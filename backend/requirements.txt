@@ -1,9 +1,0 @@
-# 백엔드 (로컬 개발용 SQLite 버전)
-# ⚠ EC2 배포 시 asyncpg, pgvector 추가 필요
-
-fastapi==0.111.0
-uvicorn==0.29.0
-python-jose==3.3.0
-bcrypt==4.1.3
-python-dotenv==1.0.1
-pydantic==2.7.1
