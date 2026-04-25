@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ReCoder Dashboard</title>
+<style>
+  :root {
+    --bg:        #1e1e1e;
+    --bg-card:   #252526;
+    --bg-input:  #3c3c3c;
+    --bg-code:   #0d0d0d;
+    --fg:        #d4d4d4;
+    --fg-dim:    #6a6a6a;
+    --accent:    #0e639c;
+    --accent-lt: #1177bb;
+    --error:     #f14c4c;
+    --error-bg:  #3d1a1a;
+    --success:   #4ec994;
+    --warn:      #d7ba7d;
+    --border:    #3e3e3e;
+    --add-bg:    #1a2e1a;
+    --add-fg:    #4ec994;
+    --del-bg:    #2e1a1a;
+    --del-fg:    #f14c4c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); font-family: 'Segoe UI', 'Malgun Gothic', sans-serif; font-size: 14px; height: 100vh; display: flex; flex-direction: column; }
+
+  /* ── 헤더 ── */
+  .header { background: var(--bg-card); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; align-items: center; gap: 12px; }
+  .header h1 { font-size: 16px; font-weight: 700; color: var(--accent); }
+  .state-badge { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; background: var(--bg-input); color: var(--fg-dim); }
+  .state-badge.active { background: var(--accent); color: white; }
+  .state-badge.ready  { background: var(--success); color: #1a1a1a; }
+  .header-spacer { flex: 1; }
+  .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-dim); }
+  .conn-dot.ok { background: var(--success); }
+
+  /* ── 탭 ── */
+  .tabs { display: flex; background: var(--bg-card); border-bottom: 1px solid var(--border); }
+  .tab { padding: 10px 18px; cursor: pointer; font-size: 13px; color: var(--fg-dim); border-bottom: 2px solid transparent; transition: all .15s; user-select: none; }
+  .tab:hover { color: var(--fg); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab .badge { display: inline-block; background: var(--error); color: white; border-radius: 8px; font-size: 10px; padding: 1px 5px; margin-left: 5px; }
+
+  /* ── 콘텐츠 ── */
+  .content { flex: 1; overflow: hidden; }
+  .panel { display: none; height: 100%; overflow-y: auto; padding: 16px 20px; }
+  .panel.active { display: flex; flex-direction: column; gap: 12px; }
+
+  /* ── 카드 ── */
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; }
+  .card-title { font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+
+  /* ── 상태 배너 ── */
+  .status-banner { padding: 10px 16px; border-radius: 6px; border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg-card)); font-size: 13px; }
+  .status-banner.error  { border-color: var(--error);   background: var(--error-bg); }
+  .status-banner.success{ border-color: var(--success); background: color-mix(in srgb, var(--success) 10%, var(--bg-card)); }
+
+  /* ── diff 뷰어 ── */
+  .diff-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .diff-filename { font-size: 13px; color: var(--warn); font-weight: 600; }
+  .risk-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .risk-low  { background: color-mix(in srgb, var(--success) 20%, var(--bg)); color: var(--success); }
+  .risk-med  { background: color-mix(in srgb, var(--warn) 20%, var(--bg));    color: var(--warn); }
+  .risk-high { background: color-mix(in srgb, var(--error) 20%, var(--bg));   color: var(--error); }
+  .diff-table { width: 100%; border-collapse: collapse; font-family: 'Consolas', 'Fira Code', monospace; font-size: 12px; }
+  .diff-table td { padding: 2px 8px; line-height: 1.6; white-space: pre; }
+  .diff-table .ln  { color: var(--fg-dim); width: 36px; text-align: right; user-select: none; border-right: 1px solid var(--border); padding-right: 10px; }
+  .diff-table .add { background: var(--add-bg); color: var(--add-fg); }
+  .diff-table .del { background: var(--del-bg); color: var(--del-fg); }
+  .diff-table .ctx { color: var(--fg-dim); }
+  .diff-table .hunk{ background: color-mix(in srgb, var(--accent) 10%, var(--bg-code)); color: var(--accent); }
+
+  /* ── 액션 버튼들 ── */
+  .action-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn { padding: 8px 18px; border: none; border-radius: 5px; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent);   color: white; }
+  .btn-success { background: var(--success);  color: #1a1a1a; }
+  .btn-danger  { background: var(--error);    color: white; }
+  .btn-ghost   { background: var(--bg-input); color: var(--fg); border: 1px solid var(--border); }
+
+  /* ── Dockerfile 뷰어 ── */
+  .code-viewer { background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px; padding: 14px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 12px; line-height: 1.7; overflow-x: auto; white-space: pre; color: var(--fg); }
+  .code-viewer .kw   { color: #569cd6; }
+  .code-viewer .str  { color: #ce9178; }
+  .code-viewer .cmt  { color: #6a9955; }
+  .code-viewer .num  { color: #b5cea8; }
+
+  /* ── 이벤트 이력 ── */
+  .event-item { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .event-item:last-child { border-bottom: none; }
+  .event-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-dim); margin-top: 5px; flex-shrink: 0; }
+  .event-dot.error   { background: var(--error); }
+  .event-dot.success { background: var(--success); }
+  .event-time { font-size: 11px; color: var(--fg-dim); white-space: nowrap; }
+  .event-text { font-size: 13px; }
+
+  /* ── 로딩 스피너 ── */
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── 토스트 ── */
+  #toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 16px; font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 999; }
+  #toast.show { opacity: 1; }
+
+  /* ── 스크롤바 ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- 헤더 -->
+<div class="header">
+  <h1>⚡ ReCoder</h1>
+  <span class="state-badge" id="stateBadge">IDLE</span>
+  <div class="header-spacer"></div>
+  <div class="conn-dot" id="connDot" title="서버 연결 상태"></div>
+</div>
+
+<!-- 탭 -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('patch')"  id="tab-patch">코드 수정 <span class="badge" id="badgePatch" style="display:none">1</span></div>
+  <div class="tab"        onclick="switchTab('infra')"  id="tab-infra">Dockerfile</div>
+  <div class="tab"        onclick="switchTab('history')"id="tab-history">이벤트 이력</div>
+</div>
+
+<!-- 패널: 코드 수정 -->
+<div class="content">
+<div class="panel active" id="panel-patch">
+  <div id="patchIdle" class="card" style="color:var(--fg-dim); text-align:center; padding:40px;">
+    에러가 감지되면 코드 수정안이 여기에 표시됩니다.
+  </div>
+
+  <!-- 에러 감지 — 수정안 생성 전 단계 -->
+  <div id="errorDetected" style="display:none; flex-direction:column; gap:12px;">
+    <div class="status-banner error">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+        <span style="font-size:16px;">🔴</span>
+        <strong id="errorTitle">에러 감지됨</strong>
+        <span id="errorScore" style="font-size:11px; color:var(--fg-dim); margin-left:auto;"></span>
+      </div>
+      <div id="errorSummary" style="font-size:13px; color:var(--fg); white-space:pre-wrap; word-break:break-all;"></div>
+      <div id="errorRawList" style="margin-top:8px;"></div>
+    </div>
+    <div class="action-row">
+      <button class="btn btn-primary" onclick="requestPatch()">🔧 AI 수정안 생성</button>
+      <button class="btn btn-ghost"   onclick="ignoreError()">무시</button>
+    </div>
+    <div id="analyzeStatus" style="display:none;" class="status-banner">
+      <span class="spinner"></span> AI가 수정안을 생성 중입니다...
+    </div>
+    <div id="analyzeError" style="display:none;" class="status-banner error">
+      <strong>❌ 수정안 생성 실패</strong>
+      <div id="analyzeErrorMsg" style="font-size:12px; margin-top:4px; color:var(--fg-dim);"></div>
+      <button class="btn btn-ghost" style="margin-top:8px; font-size:12px;" onclick="retryPatch()">다시 시도</button>
+    </div>
+  </div>
+
+  <div id="patchProposed" style="display:none; flex-direction:column; gap:12px;">
+    <!-- 요약 배너 -->
+    <div class="status-banner" id="patchBanner"></div>
+
+    <!-- diff 뷰 -->
+    <div class="card" id="diffCard">
+      <div class="card-title">변경 내역</div>
+      <div id="diffContent"></div>
+    </div>
+
+    <!-- 액션 버튼 -->
+    <div class="action-row">
+      <button class="btn btn-success" onclick="approvePatch()">✅ 승인 — 파일에 적용</button>
+      <button class="btn btn-danger"  onclick="rejectPatch()">✕ 거절</button>
+    </div>
+    <div style="font-size:11px; color:var(--fg-dim);">
+      승인 전 원본 파일은 <code>.recoder/backups/</code>에 자동 백업됩니다.
+    </div>
+  </div>
+
+  <div id="patchApplying" style="display:none;" class="status-banner">
+    <span class="spinner"></span> 패치 적용 중...
+  </div>
+  <div id="patchDone" style="display:none;" class="status-banner success">
+    ✅ 코드 수정이 완료되었습니다.
+  </div>
+</div>
+
+<!-- 패널: Dockerfile -->
+<div class="panel" id="panel-infra">
+  <div id="infraIdle" class="card" style="color:var(--fg-dim); text-align:center; padding:40px;">
+    코드 수정 완료 후 위젯에서 "Dockerfile 생성"을 클릭하세요.
+  </div>
+
+  <div id="infraProposed" style="display:none; flex-direction:column; gap:12px;">
+    <div class="status-banner">
+      🐳 Dockerfile 미리보기 — 저장하려면 "저장" 버튼을 클릭하세요.
+    </div>
+    <div class="card">
+      <div class="diff-header">
+        <span class="diff-filename" id="infraFilename">Dockerfile</span>
+        <span class="risk-badge risk-low">LOW RISK</span>
+        <span style="font-size:11px; color:var(--fg-dim); margin-left:auto;" id="infraTemplate"></span>
+      </div>
+      <div class="code-viewer" id="infraContent"></div>
+    </div>
+    <div class="action-row">
+      <button class="btn btn-success" onclick="saveInfra()">💾 저장</button>
+      <button class="btn btn-ghost"   onclick="cancelInfra()">취소</button>
+    </div>
+  </div>
+
+  <div id="infraDone" style="display:none;" class="status-banner success">
+    ✅ Dockerfile이 저장되었습니다.
+  </div>
+</div>
+
+<!-- 패널: 이벤트 이력 -->
+<div class="panel" id="panel-history">
+  <div class="card">
+    <div class="card-title">이벤트 이력</div>
+    <div id="eventList" style="color:var(--fg-dim); font-size:13px;">이벤트 없음</div>
+  </div>
+</div>
+</div><!-- .content -->
+
+<!-- 토스트 -->
+<div id="toast"></div>
+
+<script>
+// ── 토큰 취득 ──────────────────────────────────────────────────────────
+const params = new URLSearchParams(location.search);
+let TOKEN = params.get('token') || '';
+
+async function fetchToken() {
+  if (TOKEN) return;
+  try {
+    const r = await fetch('/api/token');
+    if (r.ok) { const d = await r.json(); TOKEN = d.token || ''; }
+  } catch {}
+}
+
+function authHeaders() {
+  return { 'Content-Type': 'application/json', 'X-ReCoder-Token': TOKEN };
+}
+
+// ── 상태 ─────────────────────────────────────────────────────────────
+let currentProposalId = null;
+let currentInfraId    = null;
+const events = [];
+
+// ── SSE 연결 ─────────────────────────────────────────────────────────
+function connectSSE() {
+  const url = TOKEN ? `/api/updates/stream?token=${TOKEN}` : '/api/updates/stream';
+  const es  = new EventSource(url);
+
+  es.onopen = () => {
+    document.getElementById('connDot').className = 'conn-dot ok';
+  };
+  es.onerror = () => {
+    document.getElementById('connDot').className = 'conn-dot';
+    setTimeout(connectSSE, 3000);
+    es.close();
+  };
+  es.onmessage = e => {
+    try { handleUpdate(JSON.parse(e.data)); } catch {}
+  };
+}
+
+let _currentEvent = null;
+
+function handleUpdate(data) {
+  const type  = data.type  || '';
+  const state = data.state || '';
+
+  updateStateBadge(state);
+
+  if (type === 'orchestrator_update') {
+    if (state === 'WAITING_USER_ACTION' && data.event) {
+      _currentEvent = data.event;
+      showErrorDetected(data.event);
+    }
+    if (state === 'CODE_PATCH_PROPOSED' && data.patch_proposal) {
+      hideErrorDetected();
+      showPatchProposal(data.patch_proposal);
+    }
+    if (state === 'CODE_READY') {
+      hideErrorDetected();
+      showPatchDone();
+    }
+    if (state === 'INFRA_PROPOSED' && data.infra_proposal) {
+      showInfraProposal(data.infra_proposal);
+      switchTab('infra');
+    }
+    if (state === 'INFRA_READY') {
+      showInfraDone();
+    }
+    if (state === 'IDLE') {
+      hideErrorDetected();
+    }
+    if (data.event) {
+      addEventHistory(data.event);
+    }
+  }
+
+  if (type === 'session_update') {
+    // 기존 호환
+  }
+}
+
+// ── 에러 감지 표시 ────────────────────────────────────────────────────
+function showErrorDetected(event) {
+  document.getElementById('patchIdle').style.display     = 'none';
+  document.getElementById('patchProposed').style.display = 'none';
+  document.getElementById('patchDone').style.display     = 'none';
+  document.getElementById('patchApplying').style.display = 'none';
+
+  document.getElementById('errorTitle').textContent   = '에러 감지됨';
+  document.getElementById('errorSummary').textContent = event.summary || '';
+  document.getElementById('errorScore').textContent   = `중요도: ${event.importance_score ?? ''}점`;
+
+  // raw_errors 목록
+  const rawEl = document.getElementById('errorRawList');
+  rawEl.innerHTML = '';
+  (event.raw_errors || []).slice(0, 5).forEach(e => {
+    const span = document.createElement('div');
+    span.style.cssText = 'font-size:11px; color:var(--fg-dim); font-family:monospace; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+    span.textContent = e;
+    rawEl.appendChild(span);
+  });
+
+  document.getElementById('analyzeStatus').style.display = 'none';
+  document.getElementById('errorDetected').style.display = 'flex';
+
+  // 탭 배지 업데이트
+  document.getElementById('badgePatch').style.display = '';
+  switchTab('patch');
+}
+
+function hideErrorDetected() {
+  document.getElementById('errorDetected').style.display = 'none';
+  document.getElementById('badgePatch').style.display    = 'none';
+}
+
+async function requestPatch() {
+  if (!_currentEvent) return;
+
+  document.getElementById('analyzeStatus').style.display  = '';
+  document.getElementById('analyzeError').style.display   = 'none';
+  document.querySelector('#errorDetected .action-row').style.display = 'none';
+
+  try {
+    const r = await fetch('/api/patch/propose', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        event_id:      _currentEvent.event_id,
+        error_text:    _currentEvent.error_text || _currentEvent.summary || '',
+        related_files: [],
+      }),
+    });
+    if (!r.ok) {
+      const body = await r.text();
+      // FastAPI 에러 응답은 {"detail": "..."} 형태
+      let msg = body;
+      try { msg = JSON.parse(body).detail || body; } catch {}
+      throw new Error(msg);
+    }
+    // 수정안은 SSE로 자동 수신됨 (CODE_PATCH_PROPOSED 상태)
+  } catch (e) {
+    document.getElementById('analyzeStatus').style.display  = 'none';
+    document.getElementById('analyzeErrorMsg').textContent  = e.message;
+    document.getElementById('analyzeError').style.display   = '';
+    console.error('[requestPatch]', e.message);
+  }
+}
+
+function retryPatch() {
+  document.getElementById('analyzeError').style.display  = 'none';
+  document.querySelector('#errorDetected .action-row').style.display = 'flex';
+}
+
+async function ignoreError() {
+  _currentEvent = null;
+  hideErrorDetected();
+  document.getElementById('patchIdle').style.display = '';
+  try {
+    await fetch('/api/orchestrator/action', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ action: 'ignore' }),
+    });
+  } catch {}
+  toast('에러를 무시했습니다.');
+}
+
+// ── 상태 배지 ─────────────────────────────────────────────────────────
+const STATE_LABELS = {
+  IDLE:                'IDLE',
+  ERROR_DETECTED:      '⚠ 에러 감지',
+  ANALYZING:           '🔍 분석 중',
+  WAITING_USER_ACTION: '⏳ 선택 대기',
+  CODE_PATCH_PROPOSED: '📝 수정안',
+  APPLYING_PATCH:      '⚙ 적용 중',
+  CODE_READY:          '✅ 수정 완료',
+  INFRA_PROPOSED:      '🐳 인프라 제안',
+  INFRA_READY:         '✅ 인프라 완료',
+};
+function updateStateBadge(state) {
+  const el = document.getElementById('stateBadge');
+  el.textContent = STATE_LABELS[state] || state;
+  el.className   = 'state-badge' + (state === 'IDLE' ? '' : state.includes('READY') ? ' ready' : ' active');
+}
+
+// ── 탭 전환 ──────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+  if (name === 'patch') document.getElementById('badgePatch').style.display = 'none';
+}
+
+// ── Diff 렌더러 ───────────────────────────────────────────────────────
+function renderDiff(unifiedDiff) {
+  const lines = unifiedDiff.split('\n');
+  let html = '<table class="diff-table"><tbody>';
+  let lineOld = 0, lineNew = 0;
+
+  for (const raw of lines) {
+    if (raw.startsWith('---') || raw.startsWith('+++')) {
+      // 파일 헤더 — 생략
+      continue;
+    }
+    if (raw.startsWith('@@')) {
+      const m = raw.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (m) { lineOld = parseInt(m[1]); lineNew = parseInt(m[2]); }
+      html += `<tr><td class="ln"></td><td class="diff-table hunk" colspan="2">${esc(raw)}</td></tr>`;
+      continue;
+    }
+    if (raw.startsWith('-')) {
+      html += `<tr><td class="ln del">${lineOld++}</td><td class="del" colspan="2">${esc(raw)}</td></tr>`;
+    } else if (raw.startsWith('+')) {
+      html += `<tr><td class="ln add">${lineNew++}</td><td class="add" colspan="2">${esc(raw)}</td></tr>`;
+    } else {
+      html += `<tr><td class="ln ctx">${lineNew++}</td><td class="ctx" colspan="2">${esc(raw)}</td></tr>`;
+      lineOld++;
+    }
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Patch 표시 ────────────────────────────────────────────────────────
+function showPatchProposal(proposal) {
+  currentProposalId = proposal.proposal_id;
+
+  document.getElementById('patchIdle').style.display     = 'none';
+  document.getElementById('patchDone').style.display     = 'none';
+  document.getElementById('patchApplying').style.display = 'none';
+
+  const proposed = document.getElementById('patchProposed');
+  proposed.style.display = 'flex';
+
+  const risk = proposal.risk || 'low';
+  document.getElementById('patchBanner').innerHTML =
+    `<strong>${esc(proposal.summary)}</strong>` +
+    `<span class="risk-badge risk-${risk}" style="margin-left:10px;">${risk.toUpperCase()}</span>` +
+    (proposal.test_command ? `<br><small style="color:var(--fg-dim); margin-top:4px; display:block;">테스트: <code>${esc(proposal.test_command)}</code></small>` : '');
+
+  // diff 렌더링
+  const diffEl = document.getElementById('diffContent');
+  diffEl.innerHTML = '';
+  for (const patch of (proposal.patches || [])) {
+    const wrap = document.createElement('div');
+    wrap.style.marginBottom = '12px';
+    wrap.innerHTML = `<div class="diff-header"><span class="diff-filename">${esc(patch.file)}</span></div>` +
+                     renderDiff(patch.unified_diff || '');
+    diffEl.appendChild(wrap);
+  }
+
+  // 탭 배지
+  document.getElementById('badgePatch').style.display = '';
+  switchTab('patch');
+}
+
+async function approvePatch() {
+  if (!currentProposalId) return;
+  document.getElementById('patchProposed').style.display = 'none';
+  document.getElementById('patchApplying').style.display = '';
+
+  try {
+    const r = await fetch('/api/patch/apply', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ proposal_id: currentProposalId }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    showPatchDone();
+    toast('✅ 패치 적용 완료');
+  } catch (e) {
+    document.getElementById('patchApplying').style.display = 'none';
+    document.getElementById('patchProposed').style.display = 'flex';
+    toast('❌ 오류: ' + e.message, true);
+  }
+}
+
+function showPatchDone() {
+  document.getElementById('patchApplying').style.display  = 'none';
+  document.getElementById('patchProposed').style.display  = 'none';
+  document.getElementById('patchIdle').style.display      = 'none';
+  document.getElementById('patchDone').style.display      = '';
+  currentProposalId = null;
+}
+
+async function rejectPatch() {
+  await fetch('/api/patch/reject', { method: 'POST', headers: authHeaders() });
+  document.getElementById('patchProposed').style.display = 'none';
+  document.getElementById('patchIdle').style.display     = '';
+  toast('수정안 거절됨');
+}
+
+// ── Infra 표시 ────────────────────────────────────────────────────────
+function highlightDockerfile(src) {
+  return src
+    .split('\n')
+    .map(line => {
+      const e = esc(line);
+      if (/^#/.test(line))  return `<span class="cmt">${e}</span>`;
+      if (/^(FROM|RUN|COPY|ADD|CMD|ENTRYPOINT|ENV|EXPOSE|WORKDIR|ARG|LABEL|USER|VOLUME|HEALTHCHECK|SHELL|ONBUILD|STOPSIGNAL)\b/.test(line))
+        return e.replace(/^(\w+)/, '<span class="kw">$1</span>');
+      return e;
+    })
+    .join('\n');
+}
+
+function showInfraProposal(proposal) {
+  currentInfraId = proposal.proposal_id;
+  document.getElementById('infraIdle').style.display     = 'none';
+  document.getElementById('infraDone').style.display     = 'none';
+  document.getElementById('infraProposed').style.display = 'flex';
+  document.getElementById('infraFilename').textContent   = proposal.target_path || 'Dockerfile';
+  document.getElementById('infraTemplate').textContent   = 'template: ' + (proposal.base_template || '');
+  document.getElementById('infraContent').innerHTML      = highlightDockerfile(proposal.content || '');
+}
+
+async function saveInfra() {
+  try {
+    const r = await fetch('/api/infra/save', { method: 'POST', headers: authHeaders() });
+    if (!r.ok) throw new Error(await r.text());
+    showInfraDone();
+    toast('✅ Dockerfile 저장 완료');
+  } catch (e) {
+    toast('❌ 저장 실패: ' + e.message, true);
+  }
+}
+
+function showInfraDone() {
+  document.getElementById('infraProposed').style.display = 'none';
+  document.getElementById('infraIdle').style.display     = 'none';
+  document.getElementById('infraDone').style.display     = '';
+}
+
+function cancelInfra() {
+  document.getElementById('infraProposed').style.display = 'none';
+  document.getElementById('infraIdle').style.display     = '';
+}
+
+// ── 이벤트 이력 ───────────────────────────────────────────────────────
+function addEventHistory(event) {
+  events.unshift(event);
+  renderEventHistory();
+}
+
+function renderEventHistory() {
+  const el = document.getElementById('eventList');
+  if (!events.length) { el.textContent = '이벤트 없음'; return; }
+  el.innerHTML = events.slice(0, 50).map(ev => {
+    const isError = ev.event_type === 'error_detected' || ev.event_type === 'terminal_error';
+    return `<div class="event-item">
+      <div class="event-dot ${isError ? 'error' : 'success'}"></div>
+      <div style="flex:1">
+        <div class="event-text">${esc(ev.summary || '')}</div>
+        <div style="display:flex;gap:16px;margin-top:3px;">
+          <span class="event-time">${esc(ev.created_at || '')}</span>
+          <span class="event-time">${esc(ev.event_type || '')}</span>
+          <span class="event-time">score: ${ev.importance_score ?? ''}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── 토스트 ────────────────────────────────────────────────────────────
+let _toastTimer = null;
+function toast(msg, isError = false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.borderColor = isError ? 'var(--error)' : 'var(--success)';
+  el.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ── 초기화 ────────────────────────────────────────────────────────────
+(async () => {
+  await fetchToken();
+  connectSSE();
+
+  // 현재 상태 폴링 (페이지 로드 시)
+  try {
+    const r = await fetch('/api/status');
+    if (r.ok) {
+      const d = await r.json();
+      updateStateBadge(d.state || 'IDLE');
+      if (d.patch_proposal) showPatchProposal(d.patch_proposal);
+      if (d.infra_proposal) showInfraProposal(d.infra_proposal);
+    }
+  } catch {}
+})();
+</script>
+</body>
+</html>
