@@ -66,10 +66,10 @@ _RESPONSE_SCHEMA = {
         'command': {'type': 'string', 'description': '터미널에 바로 붙여넣을 실행 가능한 명령어만. 설명 없이 순수 명령어.'},
         'next_action': {'type': 'string', 'description': '다음 할 일'},
         'importance_score': {'type': 'integer', 'description': '중요도 0~100'},
-        'voice_briefing': {'type': 'string', 'description': '음성 브리핑 한국어 2문장'},
+
         'answer': {'type': 'string', 'description': '질문 답변 또는 빈 문자열'},
     },
-    'required': ['current_task', 'summary', 'has_error', 'importance_score', 'voice_briefing', 'command', 'error_description'],
+    'required': ['current_task', 'summary', 'has_error', 'importance_score', 'command', 'error_description'],
 }
 
 
@@ -538,66 +538,6 @@ def send_alert(error_desc: str, solution: str, command: str = '') -> None:
 
 
 
-def speak(text: str) -> None:
-    """gTTS로 한국어 브리핑을 음성 재생합니다 (pygame 불필요)."""
-    if not text:
-        return
-    tmp_path = None
-    try:
-        import tempfile
-        from gtts import gTTS
-
-        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as fp:
-            tts = gTTS(text=text, lang='ko')
-            tts.save(fp.name)
-            tmp_path = fp.name
-
-        if sys.platform == 'darwin':
-            subprocess.run(['afplay', tmp_path], check=False)
-        elif sys.platform == 'win32':
-            # PresentationCore MediaPlayer — MP3 직접 재생 (SoundPlayer는 WAV 전용이라 사용 불가)
-            safe_path = tmp_path.replace(os.sep, '/')
-            ps_script = (
-                'Add-Type -AssemblyName PresentationCore; '
-                '$mp = New-Object System.Windows.Media.MediaPlayer; '
-                f'$mp.Open([Uri]"file:///{safe_path}"); '
-                'Start-Sleep -Milliseconds 500; '
-                '$mp.Play(); '
-                'Start-Sleep -s 8; '
-                '$mp.Stop(); '
-                '$mp.Close()'
-            )
-            subprocess.run(
-                ['powershell', '-NonInteractive', '-WindowStyle', 'Hidden', '-c', ps_script],
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
-                capture_output=True,
-                encoding='utf-8',
-                errors='ignore',
-                check=False,
-            )
-        else:
-            # Linux: mpg123 우선, 없으면 ffplay 사용
-            for command in (
-                ['mpg123', '-q', tmp_path],
-                ['ffplay', '-nodisp', '-autoexit', tmp_path],
-            ):
-                if subprocess.run(
-                    ['which', command[0]],
-                    capture_output=True,
-                    check=False,
-                ).returncode == 0:
-                    subprocess.run(command, check=False)
-                    break
-            else:
-                print('[speak] Linux 오디오 플레이어를 찾을 수 없습니다. mpg123 또는 ffplay를 설치해주세요.')
-    except Exception as e:
-        print(f'[speak] 음성 재생 실패: {e}')
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
 
 
 
@@ -744,11 +684,6 @@ def _finalize_analysis_result(result: dict, session_index: dict) -> dict:
         # 최대 50개 유지
         if len(session_index['error_history']) > 50:
             session_index['error_history'] = session_index['error_history'][-50:]
-
-    # 음성 브리핑
-    voice_text = str(result.get('voice_briefing') or '').strip()
-    if voice_text:
-        threading.Thread(target=speak, args=(voice_text,), daemon=True).start()
 
     return result
 

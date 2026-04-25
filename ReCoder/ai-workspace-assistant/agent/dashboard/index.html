@@ -137,6 +137,31 @@
     에러가 감지되면 코드 수정안이 여기에 표시됩니다.
   </div>
 
+  <!-- 에러 감지 — 수정안 생성 전 단계 -->
+  <div id="errorDetected" style="display:none; flex-direction:column; gap:12px;">
+    <div class="status-banner error">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+        <span style="font-size:16px;">🔴</span>
+        <strong id="errorTitle">에러 감지됨</strong>
+        <span id="errorScore" style="font-size:11px; color:var(--fg-dim); margin-left:auto;"></span>
+      </div>
+      <div id="errorSummary" style="font-size:13px; color:var(--fg); white-space:pre-wrap; word-break:break-all;"></div>
+      <div id="errorRawList" style="margin-top:8px;"></div>
+    </div>
+    <div class="action-row">
+      <button class="btn btn-primary" onclick="requestPatch()">🔧 AI 수정안 생성</button>
+      <button class="btn btn-ghost"   onclick="ignoreError()">무시</button>
+    </div>
+    <div id="analyzeStatus" style="display:none;" class="status-banner">
+      <span class="spinner"></span> AI가 수정안을 생성 중입니다...
+    </div>
+    <div id="analyzeError" style="display:none;" class="status-banner error">
+      <strong>❌ 수정안 생성 실패</strong>
+      <div id="analyzeErrorMsg" style="font-size:12px; margin-top:4px; color:var(--fg-dim);"></div>
+      <button class="btn btn-ghost" style="margin-top:8px; font-size:12px;" onclick="retryPatch()">다시 시도</button>
+    </div>
+  </div>
+
   <div id="patchProposed" style="display:none; flex-direction:column; gap:12px;">
     <!-- 요약 배너 -->
     <div class="status-banner" id="patchBanner"></div>
@@ -246,6 +271,8 @@ function connectSSE() {
   };
 }
 
+let _currentEvent = null;
+
 function handleUpdate(data) {
   const type  = data.type  || '';
   const state = data.state || '';
@@ -253,10 +280,16 @@ function handleUpdate(data) {
   updateStateBadge(state);
 
   if (type === 'orchestrator_update') {
+    if (state === 'WAITING_USER_ACTION' && data.event) {
+      _currentEvent = data.event;
+      showErrorDetected(data.event);
+    }
     if (state === 'CODE_PATCH_PROPOSED' && data.patch_proposal) {
+      hideErrorDetected();
       showPatchProposal(data.patch_proposal);
     }
     if (state === 'CODE_READY') {
+      hideErrorDetected();
       showPatchDone();
     }
     if (state === 'INFRA_PROPOSED' && data.infra_proposal) {
@@ -266,6 +299,9 @@ function handleUpdate(data) {
     if (state === 'INFRA_READY') {
       showInfraDone();
     }
+    if (state === 'IDLE') {
+      hideErrorDetected();
+    }
     if (data.event) {
       addEventHistory(data.event);
     }
@@ -274,6 +310,92 @@ function handleUpdate(data) {
   if (type === 'session_update') {
     // 기존 호환
   }
+}
+
+// ── 에러 감지 표시 ────────────────────────────────────────────────────
+function showErrorDetected(event) {
+  document.getElementById('patchIdle').style.display     = 'none';
+  document.getElementById('patchProposed').style.display = 'none';
+  document.getElementById('patchDone').style.display     = 'none';
+  document.getElementById('patchApplying').style.display = 'none';
+
+  document.getElementById('errorTitle').textContent   = '에러 감지됨';
+  document.getElementById('errorSummary').textContent = event.summary || '';
+  document.getElementById('errorScore').textContent   = `중요도: ${event.importance_score ?? ''}점`;
+
+  // raw_errors 목록
+  const rawEl = document.getElementById('errorRawList');
+  rawEl.innerHTML = '';
+  (event.raw_errors || []).slice(0, 5).forEach(e => {
+    const span = document.createElement('div');
+    span.style.cssText = 'font-size:11px; color:var(--fg-dim); font-family:monospace; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+    span.textContent = e;
+    rawEl.appendChild(span);
+  });
+
+  document.getElementById('analyzeStatus').style.display = 'none';
+  document.getElementById('errorDetected').style.display = 'flex';
+
+  // 탭 배지 업데이트
+  document.getElementById('badgePatch').style.display = '';
+  switchTab('patch');
+}
+
+function hideErrorDetected() {
+  document.getElementById('errorDetected').style.display = 'none';
+  document.getElementById('badgePatch').style.display    = 'none';
+}
+
+async function requestPatch() {
+  if (!_currentEvent) return;
+
+  document.getElementById('analyzeStatus').style.display  = '';
+  document.getElementById('analyzeError').style.display   = 'none';
+  document.querySelector('#errorDetected .action-row').style.display = 'none';
+
+  try {
+    const r = await fetch('/api/patch/propose', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        event_id:      _currentEvent.event_id,
+        error_text:    _currentEvent.error_text || _currentEvent.summary || '',
+        related_files: [],
+      }),
+    });
+    if (!r.ok) {
+      const body = await r.text();
+      // FastAPI 에러 응답은 {"detail": "..."} 형태
+      let msg = body;
+      try { msg = JSON.parse(body).detail || body; } catch {}
+      throw new Error(msg);
+    }
+    // 수정안은 SSE로 자동 수신됨 (CODE_PATCH_PROPOSED 상태)
+  } catch (e) {
+    document.getElementById('analyzeStatus').style.display  = 'none';
+    document.getElementById('analyzeErrorMsg').textContent  = e.message;
+    document.getElementById('analyzeError').style.display   = '';
+    console.error('[requestPatch]', e.message);
+  }
+}
+
+function retryPatch() {
+  document.getElementById('analyzeError').style.display  = 'none';
+  document.querySelector('#errorDetected .action-row').style.display = 'flex';
+}
+
+async function ignoreError() {
+  _currentEvent = null;
+  hideErrorDetected();
+  document.getElementById('patchIdle').style.display = '';
+  try {
+    await fetch('/api/orchestrator/action', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ action: 'ignore' }),
+    });
+  } catch {}
+  toast('에러를 무시했습니다.');
 }
 
 // ── 상태 배지 ─────────────────────────────────────────────────────────

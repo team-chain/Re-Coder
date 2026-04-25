@@ -63,6 +63,67 @@ def _terminal_capture_guide() -> str:
     )
 
 
+_SHELL_FUNC_MARKER = '# >>> recoder-logterm >>>'
+_SHELL_FUNC_BLOCK = """\
+# >>> recoder-logterm >>>
+# ReCoder 터미널 로그 캡처 함수 (자동 삽입됨)
+logterm() {
+  mkdir -p "$HOME/.ai_assistant"
+  if [ "$(uname)" = "Darwin" ]; then
+    script -q -a "$HOME/.ai_assistant/terminal.log" /bin/zsh
+  else
+    script -q -a "$HOME/.ai_assistant/terminal.log"
+  fi
+}
+# ReCoder 시작 시 자동 캡처 (원하지 않으면 이 줄을 삭제하세요)
+if [ -z "$RECODER_LOGTERM_ACTIVE" ]; then
+  export RECODER_LOGTERM_ACTIVE=1
+  logterm
+fi
+# <<< recoder-logterm <<<
+"""
+
+
+def setup_terminal_logging() -> str:
+    """
+    macOS / Linux에서 터미널 출력을 ~/.ai_assistant/terminal.log로 파이핑하는
+    shell 함수(logterm)를 ~/.zshrc 또는 ~/.bashrc에 자동으로 삽입합니다.
+
+    Returns:
+        'already_set'  — 이미 설정되어 있음
+        'inserted'     — 새로 삽입됨
+        'skipped'      — Windows이거나 오류 발생
+    """
+    if sys.platform == 'win32':
+        return 'skipped'
+
+    # 삽입 대상 파일 결정 (zsh 우선)
+    shell = os.environ.get('SHELL', '')
+    if 'zsh' in shell or os.path.exists(os.path.expanduser('~/.zshrc')):
+        rc_path = os.path.expanduser('~/.zshrc')
+    else:
+        rc_path = os.path.expanduser('~/.bashrc')
+
+    try:
+        content = ''
+        if os.path.exists(rc_path):
+            with open(rc_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+
+        if _SHELL_FUNC_MARKER in content:
+            return 'already_set'
+
+        with open(rc_path, 'a', encoding='utf-8') as f:
+            f.write('\n' + _SHELL_FUNC_BLOCK)
+
+        print(f'[ReCoder] 터미널 로그 캡처 함수를 {rc_path}에 추가했습니다.')
+        print(f'[ReCoder] 새 터미널 창을 열면 자동으로 로그가 시작됩니다.')
+        return 'inserted'
+    except Exception as e:
+        print(f'[ReCoder] 셸 설정 자동 삽입 실패: {e}')
+        return 'skipped'
+
+
 def _read_existing_env() -> tuple[list[str], dict[str, str]]:
     """기존 .env 파일을 읽어 라인 목록과 키-값 딕셔너리를 반환합니다."""
     env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -247,8 +308,9 @@ def show_setup_window() -> None:
 
     root = tk.Tk()
     root.title('AI 업무 어시스턴트 설정')
-    root.geometry('620x560')
-    root.resizable(False, False)
+    root.geometry('780x780')
+    root.resizable(True, True)
+    root.minsize(780, 680)
 
     frame = tk.Frame(root, padx=16, pady=16)
     frame.pack(fill='both', expand=True)
@@ -260,7 +322,7 @@ def show_setup_window() -> None:
     server_url_var = tk.StringVar(
         value=existing_env.get('API_BASE_URL', DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL
     )
-    tk.Entry(server_frame, textvariable=server_url_var, width=44).pack(side='left', padx=(8, 0))
+    tk.Entry(server_frame, textvariable=server_url_var, width=58).pack(side='left', padx=(8, 0))
 
     terminal_log_path_var = tk.StringVar(
         value=existing_env.get('TERMINAL_LOG_PATH', DEFAULT_TERMINAL_LOG_PATH).strip()
@@ -282,7 +344,7 @@ def show_setup_window() -> None:
 
     terminal_path_frame = tk.Frame(terminal_frame)
     terminal_path_frame.pack(fill='x', pady=(8, 0))
-    tk.Label(terminal_path_frame, text='TERMINAL_LOG_PATH').pack(side='left')
+    tk.Label(terminal_path_frame, text='TERMINAL_ LOG_PATH').pack(side='left')
     tk.Entry(terminal_path_frame, textvariable=terminal_log_path_var, width=42).pack(
         side='left', padx=(8, 0), fill='x', expand=True
     )
@@ -302,7 +364,7 @@ def show_setup_window() -> None:
 
     tk.Label(gemini_tab, text='Gemini API 키').pack(anchor='w')
     key_var = tk.StringVar()
-    key_entry = tk.Entry(gemini_tab, textvariable=key_var, width=56, show='*')
+    key_entry = tk.Entry(gemini_tab, textvariable=key_var, width=68, show='*')
     key_entry.pack(fill='x', pady=(6, 8))
     tk.Label(gemini_tab, text='키 발급: https://aistudio.google.com/app/apikey', fg='gray').pack(
         anchor='w'
@@ -315,23 +377,23 @@ def show_setup_window() -> None:
 
     tk.Label(register_tab, text='이메일').pack(anchor='w')
     reg_email_var = tk.StringVar()
-    tk.Entry(register_tab, textvariable=reg_email_var, width=56).pack(fill='x', pady=(4, 8))
+    tk.Entry(register_tab, textvariable=reg_email_var, width=68).pack(fill='x', pady=(4, 8))
 
     tk.Label(register_tab, text='비밀번호').pack(anchor='w')
     reg_password_var = tk.StringVar()
-    tk.Entry(register_tab, textvariable=reg_password_var, width=56, show='*').pack(
+    tk.Entry(register_tab, textvariable=reg_password_var, width=68, show='*').pack(
         fill='x', pady=(4, 8)
     )
 
     tk.Label(register_tab, text='비밀번호 확인').pack(anchor='w')
     reg_password_confirm_var = tk.StringVar()
-    tk.Entry(register_tab, textvariable=reg_password_confirm_var, width=56, show='*').pack(
+    tk.Entry(register_tab, textvariable=reg_password_confirm_var, width=68, show='*').pack(
         fill='x', pady=(4, 8)
     )
 
     tk.Label(register_tab, text='이름 (선택)').pack(anchor='w')
     reg_name_var = tk.StringVar()
-    tk.Entry(register_tab, textvariable=reg_name_var, width=56).pack(fill='x', pady=(4, 8))
+    tk.Entry(register_tab, textvariable=reg_name_var, width=68).pack(fill='x', pady=(4, 8))
 
     reg_status_var = tk.StringVar()
     reg_status_label = tk.Label(register_tab, textvariable=reg_status_var, fg='gray')
@@ -343,11 +405,11 @@ def show_setup_window() -> None:
 
     tk.Label(login_tab, text='이메일').pack(anchor='w')
     login_email_var = tk.StringVar()
-    tk.Entry(login_tab, textvariable=login_email_var, width=56).pack(fill='x', pady=(4, 8))
+    tk.Entry(login_tab, textvariable=login_email_var, width=68).pack(fill='x', pady=(4, 8))
 
     tk.Label(login_tab, text='비밀번호').pack(anchor='w')
     login_password_var = tk.StringVar()
-    tk.Entry(login_tab, textvariable=login_password_var, width=56, show='*').pack(
+    tk.Entry(login_tab, textvariable=login_password_var, width=68, show='*').pack(
         fill='x', pady=(4, 8)
     )
 

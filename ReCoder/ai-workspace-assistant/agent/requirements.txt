@@ -25,3 +25,6 @@ pyperclip>=1.8
 # ── GUI ───────────────────────────────────────────────────────────────
 PyQt6>=6.6.0
 pystray>=0.19
+
+# ── macOS Accessibility API (UIA 대응) ────────────────────────────────
+pyobjc-framework-ApplicationServices>=9.0; sys_platform == 'darwin'

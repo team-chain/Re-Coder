@@ -283,6 +283,52 @@ async def user_action(body: ActionRequest, _=Depends(_verify_token)):
     return {"status": "ok", "state": _orchestrator_state.value}
 
 
+# ── 채팅 API ─────────────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    message: str
+    context: str = ""   # 현재 에러 컨텍스트 (선택)
+
+
+@app.post("/api/chat")
+async def chat(body: ChatRequest, _=Depends(_verify_token)):
+    """위젯 채팅창에서 보낸 질문을 Gemini에 전달하고 답변을 반환."""
+    import os
+
+    user_msg = body.message.strip()
+    if not user_msg:
+        raise HTTPException(status_code=400, detail="빈 메시지입니다.")
+
+    # 컨텍스트가 있으면 프롬프트에 포함
+    if body.context:
+        prompt = (
+            f"## 현재 에러 컨텍스트\n{body.context[:800]}\n\n"
+            f"## 질문\n{user_msg}\n\n"
+            "한국어로 간결하게 답변하세요."
+        )
+    else:
+        prompt = f"{user_msg}\n\n한국어로 간결하게 답변하세요."
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+            prompt,
+        )
+        answer = (response.text or "").strip()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI 응답 실패: {e}")
+
+    # SSE로 채팅 응답 브로드캐스트 (위젯이 실시간 수신)
+    await _broadcast({
+        "type":    "chat_response",
+        "message": answer,
+    })
+    return {"answer": answer}
+
+
 # ── 대시보드 HTML ─────────────────────────────────────────────────────
 
 @app.get("/")
