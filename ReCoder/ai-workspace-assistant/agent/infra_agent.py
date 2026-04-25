@@ -96,11 +96,7 @@ def _detect_db_driver(project_path: str) -> bool:
 
 def _customize_with_gemini(template: str, meta: dict, error_context: str = "") -> str:
     """템플릿에 프로젝트 메타 정보를 반영해 Gemini로 커스터마이징."""
-    try:
-        from google import genai
-        client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
-
-        prompt = f"""다음 Dockerfile 템플릿을 프로젝트 정보에 맞게 최소한으로 수정하세요.
+    prompt = f"""다음 Dockerfile 템플릿을 프로젝트 정보에 맞게 최소한으로 수정하세요.
 JSON 없이 Dockerfile 내용만 출력하세요. 주석 포함.
 
 ## 템플릿
@@ -118,17 +114,28 @@ JSON 없이 Dockerfile 내용만 출력하세요. 주석 포함.
 - pip install --no-cache-dir 사용
 - EXPOSE 명시
 """
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-        )
-        result = response.text.strip()
+    try:
+        # code_agent 의 client/폴백 체인을 재사용 — quota/모델 회수 자동 처리
+        from code_agent import _get_client, _call_with_fallback
+        client = _get_client()
+        response, used_model = _call_with_fallback(client, prompt)
+        result = (getattr(response, 'text', None) or "").strip()
+        if not result:
+            print(f"[infra_agent] 빈 응답 (model={used_model}), 템플릿 그대로 사용")
+            return template
         # 코드 펜스 제거
         result = re.sub(r'^```(?:dockerfile|docker)?\s*', '', result, flags=re.IGNORECASE)
-        result = re.sub(r'\s*```$', '', result)
+        result = re.sub(r'\s*```\s*$', '', result)
+        print(f"[infra_agent] Dockerfile 커스터마이징 성공 (model={used_model})")
         return result.strip()
     except Exception as e:
-        print(f"[infra_agent] Gemini 커스터마이징 실패, 템플릿 그대로 사용: {e}")
+        # 친절한 메시지로 한 줄 출력 — code_agent._humanize_gemini_error 사용
+        try:
+            from code_agent import _humanize_gemini_error
+            msg = _humanize_gemini_error(e, os.getenv('GEMINI_MODEL', 'fallback-chain'))
+        except Exception:
+            msg = str(e)[:300]
+        print(f"[infra_agent] Gemini 커스터마이징 실패, 템플릿 그대로 사용: {msg}")
         return template
 
 

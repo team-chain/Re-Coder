@@ -179,11 +179,15 @@ async def watch_terminal_output(
     except Exception:
         pass
 
-    # 시작 시 파일 끝 위치로 건너뜀 — 과거 로그의 에러를 재감지하지 않음
+    # 앱 시작 시 터미널 로그를 초기화 — 과거 세션 에러가 재감지되는 문제 방지
+    # 로그는 새 세션부터 다시 쌓이므로 기존 내용은 필요 없음
     try:
-        offset = path.stat().st_size if path.exists() else 0
+        if path.exists():
+            path.write_text('', encoding='utf-8')
     except Exception:
-        offset = 0
+        pass
+
+    offset = 0
     lookback = ''
     # 이전 에러 상태 추적 (연속 에러 → 해결 전환 감지)
     _pending_errors: list[str] = []
