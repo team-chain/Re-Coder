@@ -1,0 +1,171 @@
+{
+  "session_id": "816563d3a806493fa52f78cac80534df",
+  "start_time": "2026-04-23 19:10:12",
+  "end_time": null,
+  "active_windows": [
+    {
+      "time": "2026-04-23 19:10:16",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py [ReCoder]"
+        },
+        {
+          "name": "SystemSettings.exe",
+          "title": "설정"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "설정"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "Codyssey University - Chrome"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 19:10:54",
+      "windows": [
+        {
+          "name": "python3.12.exe",
+          "title": "ReCoder"
+        },
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py [ReCoder]"
+        },
+        {
+          "name": "SystemSettings.exe",
+          "title": "설정"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "설정"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "Codyssey University - Chrome"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 19:11:14",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py [ReCoder]"
+        },
+        {
+          "name": "SystemSettings.exe",
+          "title": "설정"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "설정"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "Codyssey University - Chrome"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-23 19:10:48",
+      "commands": [
+        ".\\venv\\Scripts\\Activate.ps1",
+        "python .\\widget.py"
+      ]
+    }
+  ],
+  "error_count": 0,
+  "resolved": false,
+  "key_frames": [],
+  "ai_summary": "monitor.py의 비동기 실행 루프 구성을 확인하고, 터미널에서 widget.py를 실행하여 모듈 동작을 테스트하고 있습니다.",
+  "importance_score": 80,
+  "current_task": "monitor.py 코드 수정 후 widget.py 실행 테스트",
+  "ai_updated_at": "2026-04-23T19:11:04.598599",
+  "task_timeline": [
+    {
+      "timestamp": "2026-04-23T19:10:33",
+      "task": "위젯 시스템 내 _tick 함수 호출 에러 디버깅 및 모니터링 시스템 실행",
+      "trigger": "window_change",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-23T19:11:04",
+      "task": "monitor.py 코드 수정 후 widget.py 실행 테스트",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 0
+    }
+  ],
+  "last_error": {
+    "time": "2026-04-23T19:10:33.233336",
+    "error_description": "C:\\Users\\dy981\\OneDrive\\바탕 화면\\Pro\\ReCoder\\ReCoder\\ai-workspace-assistant\\agent\\widget.py 파일의 646번째 라인에서 _tick 함수 실행 중 Traceback 오류 발생.",
+    "solution": "widget.py 파일의 646라인 근처에서 발생하는 예외 상황을 확인하고, 디버깅을 위해 해당 위치에 로그를 추가하거나 try-except 블록을 사용하여 오류를 처리해야 합니다.",
+    "command": "python .\\main.py",
+    "current_task": "위젯 시스템 내 _tick 함수 호출 에러 디버깅 및 모니터링 시스템 실행"
+  },
+  "error_history": [
+    {
+      "time": "2026-04-23T19:10:33.233336",
+      "error_description": "C:\\Users\\dy981\\OneDrive\\바탕 화면\\Pro\\ReCoder\\ReCoder\\ai-workspace-assistant\\agent\\widget.py 파일의 646번째 라인에서 _tick 함수 실행 중 Traceback 오류 발생.",
+      "solution": "widget.py 파일의 646라인 근처에서 발생하는 예외 상황을 확인하고, 디버깅을 위해 해당 위치에 로그를 추가하거나 try-except 블록을 사용하여 오류를 처리해야 합니다.",
+      "command": "python .\\main.py",
+      "current_task": "위젯 시스템 내 _tick 함수 호출 에러 디버깅 및 모니터링 시스템 실행"
+    }
+  ]
+}

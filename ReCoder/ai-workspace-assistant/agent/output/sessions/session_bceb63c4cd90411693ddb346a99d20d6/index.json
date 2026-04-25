@@ -1,0 +1,37 @@
+{
+  "session_id": "bceb63c4cd90411693ddb346a99d20d6",
+  "start_time": "2026-04-23 01:54:24",
+  "end_time": null,
+  "active_windows": [
+    {
+      "time": "2026-04-23 01:54:29",
+      "windows": [
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – .env"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    }
+  ],
+  "events": [],
+  "error_count": 0,
+  "resolved": false,
+  "key_frames": [],
+  "ai_summary": null,
+  "importance_score": 0,
+  "current_task": null,
+  "ai_updated_at": null,
+  "task_timeline": []
+}

@@ -1,0 +1,62 @@
+{
+  "session_id": "20e8020aa4a04dc0ae6d7efaeb46044f",
+  "start_time": "2026-04-23 01:58:03",
+  "end_time": null,
+  "active_windows": [
+    {
+      "time": "2026-04-23 01:58:10",
+      "windows": [
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – .env"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "msedgewebview2.exe",
+          "title": "위젯"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 01:58:10",
+      "windows": [
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – .env"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    }
+  ],
+  "events": [],
+  "error_count": 0,
+  "resolved": false,
+  "key_frames": [],
+  "ai_summary": null,
+  "importance_score": 0,
+  "current_task": null,
+  "ai_updated_at": null,
+  "task_timeline": []
+}

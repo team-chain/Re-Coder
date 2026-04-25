@@ -1,0 +1,505 @@
+{
+  "session_id": "173b68e43e964fecb8b4e54836e48e13",
+  "start_time": "2026-04-23 02:09:16",
+  "end_time": null,
+  "active_windows": [
+    {
+      "time": "2026-04-23 02:09:20",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – .env"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "새 탭 - Chrome"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 02:10:05",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "페이지 복원"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "제목 없음 - 프로필 1 - Microsoft​ Edge"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – .env"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "새 탭 - Chrome"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 02:11:32",
+      "windows": [
+        {
+          "name": "python3.12.exe",
+          "title": "ReCoder"
+        },
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "새 탭 - Chrome"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "AI Workspace Assistant - 프로필 1 - Microsoft​ Edge"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 02:12:30",
+      "windows": [
+        {
+          "name": "SnippingTool.exe",
+          "title": "캡처 도구 오버레이"
+        },
+        {
+          "name": "python3.12.exe",
+          "title": "ReCoder"
+        },
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "새 탭 - Chrome"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "AI Workspace Assistant - 프로필 1 - Microsoft​ Edge"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 02:12:35",
+      "windows": [
+        {
+          "name": "python3.12.exe",
+          "title": "ReCoder"
+        },
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "새 탭 - Chrome"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "AI Workspace Assistant - 프로필 1 - Microsoft​ Edge"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 02:13:06",
+      "windows": [
+        {
+          "name": "python3.12.exe",
+          "title": "ReCoder"
+        },
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py"
+        },
+        {
+          "name": "SnippingTool.exe",
+          "title": "캡처 도구"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "새 탭 - Chrome"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "AI Workspace Assistant - 프로필 1 - Microsoft​ Edge"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 02:13:12",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "SnippingTool.exe",
+          "title": "캡처 도구"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "새 탭 - Chrome"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "AI Workspace Assistant - 프로필 1 - Microsoft​ Edge"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 02:13:24",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "WindowsTerminal.exe",
+          "title": "C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\\python3.12.exe"
+        },
+        {
+          "name": "SnippingTool.exe",
+          "title": "캡처 도구"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "새 탭 - Chrome"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "AI Workspace Assistant - 프로필 1 - Microsoft​ Edge"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-23 02:13:29",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "SnippingTool.exe",
+          "title": "캡처 도구"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "새 탭 - Chrome"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "AI Workspace Assistant - 프로필 1 - Microsoft​ Edge"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-23 02:09:48",
+      "commands": [
+        "clear"
+      ]
+    },
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-23 02:09:54",
+      "commands": [
+        ".\\venv\\Scripts\\Activate.ps1"
+      ]
+    },
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-23 02:11:01",
+      "commands": [
+        "python .\\widget.py"
+      ]
+    }
+  ],
+  "error_count": 0,
+  "resolved": false,
+  "key_frames": [],
+  "ai_summary": "RapidOCR 라이브러리 실행 시 DLL 로드 에러가 발생하여 OCR 기능이 정상 작동하지 않는 상태입니다. 관련 의존성 패키지 재설치를 통해 해결을 시도합니다.",
+  "importance_score": 90,
+  "current_task": "RapidOCR DLL 로드 에러 해결 및 모니터링 시스템 재시작",
+  "ai_updated_at": "2026-04-23T02:13:22.699026",
+  "task_timeline": [
+    {
+      "timestamp": "2026-04-23T02:09:42",
+      "task": "Running the main AI agent application",
+      "trigger": "window_change",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-23T02:09:58",
+      "task": "파이썬 가상환경 활성화 및 메인 에이전트 실행 준비",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-23T02:10:16",
+      "task": "RapidOCR DLL load failure debugging",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-23T02:11:28",
+      "task": "monitor.py 실행 및 디버깅",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-23T02:12:01",
+      "task": "Review and fix ReCoder graduation project - monitor.py and widget.py configuration",
+      "trigger": "window_change",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-23T02:12:40",
+      "task": "ReCoder 프로젝트의 모니터링 기능 개발 및 RapidOCR 모듈 이슈 해결",
+      "trigger": "window_change",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-23T02:13:04",
+      "task": "ReCoder 프로젝트의 모니터링 기능 및 OCR 기능 디버깅",
+      "trigger": "window_change",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-23T02:13:22",
+      "task": "RapidOCR DLL 로드 에러 해결 및 모니터링 시스템 재시작",
+      "trigger": "window_change",
+      "related_files": [],
+      "errors_at_change": 0
+    }
+  ],
+  "last_error": {
+    "time": "2026-04-23T02:13:22.706690",
+    "error_description": "RapidOCR 초기화 실패: DLL load failed while importing onnxruntime",
+    "solution": "onnxruntime 패키지를 강제로 재설치하여 손상된 DLL 파일을 복구합니다.",
+    "command": "pip uninstall -y onnxruntime && pip install onnxruntime",
+    "current_task": "RapidOCR DLL 로드 에러 해결 및 모니터링 시스템 재시작"
+  },
+  "error_history": [
+    {
+      "time": "2026-04-23T02:10:16.708668",
+      "error_description": "RapidOCR 초기화 실패: DLL load failed while importing onnxruntime_pybind11_state: DLL 초기화 루틴을 실행할 수 없습니다.",
+      "solution": "해당 에러는 Visual C++ 재배포 가능 패키지 문제이거나 의존성 라이브러리 충돌일 가능성이 높습니다. 먼저 관련 패키지를 재설치하거나 의존성을 업데이트해 보세요.",
+      "command": "pip install --upgrade --force-reinstall rapidocr-onnxruntime onnxruntime",
+      "current_task": "RapidOCR DLL load failure debugging"
+    },
+    {
+      "time": "2026-04-23T02:12:40.732234",
+      "error_description": "[monitor] RapidOCR 초기화 실패: DLL load failed",
+      "solution": "RapidOCR 관련 라이브러리(onnxruntime 또는 opencv-python)를 재설치하거나 누락된 Visual C++ 재배포 가능 패키지를 확인하여 설치해야 합니다.",
+      "command": "pip uninstall -y rapidocr-onnxruntime && pip install rapidocr-onnxruntime",
+      "current_task": "ReCoder 프로젝트의 모니터링 기능 개발 및 RapidOCR 모듈 이슈 해결"
+    },
+    {
+      "time": "2026-04-23T02:13:03.252316",
+      "error_description": "RapidOCR 초기화 실패: DLL load failed, 모니터링 시스템에서 지속적인 에러 로그 발생 중.",
+      "solution": "RapidOCR 관련 라이브러리인 'rapidocr-onnxruntime'이나 의존성 DLL을 재설치하고 경로를 확인해야 합니다.",
+      "command": "pip install --force-reinstall rapidocr-onnxruntime",
+      "current_task": "ReCoder 프로젝트의 모니터링 기능 및 OCR 기능 디버깅"
+    },
+    {
+      "time": "2026-04-23T02:13:22.706690",
+      "error_description": "RapidOCR 초기화 실패: DLL load failed while importing onnxruntime",
+      "solution": "onnxruntime 패키지를 강제로 재설치하여 손상된 DLL 파일을 복구합니다.",
+      "command": "pip uninstall -y onnxruntime && pip install onnxruntime",
+      "current_task": "RapidOCR DLL 로드 에러 해결 및 모니터링 시스템 재시작"
+    }
+  ]
+}

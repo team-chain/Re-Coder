@@ -1,0 +1,277 @@
+{
+  "session_id": "edbf7af381104c2c9c778d312abf9193",
+  "start_time": "2026-04-22 10:48:54",
+  "end_time": null,
+  "active_windows": [],
+  "events": [
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 10:51:38",
+      "errors": [
+        "에러"
+      ],
+      "frame": "frame_0001.png"
+    },
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 10:52:50",
+      "errors": [
+        "에러"
+      ],
+      "frame": "frame_0002.png"
+    },
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 10:53:27",
+      "errors": [
+        "에러"
+      ],
+      "frame": "frame_0003.png"
+    },
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 10:53:44",
+      "errors": [
+        "에러"
+      ],
+      "frame": "frame_0004.png"
+    },
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 10:54:07",
+      "errors": [
+        "에러"
+      ],
+      "frame": "frame_0005.png"
+    },
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-22 10:55:39",
+      "commands": [
+        "cd .\\ReCoder\\",
+        "cd .\\ai-workspace-assistant\\"
+      ]
+    },
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 10:57:17",
+      "errors": [
+        "HoduteNotFoundError:"
+      ],
+      "frame": "frame_0006.png"
+    },
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 11:02:38",
+      "errors": [
+        "에러"
+      ],
+      "frame": "frame_0007.png"
+    },
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-22 11:06:33",
+      "commands": [
+        "cd \"C:\\Users\\dy981\\OneDrive\\바탕 화면\\Pro\\ReCoder\\ReCoder\"",
+        "cat .gitignore | Select-String \".env\""
+      ]
+    },
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-22 11:07:22",
+      "commands": [
+        "clear",
+        "cd .."
+      ]
+    },
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-22 11:07:36",
+      "commands": [
+        "git branch"
+      ]
+    },
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-22 11:08:38",
+      "commands": [
+        "git add ."
+      ]
+    },
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-22 11:09:06",
+      "commands": [
+        "clear",
+        "git reset HEAD~1",
+        "git checkout main",
+        "git branch -D feat/pyqt6-widget"
+      ]
+    },
+    {
+      "type": "terminal_commands",
+      "time": "2026-04-22 11:09:57",
+      "commands": [
+        "git checkout -b feat/pyqt6-widget"
+      ]
+    }
+  ],
+  "error_count": 7,
+  "resolved": false,
+  "key_frames": [
+    "frame_0001.png",
+    "frame_0002.png",
+    "frame_0003.png",
+    "frame_0004.png",
+    "frame_0005.png",
+    "frame_0006.png",
+    "frame_0007.png"
+  ],
+  "ai_summary": "git checkout 명령어를 사용하여 새로운 기능 개발을 위한 브랜치 feat/pyqt6-widget를 성공적으로 생성했습니다. 현재 Claude와 연동하여 widget.py 코드 수정을 준비 중입니다.",
+  "importance_score": 85,
+  "current_task": "프로젝트 브랜치 생성 및 환경 설정",
+  "ai_updated_at": "2026-04-22T11:10:15.144240",
+  "task_timeline": [
+    {
+      "timestamp": "2026-04-22T10:52:25",
+      "task": "졸업작품 프로젝트 에러 감지 기능 테스트",
+      "trigger": "error_detected",
+      "related_files": [],
+      "errors_at_change": 1
+    },
+    {
+      "timestamp": "2026-04-22T10:53:05",
+      "task": "ReCoder 시스템 에러 감지 기능 테스트",
+      "trigger": "error_detected",
+      "related_files": [],
+      "errors_at_change": 2
+    },
+    {
+      "timestamp": "2026-04-22T10:53:40",
+      "task": "ReCoder 에러 감지 기능 테스트",
+      "trigger": "error_detected",
+      "related_files": [],
+      "errors_at_change": 3
+    },
+    {
+      "timestamp": "2026-04-22T10:54:21",
+      "task": "에러 감지 기능 통합 및 테스트",
+      "trigger": "error_detected",
+      "related_files": [],
+      "errors_at_change": 5
+    },
+    {
+      "timestamp": "2026-04-22T10:54:46",
+      "task": "Python 개발 및 코드 디버깅",
+      "trigger": "error_detected",
+      "related_files": [],
+      "errors_at_change": 5
+    },
+    {
+      "timestamp": "2026-04-22T10:55:58",
+      "task": "프로젝트 디렉토리 이동 및 작업 환경 구성",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 5
+    },
+    {
+      "timestamp": "2026-04-22T10:57:31",
+      "task": "프로젝트 환경 내 모듈 import 테스트 및 디버깅",
+      "trigger": "error_detected",
+      "related_files": [],
+      "errors_at_change": 6
+    },
+    {
+      "timestamp": "2026-04-22T11:03:04",
+      "task": "ReCoder 시스템의 에러 감지 기능 테스트 및 모니터링",
+      "trigger": "error_detected",
+      "related_files": [],
+      "errors_at_change": 7
+    },
+    {
+      "timestamp": "2026-04-22T11:06:54",
+      "task": "프로젝트 환경 설정 및 .gitignore 파일 내 .env 포함 여부 확인",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 7
+    },
+    {
+      "timestamp": "2026-04-22T11:08:03",
+      "task": "Git 저장소 확인 및 코드 커밋 준비",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 7
+    },
+    {
+      "timestamp": "2026-04-22T11:09:03",
+      "task": "Git 버전 관리 및 코드 변경 사항 커밋 준비",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 7
+    },
+    {
+      "timestamp": "2026-04-22T11:09:24",
+      "task": "Git 브랜치 정리 및 개발 환경 초기화",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 7
+    },
+    {
+      "timestamp": "2026-04-22T11:10:15",
+      "task": "프로젝트 브랜치 생성 및 환경 설정",
+      "trigger": "terminal_command",
+      "related_files": [],
+      "errors_at_change": 7
+    }
+  ],
+  "last_error": {
+    "time": "2026-04-22T11:09:03.649958",
+    "error_description": "git add . 실행 후 'hint: git submodule add <url> ReCoder' 메시지와 함께 서브모듈 관련 경고 발생",
+    "solution": "해당 경로가 서브모듈로 잘못 인식된 경우 'git rm --cached ReCoder' 명령어를 사용하여 인덱스에서 제거하거나, 의도한 파일만 명시적으로 add 하십시오. 경고를 무시하려면 'git config set advice.addEmbeddedRepo false' 명령어를 실행하세요.",
+    "current_task": "Git 버전 관리 및 코드 변경 사항 커밋 준비"
+  },
+  "error_history": [
+    {
+      "time": "2026-04-22T10:53:05.695533",
+      "error_description": "사용자가 테스트를 위해 'python -c \"import nonexistent_module\"'을 실행하여 발생시킨 의도적인 에러입니다.",
+      "solution": "테스트 목적의 에러이므로 별도의 조치가 필요 없으며, 감지된 에러의 디버깅 로그를 확인하여 ReCoder 모니터링 로직이 정상 작동하는지 검증하십시오.",
+      "current_task": "ReCoder 시스템 에러 감지 기능 테스트"
+    },
+    {
+      "time": "2026-04-22T10:53:40.882494",
+      "error_description": "에러 감지 기능 테스트 중 시스템 내에서 에러 신호가 포착되었습니다.",
+      "solution": "터미널에서 'python -c \"import nonexistent_module\"'을 입력하여 의도적으로 에러를 발생시키고, ReCoder 위젯에 빨간색 알림 버블이 나타나는지 관찰하세요.",
+      "current_task": "ReCoder 에러 감지 기능 테스트"
+    },
+    {
+      "time": "2026-04-22T10:54:21.687375",
+      "error_description": "ReCoder 시스템에서 2건의 에러가 감지됨. 상세 내용 없이 '에러'로만 표시되고 있어 구체적인 로그 확인이 필요함.",
+      "solution": "IDE 터미널에서 'python -c \"import nonexistent_module\"'을 실행하여 의도적으로 에러를 발생시킨 후, ReCoder 대시보드 로그 파일을 분석하여 에러 스택 트레이스를 확인하십시오.",
+      "current_task": "에러 감지 기능 통합 및 테스트"
+    },
+    {
+      "time": "2026-04-22T10:54:46.395220",
+      "error_description": "ReCoder 시스템에서 에러가 감지되었으며, 클립보드에 'nonexistent_module'을 임포트하려는 코드가 있어 모듈 참조 오류 가능성이 높습니다.",
+      "solution": "pip install을 통해 필요한 모듈이 설치되어 있는지 확인하고, 코드 내 import 구문이 올바른지 검토하십시오. 터미널에서 'python -c \"import <모듈명>\"'을 실행하여 모듈 로드 여부를 직접 확인하세요.",
+      "current_task": "Python 개발 및 코드 디버깅"
+    },
+    {
+      "time": "2026-04-22T10:57:31.034779",
+      "error_description": "ModuleNotFoundError: No module named 'nonexistent_module'이 발생했습니다.",
+      "solution": "존재하지 않는 모듈을 호출하는 코드를 제거하거나, 필요한 패키지를 pip install로 설치하세요. 현재는 임의의 테스트 명령어로 인해 발생한 에러입니다.",
+      "current_task": "프로젝트 환경 내 모듈 import 테스트 및 디버깅"
+    },
+    {
+      "time": "2026-04-22T11:03:04.021203",
+      "error_description": "ModuleNotFoundError: 존재하지 않는 모듈 호출에 따른 에러 발생 및 시스템 오류 알림이 반복됨.",
+      "solution": "터미널에서 'python -c \"import nonexistent_module\"'을 실행하여 모듈 로드 여부를 확인하고, 코드 내 불필요한 테스트 코드를 제거하십시오.",
+      "current_task": "ReCoder 시스템의 에러 감지 기능 테스트 및 모니터링"
+    },
+    {
+      "time": "2026-04-22T11:09:03.649958",
+      "error_description": "git add . 실행 후 'hint: git submodule add <url> ReCoder' 메시지와 함께 서브모듈 관련 경고 발생",
+      "solution": "해당 경로가 서브모듈로 잘못 인식된 경우 'git rm --cached ReCoder' 명령어를 사용하여 인덱스에서 제거하거나, 의도한 파일만 명시적으로 add 하십시오. 경고를 무시하려면 'git config set advice.addEmbeddedRepo false' 명령어를 실행하세요.",
+      "current_task": "Git 버전 관리 및 코드 변경 사항 커밋 준비"
+    }
+  ]
+}

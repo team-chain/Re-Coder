@@ -1,0 +1,57 @@
+{
+  "session_id": "dc42c5bebe3743eea89d1a972874e297",
+  "start_time": "2026-04-23 01:42:29",
+  "end_time": null,
+  "active_windows": [
+    {
+      "time": "2026-04-23 01:42:34",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – analyzer.py"
+        },
+        {
+          "name": "SystemSettings.exe",
+          "title": "설정"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "설정"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "Claude - Chrome"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        }
+      ]
+    }
+  ],
+  "events": [],
+  "error_count": 0,
+  "resolved": false,
+  "key_frames": [],
+  "ai_summary": null,
+  "importance_score": 0,
+  "current_task": null,
+  "ai_updated_at": null,
+  "task_timeline": []
+}

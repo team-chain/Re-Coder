@@ -1,0 +1,252 @@
+{
+  "session_id": "e8708e97439a4388841488a543c306e7",
+  "start_time": "2026-04-22 23:48:14",
+  "end_time": null,
+  "active_windows": [
+    {
+      "time": "2026-04-22 23:48:25",
+      "windows": [
+        {
+          "name": "python3.12.exe",
+          "title": "ReCoder"
+        },
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – widget.py"
+        },
+        {
+          "name": "M365Copilot.exe",
+          "title": "Microsoft 365 Copilot"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "Windows 사용자 폴더 정리 및 삭제 가능 항목 - Claude - Chrome"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "SnippingTool.exe",
+          "title": "캡처 도구"
+        },
+        {
+          "name": "KakaoTalk.exe",
+          "title": "카카오톡"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "SystemSettings.exe",
+          "title": "설정"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-22 23:48:39",
+      "windows": [
+        {
+          "name": "SnippingTool.exe",
+          "title": "캡처 도구 오버레이"
+        },
+        {
+          "name": "python3.12.exe",
+          "title": "ReCoder"
+        },
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – widget.py"
+        },
+        {
+          "name": "M365Copilot.exe",
+          "title": "Microsoft 365 Copilot"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "Windows 사용자 폴더 정리 및 삭제 가능 항목 - Claude - Chrome"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "SnippingTool.exe",
+          "title": "캡처 도구"
+        },
+        {
+          "name": "KakaoTalk.exe",
+          "title": "카카오톡"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-22 23:49:18",
+      "windows": []
+    },
+    {
+      "time": "2026-04-22 23:49:24",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "SnippingTool.exe",
+          "title": "팝업 호스트"
+        },
+        {
+          "name": "SnippingTool.exe",
+          "title": "캡처 도구"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – widget.py"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "Windows 사용자 폴더 정리 및 삭제 가능 항목 - Claude - Chrome"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "KakaoTalk.exe",
+          "title": "카카오톡"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "SystemSettings.exe",
+          "title": "설정"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "설정"
+        }
+      ]
+    },
+    {
+      "time": "2026-04-22 23:49:28",
+      "windows": [
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – widget.py"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "Windows 사용자 폴더 정리 및 삭제 가능 항목 - Claude - Chrome"
+        },
+        {
+          "name": "KakaoTalk.exe",
+          "title": "카카오톡"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "SystemSettings.exe",
+          "title": "설정"
+        },
+        {
+          "name": "ApplicationFrameHost.exe",
+          "title": "설정"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "Title"
+        },
+        {
+          "name": "Microsoft.Notes.exe",
+          "title": "스티커 메모"
+        }
+      ]
+    }
+  ],
+  "events": [],
+  "error_count": 0,
+  "resolved": false,
+  "key_frames": [],
+  "ai_summary": "RapidOCR 모듈을 로드하는 과정에서 'DLL load failed' 에러가 발생하여 정상적으로 모니터링 애플리케이션이 구동되지 않고 있습니다.",
+  "importance_score": 95,
+  "current_task": "RapidOCR 초기화 에러 해결 및 프로그램 재실행",
+  "ai_updated_at": "2026-04-22T23:50:07.481694",
+  "task_timeline": [
+    {
+      "timestamp": "2026-04-22T23:49:07",
+      "task": "PyQt6 기반 위젯 애플리케이션 실행 및 RapidOCR 모듈 초기화 에러 디버깅",
+      "trigger": "window_change",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-22T23:49:40",
+      "task": "RapidOCR 초기화 에러 디버깅",
+      "trigger": "window_change",
+      "related_files": [],
+      "errors_at_change": 0
+    },
+    {
+      "timestamp": "2026-04-22T23:50:07",
+      "task": "RapidOCR 초기화 에러 해결 및 프로그램 재실행",
+      "trigger": "window_change",
+      "related_files": [],
+      "errors_at_change": 0
+    }
+  ],
+  "last_error": {
+    "time": "2026-04-22T23:50:07.483762",
+    "error_description": "RapidOCR 초기화 실패: DLL load failed while importing onnxruntime_pybind11_state: DLL 초기화 루틴을 실행할 수 없습니다.",
+    "solution": "onnxruntime 라이브러리의 의존성 문제이거나 Visual C++ 재배포 가능 패키지가 누락되었을 가능성이 큽니다. pip를 통해 onnxruntime을 재설치하고 최신 Visual C++ 재배포 가능 패키지를 확인하세요.",
+    "command": "pip uninstall -y onnxruntime && pip install onnxruntime",
+    "current_task": "RapidOCR 초기화 에러 해결 및 프로그램 재실행"
+  },
+  "error_history": [
+    {
+      "time": "2026-04-22T23:49:07.830784",
+      "error_description": "RapidOCR 초기화 실패: 'DLL load failed while importing onnxruntime_pybind11_state'",
+      "solution": "onnxruntime 라이브러리의 의존성 문제이거나 시스템 환경 변수 충돌 가능성이 있습니다. pip를 통해 onnxruntime을 재설치하거나, 누락된 Visual C++ 재배포 가능 패키지를 설치해야 합니다.",
+      "command": "pip uninstall onnxruntime && pip install onnxruntime",
+      "current_task": "PyQt6 기반 위젯 애플리케이션 실행 및 RapidOCR 모듈 초기화 에러 디버깅"
+    },
+    {
+      "time": "2026-04-22T23:49:40.146656",
+      "error_description": "RapidOCR 초기화 실패: DLL load failed while importing onnxruntime_pybind11_state",
+      "solution": "onnxruntime 라이브러리의 호환성 문제이거나 필수 의존성 패키지가 누락된 경우입니다. onnxruntime-runtime 또는 onnxruntime을 재설치하고 Visual C++ 재배포 가능 패키지가 설치되어 있는지 확인하세요.",
+      "command": "pip uninstall onnxruntime onnxruntime-runtime && pip install onnxruntime",
+      "current_task": "RapidOCR 초기화 에러 디버깅"
+    },
+    {
+      "time": "2026-04-22T23:50:07.483762",
+      "error_description": "RapidOCR 초기화 실패: DLL load failed while importing onnxruntime_pybind11_state: DLL 초기화 루틴을 실행할 수 없습니다.",
+      "solution": "onnxruntime 라이브러리의 의존성 문제이거나 Visual C++ 재배포 가능 패키지가 누락되었을 가능성이 큽니다. pip를 통해 onnxruntime을 재설치하고 최신 Visual C++ 재배포 가능 패키지를 확인하세요.",
+      "command": "pip uninstall -y onnxruntime && pip install onnxruntime",
+      "current_task": "RapidOCR 초기화 에러 해결 및 프로그램 재실행"
+    }
+  ]
+}

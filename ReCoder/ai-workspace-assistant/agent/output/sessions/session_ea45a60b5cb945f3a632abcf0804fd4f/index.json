@@ -1,0 +1,114 @@
+{
+  "session_id": "ea45a60b5cb945f3a632abcf0804fd4f",
+  "start_time": "2026-04-22 23:03:02",
+  "end_time": null,
+  "active_windows": [
+    {
+      "time": "2026-04-22 23:03:32",
+      "windows": [
+        {
+          "name": "python3.12.exe",
+          "title": "ReCoder"
+        },
+        {
+          "name": "GramLinkExtension.exe",
+          "title": "GramLinkExtension"
+        },
+        {
+          "name": "msedge.exe",
+          "title": "AI Workspace Assistant 외 페이지 3개 - 프로필 1 - Microsoft​ Edge"
+        },
+        {
+          "name": "pycharm64.exe",
+          "title": "ReCoder – monitor.py"
+        },
+        {
+          "name": "claude.exe",
+          "title": "Claude"
+        },
+        {
+          "name": "chrome.exe",
+          "title": "이 이미지에 로고만 남겨줘 - Google Gemini - Chrome"
+        },
+        {
+          "name": "KakaoTalk.exe",
+          "title": "카카오톡"
+        },
+        {
+          "name": "Docker Desktop.exe",
+          "title": "Containers - Docker Desktop"
+        },
+        {
+          "name": "LGControlCenterRTManager.exe",
+          "title": "LGControlCenterRTManager"
+        },
+        {
+          "name": "SystemSettings.exe",
+          "title": "설정"
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 23:03:33",
+      "errors": [
+        "Traceback (most recent call last)"
+      ],
+      "frame": "frame_0001.png"
+    },
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 23:03:50",
+      "errors": [
+        "Traceback (most recent call last)"
+      ],
+      "frame": "frame_0002.png"
+    },
+    {
+      "type": "error_detected",
+      "time": "2026-04-22 23:04:17",
+      "errors": [
+        "Traceback (most recent call last)"
+      ],
+      "frame": "frame_0003.png"
+    }
+  ],
+  "error_count": 3,
+  "resolved": false,
+  "key_frames": [
+    "frame_0001.png",
+    "frame_0002.png",
+    "frame_0003.png"
+  ],
+  "ai_summary": "터미널 출력 데이터를 읽는 과정에서 cp949 인코딩 문제로 인해 UnicodeDecodeError가 발생했습니다.",
+  "importance_score": 90,
+  "current_task": "터미널 출력 읽기 중 발생한 UnicodeDecodeError 해결",
+  "ai_updated_at": "2026-04-22T23:04:11.747743",
+  "task_timeline": [
+    {
+      "timestamp": "2026-04-22T23:04:11",
+      "task": "터미널 출력 읽기 중 발생한 UnicodeDecodeError 해결",
+      "trigger": "error_detected",
+      "related_files": [],
+      "errors_at_change": 2
+    }
+  ],
+  "last_error": {
+    "time": "2026-04-22T23:04:11.748742",
+    "error_description": "UnicodeDecodeError: 'cp949' codec can't decode byte 0x... in position... 터미널 버퍼를 읽을 때 인코딩 호환성 문제 발생.",
+    "solution": "파일이나 스트림을 열 때 encoding='utf-8' 및 errors='replace' 또는 'ignore' 옵션을 명시하여 인코딩 문제를 방지하세요.",
+    "command": "sed -i \"s/open(/open(encoding='utf-8', errors='replace', /g\" collectors/terminal_output.py",
+    "current_task": "터미널 출력 읽기 중 발생한 UnicodeDecodeError 해결"
+  },
+  "error_history": [
+    {
+      "time": "2026-04-22T23:04:11.748742",
+      "error_description": "UnicodeDecodeError: 'cp949' codec can't decode byte 0x... in position... 터미널 버퍼를 읽을 때 인코딩 호환성 문제 발생.",
+      "solution": "파일이나 스트림을 열 때 encoding='utf-8' 및 errors='replace' 또는 'ignore' 옵션을 명시하여 인코딩 문제를 방지하세요.",
+      "command": "sed -i \"s/open(/open(encoding='utf-8', errors='replace', /g\" collectors/terminal_output.py",
+      "current_task": "터미널 출력 읽기 중 발생한 UnicodeDecodeError 해결"
+    }
+  ]
+}
