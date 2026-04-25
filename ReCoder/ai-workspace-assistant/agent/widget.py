@@ -502,31 +502,6 @@ class CodeReadyBubble(_BubbleBase):
         self.action_clicked.emit(action)
 
 
-    """사용자 입력 메시지 — 우측 정렬."""
-
-    def __init__(self, text: str, parent=None) -> None:
-        super().__init__(parent)
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(0, 2, 4, 2)
-        outer.addStretch()
-        frame = QFrame()
-        frame.setStyleSheet(f"""
-            QFrame {{
-                background: {C_ACCENT};
-                border-radius: 6px;
-            }}
-        """)
-        f_lay = QVBoxLayout(frame)
-        f_lay.setContentsMargins(12, 8, 12, 8)
-        lbl = QLabel(text)
-        lbl.setWordWrap(True)
-        lbl.setMaximumWidth(260)
-        lbl.setStyleSheet("color: white; font-size: 13px; background: transparent; border: none;")
-        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        f_lay.addWidget(lbl)
-        outer.addWidget(frame)
-
-
 class UserBubble(_BubbleBase):
     """사용자 입력 말풍선 — 우측 정렬."""
 

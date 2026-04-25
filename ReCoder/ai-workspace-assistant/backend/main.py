@@ -20,15 +20,21 @@ async def lifespan(app: FastAPI):
     global pool
     pool = await asyncpg.create_pool(
         dsn=os.getenv('DATABASE_URL', ''),
+@app.post('/api/users')
+
         min_size=2,
         max_size=10,
     )
-    app.state.pool = pool
     try:
         yield
-    finally:
         if pool is not None:
             await pool.close()
+    return {'ok': True, 'workers_note': 'Run uvicorn with --workers 1 for WebSocket state sharing'}
+
+
+@app.post('/api/users')
+async def create_user() -> dict:
+    return {'message': 'User creation endpoint created'}
             pool = None
 
 
