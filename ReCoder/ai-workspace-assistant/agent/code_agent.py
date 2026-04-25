@@ -110,41 +110,90 @@ def _build_prompt(error_text: str, files: list[dict]) -> str:
 
 # ── 핵심 API ──────────────────────────────────────────────────────────
 
+def _extract_json(raw: str) -> dict:
+    """
+    Gemini 응답에서 JSON 객체를 추출한다.
+    마크다운 코드펜스, 앞뒤 설명 텍스트가 있어도 처리한다.
+    """
+    # 1) 코드펜스 제거
+    raw = re.sub(r'```(?:json)?\s*', '', raw).strip()
+
+    # 2) 전체가 JSON이면 바로 파싱
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # 3) 첫 번째 { ... } 블록 추출
+    start = raw.find('{')
+    if start != -1:
+        depth = 0
+        for i, ch in enumerate(raw[start:], start):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(raw[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+
+    raise ValueError(f"Gemini 응답에서 JSON을 추출할 수 없습니다.\n원문: {raw[:300]}")
+
+
+def _safe_risk(value: str) -> RiskLevel:
+    try:
+        return RiskLevel(value.lower())
+    except ValueError:
+        return RiskLevel.LOW
+
+
 def generate_patch_proposal(error_text: str, related_files: list[str]) -> PatchProposal:
     """Gemini Flash 호출 → PatchProposal 반환."""
     files = _collect_related_files(related_files)
     prompt = _build_prompt(error_text, files)
 
-    client = _get_client()
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-    )
-    raw = response.text.strip()
+    print(f"[code_agent] 수정안 생성 시작 | 에러: {error_text[:80]!r}")
 
-    # JSON 파싱
-    raw = re.sub(r'^```(?:json)?\s*', '', raw)
-    raw = re.sub(r'\s*```$', '', raw)
-    data = json.loads(raw)
+    client = _get_client()
+    try:
+        response = client.models.generate_content(
+            model=os.getenv('GEMINI_MODEL', 'gemini-2.0-flash'),
+            contents=prompt,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Gemini API 호출 실패: {e}") from e
+
+    raw = (response.text or "").strip()
+    print(f"[code_agent] Gemini 응답 길이: {len(raw)}자")
+
+    try:
+        data = _extract_json(raw)
+    except ValueError as e:
+        raise RuntimeError(str(e)) from e
 
     # base_sha256 계산
     patches: list[FilePatch] = []
     for p in data.get('patches', []):
-        fp = Path(p['file'])
+        file_path = p.get('file', '')
+        fp = Path(file_path)
         sha = compute_sha256(fp) if fp.exists() else ""
         patches.append(FilePatch(
-            file         = p['file'],
+            file         = file_path,
             base_sha256  = sha,
-            unified_diff = p['unified_diff'],
+            unified_diff = p.get('unified_diff', ''),
         ))
 
-    return PatchProposal(
+    proposal = PatchProposal(
         proposal_id  = uuid.uuid4().hex,
-        summary      = data.get('summary', ''),
-        risk         = RiskLevel(data.get('risk', 'low')),
+        summary      = data.get('summary', '수정안이 생성되었습니다.'),
+        risk         = _safe_risk(data.get('risk', 'low')),
         test_command = data.get('test_command', ''),
         patches      = patches,
     )
+    print(f"[code_agent] 수정안 생성 완료 | 파일 {len(patches)}개")
+    return proposal
 
 
 def apply_patch_proposal(proposal: PatchProposal) -> list[dict]:

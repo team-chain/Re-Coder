@@ -36,6 +36,20 @@ except ImportError:
     _HAS_CLIPBOARD = False
 
 
+# ── 이모지 폰트 헬퍼 ────────────────────────────────────────────────────
+
+def _emoji_label(text: str, style: str = "", parent=None) -> "QLabel":
+    """이모지가 깨지지 않도록 Apple Color Emoji / Noto Emoji 폰트를 지정한 QLabel."""
+    lbl = QLabel(text, parent)
+    # macOS: Apple Color Emoji / Linux·Win: Noto Emoji → Segoe UI Emoji
+    emoji_font = (
+        "font-family: 'Apple Color Emoji', 'Noto Emoji', 'Segoe UI Emoji', sans-serif;"
+        "font-size: 14px;"
+    )
+    lbl.setStyleSheet(f"{emoji_font} background: transparent; border: none; {style}")
+    return lbl
+
+
 # ── 상수 ───────────────────────────────────────────────────────────────
 
 SERVER_PORT     = int(os.getenv("LOCAL_PORT", "17894"))
@@ -74,7 +88,7 @@ def _qss_base() -> str:
     QWidget {{
         background: {C_BG};
         color: {C_FG};
-        font-family: 'Pretendard', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+        font-family: 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', 'Segoe UI Emoji', sans-serif;
         font-size: 13px;
     }}
     QScrollArea {{ border: none; background: transparent; }}
@@ -234,8 +248,7 @@ class ErrorBubble(_BubbleBase):
 
         # 헤더
         header = QHBoxLayout()
-        icon_lbl = QLabel("🔴")
-        icon_lbl.setStyleSheet("background: transparent; border: none; font-size: 14px;")
+        icon_lbl = _emoji_label("🔴")
         title_lbl = QLabel(f"에러 감지 #{error_count}")
         title_lbl.setStyleSheet(f"color: {C_ERROR}; font-weight: 700; font-size: 13px; background: transparent; border: none;")
         header.addWidget(icon_lbl)
@@ -253,11 +266,16 @@ class ErrorBubble(_BubbleBase):
 
         # 해결책
         if solution:
-            sol_lbl = QLabel(f"💡 {solution}")
+            sol_lbl = QLabel(solution)
             sol_lbl.setWordWrap(True)
             sol_lbl.setStyleSheet(f"color: {C_WARN}; font-size: 12px; background: transparent; border: none;")
             sol_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            lay.addWidget(sol_lbl)
+            # 💡 아이콘 따로 분리해서 깨짐 방지
+            sol_row = QHBoxLayout()
+            sol_row.setSpacing(4)
+            sol_row.addWidget(_emoji_label("💡"))
+            sol_row.addWidget(sol_lbl, stretch=1)
+            lay.addLayout(sol_row)
 
         # 명령어 블록
         if command:
@@ -509,6 +527,28 @@ class CodeReadyBubble(_BubbleBase):
         outer.addWidget(frame)
 
 
+class UserBubble(_BubbleBase):
+    """사용자 입력 말풍선 — 우측 정렬."""
+
+    def __init__(self, text: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setStyleSheet(f"""
+            QFrame {{
+                background: {C_ACCENT};
+                border-radius: 6px;
+                margin: 2px 4px 2px 40px;
+            }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(0)
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("color: white; font-size: 13px; background: transparent; border: none;")
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(lbl)
+
+
 class SystemBubble(_BubbleBase):
     """시스템 알림 — 가운데 작은 글씨."""
 
@@ -687,6 +727,7 @@ class ReCoderWidget(QWidget):
         self._error_types: list[str] = []
         self._last_warn_count   = 0
         self._current_event_id: str = ""      # 현재 처리 중인 AgentEvent
+        self._last_error_text:  str = ""      # 채팅 컨텍스트용 최근 에러 텍스트
 
         self._setup_window()
         self._build_ui()
@@ -707,6 +748,9 @@ class ReCoderWidget(QWidget):
         self.setMinimumSize(WIN_MIN_W, WIN_MIN_H)
         self.resize(WIN_W, WIN_H)
         self.setStyleSheet(_qss_base())
+        # AX가 이 창을 "ReCoder Widget"으로 식별할 수 있도록 타이틀 지정
+        # → monitor.py의 _SELF_MARKERS 에서 걸러냄
+        self.setWindowTitle("ReCoder Widget")
 
     # ── UI 구성 ────────────────────────────────────────────────────────
 
@@ -852,8 +896,59 @@ class ReCoderWidget(QWidget):
             return
         self._add_user(text)
         self._input.clear()
-        # 위젯 자체는 질문을 표시만 함
-        # 실제 응답은 ws/updates에서 analysis 이벤트로 수신됨
+        # 서버 /api/chat 엔드포인트에 질문 전송 (백그라운드 스레드)
+        threading.Thread(
+            target=self._post_chat,
+            args=(text,),
+            daemon=True,
+        ).start()
+
+    def _post_chat(self, message: str) -> None:
+        """백그라운드에서 /api/chat 호출 → 응답을 SSE로 수신하거나 직접 표시."""
+        import urllib.request
+        import urllib.error
+
+        url     = f"{BASE_URL}/api/chat"
+        payload = json.dumps({
+            "message": message,
+            "context": self._current_context(),
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type":    "application/json",
+                "X-ReCoder-Token": _session_token,
+            },
+            method="POST",
+        )
+        def _show(text: str) -> None:
+            # QTimer.singleShot은 메인 스레드에서 안전하게 실행됨
+            QTimer.singleShot(0, lambda t=text: self._add_ai(t))
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                answer = body.get("answer", "")
+                if answer:
+                    _show(answer)
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            try:
+                msg = json.loads(err_body).get("detail", err_body)
+            except Exception:
+                msg = err_body
+            _show(f"⚠️ 오류: {msg}")
+        except Exception as e:
+            _show(f"⚠️ 연결 실패: {e}")
+
+    def _current_context(self) -> str:
+        """현재 에러 이벤트가 있으면 컨텍스트로 반환."""
+        return getattr(self, "_last_error_text", "")
+
+    def _add_ai_slot(self, text: str) -> None:
+        """백그라운드 스레드에서 QueuedConnection으로 호출되는 슬롯."""
+        self._add_ai(text)
 
     # ── WebSocket → SSE 교체 ──────────────────────────────────────────
 
@@ -890,6 +985,13 @@ class ReCoderWidget(QWidget):
 
     def _dispatch(self, data: dict) -> None:
         msg_type = data.get("type", "")
+
+        # ── 채팅 응답 ──
+        if msg_type == "chat_response":
+            answer = data.get("message", "")
+            if answer:
+                self._add_ai(answer)
+            return
 
         # ── Orchestrator 상태 업데이트 ──
         if msg_type == "orchestrator_update":
@@ -937,6 +1039,8 @@ class ReCoderWidget(QWidget):
         error_text = event.get("summary") or event.get("error_text", "에러 감지됨")
         self._add_error(error_text, "", "")
         self._current_event_id = event.get("event_id", "")
+        # 채팅 컨텍스트로 활용
+        self._last_error_text = event.get("error_text", "") or error_text
 
         bubble = ActionBubble(event)
         bubble.action_clicked.connect(self._on_action_selected)
