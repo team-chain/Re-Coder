@@ -177,17 +177,23 @@ class SseWorker(QObject):
                 )
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     self.connected.emit()
-                    buf = ""
+                    # 바이트 버퍼에 누적 → SSE 메시지 경계(\n\n)에서만 UTF-8 디코딩.
+                    # 1바이트씩 즉시 디코딩하면 한글(3바이트) 중간에서 잘려 �로 깨진다.
+                    buf_bytes = b""
                     while self._running:
-                        chunk = resp.read(1).decode("utf-8", errors="replace")
+                        chunk = resp.read(1024)
                         if not chunk:
                             break
-                        buf += chunk
-                        if buf.endswith("\n\n"):
-                            for line in buf.strip().splitlines():
+                        buf_bytes += chunk
+                        while b"\n\n" in buf_bytes:
+                            raw, _, buf_bytes = buf_bytes.partition(b"\n\n")
+                            try:
+                                text = raw.decode("utf-8")
+                            except UnicodeDecodeError:
+                                text = raw.decode("utf-8", errors="replace")
+                            for line in text.splitlines():
                                 if line.startswith("data:"):
                                     self.message_received.emit(line[5:].strip())
-                            buf = ""
             except Exception:
                 self.disconnected.emit()
                 time.sleep(RECONNECT_MS / 1000)
@@ -866,28 +872,37 @@ class ReCoderWidget(QWidget):
     # ── 입력창 전송 ────────────────────────────────────────────────────
 
     def _send_user_message(self) -> None:
+        print(f"[widget][chat] 입력 받음: '{self._input.text()}'")
         text = self._input.text().strip()
         if not text:
+            print("[widget][chat] 빈 텍스트 — 중단")
             return
+        print(f"[widget][chat] 버블 추가 시작: '{text}'")
         self._add_user(text)
+        print("[widget][chat] 버블 추가 완료")
         self._input.clear()
-        # 서버 /api/chat 엔드포인트에 질문 전송 (백그라운드 스레드)
+        print("[widget][chat] 스레드 시작 직전")
         threading.Thread(
             target=self._post_chat,
             args=(text,),
             daemon=True,
         ).start()
+        print("[widget][chat] 스레드 시작 완료")
 
     def _post_chat(self, message: str) -> None:
+        print(f"[widget][chat] _post_chat 진입: '{message}'")
         """백그라운드에서 /api/chat 호출 → 응답을 SSE로 수신하거나 직접 표시."""
         import urllib.request
         import urllib.error
 
         url     = f"{BASE_URL}/api/chat"
+        print(f"[widget][chat] URL: {url}")
+        print(f"[widget][chat] 토큰: {_session_token!r}")
         payload = json.dumps({
             "message": message,
             "context": self._current_context(),
         }).encode("utf-8")
+        print(f"[widget][chat] payload 크기: {len(payload)} bytes")
         req = urllib.request.Request(
             url,
             data=payload,
@@ -898,16 +913,23 @@ class ReCoderWidget(QWidget):
             method="POST",
         )
         def _show(text: str) -> None:
-            # QTimer.singleShot은 메인 스레드에서 안전하게 실행됨
+            print(f"[widget][chat] _show: {text[:60]}")
             QTimer.singleShot(0, lambda t=text: self._add_ai(t))
 
+        print("[widget][chat] urlopen 호출 직전")
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
+                print(f"[widget][chat] 응답 수신, status={resp.status}")
                 body = json.loads(resp.read().decode("utf-8"))
+                print(f"[widget][chat] body 파싱 완료: keys={list(body.keys())}")
                 answer = body.get("answer", "")
+                print(f"[widget][chat] answer 길이: {len(answer)}")
                 if answer:
                     _show(answer)
+                else:
+                    _show("⚠️ 빈 응답")
         except urllib.error.HTTPError as e:
+            print(f"[widget][chat] HTTPError: {e.code}")
             err_body = e.read().decode("utf-8", errors="replace")
             try:
                 msg = json.loads(err_body).get("detail", err_body)
@@ -915,7 +937,9 @@ class ReCoderWidget(QWidget):
                 msg = err_body
             _show(f"⚠️ 오류: {msg}")
         except Exception as e:
+            print(f"[widget][chat] 일반 예외: {type(e).__name__}: {e}")
             _show(f"⚠️ 연결 실패: {e}")
+        print("[widget][chat] _post_chat 종료")
 
     def _current_context(self) -> str:
         """현재 에러 이벤트가 있으면 컨텍스트로 반환."""
@@ -1036,12 +1060,13 @@ class ReCoderWidget(QWidget):
         if action == "fix_code":
             self._add_system("🔧 코드 수정안 생성 중...")
             # server.py /api/patch/propose 호출
+            # _last_error_text 는 _show_action_choices 에서 이벤트 수신 시 저장됨
             self._call_api_async(
                 method  = "POST",
                 path    = "/api/patch/propose",
                 body    = {
                     "event_id":      self._current_event_id,
-                    "error_text":    "",   # server가 last event에서 참조
+                    "error_text":    getattr(self, "_last_error_text", "") or "",
                     "related_files": [],
                 },
             )
