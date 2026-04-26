@@ -120,6 +120,7 @@
   <h1>⚡ ReCoder</h1>
   <span class="state-badge" id="stateBadge">IDLE</span>
   <div class="header-spacer"></div>
+  <button class="btn btn-ghost" style="padding:5px 10px; font-size:12px;" onclick="openMonitoredTerminal()">감지 터미널</button>
   <div class="conn-dot" id="connDot" title="서버 연결 상태"></div>
 </div>
 
@@ -187,13 +188,24 @@
   </div>
   <div id="patchDone" style="display:none;" class="status-banner success">
     ✅ 코드 수정이 완료되었습니다.
+    <div class="action-row" style="margin-top:10px;">
+      <button class="btn btn-ghost" onclick="rollbackPatch()">롤백</button>
+      <button class="btn btn-success" onclick="requestInfra('dockerfile')">Dockerfile</button>
+      <button class="btn btn-ghost" onclick="requestInfra('docker-compose')">docker-compose</button>
+      <button class="btn btn-ghost" onclick="requestInfra('github-actions')">CI</button>
+    </div>
   </div>
 </div>
 
 <!-- 패널: Dockerfile -->
 <div class="panel" id="panel-infra">
   <div id="infraIdle" class="card" style="color:var(--fg-dim); text-align:center; padding:40px;">
-    코드 수정 완료 후 위젯에서 "Dockerfile 생성"을 클릭하세요.
+    인프라 파일을 생성할 수 있습니다.
+    <div class="action-row" style="justify-content:center; margin-top:14px;">
+      <button class="btn btn-success" onclick="requestInfra('dockerfile')">Dockerfile</button>
+      <button class="btn btn-ghost" onclick="requestInfra('docker-compose')">docker-compose</button>
+      <button class="btn btn-ghost" onclick="requestInfra('github-actions')">CI</button>
+    </div>
   </div>
 
   <div id="infraProposed" style="display:none; flex-direction:column; gap:12px;">
@@ -210,12 +222,17 @@
     </div>
     <div class="action-row">
       <button class="btn btn-success" onclick="saveInfra()">💾 저장</button>
+      <button class="btn btn-primary" onclick="runInfra(true)">저장 후 실행</button>
       <button class="btn btn-ghost"   onclick="cancelInfra()">취소</button>
     </div>
   </div>
 
   <div id="infraDone" style="display:none;" class="status-banner success">
-    ✅ Dockerfile이 저장되었습니다.
+    ✅ 인프라 파일이 저장되었습니다.
+    <div class="action-row" style="margin-top:10px;">
+      <button class="btn btn-primary" onclick="runInfra(false)">컨테이너 실행</button>
+    </div>
+    <div id="infraRunResult" class="code-viewer" style="display:none; margin-top:10px; white-space:pre-wrap;"></div>
   </div>
 </div>
 
@@ -250,6 +267,7 @@ function authHeaders() {
 
 // ── 상태 ─────────────────────────────────────────────────────────────
 let currentProposalId = null;
+let lastAppliedProposalId = null;
 let currentInfraId    = null;
 const events = [];
 
@@ -309,6 +327,13 @@ function handleUpdate(data) {
 
   if (type === 'session_update') {
     // 기존 호환
+  }
+
+  if (type === 'infra_run_result') {
+    showInfraDone();
+    const output = document.getElementById('infraRunResult');
+    output.style.display = '';
+    output.textContent = formatInfraRun(data.result || {});
   }
 }
 
@@ -518,6 +543,7 @@ function showPatchDone() {
   document.getElementById('patchProposed').style.display  = 'none';
   document.getElementById('patchIdle').style.display      = 'none';
   document.getElementById('patchDone').style.display      = '';
+  if (currentProposalId) lastAppliedProposalId = currentProposalId;
   currentProposalId = null;
 }
 
@@ -529,6 +555,42 @@ async function rejectPatch() {
 }
 
 // ── Infra 표시 ────────────────────────────────────────────────────────
+async function rollbackPatch() {
+  const proposalId = lastAppliedProposalId || currentProposalId;
+  if (!proposalId) {
+    toast('롤백할 패치가 없습니다.', true);
+    return;
+  }
+  try {
+    const r = await fetch('/api/patch/rollback', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ proposal_id: proposalId }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    document.getElementById('patchDone').style.display = 'none';
+    document.getElementById('patchIdle').style.display = '';
+    toast('롤백 완료');
+  } catch (e) {
+    toast('롤백 실패: ' + e.message, true);
+  }
+}
+
+async function requestInfra(kind) {
+  switchTab('infra');
+  document.getElementById('infraIdle').style.display = 'none';
+  document.getElementById('infraDone').style.display = 'none';
+  document.getElementById('infraRunResult').style.display = 'none';
+  toast(`${kind} 생성 중...`);
+  try {
+    const r = await fetch(`/api/infra/${kind}`, { headers: authHeaders() });
+    if (!r.ok) throw new Error(await r.text());
+  } catch (e) {
+    document.getElementById('infraIdle').style.display = '';
+    toast('인프라 생성 실패: ' + e.message, true);
+  }
+}
+
 function highlightDockerfile(src) {
   return src
     .split('\n')
@@ -557,9 +619,71 @@ async function saveInfra() {
     const r = await fetch('/api/infra/save', { method: 'POST', headers: authHeaders() });
     if (!r.ok) throw new Error(await r.text());
     showInfraDone();
-    toast('✅ Dockerfile 저장 완료');
+    toast('저장 완료');
   } catch (e) {
     toast('❌ 저장 실패: ' + e.message, true);
+  }
+}
+
+function formatInfraRun(result) {
+  const lines = [];
+  lines.push(`mode: ${result.mode || ''}`);
+  if (result.container) lines.push(`container: ${result.container}`);
+  if (result.image) lines.push(`image: ${result.image}`);
+  if (result.port) lines.push(`port: ${result.port}`);
+  if (result.url) lines.push(`url: ${result.url}`);
+  lines.push('');
+  (result.steps || []).forEach(step => {
+    lines.push(`$ ${step.command || ''}`);
+    if (step.output) lines.push(step.output);
+    lines.push('');
+  });
+  return lines.join('\n').trim();
+}
+
+function formatApiError(text) {
+  try {
+    const parsed = JSON.parse(text);
+    const detail = parsed.detail || parsed;
+    if (typeof detail === 'string') return detail;
+    return detail.message || JSON.stringify(detail, null, 2);
+  } catch {
+    return text;
+  }
+}
+
+async function openMonitoredTerminal() {
+  try {
+    const r = await fetch('/api/terminal/open', { method: 'POST', headers: authHeaders() });
+    if (!r.ok) throw new Error(formatApiError(await r.text()));
+    toast('에러 감지 터미널을 열었습니다.');
+  } catch (e) {
+    toast('감지 터미널 실행 실패: ' + e.message, true);
+  }
+}
+
+async function runInfra(autoSave = false) {
+  const output = document.getElementById('infraRunResult');
+  output.style.display = '';
+  output.textContent = 'Docker 컨테이너 실행 중...';
+  try {
+    if (autoSave) {
+      const save = await fetch('/api/infra/save', { method: 'POST', headers: authHeaders() });
+      if (!save.ok) throw new Error(formatApiError(await save.text()));
+      showInfraDone();
+    }
+    const r = await fetch('/api/infra/run', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ prefer_compose: true }),
+    });
+    if (!r.ok) throw new Error(formatApiError(await r.text()));
+    const result = await r.json();
+    output.textContent = formatInfraRun(result);
+    toast('Docker 컨테이너 실행 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('Docker 실행 실패: ' + e.message, true);
   }
 }
 

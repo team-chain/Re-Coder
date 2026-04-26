@@ -495,7 +495,9 @@ class CodeReadyBubble(_BubbleBase):
             self._buttons.append(b)
             return b
 
-        btn_row.addWidget(_btn("🐳 Dockerfile 생성", "generate_dockerfile", primary=True))
+        btn_row.addWidget(_btn("🐳 Dockerfile", "generate_dockerfile", primary=True))
+        btn_row.addWidget(_btn("Compose", "generate_docker_compose"))
+        btn_row.addWidget(_btn("CI", "generate_github_actions"))
         btn_row.addWidget(_btn("✕ 무시", "ignore"))
         lay.addLayout(btn_row)
 
@@ -505,6 +507,104 @@ class CodeReadyBubble(_BubbleBase):
         self._done = True
         for b in self._buttons:
             b.setEnabled(False)
+        self.action_clicked.emit(action)
+
+
+class InfraProposalBubble(_BubbleBase):
+    """Generated infra file preview and actions in the widget."""
+    action_clicked = pyqtSignal(str)
+
+    def __init__(self, proposal: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._done = False
+        self._buttons: list[QPushButton] = []
+        target = proposal.get("target_path") or "Dockerfile"
+        template = proposal.get("base_template") or ""
+        content = proposal.get("content") or ""
+        lines = content.splitlines()
+        preview = "\n".join(lines[:12])
+        if len(lines) > 12:
+            preview += "\n..."
+
+        self.setStyleSheet(f"""
+            QFrame {{
+                background: {C_BG_CARD};
+                border-left: 3px solid {C_ACCENT};
+                border-radius: 6px;
+                margin: 2px 8px 2px 4px;
+            }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(8)
+
+        title_lbl = QLabel(f"인프라 파일 생성됨: {target}")
+        title_lbl.setWordWrap(True)
+        title_lbl.setStyleSheet(
+            f"color: {C_ACCENT_LIGHT}; font-weight: 700; font-size: 13px;"
+            " background: transparent; border: none;"
+        )
+        lay.addWidget(title_lbl)
+
+        if template:
+            meta_lbl = QLabel(f"template: {template}")
+            meta_lbl.setStyleSheet(f"color: {C_FG_DIM}; font-size: 11px; background: transparent; border: none;")
+            lay.addWidget(meta_lbl)
+
+        preview_lbl = QLabel(preview)
+        preview_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        preview_lbl.setWordWrap(True)
+        preview_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        preview_lbl.setStyleSheet(f"""
+            QLabel {{
+                background: {C_BG_CODE};
+                color: {C_FG};
+                border: 1px solid {C_BORDER};
+                border-radius: 5px;
+                padding: 8px;
+                font-family: Consolas, monospace;
+                font-size: 11px;
+            }}
+        """)
+        lay.addWidget(preview_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        def _btn(label: str, action: str, primary: bool = False) -> QPushButton:
+            b = QPushButton(label)
+            b.setFixedHeight(30)
+            accent = C_ACCENT if primary else C_BG_INPUT
+            fg_color = "white" if primary else C_FG
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: {accent};
+                    color: {fg_color};
+                    border: 1px solid {C_BORDER};
+                    border-radius: 5px;
+                    font-size: 12px;
+                    padding: 0 10px;
+                }}
+                QPushButton:hover {{ opacity: 0.85; }}
+                QPushButton:disabled {{ color: {C_FG_DIM}; background: {C_BG}; }}
+            """)
+            b.clicked.connect(lambda _, a=action: self._on_action(a))
+            self._buttons.append(b)
+            return b
+
+        btn_row.addWidget(_btn("저장", "save_infra"))
+        btn_row.addWidget(_btn("저장 후 실행", "run_infra", primary=True))
+        btn_row.addWidget(_btn("대시보드", "open_dashboard"))
+        btn_row.addWidget(_btn("취소", "cancel_infra"))
+        lay.addLayout(btn_row)
+
+    def _on_action(self, action: str) -> None:
+        if self._done:
+            return
+        if action in {"save_infra", "run_infra", "cancel_infra"}:
+            self._done = True
+            for b in self._buttons:
+                b.setEnabled(False)
         self.action_clicked.emit(action)
 
 
@@ -698,6 +798,8 @@ class TitleBar(QFrame):
 # ── 메인 위젯 ─────────────────────────────────────────────────────────
 
 class ReCoderWidget(QWidget):
+    ai_message_received = pyqtSignal(str)
+    system_message_received = pyqtSignal(str)
     """ReCoder 메인 위젯."""
 
     def __init__(self) -> None:
@@ -710,6 +812,10 @@ class ReCoderWidget(QWidget):
         self._current_event_id: str = ""      # 현재 처리 중인 AgentEvent
         self._last_error_text:  str = ""      # 채팅 컨텍스트용 최근 에러 텍스트
 
+        self._ignore_sse_chat_count = 0
+
+        self.ai_message_received.connect(self._add_ai_slot)
+        self.system_message_received.connect(self._add_system)
         self._setup_window()
         self._build_ui()
         self._restore_pos()
@@ -881,6 +987,7 @@ class ReCoderWidget(QWidget):
         self._add_user(text)
         print("[widget][chat] 버블 추가 완료")
         self._input.clear()
+        self._ignore_sse_chat_count += 1
         print("[widget][chat] 스레드 시작 직전")
         threading.Thread(
             target=self._post_chat,
@@ -914,11 +1021,11 @@ class ReCoderWidget(QWidget):
         )
         def _show(text: str) -> None:
             print(f"[widget][chat] _show: {text[:60]}")
-            QTimer.singleShot(0, lambda t=text: self._add_ai(t))
+            self.ai_message_received.emit(text)
 
         print("[widget][chat] urlopen 호출 직전")
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=120) as resp:
                 print(f"[widget][chat] 응답 수신, status={resp.status}")
                 body = json.loads(resp.read().decode("utf-8"))
                 print(f"[widget][chat] body 파싱 완료: keys={list(body.keys())}")
@@ -988,6 +1095,9 @@ class ReCoderWidget(QWidget):
         # ── 채팅 응답 ──
         if msg_type == "chat_response":
             answer = data.get("message", "")
+            if self._ignore_sse_chat_count > 0:
+                self._ignore_sse_chat_count -= 1
+                return
             if answer:
                 self._add_ai(answer)
             return
@@ -1010,8 +1120,8 @@ class ReCoderWidget(QWidget):
                 self._show_code_ready_choices()
 
             elif state == "INFRA_PROPOSED":
-                self._add_ai("🐳 Dockerfile 미리보기가 대시보드에 표시됩니다.")
-                self._open_dashboard()
+                proposal = data.get("infra_proposal") or {}
+                self._show_infra_proposal(proposal)
 
             elif state == "INFRA_READY":
                 msg = data.get("message", "인프라 파일 저장 완료")
@@ -1024,6 +1134,10 @@ class ReCoderWidget(QWidget):
             return
 
         # ── 기존 session_update 호환 ──
+        if msg_type == "infra_run_result":
+            self._show_infra_run_result(data.get("result") or {})
+            return
+
         reason = data.get("reason", "")
         if reason == "connected":
             self._status_bar.set_ok(data.get("status", {}).get("current_task", ""))
@@ -1053,6 +1167,37 @@ class ReCoderWidget(QWidget):
         bubble.action_clicked.connect(self._on_code_ready_action)
         self._insert_bubble(bubble)
 
+    def _show_infra_proposal(self, proposal: dict) -> None:
+        bubble = InfraProposalBubble(proposal)
+        bubble.action_clicked.connect(self._on_infra_action)
+        self._insert_bubble(bubble)
+
+    def _show_infra_run_result(self, result: dict) -> None:
+        mode = result.get("mode", "")
+        container = result.get("container", "")
+        url = result.get("url", "")
+        parts = ["Docker 컨테이너 실행 완료"]
+        if mode:
+            parts.append(f"mode={mode}")
+        if container:
+            parts.append(f"container={container}")
+        if url:
+            parts.append(url)
+        self._add_system(" | ".join(parts))
+
+    def _on_infra_action(self, action: str) -> None:
+        if action == "save_infra":
+            self._add_system("인프라 파일 저장 중...")
+            self._call_api_async("POST", "/api/infra/save", {})
+        elif action == "run_infra":
+            self._add_system("Docker 컨테이너 실행 중...")
+            self._call_api_async("POST", "/api/infra/run", {"prefer_compose": True})
+        elif action == "open_dashboard":
+            self._open_dashboard()
+        elif action == "cancel_infra":
+            self._call_api_async("POST", "/api/orchestrator/action", {"action": "cancel"})
+            self._add_system("인프라 생성 취소")
+
     def _on_action_selected(self, action: str) -> None:
         """선택지 버튼 클릭 처리."""
         import urllib.request, urllib.error
@@ -1081,6 +1226,12 @@ class ReCoderWidget(QWidget):
         if action == "generate_dockerfile":
             self._add_system("🐳 Dockerfile 생성 중...")
             self._call_api_async("GET", "/api/infra/dockerfile", {})
+        elif action == "generate_docker_compose":
+            self._add_system("docker-compose.yml 생성 중...")
+            self._call_api_async("GET", "/api/infra/docker-compose", {})
+        elif action == "generate_github_actions":
+            self._add_system("GitHub Actions CI 생성 중...")
+            self._call_api_async("GET", "/api/infra/github-actions", {})
         elif action == "ignore":
             self._add_system("무시됨")
 
@@ -1102,10 +1253,11 @@ class ReCoderWidget(QWidget):
                 else:
                     data_bytes = _json.dumps(body).encode()
                     req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
-                with urllib.request.urlopen(req, timeout=30):
+                with urllib.request.urlopen(req, timeout=900):
                     pass
             except Exception as e:
                 print(f"[widget] API 호출 실패 {path}: {e}")
+                self.system_message_received.emit(f"API 호출 실패: {e}")
 
         threading.Thread(target=_run, daemon=True).start()
 

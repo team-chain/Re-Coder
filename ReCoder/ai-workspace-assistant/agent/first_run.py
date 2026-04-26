@@ -50,15 +50,15 @@ def _extract_login_credentials(data: dict) -> tuple[str, str]:
 def _terminal_capture_guide() -> str:
     if sys.platform == 'win32':
         return (
-            '터미널 출력 캡처를 위해 PowerShell에서 다음 명령어를 실행하세요:\n'
-            'Start-Transcript -Path "$env:USERPROFILE\\.ai_assistant\\terminal.log" -Append'
+            'PowerShell/VSCode 터미널 출력은 ReCoder가 PowerShell 프로필에 자동 transcript hook을 '
+            '설정해 수집합니다. 설정 후 새 터미널부터 에러 로그가 자동 감지됩니다.'
         )
     return (
         '터미널 출력 캡처(권장: 수동 시작)\n'
         '1) 쉘 설정 파일(~/.zshrc 또는 ~/.bashrc)에 아래 함수를 추가\n'
         '   logterm() { mkdir -p "$HOME/.ai_assistant"; script -q -a "$HOME/.ai_assistant/terminal.log"; }\n'
         '2) 필요할 때 logterm 실행\n\n'
-        '프로그램 시작 시 자동 캡처를 원하면 .env에 AUTO_START_TERMINAL_CAPTURE=1을 설정하세요.\n'
+        '프로그램 시작 시 자동 캡처를 끄려면 .env에 AUTO_START_TERMINAL_CAPTURE=0을 설정하세요.\n'
         '(재귀 실행 방지 가드가 적용됩니다.)'
     )
 
@@ -83,19 +83,92 @@ fi
 # <<< recoder-logterm <<<
 """
 
+_POWERSHELL_PROFILE_MARKER = '# >>> recoder-transcript >>>'
+
+
+def _powershell_profile_block(log_path: str) -> str:
+    escaped_log_path = log_path.replace("'", "''")
+    return f"""\
+# >>> recoder-transcript >>>
+# ReCoder terminal log capture. Added automatically by ReCoder.
+$recoderLogPath = '{escaped_log_path}'
+$recoderLogDir = Split-Path -Parent $recoderLogPath
+if (-not (Test-Path $recoderLogDir)) {{
+  New-Item -ItemType Directory -Path $recoderLogDir -Force | Out-Null
+}}
+if (-not $env:RECODER_TRANSCRIPT_ACTIVE) {{
+  $env:RECODER_TRANSCRIPT_ACTIVE = '1'
+  try {{
+    Start-Transcript -Path $recoderLogPath -Append -ErrorAction SilentlyContinue | Out-Null
+  }} catch {{
+  }}
+}}
+# <<< recoder-transcript <<<
+"""
+
+
+def _windows_profile_paths() -> list[str]:
+    documents = os.path.join(os.path.expanduser('~'), 'Documents')
+    return [
+        os.path.join(documents, 'PowerShell', 'profile.ps1'),
+        os.path.join(documents, 'WindowsPowerShell', 'profile.ps1'),
+    ]
+
+
+def _setup_windows_terminal_logging() -> str:
+    """Install an idempotent PowerShell profile hook for future terminal sessions."""
+    raw_log_path = os.getenv('TERMINAL_LOG_PATH', DEFAULT_TERMINAL_LOG_PATH).strip()
+    log_path = os.path.abspath(os.path.expanduser(raw_log_path or DEFAULT_TERMINAL_LOG_PATH))
+
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        open(log_path, 'a', encoding='utf-8').close()
+    except Exception:
+        pass
+
+    block = _powershell_profile_block(log_path)
+    inserted = False
+    touched = False
+
+    for profile_path in _windows_profile_paths():
+        try:
+            os.makedirs(os.path.dirname(profile_path), exist_ok=True)
+            content = ''
+            if os.path.exists(profile_path):
+                with open(profile_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+
+            if _POWERSHELL_PROFILE_MARKER in content:
+                touched = True
+                continue
+
+            with open(profile_path, 'a', encoding='utf-8') as f:
+                f.write('\n' + block)
+            inserted = True
+            touched = True
+            print(f'[ReCoder] PowerShell 자동 로그 캡처 hook을 추가했습니다: {profile_path}')
+        except Exception as e:
+            print(f'[ReCoder] PowerShell 프로필 설정 실패 ({profile_path}): {e}')
+
+    if inserted:
+        return 'inserted'
+    if touched:
+        return 'already_set'
+    return 'skipped'
+
 
 def setup_terminal_logging() -> str:
     """
-    macOS / Linux에서 터미널 출력을 ~/.ai_assistant/terminal.log로 파이핑하는
-    shell 함수(logterm)를 ~/.zshrc 또는 ~/.bashrc에 자동으로 삽입합니다.
+    터미널 출력을 ~/.ai_assistant/terminal.log로 자동 기록하도록 설정합니다.
+    Windows는 PowerShell profile hook, macOS/Linux는 shell 함수(logterm)를 삽입합니다.
 
     Returns:
         'already_set'  — 이미 설정되어 있음
         'inserted'     — 새로 삽입됨
-        'skipped'      — Windows이거나 오류 발생
+        'skipped'      — 오류 발생
     """
     if sys.platform == 'win32':
-        return 'skipped'
+        return _setup_windows_terminal_logging()
 
     # 삽입 대상 파일 결정 (zsh 우선)
     shell = os.environ.get('SHELL', '')
@@ -222,7 +295,7 @@ def show_setup_window_cli() -> None:
         or DEFAULT_TERMINAL_LOG_PATH
     )
     auto_start_capture = (
-        existing_env.get('AUTO_START_TERMINAL_CAPTURE', '0').strip() or '0'
+        existing_env.get('AUTO_START_TERMINAL_CAPTURE', '1').strip() or '1'
     )
 
     # 서버 주소
@@ -278,7 +351,7 @@ def show_setup_window_cli() -> None:
     api_ws_url = _derive_ws_url(api_base_url, existing_env.get('API_WS_URL', ''))
     updates: dict[str, str] = {
         'GEMINI_API_KEY': key,
-        'GEMINI_MODEL': 'gemini-3.1-flash-lite-preview',
+        'GEMINI_MODEL': 'gemini-2.0-flash-lite',
         'EMBEDDING_MODEL': 'gemini-embedding-001',
         'API_BASE_URL': api_base_url,
         'API_WS_URL': api_ws_url,
@@ -328,7 +401,7 @@ def show_setup_window() -> None:
         value=existing_env.get('TERMINAL_LOG_PATH', DEFAULT_TERMINAL_LOG_PATH).strip()
         or DEFAULT_TERMINAL_LOG_PATH
     )
-    auto_capture_value = existing_env.get('AUTO_START_TERMINAL_CAPTURE', '0').strip().lower()
+    auto_capture_value = existing_env.get('AUTO_START_TERMINAL_CAPTURE', '1').strip().lower()
     auto_start_capture_var = tk.BooleanVar(
         value=auto_capture_value in {'1', 'true', 'yes', 'on', 'y'}
     )
@@ -350,7 +423,7 @@ def show_setup_window() -> None:
     )
     tk.Checkbutton(
         terminal_frame,
-        text='프로그램 시작 시 자동으로 터미널 로그 캡처 시작 (macOS/Linux)',
+        text='프로그램 시작 시 터미널 로그 자동 캡처 설정',
         variable=auto_start_capture_var,
     ).pack(anchor='w', pady=(8, 0))
 
@@ -479,7 +552,7 @@ def show_setup_window() -> None:
 
         updates: dict[str, str] = {
             'GEMINI_API_KEY': key,
-            'GEMINI_MODEL': 'gemini-3.1-flash-lite-preview',
+            'GEMINI_MODEL': 'gemini-2.0-flash-lite',
             'EMBEDDING_MODEL': 'gemini-embedding-001',
             'API_BASE_URL': api_base_url,
             'API_WS_URL': api_ws_url,

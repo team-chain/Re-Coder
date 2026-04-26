@@ -48,8 +48,10 @@ if __name__ == '__main__':
             print('GEMINI_API_KEY가 설정되지 않아 종료합니다.')
             raise SystemExit(1)
 
-    # macOS/Linux 터미널 로그 캡처 셸 함수 자동 설정
-    if sys.platform != 'win32':
+    # 터미널 로그 캡처 자동 설정.
+    # Windows는 PowerShell profile hook, macOS/Linux는 shell hook을 한 번만 삽입한다.
+    auto_capture = os.getenv('AUTO_START_TERMINAL_CAPTURE', '1').strip().lower()
+    if auto_capture in {'1', 'true', 'yes', 'on', 'y'}:
         from first_run import setup_terminal_logging
         result = setup_terminal_logging()
         if result == 'inserted':

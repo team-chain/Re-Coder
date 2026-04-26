@@ -437,12 +437,6 @@ async def _on_terminal_error_detected(output: str, raw_errors: list[str]) -> Non
     gate = run_gate(output)
     masked_text = gate.text if gate.text else output
 
-    # UIA 루프에서 이미 동일 에러를 처리한 경우 중복 트리거 방지
-    from trigger_detector import _error_fingerprint as _fp
-    fp = _fp(raw_errors)
-    if fp in _uia_recent_error_fps:
-        return
-
     context = ExtractedContext(
         context_id    = uuid.uuid4().hex,
         source        = ContextSource.TERMINAL,
@@ -457,7 +451,7 @@ async def _on_terminal_error_detected(output: str, raw_errors: list[str]) -> Non
 
     trigger, score, _ = should_trigger(
         errors          = raw_errors,
-        new_commands    = [],
+        new_commands    = ["terminal_output"],
         text_changed    = True,
         window_switched = False,
         uia_failure     = False,
@@ -466,6 +460,7 @@ async def _on_terminal_error_detected(output: str, raw_errors: list[str]) -> Non
     if not trigger:
         return
 
+    print(f'[monitor] 터미널 에러 감지: {raw_errors[:3]}')
     event = _build_agent_event(masked_text, raw_errors, context.context_id, score)
     await _post_agent_event(event)
 

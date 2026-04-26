@@ -41,6 +41,8 @@ _HIGH_WEIGHT_ERRORS = [
         r'\bKeyError\b',
         r'\bIndexError\b',
         r'\bRuntimeError\b',
+        r'\b\w+Error\b',
+        r'\b\w+Exception\b',
         r'No module named',
         # JavaScript / Node / TypeScript
         r'\bReferenceError\b',
