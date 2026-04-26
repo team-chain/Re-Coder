@@ -172,11 +172,28 @@ async def propose_patch(body: ProposeRequest, _=Depends(_verify_token)):
     """Gemini Flash 호출 → PatchProposal 생성."""
     global _current_patch, _orchestrator_state
 
+    # 클라이언트가 error_text 를 비워 보내면 마지막으로 감지된 AgentEvent 에서 보충.
+    # widget.py 에서 빈 문자열로 호출하던 옛 동작을 안전하게 흡수한다.
+    error_text = (body.error_text or "").strip()
+    if not error_text and _current_event is not None:
+        error_text = (
+            _current_event.error_text
+            or "\n".join(_current_event.raw_errors or [])
+            or _current_event.summary
+            or ""
+        ).strip()
+
+    if not error_text:
+        raise HTTPException(
+            status_code=400,
+            detail="에러 텍스트가 없습니다. 에러 감지 직후에 다시 시도해주세요.",
+        )
+
     from code_agent import generate_patch_proposal
     try:
         proposal = await asyncio.to_thread(
             generate_patch_proposal,
-            body.error_text,
+            error_text,
             body.related_files,
         )
     except Exception as e:
@@ -312,10 +329,14 @@ async def chat(body: ChatRequest, _=Depends(_verify_token)):
     try:
         from google import genai
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        # google-genai 1.x SDK 는 키워드 인자만 받는다 (model=, contents=).
+        # asyncio.to_thread 는 위치 인자만 전달하므로 lambda 로 감싼다.
         response = await asyncio.to_thread(
-            client.models.generate_content,
-            os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
-            prompt,
+            lambda: client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
         )
         answer = (response.text or "").strip()
     except Exception as e:
