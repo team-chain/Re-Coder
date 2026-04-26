@@ -31,6 +31,7 @@ class EventType(str, Enum):
     TASK_CHANGE    = "task_change"
     USER_QUESTION  = "user_question"
     TERMINAL_ERROR = "terminal_error"
+    RESOLVED       = "resolved"
 
 class OrchestratorState(str, Enum):
     IDLE                 = "IDLE"
@@ -49,6 +50,8 @@ class UserAction(str, Enum):
     SEARCH      = "search"
     IGNORE      = "ignore"
     DOCKERFILE  = "generate_dockerfile"
+    DOCKER_COMPOSE = "generate_docker_compose"
+    GITHUB_ACTIONS = "generate_github_actions"
 
 class RiskLevel(str, Enum):
     LOW    = "low"

@@ -17,6 +17,7 @@ from pathlib import Path
 from schemas import FilePatch, PatchProposal, RiskLevel
 
 BACKUP_DIR = Path.home() / '.recoder' / 'backups'
+_LAST_APPLY_BACKUPS: dict[str, list[dict]] = {}
 
 # 재귀 탐색 시 건너뛸 디렉터리
 _SKIP_DIRS = {
@@ -665,12 +666,25 @@ def apply_patch_proposal(proposal: PatchProposal) -> list[dict]:
     base_sha256 검증 → 백업 생성 → patch 적용.
     Returns: 파일별 적용 결과 목록
     """
-    session_id = uuid.uuid4().hex[:8]
     results = []
     root = _project_root()
+    backup_records: list[dict] = []
 
     for patch in proposal.patches:
         fp = _resolve_patch_path(patch.file, root)
+        try:
+            resolved_fp = fp.resolve()
+            resolved_root = root.resolve()
+            if resolved_root != resolved_fp and resolved_root not in resolved_fp.parents:
+                results.append({
+                    "file": patch.file,
+                    "status": "outside_project",
+                    "message": "Patch target is outside the project root.",
+                })
+                continue
+        except OSError as e:
+            results.append({"file": patch.file, "status": "path_error", "message": str(e)})
+            continue
 
         if not patch.unified_diff.strip():
             results.append({
@@ -692,31 +706,50 @@ def apply_patch_proposal(proposal: PatchProposal) -> list[dict]:
                 continue
 
         # 백업 생성
+        backup_path = None
         if fp.exists():
-            backup_dir = BACKUP_DIR / session_id
+            backup_dir = root / ".recoder" / "backups" / proposal.proposal_id
             backup_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_path = backup_dir / f"{fp.name}.{ts}.bak"
             backup_path.write_bytes(fp.read_bytes())
-            _ensure_gitignore_recoder()
+            _ensure_gitignore_recoder(root)
 
         # diff 적용
         try:
-            original_lines = fp.read_text(encoding='utf-8').splitlines(keepends=True) if fp.exists() else []
-            patched = _apply_unified_diff(original_lines, patch.unified_diff)
+            original_text = fp.read_text(encoding='utf-8') if fp.exists() else ""
+            patched_text = _apply_unified_diff(original_text, patch.unified_diff)
             fp.parent.mkdir(parents=True, exist_ok=True)
-            fp.write_text("".join(patched), encoding='utf-8')
-            results.append({"file": patch.file, "status": "ok", "message": "적용 완료"})
+            fp.write_text(patched_text, encoding='utf-8')
+            validation = _validate_changed_file(fp)
+            if backup_path is not None:
+                backup_records.append({
+                    "file": patch.file,
+                    "target_path": str(fp),
+                    "backup_path": str(backup_path),
+                })
+            results.append({
+                "file": patch.file,
+                "status": "ok",
+                "message": "Patch applied.",
+                "validation": validation,
+                "backup_path": str(backup_path) if backup_path else "",
+            })
         except Exception as e:
+            if backup_path and backup_path.exists():
+                fp.write_bytes(backup_path.read_bytes())
             results.append({"file": patch.file, "status": "error", "message": str(e)})
+
+    if backup_records:
+        _LAST_APPLY_BACKUPS[proposal.proposal_id] = backup_records
 
     return results
 
 
-def _apply_unified_diff(original_lines: list[str], diff_text: str) -> list[str]:
-    """unified diff를 원본에 적용해 결과 라인 목록 반환."""
-    # difflib.restore는 복잡하므로 간단한 파서 사용
-    result = list(original_lines)
+def _apply_unified_diff(original_text: str, diff_text: str) -> str:
+    """Apply a unified diff with context validation."""
+    result = original_text.splitlines()
+    original_had_trailing_newline = original_text.endswith(("\n", "\r"))
     lines = diff_text.splitlines()
 
     i = 0
@@ -726,41 +759,107 @@ def _apply_unified_diff(original_lines: list[str], diff_text: str) -> list[str]:
         if line.startswith('@@'):
             # @@ -start,count +start,count @@
             m = re.match(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
-            if m:
-                orig_start = int(m.group(1)) - 1 + offset
-                i += 1
-                removes: list[int] = []
-                adds: list[str]    = []
-                pos = orig_start
-                while i < len(lines) and not lines[i].startswith('@@'):
-                    dl = lines[i]
-                    if dl.startswith('-'):
-                        removes.append(pos)
-                        pos += 1
-                    elif dl.startswith('+'):
-                        adds.append(dl[1:] + ('\n' if not dl[1:].endswith('\n') else ''))
-                    else:
-                        pos += 1
+            if not m:
+                raise ValueError(f"Invalid hunk header: {line}")
+
+            old_start = int(m.group(1))
+            pos = max(old_start - 1, 0) + offset
+            i += 1
+
+            while i < len(lines) and not lines[i].startswith('@@'):
+                dl = lines[i]
+                if dl.startswith('\\ No newline at end of file'):
                     i += 1
-                # 삭제 (역순)
-                for idx in sorted(removes, reverse=True):
-                    if 0 <= idx < len(result):
-                        result.pop(idx)
-                        offset -= 1
-                # 삽입
-                insert_at = orig_start
-                for add_line in adds:
-                    result.insert(insert_at, add_line)
-                    insert_at += 1
+                    continue
+
+                marker = dl[:1]
+                value = dl[1:] if marker in {' ', '-', '+'} else dl
+
+                if marker == ' ':
+                    _expect_line(result, pos, value, "context")
+                    pos += 1
+                elif marker == '-':
+                    _expect_line(result, pos, value, "removal")
+                    result.pop(pos)
+                    offset -= 1
+                elif marker == '+':
+                    result.insert(pos, value)
+                    pos += 1
                     offset += 1
+                else:
+                    _expect_line(result, pos, value, "context")
+                    pos += 1
+                i += 1
         else:
             i += 1
 
-    return result
+    if not result:
+        return ""
+    text = "\n".join(result)
+    if original_had_trailing_newline or _diff_adds_trailing_newline(diff_text):
+        text += "\n"
+    return text
 
 
-def _ensure_gitignore_recoder() -> None:
-    gi = Path('.gitignore')
+def _expect_line(lines: list[str], index: int, expected: str, kind: str) -> None:
+    if index >= len(lines):
+        raise ValueError(f"Diff {kind} line is past end of file: {expected!r}")
+    actual = lines[index]
+    if actual != expected:
+        raise ValueError(
+            f"Diff {kind} mismatch at line {index + 1}: expected {expected!r}, got {actual!r}"
+        )
+
+
+def _diff_adds_trailing_newline(diff_text: str) -> bool:
+    stripped = diff_text.rstrip("\n\r")
+    return bool(stripped) and not stripped.endswith("\\ No newline at end of file")
+
+
+def _validate_changed_file(path: Path) -> str:
+    if path.suffix.lower() != ".py":
+        return "unknown"
+    try:
+        source = path.read_text(encoding="utf-8")
+        compile(source, str(path), "exec")
+        return "syntax_ok"
+    except SyntaxError as e:
+        return f"syntax_error:{e.lineno}:{e.msg}"
+
+
+def rollback_patch_proposal(proposal: PatchProposal) -> list[dict]:
+    """Restore files from the most recent backups created for a proposal."""
+    records = _LAST_APPLY_BACKUPS.get(proposal.proposal_id, [])
+    if not records:
+        return [{
+            "proposal_id": proposal.proposal_id,
+            "status": "no_backup",
+            "message": "No backup is available for this proposal.",
+        }]
+
+    results: list[dict] = []
+    for record in records:
+        target = Path(record["target_path"])
+        backup = Path(record["backup_path"])
+        if not backup.exists():
+            results.append({
+                "file": record.get("file", str(target)),
+                "status": "missing_backup",
+                "message": str(backup),
+            })
+            continue
+        target.write_bytes(backup.read_bytes())
+        results.append({
+            "file": record.get("file", str(target)),
+            "status": "ok",
+            "message": "Rollback complete.",
+        })
+    return results
+
+
+def _ensure_gitignore_recoder(root: Path | None = None) -> None:
+    root = root or _project_root()
+    gi = root / '.gitignore'
     marker = '.recoder/'
     if gi.exists():
         content = gi.read_text(encoding='utf-8')
