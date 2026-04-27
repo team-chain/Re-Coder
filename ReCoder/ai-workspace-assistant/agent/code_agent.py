@@ -110,8 +110,15 @@ def _project_root() -> Path:
         if p.exists() and p.is_dir():
             return p
 
-    markers = ('.git', 'pyproject.toml', 'package.json', 'go.mod', 'Cargo.toml')
     cwd = Path.cwd()
+    local_markers = (
+        'pyproject.toml', 'package.json', 'requirements.txt',
+        'main.py', 'app.py', 'go.mod', 'Cargo.toml',
+    )
+    if any((cwd / m).exists() for m in local_markers):
+        return cwd
+
+    markers = ('.git', 'pyproject.toml', 'package.json', 'go.mod', 'Cargo.toml')
     for d in [cwd, *cwd.parents]:
         if any((d / m).exists() for m in markers):
             return d

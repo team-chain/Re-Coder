@@ -82,6 +82,8 @@
   .btn-success { background: var(--success);  color: #1a1a1a; }
   .btn-danger  { background: var(--error);    color: white; }
   .btn-ghost   { background: var(--bg-input); color: var(--fg); border: 1px solid var(--border); }
+  .deploy-input { background: var(--bg-input); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 8px 10px; font-size: 13px; min-width: 0; }
+  .deploy-input::placeholder { color: var(--fg-dim); }
 
   /* ── Dockerfile 뷰어 ── */
   .code-viewer { background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px; padding: 14px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 12px; line-height: 1.7; overflow-x: auto; white-space: pre; color: var(--fg); }
@@ -128,6 +130,8 @@
 <div class="tabs">
   <div class="tab active" onclick="switchTab('patch')"  id="tab-patch">코드 수정 <span class="badge" id="badgePatch" style="display:none">1</span></div>
   <div class="tab"        onclick="switchTab('infra')"  id="tab-infra">Dockerfile</div>
+  <div class="tab"        onclick="switchTab('vision')" id="tab-vision">OCR/Vision</div>
+  <div class="tab"        onclick="switchTab('deploy')" id="tab-deploy">AWS 배포</div>
   <div class="tab"        onclick="switchTab('history')"id="tab-history">이벤트 이력</div>
 </div>
 
@@ -136,6 +140,11 @@
 <div class="panel active" id="panel-patch">
   <div id="patchIdle" class="card" style="color:var(--fg-dim); text-align:center; padding:40px;">
     에러가 감지되면 코드 수정안이 여기에 표시됩니다.
+    <div style="margin-top:18px; display:grid; gap:8px; max-width:520px; margin-left:auto; margin-right:auto;">
+      <input id="directFilePath" class="deploy-input" placeholder="수정할 파일 경로 예: demo_bug.py">
+      <input id="directIssueText" class="deploy-input" placeholder="문제 설명 예: NameError가 나지 않게 수정">
+      <button class="btn btn-primary" onclick="requestFilePatch()">파일 직접 수정안 생성</button>
+    </div>
   </div>
 
   <!-- 에러 감지 — 수정안 생성 전 단계 -->
@@ -234,6 +243,44 @@
     </div>
     <div id="infraRunResult" class="code-viewer" style="display:none; margin-top:10px; white-space:pre-wrap;"></div>
   </div>
+</div>
+
+<!-- 패널: OCR/Vision -->
+<div class="panel" id="panel-vision">
+  <div class="card">
+    <div class="card-title">현재 화면 분석</div>
+    <div style="color:var(--fg-dim); font-size:13px; margin-bottom:12px;">
+      버튼을 누를 때만 현재 활성 창을 캡처합니다. 민감 앱으로 판단되면 자동 차단됩니다.
+    </div>
+    <div class="action-row">
+      <button class="btn btn-primary" onclick="analyzeScreen(false)">OCR 스캔</button>
+      <button class="btn btn-success" onclick="analyzeScreen(true)">Vision 포함 분석</button>
+    </div>
+  </div>
+  <div id="visionResult" class="code-viewer" style="display:none; white-space:pre-wrap;"></div>
+</div>
+
+<!-- 패널: AWS 배포 -->
+<div class="panel" id="panel-deploy">
+  <div class="card">
+    <div class="card-title">EC2 Docker 배포</div>
+    <div style="color:var(--fg-dim); font-size:13px; margin-bottom:12px;">
+      기존 EC2에 Docker와 SSH 접속이 준비되어 있어야 합니다.
+    </div>
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:8px;">
+      <input id="awsHost" class="deploy-input" placeholder="EC2 host 또는 IP">
+      <input id="awsUser" class="deploy-input" placeholder="user (예: ec2-user)">
+      <input id="awsKey" class="deploy-input" placeholder="SSH key path">
+      <input id="awsHostPort" class="deploy-input" placeholder="host port (예: 8000)">
+      <input id="awsContainerPort" class="deploy-input" placeholder="container port (예: 8000)">
+      <input id="awsContainerName" class="deploy-input" placeholder="container name">
+    </div>
+    <div class="action-row" style="margin-top:12px;">
+      <button class="btn btn-ghost" onclick="loadAwsDeployStatus()">설정 확인</button>
+      <button class="btn btn-primary" onclick="deployAws()">EC2 배포 실행</button>
+    </div>
+  </div>
+  <div id="deployResult" class="code-viewer" style="display:none; white-space:pre-wrap;"></div>
 </div>
 
 <!-- 패널: 이벤트 이력 -->
@@ -335,6 +382,10 @@ function handleUpdate(data) {
     output.style.display = '';
     output.textContent = formatInfraRun(data.result || {});
   }
+
+  if (type === 'deploy_result') {
+    showDeployResult(data.result || {});
+  }
 }
 
 // ── 에러 감지 표시 ────────────────────────────────────────────────────
@@ -401,6 +452,36 @@ async function requestPatch() {
     document.getElementById('analyzeErrorMsg').textContent  = e.message;
     document.getElementById('analyzeError').style.display   = '';
     console.error('[requestPatch]', e.message);
+  }
+}
+
+async function requestFilePatch() {
+  const filePath = document.getElementById('directFilePath').value.trim();
+  const issueText = document.getElementById('directIssueText').value.trim();
+  if (!filePath) {
+    toast('수정할 파일 경로를 입력하세요.', true);
+    return;
+  }
+  switchTab('patch');
+  document.getElementById('patchIdle').style.display = 'none';
+  document.getElementById('errorDetected').style.display = 'none';
+  document.getElementById('patchProposed').style.display = 'none';
+  document.getElementById('patchDone').style.display = 'none';
+  document.getElementById('patchApplying').style.display = '';
+  try {
+    const r = await fetch('/api/patch/file-propose', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ file_path: filePath, issue_text: issueText }),
+    });
+    if (!r.ok) throw new Error(formatApiError(await r.text()));
+    const proposal = await r.json();
+    showPatchProposal(proposal);
+    toast('파일 수정안 생성 완료');
+  } catch (e) {
+    document.getElementById('patchApplying').style.display = 'none';
+    document.getElementById('patchIdle').style.display = '';
+    toast('파일 수정안 생성 실패: ' + e.message, true);
   }
 }
 
@@ -652,6 +733,10 @@ function formatApiError(text) {
   }
 }
 
+function formatJsonBlock(data) {
+  return JSON.stringify(data, null, 2);
+}
+
 async function openMonitoredTerminal() {
   try {
     const r = await fetch('/api/terminal/open', { method: 'POST', headers: authHeaders() });
@@ -659,6 +744,27 @@ async function openMonitoredTerminal() {
     toast('에러 감지 터미널을 열었습니다.');
   } catch (e) {
     toast('감지 터미널 실행 실패: ' + e.message, true);
+  }
+}
+
+async function analyzeScreen(includeImage) {
+  switchTab('vision');
+  const output = document.getElementById('visionResult');
+  output.style.display = '';
+  output.textContent = includeImage ? 'Vision 분석 중...' : 'OCR 스캔 중...';
+  try {
+    const r = await fetch('/api/vision/analyze', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ include_image: includeImage, create_event: true }),
+    });
+    if (!r.ok) throw new Error(formatApiError(await r.text()));
+    const result = await r.json();
+    output.textContent = formatJsonBlock(result);
+    toast(result.event ? '화면 에러 이벤트를 생성했습니다.' : '화면 분석 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('화면 분석 실패: ' + e.message, true);
   }
 }
 
@@ -684,6 +790,67 @@ async function runInfra(autoSave = false) {
   } catch (e) {
     output.textContent = e.message;
     toast('Docker 실행 실패: ' + e.message, true);
+  }
+}
+
+function deployPayload() {
+  return {
+    host: document.getElementById('awsHost').value.trim(),
+    user: document.getElementById('awsUser').value.trim(),
+    ssh_key_path: document.getElementById('awsKey').value.trim(),
+    host_port: document.getElementById('awsHostPort').value.trim(),
+    container_port: document.getElementById('awsContainerPort').value.trim(),
+    container_name: document.getElementById('awsContainerName').value.trim(),
+  };
+}
+
+function showDeployResult(result) {
+  switchTab('deploy');
+  const output = document.getElementById('deployResult');
+  output.style.display = '';
+  output.textContent = formatJsonBlock(result);
+}
+
+async function loadAwsDeployStatus() {
+  switchTab('deploy');
+  const output = document.getElementById('deployResult');
+  output.style.display = '';
+  output.textContent = 'AWS 배포 설정 확인 중...';
+  try {
+    const r = await fetch('/api/deploy/aws/status', { headers: authHeaders() });
+    if (!r.ok) throw new Error(formatApiError(await r.text()));
+    const status = await r.json();
+    output.textContent = formatJsonBlock(status);
+    document.getElementById('awsHost').value ||= status.host || '';
+    document.getElementById('awsUser').value ||= status.user || '';
+    document.getElementById('awsKey').value ||= status.ssh_key_path || '';
+    document.getElementById('awsHostPort').value ||= status.host_port || '';
+    document.getElementById('awsContainerPort').value ||= status.container_port || '';
+    document.getElementById('awsContainerName').value ||= status.container_name || '';
+  } catch (e) {
+    output.textContent = e.message;
+    toast('AWS 설정 확인 실패: ' + e.message, true);
+  }
+}
+
+async function deployAws() {
+  switchTab('deploy');
+  const output = document.getElementById('deployResult');
+  output.style.display = '';
+  output.textContent = 'EC2 배포 실행 중...';
+  try {
+    const r = await fetch('/api/deploy/aws', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(deployPayload()),
+    });
+    if (!r.ok) throw new Error(formatApiError(await r.text()));
+    const result = await r.json();
+    showDeployResult(result);
+    toast('AWS EC2 배포 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('AWS 배포 실패: ' + e.message, true);
   }
 }
 

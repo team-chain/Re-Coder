@@ -10,12 +10,12 @@ server.py — ReCoder 로컬 FastAPI 대시보드 서버.
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -149,6 +149,38 @@ def _raise_failed_docker_step(step: dict[str, Any]) -> None:
     )
 
 
+def _check_docker_ready(root: Path) -> dict[str, Any]:
+    info = _run_docker_command(["docker", "info", "--format", "{{.ServerVersion}}"], root, timeout=30)
+    if info["returncode"] != 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Docker Desktop 엔진에 연결할 수 없습니다. Docker Desktop을 켠 뒤 `docker ps`가 되는지 확인하세요.",
+                **info,
+            },
+        )
+    return info
+
+
+def _port_available(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex(("127.0.0.1", port)) != 0
+
+
+def _choose_host_port(container_port: str) -> tuple[str, bool]:
+    try:
+        base = int(container_port)
+    except ValueError:
+        return container_port, False
+    if _port_available(base):
+        return str(base), False
+    for candidate in range(base + 1, base + 101):
+        if _port_available(candidate):
+            return str(candidate), True
+    return str(base), True
+
+
 def _ensure_current_infra_saved_if_docker() -> str | None:
     if _current_infra is None:
         return None
@@ -158,7 +190,35 @@ def _ensure_current_infra_saved_if_docker() -> str | None:
     target = _safe_project_path(_current_infra.target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(_current_infra.content, encoding="utf-8")
+    _ensure_dockerignore(_project_root().resolve())
     return str(target)
+
+
+def _ensure_dockerignore(root: Path) -> str | None:
+    dockerignore = root / ".dockerignore"
+    recommended = [
+        ".git",
+        ".recoder",
+        ".env",
+        ".env.*",
+        "__pycache__",
+        "*.pyc",
+        "venv",
+        ".venv",
+        "node_modules",
+        "dist",
+        "build",
+        "output",
+    ]
+    if dockerignore.exists():
+        content = dockerignore.read_text(encoding="utf-8", errors="replace")
+        missing = [line for line in recommended if line not in content.splitlines()]
+        if not missing:
+            return None
+        dockerignore.write_text(content.rstrip() + "\n" + "\n".join(missing) + "\n", encoding="utf-8")
+    else:
+        dockerignore.write_text("\n".join(recommended) + "\n", encoding="utf-8")
+    return str(dockerignore)
 
 
 def _terminal_log_path() -> Path:
@@ -189,14 +249,37 @@ try {{
 }}
 Set-Location -LiteralPath '{str(root).replace("'", "''")}'
 """
-    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-    args = [_powershell_exe(), "-NoExit", "-EncodedCommand", encoded]
+    script_dir = root / ".recoder"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from code_agent import _ensure_gitignore_recoder
+        _ensure_gitignore_recoder(root)
+    except Exception:
+        pass
+    script_path = script_dir / "start_monitored_terminal.ps1"
+    script_path.write_text(script, encoding="utf-8")
+    args = [
+        _powershell_exe(),
+        "-NoExit",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script_path),
+    ]
     creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
     try:
         subprocess.Popen(args, cwd=str(root), creationflags=creationflags)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"모니터링 터미널 실행 실패: {e}")
     return {"status": "ok", "cwd": str(root), "log_path": str(log_path)}
+
+
+def _monitor_paused() -> bool:
+    try:
+        import monitor
+        return monitor.is_paused()
+    except Exception:
+        return False
 
 
 # ── AgentEvent 소비 태스크 ────────────────────────────────────────────
@@ -230,6 +313,18 @@ async def _broadcast(payload: dict) -> None:
 
 
 # ── SSE 엔드포인트 ────────────────────────────────────────────────────
+
+async def _activate_event(event: AgentEvent, message: str = "이벤트가 등록되었습니다.") -> None:
+    global _current_event, _orchestrator_state
+    _current_event = event
+    _orchestrator_state = OrchestratorState.WAITING_USER_ACTION
+    _append_session_event(event.event_type.value, event.summary, raw_errors=event.raw_errors)
+    await _broadcast(OrchestratorUpdate(
+        state=_orchestrator_state,
+        event=event,
+        message=message,
+    ).to_dict())
+
 
 @app.get("/api/updates/stream")
 async def sse_stream(request: Request):
@@ -305,6 +400,7 @@ async def monitor_status():
         "terminal_log_last_write": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stat.st_mtime)) if stat else None,
         "orchestrator_state": _orchestrator_state.value,
         "event_count": len(_session_ref.get("events", [])) if isinstance(_session_ref.get("events", []), list) else 0,
+        "monitor_paused": _monitor_paused(),
     }
 
 
@@ -319,6 +415,11 @@ class ProposeRequest(BaseModel):
     event_id:      str
     error_text:    str
     related_files: list[str] = []
+
+
+class FilePatchRequest(BaseModel):
+    file_path: str
+    issue_text: str = ""
 
 
 class ApplyRequest(BaseModel):
@@ -342,6 +443,135 @@ class ManualEventRequest(BaseModel):
 
 
 # ── Code Agent 연동 ───────────────────────────────────────────────────
+
+class VisionAnalyzeRequest(BaseModel):
+    include_image: bool = False
+    create_event: bool = True
+    user_question: str = ""
+
+
+class AwsDeployRequest(BaseModel):
+    host: str = ""
+    user: str = ""
+    ssh_key_path: str = ""
+    container_port: str = ""
+    host_port: str = ""
+    container_name: str = ""
+    image_name: str = ""
+
+
+@app.post("/api/vision/analyze")
+async def analyze_current_screen(body: VisionAnalyzeRequest, _=Depends(_verify_token)):
+    """Explicit user-approved OCR/Vision analysis of the current screen."""
+    from capture_agent import capture_foreground_window, extract_text_with_ocr
+    from collectors.collect import collect_os_snapshot
+    from collectors.terminal_output import ERROR_PATTERNS, match_patterns
+    from context_gate import run_gate
+
+    capture = await asyncio.to_thread(capture_foreground_window)
+    if capture.blocked or capture.image is None:
+        return {
+            "status": "blocked",
+            "blocked": True,
+            "reason": capture.reason,
+            "app_name": capture.app_name,
+            "window_title": capture.window_title,
+        }
+
+    raw_text = await asyncio.to_thread(extract_text_with_ocr, capture.image)
+    gate = run_gate(raw_text)
+    matches = match_patterns([gate.text or raw_text], ERROR_PATTERNS)
+    result: dict[str, Any] = {
+        "status": "ok",
+        "blocked": False,
+        "app_name": capture.app_name,
+        "window_title": capture.window_title,
+        "ocr_text": gate.text,
+        "quality_score": gate.quality_score,
+        "passed": gate.passed,
+        "raw_errors": matches,
+        "vision": None,
+        "event": None,
+    }
+
+    vision_result: dict[str, Any] = {}
+    if body.include_image:
+        try:
+            from analyzer import analyze_context
+            try:
+                os_snapshot = await asyncio.to_thread(collect_os_snapshot)
+            except Exception:
+                os_snapshot = {
+                    "foreground_processes": [{"name": capture.app_name, "title": capture.window_title}],
+                    "terminal": {"new_commands": [], "recent": []},
+                    "detected_errors": matches,
+                }
+            os_snapshot["detected_errors"] = matches
+            vision_result = await asyncio.to_thread(
+                analyze_context,
+                capture.image,
+                os_snapshot,
+                _session_ref,
+                body.user_question or None,
+            )
+            result["vision"] = vision_result
+        except Exception as e:
+            result["vision_error"] = str(e)
+
+    summary = ""
+    error_text = gate.text or raw_text
+    importance = 70 if matches else 55
+    if vision_result:
+        summary = vision_result.get("error_description") or vision_result.get("summary") or ""
+        error_text = summary or error_text
+        importance = int(vision_result.get("importance_score") or importance)
+    elif matches:
+        summary = (gate.text or raw_text)[:160]
+
+    if body.create_event and (matches or vision_result.get("has_error")):
+        event = AgentEvent(
+            event_id=uuid.uuid4().hex,
+            event_type=EventType.ERROR_DETECTED,
+            summary=(summary or "화면에서 에러가 감지되었습니다.")[:200],
+            contexts=[],
+            importance_score=max(0, min(importance, 100)),
+            suggested_actions=[UserAction.FIX_CODE, UserAction.EXPLAIN, UserAction.IGNORE],
+            created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            raw_errors=matches,
+            error_text=error_text,
+        )
+        await _activate_event(event, "화면 OCR/Vision 분석으로 에러를 감지했습니다.")
+        result["event"] = event.to_dict()
+
+    return result
+
+
+@app.get("/api/deploy/aws/status")
+async def aws_deploy_status(_=Depends(_verify_token)):
+    from deploy_agent import aws_deploy_status
+    return aws_deploy_status(_project_root().resolve())
+
+
+@app.post("/api/deploy/aws")
+async def deploy_aws(body: AwsDeployRequest, _=Depends(_verify_token)):
+    from deploy_agent import deploy_to_ec2
+
+    overrides = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    result = await asyncio.to_thread(deploy_to_ec2, _project_root().resolve(), overrides)
+    _append_session_event(
+        "aws_deploy",
+        "AWS EC2 deploy completed." if result.get("status") == "ok" else "AWS EC2 deploy failed.",
+        result=result,
+    )
+    await _broadcast({
+        "type": "deploy_result",
+        "state": _orchestrator_state.value,
+        "result": result,
+    })
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=500, detail=result)
+    return result
+
 
 @app.post("/api/patch/propose")
 async def propose_patch(body: ProposeRequest, _=Depends(_verify_token)):
@@ -384,6 +614,63 @@ async def propose_patch(body: ProposeRequest, _=Depends(_verify_token)):
         message="코드 수정안이 생성되었습니다. 검토 후 승인해주세요.",
     )
     await _broadcast(update.to_dict())
+    return proposal.to_dict()
+
+
+@app.post("/api/patch/file-propose")
+async def propose_file_patch(body: FilePatchRequest, _=Depends(_verify_token)):
+    """Create a PatchProposal for a user-specified file without requiring terminal output."""
+    global _current_event, _current_patch, _orchestrator_state
+
+    file_path = body.file_path.strip()
+    if not file_path:
+        raise HTTPException(status_code=400, detail="파일 경로가 필요합니다.")
+
+    target = _safe_project_path(file_path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail=f"파일을 찾지 못했습니다: {file_path}")
+
+    try:
+        relative = str(target.resolve().relative_to(_project_root().resolve()))
+    except ValueError:
+        relative = file_path
+
+    issue_text = body.issue_text.strip() or "이 파일에 포함된 문법/런타임 가능 오류를 찾아 최소 수정하세요."
+    error_text = (
+        "사용자가 터미널 실행 없이 파일 직접 수정을 요청했습니다.\n"
+        f"대상 파일: {relative}\n"
+        f"요청 내용: {issue_text}\n"
+        "파일 전체를 덮어쓰지 말고, 문제 해결에 필요한 최소 unified diff만 생성하세요."
+    )
+
+    event = AgentEvent(
+        event_id=uuid.uuid4().hex,
+        event_type=EventType.USER_QUESTION,
+        summary=f"파일 직접 수정 요청: {relative}",
+        contexts=[],
+        importance_score=70,
+        suggested_actions=[UserAction.FIX_CODE, UserAction.IGNORE],
+        created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        raw_errors=[],
+        error_text=error_text,
+    )
+    _current_event = event
+
+    from code_agent import generate_patch_proposal
+    try:
+        proposal = await asyncio.to_thread(generate_patch_proposal, error_text, [relative])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    _current_patch = proposal
+    _orchestrator_state = OrchestratorState.CODE_PATCH_PROPOSED
+    _append_session_event("file_patch_requested", event.summary, target_path=relative)
+    await _broadcast(OrchestratorUpdate(
+        state=_orchestrator_state,
+        event=event,
+        patch_proposal=proposal,
+        message="파일 직접 수정안이 생성되었습니다. 승인하면 실제 파일에 적용됩니다.",
+    ).to_dict())
     return proposal.to_dict()
 
 
@@ -524,12 +811,16 @@ async def save_infra(_=Depends(_verify_token)):
     target = _safe_project_path(_current_infra.target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(_current_infra.content, encoding='utf-8')
+    dockerignore_path = None
+    if _current_infra.target_path in {"Dockerfile", "docker-compose.yml"}:
+        dockerignore_path = _ensure_dockerignore(_project_root().resolve())
     _orchestrator_state = OrchestratorState.INFRA_READY
     _append_session_event(
         "infra_saved",
         f"{_current_infra.target_path} saved.",
         file_type=_current_infra.file_type,
         target_path=_current_infra.target_path,
+        dockerignore_path=dockerignore_path,
     )
 
     await _broadcast(OrchestratorUpdate(
@@ -551,20 +842,26 @@ async def run_infra(body: InfraRunRequest | None = None, _=Depends(_verify_token
             detail="Docker CLI를 찾지 못했습니다. Docker Desktop을 설치하고 다시 실행하세요.",
         )
 
-    saved_path = _ensure_current_infra_saved_if_docker()
+    saved_path = await asyncio.to_thread(_ensure_current_infra_saved_if_docker)
     root = _project_root().resolve()
+    docker_info = await asyncio.to_thread(_check_docker_ready, root)
     compose_path = root / "docker-compose.yml"
     dockerfile_path = root / "Dockerfile"
-    steps: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = [docker_info]
 
     if body.prefer_compose and compose_path.exists():
-        step = _run_docker_command(["docker", "compose", "up", "-d", "--build"], root, timeout=600)
+        step = await asyncio.to_thread(
+            _run_docker_command,
+            ["docker", "compose", "up", "-d", "--build"],
+            root,
+            600,
+        )
         steps.append(step)
         if step["returncode"] != 0:
             _append_session_event("infra_run_failed", "docker compose up failed.", steps=steps)
             _raise_failed_docker_step(step)
 
-        ps = _run_docker_command(["docker", "compose", "ps"], root, timeout=60)
+        ps = await asyncio.to_thread(_run_docker_command, ["docker", "compose", "ps"], root, 60)
         steps.append(ps)
         result = {
             "status": "ok",
@@ -587,20 +884,27 @@ async def run_infra(body: InfraRunRequest | None = None, _=Depends(_verify_token
             meta = {"port": "8000"}
 
         port = str(meta.get("port") or "8000").strip()
+        host_port, port_was_remapped = _choose_host_port(port)
         slug = _docker_slug(root.name)
         image_name = f"recoder-{slug}:latest"
         container_name = f"recoder-{slug}"
 
-        build_step = _run_docker_command(["docker", "build", "-t", image_name, "."], root, timeout=600)
+        build_step = await asyncio.to_thread(
+            _run_docker_command,
+            ["docker", "build", "-t", image_name, "."],
+            root,
+            600,
+        )
         steps.append(build_step)
         if build_step["returncode"] != 0:
             _append_session_event("infra_run_failed", "docker build failed.", steps=steps)
             _raise_failed_docker_step(build_step)
 
-        existing = _run_docker_command(
+        existing = await asyncio.to_thread(
+            _run_docker_command,
             ["docker", "ps", "-aq", "--filter", f"name=^/{container_name}$"],
             root,
-            timeout=60,
+            60,
         )
         steps.append(existing)
         if existing["returncode"] != 0:
@@ -608,7 +912,12 @@ async def run_infra(body: InfraRunRequest | None = None, _=Depends(_verify_token
             _raise_failed_docker_step(existing)
 
         if existing["output"].strip():
-            remove_step = _run_docker_command(["docker", "rm", "-f", container_name], root, timeout=120)
+            remove_step = await asyncio.to_thread(
+                _run_docker_command,
+                ["docker", "rm", "-f", container_name],
+                root,
+                120,
+            )
             steps.append(remove_step)
             if remove_step["returncode"] != 0:
                 _append_session_event("infra_run_failed", "docker rm failed.", steps=steps)
@@ -616,9 +925,9 @@ async def run_infra(body: InfraRunRequest | None = None, _=Depends(_verify_token
 
         run_args = ["docker", "run", "-d", "--name", container_name]
         if port:
-            run_args.extend(["-p", f"{port}:{port}"])
+            run_args.extend(["-p", f"{host_port}:{port}"])
         run_args.append(image_name)
-        run_step = _run_docker_command(run_args, root, timeout=120)
+        run_step = await asyncio.to_thread(_run_docker_command, run_args, root, 120)
         steps.append(run_step)
         if run_step["returncode"] != 0:
             _append_session_event("infra_run_failed", "docker run failed.", steps=steps)
@@ -632,7 +941,9 @@ async def run_infra(body: InfraRunRequest | None = None, _=Depends(_verify_token
             "image": image_name,
             "container": container_name,
             "port": port,
-            "url": f"http://127.0.0.1:{port}" if port else "",
+            "host_port": host_port,
+            "port_was_remapped": port_was_remapped,
+            "url": f"http://127.0.0.1:{host_port}" if host_port else "",
             "steps": steps,
         }
 
@@ -672,10 +983,26 @@ async def user_action(body: ActionRequest, _=Depends(_verify_token)):
             message="다시 시도할 수 있습니다.",
         ).to_dict())
     elif action == "pause":
+        try:
+            import monitor
+            monitor.set_paused(True)
+        except Exception:
+            pass
         _append_session_event("pause", "Monitoring pause requested.")
         await _broadcast(OrchestratorUpdate(
             state=_orchestrator_state,
             message="모니터링 일시정지는 기록되었습니다.",
+        ).to_dict())
+    elif action == "resume":
+        try:
+            import monitor
+            monitor.set_paused(False)
+        except Exception:
+            pass
+        _append_session_event("resume", "Monitoring resumed.")
+        await _broadcast(OrchestratorUpdate(
+            state=_orchestrator_state,
+            message="모니터링이 재개되었습니다.",
         ).to_dict())
     elif action == "rollback":
         if _current_patch is None:
