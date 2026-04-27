@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Awaitable, Callable, Iterable
 
 
-DEFAULT_TERMINAL_LOG_PATH = '~/.ai_assistant/terminal.log'
+DEFAULT_TERMINAL_LOG_PATH = '~/.ai_assistant/terminal-live.log'
+DEFAULT_TERMINAL_TRANSCRIPT_LOG_PATH = '~/.ai_assistant/terminal-transcript.log'
 TERMINAL_LOG_POLL_INTERVAL = 1.0
 _LOOKBACK_CHARS = 4096
 _STARTUP_LOOKBACK_CHARS = int(os.getenv('RECODER_TERMINAL_STARTUP_LOOKBACK_CHARS', '65536'))
@@ -110,6 +111,14 @@ def get_terminal_log_path() -> Path:
     return Path(raw_path or DEFAULT_TERMINAL_LOG_PATH).expanduser()
 
 
+def get_terminal_transcript_log_path() -> Path:
+    raw_path = os.getenv(
+        'TERMINAL_TRANSCRIPT_LOG_PATH',
+        DEFAULT_TERMINAL_TRANSCRIPT_LOG_PATH,
+    ).strip()
+    return Path(raw_path or DEFAULT_TERMINAL_TRANSCRIPT_LOG_PATH).expanduser()
+
+
 def match_patterns(texts: Iterable[str], patterns: list[re.Pattern[str]]) -> list[str]:
     """texts에서 patterns에 매칭되는 문자열을 중복 없이 반환한다."""
     matched: list[str] = []
@@ -145,14 +154,14 @@ def _match_patterns_since(
 def _read_new_output(path: Path, offset: int) -> tuple[str, int]:
     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
         f.seek(offset)
-        text = f.read()
+        text = f.read().replace('\x00', '')
         return text, f.tell()
 
 
 def _read_tail(path: Path, max_chars: int) -> str:
     if max_chars <= 0:
         return ''
-    return path.read_text(encoding='utf-8', errors='ignore')[-max_chars:]
+    return path.read_text(encoding='utf-8', errors='ignore').replace('\x00', '')[-max_chars:]
 
 
 async def _invoke_callback(callback: Callable[..., object], *args) -> None:
@@ -168,6 +177,7 @@ async def watch_terminal_output(
     on_new_output: Callable[[str], None | Awaitable[None]],
     on_error_detected: Callable[[str, list[str]], None | Awaitable[None]],
     on_resolved: Callable[[str, list[str]], None | Awaitable[None]] | None = None,
+    path_override: str | Path | None = None,
 ) -> None:
     """
     터미널 로그 파일을 감시하여 새 출력, 에러, 해결을 콜백으로 전달한다.
@@ -181,7 +191,7 @@ async def watch_terminal_output(
             첫 번째 인자는 출력 블록,
             두 번째 인자는 매칭된 해결 패턴 리스트.
     """
-    path = get_terminal_log_path()
+    path = Path(path_override).expanduser() if path_override else get_terminal_log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:

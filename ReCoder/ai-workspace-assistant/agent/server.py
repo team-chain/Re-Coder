@@ -222,8 +222,8 @@ def _ensure_dockerignore(root: Path) -> str | None:
 
 
 def _terminal_log_path() -> Path:
-    raw = os.getenv("TERMINAL_LOG_PATH", "~/.ai_assistant/terminal.log").strip()
-    return Path(raw or "~/.ai_assistant/terminal.log").expanduser()
+    raw = os.getenv("TERMINAL_LOG_PATH", "~/.ai_assistant/terminal-live.log").strip()
+    return Path(raw or "~/.ai_assistant/terminal-live.log").expanduser()
 
 
 def _powershell_exe() -> str:
@@ -241,13 +241,47 @@ $ErrorActionPreference = 'Continue'
 $recoderLogPath = '{str(log_path).replace("'", "''")}'
 $recoderLogDir = Split-Path -Parent $recoderLogPath
 New-Item -ItemType Directory -Path $recoderLogDir -Force | Out-Null
+$recoderTranscriptPath = Join-Path $recoderLogDir 'terminal-transcript.log'
 try {{
-  Start-Transcript -Path $recoderLogPath -Append | Out-Null
-  Write-Host '[ReCoder] 이 터미널은 에러 자동 감지 대상입니다.'
+  Start-Transcript -Path $recoderTranscriptPath -Append | Out-Null
+  Write-Host '[ReCoder] Monitored terminal is active.'
 }} catch {{
-  Write-Host '[ReCoder] transcript 시작 실패:' $_
+  Write-Host '[ReCoder] Failed to start transcript:' $_
+}}
+try {{
+  Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:{PORT}/api/token' -TimeoutSec 2 | Out-Null
+  Write-Host '[ReCoder] Local server is running. Errors printed here can be detected.'
+}} catch {{
+  Write-Host '[ReCoder] WARNING: Local server is not reachable. Start python main.py first.'
 }}
 Set-Location -LiteralPath '{str(root).replace("'", "''")}'
+function Invoke-ReCoderLoggedApplication {{
+  param(
+    [Parameter(Mandatory=$true)][string]$Name,
+    [Parameter(ValueFromRemainingArguments=$true)][object[]]$CommandArgs
+  )
+  $cmd = Get-Command "$Name.exe" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $cmd) {{
+    $cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  }}
+  if (-not $cmd) {{
+    Write-Host "[ReCoder] Command not found: $Name"
+    return
+  }}
+  & $cmd.Source @CommandArgs 2>&1 | ForEach-Object {{
+    $line = $_
+    Write-Output $line
+    Add-Content -Path $recoderLogPath -Value $line -Encoding UTF8
+  }}
+  $global:LASTEXITCODE = $LASTEXITCODE
+}}
+function python {{ Invoke-ReCoderLoggedApplication 'python' @args }}
+function py {{ Invoke-ReCoderLoggedApplication 'py' @args }}
+function node {{ Invoke-ReCoderLoggedApplication 'node' @args }}
+function npm {{ Invoke-ReCoderLoggedApplication 'npm' @args }}
+function pytest {{ Invoke-ReCoderLoggedApplication 'pytest' @args }}
+function uvicorn {{ Invoke-ReCoderLoggedApplication 'uvicorn' @args }}
+Write-Host '[ReCoder] Live command capture enabled for python, py, node, npm, pytest, uvicorn.'
 """
     script_dir = root / ".recoder"
     script_dir.mkdir(parents=True, exist_ok=True)
@@ -257,9 +291,10 @@ Set-Location -LiteralPath '{str(root).replace("'", "''")}'
     except Exception:
         pass
     script_path = script_dir / "start_monitored_terminal.ps1"
-    script_path.write_text(script, encoding="utf-8")
+    script_path.write_text(script, encoding="utf-8-sig")
     args = [
         _powershell_exe(),
+        "-NoProfile",
         "-NoExit",
         "-ExecutionPolicy",
         "Bypass",
