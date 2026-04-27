@@ -84,6 +84,15 @@
   .btn-ghost   { background: var(--bg-input); color: var(--fg); border: 1px solid var(--border); }
   .deploy-input { background: var(--bg-input); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 8px 10px; font-size: 13px; min-width: 0; }
   .deploy-input::placeholder { color: var(--fg-dim); }
+  .github-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:8px; }
+  .github-status { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:8px; font-size:12px; color:var(--fg-dim); }
+  .github-status strong { display:block; color:var(--fg); font-size:13px; margin-top:2px; word-break:break-all; }
+  .file-list { display:flex; flex-direction:column; gap:6px; max-height:260px; overflow:auto; }
+  .file-row { display:flex; align-items:center; gap:8px; padding:8px 10px; background:var(--bg-input); border:1px solid var(--border); border-radius:5px; }
+  .file-row input { flex-shrink:0; }
+  .file-path { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:'Consolas','Fira Code',monospace; font-size:12px; }
+  .file-status { color:var(--warn); font-family:'Consolas','Fira Code',monospace; font-size:11px; }
+  .file-sensitive { color:var(--error); font-size:11px; }
 
   /* ── Dockerfile 뷰어 ── */
   .code-viewer { background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px; padding: 14px; font-family: 'Consolas', 'Fira Code', monospace; font-size: 12px; line-height: 1.7; overflow-x: auto; white-space: pre; color: var(--fg); }
@@ -132,6 +141,7 @@
   <div class="tab"        onclick="switchTab('infra')"  id="tab-infra">Dockerfile</div>
   <div class="tab"        onclick="switchTab('vision')" id="tab-vision">OCR/Vision</div>
   <div class="tab"        onclick="switchTab('deploy')" id="tab-deploy">AWS 배포</div>
+  <div class="tab"        onclick="switchTab('github')" id="tab-github">GitHub</div>
   <div class="tab"        onclick="switchTab('history')"id="tab-history">이벤트 이력</div>
 </div>
 
@@ -157,6 +167,7 @@
       </div>
       <div id="errorSummary" style="font-size:13px; color:var(--fg); white-space:pre-wrap; word-break:break-all;"></div>
       <div id="errorRawList" style="margin-top:8px;"></div>
+      <div id="detectedFilesBox" style="display:none; margin-top:10px; font-size:12px; color:var(--fg-dim);"></div>
     </div>
     <div class="action-row">
       <button class="btn btn-primary" onclick="requestPatch()">🔧 AI 수정안 생성</button>
@@ -283,6 +294,61 @@
   <div id="deployResult" class="code-viewer" style="display:none; white-space:pre-wrap;"></div>
 </div>
 
+<!-- 패널: GitHub -->
+<div class="panel" id="panel-github">
+  <div class="card">
+    <div class="card-title">GitHub 연결</div>
+    <div id="githubStatus" class="github-status">
+      <div>Git<strong>-</strong></div>
+      <div>GitHub CLI<strong>-</strong></div>
+      <div>로그인<strong>-</strong></div>
+      <div>브랜치<strong>-</strong></div>
+      <div>Remote<strong>-</strong></div>
+    </div>
+    <div class="action-row" style="margin-top:12px;">
+      <button class="btn btn-ghost" onclick="loadGitHubStatus()">상태 새로고침</button>
+      <button class="btn btn-ghost" onclick="initGitRepository()">Git 초기화</button>
+      <button class="btn btn-primary" onclick="openGitHubLogin()">GitHub 로그인 열기</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">레포지토리 / 브랜치</div>
+    <div class="github-grid">
+      <input id="githubRepoName" class="deploy-input" placeholder="repo 또는 owner/repo">
+      <select id="githubVisibility" class="deploy-input">
+        <option value="private">private</option>
+        <option value="public">public</option>
+        <option value="internal">internal</option>
+      </select>
+      <input id="githubRepoDescription" class="deploy-input" placeholder="description">
+      <input id="githubBranchName" class="deploy-input" placeholder="branch name">
+    </div>
+    <div class="action-row" style="margin-top:12px;">
+      <button class="btn btn-primary" onclick="createGitHubRepo()">레포 생성</button>
+      <button class="btn btn-ghost" onclick="createGitHubBranch()">브랜치 생성/전환</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">변경 파일</div>
+    <div id="githubFiles" class="file-list" style="color:var(--fg-dim);">상태를 불러오세요.</div>
+    <div class="github-grid" style="margin-top:12px;">
+      <input id="githubCommitMessage" class="deploy-input" placeholder="commit message">
+      <input id="githubPushBranch" class="deploy-input" placeholder="push branch (비우면 현재 브랜치)">
+    </div>
+    <div class="action-row" style="margin-top:12px;">
+      <button class="btn btn-ghost" onclick="gitPreviewDiff()">diff 미리보기</button>
+      <button class="btn btn-ghost" onclick="gitAddSelected()">선택 파일 add</button>
+      <button class="btn btn-success" onclick="gitCommit()">commit</button>
+      <button class="btn btn-primary" onclick="gitPush()">push</button>
+      <button class="btn btn-primary" onclick="gitCommitPush()">add + commit + push</button>
+    </div>
+  </div>
+
+  <div id="githubResult" class="code-viewer" style="display:none; white-space:pre-wrap;"></div>
+</div>
+
 <!-- 패널: 이벤트 이력 -->
 <div class="panel" id="panel-history">
   <div class="card">
@@ -316,6 +382,9 @@ function authHeaders() {
 let currentProposalId = null;
 let lastAppliedProposalId = null;
 let currentInfraId    = null;
+let currentGitHubStatus = null;
+let githubStatusLoading = false;
+let detectedPatchFiles = [];
 const events = [];
 
 // ── SSE 연결 ─────────────────────────────────────────────────────────
@@ -386,6 +455,10 @@ function handleUpdate(data) {
   if (type === 'deploy_result') {
     showDeployResult(data.result || {});
   }
+
+  if (type === 'github_result') {
+    showGitHubResult(data.result || {});
+  }
 }
 
 // ── 에러 감지 표시 ────────────────────────────────────────────────────
@@ -409,6 +482,12 @@ function showErrorDetected(event) {
     rawEl.appendChild(span);
   });
 
+  detectedPatchFiles = [];
+  const detectedBox = document.getElementById('detectedFilesBox');
+  detectedBox.style.display = '';
+  detectedBox.textContent = 'AI가 수정 대상 파일을 찾는 중...';
+  suggestPatchFiles(event);
+
   document.getElementById('analyzeStatus').style.display = 'none';
   document.getElementById('errorDetected').style.display = 'flex';
 
@@ -422,6 +501,32 @@ function hideErrorDetected() {
   document.getElementById('badgePatch').style.display    = 'none';
 }
 
+async function suggestPatchFiles(event) {
+  const detectedBox = document.getElementById('detectedFilesBox');
+  try {
+    const r = await fetch('/api/patch/suggest-files', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        error_text: event.error_text || event.summary || '',
+        related_files: [],
+      }),
+    });
+    if (!r.ok) throw new Error(formatApiError(await r.text()));
+    const data = await r.json();
+    detectedPatchFiles = data.files || [];
+    if (detectedPatchFiles.length) {
+      document.getElementById('directFilePath').value = detectedPatchFiles[0];
+      document.getElementById('directIssueText').value = event.summary || '';
+      detectedBox.innerHTML = '<strong>AI 감지 파일</strong>: ' + detectedPatchFiles.map(esc).join(', ');
+    } else {
+      detectedBox.textContent = 'AI가 특정 파일을 확정하지 못했습니다. 수정안 생성 시 프로젝트 전체 컨텍스트로 다시 분석합니다.';
+    }
+  } catch (e) {
+    detectedBox.textContent = '파일 자동 감지 실패: ' + e.message;
+  }
+}
+
 async function requestPatch() {
   if (!_currentEvent) return;
 
@@ -430,13 +535,15 @@ async function requestPatch() {
   document.querySelector('#errorDetected .action-row').style.display = 'none';
 
   try {
+    const manualFile = document.getElementById('directFilePath').value.trim();
+    const relatedFiles = detectedPatchFiles.length ? detectedPatchFiles : (manualFile ? [manualFile] : []);
     const r = await fetch('/api/patch/propose', {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify({
         event_id:      _currentEvent.event_id,
         error_text:    _currentEvent.error_text || _currentEvent.summary || '',
-        related_files: [],
+        related_files: relatedFiles,
       }),
     });
     if (!r.ok) {
@@ -529,6 +636,7 @@ function switchTab(name) {
   document.getElementById('tab-' + name).classList.add('active');
   document.getElementById('panel-' + name).classList.add('active');
   if (name === 'patch') document.getElementById('badgePatch').style.display = 'none';
+  if (name === 'github' && !currentGitHubStatus && !githubStatusLoading) loadGitHubStatus();
 }
 
 // ── Diff 렌더러 ───────────────────────────────────────────────────────
@@ -562,7 +670,7 @@ function renderDiff(unifiedDiff) {
 }
 
 function esc(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 // ── Patch 표시 ────────────────────────────────────────────────────────
@@ -851,6 +959,270 @@ async function deployAws() {
   } catch (e) {
     output.textContent = e.message;
     toast('AWS 배포 실패: ' + e.message, true);
+  }
+}
+
+// ── GitHub 표시 / 실행 ────────────────────────────────────────────────
+function githubOutput() {
+  const output = document.getElementById('githubResult');
+  output.style.display = '';
+  return output;
+}
+
+function renderGitHubStatus(status) {
+  currentGitHubStatus = status || {};
+  const remotes = currentGitHubStatus.remotes || {};
+  const origin = (remotes.origin || []).join('\n') || '-';
+  document.getElementById('githubStatus').innerHTML = `
+    <div>Git<strong>${currentGitHubStatus.git_available ? 'OK' : '없음'}</strong></div>
+    <div>GitHub CLI<strong>${currentGitHubStatus.gh_available ? 'OK' : '없음'}</strong></div>
+    <div>로그인<strong>${currentGitHubStatus.gh_authenticated ? esc(currentGitHubStatus.gh_user || 'OK') : '필요'}</strong></div>
+    <div>브랜치<strong>${esc(currentGitHubStatus.branch || '-')}</strong></div>
+    <div>Remote<strong>${esc(origin)}</strong></div>
+  `;
+
+  const repoName = document.getElementById('githubRepoName');
+  if (!repoName.value && remotes.origin && remotes.origin[0]) {
+    const match = remotes.origin[0].match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/);
+    if (match) repoName.value = match[1];
+  }
+  document.getElementById('githubPushBranch').value ||= currentGitHubStatus.branch || '';
+  renderGitHubFiles(currentGitHubStatus.files || []);
+}
+
+function renderGitHubFiles(files) {
+  const list = document.getElementById('githubFiles');
+  if (!files.length) {
+    list.textContent = '변경 파일이 없습니다.';
+    return;
+  }
+  list.innerHTML = files.map(file => {
+    const disabled = file.sensitive ? 'disabled' : '';
+    const checked = file.sensitive ? '' : 'checked';
+    const sensitive = file.sensitive ? '<span class="file-sensitive">blocked</span>' : '';
+    return `<label class="file-row">
+      <input type="checkbox" class="github-file-check" value="${esc(file.path)}" ${checked} ${disabled}>
+      <span class="file-status">${esc(file.status || '')}</span>
+      <span class="file-path" title="${esc(file.path)}">${esc(file.path)}</span>
+      ${sensitive}
+    </label>`;
+  }).join('');
+}
+
+function selectedGitHubFiles() {
+  return Array.from(document.querySelectorAll('.github-file-check:checked')).map(el => el.value);
+}
+
+function showGitHubResult(result) {
+  const output = githubOutput();
+  output.textContent = formatJsonBlock(result);
+  if (result.state) renderGitHubStatus(result.state);
+}
+
+async function githubRequest(path, options = {}) {
+  const r = await fetch(path, {
+    method: options.method || 'POST',
+    headers: authHeaders(),
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  if (!r.ok) throw new Error(formatApiError(await r.text()));
+  return await r.json();
+}
+
+async function loadGitHubStatus() {
+  githubStatusLoading = true;
+  switchTab('github');
+  const output = githubOutput();
+  output.textContent = 'GitHub 상태 확인 중...';
+  try {
+    const r = await fetch('/api/github/status', { headers: authHeaders() });
+    if (!r.ok) throw new Error(formatApiError(await r.text()));
+    const status = await r.json();
+    renderGitHubStatus(status);
+    output.textContent = formatJsonBlock(status);
+  } catch (e) {
+    output.textContent = e.message;
+    toast('GitHub 상태 확인 실패: ' + e.message, true);
+  } finally {
+    githubStatusLoading = false;
+  }
+}
+
+async function openGitHubLogin() {
+  switchTab('github');
+  const output = githubOutput();
+  output.textContent = 'GitHub CLI 로그인 창을 여는 중...';
+  try {
+    const result = await githubRequest('/api/github/login');
+    showGitHubResult(result);
+    toast('GitHub 로그인 창을 열었습니다.');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('GitHub 로그인 열기 실패: ' + e.message, true);
+  }
+}
+
+async function initGitRepository() {
+  switchTab('github');
+  const output = githubOutput();
+  output.textContent = 'Git 초기화 확인 중...';
+  try {
+    const result = await githubRequest('/api/github/init');
+    showGitHubResult(result);
+    toast('Git 초기화 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('Git 초기화 실패: ' + e.message, true);
+  }
+}
+
+async function createGitHubRepo() {
+  switchTab('github');
+  const output = githubOutput();
+  output.textContent = 'GitHub 레포지토리 생성 중...';
+  try {
+    const result = await githubRequest('/api/github/repo', {
+      body: {
+        name: document.getElementById('githubRepoName').value.trim(),
+        visibility: document.getElementById('githubVisibility').value,
+        description: document.getElementById('githubRepoDescription').value.trim(),
+      },
+    });
+    showGitHubResult(result);
+    toast('GitHub 레포지토리 생성 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('레포 생성 실패: ' + e.message, true);
+  }
+}
+
+async function createGitHubBranch() {
+  switchTab('github');
+  const output = githubOutput();
+  output.textContent = '브랜치 생성/전환 중...';
+  try {
+    const result = await githubRequest('/api/github/branch', {
+      body: { branch: document.getElementById('githubBranchName').value.trim() },
+    });
+    showGitHubResult(result);
+    toast('브랜치 준비 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('브랜치 작업 실패: ' + e.message, true);
+  }
+}
+
+function formatGitDiff(result) {
+  const lines = [];
+  if (result.stat) {
+    lines.push('[unstaged stat]');
+    lines.push(result.stat);
+    lines.push('');
+  }
+  if (result.staged_stat) {
+    lines.push('[staged stat]');
+    lines.push(result.staged_stat);
+    lines.push('');
+  }
+  if (result.untracked && result.untracked.length) {
+    lines.push('[untracked]');
+    result.untracked.forEach(path => lines.push(path));
+    lines.push('');
+  }
+  if (result.staged_diff) {
+    lines.push('[staged diff]');
+    lines.push(result.staged_diff);
+    lines.push('');
+  }
+  if (result.diff) {
+    lines.push('[unstaged diff]');
+    lines.push(result.diff);
+    lines.push('');
+  }
+  return lines.join('\n').trim() || '표시할 diff가 없습니다.';
+}
+
+async function gitPreviewDiff() {
+  switchTab('github');
+  const output = githubOutput();
+  const files = selectedGitHubFiles();
+  output.textContent = 'diff 미리보기 생성 중...';
+  try {
+    const result = await githubRequest('/api/github/diff', { body: { files } });
+    if (result.state) renderGitHubStatus(result.state);
+    output.textContent = formatGitDiff(result);
+    toast('diff 미리보기 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('diff 미리보기 실패: ' + e.message, true);
+  }
+}
+
+async function gitAddSelected() {
+  switchTab('github');
+  const output = githubOutput();
+  const files = selectedGitHubFiles();
+  output.textContent = '선택 파일 add 중...';
+  try {
+    const result = await githubRequest('/api/github/add', { body: { files } });
+    showGitHubResult(result);
+    toast('git add 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('git add 실패: ' + e.message, true);
+  }
+}
+
+async function gitCommit() {
+  switchTab('github');
+  const output = githubOutput();
+  output.textContent = 'commit 중...';
+  try {
+    const result = await githubRequest('/api/github/commit', {
+      body: { message: document.getElementById('githubCommitMessage').value.trim() },
+    });
+    showGitHubResult(result);
+    toast('commit 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('commit 실패: ' + e.message, true);
+  }
+}
+
+async function gitPush() {
+  switchTab('github');
+  const output = githubOutput();
+  output.textContent = 'push 중...';
+  try {
+    const result = await githubRequest('/api/github/push', {
+      body: { branch: document.getElementById('githubPushBranch').value.trim() },
+    });
+    showGitHubResult(result);
+    toast('push 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('push 실패: ' + e.message, true);
+  }
+}
+
+async function gitCommitPush() {
+  switchTab('github');
+  const output = githubOutput();
+  const files = selectedGitHubFiles();
+  output.textContent = 'add + commit + push 실행 중...';
+  try {
+    const result = await githubRequest('/api/github/commit-push', {
+      body: {
+        files,
+        message: document.getElementById('githubCommitMessage').value.trim(),
+        branch: document.getElementById('githubPushBranch').value.trim(),
+      },
+    });
+    showGitHubResult(result);
+    toast('add + commit + push 완료');
+  } catch (e) {
+    output.textContent = e.message;
+    toast('add/commit/push 실패: ' + e.message, true);
   }
 }
 

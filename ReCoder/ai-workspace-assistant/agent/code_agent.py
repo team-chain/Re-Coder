@@ -226,8 +226,18 @@ def _is_server_side_error(error_text: str) -> bool:
 def _explicit_path_hints(error_text: str) -> list[str]:
     """에러 텍스트에 직접 등장하는 소스 파일 경로."""
     paths: list[str] = []
+    suffixes = r'(?:py|js|ts|tsx|jsx|go|rs|java|kt|rb|php|cs|cpp|c|h)'
+
+    # Python traceback: File "C:\project\app.py", line 10, in ...
+    for m in re.finditer(rf'File\s+"([^"]+\.{suffixes})"', error_text):
+        paths.append(m.group(1))
+
+    # Windows absolute paths, including drive letters.
+    for m in re.finditer(rf'([A-Za-z]:[^\s"\']+\.{suffixes})', error_text):
+        paths.append(m.group(1))
+
     for m in re.finditer(
-        r'([A-Za-z_][\w./\\-]*\.(?:py|js|ts|tsx|jsx|go|rs|java|kt|rb|php|cs|cpp|c|h))',
+        rf'([A-Za-z_][\w./\\-]*\.{suffixes})',
         error_text,
     ):
         paths.append(m.group(1))
@@ -339,6 +349,12 @@ def _collect_related_files(hints: list[str], error_text: str = "") -> list[dict]
         _add(fp)
 
     return files
+
+
+def suggest_related_file_paths(error_text: str, related_files: list[str] | None = None) -> list[str]:
+    """Return likely source file paths for UI autofill and patch requests."""
+    files = _collect_related_files(related_files or [], error_text or "")
+    return [f["path"] for f in files if f.get("path")]
 
 
 def _build_prompt(error_text: str, files: list[dict]) -> str:
