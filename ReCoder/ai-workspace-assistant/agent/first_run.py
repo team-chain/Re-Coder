@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import re
 import sys
 
 import requests
@@ -20,7 +21,7 @@ except Exception:  # pragma: no cover - macOS 등 tkinter 미설치 환경 대�
 
 DEFAULT_API_BASE_URL = 'http://127.0.0.1:8000'
 DEFAULT_API_WS_URL = 'ws://127.0.0.1:8000'
-DEFAULT_TERMINAL_LOG_PATH = '~/.ai_assistant/terminal.log'
+DEFAULT_TERMINAL_LOG_PATH = '~/.ai_assistant/terminal-live.log'
 
 
 def _derive_ws_url(api_base_url: str, existing_ws_url: str) -> str:
@@ -96,15 +97,26 @@ $recoderLogDir = Split-Path -Parent $recoderLogPath
 if (-not (Test-Path $recoderLogDir)) {{
   New-Item -ItemType Directory -Path $recoderLogDir -Force | Out-Null
 }}
-if (-not $env:RECODER_TRANSCRIPT_ACTIVE) {{
+$recoderTranscriptPath = Join-Path $recoderLogDir 'terminal-transcript.log'
+try {{
+  Start-Transcript -Path $recoderTranscriptPath -Append -ErrorAction SilentlyContinue | Out-Null
   $env:RECODER_TRANSCRIPT_ACTIVE = '1'
-  try {{
-    Start-Transcript -Path $recoderLogPath -Append -ErrorAction SilentlyContinue | Out-Null
-  }} catch {{
-  }}
+}} catch {{
 }}
 # <<< recoder-transcript <<<
 """
+
+
+def _upsert_profile_block(content: str, block: str) -> tuple[str, bool]:
+    pattern = re.compile(
+        r'(?:\r?\n)?# >>> recoder-transcript >>>.*?# <<< recoder-transcript <<<(?:\r?\n)?',
+        re.DOTALL,
+    )
+    normalized_block = '\n' + block.strip() + '\n'
+    if pattern.search(content):
+        updated = pattern.sub(lambda _match: normalized_block, content).strip() + '\n'
+        return updated, updated != content
+    return content.rstrip() + normalized_block, True
 
 
 def _windows_profile_paths() -> list[str]:
@@ -138,15 +150,14 @@ def _setup_windows_terminal_logging() -> str:
                 with open(profile_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
 
-            if _POWERSHELL_PROFILE_MARKER in content:
-                touched = True
-                continue
-
-            with open(profile_path, 'a', encoding='utf-8') as f:
-                f.write('\n' + block)
-            inserted = True
+            updated_content, changed = _upsert_profile_block(content, block)
+            if changed:
+                with open(profile_path, 'w', encoding='utf-8') as f:
+                    f.write(updated_content)
+                inserted = True
             touched = True
-            print(f'[ReCoder] PowerShell 자동 로그 캡처 hook을 추가했습니다: {profile_path}')
+            if changed:
+                print(f'[ReCoder] PowerShell 자동 로그 캡처 hook을 갱신했습니다: {profile_path}')
         except Exception as e:
             print(f'[ReCoder] PowerShell 프로필 설정 실패 ({profile_path}): {e}')
 

@@ -21,6 +21,8 @@ from collectors.collect import collect_os_snapshot, init_cmd_count
 from collectors.terminal_output import (
     ERROR_PATTERNS,
     RESOLVE_PATTERNS,
+    get_terminal_log_path,
+    get_terminal_transcript_log_path,
     match_patterns,
     watch_terminal_output,
 )
@@ -59,7 +61,8 @@ _DEFAULT_DEV_APPS: frozenset[str] = frozenset({
     'vim', 'nvim', 'neovim', 'emacs',
     'cursor',
     # 터미널
-    'terminal', 'iterm', 'iterm2', 'alacritty', 'kitty', 'warp',
+    'terminal', 'windows terminal', 'wt', 'powershell', 'pwsh', 'cmd',
+    'command prompt', 'iterm', 'iterm2', 'alacritty', 'kitty', 'warp',
     'hyper', 'tabby', 'wezterm',
     # 브라우저 (개발자 도구가 열려 있는 경우 대응)
     'chrome', 'google chrome', 'chromium',
@@ -124,6 +127,14 @@ def _create_session_index() -> dict:
     }
 
 
+def _ensure_session_index() -> None:
+    if not session_index.get('session_id'):
+        session_index.update(_create_session_index())
+    events = session_index.setdefault('events', [])
+    if not isinstance(events, list):
+        session_index['events'] = []
+
+
 def _empty_os_snapshot() -> dict:
     return {
         'foreground_processes': [],
@@ -134,12 +145,14 @@ def _empty_os_snapshot() -> dict:
 
 
 def _get_session_paths() -> tuple[Path, Path]:
+    _ensure_session_index()
     session_dir  = SESSIONS_DIR / f"session_{session_index['session_id']}"
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir, session_dir
 
 
 def _trim_session_index() -> None:
+    _ensure_session_index()
     max_events = 200
     if len(session_index['events']) > max_events:
         session_index['events'] = session_index['events'][-max_events:]
@@ -412,7 +425,11 @@ async def _post_agent_event(event: AgentEvent) -> None:
             pass
 
     # session_index에도 기록
-    session_index['events'].append({
+    events = session_index.setdefault('events', [])
+    if not isinstance(events, list):
+        events = []
+        session_index['events'] = events
+    events.append({
         'type':       event.event_type.value,
         'time':       event.created_at,
         'event_id':   event.event_id,
@@ -427,6 +444,7 @@ async def _post_agent_event(event: AgentEvent) -> None:
 
 async def _post_resolved_event(raw_errors: list[str]) -> None:
     """에러 해결 이벤트를 session_index에 기록하고 큐에 전달."""
+    _ensure_session_index()
     event_entry = {
         'type':       EventType.RESOLVED.value if hasattr(EventType, 'RESOLVED') else 'resolved',
         'time':       _now_iso(),
@@ -435,7 +453,11 @@ async def _post_resolved_event(raw_errors: list[str]) -> None:
         'raw_errors': raw_errors,
         'score':      0,
     }
-    session_index['events'].append(event_entry)
+    events = session_index.setdefault('events', [])
+    if not isinstance(events, list):
+        events = []
+        session_index['events'] = events
+    events.append(event_entry)
     session_index['resolved'] = True
     session_index['orchestrator_state'] = OrchestratorState.IDLE.value
     await asyncio.to_thread(_write_session_index)
@@ -633,11 +655,22 @@ async def run() -> None:
     session_index.clear()
     session_index.update(_create_session_index())
 
-    await asyncio.gather(
-        monitor_loop(),
+    terminal_watchers = [
         watch_terminal_output(
             _on_new_terminal_output,
             _on_terminal_error_detected,
             on_resolved=_on_terminal_resolved,
-        ),
-    )
+        )
+    ]
+    transcript_log_path = get_terminal_transcript_log_path()
+    if transcript_log_path.resolve() != get_terminal_log_path().resolve():
+        terminal_watchers.append(
+            watch_terminal_output(
+                _on_new_terminal_output,
+                _on_terminal_error_detected,
+                on_resolved=_on_terminal_resolved,
+                path_override=transcript_log_path,
+            )
+        )
+
+    await asyncio.gather(monitor_loop(), *terminal_watchers)

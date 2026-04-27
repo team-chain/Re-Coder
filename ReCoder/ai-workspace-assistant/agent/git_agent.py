@@ -7,6 +7,7 @@ button-driven UI while git/gh remain implementation details.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -29,6 +30,21 @@ _SECRET_PATTERNS = [
     re.compile(r"\bghp_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
 ]
+
+
+def _gh_cmd() -> str | None:
+    found = shutil.which("gh")
+    if found:
+        return found
+    candidates = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "GitHub CLI" / "gh.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "GitHub CLI" / "gh.exe",
+        Path(os.environ.get("LocalAppData", "")) / "Programs" / "GitHub CLI" / "gh.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def _run(
@@ -57,7 +73,7 @@ def _run(
             step={"command": " ".join(args), "returncode": -1, "output": output[-8000:]},
         )
 
-    output = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip())
+    output = "\n".join(part.rstrip() for part in (proc.stdout, proc.stderr) if part and part.strip())
     step = {
         "command": " ".join(args),
         "returncode": proc.returncode,
@@ -74,7 +90,7 @@ def _ensure_git() -> None:
 
 
 def _ensure_gh() -> None:
-    if not shutil.which("gh"):
+    if not _gh_cmd():
         raise GitAgentError("GitHub CLI(gh)를 찾을 수 없습니다. gh 설치와 PATH 설정을 확인하세요.")
 
 
@@ -226,7 +242,8 @@ def _validate_repo_name(name: str) -> str:
 
 def github_status(project_root: Path) -> dict[str, Any]:
     git_available = shutil.which("git") is not None
-    gh_available = shutil.which("gh") is not None
+    gh = _gh_cmd()
+    gh_available = gh is not None
     result: dict[str, Any] = {
         "git_available": git_available,
         "gh_available": gh_available,
@@ -265,10 +282,10 @@ def github_status(project_root: Path) -> dict[str, Any]:
         result["last_commit"] = last["output"].strip()
 
     if gh_available:
-        auth = _run(["gh", "auth", "status"], root)
+        auth = _run([gh, "auth", "status"], root)
         result["gh_authenticated"] = auth["returncode"] == 0
         if result["gh_authenticated"]:
-            user = _run(["gh", "api", "user", "--jq", ".login"], root)
+            user = _run([gh, "api", "user", "--jq", ".login"], root)
             if user["returncode"] == 0:
                 result["gh_user"] = user["output"].strip()
     return result
@@ -276,9 +293,10 @@ def github_status(project_root: Path) -> dict[str, Any]:
 
 def open_github_login(project_root: Path) -> dict[str, Any]:
     _ensure_gh()
+    gh = _gh_cmd()
     root = _repo_root(project_root)
     shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
-    command = "gh auth login --web; Write-Host ''; Read-Host 'GitHub login finished. Press Enter to close'"
+    command = f'& "{gh}" auth login --web; Write-Host ""; Read-Host "GitHub login finished. Press Enter to close"'
     subprocess.Popen([shell, "-NoExit", "-Command", command], cwd=str(root))
     return {"status": "ok", "message": "GitHub CLI login terminal opened."}
 
@@ -295,7 +313,8 @@ def create_repository(project_root: Path, name: str, visibility: str, descriptio
         raise GitAgentError("origin remote가 이미 있습니다. 현재 레포에서는 새 레포 생성 대신 push를 사용하세요.")
 
     _ensure_gh()
-    args = ["gh", "repo", "create", repo_name, f"--{vis}", "--source", str(root)]
+    gh = _gh_cmd()
+    args = [gh, "repo", "create", repo_name, f"--{vis}", "--source", str(root)]
     args.extend(["--remote", "origin"])
     if description.strip():
         args.extend(["--description", description.strip()])
