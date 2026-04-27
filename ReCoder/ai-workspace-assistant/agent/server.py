@@ -66,6 +66,8 @@ _current_patch:   PatchProposal | None    = None
 _current_infra:   InfraFileProposal | None = None
 
 _server_ready = threading.Event()
+_terminal_scan_seen: set[str] = set()
+_TERMINAL_SCAN_LOOKBACK = 24000
 
 
 # ── 토큰 검증 ─────────────────────────────────────────────────────────
@@ -361,6 +363,86 @@ async def _activate_event(event: AgentEvent, message: str = "이벤트가 등록
     ).to_dict())
 
 
+def _terminal_scan_paths() -> list[Path]:
+    from collectors.terminal_output import get_terminal_transcript_log_path
+
+    paths: list[Path] = [_terminal_log_path()]
+    transcript_path = get_terminal_transcript_log_path()
+    if transcript_path.resolve() != paths[0].resolve():
+        paths.append(transcript_path)
+    return paths
+
+
+def _read_terminal_tail(path: Path, max_chars: int = _TERMINAL_SCAN_LOOKBACK) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        raw = path.read_bytes()[-max_chars * 4:]
+    except OSError:
+        return ""
+    text = raw.decode("utf-8", errors="ignore").replace("\x00", "")
+    return text[-max_chars:]
+
+
+def _summarize_terminal_error(text: str, matches: list[str]) -> str:
+    for line in reversed([ln.strip() for ln in text.splitlines() if ln.strip()]):
+        if re.search(r"\b\w+(?:Error|Exception):", line):
+            return line[:180]
+    if matches:
+        return ", ".join(matches[:3])[:180]
+    return "Terminal error detected"
+
+
+async def _scan_terminal_logs_once() -> dict[str, Any]:
+    from collectors.terminal_output import ERROR_PATTERNS, match_patterns
+
+    emitted: list[dict[str, Any]] = []
+    for path in _terminal_scan_paths():
+        text = await asyncio.to_thread(_read_terminal_tail, path)
+        if not text:
+            continue
+        matches = match_patterns([text], ERROR_PATTERNS)
+        if not matches:
+            continue
+        fingerprint = hashlib.sha256(
+            (
+                str(path.resolve()) + "\n" + "\n".join(matches) + "\n" + text[-4000:]
+            ).encode("utf-8", errors="ignore")
+        ).hexdigest()
+        if fingerprint in _terminal_scan_seen:
+            continue
+        _terminal_scan_seen.add(fingerprint)
+        if len(_terminal_scan_seen) > 80:
+            _terminal_scan_seen.clear()
+            _terminal_scan_seen.add(fingerprint)
+
+        event = AgentEvent(
+            event_id=uuid.uuid4().hex,
+            event_type=EventType.ERROR_DETECTED,
+            summary=_summarize_terminal_error(text, matches),
+            contexts=[],
+            importance_score=85,
+            suggested_actions=[UserAction.FIX_CODE, UserAction.EXPLAIN, UserAction.IGNORE],
+            created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            raw_errors=matches,
+            error_text=text,
+        )
+        await _activate_event(event, f"터미널 에러 감지됨: {event.summary[:80]}")
+        emitted.append({"path": str(path), "matches": matches, "event": event.to_dict()})
+    return {"status": "ok", "emitted": emitted}
+
+
+async def _terminal_log_scan_loop() -> None:
+    while True:
+        try:
+            await _scan_terminal_logs_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[terminal_scan] {e}")
+        await asyncio.sleep(1.0)
+
+
 @app.get("/api/updates/stream")
 async def sse_stream(request: Request):
     q: asyncio.Queue = asyncio.Queue(maxsize=32)
@@ -437,6 +519,11 @@ async def monitor_status():
         "event_count": len(_session_ref.get("events", [])) if isinstance(_session_ref.get("events", []), list) else 0,
         "monitor_paused": _monitor_paused(),
     }
+
+
+@app.post("/api/terminal/scan")
+async def scan_terminal_logs(_=Depends(_verify_token)):
+    return await _scan_terminal_logs_once()
 
 
 @app.post("/api/terminal/open")
@@ -1386,6 +1473,7 @@ async def start_server(session_index_ref: dict) -> None:
     _monitor.set_server_queue(_event_queue)
 
     asyncio.create_task(_consume_events())
+    asyncio.create_task(_terminal_log_scan_loop())
 
     config = uvicorn.Config(
         app,
