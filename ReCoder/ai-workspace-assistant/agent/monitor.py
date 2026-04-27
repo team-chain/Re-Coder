@@ -45,6 +45,7 @@ _prev_uia_text: str = ""
 _uia_recent_error_fps: set[str] = set()
 
 _server_event_queue: asyncio.Queue | None = None   # server.py가 등록
+_monitor_paused = False
 
 # ── 개발 도구 앱 허용 목록 ────────────────────────────────────────────
 # 환경변수 RECODER_ALLOWED_APPS 에 쉼표로 추가하면 목록 확장 가능
@@ -89,6 +90,15 @@ def is_dev_app(app_name: str) -> bool:
 def set_server_queue(q: asyncio.Queue) -> None:
     global _server_event_queue
     _server_event_queue = q
+
+
+def set_paused(paused: bool) -> None:
+    global _monitor_paused
+    _monitor_paused = paused
+
+
+def is_paused() -> bool:
+    return _monitor_paused
 
 
 def _now_str() -> str:
@@ -434,6 +444,9 @@ async def _post_resolved_event(raw_errors: list[str]) -> None:
 # ── 터미널 에러 핸들러 ────────────────────────────────────────────────
 
 async def _on_terminal_error_detected(output: str, raw_errors: list[str]) -> None:
+    if _monitor_paused:
+        return
+
     gate = run_gate(output)
     masked_text = gate.text if gate.text else output
 
@@ -490,6 +503,10 @@ async def monitor_loop() -> None:
 
     while True:
         try:
+            if _monitor_paused:
+                await asyncio.sleep(INTERVAL)
+                continue
+
             # 1단계: Window Tracker
             win_info = await asyncio.to_thread(get_active_window_info)
             window_title = win_info.get("title", "")
