@@ -13,6 +13,8 @@ from typing import Awaitable, Callable, Iterable
 DEFAULT_TERMINAL_LOG_PATH = '~/.ai_assistant/terminal.log'
 TERMINAL_LOG_POLL_INTERVAL = 1.0
 _LOOKBACK_CHARS = 4096
+_STARTUP_LOOKBACK_CHARS = int(os.getenv('RECODER_TERMINAL_STARTUP_LOOKBACK_CHARS', '65536'))
+_STARTUP_LOOKBACK_MAX_AGE_SECONDS = int(os.getenv('RECODER_TERMINAL_STARTUP_LOOKBACK_MAX_AGE_SECONDS', '600'))
 
 ERROR_PATTERNS = [
     # ── Python ───────────────────────────────────────────────────────
@@ -147,6 +149,12 @@ def _read_new_output(path: Path, offset: int) -> tuple[str, int]:
         return text, f.tell()
 
 
+def _read_tail(path: Path, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ''
+    return path.read_text(encoding='utf-8', errors='ignore')[-max_chars:]
+
+
 async def _invoke_callback(callback: Callable[..., object], *args) -> None:
     try:
         result = callback(*args)
@@ -183,12 +191,29 @@ async def watch_terminal_output(
     # 로그는 새 세션부터 다시 쌓이므로 기존 내용은 필요 없음
     print(f'[terminal_output] 로그 감시 시작: {path}')
     try:
-        offset = path.stat().st_size if path.exists() else 0
+        stat = path.stat() if path.exists() else None
+        offset = stat.st_size if stat is not None else 0
     except Exception:
+        stat = None
         offset = 0
     lookback = ''
     # 이전 에러 상태 추적 (연속 에러 → 해결 전환 감지)
     _pending_errors: list[str] = []
+
+    if stat is not None and offset > 0 and _STARTUP_LOOKBACK_CHARS > 0:
+        try:
+            import time
+            age = time.time() - stat.st_mtime
+            if age <= _STARTUP_LOOKBACK_MAX_AGE_SECONDS:
+                startup_block = await asyncio.to_thread(_read_tail, path, _STARTUP_LOOKBACK_CHARS)
+                startup_matches = match_patterns([startup_block], ERROR_PATTERNS)
+                if startup_matches:
+                    _pending_errors = startup_matches
+                    print(f'[terminal_output] 최근 터미널 로그에서 에러 감지: {startup_matches[:3]}')
+                    await _invoke_callback(on_error_detected, startup_block, startup_matches)
+                lookback = startup_block[-_LOOKBACK_CHARS:]
+        except Exception as e:
+            print(f'[terminal_output] 시작 로그 확인 실패: {e}')
 
     while True:
         try:
