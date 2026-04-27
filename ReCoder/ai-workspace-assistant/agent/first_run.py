@@ -85,6 +85,7 @@ fi
 """
 
 _POWERSHELL_PROFILE_MARKER = '# >>> recoder-transcript >>>'
+_VENV_ACTIVATE_MARKER = '# >>> recoder-venv-python-log >>>'
 
 
 def _powershell_profile_block(log_path: str) -> str:
@@ -103,6 +104,32 @@ try {{
   $env:RECODER_TRANSCRIPT_ACTIVE = '1'
 }} catch {{
 }}
+function Invoke-ReCoderLoggedApplication {{
+  param(
+    [Parameter(Mandatory=$true)][string]$Name,
+    [Parameter(ValueFromRemainingArguments=$true)][object[]]$CommandArgs
+  )
+  $cmd = Get-Command "$Name.exe" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $cmd) {{
+    $cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  }}
+  if (-not $cmd) {{
+    Write-Host "[ReCoder] Command not found: $Name"
+    return
+  }}
+  & $cmd.Source @CommandArgs 2>&1 | ForEach-Object {{
+    $line = $_
+    Write-Output $line
+    Add-Content -Path $recoderLogPath -Value $line -Encoding UTF8
+  }}
+  $global:LASTEXITCODE = $LASTEXITCODE
+}}
+function python {{ Invoke-ReCoderLoggedApplication 'python' @args }}
+function py {{ Invoke-ReCoderLoggedApplication 'py' @args }}
+function node {{ Invoke-ReCoderLoggedApplication 'node' @args }}
+function npm {{ Invoke-ReCoderLoggedApplication 'npm' @args }}
+function pytest {{ Invoke-ReCoderLoggedApplication 'pytest' @args }}
+function uvicorn {{ Invoke-ReCoderLoggedApplication 'uvicorn' @args }}
 # <<< recoder-transcript <<<
 """
 
@@ -117,6 +144,83 @@ def _upsert_profile_block(content: str, block: str) -> tuple[str, bool]:
         updated = pattern.sub(lambda _match: normalized_block, content).strip() + '\n'
         return updated, updated != content
     return content.rstrip() + normalized_block, True
+
+
+def _venv_activation_block(log_path: str) -> str:
+    escaped_log_path = log_path.replace("'", "''")
+    return f"""\
+# >>> recoder-venv-python-log >>>
+$recoderLogPath = '{escaped_log_path}'
+$recoderLogDir = Split-Path -Parent $recoderLogPath
+if (-not (Test-Path $recoderLogDir)) {{
+  New-Item -ItemType Directory -Path $recoderLogDir -Force | Out-Null
+}}
+function Invoke-ReCoderLoggedApplication {{
+  param(
+    [Parameter(Mandatory=$true)][string]$Name,
+    [Parameter(ValueFromRemainingArguments=$true)][object[]]$CommandArgs
+  )
+  $cmd = Get-Command "$Name.exe" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $cmd) {{
+    $cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  }}
+  if (-not $cmd) {{
+    Write-Host "[ReCoder] Command not found: $Name"
+    return
+  }}
+  & $cmd.Source @CommandArgs 2>&1 | ForEach-Object {{
+    $line = $_
+    Write-Output $line
+    Add-Content -Path $recoderLogPath -Value $line -Encoding UTF8
+  }}
+  $global:LASTEXITCODE = $LASTEXITCODE
+}}
+function python {{ Invoke-ReCoderLoggedApplication 'python' @args }}
+function py {{ Invoke-ReCoderLoggedApplication 'py' @args }}
+function node {{ Invoke-ReCoderLoggedApplication 'node' @args }}
+function npm {{ Invoke-ReCoderLoggedApplication 'npm' @args }}
+function pytest {{ Invoke-ReCoderLoggedApplication 'pytest' @args }}
+function uvicorn {{ Invoke-ReCoderLoggedApplication 'uvicorn' @args }}
+# <<< recoder-venv-python-log <<<
+"""
+
+
+def _upsert_venv_activation_block(content: str, block: str) -> tuple[str, bool]:
+    pattern = re.compile(
+        r'(?:\r?\n)?# >>> recoder-venv-python-log >>>.*?# <<< recoder-venv-python-log <<<(?:\r?\n)?',
+        re.DOTALL,
+    )
+    normalized_block = '\n' + block.strip() + '\n'
+    cleaned = pattern.sub('\n', content).rstrip()
+    signature_marker = '# SIG # Begin signature block'
+    if signature_marker in cleaned:
+        updated = cleaned.replace(signature_marker, normalized_block + '\n' + signature_marker, 1)
+    else:
+        updated = cleaned + normalized_block
+    if not updated.endswith('\n'):
+        updated += '\n'
+    return updated, updated != content
+
+
+def _setup_venv_activation_logging(log_path: str) -> bool:
+    activate_path = os.path.join(os.path.dirname(__file__), 'venv', 'Scripts', 'Activate.ps1')
+    if not os.path.exists(activate_path):
+        return False
+    try:
+        with open(activate_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        updated_content, changed = _upsert_venv_activation_block(
+            content,
+            _venv_activation_block(log_path),
+        )
+        if changed:
+            with open(activate_path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+            print(f'[ReCoder] venv PowerShell 활성화 hook을 갱신했습니다: {activate_path}')
+        return changed
+    except Exception as e:
+        print(f'[ReCoder] venv PowerShell 활성화 hook 설정 실패 ({activate_path}): {e}')
+        return False
 
 
 def _windows_profile_paths() -> list[str]:
@@ -160,6 +264,10 @@ def _setup_windows_terminal_logging() -> str:
                 print(f'[ReCoder] PowerShell 자동 로그 캡처 hook을 갱신했습니다: {profile_path}')
         except Exception as e:
             print(f'[ReCoder] PowerShell 프로필 설정 실패 ({profile_path}): {e}')
+
+    if _setup_venv_activation_logging(log_path):
+        inserted = True
+        touched = True
 
     if inserted:
         return 'inserted'
