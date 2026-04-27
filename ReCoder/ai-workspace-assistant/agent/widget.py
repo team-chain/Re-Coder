@@ -442,6 +442,120 @@ class ActionBubble(_BubbleBase):
             b.setEnabled(False)
 
 
+class PatchProposalBubble(_BubbleBase):
+    """Patch proposal preview and actions in the widget."""
+    action_clicked = pyqtSignal(str)
+
+    def __init__(self, proposal: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._done = False
+        self._buttons: list[QPushButton] = []
+
+        summary = proposal.get("summary") or "코드 수정안이 생성되었습니다."
+        risk = proposal.get("risk") or "low"
+        test_command = proposal.get("test_command") or ""
+        patches = proposal.get("patches") or []
+
+        preview_parts: list[str] = []
+        for patch in patches[:2]:
+            file_name = patch.get("file") or "unknown"
+            diff = patch.get("unified_diff") or ""
+            lines = diff.splitlines()
+            preview = "\n".join(lines[:16])
+            if len(lines) > 16:
+                preview += "\n..."
+            preview_parts.append(f"{file_name}\n{preview}")
+        preview_text = "\n\n".join(preview_parts) or "수정 diff를 대시보드에서 확인할 수 있습니다."
+
+        self.setStyleSheet(f"""
+            QFrame {{
+                background: {C_BG_CARD};
+                border-left: 3px solid {C_WARN};
+                border-radius: 6px;
+                margin: 2px 8px 2px 4px;
+            }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(8)
+
+        title_lbl = QLabel(f"코드 수정안 생성됨 · risk={risk}")
+        title_lbl.setWordWrap(True)
+        title_lbl.setStyleSheet(
+            f"color: {C_WARN}; font-weight: 700; font-size: 13px;"
+            " background: transparent; border: none;"
+        )
+        lay.addWidget(title_lbl)
+
+        summary_lbl = QLabel(summary)
+        summary_lbl.setWordWrap(True)
+        summary_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        summary_lbl.setStyleSheet(f"color: {C_FG}; font-size: 12px; background: transparent; border: none;")
+        lay.addWidget(summary_lbl)
+
+        if test_command:
+            test_lbl = QLabel(f"테스트: {test_command}")
+            test_lbl.setWordWrap(True)
+            test_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            test_lbl.setStyleSheet(f"color: {C_FG_DIM}; font-size: 11px; background: transparent; border: none;")
+            lay.addWidget(test_lbl)
+
+        preview_lbl = QLabel(preview_text)
+        preview_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        preview_lbl.setWordWrap(True)
+        preview_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        preview_lbl.setStyleSheet(f"""
+            QLabel {{
+                background: {C_BG_CODE};
+                color: {C_FG};
+                border: 1px solid {C_BORDER};
+                border-radius: 5px;
+                padding: 8px;
+                font-family: Consolas, monospace;
+                font-size: 11px;
+            }}
+        """)
+        lay.addWidget(preview_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        def _btn(label: str, action: str, primary: bool = False) -> QPushButton:
+            b = QPushButton(label)
+            b.setFixedHeight(30)
+            accent = C_SUCCESS if primary else C_BG_INPUT
+            fg_color = "#1a1a1a" if primary else C_FG
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: {accent};
+                    color: {fg_color};
+                    border: 1px solid {C_BORDER};
+                    border-radius: 5px;
+                    font-size: 12px;
+                    padding: 0 10px;
+                }}
+                QPushButton:hover {{ opacity: 0.85; }}
+                QPushButton:disabled {{ color: {C_FG_DIM}; background: {C_BG}; }}
+            """)
+            b.clicked.connect(lambda _, a=action: self._on_action(a))
+            self._buttons.append(b)
+            return b
+
+        btn_row.addWidget(_btn("파일에 적용", "apply_patch", primary=True))
+        btn_row.addWidget(_btn("거절", "reject_patch"))
+        btn_row.addWidget(_btn("대시보드", "open_dashboard"))
+        lay.addLayout(btn_row)
+
+    def _on_action(self, action: str) -> None:
+        if self._done and action != "open_dashboard":
+            return
+        if action in {"apply_patch", "reject_patch"}:
+            self._done = True
+            for b in self._buttons:
+                b.setEnabled(False)
+        self.action_clicked.emit(action)
+
+
 class CodeReadyBubble(_BubbleBase):
     """CODE_READY 상태 — Dockerfile 생성 / 무시 선택지."""
     action_clicked = pyqtSignal(str)
@@ -800,6 +914,7 @@ class TitleBar(QFrame):
 class ReCoderWidget(QWidget):
     ai_message_received = pyqtSignal(str)
     system_message_received = pyqtSignal(str)
+    state_update_received = pyqtSignal(str)
     """ReCoder 메인 위젯."""
 
     def __init__(self) -> None:
@@ -811,15 +926,20 @@ class ReCoderWidget(QWidget):
         self._last_warn_count   = 0
         self._current_event_id: str = ""      # 현재 처리 중인 AgentEvent
         self._last_error_text:  str = ""      # 채팅 컨텍스트용 최근 에러 텍스트
+        self._current_patch_proposal_id: str = ""
+        self._last_widget_state_key: str = ""
+        self._terminal_scan_busy = False
 
         self._ignore_sse_chat_count = 0
 
         self.ai_message_received.connect(self._add_ai_slot)
         self.system_message_received.connect(self._add_system)
+        self.state_update_received.connect(self._on_state_update_signal)
         self._setup_window()
         self._build_ui()
         self._restore_pos()
         self._setup_sse()
+        self._setup_terminal_scan_timer()
 
         self._add_system("ReCoder 시작됨 — 화면을 감시하고 있어.")
 
@@ -1072,6 +1192,86 @@ class ReCoderWidget(QWidget):
     def _setup_polling_fallback(self) -> None:
         pass
 
+    def _setup_terminal_scan_timer(self) -> None:
+        self._terminal_scan_timer = QTimer(self)
+        self._terminal_scan_timer.timeout.connect(self._scan_terminal_logs)
+        self._terminal_scan_timer.start(1500)
+
+    def _emit_state_update(self, data: dict) -> None:
+        try:
+            self.state_update_received.emit(json.dumps(data, ensure_ascii=False))
+        except Exception:
+            pass
+
+    def _sync_server_status(self) -> None:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{BASE_URL}/api/status",
+            headers={"X-ReCoder-Token": _session_token},
+        )
+        with urllib.request.urlopen(req, timeout=3) as r:
+            status = json.loads(r.read().decode("utf-8", errors="replace"))
+
+        state = status.get("state") or ""
+        if not state:
+            return
+        update = {
+            "type": "orchestrator_update",
+            "state": state,
+            "event": status.get("event"),
+            "patch_proposal": status.get("patch_proposal"),
+            "infra_proposal": status.get("infra_proposal"),
+            "message": "",
+        }
+        if state == "WAITING_USER_ACTION" and not update["event"]:
+            return
+        if state == "CODE_PATCH_PROPOSED" and not update["patch_proposal"]:
+            return
+        if state == "INFRA_PROPOSED" and not update["infra_proposal"]:
+            return
+        self._emit_state_update(update)
+
+    def _scan_terminal_logs(self) -> None:
+        global _session_token
+        if self._terminal_scan_busy:
+            return
+        if not _session_token:
+            try:
+                worker = SseWorker()
+                _session_token = worker._fetch_token()
+            except Exception:
+                return
+        if not _session_token:
+            return
+
+        self._terminal_scan_busy = True
+
+        def _run() -> None:
+            import urllib.request, urllib.error
+            try:
+                req = urllib.request.Request(
+                    f"{BASE_URL}/api/terminal/scan",
+                    data=b"{}",
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-ReCoder-Token": _session_token,
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=3) as r:
+                    data = json.loads(r.read().decode("utf-8", errors="replace"))
+                emitted = data.get("emitted") or []
+                if emitted:
+                    self.system_message_received.emit("터미널 에러 감지됨")
+                self._sync_server_status()
+            except Exception:
+                pass
+            finally:
+                self._terminal_scan_busy = False
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _on_connected(self) -> None:
         self._add_system("✅ Monitor Agent 연결됨")
         self._status_bar.set_ok()
@@ -1089,6 +1289,33 @@ class ReCoderWidget(QWidget):
             return
         self._dispatch(data)
 
+    def _on_state_update_signal(self, raw: str) -> None:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return
+        self._dispatch(data)
+
+    def _orchestrator_update_key(self, data: dict) -> str:
+        state = data.get("state", "")
+        if not state:
+            return ""
+        if state == "WAITING_USER_ACTION":
+            event = data.get("event") or {}
+            marker = event.get("event_id") or event.get("summary") or event.get("error_text") or ""
+            return f"{state}:{marker}"
+        if state == "CODE_PATCH_PROPOSED":
+            proposal = data.get("patch_proposal") or {}
+            marker = proposal.get("proposal_id") or proposal.get("summary") or ""
+            return f"{state}:{marker}"
+        if state == "INFRA_PROPOSED":
+            proposal = data.get("infra_proposal") or {}
+            marker = proposal.get("proposal_id") or proposal.get("target_path") or ""
+            return f"{state}:{marker}"
+        if state in {"CODE_READY", "INFRA_READY", "APPLYING_PATCH"}:
+            return state
+        return f"{state}:{data.get('message', '')}"
+
     def _dispatch(self, data: dict) -> None:
         msg_type = data.get("type", "")
 
@@ -1105,15 +1332,20 @@ class ReCoderWidget(QWidget):
         # ── Orchestrator 상태 업데이트 ──
         if msg_type == "orchestrator_update":
             state = data.get("state", "")
+            state_key = self._orchestrator_update_key(data)
+            if state_key and state_key == self._last_widget_state_key:
+                return
+            if state_key:
+                self._last_widget_state_key = state_key
 
             if state == "WAITING_USER_ACTION":
                 event = data.get("event") or {}
-                self._show_action_choices(event)
+                if event:
+                    self._show_action_choices(event)
 
             elif state == "CODE_PATCH_PROPOSED":
                 proposal = data.get("patch_proposal") or {}
-                self._add_ai(f"🔧 수정안 생성됨: {proposal.get('summary', '')}")
-                self._open_dashboard()
+                self._show_patch_proposal(proposal)
 
             elif state == "CODE_READY":
                 self._add_system("✅ 코드 수정 완료")
@@ -1137,6 +1369,12 @@ class ReCoderWidget(QWidget):
         if msg_type == "infra_run_result":
             self._show_infra_run_result(data.get("result") or {})
             return
+        if msg_type == "github_result":
+            self._show_github_result(data.get("action", ""), data.get("result") or {})
+            return
+        if msg_type == "deploy_result":
+            self._show_deploy_result(data.get("result") or {})
+            return
 
         reason = data.get("reason", "")
         if reason == "connected":
@@ -1149,9 +1387,12 @@ class ReCoderWidget(QWidget):
 
     def _show_action_choices(self, event: dict) -> None:
         """에러 감지 시 선택지 버블 표시."""
+        event_id = event.get("event_id", "")
+        if event_id and event_id == self._current_event_id:
+            return
         error_text = event.get("summary") or event.get("error_text", "에러 감지됨")
         self._add_error(error_text, "", "")
-        self._current_event_id = event.get("event_id", "")
+        self._current_event_id = event_id
         # 채팅 컨텍스트로 활용
         self._last_error_text = event.get("error_text", "") or error_text
 
@@ -1160,6 +1401,20 @@ class ReCoderWidget(QWidget):
         self._insert_bubble(bubble)
         self._status_bar.set_error(error_text[:40])
         self._update_summary()
+
+    def _show_patch_proposal(self, proposal: dict) -> None:
+        if not proposal:
+            self._add_system("코드 수정안이 생성되었지만 내용을 불러오지 못했습니다.")
+            return
+        proposal_id = proposal.get("proposal_id", "")
+        if proposal_id and proposal_id == self._current_patch_proposal_id:
+            return
+        self._current_patch_proposal_id = proposal_id
+        summary = proposal.get("summary", "")
+        self._add_ai(f"수정안 생성됨: {summary}" if summary else "수정안이 생성되었습니다.")
+        bubble = PatchProposalBubble(proposal)
+        bubble.action_clicked.connect(self._on_patch_action)
+        self._insert_bubble(bubble)
 
     def _show_code_ready_choices(self) -> None:
         """CODE_READY 상태에서 Dockerfile 생성 선택지 표시."""
@@ -1184,6 +1439,32 @@ class ReCoderWidget(QWidget):
         if url:
             parts.append(url)
         self._add_system(" | ".join(parts))
+
+    def _show_github_result(self, action: str, result: dict) -> None:
+        status = result.get("status") or result.get("message") or "완료"
+        detail = result.get("branch") or result.get("repo") or result.get("remote") or ""
+        parts = [f"GitHub {action or '작업'}: {status}"]
+        if detail:
+            parts.append(str(detail))
+        self._add_system(" | ".join(parts))
+
+    def _show_deploy_result(self, result: dict) -> None:
+        status = result.get("status") or result.get("message") or "완료"
+        url = result.get("url") or result.get("endpoint") or ""
+        parts = [f"AWS 배포: {status}"]
+        if url:
+            parts.append(str(url))
+        self._add_system(" | ".join(parts))
+
+    def _on_patch_action(self, action: str) -> None:
+        if action == "apply_patch":
+            self._add_system("코드 수정 적용 중...")
+            self._call_api_async("POST", "/api/patch/apply", {"proposal_id": self._current_patch_proposal_id})
+        elif action == "reject_patch":
+            self._add_system("수정안 거절 중...")
+            self._call_api_async("POST", "/api/patch/reject", {"proposal_id": self._current_patch_proposal_id})
+        elif action == "open_dashboard":
+            self._open_dashboard()
 
     def _on_infra_action(self, action: str) -> None:
         if action == "save_infra":
