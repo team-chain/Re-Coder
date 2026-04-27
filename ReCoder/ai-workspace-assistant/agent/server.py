@@ -417,6 +417,11 @@ class ProposeRequest(BaseModel):
     related_files: list[str] = []
 
 
+class SuggestFilesRequest(BaseModel):
+    error_text: str = ""
+    related_files: list[str] = []
+
+
 class FilePatchRequest(BaseModel):
     file_path: str
     issue_text: str = ""
@@ -458,6 +463,38 @@ class AwsDeployRequest(BaseModel):
     host_port: str = ""
     container_name: str = ""
     image_name: str = ""
+
+
+class GitHubRepoCreateRequest(BaseModel):
+    name: str
+    visibility: str = "private"
+    description: str = ""
+
+
+class GitHubBranchRequest(BaseModel):
+    branch: str
+
+
+class GitHubAddRequest(BaseModel):
+    files: list[str] = []
+
+
+class GitHubDiffRequest(BaseModel):
+    files: list[str] = []
+
+
+class GitHubCommitRequest(BaseModel):
+    message: str
+
+
+class GitHubPushRequest(BaseModel):
+    branch: str = ""
+
+
+class GitHubCommitPushRequest(BaseModel):
+    files: list[str] = []
+    message: str
+    branch: str = ""
 
 
 @app.post("/api/vision/analyze")
@@ -573,14 +610,149 @@ async def deploy_aws(body: AwsDeployRequest, _=Depends(_verify_token)):
     return result
 
 
-@app.post("/api/patch/propose")
-async def propose_patch(body: ProposeRequest, _=Depends(_verify_token)):
-    """Gemini Flash 호출 → PatchProposal 생성."""
-    global _current_patch, _orchestrator_state
+# ── GitHub / Git Agent 연동 ─────────────────────────────────────────────
 
-    # 클라이언트가 error_text 를 비워 보내면 마지막으로 감지된 AgentEvent 에서 보충.
-    # widget.py 에서 빈 문자열로 호출하던 옛 동작을 안전하게 흡수한다.
-    error_text = (body.error_text or "").strip()
+def _raise_git_agent_error(error: Exception) -> None:
+    try:
+        from git_agent import GitAgentError
+    except Exception:
+        GitAgentError = RuntimeError  # type: ignore
+    if isinstance(error, GitAgentError):
+        detail: dict[str, Any] = {"message": getattr(error, "message", str(error))}
+        step = getattr(error, "step", None)
+        if step:
+            detail["step"] = step
+        raise HTTPException(status_code=400, detail=detail)
+    raise HTTPException(status_code=500, detail=str(error))
+
+
+async def _broadcast_github_result(action: str, result: dict[str, Any]) -> None:
+    _append_session_event(f"github_{action}", f"GitHub action completed: {action}", result=result)
+    await _broadcast({
+        "type": "github_result",
+        "action": action,
+        "result": result,
+    })
+
+
+@app.get("/api/github/status")
+async def api_github_status(_=Depends(_verify_token)):
+    from git_agent import github_status
+    return await asyncio.to_thread(github_status, _project_root().resolve())
+
+
+@app.post("/api/github/init")
+async def api_github_init(_=Depends(_verify_token)):
+    from git_agent import init_repository
+    try:
+        result = await asyncio.to_thread(init_repository, _project_root().resolve())
+        await _broadcast_github_result("init", result)
+        return result
+    except Exception as e:
+        _raise_git_agent_error(e)
+
+
+@app.post("/api/github/login")
+async def api_github_login(_=Depends(_verify_token)):
+    from git_agent import open_github_login
+    try:
+        result = await asyncio.to_thread(open_github_login, _project_root().resolve())
+        await _broadcast_github_result("login", result)
+        return result
+    except Exception as e:
+        _raise_git_agent_error(e)
+
+
+@app.post("/api/github/repo")
+async def api_github_create_repo(body: GitHubRepoCreateRequest, _=Depends(_verify_token)):
+    from git_agent import create_repository
+    try:
+        result = await asyncio.to_thread(
+            create_repository,
+            _project_root().resolve(),
+            body.name,
+            body.visibility,
+            body.description,
+        )
+        await _broadcast_github_result("repo_create", result)
+        return result
+    except Exception as e:
+        _raise_git_agent_error(e)
+
+
+@app.post("/api/github/branch")
+async def api_github_branch(body: GitHubBranchRequest, _=Depends(_verify_token)):
+    from git_agent import create_or_switch_branch
+    try:
+        result = await asyncio.to_thread(create_or_switch_branch, _project_root().resolve(), body.branch)
+        await _broadcast_github_result("branch", result)
+        return result
+    except Exception as e:
+        _raise_git_agent_error(e)
+
+
+@app.post("/api/github/add")
+async def api_github_add(body: GitHubAddRequest, _=Depends(_verify_token)):
+    from git_agent import add_files
+    try:
+        result = await asyncio.to_thread(add_files, _project_root().resolve(), body.files)
+        await _broadcast_github_result("add", result)
+        return result
+    except Exception as e:
+        _raise_git_agent_error(e)
+
+
+@app.post("/api/github/diff")
+async def api_github_diff(body: GitHubDiffRequest, _=Depends(_verify_token)):
+    from git_agent import diff_files
+    try:
+        result = await asyncio.to_thread(diff_files, _project_root().resolve(), body.files)
+        return result
+    except Exception as e:
+        _raise_git_agent_error(e)
+
+
+@app.post("/api/github/commit")
+async def api_github_commit(body: GitHubCommitRequest, _=Depends(_verify_token)):
+    from git_agent import commit
+    try:
+        result = await asyncio.to_thread(commit, _project_root().resolve(), body.message)
+        await _broadcast_github_result("commit", result)
+        return result
+    except Exception as e:
+        _raise_git_agent_error(e)
+
+
+@app.post("/api/github/push")
+async def api_github_push(body: GitHubPushRequest, _=Depends(_verify_token)):
+    from git_agent import push
+    try:
+        result = await asyncio.to_thread(push, _project_root().resolve(), body.branch)
+        await _broadcast_github_result("push", result)
+        return result
+    except Exception as e:
+        _raise_git_agent_error(e)
+
+
+@app.post("/api/github/commit-push")
+async def api_github_commit_push(body: GitHubCommitPushRequest, _=Depends(_verify_token)):
+    from git_agent import commit_and_push
+    try:
+        result = await asyncio.to_thread(
+            commit_and_push,
+            _project_root().resolve(),
+            body.files,
+            body.message,
+            body.branch,
+        )
+        await _broadcast_github_result("commit_push", result)
+        return result
+    except Exception as e:
+        _raise_git_agent_error(e)
+
+
+def _event_error_text(body_text: str = "") -> str:
+    error_text = (body_text or "").strip()
     if not error_text and _current_event is not None:
         error_text = (
             _current_event.error_text
@@ -588,6 +760,32 @@ async def propose_patch(body: ProposeRequest, _=Depends(_verify_token)):
             or _current_event.summary
             or ""
         ).strip()
+    return error_text
+
+
+@app.post("/api/patch/suggest-files")
+async def suggest_patch_files(body: SuggestFilesRequest, _=Depends(_verify_token)):
+    from code_agent import suggest_related_file_paths
+
+    error_text = _event_error_text(body.error_text)
+    if not error_text:
+        return {"files": [], "error_text": ""}
+    files = await asyncio.to_thread(
+        suggest_related_file_paths,
+        error_text,
+        body.related_files,
+    )
+    return {"files": files, "error_text": error_text}
+
+
+@app.post("/api/patch/propose")
+async def propose_patch(body: ProposeRequest, _=Depends(_verify_token)):
+    """Gemini Flash 호출 → PatchProposal 생성."""
+    global _current_patch, _orchestrator_state
+
+    # 클라이언트가 error_text 를 비워 보내면 마지막으로 감지된 AgentEvent 에서 보충.
+    # widget.py 에서 빈 문자열로 호출하던 옛 동작을 안전하게 흡수한다.
+    error_text = _event_error_text(body.error_text)
 
     if not error_text:
         raise HTTPException(
@@ -595,12 +793,17 @@ async def propose_patch(body: ProposeRequest, _=Depends(_verify_token)):
             detail="에러 텍스트가 없습니다. 에러 감지 직후에 다시 시도해주세요.",
         )
 
-    from code_agent import generate_patch_proposal
+    from code_agent import generate_patch_proposal, suggest_related_file_paths
     try:
+        related_files = body.related_files or await asyncio.to_thread(
+            suggest_related_file_paths,
+            error_text,
+            [],
+        )
         proposal = await asyncio.to_thread(
             generate_patch_proposal,
             error_text,
-            body.related_files,
+            related_files,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
