@@ -1,8 +1,0 @@
-agent/
-**/node_modules
-**/__pycache__
-**/.env
-**/.env.local
-**/dist
-**/build
-**/.git
