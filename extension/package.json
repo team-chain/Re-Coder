@@ -1,0 +1,104 @@
+{
+  "name": "recoder",
+  "displayName": "ReCoder",
+  "description": "AI DevOps Agent - From Error to Operation",
+  "version": "0.2.2-final",
+  "publisher": "recoder-team",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "recoder",
+          "title": "ReCoder",
+          "icon": "media/icon.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "recoder-panel",
+          "title": "ReCoder",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "recoder": [
+        {
+          "id": "recoder-sidebar",
+          "name": "ReCoder",
+          "type": "webview",
+          "icon": "media/icon.svg"
+        }
+      ],
+      "recoder-panel": [
+        {
+          "id": "recoder-output",
+          "name": "ReCoder Output",
+          "type": "webview",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "recoder.analyzeError",
+        "title": "ReCoder: Analyze Error"
+      },
+      {
+        "command": "recoder.generateDockerfile",
+        "title": "ReCoder: Generate Dockerfile"
+      },
+      {
+        "command": "recoder.startCore",
+        "title": "ReCoder: Start Core"
+      },
+      {
+        "command": "recoder.stopCore",
+        "title": "ReCoder: Stop Core"
+      },
+      {
+        "command": "recoder.runWithRecoder",
+        "title": "Run with ReCoder"
+      },
+      {
+        "command": "recoder.openDashboard",
+        "title": "ReCoder: Open Dashboard"
+      },
+      {
+        "command": "recoder.openWorkbench",
+        "title": "ReCoder: Open Workbench",
+        "icon": "$(layout-panel-center)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "recoder.openWorkbench",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "editorFocus || !inputFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js",
+    "smoke": "tsc -p ./ && node --test out/test/coreClient.smoke.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {}
+}

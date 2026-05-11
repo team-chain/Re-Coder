@@ -1,0 +1,8 @@
+.env
+core/.venv/
+core/venv/
+core/__pycache__/
+extension/node_modules/
+extension/out/
+extension/recoder-0.1.0.vsix
+*.pyc
