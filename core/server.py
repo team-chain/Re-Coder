@@ -629,9 +629,11 @@ async def generate_infra(body: InfraGenerateRequest, _=Depends(_verify_token)):
     global _orchestrator_state, _current_infra
 
     file_type = body.file_type.lower()
-    workspace = body.workspace_path or (
+    _raw_workspace = body.workspace_path or (
         _current_project.workspace_path if _current_project else "."
     )
+    # 원격 배포 시 로컬 경로가 없을 수 있으므로 현재 디렉터리로 폴백
+    workspace = _raw_workspace if Path(_raw_workspace).exists() else str(Path.cwd())
 
     try:
         from infra_agent import (
