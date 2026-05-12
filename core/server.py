@@ -50,7 +50,7 @@ RUNTIME_FILE = RUNTIME_DIR / "runtime.json"
 
 # ── 포트 / 토큰 ───────────────────────────────────────────────────────
 
-SESSION_TOKEN: str = uuid.uuid4().hex
+SESSION_TOKEN: str = os.getenv("SESSION_TOKEN", uuid.uuid4().hex)
 DEFAULT_PORT = 17894
 PORT: int = int(os.getenv("LOCAL_PORT", str(DEFAULT_PORT)))
 
@@ -129,11 +129,13 @@ class _OriginHostMiddleware(BaseHTTPMiddleware):
                         media_type="application/json",
                     )
             elif origin not in _SAFE_ORIGINS and "*" not in _EXTRA_HOSTS:
-                return Response(
-                    content='{"detail": "Origin not allowed"}',
-                    status_code=403,
-                    media_type="application/json",
-                )
+                # vscode-webview Origin 허용
+                if not origin.startswith("vscode-webview://"):
+                    return Response(
+                        content='{"detail": "Origin not allowed"}',
+                        status_code=403,
+                        media_type="application/json",
+                    )
 
         return await call_next(request)
 
