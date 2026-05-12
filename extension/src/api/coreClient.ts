@@ -139,8 +139,13 @@ export class CoreClient {
     private _pollingTimer: ReturnType<typeof setInterval> | null = null;
     private _onStatusCallback: ((status: StatusResponse) => void) | null = null;
 
-    constructor(port: number, token: string) {
-        this._base = `http://127.0.0.1:${port}`;
+    constructor(portOrUrl: number | string, token: string) {
+        if (typeof portOrUrl === 'string' && portOrUrl.startsWith('http')) {
+            // 원격 서버 URL 직접 지정 (예: http://REDACTED-IP:8000)
+            this._base = portOrUrl.replace(/\/$/, '');
+        } else {
+            this._base = `http://127.0.0.1:${portOrUrl}`;
+        }
         this._token = token;
     }
 

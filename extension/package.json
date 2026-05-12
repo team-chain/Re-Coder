@@ -85,7 +85,22 @@
         "mac": "cmd+shift+r",
         "when": "editorFocus || !inputFocus"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "ReCoder",
+      "properties": {
+        "recoder.remoteServer.url": {
+          "type": "string",
+          "default": "",
+          "description": "원격 ReCoder Core 서버 URL (예: http://REDACTED-IP:8000). 비워두면 로컬 Core를 자동 실행합니다."
+        },
+        "recoder.remoteServer.token": {
+          "type": "string",
+          "default": "",
+          "description": "원격 서버 인증 토큰 (선택사항)"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

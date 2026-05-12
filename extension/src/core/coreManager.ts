@@ -52,12 +52,37 @@ export class CoreManager {
      * runtime.json 의 port + session_token 을 사용해 토큰이 포함된 외부 링크를 만든다.
      */
     getDashboardUrl(): string | null {
+        const config = vscode.workspace.getConfiguration('recoder');
+        const remoteUrl = config.get<string>('remoteServer.url', '').trim();
+        if (remoteUrl) {
+            return `${remoteUrl.replace(/\/$/, '')}/dashboard`;
+        }
         const cfg = this._tryLoadRuntime();
         if (!cfg) { return null; }
         return `http://127.0.0.1:${cfg.port}/dashboard?token=${cfg.session_token}`;
     }
 
     async ensureRunning(): Promise<CoreClient> {
+        // 원격 서버 URL이 설정되어 있으면 로컬 실행 없이 바로 연결
+        const config = vscode.workspace.getConfiguration('recoder');
+        const remoteUrl = config.get<string>('remoteServer.url', '').trim();
+        const remoteToken = config.get<string>('remoteServer.token', '').trim();
+
+        if (remoteUrl) {
+            if (this._client) {
+                const alive = await this._client.healthCheck();
+                if (alive) { return this._client; }
+                this._client = null;
+            }
+            const candidate = new CoreClient(remoteUrl, remoteToken);
+            const alive = await candidate.healthCheck();
+            if (alive) {
+                this._client = candidate;
+                return this._client;
+            }
+            throw new Error(`원격 ReCoder Core 서버에 연결할 수 없습니다: ${remoteUrl}`);
+        }
+
         if (this._client) {
             const alive = await this._client.healthCheck();
             if (alive) { return this._client; }

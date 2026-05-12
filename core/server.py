@@ -129,8 +129,8 @@ class _OriginHostMiddleware(BaseHTTPMiddleware):
                         media_type="application/json",
                     )
             elif origin not in _SAFE_ORIGINS and "*" not in _EXTRA_HOSTS:
-                # vscode-webview Origin 허용
-                if not origin.startswith("vscode-webview://"):
+                # DEV_MODE 이거나 vscode-webview Origin 이면 허용
+                if not _DEV_MODE and not origin.startswith("vscode-webview://"):
                     return Response(
                         content='{"detail": "Origin not allowed"}',
                         status_code=403,
