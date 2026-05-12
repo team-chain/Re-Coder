@@ -711,8 +711,8 @@
         const contentEl = qs('dockerfile-content'); if (contentEl) contentEl.textContent = msg.data?.content || '';
         setStageBar('infra');
         hide('deploy-idle-card');
-        addLog('docker', 'Dockerfile 생성 완료: ' + (msg.data?.target_path||''), 'ok');
-        addActivity('blue', 'Dockerfile 생성 완료');
+        addLog('docker', (msg.data?.target_path||'파일') + ' 생성 완료', 'ok');
+        addActivity('blue', (msg.data?.target_path||'인프라 파일') + ' 생성 완료');
         break;
 
       case 'infra_approved': {
