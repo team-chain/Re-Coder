@@ -282,15 +282,18 @@ def generate_dockerfile(
     # stack name (e.g. "python-fastapi") → template_id ("dockerfile-python-fastapi")
     template_id = f"dockerfile-{stack}" if not stack.startswith("dockerfile-") else stack
     if registry.get(template_id) is None:
-        # 폴백: detect_stack_template 로 직접 감지
+        # 폴백: detect_stack_template 로 직접 감지 (경로 없으면 기본값 사용)
         try:
             template_id = registry.detect_stack_template(str(project_root))
         except Exception:
             template_id = "dockerfile-python-fastapi"
     template = registry.render(template_id, {})  # Dockerfile 템플릿은 placeholder 없음
 
-    # 메타정보 추출
-    _, meta = _detect_stack(str(project_root))
+    # 메타정보 추출 (원격 모드에서 경로 없으면 빈 dict 사용)
+    try:
+        _, meta = _detect_stack(str(project_root))
+    except Exception:
+        meta = {}
 
     # LLM 커스터마이징
     error_context = ""
@@ -338,10 +341,16 @@ def generate_docker_compose(
         default_port = str(project_profile.default_port)
     else:
         project_root = _resolve_project_path(workspace_path)
-        stack, meta = _detect_stack(str(project_root))
+        try:
+            stack, meta = _detect_stack(str(project_root))
+        except Exception:
+            stack, meta = "python-fastapi", {}
         default_port = meta.get("port", "8000")
 
-    has_db = _detect_db_driver(str(project_root))
+    try:
+        has_db = _detect_db_driver(str(project_root))
+    except Exception:
+        has_db = False
     template_id = "docker-compose-db" if has_db else "docker-compose"
 
     registry = get_file_registry()
