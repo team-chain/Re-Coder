@@ -87,6 +87,11 @@ _SAFE_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _DEV_MODE: bool = os.getenv("DEV_MODE", "0").strip() in ("1", "true", "yes")
 
+# 허용할 추가 호스트 (EC2 IP 등) - 환경변수 ALLOWED_HOSTS 에 콤마로 구분해 입력
+_EXTRA_HOSTS: set[str] = {
+    h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()
+}
+
 
 class _OriginHostMiddleware(BaseHTTPMiddleware):
     """Origin / Host 헤더 검증 (§5.2)."""
@@ -96,13 +101,23 @@ class _OriginHostMiddleware(BaseHTTPMiddleware):
         if path.startswith("/static") or path == "/" or path == "/dashboard":
             return await call_next(request)
 
-        host = request.headers.get("host", "")
-        if host and not host.startswith("127.0.0.1") and not host.startswith("localhost"):
-            return Response(
-                content='{"detail": "Invalid Host header"}',
-                status_code=403,
-                media_type="application/json",
+        # DEV_MODE 이거나 ALLOWED_HOSTS 가 "*" 이면 Host 검증 스킵
+        if not _DEV_MODE and "*" not in _EXTRA_HOSTS:
+            host = request.headers.get("host", "")
+            host_base = host.split(":")[0]  # 포트 제거
+            allowed = (
+                not host
+                or host.startswith("127.0.0.1")
+                or host.startswith("localhost")
+                or host_base in _EXTRA_HOSTS
+                or host in _EXTRA_HOSTS
             )
+            if not allowed:
+                return Response(
+                    content='{"detail": "Invalid Host header"}',
+                    status_code=403,
+                    media_type="application/json",
+                )
 
         if request.method in _WRITE_METHODS:
             origin = request.headers.get("origin", "")
@@ -113,7 +128,7 @@ class _OriginHostMiddleware(BaseHTTPMiddleware):
                         status_code=403,
                         media_type="application/json",
                     )
-            elif origin not in _SAFE_ORIGINS:
+            elif origin not in _SAFE_ORIGINS and "*" not in _EXTRA_HOSTS:
                 return Response(
                     content='{"detail": "Origin not allowed"}',
                     status_code=403,
