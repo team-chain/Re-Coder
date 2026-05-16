@@ -224,3 +224,83 @@ class PendingAuditQueue(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
     retry_count = Column(Integer, nullable=False, default=0)
     is_suspicious = Column(Boolean, default=False)
+
+
+# ---------------------------------------------------------------------------
+# Q2-B: PolicyBundle & Approval
+# ---------------------------------------------------------------------------
+
+class PolicyBundle(Base):
+    """
+    Org별 정책 묶음. Control Plane이 sha256 + version 부여.
+    Local Core가 다운로드 후 sha256 검증.
+    """
+    __tablename__ = "policy_bundles"
+
+    bundle_id = Column(String(36), primary_key=True, default=_uuid)
+    org_id = Column(String(36), ForeignKey("organizations.org_id"), nullable=False, index=True)
+    version = Column(String(50), nullable=False)          # "v1.0.0"
+    display_name = Column(String(255), nullable=False)
+    rego_content = Column(Text, nullable=False)            # 생성된 Rego 소스
+    sha256 = Column(String(64), nullable=False)           # SHA-256(rego_content)
+    preset_config = Column(JSON, nullable=False, default=list)  # list[PolicyPresetConfig]
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_by = Column(String(36), ForeignKey("users.user_id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "version", name="uq_policy_bundle_version"),
+        Index("ix_policy_bundle_org_active", "org_id", "is_active"),
+    )
+
+
+class ApprovalRequest(Base):
+    """
+    Multi-Approver 승인 요청 (설계서 §Q2-B).
+    타임아웃 기본 24시간. 거부 사유 필수.
+    """
+    __tablename__ = "approval_requests"
+
+    approval_request_id = Column(String(36), primary_key=True, default=_uuid)
+    org_id = Column(String(36), ForeignKey("organizations.org_id"), nullable=False, index=True)
+    requester_user_id = Column(String(36), ForeignKey("users.user_id"), nullable=False)
+    requester_device_id = Column(String(36), nullable=True)
+    action_summary = Column(String(500), nullable=False)
+    resource_type = Column(String(100), nullable=False)
+    resource_id = Column(String(255), nullable=True)
+    command_preview = Column(Text, nullable=True)
+    risk_reason = Column(Text, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")  # pending/approved/rejected/expired
+    required_approvers = Column(Integer, nullable=False, default=2)
+    current_approvals = Column(Integer, nullable=False, default=0)
+    current_rejections = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    policy_bundle_version = Column(String(100), nullable=False)
+    context = Column(JSON, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+    votes = relationship("ApprovalVote", back_populates="approval_request")
+
+    __table_args__ = (
+        Index("ix_approval_org_status", "org_id", "status"),
+    )
+
+
+class ApprovalVote(Base):
+    """승인자 개인 투표 기록. 모든 투표가 AuditLog에 추적된다."""
+    __tablename__ = "approval_votes"
+
+    vote_id = Column(String(36), primary_key=True, default=_uuid)
+    approval_request_id = Column(
+        String(36), ForeignKey("approval_requests.approval_request_id"), nullable=False, index=True
+    )
+    voter_user_id = Column(String(36), ForeignKey("users.user_id"), nullable=False)
+    approved = Column(Boolean, nullable=False)
+    reason = Column(Text, nullable=False)
+    voted_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+    approval_request = relationship("ApprovalRequest", back_populates="votes")
+
+    __table_args__ = (
+        UniqueConstraint("approval_request_id", "voter_user_id", name="uq_approval_vote"),
+    )

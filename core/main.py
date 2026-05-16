@@ -30,6 +30,7 @@ if str(_CORE_DIR) not in sys.path:
 from singleton import CoreSingleton
 from api.middleware.auth import SessionTokenMiddleware
 from api.routes import health, analyze, deploy, ops, session
+from api.routes import policy
 
 # ---------------------------------------------------------------------------
 # Module-level port variable
@@ -138,6 +139,7 @@ def create_app() -> FastAPI:
     app.include_router(deploy.router)
     app.include_router(ops.router)
     app.include_router(session.router)
+    app.include_router(policy.router)
 
     return app
 

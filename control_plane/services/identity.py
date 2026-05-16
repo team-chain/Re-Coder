@@ -286,5 +286,7 @@ class IdentityService:
         return hashlib.sha256(raw_token.encode()).hexdigest()
 
     async def _get_latest_policy_version(self, org_id: str) -> Optional[str]:
-        """PolicyBundle 최신 버전 조회 (Q2-B에서 구현 — 지금은 None 반환)"""
-        return None
+        """PolicyBundle 최신 버전 조회 (Q2-B 구현)"""
+        from control_plane.services.policy_service import PolicyService
+        policy_svc = PolicyService(self._db)
+        return await policy_svc.get_latest_version(org_id)

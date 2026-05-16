@@ -344,3 +344,144 @@ ROLE_PERMISSIONS: dict[OrgRole, set[Permission]] = {
 
 def has_permission(role: OrgRole, permission: Permission) -> bool:
     return permission in ROLE_PERMISSIONS.get(role, set())
+
+
+# ===========================================================================
+# Q2-B: PolicyBundle / OPA / Approval (설계서 §Q2-B)
+# ===========================================================================
+
+
+class PolicyPresetKey(str, Enum):
+    """설계서 §Q2-B Preset Policy 5개"""
+    TRIVY_CRITICAL_BLOCK = "trivy_critical_block"
+    PROD_MAIN_BRANCH_ONLY = "prod_main_branch_only"
+    PORT_22_BLOCK = "port_22_block"
+    SECRET_ENV_ESCALATE = "secret_env_escalate"
+    LEVEL3_TWO_APPROVERS = "level3_two_approvers"
+
+
+class OPADecisionStatus(str, Enum):
+    """OPA 평가 출력 5단계 (설계서 §Q2-B)"""
+    ALLOW = "allow"
+    ALLOW_WITH_APPROVAL = "allow_with_approval"
+    DENY = "deny"
+    DENY_WITH_FIX_SUGGESTION = "deny_with_fix_suggestion"
+    ESCALATE_TO_SECURITY = "escalate_to_security"
+
+
+class ApprovalStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+# ---------------------------------------------------------------------------
+# PolicyBundle
+# ---------------------------------------------------------------------------
+
+class PolicyPresetConfig(BaseModel):
+    """Preset 하나의 on/off 설정"""
+    key: PolicyPresetKey
+    enabled: bool = True
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class PolicyBundleCreate(BaseModel):
+    org_id: str
+    display_name: str
+    presets: list[PolicyPresetConfig]
+
+
+class PolicyBundleResponse(BaseModel):
+    bundle_id: str
+    org_id: str
+    version: str         # e.g. "v1.0.0"
+    display_name: str
+    sha256: str          # SHA-256 of rego content
+    is_active: bool
+    created_at: datetime
+    presets: list[PolicyPresetConfig] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# OPA 평가
+# ---------------------------------------------------------------------------
+
+class OPAEvaluateRequest(BaseModel):
+    """Local Core → Control Plane OPA 평가 요청"""
+    action: str              # e.g. "deployment:request"
+    resource_type: str
+    resource_id: Optional[str] = None
+    context: dict[str, Any] = Field(default_factory=dict)  # branch, image, env vars, ports…
+    level: int = Field(ge=1, le=4)
+    policy_bundle_version: Optional[str] = None
+
+
+class OPAEvaluateResponse(BaseModel):
+    """OPA 평가 결과"""
+    decision: OPADecisionStatus
+    reason: str
+    fix_suggestion: Optional[str] = None    # deny_with_fix_suggestion일 때
+    required_approvers: int = 0             # allow_with_approval일 때
+    approval_request_id: Optional[str] = None
+    policy_bundle_version: str
+    evaluated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# ApprovalRequest (Multi-Approver)
+# ---------------------------------------------------------------------------
+
+class ApprovalRequestCreate(BaseModel):
+    org_id: str
+    requester_user_id: str
+    requester_device_id: Optional[str] = None
+    action_summary: str
+    resource_type: str
+    resource_id: Optional[str] = None
+    command_preview: Optional[str] = None     # 실행될 명령 미리보기
+    risk_reason: str
+    required_approvers: int = Field(default=2, ge=1)
+    expires_in_hours: int = Field(default=24, ge=1, le=168)
+    policy_bundle_version: str
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApprovalVoteRequest(BaseModel):
+    approved: bool
+    reason: str   # 거부 시 필수, 승인 시에도 권고
+
+
+class ApprovalVoteResponse(BaseModel):
+    vote_id: str
+    approval_request_id: str
+    voter_user_id: str
+    approved: bool
+    reason: str
+    voted_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ApprovalRequestResponse(BaseModel):
+    approval_request_id: str
+    org_id: str
+    requester_user_id: str
+    action_summary: str
+    resource_type: str
+    resource_id: Optional[str] = None
+    command_preview: Optional[str] = None
+    risk_reason: str
+    status: ApprovalStatus
+    required_approvers: int
+    current_approvals: int
+    current_rejections: int
+    expires_at: datetime
+    policy_bundle_version: str
+    created_at: datetime
+    votes: list[ApprovalVoteResponse] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}

@@ -20,7 +20,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from control_plane.api.routes import auth, audit, devices, orgs
+from control_plane.api.routes import auth, audit, devices, orgs, policy, approvals
 from control_plane.db.migrations import init_db
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,8 @@ app.include_router(auth.router)
 app.include_router(devices.router)
 app.include_router(orgs.router)
 app.include_router(audit.router)
+app.include_router(policy.router)
+app.include_router(approvals.router)
 
 
 # ---------------------------------------------------------------------------
