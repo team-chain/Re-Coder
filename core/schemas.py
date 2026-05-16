@@ -668,3 +668,191 @@ class DemoScenario(BaseModel):
     cluster_provider: str = "eks"  # ADR-009: k3d/kind 금지
     cluster_lifetime_minutes: int = 120
     steps: list[DemoStep] = Field(default_factory=list)
+
+
+# ===========================================================================
+# Q4 Compatibility Aliases & Missing Schemas
+# (우리 Q4 에이전트 코드가 사용하는 클래스 — 팀원 스키마와 브리지)
+# ===========================================================================
+
+from typing import Optional as _Opt
+
+
+# ---------------------------------------------------------------------------
+# ArgoCD GitOps (팀원 schemas에 없음 → 추가)
+# ---------------------------------------------------------------------------
+
+class ArgoSyncPhase(str, Enum):
+    UNKNOWN    = "Unknown"
+    SYNCED     = "Synced"
+    OUT_OF_SYNC = "OutOfSync"
+    SYNC_FAILED = "SyncFailed"
+
+
+class ArgoHealthStatus(str, Enum):
+    UNKNOWN     = "Unknown"
+    PROGRESSING = "Progressing"
+    HEALTHY     = "Healthy"
+    SUSPENDED   = "Suspended"
+    DEGRADED    = "Degraded"
+    MISSING     = "Missing"
+
+
+class ArgoSyncRequest(BaseModel):
+    project_id:       str
+    app_name:         str
+    argocd_server:    str
+    argocd_token:     str
+    target_revision:  _Opt[str] = "HEAD"
+    prune:            bool = False
+    dry_run:          bool = False
+    force:            bool = False
+
+
+class ArgoSyncRecord(BaseModel):
+    sync_id:           str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id:        str
+    app_name:          str
+    argocd_server:     str
+    sync_phase:        ArgoSyncPhase = ArgoSyncPhase.UNKNOWN
+    health_status:     ArgoHealthStatus = ArgoHealthStatus.UNKNOWN
+    target_revision:   _Opt[str] = None
+    live_revision:     _Opt[str] = None
+    resources_synced:  int = 0
+    resources_failed:  int = 0
+    error_message:     _Opt[str] = None
+    rollback_triggered: bool = False
+    rollback_revision:  _Opt[str] = None
+    started_at:        datetime = Field(default_factory=datetime.utcnow)
+    completed_at:      _Opt[datetime] = None
+
+
+# ---------------------------------------------------------------------------
+# Incident (팀원: IncidentTimeline / IncidentEvent — 우리 에이전트용 alias)
+# ---------------------------------------------------------------------------
+
+class IncidentStatus(str, Enum):
+    OPEN         = "open"
+    INVESTIGATING = "investigating"
+    IDENTIFIED   = "identified"
+    MONITORING   = "monitoring"
+    RESOLVED     = "resolved"
+
+
+class TimelineEvent(BaseModel):
+    """단위 타임라인 이벤트 (팀원 IncidentEvent alias)."""
+    event_id:               str = Field(default_factory=lambda: str(uuid.uuid4()))
+    occurred_at:            datetime
+    source:                 str
+    title:                  str
+    description:            str
+    severity:               _Opt[IncidentSeverity] = None
+    related_deployment_id:  _Opt[str] = None
+    related_commit_sha:     _Opt[str] = None
+    metadata:               dict = Field(default_factory=dict)
+
+
+class IncidentRecord(BaseModel):
+    incident_id:    str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id:     str
+    title:          str
+    severity:       IncidentSeverity
+    status:         IncidentStatus = IncidentStatus.OPEN
+    detected_at:    datetime = Field(default_factory=datetime.utcnow)
+    resolved_at:    _Opt[datetime] = None
+    timeline:       list[TimelineEvent] = Field(default_factory=list)
+    rca_candidates: list[RCACandidate] = Field(default_factory=list)
+    postmortem_path: _Opt[str] = None
+    created_by:     str = "system"
+
+
+# ---------------------------------------------------------------------------
+# Rollback PR (팀원 schemas에 없음 → 추가)
+# ---------------------------------------------------------------------------
+
+class RollbackPRRequest(BaseModel):
+    project_id:          str
+    repo_owner:          str
+    repo_name:           str
+    target_commit_sha:   str
+    github_token:        str
+    base_branch:         str = "main"
+    pr_title:            _Opt[str] = None
+    pr_body:             _Opt[str] = None
+    auto_merge:          bool = False
+    approval_request_id: _Opt[str] = None
+
+
+class RollbackPRRecord(BaseModel):
+    pr_id:               str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id:          str
+    repo_full_name:      str
+    pr_number:           _Opt[int] = None
+    pr_url:              _Opt[str] = None
+    target_commit_sha:   str
+    revert_branch:       str
+    status:              str = "pending"
+    error_message:       _Opt[str] = None
+    created_at:          datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Observability (팀원 schemas에 없음 → 추가)
+# ---------------------------------------------------------------------------
+
+class MetricPoint(BaseModel):
+    name:      str
+    value:     float
+    labels:    dict[str, str] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    unit:      str = ""
+
+
+class TraceSpan(BaseModel):
+    span_id:        str = Field(default_factory=lambda: str(uuid.uuid4()))
+    trace_id:       str
+    parent_span_id: _Opt[str] = None
+    name:           str
+    service_name:   str
+    start_time:     datetime
+    end_time:       _Opt[datetime] = None
+    status:         str = "ok"
+    attributes:     dict = Field(default_factory=dict)
+    error_message:  _Opt[str] = None
+
+
+class ObservabilityConfig(BaseModel):
+    otel_endpoint:   str = "http://localhost:4317"
+    prometheus_port: int = 9090
+    loki_url:        str = "http://localhost:3100"
+    service_name:    str = "recoder-local-core"
+    service_version: str = "1.0.0"
+    enabled:         bool = True
+
+
+# ---------------------------------------------------------------------------
+# MCP (팀원: MCPToolDescriptor → 우리 에이전트용 alias 추가)
+# ---------------------------------------------------------------------------
+
+MCPToolDefinition = MCPToolDescriptor  # alias
+
+
+class MCPRequest(BaseModel):
+    jsonrpc: str = "2.0"
+    id:      _Opt[str] = None
+    method:  str
+    params:  dict = Field(default_factory=dict)
+
+
+class MCPResponse(BaseModel):
+    jsonrpc: str = "2.0"
+    id:      _Opt[str] = None
+    result:  _Opt[dict] = None
+    error:   _Opt[dict] = None
+
+
+class MCPServerConfig(BaseModel):
+    server_name:    str = "recoder-mcp"
+    server_version: str = "1.0.0"
+    transport:      str = "stdio"
+    tools:          list[MCPToolDescriptor] = Field(default_factory=list)
