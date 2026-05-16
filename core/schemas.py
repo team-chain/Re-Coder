@@ -713,3 +713,224 @@ class ECSDeployRecord(BaseModel):
     deployed_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
+
+
+# ===========================================================================
+# Q4 — GitOps + Observability + MCP
+# 설계서 §Q4 (Must-Core)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# ArgoCD GitOps
+# ---------------------------------------------------------------------------
+
+class ArgoSyncPhase(str, Enum):
+    """ArgoCD Application 동기화 단계"""
+    UNKNOWN = "Unknown"
+    SYNCED = "Synced"
+    OUT_OF_SYNC = "OutOfSync"
+    SYNC_FAILED = "SyncFailed"
+
+
+class ArgoHealthStatus(str, Enum):
+    """ArgoCD Application 헬스 상태"""
+    UNKNOWN = "Unknown"
+    PROGRESSING = "Progressing"
+    HEALTHY = "Healthy"
+    SUSPENDED = "Suspended"
+    DEGRADED = "Degraded"
+    MISSING = "Missing"
+
+
+class ArgoSyncRequest(BaseModel):
+    """ArgoCD Application 동기화 요청"""
+    project_id: str
+    app_name: str                              # ArgoCD Application 이름
+    argocd_server: str                         # e.g., "argocd.example.com"
+    argocd_token: str                          # ArgoCD API token (마스킹 출력)
+    target_revision: Optional[str] = "HEAD"   # 동기화할 git revision
+    prune: bool = False                        # 제거된 리소스 정리 여부
+    dry_run: bool = False                      # dry-run 모드
+    force: bool = False                        # 강제 동기화
+
+
+class ArgoSyncRecord(BaseModel):
+    """ArgoCD 동기화 기록"""
+    sync_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id: str
+    app_name: str
+    argocd_server: str
+    sync_phase: ArgoSyncPhase = ArgoSyncPhase.UNKNOWN
+    health_status: ArgoHealthStatus = ArgoHealthStatus.UNKNOWN
+    target_revision: Optional[str] = None
+    live_revision: Optional[str] = None       # 현재 배포된 git SHA
+    resources_synced: int = 0
+    resources_failed: int = 0
+    error_message: Optional[str] = None
+    rollback_triggered: bool = False
+    rollback_revision: Optional[str] = None
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: Optional[datetime] = None
+
+
+# ---------------------------------------------------------------------------
+# Incident Timeline + RCA
+# ---------------------------------------------------------------------------
+
+class IncidentSeverity(str, Enum):
+    SEV1 = "sev1"   # 전체 서비스 다운
+    SEV2 = "sev2"   # 주요 기능 장애
+    SEV3 = "sev3"   # 부분 장애 / 성능 저하
+    SEV4 = "sev4"   # 경미한 이슈
+
+
+class IncidentStatus(str, Enum):
+    OPEN = "open"
+    INVESTIGATING = "investigating"
+    IDENTIFIED = "identified"
+    MONITORING = "monitoring"
+    RESOLVED = "resolved"
+
+
+class TimelineEvent(BaseModel):
+    """장애 타임라인 개별 이벤트"""
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    occurred_at: datetime
+    source: str                  # "alert", "user", "deployment", "audit_log"
+    title: str
+    description: str
+    severity: Optional[IncidentSeverity] = None
+    related_deployment_id: Optional[str] = None
+    related_commit_sha: Optional[str] = None
+    metadata: dict = Field(default_factory=dict)
+
+
+class RCACandidate(BaseModel):
+    """RCA 원인 후보 (confidence score 기반)"""
+    candidate_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    title: str
+    description: str
+    confidence_score: float = Field(ge=0.0, le=1.0)   # 0.0~1.0
+    evidence: list[str] = Field(default_factory=list)  # 근거 목록
+    related_event_ids: list[str] = Field(default_factory=list)
+    suggested_fix: Optional[str] = None
+
+
+class IncidentRecord(BaseModel):
+    """장애 레코드 (Timeline + RCA 포함)"""
+    incident_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id: str
+    title: str
+    severity: IncidentSeverity
+    status: IncidentStatus = IncidentStatus.OPEN
+    detected_at: datetime = Field(default_factory=datetime.utcnow)
+    resolved_at: Optional[datetime] = None
+    timeline: list[TimelineEvent] = Field(default_factory=list)
+    rca_candidates: list[RCACandidate] = Field(default_factory=list)
+    postmortem_path: Optional[str] = None    # 생성된 Postmortem 파일 경로
+    created_by: str = "system"
+
+
+# ---------------------------------------------------------------------------
+# Rollback PR (ADR-005)
+# ---------------------------------------------------------------------------
+
+class RollbackPRRequest(BaseModel):
+    """Git revert PR 생성 요청 (ADR-005: 프로덕션은 revert PR 기본)"""
+    project_id: str
+    repo_owner: str                # GitHub 조직/유저
+    repo_name: str
+    target_commit_sha: str         # revert 대상 commit SHA
+    github_token: str              # GitHub API token
+    base_branch: str = "main"
+    pr_title: Optional[str] = None
+    pr_body: Optional[str] = None
+    auto_merge: bool = False       # 승인 후 자동 머지 (Level 3 이상 금지)
+    approval_request_id: Optional[str] = None  # 연결된 승인 요청
+
+
+class RollbackPRRecord(BaseModel):
+    """생성된 rollback PR 기록"""
+    pr_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id: str
+    repo_full_name: str            # "{owner}/{repo}"
+    pr_number: Optional[int] = None
+    pr_url: Optional[str] = None
+    target_commit_sha: str
+    revert_branch: str
+    status: str = "pending"        # "pending" | "opened" | "merged" | "closed"
+    error_message: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# OTel Observability
+# ---------------------------------------------------------------------------
+
+class MetricPoint(BaseModel):
+    """단일 메트릭 데이터 포인트"""
+    name: str
+    value: float
+    labels: dict[str, str] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    unit: str = ""
+
+
+class TraceSpan(BaseModel):
+    """OTel 트레이스 스팬"""
+    span_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    trace_id: str
+    parent_span_id: Optional[str] = None
+    name: str
+    service_name: str
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    status: str = "ok"             # "ok" | "error" | "unset"
+    attributes: dict = Field(default_factory=dict)
+    error_message: Optional[str] = None
+
+
+class ObservabilityConfig(BaseModel):
+    """OTel 설정"""
+    otel_endpoint: str = "http://localhost:4317"   # gRPC collector endpoint
+    prometheus_port: int = 9090
+    loki_url: str = "http://localhost:3100"
+    service_name: str = "recoder-local-core"
+    service_version: str = "1.0.0"
+    enabled: bool = True
+
+
+# ---------------------------------------------------------------------------
+# MCP (Model Context Protocol)
+# ---------------------------------------------------------------------------
+
+class MCPToolDefinition(BaseModel):
+    """MCP 도구 정의"""
+    name: str
+    description: str
+    input_schema: dict             # JSON Schema
+    output_schema: Optional[dict] = None
+
+
+class MCPRequest(BaseModel):
+    """MCP stdio 요청 (JSON-RPC 2.0 기반)"""
+    jsonrpc: str = "2.0"
+    id: Optional[str] = None
+    method: str
+    params: dict = Field(default_factory=dict)
+
+
+class MCPResponse(BaseModel):
+    """MCP stdio 응답"""
+    jsonrpc: str = "2.0"
+    id: Optional[str] = None
+    result: Optional[dict] = None
+    error: Optional[dict] = None
+
+
+class MCPServerConfig(BaseModel):
+    """MCP 서버 설정"""
+    server_name: str = "recoder-mcp"
+    server_version: str = "1.0.0"
+    transport: str = "stdio"       # "stdio" | "sse"
+    tools: list[MCPToolDefinition] = Field(default_factory=list)

@@ -93,6 +93,6 @@ npm run compile   # TypeScript 컴파일
 | Q2-A Control Plane Core | ✅ 완료 | 2026-05-16 |
 | Q2-B Governance (OPA + 2인 승인) | ✅ 완료 | 2026-05-16 |
 | Q3 ECS Fargate + SBOM + 보안스캔 | ✅ 완료 | 2026-05-16 |
-| Q4 GitOps + OTel + MCP | 🔲 시작 전 | - |
+| Q4 GitOps + OTel + MCP | ✅ 완료 | 2026-05-16 |
 
 → 상세 내용: [PROGRESS.md](PROGRESS.md) · [HANDOFF.md](HANDOFF.md)

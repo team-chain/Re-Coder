@@ -27,7 +27,7 @@
 | Q2-A | Control Plane Core (Identity/Org/Audit) | ✅ **100%** | 21개 파일, 20개 API 엔드포인트 완료 |
 | Q2-B | Governance (OPA, 2인 승인) | ✅ **100%** | 11개 엔드포인트, DoD 16/16 통과 |
 | Q3 | Cloud Execution (ECS, SBOM) | ✅ **100%** | 8개 파일, Must-Core 전체 완료 |
-| Q4 | GitOps + Observability + MCP | 🔲 0% | Q3 완료 후 시작 |
+| Q4 | GitOps + Observability + MCP | ✅ **100%** | 9개 파일, Must-Core 전체 완료 |
 
 ---
 
@@ -171,20 +171,47 @@
 
 ---
 
-## Q4 — GitOps + Observability + MCP
+## Q4 — GitOps + Observability + MCP ✅
 
-**전제**: Q3 DoD 달성 후 시작. 쐐기 시나리오 7단계 완성 목표.
+**브랜치**: `feat/q1-enterprise-foundation`
 
-| # | 항목 | 상태 |
-|---|---|---|
-| D-1 | GitOps ArgoCD 연동 (Must-Wedge) | 🔲 |
-| D-2 | Incident Timeline MVP | 🔲 |
-| D-3 | RCA (근거 기반 후보 제안, confidence score) | 🔲 |
-| D-4 | rollback PR 자동 생성 | 🔲 |
-| D-5 | Postmortem skeleton 생성 | 🔲 |
-| D-6 | OTel Collector (Prometheus + Loki) | 🔲 |
-| D-7 | MCP stdio PoC | 🔲 |
-| D-8 | **Final Demo: 쐐기 시나리오 7단계** | 🔲 |
+### Q4-A: GitOps ArgoCD 연동 ✅
+
+| # | 항목 | 파일 | 상태 |
+|---|---|---|---|
+| D-1 | ArgoCD Application 동기화 에이전트 (ADR-009) | `core/agents/argocd_agent.py` | ✅ |
+| D-2 | ArgoCD 상태 폴링 (Healthy/Degraded/SyncFailed) | `argocd_agent.py` | ✅ |
+| D-3 | ArgoCD 직접 rollback (ADR-006: Sev1만) | `argocd_agent.py` | ✅ |
+| D-4 | GitOps API 엔드포인트 5개 (/sync, /syncs, /apps/{app}/status, /rollback-pr) | `core/api/routes/gitops.py` | ✅ |
+| D-5 | rollback PR 자동 생성 (GitHub API, ADR-005) | `core/agents/rollback_pr_agent.py` | ✅ |
+
+### Q4-B: Incident Timeline + RCA ✅
+
+| # | 항목 | 파일 | 상태 |
+|---|---|---|---|
+| D-6 | 장애 등록 + 타임라인 구성 | `core/agents/incident_agent.py` | ✅ |
+| D-7 | RCA: LLM/휴리스틱 혼합, confidence score | `incident_agent.py` | ✅ |
+| D-8 | Postmortem skeleton 마크다운 자동 생성 | `incident_agent.py` | ✅ |
+| D-9 | Incident API 7개 (/open, /event, /rca, /postmortem, /resolve) | `core/api/routes/incident.py` | ✅ |
+
+### Q4-C: Observability + MCP ✅
+
+| # | 항목 | 파일 | 상태 |
+|---|---|---|---|
+| D-10 | OTel Collector 연동 (Prometheus + Loki) | `core/observability.py` | ✅ |
+| D-11 | 배포/장애/정책 평가 메트릭 자동 기록 | `observability.py` | ✅ |
+| D-12 | MCP stdio PoC (JSON-RPC 2.0, 6개 도구) | `core/mcp_server.py` | ✅ |
+| D-13 | Q4 스키마 추가 (ArgoSyncRecord, IncidentRecord, RCACandidate 등) | `core/schemas.py` | ✅ |
+| D-14 | **Final Demo 준비: 쐐기 시나리오 7단계 파이프라인 완성** | 전체 | ✅ |
+
+**쐐기 시나리오 7단계 구현 현황**:
+1. 장애 감지 → `/incident/open` ✅
+2. 타임라인 구성 → `/incident/{id}/event` ✅
+3. RCA 실행 → `/incident/{id}/rca` ✅
+4. rollback PR 생성 → `/gitops/rollback-pr` ✅
+5. 2인 승인 → `/approvals/vote` (Q2-B) ✅
+6. ArgoCD sync → `/gitops/sync` ✅
+7. Postmortem → `/incident/{id}/postmortem` ✅
 
 ---
 
@@ -197,3 +224,4 @@
 | 2026-05-16 | **Q2-A 완료**: Control Plane Core 21파일, 20 API (Identity/Device/Org/RBAC/AuditLog) |
 | 2026-05-16 | **Q2-B 완료**: OPA 정책 엔진 + Multi-Approver. 11 API, DoD 16/16 통과 |
 | 2026-05-16 | **Q3 완료**: ECS Fargate Rolling Update, SBOM(Syft), 보안스캔(Trivy/Hadolint/gitleaks), Circuit Breaker, OPA 게이트 7 presets |
+| 2026-05-16 | **Q4 완료**: ArgoCD GitOps, Incident Timeline+RCA, rollback PR(ADR-005), OTel+Prometheus+Loki, MCP stdio PoC. 쐐기 시나리오 7단계 완성 |

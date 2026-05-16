@@ -8,10 +8,10 @@
 
 ## 현재 상태 요약
 
-**완료된 분기**: Q1 + Q2-A + Q2-B + **Q3 ✅**
+**완료된 분기**: Q1 + Q2-A + Q2-B + Q3 + **Q4 ✅ (전체 완료)**
 
-Q1 Must-Core, Control Plane Core(Q2-A), OPA 정책 엔진 + Multi-Approver(Q2-B), ECS Fargate Rolling Update + SBOM + 보안스캔(Q3)이 구현됐다.
-다음 작업은 **Q4 — GitOps ArgoCD + OTel + MCP**이다.
+Q1 Must-Core, Control Plane Core(Q2-A), OPA 정책 엔진 + Multi-Approver(Q2-B), ECS Fargate Rolling Update + SBOM + 보안스캔(Q3), GitOps ArgoCD + Incident Timeline + RCA + OTel + MCP(Q4)가 모두 구현됐다.
+**설계서 §Q1~Q4 Must-Core 전체 완료. 쐐기 시나리오 7단계 파이프라인 완성.**
 
 ---
 
@@ -52,6 +52,13 @@ policy_cache.py             AuditLog (hash chain)
 | `security_scan.py` | Trivy/Hadolint/gitleaks 병렬 스캔 |
 | `sbom.py` | Syft CycloneDX JSON SBOM 생성 |
 | `api/routes/ecs.py` | ECS 배포 API (/deploy, /status, /cancel, /preflight, /scan) |
+| `agents/argocd_agent.py` | ArgoCD Application 동기화, 폴링, 직접 rollback (ADR-006) |
+| `agents/incident_agent.py` | 장애 등록, 타임라인, RCA (LLM+휴리스틱), Postmortem |
+| `agents/rollback_pr_agent.py` | GitHub API로 git revert PR 자동 생성 (ADR-005) |
+| `observability.py` | OTel Tracer + Prometheus 메트릭 + Loki 로그 push |
+| `mcp_server.py` | MCP stdio 서버 (JSON-RPC 2.0, 6개 도구, Extension 연동) |
+| `api/routes/gitops.py` | GitOps API (/sync, /syncs, /apps/{app}/status, /rollback-pr) |
+| `api/routes/incident.py` | Incident API (/open, /event, /rca, /postmortem, /resolve) |
 
 ### Control Plane (`control_plane/`)
 
@@ -91,15 +98,19 @@ policy_cache.py             AuditLog (hash chain)
 
 ## 다음 에이전트 인계 사항
 
-### 즉시 해야 할 것 (Q4 시작)
+### 전체 구현 완료 ✅
 
-1. **GitOps ArgoCD 연동** — ArgoCD Application CRD 생성, sync 상태 폴링, 설계서 ADR-009 기준
-2. **Incident Timeline MVP** — 장애 이벤트 수집 + 타임라인 UI
-3. **OTel Collector 연동** — Prometheus + Loki 메트릭/로그 수집
-4. **MCP stdio PoC** — Model Context Protocol 로컬 서버 구현
-5. **rollback PR 자동 생성** — ADR-005: Git revert PR 기본
-6. **Postmortem skeleton** — 장애 보고서 템플릿 자동 생성
-7. **Final Demo 준비** — 쐐기 시나리오 7단계 E2E
+**Q1~Q4 Must-Core 모두 구현됐습니다.**
+
+남은 작업 (Should/Optional):
+1. Q1 Eval pass_rate 실측 (LLM 연동 필요)
+2. PyInstaller 빌드 자동화 (Windows/Linux)
+3. ECS Blue/Green 배포 (Q3 Should)
+4. Cosign image signing (Q3 Should)
+5. SBOM Control Plane 전체 업로드 opt-in (Q3 Should)
+6. ArgoCD Application manifest 자동 생성 (Q4 Should)
+7. Slack/이메일 알림 연동 (Q2-B Should)
+8. **실제 환경 Final Demo** — 실제 EKS + ArgoCD 쐐기 시나리오 E2E
 
 **Q3 완료된 것 (인계 정보)**
 - ECS Rolling Update 전체 파이프라인 (Preflight → Scan → SBOM → TaskDef → update-service → Poll → CircuitBreaker → Rollback)
