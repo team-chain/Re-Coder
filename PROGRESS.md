@@ -1,8 +1,83 @@
 # ReCoder v6.4 — 구현 진척률 트래커
-> **설계서 버전**: v6.4-final
-> **마지막 업데이트**: 2026-05-12 (버그 수정 + EC2 배포 기능 — Claude Cowork 5차 세션)
+> **설계서 버전**: v6.4-final + v5.0 Q3/Q4 (Enterprise 1년 로드맵)
+> **마지막 업데이트**: 2026-05-16 (v5.0 Q4 Must-Wedge 잔여 구현 — Claude Cowork 6차 세션)
 > **담당**: 이동규(백엔드·인프라), 윤세빈(Extension·코드 분석)
-> **AI 구현 진행**: Claude (Cowork) — 2026-05-07 1차 구현, 2026-05-08 실측 감사 + P0-1~P0-13 전항목 완료 + pytest 15건 통과, 2026-05-10 실행 환경 버그 3종 수정, 2026-05-12 런타임 버그 수정 + EC2 배포 구현
+> **AI 구현 진행**: Claude (Cowork) — 2026-05-07 1차 구현, 2026-05-08 P0 13건 완료, 2026-05-10 실행 환경 버그 수정, 2026-05-12 EC2 배포 구현, 2026-05-16 v5.0 Q4 OTel/Incident/RCA/MCP 통합 + Final Demo B 스크립트
+
+---
+
+## v5.0 Q3 ~ Q4 진척 (Enterprise 1년 설계서 기준)
+
+> 본 섹션은 `ReCoder_Enterprise_Final_Design_v5.0 (1년).md` 의 Must / Should / Backlog 체계를 따른다.
+> v6.4 트래커는 기존 그대로 유지하고, 본 섹션은 같은 코드베이스를 분기별 시점에서 본 진척률이다.
+
+### Q3 — Cloud Execution (ECS Fargate + SBOM + OPA gate)
+
+| 항목 | 상태 | 모듈 / 비고 |
+|------|------|------------|
+| Cloud Preflight (read-only IAM) | ✅ | `server.py` `/api/deploy/ecs/ready` |
+| ECS Rolling Update | ✅ | `ecs_deploy_agent.py` + `/api/deploy/ecs` |
+| Circuit Breaker (5분 50% 초과 자동 중단) | ✅ | `ecs_deploy_agent.py` |
+| Rollback proposal (이전 Task Definition) | ✅ | `ecs_deploy_agent.py` + Approval Level 3 |
+| SBOM (Syft, CycloneDX JSON) | ✅ | `sbom_agent.py` + `/api/sbom/*` |
+| OPA gate (Trivy / Hadolint / gitleaks) | ✅ | `opa_gate.py` + `/api/opa/evaluate` |
+| Cosign signing (Should) | 🔲 | Backlog 이전 단계 — Q3 확장 |
+| ECS Blue/Green (Should) | 🔲 | Q3-A 안정화 후 |
+| Dogfooding: CloudWatch / Watchdog 감지 | 🔄 | 자체 서비스 가시화 진행 중 |
+
+### Q4 — GitOps + Observability + MCP (Must-Wedge)
+
+| 항목 | 상태 | 모듈 / 비고 |
+|------|------|------------|
+| GitOps ArgoCD 연동 | ✅ | `gitops_agent.py` + `/api/gitops/ship` |
+| Rollback PR 자동 생성 (ADR-005) | ✅ | `rollback_pr_agent.py` + `/api/rollback-pr/create` |
+| Postmortem skeleton 템플릿 | ✅ | `postmortem_agent.py` + `/api/postmortem/generate` |
+| **OpenTelemetry 통합 (Collector + Adapter)** | ✅ | `core/observability/` 패키지 + `deploy/otel/docker-compose.otel.yml` |
+| **LLM 호출 OTel Span 계측** | ✅ | `llm/provider_router.py` `_instrument_llm_span` |
+| **Incident Correlation (8개 신호)** | ✅ | `incident_correlator.py` + `/api/incident/correlate` |
+| **Incident Timeline MVP** | ✅ | `incident_timeline.py` + `/api/incident/timeline` |
+| **RCA MVP (구조화 출력 4가지 + confidence)** | ✅ | `rca_agent.py` + `/api/incident/rca` |
+| **"확정 원인" 표현 sanitizer** | ✅ | `rca_agent.py` `_sanitize_report` |
+| **MCP local stdio PoC (`recoder_analyze`)** | ✅ | `mcp_server.py` + `/api/mcp/health` |
+| **Final Demo B — 실제 EKS 자동화** | ✅ | `demo/eks/create_demo_cluster.sh`, `destroy_demo_cluster.sh`, `eksctl-cluster.yaml` |
+| Tempo (Q4 후반) | 🔲 | OTel Collector dict 빌더는 enable_tempo 옵션 준비됨 |
+| MCP Streamable HTTP remote | 🔲 | Backlog (의도) |
+| `recoder_deploy` / `recoder_operate` MCP 도구 | 🔲 | Backlog (의도) |
+
+### 신규 스키마 (`core/schemas.py`)
+
+`IncidentSeverity`, `IncidentEventKind`, `IncidentEvent`, `IncidentTimeline`,
+`CorrelationSignalKind`, `CorrelationSignal`, `CorrelationResult`,
+`RCASymptom`, `RCACandidate`, `RCAReport`, `PostmortemSection`, `PostmortemSkeleton`,
+`ObservabilityQueryKind`, `ObservabilityQueryResult`,
+`MCPTransport`, `MCPToolDescriptor`, `MCPInvocation`, `MCPInvocationResult`,
+`DemoStepStatus`, `DemoStep`, `DemoScenario`
+
+### 신규 엔드포인트 (`core/server.py`)
+
+```
+POST /api/incident/timeline      Incident Timeline MVP
+POST /api/incident/correlate     8개 신호 가중평균 correlation score
+POST /api/incident/rca           RCA MVP — confidence 포함, 확정 원인 금지
+POST /api/observability/query    Prometheus / Loki 통합 쿼리
+GET  /api/observability/ready    OTel 백엔드 연결 확인
+GET  /api/mcp/health             MCP stdio PoC tools/list
+```
+
+### Q4 Must-Wedge DoD 점검표
+
+| DoD | 상태 |
+|-----|------|
+| 쐐기 시나리오 7단계 전체 무결 동작 | 🔄 시연 환경에서 E2E 리허설 필요 |
+| ArgoCD PR 머지 후 클러스터 적용 10분 이내 | 🔄 EKS 환경에서 실제 측정 필요 |
+| Postmortem skeleton 5분 이내 생성 | ✅ deterministic 경로 즉시 생성 |
+
+### ADR / Risk 추적
+
+- ADR-005 (Production GitOps rollback = Git revert PR 기본) — 코드 일관성 OK
+- ADR-008 (ECS 데모 ≠ EKS 데모) — `demo/DEMO.md` 두 시나리오 분리 명시
+- ADR-009 (Final Demo = 실제 EKS, k3d/kind 금지) — `eksctl-cluster.yaml` 채택, k3d 사용 코드 없음
+- Risk **AI 패치 품질 불안정** — RCA sanitizer 가 "확정 원인" 표현을 자동 치환
 
 ---
 

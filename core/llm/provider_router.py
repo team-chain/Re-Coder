@@ -41,6 +41,28 @@ def _get_providers():
     return BedrockProvider, SONNET_MODELS, HAIKU_MODELS, GeminiProvider
 
 
+def _instrument_llm_span(**kwargs):
+    """v5.0 Q4 — OTel Span 계측. observability 패키지가 import 실패하면 no-op."""
+    try:
+        try:
+            from observability.otel_adapter import instrument_llm_span
+        except ImportError:
+            from core.observability.otel_adapter import instrument_llm_span
+        return instrument_llm_span(**kwargs)
+    except Exception:  # pragma: no cover
+        import contextlib
+
+        class _NoopSpan:
+            def set_attribute(self, *_a, **_k):
+                return None
+
+        @contextlib.contextmanager
+        def _noop():
+            yield _NoopSpan()
+
+        return _noop()
+
+
 # ---------------------------------------------------------------------------
 # LLMProviderRouter
 # ---------------------------------------------------------------------------
@@ -80,34 +102,51 @@ class LLMProviderRouter:
         start = time.monotonic()
         retry_count = 0
 
-        try:
-            messages = [{"role": "user", "content": [{"text": prompt}]}]
-            result = await self._bedrock_sonnet.converse(messages, output_schema=schema)
+        with _instrument_llm_span(
+            provider="bedrock",
+            model=self._bedrock_sonnet.model_id,
+            operation="call_primary",
+        ) as span:
+            try:
+                messages = [{"role": "user", "content": [{"text": prompt}]}]
+                result = await self._bedrock_sonnet.converse(messages, output_schema=schema)
+                input_tok, output_tok = self._estimate_tokens(prompt, result)
+                latency = int((time.monotonic() - start) * 1000)
+                span.set_attribute("input_tokens", input_tok)
+                span.set_attribute("output_tokens", output_tok)
+                span.set_attribute("latency_ms", latency)
+                self._record_call(
+                    agent="primary", operation="call_primary",
+                    provider="bedrock", model=self._bedrock_sonnet.model_id,
+                    input_tokens=input_tok, output_tokens=output_tok,
+                    latency_ms=latency, fallback_used=False, retry_count=0,
+                )
+                return result
+
+            except Exception as exc:
+                log.warning("Bedrock Sonnet failed: %s — trying Gemini fallback", exc)
+                retry_count = 1
+
+        # Gemini fallback (별도 span)
+        with _instrument_llm_span(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            operation="call_primary_fallback",
+        ) as span:
+            result = await self._gemini.generate(prompt, schema=schema)
             input_tok, output_tok = self._estimate_tokens(prompt, result)
             latency = int((time.monotonic() - start) * 1000)
+            span.set_attribute("input_tokens", input_tok)
+            span.set_attribute("output_tokens", output_tok)
+            span.set_attribute("latency_ms", latency)
+            span.set_attribute("fallback_used", True)
             self._record_call(
                 agent="primary", operation="call_primary",
-                provider="bedrock", model=self._bedrock_sonnet.model_id,
+                provider="gemini", model="gemini-2.5-flash",
                 input_tokens=input_tok, output_tokens=output_tok,
-                latency_ms=latency, fallback_used=False, retry_count=0,
+                latency_ms=latency, fallback_used=True, retry_count=retry_count,
             )
             return result
-
-        except Exception as exc:
-            log.warning("Bedrock Sonnet failed: %s — trying Gemini fallback", exc)
-            retry_count = 1
-
-        # Gemini fallback
-        result = await self._gemini.generate(prompt, schema=schema)
-        input_tok, output_tok = self._estimate_tokens(prompt, result)
-        latency = int((time.monotonic() - start) * 1000)
-        self._record_call(
-            agent="primary", operation="call_primary",
-            provider="gemini", model="gemini-2.5-flash",
-            input_tokens=input_tok, output_tokens=output_tok,
-            latency_ms=latency, fallback_used=True, retry_count=retry_count,
-        )
-        return result
 
     async def call_fast(
         self,

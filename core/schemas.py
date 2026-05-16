@@ -411,3 +411,260 @@ class CostSummary(BaseModel):
     monthly_usd: float = Field(ge=0.0)
     call_count: int = Field(ge=0)
     last_updated: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# v5.0 Q4 — Observability / Incident / RCA Models
+#
+# 설계서 §Q4 — OpenTelemetry 통합 + Incident Correlation + RCA MVP + Postmortem
+# 핵심 원칙:
+#  - RCA 는 "확정 원인" 을 말하지 않는다. confidence score 가 항상 함께한다.
+#  - correlation score 가 낮으면 "최근 배포와 직접 관련성 낮음" 으로 표기한다.
+#  - OTel 미연결 시 Watchdog incident.jsonl + AuditLog 만으로 fallback 한다.
+# ---------------------------------------------------------------------------
+
+
+class IncidentSeverity(str, Enum):
+    """Incident severity (ADR-005 — Severity 1 은 emergency rollback 대상)."""
+
+    SEV1 = "sev1"   # critical: production 중단, 즉시 대응
+    SEV2 = "sev2"   # high   : 주요 기능 마비
+    SEV3 = "sev3"   # medium : 부분 영향
+    SEV4 = "sev4"   # low    : 관측만, 대응 옵션
+
+
+class IncidentEventKind(str, Enum):
+    """Incident Timeline 의 단위 이벤트 종류."""
+
+    DEPLOYMENT     = "deployment"
+    ALERT          = "alert"
+    METRIC_SPIKE   = "metric_spike"
+    LOG_PATTERN    = "log_pattern"
+    HEALTH_CHECK   = "health_check"
+    APPROVAL       = "approval"
+    ROLLBACK       = "rollback"
+    GITOPS_PR      = "gitops_pr"
+    OTEL_SPAN      = "otel_span"
+    AUDIT          = "audit"
+    NOTE           = "note"
+
+
+class CorrelationSignalKind(str, Enum):
+    """Incident Correlation 의 8개 신호 (설계서 §Q4 Incident Correlation 설계)."""
+
+    ERROR_RATE_DELTA       = "error_rate_delta"
+    LATENCY_DELTA          = "latency_delta"
+    CHANGED_FILES_AREA     = "changed_files_area"
+    CONTAINER_RESTART      = "container_restart"
+    HEALTH_CHECK_FAILURE   = "health_check_failure"
+    LOG_KEYWORD_DELTA      = "log_keyword_delta"
+    TRAFFIC_SPIKE          = "traffic_spike"
+    DEPENDENCY_ERROR       = "dependency_error"
+
+
+class IncidentEvent(BaseModel):
+    """Timeline 위에 표시되는 한 줄의 이벤트."""
+
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    incident_id: str
+    occurred_at: datetime
+    kind: IncidentEventKind
+    title: str
+    detail: Optional[str] = None
+    source: str = "unknown"  # 예: "otel", "watchdog", "auditlog", "deployment_record"
+    refs: dict[str, Any] = Field(default_factory=dict)  # 자유 형식 메타
+
+
+class IncidentTimeline(BaseModel):
+    """Incident Timeline MVP — 시간 정렬된 이벤트의 집합."""
+
+    schema_version: str = "1.0"
+    incident_id: str
+    project_id: Optional[str] = None
+    severity: IncidentSeverity = IncidentSeverity.SEV3
+    detected_at: datetime
+    resolved_at: Optional[datetime] = None
+    events: list[IncidentEvent] = Field(default_factory=list)
+    otel_available: bool = False
+    fallback_reason: Optional[str] = None  # OTel 미연결 시 사유 텍스트
+
+
+class ObservabilityQueryKind(str, Enum):
+    METRIC = "metric"
+    LOG    = "log"
+    TRACE  = "trace"
+
+
+class ObservabilityQueryResult(BaseModel):
+    """PrometheusAdapter / LokiAdapter 의 통합 응답."""
+
+    schema_version: str = "1.0"
+    kind: ObservabilityQueryKind
+    query: str
+    started_at: datetime
+    ended_at: datetime
+    samples: list[dict[str, Any]] = Field(default_factory=list)
+    error: Optional[str] = None
+    backend: str = "unknown"  # "prometheus" | "loki" | "tempo" | "fallback"
+
+
+class CorrelationSignal(BaseModel):
+    """단일 신호와 그 기여도."""
+
+    kind: CorrelationSignalKind
+    weight: float = Field(ge=0.0, le=1.0)
+    score: float = Field(ge=0.0, le=1.0)  # 정규화된 신호 강도
+    evidence: str
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class CorrelationResult(BaseModel):
+    """한 인시던트 ↔ 한 DeploymentRecord 사이의 매칭 결과."""
+
+    schema_version: str = "1.0"
+    incident_id: str
+    candidate_deployment_id: Optional[str] = None
+    candidate_image_tag: Optional[str] = None
+    signals: list[CorrelationSignal] = Field(default_factory=list)
+    correlation_score: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    label: str = "candidate"  # "candidate" | "weak_link" | "no_link"
+    rationale: str = ""
+
+
+class RCASymptom(BaseModel):
+    """관측된 증상 한 줄 (RCA 구조화 출력 #3)."""
+
+    name: str             # "error_rate", "memory", "restart_count", "health_check_failure"
+    value: Optional[str] = None
+    delta: Optional[str] = None
+    evidence: Optional[str] = None
+
+
+class RCACandidate(BaseModel):
+    """가능성 높은 원인 후보 (RCA 구조화 출력 #4).
+
+    표현 원칙 (설계서):
+      - "원인입니다" 사용 금지 — 항상 "가능성 높은 원인 후보입니다" 톤
+      - confidence 가 항상 함께 표시된다
+    """
+
+    candidate_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    hypothesis: str
+    evidence: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+    rollback_hint: Optional[str] = None
+    related_files: list[str] = Field(default_factory=list)
+
+
+class RCAReport(BaseModel):
+    """RCA MVP — 설계서 §Q4 "구조화 출력 4가지" 만 채우면 Must 충족."""
+
+    schema_version: str = "1.0"
+    rca_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    incident_id: str
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # ① 가장 의심되는 배포 이벤트와 근거
+    suspected_deployment_id: Optional[str] = None
+    suspected_deployment_reason: str = ""
+
+    # ② 관련 변경 파일 목록
+    related_files: list[str] = Field(default_factory=list)
+
+    # ③ 관측된 증상
+    symptoms: list[RCASymptom] = Field(default_factory=list)
+
+    # ④ 가능성 높은 원인 후보 1~3 개와 각각의 근거
+    candidates: list[RCACandidate] = Field(default_factory=list)
+
+    overall_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    insufficient_evidence: bool = False
+    disclaimer: str = (
+        "본 RCA 는 확정된 원인이 아니라 가능성 높은 원인 후보 목록입니다. "
+        "최종 판단은 담당 엔지니어가 수행해야 합니다."
+    )
+
+
+class PostmortemSection(BaseModel):
+    """Postmortem 한 섹션."""
+
+    heading: str
+    body: str
+    auto_filled: bool = True
+
+
+class PostmortemSkeleton(BaseModel):
+    """Postmortem skeleton 자동 생성 결과 (설계서 §Q4 템플릿 일치)."""
+
+    schema_version: str = "1.0"
+    postmortem_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    incident_id: str
+    project_id: Optional[str] = None
+    severity: IncidentSeverity = IncidentSeverity.SEV3
+    sections: list[PostmortemSection] = Field(default_factory=list)
+    markdown_path: Optional[str] = None
+    otel_available: bool = False
+
+
+# ---------------------------------------------------------------------------
+# v5.0 Q4 — MCP server PoC (local stdio)
+# ---------------------------------------------------------------------------
+
+
+class MCPTransport(str, Enum):
+    STDIO              = "stdio"
+    LOCAL_HTTP         = "local_http"
+    STREAMABLE_HTTP    = "streamable_http"  # Backlog
+
+
+class MCPToolDescriptor(BaseModel):
+    """MCP `tools/list` 응답 단위."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPInvocation(BaseModel):
+    """MCP `tools/call` 입력."""
+
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPInvocationResult(BaseModel):
+    """MCP `tools/call` 출력 (텍스트 결과만 우선 지원)."""
+
+    is_error: bool = False
+    content: list[dict[str, Any]] = Field(default_factory=list)  # MCP content blocks
+
+
+# ---------------------------------------------------------------------------
+# v5.0 Q4 — Final Demo metadata
+# ---------------------------------------------------------------------------
+
+
+class DemoStepStatus(str, Enum):
+    PENDING    = "pending"
+    RUNNING    = "running"
+    PASSED     = "passed"
+    FAILED     = "failed"
+    SKIPPED    = "skipped"
+
+
+class DemoStep(BaseModel):
+    index: int = Field(ge=1)
+    title: str
+    description: str
+    expected_duration_sec: int = Field(ge=0)
+    status: DemoStepStatus = DemoStepStatus.PENDING
+
+
+class DemoScenario(BaseModel):
+    """Final Demo B 의 10단계 시나리오 (설계서 §Final Demo)."""
+
+    name: str = "final_demo_b"
+    cluster_provider: str = "eks"  # ADR-009: k3d/kind 금지
+    cluster_lifetime_minutes: int = 120
+    steps: list[DemoStep] = Field(default_factory=list)

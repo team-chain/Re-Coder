@@ -2196,3 +2196,295 @@ def wait_until_ready(timeout: float = 15.0) -> bool:
         )
     except Exception:
         return False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# v5.0 Q4 — Incident / Observability / RCA / MCP endpoints
+#
+# 설계서 §Q4 Must-Wedge: Incident Timeline → Correlation → RCA → rollback PR →
+# Approval → ArgoCD → Postmortem 흐름이 모두 하나의 incident_id 로 연결된다.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class IncidentTimelineRequest(BaseModel):
+    incident_id: str
+    detected_at: str  # ISO 8601
+    project_id: Optional[str] = None
+    service_name: Optional[str] = None
+    container_name: Optional[str] = None
+    severity: str = "sev3"
+    deployments: list[dict[str, Any]] = []
+    audit_rows: list[dict[str, Any]] = []
+    watchdog_jsonl_path: Optional[str] = None
+    window_before_minutes: int = 120
+    window_after_minutes: int = 30
+
+
+class IncidentCorrelateRequest(BaseModel):
+    incident_id: str
+    detected_at: str
+    candidate_deployment: Optional[dict[str, Any]] = None
+    error_rate_before: Optional[float] = None
+    error_rate_after: Optional[float] = None
+    latency_before_ms: Optional[float] = None
+    latency_after_ms: Optional[float] = None
+    changed_files: list[str] = []
+    affected_path_prefixes: list[str] = []
+    container_restart_count: Optional[float] = None
+    health_check_failed: Optional[bool] = None
+    log_keyword_delta: dict[str, float] = {}
+    traffic_rps_before: Optional[float] = None
+    traffic_rps_after: Optional[float] = None
+    dependency_errors: list[str] = []
+
+
+class IncidentRCARequest(BaseModel):
+    incident_id: str
+    detected_at: str
+    project_id: Optional[str] = None
+    service_name: Optional[str] = None
+    container_name: Optional[str] = None
+    use_llm: bool = True
+
+    # 직접 주입 (없으면 빈 값으로 deterministic 분석)
+    timeline_events: list[dict[str, Any]] = []
+    correlation: Optional[dict[str, Any]] = None
+    suspected_deployment: Optional[dict[str, Any]] = None
+    changed_files: list[str] = []
+    log_excerpts: list[str] = []
+    metric_snapshot: dict[str, Any] = {}
+
+
+class ObservabilityQueryRequest(BaseModel):
+    kind: str  # "metric" | "log"
+    query: str
+    container_name: Optional[str] = None
+    minutes: int = 15
+    limit: int = 100
+
+
+@app.post("/api/incident/timeline")
+async def incident_timeline(body: IncidentTimelineRequest, _=Depends(_verify_token)):
+    """Incident Timeline MVP — 시간순 통합 이벤트 리스트 반환."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    try:
+        from incident_timeline import build_timeline, TimelineBuildInput
+        from schemas import DeploymentRecord, IncidentSeverity
+    except ImportError:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="incident_timeline module missing")
+
+    try:
+        otel_service = None
+        try:
+            from observability.otel_query_service import OTelQueryService
+            otel_service = OTelQueryService()
+        except Exception:  # noqa: BLE001
+            otel_service = None
+
+        detected = _dt.fromisoformat(body.detected_at.replace("Z", "+00:00"))
+        try:
+            sev = IncidentSeverity(body.severity)
+        except ValueError:
+            sev = IncidentSeverity.SEV3
+
+        deployments = [DeploymentRecord(**d) for d in body.deployments]
+
+        inp = TimelineBuildInput(
+            incident_id=body.incident_id,
+            detected_at=detected,
+            project_id=body.project_id,
+            severity=sev,
+            service_name=body.service_name,
+            container_name=body.container_name,
+            deployments=deployments,
+            audit_rows=body.audit_rows,
+            watchdog_jsonl_path=Path(body.watchdog_jsonl_path) if body.watchdog_jsonl_path else None,
+            window_before=_td(minutes=body.window_before_minutes),
+            window_after=_td(minutes=body.window_after_minutes),
+            otel_service=otel_service,
+        )
+        timeline = build_timeline(inp)
+        return timeline.model_dump(mode="json")
+    except Exception as exc:
+        logger.exception("incident_timeline failed")
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/incident/correlate")
+async def incident_correlate(body: IncidentCorrelateRequest, _=Depends(_verify_token)):
+    """Incident ↔ DeploymentRecord 상관관계 계산 (8개 신호 가중 평균)."""
+    from datetime import datetime as _dt
+
+    try:
+        from incident_correlator import correlate, CorrelationInput
+        from schemas import DeploymentRecord
+    except ImportError:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="incident_correlator module missing")
+
+    detected = _dt.fromisoformat(body.detected_at.replace("Z", "+00:00"))
+    candidate = None
+    if body.candidate_deployment:
+        try:
+            candidate = DeploymentRecord(**body.candidate_deployment)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid candidate_deployment: {exc}")
+
+    inp = CorrelationInput(
+        incident_id=body.incident_id,
+        detected_at=detected,
+        candidate_deployment=candidate,
+        error_rate_before=body.error_rate_before,
+        error_rate_after=body.error_rate_after,
+        latency_before_ms=body.latency_before_ms,
+        latency_after_ms=body.latency_after_ms,
+        changed_files=body.changed_files,
+        affected_path_prefixes=body.affected_path_prefixes,
+        container_restart_count=body.container_restart_count,
+        health_check_failed=body.health_check_failed,
+        log_keyword_delta=body.log_keyword_delta,
+        traffic_rps_before=body.traffic_rps_before,
+        traffic_rps_after=body.traffic_rps_after,
+        dependency_errors=body.dependency_errors,
+    )
+    result = correlate(inp)
+    return result.model_dump(mode="json")
+
+
+@app.post("/api/incident/rca")
+async def incident_rca(body: IncidentRCARequest, _=Depends(_verify_token)):
+    """RCA MVP — '확정 원인' 금지, '가능성 높은 원인 후보' 만 반환."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    try:
+        from rca_agent import RCAAgent, RCAInput
+        from schemas import (
+            CorrelationResult,
+            DeploymentRecord,
+            IncidentEvent,
+            IncidentTimeline,
+            IncidentSeverity,
+        )
+    except ImportError:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="rca_agent module missing")
+
+    detected = _dt.fromisoformat(body.detected_at.replace("Z", "+00:00"))
+
+    # 1) timeline 재구성 (호출 측이 events 만 보냄)
+    events = []
+    for raw in body.timeline_events:
+        try:
+            events.append(IncidentEvent(**raw))
+        except Exception:
+            continue
+    timeline = IncidentTimeline(
+        incident_id=body.incident_id,
+        project_id=body.project_id,
+        severity=IncidentSeverity.SEV3,
+        detected_at=detected,
+        events=events,
+    )
+
+    correlation = None
+    if body.correlation:
+        try:
+            correlation = CorrelationResult(**body.correlation)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid correlation: {exc}")
+
+    suspected = None
+    if body.suspected_deployment:
+        try:
+            suspected = DeploymentRecord(**body.suspected_deployment)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid suspected_deployment: {exc}")
+
+    # OTel snapshot 보강 (옵션)
+    metric_snapshot = dict(body.metric_snapshot or {})
+    if not metric_snapshot and body.service_name:
+        try:
+            from observability.otel_query_service import OTelQueryService
+            svc = OTelQueryService()
+            if svc.available():
+                snap = svc.snapshot_for_service(body.service_name, body.container_name)
+                metric_snapshot = {
+                    "error_rate_now": snap.error_rate_now,
+                    "error_rate_baseline": snap.error_rate_baseline,
+                    "latency_p95_now": snap.latency_p95_now,
+                    "latency_p95_baseline": snap.latency_p95_baseline,
+                    "restart_count_recent": snap.restart_count_recent,
+                    "memory_bytes": snap.memory_bytes,
+                }
+        except Exception:  # noqa: BLE001
+            pass
+
+    router = None
+    if body.use_llm:
+        try:
+            from llm.provider_router import LLMProviderRouter
+            router = LLMProviderRouter()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("RCA LLM router unavailable: %s", exc)
+
+    agent = RCAAgent(llm_router=router)
+    rca_input = RCAInput(
+        incident_id=body.incident_id,
+        timeline=timeline,
+        correlation=correlation,
+        suspected_deployment=suspected,
+        metric_snapshot=metric_snapshot,
+        changed_files=body.changed_files,
+        log_excerpts=body.log_excerpts,
+    )
+    report = await agent.analyze_async(rca_input)
+    return report.model_dump(mode="json")
+
+
+@app.post("/api/observability/query")
+async def observability_query(body: ObservabilityQueryRequest, _=Depends(_verify_token)):
+    """Prometheus / Loki 통합 쿼리 entry point."""
+    try:
+        from observability.otel_query_service import OTelQueryService
+        from observability.prometheus_adapter import PrometheusAdapter
+        from observability.loki_adapter import LokiAdapter
+    except ImportError:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="observability package missing")
+
+    if body.kind == "metric":
+        prom = PrometheusAdapter(
+            base_url=os.environ.get("PROMETHEUS_URL"),
+            bearer_token=os.environ.get("PROMETHEUS_TOKEN"),
+        )
+        return prom.query(body.query).model_dump(mode="json")
+    if body.kind == "log":
+        loki = LokiAdapter(
+            base_url=os.environ.get("LOKI_URL"),
+            bearer_token=os.environ.get("LOKI_TOKEN"),
+        )
+        return loki.query_range(body.query, limit=body.limit).model_dump(mode="json")
+    raise HTTPException(status_code=400, detail=f"unsupported kind: {body.kind}")
+
+
+@app.get("/api/observability/ready")
+async def observability_ready(_=Depends(_verify_token)):
+    """OTel 백엔드 (Prometheus / Loki) 연결 가능 여부."""
+    try:
+        from observability.otel_query_service import OTelQueryService
+        svc = OTelQueryService()
+        return {
+            "available": svc.available(),
+            "prometheus_configured": bool(svc.prometheus.base_url),
+            "loki_configured": bool(svc.loki.base_url),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "error": str(exc)}
+
+
+@app.get("/api/mcp/health")
+async def mcp_health(_=Depends(_verify_token)):
+    """MCP 서버 (local stdio PoC) 가 export 하는 도구 목록."""
+    try:
+        from mcp_server import list_tools
+    except ImportError:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="mcp_server module missing")
+    return {"tools": list_tools(), "transport": "stdio"}
