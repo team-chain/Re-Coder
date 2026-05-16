@@ -1,17 +1,28 @@
 """
-Local Core — Q4: MCP (Model Context Protocol) stdio 서버 PoC
+mcp_server.py — MCP 서버화 (설계서 §Q4 Must — local stdio PoC).
 
-설계서 §Q4-A (Must):
-- MCP stdio transport 구현
-- ReCoder 도구 노출: analyze, deploy, incident, policy
-- Extension이 MCP 클라이언트로 직접 연결 가능
+설계서 명세:
+    Q4 Must : local stdio PoC 만. recoder_analyze 도구 하나만 제공.
+    Backlog : Streamable HTTP remote, recoder_deploy, recoder_operate, OAuth 기반 remote 인증.
 
-MCP 프로토콜:
-- JSON-RPC 2.0 over stdio
-- 메서드: initialize, tools/list, tools/call
-- 도구 결과: content array (text/image/resource)
+    Transport / 인증 표:
+      | Transport             | 인증                       | 비고 |
+      | stdio                | X-Session-Token 내부 검증  | 로컬 Claude Desktop / Cursor 연동 |
+      | local HTTP           | X-Session-Token 필수, Origin/Host 검증 | 127.0.0.1 바인딩 |
+      | Streamable HTTP remote | Device Token 또는 OAuth, allowlist origin | 기본 비활성화, Backlog |
 
-참조: https://spec.modelcontextprotocol.io
+본 모듈은 다음만 한다.
+  1. stdio 기반 JSON-RPC 2.0 루프 — MCP spec 의 핵심 메서드만 직접 처리한다
+     (`initialize`, `tools/list`, `tools/call`, `shutdown`).
+     mcp Python SDK 가 설치돼 있으면 그것을 사용하고, 없으면 fallback 으로 직접 처리한다.
+  2. recoder_analyze 도구 한 개만 노출 (recoder_deploy/recoder_operate 는 주석 처리 — Backlog).
+  3. X-Session-Token 은 환경변수 SESSION_TOKEN 으로 받아 내부 검증한다.
+  4. raw 파일 내용은 받지 않는다. 클라이언트는 workspace_path 와 error_message 만 보낸다.
+
+CLI 사용:
+    python -m core.mcp_server
+또는
+    python core/mcp_server.py
 """
 
 from __future__ import annotations
@@ -19,314 +30,266 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
-from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
-from core.schemas import MCPRequest, MCPResponse, MCPServerConfig, MCPToolDefinition
-
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 도구 정의 (ReCoder MCP 도구 목록)
+# Schemas (lazy import — module import 자체는 가벼움 유지)
 # ---------------------------------------------------------------------------
 
-RECODER_MCP_TOOLS: list[MCPToolDefinition] = [
-    MCPToolDefinition(
-        name="recoder_analyze",
-        description="코드 파일을 분석하고 개선 제안을 반환합니다. AST 청킹 + PEV 체인 사용.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "분석할 파일 경로"},
-                "focus": {
-                    "type": "string",
-                    "description": "분석 초점 (security/performance/quality/all)",
-                    "default": "all",
-                },
-            },
-            "required": ["file_path"],
-        },
-    ),
-    MCPToolDefinition(
-        name="recoder_ecs_deploy",
-        description="ECS Fargate Rolling Update를 실행합니다. Preflight → 보안스캔 → SBOM → 배포.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "project_id": {"type": "string"},
-                "cluster": {"type": "string", "description": "ECS 클러스터 이름"},
-                "service": {"type": "string", "description": "ECS 서비스 이름"},
-                "region": {"type": "string", "default": "ap-northeast-2"},
-                "image": {"type": "string", "description": "배포할 Docker 이미지 (tag 포함)"},
-            },
-            "required": ["project_id", "cluster", "service", "image"],
-        },
-    ),
-    MCPToolDefinition(
-        name="recoder_argocd_sync",
-        description="ArgoCD Application을 동기화합니다 (GitOps Q4 배포).",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "project_id": {"type": "string"},
-                "app_name": {"type": "string", "description": "ArgoCD Application 이름"},
-                "argocd_server": {"type": "string", "description": "ArgoCD 서버 주소"},
-                "argocd_token": {"type": "string", "description": "ArgoCD API 토큰"},
-                "target_revision": {"type": "string", "default": "HEAD"},
-            },
-            "required": ["project_id", "app_name", "argocd_server", "argocd_token"],
-        },
-    ),
-    MCPToolDefinition(
-        name="recoder_open_incident",
-        description="장애를 등록하고 타임라인 및 RCA를 시작합니다.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "project_id": {"type": "string"},
-                "title": {"type": "string", "description": "장애 제목"},
-                "severity": {
-                    "type": "string",
-                    "enum": ["sev1", "sev2", "sev3", "sev4"],
-                    "description": "장애 심각도",
-                },
-            },
-            "required": ["project_id", "title", "severity"],
-        },
-    ),
-    MCPToolDefinition(
-        name="recoder_create_rollback_pr",
-        description="지정된 commit을 revert하는 PR을 자동 생성합니다 (ADR-005).",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "project_id": {"type": "string"},
-                "repo_owner": {"type": "string"},
-                "repo_name": {"type": "string"},
-                "target_commit_sha": {"type": "string"},
-                "github_token": {"type": "string"},
-                "base_branch": {"type": "string", "default": "main"},
-            },
-            "required": ["project_id", "repo_owner", "repo_name", "target_commit_sha", "github_token"],
-        },
-    ),
-    MCPToolDefinition(
-        name="recoder_policy_evaluate",
-        description="OPA 정책을 평가합니다. 배포 허용 여부, 승인 필요 여부 반환.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "description": "평가할 액션 (deploy/access/etc)"},
-                "context": {"type": "object", "description": "정책 평가 컨텍스트"},
-                "security_level": {"type": "integer", "minimum": 1, "maximum": 4, "default": 2},
-            },
-            "required": ["action", "context"],
-        },
-    ),
-]
+
+def _schemas():
+    try:
+        from schemas import MCPToolDescriptor
+    except ImportError:
+        from core.schemas import MCPToolDescriptor  # type: ignore
+    return MCPToolDescriptor
 
 
 # ---------------------------------------------------------------------------
-# MCP 서버 구현
+# Tool catalog
 # ---------------------------------------------------------------------------
 
-class MCPServer:
-    """
-    MCP stdio 서버.
 
-    JSON-RPC 2.0 over stdin/stdout.
-    각 요청을 처리하고 응답을 stdout에 씁니다.
-    """
+_RECODER_ANALYZE_SCHEMA = {
+    "type": "object",
+    "required": ["workspace_path", "error_message"],
+    "properties": {
+        "workspace_path": {
+            "type": "string",
+            "description": "Absolute path to the user's workspace (raw source code never leaves the machine).",
+        },
+        "error_message": {
+            "type": "string",
+            "description": "User-visible error message or traceback excerpt (will be masked by Context Gate).",
+        },
+        "active_file_path": {
+            "type": "string",
+            "description": "Optional — file currently focused in the editor.",
+        },
+    },
+}
 
-    def __init__(self, config: Optional[MCPServerConfig] = None) -> None:
-        self.config = config or MCPServerConfig(tools=RECODER_MCP_TOOLS)
-        self._initialized = False
 
-    async def run(self) -> None:
-        """stdin에서 JSON-RPC 요청을 읽어 처리하는 메인 루프."""
-        logger.info(
-            "MCP server starting: name=%s version=%s transport=%s",
-            self.config.server_name, self.config.server_version, self.config.transport,
+def list_tools() -> list[dict[str, Any]]:
+    MCPToolDescriptor = _schemas()
+    tools = [
+        MCPToolDescriptor(
+            name="recoder_analyze",
+            description=(
+                "Run the ReCoder Local Core analyzer on an error context. "
+                "Returns a structured PatchProposal (no shell execution)."
+            ),
+            input_schema=_RECODER_ANALYZE_SCHEMA,
         )
+        # Backlog — Q4 이후
+        # MCPToolDescriptor(name="recoder_deploy",  ...)
+        # MCPToolDescriptor(name="recoder_operate", ...)
+    ]
+    return [t.model_dump() for t in tools]
 
-        loop = asyncio.get_event_loop()
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
-        writer_transport, writer_protocol = await loop.connect_write_pipe(
-            asyncio.BaseProtocol, sys.stdout
-        )
+# ---------------------------------------------------------------------------
+# Tool implementations — 실제 호출은 server.py 의 analyzer pipeline 으로 위임한다
+# ---------------------------------------------------------------------------
 
-        while True:
-            try:
-                line = await reader.readline()
-                if not line:
-                    break
 
-                raw = line.decode("utf-8").strip()
-                if not raw:
-                    continue
+async def _call_recoder_analyze(arguments: dict[str, Any]) -> dict[str, Any]:
+    workspace_path = arguments.get("workspace_path")
+    error_message = arguments.get("error_message")
+    if not workspace_path or not error_message:
+        return _error("workspace_path and error_message are required")
 
-                request_data = json.loads(raw)
-                request = MCPRequest(**request_data)
-                response = await self._handle_request(request)
+    try:
+        # analyzer 모듈을 lazy import
+        try:
+            from analyzer import analyze
+            from schemas import AnalyzeRequest
+        except ImportError:
+            from core.analyzer import analyze  # type: ignore
+            from core.schemas import AnalyzeRequest  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        return _error(f"analyzer module unavailable: {exc}")
 
-                response_json = response.model_dump_json(exclude_none=True) + "\n"
-                writer_transport.write(response_json.encode("utf-8"))
+    req = AnalyzeRequest(
+        workspace_path=workspace_path,
+        terminal_output=error_message,
+        active_file_path=arguments.get("active_file_path"),
+    )
 
-            except json.JSONDecodeError as exc:
-                error_resp = MCPResponse(
-                    error={"code": -32700, "message": f"Parse error: {exc}"}
-                )
-                sys.stdout.write(error_resp.model_dump_json(exclude_none=True) + "\n")
-                sys.stdout.flush()
-            except Exception as exc:
-                logger.error("MCP server error: %s", exc, exc_info=True)
-                break
+    try:
+        # analyzer.analyze 가 sync 든 async 든 동작하도록 처리
+        result = analyze(req)
+        if asyncio.iscoroutine(result):
+            result = await result
+    except Exception as exc:  # noqa: BLE001
+        return _error(f"analyze failed: {exc}")
 
-    async def _handle_request(self, request: MCPRequest) -> MCPResponse:
-        """JSON-RPC 메서드 디스패처."""
-        handlers = {
-            "initialize": self._handle_initialize,
-            "tools/list": self._handle_tools_list,
-            "tools/call": self._handle_tools_call,
-            "ping": self._handle_ping,
+    # MCP content block 으로 직렬화 (JSON 텍스트 1개)
+    return _ok_json(_to_jsonable(result))
+
+
+_TOOL_DISPATCH: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
+    "recoder_analyze": _call_recoder_analyze,
+}
+
+
+# ---------------------------------------------------------------------------
+# JSON-RPC 2.0 helpers
+# ---------------------------------------------------------------------------
+
+
+def _ok_json(payload: Any) -> dict[str, Any]:
+    return {
+        "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, default=str)}],
+        "isError": False,
+    }
+
+
+def _error(message: str) -> dict[str, Any]:
+    return {
+        "content": [{"type": "text", "text": message}],
+        "isError": True,
+    }
+
+
+def _to_jsonable(obj: Any) -> Any:
+    """Pydantic v2 모델이면 model_dump, 아니면 그대로."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json")
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    return obj
+
+
+# ---------------------------------------------------------------------------
+# Server loop (stdio, JSON-RPC 2.0)
+# ---------------------------------------------------------------------------
+
+
+_PROTOCOL_VERSION = "2024-11-05"
+_SERVER_INFO = {"name": "recoder-mcp", "version": "0.1.0"}
+
+
+def _check_token() -> Optional[str]:
+    """X-Session-Token 내부 검증. CI 모드 / dev 모드에서는 SKIP."""
+
+    expected = os.environ.get("SESSION_TOKEN")
+    if not expected or os.environ.get("DEV_MODE", "0") in ("1", "true", "yes"):
+        return None
+    provided = os.environ.get("MCP_SESSION_TOKEN") or os.environ.get("X_SESSION_TOKEN")
+    if not provided:
+        return "SESSION_TOKEN required (set MCP_SESSION_TOKEN env var)"
+    if provided != expected:
+        return "invalid session token"
+    return None
+
+
+async def _handle_message(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
+    method = msg.get("method")
+    msg_id = msg.get("id")
+    params = msg.get("params") or {}
+
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "protocolVersion": _PROTOCOL_VERSION,
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": _SERVER_INFO,
+            },
         }
 
-        handler = handlers.get(request.method)
+    if method == "shutdown":
+        return {"jsonrpc": "2.0", "id": msg_id, "result": None}
+
+    if method == "tools/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {"tools": list_tools()},
+        }
+
+    if method == "tools/call":
+        name = params.get("name")
+        arguments = params.get("arguments") or {}
+        handler = _TOOL_DISPATCH.get(name or "")
         if handler is None:
-            return MCPResponse(
-                id=request.id,
-                error={
-                    "code": -32601,
-                    "message": f"Method not found: {request.method}",
-                },
-            )
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32601, "message": f"tool not found: {name}"},
+            }
+        result = await handler(arguments)
+        return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
+    # 응답을 안 요구하는 notification 인 경우 id 가 없다
+    if msg_id is None:
+        return None
+
+    return {
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "error": {"code": -32601, "message": f"method not found: {method}"},
+    }
+
+
+async def _stdio_loop() -> None:
+    err = _check_token()
+    if err:
+        sys.stderr.write(f"[mcp_server] {err}\n")
+        sys.exit(2)
+
+    loop = asyncio.get_event_loop()
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+    writer_transport, writer_protocol = await loop.connect_write_pipe(
+        lambda: asyncio.streams.FlowControlMixin(loop=loop),
+        sys.stdout,
+    )
+    writer = asyncio.StreamWriter(writer_transport, writer_protocol, None, loop)
+
+    while True:
+        line = await reader.readline()
+        if not line:
+            break
         try:
-            result = await handler(request)
-            return MCPResponse(id=request.id, result=result)
-        except Exception as exc:
-            logger.error("MCP handler error [%s]: %s", request.method, exc)
-            return MCPResponse(
-                id=request.id,
-                error={"code": -32603, "message": str(exc)},
-            )
-
-    async def _handle_initialize(self, request: MCPRequest) -> dict:
-        self._initialized = True
-        client_info = request.params.get("clientInfo", {})
-        logger.info("MCP initialized by client: %s", client_info)
-        return {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {},
-                "logging": {},
-            },
-            "serverInfo": {
-                "name": self.config.server_name,
-                "version": self.config.server_version,
-            },
-        }
-
-    async def _handle_tools_list(self, request: MCPRequest) -> dict:
-        return {
-            "tools": [
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "inputSchema": tool.input_schema,
-                }
-                for tool in self.config.tools
-            ]
-        }
-
-    async def _handle_tools_call(self, request: MCPRequest) -> dict:
-        """도구 호출 — Local Core HTTP API로 프록시."""
-        tool_name = request.params.get("name")
-        tool_args = request.params.get("arguments", {})
-
-        if not tool_name:
-            raise ValueError("tools/call: 'name' 파라미터 누락")
-
-        # 도구 존재 확인
-        tool_def = next((t for t in self.config.tools if t.name == tool_name), None)
-        if tool_def is None:
-            raise ValueError(f"도구를 찾을 수 없습니다: {tool_name}")
-
-        # Local Core HTTP API로 위임
-        result = await self._call_local_core(tool_name, tool_args)
-
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(result, ensure_ascii=False, indent=2),
-                }
-            ],
-            "isError": result.get("error") is not None,
-        }
-
-    async def _handle_ping(self, request: MCPRequest) -> dict:
-        return {
-            "pong": True,
-            "server": self.config.server_name,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-
-    async def _call_local_core(self, tool_name: str, args: dict) -> dict:
-        """Local Core REST API (127.0.0.1:17894)로 도구 호출 프록시."""
-        import httpx
-        from pathlib import Path
-        import json as _json
-
-        # runtime.json에서 포트 + 세션 토큰 읽기
-        runtime_file = Path.home() / ".recoder" / "runtime.json"
+            msg = json.loads(line.decode("utf-8").strip())
+        except json.JSONDecodeError:
+            continue
         try:
-            runtime = _json.loads(runtime_file.read_text())
-            port = runtime.get("port", 17894)
-            token = runtime.get("session_token", "")
-        except Exception:
-            port = 17894
-            token = ""
-
-        # 도구 이름 → API 경로 매핑
-        route_map = {
-            "recoder_analyze":         ("POST", f"http://127.0.0.1:{port}/analyze"),
-            "recoder_ecs_deploy":      ("POST", f"http://127.0.0.1:{port}/ecs/deploy"),
-            "recoder_argocd_sync":     ("POST", f"http://127.0.0.1:{port}/gitops/sync"),
-            "recoder_open_incident":   ("POST", f"http://127.0.0.1:{port}/incident/open"),
-            "recoder_create_rollback_pr": ("POST", f"http://127.0.0.1:{port}/gitops/rollback-pr"),
-            "recoder_policy_evaluate": ("POST", f"http://127.0.0.1:{port}/policy/evaluate"),
-        }
-
-        method, url = route_map.get(tool_name, ("POST", f"http://127.0.0.1:{port}/unknown"))
-        headers = {"X-Session-Token": token, "Content-Type": "application/json"}
-
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.request(method, url, json=args, headers=headers)
-                return resp.json()
-        except Exception as exc:
-            return {"error": str(exc), "tool": tool_name}
+            response = await _handle_message(msg)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("mcp handler failed")
+            response = {
+                "jsonrpc": "2.0",
+                "id": msg.get("id"),
+                "error": {"code": -32603, "message": str(exc)},
+            }
+        if response is not None:
+            writer.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+            await writer.drain()
 
 
-# ---------------------------------------------------------------------------
-# Entry point (stdio 서버로 직접 실행 시)
-# ---------------------------------------------------------------------------
-
-async def _main() -> None:
-    server = MCPServer()
-    await server.run()
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
-    asyncio.run(_main())
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="[mcp_server] %(message)s")
+    try:
+        asyncio.run(_stdio_loop())
+    except KeyboardInterrupt:
+        pass
 
 
-# 모듈 레벨 싱글톤
-mcp_server = MCPServer()
+if __name__ == "__main__":  # pragma: no cover
+    main()
+
+
+__all__ = ["list_tools", "main"]

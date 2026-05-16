@@ -1,0 +1,52 @@
+# eksctl-cluster.yaml
+#
+# 설계서 ADR-009: Final Demo = 실제 EKS (비용 제어 스크립트 활용).
+# k3d / kind 로 타협하지 않는다. 데모 2시간 기준 비용은 수 달러 수준이다.
+#
+# 사용:
+#   eksctl create cluster -f demo/eks/eksctl-cluster.yaml
+#   ... 데모 ...
+#   eksctl delete cluster -f demo/eks/eksctl-cluster.yaml
+#
+# 비용 제어 포인트:
+#   - 1 nodegroup, 2 nodes (t3.small) — 최소 구성
+#   - desiredCapacity == minSize == maxSize  → autoscaling 비활성
+#   - addons 는 vpc-cni, coredns, kube-proxy 만 (선택적 EBS CSI)
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: recoder-demo
+  region: ap-northeast-2
+  version: "1.30"
+  tags:
+    Project: ReCoder
+    Purpose: FinalDemoB
+    Lifetime: ephemeral
+
+iam:
+  withOIDC: true
+
+managedNodeGroups:
+  - name: recoder-demo-ng
+    instanceType: t3.small
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 2
+    volumeSize: 20
+    volumeType: gp3
+    privateNetworking: false
+    labels:
+      role: demo-worker
+    tags:
+      Project: ReCoder
+      Purpose: FinalDemoB
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["audit", "authenticator"]

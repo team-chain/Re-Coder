@@ -1,0 +1,80 @@
+# otel-collector-config.yaml
+#
+# 설계서 §Q4 수집 파이프라인:
+#   Receiver  : otlp (grpc:4317, http:4318), docker_stats, filelog
+#   Processor : batch, memory_limiter, resource_detection
+#   Exporter  : Prometheus remote_write, Loki  (Tempo 는 Q4 후반)
+#
+# 본 파일은 build_otel_collector_config() 가 생성하는 dict 와 동등한 YAML 이다.
+# 사람이 직접 편집해야 할 때 이 파일을 수정하고, 자동 갱신은 코드에서 build → dump 한다.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+  docker_stats:
+    endpoint: "unix:///var/run/docker.sock"
+    collection_interval: 30s
+    timeout: 10s
+
+  filelog:
+    include:
+      - "/var/log/recoder/*.log"
+      - "/var/lib/docker/containers/*/*-json.log"
+    start_at: end
+    include_file_path: true
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
+
+  batch:
+    timeout: 5s
+
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 5s
+    override: false
+
+  attributes/recoder:
+    actions:
+      - { key: service.name, value: recoder-core, action: upsert }
+      - { key: deployment.environment, value: production, action: upsert }
+
+exporters:
+  prometheusremotewrite:
+    endpoint: "http://prometheus:9090/api/v1/write"
+    tls:
+      insecure: true
+
+  loki:
+    endpoint: "http://loki:3100/loki/api/v1/push"
+
+  debug:
+    verbosity: basic
+
+service:
+  telemetry:
+    logs:
+      level: info
+
+  pipelines:
+    metrics:
+      receivers: [otlp, docker_stats]
+      processors: [memory_limiter, resourcedetection, attributes/recoder, batch]
+      exporters: [prometheusremotewrite, debug]
+
+    logs:
+      receivers: [otlp, filelog]
+      processors: [memory_limiter, resourcedetection, attributes/recoder, batch]
+      exporters: [loki, debug]
+
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, attributes/recoder, batch]
+      exporters: [debug]

@@ -276,7 +276,6 @@ class ResponseProposal(BaseModel):
     """AI-generated remediation proposal for an ops alert."""
 
     schema_version: str = "1.0"
-    proposal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     alert_id: str
     action_type: ActionType
     target_container: Optional[str] = None
@@ -415,522 +414,257 @@ class CostSummary(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Q1 — AST Chunker Models
+# v5.0 Q4 — Observability / Incident / RCA Models
+#
+# 설계서 §Q4 — OpenTelemetry 통합 + Incident Correlation + RCA MVP + Postmortem
+# 핵심 원칙:
+#  - RCA 는 "확정 원인" 을 말하지 않는다. confidence score 가 항상 함께한다.
+#  - correlation score 가 낮으면 "최근 배포와 직접 관련성 낮음" 으로 표기한다.
+#  - OTel 미연결 시 Watchdog incident.jsonl + AuditLog 만으로 fallback 한다.
 # ---------------------------------------------------------------------------
 
-
-class NodeType(str, Enum):
-    FUNCTION = "function"
-    ASYNC_FUNCTION = "async_function"
-    CLASS = "class"
-    MODULE = "module"       # Whole-file fallback
-    UNKNOWN = "unknown"
-
-
-class ChunkMetadata(BaseModel):
-    """
-    Metadata for a single AST-derived code chunk.
-
-    Security policy: source text is NOT stored here.
-    It is re-read from the filesystem on demand, immediately before LLM delivery,
-    after passing through ContextGate.
-    """
-
-    chunk_id: str                   # SHA-256 of (file_path + name + start_line) — first 8 hex chars
-    file_path: str                  # Absolute path on disk
-    node_type: NodeType = NodeType.UNKNOWN
-    name: str                       # Symbol name (function/class name, or file stem for module)
-    start_line: int = Field(ge=1)
-    end_line: int = Field(ge=1)
-    token_estimate: int = Field(default=0, ge=0)   # Rough estimate; 0 = uncalculated
-
-
-# ---------------------------------------------------------------------------
-# Q1 — Plan-Execute-Verify Models
-# ---------------------------------------------------------------------------
-
-
-class AgentType(str, Enum):
-    CODE_AGENT = "code_agent"
-    INFRA_AGENT = "infra_agent"
-    DEPLOY_AGENT = "deploy_agent"
-    TEST_RUNNER = "test_runner"
-    NO_OP = "no_op"
-
-
-class ExecutionStep(BaseModel):
-    """A single step in a PlannerAgent-generated ExecutionPlan."""
-
-    step_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
-    description: str
-    agent: AgentType
-    args: dict[str, Any] = Field(default_factory=dict)
-    depends_on: list[str] = Field(default_factory=list)   # list of step_ids
-
-
-class ExecutionPlan(BaseModel):
-    """
-    Structured output produced by PlannerAgent.
-
-    Constraints (enforced by PlannerAgent prompt):
-    - Maximum 5 steps.
-    - PlannerAgent never executes — it only plans.
-    - Executor (deterministic dispatcher) drives actual agent calls.
-    """
-
-    schema_version: str = "1.0"
-    plan_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    summary: str
-    steps: list[ExecutionStep] = Field(default_factory=list, max_length=5)
-    estimated_risk: RiskLevel = RiskLevel.LOW
-    requires_approval: bool = False
-
-
-class VerificationResult(BaseModel):
-    """Result from VerifierAgent (no LLM — deterministic checks only)."""
-
-    plan_id: str
-    proposal_id: Optional[str] = None
-    schema_valid: bool = False
-    sha256_valid: bool = False
-    test_passed: Optional[bool] = None    # None = no test_command supplied
-    test_output: Optional[str] = None
-    retry_count: int = Field(default=0, ge=0)
-    needs_manual_review: bool = False     # True when retry limit exhausted
-    verified_at: datetime = Field(default_factory=datetime.utcnow)
-
-
-# ---------------------------------------------------------------------------
-# Q1 — Eval Harness Models
-# ---------------------------------------------------------------------------
-
-
-class EvalCategory(str, Enum):
-    PYTHON_SINGLE_FILE = "python_single_file"
-    PYTHON_MULTI_FILE = "python_multi_file"
-    NODEJS_ERROR = "nodejs_error"
-    DOCKERFILE_GENERATION = "dockerfile_generation"
-    DOCKER_BUILD_FAILURE = "docker_build_failure"
-    HEALTH_CHECK_FAILURE = "health_check_failure"
-
-
-class SafetyViolationType(str, Enum):
-    SECRET_LEAK = "secret_leak"
-    NONEXISTENT_IMPORT = "nonexistent_import"
-    INVALID_SHELL_COMMAND = "invalid_shell_command"
-    ROLLBACK_NOT_DISCLOSED = "rollback_not_disclosed"
-    DESTRUCTIVE_OPERATION = "destructive_operation"
-
-
-class EvalCase(BaseModel):
-    """A single evaluation test case for the Eval Harness."""
-
-    case_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:12])
-    category: EvalCategory
-    description: str
-    workspace_snapshot: dict[str, str] = Field(default_factory=dict)  # relative_path -> content
-    terminal_output: str = ""
-    command: Optional[str] = None
-    expected_files_changed: list[str] = Field(default_factory=list)
-    expected_patch_keywords: list[str] = Field(default_factory=list)
-    expected_no_safety_violations: bool = True
-    tags: list[str] = Field(default_factory=list)
-
-
-class EvalResult(BaseModel):
-    """Result of running a single EvalCase through the pipeline."""
-
-    case_id: str
-    category: EvalCategory
-    passed: bool = False
-    safety_violations: list[SafetyViolationType] = Field(default_factory=list)
-    proposal_summary: Optional[str] = None
-    patch_files: list[str] = Field(default_factory=list)
-    error_message: Optional[str] = None
-    duration_seconds: float = Field(default=0.0, ge=0.0)
-    evaluated_at: datetime = Field(default_factory=datetime.utcnow)
-
-    @property
-    def has_safety_violation(self) -> bool:
-        return len(self.safety_violations) > 0
-
-
-class EvalReport(BaseModel):
-    """Aggregated report across all EvalResults in a run."""
-
-    run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    total: int = Field(ge=0)
-    passed: int = Field(ge=0)
-    failed: int = Field(ge=0)
-    safety_violations: int = Field(ge=0)
-    pass_rate: float = Field(ge=0.0, le=1.0)
-    by_category: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    results: list[EvalResult] = Field(default_factory=list)
-    ci_gate_passed: bool = False
-    evaluated_at: datetime = Field(default_factory=datetime.utcnow)
-
-
-# ===========================================================================
-# Q3: ECS / SBOM / Security Scan (설계서 §Q3)
-# ===========================================================================
-
-class ECSDeployStatus(str, Enum):
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    ROLLED_BACK = "rolled_back"
-    CIRCUIT_BREAKER_TRIGGERED = "circuit_breaker_triggered"
-
-
-class SecurityScanSeverity(str, Enum):
-    CRITICAL = "critical"
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
-    INFO = "info"
-
-
-class SecurityScanTool(str, Enum):
-    TRIVY = "trivy"
-    HADOLINT = "hadolint"
-    GITLEAKS = "gitleaks"
-
-
-class SecurityFinding(BaseModel):
-    """보안 스캔 단일 발견 항목"""
-    tool: SecurityScanTool
-    severity: SecurityScanSeverity
-    title: str
-    description: str
-    location: Optional[str] = None   # 파일명 또는 패키지명
-    fix_suggestion: Optional[str] = None
-    secret_redacted: bool = False    # gitleaks: 원문 미포함
-
-
-class SecurityScanResult(BaseModel):
-    """Trivy / Hadolint / gitleaks 통합 스캔 결과"""
-    image: Optional[str] = None
-    dockerfile_path: Optional[str] = None
-    repo_path: Optional[str] = None
-    findings: list[SecurityFinding] = Field(default_factory=list)
-    critical_count: int = 0
-    high_count: int = 0
-    hadolint_error_count: int = 0
-    secret_count: int = 0
-    scan_passed: bool = False   # critical/hadolint_error/secret 모두 0이어야 True
-    scanned_at: datetime = Field(default_factory=datetime.utcnow)
-
-    def compute_pass(self) -> None:
-        self.critical_count = sum(1 for f in self.findings
-            if f.tool == SecurityScanTool.TRIVY and f.severity == SecurityScanSeverity.CRITICAL)
-        self.high_count = sum(1 for f in self.findings
-            if f.tool == SecurityScanTool.TRIVY and f.severity == SecurityScanSeverity.HIGH)
-        self.hadolint_error_count = sum(1 for f in self.findings
-            if f.tool == SecurityScanTool.HADOLINT and f.severity == SecurityScanSeverity.CRITICAL)
-        self.secret_count = sum(1 for f in self.findings
-            if f.tool == SecurityScanTool.GITLEAKS)
-        self.scan_passed = (
-            self.critical_count == 0
-            and self.hadolint_error_count == 0
-            and self.secret_count == 0
-        )
-
-
-class SBOMRecord(BaseModel):
-    """SBOM 생성 결과 (Syft CycloneDX JSON)"""
-    image: str
-    sbom_path: str              # 로컬 파일 경로
-    sbom_format: str = "cyclonedx-json"
-    image_digest: Optional[str] = None
-    package_count: int = 0
-    vulnerability_summary: dict[str, int] = Field(default_factory=dict)  # severity → count
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
-
-
-class PreflightCheck(BaseModel):
-    """Cloud Preflight 단일 항목 체크 결과"""
-    name: str
-    passed: bool
-    detail: str
-    severity: str = "error"   # "error" | "warning" | "info"
-    fix_guide: Optional[str] = None
-
-
-class PreflightReport(BaseModel):
-    """Cloud Preflight 전체 리포트"""
-    region: str
-    cluster: str
-    service: str
-    checks: list[PreflightCheck] = Field(default_factory=list)
-    passed: bool = False
-    checked_at: datetime = Field(default_factory=datetime.utcnow)
-
-    def compute_pass(self) -> None:
-        error_checks = [c for c in self.checks if c.severity == "error"]
-        self.passed = all(c.passed for c in error_checks)
-
-
-class ECSDeployRequest(BaseModel):
-    """ECS Rolling Update 요청 (Extension → Local Core)"""
-    project_id: str
-    cluster: str
-    service: str
-    region: str
-    image: str                  # 배포할 이미지 (태그 포함)
-    task_definition_family: str
-    container_name: str
-    health_check_path: str = "/health"
-    environment: str = "production"
-    cpu: str = "256"
-    memory: str = "512"
-    env_vars: dict[str, str] = Field(default_factory=dict)
-    run_preflight: bool = True
-    run_security_scan: bool = True
-    generate_sbom: bool = True
-    approval_request_id: Optional[str] = None  # OPA allow_with_approval 시
-
-
-class ECSDeployRecord(BaseModel):
-    """ECS 배포 기록 (DeploymentRecord 확장)"""
-    deployment_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    project_id: str
-    cluster: str
-    service: str
-    region: str
-    image: str
-    image_digest: Optional[str] = None
-    task_definition_arn: Optional[str] = None
-    previous_task_definition_arn: Optional[str] = None  # rollback 대상
-    status: ECSDeployStatus = ECSDeployStatus.PENDING
-    preflight_passed: bool = False
-    scan_result: Optional[SecurityScanResult] = None
-    sbom_path: Optional[str] = None
-    sbom_version: Optional[str] = None
-    health_check_failures: int = 0
-    circuit_breaker_triggered: bool = False
-    rollback_proposal_id: Optional[str] = None
-    deployed_at: datetime = Field(default_factory=datetime.utcnow)
-    completed_at: Optional[datetime] = None
-    error_message: Optional[str] = None
-
-
-# ===========================================================================
-# Q4 — GitOps + Observability + MCP
-# 설계서 §Q4 (Must-Core)
-# ===========================================================================
-
-# ---------------------------------------------------------------------------
-# ArgoCD GitOps
-# ---------------------------------------------------------------------------
-
-class ArgoSyncPhase(str, Enum):
-    """ArgoCD Application 동기화 단계"""
-    UNKNOWN = "Unknown"
-    SYNCED = "Synced"
-    OUT_OF_SYNC = "OutOfSync"
-    SYNC_FAILED = "SyncFailed"
-
-
-class ArgoHealthStatus(str, Enum):
-    """ArgoCD Application 헬스 상태"""
-    UNKNOWN = "Unknown"
-    PROGRESSING = "Progressing"
-    HEALTHY = "Healthy"
-    SUSPENDED = "Suspended"
-    DEGRADED = "Degraded"
-    MISSING = "Missing"
-
-
-class ArgoSyncRequest(BaseModel):
-    """ArgoCD Application 동기화 요청"""
-    project_id: str
-    app_name: str                              # ArgoCD Application 이름
-    argocd_server: str                         # e.g., "argocd.example.com"
-    argocd_token: str                          # ArgoCD API token (마스킹 출력)
-    target_revision: Optional[str] = "HEAD"   # 동기화할 git revision
-    prune: bool = False                        # 제거된 리소스 정리 여부
-    dry_run: bool = False                      # dry-run 모드
-    force: bool = False                        # 강제 동기화
-
-
-class ArgoSyncRecord(BaseModel):
-    """ArgoCD 동기화 기록"""
-    sync_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    project_id: str
-    app_name: str
-    argocd_server: str
-    sync_phase: ArgoSyncPhase = ArgoSyncPhase.UNKNOWN
-    health_status: ArgoHealthStatus = ArgoHealthStatus.UNKNOWN
-    target_revision: Optional[str] = None
-    live_revision: Optional[str] = None       # 현재 배포된 git SHA
-    resources_synced: int = 0
-    resources_failed: int = 0
-    error_message: Optional[str] = None
-    rollback_triggered: bool = False
-    rollback_revision: Optional[str] = None
-    started_at: datetime = Field(default_factory=datetime.utcnow)
-    completed_at: Optional[datetime] = None
-
-
-# ---------------------------------------------------------------------------
-# Incident Timeline + RCA
-# ---------------------------------------------------------------------------
 
 class IncidentSeverity(str, Enum):
-    SEV1 = "sev1"   # 전체 서비스 다운
-    SEV2 = "sev2"   # 주요 기능 장애
-    SEV3 = "sev3"   # 부분 장애 / 성능 저하
-    SEV4 = "sev4"   # 경미한 이슈
+    """Incident severity (ADR-005 — Severity 1 은 emergency rollback 대상)."""
+
+    SEV1 = "sev1"   # critical: production 중단, 즉시 대응
+    SEV2 = "sev2"   # high   : 주요 기능 마비
+    SEV3 = "sev3"   # medium : 부분 영향
+    SEV4 = "sev4"   # low    : 관측만, 대응 옵션
 
 
-class IncidentStatus(str, Enum):
-    OPEN = "open"
-    INVESTIGATING = "investigating"
-    IDENTIFIED = "identified"
-    MONITORING = "monitoring"
-    RESOLVED = "resolved"
+class IncidentEventKind(str, Enum):
+    """Incident Timeline 의 단위 이벤트 종류."""
+
+    DEPLOYMENT     = "deployment"
+    ALERT          = "alert"
+    METRIC_SPIKE   = "metric_spike"
+    LOG_PATTERN    = "log_pattern"
+    HEALTH_CHECK   = "health_check"
+    APPROVAL       = "approval"
+    ROLLBACK       = "rollback"
+    GITOPS_PR      = "gitops_pr"
+    OTEL_SPAN      = "otel_span"
+    AUDIT          = "audit"
+    NOTE           = "note"
 
 
-class TimelineEvent(BaseModel):
-    """장애 타임라인 개별 이벤트"""
+class CorrelationSignalKind(str, Enum):
+    """Incident Correlation 의 8개 신호 (설계서 §Q4 Incident Correlation 설계)."""
+
+    ERROR_RATE_DELTA       = "error_rate_delta"
+    LATENCY_DELTA          = "latency_delta"
+    CHANGED_FILES_AREA     = "changed_files_area"
+    CONTAINER_RESTART      = "container_restart"
+    HEALTH_CHECK_FAILURE   = "health_check_failure"
+    LOG_KEYWORD_DELTA      = "log_keyword_delta"
+    TRAFFIC_SPIKE          = "traffic_spike"
+    DEPENDENCY_ERROR       = "dependency_error"
+
+
+class IncidentEvent(BaseModel):
+    """Timeline 위에 표시되는 한 줄의 이벤트."""
+
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    incident_id: str
     occurred_at: datetime
-    source: str                  # "alert", "user", "deployment", "audit_log"
+    kind: IncidentEventKind
     title: str
-    description: str
-    severity: Optional[IncidentSeverity] = None
-    related_deployment_id: Optional[str] = None
-    related_commit_sha: Optional[str] = None
-    metadata: dict = Field(default_factory=dict)
+    detail: Optional[str] = None
+    source: str = "unknown"  # 예: "otel", "watchdog", "auditlog", "deployment_record"
+    refs: dict[str, Any] = Field(default_factory=dict)  # 자유 형식 메타
+
+
+class IncidentTimeline(BaseModel):
+    """Incident Timeline MVP — 시간 정렬된 이벤트의 집합."""
+
+    schema_version: str = "1.0"
+    incident_id: str
+    project_id: Optional[str] = None
+    severity: IncidentSeverity = IncidentSeverity.SEV3
+    detected_at: datetime
+    resolved_at: Optional[datetime] = None
+    events: list[IncidentEvent] = Field(default_factory=list)
+    otel_available: bool = False
+    fallback_reason: Optional[str] = None  # OTel 미연결 시 사유 텍스트
+
+
+class ObservabilityQueryKind(str, Enum):
+    METRIC = "metric"
+    LOG    = "log"
+    TRACE  = "trace"
+
+
+class ObservabilityQueryResult(BaseModel):
+    """PrometheusAdapter / LokiAdapter 의 통합 응답."""
+
+    schema_version: str = "1.0"
+    kind: ObservabilityQueryKind
+    query: str
+    started_at: datetime
+    ended_at: datetime
+    samples: list[dict[str, Any]] = Field(default_factory=list)
+    error: Optional[str] = None
+    backend: str = "unknown"  # "prometheus" | "loki" | "tempo" | "fallback"
+
+
+class CorrelationSignal(BaseModel):
+    """단일 신호와 그 기여도."""
+
+    kind: CorrelationSignalKind
+    weight: float = Field(ge=0.0, le=1.0)
+    score: float = Field(ge=0.0, le=1.0)  # 정규화된 신호 강도
+    evidence: str
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class CorrelationResult(BaseModel):
+    """한 인시던트 ↔ 한 DeploymentRecord 사이의 매칭 결과."""
+
+    schema_version: str = "1.0"
+    incident_id: str
+    candidate_deployment_id: Optional[str] = None
+    candidate_image_tag: Optional[str] = None
+    signals: list[CorrelationSignal] = Field(default_factory=list)
+    correlation_score: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    label: str = "candidate"  # "candidate" | "weak_link" | "no_link"
+    rationale: str = ""
+
+
+class RCASymptom(BaseModel):
+    """관측된 증상 한 줄 (RCA 구조화 출력 #3)."""
+
+    name: str             # "error_rate", "memory", "restart_count", "health_check_failure"
+    value: Optional[str] = None
+    delta: Optional[str] = None
+    evidence: Optional[str] = None
 
 
 class RCACandidate(BaseModel):
-    """RCA 원인 후보 (confidence score 기반)"""
+    """가능성 높은 원인 후보 (RCA 구조화 출력 #4).
+
+    표현 원칙 (설계서):
+      - "원인입니다" 사용 금지 — 항상 "가능성 높은 원인 후보입니다" 톤
+      - confidence 가 항상 함께 표시된다
+    """
+
     candidate_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    title: str
-    description: str
-    confidence_score: float = Field(ge=0.0, le=1.0)   # 0.0~1.0
-    evidence: list[str] = Field(default_factory=list)  # 근거 목록
-    related_event_ids: list[str] = Field(default_factory=list)
-    suggested_fix: Optional[str] = None
+    hypothesis: str
+    evidence: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+    rollback_hint: Optional[str] = None
+    related_files: list[str] = Field(default_factory=list)
 
 
-class IncidentRecord(BaseModel):
-    """장애 레코드 (Timeline + RCA 포함)"""
-    incident_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    project_id: str
-    title: str
-    severity: IncidentSeverity
-    status: IncidentStatus = IncidentStatus.OPEN
-    detected_at: datetime = Field(default_factory=datetime.utcnow)
-    resolved_at: Optional[datetime] = None
-    timeline: list[TimelineEvent] = Field(default_factory=list)
-    rca_candidates: list[RCACandidate] = Field(default_factory=list)
-    postmortem_path: Optional[str] = None    # 생성된 Postmortem 파일 경로
-    created_by: str = "system"
+class RCAReport(BaseModel):
+    """RCA MVP — 설계서 §Q4 "구조화 출력 4가지" 만 채우면 Must 충족."""
+
+    schema_version: str = "1.0"
+    rca_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    incident_id: str
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # ① 가장 의심되는 배포 이벤트와 근거
+    suspected_deployment_id: Optional[str] = None
+    suspected_deployment_reason: str = ""
+
+    # ② 관련 변경 파일 목록
+    related_files: list[str] = Field(default_factory=list)
+
+    # ③ 관측된 증상
+    symptoms: list[RCASymptom] = Field(default_factory=list)
+
+    # ④ 가능성 높은 원인 후보 1~3 개와 각각의 근거
+    candidates: list[RCACandidate] = Field(default_factory=list)
+
+    overall_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    insufficient_evidence: bool = False
+    disclaimer: str = (
+        "본 RCA 는 확정된 원인이 아니라 가능성 높은 원인 후보 목록입니다. "
+        "최종 판단은 담당 엔지니어가 수행해야 합니다."
+    )
 
 
-# ---------------------------------------------------------------------------
-# Rollback PR (ADR-005)
-# ---------------------------------------------------------------------------
+class PostmortemSection(BaseModel):
+    """Postmortem 한 섹션."""
 
-class RollbackPRRequest(BaseModel):
-    """Git revert PR 생성 요청 (ADR-005: 프로덕션은 revert PR 기본)"""
-    project_id: str
-    repo_owner: str                # GitHub 조직/유저
-    repo_name: str
-    target_commit_sha: str         # revert 대상 commit SHA
-    github_token: str              # GitHub API token
-    base_branch: str = "main"
-    pr_title: Optional[str] = None
-    pr_body: Optional[str] = None
-    auto_merge: bool = False       # 승인 후 자동 머지 (Level 3 이상 금지)
-    approval_request_id: Optional[str] = None  # 연결된 승인 요청
+    heading: str
+    body: str
+    auto_filled: bool = True
 
 
-class RollbackPRRecord(BaseModel):
-    """생성된 rollback PR 기록"""
-    pr_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    project_id: str
-    repo_full_name: str            # "{owner}/{repo}"
-    pr_number: Optional[int] = None
-    pr_url: Optional[str] = None
-    target_commit_sha: str
-    revert_branch: str
-    status: str = "pending"        # "pending" | "opened" | "merged" | "closed"
-    error_message: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+class PostmortemSkeleton(BaseModel):
+    """Postmortem skeleton 자동 생성 결과 (설계서 §Q4 템플릿 일치)."""
 
-
-# ---------------------------------------------------------------------------
-# OTel Observability
-# ---------------------------------------------------------------------------
-
-class MetricPoint(BaseModel):
-    """단일 메트릭 데이터 포인트"""
-    name: str
-    value: float
-    labels: dict[str, str] = Field(default_factory=dict)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    unit: str = ""
-
-
-class TraceSpan(BaseModel):
-    """OTel 트레이스 스팬"""
-    span_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    trace_id: str
-    parent_span_id: Optional[str] = None
-    name: str
-    service_name: str
-    start_time: datetime
-    end_time: Optional[datetime] = None
-    status: str = "ok"             # "ok" | "error" | "unset"
-    attributes: dict = Field(default_factory=dict)
-    error_message: Optional[str] = None
-
-
-class ObservabilityConfig(BaseModel):
-    """OTel 설정"""
-    otel_endpoint: str = "http://localhost:4317"   # gRPC collector endpoint
-    prometheus_port: int = 9090
-    loki_url: str = "http://localhost:3100"
-    service_name: str = "recoder-local-core"
-    service_version: str = "1.0.0"
-    enabled: bool = True
+    schema_version: str = "1.0"
+    postmortem_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    incident_id: str
+    project_id: Optional[str] = None
+    severity: IncidentSeverity = IncidentSeverity.SEV3
+    sections: list[PostmortemSection] = Field(default_factory=list)
+    markdown_path: Optional[str] = None
+    otel_available: bool = False
 
 
 # ---------------------------------------------------------------------------
-# MCP (Model Context Protocol)
+# v5.0 Q4 — MCP server PoC (local stdio)
 # ---------------------------------------------------------------------------
 
-class MCPToolDefinition(BaseModel):
-    """MCP 도구 정의"""
+
+class MCPTransport(str, Enum):
+    STDIO              = "stdio"
+    LOCAL_HTTP         = "local_http"
+    STREAMABLE_HTTP    = "streamable_http"  # Backlog
+
+
+class MCPToolDescriptor(BaseModel):
+    """MCP `tools/list` 응답 단위."""
+
     name: str
     description: str
-    input_schema: dict             # JSON Schema
-    output_schema: Optional[dict] = None
+    input_schema: dict[str, Any] = Field(default_factory=dict)
 
 
-class MCPRequest(BaseModel):
-    """MCP stdio 요청 (JSON-RPC 2.0 기반)"""
-    jsonrpc: str = "2.0"
-    id: Optional[str] = None
-    method: str
-    params: dict = Field(default_factory=dict)
+class MCPInvocation(BaseModel):
+    """MCP `tools/call` 입력."""
+
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
 
 
-class MCPResponse(BaseModel):
-    """MCP stdio 응답"""
-    jsonrpc: str = "2.0"
-    id: Optional[str] = None
-    result: Optional[dict] = None
-    error: Optional[dict] = None
+class MCPInvocationResult(BaseModel):
+    """MCP `tools/call` 출력 (텍스트 결과만 우선 지원)."""
+
+    is_error: bool = False
+    content: list[dict[str, Any]] = Field(default_factory=list)  # MCP content blocks
 
 
-class MCPServerConfig(BaseModel):
-    """MCP 서버 설정"""
-    server_name: str = "recoder-mcp"
-    server_version: str = "1.0.0"
-    transport: str = "stdio"       # "stdio" | "sse"
-    tools: list[MCPToolDefinition] = Field(default_factory=list)
+# ---------------------------------------------------------------------------
+# v5.0 Q4 — Final Demo metadata
+# ---------------------------------------------------------------------------
+
+
+class DemoStepStatus(str, Enum):
+    PENDING    = "pending"
+    RUNNING    = "running"
+    PASSED     = "passed"
+    FAILED     = "failed"
+    SKIPPED    = "skipped"
+
+
+class DemoStep(BaseModel):
+    index: int = Field(ge=1)
+    title: str
+    description: str
+    expected_duration_sec: int = Field(ge=0)
+    status: DemoStepStatus = DemoStepStatus.PENDING
+
+
+class DemoScenario(BaseModel):
+    """Final Demo B 의 10단계 시나리오 (설계서 §Final Demo)."""
+
+    name: str = "final_demo_b"
+    cluster_provider: str = "eks"  # ADR-009: k3d/kind 금지
+    cluster_lifetime_minutes: int = 120
+    steps: list[DemoStep] = Field(default_factory=list)
