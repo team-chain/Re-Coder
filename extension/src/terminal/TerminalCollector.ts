@@ -1,13 +1,14 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { TerminalOutput } from '../types';
 import { ApiClient } from '../core/ApiClient';
 
 const execFileAsync = promisify(execFile);
+
+// ---------------------------------------------------------------------------
+// Error pattern matching (§8.2)
+// ---------------------------------------------------------------------------
 
 const ERROR_PATTERNS: RegExp[] = [
     /\bTraceback\s+\(most recent call last\)/i,
@@ -28,8 +29,23 @@ const ERROR_PATTERNS: RegExp[] = [
     /ENOENT|EACCES|ECONNREFUSED/i,
 ];
 
+// ---------------------------------------------------------------------------
+// TerminalCollector
+// ---------------------------------------------------------------------------
+
 export class TerminalCollector {
+    /** Per-terminal output buffer — keyed by stable WeakMap-assigned ID */
     private outputBuffer: Map<string, string[]> = new Map();
+
+    /**
+     * WeakMap assigns a stable string ID to each Terminal instance.
+     * Avoids the pitfall of `terminal.processId` being a Thenable<number>
+     * (not a sync number), which would coerce to "[object Promise]" and
+     * cause every terminal to share the same buffer key.
+     */
+    private terminalIds: WeakMap<vscode.Terminal, string> = new WeakMap();
+    private terminalIdCounter: number = 0;
+
     private apiClient: ApiClient | null = null;
 
     constructor(apiClient?: ApiClient) {
@@ -40,63 +56,49 @@ export class TerminalCollector {
         this.apiClient = client;
     }
 
-    async createReCoderTerminal(command: string): Promise<TerminalOutput> {
-        const start = Date.now();
-        const tmpOutput = path.join(os.tmpdir(), `recoder-out-${Date.now()}.txt`);
+    // -----------------------------------------------------------------------
+    // Shell Integration listeners (§8.1 — primary collection method)
+    // -----------------------------------------------------------------------
 
-        const hasShellIntegration = vscode.window.terminals.some(
-            (t) => t.shellIntegration !== undefined
-        );
-
-        if (hasShellIntegration) {
-            return this.runWithShellIntegration(command);
-        }
-
-        const wrappedCmd =
-            process.platform === 'win32'
-                ? `${command} > "${tmpOutput}" 2>&1`
-                : `${command} 2>&1 | tee "${tmpOutput}"`;
-
-        const terminal = vscode.window.createTerminal({ name: 'ReCoder', hideFromUser: false });
-        terminal.show(false);
-        terminal.sendText(wrappedCmd);
-
-        const output = await this.waitForOutputFile(tmpOutput, 60000);
-
-        const termOutput: TerminalOutput = {
-            command,
-            output,
-            exitCode: 0,
-            timestamp: new Date().toISOString(),
-        };
-
-        if (this.detectError(output)) { await this.triggerAnalysis(termOutput); }
-
-        try { fs.unlinkSync(tmpOutput); } catch { /* ignore */ }
-
-        return termOutput;
-    }
-
+    /**
+     * Register VSCode Shell Integration listeners.
+     *
+     * Must be called ONCE from extension.ts activate() so that
+     * onDidEndTerminalShellExecution is wired up and output actually flows
+     * into the buffer.
+     *
+     * @param context   Extension context (for subscription cleanup)
+     * @param onOutput  Callback invoked after EVERY command completes.
+     *                  The caller (extension.ts) decides whether to trigger
+     *                  sidebar analysis — do NOT duplicate that logic here.
+     */
     registerShellIntegrationListeners(
         context: vscode.ExtensionContext,
         onOutput: (output: TerminalOutput) => void
     ): void {
+        // onDidStartTerminalShellExecution — stable in VSCode ≥ 1.93
         if ('onDidStartTerminalShellExecution' in vscode.window) {
             const startDisposable = (
                 vscode.window as typeof vscode.window & {
                     onDidStartTerminalShellExecution: (
-                        listener: (e: { terminal: vscode.Terminal; execution: { commandLine: { value: string } } }) => void
+                        listener: (e: {
+                            terminal: vscode.Terminal;
+                            execution: { commandLine: { value: string } };
+                        }) => void
                     ) => vscode.Disposable;
                 }
             ).onDidStartTerminalShellExecution((e) => {
-                const terminalId = this.getTerminalId(e.terminal);
-                if (!this.outputBuffer.has(terminalId)) {
-                    this.outputBuffer.set(terminalId, []);
+                const id = this.getTerminalId(e.terminal);
+                if (!this.outputBuffer.has(id)) {
+                    this.outputBuffer.set(id, []);
                 }
             });
             context.subscriptions.push(startDisposable);
         }
 
+        // onDidEndTerminalShellExecution — stable in VSCode ≥ 1.93
+        // This is the ONLY reliable way to capture shell output without the
+        // terminalDataWriteEvent proposed API.
         if ('onDidEndTerminalShellExecution' in vscode.window) {
             const endDisposable = (
                 vscode.window as typeof vscode.window & {
@@ -114,66 +116,146 @@ export class TerminalCollector {
             ).onDidEndTerminalShellExecution(async (e) => {
                 const lines: string[] = [];
                 try {
-                    for await (const data of e.execution.read()) { lines.push(data); }
-                } catch { /* ignore */ }
+                    for await (const chunk of e.execution.read()) { lines.push(chunk); }
+                } catch { /* ignore read errors */ }
 
-                const terminalId = this.getTerminalId(e.terminal);
-                this.outputBuffer.set(terminalId, lines);
+                const id = this.getTerminalId(e.terminal);
+                this.outputBuffer.set(id, lines);
 
-                const output = lines.join('');
                 const termOutput: TerminalOutput = {
                     command: e.execution.commandLine.value,
-                    output,
+                    output: lines.join(''),
                     exitCode: e.exitCode ?? 0,
                     timestamp: new Date().toISOString(),
                 };
 
+                // Notify the caller — extension.ts decides whether to show in sidebar.
+                // Do NOT call this.triggerAnalysis() here; that would fire a raw API
+                // call with no sidebar update AND potentially double-trigger if the
+                // caller also requests analysis.
                 onOutput(termOutput);
-                if (this.detectError(output)) { await this.triggerAnalysis(termOutput); }
             });
             context.subscriptions.push(endDisposable);
         }
 
-        const dataDisposable = (vscode.window as any).onDidWriteTerminalData?.((e: any) => {
-            const terminalId = this.getTerminalId(e.terminal);
-            const buf = this.outputBuffer.get(terminalId) ?? [];
-            buf.push(e.data);
-            if (buf.length > 500) { buf.splice(0, buf.length - 500); }
-            this.outputBuffer.set(terminalId, buf);
-        });
-        if (dataDisposable) { context.subscriptions.push(dataDisposable); }
+        // NOTE: onDidWriteTerminalData (proposed API — terminalDataWriteEvent)
+        // is intentionally NOT used. It requires enabledApiProposals declaration
+        // and --enable-proposed-api flag. Shell Integration (above) is the
+        // production-safe alternative per §8.1.
     }
 
+    /**
+     * Called from extension.ts onDidChangeTerminalShellIntegration.
+     * Initialises an empty buffer slot for the terminal so getLatestOutput()
+     * can return an entry for it even before the first command runs.
+     */
+    attachShellIntegration(
+        terminal: vscode.Terminal,
+        _shellIntegration: vscode.TerminalShellIntegration
+    ): void {
+        const id = this.getTerminalId(terminal);
+        if (!this.outputBuffer.has(id)) {
+            this.outputBuffer.set(id, []);
+        }
+        console.log(`[TerminalCollector] Shell Integration attached: ${terminal.name}`);
+    }
+
+    // -----------------------------------------------------------------------
+    // Run with ReCoder (§8.3 — explicit command execution)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Run *command* as a child process and return its combined output.
+     *
+     * Uses execFileAsync (not a visible VSCode terminal) so stdout/stderr are
+     * captured reliably without any proposed API dependency.
+     * The caller (extension.ts runWithRecoder) passes output to the sidebar.
+     */
+    async createReCoderTerminal(command: string): Promise<TerminalOutput> {
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        return this.runWithFallback(command, workspacePath);
+    }
+
+    /**
+     * Run *command* via the system shell and return captured output.
+     * Used both by createReCoderTerminal and as a direct fallback.
+     */
     async runWithFallback(command: string, workspacePath: string): Promise<TerminalOutput> {
         const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
         const shellFlag = process.platform === 'win32' ? '/c' : '-c';
 
         try {
             const { stdout, stderr } = await execFileAsync(shell, [shellFlag, command], {
-                cwd: workspacePath,
-                maxBuffer: 1024 * 1024 * 10,
-                timeout: 120000,
+                cwd: workspacePath || undefined,
+                maxBuffer: 1024 * 1024 * 10, // 10 MB
+                timeout: 120_000,             // 2 min hard cap
             });
 
             const combined = stdout + (stderr ? `\nSTDERR:\n${stderr}` : '');
-            const termOutput: TerminalOutput = {
-                command, output: combined, exitCode: 0, timestamp: new Date().toISOString(),
+            return {
+                command,
+                output: combined,
+                exitCode: 0,
+                timestamp: new Date().toISOString(),
             };
-            if (this.detectError(combined)) { await this.triggerAnalysis(termOutput); }
-            return termOutput;
         } catch (err: unknown) {
-            const execErr = err as { stdout?: string; stderr?: string; code?: number; message?: string };
+            const execErr = err as {
+                stdout?: string;
+                stderr?: string;
+                code?: number;
+                message?: string;
+            };
             const combined =
                 (execErr.stdout ?? '') +
                 (execErr.stderr ? `\nSTDERR:\n${execErr.stderr}` : '') +
                 (execErr.message ? `\n${execErr.message}` : '');
-            const termOutput: TerminalOutput = {
-                command, output: combined, exitCode: execErr.code ?? 1, timestamp: new Date().toISOString(),
+            return {
+                command,
+                output: combined,
+                exitCode: execErr.code ?? 1,
+                timestamp: new Date().toISOString(),
             };
-            await this.triggerAnalysis(termOutput);
-            return termOutput;
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Buffer access
+    // -----------------------------------------------------------------------
+
+    /**
+     * Return the last *lines* lines from the active terminal's output buffer.
+     * Falls back to the most recently updated terminal if no terminal is active.
+     */
+    getLatestOutput(lines: number = 100): string {
+        const activeTerm = vscode.window.activeTerminal;
+        if (activeTerm) {
+            const id = this.getTerminalId(activeTerm);
+            if (this.outputBuffer.has(id)) {
+                return this.getLastLines(id, lines);
+            }
+        }
+        // No active terminal with a buffer — use the most recently written one
+        const entries = [...this.outputBuffer.entries()];
+        if (entries.length === 0) { return ''; }
+        const [lastId] = entries[entries.length - 1];
+        return this.getLastLines(lastId, lines);
+    }
+
+    getLastOutput(terminalId: string, lines: number = 100): string {
+        return this.getLastLines(terminalId, lines);
+    }
+
+    // -----------------------------------------------------------------------
+    // Error detection
+    // -----------------------------------------------------------------------
+
+    detectError(output: string): boolean {
+        return ERROR_PATTERNS.some((p) => p.test(output));
+    }
+
+    // -----------------------------------------------------------------------
+    // Miscellaneous
+    // -----------------------------------------------------------------------
 
     async promptManualInput(): Promise<string | null> {
         const result = await vscode.window.showInputBox({
@@ -184,107 +266,29 @@ export class TerminalCollector {
         return result ?? null;
     }
 
-    /**
-     * Shell Integration이 활성화된 터미널을 등록합니다.
-     * extension.ts의 onDidChangeTerminalShellIntegration 핸들러에서 호출됩니다.
-     */
-    attachShellIntegration(
-        terminal: vscode.Terminal,
-        _shellIntegration: vscode.TerminalShellIntegration
-    ): void {
-        const terminalId = this.getTerminalId(terminal);
-        if (!this.outputBuffer.has(terminalId)) {
-            this.outputBuffer.set(terminalId, []);
-        }
-        console.log(`[TerminalCollector] Shell Integration attached: ${terminal.name}`);
-    }
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
 
-    /**
-     * onDidWriteTerminalData 이벤트 핸들러 — 데이터를 버퍼에 저장합니다.
-     */
-    onTerminalData(terminal: vscode.Terminal, data: string): void {
-        const terminalId = this.getTerminalId(terminal);
-        const buf = this.outputBuffer.get(terminalId) ?? [];
-        buf.push(data);
-        if (buf.length > 500) { buf.splice(0, buf.length - 500); }
-        this.outputBuffer.set(terminalId, buf);
-    }
-
-    /**
-     * 활성 터미널(또는 가장 최근 터미널)의 마지막 출력을 반환합니다.
-     */
-    getLatestOutput(lines: number = 100): string {
-        const activeTerm = vscode.window.activeTerminal;
-        if (activeTerm) {
-            const id = this.getTerminalId(activeTerm);
-            if (this.outputBuffer.has(id)) { return this.getLastOutput(id, lines); }
-        }
-        const entries = [...this.outputBuffer.entries()];
-        if (entries.length === 0) { return ''; }
-        const [lastId] = entries[entries.length - 1];
-        return this.getLastOutput(lastId, lines);
-    }
-
-    getLastOutput(terminalId: string, lines: number = 100): string {
+    private getLastLines(terminalId: string, lines: number): string {
         const buf = this.outputBuffer.get(terminalId) ?? [];
         const allText = buf.join('');
         const allLines = allText.split('\n');
         return allLines.slice(-lines).join('\n');
     }
 
-    detectError(output: string): boolean {
-        return ERROR_PATTERNS.some((pattern) => pattern.test(output));
-    }
-
-    private async triggerAnalysis(output: TerminalOutput): Promise<void> {
-        if (!this.apiClient) { return; }
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-        try {
-            await this.apiClient.analyze({
-                workspace_path: workspacePath,
-                terminal_output: output.output,
-                command: output.command,
-            });
-        } catch (err) {
-            console.error('[TerminalCollector] Auto-analysis failed:', err);
-        }
-    }
-
-    private async runWithShellIntegration(command: string): Promise<TerminalOutput> {
-        return new Promise((resolve) => {
-            const terminal = vscode.window.createTerminal({ name: 'ReCoder' });
-            terminal.show(false);
-            let outputLines: string[] = [];
-
-            const dataDisposable = (vscode.window as any).onDidWriteTerminalData?.((e: any) => {
-                if (e.terminal === terminal) { outputLines.push(e.data); }
-            });
-
-            terminal.sendText(command);
-
-            setTimeout(() => {
-                dataDisposable?.dispose();
-                const output = outputLines.join('');
-                resolve({
-                    command, output, exitCode: 0, timestamp: new Date().toISOString(),
-                });
-            }, 5000);
-        });
-    }
-
-    private async waitForOutputFile(filePath: string, timeoutMs: number): Promise<string> {
-        const start = Date.now();
-        while (Date.now() - start < timeoutMs) {
-            if (fs.existsSync(filePath)) {
-                const content = fs.readFileSync(filePath, 'utf-8');
-                if (content.length > 0) { return content; }
-            }
-            await new Promise((r) => setTimeout(r, 500));
-        }
-        return '';
-    }
-
+    /**
+     * Return a stable string ID for a terminal instance.
+     *
+     * Using a WeakMap-backed counter instead of terminal.processId because
+     * processId is Thenable<number|undefined> (async), not a number — direct
+     * access returns a Promise object that serialises as "[object Promise]",
+     * making every terminal share the same key.
+     */
     private getTerminalId(terminal: vscode.Terminal): string {
-        return `${terminal.name}-${((terminal as unknown) as { processId?: unknown }).processId ?? 'unknown'}`;
+        if (!this.terminalIds.has(terminal)) {
+            this.terminalIds.set(terminal, `t${++this.terminalIdCounter}`);
+        }
+        return this.terminalIds.get(terminal)!;
     }
 }

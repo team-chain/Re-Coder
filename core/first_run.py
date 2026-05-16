@@ -119,7 +119,7 @@ class FirstRunDiagnostics:
 
     async def check_docker_ready(self) -> bool:
         """Return True if Docker Engine is detected and responsive."""
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._check_docker_sync
         )
 
@@ -128,7 +128,7 @@ class FirstRunDiagnostics:
         Return True if AWS CLI is installed, at least one SSH key exists,
         and basic EC2/ECR permissions are available.
         """
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._check_aws_sync
         )
 
@@ -137,7 +137,7 @@ class FirstRunDiagnostics:
         Return True if SSH client, remote Docker socket access, container
         health-check tooling, and Discord webhook env-var are all present.
         """
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._check_ops_sync
         )
 
@@ -152,7 +152,7 @@ class FirstRunDiagnostics:
 
         Returns (True, model_id) on success or (False, "") on failure.
         """
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._validate_bedrock_sync, region
         )
 
@@ -161,7 +161,7 @@ class FirstRunDiagnostics:
         Return True if a GOOGLE_API_KEY (or GEMINI_API_KEY) environment
         variable is set and the Gemini models endpoint responds successfully.
         """
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._validate_gemini_sync
         )
 

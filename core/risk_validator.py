@@ -180,6 +180,18 @@ class RiskValidator:
             reasons.append("No rollback image specified — cannot auto-revert")
             current_risk = _bump(current_risk, RiskLevel)
 
+        # Always re-derive approval_level from final risk (§16 Approval Level)
+        # Specific branches above may have already set a stricter level;
+        # only upgrade (never downgrade) to match the resolved risk.
+        derived = self._determine_approval_level(
+            current_risk,
+            str(plan.action.value) if plan.action else "unknown",
+            ApprovalLevel,
+            RiskLevel,
+        )
+        if derived.value > plan.approval_level.value:
+            plan.approval_level = derived
+
         plan.risk_level = current_risk
         plan.risk_reasons = reasons
         return plan

@@ -104,11 +104,8 @@ def _read_sessions() -> list[SessionRecord]:
 
 
 @router.get("/api/cost")
-async def get_cost(daily_usd: float = 0.0) -> CostSummary:
-    """
-    Primary cost endpoint specified in the v6.4 design doc (§19.5).
-    Delegates to get_cost_summary for the actual aggregation.
-    """
+async def get_cost() -> CostSummary:
+    """Primary cost endpoint specified in the v6.4 design doc (§19.5)."""
     return await get_cost_summary()
 
 

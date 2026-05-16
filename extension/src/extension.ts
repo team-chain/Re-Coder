@@ -47,15 +47,42 @@ export function activate(context: vscode.ExtensionContext): void {
         )
     );
 
-    // ── Shell Integration listener ──────────────────────────────────────────
-    // Attach to any terminal that gains Shell Integration support at runtime.
-    context.subscriptions.push(
-        vscode.window.onDidChangeTerminalShellIntegration(
-            async ({ terminal, shellIntegration }) => {
-                terminalCollector.attachShellIntegration(terminal, shellIntegration);
-            }
-        )
+    // ── Shell Integration listeners (§8.1 — primary output collection) ────────
+    // registerShellIntegrationListeners wires up onDidEndTerminalShellExecution
+    // so that terminal output actually flows into the buffer used by
+    // getLatestOutput().  Must be called before any command is registered.
+    terminalCollector.registerShellIntegrationListeners(
+        context,
+        (output: import('./types').TerminalOutput) => {
+            // Auto-analysis: only trigger when an error pattern is detected.
+            // This is the §8.1 "passive monitoring" path.
+            if (!terminalCollector.detectError(output.output)) { return; }
+            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const request: AnalyzeRequest = {
+                workspace_path: workspacePath,
+                terminal_output: output.output,
+                command: output.command,
+                project_files_summary: buildProjectFilesSummary(workspacePath),
+            };
+            sidebarProvider.triggerAnalysis(request);
+            void vscode.commands.executeCommand('recoder.sidebarView.focus');
+        }
     );
+
+    // Attach to any terminal that gains Shell Integration support at runtime.
+    // onDidChangeTerminalShellIntegration became stable in VSCode 1.93.
+    // Guard with 'in' check so the extension still loads on older versions.
+    // onDidChangeTerminalShellIntegration became stable in VSCode 1.93.
+    // Use try/catch guard so activation succeeds on older versions too.
+    try {
+        context.subscriptions.push(
+            vscode.window.onDidChangeTerminalShellIntegration(({ terminal, shellIntegration }) => {
+                terminalCollector.attachShellIntegration(terminal, shellIntegration);
+            })
+        );
+    } catch (_e) {
+        // API not available on this VSCode version — Shell Integration auto-attach disabled.
+    }
 
     // Attach to terminals already open at activation time
     for (const terminal of vscode.window.terminals) {
@@ -160,12 +187,12 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
-    // ── Terminal data listener (Shell Integration fallback) ─────────────────
-    context.subscriptions.push(
-        (vscode.window as any).onDidWriteTerminalData?.(({ terminal, data }: { terminal: vscode.Terminal; data: string }) => {
-            terminalCollector.onTerminalData(terminal, data);
-        })
-    );
+    // ── Terminal data listener ──────────────────────────────────────────────
+    // onDidWriteTerminalData is a VSCode proposed API (terminalDataWriteEvent)
+    // and cannot be used without --enable-proposed-api in production builds.
+    // Primary output collection is handled by TerminalShellIntegration above
+    // (§8.1 Shell Integration 우선 수집). Raw data capture via proposed API
+    // is a 2학기 optional enhancement.
 
     console.log('[ReCoder] Extension activated.');
 }
@@ -217,6 +244,21 @@ function buildProjectFilesSummary(workspacePath: string): string {
 }
 
 function getDefaultRunCommand(workspacePath?: string): string {
+    if (!workspacePath) {
+        return '';
+    }
+    if (fs.existsSync(path.join(workspacePath, 'requirements.txt'))) {
+        return 'python main.py';
+    }
+    if (fs.existsSync(path.join(workspacePath, 'package.json'))) {
+        return 'npm start';
+    }
+    if (fs.existsSync(path.join(workspacePath, 'go.mod'))) {
+        return 'go run .';
+    }
+    return '';
+}
+unCommand(workspacePath?: string): string {
     if (!workspacePath) {
         return '';
     }

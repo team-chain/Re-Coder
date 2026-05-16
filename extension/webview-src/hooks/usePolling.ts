@@ -52,20 +52,22 @@ export function usePolling(interval: number = 4000): PollingState {
     return () => clearInterval(timer);
   }, [poll, interval]);
 
-  // Listen for responses from the extension host
+  // Listen for responses from the extension host.
+  // SidebarProvider sends "healthUpdate" and "costUpdate" (see SidebarProvider.ts).
   useMessage((message) => {
     const { type, payload } = message;
 
-    if (type === "core.health.update") {
+    if (type === "healthUpdate") {
+      const health = payload as CoreHealth;
       setState((prev) => ({
         ...prev,
-        coreHealth: payload as CoreHealth,
+        coreHealth: health,
         lastPolledAt: new Date(),
-        isConnected: (payload as CoreHealth)?.status === "ok",
+        isConnected: health?.status === "ok",
       }));
     }
 
-    if (type === "core.cost.update") {
+    if (type === "costUpdate") {
       setState((prev) => ({
         ...prev,
         costSummary: payload as CostSummary,
@@ -73,11 +75,14 @@ export function usePolling(interval: number = 4000): PollingState {
       }));
     }
 
-    if (type === "core.offline") {
+    // errorMessage from PollingService failure → mark as offline
+    if (type === "errorMessage") {
       setState((prev) => ({
         ...prev,
         isConnected: false,
-        coreHealth: { status: "down", version: "-", uptime: 0, port: 0 },
+        coreHealth: prev.coreHealth?.status === "ok"
+          ? { ...prev.coreHealth, status: "down" }
+          : prev.coreHealth,
       }));
     }
   });

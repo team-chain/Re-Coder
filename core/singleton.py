@@ -247,22 +247,19 @@ class CoreSingleton:
 
     @staticmethod
     def _set_windows_permissions(path: Path) -> None:
-        """Best-effort owner-only ACL on Windows using icacls."""
-        try:
-            import subprocess
-            import getpass
-            username = getpass.getuser()
-            subprocess.run(
-                [
-                    "icacls",
-                    str(path),
-                    "/inheritance:r",
-                    "/grant:r",
-                    f"{username}:(OI)(CI)F",
-                ],
-                capture_output=True,
-                check=False,
-                timeout=5,
-            )
-        except Exception:
-            pass  # Soft fail
+        """
+        Windows permission hardening — soft fail only (§11.3).
+
+        The files live under the user's own home directory (~/.recoder/)
+        which Windows already protects via NTFS user-account security.
+        Attempting aggressive icacls /inheritance:r can accidentally lock
+        out the same user's own PowerShell/CMD sessions, breaking runtime.json
+        readability.  Per design spec §11.3: "보안보다 데모 가용성이 우선".
+        We therefore log a notice and skip the icacls call on Windows.
+        """
+        import logging
+        logging.getLogger(__name__).debug(
+            "Windows ACL hardening skipped for %s "
+            "(NTFS home-directory protection is sufficient for demo/dev use).",
+            path,
+        )

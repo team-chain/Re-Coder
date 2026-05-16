@@ -64,7 +64,7 @@ class GeminiProvider:
             )
 
         full_prompt = self._build_prompt(prompt, schema)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None, lambda: self._model.generate_content(full_prompt)
         )

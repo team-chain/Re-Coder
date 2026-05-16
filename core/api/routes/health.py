@@ -10,11 +10,16 @@ import signal
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from first_run import FirstRunDiagnostics
 from schemas import DiagnosticsResult
+
+try:
+    from first_run import FirstRunDiagnostics  # type: ignore
+    _FIRST_RUN_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _FIRST_RUN_AVAILABLE = False
 
 router = APIRouter(tags=["health"])
 
@@ -57,7 +62,6 @@ async def get_status(request: Request) -> dict:
     orchestrator_state = "idle"
     current_proposal_id: Optional[str] = None
     try:
-        # analyze.py keeps a module-level singleton we can inspect
         from api.routes.analyze import _orchestrator  # type: ignore
         if _orchestrator is not None:
             orchestrator_state = _orchestrator.state.value
@@ -83,7 +87,12 @@ async def run_diagnostics() -> DiagnosticsResult:
 
     Results are also persisted to ~/.recoder/diagnostics.json.
     """
-    diag = FirstRunDiagnostics()
+    if not _FIRST_RUN_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="FirstRunDiagnostics module not available in this build.",
+        )
+    diag = FirstRunDiagnostics()  # type: ignore[name-defined]
     result = await diag.run_all()
     return result
 
@@ -91,7 +100,9 @@ async def run_diagnostics() -> DiagnosticsResult:
 @router.get("/api/diagnostics")
 async def get_diagnostics() -> Optional[DiagnosticsResult]:
     """Return the most recently saved diagnostics result, or null if absent."""
-    diag = FirstRunDiagnostics()
+    if not _FIRST_RUN_AVAILABLE:
+        return JSONResponse(status_code=204, content=None)
+    diag = FirstRunDiagnostics()  # type: ignore[name-defined]
     result = await diag.load_diagnostics()
     if result is None:
         return JSONResponse(status_code=204, content=None)

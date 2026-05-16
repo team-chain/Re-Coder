@@ -236,6 +236,7 @@ export interface AlertRecord {
 
 export interface ResponseProposal {
   schema_version: string;
+  proposal_id: string;
   alert_id: string;
   action_type: ActionType;
   target_container?: string;

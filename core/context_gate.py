@@ -106,7 +106,7 @@ class ContextGate:
         Runs the CPU-bound work in the default thread-pool executor so the
         event loop is never blocked for large inputs.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         masked_content, mask_count = await loop.run_in_executor(
             None, self._mask_sync, content
         )

@@ -126,7 +126,8 @@ def _detect_stack(workspace_path: str) -> StackType:
     """Heuristically detect the project stack from workspace files."""
     ws = Path(workspace_path)
     if (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
-        for f in ws.rglob("*.py"):
+        # Limit to 20 files to avoid blocking the async event loop on large projects.
+        for f in list(ws.rglob("*.py"))[:20]:
             try:
                 text = f.read_text(encoding="utf-8", errors="ignore")
                 if "fastapi" in text.lower():
@@ -191,7 +192,7 @@ async def _run_scan_container(scan_type: str, workspace_path: str, target_path: 
     ]
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
                 docker_cmd,
@@ -333,10 +334,15 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         from registry import CommandTemplateRegistry  # type: ignore
         reg = CommandTemplateRegistry()
         try:
+            # Use the first port mapping as host_port/container_port for templates.
+            # (Templates address a single port; multi-port deployments should
+            # use docker-compose, not the template registry.)
+            first_hp, first_cp = next(iter(plan.ports.items()), ("8080", "8080"))
             cmd_str = reg.build_command(plan.command_template_id, {
                 "image_name": plan.image or "",
                 "container_name": plan.container_name or "",
-                **{"host_port": int(k) for k, v in plan.ports.items()},
+                "host_port": int(first_hp),
+                "container_port": int(first_cp),
             })
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Command build failed: {exc}") from exc
@@ -349,7 +355,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         )
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
                 cmd_str, shell=True, capture_output=True, text=True, timeout=300
@@ -422,7 +428,7 @@ async def rollback(request: RollbackRequest) -> dict:
     )
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
                 rollback_cmd, shell=True, capture_output=True, text=True, timeout=120

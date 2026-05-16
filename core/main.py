@@ -32,6 +32,16 @@ from api.middleware.auth import SessionTokenMiddleware
 from api.routes import health, analyze, deploy, ops, session
 
 # ---------------------------------------------------------------------------
+# Module-level port variable
+# Shared between main() and lifespan() so both use the same port.
+# find_available_port() must be called only ONCE (in main()); the lifespan
+# hook then reads this variable instead of re-probing, which would risk
+# returning a different port if another process grabbed the original port
+# between the two calls.
+# ---------------------------------------------------------------------------
+_bound_port: int = 0
+
+# ---------------------------------------------------------------------------
 # Application version
 # ---------------------------------------------------------------------------
 VERSION = "1.0.0"
@@ -70,7 +80,9 @@ async def lifespan(app: FastAPI):
         return
 
     # --- Port discovery ---
-    port = CoreSingleton.find_available_port()
+    # Use the port already discovered by main() to guarantee that the port
+    # uvicorn bound to and the port written to runtime.json are identical.
+    port = _bound_port if _bound_port else CoreSingleton.find_available_port()
     app.state.port = port
 
     # --- Session token ---
@@ -103,8 +115,6 @@ def create_app() -> FastAPI:
         version=VERSION,
         description="Local AI-assisted development backend for the ReCoder VSCode extension.",
         lifespan=lifespan,
-        # Disable automatic /docs and /redoc in production if desired;
-        # left enabled here for developer convenience.
     )
 
     # ---- CORS (localhost only) ----
@@ -113,8 +123,6 @@ def create_app() -> FastAPI:
         allow_origins=[
             "http://127.0.0.1",
             "http://localhost",
-            # VSCode webview uses vscode-webview:// scheme; the extension
-            # communicates via HTTP to 127.0.0.1 so this is sufficient.
         ],
         allow_credentials=True,
         allow_methods=["*"],
@@ -145,24 +153,25 @@ def main() -> None:
     """
     Discover an available port and start the uvicorn server.
 
-    Port selection is handled inside the lifespan hook, but uvicorn needs
-    the port before it starts.  We therefore probe here as well and rely on
-    the lifespan to write runtime.json with the same value.
+    The port is discovered ONCE here and stored in the module-level
+    _bound_port variable so that the lifespan hook can write the same
+    value to runtime.json without re-probing (which could return a
+    different port if another process grabbed the original port first).
     """
+    global _bound_port
     try:
-        port = CoreSingleton.find_available_port()
+        _bound_port = CoreSingleton.find_available_port()
     except RuntimeError as exc:
         print(f"[ReCoder Core] FATAL: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[ReCoder Core] Starting on http://127.0.0.1:{port}", flush=True)
+    print(f"[ReCoder Core] Starting on http://127.0.0.1:{_bound_port}", flush=True)
 
     uvicorn.run(
         "main:app",
         host="127.0.0.1",
-        port=port,
+        port=_bound_port,
         log_level="info",
-        # Allow graceful shutdown via SIGTERM
         timeout_graceful_shutdown=10,
     )
 

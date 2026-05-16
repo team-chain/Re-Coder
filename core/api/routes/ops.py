@@ -103,7 +103,7 @@ async def _ssh_fetch_file(
         f"cat {remote_path}",
     ]
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=30),
         )
@@ -137,7 +137,7 @@ async def _ssh_exec(
         command,
     ]
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=60),
         )
@@ -224,7 +224,9 @@ async def analyze_incident(request: AnalyzeIncidentRequest) -> ResponseProposal:
             approval_level=ApprovalLevel.DOUBLE_CONFIRM,
         )
 
-    _proposals[proposal.alert_id] = proposal
+    # Store by proposal_id so that approve_response can look it up by the
+    # same key the client receives in the response body.
+    _proposals[proposal.proposal_id] = proposal
     return proposal
 
 

@@ -65,9 +65,14 @@ export class ApiClient {
     }
 
     async getHealth(): Promise<CoreHealth> {
-        const resp = await this.request<CoreHealth>('GET', '/api/health');
+        const resp = await this.request<CoreHealth & { uptime_seconds?: number }>('GET', '/api/health');
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Health check 실패'); }
-        return resp.data;
+        // /api/health returns `uptime_seconds`; remap to the CoreHealth.uptime field.
+        const raw = resp.data;
+        return {
+            ...raw,
+            uptime: raw.uptime ?? (raw as unknown as { uptime_seconds?: number }).uptime_seconds ?? 0,
+        };
     }
 
     async runDiagnostics(): Promise<DiagnosticsResult> {

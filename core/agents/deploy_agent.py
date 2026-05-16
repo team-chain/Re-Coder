@@ -282,7 +282,7 @@ class DeployAgent:
     async def get_image_digest(self, image_name: str) -> Optional[str]:
         """Retrieve the RepoDigest (or ID) of a locally built image."""
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
                     ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image_name],
@@ -292,7 +292,7 @@ class DeployAgent:
             digest = result.stdout.strip()
             if not digest or digest == "<no value>":
                 # Fall back to short image ID
-                result2 = await asyncio.get_event_loop().run_in_executor(
+                result2 = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: subprocess.run(
                         ["docker", "images", "--format", "{{.ID}}", image_name],
@@ -339,7 +339,7 @@ class DeployAgent:
     async def _stop_remove_container(name: str) -> None:
         """Best-effort stop + rm of an existing container (ignores errors)."""
         try:
-            await asyncio.get_event_loop().run_in_executor(
+            await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
                     ["docker", "rm", "-f", name],

@@ -276,6 +276,7 @@ class ResponseProposal(BaseModel):
     """AI-generated remediation proposal for an ops alert."""
 
     schema_version: str = "1.0"
+    proposal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     alert_id: str
     action_type: ActionType
     target_container: Optional[str] = None

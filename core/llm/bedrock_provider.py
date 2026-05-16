@@ -206,7 +206,7 @@ class BedrockProvider:
         """Run the blocking boto3 call in a thread-pool executor."""
         if self._client is None:
             raise RuntimeError("boto3 client not initialised")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None, lambda: self._client.converse(**kwargs)
         )

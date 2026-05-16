@@ -201,7 +201,8 @@ export class CoreManager {
     }
 
     private getRuntimeJsonPath(): string {
-        return path.join(os.tmpdir(), 'recoder-runtime.json');
+        // Core writes runtime.json to ~/.recoder/runtime.json (singleton.py)
+        return path.join(os.homedir(), '.recoder', 'runtime.json');
     }
 
     private sleep(ms: number): Promise<void> {

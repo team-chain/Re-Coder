@@ -99,7 +99,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     triggerDockerfileGeneration(): void {
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-        void this.handleGenerateDockerfile(workspacePath, '');
+        void this.handleGenerateDockerfile(workspacePath, undefined);
     }
 
     triggerDiagnostics(): void {
@@ -216,7 +216,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (opsResult.status === 'error') {
                     this.postMessage('errorMessage', { message: '응답 승인 실패' });
                 } else {
+                    // Remove the ResponseProposal from state (matched by proposal_id)
+                    this._state.proposals = this._state.proposals.filter(
+                        (p) => (p as import('../types').ResponseProposal).proposal_id !== proposalId
+                    );
                     this.postMessage('opsResult', opsResult);
+                    this.postMessage('stateUpdate', this._state);
                 }
                 break;
             }
@@ -239,6 +244,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const { mode } = payload as { mode: Mode };
                 this._state.currentMode = mode;
                 this.postMessage('stateUpdate', this._state);
+                break;
+            }
+            // ------------------------------------------------------------------
+            // Webview polling requests — webview asks for latest data
+            // ------------------------------------------------------------------
+            case 'webview.poll.health': {
+                // Respond with last known health from PollingService
+                const lastHealth = this._pollingService.getLastHealth();
+                if (lastHealth) {
+                    this.postMessage('healthUpdate', lastHealth);
+                } else {
+                    // Trigger a fresh poll
+                    void this._pollingService.poll();
+                }
+                break;
+            }
+            case 'webview.poll.cost': {
+                void this.refreshCost();
+                break;
+            }
+            case 'webview.poll.status': {
+                void this._pollingService.poll();
+                break;
+            }
+            case 'webview.ready': {
+                // Webview finished loading — send current state immediately
+                this.postMessage('stateUpdate', this._state);
+                const health = this._pollingService.getLastHealth();
+                if (health) { this.postMessage('healthUpdate', health); }
+                if (this._state.costSummary) { this.postMessage('costUpdate', this._state.costSummary); }
                 break;
             }
             default:
@@ -291,7 +326,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         await this.handleAnalyze({ workspace_path: workspacePath, terminal_output: errorLog });
     }
 
-    private async handleGenerateDockerfile(workspacePath: string, projectId: string): Promise<void> {
+    private async handleGenerateDockerfile(workspacePath: string, projectId?: string): Promise<void> {
         try {
             this._state.isLoading = true;
             this.postMessage('stateUpdate', this._state);
