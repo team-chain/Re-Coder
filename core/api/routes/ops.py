@@ -73,7 +73,7 @@ def _get_ops_agent():
     if _ops_agent is None:
         try:
             from llm.provider_router import LLMProviderRouter  # type: ignore
-            from ops_agent import OpsAgent  # type: ignore
+            from agents.ops_agent import OpsAgent  # type: ignore
             _ops_agent = OpsAgent(provider_router=LLMProviderRouter())
         except Exception as exc:  # noqa: BLE001
             import logging

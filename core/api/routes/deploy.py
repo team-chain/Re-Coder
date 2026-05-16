@@ -92,7 +92,7 @@ def _get_infra_agent():
         try:
             from llm.provider_router import LLMProviderRouter  # type: ignore
             from registry import FileTemplateRegistry  # type: ignore
-            from infra_agent import InfraAgent  # type: ignore
+            from agents.infra_agent import InfraAgent  # type: ignore
             _infra_agent = InfraAgent(
                 provider_router=LLMProviderRouter(),
                 file_template_registry=FileTemplateRegistry(),
@@ -108,7 +108,7 @@ def _get_deploy_agent():
     if _deploy_agent is None:
         try:
             from llm.provider_router import LLMProviderRouter  # type: ignore
-            from deploy_agent import DeployAgent  # type: ignore
+            from agents.deploy_agent import DeployAgent  # type: ignore
             _deploy_agent = DeployAgent(
                 provider_router=LLMProviderRouter(),
             )
@@ -379,6 +379,15 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         "stdout": result.stdout[:2000],
         "stderr": result.stderr[:2000],
     }
+
+
+@router.post("/api/deploy/local")
+async def execute_deployment_local(request: ExecuteRequest) -> dict:
+    """
+    Alias for /api/deploy/execute — matches the path name specified in
+    the v6.4 design document (§20.5 DeploymentPlan, method=local_docker).
+    """
+    return await execute_deployment(request)
 
 
 @router.get("/api/deploy/records")

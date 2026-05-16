@@ -46,7 +46,25 @@ export class PollingService {
 
     async poll(): Promise<CoreHealth | null> {
         try {
-            const health = await this.apiClient.getHealth();
+            // Use /api/status (§4.5) — richer than /api/health; includes
+            // Orchestrator FSM state so the sidebar can reflect progress.
+            // Falls back to /api/health if /api/status is unavailable.
+            let health: CoreHealth;
+            try {
+                const status = await this.apiClient.getStatus();
+                health = {
+                    status: status.status as CoreHealth['status'],
+                    version: status.version,
+                    uptime: status.uptime_seconds,
+                    port: status.port,
+                    orchestrator_state: status.orchestrator_state as import('../types').OrchestratorState,
+                    current_proposal_id: status.current_proposal_id,
+                    timestamp: status.timestamp,
+                };
+            } catch {
+                // Fallback: /api/status may not be available on older cores
+                health = await this.apiClient.getHealth();
+            }
             this.lastHealth = health;
             this.onUpdateCallback?.(health);
             return health;

@@ -160,32 +160,83 @@ export class ApiClient {
         return { status: resp.data?.status ?? (resp.success ? 'rolled_back' : 'error') };
     }
 
+    // -----------------------------------------------------------------------
+    // Ops / Incident Response
+    // (paths match core/api/routes/ops.py exactly)
+    // -----------------------------------------------------------------------
+
     async fetchIncidents(host: string, sshKeyPath: string, sshUser = 'ec2-user'): Promise<AlertRecord[]> {
         const resp = await this.request<AlertRecord[]>(
-            'POST', '/api/ops/incidents',
+            'POST', '/api/ops/fetch-incidents',
             { host, ssh_key_path: sshKeyPath, ssh_user: sshUser }
         );
         return resp.success && resp.data ? resp.data : [];
     }
 
-    async analyzeIncident(alertId: string): Promise<ResponseProposal> {
-        const resp = await this.request<ResponseProposal>('POST', `/api/ops/incidents/${alertId}/analyze`);
+    async analyzeIncident(alertId: string, extraContext?: string): Promise<ResponseProposal> {
+        const resp = await this.request<ResponseProposal>(
+            'POST', '/api/ops/analyze',
+            { alert_id: alertId, extra_context: extraContext }
+        );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '인시던트 분석 실패'); }
         return resp.data;
     }
 
-    async approveResponse(proposalId: string, approved: boolean): Promise<{ status: string }> {
+    async approveResponse(
+        proposalId: string,
+        approved: boolean,
+        sshHost?: string,
+        sshUser?: string,
+        sshKeyPath?: string,
+    ): Promise<{ status: string }> {
         const resp = await this.request<{ status: string }>(
-            'POST', `/api/ops/responses/${proposalId}/approve`, { approved }
+            'POST', '/api/ops/approve',
+            { proposal_id: proposalId, approved, ssh_host: sshHost, ssh_user: sshUser, ssh_key_path: sshKeyPath }
         );
         return { status: resp.data?.status ?? (resp.success ? 'executed' : 'error') };
     }
 
+    // -----------------------------------------------------------------------
+    // Status (primary polling target for PollingService — §4.5)
+    // -----------------------------------------------------------------------
+
+    async getStatus(): Promise<{
+        status: string;
+        version: string;
+        uptime_seconds: number;
+        port: number;
+        orchestrator_state: string;
+        current_proposal_id: string | null;
+        timestamp: string;
+    }> {
+        const resp = await this.request<{
+            status: string;
+            version: string;
+            uptime_seconds: number;
+            port: number;
+            orchestrator_state: string;
+            current_proposal_id: string | null;
+            timestamp: string;
+        }>('GET', '/api/status');
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '상태 조회 실패'); }
+        return resp.data;
+    }
+
+    // -----------------------------------------------------------------------
+    // Cost tracking (§19.5)
+    // /api/cost  — design-doc canonical path
+    // /api/session/cost — also supported by core for backwards compat
+    // -----------------------------------------------------------------------
+
     async getCostSummary(): Promise<CostSummary> {
-        const resp = await this.request<CostSummary>('GET', '/api/session/cost');
+        const resp = await this.request<CostSummary>('GET', '/api/cost');
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비용 정보 조회 실패'); }
         return resp.data;
     }
+
+    // -----------------------------------------------------------------------
+    // Project management (§20.1)
+    // -----------------------------------------------------------------------
 
     async createProject(profile: ProjectProfile): Promise<ProjectProfile> {
         const resp = await this.request<ProjectProfile>('POST', '/api/projects', profile);
@@ -196,5 +247,29 @@ export class ApiClient {
     async getProject(projectId: string): Promise<ProjectProfile | null> {
         const resp = await this.request<ProjectProfile>('GET', `/api/projects/${projectId}`);
         return resp.success && resp.data ? resp.data : null;
+    }
+
+    /**
+     * GET /api/project — look up a ProjectProfile by workspace path.
+     * Returns null if the workspace has not been scanned yet.
+     */
+    async getProjectByWorkspace(workspacePath: string): Promise<ProjectProfile | null> {
+        const resp = await this.request<ProjectProfile>(
+            'GET', `/api/project?workspace_path=${encodeURIComponent(workspacePath)}`
+        );
+        return resp.success && resp.data ? resp.data : null;
+    }
+
+    /**
+     * POST /api/project/scan — auto-detect stack and upsert ProjectProfile.
+     * Should be called when the sidebar is first activated (§20.1).
+     */
+    async scanProject(workspacePath: string, projectId?: string): Promise<ProjectProfile> {
+        const resp = await this.request<ProjectProfile>(
+            'POST', '/api/project/scan',
+            { workspace_path: workspacePath, project_id: projectId }
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '프로젝트 스캔 실패'); }
+        return resp.data;
     }
 }

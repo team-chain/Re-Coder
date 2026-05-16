@@ -357,4 +357,26 @@ export interface CoreHealth {
   version: string;
   uptime: number; // seconds
   port: number;
+  /** Orchestrator FSM state — populated by /api/status (§4.5) */
+  orchestrator_state?: OrchestratorState;
+  /** proposal_id currently being processed, if any */
+  current_proposal_id?: string | null;
+  /** ISO 8601 timestamp from the server */
+  timestamp?: string;
 }
+
+/**
+ * Orchestrator FSM states — mirrors OrchestratorState enum in orchestrator.py
+ */
+export type OrchestratorState =
+  | "idle"
+  | "collecting_context"
+  | "masking"
+  | "scoring"
+  | "analyzing"
+  | "proposing"
+  | "awaiting_approval"
+  | "applying"
+  | "rolling_back"
+  | "complete"
+  | "error";
