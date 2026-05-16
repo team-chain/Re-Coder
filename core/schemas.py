@@ -568,3 +568,148 @@ class EvalReport(BaseModel):
     results: list[EvalResult] = Field(default_factory=list)
     ci_gate_passed: bool = False
     evaluated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ===========================================================================
+# Q3: ECS / SBOM / Security Scan (설계서 §Q3)
+# ===========================================================================
+
+class ECSDeployStatus(str, Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    ROLLED_BACK = "rolled_back"
+    CIRCUIT_BREAKER_TRIGGERED = "circuit_breaker_triggered"
+
+
+class SecurityScanSeverity(str, Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+class SecurityScanTool(str, Enum):
+    TRIVY = "trivy"
+    HADOLINT = "hadolint"
+    GITLEAKS = "gitleaks"
+
+
+class SecurityFinding(BaseModel):
+    """보안 스캔 단일 발견 항목"""
+    tool: SecurityScanTool
+    severity: SecurityScanSeverity
+    title: str
+    description: str
+    location: Optional[str] = None   # 파일명 또는 패키지명
+    fix_suggestion: Optional[str] = None
+    secret_redacted: bool = False    # gitleaks: 원문 미포함
+
+
+class SecurityScanResult(BaseModel):
+    """Trivy / Hadolint / gitleaks 통합 스캔 결과"""
+    image: Optional[str] = None
+    dockerfile_path: Optional[str] = None
+    repo_path: Optional[str] = None
+    findings: list[SecurityFinding] = Field(default_factory=list)
+    critical_count: int = 0
+    high_count: int = 0
+    hadolint_error_count: int = 0
+    secret_count: int = 0
+    scan_passed: bool = False   # critical/hadolint_error/secret 모두 0이어야 True
+    scanned_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def compute_pass(self) -> None:
+        self.critical_count = sum(1 for f in self.findings
+            if f.tool == SecurityScanTool.TRIVY and f.severity == SecurityScanSeverity.CRITICAL)
+        self.high_count = sum(1 for f in self.findings
+            if f.tool == SecurityScanTool.TRIVY and f.severity == SecurityScanSeverity.HIGH)
+        self.hadolint_error_count = sum(1 for f in self.findings
+            if f.tool == SecurityScanTool.HADOLINT and f.severity == SecurityScanSeverity.CRITICAL)
+        self.secret_count = sum(1 for f in self.findings
+            if f.tool == SecurityScanTool.GITLEAKS)
+        self.scan_passed = (
+            self.critical_count == 0
+            and self.hadolint_error_count == 0
+            and self.secret_count == 0
+        )
+
+
+class SBOMRecord(BaseModel):
+    """SBOM 생성 결과 (Syft CycloneDX JSON)"""
+    image: str
+    sbom_path: str              # 로컬 파일 경로
+    sbom_format: str = "cyclonedx-json"
+    image_digest: Optional[str] = None
+    package_count: int = 0
+    vulnerability_summary: dict[str, int] = Field(default_factory=dict)  # severity → count
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PreflightCheck(BaseModel):
+    """Cloud Preflight 단일 항목 체크 결과"""
+    name: str
+    passed: bool
+    detail: str
+    severity: str = "error"   # "error" | "warning" | "info"
+    fix_guide: Optional[str] = None
+
+
+class PreflightReport(BaseModel):
+    """Cloud Preflight 전체 리포트"""
+    region: str
+    cluster: str
+    service: str
+    checks: list[PreflightCheck] = Field(default_factory=list)
+    passed: bool = False
+    checked_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def compute_pass(self) -> None:
+        error_checks = [c for c in self.checks if c.severity == "error"]
+        self.passed = all(c.passed for c in error_checks)
+
+
+class ECSDeployRequest(BaseModel):
+    """ECS Rolling Update 요청 (Extension → Local Core)"""
+    project_id: str
+    cluster: str
+    service: str
+    region: str
+    image: str                  # 배포할 이미지 (태그 포함)
+    task_definition_family: str
+    container_name: str
+    health_check_path: str = "/health"
+    environment: str = "production"
+    cpu: str = "256"
+    memory: str = "512"
+    env_vars: dict[str, str] = Field(default_factory=dict)
+    run_preflight: bool = True
+    run_security_scan: bool = True
+    generate_sbom: bool = True
+    approval_request_id: Optional[str] = None  # OPA allow_with_approval 시
+
+
+class ECSDeployRecord(BaseModel):
+    """ECS 배포 기록 (DeploymentRecord 확장)"""
+    deployment_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id: str
+    cluster: str
+    service: str
+    region: str
+    image: str
+    image_digest: Optional[str] = None
+    task_definition_arn: Optional[str] = None
+    previous_task_definition_arn: Optional[str] = None  # rollback 대상
+    status: ECSDeployStatus = ECSDeployStatus.PENDING
+    preflight_passed: bool = False
+    scan_result: Optional[SecurityScanResult] = None
+    sbom_path: Optional[str] = None
+    sbom_version: Optional[str] = None
+    health_check_failures: int = 0
+    circuit_breaker_triggered: bool = False
+    rollback_proposal_id: Optional[str] = None
+    deployed_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None

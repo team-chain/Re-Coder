@@ -77,6 +77,23 @@ escalate_to_security {
 required_approvers = 2 {
     input.level >= 3
 } else = 0""",
+
+    # Q3-A: SBOM 없는 배포 차단
+    PolicyPresetKey.SBOM_REQUIRED_BLOCK: """\
+# Preset: SBOM 없는 배포 차단 (§Q3-A)
+deny_reasons["sbom_required_block: SBOM이 생성되지 않은 이미지는 배포할 수 없습니다"] {
+    input.context.generate_sbom == false
+}
+deny_reasons["sbom_required_block: SBOM이 생성되지 않은 이미지는 배포할 수 없습니다"] {
+    not input.context.generate_sbom
+}""",
+
+    # Q3-A: Hadolint error 차단
+    PolicyPresetKey.HADOLINT_ERROR_BLOCK: """\
+# Preset: Hadolint Dockerfile lint error 차단 (§Q3-A)
+deny_reasons["hadolint_error_block: Hadolint error가 발견된 Dockerfile은 배포할 수 없습니다"] {
+    input.context.hadolint_error_count > 0
+}""",
 }
 
 _REGO_HEADER = '''\
@@ -233,17 +250,19 @@ class PolicyService:
         bundle = await self.get_active_bundle(org_id)
         return bundle.version if bundle else None
 
+
     @staticmethod
     def _to_response(bundle: PolicyBundle) -> PolicyBundleResponse:
         from control_plane.models.schemas import PolicyPresetConfig
         presets = [PolicyPresetConfig(**p) for p in (bundle.preset_config or [])]
         return PolicyBundleResponse(
-            bundle_id=bundle.bundle_id,
+            id=str(bundle.id),
             org_id=bundle.org_id,
             version=bundle.version,
             display_name=bundle.display_name,
             sha256=bundle.sha256,
-            is_active=bundle.is_active,
-            created_at=bundle.created_at,
             presets=presets,
+            is_active=bundle.is_active,
+            created_by=bundle.created_by,
+            created_at=bundle.created_at,
         )

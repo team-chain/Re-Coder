@@ -31,6 +31,7 @@ from singleton import CoreSingleton
 from api.middleware.auth import SessionTokenMiddleware
 from api.routes import health, analyze, deploy, ops, session
 from api.routes import policy
+from api.routes import ecs
 
 # ---------------------------------------------------------------------------
 # Module-level port variable
@@ -140,6 +141,7 @@ def create_app() -> FastAPI:
     app.include_router(ops.router)
     app.include_router(session.router)
     app.include_router(policy.router)
+    app.include_router(ecs.router)
 
     return app
 

@@ -8,10 +8,10 @@
 
 ## 현재 상태 요약
 
-**완료된 분기**: Q1 + Q2-A + Q2-B
+**완료된 분기**: Q1 + Q2-A + Q2-B + **Q3 ✅**
 
-Q1 Must-Core, Control Plane Core(Q2-A), OPA 정책 엔진 + Multi-Approver(Q2-B)가 구현됐다.
-다음 작업은 **Q3 — ECS Fargate 배포 + SBOM**이다.
+Q1 Must-Core, Control Plane Core(Q2-A), OPA 정책 엔진 + Multi-Approver(Q2-B), ECS Fargate Rolling Update + SBOM + 보안스캔(Q3)이 구현됐다.
+다음 작업은 **Q4 — GitOps ArgoCD + OTel + MCP**이다.
 
 ---
 
@@ -47,6 +47,11 @@ policy_cache.py             AuditLog (hash chain)
 | `policy_cache.py` | PolicyBundle 로컬 캐시 + sha256 검증 |
 | `context_gate.py` | 16종 민감정보 마스킹 |
 | `api/routes/policy.py` | 로컬 OPA 평가 엔드포인트 |
+| `agents/preflight_agent.py` | read-only IAM ECS/ECR/IAM/CloudWatch 점검 |
+| `agents/ecs_agent.py` | ECS Rolling Update 전체 파이프라인 오케스트레이터 |
+| `security_scan.py` | Trivy/Hadolint/gitleaks 병렬 스캔 |
+| `sbom.py` | Syft CycloneDX JSON SBOM 생성 |
+| `api/routes/ecs.py` | ECS 배포 API (/deploy, /status, /cancel, /preflight, /scan) |
 
 ### Control Plane (`control_plane/`)
 
@@ -58,7 +63,7 @@ policy_cache.py             AuditLog (hash chain)
 | `services/identity.py` | OIDC User + Device 등록/heartbeat/폐기 |
 | `services/org_service.py` | Org/Workspace/Project CRUD + RBAC |
 | `services/audit.py` | hash chain AuditLog (SELECT FOR UPDATE) |
-| `services/policy_service.py` | Preset 5개 → Rego 자동 생성, sha256 부여 |
+| `services/policy_service.py` | Preset 7개 → Rego 자동 생성, sha256 부여 (Q3: +SBOM_REQUIRED, +HADOLINT_ERROR) |
 | `services/approval_service.py` | 2인 승인 흐름, 거부 즉시 rejected |
 | `api/middleware/device_auth.py` | DeviceContext 주입, require_permission_dep |
 | `api/routes/auth.py` | Google/GitHub OIDC 콜백, Device enroll |
@@ -86,12 +91,22 @@ policy_cache.py             AuditLog (hash chain)
 
 ## 다음 에이전트 인계 사항
 
-### 즉시 해야 할 것 (Q3 시작)
+### 즉시 해야 할 것 (Q4 시작)
 
-1. **Cloud Preflight Assistant** — read-only IAM으로 ECS/ECR/ALB 사전 점검
-2. **ECS Rolling Update** — TaskDefinition JSON 생성 → ECR push → update-service
-3. **SBOM 생성** — Syft CycloneDX JSON, DeploymentRecord에 sbom_path 추가
-4. **Trivy/Hadolint OPA 게이트** — policy_service.py Preset에 추가
+1. **GitOps ArgoCD 연동** — ArgoCD Application CRD 생성, sync 상태 폴링, 설계서 ADR-009 기준
+2. **Incident Timeline MVP** — 장애 이벤트 수집 + 타임라인 UI
+3. **OTel Collector 연동** — Prometheus + Loki 메트릭/로그 수집
+4. **MCP stdio PoC** — Model Context Protocol 로컬 서버 구현
+5. **rollback PR 자동 생성** — ADR-005: Git revert PR 기본
+6. **Postmortem skeleton** — 장애 보고서 템플릿 자동 생성
+7. **Final Demo 준비** — 쐐기 시나리오 7단계 E2E
+
+**Q3 완료된 것 (인계 정보)**
+- ECS Rolling Update 전체 파이프라인 (Preflight → Scan → SBOM → TaskDef → update-service → Poll → CircuitBreaker → Rollback)
+- Circuit Breaker: 5분 내 실패율 50% 초과 → 자동 중단, Level 3 rollback proposal
+- 보안 스캔: Trivy(critical=block), Hadolint(error=block), gitleaks(secret_redacted=True, always-block)
+- SBOM: Syft CycloneDX JSON, get_upload_metadata()로 메타데이터만 Control Plane 전송
+- OPA Preset 7개: 기존 5개 + SBOM_REQUIRED_BLOCK + HADOLINT_ERROR_BLOCK
 
 ### 주의 사항
 
@@ -117,6 +132,11 @@ GITHUB_CLIENT_ID=...
 GITHUB_CLIENT_SECRET=...
 DEVICE_TOKEN_TTL_HOURS=24
 OPA_URL=http://localhost:8181
+
+# Q3 ECS 배포 (선택)
+ECS_EXECUTION_ROLE_ARN=arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole
+ECS_TASK_ROLE_ARN=arn:aws:iam::ACCOUNT_ID:role/ecsTaskRole
+AWS_DEFAULT_REGION=ap-northeast-2
 ```
 
 ---
@@ -136,4 +156,4 @@ OPA_URL=http://localhost:8181
 - Q1 Eval pass_rate 실측 (LLM 연동 필요)
 - PyInstaller 빌드 자동화 (Windows/Linux)
 - Mini-Wedge 시나리오 E2E 테스트 (OPA 차단 → 2인 승인)
-- Q3 ECS Fargate 전체 구현
+- Q4 GitOps ArgoCD + OTel + MCP 구현

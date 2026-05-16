@@ -352,12 +352,15 @@ def has_permission(role: OrgRole, permission: Permission) -> bool:
 
 
 class PolicyPresetKey(str, Enum):
-    """설계서 §Q2-B Preset Policy 5개"""
+    """설계서 §Q2-B Preset Policy 5개 + §Q3-A 추가 2개"""
     TRIVY_CRITICAL_BLOCK = "trivy_critical_block"
     PROD_MAIN_BRANCH_ONLY = "prod_main_branch_only"
     PORT_22_BLOCK = "port_22_block"
     SECRET_ENV_ESCALATE = "secret_env_escalate"
     LEVEL3_TWO_APPROVERS = "level3_two_approvers"
+    # Q3-A 추가
+    SBOM_REQUIRED_BLOCK = "sbom_required_block"        # SBOM 없는 배포 차단
+    HADOLINT_ERROR_BLOCK = "hadolint_error_block"      # Hadolint error=block
 
 
 class OPADecisionStatus(str, Enum):
@@ -483,5 +486,11 @@ class ApprovalRequestResponse(BaseModel):
     policy_bundle_version: str
     created_at: datetime
     votes: list[ApprovalVoteResponse] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+ int
+    votes: List[ApprovalVoteResponse] = []
+    expires_at: Optional[datetime] = None
+    created_at: datetime
 
     model_config = {"from_attributes": True}

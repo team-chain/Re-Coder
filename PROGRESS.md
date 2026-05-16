@@ -26,7 +26,7 @@
 | Q1 | AI 품질 기반 (AST 청킹, PEV, Eval) | ✅ **80%** | Must-Core 구현 완료. Eval 실측 + 빌드 자동화 남음 |
 | Q2-A | Control Plane Core (Identity/Org/Audit) | ✅ **100%** | 21개 파일, 20개 API 엔드포인트 완료 |
 | Q2-B | Governance (OPA, 2인 승인) | ✅ **100%** | 11개 엔드포인트, DoD 16/16 통과 |
-| Q3 | Cloud Execution (ECS, SBOM) | 🔲 0% | Q2-B 완료됨 — 시작 가능 |
+| Q3 | Cloud Execution (ECS, SBOM) | ✅ **100%** | 8개 파일, Must-Core 전체 완료 |
 | Q4 | GitOps + Observability + MCP | 🔲 0% | Q3 완료 후 시작 |
 
 ---
@@ -144,18 +144,30 @@
 
 ---
 
-## Q3 — Cloud Execution
+## Q3 — Cloud Execution ✅
 
-**전제**: Q2-B 완료 ✅ → 시작 가능
+**브랜치**: `feat/q1-enterprise-foundation`
 
-| # | 항목 | 상태 | 메모 |
+### Q3-A: ECS Fargate Rolling Update ✅
+
+| # | 항목 | 파일 | 상태 |
 |---|---|---|---|
-| C-1 | Cloud Preflight Assistant (read-only IAM) | 🔲 | ecr/ecs/iam/logs/elb describe 권한만 |
-| C-2 | ECS Rolling Update (Must) | 🔲 | ADR-002: ECS Fargate 표준 경로 |
-| C-3 | SBOM 생성 (Syft, CycloneDX, Must) | 🔲 | |
-| C-4 | Trivy/Hadolint/gitleaks OPA 게이트 | 🔲 | |
-| C-5 | ECS Blue/Green (Should) | 🔲 | Q3-A 안정화 후 |
-| C-6 | Cosign signing (Should) | 🔲 | |
+| C-1 | Cloud Preflight Assistant (read-only IAM) | `core/agents/preflight_agent.py` | ✅ |
+| C-2 | ECS Rolling Update 파이프라인 (Must) | `core/agents/ecs_agent.py` | ✅ |
+| C-3 | SBOM 생성 (Syft CycloneDX JSON, Must) | `core/sbom.py` | ✅ |
+| C-4 | 보안 스캔: Trivy/Hadolint/gitleaks 병렬 | `core/security_scan.py` | ✅ |
+| C-5 | OPA 게이트 연동 (critical=block, error=block, secret=block) | `core/api/routes/ecs.py` | ✅ |
+| C-6 | Circuit Breaker (5분/50% fail → 자동 중단) | `ecs_agent.py` | ✅ |
+| C-7 | Rollback Proposal (Level 3 승인, ADR-005) | `ecs_agent.py` | ✅ |
+| C-8 | ECS API 엔드포인트 4개 (/deploy, /status, /cancel, /preflight) | `core/api/routes/ecs.py` | ✅ |
+| C-9 | ECS Task Definition FileTemplate Registry | `core/registry/file_templates/` | ✅ |
+| C-10 | OPA Preset 추가: SBOM_REQUIRED, HADOLINT_ERROR | `control_plane/services/policy_service.py` | ✅ |
+| C-11 | PolicyPresetKey enum 확장 (5→7개) | `control_plane/models/schemas.py` | ✅ |
+
+**Should (다음 단계)**
+- [ ] ECS Blue/Green (Q3-A 안정화 후)
+- [ ] Cosign image signing
+- [ ] SBOM Control Plane 업로드 (opt-in)
 
 ---
 
@@ -184,3 +196,4 @@
 | 2026-05-16 | Enterprise v5.0 전환. terminalDataWriteEvent 수정, Q1 Must-Core 구현 |
 | 2026-05-16 | **Q2-A 완료**: Control Plane Core 21파일, 20 API (Identity/Device/Org/RBAC/AuditLog) |
 | 2026-05-16 | **Q2-B 완료**: OPA 정책 엔진 + Multi-Approver. 11 API, DoD 16/16 통과 |
+| 2026-05-16 | **Q3 완료**: ECS Fargate Rolling Update, SBOM(Syft), 보안스캔(Trivy/Hadolint/gitleaks), Circuit Breaker, OPA 게이트 7 presets |

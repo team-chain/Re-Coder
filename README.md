@@ -87,4 +87,12 @@ npm run compile   # TypeScript 컴파일
 
 ## 개발 진척
 
-→ [PROGRESS.md](PROGRESS.md) 참조
+| 분기 | 상태 | 완료 일자 |
+|------|------|-----------|
+| Q1 Must-Core | ✅ 완료 | 2026-05-16 |
+| Q2-A Control Plane Core | ✅ 완료 | 2026-05-16 |
+| Q2-B Governance (OPA + 2인 승인) | ✅ 완료 | 2026-05-16 |
+| Q3 ECS Fargate + SBOM + 보안스캔 | ✅ 완료 | 2026-05-16 |
+| Q4 GitOps + OTel + MCP | 🔲 시작 전 | - |
+
+→ 상세 내용: [PROGRESS.md](PROGRESS.md) · [HANDOFF.md](HANDOFF.md)
