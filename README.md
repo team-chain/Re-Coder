@@ -1,89 +1,90 @@
-# Re-Coder
+# ReCoder Enterprise
 
-> **From Error to Operation** — 에러 수정부터 운영 대응까지, VSCode 안에서 승인 기반으로.
-
-ReCoder는 주니어 백엔드 개발자를 위한 AI DevOps 에이전트입니다.  
-코드 에러 분석부터 Docker 빌드/배포, EC2 운영까지 VSCode Extension 하나로 처리합니다.
-
----
-
-## 구성
-
-```
-VSCode Extension (TypeScript)
-    ↕ HTTP REST (127.0.0.1:17894)
-Local Core (Python + FastAPI)
-    ↕ Docker / SSH / ECR
-Local Docker / AWS EC2
-```
+> **DevOps Execution Platform** — AI가 코드를 고쳐주는 도구가 아니라,  
+> 개발자의 DevOps 실행을 조직 정책·다중 승인·감사 로그·GitOps·관측성 데이터와 연결해  
+> 프로덕션 변경을 안전하게 수행하는 플랫폼.
 
 ---
 
-## 3단계 기능
+## 구성 (3개 Plane)
 
-| Stage | 이름 | 내용 |
+```
+┌─────────────────────────────────────────┐
+│  VSCode Extension (TypeScript)          │  ← 개발자 인터페이스
+│  Sidebar Webview / Terminal 수집         │
+└──────────────┬──────────────────────────┘
+               │ HTTP REST (127.0.0.1)
+┌──────────────▼──────────────────────────┐
+│  Local Core (Python + FastAPI)          │  ← Local Execution Plane
+│  Plan-Execute-Verify / AST Chunker      │
+│  ContextGate (마스킹) / LLM Router      │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼──────────────────────────┐
+│  Control Plane (SaaS)                   │  ← 조직 통제 (Q2~)
+│  OIDC / Device Token / RBAC / OPA       │
+│  AuditLog / 2인 승인 / PolicyBundle     │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼──────────────────────────┐
+│  Cloud Execution Plane                  │  ← 배포·운영 (Q3~Q4)
+│  ECS Fargate (Q3) / EKS + ArgoCD (Q4)  │
+│  OpenTelemetry / Prometheus / Loki      │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## 1년 로드맵
+
+| 분기 | 목표 | 핵심 기능 |
 |---|---|---|
-| Stage 1 | **Build** | 에러 자동 감지 → AI 분석 → 코드 패치 제안 → 승인 적용 |
-| Stage 2 | **Ship** | Dockerfile 생성 → docker build/run → Health Check → GitHub 배포 |
-| Stage 3 | **Operate** | EC2 SSH 배포 → ECR push → 운영 상태 조회 |
+| **Q1** | AI 품질 기반 | AST 청킹, Plan-Execute-Verify, Eval Harness |
+| **Q2-A** | 조직 통제 골격 | OIDC, Device Token, RBAC, AuditLog |
+| **Q2-B** | 정책·승인 | OPA 배포 차단, Web UI 2인 승인 |
+| **Q3** | 클라우드 실행 | ECS Rolling Update, SBOM, Trivy 게이트 |
+| **Q4** | GitOps + 관측성 | ArgoCD, Incident Timeline, RCA, Postmortem |
+
+**Final Demo (Q4)**: 쐐기 시나리오 10단계 — 장애 감지 → RCA → rollback PR → 2인 승인 → ArgoCD → Postmortem
 
 ---
 
-## 빠른 시작
+## 로컬 실행
 
-### 사전 요구사항
-
-- Python 3.11+
-- Node.js 18+
-- Docker Desktop
-- AWS CLI (Bedrock 사용 시)
-
-### Core 실행
+### Core 서버
 
 ```bash
 cd core
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+.venv/Scripts/activate  # Windows
 pip install -r requirements.txt
 python main.py
 ```
 
-### Extension 실행
+### Extension
 
 ```bash
 cd extension
 npm install
-npm run compile
-# VSCode에서 F5 → Extension Development Host 실행
+npm run compile   # TypeScript 컴파일
+# VSCode에서 F5 (Extension Development Host)
 ```
 
 ---
 
-## 환경 설정 (core/.env)
+## 제품 패키징
 
-```env
-# AWS Bedrock (AI 기능 필수)
-AWS_PROFILE=default
-BEDROCK_REGION=us-east-1
-BEDROCK_PRIMARY_MODEL_IDENTIFIER=us.anthropic.claude-sonnet-4-6
-BEDROCK_SECONDARY_MODEL_IDENTIFIER=us.anthropic.claude-sonnet-4-5-20250929-v1:0
-BEDROCK_FAST_MODEL_IDENTIFIER=us.anthropic.claude-haiku-4-5-20251001-v1:0
-
-# 개발 모드 (선택)
-DEV_MODE=1
-```
-
----
-
-## 변경 이력
-
-| 날짜 | 내용 |
+| 플랜 | 내용 |
 |---|---|
-| 2026-05-07 | v6.4-final 기준 초안 구현 (core 27개, extension 7개 파일) |
-| 2026-05-08 | P0-1~P0-13 전항목 완료, pytest 15/15 통과 |
-| 2026-05-10 | 실행 환경 버그 5종 수정 (venv 탐색, 환경변수명, CSP 등) |
-| 2026-05-12 | 런타임 버그 6종 수정 (push 폴백, rollback, enum 역직렬화 등) + EC2 배포 기능 구현 + Bedrock 모델 업데이트 |
+| **Free** | Local Core, 개인 프로젝트 3개, 로컬 Docker 배포 |
+| **Pro** | SaaS Control Plane, 배포 이력, SBOM, GitHub Actions |
+| **Team** | RBAC, Multi-Approver, AuditLog, PolicyBundle |
+| **Enterprise** | SSO/SAML, Self-hosted (Q4+), 커스텀 정책, SLA |
+
+**Open-core**: Local Core Apache 2.0 공개 예정, Control Plane 상용 운영
 
 ---
 
-자세한 구현 현황은 [PROGRESS.md](./PROGRESS.md), 에이전트 인계 가이드는 [HANDOFF.md](./HANDOFF.md)를 참고하세요.
+## 개발 진척
+
+→ [PROGRESS.md](PROGRESS.md) 참조

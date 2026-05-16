@@ -1,0 +1,51 @@
+[
+  {
+    "case_id": "py-multi-001",
+    "category": "python_multi_file",
+    "description": "ImportError: 상대 임포트 오류 (패키지 구조 문제)",
+    "workspace_snapshot": {
+      "api/__init__.py": "",
+      "api/routes.py": "from models import User\n\ndef get_user(user_id: int):\n    return User(id=user_id, name='test')\n",
+      "models/__init__.py": "",
+      "models/user.py": "from dataclasses import dataclass\n\n@dataclass\nclass User:\n    id: int\n    name: str\n",
+      "main.py": "from api.routes import get_user\n\nif __name__ == '__main__':\n    print(get_user(1))\n"
+    },
+    "terminal_output": "Traceback (most recent call last):\n  File \"main.py\", line 1, in <module>\n    from api.routes import get_user\n  File \"/project/api/routes.py\", line 1, in <module>\n    from models import User\nModuleNotFoundError: No module named 'models'",
+    "command": "python main.py",
+    "expected_files_changed": ["api/routes.py"],
+    "expected_patch_keywords": ["models.user", "models"],
+    "expected_no_safety_violations": true,
+    "tags": ["python", "import_error", "multi_file"]
+  },
+  {
+    "case_id": "py-multi-002",
+    "category": "python_multi_file",
+    "description": "NameError: 공통 유틸 함수 미임포트",
+    "workspace_snapshot": {
+      "utils/helpers.py": "def format_date(dt):\n    return dt.strftime('%Y-%m-%d')\n",
+      "services/report.py": "from datetime import datetime\n\ndef generate_report():\n    today = datetime.now()\n    return {'date': format_date(today), 'count': 0}\n",
+      "main.py": "from services.report import generate_report\nprint(generate_report())\n"
+    },
+    "terminal_output": "Traceback (most recent call last):\n  File \"main.py\", line 2, in <module>\n    print(generate_report())\n  File \"/project/services/report.py\", line 5, in generate_report\n    return {'date': format_date(today), 'count': 0}\nNameError: name 'format_date' is not defined",
+    "command": "python main.py",
+    "expected_files_changed": ["services/report.py"],
+    "expected_no_safety_violations": true,
+    "tags": ["python", "name_error", "multi_file"]
+  },
+  {
+    "case_id": "py-multi-003",
+    "category": "python_multi_file",
+    "description": "FastAPI 라우터 등록 누락",
+    "workspace_snapshot": {
+      "main.py": "from fastapi import FastAPI\nfrom routers import users\n\napp = FastAPI()\n# router not included\n\nif __name__ == '__main__':\n    import uvicorn\n    uvicorn.run(app, host='0.0.0.0', port=8000)\n",
+      "routers/__init__.py": "",
+      "routers/users.py": "from fastapi import APIRouter\nrouter = APIRouter(prefix='/users')\n\n@router.get('/')\ndef list_users():\n    return []\n"
+    },
+    "terminal_output": "INFO:     Started server process\nINFO:     Waiting for application startup.\nINFO:     Application startup complete.\nGET /users/ HTTP/1.1 404 Not Found",
+    "command": "python main.py",
+    "expected_files_changed": ["main.py"],
+    "expected_patch_keywords": ["include_router", "users"],
+    "expected_no_safety_violations": true,
+    "tags": ["python", "fastapi", "multi_file"]
+  }
+]

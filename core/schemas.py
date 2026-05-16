@@ -412,3 +412,159 @@ class CostSummary(BaseModel):
     monthly_usd: float = Field(ge=0.0)
     call_count: int = Field(ge=0)
     last_updated: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Q1 — AST Chunker Models
+# ---------------------------------------------------------------------------
+
+
+class NodeType(str, Enum):
+    FUNCTION = "function"
+    ASYNC_FUNCTION = "async_function"
+    CLASS = "class"
+    MODULE = "module"       # Whole-file fallback
+    UNKNOWN = "unknown"
+
+
+class ChunkMetadata(BaseModel):
+    """
+    Metadata for a single AST-derived code chunk.
+
+    Security policy: source text is NOT stored here.
+    It is re-read from the filesystem on demand, immediately before LLM delivery,
+    after passing through ContextGate.
+    """
+
+    chunk_id: str                   # SHA-256 of (file_path + name + start_line) — first 8 hex chars
+    file_path: str                  # Absolute path on disk
+    node_type: NodeType = NodeType.UNKNOWN
+    name: str                       # Symbol name (function/class name, or file stem for module)
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    token_estimate: int = Field(default=0, ge=0)   # Rough estimate; 0 = uncalculated
+
+
+# ---------------------------------------------------------------------------
+# Q1 — Plan-Execute-Verify Models
+# ---------------------------------------------------------------------------
+
+
+class AgentType(str, Enum):
+    CODE_AGENT = "code_agent"
+    INFRA_AGENT = "infra_agent"
+    DEPLOY_AGENT = "deploy_agent"
+    TEST_RUNNER = "test_runner"
+    NO_OP = "no_op"
+
+
+class ExecutionStep(BaseModel):
+    """A single step in a PlannerAgent-generated ExecutionPlan."""
+
+    step_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    description: str
+    agent: AgentType
+    args: dict[str, Any] = Field(default_factory=dict)
+    depends_on: list[str] = Field(default_factory=list)   # list of step_ids
+
+
+class ExecutionPlan(BaseModel):
+    """
+    Structured output produced by PlannerAgent.
+
+    Constraints (enforced by PlannerAgent prompt):
+    - Maximum 5 steps.
+    - PlannerAgent never executes — it only plans.
+    - Executor (deterministic dispatcher) drives actual agent calls.
+    """
+
+    schema_version: str = "1.0"
+    plan_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    summary: str
+    steps: list[ExecutionStep] = Field(default_factory=list, max_length=5)
+    estimated_risk: RiskLevel = RiskLevel.LOW
+    requires_approval: bool = False
+
+
+class VerificationResult(BaseModel):
+    """Result from VerifierAgent (no LLM — deterministic checks only)."""
+
+    plan_id: str
+    proposal_id: Optional[str] = None
+    schema_valid: bool = False
+    sha256_valid: bool = False
+    test_passed: Optional[bool] = None    # None = no test_command supplied
+    test_output: Optional[str] = None
+    retry_count: int = Field(default=0, ge=0)
+    needs_manual_review: bool = False     # True when retry limit exhausted
+    verified_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Q1 — Eval Harness Models
+# ---------------------------------------------------------------------------
+
+
+class EvalCategory(str, Enum):
+    PYTHON_SINGLE_FILE = "python_single_file"
+    PYTHON_MULTI_FILE = "python_multi_file"
+    NODEJS_ERROR = "nodejs_error"
+    DOCKERFILE_GENERATION = "dockerfile_generation"
+    DOCKER_BUILD_FAILURE = "docker_build_failure"
+    HEALTH_CHECK_FAILURE = "health_check_failure"
+
+
+class SafetyViolationType(str, Enum):
+    SECRET_LEAK = "secret_leak"
+    NONEXISTENT_IMPORT = "nonexistent_import"
+    INVALID_SHELL_COMMAND = "invalid_shell_command"
+    ROLLBACK_NOT_DISCLOSED = "rollback_not_disclosed"
+    DESTRUCTIVE_OPERATION = "destructive_operation"
+
+
+class EvalCase(BaseModel):
+    """A single evaluation test case for the Eval Harness."""
+
+    case_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:12])
+    category: EvalCategory
+    description: str
+    workspace_snapshot: dict[str, str] = Field(default_factory=dict)  # relative_path -> content
+    terminal_output: str = ""
+    command: Optional[str] = None
+    expected_files_changed: list[str] = Field(default_factory=list)
+    expected_patch_keywords: list[str] = Field(default_factory=list)
+    expected_no_safety_violations: bool = True
+    tags: list[str] = Field(default_factory=list)
+
+
+class EvalResult(BaseModel):
+    """Result of running a single EvalCase through the pipeline."""
+
+    case_id: str
+    category: EvalCategory
+    passed: bool = False
+    safety_violations: list[SafetyViolationType] = Field(default_factory=list)
+    proposal_summary: Optional[str] = None
+    patch_files: list[str] = Field(default_factory=list)
+    error_message: Optional[str] = None
+    duration_seconds: float = Field(default=0.0, ge=0.0)
+    evaluated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def has_safety_violation(self) -> bool:
+        return len(self.safety_violations) > 0
+
+
+class EvalReport(BaseModel):
+    """Aggregated report across all EvalResults in a run."""
+
+    run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    total: int = Field(ge=0)
+    passed: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    safety_violations: int = Field(ge=0)
+    pass_rate: float = Field(ge=0.0, le=1.0)
+    by_category: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    results: list[EvalResult] = Field(default_factory=list)
+    ci_gate_passed: bool = False
+    evaluated_at: datetime = Field(default_factory=datetime.utcnow)
