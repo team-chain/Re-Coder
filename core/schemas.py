@@ -1,633 +1,413 @@
 """
-ReCoder v6.4 공통 데이터 계약 (schemas.py)
-설계서 §20 기준. 모든 에이전트가 이 파일을 import해서 사용한다.
-변경 시 HANDOFF.md 업데이트 필수.
+ReCoder Core Data Contracts (Section 20)
+Pydantic v2 schemas for all inter-component data exchange.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import uuid
+from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
 
 
-SCHEMA_VERSION = "6.4"
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
 
-
-# ── 공통 열거형 ────────────────────────────────────────────────────────
-
-class ContextSource(str, Enum):
-    TERMINAL   = "terminal"
-    FILE       = "file"
-    USER_INPUT = "user_input"
-    WORKSPACE  = "workspace"
-
-class ContextWeight(str, Enum):
-    HIGH   = "high"
-    MEDIUM = "medium"
-    LOW    = "low"
-
-class EventType(str, Enum):
-    ERROR_DETECTED = "error_detected"
-    TASK_CHANGE    = "task_change"
-    FILE_CHANGED   = "file_changed"
-    USER_QUESTION  = "user_question"
-    TERMINAL_ERROR = "terminal_error"
-    RESOLVED       = "resolved"
-    UNKNOWN        = "unknown"
-
-class OrchestratorState(str, Enum):
-    IDLE                 = "IDLE"
-    ERROR_DETECTED       = "ERROR_DETECTED"
-    ANALYZING            = "ANALYZING"
-    WAITING_USER_ACTION  = "WAITING_USER_ACTION"
-    CODE_PATCH_PROPOSED  = "CODE_PATCH_PROPOSED"
-    APPLYING_PATCH       = "APPLYING_PATCH"
-    CODE_READY           = "CODE_READY"
-    SECURITY_SCANNING    = "SECURITY_SCANNING"    # Trivy/Hadolint 실행 중
-    INFRA_PROPOSED       = "INFRA_PROPOSED"
-    INFRA_READY          = "INFRA_READY"
-    DOCKER_BUILDING      = "DOCKER_BUILDING"
-    HEALTH_CHECKING      = "HEALTH_CHECKING"
-    DEPLOY_PROPOSED      = "DEPLOY_PROPOSED"
-    DEPLOYING            = "DEPLOYING"
-    DEPLOYED             = "DEPLOYED"
-    DEPLOY_FAILED        = "DEPLOY_FAILED"
-    ROLLBACK             = "ROLLBACK"
-
-class UserAction(str, Enum):
-    FIX_CODE       = "fix_code"
-    EXPLAIN        = "explain_error"
-    IGNORE         = "ignore"
-    INFRA          = "infra"
-    DEPLOY         = "deploy"
-    LOCAL_DEPLOY   = "local_deploy"
-    GIT_COMMIT     = "git_commit"
-    DOCKERFILE     = "generate_dockerfile"
-    DOCKER_COMPOSE = "generate_docker_compose"
-    GITHUB_ACTIONS = "generate_github_actions"
-    SCAN_SECURITY  = "scan_security"
-    OPS_QUERY      = "ops_query"          # Stage 3
 
 class RiskLevel(str, Enum):
-    LOW    = "low"
+    LOW = "low"
     MEDIUM = "medium"
-    HIGH   = "high"
+    HIGH = "high"
+    CRITICAL = "critical"
 
-class ProjectStack(str, Enum):
+
+class ApprovalLevel(int, Enum):
+    AUTO = 1            # No confirmation required
+    CONFIRM = 2         # Single confirmation
+    DOUBLE_CONFIRM = 3  # Two-step confirmation
+    BLOCKED = 4         # Cannot be executed
+
+
+class StackType(str, Enum):
     PYTHON_FASTAPI = "python-fastapi"
-    PYTHON_FLASK   = "python-flask"
-    NODE_EXPRESS   = "node-express"
-    NODE_NEXT      = "node-next"
-    CUSTOM         = "custom"
+    PYTHON_FLASK = "python-flask"
+    PYTHON_DJANGO = "python-django"
+    NODE_EXPRESS = "node-express"
+    NODE_NEXT = "node-next"
+    NODE_NEST = "node-nest"
+    GO = "go"
+    JAVA_SPRING = "java-spring"
+    RUBY_RAILS = "ruby-rails"
+    STATIC = "static"
+    UNKNOWN = "unknown"
+
 
 class DeployMethod(str, Enum):
-    LOCAL_DOCKER   = "local_docker"
-    SSH_DIRECT     = "ssh_direct"
-    ECR_EC2        = "ecr_ec2"
+    LOCAL_DOCKER = "local_docker"
+    SSH_DOCKER = "ssh_docker"
+    AWS_ECS = "aws_ecs"
+    AWS_LAMBDA = "aws_lambda"
+    K8S = "k8s"
+
+
+class AlertType(str, Enum):
+    CRASH = "crash"
+    HIGH_CPU = "high_cpu"
+    HIGH_MEMORY = "high_memory"
+    HEALTH_CHECK_FAIL = "health_check_fail"
+    OOM = "oom"
+    DEPLOY_FAILURE = "deploy_failure"
+    DISK_PRESSURE = "disk_pressure"
+    LATENCY_SPIKE = "latency_spike"
+    ERROR_RATE_SPIKE = "error_rate_spike"
+    CUSTOM = "custom"
+
+
+class ActionType(str, Enum):
+    DOCKER_BUILD = "docker_build"
+    DOCKER_RUN = "docker_run"
+    DOCKER_STOP = "docker_stop"
+    DOCKER_RESTART = "docker_restart"
+    DOCKER_LOGS = "docker_logs"
+    SSH_DOCKER_RESTART = "ssh_docker_restart"
+    SSH_DOCKER_ROLLBACK = "ssh_docker_rollback"
+    SSH_ENV_UPDATE = "ssh_env_update"
+    ECR_LOGIN = "ecr_login"
+    ECR_PUSH = "ecr_push"
+    ECR_PULL = "ecr_pull"
+    SCALE_UP = "scale_up"
+    SCALE_DOWN = "scale_down"
+    NOTIFY = "notify"
+    NO_ACTION = "no_action"
+
+
+class FileType(str, Enum):
+    DOCKERFILE = "dockerfile"
+    DOCKER_COMPOSE = "docker_compose"
     GITHUB_ACTIONS = "github_actions"
+    NGINX_CONF = "nginx_conf"
+    ENV_FILE = "env_file"
+    K8S_MANIFEST = "k8s_manifest"
+    TERRAFORM = "terraform"
+
+
+class ProviderType(str, Enum):
+    ANTHROPIC = "anthropic"
+    BEDROCK = "bedrock"
+    OPENAI = "openai"
+    LOCAL = "local"
+
+
+class ReadyState(str, Enum):
+    READY = "ready"
+    NOT_READY = "not_ready"
+    PARTIAL = "partial"
+    ERROR = "error"
+
 
 class DeployStatus(str, Enum):
-    DEPLOYING   = "deploying"
-    DEPLOYED    = "deployed"
-    FAILED      = "failed"
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    SUCCESS = "success"
+    FAILED = "failed"
     ROLLED_BACK = "rolled_back"
-
-class ReadyStatus(str, Enum):
-    OK      = "ok"
-    PARTIAL = "partial"
-    FAIL    = "fail"
+    CANCELLED = "cancelled"
 
 
-# ── §20.1 ProjectProfile ──────────────────────────────────────────────
-
-@dataclass
-class ProjectProfile:
-    project_id:         str
-    workspace_path:     str
-    stack:              ProjectStack
-    package_manager:    str                    # pip | npm | yarn | pnpm
-    default_run_command: str
-    default_port:       int
-    health_check_path:  str = "/health"
-    dockerfile_path:    str = ""
-    compose_path:       str = ""
-    deployment_target:  str = ""               # local | ec2
-    created_at:         str = ""
-    updated_at:         str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "project_id":          self.project_id,
-            "workspace_path":      self.workspace_path,
-            "stack":               self.stack.value,
-            "package_manager":     self.package_manager,
-            "default_run_command": self.default_run_command,
-            "default_port":        self.default_port,
-            "health_check_path":   self.health_check_path,
-            "dockerfile_path":     self.dockerfile_path,
-            "compose_path":        self.compose_path,
-            "deployment_target":   self.deployment_target,
-            "created_at":          self.created_at,
-            "updated_at":          self.updated_at,
-        }
+# ---------------------------------------------------------------------------
+# Supporting Models (defined first to avoid forward-reference issues)
+# ---------------------------------------------------------------------------
 
 
-# ── §20.2 AnalyzeRequest ─────────────────────────────────────────────
-# Extension → Local Core로 전달되는 분석 요청
+class HealthCheckResult(BaseModel):
+    """Result of an HTTP health check probe."""
 
-@dataclass
-class AnalyzeRequest:
-    workspace_path:        str
-    terminal_output:       str
-    project_id:            str = ""
-    active_file_path:      str = ""
-    selected_text:         str = ""
-    command:               str = ""
-    project_files_summary: str = ""            # 주요 파일 목록 요약
-    # ── analyzer/code_agent 내부 처리용 파생 필드 (서버 또는 Context Gate가 채움) ──
-    error_text:            str = ""            # terminal_output에서 추출된 에러 본문
-    file_context:          str = ""            # 활성 파일 부근 코드 스니펫
-    related_files:         list[str] = field(default_factory=list)  # 분석 대상 파일 경로 hint
-
-    def to_dict(self) -> dict:
-        return {
-            "workspace_path":        self.workspace_path,
-            "terminal_output":       self.terminal_output,
-            "project_id":            self.project_id,
-            "active_file_path":      self.active_file_path,
-            "selected_text":         self.selected_text,
-            "command":               self.command,
-            "project_files_summary": self.project_files_summary,
-            "error_text":            self.error_text,
-            "file_context":          self.file_context,
-            "related_files":         list(self.related_files),
-        }
+    status: str  # "healthy" | "unhealthy" | "timeout" | "error"
+    latency_ms: Optional[int] = Field(default=None, ge=0)
+    checked_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-# ── ExtractedContext (Context Gate 출력) ──────────────────────────────
-
-@dataclass
-class ExtractedContext:
-    context_id:           str
-    source:               ContextSource
-    app_name:             str
-    window_title:         str
-    text:                 str
-    weight:               ContextWeight
-    quality_score:        float
-    failure_flag:         bool
-    captured_at:          str
-    masked_text:          str = ""
-    raw_text_memory_only: bool = True
-    masking_applied:      bool = True
-    masked_patterns:      list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "context_id":           self.context_id,
-            "source":               self.source.value,
-            "app_name":             self.app_name,
-            "window_title":         self.window_title,
-            "text":                 self.text,
-            "masked_text":          self.masked_text or self.text,
-            "raw_text_memory_only": self.raw_text_memory_only,
-            "masking_applied":      self.masking_applied,
-            "masked_patterns":      self.masked_patterns,
-            "weight":               self.weight.value,
-            "quality_score":        self.quality_score,
-            "failure_flag":         self.failure_flag,
-            "captured_at":          self.captured_at,
-        }
+# ---------------------------------------------------------------------------
+# Core Domain Models
+# ---------------------------------------------------------------------------
 
 
-# ── AgentEvent ───────────────────────────────────────────────────────
+class ProjectProfile(BaseModel):
+    """Represents a registered workspace/project with its deployment metadata."""
 
-@dataclass
-class AgentEvent:
-    event_id:          str
-    event_type:        EventType
-    summary:           str
-    contexts:          list[str]
-    importance_score:  int
-    suggested_actions: list[UserAction]
-    created_at:        str
-    raw_errors:        list[str] = field(default_factory=list)
-    error_text:        str = ""
-    trigger_score:     int = 0
-    trigger_reasons:   list[dict] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "event_id":          self.event_id,
-            "event_type":        self.event_type.value,
-            "summary":           self.summary,
-            "contexts":          self.contexts,
-            "importance_score":  self.importance_score,
-            "suggested_actions": [a.value for a in self.suggested_actions],
-            "created_at":        self.created_at,
-            "raw_errors":        self.raw_errors,
-            "error_text":        self.error_text,
-            "trigger_score":     self.trigger_score,
-            "trigger_reasons":   self.trigger_reasons,
-        }
+    project_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    workspace_path: str
+    stack: StackType = StackType.UNKNOWN
+    package_manager: Optional[str] = None  # pip, npm, yarn, pnpm, cargo, etc.
+    default_run_command: Optional[str] = None
+    default_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    health_check_path: str = "/health"
+    dockerfile_path: Optional[str] = None
+    compose_path: Optional[str] = None
+    deployment_target: DeployMethod = DeployMethod.LOCAL_DOCKER
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-# ── §20.3 PatchProposal ──────────────────────────────────────────────
+class AnalyzeRequest(BaseModel):
+    """Payload sent to the LLM analysis endpoint from the extension."""
 
-@dataclass
-class FilePatch:
-    file:         str
-    base_sha256:  str
-    unified_diff: str
-    reason:       str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "file":         self.file,
-            "base_sha256":  self.base_sha256,
-            "unified_diff": self.unified_diff,
-            "reason":       self.reason,
-        }
-
-@dataclass
-class PatchProposal:
-    """§20.11 공통 필드: schema_version, risk_level, risk_reasons, approval_level"""
-    proposal_id:    str
-    summary:        str
-    risk_level:     RiskLevel
-    test_command:   str
-    patches:        list[FilePatch]
-    risk_reasons:   list[str] = field(default_factory=list)
-    approval_level: int       = 1          # Level 1: 로컬 파일 수정
-    schema_version: str       = SCHEMA_VERSION
-
-    def to_dict(self) -> dict:
-        return {
-            "schema_version": self.schema_version,
-            "proposal_id":    self.proposal_id,
-            "summary":        self.summary,
-            "risk_level":     self.risk_level.value,
-            "risk_reasons":   self.risk_reasons,
-            "approval_level": self.approval_level,
-            "test_command":   self.test_command,
-            "patches":        [p.to_dict() for p in self.patches],
-        }
+    workspace_path: str
+    active_file_path: Optional[str] = None
+    selected_text: Optional[str] = None
+    terminal_output: Optional[str] = None
+    command: Optional[str] = None
+    project_files_summary: Optional[str] = None
+    project_id: Optional[str] = None
 
 
-# ── §20.4 InfraFileProposal ──────────────────────────────────────────
-
-@dataclass
-class InfraFileProposal:
-    """§20.11 공통 필드 포함"""
-    proposal_id:      str
-    file_type:        Literal["Dockerfile", "docker-compose", "github-actions"]
-    target_path:      str
-    content:          str
-    base_template:    str
-    risk_level:       RiskLevel
-    risk_reasons:     list[str] = field(default_factory=list)
-    required_secrets: list[str] = field(default_factory=list)
-    approval_level:   int       = 1
-    schema_version:   str       = SCHEMA_VERSION
-
-    def to_dict(self) -> dict:
-        return {
-            "schema_version":  self.schema_version,
-            "proposal_id":     self.proposal_id,
-            "file_type":       self.file_type,
-            "target_path":     self.target_path,
-            "content":         self.content,
-            "base_template":   self.base_template,
-            "risk_level":      self.risk_level.value,
-            "risk_reasons":    self.risk_reasons,
-            "required_secrets": self.required_secrets,
-            "approval_level":  self.approval_level,
-        }
+# ---------------------------------------------------------------------------
+# Patch & Proposal Models
+# ---------------------------------------------------------------------------
 
 
-# ── §20.5 DeploymentPlan ─────────────────────────────────────────────
+class FilePatch(BaseModel):
+    """A single file change expressed as a unified diff."""
 
-@dataclass
-class DeploymentPlan:
-    """§20.11 공통 필드 포함"""
-    plan_id:             str
-    method:              DeployMethod
-    action:              str
-    image:               str
-    container_name:      str
-    command_template_id: str                   # CommandTemplate Registry 참조
-    risk_level:          RiskLevel = RiskLevel.LOW
-    risk_reasons:        list[str] = field(default_factory=list)
-    approval_level:      int       = 2         # Level 2: 로컬 명령 실행
-    schema_version:      str       = SCHEMA_VERSION
-    ports:               list[dict] = field(default_factory=list)
-    env:                 list[str]  = field(default_factory=list)
-    health_check_path:   str       = "/health"
-    rollback_image:      str       = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "schema_version":      self.schema_version,
-            "plan_id":             self.plan_id,
-            "method":              self.method.value,
-            "action":              self.action,
-            "image":               self.image,
-            "container_name":      self.container_name,
-            "command_template_id": self.command_template_id,
-            "risk_level":          self.risk_level.value,
-            "risk_reasons":        self.risk_reasons,
-            "approval_level":      self.approval_level,
-            "ports":               self.ports,
-            "env":                 self.env,
-            "health_check_path":   self.health_check_path,
-            "rollback_image":      self.rollback_image,
-        }
+    file: str  # Relative path within the workspace
+    base_sha256: Optional[str] = None  # SHA-256 of the original file content
+    unified_diff: str  # Unified diff string
+    reason: str  # Human-readable explanation for this change
 
 
-# ── §20.6 DeploymentRecord ───────────────────────────────────────────
+class PatchProposal(BaseModel):
+    """A set of file patches proposed by the AI code agent."""
 
-@dataclass
-class DeploymentRecord:
-    deployment_id:     str
-    project_id:        str
-    method:            DeployMethod
-    image:             str
-    image_digest:      str
-    git_commit:        str
-    container_name:    str
-    health_check_path: str
-    deployed_at:       str
-    status:            DeployStatus = DeployStatus.DEPLOYED
-    rollback_target:   str = ""    # 롤백 시 이전 image_digest 또는 container_name
-
-    def to_dict(self) -> dict:
-        return {
-            "deployment_id":    self.deployment_id,
-            "project_id":       self.project_id,
-            "method":           self.method.value,
-            "image":            self.image,
-            "image_digest":     self.image_digest,
-            "git_commit":       self.git_commit,
-            "container_name":   self.container_name,
-            "health_check_path": self.health_check_path,
-            "deployed_at":      self.deployed_at,
-            "status":           self.status.value,
-            "rollback_target":  self.rollback_target,
-        }
+    schema_version: str = "1.0"
+    proposal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    summary: str
+    risk_level: RiskLevel = RiskLevel.LOW
+    risk_reasons: list[str] = Field(default_factory=list)
+    approval_level: ApprovalLevel = ApprovalLevel.CONFIRM
+    patches: list[FilePatch]
+    test_command: Optional[str] = None
 
 
-# ── §20.7 AlertRecord (Stage 3, 2학기) ───────────────────────────────
+class InfraFileProposal(BaseModel):
+    """A proposal to create or update an infrastructure file."""
 
-@dataclass
-class AlertRecord:
-    alert_id:              str
-    source:                str                 # "watchdog"
-    project_id:            str
-    environment:           str
-    host:                  str
-    container_name:        str
-    alert_type:            str
-    severity:              str
-    detected_at:           str
-    logs_excerpt:          str                 # masked
-    health_check_result:   str
-    metric_snapshot:       dict = field(default_factory=dict)
-    recent_deployment_id:  str = ""
-    fingerprint:           str = ""
-    mask_version:          str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "alert_id":             self.alert_id,
-            "source":               self.source,
-            "project_id":           self.project_id,
-            "environment":          self.environment,
-            "host":                 self.host,
-            "container_name":       self.container_name,
-            "alert_type":           self.alert_type,
-            "severity":             self.severity,
-            "detected_at":          self.detected_at,
-            "logs_excerpt":         self.logs_excerpt,
-            "health_check_result":  self.health_check_result,
-            "metric_snapshot":      self.metric_snapshot,
-            "recent_deployment_id": self.recent_deployment_id,
-            "fingerprint":          self.fingerprint,
-            "mask_version":         self.mask_version,
-        }
+    schema_version: str = "1.0"
+    proposal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    file_type: FileType
+    target_path: str  # Relative path within the workspace
+    content: str
+    base_template: Optional[str] = None  # template_id used as base
+    required_secrets: list[str] = Field(default_factory=list)
+    risk_level: RiskLevel = RiskLevel.LOW
+    risk_reasons: list[str] = Field(default_factory=list)
+    approval_level: ApprovalLevel = ApprovalLevel.CONFIRM
 
 
-# ── §20.8 ResponseProposal (Stage 3, 2학기) ──────────────────────────
-
-@dataclass
-class ResponseProposal:
-    """§20.11 공통 필드 포함"""
-    proposal_id:         str
-    alert_id:            str
-    action_type:         Literal["restart", "rollback", "env_check"]
-    target_container:    str
-    command_template_id: str
-    parameters:          dict
-    risk_level:          RiskLevel
-    risk_reasons:        list[str] = field(default_factory=list)
-    approval_level:      int       = 3         # Level 3: 원격 인프라
-    schema_version:      str       = SCHEMA_VERSION
-
-    def to_dict(self) -> dict:
-        return {
-            "schema_version":      self.schema_version,
-            "proposal_id":         self.proposal_id,
-            "alert_id":            self.alert_id,
-            "action_type":         self.action_type,
-            "target_container":    self.target_container,
-            "command_template_id": self.command_template_id,
-            "parameters":          self.parameters,
-            "risk_level":          self.risk_level.value,
-            "risk_reasons":        self.risk_reasons,
-            "approval_level":      self.approval_level,
-        }
+# ---------------------------------------------------------------------------
+# Deployment Models
+# ---------------------------------------------------------------------------
 
 
-# ── §20.10 CommandTemplate / FileTemplate ────────────────────────────
+class DeploymentPlan(BaseModel):
+    """An executable deployment plan produced by the deploy agent."""
 
-@dataclass
-class CommandTemplate:
-    template_id:    str
-    action_type:    str
-    allowed_params: list[str]
+    schema_version: str = "1.0"
+    plan_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    method: DeployMethod
+    action: ActionType
+    image: Optional[str] = None
+    container_name: Optional[str] = None
+    ports: dict[str, str] = Field(default_factory=dict)  # host_port -> container_port
+    env: dict[str, str] = Field(default_factory=dict)
+    health_check_path: str = "/health"
+    rollback_image: Optional[str] = None
+    command_template_id: Optional[str] = None
+    risk_level: RiskLevel = RiskLevel.MEDIUM
+    risk_reasons: list[str] = Field(default_factory=list)
+    approval_level: ApprovalLevel = ApprovalLevel.CONFIRM
+
+
+class DeploymentRecord(BaseModel):
+    """Immutable record of a completed deployment event."""
+
+    deployment_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id: str
+    method: DeployMethod
+    image: str
+    image_digest: Optional[str] = None
+    git_commit: Optional[str] = None
+    container_name: str
+    health_check_path: str = "/health"
+    deployed_at: datetime = Field(default_factory=datetime.utcnow)
+    rollback_target: Optional[str] = None  # Previous image tag for rollback
+    status: DeployStatus = DeployStatus.SUCCESS
+
+
+# ---------------------------------------------------------------------------
+# Alerting & Ops Models
+# ---------------------------------------------------------------------------
+
+
+class AlertRecord(BaseModel):
+    """An ops alert captured by the watchdog or an external source."""
+
+    alert_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    source: str  # e.g., "watchdog", "cloudwatch", "prometheus"
+    project_id: Optional[str] = None
+    environment: str = "production"
+    host: Optional[str] = None
+    container_name: Optional[str] = None
+    alert_type: AlertType
+    severity: RiskLevel
+    detected_at: datetime = Field(default_factory=datetime.utcnow)
+    logs_excerpt: Optional[str] = None
+    health_check_result: Optional[HealthCheckResult] = None
+    metric_snapshot: dict[str, Any] = Field(default_factory=dict)
+    recent_deployment_id: Optional[str] = None
+    fingerprint: Optional[str] = None  # Dedup key
+    mask_version: Optional[str] = None  # Version of masking applied to logs
+
+
+class ResponseProposal(BaseModel):
+    """AI-generated remediation proposal for an ops alert."""
+
+    schema_version: str = "1.0"
+    alert_id: str
+    action_type: ActionType
+    target_container: Optional[str] = None
+    command_template_id: Optional[str] = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    risk_level: RiskLevel = RiskLevel.MEDIUM
+    risk_reasons: list[str] = Field(default_factory=list)
+    approval_level: ApprovalLevel = ApprovalLevel.CONFIRM
+
+
+# ---------------------------------------------------------------------------
+# LLM & Session Tracking
+# ---------------------------------------------------------------------------
+
+
+class LLMCallRecord(BaseModel):
+    """Telemetry record for a single LLM API call."""
+
+    call_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    agent: str  # e.g., "code_agent", "deploy_agent", "ops_agent"
+    operation: str  # e.g., "analyze", "plan_deploy", "diagnose_alert"
+    provider: ProviderType
+    model: str
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    estimated_cost_usd: float = Field(ge=0.0)
+    latency_ms: int = Field(ge=0)
+    token_source: str = "api"  # "api" | "cache"
+    fallback_used: bool = False
+    retry_count: int = Field(default=0, ge=0)
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SessionRecord(BaseModel):
+    """Full session record aggregating all events and LLM calls."""
+
+    schema_version: str = "1.0"
+    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    start_time: datetime = Field(default_factory=datetime.utcnow)
+    end_time: Optional[datetime] = None
+    project_id: Optional[str] = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    llm_calls: list[LLMCallRecord] = Field(default_factory=list)
+    llm_usage_summary: dict[str, Any] = Field(default_factory=dict)
+    raw_content_saved: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Registry Models
+# ---------------------------------------------------------------------------
+
+
+class CommandTemplate(BaseModel):
+    """A safe, parameterized command template for execution."""
+
+    template_id: str
+    action_type: ActionType
+    allowed_params: dict[str, Any]  # param_name -> validation rules
     command_pattern: str
-    risk_level:     RiskLevel
-    approval_level: int
-    version:        str = "1.0"
-
-    def to_dict(self) -> dict:
-        return {
-            "template_id":    self.template_id,
-            "action_type":    self.action_type,
-            "allowed_params": self.allowed_params,
-            "command_pattern": self.command_pattern,
-            "risk_level":     self.risk_level.value,
-            "approval_level": self.approval_level,
-            "version":        self.version,
-        }
-
-@dataclass
-class FileTemplate:
-    template_id:          str
-    file_type:            str
-    base_content:         str
-    customizable_sections: list[str]
-    version:              str = "1.0"
-
-    def to_dict(self) -> dict:
-        return {
-            "template_id":          self.template_id,
-            "file_type":            self.file_type,
-            "base_content":         self.base_content,
-            "customizable_sections": self.customizable_sections,
-            "version":              self.version,
-        }
+    risk_level: RiskLevel
+    approval_level: ApprovalLevel
+    version: str = "1.0"
 
 
-# ── §20.9 SessionRecord ──────────────────────────────────────────────
+class FileTemplate(BaseModel):
+    """A reusable infrastructure file template."""
 
-@dataclass
-class LLMCallRecord:
-    call_id:            str
-    agent:              str
-    operation:          str
-    provider:           str
-    model_identifier:   str
-    region:             str = ""
-    input_tokens:       int = 0
-    output_tokens:      int = 0
-    total_tokens:       int = 0
-    token_source:       str = "local_estimate"
-    estimated_cost_usd: float = 0.0
-    latency_ms:         int = 0
-    status:             Literal["success", "failed"] = "success"
-    fallback_used:      bool = False
-    retry_count:        int = 0
-    error_type:         str | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "call_id":            self.call_id,
-            "agent":              self.agent,
-            "operation":          self.operation,
-            "provider":           self.provider,
-            "model_identifier":   self.model_identifier,
-            "region":             self.region,
-            "input_tokens":       self.input_tokens,
-            "output_tokens":      self.output_tokens,
-            "total_tokens":       self.total_tokens,
-            "token_source":       self.token_source,
-            "estimated_cost_usd": self.estimated_cost_usd,
-            "latency_ms":         self.latency_ms,
-            "status":             self.status,
-            "fallback_used":      self.fallback_used,
-            "retry_count":        self.retry_count,
-            "error_type":         self.error_type,
-        }
-
-@dataclass
-class LLMUsageSummary:
-    total_input_tokens:       int   = 0
-    total_output_tokens:      int   = 0
-    estimated_total_cost_usd: float = 0.0
-    pricing_version:          str   = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "total_input_tokens":       self.total_input_tokens,
-            "total_output_tokens":      self.total_output_tokens,
-            "estimated_total_cost_usd": self.estimated_total_cost_usd,
-            "pricing_version":          self.pricing_version,
-        }
-
-@dataclass
-class SessionEvent:
-    time:                  str
-    event_type:            str
-    error_summary:         str
-    error_fingerprint:     str
-    related_file_names:    list[str]
-    ai_suggestion_summary: str
-    user_action:           Literal["approved", "rejected", "ignored"]
-    result:                Literal["success", "failed", "pending"]
-    validation:            Literal["test_passed", "syntax_ok", "unknown"]
-
-@dataclass
-class SessionRecord:
-    session_id:           str
-    start_time:           str
-    project_id:           str
-    end_time:             str | None = None
-    events:               list[SessionEvent]   = field(default_factory=list)
-    llm_calls:            list[LLMCallRecord]  = field(default_factory=list)
-    llm_usage_summary:    LLMUsageSummary      = field(default_factory=LLMUsageSummary)
-    raw_content_saved:    bool                 = False   # 항상 False 고정
-
-    def add_llm_call(self, record: LLMCallRecord) -> None:
-        self.llm_calls.append(record)
-        self.llm_usage_summary.total_input_tokens  += record.input_tokens
-        self.llm_usage_summary.total_output_tokens += record.output_tokens
-        self.llm_usage_summary.estimated_total_cost_usd += record.estimated_cost_usd
+    template_id: str
+    file_type: FileType
+    base_content: str
+    customizable_sections: dict[str, str] = Field(default_factory=dict)
+    version: str = "1.0"
 
 
-# ── Orchestrator 상태 업데이트 (server → Extension 전달용) ─────────────
-
-@dataclass
-class OrchestratorUpdate:
-    state:          OrchestratorState
-    event:          AgentEvent | None         = None
-    patch_proposal: PatchProposal | None      = None
-    infra_proposal: InfraFileProposal | None  = None
-    plan:           DeploymentPlan | None     = None
-    message:        str                       = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "type":           "orchestrator_update",
-            "state":          self.state.value,
-            "event":          self.event.to_dict() if self.event else None,
-            "patch_proposal": self.patch_proposal.to_dict() if self.patch_proposal else None,
-            "infra_proposal": self.infra_proposal.to_dict() if self.infra_proposal else None,
-            "plan":           self.plan.to_dict() if self.plan else None,
-            "message":        self.message,
-        }
+# ---------------------------------------------------------------------------
+# Diagnostic & Runtime Models
+# ---------------------------------------------------------------------------
 
 
-# ── First Run Diagnostics ─────────────────────────────────────────────
+class DiagnosticsResult(BaseModel):
+    """Result of the /diagnostics endpoint — system readiness check."""
 
-@dataclass
-class DiagnosticsResult:
-    """~/.recoder/diagnostics.json 저장 구조 (§11)"""
-    core_ready:         ReadyStatus = ReadyStatus.FAIL
-    ai_ready:           ReadyStatus = ReadyStatus.FAIL
-    docker_ready:       ReadyStatus = ReadyStatus.FAIL
-    aws_deploy_ready:   ReadyStatus = ReadyStatus.FAIL   # 2학기
-    ops_ready:          ReadyStatus = ReadyStatus.FAIL   # 2학기
-    resolved_model_id:  str = ""
-    resolved_region:    str = ""
-    provider_type:      str = ""          # "bedrock" | "gemini" | ""
+    core_ready: ReadyState = ReadyState.NOT_READY
+    ai_ready: ReadyState = ReadyState.NOT_READY
+    docker_ready: ReadyState = ReadyState.NOT_READY
+    aws_deploy_ready: ReadyState = ReadyState.NOT_READY
+    ops_ready: ReadyState = ReadyState.NOT_READY
+    resolved_model_id: Optional[str] = None
+    resolved_region: Optional[str] = None
     is_cross_region_profile: bool = False
-    validation_time:    str = ""
-    docker_version:     str = ""
-    issues:             list[str] = field(default_factory=list)
+    provider_type: Optional[ProviderType] = None
+    validation_time: datetime = Field(default_factory=datetime.utcnow)
+    details: dict[str, Any] = Field(default_factory=dict)
 
-    def to_dict(self) -> dict:
-        return {
-            "core_ready":               self.core_ready.value,
-            "ai_ready":                 self.ai_ready.value,
-            "docker_ready":             self.docker_ready.value,
-            "aws_deploy_ready":         self.aws_deploy_ready.value,
-            "ops_ready":                self.ops_ready.value,
-            "resolved_model_id":        self.resolved_model_id,
-            "resolved_region":          self.resolved_region,
-            "provider_type":            self.provider_type,
-            "is_cross_region_profile":  self.is_cross_region_profile,
-            "validation_time":          self.validation_time,
-            "docker_version":           self.docker_version,
-            "issues":                   self.issues,
-        }
+
+class RuntimeConfig(BaseModel):
+    """Runtime state persisted to .recode_runtime.json."""
+
+    port: int = Field(ge=1, le=65535)
+    session_token: str
+    pid: int
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Utility / Supporting Models
+# ---------------------------------------------------------------------------
+
+
+class MaskingResult(BaseModel):
+    """Result of applying PII/secret masking to content."""
+
+    masked_content: str
+    mask_count: int = Field(ge=0)
+    mask_version: str
+
+
+class QualityScore(BaseModel):
+    """Quality heuristics for alert log content."""
+
+    score: float = Field(ge=0.0, le=1.0)
+    has_traceback: bool = False
+    has_project_path: bool = False
+    error_message_length: int = Field(ge=0)
+    masked_info_density: float = Field(ge=0.0, le=1.0)
+    has_related_files: bool = False
+
+
+class CostSummary(BaseModel):
+    """Rolling cost summary for LLM usage."""
+
+    daily_usd: float = Field(ge=0.0)
+    monthly_usd: float = Field(ge=0.0)
+    call_count: int = Field(ge=0)
+    last_updated: datetime = Field(default_factory=datetime.utcnow)

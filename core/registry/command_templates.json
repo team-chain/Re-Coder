@@ -1,0 +1,293 @@
+{
+  "templates": [
+    {
+      "template_id": "docker_build",
+      "action_type": "docker_build",
+      "allowed_params": {
+        "image_name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/\\-]*:[a-z0-9._\\-]+$"
+        },
+        "tag": {
+          "type": "string",
+          "pattern": "^[a-z0-9._\\-]+$"
+        },
+        "context_path": {
+          "type": "string",
+          "no_absolute": true
+        },
+        "dockerfile_path": {
+          "type": "string",
+          "no_absolute": true
+        },
+        "build_args": {
+          "type": "object",
+          "key_allowlist": true
+        }
+      },
+      "command_pattern": "docker build -t {image_name} -f {dockerfile_path} {context_path}",
+      "risk_level": "low",
+      "approval_level": 2,
+      "version": "1.0"
+    },
+    {
+      "template_id": "docker_run",
+      "action_type": "docker_run",
+      "allowed_params": {
+        "image_name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/\\-]*:[a-z0-9._\\-]+$"
+        },
+        "container_name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_\\-]+$"
+        },
+        "host_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "container_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "network": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        }
+      },
+      "command_pattern": "docker run -d --name {container_name} -p {host_port}:{container_port} --network {network} --restart unless-stopped {image_name}",
+      "risk_level": "medium",
+      "approval_level": 2,
+      "version": "1.0"
+    },
+    {
+      "template_id": "docker_stop",
+      "action_type": "docker_stop",
+      "allowed_params": {
+        "container_name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_\\-]+$"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        }
+      },
+      "command_pattern": "docker stop -t {timeout} {container_name}",
+      "risk_level": "medium",
+      "approval_level": 2,
+      "version": "1.0"
+    },
+    {
+      "template_id": "docker_restart",
+      "action_type": "docker_restart",
+      "allowed_params": {
+        "container_name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_\\-]+$"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        }
+      },
+      "command_pattern": "docker restart -t {timeout} {container_name}",
+      "risk_level": "medium",
+      "approval_level": 2,
+      "version": "1.0"
+    },
+    {
+      "template_id": "docker_logs",
+      "action_type": "docker_logs",
+      "allowed_params": {
+        "container_name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_\\-]+$"
+        },
+        "tail": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      },
+      "command_pattern": "docker logs --tail {tail} --timestamps {container_name}",
+      "risk_level": "low",
+      "approval_level": 1,
+      "version": "1.0"
+    },
+    {
+      "template_id": "ssh_docker_restart",
+      "action_type": "ssh_docker_restart",
+      "allowed_params": {
+        "ssh_host": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9._\\-]+$"
+        },
+        "ssh_user": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_\\-]*$"
+        },
+        "ssh_key_path": {
+          "type": "string",
+          "no_absolute": false
+        },
+        "container_name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_\\-]+$"
+        }
+      },
+      "command_pattern": "ssh -i {ssh_key_path} -o StrictHostKeyChecking=no {ssh_user}@{ssh_host} 'docker restart {container_name}'",
+      "risk_level": "high",
+      "approval_level": 3,
+      "version": "1.0"
+    },
+    {
+      "template_id": "ssh_docker_rollback",
+      "action_type": "ssh_docker_rollback",
+      "allowed_params": {
+        "ssh_host": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9._\\-]+$"
+        },
+        "ssh_user": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_\\-]*$"
+        },
+        "ssh_key_path": {
+          "type": "string",
+          "no_absolute": false
+        },
+        "container_name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_\\-]+$"
+        },
+        "rollback_image": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/\\-]*:[a-z0-9._\\-]+$"
+        },
+        "host_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "container_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "command_pattern": "ssh -i {ssh_key_path} -o StrictHostKeyChecking=no {ssh_user}@{ssh_host} 'docker stop {container_name} && docker rm {container_name} && docker run -d --name {container_name} -p {host_port}:{container_port} --restart unless-stopped {rollback_image}'",
+      "risk_level": "high",
+      "approval_level": 3,
+      "version": "1.0"
+    },
+    {
+      "template_id": "ssh_env_update",
+      "action_type": "ssh_env_update",
+      "allowed_params": {
+        "ssh_host": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9._\\-]+$"
+        },
+        "ssh_user": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_\\-]*$"
+        },
+        "ssh_key_path": {
+          "type": "string",
+          "no_absolute": false
+        },
+        "env_file_path": {
+          "type": "string",
+          "no_absolute": false
+        },
+        "remote_path": {
+          "type": "string",
+          "pattern": "^/[a-zA-Z0-9._/\\-]+$"
+        }
+      },
+      "command_pattern": "scp -i {ssh_key_path} -o StrictHostKeyChecking=no {env_file_path} {ssh_user}@{ssh_host}:{remote_path}",
+      "risk_level": "high",
+      "approval_level": 3,
+      "version": "1.0"
+    },
+    {
+      "template_id": "ecr_login",
+      "action_type": "ecr_login",
+      "allowed_params": {
+        "aws_account_id": {
+          "type": "string",
+          "pattern": "^[0-9]{12}$"
+        },
+        "aws_region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[a-z]+-[0-9]$"
+        }
+      },
+      "command_pattern": "aws ecr get-login-password --region {aws_region} | docker login --username AWS --password-stdin {aws_account_id}.dkr.ecr.{aws_region}.amazonaws.com",
+      "risk_level": "low",
+      "approval_level": 1,
+      "version": "1.0"
+    },
+    {
+      "template_id": "ecr_push",
+      "action_type": "ecr_push",
+      "allowed_params": {
+        "aws_account_id": {
+          "type": "string",
+          "pattern": "^[0-9]{12}$"
+        },
+        "aws_region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[a-z]+-[0-9]$"
+        },
+        "repo_name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/\\-]*$"
+        },
+        "tag": {
+          "type": "string",
+          "pattern": "^[a-z0-9._\\-]+$"
+        },
+        "local_image": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/\\-]*:[a-z0-9._\\-]+$"
+        }
+      },
+      "command_pattern": "docker tag {local_image} {aws_account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repo_name}:{tag} && docker push {aws_account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repo_name}:{tag}",
+      "risk_level": "medium",
+      "approval_level": 2,
+      "version": "1.0"
+    },
+    {
+      "template_id": "ecr_pull",
+      "action_type": "ecr_pull",
+      "allowed_params": {
+        "aws_account_id": {
+          "type": "string",
+          "pattern": "^[0-9]{12}$"
+        },
+        "aws_region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[a-z]+-[0-9]$"
+        },
+        "repo_name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/\\-]*$"
+        },
+        "tag": {
+          "type": "string",
+          "pattern": "^[a-z0-9._\\-]+$"
+        }
+      },
+      "command_pattern": "docker pull {aws_account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repo_name}:{tag}",
+      "risk_level": "low",
+      "approval_level": 1,
+      "version": "1.0"
+    }
+  ]
+}
