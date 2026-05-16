@@ -1,119 +1,162 @@
 {
   "name": "recoder",
-  "displayName": "ReCoder",
-  "description": "AI DevOps Agent - From Error to Operation",
-  "version": "0.2.2-final",
+  "displayName": "ReCoder — AI DevOps Agent",
+  "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
+  "version": "1.0.0",
   "publisher": "recoder-team",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Machine Learning",
+    "Debuggers"
   ],
-  "activationEvents": [],
+  "keywords": [
+    "ai",
+    "devops",
+    "docker",
+    "bedrock",
+    "agent",
+    "claude"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
+  "icon": "media/icon.png",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
           "id": "recoder",
           "title": "ReCoder",
-          "icon": "media/icon.svg"
-        }
-      ],
-      "panel": [
-        {
-          "id": "recoder-panel",
-          "title": "ReCoder",
-          "icon": "media/icon.svg"
+          "icon": "media/recoder-icon.svg"
         }
       ]
     },
     "views": {
       "recoder": [
         {
-          "id": "recoder-sidebar",
-          "name": "ReCoder",
           "type": "webview",
-          "icon": "media/icon.svg"
-        }
-      ],
-      "recoder-panel": [
-        {
-          "id": "recoder-output",
-          "name": "ReCoder Output",
-          "type": "webview",
-          "icon": "media/icon.svg"
+          "id": "recoder.sidebarView",
+          "name": "ReCoder"
         }
       ]
     },
     "commands": [
       {
         "command": "recoder.analyzeError",
-        "title": "ReCoder: Analyze Error"
-      },
-      {
-        "command": "recoder.generateDockerfile",
-        "title": "ReCoder: Generate Dockerfile"
-      },
-      {
-        "command": "recoder.startCore",
-        "title": "ReCoder: Start Core"
-      },
-      {
-        "command": "recoder.stopCore",
-        "title": "ReCoder: Stop Core"
+        "title": "ReCoder: Analyze Error",
+        "icon": "$(bug)"
       },
       {
         "command": "recoder.runWithRecoder",
-        "title": "Run with ReCoder"
+        "title": "ReCoder: Run with ReCoder",
+        "icon": "$(play)"
       },
       {
-        "command": "recoder.openDashboard",
-        "title": "ReCoder: Open Dashboard"
+        "command": "recoder.generateDockerfile",
+        "title": "ReCoder: Generate Dockerfile",
+        "icon": "$(file-code)"
       },
       {
-        "command": "recoder.openWorkbench",
-        "title": "ReCoder: Open Workbench",
-        "icon": "$(layout-panel-center)"
-      }
-    ],
-    "keybindings": [
+        "command": "recoder.runDiagnostics",
+        "title": "ReCoder: Run Diagnostics",
+        "icon": "$(gear)"
+      },
       {
-        "command": "recoder.openWorkbench",
-        "key": "ctrl+shift+r",
-        "mac": "cmd+shift+r",
-        "when": "editorFocus || !inputFocus"
+        "command": "recoder.restartCore",
+        "title": "ReCoder: Restart Core",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "recoder.stopCore",
+        "title": "ReCoder: Stop Core",
+        "icon": "$(stop)"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "recoder.analyzeError",
+          "group": "recoder@1",
+          "when": "editorHasSelection"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "recoder.analyzeError",
+          "group": "recoder@1"
+        }
+      ]
+    },
     "configuration": {
       "title": "ReCoder",
       "properties": {
-        "recoder.remoteServer.url": {
-          "type": "string",
-          "default": "",
-          "description": "원격 ReCoder Core 서버 URL (예: http://REDACTED-IP:8000). 비워두면 로컬 Core를 자동 실행합니다."
+        "recoder.core.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start Local Core when sidebar opens."
         },
-        "recoder.remoteServer.token": {
+        "recoder.core.port": {
+          "type": "number",
+          "default": 17894,
+          "description": "Base port for Local Core (fallback range: 17895–17910)."
+        },
+        "recoder.llm.provider": {
           "type": "string",
-          "default": "",
-          "description": "원격 서버 인증 토큰 (선택사항)"
+          "enum": [
+            "bedrock",
+            "gemini",
+            "auto"
+          ],
+          "default": "auto",
+          "description": "LLM provider preference. 'auto' uses Bedrock with Gemini fallback."
+        },
+        "recoder.llm.region": {
+          "type": "string",
+          "default": "us-east-1",
+          "description": "AWS region for Bedrock API calls."
+        },
+        "recoder.context.maxLines": {
+          "type": "number",
+          "default": 200,
+          "description": "Maximum terminal output lines to collect for context."
+        },
+        "recoder.polling.interval": {
+          "type": "number",
+          "default": 4000,
+          "description": "Core status polling interval in milliseconds (3000–10000)."
         }
       }
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile",
-    "test": "node ./out/test/runTest.js",
-    "smoke": "tsc -p ./ && node --test out/test/coreClient.smoke.js"
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
+    "build": "npm run compile && npm run build:webview",
+    "build:webview": "cd webview-src && npx webpack --config webpack.config.js --mode production",
+    "watch:webview": "cd webview-src && npx webpack --config webpack.config.js --mode development --watch",
+    "package": "npx vsce package --no-dependencies",
+    "lint": "eslint src --ext ts",
+    "pretest": "npm run compile"
   },
   "devDependencies": {
+    "@types/node": "^20.19.41",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
     "@types/vscode": "^1.85.0",
-    "@types/node": "^20.0.0",
-    "typescript": "^5.3.0"
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "ts-loader": "^9.5.0",
+    "typescript": "^5.3.0",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
 }

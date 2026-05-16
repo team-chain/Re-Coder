@@ -1,229 +1,170 @@
 """
-ReCoder v6.4 Local Core 엔트리포인트 (설계서 §6)
-- §6.1 Lazy Spawn: Extension이 호출할 때만 실행
-- §6.2 Singleton: core.lock으로 단일 인스턴스 보장
-- §6.3 좀비 프로세스 방지: stale lock 감지 + 강제 종료
-- §6.4 다중 VSCode 창: lock file에 PID 목록 관리
+ReCoder Local Core — FastAPI Entry Point
+
+Binds exclusively to 127.0.0.1, enforces session-token authentication,
+manages the process singleton, and coordinates graceful startup/shutdown.
 """
 
-import asyncio
-import atexit
-import json
-import multiprocessing
+from __future__ import annotations
+
 import os
-import signal
+import secrets
 import sys
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-RECODER_HOME = Path(os.getenv("RECODER_HOME", str(Path.home() / ".recoder")))
-LOCK_FILE = RECODER_HOME / "core.lock"
-RUNTIME_FILE = RECODER_HOME / "runtime.json"
+# ---------------------------------------------------------------------------
+# Ensure the core package directory is on sys.path so that bare
+# `from schemas import ...` style imports work regardless of how the
+# process is launched.
+# ---------------------------------------------------------------------------
+_CORE_DIR = Path(__file__).parent
+if str(_CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(_CORE_DIR))
+
+from singleton import CoreSingleton
+from api.middleware.auth import SessionTokenMiddleware
+from api.routes import health, analyze, deploy, ops, session
+
+# ---------------------------------------------------------------------------
+# Application version
+# ---------------------------------------------------------------------------
+VERSION = "1.0.0"
+
+# ---------------------------------------------------------------------------
+# Lifespan context manager (startup + shutdown)
+# ---------------------------------------------------------------------------
 
 
-def acquire_lock() -> bool:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """
-    core.lock 확인 + stale 처리 + 새 lock 생성.
+    Startup:
+      1. Validate singleton (acquire lock; detect/kill stale process).
+      2. Find an available port.
+      3. Generate a session token.
+      4. Write runtime.json with locked-down file permissions.
 
-    동작 순서 (설계서 §6.2 / §6.3):
-      1) lock 이 없으면 새로 생성하고 True
-      2) lock 의 PID 가 살아있으면 같은 ReCoder Core 프로세스인지 확인
-         - "recoder-core" 또는 main.py 를 띄운 python 이면 → 다른 인스턴스 살아있음 → False
-         - 다른 프로세스(좀비 PID 재사용 등) 면 stale 로 간주 → 강제 종료 후 새 lock
-      3) PID 가 죽어 있으면 stale → 새 lock 생성 후 True
-      4) PID 목록 (다중 VSCode 창) 은 attached_pids 로 관리
-
-    lock 내용: {
-        "pid": int,
-        "attached_pids": [int, ...],
-        "started_at": str
-    }
+    Shutdown:
+      1. Release the singleton lock.
+      2. Remove runtime.json.
     """
-    RECODER_HOME.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
 
-    import psutil
-    from datetime import datetime, timezone
-
-    current_pid = os.getpid()
-
-    if LOCK_FILE.exists():
-        try:
-            with open(LOCK_FILE, "r", encoding="utf-8") as f:
-                lock_data = json.load(f)
-
-            existing_pid = lock_data.get("pid")
-
-            if existing_pid and psutil.pid_exists(existing_pid):
-                # 같은 ReCoder Core 프로세스인지 확인
-                try:
-                    proc = psutil.Process(existing_pid)
-                    cmd = " ".join(proc.cmdline()).lower()
-                    name = proc.name().lower()
-                    is_recoder = (
-                        "recoder-core" in name
-                        or "recoder-core" in cmd
-                        or "core/main.py" in cmd
-                        or "core\\main.py" in cmd
-                    )
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    is_recoder = False
-
-                if is_recoder:
-                    # 정상 동작 중인 다른 인스턴스 → 양보
-                    return False
-
-                # Stale: 다른 프로세스가 같은 PID 를 물고 있음 → 강제 종료
-                try:
-                    proc = psutil.Process(existing_pid)
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=3)
-                    except psutil.TimeoutExpired:
-                        proc.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-
-            # 죽은 PID 또는 강제 종료한 stale → 새 lock 생성
-        except Exception:
-            # lock 파일 파싱 실패 → 새로 생성
-            pass
-
-    # 새 lock 파일 생성
-    lock_data = {
-        "pid": current_pid,
-        "attached_pids": [],
-        "started_at": datetime.now(timezone.utc).isoformat()
-    }
-
-    try:
-        with open(LOCK_FILE, "w", encoding="utf-8") as f:
-            json.dump(lock_data, f, indent=2)
-        # 가능하면 0600 권한 설정 (Windows 는 ACL 별도, 실패 시 무시)
-        try:
-            os.chmod(LOCK_FILE, 0o600)
-        except Exception:
-            pass
-        return True
-    except Exception:
-        return False
-
-
-def attach_pid(pid: int) -> None:
-    """다중 VSCode 창 지원: lock 의 attached_pids 에 PID 추가."""
-    if not LOCK_FILE.exists():
+    # --- Singleton check ---
+    lock_acquired = CoreSingleton.acquire_lock(pid)
+    if not lock_acquired:
+        # Another live Core is running — read its runtime to expose the port
+        existing = CoreSingleton.read_runtime()
+        if existing:
+            app.state.port = existing.port
+            app.state.session_token = existing.session_token
+        # We still proceed; add_window was already called inside acquire_lock
+        yield
+        CoreSingleton.remove_window(pid)
         return
-    try:
-        with open(LOCK_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        attached = list(data.get("attached_pids", []))
-        if pid not in attached:
-            attached.append(pid)
-            data["attached_pids"] = attached
-            with open(LOCK_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-    except Exception:
-        pass
+
+    # --- Port discovery ---
+    port = CoreSingleton.find_available_port()
+    app.state.port = port
+
+    # --- Session token ---
+    token = secrets.token_urlsafe(32)
+    app.state.session_token = token
+
+    # --- Runtime persistence ---
+    CoreSingleton.write_runtime(port=port, token=token, pid=pid)
+    CoreSingleton.set_file_permissions(CoreSingleton.RUNTIME_FILE)
+    CoreSingleton.set_file_permissions(CoreSingleton.LOCK_FILE)
+
+    app.state.started_at = datetime.now(timezone.utc)
+
+    yield  # --- Server running ---
+
+    # --- Shutdown cleanup ---
+    is_last = CoreSingleton.remove_window(pid)
+    if is_last:
+        CoreSingleton.release_lock(pid)
 
 
-def detach_pid(pid: int) -> int:
-    """attached_pids 에서 PID 제거 후 남은 개수 반환."""
-    if not LOCK_FILE.exists():
-        return 0
-    try:
-        with open(LOCK_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        attached = [p for p in data.get("attached_pids", []) if p != pid]
-        data["attached_pids"] = attached
-        with open(LOCK_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        return len(attached)
-    except Exception:
-        return 0
+# ---------------------------------------------------------------------------
+# FastAPI application factory
+# ---------------------------------------------------------------------------
 
 
-def release_lock() -> None:
-    """프로세스 종료 시 lock file 제거"""
-    try:
-        if LOCK_FILE.exists():
-            LOCK_FILE.unlink()
-    except Exception:
-        pass
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="ReCoder Local Core",
+        version=VERSION,
+        description="Local AI-assisted development backend for the ReCoder VSCode extension.",
+        lifespan=lifespan,
+        # Disable automatic /docs and /redoc in production if desired;
+        # left enabled here for developer convenience.
+    )
+
+    # ---- CORS (localhost only) ----
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1",
+            "http://localhost",
+            # VSCode webview uses vscode-webview:// scheme; the extension
+            # communicates via HTTP to 127.0.0.1 so this is sufficient.
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # ---- Session token authentication ----
+    app.add_middleware(SessionTokenMiddleware)
+
+    # ---- Routers ----
+    app.include_router(health.router)
+    app.include_router(analyze.router)
+    app.include_router(deploy.router)
+    app.include_router(ops.router)
+    app.include_router(session.router)
+
+    return app
 
 
-def _handle_shutdown(signum, frame) -> None:
-    """SIGTERM/SIGINT 처리. graceful shutdown."""
-    print("[Core] Graceful shutdown initiated...")
-    release_lock()
-    sys.exit(0)
+app = create_app()
 
-
-async def _main_async() -> None:
-    """FastAPI 서버 비동기 실행"""
-    # server 모듈 import
-    try:
-        from server import start_server
-    except ImportError:
-        print("[Core] ERROR: server module not found. Ensure FastAPI is installed.")
-        sys.exit(1)
-
-    # 부팅 시 진단 강제 갱신 — 캐시된 stale FAIL(특히 AI Ready) 이
-    # 그대로 남는 문제를 방지한다.
-    try:
-        from first_run import run_diagnostics
-        diag = await run_diagnostics()
-        print(
-            "[Core] Diagnostics: "
-            f"core={diag.core_ready.value}, "
-            f"ai={diag.ai_ready.value} ({diag.provider_type or '-'}), "
-            f"docker={diag.docker_ready.value}"
-        )
-    except Exception as e:  # 진단 실패해도 서버는 계속 띄운다
-        print(f"[Core] WARNING: diagnostics refresh failed: {e}")
-
-    session_index: dict = {}
-    await start_server(session_index)
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
-    """메인 엔트리포인트"""
-    multiprocessing.freeze_support()
-    load_dotenv()
+    """
+    Discover an available port and start the uvicorn server.
 
-    # 디렉터리 초기화
+    Port selection is handled inside the lifespan hook, but uvicorn needs
+    the port before it starts.  We therefore probe here as well and rely on
+    the lifespan to write runtime.json with the same value.
+    """
     try:
-        from first_run import setup_recoder_home, run_diagnostics
-    except ImportError:
-        print("[Core] ERROR: first_run module not found.")
+        port = CoreSingleton.find_available_port()
+    except RuntimeError as exc:
+        print(f"[ReCoder Core] FATAL: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    setup_recoder_home()
+    print(f"[ReCoder Core] Starting on http://127.0.0.1:{port}", flush=True)
 
-    # Singleton 체크
-    if not acquire_lock():
-        print("[Core] An ReCoder instance is already running. Check runtime.json.")
-        sys.exit(0)
-
-    # 종료 핸들러 등록
-    atexit.register(release_lock)
-    signal.signal(signal.SIGTERM, _handle_shutdown)
-    signal.signal(signal.SIGINT, _handle_shutdown)
-
-    print("[Core] ReCoder v6.4 Local Core starting...")
-    print(f"[Core] RECODER_HOME: {RECODER_HOME}")
-
-    # 비동기 서버 실행
-    try:
-        asyncio.run(_main_async())
-    except KeyboardInterrupt:
-        print("[Core] Interrupted by user.")
-    except Exception as e:
-        print(f"[Core] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        release_lock()
-        print("[Core] ReCoder Local Core stopped.")
+    uvicorn.run(
+        "main:app",
+        host="127.0.0.1",
+        port=port,
+        log_level="info",
+        # Allow graceful shutdown via SIGTERM
+        timeout_graceful_shutdown=10,
+    )
 
 
 if __name__ == "__main__":
