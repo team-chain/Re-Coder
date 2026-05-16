@@ -153,6 +153,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
 
+            // ── ECS Fargate 배포 (Q3-A) ───────────────────────────────
+            case 'deploy_ecs':
+                await this._handleDeployECS(msg);
+                break;
+
+            case 'deploy_ecs_status_poll':
+                try {
+                    const s = await this.coreManager.client.getECSDeployStatus();
+                    this.sendMessage({ type: 'ecs_deploy_status', data: s });
+                } catch { /* 무시 */ }
+                break;
+
+            case 'deploy_ecs_ready_check':
+                try {
+                    const r = await this.coreManager.client.deployECSReady();
+                    this.sendMessage({ type: 'ecs_ready_result', data: r });
+                } catch (e: any) {
+                    this.sendMessage({ type: 'ecs_ready_result', data: { ready: false, issues: [e?.message ?? String(e)] } });
+                }
+                break;
+
             case 'git_commit':
                 await this._handleGitCommit(msg);
                 break;
@@ -811,6 +832,62 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    private async _handleDeployECS(msg: any): Promise<void> {
+        try {
+            await this.coreManager.ensureRunning();
+            const ctx: any = this._contextCollector.collect();
+            const workspacePath = msg.workspace_path || ctx.workspace_path || '';
+
+            const payload = {
+                workspace_path: workspacePath,
+                image_name:     msg.image_name  || 'recoder-app',
+                repo_name:      msg.repo_name   || 'recoder-app',
+                tag:            msg.tag         || 'latest',
+                ecr_registry:   msg.ecr_registry  || '',
+                ecs_cluster:    msg.ecs_cluster   || '',
+                ecs_service:    msg.ecs_service   || '',
+                aws_region:     msg.aws_region    || '',
+                container_name: msg.container_name || 'app',
+                container_port: msg.container_port || 8000,
+                cpu:            msg.cpu            || '256',
+                memory:         msg.memory         || '512',
+                task_family:    msg.task_family    || 'recoder-task',
+                environment:    msg.environment    || 'staging',
+                branch:         msg.branch         || '',
+                skip_sbom:      msg.skip_sbom      || false,
+                skip_opa:       msg.skip_opa       || false,
+            };
+
+            const result = await this.coreManager.client.deployECS(payload);
+            this.sendMessage({ type: 'ecs_deploy_started', data: result });
+
+            if (result.status === 'ok') {
+                vscode.window.showInformationMessage('ReCoder: ECS Fargate 배포 시작됨.');
+                // 폴링 시작
+                const tick = async (): Promise<void> => {
+                    try {
+                        const s = await this.coreManager.client.getECSDeployStatus();
+                        this.sendMessage({ type: 'ecs_deploy_status', data: s });
+                        if (s.running) { setTimeout(tick, 2500); }
+                        else if (s.stage === 'done') {
+                            vscode.window.showInformationMessage('ReCoder: ECS 배포 완료 ✓');
+                        } else if (s.stage === 'failed') {
+                            const msg = s.rollback_proposal
+                                ? `ReCoder: ECS 배포 실패 — rollback proposal 생성됨 (Approval Level 3)`
+                                : `ReCoder: ECS 배포 실패 — ${s.error}`;
+                            vscode.window.showErrorMessage(msg);
+                        }
+                    } catch { setTimeout(tick, 3000); }
+                };
+                setTimeout(tick, 2000);
+            } else {
+                vscode.window.showErrorMessage(`ReCoder: ECS 배포 시작 실패 — ${result.message}`);
+            }
+        } catch (e: any) {
+            this.sendMessage({ type: 'error', message: `ECS 배포 실패: ${e?.message ?? e}` });
+        }
+    }
+
     private async _handleDeployRollback(msg: any): Promise<void> {
         try {
             const result = await this.coreManager.client.deployRollback(msg.plan_id ?? '');
@@ -1439,6 +1516,44 @@ body{
           <span class="val" id="sb-ec2-stage">—</span>
         </div>
         <div id="sb-ec2-log" style="font-size:10px;color:var(--t2);max-height:80px;overflow-y:auto;margin-top:4px;white-space:pre-wrap;word-break:break-all;background:var(--bg2);padding:4px;border-radius:4px"></div>
+      </div>
+    </div>
+    <div class="sb-panel-divider"></div>
+    <div class="sb-panel-section">
+      <div class="sb-panel-label" style="display:flex;align-items:center;gap:4px">
+        AWS ECS Fargate 배포
+        <span class="git-chip" id="sb-ecs-ready-chip" style="font-size:9px;padding:1px 5px;background:var(--yellow-bg);color:var(--yellow)">확인 중</span>
+        <span class="git-chip" id="sb-opa-chip" style="font-size:9px;padding:1px 5px;background:var(--bg2);color:var(--t2)">OPA</span>
+      </div>
+      <div id="sb-ecs-issues" style="font-size:10px;color:var(--red);margin-bottom:4px;display:none"></div>
+      <div class="sb-dep-row" style="margin-bottom:4px">
+        <span class="key">이미지명</span>
+        <input class="gd-new-input" id="sb-ecs-image" placeholder="recoder-app" style="width:110px;font-size:10px;padding:2px 5px">
+      </div>
+      <div class="sb-dep-row" style="margin-bottom:4px">
+        <span class="key">ECR 레포</span>
+        <input class="gd-new-input" id="sb-ecs-repo" placeholder="recoder-app" style="width:110px;font-size:10px;padding:2px 5px">
+      </div>
+      <div class="sb-dep-row" style="margin-bottom:4px">
+        <span class="key">클러스터</span>
+        <input class="gd-new-input" id="sb-ecs-cluster" placeholder="recoder-cluster" style="width:110px;font-size:10px;padding:2px 5px">
+      </div>
+      <div class="sb-dep-row" style="margin-bottom:4px">
+        <span class="key">서비스</span>
+        <input class="gd-new-input" id="sb-ecs-service" placeholder="recoder-service" style="width:110px;font-size:10px;padding:2px 5px">
+      </div>
+      <div class="sb-dep-row" style="margin-bottom:6px">
+        <span class="key">태그</span>
+        <input class="gd-new-input" id="sb-ecs-tag" placeholder="latest" style="width:110px;font-size:10px;padding:2px 5px">
+      </div>
+      <button class="sb-panel-btn primary" id="sb-ecs-deploy-btn">🚀 ECS 배포</button>
+      <div id="sb-ecs-progress" style="display:none;margin-top:6px">
+        <div class="sb-dep-row">
+          <span class="key">단계</span>
+          <span class="val" id="sb-ecs-stage">—</span>
+        </div>
+        <div id="sb-ecs-log" style="font-size:10px;color:var(--t2);max-height:100px;overflow-y:auto;margin-top:4px;white-space:pre-wrap;word-break:break-all;background:var(--bg2);padding:4px;border-radius:4px"></div>
+        <div id="sb-ecs-rollback-hint" style="display:none;margin-top:4px;font-size:10px;color:var(--yellow);background:var(--yellow-bg);padding:4px;border-radius:4px"></div>
       </div>
     </div>
     <div class="sb-result" id="sb-dep-result">

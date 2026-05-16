@@ -101,7 +101,7 @@
   }
 
   function renderReady(data) {
-    const map = { core_ready: ['wb-chip-core','sc-core'], ai_ready: ['wb-chip-ai','sc-ai'], docker_ready: ['wb-chip-docker','sc-docker'] };
+    const map = { core_ready: ['wb-chip-core','sc-core'], ai_ready: ['wb-chip-ai','sc-ai'], docker_ready: ['wb-chip-docker','sc-docker'], aws_deploy_ready: ['sc-aws'] };
     for (const [key, ids] of Object.entries(map)) {
       ids.forEach(id => setChip(id, data[key] || 'fail'));
     }

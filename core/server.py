@@ -186,6 +186,19 @@ _ec2_deploy_state: dict = {
     "finished_at": "",
 }
 
+# ECS Fargate 배포 진행 상태
+_ecs_deploy_state: dict = {
+    "running":        False,
+    "stage":          "idle",   # idle | building | ecr_push | task_def | svc_update | deploying | done | failed
+    "log_tail":       [],
+    "image_uri":      "",
+    "task_def_arn":   "",
+    "error":          "",
+    "started_at":     "",
+    "finished_at":    "",
+    "rollback_proposal": None,  # Circuit Breaker 발동 시 채워짐
+}
+
 _server_ready = asyncio.Event()
 
 
@@ -341,6 +354,42 @@ class EC2DeployRequest(BaseModel):
     ec2_user:       str = "ec2-user"
 
 
+class ECSDeployRequest(BaseModel):
+    """ECS Fargate 배포 요청 (Q3-A Rolling Update)."""
+    workspace_path:  str = ""
+    image_name:      str = "recoder-app"
+    repo_name:       str = "recoder-app"
+    tag:             str = "latest"
+    # 아래 값은 미전달 시 환경변수(ECR_REGISTRY, ECS_CLUSTER, ECS_SERVICE)에서 자동 로드
+    ecr_registry:    str = ""
+    ecs_cluster:     str = ""
+    ecs_service:     str = ""
+    aws_region:      str = ""
+    container_name:  str = "app"
+    container_port:  int = 8000
+    cpu:             str = "256"
+    memory:          str = "512"
+    env_vars:        list[dict] = Field(default_factory=list)  # [{"name":"K","value":"V"}]
+    task_family:     str = "recoder-task"
+    environment:     str = "staging"   # staging | production (OPA 정책 평가용)
+    branch:          str = ""          # Git 브랜치 (production + main 규칙용)
+    skip_sbom:       bool = False      # 테스트용 SBOM 생성 건너뜀
+    skip_opa:        bool = False      # 테스트용 OPA 게이트 건너뜀
+
+
+class OPAEvaluateRequest(BaseModel):
+    """범용 OPA 정책 평가 요청."""
+    policy_path:    str = "recoder/deploy/allow"
+    input_data:     dict = Field(default_factory=dict)
+    approval_level: int = 3
+
+
+class SBOMGenerateRequest(BaseModel):
+    """SBOM 생성 요청."""
+    image_uri: str
+    tag:       str = "latest"
+
+
 class GhLoginRequest(BaseModel):
     """deprecated — VS Code OAuth 방식으로 대체됨. 호환성 유지용."""
     pass
@@ -375,6 +424,70 @@ class ShipGitHubRequest(BaseModel):
     include_compose: bool = True
     include_actions: bool = True
     include_dockerignore: bool = True
+
+
+# ── Q4 Must-Wedge Request Models ──────────────────────────────────────────
+
+class GitOpsShipRequest(BaseModel):
+    """GitOps ArgoCD 배포 요청."""
+    app_name:        str
+    repo_url:        str
+    ecr_image_uri:   str
+    image_tag:       str = "latest"
+    namespace:       str = "default"
+    container_port:  int = 8000
+    replica_count:   int = 2
+    cpu:             str = "256"
+    memory:          str = "512"
+    environment:     str = "staging"
+    helm_chart_path: str = "helm"
+    target_revision: str = "main"
+    env_vars:        dict = Field(default_factory=dict)
+    argocd_url:      str = ""
+    github_token:    str = ""
+
+
+class RollbackPRRequest(BaseModel):
+    """Rollback PR 생성 요청 (ADR-005)."""
+    app_name:               str
+    environment:            str = "production"
+    failed_image_tag:       str
+    last_healthy_image_tag: str
+    helm_values_path:       str = "helm/values.yaml"
+    argocd_app_name:        str = ""
+    error_summary:          str = ""
+    deployed_by:            str = ""
+    cluster:                str = ""
+    namespace:              str = "default"
+    incident_severity:      int = 2
+    incident_id:            str = ""
+    emergency:              bool = False
+    github_token:           str = ""
+    github_repo:            str = ""
+
+
+class PostmortemRequest(BaseModel):
+    """Postmortem skeleton 생성 요청."""
+    incident_id:            str
+    app_name:               str
+    environment:            str = "production"
+    severity:               int = 2
+    title:                  str = ""
+    failed_image_tag:       str = ""
+    last_healthy_image_tag: str = ""
+    argocd_app_name:        str = ""
+    rollback_pr_url:        str = ""
+    failed_at:              str = ""
+    resolved_at:            str = ""
+    deployed_by:            str = ""
+    cluster:                str = ""
+    namespace:              str = "default"
+    error_summary:          str = ""
+    affected_users:         str = ""
+    revenue_impact:         str = ""
+    otel_trace_id:          str = ""
+    otel_endpoint:          str = ""
+    extra_refs:             list[str] = Field(default_factory=list)
 
 
 # ── Ship pipeline 진행 상태 (인메모리) ────────────────────────────────
@@ -1096,6 +1209,483 @@ async def deploy_ec2_ready(_=Depends(_verify_token)):
         "ready": len(issues) == 0,
         "issues": issues,
     }
+
+
+# ── ECS Fargate 배포 (Q3-A Rolling Update) ────────────────────────────
+
+async def _run_ecs_deploy(body: "ECSDeployRequest") -> None:
+    """ECS Fargate 배포 파이프라인 백그라운드 실행.
+
+    파이프라인: Docker build → ECR push → Task Def 등록 → Service update
+              → CloudWatch 폴링 (Circuit Breaker) → 실패 시 rollback proposal
+    """
+    import time as _time
+    import os as _os
+
+    _ecs_deploy_state.update(
+        running=True, stage="building", log_tail=[],
+        image_uri="", task_def_arn="", error="",
+        rollback_proposal=None,
+        started_at=_time.strftime("%Y-%m-%dT%H:%M:%S"),
+        finished_at="",
+    )
+
+    def _log(msg: str) -> None:
+        _ecs_deploy_state["log_tail"].append(msg)
+        if len(_ecs_deploy_state["log_tail"]) > 200:
+            _ecs_deploy_state["log_tail"] = _ecs_deploy_state["log_tail"][-200:]
+        logger.info(msg)
+
+    try:
+        from ecs_deploy_agent import ECSDeployAgent, ECSDeployConfig
+
+        # ── ECSDeployConfig 구성 (요청값 우선, 없으면 환경변수) ──────────
+        config = ECSDeployConfig(
+            ecr_registry=body.ecr_registry or _os.getenv("ECR_REGISTRY", ""),
+            ecs_cluster=body.ecs_cluster or _os.getenv("ECS_CLUSTER", ""),
+            ecs_service=body.ecs_service or _os.getenv("ECS_SERVICE", ""),
+            aws_region=body.aws_region or (
+                _os.getenv("AWS_DEFAULT_REGION")
+                or _os.getenv("AWS_REGION")
+                or "ap-northeast-2"
+            ),
+            container_name=body.container_name,
+            container_port=body.container_port,
+            cpu=body.cpu,
+            memory=body.memory,
+            env_vars=body.env_vars,
+        )
+
+        # ── 필수값 검증 ──────────────────────────────────────────────────
+        if not config.ecr_registry:
+            raise ValueError("ECR_REGISTRY 미설정. 환경변수 또는 요청 body에 ecr_registry를 입력하세요.")
+        if not config.ecs_cluster:
+            raise ValueError("ECS_CLUSTER 미설정. 환경변수 또는 요청 body에 ecs_cluster를 입력하세요.")
+        if not config.ecs_service:
+            raise ValueError("ECS_SERVICE 미설정. 환경변수 또는 요청 body에 ecs_service를 입력하세요.")
+
+        workspace = body.workspace_path or (
+            _current_project.workspace_path if _current_project else ""
+        )
+        if not workspace:
+            raise ValueError("workspace_path 미설정. VS Code에서 프로젝트 폴더를 열어주세요.")
+
+        agent = ECSDeployAgent()
+        _log(f"[ECS] 배포 시작: {body.image_name}:{body.tag} → {config.ecs_cluster}/{config.ecs_service}")
+
+        # ── 배포 실행 (blocking → thread) ───────────────────────────────
+        result = await asyncio.to_thread(
+            agent.deploy,
+            workspace,
+            body.image_name,
+            body.repo_name,
+            config,
+            body.tag,
+            body.task_family,
+            _log,
+            body.environment,
+            body.branch,
+            body.skip_sbom,
+            body.skip_opa,
+        )
+
+        for ln in result.logs or []:
+            _log(ln)
+
+        if result.success:
+            _ecs_deploy_state["stage"] = "done"
+            _ecs_deploy_state["image_uri"] = result.image_uri
+            _ecs_deploy_state["task_def_arn"] = result.task_definition_arn
+        else:
+            _ecs_deploy_state["stage"] = "failed"
+            _ecs_deploy_state["error"] = result.error
+            # Circuit Breaker 발동 → rollback proposal 저장 (Approval Level 3)
+            if result.rollback_required:
+                proposal = agent.make_rollback_proposal(
+                    config,
+                    result.task_definition_arn,
+                    result.prev_task_def_arn,
+                    result.error,
+                )
+                _ecs_deploy_state["rollback_proposal"] = proposal
+                _log(f"[ECS] Rollback proposal 생성됨: {proposal.get('proposal_id','')}")
+
+    except Exception as e:
+        logger.exception("[server] ECS deploy failed")
+        _ecs_deploy_state["stage"] = "failed"
+        _ecs_deploy_state["error"] = str(e)
+        _ecs_deploy_state["log_tail"].append(f"[ERROR] {e}")
+    finally:
+        import time as _t
+        _ecs_deploy_state["running"] = False
+        _ecs_deploy_state["finished_at"] = _t.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+@app.post("/api/deploy/ecs")
+async def deploy_ecs(body: ECSDeployRequest, _=Depends(_verify_token)):
+    """
+    ECS Fargate Rolling Update 배포 시작 (백그라운드).
+    진행상황은 /api/deploy/ecs/status 로 폴링.
+
+    Request:  ECSDeployRequest
+    Response: { status, message }
+    """
+    if _ecs_deploy_state.get("running"):
+        return {"status": "in_progress", "message": "ECS 배포가 이미 진행 중입니다."}
+
+    asyncio.create_task(_run_ecs_deploy(body))
+    return {
+        "status": "ok",
+        "message": "ECS Fargate 배포 시작됨. /api/deploy/ecs/status 로 진행상황 확인.",
+    }
+
+
+@app.get("/api/deploy/ecs/status")
+async def deploy_ecs_status(_=Depends(_verify_token)):
+    """ECS 배포 진행상황 폴링."""
+    return _ecs_deploy_state
+
+
+@app.post("/api/sbom/generate")
+async def sbom_generate(body: SBOMGenerateRequest, _=Depends(_verify_token)):
+    """
+    이미지에 대한 SBOM 생성 (Syft CycloneDX). 일회성 스캔용.
+
+    Request:  { image_uri, tag }
+    Response: SBOMResult 요약 (sbom_path, package_count, sbom_hash, ...)
+    """
+    try:
+        from sbom_agent import get_sbom_agent
+        result = await asyncio.to_thread(
+            get_sbom_agent().generate, body.image_uri, body.tag
+        )
+        return {
+            "success":       result.success,
+            "sbom_path":     result.sbom_path,
+            "sbom_version":  result.sbom_version,
+            "sbom_hash":     result.sbom_hash,
+            "image_digest":  result.image_digest,
+            "package_count": result.package_count,
+            "error":         result.error,
+            "logs":          result.logs[-20:],  # 최근 20줄
+        }
+    except Exception as e:
+        logger.exception("[server] SBOM generate failed")
+        raise HTTPException(status_code=500, detail=f"SBOM 생성 실패: {e}") from e
+
+
+@app.get("/api/sbom/list")
+async def sbom_list(_=Depends(_verify_token)):
+    """최근 생성된 SBOM 파일 목록."""
+    try:
+        from sbom_agent import get_sbom_agent
+        return {"sboms": get_sbom_agent().list_recent()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/api/opa/evaluate")
+async def opa_evaluate(body: OPAEvaluateRequest, _=Depends(_verify_token)):
+    """
+    범용 OPA 정책 평가.
+
+    Request:  { policy_path, input_data, approval_level }
+    Response: OPAResult.to_dict()
+    """
+    try:
+        from opa_gate import get_opa_gate
+        result = await asyncio.to_thread(
+            get_opa_gate().evaluate,
+            body.policy_path,
+            body.input_data,
+            body.approval_level,
+        )
+        return result.to_dict()
+    except Exception as e:
+        logger.exception("[server] OPA evaluate failed")
+        raise HTTPException(status_code=500, detail=f"OPA 평가 실패: {e}") from e
+
+
+@app.get("/api/opa/ready")
+async def opa_ready(_=Depends(_verify_token)):
+    """OPA 서버 연결 상태 확인."""
+    try:
+        from opa_gate import get_opa_gate
+        available = await asyncio.to_thread(get_opa_gate().is_available)
+        url = __import__("os").getenv("OPA_URL", "http://localhost:8181")
+        return {
+            "available": available,
+            "url":       url,
+            "note":      "OPA 미연결 시 로컬 폴백 규칙 적용 (Level 3+ fail-closed)" if not available else "",
+        }
+    except Exception as e:
+        return {"available": False, "url": "", "note": str(e)}
+
+
+@app.get("/api/deploy/ecs/ready")
+async def deploy_ecs_ready(_=Depends(_verify_token)):
+    """
+    ECS Fargate 배포 가능 여부 사전 확인.
+    ECR_REGISTRY / ECS_CLUSTER / ECS_SERVICE 환경변수 + AWS 자격증명 + docker CLI 체크.
+    """
+    import os as _os, shutil
+
+    issues: list[str] = []
+
+    if not _os.getenv("ECR_REGISTRY"):
+        issues.append("ECR_REGISTRY 환경변수 미설정")
+    if not _os.getenv("ECS_CLUSTER"):
+        issues.append("ECS_CLUSTER 환경변수 미설정")
+    if not _os.getenv("ECS_SERVICE"):
+        issues.append("ECS_SERVICE 환경변수 미설정")
+    if not (_os.getenv("AWS_ACCESS_KEY_ID") or _os.path.exists(_os.path.expanduser("~/.aws/credentials"))):
+        issues.append("AWS 자격증명 미설정 (AWS_ACCESS_KEY_ID 또는 ~/.aws/credentials)")
+    if not shutil.which("docker"):
+        issues.append("Docker 미설치")
+
+    # boto3 preflight — read-only IAM 권한 확인 (선택적)
+    if not issues:
+        try:
+            from ecs_deploy_agent import check_ecs_preflight, ECSDeployConfig
+            import os as _os2
+            cfg = ECSDeployConfig(
+                ecr_registry=_os2.getenv("ECR_REGISTRY", ""),
+                ecs_cluster=_os2.getenv("ECS_CLUSTER", ""),
+                ecs_service=_os2.getenv("ECS_SERVICE", ""),
+                aws_region=_os2.getenv("AWS_DEFAULT_REGION") or _os2.getenv("AWS_REGION") or "ap-northeast-2",
+            )
+            preflight = await asyncio.to_thread(check_ecs_preflight, cfg)
+            if not preflight.get("ok"):
+                for item in preflight.get("issues", []):
+                    issues.append(f"[IAM] {item}")
+        except Exception as e:
+            logger.warning(f"[server] ECS preflight 확인 실패 (무시): {e}")
+
+    return {
+        "ready": len(issues) == 0,
+        "issues": issues,
+    }
+
+
+# ── Q4 Must-Wedge: GitOps / Rollback PR / Postmortem ─────────────────
+
+# GitOps 진행 상태 (인메모리)
+_gitops_state: dict = {
+    "running":      False,
+    "stage":        "idle",
+    "log_tail":     [],
+    "pr_url":       "",
+    "pr_number":    0,
+    "sync_status":  "",
+    "health_status": "",
+    "error":        "",
+    "started_at":   "",
+    "finished_at":  "",
+}
+
+
+async def _run_gitops_ship(body: GitOpsShipRequest) -> None:
+    """GitOps ship 백그라운드 태스크."""
+    from gitops_agent import (
+        GitOpsAgent, GitOpsConfig, GitOpsShipPayload,
+    )
+
+    def _log(msg: str) -> None:
+        tail: list = _gitops_state["log_tail"]
+        tail.append(msg)
+        if len(tail) > 200:
+            _gitops_state["log_tail"] = tail[-200:]
+        logger.info(f"[gitops] {msg}")
+
+    _gitops_state.update({
+        "running": True, "stage": "starting",
+        "log_tail": [], "pr_url": "", "pr_number": 0,
+        "sync_status": "", "health_status": "",
+        "error": "", "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "finished_at": "",
+    })
+    try:
+        cfg = GitOpsConfig(
+            app_name=body.app_name,
+            repo_url=body.repo_url,
+            helm_chart_path=body.helm_chart_path,
+            namespace=body.namespace,
+            target_revision=body.target_revision,
+            argocd_url=body.argocd_url or os.environ.get("ARGOCD_URL", ""),
+            github_token=body.github_token or os.environ.get("GITHUB_TOKEN", ""),
+        )
+        payload_cls = __import__("gitops_agent", fromlist=["GitOpsShipPayload"]).GitOpsShipPayload
+        payload = payload_cls(
+            config=cfg,
+            ecr_image_uri=body.ecr_image_uri,
+            image_tag=body.image_tag,
+            container_port=body.container_port,
+            replica_count=body.replica_count,
+            cpu=body.cpu,
+            memory=body.memory,
+            env_vars=body.env_vars,
+            environment=body.environment,
+        )
+        agent = GitOpsAgent()
+        result = await asyncio.to_thread(agent.ship, payload, _log)
+        _gitops_state.update({
+            "running":       False,
+            "stage":         "done" if result.success else "error",
+            "pr_url":        result.pr_url,
+            "pr_number":     result.pr_number,
+            "sync_status":   result.sync_status,
+            "health_status": result.health_status,
+            "error":         result.error,
+            "finished_at":   time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+    except Exception as exc:
+        _gitops_state.update({
+            "running": False, "stage": "error",
+            "error": str(exc),
+            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+
+
+@app.post("/api/gitops/ship")
+async def gitops_ship(body: GitOpsShipRequest, request: Request, _=Depends(_verify_token)):
+    """
+    GitOps ArgoCD 배포: helm/values.yaml 생성 → Git PR → ArgoCD sync.
+
+    Request : GitOpsShipRequest
+    Response: { started: bool, message: str }
+    """
+    if _gitops_state.get("running"):
+        raise HTTPException(status_code=409, detail="GitOps ship 이미 실행 중입니다.")
+    asyncio.get_event_loop().create_task(_run_gitops_ship(body))
+    return {"started": True, "message": "GitOps ship 시작됨"}
+
+
+@app.get("/api/gitops/ship/status")
+async def gitops_ship_status(_=Depends(_verify_token)):
+    """GitOps ship 진행 상태 폴링."""
+    return {
+        "running":       _gitops_state["running"],
+        "stage":         _gitops_state["stage"],
+        "log_tail":      _gitops_state["log_tail"][-50:],
+        "pr_url":        _gitops_state["pr_url"],
+        "pr_number":     _gitops_state["pr_number"],
+        "sync_status":   _gitops_state["sync_status"],
+        "health_status": _gitops_state["health_status"],
+        "error":         _gitops_state["error"],
+        "started_at":    _gitops_state["started_at"],
+        "finished_at":   _gitops_state["finished_at"],
+    }
+
+
+@app.post("/api/rollback-pr/create")
+async def rollback_pr_create(body: RollbackPRRequest, _=Depends(_verify_token)):
+    """
+    ADR-005 production rollback PR 자동 생성.
+
+    Request : RollbackPRRequest
+    Response: { success, pr_url, pr_number, branch, incident_id, error }
+    """
+    from rollback_pr_agent import (
+        RollbackPRAgent, RollbackPRConfig, DeploymentRecord,
+    )
+    import time as _time
+
+    rec = DeploymentRecord(
+        app_name=body.app_name,
+        environment=body.environment,
+        failed_at=_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        deployed_by=body.deployed_by,
+        error_summary=body.error_summary,
+        cluster=body.cluster,
+        namespace=body.namespace,
+        incident_severity=body.incident_severity,
+    )
+    cfg = RollbackPRConfig(
+        failed_image_tag=body.failed_image_tag,
+        last_healthy_image_tag=body.last_healthy_image_tag,
+        helm_values_path=body.helm_values_path,
+        argocd_app_name=body.argocd_app_name or body.app_name,
+        deployment_record=rec,
+        incident_id=body.incident_id or f"INC-{uuid.uuid4().hex[:8].upper()}",
+        github_token=body.github_token or os.environ.get("GITHUB_TOKEN", ""),
+        github_repo=body.github_repo or os.environ.get("GITHUB_REPO", ""),
+        emergency=body.emergency,
+    )
+
+    logs: list[str] = []
+    agent = RollbackPRAgent()
+    result = await asyncio.to_thread(
+        agent.create_rollback_pr, cfg, lambda m: logs.append(m)
+    )
+    resp = result.to_summary()
+    resp["logs"] = logs[-30:]
+    return resp
+
+
+@app.post("/api/postmortem/generate")
+async def postmortem_generate(body: PostmortemRequest, _=Depends(_verify_token)):
+    """
+    Postmortem skeleton 자동 생성.
+
+    Request : PostmortemRequest
+    Response: { success, file_path, incident_id, markdown_preview, error }
+    """
+    from postmortem_agent import (
+        PostmortemAgent, PostmortemInput,
+    )
+
+    inp = PostmortemInput(
+        incident_id=body.incident_id,
+        app_name=body.app_name,
+        environment=body.environment,
+        severity=body.severity,
+        title=body.title,
+        failed_image_tag=body.failed_image_tag,
+        last_healthy_image_tag=body.last_healthy_image_tag,
+        argocd_app_name=body.argocd_app_name,
+        rollback_pr_url=body.rollback_pr_url,
+        failed_at=body.failed_at,
+        resolved_at=body.resolved_at,
+        deployed_by=body.deployed_by,
+        cluster=body.cluster,
+        namespace=body.namespace,
+        error_summary=body.error_summary,
+        affected_users=body.affected_users,
+        revenue_impact=body.revenue_impact,
+        otel_trace_id=body.otel_trace_id,
+        otel_endpoint=body.otel_endpoint or os.environ.get("OTEL_ENDPOINT", ""),
+        extra_refs=body.extra_refs,
+    )
+
+    logs: list[str] = []
+    agent = PostmortemAgent()
+    result = await asyncio.to_thread(
+        agent.generate, inp, lambda m: logs.append(m)
+    )
+    resp = result.to_summary()
+    resp["markdown_preview"] = result.markdown_preview
+    resp["logs"] = logs[-20:]
+    return resp
+
+
+@app.get("/api/postmortem/list")
+async def postmortem_list(_=Depends(_verify_token)):
+    """생성된 Postmortem 파일 목록 반환."""
+    pm_dir = Path.home() / ".recoder" / "postmortems"
+    if not pm_dir.exists():
+        return {"items": []}
+    items = []
+    for f in sorted(pm_dir.glob("*.md"), reverse=True)[:20]:
+        items.append({
+            "incident_id": f.stem,
+            "file_path":   str(f),
+            "size_bytes":  f.stat().st_size,
+            "modified_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(f.stat().st_mtime)
+            ),
+        })
+    return {"items": items}
 
 
 # ── Git ──────────────────────────────────────────────────────────────

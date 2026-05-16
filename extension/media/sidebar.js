@@ -283,6 +283,55 @@
     }
   }
 
+  // ── ECS Fargate 배포 ──────────────────────────────────────────────
+  document.addEventListener('click', function(e) {
+    if (e.target && e.target.id === 'sb-btn-deploy') {
+      vscode.postMessage({ type: 'deploy_ecs_ready_check' });
+    }
+  });
+
+  on('sb-ecs-deploy-btn', 'click', function() {
+    var imageName = (qs('sb-ecs-image')   || {}).value || 'recoder-app';
+    var repoName  = (qs('sb-ecs-repo')    || {}).value || 'recoder-app';
+    var cluster   = (qs('sb-ecs-cluster') || {}).value || '';
+    var service   = (qs('sb-ecs-service') || {}).value || '';
+    var tag       = (qs('sb-ecs-tag')     || {}).value || 'latest';
+    vscode.postMessage({
+      type:        'deploy_ecs',
+      image_name:  imageName.trim() || 'recoder-app',
+      repo_name:   repoName.trim()  || 'recoder-app',
+      ecs_cluster: cluster.trim(),
+      ecs_service: service.trim(),
+      tag:         tag.trim() || 'latest',
+    });
+    var prog = qs('sb-ecs-progress');
+    if (prog) prog.style.display = 'block';
+    _setECSStage('시작 중...');
+    showToast('ECS Fargate 배포 시작...');
+  });
+
+  function _setECSStage(txt) {
+    var el = qs('sb-ecs-stage'); if (el) el.textContent = txt || '—';
+  }
+
+  function _setECSReadyChip(ready, issues) {
+    var chip     = qs('sb-ecs-ready-chip');
+    var issueDiv = qs('sb-ecs-issues');
+    if (chip) {
+      chip.textContent = ready ? '준비됨' : '설정 필요';
+      chip.style.background = ready ? 'var(--green-bg)' : 'var(--red-bg)';
+      chip.style.color      = ready ? 'var(--green)'    : 'var(--red)';
+    }
+    if (issueDiv) {
+      if (issues && issues.length) {
+        issueDiv.textContent = issues.join('\n');
+        issueDiv.style.display = 'block';
+      } else {
+        issueDiv.style.display = 'none';
+      }
+    }
+  }
+
   function _setDepStatus(msg) {
     var el = qs('sb-dep-status-line');
     if (el) el.textContent = msg;
@@ -731,6 +780,63 @@
         } else if (d.stage === 'failed') {
           _setDepStatus('EC2 배포 실패: ' + (d.error || ''));
           showToast('EC2 배포 실패: ' + (d.error || ''), 4000);
+        }
+        break;
+      }
+
+      case 'ecs_ready_result': {
+        var d = msg.data || {};
+        _setECSReadyChip(d.ready, d.issues);
+        break;
+      }
+      case 'ecs_deploy_started': {
+        var d = msg.data || {};
+        if (d.status === 'ok') {
+          _setECSStage('배포 시작됨');
+          var prog = qs('sb-ecs-progress');
+          if (prog) prog.style.display = 'block';
+        } else {
+          _setECSStage('시작 실패: ' + (d.message || ''));
+          showToast('ECS 배포 시작 실패: ' + (d.message || ''), 3500);
+        }
+        break;
+      }
+      case 'ecs_deploy_status': {
+        var d = msg.data || {};
+        var stageMap = {
+          idle:       '대기',
+          building:   '빌드 중',
+          ecr_push:   'ECR Push 중',
+          task_def:   'Task Def 등록',
+          svc_update: 'Service 업데이트',
+          deploying:  '배포 중 (폴링)',
+          done:       '✅ 완료',
+          failed:     '❌ 실패',
+        };
+        _setECSStage(stageMap[d.stage] || d.stage || '—');
+        if (d.log_tail && d.log_tail.length) {
+          var logEl = qs('sb-ecs-log');
+          if (logEl) {
+            logEl.textContent = d.log_tail.slice(-40).join('\n');
+            logEl.scrollTop = logEl.scrollHeight;
+          }
+        }
+        // Rollback proposal 힌트 표시
+        var hintEl = qs('sb-ecs-rollback-hint');
+        if (hintEl) {
+          if (d.rollback_proposal) {
+            hintEl.textContent = '⚠️ Rollback Proposal 생성됨 (Approval Level 3) — 이전 Task Definition으로 되돌릴 수 있습니다.';
+            hintEl.style.display = 'block';
+          } else {
+            hintEl.style.display = 'none';
+          }
+        }
+        if (d.stage === 'done') {
+          _setDepStatus('ECS 배포 완료');
+          showToast('ECS Fargate 배포 완료 ✅');
+        } else if (d.stage === 'failed') {
+          _setDepStatus('ECS 배포 실패: ' + (d.error || '').slice(0, 80));
+          showToast('ECS 배포 실패: ' + (d.error || '').slice(0, 60), 4000);
         }
         break;
       }

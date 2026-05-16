@@ -341,6 +341,63 @@ export class CoreClient {
         return this._get('/api/deploy/ec2/status') as any;
     }
 
+    // ── ECS Fargate 배포 (Q3-A) ──────────────────────────────────────
+
+    async deployECSReady(): Promise<{ ready: boolean; issues: string[] }> {
+        return this._get('/api/deploy/ecs/ready') as any;
+    }
+
+    async deployECS(payload: {
+        workspace_path?: string;
+        image_name?: string;
+        repo_name?: string;
+        tag?: string;
+        ecr_registry?: string;
+        ecs_cluster?: string;
+        ecs_service?: string;
+        aws_region?: string;
+        container_name?: string;
+        container_port?: number;
+        cpu?: string;
+        memory?: string;
+        env_vars?: Array<{ name: string; value: string }>;
+        task_family?: string;
+        environment?: string;
+        branch?: string;
+        skip_sbom?: boolean;
+        skip_opa?: boolean;
+    }): Promise<{ status: string; message: string }> {
+        return this._post('/api/deploy/ecs', payload) as any;
+    }
+
+    async getECSDeployStatus(): Promise<{
+        running: boolean;
+        stage: string;
+        log_tail: string[];
+        image_uri: string;
+        task_def_arn: string;
+        error: string;
+        started_at: string;
+        finished_at: string;
+        rollback_proposal: object | null;
+    }> {
+        return this._get('/api/deploy/ecs/status') as any;
+    }
+
+    async opaReady(): Promise<{ available: boolean; url: string; note: string }> {
+        return this._get('/api/opa/ready') as any;
+    }
+
+    async generateSBOM(image_uri: string, tag?: string): Promise<{
+        success: boolean;
+        sbom_path: string;
+        package_count: number;
+        sbom_hash: string;
+        error: string;
+    }> {
+        return this._post('/api/sbom/generate', { image_uri, tag: tag ?? 'latest' }) as any;
+    }
+
     // ── GitHub one-click ──────────────────────────────────────────
 
     async ghStatus(force: boolean = false): Promise<{ installed: boolean; version: string; authed: boolean; user: string; install_hint: string }> {

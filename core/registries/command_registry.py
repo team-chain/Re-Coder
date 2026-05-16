@@ -183,6 +183,56 @@ class CommandRegistry:
                 risk_level=RiskLevel.HIGH,
                 approval_level=4,
             ),
+
+            # ── ECS Fargate 전용 (Q3-A, Level 3~4) ───────────────────
+            "ecr_get_login_password": CommandTemplate(
+                template_id="ecr_get_login_password",
+                action_type="ecr_get_login_password",
+                allowed_params=["region"],
+                command_pattern="aws ecr get-login-password --region {region}",
+                risk_level=RiskLevel.HIGH,
+                approval_level=4,
+            ),
+            "docker_tag_ecr": CommandTemplate(
+                template_id="docker_tag_ecr",
+                action_type="docker_tag_ecr",
+                allowed_params=["local_image", "ecr_uri"],
+                command_pattern="docker tag {local_image} {ecr_uri}",
+                risk_level=RiskLevel.MEDIUM,
+                approval_level=3,
+            ),
+            "docker_push_ecr": CommandTemplate(
+                template_id="docker_push_ecr",
+                action_type="docker_push_ecr",
+                allowed_params=["ecr_uri"],
+                command_pattern="docker push {ecr_uri}",
+                risk_level=RiskLevel.HIGH,
+                approval_level=4,
+            ),
+            "ecs_update_service": CommandTemplate(
+                template_id="ecs_update_service",
+                action_type="ecs_update_service",
+                allowed_params=["cluster", "service", "task_definition"],
+                command_pattern="aws ecs update-service --cluster {cluster} --service {service} --task-definition {task_definition} --force-new-deployment",
+                risk_level=RiskLevel.HIGH,
+                approval_level=4,
+            ),
+            "ecs_describe_service": CommandTemplate(
+                template_id="ecs_describe_service",
+                action_type="ecs_describe_service",
+                allowed_params=["cluster", "service"],
+                command_pattern="aws ecs describe-services --cluster {cluster} --services {service}",
+                risk_level=RiskLevel.LOW,
+                approval_level=2,
+            ),
+            "syft_sbom": CommandTemplate(
+                template_id="syft_sbom",
+                action_type="syft_sbom",
+                allowed_params=["image_uri"],
+                command_pattern="docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:latest {image_uri} -o cyclonedx-json",
+                risk_level=RiskLevel.LOW,
+                approval_level=2,
+            ),
         }
 
     def get(self, template_id: str) -> Optional[CommandTemplate]:

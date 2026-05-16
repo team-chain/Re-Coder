@@ -130,6 +130,109 @@ volumes:
 """
 
 
+# ── GitOps 템플릿 (Q4 Must-Wedge) ────────────────────────────────────
+
+_ARGOCD_APPLICATION = """\
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {app_name}
+  namespace: argocd
+  labels:
+    app: {app_name}
+    managed-by: recoder
+spec:
+  project: default
+  source:
+    repoURL: {repo_url}
+    targetRevision: {target_revision}
+    path: {helm_chart_path}
+    helm:
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {namespace}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+"""
+
+_HELM_VALUES_FARGATE = """\
+# Helm values for {app_name} — managed by ReCoder
+replicaCount: {replica_count}
+
+image:
+  repository: {ecr_image_uri}
+  tag: "{image_tag}"
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: {container_port}
+
+resources:
+  requests:
+    cpu: "{cpu_request}"
+    memory: "{memory_request}"
+  limits:
+    cpu: "{cpu_limit}"
+    memory: "{memory_limit}"
+
+env: {env_yaml}
+
+healthCheck:
+  path: {health_check_path}
+  initialDelaySeconds: 30
+  periodSeconds: 10
+"""
+
+# ── ECS Task Definition 템플릿 (Q3-A) ────────────────────────────────
+
+_ECS_TASK_DEFINITION = """\
+{{
+  "family": "{family}",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "{cpu}",
+  "memory": "{memory}",
+  "executionRoleArn": "{execution_role_arn}",
+  "containerDefinitions": [
+    {{
+      "name": "{container_name}",
+      "image": "{ecr_image_uri}",
+      "portMappings": [
+        {{
+          "containerPort": {container_port},
+          "protocol": "tcp"
+        }}
+      ],
+      "essential": true,
+      "environment": {env_vars_json},
+      "logConfiguration": {{
+        "logDriver": "awslogs",
+        "options": {{
+          "awslogs-group": "/ecs/{family}",
+          "awslogs-region": "{aws_region}",
+          "awslogs-stream-prefix": "ecs",
+          "awslogs-create-group": "true"
+        }}
+      }},
+      "healthCheck": {{
+        "command": ["CMD-SHELL", "curl -fs http://localhost:{container_port}{health_check_path} || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }}
+    }}
+  ]
+}}
+"""
+
 # ── GitHub Actions 워크플로우 템플릿 ──────────────────────────────────
 
 _GITHUB_ACTIONS_EC2_DEPLOY = """\
@@ -239,6 +342,38 @@ class FileRegistry:
                 base_content=_GITHUB_ACTIONS_EC2_DEPLOY,
                 customizable_sections=["image", "container_name", "region", "repository"],
             ),
+            # Q4 Must-Wedge: GitOps 템플릿
+            "argocd-application": FileTemplate(
+                template_id="argocd-application",
+                file_type="argocd-application",
+                base_content=_ARGOCD_APPLICATION,
+                customizable_sections=[
+                    "app_name", "repo_url", "target_revision",
+                    "helm_chart_path", "namespace",
+                ],
+            ),
+            "helm-values-fargate": FileTemplate(
+                template_id="helm-values-fargate",
+                file_type="helm-values",
+                base_content=_HELM_VALUES_FARGATE,
+                customizable_sections=[
+                    "app_name", "ecr_image_uri", "image_tag",
+                    "container_port", "replica_count",
+                    "cpu_request", "memory_request", "cpu_limit", "memory_limit",
+                    "env_yaml", "health_check_path",
+                ],
+            ),
+            # Q3-A: ECS Task Definition (JSON)
+            "ecs-task-definition": FileTemplate(
+                template_id="ecs-task-definition",
+                file_type="ecs-task-definition",
+                base_content=_ECS_TASK_DEFINITION,
+                customizable_sections=[
+                    "family", "cpu", "memory", "execution_role_arn",
+                    "container_name", "ecr_image_uri", "container_port",
+                    "env_vars_json", "aws_region", "health_check_path",
+                ],
+            ),
         }
 
     def get(self, template_id: str) -> Optional[FileTemplate]:
@@ -333,6 +468,43 @@ class FileRegistry:
         raise ValueError(
             "스택을 자동 감지하지 못했습니다. "
             "requirements.txt 또는 package.json이 필요합니다."
+        )
+
+    def render_ecs_task_definition(
+        self,
+        family: str,
+        ecr_image_uri: str,
+        container_name: str = "app",
+        container_port: int = 8000,
+        cpu: str = "256",
+        memory: str = "512",
+        aws_region: str = "ap-northeast-2",
+        execution_role_arn: str = "",
+        env_vars: list[dict] | None = None,
+        health_check_path: str = "/health",
+    ) -> str:
+        """
+        ECS Task Definition JSON 렌더링 (Q3-A Step 1).
+
+        env_vars 형식: [{"name": "KEY", "value": "val"}, ...]
+        반환: JSON 문자열 (바로 boto3 에 넘기거나 파일로 저장 가능)
+        """
+        env_list = env_vars or []
+        env_vars_json = json.dumps(env_list, ensure_ascii=False)
+        return self.render(
+            "ecs-task-definition",
+            {
+                "family":             family,
+                "cpu":                cpu,
+                "memory":             memory,
+                "execution_role_arn": execution_role_arn or f"arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+                "container_name":     container_name,
+                "ecr_image_uri":      ecr_image_uri,
+                "container_port":     container_port,
+                "env_vars_json":      env_vars_json,
+                "aws_region":         aws_region,
+                "health_check_path":  health_check_path,
+            },
         )
 
 
