@@ -160,11 +160,32 @@ class ArgoCDClient:
         result = self._post(f"/api/v1/applications/{app_name}/sync", {})
         return result is not None
 
-    def rollback_app(self, app_name: str, revision: str) -> bool:
+    def rollback_app(
+        self,
+        app_name: str,
+        revision: str,
+        environment: str = "staging",
+        severity: str = "sev3",
+    ) -> bool:
         """
-        ArgoCD API rollback (staging/dev 전용 — ADR-005).
-        production 은 Git revert PR 방식 사용 (rollback_pr_agent 참조).
+        ArgoCD API 직접 rollback.
+
+        ADR-005 강제:
+          - staging / dev : 허용
+          - production    : 기본 차단. Severity 1 (sev1) emergency 만 허용.
+                            허용된 경우에도 30분 이내 Git reconciliation PR 필수.
+
+        production 의 일반 rollback 은 rollback_pr_agent.create_rollback_pr() 를 사용한다.
         """
+        env = (environment or "staging").lower()
+        sev = (severity or "sev3").lower()
+        if env in {"prod", "production"} and sev not in {"sev1", "severity_1", "critical"}:
+            raise PermissionError(
+                "ADR-005 위반: production rollback 은 Git revert PR 으로만 가능합니다. "
+                "Severity 1 emergency 인 경우에만 rollback_app() 직접 호출이 허용되며, "
+                "이 경우에도 30분 이내 Git reconciliation PR 을 생성해야 합니다."
+            )
+
         result = self._post(
             f"/api/v1/applications/{app_name}/rollback",
             {"revision": revision},

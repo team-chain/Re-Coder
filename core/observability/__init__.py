@@ -24,6 +24,21 @@ from .prometheus_adapter import PrometheusAdapter
 from .loki_adapter import LokiAdapter
 from .otel_query_service import OTelQueryService
 
+# ---------------------------------------------------------------------------
+# Legacy compatibility — core/observability.py 의 `observability` 싱글톤이
+# `from core.observability import observability` 로 import 되는 경로를 보존한다.
+# 패키지화 후에도 기존 import 가 깨지지 않도록 한다.
+# ---------------------------------------------------------------------------
+
+try:  # pragma: no cover — 환경에 따라 누락 가능
+    # NOTE: core/observability.py 와 core/observability/ 가 공존할 때
+    # Python 은 패키지(__init__.py) 를 우선한다. 레거시 manager 는
+    # 동일 디렉터리의 _legacy_manager.py 로 이전했거나, 없으면 새로 만든다.
+    from ._legacy_manager import ObservabilityManager, observability  # type: ignore
+except ImportError:  # pragma: no cover
+    ObservabilityManager = None  # type: ignore
+    observability = None  # type: ignore
+
 __all__ = [
     "OTelCollectorConfig",
     "build_otel_collector_config",
@@ -32,4 +47,6 @@ __all__ = [
     "PrometheusAdapter",
     "LokiAdapter",
     "OTelQueryService",
+    "ObservabilityManager",
+    "observability",
 ]

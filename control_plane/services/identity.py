@@ -194,6 +194,62 @@ class IdentityService:
     # Revocation
     # ------------------------------------------------------------------
 
+    async def rotate_device_token(
+        self,
+        device_id: str,
+        org_id: str,
+    ) -> Optional["DeviceTokenResponse"]:
+        """
+        Device Token 회전 (ADR-006).
+
+        - 새 raw_token / token_hash 발급
+        - expires_at 갱신 (현재 시각 기준 _DEVICE_TOKEN_TTL_HOURS 후)
+        - 이전 token 은 즉시 무효화 (token_hash 가 교체되므로 validate_token() 실패)
+        - 회전 사유 / 시각을 Device 객체에 기록
+
+        반환: 새 토큰을 담은 DeviceTokenResponse. 대상 Device 가 없거나 다른 org
+        이면 None.
+        """
+        result = await self._db.execute(
+            select(Device).where(
+                Device.device_id == device_id,
+                Device.org_id == org_id,
+            )
+        )
+        device = result.scalar_one_or_none()
+        if device is None:
+            return None
+
+        if device.status != DeviceStatus.ACTIVE:
+            logger.warning(
+                "rotate_device_token rejected: device %s is %s, not ACTIVE",
+                device_id, device.status.value,
+            )
+            return None
+
+        raw_token = secrets.token_urlsafe(48)
+        now = datetime.now(timezone.utc)
+        new_expires_at = now + timedelta(hours=_DEVICE_TOKEN_TTL_HOURS)
+
+        device.token_hash = self._hash_token(raw_token)
+        device.expires_at = new_expires_at
+        # last_heartbeat_at 은 회전한다고 갱신하지 않는다 (실제 연결과 무관)
+        await self._db.flush()
+
+        # 멤버 role 조회 (응답에 포함하기 위해)
+        from control_plane.services.org_service import OrgService
+        role = await OrgService(self._db).get_member_role(device.org_id, device.user_id) or OrgRole.DEVELOPER
+
+        logger.info("Device token rotated: device=%s org=%s", device_id, org_id)
+        return DeviceTokenResponse(
+            device_id=device.device_id,
+            token=raw_token,
+            expires_at=new_expires_at,
+            org_id=device.org_id,
+            user_id=device.user_id,
+            role=role,
+        )
+
     async def revoke_device(
         self,
         device_id: str,

@@ -265,3 +265,74 @@ class ApprovalService:
                 policy_bundle_version=ar.policy_bundle_version,
             ),
         )
+
+    # ------------------------------------------------------------------
+    # escalate_to_security 알림 (설계서 §Q2-B "보안팀 에스컬레이션")
+    # ------------------------------------------------------------------
+
+    async def notify_security_team(
+        self,
+        org_id: str,
+        actor_user_id: str,
+        action: str,
+        resource_type: str,
+        resource_id: Optional[str],
+        reason: str,
+        policy_bundle_version: Optional[str] = None,
+    ) -> None:
+        """
+        OPA 가 escalate_to_security 판정을 내렸을 때 호출.
+
+        설계서 §Q2-B "보안팀 에스컬레이션":
+          - AuditLog 기록
+          - 보안 담당자 알림 (Slack/이메일 — 미연결 시 로그로 fail-soft)
+        """
+        from control_plane.services.audit import AuditService
+        audit_svc = AuditService(self._db)
+        # 1. AuditLog
+        try:
+            await audit_svc.record(
+                org_id=org_id,
+                actor_user_id=actor_user_id,
+                event=AuditEventCreate(
+                    action=AuditAction.SECURITY_ESCALATION,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    after_state={
+                        "escalate_to_security": True,
+                        "action": action,
+                        "reason": reason,
+                    },
+                    occurred_at=datetime.now(timezone.utc),
+                    policy_bundle_version=policy_bundle_version,
+                ),
+                is_suspicious=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("security escalation audit failed: %s", exc)
+
+        # 2. 보안 담당자 알림 (Slack/이메일 webhook — 환경변수 미설정 시 로그로 fail-soft)
+        import os
+        webhook = os.environ.get("SECURITY_ESCALATION_WEBHOOK_URL")
+        if not webhook:
+            logger.warning(
+                "[SECURITY ESCALATION] org=%s actor=%s action=%s resource=%s/%s reason=%s",
+                org_id, actor_user_id, action, resource_type, resource_id, reason,
+            )
+            return
+        try:
+            import httpx  # 지연 import — 미설치 시 fail-soft
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    webhook,
+                    json={
+                        "text": (
+                            f":rotating_light: ReCoder Security Escalation\n"
+                            f"org={org_id} actor={actor_user_id}\n"
+                            f"action={action} resource={resource_type}/{resource_id}\n"
+                            f"reason={reason}"
+                        )
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("security escalation webhook failed: %s", exc)

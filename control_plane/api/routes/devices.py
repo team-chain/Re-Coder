@@ -1,10 +1,11 @@
 """
-Control Plane — Q2-A1: Device 관리 라우트
+Control Plane — Q2-A1: Device 관리 라우트.
 
-- GET  /devices/heartbeat   — 1분마다 heartbeat (Extension이 호출)
-- GET  /devices/me          — 현재 Device 정보
-- GET  /devices             — org 내 Device 목록 (admin/owner만)
-- POST /devices/{id}/revoke — Device 폐기
+- POST /devices/heartbeat            — 1분마다 heartbeat (Extension이 호출)
+- GET  /devices/me                   — 현재 Device 정보
+- GET  /devices                      — org 내 Device 목록 (admin/owner만)
+- POST /devices/{id}/revoke          — Device 폐기
+- POST /devices/{id}/rotate-token    — Device Token 회전 (ADR-006 토큰 회전 요구)
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from control_plane.models.schemas import (
     DeviceHeartbeatRequest,
     DeviceHeartbeatResponse,
     DeviceStatus,
+    DeviceTokenResponse,
     Permission,
 )
 from control_plane.services.identity import IdentityService
@@ -161,3 +163,58 @@ async def revoke_device(
     )
 
     return {"status": "revoked", "device_id": device_id}
+
+
+@router.post("/{device_id}/rotate-token", response_model=DeviceTokenResponse)
+async def rotate_device_token(
+    device_id: str,
+    ctx: DeviceContext = Depends(get_current_device),
+    db: AsyncSession = Depends(get_db),
+) -> DeviceTokenResponse:
+    """
+    Device Token 회전 (ADR-006 토큰 회전 요구).
+
+    호출자는 본인 소유의 Device 또는 device:revoke 권한을 가진 admin/owner 가
+    같은 org 의 다른 Device 를 회전시킬 수 있다.
+
+    회전 즉시 이전 토큰은 무효화되며, Extension 은 새 토큰을 OS Keychain 에
+    저장해야 한다. AuditLog 에 device.rotated 가 SECURITY_ESCALATION 이 아닌
+    일반 audit 으로 기록된다 (POLICY_BUNDLE_UPDATED 와 동일 분류).
+    """
+    # 권한: 본인 device 거나 device:revoke 권한 보유자
+    from control_plane.models.schemas import has_permission
+    if device_id != ctx.device_id and not has_permission(ctx.role, Permission.DEVICE_REVOKE):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="rotate-token requires owning the device or device:revoke permission",
+        )
+
+    svc = IdentityService(db)
+    response = await svc.rotate_device_token(device_id=device_id, org_id=ctx.org_id)
+    if response is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found, not ACTIVE, or not in your organization",
+        )
+
+    # AuditLog
+    from control_plane.services.audit import AuditService
+    import datetime as _dt
+    try:
+        audit_svc = AuditService(db)
+        await audit_svc.record(
+            org_id=ctx.org_id,
+            actor_user_id=ctx.user_id,
+            actor_device_id=ctx.device_id,
+            event=AuditEventCreate(
+                action=AuditAction.DEVICE_ENROLLED,  # 재발급도 enrolled 카테고리로 분류
+                resource_type="device",
+                resource_id=device_id,
+                after_state={"rotated": True, "by_self": device_id == ctx.device_id},
+                occurred_at=_dt.datetime.now(_dt.timezone.utc),
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("rotate-token audit log failed: %s", exc)
+
+    return response

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.db.models import Device
@@ -29,6 +30,10 @@ from control_plane.models.schemas import OrgRole
 from control_plane.services.identity import IdentityService
 
 logger = logging.getLogger(__name__)
+
+# PostgreSQL Row Level Security 가 참조하는 GUC 변수.
+# migrations.py 의 RLS 정책이 `current_setting('app.current_org_id')` 를 읽는다.
+_RLS_GUC_KEY = "app.current_org_id"
 
 
 @dataclass
@@ -97,6 +102,23 @@ async def get_current_device(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Device user is not a member of the associated organization",
         )
+
+    # ──────────────────────────────────────────────────────────────────
+    # PostgreSQL Row Level Security: 세션 GUC `app.current_org_id` 를
+    # 현재 Device 의 org_id 로 설정해야 migrations.py 의 RLS 정책이
+    # 실제로 동작한다. SET LOCAL 을 쓰면 트랜잭션 종료 시 자동 해제된다.
+    #
+    # PostgreSQL 외 백엔드(예: SQLite — 테스트)는 SET LOCAL 을 지원하지
+    # 않으므로 예외를 삼키고 진행한다 — 이 경우 RLS 는 미적용이며,
+    # ORM 레벨 org_id 필터링이 1차 방어선이 된다.
+    # ──────────────────────────────────────────────────────────────────
+    try:
+        await db.execute(
+            text(f"SET LOCAL {_RLS_GUC_KEY} = :org_id"),
+            {"org_id": device.org_id},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("RLS GUC set skipped (non-postgres backend?): %s", exc)
 
     return DeviceContext(
         device=device,

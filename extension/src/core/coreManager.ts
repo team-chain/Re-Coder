@@ -28,6 +28,7 @@ export class CoreManager {
     }
 
     async ensureRunning(): Promise<void> {
+        // 1) 정상 경로 — runtime.json + healthCheck.
         const runtime = await this.readRuntime();
         if (runtime) {
             this.port = runtime.port;
@@ -38,13 +39,62 @@ export class CoreManager {
             }
         }
 
+        // 2) runtime.json 이 없거나 health 가 실패하더라도, 사용자가 `python core/main.py`
+        //    같은 방식으로 수동 실행 중일 수 있다. 기본 포트 범위 (17894~17910) 에서
+        //    /api/health (인증 불요) 가 응답하는지 직접 확인하고, 있다면 runtime.json
+        //    이 곧 쓰여질 때까지 잠시 대기하여 토큰을 회수한다.
+        const detected = await this.probeRunningCore();
+        if (detected) {
+            this.port = detected.port;
+            // runtime.json 이 잠시 늦게 쓰여질 수 있으므로 최대 3초 polling.
+            const deadline = Date.now() + 3000;
+            while (Date.now() < deadline) {
+                const rt = await this.readRuntime();
+                if (rt && rt.port === this.port && rt.session_token) {
+                    this.sessionToken = rt.session_token;
+                    return;
+                }
+                await this.sleep(200);
+            }
+            // 토큰을 못 받아도 일단 connect 는 가능 — 인증 필요 호출이 401/503 일 뿐.
+            // 호출 측에서 refreshToken 으로 재시도.
+            return;
+        }
+
         if (this.isSpawning) {
             await this.waitForReady();
             return;
         }
 
+        // 3) 그래도 못 찾으면 직접 spawn 시도. 번들된 바이너리가 없는 dev 환경에선
+        //    여기서 throw 한다. 그 경우 사용자가 `python core/main.py` 로 띄워야 함.
         await this.cleanupStale();
         await this.spawnCore();
+    }
+
+    /**
+     * 기본 포트 범위에서 /api/health 가 응답하는 Core 가 있는지 탐색.
+     * 발견하면 { port } 반환. 인증이 필요한 호출 (status/cost/diagnostics) 은
+     * 토큰이 없으므로 운반되지 않는다 (그 시점에 runtime.json 에서 회수).
+     */
+    private async probeRunningCore(): Promise<{ port: number } | null> {
+        const candidates = [17894, ...Array.from({ length: 16 }, (_, i) => 17895 + i)];
+        for (const port of candidates) {
+            try {
+                const controller = new AbortController();
+                const timerId = setTimeout(() => controller.abort(), 800);
+                const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
+                    signal: controller.signal,
+                });
+                clearTimeout(timerId);
+                if (res.ok) {
+                    return { port };
+                }
+            } catch {
+                // not listening on this port, try next
+            }
+        }
+        return null;
     }
 
     async readRuntime(): Promise<RuntimeConfig | null> {
@@ -181,6 +231,21 @@ export class CoreManager {
     getPort(): number { return this.port; }
     getSessionToken(): string { return this.sessionToken; }
 
+    async refreshToken(): Promise<boolean> {
+        // runtime.json 에서 최신 토큰을 무조건 다시 읽어 in-memory 값과 동기화한다.
+        // - 토큰이 없던 상태(빈 문자열)였더라도 runtime.json 의 값이 있으면 채운다.
+        // - 이미 토큰이 있어도 Core 가 재시작되어 새 토큰을 발급했을 수 있으므로 갱신.
+        const runtime = await this.readRuntime();
+        if (runtime && runtime.session_token) {
+            const changed =
+                runtime.session_token !== this.sessionToken || runtime.port !== this.port;
+            this.port = runtime.port;
+            this.sessionToken = runtime.session_token;
+            return changed;
+        }
+        return false;
+    }
+
     private getCoreBinaryPath(): string {
         const platform = process.platform;
         const binaryName = platform === 'win32' ? 'recoder-core.exe' : 'recoder-core';
@@ -206,6 +271,6 @@ export class CoreManager {
     }
 
     private sleep(ms: number): Promise<void> {
-        return new Promise((resolve) => setTimeout(resolve, ms));
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 }

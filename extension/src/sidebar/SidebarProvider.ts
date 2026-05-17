@@ -53,19 +53,37 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         );
 
-        this._pollingService.start(
-            (health: CoreHealth) => {
-                this.postMessage('healthUpdate', health);
-                if (health.status === 'ok') { void this.refreshCost(); }
-            },
-            (err: Error) => {
-                this.postMessage('errorMessage', { message: err.message });
+        // ensureRunning을 먼저 끝낸 뒤 polling 을 시작한다.
+        // 그렇지 않으면 첫 polling 호출이 세션 토큰 채워지기 전에 발생해 401 이 나고
+        // 사이드바가 "연결 중…" 상태로 멈춘다.
+        void (async () => {
+            let coreOk = false;
+            try {
+                await this._coreManager.ensureRunning();
+                // ensureRunning 이후에도 토큰이 비어있을 수 있으니 강제 refresh.
+                await this._coreManager.refreshToken();
+                coreOk = true;
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                this.postMessage('errorMessage', { message: `Core 시작 실패: ${message}` });
+            } finally {
+                // ensureRunning 성공/실패와 무관하게 polling 시작 (실패 시에도 down 상태 표시)
+                this._pollingService.start(
+                    (health: CoreHealth) => {
+                        this.postMessage('healthUpdate', health);
+                        if (health.status === 'ok') { void this.refreshCost(); }
+                    },
+                    (err: Error) => {
+                        this.postMessage('errorMessage', { message: err.message });
+                    }
+                );
             }
-        );
-
-        void this._coreManager.ensureRunning().catch((err: Error) => {
-            this.postMessage('errorMessage', { message: `Core 시작 실패: ${err.message}` });
-        });
+            // Core 가 떴으면 진단을 자동으로 1회 돌려준다. (App.tsx 가 mount 시 요청을 보내지만
+            // 그 때 토큰이 아직 비어있을 수 있어 401 이 나는 경우가 있어 한 번 더 트리거.)
+            if (coreOk) {
+                void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+            }
+        })();
 
         this.postMessage('stateUpdate', this._state);
 
@@ -110,8 +128,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const { type, payload } = message;
 
         switch (type) {
-            case 'analyze': {
-                await this.handleAnalyze(payload as Partial<AnalyzeRequest>);
+            // ── Build mode (webview-src/components/BuildMode.tsx) ─────────────
+            case 'analyze':
+            case 'build.analyze': {
+                // BuildMode.tsx 가 보내는 형태: { error_log: string }
+                // 기존 형태: Partial<AnalyzeRequest>
+                const p = (payload ?? {}) as { error_log?: string } & Partial<AnalyzeRequest>;
+                if (p.error_log && !p.terminal_output) {
+                    p.terminal_output = p.error_log;
+                }
+                await this.handleAnalyze(p);
+                break;
+            }
+            case 'build.patch.approve': {
+                const { proposal_id } = (payload ?? {}) as { proposal_id: string };
+                await this.handleApprovePatch(proposal_id, true);
+                break;
+            }
+            case 'build.patch.reject': {
+                const { proposal_id } = (payload ?? {}) as { proposal_id: string };
+                await this.handleApprovePatch(proposal_id, false);
+                break;
+            }
+            case 'webview.paste.request': {
+                // BuildMode 가 클립보드 텍스트 요청. Extension 측에서 읽어 다시 전달.
+                try {
+                    const text = await vscode.env.clipboard.readText();
+                    this.postMessage('webview.paste.response', { text });
+                } catch (err) {
+                    this.postMessage('errorMessage', { message: String(err) });
+                }
+                break;
+            }
+            case 'webview.diagnostics.rerun': {
+                // DiagnosticsPanel.tsx 의 "다시 진단" 버튼.
+                void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                break;
+            }
+            case 'workbench.open':
+            case 'openWorkbench': {
+                await vscode.commands.executeCommand('recoder.openWorkbench');
                 break;
             }
             case 'approvePatch': {
@@ -226,18 +282,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'runDiagnostics': {
+                this._state.isLoading = true;
+                this.postMessage('stateUpdate', this._state);
+                let diagnostics: import('../types').DiagnosticsResult | null = null;
                 try {
-                    this._state.isLoading = true;
-                    this.postMessage('stateUpdate', this._state);
-                    const diagnostics = await this._apiClient.runDiagnostics();
-                    this._state.diagnostics = diagnostics;
-                    this._state.isLoading = false;
-                    this.postMessage('diagnosticsUpdate', diagnostics);
-                    this.postMessage('stateUpdate', this._state);
+                    diagnostics = await this._apiClient.runDiagnostics();
                 } catch (err) {
-                    this._state.isLoading = false;
-                    this.postMessage('errorMessage', { message: String(err) });
+                    // POST /api/diagnostics/run 실패 — 캐시된 결과(GET) 로 fallback.
+                    try { diagnostics = await this._apiClient.getDiagnostics(); } catch { /* ignore */ }
+                    if (!diagnostics) {
+                        this.postMessage('errorMessage', { message: `진단 실행 실패: ${String(err)}` });
+                    }
                 }
+                this._state.isLoading = false;
+                if (diagnostics) {
+                    this._state.diagnostics = diagnostics;
+                    this.postMessage('diagnosticsUpdate', diagnostics);
+                }
+                // 성공·실패와 무관하게 stateUpdate 을 보내 isLoading 스피너 해제.
+                this.postMessage('stateUpdate', this._state);
                 break;
             }
             case 'switchMode': {
@@ -282,9 +345,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleAnalyze(partialRequest: Partial<AnalyzeRequest>): Promise<void> {
+        this._state.isLoading = true;
+        this.postMessage('stateUpdate', this._state);
         try {
-            this._state.isLoading = true;
-            this.postMessage('stateUpdate', this._state);
             const context = await this.collectContext();
             const request: AnalyzeRequest = {
                 workspace_path: context.workspace_path ?? '',
@@ -295,9 +358,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (proposal) {
                 this._state.proposals.unshift(proposal);
                 this.postMessage('proposalReady', proposal);
+                // BuildMode.tsx 가 기다리는 별칭 메시지. 같은 payload.
+                this.postMessage('build.analysis.result', proposal);
+            } else {
+                // Core 가 null 을 돌려준 경우도 BuildMode 스피너를 풀어줘야 함.
+                const msg = '분석 결과를 받지 못했습니다. (Core 응답 비어있음 — 토큰/네트워크/LLM 키 확인)';
+                this.postMessage('errorMessage', { message: msg });
+                this.postMessage('build.analysis.error', msg);
             }
         } catch (err) {
-            this.postMessage('errorMessage', { message: String(err) });
+            const msg = err instanceof Error ? err.message : String(err);
+            this.postMessage('errorMessage', { message: msg });
+            this.postMessage('build.analysis.error', msg);
         } finally {
             this._state.isLoading = false;
             this.postMessage('stateUpdate', this._state);
@@ -313,11 +385,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 );
                 this.postMessage('patchResult', { status: result.status, proposalId });
                 this.postMessage('stateUpdate', this._state);
+                // BuildMode.tsx 가 기다리는 별칭 메시지.
+                this.postMessage(
+                    result.status === 'applied' ? 'build.patch.applied' : 'build.patch.rejected',
+                    { proposal_id: proposalId }
+                );
             } else {
-                this.postMessage('errorMessage', { message: '패치 승인 처리 실패' });
+                const msg = '패치 승인 처리 실패';
+                this.postMessage('errorMessage', { message: msg });
+                this.postMessage('build.analysis.error', msg);
             }
         } catch (err) {
-            this.postMessage('errorMessage', { message: String(err) });
+            const msg = err instanceof Error ? err.message : String(err);
+            this.postMessage('errorMessage', { message: msg });
+            this.postMessage('build.analysis.error', msg);
         }
     }
 

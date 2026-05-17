@@ -93,6 +93,8 @@ class AuditAction(str, Enum):
     # Policy
     POLICY_BUNDLE_UPDATED = "policy.bundle_updated"
     POLICY_EVALUATED = "policy.evaluated"
+    POLICY_VIOLATION = "policy.violation"
+    SECURITY_ESCALATION = "security.escalation"
     # Security
     UPLOAD_REJECTED = "upload.rejected"
     SUSPICIOUS_ACTIVITY = "security.suspicious_activity"
@@ -486,11 +488,5 @@ class ApprovalRequestResponse(BaseModel):
     policy_bundle_version: str
     created_at: datetime
     votes: list[ApprovalVoteResponse] = Field(default_factory=list)
-
-    model_config = {"from_attributes": True}
- int
-    votes: List[ApprovalVoteResponse] = []
-    expires_at: Optional[datetime] = None
-    created_at: datetime
 
     model_config = {"from_attributes": True}

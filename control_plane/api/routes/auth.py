@@ -13,6 +13,8 @@ Device Token은 OS Keychain에 저장한다 (Extension이 처리).
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import os
 import secrets
@@ -24,8 +26,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pydantic import BaseModel
+
 from control_plane.db.session import get_db
 from control_plane.models.schemas import (
+    AuditAction,
+    AuditEventCreate,
     DeviceEnrollRequest,
     DeviceTokenResponse,
     OIDCCallbackRequest,
@@ -33,6 +39,7 @@ from control_plane.models.schemas import (
     OIDCTokenResponse,
     OrgRole,
 )
+from control_plane.services.audit import AuditService
 from control_plane.services.identity import IdentityService
 
 logger = logging.getLogger(__name__)
@@ -51,9 +58,133 @@ _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 _GITHUB_USERINFO_URL = "https://api.github.com/user"
 _GITHUB_EMAIL_URL = "https://api.github.com/user/emails"
 
-# 임시 토큰 저장소 (개발용 — 운영에서는 Redis/DB로 교체)
-_TEMP_TOKEN_STORE: dict[str, dict[str, Any]] = {}
+# ---------------------------------------------------------------------------
+# 임시 저장소 (temp_token / OIDC state)
+#
+# 기본 백엔드: 프로세스 메모리 (개발 / 단일 인스턴스 운영용).
+# 운영에서 다중 인스턴스로 확장할 때는 환경변수 RECODER_AUTH_REDIS_URL 을
+# 설정하면 _RedisTempStore 가 자동으로 활성화되어 동일 인터페이스로 동작한다.
+# ---------------------------------------------------------------------------
+
 _TEMP_TOKEN_TTL_SECONDS = 300   # 5분
+_STATE_TTL_SECONDS = 600        # 10분
+
+
+class _MemoryTempStore:
+    """프로세스 메모리 기반 임시 저장소. 단일 인스턴스 운영 / 개발 환경 기본값."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, dict[str, Any]] = {}
+
+    def get(self, key: str) -> Optional[dict[str, Any]]:
+        meta = self._store.get(key)
+        if meta is None:
+            return None
+        exp = meta.get("expires_at")
+        if exp and exp < datetime.now(timezone.utc):
+            self._store.pop(key, None)
+            return None
+        return meta
+
+    def set(self, key: str, value: dict[str, Any]) -> None:
+        self._store[key] = value
+
+    def pop(self, key: str, default: Any = None) -> Optional[dict[str, Any]]:
+        return self._store.pop(key, default)
+
+    def purge_expired(self) -> None:
+        now = datetime.now(timezone.utc)
+        for k, meta in list(self._store.items()):
+            if meta.get("expires_at") and meta["expires_at"] < now:
+                self._store.pop(k, None)
+
+
+def _build_temp_store() -> _MemoryTempStore:
+    """
+    Redis URL 이 설정되어 있으면 _RedisTempStore 로 대체.
+
+    Redis 어댑터는 lazy import 로 처리하여 redis 패키지 미설치 환경에서도
+    메모리 fallback 으로 동작하도록 한다.
+    """
+    redis_url = os.environ.get("RECODER_AUTH_REDIS_URL")
+    if not redis_url:
+        return _MemoryTempStore()
+    try:
+        import redis  # type: ignore[import-not-found]
+    except ImportError:
+        logger.warning(
+            "RECODER_AUTH_REDIS_URL 이 설정됐지만 redis 패키지가 없어 메모리 fallback 사용. "
+            "pip install redis 후 재시도."
+        )
+        return _MemoryTempStore()
+
+    return _RedisTempStore(redis.Redis.from_url(redis_url))
+
+
+class _RedisTempStore:
+    """Redis 기반 임시 저장소 — TTL 은 Redis EXPIRE 가 자동 처리."""
+
+    def __init__(self, client: Any, prefix: str = "recoder:auth:") -> None:
+        self._client = client
+        self._prefix = prefix
+
+    def _key(self, key: str) -> str:
+        return f"{self._prefix}{key}"
+
+    def get(self, key: str) -> Optional[dict[str, Any]]:
+        import json
+        raw = self._client.get(self._key(key))
+        if raw is None:
+            return None
+        meta = json.loads(raw)
+        if "expires_at" in meta:
+            meta["expires_at"] = datetime.fromisoformat(meta["expires_at"])
+        return meta
+
+    def set(self, key: str, value: dict[str, Any]) -> None:
+        import json
+        ttl_sec = None
+        exp = value.get("expires_at")
+        if isinstance(exp, datetime):
+            ttl_sec = max(1, int((exp - datetime.now(timezone.utc)).total_seconds()))
+        # datetime 직렬화
+        payload = {**value, "expires_at": exp.isoformat() if isinstance(exp, datetime) else exp}
+        self._client.set(self._key(key), json.dumps(payload), ex=ttl_sec)
+
+    def pop(self, key: str, default: Any = None) -> Optional[dict[str, Any]]:
+        meta = self.get(key)
+        if meta is not None:
+            self._client.delete(self._key(key))
+            return meta
+        return default
+
+    def purge_expired(self) -> None:
+        # Redis EXPIRE 가 자동 만료. 별도 작업 불필요.
+        return
+
+
+_TEMP_TOKEN_STORE = _build_temp_store()
+_STATE_STORE = _build_temp_store()
+
+
+def _purge_expired_states() -> None:
+    _STATE_STORE.purge_expired()
+
+
+def _generate_pkce_pair() -> tuple[str, str]:
+    """
+    RFC 7636 PKCE S256.
+    code_verifier: 43~128자의 URL-safe random
+    code_challenge: BASE64URL(SHA256(code_verifier)) without padding
+    """
+    code_verifier = secrets.token_urlsafe(64)[:128]
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return code_verifier, code_challenge
+
+
+def _purge_expired_temp_tokens() -> None:
+    _TEMP_TOKEN_STORE.purge_expired()
 
 
 def _get_google_client_id() -> str:
@@ -93,8 +224,19 @@ async def oidc_login(provider: OIDCProvider, redirect_uri: str, request: Request
     """
     OIDC Authorization URL로 리다이렉트.
     Extension이 WebView에서 이 URL을 열어 로그인을 진행한다.
+
+    CSRF 방지를 위해 state 토큰을 발급하고 _STATE_STORE 에 저장한다.
+    callback 에서 동일한 state 가 전달되지 않으면 401 로 거부한다.
     """
+    _purge_expired_states()
     state = secrets.token_urlsafe(32)
+    code_verifier, code_challenge = _generate_pkce_pair()
+    _STATE_STORE.set(state, {
+        "provider": provider.value,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,  # callback 에서 token exchange 시 동봉
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=_STATE_TTL_SECONDS),
+    })
 
     if provider == OIDCProvider.GOOGLE:
         client_id = _get_google_client_id()
@@ -105,6 +247,9 @@ async def oidc_login(provider: OIDCProvider, redirect_uri: str, request: Request
             "scope": "openid email profile",
             "state": state,
             "access_type": "offline",
+            # PKCE S256 — Google OAuth 2.0 가 표준 지원
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
         }
         import urllib.parse
         url = _GOOGLE_AUTH_URL + "?" + urllib.parse.urlencode(params)
@@ -116,6 +261,9 @@ async def oidc_login(provider: OIDCProvider, redirect_uri: str, request: Request
             "redirect_uri": redirect_uri,
             "scope": "read:user user:email",
             "state": state,
+            # PKCE S256 — GitHub Apps OAuth 가 옵션 지원. 미지원 시 무시되며 동작에 영향 없음.
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
         }
         import urllib.parse
         url = _GITHUB_AUTH_URL + "?" + urllib.parse.urlencode(params)
@@ -139,14 +287,30 @@ async def oidc_callback(
     """
     OIDC code → access_token → userinfo → User 조회/생성 → temp_token 발급.
     temp_token은 5분 유효. Device enroll 때 사용.
+
+    CSRF 보호: login 단계에서 발급된 state 와 callback 의 state 가 동일해야 한다.
+    검증 후 state 는 즉시 폐기한다 (replay 차단).
     """
+    _purge_expired_states()
+    state_meta = _STATE_STORE.pop(request.state, None)
+    if state_meta is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired OIDC state (CSRF check failed)")
+    if state_meta.get("provider") != provider.value:
+        raise HTTPException(status_code=401, detail="OIDC state provider mismatch")
+    # redirect_uri 도 동일해야 한다 (open-redirect 방지)
+    if state_meta.get("redirect_uri") != request.redirect_uri:
+        raise HTTPException(status_code=401, detail="OIDC redirect_uri mismatch")
+
+    # PKCE — login 단계에서 발급한 code_verifier 를 token exchange 시 함께 전송한다.
+    code_verifier: Optional[str] = state_meta.get("code_verifier")
+
     if provider == OIDCProvider.GOOGLE:
         email, display_name, oidc_subject = await _exchange_google_code(
-            request.code, request.redirect_uri
+            request.code, request.redirect_uri, code_verifier=code_verifier,
         )
     elif provider == OIDCProvider.GITHUB:
         email, display_name, oidc_subject = await _exchange_github_code(
-            request.code, request.redirect_uri
+            request.code, request.redirect_uri, code_verifier=code_verifier,
         )
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
@@ -162,12 +326,12 @@ async def oidc_callback(
     # temp_token 발급 (5분 유효)
     temp_token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=_TEMP_TOKEN_TTL_SECONDS)
-    _TEMP_TOKEN_STORE[temp_token] = {
+    _TEMP_TOKEN_STORE.set(temp_token, {
         "user_id": user.user_id,
         "email": user.email,
         "display_name": user.display_name,
         "expires_at": expires_at,
-    }
+    })
 
     logger.info("OIDC login successful: %s (%s)", email, provider.value)
     return OIDCTokenResponse(
@@ -183,28 +347,43 @@ async def oidc_callback(
 # 3단계: Device 등록
 # ---------------------------------------------------------------------------
 
+
+class EnrollDeviceBody(BaseModel):
+    """
+    /auth/devices/enroll 의 요청 바디.
+
+    이전 버전은 temp_token / org_id 를 query parameter 로 받아 URL 에
+    민감 데이터가 노출됐다. 보안상 모두 request body 로 통일한다.
+    """
+    temp_token: str
+    org_id: str
+    enroll: DeviceEnrollRequest
+
+
 @router.post("/devices/enroll", response_model=DeviceTokenResponse)
 async def enroll_device(
-    temp_token: str,
-    org_id: str,
-    request: DeviceEnrollRequest,
+    body: EnrollDeviceBody,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> DeviceTokenResponse:
     """
     temp_token + org_id + DeviceEnrollRequest → DeviceToken.
 
     DeviceToken은 OS Keychain에 저장하고 이후 모든 API 요청에 사용한다.
+    설계서 §Q2-A1 의 "모든 Device 등록은 AuditLog 에 기록" 도 함께 충족한다.
     """
-    token_data = _TEMP_TOKEN_STORE.get(temp_token)
+    _purge_expired_temp_tokens()
+    token_data = _TEMP_TOKEN_STORE.get(body.temp_token)
     if token_data is None:
         raise HTTPException(status_code=401, detail="Invalid or expired temp_token")
 
     now = datetime.now(timezone.utc)
     if token_data["expires_at"] < now:
-        del _TEMP_TOKEN_STORE[temp_token]
+        _TEMP_TOKEN_STORE.pop(body.temp_token, None)
         raise HTTPException(status_code=401, detail="temp_token expired")
 
     user_id = token_data["user_id"]
+    org_id = body.org_id
 
     # RBAC: org의 멤버인지 확인 + 역할 조회
     from control_plane.services.org_service import OrgService
@@ -231,11 +410,32 @@ async def enroll_device(
         user_id=user_id,
         org_id=org_id,
         role=role,
-        request=request,
+        request=body.enroll,
     )
 
     # temp_token 즉시 무효화
-    del _TEMP_TOKEN_STORE[temp_token]
+    _TEMP_TOKEN_STORE.pop(body.temp_token, None)
+
+    # AuditLog: device.enrolled — 설계서 §Q2-A3 "Device 등록도 AuditLog 기록 100%"
+    try:
+        audit_svc = AuditService(db)
+        ip = request.client.host if request.client else None
+        await audit_svc.record(
+            org_id=org_id,
+            actor_user_id=user_id,
+            actor_device_id=token_response.device_id if hasattr(token_response, "device_id") else None,
+            event=AuditEventCreate(
+                action=AuditAction.DEVICE_ENROLLED,
+                resource_type="device",
+                resource_id=getattr(token_response, "device_id", None),
+                ip_address=ip,
+                occurred_at=datetime.now(timezone.utc),
+                extra={"role": role.value, "platform": body.enroll.platform if hasattr(body.enroll, "platform") else None},
+            ),
+        )
+    except Exception as exc:  # AuditLog 실패가 사용자 흐름을 깨지 않도록 fail-soft
+        logger.warning("device.enrolled audit log failed: %s", exc)
+
     return token_response
 
 
@@ -244,19 +444,22 @@ async def enroll_device(
 # ---------------------------------------------------------------------------
 
 async def _exchange_google_code(
-    code: str, redirect_uri: str
+    code: str, redirect_uri: str, code_verifier: Optional[str] = None,
 ) -> tuple[str, str, str]:
-    """Google OIDC code → (email, display_name, sub)"""
+    """Google OIDC code → (email, display_name, sub). PKCE 지원."""
+    payload = {
+        "client_id": _get_google_client_id(),
+        "client_secret": _get_google_client_secret(),
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    if code_verifier:
+        payload["code_verifier"] = code_verifier
     async with httpx.AsyncClient(timeout=10.0) as client:
         token_resp = await client.post(
             _GOOGLE_TOKEN_URL,
-            data={
-                "client_id": _get_google_client_id(),
-                "client_secret": _get_google_client_secret(),
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-            },
+            data=payload,
         )
         if token_resp.status_code != 200:
             raise HTTPException(status_code=400, detail="Google token exchange failed")
@@ -277,19 +480,22 @@ async def _exchange_google_code(
 
 
 async def _exchange_github_code(
-    code: str, redirect_uri: str
+    code: str, redirect_uri: str, code_verifier: Optional[str] = None,
 ) -> tuple[str, str, str]:
-    """GitHub OAuth code → (email, display_name, id)"""
+    """GitHub OAuth code → (email, display_name, id). PKCE 지원 (GitHub Apps OAuth)."""
+    payload = {
+        "client_id": _get_github_client_id(),
+        "client_secret": _get_github_client_secret(),
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    if code_verifier:
+        payload["code_verifier"] = code_verifier
     async with httpx.AsyncClient(timeout=10.0) as client:
         token_resp = await client.post(
             _GITHUB_TOKEN_URL,
             headers={"Accept": "application/json"},
-            data={
-                "client_id": _get_github_client_id(),
-                "client_secret": _get_github_client_secret(),
-                "code": code,
-                "redirect_uri": redirect_uri,
-            },
+            data=payload,
         )
         if token_resp.status_code != 200:
             raise HTTPException(status_code=400, detail="GitHub token exchange failed")

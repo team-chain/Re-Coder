@@ -1,6 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
-  <rect x="1" y="1" width="14" height="14" rx="2" fill="currentColor" opacity="0.15"/>
-  <path d="M4 5h8M4 8h5M4 11h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-  <circle cx="12" cy="11" r="2" fill="currentColor"/>
-  <path d="M11 11l1 1 2-2" stroke="white" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<!--
+  ReCoder Activity Bar Icon (사이드바 활성 표시줄용)
+  VSCode 가 activity bar 에서 monochrome stroke 으로 채움 → fill="none" + stroke="currentColor".
+  로고: 바깥 원형 화살표 두 갈래(=Re의 순환) + 가운데 R 자 + 코드 브래킷 < > 모티프.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+     fill="none" stroke="currentColor" stroke-width="1.4"
+     stroke-linecap="round" stroke-linejoin="round">
+  <!-- 바깥 원형 화살표 위쪽 (시계 반대방향, 좌상단 화살촉) -->
+  <path d="M20 7.5 A8 8 0 0 0 6.2 6.5" />
+  <polyline points="20,2.5 20,7.5 15,7.5" />
+
+  <!-- 바깥 원형 화살표 아래쪽 (시계방향 반대로 휘어드는, 우하단 화살촉) -->
+  <path d="M4 16.5 A8 8 0 0 0 17.8 17.5" />
+  <polyline points="4,21.5 4,16.5 9,16.5" />
+
+  <!-- 가운데 R 자 — sans-serif 단순형 -->
+  <path d="M9 8 L9 16" />
+  <path d="M9 8 L12.4 8 A2 2 0 0 1 12.4 12 L9 12" />
+  <path d="M11 12 L13.5 16" />
+
+  <!-- 코드 브래킷 ⟩ — "Coder" 의미 -->
+  <polyline points="15.5,10 17,11.5 15.5,13" />
 </svg>

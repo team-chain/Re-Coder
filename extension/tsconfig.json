@@ -17,5 +17,5 @@
     "types": ["node", "vscode"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "out", "webview-src"]
+  "exclude": ["node_modules", "out", "webview-src", "src/ui"]
 }

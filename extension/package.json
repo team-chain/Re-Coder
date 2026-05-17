@@ -74,6 +74,11 @@
         "command": "recoder.stopCore",
         "title": "ReCoder: Stop Core",
         "icon": "$(stop)"
+      },
+      {
+        "command": "recoder.openWorkbench",
+        "title": "ReCoder: Open Workbench",
+        "icon": "$(dashboard)"
       }
     ],
     "menus": {

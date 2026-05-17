@@ -19,8 +19,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 _CORE_DIR = Path(__file__).parent
+_ROOT_DIR = _CORE_DIR.parent
 if str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
 
 from singleton import CoreSingleton
 from api.middleware.auth import SessionTokenMiddleware
@@ -44,6 +47,20 @@ async def lifespan(app: FastAPI):
         if existing:
             app.state.port = existing.port
             app.state.session_token = existing.session_token
+        else:
+            # Orphan state — singleton lock exists but the previous owner
+            # already deleted runtime.json (e.g. the VSCode extension's
+            # cleanupStale() ran after the previous Core died, but the lock
+            # file was left behind). Force-take ownership so authenticated
+            # endpoints don't permanently 503 with
+            # "session token not initialised".
+            port = _bound_port if _bound_port else CoreSingleton.find_available_port()
+            token = secrets.token_urlsafe(32)
+            app.state.port = port
+            app.state.session_token = token
+            CoreSingleton.write_runtime(port=port, token=token, pid=pid)
+            CoreSingleton.set_file_permissions(CoreSingleton.RUNTIME_FILE)
+            app.state.started_at = datetime.now(timezone.utc)
         yield
         CoreSingleton.remove_window(pid)
         return

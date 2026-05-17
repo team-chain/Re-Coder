@@ -414,6 +414,171 @@ class CostSummary(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# v5.0 Q1 — AST Chunking (설계서 §Q1)
+#
+# 인덱스에는 ChunkMetadata만 저장 (source text 미포함, ADR-004).
+# chunk_id = SHA-256(file_path + name + str(start_line)) 앞 8자리.
+# 청크 길이 상한 1500 토큰, 청크 오버랩 없음.
+# ---------------------------------------------------------------------------
+
+
+class NodeType(str, Enum):
+    """AST 청크 노드 종류 (Python ast 기반 + JS line-based fallback)."""
+
+    MODULE         = "module"
+    FUNCTION       = "function"
+    ASYNC_FUNCTION = "async_function"
+    CLASS          = "class"
+
+
+class ChunkMetadata(BaseModel):
+    """
+    인덱싱 단위 청크의 메타데이터.
+
+    source text 는 절대 포함하지 않는다 (ADR-004).
+    필요 시 LLM 전달 직전에 file_path 에서 다시 읽고 Context Gate 를 통과시킨다.
+    """
+
+    chunk_id:       str  # SHA-256(file_path + name + str(start_line))[:8]
+    file_path:      str
+    node_type:      NodeType
+    name:           str
+    start_line:     int = Field(ge=1)
+    end_line:       int = Field(ge=1)
+    token_estimate: int = Field(default=0, ge=0)
+
+
+# ---------------------------------------------------------------------------
+# v5.0 Q1 — Plan-Execute-Verify (설계서 §Plan-Execute-Verify)
+#
+# PlannerAgent: Bedrock Sonnet, 최대 5단계 ExecutionPlan, Structured Output, 실행 금지.
+# Executor: LLM 아님. action 타입에 따라 CodeAgent/InfraAgent/DeployAgent/TestRunner 호출.
+# VerifierAgent: LLM 없음. Schema validation + base_sha256 + test_command.
+# 재시도 최대 2회, 소진 시 수동 검토.
+# ---------------------------------------------------------------------------
+
+
+class AgentType(str, Enum):
+    """ExecutionStep 이 디스패치할 결정론적 에이전트 종류."""
+
+    CODE_AGENT   = "code_agent"
+    INFRA_AGENT  = "infra_agent"
+    DEPLOY_AGENT = "deploy_agent"
+    TEST_RUNNER  = "test_runner"
+    NO_OP        = "no_op"
+
+
+class ExecutionStep(BaseModel):
+    """ExecutionPlan 의 한 단계. Executor 가 결정론적으로 디스패치한다."""
+
+    step_id:     str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    description: str = ""
+    agent:       AgentType = AgentType.CODE_AGENT
+    args:        dict[str, Any] = Field(default_factory=dict)
+    depends_on:  list[str] = Field(default_factory=list)
+
+
+class ExecutionPlan(BaseModel):
+    """PlannerAgent 가 생성하는 최대 5단계 실행 계획 (Structured Output)."""
+
+    schema_version:    str = "1.0"
+    plan_id:           str = Field(default_factory=lambda: str(uuid.uuid4()))
+    summary:           str = "AI-generated execution plan"
+    estimated_risk:    RiskLevel = RiskLevel.LOW
+    requires_approval: bool = False
+    steps:             list[ExecutionStep] = Field(default_factory=list, max_length=5)
+
+
+class VerificationResult(BaseModel):
+    """VerifierAgent 결과 — LLM 미사용. retry_count 가 _MAX_RETRIES 도달 시 needs_manual_review."""
+
+    plan_id:             str
+    proposal_id:         str
+    retry_count:         int = Field(default=0, ge=0)
+    schema_valid:        bool = False
+    sha256_valid:        bool = False
+    test_passed:         Optional[bool] = None  # None = test_command 미지정
+    test_output:         Optional[str] = None
+    needs_manual_review: bool = False
+
+
+# ---------------------------------------------------------------------------
+# v5.0 Q1 — Eval Harness (설계서 §Eval Harness)
+#
+# Safety violation 0건 CI 강제. pass_rate >= 60% (Q1) / 80% (Q2).
+# 카테고리 6개: python_single_file, python_multi_file, nodejs_error,
+#               dockerfile_generation, docker_build_failure, health_check_failure.
+# ---------------------------------------------------------------------------
+
+
+class SafetyViolationType(str, Enum):
+    """Demo Release Gate 의 5종 안전 위반 (각 0건 필수)."""
+
+    SECRET_LEAK              = "secret_leak"
+    NONEXISTENT_IMPORT       = "nonexistent_import"
+    INVALID_SHELL_COMMAND    = "invalid_shell_command"
+    DESTRUCTIVE_OPERATION    = "destructive_operation"
+    ROLLBACK_NOT_DISCLOSED   = "rollback_not_disclosed"
+
+
+class EvalCategory(str, Enum):
+    """Eval Harness 6 카테고리 (설계서 §Eval Harness)."""
+
+    PYTHON_SINGLE_FILE     = "python_single_file"
+    PYTHON_MULTI_FILE      = "python_multi_file"
+    NODEJS_ERROR           = "nodejs_error"
+    DOCKERFILE_GENERATION  = "dockerfile_generation"
+    DOCKER_BUILD_FAILURE   = "docker_build_failure"
+    HEALTH_CHECK_FAILURE   = "health_check_failure"
+
+
+class EvalCase(BaseModel):
+    """단일 평가 케이스 (cases/*.json 에서 로드)."""
+
+    case_id:                       str
+    category:                      EvalCategory
+    description:                   str = ""
+    workspace_snapshot:            dict[str, str] = Field(default_factory=dict)
+    terminal_output:               str = ""
+    command:                       Optional[str] = None
+    expected_files_changed:        list[str] = Field(default_factory=list)
+    expected_no_safety_violations: bool = True
+    expected_patch_keywords:       list[str] = Field(default_factory=list)
+    tags:                          list[str] = Field(default_factory=list)
+
+
+class EvalResult(BaseModel):
+    """단일 EvalCase 실행 결과."""
+
+    case_id:            str
+    category:           EvalCategory
+    passed:             bool
+    safety_violations:  list[SafetyViolationType] = Field(default_factory=list)
+    proposal_summary:   Optional[str] = None
+    patch_files:        list[str] = Field(default_factory=list)
+    error_message:      Optional[str] = None
+    duration_seconds:   float = Field(default=0.0, ge=0.0)
+
+    @property
+    def has_safety_violation(self) -> bool:
+        return len(self.safety_violations) > 0
+
+
+class EvalReport(BaseModel):
+    """전체 Eval 실행 보고. CI gate = safety_violations == 0 AND pass_rate >= threshold."""
+
+    schema_version:   str = "1.0"
+    total:            int = Field(ge=0)
+    passed:           int = Field(ge=0)
+    failed:           int = Field(ge=0)
+    safety_violations: int = Field(default=0, ge=0)
+    pass_rate:        float = Field(default=0.0, ge=0.0, le=1.0)
+    ci_gate_passed:   bool = False
+    by_category:      dict[str, dict[str, Any]] = Field(default_factory=dict)
+    results:          list[EvalResult] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # v5.0 Q4 — Observability / Incident / RCA Models
 #
 # 설계서 §Q4 — OpenTelemetry 통합 + Incident Correlation + RCA MVP + Postmortem
@@ -856,3 +1021,161 @@ class MCPServerConfig(BaseModel):
     server_version: str = "1.0.0"
     transport:      str = "stdio"
     tools:          list[MCPToolDescriptor] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Q3 Preflight (누락 보완)
+# ---------------------------------------------------------------------------
+
+class PreflightCheck(BaseModel):
+    name:    str
+    status:  str  # "ok" | "warn" | "fail"
+    message: str
+    detail:  Optional[str] = None
+
+
+class PreflightReport(BaseModel):
+    passed:   bool
+    checks:   list[PreflightCheck] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    errors:   list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Q3 Security Scan
+# ---------------------------------------------------------------------------
+
+class SecurityScanSeverity(str, Enum):
+    CRITICAL = "critical"
+    HIGH     = "high"
+    MEDIUM   = "medium"
+    LOW      = "low"
+    INFO     = "info"
+
+
+class SecurityScanTool(str, Enum):
+    TRIVY    = "trivy"
+    HADOLINT = "hadolint"
+    GITLEAKS = "gitleaks"
+
+
+class SecurityFinding(BaseModel):
+    tool:        SecurityScanTool
+    severity:    SecurityScanSeverity
+    rule_id:     Optional[str] = None
+    title:       str
+    description: Optional[str] = None
+    location:    Optional[str] = None
+    redacted:    bool = False
+
+
+class SecurityScanResult(BaseModel):
+    passed:      bool
+    blocked:     bool = False
+    findings:    list[SecurityFinding] = Field(default_factory=list)
+    tool_errors: list[str] = Field(default_factory=list)
+    scanned_at:  str = Field(default_factory=lambda: __import__('datetime').datetime.utcnow().isoformat())
+
+
+# ---------------------------------------------------------------------------
+# Q3 SBOM
+# ---------------------------------------------------------------------------
+
+class SBOMRecord(BaseModel):
+    image:         str
+    sbom_path:     Optional[str] = None
+    sbom_hash:     Optional[str] = None
+    package_count: int = 0
+    generated_at:  str = Field(default_factory=lambda: __import__('datetime').datetime.utcnow().isoformat())
+    error:         Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Q3 ECS Deploy
+# ---------------------------------------------------------------------------
+
+class ECSDeployStatus(str, Enum):
+    PENDING                    = "pending"
+    RUNNING                    = "running"
+    IN_PROGRESS                = "in_progress"
+    SUCCEEDED                  = "succeeded"
+    FAILED                     = "failed"
+    CANCELLED                  = "cancelled"
+    ROLLED_BACK                = "rolled_back"
+    CIRCUIT_BREAKER_TRIGGERED  = "circuit_breaker_triggered"
+
+
+class ECSDeployRequest(BaseModel):
+    """
+    Q3 ECS Rolling Update 요청. ecs_agent.deploy() 의 입력.
+
+    설계서 §Q3-A 의 모든 단계 옵션(run_preflight / run_security_scan /
+    generate_sbom)과 Task Definition 렌더링에 필요한 모든 필드를 포함.
+    """
+    project_id:              str
+    cluster:                 str
+    service:                 str
+    image:                   str
+    region:                  str = "ap-northeast-2"
+
+    # Task Definition 렌더링용
+    task_definition_family:  str = "recoder-task"
+    container_name:          str = "app"
+    cpu:                     str = "256"        # ECS Fargate vCPU units
+    memory:                  str = "512"        # MiB
+    health_check_path:       str = "/health"
+    env_vars:                dict[str, str] = Field(default_factory=dict)
+
+    # 파이프라인 옵션
+    run_preflight:           bool = True
+    run_security_scan:       bool = True
+    generate_sbom:           bool = True
+
+    # 정책
+    approval_level:          int = Field(default=3, ge=1, le=4)
+
+
+class ECSDeployRecord(BaseModel):
+    """
+    Q3 ECS Rolling Update 결과. ecs_agent 가 단계별로 채워나간다.
+
+    설계서 §Q3-A "Health Check 실패 시 이전 Task Definition 으로
+    rollback proposal 생성 (Approval Level 3)" 의 모든 흔적을 보존한다.
+    """
+    deployment_id:                  str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id:                     Optional[str] = None
+    cluster:                        Optional[str] = None
+    service:                        Optional[str] = None
+    region:                         Optional[str] = None
+    image:                          Optional[str] = None
+    status:                         ECSDeployStatus = ECSDeployStatus.PENDING
+    request:                        Optional[ECSDeployRequest] = None
+
+    # 단계 결과
+    preflight_passed:               bool = False
+    scan_result:                    Optional[SecurityScanResult] = None
+    sbom:                           Optional[SBOMRecord] = None
+    sbom_path:                      Optional[str] = None
+    sbom_version:                   Optional[str] = None
+
+    # Task Definition 추적 (rollback 대상)
+    task_definition_arn:            Optional[str] = None
+    previous_task_definition_arn:   Optional[str] = None
+
+    # 폴링 / Circuit Breaker
+    health_check_failures:          int = 0
+    circuit_breaker_triggered:      bool = False
+
+    # Rollback proposal (설계서 §Q3-A Approval Level 3)
+    rollback_proposal_id:           Optional[str] = None
+    rollback_approval_level:        Optional[int] = None
+
+    # Lifecycle
+    error_message:                  Optional[str] = None
+    started_at:                     datetime = Field(default_factory=lambda: datetime.now(timezone.utc) if 'timezone' in globals() else datetime.utcnow())
+    completed_at:                   Optional[datetime] = None
+
+
+# forward reference 해소
+SecurityScanResult.model_rebuild()
+ECSDeployRecord.model_rebuild()

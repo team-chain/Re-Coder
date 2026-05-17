@@ -1,9 +1,29 @@
 """
-rollback_pr_agent.py — GitOps rollback PR 자동 생성 에이전트 (ADR-005)
+core/rollback_pr_agent.py — **Helm-values flow** rollback PR 생성기 (ADR-005)
+
+ReCoder 에는 두 개의 rollback PR 변종이 존재한다. 호출자는 시나리오에 맞는 쪽을
+선택해야 한다.
+
+  ┌─────────────────────────────────┬─────────────────────────────────────┐
+  │ 파일                             │ 시나리오                             │
+  ├─────────────────────────────────┼─────────────────────────────────────┤
+  │ core/rollback_pr_agent.py       │ Helm values.yaml image.tag 를         │
+  │ (이 파일)                        │ last_healthy_image_tag 로 되돌리는    │
+  │                                  │ Helm-managed GitOps 환경 전용.        │
+  │                                  │ ArgoCD Application 이 Helm chart      │
+  │                                  │ values 를 watch 한다고 가정한다.      │
+  ├─────────────────────────────────┼─────────────────────────────────────┤
+  │ core/agents/rollback_pr_agent.py │ revert-commit flow. 임의 commit SHA  │
+  │                                  │ 를 GitHub API 로 revert 하고 PR 을    │
+  │                                  │ 연다. Helm 비사용 또는 일반 Git 기반   │
+  │                                  │ GitOps 환경에서 사용.                 │
+  └─────────────────────────────────┴─────────────────────────────────────┘
+
+두 변종 모두 ADR-005 의 production rollback 정책을 충족한다.
 
 ADR-005 rollback 정책:
-  - staging/dev : ArgoCD API rollback (gitops_agent.rollback_staging)
-  - production  : Git revert PR 생성 (이 파일)
+  - staging/dev : ArgoCD API rollback (gitops_agent.rollback_app, env="staging")
+  - production  : Git revert PR 생성 (이 파일 또는 agents/rollback_pr_agent)
   - Severity 1  : emergency rollback 허용 + 30분 이내 Git reconciliation PR 필수
 
 입력:
@@ -18,7 +38,7 @@ ADR-005 rollback 정책:
   values.yaml image.tag → last_healthy_image_tag 로 변경
   PR title: "rollback: restore {app} to {previous_image_tag}"
   PR body: incident summary, RCA candidate, approval link, rollback risk
-  AuditLog rollback_pr_created 기록
+  AuditLog rollback_pr_created 기록 (~/.recoder/audit/rollback_pr_{incident}.json)
 
 환경변수:
   GITHUB_TOKEN  — GitHub PAT (repo 권한)
@@ -253,6 +273,12 @@ def _build_pr_body(cfg: RollbackPRConfig) -> str:
         "- 이 PR 머지 시 ArgoCD 자동 sync → 이전 이미지로 재배포됩니다.",
         "- 머지 전 staging 에서 `last_healthy_image_tag` 동작 확인 권장.",
     ]
+    # f-string 식 부분에 backslash 가 들어가지 못하므로 외부에서 문자열을 미리 구성한다.
+    rollback_risk_block = "\n".join(rollback_risk_lines)
+    emergency_checkbox = (
+        "- [ ] Emergency: ADR-005 §Sev-1 30분 이내 Git reconciliation 진행 예정"
+        if cfg.emergency else ""
+    )
 
     return f"""## 🔄 Rollback PR — {cfg.incident_id}
 
@@ -301,14 +327,14 @@ def _build_pr_body(cfg: RollbackPRConfig) -> str:
 
 ### Rollback Risk
 
-{"".join(f"{line}\\n" for line in rollback_risk_lines)}
+{rollback_risk_block}
 
 ---
 
 ### Approval
 
 - [ ] SRE / Engineering Lead 승인
-{"- [ ] Emergency: ADR-005 §Sev-1 30분 이내 Git reconciliation 진행 예정" if cfg.emergency else ""}
+{emergency_checkbox}
 
 ---
 

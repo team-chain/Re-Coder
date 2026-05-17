@@ -15,6 +15,7 @@ import { CoreManager } from './core/CoreManager';
 import { ApiClient } from './core/ApiClient';
 import { PollingService } from './core/PollingService';
 import { SidebarProvider } from './sidebar/SidebarProvider';
+import { WorkbenchPanel } from './sidebar/WorkbenchPanel';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
 
@@ -187,6 +188,21 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
+    // ── Command: Open Workbench ─────────────────────────────────────────────
+    // ReCoder Workbench (별도 WebviewPanel) — 사이드바와는 다른 큰 대시보드.
+    // 사이드바의 "Workbench 열기" 버튼이나 명령 팔레트에서 호출.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.openWorkbench', async () => {
+            await ensureCoreRunning(coreManager, sidebarProvider);
+            WorkbenchPanel.createOrShow(
+                context.extensionUri,
+                apiClient,
+                coreManager,
+                pollingService,
+            );
+        })
+    );
+
     // ── Terminal data listener ──────────────────────────────────────────────
     // onDidWriteTerminalData is a VSCode proposed API (terminalDataWriteEvent)
     // and cannot be used without --enable-proposed-api in production builds.
@@ -244,21 +260,6 @@ function buildProjectFilesSummary(workspacePath: string): string {
 }
 
 function getDefaultRunCommand(workspacePath?: string): string {
-    if (!workspacePath) {
-        return '';
-    }
-    if (fs.existsSync(path.join(workspacePath, 'requirements.txt'))) {
-        return 'python main.py';
-    }
-    if (fs.existsSync(path.join(workspacePath, 'package.json'))) {
-        return 'npm start';
-    }
-    if (fs.existsSync(path.join(workspacePath, 'go.mod'))) {
-        return 'go run .';
-    }
-    return '';
-}
-unCommand(workspacePath?: string): string {
     if (!workspacePath) {
         return '';
     }

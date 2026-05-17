@@ -55,6 +55,14 @@ exporters:
   loki:
     endpoint: "http://loki:3100/loki/api/v1/push"
 
+  # Tempo trace exporter — 설계서 §Q4 후반 항목.
+  # 환경에 Tempo 가 준비되면 아래 주석을 풀고 traces 파이프라인의
+  # exporters 를 [otlp/tempo] 또는 [otlp/tempo, debug] 로 교체한다.
+  # otlp/tempo:
+  #   endpoint: "tempo:4317"
+  #   tls:
+  #     insecure: true
+
   debug:
     verbosity: basic
 
@@ -77,4 +85,5 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resourcedetection, attributes/recoder, batch]
+      # TODO(Q4-후반): debug → otlp/tempo 로 교체 (Tempo 엔드포인트 준비 후)
       exporters: [debug]

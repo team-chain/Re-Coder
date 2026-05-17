@@ -1,9 +1,15 @@
 /**
- * Sidebar Webview Provider (설계서 v6.4 §12)
- * 3-Mode 탭 구조: Build | Ship | Operate
- * Extension ↔ Webview 메시지 브릿지
+ * Sidebar Webview Provider (설계서 v6.4 §12) — LEGACY, DEPRECATED
  *
- * 2026-05-08 갱신 (P0-7 / P0-8 / P0-13):
+ * ⚠️ 이 파일은 더 이상 사용되지 않습니다.
+ * 실제 진입점: extension/src/sidebar/SidebarProvider.ts (v6.4 골격, 더 간결한 구현).
+ * extension/src/extension.ts 는 sidebar/SidebarProvider 만 import 합니다.
+ *
+ * 이 파일은 P0-7/P0-8/P0-13 시기의 레거시 구현으로, Workbench 연동 / Git 폴링 /
+ * 다중 타이머 등 부가 기능을 포함했습니다. 단계적 제거 예정 (잔여 권고 §4.2).
+ * 새 UI 기능은 sidebar/SidebarProvider 와 webview-src/ 에서 추가하십시오.
+ *
+ * 원본 변경 이력 (2026-05-08 P0-7 / P0-8 / P0-13):
  * - server.py 응답 형식이 PatchProposal/InfraFileProposal 통째 반환으로 통일됨에 따라
  *   webview 의 파싱을 어댑터 한 군데로 정리.
  * - infra_approved 응답에 plan 이 함께 오므로 _currentDeployPlan 자동 세팅.

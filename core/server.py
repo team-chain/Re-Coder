@@ -1,12 +1,22 @@
 """
-server.py — ReCoder v6.4 Local Core FastAPI 서버
+server.py — ReCoder v6.4 Local Core FastAPI 서버 (LEGACY MONOLITH — DEPRECATED)
 
-설계서 §4 (Local Core) / §5 (보안) / §6 (Lifecycle) / §10~17 (Agents) 결선체.
+⚠️ 이 모듈은 더 이상 진입점(entry point)이 아닙니다.
 
-본 모듈은 FastAPI 라우팅·미들웨어·요청-응답 모델만 책임지며,
-실제 비즈니스 로직은 모두 core/* 의 agent/registry 모듈에 위임한다.
+현재 실제 entry point: core/main.py
+실제 라우터 위치: core/api/routes/*.py (health · analyze · deploy · ecs · ops ·
+                  session · policy · gitops · incident)
 
-주요 변경 (2026-05-08, P0-1~P0-13 적용):
+본 파일에 정의된 60여 개의 @app.* 라우트는 main.py 가 import 하지 않으며,
+프로젝트 내 어떤 코드도 server.py 를 직접 import 하지 않습니다 (확인됨,
+2026-05-17). 따라서 본 파일은 backward-compat 또는 점진 마이그레이션 참고용
+스냅샷으로만 보존됩니다.
+
+설계서 §4 / §5 / §6 / §10~17 결선체로 작성된 원본이지만, P0-1~P0-13 적용 이후
+모듈식 api/routes/* 구조로 이전됐습니다. 새 라우트 추가는 api/routes/ 에서
+하고, server.py 는 수정하지 마십시오. 단계적 제거 예정 (잔여 권고 §4.1).
+
+레거시 변경 이력 (2026-05-08, P0-1~P0-13 적용):
 - Mock 응답 전면 제거 → analyzer/code_agent/infra_agent/local_deploy_agent 실배선
 - /api/deploy/status, /api/security/scan, /api/ready 신규
 - /api/cost 를 SessionLogger SQLite 누적치와 결선

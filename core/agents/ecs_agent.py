@@ -16,6 +16,7 @@ Local Core — Q3: ECS Rolling Update Agent
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -101,11 +102,11 @@ class ECSAgent:
             await self._step_update_service(request, task_def_arn)
 
             # 6. 배포 상태 폴링 + Circuit Breaker
-            success, failure_count = await self._step_poll_deployment(request, record)
+            success, failure_count, breaker_triggered = await self._step_poll_deployment(request, record)
 
             if not success:
                 record.health_check_failures = failure_count
-                if failure_count / max(_MAX_POLL_ATTEMPTS, 1) >= _CIRCUIT_BREAKER_THRESHOLD:
+                if breaker_triggered:
                     record.circuit_breaker_triggered = True
                     record.status = ECSDeployStatus.CIRCUIT_BREAKER_TRIGGERED
                 else:
@@ -113,6 +114,7 @@ class ECSAgent:
 
                 # 7. Rollback proposal 생성 (Approval Level 3)
                 record.rollback_proposal_id = await self._create_rollback_proposal(request, record)
+                record.rollback_approval_level = 3  # 설계서 §Q3-A "Approval Level 3"
                 record.error_message = "배포 Health Check 실패 — rollback proposal 생성됨"
                 return record
 
@@ -204,15 +206,27 @@ class ECSAgent:
 
     async def _step_poll_deployment(
         self, req: ECSDeployRequest, rec: ECSDeployRecord
-    ) -> tuple[bool, int]:
+    ) -> tuple[bool, int, bool]:
         """
         CloudWatch 배포 상태 폴링.
-        Circuit Breaker: 5분 내 Health Check 실패율 50% 초과 시 자동 중단.
+
+        Circuit Breaker (설계서 §Q3-A): "최근 5분 내 Health Check 실패 비율 50% 초과 시
+        배포 자동 중단". sliding window 로 정확하게 구현 — 단순히 처음 5분만 보는 게 아니라
+        매 폴링 시점 기준 이전 5분 구간을 평가한다.
+
+        반환: (success, 총 failure_count, circuit_breaker_triggered)
         """
         import boto3
+        try:
+            from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
+        except Exception:  # noqa: BLE001
+            BotoCoreError = ClientError = Exception  # type: ignore
+
         ecs = boto3.client("ecs", region_name=req.region)
 
-        failure_count = 0
+        # sliding window: (timestamp, observation) — observation: "pass" | "fail"
+        window: collections.deque[tuple[datetime, str]] = collections.deque()
+        total_failures = 0
         start_time = datetime.now(timezone.utc)
 
         for attempt in range(_MAX_POLL_ATTEMPTS):
@@ -220,49 +234,91 @@ class ECSAgent:
 
             try:
                 resp = ecs.describe_services(cluster=req.cluster, services=[req.service])
-                svc = resp.get("services", [{}])[0]
-                deployments = svc.get("deployments", [])
+            except (BotoCoreError, ClientError) as exc:  # noqa: BLE001
+                logger.warning("describe_services failed (attempt %d): %s", attempt + 1, exc)
+                # 일시적인 AWS 오류는 fail 1건으로만 기록하고 계속 시도
+                window.append((datetime.now(timezone.utc), "fail"))
+                total_failures += 1
+                self._trim_window(window, _CIRCUIT_BREAKER_WINDOW)
+                if self._breaker_trips(window):
+                    logger.warning("Circuit breaker triggered (AWS error rate)")
+                    return False, total_failures, True
+                continue
+            svc = resp.get("services", [{}])[0]
+            deployments = svc.get("deployments", [])
 
-                # 현재 배포 중인 PRIMARY 배포 확인
-                primary = next((d for d in deployments if d.get("status") == "PRIMARY"), None)
-                if primary is None:
-                    continue
+            # 현재 배포 중인 PRIMARY 배포 확인
+            primary = next((d for d in deployments if d.get("status") == "PRIMARY"), None)
+            if primary is None:
+                continue
 
-                running = primary.get("runningCount", 0)
-                desired = primary.get("desiredCount", 0)
-                failed_tasks = primary.get("failedTasks", 0)
-                rollout_state = primary.get("rolloutState", "")
+            running = primary.get("runningCount", 0)
+            desired = primary.get("desiredCount", 0)
+            failed_tasks = primary.get("failedTasks", 0)
+            rollout_state = primary.get("rolloutState", "")
 
-                logger.debug(
-                    "Poll %d/%d: running=%d desired=%d failed=%d state=%s",
-                    attempt + 1, _MAX_POLL_ATTEMPTS, running, desired, failed_tasks, rollout_state,
+            logger.debug(
+                "Poll %d/%d: running=%d desired=%d failed=%d state=%s",
+                attempt + 1, _MAX_POLL_ATTEMPTS, running, desired, failed_tasks, rollout_state,
+            )
+
+            now = datetime.now(timezone.utc)
+            if failed_tasks > 0:
+                # 매 폴링 사이클 사이의 신규 실패만 sliding window 에 기록
+                for _ in range(failed_tasks):
+                    window.append((now, "fail"))
+                total_failures += failed_tasks
+            else:
+                window.append((now, "pass"))
+
+            self._trim_window(window, _CIRCUIT_BREAKER_WINDOW)
+            if self._breaker_trips(window):
+                logger.warning(
+                    "Circuit breaker triggered: fail_rate=%.1f%% (window=%ds)",
+                    self._failure_rate(window) * 100, _CIRCUIT_BREAKER_WINDOW,
                 )
+                return False, total_failures, True
 
-                if failed_tasks > 0:
-                    failure_count += failed_tasks
+            # 성공 판단
+            if rollout_state == "COMPLETED" and running >= desired and desired > 0:
+                return True, total_failures, False
 
-                # Circuit Breaker 체크
-                elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
-                if elapsed <= _CIRCUIT_BREAKER_WINDOW:
-                    fail_rate = failure_count / max(attempt + 1, 1)
-                    if fail_rate >= _CIRCUIT_BREAKER_THRESHOLD:
-                        logger.warning("Circuit breaker triggered: fail_rate=%.1f%%", fail_rate * 100)
-                        return False, failure_count
-
-                # 성공 판단
-                if rollout_state == "COMPLETED" and running >= desired and desired > 0:
-                    return True, failure_count
-
-                # 명시적 실패
-                if rollout_state == "FAILED":
-                    return False, failure_count
-
-            except Exception as exc:
-                logger.warning("Polling error (attempt %d): %s", attempt + 1, exc)
+            # 명시적 실패
+            if rollout_state == "FAILED":
+                return False, total_failures, False
 
         # 폴링 시간 초과 → 실패 처리
         logger.warning("Deployment polling timed out after %d attempts", _MAX_POLL_ATTEMPTS)
-        return False, failure_count
+        return False, total_failures, False
+
+    # ------------------------------------------------------------------
+    # Circuit Breaker sliding window helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _trim_window(
+        window: "collections.deque[tuple[datetime, str]]",
+        window_seconds: int,
+    ) -> None:
+        """현재 시각 기준 window_seconds 보다 오래된 observation 을 제거."""
+        cutoff = datetime.now(timezone.utc).timestamp() - window_seconds
+        while window and window[0][0].timestamp() < cutoff:
+            window.popleft()
+
+    @staticmethod
+    def _failure_rate(window: "collections.deque[tuple[datetime, str]]") -> float:
+        if not window:
+            return 0.0
+        fails = sum(1 for _, kind in window if kind == "fail")
+        return fails / len(window)
+
+    @classmethod
+    def _breaker_trips(cls, window: "collections.deque[tuple[datetime, str]]") -> bool:
+        """sliding window 의 실패율이 임계값 초과 + 의미 있는 표본수일 때만 트리거."""
+        # 표본 수가 너무 적으면 (1~2개) 단발성 오류로 차단되는 걸 막는다.
+        if len(window) < 3:
+            return False
+        return cls._failure_rate(window) >= _CIRCUIT_BREAKER_THRESHOLD
 
     async def _create_rollback_proposal(
         self, req: ECSDeployRequest, rec: ECSDeployRecord

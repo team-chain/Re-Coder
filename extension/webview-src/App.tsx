@@ -236,15 +236,52 @@ const App: React.FC = () => {
         onChange={setCurrentMode}
       />
 
-      {/* Diagnostics toggle */}
+      {/* Diagnostics toggle + Workbench open */}
       <div
         style={{
-          padding: "2px 8px",
+          padding: "4px 8px",
           borderBottom: "1px solid var(--vscode-panel-border, #222)",
           display: "flex",
-          justifyContent: "flex-end",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
         }}
       >
+        <button
+          onClick={() => postMessage("workbench.open")}
+          title="ReCoder Workbench 열기 (별도 탭)"
+          style={{
+            background: "var(--vscode-button-background, #0e639c)",
+            color: "var(--vscode-button-foreground, #fff)",
+            border: "none",
+            borderRadius: 4,
+            fontSize: 11,
+            fontWeight: 600,
+            cursor: "pointer",
+            padding: "4px 10px",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.8}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="3" y="3" width="7" height="9" />
+            <rect x="14" y="3" width="7" height="5" />
+            <rect x="14" y="12" width="7" height="9" />
+            <rect x="3" y="16" width="7" height="5" />
+          </svg>
+          Workbench 열기
+        </button>
         <button
           onClick={() => {
             setShowDiagnostics((v) => !v);

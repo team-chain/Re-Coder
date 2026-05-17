@@ -1,9 +1,25 @@
 """
-Local Core — Q4: Git Revert PR 자동 생성 에이전트
+core/agents/rollback_pr_agent.py — **revert-commit flow** rollback PR 생성기 (ADR-005)
+
+ReCoder 에는 두 개의 rollback PR 변종이 존재한다.
+
+  ┌─────────────────────────────────┬─────────────────────────────────────┐
+  │ 파일                             │ 시나리오                             │
+  ├─────────────────────────────────┼─────────────────────────────────────┤
+  │ core/rollback_pr_agent.py        │ Helm-values flow. ArgoCD 가          │
+  │                                  │ Helm chart values 를 watch 하는 환경. │
+  ├─────────────────────────────────┼─────────────────────────────────────┤
+  │ core/agents/rollback_pr_agent.py │ **revert-commit flow** (이 파일).    │
+  │                                  │ 임의 commit SHA 를 GitHub API 로      │
+  │                                  │ revert 하고 PR 을 연다. Helm 비사용    │
+  │                                  │ 또는 일반 Git 기반 GitOps 환경.        │
+  └─────────────────────────────────┴─────────────────────────────────────┘
+
+두 변종 모두 ADR-005 의 production rollback 정책을 충족한다.
 
 설계서 ADR-005:
 - 프로덕션 rollback 기본 경로 = Git revert PR
-- ArgoCD 직접 rollback은 Severity 1만 허용 (ADR-006)
+- ArgoCD 직접 rollback은 Severity 1만 허용 (gitops_agent.rollback_app() 이 강제)
 - rollback PR은 Level 3 승인 필요 (Multi-Approver)
 
 동작 흐름:

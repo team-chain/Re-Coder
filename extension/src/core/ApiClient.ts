@@ -21,10 +21,17 @@ export class ApiClient {
     private async request<T>(
         method: string,
         path: string,
-        body?: unknown
+        body?: unknown,
+        _retried = false
     ): Promise<ApiResponse<T>> {
+        // 토큰이 비어있으면 runtime.json 에서 즉시 refresh.
+        // ensureRunning() 완료 전 PollingService 가 호출하는 race condition 방지.
+        let token = this.coreManager.getSessionToken();
+        if (!token) {
+            try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
+            token = this.coreManager.getSessionToken();
+        }
         const port = this.coreManager.getPort();
-        const token = this.coreManager.getSessionToken();
         const url = `http://127.0.0.1:${port}${path}`;
 
         const headers: Record<string, string> = {
@@ -47,6 +54,13 @@ export class ApiClient {
             const timestamp = new Date().toISOString();
 
             if (!res.ok) {
+                // 401 발생 시 한 번은 무조건 토큰 재로드 후 재시도.
+                // refreshToken 의 boolean 반환과 무관하게 retry (refresh 가 같은 토큰을
+                // 다시 읽어와도 미들웨어가 다른 이유로 401을 냈을 가능성 차단).
+                if (res.status === 401 && !_retried) {
+                    try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
+                    return this.request<T>(method, path, body, true);
+                }
                 let errorText = '';
                 try { errorText = await res.text(); } catch { errorText = `HTTP ${res.status}`; }
                 return { success: false, error: errorText || `HTTP ${res.status}`, timestamp };

@@ -12,7 +12,7 @@ from starlette.responses import JSONResponse
 
 
 # Paths that do NOT require authentication
-_EXEMPT_PATHS = {"/api/health"}
+_EXEMPT_PATHS = {"/api/health", "/docs", "/redoc", "/openapi.json", "/favicon.ico"}
 
 
 class SessionTokenMiddleware(BaseHTTPMiddleware):
