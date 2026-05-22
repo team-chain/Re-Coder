@@ -37,7 +37,6 @@ policy_cache.py             AuditLog (hash chain)
 
 ---
 
-<<<<<<< HEAD
 ## 구현된 모듈 목록
 
 ### Local Core (`core/`)
@@ -199,7 +198,9 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 PROMETHEUS_GATEWAY_URL=http://localhost:9091
 LOKI_URL=http://localhost:3100
 ```
-=======
+
+---
+
 ## 7. 저장 구조
 
 ```
@@ -300,4 +301,3 @@ core/recoder.spec (신규)
 - `POST /api/deploy/rollback` → `{ plan_id }` → `{ status, message, logs[] }`
 
 PROGRESS.md와 HANDOFF.md는 양쪽 모두 수정 가능. 작업 완료 시 해당 행 ✅로 변경.
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27

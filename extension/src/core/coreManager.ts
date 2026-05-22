@@ -1,10 +1,34 @@
-<<<<<<< HEAD
+/**
+ * Local Core 생명주기 관리 (설계서 v6.4 §6)
+ * - Lazy Spawn, Singleton, 좀비 프로세스 방지
+ * - runtime.json 으로 포트/토큰 공유
+ * - 사용자 수동 실행(python core/main.py) 자동 감지 (probeRunningCore)
+ * - graceful shutdown: SIGTERM → 5초 대기 → SIGKILL 폴백
+ * - 개발 모드(분기): core/main.py 를 python 으로 실행, Windows python 탐색
+ */
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as cp from 'child_process';
 import { ChildProcess, spawn, execSync } from 'child_process';
-import { CoreHealth, RuntimeConfig } from '../types';
+import { CoreHealth } from '../types';
+import { CoreClient } from '../api/coreClient';
+
+export interface RuntimeConfig {
+    port: number;
+    session_token: string;
+    started_at?: string;
+    pid?: number;
+}
+
+interface SpawnSpec {
+    command: string;
+    args: string[];
+    cwd?: string;
+}
+
+const SHUTDOWN_GRACE_MS = 5000;
 
 export class CoreManager {
     private static instance: CoreManager;
@@ -14,8 +38,16 @@ export class CoreManager {
     private isSpawning: boolean = false;
     private extensionContext: vscode.ExtensionContext;
 
-    private constructor(context: vscode.ExtensionContext) {
+    // CoreClient 인스턴스 (외부에서 사용)
+    private _client: CoreClient | null = null;
+    private readonly _runtimePath: string;
+    private readonly _lockPath: string;
+
+    constructor(context: vscode.ExtensionContext) {
         this.extensionContext = context;
+        const home = os.homedir();
+        this._runtimePath = path.join(home, '.recoder', 'runtime.json');
+        this._lockPath = path.join(home, '.recoder', 'core.lock');
     }
 
     static getInstance(context?: vscode.ExtensionContext): CoreManager {
@@ -28,7 +60,20 @@ export class CoreManager {
         return CoreManager.instance;
     }
 
-    async ensureRunning(): Promise<void> {
+    /** CoreClient 접근자 — Sidebar/Workbench 가 사용 */
+    get client(): CoreClient {
+        if (!this._client) {
+            // 가능한 경우 즉시 생성 (port/token 이 이미 있으면)
+            if (this.port) {
+                this._client = new CoreClient(this.port, this.sessionToken);
+                return this._client;
+            }
+            throw new Error('Core가 실행 중이 아닙니다.');
+        }
+        return this._client;
+    }
+
+    async ensureRunning(): Promise<CoreClient> {
         // 1) 정상 경로 — runtime.json + healthCheck.
         const runtime = await this.readRuntime();
         if (runtime) {
@@ -36,7 +81,8 @@ export class CoreManager {
             this.sessionToken = runtime.session_token;
             const health = await this.healthCheck();
             if (health && health.status !== 'down') {
-                return;
+                this._client = new CoreClient(this.port, this.sessionToken);
+                return this._client;
             }
         }
 
@@ -53,24 +99,29 @@ export class CoreManager {
                 const rt = await this.readRuntime();
                 if (rt && rt.port === this.port && rt.session_token) {
                     this.sessionToken = rt.session_token;
-                    return;
+                    this._client = new CoreClient(this.port, this.sessionToken);
+                    return this._client;
                 }
                 await this.sleep(200);
             }
             // 토큰을 못 받아도 일단 connect 는 가능 — 인증 필요 호출이 401/503 일 뿐.
             // 호출 측에서 refreshToken 으로 재시도.
-            return;
+            this._client = new CoreClient(this.port, this.sessionToken);
+            return this._client;
         }
 
         if (this.isSpawning) {
             await this.waitForReady();
-            return;
+            this._client = new CoreClient(this.port, this.sessionToken);
+            return this._client;
         }
 
         // 3) 그래도 못 찾으면 직접 spawn 시도. 번들된 바이너리가 없는 dev 환경에선
-        //    여기서 throw 한다. 그 경우 사용자가 `python core/main.py` 로 띄워야 함.
+        //    core/main.py 를 python 으로 실행한다.
         await this.cleanupStale();
         await this.spawnCore();
+        this._client = new CoreClient(this.port, this.sessionToken);
+        return this._client;
     }
 
     /**
@@ -109,21 +160,35 @@ export class CoreManager {
         }
     }
 
+    private _tryLoadRuntime(): RuntimeConfig | null {
+        try {
+            if (!fs.existsSync(this._runtimePath)) return null;
+            return JSON.parse(fs.readFileSync(this._runtimePath, 'utf-8')) as RuntimeConfig;
+        } catch { return null; }
+    }
+
     private async spawnCore(): Promise<void> {
         this.isSpawning = true;
         try {
-            const binaryPath = this.getCoreBinaryPath();
-            if (!binaryPath) {
-                throw new Error('ReCoder Core 바이너리를 찾을 수 없습니다. 설치를 확인해주세요.');
+            const spec = this._findCoreSpec();
+            if (!spec) {
+                throw new Error('ReCoder Core 바이너리/소스를 찾을 수 없습니다. (bin/recoder-core 또는 core/main.py)');
             }
 
-            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
-            const args = ['--port', String(this.port), '--workspace', workspacePath];
+            vscode.window.showInformationMessage('ReCoder Core를 시작합니다...');
 
-            this.coreProcess = spawn(binaryPath, args, {
+            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
+            // 바이너리 모드일 때만 port/workspace 인자 추가
+            const args = spec.args.length === 0
+                ? ['--port', String(this.port), '--workspace', workspacePath]
+                : spec.args;
+
+            this.coreProcess = spawn(spec.command, args, {
                 env: { ...process.env },
                 detached: false,
                 stdio: ['ignore', 'pipe', 'pipe'],
+                cwd: spec.cwd,
+                shell: false,
             });
 
             this.coreProcess.stdout?.on('data', (data: Buffer) => {
@@ -135,6 +200,7 @@ export class CoreManager {
             this.coreProcess.on('exit', (code, signal) => {
                 console.log(`[ReCoder Core] exited code=${code} signal=${signal}`);
                 this.coreProcess = null;
+                this._client = null;
             });
             this.coreProcess.on('error', (err) => {
                 console.error('[ReCoder Core] spawn error:', err);
@@ -167,10 +233,34 @@ export class CoreManager {
         throw new Error('ReCoder Core가 시간 내에 준비되지 않았습니다.');
     }
 
+    private async _waitForRuntime(timeoutMs: number): Promise<CoreClient> {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            await new Promise(r => setTimeout(r, 500));
+            const cfg = this._tryLoadRuntime();
+            if (cfg) {
+                const client = new CoreClient(cfg.port, cfg.session_token);
+                const alive = await client.healthCheck();
+                if (alive) {
+                    this._client = client;
+                    this.port = cfg.port;
+                    this.sessionToken = cfg.session_token;
+                    return client;
+                }
+            }
+        }
+        throw new Error('ReCoder Core 시작 타임아웃 (15초)');
+    }
+
     private async cleanupStale(): Promise<void> {
         const runtime = await this.readRuntime();
         if (!runtime) { return; }
         const pid = runtime.pid;
+        if (!pid) {
+            // pid 없으면 runtime.json 만 제거
+            try { if (fs.existsSync(this.getRuntimeJsonPath())) { fs.unlinkSync(this.getRuntimeJsonPath()); } } catch { /* ignore */ }
+            return;
+        }
         try {
             if (process.platform === 'win32') {
                 try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }); } catch { /* already gone */ }
@@ -203,24 +293,58 @@ export class CoreManager {
         }
     }
 
+    /** SIGTERM → 5초 대기 → SIGKILL 폴백. shutdown 의 별칭. */
+    async stop(): Promise<void> {
+        return this.shutdown(false);
+    }
+
     async shutdown(force: boolean = false): Promise<void> {
         const runtime = await this.readRuntime();
         const pid = this.coreProcess?.pid ?? runtime?.pid;
-        if (!pid) { return; }
+        const proc = this.coreProcess;
+        this._client = null;
+
+        if (!pid && !proc) { return; }
 
         if (process.platform === 'win32') {
-            try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }); } catch { /* ignore */ }
+            if (pid) {
+                try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }); } catch { /* ignore */ }
+            } else if (proc) {
+                try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+            }
         } else {
             if (force) {
-                try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+                if (pid) {
+                    try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+                } else if (proc) {
+                    try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+                }
             } else {
-                try { process.kill(pid, 'SIGTERM'); } catch { return; }
-                const deadline = Date.now() + 5000;
+                // graceful: SIGTERM 후 SHUTDOWN_GRACE_MS 대기, 안 되면 SIGKILL
+                if (pid) {
+                    try { process.kill(pid, 'SIGTERM'); } catch { /* might be gone */ }
+                } else if (proc) {
+                    try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+                }
+
+                const deadline = Date.now() + SHUTDOWN_GRACE_MS;
+                let exited = false;
                 while (Date.now() < deadline) {
                     await this.sleep(300);
-                    try { process.kill(pid, 0); } catch { return; }
+                    if (pid) {
+                        try { process.kill(pid, 0); } catch { exited = true; break; }
+                    } else {
+                        if (!proc || proc.killed) { exited = true; break; }
+                    }
                 }
-                try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+
+                if (!exited) {
+                    if (pid) {
+                        try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+                    } else if (proc) {
+                        try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+                    }
+                }
             }
         }
 
@@ -242,195 +366,53 @@ export class CoreManager {
                 runtime.session_token !== this.sessionToken || runtime.port !== this.port;
             this.port = runtime.port;
             this.sessionToken = runtime.session_token;
+            if (changed) {
+                this._client = new CoreClient(this.port, this.sessionToken);
+            }
             return changed;
         }
         return false;
     }
 
-    private getCoreBinaryPath(): string {
-        const platform = process.platform;
-        const binaryName = platform === 'win32' ? 'recoder-core.exe' : 'recoder-core';
-
-        const bundledPath = path.join(this.extensionContext.extensionPath, 'bin', binaryName);
-        if (fs.existsSync(bundledPath)) { return bundledPath; }
-
-        try {
-            const which = platform === 'win32' ? 'where' : 'which';
-            const result = execSync(`${which} recoder-core`, { encoding: 'utf-8' }).trim();
-            if (result && fs.existsSync(result.split('\n')[0])) { return result.split('\n')[0]; }
-        } catch { /* not in PATH */ }
-
-        const homePath = path.join(os.homedir(), '.recoder', 'bin', binaryName);
-        if (fs.existsSync(homePath)) { return homePath; }
-
-        return '';
-    }
-
-    private getRuntimeJsonPath(): string {
-        // Core writes runtime.json to ~/.recoder/runtime.json (singleton.py)
-        return path.join(os.homedir(), '.recoder', 'runtime.json');
-    }
-
-    private sleep(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
-=======
-/**
- * Local Core 생명주기 관리 (설계서 v6.4 §6)
- * - Lazy Spawn, Singleton, 좀비 프로세스 방지
- * - runtime.json 으로 포트/토큰 공유
- *
- * 2026-05-08 갱신:
- * - dev 분기 spawn 수정: exec/args 분리, Windows python 탐색
- * - graceful shutdown: SIGTERM → 5초 대기 → SIGKILL 폴백
- */
-import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import * as cp from 'child_process';
-import { CoreClient } from '../api/coreClient';
-
-export interface RuntimeConfig {
-    port: number;
-    session_token: string;
-    started_at: string;
-}
-
-interface SpawnSpec {
-    command: string;
-    args: string[];
-    cwd?: string;
-}
-
-const SHUTDOWN_GRACE_MS = 5000;
-
-export class CoreManager {
-    private _process: cp.ChildProcess | null = null;
-    private _client: CoreClient | null = null;
-    private readonly _runtimePath: string;
-    private readonly _lockPath: string;
-    private _starting: boolean = false;
-
-    constructor(private readonly context: vscode.ExtensionContext) {
-        const home = os.homedir();
-        this._runtimePath = path.join(home, '.recoder', 'runtime.json');
-        this._lockPath = path.join(home, '.recoder', 'core.lock');
-    }
-
-    get client(): CoreClient {
-        if (!this._client) throw new Error('Core가 실행 중이 아닙니다.');
-        return this._client;
-    }
-
-    /** 이미 실행 중이면 재사용, 아니면 spawn. */
-    async ensureRunning(): Promise<CoreClient> {
-        const existing = this._tryLoadRuntime();
-        if (existing) {
-            this._client = new CoreClient(existing.port, existing.session_token);
-            const alive = await this._client.healthCheck();
-            if (alive) return this._client;
-        }
-        return this._spawn();
-    }
-
-    /** SIGTERM → 5초 대기 → SIGKILL 폴백. */
-    async stop(): Promise<void> {
-        const proc = this._process;
-        this._client = null;
-        if (!proc) return;
-
-        proc.kill('SIGTERM');
-
-        const exited = await new Promise<boolean>((resolve) => {
-            const t = setTimeout(() => resolve(false), SHUTDOWN_GRACE_MS);
-            proc.once('exit', () => {
-                clearTimeout(t);
-                resolve(true);
-            });
-        });
-
-        if (!exited && !proc.killed) {
-            try {
-                proc.kill('SIGKILL');
-            } catch {
-                // 이미 죽었거나 권한 없음
-            }
-        }
-
-        this._process = null;
-    }
-
-    // ── private ────────────────────────────────────────────────────
-
-    private async _spawn(): Promise<CoreClient> {
-        if (this._starting) {
-            return this._waitForRuntime(15000);
-        }
-        this._starting = true;
-
-        const spec = this._findCoreBinary();
-        vscode.window.showInformationMessage('ReCoder Core를 시작합니다...');
-
-        try {
-            this._process = cp.spawn(spec.command, spec.args, {
-                detached: false,
-                stdio: 'pipe',
-                cwd: spec.cwd,
-                env: { ...process.env },
-                // Windows 에서 .py / .exe 경로 모두 처리
-                shell: false,
-            });
-        } catch (e: any) {
-            this._starting = false;
-            throw new Error(`ReCoder Core 실행 실패: ${e?.message ?? e}`);
-        }
-
-        this._process.stdout?.on('data', (d: Buffer) => {
-            console.log('[Core]', d.toString());
-        });
-        this._process.stderr?.on('data', (d: Buffer) => {
-            console.error('[Core]', d.toString());
-        });
-        this._process.on('exit', (code) => {
-            console.log('[Core] 종료:', code);
-            this._process = null;
-            this._client = null;
-            this._starting = false;
-        });
-        this._process.on('error', (err) => {
-            console.error('[Core] spawn error:', err);
-            this._process = null;
-            this._starting = false;
-        });
-
-        try {
-            const client = await this._waitForRuntime(15000);
-            return client;
-        } finally {
-            this._starting = false;
-        }
-    }
-
     /**
      * Core 실행 명령을 결정한다.
      *   1) VSIX 번들 바이너리 (`extension/bin/recoder-core[.exe]`)
-     *   2) 개발 모드: `extension/../core/main.py` 를 python 으로 실행
+     *   2) PATH 상의 `recoder-core`
+     *   3) `~/.recoder/bin/recoder-core[.exe]`
+     *   4) 개발 모드: `extension/../core/main.py` 를 python 으로 실행
      *
      * 반환값은 spawn(command, args) 에 그대로 넘길 수 있는 형태.
+     * 못 찾으면 null 반환.
      */
-    private _findCoreBinary(): SpawnSpec {
-        const ext = this.context.extensionPath;
+    private _findCoreSpec(): SpawnSpec | null {
+        const platform = process.platform;
+        const binaryName = platform === 'win32' ? 'recoder-core.exe' : 'recoder-core';
+        const ext = this.extensionContext.extensionPath;
 
         // 1) VSIX 번들 (Windows: .exe / 그 외: extension)
-        const bundledExe = path.join(ext, 'bin', 'recoder-core.exe');
-        if (fs.existsSync(bundledExe)) return { command: bundledExe, args: [] };
+        const bundledPath = path.join(ext, 'bin', binaryName);
+        if (fs.existsSync(bundledPath)) { return { command: bundledPath, args: [] }; }
 
-        const bundled = path.join(ext, 'bin', 'recoder-core');
-        if (fs.existsSync(bundled)) return { command: bundled, args: [] };
+        // Windows 가 아닌데 .exe 가 없으면 그냥 'recoder-core' 도 확인
+        const bundledAlt = path.join(ext, 'bin', 'recoder-core');
+        if (fs.existsSync(bundledAlt)) { return { command: bundledAlt, args: [] }; }
 
-        // 2) 개발 모드: core/main.py
+        // 2) PATH 상의 바이너리
+        try {
+            const which = platform === 'win32' ? 'where' : 'which';
+            const result = execSync(`${which} recoder-core`, { encoding: 'utf-8' }).trim();
+            if (result && fs.existsSync(result.split('\n')[0])) {
+                return { command: result.split('\n')[0], args: [] };
+            }
+        } catch { /* not in PATH */ }
+
+        // 3) ~/.recoder/bin/...
+        const homePath = path.join(os.homedir(), '.recoder', 'bin', binaryName);
+        if (fs.existsSync(homePath)) { return { command: homePath, args: [] }; }
+
+        // 4) 개발 모드: core/main.py
         const candidates = [
-            path.join(ext, '..', 'core', 'main.py'),     // monorepo: extension/ ↔ core/
+            path.join(ext, '..', 'core', 'main.py'),
             path.join(ext, '..', '..', 'core', 'main.py'),
         ];
         const mainPy = candidates.find(p => fs.existsSync(p));
@@ -443,10 +425,18 @@ export class CoreManager {
             };
         }
 
-        throw new Error('ReCoder Core 바이너리/소스를 찾을 수 없습니다. (bin/recoder-core 또는 core/main.py)');
+        return null;
     }
 
-    /** Windows 는 py / python.exe / python, 그 외는 python3 / python 우선. */
+    /** 기존 시그니처 호환용 — 바이너리 경로만 반환 */
+    private getCoreBinaryPath(): string {
+        const spec = this._findCoreSpec();
+        if (!spec) return '';
+        // python 분기는 빈 문자열 반환 (호환)
+        return spec.args.length === 0 ? spec.command : '';
+    }
+
+    /** Windows 는 python.exe / python / py, 그 외는 python3 / python 우선. */
     private _findPython(): string {
         const isWin = process.platform === 'win32';
         const candidates = isWin
@@ -463,28 +453,12 @@ export class CoreManager {
         return isWin ? 'python.exe' : 'python3';
     }
 
-    private _tryLoadRuntime(): RuntimeConfig | null {
-        try {
-            if (!fs.existsSync(this._runtimePath)) return null;
-            return JSON.parse(fs.readFileSync(this._runtimePath, 'utf-8')) as RuntimeConfig;
-        } catch { return null; }
+    private getRuntimeJsonPath(): string {
+        // Core writes runtime.json to ~/.recoder/runtime.json (singleton.py)
+        return this._runtimePath;
     }
 
-    private async _waitForRuntime(timeoutMs: number): Promise<CoreClient> {
-        const start = Date.now();
-        while (Date.now() - start < timeoutMs) {
-            await new Promise(r => setTimeout(r, 500));
-            const cfg = this._tryLoadRuntime();
-            if (cfg) {
-                const client = new CoreClient(cfg.port, cfg.session_token);
-                const alive = await client.healthCheck();
-                if (alive) {
-                    this._client = client;
-                    return client;
-                }
-            }
-        }
-        throw new Error('ReCoder Core 시작 타임아웃 (15초)');
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
+    private sleep(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 }

@@ -64,15 +64,12 @@ CMD ["npm", "start"]
 
 
 # ── docker-compose 템플릿 ─────────────────────────────────────────────
-<<<<<<< HEAD
 #
 # UX 노트:
 # - healthcheck 는 wget(기본)·curl(폴백) 둘 다 시도하는 sh -c 형태로 작성해
 #   alpine/slim 이미지에서도 동작.
 # - {env_file_block} 자리에는 .env.example 이 있으면 'env_file: [".env"]' 가 들어감.
 # - {image} 는 'recoder-app:${{IMAGE_TAG:-latest}}' 형태로 받아 git SHA 태깅 가능.
-=======
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
 _DOCKER_COMPOSE_BASE = """\
 version: '3.9'
@@ -83,7 +80,6 @@ services:
     ports:
       - "{host_port}:{container_port}"
     restart: unless-stopped
-<<<<<<< HEAD
 {env_file_block}    healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:{container_port}{health_check_path} || curl -fs http://localhost:{container_port}{health_check_path} || exit 1"]
       interval: 30s
@@ -236,16 +232,6 @@ _ECS_TASK_DEFINITION = """\
   ]
 }}
 """
-=======
-    environment: []
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:{container_port}{health_check_path}"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-"""
-
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
 # ── GitHub Actions 워크플로우 템플릿 ──────────────────────────────────
 
@@ -312,7 +298,7 @@ class FileRegistry:
         self._init_templates()
 
     def _init_templates(self) -> None:
-        """6개의 FileTemplate 초기화."""
+        """FileTemplate 초기화 (Dockerfile · docker-compose · GitHub Actions · GitOps · ECS)."""
         self._templates = {
             "dockerfile-python-fastapi": FileTemplate(
                 template_id="dockerfile-python-fastapi",
@@ -342,17 +328,19 @@ class FileRegistry:
                 template_id="docker-compose",
                 file_type="docker-compose",
                 base_content=_DOCKER_COMPOSE_BASE,
-<<<<<<< HEAD
-                customizable_sections=["image", "container_name", "host_port", "container_port", "health_check_path", "env_file_block"],
+                customizable_sections=[
+                    "image", "container_name", "host_port", "container_port",
+                    "health_check_path", "env_file_block", "environment",
+                ],
             ),
             "docker-compose-db": FileTemplate(
                 template_id="docker-compose-db",
                 file_type="docker-compose",
                 base_content=_DOCKER_COMPOSE_WITH_DB,
-                customizable_sections=["image", "container_name", "host_port", "container_port", "health_check_path", "env_file_block"],
-=======
-                customizable_sections=["image", "container_name", "host_port", "container_port", "health_check_path", "environment"],
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
+                customizable_sections=[
+                    "image", "container_name", "host_port", "container_port",
+                    "health_check_path", "env_file_block",
+                ],
             ),
             "github-actions-deploy": FileTemplate(
                 template_id="github-actions-deploy",
@@ -360,7 +348,6 @@ class FileRegistry:
                 base_content=_GITHUB_ACTIONS_EC2_DEPLOY,
                 customizable_sections=["image", "container_name", "region", "repository"],
             ),
-<<<<<<< HEAD
             # Q4 Must-Wedge: GitOps 템플릿
             "argocd-application": FileTemplate(
                 template_id="argocd-application",
@@ -393,8 +380,6 @@ class FileRegistry:
                     "env_vars_json", "aws_region", "health_check_path",
                 ],
             ),
-=======
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
         }
 
     def get(self, template_id: str) -> Optional[FileTemplate]:
@@ -440,7 +425,7 @@ class FileRegistry:
           - fastapi/uvicorn 포함 → dockerfile-python-fastapi
           - flask 포함 → dockerfile-python-flask
         - package.json 있음:
-          - next 의존성 포함 → dockerfile-node-next
+          - next 의존성 포함 → dockerfile-node-next  (Next.js 우선; Express 상위 프레임워크)
           - express 의존성 포함 → dockerfile-node-express
 
         Args:
@@ -466,11 +451,10 @@ class FileRegistry:
             except Exception:
                 pass
 
-        # Node 스택 감지
+        # Node 스택 감지 — dependencies 와 devDependencies 양쪽 모두 수집
         pkg_file = p / "package.json"
         if pkg_file.exists():
             try:
-<<<<<<< HEAD
                 package = json.loads(
                     pkg_file.read_text(encoding='utf-8', errors='replace')
                 )
@@ -480,19 +464,7 @@ class FileRegistry:
                         values = package.get(key)
                         if isinstance(values, dict):
                             deps.update({str(k).lower(): str(v) for k, v in values.items()})
-=======
-                content = pkg_file.read_text(encoding='utf-8', errors='replace')
-                package = json.loads(content)
-
-                # dependencies와 devDependencies 수집
-                deps: dict[str, str] = {}
-                for key in ('dependencies', 'devDependencies'):
-                    values = package.get(key)
-                    if isinstance(values, dict):
-                        deps.update({str(k).lower(): str(v) for k, v in values.items()})
-
                 # Next.js 우선 확인 (Next는 Express보다 상위 프레임워크)
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
                 if 'next' in deps:
                     return "dockerfile-node-next"
                 if 'express' in deps:
@@ -501,9 +473,11 @@ class FileRegistry:
                 pass
 
         raise ValueError(
-<<<<<<< HEAD
             "스택을 자동 감지하지 못했습니다. "
-            "requirements.txt 또는 package.json이 필요합니다."
+            "requirements.txt 또는 package.json이 필요합니다. "
+            "수동으로 지정하려면 다음 중 하나: "
+            "dockerfile-python-fastapi | dockerfile-python-flask | "
+            "dockerfile-node-express | dockerfile-node-next"
         )
 
     def render_ecs_task_definition(
@@ -544,27 +518,6 @@ class FileRegistry:
         )
 
 
-# ── 싱글턴 ──────────────────────────────────────────────────────────
-
-_instance: Optional[FileRegistry] = None
-
-
-def get_file_registry() -> FileRegistry:
-    global _instance
-    if _instance is None:
-        _instance = FileRegistry()
-    return _instance
-
-
-__all__ = ["FileRegistry", "get_file_registry"]
-=======
-            "Cannot auto-detect project stack. No requirements.txt or package.json found. "
-            "Please specify the stack manually: "
-            "dockerfile-python-fastapi | dockerfile-python-flask | "
-            "dockerfile-node-express | dockerfile-node-next"
-        )
-
-
 # ── 싱글톤 인스턴스 ───────────────────────────────────────────────────
 
 _file_registry_instance: Optional[FileRegistry] = None
@@ -576,4 +529,6 @@ def get_file_registry() -> FileRegistry:
     if _file_registry_instance is None:
         _file_registry_instance = FileRegistry()
     return _file_registry_instance
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
+
+
+__all__ = ["FileRegistry", "get_file_registry"]

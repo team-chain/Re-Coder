@@ -88,9 +88,9 @@ class CommandRegistry:
         self._init_templates()
 
     def _init_templates(self) -> None:
-        """11개의 CommandTemplate 초기화."""
+        """CommandTemplate 초기화 (Docker · SSH · ECR · ECS · SBOM)."""
         self._templates = {
-            # Docker 기본 명령들 (Level 2)
+            # ── Docker 기본 명령들 (Level 2) ─────────────────────────
             "docker_build": CommandTemplate(
                 template_id="docker_build",
                 action_type="docker_build",
@@ -140,7 +140,7 @@ class CommandRegistry:
                 approval_level=2,
             ),
 
-            # SSH 원격 명령들 (Level 3, 2학기용)
+            # ── SSH 원격 명령들 (Level 3, 2학기용) ───────────────────
             "ssh_docker_restart": CommandTemplate(
                 template_id="ssh_docker_restart",
                 action_type="ssh_docker_restart",
@@ -166,7 +166,7 @@ class CommandRegistry:
                 approval_level=3,
             ),
 
-            # ECR 푸시 명령들 (Level 4)
+            # ── ECR 푸시 명령들 (Level 4) ────────────────────────────
             "ecr_login": CommandTemplate(
                 template_id="ecr_login",
                 action_type="ecr_login",
@@ -183,7 +183,6 @@ class CommandRegistry:
                 risk_level=RiskLevel.HIGH,
                 approval_level=4,
             ),
-<<<<<<< HEAD
 
             # ── ECS Fargate 전용 (Q3-A, Level 3~4) ───────────────────
             "ecr_get_login_password": CommandTemplate(
@@ -234,8 +233,6 @@ class CommandRegistry:
                 risk_level=RiskLevel.LOW,
                 approval_level=2,
             ),
-=======
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
         }
 
     def get(self, template_id: str) -> Optional[CommandTemplate]:
