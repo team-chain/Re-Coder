@@ -312,17 +312,10 @@
 
 | # | 항목 | 담당 | 상태 |
 |---|---|---|---|
-<<<<<<< HEAD
 | 2S-1 | EC2 SSH 배포 (`deploy_agent.py` 이식) | 이동규 | ✅ | `core/deploy_agent.py` 신규. ECR push → SSH docker pull/run → Health Check 파이프라인 완료 |
 | 2S-2 | EC2 Watchdog v1 자동 설치 | 이동규 | 🔲 |
 | 2S-3 | ECR + EC2 배포 흐름 | 이동규 | ✅ | server.py EC2 엔드포인트 3개 + Extension UI 연동 완료 |
 | 2S-4 | GitHub Actions 생성 | 이동규 | ✅ | infra_agent.py에 포함. `npm install` 방식으로 수정 완료 |
-=======
-| 2S-1 | EC2 SSH 배포 (`deploy_agent.py` 이식) | 이동규 | 🔲 |
-| 2S-2 | EC2 Watchdog v1 자동 설치 | 이동규 | 🔲 |
-| 2S-3 | ECR + EC2 배포 흐름 | 이동규 | 🔲 |
-| 2S-4 | GitHub Actions 생성 | 이동규 | 🔲 |
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 | 2S-5 | EC2 Watchdog v2 (Fluent Bit, CloudWatch) | 이동규 | 🔲 |
 | 2S-6 | VSCode Extension 운영 상태 조회 트리거 | 윤세빈 | 🔲 |
 | 2S-7 | `ops_agent.py` 신규 구현 | 이동규 | 🔲 |
@@ -347,7 +340,6 @@
 | 2026-05-08 | stale lock 강제 종료 미구현 | acquire_lock `pass`만 있음 | ✅ P0-10 완료 |
 | 2026-05-08 | 테스트 0건 | core/, extension/ 자동 테스트 없음 | ✅ pytest 15건 + TS smoke 완료 |
 | 2026-05-08 | **실 Docker E2E 미수행** | 실제 docker run 환경에서 전체 흐름 미검증 | ⚠ 로컬 머신에서 직접 수행 필요 |
-<<<<<<< HEAD
 | 2026-05-10 | **venv Python 미탐색** | coreManager가 시스템 Python 실행 → fastapi/boto3 import 실패로 서버 미기동 | ✅ venv/Scripts/python.exe 우선 탐색으로 수정 |
 | 2026-05-10 | **.env 환경변수명 불일치** | BEDROCK_MODEL_ID → 코드에서 BEDROCK_PRIMARY_MODEL_IDENTIFIER로 읽어 .env 설정 완전 무시 | ✅ 환경변수명 일치 + AWS_REGION 추가 + DEV_MODE=1 추가 |
 | 2026-05-10 | **first_run.py 리전 불일치** | BEDROCK_REGION 무시하고 AWS_REGION 기본값 us-east-1로 진단 → AI Ready 오판 | ✅ BEDROCK_REGION 우선 읽도록 수정 |
@@ -364,8 +356,6 @@
 | 2026-05-12 | **GitHub Actions npm ci 실패** | package-lock.json 없어 CI 전체 실패 | ✅ `cache: npm` 제거, `npm ci` → `npm install` (`core/infra_agent.py`) |
 | 2026-05-12 | **Bedrock 모델 end-of-life** | 3개 모델 전부 Legacy/EOL — LLM 호출 전면 실패 | ✅ `us.anthropic.claude-sonnet-4-6` 등 ACTIVE 모델로 교체 (`core/llm/bedrock_provider.py`) |
 | 2026-05-12 | **스택 감지 실패 (부모 폴더 오픈)** | cicd/ 루트의 React package.json 감지 → StackDetectionError | ✅ 1단계 하위 폴더 탐색 추가 (`core/infra_agent.py`) |
-=======
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
 ---
 
@@ -502,15 +492,14 @@ W1에서 P0-1 + P0-7 + P0-9가 동시 닫혀야 데모 흐름이 처음으로 �
 |---|---|---|
 | 2026-05-07 | Claude (Cowork) | v6.4-final 설계서 기준 초안 작성. 기존 v5 코드베이스 분석 완료. |
 | 2026-05-07 | Claude (Cowork) | Phase 0~7 전체 구현 완료. core/ 27개 파일, extension/ 7개 파일 생성. |
-<<<<<<< HEAD
-| 2026-05-08 | Claude (Cowork) | **�
-=======
 | 2026-05-08 | Claude (Cowork) | **실측 감사 반영**: 표면상 ✅이던 server↔agent 배선·UI 응답 파싱·spawn·테스트의 실제 결손 항목을 ⚠/❌로 정정, P0 13개 정리, 두 사람 분담안 신설. |
 | 2026-05-08 | Claude (Cowork) | **P0 전항목 완료**: server.py Mock 전면 제거 + 6개 엔드포인트 실배선, coreManager spawn 수정, sidebarProvider 파싱 정상화 + Ready 카드, main.py stale PID kill + attached_pids, pytest 15/15 통과, TS smoke 작성. 1학기 필수 95% 완료. |
+| 2026-05-10 | Claude (Cowork) | **실행 환경 버그 수정**: venv Python 탐색, .env 환경변수명 일치, BEDROCK_REGION, publisher, scripts smoke 중복 제거, escHtml 헥스 이스케이프, ready_update 핸들러, CSP 메타 태그, analyzeLog 오류 가시화. |
+| 2026-05-12 | Claude (Cowork) | **EC2 배포 구현 + Bedrock 모델 교체**: deploy_agent.py 신규, server.py EC2 엔드포인트 3개, rollback_latest, enum 역직렬화, GitHub Actions npm install, ACTIVE 모델로 교체, 1단계 하위 스택 감지. |
+| 2026-05-16 | Claude (Cowork) | **v5.0 Q2-A/Q2-B/Q4 통합 + develop 머지**: Control Plane Core(OIDC/Device/RBAC/AuditLog), OPA Preset 7개 + 2인 승인, ArgoCD/Incident/Rollback PR/OTel 에이전트, MCP stdio PoC, schemas 호환 브리지. b25810a develop 머지 + 9889adc 브리지. |
 
 ---
 
 > **규칙**: 구현 완료 시 해당 행의 상태를 ✅로 변경하고 업데이트 기록에 한 줄 추가한다.
 > **규칙**: 블로킹 이슈 발생 시 이슈 섹션에 추가하고 상태를 ❌로 변경한다.
 > **규칙**: ⚠ 항목은 "겉보기 완료, 실배선 미완"을 의미합니다. 새 코딩 에이전트는 ⚠/❌ 항목을 우선 살펴보세요.
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27

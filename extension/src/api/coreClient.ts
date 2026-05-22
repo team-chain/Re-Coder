@@ -139,7 +139,6 @@ export class CoreClient {
     private _pollingTimer: ReturnType<typeof setInterval> | null = null;
     private _onStatusCallback: ((status: StatusResponse) => void) | null = null;
 
-<<<<<<< HEAD
     constructor(portOrUrl: number | string, token: string) {
         if (typeof portOrUrl === 'string' && portOrUrl.startsWith('http')) {
             // 원격 서버 URL 직접 지정 (예: http://REDACTED-IP:8000)
@@ -147,10 +146,6 @@ export class CoreClient {
         } else {
             this._base = `http://127.0.0.1:${portOrUrl}`;
         }
-=======
-    constructor(port: number, token: string) {
-        this._base = `http://127.0.0.1:${port}`;
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
         this._token = token;
     }
 
@@ -226,18 +221,14 @@ export class CoreClient {
         return this._post('/api/project/scan', { workspace_path: workspacePath });
     }
 
-<<<<<<< HEAD
     async getProject(): Promise<object> {
         return this._get('/api/project');
     }
 
-=======
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
     async getCost(): Promise<CostDto> {
         return this._get('/api/cost') as Promise<CostDto>;
     }
 
-<<<<<<< HEAD
     // ── S-8(TS): Git 커밋 ─────────────────────────────────────────
 
     async gitCommit(
@@ -474,8 +465,6 @@ export class CoreClient {
         return this._post('/api/github/logout', {}) as any;
     }
 
-=======
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
     // ── Polling 헬퍼 (CoreManager / Sidebar 가 사용) ──────────────
 
     startPolling(intervalMs: number = 4000, callback: (s: StatusResponse) => void): void {
@@ -503,7 +492,6 @@ export class CoreClient {
                 let data = '';
                 res.on('data', c => data += c);
                 res.on('end', () => {
-<<<<<<< HEAD
                     if (res.statusCode && res.statusCode >= 400) {
                         try {
                             const err = JSON.parse(data || '{}');
@@ -513,8 +501,6 @@ export class CoreClient {
                         }
                         return;
                     }
-=======
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
                     try { resolve(JSON.parse(data || 'null')); }
                     catch (e) { reject(e); }
                 });

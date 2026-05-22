@@ -1,12 +1,14 @@
 /**
-<<<<<<< HEAD
- * ReCoder VSCode Extension — Entry Point
+ * ReCoder VSCode Extension — Entry Point (설계서 v6.4 §4.1)
  *
  * Activation:
- *   - Registers the Sidebar WebviewViewProvider.
+ *   - Registers the Sidebar WebviewViewProvider (sidebar/SidebarProvider — primary v6.4 골격).
  *   - Registers all commands (analyzeError, runWithRecoder, generateDockerfile, etc.).
  *   - Manages CoreManager lifecycle (lazy spawn on first sidebar open / command).
+ *   - Shell Integration 리스너 (§8.1 — primary output collection).
  *   - Deactivation triggers graceful Core shutdown.
+ *
+ * Lazy Spawn: Sidebar 첫 열기 또는 명령 최초 실행 시 Core 시작 (§6.1).
  */
 
 import * as vscode from 'vscode';
@@ -72,8 +74,6 @@ export function activate(context: vscode.ExtensionContext): void {
     );
 
     // Attach to any terminal that gains Shell Integration support at runtime.
-    // onDidChangeTerminalShellIntegration became stable in VSCode 1.93.
-    // Guard with 'in' check so the extension still loads on older versions.
     // onDidChangeTerminalShellIntegration became stable in VSCode 1.93.
     // Use try/catch guard so activation succeeds on older versions too.
     try {
@@ -180,6 +180,14 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
+    // ── Command: Start Core ─────────────────────────────────────────────────
+    // 명시적으로 Core 만 시작하고 싶을 때 (사이드바를 열지 않고도 사용 가능).
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.startCore', async () => {
+            await ensureCoreRunning(coreManager, sidebarProvider);
+        })
+    );
+
     // ── Command: Stop Core ──────────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.stopCore', async () => {
@@ -274,55 +282,4 @@ function getDefaultRunCommand(workspacePath?: string): string {
         return 'go run .';
     }
     return '';
-=======
- * ReCoder VSCode Extension — Entry Point (설계서 v6.4 §4.1)
- * - Lazy Spawn: Sidebar 첫 열기 또는 명령 최초 실행 시 Core 시작
- * - §6.1 기준
- */
-import * as vscode from 'vscode';
-import { CoreManager } from './core/coreManager';
-import { SidebarProvider } from './ui/sidebarProvider';
-import { TerminalCollector } from './collectors/terminalCollector';
-
-let coreManager: CoreManager;
-let sidebarProvider: SidebarProvider;
-let terminalCollector: TerminalCollector;
-
-export async function activate(context: vscode.ExtensionContext) {
-    coreManager = new CoreManager(context);
-    sidebarProvider = new SidebarProvider(context, coreManager);
-    terminalCollector = new TerminalCollector(coreManager);
-
-    // Sidebar 등록
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider('recoder-sidebar', sidebarProvider)
-    );
-
-    // 명령 등록
-    context.subscriptions.push(
-        vscode.commands.registerCommand('recoder.analyzeError', async () => {
-            await coreManager.ensureRunning();
-            const output = terminalCollector.getLatestOutput();
-            sidebarProvider.sendMessage({ type: 'analyze_request', output });
-        }),
-        vscode.commands.registerCommand('recoder.generateDockerfile', async () => {
-            await coreManager.ensureRunning();
-            sidebarProvider.sendMessage({ type: 'generate_dockerfile' });
-        }),
-        vscode.commands.registerCommand('recoder.startCore', () => coreManager.ensureRunning()),
-        vscode.commands.registerCommand('recoder.stopCore', () => coreManager.stop()),
-        vscode.commands.registerCommand('recoder.runWithRecoder', async () => {
-            await coreManager.ensureRunning();
-            terminalCollector.createRecoderTerminal();
-        })
-    );
-
-    // Terminal Shell Integration 이벤트 등록
-    terminalCollector.register(context);
-}
-
-export function deactivate() {
-    coreManager?.stop();
-    terminalCollector?.dispose();
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 }

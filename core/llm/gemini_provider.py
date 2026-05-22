@@ -1,52 +1,223 @@
 """
-<<<<<<< HEAD
-ReCoder Core — Gemini Flash Fallback Provider
+ReCoder Core — Google Gemini Provider (설계서 v6.4-final §5.1 보조 fallback).
 
-Uses google-generativeai SDK to call gemini-2.5-flash as a cost-free
-fallback when Bedrock is unavailable or in cost-reduction mode.
+- Bedrock 전체 체인 실패 시 최후 수단으로 사용 (cost-free / 저비용 폴백).
+- GEMINI_API_KEY 환경변수 필수.
+- 모델 폴백 체인: gemini-2.5-flash-lite → gemini-2.5-flash → gemini-2.0-flash-lite
+  → gemini-1.5-flash-8b → gemini-1.5-flash
+- 두 가지 호출 경로를 모두 제공한다:
+    1) 동기 ``call(LLMRequest) -> LLMResponse`` — router/LLMProvider 인터페이스
+       (``google.genai`` 신 SDK 사용, 모델 폴백 체인 + structured output 지원)
+    2) 비동기 ``generate(prompt, schema)`` — legacy / asyncio 호출자용
+       (``google.generativeai`` 구 SDK 사용, thread-pool executor 경유)
 """
 
-=======
-Google Gemini Provider (설계서 v5.7 §3.2 보조 fallback).
-
-Bedrock 전체 체인 실패 시 최후 수단으로 사용.
-GEMINI_API_KEY 환경변수 필수.
-"""
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 from __future__ import annotations
 
 import json
 import logging
 import os
 import re
-<<<<<<< HEAD
+import threading
 from typing import Any, Optional
 
-log = logging.getLogger(__name__)
+from .base import LLMError, LLMErrorType, LLMProvider, LLMRequest, LLMResponse
 
+log = logging.getLogger(__name__)
+logger = log  # alias for legacy callers
+
+# ---------------------------------------------------------------------------
+# 상수 / 환경설정
+# ---------------------------------------------------------------------------
+
+# Legacy 비동기 경로용 단일 모델 (google-generativeai SDK)
 MODEL = "gemini-2.5-flash"
 API_KEY_ENV = "GEMINI_API_KEY"
 
-# Free-tier pricing (0.0 USD)
+# Free-tier pricing (0.0 USD) — 비용 추정용 (설계서 §13)
 COST_PER_1K_TOKENS: dict[str, float] = {"input": 0.0, "output": 0.0}
 
+# 동기 경로용 모델 폴백 체인 (google.genai 신 SDK)
+_DEFAULT_FALLBACK_CHAIN: list[str] = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash-8b",
+    "gemini-1.5-flash",
+]
 
-class GeminiProvider:
+# 신 SDK 클라이언트 캐시 (thread-safe)
+_client_lock = threading.Lock()
+_client_cache: dict[str, object] = {}
+
+
+# ---------------------------------------------------------------------------
+# 신 SDK (google.genai) helper
+# ---------------------------------------------------------------------------
+
+def _get_client(api_key: str):
+    """google.genai 클라이언트를 캐시하여 반환."""
+    if api_key in _client_cache:
+        return _client_cache[api_key]
+    with _client_lock:
+        if api_key in _client_cache:
+            return _client_cache[api_key]
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        _client_cache[api_key] = client
+        return client
+
+
+def _resolve_chain() -> list[str]:
+    """환경변수를 반영한 모델 폴백 체인 해석."""
+    explicit = os.getenv("GEMINI_MODEL_FALLBACKS", "").strip()
+    if explicit:
+        chain = [m.strip() for m in explicit.split(",") if m.strip()]
+        if chain:
+            return chain
+    primary = os.getenv("GEMINI_MODEL", "").strip()
+    if primary:
+        return [primary] + [m for m in _DEFAULT_FALLBACK_CHAIN if m != primary]
+    return list(_DEFAULT_FALLBACK_CHAIN)
+
+
+def _is_model_unavailable(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status in (404, 400):
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in ("not found", "unsupported", "invalid model", "404"))
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status == 429:
+        return True
+    resp = getattr(exc, "response", None)
+    if resp and getattr(resp, "status_code", None) == 429:
+        return True
+    name = type(exc).__name__.lower()
+    return "toomanyrequests" in name or "ratelimit" in name
+
+
+# ---------------------------------------------------------------------------
+# GeminiProvider
+# ---------------------------------------------------------------------------
+
+
+class GeminiProvider(LLMProvider):
     """
-    Async wrapper for the Google Generative AI (Gemini) SDK.
+    Google Gemini API Provider (설계서 §5.1 보조 fallback).
 
-    Falls back gracefully when the SDK is not installed or the API key
-    is absent.
+    동기 진입점 ``call(LLMRequest)`` 는 신 SDK(``google.genai``)와 모델
+    폴백 체인을 사용하고, 비동기 진입점 ``generate(prompt, schema)`` 는
+    구 SDK(``google.generativeai``)를 사용한다.
     """
 
     def __init__(self, api_key: Optional[str] = None) -> None:
+        # 비동기 경로용 구 SDK 초기화
         self._api_key = api_key or os.environ.get(API_KEY_ENV, "")
-        self._client = None
+        self._genai_legacy = None
         self._model = None
-        self._initialise()
+        self._initialise_legacy()
 
     # ------------------------------------------------------------------
-    # Public API
+    # LLMProvider 인터페이스
+    # ------------------------------------------------------------------
+
+    @property
+    def provider_name(self) -> str:
+        return "gemini"
+
+    def call(self, request: LLMRequest) -> LLMResponse:
+        """동기 호출 경로 — google.genai 신 SDK + 모델 폴백 체인."""
+        api_key = (self._api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        if not api_key:
+            raise LLMError(
+                "GEMINI_API_KEY가 설정되지 않았습니다.",
+                LLMErrorType.ACCESS_DENIED,
+                retryable=False,
+            )
+
+        from google.genai import types
+
+        client = _get_client(api_key)
+        chain = _resolve_chain()
+
+        # 컨텐츠 구성 (멀티모달 image 지원)
+        contents: list = []
+        if request.image_bytes:
+            contents.append(
+                types.Part.from_bytes(data=request.image_bytes, mime_type=request.image_mime)
+            )
+        contents.append(request.prompt)
+
+        config_kwargs: dict = {
+            "system_instruction": request.system or None,
+        }
+        if request.json_schema:
+            config_kwargs["response_mime_type"] = "application/json"
+            config_kwargs["response_json_schema"] = request.json_schema
+
+        last_exc: Exception | None = None
+        for idx, model_name in enumerate(chain):
+            try:
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        **{k: v for k, v in config_kwargs.items() if v is not None}
+                    ),
+                )
+                raw_text = resp.text or ""
+                parsed: dict | None = None
+                if request.json_schema:
+                    try:
+                        parsed = json.loads(raw_text)
+                    except Exception:
+                        m = re.search(r"\{.*\}", raw_text, re.DOTALL)
+                        if m:
+                            try:
+                                parsed = json.loads(m.group())
+                            except Exception:
+                                parsed = None
+
+                if idx > 0:
+                    logger.info("[GeminiProvider] fallback model used: %s", model_name)
+
+                in_tokens = max(1, len(request.prompt) // 4)
+                out_tokens = max(1, len(raw_text) // 4)
+
+                return LLMResponse(
+                    text          = raw_text,
+                    parsed        = parsed,
+                    model_used    = model_name,
+                    provider      = "gemini",
+                    input_tokens  = in_tokens,
+                    output_tokens = out_tokens,
+                    token_source  = "estimate",
+                )
+            except Exception as exc:
+                last_exc = exc
+                if _is_model_unavailable(exc) or _is_rate_limit(exc):
+                    logger.warning("[GeminiProvider] model %s unavailable: %s", model_name, exc)
+                    continue
+                raise LLMError(str(exc), LLMErrorType.UNKNOWN, raw=exc) from exc
+
+        raise LLMError(
+            f"Gemini 전체 폴백 체인 실패: {last_exc}",
+            LLMErrorType.THROTTLING,
+            retryable=True,
+            raw=last_exc,
+        )
+
+    def estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
+        """무료 티어 — 0.0 USD 반환 (설계서 §13)."""
+        return (input_tokens / 1000.0) * COST_PER_1K_TOKENS["input"] + \
+               (output_tokens / 1000.0) * COST_PER_1K_TOKENS["output"]
+
+    # ------------------------------------------------------------------
+    # 비동기 진입점 (legacy / asyncio 호출자용)
     # ------------------------------------------------------------------
 
     async def generate(
@@ -55,13 +226,10 @@ class GeminiProvider:
         schema: Optional[dict] = None,
     ) -> dict[str, Any]:
         """
-        Generate a response from Gemini Flash.
+        Gemini Flash 비동기 호출 (legacy google-generativeai SDK).
 
-        If *schema* is provided the model is instructed to return
-        well-formed JSON matching that schema.  The response text is
-        parsed and returned as a dict.
-
-        Runs synchronous SDK calls in a thread-pool executor.
+        *schema* 가 제공되면 모델이 schema 에 맞는 JSON 을 반환하도록 지시한다.
+        응답 텍스트를 파싱하여 dict 로 반환한다.
         """
         import asyncio
 
@@ -81,7 +249,7 @@ class GeminiProvider:
         return self._parse_json(text)
 
     async def validate_access(self) -> bool:
-        """Return True if the Gemini API key is present and functional."""
+        """Gemini API 키가 존재하고 동작하는지 확인."""
         if not self._api_key or self._model is None:
             return False
         try:
@@ -92,18 +260,18 @@ class GeminiProvider:
             return False
 
     # ------------------------------------------------------------------
-    # Private helpers
+    # 내부 헬퍼
     # ------------------------------------------------------------------
 
-    def _initialise(self) -> None:
-        """Attempt to initialise the Google Generative AI client."""
+    def _initialise_legacy(self) -> None:
+        """비동기 경로용 google.generativeai 구 SDK 초기화 (실패해도 무해)."""
         if not self._api_key:
-            log.debug("GEMINI_API_KEY not set — GeminiProvider disabled")
+            log.debug("GEMINI_API_KEY not set — GeminiProvider legacy async path disabled")
             return
         try:
             import google.generativeai as genai  # type: ignore
             genai.configure(api_key=self._api_key)
-            self._client = genai
+            self._genai_legacy = genai
             self._model = genai.GenerativeModel(MODEL)
         except ImportError:
             log.warning(
@@ -111,7 +279,7 @@ class GeminiProvider:
                 "Run: pip install google-generativeai"
             )
         except Exception as exc:
-            log.error("Failed to initialise Gemini client: %s", exc)
+            log.error("Failed to initialise Gemini legacy client: %s", exc)
 
     @staticmethod
     def _build_prompt(prompt: str, schema: Optional[dict]) -> str:
@@ -153,150 +321,3 @@ class GeminiProvider:
             return json.loads(text)
         except json.JSONDecodeError:
             return {"raw_response": text}
-=======
-import threading
-
-from .base import LLMError, LLMErrorType, LLMProvider, LLMRequest, LLMResponse
-
-logger = logging.getLogger(__name__)
-
-_DEFAULT_FALLBACK_CHAIN = [
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash-8b",
-    "gemini-1.5-flash",
-]
-
-_client_lock = threading.Lock()
-_client_cache: dict[str, object] = {}
-
-
-def _get_client(api_key: str):
-    if api_key in _client_cache:
-        return _client_cache[api_key]
-    with _client_lock:
-        if api_key in _client_cache:
-            return _client_cache[api_key]
-        from google import genai
-        client = genai.Client(api_key=api_key)
-        _client_cache[api_key] = client
-        return client
-
-
-def _resolve_chain() -> list[str]:
-    explicit = os.getenv("GEMINI_MODEL_FALLBACKS", "").strip()
-    if explicit:
-        chain = [m.strip() for m in explicit.split(",") if m.strip()]
-        if chain:
-            return chain
-    primary = os.getenv("GEMINI_MODEL", "").strip()
-    if primary:
-        return [primary] + [m for m in _DEFAULT_FALLBACK_CHAIN if m != primary]
-    return list(_DEFAULT_FALLBACK_CHAIN)
-
-
-def _is_model_unavailable(exc: Exception) -> bool:
-    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    if status in (404, 400):
-        return True
-    msg = str(exc).lower()
-    return any(s in msg for s in ("not found", "unsupported", "invalid model", "404"))
-
-
-def _is_rate_limit(exc: Exception) -> bool:
-    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    if status == 429:
-        return True
-    resp = getattr(exc, "response", None)
-    if resp and getattr(resp, "status_code", None) == 429:
-        return True
-    name = type(exc).__name__.lower()
-    return "toomanyrequests" in name or "ratelimit" in name
-
-
-class GeminiProvider(LLMProvider):
-    """Google Gemini API Provider (설계서 §3 보조 fallback)."""
-
-    @property
-    def provider_name(self) -> str:
-        return "gemini"
-
-    def call(self, request: LLMRequest) -> LLMResponse:
-        api_key = os.getenv("GEMINI_API_KEY", "").strip()
-        if not api_key:
-            raise LLMError(
-                "GEMINI_API_KEY가 설정되지 않았습니다.",
-                LLMErrorType.ACCESS_DENIED,
-                retryable=False,
-            )
-
-        from google.genai import types
-
-        client = _get_client(api_key)
-        chain  = _resolve_chain()
-
-        contents: list = []
-        if request.image_bytes:
-            contents.append(
-                types.Part.from_bytes(data=request.image_bytes, mime_type=request.image_mime)
-            )
-        contents.append(request.prompt)
-
-        config_kwargs: dict = {
-            "system_instruction": request.system or None,
-        }
-        if request.json_schema:
-            config_kwargs["response_mime_type"] = "application/json"
-            config_kwargs["response_json_schema"] = request.json_schema
-
-        last_exc: Exception | None = None
-        for idx, model_name in enumerate(chain):
-            try:
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=types.GenerateContentConfig(**{k: v for k, v in config_kwargs.items() if v is not None}),
-                )
-                raw_text = resp.text or ""
-                parsed: dict | None = None
-                if request.json_schema:
-                    try:
-                        parsed = json.loads(raw_text)
-                    except Exception:
-                        m = re.search(r"\{.*\}", raw_text, re.DOTALL)
-                        if m:
-                            try:
-                                parsed = json.loads(m.group())
-                            except Exception:
-                                parsed = None
-
-                if idx > 0:
-                    logger.info("[GeminiProvider] fallback model used: %s", model_name)
-
-                in_tokens  = max(1, len(request.prompt) // 4)
-                out_tokens = max(1, len(raw_text) // 4)
-
-                return LLMResponse(
-                    text          = raw_text,
-                    parsed        = parsed,
-                    model_used    = model_name,
-                    provider      = "gemini",
-                    input_tokens  = in_tokens,
-                    output_tokens = out_tokens,
-                    token_source  = "estimate",
-                )
-            except Exception as exc:
-                last_exc = exc
-                if _is_model_unavailable(exc) or _is_rate_limit(exc):
-                    logger.warning("[GeminiProvider] model %s unavailable: %s", model_name, exc)
-                    continue
-                raise LLMError(str(exc), LLMErrorType.UNKNOWN, raw=exc) from exc
-
-        raise LLMError(
-            f"Gemini 전체 폴백 체인 실패: {last_exc}",
-            LLMErrorType.THROTTLING,
-            retryable=True,
-            raw=last_exc,
-        )
->>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
