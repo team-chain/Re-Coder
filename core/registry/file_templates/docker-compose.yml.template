@@ -1,0 +1,56 @@
+# ==============================================================================
+# ReCoder File Template: docker-compose.yml.template
+# Production-ready Docker Compose configuration
+# Placeholders: {{APP_NAME}}, {{IMAGE_NAME}}, {{PORT}}, {{CONTAINER_PORT}},
+#               {{NETWORK_NAME}}, {{HEALTH_CHECK_PATH}}, {{ENV_FILE}}
+# ==============================================================================
+
+version: "3.9"
+
+services:
+  {{APP_NAME}}:
+    image: {{IMAGE_NAME}}
+    container_name: {{APP_NAME}}
+    restart: unless-stopped
+
+    ports:
+      - "{{PORT}}:{{CONTAINER_PORT}}"
+
+    env_file:
+      - {{ENV_FILE}}
+
+    networks:
+      - {{NETWORK_NAME}}
+
+    # Logging configuration — JSON for structured log ingestion
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:{{CONTAINER_PORT}}{{HEALTH_CHECK_PATH}}"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+networks:
+  {{NETWORK_NAME}}:
+    driver: bridge
+    name: {{NETWORK_NAME}}
+
+volumes:
+  app_data:
+    driver: local

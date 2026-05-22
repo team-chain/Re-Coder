@@ -1,0 +1,79 @@
+# ==============================================================================
+# ReCoder File Template: Dockerfile.node-express
+# Production-grade Dockerfile for Node.js / Express applications
+# Placeholders: {{APP_NAME}}, {{NODE_VERSION}}, {{PORT}}, {{START_SCRIPT}}
+# ==============================================================================
+
+# ---- Dependency installation stage ----
+FROM node:{{NODE_VERSION}}-alpine AS deps
+
+WORKDIR /app
+
+# Copy package manifests
+COPY package.json package-lock.json* yarn.lock* pnpm-lock.yaml* ./
+
+# Install production dependencies only
+RUN if [ -f yarn.lock ]; then \
+        yarn install --frozen-lockfile --production; \
+    elif [ -f pnpm-lock.yaml ]; then \
+        npm install -g pnpm && pnpm install --frozen-lockfile --prod; \
+    else \
+        npm ci --omit=dev; \
+    fi
+
+# ---- Build stage (for TypeScript / transpiled projects) ----
+FROM node:{{NODE_VERSION}}-alpine AS builder
+
+WORKDIR /app
+
+COPY package.json package-lock.json* yarn.lock* pnpm-lock.yaml* ./
+
+RUN if [ -f yarn.lock ]; then \
+        yarn install --frozen-lockfile; \
+    elif [ -f pnpm-lock.yaml ]; then \
+        npm install -g pnpm && pnpm install --frozen-lockfile; \
+    else \
+        npm ci; \
+    fi
+
+COPY . .
+
+# Run build if a build script exists
+RUN if [ -f package.json ] && grep -q '"build"' package.json; then \
+        npm run build; \
+    fi
+
+# ---- Runtime stage ----
+FROM node:{{NODE_VERSION}}-alpine AS runtime
+
+LABEL org.opencontainers.image.title="{{APP_NAME}}" \
+      org.opencontainers.image.description="Node.js Express application" \
+      org.opencontainers.image.version="1.0"
+
+# Security: run as non-root
+RUN addgroup -g 1001 appgroup && \
+    adduser -u 1001 -G appgroup -s /bin/sh -D appuser
+
+# Install curl for health checks
+RUN apk add --no-cache curl dumb-init
+
+WORKDIR /app
+
+# Copy production node_modules
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy built application
+COPY --from=builder --chown=appuser:appgroup /app/dist ./dist
+COPY --chown=appuser:appgroup package.json .
+
+USER appuser
+
+EXPOSE {{PORT}}
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:{{PORT}}/health || exit 1
+
+# Use dumb-init for proper signal handling
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "{{START_SCRIPT}}"]

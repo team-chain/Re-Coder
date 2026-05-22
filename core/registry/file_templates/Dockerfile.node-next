@@ -1,0 +1,72 @@
+# ==============================================================================
+# ReCoder File Template: Dockerfile.node-next
+# Production-grade Dockerfile for Next.js applications (standalone output)
+# Placeholders: {{APP_NAME}}, {{NODE_VERSION}}, {{PORT}}
+# ==============================================================================
+
+# ---- Dependency installation stage ----
+FROM node:{{NODE_VERSION}}-alpine AS deps
+
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+COPY package.json package-lock.json* yarn.lock* pnpm-lock.yaml* ./
+
+RUN if [ -f yarn.lock ]; then \
+        yarn install --frozen-lockfile; \
+    elif [ -f pnpm-lock.yaml ]; then \
+        npm install -g pnpm && pnpm install --frozen-lockfile; \
+    else \
+        npm ci; \
+    fi
+
+# ---- Build stage ----
+FROM node:{{NODE_VERSION}}-alpine AS builder
+
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Set environment for Next.js standalone output
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+
+RUN npm run build
+
+# ---- Runtime stage ----
+FROM node:{{NODE_VERSION}}-alpine AS runtime
+
+LABEL org.opencontainers.image.title="{{APP_NAME}}" \
+      org.opencontainers.image.description="Next.js application" \
+      org.opencontainers.image.version="1.0"
+
+RUN apk add --no-cache curl dumb-init
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT={{PORT}}
+ENV HOSTNAME="0.0.0.0"
+
+# Security: non-root user
+RUN addgroup -g 1001 appgroup && \
+    adduser -u 1001 -G appgroup -s /bin/sh -D appuser
+
+WORKDIR /app
+
+# Copy Next.js standalone output
+COPY --from=builder --chown=appuser:appgroup /app/.next/standalone ./
+COPY --from=builder --chown=appuser:appgroup /app/.next/static ./.next/static
+COPY --from=builder --chown=appuser:appgroup /app/public ./public
+
+USER appuser
+
+EXPOSE {{PORT}}
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:{{PORT}}/api/health || exit 1
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "server.js"]

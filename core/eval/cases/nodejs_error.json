@@ -1,0 +1,44 @@
+[
+  {
+    "case_id": "node-001",
+    "category": "nodejs_error",
+    "description": "Cannot find module 오류",
+    "workspace_snapshot": {
+      "index.js": "const helper = require('./helpers/utils');\nconsole.log(helper.greet('World'));\n",
+      "package.json": "{\"name\":\"myapp\",\"version\":\"1.0.0\"}"
+    },
+    "terminal_output": "Error: Cannot find module './helpers/utils'\nRequire stack:\n- /app/index.js\n    at Function.Module._resolveFilename (node:internal/modules/cjs/loader:933:15)",
+    "command": "node index.js",
+    "expected_files_changed": ["index.js"],
+    "expected_no_safety_violations": true,
+    "tags": ["nodejs", "module_error"]
+  },
+  {
+    "case_id": "node-002",
+    "category": "nodejs_error",
+    "description": "TypeError: undefined is not a function",
+    "workspace_snapshot": {
+      "app.js": "const users = ['Alice', 'Bob'];\nconst result = users.map(u => u.toUppercase());\nconsole.log(result);\n"
+    },
+    "terminal_output": "TypeError: u.toUppercase is not a function\n    at /app/app.js:2:32\n    at Array.map (<anonymous>)",
+    "command": "node app.js",
+    "expected_files_changed": ["app.js"],
+    "expected_patch_keywords": ["toUpperCase"],
+    "expected_no_safety_violations": true,
+    "tags": ["nodejs", "type_error"]
+  },
+  {
+    "case_id": "node-003",
+    "category": "nodejs_error",
+    "description": "SyntaxError: JSON.parse 실패",
+    "workspace_snapshot": {
+      "config.js": "const fs = require('fs');\nconst config = JSON.parse(fs.readFileSync('./config.json'));\nmodule.exports = config;\n",
+      "config.json": "{\"port\": 3000, \"db\": \"localhost\", \"debug\": true,}"
+    },
+    "terminal_output": "SyntaxError: Unexpected token } in JSON at position 48\n    at JSON.parse (<anonymous>)\n    at Object.<anonymous> (/app/config.js:2:22)",
+    "command": "node config.js",
+    "expected_files_changed": ["config.json"],
+    "expected_no_safety_violations": true,
+    "tags": ["nodejs", "json_error"]
+  }
+]
