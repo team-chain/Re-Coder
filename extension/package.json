@@ -1,5 +1,6 @@
 {
   "name": "recoder",
+<<<<<<< HEAD
   "displayName": "ReCoder — AI DevOps Agent",
   "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
   "version": "1.0.0",
@@ -164,4 +165,43 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   }
+=======
+  "displayName": "ReCoder",
+  "description": "AI DevOps Agent — From Error to Operation",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onView:recoder-sidebar"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [{"id": "recoder", "title": "ReCoder", "icon": "media/icon.svg"}]
+    },
+    "views": {
+      "recoder": [{"id": "recoder-sidebar", "name": "ReCoder", "type": "webview"}]
+    },
+    "commands": [
+      {"command": "recoder.analyzeError", "title": "ReCoder: Analyze Error"},
+      {"command": "recoder.generateDockerfile", "title": "ReCoder: Generate Dockerfile"},
+      {"command": "recoder.startCore", "title": "ReCoder: Start Core"},
+      {"command": "recoder.stopCore", "title": "ReCoder: Stop Core"},
+      {"command": "recoder.runWithRecoder", "title": "Run with ReCoder"}
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js",
+    "smoke": "npm run compile && node out/test/coreClient.smoke.js",
+    "smoke": "tsc -p ./ && node --test out/test/coreClient.smoke.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {}
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 }
