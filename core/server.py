@@ -1,4 +1,5 @@
 """
+<<<<<<< HEAD
 server.py — ReCoder v6.4 Local Core FastAPI 서버 (LEGACY MONOLITH — DEPRECATED)
 
 ⚠️ 이 모듈은 더 이상 진입점(entry point)이 아닙니다.
@@ -17,6 +18,16 @@ server.py — ReCoder v6.4 Local Core FastAPI 서버 (LEGACY MONOLITH — DEPREC
 하고, server.py 는 수정하지 마십시오. 단계적 제거 예정 (잔여 권고 §4.1).
 
 레거시 변경 이력 (2026-05-08, P0-1~P0-13 적용):
+=======
+server.py — ReCoder v6.4 Local Core FastAPI 서버
+
+설계서 §4 (Local Core) / §5 (보안) / §6 (Lifecycle) / §10~17 (Agents) 결선체.
+
+본 모듈은 FastAPI 라우팅·미들웨어·요청-응답 모델만 책임지며,
+실제 비즈니스 로직은 모두 core/* 의 agent/registry 모듈에 위임한다.
+
+주요 변경 (2026-05-08, P0-1~P0-13 적용):
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 - Mock 응답 전면 제거 → analyzer/code_agent/infra_agent/local_deploy_agent 실배선
 - /api/deploy/status, /api/security/scan, /api/ready 신규
 - /api/cost 를 SessionLogger SQLite 누적치와 결선
@@ -60,7 +71,11 @@ RUNTIME_FILE = RUNTIME_DIR / "runtime.json"
 
 # ── 포트 / 토큰 ───────────────────────────────────────────────────────
 
+<<<<<<< HEAD
 SESSION_TOKEN: str = os.getenv("SESSION_TOKEN", uuid.uuid4().hex)
+=======
+SESSION_TOKEN: str = uuid.uuid4().hex
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 DEFAULT_PORT = 17894
 PORT: int = int(os.getenv("LOCAL_PORT", str(DEFAULT_PORT)))
 
@@ -88,7 +103,11 @@ app = FastAPI(title="ReCoder v6.4 Local Core", docs_url=None, redoc_url=None)
 
 app.add_middleware(
     CORSMiddleware,
+<<<<<<< HEAD
     allow_origins=["*"],   # Origin 검증은 _OriginHostMiddleware 에서 단일 처리
+=======
+    allow_origins=[f"http://127.0.0.1:{PORT}"],
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -97,11 +116,14 @@ _SAFE_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _DEV_MODE: bool = os.getenv("DEV_MODE", "0").strip() in ("1", "true", "yes")
 
+<<<<<<< HEAD
 # 허용할 추가 호스트 (EC2 IP 등) - 환경변수 ALLOWED_HOSTS 에 콤마로 구분해 입력
 _EXTRA_HOSTS: set[str] = {
     h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()
 }
 
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
 class _OriginHostMiddleware(BaseHTTPMiddleware):
     """Origin / Host 헤더 검증 (§5.2)."""
@@ -111,6 +133,7 @@ class _OriginHostMiddleware(BaseHTTPMiddleware):
         if path.startswith("/static") or path == "/" or path == "/dashboard":
             return await call_next(request)
 
+<<<<<<< HEAD
         # DEV_MODE 이거나 ALLOWED_HOSTS 가 "*" 이면 Host 검증 스킵
         if not _DEV_MODE and "*" not in _EXTRA_HOSTS:
             host = request.headers.get("host", "")
@@ -128,6 +151,15 @@ class _OriginHostMiddleware(BaseHTTPMiddleware):
                     status_code=403,
                     media_type="application/json",
                 )
+=======
+        host = request.headers.get("host", "")
+        if host and not host.startswith("127.0.0.1") and not host.startswith("localhost"):
+            return Response(
+                content='{"detail": "Invalid Host header"}',
+                status_code=403,
+                media_type="application/json",
+            )
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
         if request.method in _WRITE_METHODS:
             origin = request.headers.get("origin", "")
@@ -138,6 +170,7 @@ class _OriginHostMiddleware(BaseHTTPMiddleware):
                         status_code=403,
                         media_type="application/json",
                     )
+<<<<<<< HEAD
             elif origin not in _SAFE_ORIGINS and "*" not in _EXTRA_HOSTS:
                 # DEV_MODE 이거나 vscode-webview Origin 이면 허용
                 if not _DEV_MODE and not origin.startswith("vscode-webview://"):
@@ -146,6 +179,14 @@ class _OriginHostMiddleware(BaseHTTPMiddleware):
                         status_code=403,
                         media_type="application/json",
                     )
+=======
+            elif origin not in _SAFE_ORIGINS:
+                return Response(
+                    content='{"detail": "Origin not allowed"}',
+                    status_code=403,
+                    media_type="application/json",
+                )
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
         return await call_next(request)
 
@@ -171,7 +212,10 @@ _current_patch: Optional[PatchProposal] = None
 _current_infra: Optional[InfraFileProposal] = None
 _current_plan: Optional[DeploymentPlan] = None
 _current_project: Optional[ProjectProfile] = None
+<<<<<<< HEAD
 _current_deploy_record = None  # S-9: 롤백용 마지막 성공 배포 기록
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
 # 비동기 docker build/run 진행 상태
 _deploy_progress: dict = {
@@ -185,6 +229,7 @@ _deploy_progress: dict = {
 }
 _deploy_task: Optional[asyncio.Task] = None
 
+<<<<<<< HEAD
 # EC2 배포 진행 상태
 _ec2_deploy_state: dict = {
     "running":     False,
@@ -209,6 +254,8 @@ _ecs_deploy_state: dict = {
     "rollback_proposal": None,  # Circuit Breaker 발동 시 채워짐
 }
 
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 _server_ready = asyncio.Event()
 
 
@@ -324,6 +371,7 @@ class GitCommitRequest(BaseModel):
     session_id: str = ""
 
 
+<<<<<<< HEAD
 class GitCheckoutRequest(BaseModel):
     workspace_path: str
     branch: str
@@ -341,10 +389,13 @@ class GitPushRequest(BaseModel):
     force: bool = False
 
 
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 class DeployRollbackRequest(BaseModel):
     plan_id: str
 
 
+<<<<<<< HEAD
 class EC2DeployRequest(BaseModel):
     """EC2 배포 요청."""
     workspace_path: str = ""
@@ -553,6 +604,8 @@ def _ship_finish(error: str = "", repo_url: str = "") -> None:
     _SHIP_STATE["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 # ── Health & Status ───────────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -611,8 +664,11 @@ async def scan_project(body: ScanWorkspaceRequest, _=Depends(_verify_token)):
     """워크스페이스 스캔 → ProjectProfile 반환 + 메모리 캐시."""
     global _current_project
 
+<<<<<<< HEAD
     if not body.workspace_path.strip():
         raise HTTPException(status_code=400, detail="VS Code에서 프로젝트 폴더를 먼저 열어주세요.")
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
     workspace_path = Path(body.workspace_path).expanduser().resolve()
     if not workspace_path.exists():
         raise HTTPException(status_code=404, detail="워크스페이스 경로가 없습니다.")
@@ -752,15 +808,22 @@ async def generate_infra(body: InfraGenerateRequest, _=Depends(_verify_token)):
     global _orchestrator_state, _current_infra
 
     file_type = body.file_type.lower()
+<<<<<<< HEAD
     _raw_workspace = body.workspace_path or (
         _current_project.workspace_path if _current_project else "."
     )
     # 원격 배포 시 로컬 경로가 없을 수 있으므로 현재 디렉터리로 폴백
     workspace = _raw_workspace if Path(_raw_workspace).exists() else str(Path.cwd())
+=======
+    workspace = body.workspace_path or (
+        _current_project.workspace_path if _current_project else "."
+    )
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
     try:
         from infra_agent import (
             generate_dockerfile, generate_docker_compose, generate_github_actions,
+<<<<<<< HEAD
             generate_dockerignore,
         )
         if file_type == "dockerignore":
@@ -769,6 +832,10 @@ async def generate_infra(body: InfraGenerateRequest, _=Depends(_verify_token)):
                 workspace_path=workspace,
             )
         elif file_type == "dockerfile":
+=======
+        )
+        if file_type == "dockerfile":
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
             proposal = generate_dockerfile(
                 request=None,
                 project_profile=_current_project,
@@ -787,7 +854,11 @@ async def generate_infra(body: InfraGenerateRequest, _=Depends(_verify_token)):
         else:
             raise HTTPException(
                 status_code=400,
+<<<<<<< HEAD
                 detail="file_type 은 dockerfile / docker-compose / github-actions / dockerignore 중 하나여야 합니다.",
+=======
+                detail="file_type 은 dockerfile / docker-compose / github-actions 중 하나여야 합니다.",
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
             )
     except HTTPException:
         raise
@@ -816,8 +887,13 @@ async def approve_infra(body: InfraApproveRequest, _=Depends(_verify_token)):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_current_infra.content, encoding="utf-8")
     except Exception as e:
+<<<<<<< HEAD
         # 원격 배포 시 로컬 경로가 없을 수 있음 → 파일 쓰기 스킵하고 계속 진행
         logger.warning(f"[server] infra file write skipped (remote mode?): {e}")
+=======
+        logger.exception("[server] infra file write failed")
+        raise HTTPException(status_code=500, detail=f"파일 저장 실패: {e}") from e
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
     _orchestrator_state = OrchestratorState.INFRA_READY
 
@@ -889,8 +965,11 @@ async def _run_deploy_in_background(plan: DeploymentPlan, workspace: str, projec
         _deploy_progress["error"] = result.error or ""
 
         if result.success:
+<<<<<<< HEAD
             global _current_deploy_record
             _current_deploy_record = result.deployment_record
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
             _deploy_progress["stage"] = "done"
             _orchestrator_state = OrchestratorState.DEPLOYED
         else:
@@ -1060,16 +1139,30 @@ async def deploy_rollback(body: DeployRollbackRequest, _=Depends(_verify_token))
     Request : { plan_id: str }
     Response: { status, message, logs }
     """
+<<<<<<< HEAD
     if not _current_deploy_record:
         raise HTTPException(status_code=400, detail="롤백할 배포 기록 없음")
 
     workspace = _current_project.workspace_path if _current_project else "."
+=======
+    workspace = (
+        _current_project.workspace_path if _current_project else "."
+    )
+    project_id = (
+        _current_project.project_id if _current_project else "default"
+    )
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 
     try:
         from local_deploy_agent import get_local_deploy_agent
         result = await asyncio.to_thread(
+<<<<<<< HEAD
             get_local_deploy_agent().rollback,
             _current_deploy_record,
+=======
+            get_local_deploy_agent().rollback_latest,
+            project_id,
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
             workspace,
         )
     except Exception as e:
@@ -1083,6 +1176,7 @@ async def deploy_rollback(body: DeployRollbackRequest, _=Depends(_verify_token))
     }
 
 
+<<<<<<< HEAD
 # ── EC2 배포 ──────────────────────────────────────────────────────────
 
 async def _run_ec2_deploy(body: "EC2DeployRequest") -> None:
@@ -1698,6 +1792,8 @@ async def postmortem_list(_=Depends(_verify_token)):
     return {"items": items}
 
 
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 # ── Git ──────────────────────────────────────────────────────────────
 
 @app.post("/api/git/commit")
@@ -1726,6 +1822,7 @@ async def git_commit(body: GitCommitRequest, _=Depends(_verify_token)):
     return result
 
 
+<<<<<<< HEAD
 @app.get("/api/git/info")
 async def git_info(workspace_path: str = "", force_refresh: bool = False, _=Depends(_verify_token)):
     """
@@ -2133,10 +2230,16 @@ async def ship_github_status(_=Depends(_verify_token)):
     return _SHIP_STATE
 
 
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 # ── Cost ─────────────────────────────────────────────────────────────
 
 @app.get("/api/cost")
 async def get_cost(_=Depends(_verify_token)):
+<<<<<<< HEAD
+=======
+    """SessionLogger SQLite 누적치 기반 일/월 비용."""
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
     try:
         from session_logger import get_session_logger
         logger_inst = get_session_logger()
@@ -2159,11 +2262,16 @@ async def pause_monitoring(_=Depends(_verify_token)):
 
 @app.get("/api/token")
 async def get_token(request: Request):
+<<<<<<< HEAD
+=======
+    """대시보드 초기화용 — 127.0.0.1 만 허용."""
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
     if request.client and request.client.host not in ("127.0.0.1", "::1"):
         raise HTTPException(status_code=403, detail="localhost only")
     return {"token": SESSION_TOKEN, "port": PORT}
 
 
+<<<<<<< HEAD
 @app.get("/dashboard")
 async def dashboard(request: Request):
     from fastapi.responses import HTMLResponse
@@ -2182,6 +2290,8 @@ async def dashboard(request: Request):
     return HTMLResponse(content=render_dashboard(embed_token, PORT), status_code=200)
 
 
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 # ── 유틸리티 ──────────────────────────────────────────────────────────
 
 def get_dashboard_url() -> str:
@@ -2189,12 +2299,25 @@ def get_dashboard_url() -> str:
 
 
 async def start_server(session_index: dict) -> None:
+<<<<<<< HEAD
     global _session_ref
     _session_ref = session_index
     _save_runtime_config()
     config = uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="warning")
     server = uvicorn.Server(config)
     _server_ready.set()
+=======
+    """Uvicorn 서버 비동기 실행 (main.py 에서 호출)."""
+    global _session_ref
+    _session_ref = session_index
+
+    _save_runtime_config()
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="warning")
+    server = uvicorn.Server(config)
+    _server_ready.set()
+
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
     print(f"[server] ReCoder v6.4 Local Server started on {get_dashboard_url()}")
     await server.serve()
 
@@ -2204,6 +2327,7 @@ def wait_until_ready(timeout: float = 15.0) -> bool:
         return _server_ready.wait() if hasattr(_server_ready, "wait") else asyncio.run(
             asyncio.wait_for(_server_ready.wait(), timeout=timeout)
         )
+<<<<<<< HEAD
     except Exception:
         return False
 
@@ -2498,3 +2622,7 @@ async def mcp_health(_=Depends(_verify_token)):
     except ImportError:  # pragma: no cover
         raise HTTPException(status_code=500, detail="mcp_server module missing")
     return {"tools": list_tools(), "transport": "stdio"}
+=======
+    except asyncio.TimeoutError:
+        return False
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27

@@ -37,6 +37,7 @@ policy_cache.py             AuditLog (hash chain)
 
 ---
 
+<<<<<<< HEAD
 ## 구현된 모듈 목록
 
 ### Local Core (`core/`)
@@ -198,3 +199,105 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 PROMETHEUS_GATEWAY_URL=http://localhost:9091
 LOKI_URL=http://localhost:3100
 ```
+=======
+## 7. 저장 구조
+
+```
+~/.recoder/
+├── runtime.json              # Core 포트, session token
+├── core.lock                 # lock file (PID 목록)
+├── diagnostics.json          # 환경 진단 결과, resolved model metadata
+├── projects/{project_id}.json  # ProjectProfile
+├── sessions/{session_id}/    # 세션 기록 (JSONL)
+├── backups/{session_id}/     # 패치 백업 (90일 보관)
+├── logs/terminal-{date}.jsonl  # 터미널 로그 (masked only)
+└── templates/                # CommandTemplate / FileTemplate Registry
+```
+
+파일 권한: `runtime.json`, `diagnostics.json`, `projects/`, `sessions/`, `logs/` → `0600` (macOS/Linux)  
+백업 디렉터리: `0700`  
+Windows ACL 설정 실패 시 Soft Fail (경고 로그만 남기고 Core 정상 시작)
+
+---
+
+## 8. LLM 호출 규칙
+
+- LLM은 **직접 명령을 생성하지 않는다.**
+- LLM 출력: `PatchProposal`, `InfraFileProposal`, `DeploymentPlan`, `ResponseProposal`만 허용
+- 실제 명령: **CommandTemplate Registry**가 생성
+- 실제 파일: **FileTemplate Registry**가 조립
+- 모든 LLM 출력은 **schema validation** 통과 후 사용
+- Bedrock 호출: Converse API Structured Output 1순위 → Tool Use → JSON 추출 → schema repair → fallback model
+
+---
+
+## 9. 1학기 One Scene (최소 성공 기준)
+
+```
+FastAPI 앱 실행
+  → ModuleNotFoundError 발생
+  → "Run with ReCoder" 또는 Shell Integration으로 에러 수집
+  → 사이드바에 분석 결과 표시 (PatchProposal)
+  → diff preview 확인 + 사용자 승인
+  → patch 자동 적용
+  → 앱 재실행 성공
+  → "Dockerfile 생성하시겠습니까?" 제안
+  → Trivy 0건 + Hadolint 통과
+  → 사용자 승인 → docker build → docker run → Health Check OK
+```
+
+---
+
+## 10. 현재 마일스톤 상태 (2026-05-08 기준)
+
+**✅ 완료 — Extension ↔ Local Core 전체 배선 완료**
+
+- `POST /api/analyze` → `analyzer.analyze` + `code_agent.generate_patch` 체인 실동작
+- `POST /api/patch/approve` → `code_agent.apply_patch` 실적용 + rollback 보장
+- `POST /api/infra/generate` → `infra_agent.generate` + hadolint 품질 검사
+- `POST /api/deploy/local` → `LocalDeployAgent.deploy()` background task + `/api/deploy/status` polling
+- `POST /api/security/scan` → Trivy + Hadolint 결과 반환
+- Sidebar Ready 카드(Core/AI/Docker), diff preview, Ship 탭 ▶ 실행 모두 정상화
+- pytest 15/15 통과
+
+**다음 목표 — 로컬 환경에서 One Scene 완주**
+1. `python core/main.py` 실행 → Core 기동 확인
+2. VSCode에서 Extension 실행 → Ready 카드 확인
+3. FastAPI 앱에서 ModuleNotFoundError 유발 → Sidebar에 diff preview 확인
+4. 승인 → 패치 적용 → 재실행 성공 확인
+5. Dockerfile 생성 제안 → 승인 → docker build → docker run → Health Check OK
+
+---
+
+## 11. 주의사항 / 금지사항
+
+- `monitor.py`, `widget.py`, `capture_agent.py`는 v6.4에서 사용하지 않는다. 수정하지 말 것.
+- `schemas.py`의 중복 클래스: 이미 해결됨. 재작업 불필요.
+- LLM이 생성한 명령을 직접 `subprocess.run()`하는 코드는 절대 작성하지 않는다. CommandTemplate Registry를 통해서만 실행.
+- `gitleaks` 결과의 secret 원문은 LLM에 전송하지 않는다. 파일 경로·라인 번호·타입·rule_id만 전달.
+- raw context는 메모리에서만 처리. 저장소(파일, DB, 로그)에는 masked 데이터만 저장.
+- Local Core는 `127.0.0.1`만 바인딩. 외부 노출 절대 금지.
+
+---
+
+## 12. 파일 소유권 (충돌 방지)
+
+```
+이동규 전담 (core/ — Python)       윤세빈 전담 (extension/ — TypeScript)
+────────────────────────────────   ──────────────────────────────────────
+core/server.py                     extension/src/api/coreClient.ts
+core/git_agent.py (신규)           extension/src/ui/sidebarProvider.ts
+core/local_deploy_agent.py         extension/package.json
+core/quality_runner.py
+core/session_logger.py
+core/first_run.py
+core/schemas.py (변경 시 TS 공유)
+core/recoder.spec (신규)
+```
+
+신규 API 계약 (미리 확정, 변경 금지):
+- `POST /api/git/commit` → `{ workspace_path, message, session_id }` → `{ status, commit_hash, message }`
+- `POST /api/deploy/rollback` → `{ plan_id }` → `{ status, message, logs[] }`
+
+PROGRESS.md와 HANDOFF.md는 양쪽 모두 수정 가능. 작업 완료 시 해당 행 ✅로 변경.
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27

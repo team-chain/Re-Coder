@@ -183,6 +183,7 @@ class CommandRegistry:
                 risk_level=RiskLevel.HIGH,
                 approval_level=4,
             ),
+<<<<<<< HEAD
 
             # ── ECS Fargate 전용 (Q3-A, Level 3~4) ───────────────────
             "ecr_get_login_password": CommandTemplate(
@@ -233,6 +234,8 @@ class CommandRegistry:
                 risk_level=RiskLevel.LOW,
                 approval_level=2,
             ),
+=======
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
         }
 
     def get(self, template_id: str) -> Optional[CommandTemplate]:

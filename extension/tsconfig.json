@@ -2,6 +2,7 @@
   "compilerOptions": {
     "module": "commonjs",
     "target": "ES2020",
+<<<<<<< HEAD
     "lib": ["ES2020", "dom", "dom.iterable"],
     "outDir": "./out",
     "rootDir": "./src",
@@ -18,4 +19,16 @@
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "out", "webview-src", "src/ui"]
+=======
+    "outDir": "./out",
+    "rootDir": "./src",
+    "lib": ["ES2020"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", ".vscode-test"]
+>>>>>>> 74cf4369799da45d0fa49de67d56e58e01a2cc27
 }
