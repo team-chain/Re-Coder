@@ -1,0 +1,11 @@
+# prometheus.yml — Q4 1차 minimal config.
+# - OTel Collector 의 self-metrics 와 remote_write 수신만 우선 설정한다.
+# - 별도 scrape 가 필요한 타깃은 Q4 후반에 추가한다.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "otel-collector"
+    static_configs:
+      - targets: ["otel-collector:8889"]

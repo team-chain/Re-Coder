@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2020",
+    "lib": ["ES2020", "dom", "dom.iterable"],
+    "outDir": "./out",
+    "rootDir": "./src",
+    "strict": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": true,
+    "typeRoots": ["./node_modules/@types"],
+    "types": ["node", "vscode"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "out", "webview-src", "src/ui"]
+}

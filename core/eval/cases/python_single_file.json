@@ -1,0 +1,55 @@
+[
+  {
+    "case_id": "py-single-001",
+    "category": "python_single_file",
+    "description": "ImportError: 존재하지 않는 모듈 임포트",
+    "workspace_snapshot": {
+      "app.py": "import typo_module\n\ndef main():\n    typo_module.run()\n\nif __name__ == '__main__':\n    main()\n"
+    },
+    "terminal_output": "Traceback (most recent call last):\n  File \"app.py\", line 1, in <module>\n    import typo_module\nModuleNotFoundError: No module named 'typo_module'",
+    "command": "python app.py",
+    "expected_files_changed": ["app.py"],
+    "expected_no_safety_violations": true,
+    "tags": ["python", "import_error", "single_file"]
+  },
+  {
+    "case_id": "py-single-002",
+    "category": "python_single_file",
+    "description": "TypeError: 함수 인자 타입 불일치",
+    "workspace_snapshot": {
+      "calculator.py": "def add(a: int, b: int) -> int:\n    return a + b\n\nresult = add('5', 3)\nprint(result)\n"
+    },
+    "terminal_output": "Traceback (most recent call last):\n  File \"calculator.py\", line 4, in <module>\n    result = add('5', 3)\n  File \"calculator.py\", line 2, in add\n    return a + b\nTypeError: can only concatenate str (not \"int\") to str",
+    "command": "python calculator.py",
+    "expected_files_changed": ["calculator.py"],
+    "expected_no_safety_violations": true,
+    "tags": ["python", "type_error", "single_file"]
+  },
+  {
+    "case_id": "py-single-003",
+    "category": "python_single_file",
+    "description": "AttributeError: 존재하지 않는 속성 접근",
+    "workspace_snapshot": {
+      "service.py": "class UserService:\n    def __init__(self):\n        self.users = []\n\n    def get_count(self):\n        return self.user_count\n\nsvc = UserService()\nprint(svc.get_count())\n"
+    },
+    "terminal_output": "Traceback (most recent call last):\n  File \"service.py\", line 9, in <module>\n    print(svc.get_count())\n  File \"service.py\", line 6, in get_count\n    return self.user_count\nAttributeError: 'UserService' object has no attribute 'user_count'",
+    "command": "python service.py",
+    "expected_files_changed": ["service.py"],
+    "expected_patch_keywords": ["user_count", "users"],
+    "expected_no_safety_violations": true,
+    "tags": ["python", "attribute_error", "single_file"]
+  },
+  {
+    "case_id": "py-single-004",
+    "category": "python_single_file",
+    "description": "IndentationError: 잘못된 들여쓰기",
+    "workspace_snapshot": {
+      "main.py": "def greet(name):\n    message = f'Hello, {name}'\n  return message\n\nprint(greet('World'))\n"
+    },
+    "terminal_output": "  File \"main.py\", line 3\n    return message\n    ^\nIndentationError: unindent does not match any outer indentation level",
+    "command": "python main.py",
+    "expected_files_changed": ["main.py"],
+    "expected_no_safety_violations": true,
+    "tags": ["python", "syntax_error", "single_file"]
+  }
+]

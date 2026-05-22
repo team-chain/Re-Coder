@@ -1,0 +1,9 @@
+# Control Plane — Q2-A
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic[email]>=2.7.0
+pydantic-settings>=2.3.0
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.29.0           # PostgreSQL async driver
+httpx>=0.27.0             # OIDC code exchange
+python-multipart>=0.0.9   # form data

@@ -1,0 +1,167 @@
+{
+  "name": "recoder",
+  "displayName": "ReCoder — AI DevOps Agent",
+  "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
+  "version": "1.0.0",
+  "publisher": "recoder-team",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning",
+    "Debuggers"
+  ],
+  "keywords": [
+    "ai",
+    "devops",
+    "docker",
+    "bedrock",
+    "agent",
+    "claude"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "icon": "media/icon.png",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "recoder",
+          "title": "ReCoder",
+          "icon": "media/recoder-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "recoder": [
+        {
+          "type": "webview",
+          "id": "recoder.sidebarView",
+          "name": "ReCoder"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "recoder.analyzeError",
+        "title": "ReCoder: Analyze Error",
+        "icon": "$(bug)"
+      },
+      {
+        "command": "recoder.runWithRecoder",
+        "title": "ReCoder: Run with ReCoder",
+        "icon": "$(play)"
+      },
+      {
+        "command": "recoder.generateDockerfile",
+        "title": "ReCoder: Generate Dockerfile",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "recoder.runDiagnostics",
+        "title": "ReCoder: Run Diagnostics",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "recoder.restartCore",
+        "title": "ReCoder: Restart Core",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "recoder.stopCore",
+        "title": "ReCoder: Stop Core",
+        "icon": "$(stop)"
+      },
+      {
+        "command": "recoder.openWorkbench",
+        "title": "ReCoder: Open Workbench",
+        "icon": "$(dashboard)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "recoder.analyzeError",
+          "group": "recoder@1",
+          "when": "editorHasSelection"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "recoder.analyzeError",
+          "group": "recoder@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ReCoder",
+      "properties": {
+        "recoder.core.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start Local Core when sidebar opens."
+        },
+        "recoder.core.port": {
+          "type": "number",
+          "default": 17894,
+          "description": "Base port for Local Core (fallback range: 17895–17910)."
+        },
+        "recoder.llm.provider": {
+          "type": "string",
+          "enum": [
+            "bedrock",
+            "gemini",
+            "auto"
+          ],
+          "default": "auto",
+          "description": "LLM provider preference. 'auto' uses Bedrock with Gemini fallback."
+        },
+        "recoder.llm.region": {
+          "type": "string",
+          "default": "us-east-1",
+          "description": "AWS region for Bedrock API calls."
+        },
+        "recoder.context.maxLines": {
+          "type": "number",
+          "default": 200,
+          "description": "Maximum terminal output lines to collect for context."
+        },
+        "recoder.polling.interval": {
+          "type": "number",
+          "default": 4000,
+          "description": "Core status polling interval in milliseconds (3000–10000)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
+    "build": "npm run compile && npm run build:webview",
+    "build:webview": "cd webview-src && npx webpack --config webpack.config.js --mode production",
+    "watch:webview": "cd webview-src && npx webpack --config webpack.config.js --mode development --watch",
+    "package": "npx vsce package --no-dependencies",
+    "lint": "eslint src --ext ts",
+    "pretest": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.41",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "ts-loader": "^9.5.0",
+    "typescript": "^5.9.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.0"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}

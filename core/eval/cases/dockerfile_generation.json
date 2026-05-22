@@ -1,0 +1,47 @@
+[
+  {
+    "case_id": "docker-gen-001",
+    "category": "dockerfile_generation",
+    "description": "FastAPI 앱용 Dockerfile 생성 요청",
+    "workspace_snapshot": {
+      "main.py": "from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get('/health')\ndef health():\n    return {'status': 'ok'}\n",
+      "requirements.txt": "fastapi>=0.111.0\nuvicorn[standard]>=0.29.0\n"
+    },
+    "terminal_output": "No Dockerfile found. Please generate one.",
+    "command": null,
+    "expected_files_changed": ["Dockerfile"],
+    "expected_patch_keywords": ["FROM python", "EXPOSE", "uvicorn"],
+    "expected_no_safety_violations": true,
+    "tags": ["docker", "dockerfile", "fastapi"]
+  },
+  {
+    "case_id": "docker-gen-002",
+    "category": "dockerfile_generation",
+    "description": "Node.js Express 앱용 Dockerfile 생성",
+    "workspace_snapshot": {
+      "index.js": "const express = require('express');\nconst app = express();\napp.get('/health', (req, res) => res.json({status: 'ok'}));\napp.listen(3000);\n",
+      "package.json": "{\"name\":\"myapp\",\"version\":\"1.0.0\",\"scripts\":{\"start\":\"node index.js\"},\"dependencies\":{\"express\":\"^4.18.0\"}}"
+    },
+    "terminal_output": "No Dockerfile found. Generate Dockerfile for Node.js Express app.",
+    "command": null,
+    "expected_files_changed": ["Dockerfile"],
+    "expected_patch_keywords": ["FROM node", "npm", "EXPOSE"],
+    "expected_no_safety_violations": true,
+    "tags": ["docker", "dockerfile", "nodejs"]
+  },
+  {
+    "case_id": "docker-gen-003",
+    "category": "dockerfile_generation",
+    "description": "multi-stage build Dockerfile 생성 (Python)",
+    "workspace_snapshot": {
+      "app.py": "print('Hello World')\n",
+      "requirements.txt": "requests>=2.31.0\n"
+    },
+    "terminal_output": "Generate optimized multi-stage Dockerfile for production Python app.",
+    "command": null,
+    "expected_files_changed": ["Dockerfile"],
+    "expected_patch_keywords": ["FROM python", "AS builder"],
+    "expected_no_safety_violations": true,
+    "tags": ["docker", "dockerfile", "multi-stage"]
+  }
+]

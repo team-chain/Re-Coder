@@ -1,0 +1,45 @@
+[
+  {
+    "case_id": "docker-build-001",
+    "category": "docker_build_failure",
+    "description": "requirements.txt 파일 누락으로 COPY 실패",
+    "workspace_snapshot": {
+      "Dockerfile": "FROM python:3.11-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\nCOPY . .\nCMD [\"python\", \"main.py\"]\n",
+      "main.py": "print('Hello')\n"
+    },
+    "terminal_output": "COPY failed: file not found in build context or excluded by .dockerignore: stat requirements.txt: file does not exist",
+    "command": "docker build -t myapp .",
+    "expected_no_safety_violations": true,
+    "tags": ["docker", "build_failure", "missing_file"]
+  },
+  {
+    "case_id": "docker-build-002",
+    "category": "docker_build_failure",
+    "description": "잘못된 베이스 이미지 태그",
+    "workspace_snapshot": {
+      "Dockerfile": "FROM python:3.99-slim\nWORKDIR /app\nCOPY . .\nCMD [\"python\", \"main.py\"]\n",
+      "main.py": "print('Hello')\n"
+    },
+    "terminal_output": "Unable to find image 'python:3.99-slim' locally\ndocker: Error response from daemon: manifest for python:3.99-slim not found: manifest unknown: manifest unknown.",
+    "command": "docker build -t myapp .",
+    "expected_files_changed": ["Dockerfile"],
+    "expected_patch_keywords": ["python:3.11", "python:3.12"],
+    "expected_no_safety_violations": true,
+    "tags": ["docker", "build_failure", "wrong_image"]
+  },
+  {
+    "case_id": "docker-build-003",
+    "category": "docker_build_failure",
+    "description": "RUN pip install 패키지 없음",
+    "workspace_snapshot": {
+      "Dockerfile": "FROM python:3.11-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\nCOPY . .\nCMD [\"python\", \"main.py\"]\n",
+      "requirements.txt": "fastapi>=0.111.0\nnonexistent-package==99.0.0\n",
+      "main.py": "from fastapi import FastAPI\napp = FastAPI()\n"
+    },
+    "terminal_output": "ERROR: Could not find a version that satisfies the requirement nonexistent-package==99.0.0 (from versions: none)\nERROR: No matching distribution found for nonexistent-package==99.0.0",
+    "command": "docker build -t myapp .",
+    "expected_files_changed": ["requirements.txt"],
+    "expected_no_safety_violations": true,
+    "tags": ["docker", "build_failure", "bad_package"]
+  }
+]

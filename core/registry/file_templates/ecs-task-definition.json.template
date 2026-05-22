@@ -1,0 +1,38 @@
+{
+  "family": "{{task_definition_family}}",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "{{cpu}}",
+  "memory": "{{memory}}",
+  "executionRoleArn": "{{execution_role_arn}}",
+  "taskRoleArn": "{{task_role_arn}}",
+  "containerDefinitions": [
+    {
+      "name": "{{container_name}}",
+      "image": "{{image}}",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": {{container_port}},
+          "protocol": "tcp"
+        }
+      ],
+      "environment": {{env_vars_json}},
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/{{task_definition_family}}",
+          "awslogs-region": "{{region}}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:{{container_port}}{{health_check_path}} || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}
