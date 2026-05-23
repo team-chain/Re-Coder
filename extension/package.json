@@ -21,8 +21,7 @@
     "claude"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onView:recoder-sidebar"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "icon": "media/icon.png",
@@ -41,12 +40,7 @@
         {
           "type": "webview",
           "id": "recoder.sidebarView",
-          "name": "ReCoder"
-        },
-        {
-          "type": "webview",
-          "id": "recoder-sidebar",
-          "name": "ReCoder (Legacy)"
+          "name": "Re-Coder"
         }
       ]
     },
@@ -90,6 +84,16 @@
         "command": "recoder.openWorkbench",
         "title": "ReCoder: Open Workbench",
         "icon": "$(dashboard)"
+      },
+      {
+        "command": "recoder.moveToRightSidebar",
+        "title": "ReCoder: Move to Right Sidebar (Kiro-style)",
+        "icon": "$(layout-sidebar-right)"
+      },
+      {
+        "command": "recoder.moveToLeftSidebar",
+        "title": "ReCoder: Move to Left Sidebar",
+        "icon": "$(layout-sidebar-left)"
       }
     ],
     "menus": {
@@ -107,6 +111,19 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "recoder.openWorkbench",
+        "key": "ctrl+shift+r ctrl+w",
+        "mac": "cmd+shift+r cmd+w",
+        "when": "!terminalFocus"
+      },
+      {
+        "command": "recoder.analyzeError",
+        "key": "ctrl+shift+r ctrl+a",
+        "mac": "cmd+shift+r cmd+a"
+      }
+    ],
     "configuration": {
       "title": "ReCoder",
       "properties": {
