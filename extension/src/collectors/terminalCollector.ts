@@ -6,7 +6,7 @@
  * 4순위: 수동 붙여넣기 (Sidebar에서 처리)
  */
 import * as vscode from 'vscode';
-import { CoreManager } from '../core/coreManager';
+import { CoreManager } from '../core/CoreManager';
 
 export class TerminalCollector {
     private _latestOutput: string = '';
