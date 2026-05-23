@@ -266,10 +266,10 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     );
   }
 
-  const fileTabs: { id: "dockerfile" | "compose" | "actions"; icon: string; label: string }[] = [
-    { id: "dockerfile", icon: "📄", label: "Dockerfile" },
-    { id: "compose", icon: "🐋", label: "Compose" },
-    { id: "actions", icon: "⚙", label: "GitHub Actions" },
+  const fileTabs: { id: "dockerfile" | "compose" | "actions"; label: string }[] = [
+    { id: "dockerfile", label: "Dockerfile" },
+    { id: "compose", label: "Compose" },
+    { id: "actions", label: "GitHub Actions" },
   ];
 
   // Derive displayed content for the active file tab
@@ -309,7 +309,6 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
                 transition: "all 0.15s",
               }}
             >
-              <span>{tab.icon}</span>
               {tab.label}
             </button>
           );
@@ -334,7 +333,6 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           borderBottom: "1px solid #2a2a2a",
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#aaa" }}>
-            <span>📄</span>
             <span style={{ fontWeight: 500 }}>
               {activeFileTab === "dockerfile" ? "Dockerfile" : activeFileTab === "compose" ? "docker-compose.yml" : ".github/workflows/deploy.yml"}
             </span>

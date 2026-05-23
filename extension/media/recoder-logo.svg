@@ -1,0 +1,41 @@
+<!--
+  Re-Coder Brand Logo
+  업로드된 브랜드 이미지 기반 — 원형 화살표로 둘러싸인 R + 코드 브래킷 모티프.
+  사이드바 / Workbench 헤더에서 사용. fill 색상이 currentColor 이라
+  VSCode 테마(다크/라이트/HC)에 자동 적응한다.
+
+  사용:
+    <img src="...recoder-logo.svg" />
+    또는 inline SVG (예: webview HTML 안에서 직접 삽입)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
+     fill="none" stroke="currentColor"
+     stroke-linecap="round" stroke-linejoin="round">
+
+  <!-- Gradient stops for premium look (only used when explicitly enabled) -->
+  <defs>
+    <linearGradient id="rc-grad" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3a8fb0" />
+      <stop offset="1" stop-color="#1f3b56" />
+    </linearGradient>
+  </defs>
+
+  <!-- 바깥 회전 화살표 1 (오른쪽 위 → 왼쪽 위, 시계 반대 방향) -->
+  <path d="M 51 16 A 22 22 0 0 0 13 22" stroke-width="3" />
+  <polyline points="51,7 51,16 42,16" stroke-width="3" />
+
+  <!-- 바깥 회전 화살표 2 (왼쪽 아래 → 오른쪽 아래, 시계 반대로 닫는 흐름) -->
+  <path d="M 13 48 A 22 22 0 0 0 51 42" stroke-width="3" />
+  <polyline points="13,57 13,48 22,48" stroke-width="3" />
+
+  <!-- 가운데 R 자 — sans-serif 모던 형태 -->
+  <!-- 세로 stem -->
+  <line x1="22" y1="20" x2="22" y2="46" stroke-width="3.5" />
+  <!-- 위쪽 반원 -->
+  <path d="M 22 20 L 30 20 A 6 6 0 0 1 30 32 L 22 32" stroke-width="3.5" />
+  <!-- 대각선 leg -->
+  <line x1="27" y1="32" x2="35" y2="46" stroke-width="3.5" />
+
+  <!-- 코드 브래킷 ⟩ — "Coder" 모티프 -->
+  <polyline points="41,26 46,31 41,36" stroke-width="2.5" />
+</svg>

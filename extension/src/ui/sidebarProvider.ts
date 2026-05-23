@@ -1523,7 +1523,7 @@ body{
         <span class="key">태그</span>
         <input class="gd-new-input" id="sb-ec2-tag" placeholder="latest" style="width:120px;font-size:10px;padding:2px 5px">
       </div>
-      <button class="sb-panel-btn primary" id="sb-ec2-deploy-btn">🚀 EC2 배포</button>
+      <button class="sb-panel-btn primary" id="sb-ec2-deploy-btn">EC2 배포</button>
       <div id="sb-ec2-progress" style="display:none;margin-top:6px">
         <div class="sb-dep-row">
           <span class="key">단계</span>
@@ -1560,7 +1560,7 @@ body{
         <span class="key">태그</span>
         <input class="gd-new-input" id="sb-ecs-tag" placeholder="latest" style="width:110px;font-size:10px;padding:2px 5px">
       </div>
-      <button class="sb-panel-btn primary" id="sb-ecs-deploy-btn">🚀 ECS 배포</button>
+      <button class="sb-panel-btn primary" id="sb-ecs-deploy-btn">ECS 배포</button>
       <div id="sb-ecs-progress" style="display:none;margin-top:6px">
         <div class="sb-dep-row">
           <span class="key">단계</span>

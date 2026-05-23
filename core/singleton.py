@@ -27,6 +27,10 @@ _RECODER_DIR = Path.home() / ".recoder"
 
 
 class CoreSingleton:
+    # Root directory for all ReCoder runtime state (§21).
+    # Exposed as a class attribute so external code (main.py, session_logger,
+    # rollback_policy, …) can reference the same location consistently.
+    RECODER_HOME: Path = _RECODER_DIR
     LOCK_FILE: Path = _RECODER_DIR / "core.lock"
     RUNTIME_FILE: Path = _RECODER_DIR / "runtime.json"
     DEFAULT_PORT: int = 17894
