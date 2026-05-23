@@ -21,6 +21,21 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Registry integration (§14.2) — commands are validated via the registry
+# before subprocess execution. The registry is the single source of truth for
+# allowed commands and parameter shapes; actual execution still uses
+# subprocess args (not shell=True) for shell-injection safety.
+# ---------------------------------------------------------------------------
+
+def _registry():
+    try:
+        from registries.command_registry import get_command_registry, ValidationError
+    except ImportError:  # pragma: no cover — fallback when imported from project root
+        from core.registries.command_registry import get_command_registry, ValidationError
+    return get_command_registry(), ValidationError
+
 # ---------------------------------------------------------------------------
 # Schema imports
 # ---------------------------------------------------------------------------
@@ -156,6 +171,20 @@ class DeployAgent:
 
         Returns (success, stdout, stderr).
         """
+        # §14.2 — validate via CommandRegistry before execution
+        registry, ValidationError = _registry()
+        try:
+            registry.build_command("docker_build", {
+                "image": image_name,
+                "context_path": ".",
+            })
+            logger.info(
+                "[CommandRegistry] template=docker_build image=%s dockerfile=%s",
+                image_name, dockerfile_path,
+            )
+        except ValidationError as exc:
+            return False, "", f"CommandRegistry validation failed: {exc}"
+
         cmd = [
             "docker", "build",
             "-t", image_name,
@@ -199,9 +228,27 @@ class DeployAgent:
 
         Returns (success, stdout, stderr).
         """
+        # §14.2 — validate via CommandRegistry (image/container_name/ports)
+        registry, ValidationError = _registry()
+        try:
+            registry.build_command("docker_run", {
+                "container_name": container_name,
+                "host_port": host_port,
+                "container_port": container_port,
+                "image": image_name,
+            })
+            logger.info(
+                "[CommandRegistry] template=docker_run image=%s container=%s ports=%d:%d env_keys=%d",
+                image_name, container_name, host_port, container_port, len(env or {}),
+            )
+        except ValidationError as exc:
+            return False, "", f"CommandRegistry validation failed: {exc}"
+
         # Stop and remove existing container with same name (idempotent)
         await self._stop_remove_container(container_name)
 
+        # Construct subprocess args (extra flags beyond the registry's base
+        # template are added programmatically: env vars, restart policy).
         cmd = ["docker", "run"]
         if detach:
             cmd.append("-d")
@@ -337,7 +384,18 @@ class DeployAgent:
 
     @staticmethod
     async def _stop_remove_container(name: str) -> None:
-        """Best-effort stop + rm of an existing container (ignores errors)."""
+        """Best-effort stop + rm of an existing container (ignores errors).
+
+        §14.2 — validates container_name via CommandRegistry's docker_remove
+        template. Validation failure is silent (idempotent best-effort), but
+        injection attempts are blocked.
+        """
+        try:
+            registry, _ValidationError = _registry()
+            registry.build_command("docker_remove", {"container_name": name})
+        except Exception:
+            return  # invalid name → silently skip (no execution attempted)
+
         try:
             await asyncio.get_running_loop().run_in_executor(
                 None,

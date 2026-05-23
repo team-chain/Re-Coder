@@ -1,0 +1,107 @@
+/*
+ * ReCoder Webview — Tailwind entry point
+ *
+ * 이 파일이 PostCSS → Tailwind JIT 를 거쳐 webpack 번들에 주입된다.
+ * VSCode 테마 변수 (--vscode-*) 는 webview 가 자동으로 정의하므로
+ * 별도 :root 변수 선언이 필요 없다.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ----------------------------------------------------------------------
+ * Component classes — 자주 쓰는 패턴을 @apply 로 묶어둔다.
+ * Tailwind utility-first 원칙을 유지하되, 반복되는 카드/버튼/탭 등은
+ * 컴포넌트 클래스로 추출해 마크업을 깔끔하게 한다.
+ * ---------------------------------------------------------------------- */
+
+@layer components {
+  /* 사이드바 공통 카드 */
+  .rc-card {
+    @apply bg-vscode-panel-bg border border-vscode-panel-border rounded-card p-3;
+  }
+
+  /* Primary action button (VSCode 기본 버튼 색상) */
+  .rc-btn-primary {
+    @apply px-3 py-1.5 rounded bg-vscode-btn-bg text-vscode-btn-fg
+           hover:bg-vscode-btn-hover transition-colors duration-100
+           text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  /* Secondary action button */
+  .rc-btn-secondary {
+    @apply px-3 py-1.5 rounded bg-vscode-btn-secondary-bg text-vscode-btn-secondary-fg
+           hover:bg-vscode-btn-hover transition-colors duration-100
+           text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  /* Inline danger button (e.g. Reject) */
+  .rc-btn-danger {
+    @apply px-3 py-1.5 rounded bg-transparent text-vscode-error
+           hover:bg-vscode-error/10 transition-colors duration-100
+           text-sm font-medium border border-vscode-error/50;
+  }
+
+  /* Mode tab (Build / Ship / Operate) */
+  .rc-tab {
+    @apply px-3 py-1.5 cursor-pointer text-sm font-medium
+           text-vscode-desc hover:text-vscode-fg transition-colors;
+  }
+  .rc-tab-active {
+    @apply text-vscode-tab-active-fg border-b-2 border-vscode-focus;
+  }
+
+  /* Status pill (Ready / Partial / NotReady) */
+  .rc-pill {
+    @apply inline-flex items-center gap-1 px-2 py-0.5
+           rounded-full text-xs font-medium;
+  }
+  .rc-pill-ready    { @apply bg-vscode-success/20 text-vscode-success; }
+  .rc-pill-partial  { @apply bg-vscode-warning/20 text-vscode-warning; }
+  .rc-pill-notready { @apply bg-vscode-error/20 text-vscode-error; }
+
+  /* Approval modal container */
+  .rc-modal {
+    @apply rc-card max-w-md w-full;
+  }
+
+  /* Unified-diff line (used by BuildMode) */
+  .rc-diff-line       { @apply font-mono text-xs px-2 py-0.5 whitespace-pre; }
+  .rc-diff-line-add   { @apply rc-diff-line bg-vscode-diff-add text-vscode-success; }
+  .rc-diff-line-del   { @apply rc-diff-line bg-vscode-diff-del text-vscode-error; }
+  .rc-diff-line-ctx   { @apply rc-diff-line text-vscode-desc; }
+}
+
+/* ----------------------------------------------------------------------
+ * Global tweaks — webview 의 기본 마진/스크롤 처리
+ * ---------------------------------------------------------------------- */
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+body {
+  overflow-x: hidden;
+}
+
+/* VSCode webview 의 기본 link 색상 보정 */
+a {
+  color: var(--vscode-textLink-foreground);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--vscode-textLink-activeForeground);
+  text-decoration: underline;
+}
+
+/* code 블록 단조로움 줄이기 */
+code, pre {
+  font-family: var(--vscode-editor-font-family, monospace);
+}
