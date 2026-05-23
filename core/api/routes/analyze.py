@@ -23,6 +23,12 @@ router = APIRouter(tags=["analyze"])
 # proposal_id -> PatchProposal
 _proposals: dict[str, PatchProposal] = {}
 
+# fingerprint -> proposal_id (§19.1 4-stage filter, step 3: dedup cache)
+# Keyed by error fingerprint; values point into _proposals. Lifetime is
+# bounded by the ContextGate's 60-second TTL check — we don't garbage-collect
+# this map explicitly because cache misses simply create a fresh proposal.
+_fingerprint_to_proposal: dict[str, str] = {}
+
 # ---------------------------------------------------------------------------
 # Lazy singletons — optional deps don't block server startup
 # ---------------------------------------------------------------------------
@@ -262,23 +268,34 @@ async def analyze(request: AnalyzeRequest) -> PatchProposal:
     # 1. Masking (async — offloads CPU work to thread pool via ContextGate)
     masked_request = await _mask_request(request)
 
-    # 2. Scores via ContextGate methods
+    # 2. Scores via ContextGate methods (§19.1 stages 1 & 2)
     trigger_score = _compute_trigger_score(masked_request)
     quality_score = _compute_quality_score(masked_request)
 
-    # 3. Fingerprint dedup via ContextGate cache
+    # 3. Fingerprint dedup via ContextGate 60-second cache (§19.1 stage 3)
     fingerprint = _get_fingerprint(masked_request)
     if _check_fingerprint_cache(fingerprint):
-        # Dedup hit — return cached proposal if still in store; else proceed
-        for prop in _proposals.values():
-            # best-effort: return any recent proposal for this fingerprint
-            pass
+        cached_id = _fingerprint_to_proposal.get(fingerprint)
+        if cached_id is not None:
+            cached = _proposals.get(cached_id)
+            if cached is not None:
+                # Same error within 60s — return the prior proposal verbatim,
+                # avoiding a duplicate LLM call. (설계서 §19.1 단계 3)
+                import logging
+                logging.getLogger(__name__).info(
+                    "[FingerprintCache] hit fingerprint=%s proposal_id=%s — skipping LLM",
+                    fingerprint[:12], cached_id,
+                )
+                return cached
+        # Cache flag was set but no proposal stored — fall through (treat as miss)
 
-    # 4. Delegate to Orchestrator
+    # 4. Delegate to Orchestrator (stages 1+2 thresholds applied internally;
+    #    stage 4 AST chunking happens inside the orchestrator's LLM prompt build)
     proposal = await _delegate_to_orchestrator(masked_request, trigger_score, quality_score)
 
-    # 5. Store and update cache
+    # 5. Store and update both caches
     _proposals[proposal.proposal_id] = proposal
+    _fingerprint_to_proposal[fingerprint] = proposal.proposal_id
     _update_fingerprint_cache(fingerprint)
 
     return proposal
