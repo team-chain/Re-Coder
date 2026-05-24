@@ -1,0 +1,67 @@
+# docker-compose.otel.yml
+#
+# 설계서 §Q4 OpenTelemetry 통합 — EC2 Watchdog 옆에 OTel Collector / Prometheus /
+# Loki 를 함께 배포하기 위한 compose 정의.
+#
+# 사용법 (EC2 또는 로컬 데모):
+#   docker compose -f deploy/otel/docker-compose.otel.yml up -d
+#
+# Q4 1차에는 Tempo 미포함 (설계서 — Tempo 는 Q4 후반). 필요해지면 services 에 추가.
+#
+version: "3.9"
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.103.0
+    container_name: recoder-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    restart: unless-stopped
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/log:/var/log:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prom scrape endpoint (collector's own metrics)
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - recoder-obs
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: recoder-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-remote-write-receiver"
+      - "--enable-feature=otlp-write-receiver"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - recoder-obs
+
+  loki:
+    image: grafana/loki:2.9.10
+    container_name: recoder-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - recoder-obs
+
+volumes:
+  prom-data:
+  loki-data:
+
+networks:
+  recoder-obs:
+    driver: bridge

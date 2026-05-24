@@ -1,0 +1,43 @@
+[
+  {
+    "case_id": "health-001",
+    "category": "health_check_failure",
+    "description": "FastAPI /health 엔드포인트 없음",
+    "workspace_snapshot": {
+      "main.py": "from fastapi import FastAPI\napp = FastAPI()\n\n@app.get('/')\ndef root():\n    return {'message': 'hello'}\n"
+    },
+    "terminal_output": "Health check failed: GET /health returned 404\nContainer health: unhealthy\nDocker event: container=myapp status=unhealthy",
+    "command": null,
+    "expected_files_changed": ["main.py"],
+    "expected_patch_keywords": ["/health", "health"],
+    "expected_no_safety_violations": true,
+    "tags": ["health_check", "fastapi", "404"]
+  },
+  {
+    "case_id": "health-002",
+    "category": "health_check_failure",
+    "description": "포트 불일치 (앱 8000, ECS 3000 기대)",
+    "workspace_snapshot": {
+      "main.py": "import uvicorn\nfrom fastapi import FastAPI\napp = FastAPI()\n\n@app.get('/health')\ndef health():\n    return {'status': 'ok'}\n\nuvicorn.run(app, host='0.0.0.0', port=8000)\n",
+      "Dockerfile": "FROM python:3.11-slim\nWORKDIR /app\nCOPY . .\nRUN pip install fastapi uvicorn\nEXPOSE 3000\nCMD [\"python\", \"main.py\"]\n"
+    },
+    "terminal_output": "Health check failed: connection refused on port 3000\nContainer started on port 8000 but health check targets port 3000",
+    "command": null,
+    "expected_no_safety_violations": true,
+    "tags": ["health_check", "port_mismatch"]
+  },
+  {
+    "case_id": "health-003",
+    "category": "health_check_failure",
+    "description": "DB 연결 실패로 인한 health check 500 응답",
+    "workspace_snapshot": {
+      "main.py": "from fastapi import FastAPI\nimport psycopg2\n\napp = FastAPI()\n\n@app.get('/health')\ndef health():\n    conn = psycopg2.connect('postgresql://localhost/mydb')\n    return {'status': 'ok', 'db': 'connected'}\n"
+    },
+    "terminal_output": "Health check failed: GET /health returned 500\nOperationalError: could not connect to server: Connection refused\n    Is the server running on host \"localhost\" and accepting TCP/IP connections on port 5432?",
+    "command": null,
+    "expected_files_changed": ["main.py"],
+    "expected_patch_keywords": ["try", "except", "status"],
+    "expected_no_safety_violations": true,
+    "tags": ["health_check", "db_error", "500"]
+  }
+]

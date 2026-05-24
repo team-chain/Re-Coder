@@ -1,0 +1,562 @@
+"""
+ReCoder Core — First Run Diagnostics (설계서 v6.4 §11)
+
+5단계 Ready 상태 진단 + diagnostics.json 저장.
+Core Ready → AI Ready → Docker Ready → AWS Deploy Ready → Ops Ready
+
+결과는 ~/.recoder/diagnostics.json에 저장되어 VSCode 확장이 첫 실행
+시 사용자에게 진단 결과를 표시할 수 있도록 한다.
+
+포함 필드: resolved_model_id, resolved_region, is_cross_region_profile,
+provider_type, validation_time.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Tuple
+
+from schemas import DiagnosticsResult, ReadyStatus
+
+# ---------------------------------------------------------------------------
+# Paths & constants
+# ---------------------------------------------------------------------------
+
+RECODER_HOME = Path(os.getenv("RECODER_HOME", str(Path.home() / ".recoder")))
+DIAGNOSTICS_PATH = RECODER_HOME / "diagnostics.json"
+
+# Backwards-compatible aliases (used by older modules)
+_RECODER_DIR = RECODER_HOME
+_DIAGNOSTICS_FILE = DIAGNOSTICS_PATH
+
+# AWS regions that support Bedrock (non-exhaustive allowlist used to flag
+# cross-region inference profiles).
+_BEDROCK_REGIONS = [
+    "us-east-1",
+    "us-west-2",
+    "eu-central-1",
+    "eu-west-1",
+    "ap-northeast-1",
+    "ap-southeast-1",
+    "ap-southeast-2",
+]
+
+# Preferred Bedrock models in priority order — Claude 4.x 우선, 없으면 3.x 폴백.
+_BEDROCK_MODEL_PRIORITY = [
+    "anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "anthropic.claude-sonnet-4-20250514-v1:0",
+    "anthropic.claude-haiku-4-5-20251001-v1:0",
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "anthropic.claude-3-sonnet-20240229-v1:0",
+    "anthropic.claude-3-5-haiku-20241022-v1:0",
+    "anthropic.claude-3-haiku-20240307-v1:0",
+]
+
+
+# ---------------------------------------------------------------------------
+# Top-level orchestration
+# ---------------------------------------------------------------------------
+
+async def run_diagnostics() -> DiagnosticsResult:
+    """
+    전체 진단 실행. 결과를 diagnostics.json에 저장.
+    순서: Core Ready → AI Ready → Docker Ready → AWS Deploy Ready → Ops Ready
+    """
+    result = DiagnosticsResult()
+
+    # Step 1: Core Ready
+    core_status, core_issues = check_core_ready()
+    result.core_ready = core_status
+    result.issues.extend(core_issues)
+
+    # Step 2: AI Ready
+    ai_status, model_id, region, provider, is_cross_region = await check_ai_ready()
+    result.ai_ready = ai_status
+    result.resolved_model_id = model_id
+    result.resolved_region = region
+    result.provider_type = provider
+    result.is_cross_region_profile = is_cross_region
+    if not model_id:
+        result.issues.append("AI Ready: No provider available (Bedrock or Gemini)")
+
+    # Step 3: Docker Ready
+    docker_status, docker_version = check_docker_ready()
+    result.docker_ready = docker_status
+    result.docker_version = docker_version
+    if docker_status == ReadyStatus.FAIL:
+        result.issues.append("Docker Ready: Docker Engine not found")
+
+    # Step 4: AWS Deploy Ready (§S-2)
+    aws_status, aws_issues = check_aws_deploy_ready()
+    result.aws_deploy_ready = aws_status
+    result.issues.extend(aws_issues)
+
+    # Step 5: Ops Ready (§S-2)
+    ops_status, ops_issues = check_ops_ready()
+    result.ops_ready = ops_status
+    result.issues.extend(ops_issues)
+
+    # 검증 시간 기록
+    result.validation_time = datetime.now(timezone.utc).isoformat()
+
+    # 결과 저장
+    save_diagnostics(result)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Individual readiness checks
+# ---------------------------------------------------------------------------
+
+def check_core_ready() -> tuple[ReadyStatus, list[str]]:
+    """
+    ~/.recoder/ 디렉터리 존재 + 쓰기 권한 확인.
+    runtime.json 생성 가능 여부.
+    Windows ACL Soft Fail (§11.3): 권한 설정 실패 시 경고만 남기고 OK 반환.
+
+    반환: (ReadyStatus, issues_list)
+    """
+    issues: list[str] = []
+
+    # 디렉터리 존재 확인
+    if not RECODER_HOME.exists():
+        try:
+            RECODER_HOME.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            issues.append(f"Core Ready: Failed to create RECODER_HOME: {e}")
+            return ReadyStatus.FAIL, issues
+
+    # 쓰기 권한 확인
+    try:
+        test_file = RECODER_HOME / ".write_test"
+        test_file.write_text("test")
+        test_file.unlink()
+    except Exception as e:
+        issues.append(f"Core Ready: No write permission in RECODER_HOME: {e}")
+        return ReadyStatus.FAIL, issues
+
+    # runtime.json 생성 가능 여부 확인
+    runtime_path = RECODER_HOME / "runtime.json"
+    try:
+        runtime_data = {
+            "version": "6.4",
+            "check_time": datetime.now(timezone.utc).isoformat(),
+        }
+        runtime_path.write_text(json.dumps(runtime_data, indent=2))
+    except Exception as e:
+        issues.append(f"Core Ready: Failed to create runtime.json: {e}")
+        return ReadyStatus.FAIL, issues
+
+    # 권한 설정 (Soft Fail)
+    if sys.platform == "win32":
+        try:
+            os.system(
+                f'icacls "{RECODER_HOME}" /inheritance:d '
+                f'/grant:r "%USERNAME%:F" >nul 2>&1'
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            RECODER_HOME.chmod(0o700)
+        except Exception:
+            pass
+
+    return ReadyStatus.OK, []
+
+
+async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
+    """
+    Bedrock 또는 Gemini 중 최소 1개 가용 확인.
+
+    Bedrock 검증:
+        - boto3 import 가능
+        - AWS credentials 존재
+        - list_foundation_models 호출 성공
+        - 우선순위 모델 ID 결정 (_BEDROCK_MODEL_PRIORITY)
+        - 리전이 표준 Bedrock 리전이 아니면 is_cross_region=True
+
+    Gemini 검증:
+        - GEMINI_API_KEY/GOOGLE_API_KEY 존재
+        - list_models 호출 성공
+
+    반환: (ReadyStatus, model_id, region, provider_type, is_cross_region_profile)
+    실패 시 빈 문자열들과 ReadyStatus.FAIL.
+    """
+
+    # 1. Bedrock 시도
+    region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+    detected = _detect_bedrock_region()
+    if detected:
+        region = detected
+
+    try:
+        import boto3  # type: ignore
+
+        session = boto3.Session()
+        credentials = session.get_credentials()
+
+        if credentials is not None:
+            try:
+                bedrock_models_client = session.client(
+                    "bedrock", region_name=region
+                )
+                response = bedrock_models_client.list_foundation_models(
+                    byOutputModality="TEXT",
+                    byInferenceType="ON_DEMAND",
+                )
+                models = response.get("modelSummaries", []) if response else []
+                available_ids = {m["modelId"] for m in models}
+
+                chosen: Optional[str] = None
+                for preferred in _BEDROCK_MODEL_PRIORITY:
+                    if preferred in available_ids:
+                        chosen = preferred
+                        break
+                if chosen is None and available_ids:
+                    chosen = sorted(available_ids)[0]
+
+                if chosen:
+                    is_cross_region = region not in _BEDROCK_REGIONS
+                    return ReadyStatus.OK, chosen, region, "bedrock", is_cross_region
+            except Exception:
+                # Bedrock 호출 실패 → Gemini로 fallback
+                pass
+    except ImportError:
+        # boto3 미설치 → Gemini로 fallback
+        pass
+    except Exception:
+        pass
+
+    # 2. Gemini 시도
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")
+    if gemini_key:
+        # google-generativeai SDK 우선 시도
+        try:
+            import google.generativeai as genai  # type: ignore
+
+            genai.configure(api_key=gemini_key)
+            models = genai.list_models()
+            if models:
+                return ReadyStatus.OK, "gemini-pro", "", "gemini", False
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        # SDK 실패 시 HTTPS 직접 호출로 fallback
+        try:
+            import urllib.request
+
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models"
+                f"?key={gemini_key}"
+            )
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                if resp.status == 200:
+                    return ReadyStatus.OK, "gemini-pro", "", "gemini", False
+        except Exception:
+            pass
+
+    # 모든 제공자 실패
+    return ReadyStatus.FAIL, "", "", "", False
+
+
+def check_docker_ready() -> tuple[ReadyStatus, str]:
+    """
+    docker --version + docker info 로 Docker Engine 감지.
+    반환: (ReadyStatus, docker_version_string)
+    """
+    if shutil.which("docker") is None:
+        return ReadyStatus.FAIL, ""
+
+    try:
+        version_result = subprocess.run(
+            ["docker", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if version_result.returncode != 0:
+            return ReadyStatus.FAIL, ""
+
+        version_string = version_result.stdout.strip()
+
+        # docker info 호출로 daemon 응답 여부 확인 (실패해도 version은 반환)
+        try:
+            info_result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                timeout=5,
+            )
+            if info_result.returncode != 0:
+                return ReadyStatus.PARTIAL, version_string
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return ReadyStatus.PARTIAL, version_string
+
+        return ReadyStatus.OK, version_string
+    except FileNotFoundError:
+        pass
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        pass
+
+    return ReadyStatus.FAIL, ""
+
+
+def check_aws_deploy_ready() -> tuple[ReadyStatus, list[str]]:
+    """
+    AWS 배포 준비 상태 확인 (§S-2).
+
+    체크 항목:
+    1. boto3 패키지 설치 여부
+    2. AWS credentials 존재 여부 (~/.aws/credentials 또는 환경변수)
+    3. STS GetCallerIdentity 호출로 자격증명 검증
+    4. AWS CLI 존재 + SSH 키 (EC2 배포용) 확인 (정보성)
+
+    반환: (ReadyStatus, issues_list)
+    - OK: boto3 있고 credentials 유효 + STS 검증 통과
+    - WARN: boto3 없거나 credentials 미설정 (배포는 불가, 로컬 모드로 fallback)
+    """
+    issues: list[str] = []
+
+    # 1) boto3 설치 확인
+    try:
+        import boto3  # type: ignore
+    except ImportError:
+        issues.append("AWS Deploy Ready: boto3 미설치 (pip install boto3)")
+        return ReadyStatus.WARN, issues
+
+    # 2) AWS credentials 확인
+    try:
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        if credentials is None:
+            issues.append(
+                "AWS Deploy Ready: AWS credentials 미설정 "
+                "(~/.aws/credentials 또는 AWS_ACCESS_KEY_ID 환경변수 필요)"
+            )
+            return ReadyStatus.WARN, issues
+
+        resolved = credentials.get_frozen_credentials() \
+            if hasattr(credentials, "get_frozen_credentials") else None
+        if resolved is None and hasattr(credentials, "resolve"):
+            try:
+                resolved = credentials.resolve()
+            except Exception:
+                resolved = None
+        # resolved가 없어도 STS 호출로 최종 검증되므로 hard-fail 하지는 않음.
+    except Exception as e:
+        issues.append(f"AWS Deploy Ready: credentials 확인 중 오류: {e}")
+        return ReadyStatus.WARN, issues
+
+    # 3) STS GetCallerIdentity — 자격증명 최종 검증
+    region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+    try:
+        sts = boto3.client("sts", region_name=region)
+        sts.get_caller_identity()
+    except Exception as e:
+        issues.append(
+            f"AWS Deploy Ready: STS 검증 실패 ({e}). 자격증명 또는 네트워크 확인 필요"
+        )
+        return ReadyStatus.WARN, issues
+
+    # 4) 정보성 체크 — AWS CLI 및 SSH 키 (실패해도 WARN으로만 처리)
+    if shutil.which("aws") is None:
+        issues.append("AWS Deploy Ready: aws CLI 미설치 (일부 기능 제한 가능)")
+
+    ssh_dir = Path.home() / ".ssh"
+    if ssh_dir.exists():
+        keys = list(ssh_dir.glob("id_*")) + list(ssh_dir.glob("*.pem"))
+        private_keys = [k for k in keys if ".pub" not in k.name]
+        if not private_keys:
+            issues.append("AWS Deploy Ready: SSH 사설키 미발견 (EC2 SSH 배포 제한)")
+    else:
+        issues.append("AWS Deploy Ready: ~/.ssh 디렉터리 없음 (EC2 SSH 배포 제한)")
+
+    return ReadyStatus.OK, issues if issues else []
+
+
+def check_ops_ready() -> tuple[ReadyStatus, list[str]]:
+    """
+    Ops 도구 준비 상태 확인 (§S-2).
+
+    체크 항목:
+    1. ssh 클라이언트 설치 여부 (원격 Docker 접근)
+    2. git 설치 여부
+    3. docker 설치 여부
+    4. DISCORD_WEBHOOK_URL 환경변수 (선택)
+
+    반환: (ReadyStatus, issues_list)
+    - OK: ssh + git + docker 모두 사용 가능
+    - WARN: 일부 도구 누락 (로컬 배포 일부 기능 제한)
+    """
+    issues: list[str] = []
+    warn = False
+
+    # ssh 클라이언트
+    if shutil.which("ssh") is None:
+        issues.append("Ops Ready: ssh 미설치 — 원격 Docker 접근 비활성화")
+        warn = True
+
+    # git 설치 확인
+    if shutil.which("git") is None:
+        issues.append("Ops Ready: git 미설치 — git_agent 기능 비활성화")
+        warn = True
+
+    # docker 설치 확인
+    if shutil.which("docker") is None:
+        issues.append("Ops Ready: docker 미설치 — 컨테이너 배포 비활성화")
+        warn = True
+
+    # Discord Webhook (선택)
+    if not os.environ.get("DISCORD_WEBHOOK_URL"):
+        issues.append("Ops Ready: DISCORD_WEBHOOK_URL 미설정 (알림 비활성, 선택사항)")
+        # Discord는 선택사항이므로 warn=True로 만들지 않음
+
+    if warn:
+        return ReadyStatus.WARN, issues
+
+    return ReadyStatus.OK, issues if issues else []
+
+
+# ---------------------------------------------------------------------------
+# Setup helpers
+# ---------------------------------------------------------------------------
+
+def setup_recoder_home() -> None:
+    """
+    ~/.recoder/ 하위 디렉터리 생성.
+    디렉터리: sessions/, backups/, logs/, projects/, templates/, deployments/
+    macOS/Linux: chmod 0700
+    Windows: ACL 설정 시도, 실패 시 경고만 (Soft Fail)
+    """
+    RECODER_HOME.mkdir(parents=True, exist_ok=True)
+
+    subdirs = [
+        "sessions",
+        "backups",
+        "logs",
+        "projects",
+        "templates",
+        "deployments",
+    ]
+
+    for subdir in subdirs:
+        subdir_path = RECODER_HOME / subdir
+        subdir_path.mkdir(parents=True, exist_ok=True)
+
+        if sys.platform == "win32":
+            try:
+                os.system(
+                    f'icacls "{subdir_path}" /inheritance:d '
+                    f'/grant:r "%USERNAME%:F" >nul 2>&1'
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                subdir_path.chmod(0o700)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+
+def save_diagnostics(result: DiagnosticsResult) -> None:
+    """결과를 ~/.recoder/diagnostics.json에 저장."""
+    RECODER_HOME.mkdir(parents=True, exist_ok=True)
+
+    with open(DIAGNOSTICS_PATH, "w", encoding="utf-8") as f:
+        json.dump(result.to_dict(), f, indent=2)
+
+
+def load_diagnostics() -> Optional[DiagnosticsResult]:
+    """저장된 diagnostics.json 로드. 없으면 None."""
+    if not DIAGNOSTICS_PATH.exists():
+        return None
+
+    try:
+        with open(DIAGNOSTICS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        return DiagnosticsResult(
+            core_ready=ReadyStatus(data.get("core_ready", "fail")),
+            ai_ready=ReadyStatus(data.get("ai_ready", "fail")),
+            docker_ready=ReadyStatus(data.get("docker_ready", "fail")),
+            aws_deploy_ready=ReadyStatus(data.get("aws_deploy_ready", "fail")),
+            ops_ready=ReadyStatus(data.get("ops_ready", "fail")),
+            resolved_model_id=data.get("resolved_model_id", ""),
+            resolved_region=data.get("resolved_region", ""),
+            provider_type=data.get("provider_type", ""),
+            is_cross_region_profile=data.get("is_cross_region_profile", False),
+            validation_time=data.get("validation_time", ""),
+            docker_version=data.get("docker_version", ""),
+            issues=data.get("issues", []),
+        )
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Internal utility
+# ---------------------------------------------------------------------------
+
+def _detect_bedrock_region() -> Optional[str]:
+    """Detect the AWS region configured in the environment or AWS config."""
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if region:
+        return region
+
+    aws_config = Path.home() / ".aws" / "config"
+    if aws_config.exists():
+        try:
+            for line in aws_config.read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("region"):
+                    _, _, val = line.partition("=")
+                    r = val.strip()
+                    if r:
+                        return r
+        except Exception:
+            pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Legacy class wrapper — kept for compatibility with older callers that
+# instantiate FirstRunDiagnostics().run_all().
+# ---------------------------------------------------------------------------
+
+class FirstRunDiagnostics:
+    """
+    Compatibility wrapper around the module-level functions.
+
+    Older code paths import this class and call ``run_all()`` to receive
+    a DiagnosticsResult. The implementation simply delegates to
+    :func:`run_diagnostics`.
+    """
+
+    async def run_all(self) -> DiagnosticsResult:
+        return await run_diagnostics()
+
+    async def save_diagnostics(self, result: DiagnosticsResult) -> None:
+        save_diagnostics(result)
+
+    async def load_diagnostics(self) -> Optional[DiagnosticsResult]:
+        return load_diagnostics()
+
+    @staticmethod
+    def _detect_bedrock_region() -> Optional[str]:
+        return _detect_bedrock_region()

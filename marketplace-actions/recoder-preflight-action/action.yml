@@ -1,0 +1,293 @@
+# recoder/preflight-action@v1 — Composite GitHub Action (설계서 §40)
+#
+# ReCoder Preflight를 GitHub Actions CI/CD 파이프라인에 통합한다.
+# ECS/ECR/ALB/CloudWatch 리소스를 read-only IAM으로 사전 점검하고
+# 실패 시 배포를 자동 차단한다.
+#
+# 사용 예:
+#   - uses: recoder/preflight-action@v1
+#     with:
+#       cluster: my-cluster
+#       service: my-service
+#       region: ap-northeast-2
+#     env:
+#       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+name: "ReCoder Preflight Check"
+description: >
+  ReCoder의 Preflight 점검을 실행합니다.
+  ECS/ECR/ALB/CloudWatch 리소스를 read-only IAM으로 사전 검증하고,
+  실패 시 배포를 자동으로 차단합니다 (설계서 §40).
+
+author: "ReCoder Team"
+
+branding:
+  icon: "check-circle"
+  color: "blue"
+
+inputs:
+  cluster:
+    description: "ECS 클러스터 이름"
+    required: true
+  service:
+    description: "ECS 서비스 이름"
+    required: true
+  region:
+    description: "AWS 리전"
+    required: false
+    default: "ap-northeast-2"
+  task_definition:
+    description: "ECS 태스크 정의 패밀리 이름 (선택)"
+    required: false
+    default: ""
+  ecr_repo:
+    description: "ECR 리포지토리 이름 (선택)"
+    required: false
+    default: ""
+  log_group:
+    description: "CloudWatch Log Group 이름 (선택)"
+    required: false
+    default: ""
+  fail_on_warning:
+    description: "MEDIUM 리스크 경고도 실패로 처리할지 여부"
+    required: false
+    default: "false"
+  recoder_version:
+    description: "ReCoder 버전 (pip install recoder==<version>)"
+    required: false
+    default: "latest"
+  output_format:
+    description: "결과 출력 형식 (text | json | github)"
+    required: false
+    default: "github"
+
+outputs:
+  passed:
+    description: "Preflight 전체 통과 여부 (true | false)"
+    value: ${{ steps.preflight.outputs.passed }}
+  risk_level:
+    description: "최고 리스크 레벨 (LOW | MEDIUM | HIGH | CRITICAL)"
+    value: ${{ steps.preflight.outputs.risk_level }}
+  report_json:
+    description: "Preflight 결과 JSON 전체"
+    value: ${{ steps.preflight.outputs.report_json }}
+  failed_checks:
+    description: "실패한 점검 항목 수"
+    value: ${{ steps.preflight.outputs.failed_checks }}
+
+runs:
+  using: "composite"
+  steps:
+    # 1. Python 설정
+    - name: Python 설정
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    # 2. ReCoder Core 설치
+    - name: ReCoder Core 설치
+      shell: bash
+      run: |
+        echo "::group::ReCoder 설치"
+        if [ "${{ inputs.recoder_version }}" = "latest" ]; then
+          pip install --quiet boto3 httpx pydantic anthropic
+          # 로컬 빌드 사용 (CI 환경에서는 소스 직접 사용)
+          echo "ReCoder preflight 모듈을 소스에서 로드합니다."
+        else
+          pip install --quiet "recoder==${{ inputs.recoder_version }}" boto3
+        fi
+        echo "::endgroup::"
+
+    # 3. Preflight 실행
+    - name: ReCoder Preflight 실행
+      id: preflight
+      shell: python
+      env:
+        INPUT_CLUSTER: ${{ inputs.cluster }}
+        INPUT_SERVICE: ${{ inputs.service }}
+        INPUT_REGION: ${{ inputs.region }}
+        INPUT_TASK_DEFINITION: ${{ inputs.task_definition }}
+        INPUT_ECR_REPO: ${{ inputs.ecr_repo }}
+        INPUT_LOG_GROUP: ${{ inputs.log_group }}
+        INPUT_FAIL_ON_WARNING: ${{ inputs.fail_on_warning }}
+        INPUT_OUTPUT_FORMAT: ${{ inputs.output_format }}
+        GITHUB_OUTPUT: ${{ env.GITHUB_OUTPUT }}
+        GITHUB_STEP_SUMMARY: ${{ env.GITHUB_STEP_SUMMARY }}
+      run: |
+        import asyncio
+        import json
+        import os
+        import sys
+        from pathlib import Path
+
+        # 소스 경로 추가 (모노레포 내 실행 시)
+        for p in [
+            Path(os.getenv("GITHUB_WORKSPACE", ".")) / "core",
+            Path(__file__).parent.parent.parent / "core",
+        ]:
+            if p.exists() and str(p) not in sys.path:
+                sys.path.insert(0, str(p))
+
+        cluster = os.environ["INPUT_CLUSTER"]
+        service = os.environ["INPUT_SERVICE"]
+        region = os.environ.get("INPUT_REGION", "ap-northeast-2")
+        task_def = os.environ.get("INPUT_TASK_DEFINITION", "")
+        ecr_repo = os.environ.get("INPUT_ECR_REPO", "")
+        log_group = os.environ.get("INPUT_LOG_GROUP", "")
+        fail_on_warning = os.environ.get("INPUT_FAIL_ON_WARNING", "false").lower() == "true"
+        output_format = os.environ.get("INPUT_OUTPUT_FORMAT", "github")
+
+        print(f"::group::ReCoder Preflight — {service} @ {cluster} ({region})")
+
+        async def run_preflight():
+            try:
+                from agents.preflight_agent import PreflightAgent
+            except ImportError:
+                # 경량 인라인 점검 (에이전트 미설치 환경)
+                return _inline_preflight(cluster, service, region)
+
+            agent = PreflightAgent()
+            return await agent.run(
+                cluster=cluster,
+                service=service,
+                region=region,
+                task_definition_family=task_def,
+                ecr_repo=ecr_repo or None,
+                log_group=log_group or None,
+            )
+
+        def _inline_preflight(cluster, service, region):
+            """에이전트 없이 boto3로 직접 점검하는 경량 fallback."""
+            checks = []
+            try:
+                import boto3
+                ecs = boto3.client("ecs", region_name=region)
+
+                # ECS 클러스터 확인
+                resp = ecs.describe_clusters(clusters=[cluster])
+                cluster_ok = bool(resp.get("clusters"))
+                checks.append({
+                    "name": "ECS Cluster",
+                    "passed": cluster_ok,
+                    "message": f"클러스터 '{cluster}' {'발견' if cluster_ok else '미발견'}",
+                    "risk_level": "LOW" if cluster_ok else "HIGH",
+                })
+
+                # ECS 서비스 확인
+                if cluster_ok:
+                    svc_resp = ecs.describe_services(cluster=cluster, services=[service])
+                    svc_ok = bool(svc_resp.get("services"))
+                    checks.append({
+                        "name": "ECS Service",
+                        "passed": svc_ok,
+                        "message": f"서비스 '{service}' {'발견' if svc_ok else '미발견'}",
+                        "risk_level": "LOW" if svc_ok else "CRITICAL",
+                    })
+
+            except Exception as e:
+                checks.append({
+                    "name": "AWS 연결",
+                    "passed": False,
+                    "message": f"AWS 연결 실패: {e}",
+                    "risk_level": "CRITICAL",
+                })
+
+            class SimpleReport:
+                def __init__(self, checks):
+                    self.checks = [type("C", (), c)() for c in checks]
+                    self.overall_passed = all(c["passed"] for c in checks)
+
+            return SimpleReport(checks)
+
+        report = asyncio.run(run_preflight())
+
+        # 결과 파싱
+        checks = []
+        if hasattr(report, "checks"):
+            for c in report.checks:
+                if hasattr(c, "__dict__"):
+                    checks.append(c.__dict__)
+                elif isinstance(c, dict):
+                    checks.append(c)
+
+        overall_passed = getattr(report, "overall_passed", True)
+        if fail_on_warning:
+            overall_passed = overall_passed and all(
+                c.get("risk_level", "LOW") not in ("HIGH", "CRITICAL", "MEDIUM")
+                for c in checks
+            )
+
+        risk_levels = [c.get("risk_level", "LOW") for c in checks]
+        risk_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+        max_risk = max(risk_levels, key=lambda r: risk_order.get(r, 0)) if risk_levels else "LOW"
+        failed_count = sum(1 for c in checks if not c.get("passed", True))
+
+        report_json = json.dumps({
+            "overall_passed": overall_passed,
+            "checks": checks,
+            "max_risk": max_risk,
+            "failed_checks": failed_count,
+        }, ensure_ascii=False)
+
+        # GitHub Actions outputs
+        github_output = os.environ.get("GITHUB_OUTPUT", "")
+        if github_output:
+            with open(github_output, "a") as f:
+                f.write(f"passed={'true' if overall_passed else 'false'}\n")
+                f.write(f"risk_level={max_risk}\n")
+                f.write(f"failed_checks={failed_count}\n")
+                safe_json = report_json.replace("\n", " ")
+                f.write(f"report_json={safe_json}\n")
+
+        # GitHub Step Summary
+        summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "")
+        if summary_file:
+            icon = "✅" if overall_passed else "❌"
+            risk_emoji = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴", "CRITICAL": "🚨"}.get(max_risk, "⚪")
+            lines = [
+                f"# {icon} ReCoder Preflight — {service}",
+                f"",
+                f"| 항목 | 값 |",
+                f"|------|-----|",
+                f"| 클러스터 | `{cluster}` |",
+                f"| 서비스 | `{service}` |",
+                f"| 리전 | `{region}` |",
+                f"| 결과 | {'통과 ✅' if overall_passed else '실패 ❌'} |",
+                f"| 최고 리스크 | {risk_emoji} `{max_risk}` |",
+                f"| 실패 항목 | `{failed_count}/{len(checks)}` |",
+                f"",
+                f"## 점검 항목",
+                f"",
+            ]
+            for c in checks:
+                icon2 = "✅" if c.get("passed") else "❌"
+                lines.append(f"- {icon2} **{c.get('name', 'unknown')}**: {c.get('message', '')}")
+
+            with open(summary_file, "a") as f:
+                f.write("\n".join(lines) + "\n")
+
+        # 콘솔 출력
+        print(f"\n{'='*50}")
+        print(f"ReCoder Preflight 결과: {'통과 ✅' if overall_passed else '실패 ❌'}")
+        print(f"최고 리스크: {max_risk} | 실패 항목: {failed_count}/{len(checks)}")
+        for c in checks:
+            icon2 = "✅" if c.get("passed") else "❌"
+            print(f"  {icon2} {c.get('name', 'unknown')}: {c.get('message', '')}")
+        print(f"{'='*50}\n")
+        print("::endgroup::")
+
+        if not overall_passed:
+            print("::error::ReCoder Preflight 실패 — 배포를 차단합니다. 위 항목을 확인하세요.")
+            sys.exit(1)
+
+    # 4. 결과 어노테이션
+    - name: Preflight 통과 확인
+      if: always()
+      shell: bash
+      run: |
+        if [ "${{ steps.preflight.outputs.passed }}" = "true" ]; then
+          echo "::notice title=ReCoder Preflight::✅ 모든 점검 통과 — 배포 진행 가능"
+        else
+          echo "::error title=ReCoder Preflight::❌ Preflight 실패 — 배포 차단됨 (실패: ${{ steps.preflight.outputs.failed_checks }}건)"
+        fi

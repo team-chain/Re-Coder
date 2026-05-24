@@ -1,0 +1,35 @@
+# Python
+*.pyc
+*.pyo
+__pycache__/
+**/__pycache__/
+*.egg-info/
+.env
+.env.*
+
+# Virtual environments
+core/.venv/
+core/venv/
+.venv/
+venv/
+
+# Node / Extension build
+extension/node_modules/
+extension/out/
+extension/webview-src/node_modules/
+
+# VSIX packages
+*.vsix
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/settings.json
+
+# Logs & temp
+*.log
+tmp*/
+recoder-runtime.json

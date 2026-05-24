@@ -1,0 +1,215 @@
+{
+  "name": "recoder",
+  "displayName": "ReCoder — AI DevOps Agent",
+  "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
+  "version": "1.0.0",
+  "publisher": "recoder-team",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning",
+    "Debuggers"
+  ],
+  "keywords": [
+    "ai",
+    "devops",
+    "docker",
+    "bedrock",
+    "agent",
+    "claude"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "icon": "media/icon.png",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "recoder",
+          "title": "ReCoder",
+          "icon": "media/recoder-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "recoder": [
+        {
+          "type": "webview",
+          "id": "recoder.sidebarView",
+          "name": "Re-Coder"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "recoder.analyzeError",
+        "title": "ReCoder: Analyze Error",
+        "icon": "$(bug)"
+      },
+      {
+        "command": "recoder.runWithRecoder",
+        "title": "ReCoder: Run with ReCoder",
+        "icon": "$(play)"
+      },
+      {
+        "command": "recoder.generateDockerfile",
+        "title": "ReCoder: Generate Dockerfile",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "recoder.runDiagnostics",
+        "title": "ReCoder: Run Diagnostics",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "recoder.startCore",
+        "title": "ReCoder: Start Core",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "recoder.restartCore",
+        "title": "ReCoder: Restart Core",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "recoder.stopCore",
+        "title": "ReCoder: Stop Core",
+        "icon": "$(stop)"
+      },
+      {
+        "command": "recoder.openWorkbench",
+        "title": "ReCoder: Open Workbench",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "recoder.moveToRightSidebar",
+        "title": "ReCoder: Move to Right Sidebar (Kiro-style)",
+        "icon": "$(layout-sidebar-right)"
+      },
+      {
+        "command": "recoder.moveToLeftSidebar",
+        "title": "ReCoder: Move to Left Sidebar",
+        "icon": "$(layout-sidebar-left)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "recoder.analyzeError",
+          "group": "recoder@1",
+          "when": "editorHasSelection"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "recoder.analyzeError",
+          "group": "recoder@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "recoder.openWorkbench",
+        "key": "ctrl+shift+r ctrl+w",
+        "mac": "cmd+shift+r cmd+w",
+        "when": "!terminalFocus"
+      },
+      {
+        "command": "recoder.analyzeError",
+        "key": "ctrl+shift+r ctrl+a",
+        "mac": "cmd+shift+r cmd+a"
+      }
+    ],
+    "configuration": {
+      "title": "ReCoder",
+      "properties": {
+        "recoder.core.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start Local Core when sidebar opens."
+        },
+        "recoder.core.port": {
+          "type": "number",
+          "default": 17894,
+          "description": "Base port for Local Core (fallback range: 17895–17910)."
+        },
+        "recoder.llm.provider": {
+          "type": "string",
+          "enum": [
+            "bedrock",
+            "gemini",
+            "auto"
+          ],
+          "default": "auto",
+          "description": "LLM provider preference. 'auto' uses Bedrock with Gemini fallback."
+        },
+        "recoder.llm.region": {
+          "type": "string",
+          "default": "us-east-1",
+          "description": "AWS region for Bedrock API calls."
+        },
+        "recoder.context.maxLines": {
+          "type": "number",
+          "default": 200,
+          "description": "Maximum terminal output lines to collect for context."
+        },
+        "recoder.polling.interval": {
+          "type": "number",
+          "default": 4000,
+          "description": "Core status polling interval in milliseconds (3000–10000)."
+        },
+        "recoder.discord.botServerUrl": {
+          "type": "string",
+          "default": "",
+          "description": "ReCoder Discord Bot 서버 URL (예: https://your-bot-server.com). 설정 시 Discord 연동을 저장할 때 봇에 자동으로 Guild 설정이 등록됩니다."
+        },
+        "recoder.discord.botRegistrationKey": {
+          "type": "string",
+          "default": "",
+          "description": "봇 자동 등록 API 인증 키. 봇 서버의 BOT_REGISTRATION_KEY 값과 동일하게 설정하세요."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
+    "build": "npm run compile && npm run build:webview",
+    "build:webview": "cd webview-src && npx webpack --config webpack.config.js --mode production",
+    "watch:webview": "cd webview-src && npx webpack --config webpack.config.js --mode development --watch",
+    "package": "npx vsce package --no-dependencies",
+    "lint": "eslint src --ext ts",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js",
+    "smoke": "npm run compile && node --test out/test/coreClient.smoke.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/vsce": "^3.9.1",
+    "autoprefixer": "^10.4.20",
+    "css-loader": "^7.1.2",
+    "eslint": "^8.0.0",
+    "postcss": "^8.4.49",
+    "postcss-loader": "^8.1.1",
+    "style-loader": "^4.0.0",
+    "tailwindcss": "^3.4.17",
+    "ts-loader": "^9.5.0",
+    "typescript": "^5.9.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.0"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}
