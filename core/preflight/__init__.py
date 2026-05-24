@@ -132,13 +132,43 @@ __all__ = [
     "safe_relative_join",
     "run_static_preflight",
     "StaticPreflightRunner",
+    # Runtime Preflight (§31)
+    "RuntimePreflightRunner",
+    "RuntimePreflightResult",
+    "merge_runtime_into_preflight_run",
+    "detect_docker",
+    "parse_duration",
+    "mask_log",
 ]
 
 
 def __getattr__(name: str) -> Any:
-    # Lazy re-export: preflight.static 로딩 시점을 지연 (테스트 시 부분 import 가능).
-    if name in {"run_static_preflight", "StaticPreflightRunner"}:
+    # Lazy re-export: 무거운 docker / static 모듈 import 를 지연시켜 부분 import 안전성 확보.
+    static_names = {"run_static_preflight", "StaticPreflightRunner"}
+    runtime_names = {
+        "RuntimePreflightRunner", "RuntimePreflightResult",
+        "merge_runtime_into_preflight_run", "detect_docker",
+        "parse_duration", "mask_log",
+    }
+    if name in static_names:
         from .static import StaticPreflightRunner, run_static_preflight  # noqa: WPS433
         return {"StaticPreflightRunner": StaticPreflightRunner,
                 "run_static_preflight": run_static_preflight}[name]
+    if name in runtime_names:
+        from .runtime import (  # noqa: WPS433
+            RuntimePreflightResult,
+            RuntimePreflightRunner,
+            detect_docker,
+            mask_log,
+            merge_runtime_into_preflight_run,
+            parse_duration,
+        )
+        return {
+            "RuntimePreflightRunner":          RuntimePreflightRunner,
+            "RuntimePreflightResult":          RuntimePreflightResult,
+            "merge_runtime_into_preflight_run": merge_runtime_into_preflight_run,
+            "detect_docker":                   detect_docker,
+            "parse_duration":                  parse_duration,
+            "mask_log":                        mask_log,
+        }[name]
     raise AttributeError(name)
