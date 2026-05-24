@@ -36,7 +36,24 @@ from pathlib import PurePath
 
 
 # 순서 중요 — 더 구체적인 패턴이 먼저.
+# Secret 패턴은 HEX 패턴보다 먼저 — 더 구체적인 잡기 위함.
 _MASK_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # === Secret 패턴 (defensive — 디버그 로그에도 노출 차단) ===
+    # AWS Access Key ID
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "<SECRET>"),
+    # AWS Secret Access Key (40 chars base64-like)
+    (re.compile(r"\b[A-Za-z0-9+/]{40}\b(?![A-Za-z0-9+/])"), "<SECRET>"),
+    # GitHub Personal Access Token
+    (re.compile(r"\bghp_[A-Za-z0-9]{36}\b"), "<SECRET>"),
+    # GitHub fine-grained PAT
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82}\b"), "<SECRET>"),
+    # OpenAI API key
+    (re.compile(r"\bsk-[A-Za-z0-9]{48}\b"), "<SECRET>"),
+    # Stripe live key
+    (re.compile(r"\bsk_live_[A-Za-z0-9]{24,}\b"), "<SECRET>"),
+    # Slack token
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}\b"), "<SECRET>"),
+    # === 일반 패턴 ===
     # UUID (8-4-4-4-12)
     (re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"), "<UUID>"),
     # ISO-8601 timestamp
