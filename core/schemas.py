@@ -22,10 +22,20 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 
 SCHEMA_VERSION = "6.4"
+
+
+# ===========================================================================
+# 표준 시간 헬퍼 — datetime 은 항상 UTC 로 저장.
+# 사용자 표시 timezone (KST 등) 은 UI/Standup 레이어에서 변환.
+# ===========================================================================
+
+def utc_now() -> datetime:
+    """타임존 인식 UTC 현재 시각. Field(default_factory=utc_now) 로 사용."""
+    return datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -2000,9 +2010,220 @@ class EmergencyRollbackRequest(BaseModel):
 
 
 # ===========================================================================
+# v10 — 공통 응답 / 요청 모델 (모든 라우트 통일)
+# ===========================================================================
+
+
+class HealthCheckResponse(BaseModel):
+    """GET /api/health 응답 — 인증 면제 엔드포인트."""
+    status:           Literal["ok", "degraded", "down"] = "ok"
+    version:          str
+    uptime_seconds:   float = Field(0.0, ge=0.0)
+    port:             int = Field(17894, ge=1, le=65535)
+
+
+class PaginationCursor(BaseModel):
+    """리스트 엔드포인트의 페이지네이션 (cursor 기반).
+
+    클라이언트는 응답의 next_cursor 를 다음 요청의 ?cursor= 파라미터로 전달.
+    """
+    limit:        int = Field(20, ge=1, le=200, description="최대 200")
+    cursor:       Optional[str] = None         # opaque base64 — 서버가 정의
+    sort_order:   Literal["asc", "desc"] = "desc"
+
+
+class PaginatedResponse(BaseModel):
+    """리스트 응답 공통 wrapper.
+
+    items 는 호출자가 구체 타입으로 model_dump 한 list 를 넣는다 (Generic 회피).
+    """
+    items:        list[dict[str, Any]] = Field(default_factory=list)
+    total:        Optional[int] = None         # 정확한 카운트가 비싸면 None
+    next_cursor:  Optional[str] = None         # None 이면 마지막 페이지
+    has_more:     bool = False
+
+
+class AuditAction(str, Enum):
+    """감사 로그 액션 분류 — 모든 부수효과 있는 작업은 기록."""
+    PATCH_APPROVED              = "patch_approved"
+    PATCH_REJECTED              = "patch_rejected"
+    REMEDIATION_APPLIED         = "remediation_applied"
+    REMEDIATION_REJECTED        = "remediation_rejected"
+    DEPLOYMENT_STARTED          = "deployment_started"
+    DEPLOYMENT_SUCCEEDED        = "deployment_succeeded"
+    DEPLOYMENT_FAILED           = "deployment_failed"
+    ROLLBACK_TRIGGERED          = "rollback_triggered"
+    ROLLBACK_COMPLETED          = "rollback_completed"
+    DISCORD_IDENTITY_REGISTERED = "discord_identity_registered"
+    DISCORD_IDENTITY_REVOKED    = "discord_identity_revoked"
+    CLOUD_RELAY_ENABLED         = "cloud_relay_enabled"
+    CLOUD_RELAY_DISABLED        = "cloud_relay_disabled"
+    EMERGENCY_ROLLBACK_REQUESTED = "emergency_rollback_requested"
+    EMERGENCY_ROLLBACK_EXECUTED  = "emergency_rollback_executed"
+    SSH_KEY_REGISTERED          = "ssh_key_registered"
+    SSH_KEY_ROTATED             = "ssh_key_rotated"
+    SESSION_TOKEN_ROTATED       = "session_token_rotated"
+    DATA_DELETED                = "data_deleted"
+
+
+class AuditLogEntry(BaseModel):
+    """단일 감사 로그 — 부수효과 작업의 영구 기록 (settings.py § 21.3 보관 기간)."""
+    audit_id:        str = Field(default_factory=lambda: f"audit_{uuid.uuid4().hex[:12]}")
+    action:          AuditAction
+    actor:           str                                  # "vscode" | "discord:<user>" | "system" | "cloud-relay"
+    target_type:     str                                  # "deployment" | "remediation" | "patch" | ...
+    target_id:       Optional[str] = None
+    details:         dict[str, Any] = Field(default_factory=dict)
+    request_id:      Optional[str] = None
+    occurred_at:     datetime = Field(default_factory=utc_now)
+    masked:          bool = True                          # raw 데이터는 보관하지 않음
+
+
+class TokenRotation(BaseModel):
+    """X-Session-Token 회전 응답.
+
+    Core 가 토큰 재발급 시 새 토큰을 반환. Extension/Discord Bot 은 갱신 필요.
+    """
+    new_token:       str
+    rotated_at:      datetime = Field(default_factory=utc_now)
+    previous_valid_until: Optional[datetime] = None       # grace period (보통 60초)
+
+
+class RateLimitInfo(BaseModel):
+    """rate limit 응답 헤더 정보를 body 에도 포함하는 경우 (429 에러).
+
+    헤더로는 항상:
+        X-RateLimit-Limit: <int>
+        X-RateLimit-Remaining: <int>
+        X-RateLimit-Reset: <unix-ts>
+    """
+    limit:           int
+    remaining:       int
+    reset_at:        datetime
+    retry_after_sec: int = Field(0, ge=0)
+
+
+class ErrorCode(str, Enum):
+    """모든 HTTP 4xx/5xx 응답의 공통 에러 코드.
+
+    - 4xx: 사용자 / 입력 오류
+    - 5xx: 서버 / 외부 의존성 오류
+    """
+    # 4xx — 클라이언트 측
+    INVALID_REQUEST          = "INVALID_REQUEST"          # 400
+    UNAUTHORIZED             = "UNAUTHORIZED"             # 401
+    FORBIDDEN                = "FORBIDDEN"                # 403
+    NOT_FOUND                = "NOT_FOUND"                # 404
+    CONFLICT                 = "CONFLICT"                 # 409 (예: base_sha256 mismatch)
+    UNPROCESSABLE            = "UNPROCESSABLE"            # 422 (Pydantic validation 실패)
+    TOO_MANY_REQUESTS        = "TOO_MANY_REQUESTS"        # 429
+    # 5xx — 서버 측
+    INTERNAL_ERROR           = "INTERNAL_ERROR"           # 500 (일반)
+    LLM_PROVIDER_ERROR       = "LLM_PROVIDER_ERROR"       # 502 (Bedrock/Gemini 실패)
+    DOCKER_ENGINE_ERROR      = "DOCKER_ENGINE_ERROR"      # 502 (Docker 미설치/실패)
+    AWS_API_ERROR            = "AWS_API_ERROR"            # 502 (EC2/ECR/Secrets 실패)
+    SERVICE_UNAVAILABLE      = "SERVICE_UNAVAILABLE"      # 503 (초기화 미완료)
+    # 도메인 별
+    PREFLIGHT_FAILED         = "PREFLIGHT_FAILED"         # 422 (Preflight blocker로 거부)
+    REMEDIATION_FAILED       = "REMEDIATION_FAILED"       # 500 (Remediation 적용 실패)
+    ROLLBACK_INFEASIBLE      = "ROLLBACK_INFEASIBLE"      # 409 (snapshot 없음 등)
+    APPROVAL_REQUIRED        = "APPROVAL_REQUIRED"        # 403 (Level 3~4 미승인)
+
+
+class ErrorResponse(BaseModel):
+    """
+    모든 라우트의 4xx/5xx 응답 공통 포맷.
+
+    원칙:
+      - message 는 사용자에게 보여줄 한 줄 (마스킹된 값만)
+      - detail 은 디버깅용 (서버 로그에는 traceback, 응답에는 마스킹된 요약)
+      - request_id 는 추적용 (모든 응답에 X-Request-ID 헤더와 동일 값)
+      - timestamp 는 ISO8601 UTC
+    """
+    error:        bool = True
+    code:         ErrorCode
+    message:      str
+    detail:       Optional[str] = None                    # 마스킹된 값만
+    request_id:   Optional[str] = None
+    timestamp:    datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── Request / Response — Preflight ─────────────────────────────────────
+
+class RunPreflightRequest(BaseModel):
+    """POST /api/preflight/run 요청 본문."""
+    project_id:       Optional[str] = None
+    contract_path:    str = "recoder.yml"                 # 프로젝트 루트 기준
+    include_runtime:  bool = True                          # Runtime Preflight 실행 여부 (B 영역)
+    timeout_sec:      int = Field(60, ge=10, le=300)
+
+
+class ApplyRemediationRequest(BaseModel):
+    """POST /api/remediations/{proposal_id}/apply 요청 본문."""
+    approve:          bool                                 # false면 거절
+    user_consent:     bool = False                         # IncidentMemory 학습 동의 (옵트인)
+    typing_confirm:   Optional[str] = None                 # Level 4 필요시
+
+
+class ApplyRemediationResponse(BaseModel):
+    """POST /api/remediations/{proposal_id}/apply 응답 본문."""
+    success:          bool
+    remediation_run:  Optional[RemediationRun] = None
+    rerun_required:   bool = True                          # 적용 후 Preflight 재실행 필요?
+    next_action:      Optional[Literal["rerun_preflight", "deploy", "rollback", "none"]] = None
+
+
+# ── Request / Response — Deployment ────────────────────────────────────
+
+class CreateDeploymentRequest(BaseModel):
+    """POST /api/deployments 요청 본문 — 배포 시작."""
+    project_id:           Optional[str] = None
+    preflight_run_id:     str                              # 통과한 PreflightRun 필수
+    image_tag:            str
+    contract_hash:        Optional[str] = None
+    approval_snapshot:    Optional[ApprovalSnapshot] = None
+
+
+class RollbackDeploymentRequest(BaseModel):
+    """POST /api/deployments/{id}/rollback 요청 본문."""
+    target_deployment_id:  Optional[str] = None            # None이면 직전 stable로
+    user_consent:          bool = False
+    typing_confirm:        str                              # "rollback dep_xxx" 형태 필수
+
+
+# ── Request / Response — Discord ───────────────────────────────────────
+
+class RegisterDiscordIdentityRequest(BaseModel):
+    """POST /api/discord/identities 요청 본문."""
+    discord_user_id:    str
+    permission_tier:    DiscordPermissionTier = DiscordPermissionTier.READ_ONLY
+
+
+# ── Request / Response — Cloud Relay ───────────────────────────────────
+
+class ExecuteCommandQueueRequest(BaseModel):
+    """POST /api/cloud-relay/queue/{entry_id}/execute 요청 본문 — Local Core가 큐 비울 때."""
+    acknowledged_at:    datetime = Field(default_factory=datetime.utcnow)
+
+
+# ===========================================================================
 # v10 PART II/III/IV — forward reference 해소
 # ===========================================================================
 
+HealthCheckResponse.model_rebuild()
+PaginationCursor.model_rebuild()
+PaginatedResponse.model_rebuild()
+AuditLogEntry.model_rebuild()
+TokenRotation.model_rebuild()
+RateLimitInfo.model_rebuild()
+ErrorResponse.model_rebuild()
+RunPreflightRequest.model_rebuild()
+ApplyRemediationRequest.model_rebuild()
+ApplyRemediationResponse.model_rebuild()
+CreateDeploymentRequest.model_rebuild()
+RollbackDeploymentRequest.model_rebuild()
+RegisterDiscordIdentityRequest.model_rebuild()
+ExecuteCommandQueueRequest.model_rebuild()
 ReleaseContract.model_rebuild()
 PreflightRun.model_rebuild()
 RemediationProposal.model_rebuild()
