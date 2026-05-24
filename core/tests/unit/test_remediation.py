@@ -220,7 +220,7 @@ def test_apply_file_template__missing_dockerfile__writes_file(tmp_path: Path) ->
     result = apply_proposal(proposal, tmp_path)
     assert result.success
     assert (tmp_path / "Dockerfile").exists()
-    content = (tmp_path / "Dockerfile").read_text()
+    content = (tmp_path / "Dockerfile").read_text(encoding="utf-8")
     assert "FROM python:3.11-slim" in content
     assert "EXPOSE 8000" in content
 
@@ -232,7 +232,7 @@ def test_apply_file_template__gitignore_append__appends_correctly(tmp_path: Path
     proposal = generate_proposal_for_blocker(blocker, contract, tmp_path)
     result = apply_proposal(proposal, tmp_path)
     assert result.success
-    content = (tmp_path / ".gitignore").read_text()
+    content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "node_modules/" in content  # original preserved
     assert ".env" in content
     assert ".env.local" in content
@@ -245,7 +245,7 @@ def test_apply_file_template__env_example_create(tmp_path: Path) -> None:
     proposal = generate_proposal_for_blocker(blocker, contract, tmp_path)
     result = apply_proposal(proposal, tmp_path)
     assert result.success
-    content = (tmp_path / ".env.example").read_text()
+    content = (tmp_path / ".env.example").read_text(encoding="utf-8")
     assert "DATABASE_URL=" in content
     assert "API_KEY=" in content
     assert "SECRET_TOKEN=" in content
@@ -417,5 +417,5 @@ def test_dockerfile_stack_aware(
     assert proposal.template_id == expected_template_id
     result = apply_proposal(proposal, tmp_path)
     assert result.success
-    content = (tmp_path / "Dockerfile").read_text()
+    content = (tmp_path / "Dockerfile").read_text(encoding="utf-8")
     assert expected_in_content in content
