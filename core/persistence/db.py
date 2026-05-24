@@ -161,6 +161,24 @@ class RecoderDB:
             conn.close()
 
     # ------------------------------------------------------------------
+    # WAL 정리 — Windows 에서 TemporaryDirectory cleanup 시 파일 잠금 해소용.
+    # ------------------------------------------------------------------
+
+    def checkpoint_and_close_wal(self) -> None:
+        """WAL 보조 파일 (.db-wal, .db-shm) 을 강제로 main DB 에 머지 + 삭제.
+
+        Windows 에서 SQLite WAL 모드 사용 시 .db-wal / .db-shm 가 잠긴 채
+        남을 수 있어 임시 디렉토리 cleanup 실패 (WinError 32) 가 흔하다.
+        평가/테스트 종료 시 호출 권장.
+        """
+        try:
+            with self._connect_raw() as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("PRAGMA journal_mode = DELETE")
+        except sqlite3.Error:
+            pass
+
+    # ------------------------------------------------------------------
     # 운영 — 테스트에서만 사용. Production 호출 금지.
     # ------------------------------------------------------------------
 
