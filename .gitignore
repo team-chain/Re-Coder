@@ -33,3 +33,7 @@ Thumbs.db
 *.log
 tmp*/
 recoder-runtime.json
+
+# Eval harness output
+core/eval_report.json
+eval_report.json
