@@ -29,6 +29,27 @@ SCHEMA_VERSION = "6.4"
 
 
 # ---------------------------------------------------------------------------
+# Compatibility shim — legacy dataclass-style .to_dict() on Pydantic models
+#
+# 기존 코드(first_run.py, session_logger.py, server.py, risk_validator.py, ...)
+# 는 dataclass 버전 모델의 .to_dict() 를 호출하던 습관이 남아있다. Pydantic v2
+# 에서는 model_dump() 가 canonical 메서드지만, 매 호출처를 수정하는 것보다
+# BaseModel 에 .to_dict() 호환 메서드를 한 번 패치해서 둘 다 동작하게 한다.
+#
+# - mode="json" 으로 직렬화 → datetime / enum 등이 JSON-safe 형태로 변환된다.
+# - 이미 .to_dict() 가 정의된 클래스(dataclass 등)는 영향 받지 않는다.
+# - Pydantic 의 self 검증/직렬화 로직은 그대로 사용한다.
+# ---------------------------------------------------------------------------
+
+if not hasattr(BaseModel, "to_dict"):
+    def _pydantic_to_dict_compat(self) -> dict:  # type: ignore[no-redef]
+        """Legacy alias for model_dump(mode='json')."""
+        return self.model_dump(mode="json")
+
+    BaseModel.to_dict = _pydantic_to_dict_compat  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
@@ -371,7 +392,7 @@ class FileTemplate(BaseModel):
 
 
 class DiagnosticsResult(BaseModel):
-    """Result of the /diagnostics endpoint — system readiness check."""
+    """Result of the /diagnostics endpoint — system readiness check (§11)."""
 
     core_ready: ReadyState = ReadyState.NOT_READY
     ai_ready: ReadyState = ReadyState.NOT_READY
@@ -384,6 +405,11 @@ class DiagnosticsResult(BaseModel):
     provider_type: Optional[ProviderType] = None
     validation_time: datetime = Field(default_factory=datetime.utcnow)
     details: dict[str, Any] = Field(default_factory=dict)
+
+    # 진단 중 수집된 사유/경고 목록 — first_run.py 가 누적해서 채운다.
+    issues: list[str] = Field(default_factory=list)
+    # Docker 버전 문자열 (예: "Docker version 24.0.7, build afdd53b") — Docker Ready 진단 시 채움.
+    docker_version: str = ""
 
 
 class RuntimeConfig(BaseModel):
