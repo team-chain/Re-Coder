@@ -129,6 +129,10 @@ class ActionType(str, Enum):
     SCALE_DOWN = "scale_down"
     NOTIFY = "notify"
     NO_ACTION = "no_action"
+    # v10 §32 Remediation Extension - CommandTemplate
+    SYSTEM_COMMAND = "system_command"
+    PACKAGE_INSTALL = "package_install"
+    FILE_WRITE = "file_write"
 
 
 class FileType(str, Enum):
@@ -139,6 +143,12 @@ class FileType(str, Enum):
     ENV_FILE = "env_file"
     K8S_MANIFEST = "k8s_manifest"
     TERRAFORM = "terraform"
+    # v10 §32 Remediation Extension - RemediationProposal FileTemplate
+    GITIGNORE = "gitignore"
+    PYTHON_SOURCE = "python_source"
+    JS_SOURCE = "js_source"
+    RECODER_YML = "recoder_yml"
+    OTHER = "other"
 
 
 class ProviderType(str, Enum):
