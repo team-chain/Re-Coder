@@ -62,28 +62,37 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Time helpers — contract duration ("5m", "30s") → seconds
+# Time helpers — contract duration ("5m", "30s", "100ms") → seconds (float)
 # ---------------------------------------------------------------------------
 
 
-_DURATION_RE: re.Pattern[str] = re.compile(r"^\s*(\d+)\s*([smhSMH]?)\s*$")
+_DURATION_RE: re.Pattern[str] = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$",
+    re.IGNORECASE,
+)
 
 
-def parse_duration(s: str | None, default: int = 60) -> int:
-    """``"5m"`` / ``"30s"`` / ``"1h"`` → seconds. 못 읽으면 default."""
+def parse_duration(s: str | None, default: float = 60.0) -> float:
+    """``"5m"`` / ``"30s"`` / ``"100ms"`` / ``"1h"`` → seconds (float).
+
+    Returns float seconds. 못 읽으면 default.
+    "100ms" → 0.1, "30s" → 30.0, "5m" → 300.0, "1h" → 3600.0.
+    """
     if not s:
         return default
     m = _DURATION_RE.match(str(s))
     if not m:
         return default
-    n = int(m.group(1))
-    unit = m.group(2).lower()
-    if unit == "" or unit == "s":
+    n = float(m.group(1))
+    unit = (m.group(2) or "s").lower()
+    if unit == "ms":
+        return n / 1000.0
+    if unit == "s":
         return n
     if unit == "m":
-        return n * 60
+        return n * 60.0
     if unit == "h":
-        return n * 3600
+        return n * 3600.0
     return default
 
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 from .db import RecoderDB, get_default_db_path
 from .ledger_store import (
     list_deployments,
+    list_rollback_candidates,
     load_deployment,
     save_deployment,
     update_deployment_status,
@@ -57,5 +58,6 @@ __all__ = [
     "save_deployment",
     "load_deployment",
     "list_deployments",
+    "list_rollback_candidates",
     "update_deployment_status",
 ]
