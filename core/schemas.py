@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 SCHEMA_VERSION = "6.4"
@@ -1220,6 +1220,809 @@ class ECSDeployRecord(BaseModel):
 # forward reference 해소
 SecurityScanResult.model_rebuild()
 ECSDeployRecord.model_rebuild()
+
+
+# ===========================================================================
+# v10 PART II/III/IV — 시장성 강화 + 멀티 채널 + Hybrid Cloud Relay
+#
+# 설계서 v10.0 §29~46 의 모든 데이터 계약을 한 곳에 정리.
+# 4명 팀원 (A/B/C/D) 모두가 이 스키마를 공통 인터페이스로 사용하므로
+# 변경 시 합의 필수. 추가 시 본 영역 끝의 model_rebuild() 블록에도 등록.
+#
+# 보안 / 마스킹 정책:
+#   - "preview" / "error_message" / "logs_excerpt" 같은 자유 텍스트 필드는
+#     ContextGate.mask()를 통과한 마스킹된 값이 들어가야 한다.
+#   - 호출자가 마스킹 책임을 진다. 본 모델은 형태만 정의.
+#   - SSH key / API key / secret 원문 필드는 본 모델에 정의하지 않는다.
+# ===========================================================================
+
+
+# ── §29 Release Contract ───────────────────────────────────────────────
+
+class ContractStack(str, Enum):
+    """프로젝트 스택 — Release Contract.project.stack 의 허용 값."""
+    PYTHON_FASTAPI = "python-fastapi"
+    PYTHON_FLASK   = "python-flask"
+    NODE_EXPRESS   = "node-express"
+    NODE_NEXT      = "node-next"
+    CUSTOM         = "custom"
+
+
+class ContractProjectMeta(BaseModel):
+    """recoder.yml 의 project 섹션 — 명시적 모델 (§29.2)."""
+    stack:           ContractStack
+    name:            Optional[str] = None
+    package_manager: Optional[str] = None        # "pip" | "npm" | "yarn" | "pnpm"
+
+
+class ContractRuntime(BaseModel):
+    """recoder.yml의 runtime 섹션 — 컨테이너 실행 파라미터 (§29.2, §29.3)."""
+    app_port:           int = Field(8000, ge=1, le=65535, description="컨테이너 내부 포트")
+    host_port:          int = Field(8000, ge=1, le=65535, description="로컬 노출 포트")
+    health_check_path:  str = Field("/health", min_length=1)
+    env_file:           str = Field(".env", min_length=1)
+
+    @field_validator("health_check_path")
+    @classmethod
+    def _validate_health_path(cls, v: str) -> str:
+        if not v.startswith("/"):
+            raise ValueError("health_check_path must start with '/'")
+        # 명령 주입 방지 — / 외 위험 문자 차단
+        if any(c in v for c in (" ", ";", "&", "|", "<", ">", "`", "$", "(", ")")):
+            raise ValueError(f"health_check_path contains forbidden characters: {v!r}")
+        return v
+
+    @field_validator("env_file")
+    @classmethod
+    def _validate_env_file(cls, v: str) -> str:
+        # 절대경로 차단 — 항상 프로젝트 루트 기준 상대경로
+        if v.startswith("/") or (len(v) > 1 and v[1] == ":"):
+            raise ValueError(f"env_file must be a relative path, got: {v!r}")
+        if ".." in v.split("/") or ".." in v.split("\\"):
+            raise ValueError(f"env_file must not contain '..': {v!r}")
+        return v
+
+
+class ContractPreflightPolicy(BaseModel):
+    """recoder.yml의 preflight 섹션 — Static/Runtime Preflight 차단 정책 (§29.2)."""
+    required_env:                list[str] = Field(default_factory=lambda: ["PORT"])
+    block_on_build_fail:         bool = True
+    block_on_health_fail:        bool = True
+    block_on_port_conflict:      bool = True
+    block_on_critical_vuln:      bool = True
+
+
+class ContractStartupPolicy(BaseModel):
+    """operational_policy.startup — 시작 시점 로그 패턴 검증 (§29.2)."""
+    timeout:                 str = "30s"
+    expected_log_pattern:    str = "Application startup complete"
+    forbidden_log_pattern:   str = "ERROR|CRITICAL|Traceback"
+
+
+class ContractDatabaseDep(BaseModel):
+    """단일 외부 의존성 (DB 등) — operational_policy.dependencies.database."""
+    url_env:                str = "DATABASE_URL"
+    required_at_startup:    bool = True
+
+
+class ContractDependencyPolicy(BaseModel):
+    """operational_policy.dependencies — 외부 의존성 (DB 등) 검증 (§29.2)."""
+    database: Optional[ContractDatabaseDep] = None
+
+
+class ContractSmokeTest(BaseModel):
+    """operational_policy.smoke_tests[] — 배포 직후 호출 검증 (§29.2)."""
+    path:             str
+    method:           Literal["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"] = "GET"
+    expected_status:  list[int] = Field(default_factory=lambda: [200])
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        if not v.startswith("/"):
+            raise ValueError("smoke test path must start with '/'")
+        return v
+
+
+class ContractResourceLimits(BaseModel):
+    """operational_policy.resource_limits (§29.2)."""
+    memory: str = Field("512m", pattern=r"^\d+[kKmMgG]?$")
+    cpu:    float = Field(0.5, gt=0.0, le=64.0)
+
+
+class ContractContinuousVerification(BaseModel):
+    """operational_policy.continuous_verification — 배포 후 5분 감시 (§29.2, §34)."""
+    duration:                 str = "5m"
+    health_check_interval:    str = "30s"
+    error_log_threshold:      str = "10/min"
+
+
+class ContractAutoRollbackTrigger(BaseModel):
+    """auto_rollback_on 의 단위 트리거 — 명시적 모델."""
+    health_check_fail_count:  Optional[int] = None
+    error_log_rate_exceeded:  Optional[bool] = None
+    memory_usage_exceeded:    Optional[float] = None    # 0~1 (90% = 0.9)
+
+
+class ContractRollbackStrategy(BaseModel):
+    """operational_policy.rollback_strategy (§29.2)."""
+    type:                Literal["previous_image", "blue_green", "manual"] = "previous_image"
+    auto_rollback_on:    list[ContractAutoRollbackTrigger] = Field(default_factory=list)
+
+
+class ContractOperationalPolicy(BaseModel):
+    """operational_policy 섹션 전체 (§29.2)."""
+    startup:                  ContractStartupPolicy = Field(default_factory=ContractStartupPolicy)
+    dependencies:             ContractDependencyPolicy = Field(default_factory=ContractDependencyPolicy)
+    smoke_tests:              list[ContractSmokeTest] = Field(default_factory=list)
+    resource_limits:          ContractResourceLimits = Field(default_factory=ContractResourceLimits)
+    continuous_verification:  ContractContinuousVerification = Field(default_factory=ContractContinuousVerification)
+    rollback_strategy:        ContractRollbackStrategy = Field(default_factory=ContractRollbackStrategy)
+
+
+class ReleaseContract(BaseModel):
+    """
+    설계서 §29 Release Contract — recoder.yml 의 Pydantic 표현.
+
+    First Run Wizard (§36) 가 프로젝트 스캔 + 5개 질문으로 자동 생성하며,
+    이후 모든 Preflight/RemediationProposal/CommandTemplate의 기준점이 된다.
+
+    contract_hash 는 본 모델 직렬화의 SHA256 — DeploymentLedger.contract_hash 와
+    매칭되어 "이 배포가 어떤 contract 버전으로 검증됐는지" 추적된다 (§29.4).
+    """
+    project:              ContractProjectMeta
+    runtime:              ContractRuntime = Field(default_factory=ContractRuntime)
+    preflight:            ContractPreflightPolicy = Field(default_factory=ContractPreflightPolicy)
+    operational_policy:   ContractOperationalPolicy = Field(default_factory=ContractOperationalPolicy)
+
+    # 추적용 메타
+    contract_hash:        Optional[str] = None  # SHA256 (DeploymentLedger 연결)
+    created_at:           datetime = Field(default_factory=datetime.utcnow)
+    updated_at:           datetime = Field(default_factory=datetime.utcnow)
+
+    @model_validator(mode="after")
+    def _validate_ports(self) -> "ReleaseContract":
+        # host_port == app_port 일 때는 매핑이 무의미하지 않지만, 외부 호환을 위해 허용.
+        # 다만 둘 다 well-known reserved 포트(<1024)는 권장하지 않음 — 경고 차원에서 거부하지 않음.
+        return self
+
+
+# ── §30 Static Preflight ───────────────────────────────────────────────
+
+class PreflightStatus(str, Enum):
+    """Preflight 최종 상태 (§30.2). 제품 로직은 status 기준 동작."""
+    BLOCKED  = "BLOCKED"
+    WARN     = "WARN"
+    PASSED   = "PASSED"
+
+
+class PreflightCheckCode(str, Enum):
+    """Static Preflight 12종 검사 코드 (§30.1)."""
+    # 환경 / 설정
+    MISSING_REQUIRED_ENV       = "MISSING_REQUIRED_ENV"
+    ENV_FILE_NOT_GITIGNORED    = "ENV_FILE_NOT_GITIGNORED"
+    INVALID_ENV_FORMAT         = "INVALID_ENV_FORMAT"
+    # 코드 / 엔드포인트
+    MISSING_HEALTH_ENDPOINT    = "MISSING_HEALTH_ENDPOINT"
+    APP_ENTRYPOINT_NOT_FOUND   = "APP_ENTRYPOINT_NOT_FOUND"
+    # Docker
+    MISSING_DOCKERFILE         = "MISSING_DOCKERFILE"
+    DOCKERFILE_BUILD_RISK      = "DOCKERFILE_BUILD_RISK"
+    # 포트 / 네트워크
+    HOST_PORT_CONFLICT         = "HOST_PORT_CONFLICT"
+    APP_PORT_MISMATCH          = "APP_PORT_MISMATCH"
+    # 의존성 / 보안
+    UNPINNED_DEPENDENCIES      = "UNPINNED_DEPENDENCIES"
+    CRITICAL_VULNERABILITY     = "CRITICAL_VULNERABILITY"
+    SECRET_LEAK_RISK           = "SECRET_LEAK_RISK"
+
+
+class PreflightSeverity(str, Enum):
+    LOW       = "low"
+    MEDIUM    = "medium"
+    HIGH      = "high"
+    CRITICAL  = "critical"
+
+
+class PreflightBlocker(BaseModel):
+    """배포를 차단하는 항목 (§30.2)."""
+    code:                    PreflightCheckCode
+    message:                 str
+    fix_hint:                str = ""
+    remediation_available:   bool = False
+    proposal_id:             Optional[str] = None  # 생성된 RemediationProposal 참조
+    severity:                PreflightSeverity = PreflightSeverity.HIGH
+
+
+class PreflightWarning(BaseModel):
+    """배포는 가능하지만 주의가 필요한 항목 (§30.2)."""
+    code:                    PreflightCheckCode
+    message:                 str
+    fix_hint:                str = ""
+    proposal_id:             Optional[str] = None
+    severity:                PreflightSeverity = PreflightSeverity.LOW
+
+
+class PreflightStaticChecks(BaseModel):
+    """§30 Static Preflight 의 12종 개별 결과 — 디버깅용 상세.
+
+    results[<code>] = {"passed": bool, "duration_ms": int, "details": dict}
+    """
+    results: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class PreflightRuntimeChecks(BaseModel):
+    """§31 Runtime Preflight 의 검증 항목별 결과 — 디버깅용 상세."""
+    container_alive:    Optional[bool] = None
+    health_passed:      Optional[bool] = None
+    smoke_passed:       Optional[bool] = None
+    log_pattern_ok:     Optional[bool] = None
+    db_connected:       Optional[bool] = None
+    temp_container_id:  Optional[str] = None       # 임시 컨테이너 (정리 추적용)
+    duration_ms:        Optional[int] = None
+    container_log_tail: Optional[str] = None       # 실패 시 마지막 50줄 (마스킹 필수)
+
+
+class PreflightRun(BaseModel):
+    """
+    §33.1 PreflightRun — Static + Runtime Preflight 의 통합 결과.
+    Layer 1 (배포 전 검사) 의 단위 레코드. SQLite 영속화 대상.
+    """
+    preflight_run_id:    str = Field(default_factory=lambda: f"pre_{uuid.uuid4().hex[:8]}")
+    project_id:          Optional[str] = None
+    contract_hash:       Optional[str] = None
+    status:              PreflightStatus = PreflightStatus.PASSED
+    score:               int = Field(0, ge=0, le=100)
+    blockers:            list[PreflightBlocker] = Field(default_factory=list)
+    warnings:            list[PreflightWarning] = Field(default_factory=list)
+    static_checks:       PreflightStaticChecks = Field(default_factory=PreflightStaticChecks)
+    runtime_checks:      PreflightRuntimeChecks = Field(default_factory=PreflightRuntimeChecks)
+    proposal_ids:        list[str] = Field(default_factory=list)
+    created_at:          datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── §32 RemediationProposal ────────────────────────────────────────────
+
+class RemediationTargetType(str, Enum):
+    """수정 대상 분류 (§32.1)."""
+    ENV_FILE          = "env_file"
+    SOURCE_CODE       = "source_code"
+    RELEASE_CONTRACT  = "release_contract"
+    DOCKER_RUNTIME    = "docker_runtime"
+    GUIDANCE_ONLY     = "guidance_only"
+
+
+class RemediationApplyMethod(str, Enum):
+    """적용 방식 (§32.1) — 결정론적 동치성을 위해 LLM 직접 생성 금지."""
+    FILE_TEMPLATE     = "file_template"      # FileTemplate Registry 사용
+    CONTRACT_UPDATE   = "contract_update"    # recoder.yml 갱신
+    COMMAND_TEMPLATE  = "command_template"   # CommandTemplate Registry 사용
+    MANUAL_ONLY       = "manual_only"        # 자동 적용 불가, 가이드만
+
+
+class RemediationPreviewType(str, Enum):
+    """미리보기 형식 (§32.1)."""
+    DIFF          = "diff"
+    FILE_CONTENT  = "file_content"
+    COMMAND       = "command"
+    GUIDANCE      = "guidance"
+
+
+class RemediationFallback(str, Enum):
+    """자동 적용 실패 시 폴백 (§32.1)."""
+    MANUAL_GUIDANCE     = "manual_guidance"
+    SKIP                = "skip"
+    ASK_USER_FOR_PATH   = "ask_user_for_path"
+
+
+class RemediationPreviewDiff(BaseModel):
+    """preview_type=diff 일 때의 본문 — unified diff 한 줄."""
+    unified_diff:   str
+    base_sha256:    Optional[str] = None       # 적용 전 파일 hash (Code Rollback 안전망)
+
+
+class RemediationPreviewFile(BaseModel):
+    """preview_type=file_content 일 때의 본문."""
+    target_path:    str
+    content:        str
+
+
+class RemediationPreviewCommand(BaseModel):
+    """preview_type=command 일 때의 본문 — CommandTemplate 렌더링 결과."""
+    command:           str
+    template_id:       str
+    requires_consent:  bool = True
+
+
+class RemediationPreviewGuidance(BaseModel):
+    """preview_type=guidance 일 때의 본문 — 사용자에게 보여줄 단계."""
+    steps:           list[str]
+    docs_url:        Optional[str] = None
+    estimated_time:  Optional[str] = None      # "5분" 등 자연어
+
+
+class RemediationProposal(BaseModel):
+    """
+    §32 RemediationProposal — PatchProposal/InfraFileProposal 의 통합 확장.
+
+    Preflight Blocker 에 1:N 대응. 결정론적 동치성 (§32.2):
+        Wizard → recoder.yml (값 확정)
+            ↓
+        Static Preflight → Blocker 감지 → RemediationProposal 생성
+            ↓  template_id + template_variables (Contract 값 기반)
+        Apply Engine → Template 치환 → 실제 파일 변경
+            ↓
+        Re-run Preflight → PASSED
+    """
+    proposal_id:              str = Field(default_factory=lambda: f"rem_{uuid.uuid4().hex[:8]}")
+    source_blocker_code:      PreflightCheckCode
+    summary:                  str
+    rationale:                str                                # LLM 이 생성하는 자연어 설명 (마스킹된 값 입력 책임은 호출자)
+    target_type:              RemediationTargetType
+    target_path:              Optional[str] = None
+    approval_level:           Optional[int] = Field(None, ge=1, le=4)  # ApprovalLevel 1~4
+    risk_level:               RiskLevel = RiskLevel.LOW
+    apply_method:             RemediationApplyMethod
+    template_id:              Optional[str] = None               # File/CommandTemplate Registry 참조
+    template_variables:       dict[str, Any] = Field(default_factory=dict)
+    preview_type:             RemediationPreviewType
+
+    # preview 는 preview_type 별로 위 4가지 중 하나. Union 처리:
+    # - diff       → RemediationPreviewDiff
+    # - file_content → RemediationPreviewFile
+    # - command    → RemediationPreviewCommand
+    # - guidance   → RemediationPreviewGuidance
+    preview:                  Optional[dict[str, Any]] = None    # 위 4 모델 중 하나의 model_dump()
+
+    auto_apply_available:     bool = False
+    confidence:               float = Field(0.0, ge=0.0, le=1.0)
+    fallback:                 Optional[RemediationFallback] = None
+    rollback_hint:            str = ""
+    requires_rerun_preflight: bool = True
+    created_at:               datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── §33.2 RemediationRun ───────────────────────────────────────────────
+
+class RemediationRun(BaseModel):
+    """
+    Layer 2 — 수정 실행 이력. 어떤 proposal 을 언제 어떤 결과로 적용했는지.
+    """
+    remediation_run_id:   str = Field(default_factory=lambda: f"run_{uuid.uuid4().hex[:8]}")
+    preflight_run_id:     str
+    proposal_id:          str
+    applied_files:        list[str] = Field(default_factory=list)
+    applied_at:           datetime = Field(default_factory=datetime.utcnow)
+    success:              bool = False
+    rollback_executed:    bool = False
+    error_message:        Optional[str] = None                    # 마스킹된 값만 (호출자 책임)
+
+
+# ── §33.3 DeploymentLedger ─────────────────────────────────────────────
+
+class ApprovalSnapshot(BaseModel):
+    """승인 시점 스냅샷 — DeploymentLedger.approval_snapshot (§33.3)."""
+    approved_at:        datetime
+    approved_action:    str                                       # "deploy" | "rollback" | "restart" | ...
+    displayed_risks:    list[str] = Field(default_factory=list)
+    approved_by:        str                                       # "vscode" | "discord:<user_id>" | "cli" | ...
+
+
+class RollbackCandidate(BaseModel):
+    """이전 배포 image_digest 참조 (§33.3, §17)."""
+    image_digest:   str
+    note:           str = ""
+
+
+class DeploymentLedgerStatus(str, Enum):
+    """DeploymentLedger.status — 상태머신 명시."""
+    DEPLOYING    = "deploying"
+    STABLE       = "stable"
+    FAILED       = "failed"
+    ROLLED_BACK  = "rolled_back"
+
+
+class DeploymentLedger(BaseModel):
+    """
+    Layer 3 — 최종 배포 결과. PreflightRun + RemediationRun 들을 ID 참조로 묶음.
+    설계서 §20.6 DeploymentRecord 를 확장한 wire format. 기존 DeploymentRecord 도 유지.
+    """
+    deployment_id:        str = Field(default_factory=lambda: f"dep_{uuid.uuid4().hex[:8]}")
+    project_id:           Optional[str] = None
+    preflight_run_id:     Optional[str] = None
+    remediation_run_ids:  list[str] = Field(default_factory=list)
+
+    # 빌드 정보
+    git_commit:           Optional[str] = None
+    image_tag:            Optional[str] = None
+    image_digest:         Optional[str] = None
+    dockerfile_hash:      Optional[str] = None
+    contract_hash:        Optional[str] = None
+
+    # 결과
+    status:               DeploymentLedgerStatus = DeploymentLedgerStatus.DEPLOYING
+    health_after:         Optional[Literal["healthy", "unhealthy"]] = None
+    approval_level:       Optional[int] = Field(None, ge=1, le=4)
+    approval_snapshot:    Optional[ApprovalSnapshot] = None
+    rollback_candidate:   Optional[RollbackCandidate] = None
+    failure_reason:       Optional[str] = None                    # 마스킹된 값만
+
+    # 메타 (env_hash 는 secret 미포함 — 단순 해시)
+    # 권장 키: env_hash, target_host, region, deployer_id
+    metadata:             dict[str, Any] = Field(default_factory=dict)
+    created_at:           datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── §34 Continuous Verification 결과 ───────────────────────────────────
+
+class CVResultStatus(str, Enum):
+    STABLE             = "stable"
+    AUTO_ROLLBACK_PROPOSED = "auto_rollback_proposed"
+    WARNING            = "warning"
+
+
+class CVResult(BaseModel):
+    """§34 Continuous Verification 5분 감시 결과 — DeploymentLedger.status 갱신용."""
+    deployment_id:         str
+    duration_seconds:      int = 300
+    health_failure_count:  int = 0
+    error_log_rate:        float = 0.0                            # 분당 에러 개수
+    max_memory_pct:        float = 0.0                            # 0~1
+    status:                CVResultStatus = CVResultStatus.STABLE
+    auto_rollback_to:      Optional[str] = None                   # rollback_image_digest
+    notes:                 list[str] = Field(default_factory=list)
+    finished_at:           datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── §35 IncidentMemory ─────────────────────────────────────────────────
+
+class IncidentMemoryRecord(BaseModel):
+    """
+    §35.1 IncidentMemory — 같은 사고 두 번 반복 방지.
+
+    fingerprint 매칭 단계 (v0): 완전 일치만 (LLM 호출 0회 / 비용 0원).
+    v1 확장: bge-small ONNX 임베딩 유사도 검색 (P2).
+    """
+    fingerprint:          str = Field(min_length=8)               # error_type + 마지막 파일 + masked 메시지의 SHA256
+    project_id:           Optional[str] = None
+    symptom:              str                                       # 사용자 표시용 증상 요약 (마스킹된 값)
+    root_cause:           str                                       # 원인 분석
+    successful_fix:       str                                       # 성공한 해결책 자연어 요약
+    applied_proposal_id:  str                                       # 어떤 RemediationProposal 로 해결
+    linked_deployment_id: Optional[str] = None
+    success_count:        int = Field(1, ge=1)                      # 재발 시 increment
+    last_seen_at:         datetime = Field(default_factory=datetime.utcnow)
+    user_consent:         bool = False                              # 학습 동의 (옵트인)
+
+
+# ===========================================================================
+# v10 PART III — 멀티 채널 + 신박 차별점
+# ===========================================================================
+
+
+# ── §37 Discord ChatOps ────────────────────────────────────────────────
+
+class DiscordPermissionTier(str, Enum):
+    """Discord 사용자별 허용 동작 범위 (§37.7)."""
+    READ_ONLY        = "read_only"               # 상태 조회만
+    APPROVE_L1_L2    = "approve_l1_l2"           # Level 1~2 자동 승인 가능
+    REQUIRE_DESKTOP  = "require_desktop"          # Level 3~4 는 데스크탑 강제
+
+
+class DiscordIdentity(BaseModel):
+    """Discord user_id ↔ ReCoder 사용자 매핑 (§37.7)."""
+    discord_user_id:    str                                       # Discord 의 unique snowflake
+    recoder_user_id:    str                                       # ReCoder 내부 사용자 ID
+    permission_tier:    DiscordPermissionTier = DiscordPermissionTier.READ_ONLY
+    enabled:            bool = True
+    registered_at:      datetime = Field(default_factory=datetime.utcnow)
+    last_used_at:       Optional[datetime] = None
+
+
+class DiscordCommandName(str, Enum):
+    """Discord 슬래시 명령 (§37.3)."""
+    STATUS          = "status"
+    PREFLIGHT       = "preflight"
+    APPLY           = "apply"
+    DEPLOY          = "deploy"
+    ROLLBACK        = "rollback"
+    REPLAY          = "replay"
+    CODE            = "code"
+    STANDUP_NOW     = "standup_now"
+
+
+class DiscordCommandRequest(BaseModel):
+    """Discord Bot → Local Core 로 들어오는 명령 요청 (§37.4 시나리오)."""
+    command:            DiscordCommandName
+    discord_user_id:    str
+    channel_id:         Optional[str] = None
+    project_id:         Optional[str] = None
+    payload:            dict[str, Any] = Field(default_factory=dict)
+    received_at:        datetime = Field(default_factory=datetime.utcnow)
+
+
+class DiscordCommandResult(BaseModel):
+    """Discord Bot 응답에 사용할 결과 (§37.4)."""
+    command:            DiscordCommandName
+    success:            bool
+    message:            str                                       # 한국어 사용자 표시 문구
+    embed_blocks:       list[dict[str, Any]] = Field(default_factory=list)  # Discord embed JSON
+    actions:            list[dict[str, str]] = Field(default_factory=list)  # 버튼 정의
+    requires_typing_confirm: bool = False                         # Level 3~4 추가 인증
+
+
+# ── §38 Deploy Replay ──────────────────────────────────────────────────
+
+class ReplayEventType(str, Enum):
+    """타임라인 이벤트 분류 (§38.2)."""
+    DEPLOY_STARTED       = "deploy_started"
+    HEALTH_OK            = "health_ok"
+    HEALTH_FAIL          = "health_fail"
+    CV_STARTED           = "cv_started"
+    METRIC_SPIKE         = "metric_spike"
+    LOG_ERROR            = "log_error"
+    INCIDENT_DETECTED    = "incident_detected"
+    DISCORD_NOTIFIED     = "discord_notified"
+    USER_ACTION          = "user_action"
+    ROLLBACK_STARTED     = "rollback_started"
+    ROLLBACK_COMPLETED   = "rollback_completed"
+    CV_PASSED            = "cv_passed"
+
+
+class ReplayEvent(BaseModel):
+    """단일 타임라인 이벤트 — 시점 + 종류 + 컨텍스트."""
+    timestamp:          datetime
+    event_type:         ReplayEventType
+    title:              str                                       # "메모리 사용량 급증 시작"
+    description:        Optional[str] = None
+    metrics:            dict[str, Any] = Field(default_factory=dict)  # {memory_mb, cpu_pct, ...}
+    actor:              Optional[str] = None                      # "vscode" | "discord:<user>" | "system" | "watchdog"
+    masked_log_excerpt: Optional[str] = None                      # 마스킹 필수
+
+
+class ReplayTimeline(BaseModel):
+    """
+    §38 Deploy Replay — 인시던트 영상 재생용 타임라인.
+    DeploymentLedger 1개에 대해 발생한 모든 이벤트의 시간순 정렬.
+    """
+    deployment_id:      str
+    project_id:         Optional[str] = None
+    start_at:           datetime
+    end_at:             datetime
+    events:             list[ReplayEvent] = Field(default_factory=list)
+    duration_seconds:   int = 0
+    incident_detected:  bool = False
+    rollback_executed:  bool = False
+    created_at:         datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── §39 Daily Standup ──────────────────────────────────────────────────
+
+class StandupChannel(str, Enum):
+    """Standup 전송 채널 (§39.4)."""
+    DISCORD_DM       = "discord_dm"
+    DISCORD_CHANNEL  = "discord_channel"
+    EMAIL            = "email"
+
+
+class NotableObservation(BaseModel):
+    """주목할 점 — Daily Standup 한 항목."""
+    category:    Literal["performance", "reliability", "security", "cost"] = "performance"
+    message:     str
+    severity:    PreflightSeverity = PreflightSeverity.LOW
+
+
+class RecommendedTask(BaseModel):
+    """오늘 추천 작업 — Daily Standup 한 항목."""
+    title:       str
+    rationale:   str
+    estimated_time: Optional[str] = None       # "30분" 등
+
+
+class StandupStats(BaseModel):
+    """주간 / 누적 통계 — Daily Standup."""
+    deployments_total:    int = 0
+    success_rate:         float = Field(0.0, ge=0.0, le=1.0)
+    avg_preflight_score:  float = Field(0.0, ge=0.0, le=100.0)
+    incidents_count:      int = 0
+
+
+class StandupBriefing(BaseModel):
+    """
+    §39 Daily Standup — 매일 아침 운영 브리핑.
+    LLM(Haiku)이 PreflightRun + DeploymentLedger + IncidentMemory 종합 생성.
+    """
+    briefing_id:        str = Field(default_factory=lambda: f"brf_{uuid.uuid4().hex[:8]}")
+    date:               datetime
+    project_id:         Optional[str] = None
+    channel:            StandupChannel = StandupChannel.DISCORD_DM
+
+    # 어제 / 지난 24h 요약
+    yesterday_deployments:  int = 0
+    yesterday_incidents:    int = 0
+    yesterday_blocks:       int = 0
+    notable:                list[NotableObservation] = Field(default_factory=list)
+    recommended:            list[RecommendedTask] = Field(default_factory=list)
+    weekly_stats:           StandupStats = Field(default_factory=StandupStats)
+
+    # 메타
+    delivered_at:       Optional[datetime] = None
+    user_disabled:      bool = False
+    created_at:         datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── §41 Deploy Forecast ────────────────────────────────────────────────
+
+class RiskFactor(BaseModel):
+    """위험 요인 한 항목 — Deploy Forecast 의 근거."""
+    code:        str                            # "RECENT_OOM", "WEEKEND_DEPLOY" 등
+    description: str
+    weight:      float = Field(0.0, ge=0.0, le=1.0)
+
+
+class DeployForecastSentiment(str, Enum):
+    SUNNY        = "sunny"        # 안정 (위험도 < 25%)
+    PARTLY_CLOUDY = "partly_cloudy"  # 주의 (25~50%)
+    CLOUDY       = "cloudy"       # 경계 (50~75%)
+    STORMY       = "stormy"       # 위험 (>75%)
+
+
+class DeployForecast(BaseModel):
+    """
+    §41 Deploy Forecast — 배포 일기예보.
+    DeploymentLedger 통계 + IncidentMemory 패턴 매칭으로 위험도 계산.
+    """
+    forecast_id:        str = Field(default_factory=lambda: f"fc_{uuid.uuid4().hex[:8]}")
+    project_id:         Optional[str] = None
+    date:               datetime
+    sentiment:          DeployForecastSentiment
+    risk_percentage:    float = Field(0.0, ge=0.0, le=1.0)
+    factors:            list[RiskFactor] = Field(default_factory=list)
+    recommendations:    list[str] = Field(default_factory=list)
+    created_at:         datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── §42 Visual Diff ────────────────────────────────────────────────────
+
+class DiffChangeType(str, Enum):
+    ADDED     = "added"
+    REMOVED   = "removed"
+    MODIFIED  = "modified"
+    UNCHANGED = "unchanged"
+
+
+class DiffEntry(BaseModel):
+    """배포 전후 비교의 한 항목."""
+    field:          str                            # "memory_limit", "endpoints", "image_digest" 등
+    change_type:    DiffChangeType
+    before:         Optional[Any] = None
+    after:          Optional[Any] = None
+    note:           Optional[str] = None
+
+
+class DeploymentDiff(BaseModel):
+    """
+    §42 Visual Diff — 두 DeploymentLedger 비교 결과.
+    프론트가 그래픽 다이어그램으로 렌더링.
+    """
+    diff_id:            str = Field(default_factory=lambda: f"diff_{uuid.uuid4().hex[:8]}")
+    before_deployment_id:   str
+    after_deployment_id:    str
+    entries:            list[DiffEntry] = Field(default_factory=list)
+    created_at:         datetime = Field(default_factory=datetime.utcnow)
+
+
+# ===========================================================================
+# v10 PART IV — Hybrid Cloud Relay (§46)
+# ===========================================================================
+
+
+class CloudRelayUserMapping(BaseModel):
+    """
+    §46.5 데이터 분리 — Cloud Relay 가 보유하는 유일한 사용자 정보.
+    Discord user_id ↔ ReCoder 사용자 ID 매핑 + 권한 토글.
+    """
+    discord_user_id:        str
+    recoder_user_id:        str
+    enable_command_queue:   bool = False                          # 흐름 ①
+    enable_incident_relay:  bool = False                          # 흐름 ②
+    enable_emergency_rollback: bool = False                       # 흐름 ③ (P2 옵트인)
+    ssh_key_secret_arn:     Optional[str] = None                  # Secrets Manager ARN (key 본문 미저장)
+    ssh_key_expires_at:     Optional[datetime] = None
+    created_at:             datetime = Field(default_factory=datetime.utcnow)
+
+
+class CommandQueueStatus(str, Enum):
+    PENDING    = "pending"
+    DELIVERED  = "delivered"
+    EXECUTED   = "executed"
+    FAILED     = "failed"
+    EXPIRED    = "expired"
+
+
+class CommandQueueEntry(BaseModel):
+    """
+    §46.3.1 명령 큐 — PC 꺼진 상태에서 들어온 명령 보관.
+    DynamoDB 에 저장. PC 켜지면 Local Core 가 polling 해서 비움.
+    """
+    queue_entry_id:     str = Field(default_factory=lambda: f"q_{uuid.uuid4().hex[:8]}")
+    recoder_user_id:    str
+    discord_user_id:    str
+    command_name:       DiscordCommandName
+    payload:            dict[str, Any] = Field(default_factory=dict)
+    status:             CommandQueueStatus = CommandQueueStatus.PENDING
+    enqueued_at:        datetime = Field(default_factory=datetime.utcnow)
+    delivered_at:       Optional[datetime] = None
+    executed_at:        Optional[datetime] = None
+    result_summary:     Optional[str] = None                      # 마스킹된 값만
+    expires_at:         Optional[datetime] = None                 # 기본 24h 후
+
+
+class IncidentNotificationSource(str, Enum):
+    WATCHDOG       = "watchdog"
+    LOCAL_CORE     = "local_core"
+    CONTINUOUS_VERIFICATION = "continuous_verification"
+
+
+class IncidentNotification(BaseModel):
+    """
+    §46.3.2 인시던트 클라우드 알림 — Watchdog/CV → Cloud Relay → Discord 즉시 push.
+    """
+    notification_id:        str = Field(default_factory=lambda: f"n_{uuid.uuid4().hex[:8]}")
+    source:                 IncidentNotificationSource
+    project_id:             Optional[str] = None
+    recoder_user_id:        str
+    deployment_id:          Optional[str] = None                  # 연결된 DeploymentLedger
+    fingerprint:            Optional[str] = None                  # IncidentMemory 매칭
+    symptom:                str                                    # "fastapi-demo 컨테이너 다운"
+    severity:               PreflightSeverity = PreflightSeverity.HIGH
+    recent_deployment_id:   Optional[str] = None
+    masked_log_excerpt:     Optional[str] = None
+    delivered_channels:     list[StandupChannel] = Field(default_factory=list)
+    detected_at:            datetime = Field(default_factory=datetime.utcnow)
+
+
+class EmergencyRollbackRequest(BaseModel):
+    """
+    §46.3.3 긴급 롤백 클라우드 실행 — P2 옵트인.
+    SSH key 본문은 본 모델에 포함 안 됨 (CloudRelayUserMapping.ssh_key_secret_arn 으로만 참조).
+    """
+    request_id:             str = Field(default_factory=lambda: f"erb_{uuid.uuid4().hex[:8]}")
+    discord_user_id:        str
+    recoder_user_id:        str
+    project_id:             Optional[str] = None
+    deployment_id:          str                                    # 어느 배포에서 rollback?
+    target_deployment_id:   str                                    # 어느 이전 배포로 복구?
+    typing_confirm:         str                                    # "rollback dep_041" 사용자가 직접 타이핑
+    requested_at:           datetime = Field(default_factory=datetime.utcnow)
+    executed:               bool = False
+    result_summary:         Optional[str] = None                   # 마스킹된 값만
+
+
+# ===========================================================================
+# v10 PART II/III/IV — forward reference 해소
+# ===========================================================================
+
+ReleaseContract.model_rebuild()
+PreflightRun.model_rebuild()
+RemediationProposal.model_rebuild()
+RemediationRun.model_rebuild()
+DeploymentLedger.model_rebuild()
+CVResult.model_rebuild()
+IncidentMemoryRecord.model_rebuild()
+# PART III
+DiscordIdentity.model_rebuild()
+DiscordCommandRequest.model_rebuild()
+DiscordCommandResult.model_rebuild()
+ReplayTimeline.model_rebuild()
+StandupBriefing.model_rebuild()
+DeployForecast.model_rebuild()
+DeploymentDiff.model_rebuild()
+# PART IV
+CloudRelayUserMapping.model_rebuild()
+CommandQueueEntry.model_rebuild()
+IncidentNotification.model_rebuild()
+EmergencyRollbackRequest.model_rebuild()
 
 
 # ===========================================================================
