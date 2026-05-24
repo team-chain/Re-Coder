@@ -1715,6 +1715,18 @@ class IncidentMemoryRecord(BaseModel):
     user_consent:         bool = False                              # 학습 동의 (옵트인)
 
 
+class IncidentMemoryMatch(BaseModel):
+    """
+    §35.2 IncidentMemory 매칭 결과 — 단일 entry + confidence.
+
+    v0: confidence ∈ {1.0 (exact project match), 0.7 (cross-project fallback)}.
+    v1: 임베딩 유사도 (0.0~1.0 연속값) 도입 예정.
+    """
+    entry:       IncidentMemoryRecord
+    confidence:  float = Field(1.0, ge=0.0, le=1.0)
+    matched_at:  datetime = Field(default_factory=datetime.utcnow)
+
+
 # ===========================================================================
 # v10 PART III — 멀티 채널 + 신박 차별점
 # ===========================================================================
