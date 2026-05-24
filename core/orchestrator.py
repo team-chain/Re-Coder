@@ -276,9 +276,33 @@ class Orchestrator:
       - context_gate    : ContextGate
     """
 
-    _TRIGGER_THRESHOLD = 70.0    # below this → skip LLM
-    _QUALITY_MIN       = 0.4     # below this → cancel AI call (back to IDLE w/ warning)
-    _QUALITY_WARN      = 0.7     # below this → request more context (raises ValueError)
+    # Thresholds — 호출 시점에 환경변수에서 읽음 (load_dotenv() 순서 무관).
+    # 설계서 §18.3 기본값:
+    #   < 0.4: AI 호출 취소 (IDLE 복귀)
+    #   0.4 ~ 0.7: 사용자에게 추가 정보 요청 (WAITING_USER_ACTION)
+    #   ≥ 0.7: 분석 진행 (LLM 호출)
+    #
+    # 시연/튜닝 시 환경변수로 조절 (런타임에 매번 읽으므로 .env 효과 즉시 반영):
+    #   RECODER_TRIGGER_THRESHOLD (0~100, 기본 70)
+    #   RECODER_QUALITY_MIN       (0~1,  기본 0.4)
+    #   RECODER_QUALITY_WARN      (0~1,  기본 0.7)
+
+    # NOTE: env-기반 threshold. property 로 매 호출 시 다시 읽으므로 .env 효과 즉시 반영.
+    # 보안: log.debug 로 강등 (INFO 는 production 기본 레벨 — env 값을 항상 찍지 않음).
+    @property
+    def _TRIGGER_THRESHOLD(self) -> float:
+        import os
+        return float(os.getenv("RECODER_TRIGGER_THRESHOLD", "70.0"))
+
+    @property
+    def _QUALITY_MIN(self) -> float:
+        import os
+        return float(os.getenv("RECODER_QUALITY_MIN", "0.4"))
+
+    @property
+    def _QUALITY_WARN(self) -> float:
+        import os
+        return float(os.getenv("RECODER_QUALITY_WARN", "0.7"))
 
     def __init__(self, provider_router: Any, context_gate: Any) -> None:
         self.state: S = S.IDLE
@@ -554,16 +578,43 @@ class Orchestrator:
         PatchProposal: Any,
         FilePatch: Any,
     ) -> Any:
-        """Convert raw LLM JSON output into a validated PatchProposal."""
+        """Convert raw LLM JSON output into a validated PatchProposal.
+
+        Tolerant of LLM schema drift — Haiku/Sonnet 가 patches 를 dict 배열이
+        아닌 string 배열, 또는 단일 dict 로 반환하는 경우도 처리한다.
+        """
         raw_patches = llm_result.get("patches", [])
+
+        # Normalise: dict 한 개로 온 경우 → list 로
+        if isinstance(raw_patches, dict):
+            raw_patches = [raw_patches]
+        elif not isinstance(raw_patches, list):
+            raw_patches = []
+
         patches: list[Any] = []
         for p in raw_patches:
-            patches.append(FilePatch(
-                file=p.get("file", ""),
-                base_sha256=p.get("base_sha256"),
-                unified_diff=p.get("unified_diff", ""),
-                reason=p.get("reason", ""),
-            ))
+            # Case 1: dict — 정상 schema
+            if isinstance(p, dict):
+                patches.append(FilePatch(
+                    file=p.get("file", ""),
+                    base_sha256=p.get("base_sha256"),
+                    unified_diff=p.get("unified_diff", ""),
+                    reason=p.get("reason", ""),
+                ))
+                continue
+
+            # Case 2: string — LLM 이 diff 본문만 string 으로 반환한 경우
+            if isinstance(p, str):
+                patches.append(FilePatch(
+                    file="",  # base_sha256 비어있으므로 적용 단계에서 가드됨
+                    base_sha256=None,
+                    unified_diff=p,
+                    reason="LLM returned patch as plain string — schema drift recovered",
+                ))
+                continue
+
+            # Case 3: 그 외 — 로그만 남기고 무시
+            log.warning("Unrecognised patch item type %s — skipping: %r", type(p).__name__, p)
 
         # Parse risk level safely (RiskLevel is a 4-step enum incl. CRITICAL).
         raw_risk = llm_result.get("risk_level", "low")

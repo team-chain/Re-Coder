@@ -220,14 +220,40 @@ async def _delegate_to_orchestrator(
     """
     Delegate analysis to the Orchestrator (Code Agent) via process_analyze_request().
 
-    Falls back to a structured placeholder when unavailable or when the
-    orchestrator filters the request (trigger/quality score too low).
+    Falls back to a structured placeholder when:
+      - Orchestrator module is unavailable
+      - Trigger/quality score is below the lower threshold (returns None)
+      - Quality score is in the WARN band (raises ValueError per §18.3 —
+        "사용자에게 추가 정보 요청"). We translate that to a friendly placeholder
+        so the HTTP endpoint never returns a raw 500.
     """
     orch = _get_orchestrator()
     if orch is not None:
-        result = await orch.process_analyze_request(request)
+        try:
+            result = await orch.process_analyze_request(request)
+        except ValueError as exc:
+            # §18.3 quality WARN band — orchestrator asks for richer context.
+            # Convert to a structured "needs more context" PatchProposal so the
+            # caller (Extension) can prompt the user to add traceback / file etc.
+            import logging
+            logging.getLogger(__name__).info(
+                "[Analyze] Orchestrator requested more context: %s", exc,
+            )
+            return PatchProposal(
+                summary="추가 컨텍스트가 필요합니다.",
+                risk_level=RiskLevel.LOW,
+                risk_reasons=[
+                    "Quality score in WARN band — more context required.",
+                    str(exc),
+                ],
+                approval_level=ApprovalLevel.AUTO,
+                patches=[],
+                test_command=None,
+            )
+
         if result is not None:
             return result
+
         # Orchestrator filtered the request (low trigger/quality score)
         return PatchProposal(
             summary="No significant issues detected in the current context.",
