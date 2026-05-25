@@ -24,32 +24,9 @@ ReCoder 는 개발자가 VSCode 사이드바에서 "분석" 또는 "배포" 한 
 
 ## 아키텍처
 
-```
-┌──────────────────────────────────────────┐
-│  VSCode Extension (TS + React + Tailwind)│   사용자 인터페이스
-│  Sidebar / Workbench / Approval Modal     │   브랜드 카드 UI
-└──────────────────┬───────────────────────┘
-                   │ HTTP REST (127.0.0.1)
-┌──────────────────▼───────────────────────┐
-│  Local Core (Python 3.11 + FastAPI)      │   ReCoder Backbone
-│  • Static Preflight (12 checks)          │
-│  • Deterministic Remediation             │
-│  • Runtime Preflight + CV                │
-│  • IncidentMemory (fingerprint 학습)     │
-│  • 3-Layer SQLite (WAL + FK CASCADE)     │
-│  • Context Gate (16-pattern 마스킹)       │
-└──────┬──────────────────┬───────────────┘
-       │                  │
-┌──────▼──────┐  ┌────────▼──────────────┐
-│ AWS Bedrock │  │ Docker (local 또는 EC2)│
-│ Claude H3/  │  │ docker build / run /   │
-│ Sonnet      │  │ stats / logs           │
-└─────────────┘  └────────────────────────┘
-                          │
-                ┌─────────▼─────────────┐
-                │ Discord ChatOps (옵션) │   `/recoder deploy` 등
-                └───────────────────────┘
-```
+![ReCoder Architecture](docs/architecture.svg)
+
+VSCode 와 Discord 두 채널이 Local Core (Python · FastAPI) 를 통해 Amazon Bedrock (Claude) / RDS for PostgreSQL / ECR 과 연동되는 솔루션 아키텍처입니다. Core 는 Release Contract 기반 검증 · 결정론적 자동 수정 · 3-Layer 감사 · 사고 학습 4가지 책임을 가집니다.
 
 ---
 
