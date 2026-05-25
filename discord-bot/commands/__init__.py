@@ -4,6 +4,7 @@ from .deploy import DeployCommands
 from .rollback import RollbackCommands
 from .code import CodeCommands
 from .setup import SetupGroup, invite_command
+from .workbench import workbench_command
 
 __all__ = [
     "PreflightCommands",
@@ -13,4 +14,5 @@ __all__ = [
     "CodeCommands",
     "SetupGroup",
     "invite_command",
+    "workbench_command",
 ]

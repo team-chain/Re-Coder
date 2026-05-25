@@ -182,6 +182,33 @@ html[data-mode="sidebar"] .brand .tag{font-size:9px}
 .log-line.cmd{color:var(--blue)}
 .log-line.ok{color:var(--green)}
 .log-line.err{color:var(--red)}
+
+/* ─── Workbench Sync Banner ─── */
+.sync-banner{
+  display:flex; align-items:center; gap:10px;
+  padding:7px 13px; margin-bottom:10px;
+  background:var(--bg1); border:1px solid var(--bd); border-radius:var(--r-md);
+  font-size:11px; transition: box-shadow .35s, border-color .35s;
+}
+.sync-banner.flash{
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px var(--blue-bg);
+}
+.sync-label{
+  font-weight:700; color:var(--t2); letter-spacing:.3px;
+  text-transform:uppercase; font-size:10px;
+}
+.sync-mode{
+  padding:2px 8px; border-radius:999px; font-weight:700; font-size:10px;
+  border:1px solid var(--bd2); color:var(--t1);
+}
+.sync-mode.mode-home   { background:var(--bg2); color:var(--t2); border-color:var(--bd) }
+.sync-mode.mode-build  { background:rgba(248,81,73,.12);  color:var(--red);    border-color:rgba(248,81,73,.40) }
+.sync-mode.mode-ship   { background:rgba(88,166,255,.12); color:var(--blue);   border-color:rgba(88,166,255,.40) }
+.sync-mode.mode-operate{ background:rgba(63,185,80,.12);  color:var(--green);  border-color:rgba(63,185,80,.40) }
+.sync-mode.mode-recover{ background:rgba(210,153,34,.12); color:var(--yellow); border-color:rgba(210,153,34,.40) }
+.sync-last{ color:var(--t1); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.sync-meta{ color:var(--t3); font-size:10px }
 </style>
 </head>
 <body>
@@ -224,6 +251,15 @@ html[data-mode="sidebar"] .brand .tag{font-size:9px}
     <div class="name">Re-Coder</div>
     <div class="tag">Remember. Return. Re-Code.</div>
   </div>
+</div>
+
+<!-- ── Workbench Sync Banner (Discord ↔ Core ↔ VSCode) ──
+     숨김 상태로 시작; /workbench/state 가 응답하면 표시되고, 새 이벤트마다 깜빡임. -->
+<div class="sync-banner" id="sync-banner" style="display:none">
+  <span class="sync-label">Workbench Sync</span>
+  <span class="sync-mode mode-home" id="sync-mode">HOME</span>
+  <span class="sync-last" id="sync-last">대기 중…</span>
+  <span class="sync-meta" id="sync-meta"></span>
 </div>
 
 <!-- ── 탭 ── -->
@@ -459,6 +495,38 @@ html[data-mode="sidebar"] .brand .tag{font-size:9px}
           line.textContent = '['+now()+'] '+m.payload.line;
           p.appendChild(line);
           p.scrollTop = p.scrollHeight;
+        }
+        break;
+      }
+      // ─── Workbench bidirectional sync (Discord ↔ Core ↔ VSCode) ──────
+      case 'wb.workbenchState': {
+        // 초기 1회 호출. 현재 모드 표시.
+        const s = m.payload || {};
+        const banner = $('sync-banner');
+        const modeChip = $('sync-mode');
+        if (banner && modeChip){
+          modeChip.textContent = (s.active_mode || 'home').toUpperCase();
+          modeChip.className = 'sync-mode mode-' + (s.active_mode || 'home');
+          banner.style.display = 'flex';
+          $('sync-meta').textContent = '동기화 활성 · ' + (s.deployments_24h ?? 0) + '건 배포 (24h)';
+        }
+        break;
+      }
+      case 'wb.workbenchEvent': {
+        // 새 이벤트 도착. 배너 깜빡 + 마지막 액션 표시.
+        const p = m.payload || {};
+        const banner = $('sync-banner');
+        if (banner){
+          banner.style.display = 'flex';
+          const modeChip = $('sync-mode');
+          if (modeChip && p.mode){
+            modeChip.textContent = String(p.mode).toUpperCase();
+            modeChip.className = 'sync-mode mode-' + p.mode;
+          }
+          $('sync-last').textContent = p.text || '';
+          // 깜빡 효과 — 1.5초 outline
+          banner.classList.add('flash');
+          setTimeout(()=> banner.classList.remove('flash'), 1500);
         }
         break;
       }

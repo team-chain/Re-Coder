@@ -291,4 +291,98 @@ export class ApiClient {
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '프로젝트 스캔 실패'); }
         return resp.data;
     }
+
+    // -----------------------------------------------------------------------
+    // Workbench (Discord ↔ Core ↔ VSCode 양방향 sync — D 역할)
+    // /workbench/* — single source of truth: Core SQLite (3-Layer)
+    // -----------------------------------------------------------------------
+
+    async workbenchState(projectId?: string): Promise<{
+        active_mode: 'home' | 'build' | 'ship' | 'operate' | 'recover';
+        active_project_id: string | null;
+        last_preflight: unknown;
+        last_deployment: unknown;
+        blockers_count: number;
+        warnings_count: number;
+        deployments_24h: number;
+        rollback_available: boolean;
+        recent_events: Array<{ kind: string; source: string; at: string; payload: object }>;
+        as_of: string;
+    }> {
+        const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+        const resp = await this.request<never>('GET', `/workbench/state${qs}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Workbench state 조회 실패'); }
+        return resp.data as never;
+    }
+
+    async workbenchChangeMode(
+        mode: 'home' | 'build' | 'ship' | 'operate' | 'recover',
+        source: 'vscode' | 'discord' | 'core' = 'vscode',
+    ): Promise<{ active_mode: string; source: string }> {
+        const resp = await this.request<{ active_mode: string; source: string }>(
+            'POST', '/workbench/mode', { mode, source },
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Mode 전환 실패'); }
+        return resp.data;
+    }
+
+    async workbenchPreflightRun(
+        params: { project_id?: string; workspace_path?: string; source?: string } = {},
+    ): Promise<{
+        preflight_run_id: string;
+        status: string;
+        score: number;
+        blockers: object[];
+        warnings: object[];
+    }> {
+        const body = { source: 'vscode', ...params };
+        const resp = await this.request<never>('POST', '/workbench/preflight/run', body);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Preflight 실행 실패'); }
+        return resp.data as never;
+    }
+
+    async workbenchDeploymentStart(
+        params: {
+            project_id?: string;
+            image_digest?: string;
+            git_commit?: string;
+            target_env?: 'local' | 'ec2' | 'ecs' | 'k8s';
+            source?: string;
+        } = {},
+    ): Promise<{ deployment_id: string; status: string; preflight_run_id: string | null }> {
+        const body = { source: 'vscode', target_env: 'local', ...params };
+        const resp = await this.request<never>('POST', '/workbench/deployment/start', body);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 시작 실패'); }
+        return resp.data as never;
+    }
+
+    async workbenchRollback(
+        deploymentId: string,
+        source: 'vscode' | 'discord' | 'core' = 'vscode',
+    ): Promise<{ deployment_id: string; status: string }> {
+        const resp = await this.request<{ deployment_id: string; status: string }>(
+            'POST', `/workbench/deployment/${encodeURIComponent(deploymentId)}/rollback?source=${source}`,
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Rollback 실패'); }
+        return resp.data;
+    }
+
+    async workbenchListDeployments(
+        params: { project_id?: string; limit?: number } = {},
+    ): Promise<unknown[]> {
+        const qs = new URLSearchParams();
+        if (params.project_id) { qs.set('project_id', params.project_id); }
+        qs.set('limit', String(params.limit ?? 10));
+        const resp = await this.request<unknown[]>('GET', `/workbench/deployments?${qs.toString()}`);
+        return resp.success && resp.data ? resp.data : [];
+    }
+
+    async workbenchEvents(since: number = 0): Promise<{
+        events: Array<{ kind: string; source: string; at: string; payload: object }>;
+        next_offset: number;
+    }> {
+        const resp = await this.request<never>('GET', `/workbench/events?since=${since}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '이벤트 조회 실패'); }
+        return resp.data as never;
+    }
 }
