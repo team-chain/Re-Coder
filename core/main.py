@@ -59,6 +59,7 @@ from api.routes import (  # noqa: E402
     ecs,
     gitops,
     incident,
+    workbench,
 )
 
 _bound_port: int = 0
@@ -161,6 +162,9 @@ def create_app() -> FastAPI:
     # Q4 라우터
     app.include_router(gitops.router)
     app.include_router(incident.router)
+
+    # Workbench 통합 라우터 (Discord ↔ Core ↔ VSCode 양방향 sync)
+    app.include_router(workbench.router)
 
     return app
 

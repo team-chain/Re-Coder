@@ -36,6 +36,15 @@ export class WorkbenchPanel {
     private _diagnosticsInflight: boolean = false;
     private _diagnosticsLoaded: boolean = false;
 
+    // ── Workbench bidirectional sync (Discord ↔ Core ↔ VSCode) ──────────
+    /** /workbench/events cursor — index offset into Core's in-memory event buffer
+     *  (NOT a timestamp). Each /events response carries next_offset which we use
+     *  for the next call. Starts at 0 = "give me everything from the beginning". */
+    private _workbenchEventsCursor: number = 0;
+    private _workbenchPollTimer: ReturnType<typeof setInterval> | null = null;
+    /** Current workbench mode (cached, last seen from Core). */
+    private _workbenchMode: 'home' | 'build' | 'ship' | 'operate' | 'recover' = 'home';
+
     static createOrShow(
         extensionUri: vscode.Uri,
         apiClient: ApiClient,
@@ -81,6 +90,10 @@ export class WorkbenchPanel {
         // 1초 후 자동으로 헬스/비용 1회 요청
         setTimeout(() => this._pushHealthAndCost().catch(() => {}), 800);
         this._startPolling();
+
+        // Workbench 양방향 sync 폴링 — Discord 에서 한 액션을 3초 안에 VSCode 에 반영.
+        setTimeout(() => this._pushWorkbenchState().catch(() => {}), 1200);
+        this._startWorkbenchPolling();
     }
 
     public addActivity(dotClass: 'ok' | 'warn' | 'fail' | 'info', text: string): void {
@@ -131,6 +144,21 @@ export class WorkbenchPanel {
                 await vscode.commands.executeCommand('recoder.restartCore');
                 this.addActivity('warn', 'Core 재시작');
                 break;
+            // ── Workbench bidirectional sync (VSCode → Core → Discord) ───
+            case 'wb.changeMode': {
+                const mode = (msg.payload?.mode as string) || 'build';
+                try {
+                    await this._apiClient.workbenchChangeMode(
+                        mode as 'build' | 'ship' | 'operate' | 'recover',
+                        'vscode',
+                    );
+                    // 즉시 자기 자신도 갱신 (Core 응답 후 다음 polling tick 까지 안 기다림)
+                    void this._pollWorkbenchEvents();
+                } catch (err) {
+                    this.addActivity('fail', `모드 전환 실패: ${err}`);
+                }
+                break;
+            }
             default:
                 console.warn('[WorkbenchPanel] Unknown message:', msg.type);
         }
@@ -186,6 +214,136 @@ export class WorkbenchPanel {
         }, 5000);
     }
 
+    // ─────────── Workbench bidirectional sync (Discord ↔ Core ↔ VSCode) ──
+    //
+    // 흐름:
+    //   1) 패널 오픈 시 /workbench/state 1회 호출 → 현재 모드 + 최근 배포 webview 로 push.
+    //   2) 3초 간격으로 /workbench/events?since=<cursor> 폴링.
+    //   3) 새 이벤트마다 webview 에 'wb.workbenchEvent' postMessage → JS 가 배너 갱신 + 활동 추가.
+    //   4) 이벤트 source='discord' 인 경우 활동 점이 파란색(info), 'vscode' 면 회색.
+    //
+    // 양방향성 (비대칭 design):
+    //   - Discord → VSCode  : 본 polling 회로로 3초 안에 반영 (auto).
+    //   - VSCode  → Core    : webview 액션이 workbenchChangeMode('vscode') 호출 → 즉시.
+    //   - Core    → Discord : Discord embed 는 push 가 안되므로, 사용자가 다음
+    //                        /recoder workbench 또는 embed 의 Refresh 버튼을
+    //                        클릭할 때 fresh state 가 표시됨 (pull-on-demand).
+    //
+    private _startWorkbenchPolling(): void {
+        if (this._workbenchPollTimer) return;
+        this._workbenchPollTimer = setInterval(() => {
+            void this._pollWorkbenchEvents();
+        }, 3000);
+    }
+
+    /** /workbench/state 1회 호출 → 현재 모드 + 최근 배포 목록 push. */
+    private async _pushWorkbenchState(): Promise<void> {
+        try {
+            const state = await this._apiClient.workbenchState();
+            if (state && state.active_mode) {
+                this._workbenchMode = state.active_mode;
+                this._panel.webview.postMessage({
+                    type: 'wb.workbenchState',
+                    payload: state,
+                });
+            }
+        } catch {
+            // Core 가 /workbench/* 를 지원하지 않거나 토큰 미설정 — 조용히 무시
+        }
+    }
+
+    /** /workbench/events 폴링 — Discord 또는 VSCode 가 일으킨 액션 반영.
+     *  Core 의 _LAST_EVENTS 는 index 기반 cursor — `since` 는 timestamp 가 아님. */
+    private async _pollWorkbenchEvents(): Promise<void> {
+        try {
+            const result = await this._apiClient.workbenchEvents(this._workbenchEventsCursor);
+            // ApiClient 는 payload 를 `object` 로 정의하지만, 내부에서 안전하게
+            // dict-like 으로 다루기 위해 한번 unknown 을 거쳐 Record 로 narrow.
+            const rawEvents = (result && Array.isArray(result.events)) ? result.events : [];
+            const events = rawEvents as unknown as Array<{
+                at: string;
+                kind: string;
+                source: string;
+                payload?: Record<string, unknown>;
+            }>;
+
+            // cursor 갱신: 응답의 next_offset 사용 (없으면 현재 + 받은 개수)
+            const nextOffset = result?.next_offset;
+            if (typeof nextOffset === 'number') {
+                this._workbenchEventsCursor = nextOffset;
+            } else {
+                this._workbenchEventsCursor += events.length;
+            }
+
+            for (const ev of events) {
+                this._renderWorkbenchEvent(ev);
+            }
+        } catch {
+            // 무시 (Core 미가동/토큰 없음 등)
+        }
+    }
+
+    /** 단일 workbench event → 활동 패널 + 배너 갱신.
+     *  kind 는 Core route 의 _record_event 가 쏘는 값:
+     *    'mode_change' / 'preflight' / 'deploy' / 'rollback' */
+    private _renderWorkbenchEvent(ev: {
+        at: string;
+        kind: string;
+        source: string;
+        payload?: Record<string, unknown>;
+    }): void {
+        const sourceLabel = ev.source === 'discord' ? 'Discord' : ev.source === 'vscode' ? 'VSCode' : ev.source;
+        let dot: 'ok' | 'warn' | 'fail' | 'info' = 'info';
+        let text = '';
+
+        switch (ev.kind) {
+            case 'mode_change': {
+                const mode = (ev.payload?.mode as string) || 'unknown';
+                this._workbenchMode = mode as typeof this._workbenchMode;
+                text = `${sourceLabel} → Workbench 모드 전환: ${mode.toUpperCase()}`;
+                dot = 'info';
+                break;
+            }
+            case 'preflight': {
+                const status = (ev.payload?.status as string) || '';
+                const ok = status === 'pass' || status === 'PASS' || ev.payload?.ok === true;
+                text = `${sourceLabel} → Preflight 실행 (${ok ? 'PASS' : (status || 'BLOCKED')})`;
+                dot = ok ? 'ok' : 'warn';
+                break;
+            }
+            case 'deploy': {
+                const id = (ev.payload?.deployment_id as string) || '?';
+                text = `${sourceLabel} → 배포 시작 (${id.slice(0, 8)})`;
+                dot = 'info';
+                break;
+            }
+            case 'rollback': {
+                const id = (ev.payload?.deployment_id as string) || '?';
+                text = `${sourceLabel} → Rollback 트리거 (${id.slice(0, 8)})`;
+                dot = 'warn';
+                break;
+            }
+            default:
+                text = `${sourceLabel} → ${ev.kind}`;
+                dot = 'info';
+        }
+
+        // 활동 패널에 push (기존 addActivity 재사용)
+        this.addActivity(dot, text);
+
+        // 배너 갱신용 별도 메시지 — webview 가 상단 배너에 표시 가능
+        this._panel.webview.postMessage({
+            type: 'wb.workbenchEvent',
+            payload: {
+                at: ev.at,
+                kind: ev.kind,
+                source: ev.source,
+                mode: this._workbenchMode,
+                text,
+            },
+        });
+    }
+
     private _now(): string {
         return new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     }
@@ -193,6 +351,8 @@ export class WorkbenchPanel {
     private _dispose(): void {
         if (this._pollTimer) clearInterval(this._pollTimer);
         this._pollTimer = null;
+        if (this._workbenchPollTimer) clearInterval(this._workbenchPollTimer);
+        this._workbenchPollTimer = null;
         WorkbenchPanel._current = undefined;
         this._panel.dispose();
     }

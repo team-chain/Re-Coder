@@ -169,3 +169,114 @@ class RecoderClient:
             )
             r.raise_for_status()
             return r.json()
+
+    # ── Workbench (Discord ↔ Core ↔ VSCode 양방향 sync) ────────────────────
+
+    async def workbench_state(self, project_id: Optional[str] = None) -> Dict[str, Any]:
+        """GET /workbench/state — 통합 state."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            params = {"project_id": project_id} if project_id else {}
+            r = await c.get(
+                f"{self._base}/workbench/state",
+                headers=self._headers,
+                params=params,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def workbench_change_mode(
+        self, mode: str, source: str = "discord"
+    ) -> Dict[str, Any]:
+        """POST /workbench/mode — 활성 모드 전환."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.post(
+                f"{self._base}/workbench/mode",
+                headers=self._headers,
+                json={"mode": mode, "source": source},
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def workbench_preflight_run(
+        self,
+        project_id: Optional[str] = None,
+        workspace_path: Optional[str] = None,
+        source: str = "discord",
+    ) -> Dict[str, Any]:
+        """POST /workbench/preflight/run — Preflight 실행."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.post(
+                f"{self._base}/workbench/preflight/run",
+                headers=self._headers,
+                json={
+                    "project_id": project_id,
+                    "workspace_path": workspace_path,
+                    "source": source,
+                },
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def workbench_deployment_start(
+        self,
+        project_id: Optional[str] = None,
+        image_digest: Optional[str] = None,
+        git_commit: Optional[str] = None,
+        target_env: str = "local",
+        source: str = "discord",
+    ) -> Dict[str, Any]:
+        """POST /workbench/deployment/start — 배포 시작."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.post(
+                f"{self._base}/workbench/deployment/start",
+                headers=self._headers,
+                json={
+                    "project_id": project_id,
+                    "image_digest": image_digest,
+                    "git_commit": git_commit,
+                    "target_env": target_env,
+                    "source": source,
+                },
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def workbench_rollback(
+        self, deployment_id: str, source: str = "discord"
+    ) -> Dict[str, Any]:
+        """POST /workbench/deployment/{id}/rollback."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.post(
+                f"{self._base}/workbench/deployment/{deployment_id}/rollback",
+                headers=self._headers,
+                params={"source": source},
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def workbench_list_deployments(
+        self, project_id: Optional[str] = None, limit: int = 10
+    ) -> list:
+        """GET /workbench/deployments — 최근 배포 N건."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            params = {"limit": limit}
+            if project_id:
+                params["project_id"] = project_id
+            r = await c.get(
+                f"{self._base}/workbench/deployments",
+                headers=self._headers,
+                params=params,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def workbench_events(self, since: int = 0) -> Dict[str, Any]:
+        """GET /workbench/events?since=N — 양방향 sync 이벤트 polling."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.get(
+                f"{self._base}/workbench/events",
+                headers=self._headers,
+                params={"since": since},
+            )
+            r.raise_for_status()
+            return r.json()

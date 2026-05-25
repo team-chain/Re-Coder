@@ -358,6 +358,14 @@ def _register_commands(group: app_commands.Group) -> None:
         except Exception as exc:
             await interaction.followup.send(f"❌ 코드 분석 실패: `{exc}`", ephemeral=True)
 
+    @group.command(
+        name="workbench",
+        description="Workbench GUI — VSCode 와 실시간 동기화되는 인터랙티브 대시보드",
+    )
+    async def workbench_cmd(interaction: discord.Interaction) -> None:
+        from commands.workbench import workbench_command
+        await workbench_command(interaction)
+
 
 def _setup_standup_scheduler(bot: RecoderBot) -> None:
     """Daily Standup을 STANDUP_CRON 스케줄에 맞게 각 서버에 전송한다 (§39)."""
