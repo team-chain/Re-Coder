@@ -87,6 +87,68 @@ class InfraDiffReport:
             return "#f59e0b"
         return "#10b981"
 
+    # ── §42 Visual 출력 ──────────────────────────────────────────────────
+    #
+    # 스펙은 "Mermaid 또는 D3로 인프라 시각화 diff"를 요구한다. unified diff
+    # 텍스트만으로는 시각화가 아니므로, 변경된 리소스 그래프를
+    # Mermaid `graph TD` 문법으로 직렬화한다.
+    #
+    # 표기 규약:
+    #   - 노드 색상: 보안 위험 hunk = 빨강, 영향도 ≥70 = 주황, 그 외 = 파랑
+    #   - 노드 라벨: "<filename>\n<resource_type>"
+    #   - 엣지 라벨: change_type (ADD/REMOVE/MODIFY/SECURITY_RISK 등)
+    #   - 보안 경고는 별도 클러스터로 묶어 한 눈에 보이게 한다.
+    #
+    # 출력은 ```mermaid 코드 블록 안에 그대로 넣을 수 있는 문자열이다.
+    def to_mermaid(self) -> str:
+        """변경된 인프라 리소스를 Mermaid graph TD 다이어그램으로 직렬화."""
+        lines: List[str] = ["graph TD"]
+        lines.append(f'    BASE["{self.base_ref}"]:::baseRef')
+        lines.append(f'    HEAD["{self.head_ref}"]:::headRef')
+        lines.append("    BASE --> HEAD")
+
+        if not self.hunks:
+            lines.append('    HEAD --> NONE["변경된 인프라 파일 없음"]')
+        else:
+            # 파일별로 그룹화 — 한 파일에 여러 hunk가 있을 수 있으므로
+            # 가장 위험한 hunk(보안 > impact 점수)를 대표 노드 스타일로 사용.
+            file_repr: Dict[str, DiffHunk] = {}
+            for h in self.hunks:
+                cur = file_repr.get(h.file_path)
+                if cur is None:
+                    file_repr[h.file_path] = h
+                    continue
+                cur_is_risk = bool(cur.security_warnings) or cur.change_type == "SECURITY_RISK"
+                new_is_risk = bool(h.security_warnings) or h.change_type == "SECURITY_RISK"
+                if (new_is_risk and not cur_is_risk) or h.impact_score > cur.impact_score:
+                    file_repr[h.file_path] = h
+
+            for idx, (fp, hunk) in enumerate(file_repr.items()):
+                node_id = f"F{idx}"
+                label_file = fp.replace('"', "'")
+                label_res = hunk.resource_type or "infra"
+                # mermaid label 내 줄바꿈은 <br/>
+                label = f"{label_file}<br/>{label_res}"
+                style_cls = "risk" if (hunk.security_warnings or hunk.change_type == "SECURITY_RISK") \
+                    else ("warn" if hunk.impact_score >= 70 else "info")
+                lines.append(f'    HEAD -->|{hunk.change_type}| {node_id}["{label}"]:::{style_cls}')
+
+                # 보안 경고는 sub-node로 노출
+                for w_idx, warning in enumerate(hunk.security_warnings[:3]):
+                    w_id = f"{node_id}_W{w_idx}"
+                    w_label = warning.replace('"', "'")
+                    lines.append(f'    {node_id} -.->|risk| {w_id}["{w_label}"]:::risk')
+
+        # 클래스 정의
+        lines.extend([
+            "    classDef baseRef fill:#1f2937,stroke:#9ca3af,color:#e5e7eb",
+            "    classDef headRef fill:#1e3a8a,stroke:#60a5fa,color:#e0f2fe",
+            "    classDef info fill:#0f172a,stroke:#3b82f6,color:#bfdbfe",
+            "    classDef warn fill:#78350f,stroke:#f97316,color:#fed7aa",
+            "    classDef risk fill:#7f1d1d,stroke:#ef4444,color:#fecaca",
+        ])
+        return "\n".join(lines)
+
 
 # ── 지원 파일 타입 판별 ────────────────────────────────────────────────────
 

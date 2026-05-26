@@ -32,12 +32,13 @@ import { ShipMode } from "./components/ShipMode";
 import { OperateMode } from "./components/OperateMode";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
+import { Replay } from "./components/Replay";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type ViewMode = "home" | "build" | "ship" | "operate";
+type ViewMode = "home" | "build" | "ship" | "operate" | "replay";
 
 interface DiagnosticsResult {
   core_ready: string;
@@ -129,6 +130,13 @@ const Icon = {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <line x1="19" y1="12" x2="5" y2="12" />
       <polyline points="12 19 5 12 12 5" />
+    </svg>
+  ),
+  /** Replay — 재생 버튼 */
+  Replay: ({ size = 18 }: { size?: number }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="5 3 19 12 5 21 5 3" />
+      <line x1="19" y1="20" x2="19" y2="4" />
     </svg>
   ),
 };
@@ -372,6 +380,15 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
       disabledReason="2학기 — AWS Deploy + Ops 설정 필요"
       onClick={() => onSelectMode("operate")}
     />
+
+    <ActionCard
+      icon={<Icon.Replay size={18} />}
+      title="Deploy Replay"
+      description="배포 이벤트를 영상처럼 재생 — 속도 조절, 시점 점프, Postmortem 자동 생성."
+      accent="#a78bfa"
+      enabled={true}
+      onClick={() => onSelectMode("replay")}
+    />
   </div>
 );
 
@@ -451,7 +468,7 @@ const App: React.FC = () => {
       diagnostics.ops_ready === "ready"
     : false;
 
-  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "Dockerfile · 배포" : view === "operate" ? "운영 대응" : "";
+  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "Dockerfile · 배포" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : "";
 
   return (
     <div style={{
@@ -524,6 +541,11 @@ const App: React.FC = () => {
         {view === "operate" && (
           <div style={{ padding: "10px 10px 8px" }}>
             <OperateMode isActive={isOpsReady} />
+          </div>
+        )}
+        {view === "replay" && (
+          <div style={{ padding: "10px 10px 8px" }}>
+            <Replay />
           </div>
         )}
       </div>

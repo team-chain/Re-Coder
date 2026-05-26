@@ -128,9 +128,9 @@ class RecoderBot(discord.Client):
         _scheduler.start()
         log.info("Standup 스케줄러 시작: %s (Asia/Seoul)", STANDUP_CRON)
 
-        # VSCode 자동 등록 API 서버 시작
+        # VSCode 자동 등록 API 서버 시작 (bot 인스턴스 주입 — GitHub Webhook 전송용)
         from api_server import start_api_server
-        await start_api_server(BOT_HTTP_PORT)
+        await start_api_server(BOT_HTTP_PORT, bot=self)
 
     async def on_ready(self) -> None:
         log.info(
@@ -366,6 +366,43 @@ def _register_commands(group: app_commands.Group) -> None:
         from commands.workbench import workbench_command
         await workbench_command(interaction)
 
+    # ── §41 Deploy Forecast ───────────────────────────────────────────────
+    @group.command(
+        name="forecast",
+        description="배포 일기예보 — 지금 배포해도 안전한지 한눈에 확인합니다",
+    )
+    @app_commands.describe(
+        service="대상 서비스명 (선택 — 생략 시 전체)",
+        window_days="분석 기간 (기본 30일)",
+    )
+    async def forecast_cmd(
+        interaction: discord.Interaction,
+        service: str = "",
+        window_days: int = 30,
+    ) -> None:
+        from commands.forecast import build_forecast_embed
+        from middleware.auth import is_allowed
+
+        if not is_allowed(interaction):
+            from middleware.auth import _get_deny_message
+            await interaction.response.send_message(_get_deny_message(interaction), ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        try:
+            client = get_client_for_guild(interaction.guild_id)
+            data = await client.get_deploy_forecast(
+                service=service,
+                window_days=window_days,
+            )
+            embed = build_forecast_embed(data)
+            await interaction.followup.send(embed=embed)
+        except GuildNotConfiguredError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(
+                f"❌ 배포 일기예보 조회 실패: `{exc}`", ephemeral=True
+            )
+
 
 def _setup_standup_scheduler(bot: RecoderBot) -> None:
     """Daily Standup을 STANDUP_CRON 스케줄에 맞게 각 서버에 전송한다 (§39)."""
@@ -388,7 +425,18 @@ def _setup_standup_scheduler(bot: RecoderBot) -> None:
                 client = get_client_for_guild(guild.id)
                 standup_data = await client.get_standup_data()
                 report = await gen.generate(standup_data)
-                embed = _build_standup_embed(report)
+
+                # §41 Forecast 한 줄 통합 — Core 에 forecast 엔드포인트가 없거나
+                # 실패해도 standup 자체는 항상 발송되도록 best-effort 로 처리.
+                forecast_line: str = ""
+                try:
+                    forecast_data = await client.get_deploy_forecast()
+                    from commands.forecast import build_forecast_oneline  # noqa: PLC0415
+                    forecast_line = build_forecast_oneline(forecast_data)
+                except Exception as fc_exc:  # noqa: BLE001
+                    log.debug("Forecast 조회 실패 (서버: %s): %s", guild.name, fc_exc)
+
+                embed = _build_standup_embed(report, forecast_line=forecast_line)
                 await channel.send(embed=embed)
             except GuildNotConfiguredError:
                 pass  # 미설정 서버는 건너뜀
@@ -410,21 +458,33 @@ def _setup_standup_scheduler(bot: RecoderBot) -> None:
         )
 
 
-def _build_standup_embed(report: dict) -> discord.Embed:
+def _build_standup_embed(report, forecast_line: str = "") -> discord.Embed:
+    # StandupReport dataclass 또는 dict 어느 쪽이든 받을 수 있게 정규화.
+    if hasattr(report, "to_dict"):
+        r = report.to_dict()
+    elif isinstance(report, dict):
+        r = report
+    else:
+        r = {"summary": str(report)}
+
     embed = discord.Embed(
         title="📅 Daily Standup 브리핑",
-        description=report.get("summary", "오늘의 운영 브리핑입니다."),
+        description=r.get("summary", "오늘의 운영 브리핑입니다."),
         color=discord.Color.blue(),
     )
 
-    if items := report.get("yesterday"):
+    # §41 Forecast 한 줄 — best-effort, 실패하면 누락됨
+    if forecast_line:
+        embed.add_field(name="🌤️ 오늘 배포 일기예보", value=forecast_line, inline=False)
+
+    if items := r.get("yesterday"):
         embed.add_field(name="✅ 어제 완료", value="\n".join(f"• {i}" for i in items[:5]), inline=False)
-    if items := report.get("today"):
+    if items := r.get("today"):
         embed.add_field(name="🎯 오늘 예정", value="\n".join(f"• {i}" for i in items[:5]), inline=False)
-    if items := report.get("blockers"):
+    if items := r.get("blockers"):
         embed.add_field(name="🚧 블로커", value="\n".join(f"• {i}" for i in items[:3]), inline=False)
 
-    embed.set_footer(text="ReCoder Daily Standup §39 | Haiku 자동 요약")
+    embed.set_footer(text="ReCoder Daily Standup §39 | Haiku 자동 요약 + §41 Forecast")
     return embed
 
 

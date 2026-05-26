@@ -88,7 +88,7 @@ async def lifespan(app: FastAPI):
             # Orphan state — singleton lock exists but runtime.json was deleted.
             # 강제로 권리를 취득해서 인증 엔드포인트가 영구 503으로 빠지지 않도록 한다.
             port = _bound_port if _bound_port else CoreSingleton.find_available_port()
-            token = secrets.token_urlsafe(32)
+            token = os.environ.get("SESSION_TOKEN") or secrets.token_urlsafe(32)
             app.state.port = port
             app.state.session_token = token
             CoreSingleton.write_runtime(port=port, token=token, pid=pid)
@@ -105,7 +105,7 @@ async def lifespan(app: FastAPI):
     port = _bound_port if _bound_port else CoreSingleton.find_available_port()
     app.state.port = port
 
-    token = secrets.token_urlsafe(32)
+    token = os.environ.get("SESSION_TOKEN") or secrets.token_urlsafe(32)
     app.state.session_token = token
 
     CoreSingleton.write_runtime(port=port, token=token, pid=pid)

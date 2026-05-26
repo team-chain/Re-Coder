@@ -309,6 +309,43 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.postMessage('stateUpdate', this._state);
                 break;
             }
+            // ── §38 Deploy Replay ──────────────────────────────────────────
+            case 'loadReplay': {
+                // webview Replay.tsx 가 보내는 형태: { deployId: string, service?, cluster?, region?, windowHours? }
+                const p = (payload ?? {}) as {
+                    deployId?: string;
+                    service?: string;
+                    cluster?: string;
+                    region?: string;
+                    windowHours?: number;
+                };
+                const deployId = (p.deployId ?? '').trim();
+                if (!deployId) {
+                    this.postMessage('replayTimeline', {
+                        error: 'deployId 가 비어있습니다.',
+                    });
+                    break;
+                }
+                try {
+                    const timeline = await this._apiClient.loadReplayTimeline(deployId, {
+                        service: p.service,
+                        cluster: p.cluster,
+                        region: p.region,
+                        windowHours: p.windowHours,
+                    });
+                    if (timeline) {
+                        this.postMessage('replayTimeline', timeline);
+                    } else {
+                        this.postMessage('replayTimeline', {
+                            error: 'Core 가 타임라인을 반환하지 않았습니다.',
+                        });
+                    }
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('replayTimeline', { error: msg });
+                }
+                break;
+            }
             // ------------------------------------------------------------------
             // Webview polling requests — webview asks for latest data
             // ------------------------------------------------------------------

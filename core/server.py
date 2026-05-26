@@ -2298,6 +2298,69 @@ class ObservabilityQueryRequest(BaseModel):
     limit: int = 100
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# §38 Deploy Replay — webview 가 `loadReplay` 메시지를 보내면
+# SidebarProvider 가 이 엔드포인트를 호출 → ReplayTimelineBuilder.build()
+# → 결과를 `replayTimeline` 메시지로 webview 에 회신한다.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class ReplayTimelineRequest(BaseModel):
+    deploy_id: str
+    service: str = ""
+    cluster: str = ""
+    region: str = "ap-northeast-2"
+    window_hours: int = 24
+
+
+class DeployForecastRequest(BaseModel):
+    service: str = ""
+    window_days: int = 30
+
+
+@app.post("/api/forecast/deploy")
+async def deploy_forecast(body: DeployForecastRequest, _=Depends(_verify_token)):
+    """§41 Deploy Forecast — 배포 일기예보."""
+    try:
+        try:
+            from forecast.deploy_forecast import DeployForecaster
+        except ImportError:
+            from core.forecast.deploy_forecast import DeployForecaster  # type: ignore
+
+        forecaster = DeployForecaster()
+        report = await forecaster.forecast(
+            service=body.service,
+            window_days=body.window_days,
+        )
+        return report.to_dict()
+    except Exception as exc:
+        logger.exception("deploy_forecast failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/replay/timeline")
+async def replay_timeline(body: ReplayTimelineRequest, _=Depends(_verify_token)):
+    """Deploy Replay 타임라인 빌더 — §38.2 / §38.4 (Postmortem 자동 생성)."""
+    try:
+        try:
+            from replay.timeline_builder import ReplayTimelineBuilder
+        except ImportError:
+            from core.replay.timeline_builder import ReplayTimelineBuilder  # type: ignore
+
+        builder = ReplayTimelineBuilder()
+        timeline = await builder.build(
+            deploy_id=body.deploy_id,
+            service=body.service,
+            cluster=body.cluster,
+            region=body.region,
+            window_hours=body.window_hours,
+        )
+        return timeline.to_dict()
+    except Exception as exc:
+        logger.exception("replay_timeline failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/api/incident/timeline")
 async def incident_timeline(body: IncidentTimelineRequest, _=Depends(_verify_token)):
     """Incident Timeline MVP — 시간순 통합 이벤트 리스트 반환."""

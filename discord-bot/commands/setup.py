@@ -7,8 +7,10 @@ discord-bot/commands/setup.py — 서버 관리자용 초기 설정 커맨드
 지원 커맨드:
   /recoder setup api <url> <token>           — ReCoder API 엔드포인트 설정
   /recoder setup channel <type> <#channel>   — 알림 채널 설정
-  /recoder setup role add <@역할>            — 봇 사용 가능 역할 추가
-  /recoder setup role remove <@역할>         — 봇 사용 가능 역할 제거
+  /recoder setup user add <@사용자>          — §6.1.4 user_id 화이트리스트 추가 (1차 게이트)
+  /recoder setup user remove <@사용자>       — user_id 화이트리스트 제거
+  /recoder setup role add <@역할>            — 보조 게이트: 허용 역할 추가
+  /recoder setup role remove <@역할>         — 보조 게이트: 허용 역할 제거
   /recoder setup status                      — 현재 설정 현황 확인
   /recoder invite                            — 봇 초대 URL 출력
 """
@@ -116,6 +118,91 @@ class SetupGroup(app_commands.Group):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # ── /recoder setup user (§6.1.4 user_id 화이트리스트 — 1차 게이트) ────
+
+    @app_commands.command(
+        name="user",
+        description="§6.1.4 봇 사용 가능 user_id 를 화이트리스트에 추가/제거합니다 (1차 게이트)",
+    )
+    @app_commands.describe(
+        action="add: 화이트리스트 추가, remove: 제거, list: 현재 목록 확인",
+        user="추가/제거할 Discord 사용자",
+        note="메모 (선택 — 예: '백엔드 리드', '온콜 담당')",
+    )
+    async def setup_user(
+        self,
+        interaction: Interaction,
+        action: Literal["add", "remove", "list"],
+        user: discord.User | None = None,
+        note: str = "",
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버 채널에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id
+
+        if action == "list":
+            users = guild_store.list_users(guild_id)
+            if not users:
+                desc = (
+                    "화이트리스트가 비어있습니다.\n\n"
+                    "`/recoder setup user add @사용자` 로 사용자를 추가하세요."
+                )
+            else:
+                lines = []
+                for uid, n, added in users:
+                    suffix = f" — {n}" if n else ""
+                    lines.append(f"• <@{uid}> (`{uid}`){suffix}")
+                desc = "**§6.1.4 user_id 화이트리스트 (1차 게이트)**\n\n" + "\n".join(lines)
+            embed = discord.Embed(description=desc, color=discord.Color.blue())
+            embed.set_footer(text=f"등록된 사용자: {len(users)}명")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # add / remove 는 user 인자 필수
+        if user is None:
+            await interaction.response.send_message(
+                "❌ `user` 인자가 필요합니다. `/recoder setup user add @사용자` 형태로 사용하세요.",
+                ephemeral=True,
+            )
+            return
+
+        if action == "add":
+            guild_store.add_user(guild_id, user.id, note=note)
+            log.info(
+                "Guild %d 화이트리스트 추가: %s (%d)%s",
+                guild_id, user.name, user.id, f" — {note}" if note else "",
+            )
+            note_part = f"\n📝 메모: `{note}`" if note else ""
+            msg = (
+                f"✅ **{user.mention}** (`{user.id}`) 가 §6.1.4 화이트리스트에 추가되었습니다."
+                f"{note_part}"
+            )
+            color = discord.Color.green()
+        else:  # remove
+            guild_store.remove_user(guild_id, user.id)
+            log.info("Guild %d 화이트리스트 제거: %s (%d)", guild_id, user.name, user.id)
+            msg = (
+                f"🗑️ **{user.mention}** (`{user.id}`) 가 §6.1.4 화이트리스트에서 제거되었습니다."
+            )
+            color = discord.Color.orange()
+
+        embed = discord.Embed(description=msg, color=color)
+        embed.add_field(
+            name="💡 권한 정책 (Hybrid)",
+            value=(
+                "통과 조건 (OR):\n"
+                "1. 서버 관리자 (manage_guild) — 항상 통과\n"
+                "2. **§6.1.4 user_id 화이트리스트** — 1차 게이트 (방금 변경됨)\n"
+                "3. 허용 역할 보유 — 보조 게이트 (`/recoder setup role`)"
+            ),
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # ── /recoder setup role ────────────────────────────────────────────────
 
     @app_commands.command(name="role", description="봇 사용 가능 역할을 추가하거나 제거합니다")
@@ -146,8 +233,12 @@ class SetupGroup(app_commands.Group):
 
         embed = discord.Embed(description=msg, color=discord.Color.green())
         embed.add_field(
-            name="💡 참고",
-            value="서버 관리자(manage_guild 권한)는 역할 설정에 상관없이 항상 봇을 사용할 수 있습니다.",
+            name="💡 참고 — Hybrid 게이트",
+            value=(
+                "• 서버 관리자(manage_guild)는 역할 설정과 무관하게 항상 통과.\n"
+                "• 역할은 **보조 게이트**입니다. 스펙 §6.1.4 의 1차 게이트는 "
+                "`/recoder setup user add` 로 등록하는 user_id 화이트리스트입니다."
+            ),
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -196,15 +287,36 @@ class SetupGroup(app_commands.Group):
             channel_lines = "미설정 (`/recoder setup channel`로 설정)"
         embed.add_field(name="📣 알림 채널", value=channel_lines, inline=False)
 
-        # 역할 현황
+        # §6.1.4 user_id 화이트리스트 현황 (1차 게이트)
+        users = summary.get("users") or []
+        if users:
+            shown = users[:8]
+            user_lines = "\n".join(
+                f"• <@{uid}>" + (f" — {n}" if n else "")
+                for uid, n, _ in shown
+            )
+            if len(users) > 8:
+                user_lines += f"\n…외 {len(users) - 8}명"
+        else:
+            user_lines = (
+                "미설정 — 관리자만 사용 가능\n"
+                "`/recoder setup user add @사용자` 로 추가 (§6.1.4 1차 게이트)"
+            )
+        embed.add_field(
+            name=f"👤 §6.1.4 user_id 화이트리스트 ({len(users)}명)",
+            value=user_lines,
+            inline=False,
+        )
+
+        # 역할 현황 (보조 게이트)
         roles = summary["roles"]
         if roles:
             role_lines = "\n".join(f"• <@&{rid}>" for rid in roles)
         else:
-            role_lines = "미설정 — 관리자만 사용 가능 (`/recoder setup role add`로 추가)"
-        embed.add_field(name="👥 허용 역할", value=role_lines, inline=False)
+            role_lines = "미설정 (`/recoder setup role add` 로 보조 게이트 추가 가능)"
+        embed.add_field(name="🛡️ 허용 역할 (보조 게이트)", value=role_lines, inline=False)
 
-        embed.set_footer(text="설정 변경: /recoder setup api | channel | role")
+        embed.set_footer(text="설정 변경: /recoder setup api | channel | user | role")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -235,8 +347,9 @@ async def invite_command(interaction: Interaction) -> None:
             "1. 봇을 서버에 초대\n"
             "2. `/recoder setup api <url> <token>` — ReCoder API 연결\n"
             "3. `/recoder setup channel` — 알림 채널 지정\n"
-            "4. `/recoder setup role add` — 사용 가능 역할 설정\n"
-            "5. `/recoder status` — 연결 확인"
+            "4. `/recoder setup user add @사용자` — §6.1.4 user_id 화이트리스트 (권장)\n"
+            "5. (선택) `/recoder setup role add` — 보조 게이트 역할 설정\n"
+            "6. `/recoder status` — 연결 확인"
         ),
         inline=False,
     )

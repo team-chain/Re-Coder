@@ -1,0 +1,233 @@
+name: "ReCoder Preflight Check"
+description: "배포 전 AI 기반 안전성 검증 — 리스크 점수, 블로커, 경고를 자동으로 분석합니다. (§40)"
+author: "team-chain"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+
+inputs:
+  api_url:
+    description: "ReCoder Core API 주소 (예: http://localhost:8000 또는 EC2 주소)"
+    required: true
+
+  api_token:
+    description: "ReCoder API 인증 토큰 (SESSION_TOKEN)"
+    required: true
+
+  project_path:
+    description: "분석할 프로젝트 경로"
+    required: false
+    default: "."
+
+  fail_on_blocker:
+    description: "블로커 발견 시 워크플로우를 실패로 처리할지 여부 (true/false)"
+    required: false
+    default: "true"
+
+  fail_on_score_at_or_above:
+    description: "리스크 점수가 이 값 이상이면 실패 처리 (0~100, 0이면 비활성화). 점수가 높을수록 위험합니다."
+    required: false
+    default: "60"
+
+  # Deprecated 호환 별칭 — 기존 워크플로우와 호환 유지용.
+  # 의미: 실제로는 '이 점수 이상이면 실패' 로 동작합니다. 새 워크플로우는
+  # fail_on_score_at_or_above 를 사용하세요.
+  fail_on_score_below:
+    description: "[Deprecated] fail_on_score_at_or_above 의 별칭. 실제로는 이 점수 '이상' 이면 실패합니다."
+    required: false
+    default: ""
+
+  timeout_seconds:
+    description: "Preflight 요청 타임아웃 (초)"
+    required: false
+    default: "120"
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+
+outputs:
+  risk_score:
+    description: "Preflight 리스크 점수 (0~100, 높을수록 위험)"
+    value: ${{ steps.preflight.outputs.risk_score }}
+
+  blocker_count:
+    description: "발견된 블로커 수"
+    value: ${{ steps.preflight.outputs.blocker_count }}
+
+  warning_count:
+    description: "발견된 경고 수"
+    value: ${{ steps.preflight.outputs.warning_count }}
+
+  passed:
+    description: "Preflight 통과 여부 (true/false)"
+    value: ${{ steps.preflight.outputs.passed }}
+
+  summary:
+    description: "Preflight 결과 요약 텍스트"
+    value: ${{ steps.preflight.outputs.summary }}
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+
+runs:
+  using: "composite"
+  steps:
+    - name: "Python 설치 확인"
+      shell: bash
+      run: |
+        python3 --version || (echo "❌ Python3가 필요합니다." && exit 1)
+
+    - name: "httpx 설치"
+      shell: bash
+      run: |
+        pip install httpx --quiet --break-system-packages 2>/dev/null || pip install httpx --quiet
+
+    - name: "ReCoder Preflight 실행"
+      id: preflight
+      shell: python3 {0}
+      env:
+        RECODER_API_URL: ${{ inputs.api_url }}
+        RECODER_API_TOKEN: ${{ inputs.api_token }}
+        PROJECT_PATH: ${{ inputs.project_path }}
+        FAIL_ON_BLOCKER: ${{ inputs.fail_on_blocker }}
+        FAIL_ON_SCORE_AT_OR_ABOVE: ${{ inputs.fail_on_score_at_or_above }}
+        FAIL_ON_SCORE_BELOW: ${{ inputs.fail_on_score_below }}
+        TIMEOUT: ${{ inputs.timeout_seconds }}
+        GITHUB_OUTPUT: ${{ env.GITHUB_OUTPUT }}
+        GITHUB_STEP_SUMMARY: ${{ env.GITHUB_STEP_SUMMARY }}
+      run: |
+        import httpx
+        import json
+        import os
+        import sys
+
+        api_url    = os.environ["RECODER_API_URL"].rstrip("/")
+        api_token  = os.environ["RECODER_API_TOKEN"]
+        project    = os.environ.get("PROJECT_PATH", ".")
+        timeout    = int(os.environ.get("TIMEOUT", "120"))
+
+        fail_on_blocker     = os.environ.get("FAIL_ON_BLOCKER", "true").lower() == "true"
+        # 신규 이름(우선) → deprecated 별칭 → 기본값 60 순으로 폴백.
+        # 의미: risk_score 가 이 값 '이상' 이면 실패 처리. 0 이면 비활성화.
+        _raw_threshold = (
+            os.environ.get("FAIL_ON_SCORE_AT_OR_ABOVE")
+            or os.environ.get("FAIL_ON_SCORE_BELOW")  # 호환 별칭
+            or "60"
+        )
+        fail_on_score_at_or_above = int(_raw_threshold)
+
+        headers = {"X-Session-Token": api_token, "Content-Type": "application/json"}
+
+        print("🔍 ReCoder Preflight 시작...")
+        print(f"   API: {api_url}")
+        print(f"   경로: {project}")
+
+        try:
+            resp = httpx.post(
+                f"{api_url}/workbench/preflight/run",
+                headers=headers,
+                json={"project_path": project, "source": "github-action"},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.ConnectError:
+            print(f"❌ ReCoder API에 연결할 수 없습니다: {api_url}")
+            print("   api_url 설정을 확인해주세요.")
+            sys.exit(1)
+        except httpx.HTTPStatusError as e:
+            print(f"❌ API 오류: {e.response.status_code} — {e.response.text[:300]}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"❌ 예기치 못한 오류: {e}")
+            sys.exit(1)
+
+        # 결과 파싱
+        risk_score    = data.get("risk_score", 0)
+        blockers      = data.get("blockers", [])
+        warnings      = data.get("warnings", [])
+        blocker_count = len(blockers)
+        warning_count = len(warnings)
+        passed        = blocker_count == 0 and (
+            fail_on_score_at_or_above == 0 or risk_score < fail_on_score_at_or_above
+        )
+
+        # 결과 출력
+        print()
+        print("=" * 50)
+        print(f"  리스크 점수 : {risk_score}/100")
+        print(f"  블로커      : {blocker_count}개")
+        print(f"  경고        : {warning_count}개")
+        print(f"  결과        : {'✅ PASS' if passed else '❌ FAIL'}")
+        print("=" * 50)
+
+        if blockers:
+            print("\n🚫 블로커:")
+            for b in blockers:
+                msg = b.get("message") or b if isinstance(b, str) else str(b)
+                print(f"  • {msg}")
+
+        if warnings:
+            print("\n⚠️  경고:")
+            for w in warnings[:10]:
+                msg = w.get("message") or w if isinstance(w, str) else str(w)
+                print(f"  • {msg}")
+
+        summary = (
+            f"ReCoder Preflight: {'PASS ✅' if passed else 'FAIL ❌'} | "
+            f"점수: {risk_score}/100 | "
+            f"블로커: {blocker_count} | 경고: {warning_count}"
+        )
+
+        # GitHub Actions outputs
+        output_file = os.environ.get("GITHUB_OUTPUT", "")
+        if output_file:
+            with open(output_file, "a") as f:
+                f.write(f"risk_score={risk_score}\n")
+                f.write(f"blocker_count={blocker_count}\n")
+                f.write(f"warning_count={warning_count}\n")
+                f.write(f"passed={'true' if passed else 'false'}\n")
+                f.write(f"summary={summary}\n")
+
+        # GitHub Step Summary
+        summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "")
+        if summary_file:
+            with open(summary_file, "a") as f:
+                status_emoji = "✅" if passed else "❌"
+                f.write(f"## {status_emoji} ReCoder Preflight 결과\n\n")
+                f.write(f"| 항목 | 결과 |\n|------|------|\n")
+                f.write(f"| 리스크 점수 | `{risk_score}/100` |\n")
+                f.write(f"| 블로커 | `{blocker_count}개` |\n")
+                f.write(f"| 경고 | `{warning_count}개` |\n")
+                f.write(f"| 결과 | `{'PASS' if passed else 'FAIL'}` |\n\n")
+                if blockers:
+                    f.write("### 🚫 블로커\n")
+                    for b in blockers:
+                        msg = b.get("message") or b if isinstance(b, str) else str(b)
+                        f.write(f"- {msg}\n")
+                    f.write("\n")
+                if warnings:
+                    f.write("### ⚠️ 경고\n")
+                    for w in warnings[:10]:
+                        msg = w.get("message") or w if isinstance(w, str) else str(w)
+                        f.write(f"- {msg}\n")
+
+        # 실패 처리
+        if not passed:
+            if fail_on_blocker and blocker_count > 0:
+                print(f"\n❌ 블로커 {blocker_count}개 발견으로 배포를 중단합니다.")
+                sys.exit(1)
+            if fail_on_score_at_or_above > 0 and risk_score >= fail_on_score_at_or_above:
+                print(
+                    f"\n❌ 리스크 점수 {risk_score}가 기준({fail_on_score_at_or_above}) 이상입니다."
+                )
+                sys.exit(1)
+
+        print("\n✅ Preflight 완료.")
