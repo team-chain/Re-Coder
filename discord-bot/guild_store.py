@@ -7,7 +7,8 @@ discord-bot/guild_store.py — 서버별(Guild) 설정 저장소
 저장 항목:
   - ReCoder API 엔드포인트 & 인증 토큰 (서버별)
   - 알림 채널 ID (deploy / incident / standup)
-  - 봇 사용 허용 역할 ID 목록
+  - 봇 사용 허용 user_id 목록 (§6.1.4 — 1차 게이트)
+  - 봇 사용 허용 역할 ID 목록 (운영 편의용 보조 게이트)
 """
 
 from __future__ import annotations
@@ -45,6 +46,17 @@ def init_db() -> None:
             guild_id  INTEGER NOT NULL,
             role_id   INTEGER NOT NULL,
             PRIMARY KEY (guild_id, role_id)
+        );
+
+        -- §6.1.4 Discord user_id 화이트리스트 — 1차 권한 게이트.
+        -- 클라우드 릴레이(§6.4.3)가 DynamoDB 에 저장하는 'Discord user_id
+        -- 매핑' 도 이 테이블을 기준으로 동기화한다.
+        CREATE TABLE IF NOT EXISTS guild_users (
+            guild_id   INTEGER NOT NULL,
+            user_id    INTEGER NOT NULL,
+            added_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+            note       TEXT    NOT NULL DEFAULT '',
+            PRIMARY KEY (guild_id, user_id)
         );
         """)
 
@@ -151,6 +163,60 @@ def get_roles(guild_id: int) -> List[int]:
     return [r[0] for r in rows]
 
 
+# ── §6.1.4 user_id 화이트리스트 (1차 게이트) ───────────────────────────────
+
+def add_user(guild_id: int, user_id: int, note: str = "") -> None:
+    """봇 사용 허용 user_id 를 추가한다 — §6.1.4 1차 게이트."""
+    with _lock, _get_conn() as c:
+        c.execute(
+            """
+            INSERT INTO guild_users (guild_id, user_id, note)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET note = excluded.note
+            """,
+            (guild_id, user_id, note),
+        )
+
+
+def remove_user(guild_id: int, user_id: int) -> None:
+    """봇 사용 허용 user_id 를 제거한다."""
+    with _lock, _get_conn() as c:
+        c.execute(
+            "DELETE FROM guild_users WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+
+
+def list_users(guild_id: int) -> List[Tuple[int, str, str]]:
+    """서버의 허용 user_id 목록 [(user_id, note, added_at), ...] 반환."""
+    with _get_conn() as c:
+        rows = c.execute(
+            "SELECT user_id, note, added_at FROM guild_users WHERE guild_id = ? ORDER BY added_at",
+            (guild_id,),
+        ).fetchall()
+    return [(r[0], r[1] or "", r[2] or "") for r in rows]
+
+
+def is_user_allowed(guild_id: int, user_id: int) -> bool:
+    """user_id 가 이 서버의 화이트리스트에 있는지 확인한다 — §6.1.4."""
+    with _get_conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM guild_users WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+    return row is not None
+
+
+def get_user_whitelist_count(guild_id: int) -> int:
+    """화이트리스트 등록된 user_id 개수 반환."""
+    with _get_conn() as c:
+        row = c.execute(
+            "SELECT COUNT(*) FROM guild_users WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
 # ── 서버 전체 삭제 ──────────────────────────────────────────────────────────
 
 def delete_guild(guild_id: int) -> None:
@@ -159,6 +225,7 @@ def delete_guild(guild_id: int) -> None:
         c.execute("DELETE FROM guild_config WHERE guild_id = ?", (guild_id,))
         c.execute("DELETE FROM guild_channels WHERE guild_id = ?", (guild_id,))
         c.execute("DELETE FROM guild_roles WHERE guild_id = ?", (guild_id,))
+        c.execute("DELETE FROM guild_users WHERE guild_id = ?", (guild_id,))
 
 
 # ── 요약 조회 ───────────────────────────────────────────────────────────────
@@ -171,4 +238,5 @@ def get_guild_summary(guild_id: int) -> dict:
         "api_base": api_cfg[0] if api_cfg else None,
         "channels": get_all_channels(guild_id),
         "roles": get_roles(guild_id),
+        "users": list_users(guild_id),  # §6.1.4 화이트리스트 현황
     }

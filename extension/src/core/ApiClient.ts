@@ -105,6 +105,25 @@ export class ApiClient {
         return resp.success && resp.data ? resp.data : null;
     }
 
+    /**
+     * §38 Deploy Replay — Core 의 /api/replay/timeline 호출.
+     * webview Replay.tsx 가 'loadReplay' 메시지로 deployId 를 보내면
+     * SidebarProvider 가 이 메서드를 거쳐 결과를 'replayTimeline' 으로 회신.
+     */
+    async loadReplayTimeline(
+        deployId: string,
+        opts: { service?: string; cluster?: string; region?: string; windowHours?: number } = {},
+    ): Promise<object | null> {
+        const resp = await this.request<object>('POST', '/api/replay/timeline', {
+            deploy_id: deployId,
+            service: opts.service ?? '',
+            cluster: opts.cluster ?? '',
+            region: opts.region ?? 'ap-northeast-2',
+            window_hours: opts.windowHours ?? 24,
+        });
+        return resp.success && resp.data ? resp.data : null;
+    }
+
     async approvePatch(proposalId: string, approved: boolean): Promise<{ status: string }> {
         const resp = await this.request<{ status: string }>(
             'POST',

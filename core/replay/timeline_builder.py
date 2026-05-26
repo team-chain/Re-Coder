@@ -180,13 +180,18 @@ class ReplayTimelineBuilder:
         try:
             import sqlite3
             conn = sqlite3.connect(self._db_path)
-            row = conn.execute(
-                "SELECT * FROM sessions WHERE session_id = ?", (deploy_id,)
-            ).fetchone()
-            conn.close()
-            if row:
-                cols = [d[0] for d in conn.description] if False else []
-                return dict(zip(cols, row)) if cols else {}
+            try:
+                cursor = conn.execute(
+                    "SELECT * FROM sessions WHERE session_id = ?", (deploy_id,)
+                )
+                # cursor.description은 conn.close() 전에 읽어야 한다 — 죽은
+                # `if False else []` 분기를 제거하고 진짜로 컬럼명을 수집한다.
+                cols = [d[0] for d in cursor.description] if cursor.description else []
+                row = cursor.fetchone()
+            finally:
+                conn.close()
+            if row and cols:
+                return dict(zip(cols, row))
         except Exception as exc:
             log.debug("deploy meta 조회 실패: %s", exc)
         return {}

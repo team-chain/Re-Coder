@@ -134,12 +134,31 @@ class RecoderClient:
     # ── Code ──────────────────────────────────────────────────────────────
 
     async def code(self, prompt: str, project_path: str = ".") -> Dict[str, Any]:
-        """§37.3 /recoder code — 코드 생성/분석 요청."""
+        """
+        §37.3 /recoder code — 코드/에러 분석 요청.
+
+        Core 의 /api/analyze 는 `AnalyzeRequestBody` 스키마(workspace_path /
+        terminal_output / error_text / ...)를 요구한다. Discord 쪽에서 들어오는
+        `prompt` 는 보통 에러 로그(ErrorLogModal) 이거나 사용자 자연어 질문이라
+        둘 다 `terminal_output` 으로 보낸다 — Core 의 `_extract_error_text` 가
+        에러 패턴이 있으면 추출하고, 없으면 마지막 30줄을 그대로 사용한다.
+
+        이전엔 `{"prompt": ..., "project_path": ...}` 으로 잘못된 필드명을 보내서
+        Pydantic 검증이 422 (Unprocessable Entity) 로 거부했다.
+        """
+        # workspace_path 가 "." 이면 Core 가 _current_project 의 경로로 폴백한다.
+        workspace_path = "" if project_path in (".", "", None) else project_path
+
+        body: Dict[str, Any] = {
+            "workspace_path":  workspace_path,
+            "terminal_output": prompt,
+        }
+
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
             r = await c.post(
                 f"{self._base}/api/analyze",
                 headers=self._headers,
-                json={"prompt": prompt, "project_path": project_path},
+                json=body,
             )
             r.raise_for_status()
             return r.json()
@@ -166,6 +185,21 @@ class RecoderClient:
                 f"{self._base}/api/incident/timeline",
                 headers=self._headers,
                 params={"deploy_id": deploy_id},
+            )
+            r.raise_for_status()
+            return r.json()
+
+    # ── §41 Deploy Forecast ──────────────────────────────────────────────
+
+    async def get_deploy_forecast(
+        self, service: str = "", window_days: int = 30
+    ) -> Dict[str, Any]:
+        """§41 배포 일기예보 — Core /api/forecast/deploy 호출."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.post(
+                f"{self._base}/api/forecast/deploy",
+                headers=self._headers,
+                json={"service": service, "window_days": window_days},
             )
             r.raise_for_status()
             return r.json()
@@ -277,6 +311,92 @@ class RecoderClient:
                 f"{self._base}/workbench/events",
                 headers=self._headers,
                 params={"since": since},
+            )
+            r.raise_for_status()
+            return r.json()
+
+    # ── GitOps (§ Q4) ────────────────────────────────────────────────────────
+
+    async def gitops_rollback_pr(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        target_commit_sha: str,
+        project_id: str = "",
+        github_token: str = "",
+    ) -> Dict[str, Any]:
+        """POST /gitops/rollback-pr — Git revert PR 자동 생성 (ADR-005)."""
+        async with httpx.AsyncClient(timeout=60.0) as c:
+            r = await c.post(
+                f"{self._base}/gitops/rollback-pr",
+                headers=self._headers,
+                json={
+                    "project_id": project_id,
+                    "repo_owner": repo_owner,
+                    "repo_name": repo_name,
+                    "target_commit_sha": target_commit_sha,
+                    "github_token": github_token,
+                },
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def gitops_rollback_pr_status(self, pr_id: str) -> Dict[str, Any]:
+        """GET /gitops/rollback-pr/{pr_id} — Rollback PR 상태 조회."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.get(
+                f"{self._base}/gitops/rollback-pr/{pr_id}",
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def gitops_argocd_sync(
+        self,
+        app_name: str,
+        argocd_server: str,
+        argocd_token: str,
+        project_id: str = "",
+        target_revision: str = "HEAD",
+    ) -> Dict[str, Any]:
+        """POST /gitops/sync — ArgoCD Application 동기화."""
+        async with httpx.AsyncClient(timeout=60.0) as c:
+            r = await c.post(
+                f"{self._base}/gitops/sync",
+                headers=self._headers,
+                json={
+                    "project_id": project_id,
+                    "app_name": app_name,
+                    "argocd_server": argocd_server,
+                    "argocd_token": argocd_token,
+                    "target_revision": target_revision,
+                },
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def gitops_argocd_sync_status(self, sync_id: str) -> Dict[str, Any]:
+        """GET /gitops/sync/{sync_id} — ArgoCD 동기화 상태 조회."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.get(
+                f"{self._base}/gitops/sync/{sync_id}",
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def gitops_list_syncs(
+        self, project_id: str = "", limit: int = 10
+    ) -> Dict[str, Any]:
+        """GET /gitops/syncs — 최근 ArgoCD 동기화 목록."""
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            params: Dict[str, Any] = {"limit": limit}
+            if project_id:
+                params["project_id"] = project_id
+            r = await c.get(
+                f"{self._base}/gitops/syncs",
+                headers=self._headers,
+                params=params,
             )
             r.raise_for_status()
             return r.json()
