@@ -15,10 +15,9 @@ VSCode Workbench (Build / Ship / Operate / Recover / Replay 5탭) 와 동일한
 from __future__ import annotations
 
 import logging
-from typing import Literal, Optional
+from typing import Literal
 
 import discord
-from discord import app_commands
 
 from recoder_client import GuildNotConfiguredError, get_client_for_guild
 from middleware.auth import _get_deny_message, is_allowed

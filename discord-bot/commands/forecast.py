@@ -9,7 +9,7 @@ Haiku 권고문 + 최적 배포 시간대를 임베드로 띄운다.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import discord
 from discord import app_commands, Interaction
@@ -44,7 +44,7 @@ class ForecastCommands(app_commands.Group):
     async def forecast(
         self,
         interaction: Interaction,
-        service: Optional[str] = None,
+        service: str | None = None,
         window_days: int = 30,
     ) -> None:
         await interaction.response.defer(thinking=True)
