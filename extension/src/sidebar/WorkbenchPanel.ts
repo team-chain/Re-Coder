@@ -557,8 +557,171 @@ export class WorkbenchPanel {
                     this._panel.webview.postMessage({ type: 'wb.deploy.ecs.statusResult', payload: s });
                 } catch { /* ignore */ }
                 break;
+
+            // ── Discord Bridge 설정 (Make 채널 / 봇 초대 / 길드 선택) ───────
+            case 'wb.discord.fetchStatus':
+                await this._pushDiscordStatus();
+                break;
+            case 'wb.discord.fetchInviteUrl':
+                await this._pushDiscordInviteUrl();
+                break;
+            case 'wb.discord.fetchGuilds':
+                await this._pushDiscordGuilds();
+                break;
+            case 'wb.discord.fetchChannels': {
+                const gid = String(msg.payload?.guild_id ?? '').trim();
+                if (!gid) {
+                    this._panel.webview.postMessage({
+                        type: 'wb.discord.error',
+                        payload: { context: 'fetchChannels', message: 'guild_id 누락' },
+                    });
+                    break;
+                }
+                await this._pushDiscordChannels(gid);
+                break;
+            }
+            case 'wb.discord.setChannel': {
+                const channelId = String(msg.payload?.channel_id ?? '').trim();
+                try {
+                    const r = await this._botHttpFetch(
+                        '/api/v1/bridge/channel',
+                        { method: 'PUT', body: JSON.stringify({ channel_id: channelId }) },
+                    );
+                    this._panel.webview.postMessage({
+                        type: 'wb.discord.setChannelResult',
+                        payload: { ok: true, ...r },
+                    });
+                    this.addActivity('ok', channelId
+                        ? `Discord Make 채널 저장: ${r.channel_name ?? channelId}`
+                        : 'Discord Make 채널 해제');
+                    // 저장 후 상태도 재푸시
+                    await this._pushDiscordStatus();
+                } catch (err) {
+                    this._panel.webview.postMessage({
+                        type: 'wb.discord.setChannelResult',
+                        payload: { ok: false, error: String(err) },
+                    });
+                    this.addActivity('fail', `Discord 채널 저장 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.discord.openInvite': {
+                try {
+                    const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
+                    const url = r?.invite_url as string | undefined;
+                    if (url) {
+                        await vscode.env.openExternal(vscode.Uri.parse(url));
+                        this.addActivity('info', '봇 초대 링크 열기');
+                    } else {
+                        this.addActivity('fail', '초대 URL 없음 (DISCORD_CLIENT_ID 미설정 또는 봇 미기동)');
+                    }
+                } catch (err) {
+                    this.addActivity('fail', `봇 초대 실패: ${err}`);
+                }
+                break;
+            }
+
             default:
                 console.warn('[WorkbenchPanel] Unknown message:', msg.type);
+        }
+    }
+
+    // ─────────────── Discord Bridge HTTP helpers ──────────────────────
+
+    /** 봇 HTTP 서버(127.0.0.1:8765 기본) 로 fetch.
+     *  recoder.bridge.httpPort / recoder.bridge.host / recoder.bridge.registrationKey 설정 사용.
+     */
+    private async _botHttpFetch(path: string, init?: { method?: string; body?: string }): Promise<any> {
+        const cfg = vscode.workspace.getConfiguration('recoder.bridge');
+        const host = (cfg.get<string>('host') || '127.0.0.1').trim();
+        const port = cfg.get<number>('httpPort') ?? 8765;
+        const regKey = (cfg.get<string>('registrationKey') || '').trim();
+
+        const url = `http://${host}:${port}${path}`;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (regKey) headers['X-Registration-Key'] = regKey;
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        try {
+            const res = await fetch(url, {
+                method: init?.method ?? 'GET',
+                headers,
+                body: init?.body,
+                signal: controller.signal,
+            });
+            const text = await res.text();
+            let json: any = null;
+            try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
+            if (!res.ok) {
+                const msg = (json && (json.error || json.message)) || `HTTP ${res.status}`;
+                throw new Error(`${msg} (${res.status})`);
+            }
+            return json ?? {};
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    private async _pushDiscordStatus(): Promise<void> {
+        try {
+            const r = await this._botHttpFetch('/api/v1/bridge/status');
+            this._panel.webview.postMessage({
+                type: 'wb.discord.statusResult',
+                payload: { ok: true, ...r },
+            });
+        } catch (err) {
+            this._panel.webview.postMessage({
+                type: 'wb.discord.statusResult',
+                payload: { ok: false, error: String(err) },
+            });
+        }
+    }
+
+    private async _pushDiscordInviteUrl(): Promise<void> {
+        try {
+            const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
+            this._panel.webview.postMessage({
+                type: 'wb.discord.inviteUrlResult',
+                payload: { ok: true, ...r },
+            });
+        } catch (err) {
+            this._panel.webview.postMessage({
+                type: 'wb.discord.inviteUrlResult',
+                payload: { ok: false, error: String(err) },
+            });
+        }
+    }
+
+    private async _pushDiscordGuilds(): Promise<void> {
+        try {
+            const r = await this._botHttpFetch('/api/v1/bridge/guilds');
+            this._panel.webview.postMessage({
+                type: 'wb.discord.guildsResult',
+                payload: { ok: true, ...r },
+            });
+        } catch (err) {
+            this._panel.webview.postMessage({
+                type: 'wb.discord.guildsResult',
+                payload: { ok: false, error: String(err), guilds: [] },
+            });
+        }
+    }
+
+    private async _pushDiscordChannels(guildId: string): Promise<void> {
+        try {
+            const r = await this._botHttpFetch(
+                `/api/v1/bridge/guilds/${encodeURIComponent(guildId)}/channels`,
+            );
+            this._panel.webview.postMessage({
+                type: 'wb.discord.channelsResult',
+                payload: { ok: true, ...r },
+            });
+        } catch (err) {
+            this._panel.webview.postMessage({
+                type: 'wb.discord.channelsResult',
+                payload: { ok: false, error: String(err), guild_id: guildId, channels: [] },
+            });
         }
     }
 
