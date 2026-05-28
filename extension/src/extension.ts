@@ -21,6 +21,7 @@ import { SidebarProvider } from './sidebar/SidebarProvider';
 import { WorkbenchPanel } from './sidebar/WorkbenchPanel';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
+import { BridgeClient } from './bridge/BridgeClient';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -34,6 +35,22 @@ export function activate(context: vscode.ExtensionContext): void {
     const apiClient = new ApiClient(coreManager);
     const pollingService = new PollingService(coreManager, apiClient);
     const terminalCollector = new TerminalCollector(apiClient);
+
+    // ── Discord bridge client (ws://127.0.0.1:7780/ws) ──────────────────────
+    // 봇의 /make 채널에서 생성된 코드를 받아 워크스페이스에 자동 저장.
+    const bridgeClient = new BridgeClient(context);
+    context.subscriptions.push(bridgeClient);
+    bridgeClient.connect();
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.bridge.reconnect', () => {
+            bridgeClient.dispose();
+            const newClient = new BridgeClient(context);
+            context.subscriptions.push(newClient);
+            newClient.connect();
+            vscode.window.showInformationMessage('ReCoder Bridge 재연결 시도');
+        }),
+    );
 
     // ── Sidebar provider ────────────────────────────────────────────────────
     const sidebarProvider = new SidebarProvider(

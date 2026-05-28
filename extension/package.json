@@ -124,6 +124,11 @@
         "command": "recoder.moveToLeftSidebar",
         "title": "ReCoder: Move to Left Sidebar",
         "icon": "$(layout-sidebar-left)"
+      },
+      {
+        "command": "recoder.bridge.reconnect",
+        "title": "ReCoder: Reconnect Discord Bridge",
+        "icon": "$(refresh)"
       }
     ],
     "menus": {
@@ -191,6 +196,21 @@
           "type": "number",
           "default": 4000,
           "description": "Core status polling interval in milliseconds (3000–10000)."
+        },
+        "recoder.bridge.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Discord 봇 브리지 호스트 (recoder_bridge.py 가 바인딩한 주소)."
+        },
+        "recoder.bridge.port": {
+          "type": "number",
+          "default": 7780,
+          "description": "Discord 봇 브리지 포트."
+        },
+        "recoder.bridge.token": {
+          "type": "string",
+          "default": "",
+          "description": "Discord 봇 브리지 인증 토큰 (.env 의 RECODER_BRIDGE_TOKEN 과 동일해야 함)."
         }
       }
     }
@@ -213,6 +233,7 @@
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
     "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "autoprefixer": "^10.4.20",
@@ -229,6 +250,7 @@
   },
   "dependencies": {
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "ws": "^8.18.0"
   }
 }

@@ -40,10 +40,41 @@ log = logging.getLogger(__name__)
 
 BEDROCK_MODEL_ID = os.getenv(
     "BEDROCK_PRIMARY_MODEL_IDENTIFIER",
-    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "anthropic.claude-3-haiku-20240307-v1:0",
 )
-BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")
-MAX_TOKENS = int(os.getenv("RECODER_MAKE_MAX_TOKENS", "32768"))
+BEDROCK_REGION = os.getenv("BEDROCK_REGION", "ap-northeast-2")
+# 큰 코드 (테트리스 등) 생성을 위해 큰 값으로 요청. 모델별 한도는
+# _resolve_max_tokens 가 자동으로 클리핑하므로 ValidationException 발생 없음.
+MAX_TOKENS = int(os.getenv("RECODER_MAKE_MAX_TOKENS", "16384"))
+
+# ── 모델별 maxTokens 한도 (AWS 공식) ────────────────────────────────────────
+# Anthropic Bedrock 모델은 모델별로 maxTokens 상한이 다름.
+# 요청값이 한도 초과 시 ValidationException 발생 → 자동 클리핑 필요.
+MODEL_MAX_TOKENS: dict[str, int] = {
+    # Claude 3 — 4096 한도
+    "anthropic.claude-3-haiku-20240307-v1:0": 4096,
+    "anthropic.claude-3-sonnet-20240229-v1:0": 4096,
+    "anthropic.claude-3-opus-20240229-v1:0": 4096,
+    # Claude 3.5 — 8192 한도
+    "anthropic.claude-3-5-haiku-20241022-v1:0": 8192,
+    "anthropic.claude-3-5-sonnet-20240620-v1:0": 8192,
+    "anthropic.claude-3-5-sonnet-20241022-v2:0": 8192,
+    # Claude 4.x (inference profile) — 보통 8192 (모델별 상이)
+    "apac.anthropic.claude-haiku-4-5-20251001-v1:0": 8192,
+    "apac.anthropic.claude-sonnet-4-5-20250929-v1:0": 8192,
+    "apac.anthropic.claude-sonnet-4-20250514-v1:0": 8192,
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0": 8192,
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 8192,
+    "us.anthropic.claude-sonnet-4-20250514-v1:0": 8192,
+}
+# 모델 한도 알 수 없으면 가장 보수적인 값 (4096) 사용 → ValidationException 회피
+_DEFAULT_MODEL_MAX_TOKENS = 4096
+
+
+def _resolve_max_tokens(model_id: str, requested: int) -> int:
+    """모델 한도로 클리핑된 max_tokens 반환."""
+    limit = MODEL_MAX_TOKENS.get(model_id, _DEFAULT_MODEL_MAX_TOKENS)
+    return min(int(requested), int(limit))
 
 # ── 상수 ────────────────────────────────────────────────────────────────────
 
@@ -438,7 +469,8 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
 
     except asyncio.CancelledError:
         await hub.broadcast({
-            "type": "error", "filename": filename, "message": "취소됨"
+            "type": "error", "filename": filename,
+            "error": "취소됨", "message": "취소됨",
         })
         try:
             await status_msg.edit(content=f"🚫 `{filename}` 생성이 취소되었습니다.")
@@ -448,11 +480,15 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
 
     except Exception as exc:
         log.exception("Bedrock 스트리밍 실패 (filename=%s): %s", filename, exc)
+        err_msg = str(exc) or exc.__class__.__name__
+        # BridgeClient 가 읽는 필드명은 'error' — 'message' 와 둘 다 채워 호환성 확보.
         await hub.broadcast({
-            "type": "error", "filename": filename, "message": str(exc),
+            "type": "error", "filename": filename,
+            "error": err_msg,
+            "message": err_msg,
         })
         try:
-            await status_msg.edit(content=f"❌ `{filename}` 생성 실패: `{exc}`")
+            await status_msg.edit(content=f"❌ `{filename}` 생성 실패: `{err_msg[:300]}`")
         except discord.HTTPException:
             pass
 
@@ -501,6 +537,97 @@ async def _update_status(
 
 # ── Bedrock 스트리밍 ──────────────────────────────────────────────────────────
 
+# 리전별 inference profile prefix 매핑.
+# 예: ap-northeast-2 → "apac." prefix 의 cross-region inference profile 사용.
+_REGION_PREFIX_MAP: dict[str, str] = {
+    "ap-northeast-1": "apac.", "ap-northeast-2": "apac.",
+    "ap-northeast-3": "apac.", "ap-southeast-1": "apac.",
+    "ap-southeast-2": "apac.", "ap-south-1": "apac.",
+    "us-east-1": "us.", "us-east-2": "us.",
+    "us-west-1": "us.", "us-west-2": "us.",
+    "eu-central-1": "eu.", "eu-west-1": "eu.",
+    "eu-west-2": "eu.", "eu-west-3": "eu.",
+    "eu-north-1": "eu.",
+}
+
+
+def _build_fallback_models() -> list[str]:
+    """현재 리전에 적합한 모델 후보 리스트 생성.
+
+    1) 사용자 지정 모델 (BEDROCK_PRIMARY_MODEL_IDENTIFIER) — 최우선.
+    2) on-demand 가능한 안정 모델 (Haiku 3, Sonnet 3) — 거의 모든 리전에서 동작.
+    3) 현재 리전의 inference profile prefix 가 붙은 Sonnet/Haiku — 그 prefix 가
+       AWS 계정에서 활성화된 경우만 통과.
+    4) 잘못된 prefix (예: us-east 에서만 동작하는 us.* 를 ap-northeast 에서 호출)
+       는 의도적으로 제외 — ValidationException 회피.
+    """
+    prefix = _REGION_PREFIX_MAP.get(BEDROCK_REGION, "")
+    candidates = [
+        BEDROCK_MODEL_ID,
+        # On-demand 모델 (어떤 리전이든 보통 동작)
+        "anthropic.claude-3-haiku-20240307-v1:0",
+        "anthropic.claude-3-5-haiku-20241022-v1:0",
+        "anthropic.claude-3-sonnet-20240229-v1:0",
+        "anthropic.claude-3-5-sonnet-20240620-v1:0",
+    ]
+    if prefix:
+        # 현재 리전에 맞는 inference profile 만 추가
+        candidates.extend([
+            f"{prefix}anthropic.claude-haiku-4-5-20251001-v1:0",
+            f"{prefix}anthropic.claude-sonnet-4-5-20250929-v1:0",
+            f"{prefix}anthropic.claude-sonnet-4-20250514-v1:0",
+        ])
+    return _dedupe_models(candidates)
+
+
+def _dedupe_models(models: list[str]) -> list[str]:
+    """순서 유지 + 중복 제거 + 빈 값 제외."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in models:
+        m = (m or "").strip()
+        if m and m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+# 캐시: bedrock list_foundation_models 1회 호출 결과
+_AVAILABLE_MODEL_CACHE: Optional[set[str]] = None
+
+
+def _get_available_models() -> set[str]:
+    """현재 AWS 계정 + 리전에서 ON_DEMAND 호출 가능한 텍스트 모델 ID 집합.
+
+    실패 시 빈 set 반환 (fallback 체인 그대로 모두 시도).
+    """
+    global _AVAILABLE_MODEL_CACHE
+    if _AVAILABLE_MODEL_CACHE is not None:
+        return _AVAILABLE_MODEL_CACHE
+    try:
+        models_client = boto3.client(
+            "bedrock", region_name=BEDROCK_REGION,
+            config=BotoConfig(retries={"max_attempts": 2, "mode": "standard"}),
+        )
+        resp = models_client.list_foundation_models(
+            byOutputModality="TEXT", byInferenceType="ON_DEMAND",
+        )
+        ids = {m["modelId"] for m in resp.get("modelSummaries", [])}
+        _AVAILABLE_MODEL_CACHE = ids
+        log.info(
+            "Bedrock 사용 가능 모델 %d개 탐색 완료 (region=%s)",
+            len(ids), BEDROCK_REGION,
+        )
+        return ids
+    except Exception as exc:
+        log.warning(
+            "Bedrock list_foundation_models 실패 — 전체 fallback 체인 시도: %s",
+            exc,
+        )
+        _AVAILABLE_MODEL_CACHE = set()
+        return set()
+
+
 async def _stream_bedrock(
     prompt: str,
     filename: str,
@@ -508,28 +635,120 @@ async def _stream_bedrock(
     max_tokens: Optional[int] = None,
 ) -> tuple[int, Optional[str]]:
     """
-    Bedrock converse_stream을 워커 스레드에서 실행하고,
-    텍스트 청크를 BridgeHub에 실시간으로 푸시한다.
+    Bedrock converse_stream을 워커 스레드에서 실행하고, 텍스트 청크를
+    BridgeHub에 실시간으로 푸시한다. 다중 모델 fallback 지원.
 
     반환: (전송한 청크 수, stop_reason)
     """
+    # global 선언은 함수 어디서든 BEDROCK_MODEL_ID 를 read/write 하기 전에 와야 함.
+    # (Python: 'name X is used prior to global declaration' SyntaxError 방지)
+    global BEDROCK_MODEL_ID
+
     system_prompt = _build_system_prompt(filename, language, prompt)
     client = _get_bedrock_client()
     loop = asyncio.get_running_loop()
-    effective_max_tokens = max_tokens or MAX_TOKENS
+    requested_max = max_tokens or MAX_TOKENS
 
-    def _invoke() -> Any:
-        return client.converse_stream(
-            modelId=BEDROCK_MODEL_ID,
-            system=[{"text": system_prompt}],
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={
-                "maxTokens": effective_max_tokens,
-                "temperature": 0.2,   # 코드 생성은 낮은 온도로 결정론적으로
-            },
+    # 1) 후보 리스트 구축
+    raw_candidates = _build_fallback_models()
+    # 2) 사용자 계정에서 실제 호출 가능한 모델로 좁히기 (invalid identifier 회피)
+    available = _get_available_models()
+    if available:
+        # 가용한 것만 시도. inference profile 가용 목록에 안 보이면 시도 안 함.
+        candidates = [m for m in raw_candidates if m in available]
+        primary = BEDROCK_MODEL_ID
+        if primary and primary not in available and primary not in candidates:
+            candidates.append(primary)
+    else:
+        candidates = raw_candidates
+
+    # 3) Sonnet 우선 정렬 — max_tokens 한도가 크고 코드 품질 좋음
+    candidates.sort(key=lambda m: (0 if "sonnet" in m.lower() else 1, m))
+
+    if not candidates:
+        raise RuntimeError(
+            "Bedrock 에서 사용 가능한 Anthropic 모델이 없습니다. "
+            "AWS Bedrock 콘솔 → Model access 에서 Claude 모델을 활성화하세요."
         )
 
-    resp = await loop.run_in_executor(None, _invoke)
+    log.info(
+        "Bedrock 모델 후보 (%d개): %s",
+        len(candidates),
+        ", ".join(candidates[:5]) + ("..." if len(candidates) > 5 else ""),
+    )
+
+    last_exc: Optional[Exception] = None
+
+    for model_id in candidates:
+        clipped_max = _resolve_max_tokens(model_id, requested_max)
+
+        def _invoke(_mid: str = model_id, _mt: int = clipped_max) -> Any:
+            return client.converse_stream(
+                modelId=_mid,
+                system=[{"text": system_prompt}],
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                inferenceConfig={"maxTokens": _mt, "temperature": 0.2},
+            )
+
+        try:
+            log.info(
+                "Bedrock 호출 시도: model=%s, maxTokens=%d", model_id, clipped_max,
+            )
+            resp = await loop.run_in_executor(None, _invoke)
+            log.info("Bedrock 호출 성공: model=%s", model_id)
+            BEDROCK_MODEL_ID = model_id  # 다음 호출 우선시 (함수 맨 위 global 선언 활용)
+            break
+        except Exception as exc:
+            cls_name = exc.__class__.__name__
+            msg_lower = str(exc).lower()
+
+            # max_tokens 초과 — 4096 으로 즉시 재시도
+            if "maximum tokens" in msg_lower and "exceeds" in msg_lower:
+                safe_max = 4096
+                if clipped_max > safe_max:
+                    log.warning(
+                        "Bedrock %s: maxTokens=%d 초과, %d 로 재시도",
+                        model_id, clipped_max, safe_max,
+                    )
+                    try:
+                        resp = await loop.run_in_executor(
+                            None, lambda _mid=model_id, _mt=safe_max: client.converse_stream(
+                                modelId=_mid,
+                                system=[{"text": system_prompt}],
+                                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                                inferenceConfig={"maxTokens": _mt, "temperature": 0.2},
+                            ),
+                        )
+                        log.info("Bedrock 호출 성공 (재시도): model=%s", model_id)
+                        BEDROCK_MODEL_ID = model_id
+                        break
+                    except Exception as exc2:
+                        log.warning("Bedrock %s 재시도도 실패: %s", model_id, str(exc2)[:200])
+                        last_exc = exc2
+                        continue
+
+            FALLBACK_TRIGGERS = (
+                "ResourceNotFoundException",
+                "AccessDeniedException",
+                "ValidationException",
+                "ModelNotReadyException",
+                "ServiceQuotaExceededException",
+            )
+            if cls_name in FALLBACK_TRIGGERS or "legacy" in msg_lower:
+                log.warning(
+                    "Bedrock model fallback: %s → 다음 후보. (%s: %s)",
+                    model_id, cls_name, str(exc)[:200],
+                )
+                last_exc = exc
+                continue
+            raise
+    else:
+        msg = (
+            f"Bedrock 모델 호출 전부 실패. 마지막 에러: "
+            f"{last_exc.__class__.__name__ if last_exc else 'unknown'}: "
+            f"{str(last_exc)[:300] if last_exc else ''}"
+        )
+        raise RuntimeError(msg) from last_exc
 
     stream = resp.get("stream")
     if stream is None:
@@ -544,7 +763,6 @@ async def _stream_bedrock(
         if event is None:
             break
 
-        # 텍스트 청크 처리
         delta = event.get("contentBlockDelta", {}).get("delta", {})
         text = delta.get("text")
         if text:
@@ -552,7 +770,6 @@ async def _stream_bedrock(
             chunk_count += 1
             continue
 
-        # 종료 이벤트
         if "messageStop" in event:
             stop_reason = event["messageStop"].get("stopReason")
             log.info(
@@ -561,7 +778,6 @@ async def _stream_bedrock(
             )
             continue
 
-        # 에러 이벤트 처리
         _check_stream_error(event)
 
     return chunk_count, stop_reason
