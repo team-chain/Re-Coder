@@ -23,7 +23,6 @@ import hashlib
 import hmac
 import logging
 import os
-import sqlite3
 from aiohttp import web
 
 from guild_store import (
@@ -31,8 +30,14 @@ from guild_store import (
     set_channel,
     get_guild_summary,
     get_channel,
-    DB_PATH,
+    _conn as _guild_conn,
 )
+from bridge_settings import (
+    get_make_channel_id,
+    set_make_channel_id,
+    get_settings_snapshot,
+)
+from recoder_bridge import hub as bridge_hub
 
 log = logging.getLogger(__name__)
 
@@ -320,11 +325,10 @@ async def _broadcast_to_deploy_channels(embed_data: dict) -> None:
         log.warning("봇 인스턴스 미주입 — Webhook 메시지를 보낼 수 없습니다.")
         return
 
-    # 모든 guild_id 조회
+    # 모든 guild_id 조회 — guild_store 의 컨텍스트 매니저로 connection 누수 방지
     try:
-        conn = sqlite3.connect(str(DB_PATH))
-        rows = conn.execute("SELECT guild_id FROM guild_config").fetchall()
-        conn.close()
+        with _guild_conn() as c:
+            rows = c.execute("SELECT guild_id FROM guild_config").fetchall()
     except Exception as e:
         log.error("guild_id 조회 실패: %s", e)
         return
@@ -360,12 +364,132 @@ async def _broadcast_to_deploy_channels(embed_data: dict) -> None:
 # 앱 생성 & 시작
 # ---------------------------------------------------------------------------
 
+async def handle_bridge_status(request: web.Request) -> web.Response:
+    """ReCoder Bridge 현재 설정 + 연결 상태 조회 (Workbench UI 용)."""
+    if not _check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    snapshot = get_settings_snapshot()
+    active_channel_id = get_make_channel_id()
+
+    # 봇이 알고 있는 채널 정보로 이름까지 채워준다 (UI 표시용)
+    channel_name = None
+    channel_guild_name = None
+    if _bot is not None and active_channel_id:
+        try:
+            ch = _bot.get_channel(active_channel_id)
+            if ch is not None:
+                channel_name = getattr(ch, "name", None)
+                channel_guild_name = getattr(getattr(ch, "guild", None), "name", None)
+        except Exception:
+            pass
+
+    return web.json_response({
+        "active_channel_id": str(active_channel_id) if active_channel_id else "",
+        "channel_name": channel_name,
+        "guild_name": channel_guild_name,
+        "connected_clients": bridge_hub.connected_count,
+        "settings": snapshot,
+    })
+
+
+async def handle_bridge_invite_url(request: web.Request) -> web.Response:
+    """봇 OAuth 초대 URL 생성. DISCORD_CLIENT_ID 환경변수 → 봇 user.id 순으로 fallback."""
+    if not _check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    # setup.py 와 동일 권한 비트마스크 사용 (Send/Embed/History/Slash)
+    invite_permissions = 2147485696
+
+    client_id = os.getenv("DISCORD_CLIENT_ID", "")
+    if not client_id and _bot is not None:
+        try:
+            if _bot.user is not None:
+                client_id = str(_bot.user.id)
+        except Exception:
+            pass
+
+    if not client_id:
+        return web.json_response(
+            {"error": "DISCORD_CLIENT_ID가 설정되지 않았고 봇 user 정보도 없습니다."},
+            status=503,
+        )
+
+    invite_url = (
+        f"https://discord.com/api/oauth2/authorize"
+        f"?client_id={client_id}"
+        f"&permissions={invite_permissions}"
+        f"&scope=bot%20applications.commands"
+    )
+
+    bot_name = None
+    bot_avatar = None
+    if _bot is not None and _bot.user is not None:
+        try:
+            bot_name = str(_bot.user)
+            bot_avatar = _bot.user.display_avatar.url if _bot.user.display_avatar else None
+        except Exception:
+            pass
+
+    return web.json_response({
+        "invite_url": invite_url,
+        "client_id": client_id,
+        "bot_name": bot_name,
+        "bot_avatar": bot_avatar,
+    })
+
+
+async def handle_bridge_set_channel(request: web.Request) -> web.Response:
+    """채널 ID 설정. body: { channel_id: "123..." }  또는 "" 로 해제."""
+    if not _check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    raw = body.get("channel_id", "")
+    if raw in ("", None):
+        set_make_channel_id(0)
+        return web.json_response({"ok": True, "active_channel_id": ""})
+
+    try:
+        channel_id = int(str(raw).strip())
+    except ValueError:
+        return web.json_response(
+            {"error": "channel_id는 숫자여야 합니다 (Discord 채널 우클릭 → ID 복사)."},
+            status=400,
+        )
+
+    # 봇이 해당 채널을 실제로 보고 있는지 best-effort 검증 (실패해도 저장은 함)
+    channel_name = None
+    if _bot is not None:
+        try:
+            ch = _bot.get_channel(channel_id)
+            if ch is not None:
+                channel_name = getattr(ch, "name", None)
+        except Exception:
+            pass
+
+    set_make_channel_id(channel_id)
+    return web.json_response({
+        "ok": True,
+        "active_channel_id": str(channel_id),
+        "channel_name": channel_name,
+    })
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/api/v1/health",                  handle_health)
     app.router.add_post("/api/v1/register",               handle_register)
     app.router.add_delete("/api/v1/register/{guild_id}",  handle_unregister)
     app.router.add_post("/api/v1/github/webhook",         handle_github_webhook)
+    # ReCoder Bridge (Discord → VSCode 실시간 코드 삽입) 설정 API
+    app.router.add_get("/api/v1/bridge/status",           handle_bridge_status)
+    app.router.add_put("/api/v1/bridge/channel",          handle_bridge_set_channel)
+    app.router.add_get("/api/v1/bridge/invite-url",       handle_bridge_invite_url)
     return app
 
 

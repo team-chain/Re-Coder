@@ -20,6 +20,7 @@ from typing import Optional
 
 from schemas import (
     AnalyzeRequest,
+    FileType,
     InfraFileProposal,
     ProjectProfile,
     ProjectStack,
@@ -258,7 +259,7 @@ def generate_dockerfile(
 
     return InfraFileProposal(
         proposal_id=uuid.uuid4().hex,
-        file_type="Dockerfile",
+        file_type=FileType.DOCKERFILE,
         target_path="Dockerfile",
         content=customized_content,
         base_template=stack,
@@ -312,7 +313,7 @@ def generate_docker_compose(
 
     return InfraFileProposal(
         proposal_id=uuid.uuid4().hex,
-        file_type="docker-compose",
+        file_type=FileType.DOCKER_COMPOSE,
         target_path="docker-compose.yml",
         content=content,
         base_template="db-multi" if has_db else "single",
@@ -466,7 +467,7 @@ jobs:
 
     return InfraFileProposal(
         proposal_id=uuid.uuid4().hex,
-        file_type="github-actions",
+        file_type=FileType.GITHUB_ACTIONS,
         target_path=".github/workflows/deploy.yml",
         content=content,
         base_template=template_name,

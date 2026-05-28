@@ -12,6 +12,9 @@ import {
     ResponseProposal,
     CostSummary,
     ProjectProfile,
+    AwsStatus,
+    AwsConfigureInput,
+    AwsEcrRepo,
 } from '../types';
 import { CoreManager } from './CoreManager';
 
@@ -27,11 +30,21 @@ export class ApiClient {
         // 토큰이 비어있으면 runtime.json 에서 즉시 refresh.
         // ensureRunning() 완료 전 PollingService 가 호출하는 race condition 방지.
         let token = this.coreManager.getSessionToken();
-        if (!token) {
+        let port = this.coreManager.getPort();
+        if (!token || !port || port <= 0 || !Number.isFinite(port)) {
             try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
             token = this.coreManager.getSessionToken();
+            port = this.coreManager.getPort();
         }
-        const port = this.coreManager.getPort();
+        // 여전히 port 가 없으면 요청 자체를 보내지 않고 부드럽게 실패 반환.
+        // (이전엔 http://127.0.0.1:undefined/api/health 로 가서 fetch 가 throw)
+        if (!port || port <= 0 || !Number.isFinite(port)) {
+            return {
+                success: false,
+                error: 'Core not ready (port unavailable)',
+                timestamp: new Date().toISOString(),
+            };
+        }
         const url = `http://127.0.0.1:${port}${path}`;
 
         const headers: Record<string, string> = {
@@ -54,10 +67,10 @@ export class ApiClient {
             const timestamp = new Date().toISOString();
 
             if (!res.ok) {
-                // 401 발생 시 한 번은 무조건 토큰 재로드 후 재시도.
+                // 401/403 (Invalid session token) 발생 시 한 번은 무조건 토큰 재로드 후 재시도.
                 // refreshToken 의 boolean 반환과 무관하게 retry (refresh 가 같은 토큰을
-                // 다시 읽어와도 미들웨어가 다른 이유로 401을 냈을 가능성 차단).
-                if (res.status === 401 && !_retried) {
+                // 다시 읽어와도 미들웨어가 다른 이유로 401/403 을 냈을 가능성 차단).
+                if ((res.status === 401 || res.status === 403) && !_retried) {
                     try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
                     return this.request<T>(method, path, body, true);
                 }
@@ -152,6 +165,70 @@ export class ApiClient {
             `/api/deploy/dockerfile/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
         return { status: resp.data?.status ?? (resp.success ? 'saved' : 'error') };
+    }
+
+    /**
+     * GitHub Actions 워크플로우 YAML 생성.
+     *
+     * 설계 §4.1.2 (Ship Stage 확장): generate_github_actions() 결과를
+     * InfraFileProposal 로 반환. 사용자 승인 후 .github/workflows/deploy.yml 에 저장.
+     */
+    async generateGithubActions(workspacePath: string, projectId?: string): Promise<InfraFileProposal> {
+        const resp = await this.request<InfraFileProposal>(
+            'POST', '/api/deploy/github-actions',
+            { workspace_path: workspacePath, project_id: projectId }
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'GitHub Actions 워크플로우 생성 실패'); }
+        return resp.data;
+    }
+
+    /**
+     * GitHub Actions 워크플로우 승인/저장.
+     * approved=true 시 Core 가 .github/workflows/deploy.yml 에 저장.
+     */
+    async approveGithubActions(proposalId: string, approved: boolean): Promise<{ status: string }> {
+        const resp = await this.request<{ status: string }>(
+            'POST',
+            `/api/deploy/github-actions/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
+        );
+        return { status: resp.data?.status ?? (resp.success ? 'saved' : 'error') };
+    }
+
+    // ── GitHub 인증 (VS Code OAuth → Core) ──────────────────────────────
+
+    /** Core 에 GitHub 토큰 등록. VS Code 의 vscode.authentication.getSession() 으로 받은 토큰 전달. */
+    async setGithubToken(token: string): Promise<{ status: string; user?: string; message?: string }> {
+        const resp = await this.request<{ status: string; user?: string; message?: string }>(
+            'POST', '/api/github/token', { token }
+        );
+        return resp.success && resp.data ? resp.data : { status: 'error', message: resp.error };
+    }
+
+    /** GitHub 인증 상태 조회 (캐시 5분). force=true 시 강제 갱신. */
+    async getGithubStatus(force = false): Promise<{ status: string; user?: string; message?: string }> {
+        const resp = await this.request<{ status: string; user?: string; message?: string }>(
+            'GET', `/api/github/status${force ? '?force=true' : ''}`
+        );
+        return resp.success && resp.data ? resp.data : { status: 'error', message: resp.error };
+    }
+
+    /** GitHub 로그아웃 — Core 의 ~/.recoder/github.token 제거. */
+    async githubLogout(): Promise<{ status: string; message?: string }> {
+        const resp = await this.request<{ status: string; message?: string }>(
+            'POST', '/api/github/logout'
+        );
+        return resp.success && resp.data ? resp.data : { status: 'error', message: resp.error };
+    }
+
+    /** 인증된 사용자의 GitHub 레포 목록. */
+    async listGithubRepos(): Promise<{ status: string; repos: Array<{ name: string; private: boolean; html_url: string }> }> {
+        const resp = await this.request<{ status: string; repos: unknown[] }>(
+            'GET', '/api/github/repos'
+        );
+        if (!resp.success || !resp.data) {
+            return { status: 'error', repos: [] };
+        }
+        return resp.data as { status: string; repos: Array<{ name: string; private: boolean; html_url: string }> };
     }
 
     async runScan(
@@ -403,5 +480,272 @@ export class ApiClient {
         const resp = await this.request<never>('GET', `/workbench/events?since=${since}`);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '이벤트 조회 실패'); }
         return resp.data as never;
+    }
+
+    // -----------------------------------------------------------------------
+    // AWS Credentials / Status (§S-2 — AWS Deploy Ready 활성화 흐름)
+    // /api/aws/*  — see core/api/routes/aws.py
+    // -----------------------------------------------------------------------
+
+    /**
+     * GET /api/aws/status — 현재 AWS 자격증명 상태.
+     * 자격증명이 없어도 500 이 아닌 ready=false 의 200 응답을 보장한다.
+     */
+    async getAwsStatus(): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('GET', '/api/aws/status');
+        if (resp.success && resp.data) {
+            return resp.data;
+        }
+        // network/401 등 실제 통신 실패 시 친화적 기본값
+        return {
+            ready: false,
+            identity: null,
+            region: '',
+            profile: '',
+            access_key_last4: '',
+            storage: '',
+            message: resp.error ?? 'AWS 상태 조회 실패',
+        };
+    }
+
+    /**
+     * POST /api/aws/configure — 자격증명 저장 + 즉시 STS 검증.
+     * Core 가 검증을 통과해야만 디스크에 저장되고, diagnostics 캐시를 갱신한다.
+     */
+    async configureAws(creds: AwsConfigureInput): Promise<AwsStatus> {
+        const body = {
+            access_key_id: creds.accessKeyId,
+            secret_access_key: creds.secretAccessKey,
+            region: creds.region ?? '',
+            profile: creds.profile ?? 'recoder',
+            storage: creds.storage ?? 'recoder',
+            session_token: creds.sessionToken ?? '',
+        };
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/configure', body);
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 자격증명 등록 실패');
+        }
+        return resp.data;
+    }
+
+    /**
+     * POST /api/aws/clear — 저장된 자격증명 제거.
+     */
+    async clearAws(): Promise<void> {
+        const resp = await this.request<{ status: string }>('POST', '/api/aws/clear');
+        if (!resp.success) {
+            throw new Error(resp.error ?? 'AWS 자격증명 제거 실패');
+        }
+    }
+
+    /**
+     * GET /api/aws/profiles — ~/.aws/credentials 의 사용 가능한 profile 목록.
+     */
+    async listAwsProfiles(): Promise<string[]> {
+        const resp = await this.request<{ profiles: string[] }>('GET', '/api/aws/profiles');
+        return resp.success && resp.data ? resp.data.profiles : [];
+    }
+
+    /**
+     * GET /api/aws/ecr/repos — ECR 레포지토리 목록 (자격증명 sanity check).
+     */
+    async listEcrRepos(opts: { region?: string; profile?: string; maxResults?: number } = {}): Promise<AwsEcrRepo[]> {
+        const qs = new URLSearchParams();
+        if (opts.region) { qs.set('region', opts.region); }
+        if (opts.profile) { qs.set('profile', opts.profile); }
+        if (opts.maxResults) { qs.set('max_results', String(opts.maxResults)); }
+        const path = qs.toString() ? `/api/aws/ecr/repos?${qs.toString()}` : '/api/aws/ecr/repos';
+        const resp = await this.request<{ repositories: AwsEcrRepo[] }>('GET', path);
+        return resp.success && resp.data ? resp.data.repositories : [];
+    }
+
+    // ===== Workbench 풀 구현 — Deploy / GitHub 액션 =====
+
+    /** POST /api/deploy/ec2 — EC2 SSH 배포 시작 (백그라운드, status 폴링 필요). */
+    async deployEc2(req: {
+        workspace_path?: string;
+        image_name?: string;
+        repo_name?: string;
+        tag?: string;
+        container_name?: string;
+        host_port?: number;
+        container_port?: number;
+        health_check_path?: string;
+        ecr_registry?: string;
+        ec2_host?: string;
+        ec2_ssh_key?: string;
+        aws_region?: string;
+        ec2_user?: string;
+    }): Promise<{ status: string; message: string }> {
+        const resp = await this.request<{ status: string; message: string }>('POST', '/api/deploy/ec2', req);
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'EC2 배포 요청 실패');
+        }
+        return resp.data;
+    }
+
+    /** GET /api/deploy/ec2/status — EC2 배포 진행상황 폴링. */
+    async getEc2DeployStatus(): Promise<{
+        running: boolean;
+        stage: string;
+        log_tail: string[];
+        image_uri: string;
+        error: string;
+        started_at: string;
+        finished_at: string;
+    }> {
+        const resp = await this.request<{
+            running: boolean;
+            stage: string;
+            log_tail: string[];
+            image_uri: string;
+            error: string;
+            started_at: string;
+            finished_at: string;
+        }>('GET', '/api/deploy/ec2/status');
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'EC2 상태 조회 실패');
+        }
+        return resp.data;
+    }
+
+    /** GET /api/deploy/ec2/ready — EC2 배포 사전 점검. */
+    async ec2DeployReady(): Promise<{ ready: boolean; issues: string[]; warnings?: string[] }> {
+        const resp = await this.request<{ ready: boolean; issues: string[]; warnings?: string[] }>(
+            'GET', '/api/deploy/ec2/ready'
+        );
+        return resp.success && resp.data ? resp.data : { ready: false, issues: ['Core 응답 없음'] };
+    }
+
+    /** POST /api/deploy/ecs — ECS Fargate 배포 시작. */
+    async deployEcs(req: {
+        workspace_path?: string;
+        image_name?: string;
+        repo_name?: string;
+        tag?: string;
+        ecr_registry?: string;
+        ecs_cluster?: string;
+        ecs_service?: string;
+        aws_region?: string;
+        container_name?: string;
+        container_port?: number;
+        cpu?: string;
+        memory?: string;
+        task_family?: string;
+        environment?: string;
+        branch?: string;
+        skip_sbom?: boolean;
+        skip_opa?: boolean;
+    }): Promise<{ status: string; message: string }> {
+        const resp = await this.request<{ status: string; message: string }>('POST', '/api/deploy/ecs', req);
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'ECS 배포 요청 실패');
+        }
+        return resp.data;
+    }
+
+    /** GET /api/deploy/ecs/status — ECS 배포 진행상황 폴링. */
+    async getEcsDeployStatus(): Promise<{
+        running: boolean;
+        stage: string;
+        log_tail: string[];
+        image_uri: string;
+        task_def_arn: string;
+        error: string;
+        started_at: string;
+        finished_at: string;
+    }> {
+        const resp = await this.request<{
+            running: boolean;
+            stage: string;
+            log_tail: string[];
+            image_uri: string;
+            task_def_arn: string;
+            error: string;
+            started_at: string;
+            finished_at: string;
+        }>('GET', '/api/deploy/ecs/status');
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'ECS 상태 조회 실패');
+        }
+        return resp.data;
+    }
+
+    /** GET /api/deploy/ecs/ready — ECS 배포 사전 점검. */
+    async ecsDeployReady(): Promise<{ ready: boolean; issues: string[]; warnings?: string[] }> {
+        const resp = await this.request<{ ready: boolean; issues: string[]; warnings?: string[] }>(
+            'GET', '/api/deploy/ecs/ready'
+        );
+        return resp.success && resp.data ? resp.data : { ready: false, issues: ['Core 응답 없음'] };
+    }
+
+    /** POST /api/git/push — 원격 push (upstream 자동 설정). */
+    async gitPush(req: { workspace_path: string; branch?: string; force?: boolean }): Promise<{
+        status: string;
+        message?: string;
+        branch?: string;
+    }> {
+        const resp = await this.request<{ status: string; message?: string; branch?: string }>(
+            'POST', '/api/git/push', req
+        );
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'git push 실패');
+        }
+        return resp.data;
+    }
+
+    /** GET /api/git/info — 현재 브랜치/remote 정보. */
+    async gitInfo(workspacePath: string): Promise<{
+        branch?: string;
+        remote_url?: string;
+        clean?: boolean;
+        ahead?: number;
+        behind?: number;
+        last_commit?: string;
+    }> {
+        const qs = new URLSearchParams({ workspace_path: workspacePath });
+        const resp = await this.request<object>('GET', `/api/git/info?${qs}`);
+        return resp.success && resp.data ? (resp.data as object) : {};
+    }
+
+    /** POST /api/github/repo — 새 GitHub 레포 생성 + 초기 push. */
+    async githubCreateRepo(req: {
+        workspace_path: string;
+        name: string;
+        private: boolean;
+        description?: string;
+    }): Promise<{ status: string; html_url?: string; message?: string }> {
+        const resp = await this.request<{ status: string; html_url?: string; message?: string }>(
+            'POST', '/api/github/repo', req
+        );
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? '레포 생성 실패');
+        }
+        return resp.data;
+    }
+
+    /** POST /api/github/secret — GitHub Actions Secret 등록. */
+    async githubSetSecret(req: { repo: string; name: string; value: string }): Promise<{
+        status: string;
+        message?: string;
+    }> {
+        const resp = await this.request<{ status: string; message?: string }>(
+            'POST', '/api/github/secret', req
+        );
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'Secret 등록 실패');
+        }
+        return resp.data;
+    }
+
+    /** GET /api/github/runs?repo=owner/name — Actions 워크플로 실행 이력. */
+    async githubListRuns(repo: string): Promise<{
+        workflow_runs?: Array<{ id: number; name: string; status: string; conclusion: string; html_url: string }>;
+    }> {
+        const qs = new URLSearchParams({ repo });
+        const resp = await this.request<{
+            workflow_runs?: Array<{ id: number; name: string; status: string; conclusion: string; html_url: string }>;
+        }>('GET', `/api/github/runs?${qs}`);
+        return resp.success && resp.data ? resp.data : {};
     }
 }
