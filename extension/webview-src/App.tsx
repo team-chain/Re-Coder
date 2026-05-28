@@ -30,6 +30,7 @@ import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
 import { ShipMode } from "./components/ShipMode";
 import { OperateMode } from "./components/OperateMode";
+import { DiscordMode } from "./components/DiscordMode";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
 import { Replay } from "./components/Replay";
@@ -38,7 +39,7 @@ import { Replay } from "./components/Replay";
 // Types
 // ---------------------------------------------------------------------------
 
-type ViewMode = "home" | "build" | "ship" | "operate" | "replay";
+type ViewMode = "home" | "build" | "ship" | "operate" | "replay" | "discord";
 
 interface DiagnosticsResult {
   core_ready: string;
@@ -137,6 +138,12 @@ const Icon = {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <polygon points="5 3 19 12 5 21 5 3" />
       <line x1="19" y1="20" x2="19" y2="4" />
+    </svg>
+  ),
+  /** Discord — 게임 컨트롤러 풍 디스코드 마크 (단순화) */
+  Discord: ({ size = 18 }: { size?: number }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-label="Discord">
+      <path d="M20.317 4.369A19.79 19.79 0 0 0 16.558 3.2a.077.077 0 0 0-.082.038c-.357.63-.755 1.453-1.034 2.1a18.27 18.27 0 0 0-5.487 0 12.51 12.51 0 0 0-1.05-2.1.08.08 0 0 0-.082-.038A19.74 19.74 0 0 0 5.064 4.37a.07.07 0 0 0-.032.027C2.534 8.046 1.876 11.61 2.2 15.14a.082.082 0 0 0 .031.056 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.3 14.3 0 0 0 1.226-1.994.075.075 0 0 0-.041-.105 13.2 13.2 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.075.075 0 0 1 .078-.01c3.927 1.793 8.18 1.793 12.061 0a.075.075 0 0 1 .079.009c.12.099.246.198.373.292a.077.077 0 0 1-.006.128 12.37 12.37 0 0 1-1.873.891.077.077 0 0 0-.04.106c.36.7.772 1.366 1.225 1.993a.076.076 0 0 0 .084.028 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .03-.055c.5-4.087-.838-7.62-3.549-10.745a.06.06 0 0 0-.031-.028zM8.02 13.0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.418 2.157-2.418 1.212 0 2.176 1.094 2.157 2.418 0 1.334-.955 2.419-2.157 2.419zm7.974 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.418 2.157-2.418 1.212 0 2.176 1.094 2.157 2.418 0 1.334-.945 2.419-2.157 2.419z"/>
     </svg>
   ),
 };
@@ -389,6 +396,15 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
       enabled={true}
       onClick={() => onSelectMode("replay")}
     />
+
+    <ActionCard
+      icon={<Icon.Discord size={18} />}
+      title="Discord 연동"
+      description="모바일에서 채팅으로 코드 생성 명령을 보내면, 노트북 VSCode에 실시간 삽입."
+      accent="#5865f2"
+      enabled={true}
+      onClick={() => onSelectMode("discord")}
+    />
   </div>
 );
 
@@ -468,7 +484,13 @@ const App: React.FC = () => {
       diagnostics.ops_ready === "ready"
     : false;
 
-  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "Dockerfile · 배포" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : "";
+  const subTitle =
+    view === "build" ? "에러 분석" :
+    view === "ship" ? "Dockerfile · 배포" :
+    view === "operate" ? "운영 대응" :
+    view === "replay" ? "Deploy Replay" :
+    view === "discord" ? "Discord 연동" :
+    "";
 
   return (
     <div style={{
@@ -547,6 +569,9 @@ const App: React.FC = () => {
           <div style={{ padding: "10px 10px 8px" }}>
             <Replay />
           </div>
+        )}
+        {view === "discord" && (
+          <DiscordMode />
         )}
       </div>
 

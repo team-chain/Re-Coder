@@ -192,6 +192,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
   const [approvalResult, setApprovalResult] = useState<"approved" | "rejected" | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+
   // Derive current step
   const currentStep: BuildStep = proposal
     ? approvalResult === "approved"

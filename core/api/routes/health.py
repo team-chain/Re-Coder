@@ -12,6 +12,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.responses import Response
 
 from schemas import DiagnosticsResult
 
@@ -99,13 +100,20 @@ async def run_diagnostics() -> DiagnosticsResult:
 
 @router.get("/api/diagnostics")
 async def get_diagnostics() -> Optional[DiagnosticsResult]:
-    """Return the most recently saved diagnostics result, or null if absent."""
+    """Return the most recently saved diagnostics result, or null if absent.
+
+    HTTP 204 No Content 는 body 가 없어야 하므로 JSONResponse(content=None) 대신
+    body 가 없는 Response(status_code=204) 를 반환한다.
+    JSONResponse(status_code=204, content=None) 은 b"null" (4 bytes) 를 body 로
+    직렬화하지만 uvicorn 이 204 에 대해 Content-Length 를 0 으로 재설정해
+    RuntimeError('Response content longer than Content-Length') 를 발생시킨다.
+    """
     if not _FIRST_RUN_AVAILABLE:
-        return JSONResponse(status_code=204, content=None)
+        return Response(status_code=204)
     diag = FirstRunDiagnostics()  # type: ignore[name-defined]
     result = await diag.load_diagnostics()
     if result is None:
-        return JSONResponse(status_code=204, content=None)
+        return Response(status_code=204)
     return result
 
 

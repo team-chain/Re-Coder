@@ -21,6 +21,7 @@ import { SidebarProvider } from './sidebar/SidebarProvider';
 import { WorkbenchPanel } from './sidebar/WorkbenchPanel';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
+import { BridgeClient } from './bridge/BridgeClient';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -247,6 +248,18 @@ export function activate(context: vscode.ExtensionContext): void {
     // Primary output collection is handled by TerminalShellIntegration above
     // (§8.1 Shell Integration 우선 수집). Raw data capture via proposed API
     // is a 2학기 optional enhancement.
+
+    // ── ReCoder Bridge (Discord 봇 → 실시간 코드 삽입) ────────────────────────
+    // recoder.bridge.enabled 설정이 true 이면 봇의 WebSocket에 접속하고,
+    // 봇이 푸시하는 스트리밍 코드 청크를 활성 워크스페이스 파일에 실시간 삽입한다.
+    const bridgeCfg = vscode.workspace.getConfiguration('recoder.bridge');
+    if (bridgeCfg.get<boolean>('enabled', false)) {
+        const url = bridgeCfg.get<string>('url', 'ws://127.0.0.1:7780/ws');
+        const token = bridgeCfg.get<string>('token', '');
+        const bridge = new BridgeClient(url, token);
+        bridge.start();
+        context.subscriptions.push(bridge);
+    }
 
     console.log('[ReCoder] Extension activated.');
 }

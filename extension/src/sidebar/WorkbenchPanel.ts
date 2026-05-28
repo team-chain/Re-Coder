@@ -25,6 +25,7 @@ import { CoreManager } from '../core/CoreManager';
 import { ApiClient } from '../core/ApiClient';
 import { PollingService } from '../core/PollingService';
 import { renderWorkbenchHtml } from './workbenchHtml';
+import { fetchBridgeStatus, setBridgeChannel, fetchInviteUrl } from '../bridge/bridgeApi';
 
 export class WorkbenchPanel {
     public static readonly viewType = 'recoder.workbench';
@@ -157,6 +158,42 @@ export class WorkbenchPanel {
                 } catch (err) {
                     this.addActivity('fail', `모드 전환 실패: ${err}`);
                 }
+                break;
+            }
+            // ── ReCoder Bridge (Discord → VSCode 실시간 코드 삽입) ─────────────
+            case 'wb.bridge.getStatus': {
+                const status = await fetchBridgeStatus();
+                this._panel.webview.postMessage({
+                    type: 'wb.bridge.status',
+                    payload: status,
+                });
+                break;
+            }
+            case 'wb.bridge.setChannel': {
+                const channelId = String(msg.payload?.channelId ?? '').trim();
+                const result = await setBridgeChannel(channelId);
+                this._panel.webview.postMessage({
+                    type: 'wb.bridge.status',
+                    payload: result,
+                });
+                if (result.ok) {
+                    this.addActivity(
+                        'info',
+                        channelId
+                            ? `Discord Bridge 채널 설정: ${result.channel_name ?? channelId}`
+                            : 'Discord Bridge 채널 해제',
+                    );
+                } else {
+                    this.addActivity('fail', `Bridge 설정 실패: ${result.error ?? 'unknown'}`);
+                }
+                break;
+            }
+            case 'wb.bridge.getInviteUrl': {
+                const invite = await fetchInviteUrl();
+                this._panel.webview.postMessage({
+                    type: 'wb.bridge.invite',
+                    payload: invite,
+                });
                 break;
             }
             default:
@@ -787,3 +824,5 @@ body{
 </html>`;
     }
 }
+
+// Bridge HTTP API 헬퍼는 ../bridge/bridgeApi.ts 로 이동 (SidebarProvider와 공유)

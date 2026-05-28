@@ -39,6 +39,10 @@ except ImportError:  # dotenv가 없어도 코어는 동작해야 함
     def load_dotenv(*_args, **_kwargs):  # type: ignore
         return False
 
+# python -m uvicorn core.main:app 으로 실행할 때는 main() 이 호출되지 않으므로
+# 모듈 임포트 시점에 .env 를 로드해야 SESSION_TOKEN 이 적용된다.
+load_dotenv(Path(__file__).parent / ".env", override=False)
+
 # core 모듈을 패키지 외부에서도 import 가능하도록 sys.path 보정
 _CORE_DIR = Path(__file__).parent
 _ROOT_DIR = _CORE_DIR.parent

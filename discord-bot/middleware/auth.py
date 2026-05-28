@@ -30,7 +30,6 @@ import logging
 from functools import wraps
 from typing import Callable
 
-import discord
 from discord import Interaction
 
 import guild_store
@@ -166,14 +165,11 @@ def get_whitelist_count(guild_id: int | None = None) -> int:
     if guild_id is not None:
         return guild_store.get_user_whitelist_count(guild_id)
 
-    # 전체 합계 — 모든 길드 스캔
-    import sqlite3
+    # 전체 합계 — 모든 길드 스캔. guild_store 의 컨텍스트 매니저를 재사용해
+    # connection 누수가 발생하지 않도록 한다.
     try:
-        conn = sqlite3.connect(str(guild_store.DB_PATH))
-        try:
-            row = conn.execute("SELECT COUNT(*) FROM guild_users").fetchone()
+        with guild_store._conn() as c:  # noqa: SLF001 — 의도적 내부 헬퍼 재사용
+            row = c.execute("SELECT COUNT(*) FROM guild_users").fetchone()
             return int(row[0]) if row else 0
-        finally:
-            conn.close()
     except Exception:  # noqa: BLE001
         return 0

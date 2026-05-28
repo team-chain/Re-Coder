@@ -161,6 +161,31 @@
           "type": "number",
           "default": 4000,
           "description": "Core status polling interval in milliseconds (3000–10000)."
+        },
+        "recoder.bridge.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Discord 봇이 푸시하는 코드를 VSCode에 실시간 삽입하는 ReCoder Bridge를 활성화합니다."
+        },
+        "recoder.bridge.url": {
+          "type": "string",
+          "default": "ws://127.0.0.1:7780/ws",
+          "description": "ReCoder Bridge WebSocket URL. A 모드(같은 PC): ws://127.0.0.1:7780/ws. B 모드(클라우드 봇): wss://your-bot.example.com/ws."
+        },
+        "recoder.bridge.token": {
+          "type": "string",
+          "default": "",
+          "description": "봇의 RECODER_BRIDGE_TOKEN 과 동일한 공유 토큰. 비워두면 인증 헤더를 보내지 않습니다(개발용)."
+        },
+        "recoder.bridge.botApiUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8765",
+          "description": "봇 내장 HTTP API 베이스 URL. Workbench → Build 탭에서 Discord 채널을 설정할 때 사용합니다."
+        },
+        "recoder.bridge.botRegistrationKey": {
+          "type": "string",
+          "default": "",
+          "description": "봇의 BOT_REGISTRATION_KEY 와 동일한 값. 빈 값이면 인증 헤더 미전송(개발용)."
         }
       }
     }
@@ -183,6 +208,9 @@
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
     "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.13",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "autoprefixer": "^10.4.20",
@@ -198,7 +226,6 @@
     "webpack-cli": "^5.1.0"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "ws": "^8.18.0"
   }
 }

@@ -13,12 +13,24 @@ import {
 } from '../types';
 import { ApiClient } from '../core/ApiClient';
 import { CoreManager } from '../core/CoreManager';
+import { fetchBridgeStatus, setBridgeChannel } from '../bridge/bridgeApi';
 import { PollingService } from '../core/PollingService';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'recoder.sidebarView';
     private _view?: vscode.WebviewView;
     private _state: SidebarState;
+
+    // ── Discord 실시간 이벤트 폴링 ─────────────────────────────────────────
+    /** /workbench/events 의 cursor — 마지막으로 받은 이벤트 이후부터만 수신 */
+    private _discordEventCursor: number = 0;
+    private _discordPollTimer: ReturnType<typeof setInterval> | null = null;
+    /** Discord → VSCode 모드 매핑 (Mode enum 에 없는 'recover'/'home'은 제외) */
+    private static readonly _DISCORD_MODE_MAP: Record<string, Mode> = {
+        build:   Mode.BUILD,
+        ship:    Mode.SHIP,
+        operate: Mode.OPERATE,
+    };
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -77,6 +89,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.postMessage('errorMessage', { message: err.message });
                     }
                 );
+                // Discord 이벤트 폴링 시작 — Core 성공/실패와 무관하게 시작
+                // (실패 시엔 _pollDiscordEvents 내부에서 조용히 무시됨)
+                this._startDiscordEventPolling();
             }
             // Core 가 떴으면 진단을 자동으로 1회 돌려준다. (App.tsx 가 mount 시 요청을 보내지만
             // 그 때 토큰이 아직 비어있을 수 있어 401 이 나는 경우가 있어 한 번 더 트리거.)
@@ -93,12 +108,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     (h) => this.postMessage('healthUpdate', h),
                     (e) => this.postMessage('errorMessage', { message: e.message })
                 );
+                // 사이드바가 다시 보일 때 Discord 이벤트 폴링도 재개
+                this._startDiscordEventPolling();
             } else {
                 this._pollingService.stop();
+                this._stopDiscordEventPolling();
             }
         });
 
-        webviewView.onDidDispose(() => { this._pollingService.stop(); });
+        webviewView.onDidDispose(() => {
+            this._pollingService.stop();
+            this._stopDiscordEventPolling();
+        });
     }
 
     postMessage(type: string, payload: unknown): void {
@@ -376,6 +397,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (this._state.costSummary) { this.postMessage('costUpdate', this._state.costSummary); }
                 break;
             }
+            // ── ReCoder Bridge (Discord → VSCode 실시간 코드 삽입) ─────────────
+            case 'wb.bridge.getStatus': {
+                const status = await fetchBridgeStatus();
+                this.postMessage('wb.bridge.status', status);
+                break;
+            }
+            case 'wb.bridge.setChannel': {
+                const p = (payload ?? {}) as { channelId?: string };
+                const channelId = String(p.channelId ?? '').trim();
+                const result = await setBridgeChannel(channelId);
+                this.postMessage('wb.bridge.status', result);
+                break;
+            }
             default:
                 console.warn('[SidebarProvider] Unknown message type:', type);
         }
@@ -545,5 +579,135 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     updateState(partial: Partial<SidebarState>): void {
         this._state = { ...this._state, ...partial };
         this.postMessage('stateUpdate', this._state);
+    }
+
+    // ── Discord 실시간 이벤트 폴링 (Discord → VSCode 단방향) ──────────────
+
+    /** 사이드바가 표시될 때 Discord 이벤트 폴링을 시작한다 (3초 간격). */
+    private _startDiscordEventPolling(): void {
+        if (this._discordPollTimer !== null) { return; }
+        // 첫 번째 폴링은 즉시 실행 (cursor 초기화 포함)
+        void this._pollDiscordEvents();
+        this._discordPollTimer = setInterval(() => {
+            void this._pollDiscordEvents();
+        }, 3000);
+    }
+
+    /** 사이드바가 숨겨지거나 소멸될 때 폴링을 중지한다. */
+    private _stopDiscordEventPolling(): void {
+        if (this._discordPollTimer !== null) {
+            clearInterval(this._discordPollTimer);
+            this._discordPollTimer = null;
+        }
+    }
+
+    /**
+     * GET /workbench/events?since=<cursor> 를 호출해 새 이벤트를 처리한다.
+     * Discord 에서 온 이벤트만 VSCode 알림 / 모드 전환에 반영.
+     */
+    private async _pollDiscordEvents(): Promise<void> {
+        try {
+            const result = await this._apiClient.workbenchEvents(this._discordEventCursor);
+            const events = Array.isArray(result?.events) ? result.events : [];
+            const nextOffset = result?.next_offset;
+
+            // cursor 갱신 — next_offset 기반 (없으면 현재 + 받은 개수)
+            if (typeof nextOffset === 'number') {
+                this._discordEventCursor = nextOffset;
+            } else {
+                this._discordEventCursor += events.length;
+            }
+
+            for (const ev of events) {
+                // Discord 에서 발생한 이벤트만 VSCode 에 반영
+                if (ev.source !== 'discord') { continue; }
+                this._handleDiscordEvent(ev as {
+                    kind: string;
+                    source: string;
+                    at: string;
+                    payload: Record<string, unknown>;
+                });
+            }
+        } catch {
+            // Core 미가동 / 토큰 없음 등 — 조용히 무시 (PollingService 가 down 표시)
+        }
+    }
+
+    /**
+     * Discord 이벤트 한 건을 처리한다.
+     *
+     * kind 별 동작:
+     *   mode_change  → 사이드바 모드 전환 + VSCode 알림
+     *   preflight    → VSCode 알림 (Pass/Blocked)
+     *   deploy       → VSCode 알림 + Core 상태 즉시 갱신
+     *   rollback     → VSCode 경고 알림 + Core 상태 즉시 갱신
+     */
+    private _handleDiscordEvent(ev: {
+        kind: string;
+        source: string;
+        at: string;
+        payload: Record<string, unknown>;
+    }): void {
+        switch (ev.kind) {
+            case 'mode_change': {
+                const rawMode = ev.payload?.mode as string | undefined;
+                if (!rawMode) { break; }
+
+                // 사이드바 모드 전환 (Mode enum 에 있는 것만)
+                const newMode = SidebarProvider._DISCORD_MODE_MAP[rawMode];
+                if (newMode !== undefined) {
+                    this._state.currentMode = newMode;
+                    this.postMessage('stateUpdate', this._state);
+                }
+
+                void vscode.window.showInformationMessage(
+                    `🎮 Discord → Workbench 모드 전환: ${rawMode.toUpperCase()}`
+                );
+                break;
+            }
+
+            case 'preflight': {
+                const status = (ev.payload?.status as string | undefined) ?? '?';
+                const score  = ev.payload?.score as number | undefined;
+                const label  = score !== undefined ? ` (${score}/100)` : '';
+                const isPass = status.toUpperCase().startsWith('PASS');
+                const icon   = isPass ? '✅' : '🚫';
+
+                void vscode.window.showInformationMessage(
+                    `${icon} Discord → Preflight ${status.toUpperCase()}${label}`
+                );
+                break;
+            }
+
+            case 'deploy': {
+                const depId = ((ev.payload?.deployment_id as string | undefined) ?? '?').slice(0, 8);
+                void vscode.window.showInformationMessage(
+                    `🚀 Discord → 배포 시작 (${depId}) — 상태를 갱신합니다`
+                );
+                // Core 상태 즉시 갱신 (배포 결과가 사이드바에 반영되도록)
+                void this._pollingService.poll();
+                break;
+            }
+
+            case 'rollback': {
+                const depId = ((ev.payload?.deployment_id as string | undefined) ?? '?').slice(0, 8);
+                void vscode.window.showWarningMessage(
+                    `↩️ Discord → Rollback 트리거 (${depId})`
+                );
+                void this._pollingService.poll();
+                break;
+            }
+
+            default:
+                break;
+        }
+
+        // 웹뷰에도 이벤트 전달 → webview-src 쪽에서 인라인 배너를 표시할 수 있음
+        this.postMessage('discordEvent', {
+            kind:   ev.kind,
+            source: ev.source,
+            at:     ev.at,
+            payload: ev.payload,
+        });
     }
 }

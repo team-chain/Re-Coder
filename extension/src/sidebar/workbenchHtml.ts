@@ -241,6 +241,7 @@ html[data-mode="sidebar"] .brand .tag{font-size:9px}
     <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.84 4.61 a5.5 5.5 0 0 0 -7.78 0 L12 5.67 l-1.06 -1.06 a5.5 5.5 0 0 0 -7.78 7.78 l1.06 1.06 L12 21.23 l7.78 -7.78 1.06 -1.06 a5.5 5.5 0 0 0 0 -7.78 Z"/></symbol>
     <symbol id="i-dash" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></symbol>
     <symbol id="i-log" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></symbol>
+    <symbol id="i-discord" viewBox="0 0 24 24"><path fill="currentColor" d="M20.317 4.369A19.79 19.79 0 0 0 16.558 3.2a.077.077 0 0 0-.082.038c-.357.63-.755 1.453-1.034 2.1a18.27 18.27 0 0 0-5.487 0 12.51 12.51 0 0 0-1.05-2.1.08.08 0 0 0-.082-.038A19.74 19.74 0 0 0 5.064 4.37a.07.07 0 0 0-.032.027C2.534 8.046 1.876 11.61 2.2 15.14a.082.082 0 0 0 .031.056 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.3 14.3 0 0 0 1.226-1.994.075.075 0 0 0-.041-.105 13.2 13.2 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.075.075 0 0 1 .078-.01c3.927 1.793 8.18 1.793 12.061 0a.075.075 0 0 1 .079.009c.12.099.246.198.373.292a.077.077 0 0 1-.006.128 12.37 12.37 0 0 1-1.873.891.077.077 0 0 0-.04.106c.36.7.772 1.366 1.225 1.993a.076.076 0 0 0 .084.028 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .03-.055c.5-4.087-.838-7.62-3.549-10.745a.06.06 0 0 0-.031-.028zM8.02 13.0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.418 2.157-2.418 1.212 0 2.176 1.094 2.157 2.418 0 1.334-.955 2.419-2.157 2.419zm7.974 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.418 2.157-2.418 1.212 0 2.176 1.094 2.157 2.418 0 1.334-.945 2.419-2.157 2.419z"/></symbol>
   </defs>
 </svg>
 
@@ -268,6 +269,7 @@ html[data-mode="sidebar"] .brand .tag{font-size:9px}
   <div class="tab" data-page="error"><svg class="ic"><use href="#i-err"/></svg>Error Center</div>
   <div class="tab" data-page="github"><svg class="ic"><use href="#i-gh"/></svg>GitHub Hub</div>
   <div class="tab" data-page="deploy"><svg class="ic"><use href="#i-up"/></svg>Deploy Center</div>
+  <div class="tab" data-page="discord"><svg class="ic"><use href="#i-discord"/></svg>Discord</div>
   <div class="right-chips">
     <span class="chip" id="chip-core"><span class="dot"></span>Core</span>
     <span class="chip" id="chip-ai"><span class="dot"></span>AI</span>
@@ -361,6 +363,72 @@ html[data-mode="sidebar"] .brand .tag{font-size:9px}
   <div class="panel">
     <h4><svg class="icon-svg" style="color:var(--green)"><use href="#i-up"/></svg>Deploy Center</h4>
     <p style="color:var(--t2)">Local Docker / EC2 SSH / ECS Fargate 배포 흐름. 사이드바의 Ship 탭에서 진행하세요.</p>
+  </div>
+</div>
+
+<!-- ── Discord 페이지 ── -->
+<div class="page" id="page-discord">
+  <!-- 봇 초대 카드 -->
+  <div class="panel" style="background:rgba(88,101,242,.06); border-color:rgba(88,101,242,.35); margin-bottom:14px">
+    <h4 style="color:#c1c8ff"><svg class="icon-svg" style="color:#5865f2"><use href="#i-discord"/></svg>봇을 Discord 서버에 추가</h4>
+    <p style="color:var(--t2); margin-bottom:10px; line-height:1.55">
+      아래 링크를 열면 봇을 본인의 Discord 서버에 초대할 수 있습니다. 봇이 이미 서버에 있다면 이 단계는 건너뛰세요.
+    </p>
+    <div id="dc-bot-info" style="display:none; align-items:center; gap:10px; padding:8px 10px; background:var(--bg2); border-radius:var(--r-md); margin-bottom:10px">
+      <img id="dc-bot-avatar" src="" alt="" style="width:28px; height:28px; border-radius:50%; display:none"/>
+      <div>
+        <div id="dc-bot-name" style="font-weight:700; font-size:13px"></div>
+        <div id="dc-bot-clientid" style="font-size:10px; color:var(--t3); font-family:monospace"></div>
+      </div>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+      <a id="dc-invite-btn" href="#" target="_blank" rel="noopener" style="
+        display:inline-flex; align-items:center; gap:6px;
+        background:#5865f2; color:#fff; text-decoration:none;
+        padding:8px 14px; border-radius:var(--r-md); font-size:12px; font-weight:600;
+        opacity:.5; pointer-events:none;
+      ">
+        <svg class="icon-svg" style="color:#fff"><use href="#i-discord"/></svg>
+        Discord에서 봇 초대하기
+      </a>
+      <button id="dc-copy-invite" class="quick-btn" style="font-size:11px; padding:7px 10px" disabled>URL 복사</button>
+      <span id="dc-invite-status" style="font-size:11px; color:var(--t3); margin-left:auto"></span>
+    </div>
+    <div id="dc-invite-error" style="display:none; margin-top:8px; padding:6px 9px; background:rgba(248,81,73,.1); border:1px solid rgba(248,81,73,.3); color:var(--red); border-radius:var(--r-sm); font-size:11px"></div>
+  </div>
+
+  <!-- 채널 설정 카드 -->
+  <div class="panel" style="margin-bottom:14px">
+    <h4><svg class="icon-svg" style="color:#5865f2"><use href="#i-discord"/></svg>채팅 채널 설정</h4>
+    <p style="color:var(--t2); margin-bottom:10px; line-height:1.55">
+      이 채널에 들어온 메시지가 봇 → Bedrock → 노트북 VSCode로 흘러갑니다. 한 채널 ID를 지정하세요.
+    </p>
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 10px; background:var(--bg2); border-radius:var(--r-md); margin-bottom:10px; font-size:12px">
+      <span style="color:var(--t2)">현재 채널</span>
+      <span id="dc-current-channel" style="font-family:monospace; color:var(--t1)">조회 중…</span>
+    </div>
+    <div style="display:flex; gap:6px; margin-bottom:8px">
+      <input id="dc-channel-input" type="text" placeholder="예) 123456789012345678" inputmode="numeric"
+             style="flex:1; background:var(--bg2); color:var(--t1); border:1px solid var(--bd); border-radius:var(--r-sm); padding:7px 9px; font-size:12px; font-family:monospace; outline:none"/>
+      <button id="dc-save-channel" class="quick-btn" style="background:#5865f2; color:#fff; border:none; font-weight:600">저장</button>
+      <button id="dc-clear-channel" class="quick-btn" style="font-size:11px">해제</button>
+    </div>
+    <div style="font-size:10px; color:var(--t3); line-height:1.5">
+      Discord 설정 → 고급 → <b>개발자 모드 ON</b> → 채널 우클릭 → "ID 복사"
+    </div>
+  </div>
+
+  <!-- 상태 카드 -->
+  <div class="panel">
+    <h4><svg class="icon-svg" style="color:var(--blue)"><use href="#i-cog"/></svg>연결 상태</h4>
+    <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:12px">
+      <span style="color:var(--t2)">봇 API</span>
+      <span id="dc-bot-api" style="font-family:monospace">확인 중…</span>
+      <span style="color:var(--t2)">연결된 확장</span>
+      <span id="dc-connected" style="font-family:monospace">-</span>
+      <span style="color:var(--t2)">서버</span>
+      <span id="dc-guild" style="font-family:monospace">-</span>
+    </div>
   </div>
 </div>
 
@@ -532,6 +600,142 @@ html[data-mode="sidebar"] .brand .tag{font-size:9px}
       }
     }
   });
+
+  // ── Discord 탭 로직 ──────────────────────────────────────────────────────
+  (function setupDiscordTab(){
+    let pollTimer = null;
+
+    function renderStatus(s){
+      if (!s) return;
+      const isConnected = (s.connected_clients || 0) > 0;
+      const isConfigured = !!s.active_channel_id;
+      const ok = s.ok !== false;
+
+      const ch = $('dc-current-channel');
+      if (ch) {
+        if (isConfigured) {
+          ch.textContent = s.channel_name ? '#'+s.channel_name : s.active_channel_id;
+          ch.style.color = 'var(--green)';
+        } else {
+          ch.textContent = '미설정';
+          ch.style.color = 'var(--t3)';
+        }
+      }
+
+      const api = $('dc-bot-api');
+      if (api) {
+        if (!ok) { api.textContent = '응답 없음 — ' + (s.error||''); api.style.color = 'var(--red)'; }
+        else if (isConnected) { api.textContent = '정상 · 연결됨'; api.style.color = 'var(--green)'; }
+        else { api.textContent = '정상 · ' + (isConfigured ? '대기 중' : '미설정'); api.style.color = isConfigured ? 'var(--yellow)' : 'var(--t2)'; }
+      }
+
+      const conn = $('dc-connected');
+      if (conn) conn.textContent = (s.connected_clients || 0) + '개';
+
+      const gd = $('dc-guild');
+      if (gd) gd.textContent = s.guild_name || '-';
+    }
+
+    function renderInvite(d){
+      const btn = $('dc-invite-btn');
+      const copy = $('dc-copy-invite');
+      const errEl = $('dc-invite-error');
+      const status = $('dc-invite-status');
+      const info = $('dc-bot-info');
+      const nameEl = $('dc-bot-name');
+      const cidEl = $('dc-bot-clientid');
+      const avatar = $('dc-bot-avatar');
+
+      if (!d || d.ok === false || !d.invite_url) {
+        if (btn) { btn.style.opacity = .5; btn.style.pointerEvents = 'none'; btn.href = '#'; }
+        if (copy) copy.disabled = true;
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = (d && d.error) || '초대 URL을 가져올 수 없습니다. (DISCORD_CLIENT_ID 설정 확인)'; }
+        if (status) status.textContent = '';
+        if (info) info.style.display = 'none';
+        return;
+      }
+      if (errEl) errEl.style.display = 'none';
+      if (btn) { btn.href = d.invite_url; btn.style.opacity = 1; btn.style.pointerEvents = 'auto'; }
+      if (copy) { copy.disabled = false; copy.dataset.url = d.invite_url; }
+      if (status) status.textContent = '준비됨';
+      if (info && (d.bot_name || d.client_id)) {
+        info.style.display = 'flex';
+        if (nameEl) nameEl.textContent = d.bot_name || '';
+        if (cidEl)  cidEl.textContent = 'client_id: ' + (d.client_id || '');
+        if (avatar && d.bot_avatar) { avatar.src = d.bot_avatar; avatar.style.display = 'block'; }
+      }
+    }
+
+    function refreshDiscord(){
+      vscode.postMessage({ type:'wb.bridge.getStatus' });
+      vscode.postMessage({ type:'wb.bridge.getInviteUrl' });
+    }
+
+    function startPolling(){
+      stopPolling();
+      refreshDiscord();
+      pollTimer = setInterval(refreshDiscord, 8000);
+    }
+    function stopPolling(){
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    // 탭 클릭 시 진입/이탈 감지 (이미 전역 switchTab이 존재 — wrap)
+    const _origSwitch = switchTab;
+    window.__wbDiscordHook = true;
+    // 모든 탭 클릭에 폴링 토글 부착
+    document.querySelectorAll('.tab').forEach(t=>{
+      t.addEventListener('click', ()=>{
+        if (t.dataset.page === 'discord') startPolling();
+        else stopPolling();
+      });
+    });
+
+    // 채널 저장 / 해제
+    const saveBtn = $('dc-save-channel');
+    const clearBtn = $('dc-clear-channel');
+    const inp = $('dc-channel-input');
+    if (saveBtn && inp) {
+      saveBtn.addEventListener('click', ()=>{
+        const v = (inp.value||'').replace(/[^0-9]/g, '').trim();
+        if (!v) return;
+        vscode.postMessage({ type:'wb.bridge.setChannel', payload:{ channelId: v } });
+        inp.value = '';
+      });
+      inp.addEventListener('keydown', (e)=>{
+        if (e.key === 'Enter') saveBtn.click();
+      });
+    }
+    if (clearBtn) {
+      clearBtn.addEventListener('click', ()=>{
+        vscode.postMessage({ type:'wb.bridge.setChannel', payload:{ channelId: '' } });
+      });
+    }
+
+    // 초대 URL 복사
+    const copyBtn = $('dc-copy-invite');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', ()=>{
+        const url = copyBtn.dataset.url;
+        if (!url) return;
+        navigator.clipboard.writeText(url).then(()=>{
+          copyBtn.textContent = '복사됨 ✓';
+          setTimeout(()=> copyBtn.textContent = 'URL 복사', 1500);
+        }).catch(()=>{
+          copyBtn.textContent = '실패';
+          setTimeout(()=> copyBtn.textContent = 'URL 복사', 1500);
+        });
+      });
+    }
+
+    // 봇 응답 메시지 수신
+    window.addEventListener('message', (ev)=>{
+      const m = ev.data;
+      if (!m || !m.type) return;
+      if (m.type === 'wb.bridge.status') renderStatus(m.payload || {});
+      if (m.type === 'wb.bridge.invite') renderInvite(m.payload || {});
+    });
+  })();
 
   vscode.postMessage({ type:'wb.ready' });
   setInterval(()=> vscode.postMessage({ type:'wb.poll.health' }), 5000);
