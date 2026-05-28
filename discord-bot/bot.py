@@ -44,18 +44,16 @@ from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import guild_store
+# NOTE: PreflightCommands / StatusCommands / DeployCommands / RollbackCommands /
+# CodeCommands 클래스는 미래 리팩토링(Group 등록 단순화) 용으로 commands/ 에
+# 정의돼 있지만, 본 봇은 _register_commands() 안에서 데코레이터로 직접
+# 등록하므로 import 하지 않는다.
 from commands import (
-    PreflightCommands,
-    StatusCommands,
-    DeployCommands,
-    RollbackCommands,
-    CodeCommands,
     SetupGroup,
     invite_command,
 )
 from scenarios.commute import send_commute_briefing
 from recoder_client import get_client_for_guild, GuildNotConfiguredError
-from middleware.auth import get_whitelist_count
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,6 +93,33 @@ class RecoderBot(discord.Client):
 
     async def setup_hook(self) -> None:
         """슬래시 커맨드 등록 및 스케줄러 시작 (§37.3)."""
+
+        # 슬래시 커맨드 전역 에러 핸들러 등록 — discord.py 2.x 정식 API.
+        # 데코레이터로 정의된 모든 /recoder * 명령에서 발생한 예외 (인증 실패,
+        # AppCommandError, 그리고 우리가 핸들러 안에서 followup 으로 안내하지
+        # 못한 예상치 못한 예외) 가 모두 여기로 흘러들어와 사용자에게
+        # 보이는 ephemeral 메시지로 전달된다.
+        async def _tree_error_handler(
+            interaction: discord.Interaction,
+            error: app_commands.AppCommandError,
+        ) -> None:
+            log.error(
+                "슬래시 커맨드 오류: %s (user=%s, guild=%s)",
+                error,
+                getattr(interaction.user, "id", "?"),
+                interaction.guild.id if interaction.guild else "DM",
+            )
+            msg = f"❌ 오류 발생: `{error}`"
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except discord.HTTPException as exc:
+                log.warning("에러 메시지 전송 실패: %s", exc)
+
+        self.tree.on_error = _tree_error_handler
+
         # recoder 최상위 그룹 생성
         recoder_group = app_commands.Group(name="recoder", description="ReCoder ChatOps 명령")
 
@@ -131,6 +156,18 @@ class RecoderBot(discord.Client):
         # VSCode 자동 등록 API 서버 시작 (bot 인스턴스 주입 — GitHub Webhook 전송용)
         from api_server import start_api_server
         await start_api_server(BOT_HTTP_PORT, bot=self)
+
+        # ReCoder Bridge (모바일 → 노트북 VSCode 실시간 코드 스트리밍) 시작
+        from recoder_bridge import hub as bridge_hub
+        await bridge_hub.start()
+
+    async def on_message(self, message: discord.Message) -> None:
+        """지정 채널 메시지를 받으면 Bedrock 스트리밍 → VSCode 확장에 실시간 삽입."""
+        try:
+            from make_handler import handle_make_message
+            await handle_make_message(self, message)
+        except Exception as exc:
+            log.exception("on_message handler error: %s", exc)
 
     async def on_ready(self) -> None:
         log.info(
@@ -204,16 +241,9 @@ class RecoderBot(discord.Client):
         log.info("서버 제거: %s (%d) — 설정 삭제", guild.name, guild.id)
         guild_store.delete_guild(guild.id)
 
-    async def on_application_command_error(
-        self,
-        interaction: discord.Interaction,
-        error: app_commands.AppCommandError,
-    ) -> None:
-        log.error("커맨드 오류: %s", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                f"❌ 오류 발생: `{error}`", ephemeral=True
-            )
+    # NOTE: discord.Client 에는 `on_application_command_error` 이벤트가 없다.
+    # discord.py 2.x 에서 슬래시 커맨드 에러는 CommandTree.on_error 로만 잡힌다.
+    # 실제 핸들러는 setup_hook 안에서 `self.tree.on_error = ...` 로 등록된다.
 
 
 def _register_commands(group: app_commands.Group) -> None:
@@ -419,7 +449,11 @@ def _setup_standup_scheduler(bot: RecoderBot) -> None:
                 continue
 
             try:
-                sys.path.insert(0, str(Path(__file__).parent.parent / "core"))
+                # core/ 디렉터리를 sys.path 에 한 번만 추가 (cron 매 호출마다
+                # 중복 insert 되어 모듈 캐시가 오염되는 것을 방지)
+                _core_path = str(Path(__file__).parent.parent / "core")
+                if _core_path not in sys.path:
+                    sys.path.insert(0, _core_path)
                 from standup.generator import StandupGenerator  # noqa: PLC0415
                 gen = StandupGenerator()
                 client = get_client_for_guild(guild.id)

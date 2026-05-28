@@ -10,7 +10,7 @@ import signal
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from schemas import DiagnosticsResult
@@ -99,13 +99,19 @@ async def run_diagnostics() -> DiagnosticsResult:
 
 @router.get("/api/diagnostics")
 async def get_diagnostics() -> Optional[DiagnosticsResult]:
-    """Return the most recently saved diagnostics result, or null if absent."""
+    """Return the most recently saved diagnostics result, or null if absent.
+
+    NOTE: 204 No Content 응답은 body 가 있으면 안 됨 (RFC 7230). 일부 미들웨어
+    (BaseHTTPMiddleware 계열) 가 빈 body 위에 다시 chunk 를 얹어 "Response
+    content longer than Content-Length" 가 터지는 케이스가 있어, Response 객체로
+    명시적 빈 body 를 반환한다.
+    """
     if not _FIRST_RUN_AVAILABLE:
-        return JSONResponse(status_code=204, content=None)
+        return Response(status_code=204)
     diag = FirstRunDiagnostics()  # type: ignore[name-defined]
     result = await diag.load_diagnostics()
     if result is None:
-        return JSONResponse(status_code=204, content=None)
+        return Response(status_code=204)
     return result
 
 

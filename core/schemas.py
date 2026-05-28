@@ -93,8 +93,22 @@ class StackType(str, Enum):
 
 
 class DeployMethod(str, Enum):
+    """설계 A.5 DeploymentPlan.method — 배포 대상 분류.
+
+    LOCAL_DOCKER : 로컬 Docker 엔진에 컨테이너 띄움 (P0)
+    SSH_DIRECT   : SSH 로 원격 호스트에서 docker build + run (P1)
+    ECR_EC2      : 로컬에서 ECR push → EC2 가 docker pull + run (P1)
+    GITHUB_ACTIONS: GitHub Actions 워크플로우가 CI/CD 수행 (P2)
+    SSH_DOCKER   : (legacy alias) — SSH_DIRECT 와 동일
+    AWS_ECS      : ECS Service 업데이트 (확장)
+    AWS_LAMBDA   : Lambda 배포 (확장)
+    K8S          : Kubernetes 배포 (P2)
+    """
     LOCAL_DOCKER = "local_docker"
     SSH_DOCKER = "ssh_docker"
+    SSH_DIRECT = "ssh_direct"
+    ECR_EC2 = "ecr_ec2"
+    GITHUB_ACTIONS = "github_actions"
     AWS_ECS = "aws_ecs"
     AWS_LAMBDA = "aws_lambda"
     K8S = "k8s"
@@ -412,24 +426,39 @@ class FileTemplate(BaseModel):
 
 
 class DiagnosticsResult(BaseModel):
-    """Result of the /diagnostics endpoint — system readiness check (§11)."""
+    """Result of the /diagnostics endpoint — system readiness check (§11).
 
-    core_ready: ReadyState = ReadyState.NOT_READY
-    ai_ready: ReadyState = ReadyState.NOT_READY
-    docker_ready: ReadyState = ReadyState.NOT_READY
-    aws_deploy_ready: ReadyState = ReadyState.NOT_READY
-    ops_ready: ReadyState = ReadyState.NOT_READY
+    Field types align with actual values produced by ``first_run.py``.
+    Ready 상태와 provider_type 은 string 으로 정의 — Pydantic v2 의
+    enum 호환 경고("serialized value may not be as expected")를 차단.
+
+    String 으로 받아도 first_run 이 ReadyStatus enum 을 직접 할당하면
+    Pydantic 이 .value 로 자동 coerce (ReadyStatus, ReadyState 둘 다 str Enum).
+    """
+
+    # Ready 상태 — first_run 이 ReadyStatus.OK 등을 직접 할당, str Enum 이므로 자동 coerce
+    core_ready: str = "fail"
+    ai_ready: str = "fail"
+    docker_ready: str = "fail"
+    aws_deploy_ready: str = "fail"
+    ops_ready: str = "fail"
     resolved_model_id: Optional[str] = None
     resolved_region: Optional[str] = None
     is_cross_region_profile: bool = False
-    provider_type: Optional[ProviderType] = None
-    validation_time: datetime = Field(default_factory=datetime.utcnow)
+    # provider_type 은 자유 문자열 ("bedrock"/"gemini"/"anthropic" 등)
+    provider_type: Optional[str] = None
+    # ISO-8601 datetime string — first_run.py 가 .isoformat() 으로 채움
+    validation_time: str = ""
     details: dict[str, Any] = Field(default_factory=dict)
 
     # 진단 중 수집된 사유/경고 목록 — first_run.py 가 누적해서 채운다.
     issues: list[str] = Field(default_factory=list)
     # Docker 버전 문자열 (예: "Docker version 24.0.7, build afdd53b") — Docker Ready 진단 시 채움.
     docker_version: str = ""
+
+    model_config = {
+        "use_enum_values": True,  # ReadyStatus.OK → "ok" 자동 직렬화
+    }
 
 
 class RuntimeConfig(BaseModel):

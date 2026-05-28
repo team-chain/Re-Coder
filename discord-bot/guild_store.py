@@ -15,18 +15,39 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 DB_PATH = Path(__file__).parent / "guild_config.db"
 _lock = threading.Lock()
+
+
+@contextmanager
+def _conn() -> Iterator[sqlite3.Connection]:
+    """
+    sqlite3.Connection 을 컨텍스트로 감싸 항상 close 보장.
+
+    내장 `with sqlite3.connect(...) as c:` 는 트랜잭션 commit/rollback 만
+    처리할 뿐 connection 자체는 닫지 않는다 — 장기 실행 봇에서 fd 누수의
+    원인이 된다. 본 헬퍼는 try/finally 로 close 까지 확실히 처리한다.
+    """
+    c = sqlite3.connect(str(DB_PATH))
+    try:
+        yield c
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
 
 
 # ── 초기화 ──────────────────────────────────────────────────────────────────
 
 def init_db() -> None:
     """봇 시작 시 1회 호출해 테이블을 생성한다."""
-    with _lock, _get_conn() as c:
+    with _lock, _conn() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS guild_config (
             guild_id    INTEGER PRIMARY KEY,
@@ -62,6 +83,12 @@ def init_db() -> None:
 
 
 def _get_conn() -> sqlite3.Connection:
+    """
+    레거시: 새 코드는 `_conn()` 컨텍스트 매니저를 사용하세요.
+
+    이 함수는 close 책임을 호출자에게 떠넘기므로 try/finally 가 필수.
+    호환성을 위해서만 유지합니다.
+    """
     return sqlite3.connect(str(DB_PATH))
 
 
@@ -69,7 +96,7 @@ def _get_conn() -> sqlite3.Connection:
 
 def set_api(guild_id: int, api_base: str, api_token: str) -> None:
     """서버의 ReCoder API URL 및 토큰을 저장(Upsert)한다."""
-    with _lock, _get_conn() as c:
+    with _lock, _conn() as c:
         c.execute(
             """
             INSERT INTO guild_config (guild_id, api_base, api_token, updated_at)
@@ -85,7 +112,7 @@ def set_api(guild_id: int, api_base: str, api_token: str) -> None:
 
 def get_api(guild_id: int) -> Optional[Tuple[str, str]]:
     """(api_base, api_token) 반환. 미설정이면 None."""
-    with _get_conn() as c:
+    with _conn() as c:
         row = c.execute(
             "SELECT api_base, api_token FROM guild_config WHERE guild_id = ?",
             (guild_id,),
@@ -102,7 +129,7 @@ CHANNEL_TYPES = ("deploy", "incident", "standup")
 
 def set_channel(guild_id: int, channel_type: str, channel_id: int) -> None:
     """알림 채널을 설정한다. channel_type: 'deploy' | 'incident' | 'standup'"""
-    with _lock, _get_conn() as c:
+    with _lock, _conn() as c:
         c.execute(
             """
             INSERT INTO guild_channels (guild_id, channel_type, channel_id)
@@ -115,7 +142,7 @@ def set_channel(guild_id: int, channel_type: str, channel_id: int) -> None:
 
 def get_channel(guild_id: int, channel_type: str) -> Optional[int]:
     """알림 채널 ID 반환. 미설정이면 None."""
-    with _get_conn() as c:
+    with _conn() as c:
         row = c.execute(
             "SELECT channel_id FROM guild_channels WHERE guild_id = ? AND channel_type = ?",
             (guild_id, channel_type),
@@ -125,7 +152,7 @@ def get_channel(guild_id: int, channel_type: str) -> Optional[int]:
 
 def get_all_channels(guild_id: int) -> Dict[str, int]:
     """서버의 모든 채널 설정 {channel_type: channel_id} 반환."""
-    with _get_conn() as c:
+    with _conn() as c:
         rows = c.execute(
             "SELECT channel_type, channel_id FROM guild_channels WHERE guild_id = ?",
             (guild_id,),
@@ -137,7 +164,7 @@ def get_all_channels(guild_id: int) -> Dict[str, int]:
 
 def add_role(guild_id: int, role_id: int) -> None:
     """봇 사용 허용 역할을 추가한다."""
-    with _lock, _get_conn() as c:
+    with _lock, _conn() as c:
         c.execute(
             "INSERT OR IGNORE INTO guild_roles (guild_id, role_id) VALUES (?, ?)",
             (guild_id, role_id),
@@ -146,7 +173,7 @@ def add_role(guild_id: int, role_id: int) -> None:
 
 def remove_role(guild_id: int, role_id: int) -> None:
     """봇 사용 허용 역할을 제거한다."""
-    with _lock, _get_conn() as c:
+    with _lock, _conn() as c:
         c.execute(
             "DELETE FROM guild_roles WHERE guild_id = ? AND role_id = ?",
             (guild_id, role_id),
@@ -155,7 +182,7 @@ def remove_role(guild_id: int, role_id: int) -> None:
 
 def get_roles(guild_id: int) -> List[int]:
     """서버의 허용 역할 ID 목록 반환."""
-    with _get_conn() as c:
+    with _conn() as c:
         rows = c.execute(
             "SELECT role_id FROM guild_roles WHERE guild_id = ?",
             (guild_id,),
@@ -167,7 +194,7 @@ def get_roles(guild_id: int) -> List[int]:
 
 def add_user(guild_id: int, user_id: int, note: str = "") -> None:
     """봇 사용 허용 user_id 를 추가한다 — §6.1.4 1차 게이트."""
-    with _lock, _get_conn() as c:
+    with _lock, _conn() as c:
         c.execute(
             """
             INSERT INTO guild_users (guild_id, user_id, note)
@@ -180,7 +207,7 @@ def add_user(guild_id: int, user_id: int, note: str = "") -> None:
 
 def remove_user(guild_id: int, user_id: int) -> None:
     """봇 사용 허용 user_id 를 제거한다."""
-    with _lock, _get_conn() as c:
+    with _lock, _conn() as c:
         c.execute(
             "DELETE FROM guild_users WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id),
@@ -189,7 +216,7 @@ def remove_user(guild_id: int, user_id: int) -> None:
 
 def list_users(guild_id: int) -> List[Tuple[int, str, str]]:
     """서버의 허용 user_id 목록 [(user_id, note, added_at), ...] 반환."""
-    with _get_conn() as c:
+    with _conn() as c:
         rows = c.execute(
             "SELECT user_id, note, added_at FROM guild_users WHERE guild_id = ? ORDER BY added_at",
             (guild_id,),
@@ -199,7 +226,7 @@ def list_users(guild_id: int) -> List[Tuple[int, str, str]]:
 
 def is_user_allowed(guild_id: int, user_id: int) -> bool:
     """user_id 가 이 서버의 화이트리스트에 있는지 확인한다 — §6.1.4."""
-    with _get_conn() as c:
+    with _conn() as c:
         row = c.execute(
             "SELECT 1 FROM guild_users WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id),
@@ -209,7 +236,7 @@ def is_user_allowed(guild_id: int, user_id: int) -> bool:
 
 def get_user_whitelist_count(guild_id: int) -> int:
     """화이트리스트 등록된 user_id 개수 반환."""
-    with _get_conn() as c:
+    with _conn() as c:
         row = c.execute(
             "SELECT COUNT(*) FROM guild_users WHERE guild_id = ?",
             (guild_id,),
@@ -221,7 +248,7 @@ def get_user_whitelist_count(guild_id: int) -> int:
 
 def delete_guild(guild_id: int) -> None:
     """봇이 서버에서 추방될 때 해당 서버의 모든 설정을 삭제한다."""
-    with _lock, _get_conn() as c:
+    with _lock, _conn() as c:
         c.execute("DELETE FROM guild_config WHERE guild_id = ?", (guild_id,))
         c.execute("DELETE FROM guild_channels WHERE guild_id = ?", (guild_id,))
         c.execute("DELETE FROM guild_roles WHERE guild_id = ?", (guild_id,))
