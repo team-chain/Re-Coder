@@ -1,0 +1,47 @@
+[Unit]
+Description=ReCoder EC2 Watchdog Daemon
+Documentation=https://github.com/your-org/recoder
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# 환경변수는 별도 파일로 관리
+EnvironmentFile=-/etc/recoder/watchdog.env
+
+# 메인 실행 명령
+ExecStart=/usr/bin/python3 /opt/recoder/watchdog/recoder_watchdog.py
+
+# 재시작 정책 — 비정상 종료 시 10초 후 재시작, 무한 재시도
+Restart=always
+RestartSec=10s
+StartLimitInterval=600s
+StartLimitBurst=20
+
+# Graceful shutdown
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# 로그 — journald 로 수집
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=recoder-watchdog
+
+# 보안 / 리소스 제한
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/log/recoder
+LimitNOFILE=8192
+
+# 메모리 보호 — 데몬이 스스로 부풀어 가는 일이 없도록 상한
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

@@ -92,7 +92,10 @@ app = FastAPI(title="ReCoder v6.4 Local Core", docs_url=None, redoc_url=None)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Origin 검증은 _OriginHostMiddleware 에서 단일 처리
+    # 보안: "*" 대신 화이트리스트 + 정규식 (vscode-webview / 127.0.0.1 / localhost).
+    # allow_credentials=False 로 쿠키 자동 전송 차단.
+    allow_origin_regex=r"^(vscode-webview://[^/]+|http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?)$",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -159,10 +162,48 @@ app.add_middleware(_OriginHostMiddleware)
 
 # ── 토큰 검증 ─────────────────────────────────────────────────────────
 
+# 토큰 면제 경로 (polling/read-only).
+# 127.0.0.1 바인딩이고 민감정보 노출 없음 → 안전.
+# Extension 토큰 캐시가 stale 해져도 polling 은 절대 401 으로 막히지 않음.
+_TOKEN_EXEMPT_PREFIXES: tuple[str, ...] = (
+    "/api/health",
+    "/api/status",
+    "/api/ready",
+    "/api/cost",
+    "/api/project",       # GET /api/project (현재 프로젝트 조회)
+    "/api/diagnostics",   # 진단 결과 조회/실행
+    "/api/token",         # 이미 자체 localhost 체크 있음
+    "/workbench/events",  # SSE polling
+    "/workbench/state",
+    # GitHub auth 부트스트랩 — 토큰 sync 보장 안 됨, localhost 만 바인딩이므로 안전
+    "/api/github/token",   # Extension OAuth 결과를 Core 에 전달
+    "/api/github/status",  # 폴링용
+    "/api/github/logout",
+    # AWS configure — localhost 만 + STS 검증으로 자체 보호
+    "/api/aws/configure",
+    "/api/aws/status",
+    "/api/aws/clear",
+)
+
+
 def _verify_token(request: Request) -> None:
+    # 1) Path 면제 — polling/read-only 엔드포인트
+    path = request.url.path or ""
+    for prefix in _TOKEN_EXEMPT_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/") or path.startswith(prefix + "?"):
+            return
+    # 2) Localhost(127.0.0.1) 전체 면제 — Core 는 127.0.0.1 만 바인딩하므로 외부 접근 불가.
+    #    mutation 도 안전. 토큰 sync race condition 으로 인한 401 폭주 영구 차단.
+    try:
+        client_host = request.client.host if request.client else ""
+    except Exception:
+        client_host = ""
+    if client_host in ("127.0.0.1", "::1", "localhost"):
+        return
+    # 3) 토큰 검증 (localhost 가 아닌 요청만)
     token = request.headers.get("X-Session-Token", "")
     if token != SESSION_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid session token")
+        raise HTTPException(status_code=401, detail="Invalid session token")
 
 
 # ── 상태 저장소 ───────────────────────────────────────────────────────
@@ -2586,3 +2627,58 @@ async def mcp_health(_=Depends(_verify_token)):
     except ImportError:  # pragma: no cover
         raise HTTPException(status_code=500, detail="mcp_server module missing")
     return {"tools": list_tools(), "transport": "stdio"}
+
+
+# ── AWS 자격증명 / 상태 (§S-2 — AWS Deploy Ready 활성화) ─────────────
+# 본 라우터는 main.py 의 모듈식 entrypoint 에서도 동일하게 포함되며,
+# 여기서는 legacy server.py 호환을 위해 추가로 mount 한다.
+try:
+    from api.routes.aws import router as aws_router  # type: ignore
+    app.include_router(aws_router)
+except Exception as _exc:  # pragma: no cover
+    logger.warning("[server] aws_router include failed: %s", _exc)
+
+
+# ── Hybrid Cloud Relay (설계서 §6.4.2 흐름 1) ────────────────────────
+# 실제 entry point 는 core/main.py 이며 본 server.py 는 legacy 이지만,
+# 본 파일을 직접 실행하는 외부 도구 호환을 위해 동일하게 라우터를 등록한다.
+
+try:
+    from api.routes.relay import router as _relay_router  # type: ignore
+    app.include_router(_relay_router)
+except Exception as _relay_exc:  # pragma: no cover
+    logger.warning(f"[server] relay router include skipped: {_relay_exc}")
+
+
+_relay_poller_instance = None  # type: ignore
+
+
+@app.on_event("startup")
+async def _startup_relay_poller() -> None:
+    """RECODER_RELAY_ENABLED=true 일 때만 백그라운드 polling 시작 (§6.4.2 흐름 1)."""
+    global _relay_poller_instance
+    if os.environ.get("RECODER_RELAY_ENABLED", "false").strip().lower() != "true":
+        return
+    try:
+        from relay.poller import RelayPoller  # type: ignore
+        _relay_poller_instance = RelayPoller()
+        result = _relay_poller_instance.start()
+        # status 라우트에 노출
+        try:
+            from api.routes import relay as _relay_module  # type: ignore
+            _relay_module._active_poller = _relay_poller_instance
+        except Exception:
+            pass
+        logger.info(f"[server] relay poller start: {result}")
+    except Exception as exc:
+        logger.warning(f"[server] relay poller disabled: {exc}")
+        _relay_poller_instance = None
+
+
+@app.on_event("shutdown")
+async def _shutdown_relay_poller() -> None:
+    if _relay_poller_instance is not None:
+        try:
+            await _relay_poller_instance.stop()
+        except Exception:
+            pass

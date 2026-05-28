@@ -15,6 +15,45 @@ import { ApiClient } from '../core/ApiClient';
 import { CoreManager } from '../core/CoreManager';
 import { PollingService } from '../core/PollingService';
 
+/**
+ * Core 의 ReadyStatus enum 값("ok" | "partial" | "fail")을 Webview 가 기대하는
+ * "ready" / "not_ready" 문자열로 정규화한다.
+ *
+ * Strict 정책: 실제 사용 가능한 OK 상태에서만 ✓ 표시.
+ *   - "ok" / "ready"            → "ready"      (✓)
+ *   - "partial" / "fail" / 그 외 → "not_ready"  (✗)
+ *
+ * PARTIAL 을 ✗ 로 처리하는 이유: 사용자가 실제로 그 기능을 호출했을 때 실패할
+ * 수 있는 상태를 ✓ 로 속이면 안 됨. (예: Docker version 은 있지만 daemon 다운 →
+ * docker build 하면 즉시 실패. AI 자격증명만 있고 invoke 실패 → analyze 즉시 실패.)
+ */
+function _normalizeReadyValue(v: unknown): string {
+    if (typeof v !== 'string') { return 'not_ready'; }
+    const s = v.toLowerCase().trim();
+    if (s === 'ready' || s === 'ok') { return 'ready'; }
+    return 'not_ready';
+}
+
+function _normalizeDiagnostics<T extends Record<string, unknown>>(d: T | null | undefined): T | null {
+    if (!d) { return null; }
+    const fields = [
+        'core_ready',
+        'ai_ready',
+        'docker_ready',
+        'aws_deploy_ready',
+        'ops_ready',
+        'git_ready',
+        'github_ready',
+    ];
+    const out: Record<string, unknown> = { ...d };
+    for (const f of fields) {
+        if (f in out) {
+            out[f] = _normalizeReadyValue(out[f]);
+        }
+    }
+    return out as T;
+}
+
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'recoder.sidebarView';
     private _view?: vscode.WebviewView;
@@ -120,6 +159,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         void this.handleGenerateDockerfile(workspacePath, undefined);
     }
 
+    triggerGithubActionsGeneration(): void {
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        void this.handleGenerateGithubActions(workspacePath, undefined);
+    }
+
     triggerDiagnostics(): void {
         void this.handleMessage({ type: 'runDiagnostics', payload: {} });
     }
@@ -165,6 +209,53 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 void this.handleMessage({ type: 'runDiagnostics', payload: {} });
                 break;
             }
+            case 'webview.diagnostics.fix': {
+                // DiagnosticsPanel.tsx 의 chip 별 "Retry check" 버튼.
+                // not-ready 인 항목을 누르면 해당 설정 GUI 를 자동으로 띄운다.
+                const { key } = (payload ?? {}) as { key?: string };
+                switch (key) {
+                    case 'aws_deploy_ready':
+                    case 'ai_ready':  // Bedrock 도 AWS 자격증명을 사용
+                        await vscode.commands.executeCommand('recoder.awsConfigure');
+                        break;
+                    case 'github_ready':
+                        await vscode.commands.executeCommand('recoder.githubLogin');
+                        break;
+                    case 'docker_ready': {
+                        // Docker Desktop 실행 안내만 — 자동 시작은 위험
+                        const selected = await vscode.window.showInformationMessage(
+                            'Docker Desktop 을 시작한 후 진단을 다시 실행해주세요.',
+                            'Docker Desktop 다운로드',
+                        );
+                        if (selected === 'Docker Desktop 다운로드') {
+                            void vscode.env.openExternal(
+                                vscode.Uri.parse('https://www.docker.com/products/docker-desktop'),
+                            );
+                        }
+                        void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                        break;
+                    }
+                    case 'core_ready':
+                        await vscode.commands.executeCommand('recoder.restartCore');
+                        break;
+                    case 'ops_ready':
+                        // Operate 탭에서 EC2 host / SSH key 를 설정 — 모드만 전환
+                        this._state.currentMode = Mode.OPERATE;
+                        this.postMessage('stateUpdate', this._state);
+                        break;
+                    default:
+                        // 알 수 없는 key — 그냥 진단 재실행
+                        void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                }
+                break;
+            }
+            case 'webview.open.external': {
+                const { url } = (payload ?? {}) as { url?: string };
+                if (url) {
+                    void vscode.env.openExternal(vscode.Uri.parse(url));
+                }
+                break;
+            }
             case 'workbench.open':
             case 'openWorkbench': {
                 await vscode.commands.executeCommand('recoder.openWorkbench');
@@ -190,6 +281,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.postMessage('stateUpdate', { ...this._state });
                 if (dfResult.status === 'error') {
                     this.postMessage('errorMessage', { message: 'Dockerfile 승인 실패' });
+                }
+                break;
+            }
+            case 'generateGithubActions': {
+                const { workspacePath: ghWs, projectId: ghPid } = payload as { workspacePath: string; projectId?: string };
+                await this.handleGenerateGithubActions(ghWs, ghPid);
+                break;
+            }
+            case 'approveGithubActions': {
+                const { proposalId, approved } = payload as { proposalId: string; approved: boolean };
+                const ghResult = await this._apiClient.approveGithubActions(proposalId, approved);
+                this.postMessage('stateUpdate', { ...this._state });
+                if (ghResult.status === 'error') {
+                    this.postMessage('errorMessage', { message: 'GitHub Actions 승인 실패' });
                 }
                 break;
             }
@@ -296,8 +401,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 this._state.isLoading = false;
                 if (diagnostics) {
-                    this._state.diagnostics = diagnostics;
-                    this.postMessage('diagnosticsUpdate', diagnostics);
+                    // Core 가 ReadyStatus enum 값("ok"/"partial"/"fail") 으로 보내는데
+                    // webview 는 "ready" 문자열로 비교. 여기서 변환.
+                    const normalized = _normalizeDiagnostics(
+                        diagnostics as unknown as Record<string, unknown>
+                    ) as unknown as typeof diagnostics;
+                    if (normalized) {
+                        this._state.diagnostics = normalized;
+                        this.postMessage('diagnosticsUpdate', normalized);
+                    }
                 }
                 // 성공·실패와 무관하게 stateUpdate 을 보내 isLoading 스피너 해제.
                 this.postMessage('stateUpdate', this._state);
@@ -376,6 +488,105 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (this._state.costSummary) { this.postMessage('costUpdate', this._state.costSummary); }
                 break;
             }
+            // ── AWS Credentials / Status (§S-2 — /api/aws/* 라우트) ────────
+            case 'aws.status': {
+                try {
+                    const status = await this._apiClient.getAwsStatus();
+                    this.postMessage('aws.status', status);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.status', {
+                        ready: false,
+                        identity: null,
+                        region: '',
+                        profile: '',
+                        access_key_last4: '',
+                        storage: '',
+                        message: msg,
+                    });
+                    this.postMessage('errorMessage', { message: `AWS 상태 조회 실패: ${msg}` });
+                }
+                break;
+            }
+            case 'aws.configure': {
+                const p = (payload ?? {}) as {
+                    accessKeyId?: string;
+                    secretAccessKey?: string;
+                    region?: string;
+                    profile?: string;
+                    storage?: 'recoder' | 'aws_credentials_file';
+                    sessionToken?: string;
+                };
+                if (!p.accessKeyId || !p.secretAccessKey) {
+                    this.postMessage('aws.configure.result', {
+                        ok: false,
+                        message: 'accessKeyId / secretAccessKey 가 비어있습니다.',
+                    });
+                    break;
+                }
+                try {
+                    const status = await this._apiClient.configureAws({
+                        accessKeyId: p.accessKeyId,
+                        secretAccessKey: p.secretAccessKey,
+                        region: p.region,
+                        profile: p.profile,
+                        storage: p.storage,
+                        sessionToken: p.sessionToken,
+                    });
+                    this.postMessage('aws.configure.result', { ok: true, status });
+                    this.postMessage('aws.status', status);
+                    // 자격증명 저장 직후 diagnostics 도 즉시 갱신 (Core 가 캐시를 다시 작성하지만
+                    // webview UI 의 readyCheck 까지 동기화시키기 위해 한번 더 트리거).
+                    void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.configure.result', { ok: false, message: msg });
+                    this.postMessage('errorMessage', { message: `AWS 자격증명 등록 실패: ${msg}` });
+                }
+                break;
+            }
+            case 'aws.clear': {
+                try {
+                    await this._apiClient.clearAws();
+                    this.postMessage('aws.clear.result', { ok: true });
+                    // status / diagnostics 동시 갱신
+                    try {
+                        const status = await this._apiClient.getAwsStatus();
+                        this.postMessage('aws.status', status);
+                    } catch { /* ignore */ }
+                    void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.clear.result', { ok: false, message: msg });
+                    this.postMessage('errorMessage', { message: `AWS 자격증명 제거 실패: ${msg}` });
+                }
+                break;
+            }
+            case 'aws.listProfiles': {
+                try {
+                    const profiles = await this._apiClient.listAwsProfiles();
+                    this.postMessage('aws.profiles', { profiles });
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.profiles', { profiles: [], error: msg });
+                }
+                break;
+            }
+            case 'aws.listEcrRepos': {
+                const p = (payload ?? {}) as { region?: string; profile?: string; maxResults?: number };
+                try {
+                    const repositories = await this._apiClient.listEcrRepos({
+                        region: p.region,
+                        profile: p.profile,
+                        maxResults: p.maxResults,
+                    });
+                    this.postMessage('aws.ecrRepos', { repositories });
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.ecrRepos', { repositories: [], error: msg });
+                }
+                break;
+            }
             default:
                 console.warn('[SidebarProvider] Unknown message type:', type);
         }
@@ -449,6 +660,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this._state.isLoading = true;
             this.postMessage('stateUpdate', this._state);
             const proposal = await this._apiClient.generateDockerfile(workspacePath, projectId);
+            this._state.proposals.unshift(proposal);
+            this.postMessage('proposalReady', proposal);
+        } catch (err) {
+            this.postMessage('errorMessage', { message: String(err) });
+        } finally {
+            this._state.isLoading = false;
+            this.postMessage('stateUpdate', this._state);
+        }
+    }
+
+    private async handleGenerateGithubActions(workspacePath: string, projectId?: string): Promise<void> {
+        try {
+            this._state.isLoading = true;
+            this.postMessage('stateUpdate', this._state);
+            const proposal = await this._apiClient.generateGithubActions(workspacePath, projectId);
             this._state.proposals.unshift(proposal);
             this.postMessage('proposalReady', proposal);
         } catch (err) {

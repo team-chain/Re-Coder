@@ -157,12 +157,189 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
+    // ── Command: Generate GitHub Actions Workflow ───────────────────────────
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.generateGithubActions', async () => {
+            await ensureCoreRunning(coreManager, sidebarProvider);
+            sidebarProvider.switchToShipMode();
+            sidebarProvider.triggerGithubActionsGeneration();
+            await vscode.commands.executeCommand('recoder.sidebarView.focus');
+        })
+    );
+
     // ── Command: Run Diagnostics ────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.runDiagnostics', async () => {
             await ensureCoreRunning(coreManager, sidebarProvider);
             sidebarProvider.triggerDiagnostics();
             await vscode.commands.executeCommand('recoder.sidebarView.focus');
+        })
+    );
+
+    // ── Command: GitHub Login (VS Code native OAuth) ────────────────────────
+    // VS Code 가 내장한 GitHub 인증 공급자를 사용. 토큰을 직접 받아 Core 에 전달.
+    // 사용자는 별도 PAT 발급 없이 브라우저 1-click 으로 인증 가능.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.githubLogin', async () => {
+            await ensureCoreRunning(coreManager, sidebarProvider);
+            try {
+                const session = await vscode.authentication.getSession(
+                    'github',
+                    ['repo', 'workflow', 'admin:repo_hook'],
+                    { createIfNone: true },
+                );
+                if (!session?.accessToken) {
+                    vscode.window.showWarningMessage('GitHub 인증이 취소되었습니다.');
+                    return;
+                }
+                const result = await apiClient.setGithubToken(session.accessToken);
+                if (result.status === 'ok') {
+                    vscode.window.showInformationMessage(
+                        `GitHub 연결 완료: ${result.user ?? session.account.label}`,
+                    );
+                    // 진단 갱신 — github_ready chip 즉시 반영
+                    sidebarProvider.triggerDiagnostics();
+                } else {
+                    vscode.window.showErrorMessage(
+                        `GitHub 토큰 등록 실패: ${result.message ?? 'unknown error'}`,
+                    );
+                }
+            } catch (err) {
+                vscode.window.showErrorMessage(
+                    `GitHub 로그인 실패: ${err instanceof Error ? err.message : String(err)}`,
+                );
+            }
+        })
+    );
+
+    // ── Command: GitHub Logout ──────────────────────────────────────────────
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.githubLogout', async () => {
+            await ensureCoreRunning(coreManager, sidebarProvider);
+            const result = await apiClient.githubLogout();
+            vscode.window.showInformationMessage(
+                result.status === 'ok'
+                    ? 'GitHub 로그아웃 완료'
+                    : `로그아웃 실패: ${result.message ?? 'unknown'}`,
+            );
+            sidebarProvider.triggerDiagnostics();
+        })
+    );
+
+    // ── Command: AWS Credentials Configure (native input boxes) ─────────────
+    // showInputBox 3단계로 자격증명 수집 → Core 가 STS GetCallerIdentity 로 검증.
+    // 입력 즉시 ~/.recoder/aws_credentials.json (0600) 에 저장 후 진단 자동 갱신.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.awsConfigure', async () => {
+            await ensureCoreRunning(coreManager, sidebarProvider);
+
+            const accessKey = await vscode.window.showInputBox({
+                title: 'AWS 자격증명 (1/3)',
+                prompt: 'AWS Access Key ID',
+                placeHolder: 'AKIA...',
+                ignoreFocusOut: true,
+                validateInput: (v) => (v && v.trim().length >= 16 ? null : 'Access Key 가 너무 짧습니다.'),
+            });
+            if (!accessKey) { return; }
+
+            const secret = await vscode.window.showInputBox({
+                title: 'AWS 자격증명 (2/3)',
+                prompt: 'AWS Secret Access Key',
+                password: true,
+                ignoreFocusOut: true,
+                validateInput: (v) => (v && v.trim().length >= 16 ? null : 'Secret Access Key 가 너무 짧습니다.'),
+            });
+            if (!secret) { return; }
+
+            const region = await vscode.window.showInputBox({
+                title: 'AWS 자격증명 (3/3)',
+                prompt: 'AWS Region',
+                value: 'ap-northeast-2',
+                placeHolder: 'ap-northeast-2',
+                ignoreFocusOut: true,
+                validateInput: (v) => (v && /^[a-z]{2}-[a-z]+-\d+$/.test(v.trim()) ? null : '예: ap-northeast-2'),
+            });
+            if (!region) { return; }
+
+            await vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: 'AWS 자격증명 검증 중…' },
+                async () => {
+                    const result = await apiClient.configureAws({
+                        accessKeyId: accessKey.trim(),
+                        secretAccessKey: secret.trim(),
+                        region: region.trim(),
+                    });
+                    if (result.ready) {
+                        const acct = result.identity?.account ?? 'unknown';
+                        vscode.window.showInformationMessage(
+                            `AWS 연결 완료 (account ${acct}, region ${region.trim()})`,
+                        );
+                        sidebarProvider.triggerDiagnostics();
+                    } else {
+                        vscode.window.showErrorMessage(
+                            `AWS 자격증명 검증 실패: ${result.message ?? 'STS 호출 실패'}`,
+                        );
+                    }
+                },
+            );
+        })
+    );
+
+    // ── Command: AWS Credentials Clear ──────────────────────────────────────
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.awsClear', async () => {
+            await ensureCoreRunning(coreManager, sidebarProvider);
+            const confirm = await vscode.window.showWarningMessage(
+                '저장된 AWS 자격증명을 모두 삭제하시겠습니까?',
+                { modal: true },
+                '삭제',
+            );
+            if (confirm !== '삭제') { return; }
+            await apiClient.clearAws();
+            vscode.window.showInformationMessage('AWS 자격증명 삭제 완료');
+            sidebarProvider.triggerDiagnostics();
+        })
+    );
+
+    // ── Command: Setup Wizard (모든 외부 연결을 한 번에) ────────────────────
+    // 진단 결과를 보고, 비어있는 항목만 차례로 설정 다이얼로그를 띄운다.
+    // 명령 팔레트의 "ReCoder: Setup Wizard" 진입점.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.setupWizard', async () => {
+            await ensureCoreRunning(coreManager, sidebarProvider);
+
+            // 1) 현재 상태 가져오기
+            const [gh, aws] = await Promise.all([
+                apiClient.getGithubStatus(true).catch(() => ({ status: 'error' as const })),
+                apiClient.getAwsStatus().catch(() => ({ ready: false } as { ready: boolean })),
+            ]);
+
+            const needsGithub = gh.status !== 'authenticated';
+            const needsAws = !aws.ready;
+
+            if (!needsGithub && !needsAws) {
+                vscode.window.showInformationMessage('이미 GitHub & AWS 모두 연결되어 있습니다.');
+                return;
+            }
+
+            const targets: string[] = [];
+            if (needsGithub) { targets.push('GitHub'); }
+            if (needsAws) { targets.push('AWS'); }
+            const start = await vscode.window.showInformationMessage(
+                `다음 항목을 설정합니다: ${targets.join(', ')}`,
+                { modal: true },
+                '시작',
+            );
+            if (start !== '시작') { return; }
+
+            if (needsGithub) {
+                await vscode.commands.executeCommand('recoder.githubLogin');
+            }
+            if (needsAws) {
+                await vscode.commands.executeCommand('recoder.awsConfigure');
+            }
+
+            vscode.window.showInformationMessage('초기 설정 완료. 사이드바의 ready chip 을 확인하세요.');
         })
     );
 

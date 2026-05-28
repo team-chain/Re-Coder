@@ -322,6 +322,45 @@ export interface CostSummary {
 }
 
 // ---------------------------------------------------------------------------
+// AWS Status (§S-2 — /api/aws/* 라우트 1:1 매핑)
+// ---------------------------------------------------------------------------
+
+export interface AwsIdentity {
+  account: string;
+  arn: string;
+  user_id: string;
+}
+
+export interface AwsStatus {
+  ready: boolean;
+  identity?: AwsIdentity | null;
+  region: string;
+  profile: string;
+  access_key_last4: string;
+  /** "recoder" | "aws_credentials_file" | "env" | "" */
+  storage: string;
+  message: string;
+}
+
+export interface AwsConfigureInput {
+  accessKeyId: string;
+  secretAccessKey: string;
+  region?: string;
+  profile?: string;
+  /** "recoder" (default) | "aws_credentials_file" */
+  storage?: 'recoder' | 'aws_credentials_file';
+  sessionToken?: string;
+}
+
+export interface AwsEcrRepo {
+  name: string;
+  uri: string;
+  arn: string;
+  created_at: string;
+  image_tag_mutability: string;
+}
+
+// ---------------------------------------------------------------------------
 // API Response Wrapper
 // ---------------------------------------------------------------------------
 

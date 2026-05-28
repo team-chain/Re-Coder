@@ -87,12 +87,13 @@ export class WorkbenchPanel {
             await this._handleMessage(msg);
         });
 
-        // 1초 후 자동으로 헬스/비용 1회 요청
-        setTimeout(() => this._pushHealthAndCost().catch(() => {}), 800);
+        // 즉시 health/cost/diagnostics 푸시 (캐시된 값 사용 → chip 색상 즉시 표시)
+        // 이전 800ms setTimeout → 사용자가 panel 열고 1초 동안 빈 chip 봤음. 제거.
+        void this._pushHealthAndCost();
         this._startPolling();
 
-        // Workbench 양방향 sync 폴링 — Discord 에서 한 액션을 3초 안에 VSCode 에 반영.
-        setTimeout(() => this._pushWorkbenchState().catch(() => {}), 1200);
+        // Workbench 양방향 sync — 즉시 시작
+        void this._pushWorkbenchState();
         this._startWorkbenchPolling();
     }
 
@@ -136,6 +137,14 @@ export class WorkbenchPanel {
                 await vscode.commands.executeCommand('recoder.generateDockerfile');
                 this.addActivity('info', 'Dockerfile 생성 요청');
                 break;
+            case 'wb.generateGithubActions':
+                try {
+                    await vscode.commands.executeCommand('recoder.generateGithubActions');
+                    this.addActivity('info', 'GitHub Actions 워크플로우 생성 요청');
+                } catch (err) {
+                    this.addActivity('fail', `GitHub Actions 생성 실패: ${err}`);
+                }
+                break;
             case 'wb.runDiagnostics':
                 await vscode.commands.executeCommand('recoder.runDiagnostics');
                 this.addActivity('info', '진단 재실행');
@@ -159,21 +168,573 @@ export class WorkbenchPanel {
                 }
                 break;
             }
+
+            // ── GitHub Hub ──────────────────────────────────────────────
+            case 'wb.gh.login':
+                try {
+                    await vscode.commands.executeCommand('recoder.githubLogin');
+                    this.addActivity('info', 'GitHub 로그인 시도');
+                    // 로그인 후 상태 갱신을 webview 에 보냄
+                    void this._pushGithubStatus();
+                } catch (err) {
+                    this.addActivity('fail', `GitHub 로그인 실패: ${err}`);
+                }
+                break;
+            case 'wb.gh.logout':
+                try {
+                    await vscode.commands.executeCommand('recoder.githubLogout');
+                    this.addActivity('info', 'GitHub 로그아웃');
+                    void this._pushGithubStatus();
+                } catch (err) {
+                    this.addActivity('fail', `GitHub 로그아웃 실패: ${err}`);
+                }
+                break;
+            case 'wb.gh.status':
+                await this._pushGithubStatus();
+                break;
+            case 'wb.gh.listRepos':
+                try {
+                    const result = await this._apiClient.listGithubRepos();
+                    this._panel.webview.postMessage({
+                        type: 'wb.gh.reposResult',
+                        payload: { repos: result.repos ?? [] },
+                    });
+                    this.addActivity('info', `GitHub 레포 ${(result.repos ?? []).length}개 로드`);
+                } catch (err) {
+                    this.pushLog('github', `[ERR] 레포 목록 조회 실패: ${err}`);
+                    this.addActivity('fail', `GitHub 레포 조회 실패: ${err}`);
+                }
+                break;
+            case 'wb.gh.createRepo': {
+                const p = msg.payload ?? {};
+                const wsPath = (p.workspace_path as string) || this._getWorkspacePath();
+                if (!wsPath) {
+                    this._panel.webview.postMessage({ type: 'wb.gh.createRepoResult', payload: { ok: false, error: '워크스페이스가 열려 있지 않음' } });
+                    break;
+                }
+                if (!p.name) {
+                    this._panel.webview.postMessage({ type: 'wb.gh.createRepoResult', payload: { ok: false, error: '레포 이름이 비어 있음' } });
+                    break;
+                }
+                try {
+                    const result = await this._apiClient.githubCreateRepo({
+                        workspace_path: wsPath,
+                        name: String(p.name),
+                        private: !!p.private,
+                        description: (p.description as string) || '',
+                    });
+                    const url = result.html_url ?? '';
+                    this._panel.webview.postMessage({
+                        type: 'wb.gh.createRepoResult',
+                        payload: { ok: true, url, message: `레포 생성 완료: ${url || result.status}` },
+                    });
+                    this.addActivity('ok', `레포 생성 완료: ${p.name}`);
+                } catch (err) {
+                    this._panel.webview.postMessage({ type: 'wb.gh.createRepoResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `레포 생성 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.gh.setSecret': {
+                const p = msg.payload ?? {};
+                if (!p.repo || !p.name || p.value === undefined) {
+                    this._panel.webview.postMessage({ type: 'wb.gh.secretResult', payload: { ok: false, error: 'repo / name / value 모두 필요' } });
+                    break;
+                }
+                try {
+                    const r = await this._apiClient.githubSetSecret({
+                        repo: String(p.repo),
+                        name: String(p.name),
+                        value: String(p.value),
+                    });
+                    this._panel.webview.postMessage({
+                        type: 'wb.gh.secretResult',
+                        payload: { ok: true, name: p.name, message: r.message ?? `Secret 등록: ${p.repo}/${p.name}` },
+                    });
+                    this.addActivity('ok', `Secret 등록: ${p.repo}/${p.name}`);
+                } catch (err) {
+                    this._panel.webview.postMessage({ type: 'wb.gh.secretResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `Secret 등록 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.gh.push': {
+                const p = msg.payload ?? {};
+                const wsPath = (p.workspace_path as string) || this._getWorkspacePath();
+                if (!wsPath) {
+                    this._panel.webview.postMessage({ type: 'wb.gh.pushResult', payload: { ok: false, error: '워크스페이스가 열려 있지 않음' } });
+                    break;
+                }
+                try {
+                    const r = await this._apiClient.gitPush({
+                        workspace_path: wsPath,
+                        branch: (p.branch as string) || '',
+                        force: !!p.force,
+                    });
+                    this._panel.webview.postMessage({
+                        type: 'wb.gh.pushResult',
+                        payload: { ok: true, branch: r.branch, message: r.message ?? `push 완료 (branch=${r.branch ?? '?'})` },
+                    });
+                    this.addActivity('ok', `git push 완료`);
+                } catch (err) {
+                    this._panel.webview.postMessage({ type: 'wb.gh.pushResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `git push 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.gh.listRuns': {
+                const repo = String(msg.payload?.repo ?? '');
+                if (!repo) {
+                    this.pushLog('github', '[ERR] repo 인자 누락');
+                    break;
+                }
+                try {
+                    const r = await this._apiClient.githubListRuns(repo);
+                    this._panel.webview.postMessage({
+                        type: 'wb.gh.runsResult',
+                        payload: { repo, runs: r.workflow_runs ?? [] },
+                    });
+                    this.pushLog('github', `[OK] ${repo}: ${(r.workflow_runs ?? []).length}개 실행`);
+                } catch (err) {
+                    this.pushLog('github', `[ERR] runs 조회 실패: ${err}`);
+                }
+                break;
+            }
+
+            // ── Deploy Center 사전 점검 (자동 발사) ────────────────────
+            case 'wb.deploy.precheck': {
+                const items = await this._collectDeployPrechecks();
+                this._panel.webview.postMessage({
+                    type: 'wb.deploy.precheckResult',
+                    payload: { items },
+                });
+                break;
+            }
+            // 일반 VS Code command 트리거 (precheck "해결" 버튼용)
+            case 'wb.cmd': {
+                const cmd = String(msg.payload?.cmd ?? '');
+                if (cmd && cmd.startsWith('recoder.')) {
+                    try { await vscode.commands.executeCommand(cmd); } catch (err) {
+                        this.addActivity('fail', `${cmd} 실패: ${err}`);
+                    }
+                }
+                break;
+            }
+
+            // ── Deploy Center ───────────────────────────────────────────
+            case 'wb.deploy.localDocker':
+                // 호환용 (구버전 button id) — 새 wizard 로 위임
+                this._panel.webview.postMessage({
+                    type: 'wb.local.generateResult',
+                    payload: { ok: false, error: '새 wizard 의 1. Dockerfile 생성 버튼을 사용하세요' },
+                });
+                break;
+
+            // ── Local Docker 6단계 wizard (워크벤치 직접 실행) ─────────
+            case 'wb.local.generate': {
+                const ws = this._getWorkspacePath();
+                if (!ws) {
+                    this._panel.webview.postMessage({ type: 'wb.local.generateResult', payload: { ok: false, error: '워크스페이스 없음' } });
+                    break;
+                }
+                try {
+                    const proposal = await this._apiClient.generateDockerfile(ws);
+                    const content = (proposal as unknown as { content?: string }).content ?? '';
+                    const proposalId = (proposal as unknown as { proposal_id?: string }).proposal_id ?? '';
+                    this._panel.webview.postMessage({
+                        type: 'wb.local.generateResult',
+                        payload: { ok: true, proposal_id: proposalId, content },
+                    });
+                    this.addActivity('ok', 'Dockerfile 생성 완료');
+                } catch (err) {
+                    this._panel.webview.postMessage({ type: 'wb.local.generateResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `Dockerfile 생성 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.local.approve': {
+                const proposalId = String(msg.payload?.proposal_id ?? '');
+                if (!proposalId) {
+                    this._panel.webview.postMessage({ type: 'wb.local.approveResult', payload: { ok: false, error: 'proposal_id 누락' } });
+                    break;
+                }
+                try {
+                    await this._apiClient.approveDockerfile(proposalId, true);
+                    this._panel.webview.postMessage({
+                        type: 'wb.local.approveResult',
+                        payload: { ok: true, path: 'Dockerfile' },
+                    });
+                    this.addActivity('ok', 'Dockerfile 승인 + 저장');
+                } catch (err) {
+                    this._panel.webview.postMessage({ type: 'wb.local.approveResult', payload: { ok: false, error: String(err) } });
+                }
+                break;
+            }
+            case 'wb.local.scan': {
+                const ws = this._getWorkspacePath();
+                if (!ws) {
+                    this._panel.webview.postMessage({ type: 'wb.local.scanResult', payload: { ok: false, error: '워크스페이스 없음' } });
+                    break;
+                }
+                try {
+                    const r = await this._apiClient.runScan('trivy', ws);
+                    this._panel.webview.postMessage({
+                        type: 'wb.local.scanResult',
+                        payload: { ok: true, result: r },
+                    });
+                    this.addActivity('ok', 'Trivy 스캔 완료');
+                } catch (err) {
+                    this._panel.webview.postMessage({ type: 'wb.local.scanResult', payload: { ok: false, error: String(err) } });
+                }
+                break;
+            }
+            case 'wb.local.deploy': {
+                const ws = this._getWorkspacePath();
+                if (!ws) {
+                    this._panel.webview.postMessage({ type: 'wb.local.deployProgress', payload: { stage: 'failed', error: '워크스페이스 없음', finished: true, line: '워크스페이스가 열려있지 않습니다.' } });
+                    break;
+                }
+                const p = msg.payload ?? {};
+                try {
+                    this._panel.webview.postMessage({ type: 'wb.local.deployProgress', payload: { stage: 'build', line: '[…] 배포 플랜 생성 중' } });
+                    // DeployMethod LOCAL_DOCKER 는 enum 문자열로 보냄
+                    const plan = await this._apiClient.createDeploymentPlan(
+                        ws,
+                        'local_docker' as unknown as import('../types').DeployMethod,
+                        undefined,
+                        String(p.image || 'recoder-app'),
+                        String(p.image || 'recoder-app'),
+                        Number(p.host_port || 8000),
+                        Number(p.container_port || 8000),
+                    );
+                    const planId = (plan as unknown as { plan_id?: string }).plan_id || '';
+                    this._panel.webview.postMessage({ type: 'wb.local.deployProgress', payload: { stage: 'build', line: '[OK] 플랜 생성됨 — 실행 시작' } });
+                    const result = await this._apiClient.executeDeployment(planId, true);
+                    if (result.status === 'ok' || result.deployment_id) {
+                        this._panel.webview.postMessage({
+                            type: 'wb.local.deployProgress',
+                            payload: { stage: 'health', finished: true, line: `[OK] 배포 완료 (id=${result.deployment_id ?? '?'})` },
+                        });
+                        this.addActivity('ok', 'Local Docker 배포 완료');
+                    } else {
+                        this._panel.webview.postMessage({
+                            type: 'wb.local.deployProgress',
+                            payload: { stage: 'build', error: 'execute 실패', finished: true, line: `[FAIL] ${result.status}` },
+                        });
+                    }
+                } catch (err) {
+                    this._panel.webview.postMessage({
+                        type: 'wb.local.deployProgress',
+                        payload: { stage: 'build', error: String(err), finished: true, line: `[ERR] ${err}` },
+                    });
+                    this.addActivity('fail', `Local Docker 배포 실패: ${err}`);
+                }
+                break;
+            }
+
+            // ── GitHub Actions wizard (워크벤치 직접) ─────────────────
+            case 'wb.actions.generate': {
+                const ws = this._getWorkspacePath();
+                if (!ws) {
+                    this._panel.webview.postMessage({ type: 'wb.actions.generateResult', payload: { ok: false, error: '워크스페이스 없음' } });
+                    break;
+                }
+                try {
+                    const proposal = await this._apiClient.generateGithubActions(ws);
+                    const content = (proposal as unknown as { content?: string }).content ?? '';
+                    const proposalId = (proposal as unknown as { proposal_id?: string }).proposal_id ?? '';
+                    this._panel.webview.postMessage({
+                        type: 'wb.actions.generateResult',
+                        payload: { ok: true, proposal_id: proposalId, content },
+                    });
+                    this.addActivity('ok', 'GitHub Actions 워크플로 생성');
+                } catch (err) {
+                    this._panel.webview.postMessage({ type: 'wb.actions.generateResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `워크플로 생성 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.actions.approve': {
+                const proposalId = String(msg.payload?.proposal_id ?? '');
+                if (!proposalId) {
+                    this._panel.webview.postMessage({ type: 'wb.actions.approveResult', payload: { ok: false, error: 'proposal_id 누락' } });
+                    break;
+                }
+                try {
+                    await this._apiClient.approveGithubActions(proposalId, true);
+                    this._panel.webview.postMessage({
+                        type: 'wb.actions.approveResult',
+                        payload: { ok: true, path: '.github/workflows/ci-cd.yml' },
+                    });
+                    this.addActivity('ok', '워크플로 저장');
+                } catch (err) {
+                    this._panel.webview.postMessage({ type: 'wb.actions.approveResult', payload: { ok: false, error: String(err) } });
+                }
+                break;
+            }
+            case 'wb.deploy.ec2': {
+                const p = msg.payload ?? {};
+                const wsPath = (p.workspace_path as string) || this._getWorkspacePath();
+                this.pushLog('deploy', `[…] EC2 배포 시작 (host=${p.ec2_host || 'env'})`);
+                try {
+                    const ready = await this._apiClient.ec2DeployReady();
+                    if (!ready.ready) {
+                        this.pushLog('deploy', `[BLOCKED] ${ready.issues.join('; ')}`);
+                        this.addActivity('fail', 'EC2 사전 점검 실패');
+                        break;
+                    }
+                    const r = await this._apiClient.deployEc2({
+                        workspace_path: wsPath,
+                        image_name: (p.image_name as string) || 'recoder-app',
+                        repo_name: (p.repo_name as string) || 'recoder-app',
+                        tag: (p.tag as string) || 'latest',
+                        container_name: (p.container_name as string) || 'recoder-app',
+                        host_port: Number(p.host_port ?? 8000),
+                        container_port: Number(p.container_port ?? 8000),
+                        health_check_path: (p.health_check_path as string) || '/health',
+                        ecr_registry: (p.ecr_registry as string) || '',
+                        ec2_host: (p.ec2_host as string) || '',
+                        ec2_ssh_key: (p.ec2_ssh_key as string) || '',
+                        aws_region: (p.aws_region as string) || '',
+                        ec2_user: (p.ec2_user as string) || 'ec2-user',
+                    });
+                    this.pushLog('deploy', `[OK] ${r.message}`);
+                    this.addActivity('info', 'EC2 배포 시작 (백그라운드)');
+                    this._startEc2StatusPolling();
+                } catch (err) {
+                    this.pushLog('deploy', `[ERR] ${err}`);
+                    this.addActivity('fail', `EC2 배포 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.deploy.ecs': {
+                const p = msg.payload ?? {};
+                const wsPath = (p.workspace_path as string) || this._getWorkspacePath();
+                this.pushLog('deploy', `[…] ECS Fargate 배포 시작`);
+                try {
+                    const ready = await this._apiClient.ecsDeployReady();
+                    if (!ready.ready) {
+                        this.pushLog('deploy', `[BLOCKED] ${ready.issues.join('; ')}`);
+                        this.addActivity('fail', 'ECS 사전 점검 실패');
+                        break;
+                    }
+                    const r = await this._apiClient.deployEcs({
+                        workspace_path: wsPath,
+                        image_name: (p.image_name as string) || 'recoder-app',
+                        repo_name: (p.repo_name as string) || 'recoder-app',
+                        tag: (p.tag as string) || 'latest',
+                        ecr_registry: (p.ecr_registry as string) || '',
+                        ecs_cluster: (p.ecs_cluster as string) || '',
+                        ecs_service: (p.ecs_service as string) || '',
+                        aws_region: (p.aws_region as string) || '',
+                        container_port: Number(p.container_port ?? 8000),
+                        cpu: (p.cpu as string) || '256',
+                        memory: (p.memory as string) || '512',
+                        task_family: (p.task_family as string) || 'recoder-task',
+                        environment: (p.environment as string) || 'staging',
+                        branch: (p.branch as string) || '',
+                        skip_sbom: !!p.skip_sbom,
+                        skip_opa: !!p.skip_opa,
+                    });
+                    this.pushLog('deploy', `[OK] ${r.message}`);
+                    this.addActivity('info', 'ECS 배포 시작 (백그라운드)');
+                    this._startEcsStatusPolling();
+                } catch (err) {
+                    this.pushLog('deploy', `[ERR] ${err}`);
+                    this.addActivity('fail', `ECS 배포 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.deploy.ec2.status':
+                try {
+                    const s = await this._apiClient.getEc2DeployStatus();
+                    this._panel.webview.postMessage({ type: 'wb.deploy.ec2.statusResult', payload: s });
+                } catch { /* ignore */ }
+                break;
+            case 'wb.deploy.ecs.status':
+                try {
+                    const s = await this._apiClient.getEcsDeployStatus();
+                    this._panel.webview.postMessage({ type: 'wb.deploy.ecs.statusResult', payload: s });
+                } catch { /* ignore */ }
+                break;
             default:
                 console.warn('[WorkbenchPanel] Unknown message:', msg.type);
         }
     }
 
+    // ───────── Workbench 풀 구현 헬퍼 ─────────
+
+    /** 현재 열린 첫 워크스페이스 경로. 없으면 빈 문자열. */
+    private _getWorkspacePath(): string {
+        const folders = vscode.workspace.workspaceFolders;
+        if (!folders || folders.length === 0) return '';
+        return folders[0].uri.fsPath;
+    }
+
+    /**
+     * Deploy Center 사전점검 — Core 의 진단/aws/ec2-ready/ecs-ready 결과를 종합해
+     * webview 가 표시할 항목 리스트로 반환.
+     *
+     * 각 항목: { status: 'ok'|'fail'|'warn', name, msg, action?, action_label? }
+     */
+    private async _collectDeployPrechecks(): Promise<Array<{
+        status: 'ok' | 'fail' | 'warn';
+        name: string;
+        msg?: string;
+        action?: string;
+        action_label?: string;
+    }>> {
+        const items: Array<{
+            status: 'ok' | 'fail' | 'warn';
+            name: string;
+            msg?: string;
+            action?: string;
+            action_label?: string;
+        }> = [];
+
+        // 1) 워크스페이스
+        const ws = this._getWorkspacePath();
+        items.push(ws
+            ? { status: 'ok', name: '워크스페이스 열림', msg: ws }
+            : { status: 'fail', name: '워크스페이스 없음', msg: 'VS Code 에서 프로젝트 폴더를 여세요.' }
+        );
+
+        // 2) Core diagnostics (Docker / AI)
+        try {
+            const diag = await this._apiClient.getDiagnostics();
+            if (diag) {
+                const d = diag as unknown as Record<string, string>;
+                items.push(d.docker_ready === 'ok'
+                    ? { status: 'ok', name: 'Docker daemon 동작' }
+                    : { status: 'fail', name: 'Docker daemon 미동작', msg: 'Docker Desktop 을 실행하세요.', action: 'docker_start', action_label: 'Docker Desktop 안내' }
+                );
+                items.push(d.ai_ready === 'ok'
+                    ? { status: 'ok', name: 'Bedrock AI 가용' }
+                    : { status: 'warn', name: 'Bedrock AI 미점검', msg: 'AI 분석 기능이 동작하지 않을 수 있습니다.', action: 'core_diagnostics', action_label: '진단 재실행' }
+                );
+            } else {
+                items.push({ status: 'warn', name: 'Core 진단 결과 없음', msg: '진단을 한 번 실행하세요.', action: 'core_diagnostics', action_label: '진단 실행' });
+            }
+        } catch {
+            items.push({ status: 'fail', name: 'Core 통신 실패', msg: '/api/diagnostics 응답 없음' });
+        }
+
+        // 3) AWS 자격증명
+        try {
+            const aws = await this._apiClient.getAwsStatus();
+            items.push(aws.ready
+                ? { status: 'ok', name: 'AWS 자격증명 유효', msg: aws.identity?.arn ?? '' }
+                : { status: 'fail', name: 'AWS 자격증명 미설정', msg: aws.message || 'STS 검증 실패', action: 'aws_configure', action_label: 'AWS 설정' }
+            );
+        } catch {
+            items.push({ status: 'warn', name: 'AWS 상태 확인 불가', msg: '/api/aws/status 응답 없음' });
+        }
+
+        // 4) GitHub 연결 (선택 — fail 대신 warn)
+        try {
+            const gh = await this._apiClient.getGithubStatus();
+            const connected = (gh as { status?: string; user?: string }).user
+                || (gh as { status?: string }).status === 'connected';
+            items.push(connected
+                ? { status: 'ok', name: 'GitHub 연결됨', msg: (gh as { user?: string }).user || '' }
+                : { status: 'warn', name: 'GitHub 미연결', msg: 'GitHub Actions/푸시 사용 시 필요', action: 'github_login', action_label: '로그인' }
+            );
+        } catch {
+            items.push({ status: 'warn', name: 'GitHub 상태 확인 불가' });
+        }
+
+        // 5) EC2/ECS 환경변수 (warn — 폼에 직접 입력해도 됨)
+        try {
+            const ec2 = await this._apiClient.ec2DeployReady();
+            items.push(ec2.ready
+                ? { status: 'ok', name: 'EC2 배포 환경 준비됨' }
+                : { status: 'warn', name: 'EC2 환경변수 일부 미설정', msg: ec2.issues.slice(0, 2).join(' · ') }
+            );
+        } catch { /* skip */ }
+        try {
+            const ecs = await this._apiClient.ecsDeployReady();
+            items.push(ecs.ready
+                ? { status: 'ok', name: 'ECS 배포 환경 준비됨' }
+                : { status: 'warn', name: 'ECS 환경변수 일부 미설정', msg: ecs.issues.slice(0, 2).join(' · ') }
+            );
+        } catch { /* skip */ }
+
+        return items;
+    }
+
+    /** GitHub 상태 조회 후 webview 에 push (chip-github 색상 갱신용). */
+    private async _pushGithubStatus(): Promise<void> {
+        try {
+            const r = await this._apiClient.getGithubStatus(true);
+            this._panel.webview.postMessage({
+                type: 'wb.gh.statusResult',
+                payload: r,
+            });
+        } catch { /* ignore */ }
+    }
+
+    private _ec2StatusTimer: ReturnType<typeof setInterval> | null = null;
+    private _ecsStatusTimer: ReturnType<typeof setInterval> | null = null;
+
+    private _startEc2StatusPolling(): void {
+        if (this._ec2StatusTimer) return;
+        const tick = async () => {
+            try {
+                const s = await this._apiClient.getEc2DeployStatus();
+                this._panel.webview.postMessage({ type: 'wb.deploy.ec2.statusResult', payload: s });
+                // log_tail 마지막 줄을 deploy 로그 패널에 출력
+                const tail = s.log_tail || [];
+                if (tail.length) {
+                    this.pushLog('deploy', `[EC2:${s.stage}] ${tail[tail.length - 1]}`);
+                }
+                if (!s.running) {
+                    if (this._ec2StatusTimer) { clearInterval(this._ec2StatusTimer); this._ec2StatusTimer = null; }
+                    if (s.stage === 'done') {
+                        this.pushLog('deploy', `[OK] EC2 배포 완료 (image=${s.image_uri || '?'})`);
+                        this.addActivity('ok', 'EC2 배포 완료');
+                    } else if (s.stage === 'failed') {
+                        this.pushLog('deploy', `[FAIL] EC2 배포 실패: ${s.error || ''}`);
+                        this.addActivity('fail', 'EC2 배포 실패');
+                    }
+                }
+            } catch { /* ignore */ }
+        };
+        this._ec2StatusTimer = setInterval(() => { void tick(); }, 3000);
+        void tick();
+    }
+
+    private _startEcsStatusPolling(): void {
+        if (this._ecsStatusTimer) return;
+        const tick = async () => {
+            try {
+                const s = await this._apiClient.getEcsDeployStatus();
+                this._panel.webview.postMessage({ type: 'wb.deploy.ecs.statusResult', payload: s });
+                const tail = s.log_tail || [];
+                if (tail.length) {
+                    this.pushLog('deploy', `[ECS:${s.stage}] ${tail[tail.length - 1]}`);
+                }
+                if (!s.running) {
+                    if (this._ecsStatusTimer) { clearInterval(this._ecsStatusTimer); this._ecsStatusTimer = null; }
+                    if (s.stage === 'done') {
+                        this.pushLog('deploy', `[OK] ECS 배포 완료 (image=${s.image_uri || '?'}, task=${s.task_def_arn || '?'})`);
+                        this.addActivity('ok', 'ECS 배포 완료');
+                    } else if (s.stage === 'failed') {
+                        this.pushLog('deploy', `[FAIL] ECS 배포 실패: ${s.error || ''}`);
+                        this.addActivity('fail', 'ECS 배포 실패');
+                    }
+                }
+            } catch { /* ignore */ }
+        };
+        this._ecsStatusTimer = setInterval(() => { void tick(); }, 3000);
+        void tick();
+    }
+
     private async _pushHealthAndCost(): Promise<void> {
-        // 토큰이 빈 상태로 API 호출되어 401 누적되는 것을 막기 위해, 호출 직전
-        // runtime.json 에서 토큰을 한 번 더 확인한다. (ApiClient 안에도 같은 가드가
-        // 있지만, Core 가 막 부팅된 직후엔 in-memory 토큰이 비어있을 수 있어 이중 안전망.)
         try {
             if (!this._coreManager.getSessionToken()) {
                 await this._coreManager.refreshToken();
             }
         } catch { /* ignore */ }
-
         try {
             const last = this._polling.getLastHealth();
             if (last) {
@@ -186,10 +747,6 @@ export class WorkbenchPanel {
             const cost = await this._apiClient.getCostSummary();
             this._panel.webview.postMessage({ type: 'wb.costUpdate', payload: cost });
         } catch { /* ignore */ }
-
-        // Diagnostics — chip-ai / chip-docker 색상은 DiagnosticsResult 의 ReadyState 에서 결정.
-        // (1) 첫 호출엔 캐시 확인 → 없으면 runDiagnostics 1회 실행 → 캐싱.
-        // (2) 이후 polling tick 에선 GET 만 호출 (저렴). runDiagnostics 는 중복 실행 방지 플래그로 차단.
         try {
             let diag = await this._apiClient.getDiagnostics();
             if (!diag && !this._diagnosticsInflight && !this._diagnosticsLoaded) {
@@ -214,21 +771,6 @@ export class WorkbenchPanel {
         }, 5000);
     }
 
-    // ─────────── Workbench bidirectional sync (Discord ↔ Core ↔ VSCode) ──
-    //
-    // 흐름:
-    //   1) 패널 오픈 시 /workbench/state 1회 호출 → 현재 모드 + 최근 배포 webview 로 push.
-    //   2) 3초 간격으로 /workbench/events?since=<cursor> 폴링.
-    //   3) 새 이벤트마다 webview 에 'wb.workbenchEvent' postMessage → JS 가 배너 갱신 + 활동 추가.
-    //   4) 이벤트 source='discord' 인 경우 활동 점이 파란색(info), 'vscode' 면 회색.
-    //
-    // 양방향성 (비대칭 design):
-    //   - Discord → VSCode  : 본 polling 회로로 3초 안에 반영 (auto).
-    //   - VSCode  → Core    : webview 액션이 workbenchChangeMode('vscode') 호출 → 즉시.
-    //   - Core    → Discord : Discord embed 는 push 가 안되므로, 사용자가 다음
-    //                        /recoder workbench 또는 embed 의 Refresh 버튼을
-    //                        클릭할 때 fresh state 가 표시됨 (pull-on-demand).
-    //
     private _startWorkbenchPolling(): void {
         if (this._workbenchPollTimer) return;
         this._workbenchPollTimer = setInterval(() => {
@@ -236,7 +778,6 @@ export class WorkbenchPanel {
         }, 3000);
     }
 
-    /** /workbench/state 1회 호출 → 현재 모드 + 최근 배포 목록 push. */
     private async _pushWorkbenchState(): Promise<void> {
         try {
             const state = await this._apiClient.workbenchState();
@@ -247,18 +788,12 @@ export class WorkbenchPanel {
                     payload: state,
                 });
             }
-        } catch {
-            // Core 가 /workbench/* 를 지원하지 않거나 토큰 미설정 — 조용히 무시
-        }
+        } catch { /* ignore */ }
     }
 
-    /** /workbench/events 폴링 — Discord 또는 VSCode 가 일으킨 액션 반영.
-     *  Core 의 _LAST_EVENTS 는 index 기반 cursor — `since` 는 timestamp 가 아님. */
     private async _pollWorkbenchEvents(): Promise<void> {
         try {
             const result = await this._apiClient.workbenchEvents(this._workbenchEventsCursor);
-            // ApiClient 는 payload 를 `object` 로 정의하지만, 내부에서 안전하게
-            // dict-like 으로 다루기 위해 한번 unknown 을 거쳐 Record 로 narrow.
             const rawEvents = (result && Array.isArray(result.events)) ? result.events : [];
             const events = rawEvents as unknown as Array<{
                 at: string;
@@ -266,26 +801,18 @@ export class WorkbenchPanel {
                 source: string;
                 payload?: Record<string, unknown>;
             }>;
-
-            // cursor 갱신: 응답의 next_offset 사용 (없으면 현재 + 받은 개수)
             const nextOffset = result?.next_offset;
             if (typeof nextOffset === 'number') {
                 this._workbenchEventsCursor = nextOffset;
             } else {
                 this._workbenchEventsCursor += events.length;
             }
-
             for (const ev of events) {
                 this._renderWorkbenchEvent(ev);
             }
-        } catch {
-            // 무시 (Core 미가동/토큰 없음 등)
-        }
+        } catch { /* ignore */ }
     }
 
-    /** 단일 workbench event → 활동 패널 + 배너 갱신.
-     *  kind 는 Core route 의 _record_event 가 쏘는 값:
-     *    'mode_change' / 'preflight' / 'deploy' / 'rollback' */
     private _renderWorkbenchEvent(ev: {
         at: string;
         kind: string;
@@ -295,7 +822,6 @@ export class WorkbenchPanel {
         const sourceLabel = ev.source === 'discord' ? 'Discord' : ev.source === 'vscode' ? 'VSCode' : ev.source;
         let dot: 'ok' | 'warn' | 'fail' | 'info' = 'info';
         let text = '';
-
         switch (ev.kind) {
             case 'mode_change': {
                 const mode = (ev.payload?.mode as string) || 'unknown';
@@ -327,11 +853,7 @@ export class WorkbenchPanel {
                 text = `${sourceLabel} → ${ev.kind}`;
                 dot = 'info';
         }
-
-        // 활동 패널에 push (기존 addActivity 재사용)
         this.addActivity(dot, text);
-
-        // 배너 갱신용 별도 메시지 — webview 가 상단 배너에 표시 가능
         this._panel.webview.postMessage({
             type: 'wb.workbenchEvent',
             payload: {
@@ -359,431 +881,5 @@ export class WorkbenchPanel {
 
     private _renderHtml(webview: vscode.Webview): string {
         return renderWorkbenchHtml(webview, 'panel');
-    }
-
-    // Legacy inline HTML below is kept temporarily but no longer called.
-    // Will be removed in a follow-up cleanup commit.
-    private _renderHtmlLegacy(webview: vscode.Webview): string {
-        const nonce = Array.from({ length: 24 }, () =>
-            'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 62)],
-        ).join('');
-        const cspConnect = Array.from({ length: 17 }, (_, i) => `http://127.0.0.1:${17894 + i}`).join(' ');
-
-        return `<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy"
-  content="default-src 'none';
-           style-src 'unsafe-inline';
-           script-src 'nonce-${nonce}';
-           img-src ${webview.cspSource} https: data:;
-           connect-src ${cspConnect};">
-<title>ReCoder Workbench</title>
-<style>
-:root{
-  --bg0:#0d1117; --bg1:#161b22; --bg2:#21262d; --bg3:#30363d;
-  --bd:#30363d; --bd2:#484f58;
-  --t1:#e6edf3; --t2:#8b949e; --t3:#6e7681;
-  --blue:#58a6ff; --blue-bg:rgba(88,166,255,.08);
-  --green:#3fb950; --green-bg:rgba(63,185,80,.10);
-  --red:#f85149; --red-bg:rgba(248,81,73,.10);
-  --yellow:#d29922; --yellow-bg:rgba(210,153,34,.10);
-  --r-sm:4px; --r-md:6px; --r-lg:10px;
-}
-*{box-sizing:border-box; margin:0; padding:0}
-body{
-  background:var(--bg0); color:var(--t1);
-  font-family:'Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-  font-size:13px; padding:14px 18px 18px;
-}
-.tabs{display:flex; gap:6px; padding:8px 0 14px; border-bottom:1px solid var(--bd); margin-bottom:18px}
-.tab{
-  display:flex; align-items:center; gap:6px;
-  padding:6px 14px; border-radius:var(--r-md);
-  cursor:pointer; color:var(--t2); font-weight:600; font-size:12px;
-  border:1px solid transparent;
-}
-.tab:hover{color:var(--t1); background:var(--bg1)}
-.tab.active{color:var(--blue); border-color:var(--blue); background:var(--blue-bg)}
-.tab .ic{width:14px;height:14px;flex-shrink:0}
-.icon-svg{width:14px;height:14px;flex-shrink:0;stroke-width:1.7;fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round}
-.right-chips{margin-left:auto; display:flex; align-items:center; gap:6px}
-.chip{
-  display:inline-flex; align-items:center; gap:5px;
-  padding:3px 9px; border-radius:999px; border:1px solid var(--bd);
-  font-size:11px; font-weight:600; color:var(--t3); background:var(--bg1);
-}
-.chip .dot{width:6px; height:6px; border-radius:50%; background:var(--t3)}
-.chip.ok{color:var(--green); border-color:rgba(63,185,80,.35)} .chip.ok .dot{background:var(--green)}
-.chip.warn{color:var(--yellow); border-color:rgba(210,153,34,.35)} .chip.warn .dot{background:var(--yellow)}
-.chip.fail{color:var(--red); border-color:rgba(248,81,73,.35)} .chip.fail .dot{background:var(--red)}
-.cost{margin-left:8px; color:var(--t2); font-size:11px}
-.cost b{color:var(--green); font-weight:700}
-
-.page{display:none}
-.page.active{display:block}
-
-/* Command Center */
-.greet{display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:18px}
-.greet h2{font-size:20px; font-weight:700}
-.greet p{color:var(--t2); margin-top:6px; font-size:13px}
-.greet .cost-large{text-align:right}
-.greet .cost-large b{font-size:24px; color:var(--green)}
-.greet .cost-large span{color:var(--t3); font-size:11px}
-
-.cards{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:18px}
-.card{
-  background:var(--bg1); border:1px solid var(--bd); border-radius:var(--r-lg);
-  padding:18px 18px 16px; position:relative; cursor:pointer; transition:border-color .15s;
-}
-.card:hover{border-color:var(--bd2)}
-.card .icon{width:38px; height:38px; border-radius:50%; display:flex; align-items:center; justify-content:center; margin-bottom:12px}
-.card .icon svg{width:18px;height:18px;stroke:currentColor;stroke-width:1.8;fill:none;stroke-linecap:round;stroke-linejoin:round}
-/* GitHub silhouette path is meant to be filled, not stroked */
-.card .icon.blue svg{stroke:none; fill:currentColor}
-.card .icon.red{background:var(--red-bg); color:var(--red)}
-.card .icon.blue{background:var(--blue-bg); color:var(--blue)}
-.card .icon.green{background:var(--green-bg); color:var(--green)}
-.card h3{font-size:14px; font-weight:700; margin-bottom:6px}
-.card p{font-size:12px; color:var(--t2); margin-bottom:4px; line-height:1.5}
-.card .meta{font-size:11px; color:var(--t3); margin-bottom:12px}
-.card .badge{position:absolute; top:14px; right:14px; padding:2px 7px; border-radius:999px; background:var(--red); color:white; font-size:10px; font-weight:700}
-.card .cta{font-size:11px; font-weight:600; padding:5px 10px; border-radius:var(--r-sm); border:none; cursor:pointer}
-.card .cta.red{background:var(--red); color:white}
-.card .cta.blue{background:var(--blue); color:white}
-.card .cta.green{background:var(--green); color:white}
-
-.row{display:grid; grid-template-columns:1.4fr 1fr; gap:14px; margin-bottom:18px}
-.panel{background:var(--bg1); border:1px solid var(--bd); border-radius:var(--r-lg); padding:14px 16px}
-.panel h4{font-size:13px; font-weight:700; margin-bottom:10px; display:flex; align-items:center; gap:7px}
-.panel h4 .icon-svg{width:15px;height:15px}
-.act-list{display:flex; flex-direction:column; gap:8px; max-height:300px; overflow-y:auto}
-.act-item{display:flex; align-items:center; gap:8px; font-size:12px; color:var(--t1)}
-.act-dot{width:6px; height:6px; border-radius:50%; background:var(--t3); flex-shrink:0}
-.act-dot.ok{background:var(--green)} .act-dot.warn{background:var(--yellow)}
-.act-dot.fail{background:var(--red)} .act-dot.info{background:var(--blue)}
-.act-time{margin-left:auto; color:var(--t3); font-size:11px}
-.quick-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px}
-.quick-btn{
-  display:flex; align-items:center; gap:6px;
-  padding:9px 12px; background:var(--bg2); border:1px solid var(--bd);
-  border-radius:var(--r-md); color:var(--t1); font-size:12px;
-  cursor:pointer; font-weight:500;
-}
-.quick-btn:hover{background:var(--bg3); border-color:var(--bd2)}
-.quick-btn .ic{color:var(--blue); width:14px;height:14px;flex-shrink:0;stroke-width:1.8;fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round}
-.quick-toggle{display:flex; align-items:center; gap:6px; font-size:11px; color:var(--t2); margin-top:10px}
-
-/* Log panel (bottom) */
-.log-panel{
-  background:var(--bg1); border:1px solid var(--bd); border-radius:var(--r-lg);
-  margin-top:18px;
-}
-.log-tabs{display:flex; align-items:center; padding:10px 14px; border-bottom:1px solid var(--bd); gap:14px}
-.log-tab{
-  font-size:12px; color:var(--t2); cursor:pointer; padding:4px 0;
-  border-bottom:2px solid transparent; font-weight:600;
-}
-.log-tab.active{color:var(--blue); border-bottom-color:var(--blue)}
-.log-clear{margin-left:auto; font-size:11px; color:var(--t3); cursor:pointer; border:none; background:none}
-.log-clear:hover{color:var(--t1)}
-.log-body{padding:10px 14px; max-height:200px; overflow-y:auto; font-family:'Consolas','SF Mono',monospace; font-size:11px; line-height:1.6}
-.log-pane{display:none}
-.log-pane.active{display:block}
-.log-line{color:var(--t1)}
-.log-line.cmd{color:var(--blue)}
-.log-line.ok{color:var(--green)}
-.log-line.err{color:var(--red)}
-</style>
-</head>
-<body>
-
-<!-- ── 인라인 SVG 아이콘 심볼 (한 번 정의 → 어디서나 <use> 로 참조) ── -->
-<svg width="0" height="0" style="position:absolute" aria-hidden="true">
-  <defs>
-    <!-- Command Center: lightning -->
-    <symbol id="i-cmd" viewBox="0 0 24 24"><polygon points="13,2 4,14 11,14 9,22 20,10 13,10" /></symbol>
-    <!-- Error Center: alert triangle -->
-    <symbol id="i-err" viewBox="0 0 24 24"><path d="M12 3 L22 20 L2 20 Z"/><line x1="12" y1="10" x2="12" y2="14"/><circle cx="12" cy="17" r="0.8" fill="currentColor" stroke="none"/></symbol>
-    <!-- GitHub: cat silhouette simplified -->
-    <symbol id="i-gh" viewBox="0 0 24 24"><path d="M12 2 a10 10 0 0 0 -3.16 19.49 c.5 .09 .68 -.22 .68 -.48 v-1.7 c-2.78 .6 -3.37 -1.34 -3.37 -1.34 -.45 -1.15 -1.11 -1.46 -1.11 -1.46 -.91 -.62 .07 -.61 .07 -.61 1 .07 1.53 1.03 1.53 1.03 .89 1.53 2.34 1.09 2.91 .83 .09 -.65 .35 -1.09 .63 -1.34 -2.22 -.25 -4.55 -1.11 -4.55 -4.94 0 -1.09 .39 -1.98 1.03 -2.68 -.1 -.25 -.45 -1.27 .1 -2.64 0 0 .84 -.27 2.75 1.02 a9.5 9.5 0 0 1 5 0 c1.91 -1.29 2.75 -1.02 2.75 -1.02 .55 1.37 .2 2.39 .1 2.64 .64 .7 1.03 1.59 1.03 2.68 0 3.84 -2.34 4.69 -4.57 4.93 .36 .31 .68 .92 .68 1.85 v2.74 c0 .27 .18 .58 .69 .48 A10 10 0 0 0 12 2 Z" /></symbol>
-    <!-- Deploy: upload cloud -->
-    <symbol id="i-up" viewBox="0 0 24 24"><path d="M4 14 a4 4 0 1 1 1.5 -7.78 a5.5 5.5 0 0 1 10.6 1.78 a4 4 0 0 1 -.6 7.95"/><polyline points="9,15 12,12 15,15"/><line x1="12" y1="12" x2="12" y2="21"/></symbol>
-    <!-- Clock (최근 활동) -->
-    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12,7 12,12 16,14"/></symbol>
-    <!-- Bolt (빠른 작업) -->
-    <symbol id="i-bolt" viewBox="0 0 24 24"><polygon points="13,2 4,14 11,14 9,22 20,10 13,10"/></symbol>
-    <!-- Search (새 에러 분석) -->
-    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.5" y2="16.5"/></symbol>
-    <!-- Package (Dockerfile) -->
-    <symbol id="i-pkg" viewBox="0 0 24 24"><path d="M21 8.5 L12 13 L3 8.5 L12 4 Z"/><polyline points="3,8.5 3,16 12,20.5 21,16 21,8.5"/><line x1="12" y1="13" x2="12" y2="20.5"/></symbol>
-    <!-- Cog (Actions) -->
-    <symbol id="i-cog" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15 a1.65 1.65 0 0 0 .33 1.82 l.06 .06 a2 2 0 1 1 -2.83 2.83 l-.06 -.06 a1.65 1.65 0 0 0 -1.82 -.33 1.65 1.65 0 0 0 -1 1.51 V21 a2 2 0 0 1 -4 0 v-.09 A1.65 1.65 0 0 0 9 19.4 a1.65 1.65 0 0 0 -1.82 .33 l-.06 .06 a2 2 0 1 1 -2.83 -2.83 l.06 -.06 A1.65 1.65 0 0 0 4.6 15 a1.65 1.65 0 0 0 -1.51 -1 H3 a2 2 0 0 1 0 -4 h.09 A1.65 1.65 0 0 0 4.6 9 a1.65 1.65 0 0 0 -.33 -1.82 l-.06 -.06 a2 2 0 1 1 2.83 -2.83 l.06 .06 A1.65 1.65 0 0 0 9 4.6 a1.65 1.65 0 0 0 1 -1.51 V3 a2 2 0 0 1 4 0 v.09 A1.65 1.65 0 0 0 15 4.6 a1.65 1.65 0 0 0 1.82 -.33 l.06 -.06 a2 2 0 1 1 2.83 2.83 l-.06 .06 A1.65 1.65 0 0 0 19.4 9 a1.65 1.65 0 0 0 1.51 1 H21 a2 2 0 0 1 0 4 h-.09 a1.65 1.65 0 0 0 -1.51 1 Z"/></symbol>
-    <!-- Heart (health check) -->
-    <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.84 4.61 a5.5 5.5 0 0 0 -7.78 0 L12 5.67 l-1.06 -1.06 a5.5 5.5 0 0 0 -7.78 7.78 l1.06 1.06 L12 21.23 l7.78 -7.78 1.06 -1.06 a5.5 5.5 0 0 0 0 -7.78 Z"/></symbol>
-    <!-- Dashboard grid -->
-    <symbol id="i-dash" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></symbol>
-    <!-- Logs (lines) -->
-    <symbol id="i-log" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></symbol>
-  </defs>
-</svg>
-
-<!-- ── 탭 ── -->
-<div class="tabs">
-  <div class="tab active" data-page="command"><svg class="ic"><use href="#i-cmd"/></svg>Command Center</div>
-  <div class="tab" data-page="error"><svg class="ic"><use href="#i-err"/></svg>Error Center</div>
-  <div class="tab" data-page="github"><svg class="ic"><use href="#i-gh"/></svg>GitHub Hub</div>
-  <div class="tab" data-page="deploy"><svg class="ic"><use href="#i-up"/></svg>Deploy Center</div>
-  <div class="right-chips">
-    <span class="chip" id="chip-core"><span class="dot"></span>Core</span>
-    <span class="chip" id="chip-ai"><span class="dot"></span>AI</span>
-    <span class="chip" id="chip-docker"><span class="dot"></span>Docker</span>
-    <span class="chip" id="chip-github"><span class="dot"></span>GitHub</span>
-    <span class="cost">오늘 사용 <b id="cost-today">$0.0000</b></span>
-  </div>
-</div>
-
-<!-- ── Command Center 페이지 ── -->
-<div class="page active" id="page-command">
-  <div class="greet">
-    <div>
-      <h2 id="greet-h">안녕하세요!</h2>
-      <p>ReCoder가 개발부터 배포까지 여기에서 도와드립니다.</p>
-    </div>
-    <div class="cost-large">
-      <b id="cost-month">$0.00</b><br>
-      <span>/ $3.00 한도</span>
-    </div>
-  </div>
-
-  <div class="cards">
-    <div class="card" data-action="error">
-      <span class="badge" id="card-error-badge" style="display:none">1</span>
-      <div class="icon red"><svg viewBox="0 0 24 24"><use href="#i-err"/></svg></div>
-      <h3 id="card-error-title">에러 감지</h3>
-      <p id="card-error-desc">감지된 이슈 없음</p>
-      <div class="meta" id="card-error-meta"></div>
-      <button class="cta red">에러 센터 열기 →</button>
-    </div>
-    <div class="card" data-action="github">
-      <div class="icon blue"><svg viewBox="0 0 24 24"><use href="#i-gh"/></svg></div>
-      <h3>GitHub Hub</h3>
-      <p id="card-gh-desc">연결 안 됨</p>
-      <div class="meta" id="card-gh-meta"></div>
-      <button class="cta blue">GitHub Hub 열기 →</button>
-    </div>
-    <div class="card" data-action="deploy">
-      <div class="icon green"><svg viewBox="0 0 24 24"><use href="#i-up"/></svg></div>
-      <h3>배포 센터</h3>
-      <p id="card-deploy-desc">배포 현황 없음</p>
-      <div class="meta" id="card-deploy-meta"></div>
-      <button class="cta green">배포 센터 열기 →</button>
-    </div>
-  </div>
-
-  <div class="row">
-    <div class="panel">
-      <h4><svg class="icon-svg" style="color:var(--t2)"><use href="#i-clock"/></svg>최근 활동</h4>
-      <div class="act-list" id="act-list">
-        <div class="act-item"><div class="act-dot"></div><span style="color:var(--t3)">활동 이력 없음</span></div>
-      </div>
-    </div>
-    <div class="panel">
-      <h4><svg class="icon-svg" style="color:var(--yellow)"><use href="#i-bolt"/></svg>빠른 작업</h4>
-      <div class="quick-grid">
-        <button class="quick-btn" data-q="analyze"><svg class="ic"><use href="#i-search"/></svg>새 에러 분석</button>
-        <button class="quick-btn" data-q="dockerfile"><svg class="ic"><use href="#i-pkg"/></svg>Dockerfile 생성</button>
-        <button class="quick-btn" data-q="actions"><svg class="ic"><use href="#i-cog"/></svg>GitHub Actions 생성</button>
-        <button class="quick-btn" data-q="health"><svg class="ic"><use href="#i-heart"/></svg>헬스 체크</button>
-        <button class="quick-btn" data-q="dashboard"><svg class="ic"><use href="#i-dash"/></svg>대시보드</button>
-        <button class="quick-btn" data-q="logs"><svg class="ic"><use href="#i-log"/></svg>로그 분리</button>
-      </div>
-      <label class="quick-toggle">
-        <input type="checkbox" id="auto-detect"> 자동 오류 감지 활성화
-      </label>
-    </div>
-  </div>
-</div>
-
-<!-- ── Error Center 페이지 ── -->
-<div class="page" id="page-error">
-  <div class="panel">
-    <h4><svg class="icon-svg" style="color:var(--red)"><use href="#i-err"/></svg>Error Center</h4>
-    <p style="color:var(--t2);margin-bottom:14px">사이드바의 "Paste Error Log" 텍스트박스에 에러 메시지를 붙여넣고 Analyze Error 버튼을 누르세요.</p>
-    <button class="quick-btn" data-q="analyze"><svg class="ic"><use href="#i-search"/></svg>사이드바 열기</button>
-  </div>
-</div>
-
-<!-- ── GitHub Hub 페이지 ── -->
-<div class="page" id="page-github">
-  <div class="panel">
-    <h4><svg class="icon-svg" style="color:var(--blue)"><use href="#i-gh"/></svg>GitHub Hub</h4>
-    <p style="color:var(--t2)">GitHub 통합 기능은 Local Core 의 /api/gh/* 엔드포인트를 통해 동작합니다.</p>
-  </div>
-</div>
-
-<!-- ── Deploy Center 페이지 ── -->
-<div class="page" id="page-deploy">
-  <div class="panel">
-    <h4><svg class="icon-svg" style="color:var(--green)"><use href="#i-up"/></svg>Deploy Center</h4>
-    <p style="color:var(--t2)">Local Docker / EC2 SSH / ECS Fargate 배포 흐름. 사이드바의 Ship 탭에서 진행하세요.</p>
-  </div>
-</div>
-
-<!-- ── 하단 로그 패널 ── -->
-<div class="log-panel">
-  <div class="log-tabs">
-    <div class="log-tab active" data-log="ai">AI 분석 로그</div>
-    <div class="log-tab" data-log="docker">Docker 빌드 로그</div>
-    <div class="log-tab" data-log="github">GitHub Actions 로그</div>
-    <div class="log-tab" data-log="deploy">배포 로그</div>
-    <div class="log-tab" data-log="health">헬스체크 로그</div>
-    <button class="log-clear" id="log-clear">Clear</button>
-  </div>
-  <div class="log-body">
-    <div class="log-pane active" id="log-ai"></div>
-    <div class="log-pane" id="log-docker"></div>
-    <div class="log-pane" id="log-github"></div>
-    <div class="log-pane" id="log-deploy"></div>
-    <div class="log-pane" id="log-health"></div>
-  </div>
-</div>
-
-<script nonce="${nonce}">
-(function(){
-  const vscode = acquireVsCodeApi();
-  let currentTab = 'command';
-  let currentLog = 'ai';
-
-  function $(id){ return document.getElementById(id); }
-  function setChip(id, state){
-    const el = $(id); if(!el) return;
-    el.className = 'chip' + (state==='ok' ? ' ok' : state==='partial' ? ' warn' : state==='fail' ? ' fail' : '');
-  }
-  // CoreHealth.status ('ok'|'degraded'|'down') → chip 상태
-  function healthToChip(status){
-    if (status === 'ok')       return 'ok';
-    if (status === 'degraded') return 'partial';
-    if (status === 'down')     return 'fail';
-    return '';
-  }
-  // DiagnosticsResult.<x>_ready ('ready'|'partial'|'not_ready'|'error') → chip 상태
-  function readyToChip(state){
-    if (state === 'ready')   return 'ok';
-    if (state === 'partial') return 'partial';
-    if (state === 'not_ready' || state === 'error') return 'fail';
-    return '';
-  }
-  function now(){ return new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
-
-  // 로컬 탭 전환 (DOM 만 갱신, 메시지는 보내지 않음)
-  function switchTab(name){
-    if (!name) return;
-    currentTab = name;
-    document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active', x.dataset.page===currentTab));
-    document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active', p.id==='page-'+currentTab));
-  }
-  // 탭 헤더 클릭 → 탭 전환 + extension 알림
-  document.querySelectorAll('.tab').forEach(t=>{
-    t.addEventListener('click', ()=>{
-      switchTab(t.dataset.page);
-      vscode.postMessage({ type:'wb.tab', payload:{ tab: currentTab } });
-    });
-  });
-  document.querySelectorAll('.log-tab').forEach(t=>{
-    t.addEventListener('click', ()=>{
-      currentLog = t.dataset.log;
-      document.querySelectorAll('.log-tab').forEach(x=>x.classList.toggle('active', x.dataset.log===currentLog));
-      document.querySelectorAll('.log-pane').forEach(p=>p.classList.toggle('active', p.id==='log-'+currentLog));
-    });
-  });
-  $('log-clear').addEventListener('click', ()=>{
-    const el = $('log-'+currentLog); if(el) el.innerHTML='';
-  });
-
-  // 카드 / 빠른 작업 클릭
-  // 카드(에러/깃허브/배포)는 클릭 시 해당 탭으로 즉시 이동.
-  function dispatchAction(name){
-    switch(name){
-      case 'analyze':    switchTab('error');  vscode.postMessage({ type:'wb.analyze' }); break;
-      case 'error':      switchTab('error');  break;
-      case 'dockerfile': switchTab('deploy'); vscode.postMessage({ type:'wb.generateDockerfile' }); break;
-      case 'github':     switchTab('github'); vscode.postMessage({ type:'wb.tab', payload:{tab:'github'} }); break;
-      case 'deploy':     switchTab('deploy'); vscode.postMessage({ type:'wb.tab', payload:{tab:'deploy'} }); break;
-      case 'actions':    switchTab('github'); vscode.postMessage({ type:'wb.generateDockerfile' }); break; // alias
-      case 'health':     vscode.postMessage({ type:'wb.runDiagnostics' }); break;
-      case 'dashboard':  switchTab('command'); break;
-      case 'logs':       /* no-op, 로그 패널은 항상 보임 */ break;
-      default: console.log('unknown action', name);
-    }
-  }
-  document.querySelectorAll('.card').forEach(c=>{
-    c.addEventListener('click', ()=> dispatchAction(c.dataset.action));
-  });
-  document.querySelectorAll('.quick-btn').forEach(b=>{
-    b.addEventListener('click', (ev)=>{
-      ev.stopPropagation();
-      dispatchAction(b.dataset.q);
-    });
-  });
-
-  // Extension -> Webview messages
-  window.addEventListener('message', (e)=>{
-    const m = e.data || {};
-    switch(m.type){
-      case 'wb.healthUpdate': {
-        // CoreHealth.status -> chip-core
-        const h = m.payload || {};
-        setChip('chip-core', healthToChip(h.status));
-        break;
-      }
-      case 'wb.diagnosticsUpdate': {
-        // DiagnosticsResult -> chip-ai / chip-docker
-        const d = m.payload || {};
-        setChip('chip-ai', readyToChip(d.ai_ready));
-        setChip('chip-docker', readyToChip(d.docker_ready));
-        break;
-      }
-      case 'wb.costUpdate': {
-        const c = m.payload || {};
-        if (c.daily_usd != null) $('cost-today').textContent = '$' + Number(c.daily_usd).toFixed(4);
-        if (c.monthly_usd != null) $('cost-month').textContent = '$' + Number(c.monthly_usd).toFixed(2);
-        break;
-      }
-      case 'wb.activity': {
-        const items = (m.payload && m.payload.items) || [];
-        const el = $('act-list');
-        if (!items.length){
-          el.innerHTML = '<div class="act-item"><div class="act-dot"></div><span style="color:var(--t3)">활동 이력 없음</span></div>';
-        } else {
-          el.innerHTML = items.map(a =>
-            '<div class="act-item"><div class="act-dot '+a.dot+'"></div><span>'+a.text+'</span><span class="act-time">'+a.time+'</span></div>'
-          ).join('');
-        }
-        break;
-      }
-      case 'wb.log': {
-        const p = $('log-'+m.payload.pane);
-        if (p){
-          const line = document.createElement('div');
-          line.className = 'log-line';
-          line.textContent = '['+now()+'] '+m.payload.line;
-          p.appendChild(line);
-          p.scrollTop = p.scrollHeight;
-        }
-        break;
-      }
-    }
-  });
-
-  // ready signal
-  vscode.postMessage({ type:'wb.ready' });
-  setInterval(()=> vscode.postMessage({ type:'wb.poll.health' }), 5000);
-})();
-</script>
-</body>
-</html>`;
     }
 }

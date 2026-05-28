@@ -61,9 +61,39 @@
         "icon": "$(file-code)"
       },
       {
+        "command": "recoder.generateGithubActions",
+        "title": "ReCoder: Generate GitHub Actions Workflow",
+        "icon": "$(github-action)"
+      },
+      {
         "command": "recoder.runDiagnostics",
         "title": "ReCoder: Run Diagnostics",
         "icon": "$(gear)"
+      },
+      {
+        "command": "recoder.setupWizard",
+        "title": "ReCoder: Setup Wizard (GitHub + AWS)",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "recoder.githubLogin",
+        "title": "ReCoder: Connect GitHub",
+        "icon": "$(github)"
+      },
+      {
+        "command": "recoder.githubLogout",
+        "title": "ReCoder: Disconnect GitHub",
+        "icon": "$(sign-out)"
+      },
+      {
+        "command": "recoder.awsConfigure",
+        "title": "ReCoder: Configure AWS Credentials",
+        "icon": "$(cloud)"
+      },
+      {
+        "command": "recoder.awsClear",
+        "title": "ReCoder: Clear AWS Credentials",
+        "icon": "$(trash)"
       },
       {
         "command": "recoder.startCore",

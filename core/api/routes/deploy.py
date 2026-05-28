@@ -65,11 +65,18 @@ class DeployPlanRequest(BaseModel):
     host_port: Optional[int] = None
     container_port: Optional[int] = None
     extra_context: Optional[str] = None
+    # Security gate (Ship Stage). Default False — security scans always run.
+    # Set to True to bypass Trivy/Hadolint pre-deployment gating (e.g. CI dry runs).
+    skip_security_scan: bool = False
+    # 설계 §4.6 / §34 — 배포 직후 5분 헬스 체크 자동 트리거 여부.
+    enable_continuous_verification: bool = True
 
 
 class ExecuteRequest(BaseModel):
     plan_id: str
     approved: bool
+    # Per-execute override; if None, falls back to the plan's setting.
+    enable_continuous_verification: Optional[bool] = None
 
 
 class RollbackRequest(BaseModel):
@@ -162,61 +169,212 @@ def _detect_stack(workspace_path: str) -> StackType:
     return StackType.UNKNOWN
 
 
-async def _run_scan_container(scan_type: str, workspace_path: str, target_path: Optional[str]) -> dict:
-    """Run a one-shot security scanner container and return the result."""
-    ws = Path(workspace_path)
-    scan_configs = {
-        "trivy": {
-            "image": "aquasec/trivy:latest",
-            "cmd": ["trivy", "fs", "--format", "json", "/workspace"],
-        },
-        "hadolint": {
-            "image": "hadolint/hadolint:latest",
-            "cmd": ["hadolint", "--format", "json", "/workspace/Dockerfile"],
-        },
-        "gitleaks": {
-            "image": "zricethezav/gitleaks:latest",
-            "cmd": ["gitleaks", "detect", "--source", "/workspace", "--report-format", "json"],
-        },
-    }
-    if scan_type not in scan_configs:
-        raise HTTPException(status_code=400, detail=f"Unknown scan type: '{scan_type}'. Use trivy, hadolint, or gitleaks.")
+def _log_scan_to_session(scan_type: str, target: str, result: dict) -> None:
+    """Best-effort persistence of scan outcome to SQLite session_logger.
 
-    cfg = scan_configs[scan_type]
-    mount_target = str(ws) if target_path is None else str(Path(target_path))
-    docker_cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{mount_target}:/workspace:ro",
-        cfg["image"],
-        *cfg["cmd"],
-    ]
+    Failures are swallowed so the API path is never broken by logger problems.
+    """
+    try:
+        from datetime import datetime, timezone
+        from session_logger import get_session_logger  # type: ignore
+        from schemas import SessionEvent  # type: ignore
+
+        crit = int(result.get("critical_count", 0))
+        high = int(result.get("high_count", 0))
+        summary = result.get("summary") or f"{scan_type} scan on {target}"
+        status = result.get("status", "unknown")
+
+        event = SessionEvent(
+            time=datetime.now(timezone.utc).isoformat(),
+            event_type=f"security_scan.{scan_type}",
+            error_summary=f"crit={crit} high={high}",
+            error_fingerprint=f"{scan_type}:{target}",
+            related_file_names=[target] if target else [],
+            ai_suggestion_summary=str(summary)[:500],
+            user_action="ignored",
+            result="success" if status == "ok" else ("failed" if status == "error" else "pending"),
+            validation="unknown",
+        )
+        get_session_logger().log_event("ship-stage", event)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug("session_logger unavailable for scan log: %s", exc)
+
+
+def _normalise_scan_result(scan_type: str, target: str, raw: dict) -> dict:
+    """Map an InfraAgent scan output dict into the canonical ScanResult shape.
+
+    ScanResult = {status, scan_type, critical_count, high_count, medium_count,
+                  findings[], summary, target}
+    """
+    if not raw.get("success", False):
+        return {
+            "status": "error",
+            "scan_type": scan_type,
+            "target": target,
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "findings": [],
+            "summary": raw.get("error") or raw.get("summary") or "Scan failed.",
+            "message": raw.get("error", "Scan failed."),
+        }
+
+    findings: list[dict] = []
+    critical_count = 0
+    high_count = 0
+    medium_count = 0
+
+    if scan_type == "trivy":
+        critical = raw.get("critical", []) or []
+        high = raw.get("high", []) or []
+        critical_count = len(critical)
+        high_count = len(high)
+        for entry in critical:
+            findings.append({"severity": "CRITICAL", **entry})
+        for entry in high:
+            findings.append({"severity": "HIGH", **entry})
+    elif scan_type == "hadolint":
+        for v in raw.get("violations", []) or []:
+            level = str(v.get("level", "")).lower()
+            if level == "error":
+                critical_count += 1
+                severity = "CRITICAL"
+            elif level == "warning":
+                high_count += 1
+                severity = "HIGH"
+            else:
+                medium_count += 1
+                severity = "MEDIUM"
+            findings.append({"severity": severity, **v})
+    elif scan_type == "gitleaks":
+        # Every leaked secret is treated as CRITICAL.
+        for f in raw.get("findings", []) or []:
+            critical_count += 1
+            findings.append({"severity": "CRITICAL", **f})
+
+    return {
+        "status": "ok",
+        "scan_type": scan_type,
+        "target": target,
+        "critical_count": critical_count,
+        "high_count": high_count,
+        "medium_count": medium_count,
+        "findings": findings,
+        "summary": raw.get("summary") or "",
+    }
+
+
+async def _execute_scan(scan_type: str, workspace_path: str, target_path: Optional[str]) -> dict:
+    """Dispatch to InfraAgent.run_{trivy,hadolint,gitleaks}_scan and normalise output.
+
+    Dispatch rules per scan_type:
+      - trivy:    target = target_path (image name, e.g. "myapp:latest")
+                  — if missing, falls back to "<basename(workspace)>:latest".
+      - hadolint: target = target_path (Dockerfile path)
+                  — if missing, falls back to "<workspace>/Dockerfile".
+      - gitleaks: target = workspace_path (the repo root).
+    """
+    if scan_type not in {"trivy", "hadolint", "gitleaks"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown scan type: '{scan_type}'. Use trivy, hadolint, or gitleaks.",
+        )
+
+    agent = _get_infra_agent()
+    if agent is None:
+        return {
+            "status": "error",
+            "scan_type": scan_type,
+            "target": target_path or workspace_path,
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "findings": [],
+            "summary": "InfraAgent unavailable (dependencies missing).",
+            "message": "InfraAgent unavailable on this host.",
+        }
+
+    ws = Path(workspace_path) if workspace_path else None
 
     try:
-        result = await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(
-                docker_cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            ),
-        )
-        import json
-        try:
-            output = json.loads(result.stdout) if result.stdout.strip() else {}
-        except json.JSONDecodeError:
-            output = {"raw_output": result.stdout}
-
-        return {
-            "scan_type": scan_type,
-            "exit_code": result.returncode,
-            "findings": output,
-            "stderr": result.stderr[:2000] if result.stderr else None,
-        }
+        if scan_type == "trivy":
+            image = target_path
+            if not image:
+                if ws is not None and ws.exists():
+                    image = f"{ws.name.lower().replace(' ', '-') or 'app'}:latest"
+                else:
+                    image = "app:latest"
+            raw = await asyncio.wait_for(agent.run_trivy_scan(image), timeout=300)
+            target_for_log = image
+        elif scan_type == "hadolint":
+            dockerfile = target_path
+            if not dockerfile and ws is not None:
+                dockerfile = str(ws / "Dockerfile")
+            if not dockerfile:
+                raise HTTPException(
+                    status_code=400,
+                    detail="hadolint scan requires either target_path or workspace_path.",
+                )
+            raw = await asyncio.wait_for(agent.run_hadolint_scan(dockerfile), timeout=300)
+            target_for_log = dockerfile
+        else:  # gitleaks
+            scan_root = workspace_path or target_path
+            if not scan_root:
+                raise HTTPException(
+                    status_code=400,
+                    detail="gitleaks scan requires workspace_path.",
+                )
+            raw = await asyncio.wait_for(agent.run_gitleaks_scan(scan_root), timeout=300)
+            target_for_log = scan_root
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail=f"Scan '{scan_type}' timed out.")
+        result = {
+            "status": "error",
+            "scan_type": scan_type,
+            "target": target_path or workspace_path,
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "findings": [],
+            "summary": f"Scan '{scan_type}' exceeded 300s timeout.",
+            "message": "timeout",
+        }
+        _log_scan_to_session(scan_type, target_path or workspace_path or "", result)
+        return result
     except FileNotFoundError:
-        raise HTTPException(status_code=503, detail="Docker is not available on this host.")
+        result = {
+            "status": "error",
+            "scan_type": scan_type,
+            "target": target_path or workspace_path,
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "findings": [],
+            "summary": "Docker is not available on this host. Start Docker Desktop and retry.",
+            "message": "docker_not_found",
+        }
+        _log_scan_to_session(scan_type, target_path or workspace_path or "", result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        result = {
+            "status": "error",
+            "scan_type": scan_type,
+            "target": target_path or workspace_path,
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "findings": [],
+            "summary": f"Scan failed: {exc}",
+            "message": str(exc),
+        }
+        _log_scan_to_session(scan_type, target_path or workspace_path or "", result)
+        return result
+
+    normalised = _normalise_scan_result(scan_type, target_for_log, raw)
+    _log_scan_to_session(scan_type, target_for_log, normalised)
+    return normalised
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +394,24 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
 
     agent = _get_infra_agent()
     if agent is not None:
-        proposal = await agent.generate_dockerfile(request.workspace_path, stack, request.extra_context)
+        # InfraAgent.generate_dockerfile(workspace_path, project: ProjectProfile)
+        # 시그니처에 맞춰 ProjectProfile 을 구성. 사용자가 /api/project/scan 을 안 했어도
+        # 최소한의 정보로 호출 가능하도록 inline 구성.
+        try:
+            from project_scanner import get_project_scanner  # type: ignore
+            project = get_project_scanner().scan(request.workspace_path)
+        except Exception:
+            # 폴백 — 빈 ProjectProfile (필수 필드만)
+            from schemas import ProjectProfile  # type: ignore
+            project = ProjectProfile(
+                workspace_path=request.workspace_path,
+                stack=stack,
+            )
+        try:
+            proposal = await agent.generate_dockerfile(request.workspace_path, project)
+        except TypeError:
+            # 구버전 호환 — 일부 InfraAgent 구현은 시그니처가 다를 수 있음
+            proposal = await agent.generate_dockerfile(request.workspace_path)  # type: ignore[call-arg]
     else:
         # Placeholder: load from FileTemplateRegistry
         from registry import FileTemplateRegistry  # type: ignore
@@ -280,21 +455,203 @@ async def approve_dockerfile(proposal_id: str, approved: bool) -> dict:
     return {"status": "saved", "proposal_id": proposal_id, "path": str(target)}
 
 
+# ---------------------------------------------------------------------------
+# GitHub Actions Workflow generation (설계 §4.1.2 Ship Stage 확장)
+# ---------------------------------------------------------------------------
+
+
+class GithubActionsRequest(BaseModel):
+    workspace_path: str
+    project_id: Optional[str] = None
+    extra_context: Optional[str] = None
+
+
+@router.post("/api/deploy/github-actions")
+async def generate_github_actions_route(request: GithubActionsRequest) -> InfraFileProposal:
+    """
+    Generate a GitHub Actions workflow YAML for the workspace.
+
+    Returns an InfraFileProposal (file_type=GITHUB_ACTIONS) targeting
+    `.github/workflows/deploy.yml`. The proposal is held in-memory until
+    the user approves via `/api/deploy/github-actions/approve`.
+
+    설계 A.4 InfraFileProposal — file_type "github-actions" 케이스.
+    """
+    # Lazy import: project_scanner / infra_agent 둘 다 server.py 전역에 의존하지 않도록
+    try:
+        from project_scanner import get_project_scanner  # type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"project_scanner import 실패: {e}") from e
+
+    try:
+        from infra_agent import generate_github_actions  # type: ignore
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"infra_agent.generate_github_actions import 실패: {e}",
+        ) from e
+
+    # 1. 워크스페이스 스캔 → ProjectProfile
+    ws_path = request.workspace_path
+    if not ws_path:
+        raise HTTPException(status_code=400, detail="workspace_path 가 비어있습니다.")
+    if not Path(ws_path).expanduser().resolve().exists():
+        raise HTTPException(status_code=404, detail=f"워크스페이스 경로가 없습니다: {ws_path}")
+
+    try:
+        scanner = get_project_scanner()
+        project = await asyncio.to_thread(scanner.scan, ws_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"프로젝트 스캔 실패: {e}") from e
+
+    # 2. 워크플로우 생성 (FileTemplate Registry 기반)
+    try:
+        proposal = await asyncio.to_thread(generate_github_actions, project, ws_path)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"GitHub Actions 워크플로우 생성 실패: {e}",
+        ) from e
+
+    # 3. file_type 보정 — 호출 측이 어떤 enum 을 쓰든 GITHUB_ACTIONS 로 정규화
+    if proposal.file_type != FileType.GITHUB_ACTIONS:
+        proposal = proposal.model_copy(update={"file_type": FileType.GITHUB_ACTIONS})
+
+    _infra_proposals[proposal.proposal_id] = proposal
+    return proposal
+
+
+@router.post("/api/deploy/github-actions/approve")
+async def approve_github_actions(proposal_id: str, approved: bool) -> dict:
+    """
+    Approve or reject a GitHub Actions workflow proposal.
+
+    On approve, writes the YAML to `<workspace>/.github/workflows/deploy.yml`
+    (target_path from the proposal). 설계 §5.2 Approval Level 1 (로컬 파일 생성).
+    """
+    proposal = _infra_proposals.get(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found.")
+
+    if not approved:
+        del _infra_proposals[proposal_id]
+        return {"status": "rejected", "proposal_id": proposal_id}
+
+    # target_path 는 ".github/workflows/deploy.yml" 같은 상대 경로
+    target = Path(proposal.target_path)
+    if not target.is_absolute():
+        # 워크스페이스 루트에 상대 — InfraAgent 가 절대경로를 안 넣었으면 cwd 폴백
+        target = Path.cwd() / target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(proposal.content, encoding="utf-8")
+    del _infra_proposals[proposal_id]
+    return {"status": "saved", "proposal_id": proposal_id, "path": str(target)}
+
+
 @router.post("/api/deploy/scan")
 async def run_scan(request: ScanRequest) -> dict:
     """
-    Run a one-shot security scan via a Docker container.
+    Run a one-shot security scan via the InfraAgent.
 
     Supported scan_type values: ``trivy``, ``hadolint``, ``gitleaks``.
+
+    Returns a normalised ScanResult dict:
+      {
+        status: "ok" | "error",
+        scan_type: str,
+        target: str,
+        critical_count: int,
+        high_count: int,
+        medium_count: int,
+        findings: list[dict],
+        summary: str,
+      }
+
+    Docker not running, missing dependencies, and timeouts return
+    ``{status: "error", message: "..."}``. Only invalid ``scan_type`` raises
+    HTTP 400.
     """
-    return await _run_scan_container(
+    return await _execute_scan(
         request.scan_type, request.workspace_path, request.target_path
     )
 
 
+async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
+    """Run Trivy (filesystem/image) + Hadolint (Dockerfile) before planning.
+
+    Returns a dict with:
+      - blockers:    list[str]  — human-readable critical findings
+      - risk_reasons:list[str]  — additional non-critical reasons
+      - elevated:    bool       — True if any critical was found
+      - reports:     dict       — raw normalised scan reports per scanner
+    """
+    blockers: list[str] = []
+    risk_reasons: list[str] = []
+    reports: dict = {}
+
+    workspace = request.workspace_path
+    ws_path = Path(workspace) if workspace else None
+    dockerfile_path = None
+    if ws_path is not None and (ws_path / "Dockerfile").exists():
+        dockerfile_path = str(ws_path / "Dockerfile")
+
+    # Hadolint — only meaningful if a Dockerfile exists.
+    if dockerfile_path is not None:
+        hadolint_report = await _execute_scan("hadolint", workspace, dockerfile_path)
+        reports["hadolint"] = hadolint_report
+        if hadolint_report.get("status") == "ok":
+            crit = int(hadolint_report.get("critical_count", 0))
+            if crit > 0:
+                blockers.append(f"Hadolint: {crit} Dockerfile error(s)")
+            high = int(hadolint_report.get("high_count", 0))
+            if high > 0:
+                risk_reasons.append(f"Hadolint: {high} warning(s)")
+
+    # Trivy — only against an explicitly-provided image name.
+    if request.image:
+        trivy_report = await _execute_scan("trivy", workspace, request.image)
+        reports["trivy"] = trivy_report
+        if trivy_report.get("status") == "ok":
+            crit = int(trivy_report.get("critical_count", 0))
+            if crit > 0:
+                blockers.append(f"Trivy: {crit} CRITICAL CVE(s) in {request.image}")
+            high = int(trivy_report.get("high_count", 0))
+            if high > 0:
+                risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {request.image}")
+
+    return {
+        "blockers": blockers,
+        "risk_reasons": risk_reasons,
+        "elevated": bool(blockers),
+        "reports": reports,
+    }
+
+
 @router.post("/api/deploy/plan")
 async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
-    """Generate an executable DeploymentPlan via the DeployAgent."""
+    """Generate an executable DeploymentPlan via the DeployAgent.
+
+    Ship Stage security gate: unless ``skip_security_scan=true``, Trivy and
+    Hadolint are run before the plan is built. If any CRITICAL findings are
+    detected, the resulting plan is annotated with ``risk_level=HIGH``,
+    ``approval_level=DOUBLE_CONFIRM``, and the blockers are embedded into
+    ``risk_reasons`` (prefixed with ``BLOCKER:``).
+    """
+    gate: dict = {"blockers": [], "risk_reasons": [], "elevated": False, "reports": {}}
+    if not request.skip_security_scan:
+        try:
+            gate = await _run_pre_deploy_security_gate(request)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning("Pre-deploy security gate failed: %s", exc)
+            gate = {
+                "blockers": [],
+                "risk_reasons": [f"Security gate did not run: {exc}"],
+                "elevated": False,
+                "reports": {},
+            }
+
     deploy_agent = _get_deploy_agent()
     if deploy_agent is not None:
         plan = await deploy_agent.create_plan(request)
@@ -310,6 +667,16 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
             risk_level=RiskLevel.MEDIUM,
             approval_level=ApprovalLevel.CONFIRM,
         )
+
+    # Apply the security-gate verdict onto the plan.
+    extra_reasons: list[str] = []
+    extra_reasons.extend(f"BLOCKER: {b}" for b in gate["blockers"])
+    extra_reasons.extend(gate["risk_reasons"])
+    if extra_reasons:
+        plan.risk_reasons = list(plan.risk_reasons) + extra_reasons
+    if gate["elevated"]:
+        plan.risk_level = RiskLevel.HIGH
+        plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
 
     _deployment_plans[plan.plan_id] = plan
     return plan
@@ -330,15 +697,29 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         del _deployment_plans[request.plan_id]
         return {"status": "cancelled", "plan_id": request.plan_id}
 
+    # ── 보안: image / container_name 화이트리스트 검증 (shell injection 차단) ──
+    # docker 이미지 이름 문법: [registry/][namespace/]name[:tag][@digest]
+    # 컨테이너 이름: [a-zA-Z0-9][a-zA-Z0-9_.-]+
+    import re as _re
+    _IMG_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/\-@]{0,254}$")
+    _NAME_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$")
+    if plan.image and not _IMG_RE.match(plan.image):
+        raise HTTPException(status_code=400, detail="Invalid image name (forbidden characters).")
+    if plan.container_name and not _NAME_RE.match(plan.container_name):
+        raise HTTPException(status_code=400, detail="Invalid container name (forbidden characters).")
+    for _hp, _cp in plan.ports.items():
+        if not str(_hp).isdigit() or not str(_cp).isdigit():
+            raise HTTPException(status_code=400, detail="Port must be numeric.")
+
     if plan.command_template_id:
+        # Template-based path: registry 가 list-form 을 반환하도록 요구하고,
+        # str 반환 시 shlex.split 으로 안전하게 토큰화한다 (shell=False 보장).
         from registry import CommandTemplateRegistry  # type: ignore
+        import shlex as _shlex
         reg = CommandTemplateRegistry()
         try:
-            # Use the first port mapping as host_port/container_port for templates.
-            # (Templates address a single port; multi-port deployments should
-            # use docker-compose, not the template registry.)
             first_hp, first_cp = next(iter(plan.ports.items()), ("8080", "8080"))
-            cmd_str = reg.build_command(plan.command_template_id, {
+            built = reg.build_command(plan.command_template_id, {
                 "image_name": plan.image or "",
                 "container_name": plan.container_name or "",
                 "host_port": int(first_hp),
@@ -346,19 +727,23 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             })
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Command build failed: {exc}") from exc
+        if isinstance(built, list):
+            cmd_args = [str(x) for x in built]
+        else:
+            # str 반환은 deprecated — 시연 호환을 위해 shlex 로 토큰화 (shell 호출 없음)
+            cmd_args = _shlex.split(str(built))
     else:
-        # Build a direct docker run command
-        port_args = " ".join(f"-p {hp}:{cp}" for hp, cp in plan.ports.items())
-        cmd_str = (
-            f"docker run -d --name {plan.container_name} {port_args} "
-            f"--restart unless-stopped {plan.image}"
-        )
+        # 안전한 args list 직접 조립 (shell=False 강제)
+        cmd_args: list[str] = ["docker", "run", "-d", "--name", str(plan.container_name)]
+        for _hp, _cp in plan.ports.items():
+            cmd_args.extend(["-p", f"{int(_hp)}:{int(_cp)}"])
+        cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
     try:
         result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
-                cmd_str, shell=True, capture_output=True, text=True, timeout=300
+                cmd_args, shell=False, capture_output=True, text=True, timeout=300
             ),
         )
         success = result.returncode == 0
@@ -379,11 +764,57 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     _deployment_records[record.deployment_id] = record
     del _deployment_plans[request.plan_id]
 
+    # 설계 §4.6 / §34 — 배포 성공 직후 Continuous Verification 자동 트리거.
+    # 실패 시에도 verification 자체의 예외가 배포 응답을 흔들지 않도록 모두 catch.
+    cv_started = False
+    cv_enabled = request.enable_continuous_verification
+    if cv_enabled is None:
+        cv_enabled = bool(getattr(plan, "enable_continuous_verification", True))
+    if success and cv_enabled:
+        get_continuous_verifier = None  # type: ignore
+        try:
+            from preflight.continuous_verification import get_continuous_verifier  # type: ignore
+        except Exception:  # noqa: BLE001
+            try:
+                from core.preflight.continuous_verification import get_continuous_verifier  # type: ignore
+            except Exception as _exc:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).warning(
+                    "ContinuousVerifier unavailable: %s", _exc,
+                )
+
+        if get_continuous_verifier is not None:
+            try:
+                first_hp = next(iter(plan.ports.items()), ("8080", "8080"))[0]
+                health_path = plan.health_check_path or "/health"
+                if not health_path.startswith("/"):
+                    health_path = "/" + health_path
+                health_url = f"http://localhost:{first_hp}{health_path}"
+                verifier = get_continuous_verifier()
+                await verifier.start(
+                    deployment_id=record.deployment_id,
+                    container_name=record.container_name,
+                    health_check_url=health_url,
+                    duration_minutes=5,
+                    project_id=getattr(plan, "project_id", None),
+                )
+                cv_started = True
+            except Exception as _exc:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Continuous verification start failed (deployment still success): %s",
+                    _exc,
+                )
+
     return {
         "status": "success" if success else "failed",
         "deployment_id": record.deployment_id,
         "stdout": result.stdout[:2000],
         "stderr": result.stderr[:2000],
+        "continuous_verification": {
+            "enabled": bool(cv_enabled),
+            "started": bool(cv_started),
+        },
     }
 
 
@@ -404,12 +835,7 @@ async def list_deployment_records() -> list[DeploymentRecord]:
 
 @router.post("/api/deploy/rollback")
 async def rollback(request: RollbackRequest) -> dict:
-    """
-    Roll back to the previous image tag for a given deployment.
-
-    Reads the rollback_target from the DeploymentRecord and re-runs the
-    container with the previous image.
-    """
+    """Roll back to the previous image tag for a given deployment."""
     record = _deployment_records.get(request.deployment_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Deployment '{request.deployment_id}' not found.")
@@ -420,31 +846,87 @@ async def rollback(request: RollbackRequest) -> dict:
             detail=f"Deployment '{request.deployment_id}' has no rollback target.",
         )
 
-    rollback_cmd = (
-        f"docker stop {record.container_name} && "
-        f"docker rm {record.container_name} && "
-        f"docker run -d --name {record.container_name} "
-        f"--restart unless-stopped {record.rollback_target}"
-    )
+    # 보안: container_name / rollback_target 화이트리스트 검증 후 args list 로 호출.
+    # shell=True 가 아니므로 && 체이닝 불가 → 3단계 순차 실행.
+    import re as _re
+    _IMG_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/\-@]{0,254}$")
+    _NAME_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$")
+    if not _NAME_RE.match(record.container_name or ""):
+        raise HTTPException(status_code=400, detail="Invalid container_name on record.")
+    if not _IMG_RE.match(record.rollback_target):
+        raise HTTPException(status_code=400, detail="Invalid rollback_target on record.")
 
     try:
-        result = await asyncio.get_running_loop().run_in_executor(
+        loop = asyncio.get_running_loop()
+        # 1) docker stop (실패 무시 — 이미 중지됐을 수 있음)
+        await loop.run_in_executor(
             None,
             lambda: subprocess.run(
-                rollback_cmd, shell=True, capture_output=True, text=True, timeout=120
+                ["docker", "stop", record.container_name],
+                shell=False, capture_output=True, text=True, timeout=60,
+            ),
+        )
+        # 2) docker rm (실패 무시)
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["docker", "rm", record.container_name],
+                shell=False, capture_output=True, text=True, timeout=60,
+            ),
+        )
+        # 3) docker run — 이게 실패하면 rollback 실패
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["docker", "run", "-d", "--name", record.container_name,
+                 "--restart", "unless-stopped", record.rollback_target],
+                shell=False, capture_output=True, text=True, timeout=120,
             ),
         )
         success = result.returncode == 0
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
 
-    # Update record status
     record.status = DeployStatus.ROLLED_BACK if success else DeployStatus.FAILED
 
     return {
-        "status": "rolled_back" if success else "failed",
+        "status": "ok" if success else "failed",
         "deployment_id": request.deployment_id,
-        "rollback_image": record.rollback_target,
+        "rolled_back_to": record.rollback_target,
         "stdout": result.stdout[:2000],
         "stderr": result.stderr[:2000],
     }
+
+
+def _get_verifier():
+    """ContinuousVerifier singleton."""
+    try:
+        from preflight.continuous_verification import get_continuous_verifier
+        return get_continuous_verifier()
+    except Exception:
+        try:
+            from core.preflight.continuous_verification import get_continuous_verifier
+            return get_continuous_verifier()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"ContinuousVerifier unavailable: {exc}",
+            ) from exc
+
+
+@router.get("/api/deploy/verification/{deployment_id}/status")
+async def get_verification_status(deployment_id: str) -> dict:
+    verifier = _get_verifier()
+    snapshot = verifier.get_status(deployment_id)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No continuous verification found for deployment '{deployment_id}'.",
+        )
+    return snapshot
+
+
+@router.post("/api/deploy/verification/{deployment_id}/stop")
+async def stop_verification(deployment_id: str) -> dict:
+    verifier = _get_verifier()
+    return await verifier.stop(deployment_id)

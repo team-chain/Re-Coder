@@ -111,6 +111,14 @@ export class WorkbenchSidebarProvider implements vscode.WebviewViewProvider {
                 await vscode.commands.executeCommand('recoder.generateDockerfile');
                 this.addActivity('info', 'Dockerfile 생성 요청');
                 break;
+            case 'wb.generateGithubActions':
+                try {
+                    await vscode.commands.executeCommand('recoder.generateGithubActions');
+                    this.addActivity('info', 'GitHub Actions 워크플로우 생성 요청');
+                } catch (err) {
+                    this.addActivity('fail', `GitHub Actions 생성 실패: ${err}`);
+                }
+                break;
             case 'wb.runDiagnostics':
                 await vscode.commands.executeCommand('recoder.runDiagnostics');
                 this.addActivity('info', '진단 재실행');
