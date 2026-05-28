@@ -439,6 +439,127 @@ async def handle_bridge_invite_url(request: web.Request) -> web.Response:
     })
 
 
+async def handle_bridge_guilds(request: web.Request) -> web.Response:
+    """봇이 접속해 있는 길드 목록 (Workbench dropdown 용).
+
+    응답:
+      { guilds: [
+          { id, name, icon_url, channel_count, text_channel_count, registered }
+        ]
+      }
+    봇이 아직 init 안된 경우 비어있는 리스트 반환.
+    """
+    if not _check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    guilds: list[dict] = []
+    if _bot is not None:
+        try:
+            for g in list(getattr(_bot, "guilds", []) or []):
+                icon_url = None
+                try:
+                    if g.icon is not None:
+                        icon_url = g.icon.url
+                except Exception:
+                    icon_url = None
+
+                text_count = 0
+                try:
+                    for ch in getattr(g, "channels", []) or []:
+                        if type(ch).__name__ == "TextChannel":
+                            text_count += 1
+                except Exception:
+                    pass
+
+                # 이 guild가 /recoder setup 으로 등록된 적 있는지
+                registered = False
+                try:
+                    summary = get_guild_summary(g.id)
+                    registered = bool(summary and summary.get("api_base"))
+                except Exception:
+                    pass
+
+                guilds.append({
+                    "id": str(g.id),
+                    "name": str(getattr(g, "name", "") or ""),
+                    "icon_url": icon_url,
+                    "channel_count": len(list(getattr(g, "channels", []) or [])),
+                    "text_channel_count": text_count,
+                    "registered": registered,
+                })
+        except Exception as exc:
+            log.warning("길드 목록 조회 실패: %s", exc)
+
+    return web.json_response({"guilds": guilds})
+
+
+async def handle_bridge_guild_channels(request: web.Request) -> web.Response:
+    """특정 길드의 text 채널 목록 (Workbench dropdown 용).
+
+    URL: GET /api/v1/bridge/guilds/{guild_id}/channels
+
+    응답:
+      { guild_id, channels: [
+          { id, name, type, category, position }
+        ]
+      }
+    """
+    if not _check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    raw_guild = request.match_info.get("guild_id", "")
+    try:
+        guild_id = int(raw_guild)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "guild_id는 숫자여야 합니다."}, status=400)
+
+    if _bot is None:
+        return web.json_response({"guild_id": str(guild_id), "channels": []})
+
+    try:
+        guild = _bot.get_guild(guild_id)
+    except Exception:
+        guild = None
+
+    if guild is None:
+        return web.json_response(
+            {
+                "error": f"봇이 guild {guild_id} 에 접속해 있지 않습니다.",
+                "guild_id": str(guild_id),
+                "channels": [],
+            },
+            status=404,
+        )
+
+    channels: list[dict] = []
+    try:
+        for ch in getattr(guild, "channels", []) or []:
+            if type(ch).__name__ != "TextChannel":
+                continue
+
+            category_name = None
+            try:
+                if getattr(ch, "category", None) is not None:
+                    category_name = str(ch.category.name)
+            except Exception:
+                category_name = None
+
+            channels.append({
+                "id": str(ch.id),
+                "name": str(getattr(ch, "name", "") or ""),
+                "type": "text",
+                "category": category_name,
+                "position": int(getattr(ch, "position", 0) or 0),
+            })
+    except Exception as exc:
+        log.warning("Guild %d 채널 목록 조회 실패: %s", guild_id, exc)
+
+    # category 우선, position 보조 정렬
+    channels.sort(key=lambda c: ((c["category"] or "~"), c["position"], c["name"]))
+
+    return web.json_response({"guild_id": str(guild_id), "channels": channels})
+
+
 async def handle_bridge_set_channel(request: web.Request) -> web.Response:
     """채널 ID 설정. body: { channel_id: "123..." }  또는 "" 로 해제."""
     if not _check_auth(request):
@@ -490,6 +611,11 @@ def create_app() -> web.Application:
     app.router.add_get("/api/v1/bridge/status",           handle_bridge_status)
     app.router.add_put("/api/v1/bridge/channel",          handle_bridge_set_channel)
     app.router.add_get("/api/v1/bridge/invite-url",       handle_bridge_invite_url)
+    app.router.add_get("/api/v1/bridge/guilds",           handle_bridge_guilds)
+    app.router.add_get(
+        "/api/v1/bridge/guilds/{guild_id}/channels",
+        handle_bridge_guild_channels,
+    )
     return app
 
 

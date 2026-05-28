@@ -211,6 +211,16 @@
           "type": "string",
           "default": "",
           "description": "Discord 봇 브리지 인증 토큰 (.env 의 RECODER_BRIDGE_TOKEN 과 동일해야 함)."
+        },
+        "recoder.bridge.httpPort": {
+          "type": "number",
+          "default": 8765,
+          "description": "Discord 봇 HTTP API 포트 (api_server.py — Workbench Discord 탭이 사용)."
+        },
+        "recoder.bridge.registrationKey": {
+          "type": "string",
+          "default": "",
+          "description": "Discord 봇 HTTP API 인증 키 (.env 의 BOT_REGISTRATION_KEY 와 동일해야 함, 미설정 시 인증 생략)."
         }
       }
     }

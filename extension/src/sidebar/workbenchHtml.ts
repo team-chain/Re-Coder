@@ -220,6 +220,7 @@ html[data-mode="sidebar"] .brand .tag{font-size:9px}
 }
 .quick-btn:hover{background:var(--bg3); border-color:var(--bd2)}
 .quick-btn .ic{color:var(--blue); width:14px;height:14px;flex-shrink:0;stroke-width:1.8;fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round}
+.wb-btn .ic{width:13px;height:13px;flex-shrink:0;stroke-width:1.8;fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round;vertical-align:-1px;margin-right:4px}
 .quick-toggle{display:flex; align-items:center; gap:6px; font-size:11px; color:var(--t2); margin-top:10px}
 
 /* Log panel (bottom) */
@@ -596,6 +597,9 @@ html[data-mode="sidebar"] .deploy-grid{ }
     <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.84 4.61 a5.5 5.5 0 0 0 -7.78 0 L12 5.67 l-1.06 -1.06 a5.5 5.5 0 0 0 -7.78 7.78 l1.06 1.06 L12 21.23 l7.78 -7.78 1.06 -1.06 a5.5 5.5 0 0 0 0 -7.78 Z"/></symbol>
     <symbol id="i-dash" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></symbol>
     <symbol id="i-log" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></symbol>
+    <symbol id="i-dc" viewBox="0 0 24 24"><path d="M18.93 5.42 a16 16 0 0 0 -4.07 -1.27 l-.2 .36 a14.8 14.8 0 0 1 3.62 1.16 c-3.85 -1.81 -8.4 -1.81 -12.4 0 a14.8 14.8 0 0 1 3.62 -1.16 l-.2 -.36 a16 16 0 0 0 -4.07 1.27 C2.6 9.04 1.9 12.54 2.22 16 a16.1 16.1 0 0 0 4.9 2.48 l.36 -.49 a10.3 10.3 0 0 1 -1.62 -.78 c.13 -.1 .27 -.2 .39 -.31 a11.4 11.4 0 0 0 9.7 0 c .13 .1 .26 .21 .39 .31 a10.3 10.3 0 0 1 -1.62 .78 l .36 .49 a16.1 16.1 0 0 0 4.9 -2.48 c.4 -3.93 -.47 -7.4 -2.05 -10.58 Z M8.68 13.86 c -.97 0 -1.77 -.9 -1.77 -2 0 -1.1 .79 -2 1.77 -2 .98 0 1.78 .9 1.77 2 0 1.1 -.79 2 -1.77 2 Z m6.65 0 c -.97 0 -1.77 -.9 -1.77 -2 0 -1.1 .79 -2 1.77 -2 .98 0 1.78 .9 1.77 2 0 1.1 -.79 2 -1.77 2 Z"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13 a5 5 0 0 0 7.07 0 l3 -3 a5 5 0 0 0 -7.07 -7.07 l-1.5 1.5"/><path d="M14 11 a5 5 0 0 0 -7.07 0 l-3 3 a5 5 0 0 0 7.07 7.07 l1.5 -1.5"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M19 21 H5 a2 2 0 0 1 -2 -2 V5 a2 2 0 0 1 2 -2 h11 l5 5 v11 a2 2 0 0 1 -2 2 Z"/><polyline points="17,21 17,13 7,13 7,21"/><polyline points="7,3 7,8 15,8"/></symbol>
   </defs>
 </svg>
 
@@ -608,6 +612,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
 <div class="tabs">
   <div class="tab" data-page="github"><svg class="ic"><use href="#i-gh"/></svg>GitHub</div>
   <div class="tab active" data-page="deploy"><svg class="ic"><use href="#i-up"/></svg>배포</div>
+  <div class="tab" data-page="discord"><svg class="ic"><use href="#i-dc"/></svg>Discord</div>
   <div class="right-chips">
     <span class="chip" id="chip-core"><span class="dot"></span>Core</span>
     <span class="chip" id="chip-ai"><span class="dot"></span>AI</span>
@@ -964,6 +969,116 @@ html[data-mode="sidebar"] .deploy-grid{ }
       <div class="inline-log-body"><div class="inline-log-empty">결과 없음</div></div>
     </div>
   </div>
+</div>
+
+<!-- ── Discord Bridge ── -->
+<div class="page" id="page-discord">
+
+  <!-- Step 1: 봇 상태 -->
+  <div class="step-card" id="dc-step-1">
+    <div class="step-card-header">
+      <div class="step-num" id="dc-step-1-num">1</div>
+      <div class="step-title">봇 상태</div>
+      <span class="step-status" id="dc-step-1-status">대기</span>
+    </div>
+    <div id="dc-status-text" class="alert info" style="margin:0 0 12px">봇 HTTP API 연결 확인 중…</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+      <span style="display:inline-flex; align-items:center; gap:8px">
+        <img id="dc-bot-avatar" alt="" style="width:24px; height:24px; border-radius:50%; display:none; object-fit:cover; border:1px solid var(--bd2)">
+        <span id="dc-bot-name" style="font-size:12px; color:var(--t2)">봇 미감지</span>
+      </span>
+      <span class="cost" style="margin-left:auto"><b id="dc-bridge-clients">0</b>&nbsp;<span style="color:var(--t3); font-weight:400">VSCode 브리지 연결</span></span>
+    </div>
+    <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap">
+      <button class="wb-btn wb-btn-ghost" id="dc-refresh-btn">새로고침</button>
+    </div>
+    <div style="margin-top:10px; font-size:11px; color:var(--t3); line-height:1.5">
+      봇 HTTP API: <code id="dc-http-endpoint" style="color:var(--t2)">http://127.0.0.1:8765</code>
+      <span style="margin-left:8px">— recoder.bridge.httpPort 설정으로 변경 가능</span>
+    </div>
+  </div>
+
+  <!-- Step 2: 봇 초대 (Discord 서버에 추가) -->
+  <div class="step-card" id="dc-step-2">
+    <div class="step-card-header">
+      <div class="step-num" id="dc-step-2-num">2</div>
+      <div class="step-title">봇 초대</div>
+      <span class="step-status" id="dc-step-2-status">선택</span>
+    </div>
+    <p style="margin:0 0 12px; color:var(--t2); font-size:12px; line-height:1.5">
+      Discord 서버에 봇을 추가해야 채널 선택이 가능합니다. 아래 버튼을 누르면 OAuth 초대 페이지가 브라우저에서 열립니다.
+    </p>
+    <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <button class="wb-btn wb-btn-primary" id="dc-invite-btn">
+        <svg class="ic"><use href="#i-link"/></svg> 서버에 봇 초대
+      </button>
+      <button class="wb-btn wb-btn-ghost" id="dc-copy-invite-btn">URL 복사</button>
+    </div>
+    <div style="margin-top:10px; font-size:11px; color:var(--t3); word-break:break-all">
+      <span style="color:var(--t2)">초대 URL:</span> <span id="dc-invite-url" style="font-family:var(--vscode-editor-font-family, monospace); color:var(--t3)">—</span>
+    </div>
+  </div>
+
+  <!-- Step 3: 서버 + 채널 선택 -->
+  <div class="step-card" id="dc-step-3">
+    <div class="step-card-header">
+      <div class="step-num" id="dc-step-3-num">3</div>
+      <div class="step-title">Make 채널 선택</div>
+      <span class="step-status" id="dc-step-3-status">대기</span>
+    </div>
+    <p style="margin:0 0 12px; color:var(--t2); font-size:12px; line-height:1.5">
+      봇이 자유 대화에 응답하고 코드를 생성할 채널을 지정합니다. 슬래시 명령(<code>/recoder</code> 등)은 모든 채널에서 동작하지만, <b>자연어 → 코드 변환</b>은 여기서 선택한 채널에서만 일어납니다.
+    </p>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px">
+      <label style="display:flex; flex-direction:column; gap:4px">
+        <span style="font-size:11px; color:var(--t3); font-weight:600; text-transform:uppercase; letter-spacing:0.04em">서버</span>
+        <select id="dc-guild-select" class="wb-input">
+          <option value="">— 봇을 초대한 서버 선택 —</option>
+        </select>
+      </label>
+      <label style="display:flex; flex-direction:column; gap:4px">
+        <span style="font-size:11px; color:var(--t3); font-weight:600; text-transform:uppercase; letter-spacing:0.04em">채널</span>
+        <select id="dc-channel-select" class="wb-input" disabled>
+          <option value="">— 먼저 서버 선택 —</option>
+        </select>
+      </label>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+      <button class="wb-btn wb-btn-primary" id="dc-save-channel-btn" disabled>
+        <svg class="ic"><use href="#i-save"/></svg> 저장
+      </button>
+      <button class="wb-btn wb-btn-danger" id="dc-clear-channel-btn">해제</button>
+      <span id="dc-save-hint" style="font-size:11px; color:var(--t3); margin-left:auto">채널을 고르면 활성화됩니다</span>
+    </div>
+    <details style="margin-top:14px">
+      <summary style="cursor:pointer; color:var(--t2); font-size:12px; padding:4px 0">수동 입력 (채널 ID 직접)</summary>
+      <div style="display:grid; grid-template-columns:1fr auto; gap:8px; margin-top:10px">
+        <input id="dc-manual-channel" class="wb-input" placeholder="채널 우클릭 → ID 복사 (예: 1234567890123456789)">
+        <button class="wb-btn" id="dc-manual-save-btn">저장</button>
+      </div>
+    </details>
+    <div class="inline-log collapsed" id="dc-step-3-log">
+      <div class="inline-log-header"><span class="chev">▼</span> 로그</div>
+      <div class="inline-log-body"><div class="inline-log-empty">결과 없음</div></div>
+    </div>
+  </div>
+
+  <!-- Step 4: 현재 설정 -->
+  <div class="step-card" id="dc-step-4">
+    <div class="step-card-header">
+      <div class="step-num" id="dc-step-4-num">4</div>
+      <div class="step-title">현재 활성 채널</div>
+      <span class="step-status" id="dc-step-4-status">없음</span>
+    </div>
+    <div id="dc-current-channel" style="font-size:13px; color:var(--t2); line-height:1.7">
+      활성 채널이 설정되지 않았습니다. 위에서 채널을 저장하세요.
+    </div>
+    <details style="margin-top:14px">
+      <summary style="cursor:pointer; color:var(--t2); font-size:12px; padding:4px 0">고급 — 모든 봇 설정 보기</summary>
+      <pre id="dc-settings-snapshot" style="margin-top:10px; padding:10px; background:var(--bg2); border:1px solid var(--bd); border-radius:4px; font-size:11px; color:var(--t3); overflow-x:auto; max-height:200px">—</pre>
+    </details>
+  </div>
+
 </div>
 
 <!-- 하단 풀 로그 패널 제거됨 — 각 탭의 인라인 로그가 그 역할을 함. 시각 중복 정리. -->
@@ -1377,7 +1492,241 @@ html[data-mode="sidebar"] .deploy-grid{ }
         }
         break;
       }
+      // ── Discord Bridge ──────────────────────────────────────
+      case 'wb.discord.statusResult': {
+        const p = m.payload || {};
+        const txt = $('dc-status-text');
+        if (!p.ok){
+          if (txt){
+            txt.className = 'alert warn';
+            txt.innerHTML = '<span>봇 HTTP API에 연결할 수 없습니다 — 봇이 켜져있는지 확인하세요. <br><span style="color:var(--t3); font-size:11px">' + (p.error || '') + '</span></span>';
+          }
+          setDcStepCard(1, 'active');
+          setDcStepCard(2, 'disabled');
+          setDcStepCard(3, 'disabled');
+          setDcStepCard(4, 'disabled');
+          if ($('dc-step-1-status')) $('dc-step-1-status').textContent = '오프라인';
+          break;
+        }
+        if (txt){
+          txt.className = 'alert ok';
+          txt.innerHTML = '<span><b>✓ 봇 온라인</b> · ' + (p.connected_clients || 0) + '개 VSCode 클라이언트 연결</span>';
+        }
+        if ($('dc-bridge-clients')) $('dc-bridge-clients').textContent = String(p.connected_clients || 0);
+        setDcStepCard(1, 'done');
+        setDcStepCard(2, 'active');
+        setDcStepCard(3, 'active');
+        if ($('dc-step-1-status')) $('dc-step-1-status').textContent = '온라인';
+
+        // Step 4 — 현재 활성 채널
+        const ch = $('dc-current-channel');
+        if (p.active_channel_id){
+          setDcStepCard(4, 'done');
+          if ($('dc-step-4-status')) $('dc-step-4-status').textContent = '설정됨';
+          if (ch){
+            ch.innerHTML =
+              '<div style="display:flex; align-items:center; gap:10px; padding:10px; background:var(--green-bg); border:1px solid var(--bd); border-radius:6px">'
+              + '<svg class="icon-svg" style="color:var(--green); width:18px; height:18px"><use href="#i-dc"/></svg>'
+              + '<div>'
+              + '<div style="color:var(--t1); font-weight:600">#' + (p.channel_name || '(이름 조회 실패)') + '</div>'
+              + '<div style="font-size:11px; color:var(--t3)">' + (p.guild_name || '(서버 이름 조회 실패)') + ' · ID ' + p.active_channel_id + '</div>'
+              + '</div>'
+              + '</div>';
+          }
+        } else {
+          setDcStepCard(4, 'active');
+          if ($('dc-step-4-status')) $('dc-step-4-status').textContent = '없음';
+          if (ch) ch.textContent = '활성 채널이 설정되지 않았습니다. 위에서 채널을 저장하세요.';
+        }
+        if ($('dc-settings-snapshot')){
+          try { $('dc-settings-snapshot').textContent = JSON.stringify(p.settings || {}, null, 2); }
+          catch(_) { $('dc-settings-snapshot').textContent = '—'; }
+        }
+        // 자동 후속 로드 (1회만 — overwrite 방지)
+        if (!window.__dcLoadedExtras){
+          window.__dcLoadedExtras = true;
+          vscode.postMessage({ type:'wb.discord.fetchInviteUrl' });
+          vscode.postMessage({ type:'wb.discord.fetchGuilds' });
+        }
+        break;
+      }
+      case 'wb.discord.inviteUrlResult': {
+        const p = m.payload || {};
+        if (!p.ok){
+          if ($('dc-invite-url')) $('dc-invite-url').textContent = '(생성 불가 — ' + (p.error || 'DISCORD_CLIENT_ID 미설정') + ')';
+          break;
+        }
+        if ($('dc-invite-url')) $('dc-invite-url').textContent = p.invite_url || '—';
+        if ($('dc-bot-name')) $('dc-bot-name').textContent = p.bot_name || '봇 이름 미감지';
+        if ($('dc-bot-avatar') && p.bot_avatar){
+          $('dc-bot-avatar').src = p.bot_avatar;
+          $('dc-bot-avatar').style.display = 'inline-block';
+        }
+        window.__dcInviteUrl = p.invite_url || '';
+        break;
+      }
+      case 'wb.discord.guildsResult': {
+        const p = m.payload || {};
+        const sel = $('dc-guild-select');
+        if (!sel) break;
+        if (!p.ok){
+          sel.innerHTML = '<option value="">— 로딩 실패: ' + (p.error || '') + ' —</option>';
+          break;
+        }
+        const guilds = p.guilds || [];
+        if (!guilds.length){
+          sel.innerHTML = '<option value="">— 봇을 초대한 서버가 없습니다 —</option>';
+        } else {
+          sel.innerHTML = '<option value="">— 서버 선택 (' + guilds.length + '개) —</option>' +
+            guilds.map(g => '<option value="' + g.id + '">' + (g.name || '(이름 없음)') + ' · 채널 ' + (g.text_channel_count || 0) + '개</option>').join('');
+        }
+        break;
+      }
+      case 'wb.discord.channelsResult': {
+        const p = m.payload || {};
+        const sel = $('dc-channel-select');
+        if (!sel) break;
+        if (!p.ok){
+          sel.innerHTML = '<option value="">— 로딩 실패 —</option>';
+          sel.disabled = true;
+          break;
+        }
+        const channels = p.channels || [];
+        if (!channels.length){
+          sel.innerHTML = '<option value="">— 텍스트 채널 없음 —</option>';
+          sel.disabled = true;
+          break;
+        }
+        // category 별로 묶기
+        const byCategory = {};
+        channels.forEach(c => {
+          const k = c.category || '(카테고리 없음)';
+          if (!byCategory[k]) byCategory[k] = [];
+          byCategory[k].push(c);
+        });
+        let html = '<option value="">— 채널 선택 (' + channels.length + '개) —</option>';
+        Object.keys(byCategory).forEach(cat => {
+          html += '<optgroup label="' + cat.replace(/"/g, '&quot;') + '">';
+          byCategory[cat].forEach(c => {
+            html += '<option value="' + c.id + '">#' + (c.name || '(이름 없음)') + '</option>';
+          });
+          html += '</optgroup>';
+        });
+        sel.innerHTML = html;
+        sel.disabled = false;
+        break;
+      }
+      case 'wb.discord.setChannelResult': {
+        const p = m.payload || {};
+        if (p.ok){
+          appendInlineLog('dc-step-3-log', '✓ 저장됨: ' + (p.channel_name ? ('#' + p.channel_name) : (p.active_channel_id || '(해제)')), 'ok');
+          if ($('dc-save-hint')) $('dc-save-hint').textContent = '저장 완료';
+        } else {
+          appendInlineLog('dc-step-3-log', '✗ ' + (p.error || '저장 실패'), 'err');
+        }
+        break;
+      }
+      case 'wb.discord.error': {
+        const p = m.payload || {};
+        appendInlineLog('dc-step-3-log', '✗ ' + (p.context || '') + ': ' + (p.message || ''), 'err');
+        break;
+      }
     }
+  });
+
+  // ─── Discord Bridge 핸들러 ──────────────────────────────────────
+  function setDcStepCard(stepNum, status){
+    const card = $('dc-step-' + stepNum);
+    if (!card) return;
+    card.classList.remove('disabled','active','done');
+    if (status === 'done') card.classList.add('done');
+    else if (status === 'active') card.classList.add('active');
+    else if (status === 'disabled') card.classList.add('disabled');
+    const badge = $('dc-step-' + stepNum + '-status');
+    if (badge){
+      badge.textContent = status === 'done' ? '완료 ✓'
+        : status === 'active' ? '진행 중'
+        : status === 'disabled' ? '잠금'
+        : '대기';
+    }
+    const numEl = $('dc-step-' + stepNum + '-num');
+    if (numEl) numEl.textContent = status === 'done' ? '✓' : String(stepNum);
+  }
+  function dcBindClick(id, fn){
+    const el = $(id);
+    if (el) el.addEventListener('click', fn);
+  }
+  dcBindClick('dc-refresh-btn',       () => vscode.postMessage({ type:'wb.discord.fetchStatus' }));
+  dcBindClick('dc-invite-btn',        () => vscode.postMessage({ type:'wb.discord.openInvite' }));
+  dcBindClick('dc-copy-invite-btn',   () => {
+    const url = window.__dcInviteUrl || '';
+    if (!url){ appendInlineLog('dc-step-3-log', '✗ 초대 URL이 아직 로드되지 않았습니다', 'err'); return; }
+    try {
+      navigator.clipboard.writeText(url).then(
+        () => appendInlineLog('dc-step-3-log', '✓ 초대 URL을 클립보드에 복사', 'ok'),
+        () => appendInlineLog('dc-step-3-log', '✗ 복사 실패 — 수동으로 선택해 복사하세요', 'err')
+      );
+    } catch (e) {
+      appendInlineLog('dc-step-3-log', '✗ 복사 불가: ' + e, 'err');
+    }
+  });
+
+  // Guild 변경 → 채널 목록 다시 로드
+  const dcGuildSel = $('dc-guild-select');
+  if (dcGuildSel) dcGuildSel.addEventListener('change', () => {
+    const gid = dcGuildSel.value || '';
+    const chSel = $('dc-channel-select');
+    if (chSel){
+      chSel.innerHTML = '<option value="">— 로딩 중… —</option>';
+      chSel.disabled = true;
+    }
+    if (!gid){
+      if (chSel){
+        chSel.innerHTML = '<option value="">— 먼저 서버 선택 —</option>';
+        chSel.disabled = true;
+      }
+      return;
+    }
+    vscode.postMessage({ type:'wb.discord.fetchChannels', payload:{ guild_id: gid } });
+  });
+
+  // Channel 선택 → 저장 버튼 활성화
+  const dcChannelSel = $('dc-channel-select');
+  if (dcChannelSel) dcChannelSel.addEventListener('change', () => {
+    const v = dcChannelSel.value || '';
+    const btn = $('dc-save-channel-btn');
+    if (btn) btn.disabled = !v;
+    if ($('dc-save-hint')) $('dc-save-hint').textContent = v ? '저장 준비됨' : '채널을 고르면 활성화됩니다';
+  });
+
+  dcBindClick('dc-save-channel-btn', () => {
+    const v = ($('dc-channel-select') || {}).value || '';
+    if (!v) return;
+    vscode.postMessage({ type:'wb.discord.setChannel', payload:{ channel_id: v } });
+  });
+  dcBindClick('dc-clear-channel-btn', () => {
+    vscode.postMessage({ type:'wb.discord.setChannel', payload:{ channel_id: '' } });
+  });
+  dcBindClick('dc-manual-save-btn', () => {
+    const v = (($('dc-manual-channel') || {}).value || '').trim();
+    if (!v){ appendInlineLog('dc-step-3-log', '✗ 채널 ID를 입력하세요', 'err'); return; }
+    if (!/^[0-9]{15,22}$/.test(v)){
+      appendInlineLog('dc-step-3-log', '✗ 채널 ID는 15~22자리 숫자여야 합니다', 'err');
+      return;
+    }
+    vscode.postMessage({ type:'wb.discord.setChannel', payload:{ channel_id: v } });
+  });
+
+  // Discord 탭에 처음 진입할 때 상태 로드 (lazy). 스크립트가 이미 DOM 끝에 있으므로
+  // querySelectorAll로 즉시 listener 부착. 이미 일반 .tab 클릭 핸들러가 따로 있으므로
+  // 여기는 "최초 1회 fetch" 트리거만 담당.
+  document.querySelectorAll('.tab[data-page="discord"]').forEach(t => {
+    t.addEventListener('click', () => {
+      if (!window.__dcLoadedOnce){
+        window.__dcLoadedOnce = true;
+        vscode.postMessage({ type:'wb.discord.fetchStatus' });
+      }
+    });
   });
 
   // ─── GitHub Hub 핸들러 ──────────────────────────────────────────
