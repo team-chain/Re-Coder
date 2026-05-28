@@ -92,7 +92,13 @@ async def _ssh_fetch_file(
     port: int,
     remote_path: str,
 ) -> str:
-    """Fetch the content of a remote file via SSH."""
+    """Fetch the content of a remote file via SSH.
+
+    보안: remote_path 는 원격 셸에서 평가되므로 shlex.quote 로 escape 필수.
+    이전엔 f"cat {remote_path}" 가 직접 보간되어 원격 RCE 위험 (예: '"; rm -rf /; #').
+    """
+    import shlex as _shlex
+    # remote_path / user / host 도 ssh 가 원격 셸로 전달하기 전에 안전화.
     cmd = [
         "ssh",
         "-i", key_path,
@@ -100,7 +106,8 @@ async def _ssh_fetch_file(
         "-o", "ConnectTimeout=10",
         "-p", str(port),
         f"{user}@{host}",
-        f"cat {remote_path}",
+        # cat 명령에 원격 path 를 안전하게 quoting — 메타문자 (; & | $) 무력화.
+        "cat -- " + _shlex.quote(remote_path),
     ]
     try:
         result = await asyncio.get_running_loop().run_in_executor(
@@ -257,7 +264,11 @@ async def approve_response(request: ApproveResponseRequest) -> dict:
             detail="ssh_host and ssh_key_path are required for remote execution.",
         )
 
-    # Build the remote command
+    # Build the remote command — 사용자 입력은 shlex.quote 로 escape (RCE 차단).
+    import re as _re
+    import shlex as _shlex
+    _NAME_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$")
+
     if proposal.command_template_id:
         from registry import CommandTemplateRegistry  # type: ignore
         reg = CommandTemplateRegistry()
@@ -266,9 +277,14 @@ async def approve_response(request: ApproveResponseRequest) -> dict:
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Command build failed: {exc}") from exc
     else:
-        # Fallback: compose a docker restart command
+        # Fallback: docker restart — container 이름 strict 화이트리스트 검증 후만 사용.
         container = proposal.target_container or "app"
-        remote_cmd = f"docker restart {container}"
+        if not _NAME_RE.match(container):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid target_container (forbidden characters).",
+            )
+        remote_cmd = "docker restart " + _shlex.quote(container)
 
     exec_result = await _ssh_exec(
         host=ssh_host,

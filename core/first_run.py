@@ -175,28 +175,44 @@ def check_core_ready() -> tuple[ReadyStatus, list[str]]:
 
 async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
     """
-    Bedrock 또는 Gemini 중 최소 1개 가용 확인.
+    Strict 검증: 실제 invoke (Bedrock converse 또는 Gemini list_models) 가
+    성공해야만 OK. 자격증명만 있고 호출이 실패하면 FAIL.
 
-    Bedrock 검증:
-        - boto3 import 가능
-        - AWS credentials 존재
-        - list_foundation_models 호출 성공
-        - 우선순위 모델 ID 결정 (_BEDROCK_MODEL_PRIORITY)
-        - 리전이 표준 Bedrock 리전이 아니면 is_cross_region=True
+    Bedrock 검증 순서:
+        1) ListFoundationModels + on-demand 매칭 모델 발견 → 그 모델로 converse ping
+        2) .env BEDROCK_PRIMARY_MODEL_IDENTIFIER 직접 converse ping
+        3) Cross-region inference profile 후보 (apac./us./eu. prefix) 순회하며 ping
+        4) 위 SONNET_MODELS/HAIKU_MODELS 체인 순회 ping
+        하나라도 성공하면 OK, 모두 실패하면 다음 단계(Gemini)로.
 
     Gemini 검증:
-        - GEMINI_API_KEY/GOOGLE_API_KEY 존재
-        - list_models 호출 성공
+        - GEMINI_API_KEY/GOOGLE_API_KEY 존재 + list_models 호출 성공.
 
     반환: (ReadyStatus, model_id, region, provider_type, is_cross_region_profile)
     실패 시 빈 문자열들과 ReadyStatus.FAIL.
     """
+
+    import logging
+    log = logging.getLogger(__name__)
 
     # 1. Bedrock 시도
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
     detected = _detect_bedrock_region()
     if detected:
         region = detected
+
+    def _converse_ping(runtime_client, model_id: str) -> bool:
+        """1-token converse ping. 성공 시 True, 실패 시 False."""
+        try:
+            runtime_client.converse(
+                modelId=model_id,
+                messages=[{"role": "user", "content": [{"text": "ping"}]}],
+                inferenceConfig={"maxTokens": 1},
+            )
+            return True
+        except Exception as exc:
+            log.debug("Bedrock ping failed model=%s: %s", model_id, exc)
+            return False
 
     try:
         import boto3  # type: ignore
@@ -205,36 +221,83 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
         credentials = session.get_credentials()
 
         if credentials is not None:
+            primary_model = (
+                os.getenv("BEDROCK_PRIMARY_MODEL_IDENTIFIER")
+                or os.getenv("BEDROCK_FAST_MODEL_IDENTIFIER")
+                or os.getenv("BEDROCK_SECONDARY_MODEL_IDENTIFIER")
+                or ""
+            ).strip()
+
+            is_cross_region = region not in _BEDROCK_REGIONS
+            runtime = session.client("bedrock-runtime", region_name=region)
+
+            # ── 1차: ListFoundationModels → on-demand 모델 발견 시 converse ping ──
             try:
-                bedrock_models_client = session.client(
-                    "bedrock", region_name=region
-                )
+                bedrock_models_client = session.client("bedrock", region_name=region)
                 response = bedrock_models_client.list_foundation_models(
                     byOutputModality="TEXT",
                     byInferenceType="ON_DEMAND",
                 )
                 models = response.get("modelSummaries", []) if response else []
                 available_ids = {m["modelId"] for m in models}
-
-                chosen: Optional[str] = None
                 for preferred in _BEDROCK_MODEL_PRIORITY:
-                    if preferred in available_ids:
-                        chosen = preferred
-                        break
-                if chosen is None and available_ids:
-                    chosen = sorted(available_ids)[0]
+                    if preferred in available_ids and _converse_ping(runtime, preferred):
+                        return ReadyStatus.OK, preferred, region, "bedrock", is_cross_region
+                # 사전 우선순위 매칭 안 되면 발견된 모델 중 첫 번째로 ping
+                for mid in sorted(available_ids):
+                    if _converse_ping(runtime, mid):
+                        return ReadyStatus.OK, mid, region, "bedrock", is_cross_region
+            except Exception as list_exc:
+                log.debug("ListFoundationModels 실패: %s — invoke fallback 진행", list_exc)
 
-                if chosen:
-                    is_cross_region = region not in _BEDROCK_REGIONS
-                    return ReadyStatus.OK, chosen, region, "bedrock", is_cross_region
+            # ── 2차: .env primary_model 직접 converse ping ──
+            if primary_model and _converse_ping(runtime, primary_model):
+                return ReadyStatus.OK, primary_model, region, "bedrock", is_cross_region
+
+            # ── 3차: cross-region inference profile 후보 (apac./us./eu. prefix) ──
+            # primary_model 이 prefix 없는 raw model id 면 region 매핑 prefix 시도.
+            if primary_model and not primary_model.startswith(("us.", "apac.", "eu.")):
+                region_prefix_map = {
+                    "ap-northeast-1": "apac.", "ap-northeast-2": "apac.",
+                    "ap-northeast-3": "apac.", "ap-southeast-1": "apac.",
+                    "ap-southeast-2": "apac.", "ap-south-1": "apac.",
+                    "us-east-1": "us.", "us-east-2": "us.",
+                    "us-west-1": "us.", "us-west-2": "us.",
+                    "eu-central-1": "eu.", "eu-west-1": "eu.",
+                    "eu-west-2": "eu.", "eu-west-3": "eu.",
+                    "eu-north-1": "eu.",
+                }
+                prefix = region_prefix_map.get(region, "")
+                if prefix:
+                    candidate = prefix + primary_model
+                    if _converse_ping(runtime, candidate):
+                        return ReadyStatus.OK, candidate, region, "bedrock", True
+
+            # ── 4차: BedrockProvider 의 SONNET/HAIKU 체인 순회 ──
+            try:
+                from llm.bedrock_provider import SONNET_MODELS, HAIKU_MODELS  # type: ignore
+                fallback_chain = list(dict.fromkeys(SONNET_MODELS + HAIKU_MODELS))
             except Exception:
-                # Bedrock 호출 실패 → Gemini로 fallback
-                pass
+                fallback_chain = [
+                    "anthropic.claude-3-haiku-20240307-v1:0",
+                    "anthropic.claude-3-sonnet-20240229-v1:0",
+                    "anthropic.claude-3-5-haiku-20241022-v1:0",
+                    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                    "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                ]
+            for mid in fallback_chain:
+                if mid == primary_model:
+                    continue  # 이미 시도
+                if _converse_ping(runtime, mid):
+                    is_xreg = mid.startswith(("us.", "apac.", "eu."))
+                    return ReadyStatus.OK, mid, region, "bedrock", is_xreg
+
+            log.debug("Bedrock 모든 invoke ping 실패 — Gemini fallback 진행")
     except ImportError:
-        # boto3 미설치 → Gemini로 fallback
         pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Bedrock 진단 전체 실패: %s", exc)
 
     # 2. Gemini 시도
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")
@@ -272,7 +335,12 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
 
 def check_docker_ready() -> tuple[ReadyStatus, str]:
     """
-    docker --version + docker info 로 Docker Engine 감지.
+    Strict: docker CLI 존재 + docker --version 성공 + docker info 응답(daemon up)
+    셋 다 만족할 때만 OK. 하나라도 실패하면 FAIL.
+
+    이전엔 daemon down 일 때 PARTIAL 을 반환했으나, 실제 `docker build` 가
+    즉시 실패하므로 ✓ 표시는 거짓 양성이다. Docker Desktop 을 켜야 ✓.
+
     반환: (ReadyStatus, docker_version_string)
     """
     if shutil.which("docker") is None:
@@ -290,17 +358,17 @@ def check_docker_ready() -> tuple[ReadyStatus, str]:
 
         version_string = version_result.stdout.strip()
 
-        # docker info 호출로 daemon 응답 여부 확인 (실패해도 version은 반환)
+        # docker info — daemon 이 응답해야만 OK. 안 되면 FAIL (거짓 양성 금지).
         try:
             info_result = subprocess.run(
                 ["docker", "info"],
                 capture_output=True,
-                timeout=5,
+                timeout=8,
             )
             if info_result.returncode != 0:
-                return ReadyStatus.PARTIAL, version_string
+                return ReadyStatus.FAIL, version_string  # daemon down
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return ReadyStatus.PARTIAL, version_string
+            return ReadyStatus.FAIL, version_string
 
         return ReadyStatus.OK, version_string
     except FileNotFoundError:
@@ -552,6 +620,14 @@ class FirstRunDiagnostics:
         return await run_diagnostics()
 
     async def save_diagnostics(self, result: DiagnosticsResult) -> None:
+        save_diagnostics(result)
+
+    async def load_diagnostics(self) -> Optional[DiagnosticsResult]:
+        return load_diagnostics()
+
+    @staticmethod
+    def _detect_bedrock_region() -> Optional[str]:
+        return _detect_bedrock_region()
         save_diagnostics(result)
 
     async def load_diagnostics(self) -> Optional[DiagnosticsResult]:

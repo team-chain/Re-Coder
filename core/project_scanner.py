@@ -81,7 +81,7 @@ class ProjectScanner:
             health_check_path="/health",
             dockerfile_path=dockerfile_path,
             compose_path=compose_path,
-            deployment_target="local",
+            deployment_target="local_docker",
             created_at=now,
             updated_at=now,
         )
