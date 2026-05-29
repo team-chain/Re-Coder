@@ -607,13 +607,17 @@ export class WorkbenchPanel {
             }
             case 'wb.discord.openInvite': {
                 try {
-                    const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
-                    const url = r?.invite_url as string | undefined;
+                    // 1) 설정된 client_id 로 로컬 생성(봇 실행 불필요) → 2) 없으면 봇 API 폴백
+                    let url = this._buildLocalInviteUrl();
+                    if (!url) {
+                        const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
+                        url = (r?.invite_url as string | undefined) || '';
+                    }
                     if (url) {
                         await vscode.env.openExternal(vscode.Uri.parse(url));
                         this.addActivity('info', '봇 초대 링크 열기');
                     } else {
-                        this.addActivity('fail', '초대 URL 없음 (DISCORD_CLIENT_ID 미설정 또는 봇 미기동)');
+                        this.addActivity('fail', '초대 URL 없음 — 설정 recoder.discord.clientId 를 넣거나 봇을 켜세요');
                     }
                 } catch (err) {
                     this.addActivity('fail', `봇 초대 실패: ${err}`);
@@ -678,7 +682,32 @@ export class WorkbenchPanel {
         }
     }
 
+    /** 설정 recoder.discord.clientId 로 봇 초대 URL 을 로컬 생성. 없으면 빈 문자열. */
+    private _buildLocalInviteUrl(): string {
+        const clientId = vscode.workspace
+            .getConfiguration('recoder.discord')
+            .get<string>('clientId', '')
+            .trim();
+        if (!clientId) { return ''; }
+        const permissions = 2147485696; // 메시지 읽기/쓰기 + 슬래시 커맨드
+        return (
+            'https://discord.com/api/oauth2/authorize'
+            + `?client_id=${encodeURIComponent(clientId)}`
+            + `&permissions=${permissions}`
+            + '&scope=bot%20applications.commands'
+        );
+    }
+
     private async _pushDiscordInviteUrl(): Promise<void> {
+        // 설정된 client_id 가 있으면 봇 실행 없이 즉시 초대 URL 표시.
+        const local = this._buildLocalInviteUrl();
+        if (local) {
+            this._panel.webview.postMessage({
+                type: 'wb.discord.inviteUrlResult',
+                payload: { ok: true, invite_url: local, client_id: 'config' },
+            });
+            return;
+        }
         try {
             const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
             this._panel.webview.postMessage({
