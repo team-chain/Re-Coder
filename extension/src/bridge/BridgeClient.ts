@@ -71,6 +71,16 @@ export class BridgeClient implements vscode.Disposable {
     }
 
     /** 설정 또는 환경변수에서 브리지 endpoint + 토큰 회수 */
+    /** rcdr_<student_id>_<secret> 토큰에서 student_id 추출 */
+    private _parseStudentId(token: string): string {
+        const t = (token || '').trim();
+        if (t.startsWith('rcdr_')) {
+            const parts = t.split('_');
+            if (parts.length >= 3) return parts[1];
+        }
+        return '';
+    }
+
     private _resolveEndpoint(): { url: string; token: string } {
         const cfg = vscode.workspace.getConfiguration('recoder.bridge');
         const host = cfg.get<string>('host', '127.0.0.1');
@@ -79,9 +89,16 @@ export class BridgeClient implements vscode.Disposable {
             cfg.get<string>('token', '') ||
             process.env.RECODER_BRIDGE_TOKEN ||
             '';
-        const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+        // Phase 2 per-user 라우팅 식별자: 설정값 우선, 없으면 게이트웨이 토큰에서 추출.
+        const studentId =
+            cfg.get<string>('studentId', '') ||
+            this._parseStudentId(process.env.RECODER_STUDENT_TOKEN || '');
+        const params = new URLSearchParams();
+        if (token) params.set('token', token);
+        if (studentId) params.set('student', studentId);
+        const qs = params.toString() ? `?${params.toString()}` : '';
         return {
-            url: `ws://${host}:${port}/ws${tokenParam}`,
+            url: `ws://${host}:${port}/ws${qs}`,
             token,
         };
     }

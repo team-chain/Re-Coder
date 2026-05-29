@@ -212,6 +212,11 @@
           "default": "",
           "description": "Discord 봇 브리지 인증 토큰 (.env 의 RECODER_BRIDGE_TOKEN 과 동일해야 함)."
         },
+        "recoder.bridge.studentId": {
+          "type": "string",
+          "default": "",
+          "description": "Phase 2 per-user 라우팅 식별자. /recoder link 로 받은 student_id 를 넣으면 본인 디스코드 요청이 이 VSCode로만 전달됩니다. 비우면 전체 broadcast(단일 PC)."
+        },
         "recoder.bridge.httpPort": {
           "type": "number",
           "default": 8765,

@@ -79,6 +79,16 @@ def init_db() -> None:
             note       TEXT    NOT NULL DEFAULT '',
             PRIMARY KEY (guild_id, user_id)
         );
+
+        -- Phase 2 per-user 라우팅: Discord user_id → student_id 1:1 바인딩.
+        -- /recoder link 로 학생이 본인 계정과 student_id 를 연결한다.
+        -- 디스코드 명령이 본인 VSCode(해당 student_id 로 브리지에 붙은 연결)로만
+        -- 라우팅되도록 하는 기준.
+        CREATE TABLE IF NOT EXISTS user_bindings (
+            discord_user_id INTEGER PRIMARY KEY,
+            student_id      TEXT    NOT NULL,
+            updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
         """)
 
 
@@ -267,3 +277,37 @@ def get_guild_summary(guild_id: int) -> dict:
         "roles": get_roles(guild_id),
         "users": list_users(guild_id),  # §6.1.4 화이트리스트 현황
     }
+
+
+# ── Phase 2: Discord user ↔ student_id 바인딩 ────────────────────────────────
+
+def set_binding(discord_user_id: int, student_id: str) -> None:
+    """학생 본인 Discord 계정 ↔ student_id 연결(덮어쓰기)."""
+    with _lock, _conn() as c:
+        c.execute(
+            """
+            INSERT INTO user_bindings (discord_user_id, student_id, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(discord_user_id)
+            DO UPDATE SET student_id = excluded.student_id, updated_at = datetime('now')
+            """,
+            (int(discord_user_id), str(student_id)),
+        )
+
+
+def get_student_id(discord_user_id: int) -> Optional[str]:
+    """Discord user_id 의 student_id 반환(없으면 None)."""
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT student_id FROM user_bindings WHERE discord_user_id = ?",
+            (int(discord_user_id),),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def remove_binding(discord_user_id: int) -> None:
+    with _lock, _conn() as c:
+        c.execute(
+            "DELETE FROM user_bindings WHERE discord_user_id = ?",
+            (int(discord_user_id),),
+        )

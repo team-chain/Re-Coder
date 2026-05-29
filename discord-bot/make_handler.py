@@ -33,6 +33,10 @@ import discord
 
 from recoder_bridge import hub
 from bridge_settings import get_make_channel_id
+try:
+    import guild_store  # Phase 2 per-user 라우팅 바인딩 조회
+except Exception:
+    guild_store = None
 
 log = logging.getLogger(__name__)
 
@@ -397,8 +401,30 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
     # "실행" 의도 감지 — VSCode 확장이 파일을 자동으로 열어줘야 하는지
     auto_run = _infer_should_auto_run(content)
 
-    # VSCode 브리지 연결 확인
-    if hub.connected_count == 0:
+    # Phase 2 per-user 라우팅: 이 Discord 사용자에 바인딩된 student_id 해석.
+    # 있으면 그 학생 본인 VSCode 연결로만, 없으면 레거시 broadcast(단일 PC 데모).
+    target = ""
+    if guild_store is not None:
+        try:
+            target = guild_store.get_student_id(message.author.id) or ""
+        except Exception:
+            target = ""
+
+    async def emit(event: dict) -> int:
+        if target:
+            return await hub.send_to_student(target, event)
+        return await hub.broadcast(event)
+
+    # VSCode 브리지 연결 확인 (per-user면 본인 연결만 확인)
+    if target:
+        if not hub.student_connected(target):
+            await message.reply(
+                f"❗ 연결된 VSCode(student_id `{target}`)를 찾을 수 없습니다.\n"
+                "VSCode 확장 설정 `recoder.bridge.studentId` 에 student_id 를 넣고 연결하세요.",
+                mention_author=False,
+            )
+            return
+    elif hub.connected_count == 0:
         await message.reply(
             "❗ VSCode 확장이 브리지에 연결되어 있지 않습니다.\n"
             "VSCode를 열고 ReCoder 확장이 활성화되어 있는지 확인하세요.\n"
@@ -415,7 +441,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
     )
 
     # 브리지에 시작 이벤트 전송
-    await hub.broadcast({
+    await emit({
         "type": "start",
         "filename": filename,
         "language": language,
@@ -435,29 +461,29 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
         # max_tokens 로 잘리거나 응답이 비정상적으로 짧으면 한 번까지
         # 토큰 한도를 두 배로 늘려 재시도. 무한 루프 방지 위해 1회만.
         chunk_count, stop_reason = await _stream_bedrock(
-            content, filename, language, max_tokens=MAX_TOKENS,
+            content, filename, language, max_tokens=MAX_TOKENS, emit=emit,
         )
         if stop_reason == "max_tokens" and chunk_count > 0:
             log.warning(
                 "%s: max_tokens 도달 — %d 토큰으로 재시도",
                 filename, MAX_TOKENS * 2,
             )
-            await hub.broadcast({
+            await emit({
                 "type": "info", "filename": filename,
                 "message": "토큰 한도 도달 — 한도 두 배로 재시도 중…",
             })
             # 이전 부분 응답은 폐기하고 새 세션으로 다시 — 확장은 새 start 받으면
             # 이전 세션을 강제 종료하고 새 파일을 연다 (startSession 에 구현됨).
-            await hub.broadcast({
+            await emit({
                 "type": "start", "filename": filename,
                 "language": language, "prompt": content,
             })
             chunk_count, stop_reason = await _stream_bedrock(
-                content, filename, language, max_tokens=MAX_TOKENS * 2,
+                content, filename, language, max_tokens=MAX_TOKENS * 2, emit=emit,
             )
 
         # end 이벤트에 auto_run 플래그 포함 — 확장이 파일을 자동 실행할지 결정
-        await hub.broadcast({
+        await emit({
             "type": "end",
             "filename": filename,
             "auto_run": auto_run,
@@ -468,7 +494,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
         )
 
     except asyncio.CancelledError:
-        await hub.broadcast({
+        await emit({
             "type": "error", "filename": filename,
             "error": "취소됨", "message": "취소됨",
         })
@@ -482,7 +508,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
         log.exception("Bedrock 스트리밍 실패 (filename=%s): %s", filename, exc)
         err_msg = str(exc) or exc.__class__.__name__
         # BridgeClient 가 읽는 필드명은 'error' — 'message' 와 둘 다 채워 호환성 확보.
-        await hub.broadcast({
+        await emit({
             "type": "error", "filename": filename,
             "error": err_msg,
             "message": err_msg,
@@ -497,7 +523,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
         # 저장될 수 있도록 end 를 한 번 더 보낸다. 이미 보냈으면 skip.
         if not end_sent:
             try:
-                await hub.broadcast({
+                await emit({
                     "type": "end", "filename": filename, "auto_run": False,
                 })
             except Exception:
@@ -633,6 +659,7 @@ async def _stream_bedrock(
     filename: str,
     language: str,
     max_tokens: Optional[int] = None,
+    emit=None,
 ) -> tuple[int, Optional[str]]:
     """
     Bedrock converse_stream을 워커 스레드에서 실행하고, 텍스트 청크를
@@ -766,7 +793,7 @@ async def _stream_bedrock(
         delta = event.get("contentBlockDelta", {}).get("delta", {})
         text = delta.get("text")
         if text:
-            await hub.broadcast({"type": "chunk", "text": text})
+            await (emit or hub.broadcast)({"type": "chunk", "text": text})
             chunk_count += 1
             continue
 
