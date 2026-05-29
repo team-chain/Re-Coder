@@ -250,8 +250,11 @@ def main() -> None:
     print(f"[ReCoder Core] RECODER_HOME: {CoreSingleton.RECODER_HOME}", flush=True)
 
     try:
+        # PyInstaller 번들(frozen)에서는 "main:app" 모듈 재import가 안 되므로
+        # app 객체를 직접 넘긴다. 개발 모드에서는 import 문자열을 그대로 사용.
+        _target = app if getattr(sys, "frozen", False) else "main:app"
         uvicorn.run(
-            "main:app",
+            _target,
             host="127.0.0.1",
             port=_bound_port,
             log_level="info",
