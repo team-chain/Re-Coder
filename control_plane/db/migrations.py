@@ -16,7 +16,8 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_plane.db.models import Base, engine
+from control_plane.db.models import Base
+from control_plane.db.session import engine
 
 logger = logging.getLogger(__name__)
 

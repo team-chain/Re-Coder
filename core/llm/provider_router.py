@@ -83,6 +83,20 @@ class LLMProviderRouter:
         self._bedrock_haiku = BedrockProvider(model_id=HAIKU_MODELS[0])
         self._gemini = GeminiProvider()
 
+        # 학생 배포 모드: 게이트웨이 env 가 있으면 Bedrock 직접호출 대신
+        # 운영자 게이트웨이를 통해 호출(학생 PC 에 AWS 키 불필요).
+        try:
+            try:
+                from llm.gateway_provider import GatewayProvider, gateway_enabled
+            except ImportError:
+                from core.llm.gateway_provider import GatewayProvider, gateway_enabled
+            if gateway_enabled():
+                self._bedrock_sonnet = GatewayProvider(model_id=SONNET_MODELS[0])
+                self._bedrock_haiku = GatewayProvider(model_id=HAIKU_MODELS[0])
+                log.info("LLM gateway mode enabled — Bedrock 호출을 운영자 게이트웨이로 라우팅")
+        except Exception as exc:  # pragma: no cover
+            log.debug("gateway provider 비활성: %s", exc)
+
         self._call_records: list[Any] = []  # list[LLMCallRecord]
 
     # ------------------------------------------------------------------

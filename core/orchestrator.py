@@ -644,37 +644,60 @@ class Orchestrator:
     @staticmethod
     def _apply_unified_diff(file_path: Path, unified_diff: str) -> None:
         """
-        Apply a unified diff string to *file_path* via the system ``patch`` command.
+        Apply a unified diff string to *file_path* using pure-Python line
+        manipulation (no external ``patch`` binary — cross-platform / Windows-safe).
 
-        New files are created if the diff targets /dev/null. An empty diff is a
-        no-op (logged at debug level).
+        New files are created when the target does not yet exist. An empty diff is
+        a no-op (logged at debug level). Raises RuntimeError if the diff cannot be
+        applied cleanly so that the caller can trigger rollback.
         """
-        import os
-        import subprocess
-        import tempfile
+        import re as _re
 
         if not unified_diff.strip():
             log.debug("Empty diff for %s — skipping", file_path)
             return
 
-        # Write diff to a temp file (kept for diagnostics if patch(1) fails).
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".patch", delete=False, encoding="utf-8"
-        ) as tmp:
-            tmp.write(unified_diff)
-            tmp_path = tmp.name
+        original_lines: list[str] = []
+        if file_path.exists():
+            original_lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
 
-        try:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            result = subprocess.run(
-                ["patch", "-p1", "--forward", str(file_path)],
-                input=unified_diff,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"patch command failed for {file_path}: {result.stderr}"
-                )
-        finally:
-            os.unlink(tmp_path)
+        diff_lines = unified_diff.splitlines(keepends=True)
+        result = original_lines[:]
+        offset = 0
+        hunk_re = _re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+        applied_hunks = 0
+        i = 0
+        while i < len(diff_lines):
+            m = hunk_re.match(diff_lines[i])
+            if not m:
+                i += 1
+                continue
+
+            orig_start = int(m.group(1)) - 1  # 0-indexed
+            orig_count = int(m.group(2)) if m.group(2) is not None else 1
+            i += 1
+
+            removes: list[str] = []
+            adds: list[str] = []
+            while i < len(diff_lines) and not hunk_re.match(diff_lines[i]):
+                line = diff_lines[i]
+                if line.startswith("-"):
+                    removes.append(line[1:])
+                elif line.startswith("+"):
+                    adds.append(line[1:])
+                elif line.startswith(" "):
+                    removes.append(line[1:])
+                    adds.append(line[1:])
+                # diff headers (---, +++, \ No newline) are ignored
+                i += 1
+
+            adjusted_start = max(0, orig_start + offset)
+            result[adjusted_start : adjusted_start + orig_count] = adds
+            offset += len(adds) - orig_count
+            applied_hunks += 1
+
+        if applied_hunks == 0:
+            raise RuntimeError(f"No valid hunks found in diff for {file_path}")
+
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("".join(result), encoding="utf-8")

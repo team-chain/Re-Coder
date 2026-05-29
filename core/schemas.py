@@ -147,6 +147,14 @@ class ActionType(str, Enum):
     SYSTEM_COMMAND = "system_command"
     PACKAGE_INSTALL = "package_install"
     FILE_WRITE = "file_write"
+    # ECS / ECR / SBOM 배포 파이프라인 (command_registry)
+    DOCKER_REMOVE = "docker_remove"
+    DOCKER_TAG_ECR = "docker_tag_ecr"
+    DOCKER_PUSH_ECR = "docker_push_ecr"
+    ECR_GET_LOGIN_PASSWORD = "ecr_get_login_password"
+    ECS_DESCRIBE_SERVICE = "ecs_describe_service"
+    ECS_UPDATE_SERVICE = "ecs_update_service"
+    SYFT_SBOM = "syft_sbom"
 
 
 class FileType(str, Enum):
@@ -409,6 +417,14 @@ class CommandTemplate(BaseModel):
     approval_level: ApprovalLevel
     version: str = "1.0"
 
+    @field_validator("allowed_params", mode="before")
+    @classmethod
+    def _coerce_allowed_params(cls, v):
+        """일부 레지스트리가 파라미터 이름 list 를 넘기므로 {name: {}} dict 로 변환."""
+        if isinstance(v, (list, tuple, set)):
+            return {str(k): {} for k in v}
+        return v
+
 
 class FileTemplate(BaseModel):
     """A reusable infrastructure file template."""
@@ -418,6 +434,31 @@ class FileTemplate(BaseModel):
     base_content: str
     customizable_sections: dict[str, str] = Field(default_factory=dict)
     version: str = "1.0"
+
+    @field_validator("file_type", mode="before")
+    @classmethod
+    def _normalize_file_type(cls, v):
+        """레지스트리별로 다른 file_type 표기를 FileType enum 값으로 정규화."""
+        if isinstance(v, str):
+            key = v.strip().lower()
+            alias = {
+                "dockerfile":          "dockerfile",
+                "docker-compose":      "docker_compose",
+                "github-actions":      "github_actions",
+                "argocd-application":  "k8s_manifest",
+                "helm-values":         "other",
+                "ecs-task-definition": "other",
+            }
+            return alias.get(key, key)
+        return v
+
+    @field_validator("customizable_sections", mode="before")
+    @classmethod
+    def _coerce_customizable_sections(cls, v):
+        """일부 레지스트리가 섹션 이름 list 를 넘기므로 dict 로 변환."""
+        if isinstance(v, (list, tuple, set)):
+            return {str(s): "" for s in v}
+        return v
 
 
 # ---------------------------------------------------------------------------
@@ -1118,17 +1159,35 @@ class MCPServerConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 class PreflightCheck(BaseModel):
-    name:    str
-    status:  str  # "ok" | "warn" | "fail"
-    message: str
-    detail:  Optional[str] = None
+    """Q3 ECS Cloud Preflight 개별 점검 결과 (preflight_agent 사용)."""
+    name:      str
+    passed:    bool = True
+    severity:  str = "error"          # "error" | "warning"
+    detail:    Optional[str] = None
+    fix_guide: Optional[str] = None
+    # legacy 호환 필드 (deprecated, 일부 코드가 status/message 기대 시 대비)
+    status:    Optional[str] = None
+    message:   Optional[str] = None
 
 
 class PreflightReport(BaseModel):
-    passed:   bool
+    """Q3 ECS Cloud Preflight 종합 리포트 (preflight_agent 사용)."""
+    region:   Optional[str] = None
+    cluster:  Optional[str] = None
+    service:  Optional[str] = None
+    passed:   bool = False
     checks:   list[PreflightCheck] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     errors:   list[str] = Field(default_factory=list)
+
+    def compute_pass(self) -> bool:
+        """error severity 실패 체크가 하나라도 있으면 미통과. warnings/errors 목록을 채운다."""
+        errs  = [c for c in self.checks if c.passed is False and c.severity == "error"]
+        warns = [c for c in self.checks if c.passed is False and c.severity == "warning"]
+        self.errors   = [c.detail or c.name for c in errs]
+        self.warnings = [c.detail or c.name for c in warns]
+        self.passed   = len(errs) == 0
+        return self.passed
 
 
 # ---------------------------------------------------------------------------
@@ -2378,6 +2437,7 @@ class ReadyStatus(str, Enum):
     """Legacy alias used by first_run / orchestrator for diagnostics output."""
     OK      = "ok"
     PARTIAL = "partial"
+    WARN    = "warn"
     FAIL    = "fail"
 
 

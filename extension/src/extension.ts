@@ -396,13 +396,16 @@ export function activate(context: vscode.ExtensionContext): void {
     // Editor Area 에 풀스크린 탭으로 열린다 — 4탭 펼침, 넓은 작업 공간.
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.openWorkbench', async () => {
-            await ensureCoreRunning(coreManager, sidebarProvider);
+            // 패널을 먼저 즉시 연다 — HTML 은 동기 렌더, 데이터는 polling 으로 채워지므로
+            // Core 헬스체크/스폰(ensureCoreRunning)을 기다리지 않아 체감 지연이 사라진다.
+            // Core 가 준비되면 chip·진단·비용이 자동 갱신된다.
             WorkbenchPanel.createOrShow(
                 context.extensionUri,
                 apiClient,
                 coreManager,
                 pollingService,
             );
+            void ensureCoreRunning(coreManager, sidebarProvider);
         })
     );
 

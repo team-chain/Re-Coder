@@ -78,17 +78,7 @@ export const CostTracker: React.FC<CostTrackerProps> = ({
     >
       {/* 한 줄 요약 */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span>LLM</span>
-        <span
-          style={{
-            fontFamily: "var(--vscode-editor-font-family, monospace)",
-            color: "var(--vscode-editor-foreground)",
-            fontWeight: 600,
-          }}
-        >
-          {formatUsd(monthlyUsd)}
-        </span>
-        <span style={{ opacity: 0.6 }}>/ {formatUsd(monthlyBudgetUsd)}</span>
+        <span>사용량</span>
         {/* 인라인 미니 progress bar */}
         <div
           style={{

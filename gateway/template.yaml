@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ReCoder Gateway (Phase 1) — 학생이 키 없이 운영자 계정 Bedrock 을 쓰도록 중계.
+  API Gateway(HTTP) + Lambda + DynamoDB. IAM 은 Bedrock 호출 전용(최소권한).
+  전부 프리티어 한도 내 동작 목표.
+
+Parameters:
+  AdminKey:
+    Type: String
+    NoEcho: true
+    Description: /admin 보호용 비밀 키 (긴 랜덤 문자열)
+  EnrollCode:
+    Type: String
+    NoEcho: true
+    Description: 학생 자가발급(/enroll)용 반 공유 코드. 비우면 자가발급 비활성.
+    Default: ""
+  MaxStudents:
+    Type: String
+    Default: "0"
+    Description: 자가발급 정원 (0 = 무제한). 트라이얼이면 30 권장.
+  AllowedModels:
+    Type: String
+    Default: anthropic.claude-3-haiku-20240307-v1:0
+    Description: 허용 Bedrock 모델 ID (쉼표 구분). 학생은 이 목록만 사용 가능.
+  PoolCapUsd:
+    Type: String
+    Default: "20"
+    Description: 학생 풀 전체 비용 천장(USD)
+  PoolSoftUsd:
+    Type: String
+    Default: "18"
+    Description: 게이트웨이 소프트 차단 임계(USD)
+  PriceInPer1K:
+    Type: String
+    Default: "0.00025"
+  PriceOutPer1K:
+    Type: String
+    Default: "0.00125"
+  DefaultMaxTotalTokens:
+    Type: String
+    Default: "500000"
+  DefaultMaxDailyTokens:
+    Type: String
+    Default: "100000"
+  DefaultRpm:
+    Type: String
+    Default: "10"
+  TokenTtlDays:
+    Type: String
+    Default: "7"
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        GW_TABLE: !Ref GatewayTable
+        GW_REGION: !Ref AWS::Region
+        GW_ALLOWED_MODELS: !Ref AllowedModels
+        GW_POOL_CAP_USD: !Ref PoolCapUsd
+        GW_POOL_SOFT_USD: !Ref PoolSoftUsd
+        GW_PRICE_IN_PER_1K: !Ref PriceInPer1K
+        GW_PRICE_OUT_PER_1K: !Ref PriceOutPer1K
+        GW_DEFAULT_MAX_TOTAL_TOKENS: !Ref DefaultMaxTotalTokens
+        GW_DEFAULT_MAX_DAILY_TOKENS: !Ref DefaultMaxDailyTokens
+        GW_DEFAULT_RPM: !Ref DefaultRpm
+        GW_TOKEN_TTL_DAYS: !Ref TokenTtlDays
+        GW_MAX_STUDENTS: !Ref MaxStudents
+
+Resources:
+  GatewayTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: RecoderGateway
+      BillingMode: PAY_PER_REQUEST     # 프리티어 친화 (요청당 과금, 트라이얼 규모는 사실상 $0)
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl            # 토큰 7일 자동 만료 + rate 윈도우 자동 정리
+        Enabled: true
+
+  InvokeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: recoder-gw-invoke
+      Handler: invoke.handler
+      CodeUri: src/
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GatewayTable
+        # ── Bedrock 전용 최소권한: InvokeModel 만, 그 외 0 ──
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+                - bedrock:Converse
+                - bedrock:ConverseStream
+              Resource: "*"   # 배포 후 특정 모델 ARN 으로 좁히는 것을 권장
+      Events:
+        Invoke:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /llm/invoke
+            Method: POST
+
+  AdminFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: recoder-gw-admin
+      Handler: admin.handler
+      CodeUri: src/
+      Environment:
+        Variables:
+          GW_ADMIN_KEY: !Ref AdminKey
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GatewayTable
+      Events:
+        Admin:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /admin
+            Method: POST
+
+  EnrollFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: recoder-gw-enroll
+      Handler: enroll.handler
+      CodeUri: src/
+      Environment:
+        Variables:
+          GW_ENROLL_CODE: !Ref EnrollCode
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GatewayTable
+      Events:
+        Enroll:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /enroll
+            Method: POST
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      # HTTPS(TLS) 는 API Gateway 가 자동 종단 — 별도 인증서 불필요
+      Description: ReCoder Gateway HTTP API
+
+Outputs:
+  GatewayUrl:
+    Description: 학생 Local Core 가 사용할 게이트웨이 베이스 URL
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  InvokeEndpoint:
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/llm/invoke"
+  AdminEndpoint:
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/admin"
+  EnrollEndpoint:
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/enroll"
+  TableName:
+    Value: !Ref GatewayTable

@@ -288,10 +288,10 @@ def _try_update_ledger(state: VerificationState) -> None:
     """5분 완료 시 DeploymentLedger.status 업데이트 (best-effort)."""
     try:
         try:
-            from persistence import RecoderDB, update_deployment_status  # type: ignore
+            from persistence import RecoderDB, get_default_db_path, update_deployment_status  # type: ignore
             from schemas import DeploymentLedgerStatus  # type: ignore
         except ImportError:
-            from core.persistence import RecoderDB, update_deployment_status  # type: ignore
+            from core.persistence import RecoderDB, get_default_db_path, update_deployment_status  # type: ignore
             from core.schemas import DeploymentLedgerStatus  # type: ignore
 
         new_status = (
@@ -299,7 +299,7 @@ def _try_update_ledger(state: VerificationState) -> None:
             if state.status == "stable"
             else DeploymentLedgerStatus.FAILED
         )
-        db = RecoderDB()
+        db = RecoderDB(get_default_db_path())
         update_deployment_status(
             db,
             state.deployment_id,
@@ -321,12 +321,12 @@ def _try_save_incident(state: VerificationState) -> None:
         return
     try:
         try:
-            from incident_memory.memory_store import save_incident_memory  # type: ignore
-            from persistence import RecoderDB  # type: ignore
+            from incident_memory.memory_store import init_incident_memory_table, save_incident_memory  # type: ignore
+            from persistence import RecoderDB, get_default_db_path  # type: ignore
             from schemas import IncidentMemoryRecord  # type: ignore
         except ImportError:
-            from core.incident_memory.memory_store import save_incident_memory  # type: ignore
-            from core.persistence import RecoderDB  # type: ignore
+            from core.incident_memory.memory_store import init_incident_memory_table, save_incident_memory  # type: ignore
+            from core.persistence import RecoderDB, get_default_db_path  # type: ignore
             from core.schemas import IncidentMemoryRecord  # type: ignore
 
         symptom = "; ".join(a.get("message", a.get("kind", "")) for a in state.anomalies[:3])[:500]
@@ -344,7 +344,8 @@ def _try_save_incident(state: VerificationState) -> None:
             linked_deployment_id=state.deployment_id,
             user_consent=False,
         )
-        db = RecoderDB()
+        db = RecoderDB(get_default_db_path())
+        init_incident_memory_table(db)
         save_incident_memory(db, record)
     except Exception as exc:  # noqa: BLE001
         log.debug("IncidentMemory save skipped: %s", exc)
