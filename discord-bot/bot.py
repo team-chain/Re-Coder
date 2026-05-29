@@ -302,6 +302,36 @@ def _register_commands(group: app_commands.Group) -> None:
         except Exception as exc:
             await interaction.followup.send(f"❌ 상태 조회 실패: `{exc}`", ephemeral=True)
 
+    @group.command(name="link", description="본인 VSCode를 연결합니다 (자가발급 student_id 입력)")
+    @app_commands.describe(student_id="enroll로 받은 토큰(rcdr_...) 또는 student_id")
+    async def link_cmd(
+        interaction: discord.Interaction,
+        student_id: str,
+    ) -> None:
+        # Phase 2 per-user 라우팅: 이 Discord 계정 ↔ student_id 바인딩.
+        # 이후 /make 등 요청이 해당 student_id 로 브리지에 붙은 본인 VSCode로만 전달된다.
+        from middleware.auth import is_allowed
+        if not is_allowed(interaction):
+            from middleware.auth import _get_deny_message
+            await interaction.response.send_message(_get_deny_message(interaction), ephemeral=True)
+            return
+        import guild_store
+        sid = student_id.strip()
+        # 전체 토큰(rcdr_<sid>_<secret>)을 붙여넣으면 가운데 student_id만 추출
+        if sid.startswith("rcdr_") and sid.count("_") >= 2:
+            sid = sid.split("_", 2)[1]
+        if not sid:
+            await interaction.response.send_message("❌ student_id가 비어 있습니다.", ephemeral=True)
+            return
+        guild_store.set_binding(interaction.user.id, sid)
+        await interaction.response.send_message(
+            f"✅ 연결 완료. 이제 이 디스코드 계정의 요청은 student_id `{sid}` 로 "
+            f"브리지에 붙은 **당신의 VSCode**로만 전달됩니다.\n"
+            f"VSCode 확장 설정 `recoder.bridge.studentId` 에 `{sid}` 를 넣고 다시 연결하세요.\n"
+            f"⚠️ student_id 는 라우팅 식별자이니 타인에게 공개하지 마세요.",
+            ephemeral=True,
+        )
+
     @group.command(name="deploy", description="ECS 서비스 배포 실행")
     @app_commands.describe(
         cluster="ECS 클러스터",

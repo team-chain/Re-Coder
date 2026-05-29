@@ -37,6 +37,7 @@ class BridgeHub:
 
     def __init__(self) -> None:
         self._clients: set[web.WebSocketResponse] = set()
+        self._student_of: dict[web.WebSocketResponse, str] = {}  # 연결 → student_id (per-user 라우팅)
         self._lock = asyncio.Lock()
         self._runner: Optional[web.AppRunner] = None
 
@@ -88,14 +89,19 @@ class BridgeHub:
             log.warning("브리지 인증 실패 — IP=%s", request.remote)
             return web.Response(status=401, text="unauthorized")
 
+        # per-user 라우팅용 학생 식별자 (없으면 레거시 broadcast 대상)
+        student = request.query.get("student", "").strip()
+
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
 
         async with self._lock:
             self._clients.add(ws)
+            if student:
+                self._student_of[ws] = student
         log.info(
-            "확장 클라이언트 연결: %s (현재 연결 수: %d)",
-            request.remote, len(self._clients),
+            "확장 클라이언트 연결: %s student=%s (현재 연결 수: %d)",
+            request.remote, student or "-", len(self._clients),
         )
 
         try:
@@ -114,6 +120,7 @@ class BridgeHub:
         finally:
             async with self._lock:
                 self._clients.discard(ws)
+                self._student_of.pop(ws, None)
             log.info(
                 "확장 클라이언트 해제 (남은 연결 수: %d)", len(self._clients)
             )
@@ -134,6 +141,28 @@ class BridgeHub:
             except (ConnectionResetError, RuntimeError) as exc:
                 log.debug("브리지 전송 실패(무시): %s", exc)
         return sent
+
+    async def send_to_student(self, student_id: str, event: dict[str, Any]) -> int:
+        """특정 student_id 로 등록된 연결(들)에만 이벤트 전송. 보낸 수 반환."""
+        if not student_id:
+            return 0
+        async with self._lock:
+            targets = [
+                ws for ws, sid in self._student_of.items()
+                if sid == student_id and not ws.closed
+            ]
+        sent = 0
+        for ws in targets:
+            try:
+                await ws.send_json(event)
+                sent += 1
+            except (ConnectionResetError, RuntimeError) as exc:
+                log.debug("send_to_student 전송 실패(무시): %s", exc)
+        return sent
+
+    def student_connected(self, student_id: str) -> bool:
+        """해당 student_id 의 확장이 현재 연결돼 있는지."""
+        return bool(student_id) and student_id in self._student_of.values()
 
     @property
     def connected_count(self) -> int:
