@@ -357,9 +357,17 @@ class ContextGate:
         )
         error_message_length = len(error_line_match.group(0)) if error_line_match else 0
 
-        # masked info density: fraction of non-whitespace content remaining
-        non_ws = len(re.sub(r"\s+", "", masked_content))
-        masked_info_density = min(1.0, non_ws / max(len(re.sub(r"\s+", "", masked_content)), 1))
+        # masked info density: fraction of non-whitespace content that is NOT a
+        # redaction placeholder. No secrets -> ~1.0; heavily-masked -> lower
+        # (less useful signal survives for the LLM).
+        total_non_ws = len(re.sub(r"\s+", "", masked_content))
+        mask_tokens = re.findall(
+            r"\[<[^>]+>\]|\[MASKED[^\]]*\]|\[WIN_ABS_PATH\]", masked_content
+        )
+        mask_non_ws = len(re.sub(r"\s+", "", "".join(mask_tokens)))
+        masked_info_density = (
+            max(0.0, (total_non_ws - mask_non_ws) / total_non_ws) if total_non_ws else 0.0
+        )
 
         # related files collected
         has_related_files = bool(original_request.project_files_summary)

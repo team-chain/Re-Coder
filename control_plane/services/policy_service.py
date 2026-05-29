@@ -256,13 +256,12 @@ class PolicyService:
         from control_plane.models.schemas import PolicyPresetConfig
         presets = [PolicyPresetConfig(**p) for p in (bundle.preset_config or [])]
         return PolicyBundleResponse(
-            id=str(bundle.id),
+            bundle_id=bundle.bundle_id,
             org_id=bundle.org_id,
             version=bundle.version,
             display_name=bundle.display_name,
             sha256=bundle.sha256,
             presets=presets,
             is_active=bundle.is_active,
-            created_by=bundle.created_by,
             created_at=bundle.created_at,
         )

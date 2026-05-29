@@ -183,56 +183,57 @@ const Hero: React.FC = () => (
 // Status Pills (이모지/✓✗ 대신 inline SVG 사용)
 // ---------------------------------------------------------------------------
 
-interface StatusPillsProps {
+interface StatusBadgeProps {
   diagnostics: DiagnosticsResult | null;
   coreStatus: "ok" | "degraded" | "down" | null;
+  expanded: boolean;
+  onToggle: () => void;
 }
 
-const StatusPills: React.FC<StatusPillsProps> = ({ diagnostics, coreStatus }) => {
-  const green = "#22c55e";
-  const red = "#ef4444";
-  const gray = "#6b7280";
+const StatusBadge: React.FC<StatusBadgeProps> = ({ diagnostics, coreStatus, expanded, onToggle }) => {
+  const green = "var(--vscode-charts-green, #3fb950)";
+  const amber = "var(--vscode-editorWarning-foreground, #d7a300)";
+  const red = "var(--vscode-editorError-foreground, #e5534b)";
+  const muted = "var(--vscode-descriptionForeground, #888)";
 
   const coreOk = coreStatus === "ok";
   const aiOk = diagnostics?.ai_ready === "ready";
-  const dockerOk = diagnostics?.docker_ready === "ready";
 
-  const pillStyle = (state: "ok" | "fail" | "pending"): React.CSSProperties => ({
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 5,
-    padding: "3px 9px",
-    borderRadius: 999,
-    border: `1px solid ${state === "ok" ? green : state === "fail" ? red : gray}40`,
-    background: state === "ok" ? `${green}15` : state === "fail" ? `${red}15` : `${gray}15`,
-    color: state === "ok" ? green : state === "fail" ? red : gray,
-    fontSize: 11,
-    fontWeight: 600,
-    cursor: "default",
-    userSelect: "none",
-  });
-
-  const renderPill = (label: string, isOk: boolean | null) => {
-    const state: "ok" | "fail" | "pending" = isOk === null ? "pending" : isOk ? "ok" : "fail";
-    return (
-      <span style={pillStyle(state)}>
-        {state === "ok" ? <Icon.Check size={10} /> : state === "fail" ? <Icon.Cross size={10} /> : <span style={{ width: 10, height: 10, display: "inline-block" }} />}
-        {label}
-      </span>
-    );
-  };
+  let label: string;
+  let color: string;
+  if (coreStatus === null) { label = "확인 중"; color = muted; }
+  else if (!coreOk) { label = "연결 안 됨"; color = red; }
+  else if (aiOk) { label = "준비됨"; color = green; }
+  else { label = "설정 필요"; color = amber; }
 
   return (
     <div style={{
       display: "flex",
-      gap: 6,
-      padding: "10px 14px",
+      alignItems: "center",
+      padding: "9px 14px",
       background: "var(--vscode-sideBar-background, #1e1e1e)",
-      flexWrap: "wrap",
+      borderBottom: "1px solid var(--vscode-panel-border, #2a2a2a)",
     }}>
-      {renderPill("Core", coreOk)}
-      {renderPill("AI", aiOk ?? null)}
-      {renderPill("Docker", dockerOk ?? null)}
+      <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
+      <span style={{ marginLeft: 8, fontSize: 12, fontWeight: 600, color }}>{label}</span>
+      <button
+        onClick={onToggle}
+        title={expanded ? "상태 상세 숨기기" : "상태 상세 보기"}
+        style={{
+          marginLeft: "auto",
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          color: muted,
+          display: "flex",
+          alignItems: "center",
+          padding: 2,
+        }}
+      >
+        <span style={{ display: "inline-flex", transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.12s" }}>
+          <Icon.ChevronRight size={14} />
+        </span>
+      </button>
     </div>
   );
 };
@@ -338,59 +339,116 @@ interface HomeProps {
   onSelectMode: (mode: ViewMode) => void;
 }
 
-const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSelectMode }) => (
-  <div style={{ padding: "14px 12px 10px", display: "flex", flexDirection: "column", gap: 9 }}>
-    <div style={{
-      fontSize: 11,
-      fontWeight: 600,
-      letterSpacing: "0.08em",
-      textTransform: "uppercase",
-      color: "var(--vscode-descriptionForeground, #888)",
-      marginBottom: 2,
-    }}>
-      무엇을 도와드릴까요?
+const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSelectMode }) => {
+  const accent = "var(--vscode-textLink-foreground, #4a9eff)";
+  const green = "var(--vscode-charts-green, #3fb950)";
+  const muted = "var(--vscode-descriptionForeground, #888)";
+  const fg = "var(--vscode-foreground, #e0e0e0)";
+
+  const sectionLabel: React.CSSProperties = {
+    fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase",
+    color: muted, marginBottom: 10,
+  };
+
+  const StepRow: React.FC<{
+    icon: React.ReactNode; label: string; sub: string;
+    enabled: boolean; right: string; onClick: () => void; last?: boolean;
+  }> = ({ icon, label, sub, enabled, right, onClick, last }) => (
+    <button
+      onClick={enabled ? onClick : undefined}
+      disabled={!enabled}
+      style={{
+        width: "100%", display: "flex", alignItems: "center", gap: 12,
+        padding: "10px 2px", background: "none", border: "none",
+        borderBottom: last ? "none" : "1px solid var(--vscode-panel-border, #2a2a2a)",
+        textAlign: "left", cursor: enabled ? "pointer" : "default",
+        opacity: enabled ? 1 : 0.6,
+      }}
+    >
+      <span style={{ color: enabled ? accent : muted, display: "inline-flex", flexShrink: 0 }}>{icon}</span>
+      <span style={{ lineHeight: 1.3, flex: 1, minWidth: 0 }}>
+        <span style={{ display: "block", fontSize: 13, color: enabled ? fg : muted }}>{label}</span>
+        <span style={{ display: "block", fontSize: 11, color: muted }}>{sub}</span>
+      </span>
+      <span style={{ fontSize: 11, color: muted, flexShrink: 0 }}>{right}</span>
+    </button>
+  );
+
+  return (
+    <div style={{ padding: "14px 12px 10px", display: "flex", flexDirection: "column", gap: 16 }}>
+
+      {/* 지금 할 일 — 에러 분석 빠른 시작 */}
+      <div>
+        <div style={sectionLabel}>지금 할 일</div>
+        <button
+          onClick={isAiReady ? () => onSelectMode("build") : undefined}
+          disabled={!isAiReady}
+          title={!isAiReady ? "AI 설정 필요 — 상단 상태에서 확인하세요" : undefined}
+          style={{
+            width: "100%", textAlign: "left", border: `1px solid ${accent}`,
+            borderRadius: 6, background: "var(--vscode-input-background, #252526)",
+            padding: "12px 14px", cursor: isAiReady ? "pointer" : "not-allowed",
+            opacity: isAiReady ? 1 : 0.55,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            <span style={{ color: accent, display: "inline-flex" }}><Icon.Alert size={16} /></span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: fg }}>에러 분석</span>
+          </div>
+          <div style={{ fontSize: 11, color: muted, lineHeight: 1.45, marginBottom: 10 }}>
+            터미널 에러를 분석해 코드 수정안을 제안합니다.
+          </div>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            padding: "7px", borderRadius: 5, border: `1px solid ${accent}`,
+            color: accent, fontSize: 12.5, fontWeight: 600,
+          }}>
+            분석 시작 <Icon.ChevronRight size={14} />
+          </div>
+        </button>
+      </div>
+
+      {/* 워크플로 */}
+      <div>
+        <div style={sectionLabel}>워크플로</div>
+        <StepRow
+          icon={<Icon.Alert size={20} />}
+          label="Build" sub="코드·에러 수정"
+          enabled={isAiReady} right={isAiReady ? ">" : "AI 필요"}
+          onClick={() => onSelectMode("build")}
+        />
+        <StepRow
+          icon={<Icon.Container size={20} />}
+          label="Deploy" sub="컨테이너·배포 검증"
+          enabled={isAiReady} right={isAiReady ? ">" : "AI 필요"}
+          onClick={() => onSelectMode("ship")}
+        />
+        <StepRow
+          icon={<Icon.Cloud size={20} />}
+          label="Operate" sub="운영 대응"
+          enabled={isOpsReady} right={isOpsReady ? ">" : "대기"}
+          onClick={() => onSelectMode("operate")}
+          last
+        />
+      </div>
+
+      {/* Deploy Replay (보조) */}
+      <button
+        onClick={() => onSelectMode("replay")}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", gap: 8,
+          padding: "9px 2px", background: "none", border: "none",
+          borderTop: "1px solid var(--vscode-panel-border, #2a2a2a)",
+          color: muted, fontSize: 12, cursor: "pointer", textAlign: "left",
+        }}
+      >
+        <Icon.Replay size={16} />
+        <span style={{ flex: 1 }}>Deploy Replay</span>
+        <Icon.ChevronRight size={14} />
+      </button>
     </div>
-
-    <ActionCard
-      icon={<Icon.Alert size={18} />}
-      title="에러 분석"
-      description="터미널 에러를 자동 분석하고 코드 수정안을 제안합니다."
-      accent="#ef4444"
-      enabled={isAiReady}
-      disabledReason="AI 설정 필요 — 시스템 진단에서 확인하세요"
-      onClick={() => onSelectMode("build")}
-    />
-
-    <ActionCard
-      icon={<Icon.Container size={18} />}
-      title="Dockerfile · 배포"
-      description="스택을 감지해 Dockerfile을 만들고 docker build/run · Health Check 수행."
-      accent="#3b82f6"
-      enabled={isAiReady}
-      disabledReason={!isAiReady ? "AI 설정 필요" : !isDockerReady ? "Docker 미감지 — 생성만 가능" : undefined}
-      onClick={() => onSelectMode("ship")}
-    />
-
-    <ActionCard
-      icon={<Icon.Cloud size={18} />}
-      title="운영 대응"
-      description="EC2 incident 조회 → AI 분석 → 승인 기반 원격 명령 실행."
-      accent="#22c55e"
-      enabled={isOpsReady}
-      disabledReason="2학기 — AWS Deploy + Ops 설정 필요"
-      onClick={() => onSelectMode("operate")}
-    />
-
-    <ActionCard
-      icon={<Icon.Replay size={18} />}
-      title="Deploy Replay"
-      description="배포 이벤트를 영상처럼 재생 — 속도 조절, 시점 점프, Postmortem 자동 생성."
-      accent="#a78bfa"
-      enabled={true}
-      onClick={() => onSelectMode("replay")}
-    />
-  </div>
-);
+  );
+};
 
 // ---------------------------------------------------------------------------
 // Sub-page header (뒤로가기)
@@ -468,7 +526,7 @@ const App: React.FC = () => {
       diagnostics.ops_ready === "ready"
     : false;
 
-  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "Dockerfile · 배포" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : "";
+  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "Deploy" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : "";
 
   return (
     <div style={{
@@ -484,29 +542,16 @@ const App: React.FC = () => {
       {view === "home" && <Hero />}
       {view !== "home" && <SubHeader title={subTitle} onBack={() => setView("home")} />}
 
-      {/* Status pills */}
-      <StatusPills diagnostics={diagnostics} coreStatus={coreHealth?.status ?? null} />
-
-      {/* 진단 토글 */}
-      <div style={{ display: "flex", justifyContent: "flex-end", padding: "0 12px 4px" }}>
-        <button
-          onClick={() => {
-            setShowDiagnostics((v) => !v);
-            if (!showDiagnostics) postMessage("runDiagnostics", {});
-          }}
-          style={{
-            background: "none",
-            border: "none",
-            color: "var(--vscode-textLink-foreground, #4a9eff)",
-            fontSize: 10,
-            cursor: "pointer",
-            padding: "2px 0",
-            opacity: 0.7,
-          }}
-        >
-          {showDiagnostics ? "진단 숨기기" : "시스템 진단"}
-        </button>
-      </div>
+      {/* Status badge (펼치면 진단 상세) */}
+      <StatusBadge
+        diagnostics={diagnostics}
+        coreStatus={coreHealth?.status ?? null}
+        expanded={showDiagnostics}
+        onToggle={() => {
+          setShowDiagnostics((v) => !v);
+          if (!showDiagnostics) postMessage("runDiagnostics", {});
+        }}
+      />
 
       {showDiagnostics && (
         <div style={{

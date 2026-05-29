@@ -125,12 +125,12 @@ class IncidentAgent:
             record = await self._rca_heuristic(record)
 
         # confidence 내림차순 정렬
-        record.rca_candidates.sort(key=lambda c: c.confidence_score, reverse=True)
+        record.rca_candidates.sort(key=lambda c: c.confidence, reverse=True)
         logger.info(
             "RCA completed: incident=%s candidates=%d top_confidence=%.2f",
             record.incident_id,
             len(record.rca_candidates),
-            record.rca_candidates[0].confidence_score if record.rca_candidates else 0.0,
+            record.rca_candidates[0].confidence if record.rca_candidates else 0.0,
         )
         return record
 
@@ -203,14 +203,14 @@ Respond in JSON format:
             response = await llm_client.complete(prompt)
             data = json.loads(response)
             for c in data.get("candidates", []):
+                description = c.get("description")
+                evidence = ([description] if description else []) + list(c.get("evidence", []))
                 record.rca_candidates.append(
                     RCACandidate(
-                        title=c["title"],
-                        description=c["description"],
-                        confidence_score=float(c.get("confidence_score", 0.5)),
-                        evidence=c.get("evidence", []),
-                        related_event_ids=[e.event_id for e in record.timeline[:3]],
-                        suggested_fix=c.get("suggested_fix"),
+                        hypothesis=c["title"],
+                        evidence=evidence,
+                        confidence=float(c.get("confidence_score", 0.5)),
+                        rollback_hint=c.get("suggested_fix"),
                     )
                 )
         except Exception as exc:
@@ -227,18 +227,17 @@ Respond in JSON format:
             latest_deploy = deploy_events[-1]
             record.rca_candidates.append(
                 RCACandidate(
-                    title="최근 배포와의 상관관계",
-                    description=(
-                        f"장애 직전 배포({latest_deploy.related_deployment_id})가 "
-                        f"발생했습니다. 코드 변경 또는 설정 변경이 원인일 가능성이 높습니다."
-                    ),
-                    confidence_score=0.75,
+                    hypothesis="최근 배포와의 상관관계",
+                    confidence=0.75,
                     evidence=[
+                        (
+                            f"장애 직전 배포({latest_deploy.related_deployment_id})가 "
+                            f"발생했습니다. 코드 변경 또는 설정 변경이 원인일 가능성이 높습니다."
+                        ),
                         f"배포 ID: {latest_deploy.related_deployment_id}",
                         f"배포 시각: {latest_deploy.occurred_at.isoformat()}",
                     ],
-                    related_event_ids=[latest_deploy.event_id],
-                    suggested_fix="배포를 롤백하고 변경 사항을 코드 리뷰합니다",
+                    rollback_hint="배포를 롤백하고 변경 사항을 코드 리뷰합니다",
                 )
             )
 
@@ -248,28 +247,29 @@ Respond in JSON format:
             latest_commit = commit_events[-1]
             record.rca_candidates.append(
                 RCACandidate(
-                    title="코드 변경 원인 추정",
-                    description=(
-                        f"커밋 {latest_commit.related_commit_sha[:8]}이 "
-                        f"장애 전후로 배포됐습니다."
-                    ),
-                    confidence_score=0.60,
+                    hypothesis="코드 변경 원인 추정",
+                    confidence=0.60,
                     evidence=[
+                        (
+                            f"커밋 {latest_commit.related_commit_sha[:8]}이 "
+                            f"장애 전후로 배포됐습니다."
+                        ),
                         f"커밋 SHA: {latest_commit.related_commit_sha}",
                     ],
-                    related_event_ids=[latest_commit.event_id],
-                    suggested_fix="해당 커밋을 git revert하고 PR을 생성합니다 (ADR-005)",
+                    rollback_hint="해당 커밋을 git revert하고 PR을 생성합니다 (ADR-005)",
                 )
             )
 
         # 기본 후보 (항상 추가)
         record.rca_candidates.append(
             RCACandidate(
-                title="외부 의존성 장애",
-                description="데이터베이스, 캐시, 외부 API 등 의존성 서비스 장애 가능성",
-                confidence_score=0.30,
-                evidence=["타임라인 이벤트 기반 추정"],
-                suggested_fix="의존성 서비스 상태를 확인하고 서킷 브레이커 설정을 검토합니다",
+                hypothesis="외부 의존성 장애",
+                confidence=0.30,
+                evidence=[
+                    "데이터베이스, 캐시, 외부 API 등 의존성 서비스 장애 가능성",
+                    "타임라인 이벤트 기반 추정",
+                ],
+                rollback_hint="의존성 서비스 상태를 확인하고 서킷 브레이커 설정을 검토합니다",
             )
         )
 
@@ -294,10 +294,9 @@ Respond in JSON format:
         )
 
         rca_md = "\n\n".join(
-            f"### {i+1}. {c.title} (confidence: {c.confidence_score:.0%})\n\n"
-            f"{c.description}\n\n"
+            f"### {i+1}. {c.hypothesis} (confidence: {c.confidence:.0%})\n\n"
             f"**근거**:\n" + "\n".join(f"- {ev}" for ev in c.evidence) +
-            (f"\n\n**권장 조치**: {c.suggested_fix}" if c.suggested_fix else "")
+            (f"\n\n**권장 조치**: {c.rollback_hint}" if c.rollback_hint else "")
             for i, c in enumerate(record.rca_candidates)
         ) if record.rca_candidates else "_RCA 결과 없음_"
 
