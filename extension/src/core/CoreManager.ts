@@ -167,6 +167,18 @@ export class CoreManager {
         } catch { return null; }
     }
 
+    /** 게이트웨이 모드 env: recoder.gateway.url + 저장된 학생 토큰이 모두 있으면 주입. */
+    private async _gatewayEnv(): Promise<Record<string, string>> {
+        try {
+            const url = (vscode.workspace.getConfiguration('recoder.gateway').get<string>('url', '') || '').trim();
+            const token = (await this.extensionContext.secrets.get('recoder.studentToken')) || '';
+            if (url && token) {
+                return { RECODER_LLM_GATEWAY_URL: url, RECODER_STUDENT_TOKEN: token };
+            }
+        } catch { /* ignore */ }
+        return {};
+    }
+
     private async spawnCore(): Promise<void> {
         this.isSpawning = true;
         try {
@@ -183,8 +195,12 @@ export class CoreManager {
                 ? ['--port', String(this.port), '--workspace', workspacePath]
                 : spec.args;
 
+            // 게이트웨이 모드: 설정 URL + 저장된 학생 토큰이 있으면 Core 에 env 주입 →
+            // Core 의 provider_router 가 Bedrock 직접호출 대신 운영자 게이트웨이를 사용.
+            const gatewayEnv = await this._gatewayEnv();
+
             this.coreProcess = spawn(spec.command, args, {
-                env: { ...process.env },
+                env: { ...process.env, ...gatewayEnv },
                 detached: false,
                 stdio: ['ignore', 'pipe', 'pipe'],
                 cwd: spec.cwd,

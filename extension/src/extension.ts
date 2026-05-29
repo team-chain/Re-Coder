@@ -22,6 +22,7 @@ import { WorkbenchPanel } from './sidebar/WorkbenchPanel';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
 import { BridgeClient } from './bridge/BridgeClient';
+import { ensureEnrolled, runEnrollCommand } from './gateway/enroll';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -51,6 +52,14 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.window.showInformationMessage('ReCoder Bridge 재연결 시도');
         }),
     );
+
+    // ── 게이트웨이 자가발급(enroll) ───────────────────────────────────────────
+    // recoder.gateway.url 이 설정돼 있고 아직 토큰이 없으면 최초 실행 시 반 코드를
+    // 물어 발급한다("확장만 설치 → 반 코드 1회 → AWS 키 없이 AI"). 명령으로도 가능.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.enroll', () => runEnrollCommand(context)),
+    );
+    void ensureEnrolled(context);
 
     // ── Sidebar provider ────────────────────────────────────────────────────
     const sidebarProvider = new SidebarProvider(
