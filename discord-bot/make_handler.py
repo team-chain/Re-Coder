@@ -70,6 +70,12 @@ MODEL_MAX_TOKENS: dict[str, int] = {
     "us.anthropic.claude-haiku-4-5-20251001-v1:0": 8192,
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 8192,
     "us.anthropic.claude-sonnet-4-20250514-v1:0": 8192,
+    # APAC / global inference profiles (계정 list_inference_profiles 기준)
+    "apac.anthropic.claude-3-sonnet-20240229-v1:0": 4096,
+    "apac.anthropic.claude-3-5-sonnet-20240620-v1:0": 8192,
+    "apac.anthropic.claude-3-5-sonnet-20241022-v2:0": 8192,
+    "global.anthropic.claude-sonnet-4-5-20250929-v1:0": 8192,
+    "global.anthropic.claude-sonnet-4-6": 8192,
 }
 # 모델 한도 알 수 없으면 가장 보수적인 값 (4096) 사용 → ValidationException 회피
 _DEFAULT_MODEL_MAX_TOKENS = 4096
