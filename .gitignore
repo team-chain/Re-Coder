@@ -44,3 +44,5 @@ core/api/routes/_deploy_tail.py
 core/build/
 core/dist/
 extension/bin/
+gateway/deploy-token.csv
+*token*.csv

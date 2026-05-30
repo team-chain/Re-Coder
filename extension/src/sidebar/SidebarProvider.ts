@@ -14,6 +14,7 @@ import {
 import { ApiClient } from '../core/ApiClient';
 import { CoreManager } from '../core/CoreManager';
 import { PollingService } from '../core/PollingService';
+import { analyzeProject, analyzeFile } from '../codemap/analyzer';
 
 /**
  * Core 의 ReadyStatus enum 값("ok" | "partial" | "fail")을 Webview 가 기대하는
@@ -63,6 +64,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly _codegenDocs = new Map<string, string>();
     private _codegenProviderRegistered = false;
     private _view?: vscode.WebviewView;
+    // 구조 지도 자동 갱신: 파일 변경 감시 + 디바운스
+    private _mapWatcher?: vscode.FileSystemWatcher;
+    private _mapRefreshTimer?: ReturnType<typeof setTimeout>;
     private _state: SidebarState;
 
     constructor(
@@ -132,6 +136,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         this.postMessage('stateUpdate', this._state);
 
+        // 파일이 생기거나 바뀌면 구조 지도를 자동으로 다시 그린다(서버 불필요).
+        this._setupMapWatcher();
+
         webviewView.onDidChangeVisibility(() => {
             if (webviewView.visible) {
                 this._pollingService.start(
@@ -143,11 +150,52 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         });
 
-        webviewView.onDidDispose(() => { this._pollingService.stop(); });
+        webviewView.onDidDispose(() => {
+            this._pollingService.stop();
+            this._mapWatcher?.dispose();
+            this._mapWatcher = undefined;
+            if (this._mapRefreshTimer) { clearTimeout(this._mapRefreshTimer); }
+        });
     }
 
     postMessage(type: string, payload: unknown): void {
         if (this._view) { void this._view.webview.postMessage({ type, payload }); }
+    }
+
+    /** 워크스페이스 파일 변경을 감시해 구조 지도를 자동 갱신한다(생성/삭제/수정). */
+    private _setupMapWatcher(): void {
+        if (this._mapWatcher) { return; }
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) { return; }
+        const pattern = new vscode.RelativePattern(folder, '**/*.{py,js,mjs,jsx,ts,tsx,html,htm,css}');
+        const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+        const SKIP = ['node_modules/', '.git/', '.venv/', 'venv/', 'out/', 'dist/', 'build/', 'site-packages/', '__pycache__/', '.next/', 'coverage/', '.aws-sam/'];
+        const onFsEvent = (uri: vscode.Uri) => {
+            const rel = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
+            if (SKIP.some((d) => rel.startsWith(d) || rel.includes('/' + d))) { return; }
+            this._scheduleMapRefresh();
+        };
+        watcher.onDidCreate(onFsEvent);
+        watcher.onDidDelete(onFsEvent);
+        watcher.onDidChange(onFsEvent);
+        this._mapWatcher = watcher;
+    }
+
+    /** 연속 변경을 모아 0.6초 뒤 한 번만 재분석(저장 폭주 방지). */
+    private _scheduleMapRefresh(): void {
+        if (this._mapRefreshTimer) { clearTimeout(this._mapRefreshTimer); }
+        this._mapRefreshTimer = setTimeout(() => { this._doMapRefresh(); }, 600);
+    }
+
+    /** 사이드바가 보일 때만 재분석해 webview 에 푸시(파일 뷰면 화면을 빼앗지 않음). */
+    private _doMapRefresh(): void {
+        try {
+            if (!this._view?.visible) { return; }
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            if (!root) { return; }
+            const data = analyzeProject(root);
+            this.postMessage('map.projectResult', data);
+        } catch { /* 무해하게 무시 */ }
     }
 
     /** 탐색기에서 폴더 우클릭 → '여기에 코드 생성' 시 webview 에 대상 폴더 주입. */
@@ -665,6 +713,45 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     } catch { /* skip */ }
                 }
                 if (files.length) { this.postMessage('code.contextAdded', { files }); }
+                break;
+            }
+            case 'map.project': {
+                try {
+                    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                    if (!root) { this.postMessage('map.error', { message: '분석할 폴더가 열려있지 않습니다.' }); break; }
+                    // 서버 불필요 — 확장 내부에서 정적 분석.
+                    const data = analyzeProject(root);
+                    this.postMessage('map.projectResult', data);
+                } catch (err) {
+                    this.postMessage('map.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'map.file': {
+                const { id } = (payload ?? {}) as { id?: string };
+                try {
+                    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                    if (!root) { this.postMessage('map.error', { message: '워크스페이스가 열려있지 않습니다.' }); break; }
+                    const safe = (id ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
+                    if (!safe) { this.postMessage('map.error', { message: '대상 파일이 없습니다.' }); break; }
+                    const abs = vscode.Uri.joinPath(root, safe).fsPath;
+                    const data = analyzeFile(abs);
+                    this.postMessage('map.fileResult', data);
+                } catch (err) {
+                    this.postMessage('map.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'map.openFile': {
+                const { id } = (payload ?? {}) as { id?: string };
+                try {
+                    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                    if (!root || !id) { break; }
+                    const safe = id.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
+                    await vscode.window.showTextDocument(vscode.Uri.joinPath(root, safe));
+                } catch (err) {
+                    this.postMessage('map.error', { message: String(err) });
+                }
                 break;
             }
             default:

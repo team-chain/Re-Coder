@@ -290,6 +290,9 @@ export class CoreManager {
         } catch { /* ignore */ }
         const runtimePath = this.getRuntimeJsonPath();
         try { if (fs.existsSync(runtimePath)) { fs.unlinkSync(runtimePath); } } catch { /* ignore */ }
+        // 싱글톤 락도 함께 제거 — 스테일 락이 남으면 새 Core 가 옛 Core 에 양보(window 등록)해
+        // 라우트 없는 옛 포트를 가리키는 문제를 막는다.
+        try { if (fs.existsSync(this._lockPath)) { fs.unlinkSync(this._lockPath); } } catch { /* ignore */ }
     }
 
     async healthCheck(): Promise<CoreHealth | null> {
@@ -433,11 +436,12 @@ export class CoreManager {
         ];
         const mainPy = candidates.find(p => fs.existsSync(p));
         if (mainPy) {
-            const py = this._findPython();
+            const coreDir = path.dirname(mainPy);
+            const py = this._findPython(coreDir);
             return {
                 command: py,
                 args: [mainPy],
-                cwd: path.dirname(mainPy),
+                cwd: coreDir,
             };
         }
 
@@ -452,9 +456,20 @@ export class CoreManager {
         return spec.args.length === 0 ? spec.command : '';
     }
 
-    /** Windows 는 python.exe / python / py, 그 외는 python3 / python 우선. */
-    private _findPython(): string {
+    /**
+     * Core 소스를 실행할 python 을 고른다.
+     * 개발 모드에서는 프로젝트 venv(core/.venv)를 최우선 — 글로벌 python 에
+     * Core 의존성(fastapi 등)이 없어도 바로 뜨게 한다.
+     */
+    private _findPython(coreDir?: string): string {
         const isWin = process.platform === 'win32';
+        // 0) 프로젝트 venv 우선 (의존성 포함)
+        if (coreDir) {
+            const venvPy = isWin
+                ? path.join(coreDir, '.venv', 'Scripts', 'python.exe')
+                : path.join(coreDir, '.venv', 'bin', 'python');
+            if (fs.existsSync(venvPy)) { return venvPy; }
+        }
         const candidates = isWin
             ? ['python.exe', 'python', 'py']
             : ['python3', 'python'];
