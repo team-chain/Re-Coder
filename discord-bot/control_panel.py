@@ -59,6 +59,36 @@ def _progress_embed(steps: list[list], url: str = "") -> discord.Embed:
 
 
 # ── 배포 공통 ────────────────────────────────────────────────────────────────
+def _make_qr_file(url: str):
+    """배포 URL을 QR PNG(discord.File)로. 라이브 발표용 — 청중이 스캔해 바로 접속."""
+    try:
+        import io
+        import qrcode
+        img = qrcode.make(url)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return discord.File(buf, filename="deploy-qr.png")
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger("recoder-bot").warning(
+            "QR 생성 실패(%s) — 'pip install qrcode Pillow' 후 봇 재시작하세요.", e)
+        return None
+
+
+async def _announce_deploy(interaction: discord.Interaction, url: str):
+    """배포 결과를 채널에 공개 게시(URL + QR). 발표 화면에서 보이고 청중이 스캔."""
+    qr = _make_qr_file(url)
+    text = f"**배포 완료** — 공개 주소\n{url}\nQR을 스캔하면 바로 열립니다."
+    try:
+        if qr:
+            await interaction.channel.send(content=text, file=qr)
+        else:
+            await interaction.channel.send(content=text)
+    except Exception:
+        pass
+
+
 def _current_session(channel_id: int) -> dict | None:
     sess = make_handler._SESSIONS.get(channel_id)
     if sess and sess.get("code"):
@@ -123,7 +153,8 @@ class DeploySelect(discord.ui.Select):
         try:
             if choice == "s3":
                 url = await _deploy_s3(interaction)
-                await interaction.followup.send(f"배포 완료 — 공개 주소: {url}", ephemeral=True)
+                await _announce_deploy(interaction, url)
+                await interaction.followup.send("배포 완료 — 채널에 주소·QR을 게시했어요.", ephemeral=True)
             else:
                 await _preview_local(interaction)
                 await interaction.followup.send("VSCode에서 미리보기를 열었습니다.", ephemeral=True)
@@ -192,6 +223,7 @@ async def _run_all(interaction: discord.Interaction, prompt: str):
         return
     steps[3] = ["운영", "skip", "2학기"]
     await msg.edit(embed=_progress_embed(steps, url=url))
+    await _announce_deploy(interaction, url)
 
 
 # ── 패널 View ────────────────────────────────────────────────────────────────
