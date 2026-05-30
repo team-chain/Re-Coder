@@ -33,12 +33,13 @@ import { OperateMode } from "./components/OperateMode";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
 import { Replay } from "./components/Replay";
+import CodeMap from "./components/CodeMap";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type ViewMode = "home" | "build" | "ship" | "operate" | "replay";
+type ViewMode = "home" | "build" | "ship" | "operate" | "replay" | "map";
 
 interface DiagnosticsResult {
   core_ready: string;
@@ -157,6 +158,13 @@ const Icon = {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <polygon points="5 3 19 12 5 21 5 3" />
       <line x1="19" y1="20" x2="19" y2="4" />
+    </svg>
+  ),
+  /** Map — 노드 그래프 (구조 지도) */
+  Map: ({ size = 18 }: { size?: number }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="6" cy="5" r="2.2" /><circle cx="18" cy="9" r="2.2" /><circle cx="7" cy="19" r="2.2" />
+      <line x1="7.6" y1="6.6" x2="16.2" y2="7.7" /><line x1="6.4" y1="7.1" x2="6.8" y2="16.8" />
     </svg>
   ),
 };
@@ -393,6 +401,12 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
   return (
     <div style={{ padding: "14px 12px 10px", display: "flex", flexDirection: "column", gap: 16 }}>
 
+      {/* 구조 지도 — 홈에서 바로 표시 (정적 분석이라 AI 없이 동작) */}
+      <div>
+        <div style={sectionLabel}>구조 지도</div>
+        <CodeMap isActive={true} />
+      </div>
+
       {/* 워크플로 */}
       <div>
         <div style={sectionLabel}>워크플로</div>
@@ -522,7 +536,7 @@ const App: React.FC = () => {
       diagnostics.ops_ready === "ready"
     : false;
 
-  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "Deploy" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : "";
+  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "Deploy" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : view === "map" ? "구조 지도" : "";
 
   return (
     <div style={{
@@ -590,6 +604,11 @@ const App: React.FC = () => {
         {view === "replay" && (
           <div style={{ padding: "10px 10px 8px" }}>
             <Replay />
+          </div>
+        )}
+        {view === "map" && (
+          <div style={{ padding: "10px 10px 8px" }}>
+            <CodeMap isActive={view === "map"} />
           </div>
         )}
       </div>

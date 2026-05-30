@@ -246,7 +246,7 @@
         },
         "recoder.gateway.url": {
           "type": "string",
-          "default": "",
+          "default": "https://tfuvwq54xg.execute-api.ap-northeast-2.amazonaws.com",
           "description": "운영자 Bedrock 게이트웨이 베이스 URL. 설정 시 최초 실행에서 반 코드로 토큰을 발급받아 AWS 키 없이 AI를 사용합니다. 비우면 본인 AWS(BYO) 모드."
         },
         "recoder.bridge.httpPort": {

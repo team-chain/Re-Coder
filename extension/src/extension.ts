@@ -60,7 +60,9 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.enroll', () => runEnrollCommand(context)),
     );
-    void ensureEnrolled(context);
+    // 자동 팝업 제거 — 운영자/일반 사용자에게 매번 'enroll 코드' 묻지 않는다.
+    // 게이트웨이 연결이 필요하면 명령 팔레트에서 'recoder.enroll' 로 수동 실행.
+    // void ensureEnrolled(context);
 
     // ── Sidebar provider ────────────────────────────────────────────────────
     const sidebarProvider = new SidebarProvider(
