@@ -40,3 +40,4 @@ recoder-runtime.json
 core/eval_report.json
 eval_report.json
 core/api/routes/_deploy_tail.py
+.aws-sam/

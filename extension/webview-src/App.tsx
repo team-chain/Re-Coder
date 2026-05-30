@@ -83,6 +83,26 @@ const Icon = {
       <line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
   ),
+  /** 코드 / Build - 꺾쇠 */
+  Code: ({ size = 18 }: { size?: number }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
+    </svg>
+  ),
+  /** Git / GitHub */
+  Git: ({ size = 18 }: { size?: number }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="6" cy="6" r="2.2" /><circle cx="6" cy="18" r="2.2" /><circle cx="18" cy="9" r="2.2" />
+      <path d="M6 8.2v7.6M18 11.2a6 6 0 0 1-6 6H8.5" />
+    </svg>
+  ),
+  /** 채팅 / Discord */
+  Chat: ({ size = 18 }: { size?: number }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7a8.5 8.5 0 0 1-.9-3.8 8.38 8.38 0 0 1 8.5-8.5 8.5 8.5 0 0 1 8.5 8.5z" />
+    </svg>
+  ),
   /** 컨테이너 / Ship - 박스 + 화살표 */
   Container: ({ size = 18 }: { size?: number }) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -146,35 +166,10 @@ const Icon = {
 // ---------------------------------------------------------------------------
 
 const Hero: React.FC = () => (
-  <div style={{
-    padding: "16px 14px 12px",
-    background: "var(--vscode-sideBar-background, #1e1e1e)",
-    borderBottom: "1px solid var(--vscode-panel-border, #2a2a2a)",
-  }}>
-    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-      <div style={{ color: "var(--vscode-textLink-foreground, #4a9eff)" }}>
-        <Icon.Logo size={32} />
-      </div>
-      <div>
-        <div style={{
-          fontSize: 16,
-          fontWeight: 700,
-          color: "var(--vscode-foreground, #e0e0e0)",
-          letterSpacing: "-0.01em",
-          lineHeight: 1.1,
-        }}>
-          Re-Coder
-        </div>
-        <div style={{
-          fontSize: 10,
-          fontWeight: 500,
-          color: "var(--vscode-descriptionForeground, #888)",
-          letterSpacing: "0.04em",
-          marginTop: 2,
-        }}>
-          Remember. Return. Re-Code.
-        </div>
-      </div>
+  <div style={{ padding: "18px 16px 8px", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+      <span style={{ color: "var(--vscode-foreground, #e0e0e0)", display: "inline-flex" }}><Icon.Logo size={22} /></span>
+      <span style={{ fontSize: 20, fontWeight: 600, color: "var(--vscode-foreground, #e0e0e0)", letterSpacing: "-0.01em" }}>ReCoder</span>
     </div>
   </div>
 );
@@ -337,99 +332,100 @@ interface HomeProps {
   isDockerReady: boolean;
   isOpsReady: boolean;
   onSelectMode: (mode: ViewMode) => void;
+  postMessage: (type: string, payload?: unknown) => void;
+  awsReady: boolean;
+  githubReady: boolean;
 }
 
-const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSelectMode }) => {
+const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSelectMode, postMessage, awsReady, githubReady }) => {
   const accent = "var(--vscode-textLink-foreground, #4a9eff)";
   const green = "var(--vscode-charts-green, #3fb950)";
   const muted = "var(--vscode-descriptionForeground, #888)";
   const fg = "var(--vscode-foreground, #e0e0e0)";
 
   const sectionLabel: React.CSSProperties = {
-    fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase",
-    color: muted, marginBottom: 10,
+    fontSize: 11, fontWeight: 400, color: muted, marginBottom: 6, marginLeft: 2,
   };
 
   const StepRow: React.FC<{
-    icon: React.ReactNode; label: string; sub: string;
-    enabled: boolean; right: string; onClick: () => void; last?: boolean;
-  }> = ({ icon, label, sub, enabled, right, onClick, last }) => (
+    icon: React.ReactNode; label: string;
+    enabled: boolean; hint?: string; onClick: () => void; last?: boolean;
+  }> = ({ icon, label, enabled, hint, onClick, last }) => (
     <button
       onClick={enabled ? onClick : undefined}
       disabled={!enabled}
       style={{
         width: "100%", display: "flex", alignItems: "center", gap: 12,
-        padding: "10px 2px", background: "none", border: "none",
-        borderBottom: last ? "none" : "1px solid var(--vscode-panel-border, #2a2a2a)",
+        padding: "11px 2px", background: "none", border: "none",
+        borderBottom: last ? "none" : "0.5px solid var(--vscode-panel-border, #2a2a2a)",
         textAlign: "left", cursor: enabled ? "pointer" : "default",
-        opacity: enabled ? 1 : 0.6,
+        opacity: enabled ? 1 : 0.55,
       }}
     >
-      <span style={{ color: enabled ? accent : muted, display: "inline-flex", flexShrink: 0 }}>{icon}</span>
-      <span style={{ lineHeight: 1.3, flex: 1, minWidth: 0 }}>
-        <span style={{ display: "block", fontSize: 13, color: enabled ? fg : muted }}>{label}</span>
-        <span style={{ display: "block", fontSize: 11, color: muted }}>{sub}</span>
+      <span style={{ color: enabled ? fg : muted, display: "inline-flex", flexShrink: 0 }}>{icon}</span>
+      <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: enabled ? fg : muted }}>{label}</span>
+      {enabled
+        ? <span style={{ color: muted, display: "inline-flex", flexShrink: 0 }}><Icon.ChevronRight size={15} /></span>
+        : <span style={{ fontSize: 11, color: muted, flexShrink: 0 }}>{hint}</span>}
+    </button>
+  );
+
+  const ConnRow: React.FC<{
+    icon: React.ReactNode; label: string; connected: boolean; actionLabel?: string; onConnect: () => void; last?: boolean;
+  }> = ({ icon, label, connected, actionLabel, onConnect, last }) => (
+    <button
+      onClick={onConnect}
+      style={{
+        width: "100%", display: "flex", alignItems: "center", gap: 12,
+        padding: "11px 2px", background: "none", border: "none",
+        borderBottom: last ? "none" : "0.5px solid var(--vscode-panel-border, #2a2a2a)",
+        textAlign: "left", cursor: "pointer",
+      }}
+    >
+      <span style={{ color: fg, display: "inline-flex", flexShrink: 0 }}>{icon}</span>
+      <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: fg }}>{label}</span>
+      <span style={{ fontSize: 12, color: connected ? muted : accent, flexShrink: 0 }}>
+        {connected ? "연결됨" : (actionLabel ?? "연결")}
       </span>
-      <span style={{ fontSize: 11, color: muted, flexShrink: 0 }}>{right}</span>
     </button>
   );
 
   return (
     <div style={{ padding: "14px 12px 10px", display: "flex", flexDirection: "column", gap: 16 }}>
 
-      {/* 지금 할 일 — 에러 분석 빠른 시작 */}
-      <div>
-        <div style={sectionLabel}>지금 할 일</div>
-        <button
-          onClick={isAiReady ? () => onSelectMode("build") : undefined}
-          disabled={!isAiReady}
-          title={!isAiReady ? "AI 설정 필요 — 상단 상태에서 확인하세요" : undefined}
-          style={{
-            width: "100%", textAlign: "left", border: `1px solid ${accent}`,
-            borderRadius: 6, background: "var(--vscode-input-background, #252526)",
-            padding: "12px 14px", cursor: isAiReady ? "pointer" : "not-allowed",
-            opacity: isAiReady ? 1 : 0.55,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-            <span style={{ color: accent, display: "inline-flex" }}><Icon.Alert size={16} /></span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: fg }}>에러 분석</span>
-          </div>
-          <div style={{ fontSize: 11, color: muted, lineHeight: 1.45, marginBottom: 10 }}>
-            터미널 에러를 분석해 코드 수정안을 제안합니다.
-          </div>
-          <div style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            padding: "7px", borderRadius: 5, border: `1px solid ${accent}`,
-            color: accent, fontSize: 12.5, fontWeight: 600,
-          }}>
-            분석 시작 <Icon.ChevronRight size={14} />
-          </div>
-        </button>
-      </div>
-
       {/* 워크플로 */}
       <div>
         <div style={sectionLabel}>워크플로</div>
         <StepRow
-          icon={<Icon.Alert size={20} />}
-          label="Build" sub="코드·에러 수정"
-          enabled={isAiReady} right={isAiReady ? ">" : "AI 필요"}
+          icon={<Icon.Code size={19} />}
+          label="Build"
+          enabled={isAiReady} hint="AI 필요"
           onClick={() => onSelectMode("build")}
         />
         <StepRow
-          icon={<Icon.Container size={20} />}
-          label="Deploy" sub="컨테이너·배포 검증"
-          enabled={isAiReady} right={isAiReady ? ">" : "AI 필요"}
+          icon={<Icon.Container size={19} />}
+          label="Deploy"
+          enabled={isAiReady} hint="AI 필요"
           onClick={() => onSelectMode("ship")}
         />
         <StepRow
-          icon={<Icon.Cloud size={20} />}
-          label="Operate" sub="운영 대응"
-          enabled={isOpsReady} right={isOpsReady ? ">" : "대기"}
+          icon={<Icon.Cloud size={19} />}
+          label="Operate"
+          enabled={isOpsReady} hint="대기"
           onClick={() => onSelectMode("operate")}
           last
         />
+      </div>
+
+      {/* 연결 */}
+      <div>
+        <div style={sectionLabel}>연결</div>
+        <ConnRow icon={<Icon.Git size={19} />} label="GitHub" connected={githubReady}
+          onConnect={() => postMessage("webview.diagnostics.fix", { key: "github_ready" })} />
+        <ConnRow icon={<Icon.Cloud size={19} />} label="AWS" connected={awsReady}
+          onConnect={() => postMessage("webview.diagnostics.fix", { key: "aws_deploy_ready" })} />
+        <ConnRow icon={<Icon.Chat size={19} />} label="Discord" connected={false} actionLabel="봇 초대"
+          onConnect={() => postMessage("workbench.open", {})} last />
       </div>
 
       {/* Deploy Replay (보조) */}
@@ -571,6 +567,9 @@ const App: React.FC = () => {
             isDockerReady={isDockerReady}
             isOpsReady={isOpsReady}
             onSelectMode={setView}
+            postMessage={postMessage}
+            awsReady={diagnostics?.aws_deploy_ready === "ready"}
+            githubReady={(diagnostics as unknown as { github_ready?: string })?.github_ready === "ready"}
           />
         )}
         {view === "build" && (
@@ -626,14 +625,6 @@ const App: React.FC = () => {
           <Icon.Dashboard size={14} />
           Workbench 열기
         </button>
-        <div style={{
-          fontSize: 10,
-          color: "var(--vscode-descriptionForeground, #888)",
-          textAlign: "center",
-          marginTop: 5,
-        }}>
-          넓은 대시보드 · 4탭 · 실시간 로그
-        </div>
       </div>
 
       {/* Cost tracker */}

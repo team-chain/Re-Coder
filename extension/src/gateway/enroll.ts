@@ -73,10 +73,21 @@ export async function enrollWithCode(context: vscode.ExtensionContext, code: str
                 await vscode.workspace
                     .getConfiguration('recoder.bridge')
                     .update('studentId', json.student_id, vscode.ConfigurationTarget.Global);
+                // (2) 연동 단순화: Discord 연동용 /recoder link 명령을 바로 복사하게 안내.
+                const linkCmd = `/recoder link ${json.student_id}`;
+                void vscode.window
+                    .showInformationMessage(
+                        `ReCoder 연결 완료 — AWS 키 없이 AI 사용 가능. Discord 연동하려면 채널에 붙여넣기: ${linkCmd}`,
+                        '명령 복사',
+                    )
+                    .then((sel) => {
+                        if (sel === '명령 복사') { void vscode.env.clipboard.writeText(linkCmd); }
+                    });
+            } else {
+                vscode.window.showInformationMessage(
+                    'ReCoder: 연결 완료 — 이제 AWS 키 없이 AI를 사용할 수 있습니다. (Core 재시작 시 적용)',
+                );
             }
-            vscode.window.showInformationMessage(
-                'ReCoder: 연결 완료 — 이제 AWS 키 없이 AI를 사용할 수 있습니다. (Core 재시작 시 적용)',
-            );
             return true;
         }
         vscode.window.showErrorMessage(`ReCoder 발급 실패: ${json.message || json.error || `HTTP ${status}`}`);

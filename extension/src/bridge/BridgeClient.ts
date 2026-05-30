@@ -227,6 +227,9 @@ export class BridgeClient implements vscode.Disposable {
                 return;
             }
 
+            case 'delete':
+                await this._handleDelete(msg);
+                break;
             default:
                 this.output.appendLine(`[bridge] unknown message type: ${msg.type}`);
         }
@@ -388,6 +391,36 @@ export class BridgeClient implements vscode.Disposable {
         // auto_run — 파일 종류별로 실행
         if (msg.auto_run) {
             await this._autoRun(session);
+        }
+    }
+
+    /** 봇이 보내는 { type: "delete", filename } — 워크스페이스에서 파일 삭제(휴지통). */
+    private async _handleDelete(msg: BridgeMessage): Promise<void> {
+        const filename = msg.filename;
+        if (!filename) { return; }
+        const root = this._getWorkspaceRoot();
+        if (!root) {
+            vscode.window.showErrorMessage('ReCoder Bridge: 워크스페이스가 열려있지 않습니다.');
+            return;
+        }
+        const safeName = this._sanitizeFilename(filename);
+        const fileUri = vscode.Uri.joinPath(root, safeName);
+        // 그 파일을 편집 중인 세션이면 먼저 정리
+        if (this.session && this.session.filename === safeName) {
+            this._disposeSession(this.session, /* save */ false);
+            this.session = null;
+        }
+        try {
+            if (!(await this._fileExists(fileUri))) {
+                vscode.window.setStatusBarMessage(`ReCoder: ${safeName} 없음(이미 삭제?)`, 4000);
+                return;
+            }
+            await vscode.workspace.fs.delete(fileUri, { useTrash: true });
+            this.output.appendLine(`[bridge] delete → ${safeName}`);
+            vscode.window.setStatusBarMessage(`ReCoder: ${safeName} 삭제됨`, 4000);
+        } catch (err) {
+            this.output.appendLine(`[bridge] delete failed: ${err}`);
+            vscode.window.showErrorMessage(`ReCoder: ${safeName} 삭제 실패 — ${err}`);
         }
     }
 

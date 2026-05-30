@@ -41,6 +41,11 @@
           "type": "webview",
           "id": "recoder.sidebarView",
           "name": "Re-Coder"
+        },
+        {
+          "type": "webview",
+          "id": "recoder.workbenchView",
+          "name": "Workbench"
         }
       ]
     },
@@ -134,6 +139,11 @@
         "command": "recoder.enroll",
         "title": "ReCoder: Connect to Gateway (Enroll)",
         "icon": "$(key)"
+      },
+      {
+        "command": "recoder.generateInFolder",
+        "title": "ReCoder: 이 폴더에 코드 생성",
+        "icon": "$(sparkle)"
       }
     ],
     "menus": {
@@ -147,6 +157,13 @@
       "terminal/context": [
         {
           "command": "recoder.analyzeError",
+          "group": "recoder@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "recoder.generateInFolder",
+          "when": "explorerResourceIsFolder",
           "group": "recoder@1"
         }
       ]
