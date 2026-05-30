@@ -56,6 +56,12 @@ function _normalizeDiagnostics<T extends Record<string, unknown>>(d: T | null | 
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'recoder.sidebarView';
+
+    // 코드 에이전트 멀티턴: 직전 생성/적용 파일 보관
+    private _lastCodeOps: Array<{ path: string; content: string }> = [];
+    // diff 미리보기용 제안 콘텐츠 (scheme: recoder-codegen)
+    private readonly _codegenDocs = new Map<string, string>();
+    private _codegenProviderRegistered = false;
     private _view?: vscode.WebviewView;
     private _state: SidebarState;
 
@@ -144,6 +150,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (this._view) { void this._view.webview.postMessage({ type, payload }); }
     }
 
+    /** 탐색기에서 폴더 우클릭 → '여기에 코드 생성' 시 webview 에 대상 폴더 주입. */
+    setCodeTargetFolder(folder: string): void {
+        this.postMessage('code.setTargetFolder', { folder });
+    }
+
     triggerAnalysis(request: Partial<AnalyzeRequest>): void {
         this.postMessage('core.analyzeStarted', {});
         void this.handleAnalyze(request);
@@ -173,6 +184,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         switch (type) {
             // ── Build mode (webview-src/components/BuildMode.tsx) ─────────────
+            case 'build.analyzeActive': {
+                // 자동 감지와 동일 경로: 최근 터미널 출력 + 에디터 선택을 모아 분석.
+                await vscode.commands.executeCommand('recoder.analyzeError');
+                break;
+            }
             case 'analyze':
             case 'build.analyze': {
                 // BuildMode.tsx 가 보내는 형태: { error_log: string }
@@ -587,8 +603,170 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'code.generate': {
+                const p = (payload ?? {}) as {
+                    instruction?: string;
+                    openFile?: { path: string; content: string };
+                    targetFolder?: string;
+                    contextFiles?: Array<{ path: string; content: string }>;
+                };
+                await this.handleCodeGenerate(p.instruction ?? '', {
+                    openFile: p.openFile,
+                    targetFolder: p.targetFolder ?? '',
+                    contextFiles: p.contextFiles ?? [],
+                });
+                break;
+            }
+            case 'code.apply': {
+                const { file, content, targetFolder } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string };
+                await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '');
+                break;
+            }
+            case 'code.applyAll': {
+                const { ops, targetFolder } = (payload ?? {}) as { ops?: Array<{ file: string; content: string }>; targetFolder?: string };
+                let okCount = 0;
+                for (const op of ops ?? []) {
+                    const ok = await this.handleCodeApply(op.file, op.content, targetFolder ?? '');
+                    if (ok) { okCount++; }
+                }
+                this.postMessage('code.applied', { file: `전체 ${okCount}개`, ok: okCount > 0 });
+                break;
+            }
+            case 'code.diff': {
+                const { file, content, targetFolder } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string };
+                await this.handleCodeDiff(this._joinFolder(targetFolder ?? '', file ?? ''), content ?? '');
+                break;
+            }
+            case 'code.pickFolder': {
+                const picked = await vscode.window.showOpenDialog({
+                    canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
+                    openLabel: '이 폴더에 생성',
+                    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+                });
+                if (picked && picked[0]) {
+                    const rel = vscode.workspace.asRelativePath(picked[0], false);
+                    this.postMessage('code.folderPicked', { folder: rel === picked[0].fsPath ? '' : rel });
+                }
+                break;
+            }
+            case 'code.pickContext': {
+                const picked = await vscode.window.showOpenDialog({
+                    canSelectFolders: false, canSelectFiles: true, canSelectMany: true,
+                    openLabel: '컨텍스트로 첨부',
+                    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+                });
+                const files: Array<{ path: string; content: string }> = [];
+                for (const uri of picked ?? []) {
+                    try {
+                        const buf = await vscode.workspace.fs.readFile(uri);
+                        let text = new TextDecoder().decode(buf);
+                        if (text.length > 20000) { text = text.slice(0, 20000); }
+                        files.push({ path: vscode.workspace.asRelativePath(uri), content: text });
+                    } catch { /* skip */ }
+                }
+                if (files.length) { this.postMessage('code.contextAdded', { files }); }
+                break;
+            }
             default:
                 console.warn('[SidebarProvider] Unknown message type:', type);
+        }
+    }
+
+    /** EDIT op 의 제안 내용을 현재 파일과 나란히 diff 로 연다(적용 전 검토). */
+    private async handleCodeDiff(file: string, content: string): Promise<void> {
+        if (!this._codegenProviderRegistered) {
+            const docs = this._codegenDocs;
+            vscode.workspace.registerTextDocumentContentProvider('recoder-codegen', {
+                provideTextDocumentContent(uri: vscode.Uri): string {
+                    return docs.get(uri.path.replace(/^\//, '')) ?? '';
+                },
+            });
+            this._codegenProviderRegistered = true;
+        }
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (!root) { this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' }); return; }
+        const safe = file.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
+        if (!safe) { return; }
+        const fileUri = vscode.Uri.joinPath(root, safe);
+        this._codegenDocs.set(safe, content);
+        const proposedUri = vscode.Uri.parse(`recoder-codegen:/${safe}`);
+        try {
+            const exists = await this._fileExists(fileUri);
+            const leftUri = exists ? fileUri : vscode.Uri.parse(`recoder-codegen:/(빈 파일)`);
+            if (!exists) { this._codegenDocs.set('(빈 파일)', ''); }
+            await vscode.commands.executeCommand('vscode.diff', leftUri, proposedUri, `ReCoder 제안: ${safe}`);
+        } catch (err) {
+            this.postMessage('code.error', { message: `diff 열기 실패: ${err}` });
+        }
+    }
+
+    private async _fileExists(uri: vscode.Uri): Promise<boolean> {
+        try { await vscode.workspace.fs.stat(uri); return true; } catch { return false; }
+    }
+
+    /** 워크스페이스 상대 폴더 + 파일명을 안전하게 결합. */
+    private _joinFolder(folder: string, file: string): string {
+        const f = (folder || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+        const n = (file || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        return f ? `${f}/${n}` : n;
+    }
+
+    /** 코드 생성 에이전트 — 자연어 요청을 Core 로 보내 ops 를 받아 webview 로 회신. */
+    private async handleCodeGenerate(
+        instruction: string,
+        opts: { openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }> } = {},
+    ): Promise<void> {
+        if (!instruction.trim()) { return; }
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        // 인자가 없으면 현재 활성 에디터를 컨텍스트로 자동 첨부.
+        let attach = opts.openFile;
+        if (!attach) {
+            const ed = vscode.window.activeTextEditor;
+            if (ed && !ed.document.isUntitled) {
+                attach = { path: vscode.workspace.asRelativePath(ed.document.uri), content: ed.document.getText() };
+            }
+        }
+        try {
+            const result = await this._apiClient.generateCode(instruction, {
+                workspacePath,
+                openFile: attach,
+                priorFiles: this._lastCodeOps,
+                contextFiles: opts.contextFiles ?? [],
+                targetFolder: opts.targetFolder ?? '',
+            });
+            // 다음 턴 컨텍스트로 보관
+            this._lastCodeOps = (result.ops ?? []).map((op) => ({ path: op.file, content: op.content }));
+            this.postMessage('code.result', result);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.postMessage('code.error', { message: msg });
+        }
+    }
+
+    /** 단일 파일 op 적용 — 워크스페이스에 직접 쓰고 에디터로 연다(Codex 식). 반환: 성공 여부. */
+    private async handleCodeApply(file: string, content: string, targetFolder: string = ''): Promise<boolean> {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (!root) {
+            this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' });
+            return false;
+        }
+        const combined = this._joinFolder(targetFolder, file);
+        const safe = combined.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
+        if (!safe) {
+            this.postMessage('code.error', { message: `잘못된 파일명: ${file}` });
+            return false;
+        }
+        const uri = vscode.Uri.joinPath(root, safe);
+        try {
+            await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
+            await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
+            await vscode.window.showTextDocument(uri, { preview: false });
+            this.postMessage('code.applied', { file: safe, ok: true });
+            return true;
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.postMessage('code.error', { message: `${safe} 적용 실패: ${msg}` });
+            return false;
         }
     }
 

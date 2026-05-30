@@ -249,6 +249,11 @@ class RecoderBot(discord.Client):
 def _register_commands(group: app_commands.Group) -> None:
     """§37.3 슬래시 커맨드 5종을 recoder 그룹에 등록한다."""
 
+    @group.command(name="panel", description="ReCoder 작업 패널 — 버튼으로 개발/배포/전체 실행")
+    async def panel_cmd(interaction: discord.Interaction) -> None:
+        import control_panel
+        await control_panel.send_panel(interaction)
+
     @group.command(name="preflight", description="ECS 배포 전 AWS 리소스 사전 점검")
     @app_commands.describe(
         cluster="ECS 클러스터 이름",

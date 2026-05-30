@@ -6,6 +6,7 @@
 import React, { useState, useCallback, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal, { RiskLevel } from "./ApprovalModal";
+import CodeAgent from "./CodeAgent";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -183,14 +184,12 @@ interface BuildModeProps {
 export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
-  const [errorLog, setErrorLog] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [autoDetect, setAutoDetect] = useState(false);
   const [proposal, setProposal] = useState<PatchProposal | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showApproval, setShowApproval] = useState(false);
   const [approvalResult, setApprovalResult] = useState<"approved" | "rejected" | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
 
   // Derive current step
   const currentStep: BuildStep = proposal
@@ -221,24 +220,13 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
     }
   }, []));
 
-  const handleAnalyze = useCallback(() => {
-    if (!errorLog.trim()) return;
+  // 자동 감지가 기본. 직접 누르면 현재 터미널 출력+선택을 모아 분석(명령과 동일 경로).
+  const handleAnalyzeNow = useCallback(() => {
     setIsAnalyzing(true);
     setProposal(null);
     setError(null);
     setApprovalResult(null);
-    postMessage("build.analyze", { error_log: errorLog });
-  }, [errorLog, postMessage]);
-
-  const handlePaste = useCallback(async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      setErrorLog(text);
-      textareaRef.current?.focus();
-    } catch {
-      textareaRef.current?.focus();
-      postMessage("webview.paste.request");
-    }
+    postMessage("build.analyzeActive");
   }, [postMessage]);
 
   const handleApprove = useCallback(() => {
@@ -251,6 +239,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
     postMessage("build.patch.reject", { proposal_id: proposal.proposal_id });
     setShowApproval(false);
   }, [proposal, postMessage]);
+
 
   // ── Styles ────────────────────────────────────────────────────────────────
 
@@ -304,110 +293,32 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
   return (
     <div style={{ fontFamily: "var(--vscode-font-family, sans-serif)", fontSize: 12, color: "var(--vscode-editor-foreground)" }}>
 
-      {/* ── Progress stepper ── */}
-      <StepBar current={currentStep} />
-
-      {/* ── Error Log ── */}
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--vscode-descriptionForeground, #888)", marginBottom: 5 }}>
-        에러 로그
+      {/* ── 에러 분석 ── */}
+      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--vscode-descriptionForeground, #888)", marginBottom: 6 }}>
+        에러 분석
       </div>
-      <textarea
-        ref={textareaRef}
-        value={errorLog}
-        onChange={(e) => setErrorLog(e.target.value)}
-        placeholder="터미널 출력을 붙여넣고 'AI 분석'을 누르거나, 아래 '자동 감지'를 켜서 ReCoder가 알아서 잡게 하세요."
-        style={{
-          width: "100%",
-          boxSizing: "border-box",
-          minHeight: 88,
-          background: "var(--vscode-input-background, #252526)",
-          color: "var(--vscode-input-foreground, #ccc)",
-          border: "1px solid var(--vscode-input-border, #3f3f3f)",
-          borderRadius: 5,
-          padding: "7px 9px",
-          fontSize: 11,
-          fontFamily: "var(--vscode-editor-font-family, monospace)",
-          resize: "vertical",
-          outline: "none",
-          lineHeight: 1.5,
-        }}
-      />
+      <div style={{ background: "var(--vscode-textCodeBlock-background, #1e1e1e)", border: "1px solid var(--vscode-panel-border, #333)", borderRadius: 6, padding: "9px 11px", fontSize: 11, color: "var(--vscode-descriptionForeground, #aaa)", lineHeight: 1.6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, color: "#22c55e", fontWeight: 600 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", display: "inline-block" }} />
+          자동 감지 켜짐
+        </div>
+        코드 실행 중 에러가 나면 자동으로 분석합니다. 직접 분석하려면 터미널이나 에디터에서 에러를 선택하고{" "}
+        <strong style={{ color: "var(--vscode-foreground, #ccc)" }}>우클릭 → ReCoder: Analyze Error</strong>.
+      </div>
 
-      {/* ── Action row ── */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-        {/* AI 분석 button */}
         <button
-          onClick={handleAnalyze}
-          disabled={!errorLog.trim() || isAnalyzing}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 5,
-            background: "#2563eb",
-            color: "#fff",
-            border: "none",
-            borderRadius: 5,
-            padding: "6px 12px",
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: (!errorLog.trim() || isAnalyzing) ? "not-allowed" : "pointer",
-            opacity: (!errorLog.trim() || isAnalyzing) ? 0.55 : 1,
-            transition: "opacity 0.15s",
-          }}
+          onClick={handleAnalyzeNow}
+          disabled={isAnalyzing}
+          style={{ background: "#2563eb", color: "#fff", border: "none", borderRadius: 5, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: isAnalyzing ? "not-allowed" : "pointer", opacity: isAnalyzing ? 0.55 : 1 }}
         >
-          <span style={{ fontSize: 13 }}>🔍</span>
-          AI 분석
+          지금 분석
         </button>
-
-        {/* 자동 감지 toggle */}
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", userSelect: "none", fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
-          <div
-            onClick={() => setAutoDetect(v => !v)}
-            style={{
-              width: 32,
-              height: 18,
-              borderRadius: 9,
-              background: autoDetect ? "#3b82f6" : "#3f3f3f",
-              position: "relative",
-              transition: "background 0.2s",
-              flexShrink: 0,
-              cursor: "pointer",
-            }}
-          >
-            <div style={{
-              position: "absolute",
-              top: 2,
-              left: autoDetect ? 16 : 2,
-              width: 14,
-              height: 14,
-              borderRadius: "50%",
-              background: "#fff",
-              transition: "left 0.2s",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
-            }} />
-          </div>
-          자동 감지
-        </label>
-
-        {/* 스캔 button (right-aligned) */}
         <button
           onClick={() => postMessage("build.scan", {})}
-          style={{
-            marginLeft: "auto",
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 5,
-            background: "#1c1c1c",
-            color: "#ccc",
-            border: "1px solid #3f3f3f",
-            borderRadius: 5,
-            padding: "6px 12px",
-            fontSize: 12,
-            fontWeight: 500,
-            cursor: "pointer",
-          }}
+          style={{ marginLeft: "auto", background: "#1c1c1c", color: "#ccc", border: "1px solid #3f3f3f", borderRadius: 5, padding: "6px 12px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}
         >
-          <span style={{ fontSize: 12 }}>⬛</span> 스캔
+          스캔
         </button>
       </div>
 
@@ -545,27 +456,9 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
         </div>
       )}
 
-      {/* Tip card (empty state) */}
-      {!proposal && !isAnalyzing && !error && (
-        <div style={{
-          marginTop: 16,
-          background: "rgba(59,130,246,0.07)",
-          border: "1px solid rgba(59,130,246,0.2)",
-          borderRadius: 6,
-          padding: "9px 11px",
-          fontSize: 11,
-          color: "var(--vscode-descriptionForeground, #999)",
-          lineHeight: 1.6,
-          display: "flex",
-          gap: 7,
-          alignItems: "flex-start",
-        }}>
-          <span style={{ fontSize: 14, flexShrink: 0, marginTop: 1 }}>💡</span>
-          <span>
-            처음이라면 우선 <strong style={{ color: "#ccc" }}>스캔</strong>으로 프로젝트를 잡고, 에러가 나는 명령을 터미널에서 실행하면 자동 감지 모드에서 그대로 분석돼요.
-          </span>
-        </div>
-      )}
+      <CodeAgent isActive={isActive} />
+
+
     </div>
   );
 };

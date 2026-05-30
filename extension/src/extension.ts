@@ -18,6 +18,7 @@ import { CoreManager } from './core/CoreManager';
 import { ApiClient } from './core/ApiClient';
 import { PollingService } from './core/PollingService';
 import { SidebarProvider } from './sidebar/SidebarProvider';
+import { WorkbenchSidebarProvider } from './sidebar/WorkbenchSidebarProvider';
 import { WorkbenchPanel } from './sidebar/WorkbenchPanel';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
@@ -73,6 +74,33 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.registerWebviewViewProvider(
             SidebarProvider.viewType,
             sidebarProvider,
+            { webviewOptions: { retainContextWhenHidden: true } }
+        )
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.generateInFolder', async (uri?: vscode.Uri) => {
+            let folder = '';
+            if (uri) {
+                const rel = vscode.workspace.asRelativePath(uri, false);
+                folder = rel === uri.fsPath ? '' : rel;
+            }
+            await vscode.commands.executeCommand('recoder.sidebarView.focus');
+            sidebarProvider.setCodeTargetFolder(folder);
+        }),
+    );
+
+    // ── Workbench sidebar view (옵션 B — 사이드바 워크벤치 대시보드) ───────────
+    const workbenchSidebarProvider = new WorkbenchSidebarProvider(
+        context.extensionUri,
+        apiClient,
+        coreManager,
+        pollingService,
+    );
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(
+            WorkbenchSidebarProvider.viewType,
+            workbenchSidebarProvider,
             { webviewOptions: { retainContextWhenHidden: true } }
         )
     );
