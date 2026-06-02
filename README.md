@@ -29,7 +29,8 @@ OPA (8181) + policy_cache      AuditLog (hash chain, 불변)    OTel Collector /
 | **Control Plane** | 조직 통제 — 인증·권한·정책·승인·감사 | `control_plane/` (FastAPI · PostgreSQL) |
 | **Cloud Execution** | ECS / EKS 배포, GitOps, 관측성 | `core/agents/`, `deploy/`, `watchdog/` |
 
-전체 솔루션 아키텍처 다이어그램: [docs/architecture.svg](docs/architecture.png)
+전체 솔루션 아키텍처 다이어그램: <img width="824" height="357" alt="architecture" src="https://github.com/user-attachments/assets/18e3072e-0160-4ffe-841f-53ea0a1a598c" />
+
 
 ---
 
