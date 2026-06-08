@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from schemas import AnalyzeRequest, ApprovalLevel, FilePatch, PatchProposal, RiskLevel
 
@@ -291,6 +292,20 @@ async def analyze(request: AnalyzeRequest) -> PatchProposal:
     4. Delegate to the Orchestrator (Code Agent).
     5. Store the proposal for later approval.
     """
+    # 0. (Fix A) 활성 파일 내용을 컨텍스트에 포함한다.
+    #    드래그 선택이 없으면 모델이 파일명만 보고 환각하므로, 파일 전체를
+    #    selected_text 에 실어 준다. selected_text 는 아래 _mask_request 에서
+    #    Context Gate 로 마스킹되므로 시크릿은 LLM 에 노출되지 않는다.
+    if request.active_file_path and not (request.selected_text and request.selected_text.strip()):
+        try:
+            _afp = Path(request.active_file_path)
+            if _afp.is_file():
+                _file_text = _afp.read_text(encoding="utf-8", errors="ignore")[:30000]
+                if _file_text.strip():
+                    request = request.model_copy(update={"selected_text": _file_text})
+        except Exception:
+            pass
+
     # 1. Masking (async — offloads CPU work to thread pool via ContextGate)
     masked_request = await _mask_request(request)
 
@@ -318,6 +333,25 @@ async def analyze(request: AnalyzeRequest) -> PatchProposal:
     # 4. Delegate to Orchestrator (stages 1+2 thresholds applied internally;
     #    stage 4 AST chunking happens inside the orchestrator's LLM prompt build)
     proposal = await _delegate_to_orchestrator(masked_request, trigger_score, quality_score)
+
+    # 4.5 (Fix) LLM 이 돌려준 patch.file 은 보통 상대경로/파일명/빈값이다.
+    #     승인 핸들러는 절대경로가 아니면 422 를 내므로, 여기서 활성 파일·워크스페이스
+    #     기준 절대경로로 정규화한다. (이게 'must be absolute' 422 의 직접 원인이었음)
+    try:
+        _afp = request.active_file_path or ""
+        _ws = request.workspace_path or ""
+        for _pt in getattr(proposal, "patches", []) or []:
+            _f = (getattr(_pt, "file", "") or "").strip()
+            if _f and Path(_f).is_absolute():
+                continue
+            if _afp and (not _f or Path(_f).name == Path(_afp).name):
+                _pt.file = _afp
+            elif _ws and _f:
+                _pt.file = str(Path(_ws) / _f)
+            elif _afp:
+                _pt.file = _afp
+    except Exception:
+        pass
 
     # 5. Store and update both caches
     _proposals[proposal.proposal_id] = proposal
@@ -349,6 +383,7 @@ async def approve_patch(proposal_id: str, approved: bool) -> dict:
         return {"status": "rejected", "proposal_id": proposal_id}
 
     applied: list[str] = []
+    unchanged: list[str] = []
     backups: dict[str, bytes] = {}
 
     try:
@@ -371,11 +406,15 @@ async def approve_patch(proposal_id: str, approved: bool) -> dict:
                             f"was generated (SHA-256 mismatch)."
                         ),
                     )
+            if file_path.exists():
                 backups[patch.file] = file_path.read_bytes()
 
-            # Apply the unified diff
-            _apply_unified_diff(file_path, patch)
-            applied.append(patch.file)
+            # (Fix B) 실제로 변경됐는지 확인. diff 문맥이 파일과 안 맞으면 False.
+            changed = _apply_unified_diff(file_path, patch)
+            if changed:
+                applied.append(patch.file)
+            else:
+                unchanged.append(patch.file)
 
     except HTTPException:
         # Rollback already-applied patches
@@ -395,7 +434,20 @@ async def approve_patch(proposal_id: str, approved: bool) -> dict:
         raise HTTPException(status_code=500, detail=f"Patch application failed: {exc}") from exc
 
     del _proposals[proposal_id]
-    return {"status": "applied", "proposal_id": proposal_id, "applied_files": applied}
+
+    # (Fix B) 적용된 변경이 하나도 없으면 "성공"으로 속이지 않는다.
+    if not applied:
+        raise HTTPException(
+            status_code=422,
+            detail="패치가 현재 파일과 일치하지 않아 적용된 변경이 없습니다. 코드를 선택한 뒤 다시 분석하거나 실제 에러로 분석하세요 (diff 환각 가능성).",
+        )
+
+    return {
+        "status": "applied",
+        "proposal_id": proposal_id,
+        "applied_files": applied,
+        "unchanged_files": unchanged,
+    }
 
 
 @router.get("/api/analyze/proposals")
@@ -409,25 +461,145 @@ async def list_proposals() -> list[PatchProposal]:
 # ---------------------------------------------------------------------------
 
 
-def _apply_unified_diff(file_path: Path, patch: FilePatch) -> None:
-    """
-    Apply a unified diff to *file_path*.
+def _norm_line(s: str) -> str:
+    """비교용 정규화: 따옴표 안 문자열은 와일드카드로(마스킹된 시크릿 ↔ 실제 시크릿
+    매칭), 앞뒤 공백 무시. 'KEY = "[REDACTED]"' 와 'KEY = "AKIA..."' 가 같다고 본다."""
+    import re as _re
+    out = _re.sub(r'"[^"]*"', '""', s)
+    out = _re.sub(r"'[^']*'", "''", out)
+    return out.strip()
 
-    Uses the ``whatthepatch`` library when available, falling back to writing
-    the full content if the diff is not in standard unified format.
+
+def _apply_unified_diff(file_path: Path, patch: FilePatch) -> bool:
     """
+    Apply a unified diff to *file_path*, **tolerantly**.
+
+    엄격한 라인 일치 대신:
+      - 따옴표 안 문자열을 와일드카드로 취급(마스킹된 시크릿 줄도 매칭).
+      - 앞뒤 공백 차이 무시.
+      - @@ 줄번호를 신뢰하지 않고 파일에서 직접 위치를 찾는다(LLM 줄번호 드리프트 허용).
+
+    Returns
+    -------
+    bool : 파일 내용이 실제로 변경됐으면 True, 매칭 실패/무변경이면 False.
+    """
+    import re as _re
+
+    original_text = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+    nl = "\r\n" if "\r\n" in original_text else "\n"
+    lines = original_text.split(nl)
+
+    diff = patch.unified_diff or ""
+    diff_lines = diff.splitlines()
+
+    # ── 훅(hunk) 단위 파싱: (old_block[], new_block[]) ──
+    hunks: list[tuple[list[str], list[str]]] = []
+    cur_old: list[str] | None = None
+    cur_new: list[str] | None = None
+    for dl in diff_lines:
+        if dl.startswith("@@"):
+            if cur_old is not None:
+                hunks.append((cur_old, cur_new))
+            cur_old, cur_new = [], []
+            continue
+        if cur_old is None:
+            continue  # 헤더(--- / +++) 이전
+        if dl.startswith("\\"):  # "\ No newline at end of file"
+            continue
+        tag, val = (dl[:1], dl[1:]) if dl[:1] in {" ", "+", "-"} else (" ", dl)
+        if tag == " ":
+            cur_old.append(val)
+            cur_new.append(val)
+        elif tag == "-":
+            cur_old.append(val)
+        elif tag == "+":
+            cur_new.append(val)
+    if cur_old is not None:
+        hunks.append((cur_old, cur_new))
+
+    if not hunks:
+        return False
+
+    changed = False
+    for old_block, new_block in hunks:
+        if old_block == new_block:
+            continue  # 변경 없는 훅
+        # old_block 을 파일에서 (정규화 기준) 찾는다.
+        if old_block:
+            norm_old = [_norm_line(x) for x in old_block]
+            found = -1
+            for i in range(0, len(lines) - len(norm_old) + 1):
+                if [_norm_line(lines[i + j]) for j in range(len(norm_old))] == norm_old:
+                    found = i
+                    break
+            if found < 0:
+                continue  # 이 훅은 매칭 실패 → 건너뜀
+            lines[found:found + len(old_block)] = new_block
+            changed = True
+        else:
+            # 순수 삽입(old 없음): 적용 위치 모호 → 건너뜀(안전)
+            continue
+
+    if not changed:
+        return False
+
+    new_text = nl.join(lines)
+    if new_text == original_text:
+        return False
+
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(new_text, encoding="utf-8")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Code generation (Build 탭 "코드 작성 및 수정")
+#   server.py 에만 있던 /api/code/generate 를 main.py 스택에도 추가.
+#   자연어 instruction → 파일 작업(ops) 목록. 적용은 확장이 직접 writeFile.
+# ---------------------------------------------------------------------------
+
+
+class CodeGenerateRequest(BaseModel):
+    instruction: str = ""
+    workspace_path: str = ""
+    open_file_path: str = ""
+    open_file_content: str = ""
+    prior_files: list = []
+    context_files: list = []
+    target_folder: str = ""
+
+
+@router.post("/api/code/generate")
+async def generate_code_route(body: CodeGenerateRequest) -> dict:
+    import os as _os
+    import uuid as _uuid
+
+    if not (body.instruction or "").strip():
+        raise HTTPException(status_code=400, detail="instruction 이 비어 있습니다.")
+
+    if body.workspace_path and Path(body.workspace_path).exists():
+        _os.environ["RECODER_PROJECT_ROOT"] = body.workspace_path
+
+    open_file = None
+    if body.open_file_path or body.open_file_content:
+        open_file = {"path": body.open_file_path, "content": body.open_file_content}
+
     try:
-        import whatthepatch  # type: ignore
+        try:
+            from code_agent import generate_code
+        except ImportError:
+            from core.code_agent import generate_code
+        result = generate_code(
+            instruction=body.instruction,
+            session_id=_uuid.uuid4().hex[:8],
+            open_file=open_file,
+            prior_files=body.prior_files or [],
+            context_files=body.context_files or [],
+            target_folder=body.target_folder or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"코드 생성 실패: {e}") from e
 
-        original_text = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
-        patches = list(whatthepatch.parse_patch(patch.unified_diff))
-        if not patches:
-            raise ValueError("No patches parsed from unified diff.")
-        new_text = whatthepatch.apply_diff(patches[0], original_text)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(new_text or "", encoding="utf-8")
-
-    except ImportError:
-        # Fallback: write the diff as-is (dev/testing convenience)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(patch.unified_diff, encoding="utf-8")
+    return result

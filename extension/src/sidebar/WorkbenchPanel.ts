@@ -377,12 +377,13 @@ export class WorkbenchPanel {
                     break;
                 }
                 try {
-                    const r = await this._apiClient.runScan('trivy', ws);
+                    // 보안 스캔: gitleaks 로 하드코딩된 시크릿 탐지 (빌드 전에 코드 정적 스캔).
+                    const r = await this._apiClient.runScan('gitleaks', ws);
                     this._panel.webview.postMessage({
                         type: 'wb.local.scanResult',
                         payload: { ok: true, result: r },
                     });
-                    this.addActivity('ok', 'Trivy 스캔 완료');
+                    this.addActivity('ok', '보안 스캔(gitleaks) 완료');
                 } catch (err) {
                     this._panel.webview.postMessage({ type: 'wb.local.scanResult', payload: { ok: false, error: String(err) } });
                 }
@@ -417,9 +418,14 @@ export class WorkbenchPanel {
                         });
                         this.addActivity('ok', 'Local Docker 배포 완료');
                     } else {
+                        // 컨테이너가 시작/헬스에 실패한 경우 — stderr 에서 핵심 사유 한 줄 추출
+                        const errText = (result.stderr || result.stdout || '').trim();
+                        const lines = errText.split('\n').map(s => s.trim()).filter(Boolean);
+                        const summary = lines.reverse().find(l => /error|exception|traceback|keyerror|exited|not running|unhealthy|refused/i.test(l))
+                            || lines[0] || '컨테이너가 시작되지 못했습니다.';
                         this._panel.webview.postMessage({
                             type: 'wb.local.deployProgress',
-                            payload: { stage: 'build', error: 'execute 실패', finished: true, line: `[FAIL] ${result.status}` },
+                            payload: { stage: 'run', error: 'execute 실패', error_summary: summary, finished: true, line: `[FAIL] ${result.status} — ${summary}` },
                         });
                     }
                 } catch (err) {

@@ -514,12 +514,24 @@ const App: React.FC = () => {
   useMessage(
     useCallback((msg) => {
       const { type, payload } = msg;
+      // Core 는 Ready 상태를 "ok" 로 보내고 UI 는 "ready" 로 비교한다 → 정규화로 맞춘다.
+      const normDiag = (d: DiagnosticsResult): DiagnosticsResult => {
+        const fix = (s?: string) => (s === "ok" ? "ready" : s);
+        return {
+          ...d,
+          core_ready: fix(d.core_ready),
+          ai_ready: fix(d.ai_ready),
+          docker_ready: fix(d.docker_ready),
+          aws_deploy_ready: fix(d.aws_deploy_ready),
+          ops_ready: fix(d.ops_ready),
+        } as DiagnosticsResult;
+      };
       if (type === "stateUpdate") {
         const state = payload as { currentMode?: string; diagnostics?: DiagnosticsResult };
-        if (state.diagnostics) setDiagnostics(state.diagnostics);
+        if (state.diagnostics) setDiagnostics(normDiag(state.diagnostics));
       }
       if (type === "diagnosticsUpdate") {
-        setDiagnostics(payload as DiagnosticsResult);
+        setDiagnostics(normDiag(payload as DiagnosticsResult));
       }
     }, [])
   );

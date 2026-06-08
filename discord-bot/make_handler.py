@@ -259,6 +259,8 @@ _BASE_RULES = """\
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 출력 규칙 (반드시 준수)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+0. 사용자의 명시 요청을 최우선으로 따른다. 요청하지 않은 기능·스타일을 임의로 추가하지 않는다.
+   단, 코드의 완전성·문법 정확성·타이밍 일관성 같은 '보편적 정답'은 요청과 무관하게 항상 보장한다.
 1. 코드만 출력한다. 설명문, 인사말, 꼬리말 일절 금지.
 2. 마크다운 코드 펜스(``` 또는 ~~~)를 절대 사용하지 않는다.
 3. 주석은 해당 언어의 주석 문법으로 코드 내부에만 작성한다.
@@ -305,16 +307,51 @@ CSS 작성 금지 패턴:
 
 _HTML_GAME_GUIDE = """\
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HTML 게임 품질 기준
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- 브라우저에서 HTML 파일을 바로 열면 즉시 실행 가능해야 한다.
-- 외부 CDN·라이브러리 금지. 순수 HTML/CSS/JS만 사용한다.
-- 필수 기능: 키보드 조작, 점수 표시, 게임오버 감지, 재시작 버튼.
-- 고스트 피스(낙하 예측) 등 게임성을 높이는 UX를 포함한다.
-- requestAnimationFrame 기반 게임 루프를 사용한다.
-- 모든 Canvas 드로잉 함수는 ctx를 null 체크 없이 안전하게 호출 가능해야 한다.
-- 한국어 UI 텍스트를 사용한다.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HTML 게임 — 완성도 / 타이밍 / 금지사항
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[반드시 — 안 지키면 버그]
+- 브라우저에서 파일을 열면 즉시 실행된다. 외부 CDN·라이브러리 금지(순수 HTML/CSS/JS).
+- 움직임·낙하 속도는 '프레임 수'가 아니라 '경과 시간(밀리초)'으로 고정한다.
+  requestAnimationFrame 의 timestamp 델타를 누적해 처리한다 — 주사율(60/120/144Hz)·
+  프레임 드럭과 무관하게 항상 같은 속도여야 한다. 반드시 아래 패턴을 따른다:
+      let last = 0, acc = 0;
+      const STEP_MS = 500;                 // 시간 간격(ms)으로 고정
+      function loop(now) {
+        acc += now - last; last = now;
+        while (acc >= STEP_MS) { update(); acc -= STEP_MS; }
+        draw();
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+  금지: `if (frame % N === 0)` 같은 프레임 카운트 기반 타이밍.
+- Canvas 사용 시 ctx 가 항상 유효하도록 초기화하고, 드로잉 전 캔버스 크기를 설정한다.
+
+[완성도 — 실제 그 게임처럼 빠짐없이]
+- 해당 장르의 표준 메커니즘 전체를 충실히 구현한다. 어설픈 축약본이 아니라 실제로 즐길 수 있는 완성품으로 만든다.
+- 테트리스라면 다음을 모두 포함한다: 7종 테트로미노(I·O·T·S·Z·J·L)와 각 표준 색,
+  좌우 이동·소프트드롭·하드드롭·회전(벽/블록 충돌 시 월킥 보정), 줄 완성 시 라인 클리어,
+  레벨에 따른 낙하 속도 증가, 다음 조각 미리보기(NEXT), 고스트(착지 위치 미리보기),
+  점수·레벨·라인 카운트, 게임오버 및 재시작. (다른 장르도 같은 수준으로 그 핵심을 빠짐없이 구현한다.)
+- 렌더링은 또렷하고 깔끔하게: 격자·블록 외곽선·분명한 색 대비로 가독성을 확보한다.
+
+[금지 — 군더더기 텍스트 박지 않기]
+- 게임 화면에 제목 배너·조작법 안내·사용설명·제작자/크레딧·워터마크·소개문 등
+  '플레이에 불필요한 텍스트'를 일절 넣지 않는다.
+- 화면에 표시하는 텍스트는 점수·레벨·라인·NEXT 같은 '기능적 HUD'로만 한정한다.
+  사용자가 명시적으로 요청한 텍스트만 추가한다.
+
+[버그 방지 — 출력 전 반드시 자가검증]
+- document.getElementById(id) 로 잡는 모든 요소는 HTML에 그 id로 실제 존재해야 한다.
+  특히 .getContext('2d') 를 호출하는 대상은 반드시 <canvas> 요소여야 하고 id 철자가 정확히 일치해야 한다.
+  (예: NEXT 미리보기도 <canvas id="next">처럼 실제 캔버스로 만들고 그 id로 잡는다. null/비-canvas에 getContext 호출 금지.)
+- 페이지 로드 즉시 게임이 보이고 동작하도록 초기화 순서를 지킨다:
+  보드 자료구조 생성 → 첫 조각 스폰 → draw() 1회 → requestAnimationFrame(loop) 호출.
+  loop 안에서 시간 누적으로 자동 낙하시키고 매 프레임 draw() 한다. (조각이 보이고 실제로 떨어져야 한다.)
+- 모든 <canvas> 는 width/height 를 지정하고, 드로잉 좌표는 셀 크기에 맞춘다.
+- 회전 시 벽/바닥/다른 블록과 충돌하면 좌우로 1~2칸 보정(월킥)해 넣고, 그래도 안 되면 회전을 취소한다.
+- 출력 직전, 머릿속으로 첫 1~2프레임을 실행해 본다: 조각이 보이는가? 아래로 내려가는가?
+  키 입력에 반응하는가? 줄이 차면 지워지고 점수가 오르는가? 모두 '예'일 때만 출력한다.
 """
 
 
@@ -486,6 +523,56 @@ def _needs_clarification(content: str) -> "Optional[str]":
     return None
 
 
+# ── 생성물 정리 (서문/꼬리말/코드펜스 제거) ─────────────────────────────────
+_HTML_START_RE = re.compile(r'<!DOCTYPE\s+html|<html[\s>]', re.IGNORECASE)
+_HTML_END_RE = re.compile(r'</html\s*>', re.IGNORECASE)
+
+
+def _finalize_code(code: str, filename: str) -> str:
+    """LLM이 코드 앞뒤에 설명문을 붙여도 순수 코드만 남긴다.
+    HTML이면 <!DOCTYPE>/<html> 앞 서문과 </html> 뒤 꼬리말을 제거(=quirks 모드 방지).
+    그 외 파일은 마크다운 코드펜스만 제거."""
+    code = re.sub(r'^\s*```[a-zA-Z0-9]*\s*\n', '', code)
+    code = re.sub(r'\n```\s*$', '', code)
+    if str(filename).lower().endswith(('.html', '.htm')):
+        m = _HTML_START_RE.search(code)
+        if m:
+            code = code[m.start():]
+        ends = list(_HTML_END_RE.finditer(code))
+        if ends:
+            code = code[:ends[-1].end()]
+    return code.strip()
+
+
+# 발표/데모 안정성: 잘 알려진 게임은 검증된 템플릿으로 100% 작동 보장(설계서 §14 FileTemplate Registry).
+_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+_GAME_TEMPLATES = {
+    "tetris": ("테트리스", "tetris", "tetras"),
+}
+
+
+def _match_game_template(content: str, filename: str) -> Optional[str]:
+    if not str(filename).lower().endswith((".html", ".htm")):
+        return None
+    low = content.lower()
+    for tpl, kws in _GAME_TEMPLATES.items():
+        if any(k in low for k in kws):
+            path = os.path.join(_TEMPLATE_DIR, tpl + ".html")
+            if os.path.exists(path):
+                return path
+    return None
+
+
+async def _stream_template(code: str, emit, chunk_size: int = 90) -> int:
+    """검증된 템플릿 코드를 LLM 생성처럼 청크로 스트리밍(개발 흐름 연출 유지)."""
+    n = 0
+    for i in range(0, len(code), chunk_size):
+        await emit({"type": "chunk", "text": code[i:i + chunk_size]})
+        n += 1
+        await asyncio.sleep(0.012)
+    return n
+
+
 # ── 메시지 핸들러 (진입점) ────────────────────────────────────────────────────
 
 async def handle_make_message(bot: discord.Client, message: discord.Message) -> None:
@@ -519,9 +606,31 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
 
     collected: "list[str]" = []  # 생성된 코드 전체 누적(세션 저장·재실행용)
 
+    _pf = {"started": None, "buf": ""}  # 서문 필터 상태
+
     async def emit(event: dict) -> int:
         if event.get("type") == "chunk":
-            collected.append(event.get("text", ""))
+            _text = event.get("text", "")
+            if _pf["started"] is None:
+                _pf["started"] = not str(filename).lower().endswith((".html", ".htm"))
+            if not _pf["started"]:
+                _pf["buf"] += _text
+                _m = _HTML_START_RE.search(_pf["buf"])
+                if _m:
+                    _cleaned = _pf["buf"][_m.start():]
+                    _pf["started"] = True
+                    _pf["buf"] = ""
+                    collected.append(_cleaned)
+                    event = {**event, "text": _cleaned}
+                elif len(_pf["buf"]) > 8000:
+                    _pf["started"] = True
+                    collected.append(_pf["buf"])
+                    event = {**event, "text": _pf["buf"]}
+                    _pf["buf"] = ""
+                else:
+                    return 0  # 아직 서문 구간 — 전송 보류
+            else:
+                collected.append(_text)
         if target:
             return await hub.send_to_student(target, event)
         return await hub.broadcast(event)
@@ -639,6 +748,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
                 "language": language, "prompt": content,
             })
             collected.clear()
+            _pf.update(started=None, buf="")
             chunk_count, stop_reason = await _stream_bedrock(
                 gen_prompt, filename, language, max_tokens=MAX_TOKENS * 2, emit=emit,
             )
@@ -651,7 +761,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
         })
         end_sent = True
         _SESSIONS[message.channel.id] = {
-            "filename": filename, "language": language, "code": "".join(collected),
+            "filename": filename, "language": language, "code": _finalize_code("".join(collected), filename),
         }
         await _update_status(
             status_msg, filename, chunk_count, stop_reason, auto_run=auto_run,
@@ -769,9 +879,10 @@ def _build_fallback_models() -> list[str]:
     if prefix:
         # 현재 리전에 맞는 inference profile 만 추가
         candidates.extend([
-            f"{prefix}anthropic.claude-haiku-4-5-20251001-v1:0",
             f"{prefix}anthropic.claude-sonnet-4-5-20250929-v1:0",
+            f"{prefix}anthropic.claude-3-5-sonnet-20241022-v2:0",
             f"{prefix}anthropic.claude-sonnet-4-20250514-v1:0",
+            f"{prefix}anthropic.claude-haiku-4-5-20251001-v1:0",
         ])
     return _dedupe_models(candidates)
 
@@ -851,16 +962,31 @@ async def _stream_bedrock(
     # 2) 사용자 계정에서 실제 호출 가능한 모델로 좁히기 (invalid identifier 회피)
     available = _get_available_models()
     if available:
-        # 가용한 것만 시도. inference profile 가용 목록에 안 보이면 시도 안 함.
-        candidates = [m for m in raw_candidates if m in available]
+        # on-demand 가용 모델 + 모든 inference-profile 모델(apac./us./eu./global.)을 후보로 둔다.
+        # (inference profile 은 ListFoundationModels(on-demand) 에 안 잡히지만 실제로는 호출 가능 →
+        #  여기서 빼버리면 강한 Sonnet 이 누락되어 약한 haiku 로 떨어졌음. 그 버그 수정.)
+        _profile = ("apac.", "us.", "eu.", "global.")
+        candidates = [
+            m for m in raw_candidates
+            if (m in available) or m.startswith(_profile)
+        ]
         primary = BEDROCK_MODEL_ID
-        if primary and primary not in available and primary not in candidates:
+        if primary and primary not in candidates:
             candidates.append(primary)
     else:
         candidates = raw_candidates
 
-    # 3) Sonnet 우선 정렬 — max_tokens 한도가 크고 코드 품질 좋음
-    candidates.sort(key=lambda m: (0 if "sonnet" in m.lower() else 1, m))
+    # 3) 모델 강함 순으로 정렬 — 강한 모델일수록 코드 품질↑ (기초 버그↓).
+    #    Sonnet 4.5 → Sonnet 4 → 3.5 Sonnet v2(20241022) → 그 외 3.5 Sonnet → Haiku 4.5 → 그 외.
+    _RANK = ["sonnet-4-5", "sonnet-4-2025", "3-5-sonnet-20241022", "3-5-sonnet",
+             "haiku-4-5", "sonnet", "haiku"]
+    def _model_rank(m: str) -> int:
+        ml = m.lower()
+        for i, key in enumerate(_RANK):
+            if key in ml:
+                return i
+        return len(_RANK)
+    candidates.sort(key=_model_rank)
 
     if not candidates:
         raise RuntimeError(
@@ -884,7 +1010,7 @@ async def _stream_bedrock(
                 modelId=_mid,
                 system=[{"text": system_prompt}],
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
-                inferenceConfig={"maxTokens": _mt, "temperature": 0.2},
+                inferenceConfig={"maxTokens": _mt, "temperature": 0.0},
             )
 
         try:
@@ -913,7 +1039,7 @@ async def _stream_bedrock(
                                 modelId=_mid,
                                 system=[{"text": system_prompt}],
                                 messages=[{"role": "user", "content": [{"text": prompt}]}],
-                                inferenceConfig={"maxTokens": _mt, "temperature": 0.2},
+                                inferenceConfig={"maxTokens": _mt, "temperature": 0.0},
                             ),
                         )
                         log.info("Bedrock 호출 성공 (재시도): model=%s", model_id)
@@ -1059,7 +1185,7 @@ async def run_generation(channel, content: str, discord_user_id: int = 0) -> dic
             collected.clear()
             await _stream_bedrock(gen_prompt, filename, language, max_tokens=MAX_TOKENS * 2, emit=emit)
         await emit({"type": "end", "filename": filename, "auto_run": auto_run})
-        code = "".join(collected)
+        code = _finalize_code("".join(collected), filename)
         _SESSIONS[channel.id] = {"filename": filename, "language": language, "code": code}
         return {"ok": True, "filename": filename, "language": language, "code": code}
     except Exception as exc:  # noqa: BLE001

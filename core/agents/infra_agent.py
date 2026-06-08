@@ -398,19 +398,24 @@ class InfraAgent:
         SAFETY: Secret plaintext values are NEVER passed to the LLM.
         Only file path, line number, secret type, and rule_id are forwarded.
         """
+        # 일부 gitleaks 이미지는 --report-path /dev/stdout 로 JSON 을 내보내지 않아
+        # stdout 이 비어버린다(→ 시크릿을 놓침). 컨테이너 /tmp 에 리포트를 쓰고
+        # cat 으로 stdout 에 내보내는 방식이 버전 무관하게 안정적이다.
+        gl_cmd = (
+            "gitleaks detect --source /repo --no-git "
+            "--report-format json --report-path /tmp/gl.json >/dev/null 2>&1; "
+            "cat /tmp/gl.json 2>/dev/null"
+        )
         cmd = [
             "docker", "run", "--rm",
             "-v", f"{workspace_path}:/repo:ro",
+            "--entrypoint", "sh",
             "zricethezav/gitleaks:latest",
-            "detect",
-            "--source", "/repo",
-            "--report-format", "json",
-            "--report-path", "/dev/stdout",
-            "--no-git",
+            "-c", gl_cmd,
         ]
         returncode, stdout, stderr = await self._run_subprocess(cmd, timeout=180)
 
-        # gitleaks exits 1 when findings exist; that is not an error
+        # sh+cat 경로: cat 성공 시 0, 파일 없으면 1 — 둘 다 정상 처리.
         if returncode not in (0, 1):
             return {"success": False, "error": stderr}
 

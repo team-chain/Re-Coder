@@ -89,6 +89,7 @@ class StackType(str, Enum):
     JAVA_SPRING = "java-spring"
     RUBY_RAILS = "ruby-rails"
     STATIC = "static"
+    CUSTOM = "custom"
     UNKNOWN = "unknown"
 
 
@@ -277,6 +278,9 @@ class InfraFileProposal(BaseModel):
     proposal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     file_type: FileType
     target_path: str  # Relative path within the workspace
+    # 워크스페이스 루트(절대경로). approve 시 target_path 를 이 경로 기준으로 해석.
+    # 없으면(레거시) approve 단계가 cwd(=core/) 폴백 -> 잘못된 위치에 써지는 버그.
+    workspace_path: Optional[str] = None
     content: str
     base_template: Optional[str] = None  # template_id used as base
     required_secrets: list[str] = Field(default_factory=list)

@@ -78,8 +78,18 @@ class CommandTemplateRegistry:
             raise RegistryError(f"Command templates file not found: {path}")
         with path.open("r", encoding="utf-8") as fh:
             raw = json.load(fh)
+        import logging as _logging
         for item in raw.get("templates", []):
-            tmpl = CommandTemplate(**item)
+            # 스키마와 안 맞는(레거시 포맷) 항목 하나가 레지스트리 전체 로딩을 깨뜨리지
+            # 않도록, 검증 실패한 템플릿은 경고만 남기고 건너뛴다.
+            try:
+                tmpl = CommandTemplate(**item)
+            except Exception as exc:  # noqa: BLE001
+                _logging.getLogger(__name__).warning(
+                    "Skipping malformed command template '%s': %s",
+                    item.get("template_id", "<unknown>"), exc,
+                )
+                continue
             self._templates[tmpl.template_id] = tmpl
 
     # ------------------------------------------------------------------
