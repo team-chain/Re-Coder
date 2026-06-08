@@ -85,8 +85,31 @@ async def lifespan(app: FastAPI):
     port = _bound_port if _bound_port else CoreSingleton.find_available_port()
     app.state.port = port
 
-    token = os.environ.get("SESSION_TOKEN") or secrets.token_urlsafe(32)
+    # 토큰 안정화: 재시작해도 같은 토큰을 유지한다 (GitHub Secret 재등록 불필요).
+    # runtime.json 은 정상 종료 시 삭제되므로, 종료에도 살아남는 별도 파일에 보관한다.
+    # 우선순위: SESSION_TOKEN env > 영속 파일 > 기존 runtime.json > 새로 생성.
+    from pathlib import Path as _TokPath
+    _tok_file = _TokPath.home() / ".recoder" / ".session_token"
+    _persisted_token = None
+    try:
+        if _tok_file.is_file():
+            _persisted_token = (_tok_file.read_text(encoding="utf-8").strip() or None)
+    except Exception:
+        _persisted_token = None
+    _existing_rt = CoreSingleton.read_runtime()
+    _existing_token = getattr(_existing_rt, "session_token", None) if _existing_rt else None
+    token = (
+        os.environ.get("SESSION_TOKEN")
+        or _persisted_token
+        or _existing_token
+        or secrets.token_urlsafe(32)
+    )
     app.state.session_token = token
+    try:
+        _tok_file.parent.mkdir(parents=True, exist_ok=True)
+        _tok_file.write_text(token, encoding="utf-8")
+    except Exception:
+        pass
 
     CoreSingleton.write_runtime(port=port, token=token, pid=pid)
     CoreSingleton.set_file_permissions(CoreSingleton.RUNTIME_FILE)
@@ -250,8 +273,11 @@ def main() -> None:
     print(f"[ReCoder Core] RECODER_HOME: {CoreSingleton.RECODER_HOME}", flush=True)
 
     try:
+        # PyInstaller 번들(frozen)에서는 "main:app" 모듈 재import가 안 되므로
+        # app 객체를 직접 넘긴다. 개발 모드에서는 import 문자열을 그대로 사용.
+        _target = app if getattr(sys, "frozen", False) else "main:app"
         uvicorn.run(
-            "main:app",
+            _target,
             host="127.0.0.1",
             port=_bound_port,
             log_level="info",

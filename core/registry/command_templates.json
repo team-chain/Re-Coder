@@ -36,7 +36,7 @@
       "allowed_params": {
         "image_name": {
           "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9._/\\-]*:[a-z0-9._\\-]+$"
+          "pattern": "^[a-z0-9][a-z0-9._/\\-]*(:[a-z0-9._\\-]+)?$"
         },
         "container_name": {
           "type": "string",
@@ -57,7 +57,7 @@
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         }
       },
-      "command_pattern": "docker run -d --name {container_name} -p {host_port}:{container_port} --network {network} --restart unless-stopped {image_name}",
+      "command_pattern": "docker run -d --name {container_name} -p {host_port}:{container_port} --restart unless-stopped {image_name}",
       "risk_level": "medium",
       "approval_level": 2,
       "version": "1.0"
@@ -288,89 +288,6 @@
       "risk_level": "low",
       "approval_level": 1,
       "version": "1.0"
-    },
-    {
-      "template_id": "ecr_tag",
-      "description": "로컬 이미지에 ECR 태그 부착",
-      "command": "docker tag {{local_image}} {{ecr_uri}}:{{tag}}",
-      "risk_level": 1,
-      "required_params": [
-        "local_image",
-        "ecr_uri",
-        "tag"
-      ]
-    },
-    {
-      "template_id": "ecs_describe_services",
-      "description": "ECS 서비스 상태 조회 (read-only)",
-      "command": "aws ecs describe-services --cluster {{cluster}} --services {{service}} --region {{region}} --output json",
-      "risk_level": 1,
-      "required_params": [
-        "cluster",
-        "service",
-        "region"
-      ]
-    },
-    {
-      "template_id": "ecs_register_task_definition",
-      "description": "ECS Task Definition 등록",
-      "command": "aws ecs register-task-definition --cli-input-json file://{{task_def_path}} --region {{region}} --output json",
-      "risk_level": 2,
-      "required_params": [
-        "task_def_path",
-        "region"
-      ]
-    },
-    {
-      "template_id": "ecs_update_service",
-      "description": "ECS Rolling Update 실행",
-      "command": "aws ecs update-service --cluster {{cluster}} --service {{service}} --task-definition {{task_definition_arn}} --force-new-deployment --region {{region}} --output json",
-      "risk_level": 3,
-      "required_params": [
-        "cluster",
-        "service",
-        "task_definition_arn",
-        "region"
-      ]
-    },
-    {
-      "template_id": "trivy_image_scan",
-      "description": "Trivy 컨테이너 이미지 취약점 스캔",
-      "command": "trivy image --format json --output {{output_path}} --exit-code 0 {{image}}",
-      "risk_level": 1,
-      "required_params": [
-        "image",
-        "output_path"
-      ]
-    },
-    {
-      "template_id": "hadolint_scan",
-      "description": "Hadolint Dockerfile 정적 분석",
-      "command": "hadolint --format json {{dockerfile_path}}",
-      "risk_level": 1,
-      "required_params": [
-        "dockerfile_path"
-      ]
-    },
-    {
-      "template_id": "syft_sbom",
-      "description": "Syft SBOM 생성 (CycloneDX JSON)",
-      "command": "syft {{image}} -o cyclonedx-json={{output_path}}",
-      "risk_level": 1,
-      "required_params": [
-        "image",
-        "output_path"
-      ]
-    },
-    {
-      "template_id": "gitleaks_scan",
-      "description": "gitleaks 시크릿 스캔",
-      "command": "gitleaks detect --source {{repo_path}} --report-format json --report-path {{output_path}} --exit-code 0",
-      "risk_level": 1,
-      "required_params": [
-        "repo_path",
-        "output_path"
-      ]
     }
   ]
 }

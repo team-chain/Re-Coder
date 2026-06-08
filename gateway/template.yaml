@@ -90,6 +90,33 @@ Resources:
         AttributeName: ttl            # 토큰 7일 자동 만료 + rate 윈도우 자동 정리
         Enabled: true
 
+  DeployBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "recoder-deploy-${AWS::AccountId}-${AWS::Region}"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+
+  DeployBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DeployBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${DeployBucket.Arn}/*"
+
   InvokeFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -156,6 +183,28 @@ Resources:
             Path: /enroll
             Method: POST
 
+  DeployFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: recoder-gw-deploy
+      Handler: deploy.handler
+      CodeUri: src/
+      Environment:
+        Variables:
+          GW_DEPLOY_BUCKET: !Ref DeployBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GatewayTable
+        - S3CrudPolicy:
+            BucketName: !Ref DeployBucket
+      Events:
+        Deploy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /deploy/s3
+            Method: POST
+
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
@@ -174,3 +223,8 @@ Outputs:
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/enroll"
   TableName:
     Value: !Ref GatewayTable
+  DeployEndpoint:
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/deploy/s3"
+  DeployBucketWebsite:
+    Description: 학생 정적 배포가 올라가는 공개 웹사이트 베이스
+    Value: !Sub "http://${DeployBucket}.s3-website.${AWS::Region}.amazonaws.com"

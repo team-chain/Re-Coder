@@ -346,6 +346,20 @@ class InfraApproveRequest(BaseModel):
     proposal_id: str
 
 
+class CodeGenerateRequest(BaseModel):
+    """Build 탭 코드 생성 에이전트 / 시크릿 스캔 요청."""
+    instruction: str = ""
+    workspace_path: str = ""
+    open_file_path: str = ""
+    open_file_content: str = ""
+    # 멀티턴: 직전에 생성/적용한 파일들 [{path, content}] — 이어서 수정용 컨텍스트
+    prior_files: list[dict] = []
+    # 사용자가 첨부한 참고 파일 [{path, content}]
+    context_files: list[dict] = []
+    # 생성 파일이 들어갈 대상 폴더(워크스페이스 상대). 프롬프트 힌트용.
+    target_folder: str = ""
+
+
 class DeployLocalRequest(BaseModel):
     plan_id: str = ""
     project_id: str = ""
@@ -843,6 +857,61 @@ async def generate_infra(body: InfraGenerateRequest, _=Depends(_verify_token)):
     _current_infra = proposal
     _orchestrator_state = OrchestratorState.INFRA_PROPOSED
     return proposal.to_dict()
+
+
+@app.post("/api/secrets/scan")
+async def scan_secrets_route(body: CodeGenerateRequest, _=Depends(_verify_token)):
+    """프로젝트 전체(작업 트리)에서 시크릿/키를 스캔한다. 바이너리 불필요.
+
+    다른 파일에 숨어있는 AWS 키/토큰/private key 등을 파일:라인까지 보고하며,
+    값 원문은 마스킹되어 절대 응답/로그에 실리지 않는다.
+    """
+    raw = body.workspace_path or (
+        _current_project.workspace_path if _current_project else "."
+    )
+    root = raw if Path(raw).exists() else str(Path.cwd())
+    try:
+        from security_scan import scan_project_for_secrets
+    except ImportError:
+        from core.security_scan import scan_project_for_secrets
+    findings = scan_project_for_secrets(root)
+    return {"root": root, "count": len(findings), "findings": findings}
+
+
+@app.post("/api/code/generate")
+async def generate_code_route(body: CodeGenerateRequest, _=Depends(_verify_token)):
+    """Build 탭 코드 생성 에이전트 — 자연어 요청 -> 파일 작업(ops) 목록.
+
+    파일 적용은 확장(클라이언트)이 워크스페이스에 직접 수행한다.
+    (에러 수정 generate_patch 와 별개이며 자동 트리거 없음.)
+    """
+    if not (body.instruction or "").strip():
+        raise HTTPException(status_code=400, detail="instruction 이 비어 있습니다.")
+
+    if body.workspace_path and Path(body.workspace_path).exists():
+        os.environ["RECODER_PROJECT_ROOT"] = body.workspace_path
+
+    open_file = None
+    if body.open_file_path or body.open_file_content:
+        open_file = {"path": body.open_file_path, "content": body.open_file_content}
+
+    try:
+        from code_agent import generate_code
+        result = generate_code(
+            instruction=body.instruction,
+            session_id=uuid.uuid4().hex[:8],
+            open_file=open_file,
+            prior_files=body.prior_files or [],
+            context_files=body.context_files or [],
+            target_folder=body.target_folder or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("[server] code generate failed")
+        raise HTTPException(status_code=500, detail=f"코드 생성 실패: {e}") from e
+
+    return result
 
 
 @app.post("/api/infra/approve")

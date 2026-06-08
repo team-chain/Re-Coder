@@ -18,6 +18,30 @@ import {
 } from '../types';
 import { CoreManager } from './CoreManager';
 
+export interface CodeSecretWarning {
+    rule: string;
+    severity: string;
+    file: string;
+    line: number;
+    masked: string;
+    fix: string;
+}
+
+export interface CodeAgentOp {
+    action: 'create' | 'edit';
+    file: string;
+    language: string;
+    content: string;
+    rationale: string;
+    secret_warnings?: CodeSecretWarning[];
+}
+
+export interface CodeAgentResult {
+    summary: string;
+    ops: CodeAgentOp[];
+    model: string;
+}
+
 export class ApiClient {
     constructor(private coreManager: CoreManager) {}
 
@@ -25,7 +49,8 @@ export class ApiClient {
         method: string,
         path: string,
         body?: unknown,
-        _retried = false
+        _retried = false,
+        timeoutMs = 30000
     ): Promise<ApiResponse<T>> {
         // 토큰이 비어있으면 runtime.json 에서 즉시 refresh.
         // ensureRunning() 완료 전 PollingService 가 호출하는 race condition 방지.
@@ -53,7 +78,7 @@ export class ApiClient {
         };
 
         const controller = new AbortController();
-        const timerId = setTimeout(() => controller.abort(), 30000);
+        const timerId = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
             const res = await fetch(url, {
@@ -72,7 +97,7 @@ export class ApiClient {
                 // 다시 읽어와도 미들웨어가 다른 이유로 401/403 을 냈을 가능성 차단).
                 if ((res.status === 401 || res.status === 403) && !_retried) {
                     try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
-                    return this.request<T>(method, path, body, true);
+                    return this.request<T>(method, path, body, true, timeoutMs);
                 }
                 let errorText = '';
                 try { errorText = await res.text(); } catch { errorText = `HTTP ${res.status}`; }
@@ -116,6 +141,32 @@ export class ApiClient {
     async analyze(request: AnalyzeRequest): Promise<PatchProposal | null> {
         const resp = await this.request<PatchProposal>('POST', '/api/analyze', request);
         return resp.success && resp.data ? resp.data : null;
+    }
+
+    /** Build 탭 코드 생성 에이전트 — 자연어 요청 → 파일 작업(ops). 적용은 호출측이 수행. */
+    async generateCode(
+        instruction: string,
+        opts?: {
+            workspacePath?: string;
+            openFile?: { path: string; content: string };
+            priorFiles?: Array<{ path: string; content: string }>;
+            contextFiles?: Array<{ path: string; content: string }>;
+            targetFolder?: string;
+        }
+    ): Promise<CodeAgentResult> {
+        const body = {
+            instruction,
+            workspace_path: opts?.workspacePath ?? '',
+            open_file_path: opts?.openFile?.path ?? '',
+            open_file_content: opts?.openFile?.content ?? '',
+            prior_files: opts?.priorFiles ?? [],
+            context_files: opts?.contextFiles ?? [],
+            target_folder: opts?.targetFolder ?? '',
+        };
+        // 코드 생성은 30s 를 넘길 수 있어 90s 타임아웃.
+        const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 90000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '코드 생성 실패'); }
+        return resp.data;
     }
 
     /**
@@ -248,17 +299,19 @@ export class ApiClient {
         workspacePath: string, method: DeployMethod, projectId?: string,
         image?: string, containerName?: string, hostPort?: number, containerPort?: number,
     ): Promise<DeploymentPlan> {
+        // 플랜 생성은 Trivy/Hadolint 보안 게이트(도커 기반)를 돌려 30초를 넘길 수 있으므로 타임아웃을 길게.
         const resp = await this.request<DeploymentPlan>('POST', '/api/deploy/plan', {
             workspace_path: workspacePath, project_id: projectId, method,
             image, container_name: containerName, host_port: hostPort, container_port: containerPort,
-        });
+        }, false, 600000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 플랜 생성 실패'); }
         return resp.data;
     }
 
-    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string }> {
-        const resp = await this.request<{ status: string; deployment_id?: string }>(
-            'POST', '/api/deploy/execute', { plan_id: planId, approved }
+    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }> {
+        // docker build + run + 헬스체크는 30초를 넘으므로 타임아웃을 길게.
+        const resp = await this.request<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }>(
+            'POST', '/api/deploy/execute', { plan_id: planId, approved }, false, 600000
         );
         return resp.success && resp.data ? resp.data : { status: 'error' };
     }

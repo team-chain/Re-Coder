@@ -18,10 +18,12 @@ import { CoreManager } from './core/CoreManager';
 import { ApiClient } from './core/ApiClient';
 import { PollingService } from './core/PollingService';
 import { SidebarProvider } from './sidebar/SidebarProvider';
+import { WorkbenchSidebarProvider } from './sidebar/WorkbenchSidebarProvider';
 import { WorkbenchPanel } from './sidebar/WorkbenchPanel';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
 import { BridgeClient } from './bridge/BridgeClient';
+import { ensureEnrolled, runEnrollCommand } from './gateway/enroll';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -52,6 +54,16 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
     );
 
+    // ── 게이트웨이 자가발급(enroll) ───────────────────────────────────────────
+    // recoder.gateway.url 이 설정돼 있고 아직 토큰이 없으면 최초 실행 시 반 코드를
+    // 물어 발급한다("확장만 설치 → 반 코드 1회 → AWS 키 없이 AI"). 명령으로도 가능.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.enroll', () => runEnrollCommand(context)),
+    );
+    // 자동 팝업 제거 — 운영자/일반 사용자에게 매번 'enroll 코드' 묻지 않는다.
+    // 게이트웨이 연결이 필요하면 명령 팔레트에서 'recoder.enroll' 로 수동 실행.
+    // void ensureEnrolled(context);
+
     // ── Sidebar provider ────────────────────────────────────────────────────
     const sidebarProvider = new SidebarProvider(
         context.extensionUri,
@@ -64,6 +76,33 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.registerWebviewViewProvider(
             SidebarProvider.viewType,
             sidebarProvider,
+            { webviewOptions: { retainContextWhenHidden: true } }
+        )
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.generateInFolder', async (uri?: vscode.Uri) => {
+            let folder = '';
+            if (uri) {
+                const rel = vscode.workspace.asRelativePath(uri, false);
+                folder = rel === uri.fsPath ? '' : rel;
+            }
+            await vscode.commands.executeCommand('recoder.sidebarView.focus');
+            sidebarProvider.setCodeTargetFolder(folder);
+        }),
+    );
+
+    // ── Workbench sidebar view (옵션 B — 사이드바 워크벤치 대시보드) ───────────
+    const workbenchSidebarProvider = new WorkbenchSidebarProvider(
+        context.extensionUri,
+        apiClient,
+        coreManager,
+        pollingService,
+    );
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(
+            WorkbenchSidebarProvider.viewType,
+            workbenchSidebarProvider,
             { webviewOptions: { retainContextWhenHidden: true } }
         )
     );

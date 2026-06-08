@@ -40,3 +40,11 @@ recoder-runtime.json
 core/eval_report.json
 eval_report.json
 core/api/routes/_deploy_tail.py
+.aws-sam/
+core/build/
+core/dist/
+extension/bin/
+gateway/deploy-token.csv
+*token*.csv
+
+core/.recoder/

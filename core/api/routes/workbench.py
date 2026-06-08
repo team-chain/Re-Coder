@@ -127,7 +127,9 @@ class ModeChangeRequest(BaseModel):
 class PreflightRunRequest(BaseModel):
     project_id:     Optional[str] = None
     workspace_path: Optional[str] = None  # 없으면 현재 cwd
-    source:         Literal["vscode", "discord", "core"] = "core"
+    project_path:   Optional[str] = None  # github-action 이 보내는 별칭 (workspace_path 와 동일 의미)
+    # vscode/discord/core 외에 "github-action" 같은 외부 소스도 허용 — 자유 문자열.
+    source:         str = "core"
 
 
 class DeploymentStartRequest(BaseModel):
@@ -207,6 +209,52 @@ async def change_mode(req: ModeChangeRequest) -> dict:
     return {"active_mode": _ACTIVE_MODE, "source": req.source}
 
 
+def _detect_contract_stack(ws):
+    """워크스페이스에서 contract 스택을 간이 감지.
+
+    recoder.yml 이 없을 때 build_default_contract 에 넘길 ContractStack 을 정한다.
+    프레임워크(FastAPI/Flask/Express/Next)가 안 보이면 CUSTOM — CUSTOM 은
+    health 검사가 blocker 가 아니라 warning 이라 stdlib 앱도 깨끗하게 통과한다.
+    """
+    try:
+        from schemas import ContractStack  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.schemas import ContractStack  # type: ignore
+    try:
+        from pathlib import Path
+        ws = Path(ws)
+        # Node 우선 판별
+        pkg = ws / "package.json"
+        if pkg.exists():
+            try:
+                import json as _json
+                data = _json.loads(pkg.read_text(encoding="utf-8"))
+                deps = {**(data.get("dependencies") or {}), **(data.get("devDependencies") or {})}
+                if "next" in deps:
+                    return ContractStack.NODE_NEXT
+                if "express" in deps:
+                    return ContractStack.NODE_EXPRESS
+            except Exception:
+                pass
+            return ContractStack.NODE_EXPRESS
+        # Python 프레임워크 판별 — .py 안에서 fastapi/flask import 탐지
+        skip = {"node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".git"}
+        for py in list(ws.rglob("*.py"))[:200]:
+            if any(part in skip for part in py.parts):
+                continue
+            try:
+                head = py.read_text(encoding="utf-8", errors="ignore")[:4000].lower()
+            except OSError:
+                continue
+            if "fastapi" in head:
+                return ContractStack.PYTHON_FASTAPI
+            if "flask" in head:
+                return ContractStack.PYTHON_FLASK
+    except Exception:
+        pass
+    return ContractStack.CUSTOM
+
+
 @router.post("/preflight/run")
 async def trigger_preflight(req: PreflightRunRequest) -> dict:
     """Preflight 실행 트리거. 실제 검사는 backbone 호출.
@@ -216,20 +264,20 @@ async def trigger_preflight(req: PreflightRunRequest) -> dict:
     """
     db = _get_db()
 
-    # Stub: 실제로는 StaticPreflightRunner 호출. 데모용으로 mock state.
+    # 실제 12종 정적 검사를 StaticPreflightRunner 로 실행.
+    # recoder.yml 이 있으면 그걸 contract 로, 없으면 스택 감지 후 기본 contract.
     try:
         from pathlib import Path
         from preflight import StaticPreflightRunner
         from preflight.contract_loader import load_contract, build_default_contract
-        ws = Path(req.workspace_path or ".").resolve()
-        contract_path = ws / "recoder.yml"
-        if contract_path.exists():
-            contract = load_contract(contract_path)
-        else:
-            contract = build_default_contract(project_id=req.project_id or "demo")
+        ws = Path(req.workspace_path or req.project_path or ".").resolve()
+        # load_contract 는 워크스페이스 '디렉터리' 를 받아 recoder.yml 을 자동 탐색한다.
+        contract = load_contract(ws)
+        if contract is None:
+            contract = build_default_contract(_detect_contract_stack(ws))
         runner = StaticPreflightRunner(str(ws), contract, project_id=req.project_id)
         run = runner.run_sync()
-    except Exception as exc:  # pragma: no cover — backbone 없을 때 graceful
+    except Exception as exc:  # pragma: no cover — preflight 모듈 자체가 없을 때만 graceful
         log.warning("Preflight 실행 실패, mock 으로 대체: %s", exc)
         run = PreflightRun(
             project_id=req.project_id,
@@ -245,10 +293,13 @@ async def trigger_preflight(req: PreflightRunRequest) -> dict:
         "blockers": len(run.blockers),
         "warnings": len(run.warnings),
     })
+    _status = run.status.value if hasattr(run.status, "value") else str(run.status)
     return {
         "preflight_run_id": run.preflight_run_id,
-        "status": run.status.value if hasattr(run.status, "value") else str(run.status),
+        "status": _status,
+        # score = 건강도(높을수록 좋음). risk_score = 위험도(높을수록 나쁨) — CI 게이트용.
         "score": run.score,
+        "risk_score": max(0, 100 - int(run.score)),
         "blockers": [b.model_dump() for b in run.blockers],
         "warnings": [w.model_dump() for w in run.warnings],
     }

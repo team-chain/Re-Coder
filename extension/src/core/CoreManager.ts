@@ -167,6 +167,18 @@ export class CoreManager {
         } catch { return null; }
     }
 
+    /** 게이트웨이 모드 env: recoder.gateway.url + 저장된 학생 토큰이 모두 있으면 주입. */
+    private async _gatewayEnv(): Promise<Record<string, string>> {
+        try {
+            const url = (vscode.workspace.getConfiguration('recoder.gateway').get<string>('url', '') || '').trim();
+            const token = (await this.extensionContext.secrets.get('recoder.studentToken')) || '';
+            if (url && token) {
+                return { RECODER_LLM_GATEWAY_URL: url, RECODER_STUDENT_TOKEN: token };
+            }
+        } catch { /* ignore */ }
+        return {};
+    }
+
     private async spawnCore(): Promise<void> {
         this.isSpawning = true;
         try {
@@ -183,8 +195,12 @@ export class CoreManager {
                 ? ['--port', String(this.port), '--workspace', workspacePath]
                 : spec.args;
 
+            // 게이트웨이 모드: 설정 URL + 저장된 학생 토큰이 있으면 Core 에 env 주입 →
+            // Core 의 provider_router 가 Bedrock 직접호출 대신 운영자 게이트웨이를 사용.
+            const gatewayEnv = await this._gatewayEnv();
+
             this.coreProcess = spawn(spec.command, args, {
-                env: { ...process.env },
+                env: { ...process.env, ...gatewayEnv },
                 detached: false,
                 stdio: ['ignore', 'pipe', 'pipe'],
                 cwd: spec.cwd,
@@ -274,9 +290,18 @@ export class CoreManager {
         } catch { /* ignore */ }
         const runtimePath = this.getRuntimeJsonPath();
         try { if (fs.existsSync(runtimePath)) { fs.unlinkSync(runtimePath); } } catch { /* ignore */ }
+        // 싱글톤 락도 함께 제거 — 스테일 락이 남으면 새 Core 가 옛 Core 에 양보(window 등록)해
+        // 라우트 없는 옛 포트를 가리키는 문제를 막는다.
+        try { if (fs.existsSync(this._lockPath)) { fs.unlinkSync(this._lockPath); } } catch { /* ignore */ }
     }
 
     async healthCheck(): Promise<CoreHealth | null> {
+        // 포트가 아직 확정되지 않았으면(runtime.json 미작성/부분작성 등) 요청을
+        // 보내지 않는다. (이전엔 http://127.0.0.1:undefined/api/health 로 가서
+        // fetch 가 throw + Node DeprecationWarning 발생 → "연결 안됨" 깜빡임)
+        if (!this.port || this.port <= 0 || !Number.isFinite(this.port)) {
+            return null;
+        }
         try {
             const url = `http://127.0.0.1:${this.port}/api/health`;
             const controller = new AbortController();
@@ -417,11 +442,12 @@ export class CoreManager {
         ];
         const mainPy = candidates.find(p => fs.existsSync(p));
         if (mainPy) {
-            const py = this._findPython();
+            const coreDir = path.dirname(mainPy);
+            const py = this._findPython(coreDir);
             return {
                 command: py,
                 args: [mainPy],
-                cwd: path.dirname(mainPy),
+                cwd: coreDir,
             };
         }
 
@@ -436,9 +462,20 @@ export class CoreManager {
         return spec.args.length === 0 ? spec.command : '';
     }
 
-    /** Windows 는 python.exe / python / py, 그 외는 python3 / python 우선. */
-    private _findPython(): string {
+    /**
+     * Core 소스를 실행할 python 을 고른다.
+     * 개발 모드에서는 프로젝트 venv(core/.venv)를 최우선 — 글로벌 python 에
+     * Core 의존성(fastapi 등)이 없어도 바로 뜨게 한다.
+     */
+    private _findPython(coreDir?: string): string {
         const isWin = process.platform === 'win32';
+        // 0) 프로젝트 venv 우선 (의존성 포함)
+        if (coreDir) {
+            const venvPy = isWin
+                ? path.join(coreDir, '.venv', 'Scripts', 'python.exe')
+                : path.join(coreDir, '.venv', 'bin', 'python');
+            if (fs.existsSync(venvPy)) { return venvPy; }
+        }
         const candidates = isWin
             ? ['python.exe', 'python', 'py']
             : ['python3', 'python'];

@@ -525,10 +525,17 @@ class GitHubAgent:
         workspace_path: str,
         branch: str = "",
         force: bool = False,
+        commit_message: str = "",
+        auto_commit: bool = True,
     ) -> dict:
         """현재 워크스페이스의 origin 으로 push.
 
         토큰이 있으면 URL 에 임시 임베드 후 푸시 직후 제거.
+
+        auto_commit=True(기본)면 push 전에 미커밋 변경을 stage+commit 한다.
+        과거 버그: push 가 stage/commit 을 안 해서, 새로 생성된
+        .github/workflows/deploy.yml 같은 untracked 파일이 영원히 안 올라갔다
+        (-> GitHub Actions 가 워크플로를 받지 못해 CI/CD 미동작).
         """
         if not self._token:
             return {"status": "error", "message": "GitHub 인증이 필요합니다."}
@@ -541,6 +548,25 @@ class GitHubAgent:
         if not branch:
             rc, cur, _ = self._git(ws, ["branch", "--show-current"])
             branch = cur.strip() or "main"
+
+        # 미커밋 변경(워크플로 파일 포함)을 stage + commit — 안 하면 push 해도 안 올라감.
+        committed = False
+        if auto_commit:
+            rc, status_out, _ = self._git(ws, ["status", "--porcelain"])
+            if rc == 0 and status_out.strip():
+                rc_n, name_out, _ = self._git(ws, ["config", "user.name"])
+                if rc_n != 0 or not name_out.strip():
+                    self._git(ws, ["config", "user.name", "ReCoder User"])
+                rc_e, email_out, _ = self._git(ws, ["config", "user.email"])
+                if rc_e != 0 or not email_out.strip():
+                    self._git(ws, ["config", "user.email", "recoder@local"])
+                self._git(ws, ["add", "-A"])
+                msg = commit_message or "chore(recoder): CI/CD workflow & changes"
+                rc_c, _, err_c = self._git(ws, ["commit", "-m", msg])
+                if rc_c == 0:
+                    committed = True
+                elif "nothing to commit" not in err_c:
+                    return {"status": "error", "message": f"커밋 실패: {err_c[:300]}"}
 
         # 원래 origin URL 보존
         rc, original_url, _ = self._git(ws, ["remote", "get-url", "origin"])
@@ -573,6 +599,7 @@ class GitHubAgent:
             "message": f"push 완료: {full}:{branch}",
             "branch": branch,
             "repo": full,
+            "committed": committed,
         }
 
     # ── Actions Secrets ───────────────────────────────────────────────

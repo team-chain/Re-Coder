@@ -41,6 +41,11 @@
           "type": "webview",
           "id": "recoder.sidebarView",
           "name": "Re-Coder"
+        },
+        {
+          "type": "webview",
+          "id": "recoder.workbenchView",
+          "name": "Workbench"
         }
       ]
     },
@@ -129,6 +134,16 @@
         "command": "recoder.bridge.reconnect",
         "title": "ReCoder: Reconnect Discord Bridge",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "recoder.enroll",
+        "title": "ReCoder: Connect to Gateway (Enroll)",
+        "icon": "$(key)"
+      },
+      {
+        "command": "recoder.generateInFolder",
+        "title": "ReCoder: 이 폴더에 코드 생성",
+        "icon": "$(sparkle)"
       }
     ],
     "menus": {
@@ -142,6 +157,13 @@
       "terminal/context": [
         {
           "command": "recoder.analyzeError",
+          "group": "recoder@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "recoder.generateInFolder",
+          "when": "explorerResourceIsFolder",
           "group": "recoder@1"
         }
       ]
@@ -211,6 +233,21 @@
           "type": "string",
           "default": "",
           "description": "Discord 봇 브리지 인증 토큰 (.env 의 RECODER_BRIDGE_TOKEN 과 동일해야 함)."
+        },
+        "recoder.bridge.studentId": {
+          "type": "string",
+          "default": "",
+          "description": "Phase 2 per-user 라우팅 식별자. /recoder link 로 받은 student_id 를 넣으면 본인 디스코드 요청이 이 VSCode로만 전달됩니다. 비우면 전체 broadcast(단일 PC)."
+        },
+        "recoder.discord.clientId": {
+          "type": "string",
+          "default": "",
+          "description": "Discord 봇의 Application(Client) ID. 설정하면 워크벤치 Discord 탭의 '봇 초대'가 봇 실행 없이도 동작합니다. Discord 개발자 포털 > Application > General 의 Application ID."
+        },
+        "recoder.gateway.url": {
+          "type": "string",
+          "default": "https://tfuvwq54xg.execute-api.ap-northeast-2.amazonaws.com",
+          "description": "운영자 Bedrock 게이트웨이 베이스 URL. 설정 시 최초 실행에서 반 코드로 토큰을 발급받아 AWS 키 없이 AI를 사용합니다. 비우면 본인 AWS(BYO) 모드."
         },
         "recoder.bridge.httpPort": {
           "type": "number",
