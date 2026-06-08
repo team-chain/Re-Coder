@@ -1,51 +1,33 @@
 # ==============================================================================
 # ReCoder File Template: Dockerfile.python-flask
-# Production-grade Dockerfile for Python / Flask applications
-# Placeholders: {{APP_NAME}}, {{PYTHON_VERSION}}, {{PORT}}, {{APP_MODULE}}
+# Lightweight Dockerfile for Python / Flask apps (fast local build, < timeout)
+# Placeholders: {{APP_NAME}}, {{PYTHON_VERSION}}  (PORT/APP_MODULE pinned: 8000 / app:app)
 # ==============================================================================
 
-# ---- Build stage ----
-FROM python:{{PYTHON_VERSION}}-slim AS builder
-
-WORKDIR /build
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --prefix=/install --no-cache-dir -r requirements.txt
-
-# ---- Runtime stage ----
-FROM python:{{PYTHON_VERSION}}-slim AS runtime
+FROM python:{{PYTHON_VERSION}}-slim
 
 LABEL org.opencontainers.image.title="{{APP_NAME}}" \
       org.opencontainers.image.description="Flask application" \
       org.opencontainers.image.version="1.0"
 
-# Security: run as non-root
-RUN groupadd --gid 1001 appgroup && \
-    useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser
-
-# Install runtime OS dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /install /usr/local
-
 WORKDIR /app
 
-COPY --chown=appuser:appgroup . .
+# 의존성 먼저 설치 (레이어 캐시 활용).
+# flask / boto3 / gunicorn 은 순수 Python wheel 이라 build-essential·컴파일러가 필요 없다.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
+COPY . .
+
+# Security: run as non-root
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser && \
+    chown -R appuser:appgroup /app
 USER appuser
 
-EXPOSE {{PORT}}
+EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:{{PORT}}/health || exit 1
+# NOTE: 런타임 헬스체크는 ReCoder 배포 에이전트가 직접 수행하므로
+#       curl(apt 설치 필요) 의존 HEALTHCHECK 는 생략해 빌드를 가볍게 유지한다.
 
-# Use gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:{{PORT}}", "--workers", "2", "--timeout", "120", "{{APP_MODULE}}:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "120", "app:app"]

@@ -749,3 +749,194 @@ def _validate_changed_file(path: Path) -> str:
         return "syntax_ok"
     except SyntaxError as e:
         return f"syntax_error:{e.lineno}:{e.msg}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 코드 생성 에이전트 (Build 탭 — Codex/Cowork 식 인터랙티브 파일 생성/수정)
+#
+# 에러 수정(generate_patch)과 별개의 진입점.
+#   - 사용자가 자연어로 "~ 만들어줘 / ~ 고쳐줘" 요청
+#   - LLM 이 파일 단위 작업(ops) 을 전체 내용으로 반환 (unified diff 아님 → 적용 안정성↑)
+#   - 확장(Bridge/Sidebar)이 워크스페이스에 직접 쓰고 에디터로 열어줌
+# 정체성 유지: 자동 트리거 없음. 사용자가 명시적으로 호출할 때만 1회.
+# ════════════════════════════════════════════════════════════════════════════
+
+_CODE_AGENT_MAX_TOKENS = 8192
+_CODE_AGENT_TREE_LIMIT = 80   # 컨텍스트에 넣을 기존 파일 경로 최대 수
+
+
+def _list_project_files(root: Path, limit: int = _CODE_AGENT_TREE_LIMIT) -> list[str]:
+    """충돌 회피·맥락용 기존 파일 경로 목록(상대경로). 가벼운 트리."""
+    out: list[str] = []
+    try:
+        for p in sorted(root.rglob("*")):
+            if len(out) >= limit:
+                break
+            if p.is_dir():
+                continue
+            if any(part in _SKIP_DIRS for part in p.parts):
+                continue
+            if p.suffix.lower() in _SOURCE_EXTS or p.suffix.lower() in {
+                ".html", ".css", ".json", ".md", ".txt", ".yml", ".yaml", ".toml",
+            }:
+                try:
+                    out.append(str(p.relative_to(root)).replace("\\", "/"))
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+    return out
+
+
+def _build_code_prompt(
+    instruction: str,
+    existing_files: list[str],
+    open_file: dict | None,
+    prior_files: list[dict] | None = None,
+    context_files: list[dict] | None = None,
+    target_folder: str = "",
+) -> str:
+    """코드 생성 에이전트용 프롬프트. JSON ops 형식을 강제한다."""
+    tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
+    prior_block = ""
+    for pf in (prior_files or [])[:4]:
+        body = (pf.get("content") or "")[:_MAX_PROMPT_BYTES]
+        if body.strip():
+            prior_block += f"\n[직전 생성 파일] {pf.get('path','?')}\n```\n{body}\n```\n"
+    if prior_block:
+        prior_block = "\n직전 턴에서 만든 파일들(이어서 수정/확장할 수 있음):\n" + prior_block
+
+    ctx_block = ""
+    for cf in (context_files or [])[:6]:
+        body = (cf.get("content") or "")[:_MAX_PROMPT_BYTES]
+        if body.strip():
+            ctx_block += f"\n[참고 파일] {cf.get('path','?')}\n```\n{body}\n```\n"
+    if ctx_block:
+        ctx_block = "\n사용자가 첨부한 참고 파일(이 내용을 활용/일관성 유지):\n" + ctx_block
+
+    folder_block = ""
+    if (target_folder or "").strip():
+        folder_block = (
+            f"\n[대상 폴더] 생성/수정 파일의 경로는 '{target_folder.strip().rstrip('/')}/' 아래 "
+            f"상대경로로 정하라(예: {target_folder.strip().rstrip('/')}/index.html).\n"
+        )
+
+    open_block = ""
+    if open_file and (open_file.get("content") or "").strip():
+        body = (open_file.get("content") or "")[:_MAX_PROMPT_BYTES]
+        open_block = (
+            f"\n현재 편집 중인 파일: {open_file.get('path', '(unknown)')}\n"
+            f"```\n{body}\n```\n"
+        )
+    return f"""당신은 VSCode 안에서 동작하는 코드 작성 에이전트입니다.
+사용자의 요청을 읽고, 실제로 워크스페이스에 적용할 파일 작업(ops)을 만드세요.
+
+규칙:
+- 각 파일 작업은 그 파일의 "전체 최종 내용"을 담습니다 (부분 diff 아님).
+- 새 파일이면 action="create", 기존 파일을 바꾸면 action="edit".
+- 가능한 한 적은 수의 파일로, 즉시 실행/렌더 가능한 완결된 코드를 작성합니다.
+- 외부 빌드 도구 없이 동작하도록 합니다(예: 단일 HTML 은 인라인 CSS/JS).
+- 데이터 저장이 필요하면 외부 DB 대신 localStorage 를 사용합니다.
+- 기존 파일 목록과 겹치지 않게 파일명을 정하되, 사용자가 파일명을 지정하면 그대로 따릅니다.
+
+기존 파일 목록:
+{tree}
+{folder_block}{ctx_block}{prior_block}{open_block}
+사용자 요청:
+{instruction}
+
+아래 JSON 형식으로만 응답하세요(설명 문장 금지):
+{{
+  "summary": "무엇을 만들었는지 한국어 한 줄",
+  "ops": [
+    {{
+      "action": "create",
+      "file": "상대경로/파일명.확장자",
+      "language": "html|python|javascript|...",
+      "content": "파일의 전체 내용",
+      "rationale": "이 파일을 만든/고친 이유 한 줄"
+    }}
+  ]
+}}"""
+
+
+def generate_code(
+    instruction: str,
+    session_id: str = "",
+    open_file: dict | None = None,
+    prior_files: list[dict] | None = None,
+    context_files: list[dict] | None = None,
+    target_folder: str = "",
+) -> dict:
+    """
+    자연어 instruction → 파일 작업(ops) 목록.
+
+    반환:
+        {"summary": str, "ops": [{action, file, language, content, rationale}], "model": str}
+    """
+    instruction = (instruction or "").strip()
+    if not instruction:
+        raise ValueError("instruction 이 비어 있습니다.")
+
+    root = _project_root()
+    existing = _list_project_files(root)
+    print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
+
+    prompt = _build_code_prompt(instruction, existing, open_file, prior_files or [], context_files or [], target_folder)
+
+    try:
+        llm_resp = get_router().call(
+            LLMRequest(prompt=prompt, max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+            agent="code_agent",
+            operation="generate_code",
+        )
+    except Exception as e:
+        raise RuntimeError(f"LLM 호출 실패: {e}") from e
+
+    raw = (llm_resp.text or "").strip()
+    if not raw:
+        raise RuntimeError("LLM 이 빈 응답을 반환했습니다. 모델/할당량/필터를 확인하세요.")
+
+    data = _extract_json(raw)
+
+    ops_out: list[dict] = []
+    for op in (data.get("ops") or []):
+        file_path = (op.get("file") or "").strip()
+        content = op.get("content")
+        if not file_path or content is None:
+            continue
+        action = (op.get("action") or "create").strip().lower()
+        if action not in ("create", "edit"):
+            action = "create"
+        ops_out.append({
+            "action": action,
+            "file": file_path.replace("\\", "/"),
+            "language": (op.get("language") or "").strip(),
+            "content": str(content),
+            "rationale": (op.get("rationale") or "").strip(),
+        })
+
+    if not ops_out:
+        raise RuntimeError("LLM 응답에 적용할 ops 가 없습니다.")
+
+    # 적용 전 안전 검사 — 생성된 코드에 시크릿이 박혀있으면 op 에 경고를 단다.
+    try:
+        try:
+            from security_scan import scan_text_for_secrets
+        except ImportError:
+            from core.security_scan import scan_text_for_secrets
+        for op in ops_out:
+            warns = scan_text_for_secrets(op["content"], op["file"])
+            op["secret_warnings"] = warns
+    except Exception as exc:
+        print(f"[code_agent] 시크릿 사전검사 생략: {exc}")
+        for op in ops_out:
+            op.setdefault("secret_warnings", [])
+
+    result = {
+        "summary": data.get("summary", "코드를 생성했습니다.").strip(),
+        "ops": ops_out,
+        "model": getattr(llm_resp, "model_used", ""),
+    }
+    print(f"[code_agent] 코드 생성 완료 | ops {len(ops_out)}개 | model={result['model']}")
+    return result

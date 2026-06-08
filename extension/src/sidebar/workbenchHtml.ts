@@ -121,26 +121,20 @@ html[data-mode="sidebar"] .brand .name{font-size:14px}
 html[data-mode="sidebar"] .brand .tag{font-size:9px}
 
 .tabs{
-  display:flex; gap:2px; padding:0 0 0;
-  border-bottom:1px solid var(--bd); margin-bottom:28px;
-  position:relative;
+  display:inline-flex; gap:3px; padding:3px;
+  background:var(--bg2); border-radius:var(--r-md);
+  margin-bottom:24px; position:relative;
 }
 .tab{
-  display:flex; align-items:center; gap:8px;
-  padding:10px 16px;
+  display:flex; align-items:center; gap:7px;
+  padding:7px 18px; border-radius:var(--r-sm);
   cursor:pointer; color:var(--t2); font-weight:500; font-size:13px;
   border:none; background:transparent;
-  transition:color .15s var(--ease);
-  position:relative;
+  transition:color .15s var(--ease), background .15s var(--ease);
   letter-spacing:-0.005em;
-  margin-bottom:-1px;
 }
 .tab:hover{color:var(--t1)}
-.tab.active{ color:var(--t1); font-weight:600 }
-.tab.active::after{
-  content:''; position:absolute; left:0; right:0; bottom:-1px; height:2px;
-  background:var(--blue);
-}
+.tab.active{ color:var(--t1); font-weight:600; background:var(--bg1); box-shadow:0 1px 2px rgba(0,0,0,.18) }
 .tab .ic{width:14px;height:14px;flex-shrink:0; opacity:.85}
 .icon-svg{width:14px;height:14px;flex-shrink:0;stroke-width:1.7;fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round}
 .right-chips{margin-left:auto; display:flex; align-items:center; gap:6px}
@@ -314,6 +308,21 @@ select.wb-input{ cursor:pointer; appearance:none;
   background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239aa3b2' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
   background-repeat:no-repeat; background-position:right 12px center; padding-right:32px;
 }
+/* 체크박스 → iOS 토글 스위치 (모든 탭 공통) */
+input[type="checkbox"]{
+  appearance:none; -webkit-appearance:none; margin:0;
+  width:34px; height:20px; border-radius:999px; flex-shrink:0;
+  background:var(--bd2); position:relative; cursor:pointer; vertical-align:-5px;
+  transition:background .15s var(--ease);
+}
+input[type="checkbox"]::after{
+  content:""; position:absolute; top:2px; left:2px;
+  width:16px; height:16px; border-radius:50%; background:#fff;
+  transition:left .15s var(--ease);
+}
+input[type="checkbox"]:checked{ background:var(--blue) }
+input[type="checkbox"]:checked::after{ left:16px }
+input[type="checkbox"]:focus-visible{ outline:none; box-shadow:0 0 0 3px var(--blue-bg) }
 /* label 안의 input 위 텍스트 (필드 이름) — 폰트 살짝 키우고 여백 */
 .deploy-grid label,
 #page-github label{
@@ -468,6 +477,18 @@ html[data-mode="sidebar"] .deploy-grid{ }
 .stepper-item.active .stepper-dot{ background:var(--blue); border-color:var(--blue); color:#fff }
 .stepper-item.done .stepper-dot{ background:var(--green); border-color:var(--green); color:#fff }
 .stepper-item.fail .stepper-dot{ background:var(--red); border-color:var(--red); color:#fff }
+.shipguard{ display:flex; align-items:flex-start; gap:13px; margin:4px 0 16px; padding:15px 18px; border-radius:10px;
+  border:1px solid rgba(248,113,113,.32); border-left:3px solid #ef4444;
+  background:rgba(248,113,113,.06); animation:sgpop .3s ease both }
+.shipguard.pass{ border-color:rgba(74,222,128,.32); border-left-color:#22c55e; background:rgba(74,222,128,.06) }
+.shipguard-icon{ color:#f87171; flex:none; margin-top:1px; display:flex }
+.shipguard.pass .shipguard-icon{ color:#4ade80 }
+.shipguard-tag{ font-size:10px; font-weight:600; letter-spacing:.10em; text-transform:uppercase;
+  color:#f87171; font-family:'JetBrains Mono','Cascadia Code','Consolas',monospace; margin-bottom:4px }
+.shipguard.pass .shipguard-tag{ color:#4ade80 }
+.shipguard-title{ font-size:15px; font-weight:700; letter-spacing:-0.01em; color:var(--t1) }
+.shipguard-msg{ font-size:12.5px; color:var(--t2); margin-top:4px; line-height:1.55 }
+@keyframes sgpop{ from{ opacity:0; transform:translateY(5px) } to{ opacity:1; transform:none } }
 .stepper-label{
   font-size:11px; color:var(--t3); text-align:center;
   white-space:nowrap; font-weight:400;
@@ -559,6 +580,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
 .step-card.done .step-num{ background:var(--green); border-color:var(--green); color:#fff }
 .step-card.active .step-num{ background:var(--blue); border-color:var(--blue); color:#fff }
 .step-title{ font-size:14px; font-weight:600; flex:1; letter-spacing:-0.005em }
+.step-desc{ font-size:12px; color:var(--t3); line-height:1.55; margin:-6px 0 16px 38px }
 .step-status{
   font-size:11px; padding:3px 9px; border-radius:999px;
   background:var(--bg2); color:var(--t3); font-weight:500;
@@ -694,13 +716,14 @@ html[data-mode="sidebar"] .deploy-grid{ }
   <div class="step-card" id="gh-step-1">
     <div class="step-card-header">
       <div class="step-num" id="gh-step-1-num">1</div>
-      <div class="step-title">로그인</div>
+      <div class="step-title">GitHub 로그인</div>
       <span class="step-status" id="gh-step-1-status">대기</span>
     </div>
+    <div class="step-desc">GitHub 계정을 연결합니다. 연결하면 저장소를 불러오고 코드를 올릴 수 있습니다.</div>
     <div id="gh-status-text" class="alert info" style="margin:0 0 12px">상태 확인 중…</div>
     <div style="display:flex; gap:8px; flex-wrap:wrap">
-      <button class="wb-btn wb-btn-primary" id="gh-login-btn">로그인</button>
-      <button class="wb-btn wb-btn-ghost" id="gh-status-refresh">새로고침</button>
+      <button class="wb-btn wb-btn-primary" id="gh-login-btn">GitHub 계정 연결</button>
+      <button class="wb-btn wb-btn-ghost" id="gh-status-refresh">상태 새로고침</button>
       <button class="wb-btn wb-btn-danger" id="gh-logout-btn">로그아웃</button>
     </div>
   </div>
@@ -709,24 +732,25 @@ html[data-mode="sidebar"] .deploy-grid{ }
   <div class="step-card" id="gh-step-2">
     <div class="step-card-header">
       <div class="step-num" id="gh-step-2-num">2</div>
-      <div class="step-title">레포지토리</div>
+      <div class="step-title">저장소 연결</div>
       <span class="step-status" id="gh-step-2-status">대기</span>
     </div>
+    <div class="step-desc">코드를 올릴 GitHub 저장소를 선택하거나, 새 저장소를 만듭니다.</div>
     <div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap">
-      <button class="wb-btn" id="gh-list-repos-btn">내 레포 불러오기</button>
+      <button class="wb-btn" id="gh-list-repos-btn">내 저장소 불러오기</button>
       <select id="gh-repo-select" class="wb-input" style="flex:1; min-width:220px">
-        <option value="">— 레포 선택 —</option>
+        <option value="">저장소를 선택하세요</option>
       </select>
     </div>
     <details>
-      <summary style="cursor:pointer; color:var(--t2); font-size:12px; padding:4px 0">새 레포 생성</summary>
+      <summary style="cursor:pointer; color:var(--t2); font-size:12px; padding:4px 0">새 저장소 만들기</summary>
       <div style="display:grid; grid-template-columns:1fr auto; gap:8px; margin-top:10px">
-        <input id="gh-new-name" class="wb-input" placeholder="레포 이름">
+        <input id="gh-new-name" class="wb-input" placeholder="저장소 이름 (예: my-app)">
         <label style="display:flex; align-items:center; gap:6px; color:var(--t2); font-size:12px; padding:0 6px">
           <input type="checkbox" id="gh-new-private" checked> Private
         </label>
-        <input id="gh-new-desc" class="wb-input" style="grid-column:1/-1" placeholder="설명 (선택)">
-        <button class="wb-btn wb-btn-primary" id="gh-create-btn" style="grid-column:1/-1">생성 + 초기 push</button>
+        <input id="gh-new-desc" class="wb-input" style="grid-column:1/-1" placeholder="저장소 설명 (선택 사항)">
+        <button class="wb-btn wb-btn-primary" id="gh-create-btn" style="grid-column:1/-1">저장소 만들고 코드 올리기</button>
       </div>
     </details>
     <div class="inline-log collapsed" id="gh-step-2-log">
@@ -739,15 +763,16 @@ html[data-mode="sidebar"] .deploy-grid{ }
   <div class="step-card" id="gh-step-3">
     <div class="step-card-header">
       <div class="step-num" id="gh-step-3-num">3</div>
-      <div class="step-title">Push</div>
+      <div class="step-title">코드 올리기</div>
       <span class="step-status" id="gh-step-3-status">대기</span>
     </div>
+    <div class="step-desc">현재 작업 폴더의 코드를 선택한 저장소로 푸시합니다.</div>
     <div style="display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center">
-      <input id="gh-push-branch" class="wb-input" placeholder="브랜치 (비우면 현재)">
+      <input id="gh-push-branch" class="wb-input" placeholder="브랜치 — 비워두면 현재 브랜치">
       <label style="display:flex; align-items:center; gap:6px; color:var(--t2); font-size:12px; white-space:nowrap; padding:0 4px">
-        <input type="checkbox" id="gh-push-force"> --force
+        <input type="checkbox" id="gh-push-force"> 강제 푸시
       </label>
-      <button class="wb-btn wb-btn-primary" id="gh-push-btn">push</button>
+      <button class="wb-btn wb-btn-primary" id="gh-push-btn">코드 올리기</button>
     </div>
     <span id="gh-ws-name" style="display:none"></span>
     <div class="inline-log collapsed" id="gh-step-3-log">
@@ -760,9 +785,10 @@ html[data-mode="sidebar"] .deploy-grid{ }
   <div class="step-card" id="gh-step-4">
     <div class="step-card-header">
       <div class="step-num" id="gh-step-4-num">4</div>
-      <div class="step-title">Secret</div>
+      <div class="step-title">배포 시크릿 등록</div>
       <span class="step-status" id="gh-step-4-status">선택</span>
     </div>
+    <div class="step-desc">자동 배포(GitHub Actions)에 쓸 AWS 키 등을 저장소 비밀값으로 안전하게 등록합니다. 값은 가려진 채 저장됩니다.</div>
     <div style="display:flex; gap:4px; flex-wrap:wrap; margin-bottom:10px">
       <button class="wb-btn wb-btn-sm" data-preset="AWS_ACCESS_KEY_ID">AWS_KEY_ID</button>
       <button class="wb-btn wb-btn-sm" data-preset="AWS_SECRET_ACCESS_KEY">AWS_SECRET</button>
@@ -773,10 +799,10 @@ html[data-mode="sidebar"] .deploy-grid{ }
       <button class="wb-btn wb-btn-sm" data-preset="ECS_SERVICE">ECS_SERVICE</button>
     </div>
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px">
-      <input id="gh-secret-repo" class="wb-input" placeholder="owner/name">
-      <input id="gh-secret-name" class="wb-input" placeholder="SECRET_NAME">
-      <input id="gh-secret-value" class="wb-input" type="password" placeholder="값" style="grid-column:1/-1">
-      <button class="wb-btn wb-btn-primary" id="gh-secret-btn" style="grid-column:1/-1">등록</button>
+      <input id="gh-secret-repo" class="wb-input" placeholder="소유자/저장소 (예: my-id/my-app)">
+      <input id="gh-secret-name" class="wb-input" placeholder="시크릿 이름">
+      <input id="gh-secret-value" class="wb-input" type="password" placeholder="시크릿 값 (가려져 저장됨)" style="grid-column:1/-1">
+      <button class="wb-btn wb-btn-primary" id="gh-secret-btn" style="grid-column:1/-1">시크릿 등록</button>
     </div>
     <div class="inline-log collapsed" id="gh-step-4-log">
       <div class="inline-log-header"><span class="chev">▼</span> 로그</div>
@@ -791,8 +817,8 @@ html[data-mode="sidebar"] .deploy-grid{ }
       <span>워크플로 실행 이력</span>
     </summary>
     <div style="display:flex; gap:8px; margin:12px 0 8px">
-      <input id="gh-runs-repo" class="wb-input" placeholder="owner/name" style="flex:1">
-      <button class="wb-btn" id="gh-runs-btn">조회</button>
+      <input id="gh-runs-repo" class="wb-input" placeholder="소유자/저장소" style="flex:1">
+      <button class="wb-btn" id="gh-runs-btn">불러오기</button>
     </div>
     <div id="gh-runs-list" style="font-size:11px; color:var(--t3)"></div>
   </details>
@@ -813,6 +839,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
 
   <!-- Local Docker -->
   <div class="panel deploy-pane active" id="deploy-local">
+    <div class="step-desc" style="margin-top:0">내 컴퓨터의 Docker로 이미지를 빌드·실행해 바로 테스트합니다. AWS 없이 로컬에서 확인할 때 사용하세요.</div>
     <div class="stepper" id="local-stepper">
       <div class="stepper-item" data-step="generate"><div class="stepper-dot">1</div><div class="stepper-label">생성</div></div>
       <div class="stepper-item" data-step="approve"><div class="stepper-dot">2</div><div class="stepper-label">승인</div></div>
@@ -820,6 +847,16 @@ html[data-mode="sidebar"] .deploy-grid{ }
       <div class="stepper-item" data-step="build"><div class="stepper-dot">4</div><div class="stepper-label">빌드</div></div>
       <div class="stepper-item" data-step="run"><div class="stepper-dot">5</div><div class="stepper-label">실행</div></div>
       <div class="stepper-item" data-step="health"><div class="stepper-dot">6</div><div class="stepper-label">헬스</div></div>
+    </div>
+
+    <!-- Ship Guard 결과 배너 (배포 차단/통과) -->
+    <div id="local-shipguard" class="shipguard" style="display:none">
+      <div class="shipguard-icon" id="local-shipguard-icon"></div>
+      <div class="shipguard-body">
+        <div class="shipguard-tag" id="local-shipguard-tag"></div>
+        <div class="shipguard-title" id="local-shipguard-title">배포 차단됨</div>
+        <div class="shipguard-msg" id="local-shipguard-msg"></div>
+      </div>
     </div>
 
     <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:8px; margin-bottom:14px">
@@ -835,10 +872,10 @@ html[data-mode="sidebar"] .deploy-grid{ }
     <div id="local-scan-result" style="display:none; gap:10px; flex-wrap:wrap; padding:10px 0 0"></div>
 
     <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:14px">
-      <button class="wb-btn wb-btn-primary" id="local-btn-generate">생성</button>
+      <button class="wb-btn wb-btn-primary" id="local-btn-generate">Dockerfile 생성</button>
       <button class="wb-btn" id="local-btn-approve" disabled>승인</button>
       <button class="wb-btn" id="local-btn-scan" disabled>스캔</button>
-      <button class="wb-btn wb-btn-primary" id="local-btn-deploy" disabled>배포</button>
+      <button class="wb-btn wb-btn-primary" id="local-btn-deploy" disabled>배포 실행</button>
       <span style="flex:1"></span>
       <button class="wb-btn wb-btn-ghost" id="local-btn-reset">초기화</button>
     </div>
@@ -851,6 +888,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
 
   <!-- EC2 -->
   <div class="panel deploy-pane" id="deploy-ec2">
+    <div class="step-desc" style="margin-top:0">이미지를 ECR에 올리고 EC2 서버에 SSH로 접속해 배포합니다. 단일 서버 운영에 적합합니다.</div>
     <div class="stepper" id="ec2-stepper">
       <div class="stepper-item" data-step="building"><div class="stepper-dot">1</div><div class="stepper-label">빌드</div></div>
       <div class="stepper-item" data-step="ecr_login"><div class="stepper-dot">2</div><div class="stepper-label">ECR 로그인</div></div>
@@ -876,7 +914,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
     </div>
 
     <div style="display:flex; gap:6px; margin-top:6px; align-items:center">
-      <button class="wb-btn wb-btn-primary" id="ec2-deploy-btn">배포</button>
+      <button class="wb-btn wb-btn-primary" id="ec2-deploy-btn">배포 실행</button>
       <button class="wb-btn wb-btn-ghost" id="ec2-ready-btn" style="display:none">점검</button>
       <span style="flex:1"></span>
       <span id="ec2-status-line" style="font-size:11px; color:var(--t2)"></span>
@@ -890,6 +928,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
 
   <!-- ECS -->
   <div class="panel deploy-pane" id="deploy-ecs">
+    <div class="step-desc" style="margin-top:0">ECS Fargate에 무중단(롤링) 방식으로 배포합니다. 서버 관리 없이 컨테이너를 운영할 때 사용하세요.</div>
     <div class="stepper" id="ecs-stepper">
       <div class="stepper-item" data-step="building"><div class="stepper-dot">1</div><div class="stepper-label">빌드</div></div>
       <div class="stepper-item" data-step="ecr_push"><div class="stepper-dot">2</div><div class="stepper-label">push</div></div>
@@ -925,13 +964,13 @@ html[data-mode="sidebar"] .deploy-grid{ }
 
     <div style="display:flex; gap:12px; margin-top:14px; align-items:center; flex-wrap:wrap">
       <label style="color:var(--t3); font-size:11px; display:flex; align-items:center; gap:5px">
-        <input type="checkbox" id="ecs-skip-sbom"> skip SBOM
+        <input type="checkbox" id="ecs-skip-sbom"> SBOM 생성 생략
       </label>
       <label style="color:var(--t3); font-size:11px; display:flex; align-items:center; gap:5px">
-        <input type="checkbox" id="ecs-skip-opa"> skip OPA
+        <input type="checkbox" id="ecs-skip-opa"> 정책 검사(OPA) 생략
       </label>
       <span style="flex:1"></span>
-      <button class="wb-btn wb-btn-primary" id="ecs-deploy-btn">배포</button>
+      <button class="wb-btn wb-btn-primary" id="ecs-deploy-btn">배포 실행</button>
       <button class="wb-btn wb-btn-ghost" id="ecs-ready-btn" style="display:none">점검</button>
     </div>
     <div id="ecs-status-line" style="margin-top:10px; font-size:11px; color:var(--t2)"></div>
@@ -944,6 +983,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
 
   <!-- GitHub Actions -->
   <div class="panel deploy-pane" id="deploy-actions">
+    <div class="step-desc" style="margin-top:0">배포 워크플로(YAML)를 만들어 저장소에 넣습니다. 이후 코드를 푸시하면 GitHub가 자동으로 배포합니다.</div>
     <div class="stepper" id="actions-stepper">
       <div class="stepper-item" data-step="generate"><div class="stepper-dot">1</div><div class="stepper-label">생성</div></div>
       <div class="stepper-item" data-step="approve"><div class="stepper-dot">2</div><div class="stepper-label">저장</div></div>
@@ -957,9 +997,9 @@ html[data-mode="sidebar"] .deploy-grid{ }
       placeholder="워크플로 YAML (생성 후 표시)"></textarea>
 
     <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:14px">
-      <button class="wb-btn wb-btn-primary" id="actions-generate-btn">생성</button>
+      <button class="wb-btn wb-btn-primary" id="actions-generate-btn">워크플로 생성</button>
       <button class="wb-btn" id="actions-approve-btn" disabled>저장</button>
-      <button class="wb-btn" id="actions-push-btn" disabled>push</button>
+      <button class="wb-btn" id="actions-push-btn" disabled>푸시</button>
       <span style="flex:1"></span>
       <button class="wb-btn wb-btn-ghost" id="actions-reset-btn">초기화</button>
     </div>
@@ -981,16 +1021,17 @@ html[data-mode="sidebar"] .deploy-grid{ }
       <div class="step-title">봇 상태</div>
       <span class="step-status" id="dc-step-1-status">대기</span>
     </div>
+    <div class="step-desc">Discord 봇이 켜져 있고 내 VSCode와 연결됐는지 확인합니다.</div>
     <div id="dc-status-text" class="alert info" style="margin:0 0 12px">봇 HTTP API 연결 확인 중…</div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
       <span style="display:inline-flex; align-items:center; gap:8px">
         <img id="dc-bot-avatar" alt="" style="width:24px; height:24px; border-radius:50%; display:none; object-fit:cover; border:1px solid var(--bd2)">
-        <span id="dc-bot-name" style="font-size:12px; color:var(--t2)">봇 미감지</span>
+        <span id="dc-bot-name" style="font-size:12px; color:var(--t2)">봇이 감지되지 않음</span>
       </span>
       <span class="cost" style="margin-left:auto"><b id="dc-bridge-clients">0</b>&nbsp;<span style="color:var(--t3); font-weight:400">VSCode 브리지 연결</span></span>
     </div>
     <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap">
-      <button class="wb-btn wb-btn-ghost" id="dc-refresh-btn">새로고침</button>
+      <button class="wb-btn wb-btn-ghost" id="dc-refresh-btn">상태 새로고침</button>
     </div>
     <div style="margin-top:10px; font-size:11px; color:var(--t3); line-height:1.5">
       봇 HTTP API: <code id="dc-http-endpoint" style="color:var(--t2)">http://127.0.0.1:8765</code>
@@ -1005,6 +1046,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
       <div class="step-title">봇 초대</div>
       <span class="step-status" id="dc-step-2-status">선택</span>
     </div>
+    <div class="step-desc">내 Discord 서버에 봇을 추가합니다. 추가해야 채널을 선택하고 명령을 쓸 수 있습니다.</div>
     <p style="margin:0 0 12px; color:var(--t2); font-size:12px; line-height:1.5">
       Discord 서버에 봇을 추가해야 채널 선택이 가능합니다. 아래 버튼을 누르면 OAuth 초대 페이지가 브라우저에서 열립니다.
     </p>
@@ -1023,7 +1065,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
   <div class="step-card" id="dc-step-3">
     <div class="step-card-header">
       <div class="step-num" id="dc-step-3-num">3</div>
-      <div class="step-title">Make 채널 선택</div>
+      <div class="step-title">코드 생성 채널</div>
       <span class="step-status" id="dc-step-3-status">대기</span>
     </div>
     <p style="margin:0 0 12px; color:var(--t2); font-size:12px; line-height:1.5">
@@ -1106,11 +1148,24 @@ html[data-mode="sidebar"] .deploy-grid{ }
     return '';
   }
   function readyToChip(state){
-    if (state === 'ready')   return 'ok';
-    if (state === 'partial') return 'partial';
-    if (state === 'not_ready' || state === 'error') return 'fail';
+    if (state === 'ok' || state === 'ready')   return 'ok';
+    if (state === 'partial' || state === 'warn') return 'partial';
+    if (state === 'fail' || state === 'not_ready' || state === 'error') return 'fail';
     return '';
   }
+  var SG_ICON_BLOCK = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16.5" x2="12" y2="16.5"/></svg>';
+  var SG_ICON_PASS = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 11.5l2 2 4-4"/></svg>';
+  function showShipGuard(blocked, msg, tagText, titleText){
+    const box = $('local-shipguard'); if(!box) return;
+    box.className = 'shipguard' + (blocked ? '' : ' pass');
+    $('local-shipguard-icon').innerHTML = blocked ? SG_ICON_BLOCK : SG_ICON_PASS;
+    $('local-shipguard-tag').textContent = tagText || (blocked ? 'SHIP GUARD · 배포 전 검증 실패' : 'SHIP GUARD · 배포 전 검증 통과');
+    $('local-shipguard-title').textContent = titleText || (blocked ? '배포가 차단되었습니다' : '배포 검증을 통과했습니다');
+    $('local-shipguard-msg').textContent = msg || '';
+    box.style.display = 'flex';
+    box.scrollIntoView({ behavior:'smooth', block:'nearest' });
+  }
+  function hideShipGuard(){ const box = $('local-shipguard'); if(box) box.style.display = 'none'; }
   function now(){ return new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 
   function switchTab(name){
@@ -1448,9 +1503,24 @@ html[data-mode="sidebar"] .deploy-grid{ }
               '<span class="precheck-icon ' + (med>0?'warn':'ok') + '">' + med + '</span><span style="font-size:12px; color:var(--t2)">Medium</span>' +
               '</div>';
           }
-          appendInlineLog('local-inline-log', '✓ 스캔 완료 (critical=' + c + ', high=' + h + ')', c>0 || h>0 ? 'err' : 'ok');
-          updateStepper('local-stepper', 'build', '');
-          setLocalBtns({ generate:true, approve:false, scan:false, deploy:true });
+          const finds = r.findings || [];
+          const f0 = finds[0] || {};
+          if (c > 0){
+            updateStepper('local-stepper', 'scan', 'failed');
+            const where = f0.file ? (String(f0.file).split('/').pop() + (f0.line ? ':' + f0.line : '')) : '코드';
+            const kind = f0.rule_id || '시크릿';
+            appendInlineLog('local-inline-log', '✗ 보안 스캔 실패 — 시크릿 ' + c + '건 발견', 'err');
+            showShipGuard(true,
+              where + ' 에서 하드코딩된 시크릿 ' + c + '건 발견 (' + kind + '). 이 비밀값이 이미지에 그대로 담겨 배포되면 외부에 유출됩니다 — 배포를 중단했습니다.',
+              'SHIP GUARD · 보안 스캔 차단', '하드코딩된 시크릿이 발견되었습니다');
+            setLocalBtns({ generate:true, approve:false, scan:true, deploy:false });
+          } else {
+            appendInlineLog('local-inline-log', '✓ 보안 스캔 통과 — 노출된 시크릿 없음', 'ok');
+            updateStepper('local-stepper', 'build', '');
+            showShipGuard(false, '코드에서 노출된 시크릿이 발견되지 않았습니다 — 배포 진행 가능.',
+              'SHIP GUARD · 보안 스캔 통과', '보안 스캔을 통과했습니다');
+            setLocalBtns({ generate:true, approve:false, scan:false, deploy:true });
+          }
         } else {
           appendInlineLog('local-inline-log', '✗ 스캔 실패: ' + (p.error || ''), 'err');
         }
@@ -1463,6 +1533,13 @@ html[data-mode="sidebar"] .deploy-grid{ }
         if (p.finished && !p.error){
           appendInlineLog('local-inline-log', '✓ 배포 완료 + 헬스체크 통과', 'ok');
           updateStepper('local-stepper', 'health', 'done');
+          setLocalBtns({ generate:true, approve:false, scan:false, deploy:false });
+          showShipGuard(false, '컨테이너 정상 기동 · 헬스체크 통과 — 배포해도 안전합니다.');
+        }
+        if (p.finished && p.error){
+          const stageLabel = ({ build:'빌드', run:'실행', health:'헬스체크' })[p.stage] || '실행 전 검증';
+          showShipGuard(true, (p.error_summary || p.line || '컨테이너가 시작되지 못했습니다.')
+            + ' — ' + stageLabel + ' 단계에서 실패. 이대로 배포하면 운영 장애로 이어집니다.');
           setLocalBtns({ generate:true, approve:false, scan:false, deploy:false });
         }
         break;
@@ -1802,11 +1879,13 @@ html[data-mode="sidebar"] .deploy-grid{ }
     vscode.postMessage({ type:'wb.local.approve', payload:{ proposal_id: localProposalId, content } });
   });
   ghBindClick('local-btn-scan', () => {
-    appendInlineLog('local-inline-log', '[…] Trivy 스캔 실행', 'cmd');
+    hideShipGuard();
+    appendInlineLog('local-inline-log', '[…] 보안 스캔 실행 — 하드코딩된 시크릿 탐지', 'cmd');
     setLocalStepperStage('scan');
     vscode.postMessage({ type:'wb.local.scan' });
   });
   ghBindClick('local-btn-deploy', () => {
+    hideShipGuard();
     appendInlineLog('local-inline-log', '[…] docker build + run + 헬스체크', 'cmd');
     setLocalStepperStage('build');
     vscode.postMessage({
@@ -1820,6 +1899,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
   });
   ghBindClick('local-btn-reset', () => {
     localProposalId = '';
+    hideShipGuard();
     if ($('local-dockerfile-preview')) $('local-dockerfile-preview').value = '';
     if ($('local-scan-result')) $('local-scan-result').innerHTML = '<div style="color:var(--t3); font-size:12px">아직 스캔하지 않음</div>';
     setLocalBtns({ generate:true, approve:false, scan:false, deploy:false });

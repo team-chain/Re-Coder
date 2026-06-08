@@ -71,6 +71,16 @@ export class BridgeClient implements vscode.Disposable {
     }
 
     /** 설정 또는 환경변수에서 브리지 endpoint + 토큰 회수 */
+    /** rcdr_<student_id>_<secret> 토큰에서 student_id 추출 */
+    private _parseStudentId(token: string): string {
+        const t = (token || '').trim();
+        if (t.startsWith('rcdr_')) {
+            const parts = t.split('_');
+            if (parts.length >= 3) return parts[1];
+        }
+        return '';
+    }
+
     private _resolveEndpoint(): { url: string; token: string } {
         const cfg = vscode.workspace.getConfiguration('recoder.bridge');
         const host = cfg.get<string>('host', '127.0.0.1');
@@ -79,9 +89,16 @@ export class BridgeClient implements vscode.Disposable {
             cfg.get<string>('token', '') ||
             process.env.RECODER_BRIDGE_TOKEN ||
             '';
-        const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+        // Phase 2 per-user 라우팅 식별자: 설정값 우선, 없으면 게이트웨이 토큰에서 추출.
+        const studentId =
+            cfg.get<string>('studentId', '') ||
+            this._parseStudentId(process.env.RECODER_STUDENT_TOKEN || '');
+        const params = new URLSearchParams();
+        if (token) params.set('token', token);
+        if (studentId) params.set('student', studentId);
+        const qs = params.toString() ? `?${params.toString()}` : '';
         return {
-            url: `ws://${host}:${port}/ws${tokenParam}`,
+            url: `ws://${host}:${port}/ws${qs}`,
             token,
         };
     }
@@ -210,6 +227,9 @@ export class BridgeClient implements vscode.Disposable {
                 return;
             }
 
+            case 'delete':
+                await this._handleDelete(msg);
+                break;
             default:
                 this.output.appendLine(`[bridge] unknown message type: ${msg.type}`);
         }
@@ -371,6 +391,36 @@ export class BridgeClient implements vscode.Disposable {
         // auto_run — 파일 종류별로 실행
         if (msg.auto_run) {
             await this._autoRun(session);
+        }
+    }
+
+    /** 봇이 보내는 { type: "delete", filename } — 워크스페이스에서 파일 삭제(휴지통). */
+    private async _handleDelete(msg: BridgeMessage): Promise<void> {
+        const filename = msg.filename;
+        if (!filename) { return; }
+        const root = this._getWorkspaceRoot();
+        if (!root) {
+            vscode.window.showErrorMessage('ReCoder Bridge: 워크스페이스가 열려있지 않습니다.');
+            return;
+        }
+        const safeName = this._sanitizeFilename(filename);
+        const fileUri = vscode.Uri.joinPath(root, safeName);
+        // 그 파일을 편집 중인 세션이면 먼저 정리
+        if (this.session && this.session.filename === safeName) {
+            this._disposeSession(this.session, /* save */ false);
+            this.session = null;
+        }
+        try {
+            if (!(await this._fileExists(fileUri))) {
+                vscode.window.setStatusBarMessage(`ReCoder: ${safeName} 없음(이미 삭제?)`, 4000);
+                return;
+            }
+            await vscode.workspace.fs.delete(fileUri, { useTrash: true });
+            this.output.appendLine(`[bridge] delete → ${safeName}`);
+            vscode.window.setStatusBarMessage(`ReCoder: ${safeName} 삭제됨`, 4000);
+        } catch (err) {
+            this.output.appendLine(`[bridge] delete failed: ${err}`);
+            vscode.window.showErrorMessage(`ReCoder: ${safeName} 삭제 실패 — ${err}`);
         }
     }
 

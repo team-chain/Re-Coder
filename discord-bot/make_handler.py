@@ -33,6 +33,10 @@ import discord
 
 from recoder_bridge import hub
 from bridge_settings import get_make_channel_id
+try:
+    import guild_store  # Phase 2 per-user 라우팅 바인딩 조회
+except Exception:
+    guild_store = None
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +70,12 @@ MODEL_MAX_TOKENS: dict[str, int] = {
     "us.anthropic.claude-haiku-4-5-20251001-v1:0": 8192,
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 8192,
     "us.anthropic.claude-sonnet-4-20250514-v1:0": 8192,
+    # APAC / global inference profiles (계정 list_inference_profiles 기준)
+    "apac.anthropic.claude-3-sonnet-20240229-v1:0": 4096,
+    "apac.anthropic.claude-3-5-sonnet-20240620-v1:0": 8192,
+    "apac.anthropic.claude-3-5-sonnet-20241022-v2:0": 8192,
+    "global.anthropic.claude-sonnet-4-5-20250929-v1:0": 8192,
+    "global.anthropic.claude-sonnet-4-6": 8192,
 }
 # 모델 한도 알 수 없으면 가장 보수적인 값 (4096) 사용 → ValidationException 회피
 _DEFAULT_MODEL_MAX_TOKENS = 4096
@@ -249,6 +259,8 @@ _BASE_RULES = """\
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 출력 규칙 (반드시 준수)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+0. 사용자의 명시 요청을 최우선으로 따른다. 요청하지 않은 기능·스타일을 임의로 추가하지 않는다.
+   단, 코드의 완전성·문법 정확성·타이밍 일관성 같은 '보편적 정답'은 요청과 무관하게 항상 보장한다.
 1. 코드만 출력한다. 설명문, 인사말, 꼬리말 일절 금지.
 2. 마크다운 코드 펜스(``` 또는 ~~~)를 절대 사용하지 않는다.
 3. 주석은 해당 언어의 주석 문법으로 코드 내부에만 작성한다.
@@ -295,16 +307,51 @@ CSS 작성 금지 패턴:
 
 _HTML_GAME_GUIDE = """\
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HTML 게임 품질 기준
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- 브라우저에서 HTML 파일을 바로 열면 즉시 실행 가능해야 한다.
-- 외부 CDN·라이브러리 금지. 순수 HTML/CSS/JS만 사용한다.
-- 필수 기능: 키보드 조작, 점수 표시, 게임오버 감지, 재시작 버튼.
-- 고스트 피스(낙하 예측) 등 게임성을 높이는 UX를 포함한다.
-- requestAnimationFrame 기반 게임 루프를 사용한다.
-- 모든 Canvas 드로잉 함수는 ctx를 null 체크 없이 안전하게 호출 가능해야 한다.
-- 한국어 UI 텍스트를 사용한다.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HTML 게임 — 완성도 / 타이밍 / 금지사항
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[반드시 — 안 지키면 버그]
+- 브라우저에서 파일을 열면 즉시 실행된다. 외부 CDN·라이브러리 금지(순수 HTML/CSS/JS).
+- 움직임·낙하 속도는 '프레임 수'가 아니라 '경과 시간(밀리초)'으로 고정한다.
+  requestAnimationFrame 의 timestamp 델타를 누적해 처리한다 — 주사율(60/120/144Hz)·
+  프레임 드럭과 무관하게 항상 같은 속도여야 한다. 반드시 아래 패턴을 따른다:
+      let last = 0, acc = 0;
+      const STEP_MS = 500;                 // 시간 간격(ms)으로 고정
+      function loop(now) {
+        acc += now - last; last = now;
+        while (acc >= STEP_MS) { update(); acc -= STEP_MS; }
+        draw();
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+  금지: `if (frame % N === 0)` 같은 프레임 카운트 기반 타이밍.
+- Canvas 사용 시 ctx 가 항상 유효하도록 초기화하고, 드로잉 전 캔버스 크기를 설정한다.
+
+[완성도 — 실제 그 게임처럼 빠짐없이]
+- 해당 장르의 표준 메커니즘 전체를 충실히 구현한다. 어설픈 축약본이 아니라 실제로 즐길 수 있는 완성품으로 만든다.
+- 테트리스라면 다음을 모두 포함한다: 7종 테트로미노(I·O·T·S·Z·J·L)와 각 표준 색,
+  좌우 이동·소프트드롭·하드드롭·회전(벽/블록 충돌 시 월킥 보정), 줄 완성 시 라인 클리어,
+  레벨에 따른 낙하 속도 증가, 다음 조각 미리보기(NEXT), 고스트(착지 위치 미리보기),
+  점수·레벨·라인 카운트, 게임오버 및 재시작. (다른 장르도 같은 수준으로 그 핵심을 빠짐없이 구현한다.)
+- 렌더링은 또렷하고 깔끔하게: 격자·블록 외곽선·분명한 색 대비로 가독성을 확보한다.
+
+[금지 — 군더더기 텍스트 박지 않기]
+- 게임 화면에 제목 배너·조작법 안내·사용설명·제작자/크레딧·워터마크·소개문 등
+  '플레이에 불필요한 텍스트'를 일절 넣지 않는다.
+- 화면에 표시하는 텍스트는 점수·레벨·라인·NEXT 같은 '기능적 HUD'로만 한정한다.
+  사용자가 명시적으로 요청한 텍스트만 추가한다.
+
+[버그 방지 — 출력 전 반드시 자가검증]
+- document.getElementById(id) 로 잡는 모든 요소는 HTML에 그 id로 실제 존재해야 한다.
+  특히 .getContext('2d') 를 호출하는 대상은 반드시 <canvas> 요소여야 하고 id 철자가 정확히 일치해야 한다.
+  (예: NEXT 미리보기도 <canvas id="next">처럼 실제 캔버스로 만들고 그 id로 잡는다. null/비-canvas에 getContext 호출 금지.)
+- 페이지 로드 즉시 게임이 보이고 동작하도록 초기화 순서를 지킨다:
+  보드 자료구조 생성 → 첫 조각 스폰 → draw() 1회 → requestAnimationFrame(loop) 호출.
+  loop 안에서 시간 누적으로 자동 낙하시키고 매 프레임 draw() 한다. (조각이 보이고 실제로 떨어져야 한다.)
+- 모든 <canvas> 는 width/height 를 지정하고, 드로잉 좌표는 셀 크기에 맞춘다.
+- 회전 시 벽/바닥/다른 블록과 충돌하면 좌우로 1~2칸 보정(월킥)해 넣고, 그래도 안 되면 회전을 취소한다.
+- 출력 직전, 머릿속으로 첫 1~2프레임을 실행해 본다: 조각이 보이는가? 아래로 내려가는가?
+  키 입력에 반응하는가? 줄이 차면 지워지고 점수가 오르는가? 모두 '예'일 때만 출력한다.
 """
 
 
@@ -371,6 +418,161 @@ Bash 스크립트 품질 기준
     return header + _BASE_RULES
 
 
+# ── 세션 메모리 / 의도 분류 / 명확화 (Phase: /make 대화형 개선) ───────────────
+
+# 채널별 직전 산출물 기억: {channel_id: {"filename","language","code"}}
+_SESSIONS: "dict[int, dict]" = {}
+
+# 명시 파일명 지시 (확장자 없는 "파일명은 sebin" 형태). 파일명은 ASCII 로 한정.
+_NAME_DIRECTIVE_RE = re.compile(
+    r"(?:파일\s*명|파일\s*이름|파일|filename|file\s*name|이름)\s*"
+    r"(?:은|는|이|가|:|=|을|를|으로|로|to)?\s*['\"]?([A-Za-z0-9_][A-Za-z0-9_\-]{0,39})",
+    re.IGNORECASE,
+)
+_LANG_EXT_HINTS = [
+    ("파이썬", "py"), ("python", "py"), ("자바스크립트", "js"), ("javascript", "js"),
+    ("타입스크립트", "ts"), ("typescript", "ts"), ("리액트", "jsx"), ("react", "jsx"),
+    ("러스트", "rs"), ("rust", "rs"), ("자바", "java"), ("go", "go"),
+]
+_RUN_ONLY_REFS = ("방금", "아까", "이거", "그거", "위에", "직전", "다시", "that", "this", "it")
+_MODIFY_KW = ("더 ", "느리", "빠르", "바꿔", "바꾸", "수정", "변경", "추가", "고쳐",
+              "줄여", "늘려", "크게", "작게", "색", "버튼", "개선", "modify", "change",
+              "slower", "faster", "add ")
+_CREATE_KW = ("만들", "생성", "짜줘", "짜 줘", "만드", "구현", "create", "build", "make",
+              "코드", "게임", "웹", "앱", "사이트", "페이지", "스크립트", "프로그램")
+_DELETE_KW = ("삭제", "지워", "지우", "제거", "delete", "remove")
+_DB_HINTS = ("db", "데이터베이스", "database", "로그인", "회원", "계정", "결제",
+             "주문", "장바구니", "백엔드", "back-end", "backend", "서버", "인증", "auth")
+
+
+def _infer_ext(text: str) -> str:
+    t = text.lower()
+    for kw, ext in _LANG_EXT_HINTS:
+        if kw in t:
+            return ext
+    return "html"
+
+
+def _resolve_filename(content: str) -> "tuple[str, str]":
+    """명시 파일명(확장자 유무 모두) 우선, 없으면 기존 추론."""
+    m = _EXPLICIT_FILENAME_RE.search(content)
+    if m:
+        fn = m.group(1)
+        ext = fn.rsplit(".", 1)[-1].lower()
+        return fn, _EXT_TO_LANG.get(ext, ext.upper())
+    m2 = _NAME_DIRECTIVE_RE.search(content)
+    if m2:
+        base = m2.group(1)
+        if base.lower() not in ("은", "는", "로", "으로", "파일", "코드", "이름", "name", "file"):
+            ext = _infer_ext(content)
+            return f"{base}.{ext}", _EXT_TO_LANG.get(ext, ext.upper())
+    return _infer_file_info(content)
+
+
+def _classify_intent(content: str, has_session: bool) -> str:
+    """create | run | modify | delete 분류 (키워드 기반, LLM 없음)."""
+    t = content.lower()
+    if any(k in content for k in _DELETE_KW):
+        return "delete"
+    is_run = any(k in t for k in _RUN_KEYWORDS)
+    refers_prev = any(k in content for k in _RUN_ONLY_REFS)
+    is_modify = any(k in content for k in _MODIFY_KW)
+    has_create = any(k in content for k in _CREATE_KW)
+    if is_run and refers_prev:          # "방금 만든 거 실행" — 생성보다 우선
+        return "run"
+    if has_create:                      # 새 생성 (auto_run 은 별도 플래그)
+        return "create"
+    if has_session and is_modify:
+        return "modify"
+    if has_session and is_run:
+        return "run"
+    if is_run:
+        return "run"
+    if has_session:
+        return "modify"
+    return "create"
+
+
+def _build_modify_prompt(prev_code: str, instruction: str, filename: str) -> str:
+    return (
+        f"다음은 직전에 생성한 파일 `{filename}` 의 전체 코드입니다:\n\n"
+        f"{prev_code}\n\n"
+        f"---\n위 코드에 아래 수정 요청을 반영해서 **수정된 전체 파일 전체**를 다시 출력하세요"
+        f"(일부가 아니라 완전한 파일 하나). 수정 요청: {instruction}"
+    )
+
+
+def _implies_persistence(content: str) -> bool:
+    """DB/저장/회원/장바구니 등 데이터 영속이 필요해 보이면 True."""
+    t = content.lower()
+    if any(h in t for h in _DB_HINTS):
+        return True
+    return any(k in t for k in ("저장", "목록", "장바구니", "기록", "save", "persist", "store"))
+
+
+def _needs_clarification(content: str) -> "Optional[str]":
+    """애매(너무 짧은) 요청이면 생성 전에 보여줄 안내문, 아니면 None.
+
+    DB/백엔드 요청은 더 이상 거절하지 않는다 — _implies_persistence 로 감지해
+    localStorage 기반 단일 파일 앱으로 생성한다(아래 핸들러)."""
+    if len(content.strip()) <= 6 and not _EXPLICIT_FILENAME_RE.search(content):
+        return (
+            "요청이 조금 짧아요. 무엇을 어떤 기능/화면으로 만들지 한 줄만 더 알려주세요.\n"
+            "예: `할 일 목록 앱 - 추가/삭제/완료체크`"
+        )
+    return None
+
+
+# ── 생성물 정리 (서문/꼬리말/코드펜스 제거) ─────────────────────────────────
+_HTML_START_RE = re.compile(r'<!DOCTYPE\s+html|<html[\s>]', re.IGNORECASE)
+_HTML_END_RE = re.compile(r'</html\s*>', re.IGNORECASE)
+
+
+def _finalize_code(code: str, filename: str) -> str:
+    """LLM이 코드 앞뒤에 설명문을 붙여도 순수 코드만 남긴다.
+    HTML이면 <!DOCTYPE>/<html> 앞 서문과 </html> 뒤 꼬리말을 제거(=quirks 모드 방지).
+    그 외 파일은 마크다운 코드펜스만 제거."""
+    code = re.sub(r'^\s*```[a-zA-Z0-9]*\s*\n', '', code)
+    code = re.sub(r'\n```\s*$', '', code)
+    if str(filename).lower().endswith(('.html', '.htm')):
+        m = _HTML_START_RE.search(code)
+        if m:
+            code = code[m.start():]
+        ends = list(_HTML_END_RE.finditer(code))
+        if ends:
+            code = code[:ends[-1].end()]
+    return code.strip()
+
+
+# 발표/데모 안정성: 잘 알려진 게임은 검증된 템플릿으로 100% 작동 보장(설계서 §14 FileTemplate Registry).
+_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+_GAME_TEMPLATES = {
+    "tetris": ("테트리스", "tetris", "tetras"),
+}
+
+
+def _match_game_template(content: str, filename: str) -> Optional[str]:
+    if not str(filename).lower().endswith((".html", ".htm")):
+        return None
+    low = content.lower()
+    for tpl, kws in _GAME_TEMPLATES.items():
+        if any(k in low for k in kws):
+            path = os.path.join(_TEMPLATE_DIR, tpl + ".html")
+            if os.path.exists(path):
+                return path
+    return None
+
+
+async def _stream_template(code: str, emit, chunk_size: int = 90) -> int:
+    """검증된 템플릿 코드를 LLM 생성처럼 청크로 스트리밍(개발 흐름 연출 유지)."""
+    n = 0
+    for i in range(0, len(code), chunk_size):
+        await emit({"type": "chunk", "text": code[i:i + chunk_size]})
+        n += 1
+        await asyncio.sleep(0.012)
+    return n
+
+
 # ── 메시지 핸들러 (진입점) ────────────────────────────────────────────────────
 
 async def handle_make_message(bot: discord.Client, message: discord.Message) -> None:
@@ -391,14 +593,58 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
     if not content:
         return
 
-    # 파일명 / 언어 자동 추론
-    filename, language = _infer_file_info(content)
+    # (파일명/의도는 연결 확인 뒤 intent 분기에서 결정)
 
-    # "실행" 의도 감지 — VSCode 확장이 파일을 자동으로 열어줘야 하는지
-    auto_run = _infer_should_auto_run(content)
+    # Phase 2 per-user 라우팅: 이 Discord 사용자에 바인딩된 student_id 해석.
+    # 있으면 그 학생 본인 VSCode 연결로만, 없으면 레거시 broadcast(단일 PC 데모).
+    target = ""
+    if guild_store is not None:
+        try:
+            target = guild_store.get_student_id(message.author.id) or ""
+        except Exception:
+            target = ""
 
-    # VSCode 브리지 연결 확인
-    if hub.connected_count == 0:
+    collected: "list[str]" = []  # 생성된 코드 전체 누적(세션 저장·재실행용)
+
+    _pf = {"started": None, "buf": ""}  # 서문 필터 상태
+
+    async def emit(event: dict) -> int:
+        if event.get("type") == "chunk":
+            _text = event.get("text", "")
+            if _pf["started"] is None:
+                _pf["started"] = not str(filename).lower().endswith((".html", ".htm"))
+            if not _pf["started"]:
+                _pf["buf"] += _text
+                _m = _HTML_START_RE.search(_pf["buf"])
+                if _m:
+                    _cleaned = _pf["buf"][_m.start():]
+                    _pf["started"] = True
+                    _pf["buf"] = ""
+                    collected.append(_cleaned)
+                    event = {**event, "text": _cleaned}
+                elif len(_pf["buf"]) > 8000:
+                    _pf["started"] = True
+                    collected.append(_pf["buf"])
+                    event = {**event, "text": _pf["buf"]}
+                    _pf["buf"] = ""
+                else:
+                    return 0  # 아직 서문 구간 — 전송 보류
+            else:
+                collected.append(_text)
+        if target:
+            return await hub.send_to_student(target, event)
+        return await hub.broadcast(event)
+
+    # VSCode 브리지 연결 확인 (per-user면 본인 연결만 확인)
+    if target:
+        if not hub.student_connected(target):
+            await message.reply(
+                f"❗ 연결된 VSCode(student_id `{target}`)를 찾을 수 없습니다.\n"
+                "VSCode 확장 설정 `recoder.bridge.studentId` 에 student_id 를 넣고 연결하세요.",
+                mention_author=False,
+            )
+            return
+    elif hub.connected_count == 0:
         await message.reply(
             "❗ VSCode 확장이 브리지에 연결되어 있지 않습니다.\n"
             "VSCode를 열고 ReCoder 확장이 활성화되어 있는지 확인하세요.\n"
@@ -406,6 +652,55 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
             mention_author=False,
         )
         return
+
+    # ── 의도 분기 (create / run / modify / delete) ──────────────────────────
+    session = _SESSIONS.get(message.channel.id)
+    intent = _classify_intent(content, session is not None)
+
+    if intent == "delete":
+        m = _EXPLICIT_FILENAME_RE.search(content)
+        del_target = m.group(1) if m else (session.get("filename") if session else None)
+        if not del_target:
+            await message.reply("어떤 파일을 삭제할까요? 파일명을 알려주세요.", mention_author=False)
+            return
+        await emit({"type": "delete", "filename": del_target})
+        if session and session.get("filename") == del_target:
+            _SESSIONS.pop(message.channel.id, None)
+        await message.reply(f"🗑️ `{del_target}` 삭제 요청을 보냈습니다.", mention_author=False)
+        return
+
+    if intent == "run":
+        if not session:
+            await message.reply("아직 만든 파일이 없어요. 먼저 무엇을 만들지 요청해 주세요.", mention_author=False)
+            return
+        fn, lang, code = session["filename"], session["language"], session["code"]
+        await emit({"type": "start", "filename": fn, "language": lang, "prompt": content})
+        await emit({"type": "chunk", "text": code})
+        await emit({"type": "end", "filename": fn, "auto_run": True})
+        await message.reply(f"▶️ `{fn}` 실행 요청을 보냈습니다.", mention_author=False)
+        return
+
+    _db_note = False
+    if intent == "modify" and session:
+        filename, language = session["filename"], session["language"]
+        gen_prompt = _build_modify_prompt(session["code"], content, filename)
+    else:
+        filename, language = _resolve_filename(content)
+        _clar = _needs_clarification(content)
+        if _clar:
+            await message.reply(_clar, mention_author=False)
+            return
+        gen_prompt = content
+        if _implies_persistence(content):
+            # (4) 실제 DB 대신 localStorage 로 영속화하는 단일 파일 앱을 만든다.
+            gen_prompt = content + (
+                "\n\n[저장 요구사항] 데이터 저장·목록·장바구니·회원·기록 등이 필요하면 "
+                "브라우저 localStorage 로 구현해 새로고침 후에도 유지되게 하라. "
+                "외부 DB·서버 없이 단일 파일(HTML+JS) 하나로 완결되게 하라."
+            )
+            _db_note = True
+
+    auto_run = _infer_should_auto_run(content)
 
     # 생성 시작 알림
     short_model = BEDROCK_MODEL_ID.split(".")[-1][:28]
@@ -415,7 +710,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
     )
 
     # 브리지에 시작 이벤트 전송
-    await hub.broadcast({
+    await emit({
         "type": "start",
         "filename": filename,
         "language": language,
@@ -435,40 +730,51 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
         # max_tokens 로 잘리거나 응답이 비정상적으로 짧으면 한 번까지
         # 토큰 한도를 두 배로 늘려 재시도. 무한 루프 방지 위해 1회만.
         chunk_count, stop_reason = await _stream_bedrock(
-            content, filename, language, max_tokens=MAX_TOKENS,
+            gen_prompt, filename, language, max_tokens=MAX_TOKENS, emit=emit,
         )
         if stop_reason == "max_tokens" and chunk_count > 0:
             log.warning(
                 "%s: max_tokens 도달 — %d 토큰으로 재시도",
                 filename, MAX_TOKENS * 2,
             )
-            await hub.broadcast({
+            await emit({
                 "type": "info", "filename": filename,
                 "message": "토큰 한도 도달 — 한도 두 배로 재시도 중…",
             })
             # 이전 부분 응답은 폐기하고 새 세션으로 다시 — 확장은 새 start 받으면
             # 이전 세션을 강제 종료하고 새 파일을 연다 (startSession 에 구현됨).
-            await hub.broadcast({
+            await emit({
                 "type": "start", "filename": filename,
                 "language": language, "prompt": content,
             })
+            collected.clear()
+            _pf.update(started=None, buf="")
             chunk_count, stop_reason = await _stream_bedrock(
-                content, filename, language, max_tokens=MAX_TOKENS * 2,
+                gen_prompt, filename, language, max_tokens=MAX_TOKENS * 2, emit=emit,
             )
 
         # end 이벤트에 auto_run 플래그 포함 — 확장이 파일을 자동 실행할지 결정
-        await hub.broadcast({
+        await emit({
             "type": "end",
             "filename": filename,
             "auto_run": auto_run,
         })
         end_sent = True
+        _SESSIONS[message.channel.id] = {
+            "filename": filename, "language": language, "code": _finalize_code("".join(collected), filename),
+        }
         await _update_status(
             status_msg, filename, chunk_count, stop_reason, auto_run=auto_run,
         )
+        if _db_note:
+            await message.reply(
+                "ℹ️ 실제 DB는 백엔드 서버가 필요해서, **localStorage 로 저장되는 단일 파일 앱**으로 만들었어요"
+                " (새로고침해도 데이터 유지). 진짜 DB 연동이 필요하면 알려주세요.",
+                mention_author=False,
+            )
 
     except asyncio.CancelledError:
-        await hub.broadcast({
+        await emit({
             "type": "error", "filename": filename,
             "error": "취소됨", "message": "취소됨",
         })
@@ -482,7 +788,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
         log.exception("Bedrock 스트리밍 실패 (filename=%s): %s", filename, exc)
         err_msg = str(exc) or exc.__class__.__name__
         # BridgeClient 가 읽는 필드명은 'error' — 'message' 와 둘 다 채워 호환성 확보.
-        await hub.broadcast({
+        await emit({
             "type": "error", "filename": filename,
             "error": err_msg,
             "message": err_msg,
@@ -497,7 +803,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
         # 저장될 수 있도록 end 를 한 번 더 보낸다. 이미 보냈으면 skip.
         if not end_sent:
             try:
-                await hub.broadcast({
+                await emit({
                     "type": "end", "filename": filename, "auto_run": False,
                 })
             except Exception:
@@ -573,9 +879,10 @@ def _build_fallback_models() -> list[str]:
     if prefix:
         # 현재 리전에 맞는 inference profile 만 추가
         candidates.extend([
-            f"{prefix}anthropic.claude-haiku-4-5-20251001-v1:0",
             f"{prefix}anthropic.claude-sonnet-4-5-20250929-v1:0",
+            f"{prefix}anthropic.claude-3-5-sonnet-20241022-v2:0",
             f"{prefix}anthropic.claude-sonnet-4-20250514-v1:0",
+            f"{prefix}anthropic.claude-haiku-4-5-20251001-v1:0",
         ])
     return _dedupe_models(candidates)
 
@@ -633,6 +940,7 @@ async def _stream_bedrock(
     filename: str,
     language: str,
     max_tokens: Optional[int] = None,
+    emit=None,
 ) -> tuple[int, Optional[str]]:
     """
     Bedrock converse_stream을 워커 스레드에서 실행하고, 텍스트 청크를
@@ -654,16 +962,31 @@ async def _stream_bedrock(
     # 2) 사용자 계정에서 실제 호출 가능한 모델로 좁히기 (invalid identifier 회피)
     available = _get_available_models()
     if available:
-        # 가용한 것만 시도. inference profile 가용 목록에 안 보이면 시도 안 함.
-        candidates = [m for m in raw_candidates if m in available]
+        # on-demand 가용 모델 + 모든 inference-profile 모델(apac./us./eu./global.)을 후보로 둔다.
+        # (inference profile 은 ListFoundationModels(on-demand) 에 안 잡히지만 실제로는 호출 가능 →
+        #  여기서 빼버리면 강한 Sonnet 이 누락되어 약한 haiku 로 떨어졌음. 그 버그 수정.)
+        _profile = ("apac.", "us.", "eu.", "global.")
+        candidates = [
+            m for m in raw_candidates
+            if (m in available) or m.startswith(_profile)
+        ]
         primary = BEDROCK_MODEL_ID
-        if primary and primary not in available and primary not in candidates:
+        if primary and primary not in candidates:
             candidates.append(primary)
     else:
         candidates = raw_candidates
 
-    # 3) Sonnet 우선 정렬 — max_tokens 한도가 크고 코드 품질 좋음
-    candidates.sort(key=lambda m: (0 if "sonnet" in m.lower() else 1, m))
+    # 3) 모델 강함 순으로 정렬 — 강한 모델일수록 코드 품질↑ (기초 버그↓).
+    #    Sonnet 4.5 → Sonnet 4 → 3.5 Sonnet v2(20241022) → 그 외 3.5 Sonnet → Haiku 4.5 → 그 외.
+    _RANK = ["sonnet-4-5", "sonnet-4-2025", "3-5-sonnet-20241022", "3-5-sonnet",
+             "haiku-4-5", "sonnet", "haiku"]
+    def _model_rank(m: str) -> int:
+        ml = m.lower()
+        for i, key in enumerate(_RANK):
+            if key in ml:
+                return i
+        return len(_RANK)
+    candidates.sort(key=_model_rank)
 
     if not candidates:
         raise RuntimeError(
@@ -687,7 +1010,7 @@ async def _stream_bedrock(
                 modelId=_mid,
                 system=[{"text": system_prompt}],
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
-                inferenceConfig={"maxTokens": _mt, "temperature": 0.2},
+                inferenceConfig={"maxTokens": _mt, "temperature": 0.0},
             )
 
         try:
@@ -716,7 +1039,7 @@ async def _stream_bedrock(
                                 modelId=_mid,
                                 system=[{"text": system_prompt}],
                                 messages=[{"role": "user", "content": [{"text": prompt}]}],
-                                inferenceConfig={"maxTokens": _mt, "temperature": 0.2},
+                                inferenceConfig={"maxTokens": _mt, "temperature": 0.0},
                             ),
                         )
                         log.info("Bedrock 호출 성공 (재시도): model=%s", model_id)
@@ -766,7 +1089,7 @@ async def _stream_bedrock(
         delta = event.get("contentBlockDelta", {}).get("delta", {})
         text = delta.get("text")
         if text:
-            await hub.broadcast({"type": "chunk", "text": text})
+            await (emit or hub.broadcast)({"type": "chunk", "text": text})
             chunk_count += 1
             continue
 
@@ -806,3 +1129,68 @@ def _check_stream_error(event: dict) -> None:
             payload = event[key]
             msg = payload.get("message", str(payload)) if isinstance(payload, dict) else str(payload)
             raise RuntimeError(f"Bedrock 스트림 오류 [{key}]: {msg}")
+
+
+# ── 패널 재사용용 생성 코어 ──────────────────────────────────────────────────
+async def run_generation(channel, content: str, discord_user_id: int = 0) -> dict:
+    """디스코드 작업 패널(모달/ALL)에서 호출하는 생성 코어.
+
+    handle_make_message 와 같은 헬퍼(_resolve_filename/_classify_intent/_stream_bedrock)
+    를 재사용하되, discord.Message 가 아니라 channel + 텍스트만으로 동작한다.
+    브리지로 emit(연결돼 있으면 VSCode에 파일 생성), 코드 전체를 반환한다.
+    반환: {ok, filename, language, code, error?}
+    """
+    target = ""
+    if guild_store is not None and discord_user_id:
+        try:
+            target = guild_store.get_student_id(discord_user_id) or ""
+        except Exception:
+            target = ""
+
+    collected: "list[str]" = []
+
+    async def emit(event: dict) -> int:
+        if event.get("type") == "chunk":
+            collected.append(event.get("text", ""))
+        try:
+            if target:
+                return await hub.send_to_student(target, event)
+            return await hub.broadcast(event)
+        except Exception:
+            return 0
+
+    session = _SESSIONS.get(channel.id)
+    intent = _classify_intent(content, session is not None)
+    if intent == "modify" and session:
+        filename, language = session["filename"], session["language"]
+        gen_prompt = _build_modify_prompt(session["code"], content, filename)
+    else:
+        filename, language = _resolve_filename(content)
+        gen_prompt = content
+        if _implies_persistence(content):
+            gen_prompt = content + (
+                "\n\n[저장 요구사항] 데이터 저장·목록·장바구니·회원·기록 등이 필요하면 "
+                "브라우저 localStorage 로 구현해 새로고침 후에도 유지되게 하라. "
+                "외부 DB·서버 없이 단일 파일(HTML+JS) 하나로 완결되게 하라."
+            )
+
+    auto_run = _infer_should_auto_run(content)
+    await emit({"type": "start", "filename": filename, "language": language, "prompt": content})
+    try:
+        _cc, stop_reason = await _stream_bedrock(
+            gen_prompt, filename, language, max_tokens=MAX_TOKENS, emit=emit,
+        )
+        if stop_reason == "max_tokens" and _cc > 0:
+            await emit({"type": "start", "filename": filename, "language": language, "prompt": content})
+            collected.clear()
+            await _stream_bedrock(gen_prompt, filename, language, max_tokens=MAX_TOKENS * 2, emit=emit)
+        await emit({"type": "end", "filename": filename, "auto_run": auto_run})
+        code = _finalize_code("".join(collected), filename)
+        _SESSIONS[channel.id] = {"filename": filename, "language": language, "code": code}
+        return {"ok": True, "filename": filename, "language": language, "code": code}
+    except Exception as exc:  # noqa: BLE001
+        try:
+            await emit({"type": "end", "filename": filename, "auto_run": False})
+        except Exception:
+            pass
+        return {"ok": False, "filename": filename, "language": language, "code": "", "error": str(exc)}

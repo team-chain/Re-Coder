@@ -143,8 +143,10 @@ def check_core_ready() -> tuple[ReadyStatus, list[str]]:
         issues.append(f"Core Ready: No write permission in RECODER_HOME: {e}")
         return ReadyStatus.FAIL, issues
 
-    # runtime.json 생성 가능 여부 확인
-    runtime_path = RECODER_HOME / "runtime.json"
+    # 쓰기 가능 여부 확인 — 별도 파일 사용.
+    # 주의: 절대 "runtime.json" 을 쓰면 안 된다. 그 파일은 singleton 이 port/session_token/pid
+    # 를 저장하는 곳이라, 여기서 덮어쓰면 토큰이 날아가 인증(401) 이 깨진다. (실제 버그였음)
+    runtime_path = RECODER_HOME / "ready_check.json"
     try:
         runtime_data = {
             "version": "6.4",
@@ -152,7 +154,7 @@ def check_core_ready() -> tuple[ReadyStatus, list[str]]:
         }
         runtime_path.write_text(json.dumps(runtime_data, indent=2))
     except Exception as e:
-        issues.append(f"Core Ready: Failed to create runtime.json: {e}")
+        issues.append(f"Core Ready: Failed to create ready_check.json: {e}")
         return ReadyStatus.FAIL, issues
 
     # 권한 설정 (Soft Fail)

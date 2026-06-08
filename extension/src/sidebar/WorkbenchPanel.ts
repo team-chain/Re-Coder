@@ -377,12 +377,13 @@ export class WorkbenchPanel {
                     break;
                 }
                 try {
-                    const r = await this._apiClient.runScan('trivy', ws);
+                    // 보안 스캔: gitleaks 로 하드코딩된 시크릿 탐지 (빌드 전에 코드 정적 스캔).
+                    const r = await this._apiClient.runScan('gitleaks', ws);
                     this._panel.webview.postMessage({
                         type: 'wb.local.scanResult',
                         payload: { ok: true, result: r },
                     });
-                    this.addActivity('ok', 'Trivy 스캔 완료');
+                    this.addActivity('ok', '보안 스캔(gitleaks) 완료');
                 } catch (err) {
                     this._panel.webview.postMessage({ type: 'wb.local.scanResult', payload: { ok: false, error: String(err) } });
                 }
@@ -417,9 +418,14 @@ export class WorkbenchPanel {
                         });
                         this.addActivity('ok', 'Local Docker 배포 완료');
                     } else {
+                        // 컨테이너가 시작/헬스에 실패한 경우 — stderr 에서 핵심 사유 한 줄 추출
+                        const errText = (result.stderr || result.stdout || '').trim();
+                        const lines = errText.split('\n').map(s => s.trim()).filter(Boolean);
+                        const summary = lines.reverse().find(l => /error|exception|traceback|keyerror|exited|not running|unhealthy|refused/i.test(l))
+                            || lines[0] || '컨테이너가 시작되지 못했습니다.';
                         this._panel.webview.postMessage({
                             type: 'wb.local.deployProgress',
-                            payload: { stage: 'build', error: 'execute 실패', finished: true, line: `[FAIL] ${result.status}` },
+                            payload: { stage: 'run', error: 'execute 실패', error_summary: summary, finished: true, line: `[FAIL] ${result.status} — ${summary}` },
                         });
                     }
                 } catch (err) {
@@ -607,13 +613,17 @@ export class WorkbenchPanel {
             }
             case 'wb.discord.openInvite': {
                 try {
-                    const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
-                    const url = r?.invite_url as string | undefined;
+                    // 1) 설정된 client_id 로 로컬 생성(봇 실행 불필요) → 2) 없으면 봇 API 폴백
+                    let url = this._buildLocalInviteUrl();
+                    if (!url) {
+                        const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
+                        url = (r?.invite_url as string | undefined) || '';
+                    }
                     if (url) {
                         await vscode.env.openExternal(vscode.Uri.parse(url));
                         this.addActivity('info', '봇 초대 링크 열기');
                     } else {
-                        this.addActivity('fail', '초대 URL 없음 (DISCORD_CLIENT_ID 미설정 또는 봇 미기동)');
+                        this.addActivity('fail', '초대 URL 없음 — 설정 recoder.discord.clientId 를 넣거나 봇을 켜세요');
                     }
                 } catch (err) {
                     this.addActivity('fail', `봇 초대 실패: ${err}`);
@@ -678,7 +688,32 @@ export class WorkbenchPanel {
         }
     }
 
+    /** 설정 recoder.discord.clientId 로 봇 초대 URL 을 로컬 생성. 없으면 빈 문자열. */
+    private _buildLocalInviteUrl(): string {
+        const clientId = vscode.workspace
+            .getConfiguration('recoder.discord')
+            .get<string>('clientId', '')
+            .trim();
+        if (!clientId) { return ''; }
+        const permissions = 2147485696; // 메시지 읽기/쓰기 + 슬래시 커맨드
+        return (
+            'https://discord.com/api/oauth2/authorize'
+            + `?client_id=${encodeURIComponent(clientId)}`
+            + `&permissions=${permissions}`
+            + '&scope=bot%20applications.commands'
+        );
+    }
+
     private async _pushDiscordInviteUrl(): Promise<void> {
+        // 설정된 client_id 가 있으면 봇 실행 없이 즉시 초대 URL 표시.
+        const local = this._buildLocalInviteUrl();
+        if (local) {
+            this._panel.webview.postMessage({
+                type: 'wb.discord.inviteUrlResult',
+                payload: { ok: true, invite_url: local, client_id: 'config' },
+            });
+            return;
+        }
         try {
             const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
             this._panel.webview.postMessage({

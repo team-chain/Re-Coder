@@ -73,8 +73,10 @@ BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")
 # 즉시 동작 보장. 명시적으로 cross-region profile 을 쓰려면 환경변수로 지정:
 #   BEDROCK_PRIMARY_MODEL_IDENTIFIER=apac.anthropic.claude-sonnet-4-5-20250929-v1:0
 SONNET_MODELS: list[str] = [
+    # 패치/분석 1순위 — 검증된 Haiku 4.5 (diff 생성 가능). .env 와 동일 모델.
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     # 가장 보장된 on-demand 모델 (ap-northeast-2 / us-east-1 등 거의 모든 리전)
-    "anthropic.claude-3-haiku-20240307-v1:0",   # ★ 진단 검증된 모델 — 시연 우선
+    "anthropic.claude-3-haiku-20240307-v1:0",   # 폴백 (구형 — diff 생성 약함)
     "anthropic.claude-3-sonnet-20240229-v1:0",
     "anthropic.claude-3-5-haiku-20241022-v1:0",
     "anthropic.claude-3-5-sonnet-20241022-v2:0",
@@ -87,6 +89,7 @@ SONNET_MODELS: list[str] = [
 
 # Haiku 폴백 체인 — on-demand 가능 모델 우선
 HAIKU_MODELS: list[str] = [
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "anthropic.claude-3-haiku-20240307-v1:0",
     "anthropic.claude-3-5-haiku-20241022-v1:0",
     # Claude 4.x cross-region profile

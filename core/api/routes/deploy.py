@@ -377,6 +377,26 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
     return normalised
 
 
+def _write_proposal_to_workspace(proposal, workspace_override, proposal_id):
+    """Proposal 파일을 워크스페이스 루트 기준으로 디스크에 쓴다.
+
+    상대 target_path 면 (override -> proposal.workspace_path -> cwd) 순으로 루트 결정.
+    과거 버그: 루트를 항상 Path.cwd()(=Core 실행 디렉토리 core/)로 잡아
+    .github/workflows/deploy.yml 이 사용자 프로젝트가 아니라 core/ 에 써졌다.
+    """
+    target = Path(proposal.target_path)
+    if not target.is_absolute():
+        root = (
+            workspace_override
+            or getattr(proposal, "workspace_path", None)
+            or str(Path.cwd())
+        )
+        target = Path(root).expanduser().resolve() / target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(proposal.content, encoding="utf-8")
+    return {"status": "saved", "proposal_id": proposal_id, "path": str(target)}
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -431,13 +451,20 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
             approval_level=ApprovalLevel.CONFIRM,
         )
 
+    if not getattr(proposal, "workspace_path", None):
+        proposal = proposal.model_copy(update={
+            "workspace_path": str(Path(request.workspace_path).expanduser().resolve()),
+        })
     _infra_proposals[proposal.proposal_id] = proposal
     return proposal
 
 
 @router.post("/api/deploy/dockerfile/approve")
-async def approve_dockerfile(proposal_id: str, approved: bool) -> dict:
-    """Approve or reject a Dockerfile / infra file proposal."""
+async def approve_dockerfile(proposal_id: str, approved: bool, workspace_path: str = "") -> dict:
+    """Approve or reject a Dockerfile / infra file proposal.
+
+    워크스페이스 루트 기준으로 쓴다 (cwd 폴백 버그 동일 수정).
+    """
     proposal = _infra_proposals.get(proposal_id)
     if proposal is None:
         raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found.")
@@ -446,13 +473,9 @@ async def approve_dockerfile(proposal_id: str, approved: bool) -> dict:
         del _infra_proposals[proposal_id]
         return {"status": "rejected", "proposal_id": proposal_id}
 
-    # Write the file to disk
-    target = Path(proposal.target_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(proposal.content, encoding="utf-8")
+    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id)
     del _infra_proposals[proposal_id]
-
-    return {"status": "saved", "proposal_id": proposal_id, "path": str(target)}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +525,11 @@ async def generate_github_actions_route(request: GithubActionsRequest) -> InfraF
         scanner = get_project_scanner()
         project = await asyncio.to_thread(scanner.scan, ws_path)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"프로젝트 스캔 실패: {e}") from e
+        # 스캔 실패(스택 미감지/검증 오류 등)해도 워크플로 생성은 계속한다.
+        # generate_github_actions 가 project=None 이면 자체 폴백(generic CI)으로 생성.
+        import logging as _logging
+        _logging.getLogger(__name__).warning("프로젝트 스캔 실패, generic 폴백: %s", e)
+        project = None
 
     # 2. 워크플로우 생성 (FileTemplate Registry 기반)
     try:
@@ -512,21 +539,27 @@ async def generate_github_actions_route(request: GithubActionsRequest) -> InfraF
             status_code=500, detail=f"GitHub Actions 워크플로우 생성 실패: {e}",
         ) from e
 
-    # 3. file_type 보정 — 호출 측이 어떤 enum 을 쓰든 GITHUB_ACTIONS 로 정규화
+    # 3. file_type 보정 + workspace_path 절대경로 박기.
+    #    approve 단계가 이 경로 기준으로 .github/workflows/deploy.yml 을 쓰지 않으면
+    #    Core 의 cwd(=core/)에 써지는 버그가 있었다.
+    abs_ws = str(Path(ws_path).expanduser().resolve())
+    update = {"workspace_path": abs_ws}
     if proposal.file_type != FileType.GITHUB_ACTIONS:
-        proposal = proposal.model_copy(update={"file_type": FileType.GITHUB_ACTIONS})
+        update["file_type"] = FileType.GITHUB_ACTIONS
+    proposal = proposal.model_copy(update=update)
 
     _infra_proposals[proposal.proposal_id] = proposal
     return proposal
 
 
 @router.post("/api/deploy/github-actions/approve")
-async def approve_github_actions(proposal_id: str, approved: bool) -> dict:
+async def approve_github_actions(proposal_id: str, approved: bool, workspace_path: str = "") -> dict:
     """
     Approve or reject a GitHub Actions workflow proposal.
 
-    On approve, writes the YAML to `<workspace>/.github/workflows/deploy.yml`
-    (target_path from the proposal). 설계 §5.2 Approval Level 1 (로컬 파일 생성).
+    On approve, writes the YAML to `<workspace>/.github/workflows/deploy.yml`.
+    파일 위치 우선순위(상대 target_path): 쿼리 workspace_path -> proposal.workspace_path
+    -> (폴백) cwd. 1·2 가 항상 채워지므로 더는 core/ 에 잘못 써지지 않는다.
     """
     proposal = _infra_proposals.get(proposal_id)
     if proposal is None:
@@ -536,15 +569,9 @@ async def approve_github_actions(proposal_id: str, approved: bool) -> dict:
         del _infra_proposals[proposal_id]
         return {"status": "rejected", "proposal_id": proposal_id}
 
-    # target_path 는 ".github/workflows/deploy.yml" 같은 상대 경로
-    target = Path(proposal.target_path)
-    if not target.is_absolute():
-        # 워크스페이스 루트에 상대 — InfraAgent 가 절대경로를 안 넣었으면 cwd 폴백
-        target = Path.cwd() / target
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(proposal.content, encoding="utf-8")
+    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id)
     del _infra_proposals[proposal_id]
-    return {"status": "saved", "proposal_id": proposal_id, "path": str(target)}
+    return result
 
 
 @router.post("/api/deploy/scan")

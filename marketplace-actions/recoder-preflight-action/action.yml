@@ -150,13 +150,25 @@ runs:
             sys.exit(1)
 
         # 결과 파싱
-        risk_score    = data.get("risk_score", 0)
+        # risk_score(위험도, 높을수록 나쁨) 우선. 구버전 Core 가 risk_score 를 안 주면
+        # score(건강도, 높을수록 좋음) 를 100-score 로 환산해 폴백.
+        if data.get("risk_score") is not None:
+            risk_score = int(data.get("risk_score") or 0)
+        elif data.get("score") is not None:
+            risk_score = max(0, 100 - int(data.get("score") or 0))
+        else:
+            risk_score = 0
+
+        status        = str(data.get("status", "")).lower()
         blockers      = data.get("blockers", [])
         warnings      = data.get("warnings", [])
         blocker_count = len(blockers)
         warning_count = len(warnings)
-        passed        = blocker_count == 0 and (
-            fail_on_score_at_or_above == 0 or risk_score < fail_on_score_at_or_above
+        # blocker 가 있거나 status 가 blocked 면 무조건 실패. 그 외엔 점수 기준.
+        passed        = (
+            blocker_count == 0
+            and status != "blocked"
+            and (fail_on_score_at_or_above == 0 or risk_score < fail_on_score_at_or_above)
         )
 
         # 결과 출력
@@ -223,6 +235,9 @@ runs:
         if not passed:
             if fail_on_blocker and blocker_count > 0:
                 print(f"\n❌ 블로커 {blocker_count}개 발견으로 배포를 중단합니다.")
+                sys.exit(1)
+            if status == "blocked":
+                print("\n❌ Preflight status=blocked — 배포를 중단합니다.")
                 sys.exit(1)
             if fail_on_score_at_or_above > 0 and risk_score >= fail_on_score_at_or_above:
                 print(
