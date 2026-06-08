@@ -296,6 +296,12 @@ export class CoreManager {
     }
 
     async healthCheck(): Promise<CoreHealth | null> {
+        // 포트가 아직 확정되지 않았으면(runtime.json 미작성/부분작성 등) 요청을
+        // 보내지 않는다. (이전엔 http://127.0.0.1:undefined/api/health 로 가서
+        // fetch 가 throw + Node DeprecationWarning 발생 → "연결 안됨" 깜빡임)
+        if (!this.port || this.port <= 0 || !Number.isFinite(this.port)) {
+            return null;
+        }
         try {
             const url = `http://127.0.0.1:${this.port}/api/health`;
             const controller = new AbortController();

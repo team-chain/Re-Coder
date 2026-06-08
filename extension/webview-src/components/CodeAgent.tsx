@@ -107,7 +107,22 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
 
   return (
     <div style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", margin: "16px 0 0", paddingTop: 14 }}>
-      <div style={label}>코드 작성 및 수정</div>
+      <style>{`
+        .rc-cg-input { transition: border-color .12s ease, box-shadow .12s ease; }
+        .rc-cg-input:focus { border-color: var(--vscode-focusBorder, #3794ff) !important; box-shadow: 0 0 0 1px var(--vscode-focusBorder, #3794ff); }
+        .rc-cg-input::placeholder { color: var(--vscode-input-placeholderForeground, #6b6b6b); }
+        .rc-cg-send { transition: filter .12s ease, transform .05s ease; }
+        .rc-cg-send:hover:not(:disabled) { filter: brightness(1.12); }
+        .rc-cg-send:active:not(:disabled) { transform: translateY(1px); }
+      `}</style>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <span style={{ width: 3, height: 14, borderRadius: 2, background: "var(--vscode-textLink-foreground, #3794ff)" }} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--vscode-foreground, #eee)", letterSpacing: 0.2 }}>코드 작성 및 수정</span>
+        <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #888)", marginLeft: "auto", border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 10, padding: "1px 8px" }}>AI 코드 생성</span>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", marginBottom: 10, lineHeight: 1.5 }}>
+        자연어로 새 코드를 만들거나 기존 코드를 고칩니다. 생성 결과는 파일별로 확인 후 적용됩니다.
+      </div>
 
       {/* 대상 폴더 · 참고 파일 */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: contextFiles.length ? 6 : 8, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
@@ -195,17 +210,18 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
 
       {/* 입력 */}
       <textarea
+        className="rc-cg-input"
         value={input}
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { send(); } }}
-        placeholder={turns.length ? "이어서 수정 요청 (예: 버튼 색을 파랑으로)" : "만들거나 고칠 내용을 입력 (예: 할 일 목록 앱)"}
-        style={{ width: "100%", boxSizing: "border-box", minHeight: 48, background: "var(--vscode-input-background, #252526)", color: "var(--vscode-input-foreground, #ccc)", border: "1px solid var(--vscode-input-border, #3f3f3f)", borderRadius: 4, padding: "7px 9px", fontSize: 12, fontFamily: "var(--vscode-font-family, sans-serif)", resize: "vertical", outline: "none", lineHeight: 1.5 }}
+        placeholder={turns.length ? "이어서 수정 요청 (예: 버튼 색을 파랑으로)" : "만들거나 고칠 내용을 입력 (예: SQLite 게시판 REST API를 FastAPI로 만들어줘)"}
+        style={{ width: "100%", boxSizing: "border-box", minHeight: 130, background: "var(--vscode-input-background, #252526)", color: "var(--vscode-input-foreground, #ccc)", border: "1px solid var(--vscode-input-border, #3f3f3f)", borderRadius: 6, padding: "10px 12px", fontSize: 12.5, fontFamily: "var(--vscode-font-family, sans-serif)", resize: "vertical", outline: "none", lineHeight: 1.6 }}
       />
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
-        <button onClick={send} disabled={!input.trim()} style={{ ...primaryBtn, opacity: input.trim() ? 1 : 0.5, cursor: input.trim() ? "pointer" : "not-allowed" }}>
+        <button onClick={send} disabled={!input.trim()} className="rc-cg-send" style={{ ...primaryBtn, padding: "7px 16px", borderRadius: 6, opacity: input.trim() ? 1 : 0.5, cursor: input.trim() ? "pointer" : "not-allowed" }}>
           보내기
         </button>
-        <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #777)" }}>Ctrl+Enter</span>
+        <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #777)" }}>Ctrl+Enter 로 전송</span>
       </div>
     </div>
   );

@@ -9,6 +9,9 @@ export class PollingService {
     private lastHealth: CoreHealth | null = null;
     private onUpdateCallback: ((health: CoreHealth) => void) | null = null;
     private onErrorCallback: ((err: Error) => void) | null = null;
+    /** 자동 복구 진행 중 플래그 + 마지막 복구 시각(쿨다운용). */
+    private recovering: boolean = false;
+    private lastRecoveryMs: number = 0;
 
     constructor(
         private readonly _coreManager: CoreManager,
@@ -46,29 +49,21 @@ export class PollingService {
 
     async poll(): Promise<CoreHealth | null> {
         try {
-            // Use /api/status (§4.5) — richer than /api/health; includes
-            // Orchestrator FSM state so the sidebar can reflect progress.
-            // Falls back to /api/health if /api/status is unavailable.
-            let health: CoreHealth;
-            try {
-                const status = await this.apiClient.getStatus();
-                health = {
-                    status: status.status as CoreHealth['status'],
-                    version: status.version,
-                    uptime: status.uptime_seconds,
-                    port: status.port,
-                    orchestrator_state: status.orchestrator_state as import('../types').OrchestratorState,
-                    current_proposal_id: status.current_proposal_id,
-                    timestamp: status.timestamp,
-                };
-            } catch {
-                // Fallback: /api/status may not be available on older cores
-                health = await this.apiClient.getHealth();
-            }
+            const health = await this.fetchHealth();
             this.lastHealth = health;
             this.onUpdateCallback?.(health);
             return health;
         } catch (err: unknown) {
+            // Core 가 죽었거나 포트를 잃은 경우 — 자동 복구(재spawn/재연결) 1회 시도.
+            // 성공하면 곧바로 상태를 다시 읽어 "연결 안됨" 이 사라진다.
+            if (await this.tryRecover()) {
+                try {
+                    const health = await this.fetchHealth();
+                    this.lastHealth = health;
+                    this.onUpdateCallback?.(health);
+                    return health;
+                } catch { /* 여전히 실패 → 아래 down 처리 */ }
+            }
             const error = err instanceof Error ? err : new Error(String(err));
             this.onErrorCallback?.(error);
             const downHealth: CoreHealth = {
@@ -80,6 +75,48 @@ export class PollingService {
             this.lastHealth = downHealth;
             this.onUpdateCallback?.(downHealth);
             return null;
+        }
+    }
+
+    /**
+     * /api/status (FSM 포함) 를 우선 읽고, 구버전 Core 면 /api/health 로 폴백.
+     * 실패 시 throw — 호출 측(poll)이 자동 복구를 트리거한다.
+     */
+    private async fetchHealth(): Promise<CoreHealth> {
+        try {
+            const status = await this.apiClient.getStatus();
+            return {
+                status: status.status as CoreHealth['status'],
+                version: status.version,
+                uptime: status.uptime_seconds,
+                port: status.port,
+                orchestrator_state: status.orchestrator_state as import('../types').OrchestratorState,
+                current_proposal_id: status.current_proposal_id,
+                timestamp: status.timestamp,
+            };
+        } catch {
+            return await this.apiClient.getHealth();
+        }
+    }
+
+    /**
+     * Core 연결이 끊겼을 때 자동 복구.
+     * CoreManager.ensureRunning() 으로 기존 Core 재탐색 → 없으면 재spawn.
+     * 8초 쿨다운 + 동시 실행 방지로 재spawn 폭주를 막는다.
+     */
+    private async tryRecover(): Promise<boolean> {
+        const now = Date.now();
+        if (this.recovering) { return false; }
+        if (now - this.lastRecoveryMs < 8000) { return false; }
+        this.recovering = true;
+        this.lastRecoveryMs = now;
+        try {
+            await this._coreManager.ensureRunning();
+            return true;
+        } catch {
+            return false;
+        } finally {
+            this.recovering = false;
         }
     }
 

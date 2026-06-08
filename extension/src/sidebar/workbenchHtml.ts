@@ -477,6 +477,18 @@ html[data-mode="sidebar"] .deploy-grid{ }
 .stepper-item.active .stepper-dot{ background:var(--blue); border-color:var(--blue); color:#fff }
 .stepper-item.done .stepper-dot{ background:var(--green); border-color:var(--green); color:#fff }
 .stepper-item.fail .stepper-dot{ background:var(--red); border-color:var(--red); color:#fff }
+.shipguard{ display:flex; align-items:flex-start; gap:13px; margin:4px 0 16px; padding:15px 18px; border-radius:10px;
+  border:1px solid rgba(248,113,113,.32); border-left:3px solid #ef4444;
+  background:rgba(248,113,113,.06); animation:sgpop .3s ease both }
+.shipguard.pass{ border-color:rgba(74,222,128,.32); border-left-color:#22c55e; background:rgba(74,222,128,.06) }
+.shipguard-icon{ color:#f87171; flex:none; margin-top:1px; display:flex }
+.shipguard.pass .shipguard-icon{ color:#4ade80 }
+.shipguard-tag{ font-size:10px; font-weight:600; letter-spacing:.10em; text-transform:uppercase;
+  color:#f87171; font-family:'JetBrains Mono','Cascadia Code','Consolas',monospace; margin-bottom:4px }
+.shipguard.pass .shipguard-tag{ color:#4ade80 }
+.shipguard-title{ font-size:15px; font-weight:700; letter-spacing:-0.01em; color:var(--t1) }
+.shipguard-msg{ font-size:12.5px; color:var(--t2); margin-top:4px; line-height:1.55 }
+@keyframes sgpop{ from{ opacity:0; transform:translateY(5px) } to{ opacity:1; transform:none } }
 .stepper-label{
   font-size:11px; color:var(--t3); text-align:center;
   white-space:nowrap; font-weight:400;
@@ -837,6 +849,16 @@ html[data-mode="sidebar"] .deploy-grid{ }
       <div class="stepper-item" data-step="health"><div class="stepper-dot">6</div><div class="stepper-label">헬스</div></div>
     </div>
 
+    <!-- Ship Guard 결과 배너 (배포 차단/통과) -->
+    <div id="local-shipguard" class="shipguard" style="display:none">
+      <div class="shipguard-icon" id="local-shipguard-icon"></div>
+      <div class="shipguard-body">
+        <div class="shipguard-tag" id="local-shipguard-tag"></div>
+        <div class="shipguard-title" id="local-shipguard-title">배포 차단됨</div>
+        <div class="shipguard-msg" id="local-shipguard-msg"></div>
+      </div>
+    </div>
+
     <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:8px; margin-bottom:14px">
       <input id="local-image" class="wb-input" value="recoder-app" placeholder="이미지 이름">
       <input id="local-host-port" class="wb-input" type="number" value="8000" placeholder="호스트 포트">
@@ -1126,11 +1148,24 @@ html[data-mode="sidebar"] .deploy-grid{ }
     return '';
   }
   function readyToChip(state){
-    if (state === 'ready')   return 'ok';
-    if (state === 'partial') return 'partial';
-    if (state === 'not_ready' || state === 'error') return 'fail';
+    if (state === 'ok' || state === 'ready')   return 'ok';
+    if (state === 'partial' || state === 'warn') return 'partial';
+    if (state === 'fail' || state === 'not_ready' || state === 'error') return 'fail';
     return '';
   }
+  var SG_ICON_BLOCK = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16.5" x2="12" y2="16.5"/></svg>';
+  var SG_ICON_PASS = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 11.5l2 2 4-4"/></svg>';
+  function showShipGuard(blocked, msg, tagText, titleText){
+    const box = $('local-shipguard'); if(!box) return;
+    box.className = 'shipguard' + (blocked ? '' : ' pass');
+    $('local-shipguard-icon').innerHTML = blocked ? SG_ICON_BLOCK : SG_ICON_PASS;
+    $('local-shipguard-tag').textContent = tagText || (blocked ? 'SHIP GUARD · 배포 전 검증 실패' : 'SHIP GUARD · 배포 전 검증 통과');
+    $('local-shipguard-title').textContent = titleText || (blocked ? '배포가 차단되었습니다' : '배포 검증을 통과했습니다');
+    $('local-shipguard-msg').textContent = msg || '';
+    box.style.display = 'flex';
+    box.scrollIntoView({ behavior:'smooth', block:'nearest' });
+  }
+  function hideShipGuard(){ const box = $('local-shipguard'); if(box) box.style.display = 'none'; }
   function now(){ return new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 
   function switchTab(name){
@@ -1468,9 +1503,24 @@ html[data-mode="sidebar"] .deploy-grid{ }
               '<span class="precheck-icon ' + (med>0?'warn':'ok') + '">' + med + '</span><span style="font-size:12px; color:var(--t2)">Medium</span>' +
               '</div>';
           }
-          appendInlineLog('local-inline-log', '✓ 스캔 완료 (critical=' + c + ', high=' + h + ')', c>0 || h>0 ? 'err' : 'ok');
-          updateStepper('local-stepper', 'build', '');
-          setLocalBtns({ generate:true, approve:false, scan:false, deploy:true });
+          const finds = r.findings || [];
+          const f0 = finds[0] || {};
+          if (c > 0){
+            updateStepper('local-stepper', 'scan', 'failed');
+            const where = f0.file ? (String(f0.file).split('/').pop() + (f0.line ? ':' + f0.line : '')) : '코드';
+            const kind = f0.rule_id || '시크릿';
+            appendInlineLog('local-inline-log', '✗ 보안 스캔 실패 — 시크릿 ' + c + '건 발견', 'err');
+            showShipGuard(true,
+              where + ' 에서 하드코딩된 시크릿 ' + c + '건 발견 (' + kind + '). 이 비밀값이 이미지에 그대로 담겨 배포되면 외부에 유출됩니다 — 배포를 중단했습니다.',
+              'SHIP GUARD · 보안 스캔 차단', '하드코딩된 시크릿이 발견되었습니다');
+            setLocalBtns({ generate:true, approve:false, scan:true, deploy:false });
+          } else {
+            appendInlineLog('local-inline-log', '✓ 보안 스캔 통과 — 노출된 시크릿 없음', 'ok');
+            updateStepper('local-stepper', 'build', '');
+            showShipGuard(false, '코드에서 노출된 시크릿이 발견되지 않았습니다 — 배포 진행 가능.',
+              'SHIP GUARD · 보안 스캔 통과', '보안 스캔을 통과했습니다');
+            setLocalBtns({ generate:true, approve:false, scan:false, deploy:true });
+          }
         } else {
           appendInlineLog('local-inline-log', '✗ 스캔 실패: ' + (p.error || ''), 'err');
         }
@@ -1483,6 +1533,13 @@ html[data-mode="sidebar"] .deploy-grid{ }
         if (p.finished && !p.error){
           appendInlineLog('local-inline-log', '✓ 배포 완료 + 헬스체크 통과', 'ok');
           updateStepper('local-stepper', 'health', 'done');
+          setLocalBtns({ generate:true, approve:false, scan:false, deploy:false });
+          showShipGuard(false, '컨테이너 정상 기동 · 헬스체크 통과 — 배포해도 안전합니다.');
+        }
+        if (p.finished && p.error){
+          const stageLabel = ({ build:'빌드', run:'실행', health:'헬스체크' })[p.stage] || '실행 전 검증';
+          showShipGuard(true, (p.error_summary || p.line || '컨테이너가 시작되지 못했습니다.')
+            + ' — ' + stageLabel + ' 단계에서 실패. 이대로 배포하면 운영 장애로 이어집니다.');
           setLocalBtns({ generate:true, approve:false, scan:false, deploy:false });
         }
         break;
@@ -1822,11 +1879,13 @@ html[data-mode="sidebar"] .deploy-grid{ }
     vscode.postMessage({ type:'wb.local.approve', payload:{ proposal_id: localProposalId, content } });
   });
   ghBindClick('local-btn-scan', () => {
-    appendInlineLog('local-inline-log', '[…] Trivy 스캔 실행', 'cmd');
+    hideShipGuard();
+    appendInlineLog('local-inline-log', '[…] 보안 스캔 실행 — 하드코딩된 시크릿 탐지', 'cmd');
     setLocalStepperStage('scan');
     vscode.postMessage({ type:'wb.local.scan' });
   });
   ghBindClick('local-btn-deploy', () => {
+    hideShipGuard();
     appendInlineLog('local-inline-log', '[…] docker build + run + 헬스체크', 'cmd');
     setLocalStepperStage('build');
     vscode.postMessage({
@@ -1840,6 +1899,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
   });
   ghBindClick('local-btn-reset', () => {
     localProposalId = '';
+    hideShipGuard();
     if ($('local-dockerfile-preview')) $('local-dockerfile-preview').value = '';
     if ($('local-scan-result')) $('local-scan-result').innerHTML = '<div style="color:var(--t3); font-size:12px">아직 스캔하지 않음</div>';
     setLocalBtns({ generate:true, approve:false, scan:false, deploy:false });

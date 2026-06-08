@@ -299,17 +299,19 @@ export class ApiClient {
         workspacePath: string, method: DeployMethod, projectId?: string,
         image?: string, containerName?: string, hostPort?: number, containerPort?: number,
     ): Promise<DeploymentPlan> {
+        // 플랜 생성은 Trivy/Hadolint 보안 게이트(도커 기반)를 돌려 30초를 넘길 수 있으므로 타임아웃을 길게.
         const resp = await this.request<DeploymentPlan>('POST', '/api/deploy/plan', {
             workspace_path: workspacePath, project_id: projectId, method,
             image, container_name: containerName, host_port: hostPort, container_port: containerPort,
-        });
+        }, false, 600000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 플랜 생성 실패'); }
         return resp.data;
     }
 
-    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string }> {
-        const resp = await this.request<{ status: string; deployment_id?: string }>(
-            'POST', '/api/deploy/execute', { plan_id: planId, approved }
+    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }> {
+        // docker build + run + 헬스체크는 30초를 넘으므로 타임아웃을 길게.
+        const resp = await this.request<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }>(
+            'POST', '/api/deploy/execute', { plan_id: planId, approved }, false, 600000
         );
         return resp.success && resp.data ? resp.data : { status: 'error' };
     }

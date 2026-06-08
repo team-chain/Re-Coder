@@ -322,6 +322,61 @@ def generate_docker_compose(
     )
 
 
+# ReCoder Preflight 게이트 job — CI 워크플로 뒤에 append 된다.
+# __CIJOB__ 는 앞선 CI job 이름(test/smoke)으로 치환된다.
+# run 블록 안 python 들여쓰기는 YAML block-scalar 규칙상 모두 10칸 기준 — 수정 시 주의.
+_PREFLIGHT_GATE_TEMPLATE = '''
+  # ── ReCoder Preflight 게이트 (배포 전 안전성 자동 검증) ───────────────────
+  # self-hosted 러너의 시스템 python 으로 로컬 ReCoder Core 를 호출해 위험한 변경을 차단.
+  # setup-python 설치 안 함 + stdlib(urllib) 만 사용 → 러너에 추가 설치 불필요.
+  # 셸 무관(단일 python -c 명령) — Windows PowerShell / bash 모두 동작.
+  # 원격 Core(EC2)면 RECODER_API_URL 을 그 주소로, runs-on 을 ubuntu-latest 로 바꾸세요.
+  # 사전 준비: ① self-hosted 러너 등록 ② Secret RECODER_SESSION_TOKEN 등록.
+  preflight:
+    name: ReCoder Preflight 게이트
+    runs-on: self-hosted
+    needs: __CIJOB__
+    steps:
+      - uses: actions/checkout@v4
+      - name: ReCoder 배포 전 안전성 검증
+        env:
+          RECODER_API_URL: http://localhost:17894
+          RECODER_API_TOKEN: ${{ secrets.RECODER_SESSION_TOKEN }}
+          FAIL_ON_SCORE_AT_OR_ABOVE: "60"
+          PREFLIGHT_PY: |
+            import json, os, sys, urllib.request
+            api = os.environ["RECODER_API_URL"].rstrip("/")
+            tok = os.environ["RECODER_API_TOKEN"]
+            thr = int(os.environ.get("FAIL_ON_SCORE_AT_OR_ABOVE", "60"))
+            project = os.environ.get("GITHUB_WORKSPACE", ".")
+            payload = json.dumps({"project_path": project, "source": "github-action"}).encode("utf-8")
+            req = urllib.request.Request(api + "/workbench/preflight/run", data=payload, method="POST")
+            req.add_header("X-Session-Token", tok)
+            req.add_header("Content-Type", "application/json")
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    d = json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                print("ReCoder Core 호출 실패:", e)
+                sys.exit(1)
+            status = str(d.get("status", "")).lower()
+            blockers = d.get("blockers", [])
+            risk = d.get("risk_score")
+            if risk is None and d.get("score") is not None:
+                risk = max(0, 100 - int(d["score"]))
+            risk = int(risk or 0)
+            print("status=%s risk_score=%s blockers=%d" % (status, risk, len(blockers)))
+            for b in blockers:
+                print("  - BLOCKER:", b.get("message") if isinstance(b, dict) else b)
+            ok = (not blockers) and status != "blocked" and (thr == 0 or risk < thr)
+            if not ok:
+                print("배포 차단: 위험 요소가 발견되었습니다.")
+                sys.exit(1)
+            print("Preflight 통과.")
+        run: python -c "import os; exec(os.environ['PREFLIGHT_PY'])"
+'''
+
+
 def generate_github_actions(
     project_profile: Optional[ProjectProfile] = None,
     workspace_path: str = ".",
@@ -343,7 +398,12 @@ def generate_github_actions(
         stack = project_profile.stack.value
     else:
         project_root = _resolve_project_path(workspace_path)
-        stack, _ = _detect_stack(str(project_root))
+        try:
+            stack, _ = _detect_stack(str(project_root))
+        except StackDetectionError:
+            # 매니페스트가 없거나(예: stdlib 파이썬 앱) 프레임워크 미감지 →
+            # generic CI 로 폴백해 워크플로 생성을 보장한다. (버튼이 에러나지 않게)
+            stack = "custom"
 
     # 스택별 CI 워크플로우 생성
     if stack.startswith("python"):
@@ -418,6 +478,7 @@ jobs:
         template_name = "generic-ci"
 
     required_secrets = [
+        "RECODER_SESSION_TOKEN",  # Preflight 게이트가 로컬/원격 Core 인증에 사용
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "ECR_REGISTRY",
@@ -463,6 +524,17 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────
 
 """
+    # ReCoder Preflight 게이트 job 은 self-hosted 러너 + RECODER_SESSION_TOKEN 이
+    # 필요해서, 환경변수 RECODER_GHA_PREFLIGHT 로 옵트인할 때만 붙인다.
+    # (기본 OFF → 생성 즉시 GitHub 호스팅 러너만으로 도는 CI-only 워크플로.)
+    import os as _os
+    _preflight_on = _os.environ.get("RECODER_GHA_PREFLIGHT", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if _preflight_on:
+        ci_job_name = "smoke" if template_name == "generic-ci" else "test"
+        content = content + _PREFLIGHT_GATE_TEMPLATE.replace("__CIJOB__", ci_job_name)
+
     content = secrets_comment + content
 
     return InfraFileProposal(
