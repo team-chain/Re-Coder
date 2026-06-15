@@ -9,6 +9,25 @@ ReCoder 는 개발자가 VSCode 사이드바(또는 Discord)에서 한 번만 �
 
 ---
 
+## 🎬 시연 영상
+
+개발한 전체 기능을 하나의 영상에 담았습니다. 썸네일을 클릭하면 YouTube 로 이동합니다.
+
+[![ReCoder 데모 영상](https://img.youtube.com/vi/1VvfyR7i0tk/maxresdefault.jpg)](https://youtu.be/1VvfyR7i0tk)
+
+▶️ **시연 영상 바로가기: https://youtu.be/1VvfyR7i0tk**
+
+---
+
+## 📑 발표 자료
+
+| 자료 | 설명 | 링크 |
+|------|------|------|
+| 프로젝트 제안서 발표 (중간발표) | 프로젝트 기획 · 목표 기능 제안 | _업로드 예정_ |
+| 프로젝트 최종 발표 (기말발표) | 최종 구현 결과 · 시연 | [ReCoder_기말발표.pptx](발표자료/ReCoder_기말발표.pptx) |
+
+---
+
 ## 3-Plane 아키텍처
 
 ReCoder 는 책임에 따라 세 개의 Plane 으로 나뉩니다.
@@ -129,7 +148,7 @@ CONTROL_PLANE_URL=http://localhost:18000
 POLICY_CACHE_TTL_HOURS=1
 ```
 
-> 전체 환경변수 목록(Control Plane OIDC, ECS, ArgoCD, GitHub Rollback PR, Observability)은 [HANDOFF.md](HANDOFF.md) 참고. 처음부터 끝까지의 운영자 셋업 순서는 [SETUP.md](SETUP.md).
+> 처음부터 끝까지의 운영자 셋업 순서는 [SETUP.md](SETUP.md) 참고.
 
 ---
 
@@ -264,11 +283,9 @@ Re-Coder/
 
 ## 문서
 - [SETUP.md](SETUP.md) — 처음부터 끝까지 운영자 셋업 가이드 (Core · Gateway · Discord · Extension)
-- [HANDOFF.md](HANDOFF.md) — 팀 인수인계 (모듈 목록 + 전체 환경변수)
-- [PROGRESS.md](PROGRESS.md) — 누적 진행 사항 (Q1~Q4 진척 트래커)
-- [docs/MENTOR_DEMO.md](docs/MENTOR_DEMO.md) — 멘토링 데모 가이드
-- [docs/OPERATOR_RUNBOOK.md](docs/OPERATOR_RUNBOOK.md) — 운영자 런북
+- [docs/ReCoder_구현설계서_v1.md](docs/ReCoder_구현설계서_v1.md) — 구현 설계서 (현행 구현 기준)
 - [docs/API_v10.md](docs/API_v10.md) — API 레퍼런스
+- [docs/STUDENT_GUIDE.md](docs/STUDENT_GUIDE.md) — 학생 설치 가이드
 - [docs/architecture.svg](docs/architecture.svg) — 솔루션 아키텍처 다이어그램
 
 ---
