@@ -60,18 +60,17 @@ ReCoder 는 책임에 따라 세 개의 Plane 으로 나뉩니다.
 
 ## 핵심 기능
 
-| 기능 | 설명 |
-|------|------|
-| **Release Contract** (`recoder.yml`) | 배포 계약 — 스택·포트·health 경로·환경 변수·롤백 트리거를 명시. First Run Wizard 가 자동 생성 |
-| **Static / Runtime Preflight** | 배포 전 정적 검사(env·code·Dockerfile·포트·의존성·secret) 후 0~100 점수화, 임시 컨테이너로 health·smoke 검증 |
-| **Deterministic Remediation** | 같은 입력 → 같은 `proposal_id`(SHA256). 결정론적 템플릿 치환으로 재현성 보장 |
-| **Plan-Execute-Verify** | LLM Planner → 결정론적 Executor(allowlist + 타임아웃) → Verifier(schema·sha256·test) 검증 |
-| **3-Layer Audit** | Preflight → Remediation → DeploymentLedger 영속화. Layer 3 는 append-only 상태머신 |
-| **IncidentMemory** | 사고 fingerprint 기반 매칭, 재발 시 과거 해결책 자동 제안(옵트인 학습) |
-| **Continuous Verification** | 배포 후 5분 감시 — health·에러율·메모리 추적 → 자동 롤백 제안 |
-| **Governance** | OIDC + Device 토큰 + RBAC, OPA 정책 7종, 위험 작업 2인 승인, hash-chain 불변 AuditLog |
-| **Cloud Execution** | ECS Fargate Rolling Update(Circuit Breaker), EKS + ArgoCD GitOps, SBOM·보안스캔 |
-| **Multi-channel** | VSCode 워크벤치 + Discord ChatOps(`/recoder deploy`, `/recoder rollback` 등) |
+| 기능 | 무엇을 하는가 |
+|------|--------------|
+| **AI 코드 에러 분석·패치** | 터미널·코드 에러를 감지해 AI가 원인을 분석하고 수정 패치를 카드로 제안, 사용자 승인 시 자동 적용(검증 + 백업) |
+| **배포 전 자동 검증 (Preflight)** | 환경변수·코드·Dockerfile·포트·의존성·보안을 자동 점검해 0~100점으로 통과 여부 판정하고, 임시 컨테이너로 실제 동작까지 확인 |
+| **배포 문제 자동 수정 제안** | 검증에서 막힌 항목에 대해 수정안(코드 diff·파일·명령어·가이드)을 자동 생성해 제안 |
+| **원클릭 안전 배포** | 검증 통과 시 ECS Fargate / EKS(ArgoCD GitOps)로 자동 배포 |
+| **배포 후 자동 감시·롤백** | 배포 후 5분간 상태(health·에러율·메모리)를 감시하고, 이상 시 자동 롤백(Git revert PR)을 제안 |
+| **사고 학습·재발 대응** | 발생한 장애를 학습해, 같은 사고가 재발하면 과거 해결책을 자동으로 제안 |
+| **장애 분석 자동화** | 장애 발생 시 타임라인·원인분석(RCA)·사후보고서(Postmortem)를 자동 생성 |
+| **조직 거버넌스** | 로그인·권한 관리(RBAC), 위험 작업 2인 승인, 모든 작업의 변경 불가능한 감사 로그 기록 |
+| **멀티채널 지원** | VSCode 사이드바와 Discord 명령어(`/recoder deploy`, `/recoder rollback` 등) 양쪽에서 동일하게 사용 |
 
 ---
 
