@@ -603,3 +603,54 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"코드 생성 실패: {e}") from e
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# AI-DLC 1단계: 코드 대신 "설계 결정" 제시 (/api/code/plan)
+#   ReCoder_AI-DLC_도입_설계서.md §3.2 — 회차1 범위.
+#   자연어 요청 -> 설계 결정 목록(decisions). 코드는 아직 생성하지 않는다.
+#   확장(webview)이 이 목록을 결정 카드로 렌더 -> 사용자가 옵션 선택·승인 ->
+#   그 결과를 담아 /api/code/generate 를 다시 호출하는 흐름을 전제로 한다.
+# ---------------------------------------------------------------------------
+
+
+class CodePlanRequest(BaseModel):
+    instruction: str = ""
+    workspace_path: str = ""
+    open_file_path: str = ""
+    open_file_content: str = ""
+    target_folder: str = ""
+
+
+@router.post("/api/code/plan")
+async def code_plan_route(body: CodePlanRequest) -> dict:
+    import os as _os
+    import uuid as _uuid
+
+    if not (body.instruction or "").strip():
+        raise HTTPException(status_code=400, detail="instruction 이 비어 있습니다.")
+
+    if body.workspace_path and Path(body.workspace_path).exists():
+        _os.environ["RECODER_PROJECT_ROOT"] = body.workspace_path
+
+    open_file = None
+    if body.open_file_path or body.open_file_content:
+        open_file = {"path": body.open_file_path, "content": body.open_file_content}
+
+    try:
+        try:
+            from code_agent import generate_plan
+        except ImportError:
+            from core.code_agent import generate_plan
+        result = generate_plan(
+            instruction=body.instruction,
+            session_id=_uuid.uuid4().hex[:8],
+            open_file=open_file,
+            target_folder=body.target_folder or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"설계 결정 생성 실패: {e}") from e
+
+    return result
