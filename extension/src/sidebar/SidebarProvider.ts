@@ -11,7 +11,7 @@ import {
     CoreHealth,
     DeployMethod,
 } from '../types';
-import { ApiClient, CodeDecision, CodeDecisionChoice } from '../core/ApiClient';
+import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
 import { CoreManager } from '../core/CoreManager';
 import { PollingService } from '../core/PollingService';
 import { analyzeProject, analyzeFile } from '../codemap/analyzer';
@@ -765,24 +765,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     openFile?: { path: string; content: string };
                     targetFolder?: string;
                     contextFiles?: Array<{ path: string; content: string }>;
+                    decisions?: CodeDecisionChoice[];
                 };
                 await this.handleCodeGenerate(p.instruction ?? '', {
                     openFile: p.openFile,
                     targetFolder: p.targetFolder ?? '',
                     contextFiles: p.contextFiles ?? [],
+                    decisions: p.decisions ?? [],
                 });
                 break;
             }
             case 'code.plan': {
                 // AI-DLC 1단계: 바로 generate 로 가지 않고 /api/code/plan 으로
-                // "설계 결정"을 먼저 물어본 뒤(QuickPick), 승인된 선택을 담아 generate.
+                // 결정 목록을 먼저 받은 뒤 Webview 모달에서 사용자가 직접 확정한다.
                 const p = (payload ?? {}) as {
                     instruction?: string;
+                    requestId?: number;
                     openFile?: { path: string; content: string };
                     targetFolder?: string;
                     contextFiles?: Array<{ path: string; content: string }>;
                 };
                 await this.handleCodePlan(p.instruction ?? '', {
+                    requestId: p.requestId,
                     openFile: p.openFile,
                     targetFolder: p.targetFolder ?? '',
                     contextFiles: p.contextFiles ?? [],
@@ -934,7 +938,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** 코드 생성 에이전트 — 자연어 요청을 Core 로 보내 ops 를 받아 webview 로 회신. */
     private async handleCodeGenerate(
         instruction: string,
-        opts: { openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }> } = {},
+        opts: { openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }>; decisions?: CodeDecisionChoice[] } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
@@ -953,6 +957,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 priorFiles: this._lastCodeOps,
                 contextFiles: opts.contextFiles ?? [],
                 targetFolder: opts.targetFolder ?? '',
+                decisions: opts.decisions ?? [],
             });
             // 다음 턴 컨텍스트로 보관
             this._lastCodeOps = (result.ops ?? []).map((op) => ({ path: op.file, content: op.content }));
@@ -980,14 +985,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    /**
-     * AI-DLC 1단계 — /api/code/plan 으로 "설계 결정"을 먼저 받아, 결정마다 네이티브
-     * QuickPick(팝업, ADR-D3 "Quick Pick 스타일")을 순서대로 띄워 사람이 고르게 한 뒤,
-     * 승인된 선택을 담아 /api/code/generate 를 호출한다. 결정이 없으면 바로 generate.
-     */
+    /** AI-DLC 결정 목록을 Webview 모달로 보내고, 선택·생성은 사용자가 직접 확정한다. */
     private async handleCodePlan(
         instruction: string,
-        opts: { openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }> } = {},
+        opts: { requestId?: number; openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }> } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
@@ -999,106 +1000,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         }
 
-        let decisions: CodeDecision[] = [];
         try {
             const plan = await this._apiClient.planCode(instruction, {
                 workspacePath,
                 openFile: attach,
                 targetFolder: opts.targetFolder ?? '',
             });
-            decisions = plan.decisions ?? [];
+            this.postMessage('code.planResult', {
+                requestId: opts.requestId,
+                instruction,
+                decisions: plan.decisions ?? [],
+            });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            this.postMessage('code.error', { message: `설계 결정 생성 실패: ${msg}` });
-            return;
+            this.postMessage('code.error', { requestId: opts.requestId, message: `설계 결정 생성 실패: ${msg}` });
         }
-
-        const choices: CodeDecisionChoice[] = [];
-        if (decisions.length > 0) {
-            const countText = decisions.length > 1 ? `${decisions.length}개` : '하나';
-            this.postMessage('code.planNote', {
-                message:
-                    `좋아요. 바로 코드를 짜기 전에, 앱 구조에 영향을 주는 결정이 ${countText} 있어요. 창에서 골라주세요.\n\n` +
-                    `고르면 근거(왜·검토한 대안)를 docs/adr 에 남기고 코드를 만들게요.`,
-            });
-
-            for (let i = 0; i < decisions.length; i++) {
-                const decision = decisions[i];
-                const chosenKey = await this._pickDecision(decision, i + 1, decisions.length);
-                if (chosenKey === undefined) {
-                    this.postMessage('code.error', { message: '설계 결정을 취소해서 생성을 중단했습니다.' });
-                    return;
-                }
-                choices.push({
-                    id: decision.id,
-                    question: decision.question,
-                    chosen_key: chosenKey,
-                    options: decision.options,
-                });
-            }
-        }
-
-        try {
-            const result = await this._apiClient.generateCode(instruction, {
-                workspacePath,
-                openFile: attach,
-                priorFiles: this._lastCodeOps,
-                contextFiles: opts.contextFiles ?? [],
-                targetFolder: opts.targetFolder ?? '',
-                decisions: choices,
-            });
-            this._lastCodeOps = (result.ops ?? []).map((op) => ({ path: op.file, content: op.content }));
-            this.postMessage('code.result', result);
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            this.postMessage('code.error', { message: msg });
-        }
-    }
-
-    /**
-     * 결정 하나를 네이티브 QuickPick 팝업으로 렌더한다.
-     * step/totalSteps 로 "설계 결정 i/N" 진행 표시(VS Code 기본 제공), recommended
-     * 옵션에는 "추천" 배지를 달고 기본 활성 항목으로 미리 선택해 둔다.
-     * 반환: 선택된 option.key, 사용자가 Esc 로 취소하면 undefined.
-     */
-    private async _pickDecision(decision: CodeDecision, step: number, totalSteps: number): Promise<string | undefined> {
-        return new Promise<string | undefined>((resolve) => {
-            type DecisionItem = vscode.QuickPickItem & { key: string };
-            const qp = vscode.window.createQuickPick<DecisionItem>();
-            qp.title = decision.question;
-            qp.step = step;
-            qp.totalSteps = totalSteps;
-            qp.placeholder = decision.impact || '↑↓ 이동 · Enter 선택';
-            qp.ignoreFocusOut = true;
-            qp.items = decision.options.map((opt) => {
-                const prosCons = [
-                    ...(opt.pros ?? []).map((p) => `+ ${p}`),
-                    ...(opt.cons ?? []).map((c) => `- ${c}`),
-                ].join('  ');
-                return {
-                    key: opt.key,
-                    label: opt.label,
-                    description: opt.recommended ? '추천' : undefined,
-                    detail: [opt.summary, prosCons].filter(Boolean).join('  ·  ') || undefined,
-                };
-            });
-            const recommendedKey = decision.options.find((o) => o.recommended)?.key;
-            const recommendedItem = recommendedKey ? qp.items.find((it) => it.key === recommendedKey) : undefined;
-            if (recommendedItem) { qp.activeItems = [recommendedItem]; }
-
-            let resolved = false;
-            qp.onDidAccept(() => {
-                const sel = qp.selectedItems[0];
-                resolved = true;
-                qp.hide();
-                resolve(sel ? sel.key : undefined);
-            });
-            qp.onDidHide(() => {
-                qp.dispose();
-                if (!resolved) { resolve(undefined); }
-            });
-            qp.show();
-        });
     }
 
     /** 단일 파일 op 적용 — 워크스페이스에 직접 쓰고 에디터로 연다(Codex 식). 반환: 성공 여부. */

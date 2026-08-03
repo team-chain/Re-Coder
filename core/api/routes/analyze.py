@@ -567,6 +567,8 @@ class CodeGenerateRequest(BaseModel):
     prior_files: list = []
     context_files: list = []
     target_folder: str = ""
+    # AI-DLC 결정 모달에서 사용자가 확정한 설계 선택. generate_code 프롬프트에 반영한다.
+    decisions: list = []
 
 
 @router.post("/api/code/generate")
@@ -596,6 +598,7 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
             prior_files=body.prior_files or [],
             context_files=body.context_files or [],
             target_folder=body.target_folder or "",
+            decisions=body.decisions or [],
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
