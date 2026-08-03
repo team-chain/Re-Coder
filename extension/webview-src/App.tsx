@@ -575,12 +575,14 @@ const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         <div style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", padding: "4px 14px", background: "var(--vscode-sideBar-background, #181818)" }}><CostTracker costSummary={costSummary} /></div>
       </section>
 
-      <aside style={{ minWidth: 0, display: "flex", flexDirection: "column", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
+      <aside style={{ minWidth: 0, minHeight: 0, height: "100%", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
         <div style={{ padding: "14px 16px 12px", borderBottom: "1px solid var(--vscode-panel-border, #333)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon.Chat size={19} /><strong style={{ fontSize: 15 }}>AI와 대화</strong><span style={{ marginLeft: "auto", color: "var(--vscode-charts-green, #4ade80)", fontSize: 11 }}>AI-DLC</span></div>
           <div style={{ marginTop: 5, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11 }}>요청을 입력하면 설계 결정부터 코드 적용까지 함께 진행합니다.</div>
         </div>
-        <ChatPanel isAiReady={isAiReady} />
+        <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
+          <ChatPanel isAiReady={isAiReady} />
+        </div>
       </aside>
     </div>
   );
