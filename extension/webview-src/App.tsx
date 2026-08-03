@@ -34,12 +34,15 @@ import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
 import { Replay } from "./components/Replay";
 import CodeMap from "./components/CodeMap";
+import CodeAgent from "./components/CodeAgent";
+import ChatPanel from "./components/ChatPanel";
+import DeploymentCenter from "./components/DeploymentCenter";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type ViewMode = "home" | "build" | "ship" | "operate" | "replay" | "map";
+type ViewMode = "home" | "build" | "ship" | "deploy" | "operate" | "replay" | "map";
 
 interface DiagnosticsResult {
   core_ready: string;
@@ -173,12 +176,20 @@ const Icon = {
 // Hero (로고 + 태그라인)
 // ---------------------------------------------------------------------------
 
-const Hero: React.FC = () => (
+const Hero: React.FC<{ onOpenWorkspace?: () => void }> = ({ onOpenWorkspace }) => (
   <div style={{ padding: "18px 16px 8px", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
     <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
       <span style={{ color: "var(--vscode-foreground, #e0e0e0)", display: "inline-flex" }}><Icon.Logo size={22} /></span>
       <span style={{ fontSize: 20, fontWeight: 600, color: "var(--vscode-foreground, #e0e0e0)", letterSpacing: "-0.01em" }}>ReCoder</span>
     </div>
+    {onOpenWorkspace && (
+      <button
+        onClick={onOpenWorkspace}
+        style={{ width: "100%", marginTop: 12, padding: "8px 10px", border: "none", borderRadius: 5, background: "var(--vscode-button-background, #0e639c)", color: "var(--vscode-button-foreground, #fff)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+      >
+        ReCoder 창 열기
+      </button>
+    )}
   </div>
 );
 
@@ -343,9 +354,10 @@ interface HomeProps {
   postMessage: (type: string, payload?: unknown) => void;
   awsReady: boolean;
   githubReady: boolean;
+  showMap?: boolean;
 }
 
-const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSelectMode, postMessage, awsReady, githubReady }) => {
+const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSelectMode, postMessage, awsReady, githubReady, showMap = false }) => {
   const accent = "var(--vscode-textLink-foreground, #4a9eff)";
   const green = "var(--vscode-charts-green, #3fb950)";
   const muted = "var(--vscode-descriptionForeground, #888)";
@@ -402,10 +414,17 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
     <div style={{ padding: "14px 12px 10px", display: "flex", flexDirection: "column", gap: 16 }}>
 
       {/* 구조 지도 — 홈에서 바로 표시 (정적 분석이라 AI 없이 동작) */}
-      <div>
-        <div style={sectionLabel}>구조 지도</div>
-        <CodeMap isActive={true} />
-      </div>
+      {showMap ? (
+        <div>
+          <div style={sectionLabel}>구조 지도</div>
+          <CodeMap isActive={true} />
+        </div>
+      ) : (
+        <div>
+          <div style={sectionLabel}>구조 지도</div>
+          <StepRow icon={<Icon.Map size={19} />} label="전체 아키텍처 보기" enabled onClick={() => onSelectMode("map")} last />
+        </div>
+      )}
 
       {/* 워크플로 */}
       <div>
@@ -421,6 +440,12 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
           label="Deploy"
           enabled={isAiReady} hint="AI 필요"
           onClick={() => onSelectMode("ship")}
+        />
+        <StepRow
+          icon={<Icon.Dashboard size={19} />}
+          label="배포 센터"
+          enabled={true}
+          onClick={() => onSelectMode("deploy")}
         />
         <StepRow
           icon={<Icon.Cloud size={19} />}
@@ -500,11 +525,74 @@ const SubHeader: React.FC<{ title: string; onBack: () => void }> = ({ title, onB
 );
 
 // ---------------------------------------------------------------------------
+// ReCoder 작업 화면 — 왼쪽 작업 영역 + 오른쪽 고정 AI 대화
+// ---------------------------------------------------------------------------
+
+interface WorkspaceLayoutProps {
+  view: ViewMode;
+  diagnostics: DiagnosticsResult | null;
+  coreStatus: "ok" | "degraded" | "down" | null;
+  showDiagnostics: boolean;
+  isAiReady: boolean;
+  isDockerReady: boolean;
+  isOpsReady: boolean;
+  costSummary: ReturnType<typeof usePolling>["costSummary"];
+  onSelectMode: (mode: ViewMode) => void;
+  onToggleDiagnostics: () => void;
+  postMessage: (type: string, payload?: unknown) => void;
+}
+
+const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
+  view, diagnostics, coreStatus, showDiagnostics, isAiReady, isDockerReady, isOpsReady,
+  costSummary, onSelectMode, onToggleDiagnostics, postMessage,
+}) => {
+  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "로컬 Docker 배포" : view === "deploy" ? "배포 센터" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : view === "map" ? "구조 지도" : "";
+
+  return (
+    <div style={{ height: "100vh", display: "grid", gridTemplateColumns: "minmax(0, 1.65fr) minmax(330px, .85fr)", overflow: "hidden", background: "var(--vscode-editor-background, #1e1e1e)", color: "var(--vscode-foreground, #e0e0e0)" }}>
+      <section style={{ minWidth: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--vscode-panel-border, #333)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 18px", borderBottom: "1px solid var(--vscode-panel-border, #333)", background: "var(--vscode-sideBar-background, #181818)" }}>
+          <Icon.Logo size={22} />
+          <strong style={{ fontSize: 16 }}>ReCoder</strong>
+          <span style={{ color: "var(--vscode-descriptionForeground, #8b8b8b)", fontSize: 12 }}>Workspace</span>
+          <button onClick={() => onSelectMode("map")} style={{ marginLeft: "auto", border: "1px solid var(--vscode-button-border, transparent)", borderRadius: 4, padding: "4px 9px", background: "transparent", color: "var(--vscode-textLink-foreground, #4a9eff)", cursor: "pointer", fontSize: 11 }}>구조 지도</button>
+          <button onClick={() => onSelectMode("deploy")} style={{ border: "1px solid var(--vscode-button-border, transparent)", borderRadius: 4, padding: "4px 9px", background: "transparent", color: "var(--vscode-textLink-foreground, #4a9eff)", cursor: "pointer", fontSize: 11 }}>배포 센터</button>
+          <button onClick={() => onSelectMode("home")} style={{ border: "1px solid var(--vscode-button-border, transparent)", borderRadius: 4, padding: "4px 9px", background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)", cursor: "pointer", fontSize: 11 }}>홈</button>
+        </div>
+
+        <StatusBadge diagnostics={diagnostics} coreStatus={coreStatus} expanded={showDiagnostics} onToggle={onToggleDiagnostics} />
+        {showDiagnostics && <div style={{ borderBottom: "1px solid var(--vscode-panel-border, #333)", maxHeight: 220, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /></div>}
+
+        <div style={{ flex: 1, overflowY: "auto", padding: view === "home" ? "0 14px 16px" : "14px 18px 18px" }}>
+          {view === "home" && <Home isAiReady={isAiReady} isDockerReady={isDockerReady} isOpsReady={isOpsReady} onSelectMode={onSelectMode} postMessage={postMessage} awsReady={diagnostics?.aws_deploy_ready === "ready"} githubReady={(diagnostics as unknown as { github_ready?: string })?.github_ready === "ready"} showMap={false} />}
+          {view === "build" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><BuildMode isActive={isAiReady} showCodeAgent={false} /></>}
+          {view === "ship" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><ShipMode isAiReady={isAiReady} isDockerReady={isDockerReady} /></>}
+          {view === "deploy" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><DeploymentCenter onOpenDocker={() => onSelectMode("ship")} /></>}
+          {view === "operate" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><OperateMode isActive={isOpsReady} /></>}
+          {view === "replay" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><Replay /></>}
+          {view === "map" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><CodeMap isActive /></>}
+        </div>
+        <div style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", padding: "4px 14px", background: "var(--vscode-sideBar-background, #181818)" }}><CostTracker costSummary={costSummary} /></div>
+      </section>
+
+      <aside style={{ minWidth: 0, display: "flex", flexDirection: "column", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
+        <div style={{ padding: "14px 16px 12px", borderBottom: "1px solid var(--vscode-panel-border, #333)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon.Chat size={19} /><strong style={{ fontSize: 15 }}>AI와 대화</strong><span style={{ marginLeft: "auto", color: "var(--vscode-charts-green, #4ade80)", fontSize: 11 }}>AI-DLC</span></div>
+          <div style={{ marginTop: 5, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11 }}>요청을 입력하면 설계 결정부터 코드 적용까지 함께 진행합니다.</div>
+        </div>
+        <ChatPanel isAiReady={isAiReady} />
+      </aside>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
 const App: React.FC = () => {
   const { postMessage, useMessage } = useVSCodeApi();
+  const isWorkspacePanel = typeof document !== "undefined" && document.documentElement.dataset.recoderLayout === "workspace";
   const { coreHealth, costSummary } = usePolling(4000);
 
   const [view, setView] = useState<ViewMode>("home");
@@ -540,6 +628,21 @@ const App: React.FC = () => {
     postMessage("runDiagnostics", {});
   }, [postMessage]);
 
+  // 사이드바는 retainContextWhenHidden 옵션으로 닫혀도 React가 유지된다.
+  // 다시 보이는 순간을 직접 알리면 "큰 창 닫기 → ReCoder 아이콘 클릭"도
+  // 항상 Workspace를 다시 여는 동작으로 연결할 수 있다.
+  useEffect(() => {
+    if (isWorkspacePanel) { return; }
+    const notifyVisible = () => {
+      if (document.visibilityState === "visible") {
+        postMessage("sidebar.visible", {});
+      }
+    };
+    document.addEventListener("visibilitychange", notifyVisible);
+    notifyVisible();
+    return () => document.removeEventListener("visibilitychange", notifyVisible);
+  }, [isWorkspacePanel, postMessage]);
+
   const isAiReady = diagnostics ? diagnostics.ai_ready === "ready" : false;
   const isDockerReady = diagnostics ? diagnostics.docker_ready === "ready" : false;
   const isOpsReady = diagnostics
@@ -548,7 +651,28 @@ const App: React.FC = () => {
       diagnostics.ops_ready === "ready"
     : false;
 
-  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "Deploy" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : view === "map" ? "구조 지도" : "";
+  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "로컬 Docker 배포" : view === "deploy" ? "배포 센터" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : view === "map" ? "구조 지도" : "";
+
+  // WebviewPanel 로 열리는 ReCoder 작업 화면에서는 현재 사이드바 기능을
+  // 왼쪽에, 대화형 코드 에이전트를 오른쪽에 동시에 표시한다.
+  if (isWorkspacePanel) {
+    return <WorkspaceLayout
+      view={view}
+      diagnostics={diagnostics}
+      coreStatus={coreHealth?.status ?? null}
+      showDiagnostics={showDiagnostics}
+      isAiReady={isAiReady}
+      isDockerReady={isDockerReady}
+      isOpsReady={isOpsReady}
+      costSummary={costSummary}
+      onSelectMode={setView}
+      onToggleDiagnostics={() => {
+        setShowDiagnostics((v) => !v);
+        if (!showDiagnostics) postMessage("runDiagnostics", {});
+      }}
+      postMessage={postMessage}
+    />;
+  }
 
   return (
     <div style={{
@@ -561,7 +685,7 @@ const App: React.FC = () => {
       fontFamily: "var(--vscode-font-family)",
     }}>
       {/* Hero (로고 + 브랜드) */}
-      {view === "home" && <Hero />}
+      {view === "home" && <Hero onOpenWorkspace={() => postMessage("workbench.open", {})} />}
       {view !== "home" && <SubHeader title={subTitle} onBack={() => setView("home")} />}
 
       {/* Status badge (펼치면 진단 상세) */}
@@ -606,6 +730,11 @@ const App: React.FC = () => {
         {view === "ship" && (
           <div style={{ padding: "10px 10px 8px" }}>
             <ShipMode isAiReady={isAiReady} isDockerReady={isDockerReady} />
+          </div>
+        )}
+        {view === "deploy" && (
+          <div style={{ padding: "10px 10px 8px" }}>
+            <DeploymentCenter onOpenDocker={() => setView("ship")} />
           </div>
         )}
         {view === "operate" && (

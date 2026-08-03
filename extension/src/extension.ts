@@ -19,7 +19,7 @@ import { ApiClient } from './core/ApiClient';
 import { PollingService } from './core/PollingService';
 import { SidebarProvider } from './sidebar/SidebarProvider';
 import { WorkbenchSidebarProvider } from './sidebar/WorkbenchSidebarProvider';
-import { WorkbenchPanel } from './sidebar/WorkbenchPanel';
+import { ReCoderPanel } from './sidebar/ReCoderPanel';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
 import { BridgeClient } from './bridge/BridgeClient';
@@ -70,6 +70,7 @@ export function activate(context: vscode.ExtensionContext): void {
         apiClient,
         coreManager,
         pollingService,
+        () => { void vscode.commands.executeCommand('recoder.openReCoder'); },
     );
 
     context.subscriptions.push(
@@ -430,22 +431,18 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
-    // ── Command: Open Workbench ─────────────────────────────────────────────
+    // ── Command: Open ReCoder workspace ─────────────────────────────────────
     // 사이드바의 "Workbench 열기" 버튼이나 명령 팔레트에서 호출.
-    // Editor Area 에 풀스크린 탭으로 열린다 — 4탭 펼침, 넓은 작업 공간.
+    // Editor Area 에 왼쪽 작업 영역 + 오른쪽 AI 대화가 한 화면으로 열린다.
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.openWorkbench', async () => {
-            // 패널을 먼저 즉시 연다 — HTML 은 동기 렌더, 데이터는 polling 으로 채워지므로
-            // Core 헬스체크/스폰(ensureCoreRunning)을 기다리지 않아 체감 지연이 사라진다.
-            // Core 가 준비되면 chip·진단·비용이 자동 갱신된다.
-            WorkbenchPanel.createOrShow(
-                context.extensionUri,
-                apiClient,
-                coreManager,
-                pollingService,
-            );
+            ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider);
             void ensureCoreRunning(coreManager, sidebarProvider);
-        })
+        }),
+        vscode.commands.registerCommand('recoder.openReCoder', async () => {
+            ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider);
+            void ensureCoreRunning(coreManager, sidebarProvider);
+        }),
     );
 
     // ── Commands: Sidebar Location (Kiro-style 우측 / 기본 좌측) ─────────────
@@ -563,6 +560,7 @@ async function ensureCoreRunning(
 ): Promise<void> {
     try {
         await coreManager.ensureRunning();
+        sidebarProvider.triggerDiagnostics();
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`ReCoder Core 시작 실패: ${msg}`);
