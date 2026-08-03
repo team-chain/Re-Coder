@@ -67,8 +67,8 @@ hidden_imports = [
     "orchestrator",
     "llm.router",
     "llm.base",
-    "llm.bedrock",
-    "llm.gemini",
+    "llm.bedrock_provider",
+    "llm.gemini_provider",
     "registries.command_registry",
     "collectors",
 ]

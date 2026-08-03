@@ -42,6 +42,42 @@ export interface CodeAgentResult {
     model: string;
 }
 
+/** /api/code/plan — AI-DLC 1단계: 코드 대신 "설계 결정" 선택지. */
+export interface CodeDecisionOption {
+    key: string;
+    label: string;
+    summary: string;
+    pros: string[];
+    cons: string[];
+    recommended: boolean;
+}
+
+export interface CodeDecision {
+    id: string;
+    question: string;
+    options: CodeDecisionOption[];
+    impact: string;
+}
+
+export interface CodePlanResult {
+    decisions: CodeDecision[];
+    model: string;
+}
+
+/** Workspace 오른쪽 대화 패널의 일반 AI 응답. 파일을 변경하지 않는 상담용 API다. */
+export interface ChatResult {
+    reply: string;
+    model: string;
+}
+
+/** 사용자가 결정 카드(QuickPick)에서 고른 결과 — /api/code/generate 로 그대로 전달. */
+export interface CodeDecisionChoice {
+    id: string;
+    question: string;
+    chosen_key: string;
+    options: CodeDecisionOption[];
+}
+
 export class ApiClient {
     constructor(private coreManager: CoreManager) {}
 
@@ -152,6 +188,10 @@ export class ApiClient {
             priorFiles?: Array<{ path: string; content: string }>;
             contextFiles?: Array<{ path: string; content: string }>;
             targetFolder?: string;
+            // AI-DLC 2단계: 결정 카드에서 사용자가 승인한 선택 결과.
+            // (Core 의 /api/code/generate 가 아직 이 필드를 소비하지 않아도 무해하게 무시됨 —
+            //  decisions 반영은 별도 태스크.)
+            decisions?: CodeDecisionChoice[];
         }
     ): Promise<CodeAgentResult> {
         const body = {
@@ -162,10 +202,50 @@ export class ApiClient {
             prior_files: opts?.priorFiles ?? [],
             context_files: opts?.contextFiles ?? [],
             target_folder: opts?.targetFolder ?? '',
+            decisions: opts?.decisions ?? [],
         };
         // 코드 생성은 30s 를 넘길 수 있어 90s 타임아웃.
         const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 90000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '코드 생성 실패'); }
+        return resp.data;
+    }
+
+    /**
+     * AI-DLC 1단계 — 코드 대신 "설계 결정" 목록 요청 (/api/code/plan).
+     * 결과는 SidebarProvider 가 QuickPick(팝업) 으로 렌더해 사용자에게 고르게 한다.
+     */
+    async planCode(
+        instruction: string,
+        opts?: {
+            workspacePath?: string;
+            openFile?: { path: string; content: string };
+            targetFolder?: string;
+        }
+    ): Promise<CodePlanResult> {
+        const body = {
+            instruction,
+            workspace_path: opts?.workspacePath ?? '',
+            open_file_path: opts?.openFile?.path ?? '',
+            open_file_content: opts?.openFile?.content ?? '',
+            target_folder: opts?.targetFolder ?? '',
+        };
+        const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설계 결정 생성 실패'); }
+        return resp.data;
+    }
+
+    /** 일반 대화형 AI — 코드 생성과 달리 이 호출만으로 파일을 수정하지 않는다. */
+    async chat(
+        message: string,
+        history: Array<{ role: 'user' | 'assistant'; content: string }>,
+        workspacePath = '',
+    ): Promise<ChatResult> {
+        const resp = await this.request<ChatResult>('POST', '/api/chat', {
+            message,
+            history,
+            workspace_path: workspacePath,
+        }, false, 90000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AI 대화 실패'); }
         return resp.data;
     }
 

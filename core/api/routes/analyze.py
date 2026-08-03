@@ -622,6 +622,88 @@ class CodePlanRequest(BaseModel):
     target_folder: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Workspace chat — 오른쪽 "AI와 대화" 패널용
+# ---------------------------------------------------------------------------
+
+
+class ChatHistoryMessage(BaseModel):
+    role: str = "user"
+    content: str = ""
+
+
+class ChatRequest(BaseModel):
+    message: str = ""
+    history: list[ChatHistoryMessage] = []
+    workspace_path: str = ""
+
+
+@router.post("/api/chat")
+async def chat_route(body: ChatRequest) -> dict:
+    """ReCoder 작업 맥락을 아는 일반 대화형 AI 응답을 반환한다.
+
+    코드 변경이 필요한 경우에도 이 API는 파일을 쓰지 않는다. 사용자가 대화로
+    방향을 정한 뒤 Build의 코드 생성 기능을 사용하도록 안내해, 대화만으로
+    워크스페이스가 변경되는 일을 막는다.
+    """
+    import asyncio
+
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message 가 비어 있습니다.")
+
+    # 대화 기록은 최근 10개만, 각 메시지는 2천 자까지만 넣어 비용과 컨텍스트를 제한한다.
+    history_lines: list[str] = []
+    for item in (body.history or [])[-10:]:
+        role = "사용자" if item.role == "user" else "ReCoder"
+        content = (item.content or "").strip()[:2000]
+        if content:
+            history_lines.append(f"{role}: {content}")
+    history_text = "\n".join(history_lines) or "(이전 대화 없음)"
+
+    workspace_name = "현재 워크스페이스"
+    if body.workspace_path:
+        try:
+            workspace_name = Path(body.workspace_path).name or workspace_name
+        except Exception:
+            pass
+
+    prompt = f"""당신은 VS Code 확장 ReCoder의 친절한 개발 도우미입니다.
+사용자는 '{workspace_name}' 프로젝트에서 작업 중입니다.
+한국어로 자연스럽고 짧게 답하세요. 질문의 의도를 먼저 파악하고, 필요한 경우
+실행 순서·주의점·예시를 제시하세요. 정보가 부족하면 한 가지 확인 질문을 하세요.
+코드나 파일을 실제로 변경했다고 말하지 마세요. 사용자가 구현을 원하면 대화로
+방향을 정한 뒤 ReCoder의 코드 생성 기능을 사용하도록 안내하세요.
+
+이전 대화:
+{history_text}
+
+사용자: {message}
+ReCoder:"""
+
+    try:
+        try:
+            from llm.base import LLMRequest
+            from llm.router import get_router
+        except ImportError:
+            from core.llm.base import LLMRequest
+            from core.llm.router import get_router
+
+        # 동기 Provider 호출이므로 이벤트 루프를 막지 않도록 별도 스레드에서 실행한다.
+        response = await asyncio.to_thread(
+            get_router().call,
+            LLMRequest(prompt=prompt, max_tokens=1000, temperature=0.45),
+            "workspace_chat",
+            "chat",
+        )
+        reply = (response.text or "").strip()
+        if not reply:
+            raise RuntimeError("AI가 빈 응답을 반환했습니다.")
+        return {"reply": reply, "model": getattr(response, "model_used", "")}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AI 대화 실패: {exc}") from exc
+
+
 @router.post("/api/code/plan")
 async def code_plan_route(body: CodePlanRequest) -> dict:
     import os as _os

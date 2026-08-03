@@ -13,7 +13,7 @@ interface CodeOp {
   secret_warnings?: SecretWarning[];
 }
 interface CodeResult { summary: string; ops: CodeOp[]; model: string; }
-interface Turn { id: number; prompt: string; status: "loading" | "done" | "error"; result?: CodeResult; error?: string; }
+interface Turn { id: number; prompt: string; status: "loading" | "done" | "error"; result?: CodeResult; error?: string; note?: string; }
 interface CtxFile { path: string; content: string; }
 
 let _turnSeq = 1;
@@ -47,6 +47,17 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
         }
         return copy;
       });
+    } else if (type === "code.planNote") {
+      // AI-DLC 1단계: /api/code/plan 결과 결정이 있으면, VS Code 팝업(QuickPick)이
+      // 뜨기 전에 채팅에 안내 문구를 먼저 보여준다.
+      const m = (payload as { message?: string })?.message ?? "";
+      setTurns((ts) => {
+        const copy = [...ts];
+        for (let i = copy.length - 1; i >= 0; i--) {
+          if (copy[i].status === "loading") { copy[i] = { ...copy[i], note: m }; break; }
+        }
+        return copy;
+      });
     } else if (type === "code.folderPicked" || type === "code.setTargetFolder") {
       setTargetFolder((payload as { folder?: string })?.folder ?? "");
     } else if (type === "code.contextAdded") {
@@ -63,7 +74,9 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
     if (!text) { return; }
     const id = _turnSeq++;
     setTurns((ts) => [...ts, { id, prompt: text, status: "loading" }]);
-    postMessage("code.generate", { instruction: text, targetFolder, contextFiles });
+    // AI-DLC 1단계: 코드로 바로 가지 않고 먼저 설계 결정을 물어본다 (/api/code/plan).
+    // 결정이 없으면 SidebarProvider 가 바로 generate 로 넘어간다.
+    postMessage("code.plan", { instruction: text, targetFolder, contextFiles });
     setInput("");
   }, [input, targetFolder, contextFiles, postMessage]);
 
@@ -85,8 +98,6 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
   const showDiff = useCallback((op: CodeOp) => {
     postMessage("code.diff", { file: op.file, content: op.content, targetFolder });
   }, [postMessage, targetFolder]);
-
-  if (!isActive) { return null; }
 
   const label: React.CSSProperties = {
     fontSize: 12, fontWeight: 600, color: "var(--vscode-foreground, #ddd)", marginBottom: 8,
@@ -123,6 +134,11 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
       <div style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", marginBottom: 10, lineHeight: 1.5 }}>
         자연어로 새 코드를 만들거나 기존 코드를 고칩니다. 생성 결과는 파일별로 확인 후 적용됩니다.
       </div>
+      {!isActive && (
+        <div style={{ marginBottom: 10, border: "1px solid var(--vscode-inputValidation-warningBorder, #cca700)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", borderRadius: 5, padding: "7px 9px", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.45 }}>
+          AI 연결이 아직 준비되지 않았습니다. 요청은 입력할 수 있지만, 실제 처리는 Core/AI 연결 후에 가능합니다.
+        </div>
+      )}
 
       {/* 대상 폴더 · 참고 파일 */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: contextFiles.length ? 6 : 8, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
@@ -154,11 +170,18 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
           </div>
 
           {turn.status === "loading" && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--vscode-descriptionForeground, #888)", fontSize: 11, padding: "2px 0 6px" }}>
-              <div style={{ width: 11, height: 11, border: "2px solid #3f3f3f", borderTopColor: "var(--vscode-progressBar-background, #3794ff)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-              <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-              생성 중…
-            </div>
+            <>
+              {turn.note && (
+                <div style={{ background: "var(--vscode-editorWidget-background, #252526)", border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 6, padding: "8px 10px", marginBottom: 8, fontSize: 11.5, lineHeight: 1.6, color: "var(--vscode-foreground, #ddd)", whiteSpace: "pre-line" }}>
+                  {turn.note}
+                </div>
+              )}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--vscode-descriptionForeground, #888)", fontSize: 11, padding: "2px 0 6px" }}>
+                <div style={{ width: 11, height: 11, border: "2px solid #3f3f3f", borderTopColor: "var(--vscode-progressBar-background, #3794ff)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                {turn.note ? "창에서 설계 결정을 선택해주세요…" : "생성 중…"}
+              </div>
+            </>
           )}
           {turn.status === "error" && (
             <div style={{ background: "var(--vscode-inputValidation-errorBackground, rgba(239,68,68,0.1))", border: "1px solid var(--vscode-inputValidation-errorBorder, #ef4444)", borderRadius: 4, padding: "7px 10px", color: "var(--vscode-errorForeground, #f48771)", fontSize: 11 }}>{turn.error}</div>
