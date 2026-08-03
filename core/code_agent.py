@@ -795,6 +795,7 @@ def _build_code_prompt(
     prior_files: list[dict] | None = None,
     context_files: list[dict] | None = None,
     target_folder: str = "",
+    decisions: list[dict] | None = None,
 ) -> str:
     """코드 생성 에이전트용 프롬프트. JSON ops 형식을 강제한다."""
     tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
@@ -829,6 +830,26 @@ def _build_code_prompt(
             f"```\n{body}\n```\n"
         )
 
+    decision_lines: list[str] = []
+    for decision in (decisions or []):
+        chosen_key = str(decision.get("chosen_key") or "").strip()
+        if not chosen_key:
+            continue
+        question = str(decision.get("question") or "설계 결정").strip()
+        chosen_label = chosen_key
+        for option in (decision.get("options") or []):
+            if str(option.get("key") or "") == chosen_key:
+                chosen_label = str(option.get("label") or chosen_key).strip()
+                break
+        decision_lines.append(f"- {question}: {chosen_label} ({chosen_key})")
+    decision_block = ""
+    if decision_lines:
+        decision_block = (
+            "\n사용자가 확정한 설계 결정(반드시 이 선택을 반영):\n"
+            + "\n".join(decision_lines)
+            + "\n"
+        )
+
     return f"""당신은 VSCode 안에서 동작하는 코드 작성 에이전트입니다.
 사용자의 요청을 읽고, 실제로 워크스페이스에 적용할 파일 작업(ops)을 만드세요.
 
@@ -839,10 +860,11 @@ def _build_code_prompt(
 - 외부 빌드 도구 없이 동작하도록 합니다(예: 단일 HTML 은 인라인 CSS/JS).
 - 데이터 저장이 필요하면 외부 DB 대신 localStorage 를 사용합니다.
 - 기존 파일 목록과 겹치지 않게 파일명을 정하되, 사용자가 파일명을 지정하면 그대로 따릅니다.
+- 사용자가 확정한 설계 결정이 있으면 그 선택을 우선하고 임의로 다른 방식을 택하지 않습니다.
 
 기존 파일 목록:
 {tree}
-{folder_block}{ctx_block}{prior_block}{open_block}
+{folder_block}{ctx_block}{prior_block}{open_block}{decision_block}
 사용자 요청:
 {instruction}
 
@@ -1025,6 +1047,7 @@ def generate_code(
     prior_files: list[dict] | None = None,
     context_files: list[dict] | None = None,
     target_folder: str = "",
+    decisions: list[dict] | None = None,
 ) -> dict:
     """
     자연어 instruction → 파일 작업(ops) 목록.
@@ -1040,7 +1063,10 @@ def generate_code(
     existing = _list_project_files(root)
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
-    prompt = _build_code_prompt(instruction, existing, open_file, prior_files or [], context_files or [], target_folder)
+    prompt = _build_code_prompt(
+        instruction, existing, open_file, prior_files or [], context_files or [],
+        target_folder, decisions or [],
+    )
 
     try:
         llm_resp = get_router().call(
