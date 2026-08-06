@@ -1136,6 +1136,7 @@ def generate_plan(
     data = _extract_json(raw)
 
     decisions_out: list[dict] = []
+    seen_ids: set[str] = set()
     for d in (data.get("decisions") or []):
         if not isinstance(d, dict):
             continue
@@ -1150,6 +1151,17 @@ def generate_plan(
         # 조용히 사라지지 않도록 여기서 일반 id 로 옮겨 붙인다.
         if did.startswith(RESERVED_ID_PREFIX):
             did = f"d-{did.strip('_')}" if did.strip("_") else "decision"
+        # id 는 웹뷰가 사용자의 선택을 저장하는 **키**다(selections[decision.id]).
+        # 겹치면 뒤 카드가 앞 카드의 선택을 덮어써, 고르지도 않은 선택이
+        # 코드 생성과 ADR 에 실린다. 모델이 같은 id 를 두 번 주는 경우와
+        # 위 재배치가 기존 id 와 충돌하는 경우(`__auth` + `d-auth`) 둘 다
+        # 여기서 걸러, plan 전체에서 id 유일성을 보장한다.
+        if did in seen_ids:
+            suffix = 2
+            while f"{did}-{suffix}" in seen_ids:
+                suffix += 1
+            did = f"{did}-{suffix}"
+        seen_ids.add(did)
         raw_options = d.get("options") or []
         options_out: list[dict] = []
         has_recommended = False
