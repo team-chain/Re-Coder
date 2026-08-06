@@ -1055,10 +1055,15 @@ def _approval_state(decisions: list | None) -> str:
     **클라이언트 결함 차단**(낡은 확장·오타·누락 페이로드)이며, 그 목적에는
     이 수준이 맞다. 서버 보관 대조는 별도 태스크로 분리.
 
-    반환값:
-      APPROVAL_CANCELLED — 확인 카드에서 명시적으로 '취소'를 골랐다 (최우선)
-      APPROVAL_APPROVED  — 제시된 선택지 중 하나를 고른 결정이 하나 이상 있다
-      APPROVAL_INVALID   — 고르긴 했으나 제시된 선택지에 없는 값이다
+    유효한 선택 **하나만 있으면 통과**시켜서도 안 된다. 나머지 항목이 엉터리여도
+    정규화는 그것을 버리지 않고 알 수 없는 `chosen_key` 를 선택 라벨로 삼아
+    프롬프트와 ADR 에 실어버린다 — 아무도 승인하지 않은 결정이 기록되는 것이다.
+    그래서 **하나라도 유효하지 않으면 요청 전체를 거절**한다.
+
+    반환값 (우선순위 순):
+      APPROVAL_CANCELLED — 확인 카드에서 명시적으로 '취소'를 골랐다
+      APPROVAL_INVALID   — 고른 값 중 제시된 선택지에 없는 것이 하나라도 있다
+      APPROVAL_APPROVED  — 고른 것이 모두 제시된 선택지 안에 있고, 하나 이상이다
       APPROVAL_MISSING   — 고른 것이 아예 없다
     """
     from adr import CONFIRM_DECISION_ID
@@ -1091,9 +1096,11 @@ def _approval_state(decisions: list | None) -> str:
             continue
         approved = True
 
-    if approved:
-        return APPROVAL_APPROVED
-    return APPROVAL_INVALID if invalid else APPROVAL_MISSING
+    # 유효하지 않은 항목이 하나라도 있으면 전체 거절 — 통과시키면 그 항목이
+    # 승인되지 않은 채로 프롬프트와 ADR 에 실린다.
+    if invalid:
+        return APPROVAL_INVALID
+    return APPROVAL_APPROVED if approved else APPROVAL_MISSING
 
 
 def _build_confirm_decision(instruction: str) -> dict:

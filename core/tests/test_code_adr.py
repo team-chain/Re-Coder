@@ -344,9 +344,37 @@ def test_confirm_card_requires_exactly_proceed():
     ]) == ca.APPROVAL_APPROVED
 
 
-def test_one_valid_choice_is_enough_even_with_a_bad_sibling():
-    """유효한 승인이 하나라도 있으면 통과 — 잘못된 항목은 정규화가 걸러낸다."""
-    assert ca._approval_state([{"id": "x", "chosen_key": "x"}, _chose("local")]) == ca.APPROVAL_APPROVED
+def test_invalid_sibling_rejects_the_whole_payload():
+    """[핵심] 유효한 선택 하나가 섞여 있어도, 엉터리 항목이 있으면 전체를 거절한다.
+
+    정규화는 알 수 없는 `chosen_key` 를 버리지 않고 그대로 선택 라벨로 삼는다.
+    그래서 통과시키면 **아무도 승인하지 않은 결정**이 프롬프트와 ADR 에 실린다.
+    (3차 리뷰에서 내가 반대로 단정했던 부분 — 회귀로 고정한다.)
+    """
+    bad = _chose("없는키", id="auth", keys=("jwt", "session"))
+    assert ca._approval_state([_chose("local"), bad]) == ca.APPROVAL_INVALID
+    assert ca._approval_state([bad, _chose("local")]) == ca.APPROVAL_INVALID
+
+
+def test_cancel_still_outranks_an_invalid_sibling():
+    cancel = {"id": adr.CONFIRM_DECISION_ID, "chosen_key": "cancel"}
+    bad = _chose("없는키")
+    assert ca._approval_state([bad, cancel]) == ca.APPROVAL_CANCELLED
+
+
+def test_normalize_drops_choice_that_matches_no_offered_option():
+    """게이트가 뚫려도 근거 없는 ADR 이 남지 않도록 정규화에서도 끊는다."""
+    out = adr.normalize_decisions([{
+        "id": "auth", "question": "인증?", "chosen_key": "없는키",
+        "options": [{"key": "jwt", "label": "JWT"}, {"key": "session", "label": "세션"}],
+    }])
+    assert out == []
+
+
+def test_normalize_still_accepts_minimal_shape_without_options():
+    """선택지 목록이 아예 없는 최소 형태는 종전대로 허용 (대조할 대상이 없음)."""
+    out = adr.normalize_decisions([{"id": "auth", "question": "인증?", "chosen_key": "jwt"}])
+    assert [d["chosen_label"] for d in out] == ["jwt"]
 
 
 def test_generate_code_rejects_choice_outside_offered_options(monkeypatch, tmp_path):
