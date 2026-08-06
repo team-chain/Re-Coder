@@ -573,6 +573,7 @@ class CodeGenerateRequest(BaseModel):
 
 @router.post("/api/code/generate")
 async def generate_code_route(body: CodeGenerateRequest) -> dict:
+    import asyncio as _asyncio
     import os as _os
     import uuid as _uuid
 
@@ -591,7 +592,11 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
             from code_agent import generate_code
         except ImportError:
             from core.code_agent import generate_code
-        result = generate_code(
+        # LLM 호출은 수 초~수십 초 걸린다. 동기 함수를 그대로 await 없이 부르면
+        # 이벤트 루프가 묶여 health 폴링·채팅 등 다른 요청이 전부 막히고,
+        # 확장이 Core 를 "응답 없음"으로 판정해 복구 로직을 돌린다.
+        result = await _asyncio.to_thread(
+            generate_code,
             instruction=body.instruction,
             session_id=_uuid.uuid4().hex[:8],
             open_file=open_file,
@@ -709,6 +714,7 @@ ReCoder:"""
 
 @router.post("/api/code/plan")
 async def code_plan_route(body: CodePlanRequest) -> dict:
+    import asyncio as _asyncio
     import os as _os
     import uuid as _uuid
 
@@ -727,7 +733,9 @@ async def code_plan_route(body: CodePlanRequest) -> dict:
             from code_agent import generate_plan
         except ImportError:
             from core.code_agent import generate_plan
-        result = generate_plan(
+        # generate 와 동일 — 동기 LLM 호출을 이벤트 루프 밖으로 뺀다.
+        result = await _asyncio.to_thread(
+            generate_plan,
             instruction=body.instruction,
             session_id=_uuid.uuid4().hex[:8],
             open_file=open_file,
