@@ -595,6 +595,11 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
         # LLM 호출은 수 초~수십 초 걸린다. 동기 함수를 그대로 await 없이 부르면
         # 이벤트 루프가 묶여 health 폴링·채팅 등 다른 요청이 전부 막히고,
         # 확장이 Core 를 "응답 없음"으로 판정해 복구 로직을 돌린다.
+        #
+        # 단, 스레드로 넘기면 여기서 실행이 양보되므로 워크스페이스 경로를
+        # 전역 env 로 전달하면 안 된다. 다른 창의 요청이 그 사이 env 를
+        # 덮어쓰면 이 요청이 남의 워크스페이스를 기준으로 동작한다.
+        # → 요청별 경로는 인자로 직접 넘긴다.
         result = await _asyncio.to_thread(
             generate_code,
             instruction=body.instruction,
@@ -604,6 +609,7 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
             context_files=body.context_files or [],
             target_folder=body.target_folder or "",
             decisions=body.decisions or [],
+            project_root=body.workspace_path or "",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -733,13 +739,15 @@ async def code_plan_route(body: CodePlanRequest) -> dict:
             from code_agent import generate_plan
         except ImportError:
             from core.code_agent import generate_plan
-        # generate 와 동일 — 동기 LLM 호출을 이벤트 루프 밖으로 뺀다.
+        # generate 와 동일 — 동기 LLM 호출을 이벤트 루프 밖으로 빼되,
+        # 워크스페이스 경로는 전역 env 가 아니라 인자로 넘긴다(동시 요청 격리).
         result = await _asyncio.to_thread(
             generate_plan,
             instruction=body.instruction,
             session_id=_uuid.uuid4().hex[:8],
             open_file=open_file,
             target_folder=body.target_folder or "",
+            project_root=body.workspace_path or "",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

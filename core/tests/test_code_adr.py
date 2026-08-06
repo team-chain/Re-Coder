@@ -187,3 +187,55 @@ def test_prompt_block_and_adr_agree_on_choice():
     md = adr.build_adr_markdown(1, d[0], "요청")
     assert d[0]["chosen_label"] in block
     assert d[0]["chosen_label"] in md
+
+
+def test_prompt_block_survives_raw_input():
+    """정규화를 거치지 않은 입력이 흘러들어와도 예외 없이 처리한다."""
+    assert ca._decisions_prompt_block([None, "x", 3, {}]) == ""
+    assert ca._decisions_prompt_block([{"id": "a"}]) == ""          # chosen_key 없음
+    raw = [{"id": "s", "question": "q", "chosen_key": "k", "options": []}]
+    assert "q: k (k)" in ca._decisions_prompt_block(raw)
+
+
+# ── 요청별 워크스페이스 격리 ─────────────────────────────────────────
+
+def test_resolve_root_prefers_explicit_over_env(tmp_path, monkeypatch):
+    """[회귀] 워크스페이스는 전역 env 가 아니라 인자로 결정되어야 한다.
+
+    to_thread 로 넘기는 사이 다른 요청이 env 를 덮어써도, 명시 경로를 받은
+    요청은 자기 워크스페이스를 그대로 쓴다.
+    """
+    mine = tmp_path / "mine"; mine.mkdir()
+    other = tmp_path / "other"; other.mkdir()
+    monkeypatch.setenv("RECODER_PROJECT_ROOT", str(other))   # 남이 덮어쓴 상태
+
+    assert ca._resolve_root(str(mine)) == mine               # 명시값 우선
+    assert ca._resolve_root("") == other                     # 없으면 기존 동작
+
+
+def test_resolve_root_falls_back_when_path_invalid(tmp_path, monkeypatch):
+    valid = tmp_path / "v"; valid.mkdir()
+    monkeypatch.setenv("RECODER_PROJECT_ROOT", str(valid))
+    assert ca._resolve_root(str(tmp_path / "does-not-exist")) == valid
+
+
+def test_concurrent_requests_do_not_share_root(tmp_path, monkeypatch):
+    """두 요청이 스레드에서 겹쳐 돌아도 각자 자기 루트를 본다."""
+    import threading
+
+    a = tmp_path / "wsA"; a.mkdir()
+    b = tmp_path / "wsB"; b.mkdir()
+    seen: dict[str, object] = {}
+    barrier = threading.Barrier(2)
+
+    def worker(name: str, path):
+        # 두 스레드가 동시에 env 를 덮어쓰는 최악의 상황을 재현
+        monkeypatch.setenv("RECODER_PROJECT_ROOT", str(path))
+        barrier.wait()
+        seen[name] = ca._resolve_root(str(path))
+
+    t1 = threading.Thread(target=worker, args=("A", a))
+    t2 = threading.Thread(target=worker, args=("B", b))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    assert seen["A"] == a and seen["B"] == b

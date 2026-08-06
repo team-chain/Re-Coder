@@ -85,6 +85,22 @@ def _project_root() -> Path:
     return cwd
 
 
+def _resolve_root(explicit: str = "") -> Path:
+    """요청별 워크스페이스 루트를 결정한다.
+
+    `RECODER_PROJECT_ROOT` 는 **프로세스 전역**이라, 여러 VSCode 창이 동시에
+    요청하면 서로 덮어쓴다. 요청 처리 중 스레드로 넘어가는 지점이 생기면
+    나중 요청이 먼저 요청의 루트를 바꿔버려, A 창 요청인데 B 워크스페이스를
+    기준으로 코드·ADR 이 만들어질 수 있다.
+    그래서 호출자가 넘긴 명시 경로를 항상 우선한다(전역 상태 비의존).
+    """
+    if explicit:
+        p = Path(str(explicit)).expanduser()
+        if p.exists() and p.is_dir():
+            return p
+    return _project_root()
+
+
 def compute_sha256(path: str | Path) -> str:
     """파일의 SHA256 해시를 계산한다."""
     with open(path, 'rb') as f:
@@ -976,6 +992,7 @@ def generate_plan(
     session_id: str = "",
     open_file: dict | None = None,
     target_folder: str = "",
+    project_root: str = "",
 ) -> dict:
     """
     자연어 instruction → "설계 결정" 목록 (코드 아님).
@@ -985,6 +1002,9 @@ def generate_plan(
     사용자가 각 결정을 선택하면 그 결과(decisions: [{id, chosen_key}])를
     담아 /api/code/generate 를 다시 호출한다.
 
+    project_root: 이 요청의 워크스페이스 루트. 비우면 전역 설정을 따른다.
+        동시 요청이 서로의 루트를 덮어쓰지 않도록 호출자가 명시하는 것을 권장.
+
     반환:
         {"decisions": [{id, question, options: [...], impact}], "model": str}
     """
@@ -992,7 +1012,7 @@ def generate_plan(
     if not instruction:
         raise ValueError("instruction 이 비어 있습니다.")
 
-    root = _project_root()
+    root = _resolve_root(project_root)
     existing = _list_project_files(root)
     print(f"[code_agent] 설계 결정 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
@@ -1070,9 +1090,14 @@ def generate_code(
     context_files: list[dict] | None = None,
     target_folder: str = "",
     decisions: list | None = None,
+    project_root: str = "",
 ) -> dict:
     """
     자연어 instruction → 파일 작업(ops) 목록.
+
+    project_root: 이 요청의 워크스페이스 루트. 비우면 전역 설정을 따른다.
+        전역 env 는 동시 요청 시 서로 덮어써 다른 워크스페이스를 가리킬 수
+        있으므로, 호출자가 요청별로 명시하는 것을 권장.
 
     decisions: /api/code/plan 이 제시하고 사용자가 선택·승인한 설계 결정.
         주어지면 (1) 결정을 프롬프트에 주입해 코드가 그 결정을 따르게 하고,
@@ -1088,7 +1113,7 @@ def generate_code(
     if not instruction:
         raise ValueError("instruction 이 비어 있습니다.")
 
-    root = _project_root()
+    root = _resolve_root(project_root)
     existing = _list_project_files(root)
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
