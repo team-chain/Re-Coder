@@ -23,6 +23,11 @@ from llm.base import LLMRequest
 from llm.router import get_router
 from schemas import AnalyzeRequest, FilePatch, PatchProposal, RiskLevel
 
+try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
+    from adr import NormalizedDecision, build_adr_ops, normalize_decisions
+except ImportError:  # pragma: no cover
+    from core.adr import NormalizedDecision, build_adr_ops, normalize_decisions
+
 BACKUP_DIR = Path.home() / '.recoder' / 'backups'
 _LAST_APPLY_BACKUPS: dict[str, list[dict]] = {}
 
@@ -78,6 +83,22 @@ def _project_root() -> Path:
         if any((d / m).exists() for m in markers):
             return d
     return cwd
+
+
+def _resolve_root(explicit: str = "") -> Path:
+    """요청별 워크스페이스 루트를 결정한다.
+
+    `RECODER_PROJECT_ROOT` 는 **프로세스 전역**이라, 여러 VSCode 창이 동시에
+    요청하면 서로 덮어쓴다. 요청 처리 중 스레드로 넘어가는 지점이 생기면
+    나중 요청이 먼저 요청의 루트를 바꿔버려, A 창 요청인데 B 워크스페이스를
+    기준으로 코드·ADR 이 만들어질 수 있다.
+    그래서 호출자가 넘긴 명시 경로를 항상 우선한다(전역 상태 비의존).
+    """
+    if explicit:
+        p = Path(str(explicit)).expanduser()
+        if p.exists() and p.is_dir():
+            return p
+    return _project_root()
 
 
 def compute_sha256(path: str | Path) -> str:
@@ -788,6 +809,36 @@ def _list_project_files(root: Path, limit: int = _CODE_AGENT_TREE_LIMIT) -> list
     return out
 
 
+def _decisions_prompt_block(decisions: list[NormalizedDecision]) -> str:
+    """정규화된 결정 목록 → 프롬프트에 주입할 텍스트.
+
+    입력은 반드시 `adr.normalize_decisions` 를 거친 것이어야 한다
+    (여기서 다시 파싱하지 않는다). "이 선택을 따르라"는 지시는 프롬프트
+    규칙 항목에 이미 있으므로 여기서는 사실만 나열한다.
+    """
+    lines: list[str] = []
+    for d in (decisions or []):
+        if not isinstance(d, dict):
+            continue
+        # 정규화를 거치지 않은 원시 입력이 흘러들어와도 죽지 않도록 .get() 으로 접근.
+        key = str(d.get("chosen_key") or "").strip()
+        if not key:
+            continue
+        label = str(d.get("chosen_label") or key).strip()
+        title = str(d.get("question") or d.get("id") or "설계 결정").strip()
+        summary = str(d.get("chosen_summary") or "").strip()
+        lines.append(
+            f"- {title}: {label} ({key})" + (f" — {summary}" if summary else "")
+        )
+    if not lines:
+        return ""
+    return (
+        "\n사용자가 확정한 설계 결정(반드시 이 선택을 반영):\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+
+
 def _build_code_prompt(
     instruction: str,
     existing_files: list[str],
@@ -795,9 +846,12 @@ def _build_code_prompt(
     prior_files: list[dict] | None = None,
     context_files: list[dict] | None = None,
     target_folder: str = "",
-    decisions: list[dict] | None = None,
+    decisions: list[NormalizedDecision] | None = None,
 ) -> str:
-    """코드 생성 에이전트용 프롬프트. JSON ops 형식을 강제한다."""
+    """코드 생성 에이전트용 프롬프트. JSON ops 형식을 강제한다.
+
+    `decisions` 는 `adr.normalize_decisions` 를 거친 목록이어야 한다.
+    """
     tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
     prior_block = ""
     for pf in (prior_files or [])[:4]:
@@ -830,25 +884,9 @@ def _build_code_prompt(
             f"```\n{body}\n```\n"
         )
 
-    decision_lines: list[str] = []
-    for decision in (decisions or []):
-        chosen_key = str(decision.get("chosen_key") or "").strip()
-        if not chosen_key:
-            continue
-        question = str(decision.get("question") or "설계 결정").strip()
-        chosen_label = chosen_key
-        for option in (decision.get("options") or []):
-            if str(option.get("key") or "") == chosen_key:
-                chosen_label = str(option.get("label") or chosen_key).strip()
-                break
-        decision_lines.append(f"- {question}: {chosen_label} ({chosen_key})")
-    decision_block = ""
-    if decision_lines:
-        decision_block = (
-            "\n사용자가 확정한 설계 결정(반드시 이 선택을 반영):\n"
-            + "\n".join(decision_lines)
-            + "\n"
-        )
+    # 결정 파싱은 adr.normalize_decisions 한 곳에서만 수행한다.
+    # (프롬프트가 말하는 결정과 ADR 이 기록한 결정이 어긋나지 않도록)
+    decision_block = _decisions_prompt_block(decisions or [])
 
     return f"""당신은 VSCode 안에서 동작하는 코드 작성 에이전트입니다.
 사용자의 요청을 읽고, 실제로 워크스페이스에 적용할 파일 작업(ops)을 만드세요.
@@ -954,6 +992,7 @@ def generate_plan(
     session_id: str = "",
     open_file: dict | None = None,
     target_folder: str = "",
+    project_root: str = "",
 ) -> dict:
     """
     자연어 instruction → "설계 결정" 목록 (코드 아님).
@@ -963,6 +1002,9 @@ def generate_plan(
     사용자가 각 결정을 선택하면 그 결과(decisions: [{id, chosen_key}])를
     담아 /api/code/generate 를 다시 호출한다.
 
+    project_root: 이 요청의 워크스페이스 루트. 비우면 전역 설정을 따른다.
+        동시 요청이 서로의 루트를 덮어쓰지 않도록 호출자가 명시하는 것을 권장.
+
     반환:
         {"decisions": [{id, question, options: [...], impact}], "model": str}
     """
@@ -970,7 +1012,7 @@ def generate_plan(
     if not instruction:
         raise ValueError("instruction 이 비어 있습니다.")
 
-    root = _project_root()
+    root = _resolve_root(project_root)
     existing = _list_project_files(root)
     print(f"[code_agent] 설계 결정 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
@@ -1047,25 +1089,42 @@ def generate_code(
     prior_files: list[dict] | None = None,
     context_files: list[dict] | None = None,
     target_folder: str = "",
-    decisions: list[dict] | None = None,
+    decisions: list | None = None,
+    project_root: str = "",
 ) -> dict:
     """
     자연어 instruction → 파일 작업(ops) 목록.
 
+    project_root: 이 요청의 워크스페이스 루트. 비우면 전역 설정을 따른다.
+        전역 env 는 동시 요청 시 서로 덮어써 다른 워크스페이스를 가리킬 수
+        있으므로, 호출자가 요청별로 명시하는 것을 권장.
+
+    decisions: /api/code/plan 이 제시하고 사용자가 선택·승인한 설계 결정.
+        주어지면 (1) 결정을 프롬프트에 주입해 코드가 그 결정을 따르게 하고,
+        (2) 각 결정을 docs/adr/ADR-NNN-*.md 로 영속화해 ops 에 함께 담는다.
+        None/빈 값이면 기존 동작과 동일(하위호환).
+        비신뢰 JSON 이 그대로 들어오므로 타입은 list 로 받고 정규화에서 거른다.
+
     반환:
-        {"summary": str, "ops": [{action, file, language, content, rationale}], "model": str}
+        {"summary": str, "ops": [{action, file, language, content, rationale}],
+         "model": str, "adr"?: [파일경로]}
     """
     instruction = (instruction or "").strip()
     if not instruction:
         raise ValueError("instruction 이 비어 있습니다.")
 
-    root = _project_root()
+    root = _resolve_root(project_root)
     existing = _list_project_files(root)
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
+    # 결정 파싱은 여기서 딱 한 번. 프롬프트와 ADR 이 같은 데이터를 본다.
+    norm_decisions = normalize_decisions(decisions)
+    if norm_decisions:
+        print(f"[code_agent] 승인된 결정 {len(norm_decisions)}개 주입")
+
     prompt = _build_code_prompt(
         instruction, existing, open_file, prior_files or [], context_files or [],
-        target_folder, decisions or [],
+        target_folder, norm_decisions,
     )
 
     try:
@@ -1103,7 +1162,14 @@ def generate_code(
     if not ops_out:
         raise RuntimeError("LLM 응답에 적용할 ops 가 없습니다.")
 
-    # 적용 전 안전 검사 — 생성된 코드에 시크릿이 박혀있으면 op 에 경고를 단다.
+    # ADR 영속화 — 승인된 결정을 docs/adr 에 구조화 기록으로 남긴다(코드와 동시 산출).
+    # 시크릿 검사 '앞'에 넣어야 한다: ADR 본문에도 사용자 요청문이 들어가므로
+    # 여기에 키가 섞여 있으면 경고 없이 파일로 굳어버린다.
+    adr_ops = build_adr_ops(norm_decisions, instruction, root, target_folder)
+    if adr_ops:
+        ops_out.extend(adr_ops)
+
+    # 적용 전 안전 검사 — 생성된 코드/ADR 에 시크릿이 박혀있으면 op 에 경고를 단다.
     try:
         try:
             from security_scan import scan_text_for_secrets
@@ -1122,5 +1188,8 @@ def generate_code(
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),
     }
+    if adr_ops:
+        result["adr"] = [op["file"] for op in adr_ops]
+        print(f"[code_agent] ADR {len(adr_ops)}건 영속화 예정: {result['adr']}")
     print(f"[code_agent] 코드 생성 완료 | ops {len(ops_out)}개 | model={result['model']}")
     return result
