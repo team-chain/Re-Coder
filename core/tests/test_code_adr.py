@@ -371,6 +371,40 @@ def test_generate_plan_remaps_model_ids_that_invade_reserved_namespace(monkeypat
     assert [d["id"] for d in adr.normalize_decisions([decision])] == ["d-confirm"]
 
 
+def _plan_ids(monkeypatch, *raw_ids: str) -> list[str]:
+    """주어진 id 들로 plan 을 태우고, 최종 결정 id 목록을 돌려준다."""
+    body = json.dumps({"decisions": [
+        {"id": rid, "question": f"{rid} 를 어떻게 할까요?",
+         "options": [{"key": "a", "label": "A"}, {"key": "b", "label": "B"}], "impact": ""}
+        for rid in raw_ids
+    ]})
+    monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([body]))
+    return [d["id"] for d in ca.generate_plan("뭔가 만들어줘")["decisions"]]
+
+
+def test_remap_does_not_collide_with_existing_id(monkeypatch):
+    """[핵심] `__auth` 재배치 결과가 이미 있는 `d-auth` 를 덮어쓰면 안 된다.
+
+    웹뷰는 선택을 `selections[decision.id]` 로 저장한다. id 가 겹치면 뒤 카드가
+    앞 카드의 선택을 덮어써, 고르지도 않은 선택이 코드 생성과 ADR 에 실린다.
+    """
+    ids = _plan_ids(monkeypatch, "__auth", "d-auth")
+    assert len(set(ids)) == 2, f"id 가 충돌함: {ids}"
+
+
+def test_duplicate_ids_from_model_are_separated(monkeypatch):
+    """재배치와 무관하게, 모델이 같은 id 를 두 번 줘도 유일해야 한다."""
+    ids = _plan_ids(monkeypatch, "auth", "auth", "auth")
+    assert len(set(ids)) == 3, f"id 가 충돌함: {ids}"
+    assert ids[0] == "auth"
+
+
+def test_repeated_reserved_ids_stay_unique(monkeypatch):
+    ids = _plan_ids(monkeypatch, "__auth", "__auth")
+    assert len(set(ids)) == 2, f"id 가 충돌함: {ids}"
+    assert not any(i.startswith(adr.RESERVED_ID_PREFIX) for i in ids)
+
+
 def test_remapped_decision_cannot_impersonate_cancellation(monkeypatch):
     """`__confirm__` + 'cancel' 을 유도해도 생성 중단을 흉내 낼 수 없다."""
     body = json.dumps({"decisions": [{
