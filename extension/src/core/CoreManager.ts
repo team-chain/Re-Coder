@@ -36,6 +36,8 @@ export class CoreManager {
     private port: number = 17894;
     private sessionToken: string = '';
     private isSpawning: boolean = false;
+    /** 동시에 열린 Sidebar/Workspace 가 같은 Core를 중복 시작하지 않도록 직렬화. */
+    private ensurePromise: Promise<CoreClient> | null = null;
     private extensionContext: vscode.ExtensionContext;
 
     // CoreClient 인스턴스 (외부에서 사용)
@@ -74,6 +76,18 @@ export class CoreManager {
     }
 
     async ensureRunning(): Promise<CoreClient> {
+        if (this.ensurePromise) {
+            return this.ensurePromise;
+        }
+        this.ensurePromise = this._ensureRunning();
+        try {
+            return await this.ensurePromise;
+        } finally {
+            this.ensurePromise = null;
+        }
+    }
+
+    private async _ensureRunning(): Promise<CoreClient> {
         // 1) 정상 경로 — runtime.json + healthCheck.
         const runtime = await this.readRuntime();
         if (runtime) {

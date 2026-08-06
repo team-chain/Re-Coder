@@ -179,9 +179,11 @@ const StepBar: React.FC<{ current: BuildStep }> = ({ current }) => {
 
 interface BuildModeProps {
   isActive: boolean;
+  /** 큰 ReCoder 작업 화면에서는 오른쪽 고정 대화 패널을 사용한다. */
+  showCodeAgent?: boolean;
 }
 
-export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
+export const BuildMode: React.FC<BuildModeProps> = ({ isActive, showCodeAgent = true }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -456,7 +458,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
         </div>
       )}
 
-      <CodeAgent isActive={isActive} />
+      {showCodeAgent && <CodeAgent isActive={isActive} />}
 
 
     </div>

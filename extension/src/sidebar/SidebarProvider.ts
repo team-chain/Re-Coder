@@ -11,7 +11,7 @@ import {
     CoreHealth,
     DeployMethod,
 } from '../types';
-import { ApiClient } from '../core/ApiClient';
+import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
 import { CoreManager } from '../core/CoreManager';
 import { PollingService } from '../core/PollingService';
 import { analyzeProject, analyzeFile } from '../codemap/analyzer';
@@ -64,6 +64,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly _codegenDocs = new Map<string, string>();
     private _codegenProviderRegistered = false;
     private _view?: vscode.WebviewView;
+    /** Editor Area 의 ReCoder 작업 화면. 사이드바와 같은 상태/메시지를 공유한다. */
+    private _workspacePanelWebview?: vscode.Webview;
+    private _workspaceAutoOpenRequested = false;
     // 구조 지도 자동 갱신: 파일 변경 감시 + 디바운스
     private _mapWatcher?: vscode.FileSystemWatcher;
     private _mapRefreshTimer?: ReturnType<typeof setTimeout>;
@@ -73,7 +76,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly _extensionUri: vscode.Uri,
         private readonly _apiClient: ApiClient,
         private readonly _coreManager: CoreManager,
-        private readonly _pollingService: PollingService
+        private readonly _pollingService: PollingService,
+        private readonly _openWorkspace?: () => void,
     ) {
         this._state = { currentMode: Mode.BUILD, proposals: [], isLoading: false };
     }
@@ -141,17 +145,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.onDidChangeVisibility(() => {
             if (webviewView.visible) {
+                this._openWorkspaceFromSidebar();
                 this._pollingService.start(
                     (h) => this.postMessage('healthUpdate', h),
                     (e) => this.postMessage('errorMessage', { message: e.message })
                 );
-            } else {
+            } else if (!this._workspacePanelWebview) {
                 this._pollingService.stop();
             }
         });
 
+        // Activity Bar 의 ReCoder 아이콘을 눌러 처음 View가 resolve되는 경우에는
+        // onDidChangeVisibility 이벤트가 이미 지나갈 수 있다. 다음 이벤트 루프에서
+        // 명령 등록 완료 후 무조건 Workspace를 열어 사이드바가 남지 않게 한다.
+        setTimeout(() => this._openWorkspaceFromSidebar(), 100);
+
         webviewView.onDidDispose(() => {
-            this._pollingService.stop();
+            if (this._view === webviewView) {
+                this._view = undefined;
+            }
+            if (!this._workspacePanelWebview) {
+                this._pollingService.stop();
+            }
             this._mapWatcher?.dispose();
             this._mapWatcher = undefined;
             if (this._mapRefreshTimer) { clearTimeout(this._mapRefreshTimer); }
@@ -160,6 +175,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     postMessage(type: string, payload: unknown): void {
         if (this._view) { void this._view.webview.postMessage({ type, payload }); }
+        if (this._workspacePanelWebview) {
+            void this._workspacePanelWebview.postMessage({ type, payload });
+        }
+    }
+
+    /**
+     * 큰 작업 화면이 사이드바와 동일한 React 앱을 사용할 수 있도록 연결한다.
+     * 메시지는 기존 핸들러로 라우팅되므로 코드 생성/승인/진단 흐름은 그대로 유지된다.
+     */
+    attachWorkspacePanel(webview: vscode.Webview): void {
+        this._workspacePanelWebview = webview;
+        webview.onDidReceiveMessage((message: { type: string; payload: unknown }) => {
+            void this.handleMessage(message);
+        });
+        this.postMessage('stateUpdate', this._state);
+        // Core 시작은 명령 진입점에서 한 번만 수행한다. 여기서도 시작하면
+        // Activity Bar 클릭 시 Sidebar/Panel 이 동시에 spawn 하며 로딩이 길어진다.
+        this._pollingService.start(
+            (health: CoreHealth) => {
+                this.postMessage('healthUpdate', health);
+                if (health.status === 'ok') { void this.refreshCost(); }
+            },
+            (err: Error) => this.postMessage('errorMessage', { message: err.message }),
+        );
+    }
+
+    detachWorkspacePanel(webview: vscode.Webview): void {
+        if (this._workspacePanelWebview === webview) {
+            this._workspacePanelWebview = undefined;
+            this._workspaceAutoOpenRequested = false;
+            if (!this._view?.visible) {
+                this._pollingService.stop();
+            }
+        }
+    }
+
+    private _openWorkspaceFromSidebar(): void {
+        if (this._workspaceAutoOpenRequested || !this._openWorkspace) { return; }
+        this._workspaceAutoOpenRequested = true;
+        this._openWorkspace();
     }
 
     /** 워크스페이스 파일 변경을 감시해 구조 지도를 자동 갱신한다(생성/삭제/수정). */
@@ -325,6 +380,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 await vscode.commands.executeCommand('recoder.openWorkbench');
                 break;
             }
+            case 'sidebar.visible': {
+                // retainContextWhenHidden 때문에 VS Code의 view visibility 이벤트가
+                // 누락되는 경우에도 웹뷰가 다시 보였다는 신호로 Workspace를 연다.
+                this._openWorkspaceFromSidebar();
+                break;
+            }
             case 'approvePatch': {
                 const { proposalId, approved } = payload as { proposalId: string; approved: boolean };
                 await this.handleApprovePatch(proposalId, approved);
@@ -336,7 +397,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'generateDockerfile': {
                 const { workspacePath, projectId } = payload as { workspacePath: string; projectId: string };
-                await this.handleGenerateDockerfile(workspacePath, projectId);
+                await this.handleGenerateDockerfile(
+                    workspacePath || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                    projectId,
+                );
                 break;
             }
             case 'approveDockerfile': {
@@ -350,7 +414,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'generateGithubActions': {
                 const { workspacePath: ghWs, projectId: ghPid } = payload as { workspacePath: string; projectId?: string };
-                await this.handleGenerateGithubActions(ghWs, ghPid);
+                await this.handleGenerateGithubActions(
+                    ghWs || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                    ghPid,
+                );
                 break;
             }
             case 'approveGithubActions': {
@@ -402,6 +469,47 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     this.postMessage('errorMessage', { message: String(err) });
                 }
+                break;
+            }
+            // ── 큰 ReCoder Workspace 의 배포 센터 ──────────────────────────
+            case 'workspace.deploy.ec2': {
+                const req = (payload ?? {}) as Parameters<ApiClient['deployEc2']>[0];
+                try {
+                    const result = await this._apiClient.deployEc2({
+                        ...req,
+                        workspace_path: req.workspace_path || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                    });
+                    this.postMessage('workspace.deploy.result', result);
+                } catch (err) {
+                    this.postMessage('errorMessage', { message: String(err) });
+                }
+                break;
+            }
+            case 'workspace.deploy.ecs': {
+                const req = (payload ?? {}) as Parameters<ApiClient['deployEcs']>[0];
+                try {
+                    const result = await this._apiClient.deployEcs({
+                        ...req,
+                        workspace_path: req.workspace_path || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                    });
+                    this.postMessage('workspace.deploy.result', result);
+                } catch (err) {
+                    this.postMessage('errorMessage', { message: String(err) });
+                }
+                break;
+            }
+            case 'workspace.deploy.ec2.status': {
+                try {
+                    const status = await this._apiClient.getEc2DeployStatus();
+                    this.postMessage('workspace.deploy.result', { message: status.error || `EC2: ${status.stage}` });
+                } catch { /* status polling is best effort */ }
+                break;
+            }
+            case 'workspace.deploy.ecs.status': {
+                try {
+                    const status = await this._apiClient.getEcsDeployStatus();
+                    this.postMessage('workspace.deploy.result', { message: status.error || `ECS: ${status.stage}` });
+                } catch { /* status polling is best effort */ }
                 break;
             }
             case 'rollback': {
@@ -657,12 +765,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     openFile?: { path: string; content: string };
                     targetFolder?: string;
                     contextFiles?: Array<{ path: string; content: string }>;
+                    decisions?: CodeDecisionChoice[];
                 };
                 await this.handleCodeGenerate(p.instruction ?? '', {
                     openFile: p.openFile,
                     targetFolder: p.targetFolder ?? '',
                     contextFiles: p.contextFiles ?? [],
+                    decisions: p.decisions ?? [],
                 });
+                break;
+            }
+            case 'code.plan': {
+                // AI-DLC 1단계: 바로 generate 로 가지 않고 /api/code/plan 으로
+                // 결정 목록을 먼저 받은 뒤 Webview 모달에서 사용자가 직접 확정한다.
+                const p = (payload ?? {}) as {
+                    instruction?: string;
+                    requestId?: number;
+                    openFile?: { path: string; content: string };
+                    targetFolder?: string;
+                    contextFiles?: Array<{ path: string; content: string }>;
+                };
+                await this.handleCodePlan(p.instruction ?? '', {
+                    requestId: p.requestId,
+                    openFile: p.openFile,
+                    targetFolder: p.targetFolder ?? '',
+                    contextFiles: p.contextFiles ?? [],
+                });
+                break;
+            }
+            case 'chat.send': {
+                const p = (payload ?? {}) as {
+                    id?: string;
+                    message?: string;
+                    history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+                };
+                await this.handleChat(p.id ?? '', p.message ?? '', p.history ?? []);
                 break;
             }
             case 'code.apply': {
@@ -801,7 +938,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** 코드 생성 에이전트 — 자연어 요청을 Core 로 보내 ops 를 받아 webview 로 회신. */
     private async handleCodeGenerate(
         instruction: string,
-        opts: { openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }> } = {},
+        opts: { openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }>; decisions?: CodeDecisionChoice[] } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
@@ -820,6 +957,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 priorFiles: this._lastCodeOps,
                 contextFiles: opts.contextFiles ?? [],
                 targetFolder: opts.targetFolder ?? '',
+                decisions: opts.decisions ?? [],
             });
             // 다음 턴 컨텍스트로 보관
             this._lastCodeOps = (result.ops ?? []).map((op) => ({ path: op.file, content: op.content }));
@@ -827,6 +965,55 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             this.postMessage('code.error', { message: msg });
+        }
+    }
+
+    /** 오른쪽 대화 패널 — 대화만 수행하며 파일 쓰기/코드 적용은 절대 하지 않는다. */
+    private async handleChat(
+        id: string,
+        message: string,
+        history: Array<{ role: 'user' | 'assistant'; content: string }>,
+    ): Promise<void> {
+        if (!message.trim()) { return; }
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        try {
+            const result = await this._apiClient.chat(message, history, workspacePath);
+            this.postMessage('chat.response', { id, reply: result.reply, model: result.model });
+        } catch (err) {
+            const error = err instanceof Error ? err.message : String(err);
+            this.postMessage('chat.error', { id, message: error });
+        }
+    }
+
+    /** AI-DLC 결정 목록을 Webview 모달로 보내고, 선택·생성은 사용자가 직접 확정한다. */
+    private async handleCodePlan(
+        instruction: string,
+        opts: { requestId?: number; openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }> } = {},
+    ): Promise<void> {
+        if (!instruction.trim()) { return; }
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        let attach = opts.openFile;
+        if (!attach) {
+            const ed = vscode.window.activeTextEditor;
+            if (ed && !ed.document.isUntitled) {
+                attach = { path: vscode.workspace.asRelativePath(ed.document.uri), content: ed.document.getText() };
+            }
+        }
+
+        try {
+            const plan = await this._apiClient.planCode(instruction, {
+                workspacePath,
+                openFile: attach,
+                targetFolder: opts.targetFolder ?? '',
+            });
+            this.postMessage('code.planResult', {
+                requestId: opts.requestId,
+                instruction,
+                decisions: plan.decisions ?? [],
+            });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.postMessage('code.error', { requestId: opts.requestId, message: `설계 결정 생성 실패: ${msg}` });
         }
     }
 
@@ -985,15 +1172,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return found.join(', ');
     }
 
-    private _getHtmlForWebview(webview: vscode.Webview): string {
+    getWorkspacePanelHtml(webview: vscode.Webview): string {
+        return this._getHtmlForWebview(webview, 'workspace');
+    }
+
+    private _getHtmlForWebview(webview: vscode.Webview, layout: 'sidebar' | 'workspace' = 'sidebar'): string {
         const nonce = this.getNonce();
         const scriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, 'out', 'webview', 'webview.js')
         );
+        const botAvatarUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, 'media', 'recoder-bot.png')
+        );
         const cspConnect = Array.from({ length: 17 }, (_, i) => `http://127.0.0.1:${17894 + i}`).join(' ');
 
         return `<!DOCTYPE html>
-<html lang="ko">
+<html lang="ko" data-recoder-layout="${layout}" data-recoder-bot-avatar="${botAvatarUri}">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

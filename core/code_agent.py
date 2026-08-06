@@ -795,6 +795,7 @@ def _build_code_prompt(
     prior_files: list[dict] | None = None,
     context_files: list[dict] | None = None,
     target_folder: str = "",
+    decisions: list[dict] | None = None,
 ) -> str:
     """코드 생성 에이전트용 프롬프트. JSON ops 형식을 강제한다."""
     tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
@@ -828,6 +829,27 @@ def _build_code_prompt(
             f"\n현재 편집 중인 파일: {open_file.get('path', '(unknown)')}\n"
             f"```\n{body}\n```\n"
         )
+
+    decision_lines: list[str] = []
+    for decision in (decisions or []):
+        chosen_key = str(decision.get("chosen_key") or "").strip()
+        if not chosen_key:
+            continue
+        question = str(decision.get("question") or "설계 결정").strip()
+        chosen_label = chosen_key
+        for option in (decision.get("options") or []):
+            if str(option.get("key") or "") == chosen_key:
+                chosen_label = str(option.get("label") or chosen_key).strip()
+                break
+        decision_lines.append(f"- {question}: {chosen_label} ({chosen_key})")
+    decision_block = ""
+    if decision_lines:
+        decision_block = (
+            "\n사용자가 확정한 설계 결정(반드시 이 선택을 반영):\n"
+            + "\n".join(decision_lines)
+            + "\n"
+        )
+
     return f"""당신은 VSCode 안에서 동작하는 코드 작성 에이전트입니다.
 사용자의 요청을 읽고, 실제로 워크스페이스에 적용할 파일 작업(ops)을 만드세요.
 
@@ -838,10 +860,11 @@ def _build_code_prompt(
 - 외부 빌드 도구 없이 동작하도록 합니다(예: 단일 HTML 은 인라인 CSS/JS).
 - 데이터 저장이 필요하면 외부 DB 대신 localStorage 를 사용합니다.
 - 기존 파일 목록과 겹치지 않게 파일명을 정하되, 사용자가 파일명을 지정하면 그대로 따릅니다.
+- 사용자가 확정한 설계 결정이 있으면 그 선택을 우선하고 임의로 다른 방식을 택하지 않습니다.
 
 기존 파일 목록:
 {tree}
-{folder_block}{ctx_block}{prior_block}{open_block}
+{folder_block}{ctx_block}{prior_block}{open_block}{decision_block}
 사용자 요청:
 {instruction}
 
@@ -860,6 +883,163 @@ def _build_code_prompt(
 }}"""
 
 
+# ── AI-DLC: 코드 대신 "설계 결정" 제시 (/api/code/plan) ────────────────
+#
+# 회차1 (ADR-D3·D5·D6, ReCoder_AI-DLC_도입_설계서.md §3.2 1단계):
+#   POST /api/code/plan — 코드 대신 "설계 결정 목록"을 반환한다.
+#   (2단계 /api/code/generate 의 decisions 반영 + ADR 영속화(docs/adr/)는
+#    별도 담당 범위라 이 파일에서는 다루지 않는다.)
+
+_PLAN_MAX_TOKENS = 2048
+
+
+def _build_plan_prompt(
+    instruction: str,
+    existing_files: list[str],
+    open_file: dict | None,
+    target_folder: str = "",
+) -> str:
+    """/api/code/plan 용 프롬프트 — 코드가 아니라 '설계 결정 선택지'를 요구한다."""
+    tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
+
+    folder_block = ""
+    if (target_folder or "").strip():
+        folder_block = f"\n[대상 폴더] {target_folder.strip().rstrip('/')}/\n"
+
+    open_block = ""
+    if open_file and (open_file.get("content") or "").strip():
+        body = (open_file.get("content") or "")[:_MAX_PROMPT_BYTES]
+        open_block = (
+            f"\n현재 편집 중인 파일: {open_file.get('path', '(unknown)')}\n"
+            f"```\n{body}\n```\n"
+        )
+
+    return f"""당신은 VSCode 안에서 동작하는 AI-DLC(AI 개발 라이프사이클) 설계 도우미입니다.
+사용자 요청을 코드로 바로 구현하지 말고, 구현하기 전에 사람이 승인해야 할 "설계 결정"을 선택지로 제시하세요.
+
+규칙:
+- 이 요청을 구현하는 데 필요한 설계 결정을 식별하세요 (예: 데이터 저장 방식, 인증/권한 방식, 프레임워크/라이브러리 선택, API 형태 등).
+- 결정할 것이 전혀 없는 사소한 요청(오타 수정, 이름 변경 등)이면 decisions 를 빈 배열로 반환하세요.
+- 각 결정은 서로 다른 2~4개의 선택지를 제공합니다.
+- 프로젝트 성격과 기존 파일을 근거로 가장 적합한 선택지 하나를 recommended: true 로 표시하세요.
+- 각 선택지의 장단점(pros/cons)을 1~3개씩 간결하게 답니다.
+- 결정 개수는 보통 1~3개로 제한합니다 (과도하게 쪼개지 마세요).
+
+기존 파일 목록:
+{tree}
+{folder_block}{open_block}
+사용자 요청:
+{instruction}
+
+아래 JSON 형식으로만 응답하세요(설명 문장 금지):
+{{
+  "decisions": [
+    {{
+      "id": "storage",
+      "question": "데이터를 어디에 저장할까요?",
+      "options": [
+        {{"key": "local", "label": "브라우저 로컬 저장", "summary": "서버 없이 바로 동작",
+         "pros": ["간단", "설정 불필요"], "cons": ["기기 간 공유 불가"], "recommended": true}},
+        {{"key": "file", "label": "파일(JSON)", "summary": "서버 파일시스템에 저장",
+         "pros": ["영속성"], "cons": ["동시성 처리 필요"], "recommended": false}}
+      ],
+      "impact": "앱 구조에 영향"
+    }}
+  ]
+}}"""
+
+
+def generate_plan(
+    instruction: str,
+    session_id: str = "",
+    open_file: dict | None = None,
+    target_folder: str = "",
+) -> dict:
+    """
+    자연어 instruction → "설계 결정" 목록 (코드 아님).
+
+    AI-DLC 1단계: 에이전트가 코드를 바로 뱉지 않고, 사람이 선택·승인할
+    결정 카드 목록을 반환한다. 확장(webview)이 이를 팝업 카드로 렌더하고,
+    사용자가 각 결정을 선택하면 그 결과(decisions: [{id, chosen_key}])를
+    담아 /api/code/generate 를 다시 호출한다.
+
+    반환:
+        {"decisions": [{id, question, options: [...], impact}], "model": str}
+    """
+    instruction = (instruction or "").strip()
+    if not instruction:
+        raise ValueError("instruction 이 비어 있습니다.")
+
+    root = _project_root()
+    existing = _list_project_files(root)
+    print(f"[code_agent] 설계 결정 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
+
+    prompt = _build_plan_prompt(instruction, existing, open_file, target_folder)
+
+    try:
+        llm_resp = get_router().call(
+            LLMRequest(prompt=prompt, max_tokens=_PLAN_MAX_TOKENS, temperature=0.2),
+            agent="code_agent",
+            operation="generate_plan",
+        )
+    except Exception as e:
+        raise RuntimeError(f"LLM 호출 실패: {e}") from e
+
+    raw = (llm_resp.text or "").strip()
+    if not raw:
+        raise RuntimeError("LLM 이 빈 응답을 반환했습니다. 모델/할당량/필터를 확인하세요.")
+
+    data = _extract_json(raw)
+
+    decisions_out: list[dict] = []
+    for d in (data.get("decisions") or []):
+        if not isinstance(d, dict):
+            continue
+        did = (d.get("id") or "").strip()
+        question = (d.get("question") or "").strip()
+        if not did or not question:
+            continue
+        raw_options = d.get("options") or []
+        options_out: list[dict] = []
+        has_recommended = False
+        for opt in raw_options:
+            if not isinstance(opt, dict):
+                continue
+            key = (opt.get("key") or "").strip()
+            if not key:
+                continue
+            recommended = bool(opt.get("recommended", False))
+            has_recommended = has_recommended or recommended
+            pros = opt.get("pros") or []
+            cons = opt.get("cons") or []
+            options_out.append({
+                "key": key,
+                "label": (opt.get("label") or key).strip(),
+                "summary": (opt.get("summary") or "").strip(),
+                "pros": [str(p) for p in pros if str(p).strip()],
+                "cons": [str(c) for c in cons if str(c).strip()],
+                "recommended": recommended,
+            })
+        if not options_out:
+            continue
+        if not has_recommended:
+            # 모델이 recommended 를 하나도 표시하지 않았으면 첫 옵션을 기본 추천으로.
+            options_out[0]["recommended"] = True
+        decisions_out.append({
+            "id": did,
+            "question": question,
+            "options": options_out,
+            "impact": (d.get("impact") or "").strip(),
+        })
+
+    result = {
+        "decisions": decisions_out,
+        "model": getattr(llm_resp, "model_used", ""),
+    }
+    print(f"[code_agent] 설계 결정 생성 완료 | 결정 {len(decisions_out)}개 | model={result['model']}")
+    return result
+
+
 def generate_code(
     instruction: str,
     session_id: str = "",
@@ -867,6 +1047,7 @@ def generate_code(
     prior_files: list[dict] | None = None,
     context_files: list[dict] | None = None,
     target_folder: str = "",
+    decisions: list[dict] | None = None,
 ) -> dict:
     """
     자연어 instruction → 파일 작업(ops) 목록.
@@ -882,7 +1063,10 @@ def generate_code(
     existing = _list_project_files(root)
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
-    prompt = _build_code_prompt(instruction, existing, open_file, prior_files or [], context_files or [], target_folder)
+    prompt = _build_code_prompt(
+        instruction, existing, open_file, prior_files or [], context_files or [],
+        target_folder, decisions or [],
+    )
 
     try:
         llm_resp = get_router().call(
