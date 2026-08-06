@@ -25,6 +25,7 @@ from schemas import AnalyzeRequest, FilePatch, PatchProposal, RiskLevel
 
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     from adr import (
+        MAX_DECISIONS,
         RESERVED_ID_PREFIX,
         NormalizedDecision,
         build_adr_ops,
@@ -32,6 +33,7 @@ try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     )
 except ImportError:  # pragma: no cover
     from core.adr import (
+        MAX_DECISIONS,
         RESERVED_ID_PREFIX,
         NormalizedDecision,
         build_adr_ops,
@@ -1035,17 +1037,52 @@ def _is_cancelled(decisions: list | None) -> bool:
     return _approval_state(decisions) == APPROVAL_CANCELLED
 
 
+def _decision_is_valid(d: object) -> bool:
+    """결정 하나가 '사람이 제시된 선택지 중 하나를 골랐다'를 만족하는가."""
+    from adr import CONFIRM_DECISION_ID
+
+    if not isinstance(d, dict):
+        return False
+    did = str(d.get("id") or "").strip()
+    if not did:
+        # id 가 없으면 정규화가 chosen_key 를 id 로 대체해 엉뚱한 ADR 이름이 된다.
+        return False
+    chosen = _chosen_key(d)
+    if not chosen:
+        # 카드는 제시됐는데 고르지 않음 — 정규화가 조용히 버리므로,
+        # 승인받으라고 내놓은 결정이 반영도 기록도 되지 않은 채 코드가 나간다.
+        return False
+    if did == CONFIRM_DECISION_ID:
+        # 확인 카드는 서버가 만든 것이므로 허용 키가 고정이다.
+        return chosen.lower() in (CONFIRM_PROCEED_KEY, CONFIRM_CANCEL_KEY)
+    offered = _offered_keys(d)
+    return bool(offered) and chosen in offered
+
+
 def _approval_state(decisions: list | None) -> str:
-    """생성 요청에 **사람의 긍정 승인**이 실려 있는지 판정한다 (FR-02-05).
+    """생성 요청이 사람의 승인을 온전히 담고 있는지 판정한다 (FR-02-05).
 
-    '취소가 아님'만 확인하면 승인 게이트가 사실상 열려 있는 것과 같다.
-    `decisions` 를 아예 빼고 호출하는 경로 — 직접 API 호출, 낡은 확장,
-    선택을 누락한 웹뷰 메시지 — 가 전부 통과해버리기 때문이다.
+    ## 규칙 (하나로 통일)
 
-    나아가 "아무 문자열이나 chosen_key 에 들어있으면 승인"으로 처리해도 안 된다.
-    `[{"id":"x","chosen_key":"x"}]` 처럼 **제시된 적 없는 선택**이 통과하면
-    사람이 실제로 고른 것이 아닌데 승인으로 기록되기 때문이다. 그래서 고른 키가
-    그 결정이 **실제로 제시한 선택지 안에 있는지**까지 확인한다.
+    **제출된 모든 결정 카드는 각자 제시한 선택지 중 정확히 하나를 골라야 한다.
+    하나라도 어긋나면 요청 전체를 거절한다.**
+
+    부분 통과를 허용하면 안 되는 이유는 한 가지로 수렴한다 — `normalize_decisions`
+    는 규칙에 맞지 않는 항목을 **조용히 버리거나 엉뚱하게 해석**한다.
+    그 상태로 생성이 진행되면 "승인받으라고 내놓은 결정"과 "실제로 코드·ADR 에
+    반영된 결정"이 어긋난다. 즉 게이트를 느슨하게 둘수록 AI-DLC 의 전제가 깨진다.
+
+    ### 거절하는 경우 (모두 같은 이유의 변형)
+
+    | 입력 | 정규화가 하는 일 | 그래서 |
+    | --- | --- | --- |
+    | dict 가 아닌 항목 | 건너뜀 | 거절 |
+    | `id` 없음 | `chosen_key` 를 id 로 대체 | 거절 |
+    | `chosen_key` 없음(미선택 카드) | 건너뜀 | 거절 |
+    | 제시되지 않은 `chosen_key` | 그 값을 선택 라벨로 씀 | 거절 |
+    | 확인 카드에 proceed/cancel 이 아닌 키 | 확인 카드로 처리 | 거절 |
+    | `id` 중복 | 어느 선택이 어느 카드인지 불분명 | 거절 |
+    | `MAX_DECISIONS` 초과 | 초과분을 잘라냄 | 거절 |
 
     한계(의도적): 선택지 목록은 클라이언트가 되돌려준 값이라 이 검증만으로는
     악의적 위조를 막지 못한다. 위조를 막으려면 plan 을 서버에 보관해 대조해야
@@ -1055,52 +1092,40 @@ def _approval_state(decisions: list | None) -> str:
     **클라이언트 결함 차단**(낡은 확장·오타·누락 페이로드)이며, 그 목적에는
     이 수준이 맞다. 서버 보관 대조는 별도 태스크로 분리.
 
-    유효한 선택 **하나만 있으면 통과**시켜서도 안 된다. 나머지 항목이 엉터리여도
-    정규화는 그것을 버리지 않고 알 수 없는 `chosen_key` 를 선택 라벨로 삼아
-    프롬프트와 ADR 에 실어버린다 — 아무도 승인하지 않은 결정이 기록되는 것이다.
-    그래서 **하나라도 유효하지 않으면 요청 전체를 거절**한다.
-
     반환값 (우선순위 순):
       APPROVAL_CANCELLED — 확인 카드에서 명시적으로 '취소'를 골랐다
-      APPROVAL_INVALID   — 고른 값 중 제시된 선택지에 없는 것이 하나라도 있다
-      APPROVAL_APPROVED  — 고른 것이 모두 제시된 선택지 안에 있고, 하나 이상이다
-      APPROVAL_MISSING   — 고른 것이 아예 없다
+      APPROVAL_INVALID   — 위 표의 어느 하나라도 해당된다
+      APPROVAL_APPROVED  — 모든 카드가 규칙을 만족한다
+      APPROVAL_MISSING   — 결정이 아예 실려오지 않았다
     """
-    from adr import CONFIRM_DECISION_ID
+    from adr import CONFIRM_DECISION_ID, MAX_DECISIONS
 
-    approved = False
-    invalid = False
-    for d in (decisions or []):
-        if not isinstance(d, dict):
-            continue
-        chosen = _chosen_key(d)
-        if not chosen:
-            # 카드는 왔는데 고르지 않음 — 승인으로 치지 않는다.
-            continue
+    items = list(decisions or [])
 
-        if str(d.get("id") or "").strip() == CONFIRM_DECISION_ID:
-            # 확인 카드는 서버가 만든 것이므로 허용 키가 고정이다.
-            if chosen.lower() == CONFIRM_CANCEL_KEY:
-                # 명시적 취소는 다른 승인보다 우선한다.
-                return APPROVAL_CANCELLED
-            if chosen.lower() != CONFIRM_PROCEED_KEY:
-                invalid = True
-                continue
-            approved = True
-            continue
+    # 명시적 취소가 최우선 — 나머지가 엉터리여도 '생성 안 함'이 옳은 결과다.
+    for d in items:
+        if (isinstance(d, dict)
+                and str(d.get("id") or "").strip() == CONFIRM_DECISION_ID
+                and _chosen_key(d).lower() == CONFIRM_CANCEL_KEY):
+            return APPROVAL_CANCELLED
 
-        offered = _offered_keys(d)
-        if not offered or chosen not in offered:
-            # 제시된 적 없는 선택 — 사람이 고른 근거가 되지 못한다.
-            invalid = True
-            continue
-        approved = True
+    if not items:
+        return APPROVAL_MISSING
 
-    # 유효하지 않은 항목이 하나라도 있으면 전체 거절 — 통과시키면 그 항목이
-    # 승인되지 않은 채로 프롬프트와 ADR 에 실린다.
-    if invalid:
+    if len(items) > MAX_DECISIONS:
+        # 잘라내고 진행하면 초과분이 승인만 받고 반영되지 않는다.
         return APPROVAL_INVALID
-    return APPROVAL_APPROVED if approved else APPROVAL_MISSING
+
+    ids: list[str] = []
+    for d in items:
+        if not _decision_is_valid(d):
+            return APPROVAL_INVALID
+        ids.append(str(d.get("id") or "").strip())
+
+    if len(set(ids)) != len(ids):
+        return APPROVAL_INVALID
+
+    return APPROVAL_APPROVED
 
 
 def _build_confirm_decision(instruction: str) -> dict:
@@ -1248,6 +1273,15 @@ def generate_plan(
             "options": options_out,
             "impact": (d.get("impact") or "").strip(),
         })
+        # 정규화(normalize_decisions)는 MAX_DECISIONS 를 넘는 결정을 잘라낸다.
+        # 그보다 많이 제시하면 사용자가 승인한 결정 중 일부가 코드에도 ADR 에도
+        # 반영되지 않는다. 애초에 제시 단계에서 같은 상한을 지켜 그 상황을 막고,
+        # 잘린 사실은 로그로 드러낸다(조용히 사라지지 않게).
+        if len(decisions_out) >= MAX_DECISIONS:
+            dropped = len(data.get("decisions") or []) - len(decisions_out)
+            if dropped > 0:
+                print(f"[code_agent] 결정 {dropped}개가 상한({MAX_DECISIONS})을 넘어 제외됨")
+            break
 
     # FR-02-05 (ADR-D5 항상 선택지 · D6 사람 승인)
     # 설계 결정이 없다고 판단된 요청이라도 **빈 목록을 돌려주지 않는다**.
@@ -1311,8 +1345,9 @@ def generate_code(
         raise ValueError("사용자가 취소를 선택해 생성을 중단했습니다.")
     if approval == APPROVAL_INVALID:
         raise ValueError(
-            "고른 값이 제시된 선택지에 없어 생성을 중단했습니다. "
-            "/api/code/plan 이 준 options 중 하나의 key 를 chosen_key 로 보내세요."
+            "승인 내용이 온전하지 않아 생성을 중단했습니다. "
+            "제시된 모든 결정 카드에 대해 그 카드의 options 중 하나의 key 를 "
+            "chosen_key 로 보내야 합니다 (미선택·중복 id·목록에 없는 key 는 거절)."
         )
     if approval == APPROVAL_MISSING:
         raise ValueError(
