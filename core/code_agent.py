@@ -1001,6 +1001,11 @@ def _build_plan_prompt(
 APPROVAL_APPROVED = "approved"
 APPROVAL_CANCELLED = "cancelled"
 APPROVAL_MISSING = "missing"
+APPROVAL_INVALID = "invalid"
+
+# 확인 카드에서 허용되는 선택 (그 외 값은 승인으로 인정하지 않는다)
+CONFIRM_PROCEED_KEY = "proceed"
+CONFIRM_CANCEL_KEY = "cancel"
 
 
 def _chosen_key(decision: dict) -> str:
@@ -1008,6 +1013,18 @@ def _chosen_key(decision: dict) -> str:
     return str(
         decision.get("chosen_key") or decision.get("choice") or decision.get("chosen") or ""
     ).strip()
+
+
+def _offered_keys(decision: dict) -> set[str]:
+    """그 결정이 실제로 제시한 선택지 key 집합."""
+    opts = decision.get("options")
+    if not isinstance(opts, list):
+        return set()
+    return {
+        str(o.get("key") or "").strip()
+        for o in opts
+        if isinstance(o, dict) and str(o.get("key") or "").strip()
+    }
 
 
 def _is_cancelled(decisions: list | None) -> bool:
@@ -1024,16 +1041,30 @@ def _approval_state(decisions: list | None) -> str:
     '취소가 아님'만 확인하면 승인 게이트가 사실상 열려 있는 것과 같다.
     `decisions` 를 아예 빼고 호출하는 경로 — 직접 API 호출, 낡은 확장,
     선택을 누락한 웹뷰 메시지 — 가 전부 통과해버리기 때문이다.
-    그래서 "고른 것이 하나라도 있는가"를 확인한다.
+
+    나아가 "아무 문자열이나 chosen_key 에 들어있으면 승인"으로 처리해도 안 된다.
+    `[{"id":"x","chosen_key":"x"}]` 처럼 **제시된 적 없는 선택**이 통과하면
+    사람이 실제로 고른 것이 아닌데 승인으로 기록되기 때문이다. 그래서 고른 키가
+    그 결정이 **실제로 제시한 선택지 안에 있는지**까지 확인한다.
+
+    한계(의도적): 선택지 목록은 클라이언트가 되돌려준 값이라 이 검증만으로는
+    악의적 위조를 막지 못한다. 위조를 막으려면 plan 을 서버에 보관해 대조해야
+    하는데, 그러려면 웹뷰가 plan 식별자를 되돌려줘야 한다(확장 변경 필요).
+    다만 코어는 세션 토큰이 걸린 로컬호스트 전용이라 토큰을 가진 쪽은 이미
+    어떤 요청이든 보낼 수 있다. 즉 이 검증의 실익은 위조 차단이 아니라
+    **클라이언트 결함 차단**(낡은 확장·오타·누락 페이로드)이며, 그 목적에는
+    이 수준이 맞다. 서버 보관 대조는 별도 태스크로 분리.
 
     반환값:
       APPROVAL_CANCELLED — 확인 카드에서 명시적으로 '취소'를 골랐다 (최우선)
-      APPROVAL_APPROVED  — 사용자가 고른 선택이 하나 이상 있다
-      APPROVAL_MISSING   — 고른 것이 없다 (승인 자체가 실려오지 않음)
+      APPROVAL_APPROVED  — 제시된 선택지 중 하나를 고른 결정이 하나 이상 있다
+      APPROVAL_INVALID   — 고르긴 했으나 제시된 선택지에 없는 값이다
+      APPROVAL_MISSING   — 고른 것이 아예 없다
     """
     from adr import CONFIRM_DECISION_ID
 
     approved = False
+    invalid = False
     for d in (decisions or []):
         if not isinstance(d, dict):
             continue
@@ -1041,12 +1072,28 @@ def _approval_state(decisions: list | None) -> str:
         if not chosen:
             # 카드는 왔는데 고르지 않음 — 승인으로 치지 않는다.
             continue
-        is_confirm_card = str(d.get("id") or "").strip() == CONFIRM_DECISION_ID
-        if is_confirm_card and chosen.lower() == "cancel":
-            # 명시적 취소는 다른 승인보다 우선한다.
-            return APPROVAL_CANCELLED
+
+        if str(d.get("id") or "").strip() == CONFIRM_DECISION_ID:
+            # 확인 카드는 서버가 만든 것이므로 허용 키가 고정이다.
+            if chosen.lower() == CONFIRM_CANCEL_KEY:
+                # 명시적 취소는 다른 승인보다 우선한다.
+                return APPROVAL_CANCELLED
+            if chosen.lower() != CONFIRM_PROCEED_KEY:
+                invalid = True
+                continue
+            approved = True
+            continue
+
+        offered = _offered_keys(d)
+        if not offered or chosen not in offered:
+            # 제시된 적 없는 선택 — 사람이 고른 근거가 되지 못한다.
+            invalid = True
+            continue
         approved = True
-    return APPROVAL_APPROVED if approved else APPROVAL_MISSING
+
+    if approved:
+        return APPROVAL_APPROVED
+    return APPROVAL_INVALID if invalid else APPROVAL_MISSING
 
 
 def _build_confirm_decision(instruction: str) -> dict:
@@ -1255,6 +1302,11 @@ def generate_code(
     approval = _approval_state(decisions)
     if approval == APPROVAL_CANCELLED:
         raise ValueError("사용자가 취소를 선택해 생성을 중단했습니다.")
+    if approval == APPROVAL_INVALID:
+        raise ValueError(
+            "고른 값이 제시된 선택지에 없어 생성을 중단했습니다. "
+            "/api/code/plan 이 준 options 중 하나의 key 를 chosen_key 로 보내세요."
+        )
     if approval == APPROVAL_MISSING:
         raise ValueError(
             "승인된 선택이 없어 생성을 중단했습니다. "
