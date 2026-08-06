@@ -24,9 +24,19 @@ from llm.router import get_router
 from schemas import AnalyzeRequest, FilePatch, PatchProposal, RiskLevel
 
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
-    from adr import NormalizedDecision, build_adr_ops, normalize_decisions
+    from adr import (
+        RESERVED_ID_PREFIX,
+        NormalizedDecision,
+        build_adr_ops,
+        normalize_decisions,
+    )
 except ImportError:  # pragma: no cover
-    from core.adr import NormalizedDecision, build_adr_ops, normalize_decisions
+    from core.adr import (
+        RESERVED_ID_PREFIX,
+        NormalizedDecision,
+        build_adr_ops,
+        normalize_decisions,
+    )
 
 BACKUP_DIR = Path.home() / '.recoder' / 'backups'
 _LAST_APPLY_BACKUPS: dict[str, list[dict]] = {}
@@ -987,24 +997,56 @@ def _build_plan_prompt(
 }}"""
 
 
+# 승인 판정 결과 (FR-02-05)
+APPROVAL_APPROVED = "approved"
+APPROVAL_CANCELLED = "cancelled"
+APPROVAL_MISSING = "missing"
+
+
+def _chosen_key(decision: dict) -> str:
+    """결정 dict 에서 사용자가 고른 키를 꺼낸다 (웹뷰가 쓰는 세 가지 필드명 허용)."""
+    return str(
+        decision.get("chosen_key") or decision.get("choice") or decision.get("chosen") or ""
+    ).strip()
+
+
 def _is_cancelled(decisions: list | None) -> bool:
     """확인 카드에서 '취소'가 선택됐는지 판정한다 (FR-02-05).
 
     사용자가 명시적으로 취소했는데 코드를 생성하면 '사람 승인' 전제가 깨진다.
     """
+    return _approval_state(decisions) == APPROVAL_CANCELLED
+
+
+def _approval_state(decisions: list | None) -> str:
+    """생성 요청에 **사람의 긍정 승인**이 실려 있는지 판정한다 (FR-02-05).
+
+    '취소가 아님'만 확인하면 승인 게이트가 사실상 열려 있는 것과 같다.
+    `decisions` 를 아예 빼고 호출하는 경로 — 직접 API 호출, 낡은 확장,
+    선택을 누락한 웹뷰 메시지 — 가 전부 통과해버리기 때문이다.
+    그래서 "고른 것이 하나라도 있는가"를 확인한다.
+
+    반환값:
+      APPROVAL_CANCELLED — 확인 카드에서 명시적으로 '취소'를 골랐다 (최우선)
+      APPROVAL_APPROVED  — 사용자가 고른 선택이 하나 이상 있다
+      APPROVAL_MISSING   — 고른 것이 없다 (승인 자체가 실려오지 않음)
+    """
     from adr import CONFIRM_DECISION_ID
 
+    approved = False
     for d in (decisions or []):
         if not isinstance(d, dict):
             continue
-        if str(d.get("id") or "").strip() != CONFIRM_DECISION_ID:
+        chosen = _chosen_key(d)
+        if not chosen:
+            # 카드는 왔는데 고르지 않음 — 승인으로 치지 않는다.
             continue
-        chosen = str(
-            d.get("chosen_key") or d.get("choice") or d.get("chosen") or ""
-        ).strip().lower()
-        if chosen == "cancel":
-            return True
-    return False
+        is_confirm_card = str(d.get("id") or "").strip() == CONFIRM_DECISION_ID
+        if is_confirm_card and chosen.lower() == "cancel":
+            # 명시적 취소는 다른 승인보다 우선한다.
+            return APPROVAL_CANCELLED
+        approved = True
+    return APPROVAL_APPROVED if approved else APPROVAL_MISSING
 
 
 def _build_confirm_decision(instruction: str) -> dict:
@@ -1101,6 +1143,13 @@ def generate_plan(
         question = (d.get("question") or "").strip()
         if not did or not question:
             continue
+        # FR-02-05 — 예약 네임스페이스(`__`)는 내부 확인 카드 전용이다.
+        # 모델이(또는 요청문에 유도되어) `__` 로 시작하는 id 를 만들어내면
+        # 그 결정은 UI 에는 뜨지만 정규화 단계에서 걸러져, 사용자가 고른
+        # 선택이 프롬프트에도 ADR 에도 반영되지 않는 채로 코드가 생성된다.
+        # 조용히 사라지지 않도록 여기서 일반 id 로 옮겨 붙인다.
+        if did.startswith(RESERVED_ID_PREFIX):
+            did = f"d-{did.strip('_')}" if did.strip("_") else "decision"
         raw_options = d.get("options") or []
         options_out: list[dict] = []
         has_recommended = False
@@ -1187,9 +1236,19 @@ def generate_code(
     existing = _list_project_files(root)
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
-    # FR-02-05 — 사용자가 확인 카드에서 "취소"를 고르면 생성하지 않는다.
-    if _is_cancelled(decisions):
+    # FR-02-05 — 승인 게이트. 라우트가 아니라 여기(생성 함수)에서 막는다.
+    # 라우트에서만 막으면 server.py 의 구(舊) /api/code/generate 처럼 decisions 를
+    # 아예 받지 않는 호출부가 게이트를 우회한다. 생성 경로는 하나뿐이므로
+    # 이 지점을 지키면 어떤 호출자가 와도 승인 없이 코드가 나오지 않는다.
+    approval = _approval_state(decisions)
+    if approval == APPROVAL_CANCELLED:
         raise ValueError("사용자가 취소를 선택해 생성을 중단했습니다.")
+    if approval == APPROVAL_MISSING:
+        raise ValueError(
+            "승인된 선택이 없어 생성을 중단했습니다. "
+            "/api/code/plan 으로 설계 결정을 먼저 받은 뒤, 사용자가 고른 결과를 "
+            "decisions 에 담아 다시 요청하세요."
+        )
 
     # 결정 파싱은 여기서 딱 한 번. 프롬프트와 ADR 이 같은 데이터를 본다.
     norm_decisions = normalize_decisions(decisions)

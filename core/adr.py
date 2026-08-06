@@ -106,8 +106,15 @@ def normalize_decisions(decisions: list | None) -> list[NormalizedDecision]:
             continue
 
         did = _clean(d.get("id")) or chosen_key
-        if did.startswith(RESERVED_ID_PREFIX):
-            # 확인 카드 등 내부용 결정 — 승인 흐름에는 쓰이되 ADR 로는 남기지 않는다.
+        if did == CONFIRM_DECISION_ID:
+            # 확인 카드 — 승인 흐름에는 쓰이되 설계 결정이 아니므로 ADR 로 남기지 않는다.
+            #
+            # 여기서 접두사(`__`) 전체를 거르지 않는 이유: 그렇게 하면 모델이
+            # 만들어낸 `__` 로 시작하는 **진짜 결정**까지 조용히 사라져,
+            # 사용자가 고른 선택이 프롬프트에도 ADR 에도 안 실린 채 코드가 생성된다.
+            # 예약 네임스페이스 침범은 code_agent.generate_plan 이 파싱 시점에
+            # 일반 id 로 옮겨 붙여 막는다(RESERVED_ID_PREFIX). 이 필터는 실제
+            # 확인 카드 하나만 정확히 집어낸다.
             continue
 
         raw_options = d.get("options") if isinstance(d.get("options"), list) else []
