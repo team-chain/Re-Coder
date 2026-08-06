@@ -305,8 +305,14 @@ def test_approval_missing_when_cards_present_but_unchosen():
     assert ca._approval_state([{"id": "storage", "options": []}]) == ca.APPROVAL_MISSING
 
 
-def test_approval_granted_by_any_chosen_key():
-    assert ca._approval_state([{"id": "storage", "chosen_key": "local"}]) == ca.APPROVAL_APPROVED
+def _chose(key: str, *, id: str = "storage", keys=("local", "db")) -> dict:
+    """제시된 선택지 중 하나를 고른 정상 결정 페이로드."""
+    return {"id": id, "question": "q", "chosen_key": key,
+            "options": [{"key": k, "label": k} for k in keys]}
+
+
+def test_approval_granted_by_offered_choice():
+    assert ca._approval_state([_chose("local")]) == ca.APPROVAL_APPROVED
     assert ca._approval_state([
         {"id": adr.CONFIRM_DECISION_ID, "chosen_key": "proceed"}
     ]) == ca.APPROVAL_APPROVED
@@ -315,9 +321,50 @@ def test_approval_granted_by_any_chosen_key():
 def test_cancel_outranks_other_approvals():
     """여러 결정 중 하나라도 명시적 취소면 전체가 취소다 (순서 무관)."""
     cancel = {"id": adr.CONFIRM_DECISION_ID, "chosen_key": "cancel"}
-    ok = {"id": "storage", "chosen_key": "local"}
+    ok = _chose("local")
     assert ca._approval_state([ok, cancel]) == ca.APPROVAL_CANCELLED
     assert ca._approval_state([cancel, ok]) == ca.APPROVAL_CANCELLED
+
+
+# ── 승인 키가 실제 제시된 선택지인지 검증 (Codex P2 · 3차) ──────────
+
+def test_choice_not_among_offered_options_is_not_approval():
+    """[핵심] 제시된 적 없는 값을 chosen_key 로 보내면 승인이 아니다."""
+    assert ca._approval_state([{"id": "x", "chosen_key": "x"}]) == ca.APPROVAL_INVALID
+    assert ca._approval_state([_chose("없는키")]) == ca.APPROVAL_INVALID
+
+
+def test_confirm_card_requires_exactly_proceed():
+    """확인 카드는 서버가 만든 것이므로 허용 키가 proceed/cancel 로 고정이다."""
+    assert ca._approval_state([
+        {"id": adr.CONFIRM_DECISION_ID, "chosen_key": "yes"}
+    ]) == ca.APPROVAL_INVALID
+    assert ca._approval_state([
+        {"id": adr.CONFIRM_DECISION_ID, "chosen_key": "PROCEED"}
+    ]) == ca.APPROVAL_APPROVED
+
+
+def test_one_valid_choice_is_enough_even_with_a_bad_sibling():
+    """유효한 승인이 하나라도 있으면 통과 — 잘못된 항목은 정규화가 걸러낸다."""
+    assert ca._approval_state([{"id": "x", "chosen_key": "x"}, _chose("local")]) == ca.APPROVAL_APPROVED
+
+
+def test_generate_code_rejects_choice_outside_offered_options(monkeypatch, tmp_path):
+    called: list[int] = []
+    monkeypatch.setattr(ca, "get_router", lambda: called.append(1))
+    with pytest.raises(ValueError, match="제시된 선택지에 없어"):
+        ca.generate_code("만들어줘", decisions=[{"id": "x", "chosen_key": "x"}],
+                         project_root=str(tmp_path))
+    assert called == []
+
+
+def test_server_issued_confirm_card_passes_its_own_gate():
+    """서버가 만든 확인 카드를 그대로 승인하면 반드시 통과해야 한다 (자기모순 방지)."""
+    card = ca._build_confirm_decision("오타 고쳐줘")
+    for opt in card["options"]:
+        card["chosen_key"] = opt["key"]
+        expected = ca.APPROVAL_CANCELLED if opt["key"] == "cancel" else ca.APPROVAL_APPROVED
+        assert ca._approval_state([card]) == expected
 
 
 def test_generate_code_rejects_request_without_approval(monkeypatch, tmp_path):
