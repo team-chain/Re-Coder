@@ -121,12 +121,14 @@ def normalize_decisions(decisions: list | None) -> list[NormalizedDecision]:
 
         chosen_opt: dict = {}
         alternatives: list[Alternative] = []
+        offered = False
         for opt in raw_options:
             if not isinstance(opt, dict):
                 continue
             key = _clean(opt.get("key"))
             if not key:
                 continue
+            offered = True
             if key == chosen_key:
                 chosen_opt = opt
             elif len(alternatives) < MAX_ALTERNATIVES:
@@ -135,6 +137,16 @@ def normalize_decisions(decisions: list | None) -> list[NormalizedDecision]:
                     "summary": _clean(opt.get("summary")),
                     "cons": _clean_list(opt.get("cons")),
                 })
+
+        if offered and not chosen_opt:
+            # 선택지를 제시해 놓고 그중 어느 것도 아닌 값이 왔다.
+            # 이걸 살려두면 아래 `or chosen_key` 폴백이 알 수 없는 키를 그대로
+            # 선택 라벨로 삼아, 아무도 승인하지 않은 결정이 프롬프트와 ADR 에
+            # 실린다. 승인 게이트(code_agent._approval_state)가 이미 막지만,
+            # 기록을 만드는 이 지점에서도 한 번 더 끊는다.
+            continue
+        # 선택지 자체가 없는 최소 형태({"id","chosen_key"})는 종전대로 허용한다
+        # — 대조할 목록이 없으므로 chosen_key 를 라벨로 쓰는 것이 유일한 해석이다.
 
         out.append({
             "id": did,
