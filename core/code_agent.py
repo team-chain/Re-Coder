@@ -987,6 +987,66 @@ def _build_plan_prompt(
 }}"""
 
 
+def _is_cancelled(decisions: list | None) -> bool:
+    """확인 카드에서 '취소'가 선택됐는지 판정한다 (FR-02-05).
+
+    사용자가 명시적으로 취소했는데 코드를 생성하면 '사람 승인' 전제가 깨진다.
+    """
+    from adr import CONFIRM_DECISION_ID
+
+    for d in (decisions or []):
+        if not isinstance(d, dict):
+            continue
+        if str(d.get("id") or "").strip() != CONFIRM_DECISION_ID:
+            continue
+        chosen = str(
+            d.get("chosen_key") or d.get("choice") or d.get("chosen") or ""
+        ).strip().lower()
+        if chosen == "cancel":
+            return True
+    return False
+
+
+def _build_confirm_decision(instruction: str) -> dict:
+    """설계 결정이 없는 요청용 최소 확인 카드.
+
+    FR-02-05 는 "항상 선택지·사람 승인"이다. 오타 수정처럼 결정할 것이 없는
+    요청이라고 해서 승인 단계를 건너뛰면, AI 가 혼자 판단해 코드를 만든 것이
+    되어 AI-DLC 전제가 깨진다. 결정이 없을 때도 사람이 한 번 승인하도록
+    이 카드를 대신 내보낸다.
+
+    `plan` 결과 스키마를 그대로 따르므로 확장 코드 변경이 필요 없다.
+    id 가 예약 접두사(`__`)로 시작해 ADR 로는 기록되지 않는다.
+    """
+    from adr import CONFIRM_DECISION_ID  # 지연 import (순환 방지 목적 아님, 가독성)
+
+    preview = re.sub(r"\s+", " ", (instruction or "").strip())[:60]
+    question = f'"{preview}" — 이대로 진행할까요?' if preview else "이대로 진행할까요?"
+    return {
+        "id": CONFIRM_DECISION_ID,
+        "question": question,
+        "options": [
+            {
+                "key": "proceed",
+                "label": "진행",
+                "summary": "설계상 갈림길이 없어 요청대로 바로 반영합니다.",
+                "pros": ["추가 선택 불필요"],
+                "cons": [],
+                "recommended": True,
+            },
+            {
+                "key": "cancel",
+                "label": "취소",
+                "summary": "생성하지 않고 중단합니다.",
+                "pros": ["변경 없음"],
+                "cons": ["요청이 처리되지 않음"],
+                "recommended": False,
+            },
+        ],
+        "impact": "설계 결정 없음 — 승인만 확인합니다.",
+    }
+
+
 def generate_plan(
     instruction: str,
     session_id: str = "",
@@ -1074,6 +1134,16 @@ def generate_plan(
             "impact": (d.get("impact") or "").strip(),
         })
 
+    # FR-02-05 (ADR-D5 항상 선택지 · D6 사람 승인)
+    # 설계 결정이 없다고 판단된 요청이라도 **빈 목록을 돌려주지 않는다**.
+    # 빈 목록이면 확장이 결정 카드를 건너뛰고 곧장 생성으로 넘어가, 사람이
+    # 승인하지 않은 코드가 만들어진다(= AI 가 혼자 판단). 그래서 최소 한 장의
+    # 확인 카드를 항상 보장한다. 이 카드는 설계 결정이 아니므로 예약 id 를
+    # 사용해 ADR 로는 기록하지 않는다(adr.RESERVED_ID_PREFIX).
+    if not decisions_out:
+        decisions_out.append(_build_confirm_decision(instruction))
+        print("[code_agent] 설계 결정 없음 → 확인 카드로 대체 (항상 사람 승인)")
+
     result = {
         "decisions": decisions_out,
         "model": getattr(llm_resp, "model_used", ""),
@@ -1116,6 +1186,10 @@ def generate_code(
     root = _resolve_root(project_root)
     existing = _list_project_files(root)
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
+
+    # FR-02-05 — 사용자가 확인 카드에서 "취소"를 고르면 생성하지 않는다.
+    if _is_cancelled(decisions):
+        raise ValueError("사용자가 취소를 선택해 생성을 중단했습니다.")
 
     # 결정 파싱은 여기서 딱 한 번. 프롬프트와 ADR 이 같은 데이터를 본다.
     norm_decisions = normalize_decisions(decisions)

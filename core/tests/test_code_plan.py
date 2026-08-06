@@ -197,13 +197,24 @@ def test_generate_plan_representative_requests(monkeypatch, instruction, decisio
         _assert_decision_shape(d)
 
 
-def test_generate_plan_trivial_request_can_return_empty_decisions(monkeypatch):
-    # 오타 수정처럼 설계 결정이 필요 없는 사소한 요청은 decisions: [] 도 유효.
+def test_generate_plan_trivial_request_falls_back_to_confirm_card(monkeypatch):
+    # 오타 수정처럼 설계상 갈림길이 없는 요청이라도 decisions 는 비면 안 된다.
+    # FR-02-05(항상 선택지·사람 승인): 결정이 없다고 승인 단계를 건너뛰면
+    # AI 가 혼자 판단해 코드를 만든 셈이 되어 AI-DLC 전제가 깨진다.
+    # 그래서 LLM 이 빈 배열을 줘도 서버가 "진행/취소" 확인 카드로 대체한다.
+    from adr import CONFIRM_DECISION_ID
+
     fake = _FakeRouter([json.dumps({"decisions": []})])
     monkeypatch.setattr(code_agent, "get_router", lambda: fake)
 
     result = code_agent.generate_plan("변수명 오타 고쳐줘")
-    assert result["decisions"] == []
+
+    assert len(result["decisions"]) == 1, "빈 결정은 확인 카드로 대체돼야 함"
+    card = result["decisions"][0]
+    assert card["id"] == CONFIRM_DECISION_ID
+    _assert_decision_shape(card)  # 확인 카드도 plan 스키마를 그대로 따른다
+    assert [o["key"] for o in card["options"]] == ["proceed", "cancel"]
+    assert "변수명 오타 고쳐줘" in card["question"], "무엇을 승인하는지 질문에 보여야 함"
 
 
 def test_generate_plan_empty_instruction_raises():

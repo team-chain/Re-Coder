@@ -24,6 +24,13 @@ from typing import TypedDict
 
 ADR_DIR = "docs/adr"
 
+# 내부용 예약 결정 id 접두사.
+# FR-02-05(항상 선택지·사람 승인)를 지키려면 설계 결정이 없는 요청에도
+# 확인 카드를 띄워야 한다. 그 확인 카드는 "설계 결정"이 아니므로 ADR 로
+# 남기지 않는다 — 이 접두사로 시작하는 결정은 정규화 단계에서 걸러진다.
+RESERVED_ID_PREFIX = "__"
+CONFIRM_DECISION_ID = "__confirm__"
+
 # 프롬프트 오염·비대화 방지 상한 (결정 텍스트는 웹뷰를 거친 비신뢰 입력)
 MAX_DECISIONS = 10
 MAX_FIELD_CHARS = 200
@@ -99,6 +106,10 @@ def normalize_decisions(decisions: list | None) -> list[NormalizedDecision]:
             continue
 
         did = _clean(d.get("id")) or chosen_key
+        if did.startswith(RESERVED_ID_PREFIX):
+            # 확인 카드 등 내부용 결정 — 승인 흐름에는 쓰이되 ADR 로는 남기지 않는다.
+            continue
+
         raw_options = d.get("options") if isinstance(d.get("options"), list) else []
 
         chosen_opt: dict = {}

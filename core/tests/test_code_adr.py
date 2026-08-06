@@ -219,6 +219,64 @@ def test_resolve_root_falls_back_when_path_invalid(tmp_path, monkeypatch):
     assert ca._resolve_root(str(tmp_path / "does-not-exist")) == valid
 
 
+# ── FR-02-05 항상 선택지·사람 승인 ───────────────────────────────────
+
+def test_confirm_decision_shape_matches_plan_schema():
+    """확인 카드는 plan 결과 스키마를 그대로 따라야 확장이 수정 없이 렌더한다."""
+    d = ca._build_confirm_decision("오타 고쳐줘")
+    assert d["id"] == adr.CONFIRM_DECISION_ID
+    assert "이대로 진행할까요?" in d["question"]
+    assert "오타 고쳐줘" in d["question"]
+    assert [o["key"] for o in d["options"]] == ["proceed", "cancel"]
+    for o in d["options"]:
+        assert {"key", "label", "summary", "pros", "cons", "recommended"} <= set(o)
+    assert sum(1 for o in d["options"] if o["recommended"]) == 1
+
+
+def test_confirm_decision_handles_empty_instruction():
+    assert ca._build_confirm_decision("")["question"] == "이대로 진행할까요?"
+
+
+def test_confirm_decision_collapses_newlines():
+    assert "\n" not in ca._build_confirm_decision("첫줄\n둘째줄")["question"]
+
+
+def test_confirm_decision_is_not_recorded_as_adr(tmp_path):
+    """[핵심] 확인 카드는 승인 흐름에만 쓰이고 ADR 로는 남지 않는다."""
+    confirmed = [{
+        "id": adr.CONFIRM_DECISION_ID,
+        "question": "이대로 진행할까요?",
+        "chosen_key": "proceed",
+        "options": [{"key": "proceed", "label": "진행"}],
+    }]
+    assert adr.normalize_decisions(confirmed) == []
+    assert adr.build_adr_ops(adr.normalize_decisions(confirmed), "req", tmp_path) == []
+
+
+def test_reserved_ids_filtered_but_real_decisions_survive():
+    out = adr.normalize_decisions([
+        {"id": adr.CONFIRM_DECISION_ID, "chosen_key": "proceed"},
+        PLAN_DECISION,
+    ])
+    assert [d["id"] for d in out] == ["storage"]
+
+
+def test_cancel_blocks_generation():
+    assert ca._is_cancelled([{"id": adr.CONFIRM_DECISION_ID, "chosen_key": "cancel"}]) is True
+
+
+def test_proceed_does_not_block():
+    assert ca._is_cancelled([{"id": adr.CONFIRM_DECISION_ID, "chosen_key": "proceed"}]) is False
+    assert ca._is_cancelled([]) is False
+    assert ca._is_cancelled(None) is False
+    assert ca._is_cancelled([PLAN_DECISION]) is False
+
+
+def test_cancel_key_on_normal_decision_is_not_cancellation():
+    """일반 결정에서 'cancel' 이라는 key 를 골라도 중단으로 오인하지 않는다."""
+    assert ca._is_cancelled([{"id": "storage", "chosen_key": "cancel"}]) is False
+
+
 def test_concurrent_requests_do_not_share_root(tmp_path, monkeypatch):
     """두 요청이 스레드에서 겹쳐 돌아도 각자 자기 루트를 본다."""
     import threading
