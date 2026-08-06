@@ -117,8 +117,13 @@
       },
       {
         "command": "recoder.openWorkbench",
-        "title": "ReCoder: Open Workbench",
+        "title": "ReCoder: Open Workspace",
         "icon": "$(dashboard)"
+      },
+      {
+        "command": "recoder.openReCoder",
+        "title": "ReCoder: Open ReCoder",
+        "icon": "$(comment-discussion)"
       },
       {
         "command": "recoder.moveToRightSidebar",
@@ -166,6 +171,13 @@
           "when": "explorerResourceIsFolder",
           "group": "recoder@1"
         }
+      ],
+      "view/title": [
+        {
+          "command": "recoder.openReCoder",
+          "when": "view == recoder.sidebarView",
+          "group": "navigation"
+        }
       ]
     },
     "keybindings": [
@@ -188,6 +200,11 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically start Local Core when sidebar opens."
+        },
+        "recoder.workspace.hideSidebar": {
+          "type": "boolean",
+          "default": true,
+          "description": "ReCoder 작업 화면을 열 때 VS Code 왼쪽 사이드바를 자동으로 숨깁니다."
         },
         "recoder.core.port": {
           "type": "number",
@@ -269,7 +286,7 @@
     "build": "npm run compile && npm run build:webview",
     "build:webview": "cd webview-src && npx webpack --config webpack.config.js --mode production",
     "watch:webview": "cd webview-src && npx webpack --config webpack.config.js --mode development --watch",
-    "package": "npx vsce package --no-dependencies",
+    "package": "npx vsce package",
     "lint": "eslint src --ext ts",
     "pretest": "npm run compile",
     "test": "node ./out/test/runTest.js",
