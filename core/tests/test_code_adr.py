@@ -2,15 +2,30 @@
 회차1 (FR-02-03/04) — 결정 정규화 + ADR 영속화 단위 테스트.
 
 LLM 호출 없이 순수 로직(정규화·슬러그·번호·마크다운·ops·프롬프트 블록)만 검증한다.
-코드리뷰에서 나온 결함(번호 초기화·미선택 결정·프롬프트 인젝션)에 대한
-회귀 테스트를 포함한다.
+코드리뷰에서 나온 결함(번호 초기화·미선택 결정·프롬프트 인젝션·승인 게이트 우회·
+예약 네임스페이스 침범)에 대한 회귀 테스트를 포함한다.
 """
+import json
+
+import pytest
+
 try:  # main.py 스택/패키지 실행 양쪽 지원
     import adr  # type: ignore
     import code_agent as ca  # type: ignore
 except ImportError:  # pragma: no cover
     from core import adr  # type: ignore
     from core import code_agent as ca  # type: ignore
+
+
+class _FakeRouter:
+    """LLM 대신 미리 정해둔 raw 텍스트를 돌려주는 가짜 라우터."""
+
+    def __init__(self, texts: list[str]):
+        self._texts = list(texts)
+
+    def call(self, request, agent=None, operation=None):
+        text = self._texts.pop(0) if self._texts else json.dumps({"decisions": []})
+        return type("_Resp", (), {"text": text, "model_used": "fake-model"})()
 
 
 PLAN_DECISION = {
@@ -275,6 +290,99 @@ def test_proceed_does_not_block():
 def test_cancel_key_on_normal_decision_is_not_cancellation():
     """일반 결정에서 'cancel' 이라는 key 를 골라도 중단으로 오인하지 않는다."""
     assert ca._is_cancelled([{"id": "storage", "chosen_key": "cancel"}]) is False
+
+
+# ── 승인 게이트: '취소 아님'이 아니라 '고른 것이 있음'을 확인 (Codex P1) ──
+
+def test_approval_missing_when_no_decisions():
+    """decisions 를 빼고 부르는 경로가 승인 게이트를 통과하면 안 된다."""
+    assert ca._approval_state([]) == ca.APPROVAL_MISSING
+    assert ca._approval_state(None) == ca.APPROVAL_MISSING
+
+
+def test_approval_missing_when_cards_present_but_unchosen():
+    """카드는 왔는데 아무것도 고르지 않았으면 승인이 아니다."""
+    assert ca._approval_state([{"id": "storage", "options": []}]) == ca.APPROVAL_MISSING
+
+
+def test_approval_granted_by_any_chosen_key():
+    assert ca._approval_state([{"id": "storage", "chosen_key": "local"}]) == ca.APPROVAL_APPROVED
+    assert ca._approval_state([
+        {"id": adr.CONFIRM_DECISION_ID, "chosen_key": "proceed"}
+    ]) == ca.APPROVAL_APPROVED
+
+
+def test_cancel_outranks_other_approvals():
+    """여러 결정 중 하나라도 명시적 취소면 전체가 취소다 (순서 무관)."""
+    cancel = {"id": adr.CONFIRM_DECISION_ID, "chosen_key": "cancel"}
+    ok = {"id": "storage", "chosen_key": "local"}
+    assert ca._approval_state([ok, cancel]) == ca.APPROVAL_CANCELLED
+    assert ca._approval_state([cancel, ok]) == ca.APPROVAL_CANCELLED
+
+
+def test_generate_code_rejects_request_without_approval(monkeypatch, tmp_path):
+    """[핵심] decisions 없이 generate_code 를 부르면 LLM 호출 전에 막힌다."""
+    called: list[int] = []
+    monkeypatch.setattr(ca, "get_router", lambda: called.append(1))
+
+    with pytest.raises(ValueError, match="승인된 선택이 없어"):
+        ca.generate_code("아무거나 만들어줘", decisions=[], project_root=str(tmp_path))
+    with pytest.raises(ValueError, match="승인된 선택이 없어"):
+        ca.generate_code("아무거나 만들어줘", project_root=str(tmp_path))
+
+    assert called == [], "승인 없이 LLM 을 호출하면 안 됨 (게이트가 뒤에 있다는 뜻)"
+
+
+# ── 예약 네임스페이스 침범 방지 (Codex P2) ──────────────────────────
+
+def test_normalize_keeps_reserved_looking_ids_other_than_confirm():
+    """`__` 로 시작해도 확인 카드가 아니면 버리지 않는다.
+
+    접두사 전체를 걸러내면 사용자가 고른 진짜 결정이 조용히 사라져
+    프롬프트에도 ADR 에도 안 실린 채 코드가 생성된다.
+    """
+    out = adr.normalize_decisions([{"id": "__rogue", "question": "진짜 결정", "chosen_key": "a"}])
+    assert [d["id"] for d in out] == ["__rogue"]
+
+
+def test_reserved_id_slug_is_still_a_safe_filename(tmp_path):
+    ops = adr.build_adr_ops(
+        adr.normalize_decisions([{"id": "__rogue", "question": "q", "chosen_key": "a"}]),
+        "req", tmp_path,
+    )
+    assert ops[0]["file"] == "docs/adr/ADR-001-rogue.md"
+
+
+def test_generate_plan_remaps_model_ids_that_invade_reserved_namespace(monkeypatch):
+    """[핵심] 모델이 `__` id 를 뱉어도 일반 id 로 옮겨 붙여 UI·ADR 이 어긋나지 않게 한다."""
+    body = json.dumps({"decisions": [{
+        "id": "__confirm__", "question": "진짜 설계 결정입니다",
+        "options": [{"key": "a", "label": "A"}, {"key": "b", "label": "B"}],
+        "impact": "",
+    }]})
+    monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([body]))
+
+    decision = ca.generate_plan("뭔가 만들어줘")["decisions"][0]
+    assert decision["id"] == "d-confirm"
+    assert decision["id"] != adr.CONFIRM_DECISION_ID
+
+    # 옮겨 붙인 id 로 승인해도 정규화·ADR 이 정상 동작해야 한다.
+    decision["chosen_key"] = "a"
+    assert [d["id"] for d in adr.normalize_decisions([decision])] == ["d-confirm"]
+
+
+def test_remapped_decision_cannot_impersonate_cancellation(monkeypatch):
+    """`__confirm__` + 'cancel' 을 유도해도 생성 중단을 흉내 낼 수 없다."""
+    body = json.dumps({"decisions": [{
+        "id": "__confirm__", "question": "진짜 결정",
+        "options": [{"key": "cancel", "label": "취소처럼 보이는 선택지"}],
+        "impact": "",
+    }]})
+    monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([body]))
+
+    decision = ca.generate_plan("뭔가 만들어줘")["decisions"][0]
+    decision["chosen_key"] = "cancel"
+    assert ca._approval_state([decision]) == ca.APPROVAL_APPROVED
 
 
 def test_concurrent_requests_do_not_share_root(tmp_path, monkeypatch):
