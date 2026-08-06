@@ -300,9 +300,15 @@ def test_approval_missing_when_no_decisions():
     assert ca._approval_state(None) == ca.APPROVAL_MISSING
 
 
-def test_approval_missing_when_cards_present_but_unchosen():
-    """카드는 왔는데 아무것도 고르지 않았으면 승인이 아니다."""
-    assert ca._approval_state([{"id": "storage", "options": []}]) == ca.APPROVAL_MISSING
+def test_unchosen_card_is_invalid_not_merely_missing():
+    """카드는 제시됐는데 고르지 않았다 — 승인이 아닐 뿐 아니라 **거절 대상**이다.
+
+    정규화가 미선택 카드를 조용히 버리므로, 통과시키면 "승인받으라고 내놓은
+    결정"이 코드에도 ADR 에도 반영되지 않은 채 생성이 진행된다.
+    """
+    assert ca._approval_state([{"id": "storage", "options": []}]) == ca.APPROVAL_INVALID
+    # MISSING 은 결정이 아예 실려오지 않은 경우로만 좁힌다.
+    assert ca._approval_state([]) == ca.APPROVAL_MISSING
 
 
 def _chose(key: str, *, id: str = "storage", keys=("local", "db")) -> dict:
@@ -344,6 +350,85 @@ def test_confirm_card_requires_exactly_proceed():
     ]) == ca.APPROVAL_APPROVED
 
 
+# ── [불변식] 게이트와 정규화는 어긋나선 안 된다 ──────────────────────
+#
+# 지금까지 리뷰에서 나온 결함은 전부 같은 형태였다:
+#   "게이트는 통과시켰는데 정규화가 조용히 버리거나 엉뚱하게 해석한다"
+#   → 승인받으라고 내놓은 결정이 코드·ADR 에 반영되지 않는다.
+# 개별 사례를 하나씩 막는 대신, 규칙 자체를 불변식으로 고정한다.
+
+_CONFIRM = {"id": adr.CONFIRM_DECISION_ID, "chosen_key": "proceed"}
+
+
+def _card(i: int, chosen: str = "a") -> dict:
+    return {"id": f"d{i}", "question": f"q{i}", "chosen_key": chosen,
+            "options": [{"key": "a", "label": "A"}, {"key": "b", "label": "B"}]}
+
+
+ACCEPTED_PAYLOADS = [
+    [_card(1)],
+    [_card(1), _card(2), _card(3)],
+    [_CONFIRM],
+    [_card(i) for i in range(adr.MAX_DECISIONS)],          # 상한 정확히
+]
+
+REJECTED_PAYLOADS = [
+    ["문자열"],                                             # dict 아님
+    [{"question": "q", "chosen_key": "a",                   # id 없음
+      "options": [{"key": "a"}]}],
+    [dict(_card(1), chosen_key="")],                        # 미선택 카드
+    [_card(1), dict(_card(2), chosen_key="")],              # 일부만 미선택
+    [dict(_card(1), chosen_key="없는키")],                   # 제시 안 된 키
+    [_card(1), dict(_card(2), chosen_key="없는키")],         # 일부만 엉터리
+    [{"id": adr.CONFIRM_DECISION_ID, "chosen_key": "yes"}],  # 확인 카드 잘못된 키
+    [_card(1), dict(_card(2), id="d1")],                    # id 중복
+    [_card(i) for i in range(adr.MAX_DECISIONS + 1)],       # 상한 초과
+]
+
+
+@pytest.mark.parametrize("payload", ACCEPTED_PAYLOADS,
+                         ids=[f"ok{i}" for i in range(len(ACCEPTED_PAYLOADS))])
+def test_gate_accepts_only_fully_valid_payloads(payload):
+    assert ca._approval_state(payload) == ca.APPROVAL_APPROVED
+
+
+@pytest.mark.parametrize("payload", REJECTED_PAYLOADS,
+                         ids=[f"bad{i}" for i in range(len(REJECTED_PAYLOADS))])
+def test_gate_rejects_partially_valid_payloads(payload):
+    assert ca._approval_state(payload) == ca.APPROVAL_INVALID
+
+
+@pytest.mark.parametrize("payload", ACCEPTED_PAYLOADS,
+                         ids=[f"ok{i}" for i in range(len(ACCEPTED_PAYLOADS))])
+def test_everything_the_gate_accepts_survives_normalization(payload):
+    """[불변식] 게이트를 통과한 결정은 확인 카드를 빼고 **하나도 사라지지 않는다**.
+
+    이게 깨지면 "승인은 받았는데 반영은 안 된 결정"이 생긴다 — 지금까지 나온
+    결함들이 전부 이 불변식의 위반이었다.
+    """
+    expected = [str(d["id"]) for d in payload if d["id"] != adr.CONFIRM_DECISION_ID]
+    assert [d["id"] for d in adr.normalize_decisions(payload)] == expected
+
+
+def test_plan_never_offers_more_than_normalization_keeps(monkeypatch):
+    """제시 단계에서도 같은 상한을 지킨다 — 승인 후 잘려나가는 결정이 없도록."""
+    over = adr.MAX_DECISIONS + 5
+    body = json.dumps({"decisions": [
+        {"id": f"d{i}", "question": f"q{i}",
+         "options": [{"key": "a", "label": "A"}, {"key": "b", "label": "B"}], "impact": ""}
+        for i in range(over)
+    ]})
+    monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([body]))
+
+    offered = ca.generate_plan("뭔가 만들어줘")["decisions"]
+    assert len(offered) == adr.MAX_DECISIONS
+
+    for d in offered:
+        d["chosen_key"] = "a"
+    assert ca._approval_state(offered) == ca.APPROVAL_APPROVED
+    assert len(adr.normalize_decisions(offered)) == len(offered)
+
+
 def test_invalid_sibling_rejects_the_whole_payload():
     """[핵심] 유효한 선택 하나가 섞여 있어도, 엉터리 항목이 있으면 전체를 거절한다.
 
@@ -380,7 +465,7 @@ def test_normalize_still_accepts_minimal_shape_without_options():
 def test_generate_code_rejects_choice_outside_offered_options(monkeypatch, tmp_path):
     called: list[int] = []
     monkeypatch.setattr(ca, "get_router", lambda: called.append(1))
-    with pytest.raises(ValueError, match="제시된 선택지에 없어"):
+    with pytest.raises(ValueError, match="승인 내용이 온전하지 않아"):
         ca.generate_code("만들어줘", decisions=[{"id": "x", "chosen_key": "x"}],
                          project_root=str(tmp_path))
     assert called == []
