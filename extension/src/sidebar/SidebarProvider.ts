@@ -102,7 +102,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(
             (message: { type: string; payload: unknown }) => {
-                void this.handleMessage(message);
+                void this.handleMessage(message, webviewView.webview);
             }
         );
 
@@ -180,6 +180,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    /** 요청-응답 메시지는 요청을 보낸 Webview로만 돌려보낸다. */
+    private postMessageToWebview(webview: vscode.Webview | undefined, type: string, payload: unknown): void {
+        if (webview) {
+            void webview.postMessage({ type, payload });
+            return;
+        }
+        // VS Code 명령처럼 Webview 밖에서 시작한 기존 호출은 전체에 알린다.
+        this.postMessage(type, payload);
+    }
+
     /**
      * 큰 작업 화면이 사이드바와 동일한 React 앱을 사용할 수 있도록 연결한다.
      * 메시지는 기존 핸들러로 라우팅되므로 코드 생성/승인/진단 흐름은 그대로 유지된다.
@@ -187,7 +197,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     attachWorkspacePanel(webview: vscode.Webview): void {
         this._workspacePanelWebview = webview;
         webview.onDidReceiveMessage((message: { type: string; payload: unknown }) => {
-            void this.handleMessage(message);
+            void this.handleMessage(message, webview);
         });
         this.postMessage('stateUpdate', this._state);
         // Core 시작은 명령 진입점에서 한 번만 수행한다. 여기서도 시작하면
@@ -282,7 +292,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         void this.handleMessage({ type: 'runDiagnostics', payload: {} });
     }
 
-    private async handleMessage(message: { type: string; payload: unknown }): Promise<void> {
+    private async handleMessage(
+        message: { type: string; payload: unknown },
+        requestWebview?: vscode.Webview,
+    ): Promise<void> {
         const { type, payload } = message;
 
         switch (type) {
@@ -762,12 +775,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'code.generate': {
                 const p = (payload ?? {}) as {
                     instruction?: string;
+                    requestId?: number;
                     openFile?: { path: string; content: string };
                     targetFolder?: string;
                     contextFiles?: Array<{ path: string; content: string }>;
                     decisions?: CodeDecisionChoice[];
                 };
                 await this.handleCodeGenerate(p.instruction ?? '', {
+                    requestId: p.requestId,
+                    requestWebview,
                     openFile: p.openFile,
                     targetFolder: p.targetFolder ?? '',
                     contextFiles: p.contextFiles ?? [],
@@ -787,6 +803,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 };
                 await this.handleCodePlan(p.instruction ?? '', {
                     requestId: p.requestId,
+                    requestWebview,
                     openFile: p.openFile,
                     targetFolder: p.targetFolder ?? '',
                     contextFiles: p.contextFiles ?? [],
@@ -938,7 +955,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** 코드 생성 에이전트 — 자연어 요청을 Core 로 보내 ops 를 받아 webview 로 회신. */
     private async handleCodeGenerate(
         instruction: string,
-        opts: { openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }>; decisions?: CodeDecisionChoice[] } = {},
+        opts: {
+            requestId?: number;
+            requestWebview?: vscode.Webview;
+            openFile?: { path: string; content: string };
+            targetFolder?: string;
+            contextFiles?: Array<{ path: string; content: string }>;
+            decisions?: CodeDecisionChoice[];
+        } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
@@ -961,10 +985,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             });
             // 다음 턴 컨텍스트로 보관
             this._lastCodeOps = (result.ops ?? []).map((op) => ({ path: op.file, content: op.content }));
-            this.postMessage('code.result', result);
+            this.postMessageToWebview(opts.requestWebview, 'code.result', {
+                ...result,
+                requestId: opts.requestId,
+            });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            this.postMessage('code.error', { message: msg });
+            this.postMessageToWebview(opts.requestWebview, 'code.error', {
+                requestId: opts.requestId,
+                message: msg,
+            });
         }
     }
 
@@ -988,7 +1018,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** AI-DLC 결정 목록을 Webview 모달로 보내고, 선택·생성은 사용자가 직접 확정한다. */
     private async handleCodePlan(
         instruction: string,
-        opts: { requestId?: number; openFile?: { path: string; content: string }; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }> } = {},
+        opts: {
+            requestId?: number;
+            requestWebview?: vscode.Webview;
+            openFile?: { path: string; content: string };
+            targetFolder?: string;
+            contextFiles?: Array<{ path: string; content: string }>;
+        } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
@@ -1004,16 +1040,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const plan = await this._apiClient.planCode(instruction, {
                 workspacePath,
                 openFile: attach,
+                contextFiles: opts.contextFiles ?? [],
                 targetFolder: opts.targetFolder ?? '',
             });
-            this.postMessage('code.planResult', {
+            this.postMessageToWebview(opts.requestWebview, 'code.planResult', {
                 requestId: opts.requestId,
                 instruction,
                 decisions: plan.decisions ?? [],
             });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            this.postMessage('code.error', { requestId: opts.requestId, message: `설계 결정 생성 실패: ${msg}` });
+            this.postMessageToWebview(opts.requestWebview, 'code.error', {
+                requestId: opts.requestId,
+                message: `설계 결정 생성 실패: ${msg}`,
+            });
         }
     }
 

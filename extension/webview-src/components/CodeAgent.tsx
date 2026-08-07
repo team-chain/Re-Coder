@@ -12,7 +12,7 @@ interface CodeOp {
   file: string; language: string; content: string; rationale: string;
   secret_warnings?: SecretWarning[];
 }
-interface CodeResult { summary: string; ops: CodeOp[]; model: string; }
+interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
 interface DecisionChoice { id: string; question: string; chosen_key: string; options: DecisionOption[]; }
@@ -38,10 +38,14 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
     const { type, payload } = msg;
     if (type === "code.result") {
       const res = payload as CodeResult;
+      const requestId = res.requestId;
       setTurns((ts) => {
         const copy = [...ts];
         for (let i = copy.length - 1; i >= 0; i--) {
-          if (copy[i].status === "generating") { copy[i] = { ...copy[i], status: "done", result: res }; break; }
+          if ((requestId === undefined || copy[i].id === requestId) && copy[i].status === "generating") {
+            copy[i] = { ...copy[i], status: "done", result: res };
+            break;
+          }
         }
         return copy;
       });
@@ -67,7 +71,7 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
       const decisions = plan.decisions ?? [];
       if (decisions.length === 0) {
         setTurns((ts) => ts.map((turn) => turn.id === requestId ? { ...turn, status: "generating" } : turn));
-        postMessage("code.generate", { instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: [] });
+        postMessage("code.generate", { requestId, instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: [] });
         return;
       }
       const selections: Record<string, string> = {};
@@ -124,7 +128,7 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
     }));
     setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId ? { ...turn, status: "generating" } : turn));
     setDecisionModal(null);
-    postMessage("code.generate", { instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices });
+    postMessage("code.generate", { requestId: decisionModal.requestId, instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices });
   }, [decisionModal, postMessage]);
 
   const applyOp = useCallback((turnId: number, op: CodeOp) => {
