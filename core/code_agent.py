@@ -29,6 +29,7 @@ try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
         RESERVED_ID_PREFIX,
         NormalizedDecision,
         build_adr_ops,
+        canonical_key,
         normalize_decisions,
     )
 except ImportError:  # pragma: no cover
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover
         RESERVED_ID_PREFIX,
         NormalizedDecision,
         build_adr_ops,
+        canonical_key,
         normalize_decisions,
     )
 
@@ -1011,22 +1013,34 @@ CONFIRM_CANCEL_KEY = "cancel"
 
 
 def _chosen_key(decision: dict) -> str:
-    """결정 dict 에서 사용자가 고른 키를 꺼낸다 (웹뷰가 쓰는 세 가지 필드명 허용)."""
-    return str(
+    """사용자가 고른 키 (웹뷰가 쓰는 세 가지 필드명 허용) — **정규형으로** 반환.
+
+    기록 단계(normalize_decisions)와 같은 정규형을 써야 '게이트에서는 A 를
+    골랐는데 ADR 에는 B 가 남는' 어긋남이 생기지 않는다.
+    """
+    return canonical_key(
         decision.get("chosen_key") or decision.get("choice") or decision.get("chosen") or ""
-    ).strip()
+    )
 
 
-def _offered_keys(decision: dict) -> set[str]:
-    """그 결정이 실제로 제시한 선택지 key 집합."""
+def _decision_id(decision: dict) -> str:
+    """결정 id — 정규형. 중복 판정도 이 값으로 한다."""
+    return canonical_key(decision.get("id"))
+
+
+def _offered_key_list(decision: dict) -> list[str]:
+    """그 결정이 제시한 선택지 key 목록 — 정규형, 등장 순서 유지(중복 포함)."""
     opts = decision.get("options")
     if not isinstance(opts, list):
-        return set()
-    return {
-        str(o.get("key") or "").strip()
-        for o in opts
-        if isinstance(o, dict) and str(o.get("key") or "").strip()
-    }
+        return []
+    out: list[str] = []
+    for o in opts:
+        if not isinstance(o, dict):
+            continue
+        key = canonical_key(o.get("key"))
+        if key:
+            out.append(key)
+    return out
 
 
 def _is_cancelled(decisions: list | None) -> bool:
@@ -1043,7 +1057,7 @@ def _decision_is_valid(d: object) -> bool:
 
     if not isinstance(d, dict):
         return False
-    did = str(d.get("id") or "").strip()
+    did = _decision_id(d)
     if not did:
         # id 가 없으면 정규화가 chosen_key 를 id 로 대체해 엉뚱한 ADR 이름이 된다.
         return False
@@ -1055,8 +1069,13 @@ def _decision_is_valid(d: object) -> bool:
     if did == CONFIRM_DECISION_ID:
         # 확인 카드는 서버가 만든 것이므로 허용 키가 고정이다.
         return chosen.lower() in (CONFIRM_PROCEED_KEY, CONFIRM_CANCEL_KEY)
-    offered = _offered_keys(d)
-    return bool(offered) and chosen in offered
+    offered = _offered_key_list(d)
+    if len(set(offered)) != len(offered):
+        # 정규형이 겹치는 선택지가 둘 이상 — 정규화는 뒤엣것으로 덮어써서
+        # 사용자가 고르지 않은 선택지의 라벨·근거를 기록한다. 어느 쪽을 고른
+        # 것인지 확정할 수 없으므로 거절한다.
+        return False
+    return chosen in offered
 
 
 def _approval_state(decisions: list | None) -> str:
@@ -1082,7 +1101,12 @@ def _approval_state(decisions: list | None) -> str:
     | 제시되지 않은 `chosen_key` | 그 값을 선택 라벨로 씀 | 거절 |
     | 확인 카드에 proceed/cancel 이 아닌 키 | 확인 카드로 처리 | 거절 |
     | `id` 중복 | 어느 선택이 어느 카드인지 불분명 | 거절 |
+    | 정규형이 겹치는 선택지 | 뒤엣것으로 덮어써서 안 고른 쪽을 기록 | 거절 |
     | `MAX_DECISIONS` 초과 | 초과분을 잘라냄 | 거절 |
+
+    비교는 반드시 `adr.canonical_key` 를 거친다. 게이트가 원문으로, 정규화가
+    정규형으로 비교하면 "게이트에선 서로 다른 두 키가 기록에선 같아지는"
+    구멍이 생긴다 — 앞 200자가 같은 두 키, 내부 공백만 다른 두 키가 그렇다.
 
     한계(의도적): 선택지 목록은 클라이언트가 되돌려준 값이라 이 검증만으로는
     악의적 위조를 막지 못한다. 위조를 막으려면 plan 을 서버에 보관해 대조해야
@@ -1105,7 +1129,7 @@ def _approval_state(decisions: list | None) -> str:
     # 명시적 취소가 최우선 — 나머지가 엉터리여도 '생성 안 함'이 옳은 결과다.
     for d in items:
         if (isinstance(d, dict)
-                and str(d.get("id") or "").strip() == CONFIRM_DECISION_ID
+                and _decision_id(d) == CONFIRM_DECISION_ID
                 and _chosen_key(d).lower() == CONFIRM_CANCEL_KEY):
             return APPROVAL_CANCELLED
 
@@ -1120,7 +1144,7 @@ def _approval_state(decisions: list | None) -> str:
     for d in items:
         if not _decision_is_valid(d):
             return APPROVAL_INVALID
-        ids.append(str(d.get("id") or "").strip())
+        ids.append(_decision_id(d))
 
     if len(set(ids)) != len(ids):
         return APPROVAL_INVALID
@@ -1219,7 +1243,9 @@ def generate_plan(
     for d in (data.get("decisions") or []):
         if not isinstance(d, dict):
             continue
-        did = (d.get("id") or "").strip()
+        # 정규형으로 발급한다 — 게이트·기록이 쓰는 비교 형태와 처음부터 일치시켜
+        # "제시한 키"와 "해석되는 키"가 갈라지지 않게 한다(adr.canonical_key).
+        did = canonical_key(d.get("id"))
         question = (d.get("question") or "").strip()
         if not did or not question:
             continue
@@ -1243,13 +1269,19 @@ def generate_plan(
         seen_ids.add(did)
         raw_options = d.get("options") or []
         options_out: list[dict] = []
+        seen_keys: set[str] = set()
         has_recommended = False
         for opt in raw_options:
             if not isinstance(opt, dict):
                 continue
-            key = (opt.get("key") or "").strip()
-            if not key:
+            key = canonical_key(opt.get("key"))
+            if not key or key in seen_keys:
+                # 정규형이 겹치는 선택지는 기록 단계에서 서로를 덮어써
+                # 고르지 않은 쪽의 라벨·근거가 ADR 에 남는다. 제시 자체를 막는다.
+                if key:
+                    print(f"[code_agent] 선택지 key 중복으로 제외: {key[:40]!r}")
                 continue
+            seen_keys.add(key)
             recommended = bool(opt.get("recommended", False))
             has_recommended = has_recommended or recommended
             pros = opt.get("pros") or []

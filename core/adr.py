@@ -69,6 +69,19 @@ def _clean(value: object, limit: int = MAX_FIELD_CHARS) -> str:
     return text[:limit]
 
 
+def canonical_key(value: object) -> str:
+    """결정 id·선택지 key 의 **정규형**. 비교와 기록이 반드시 이걸 통해야 한다.
+
+    승인 게이트(code_agent)와 기록(normalize_decisions)이 서로 다른 방식으로
+    키를 비교하면, 게이트에서는 서로 다른 두 키가 기록 단계에서는 같아진다.
+    그러면 사용자가 고른 것과 **다른 선택지**의 라벨·근거가 ADR 에 남는다.
+    (예: 앞 200자가 같은 두 키, 내부 공백만 다른 두 키)
+
+    그래서 정규형을 한 곳에서만 정의하고 양쪽이 같은 함수를 쓴다.
+    """
+    return _clean(value)
+
+
 def _clean_list(values: object, limit: int = MAX_LIST_ITEMS) -> list[str]:
     if not isinstance(values, list):
         return []

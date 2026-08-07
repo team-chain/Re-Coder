@@ -383,6 +383,19 @@ REJECTED_PAYLOADS = [
     [{"id": adr.CONFIRM_DECISION_ID, "chosen_key": "yes"}],  # 확인 카드 잘못된 키
     [_card(1), dict(_card(2), id="d1")],                    # id 중복
     [_card(i) for i in range(adr.MAX_DECISIONS + 1)],       # 상한 초과
+    # ↓ 원문으로는 서로 다르지만 정규형(adr.canonical_key)으로는 같아지는 키.
+    #   게이트가 원문으로 비교하면 통과하는데, 기록 단계는 정규형으로 비교해
+    #   **고르지 않은 선택지**의 라벨·근거를 ADR 에 남긴다.
+    [{"id": "auth", "question": "q", "chosen_key": "k" * 200 + "AAA",
+      "options": [{"key": "k" * 200 + "AAA", "label": "고른 것"},
+                  {"key": "k" * 200 + "BBB", "label": "안 고른 것"}]}],   # 200자 절단 충돌
+    [{"id": "auth", "question": "q", "chosen_key": "a b",
+      "options": [{"key": "a b", "label": "고른 것"},
+                  {"key": "a  b", "label": "안 고른 것"}]}],              # 공백 접힘 충돌
+    [{"id": "auth", "question": "q", "chosen_key": "a\tb",
+      "options": [{"key": "a\tb", "label": "고른 것"},
+                  {"key": "a b", "label": "안 고른 것"}]}],               # 탭→공백 충돌
+    [_card(1), dict(_card(2), id="d1 ")],                   # 공백만 다른 id → 정규형 중복
 ]
 
 
@@ -408,6 +421,42 @@ def test_everything_the_gate_accepts_survives_normalization(payload):
     """
     expected = [str(d["id"]) for d in payload if d["id"] != adr.CONFIRM_DECISION_ID]
     assert [d["id"] for d in adr.normalize_decisions(payload)] == expected
+
+
+def test_gate_and_normalization_compare_keys_the_same_way():
+    """[핵심] 게이트와 기록이 같은 정규형으로 비교해야 한다.
+
+    원문 비교와 정규형 비교가 섞이면, 게이트에선 서로 다른 두 키가 기록에선
+    같아져 **사용자가 고르지 않은 선택지**의 라벨·근거가 ADR 에 남는다.
+    """
+    long_a, long_b = "k" * 200 + "AAA", "k" * 200 + "BBB"
+    d = {"id": "auth", "question": "q", "chosen_key": long_a,
+         "options": [{"key": long_a, "label": "고른 것", "summary": "A안"},
+                     {"key": long_b, "label": "안 고른 것", "summary": "B안"}]}
+    assert ca._approval_state([d]) == ca.APPROVAL_INVALID
+    assert ca._chosen_key(d) == adr.canonical_key(long_a)
+
+
+def test_plan_never_issues_options_that_collide_after_canonicalization(monkeypatch):
+    """제시 단계에서 정규형이 겹치는 선택지를 아예 내보내지 않는다."""
+    long_a, long_b = "k" * 200 + "AAA", "k" * 200 + "BBB"
+    body = json.dumps({"decisions": [{
+        "id": "auth", "question": "인증?",
+        "options": [{"key": long_a, "label": "A"}, {"key": long_b, "label": "B"},
+                    {"key": "sane", "label": "C"}],
+        "impact": "",
+    }]})
+    monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([body]))
+
+    offered = ca.generate_plan("뭔가 만들어줘")["decisions"][0]["options"]
+    keys = [o["key"] for o in offered]
+    assert len(set(keys)) == len(keys), f"정규형 충돌이 제시됨: {keys}"
+
+    # 제시된 어느 것을 골라도 게이트 통과 + 기록이 그 선택과 일치해야 한다.
+    for opt in offered:
+        d = {"id": "auth", "question": "인증?", "chosen_key": opt["key"], "options": offered}
+        assert ca._approval_state([d]) == ca.APPROVAL_APPROVED
+        assert adr.normalize_decisions([d])[0]["chosen_label"] == opt["label"]
 
 
 def test_plan_never_offers_more_than_normalization_keeps(monkeypatch):
