@@ -5,6 +5,7 @@
  */
 import React, { useCallback, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import { DecisionOptionCards } from "./DecisionOptionCards";
 
 interface SecretWarning { rule: string; line: number; masked: string; }
 interface CodeOp {
@@ -196,24 +197,7 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
               <div style={{ padding: "18px" }}>
                 <h3 style={{ margin: 0, color: "var(--vscode-foreground, #eee)", fontSize: 18, lineHeight: 1.4 }}>{decision.question}</h3>
                 {decision.impact && <p style={{ margin: "7px 0 16px", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.5 }}>{decision.impact}</p>}
-                <div style={{ display: "grid", gap: 9 }}>
-                  {decision.options.map((option) => {
-                    const selected = decisionModal.selections[decision.id] === option.key;
-                    return (
-                      <label key={option.key} className="rc-decision-option" style={{ display: "flex", gap: 11, alignItems: "flex-start", cursor: "pointer", padding: "12px 13px", border: `1px solid ${selected ? "var(--vscode-focusBorder, #3794ff)" : "var(--vscode-panel-border, #3f3f3f)"}`, borderRadius: 8, background: selected ? "var(--vscode-list-activeSelectionBackground, rgba(55,148,255,.18))" : "var(--vscode-editor-background, #1e1e1e)" }}>
-                        <input type="radio" name={`decision-${decision.id}`} checked={selected} onChange={() => chooseDecision(option.key)} style={{ marginTop: 3, accentColor: "var(--vscode-focusBorder, #3794ff)" }} />
-                        <span style={{ minWidth: 0 }}>
-                          <span style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13.5, fontWeight: 650, color: "var(--vscode-foreground, #eee)" }}>
-                            {option.label}
-                            {option.recommended && <span style={{ borderRadius: 99, padding: "2px 6px", background: "rgba(81, 188, 120, .18)", color: "#78d89b", fontSize: 10, fontWeight: 700 }}>추천</span>}
-                          </span>
-                          {option.summary && <span style={{ display: "block", marginTop: 4, color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 11.5, lineHeight: 1.45 }}>{option.summary}</span>}
-                          {(option.pros?.length > 0 || option.cons?.length > 0) && <span style={{ display: "block", marginTop: 6, color: "var(--vscode-descriptionForeground, #888)", fontSize: 10.5, lineHeight: 1.5 }}>{[...(option.pros ?? []).map((text) => `+ ${text}`), ...(option.cons ?? []).map((text) => `− ${text}`)].join("  ·  ")}</span>}
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
+                <DecisionOptionCards options={decision.options} selectedKey={decisionModal.selections[decision.id]} onSelect={chooseDecision} radioName={`decision-${decision.id}`} />
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 18px 16px", borderTop: "1px solid var(--vscode-panel-border, #3b3b3b)" }}>
                 <button onClick={cancelDecision} style={{ ...ghostBtn, padding: "7px 11px" }}>취소</button>
