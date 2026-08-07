@@ -11,7 +11,7 @@ import asyncio
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -81,6 +81,18 @@ class ExecuteRequest(BaseModel):
 
 class RollbackRequest(BaseModel):
     deployment_id: str
+
+
+class DeployPreflightRequest(BaseModel):
+    """배포 대상 선택 카드에 표시할 프로젝트 감지 요청."""
+    workspace_path: str
+
+
+class DeploymentDecisionRequest(BaseModel):
+    """사용자가 승인한 배포 대상. ADR은 확장이 워크스페이스에 기록한다."""
+    workspace_path: str
+    target: Literal["ecs", "s3", "local"]
+    evidence: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +179,148 @@ def _detect_stack(workspace_path: str) -> StackType:
     if (ws / "Gemfile").exists():
         return StackType.RUBY_RAILS
     return StackType.UNKNOWN
+
+
+def _read_text_if_exists(path: Path, limit: int = 100_000) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")[:limit]
+    except OSError:
+        return ""
+
+
+def _deployment_preflight(workspace_path: str) -> dict:
+    """프로젝트 파일만으로 서버형/정적 앱을 판별해 배포 선택지를 추천한다."""
+    root = Path(workspace_path)
+    if not root.is_dir():
+        raise ValueError("유효한 워크스페이스 경로가 아닙니다.")
+
+    evidence: list[str] = []
+    requirements = _read_text_if_exists(root / "requirements.txt")
+    pyproject = _read_text_if_exists(root / "pyproject.toml")
+    python_config = f"{requirements}\n{pyproject}".lower()
+    python_files = list(root.glob("*.py"))[:20]
+    python_source = "\n".join(_read_text_if_exists(p, 20_000) for p in python_files).lower()
+    has_fastapi = "fastapi" in python_config or "fastapi" in python_source
+    has_flask = "flask" in python_config or "flask" in python_source
+    has_django = "django" in python_config or "django" in python_source
+    if has_fastapi:
+        evidence.append("FastAPI 서버")
+    elif has_flask:
+        evidence.append("Flask 서버")
+    elif has_django:
+        evidence.append("Django 서버")
+
+    package_text = _read_text_if_exists(root / "package.json").lower()
+    has_node_server = any(dep in package_text for dep in ('"next"', '"express"', '"@nestjs/core"'))
+    if '"next"' in package_text:
+        evidence.append("Next.js 서버")
+    elif '"express"' in package_text:
+        evidence.append("Express 서버")
+    elif '"@nestjs/core"' in package_text:
+        evidence.append("NestJS 서버")
+
+    has_sqlite_file = any(root.glob("*.db")) or any(root.glob("*.sqlite")) or any(root.glob("*.sqlite3"))
+    has_sqlite_dependency = "sqlite" in python_config or "sqlite" in python_source
+    if has_sqlite_file or has_sqlite_dependency:
+        evidence.append("SQLite 데이터 저장")
+
+    has_static_entry = (root / "index.html").is_file()
+    has_static_builder = '"vite"' in package_text or (root / "vite.config.ts").is_file() or (root / "vite.config.js").is_file()
+    if has_static_entry:
+        evidence.append("정적 HTML 엔트리")
+    if has_static_builder:
+        evidence.append("정적 번들 빌드")
+
+    if has_fastapi or has_flask or has_django or has_node_server:
+        return {
+            "app_kind": "server",
+            "summary": f"서버형 앱 — {'·'.join(evidence) or '서버 런타임 포함'}",
+            "evidence": evidence,
+            "recommended_target": "ecs",
+        }
+    if has_static_entry or has_static_builder:
+        return {
+            "app_kind": "static",
+            "summary": f"정적 웹 앱 — {'·'.join(evidence) or '정적 파일 구성'}",
+            "evidence": evidence,
+            "recommended_target": "s3",
+        }
+    return {
+        "app_kind": "unknown",
+        "summary": "프로젝트 유형을 확신하기 어려움",
+        "evidence": evidence or ["명확한 서버 또는 정적 빌드 설정을 찾지 못함"],
+        "recommended_target": "local",
+    }
+
+
+def _build_deployment_decision_adr(workspace_path: str, target: str, evidence: list[str]) -> dict:
+    """배포 대상 선택을 기존 ADR 형식으로 만들고, 확장이 기록할 파일 정보를 반환한다."""
+    try:
+        from adr import build_adr_ops, normalize_decisions
+    except ImportError:
+        from core.adr import build_adr_ops, normalize_decisions
+
+    options = [
+        {
+            "key": "ecs",
+            "label": "ECS 컨테이너",
+            "summary": "서버형 앱을 컨테이너로 운영",
+            "pros": ["서버 런타임 지원", "확장 가능한 운영 환경"],
+            "cons": ["AWS 설정이 필요"],
+        },
+        {
+            "key": "s3",
+            "label": "S3 정적 호스팅",
+            "summary": "빌드된 정적 파일을 제공",
+            "pros": ["운영 비용과 구성이 단순"],
+            "cons": ["서버 API를 직접 실행할 수 없음"],
+        },
+        {
+            "key": "local",
+            "label": "나중에 · 로컬 먼저",
+            "summary": "로컬 Docker로 먼저 검증",
+            "pros": ["원격 자격증명 없이 검증 가능"],
+            "cons": ["외부 사용자에게 공개되지 않음"],
+        },
+    ]
+    decision = normalize_decisions([{
+        "id": "deployment-target",
+        "question": "이 앱을 어디에 배포할까요?",
+        "chosen_key": target,
+        "options": options,
+        "impact": "감지 근거: " + (", ".join(str(item) for item in evidence[:5]) or "감지 근거 없음"),
+    }])
+    ops = build_adr_ops(decision, "배포 대상 선택", Path(workspace_path))
+    if not ops:
+        raise RuntimeError("배포 대상 ADR을 만들 수 없습니다.")
+    return ops[0]
+
+
+@router.post("/api/deploy/preflight")
+async def deploy_preflight(request: DeployPreflightRequest) -> dict:
+    """배포 버튼 직후 실행되는 가벼운 프로젝트 감지 단계."""
+    try:
+        return _deployment_preflight(request.workspace_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/deploy/decision")
+async def record_deployment_decision(request: DeploymentDecisionRequest) -> dict:
+    """선택한 배포 대상을 ADR로 기록할 데이터를 반환한다.
+
+    Core는 워크스페이스에 직접 쓰지 않는다. 호출한 VS Code 확장이 반환된
+    ``adr`` 파일을 기록하므로, 사용자가 누른 선택과 실제 파일 변경이 연결된다.
+    """
+    if not Path(request.workspace_path).is_dir():
+        raise HTTPException(status_code=400, detail="유효한 워크스페이스 경로가 아닙니다.")
+    adr = _build_deployment_decision_adr(
+        request.workspace_path,
+        request.target,
+        request.evidence,
+    )
+    next_view = {"ecs": "ecs", "s3": "s3", "local": "docker"}[request.target]
+    return {"target": request.target, "next_view": next_view, "adr": adr}
 
 
 def _log_scan_to_session(scan_type: str, target: str, result: dict) -> None:

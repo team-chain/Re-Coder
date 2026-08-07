@@ -525,6 +525,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch { /* status polling is best effort */ }
                 break;
             }
+            case 'workspace.deploy.preflight': {
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                try {
+                    const result = await this._apiClient.getDeployPreflight(workspacePath);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.preflightResult', result);
+                } catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.preflightError', { message });
+                }
+                break;
+            }
+            case 'workspace.deploy.chooseTarget': {
+                const p = (payload ?? {}) as {
+                    target?: 'ecs' | 's3' | 'local';
+                    evidence?: string[];
+                };
+                if (p.target !== 'ecs' && p.target !== 's3' && p.target !== 'local') {
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.decisionError', {
+                        message: '유효하지 않은 배포 대상입니다.',
+                    });
+                    break;
+                }
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                try {
+                    const result = await this._apiClient.recordDeploymentDecision(
+                        workspacePath,
+                        p.target,
+                        p.evidence ?? [],
+                    );
+                    const adrPath = await this.writeWorkspaceFile(result.adr.file, result.adr.content);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.decisionResult', {
+                        ...result,
+                        adr_path: adrPath,
+                    });
+                } catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.decisionError', { message });
+                }
+                break;
+            }
             case 'rollback': {
                 const { deploymentId } = payload as { deploymentId: string };
                 try {
@@ -950,6 +990,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const f = (folder || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
         const n = (file || '').replace(/\\/g, '/').replace(/^\/+/, '');
         return f ? `${f}/${n}` : n;
+    }
+
+    /** Core가 제안한 ADR 등 승인된 산출물을 워크스페이스에 안전하게 기록한다. */
+    private async writeWorkspaceFile(file: string, content: string): Promise<string> {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        if (!root) { throw new Error('워크스페이스가 열려있지 않습니다.'); }
+        const safe = (file || '').replace(/\\/g, '/').replace(/^\/+/, '')
+            .split('/').filter((segment) => segment && segment !== '..').join('/');
+        if (!safe) { throw new Error('기록할 파일 경로가 올바르지 않습니다.'); }
+        const parts = safe.split('/');
+        const fileUri = vscode.Uri.joinPath(root, ...parts);
+        const parentUri = vscode.Uri.joinPath(root, ...parts.slice(0, -1));
+        await vscode.workspace.fs.createDirectory(parentUri);
+        await vscode.workspace.fs.writeFile(fileUri, new TextEncoder().encode(content));
+        return safe;
     }
 
     /** 코드 생성 에이전트 — 자연어 요청을 Core 로 보내 ops 를 받아 webview 로 회신. */
