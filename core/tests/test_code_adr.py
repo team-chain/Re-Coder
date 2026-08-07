@@ -423,6 +423,129 @@ def test_everything_the_gate_accepts_survives_normalization(payload):
     assert [d["id"] for d in adr.normalize_decisions(payload)] == expected
 
 
+def test_canonical_key_is_idempotent():
+    """[근본] `canonical_key(canonical_key(x)) == canonical_key(x)`.
+
+    이 함수는 발급(generate_plan)·검증(게이트)·기록(normalize_decisions)
+    세 곳에서 각각 호출된다. 멱등이 아니면 발급 때 서로 다르던 두 값이
+    검증 때 같아져 **정상 승인이 거절**된다 — 실제로 그랬다.
+    경계는 상한 근처에서 공백이 잘릴 때다.
+    """
+    for n in range(195, 210):
+        for pos in range(195, n):
+            for ch in (" ", "\t", "\n"):
+                s = "a" * n
+                s = s[:pos] + ch + s[pos + 1:]
+                assert adr.canonical_key(adr.canonical_key(s)) == adr.canonical_key(s), \
+                    f"멱등 아님: len={n} pos={pos} ch={ch!r}"
+    assert all(len(adr.canonical_key("x" * n)) <= adr.MAX_FIELD_CHARS for n in range(300))
+
+
+def test_unique_canonical_id_stays_within_the_length_limit():
+    """중복 회피 접미사를 붙여도 정규형이 다시 잘려 원래 id 로 돌아가면 안 된다."""
+    base = "a" * adr.MAX_FIELD_CHARS
+    seen = {base}
+    for _ in range(5):
+        new = ca._unique_canonical_id(base, seen)
+        assert adr.canonical_key(new) == new, "발급한 id 가 정규형과 다름"
+        assert new not in seen, "정규형 기준으로 중복"
+        seen.add(new)
+
+
+# plan 이 발급한 값은 기록 단계가 손대지 않아야 한다 (발급형 == 기록형).
+_PLAN_STRESS = [
+    ("상한 근처 id", {"id": "a" * 199 + "  b", "question": "q",
+                      "options": [{"key": "x", "label": "X"}, {"key": "y", "label": "Y"}]}),
+    ("상한 근처 key", {"id": "d", "question": "q",
+                       "options": [{"key": "k" * 199 + "  b", "label": "X"},
+                                   {"key": "k" * 199, "label": "Y"},
+                                   {"key": "z", "label": "Z"}]}),
+    ("긴 질문", {"id": "d", "question": "질" * 260,
+                 "options": [{"key": "x", "label": "X"}, {"key": "y", "label": "Y"}]}),
+    ("긴 라벨·요약", {"id": "d", "question": "q",
+                      "options": [{"key": "x", "label": "라" * 260, "summary": "요" * 260},
+                                  {"key": "y", "label": "Y"}]}),
+    ("장단점 과다", {"id": "d", "question": "q",
+                     "options": [{"key": "x", "label": "X", "pros": [f"p{i}" for i in range(9)],
+                                  "cons": [f"c{i}" for i in range(9)]},
+                                 {"key": "y", "label": "Y"}]}),
+    ("옵션 과다", {"id": "d", "question": "q",
+                   "options": [{"key": f"k{i}", "label": f"L{i}"} for i in range(9)]}),
+    ("타입 이상", {"id": 7, "question": True, "impact": ["x"],
+                   "options": [{"key": 1, "label": 2, "summary": None, "pros": [3], "cons": False},
+                               {"key": 2, "label": 3}]}),
+]
+
+
+@pytest.mark.parametrize("name,raw", _PLAN_STRESS, ids=[n for n, _ in _PLAN_STRESS])
+def test_plan_emits_values_normalization_will_not_change(monkeypatch, name, raw):
+    """[불변식] 발급한 문자열은 전부 정규형이고, 개수 상한도 기록 단계와 같다.
+
+    이걸 어기면 사용자가 카드에서 본 문구·항목이 ADR 에서 말없이 달라지거나
+    사라진다. 지금까지 나온 결함 상당수가 이 불변식의 위반이었다.
+    """
+    monkeypatch.setattr(ca, "get_router",
+                        lambda: _FakeRouter([json.dumps({"decisions": [raw]})]))
+    for d in ca.generate_plan("뭔가 만들어줘")["decisions"]:
+        for value in (d["id"], d["question"], d["impact"]):
+            assert adr.canonical_key(value) == value, f"{name}: 발급형≠정규형 {value!r}"
+        assert ca.MIN_OPTIONS_PER_DECISION <= len(d["options"]) <= ca.MAX_OPTIONS_PER_DECISION
+        for o in d["options"]:
+            for value in (o["key"], o["label"], o["summary"], *o["pros"], *o["cons"]):
+                assert adr.canonical_key(value) == value, f"{name}: 발급형≠정규형 {value!r}"
+            assert len(o["pros"]) <= adr.MAX_LIST_ITEMS
+            assert len(o["cons"]) <= adr.MAX_LIST_ITEMS
+
+
+@pytest.mark.parametrize("name,raw", _PLAN_STRESS, ids=[n for n, _ in _PLAN_STRESS])
+def test_plan_output_approved_normally_always_passes_and_is_recorded(monkeypatch, name, raw):
+    """[불변식] plan 이 준 선택지를 그대로 고르면 **반드시** 통과하고, 고른 그대로 기록된다."""
+    monkeypatch.setattr(ca, "get_router",
+                        lambda: _FakeRouter([json.dumps({"decisions": [raw]})]))
+    offered = ca.generate_plan("뭔가 만들어줘")["decisions"]
+    if any(d["id"] == adr.CONFIRM_DECISION_ID for d in offered):
+        return  # 확인 카드는 별도 테스트에서 다룬다
+
+    for index in range(len(offered[0]["options"])):
+        picked = [dict(d, chosen_key=d["options"][index % len(d["options"])]["key"])
+                  for d in offered]
+        assert ca._approval_state(picked) == ca.APPROVAL_APPROVED, f"{name}: 정상 승인이 거절됨"
+        kept = adr.normalize_decisions(picked)
+        assert len(kept) == len(picked), f"{name}: 승인한 결정이 기록에서 사라짐"
+        for d, k in zip(picked, kept):
+            want = next(o for o in d["options"] if o["key"] == d["chosen_key"])
+            assert k["chosen_label"] == (want["label"] or want["key"])
+            assert k["chosen_summary"] == want.get("summary", "")
+            assert k["impact"] == d["impact"]
+            assert k["question"] == d["question"]
+            assert len(k["alternatives"]) == len(d["options"]) - 1, "본 대안이 기록에서 누락"
+
+
+def test_adr_marks_a_truncated_request_instead_of_hiding_it():
+    """요청문이 잘렸으면 잘렸다고 적는다 — ADR 만 읽는 사람이 오해하지 않도록."""
+    long_req = "이 요청은 아주 깁니다. " * 40
+    md = adr.build_adr_markdown(1, adr.normalize_decisions([PLAN_DECISION])[0], long_req)
+    assert "생략" in md
+    short = adr.build_adr_markdown(1, adr.normalize_decisions([PLAN_DECISION])[0], "짧은 요청")
+    assert "생략" not in short
+
+
+def test_generated_code_ops_cannot_overwrite_the_adr_record(monkeypatch, tmp_path):
+    """LLM 이 docs/adr 경로 파일을 만들어도 결정 기록을 덮어쓰지 못한다."""
+    payload = json.dumps({"ops": [
+        {"action": "create", "file": "docs/adr/ADR-001-storage.md", "content": "가짜"},
+        {"action": "create", "file": "app.py", "content": "x=1"},
+    ], "summary": "s"})
+    monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([payload]))
+
+    result = ca.generate_code("만들어줘", decisions=[PLAN_DECISION], project_root=str(tmp_path))
+    files = [op["file"] for op in result["ops"]]
+    assert files.count("docs/adr/ADR-001-storage.md") == 1
+    assert "app.py" in files
+    adr_op = next(op for op in result["ops"] if op["file"].startswith(adr.ADR_DIR))
+    assert adr_op.get("is_adr") is True, "남은 것은 진짜 ADR 기록이어야 함"
+
+
 def test_gate_and_normalization_compare_keys_the_same_way():
     """[핵심] 게이트와 기록이 같은 정규형으로 비교해야 한다.
 
@@ -618,7 +741,9 @@ def test_remapped_decision_cannot_impersonate_cancellation(monkeypatch):
     """`__confirm__` + 'cancel' 을 유도해도 생성 중단을 흉내 낼 수 없다."""
     body = json.dumps({"decisions": [{
         "id": "__confirm__", "question": "진짜 결정",
-        "options": [{"key": "cancel", "label": "취소처럼 보이는 선택지"}],
+        # 선택지는 2개 이상이어야 제시된다(MIN_OPTIONS_PER_DECISION).
+        "options": [{"key": "cancel", "label": "취소처럼 보이는 선택지"},
+                    {"key": "keep", "label": "다른 선택지"}],
         "impact": "",
     }]})
     monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([body]))

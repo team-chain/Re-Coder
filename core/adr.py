@@ -58,15 +58,22 @@ class NormalizedDecision(TypedDict):
 
 
 def _clean(value: object, limit: int = MAX_FIELD_CHARS) -> str:
-    """비신뢰 입력을 한 줄로 눕히고 길이를 제한한다.
+    """비신뢰 입력을 한 줄로 눕히고 길이를 제한한다. **멱등이어야 한다.**
 
     개행을 남기면 프롬프트의 다른 섹션인 척하거나(프롬프트 인젝션)
     ADR 마크다운 구조를 깨뜨릴 수 있어 공백으로 접는다.
+
+    자른 **뒤에** 다시 strip 하는 순서가 중요하다. 먼저 strip 하고 자르면
+    상한 경계가 공백에 걸릴 때 결과 끝에 공백이 남고, 한 번 더 적용했을 때
+    그 공백이 사라져 **값이 달라진다**(`f(f(x)) != f(x)`).
+    이 함수는 발급(generate_plan)·검증(승인 게이트)·기록(normalize_decisions)
+    세 곳에서 각각 호출되므로, 멱등이 아니면 "발급 때 서로 다른 두 값이
+    검증 때 같아지는" 어긋남이 생긴다 — 정상 승인이 거절되는 원인이었다.
     """
     text = str(value or "")
     text = re.sub(r"[\r\n\t]+", " ", text)
-    text = re.sub(r"\s{2,}", " ", text).strip()
-    return text[:limit]
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()[:limit].strip()
 
 
 def canonical_key(value: object) -> str:
@@ -234,7 +241,13 @@ def build_adr_markdown(index: int, decision: NormalizedDecision, instruction: st
     cons = decision.get("cons") or []
     impact = decision.get("impact")
     alts = decision.get("alternatives") or []
+    # 요청문은 프롬프트에는 전문이 들어가고 ADR 에는 상한까지만 들어간다.
+    # 잘렸다는 표시가 없으면, ADR 만 읽는 사람은 잘린 문장을 요청 전문으로
+    # 오해한다(뒤에 붙어 있던 제약이 사라진 것처럼 보인다).
+    full_req = _clean(instruction, MAX_INSTRUCTION_CHARS * 4)
     req = _clean(instruction, MAX_INSTRUCTION_CHARS)
+    if len(full_req) > len(req):
+        req = f"{req} …(이하 생략, 전문은 코드 생성에 사용됨)"
 
     lines = [
         f"# ADR-{index:03d}: {title}",
