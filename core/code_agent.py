@@ -1004,6 +1004,8 @@ def generate_plan(
     session_id: str = "",
     open_file: dict | None = None,
     target_folder: str = "",
+    context_files: list[dict] | None = None,
+    project_root: str = "",
 ) -> dict:
     """
     자연어 instruction → "설계 결정" 목록 (코드 아님).
