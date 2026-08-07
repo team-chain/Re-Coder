@@ -14,6 +14,7 @@ import {
     ProjectProfile,
     AwsStatus,
     AwsConfigureInput,
+    AwsConnectInput,
     AwsEcrRepo,
 } from '../types';
 import { CoreManager } from './CoreManager';
@@ -694,6 +695,23 @@ export class ApiClient {
         const resp = await this.request<AwsStatus>('POST', '/api/aws/configure', body);
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 자격증명 등록 실패');
+        }
+        return resp.data;
+    }
+
+    /**
+     * POST /api/aws/connect — STS 검증만 수행한다.
+     * 키의 영속 보관은 Extension의 SecretStorage가 담당한다.
+     */
+    async connectAws(creds: AwsConnectInput): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/connect', {
+            access_key_id: creds.accessKeyId,
+            secret_access_key: creds.secretAccessKey,
+            region: creds.region ?? '',
+            session_token: creds.sessionToken ?? '',
+        });
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 자격증명 검증 실패');
         }
         return resp.data;
     }

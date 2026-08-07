@@ -27,7 +27,8 @@ _EXEMPT_PATHS = {
     "/api/github/token",
     "/api/github/status",
     "/api/github/logout",
-    # AWS configure — localhost 만 + STS 자체 검증
+    # AWS connect/configure — localhost 만 + STS 자체 검증
+    "/api/aws/connect",
     "/api/aws/configure",
     "/api/aws/status",
     "/api/aws/clear",

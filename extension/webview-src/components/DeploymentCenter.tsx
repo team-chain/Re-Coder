@@ -2,8 +2,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
+import { AwsConnection } from "./AwsConnection";
 
-type Target = "decision" | "docker" | "actions" | "ec2" | "ecs" | "s3";
+type Target = "decision" | "docker" | "actions" | "ec2" | "ecs" | "s3" | "aws";
 type Proposal = { proposal_id: string; target_path: string; content: string; approval_level: number };
 type DeployTarget = "ecs" | "s3" | "local";
 type Preflight = { app_kind: "server" | "static" | "unknown"; summary: string; evidence: string[]; recommended_target: DeployTarget };
@@ -31,6 +32,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [checking, setChecking] = useState(true);
   const [savingDecision, setSavingDecision] = useState(false);
+  const [awsReady, setAwsReady] = useState(false);
   const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: "ap-northeast-2", ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
   const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "ap-northeast-2", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512" });
 
@@ -56,10 +58,11 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     }
     if (type === "workspace.deploy.decisionError") { setSavingDecision(false); setMessage((payload as { message?: string })?.message ?? "배포 대상 기록에 실패했습니다."); }
     if (type === "workspace.deploy.result") setMessage((payload as { message?: string })?.message ?? "배포 요청을 보냈습니다.");
+    if (type === "aws.status") setAwsReady(Boolean((payload as { ready?: boolean })?.ready));
     if (type === "errorMessage") setMessage((payload as { message?: string })?.message ?? "요청 처리에 실패했습니다.");
   }, []));
 
-  useEffect(() => { runPreflight(); }, [runPreflight]);
+  useEffect(() => { runPreflight(); postMessage("aws.status"); }, [runPreflight, postMessage]);
   useEffect(() => {
     if (target !== "ec2" && target !== "ecs") return;
     const timer = window.setInterval(() => postMessage(target === "ec2" ? "workspace.deploy.ec2.status" : "workspace.deploy.ecs.status"), 4000);
@@ -68,21 +71,31 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
 
   const chooseTarget = (choice: DeployTarget) => {
     if (!preflight || savingDecision) return;
+    if (choice !== "local" && !awsReady) {
+      setTarget("aws");
+      setMessage("원격 배포 전에 AWS 계정을 연결하세요.");
+      return;
+    }
     setSavingDecision(true);
     postMessage("workspace.deploy.chooseTarget", { target: choice, evidence: preflight.evidence });
   };
   const generateActions = () => { setMessage("GitHub Actions 워크플로우 생성 중…"); postMessage("generateGithubActions", { workspacePath: "" }); };
   const deployEc2 = () => { setMessage("EC2 배포 요청 전송 중…"); postMessage("workspace.deploy.ec2", { ...ec2, host_port: Number(ec2.host_port), container_port: Number(ec2.container_port) }); };
-  const deployEcs = () => { setMessage("ECS Fargate 배포 요청 전송 중…"); postMessage("workspace.deploy.ecs", { ...ecs, container_port: Number(ecs.container_port) }); };
+  const deployEcs = () => {
+    if (!awsReady) { setTarget("aws"); setMessage("ECS 배포를 시작하려면 AWS 계정을 연결하세요."); return; }
+    setMessage("ECS Fargate 배포 요청 전송 중…"); postMessage("workspace.deploy.ecs", { ...ecs, container_port: Number(ecs.container_port) });
+  };
   const update = <T extends Record<string, string>>(set: React.Dispatch<React.SetStateAction<T>>, key: keyof T, value: string) => set(cur => ({ ...cur, [key]: value }));
 
   return (
     <div style={{ fontFamily: "var(--vscode-font-family)", color: "var(--vscode-foreground, #ddd)" }}>
       <div style={{ fontSize: 18, fontWeight: 650, marginBottom: 5 }}>배포 센터</div>
       <div style={{ fontSize: 12, color: "var(--vscode-descriptionForeground, #999)", marginBottom: 16 }}>감지 결과를 확인하고, 배포 대상은 직접 선택하세요.</div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 7, marginBottom: 18 }}>
-        {([ ["decision", "배포 결정"], ["docker", "Local"], ["actions", "Actions"], ["ec2", "EC2"], ["ecs", "ECS"] ] as [Target, string][]).map(([id, label]) => <button key={id} onClick={() => { setTarget(id); setMessage(""); }} style={{ padding: "9px 6px", borderRadius: 6, border: `1px solid ${target === id ? "var(--vscode-focusBorder, #3794ff)" : "var(--vscode-panel-border, #3f3f3f)"}`, background: target === id ? "var(--vscode-list-activeSelectionBackground, #094771)" : "var(--vscode-editorWidget-background, #252526)", color: "var(--vscode-foreground, #ddd)", cursor: "pointer", fontSize: 11, fontWeight: target === id ? 600 : 400 }}>{label}</button>)}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 7, marginBottom: 18 }}>
+        {([ ["decision", "배포 결정"], ["aws", awsReady ? "AWS 연결됨" : "AWS 연결"], ["docker", "Local"], ["actions", "Actions"], ["ec2", "EC2"], ["ecs", "ECS"] ] as [Target, string][]).map(([id, label]) => <button key={id} onClick={() => { setTarget(id); setMessage(""); }} style={{ padding: "9px 6px", borderRadius: 6, border: `1px solid ${target === id ? "var(--vscode-focusBorder, #3794ff)" : "var(--vscode-panel-border, #3f3f3f)"}`, background: target === id ? "var(--vscode-list-activeSelectionBackground, #094771)" : "var(--vscode-editorWidget-background, #252526)", color: id === "aws" && awsReady ? "var(--vscode-charts-green, #4ec9b0)" : "var(--vscode-foreground, #ddd)", cursor: "pointer", fontSize: 11, fontWeight: target === id ? 600 : 400 }}>{label}</button>)}
       </div>
+
+      {target === "aws" && <AwsConnection />}
 
       {target === "decision" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 9, overflow: "hidden", background: "var(--vscode-editorWidget-background, #252526)" }}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--vscode-panel-border, #3f3f3f)", background: "linear-gradient(120deg, rgba(55,148,255,.16), transparent)" }}>

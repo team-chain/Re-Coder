@@ -352,6 +352,14 @@ export interface AwsConfigureInput {
   sessionToken?: string;
 }
 
+/** 저장 없이 STS 검증에만 쓰는 AWS 입력값. */
+export interface AwsConnectInput {
+  accessKeyId: string;
+  secretAccessKey: string;
+  region?: string;
+  sessionToken?: string;
+}
+
 export interface AwsEcrRepo {
   name: string;
   uri: string;

@@ -3,7 +3,8 @@ ReCoder Core — AWS Credentials & Status Routes (§S-2 보강)
 
 AWS Deploy Ready 활성화를 위한 자격증명 관리 엔드포인트.
 - /api/aws/status: STS GetCallerIdentity 로 현재 자격증명 검증
-- /api/aws/configure: 자격증명 저장 + 즉시 검증 + diagnostics 캐시 무효화
+- /api/aws/connect: 자격증명을 저장하지 않고 STS로 검증 (VS Code SecretStorage용)
+- /api/aws/configure: 레거시 호환용 자격증명 저장 + 즉시 검증
 - /api/aws/clear: 저장된 자격증명 제거
 - /api/aws/profiles: ~/.aws/credentials 의 profile 목록
 - /api/aws/ecr/repos: ECR 레포지토리 목록 (자격증명 sanity-check 용)
@@ -78,6 +79,19 @@ class AwsConfigureRequest(BaseModel):
     profile: str = "recoder"
     storage: str = "recoder"  # "recoder" | "aws_credentials_file"
     session_token: str = ""   # 임시 자격증명용 (선택)
+
+
+class AwsConnectRequest(BaseModel):
+    """VS Code SecretStorage에 보관하기 전, STS로 키만 검증하는 요청.
+
+    이 경로는 파일이나 Core 설정에 자격증명을 기록하지 않는다. 검증에 필요한
+    boto3 세션은 요청 중에만 환경변수로 설정하고, 응답 전 원래 상태로 복원한다.
+    """
+
+    access_key_id: str = Field(..., min_length=16, max_length=128)
+    secret_access_key: str = Field(..., min_length=8, max_length=256)
+    region: str = ""
+    session_token: str = ""
 
 
 class AwsIdentity(BaseModel):
@@ -385,9 +399,64 @@ def _load_into_process_if_needed() -> None:
     )
 
 
+def _environment_snapshot() -> tuple[dict[str, Optional[str]], Optional[str]]:
+    """검증용 임시 환경변수를 원상 복구하기 위한 스냅샷."""
+    return (
+        {
+            "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID"),
+            "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY"),
+            "AWS_SESSION_TOKEN": os.environ.get("AWS_SESSION_TOKEN"),
+            "AWS_REGION": os.environ.get("AWS_REGION"),
+            "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION"),
+            "AWS_PROFILE": os.environ.get("AWS_PROFILE"),
+        },
+        _active_profile,
+    )
+
+
+def _restore_environment(snapshot: dict[str, Optional[str]], profile: Optional[str]) -> None:
+    """_environment_snapshot()으로 만든 상태를 정확히 복구한다."""
+    global _active_profile
+    for key, value in snapshot.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    _active_profile = profile
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+@router.post("/api/aws/connect", response_model=AwsStatus)
+async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
+    """AWS 키의 유효성만 STS로 확인한다. 어떤 파일에도 키를 저장하지 않는다."""
+    region = (req.region or DEFAULT_REGION).strip()
+    snapshot, prior_profile = _environment_snapshot()
+    try:
+        # boto3의 표준 credential chain을 그대로 써서 임시/장기 자격증명 모두 검증한다.
+        _apply_to_process_env(
+            access_key_id=req.access_key_id,
+            secret_access_key=req.secret_access_key,
+            region=region,
+            profile="",
+            session_token=req.session_token,
+        )
+        identity = _call_sts_get_caller_identity(profile=None, region=region)
+    finally:
+        _restore_environment(snapshot, prior_profile)
+
+    return AwsStatus(
+        ready=True,
+        identity=AwsIdentity(**identity),
+        region=region,
+        profile="",
+        access_key_last4=_mask_key(req.access_key_id),
+        storage="secret_storage",
+        message="AWS 자격증명이 유효합니다. VS Code 보안 금고에 저장할 수 있습니다.",
+    )
 
 
 @router.get("/api/aws/status", response_model=AwsStatus)
