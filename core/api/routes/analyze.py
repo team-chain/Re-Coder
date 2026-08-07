@@ -633,6 +633,7 @@ class CodePlanRequest(BaseModel):
     workspace_path: str = ""
     open_file_path: str = ""
     open_file_content: str = ""
+    context_files: list = []
     target_folder: str = ""
 
 
@@ -746,6 +747,7 @@ async def code_plan_route(body: CodePlanRequest) -> dict:
             instruction=body.instruction,
             session_id=_uuid.uuid4().hex[:8],
             open_file=open_file,
+            context_files=body.context_files or [],
             target_folder=body.target_folder or "",
             project_root=body.workspace_path or "",
         )

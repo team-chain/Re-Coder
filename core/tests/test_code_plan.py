@@ -13,6 +13,7 @@ LLM 호출은 code_agent.get_router 를 가짜 라우터로 monkeypatch 해서 �
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -206,6 +207,24 @@ def test_generate_plan_trivial_request_can_return_empty_decisions(monkeypatch):
     assert result["decisions"] == []
 
 
+def test_generate_plan_includes_attached_context_files_in_prompt(monkeypatch):
+    """첨부한 아키텍처 제약이 plan 단계의 LLM 프롬프트까지 전달돼야 한다."""
+    fake = _FakeRouter([json.dumps({"decisions": []})])
+    monkeypatch.setattr(code_agent, "get_router", lambda: fake)
+    context_files = [{
+        "path": "docs/architecture.md",
+        "content": "데이터 저장소는 PostgreSQL만 사용한다. SQLite는 사용 금지.",
+    }]
+
+    code_agent.generate_plan("사용자 저장 기능을 추가해줘", context_files=context_files)
+
+    prompt = fake.calls[0]["prompt"]
+    assert "사용자가 첨부한 참고 파일" in prompt
+    assert "docs/architecture.md" in prompt
+    assert "PostgreSQL만 사용한다" in prompt
+    assert "모순되는 선택지는 추천하지 마세요" in prompt
+
+
 def test_generate_plan_empty_instruction_raises():
     with pytest.raises(ValueError):
         code_agent.generate_plan("   ")
@@ -224,3 +243,34 @@ def test_code_plan_route_registered():
     ]
     assert matches, "POST /api/code/plan 라우트가 등록되어 있지 않음"
     assert "POST" in matches[0].methods
+
+
+def test_code_plan_request_accepts_context_files():
+    from api.routes.analyze import CodePlanRequest
+
+    request = CodePlanRequest(
+        instruction="계획 세워줘",
+        context_files=[{"path": "docs/architecture.md", "content": "PostgreSQL 사용"}],
+    )
+
+    assert request.context_files == [{"path": "docs/architecture.md", "content": "PostgreSQL 사용"}]
+
+
+def test_code_plan_route_forwards_context_files(monkeypatch):
+    from api.routes import analyze as analyze_routes
+
+    captured: dict = {}
+
+    def fake_generate_plan(**kwargs):
+        captured.update(kwargs)
+        return {"decisions": [], "model": "fake-model"}
+
+    monkeypatch.setattr(code_agent, "generate_plan", fake_generate_plan)
+    context_files = [{"path": "docs/architecture.md", "content": "PostgreSQL 사용"}]
+    result = asyncio.run(analyze_routes.code_plan_route(analyze_routes.CodePlanRequest(
+        instruction="계획 세워줘",
+        context_files=context_files,
+    )))
+
+    assert result["decisions"] == []
+    assert captured["context_files"] == context_files

@@ -936,6 +936,7 @@ def _build_plan_prompt(
     existing_files: list[str],
     open_file: dict | None,
     target_folder: str = "",
+    context_files: list[dict] | None = None,
 ) -> str:
     """/api/code/plan 용 프롬프트 — 코드가 아니라 '설계 결정 선택지'를 요구한다."""
     tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
@@ -952,6 +953,17 @@ def _build_plan_prompt(
             f"```\n{body}\n```\n"
         )
 
+    ctx_block = ""
+    for cf in (context_files or [])[:6]:
+        body = (cf.get("content") or "")[:_MAX_PROMPT_BYTES]
+        if body.strip():
+            ctx_block += f"\n[참고 파일] {cf.get('path', '?')}\n```\n{body}\n```\n"
+    if ctx_block:
+        ctx_block = (
+            "\n사용자가 첨부한 참고 파일입니다. 파일의 아키텍처 제약과 기존 선택을 "
+            "반드시 반영하고, 이 내용과 모순되는 선택지는 추천하지 마세요:\n" + ctx_block
+        )
+
     return f"""당신은 VSCode 안에서 동작하는 AI-DLC(AI 개발 라이프사이클) 설계 도우미입니다.
 사용자 요청을 코드로 바로 구현하지 말고, 구현하기 전에 사람이 승인해야 할 "설계 결정"을 선택지로 제시하세요.
 
@@ -965,7 +977,7 @@ def _build_plan_prompt(
 
 기존 파일 목록:
 {tree}
-{folder_block}{open_block}
+{folder_block}{open_block}{ctx_block}
 사용자 요청:
 {instruction}
 
@@ -992,7 +1004,6 @@ def generate_plan(
     session_id: str = "",
     open_file: dict | None = None,
     target_folder: str = "",
-    project_root: str = "",
 ) -> dict:
     """
     자연어 instruction → "설계 결정" 목록 (코드 아님).
@@ -1016,7 +1027,13 @@ def generate_plan(
     existing = _list_project_files(root)
     print(f"[code_agent] 설계 결정 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
-    prompt = _build_plan_prompt(instruction, existing, open_file, target_folder)
+    prompt = _build_plan_prompt(
+        instruction,
+        existing,
+        open_file,
+        context_files=context_files,
+        target_folder=target_folder,
+    )
 
     try:
         llm_resp = get_router().call(
