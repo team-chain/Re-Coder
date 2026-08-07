@@ -29,6 +29,17 @@ interface SpawnSpec {
 }
 
 const SHUTDOWN_GRACE_MS = 5000;
+const AWS_ACCESS_KEY_SECRET = 'recoder.aws.accessKeyId';
+const AWS_SECRET_KEY_SECRET = 'recoder.aws.secretAccessKey';
+const AWS_REGION_SECRET = 'recoder.aws.region';
+const AWS_SESSION_TOKEN_SECRET = 'recoder.aws.sessionToken';
+
+export interface AwsSecretCredentials {
+    accessKeyId: string;
+    secretAccessKey: string;
+    region: string;
+    sessionToken?: string;
+}
 
 export class CoreManager {
     private static instance: CoreManager;
@@ -193,6 +204,60 @@ export class CoreManager {
         return {};
     }
 
+    /**
+     * VS Code OS 보안 저장소에서 읽은 AWS 키만 Core 프로세스에 전달한다.
+     * 파일이나 workspace 설정에는 키를 쓰지 않는다.
+     */
+    private async _awsEnv(): Promise<Record<string, string>> {
+        try {
+            const [accessKeyId, secretAccessKey, storedRegion, sessionToken] = await Promise.all([
+                this.extensionContext.secrets.get(AWS_ACCESS_KEY_SECRET),
+                this.extensionContext.secrets.get(AWS_SECRET_KEY_SECRET),
+                this.extensionContext.secrets.get(AWS_REGION_SECRET),
+                this.extensionContext.secrets.get(AWS_SESSION_TOKEN_SECRET),
+            ]);
+            if (!accessKeyId || !secretAccessKey) { return {}; }
+            const region = storedRegion || 'ap-northeast-2';
+            return {
+                AWS_ACCESS_KEY_ID: accessKeyId,
+                AWS_SECRET_ACCESS_KEY: secretAccessKey,
+                AWS_REGION: region,
+                AWS_DEFAULT_REGION: region,
+                ...(sessionToken ? { AWS_SESSION_TOKEN: sessionToken } : {}),
+            };
+        } catch {
+            return {};
+        }
+    }
+
+    /** STS 검증이 끝난 자격증명만 VS Code SecretStorage에 보관한다. */
+    async storeAwsCredentials(credentials: AwsSecretCredentials): Promise<void> {
+        await this.extensionContext.secrets.store(AWS_ACCESS_KEY_SECRET, credentials.accessKeyId);
+        await this.extensionContext.secrets.store(AWS_SECRET_KEY_SECRET, credentials.secretAccessKey);
+        await this.extensionContext.secrets.store(AWS_REGION_SECRET, credentials.region || 'ap-northeast-2');
+        if (credentials.sessionToken) {
+            await this.extensionContext.secrets.store(AWS_SESSION_TOKEN_SECRET, credentials.sessionToken);
+        } else {
+            await this.extensionContext.secrets.delete(AWS_SESSION_TOKEN_SECRET);
+        }
+    }
+
+    /** SecretStorage의 AWS 자격증명을 제거한다. */
+    async clearAwsCredentials(): Promise<void> {
+        await Promise.all([
+            this.extensionContext.secrets.delete(AWS_ACCESS_KEY_SECRET),
+            this.extensionContext.secrets.delete(AWS_SECRET_KEY_SECRET),
+            this.extensionContext.secrets.delete(AWS_REGION_SECRET),
+            this.extensionContext.secrets.delete(AWS_SESSION_TOKEN_SECRET),
+        ]);
+    }
+
+    /** 보안 금고의 변경값을 현재 Core에도 반영한다. */
+    async restart(): Promise<CoreClient> {
+        await this.shutdown(true);
+        return this.ensureRunning();
+    }
+
     private async spawnCore(): Promise<void> {
         this.isSpawning = true;
         try {
@@ -211,10 +276,10 @@ export class CoreManager {
 
             // 게이트웨이 모드: 설정 URL + 저장된 학생 토큰이 있으면 Core 에 env 주입 →
             // Core 의 provider_router 가 Bedrock 직접호출 대신 운영자 게이트웨이를 사용.
-            const gatewayEnv = await this._gatewayEnv();
+            const [gatewayEnv, awsEnv] = await Promise.all([this._gatewayEnv(), this._awsEnv()]);
 
             this.coreProcess = spawn(spec.command, args, {
-                env: { ...process.env, ...gatewayEnv },
+                env: { ...process.env, ...gatewayEnv, ...awsEnv },
                 detached: false,
                 stdio: ['ignore', 'pipe', 'pipe'],
                 cwd: spec.cwd,

@@ -285,7 +285,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // ── Command: AWS Credentials Configure (native input boxes) ─────────────
     // showInputBox 3단계로 자격증명 수집 → Core 가 STS GetCallerIdentity 로 검증.
-    // 입력 즉시 ~/.recoder/aws_credentials.json (0600) 에 저장 후 진단 자동 갱신.
+    // 검증을 통과한 키만 VS Code SecretStorage(OS 보안 저장소)에 보관한다.
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.awsConfigure', async () => {
             await ensureCoreRunning(coreManager, sidebarProvider);
@@ -321,12 +321,18 @@ export function activate(context: vscode.ExtensionContext): void {
             await vscode.window.withProgress(
                 { location: vscode.ProgressLocation.Notification, title: 'AWS 자격증명 검증 중…' },
                 async () => {
-                    const result = await apiClient.configureAws({
+                    const result = await apiClient.connectAws({
                         accessKeyId: accessKey.trim(),
                         secretAccessKey: secret.trim(),
                         region: region.trim(),
                     });
                     if (result.ready) {
+                        await coreManager.storeAwsCredentials({
+                            accessKeyId: accessKey.trim(),
+                            secretAccessKey: secret.trim(),
+                            region: region.trim(),
+                        });
+                        await coreManager.restart();
                         const acct = result.identity?.account ?? 'unknown';
                         vscode.window.showInformationMessage(
                             `AWS 연결 완료 (account ${acct}, region ${region.trim()})`,
@@ -345,14 +351,14 @@ export function activate(context: vscode.ExtensionContext): void {
     // ── Command: AWS Credentials Clear ──────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.awsClear', async () => {
-            await ensureCoreRunning(coreManager, sidebarProvider);
             const confirm = await vscode.window.showWarningMessage(
-                '저장된 AWS 자격증명을 모두 삭제하시겠습니까?',
+                'VS Code 보안 금고에 저장된 AWS 자격증명을 삭제하시겠습니까?',
                 { modal: true },
                 '삭제',
             );
             if (confirm !== '삭제') { return; }
-            await apiClient.clearAws();
+            await coreManager.clearAwsCredentials();
+            await coreManager.restart();
             vscode.window.showInformationMessage('AWS 자격증명 삭제 완료');
             sidebarProvider.triggerDiagnostics();
         })
