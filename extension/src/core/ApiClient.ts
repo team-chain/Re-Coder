@@ -70,6 +70,19 @@ export interface ChatResult {
     model: string;
 }
 
+export interface DeployPreflightResult {
+    app_kind: 'server' | 'static' | 'unknown';
+    summary: string;
+    evidence: string[];
+    recommended_target: 'ecs' | 's3' | 'local';
+}
+
+export interface DeploymentDecisionResult {
+    target: 'ecs' | 's3' | 'local';
+    next_view: 'ecs' | 's3' | 'docker';
+    adr: { file: string; content: string };
+}
+
 /** 사용자가 결정 카드(QuickPick)에서 고른 결과 — /api/code/generate 로 그대로 전달. */
 export interface CodeDecisionChoice {
     id: string;
@@ -233,6 +246,28 @@ export class ApiClient {
         };
         const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 60000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설계 결정 생성 실패'); }
+        return resp.data;
+    }
+
+    async getDeployPreflight(workspacePath: string): Promise<DeployPreflightResult> {
+        const resp = await this.request<DeployPreflightResult>('POST', '/api/deploy/preflight', {
+            workspace_path: workspacePath,
+        });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
+        return resp.data;
+    }
+
+    async recordDeploymentDecision(
+        workspacePath: string,
+        target: 'ecs' | 's3' | 'local',
+        evidence: string[],
+    ): Promise<DeploymentDecisionResult> {
+        const resp = await this.request<DeploymentDecisionResult>('POST', '/api/deploy/decision', {
+            workspace_path: workspacePath,
+            target,
+            evidence,
+        });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 대상 결정 기록 실패'); }
         return resp.data;
     }
 
