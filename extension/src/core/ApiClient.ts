@@ -219,6 +219,7 @@ export class ApiClient {
         opts?: {
             workspacePath?: string;
             openFile?: { path: string; content: string };
+            contextFiles?: Array<{ path: string; content: string }>;
             targetFolder?: string;
         }
     ): Promise<CodePlanResult> {
@@ -227,6 +228,7 @@ export class ApiClient {
             workspace_path: opts?.workspacePath ?? '',
             open_file_path: opts?.openFile?.path ?? '',
             open_file_content: opts?.openFile?.content ?? '',
+            context_files: opts?.contextFiles ?? [],
             target_folder: opts?.targetFolder ?? '',
         };
         const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 60000);
