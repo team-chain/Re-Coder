@@ -25,7 +25,11 @@ from schemas import AnalyzeRequest, FilePatch, PatchProposal, RiskLevel
 
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     from adr import (
+        ADR_DIR,
+        MAX_ALTERNATIVES,
         MAX_DECISIONS,
+        MAX_FIELD_CHARS,
+        MAX_LIST_ITEMS,
         RESERVED_ID_PREFIX,
         NormalizedDecision,
         build_adr_ops,
@@ -34,7 +38,11 @@ try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     )
 except ImportError:  # pragma: no cover
     from core.adr import (
+        ADR_DIR,
+        MAX_ALTERNATIVES,
         MAX_DECISIONS,
+        MAX_FIELD_CHARS,
+        MAX_LIST_ITEMS,
         RESERVED_ID_PREFIX,
         NormalizedDecision,
         build_adr_ops,
@@ -1011,6 +1019,13 @@ APPROVAL_INVALID = "invalid"
 CONFIRM_PROCEED_KEY = "proceed"
 CONFIRM_CANCEL_KEY = "cancel"
 
+# 결정 하나가 제시할 선택지 개수.
+#  - 최소 2: 하나뿐이면 '고른다'가 성립하지 않는다(승인이 아니라 통과 의식).
+#  - 최대 MAX_ALTERNATIVES+1: 기록 단계가 '검토한 대안'을 그만큼만 남기므로,
+#    더 제시하면 사용자가 본 대안이 ADR 에서 말없이 사라진다.
+MIN_OPTIONS_PER_DECISION = 2
+MAX_OPTIONS_PER_DECISION = MAX_ALTERNATIVES + 1
+
 
 def _chosen_key(decision: dict) -> str:
     """사용자가 고른 키 (웹뷰가 쓰는 세 가지 필드명 허용) — **정규형으로** 반환.
@@ -1049,6 +1064,44 @@ def _is_cancelled(decisions: list | None) -> bool:
     사용자가 명시적으로 취소했는데 코드를 생성하면 '사람 승인' 전제가 깨진다.
     """
     return _approval_state(decisions) == APPROVAL_CANCELLED
+
+
+def _clean_str_list(values: object) -> list[str]:
+    """장점/단점 목록을 기록 단계와 같은 형태(정규형·같은 개수 상한)로 정리한다.
+
+    여기서 맞춰두지 않으면 `_clean_list` 가 나중에 잘라내, 사용자가 카드에서
+    본 항목이 ADR 에서 말없이 사라진다. 숫자·불리언이 섞여 와도 여기서 흡수한다.
+    """
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for v in values:
+        cleaned = canonical_key(v)
+        if cleaned:
+            out.append(cleaned)
+        if len(out) >= MAX_LIST_ITEMS:
+            break
+    return out
+
+
+def _unique_canonical_id(base: str, seen: set[str]) -> str:
+    """정규형 기준으로 유일한 결정 id 를 만든다.
+
+    접미사를 그냥 이어 붙이면 길이 상한(MAX_FIELD_CHARS)을 넘어, 게이트가
+    다시 정규화할 때 잘려 원래 id 로 되돌아간다. 그러면 웹뷰에는 서로 다른
+    카드로 보이는데 게이트는 중복으로 판정해 **정상 승인이 거절**된다.
+    그래서 접미사 자리를 미리 비워두고, 최종 정규형으로 유일성을 확인한다.
+    """
+    base = canonical_key(base)
+    if base and base not in seen:
+        return base
+    suffix = 2
+    while True:
+        tail = f"-{suffix}"
+        candidate = canonical_key(base[:MAX_FIELD_CHARS - len(tail)] + tail)
+        if candidate and candidate not in seen:
+            return candidate
+        suffix += 1
 
 
 def _decision_is_valid(d: object) -> bool:
@@ -1238,15 +1291,20 @@ def generate_plan(
 
     data = _extract_json(raw)
 
+    raw_decisions = data.get("decisions") or []
+    if not isinstance(raw_decisions, list):
+        raw_decisions = []
     decisions_out: list[dict] = []
     seen_ids: set[str] = set()
-    for d in (data.get("decisions") or []):
+    for d in raw_decisions:
         if not isinstance(d, dict):
             continue
         # 정규형으로 발급한다 — 게이트·기록이 쓰는 비교 형태와 처음부터 일치시켜
         # "제시한 키"와 "해석되는 키"가 갈라지지 않게 한다(adr.canonical_key).
         did = canonical_key(d.get("id"))
-        question = (d.get("question") or "").strip()
+        # question 도 정규형으로 — 기록 단계가 어차피 같은 상한으로 자르므로,
+        # 여기서 맞춰두지 않으면 "사용자가 본 질문"과 "ADR 제목"이 달라진다.
+        question = canonical_key(d.get("question"))
         if not did or not question:
             continue
         # FR-02-05 — 예약 네임스페이스(`__`)는 내부 확인 카드 전용이다.
@@ -1261,11 +1319,7 @@ def generate_plan(
         # 코드 생성과 ADR 에 실린다. 모델이 같은 id 를 두 번 주는 경우와
         # 위 재배치가 기존 id 와 충돌하는 경우(`__auth` + `d-auth`) 둘 다
         # 여기서 걸러, plan 전체에서 id 유일성을 보장한다.
-        if did in seen_ids:
-            suffix = 2
-            while f"{did}-{suffix}" in seen_ids:
-                suffix += 1
-            did = f"{did}-{suffix}"
+        did = _unique_canonical_id(did, seen_ids)
         seen_ids.add(did)
         raw_options = d.get("options") or []
         options_out: list[dict] = []
@@ -1284,17 +1338,26 @@ def generate_plan(
             seen_keys.add(key)
             recommended = bool(opt.get("recommended", False))
             has_recommended = has_recommended or recommended
-            pros = opt.get("pros") or []
-            cons = opt.get("cons") or []
             options_out.append({
                 "key": key,
-                "label": (opt.get("label") or key).strip(),
-                "summary": (opt.get("summary") or "").strip(),
-                "pros": [str(p) for p in pros if str(p).strip()],
-                "cons": [str(c) for c in cons if str(c).strip()],
+                # 라벨·요약·장단점도 기록 단계와 같은 형태로 맞춘다. 여기서
+                # 자르지 않으면 사용자가 본 문구와 ADR 문구가 달라지고,
+                # 숫자·불리언이 섞여 와도 여기서 문자열로 정리된다.
+                "label": canonical_key(opt.get("label")) or key,
+                "summary": canonical_key(opt.get("summary")),
+                "pros": _clean_str_list(opt.get("pros")),
+                "cons": _clean_str_list(opt.get("cons")),
                 "recommended": recommended,
             })
-        if not options_out:
+            if len(options_out) >= MAX_OPTIONS_PER_DECISION:
+                # 기록 단계는 '검토한 대안'을 MAX_ALTERNATIVES 개까지만 남긴다.
+                # 그보다 많이 제시하면 사용자가 본 대안이 ADR 에서 말없이 사라진다.
+                break
+        if len(options_out) < MIN_OPTIONS_PER_DECISION:
+            # 선택지가 하나뿐이면 '고를 수 있다'는 전제가 성립하지 않는다.
+            # 사용자는 유일한 항목을 누를 수밖에 없고, 그건 승인이 아니라
+            # 통과 의식이다. 정규형 충돌로 하나만 남은 경우도 여기서 걸린다.
+            print(f"[code_agent] 선택지가 {len(options_out)}개뿐이라 결정 제외: {did[:40]!r}")
             continue
         if not has_recommended:
             # 모델이 recommended 를 하나도 표시하지 않았으면 첫 옵션을 기본 추천으로.
@@ -1303,16 +1366,18 @@ def generate_plan(
             "id": did,
             "question": question,
             "options": options_out,
-            "impact": (d.get("impact") or "").strip(),
+            "impact": canonical_key(d.get("impact")),
         })
         # 정규화(normalize_decisions)는 MAX_DECISIONS 를 넘는 결정을 잘라낸다.
         # 그보다 많이 제시하면 사용자가 승인한 결정 중 일부가 코드에도 ADR 에도
         # 반영되지 않는다. 애초에 제시 단계에서 같은 상한을 지켜 그 상황을 막고,
         # 잘린 사실은 로그로 드러낸다(조용히 사라지지 않게).
         if len(decisions_out) >= MAX_DECISIONS:
-            dropped = len(data.get("decisions") or []) - len(decisions_out)
-            if dropped > 0:
-                print(f"[code_agent] 결정 {dropped}개가 상한({MAX_DECISIONS})을 넘어 제외됨")
+            # 상한 때문에 못 본 것만 센다 (형식 불량으로 걸러진 것과 섞지 않는다).
+            seen_so_far = raw_decisions.index(d) + 1
+            over_cap = len(raw_decisions) - seen_so_far
+            if over_cap > 0:
+                print(f"[code_agent] 결정 {over_cap}개가 상한({MAX_DECISIONS})을 넘어 제외됨")
             break
 
     # FR-02-05 (ADR-D5 항상 선택지 · D6 사람 승인)
@@ -1436,6 +1501,19 @@ def generate_code(
     # ADR 영속화 — 승인된 결정을 docs/adr 에 구조화 기록으로 남긴다(코드와 동시 산출).
     # 시크릿 검사 '앞'에 넣어야 한다: ADR 본문에도 사용자 요청문이 들어가므로
     # 여기에 키가 섞여 있으면 경고 없이 파일로 굳어버린다.
+    # docs/adr 은 '사람이 승인한 결정의 기록' 전용 공간이다. LLM 이 만든 코드 op
+    # 가 같은 경로를 쓰면 기록이 코드로 덮이거나 그 반대가 된다(적용 순서에 따라
+    # 결과가 달라짐). 기록이 우선이므로 침범하는 코드 op 는 걷어낸다.
+    def _invades_adr_dir(op: dict) -> bool:
+        path = str(op.get("file") or "").replace("\\", "/").lstrip("./")
+        return path.startswith(f"{ADR_DIR}/")
+
+    intruders = [op for op in ops_out if _invades_adr_dir(op)]
+    if intruders:
+        for op in intruders:
+            print(f"[code_agent] ADR 기록 영역을 침범한 코드 op 제외: {op.get('file')!r}")
+        ops_out = [op for op in ops_out if not _invades_adr_dir(op)]
+
     adr_ops = build_adr_ops(norm_decisions, instruction, root, target_folder)
     if adr_ops:
         ops_out.extend(adr_ops)
