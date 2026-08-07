@@ -739,7 +739,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     secretAccessKey?: string;
                     region?: string;
                     profile?: string;
-                    storage?: 'recoder' | 'aws_credentials_file';
                     sessionToken?: string;
                 };
                 if (!p.accessKeyId || !p.secretAccessKey) {
@@ -750,18 +749,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 try {
-                    const status = await this._apiClient.configureAws({
+                    // Core는 STS 검증만 한다. 검증 후 키의 영속 보관은 OS 보안
+                    // 저장소(SecretStorage)에서만 이루어져 파일에 평문이 남지 않는다.
+                    const status = await this._apiClient.connectAws({
                         accessKeyId: p.accessKeyId,
                         secretAccessKey: p.secretAccessKey,
                         region: p.region,
-                        profile: p.profile,
-                        storage: p.storage,
                         sessionToken: p.sessionToken,
                     });
-                    this.postMessage('aws.configure.result', { ok: true, status });
-                    this.postMessage('aws.status', status);
-                    // 자격증명 저장 직후 diagnostics 도 즉시 갱신 (Core 가 캐시를 다시 작성하지만
-                    // webview UI 의 readyCheck 까지 동기화시키기 위해 한번 더 트리거).
+                    await this._coreManager.storeAwsCredentials({
+                        accessKeyId: p.accessKeyId,
+                        secretAccessKey: p.secretAccessKey,
+                        region: p.region?.trim() || 'ap-northeast-2',
+                        sessionToken: p.sessionToken,
+                    });
+                    // 새 Core는 SecretStorage에서 주입받는다. 이 재시작으로 현재
+                    // 세션도 재시작 후 상태와 동일한 자격증명을 사용한다.
+                    await this._coreManager.restart();
+                    const connected = await this._apiClient.getAwsStatus();
+                    this.postMessage('aws.configure.result', { ok: true, status: connected });
+                    this.postMessage('aws.status', connected);
                     void this.handleMessage({ type: 'runDiagnostics', payload: {} });
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
@@ -772,7 +779,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'aws.clear': {
                 try {
-                    await this._apiClient.clearAws();
+                    await this._coreManager.clearAwsCredentials();
+                    await this._coreManager.restart();
                     this.postMessage('aws.clear.result', { ok: true });
                     // status / diagnostics 동시 갱신
                     try {
