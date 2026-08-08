@@ -396,6 +396,15 @@ REJECTED_PAYLOADS = [
       "options": [{"key": "a\tb", "label": "고른 것"},
                   {"key": "a b", "label": "안 고른 것"}]}],               # 탭→공백 충돌
     [_card(1), dict(_card(2), id="d1 ")],                   # 공백만 다른 id → 정규형 중복
+    # ↓ plan 이 지키는 구조 제약을 벗어난 카드. 낡거나 망가진 클라이언트가 보내면
+    #   정규화가 초과분을 말없이 잘라내 사용자가 본 것과 기록이 어긋난다.
+    [dict(_card(1), options=[{"key": "a", "label": "A"}])],  # 선택지 1개 → 고를 게 없음
+    [dict(_card(1), chosen_key="k0",
+          options=[{"key": f"k{i}", "label": f"L{i}"} for i in range(7)])],  # 선택지 7개
+    [dict(_card(1), options=[{"key": "a", "label": "A", "pros": [f"p{i}" for i in range(9)]},
+                             {"key": "b", "label": "B"}])],  # 장점 9개 → 5개로 잘림
+    [{"id": "d1", "chosen_key": "a",                        # 질문 없음 → ADR 제목이 id 로 대체
+      "options": [{"key": "a", "label": "A"}, {"key": "b", "label": "B"}]}],
 ]
 
 
@@ -530,8 +539,47 @@ def test_adr_marks_a_truncated_request_instead_of_hiding_it():
     assert "생략" not in short
 
 
+def test_gate_enforces_the_same_option_limits_plan_does():
+    """[불변식] 발급 쪽 구조 제약과 검증 쪽 제약은 같아야 한다.
+
+    게이트가 개수를 확인하지 않으면, 제약을 벗어난 카드를 보낸 클라이언트의
+    요청이 통과하고 정규화가 초과분을 말없이 잘라낸다 — 사용자가 봤다는
+    대안·근거가 ADR 에서 사라지거나, 고를 것이 하나뿐인 카드가 승인이 된다.
+    """
+    too_few = dict(_card(1), options=[{"key": "a", "label": "A"}])
+    too_many = dict(_card(1), chosen_key="k0",
+                    options=[{"key": f"k{i}", "label": f"L{i}"}
+                             for i in range(ca.MAX_OPTIONS_PER_DECISION + 2)])
+    assert ca._approval_state([too_few]) == ca.APPROVAL_INVALID
+    assert ca._approval_state([too_many]) == ca.APPROVAL_INVALID
+
+    # 경계값은 통과해야 한다 (과도한 조임 방지).
+    for n in range(ca.MIN_OPTIONS_PER_DECISION, ca.MAX_OPTIONS_PER_DECISION + 1):
+        ok = dict(_card(1), chosen_key="k0",
+                  options=[{"key": f"k{i}", "label": f"L{i}"} for i in range(n)])
+        assert ca._approval_state([ok]) == ca.APPROVAL_APPROVED, f"선택지 {n}개가 거절됨"
+
+
+def test_gate_rejects_pros_cons_that_normalization_would_truncate():
+    over = dict(_card(1), options=[
+        {"key": "a", "label": "A", "cons": [f"c{i}" for i in range(adr.MAX_LIST_ITEMS + 1)]},
+        {"key": "b", "label": "B"}])
+    assert ca._approval_state([over]) == ca.APPROVAL_INVALID
+    exact = dict(_card(1), options=[
+        {"key": "a", "label": "A", "cons": [f"c{i}" for i in range(adr.MAX_LIST_ITEMS)]},
+        {"key": "b", "label": "B"}])
+    assert ca._approval_state([exact]) == ca.APPROVAL_APPROVED
+
+
+def test_gate_requires_the_question_the_user_approved():
+    """질문이 없으면 ADR 제목이 id 로 대체돼 승인한 질문이 기록에서 사라진다."""
+    no_q = {"id": "d1", "chosen_key": "a",
+            "options": [{"key": "a", "label": "A"}, {"key": "b", "label": "B"}]}
+    assert ca._approval_state([no_q]) == ca.APPROVAL_INVALID
+
+
 def test_generated_code_ops_cannot_overwrite_the_adr_record(monkeypatch, tmp_path):
-    """LLM 이 docs/adr 경로 파일을 만들어도 결정 기록을 덮어쓰지 못한다."""
+    """LLM 이 ADR 기록 파일을 만들어도 결정 기록을 덮어쓰지 못한다."""
     payload = json.dumps({"ops": [
         {"action": "create", "file": "docs/adr/ADR-001-storage.md", "content": "가짜"},
         {"action": "create", "file": "app.py", "content": "x=1"},
@@ -544,6 +592,38 @@ def test_generated_code_ops_cannot_overwrite_the_adr_record(monkeypatch, tmp_pat
     assert "app.py" in files
     adr_op = next(op for op in result["ops"] if op["file"].startswith(adr.ADR_DIR))
     assert adr_op.get("is_adr") is True, "남은 것은 진짜 ADR 기록이어야 함"
+
+
+def test_filtering_every_op_reports_failure_instead_of_empty_success(monkeypatch, tmp_path):
+    """[핵심] 걸러내고 나니 적용할 게 없으면 성공으로 반환하면 안 된다.
+
+    그대로 두면 확장은 "생성 완료 · 변경 0건"을 띄우고, 사용자는 요청이
+    처리된 줄 안다. 실제로는 요청한 변경이 통째로 사라진 것이다.
+    """
+    payload = json.dumps({"ops": [
+        {"action": "create", "file": "docs/adr/ADR-001-storage.md", "content": "덮어쓰기"},
+    ], "summary": "s"})
+    monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([payload]))
+    confirm = dict(ca._build_confirm_decision("ADR 고쳐줘"), chosen_key="proceed")
+
+    with pytest.raises(ValueError, match="적용할 수 있는 것이 없습니다"):
+        ca.generate_code("ADR 고쳐줘", decisions=[confirm], project_root=str(tmp_path))
+
+
+def test_hand_written_docs_in_the_adr_folder_stay_editable(monkeypatch, tmp_path):
+    """생성 기록(ADR-NNN-*.md)만 보호한다 — README 같은 손 문서는 수정 가능해야 한다.
+
+    디렉터리 전체를 막으면 "ADR 규칙 문서 고쳐줘"가 조용히 아무것도 안 하고
+    성공으로 끝난다.
+    """
+    payload = json.dumps({"ops": [
+        {"action": "update", "file": "docs/adr/README.md", "content": "규칙 보강"},
+    ], "summary": "s"})
+    monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([payload]))
+    confirm = dict(ca._build_confirm_decision("ADR 규칙 문서 보강"), chosen_key="proceed")
+
+    result = ca.generate_code("ADR 규칙 문서 보강", decisions=[confirm], project_root=str(tmp_path))
+    assert [op["file"] for op in result["ops"]] == ["docs/adr/README.md"]
 
 
 def test_gate_and_normalization_compare_keys_the_same_way():
