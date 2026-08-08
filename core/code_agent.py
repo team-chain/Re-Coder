@@ -1105,8 +1105,17 @@ def _unique_canonical_id(base: str, seen: set[str]) -> str:
 
 
 def _decision_is_valid(d: object) -> bool:
-    """결정 하나가 '사람이 제시된 선택지 중 하나를 골랐다'를 만족하는가."""
-    from adr import CONFIRM_DECISION_ID
+    """제출된 카드가 **plan 이 발급할 수 있었던 모양**이고, 그 카드가 제시한
+    선택지 중 정확히 하나를 골랐는가.
+
+    "고른 키가 목록에 있는가"만 봐서는 부족하다. `generate_plan` 이 지키는
+    구조 제약(선택지 2~5개, 장단점 5개 이하, 질문 존재)을 게이트가 다시
+    확인하지 않으면, 낡거나 망가진 클라이언트가 그 제약을 벗어난 카드를
+    보냈을 때 **정규화가 초과분을 말없이 잘라낸다**. 사용자가 봤다고 주장하는
+    대안이 ADR 에서 사라지거나, 선택지가 하나뿐인 '고를 수 없는 카드'가
+    승인으로 처리된다. 발급 쪽 제약과 검증 쪽 제약은 반드시 같아야 한다.
+    """
+    from adr import CONFIRM_DECISION_ID, MAX_LIST_ITEMS
 
     if not isinstance(d, dict):
         return False
@@ -1122,12 +1131,33 @@ def _decision_is_valid(d: object) -> bool:
     if did == CONFIRM_DECISION_ID:
         # 확인 카드는 서버가 만든 것이므로 허용 키가 고정이다.
         return chosen.lower() in (CONFIRM_PROCEED_KEY, CONFIRM_CANCEL_KEY)
+
+    if not canonical_key(d.get("question")):
+        # 질문이 없으면 ADR 제목이 id 로 대체된다 — 사용자가 승인한 질문이
+        # 기록에서 사라진다.
+        return False
+
     offered = _offered_key_list(d)
     if len(set(offered)) != len(offered):
         # 정규형이 겹치는 선택지가 둘 이상 — 정규화는 뒤엣것으로 덮어써서
         # 사용자가 고르지 않은 선택지의 라벨·근거를 기록한다. 어느 쪽을 고른
         # 것인지 확정할 수 없으므로 거절한다.
         return False
+    if not (MIN_OPTIONS_PER_DECISION <= len(offered) <= MAX_OPTIONS_PER_DECISION):
+        # 1개면 고를 것이 없고(승인이 아니라 통과 의식),
+        # 상한을 넘으면 정규화가 '검토한 대안'을 잘라 본 대안이 사라진다.
+        return False
+
+    options = d.get("options") if isinstance(d.get("options"), list) else []
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        for field in ("pros", "cons"):
+            values = opt.get(field)
+            if isinstance(values, list) and len(values) > MAX_LIST_ITEMS:
+                # 초과분을 정규화가 잘라내 사용자가 본 근거가 기록에서 빠진다.
+                return False
+
     return chosen in offered
 
 
@@ -1501,18 +1531,32 @@ def generate_code(
     # ADR 영속화 — 승인된 결정을 docs/adr 에 구조화 기록으로 남긴다(코드와 동시 산출).
     # 시크릿 검사 '앞'에 넣어야 한다: ADR 본문에도 사용자 요청문이 들어가므로
     # 여기에 키가 섞여 있으면 경고 없이 파일로 굳어버린다.
-    # docs/adr 은 '사람이 승인한 결정의 기록' 전용 공간이다. LLM 이 만든 코드 op
-    # 가 같은 경로를 쓰면 기록이 코드로 덮이거나 그 반대가 된다(적용 순서에 따라
-    # 결과가 달라짐). 기록이 우선이므로 침범하는 코드 op 는 걷어낸다.
-    def _invades_adr_dir(op: dict) -> bool:
+    # 생성된 ADR 기록 파일(docs/adr/ADR-NNN-*.md)은 '사람이 승인한 결정'의 산물이다.
+    # LLM 이 만든 코드 op 가 같은 경로를 쓰면 기록이 코드로 덮이거나 그 반대가 된다
+    # (적용 순서에 따라 결과가 달라짐). 기록이 우선이므로 침범하는 op 는 걷어낸다.
+    #
+    # 디렉터리 전체가 아니라 **생성 기록 파일명만** 막는다. docs/adr/README.md 같은
+    # 손으로 관리하는 문서까지 막으면 "ADR 규칙 문서 고쳐줘"가 아예 불가능해진다.
+    def _overwrites_adr_record(op: dict) -> bool:
         path = str(op.get("file") or "").replace("\\", "/").lstrip("./")
-        return path.startswith(f"{ADR_DIR}/")
+        if not path.startswith(f"{ADR_DIR}/"):
+            return False
+        return bool(re.match(r"ADR-\d+", path[len(ADR_DIR) + 1:]))
 
-    intruders = [op for op in ops_out if _invades_adr_dir(op)]
+    intruders = [op for op in ops_out if _overwrites_adr_record(op)]
     if intruders:
         for op in intruders:
-            print(f"[code_agent] ADR 기록 영역을 침범한 코드 op 제외: {op.get('file')!r}")
-        ops_out = [op for op in ops_out if not _invades_adr_dir(op)]
+            print(f"[code_agent] ADR 기록을 덮어쓰려는 코드 op 제외: {op.get('file')!r}")
+        ops_out = [op for op in ops_out if not _overwrites_adr_record(op)]
+        if not ops_out:
+            # 걸러내고 나니 적용할 것이 하나도 없다. 이대로 성공으로 반환하면
+            # 확장은 "생성 완료 · 변경 0건"을 띄우고, 사용자는 요청이 처리된
+            # 줄 안다. 실제로는 요청한 변경이 통째로 사라진 것이므로 실패로 알린다.
+            raise ValueError(
+                "요청한 변경이 모두 ADR 기록 파일(docs/adr/ADR-NNN-*.md)을 향해 있어 "
+                "적용할 수 있는 것이 없습니다. ADR 은 승인된 설계 결정에서 자동 생성되며 "
+                "직접 수정 대상이 아닙니다."
+            )
 
     adr_ops = build_adr_ops(norm_decisions, instruction, root, target_folder)
     if adr_ops:
