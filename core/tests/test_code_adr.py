@@ -610,6 +610,36 @@ def test_filtering_every_op_reports_failure_instead_of_empty_success(monkeypatch
         ca.generate_code("ADR 고쳐줘", decisions=[confirm], project_root=str(tmp_path))
 
 
+@pytest.mark.parametrize("path", [
+    "docs/adr/ADR-001-storage.md",       # 그대로
+    "docs/adr/adr-001-storage.md",       # 파일명 소문자 — Windows·macOS 에선 같은 파일
+    "Docs/ADR/ADR-001-storage.md",       # 디렉터리 대소문자
+    "DOCS/ADR/ADR-001-STORAGE.MD",       # 전부 대문자
+    "./docs/adr/ADR-001-storage.md",     # 앞에 ./
+    "docs/adr/../adr/ADR-001-storage.md",  # 돌아가는 경로
+    "docs\\adr\\ADR-001-storage.md",     # 윈도우 구분자
+], ids=["as-is", "lower-file", "mixed-dir", "upper", "dot-slash", "dot-dot", "backslash"])
+def test_adr_record_protection_ignores_path_spelling(monkeypatch, tmp_path, path):
+    """[핵심] 같은 파일을 가리키는 다른 표기로 보호를 우회할 수 없다.
+
+    확장은 op 를 하나씩 독립적으로 쓴다. 대소문자만 다른 op 가 통과해 나중에
+    쓰이면, 대소문자를 구분하지 않는 파일시스템(Windows·macOS)에서는 승인된
+    기록을 그대로 덮어쓴다 — 이 필터가 막으려던 사고가 그대로 난다.
+    """
+    payload = json.dumps({"ops": [
+        {"action": "create", "file": path, "content": "가짜"},
+        {"action": "create", "file": "app.py", "content": "x=1"},
+    ], "summary": "s"})
+    monkeypatch.setattr(ca, "get_router", lambda: _FakeRouter([payload]))
+
+    result = ca.generate_code("만들어줘", decisions=[PLAN_DECISION], project_root=str(tmp_path))
+    # 가짜 내용이 op 로 남아있으면 안 된다 (경로 표기가 무엇이든).
+    assert all(op["content"] != "가짜" for op in result["ops"]), f"{path} 가 걸러지지 않음"
+    assert "app.py" in [op["file"] for op in result["ops"]]
+    adr_ops = [op for op in result["ops"] if op.get("is_adr")]
+    assert len(adr_ops) == 1, "진짜 ADR 기록 하나만 남아야 함"
+
+
 def test_hand_written_docs_in_the_adr_folder_stay_editable(monkeypatch, tmp_path):
     """생성 기록(ADR-NNN-*.md)만 보호한다 — README 같은 손 문서는 수정 가능해야 한다.
 

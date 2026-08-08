@@ -14,6 +14,7 @@ import difflib
 import hashlib
 import json
 import os
+import posixpath
 import re
 import uuid
 from datetime import datetime
@@ -1537,11 +1538,22 @@ def generate_code(
     #
     # 디렉터리 전체가 아니라 **생성 기록 파일명만** 막는다. docs/adr/README.md 같은
     # 손으로 관리하는 문서까지 막으면 "ADR 규칙 문서 고쳐줘"가 아예 불가능해진다.
+    # 비교 전에 경로를 **정규화**해야 한다. 글자 그대로 비교하면 같은 파일을
+    # 가리키는 다른 표기가 전부 빠져나간다:
+    #   - 대소문자: Windows·macOS 에서 `adr-001-x.md` 와 `ADR-001-x.md` 는 같은 파일.
+    #     확장은 op 를 하나씩 독립적으로 쓰므로, 통과된 쪽이 나중에 쓰이면
+    #     승인된 기록을 그대로 덮어쓴다 — 막으려던 사고가 그대로 난다.
+    #   - 우회 경로: `docs/adr/../adr/ADR-001-x.md`, `./docs/adr/...` 도 같은 파일.
     def _overwrites_adr_record(op: dict) -> bool:
-        path = str(op.get("file") or "").replace("\\", "/").lstrip("./")
-        if not path.startswith(f"{ADR_DIR}/"):
+        raw = str(op.get("file") or "").replace("\\", "/")
+        if not raw.strip():
             return False
-        return bool(re.match(r"ADR-\d+", path[len(ADR_DIR) + 1:]))
+        # normpath 로 `.` `..` 를 접고, casefold 로 대소문자를 통일한다.
+        path = posixpath.normpath(raw).lstrip("/").casefold()
+        prefix = f"{ADR_DIR}/".casefold()
+        if not path.startswith(prefix):
+            return False
+        return bool(re.match(r"adr-\d+", path[len(prefix):]))
 
     intruders = [op for op in ops_out if _overwrites_adr_record(op)]
     if intruders:
