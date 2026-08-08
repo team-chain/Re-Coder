@@ -35,6 +35,11 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
+    import aws_policy
+except ImportError:  # pragma: no cover
+    from core import aws_policy
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["aws"])
@@ -743,3 +748,137 @@ async def list_ecr_repos(region: str = "", profile: str = "", max_results: int =
         "profile": resolved_profile or "",
         "repositories": repos,
     }
+
+
+# ---------------------------------------------------------------------------
+# 최소권한 권한표 (FR-04-02 · ADR-D10/D12)
+# ---------------------------------------------------------------------------
+#
+# 사용자가 키를 만들기 **전에** 부르는 엔드포인트다. 자격증명이 없어도
+# 반드시 200 으로 응답해야 한다 — 권한을 몰라서 키를 못 만드는 상황을
+# 없애는 것이 이 기능의 목적이기 때문이다.
+
+
+class AwsPolicyResponse(BaseModel):
+    """복사해 붙일 정책 + 따라 할 순서."""
+    policy: dict
+    policy_json: str          # 콘솔에 그대로 붙여넣을 문자열
+    targets: list[str]
+    action_count: int
+    needs_manual_fill: bool   # 계정/리전 자리표시자가 남아 있는가
+    account_id: str = ""
+    region: str = ""
+    task_execution_role: str = ""   # ECS 작업이 쓸 실행 역할 이름
+    is_academy_account: bool = False  # 학교(AWS Academy) 러너랩 세션인가
+    steps: list[str] = []
+
+
+def _policy_steps(needs_manual_fill: bool, academy: bool = False) -> list[str]:
+    """콘솔에서 따라 할 순서.
+
+    학교(AWS Academy) 계정은 **IAM 사용자를 만들 수 없다.** 실제 러너랩
+    계정에서 확인했다 — `iam:CreateUser` 가 허용되지 않는다. 그런 계정에
+    "사용자를 만드세요"라고 안내하면 3단계에서 막히고, 사용자는 자기가 뭘
+    잘못한 줄 안다. 그래서 안내 자체를 갈라 놓는다.
+    """
+    if academy:
+        return [
+            "학교(AWS Academy) 계정은 IAM 사용자·정책을 만들 수 없습니다. "
+            "아래 정책은 참고용이고, 실제로는 랩이 주는 임시 자격증명을 그대로 씁니다",
+            "러너랩 화면 → AWS Details → AWS CLI → 3줄(액세스 키·비밀 키·세션 토큰) 복사",
+            # 화면으로 안내하면 안 된다. 'AWS 연결' 화면에는 세션 토큰 입력칸이
+            # 없어서(FR-04-01 미비) 3번째 줄이 들어갈 데가 없다. 넣어봐야
+            "그 3줄을 '~/.aws/credentials' 파일에 직접 넣으세요. "
+            "지금 'AWS 연결' 화면에는 세션 토큰 입력칸이 없어 학교 계정 "
+            "자격증명을 넣을 수 없습니다",
+            "region = us-east-1 도 같은 파일에 적으세요. 학교 계정은 이 리전만 됩니다",
+            "랩 세션이 끝나면 자격증명이 만료됩니다. 만료되면 그 3줄을 다시 덮어쓰세요",
+            f"ECS 작업의 실행 역할로는 미리 만들어져 있는 "
+            f"'{aws_policy.ACADEMY_TASK_EXECUTION_ROLE}' 을 씁니다 "
+            f"(학교 계정에는 '{aws_policy.TASK_EXECUTION_ROLE}' 이 없습니다)",
+        ]
+
+    steps = [
+        "AWS 콘솔 → IAM → 정책(Policies) → 정책 생성 → JSON 탭",
+        "아래 정책을 붙여넣고 이름을 'ReCoderMinimal' 로 저장",
+    ]
+    if needs_manual_fill:
+        steps.insert(
+            2,
+            f"정책 안의 {aws_policy.ACCOUNT_PLACEHOLDER} 와 "
+            f"{aws_policy.REGION_PLACEHOLDER} 를 본인 계정 ID·리전으로 바꾸기",
+        )
+    steps += [
+        "IAM → 사용자 → 사용자 생성 → 방금 만든 정책 연결",
+        "해당 사용자에서 액세스 키 발급 (용도: 로컬 코드)",
+        "발급된 액세스 키를 ReCoder 의 'AWS 연결' 화면에 입력",
+    ]
+    return steps
+
+
+#: 학교 계정임을 알아보는 표시. 러너랩은 `voclabs` 역할로 로그인시킨다.
+ACADEMY_ARN_MARKERS = ("assumed-role/voclabs", ":role/LabRole")
+
+
+def _looks_like_academy(arn: str) -> bool:
+    """호출자가 AWS Academy 러너랩 세션인가.
+
+    맞으면 IAM 사용자 생성 안내를 보여줘 봐야 막히기만 한다.
+    """
+    return any(marker in (arn or "") for marker in ACADEMY_ARN_MARKERS)
+
+
+@router.get("/api/aws/policy", response_model=AwsPolicyResponse)
+async def get_minimum_policy(
+    targets: str = "",
+    task_execution_role: str = "",
+) -> AwsPolicyResponse:
+    """ReCoder 가 요구하는 최소권한 IAM 정책을 돌려준다.
+
+    `targets` 는 쉼표로 구분한다 (`ecs,s3,bedrock`). 비우면 전체.
+    이미 자격증명이 연결돼 있으면 계정 ID·리전을 채워 돌려주고,
+    없으면 자리표시자를 남긴 뒤 `needs_manual_fill=True` 로 알린다.
+
+    `task_execution_role` 은 ECS 작업의 실행 역할 **이름**이다. 비우면
+    일반 계정 기준(`ecsTaskExecutionRole`)이고, 학교 계정에서 접속한 것이
+    확인되면 자동으로 `LabRole` 로 맞춘다 — 학교 계정에는 역할을 만들 수
+    없어서 기본값 그대로 주면 존재하지 않는 역할을 가리키게 된다.
+    """
+    selected = [t.strip() for t in targets.split(",") if t.strip()] or None
+    account_id, region, caller_arn = "", "", ""
+    try:
+        # 자격증명이 이미 있으면 ARN 을 채워 사용자가 손댈 것을 줄인다.
+        # 없거나 실패해도 권한표는 나와야 하므로 조용히 넘어간다.
+        status = await get_aws_status()
+        if status.identity:
+            account_id = status.identity.account or ""
+            caller_arn = getattr(status.identity, "arn", "") or ""
+        region = status.region or ""
+    except Exception:  # pragma: no cover - 상태 조회 실패는 권한표를 막지 않는다
+        pass
+
+    academy = _looks_like_academy(caller_arn)
+    role = (task_execution_role or "").strip()
+    if not role:
+        role = (aws_policy.ACADEMY_TASK_EXECUTION_ROLE if academy
+                else aws_policy.TASK_EXECUTION_ROLE)
+
+    try:
+        policy = aws_policy.build_policy(selected, account_id, region, role)
+        policy_text = aws_policy.policy_json(selected, account_id, region, role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    needs_fill = aws_policy.has_placeholder(policy)
+    return AwsPolicyResponse(
+        policy=policy,
+        policy_json=policy_text,
+        targets=list(selected or aws_policy.DEFAULT_TARGETS),
+        action_count=len(aws_policy.used_actions(policy)),
+        needs_manual_fill=needs_fill,
+        account_id=account_id,
+        region=region,
+        task_execution_role=role,
+        is_academy_account=academy,
+        steps=_policy_steps(needs_fill, academy),
+    )
