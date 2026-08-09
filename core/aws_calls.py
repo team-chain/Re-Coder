@@ -557,31 +557,64 @@ class _ModuleScanner:
 
     def _collect_calls(self, scope: ast.AST, local: dict[str, str],
                        current_class: str | None = None) -> None:
+        """호출을 수집한다. **문장 순서를 지킨다.**
+
+        한 함수 안에서 같은 이름을 다른 서비스로 다시 대입할 수 있다::
+
+            c = boto3.client("ecs");  c.update_service()
+            c = boto3.client("s3");   c.put_object()
+
+        이름 하나에 값 하나만 두고 범위 전체에 적용하면 **마지막 대입만**
+        남아, 위 코드가 `s3.update_service` 로 기록된다. 필요한
+        `ecs:UpdateService` 는 목록에서 사라지고, 있지도 않은 액션이 생긴다.
+
+        그래서 대입과 호출을 **소스 순서대로 재생**하며 그 시점의 값을 쓴다.
+        (반복문에서 뒤쪽 대입이 다음 회차의 앞쪽 호출에 영향을 주는 경우까지는
+        보지 않는다. 그런 코드는 지금 없고, 생기면 대조 테스트가 시끄럽게
+        실패하는 쪽으로 기운다.)
+        """
+        state = dict(local)
+        events: list[tuple[tuple[int, int], int, object]] = []
+        for key, value in _assignments(scope):
+            pos = (getattr(value, "lineno", 0), getattr(value, "col_offset", 0))
+            events.append((pos, 0, ("assign", key, value)))
         for node in _walk_scope(scope):
-            if not isinstance(node, ast.Call):
-                continue
+            if isinstance(node, ast.Call):
+                events.append(((node.lineno, node.col_offset), 1, ("call", node)))
+        events.sort(key=lambda e: (e[0], e[1]))
 
-            # (5) AWS CLI 를 subprocess 로 부르는 경로
-            for arg in list(node.args) + [kw.value for kw in node.keywords]:
-                cli = _aws_cli_command(arg)
-                if cli:
-                    self.calls.append(AwsCall(
-                        service=cli[0], operation=cli[1],
-                        where=f"{self.rel}:{arg.lineno}", via="cli",
-                    ))
+        for _pos, _kind, payload in events:
+            if payload[0] == "assign":
+                _, key, value = payload
+                svc = self._service_of(value, state, current_class)
+                if svc and "." not in key:
+                    state[key] = svc
+                continue
+            node = payload[1]
+            self._record_call(node, state, current_class)
 
-            if not isinstance(node.func, ast.Attribute):
-                continue
-            base = node.func.value
-            # 클라이언트를 만드는 호출 자체(`.client("ecs")`)는 액션이 아니다.
-            if _client_service(node):
-                continue
-            svc = self._service_of(base, local, current_class)
-            if svc:
+    def _record_call(self, node: ast.Call, local: dict[str, str],
+                     current_class: str | None) -> None:
+        # (5) AWS CLI 를 subprocess 로 부르는 경로
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            cli = _aws_cli_command(arg)
+            if cli:
                 self.calls.append(AwsCall(
-                    service=svc, operation=node.func.attr,
-                    where=f"{self.rel}:{node.lineno}", via="boto3",
+                    service=cli[0], operation=cli[1],
+                    where=f"{self.rel}:{arg.lineno}", via="cli",
                 ))
+
+        if not isinstance(node.func, ast.Attribute):
+            return
+        # 클라이언트를 만드는 호출 자체(`.client("ecs")`)는 액션이 아니다.
+        if _client_service(node):
+            return
+        svc = self._service_of(node.func.value, local, current_class)
+        if svc:
+            self.calls.append(AwsCall(
+                service=svc, operation=node.func.attr,
+                where=f"{self.rel}:{node.lineno}", via="boto3",
+            ))
 
 
 def scan_source(root: str | Path) -> ScanResult:

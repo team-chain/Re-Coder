@@ -91,6 +91,29 @@ def _check_role_name(kind: str, value: str) -> str:
     return name
 
 
+#: AWS 리전 이름. `us-east-1` `ap-northeast-2` `us-gov-west-1` `cn-north-1` 형태.
+#: **와일드카드가 들어가면 안 된다** — `arn:aws:ecs:*:...` 는 전 리전을 연다.
+_REGION_NAME = re.compile(r"[a-z]{2}(-[a-z]+){1,2}-\d{1,2}\Z")
+
+
+def _check_region(value: str) -> str:
+    """리전 이름 확인. 자리표시자는 그대로 통과시킨다.
+
+    역할·클러스터 이름은 검증하면서 리전만 빼놓았었다. `region=*` 를 주면
+    `arn:aws:ecs:*:...` 가 되어 **정책이 전 리전으로 넓어지는데**,
+    자리표시자가 아니라서 "채울 것 없음"으로 표시된다. 조용히 넓어진다.
+    """
+    name = (value or "").strip()
+    if name == REGION_PLACEHOLDER or _REGION_NAME.match(name):
+        return name
+    raise ValueError(
+        f"리전 이름이 올바르지 않습니다: {value!r}\n"
+        f"  · `us-east-1` `ap-northeast-2` 같은 형태여야 합니다\n"
+        f"  · 와일드카드(*)는 쓸 수 없습니다 — 정책이 전 리전으로 넓어집니다\n"
+        f"  · 모르면 비워 두세요. 자리표시자({REGION_PLACEHOLDER})가 남습니다"
+    )
+
+
 def _check_ecs_name(kind: str, value: str) -> str:
     """ECS 클러스터·서비스 이름 확인. 접두사 와일드카드 하나까지만 허용."""
     name = (value or "").strip()
@@ -411,7 +434,7 @@ def build_policy(
     service_name = _check_ecs_name("서비스", (service or "").strip() or DEFAULT_SERVICE)
 
     account = (account_id or "").strip() or ACCOUNT_PLACEHOLDER
-    reg = (region or "").strip() or REGION_PLACEHOLDER
+    reg = _check_region((region or "").strip() or REGION_PLACEHOLDER)
 
     statements = _sts_statements()
     # 요청 순서가 아니라 **정해진 순서**로 배치한다 — 같은 대상 조합이면
