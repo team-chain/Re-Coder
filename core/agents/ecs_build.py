@@ -68,7 +68,20 @@ def run_command(
     timeout: int = DOCKER_QUICK_TIMEOUT,
     stdin_text: Optional[str] = None,
 ) -> CommandResult:
-    """subprocess 래퍼. 예외를 던지지 않고 (rc, stdout, stderr) 로 돌려준다."""
+    """subprocess 래퍼. 예외를 던지지 않고 (rc, stdout, stderr) 로 돌려준다.
+
+    **인코딩을 명시한다.** `text=True` 만 주면 파이썬이 시스템 로케일로
+    디코딩하는데, 한국어 윈도우는 cp949 다. docker 는 진행 표시에 유니코드
+    박스 문자(`─` 등)를 쓰기 때문에 cp949 로는 디코딩이 깨진다. 그러면
+    subprocess 내부 리더 스레드가 `UnicodeDecodeError` 로 죽고 `proc.stdout`
+    이 **None** 이 되어, 여기서 `None.strip()` 이 난다. 실제로 그 오류가
+    사용자에게는 `'NoneType' object has no attribute 'strip'` 로 보였다 —
+    원인이 인코딩이라는 걸 알아낼 방법이 없는 메시지다.
+
+    `errors="replace"` 까지 두는 이유: 도구가 무슨 바이트를 뱉든 배포가
+    그것 때문에 죽으면 안 된다. 읽을 수 없는 글자는 대체 문자로 두고
+    나머지 로그를 살린다.
+    """
     try:
         proc = subprocess.run(  # noqa: S603 - 인자는 호출부가 구성한다
             list(args),
@@ -76,9 +89,17 @@ def run_command(
             input=stdin_text,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
-        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+        # 그래도 None 이 올 수 있는 경로(플랫폼별 차이)를 막는다.
+        # 진단 메시지가 AttributeError 로 둔갑하는 일이 다시 없도록.
+        return (
+            proc.returncode,
+            (proc.stdout or "").strip(),
+            (proc.stderr or "").strip(),
+        )
     except subprocess.TimeoutExpired:
         return -1, "", f"{timeout}초 안에 끝나지 않았습니다"
     except FileNotFoundError as exc:
