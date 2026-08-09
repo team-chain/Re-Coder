@@ -514,6 +514,24 @@ def go():
     assert found == {("ecs", "update_service"), ("s3", "put_object")}, found
 
 
+def test_scanner_clears_binding_after_a_non_aws_reassignment(tmp_path):
+    """AWS 클라이언트였던 이름을 다른 것으로 바꾸면 **낡은 값을 지워야** 한다.
+
+    안 지우면 `c = httpx.Client()` 뒤의 `c.get(...)` 이 직전 서비스로 기록돼
+    있지도 않은 액션(`ecs:Get`)이 생긴다. 사람이 그걸 보고 정책에 넣어버릴 수
+    있어서, 누락보다 나쁠 수 있다.
+    """
+    found = _scan_snippet(tmp_path, """
+import boto3, httpx
+def go():
+    c = boto3.client("ecs")
+    c.update_service()
+    c = httpx.Client()
+    c.get("/health")
+""")
+    assert found == {("ecs", "update_service")}, f"낡은 바인딩이 남았다: {found}"
+
+
 def test_scanner_separates_same_attribute_in_different_classes(tmp_path):
     """두 클래스가 둘 다 `self._client` 를 쓰면 서로 오염되면 안 된다.
 
@@ -689,7 +707,7 @@ def test_policy_and_deploy_path_agree_on_role_names(monkeypatch):
 def test_bad_role_env_var_fails_loudly(monkeypatch):
     """역할 환경변수가 이상하면 조용히 기본값으로 떨어지면 안 된다."""
     monkeypatch.setenv(ap.ENV_EXECUTION_ROLE_ARN, "arn:aws:iam::1:role/*")
-    with pytest.raises(ValueError, match="IAM 역할 이름"):
+    with pytest.raises(ValueError, match="역할"):
         ap.configured_execution_role()
 
 
@@ -771,16 +789,16 @@ def test_same_role_for_both_is_not_duplicated():
     assert isinstance(stmt["Resource"], str), "같은 역할인데 목록으로 중복됐다"
 
 
-@pytest.mark.parametrize("bad", ["*", "role/*", "arn:aws:iam::1:role/X", "a b", "a/b", "?"])
+@pytest.mark.parametrize("bad", ["*", "role/*", "arn:aws:iam::1:role/X", "a b", "?", "a//*"])
 def test_wildcard_or_malformed_role_names_are_rejected(bad):
     """[보안] `task_execution_role=*` 은 계정의 **모든 역할**에 PassRole 을 준다.
 
     이 엔드포인트는 자격증명 없이도 응답하므로, 여기서 막지 않으면 누구나
     `role/*` 짜리 정책 문구를 뽑아낼 수 있다. 최소권한 보장이 무너진다.
     """
-    with pytest.raises(ValueError, match="IAM 역할 이름"):
+    with pytest.raises(ValueError, match="역할"):
         ap.build_policy(["ecs"], "1", "us-east-1", bad)
-    with pytest.raises(ValueError, match="IAM 역할 이름"):
+    with pytest.raises(ValueError, match="역할"):
         ap.build_policy(["ecs"], "1", "us-east-1", task_role=bad)
 
 
@@ -813,6 +831,53 @@ def test_no_input_can_produce_a_role_wildcard(hostile):
         )
         for arn in re.findall(r"arn:aws:iam::[^\"]*", text):
             assert "*" not in arn, f"역할 ARN 에 와일드카드: {arn}"
+
+
+@pytest.mark.parametrize("region,partition", [
+    ("us-east-1",      "aws"),
+    ("ap-northeast-2", "aws"),
+    ("us-gov-west-1",  "aws-us-gov"),   # 미국 정부용
+    ("cn-north-1",     "aws-cn"),       # 중국
+])
+def test_arn_partition_follows_the_region(region, partition):
+    """**모든 AWS 가 `arn:aws:` 가 아니다.**
+
+    GovCloud 는 `arn:aws-us-gov:`, 중국은 `arn:aws-cn:` 이다. 파티션이 틀리면
+    ARN 이 어떤 리소스와도 매칭되지 않아 정책을 붙여도 전부 거부된다.
+
+    지난 라운드에 리전 검증을 넣으면서 이 두 리전을 **허용 목록에 넣어놓고**
+    파티션은 `aws` 로 고정돼 있었다. 허용해 놓고 동작은 안 되는 조합을
+    내가 만든 것이다.
+    """
+    text = ap.policy_json(None, "123456789012", region)
+    found = {a.split(":")[1] for a in re.findall(r'arn:[^"]+', text)}
+    assert found == {partition}, f"{region} 인데 파티션이 {found}"
+
+
+def test_role_paths_are_preserved_in_arns(monkeypatch):
+    """역할에 경로가 있으면 ARN 도 경로째여야 한다.
+
+    `arn:aws:iam::123:role/team/EcsExec` 를 `role/EcsExec` 로 줄이면
+    **다른 ARN 을 가리켜** PassRole 이 거부된다. 반대로 `GetRole(RoleName=)`
+    은 경로 없는 이름을 받는다 — 둘을 섞으면 한쪽이 틀린다.
+    """
+    monkeypatch.setenv(ap.ENV_EXECUTION_ROLE_ARN,
+                       "arn:aws:iam::123456789012:role/team/EcsExec")
+    role = ap.configured_execution_role()
+    assert role == "team/EcsExec", role
+    assert ap.role_short_name(role) == "EcsExec"
+
+    stmt = next(s for s in ap.build_policy(["ecs"], "123456789012", "us-east-1",
+                                           role)["Statement"]
+                if "iam:PassRole" in s["Action"])
+    assert any(a.endswith("role/team/EcsExec") for a in stmt["Resource"]), stmt
+
+
+def test_preflight_asks_for_the_role_without_its_path():
+    """`GetRole` 은 경로 없는 이름을 받는다. 경로째 넘기면 못 찾는다."""
+    source = (CORE_DIR / "agents" / "preflight_agent.py").read_text(encoding="utf-8")
+    assert "role_short_name" in source, \
+        "배포 전 점검이 경로째 넘기고 있다 — GetRole 이 역할을 못 찾는다"
 
 
 @pytest.mark.parametrize("hostile", ["*", "us-*", "?", "**", "us east 1",
