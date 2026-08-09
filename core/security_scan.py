@@ -131,7 +131,30 @@ class SecurityScanner:
                 description="trivy가 설치되지 않아 스캔을 건너뜁니다",
             ))
         except Exception as exc:
+            # **조용히 넘어가면 안 된다.**
+            #
+            # 여기서 아무 흔적도 안 남기면 findings 가 빈 채로 돌아가고,
+            # 호출부는 "취약점 0건 = 스캔 통과"로 읽는다. 즉 **이미지를 한 번도
+            # 들여다보지 않은 배포가 보안 게이트를 통과**한다.
+            #
+            # 실제로 그렇게 되는 경로가 있다 — 최소권한 정책에 ECR **pull**
+            # 권한(`ecr:BatchGetImage`)이 없으면 trivy 가 원격 이미지를 못 받아
+            # 여기로 떨어진다. 권한 하나가 보안 게이트 무력화로 이어진다.
+            #
+            # 위 FileNotFoundError 갈래와 똑같이 흔적을 남겨, 결과만 보고도
+            # 스캔이 실제로 수행됐는지 알 수 있게 한다.
             logger.warning("Trivy scan failed: %s", exc)
+            findings.append(SecurityFinding(
+                tool=SecurityScanTool.TRIVY,
+                severity=SecurityScanSeverity.INFO,
+                title="trivy_scan_failed",
+                description=(
+                    f"Trivy 스캔이 실패해 이미지를 검사하지 못했습니다: {exc} — "
+                    f"이 결과의 '취약점 없음'은 검사 결과가 아닙니다. "
+                    f"ECR 이미지를 받아오지 못한 경우라면 권한표의 "
+                    f"ecr:BatchGetImage · ecr:GetDownloadUrlForLayer 를 확인하세요."
+                ),
+            ))
         finally:
             try:
                 os.unlink(output_path)
