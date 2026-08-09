@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from typing import Literal
 
 Target = Literal["ecs", "s3", "bedrock"]
@@ -37,6 +38,9 @@ Target = Literal["ecs", "s3", "bedrock"]
 #: 사용자가 콘솔에서 직접 바꿔 넣을 수 있도록 눈에 띄는 형태로 둔다.
 ACCOUNT_PLACEHOLDER = "<ACCOUNT_ID>"
 REGION_PLACEHOLDER = "<REGION>"
+#: ARN 파티션. 대부분 `aws` 지만 GovCloud 는 `aws-us-gov`, 중국은 `aws-cn` 이다.
+#: **리전에서 파생되는 값**이라, 리전을 모르면 이것도 모른다.
+PARTITION_PLACEHOLDER = "<PARTITION>"
 
 #: ECR 리포지토리·S3 버킷 이름 접두사. 권한을 이 접두사로 좁혀
 #: 사용자의 다른 리포지토리·버킷에는 손대지 못하게 한다.
@@ -69,6 +73,10 @@ ACADEMY_TASK_EXECUTION_ROLE = "LabRole"
 #: 권한이 안 맞으므로, 실제 이름을 인자로 받아 ARN 에 반영한다.
 DEFAULT_CLUSTER = f"{RESOURCE_PREFIX}-*"
 DEFAULT_SERVICE = f"{RESOURCE_PREFIX}-*"
+#: ECR 리포지토리 이름 기본값. 클러스터·서비스와 **같은 성질**이다 —
+#: 사용자가 이미 있는 리포지토리(`my-api` 등)에 밀어 넣으면 기본값으로는
+#: 권한이 안 맞는다. 그런데 클러스터·서비스만 인자로 빼고 여기를 빠뜨렸었다.
+DEFAULT_ECR_REPO = f"{RESOURCE_PREFIX}-*"
 
 #: IAM 역할 이름에 허용되는 문자 (AWS 명세). **와일드카드는 없다.**
 #: `*` 를 통과시키면 `role/*` 이 되어 계정 내 모든 역할에 PassRole 을 주게 된다.
@@ -138,6 +146,34 @@ def _check_region(value: str) -> str:
     )
 
 
+#: AWS 계정 ID — 숫자 12자리. 다른 형태는 ARN 을 망가뜨리거나 넓힌다.
+_ACCOUNT_ID = re.compile(r"\d{12}\Z")
+
+
+def _check_account(value: str) -> str:
+    """계정 ID 확인. 자리표시자는 통과.
+
+    형제 입력(역할·리전·클러스터)은 다 검증하면서 **계정만 빠져 있었다.**
+    `account_id="*"` 를 주면 `arn:aws:iam::*:role/...` 이 되어 **어느 계정의**
+    역할이든 ECS 에 넘길 수 있게 되는데, 자리표시자가 아니라서 "채울 것 없음"
+    으로 나간다. 지금은 STS 에서만 값이 오지만, 막아두지 않으면 다음에 입력
+    경로가 하나 생기는 순간 뚫린다.
+    """
+    name = (value or "").strip()
+    if name == ACCOUNT_PLACEHOLDER or _ACCOUNT_ID.match(name):
+        return name
+    raise ValueError(
+        f"계정 ID 가 올바르지 않습니다: {value!r}\n"
+        f"  · 숫자 12자리여야 합니다 (예: 123456789012)\n"
+        f"  · 모르면 비워 두세요. 자리표시자({ACCOUNT_PLACEHOLDER})가 남습니다"
+    )
+
+
+def validate_region(value: str) -> str:
+    """리전 형식 확인 (공개). 호출자가 저하 처리를 하고 싶을 때 쓴다."""
+    return _check_region(value)
+
+
 def _check_ecs_name(kind: str, value: str) -> str:
     """ECS 클러스터·서비스 이름 확인. 접두사 와일드카드 하나까지만 허용."""
     name = (value or "").strip()
@@ -193,6 +229,82 @@ def configured_task_role() -> str:
     return role_from_env(ENV_TASK_ROLE_ARN) or TASK_ROLE
 
 
+def resolve_roles(execution: str = "", task: str = "") -> tuple[str, str]:
+    """(실행 역할, 태스크 역할) — **정책과 배포가 함께 쓰는 단 하나의 결정 함수.**
+
+    ## 왜 하나여야 하나
+
+    예전에는 결정 함수가 둘이었다. 라우트에 학교 계정을 감지해 `LabRole` 로
+    바꾸는 갈래가 있었고, 배포 경로는 `configured_*()` 만 봤다. 결과:
+
+      - 정책은 `LabRole` 을 인가하고 화면도 "LabRole 을 씁니다"라고 안내
+      - 배포 전 점검은 `ecsTaskExecutionRole` 을 찾다가 실패
+
+    **이 함수가 막으려던 바로 그 불일치를, 갈래를 하나 더 만들어 스스로
+    재현했다.** 그래서 기본값을 정하는 곳을 여기 하나로 못 박는다.
+
+    ## 학교 계정은 어떻게 하나
+
+    여기서 자동으로 `LabRole` 로 바꾸지 **않는다.** 배포 경로는 환경변수를
+    보고 움직이므로, 환경변수를 안 건드린 채 정책만 바꾸면 또 갈라진다.
+    학교 계정 감지는 **"환경변수를 이렇게 설정하세요"라고 안내**하는 데만
+    쓴다. 그래야 정책과 배포가 같은 값을 본다.
+
+    우선순위: **직접 지정 → 환경변수 → 기본값**
+    """
+    exec_name = (execution or "").strip()
+    task_name = (task or "").strip()
+    return (
+        _check_role_name("실행 역할(task_execution_role)", exec_name)
+        if exec_name else configured_execution_role(),
+        _check_role_name("태스크 역할(task_role)", task_name)
+        if task_name else configured_task_role(),
+    )
+
+
+@dataclass(frozen=True)
+class ArnContext:
+    """ARN 을 만드는 데 필요한 세 조각. **함께 정해지고 함께 미상이 된다.**
+
+    ## 왜 묶어야 하나
+
+    이 셋을 따로 두고 각각 "알면 채우고 모르면 자리표시자" 로 처리했더니,
+    **말이 안 되는 조합**이 만들어졌다.
+
+      - 리전은 `<REGION>` 인데 파티션은 `aws` → GovCloud 사용자가 `<REGION>`
+        을 `us-gov-west-1` 로 바꿔도 앞의 `arn:aws:` 는 그대로다. 정책은
+        완성돼 보이지만 **어떤 리소스와도 매칭되지 않는다.**
+
+    파티션은 리전에서 **파생**되는 값이다. 독립적으로 알 수 있는 게 아니다.
+    그래서 따로 두지 않고 한 자료구조로 묶어, 생성 지점을 하나로 만든다.
+    `_arn()` 은 이 객체만 받는다 — 세 값을 따로 넘길 방법이 없어야 어긋나지
+    않는다.
+    """
+
+    account: str
+    region: str
+    partition: str
+
+    @classmethod
+    def of(cls, account_id: str = "", region: str = "") -> "ArnContext":
+        """알려진 값으로 채우고, 모르는 것과 **거기서 파생되는 것**을 표시한다."""
+        account = _check_account((account_id or "").strip() or ACCOUNT_PLACEHOLDER)
+        raw = (region or "").strip()
+        if not raw or raw == REGION_PLACEHOLDER:
+            # 리전을 모르면 파티션도 모른다. 여기가 핵심.
+            return cls(account, REGION_PLACEHOLDER, PARTITION_PLACEHOLDER)
+        checked = _check_region(raw)
+        return cls(account, checked, partition_for(checked))
+
+    @property
+    def unknowns(self) -> list[str]:
+        """사용자가 직접 채워야 하는 자리표시자 목록."""
+        return [
+            value for value in (self.account, self.region, self.partition)
+            if value.startswith("<") and value.endswith(">")
+        ]
+
+
 def partition_for(region: str) -> str:
     """리전이 속한 ARN 파티션.
 
@@ -209,18 +321,26 @@ def partition_for(region: str) -> str:
         return "aws-us-gov"
     if reg.startswith("cn-"):
         return "aws-cn"
+    # 격리(air-gapped) 리전. 리전 정규식이 이 이름들을 받아주므로 여기서도
+    # 처리해야 한다 — 정규식은 통과시키는데 파티션 표에 없으면 GovCloud 때와
+    # 똑같이 "완성돼 보이는데 전부 거부되는" 정책이 나온다.
+    if reg.startswith("us-isob-"):
+        return "aws-iso-b"
+    if reg.startswith("us-iso-"):
+        return "aws-iso"
     return "aws"
 
 
-def _arn(service: str, resource: str, region: str, account: str,
+def _arn(service: str, resource: str, ctx: ArnContext,
          *, global_service: bool = False) -> str:
     """ARN 조립. 전역 서비스(iam 등)는 리전 칸을 비운다.
 
-    파티션은 리전에서 끌어온다 — 전역 서비스라도 파티션은 따라가야 한다
+    세 조각을 따로 받지 않고 `ArnContext` 만 받는다 — 따로 넘길 수 있으면
+    언젠가 어긋난 조합이 들어온다. 전역 서비스라도 **파티션은 따라간다**
     (GovCloud 계정의 IAM 역할은 `arn:aws-us-gov:iam::...` 이다).
     """
-    part = partition_for(region)
-    return f"arn:{part}:{service}:{'' if global_service else region}:{account}:{resource}"
+    region = "" if global_service else ctx.region
+    return f"arn:{ctx.partition}:{service}:{region}:{ctx.account}:{resource}"
 
 
 def _sts_statements() -> list[dict]:
@@ -238,23 +358,23 @@ def _sts_statements() -> list[dict]:
 
 
 def _ecs_statements(
-    region: str,
-    account: str,
+    ctx: ArnContext,
     task_execution_role: str = TASK_EXECUTION_ROLE,
     task_role: str = TASK_ROLE,
     cluster: str = DEFAULT_CLUSTER,
     service: str = DEFAULT_SERVICE,
+    ecr_repo: str = DEFAULT_ECR_REPO,
 ) -> list[dict]:
     """컨테이너 배포 (ECS Fargate + ECR)."""
-    repo = _arn("ecr", f"repository/{RESOURCE_PREFIX}-*", region, account)
-    exec_role = _arn("iam", f"role/{task_execution_role}", region, account,
+    repo = _arn("ecr", f"repository/{ecr_repo}", ctx)
+    exec_role = _arn("iam", f"role/{task_execution_role}", ctx,
                      global_service=True)
     # 실행 역할과 태스크 역할이 같을 수 있다(학교 계정은 둘 다 LabRole).
     # 같으면 ARN 을 중복해 넣지 않는다 — 정책이 지저분해지고 비교가 어려워진다.
     pass_targets = [exec_role]
     if task_role != task_execution_role:
         pass_targets.append(
-            _arn("iam", f"role/{task_role}", region, account, global_service=True)
+            _arn("iam", f"role/{task_role}", ctx, global_service=True)
         )
     return [
         {
@@ -321,8 +441,8 @@ def _ecs_statements(
                 "ecs:UpdateService",
             ],
             "Resource": [
-                _arn("ecs", f"cluster/{cluster}", region, account),
-                _arn("ecs", f"service/{cluster}/{service}", region, account),
+                _arn("ecs", f"cluster/{cluster}", ctx),
+                _arn("ecs", f"service/{cluster}/{service}", ctx),
             ],
         },
         {
@@ -359,7 +479,7 @@ def _ecs_statements(
     ]
 
 
-def _s3_statements(region: str, account: str) -> list[dict]:
+def _s3_statements(ctx: ArnContext) -> list[dict]:
     """정적 사이트 배포 (S3).
 
     현재 코어에는 BYO S3 업로드 경로가 아직 없다(게이트웨이가 팀 버킷에
@@ -368,7 +488,7 @@ def _s3_statements(region: str, account: str) -> list[dict]:
     막히기 때문이다.
     """
     # S3 버킷 ARN 은 리전·계정 칸이 비지만 **파티션은 따라간다.**
-    bucket = f"arn:{partition_for(region)}:s3:::{RESOURCE_PREFIX}-*"
+    bucket = f"arn:{ctx.partition}:s3:::{RESOURCE_PREFIX}-*"
     return [
         {
             "Sid": "S3StaticSiteBucket",
@@ -391,7 +511,7 @@ def _s3_statements(region: str, account: str) -> list[dict]:
     ]
 
 
-def _bedrock_statements(region: str, account: str) -> list[dict]:
+def _bedrock_statements(ctx: ArnContext) -> list[dict]:
     """AI 호출 (Bedrock).
 
     `llm/bedrock_provider.py` 가 `converse(...)` 를 쓴다.
@@ -415,8 +535,8 @@ def _bedrock_statements(region: str, account: str) -> list[dict]:
             "Effect": "Allow",
             "Action": ["bedrock:InvokeModel"],
             "Resource": [
-                f"arn:{partition_for(region)}:bedrock:*::foundation-model/*",
-                _arn("bedrock", "inference-profile/*", region, account),
+                f"arn:{ctx.partition}:bedrock:*::foundation-model/*",
+                _arn("bedrock", "inference-profile/*", ctx),
             ],
         },
         {
@@ -448,6 +568,7 @@ def build_policy(
     task_role: str = TASK_ROLE,
     cluster: str = DEFAULT_CLUSTER,
     service: str = DEFAULT_SERVICE,
+    ecr_repo: str = DEFAULT_ECR_REPO,
 ) -> dict:
     """최소권한 IAM 정책 문서를 만든다.
 
@@ -486,9 +607,10 @@ def build_policy(
     )
     cluster_name = _check_ecs_name("클러스터", (cluster or "").strip() or DEFAULT_CLUSTER)
     service_name = _check_ecs_name("서비스", (service or "").strip() or DEFAULT_SERVICE)
+    repo_name = _check_ecs_name("ECR 리포지토리",
+                                (ecr_repo or "").strip() or DEFAULT_ECR_REPO)
 
-    account = (account_id or "").strip() or ACCOUNT_PLACEHOLDER
-    reg = _check_region((region or "").strip() or REGION_PLACEHOLDER)
+    ctx = ArnContext.of(account_id, region)
 
     statements = _sts_statements()
     # 요청 순서가 아니라 **정해진 순서**로 배치한다 — 같은 대상 조합이면
@@ -499,18 +621,29 @@ def build_policy(
         builder = _BUILDERS[target]
         if target == "ecs":
             statements.extend(
-                builder(reg, account, exec_name, task_name, cluster_name, service_name)
+                builder(ctx, exec_name, task_name, cluster_name, service_name, repo_name)
             )
         else:
-            statements.extend(builder(reg, account))
+            statements.extend(builder(ctx))
 
     return {"Version": "2012-10-17", "Statement": statements}
+
+
+#: 사용자가 직접 채워야 하는 자리표시자 전체. 새로 추가하면 여기에도 넣어야
+#: `has_placeholder()` 가 알아본다 — 빠뜨리면 "채울 것 없음" 으로 잘못 안내된다.
+ALL_PLACEHOLDERS = (ACCOUNT_PLACEHOLDER, REGION_PLACEHOLDER, PARTITION_PLACEHOLDER)
 
 
 def has_placeholder(policy: dict) -> bool:
     """정책에 아직 사용자가 채워야 할 자리표시자가 남아 있는가."""
     text = json.dumps(policy)
-    return ACCOUNT_PLACEHOLDER in text or REGION_PLACEHOLDER in text
+    return any(ph in text for ph in ALL_PLACEHOLDERS)
+
+
+def placeholders_in(policy: dict) -> list[str]:
+    """남아 있는 자리표시자 목록. 안내에 그대로 쓴다."""
+    text = json.dumps(policy)
+    return [ph for ph in ALL_PLACEHOLDERS if ph in text]
 
 
 def policy_json(

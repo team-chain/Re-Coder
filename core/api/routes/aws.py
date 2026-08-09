@@ -703,13 +703,19 @@ async def list_ecr_repos(region: str = "", profile: str = "", max_results: int =
     """
     _load_into_process_if_needed()
 
+    # 권한표 쪽과 **같은 방식**으로 리전을 정한다. 예전에는 여기만 하드코딩
+    # 기본값(`ap-northeast-2`)으로 떨어져서, 같은 세션인데 두 엔드포인트가
+    # 서로 다른 리전을 말했다. 사용자는 `us-west-2` 에 있는데 "리포지토리가
+    # 없습니다"를 보게 된다.
+    resolved_profile = profile.strip() or _effective_profile()
+    _, session_region, _ = _deployment_identity()
     resolved_region = (
         region.strip()
+        or session_region
         or os.environ.get("AWS_REGION")
         or os.environ.get("AWS_DEFAULT_REGION")
         or DEFAULT_REGION
     )
-    resolved_profile = profile.strip() or _active_profile or None
 
     session = _build_boto3_session(profile=resolved_profile, region=resolved_region)
     try:
@@ -791,11 +797,12 @@ class AwsPolicyResponse(BaseModel):
     task_role: str = ""             # 컨테이너 안 코드가 쓸 역할 (실행 역할과 다름)
     cluster: str = ""               # 정책이 허용한 ECS 클러스터 이름
     service: str = ""               # 정책이 허용한 ECS 서비스 이름
+    ecr_repo: str = ""              # 정책이 허용한 ECR 리포지토리 이름
     is_academy_account: bool = False  # 학교(AWS Academy) 러너랩 세션인가
     steps: list[str] = []
 
 
-def _policy_steps(needs_manual_fill: bool, academy: bool = False) -> list[str]:
+def _policy_steps(unknowns: list[str], academy: bool = False) -> list[str]:
     """콘솔에서 따라 할 순서.
 
     학교(AWS Academy) 계정은 **IAM 사용자를 만들 수 없다.** 실제 러너랩
@@ -824,12 +831,16 @@ def _policy_steps(needs_manual_fill: bool, academy: bool = False) -> list[str]:
         "AWS 콘솔 → IAM → 정책(Policies) → 정책 생성 → JSON 탭",
         "아래 정책을 붙여넣고 이름을 'ReCoderMinimal' 로 저장",
     ]
-    if needs_manual_fill:
-        steps.insert(
-            2,
-            f"정책 안의 {aws_policy.ACCOUNT_PLACEHOLDER} 와 "
-            f"{aws_policy.REGION_PLACEHOLDER} 를 본인 계정 ID·리전으로 바꾸기",
-        )
+    if unknowns:
+        what = " · ".join(unknowns)
+        hint = f"정책 안의 {what} 를 본인 값으로 바꾸기"
+        if aws_policy.PARTITION_PLACEHOLDER in unknowns:
+            # 파티션은 낯선 개념이라 값까지 알려준다. 안 그러면 여기서 막힌다.
+            hint += (
+                f" — {aws_policy.PARTITION_PLACEHOLDER} 는 대부분 'aws' 이고, "
+                f"미국 정부용(GovCloud)이면 'aws-us-gov', 중국이면 'aws-cn' 입니다"
+            )
+        steps.insert(2, hint)
     steps += [
         "IAM → 사용자 → 사용자 생성 → 방금 만든 정책 연결",
         "해당 사용자에서 액세스 키 발급 (용도: 로컬 코드)",
@@ -850,56 +861,84 @@ def _looks_like_academy(arn: str) -> bool:
     return any(marker in (arn or "") for marker in ACADEMY_ARN_MARKERS)
 
 
-def _session_region(profile: Optional[str]) -> str:
-    """실제로 배포에 쓰일 리전. 확실하지 않으면 빈 문자열.
+def _effective_profile() -> Optional[str]:
+    """배포가 **실제로** 쓸 프로필. 모르면 None(=boto3 기본 체인).
 
-    **`get_aws_status()` 의 리전을 그대로 쓰면 안 된다.** 그쪽은 환경변수가
-    없으면 하드코딩 기본값(`ap-northeast-2`)으로 떨어진다. 그런데 자격증명이
-    `~/.aws/credentials` 에 있고 리전은 `~/.aws/config` 에만 있는 구성(공유
-    프로필의 표준 형태)이 흔하다. 그 경우 기본값이 그대로 ARN 에 박히고,
-    `needs_manual_fill=False` 라 사용자는 **다 채워진 줄 안다.**
+    `AWS_PROFILE` 을 무시하면 안 된다. 배포 클라이언트는 boto3 기본 체인을
+    쓰므로 그 환경변수를 따른다. 그런데 `_detect_credential_source()` 는
+    `AWS_PROFILE` 을 읽지 않고 `"default"` 를 돌려준다 — 그 값을 세션에
+    넘기면 **정책은 default 계정, 배포는 AWS_PROFILE 계정**이 되어
+    사용자가 시킨 대로 붙여도 AccessDenied 가 난다.
 
-    그러면 엉뚱한 리전의 ARN 을 그대로 붙여넣고, 실제 배포는 거부된다.
-    원인을 찾기가 특히 어렵다 — 정책은 멀쩡해 보이기 때문이다.
-
-    **틀린 값을 조용히 채우느니 자리표시자를 남기는 게 낫다.** 자리표시자는
-    최소한 "여기 채우세요"라고 말한다.
+    None 을 돌려주면 boto3 가 자기 체인대로(=AWS_PROFILE 포함) 고른다.
     """
+    return (os.environ.get("AWS_PROFILE") or "").strip() or _active_profile or None
+
+
+def _deployment_identity() -> tuple[str, str, str]:
+    """(계정, 리전, 호출자 ARN). 모르는 값은 빈 문자열.
+
+    **세 값을 한 세션에서 뽑는다.** 계정은 `get_aws_status()` 에서, 리전은
+    다른 경로에서 가져오면 서로 다른 프로필을 가리킬 수 있고, 그러면 정책이
+    "A 계정의 B 리전" 같은 존재하지 않는 조합을 그린다.
+
+    리전은 세션에서 가져온다 — 프로필의 `~/.aws/config` 까지 읽는 유일한
+    경로다. 하드코딩 기본값으로는 절대 떨어지지 않는다. 모르면 비워서
+    자리표시자가 남게 한다. **틀린 값을 채우는 것보다 낫다.**
+    """
+    _load_into_process_if_needed()
+    profile = _effective_profile()
     try:
         session = _build_boto3_session(profile=profile, region="")
-        return (getattr(session, "region_name", "") or "").strip()
-    except Exception:  # pragma: no cover - 세션 생성 실패는 권한표를 막지 않는다
-        return ""
+    except Exception:  # pragma: no cover - 세션 실패가 권한표를 막지 않는다
+        return "", "", ""
+
+    region = (getattr(session, "region_name", "") or "").strip()
+    account, caller_arn = "", ""
+    try:
+        identity = session.client("sts", region_name=region or None).get_caller_identity()
+        account = identity.get("Account", "") or ""
+        caller_arn = identity.get("Arn", "") or ""
+    except Exception:  # 자격증명이 없거나 막혀도 권한표는 나와야 한다
+        pass
+    return account, region, caller_arn
 
 
 def _resolve_roles(
     academy: bool, task_execution_role: str, task_role: str
 ) -> tuple[str, str]:
-    """(실행 역할, 태스크 역할) 이름을 정한다.
+    """역할 이름 결정 — **`aws_policy.resolve_roles()` 에 그대로 위임한다.**
 
-    **학교 계정은 둘 다 `LabRole` 이다.** 러너랩은 IAM 역할을 만들 수 없어서
-    쓸 수 있는 역할이 그것 하나뿐이다. 한쪽만 바꾸면 나머지가 존재하지 않는
-    역할(`ecsTaskRole`)을 가리켜, 있지도 않은 역할에 PassRole 을 주는
-    무의미한 정책이 나온다.
+    여기에 갈래를 하나라도 더 두면 안 된다. 예전에 여기서 학교 계정을
+    `LabRole` 로 바꿨는데, 배포 경로는 환경변수만 보므로 **정책은 LabRole,
+    배포는 ecsTaskExecutionRole** 이 되어 학교 계정 사용자가 안내대로 해도
+    배포 전 점검에서 실패했다.
 
-    우선순위는 **명시 지정 > 환경변수 > 학교 계정 자동 판단 > 기본값** 이다.
-    환경변수가 자동 판단보다 앞서는 이유: 배포 경로(`preflight_agent`,
-    `ecs_agent`)가 그 환경변수를 보고 움직이므로, 권한표가 다른 값을 인가하면
-    **정책과 배포가 서로 다른 역할을 가리키게** 된다.
+    학교 계정은 `_academy_role_advice()` 로 **안내**만 한다.
     """
-    if academy:
-        default_exec = default_task = aws_policy.ACADEMY_TASK_EXECUTION_ROLE
-    else:
-        default_exec = aws_policy.TASK_EXECUTION_ROLE
-        default_task = aws_policy.TASK_ROLE
-    return (
-        (task_execution_role or "").strip()
-        or aws_policy.role_from_env(aws_policy.ENV_EXECUTION_ROLE_ARN)
-        or default_exec,
-        (task_role or "").strip()
-        or aws_policy.role_from_env(aws_policy.ENV_TASK_ROLE_ARN)
-        or default_task,
-    )
+    return aws_policy.resolve_roles(task_execution_role, task_role)
+
+
+def _academy_role_advice(academy: bool) -> list[str]:
+    """학교 계정인데 역할 환경변수가 안 잡혀 있으면 알려준다.
+
+    자동으로 바꿔주지 않는 이유는 `aws_policy.resolve_roles()` 참고 —
+    배포 경로가 안 따라오면 정책만 바뀌어 봐야 갈라질 뿐이다.
+    """
+    if not academy:
+        return []
+    lab = aws_policy.ACADEMY_TASK_EXECUTION_ROLE
+    if (aws_policy.configured_execution_role() == lab
+            and aws_policy.configured_task_role() == lab):
+        return []
+    return [
+        f"⚠ 학교(AWS Academy) 계정으로 보입니다. 이 계정에는 "
+        f"'{aws_policy.TASK_EXECUTION_ROLE}' 이 없고 '{lab}' 만 있습니다. "
+        f"아래 두 환경변수를 설정한 뒤 이 권한표를 다시 받으세요 — "
+        f"설정해야 정책과 실제 배포가 같은 역할을 봅니다:\n"
+        f"    {aws_policy.ENV_EXECUTION_ROLE_ARN}=arn:aws:iam::<계정ID>:role/{lab}\n"
+        f"    {aws_policy.ENV_TASK_ROLE_ARN}=arn:aws:iam::<계정ID>:role/{lab}"
+    ]
 
 
 @router.get("/api/aws/policy", response_model=AwsPolicyResponse)
@@ -909,6 +948,7 @@ async def get_minimum_policy(
     task_role: str = "",
     cluster: str = "",
     service: str = "",
+    ecr_repo: str = "",
     region: str = "",
 ) -> AwsPolicyResponse:
     """ReCoder 가 요구하는 최소권한 IAM 정책을 돌려준다.
@@ -936,29 +976,36 @@ async def get_minimum_policy(
     뽑아낼 수 있으면 이 기능의 존재 이유가 사라진다.
     """
     selected = [t.strip() for t in targets.split(",") if t.strip()] or None
-    account_id, caller_arn, profile = "", "", None
-    try:
-        # 자격증명이 이미 있으면 ARN 을 채워 사용자가 손댈 것을 줄인다.
-        # 없거나 실패해도 권한표는 나와야 하므로 조용히 넘어간다.
-        status = await get_aws_status()
-        if status.identity:
-            account_id = status.identity.account or ""
-            caller_arn = getattr(status.identity, "arn", "") or ""
-        profile = status.profile or None
-    except Exception:  # pragma: no cover - 상태 조회 실패는 권한표를 막지 않는다
-        pass
-
-    # 리전은 **확실할 때만** 채운다. 자세한 이유는 _session_region() 참고.
-    # 우선순위: 직접 지정 → 세션(프로필 config 포함) → 비움(자리표시자)
-    resolved_region = (region or "").strip() or _session_region(profile)
+    # 계정·리전·호출자를 **한 세션에서** 뽑는다. 섞으면 서로 다른 프로필을
+    # 가리키는 조합이 만들어진다.
+    account_id, session_region, caller_arn = _deployment_identity()
+    explicit_region = (region or "").strip()
+    resolved_region = explicit_region or session_region
+    if resolved_region and not explicit_region:
+        # 세션에서 끌어온 값은 **사용자가 타이핑한 게 아니다.** 우리가 모르는
+        # 리전 이름(새 리전, 주권 클라우드 등)이면 "당신 리전이 잘못됐다"고
+        # 400 을 던질 게 아니라, 자리표시자로 내려서 권한표는 주고 사용자가
+        # 채우게 한다. 직접 지정한 값이 틀렸을 때만 400 이 맞다.
+        try:
+            aws_policy.validate_region(resolved_region)
+        except ValueError:
+            logger.info("[aws] 세션 리전 형식을 모르겠음 — 자리표시자로 둔다: %r",
+                        resolved_region)
+            resolved_region = ""
 
     academy = _looks_like_academy(caller_arn)
-    exec_role, task = _resolve_roles(academy, task_execution_role, task_role)
+    try:
+        exec_role, task = _resolve_roles(academy, task_execution_role, task_role)
+    except ValueError as exc:
+        # 역할 환경변수가 잘못된 경우도 여기로 온다. 500 이 아니라 400 이어야
+        # 사용자가 "내 설정이 잘못됐구나"를 안다.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     names = {
         "task_role": task,
         "cluster": (cluster or "").strip() or aws_policy.DEFAULT_CLUSTER,
         "service": (service or "").strip() or aws_policy.DEFAULT_SERVICE,
+        "ecr_repo": (ecr_repo or "").strip() or aws_policy.DEFAULT_ECR_REPO,
     }
 
     try:
@@ -971,7 +1018,8 @@ async def get_minimum_policy(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    needs_fill = aws_policy.has_placeholder(policy)
+    unknowns = aws_policy.placeholders_in(policy)
+    needs_fill = bool(unknowns)
     return AwsPolicyResponse(
         policy=policy,
         policy_json=policy_text,
@@ -984,6 +1032,7 @@ async def get_minimum_policy(
         task_role=task,
         cluster=names["cluster"],
         service=names["service"],
+        ecr_repo=names["ecr_repo"],
         is_academy_account=academy,
-        steps=_policy_steps(needs_fill, academy),
+        steps=_academy_role_advice(academy) + _policy_steps(unknowns, academy),
     )

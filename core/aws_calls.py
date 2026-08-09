@@ -31,6 +31,24 @@ aws_calls.py — ReCoder 가 실제로 호출하는 AWS API 를 찾아내는 두
 무엇보다, **모르는 호출을 만나면 조용히 넘어갔다.** 새 호출일수록 그냥 통과했다.
 이 파일은 반대로 한다 — 모르면 **큰 소리로 실패**한다.
 
+## 정적 분석이 **아직 못 보는 파이썬 형태** (알고 있는 한계)
+
+숨기지 않고 적어둔다. 조용한 구멍을 "없다"고 두면 그게 제일 위험하다.
+`UNSUPPORTED_PATTERNS` 에 목록으로도 박아두고 테스트가 그 목록과 실제 동작이
+일치하는지 확인한다 — 목록이 낡으면 테스트가 먼저 알려준다.
+
+  - 튜플 언패킹: `a, b = boto3.client("ecs"), x`
+  - 바다코끼리: `if (c := boto3.client("ecs")):`
+  - 반복문·컴프리헨션 바인딩: `for c in [boto3.client("ecs")]:`
+  - 자료구조에 담기: `CLIENTS = {"ecs": boto3.client("ecs")}`
+  - 동적 속성: `getattr(client, "update_service")()`
+  - `global` / `nonlocal` 재바인딩
+  - 상속 — 부모 클래스가 `self._client` 를 잡고 자식이 쓰는 경우
+  - subprocess 인자를 변수로 조립: `cmd = ["aws", ...]; run(cmd)`
+
+**이 한계를 메우는 것이 `Recorder` 다.** 실제로 배포를 한 번 돌리면 위 형태로
+나간 호출도 전부 기록된다. 정적 분석만 믿으면 안 되는 이유가 이것이다.
+
 ## 정적 분석으로도 절대 안 보이는 것
 
   - **docker push** 가 쓰는 ECR 레이어 업로드 액션. 파이썬이 아니라 docker
@@ -125,6 +143,20 @@ NOT_AN_API_CALL: frozenset[str] = frozenset({
 
 
 # ── AWS CLI 하위 명령 → IAM 액션 (이름 규칙이 안 맞는 것만) ──────────
+
+#: 정적 분석이 못 잡는 것으로 **확인된** 파이썬 형태. 설명은 모듈 docstring 참고.
+#: 목록과 실제 동작이 어긋나면 테스트가 실패한다 — 좋아졌는데 목록이 낡은
+#: 경우도 잡힌다. 이걸 "없는 문제" 로 두지 않기 위한 장치다.
+UNSUPPORTED_PATTERNS: dict[str, str] = {
+    "tuple_unpack":   'a, b = boto3.client("ecs"), 1',
+    "walrus":         'if (c := boto3.client("ecs")): c.update_service()',
+    "for_binding":    'for c in [boto3.client("ecs")]: c.update_service()',
+    "dict_of_clients": 'C = {"e": boto3.client("ecs")}\nC["e"].update_service()',
+    "getattr_call":   'c = boto3.client("ecs")\ngetattr(c, "update_service")()',
+    "global_rebind":  '_C = None\ndef s():\n    global _C\n    _C = boto3.client("ecs")\ndef u():\n    _C.update_service()',
+    "subprocess_var": 'cmd = ["aws", "ecr", "create-repository"]\nsubprocess.run(cmd)',
+}
+
 
 CLI_TO_ACTION: dict[tuple[str, str], str] = {
     # 이름이 전혀 다르다. CLI 가 편의를 위해 감싼 것.
@@ -278,7 +310,14 @@ def _aws_cli_command(node: ast.AST) -> tuple[str, str] | None:
     return vals[1], vals[2]
 
 
-_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+#: 지역 이름을 따로 관리할 범위. **람다는 일부러 뺐다.**
+#:
+#: 람다를 별도 범위로 두면 감싼 함수의 지역 변수를 못 본다. 실제로 그래서
+#: `bedrock_provider.py` 의
+#:     `run_in_executor(None, lambda: client.converse(**kwargs))`
+#: 를 통째로 놓치고 있었다 — 비동기 대화 경로 전부가 검사 밖이었다.
+#: 람다를 감싼 함수의 일부로 취급하면 그 흐름 상태로 풀린다.
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
 def _walk_scope(root: ast.AST):
@@ -289,17 +328,23 @@ def _walk_scope(root: ast.AST):
     착각하게 된다.
     """
     for child in ast.iter_child_nodes(root):
-        if isinstance(child, _SCOPE_NODES):
+        if isinstance(child, _SCOPE_LIKE):
             continue
         yield child
         yield from _walk_scope(child)
 
 
+#: 범위로 취급할 노드 전체. 클래스 본문을 포함한다 —
+#: `class D: _client = boto3.client("ecs")` 를 모듈 전역으로 흘려보내면,
+#: 다른 함수의 **매개변수** `_client` 까지 ECS 클라이언트로 오인한다.
+_SCOPE_LIKE = _SCOPE_NODES + (ast.ClassDef,)
+
+
 def _scopes(tree: ast.Module):
-    """모듈 본문 + 모든 함수 본문을 각각 하나의 범위로 돌려준다."""
+    """모듈 본문 + 함수 본문 + 클래스 본문을 각각 하나의 범위로 돌려준다."""
     yield tree
     for node in ast.walk(tree):
-        if isinstance(node, _SCOPE_NODES):
+        if isinstance(node, _SCOPE_LIKE):
             yield node
 
 
@@ -315,7 +360,7 @@ def _assignments(scope: ast.AST):
             key = _target_name(node.target)
             if key:
                 yield key, node.value
-        elif isinstance(node, ast.With):
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 if item.optional_vars is not None:
                     key = _target_name(item.optional_vars)
@@ -591,15 +636,27 @@ class _ModuleScanner:
                 svc = self._service_of(value, state, current_class)
                 if svc:
                     state[key] = svc
-                else:
-                    # **낡은 값을 지운다.** 안 지우면 `c = httpx.Client()` 뒤의
-                    # `c.get(...)` 이 직전 서비스로 기록돼 있지도 않은 액션
-                    # (`ecs:Get`)이 생긴다.
+                elif isinstance(value, ast.Constant):
+                    # `client = None` 같은 **센티널 대입은 지우지 않는다.**
                     #
-                    # 대가: `c = wrap(c)` 처럼 우리가 못 푸는 호출을 거치면
-                    # 이후 호출을 놓친다. 둘 다 완벽하진 않지만, 없는 권한을
-                    # 지어내는 쪽이 더 나쁘다 — 사람이 그걸 보고 정책에
-                    # 넣어버릴 수 있기 때문이다.
+                    #     client = self._client
+                    #     if client is None:
+                    #         client = self._get_client()   # 못 풀 수도 있음
+                    #     ...
+                    #     lambda: client.converse(...)
+                    #
+                    # 이 흔한 형태에서 `None` 대입에 바인딩을 날리면 뒤쪽
+                    # 호출을 통째로 놓친다. 실제로 `bedrock_provider` 의
+                    # 비동기 대화 경로가 이렇게 검사 밖에 있었다.
+                    pass
+                else:
+                    # **다른 것으로 바뀌었으면 낡은 값을 지운다.**
+                    # 안 지우면 `c = httpx.Client()` 뒤의 `c.get(...)` 이
+                    # 직전 서비스로 기록돼 있지도 않은 액션(`ecs:Get`)이 생긴다.
+                    #
+                    # 대가: `c = wrap(c)` 처럼 못 푸는 **호출**을 거치면 이후
+                    # 호출을 놓친다. 없는 권한을 지어내는 쪽이 더 나쁘다고 보고
+                    # 이렇게 뒀다 — 사람이 그걸 보고 정책에 넣어버릴 수 있다.
                     state.pop(key, None)
                 continue
             node = payload[1]
