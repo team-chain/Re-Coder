@@ -65,6 +65,23 @@ _AUTH_ERROR_CODES = frozenset({
 _TEMPLATE_PATH = Path(__file__).parent.parent / "registry" / "file_templates" / "ecs-task-definition.json.template"
 
 
+def python_http_health_check(
+    port: int, path: str = "/health", *, timeout: int = 5
+) -> list[str]:
+    """파이썬 이미지에서 쓸 수 있는 ECS 컨테이너 헬스체크 명령.
+
+    curl 을 쓰지 않는다 — `python:slim` 런타임에 curl 은 없다. 예전에
+    태스크 정의가 curl 을 호출하는 바람에 컨테이너가 항상 UNHEALTHY 로
+    찍혀 ECS 가 무한 재시작했다. python 은 이 이미지에 반드시 있다.
+    """
+    probe = (
+        "import sys,urllib.request; "
+        f"sys.exit(0 if urllib.request.urlopen("
+        f"'http://127.0.0.1:{port}{path}', timeout={timeout}).status == 200 else 1)"
+    )
+    return ["CMD-SHELL", f'python -c "{probe}" || exit 1']
+
+
 def _probe_http(
     url: str,
     *,
@@ -76,8 +93,9 @@ def _probe_http(
     """URL 에 실제로 접속되는지 확인한다. (성공 여부, 설명).
 
     표준 라이브러리만 쓴다 — 배포 검증이 추가 의존성 때문에 실패하면 곤란하다.
-    HTTP 4xx 도 "서버가 응답했다"로 본다. 우리가 확인하려는 건 앱의 라우팅이
-    아니라 **네트워크 경로가 열렸는가**이기 때문이다.
+    HTTP 4xx 는 "서버가 응답했다"로 본다 — 확인하려는 건 앱의 라우팅이
+    아니라 네트워크 경로가 열렸는가다. 반면 **5xx 는 실패로 센다.**
+    앱이 500 만 뱉고 있는데 "배포 성공"이라고 보고하면 안 된다.
     """
     import time as _time
     import urllib.error
@@ -90,7 +108,15 @@ def _probe_http(
             with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
                 return True, f"HTTP {resp.status}"
         except urllib.error.HTTPError as exc:
-            # 서버가 응답은 했다 — 네트워크 경로는 열려 있다.
+            # 4xx 는 "도달했다"로 본다 — 서버가 응답했고 네트워크 경로는
+            # 열려 있다. 경로를 잘못 짚었을 뿐이다.
+            # 그러나 **5xx 는 앱이 망가진 것**이다. 이걸 성공으로 세면
+            # 500 만 뱉는 서비스를 "배포 성공"으로 보고하게 된다.
+            if 500 <= exc.code < 600:
+                last = f"HTTP {exc.code} (서버 오류)"
+                if i < attempts - 1:
+                    sleeper(interval)
+                continue
             return True, f"HTTP {exc.code}"
         except Exception as exc:  # noqa: BLE001
             last = f"{type(exc).__name__}: {exc}"
@@ -230,6 +256,20 @@ class ECSAgent:
             # 5. SBOM 생성
             if request.generate_sbom:
                 record = await self._step_sbom(request, record, image_uri)
+
+            # 헬스체크가 없으면 ECS 가 컨테이너 상태를 감시하지 않는다.
+            # 조용히 넘어가면 "배포 성공"이 실제 동작을 보장하지 않는데도
+            # 사용자는 그 사실을 알 수 없다. 기록에 남겨 표면화한다.
+            if not request.health_check_command:
+                record.provisioned["health_check"] = (
+                    "없음 — ECS 가 컨테이너 상태를 감시하지 않습니다. "
+                    "앱이 응답하지 않아도 롤백·서킷 브레이커가 걸리지 않습니다."
+                )
+                logger.warning(
+                    "health_check_command 가 없습니다 — ECS 컨테이너 헬스체크 없이 "
+                    "배포합니다. 파이썬 이미지라면 python_http_health_check() 를 "
+                    "쓰세요."
+                )
 
             # 6. Task Definition 생성 + 등록
             task_def_arn, prev_arn = await self._step_register_task_definition(
@@ -915,4 +955,18 @@ class ECSAgent:
             if isinstance(options, dict):
                 options["awslogs-group"] = self.log_group_name(req)
                 options["awslogs-region"] = req.region
+
+            # ECS 는 **태스크 정의에 적힌 헬스체크만** 감시한다. 이미지에
+            # 구워둔 Docker HEALTHCHECK 는 보지 않는다. 그래서 여기 없으면
+            # "프로세스는 살아 있는데 앱은 죽은" 상태를 ECS 가 못 잡고,
+            # 롤백 제안도 서킷 브레이커도 걸리지 않은 채 배포가 성공으로
+            # 보고된다.
+            if req.health_check_command:
+                container["healthCheck"] = {
+                    "command": list(req.health_check_command),
+                    "interval": 30,
+                    "timeout": 5,
+                    "retries": 3,
+                    "startPeriod": 60,
+                }
         return rendered

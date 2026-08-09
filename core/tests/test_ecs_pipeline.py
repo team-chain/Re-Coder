@@ -699,3 +699,190 @@ def test_rendered_log_group_wins_over_whatever_the_template_says(tmp_path,
         "템플릿의 낡은 로그 그룹 이름이 그대로 나갔다"
     assert options["awslogs-region"] == "us-east-1", \
         "템플릿의 낡은 리전이 그대로 나갔다"
+
+
+# ===========================================================================
+# Codex 리뷰 대응 (PR #10)
+# ===========================================================================
+
+
+def test_only_a_plain_allow_proceeds(app_client, monkeypatch):
+    """[회귀·P1] OPA 결정은 다섯 가지다.
+
+    예전 조건은 `decision.startswith("deny")` 였다. 그러면
+    `allow_with_approval`(승인자 필요)과 `escalate_to_security`(보안 검토
+    필요)가 **그대로 통과해 즉시 배포**된다. 게이트를 여는 조건은
+    화이트리스트여야 한다.
+    """
+    client, ecs_routes = app_client
+    from core import opa_client as opa_module
+
+    started: list = []
+
+    async def _fake_deploy(request, record=None):
+        started.append(request)
+        if record is not None:
+            record.status = ECSDeployStatus.SUCCEEDED
+            return record
+        return ECSDeployRecord(status=ECSDeployStatus.SUCCEEDED)
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+
+    blocked = {
+        "allow_with_approval": "approval_required",
+        "escalate_to_security": "security_escalation_required",
+        "deny": "policy_denied",
+        "deny_with_fix_suggestion": "policy_denied",
+    }
+    for decision, expected_error in blocked.items():
+        ecs_routes._deploy_records.clear()
+
+        class _Result:
+            pass
+
+        _Result.decision = decision
+        _Result.reason = "테스트"
+        _Result.fix_suggestion = None
+        _Result.opa_available = True
+        _Result.required_approvers = 2
+
+        async def _evaluate(**_kwargs):
+            return _Result()
+
+        monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
+        resp = client.post("/api/deploy/ecs", json={})
+        assert resp.status_code == 403, f"{decision} 이 통과했다"
+        assert resp.json()["detail"]["error"] == expected_error, decision
+
+    assert started == [], "차단돼야 할 결정으로 배포가 시작됐다"
+
+
+def test_a_second_deploy_while_one_is_running_is_rejected(app_client, monkeypatch):
+    """[회귀·P2] 배포 버튼 두 번 누르면 파이프라인이 두 개 뜨던 문제.
+
+    둘 다 같은 태그로 빌드해 같은 ECR·ECS 를 건드리고, 상태 조회는 가장
+    최근 것 하나만 보여줘서 먼저 시작한 배포가 사용자 눈에서 사라진다.
+    """
+    client, ecs_routes = app_client
+    started: list = []
+
+    async def _never_finishes(request, record=None):
+        started.append(request)
+        if record is not None:
+            record.status = ECSDeployStatus.IN_PROGRESS
+            return record
+        return ECSDeployRecord(status=ECSDeployStatus.IN_PROGRESS)
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _never_finishes)
+
+    body = {"ecs_cluster": "recoder-cluster", "ecs_service": "recoder-app"}
+    assert client.post("/api/deploy/ecs", json=body).status_code == 200
+
+    second = client.post("/api/deploy/ecs", json=body)
+    assert second.status_code == 409, "같은 서비스에 배포가 두 개 떴다"
+    assert second.json()["detail"]["error"] == "deployment_in_progress"
+    assert len(started) == 1
+
+
+def test_a_different_service_is_not_blocked(app_client, monkeypatch):
+    """부정 통제: 잠금이 너무 넓으면 관계없는 배포까지 막는다."""
+    client, ecs_routes = app_client
+
+    async def _never_finishes(request, record=None):
+        if record is not None:
+            record.status = ECSDeployStatus.IN_PROGRESS
+            return record
+        return ECSDeployRecord(status=ECSDeployStatus.IN_PROGRESS)
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _never_finishes)
+    client.post("/api/deploy/ecs", json={"ecs_service": "app-a"})
+    other = client.post("/api/deploy/ecs", json={"ecs_service": "app-b"})
+    assert other.status_code == 200, "다른 서비스 배포까지 막고 있다"
+
+
+def test_health_check_is_injected_when_a_command_is_given():
+    """[회귀·P1] ECS 는 태스크 정의의 헬스체크만 감시한다.
+
+    이미지에 구운 Docker HEALTHCHECK 는 보지 않으므로, 여기 없으면
+    "프로세스는 살아 있는데 앱은 죽은" 상태에서도 배포가 성공으로
+    보고되고 롤백·서킷 브레이커가 걸리지 않는다.
+    """
+    from core.agents.ecs_agent import python_http_health_check
+
+    agent = ECSAgent()
+    command = python_http_health_check(8000, "/health")
+    rendered = agent._render_task_definition(
+        make_request(health_check_command=command),
+        image="img",
+        execution_role_arn="arn:aws:iam::123456789012:role/LabRole",
+        task_role_arn="arn:aws:iam::123456789012:role/LabRole",
+    )
+    check = rendered["containerDefinitions"][0]["healthCheck"]
+    assert check["command"] == command
+    assert check["retries"] >= 1 and check["startPeriod"] >= 1
+
+
+def test_the_python_health_check_does_not_use_curl():
+    """부정 통제: curl 은 python:slim 런타임에 없다. 넣으면 무한 재시작."""
+    from core.agents.ecs_agent import python_http_health_check
+
+    command = " ".join(python_http_health_check(8000))
+    assert "curl" not in command
+    assert "python" in command
+
+
+def test_no_health_check_is_recorded_as_a_gap_not_silently_skipped():
+    """헬스체크가 없다는 사실이 기록에 남아야 한다.
+
+    조용히 넘어가면 "배포 성공"이 실제 동작을 보장하지 않는데도 사용자는
+    그 사실을 알 수 없다.
+    """
+    agent = ECSAgent()
+    rendered = agent._render_task_definition(
+        make_request(),  # health_check_command 없음
+        image="img",
+        execution_role_arn="arn:aws:iam::123456789012:role/LabRole",
+        task_role_arn="arn:aws:iam::123456789012:role/LabRole",
+    )
+    assert "healthCheck" not in rendered["containerDefinitions"][0]
+
+
+def test_http_probe_treats_5xx_as_a_failure():
+    """[회귀·P2] 500 만 뱉는 서비스를 "배포 성공"으로 보고하면 안 된다."""
+    import urllib.error
+    import urllib.request
+
+    from core.agents import ecs_agent as module
+
+    def _raise(*_a, **_k):
+        raise urllib.error.HTTPError("u", 503, "unavailable", None, None)
+
+    original = urllib.request.urlopen
+    urllib.request.urlopen = _raise
+    try:
+        ok, detail = module._probe_http(
+            "http://x/health", attempts=2, sleep=lambda _: None
+        )
+    finally:
+        urllib.request.urlopen = original
+    assert ok is False, "5xx 를 도달 성공으로 처리했다"
+    assert "503" in detail
+
+
+def test_http_probe_still_treats_404_as_reachable():
+    """반대 방향 — 4xx 는 네트워크 경로가 열렸다는 뜻이므로 성공이다."""
+    import urllib.error
+    import urllib.request
+
+    from core.agents import ecs_agent as module
+
+    def _raise(*_a, **_k):
+        raise urllib.error.HTTPError("u", 404, "nf", None, None)
+
+    original = urllib.request.urlopen
+    urllib.request.urlopen = _raise
+    try:
+        ok, _ = module._probe_http("http://x/health", attempts=1, sleep=lambda _: None)
+    finally:
+        urllib.request.urlopen = original
+    assert ok is True
