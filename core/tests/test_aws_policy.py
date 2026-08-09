@@ -133,7 +133,7 @@ def test_passrole_is_restricted_to_ecs_tasks():
 
 def test_resource_scoped_to_recoder_prefix():
     """ECR 리포지토리·S3 버킷은 접두사로 좁혀 사용자의 다른 자원을 건드리지 못하게 한다."""
-    for stmt in ap.build_policy(account_id="1", region="r")["Statement"]:
+    for stmt in ap.build_policy(account_id="1", region="us-east-1")["Statement"]:
         resources = stmt["Resource"]
         for res in ([resources] if isinstance(resources, str) else resources):
             if res.startswith("arn:aws:s3:::") or ":repository/" in res:
@@ -184,7 +184,7 @@ def test_task_execution_role_is_configurable_for_academy():
 
 def test_default_role_is_the_standard_one():
     """인자를 안 주면 일반 계정 기준이어야 한다 (사용자용 기본값)."""
-    text = json.dumps(ap.build_policy(["ecs"], "1", "r"))
+    text = json.dumps(ap.build_policy(["ecs"], "1", "us-east-1"))
     assert f"role/{ap.TASK_EXECUTION_ROLE}" in text
 
 
@@ -496,6 +496,24 @@ class B:
     assert ("ecs", "post") not in found
 
 
+def test_scanner_respects_reassignment_order(tmp_path):
+    """한 함수에서 같은 이름을 다른 서비스로 다시 대입할 수 있다.
+
+    이름 하나에 값 하나만 두면 **마지막 대입만** 남아, 앞쪽 호출이 엉뚱한
+    서비스로 기록된다. 필요한 권한은 목록에서 사라지고(조용히), 있지도 않은
+    액션(`s3:UpdateService`)이 대신 생긴다.
+    """
+    found = _scan_snippet(tmp_path, """
+import boto3
+def go():
+    c = boto3.client("ecs")
+    c.update_service()
+    c = boto3.client("s3")
+    c.put_object()
+""")
+    assert found == {("ecs", "update_service"), ("s3", "put_object")}, found
+
+
 def test_scanner_separates_same_attribute_in_different_classes(tmp_path):
     """두 클래스가 둘 다 `self._client` 를 쓰면 서로 오염되면 안 된다.
 
@@ -589,8 +607,8 @@ def test_passrole_covers_every_role_the_deploy_code_passes():
     """
     covered: set[str] = set()
     for policy in (
-        ap.build_policy(["ecs"], "1", "r"),
-        ap.build_policy(["ecs"], "1", "r", ap.ACADEMY_TASK_EXECUTION_ROLE,
+        ap.build_policy(["ecs"], "1", "us-east-1"),
+        ap.build_policy(["ecs"], "1", "us-east-1", ap.ACADEMY_TASK_EXECUTION_ROLE,
                         task_role=ap.ACADEMY_TASK_EXECUTION_ROLE),
     ):
         for stmt in policy["Statement"]:
@@ -652,7 +670,7 @@ def test_policy_and_deploy_path_agree_on_role_names(monkeypatch):
     exec_role, task = route._resolve_roles(False, "", "")
     assert (exec_role, task) == (ap.configured_execution_role(),
                                  ap.configured_task_role())
-    assert authorized(ap.build_policy(["ecs"], "1", "r", exec_role,
+    assert authorized(ap.build_policy(["ecs"], "1", "us-east-1", exec_role,
                                       task_role=task)) == {exec_role, task}
 
     # ② 배포 경로가 환경변수로 다른 역할을 쓰도록 설정된 경우
@@ -734,7 +752,7 @@ def test_ecr_listing_denial_is_reported_as_normal_not_as_broken_credentials():
 def test_execution_role_and_task_role_are_different_and_both_passable():
     """둘은 서로 다른 역할이다. 기본값이 같아지면 한쪽을 잊었다는 뜻이다."""
     assert ap.TASK_EXECUTION_ROLE != ap.TASK_ROLE
-    stmt = next(s for s in ap.build_policy(["ecs"], "1", "r")["Statement"]
+    stmt = next(s for s in ap.build_policy(["ecs"], "1", "us-east-1")["Statement"]
                 if "iam:PassRole" in s["Action"])
     res = stmt["Resource"]
     arns = [res] if isinstance(res, str) else res
@@ -746,7 +764,7 @@ def test_execution_role_and_task_role_are_different_and_both_passable():
 def test_same_role_for_both_is_not_duplicated():
     """학교 계정은 둘 다 LabRole 이다. ARN 을 두 번 넣지 않는다."""
     stmt = next(s for s in ap.build_policy(
-        ["ecs"], "1", "r", "LabRole", task_role="LabRole")["Statement"]
+        ["ecs"], "1", "us-east-1", "LabRole", task_role="LabRole")["Statement"]
         if "iam:PassRole" in s["Action"])
     assert stmt["Resource"] == "arn:aws:iam:::1:role/LabRole".replace(":::", "::") \
         or stmt["Resource"].endswith("role/LabRole"), stmt["Resource"]
@@ -761,9 +779,9 @@ def test_wildcard_or_malformed_role_names_are_rejected(bad):
     `role/*` 짜리 정책 문구를 뽑아낼 수 있다. 최소권한 보장이 무너진다.
     """
     with pytest.raises(ValueError, match="IAM 역할 이름"):
-        ap.build_policy(["ecs"], "1", "r", bad)
+        ap.build_policy(["ecs"], "1", "us-east-1", bad)
     with pytest.raises(ValueError, match="IAM 역할 이름"):
-        ap.build_policy(["ecs"], "1", "r", task_role=bad)
+        ap.build_policy(["ecs"], "1", "us-east-1", task_role=bad)
 
 
 #: 이 엔드포인트로 넓은 권한을 뽑아내려는 시도들. 하나라도 통과하면
@@ -797,12 +815,38 @@ def test_no_input_can_produce_a_role_wildcard(hostile):
             assert "*" not in arn, f"역할 ARN 에 와일드카드: {arn}"
 
 
+@pytest.mark.parametrize("hostile", ["*", "us-*", "?", "**", "us east 1",
+                                     "arn:aws:ecs:us-east-1", "../*", "US-EAST-1"])
+def test_no_input_can_make_the_policy_region_global(hostile):
+    """[보안] 리전에 와일드카드가 들어가면 정책이 **전 리전**으로 넓어진다.
+
+    역할·클러스터 이름은 검증하면서 리전만 빼놓았었다. 같은 성질의 구멍을
+    한 군데 고치고 옆자리를 안 본 것이다 — 이번 라운드에서 반복된 실수라
+    적대적 입력으로 못 박는다.
+    """
+    try:
+        policy = ap.build_policy(["ecs", "s3", "bedrock"], "123456789012", hostile)
+    except ValueError:
+        return  # 거부했으면 통과
+    for arn in re.findall(r"arn:aws:[^\"]*", json.dumps(policy)):
+        parts = arn.split(":")
+        if len(parts) > 3:
+            assert parts[3] != "*", f"리전 칸이 전체로 열렸다: {arn}"
+
+
+@pytest.mark.parametrize("good", ["us-east-1", "ap-northeast-2", "eu-central-1",
+                                  "us-gov-west-1", "cn-north-1"])
+def test_real_region_names_are_accepted(good):
+    """검증이 너무 빡빡하면 멀쩡한 리전이 막힌다. 실제 형태들을 고정한다."""
+    assert good in ap.policy_json(["ecs"], "123456789012", good)
+
+
 @pytest.mark.parametrize("hostile", HOSTILE_NAMES)
 def test_no_input_can_widen_the_ecs_resource_scope(hostile):
     """클러스터·서비스 이름으로도 범위를 넓힐 수 없어야 한다."""
     for kwargs in ({"cluster": hostile}, {"service": hostile}):
         try:
-            policy = ap.build_policy(["ecs"], "1", "r", **kwargs)
+            policy = ap.build_policy(["ecs"], "1", "us-east-1", **kwargs)
         except ValueError:
             continue
         for stmt in policy["Statement"]:
@@ -831,7 +875,7 @@ def test_cluster_and_service_names_flow_into_the_arns():
 
 def test_service_arn_nests_the_cluster_name():
     """ECS 서비스 ARN 은 `service/<클러스터>/<서비스>` 형태다."""
-    stmt = next(s for s in ap.build_policy(["ecs"], "1", "r")["Statement"]
+    stmt = next(s for s in ap.build_policy(["ecs"], "1", "us-east-1")["Statement"]
                 if s["Sid"] == "EcsDeployService")
     svc = [r for r in stmt["Resource"] if ":service/" in r][0]
     assert svc.endswith(f"service/{ap.DEFAULT_CLUSTER}/{ap.DEFAULT_SERVICE}")
@@ -840,14 +884,14 @@ def test_service_arn_nests_the_cluster_name():
 @pytest.mark.parametrize("bad", ["*", "a/b", "a*b", "clus ter", "arn:aws:ecs:::cluster/x"])
 def test_bad_cluster_or_service_names_are_rejected(bad):
     with pytest.raises(ValueError, match="이름이 올바르지 않습니다"):
-        ap.build_policy(["ecs"], "1", "r", cluster=bad)
+        ap.build_policy(["ecs"], "1", "us-east-1", cluster=bad)
     with pytest.raises(ValueError, match="이름이 올바르지 않습니다"):
-        ap.build_policy(["ecs"], "1", "r", service=bad)
+        ap.build_policy(["ecs"], "1", "us-east-1", service=bad)
 
 
 def test_prefix_wildcard_is_still_allowed_for_defaults():
     """기본값 `recoder-*` 는 접두사 와일드카드라 허용돼야 한다."""
-    ap.build_policy(["ecs"], "1", "r", cluster="recoder-*", service="recoder-*")
+    ap.build_policy(["ecs"], "1", "us-east-1", cluster="recoder-*", service="recoder-*")
 
 
 # ── 학교 계정 감지와 안내 분기 ────────────────────────────────────────
