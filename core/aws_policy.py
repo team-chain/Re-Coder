@@ -27,6 +27,8 @@ aws_policy.py — ReCoder 가 요구하는 **최소권한 IAM 정책** 생성 (F
 from __future__ import annotations
 
 import json
+import os
+import re
 from typing import Literal
 
 Target = Literal["ecs", "s3", "bedrock"]
@@ -49,8 +51,94 @@ RESOURCE_PREFIX = "recoder"
 #: 실제 계정에서 확인했다 — 그대로 실행 역할로 쓸 수 있다.)
 TASK_EXECUTION_ROLE = "ecsTaskExecutionRole"
 
+#: 컨테이너 **안의 코드**가 AWS 를 부를 때 쓰는 역할. 실행 역할과 **다르다.**
+#:
+#: 실행 역할(execution role)은 ECS 가 이미지를 받아오고 로그를 쓸 때 쓰고,
+#: 태스크 역할(task role)은 컨테이너 안 애플리케이션이 쓴다. `ecs_agent.py` 가
+#: `ECS_TASK_ROLE_ARN`(기본 `ecsTaskRole`)으로 **둘을 따로** 넘기므로,
+#: `RegisterTaskDefinition` 은 **두 역할 모두에 대해** `iam:PassRole` 을 요구한다.
+#: 하나만 주면 배포 마지막 단계에서 AccessDenied 가 난다.
+TASK_ROLE = "ecsTaskRole"
+
 #: AWS Academy 러너랩이 미리 만들어 두는 역할. 학교 계정에서 개발할 때 쓴다.
+#: 러너랩은 역할을 만들 수 없어서 실행 역할·태스크 역할 **둘 다** 이걸 쓴다.
 ACADEMY_TASK_EXECUTION_ROLE = "LabRole"
+
+#: ECS 클러스터·서비스 이름의 기본값. ReCoder 가 직접 만드는 자원의 이름 규칙이다.
+#: 사용자가 **이미 있는** 클러스터(`default` 등)에 배포하면 이 기본값으로는
+#: 권한이 안 맞으므로, 실제 이름을 인자로 받아 ARN 에 반영한다.
+DEFAULT_CLUSTER = f"{RESOURCE_PREFIX}-*"
+DEFAULT_SERVICE = f"{RESOURCE_PREFIX}-*"
+
+#: IAM 역할 이름에 허용되는 문자 (AWS 명세). **와일드카드는 없다.**
+#: `*` 를 통과시키면 `role/*` 이 되어 계정 내 모든 역할에 PassRole 을 주게 된다.
+_IAM_NAME = re.compile(r"[\w+=,.@-]{1,64}\Z")
+
+#: ECS 클러스터·서비스 이름. 맨 끝의 `*` 하나만 접두사 와일드카드로 허용한다.
+_ECS_NAME_CORE = re.compile(r"[A-Za-z0-9_-]{1,255}\Z")
+
+
+def _check_role_name(kind: str, value: str) -> str:
+    """IAM 역할 **이름**인지 확인. ARN 도, 와일드카드도 안 된다."""
+    name = (value or "").strip()
+    if not _IAM_NAME.match(name):
+        raise ValueError(
+            f"{kind} 은 IAM 역할 이름이어야 합니다: {value!r}\n"
+            f"  · ARN 이 아니라 이름만 (예: {TASK_EXECUTION_ROLE!r})\n"
+            f"  · 와일드카드(*)는 쓸 수 없습니다 — 계정의 모든 역할에 "
+            f"PassRole 을 주게 되어 최소권한이 무너집니다"
+        )
+    return name
+
+
+def _check_ecs_name(kind: str, value: str) -> str:
+    """ECS 클러스터·서비스 이름 확인. 접두사 와일드카드 하나까지만 허용."""
+    name = (value or "").strip()
+    core = name[:-1] if name.endswith("*") else name
+    if not core or not _ECS_NAME_CORE.match(core):
+        raise ValueError(
+            f"{kind} 이름이 올바르지 않습니다: {value!r}\n"
+            f"  · 영문·숫자·하이픈·밑줄만, 맨 끝에 접두사 와일드카드 하나까지 "
+            f"(예: {DEFAULT_CLUSTER!r} 또는 'my-cluster')\n"
+            f"  · '*' 하나만 주는 것은 전체 허용이라 거부합니다"
+        )
+    return name
+
+
+# ── 배포 경로와 권한표가 **같은 역할 이름**을 보게 하는 단일 출처 ────
+#
+# 권한표가 `LabRole` 을 인가해도 배포 코드가 `ecsTaskExecutionRole` 을 찾으면
+# 소용이 없다. 앞뒤가 안 맞는 안내를 하게 된다 — 사용자는 시킨 대로 했는데
+# 배포 전 점검에서 없는 역할을 찾다가 실패한다.
+#
+# 그래서 "지금 쓸 역할 이름"을 여기 한 곳에서 정하고, 권한표와 배포 경로가
+# 둘 다 이걸 본다. 환경변수 이름은 배포 경로가 이미 쓰던 것을 그대로 쓴다.
+
+ENV_EXECUTION_ROLE_ARN = "ECS_EXECUTION_ROLE_ARN"
+ENV_TASK_ROLE_ARN = "ECS_TASK_ROLE_ARN"
+
+
+def role_from_env(env_var: str) -> str | None:
+    """환경변수에 설정된 역할 **이름**. 설정 안 됐으면 None.
+
+    배포 경로는 ARN 전체를 넣는 관례라 뒤쪽 이름만 뽑는다.
+    값이 이상하면 조용히 기본값으로 떨어지지 않고 **터진다** — 역할을 잘못
+    지정한 채 배포가 진행되면 마지막 단계에서 더 알기 어려운 오류가 난다.
+    """
+    raw = (os.environ.get(env_var) or "").strip()
+    if not raw:
+        return None
+    return _check_role_name(f"환경변수 {env_var}", raw.rsplit("/", 1)[-1])
+
+
+def configured_execution_role() -> str:
+    """배포 경로가 실제로 쓸 실행 역할 이름."""
+    return role_from_env(ENV_EXECUTION_ROLE_ARN) or TASK_EXECUTION_ROLE
+
+
+def configured_task_role() -> str:
+    """배포 경로가 실제로 쓸 태스크 역할 이름."""
+    return role_from_env(ENV_TASK_ROLE_ARN) or TASK_ROLE
 
 
 def _arn(service: str, resource: str, region: str, account: str,
@@ -73,12 +161,25 @@ def _sts_statements() -> list[dict]:
     }]
 
 
-def _ecs_statements(region: str, account: str,
-                    task_execution_role: str = TASK_EXECUTION_ROLE) -> list[dict]:
+def _ecs_statements(
+    region: str,
+    account: str,
+    task_execution_role: str = TASK_EXECUTION_ROLE,
+    task_role: str = TASK_ROLE,
+    cluster: str = DEFAULT_CLUSTER,
+    service: str = DEFAULT_SERVICE,
+) -> list[dict]:
     """컨테이너 배포 (ECS Fargate + ECR)."""
     repo = _arn("ecr", f"repository/{RESOURCE_PREFIX}-*", region, account)
-    role = _arn("iam", f"role/{task_execution_role}", region, account,
-                global_service=True)
+    exec_role = _arn("iam", f"role/{task_execution_role}", region, account,
+                     global_service=True)
+    # 실행 역할과 태스크 역할이 같을 수 있다(학교 계정은 둘 다 LabRole).
+    # 같으면 ARN 을 중복해 넣지 않는다 — 정책이 지저분해지고 비교가 어려워진다.
+    pass_targets = [exec_role]
+    if task_role != task_execution_role:
+        pass_targets.append(
+            _arn("iam", f"role/{task_role}", region, account, global_service=True)
+        )
     return [
         {
             # ECR 로그인 토큰은 계정 단위 발급이라 리소스를 좁힐 수 없다.
@@ -105,6 +206,24 @@ def _ecs_statements(region: str, account: str,
             "Resource": repo,
         },
         {
+            # **이미지를 내려받는** 권한. 올리는 것과 다르다.
+            #
+            # 배포 전 보안 스캔(trivy)과 SBOM 생성(syft)이 이미지가 로컬에
+            # 없으면 ECR 에서 **끌어온다.** 파이썬 코드에는 안 보인다 —
+            # 외부 실행 파일이 하는 일이라 docker push 와 같은 부류다.
+            #
+            # 이게 없으면 스캔이 이미지를 못 받아 실패하는데, 지금 코드는
+            # 그 실패를 조용히 삼키고 **"취약점 0건 = 통과"로 보고**한다.
+            # 권한 하나 빠진 것이 보안 게이트 무력화로 이어지는 경로다.
+            "Sid": "EcrPullImageForScan",
+            "Effect": "Allow",
+            "Action": [
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+            ],
+            "Resource": repo,
+        },
+        {
             # RegisterTaskDefinition·DescribeTaskDefinition 은 AWS 가
             # 리소스 단위 제한을 지원하지 않는다 — "*" 가 강제된다.
             "Sid": "EcsTaskDefinition",
@@ -126,8 +245,8 @@ def _ecs_statements(region: str, account: str,
                 "ecs:UpdateService",
             ],
             "Resource": [
-                _arn("ecs", f"cluster/{RESOURCE_PREFIX}-*", region, account),
-                _arn("ecs", f"service/{RESOURCE_PREFIX}-*/*", region, account),
+                _arn("ecs", f"cluster/{cluster}", region, account),
+                _arn("ecs", f"service/{cluster}/{service}", region, account),
             ],
         },
         {
@@ -135,16 +254,20 @@ def _ecs_statements(region: str, account: str,
             "Sid": "ReadTaskExecutionRole",
             "Effect": "Allow",
             "Action": ["iam:GetRole"],
-            "Resource": role,
+            "Resource": exec_role,
         },
         {
-            # Task Definition 에 실행 역할을 붙이려면 PassRole 이 필요하다.
+            # Task Definition 을 등록하려면 거기 붙는 역할마다 PassRole 이 필요하다.
+            # **실행 역할과 태스크 역할은 서로 다른 역할이다** — ecs_agent 가
+            # ECS_EXECUTION_ROLE_ARN 과 ECS_TASK_ROLE_ARN 을 따로 넘긴다.
+            # 하나만 주면 RegisterTaskDefinition 이 거부된다.
+            #
             # 조건을 걸어 **ECS 작업에 넘길 때만** 허용한다 — 이게 없으면
             # 이 키로 아무 서비스에나 역할을 넘길 수 있어 권한 상승이 된다.
-            "Sid": "PassTaskExecutionRoleToEcsOnly",
+            "Sid": "PassEcsRolesToEcsOnly",
             "Effect": "Allow",
             "Action": ["iam:PassRole"],
-            "Resource": role,
+            "Resource": pass_targets[0] if len(pass_targets) == 1 else pass_targets,
             "Condition": {
                 "StringEquals": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}
             },
@@ -244,6 +367,10 @@ def build_policy(
     account_id: str = "",
     region: str = "",
     task_execution_role: str = TASK_EXECUTION_ROLE,
+    *,
+    task_role: str = TASK_ROLE,
+    cluster: str = DEFAULT_CLUSTER,
+    service: str = DEFAULT_SERVICE,
 ) -> dict:
     """최소권한 IAM 정책 문서를 만든다.
 
@@ -251,9 +378,19 @@ def build_policy(
     남긴다. 자리표시자가 남아 있으면 사용자가 콘솔에서 직접 바꿔야 하므로
     `has_placeholder()` 로 확인해 안내에 반영한다.
 
-    `task_execution_role` 은 ECS 작업이 이미지를 받아올 때 쓰는 역할 이름이다.
-    학교(AWS Academy) 계정에서는 역할을 만들 수 없으므로
-    `ACADEMY_TASK_EXECUTION_ROLE`("LabRole")을 넘긴다.
+    ## 이름들을 왜 인자로 받나
+
+    정책의 값어치는 **범위를 좁히는 것**인데, 좁히려면 실제 이름을 알아야 한다.
+    이름을 코드에 박아두면 두 가지로 어긋난다.
+
+      - `task_execution_role` / `task_role` — 학교(AWS Academy) 계정은 역할을
+        만들 수 없어 둘 다 `LabRole` 이다. 그리고 일반 계정에서도 이 둘은
+        **서로 다른 역할**이라 PassRole 대상이 둘이다.
+      - `cluster` / `service` — 사용자가 이미 있는 클러스터(`default` 등)에
+        배포할 수 있다. 기본값 `recoder-*` 로 고정하면 그런 사용자는 정책을
+        그대로 붙여도 배포 전 점검에서 막힌다.
+
+    모르면 기본값(우리가 만드는 자원의 이름 규칙)을 쓴다.
     """
     selected = tuple(targets) if targets else DEFAULT_TARGETS
     unknown = [t for t in selected if t not in _BUILDERS]
@@ -263,13 +400,15 @@ def build_policy(
             f"가능한 값: {sorted(_BUILDERS)}"
         )
 
-    role = (task_execution_role or "").strip() or TASK_EXECUTION_ROLE
-    if "/" in role or ":" in role:
-        # ARN 전체를 넘기는 실수를 막는다 — 여기 필요한 건 **이름**이다.
-        raise ValueError(
-            f"실행 역할은 ARN 이 아니라 이름이어야 합니다: {task_execution_role!r} "
-            f"(예: {TASK_EXECUTION_ROLE!r} 또는 {ACADEMY_TASK_EXECUTION_ROLE!r})"
-        )
+    exec_name = _check_role_name(
+        "실행 역할(task_execution_role)",
+        (task_execution_role or "").strip() or TASK_EXECUTION_ROLE,
+    )
+    task_name = _check_role_name(
+        "태스크 역할(task_role)", (task_role or "").strip() or TASK_ROLE
+    )
+    cluster_name = _check_ecs_name("클러스터", (cluster or "").strip() or DEFAULT_CLUSTER)
+    service_name = _check_ecs_name("서비스", (service or "").strip() or DEFAULT_SERVICE)
 
     account = (account_id or "").strip() or ACCOUNT_PLACEHOLDER
     reg = (region or "").strip() or REGION_PLACEHOLDER
@@ -282,7 +421,9 @@ def build_policy(
             continue
         builder = _BUILDERS[target]
         if target == "ecs":
-            statements.extend(builder(reg, account, role))
+            statements.extend(
+                builder(reg, account, exec_name, task_name, cluster_name, service_name)
+            )
         else:
             statements.extend(builder(reg, account))
 
@@ -300,13 +441,14 @@ def policy_json(
     account_id: str = "",
     region: str = "",
     task_execution_role: str = TASK_EXECUTION_ROLE,
+    **names: str,
 ) -> str:
     """콘솔에 그대로 붙여넣을 수 있는 JSON 문자열.
 
     들여쓰기 2칸 · 키 순서 유지 · 한글 이스케이프 없음.
     """
     return json.dumps(
-        build_policy(targets, account_id, region, task_execution_role),
+        build_policy(targets, account_id, region, task_execution_role, **names),
         indent=2,
         ensure_ascii=False,
     )

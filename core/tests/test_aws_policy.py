@@ -162,8 +162,14 @@ def test_unknown_target_is_rejected_with_a_helpful_message():
 # 실행 역할 이름이 고정돼 있으면 학교 계정에서 개발 자체가 막힌다.
 
 def test_task_execution_role_is_configurable_for_academy():
+    """학교 계정은 역할을 못 만들므로 **실행 역할·태스크 역할 둘 다** LabRole 이다.
+
+    한쪽만 바꾸면 나머지 하나가 존재하지 않는 역할(`ecsTaskRole`)을 가리켜,
+    그 역할에 PassRole 을 주는 무의미한 정책이 나온다.
+    """
     p = ap.build_policy(["ecs"], "123456789012", "us-east-1",
-                        ap.ACADEMY_TASK_EXECUTION_ROLE)
+                        ap.ACADEMY_TASK_EXECUTION_ROLE,
+                        task_role=ap.ACADEMY_TASK_EXECUTION_ROLE)
     role_arns = [
         r
         for s in p["Statement"]
@@ -207,6 +213,11 @@ PINNED_ACTIONS: dict[str, str] = {
     "iam:PassRole":
         "ecs:RegisterTaskDefinition 에 실행 역할 ARN 을 넘기면 AWS 가 내부적으로 "
         "요구한다. 코드에 pass_role 이라는 호출은 존재하지 않는다",
+    "ecr:BatchGetImage":
+        "배포 전 보안 스캔(trivy)·SBOM(syft)이 원격 이미지를 끌어온다. "
+        "외부 실행 파일이 하는 일이라 파이썬 코드에 안 보인다",
+    "ecr:GetDownloadUrlForLayer":
+        "같은 이유 — trivy/syft 가 ECR 에서 레이어를 받아온다",
 }
 
 #: 아직 코드가 안 쓰지만 미리 발급하는 권한. **카드 번호를 반드시 적는다.**
@@ -459,6 +470,56 @@ def fetch():
     assert found == set(), f"AWS 아닌 호출을 잡았다: {found}"
 
 
+def test_scanner_handles_two_methods_with_the_same_name(tmp_path):
+    """같은 이름의 메서드가 여럿이면 **앞쪽 것을 놓치면 안 된다.**
+
+    예전 판은 이름 → 정의 dict 라 마지막 정의만 남았고, 앞 클래스 안의
+    AWS 호출이 통째로 검사를 빠져나갔다. 새 호출이 **조용히** 통과하는
+    형태라 제일 위험한 종류의 구멍이다.
+    """
+    found = _scan_snippet(tmp_path, """
+import boto3, httpx
+class A:
+    def run(self):
+        client = boto3.client("ecs")
+        return self.use(client)
+    def use(self, client):
+        return client.update_service()
+class B:
+    def run(self):
+        return self.use(httpx.Client())
+    def use(self, client):
+        return client.post("/x")
+""")
+    assert ("ecs", "update_service") in found, \
+        f"동명 메서드 때문에 A.use 안의 호출을 놓쳤다: {found}"
+    assert ("ecs", "post") not in found
+
+
+def test_scanner_separates_same_attribute_in_different_classes(tmp_path):
+    """두 클래스가 둘 다 `self._client` 를 쓰면 서로 오염되면 안 된다.
+
+    흔한 형태다. 모듈 전체 dict 로 관리하면 **마지막 클래스 것만** 남아,
+    앞 클래스의 호출이 엉뚱한 서비스로 기록되고 필요한 권한이 목록에서
+    사라진다. 조용히 빠지는 형태라 제일 위험하다.
+    """
+    found = _scan_snippet(tmp_path, """
+import boto3
+class EcsDeployer:
+    def __init__(self):
+        self._client = boto3.client("ecs")
+    def go(self):
+        return self._client.update_service()
+class S3Uploader:
+    def __init__(self):
+        self._client = boto3.client("s3")
+    def go(self):
+        return self._client.put_object()
+""")
+    assert ("ecs", "update_service") in found, f"ECS 쪽이 S3 에 덮였다: {found}"
+    assert ("s3", "put_object") in found, found
+
+
 def test_scanner_does_not_leak_names_between_functions(tmp_path):
     """한 함수의 `client` 가 다른 함수의 `client` 를 오염시키면 안 된다."""
     found = _scan_snippet(tmp_path, """
@@ -505,6 +566,288 @@ def make(name):
     return c.something()
 """)
     assert found == set()
+
+
+# ── [핵심] 리소스 범위 대조 — 액션만 봐서는 안 잡히는 것 ──────────────
+#
+# 3차 리뷰(Codex)에서 P1 세 건이 나왔는데 **전부 리소스 범위 문제**였다.
+# 액션(`ecs:RegisterTaskDefinition`)은 정책에 있는데, 그 액션이 건드리는
+# 리소스(태스크 역할 ARN)가 범위 밖이라 배포가 실패하는 형태다.
+#
+# 액션 대조 14건 음성 대조를 다 통과하고도 이게 남았다. 검사가 액션만 보고
+# 리소스는 안 봤기 때문이다. 아래가 그 구멍을 메운다.
+
+def test_passrole_covers_every_role_the_deploy_code_passes():
+    """[구멍 메움] 배포 코드가 넘기는 역할이 전부 PassRole 대상이어야 한다.
+
+    `ecs_agent` 는 실행 역할과 태스크 역할을 **따로** 넘긴다. 하나만 PassRole
+    대상에 넣으면 `RegisterTaskDefinition` 이 거부된다 — 그것도 이미지 빌드와
+    푸시가 다 끝난 **배포 마지막 단계**에서.
+
+    학교 계정용 `LabRole` 은 학교용 정책이 덮는다. 그래서 두 조합의 합집합으로
+    본다.
+    """
+    covered: set[str] = set()
+    for policy in (
+        ap.build_policy(["ecs"], "1", "r"),
+        ap.build_policy(["ecs"], "1", "r", ap.ACADEMY_TASK_EXECUTION_ROLE,
+                        task_role=ap.ACADEMY_TASK_EXECUTION_ROLE),
+    ):
+        for stmt in policy["Statement"]:
+            if "iam:PassRole" not in stmt["Action"]:
+                continue
+            res = stmt["Resource"]
+            for arn in ([res] if isinstance(res, str) else res):
+                covered.add(arn.rsplit("/", 1)[-1])
+
+    found = ac.iam_roles_in_source(CORE_DIR)
+    missing = {name: where for name, where in found.items() if name not in covered}
+    assert not missing, (
+        "배포 코드가 넘기는데 PassRole 대상에 없는 역할:\n  "
+        + "\n  ".join(f"{n}  ({', '.join(w[:3])})" for n, w in sorted(missing.items()))
+        + "\n(aws_policy.py 의 PassRole Resource 를 넓히거나, 코드에서 그 역할을 빼세요)"
+    )
+
+
+def test_role_scanner_works(tmp_path):
+    """위 대조가 헛돌지 않게 못 박는다.
+
+    `iam_roles_in_source` 가 빈 결과를 돌려주면 "빠진 역할 0" 이 되어
+    통과해 버린다. 액션 스캐너 때와 **똑같은 함정**이다.
+
+    실제 저장소 상태가 아니라 **합성 입력**으로 검사한다. 저장소에서 하드코딩이
+    사라지는 건 좋은 일인데, 저장소를 기준으로 삼으면 그때 이 가드가 깨진다.
+    """
+    (tmp_path / "mod.py").write_text('''
+ARN = "arn:aws:iam::123456789012:role/SomeHardcodedRole"
+def go(agent, region):
+    return agent._check_iam_role("AnotherRole", region)
+''', encoding="utf-8")
+    found = ac.iam_roles_in_source(tmp_path)
+    assert set(found) == {"SomeHardcodedRole", "AnotherRole"}, found
+
+
+def test_policy_and_deploy_path_agree_on_role_names(monkeypatch):
+    """[핵심] 권한표가 인가한 역할 = 배포 경로가 실제로 쓸 역할.
+
+    이게 어긋나면 사용자는 시킨 대로 정책을 붙였는데도 배포 전 점검이 없는
+    역할을 찾다가 실패하거나, 태스크 정의가 인가 안 된 역할을 달고 등록되다
+    거부된다. **정책만 맞고 코드가 안 맞는** 형태라 액션 대조로는 안 잡힌다.
+    """
+    def authorized(policy):
+        names = set()
+        for stmt in policy["Statement"]:
+            if "iam:PassRole" not in stmt["Action"]:
+                continue
+            res = stmt["Resource"]
+            for arn in ([res] if isinstance(res, str) else res):
+                names.add(arn.rsplit("/", 1)[-1])
+        return names
+
+    from api.routes import aws as route
+
+    # ① 기본 (환경변수 없음)
+    monkeypatch.delenv(ap.ENV_EXECUTION_ROLE_ARN, raising=False)
+    monkeypatch.delenv(ap.ENV_TASK_ROLE_ARN, raising=False)
+    exec_role, task = route._resolve_roles(False, "", "")
+    assert (exec_role, task) == (ap.configured_execution_role(),
+                                 ap.configured_task_role())
+    assert authorized(ap.build_policy(["ecs"], "1", "r", exec_role,
+                                      task_role=task)) == {exec_role, task}
+
+    # ② 배포 경로가 환경변수로 다른 역할을 쓰도록 설정된 경우
+    monkeypatch.setenv(ap.ENV_EXECUTION_ROLE_ARN, "arn:aws:iam::1:role/MyExec")
+    monkeypatch.setenv(ap.ENV_TASK_ROLE_ARN, "arn:aws:iam::1:role/MyTask")
+    assert ap.configured_execution_role() == "MyExec"
+    assert ap.configured_task_role() == "MyTask"
+    exec_role, task = route._resolve_roles(False, "", "")
+    assert (exec_role, task) == ("MyExec", "MyTask"), \
+        "환경변수로 지정한 역할이 권한표에 반영되지 않는다"
+
+    # ③ 학교 계정 자동 판단보다 환경변수가 앞선다 (배포 경로가 그걸 보므로)
+    assert route._resolve_roles(True, "", "") == ("MyExec", "MyTask")
+
+
+def test_bad_role_env_var_fails_loudly(monkeypatch):
+    """역할 환경변수가 이상하면 조용히 기본값으로 떨어지면 안 된다."""
+    monkeypatch.setenv(ap.ENV_EXECUTION_ROLE_ARN, "arn:aws:iam::1:role/*")
+    with pytest.raises(ValueError, match="IAM 역할 이름"):
+        ap.configured_execution_role()
+
+
+def test_academy_uses_labrole_for_both_roles(monkeypatch):
+    """학교 계정에서 한쪽만 LabRole 로 바꾸면 반쪽짜리 정책이 나온다."""
+    from api.routes import aws as route
+    monkeypatch.delenv(ap.ENV_EXECUTION_ROLE_ARN, raising=False)
+    monkeypatch.delenv(ap.ENV_TASK_ROLE_ARN, raising=False)
+    assert route._resolve_roles(True, "", "") == (
+        ap.ACADEMY_TASK_EXECUTION_ROLE, ap.ACADEMY_TASK_EXECUTION_ROLE
+    )
+    assert route._resolve_roles(False, "", "") == (
+        ap.TASK_EXECUTION_ROLE, ap.TASK_ROLE
+    )
+    # 명시 지정은 자동 판단보다 우선한다.
+    assert route._resolve_roles(True, "MyExec", "MyTask") == ("MyExec", "MyTask")
+
+
+def test_ecr_listing_denial_is_reported_as_normal_not_as_broken_credentials():
+    """최소권한 정책에서 계정 전체 ECR 목록이 막히는 건 **정상**이다.
+
+    `/api/aws/ecr/repos` 는 리포지토리 이름을 안 주고 계정 전체를 훑는데,
+    권한표는 ECR 조회를 `recoder-*` 로 좁혀 놓는다. 즉 **권한표를 정확히
+    따른 사용자일수록** 여기서 막힌다.
+
+    403 으로 끊으면 화면이 "자격증명이 잘못됐다"로 표시해, 멀쩡한 키를
+    의심하게 만든다. 목록만 비우고 이유를 알려야 한다.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api.routes import aws as route
+
+    class _Denied(Exception):
+        def __str__(self):
+            return "AccessDeniedException: not authorized to perform ecr:DescribeRepositories"
+
+    class _FakeSession:
+        def client(self, *a, **k):
+            class _C:
+                def describe_repositories(self, **kw):
+                    raise _Denied()
+            return _C()
+
+    app = FastAPI()
+    app.include_router(route.router)
+    original = route._build_boto3_session
+    route._build_boto3_session = lambda **k: _FakeSession()
+    try:
+        resp = TestClient(app).get("/api/aws/ecr/repos")
+    finally:
+        route._build_boto3_session = original
+
+    assert resp.status_code == 200, "권한 거부를 오류로 끊으면 안 된다"
+    body = resp.json()
+    assert body["listing_denied"] is True
+    assert body["repositories"] == []
+    assert "자격증명 문제가 아닙니다" in body["message"]
+
+
+def test_execution_role_and_task_role_are_different_and_both_passable():
+    """둘은 서로 다른 역할이다. 기본값이 같아지면 한쪽을 잊었다는 뜻이다."""
+    assert ap.TASK_EXECUTION_ROLE != ap.TASK_ROLE
+    stmt = next(s for s in ap.build_policy(["ecs"], "1", "r")["Statement"]
+                if "iam:PassRole" in s["Action"])
+    res = stmt["Resource"]
+    arns = [res] if isinstance(res, str) else res
+    names = {a.rsplit("/", 1)[-1] for a in arns}
+    assert names == {ap.TASK_EXECUTION_ROLE, ap.TASK_ROLE}, \
+        f"PassRole 대상이 두 역할을 다 덮지 않는다: {names}"
+
+
+def test_same_role_for_both_is_not_duplicated():
+    """학교 계정은 둘 다 LabRole 이다. ARN 을 두 번 넣지 않는다."""
+    stmt = next(s for s in ap.build_policy(
+        ["ecs"], "1", "r", "LabRole", task_role="LabRole")["Statement"]
+        if "iam:PassRole" in s["Action"])
+    assert stmt["Resource"] == "arn:aws:iam:::1:role/LabRole".replace(":::", "::") \
+        or stmt["Resource"].endswith("role/LabRole"), stmt["Resource"]
+    assert isinstance(stmt["Resource"], str), "같은 역할인데 목록으로 중복됐다"
+
+
+@pytest.mark.parametrize("bad", ["*", "role/*", "arn:aws:iam::1:role/X", "a b", "a/b", "?"])
+def test_wildcard_or_malformed_role_names_are_rejected(bad):
+    """[보안] `task_execution_role=*` 은 계정의 **모든 역할**에 PassRole 을 준다.
+
+    이 엔드포인트는 자격증명 없이도 응답하므로, 여기서 막지 않으면 누구나
+    `role/*` 짜리 정책 문구를 뽑아낼 수 있다. 최소권한 보장이 무너진다.
+    """
+    with pytest.raises(ValueError, match="IAM 역할 이름"):
+        ap.build_policy(["ecs"], "1", "r", bad)
+    with pytest.raises(ValueError, match="IAM 역할 이름"):
+        ap.build_policy(["ecs"], "1", "r", task_role=bad)
+
+
+#: 이 엔드포인트로 넓은 권한을 뽑아내려는 시도들. 하나라도 통과하면
+#: "최소권한 정책을 준다"는 이 기능의 전제가 무너진다.
+HOSTILE_NAMES = [
+    "*", "?", "role/*", "*Admin*", "Admin*", "a*", "**",
+    "arn:aws:iam::1:role/Admin", "../Admin", "Admin/../*",
+    "OrganizationAccountAccessRole\n*", "a b", "",
+]
+
+
+@pytest.mark.parametrize("hostile", HOSTILE_NAMES)
+def test_no_input_can_produce_a_role_wildcard(hostile):
+    """[보안 · 속성] **어떤 입력으로도** `role/*` 이 나오면 안 된다.
+
+    거부하든 기본값으로 떨어지든 상관없다. 나오면 안 되는 것만 확실하면 된다.
+    이렇게 써야 검증이 헛돌지 않는다 — 고정 입력 몇 개만 확인하면, 검증이
+    느슨해져도 그 입력들은 여전히 멀쩡해서 테스트가 통과해 버린다.
+    """
+    for kwargs in ({"task_execution_role": hostile}, {"task_role": hostile}):
+        try:
+            policy = ap.build_policy(["ecs"], "123456789012", "us-east-1", **kwargs)
+        except ValueError:
+            continue  # 거부했으면 통과
+        text = json.dumps(policy)
+        assert "role/*" not in text and "role/**" not in text, (
+            f"{kwargs!r} 로 와일드카드 역할 ARN 이 만들어졌다 — "
+            f"이 키 하나로 계정의 모든 역할을 ECS 에 넘길 수 있다"
+        )
+        for arn in re.findall(r"arn:aws:iam::[^\"]*", text):
+            assert "*" not in arn, f"역할 ARN 에 와일드카드: {arn}"
+
+
+@pytest.mark.parametrize("hostile", HOSTILE_NAMES)
+def test_no_input_can_widen_the_ecs_resource_scope(hostile):
+    """클러스터·서비스 이름으로도 범위를 넓힐 수 없어야 한다."""
+    for kwargs in ({"cluster": hostile}, {"service": hostile}):
+        try:
+            policy = ap.build_policy(["ecs"], "1", "r", **kwargs)
+        except ValueError:
+            continue
+        for stmt in policy["Statement"]:
+            if stmt["Sid"] != "EcsDeployService":
+                continue
+            for arn in stmt["Resource"]:
+                tail = arn.split(":", 5)[-1]
+                assert tail not in ("cluster/*", "service/*", "service/*/*"), \
+                    f"{kwargs!r} 로 ECS 범위가 전체로 열렸다: {arn}"
+
+
+# ── 클러스터·서비스 이름이 ARN 에 반영되는가 ─────────────────────────
+
+def test_cluster_and_service_names_flow_into_the_arns():
+    """사용자가 이미 있는 클러스터(`default` 등)에 배포할 수 있다.
+
+    이름을 `recoder-*` 로 고정하면 그런 사용자는 정책을 그대로 붙여도
+    배포 전 점검에서 `DescribeClusters` 가 거부된다.
+    """
+    stmt = next(s for s in ap.build_policy(
+        ["ecs"], "1", "us-east-1", cluster="default", service="my-api")["Statement"]
+        if s["Sid"] == "EcsDeployService")
+    assert "arn:aws:ecs:us-east-1:1:cluster/default" in stmt["Resource"]
+    assert "arn:aws:ecs:us-east-1:1:service/default/my-api" in stmt["Resource"]
+
+
+def test_service_arn_nests_the_cluster_name():
+    """ECS 서비스 ARN 은 `service/<클러스터>/<서비스>` 형태다."""
+    stmt = next(s for s in ap.build_policy(["ecs"], "1", "r")["Statement"]
+                if s["Sid"] == "EcsDeployService")
+    svc = [r for r in stmt["Resource"] if ":service/" in r][0]
+    assert svc.endswith(f"service/{ap.DEFAULT_CLUSTER}/{ap.DEFAULT_SERVICE}")
+
+
+@pytest.mark.parametrize("bad", ["*", "a/b", "a*b", "clus ter", "arn:aws:ecs:::cluster/x"])
+def test_bad_cluster_or_service_names_are_rejected(bad):
+    with pytest.raises(ValueError, match="이름이 올바르지 않습니다"):
+        ap.build_policy(["ecs"], "1", "r", cluster=bad)
+    with pytest.raises(ValueError, match="이름이 올바르지 않습니다"):
+        ap.build_policy(["ecs"], "1", "r", service=bad)
+
+
+def test_prefix_wildcard_is_still_allowed_for_defaults():
+    """기본값 `recoder-*` 는 접두사 와일드카드라 허용돼야 한다."""
+    ap.build_policy(["ecs"], "1", "r", cluster="recoder-*", service="recoder-*")
 
 
 # ── 학교 계정 감지와 안내 분기 ────────────────────────────────────────
@@ -555,6 +898,101 @@ def test_normal_steps_still_walk_through_key_creation():
     from api.routes import aws as route
     text = " ".join(route._policy_steps(True, academy=False))
     assert "사용자 생성" in text and "액세스 키 발급" in text
+
+
+# ── 리전을 확실할 때만 채우는가 ───────────────────────────────────────
+
+def _policy_client(monkeypatch, session_region):
+    """리전만 다르게 준 가짜 세션으로 엔드포인트를 부른다."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api.routes import aws as route
+
+    class _S:
+        region_name = session_region
+
+    monkeypatch.setattr(route, "_build_boto3_session", lambda **k: _S())
+    app = FastAPI()
+    app.include_router(route.router)
+    return TestClient(app)
+
+
+def test_region_stays_a_placeholder_when_it_is_not_known(monkeypatch):
+    """[핵심] 모르면 **자리표시자를 남긴다.** 기본값을 몰래 채우지 않는다.
+
+    자격증명이 `~/.aws/credentials` 에 있고 리전은 `~/.aws/config` 에만 있는
+    구성이 흔하다. 예전에는 그 경우 하드코딩 기본값(`ap-northeast-2`)이 ARN 에
+    박히면서 `needs_manual_fill=False` 로 나갔다. 사용자는 다 채워진 줄 알고
+    붙여넣고, 실제 배포는 다른 리전이라 거부된다. **정책이 멀쩡해 보여서**
+    원인을 찾기가 특히 어렵다.
+
+    틀린 값을 조용히 채우느니 "여기 채우세요"가 낫다.
+    """
+    client = _policy_client(monkeypatch, None)
+    body = client.get("/api/aws/policy").json()
+    assert body["region"] == "", f"모르는 리전을 채웠다: {body['region']!r}"
+    assert body["needs_manual_fill"] is True
+    assert ap.REGION_PLACEHOLDER in body["policy_json"]
+    assert "ap-northeast-2" not in body["policy_json"], \
+        "하드코딩 기본 리전이 정책에 새어 들어갔다"
+
+
+def test_region_comes_from_the_session_when_known(monkeypatch):
+    """프로필 config 에 리전이 있으면 그걸 쓴다."""
+    client = _policy_client(monkeypatch, "us-west-2")
+    body = client.get("/api/aws/policy").json()
+    assert body["region"] == "us-west-2"
+    assert "us-west-2" in body["policy_json"]
+
+
+def test_explicit_region_wins_over_the_session(monkeypatch):
+    client = _policy_client(monkeypatch, "us-west-2")
+    body = client.get("/api/aws/policy", params={"region": "eu-central-1"}).json()
+    assert body["region"] == "eu-central-1"
+
+
+# ── 권한 부족이 보안 게이트를 무력화하지 않는가 ───────────────────────
+
+def test_trivy_failure_is_visible_in_the_findings():
+    """[보안] 스캔이 실패하면 **결과에 흔적이 남아야** 한다.
+
+    실패를 조용히 삼키면 findings 가 빈 채로 돌아가고, 호출부는 그걸
+    "취약점 0건 = 통과"로 읽는다. 즉 **이미지를 한 번도 들여다보지 않은
+    배포가 보안 게이트를 통과**한다.
+
+    이건 가상의 걱정이 아니다. 권한표에 ECR **pull** 권한이 없으면 trivy 가
+    원격 이미지를 못 받아 정확히 이 경로로 떨어진다. 권한 하나가 보안 게이트
+    무력화로 이어지는 셈이라, 권한표 카드에서 같이 막는다.
+    """
+    import asyncio
+    import security_scan as ss
+
+    scanner = ss.SecurityScanner() if hasattr(ss, "SecurityScanner") else None
+    if scanner is None:  # pragma: no cover - 클래스 이름이 바뀌면 알려준다
+        pytest.fail("SecurityScanner 를 찾을 수 없다 — 테스트를 갱신하세요")
+
+    async def _boom(*a, **k):
+        raise RuntimeError("AccessDeniedException: ecr:BatchGetImage")
+
+    scanner._run_cmd = _boom
+    findings = asyncio.run(scanner._run_trivy("123.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1"))
+
+    assert findings, "스캔이 실패했는데 결과가 비어 있다 — '취약점 없음'으로 오해된다"
+    titles = {f.title for f in findings}
+    assert "trivy_scan_failed" in titles, titles
+    detail = " ".join(f.description for f in findings)
+    assert "ecr:BatchGetImage" in detail, "원인을 짚어주지 않으면 사용자가 못 고친다"
+
+
+def test_ecr_pull_actions_are_granted_for_image_scanning():
+    """trivy/syft 가 원격 이미지를 끌어오려면 pull 권한이 따로 필요하다.
+
+    push 권한(`PutImage` 등)과 **다른 액션**이다. 코드 grep 으로는 안 보인다 —
+    외부 실행 파일이 하는 일이라 docker push 와 같은 부류다.
+    """
+    granted = set(ap.used_actions(ap.build_policy(["ecs"])))
+    for action in ("ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"):
+        assert action in granted, f"이미지 스캔에 필요한 {action} 이 빠졌다"
 
 
 # ── 실행 중 기록기 (권한 0 으로 동작해야 한다) ────────────────────────

@@ -732,10 +732,27 @@ async def list_ecr_repos(region: str = "", profile: str = "", max_results: int =
         if "InvalidClientTokenId" in msg or "SignatureDoesNotMatch" in msg:
             raise HTTPException(status_code=401, detail=f"AWS 자격증명 무효: {msg}") from exc
         if "AccessDenied" in msg or "NotAuthorized" in msg:
-            raise HTTPException(
-                status_code=403,
-                detail=f"ECR DescribeRepositories 권한 거부: {msg}",
-            ) from exc
+            # 이건 고장이 아니라 **의도된 결과**다.
+            #
+            # 이 엔드포인트는 리포지토리 이름을 안 주고 계정 전체를 훑는다.
+            # 그런데 최소권한 정책은 ECR 조회를 `recoder-*` 로 좁혀 놓는다
+            # (사용자의 다른 리포지토리 이름까지 보여줄 이유가 없다).
+            # 그래서 권한표를 정확히 따른 사용자일수록 여기서 막힌다.
+            #
+            # 403 으로 끊으면 화면이 "자격증명이 잘못됐다"로 표시해 사용자가
+            # 멀쩡한 키를 의심하게 된다. 목록만 비우고 이유를 알린다.
+            logger.info("[aws] ECR 계정 전체 목록 거부 — 최소권한 정책에서는 정상: %s", msg)
+            return {
+                "region": resolved_region,
+                "profile": resolved_profile or "",
+                "repositories": [],
+                "listing_denied": True,
+                "message": (
+                    "최소권한 정책에서는 계정 전체 ECR 목록 조회를 허용하지 않습니다. "
+                    "권한표대로 설정하셨다면 정상이며, 자격증명 문제가 아닙니다. "
+                    "연결 확인은 /api/aws/status 를 쓰세요."
+                ),
+            }
         if "Unable to locate credentials" in msg:
             raise HTTPException(
                 status_code=400,
@@ -747,6 +764,8 @@ async def list_ecr_repos(region: str = "", profile: str = "", max_results: int =
         "region": resolved_region,
         "profile": resolved_profile or "",
         "repositories": repos,
+        "listing_denied": False,
+        "message": "",
     }
 
 
@@ -769,6 +788,9 @@ class AwsPolicyResponse(BaseModel):
     account_id: str = ""
     region: str = ""
     task_execution_role: str = ""   # ECS 작업이 쓸 실행 역할 이름
+    task_role: str = ""             # 컨테이너 안 코드가 쓸 역할 (실행 역할과 다름)
+    cluster: str = ""               # 정책이 허용한 ECS 클러스터 이름
+    service: str = ""               # 정책이 허용한 ECS 서비스 이름
     is_academy_account: bool = False  # 학교(AWS Academy) 러너랩 세션인가
     steps: list[str] = []
 
@@ -828,10 +850,66 @@ def _looks_like_academy(arn: str) -> bool:
     return any(marker in (arn or "") for marker in ACADEMY_ARN_MARKERS)
 
 
+def _session_region(profile: Optional[str]) -> str:
+    """실제로 배포에 쓰일 리전. 확실하지 않으면 빈 문자열.
+
+    **`get_aws_status()` 의 리전을 그대로 쓰면 안 된다.** 그쪽은 환경변수가
+    없으면 하드코딩 기본값(`ap-northeast-2`)으로 떨어진다. 그런데 자격증명이
+    `~/.aws/credentials` 에 있고 리전은 `~/.aws/config` 에만 있는 구성(공유
+    프로필의 표준 형태)이 흔하다. 그 경우 기본값이 그대로 ARN 에 박히고,
+    `needs_manual_fill=False` 라 사용자는 **다 채워진 줄 안다.**
+
+    그러면 엉뚱한 리전의 ARN 을 그대로 붙여넣고, 실제 배포는 거부된다.
+    원인을 찾기가 특히 어렵다 — 정책은 멀쩡해 보이기 때문이다.
+
+    **틀린 값을 조용히 채우느니 자리표시자를 남기는 게 낫다.** 자리표시자는
+    최소한 "여기 채우세요"라고 말한다.
+    """
+    try:
+        session = _build_boto3_session(profile=profile, region="")
+        return (getattr(session, "region_name", "") or "").strip()
+    except Exception:  # pragma: no cover - 세션 생성 실패는 권한표를 막지 않는다
+        return ""
+
+
+def _resolve_roles(
+    academy: bool, task_execution_role: str, task_role: str
+) -> tuple[str, str]:
+    """(실행 역할, 태스크 역할) 이름을 정한다.
+
+    **학교 계정은 둘 다 `LabRole` 이다.** 러너랩은 IAM 역할을 만들 수 없어서
+    쓸 수 있는 역할이 그것 하나뿐이다. 한쪽만 바꾸면 나머지가 존재하지 않는
+    역할(`ecsTaskRole`)을 가리켜, 있지도 않은 역할에 PassRole 을 주는
+    무의미한 정책이 나온다.
+
+    우선순위는 **명시 지정 > 환경변수 > 학교 계정 자동 판단 > 기본값** 이다.
+    환경변수가 자동 판단보다 앞서는 이유: 배포 경로(`preflight_agent`,
+    `ecs_agent`)가 그 환경변수를 보고 움직이므로, 권한표가 다른 값을 인가하면
+    **정책과 배포가 서로 다른 역할을 가리키게** 된다.
+    """
+    if academy:
+        default_exec = default_task = aws_policy.ACADEMY_TASK_EXECUTION_ROLE
+    else:
+        default_exec = aws_policy.TASK_EXECUTION_ROLE
+        default_task = aws_policy.TASK_ROLE
+    return (
+        (task_execution_role or "").strip()
+        or aws_policy.role_from_env(aws_policy.ENV_EXECUTION_ROLE_ARN)
+        or default_exec,
+        (task_role or "").strip()
+        or aws_policy.role_from_env(aws_policy.ENV_TASK_ROLE_ARN)
+        or default_task,
+    )
+
+
 @router.get("/api/aws/policy", response_model=AwsPolicyResponse)
 async def get_minimum_policy(
     targets: str = "",
     task_execution_role: str = "",
+    task_role: str = "",
+    cluster: str = "",
+    service: str = "",
+    region: str = "",
 ) -> AwsPolicyResponse:
     """ReCoder 가 요구하는 최소권한 IAM 정책을 돌려준다.
 
@@ -839,13 +917,26 @@ async def get_minimum_policy(
     이미 자격증명이 연결돼 있으면 계정 ID·리전을 채워 돌려주고,
     없으면 자리표시자를 남긴 뒤 `needs_manual_fill=True` 로 알린다.
 
-    `task_execution_role` 은 ECS 작업의 실행 역할 **이름**이다. 비우면
-    일반 계정 기준(`ecsTaskExecutionRole`)이고, 학교 계정에서 접속한 것이
-    확인되면 자동으로 `LabRole` 로 맞춘다 — 학교 계정에는 역할을 만들 수
-    없어서 기본값 그대로 주면 존재하지 않는 역할을 가리키게 된다.
+    ## 이름 인자들
+
+    `task_execution_role` / `task_role` 은 ECS 작업에 붙는 역할 **이름**이다.
+    **둘은 서로 다른 역할이고, `RegisterTaskDefinition` 은 둘 다에 대해
+    `iam:PassRole` 을 요구한다.**
+
+    학교(AWS Academy) 계정에서 접속한 것이 확인되면 **둘 다** `LabRole` 로
+    맞춘다. 학교 계정에는 역할을 만들 수 없어서, 한쪽만 바꾸면 나머지가
+    존재하지 않는 역할을 가리키게 된다.
+
+    `cluster` / `service` 는 배포 대상 이름이다. 비우면 우리가 만드는 자원의
+    기본 규칙(`recoder-*`)을 쓴다. **이미 있는 클러스터(`default` 등)에
+    배포한다면 반드시 넘겨야 한다** — 안 그러면 정책을 그대로 붙여도 배포 전
+    점검에서 막힌다.
+
+    이름이 잘못되면(특히 와일드카드) 400 으로 거부한다. `role/*` 짜리 정책을
+    뽑아낼 수 있으면 이 기능의 존재 이유가 사라진다.
     """
     selected = [t.strip() for t in targets.split(",") if t.strip()] or None
-    account_id, region, caller_arn = "", "", ""
+    account_id, caller_arn, profile = "", "", None
     try:
         # 자격증명이 이미 있으면 ARN 을 채워 사용자가 손댈 것을 줄인다.
         # 없거나 실패해도 권한표는 나와야 하므로 조용히 넘어간다.
@@ -853,19 +944,30 @@ async def get_minimum_policy(
         if status.identity:
             account_id = status.identity.account or ""
             caller_arn = getattr(status.identity, "arn", "") or ""
-        region = status.region or ""
+        profile = status.profile or None
     except Exception:  # pragma: no cover - 상태 조회 실패는 권한표를 막지 않는다
         pass
 
+    # 리전은 **확실할 때만** 채운다. 자세한 이유는 _session_region() 참고.
+    # 우선순위: 직접 지정 → 세션(프로필 config 포함) → 비움(자리표시자)
+    resolved_region = (region or "").strip() or _session_region(profile)
+
     academy = _looks_like_academy(caller_arn)
-    role = (task_execution_role or "").strip()
-    if not role:
-        role = (aws_policy.ACADEMY_TASK_EXECUTION_ROLE if academy
-                else aws_policy.TASK_EXECUTION_ROLE)
+    exec_role, task = _resolve_roles(academy, task_execution_role, task_role)
+
+    names = {
+        "task_role": task,
+        "cluster": (cluster or "").strip() or aws_policy.DEFAULT_CLUSTER,
+        "service": (service or "").strip() or aws_policy.DEFAULT_SERVICE,
+    }
 
     try:
-        policy = aws_policy.build_policy(selected, account_id, region, role)
-        policy_text = aws_policy.policy_json(selected, account_id, region, role)
+        policy = aws_policy.build_policy(
+            selected, account_id, resolved_region, exec_role, **names
+        )
+        policy_text = aws_policy.policy_json(
+            selected, account_id, resolved_region, exec_role, **names
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -877,8 +979,11 @@ async def get_minimum_policy(
         action_count=len(aws_policy.used_actions(policy)),
         needs_manual_fill=needs_fill,
         account_id=account_id,
-        region=region,
-        task_execution_role=role,
+        region=resolved_region,
+        task_execution_role=exec_role,
+        task_role=task,
+        cluster=names["cluster"],
+        service=names["service"],
         is_academy_account=academy,
         steps=_policy_steps(needs_fill, academy),
     )

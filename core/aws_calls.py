@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -331,30 +332,77 @@ def _callee_name(node: ast.Call) -> str | None:
     return None
 
 
-def _bind_params(node: ast.Call, funcdefs: dict, view: dict, scanner) -> bool:
+def _enclosing_classes(tree: ast.Module) -> dict[int, str]:
+    """함수 정의 → 그것을 감싸는 클래스 이름.
+
+    `self.foo(...)` 를 풀 때 **같은 클래스의 `foo`** 로 좁히기 위해 쓴다.
+    이게 없으면 동명 메서드가 서로 오염된다.
+    """
+    out: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.setdefault(id(child), node.name)
+    return out
+
+
+def _is_self_call(node: ast.Call) -> bool:
+    """`self.foo(...)` / `cls.foo(...)` 인가."""
+    return (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in ("self", "cls")
+    )
+
+
+def _bind_params(node: ast.Call, funcdefs: dict, view: dict, scanner,
+                 current_class: str | None = None) -> bool:
     """`f(client, ...)` 로 클라이언트가 넘어가면 받는 쪽 매개변수를 기록한다.
 
     `bedrock_provider` 가 `self._call_with_tool_config(client, ...)` 처럼
     클라이언트를 **인자로 넘긴다.** 이걸 못 따라가면 그 안의 `client.converse(...)`
     를 통째로 놓친다 — 실제로 이전 판이 `bedrock:Converse` 를 놓쳤다.
+
+    ## 같은 이름의 함수가 여러 개일 때
+
+    한 모듈에 `A.use` 와 `B.use` 가 둘 다 있으면, 이름 하나에 정의가 여럿이다.
+    예전 판은 **마지막 것만** 남겨서 `A.use` 안의 AWS 호출을 통째로 놓쳤다.
+    지금은 **같은 이름의 정의 전부**에 인자를 묶는다.
+
+    과대 추정이 되지만 방향이 맞다 — 실제보다 많이 잡히면 테스트가 시끄럽게
+    실패할 뿐이고, 적게 잡히면 새 AWS 호출이 **조용히** 검사를 빠져나간다.
     """
     fname = _callee_name(node)
     if not fname or fname not in funcdefs:
         return False
-    target = funcdefs[fname]
-    names = [a.arg for a in target.args.args]
-    # 메서드를 `self.f(...)` 로 부르면 첫 매개변수(self)는 인자에 없다.
-    if names and names[0] in ("self", "cls") and isinstance(node.func, ast.Attribute):
-        names = names[1:]
+
+    candidates = funcdefs[fname]
+    # `self.foo(...)` 는 **같은 클래스의 foo** 다. 좁힐 수 있으면 좁힌다.
+    # 못 좁히면 동명 정의 전부에 묶는다 — 과대 추정이 누락보다 낫다.
+    if _is_self_call(node) and current_class:
+        same = [c for c in candidates
+                if scanner.class_of.get(id(c)) == current_class]
+        if same:
+            candidates = same
 
     changed = False
-    pairs: list[tuple[str, ast.expr]] = list(zip(names, node.args))
-    pairs += [(kw.arg, kw.value) for kw in node.keywords if kw.arg]
-    for pname, value in pairs:
-        svc = scanner._service_of(value, view)
-        if svc and scanner.params.get((fname, pname)) != svc:
-            scanner.params[(fname, pname)] = svc
-            changed = True
+    for target in candidates:
+        names = [a.arg for a in target.args.args]
+        # 메서드를 `self.f(...)` 로 부르면 첫 매개변수(self)는 인자에 없다.
+        if names and names[0] in ("self", "cls") and isinstance(node.func, ast.Attribute):
+            names = names[1:]
+
+        pairs: list[tuple[str, ast.expr]] = list(zip(names, node.args))
+        pairs += [(kw.arg, kw.value) for kw in node.keywords if kw.arg]
+        for pname, value in pairs:
+            svc = scanner._service_of(value, view, current_class)
+            # 같은 이름의 정의가 여럿이면 **모두**에 묶는다 (과대 추정).
+            key = (id(target), pname)
+            if svc and scanner.params.get(key) != svc:
+                scanner.params[key] = svc
+                changed = True
     return changed
 
 
@@ -388,14 +436,20 @@ class _ModuleScanner:
 
     def __init__(self, rel_path: str) -> None:
         self.rel = rel_path
-        self.dotted: dict[str, str] = {}      # "self._client" → 서비스
+        # (소유 클래스, 이름) → 서비스.
+        # **클래스별로 나눠야 한다.** 한 모듈의 두 클래스가 둘 다
+        # `self._client` 를 쓰면(흔하다) 모듈 전체 dict 는 마지막 것만 남기고,
+        # 앞 클래스의 AWS 호출을 통째로 다른 서비스로 오인한다.
+        self.dotted: dict[tuple[str | None, str], str] = {}
         self.factories: dict[str, str] = {}   # 함수 이름 → 서비스
         self.globals: dict[str, str] = {}     # 모듈 전역 맨 이름 → 서비스
-        self.params: dict[tuple[str, str], str] = {}  # (함수, 매개변수) → 서비스
+        self.params: dict[tuple[int, str], str] = {}  # (정의 id, 매개변수) → 서비스
         self.locals: dict[int, dict[str, str]] = {}   # 범위별 지역 이름
+        self.class_of: dict[int, str] = {}            # 함수 정의 → 감싸는 클래스
         self.calls: list[AwsCall] = []
 
-    def _service_of(self, node: ast.AST, view: dict[str, str]) -> str | None:
+    def _service_of(self, node: ast.AST, view: dict[str, str],
+                    current_class: str | None = None) -> str | None:
         """이 표현식이 어떤 AWS 서비스의 클라이언트인가."""
         svc = _client_service(node)
         if svc:
@@ -404,8 +458,11 @@ class _ModuleScanner:
         if name:
             if name in view:
                 return view[name]
-            if name in self.dotted:
-                return self.dotted[name]
+            # 같은 클래스의 바인딩을 먼저 본다. 없으면 모듈 수준(클래스 밖).
+            for owner in (current_class, None):
+                svc = self.dotted.get((owner, name))
+                if svc:
+                    return svc
         if isinstance(node, ast.Call):
             fn = _callee_name(node)
             if fn and fn in self.factories:
@@ -420,20 +477,26 @@ class _ModuleScanner:
 
     def resolve(self, tree: ast.Module) -> None:
         scopes = list(_scopes(tree))
-        funcdefs: dict[str, ast.AST] = {
-            node.name: node
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
+        self.class_of = _enclosing_classes(tree)
+        # 이름 하나에 정의가 **여럿일 수 있다** (`A.use` 와 `B.use`).
+        # 예전 판은 dict 로 덮어써서 마지막 정의만 남았고, 앞쪽 클래스의
+        # AWS 호출을 통째로 놓쳤다. 이름 → 정의 **목록**으로 바꾼다.
+        funcdefs: dict[str, list[ast.AST]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funcdefs.setdefault(node.name, []).append(node)
+
         assigns = {id(s): list(_assignments(s)) for s in scopes}
-        returns = {
-            name: [
-                sub.value
-                for sub in _walk_scope(node)
-                if isinstance(sub, ast.Return) and sub.value is not None
-            ]
-            for name, node in funcdefs.items()
-        }
+        returns: dict[str, list[ast.expr]] = {}
+        for name, nodes in funcdefs.items():
+            values: list[ast.expr] = []
+            for node in nodes:
+                values += [
+                    sub.value
+                    for sub in _walk_scope(node)
+                    if isinstance(sub, ast.Return) and sub.value is not None
+                ]
+            returns[name] = values
 
         for _ in range(self.MAX_ROUNDS):
             changed = False
@@ -441,22 +504,27 @@ class _ModuleScanner:
                 local = self.locals.setdefault(id(scope), {})
                 # 이 함수의 매개변수가 클라이언트로 밝혀졌으면 지역에 깔아준다.
                 if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    for (fname, pname), svc in self.params.items():
-                        if fname == scope.name and local.get(pname) != svc:
+                    # 매개변수 바인딩은 **정의 하나하나**에 걸려 있다.
+                    # 이름으로 맞추면 동명이인 함수끼리 서로 오염된다.
+                    for (target_id, pname), svc in self.params.items():
+                        if target_id == id(scope) and local.get(pname) != svc:
                             local[pname] = svc
                             changed = True
                 view = self._view(scope)
+                scope_class = self.class_of.get(id(scope))
 
                 for key, value in assigns[id(scope)]:
-                    svc = self._service_of(value, view)
+                    svc = self._service_of(value, view, scope_class)
                     if not svc:
                         continue
                     if "." in key:
-                        table = self.dotted
-                    elif scope is tree:
-                        table = self.globals
-                    else:
-                        table = local
+                        # 소유 클래스와 함께 저장한다 (없으면 모듈 수준).
+                        dkey = (scope_class, key)
+                        if self.dotted.get(dkey) != svc:
+                            self.dotted[dkey] = svc
+                            changed = True
+                        continue
+                    table = self.globals if scope is tree else local
                     if table.get(key) != svc:
                         table[key] = svc
                         changed = True
@@ -464,15 +532,17 @@ class _ModuleScanner:
                 # 호출 인자로 클라이언트를 넘기는가 → 받는 쪽 매개변수를 기록
                 for node in _walk_scope(scope):
                     if isinstance(node, ast.Call) and _bind_params(
-                        node, funcdefs, view, self
+                        node, funcdefs, view, self, scope_class
                     ):
                         changed = True
 
             for fname, values in returns.items():
-                node = funcdefs[fname]
-                view = self._view(node)
+                # 같은 이름의 정의가 여럿이면 그중 하나라도 클라이언트를
+                # 돌려주면 팩토리로 본다 (과대 추정 — 놓치는 것보다 낫다).
+                first = funcdefs[fname][0]
+                view = self._view(first)
                 for value in values:
-                    svc = self._service_of(value, view)
+                    svc = self._service_of(value, view, self.class_of.get(id(first)))
                     if svc and self.factories.get(fname) != svc:
                         self.factories[fname] = svc
                         changed = True
@@ -482,9 +552,11 @@ class _ModuleScanner:
 
     def collect(self, tree: ast.Module) -> None:
         for scope in _scopes(tree):
-            self._collect_calls(scope, self._view(scope))
+            self._collect_calls(scope, self._view(scope),
+                                self.class_of.get(id(scope)))
 
-    def _collect_calls(self, scope: ast.AST, local: dict[str, str]) -> None:
+    def _collect_calls(self, scope: ast.AST, local: dict[str, str],
+                       current_class: str | None = None) -> None:
         for node in _walk_scope(scope):
             if not isinstance(node, ast.Call):
                 continue
@@ -504,7 +576,7 @@ class _ModuleScanner:
             # 클라이언트를 만드는 호출 자체(`.client("ecs")`)는 액션이 아니다.
             if _client_service(node):
                 continue
-            svc = self._service_of(base, local)
+            svc = self._service_of(base, local, current_class)
             if svc:
                 self.calls.append(AwsCall(
                     service=svc, operation=node.func.attr,
@@ -681,6 +753,45 @@ def _snake(pascal: str) -> str:
             out.append("_")
         out.append(ch.lower())
     return "".join(out)
+
+
+#: 소스에 박혀 있는 IAM 역할 이름을 찾는 두 패턴.
+#: ARN 리터럴(`arn:aws:iam::…:role/ecsTaskRole`)과, 역할 이름을 그대로 넘기는
+#: 배포 전 점검(`_check_iam_role("ecsTaskExecutionRole", …)`).
+_ROLE_IN_ARN = re.compile(r":role/([A-Za-z0-9_+=,.@-]+)")
+_ROLE_IN_CHECK = re.compile(r"_check_iam_role\(\s*f?[\"']([A-Za-z0-9_+=,.@-]+)[\"']")
+
+#: 역할 이름 스캔에서 뺄 파일. 정책 자신과 이 파일은 예시 문자열이 오탐이 된다.
+_ROLE_SCAN_SKIP_FILES = {"aws_policy.py", "aws_calls.py"}
+
+
+def iam_roles_in_source(root: str | Path) -> dict[str, list[str]]:
+    """배포 코드가 **실제로 쓰는 IAM 역할 이름** → 발견 위치.
+
+    액션만 대조하면 놓치는 것이 있다. `ecs:RegisterTaskDefinition` 이 정책에
+    있어도, 거기 붙는 역할이 `iam:PassRole` 대상에 없으면 배포는 그대로
+    실패한다. **액션은 맞는데 리소스가 안 맞는** 경우다.
+
+    실제로 이 구멍으로 한 건 샜다 — `ecs_agent` 가 실행 역할과 태스크 역할을
+    따로 넘기는데 정책은 실행 역할만 PassRole 대상으로 두고 있었다.
+    """
+    root = Path(root)
+    found: dict[str, list[str]] = {}
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if any(part in SKIPPED_DIRS for part in path.relative_to(root).parts[:-1]):
+            continue
+        if path.name in SKIPPED_FILES or path.name in _ROLE_SCAN_SKIP_FILES:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for pattern in (_ROLE_IN_ARN, _ROLE_IN_CHECK):
+            for match in pattern.finditer(text):
+                name = match.group(1)
+                if "{" in name:  # 템플릿 자리표시자는 실제 이름이 아니다
+                    continue
+                line = text.count("\n", 0, match.start()) + 1
+                found.setdefault(name, []).append(f"{rel}:{line}")
+    return found
 
 
 def missing_from_policy(actions: set[str], granted: set[str]) -> list[str]:

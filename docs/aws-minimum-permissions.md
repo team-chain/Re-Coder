@@ -26,7 +26,10 @@ GET /api/aws/policy
 1. **IAM → 정책 → 정책 생성 → JSON 탭** 에 받은 정책을 붙여넣습니다.
 2. 정책 안에 `<ACCOUNT_ID>` `<REGION>` 이 남아 있으면 본인 값으로 바꿉니다.
    계정 ID 는 콘솔 오른쪽 위 계정 메뉴에서 볼 수 있습니다.
-   (ReCoder 에 이미 자격증명이 연결돼 있으면 자동으로 채워져서 나옵니다.)
+   (ReCoder 가 확실히 알 수 있는 값은 자동으로 채워져서 나옵니다. **확실하지
+   않으면 일부러 자리표시자를 남깁니다** — 틀린 값이 채워진 채로 "완료"처럼
+   보이는 것보다 낫기 때문입니다. 리전을 직접 지정하려면
+   `GET /api/aws/policy?region=us-west-2` 처럼 넘기세요.)
 3. 이름을 `ReCoderMinimal` 로 저장합니다.
 4. **IAM → 사용자 → 사용자 생성** 후 방금 만든 정책을 연결합니다.
 5. 그 사용자에서 **액세스 키** 를 발급합니다 (용도: *로컬에서 실행되는 코드*).
@@ -48,8 +51,10 @@ GET /api/aws/policy
 | 연결 확인 | `sts:GetCallerIdentity` | 키가 유효한지, 어느 계정인지 확인 |
 | 이미지 저장소 | `ecr:GetAuthorizationToken` · `CreateRepository` · `DescribeRepositories` | 로그인하고 저장소를 준비 |
 | 이미지 올리기 | `ecr:BatchCheckLayerAvailability` · `InitiateLayerUpload` · `UploadLayerPart` · `CompleteLayerUpload` · `PutImage` | `docker push` 가 내부적으로 호출 |
+| 이미지 내려받기 | `ecr:BatchGetImage` · `GetDownloadUrlForLayer` | 배포 전 보안 스캔(trivy)·SBOM(syft)이 원격 이미지를 끌어옴 |
 | 컨테이너 배포 | `ecs:RegisterTaskDefinition` · `DescribeTaskDefinition` · `DescribeClusters` · `DescribeServices` · `UpdateService` | 새 버전 등록 후 서비스 교체 |
 | 실행 역할 확인·연결 | `iam:GetRole` · `iam:PassRole` | 컨테이너가 이미지를 받아오려면 실행 역할이 필요 |
+| 태스크 역할 연결 | `iam:PassRole` (역할 하나 더) | 컨테이너 **안의 코드**가 쓰는 역할. 실행 역할과 다르다 |
 | 배포 전 점검 | `logs:DescribeLogGroups` | 로그 그룹이 준비됐는지 확인 |
 | 정적 사이트 | `s3:CreateBucket` · `PutObject` · `ListBucket` 외 | 빌드 결과를 버킷에 올리고 공개 |
 | AI 호출 | `bedrock:InvokeModel` · `ListFoundationModels` | 코드 생성·에러 분석 |
@@ -66,13 +71,35 @@ ReCoder 는 Bedrock 의 **Converse** API 를 씁니다. 그런데 이 API 는 �
 주면 쓰지도 않는 권한이 하나 늘어납니다. 그래서 문서가 요구하는 것 하나만
 줍니다. 스트리밍(`ConverseStream`)은 지금 코드에 호출이 없어서 빼놨습니다.
 
+### 역할이 두 개인 이유
+
+ECS 작업에는 역할이 **두 개** 붙습니다. 헷갈리기 쉬운데 하는 일이 다릅니다.
+
+| 역할 | 누가 쓰나 | 하는 일 |
+| --- | --- | --- |
+| 실행 역할 (execution role) | ECS 서비스 자체 | 이미지를 받아오고 로그를 씁니다 |
+| 태스크 역할 (task role) | 컨테이너 **안의** 앱 | 앱이 S3 등 AWS 를 부를 때 씁니다 |
+
+`RegisterTaskDefinition` 은 **두 역할 모두에 대해** `iam:PassRole` 을 요구합니다.
+하나만 주면 이미지 빌드와 푸시가 다 끝난 **마지막 단계에서** 거부됩니다.
+
+학교 계정은 역할을 만들 수 없어서 둘 다 `LabRole` 을 씁니다. 그때는 ARN 이
+하나로 합쳐집니다.
+
 ### 범위를 어떻게 좁혔나
 
 - **이름 접두사 제한** — ECR 저장소와 S3 버킷은 `recoder-*` 로 시작하는 것만
   건드릴 수 있습니다. 여러분의 다른 저장소·버킷에는 손대지 못합니다.
-- **`iam:PassRole` 에 조건** — 실행 역할을 **ECS 작업에 넘길 때만** 허용합니다.
+- **ECS 클러스터·서비스도 이름으로 제한** — 기본값이 `recoder-*` 입니다.
+  **이미 있는 클러스터(`default` 등)에 배포한다면 그 이름을 알려주셔야 합니다.**
+  안 그러면 정책을 그대로 붙여도 배포 전 점검에서 막힙니다. 바로 아래
+  「필요한 것만 골라 받기」를 보세요.
+- **`iam:PassRole` 에 조건** — 역할을 **ECS 작업에 넘길 때만** 허용합니다.
   이 조건이 없으면 이 키로 아무 서비스에나 역할을 붙일 수 있어, 사실상 권한
   상승 통로가 됩니다.
+- **역할·클러스터 이름에 와일드카드 금지** — `*` 같은 값을 넣으면 400 으로
+  거부합니다. 허용하면 `role/*` 짜리 정책이 만들어져 계정의 모든 역할을
+  ECS 에 넘길 수 있게 되고, 이 문서의 존재 이유가 사라집니다.
 - **와일드카드는 불가피한 곳만** — `Resource: "*"` 는 AWS 가 리소스 단위
   제한을 지원하지 않는 액션(`ecs:RegisterTaskDefinition`, `logs:DescribeLogGroups`
   등)에만 씁니다. 이 목록은 테스트로 고정돼 있어, 근거 없이 늘어나면 CI 가
@@ -90,12 +117,32 @@ GET /api/aws/policy?targets=ecs,bedrock  # 배포 + AI
 
 연결 확인(`sts:GetCallerIdentity`)은 대상과 무관하게 항상 포함됩니다.
 
-실행 역할 이름도 바꿀 수 있습니다. 기본값은 AWS 표준인 `ecsTaskExecutionRole`
-입니다.
+**배포 대상 이름을 알려주면 범위가 그만큼 좁아집니다.** 이미 쓰고 있는
+클러스터가 있다면 반드시 넘기세요.
 
 ```
-GET /api/aws/policy?task_execution_role=LabRole
+GET /api/aws/policy?cluster=default&service=my-api
+GET /api/aws/policy?task_execution_role=LabRole&task_role=LabRole
 ```
+
+| 인자 | 기본값 | 언제 넘기나 |
+| --- | --- | --- |
+| `cluster` | `recoder-*` | 이미 있는 클러스터에 배포할 때 |
+| `service` | `recoder-*` | 서비스 이름이 `recoder-` 로 시작하지 않을 때 |
+| `task_execution_role` | `ecsTaskExecutionRole` | 학교 계정이면 `LabRole` |
+| `task_role` | `ecsTaskRole` | 학교 계정이면 `LabRole` |
+
+학교 계정으로 접속한 것이 확인되면 역할 두 개는 **자동으로** `LabRole` 로
+맞춰집니다. 직접 넘길 필요는 없습니다.
+
+### 역할을 환경변수로 지정했다면
+
+배포 경로는 `ECS_EXECUTION_ROLE_ARN` · `ECS_TASK_ROLE_ARN` 환경변수를 봅니다.
+이 값이 설정돼 있으면 **권한표도 같은 역할을 인가합니다.** 둘이 갈라지면
+정책은 A 를 허용하는데 배포는 B 를 쓰는 상황이 되어, 배포 마지막 단계에서
+`PassRole` 오류가 납니다.
+
+우선순위는 **직접 넘긴 값 → 환경변수 → 학교 계정 자동 판단 → 기본값** 입니다.
 
 ## 학교 (AWS Academy) 계정
 
@@ -176,8 +223,31 @@ region = us-east-1
 `recoder-*` 부분을 원하는 접두사로 바꾸세요.
 
 **배포 마지막 단계에서 `PassRole` 오류가 납니다**
-계정에 `ecsTaskExecutionRole` 이 없을 수 있습니다. ECS 콘솔에서 서비스를 한 번
-만들면 AWS 가 자동으로 생성해 줍니다. 학교 계정이라면 `LabRole` 을 쓰세요.
+두 가지 중 하나입니다. 계정에 `ecsTaskExecutionRole` 이 없거나(ECS 콘솔에서
+서비스를 한 번 만들면 AWS 가 자동 생성합니다. 학교 계정이라면 `LabRole`),
+아니면 **태스크 역할 이름이 기본값과 다른** 경우입니다. 후자라면
+`?task_role=<실제이름>` 으로 정책을 다시 받으세요.
+
+**ECR 저장소 목록이 비어 있고 "목록 조회가 허용되지 않는다"고 나옵니다**
+**정상입니다.** 이 권한표는 ECR 조회를 `recoder-*` 로 좁혀 놓습니다 — 여러분의
+다른 저장소 이름까지 ReCoder 가 볼 이유가 없기 때문입니다. 그래서 계정 전체
+목록을 훑는 화면에서는 막힙니다. **자격증명 문제가 아닙니다.** 연결이
+살아 있는지는 **AWS 연결** 화면의 상태 표시로 확인하세요.
+
+굳이 목록을 다 보고 싶다면 정책의 `ecr:DescribeRepositories` 를 별도
+문장으로 빼서 `Resource: "*"` 를 주면 됩니다. 대신 그 키로 계정의 모든
+저장소 이름을 볼 수 있게 되므로 권하기는 어렵습니다.
+
+**보안 스캔이 "취약점 없음"으로 통과하는데 뭔가 이상합니다**
+정말 깨끗한 건지, **스캔 자체가 실패한 건지** 확인하세요. 결과에
+`trivy_scan_failed` 항목이 있으면 이미지를 아예 못 들여다본 겁니다. 가장 흔한
+원인은 ECR **내려받기** 권한(`ecr:BatchGetImage` · `GetDownloadUrlForLayer`)
+누락입니다. 올리기 권한만으로는 스캐너가 원격 이미지를 못 가져옵니다.
+
+**클러스터를 못 찾는다거나 `DescribeClusters` 가 거부됩니다**
+정책이 클러스터 이름을 `recoder-*` 로 좁히고 있는데, 실제로는 다른 이름
+(`default` 등)에 배포하고 있어서입니다. `?cluster=<실제이름>&service=<실제이름>`
+으로 다시 받으세요.
 
 ## 이 목록은 어디서 나왔나
 
