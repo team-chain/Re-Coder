@@ -133,7 +133,7 @@ def test_passrole_is_restricted_to_ecs_tasks():
 
 def test_resource_scoped_to_recoder_prefix():
     """ECR 리포지토리·S3 버킷은 접두사로 좁혀 사용자의 다른 자원을 건드리지 못하게 한다."""
-    for stmt in ap.build_policy(account_id="1", region="us-east-1")["Statement"]:
+    for stmt in ap.build_policy(account_id="123456789012", region="us-east-1")["Statement"]:
         resources = stmt["Resource"]
         for res in ([resources] if isinstance(resources, str) else resources):
             if res.startswith("arn:aws:s3:::") or ":repository/" in res:
@@ -184,7 +184,7 @@ def test_task_execution_role_is_configurable_for_academy():
 
 def test_default_role_is_the_standard_one():
     """인자를 안 주면 일반 계정 기준이어야 한다 (사용자용 기본값)."""
-    text = json.dumps(ap.build_policy(["ecs"], "1", "us-east-1"))
+    text = json.dumps(ap.build_policy(["ecs"], "123456789012", "us-east-1"))
     assert f"role/{ap.TASK_EXECUTION_ROLE}" in text
 
 
@@ -625,8 +625,8 @@ def test_passrole_covers_every_role_the_deploy_code_passes():
     """
     covered: set[str] = set()
     for policy in (
-        ap.build_policy(["ecs"], "1", "us-east-1"),
-        ap.build_policy(["ecs"], "1", "us-east-1", ap.ACADEMY_TASK_EXECUTION_ROLE,
+        ap.build_policy(["ecs"], "123456789012", "us-east-1"),
+        ap.build_policy(["ecs"], "123456789012", "us-east-1", ap.ACADEMY_TASK_EXECUTION_ROLE,
                         task_role=ap.ACADEMY_TASK_EXECUTION_ROLE),
     ):
         for stmt in policy["Statement"]:
@@ -688,7 +688,7 @@ def test_policy_and_deploy_path_agree_on_role_names(monkeypatch):
     exec_role, task = route._resolve_roles(False, "", "")
     assert (exec_role, task) == (ap.configured_execution_role(),
                                  ap.configured_task_role())
-    assert authorized(ap.build_policy(["ecs"], "1", "us-east-1", exec_role,
+    assert authorized(ap.build_policy(["ecs"], "123456789012", "us-east-1", exec_role,
                                       task_role=task)) == {exec_role, task}
 
     # ② 배포 경로가 환경변수로 다른 역할을 쓰도록 설정된 경우
@@ -711,19 +711,58 @@ def test_bad_role_env_var_fails_loudly(monkeypatch):
         ap.configured_execution_role()
 
 
-def test_academy_uses_labrole_for_both_roles(monkeypatch):
-    """학교 계정에서 한쪽만 LabRole 로 바꾸면 반쪽짜리 정책이 나온다."""
+def test_academy_does_not_silently_diverge_from_the_deploy_path(monkeypatch):
+    """[불변식] 학교 계정이라고 정책만 `LabRole` 로 바꾸면 **안 된다.**
+
+    배포 경로는 환경변수만 본다. 정책만 LabRole 로 바꾸면 화면은 "LabRole 을
+    씁니다"라고 안내하는데 배포 전 점검은 `ecsTaskExecutionRole` 을 찾다가
+    실패한다 — 이 코드가 막으려던 바로 그 불일치다.
+
+    그래서 학교 계정 감지는 **안내만** 한다. 정책은 언제나 배포 경로와
+    같은 값을 쓴다.
+    """
     from api.routes import aws as route
     monkeypatch.delenv(ap.ENV_EXECUTION_ROLE_ARN, raising=False)
     monkeypatch.delenv(ap.ENV_TASK_ROLE_ARN, raising=False)
-    assert route._resolve_roles(True, "", "") == (
-        ap.ACADEMY_TASK_EXECUTION_ROLE, ap.ACADEMY_TASK_EXECUTION_ROLE
-    )
-    assert route._resolve_roles(False, "", "") == (
-        ap.TASK_EXECUTION_ROLE, ap.TASK_ROLE
-    )
-    # 명시 지정은 자동 판단보다 우선한다.
-    assert route._resolve_roles(True, "MyExec", "MyTask") == ("MyExec", "MyTask")
+
+    deploy = (ap.configured_execution_role(), ap.configured_task_role())
+    assert route._resolve_roles(True, "", "") == deploy, \
+        "학교 계정에서 정책과 배포가 다른 역할을 가리킨다"
+    assert route._resolve_roles(False, "", "") == deploy
+
+    # 대신 환경변수를 설정하라고 알려줘야 한다.
+    advice = " ".join(route._academy_role_advice(True))
+    assert ap.ENV_EXECUTION_ROLE_ARN in advice and ap.ENV_TASK_ROLE_ARN in advice
+    assert ap.ACADEMY_TASK_EXECUTION_ROLE in advice
+    assert not route._academy_role_advice(False), "일반 계정엔 안내가 없어야 한다"
+
+
+def test_academy_advice_disappears_once_the_env_vars_are_set(monkeypatch):
+    """설정을 마친 사람에게 계속 잔소리하면 안 된다."""
+    from api.routes import aws as route
+    lab = ap.ACADEMY_TASK_EXECUTION_ROLE
+    monkeypatch.setenv(ap.ENV_EXECUTION_ROLE_ARN, f"arn:aws:iam::123456789012:role/{lab}")
+    monkeypatch.setenv(ap.ENV_TASK_ROLE_ARN, f"arn:aws:iam::123456789012:role/{lab}")
+    assert route._academy_role_advice(True) == []
+    assert route._resolve_roles(True, "", "") == (lab, lab)
+
+
+@pytest.mark.parametrize("env", [ap.ENV_EXECUTION_ROLE_ARN, ap.ENV_TASK_ROLE_ARN])
+def test_bad_role_env_var_is_400_not_500(env, monkeypatch):
+    """권한표 엔드포인트는 **항상 200 아니면 400** 이어야 한다.
+
+    역할 환경변수가 잘못됐을 때 `ValueError` 가 그대로 새어 나가 500 이
+    되면, 사용자는 서버가 고장난 줄 안다. 자기 설정 문제라는 걸 알려야 한다.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api.routes import aws as route
+
+    monkeypatch.setenv(env, "arn:aws:iam::123456789012:role/*")
+    monkeypatch.setattr(route, "_deployment_identity", lambda: ("", "", ""))
+    app = FastAPI()
+    app.include_router(route.router)
+    assert TestClient(app).get("/api/aws/policy").status_code == 400
 
 
 def test_ecr_listing_denial_is_reported_as_normal_not_as_broken_credentials():
@@ -770,7 +809,7 @@ def test_ecr_listing_denial_is_reported_as_normal_not_as_broken_credentials():
 def test_execution_role_and_task_role_are_different_and_both_passable():
     """둘은 서로 다른 역할이다. 기본값이 같아지면 한쪽을 잊었다는 뜻이다."""
     assert ap.TASK_EXECUTION_ROLE != ap.TASK_ROLE
-    stmt = next(s for s in ap.build_policy(["ecs"], "1", "us-east-1")["Statement"]
+    stmt = next(s for s in ap.build_policy(["ecs"], "123456789012", "us-east-1")["Statement"]
                 if "iam:PassRole" in s["Action"])
     res = stmt["Resource"]
     arns = [res] if isinstance(res, str) else res
@@ -782,7 +821,7 @@ def test_execution_role_and_task_role_are_different_and_both_passable():
 def test_same_role_for_both_is_not_duplicated():
     """학교 계정은 둘 다 LabRole 이다. ARN 을 두 번 넣지 않는다."""
     stmt = next(s for s in ap.build_policy(
-        ["ecs"], "1", "us-east-1", "LabRole", task_role="LabRole")["Statement"]
+        ["ecs"], "123456789012", "us-east-1", "LabRole", task_role="LabRole")["Statement"]
         if "iam:PassRole" in s["Action"])
     assert stmt["Resource"] == "arn:aws:iam:::1:role/LabRole".replace(":::", "::") \
         or stmt["Resource"].endswith("role/LabRole"), stmt["Resource"]
@@ -797,9 +836,9 @@ def test_wildcard_or_malformed_role_names_are_rejected(bad):
     `role/*` 짜리 정책 문구를 뽑아낼 수 있다. 최소권한 보장이 무너진다.
     """
     with pytest.raises(ValueError, match="역할"):
-        ap.build_policy(["ecs"], "1", "us-east-1", bad)
+        ap.build_policy(["ecs"], "123456789012", "us-east-1", bad)
     with pytest.raises(ValueError, match="역할"):
-        ap.build_policy(["ecs"], "1", "us-east-1", task_role=bad)
+        ap.build_policy(["ecs"], "123456789012", "us-east-1", task_role=bad)
 
 
 #: 이 엔드포인트로 넓은 권한을 뽑아내려는 시도들. 하나라도 통과하면
@@ -831,6 +870,96 @@ def test_no_input_can_produce_a_role_wildcard(hostile):
         )
         for arn in re.findall(r"arn:aws:iam::[^\"]*", text):
             assert "*" not in arn, f"역할 ARN 에 와일드카드: {arn}"
+
+
+# ── [구조 불변식] ARN 세 조각은 함께 정해지고 함께 미상이 된다 ────────
+#
+# 6~9차 리뷰에서 나온 것들이 전부 이 한 가지가 깨져서 생겼다.
+# 조각별로 "알면 채우고 모르면 표시" 를 따로 하면, 조합이 늘어날 때마다
+# 말이 안 되는 상태가 생긴다. 아래는 **모든 조합**을 훑어 그걸 막는다.
+
+@pytest.mark.parametrize("account", ["", "123456789012"])
+@pytest.mark.parametrize("region", ["", None, "  ", ap.REGION_PLACEHOLDER,
+                                    "us-east-1", "ap-northeast-2",
+                                    "us-gov-west-1", "cn-north-1"])
+def test_partition_is_unknown_exactly_when_the_region_is(account, region):
+    """[불변식 · 근원] 파티션은 리전에서 파생된다 — 따로 알 수 없다.
+
+    리전이 `<REGION>` 인데 파티션이 `aws` 로 굳어 있으면, GovCloud 사용자가
+    리전만 바꿔도 `arn:aws:` 가 남아 **어떤 리소스와도 매칭되지 않는다.**
+    정책은 완성돼 보이는데 전부 거부된다 — 가장 찾기 어려운 실패다.
+
+    렌더링된 문자열이 아니라 **`ArnContext` 자체**를 본다. 정책 문자열로
+    검사하면 S3 처럼 ARN 에 리전 칸이 없는 경우와 섞여 판정이 흐려진다.
+    """
+    ctx = ap.ArnContext.of(account, region)
+    region_unknown = ctx.region == ap.REGION_PLACEHOLDER
+    partition_unknown = ctx.partition == ap.PARTITION_PLACEHOLDER
+    assert region_unknown == partition_unknown, (
+        f"리전 미상={region_unknown} 인데 파티션 미상={partition_unknown} — "
+        f"둘은 항상 같아야 한다 (account={account!r} region={region!r}) → {ctx}"
+    )
+
+
+@pytest.mark.parametrize("targets", [None, ["ecs"], ["s3"], ["bedrock"],
+                                     ["ecs", "s3"], ["ecs", "s3", "bedrock"]])
+def test_unknown_partition_always_flags_manual_fill(targets):
+    """[불변식] 파티션이 미상이면 **어떤 대상 조합에서도** "채워야 함" 이어야 한다.
+
+    S3 ARN 처럼 리전 칸이 없는 자원만 담긴 정책에서도 파티션은 남는다.
+    그때 `needs_manual_fill` 이 False 로 나가면 사용자는 다 됐다고 믿는다.
+    """
+    policy = ap.build_policy(targets, "123456789012", "")
+    text = json.dumps(policy)
+    if ap.PARTITION_PLACEHOLDER in text:
+        assert ap.has_placeholder(policy), \
+            f"{targets}: 파티션이 남았는데 채울 것 없다고 한다"
+        assert ap.PARTITION_PLACEHOLDER in ap.placeholders_in(policy)
+
+
+@pytest.mark.parametrize("account", ["", "123456789012"])
+@pytest.mark.parametrize("region", ["", "us-east-1", "us-gov-west-1", "cn-north-1"])
+def test_every_arn_in_the_policy_uses_one_consistent_partition(account, region):
+    """[불변식] 한 정책 안에 파티션이 두 종류 섞이면 안 된다.
+
+    S3·Bedrock 처럼 손으로 문자열을 조립한 ARN 이 하나라도 남아 있으면
+    거기만 `aws` 로 굳는다. 실제로 그렇게 새어 있었다.
+    """
+    text = ap.policy_json(None, account, region)
+    partitions = {a.split(":")[1] for a in re.findall(r'arn:[^"]+', text)}
+    assert len(partitions) == 1, f"파티션이 섞였다: {partitions}"
+
+
+@pytest.mark.parametrize("account", ["", "123456789012"])
+@pytest.mark.parametrize("region", ["", "us-east-1", "cn-north-1"])
+def test_guidance_names_every_placeholder_that_is_left(account, region):
+    """[불변식] 남겨둔 자리표시자는 **안내에 반드시 나와야** 한다.
+
+    자리표시자를 새로 추가하고 안내를 안 고치면, 사용자는 바꿔야 할 값이
+    있는 줄도 모른 채 붙여넣는다. 자리표시자가 늘어날 때 같이 깨지도록
+    목록에서 직접 끌어와 검사한다.
+    """
+    from api.routes import aws as route
+    policy = ap.build_policy(None, account, region)
+    unknowns = ap.placeholders_in(policy)
+    text = " ".join(route._policy_steps(unknowns, academy=False))
+    for ph in unknowns:
+        assert ph in text, f"{ph} 를 남겨놓고 안내에 안 적었다"
+
+
+def test_placeholder_list_covers_every_placeholder_in_the_module():
+    """[불변식] `ALL_PLACEHOLDERS` 에서 빠진 자리표시자가 없어야 한다.
+
+    빠지면 `has_placeholder()` 가 못 알아보고 "채울 것 없음" 으로 잘못
+    안내한다. 모듈에 정의된 `*_PLACEHOLDER` 상수를 직접 훑어 대조한다.
+    """
+    defined = {
+        value for name, value in vars(ap).items()
+        if name.endswith("_PLACEHOLDER") and isinstance(value, str)
+    }
+    assert defined == set(ap.ALL_PLACEHOLDERS), (
+        f"ALL_PLACEHOLDERS 에서 빠진 것: {defined - set(ap.ALL_PLACEHOLDERS)}"
+    )
 
 
 @pytest.mark.parametrize("region,partition", [
@@ -911,7 +1040,7 @@ def test_no_input_can_widen_the_ecs_resource_scope(hostile):
     """클러스터·서비스 이름으로도 범위를 넓힐 수 없어야 한다."""
     for kwargs in ({"cluster": hostile}, {"service": hostile}):
         try:
-            policy = ap.build_policy(["ecs"], "1", "us-east-1", **kwargs)
+            policy = ap.build_policy(["ecs"], "123456789012", "us-east-1", **kwargs)
         except ValueError:
             continue
         for stmt in policy["Statement"]:
@@ -932,15 +1061,15 @@ def test_cluster_and_service_names_flow_into_the_arns():
     배포 전 점검에서 `DescribeClusters` 가 거부된다.
     """
     stmt = next(s for s in ap.build_policy(
-        ["ecs"], "1", "us-east-1", cluster="default", service="my-api")["Statement"]
+        ["ecs"], "123456789012", "us-east-1", cluster="default", service="my-api")["Statement"]
         if s["Sid"] == "EcsDeployService")
-    assert "arn:aws:ecs:us-east-1:1:cluster/default" in stmt["Resource"]
-    assert "arn:aws:ecs:us-east-1:1:service/default/my-api" in stmt["Resource"]
+    assert "arn:aws:ecs:us-east-1:123456789012:cluster/default" in stmt["Resource"]
+    assert "arn:aws:ecs:us-east-1:123456789012:service/default/my-api" in stmt["Resource"]
 
 
 def test_service_arn_nests_the_cluster_name():
     """ECS 서비스 ARN 은 `service/<클러스터>/<서비스>` 형태다."""
-    stmt = next(s for s in ap.build_policy(["ecs"], "1", "us-east-1")["Statement"]
+    stmt = next(s for s in ap.build_policy(["ecs"], "123456789012", "us-east-1")["Statement"]
                 if s["Sid"] == "EcsDeployService")
     svc = [r for r in stmt["Resource"] if ":service/" in r][0]
     assert svc.endswith(f"service/{ap.DEFAULT_CLUSTER}/{ap.DEFAULT_SERVICE}")
@@ -949,14 +1078,14 @@ def test_service_arn_nests_the_cluster_name():
 @pytest.mark.parametrize("bad", ["*", "a/b", "a*b", "clus ter", "arn:aws:ecs:::cluster/x"])
 def test_bad_cluster_or_service_names_are_rejected(bad):
     with pytest.raises(ValueError, match="이름이 올바르지 않습니다"):
-        ap.build_policy(["ecs"], "1", "us-east-1", cluster=bad)
+        ap.build_policy(["ecs"], "123456789012", "us-east-1", cluster=bad)
     with pytest.raises(ValueError, match="이름이 올바르지 않습니다"):
-        ap.build_policy(["ecs"], "1", "us-east-1", service=bad)
+        ap.build_policy(["ecs"], "123456789012", "us-east-1", service=bad)
 
 
 def test_prefix_wildcard_is_still_allowed_for_defaults():
     """기본값 `recoder-*` 는 접두사 와일드카드라 허용돼야 한다."""
-    ap.build_policy(["ecs"], "1", "us-east-1", cluster="recoder-*", service="recoder-*")
+    ap.build_policy(["ecs"], "123456789012", "us-east-1", cluster="recoder-*", service="recoder-*")
 
 
 # ── 학교 계정 감지와 안내 분기 ────────────────────────────────────────
@@ -981,7 +1110,7 @@ def test_academy_steps_never_tell_you_to_create_an_iam_user():
     막히는 길을 가리키면, 사용자는 자기가 뭘 잘못한 줄 알고 시간을 버린다.
     """
     from api.routes import aws as route
-    text = " ".join(route._policy_steps(True, academy=True))
+    text = " ".join(route._policy_steps([ap.ACCOUNT_PLACEHOLDER], academy=True))
     assert "사용자 생성" not in text, "학교 계정에 IAM 사용자 생성을 안내하고 있다"
     assert "액세스 키 발급" not in text, "학교 계정에서는 키를 발급할 수 없다"
     assert ap.ACADEMY_TASK_EXECUTION_ROLE in text, "LabRole 안내가 빠졌다"
@@ -995,7 +1124,7 @@ def test_academy_steps_do_not_send_the_user_to_a_screen_that_cannot_accept_them(
     경로를 안내해야 한다. (입력칸이 생기면 이 테스트를 함께 고칠 것)
     """
     from api.routes import aws as route
-    text = " ".join(route._policy_steps(True, academy=True))
+    text = " ".join(route._policy_steps([ap.ACCOUNT_PLACEHOLDER], academy=True))
     assert "~/.aws/credentials" in text, "자격증명 파일 경로 안내가 빠졌다"
     assert "us-east-1" in text, "학교 계정 리전 안내가 빠졌다"
     assert "화면에 붙여넣" not in text, \
@@ -1005,22 +1134,22 @@ def test_academy_steps_do_not_send_the_user_to_a_screen_that_cannot_accept_them(
 def test_normal_steps_still_walk_through_key_creation():
     """반대로 일반 계정 안내에서는 그 단계가 빠지면 안 된다."""
     from api.routes import aws as route
-    text = " ".join(route._policy_steps(True, academy=False))
+    text = " ".join(route._policy_steps([ap.ACCOUNT_PLACEHOLDER], academy=False))
     assert "사용자 생성" in text and "액세스 키 발급" in text
 
 
 # ── 리전을 확실할 때만 채우는가 ───────────────────────────────────────
 
 def _policy_client(monkeypatch, session_region):
-    """리전만 다르게 준 가짜 세션으로 엔드포인트를 부른다."""
+    """리전만 다르게 준 가짜 신원으로 엔드포인트를 부른다."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from api.routes import aws as route
 
-    class _S:
-        region_name = session_region
-
-    monkeypatch.setattr(route, "_build_boto3_session", lambda **k: _S())
+    monkeypatch.setattr(
+        route, "_deployment_identity",
+        lambda: ("123456789012", session_region or "", ""),
+    )
     app = FastAPI()
     app.include_router(route.router)
     return TestClient(app)
@@ -1153,3 +1282,267 @@ def test_recorded_calls_map_to_the_same_actions_as_static_scan():
     rec._seen[("ecs", "RegisterTaskDefinition")] = 1
     rec._seen[("bedrock-runtime", "Converse")] = 1
     assert rec.actions() == {"ecs:RegisterTaskDefinition", "bedrock:InvokeModel"}
+
+
+# ── [불변식] 정책과 배포가 같은 신원을 본다 ──────────────────────────
+
+def test_policy_identity_follows_aws_profile(monkeypatch):
+    """[불변식] `AWS_PROFILE` 을 무시하면 정책과 배포가 **다른 계정**을 본다.
+
+    배포 클라이언트는 boto3 기본 체인을 쓰므로 `AWS_PROFILE` 을 따른다.
+    그런데 `_detect_credential_source()` 는 그 환경변수를 읽지 않고
+    `"default"` 를 돌려준다. 그 값을 세션에 넘기면 정책은 default 계정을
+    그리고, 배포는 AWS_PROFILE 계정에서 돌아 AccessDenied 가 난다.
+    """
+    from api.routes import aws as route
+
+    monkeypatch.setattr(route, "_active_profile", None)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    assert route._effective_profile() is None, \
+        "아무것도 없으면 boto3 기본 체인에 맡겨야 한다 (None)"
+
+    monkeypatch.setenv("AWS_PROFILE", "work")
+    assert route._effective_profile() == "work", \
+        "AWS_PROFILE 을 무시하고 있다 — 정책과 배포가 다른 계정을 본다"
+
+
+def test_identity_comes_from_a_single_session(monkeypatch):
+    """[불변식] 계정·리전·호출자는 **한 세션**에서 나와야 한다.
+
+    계정은 status 에서, 리전은 다른 경로에서 가져오면 서로 다른 프로필을
+    가리킬 수 있고, 정책이 "A 계정의 B 리전" 같은 존재하지 않는 조합을 그린다.
+    """
+    from api.routes import aws as route
+
+    seen: list[dict] = []
+
+    class _Session:
+        region_name = "eu-west-1"
+
+        def client(self, name, **kw):
+            class _C:
+                def get_caller_identity(inner):
+                    return {"Account": "999988887777",
+                            "Arn": "arn:aws:iam::999988887777:user/x"}
+            return _C()
+
+    monkeypatch.setattr(route, "_load_into_process_if_needed", lambda: None)
+    monkeypatch.setattr(route, "_build_boto3_session",
+                        lambda **kw: (seen.append(kw), _Session())[1])
+
+    account, region, arn = route._deployment_identity()
+    assert (account, region) == ("999988887777", "eu-west-1")
+    assert arn.endswith("user/x")
+    assert len(seen) == 1, f"세션을 여러 번 만들었다: {seen}"
+
+
+def test_identity_never_invents_values_when_credentials_are_missing(monkeypatch):
+    """자격증명이 없으면 **빈 값**이어야 한다. 기본값을 지어내면 안 된다."""
+    from api.routes import aws as route
+
+    class _Broken:
+        region_name = None
+
+        def client(self, *a, **k):
+            raise RuntimeError("Unable to locate credentials")
+
+    monkeypatch.setattr(route, "_load_into_process_if_needed", lambda: None)
+    monkeypatch.setattr(route, "_build_boto3_session", lambda **kw: _Broken())
+    assert route._deployment_identity() == ("", "", "")
+
+
+# ── 스캐너가 못 보는 것을 **정직하게 고정** ───────────────────────────
+
+@pytest.mark.parametrize("name", sorted(ac.UNSUPPORTED_PATTERNS))
+def test_documented_scanner_limits_are_accurate(name, tmp_path):
+    """목록에 적어둔 "못 잡는 형태"가 실제로도 못 잡히는지 확인한다.
+
+    두 방향 모두 의미가 있다.
+
+      - 여전히 못 잡으면 → 목록이 정직하다. `Recorder` 가 메워야 할 몫이다.
+      - **이제 잡히면 → 목록이 낡았다.** 그때도 실패해야 한다. 안 그러면
+        "우리는 이건 못 본다"는 잘못된 믿음이 남아, 실제로는 보호되는 것을
+        보호되지 않는다고 생각하며 판단하게 된다.
+
+    조용한 구멍을 "없는 것"으로 두지 않으려는 장치다.
+    """
+    code = "import boto3, subprocess\n" + ac.UNSUPPORTED_PATTERNS[name]
+    (tmp_path / "m.py").write_text(code, encoding="utf-8")
+    found = {(c.service, c.operation) for c in ac.scan_source(tmp_path).calls}
+    aws_found = {c for c in found if c[0] in ("ecs", "ecr", "s3")}
+    assert not aws_found, (
+        f"'{name}' 이 이제 잡힌다 — UNSUPPORTED_PATTERNS 에서 빼세요: {aws_found}"
+    )
+
+
+def test_recorder_is_named_as_the_compensating_control():
+    """한계를 적어놨으면 **무엇이 그걸 메우는지**도 적혀 있어야 한다."""
+    assert "Recorder" in ac.__doc__ and "UNSUPPORTED_PATTERNS" in ac.__doc__
+
+
+def test_lambda_bodies_are_scanned(tmp_path):
+    """람다 안의 호출도 봐야 한다 — 실제로 여기서 한 경로를 통째로 놓쳤다.
+
+    `bedrock_provider._invoke_sync` 의
+    `run_in_executor(None, lambda: client.converse(...))` 가 검사 밖이었다.
+    비동기 대화 경로 전부다.
+    """
+    (tmp_path / "m.py").write_text('''
+import boto3
+def go(loop, kwargs):
+    client = boto3.client("bedrock-runtime")
+    return loop.run_in_executor(None, lambda: client.converse(**kwargs))
+''', encoding="utf-8")
+    found = {(c.service, c.operation) for c in ac.scan_source(tmp_path).calls}
+    assert ("bedrock-runtime", "converse") in found, found
+
+
+def test_sentinel_none_does_not_erase_a_known_client(tmp_path):
+    """`client = None` 은 센티널이지 "다른 것으로 바뀜" 이 아니다.
+
+    이걸 재대입으로 보고 바인딩을 지우면, 아래처럼 흔한 형태에서 뒤쪽 호출을
+    통째로 놓친다.
+    """
+    (tmp_path / "m.py").write_text('''
+import boto3
+def go(kwargs):
+    client = boto3.client("bedrock-runtime")
+    if client is None:
+        client = None
+    return client.converse(**kwargs)
+''', encoding="utf-8")
+    found = {(c.service, c.operation) for c in ac.scan_source(tmp_path).calls}
+    assert ("bedrock-runtime", "converse") in found, found
+
+
+def test_class_body_client_does_not_leak_into_other_functions(tmp_path):
+    """클래스 본문에서 만든 클라이언트가 모듈 전역으로 새면 안 된다.
+
+    새면 다른 함수의 **매개변수** 이름이 같기만 해도 AWS 클라이언트로 오인해
+    있지도 않은 액션(`ecs:Get`)을 만들어낸다.
+    """
+    found = _scan_snippet(tmp_path, """
+import boto3
+class D:
+    _client = boto3.client("ecs")
+def unrelated(_client):
+    return _client.get("/health")
+""")
+    assert ("ecs", "get") not in found, f"클래스 속성이 샜다: {found}"
+
+
+# ── 자체 검토에서 나온 나머지 (형제 입력 누락 계열) ───────────────────
+
+def test_ecr_repo_name_is_parameterized_like_cluster_and_service():
+    """리포지토리 이름도 클러스터·서비스와 **같은 성질**의 입력이다.
+
+    사용자가 이미 있는 리포지토리(`my-api`)에 밀어 넣으면 기본값 `recoder-*`
+    로는 권한이 안 맞는다. 그런데 클러스터·서비스만 인자로 빼고 여기를
+    빠뜨렸었다 — 같은 실수를 옆자리에 남긴 전형이다.
+
+    이건 특히 아프다. **도커 빌드와 푸시를 다 끝낸 뒤에** 거부된다.
+    """
+    stmt = next(s for s in ap.build_policy(["ecs"], "123456789012", "us-east-1",
+                                           ecr_repo="my-api")["Statement"]
+                if s["Sid"] == "EcrPushImage")
+    assert stmt["Resource"].endswith("repository/my-api"), stmt["Resource"]
+
+
+def test_unknown_session_region_degrades_instead_of_failing(monkeypatch):
+    """세션이 우리가 모르는 리전 이름을 주면 **권한표를 막지 말고** 비운다.
+
+    사용자가 타이핑한 값이 아니다. 새 리전이나 주권 클라우드일 수 있는데
+    "당신 리전이 잘못됐다"며 400 을 던지면 권한표를 아예 못 받는다.
+    직접 지정한 값이 틀렸을 때만 400 이 맞다.
+    """
+    client = _policy_client(monkeypatch, "eusc-de-east-1")
+    body = client.get("/api/aws/policy")
+    assert body.status_code == 200
+    assert body.json()["region"] == ""
+    assert body.json()["needs_manual_fill"] is True
+
+    # 직접 지정한 값이 틀리면 그건 400.
+    assert client.get("/api/aws/policy", params={"region": "eusc-de-east-1"}).status_code == 400
+
+
+def test_both_endpoints_agree_on_the_region(monkeypatch):
+    """같은 세션인데 두 엔드포인트가 다른 리전을 말하면 안 된다.
+
+    권한표 쪽만 고치고 ECR 목록 쪽은 하드코딩 기본값에 남겨뒀었다. 사용자는
+    `us-west-2` 에 있는데 한쪽은 `ap-northeast-2` 라고 답했다.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api.routes import aws as route
+
+    monkeypatch.setattr(route, "_deployment_identity",
+                        lambda: ("123456789012", "us-west-2", ""))
+    monkeypatch.setattr(route, "_load_into_process_if_needed", lambda: None)
+
+    class _S:
+        def client(self, *a, **k):
+            class _C:
+                def describe_repositories(self, **kw):
+                    return {"repositories": []}
+            return _C()
+
+    monkeypatch.setattr(route, "_build_boto3_session", lambda **k: _S())
+    app = FastAPI()
+    app.include_router(route.router)
+    c = TestClient(app)
+    assert c.get("/api/aws/policy").json()["region"] == "us-west-2"
+    assert c.get("/api/aws/ecr/repos").json()["region"] == "us-west-2"
+
+
+@pytest.mark.parametrize("region,partition", [
+    ("us-iso-east-1",  "aws-iso"),
+    ("us-isob-east-1", "aws-iso-b"),
+])
+def test_isolated_region_partitions(region, partition):
+    """리전 정규식이 받아주는 이름은 파티션 표에도 있어야 한다.
+
+    정규식은 통과시키는데 파티션 표에 없으면 GovCloud 때와 똑같이
+    "완성돼 보이는데 전부 거부되는" 정책이 나온다. 같은 실수의 재발이다.
+    """
+    assert ap.partition_for(region) == partition
+
+
+def test_every_region_the_validator_accepts_has_a_partition():
+    """[불변식] 검증을 통과하는 리전은 **전부** 파티션이 정해져 있어야 한다.
+
+    두 목록이 따로 자라면 또 어긋난다. 알려진 접두사를 모두 훑어 고정한다.
+    """
+    known = {
+        "us-east-1": "aws", "eu-west-3": "aws", "ap-northeast-2": "aws",
+        "us-gov-west-1": "aws-us-gov", "us-gov-east-1": "aws-us-gov",
+        "cn-north-1": "aws-cn", "cn-northwest-1": "aws-cn",
+        "us-iso-east-1": "aws-iso", "us-isob-east-1": "aws-iso-b",
+    }
+    for region, expected in known.items():
+        ap.validate_region(region)          # 검증을 통과하고
+        assert ap.partition_for(region) == expected, region   # 파티션도 맞아야
+
+
+@pytest.mark.parametrize("hostile", ["*", "?", "1", "12345", "abc",
+                                     "1:2", "aws:iam::999:role/Admin",
+                                     "123456789012 ", "1234567890123", ""])
+def test_no_account_id_can_widen_the_policy(hostile):
+    """[보안] 계정 ID 도 검증한다 — 마지막까지 빠져 있던 형제 입력.
+
+    `account_id="*"` 를 주면 `arn:aws:iam::*:role/...` 이 되어 **어느 계정의**
+    역할이든 ECS 에 넘길 수 있다. 그런데 자리표시자가 아니라서 "채울 것 없음"
+    으로 나간다.
+
+    지금은 STS 에서만 값이 오지만, 검증을 안 걸어두면 입력 경로가 하나
+    생기는 순간 뚫린다. 형제 입력은 다 막아놓고 이것만 열어두는 게 이 카드에서
+    반복된 실수라, 여기도 적대적 입력으로 못 박는다.
+    """
+    try:
+        policy = ap.build_policy(None, hostile, "us-east-1")
+    except ValueError:
+        return  # 거부했으면 통과
+    for arn in re.findall(r'arn:[^"]+', json.dumps(policy)):
+        parts = arn.split(":")
+        if len(parts) > 4:
+            assert parts[4] in ("", "123456789012", ap.ACCOUNT_PLACEHOLDER), \
+                f"{hostile!r} 로 계정 칸이 이상해졌다: {arn}"

@@ -24,7 +24,9 @@ GET /api/aws/policy
 그다음 AWS 콘솔에서 순서대로 진행합니다.
 
 1. **IAM → 정책 → 정책 생성 → JSON 탭** 에 받은 정책을 붙여넣습니다.
-2. 정책 안에 `<ACCOUNT_ID>` `<REGION>` 이 남아 있으면 본인 값으로 바꿉니다.
+2. 정책 안에 `<ACCOUNT_ID>` `<REGION>` `<PARTITION>` 이 남아 있으면 본인 값으로
+   바꿉니다. `<PARTITION>` 은 대부분 `aws` 이고, 미국 정부용(GovCloud)이면
+   `aws-us-gov`, 중국이면 `aws-cn` 입니다.
    계정 ID 는 콘솔 오른쪽 위 계정 메뉴에서 볼 수 있습니다.
    (ReCoder 가 확실히 알 수 있는 값은 자동으로 채워져서 나옵니다. **확실하지
    않으면 일부러 자리표시자를 남깁니다** — 틀린 값이 채워진 채로 "완료"처럼
@@ -129,11 +131,14 @@ GET /api/aws/policy?task_execution_role=LabRole&task_role=LabRole
 | --- | --- | --- |
 | `cluster` | `recoder-*` | 이미 있는 클러스터에 배포할 때 |
 | `service` | `recoder-*` | 서비스 이름이 `recoder-` 로 시작하지 않을 때 |
-| `task_execution_role` | `ecsTaskExecutionRole` | 학교 계정이면 `LabRole` |
-| `task_role` | `ecsTaskRole` | 학교 계정이면 `LabRole` |
+| `ecr_repo` | `recoder-*` | 이미 있는 이미지 저장소에 올릴 때 |
+| `task_execution_role` | `ecsTaskExecutionRole` | 환경변수로 다른 역할을 쓸 때 |
+| `task_role` | `ecsTaskRole` | 환경변수로 다른 역할을 쓸 때 |
+| `region` | 세션에서 자동 | 세션 리전과 다른 곳에 배포할 때 |
 
-학교 계정으로 접속한 것이 확인되면 역할 두 개는 **자동으로** `LabRole` 로
-맞춰집니다. 직접 넘길 필요는 없습니다.
+**역할은 자동으로 바꾸지 않습니다.** 학교 계정으로 접속한 것이 확인되면
+"환경변수를 이렇게 설정하세요"라고 안내만 합니다. 정책만 `LabRole` 로 바꿔봐야
+실제 배포 코드는 환경변수를 보므로 둘이 갈라지기 때문입니다.
 
 ### 역할을 환경변수로 지정했다면
 
@@ -142,7 +147,8 @@ GET /api/aws/policy?task_execution_role=LabRole&task_role=LabRole
 정책은 A 를 허용하는데 배포는 B 를 쓰는 상황이 되어, 배포 마지막 단계에서
 `PassRole` 오류가 납니다.
 
-우선순위는 **직접 넘긴 값 → 환경변수 → 학교 계정 자동 판단 → 기본값** 입니다.
+우선순위는 **직접 넘긴 값 → 환경변수 → 기본값** 입니다. 학교 계정 감지는 값을
+바꾸지 않고 안내만 합니다.
 
 ## 학교 (AWS Academy) 계정
 
@@ -188,14 +194,26 @@ region = us-east-1
 자격증명은 랩 세션이 끝나면 만료됩니다. 만료되면 위 3줄을 다시 덮어써야 하고,
 장기 액세스 키는 만들 수 없습니다.
 
-### 실행 역할은 `LabRole` 을 씁니다
+### 실행 역할은 `LabRole` 을 씁니다 — 환경변수로 알려주세요
 
 학교 계정에는 `ecsTaskExecutionRole` 이 **없습니다.** 대신 미리 만들어져 있는
-`LabRole` 을 그대로 실행 역할로 쓰면 됩니다. 러너랩 계정에서 `LabRole` 의 신뢰
-정책을 직접 확인했고, `ecs-tasks.amazonaws.com` 이 들어 있습니다.
+`LabRole` 을 그대로 쓰면 됩니다. 러너랩 계정에서 `LabRole` 의 신뢰 정책을 직접
+확인했고 `ecs-tasks.amazonaws.com` 이 들어 있습니다.
 
-코어에 학교 계정 자격증명이 연결돼 있으면 `GET /api/aws/policy` 가 이걸
-알아보고 `LabRole` 기준으로 정책과 안내를 돌려줍니다.
+**아래 두 환경변수를 설정하세요.**
+
+```
+ECS_EXECUTION_ROLE_ARN=arn:aws:iam::<계정ID>:role/LabRole
+ECS_TASK_ROLE_ARN=arn:aws:iam::<계정ID>:role/LabRole
+```
+
+설정하면 권한표도 자동으로 `LabRole` 기준으로 나옵니다. 설정하지 않으면
+`GET /api/aws/policy` 가 학교 계정임을 알아보고 이 안내를 응답에 붙여 줍니다.
+
+> **왜 자동으로 안 바꾸나** — 실제 배포 코드는 위 환경변수를 봅니다. 권한표만
+> `LabRole` 로 바꾸면 **정책은 LabRole, 배포는 ecsTaskExecutionRole** 이 되어
+> 시킨 대로 했는데도 배포 전 점검에서 실패합니다. 한쪽만 바꾸는 게 아무것도
+> 안 바꾸는 것보다 나쁩니다.
 
 ### 학교 계정에서 배포할 때 자주 막히는 것
 
