@@ -301,3 +301,68 @@ def test_bad_tags_are_rejected_before_anything_runs(workspace, bad):
             runner=runner,
         )
     assert runner.calls == [], "잘못된 태그인데 명령을 실행했다"
+
+
+# ---------------------------------------------------------------------------
+# subprocess 인코딩 — 한국어 윈도우에서 실제로 터졌던 경로
+# ---------------------------------------------------------------------------
+
+
+def test_run_command_decodes_as_utf8_not_the_system_locale(monkeypatch):
+    """[회귀] `text=True` 만 주면 파이썬이 시스템 로케일로 디코딩한다.
+
+    한국어 윈도우는 cp949 이고, docker 는 진행 표시에 유니코드 박스 문자를
+    쓴다. cp949 로는 디코딩이 깨져 subprocess 리더 스레드가 죽고
+    `proc.stdout` 이 None 이 된다. 그러면 사용자는 인코딩 문제를
+    `'NoneType' object has no attribute 'strip'` 로 보게 된다 — 원인을
+    알아낼 수 없는 메시지다.
+    """
+    seen: dict = {}
+
+    class _Done:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(args, **kwargs):
+        seen.update(kwargs)
+        return _Done()
+
+    monkeypatch.setattr(ecs_build.subprocess, "run", _fake_run)
+    ecs_build.run_command(["docker", "info"])
+
+    assert seen.get("encoding") == "utf-8", \
+        "시스템 로케일로 디코딩하고 있다 — 한국어 윈도우에서 깨진다"
+    assert seen.get("errors") == "replace", \
+        "읽을 수 없는 바이트 하나가 배포 전체를 죽일 수 있다"
+
+
+def test_run_command_survives_none_streams(monkeypatch):
+    """부정 통제: 스트림이 None 이어도 AttributeError 를 내지 않는다.
+
+    플랫폼에 따라 여전히 None 이 올 수 있다. 그때 진단 메시지가
+    AttributeError 로 둔갑하면 원인 추적이 다시 막힌다.
+    """
+
+    class _Broken:
+        returncode = 1
+        stdout = None
+        stderr = None
+
+    monkeypatch.setattr(ecs_build.subprocess, "run", lambda *a, **k: _Broken())
+    assert ecs_build.run_command(["docker", "build"]) == (1, "", "")
+
+
+def test_build_failure_message_survives_undecodable_output(monkeypatch, workspace):
+    """깨진 바이트가 섞여도 빌드 실패는 **빌드 실패로** 보고돼야 한다."""
+
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "ERROR: failed to solve �� pip install failed"
+
+    monkeypatch.setattr(ecs_build.subprocess, "run", lambda *a, **k: _Failed())
+    with pytest.raises(ecs_build.BuildError) as caught:
+        ecs_build.build_image(workspace, "app:1")
+    assert "빌드에 실패했습니다" in str(caught.value)
+    assert "pip install failed" in caught.value.detail
