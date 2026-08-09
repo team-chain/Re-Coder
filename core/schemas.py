@@ -1302,6 +1302,15 @@ class ECSDeployRequest(BaseModel):
     memory:                  str = "512"        # MiB
     health_check_path:       str = "/health"
     container_port:          int = Field(default=8000, ge=1, le=65535)
+    #: ECS 컨테이너 헬스체크 명령. **비우면 ECS 가 컨테이너 상태를
+    #: 감시하지 않는다** — 프로세스는 살아 있는데 앱이 죽은 경우를
+    #: 못 잡고, 롤백·서킷 브레이커도 걸리지 않는다.
+    #:
+    #: 기본값을 두지 않는 이유: 이미지마다 쓸 수 있는 명령이 다르다.
+    #: curl 을 박아뒀다가 런타임 이미지에 curl 이 없어 컨테이너가 무한
+    #: 재시작한 적이 있다. 이미지에 확실히 있는 명령을 호출자가 정한다.
+    #: 파이썬 이미지는 `python_http_health_check()` 헬퍼를 쓰면 된다.
+    health_check_command:    Optional[list[str]] = None
     env_vars:                dict[str, str] = Field(default_factory=dict)
 
     # ── 빌드 · 업로드 (FR-05-04) ────────────────────────────────────────

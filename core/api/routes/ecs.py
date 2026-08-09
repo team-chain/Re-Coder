@@ -39,6 +39,20 @@ _deploy_records: Dict[str, ECSDeployRecord] = {}
 _ecs_agent = ECSAgent()
 
 
+#: 아직 끝나지 않은 배포로 볼 상태.
+_ACTIVE_STATUSES = frozenset({ECSDeployStatus.PENDING, ECSDeployStatus.IN_PROGRESS})
+
+
+def _active_deployment(cluster: str, service: str) -> Optional[ECSDeployRecord]:
+    """같은 클러스터·서비스에서 아직 돌고 있는 배포. 없으면 None."""
+    for record in _deploy_records.values():
+        if record.status not in _ACTIVE_STATUSES:
+            continue
+        if record.cluster == cluster and record.service == service:
+            return record
+    return None
+
+
 # ---------------------------------------------------------------------------
 # POST /ecs/deploy
 # ---------------------------------------------------------------------------
@@ -63,6 +77,28 @@ async def start_deployment(
 
     OPA 정책 위반 시 400 반환 (fail-closed Level ≥ 3).
     """
+    # **같은 서비스에 배포가 이미 돌고 있으면 새로 시작하지 않는다.**
+    #
+    # 확장의 배포 버튼을 두 번 누르거나 재시도하면 예전에는 파이프라인이
+    # 두 개 동시에 떴다. 둘 다 같은 태그로 빌드해 같은 ECR 리포에 올리고
+    # 같은 ECS 서비스를 갱신하므로 docker/ECR 작업이 뒤엉킨다. 게다가
+    # `/api/deploy/ecs/status` 는 **가장 최근에 시작된 것 하나만** 보여줘서,
+    # 먼저 시작한 배포는 사용자 눈에서 사라진 채 계속 돌아간다.
+    active = _active_deployment(request.cluster, request.service)
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "deployment_in_progress",
+                "message": (
+                    f"{request.cluster}/{request.service} 에 이미 진행 중인 "
+                    "배포가 있습니다. 끝난 뒤 다시 시도하세요."
+                ),
+                "deployment_id": active.deployment_id,
+                "started_at": active.started_at.isoformat() if active.started_at else "",
+            },
+        )
+
     deployment_id = str(uuid4())
 
     # 초기 PENDING 레코드 등록
@@ -121,21 +157,44 @@ async def start_deployment(
             },
         ) from opa_exc
 
-    if opa_result.decision.startswith("deny"):
+    # **"allow" 하나만 통과시킨다.**
+    #
+    # 예전에는 `decision.startswith("deny")` 로만 막았다. 그런데 결정값은
+    # 다섯 가지다 — allow / allow_with_approval / deny /
+    # deny_with_fix_suggestion / escalate_to_security. 앞의 조건은
+    # `allow_with_approval` 과 `escalate_to_security` 를 통과시켜서,
+    # **승인자가 필요하다는 결정과 보안 에스컬레이션 결정이 곧바로
+    # 배포로 이어졌다.** 게이트를 통과시키는 조건은 화이트리스트여야 한다.
+    decision = (opa_result.decision or "").strip()
+    if decision != "allow":
         record.status = ECSDeployStatus.FAILED
-        record.error_message = f"OPA 정책 거부 — {opa_result.reason}"
-        # OPA 에 못 닿아서 나온 deny 와, 정책이 실제로 막은 deny 는 다르다.
+        record.error_message = f"정책 통과 실패({decision}) — {opa_result.reason}"
+
+        # OPA 에 못 닿아서 나온 거부와, 정책이 실제로 막은 거부는 다르다.
         # 같은 코드로 보고하면 사용자가 무엇을 해야 할지 알 수 없다.
-        unavailable = not opa_result.opa_available
+        if not opa_result.opa_available:
+            error_code, status_code = "opa_unavailable", 503
+            message = "OPA에 연결할 수 없습니다. Level 3+ 배포는 차단됩니다."
+        elif decision == "allow_with_approval":
+            error_code, status_code = "approval_required", 403
+            message = (
+                f"이 배포는 승인이 필요합니다(필요 승인자 "
+                f"{opa_result.required_approvers}명). 승인 절차를 거친 뒤 "
+                "다시 시도하세요."
+            )
+        elif decision == "escalate_to_security":
+            error_code, status_code = "security_escalation_required", 403
+            message = "이 배포는 보안팀 검토가 필요합니다."
+        else:
+            error_code, status_code = "policy_denied", 403
+            message = f"OPA 정책이 이 배포를 거부했습니다: {opa_result.reason}"
+
         raise HTTPException(
-            status_code=503 if unavailable else 403,
+            status_code=status_code,
             detail={
-                "error": "opa_unavailable" if unavailable else "policy_denied",
-                "message": (
-                    "OPA에 연결할 수 없습니다. Level 3+ 배포는 차단됩니다."
-                    if unavailable
-                    else f"OPA 정책이 이 배포를 거부했습니다: {opa_result.reason}"
-                ),
+                "error": error_code,
+                "decision": decision,
+                "message": message,
                 "fix_suggestion": opa_result.fix_suggestion,
                 "deployment_id": deployment_id,
             },
