@@ -79,16 +79,40 @@ _ECS_NAME_CORE = re.compile(r"[A-Za-z0-9_-]{1,255}\Z")
 
 
 def _check_role_name(kind: str, value: str) -> str:
-    """IAM 역할 **이름**인지 확인. ARN 도, 와일드카드도 안 된다."""
-    name = (value or "").strip()
-    if not _IAM_NAME.match(name):
+    """IAM 역할 지정자 확인. **경로(path)를 허용하고 와일드카드는 막는다.**
+
+    IAM 역할에는 경로가 있을 수 있다 — `arn:aws:iam::123:role/team/EcsExec`
+    처럼. 이때 정책의 Resource 는 `role/team/EcsExec` 여야 하고, 마지막
+    조각(`EcsExec`)만 쓰면 **다른 ARN 을 가리켜 PassRole 이 거부된다.**
+    그래서 경로째로 받고, `role_short_name()` 이 필요할 때만 끝 이름을 뗀다.
+
+    ARN 전체(`arn:...`)는 여전히 거부한다 — 콜론이 들어간 값은 경로가 아니다.
+    """
+    name = (value or "").strip().strip("/")
+    if not name or ":" in name or len(name) > 512:
         raise ValueError(
             f"{kind} 은 IAM 역할 이름이어야 합니다: {value!r}\n"
             f"  · ARN 이 아니라 이름만 (예: {TASK_EXECUTION_ROLE!r})\n"
-            f"  · 와일드카드(*)는 쓸 수 없습니다 — 계정의 모든 역할에 "
-            f"PassRole 을 주게 되어 최소권한이 무너집니다"
+            f"  · 경로가 있으면 경로째로 주세요 (예: 'team/EcsExec')"
         )
+    for segment in name.split("/"):
+        if not _IAM_NAME.match(segment):
+            raise ValueError(
+                f"{kind} 이름이 올바르지 않습니다: {value!r}\n"
+                f"  · 각 조각은 IAM 이름 규칙을 따라야 합니다\n"
+                f"  · 와일드카드(*)는 쓸 수 없습니다 — 계정의 모든 역할에 "
+                f"PassRole 을 주게 되어 최소권한이 무너집니다"
+            )
     return name
+
+
+def role_short_name(role: str) -> str:
+    """경로를 뗀 역할 이름. `RoleName` 인자에 넣을 값.
+
+    `iam:GetRole(RoleName=...)` 는 **경로 없는 이름**을 받는다. 반면 정책의
+    Resource ARN 은 경로를 포함해야 한다. 둘을 섞으면 한쪽이 틀린다.
+    """
+    return (role or "").rstrip("/").rsplit("/", 1)[-1]
 
 
 #: AWS 리전 이름. `us-east-1` `ap-northeast-2` `us-gov-west-1` `cn-north-1` 형태.
@@ -144,14 +168,19 @@ ENV_TASK_ROLE_ARN = "ECS_TASK_ROLE_ARN"
 def role_from_env(env_var: str) -> str | None:
     """환경변수에 설정된 역할 **이름**. 설정 안 됐으면 None.
 
-    배포 경로는 ARN 전체를 넣는 관례라 뒤쪽 이름만 뽑는다.
+    배포 경로는 ARN 전체를 넣는 관례라 `:role/` 뒤를 잘라낸다.
+    **경로는 보존한다** — `role/team/EcsExec` 에서 `EcsExec` 만 남기면
+    정책이 다른 ARN 을 가리켜 PassRole 이 거부된다.
+
     값이 이상하면 조용히 기본값으로 떨어지지 않고 **터진다** — 역할을 잘못
     지정한 채 배포가 진행되면 마지막 단계에서 더 알기 어려운 오류가 난다.
     """
     raw = (os.environ.get(env_var) or "").strip()
     if not raw:
         return None
-    return _check_role_name(f"환경변수 {env_var}", raw.rsplit("/", 1)[-1])
+    if ":role/" in raw:
+        raw = raw.split(":role/", 1)[1]
+    return _check_role_name(f"환경변수 {env_var}", raw)
 
 
 def configured_execution_role() -> str:
@@ -164,10 +193,34 @@ def configured_task_role() -> str:
     return role_from_env(ENV_TASK_ROLE_ARN) or TASK_ROLE
 
 
+def partition_for(region: str) -> str:
+    """리전이 속한 ARN 파티션.
+
+    **모든 AWS 가 `arn:aws:` 가 아니다.** 미국 정부용(GovCloud)은
+    `arn:aws-us-gov:`, 중국은 `arn:aws-cn:` 을 쓴다. 파티션이 틀리면 ARN 이
+    **어떤 리소스와도 매칭되지 않아** 정책을 붙여도 전부 거부된다.
+
+    지난 라운드에 리전 검증을 넣으면서 `us-gov-west-1` `cn-north-1` 을
+    허용 목록에 넣었는데, 정작 파티션은 `aws` 로 고정돼 있었다. 허용해 놓고
+    동작은 안 되는 조합을 내가 만든 셈이다.
+    """
+    reg = (region or "").strip()
+    if reg.startswith("us-gov-"):
+        return "aws-us-gov"
+    if reg.startswith("cn-"):
+        return "aws-cn"
+    return "aws"
+
+
 def _arn(service: str, resource: str, region: str, account: str,
          *, global_service: bool = False) -> str:
-    """ARN 조립. 전역 서비스(iam 등)는 리전 칸을 비운다."""
-    return f"arn:aws:{service}:{'' if global_service else region}:{account}:{resource}"
+    """ARN 조립. 전역 서비스(iam 등)는 리전 칸을 비운다.
+
+    파티션은 리전에서 끌어온다 — 전역 서비스라도 파티션은 따라가야 한다
+    (GovCloud 계정의 IAM 역할은 `arn:aws-us-gov:iam::...` 이다).
+    """
+    part = partition_for(region)
+    return f"arn:{part}:{service}:{'' if global_service else region}:{account}:{resource}"
 
 
 def _sts_statements() -> list[dict]:
@@ -314,7 +367,8 @@ def _s3_statements(region: str, account: str) -> list[dict]:
     미리 넣어두는 이유는, 정책을 두 번 발급받게 하면 사용자가 중간에
     막히기 때문이다.
     """
-    bucket = f"arn:aws:s3:::{RESOURCE_PREFIX}-*"
+    # S3 버킷 ARN 은 리전·계정 칸이 비지만 **파티션은 따라간다.**
+    bucket = f"arn:{partition_for(region)}:s3:::{RESOURCE_PREFIX}-*"
     return [
         {
             "Sid": "S3StaticSiteBucket",
@@ -361,7 +415,7 @@ def _bedrock_statements(region: str, account: str) -> list[dict]:
             "Effect": "Allow",
             "Action": ["bedrock:InvokeModel"],
             "Resource": [
-                "arn:aws:bedrock:*::foundation-model/*",
+                f"arn:{partition_for(region)}:bedrock:*::foundation-model/*",
                 _arn("bedrock", "inference-profile/*", region, account),
             ],
         },

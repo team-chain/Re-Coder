@@ -586,9 +586,21 @@ class _ModuleScanner:
         for _pos, _kind, payload in events:
             if payload[0] == "assign":
                 _, key, value = payload
+                if "." in key:
+                    continue
                 svc = self._service_of(value, state, current_class)
-                if svc and "." not in key:
+                if svc:
                     state[key] = svc
+                else:
+                    # **낡은 값을 지운다.** 안 지우면 `c = httpx.Client()` 뒤의
+                    # `c.get(...)` 이 직전 서비스로 기록돼 있지도 않은 액션
+                    # (`ecs:Get`)이 생긴다.
+                    #
+                    # 대가: `c = wrap(c)` 처럼 우리가 못 푸는 호출을 거치면
+                    # 이후 호출을 놓친다. 둘 다 완벽하진 않지만, 없는 권한을
+                    # 지어내는 쪽이 더 나쁘다 — 사람이 그걸 보고 정책에
+                    # 넣어버릴 수 있기 때문이다.
+                    state.pop(key, None)
                 continue
             node = payload[1]
             self._record_call(node, state, current_class)
