@@ -1258,6 +1258,22 @@ class ECSDeployStatus(str, Enum):
     CIRCUIT_BREAKER_TRIGGERED  = "circuit_breaker_triggered"
 
 
+def _default_ecs_region() -> str:
+    """ECS 배포 기본 리전.
+
+    AWS_REGION / AWS_DEFAULT_REGION 을 순서대로 보고, 없으면 us-east-1.
+    us-east-1 인 이유는 개발·검증 환경(AWS Academy Learner Lab)이
+    us-east-1 과 us-west-2 만 허용하기 때문이다.
+    """
+    import os as _os
+
+    for key in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+        value = (_os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return "us-east-1"
+
+
 class ECSDeployRequest(BaseModel):
     """
     Q3 ECS Rolling Update 요청. ecs_agent.deploy() 의 입력.
@@ -1268,8 +1284,16 @@ class ECSDeployRequest(BaseModel):
     project_id:              str
     cluster:                 str
     service:                 str
-    image:                   str
-    region:                  str = "ap-northeast-2"
+    #: 이미 ECR 에 있는 이미지를 그대로 쓸 때 지정. `workspace_path` 를
+    #: 주면 여기에 빌드 결과가 채워지므로 비워도 된다.
+    image:                   str = ""
+    #: 기본 리전. 환경변수 AWS_REGION 을 먼저 보고, 없으면 us-east-1.
+    #:
+    #: 원래 기본값은 ap-northeast-2(서울)였다. 그런데 개발·검증 환경인
+    #: AWS Academy Learner Lab 은 us-east-1 / us-west-2 만 허용해서,
+    #: 기본값 그대로 배포하면 전 단계가 조용히 거부당한다. 환경변수를
+    #: 먼저 보게 해서 서울로 쓰던 쪽도 깨지지 않게 한다.
+    region:                  str = Field(default_factory=_default_ecs_region)
 
     # Task Definition 렌더링용
     task_definition_family:  str = "recoder-task"
@@ -1277,12 +1301,36 @@ class ECSDeployRequest(BaseModel):
     cpu:                     str = "256"        # ECS Fargate vCPU units
     memory:                  str = "512"        # MiB
     health_check_path:       str = "/health"
+    container_port:          int = Field(default=8000, ge=1, le=65535)
     env_vars:                dict[str, str] = Field(default_factory=dict)
+
+    # ── 빌드 · 업로드 (FR-05-04) ────────────────────────────────────────
+    #: 이미지를 빌드할 로컬 작업 폴더. 비우면 빌드를 건너뛰고 `image` 를 쓴다.
+    workspace_path:          Optional[str] = None
+    dockerfile:              str = "Dockerfile"
+    #: 올릴 ECR 리포지토리 이름. 비우면 service 이름을 쓴다.
+    ecr_repo:                Optional[str] = None
+    #: 이미지 태그. 비우면 배포 시각으로 만든다.
+    image_tag:               Optional[str] = None
+
+    # ── 인프라 확보 (FR-05-04) ──────────────────────────────────────────
+    #: 참이면 클러스터·로그그룹·ECR·보안그룹·서비스를 없을 때 만들어 준다.
+    #: 이미 있으면 그대로 재사용한다(멱등).
+    provision:               bool = True
+    #: 띄울 태스크 수. 0 이면 서비스만 만들고 태스크는 띄우지 않는다
+    #: (Fargate 는 실행 중인 태스크에만 과금되므로 이 상태는 0원).
+    desired_count:           int = Field(default=1, ge=0, le=10)
+    #: 사용할 서브넷. 비우면 기본 VPC 에서 자동으로 찾는다.
+    subnet_ids:              list[str] = Field(default_factory=list)
+    #: 사용할 보안 그룹. 비우면 앱 포트를 여는 그룹을 만들어 쓴다.
+    security_group_ids:      list[str] = Field(default_factory=list)
 
     # 파이프라인 옵션
     run_preflight:           bool = True
     run_security_scan:       bool = True
     generate_sbom:           bool = True
+    #: 태스크 공인 IP 를 기다릴 최대 시간(초). 0 이면 URL 확인을 건너뛴다.
+    url_wait_timeout:        float = Field(default=300.0, ge=0)
 
     # 정책
     approval_level:          int = Field(default=3, ge=1, le=4)
@@ -1314,6 +1362,19 @@ class ECSDeployRecord(BaseModel):
     # Task Definition 추적 (rollback 대상)
     task_definition_arn:            Optional[str] = None
     previous_task_definition_arn:   Optional[str] = None
+
+    # ── FR-05-04 결과 ───────────────────────────────────────────────────
+    #: 카드 DoD 1번 "URL 로 접속됨". 배포가 성공하면 여기에 주소가 담긴다.
+    service_url:                    Optional[str] = None
+    #: ECR 에 올라간 최종 이미지 주소 (repositoryUri:tag).
+    image_uri:                      Optional[str] = None
+    image_digest:                   Optional[str] = None
+    #: 이번 실행에서 확보한 리소스들 — 무엇이 새로 생겼고 무엇을 재사용했는지.
+    provisioned:                    dict[str, str] = Field(default_factory=dict)
+    #: 실패했을 때 사용자가 할 수 있는 일 (DoD 3번).
+    error_remedy:                   Optional[str] = None
+    #: 실패 원인의 AWS 원문. 사람용 메시지와 분리해서 보존한다.
+    error_detail:                   Optional[str] = None
 
     # 폴링 / Circuit Breaker
     health_check_failures:          int = 0

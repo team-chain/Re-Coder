@@ -39,6 +39,7 @@ from api.routes import (  # noqa: E402
     health,
     analyze,
     deploy,
+    deploy_ecs,
     ops,
     session,
     policy,
@@ -216,6 +217,8 @@ def create_app() -> FastAPI:
     app.include_router(session.router)
     app.include_router(policy.router)
     app.include_router(ecs.router)
+    # 확장이 부르는 /api/deploy/ecs* 호환 계층 (FR-05-04)
+    app.include_router(deploy_ecs.router)
     app.include_router(gitops.router)
     app.include_router(incident.router)
     app.include_router(workbench.router)
