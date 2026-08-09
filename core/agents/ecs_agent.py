@@ -28,6 +28,7 @@ from typing import Optional
 
 from core.agents.preflight_agent import PreflightAgent
 from core.sbom import sbom_generator
+from core import aws_policy
 from core.schemas import (
     ECSDeployRecord,
     ECSDeployRequest,
@@ -360,13 +361,16 @@ class ECSAgent:
             "{{health_check_path}}": req.health_check_path,
             "{{region}}": req.region,
             "{{env_vars_json}}": json.dumps(env_vars_list),
+            # 역할 이름은 권한표와 같은 출처(aws_policy)를 본다.
+            # 여기 박아두면 권한표가 인가한 역할과 다른 역할을 태스크 정의에
+            # 넣게 되고, RegisterTaskDefinition 이 PassRole 로 거부된다.
             "{{execution_role_arn}}": os.environ.get(
-                "ECS_EXECUTION_ROLE_ARN",
-                f"arn:aws:iam::000000000000:role/ecsTaskExecutionRole",
+                aws_policy.ENV_EXECUTION_ROLE_ARN,
+                f"arn:aws:iam::000000000000:role/{aws_policy.TASK_EXECUTION_ROLE}",
             ),
             "{{task_role_arn}}": os.environ.get(
-                "ECS_TASK_ROLE_ARN",
-                f"arn:aws:iam::000000000000:role/ecsTaskRole",
+                aws_policy.ENV_TASK_ROLE_ARN,
+                f"arn:aws:iam::000000000000:role/{aws_policy.TASK_ROLE}",
             ),
         }
         for k, v in replacements.items():
