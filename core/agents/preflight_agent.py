@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from core import aws_policy
 from core.schemas import PreflightCheck, PreflightReport
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,14 @@ class PreflightAgent:
         checks = [
             await self._check_ecs_cluster(cluster, region),
             await self._check_ecs_service(cluster, service, region),
-            await self._check_iam_role(f"ecsTaskExecutionRole", region),
+            # 역할 이름은 권한표와 **같은 출처**에서 가져온다. 여기 박아두면
+            # 학교 계정처럼 역할 이름이 다른 환경에서 없는 역할을 찾게 된다.
+            await self._check_iam_role(
+                # GetRole 은 **경로 없는** 이름을 받는다. 정책 ARN 은 경로를
+                # 포함해야 하므로 둘을 섞으면 한쪽이 틀린다.
+                aws_policy.role_short_name(aws_policy.configured_execution_role()),
+                region,
+            ),
             await self._check_log_group(
                 log_group or f"/ecs/{task_definition_family}", region
             ),
