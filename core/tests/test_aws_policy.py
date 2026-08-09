@@ -1330,14 +1330,27 @@ def test_policy_identity_follows_aws_profile(monkeypatch):
     """
     from api.routes import aws as route
 
+    # 환경변수에 키가 주입돼 있으면 프로필을 아예 넘기지 않는 것이 맞다
+    # (test_injected_credentials_do_not_get_a_profile_name 참고).
+    # 여기서 보려는 건 그 경우가 아니라 **공유 프로필을 쓰는 경우**다.
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.setattr(route, "_active_profile", None)
     monkeypatch.delenv("AWS_PROFILE", raising=False)
     assert route._effective_profile() is None, \
         "아무것도 없으면 boto3 기본 체인에 맡겨야 한다 (None)"
 
+    # 실제로 존재하는 프로필이면 그대로 따른다.
+    monkeypatch.setattr(route, "_shared_profile_names", lambda: {"default", "work"})
     monkeypatch.setenv("AWS_PROFILE", "work")
     assert route._effective_profile() == "work", \
         "AWS_PROFILE 을 무시하고 있다 — 정책과 배포가 다른 계정을 본다"
+
+    # 존재하지 않는 이름은 넘기지 않는다. 없는 프로필을 세션에 주면
+    # ProfileNotFound 로 죽어서, 멀쩡한 자격증명이 있어도 권한표가
+    # 자리표시자만 담아 나간다. 기본 체인에 맡기는 편이 항상 낫다.
+    monkeypatch.setenv("AWS_PROFILE", "이런프로필은없다")
+    assert route._effective_profile() is None, \
+        "존재하지 않는 프로필 이름을 그대로 넘기고 있다"
 
 
 def test_identity_comes_from_a_single_session(monkeypatch):
