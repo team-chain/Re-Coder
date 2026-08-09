@@ -861,18 +861,47 @@ def _looks_like_academy(arn: str) -> bool:
     return any(marker in (arn or "") for marker in ACADEMY_ARN_MARKERS)
 
 
+def _shared_profile_names() -> set[str]:
+    """`~/.aws/credentials` · `~/.aws/config` 에 **실제로 존재하는** 프로필 이름."""
+    names: set[str] = set()
+    for path, prefix in ((AWS_CREDENTIALS_FILE, ""), (AWS_CONFIG_FILE, "profile ")):
+        if not path.exists():
+            continue
+        cp = configparser.RawConfigParser()
+        try:
+            cp.read(path, encoding="utf-8")
+        except Exception:  # pragma: no cover - 깨진 파일이 권한표를 막지 않는다
+            continue
+        for section in cp.sections():
+            names.add(section[len(prefix):] if prefix and section.startswith(prefix)
+                      else section)
+    return names
+
+
 def _effective_profile() -> Optional[str]:
-    """배포가 **실제로** 쓸 프로필. 모르면 None(=boto3 기본 체인).
+    """배포가 **실제로** 쓸 프로필. 없거나 못 쓰면 None(=boto3 기본 체인).
 
-    `AWS_PROFILE` 을 무시하면 안 된다. 배포 클라이언트는 boto3 기본 체인을
-    쓰므로 그 환경변수를 따른다. 그런데 `_detect_credential_source()` 는
-    `AWS_PROFILE` 을 읽지 않고 `"default"` 를 돌려준다 — 그 값을 세션에
-    넘기면 **정책은 default 계정, 배포는 AWS_PROFILE 계정**이 되어
-    사용자가 시킨 대로 붙여도 AccessDenied 가 난다.
+    두 가지를 거른다.
 
-    None 을 돌려주면 boto3 가 자기 체인대로(=AWS_PROFILE 포함) 고른다.
+    **① 자격증명이 환경변수에 이미 주입돼 있으면 프로필을 넘기지 않는다.**
+    ReCoder 기본 저장 방식(`storage="recoder"`)은 키를 `~/.recoder/` 에 두고
+    환경변수로 주입하면서 `AWS_PROFILE` 에 `"recoder"` 라는 **라벨**을 같이
+    심는다. 그런데 그 이름의 공유 프로필은 존재하지 않는다. 그대로 세션에
+    넘기면 `ProfileNotFound` 로 죽고, 멀쩡한 자격증명이 연결돼 있는데도
+    권한표가 자리표시자만 담아 나간다.
+
+    **② 이름이 있어도 공유 프로필로 존재할 때만 쓴다.** 없는 이름을 넘기는
+    것보다 boto3 기본 체인에 맡기는 편이 항상 낫다.
+
+    `AWS_PROFILE` 자체는 계속 존중한다 — 배포 클라이언트가 그걸 보기 때문에,
+    무시하면 정책과 배포가 다른 계정을 가리킨다.
     """
-    return (os.environ.get("AWS_PROFILE") or "").strip() or _active_profile or None
+    if os.environ.get("AWS_ACCESS_KEY_ID"):
+        return None
+    name = (os.environ.get("AWS_PROFILE") or "").strip() or _active_profile
+    if not name:
+        return None
+    return name if name in _shared_profile_names() else None
 
 
 def _deployment_identity() -> tuple[str, str, str]:
@@ -888,9 +917,17 @@ def _deployment_identity() -> tuple[str, str, str]:
     """
     _load_into_process_if_needed()
     profile = _effective_profile()
-    try:
-        session = _build_boto3_session(profile=profile, region="")
-    except Exception:  # pragma: no cover - 세션 실패가 권한표를 막지 않는다
+    session = None
+    for attempt in ([profile] if profile else []) + [None]:
+        try:
+            session = _build_boto3_session(profile=attempt, region="")
+            break
+        except Exception:
+            # 프로필로 실패하면 프로필 **없이** 한 번 더 시도한다.
+            # 자격증명이 환경변수에 있는데 이름 하나 때문에 통째로 포기하면,
+            # 멀쩡한 사용자가 자리표시자만 받는다.
+            logger.info("[aws] 프로필 %r 로 세션 실패 — 기본 체인으로 재시도", attempt)
+    if session is None:  # pragma: no cover - boto3 자체가 없는 경우
         return "", "", ""
 
     region = (getattr(session, "region_name", "") or "").strip()

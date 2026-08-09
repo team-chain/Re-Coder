@@ -1,0 +1,25 @@
+# ReCoder Local Core - test-only dependencies
+# Requires Python 3.11+
+#
+# ASCII only. pip reads requirements files with the system locale encoding,
+# which is cp949 on Korean Windows. UTF-8 comments here crash the install
+# with UnicodeDecodeError. Keep this file plain ASCII.
+#
+# Why this file exists
+# --------------------
+# These used to be inlined in .github/workflows/ci.yml as
+# `pip install pytest "moto[server]"`. That hid the requirement from the
+# repository, so a developer machine without moto silently skipped:
+#
+#   * core/tests/test_aws_infra.py           (38 tests -> 1 skip)
+#   * test_aws_policy.py runtime policy check (3 tests)
+#
+# The second one matters most. It verifies that every AWS action the code
+# actually calls is granted by aws_policy.py. When it is skipped the suite
+# still reports green, so a missing permission looks like a pass. That is
+# exactly how 14 ungranted actions once shipped with an all-green run.
+#
+# Install with:  pip install -r requirements-dev.txt
+
+pytest>=8.0
+moto[server]>=5.0
