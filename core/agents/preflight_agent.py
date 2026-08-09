@@ -53,16 +53,28 @@ class PreflightAgent:
         task_definition_family: str,
         ecr_repo: Optional[str] = None,
         log_group: Optional[str] = None,
+        will_provision: bool = False,
     ) -> PreflightReport:
         """
         Preflight 전체 실행.
         CloudPreflight를 통과하지 못한 환경은 배포 측정에서 제외한다 (설계서 §Q3 DoD).
+
+        `will_provision=True` 는 "배포 파이프라인이 없는 리소스를 직접 만든다"는
+        뜻이다. 이때 클러스터·서비스가 **아직 없는 것은 실패가 아니다** —
+        그게 정상 출발 상태다. 예전에는 이 구분이 없어서, 자동 생성 기능을
+        preflight 가 막고 있었다: 빈 계정에서 첫 배포가 "클러스터를 찾을 수
+        없습니다"로 중단되는데, 정작 그 클러스터를 만들어 주는 코드는
+        preflight 바로 다음 단계에 있었다.
         """
         report = PreflightReport(region=region, cluster=cluster, service=service)
 
+        # 우리가 만들어 줄 리소스는 없어도 경고로만 남긴다.
+        creatable = "warning" if will_provision else "error"
         checks = [
-            await self._check_ecs_cluster(cluster, region),
-            await self._check_ecs_service(cluster, service, region),
+            await self._check_ecs_cluster(cluster, region, missing_severity=creatable),
+            await self._check_ecs_service(
+                cluster, service, region, missing_severity=creatable
+            ),
             # 역할 이름은 권한표와 **같은 출처**에서 가져온다. 여기 박아두면
             # 학교 계정처럼 역할 이름이 다른 환경에서 없는 역할을 찾게 된다.
             await self._check_iam_role(
@@ -74,6 +86,9 @@ class PreflightAgent:
             await self._check_log_group(
                 log_group or f"/ecs/{task_definition_family}", region
             ),
+            # NOTE: 로그 그룹 이름의 규칙(`/ecs/{family}`)은 여기서 다시
+            # 계산하지 않는다 — 호출자가 만들어 넘긴다. 같은 값을 두 곳에서
+            # 계산하면 한쪽만 바뀌었을 때 조용히 어긋난다.
         ]
 
         if ecr_repo:
@@ -91,7 +106,9 @@ class PreflightAgent:
     # 개별 체크
     # ------------------------------------------------------------------
 
-    async def _check_ecs_cluster(self, cluster: str, region: str) -> PreflightCheck:
+    async def _check_ecs_cluster(
+        self, cluster: str, region: str, *, missing_severity: str = "error"
+    ) -> PreflightCheck:
         name = "ECS Cluster 존재 확인"
         try:
             client = self._ecs_client(region)
@@ -101,14 +118,22 @@ class PreflightAgent:
             if active:
                 return PreflightCheck(name=name, passed=True, detail=f"클러스터 '{cluster}' ACTIVE", severity="error")
             return PreflightCheck(
-                name=name, passed=False, severity="error",
+                name=name, passed=False, severity=missing_severity,
                 detail=f"클러스터 '{cluster}'를 찾을 수 없습니다",
-                fix_guide=f"`aws ecs create-cluster --cluster-name {cluster} --region {region}` 를 실행하세요",
+                fix_guide=(
+                    "배포 중에 자동으로 생성됩니다"
+                    if missing_severity == "warning"
+                    else f"`aws ecs create-cluster --cluster-name {cluster} "
+                         f"--region {region}` 를 실행하세요"
+                ),
             )
         except Exception as e:
             return self._boto3_error(name, e)
 
-    async def _check_ecs_service(self, cluster: str, service: str, region: str) -> PreflightCheck:
+    async def _check_ecs_service(
+        self, cluster: str, service: str, region: str, *,
+        missing_severity: str = "error"
+    ) -> PreflightCheck:
         name = "ECS Service 존재 확인"
         try:
             client = self._ecs_client(region)
@@ -123,9 +148,13 @@ class PreflightAgent:
                     detail=f"서비스 '{service}' ACTIVE (running={running}, desired={desired})",
                 )
             return PreflightCheck(
-                name=name, passed=False, severity="error",
+                name=name, passed=False, severity=missing_severity,
                 detail=f"서비스 '{service}'를 찾을 수 없습니다",
-                fix_guide="ECS 콘솔에서 서비스를 먼저 생성하세요",
+                fix_guide=(
+                    "배포 중에 자동으로 생성됩니다"
+                    if missing_severity == "warning"
+                    else "ECS 콘솔에서 서비스를 먼저 생성하세요"
+                ),
             )
         except Exception as e:
             return self._boto3_error(name, e)

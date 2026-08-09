@@ -28,7 +28,11 @@ from core.schemas import (
 )
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/ecs", tags=["ecs"])
+# 접두어가 "/ecs" 였다. 다른 라우터는 전부 "/api/..." 를 쓰는데 여기만
+# 달라서, 디스코드 봇이 부르는 "/api/ecs/deploy" 가 404 였다.
+# 리포 전체를 확인한 결과 "/ecs/..." 를 부르는 코드는 없었으므로
+# (로그 그룹 이름 문자열만 걸린다) 깨질 호출자 없이 맞출 수 있다.
+router = APIRouter(prefix="/api/ecs", tags=["ecs"])
 
 # 인메모리 배포 레코드 저장소 (실제 환경에서는 SQLite/DB로 대체)
 _deploy_records: Dict[str, ECSDeployRecord] = {}
@@ -74,50 +78,68 @@ async def start_deployment(
     _deploy_records[deployment_id] = record
 
     # OPA 정책 평가 (core/opa_client.py)
-    try:
-        from core.opa_client import opa_client
+    #
+    # 이 블록은 예전에 잘못된 인자 이름(policy_path / input_data /
+    # security_level)으로 evaluate() 를 불렀다. 실제 시그니처는
+    # (action, level, context, ...) 라서 매번 TypeError 가 났고, 그걸 아래
+    # `except Exception` 이 삼켜 "OPA에 연결할 수 없습니다"로 바꿔 내보냈다.
+    # 결과: **모든 ECS 배포 요청이 항상 503.** 우리 코드의 타입 오류가
+    # 외부 서비스 장애로 둔갑하는, 원인을 절대 못 찾는 형태였다.
+    #
+    # OPAClient.evaluate() 는 이미 내부에서 fail-closed 를 한다
+    # (연결 실패 시 Level 3~4 는 deny, 1~2 는 allow). 그래서 여기서
+    # 한 겹 더 감싸지 않는다 — 그 중복이 위 사고의 원인이었다.
+    from core.opa_client import opa_client
 
-        policy_input = {
-            "action": "ecs_deploy",
-            "project_id": request.project_id,
-            "image": request.image,
-            "cluster": request.cluster,
-            "region": request.region,
-            "run_security_scan": request.run_security_scan,
-            "generate_sbom": request.generate_sbom,
-        }
+    try:
         opa_result = await opa_client.evaluate(
-            policy_path="recoder/deploy/allow",
-            input_data=policy_input,
-            security_level=request.security_level,
+            action="ecs_deploy",
+            level=request.approval_level,
+            context={
+                "project_id": request.project_id,
+                "image": request.image,
+                "cluster": request.cluster,
+                "region": request.region,
+                "run_security_scan": request.run_security_scan,
+                "generate_sbom": request.generate_sbom,
+            },
+            resource_type="ecs_service",
+            resource_id=f"{request.cluster}/{request.service}",
         )
-        if not opa_result.get("result", {}).get("allow", True):
-            record.status = ECSDeployStatus.FAILED
-            record.error_message = "OPA 정책 거부 — 배포 권한 없음"
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "policy_denied",
-                    "message": "OPA 정책이 이 배포를 거부했습니다",
-                    "deployment_id": deployment_id,
-                },
-            )
-    except HTTPException:
-        raise
-    except Exception as opa_exc:
-        # OPA 연결 실패 → fail-closed (Level ≥ 3)
-        if request.security_level >= 3:
-            record.status = ECSDeployStatus.FAILED
-            record.error_message = f"OPA 연결 실패 (fail-closed): {opa_exc}"
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": "opa_unavailable",
-                    "message": "OPA에 연결할 수 없습니다. Level 3+ 배포는 차단됩니다.",
-                    "deployment_id": deployment_id,
-                },
-            )
-        logger.warning("OPA 연결 실패 (Level %d, pass-through): %s", request.security_level, opa_exc)
+    except Exception as opa_exc:  # noqa: BLE001
+        # 여기까지 왔다면 클라이언트 자체의 결함이다(시그니처·구현 오류).
+        # 그걸 "OPA 장애"로 보고하면 사용자는 영원히 엉뚱한 곳을 본다.
+        logger.error("OPA 평가 호출 자체가 실패했습니다", exc_info=True)
+        record.status = ECSDeployStatus.FAILED
+        record.error_message = f"정책 평가를 실행하지 못했습니다: {opa_exc}"
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "policy_evaluation_crashed",
+                "message": f"정책 평가 중 내부 오류가 발생했습니다: {opa_exc}",
+                "deployment_id": deployment_id,
+            },
+        ) from opa_exc
+
+    if opa_result.decision.startswith("deny"):
+        record.status = ECSDeployStatus.FAILED
+        record.error_message = f"OPA 정책 거부 — {opa_result.reason}"
+        # OPA 에 못 닿아서 나온 deny 와, 정책이 실제로 막은 deny 는 다르다.
+        # 같은 코드로 보고하면 사용자가 무엇을 해야 할지 알 수 없다.
+        unavailable = not opa_result.opa_available
+        raise HTTPException(
+            status_code=503 if unavailable else 403,
+            detail={
+                "error": "opa_unavailable" if unavailable else "policy_denied",
+                "message": (
+                    "OPA에 연결할 수 없습니다. Level 3+ 배포는 차단됩니다."
+                    if unavailable
+                    else f"OPA 정책이 이 배포를 거부했습니다: {opa_result.reason}"
+                ),
+                "fix_suggestion": opa_result.fix_suggestion,
+                "deployment_id": deployment_id,
+            },
+        )
 
     # 백그라운드에서 ECS 파이프라인 실행
     background_tasks.add_task(_run_deployment, deployment_id, request)
@@ -130,19 +152,27 @@ async def start_deployment(
 
 
 async def _run_deployment(deployment_id: str, request: ECSDeployRequest) -> None:
-    """백그라운드 배포 태스크."""
+    """백그라운드 배포 태스크.
+
+    저장소에 있는 **바로 그 기록 객체**를 에이전트에 넘긴다. 예전에는
+    에이전트가 자기 기록을 따로 만들어 채우고 끝에 통째로 교체했는데,
+    그동안 사이드바 폴링은 계속 초기 PENDING 만 봤다 — 진행 단계도
+    로그도 배포가 끝날 때까지 하나도 안 보였다.
+    """
+    record = _deploy_records.get(deployment_id)
     try:
-        result = await _ecs_agent.deploy(request)
-        result.deployment_id = deployment_id
+        result = await _ecs_agent.deploy(request, record=record)
+        # deploy() 가 새 기록을 만들었을 경우(record=None) 에만 id 를 맞춘다.
+        if result is not record:
+            result.deployment_id = deployment_id
         _deploy_records[deployment_id] = result
-        logger.info(
-            "Deployment %s finished: status=%s", deployment_id, result.status
-        )
+        logger.info("배포 %s 종료: status=%s", deployment_id, result.status)
     except Exception as exc:
-        logger.error("Deployment %s crashed: %s", deployment_id, exc, exc_info=True)
-        if deployment_id in _deploy_records:
-            _deploy_records[deployment_id].status = ECSDeployStatus.FAILED
-            _deploy_records[deployment_id].error_message = str(exc)
+        logger.error("배포 %s 가 예외로 중단됨: %s", deployment_id, exc, exc_info=True)
+        if record is not None:
+            record.status = ECSDeployStatus.FAILED
+            record.error_message = str(exc)
+            record.completed_at = datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +208,7 @@ async def list_deployments(
     """
     최근 배포 목록을 반환합니다.
 
-    project_id, cluster로 필터링 가능. 최신순(created_at 내림차순) 정렬.
+    project_id, cluster로 필터링 가능. 최신순(started_at 내림차순) 정렬.
     """
     records = list(_deploy_records.values())
 
@@ -188,7 +218,8 @@ async def list_deployments(
         records = [r for r in records if r.cluster == cluster]
 
     # 최신순 정렬
-    records.sort(key=lambda r: r.created_at, reverse=True)
+    # ECSDeployRecord 에는 created_at 이 없다 — 시작 시각이 started_at 이다.
+    records.sort(key=lambda r: r.started_at, reverse=True)
     return records[:limit]
 
 

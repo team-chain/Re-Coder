@@ -114,6 +114,18 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "ecs:DescribeTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
         "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
         "bedrock:ListFoundationModels": "계정 단위 조회",
+        # FR-05-04 — EC2 의 Describe* 는 AWS 가 리소스 단위 제한을 지원하지
+        # 않는다. "*" 는 AWS 쪽 강제이지 범위를 게을리 잡은 결과가 아니다.
+        "ec2:DescribeVpcs":              "AWS 가 리소스 단위 제한 미지원",
+        "ec2:DescribeSubnets":           "AWS 가 리소스 단위 제한 미지원",
+        "ec2:DescribeRouteTables":       "AWS 가 리소스 단위 제한 미지원",
+        "ec2:DescribeSecurityGroups":    "AWS 가 리소스 단위 제한 미지원",
+        "ec2:DescribeNetworkInterfaces": "AWS 가 리소스 단위 제한 미지원",
+        "ecs:ListTasks":                 "AWS 가 리소스 단위 제한 미지원 — "
+                                         "대신 ecs:cluster 조건으로 좁혔다",
+        "iam:CreateServiceLinkedRole":   "AWS 가 리소스 단위 제한 미지원 — "
+                                         "대신 iam:AWSServiceName 조건으로 "
+                                         "ecs.amazonaws.com 에만 한정했다",
     }
     for stmt in ap.build_policy()["Statement"]:
         if stmt["Resource"] != "*":
@@ -121,6 +133,14 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         for action in stmt["Action"]:
             assert action in allowed_wildcard, \
                 f"{action} 이 근거 없이 Resource '*' 로 열려 있다 ({stmt['Sid']})"
+        # 근거에 "조건으로 좁혔다"고 적은 액션은 실제로 Condition 이 있어야
+        # 한다. 주석만 적고 조건을 안 걸면 설명과 정책이 어긋난다.
+        for action in stmt["Action"]:
+            if "조건으로" in allowed_wildcard[action]:
+                assert stmt.get("Condition"), (
+                    f"{action} 은 조건으로 좁혔다고 적혀 있는데 "
+                    f"Condition 이 없다 ({stmt['Sid']})"
+                )
 
 
 def test_passrole_is_restricted_to_ecs_tasks():
@@ -218,6 +238,11 @@ PINNED_ACTIONS: dict[str, str] = {
         "외부 실행 파일이 하는 일이라 파이썬 코드에 안 보인다",
     "ecr:GetDownloadUrlForLayer":
         "같은 이유 — trivy/syft 가 ECR 에서 레이어를 받아온다",
+    "iam:CreateServiceLinkedRole":
+        "FR-05-04 — 계정의 첫 ecs:CreateService 에서 AWS 가 내부적으로 "
+        "ECS 서비스 연결 역할을 만든다. 우리 코드에 이 호출은 없다. "
+        "랩 Readme(2025-06-24)가 'the ECS service linked role could not be "
+        "assumed ... try again' 으로 이 현상을 문서화하고 있다",
 }
 
 #: 아직 코드가 안 쓰지만 미리 발급하는 권한. **카드 번호를 반드시 적는다.**
@@ -329,14 +354,23 @@ def test_every_aws_call_in_the_source_is_covered_by_the_policy(scan):
     )
 
 
-def test_every_granted_action_has_evidence(scan):
+def test_every_granted_action_has_evidence(scan, runtime_actions):
     """[핵심 · 반대 방향] 정책의 모든 권한은 근거가 있어야 한다.
 
     근거는 셋 중 하나다 — 코드에서 발견됨 / PINNED / PLANNED.
     아무 데도 없으면 이유 없이 열어준 권한이다.
     """
     granted = set(ap.used_actions(ap.build_policy()))
-    justified = scan.actions() | set(PINNED_ACTIONS) | set(PLANNED_ACTIONS)
+    # 근거는 넷 중 하나다 — 정적 스캔에서 발견 / **런타임 기록에서 발견** /
+    # PINNED / PLANNED. 런타임 기록이 근거로 들어가는 이유는
+    # `aws_infra.py` 가 클라이언트를 인자로 받아 정적 스캔에 안 잡히기
+    # 때문이다(파일 하단 주석 참고).
+    justified = (
+        scan.actions()
+        | runtime_actions
+        | set(PINNED_ACTIONS)
+        | set(PLANNED_ACTIONS)
+    )
     orphans = sorted(granted - justified)
     assert not orphans, (
         "근거 없이 열려 있는 권한:\n  " + "\n  ".join(orphans)
@@ -1546,3 +1580,352 @@ def test_no_account_id_can_widen_the_policy(hostile):
         if len(parts) > 4:
             assert parts[4] in ("", "123456789012", ap.ACCOUNT_PLACEHOLDER), \
                 f"{hostile!r} 로 계정 칸이 이상해졌다: {arn}"
+
+
+# ── 10차: 재사용한 검증기가 문법이 다른 경우 / 라벨 프로필 ────────────
+
+@pytest.mark.parametrize("good", ["recoder-*", "team/my.api", "my-api",
+                                  "a.b_c-d", "x/y/z", "recoder-app"])
+def test_real_ecr_repository_names_are_accepted(good):
+    """ECR 문법은 ECS 문법과 **다르다.** 네임스페이스와 마침표를 허용한다.
+
+    ECS 검증기를 그대로 돌려 쓰다가 `team/my.api` 같은 정상 이름을 거부했다.
+    검증기를 재사용할 때 문법이 같은지 확인하지 않은 것이 원인이다.
+    """
+    assert good in ap.policy_json(["ecs"], "123456789012", "us-east-1",
+                                  ecr_repo=good)
+
+
+@pytest.mark.parametrize("bad", ["MyRepo", "*", "a b", "-abc", "abc..def",
+                                 "a//b", "", "UPPER/case"])
+def test_names_ecr_itself_rejects_are_rejected(bad):
+    """반대 방향 — ECR 이 안 받는 이름을 우리가 통과시키면, 사용자는 정책을
+    만들고 나서야 저장소를 못 만든다는 걸 안다. 대문자가 대표적이다.
+    """
+    if not bad:
+        return  # 빈 값은 기본값으로 떨어지는 정상 경로
+    with pytest.raises(ValueError, match="ECR 리포지토리"):
+        ap.build_policy(["ecs"], "123456789012", "us-east-1", ecr_repo=bad)
+
+
+def test_injected_credentials_do_not_get_a_profile_name(monkeypatch):
+    """[회귀] 내부 라벨을 공유 프로필처럼 넘기면 안 된다.
+
+    ReCoder 기본 저장 방식은 키를 `~/.recoder/` 에 두고 환경변수로 주입하면서
+    `AWS_PROFILE=recoder` 라벨을 심는다. 그 이름의 공유 프로필은 없다.
+    그대로 세션에 넘기면 `ProfileNotFound` 로 죽고, **멀쩡한 자격증명이
+    연결돼 있는데 권한표가 자리표시자만 담아 나간다.**
+    """
+    from api.routes import aws as route
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAFAKEFAKEFAKEFAKE")
+    monkeypatch.setenv("AWS_PROFILE", "recoder")
+    assert route._effective_profile() is None, \
+        "주입된 자격증명이 있는데 프로필 이름을 넘기고 있다"
+
+
+def test_nonexistent_profile_falls_back_to_the_default_chain(monkeypatch):
+    """존재하지 않는 프로필 이름은 쓰지 않는다. 없는 것보다 나쁘다."""
+    from api.routes import aws as route
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.setenv("AWS_PROFILE", "이런프로필은없다")
+    monkeypatch.setattr(route, "_shared_profile_names", lambda: {"default", "work"})
+    assert route._effective_profile() is None
+
+    monkeypatch.setenv("AWS_PROFILE", "work")
+    assert route._effective_profile() == "work"
+
+
+def test_identity_retries_without_profile_when_the_profile_fails(monkeypatch):
+    """프로필로 세션이 실패하면 **프로필 없이** 한 번 더 시도한다.
+
+    이름 하나 때문에 통째로 포기하면 멀쩡한 사용자가 자리표시자만 받는다.
+    """
+    from api.routes import aws as route
+    tried: list = []
+
+    class _S:
+        region_name = "us-east-1"
+
+        def client(self, *a, **k):
+            class _C:
+                def get_caller_identity(inner):
+                    return {"Account": "123456789012", "Arn": "arn:x"}
+            return _C()
+
+    def _build(profile=None, region=None):
+        tried.append(profile)
+        if profile is not None:
+            raise RuntimeError("ProfileNotFound")
+        return _S()
+
+    monkeypatch.setattr(route, "_load_into_process_if_needed", lambda: None)
+    monkeypatch.setattr(route, "_effective_profile", lambda: "깨진프로필")
+    monkeypatch.setattr(route, "_build_boto3_session", _build)
+
+    account, region, _ = route._deployment_identity()
+    assert (account, region) == ("123456789012", "us-east-1")
+    assert tried == ["깨진프로필", None], tried
+
+
+# ===========================================================================
+# 역할 스캐너 정밀도 (FR-05-04에서 재작성)
+#
+# 이 검사는 두 방향으로 다 틀릴 수 있고, 둘 다 실제로 겪었다.
+#   · 너무 느슨하면: docstring 예시 ARN 을 "코드가 쓰는 역할"로 보고한다.
+#     오탐이 쌓이면 사람이 검사를 통째로 무시하게 된다.
+#   · 너무 빡빡하면: f-string 을 통째로 놓쳐 실제 리포에서 아무것도 못 잡는
+#     무력한 검사가 된다. 예전에 실제로 이 상태였다.
+# 아래는 양쪽을 동시에 고정한다.
+# ===========================================================================
+
+
+def _scan_roles(tmp_path, source: str):
+    import aws_calls as _aws_calls
+
+    (tmp_path / "probe.py").write_text(source, encoding="utf-8")
+    return sorted(_aws_calls.iam_roles_in_source(tmp_path))
+
+
+def test_role_scanner_ignores_docstrings(tmp_path):
+    """설명문에 적은 예시 ARN 은 코드가 쓰는 역할이 아니다."""
+    assert _scan_roles(
+        tmp_path,
+        'def f():\n    """예: arn:aws:iam::000000000000:role/GhostRole"""\n    return 1\n',
+    ) == []
+
+
+def test_role_scanner_ignores_comments(tmp_path):
+    assert _scan_roles(
+        tmp_path, "# arn:aws:iam::1:role/CommentRole 는 예시일 뿐이다\nx = 1\n"
+    ) == []
+
+
+def test_role_scanner_finds_plain_literals(tmp_path):
+    assert _scan_roles(
+        tmp_path, 'ARN = "arn:aws:iam::1:role/RealRole"\n'
+    ) == ["RealRole"]
+
+
+def test_role_scanner_finds_literal_parts_of_f_strings(tmp_path):
+    """예전에 이 검사를 무력하게 만들었던 바로 그 구멍."""
+    assert _scan_roles(
+        tmp_path, 'a = 1\nARN = f"arn:aws:iam::{a}:role/FstringRole"\n'
+    ) == ["FstringRole"]
+
+
+def test_role_scanner_finds_roles_inside_containers(tmp_path):
+    assert _scan_roles(
+        tmp_path, 'D = {"exec": "arn:aws:iam::1:role/DictRole"}\n'
+    ) == ["DictRole"]
+
+
+def test_role_scanner_finds_check_iam_role_calls(tmp_path):
+    assert _scan_roles(tmp_path, '_check_iam_role("CheckedRole")\n') == [
+        "CheckedRole"
+    ]
+
+
+def test_role_scanner_stays_silent_when_the_name_is_a_variable(tmp_path):
+    """이름이 리터럴이 아니면 대조할 대상이 없다 — 못 잡는 게 맞는 동작이다."""
+    assert _scan_roles(
+        tmp_path, 'n = "X"\nARN = f"arn:aws:iam::1:role/{n}"\n'
+    ) == []
+
+
+def test_role_scanner_falls_back_instead_of_going_blind_on_a_parse_error(tmp_path):
+    """파싱 실패를 조용히 건너뛰면 검사는 도는데 아무것도 안 보는 상태가 된다."""
+    assert _scan_roles(
+        tmp_path,
+        'ARN = "arn:aws:iam::1:role/BrokenFileRole"\ndef ( oops\n',
+    ) == ["BrokenFileRole"]
+
+
+# ===========================================================================
+# 런타임 기록 기반 권한 대조 (FR-05-04)
+#
+# 왜 필요한가 — `core/aws_infra.py` 는 boto3 클라이언트를 **인자로 받는다**
+# (moto 로 테스트하기 위한 설계다). 그런데 정적 스캐너 `aws_calls.scan_source`
+# 는 `boto3.client(...)` 대입을 기준으로 호출을 찾는다. 그래서 이 모듈의
+# 호출을 **하나도 못 본다.**
+#
+# 실제로 이 구멍으로 한 번 크게 샜다: 새 배포 경로가 14개 액션을 부르는데
+# 권한표에는 하나도 없었고, 그 상태로 테스트 651개가 전부 초록이었다.
+# "권한을 자동으로 대조한다"는 주장이 조용히 거짓이 된 두 번째 사례다.
+#
+# 그래서 정적 분석 대신 **실제로 나간 호출**을 근거로 쓴다. moto 밑에서
+# 배포 경로를 한 바퀴 돌리고, botocore before-call 훅(Recorder)이 잡은
+# 호출을 권한표와 대조한다. 클라이언트를 어떻게 만들든 상관없이 잡힌다.
+# ===========================================================================
+
+
+@pytest.fixture(scope="module")
+def runtime_actions() -> set[str]:
+    """moto 밑에서 배포 경로를 실행하고 실제로 나간 IAM 액션을 모은다."""
+    boto3 = pytest.importorskip("boto3")
+    pytest.importorskip("moto")
+    from moto import mock_aws
+
+    import aws_infra
+
+    recorder = ac.Recorder()
+    recorder.install()
+    try:
+        with mock_aws():
+            region = "us-east-1"
+            ecs = boto3.client("ecs", region_name=region)
+            ec2 = boto3.client("ec2", region_name=region)
+            logs = boto3.client("logs", region_name=region)
+            ecr = boto3.client("ecr", region_name=region)
+
+            aws_infra.ensure_cluster(ecs, "recoder-probe")
+            aws_infra.ensure_cluster(ecs, "recoder-probe")          # 재사용 경로
+            aws_infra.ensure_log_group(logs, "/ecs/recoder-probe")
+            aws_infra.ensure_ecr_repository(ecr, "recoder-probe")
+            aws_infra.ensure_ecr_repository(ecr, "recoder-probe")   # 재사용 경로
+
+            net = aws_infra.discover_default_network(ec2)
+            sg = aws_infra.ensure_security_group(
+                ec2, vpc_id=net.vpc_id, name="recoder-probe-sg", port=8000
+            )
+            # 두 번째 호출은 중복 경로 → DescribeSecurityGroups 가 나간다
+            aws_infra.ensure_security_group(
+                ec2, vpc_id=net.vpc_id, name="recoder-probe-sg", port=8000
+            )
+
+            task_def = ecs.register_task_definition(
+                family="recoder-probe",
+                networkMode="awsvpc",
+                requiresCompatibilities=["FARGATE"],
+                cpu="256", memory="512",
+                containerDefinitions=[
+                    # moto 의 run_task 는 컨테이너 memory 가 없으면 터진다.
+                    {"name": "app", "image": "x", "essential": True,
+                     "memory": 512, "cpu": 256}
+                ],
+            )["taskDefinition"]["taskDefinitionArn"]
+
+            aws_infra.ensure_service(
+                ecs, cluster="recoder-probe", service="recoder-probe-svc",
+                task_definition=task_def, subnet_ids=net.subnet_ids,
+                security_group_ids=[sg], desired_count=1,
+            )
+            aws_infra.ensure_service(                                # 갱신 경로
+                ecs, cluster="recoder-probe", service="recoder-probe-svc",
+                task_definition=task_def, subnet_ids=net.subnet_ids,
+                security_group_ids=[sg], desired_count=1,
+            )
+            aws_infra.scale_service(
+                ecs, cluster="recoder-probe", service="recoder-probe-svc",
+                desired_count=0,
+            )
+            # URL 확인 경로 — 태스크가 실제로 떠 있어야 우리 코드가
+            # DescribeTasks 와 DescribeNetworkInterfaces 까지 간다.
+            # run_task 는 **픽스처의 준비 작업**이지 우리 코드가 하는 일이
+            # 아니다. 기록에 섞이면 "코드가 ecs:RunTask 를 쓴다"는 거짓
+            # 근거가 되므로, 기록기를 잠깐 떼고 부른다.
+            # 주의: `uninstall()` 은 **이미 만들어진** 클라이언트에 붙은
+            # 훅까지 떼지는 못한다(DEFAULT_SESSION 과 create_client 만
+            # 되돌린다). 그래서 이 창 안에서 클라이언트를 새로 만들어 쓴다.
+            recorder.uninstall()
+            try:
+                setup_ecs = boto3.client("ecs", region_name=region)
+                setup_ecs.run_task(
+                    cluster="recoder-probe",
+                    taskDefinition=task_def,
+                    launchType="FARGATE",
+                    count=1,
+                    networkConfiguration={
+                        "awsvpcConfiguration": {
+                            "subnets": list(net.subnet_ids),
+                            "securityGroups": [sg],
+                            "assignPublicIp": "ENABLED",
+                        }
+                    },
+                )
+                task_arns = setup_ecs.list_tasks(
+                    cluster="recoder-probe"
+                )["taskArns"]
+                raw_tasks = setup_ecs.describe_tasks(
+                    cluster="recoder-probe", tasks=task_arns
+                )["tasks"]
+            finally:
+                recorder.install()
+
+            # 여기서 부르는 것은 **우리 코드**다. 픽스처가 직접
+            # describe_tasks 를 부르면 "코드가 그 액션을 쓴다"는 근거가
+            # 되지 못한다.
+            aws_infra.resolve_public_ip(
+                ecs, ec2, cluster="recoder-probe", service="recoder-probe-svc"
+            )
+
+            # moto 는 태스크를 RUNNING 으로 두지 않아서(DEACTIVATING) 우리
+            # 코드의 RUNNING 필터에 걸려 ENI 조회까지 가지 않는다. 그 필터는
+            # 옳은 동작이므로 끄지 않고, 상태만 RUNNING 으로 바꾼 응답을
+            # 물려 **우리 코드가** ec2 를 부르게 한다. ec2 는 진짜 moto 다.
+            class _RunningEcs:
+                def list_tasks(self, **_):
+                    return {"taskArns": task_arns}
+
+                def describe_tasks(self, **_):
+                    return {
+                        "tasks": [{**t, "lastStatus": "RUNNING"} for t in raw_tasks]
+                    }
+
+            aws_infra.resolve_public_ip(
+                _RunningEcs(), ec2,
+                cluster="recoder-probe", service="recoder-probe-svc",
+            )
+        return recorder.actions()
+    finally:
+        recorder.uninstall()
+
+
+#: 런타임 기록이 **반드시** 담고 있어야 하는 액션.
+#: 이게 없으면 기록기가 고장 났거나 픽스처가 배포 경로를 안 도는 것인데,
+#: 그 상태로 두면 아래 대조 검사들이 조용히 무력해진다. 검사기가 눈이 먼 채로
+#: 초록불을 켜는 상황을 이 목록이 막는다.
+RUNTIME_EVIDENCE_FLOOR = {
+    "ecs:CreateCluster",
+    "ecs:CreateService",
+    "ecs:UpdateService",
+    "ecs:ListTasks",
+    "ecs:DescribeTasks",
+    "logs:CreateLogGroup",
+    "logs:PutRetentionPolicy",
+    "ecr:CreateRepository",
+    "ecr:PutLifecyclePolicy",
+    "ec2:DescribeVpcs",
+    "ec2:DescribeSubnets",
+    "ec2:DescribeRouteTables",
+    "ec2:DescribeSecurityGroups",
+    "ec2:DescribeNetworkInterfaces",
+    "ec2:CreateSecurityGroup",
+    "ec2:AuthorizeSecurityGroupIngress",
+}
+
+
+def test_runtime_recorder_actually_sees_the_deploy_path(runtime_actions):
+    """[메타] 기록기가 정말 보고 있는지부터 확인한다.
+
+    이 검사가 없으면, 기록기가 조용히 고장 났을 때 아래 대조가 빈 집합끼리
+    비교하며 통과한다 — 검사는 도는데 아무것도 안 보는 상태. 정확히 그
+    상태로 14개 액션이 빠진 채 전체 테스트가 초록이었다.
+    """
+    missing = sorted(RUNTIME_EVIDENCE_FLOOR - runtime_actions)
+    assert not missing, (
+        "런타임 기록이 배포 경로의 핵심 호출을 놓쳤다:\n  " + "\n  ".join(missing)
+        + "\n(Recorder 가 고장 났거나 픽스처가 그 코드를 안 지나간다)"
+    )
+
+
+def test_every_runtime_call_is_granted_by_the_policy(runtime_actions):
+    """[핵심] 실제로 나간 호출 중 권한표에 없는 것이 없어야 한다.
+
+    정적 스캐너가 못 보는 `aws_infra.py` 를 덮는 검사다.
+    """
+    granted = set(ap.used_actions(ap.build_policy()))
+    missing = sorted(runtime_actions - granted)
+    assert not missing, (
+        "실행 중 실제로 나갔는데 권한표에 없는 액션:\n  " + "\n  ".join(missing)
+        + "\n(aws_policy.py 를 갱신하세요)"
+    )

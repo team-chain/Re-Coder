@@ -169,6 +169,39 @@ def _check_account(value: str) -> str:
     )
 
 
+#: ECR 리포지토리 이름 규칙 (AWS 명세). ECS 이름과 **다르다.**
+#:   · 소문자만 (ECS 는 대문자 허용)
+#:   · 네임스페이스 `/` 와 마침표 `.` 허용 (ECS 는 둘 다 불가)
+_ECR_SEGMENT = r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
+_ECR_REPO_NAME = re.compile(rf"(?:{_ECR_SEGMENT}/)*{_ECR_SEGMENT}\Z")
+
+
+def _check_ecr_repo(value: str) -> str:
+    """ECR 리포지토리 이름 확인. 접두사 와일드카드 하나까지 허용.
+
+    ECS 클러스터·서비스 검증기를 그대로 돌려 쓰고 있었는데, **두 문법이
+    다르다.** 그래서 두 방향으로 틀렸다.
+
+      - `team/my.api` 처럼 **정상적인** ECR 이름을 거부했다 (네임스페이스·마침표)
+      - `MyRepo` 처럼 **ECR 이 거부하는** 대문자 이름을 통과시켰다
+
+    검증기를 재사용할 때 문법이 같은지 확인하지 않은 것이 원인이다.
+    """
+    name = (value or "").strip()
+    core = name[:-1] if name.endswith("*") else name
+    # 와일드카드 앞의 구분자는 허용한다 (`recoder-*` 가 기본값이다).
+    if core.endswith((".", "_", "-", "/")) and name.endswith("*"):
+        core = core[:-1]
+    if not core or len(name) > 256 or not _ECR_REPO_NAME.match(core):
+        raise ValueError(
+            f"ECR 리포지토리 이름이 올바르지 않습니다: {value!r}\n"
+            f"  · 소문자·숫자와 `. _ - /` 만 쓸 수 있습니다 (대문자 불가)\n"
+            f"  · 네임스페이스를 쓸 수 있습니다 (예: 'team/my.api')\n"
+            f"  · 맨 끝에 접두사 와일드카드 하나까지 (예: {DEFAULT_ECR_REPO!r})"
+        )
+    return name
+
+
 def validate_region(value: str) -> str:
     """리전 형식 확인 (공개). 호출자가 저하 처리를 하고 싶을 때 쓴다."""
     return _check_region(value)
@@ -476,6 +509,99 @@ def _ecs_statements(
             "Action": ["logs:DescribeLogGroups"],
             "Resource": "*",
         },
+        # ── FR-05-04: 없는 인프라를 직접 만들어 기동시키는 데 필요한 것들 ──
+        #
+        # 여기부터는 `aws_infra.py` 가 부르는 액션이다. 그 모듈은 boto3
+        # 클라이언트를 **인자로 받도록** 만들어져 있어서(테스트 가능성을 위해)
+        # `boto3.client(...)` 대입을 찾는 정적 스캐너에는 잡히지 않는다.
+        # 그래서 이 목록은 `tests/test_aws_policy.py` 의 **런타임 기록 대조**
+        # (moto 로 실제 호출을 흘려보내고 Recorder 로 잡아 비교)로 지킨다.
+        {
+            # 클러스터를 만든다. 빈 클러스터는 요금이 없다.
+            "Sid": "EcsCreateCluster",
+            "Effect": "Allow",
+            "Action": ["ecs:CreateCluster"],
+            "Resource": _arn("ecs", f"cluster/{cluster}", ctx),
+        },
+        {
+            # 서비스를 만들고, 태스크 수를 조절한다(0 으로 내리면 과금 정지).
+            "Sid": "EcsCreateService",
+            "Effect": "Allow",
+            "Action": ["ecs:CreateService"],
+            "Resource": _arn("ecs", f"service/{cluster}/{service}", ctx),
+        },
+        {
+            # 기동된 태스크의 공인 IP 를 찾아 접속 URL 을 만든다 (DoD "URL 로 접속됨").
+            # ListTasks 는 리소스 단위 제한을 지원하지 않아 "*" 가 강제된다.
+            "Sid": "EcsFindRunningTasks",
+            "Effect": "Allow",
+            "Action": ["ecs:ListTasks"],
+            "Resource": "*",
+            "Condition": {
+                "ArnEquals": {"ecs:cluster": _arn("ecs", f"cluster/{cluster}", ctx)}
+            },
+        },
+        {
+            "Sid": "EcsDescribeTasks",
+            "Effect": "Allow",
+            "Action": ["ecs:DescribeTasks"],
+            "Resource": _arn("ecs", f"task/{cluster}/*", ctx),
+        },
+        {
+            # 첫 CreateService 는 계정에 ECS 서비스 연결 역할이 있어야 한다.
+            # 없으면 AWS 가 만들어 주는데, 그러려면 이 권한이 필요하다.
+            # 조건으로 **ECS 용으로만** 만들 수 있게 좁힌다.
+            "Sid": "CreateEcsServiceLinkedRole",
+            "Effect": "Allow",
+            "Action": ["iam:CreateServiceLinkedRole"],
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {"iam:AWSServiceName": "ecs.amazonaws.com"}
+            },
+        },
+        {
+            # 컨테이너 로그가 갈 곳. 보관 기간을 걸어 비용 누적을 막는다.
+            "Sid": "EcsLogGroup",
+            "Effect": "Allow",
+            "Action": ["logs:CreateLogGroup", "logs:PutRetentionPolicy"],
+            "Resource": _arn("logs", "log-group:/ecs/*", ctx),
+        },
+        {
+            # 옛 이미지를 자동 정리한다. GB 당 월 $0.10 이라 방치하면 쌓인다.
+            "Sid": "EcrLifecycle",
+            "Effect": "Allow",
+            "Action": ["ecr:PutLifecyclePolicy"],
+            "Resource": repo,
+        },
+        {
+            # 기본 VPC 와 인터넷으로 나가는 서브넷을 찾는다.
+            # EC2 의 Describe* 는 **리소스 단위 제한을 지원하지 않는다** —
+            # "*" 가 AWS 쪽 강제이지 우리가 게을러서가 아니다.
+            "Sid": "DiscoverDefaultNetwork",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeVpcs",
+                "ec2:DescribeSubnets",
+                "ec2:DescribeRouteTables",
+                "ec2:DescribeSecurityGroups",
+                "ec2:DescribeNetworkInterfaces",
+            ],
+            "Resource": "*",
+        },
+        {
+            # 앱 포트를 여는 보안 그룹을 만든다.
+            # CreateSecurityGroup 은 만들 그룹과 넣을 VPC 를 둘 다 요구한다.
+            "Sid": "CreateAppSecurityGroup",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:CreateSecurityGroup",
+                "ec2:AuthorizeSecurityGroupIngress",
+            ],
+            "Resource": [
+                _arn("ec2", "security-group/*", ctx),
+                _arn("ec2", "vpc/*", ctx),
+            ],
+        },
     ]
 
 
@@ -607,8 +733,7 @@ def build_policy(
     )
     cluster_name = _check_ecs_name("클러스터", (cluster or "").strip() or DEFAULT_CLUSTER)
     service_name = _check_ecs_name("서비스", (service or "").strip() or DEFAULT_SERVICE)
-    repo_name = _check_ecs_name("ECR 리포지토리",
-                                (ecr_repo or "").strip() or DEFAULT_ECR_REPO)
+    repo_name = _check_ecr_repo((ecr_repo or "").strip() or DEFAULT_ECR_REPO)
 
     ctx = ArnContext.of(account_id, region)
 
