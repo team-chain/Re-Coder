@@ -3338,10 +3338,20 @@ def test_the_sbom_generator_falls_back_to_docker_when_syft_is_missing():
     assert fallback[0] == "docker", "syft 가 없는데 대체 경로가 없다"
     assert "anchore/syft" in " ".join(fallback)
     assert "docker:img:1" in fallback, "로컬 도커 데몬의 이미지를 가리켜야 한다"
-    assert "/out:/out" in " ".join(fallback), "결과 파일을 호스트로 못 받는다"
     assert "/var/run/docker.sock:/var/run/docker.sock" in fallback, (
         "도커 소켓을 안 넘기면 컨테이너가 로컬 이미지를 못 읽는다"
     )
+
+    # 결과 마운트는 **플랫폼마다 호스트 경로 모양이 다르다.** 리눅스 기준
+    # 문자열을 박아두면 윈도우에서만 깨진다 — 개발 PC 가 전부 윈도우인데.
+    mounts = [fallback[i + 1] for i, a in enumerate(fallback) if a == "-v"]
+    out_mount = [m for m in mounts if m.endswith(":/out")]
+    assert out_mount, f"결과 파일을 호스트로 못 받는다: {mounts}"
+    host_dir = out_mount[0][: -len(":/out")]
+    assert "\\" not in host_dir, (
+        f"호스트 경로에 역슬래시가 섞였다 — 윈도우에서 마운트가 깨진다: {host_dir}"
+    )
+    assert host_dir.endswith("out"), host_dir
 
 
 def test_the_sbom_failure_reason_reaches_the_record():
@@ -3411,3 +3421,26 @@ def test_the_branch_lookup_cannot_hang_the_request(monkeypatch, tmp_path):
 
     assert seen, "git 을 아예 부르지 않았다"
     assert seen[0].get("timeout"), "git 호출에 시간 제한이 없다"
+
+
+def test_the_sbom_mount_path_survives_windows():
+    """[회귀] 개발 PC 가 전부 윈도우인데 리눅스 기준으로만 짰다.
+
+    `str(WindowsPath)` 는 `C:\\Users\\...` 로 나오고, `-v` 인자는 콜론으로
+    호스트·컨테이너를 가르므로 역슬래시가 섞이면 마운트가 깨진다.
+    테스트는 리눅스에서 통과하고 **실제 배포만 윈도우에서 깨진다.**
+    """
+    import unittest.mock as mock
+    from pathlib import PureWindowsPath
+
+    from core.sbom import SBOMGenerator
+
+    with mock.patch("core.sbom.shutil.which", return_value=None):
+        cmd = SBOMGenerator._syft_command(
+            "img:1", PureWindowsPath(r"C:\Users\dy981\.recoder\sbom\a.json")
+        )
+
+    mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+    out_mount = next(m for m in mounts if m.endswith(":/out"))
+    assert out_mount == "C:/Users/dy981/.recoder/sbom:/out", out_mount
+    assert "\\" not in out_mount, "역슬래시가 남아 도커가 경로를 못 읽는다"
