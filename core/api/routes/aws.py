@@ -89,8 +89,9 @@ class AwsConfigureRequest(BaseModel):
 class AwsConnectRequest(BaseModel):
     """VS Code SecretStorage에 보관하기 전, STS로 키만 검증하는 요청.
 
-    이 경로는 파일이나 Core 설정에 자격증명을 기록하지 않는다. 검증에 필요한
-    boto3 세션은 요청 중에만 환경변수로 설정하고, 응답 전 원래 상태로 복원한다.
+    이 경로는 파일이나 Core 설정에 자격증명을 기록하지 않는다. 검증에 성공한
+    자격증명은 현재 Core 프로세스 메모리에만 유지하며, 재시작 후에는 Extension이
+    VS Code SecretStorage에서 환경변수로 다시 주입한다.
     """
 
     access_key_id: str = Field(..., min_length=16, max_length=128)
@@ -437,7 +438,12 @@ def _restore_environment(snapshot: dict[str, Optional[str]], profile: Optional[s
 
 @router.post("/api/aws/connect", response_model=AwsStatus)
 async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
-    """AWS 키의 유효성만 STS로 확인한다. 어떤 파일에도 키를 저장하지 않는다."""
+    """AWS 키를 검증하고 현재 Core 프로세스에만 적용한다.
+
+    키는 어떤 파일에도 저장하지 않는다. 실패한 요청은 기존 환경을 되돌리지만,
+    성공한 요청은 Extension이 SecretStorage에 보관하기 전에도 현재 세션에서
+    즉시 배포 진단을 실행할 수 있도록 메모리에 유지한다.
+    """
     region = (req.region or DEFAULT_REGION).strip()
     snapshot, prior_profile = _environment_snapshot()
     try:
@@ -450,8 +456,14 @@ async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
             session_token=req.session_token,
         )
         identity = _call_sts_get_caller_identity(profile=None, region=region)
-    finally:
+    except Exception:
         _restore_environment(snapshot, prior_profile)
+        raise
+
+    # SecretStorage 기반 연결도 기존 configure 경로와 똑같이 진단 캐시를
+    # 갱신해야 한다. 그렇지 않으면 연결은 성공했는데 AWS Deploy Ready가
+    # 연결 전 결과를 계속 표시하는 상태 불일치가 생긴다.
+    _refresh_diagnostics_cache()
 
     return AwsStatus(
         ready=True,
