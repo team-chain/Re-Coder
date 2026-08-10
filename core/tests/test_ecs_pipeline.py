@@ -2949,3 +2949,465 @@ def test_the_sbom_record_model_accepts_what_the_generator_produces():
         generated_at=_dt.now(_tz.utc).isoformat(),
     )
     assert record.package_count == 2 and record.sbom_path
+
+
+# ===========================================================================
+# 정책 평가가 브랜치를 보는가 — Codex 4차 P1
+#
+# 확장이 `environment=production` 을 보내도, 변환 계층이 environment 만
+# 컨테이너 환경변수로 옮기고 **branch 를 통째로 버렸다.** OPA 컨텍스트에도
+# 로컬 폴백에도 branch 가 없어서, 프리셋 규칙 "프로덕션은 main 에서만"이
+# 어느 경로로도 아무것도 막지 못했다. 규칙은 있는데 판단 재료가 없으면
+# 그 규칙은 없는 것과 같다.
+# ===========================================================================
+
+
+def test_the_extension_request_carries_branch_and_environment():
+    """[회귀] 변환 계층이 두 값을 버리면 정책이 눈을 감는다."""
+    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
+
+    core_request = to_core_request(
+        ExtensionEcsDeployRequest(environment="production", branch="feat/x")
+    )
+    assert core_request.environment == "production"
+    assert core_request.branch == "feat/x"
+    # 컨테이너 환경변수로도 계속 넘어가야 한다 — /version 이 이걸 읽는다.
+    assert core_request.env_vars.get("ENVIRONMENT") == "production"
+
+
+def test_both_policy_paths_read_the_same_context():
+    """[계약] OPA 와 로컬 폴백이 **같은 함수**에서 사실을 받아야 한다.
+
+    갈라 놓으면 한쪽만 값을 받는다. 실제로 그래서 이 사고가 났다.
+    """
+    import inspect
+
+    from core.api.routes import ecs as ecs_routes
+
+    context = ecs_routes._policy_context(
+        make_request(environment="production", branch="feat/x")
+    )
+    assert context["branch"] == "feat/x"
+    assert context["environment"] == "production"
+
+    source = inspect.getsource(ecs_routes)
+    assert "context=_policy_context(request)" in source, (
+        "OPA 호출이 컨텍스트를 따로 조립하고 있다 — 폴백과 갈라진다"
+    )
+    assert source.count("_policy_context(") >= 3, (
+        "폴백이 공통 컨텍스트를 안 쓰고 있다"
+    )
+
+
+def test_the_local_fallback_can_actually_reject_a_production_deploy():
+    """[회귀] 브랜치가 비어 있으면 이 규칙은 절대 발동하지 않는다."""
+    from core.opa_gate import OPAGate
+
+    def judge(branch: str):
+        return OPAGate()._local_deploy_gate({
+            "sbom": {"present": True},
+            "trivy": {"critical_count": 0, "high_count": 0},
+            "gitleaks": {"passed": True},
+            "hadolint": {"passed": True},
+            "environment": "production",
+            "branch": branch,
+        })
+
+    blocked = judge("feat/x")
+    assert str(getattr(blocked.decision, "value", blocked.decision)) != "allow", (
+        "기능 브랜치에서 프로덕션 배포가 통과했다"
+    )
+    allowed = judge("main")
+    assert str(getattr(allowed.decision, "value", allowed.decision)) == "allow", (
+        "main 에서의 프로덕션 배포까지 막았다"
+    )
+
+
+# ===========================================================================
+# SBOM 을 못 만들면 배포를 세우는가 — Codex 4차 P1
+# ===========================================================================
+
+
+def test_a_failed_sbom_stops_the_deployment(monkeypatch):
+    """[회귀] syft 가 없어도 배포가 계속되고 버전은 찍혔다.
+
+    그러면 기록에는 **존재하지 않는 SBOM 의 버전**이 남고, 정책 게이트는
+    `generate_sbom=True` 라는 요청만 보고 통과시킨 뒤 SBOM 없는 이미지가
+    배포된다. 프리셋 정책 1번을 우리 손으로 우회한 셈이다.
+    """
+    from core.agents import ecs_agent as agent_module
+    from core.schemas import SBOMRecord
+
+    async def _empty(image):
+        return SBOMRecord(image=image, sbom_path=None, error="syft not installed")
+
+    monkeypatch.setattr(agent_module.sbom_generator, "generate", _empty)
+
+    record = ECSDeployRecord()
+    with pytest.raises(aws_infra.InfraError) as caught:
+        asyncio.run(ECSAgent()._step_sbom(make_request(), record, "img:1"))
+
+    assert "SBOM" in caught.value.message
+    assert "syft" in (caught.value.remedy or ""), "설치 방법을 안 알려줬다"
+    assert "generate_sbom" in (caught.value.remedy or ""), (
+        "끄는 방법을 안 알려주면 사용자가 막힌 채로 끝난다"
+    )
+    assert not record.sbom_version, (
+        "만들어지지도 않은 SBOM 의 버전을 기록에 남겼다"
+    )
+
+
+def test_a_successful_sbom_is_recorded(monkeypatch):
+    """[부정 통제] 정상 SBOM 까지 막으면 안 된다."""
+    from core.agents import ecs_agent as agent_module
+    from core.schemas import SBOMRecord
+
+    async def _ok(image):
+        return SBOMRecord(image=image, sbom_path="/tmp/sbom.json", package_count=42)
+
+    monkeypatch.setattr(agent_module.sbom_generator, "generate", _ok)
+
+    record = asyncio.run(
+        ECSAgent()._step_sbom(make_request(), ECSDeployRecord(), "img:1")
+    )
+    from datetime import datetime as _dt, timezone as _tz
+
+    assert record.sbom_path == "/tmp/sbom.json"
+    # 그냥 "v 로 시작"만 보면 아무 상수나 넣어도 통과한다.
+    assert record.sbom_version == f"v{_dt.now(_tz.utc).strftime('%Y%m%d')}"
+    assert record.sbom is not None and record.sbom.package_count == 42
+
+
+# ===========================================================================
+# provision=False 는 정말 아무것도 안 만드는가 — Codex 4차 P2
+# ===========================================================================
+
+
+def _no_provision_clients(*, cluster="", service="", log_group=""):
+    """provision=False 검증에 쓸 AWS 환경을 원하는 만큼만 갖춰 준다."""
+    import boto3
+
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    logs = boto3.client("logs", region_name="us-east-1")
+    if cluster:
+        ecs.create_cluster(clusterName=cluster)
+    if service:
+        task_def = ecs.register_task_definition(
+            family="probe", networkMode="awsvpc",
+            requiresCompatibilities=["FARGATE"], cpu="256", memory="512",
+            containerDefinitions=[{"name": "app", "image": "x", "essential": True,
+                                   "memory": 512, "cpu": 256}],
+        )["taskDefinition"]["taskDefinitionArn"]
+        ecs.create_service(
+            cluster=cluster, serviceName=service, taskDefinition=task_def,
+            desiredCount=0, launchType="FARGATE",
+        )
+    if log_group:
+        logs.create_log_group(logGroupName=log_group)
+    return {"ecs": ecs, "logs": logs}
+
+
+def _run_no_provision(clients, **overrides):
+    request = make_request(
+        provision=False, subnet_ids=["subnet-1"], security_group_ids=["sg-1"],
+        **overrides,
+    )
+    record = ECSDeployRecord()
+    target = asyncio.run(ECSAgent()._step_provision(request, record, clients))
+    return target, record, request
+
+
+def test_no_provision_requires_the_cluster():
+    """[회귀] 클러스터를 안 보면 7단계에서 create_service 가 날 오류를 낸다."""
+    moto = pytest.importorskip("moto")
+    with moto.mock_aws():
+        clients = _no_provision_clients()
+        with pytest.raises(aws_infra.InfraError) as caught:
+            _run_no_provision(clients)
+    # "클러스터"라는 낱말은 서비스 없음 메시지에도 들어간다. 두 메시지를
+    # 확실히 가르는 것으로 본다 — 안 그러면 클러스터 검사를 지워도 통과한다.
+    assert "create-cluster" in (caught.value.remedy or ""), (
+        f"클러스터 부재를 짚지 못했다: {caught.value.message} / {caught.value.remedy}"
+    )
+
+
+def test_no_provision_requires_the_service_because_creating_one_costs_money():
+    """[회귀] **가장 비싼 자리.**
+
+    로그 그룹·리포지토리만 확인하던 때는 서비스 이름을 잘못 적어도 통과했다.
+    그러면 7단계에서 **새 Fargate 서비스가 만들어지고 과금이 시작**된다.
+    사용자의 관리 도구에는 안 보이는 이름이라 발견도 늦다.
+    """
+    moto = pytest.importorskip("moto")
+    request = make_request()
+    with moto.mock_aws():
+        clients = _no_provision_clients(cluster=request.cluster)
+        with pytest.raises(aws_infra.InfraError) as caught:
+            _run_no_provision(clients)
+    assert "서비스" in caught.value.message
+    assert "요금" in (caught.value.remedy or ""), (
+        "이름을 잘못 적으면 돈이 샌다는 걸 안 알려줬다"
+    )
+
+
+def test_no_provision_requires_the_log_group_up_front():
+    """[회귀] 로그 그룹이 없으면 태스크가 기동 중에 죽는다.
+
+    실행 역할에 `logs:CreateLogGroup` 이 없어서다. preflight 는 이걸
+    경고로만 남겨 통과시킨다. 그리고 실패 안내는 "CloudWatch 로그를
+    확인하세요"인데 **정작 로깅이 실패 원인이라 로그가 비어 있다.**
+    """
+    moto = pytest.importorskip("moto")
+    request = make_request()
+    with moto.mock_aws():
+        clients = _no_provision_clients(
+            cluster=request.cluster, service=request.service
+        )
+        with pytest.raises(aws_infra.InfraError) as caught:
+            _run_no_provision(clients)
+    assert "로그 그룹" in caught.value.message
+
+
+def test_no_provision_passes_when_everything_already_exists():
+    """[부정 통제] 다 갖춰 놨으면 통과해야 한다."""
+    moto = pytest.importorskip("moto")
+    request = make_request()
+    with moto.mock_aws():
+        clients = _no_provision_clients(
+            cluster=request.cluster,
+            service=request.service,
+            log_group=f"/ecs/{request.task_definition_family}",
+        )
+        target, record, _ = _run_no_provision(clients)
+
+    assert target.subnet_ids == ("subnet-1",)
+    assert "기존" in record.provisioned.get("log_group", "")
+    assert "기존" in record.provisioned.get("cluster", "")
+
+
+def test_a_permission_error_is_not_reported_as_a_missing_resource():
+    """[부정 통제] "없다"와 "볼 수 없다"는 대처법이 다르다."""
+    class _Denied:
+        @staticmethod
+        def describe_repositories(**_):
+            raise client_error("AccessDeniedException", "not authorized")
+
+    with pytest.raises(aws_infra.InfraError) as caught:
+        aws_infra.require_ecr_repository(_Denied(), "recoder-app")
+    assert "권한" in (caught.value.remedy or ""), (
+        "권한 문제인데 리포지토리를 만들라고 안내했다"
+    )
+
+
+def test_no_provision_does_not_create_the_ecr_repository():
+    """[회귀] provision 을 꺼도 리포지토리는 만들고 있었다.
+
+    "아무것도 만들지 않는다"는 약속이 반만 지켜진 상태였다.
+    """
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ecr = boto3.client("ecr", region_name="us-east-1")
+        with pytest.raises(aws_infra.InfraError) as caught:
+            aws_infra.require_ecr_repository(ecr, "recoder-app")
+        assert "recoder-app" in caught.value.message
+
+        ecr.create_repository(repositoryName="recoder-app")
+        uri = aws_infra.require_ecr_repository(ecr, "recoder-app")
+
+    assert uri.endswith("/recoder-app")
+
+
+def test_the_build_step_only_creates_a_repository_when_provisioning():
+    """[계약] 두 경로가 서로 다른 함수를 써야 한다."""
+    import inspect
+
+    source = inspect.getsource(ECSAgent._step_build_and_push)
+    assert "require_ecr_repository" in source, (
+        "provision=False 인데도 리포지토리를 만들고 있다"
+    )
+    assert "if req.provision:" in source
+
+
+def test_the_route_fallback_rejects_production_from_a_feature_branch():
+    """[회귀] 규칙 자체가 아니라 **라우트의 폴백 경로**를 관통해 확인한다.
+
+    규칙만 직접 부르면 라우트가 branch 를 안 넘겨도 통과한다 —
+    실제로 그 상태였다.
+    """
+    from core.api.routes import ecs as ecs_routes
+
+    blocked = ecs_routes._local_policy_fallback(
+        ECSDeployRecord(),
+        make_request(environment="production", branch="feat/x", generate_sbom=True),
+    )
+    assert blocked is not None
+    assert blocked.decision != "allow", (
+        "기능 브랜치에서 프로덕션 배포가 폴백을 통과했다"
+    )
+
+    allowed = ecs_routes._local_policy_fallback(
+        ECSDeployRecord(),
+        make_request(environment="production", branch="main", generate_sbom=True),
+    )
+    assert allowed is not None and allowed.decision == "allow", (
+        "main 에서의 프로덕션 배포까지 막았다"
+    )
+
+
+def test_require_ecr_repository_rejects_an_empty_listing():
+    """AWS 는 없는 리포지토리에 예외를 던지지만, 빈 목록으로 답하는
+    구현(모의 서버·프록시)도 있다. 그때 IndexError 로 터지면 안 된다."""
+    class _Empty:
+        @staticmethod
+        def describe_repositories(**_):
+            return {"repositories": []}
+
+    with pytest.raises(aws_infra.InfraError) as caught:
+        aws_infra.require_ecr_repository(_Empty(), "recoder-app")
+    assert "recoder-app" in caught.value.message
+
+
+def test_the_branch_is_derived_from_the_workspace_when_the_caller_omits_it(tmp_path):
+    """[회귀] 배관만 고치고 값을 만드는 곳을 안 고치면 규칙은 여전히 무력하다.
+
+    확장 배포 화면에는 브랜치 입력칸이 아예 없고 사이드바는 빈 문자열을
+    보낸다. 그래서 "프로덕션은 main 에서만" 규칙이 판단 재료를 못 받았다.
+    """
+    import subprocess
+
+    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
+
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True)
+    run("git", "init", "-q", "-b", "feat/xyz")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    run("git", "add", "-A")
+    run("git", "commit", "-qm", "init")
+
+    core_request = to_core_request(
+        ExtensionEcsDeployRequest(workspace_path=str(repo), environment="production")
+    )
+    assert core_request.branch == "feat/xyz", (
+        f"작업 폴더에서 브랜치를 못 알아냈다: {core_request.branch!r}"
+    )
+
+
+def test_an_explicit_branch_wins_over_the_workspace(tmp_path):
+    """[부정 통제] 호출자가 준 값이 우선이어야 한다."""
+    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
+
+    core_request = to_core_request(
+        ExtensionEcsDeployRequest(workspace_path=str(tmp_path), branch="main")
+    )
+    assert core_request.branch == "main"
+
+
+def test_a_non_git_workspace_does_not_break_the_request(tmp_path):
+    """git 저장소가 아니어도 배포는 되어야 한다."""
+    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
+
+    core_request = to_core_request(
+        ExtensionEcsDeployRequest(workspace_path=str(tmp_path))
+    )
+    assert core_request.branch == ""
+
+
+def test_the_sbom_generator_falls_back_to_docker_when_syft_is_missing():
+    """[회귀] `syft` 바이너리는 **어느 개발자 PC 에도 없다.**
+
+    SETUP.md 준비물은 Python·Node·Docker Desktop 뿐이고 CI 도 설치하지
+    않는다. 그 상태에서 SBOM 실패를 배포 실패로 올리면 **모든 배포가
+    막힌다.** 도커는 어차피 있어야 하므로 컨테이너로 돌린다.
+    """
+    import unittest.mock as mock
+    from pathlib import Path
+
+    from core.sbom import SBOMGenerator
+
+    with mock.patch("core.sbom.shutil.which", return_value="/usr/bin/syft"):
+        native = SBOMGenerator._syft_command("img:1", Path("/out/a.json"))
+    assert native[0] == "syft"
+
+    with mock.patch("core.sbom.shutil.which", return_value=None):
+        fallback = SBOMGenerator._syft_command("img:1", Path("/out/a.json"))
+    assert fallback[0] == "docker", "syft 가 없는데 대체 경로가 없다"
+    assert "anchore/syft" in " ".join(fallback)
+    assert "docker:img:1" in fallback, "로컬 도커 데몬의 이미지를 가리켜야 한다"
+    assert "/out:/out" in " ".join(fallback), "결과 파일을 호스트로 못 받는다"
+    assert "/var/run/docker.sock:/var/run/docker.sock" in fallback, (
+        "도커 소켓을 안 넘기면 컨테이너가 로컬 이미지를 못 읽는다"
+    )
+
+
+def test_the_sbom_failure_reason_reaches_the_record():
+    """[회귀] `_empty_record` 가 원인을 받아놓고 모델에 안 넣었다.
+
+    그래서 호출부는 항상 기본 문구만 보여줬고, 진짜 원인(타임아웃·권한
+    거부)은 사용자에게 닿지 않았다.
+    """
+    from core.sbom import SBOMGenerator
+
+    record = SBOMGenerator._empty_record("img:1", error="syft timeout (120s)")
+    assert record.error == "syft timeout (120s)", (
+        "실패 원인이 기록에서 사라졌다"
+    )
+
+
+def test_a_detached_head_is_not_treated_as_a_branch(tmp_path):
+    """[회귀] `git rev-parse --abbrev-ref HEAD` 는 분리된 HEAD 에서 "HEAD" 를 준다.
+
+    그걸 브랜치 이름으로 넘기면 "프로덕션은 main 에서만" 규칙이 존재하지
+    않는 브랜치를 근거로 판단한다.
+    """
+    import subprocess
+
+    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
+
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True)
+    run("git", "init", "-q", "-b", "main")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    run("git", "add", "-A")
+    run("git", "commit", "-qm", "init")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                          capture_output=True, text=True).stdout.strip()
+    run("git", "checkout", "-q", head)   # 분리된 HEAD
+
+    core_request = to_core_request(
+        ExtensionEcsDeployRequest(workspace_path=str(repo))
+    )
+    assert core_request.branch == "", (
+        f"분리된 HEAD 를 브랜치로 넘겼다: {core_request.branch!r}"
+    )
+
+
+def test_the_branch_lookup_cannot_hang_the_request(monkeypatch, tmp_path):
+    """git 이 멈추면 배포 요청 전체가 멈춘다 — 시간 제한이 있어야 한다.
+
+    `to_core_request` 는 HTTP 핸들러 안에서 동기로 돈다. 여기서 git 이
+    자격증명 프롬프트 같은 걸로 붙잡히면 요청이 영영 안 끝난다.
+    """
+    from core.api.routes import deploy_ecs as routes
+
+    seen: list[dict] = []
+    real = routes.subprocess.run
+
+    def _spy(*args, **kwargs):
+        seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(routes.subprocess, "run", _spy)
+    routes.to_core_request(
+        routes.ExtensionEcsDeployRequest(workspace_path=str(tmp_path))
+    )
+
+    assert seen, "git 을 아예 부르지 않았다"
+    assert seen[0].get("timeout"), "git 호출에 시간 제한이 없다"

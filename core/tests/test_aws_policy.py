@@ -1845,6 +1845,14 @@ def runtime_actions() -> set[str]:
             # 이유로 이 기록기를 만들었는데, 새로 추가한 함수를 안 부르면
             # 같은 구멍이 그대로 다시 생긴다.
             aws_infra.resolve_subnet_network(ec2, list(net.subnet_ids))
+            # provision=False 경로가 쓰는 확인 함수들. 여기서 안 부르면
+            # 그 경로의 AWS 호출은 권한표 증거에 한 줄도 남지 않는다.
+            aws_infra.require_cluster(ecs, "recoder-probe")
+            aws_infra.require_service(
+                ecs, cluster="recoder-probe", service="recoder-probe-svc"
+            )
+            aws_infra.require_log_group(logs, "/ecs/recoder-probe")
+            aws_infra.require_ecr_repository(ecr, "recoder-probe")
             # 실패한 배포를 멈추는 경로.
             aws_infra.halt_service(
                 ecs, cluster="recoder-probe", service="recoder-probe-svc"
