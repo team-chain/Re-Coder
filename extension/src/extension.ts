@@ -332,7 +332,10 @@ export function activate(context: vscode.ExtensionContext): void {
                             secretAccessKey: secret.trim(),
                             region: region.trim(),
                         });
-                        await coreManager.restart();
+                        // connectAws는 검증을 통과한 자격증명을 현재 Core 메모리에
+                        // 적용한다. 성공 알림만 띄우면 배포 진단은 연결 전 캐시를 계속
+                        // 보여줄 수 있으므로, 즉시 다시 실행해 AWS Deploy Ready를 갱신한다.
+                        sidebarProvider.triggerDiagnostics();
                         const acct = result.identity?.account ?? 'unknown';
                         vscode.window.showInformationMessage(
                             `AWS 연결 완료 (account ${acct}, region ${region.trim()})`,

@@ -763,9 +763,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         region: p.region?.trim() || 'ap-northeast-2',
                         sessionToken: p.sessionToken,
                     });
-                    // 새 Core는 SecretStorage에서 주입받는다. 이 재시작으로 현재
-                    // 세션도 재시작 후 상태와 동일한 자격증명을 사용한다.
-                    await this._coreManager.restart();
+                    // /api/aws/connect는 검증을 통과한 키를 현재 Core 메모리에만
+                    // 적용한다. 재시작은 다음 Core 시작 시 SecretStorage 주입으로
+                    // 처리하므로, 여기서 Core를 죽여 연결 직후 상태가 사라지지 않게 한다.
                     const connected = await this._apiClient.getAwsStatus();
                     this.postMessage('aws.configure.result', { ok: true, status: connected });
                     this.postMessage('aws.status', connected);
