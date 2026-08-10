@@ -331,6 +331,14 @@ export interface AwsIdentity {
   user_id: string;
 }
 
+export interface AwsPermissionCheck {
+  inspected: boolean;
+  required_actions: string[];
+  missing_actions: string[];
+  excessive_policies: string[];
+  warnings: string[];
+}
+
 export interface AwsStatus {
   ready: boolean;
   identity?: AwsIdentity | null;
@@ -340,6 +348,7 @@ export interface AwsStatus {
   /** "recoder" | "aws_credentials_file" | "env" | "" */
   storage: string;
   message: string;
+  permission_check?: AwsPermissionCheck | null;
 }
 
 export interface AwsConfigureInput {
