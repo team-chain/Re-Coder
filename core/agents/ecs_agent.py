@@ -511,6 +511,28 @@ class ECSAgent:
                     "직접 지정해야 합니다.",
                     remedy="배포 요청에 두 값을 넣거나 provision 을 켜세요.",
                 )
+            # 만들어 주지는 않지만 **있어야 하는 것은 있는지 확인한다.**
+            # 로그 그룹이 없으면 태스크가 기동 중에 죽는데, preflight 는
+            # 이걸 경고로만 남겨 통과시킨다. 배포를 시작한 뒤 죽는 것보다
+            # 여기서 세우는 편이 낫다.
+            # 만들어 주지는 않지만 **있어야 하는 것은 전부 확인한다.**
+            # 로그 그룹만 보던 때는 서비스 이름을 잘못 적어도 그냥 통과해서,
+            # 7단계에서 **새 서비스가 만들어지고 과금이 시작**됐다.
+            # "아무것도 만들지 않는다"는 약속이 가장 비싼 자리에서 깨졌다.
+            loop = asyncio.get_running_loop()
+
+            def _verify() -> None:
+                aws_infra.require_cluster(clients["ecs"], req.cluster)
+                aws_infra.require_service(
+                    clients["ecs"], cluster=req.cluster, service=req.service
+                )
+                aws_infra.require_log_group(
+                    clients["logs"], self.log_group_name(req)
+                )
+
+            await loop.run_in_executor(None, _verify)
+            rec.provisioned["cluster"] = f"{req.cluster} (기존)"
+            rec.provisioned["log_group"] = f"{self.log_group_name(req)} (기존)"
             return aws_infra.NetworkTarget(
                 vpc_id="", subnet_ids=tuple(req.subnet_ids), internet_routable=False
             )
@@ -606,8 +628,19 @@ class ECSAgent:
         loop = asyncio.get_running_loop()
 
         def _work() -> ecs_build.PushResult:
-            repository_uri = aws_infra.ensure_ecr_repository(clients["ecr"], repo_name)
-            rec.provisioned["ecr_repo"] = repo_name
+            # provision 을 끄면 **리포지토리도 만들지 않는다.** 예전에는
+            # 여기만 예외적으로 만들고 있어서 "아무것도 만들지 않는다"는
+            # 약속이 반만 지켜졌다.
+            if req.provision:
+                repository_uri = aws_infra.ensure_ecr_repository(
+                    clients["ecr"], repo_name
+                )
+                rec.provisioned["ecr_repo"] = repo_name
+            else:
+                repository_uri = aws_infra.require_ecr_repository(
+                    clients["ecr"], repo_name
+                )
+                rec.provisioned["ecr_repo"] = f"{repo_name} (기존)"
             return ecs_build.build_and_push(
                 clients["ecr"],
                 workspace_path=req.workspace_path or "",
@@ -740,8 +773,31 @@ class ECSAgent:
     async def _step_sbom(
         self, req: ECSDeployRequest, rec: ECSDeployRecord, image: str
     ) -> ECSDeployRecord:
+        """SBOM 을 만든다. **못 만들면 배포를 세운다.**
+
+        예전에는 syft 가 없거나 죽어도 빈 기록이 돌아왔고, 그런데도
+        `sbom_version` 을 찍고 배포를 계속했다. 그러면 두 가지가 동시에
+        거짓이 된다 — 기록에는 **존재하지 않는 SBOM 의 버전**이 남고,
+        정책 게이트는 `generate_sbom=True` 라는 **요청**만 보고 통과시킨
+        뒤 SBOM 없는 이미지가 배포된다. 프리셋 정책 1번이 "SBOM 없는
+        배포 차단"인데 그 규칙을 우리 손으로 우회한 셈이다.
+
+        사용자가 SBOM 을 원하지 않으면 `generate_sbom=False` 로 끄면 된다.
+        켜 놓고 조용히 실패하는 경우를 없앤다.
+        """
         sbom = await sbom_generator.generate(image)
+        rec.sbom = sbom
         rec.sbom_path = sbom.sbom_path
+
+        if not sbom.sbom_path:
+            raise InfraError(
+                "SBOM 을 만들지 못해 배포를 중단했습니다.",
+                detail=sbom.error or "syft 가 결과 파일을 남기지 않았습니다.",
+                remedy="syft 를 설치하거나(https://github.com/anchore/syft), "
+                       "SBOM 이 필요 없다면 배포 요청에서 generate_sbom 을 "
+                       "꺼 주세요. 정책상 SBOM 없는 배포는 차단됩니다.",
+            )
+
         rec.sbom_version = f"v{datetime.now(timezone.utc).strftime('%Y%m%d')}"
         return rec
 

@@ -221,14 +221,7 @@ async def start_deployment(
         opa_result = await opa_client.evaluate(
             action="ecs_deploy",
             level=request.approval_level,
-            context={
-                "project_id": request.project_id,
-                "image": request.image,
-                "cluster": request.cluster,
-                "region": request.region,
-                "run_security_scan": request.run_security_scan,
-                "generate_sbom": request.generate_sbom,
-            },
+            context=_policy_context(request),
             resource_type="ecs_service",
             resource_id=f"{request.cluster}/{request.service}",
         )
@@ -325,6 +318,27 @@ async def start_deployment(
     return record
 
 
+def _policy_context(request: ECSDeployRequest) -> dict:
+    """정책 평가가 보는 사실들. **OPA 와 로컬 폴백이 같은 함수를 쓴다.**
+
+    갈라 놓으면 한쪽만 값을 받는다. 실제로 그랬다 — OPA 컨텍스트에도
+    폴백에도 `branch` 가 없어서, "프로덕션은 main 브랜치에서만" 규칙이
+    **어느 경로로도 아무것도 막지 못했다.** 규칙은 있는데 판단 재료가
+    없으면 그 규칙은 없는 것과 같다.
+    """
+    return {
+        "project_id": request.project_id,
+        "image": request.image,
+        "cluster": request.cluster,
+        "service": request.service,
+        "region": request.region,
+        "run_security_scan": request.run_security_scan,
+        "generate_sbom": request.generate_sbom,
+        "environment": request.environment or "",
+        "branch": request.branch or "",
+    }
+
+
 def _local_policy_fallback(record: ECSDeployRecord, request: ECSDeployRequest):
     """OPA 서버가 없을 때 쓰는 로컬 내장 게이트.
 
@@ -347,13 +361,18 @@ def _local_policy_fallback(record: ECSDeployRecord, request: ECSDeployRequest):
         return None
 
     try:
+        context = _policy_context(request)
         result = OPAGate()._local_deploy_gate({
+            # SBOM·스캔 결과는 **이 시점에 아직 없다.** 여기서 넘기는 값은
+            # "그렇게 하겠다는 요청"이고, 실제 결과는 파이프라인 안의 게이트가
+            # 강제한다 (`_step_sbom` 이 SBOM 생성 실패를 배포 실패로 올리고,
+            # `_scan_gate_message` 가 스캔 위반을 막는다).
             "sbom": {"present": bool(request.generate_sbom)},
             "trivy": {"critical_count": 0, "high_count": 0},
             "gitleaks": {"passed": True},
             "hadolint": {"passed": True},
-            "environment": request.env_vars.get("ENVIRONMENT", ""),
-            "branch": "",
+            "environment": context["environment"],
+            "branch": context["branch"],
         })
     except Exception as exc:  # noqa: BLE001
         logger.warning("로컬 정책 폴백 평가 실패: %s", exc)

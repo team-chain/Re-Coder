@@ -1431,6 +1431,14 @@ class ECSDeployRequest(BaseModel):
     security_group_ids:      list[str] = Field(default_factory=list)
 
     # 파이프라인 옵션
+    #: 어느 브랜치에서 배포하는가. **정책 평가에만 쓴다.**
+    #: 프리셋 규칙 중 "프로덕션은 main 에서만"이 이 값을 본다. 비어 있으면
+    #: 그 규칙이 **아무것도 막지 못한다** — 값을 안 넘기면 규칙이 있으나
+    #: 마나가 된다.
+    branch:                  str = ""
+    #: 배포 대상 환경(staging / production 등). 위 규칙의 다른 한 축이다.
+    environment:             str = ""
+
     run_preflight:           bool = True
     run_security_scan:       bool = True
     generate_sbom:           bool = True

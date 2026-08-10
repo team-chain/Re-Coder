@@ -277,6 +277,133 @@ def ecr_lifecycle_policy(keep_last: int) -> dict:
     }
 
 
+def require_cluster(ecs: Any, name: str) -> None:
+    """클러스터가 이미 있어야 한다. `provision=False` 전용."""
+    try:
+        found = ecs.describe_clusters(clusters=[name]).get("clusters", [])
+    except Exception as exc:  # noqa: BLE001
+        if _is_missing(exc):
+            found = []
+        else:
+            raise InfraError(
+                f"클러스터 '{name}' 을 확인하지 못했습니다.",
+                detail=error_message(exc),
+                remedy="권한표의 ecs:DescribeClusters 를 확인하세요.",
+            ) from exc
+    if not any(c.get("status") == "ACTIVE" for c in found):
+        raise InfraError(
+            f"ECS 클러스터 '{name}' 이 없습니다.",
+            remedy=f"provision 을 끄면 클러스터를 만들어 주지 않습니다. "
+                   f"`aws ecs create-cluster --cluster-name {name}` 로 미리 "
+                   f"만들거나 provision 을 켜세요.",
+        )
+
+
+def require_service(ecs: Any, *, cluster: str, service: str) -> None:
+    """서비스가 이미 있어야 한다. `provision=False` 전용.
+
+    **여기가 돈이 걸린 자리다.** 로그 그룹·리포지토리는 없어도 공짜지만,
+    서비스는 만들어지는 순간 Fargate 태스크가 뜨고 과금이 시작된다.
+    이름을 하나 잘못 적으면 사용자의 관리 도구에는 보이지 않는 서비스가
+    조용히 생겨 계속 요금을 문다.
+    """
+    try:
+        found = ecs.describe_services(cluster=cluster, services=[service]).get(
+            "services", []
+        )
+    except Exception as exc:  # noqa: BLE001
+        if _is_missing(exc):
+            found = []
+        else:
+            raise InfraError(
+                f"서비스 '{service}' 를 확인하지 못했습니다.",
+                detail=error_message(exc),
+                remedy="권한표의 ecs:DescribeServices 를 확인하세요.",
+            ) from exc
+    if not any(s.get("status") == "ACTIVE" for s in found):
+        raise InfraError(
+            f"ECS 서비스 '{service}' 가 클러스터 '{cluster}' 에 없습니다.",
+            remedy="provision 을 끄면 서비스를 만들어 주지 않습니다. 이름이 "
+                   "맞는지 확인하거나 provision 을 켜세요. 이름을 잘못 적은 "
+                   "채로 만들면 관리 도구에 안 보이는 서비스가 생겨 요금만 "
+                   "나갑니다.",
+        )
+
+
+#: "그 리소스가 아직 없다"는 뜻의 AWS 오류 코드.
+_MISSING_CODES = frozenset({
+    "ClusterNotFoundException", "ServiceNotFoundException",
+    "ServiceNotActiveException", "RepositoryNotFoundException",
+    "ResourceNotFoundException",
+})
+
+
+def _is_missing(exc: Exception) -> bool:
+    return error_code(exc) in _MISSING_CODES
+
+
+def require_log_group(logs: Any, name: str) -> None:
+    """로그 그룹이 이미 있어야 한다. 없으면 **여기서** 막는다.
+
+    `provision=False` 는 "아무것도 만들지 않는다"는 뜻이라 우리가 만들어
+    줄 수 없다. 그런데 태스크 정의는 awslogs 드라이버를 쓰고, 로그 그룹이
+    없으면 컨테이너가 기동 중에 죽는다(실행 역할에는 `logs:CreateLogGroup`
+    이 없다). preflight 는 이걸 **경고**로만 남기므로 통과해 버린다.
+
+    그 결과가 최악이다 — 배포는 시작되고, 태스크는 뜨자마자 죽고,
+    안내는 "CloudWatch 로그를 확인하세요"인데 **정작 로깅이 실패 원인이라
+    로그가 비어 있다.** 배포 전에 세우는 편이 훨씬 친절하다.
+    """
+    try:
+        found = logs.describe_log_groups(logGroupNamePrefix=name).get("logGroups", [])
+    except Exception as exc:  # noqa: BLE001
+        raise InfraError(
+            f"로그 그룹 '{name}' 을 확인하지 못했습니다.",
+            detail=error_message(exc),
+            remedy="권한표의 logs:DescribeLogGroups 를 확인하세요.",
+        ) from exc
+
+    if not any(str(g.get("logGroupName")) == name for g in found):
+        raise InfraError(
+            f"로그 그룹 '{name}' 이 없습니다.",
+            remedy=f"provision 을 끄면 로그 그룹을 만들어 주지 않습니다. "
+                   f"`aws logs create-log-group --log-group-name {name}` 로 "
+                   f"미리 만들거나 provision 을 켜세요. 이게 없으면 컨테이너가 "
+                   f"기동 중에 죽고, 로그도 안 남아 원인을 찾기 어렵습니다.",
+        )
+
+
+def require_ecr_repository(ecr: Any, name: str) -> str:
+    """ECR 리포지토리가 이미 있어야 한다. 리포지토리 URI 를 돌려준다.
+
+    `provision=False` 인데도 리포지토리를 **만들고 있었다.** "아무것도
+    만들지 않는다"는 약속과 어긋난다.
+    """
+    try:
+        repos = ecr.describe_repositories(repositoryNames=[name]).get(
+            "repositories", []
+        )
+    except Exception as exc:  # noqa: BLE001
+        # **"없다"와 "볼 수 없다"를 구분한다.** 예전에는 둘 다 같은 문구에
+        # 같은 대처법("리포지토리를 만드세요")을 냈다. 권한 문제인 사람이
+        # 이미 있는 리포지토리를 또 만들러 가게 된다.
+        if not _is_missing(exc):
+            raise InfraError(
+                f"ECR 리포지토리 '{name}' 을 조회하지 못했습니다.",
+                detail=error_message(exc),
+                remedy="권한표의 ecr:DescribeRepositories 를 확인하세요. "
+                       "자격증명이 만료됐을 수도 있습니다.",
+            ) from exc
+        repos = []
+    if not repos:
+        raise InfraError(
+            f"ECR 리포지토리 '{name}' 이 없습니다.",
+            remedy=f"`aws ecr create-repository --repository-name {name}` 로 "
+                   f"미리 만들거나 provision 을 켜세요.",
+        )
+    return str(repos[0]["repositoryUri"])
+
+
 def ensure_ecr_repository(
     ecr: Any,
     name: str,
