@@ -550,7 +550,7 @@ const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
 
   return (
     <div style={{ height: "100vh", display: "grid", gridTemplateColumns: "minmax(0, 1.65fr) minmax(330px, .85fr)", overflow: "hidden", background: "var(--vscode-editor-background, #1e1e1e)", color: "var(--vscode-foreground, #e0e0e0)" }}>
-      <section style={{ minWidth: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--vscode-panel-border, #333)" }}>
+      <section style={{ minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--vscode-panel-border, #333)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 18px", borderBottom: "1px solid var(--vscode-panel-border, #333)", background: "var(--vscode-sideBar-background, #181818)" }}>
           <Icon.Logo size={22} />
           <strong style={{ fontSize: 16 }}>ReCoder</strong>
@@ -563,7 +563,7 @@ const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         <StatusBadge diagnostics={diagnostics} coreStatus={coreStatus} expanded={showDiagnostics} onToggle={onToggleDiagnostics} />
         {showDiagnostics && <div style={{ borderBottom: "1px solid var(--vscode-panel-border, #333)", maxHeight: 220, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /></div>}
 
-        <div style={{ flex: 1, overflowY: "auto", padding: view === "home" ? "0 14px 16px" : "14px 18px 18px" }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: view === "home" ? "0 14px 16px" : "14px 18px 18px" }}>
           {view === "home" && <Home isAiReady={isAiReady} isDockerReady={isDockerReady} isOpsReady={isOpsReady} onSelectMode={onSelectMode} postMessage={postMessage} awsReady={diagnostics?.aws_deploy_ready === "ready"} githubReady={(diagnostics as unknown as { github_ready?: string })?.github_ready === "ready"} showMap={false} />}
           {view === "build" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><BuildMode isActive={isAiReady} showCodeAgent={false} /></>}
           {view === "ship" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><ShipMode isAiReady={isAiReady} isDockerReady={isDockerReady} /></>}
