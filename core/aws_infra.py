@@ -486,11 +486,39 @@ class NetworkTarget:
             raise ValueError("subnet_ids 는 비어 있을 수 없다")
 
 
+#: 인터넷으로 나가는 기본 경로의 목적지.
+_DEFAULT_ROUTES = frozenset({"0.0.0.0/0", "::/0"})
+
+
 def _route_table_has_igw(route_table: dict) -> bool:
-    """이 라우트 테이블이 인터넷 게이트웨이로 나가는가."""
+    """이 라우트 테이블이 인터넷 게이트웨이로 **실제로** 나가는가.
+
+    `igw-` 로 시작하는 게이트웨이가 보이기만 하면 참으로 치던 때가 있었다.
+    그러면 두 가지가 통과한다.
+
+      · **좁은 경로** — 예: `52.94.0.0/16 → igw-...` 는 그 대역만 나간다.
+        ECR·인터넷 전반으로는 못 나가는데 "공인 서브넷"으로 분류된다.
+      · **blackhole** — 게이트웨이가 떨어져 나가 `state=blackhole` 이 된
+        경로. 남아 있지만 아무 데도 안 간다.
+
+    둘 다 결과가 같다: Fargate 태스크가 그 서브넷에 배치되고, ECR 에서
+    이미지를 못 받아 `CannotPullContainerError` 로 죽는다. 이 검사가
+    막으려던 바로 그 증상이다. 목적지와 상태까지 본다.
+    """
     for route in route_table.get("Routes", []):
         gateway = str(route.get("GatewayId") or "")
-        if gateway.startswith("igw-"):
+        if not gateway.startswith("igw-"):
+            continue
+        destination = str(
+            route.get("DestinationCidrBlock")
+            or route.get("DestinationIpv6CidrBlock")
+            or ""
+        )
+        if destination not in _DEFAULT_ROUTES:
+            continue
+        # state 를 안 주는 구현(moto 등)은 활성으로 본다. 있으면 지킨다.
+        state = str(route.get("State") or "active")
+        if state == "active":
             return True
     return False
 

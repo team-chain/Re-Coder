@@ -392,7 +392,16 @@ class FakePollEcs:
         frame = self._frames[min(self.calls - 1, len(self._frames) - 1)]
         if isinstance(frame, Exception):
             raise frame
-        return {"services": [{"deployments": [dict(frame, status="PRIMARY")]}]}
+        # 서비스 단위 runningCount 는 PRIMARY 배포의 것과 **다를 수 있다.**
+        # 갱신 실패 중이면 PRIMARY 는 0 인데 이전 ACTIVE 배포의 태스크가
+        # 살아 있다. 그 차이를 표현할 수 있어야 한다.
+        service_running = frame.get(
+            "serviceRunningCount", frame.get("runningCount", 0)
+        )
+        return {"services": [{
+            "runningCount": service_running,
+            "deployments": [dict(frame, status="PRIMARY")],
+        }]}
 
 
 @pytest.fixture(autouse=True)
@@ -1415,6 +1424,7 @@ def test_a_failed_deploy_with_nothing_running_is_scaled_to_zero():
     record = ECSDeployRecord()
     record.circuit_breaker_triggered = True
     record.running_task_count = 0
+    record.service_created_by_this_run = True
 
     _halt(record, ecs)
 
@@ -1466,6 +1476,7 @@ def test_the_halt_decision_does_not_rely_on_the_previous_revision():
     record.circuit_breaker_triggered = True
     record.previous_task_definition_arn = "arn:aws:ecs:us-east-1:1:task-definition/app:7"
     record.running_task_count = 0   # 그 리비전은 지금 떠 있지 않다
+    record.service_created_by_this_run = True
 
     _halt(record, ecs)
 
@@ -1793,13 +1804,71 @@ def test_a_deployment_ecs_itself_failed_counts_as_a_breaker_trip(monkeypatch):
     assert breaker is True
 
 
-def test_the_last_running_count_is_recorded_for_the_halt_decision(monkeypatch):
+def test_the_halt_decision_uses_the_service_wide_running_count(monkeypatch):
+    """[회귀] PRIMARY 의 runningCount 는 **새 리비전만** 센다.
+
+    멀쩡히 돌던 서비스를 갱신하다 실패하면 PRIMARY 는 0 인데 이전 ACTIVE
+    배포의 태스크는 전부 살아 있다. 그걸 "떠 있는 게 없다"로 읽으면 중지
+    로직이 **멀쩡한 이전 버전을 통째로 내린다.**
+    """
     frames = [
-        {"runningCount": 2, "desiredCount": 3, "failedTasks": 0,
-         "rolloutState": "IN_PROGRESS", "taskDefinition": OUR_ARN},
+        {"runningCount": 0, "serviceRunningCount": 2, "desiredCount": 1,
+         "failedTasks": 0, "rolloutState": "IN_PROGRESS",
+         "taskDefinition": OUR_ARN},
     ]
     _result, record = _poll(frames, monkeypatch)
-    assert record.running_task_count == 2
+    assert record.running_task_count == 2, (
+        "PRIMARY 만 보고 있다 — 이전 버전의 살아 있는 태스크를 못 본다"
+    )
+
+
+def test_a_rolling_update_failure_never_takes_down_the_old_revision():
+    """[회귀·P1] 갱신 실패로 새 리비전이 0 이어도 이전 버전은 건드리면 안 된다."""
+    ecs = RecordingEcs()
+    record = ECSDeployRecord()
+    record.circuit_breaker_triggered = True
+    record.running_task_count = 2          # 이전 버전이 아직 서비스 중
+    record.service_created_by_this_run = False
+
+    _halt(record, ecs)
+
+    assert ecs.updated == [], (
+        "갱신 실패인데 서비스 전체를 0 으로 내렸다 — 사용자가 요청하지 "
+        "않은 장애다"
+    )
+
+
+def test_a_pre_existing_service_is_never_halted_even_with_nothing_running():
+    """[부정 통제] 우리가 만들지 않은 서비스는 판단 대상이 아니다.
+
+    떠 있는 게 없더라도 그건 사용자 쪽 사정일 수 있다.
+    """
+    ecs = RecordingEcs()
+    record = ECSDeployRecord()
+    record.circuit_breaker_triggered = True
+    record.running_task_count = 0
+    record.service_created_by_this_run = False
+
+    _halt(record, ecs)
+
+    assert ecs.updated == [], "원래 있던 서비스를 우리 판단으로 내렸다"
+    assert "cost_warning" in record.provisioned
+
+
+def test_cancellation_is_rechecked_after_the_url_step():
+    """[회귀·P2] URL 확인은 최대 300초를 기다린다.
+
+    그 사이 취소를 눌렀는데 다시 안 보면, 취소한 배포가 SUCCEEDED 로
+    기록되고 새로 만든 서비스의 뒷정리도 건너뛴다.
+    """
+    import inspect
+
+    source = inspect.getsource(ECSAgent._deploy_pipeline)
+    after_url = source.split("_step_resolve_url(request, record, clients)", 1)[1]
+    before_success = after_url.split("ECSDeployStatus.SUCCEEDED", 1)[0]
+    assert "_abort_if_cancelled" in before_success, (
+        "URL 확인 뒤 취소 확인 없이 곧바로 성공으로 표시한다"
+    )
 
 
 def test_a_missing_service_says_so_instead_of_crashing(monkeypatch):
@@ -3444,3 +3513,53 @@ def test_the_sbom_mount_path_survives_windows():
     out_mount = next(m for m in mounts if m.endswith(":/out"))
     assert out_mount == "C:/Users/dy981/.recoder/sbom:/out", out_mount
     assert "\\" not in out_mount, "역슬래시가 남아 도커가 경로를 못 읽는다"
+
+
+# ===========================================================================
+# 인터넷 경로 판정 — Codex 5차 P2
+#
+# `igw-` 로 시작하는 게이트웨이가 **보이기만 하면** 공인 서브넷으로 쳤다.
+# 좁은 경로나 blackhole 도 통과한다. 그러면 Fargate 태스크가 그 서브넷에
+# 배치되고 ECR 에서 이미지를 못 받아 죽는다 — 이 검사가 막으려던 증상이다.
+# ===========================================================================
+
+
+def _routes(*routes):
+    return {"Associations": [{"Main": True}], "Routes": list(routes)}
+
+
+def test_a_narrow_igw_route_is_not_an_internet_path():
+    """[회귀] 특정 대역만 가는 경로는 인터넷 전반으로 못 나간다."""
+    table = _routes(
+        {"DestinationCidrBlock": "10.0.0.0/16", "GatewayId": "local"},
+        {"DestinationCidrBlock": "52.94.0.0/16", "GatewayId": "igw-123"},
+    )
+    assert aws_infra._route_table_has_igw(table) is False, (
+        "좁은 경로를 인터넷 경로로 오판했다"
+    )
+
+
+def test_a_blackholed_igw_route_is_not_an_internet_path():
+    """[회귀] 게이트웨이가 떨어져 나간 경로는 남아 있어도 아무 데도 안 간다."""
+    table = _routes(
+        {"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-123",
+         "State": "blackhole"},
+    )
+    assert aws_infra._route_table_has_igw(table) is False
+
+
+def test_a_real_default_route_is_accepted():
+    """[부정 통제] 진짜 기본 경로는 통과해야 한다."""
+    assert aws_infra._route_table_has_igw(_routes(
+        {"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-123",
+         "State": "active"},
+    )) is True
+    # IPv6 기본 경로도 인정한다.
+    assert aws_infra._route_table_has_igw(_routes(
+        {"DestinationIpv6CidrBlock": "::/0", "GatewayId": "igw-123"},
+    )) is True
+    # State 를 안 주는 구현(moto)은 활성으로 본다 — 여기서 막으면
+    # 멀쩡한 테스트 환경과 일부 실계정 응답이 전부 막힌다.
+    assert aws_infra._route_table_has_igw(_routes(
+        {"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-123"},
+    )) is True

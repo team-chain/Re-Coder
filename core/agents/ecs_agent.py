@@ -410,6 +410,11 @@ class ECSAgent:
             # 10. 공개 주소 확인 — 카드 DoD 1번 "URL 로 접속됨"
             await self._step_resolve_url(request, record, clients)
 
+            # URL 확인은 최대 300초를 기다린다. 그 사이 취소를 눌렀다면
+            # 여기서 다시 봐야 한다 — 안 보면 취소한 배포가 SUCCEEDED 로
+            # 기록되고, 새로 만든 서비스의 뒷정리도 건너뛴다.
+            self._abort_if_cancelled(record, "공개 주소 확인")
+
             record.status = ECSDeployStatus.SUCCEEDED
             record.completed_at = datetime.now(timezone.utc)
             logger.info(
@@ -1117,7 +1122,13 @@ class ECSAgent:
             desired = primary.get("desiredCount", 0)
             failed_tasks = primary.get("failedTasks", 0)
             rollout_state = primary.get("rolloutState", "")
-            rec.running_task_count = int(running or 0)
+            # **서비스 전체**의 실행 태스크 수를 본다. PRIMARY 배포의
+            # runningCount 는 **새 리비전만** 센다. 멀쩡히 돌던 서비스를
+            # 새 리비전으로 갱신하다 실패하면 PRIMARY 는 0 인데 이전
+            # ACTIVE 배포의 태스크는 전부 살아 있다. 그 상태에서 "떠 있는
+            # 게 없다"고 판단하면 아래 중지 로직이 **멀쩡한 이전 버전을
+            # 통째로 내린다** — 사용자가 요청하지도 않은 장애가 된다.
+            rec.running_task_count = int(svc.get("runningCount") or 0)
 
             # ECS 서킷 브레이커가 우리 리비전을 버리고 이전 리비전을 다시
             # PRIMARY 로 올렸을 수 있다. 그러면 서비스는 **정상 동작하지만
@@ -1240,9 +1251,16 @@ class ECSAgent:
             # 멀쩡히 굴러가는 이전 버전을 우리 손으로 끄는 꼴이 된다.
             return
 
-        if rec.running_task_count > 0:
-            # 뭔가는 떠 있다. 느리게 기동하는 정상 앱일 수 있으므로
-            # 자동으로 끄지 않고, 끄는 방법을 알려준다.
+        if rec.running_task_count > 0 or not rec.service_created_by_this_run:
+            # 두 가지 중 하나라도 참이면 손대지 않는다.
+            #
+            #  · 떠 있는 태스크가 있다 — 느리게 기동하는 정상 앱이거나,
+            #    갱신 실패 후에도 살아 있는 **이전 버전**이다.
+            #  · 이 서비스는 우리가 만든 게 아니다 — 원래 돌던 사용자의
+            #    서비스를 우리 판단으로 내리면 요청하지 않은 장애다.
+            #
+            # 자동 중지는 "이번 실행이 새로 만들었고, 아무것도 못 뜬"
+            # 경우에만 한다. 그때는 내려도 잃을 게 없다.
             rec.provisioned["cost_warning"] = (
                 f"태스크 {rec.running_task_count}개가 아직 실행 중입니다 — "
                 "요금이 계속 발생합니다. 사이드바의 배포 중지"
