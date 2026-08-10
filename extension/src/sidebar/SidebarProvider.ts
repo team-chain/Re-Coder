@@ -536,6 +536,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'workspace.deploy.remediation.apply': {
+                const proposalId = (payload as { proposalId?: string } | undefined)?.proposalId;
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                if (!proposalId) {
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', {
+                        message: '적용할 수정안 정보가 없습니다. 다시 검사해 주세요.',
+                    });
+                    break;
+                }
+                try {
+                    const result = await this._apiClient.applyDeployRemediation(proposalId, workspacePath);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationResult', result);
+                } catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', { message });
+                }
+                break;
+            }
             case 'workspace.deploy.chooseTarget': {
                 const p = (payload ?? {}) as {
                     target?: 'ecs' | 's3' | 'local';
