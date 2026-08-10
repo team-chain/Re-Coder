@@ -8,6 +8,13 @@ type AwsStatus = {
   region?: string;
   access_key_last4?: string;
   message?: string;
+  permission_check?: {
+    inspected: boolean;
+    required_actions: string[];
+    missing_actions: string[];
+    excessive_policies: string[];
+    warnings: string[];
+  } | null;
 };
 
 const input: React.CSSProperties = {
@@ -47,6 +54,12 @@ export const AwsConnection: React.FC = () => {
       if (result.ok) { setStatus({ ready: false, message: "AWS 연결이 해제되었습니다." }); setError(""); }
       else { setError(result.message ?? "AWS 연결 해제에 실패했습니다."); }
     }
+    if (type === "aws.permissions.result") {
+      const result = payload as { ok: boolean; status?: AwsStatus; message?: string };
+      setBusy(false);
+      if (result.ok) { setStatus(result.status ?? null); setError(""); }
+      else { setError(result.message ?? "AWS 권한을 점검하지 못했습니다."); }
+    }
   }, []));
 
   const connect = () => {
@@ -71,14 +84,28 @@ export const AwsConnection: React.FC = () => {
   };
 
   if (status?.ready) {
+    const permission = status.permission_check;
     return <div style={card}>
       <div style={{ color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 15, fontWeight: 700 }}>✓ AWS 연결됨</div>
       <div style={{ marginTop: 9, fontSize: 12, lineHeight: 1.6 }}>
         <div>계정: <b>{status.identity?.account ?? "확인됨"}</b></div>
         <div>리전: <b>{status.region || "ap-northeast-2"}</b>{status.access_key_last4 ? ` · 키 끝 ${status.access_key_last4}` : ""}</div>
       </div>
+      {permission && (permission.missing_actions.length > 0 || permission.excessive_policies.length > 0 || permission.warnings.length > 0) && (
+        <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 5, background: "rgba(245, 180, 0, .12)", border: "1px solid rgba(245, 180, 0, .35)", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.55 }}>
+          {permission.excessive_policies.length > 0 && <div><b>⚠️ 이 키는 너무 강력합니다:</b> {permission.excessive_policies.join(", ")}. 배포 전용 최소권한 키를 권장합니다.</div>}
+          {permission.missing_actions.length > 0 && <div style={{ marginTop: permission.excessive_policies.length ? 5 : 0 }}><b>배포 전 확인할 권한:</b> {permission.missing_actions.join(", ")}</div>}
+          {permission.warnings.map((warning) => <div key={warning} style={{ marginTop: (permission.excessive_policies.length || permission.missing_actions.length) ? 5 : 0 }}>{warning}</div>)}
+        </div>
+      )}
+      {permission?.inspected && permission.missing_actions.length === 0 && permission.excessive_policies.length === 0 && (
+        <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 5, background: "rgba(78, 201, 176, .10)", border: "1px solid rgba(78, 201, 176, .32)", color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 11 }}>✓ 권한 점검 완료: 기본 ECS 배포 권한이 확인되었습니다.</div>
+      )}
       <div style={{ marginTop: 11, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 }}>키는 VS Code의 OS 보안 금고에 암호화되어 저장되며 프로젝트 파일에는 기록되지 않습니다.</div>
-      <button disabled={busy} onClick={() => { setBusy(true); setError(""); postMessage("aws.clear"); }} style={{ ...button, marginTop: 13, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>연결 해제</button>
+      <div style={{ display: "flex", gap: 8, marginTop: 13 }}>
+        <button disabled={busy} onClick={() => { setBusy(true); setError(""); postMessage("aws.permissions.check"); }} style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>{busy ? "권한 점검 중…" : "권한 다시 점검"}</button>
+        <button disabled={busy} onClick={() => { setBusy(true); setError(""); postMessage("aws.clear"); }} style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>연결 해제</button>
+      </div>
       {error && <div style={{ marginTop: 10, color: "var(--vscode-errorForeground, #f48771)", fontSize: 12 }}>{error}</div>}
     </div>;
   }

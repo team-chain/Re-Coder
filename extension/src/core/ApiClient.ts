@@ -679,6 +679,15 @@ export class ApiClient {
         };
     }
 
+    /** POST /api/aws/permissions/check — 현재 키를 다시 입력하지 않고 권한만 점검. */
+    async checkAwsPermissions(): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/permissions/check');
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 권한 점검 실패');
+        }
+        return resp.data;
+    }
+
     /**
      * POST /api/aws/configure — 자격증명 저장 + 즉시 STS 검증.
      * Core 가 검증을 통과해야만 디스크에 저장되고, diagnostics 캐시를 갱신한다.
