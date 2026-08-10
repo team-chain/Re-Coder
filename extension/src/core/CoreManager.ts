@@ -99,11 +99,11 @@ export class CoreManager {
     }
 
     private async _ensureRunning(): Promise<CoreClient> {
-        // 1) 정상 경로 — runtime.json + healthCheck.
-        const runtime = await this.readRuntime();
-        if (runtime) {
-            this.port = runtime.port;
-            this.sessionToken = runtime.session_token;
+        // ReCoder 저장소를 직접 열어 개발 중인 경우에는, 이전 VSIX가 남겨 둔
+        // 번들 Core를 재사용하지 않는다. 그 프로세스는 최신 API/진단 로직을
+        // 포함하지 않을 수 있으므로 현재 workspace의 Python Core를 새로 시작한다.
+        const workspaceCore = this._findWorkspaceCore();
+        if (workspaceCore && this.coreProcess && !this.coreProcess.killed) {
             const health = await this.healthCheck();
             if (health && health.status !== 'down') {
                 this._client = new CoreClient(this.port, this.sessionToken);
@@ -111,28 +111,42 @@ export class CoreManager {
             }
         }
 
-        // 2) runtime.json 이 없거나 health 가 실패하더라도, 사용자가 `python core/main.py`
-        //    같은 방식으로 수동 실행 중일 수 있다. 기본 포트 범위 (17894~17910) 에서
-        //    /api/health (인증 불요) 가 응답하는지 직접 확인하고, 있다면 runtime.json
-        //    이 곧 쓰여질 때까지 잠시 대기하여 토큰을 회수한다.
-        const detected = await this.probeRunningCore();
-        if (detected) {
-            this.port = detected.port;
-            // runtime.json 이 잠시 늦게 쓰여질 수 있으므로 최대 3초 polling.
-            const deadline = Date.now() + 3000;
-            while (Date.now() < deadline) {
-                const rt = await this.readRuntime();
-                if (rt && rt.port === this.port && rt.session_token) {
-                    this.sessionToken = rt.session_token;
+        // 1) 정상 경로 — runtime.json + healthCheck.
+        if (!workspaceCore) {
+            const runtime = await this.readRuntime();
+            if (runtime) {
+                this.port = runtime.port;
+                this.sessionToken = runtime.session_token;
+                const health = await this.healthCheck();
+                if (health && health.status !== 'down') {
                     this._client = new CoreClient(this.port, this.sessionToken);
                     return this._client;
                 }
-                await this.sleep(200);
             }
-            // 토큰을 못 받아도 일단 connect 는 가능 — 인증 필요 호출이 401/503 일 뿐.
-            // 호출 측에서 refreshToken 으로 재시도.
-            this._client = new CoreClient(this.port, this.sessionToken);
-            return this._client;
+
+            // 2) runtime.json 이 없거나 health 가 실패하더라도, 사용자가 `python core/main.py`
+            //    같은 방식으로 수동 실행 중일 수 있다. 기본 포트 범위 (17894~17910) 에서
+            //    /api/health (인증 불요) 가 응답하는지 직접 확인하고, 있다면 runtime.json
+            //    이 곧 쓰여질 때까지 잠시 대기하여 토큰을 회수한다.
+            const detected = await this.probeRunningCore();
+            if (detected) {
+                this.port = detected.port;
+                // runtime.json 이 잠시 늦게 쓰여질 수 있으므로 최대 3초 polling.
+                const deadline = Date.now() + 3000;
+                while (Date.now() < deadline) {
+                    const rt = await this.readRuntime();
+                    if (rt && rt.port === this.port && rt.session_token) {
+                        this.sessionToken = rt.session_token;
+                        this._client = new CoreClient(this.port, this.sessionToken);
+                        return this._client;
+                    }
+                    await this.sleep(200);
+                }
+                // 토큰을 못 받아도 일단 connect 는 가능 — 인증 필요 호출이 401/503 일 뿐.
+                // 호출 측에서 refreshToken 으로 재시도.
+                this._client = new CoreClient(this.port, this.sessionToken);
+                return this._client;
+            }
         }
 
         if (this.isSpawning) {
@@ -480,10 +494,11 @@ export class CoreManager {
 
     /**
      * Core 실행 명령을 결정한다.
-     *   1) VSIX 번들 바이너리 (`extension/bin/recoder-core[.exe]`)
-     *   2) PATH 상의 `recoder-core`
-     *   3) `~/.recoder/bin/recoder-core[.exe]`
-     *   4) 개발 모드: `extension/../core/main.py` 를 python 으로 실행
+     *   1) ReCoder 소스 저장소를 연 개발 모드: workspace/core/main.py
+     *   2) VSIX 번들 바이너리 (`extension/bin/recoder-core[.exe]`)
+     *   3) PATH 상의 `recoder-core`
+     *   4) `~/.recoder/bin/recoder-core[.exe]`
+     *   5) 개발 모드: `extension/../core/main.py` 를 python 으로 실행
      *
      * 반환값은 spawn(command, args) 에 그대로 넘길 수 있는 형태.
      * 못 찾으면 null 반환.
@@ -493,7 +508,24 @@ export class CoreManager {
         const binaryName = platform === 'win32' ? 'recoder-core.exe' : 'recoder-core';
         const ext = this.extensionContext.extensionPath;
 
-        // 1) VSIX 번들 (Windows: .exe / 그 외: extension)
+        // 개발자가 ReCoder 저장소 자체를 열었을 때는, VSIX 안에 남아 있을 수 있는
+        // 이전 Core 바이너리보다 workspace의 최신 Python Core를 우선 사용한다.
+        // 일반 사용자의 프로젝트는 extension/package.json이 없으므로 이 경로에
+        // 해당하지 않고, 아래 번들 바이너리 경로를 그대로 사용한다.
+        // workspace로 저장소 루트 또는 extension/ 폴더만 열 수 있으므로, 각
+        // workspace의 부모도 함께 확인한다. 그래야 개발 중 최신 소스 Core를
+        // 일관되게 사용하고, 낡은 번들 바이너리로 인한 API 404를 피할 수 있다.
+        const workspaceCore = this._findWorkspaceCore();
+        if (workspaceCore) {
+            const coreDir = path.dirname(workspaceCore.mainPy);
+            return {
+                command: this._findPython(coreDir),
+                args: [workspaceCore.mainPy],
+                cwd: coreDir,
+            };
+        }
+
+        // 2) VSIX 번들 (Windows: .exe / 그 외: extension)
         const bundledPath = path.join(ext, 'bin', binaryName);
         if (fs.existsSync(bundledPath)) { return { command: bundledPath, args: [] }; }
 
@@ -531,6 +563,18 @@ export class CoreManager {
         }
 
         return null;
+    }
+
+    /** 현재 열린 workspace가 ReCoder 소스 저장소이면 최신 Core 진입점을 찾는다. */
+    private _findWorkspaceCore(): { mainPy: string; extensionManifest: string } | null {
+        const workspaceRoots = (vscode.workspace.workspaceFolders ?? [])
+            .flatMap(folder => [folder.uri.fsPath, path.dirname(folder.uri.fsPath)]);
+        return workspaceRoots
+            .map(root => ({
+                mainPy: path.join(root, 'core', 'main.py'),
+                extensionManifest: path.join(root, 'extension', 'package.json'),
+            }))
+            .find(candidate => fs.existsSync(candidate.mainPy) && fs.existsSync(candidate.extensionManifest)) ?? null;
     }
 
     /** 기존 시그니처 호환용 — 바이너리 경로만 반환 */
