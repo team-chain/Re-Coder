@@ -77,6 +77,7 @@ class EcsDeployStatusResponse(BaseModel):
     """
 
     running: bool = False
+    #: 기계 토큰. 확장이 문자열 비교로 분기한다 — 번역 금지.
     stage: str = "idle"
     log_tail: list[str] = Field(default_factory=list)
     image_uri: str = ""
@@ -89,6 +90,8 @@ class EcsDeployStatusResponse(BaseModel):
     service_url: str = ""
     remedy: str = ""
     deployment_id: str = ""
+    #: 사람이 읽을 단계 문구. `stage` 는 기계 토큰이므로 번역하지 않는다.
+    stage_text: str = ""
 
 
 class EcsReadyResponse(BaseModel):
@@ -153,8 +156,36 @@ def to_core_request(
     return ECSDeployRequest(**fields)
 
 
-#: 코어 상태 → 확장이 사이드바에 띄우는 단계 이름.
-_STAGE_LABEL = {
+#: 코어 상태 → 확장이 읽는 **기계용 단계 토큰.**
+#:
+#: 이 값은 UI 문구가 아니라 **계약**이다. 확장 네 곳이 문자열을 직접
+#: 비교한다 — `sidebar/WorkbenchPanel.ts`, `ui/sidebarProvider.ts`,
+#: `sidebar/workbenchHtml.ts`, `test/coreClient.smoke.ts` 가 모두
+#: `stage === 'done'` / `stage === 'failed'` 로 분기한다.
+#:
+#: 예전에 여기 한국어("완료"/"실패")를 넣었다가 그 분기가 전부 빗나갔다.
+#: `running` 이 false 로 바뀌어 폴링은 멈추는데 완료 표시도 실패 알림도
+#: 뜨지 않는, **끝났는데 아무 말도 없는** 상태가 됐다.
+#: 어휘는 기존 계약(`core/server.py:247`)을 그대로 따른다:
+#: `idle | building | ecr_push | task_def | svc_update | deploying | done | failed`
+#:
+#: 사람이 읽을 문구가 필요하면 아래 `stage_text` 를 쓴다. 번역은 UI 몫이다.
+_STAGE_TOKEN = {
+    ECSDeployStatus.PENDING: "idle",
+    ECSDeployStatus.IN_PROGRESS: "deploying",
+    ECSDeployStatus.SUCCEEDED: "done",
+    # 성공이 아닌 종료는 **전부 failed 로 보낸다.** 확장은 종료 시
+    # done/failed 두 갈래만 처리하므로, 여기서 새 토큰을 만들면
+    # 취소·롤백·서킷브레이커가 아무 표시 없이 사라진다.
+    # 구체적인 사유는 `error` 와 `stage_text` 로 전달한다.
+    ECSDeployStatus.FAILED: "failed",
+    ECSDeployStatus.CANCELLED: "failed",
+    ECSDeployStatus.ROLLED_BACK: "failed",
+    ECSDeployStatus.CIRCUIT_BREAKER_TRIGGERED: "failed",
+}
+
+#: 사람이 읽을 문구. 기계 토큰과 **분리**한다.
+_STAGE_TEXT = {
     ECSDeployStatus.PENDING: "대기 중",
     ECSDeployStatus.IN_PROGRESS: "배포 중",
     ECSDeployStatus.SUCCEEDED: "완료",
@@ -184,7 +215,8 @@ def to_status_response(record: Optional[ECSDeployRecord]) -> EcsDeployStatusResp
 
     return EcsDeployStatusResponse(
         running=record.status in _RUNNING_STATES,
-        stage=_STAGE_LABEL.get(record.status, str(record.status)),
+        stage=_STAGE_TOKEN.get(record.status, "failed"),
+        stage_text=_STAGE_TEXT.get(record.status, str(record.status)),
         log_tail=log_tail,
         image_uri=record.image_uri or record.image or "",
         task_def_arn=record.task_definition_arn or "",
@@ -222,8 +254,12 @@ async def deploy_ecs(
     record = await ecs_routes.start_deployment(
         core_request, background_tasks, request
     )
+    # 확장 사이드바는 **`status === 'ok'`** 일 때만 폴링을 시작한다
+    # (`extension/media/sidebar.js`, 옛 `core/server.py` 계약).
+    # "started" 를 돌려주면 시작 실패로 읽혀서, 배포는 도는데 아무도
+    # 지켜보지 않는 상태가 된다.
     return {
-        "status": "started",
+        "status": "ok",
         "message": f"{core_request.cluster}/{core_request.service} 배포를 시작했습니다.",
         "deployment_id": record.deployment_id,
     }
