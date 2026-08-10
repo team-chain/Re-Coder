@@ -28,6 +28,7 @@ import logging
 import os
 import stat
 import sys
+from urllib.parse import unquote
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -89,8 +90,9 @@ class AwsConfigureRequest(BaseModel):
 class AwsConnectRequest(BaseModel):
     """VS Code SecretStorage에 보관하기 전, STS로 키만 검증하는 요청.
 
-    이 경로는 파일이나 Core 설정에 자격증명을 기록하지 않는다. 검증에 필요한
-    boto3 세션은 요청 중에만 환경변수로 설정하고, 응답 전 원래 상태로 복원한다.
+    이 경로는 파일이나 Core 설정에 자격증명을 기록하지 않는다. 검증에 성공한
+    자격증명은 현재 Core 프로세스 메모리에만 유지하며, 재시작 후에는 Extension이
+    VS Code SecretStorage에서 환경변수로 다시 주입한다.
     """
 
     access_key_id: str = Field(..., min_length=16, max_length=128)
@@ -105,6 +107,16 @@ class AwsIdentity(BaseModel):
     user_id: str = ""
 
 
+class AwsPermissionCheck(BaseModel):
+    """배포에 필요한 IAM 권한을 읽기 전용으로 점검한 결과."""
+
+    inspected: bool = False
+    required_actions: list[str] = Field(default_factory=list)
+    missing_actions: list[str] = Field(default_factory=list)
+    excessive_policies: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class AwsStatus(BaseModel):
     ready: bool = False
     identity: Optional[AwsIdentity] = None
@@ -113,6 +125,31 @@ class AwsStatus(BaseModel):
     access_key_last4: str = ""
     storage: str = ""        # "recoder" | "aws_credentials_file" | "env" | ""
     message: str = ""
+    permission_check: Optional[AwsPermissionCheck] = None
+
+
+# ECS Fargate 배포에 쓰는 최소 작업 목록. 이 목록은 배포 가능 여부를 알려 주기
+# 위한 것이며, 실제 정책은 대상 ECR 리포지토리/Task Role로 더 좁혀야 한다.
+REQUIRED_DEPLOY_ACTIONS = [
+    "ecr:GetAuthorizationToken",
+    "ecr:BatchCheckLayerAvailability",
+    "ecr:InitiateLayerUpload",
+    "ecr:UploadLayerPart",
+    "ecr:CompleteLayerUpload",
+    "ecr:PutImage",
+    "ecr:BatchGetImage",
+    "ecs:DescribeClusters",
+    "ecs:DescribeServices",
+    "ecs:RegisterTaskDefinition",
+    "ecs:UpdateService",
+    "iam:PassRole",
+]
+
+_BROAD_POLICY_NAMES = {
+    "administratoraccess",
+    "poweruseraccess",
+    "iamfullaccess",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +393,137 @@ def _detect_credential_source() -> tuple[str, str]:
     return "", ""
 
 
+def _iam_principal_arn(identity_arn: str) -> Optional[str]:
+    """STS ARN을 IAM 시뮬레이션에 사용할 수 있는 사용자/역할 ARN으로 변환한다."""
+    if ":iam:" in identity_arn and (":user/" in identity_arn or ":role/" in identity_arn):
+        return identity_arn
+    # arn:aws:sts::123456789012:assumed-role/role-name/session-name
+    marker = ":assumed-role/"
+    if ":sts:" in identity_arn and marker in identity_arn:
+        prefix, role_and_session = identity_arn.split(marker, 1)
+        role_name = role_and_session.rsplit("/", 1)[0]
+        account = prefix.split(":")[4]
+        partition = prefix.split(":")[1]
+        return f"arn:{partition}:iam::{account}:role/{role_name}"
+    return None
+
+
+def _policy_is_administrator(document: Any) -> bool:
+    """관리형/인라인 정책 문서가 사실상 전체 권한인지 판별한다."""
+    if isinstance(document, str):
+        try:
+            document = json.loads(unquote(document))
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(document, dict):
+        return False
+    statements = document.get("Statement", [])
+    if isinstance(statements, dict):
+        statements = [statements]
+    for statement in statements:
+        if not isinstance(statement, dict) or statement.get("Effect") != "Allow":
+            continue
+        actions = statement.get("Action", [])
+        resources = statement.get("Resource", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        if isinstance(resources, str):
+            resources = [resources]
+        if "*" in actions and "*" in resources:
+            return True
+    return False
+
+
+def _inspect_deploy_permissions(identity: dict[str, str], region: str) -> AwsPermissionCheck:
+    """IAM simulation과 정책 이름으로 부족·과다 권한을 읽기 전용 점검한다.
+
+    IAM 읽기/시뮬레이션 권한이 없는 키도 정상적인 배포 키일 수 있다. 이 경우
+    연결을 막지 않고, 확인할 수 없었다는 안내만 반환한다.
+    """
+    report = AwsPermissionCheck(required_actions=list(REQUIRED_DEPLOY_ACTIONS))
+    principal_arn = _iam_principal_arn(identity.get("arn", ""))
+    if not principal_arn:
+        report.warnings.append("IAM 사용자 또는 역할 ARN을 확인할 수 없어 권한 점검을 건너뛰었습니다.")
+        return report
+
+    try:
+        session = _build_boto3_session(region=region)
+        iam = session.client("iam", region_name=region)
+    except Exception as exc:  # noqa: BLE001
+        report.warnings.append(f"IAM 권한 점검을 시작할 수 없습니다: {exc}")
+        return report
+
+    try:
+        simulation = iam.simulate_principal_policy(
+            PolicySourceArn=principal_arn,
+            ActionNames=REQUIRED_DEPLOY_ACTIONS,
+        )
+        results = simulation.get("EvaluationResults", [])
+        decisions = {
+            item.get("EvalActionName", ""): item.get("EvalDecision", "implicitDeny")
+            for item in results
+        }
+        report.missing_actions = [
+            action for action in REQUIRED_DEPLOY_ACTIONS
+            if decisions.get(action, "implicitDeny").lower() != "allowed"
+        ]
+        report.inspected = True
+        if report.missing_actions:
+            report.warnings.append("ECS 배포에 필요한 권한 일부가 허용되지 않았습니다.")
+    except Exception as exc:  # noqa: BLE001
+        report.warnings.append(
+            "IAM 권한 시뮬레이션 권한이 없어 부족 권한을 자동 확인하지 못했습니다. "
+            "배포용 최소권한 정책을 확인하세요."
+        )
+        logger.info("[aws] IAM permission simulation unavailable: %s", exc)
+
+    # 명백히 과도한 AWS 관리형 정책을 확인한다. 정책 본문을 읽을 권한이 없더라도
+    # 이름만으로 확실한 정책은 표시한다.
+    try:
+        if ":user/" in principal_arn:
+            user_name = principal_arn.rsplit("/", 1)[-1]
+            attached = iam.list_attached_user_policies(UserName=user_name).get("AttachedPolicies", [])
+            inline_names = iam.list_user_policies(UserName=user_name).get("PolicyNames", [])
+            inline_documents = [
+                (name, iam.get_user_policy(UserName=user_name, PolicyName=name).get("PolicyDocument"))
+                for name in inline_names
+            ]
+        else:
+            role_name = principal_arn.rsplit("/", 1)[-1]
+            attached = iam.list_attached_role_policies(RoleName=role_name).get("AttachedPolicies", [])
+            inline_names = iam.list_role_policies(RoleName=role_name).get("PolicyNames", [])
+            inline_documents = [
+                (name, iam.get_role_policy(RoleName=role_name, PolicyName=name).get("PolicyDocument"))
+                for name in inline_names
+            ]
+        for policy in attached:
+            name = str(policy.get("PolicyName", ""))
+            arn = str(policy.get("PolicyArn", ""))
+            if name.lower() in _BROAD_POLICY_NAMES:
+                report.excessive_policies.append(name)
+                continue
+            try:
+                metadata = iam.get_policy(PolicyArn=arn).get("Policy", {})
+                version_id = metadata.get("DefaultVersionId")
+                if version_id:
+                    version = iam.get_policy_version(PolicyArn=arn, VersionId=version_id)
+                    if _policy_is_administrator(version.get("PolicyVersion", {}).get("Document")):
+                        report.excessive_policies.append(name or arn)
+            except Exception:  # 정책 본문 읽기는 선택 점검이다.
+                continue
+        for name, document in inline_documents:
+            if _policy_is_administrator(document):
+                report.excessive_policies.append(f"인라인 정책: {name}")
+    except Exception as exc:  # noqa: BLE001
+        report.warnings.append("연결된 IAM 정책 목록을 읽을 권한이 없어 과다 권한 점검이 제한됩니다.")
+        logger.info("[aws] IAM policy listing unavailable: %s", exc)
+
+    report.excessive_policies = list(dict.fromkeys(report.excessive_policies))
+    if report.excessive_policies:
+        report.warnings.append("관리자급 또는 전체 권한 정책이 감지되었습니다. 배포 전용 최소권한 키를 권장합니다.")
+    return report
+
+
 def _refresh_diagnostics_cache() -> None:
     """자격증명 저장/삭제 후 first_run 의 aws_deploy_ready 진단을 즉시 재실행.
 
@@ -437,7 +605,12 @@ def _restore_environment(snapshot: dict[str, Optional[str]], profile: Optional[s
 
 @router.post("/api/aws/connect", response_model=AwsStatus)
 async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
-    """AWS 키의 유효성만 STS로 확인한다. 어떤 파일에도 키를 저장하지 않는다."""
+    """AWS 키를 검증하고 현재 Core 프로세스에만 적용한다.
+
+    키는 어떤 파일에도 저장하지 않는다. 실패한 요청은 기존 환경을 되돌리지만,
+    성공한 요청은 Extension이 SecretStorage에 보관하기 전에도 현재 세션에서
+    즉시 배포 진단을 실행할 수 있도록 메모리에 유지한다.
+    """
     region = (req.region or DEFAULT_REGION).strip()
     snapshot, prior_profile = _environment_snapshot()
     try:
@@ -450,8 +623,15 @@ async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
             session_token=req.session_token,
         )
         identity = _call_sts_get_caller_identity(profile=None, region=region)
-    finally:
+        permission_check = _inspect_deploy_permissions(identity, region)
+    except Exception:
         _restore_environment(snapshot, prior_profile)
+        raise
+
+    # SecretStorage 기반 연결도 기존 configure 경로와 똑같이 진단 캐시를
+    # 갱신해야 한다. 그렇지 않으면 연결은 성공했는데 AWS Deploy Ready가
+    # 연결 전 결과를 계속 표시하는 상태 불일치가 생긴다.
+    _refresh_diagnostics_cache()
 
     return AwsStatus(
         ready=True,
@@ -461,6 +641,7 @@ async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
         access_key_last4=_mask_key(req.access_key_id),
         storage="secret_storage",
         message="AWS 자격증명이 유효합니다. VS Code 보안 금고에 저장할 수 있습니다.",
+        permission_check=permission_check,
     )
 
 
@@ -541,6 +722,21 @@ async def get_aws_status() -> AwsStatus:
         storage=storage,
         message="AWS 자격증명이 유효합니다.",
     )
+
+
+@router.post("/api/aws/permissions/check", response_model=AwsStatus)
+async def check_aws_permissions() -> AwsStatus:
+    """저장·재입력 없이 현재 연결된 자격증명의 배포 권한을 다시 점검한다."""
+    status = await get_aws_status()
+    if not status.ready or status.identity is None:
+        return status
+    identity = {
+        "account": status.identity.account,
+        "arn": status.identity.arn,
+        "user_id": status.identity.user_id,
+    }
+    status.permission_check = _inspect_deploy_permissions(identity, status.region or DEFAULT_REGION)
+    return status
 
 
 @router.post("/api/aws/configure", response_model=AwsStatus)

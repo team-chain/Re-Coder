@@ -114,6 +114,14 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "ecs:DescribeTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
         "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
         "bedrock:ListFoundationModels": "계정 단위 조회",
+        # FR-04-01 — 연결하는 IAM 사용자·정책 이름을 **정책을 만드는 시점에는
+        # 알 수 없다.** 읽기 전용 조회라 범위를 좁힐 근거도 없다.
+        "iam:SimulatePrincipalPolicy":  "IAM 시뮬레이션 API 가 리소스 단위 제한 미지원",
+        "iam:ListAttachedUserPolicies": "연결하는 IAM 사용자 이름을 정책 생성 시 알 수 없는 읽기 전용 조회",
+        "iam:ListUserPolicies":         "연결하는 IAM 사용자 이름을 정책 생성 시 알 수 없는 읽기 전용 조회",
+        "iam:GetUserPolicy":            "연결하는 IAM 사용자 이름을 정책 생성 시 알 수 없는 읽기 전용 조회",
+        "iam:GetPolicy":                "연결된 관리형 정책 ARN을 정책 생성 시 알 수 없는 읽기 전용 조회",
+        "iam:GetPolicyVersion":         "연결된 관리형 정책 ARN을 정책 생성 시 알 수 없는 읽기 전용 조회",
         # FR-05-04 — EC2 의 Describe* 는 AWS 가 리소스 단위 제한을 지원하지
         # 않는다. "*" 는 AWS 쪽 강제이지 범위를 게을리 잡은 결과가 아니다.
         "ec2:DescribeVpcs":              "AWS 가 리소스 단위 제한 미지원",

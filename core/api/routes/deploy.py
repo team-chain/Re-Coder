@@ -37,6 +37,9 @@ router = APIRouter(tags=["deploy"])
 _infra_proposals: dict[str, InfraFileProposal] = {}
 _deployment_plans: dict[str, DeploymentPlan] = {}
 _deployment_records: dict[str, DeploymentRecord] = {}
+# Static Preflight가 만든 수정안은 사용자가 배포 화면에서 "자동 수정"을 눌렀을
+# 때만 적용한다. 프로세스 메모리에만 두므로 Core 재시작 후에는 다시 검사해야 한다.
+_deployment_remediation_proposals: dict[str, object] = {}
 
 # ---------------------------------------------------------------------------
 # Request models
@@ -93,6 +96,11 @@ class DeploymentDecisionRequest(BaseModel):
     workspace_path: str
     target: Literal["ecs", "s3", "local"]
     evidence: list[str] = []
+
+
+class DeploymentRemediationApplyRequest(BaseModel):
+    """배포 차단 카드에서 사용자가 승인한 안전한 자동 수정 요청."""
+    workspace_path: str
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +261,91 @@ def _deployment_preflight(workspace_path: str) -> dict:
     }
 
 
+def _detect_preflight_contract_stack(root: Path):
+    """recoder.yml 이 없는 프로젝트용 최소 ContractStack 감지.
+
+    배포 대상 감지와 정적 Preflight가 서로 다른 기준을 쓰지 않도록, 이 함수는
+    FastAPI/Flask/Next/Express만 구분하고 그 외에는 CUSTOM으로 보수적으로 처리한다.
+    """
+    try:
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover - package 실행 호환
+        from core.schemas import ContractStack  # type: ignore
+
+    package_text = _read_text_if_exists(root / "package.json").lower()
+    if '"next"' in package_text:
+        return ContractStack.NODE_NEXT
+    if package_text:
+        return ContractStack.NODE_EXPRESS
+
+    python_source = "\n".join(
+        _read_text_if_exists(path, 4_000).lower()
+        for path in list(root.glob("*.py"))[:50]
+    )
+    if "fastapi" in python_source:
+        return ContractStack.PYTHON_FASTAPI
+    if "flask" in python_source:
+        return ContractStack.PYTHON_FLASK
+    return ContractStack.CUSTOM
+
+
+def _run_deployment_safety_preflight(workspace_path: str) -> dict:
+    """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다."""
+    root = Path(workspace_path)
+    if not root.is_dir():
+        raise ValueError("유효한 워크스페이스 경로가 아닙니다.")
+
+    try:
+        from preflight import StaticPreflightRunner
+        from preflight.contract_loader import build_default_contract, load_contract
+        from remediation import generate_proposals
+    except ImportError:  # pragma: no cover - package 실행 호환
+        from core.preflight import StaticPreflightRunner  # type: ignore
+        from core.preflight.contract_loader import build_default_contract, load_contract  # type: ignore
+        from core.remediation import generate_proposals  # type: ignore
+
+    contract = load_contract(root)
+    if contract is None:
+        contract = build_default_contract(_detect_preflight_contract_stack(root))
+    run = StaticPreflightRunner(str(root), contract).run_sync()
+    proposals = generate_proposals(run, contract, root)
+    for proposal in proposals:
+        _deployment_remediation_proposals[proposal.proposal_id] = proposal
+
+    proposal_by_code = {
+        proposal.source_blocker_code.value: proposal
+        for proposal in proposals
+    }
+
+    def issue_payload(issue) -> dict:
+        code = issue.code.value if hasattr(issue.code, "value") else str(issue.code)
+        proposal = proposal_by_code.get(code)
+        return {
+            "code": code,
+            "message": issue.message,
+            "fix": issue.fix_hint or (proposal.summary if proposal else "수정 방법을 확인한 뒤 다시 검사하세요."),
+            "severity": issue.severity.value if hasattr(issue.severity, "value") else str(issue.severity),
+            "remediation_available": bool(proposal and proposal.auto_apply_available),
+            "proposal_id": proposal.proposal_id if proposal else None,
+        }
+
+    reasons = [issue_payload(blocker) for blocker in run.blockers]
+    warnings = [issue_payload(warning) for warning in run.warnings]
+    return {
+        "blocked": bool(run.blockers),
+        "status": run.status.value if hasattr(run.status, "value") else str(run.status),
+        "score": run.score,
+        "reasons": reasons,
+        # fixes 는 API 소비자가 설명과 해결책만 간단히 표시할 때 쓰는 호환 필드다.
+        "fixes": [
+            {"code": reason["code"], "message": reason["fix"], "proposal_id": reason["proposal_id"],
+             "auto_apply_available": reason["remediation_available"]}
+            for reason in reasons
+        ],
+        "warnings": warnings,
+    }
+
+
 def _build_deployment_decision_adr(workspace_path: str, target: str, evidence: list[str]) -> dict:
     """배포 대상 선택을 기존 ADR 형식으로 만들고, 확장이 기록할 파일 정보를 반환한다."""
     try:
@@ -298,11 +391,51 @@ def _build_deployment_decision_adr(workspace_path: str, target: str, evidence: l
 
 @router.post("/api/deploy/preflight")
 async def deploy_preflight(request: DeployPreflightRequest) -> dict:
-    """배포 버튼 직후 실행되는 가벼운 프로젝트 감지 단계."""
+    """배포 버튼 직후 앱 감지와 차단 검사 결과를 함께 반환한다.
+
+    정적 Preflight는 디스크 검사와 보안 패턴 검색을 수행하므로 이벤트 루프 밖에서
+    실행한다. 응답의 ``blocked/reasons/fixes`` 는 배포 차단 수정안 카드에 사용한다.
+    """
     try:
-        return _deployment_preflight(request.workspace_path)
+        detected = await asyncio.to_thread(_deployment_preflight, request.workspace_path)
+        safety = await asyncio.to_thread(_run_deployment_safety_preflight, request.workspace_path)
+        return {**detected, **safety}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/deploy/remediations/{proposal_id}/apply")
+async def apply_deployment_remediation(
+    proposal_id: str,
+    request: DeploymentRemediationApplyRequest,
+) -> dict:
+    """사용자가 명시적으로 누른 자동 수정만 안전하게 적용한다."""
+    proposal = _deployment_remediation_proposals.get(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="수정안을 찾을 수 없습니다. 다시 검사해 주세요.")
+    workspace = Path(request.workspace_path)
+    if not workspace.is_dir():
+        raise HTTPException(status_code=400, detail="유효한 워크스페이스 경로가 아닙니다.")
+
+    try:
+        from remediation import apply_proposal
+    except ImportError:  # pragma: no cover - package 실행 호환
+        from core.remediation import apply_proposal  # type: ignore
+
+    result = await asyncio.to_thread(apply_proposal, proposal, workspace)
+    payload = {
+        "success": result.success,
+        "proposal_id": result.proposal_id,
+        "applied_files": result.applied_files,
+        "backup_dir": result.backup_dir,
+        "message": result.error_message or result.skipped_reason or (
+            "자동 수정을 적용했습니다. 다시 검사해 주세요." if result.success else "자동 수정에 실패했습니다."
+        ),
+        "rerun_required": True,
+    }
+    if not result.success:
+        raise HTTPException(status_code=409, detail=payload["message"])
+    return payload
 
 
 @router.post("/api/deploy/decision")

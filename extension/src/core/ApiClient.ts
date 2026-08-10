@@ -76,6 +76,27 @@ export interface DeployPreflightResult {
     summary: string;
     evidence: string[];
     recommended_target: 'ecs' | 's3' | 'local';
+    blocked: boolean;
+    status: string;
+    score: number;
+    reasons: DeployPreflightIssue[];
+    fixes: Array<{
+        code: string;
+        message: string;
+        proposal_id: string | null;
+        auto_apply_available: boolean;
+    }>;
+    warnings: DeployPreflightIssue[];
+}
+
+/** 배포 전에 발견한 문제와 사용자에게 보여 줄 수정 방법. */
+export interface DeployPreflightIssue {
+    code: string;
+    message: string;
+    fix: string;
+    severity: string;
+    remediation_available: boolean;
+    proposal_id: string | null;
 }
 
 export interface DeploymentDecisionResult {
@@ -255,6 +276,28 @@ export class ApiClient {
             workspace_path: workspacePath,
         });
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
+        return resp.data;
+    }
+
+    async applyDeployRemediation(proposalId: string, workspacePath: string): Promise<{
+        success: boolean;
+        proposal_id: string;
+        applied_files: string[];
+        backup_dir?: string | null;
+        message: string;
+        rerun_required: boolean;
+    }> {
+        const resp = await this.request<{
+            success: boolean;
+            proposal_id: string;
+            applied_files: string[];
+            backup_dir?: string | null;
+            message: string;
+            rerun_required: boolean;
+        }>('POST', `/api/deploy/remediations/${encodeURIComponent(proposalId)}/apply`, {
+            workspace_path: workspacePath,
+        });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '자동 수정 적용 실패'); }
         return resp.data;
     }
 
@@ -677,6 +720,15 @@ export class ApiClient {
             storage: '',
             message: resp.error ?? 'AWS 상태 조회 실패',
         };
+    }
+
+    /** POST /api/aws/permissions/check — 현재 키를 다시 입력하지 않고 권한만 점검. */
+    async checkAwsPermissions(): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/permissions/check');
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 권한 점검 실패');
+        }
+        return resp.data;
     }
 
     /**

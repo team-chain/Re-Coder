@@ -31,6 +31,7 @@ _EXEMPT_PATHS = {
     "/api/aws/connect",
     "/api/aws/configure",
     "/api/aws/status",
+    "/api/aws/permissions/check",
     "/api/aws/clear",
 }
 
