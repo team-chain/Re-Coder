@@ -32,7 +32,6 @@ from core.schemas import (
     ECSDeployRecord,
     ECSDeployRequest,
     ECSDeployStatus,
-    SecurityScanResult,
 )
 from core.security_scan import security_scanner
 
@@ -43,9 +42,6 @@ _MAX_POLL_ATTEMPTS = 40       # 최대 폴링 횟수 (= 10분)
 _CIRCUIT_BREAKER_WINDOW = 300 # 5분 (초)
 _CIRCUIT_BREAKER_THRESHOLD = 0.5  # 50%
 
-#: 자격증명·권한 문제를 나타내는 AWS 오류 코드.
-#: 이것들은 "앱이 아프다"가 아니라 "우리가 못 들어간다"이므로,
-#: 배포 건강 상태의 실패로 세면 안 된다.
 #: 더 이상 진행하지 않는 상태. 여기에 들어가면 종료 시각이 찍혀야 한다.
 _TERMINAL_STATUSES = frozenset({
     ECSDeployStatus.SUCCEEDED,
@@ -55,6 +51,9 @@ _TERMINAL_STATUSES = frozenset({
     ECSDeployStatus.CIRCUIT_BREAKER_TRIGGERED,
 })
 
+#: 자격증명·권한 문제를 나타내는 AWS 오류 코드.
+#: 이것들은 "앱이 아프다"가 아니라 "우리가 못 들어간다"이므로,
+#: 배포 건강 상태의 실패로 세면 안 된다.
 _AUTH_ERROR_CODES = frozenset({
     "ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId",
     "UnrecognizedClientException", "RequestExpired",
@@ -304,6 +303,39 @@ class ECSAgent:
                 else:
                     record.status = ECSDeployStatus.FAILED
 
+                # ECS 가 이미 이전 버전을 되살린 경우에는 롤백 제안을 만들지
+                # 않는다. 만들면 "승인하면 이전 버전으로 되돌립니다"라고
+                # 안내하게 되는데, **이미 되돌아가 있다.** 사용자는 이미 끝난
+                # 일을 승인하게 되고, 그 승인은 같은 리비전을 한 번 더 배포한다.
+                if record.ecs_rolled_back:
+                    record.status = ECSDeployStatus.ROLLED_BACK
+                    record.error_message = (
+                        "배포 실패 — ECS 가 이전 버전으로 자동 복구했습니다. "
+                        "이번에 올린 이미지는 실행되고 있지 않습니다."
+                    )
+                    # "이전 버전으로 계속 동작합니다"를 사실처럼 말하지
+                    # 않는다. ecs_rolled_back 은 ECS 가 되돌리기를 **시작**했다는
+                    # 뜻일 뿐, 그 이전 버전이 멀쩡히 떠 있다는 보장이 아니다
+                    # (그 리비전도 똑같이 망가졌을 수 있다). 관측된 태스크 수로
+                    # 말한다.
+                    if record.running_task_count > 0:
+                        state = (
+                            f"서비스는 이전 버전으로 동작 중입니다 "
+                            f"(태스크 {record.running_task_count}개)."
+                        )
+                    else:
+                        state = (
+                            "다만 되돌린 이전 버전도 아직 떠 있지 않습니다 — "
+                            "그 버전에도 문제가 있을 수 있으니 요금이 걱정되면 "
+                            "배포 중지로 태스크 수를 0 으로 내리세요."
+                        )
+                    record.error_remedy = (
+                        f"{state} CloudWatch 로그 그룹 "
+                        f"{self.log_group_name(request)} 에서 새 이미지가 왜 "
+                        "기동하지 못했는지 확인한 뒤 다시 배포하세요."
+                    )
+                    return record
+
                 # Rollback proposal 생성 (Approval Level 3)
                 record.rollback_proposal_id = await self._create_rollback_proposal(request, record)
                 # 메시지는 **실제로 만들어졌을 때만** 만들어졌다고 말한다.
@@ -328,6 +360,7 @@ class ECSAgent:
                         f"{self.log_group_name(request)} 에서 컨테이너가 왜 "
                         "죽는지 확인하세요."
                     )
+                await self._halt_failed_deployment(request, record, clients)
                 return record
 
             # 10. 공개 주소 확인 — 카드 DoD 1번 "URL 로 접속됨"
@@ -434,16 +467,19 @@ class ECSAgent:
             aws_infra.ensure_log_group(clients["logs"], self.log_group_name(req))
             rec.provisioned["log_group"] = self.log_group_name(req)
 
-            # 서브넷 — 요청에 있으면 그대로, 없으면 기본 VPC 에서 찾는다.
+            # 서브넷 — 요청에 있으면 그걸 쓰되, **VPC 는 조회해서 알아낸다.**
+            # 예전에는 vpc_id 를 빈 문자열로 두고 넘어갔다. 그러면 아래
+            # 보안 그룹 자동 생성이 무조건 실패해서, 서브넷을 지정하는
+            # 순간 보안 그룹까지 반드시 함께 넘겨야 하는 **문서에도 없는
+            # 규칙**이 생겼다 — 요청 모델은 보안 그룹을 생략하면 자동으로
+            # 만든다고 말하고 있는데도.
             if req.subnet_ids:
-                target = aws_infra.NetworkTarget(
-                    vpc_id="",
-                    subnet_ids=tuple(req.subnet_ids),
-                    internet_routable=False,
+                target = aws_infra.resolve_subnet_network(
+                    clients["ec2"], req.subnet_ids
                 )
             else:
                 target = aws_infra.discover_default_network(clients["ec2"])
-                rec.provisioned["vpc"] = target.vpc_id
+            rec.provisioned["vpc"] = target.vpc_id
             rec.provisioned["subnets"] = ",".join(target.subnet_ids)
             # 라우팅을 확인하지 못했다는 사실을 **기록에 남긴다.** 값만
             # 계산해두고 아무도 안 읽으면, 애써 구분한 "확인함/확인 못 함"이
@@ -461,11 +497,15 @@ class ECSAgent:
             if req.security_group_ids:
                 groups = list(req.security_group_ids)
             else:
+                # 불변식 확인. 위의 두 경로 모두 실제 VPC 를 채워 주므로
+                # 여기가 참이 되면 안 된다 — 참이면 코드가 깨진 것이지
+                # 사용자가 뭘 잘못한 게 아니다.
                 if not target.vpc_id:
                     raise InfraError(
-                        "보안 그룹을 만들려면 VPC 를 알아야 하는데, 서브넷만 "
-                        "지정되어 VPC 를 알 수 없습니다.",
-                        remedy="security_group_ids 를 함께 지정하세요.",
+                        "내부 오류: 서브넷의 VPC 를 확인하지 못한 채 보안 그룹을 "
+                        "만들려 했습니다.",
+                        remedy="security_group_ids 를 직접 지정하면 우회할 수 "
+                               "있습니다. 이 오류는 버그이니 함께 알려주세요.",
                     )
                 groups = [
                     aws_infra.ensure_security_group(
@@ -558,6 +598,19 @@ class ECSAgent:
         rec.scan_result = await security_scanner.scan_all(
             image=image, dockerfile_path=dockerfile_path, repo_path=repo_path
         )
+        # **못 돌린 검사는 반드시 말한다.** 도구가 안 깔렸거나 이미지를 못
+        # 받아오면 findings 가 비고, 그대로 두면 "취약점 0건 = 안전"으로
+        # 읽힌다. 스캐너는 그 사실을 tool_errors 에 담아 주는데, 예전에는
+        # 아무도 읽지 않아서 사용자에게 닿지 않았다.
+        if rec.scan_result.tool_errors:
+            rec.provisioned["scan_warning"] = (
+                "실행되지 않은 보안 검사가 있습니다: "
+                + ", ".join(rec.scan_result.tool_errors)
+                + " — 이 배포의 '취약점 0건'은 검사 결과가 아닙니다."
+            )
+            logger.warning(
+                "보안 검사 일부 미실행: %s", ", ".join(rec.scan_result.tool_errors)
+            )
         return rec
 
     async def _step_sbom(
@@ -770,7 +823,6 @@ class ECSAgent:
         #: AWS 가 돌려주는 failedTasks 는 누적값이라 직전 값을 들고 있어야
         #: 신규 실패만 셀 수 있다.
         previous_failed_tasks = 0
-        start_time = datetime.now(timezone.utc)
 
         for attempt in range(_MAX_POLL_ATTEMPTS):
             await asyncio.sleep(_POLL_INTERVAL)
@@ -799,7 +851,20 @@ class ECSAgent:
                     logger.warning("서킷 브레이커 작동 (AWS 오류율)")
                     return False, total_failures, True
                 continue
-            svc = resp.get("services", [{}])[0]
+            # describe_services 는 없는 서비스에 대해 빈 목록과 failures 를
+            # 돌려준다 — 키가 있으므로 `.get(..., [{}])` 기본값은 절대 안 뜬다.
+            services = resp.get("services") or []
+            if not services:
+                reasons = ", ".join(
+                    str(f.get("reason", "?")) for f in resp.get("failures", [])
+                ) or "이유 없음"
+                raise InfraError(
+                    f"배포 상태를 확인할 서비스가 없습니다: {req.cluster}/{req.service}",
+                    detail=reasons,
+                    remedy="서비스가 삭제되지 않았는지, 클러스터·서비스 이름과 "
+                           "리전이 맞는지 확인하세요.",
+                )
+            svc = services[0]
             deployments = svc.get("deployments", [])
 
             # 현재 배포 중인 PRIMARY 배포 확인
@@ -811,6 +876,30 @@ class ECSAgent:
             desired = primary.get("desiredCount", 0)
             failed_tasks = primary.get("failedTasks", 0)
             rollout_state = primary.get("rolloutState", "")
+            rec.running_task_count = int(running or 0)
+
+            # ECS 서킷 브레이커가 우리 리비전을 버리고 이전 리비전을 다시
+            # PRIMARY 로 올렸을 수 있다. 그러면 서비스는 **정상 동작하지만
+            # 우리가 올린 이미지가 아니다.** 이걸 확인하지 않으면
+            # `rolloutState=COMPLETED, running>=desired` 만 보고 "배포 성공"이라
+            # 보고하게 된다 — 사용자는 배포되지 않은 코드를 배포됐다고 믿는다.
+            primary_td = str(primary.get("taskDefinition") or "")
+            if (
+                rec.task_definition_arn
+                and primary_td
+                and primary_td != rec.task_definition_arn
+            ):
+                logger.warning(
+                    "ECS 가 이전 리비전으로 되돌렸습니다: 요청=%s 실행중=%s",
+                    rec.task_definition_arn, primary_td,
+                )
+                rec.ecs_rolled_back = True
+                rec.provisioned["ecs_rollback"] = (
+                    f"ECS 서킷 브레이커가 이전 버전({primary_td.rsplit('/', 1)[-1]})"
+                    "으로 자동 복구했습니다. 서비스는 살아 있지만 **이번에 올린 "
+                    "이미지는 실행되고 있지 않습니다.**"
+                )
+                return False, total_failures, False
 
             logger.debug(
                 "Poll %d/%d: running=%d desired=%d failed=%d state=%s",
@@ -844,9 +933,12 @@ class ECSAgent:
             if rollout_state == "COMPLETED" and running >= desired and desired > 0:
                 return True, total_failures, False
 
-            # 명시적 실패
+            # 명시적 실패. ECS 자체 브레이커가 걸린 경우도 여기로 온다 —
+            # 우리 sliding window 는 폴링 간격(15초) 때문에 그보다 늦게
+            # 반응하거나 아예 임계값에 못 미칠 수 있다. AWS 의 판정을
+            # 우리 판정보다 우선한다.
             if rollout_state == "FAILED":
-                return False, total_failures, False
+                return False, total_failures, True
 
         # 폴링 시간 초과 → 실패 처리
         logger.warning("Deployment polling timed out after %d attempts", _MAX_POLL_ATTEMPTS)
@@ -880,6 +972,56 @@ class ECSAgent:
         if len(window) < 3:
             return False
         return cls._failure_rate(window) >= _CIRCUIT_BREAKER_THRESHOLD
+
+    async def _halt_failed_deployment(
+        self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict
+    ) -> None:
+        """실패한 배포가 태스크를 계속 새로 띄우지 못하게 막는다.
+
+        예전에는 서킷 브레이커가 "작동"해도 우리 기록의 상태값만 바뀌었다.
+        AWS 에는 아무 말도 하지 않았으므로 ECS 는 죽는 태스크를 계속
+        새로 띄웠다 — **기록에는 "자동 중단", 청구서에는 계속 과금.**
+
+        이제 세 겹이다.
+
+        1) ECS 자체 서킷 브레이커(`ensure_service`, rollback=True) — 되돌아갈
+           버전이 있으면 ECS 가 그 버전을 되살린다.
+        2) 되살린 걸 **성공으로 착각하지 않기** (`ecs_rolled_back`).
+        3) 그러고도 아무것도 안 떠 있으면 여기서 태스크 수를 0 으로 내린다.
+
+        판단 기준은 `previous_task_definition_arn` 이 아니라 **실제로 떠 있는
+        태스크 수**다. 이전 리비전이 있다는 사실은 그 리비전이 지금 멀쩡히
+        떠 있다는 뜻이 아니다 — 삭제된 서비스도, 똑같이 망가진 이전
+        리비전도 그 값을 채운다. 관측값을 쓰면 그런 착각이 없다.
+        """
+        if rec.ecs_rolled_back:
+            # ECS 가 이미 이전 버전을 되살려 놨다. 여기서 0 으로 내리면
+            # 멀쩡히 굴러가는 이전 버전을 우리 손으로 끄는 꼴이 된다.
+            return
+
+        if rec.running_task_count > 0:
+            # 뭔가는 떠 있다. 느리게 기동하는 정상 앱일 수 있으므로
+            # 자동으로 끄지 않고, 끄는 방법을 알려준다.
+            rec.provisioned["cost_warning"] = (
+                f"태스크 {rec.running_task_count}개가 아직 실행 중입니다 — "
+                "요금이 계속 발생합니다. 사이드바의 배포 중지"
+                "(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 내리세요."
+                + ("" if req.health_check_command else
+                   " 컨테이너 헬스체크가 없어 앱이 죽어도 ECS 가 알아채지 "
+                   "못합니다 — python_http_health_check() 를 쓰면 이런 상태를 "
+                   "자동으로 잡습니다.")
+            )
+            return
+
+        # 떠 있는 태스크가 하나도 없다. 배포는 실패했고 ECS 는 계속
+        # 재시도할 수 있다. 0 으로 내려도 잃을 게 없고, 안 내리면 돈이 샌다.
+        loop = asyncio.get_running_loop()
+        rec.provisioned["halt"] = await loop.run_in_executor(
+            None,
+            lambda: aws_infra.halt_service(
+                clients["ecs"], cluster=req.cluster, service=req.service
+            ),
+        )
 
     async def _create_rollback_proposal(
         self, req: ECSDeployRequest, rec: ECSDeployRecord

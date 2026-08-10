@@ -27,7 +27,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -420,6 +420,66 @@ def internet_routable_subnets(
     return routable, True
 
 
+def choose_routable_subnets(
+    ec2: Any, vpc_id: str, subnets: list[dict], *, where: str, strict: bool = True
+) -> tuple[list[str], bool]:
+    """인터넷으로 나갈 수 있는 서브넷만 골라낸다. `(서브넷, 확인됨)`.
+
+    **기본 VPC 자동 탐색과 사용자 지정 서브넷이 같은 함수를 쓴다.** 예전에
+    이 판정을 두 곳에 따로 두었더니 같은 서브넷인데 지정 방식에 따라 결과가
+    달랐다: 자동 탐색은 인터넷으로 못 나가는 서브넷을 걸러냈지만, 사용자가
+    직접 지정하면 그대로 통과시키고 "확인됨"이라고까지 보고했다. 그러면
+    공인/사설 서브넷을 섞어 준 사용자는 태스크 절반이 CannotPullContainerError
+    로 죽는 걸 보게 된다 — 이 검사가 막으려던 바로 그 증상이다.
+
+    신호는 둘이다.
+      (1) 라우팅 테이블에 igw- 경로가 있는가 — 가장 정확하다.
+      (2) 서브넷의 MapPublicIpOnLaunch — 보조 신호.
+
+    (1) 하나만 믿고 하드 실패시키면 라우팅을 우리가 예상한 모양으로 쓰지
+    않는 정상 환경까지 막는다. **둘 다 아니라고 할 때만** 막는다.
+
+    `strict=False` 는 그마저도 막지 않는다. 사용자가 서브넷을 **직접 찍어
+    준** 경우에 쓴다. PrivateLink 엔드포인트로 ECR 에 닿는 사설 서브넷은
+    두 신호가 모두 "인터넷 없음"인데도 멀쩡히 동작한다 — 우리가 모르는
+    구성을 사용자가 알고 있을 수 있으므로, 그럴 땐 막지 말고 경고만 한다.
+    자동 탐색(strict=True)은 반대다: 우리가 고른 서브넷이 안 되는 것이면
+    그건 우리 잘못이므로 배포 전에 막는 편이 친절하다.
+    """
+    all_ids = [str(s["SubnetId"]) for s in subnets]
+    by_igw, verified = internet_routable_subnets(ec2, vpc_id, all_ids)
+    by_public_ip = [str(s["SubnetId"]) for s in subnets if s.get("MapPublicIpOnLaunch")]
+
+    if by_igw:
+        # verified=False 면 "라우팅을 확인하지 못해 넘겨받은 그대로"라는 뜻이다.
+        # 목록은 같아도 의미가 다르므로 verified 를 그대로 들고 나간다.
+        return by_igw, verified
+    if by_public_ip:
+        logger.warning(
+            "%s: 라우팅에서 인터넷 게이트웨이 경로를 찾지 못했습니다. "
+            "공인 IP 자동 할당(MapPublicIpOnLaunch) 설정을 근거로 진행합니다.",
+            where,
+        )
+        return by_public_ip, False
+
+    if not strict:
+        logger.warning(
+            "%s: 인터넷으로 나가는 경로를 확인하지 못했습니다. 지정하신 "
+            "대로 진행합니다 — PrivateLink 엔드포인트 같은 구성이라면 "
+            "정상입니다. 이미지 pull 이 실패하면 이 부분을 먼저 보세요.",
+            where,
+        )
+        return [str(s["SubnetId"]) for s in subnets], False
+
+    raise NetworkNotFound(
+        f"{where}에 인터넷으로 나가는 서브넷이 없습니다. 이 상태로는 "
+        "컨테이너가 ECR 에서 이미지를 받지 못합니다.",
+        remedy="서브넷의 라우팅 테이블에 인터넷 게이트웨이(igw-) 경로가 "
+               "있는지, 또는 서브넷에 공인 IP 자동 할당이 켜져 있는지 "
+               "확인하세요.",
+    )
+
+
 def discover_default_network(ec2: Any, *, max_subnets: int = 3) -> NetworkTarget:
     """기본 VPC 에서 태스크를 띄울 서브넷을 찾는다.
 
@@ -471,50 +531,112 @@ def discover_default_network(ec2: Any, *, max_subnets: int = 3) -> NetworkTarget
     ordered = sorted(
         subnets, key=lambda s: (str(s.get("AvailabilityZone", "")), str(s["SubnetId"]))
     )
-    all_ids = [str(s["SubnetId"]) for s in ordered]
 
-    # 인터넷 접근 가능 여부는 신호 **두 개**로 판단한다.
-    #
-    #  (1) 라우팅 테이블에 igw- 경로가 있는가 — 가장 정확하다.
-    #      실계정의 기본 VPC 를 확인한 결과 메인 라우트 테이블에
-    #      local + igw- 경로가 있었다.
-    #  (2) 서브넷의 MapPublicIpOnLaunch — 보조 신호.
-    #
-    # (1) 하나만 믿고 하드 실패시키면, 라우팅을 우리가 예상한 모양으로
-    # 안 쓰는 정상 환경까지 막아버린다. 정상 동작을 검증 로직으로 깨뜨리는
-    # 실수를 전에 한 적이 있어서, **둘 다 아니라고 할 때만** 막는다.
-    by_igw, verified = internet_routable_subnets(ec2, vpc_id, all_ids)
-    by_public_ip = [
-        str(s["SubnetId"]) for s in ordered if s.get("MapPublicIpOnLaunch")
-    ]
+    chosen, verified = choose_routable_subnets(
+        ec2, vpc_id, ordered, where=f"기본 VPC({vpc_id})"
+    )
 
-    if by_igw:
-        chosen = by_igw
-    elif by_public_ip:
-        logger.warning(
-            "서브넷 라우팅에서 인터넷 게이트웨이 경로를 찾지 못했습니다. "
-            "공인 IP 자동 할당(MapPublicIpOnLaunch) 설정을 근거로 진행합니다.",
-        )
-        chosen, verified = by_public_ip, False
-    elif not verified:
-        # 라우팅도 확인 못 했고 보조 신호도 없다 — 판단 근거가 아예 없다.
-        # 막지는 않되 확인되지 않았음을 분명히 표시한다.
-        chosen = all_ids
-    else:
-        # 두 신호 모두 "인터넷으로 못 나간다"고 말한다. 이대로 두면
-        # 컨테이너가 ECR 에서 이미지를 못 받고, 그때 나오는 오류는
-        # 원인을 짐작하기 어렵다. 여기서 막는 편이 친절하다.
+    return NetworkTarget(
+        vpc_id=vpc_id,
+        # 자동 탐색은 개수를 제한한다. 우리가 고른 것이므로 넓게 잡을 이유가
+        # 없다. (사용자가 직접 찍어 준 경우는 resolve_subnet_network 참고 —
+        # 거기서는 자르지 않는다.)
+        subnet_ids=tuple(chosen[:max_subnets]),
+        internet_routable=verified,
+    )
+
+
+#: ECS awsvpc 가 서비스 하나에 받아 주는 서브넷 수 상한.
+_MAX_AWSVPC_SUBNETS = 16
+
+
+def resolve_subnet_network(ec2: Any, subnet_ids: Iterable[str]) -> NetworkTarget:
+    """사용자가 직접 지정한 서브넷들로부터 VPC 를 알아낸다.
+
+    예전에는 서브넷만 받으면 `vpc_id=""` 로 두고 넘어갔다. 그러면 보안
+    그룹을 만들 수 없어서 "서브넷만 지정하면 보안 그룹도 반드시 함께
+    지정해야 한다"는, **문서에도 없는 규칙**이 생겼다. 요청 모델은
+    보안 그룹을 생략하면 자동 생성한다고 말하고 있는데도 그랬다.
+
+    서브넷을 조회하면 VPC 는 그냥 알 수 있다. 겸사겸사 검증도 한다:
+      - 지정한 서브넷이 실제로 존재하는가 (오타를 배포 중이 아니라 여기서 잡는다)
+      - 전부 같은 VPC 인가 (ECS awsvpc 는 한 VPC 안의 서브넷만 받는다)
+      - 개수가 ECS 상한(16개) 안인가
+
+    인터넷으로 나가지 못하는 서브넷은 **빼고** 넘긴다. 다만 전부 그렇다면
+    막지 않는다 — 자동 탐색과 달리 여기서는 사용자가 직접 고른 것이므로,
+    우리가 모르는 구성(PrivateLink 등)일 수 있다.
+
+    **개수는 줄이지 않는다.** 자동 탐색은 3개로 자르지만, 사용자가 다섯 개를
+    적어 냈다면 다섯 개를 쓰겠다는 뜻이다. 말없이 줄이면 AZ 를 넓게 쓰려던
+    의도가 조용히 무너진다.
+    """
+    wanted = [str(s) for s in subnet_ids]
+    if not wanted:
+        raise NetworkNotFound("서브넷이 지정되지 않았습니다.")
+
+    try:
+        found = ec2.describe_subnets(SubnetIds=wanted).get("Subnets", [])
+    except Exception as exc:  # noqa: BLE001
+        # 실계정에서는 ID 가 하나만 틀려도 InvalidSubnetID.NotFound 로 여기 온다
+        # (부분 목록을 돌려주지 않는다). 그래서 **AWS 원문을 반드시 남긴다** —
+        # 어떤 ID 가 문제인지는 거기에만 적혀 있다. 자격증명 만료처럼 서브넷과
+        # 무관한 오류도 이 경로로 오므로, 원인을 단정하지 않는다.
         raise NetworkNotFound(
-            f"기본 VPC({vpc_id})에 인터넷으로 나가는 서브넷이 없습니다. "
-            "이 상태로는 컨테이너가 ECR 에서 이미지를 받지 못합니다.",
-            remedy="서브넷의 라우팅 테이블에 인터넷 게이트웨이(igw-) 경로가 "
-                   "있는지, 또는 서브넷에 공인 IP 자동 할당이 켜져 있는지 "
-                   "확인하세요.",
+            "지정한 서브넷을 조회하지 못했습니다: " + ", ".join(wanted),
+            detail=error_message(exc),
+            remedy="AWS 가 알려준 원인을 먼저 보세요. 서브넷 ID 오타나 리전 "
+                   "불일치가 흔하고, 자격증명 만료일 수도 있습니다. "
+                   "권한표의 ec2:DescribeSubnets 도 함께 확인하세요.",
+        ) from exc
+
+    by_id = {str(s["SubnetId"]): s for s in found}
+    # moto 등 일부 구현은 없는 ID 를 조용히 빼고 부분 목록을 준다.
+    missing = [s for s in wanted if s not in by_id]
+    if missing:
+        raise NetworkNotFound(
+            "지정한 서브넷을 찾을 수 없습니다: " + ", ".join(missing),
+            remedy="서브넷 ID 와 리전을 확인하세요.",
+        )
+
+    vpc_ids = {str(by_id[s]["VpcId"]) for s in wanted}
+    if len(vpc_ids) > 1:
+        raise NetworkNotFound(
+            "지정한 서브넷들이 서로 다른 VPC 에 있습니다: " + ", ".join(sorted(vpc_ids)),
+            remedy="ECS awsvpc 네트워크 모드는 한 VPC 안의 서브넷만 받습니다. "
+                   "같은 VPC 의 서브넷으로 맞춰 주세요.",
+        )
+    vpc_id = vpc_ids.pop()
+
+    if len(wanted) > _MAX_AWSVPC_SUBNETS:
+        raise NetworkNotFound(
+            f"서브넷을 {len(wanted)}개 지정하셨는데 ECS 는 서비스 하나에 "
+            f"최대 {_MAX_AWSVPC_SUBNETS}개까지만 받습니다.",
+            remedy=f"{_MAX_AWSVPC_SUBNETS}개 이하로 줄여 주세요.",
+        )
+
+    # 기본 VPC 탐색과 **같은 함수**로 판정한다. 갈라 놓으면 같은 서브넷인데
+    # 지정 방식에 따라 결과가 달라진다 — 실제로 그런 상태였다.
+    # strict=False: 여기서는 사용자가 직접 골랐으므로 막지 않고 경고만 한다.
+    chosen, verified = choose_routable_subnets(
+        ec2, vpc_id, [by_id[s] for s in wanted],
+        where="지정한 서브넷 중", strict=False,
+    )
+
+    # 인터넷으로 못 나가는 서브넷은 **빼고 넘긴다.** 섞어서 넘기면 태스크가
+    # 어디에 배치되느냐에 따라 되기도 하고 안 되기도 한다 — 재현이 어려운
+    # 최악의 실패 모양이다.
+    chosen_set = set(chosen)
+    dropped = [s for s in wanted if s not in chosen_set]
+    if dropped:
+        logger.warning(
+            "인터넷으로 나가는 경로를 확인하지 못한 서브넷은 제외합니다: %s",
+            ", ".join(dropped),
         )
 
     return NetworkTarget(
         vpc_id=vpc_id,
-        subnet_ids=tuple(chosen[:max_subnets]),
+        subnet_ids=tuple(chosen),
         internet_routable=verified,
     )
 
@@ -651,12 +773,23 @@ def ensure_service(
     security_group_ids: Iterable[str],
     desired_count: int = 1,
     assign_public_ip: bool = True,
+    circuit_breaker: bool = True,
     sleep: Callable[[float], None] = time.sleep,
 ) -> ServiceResult:
     """Fargate 서비스를 확보한다. 있으면 새 태스크 정의로 갱신한다.
 
     `desired_count=0` 으로 부르면 서비스는 만들되 태스크는 띄우지 않는다.
     Fargate 는 실행 중인 태스크에만 과금되므로 이 상태의 비용은 0원이다.
+
+    `circuit_breaker=True` 면 **ECS 자체의** 배포 서킷 브레이커를 켠다.
+    이게 없으면 컨테이너가 계속 죽는 서비스에 대해 ECS 가 대체 태스크를
+    무한히 새로 띄운다. 우리 쪽 폴링 브레이커는 그걸 **관찰**만 할 뿐
+    멈추게 하지는 못한다 — 기록에는 "자동 중단"이라 적히는데 AWS 에서는
+    태스크가 계속 뜨고 요금이 계속 붙는 상태가 된다.
+
+    `rollback=True` 를 함께 켜므로, 되돌아갈 이전 버전이 있으면 ECS 가
+    스스로 그 버전으로 되돌린다. 첫 배포처럼 되돌아갈 곳이 없으면 배포를
+    FAILED 로 끝내고 태스크 재생성을 멈춘다.
     """
     subnets = [str(s) for s in subnet_ids]
     groups = [str(g) for g in security_group_ids]
@@ -666,6 +799,21 @@ def ensure_service(
         raise InfraError("태스크에 붙일 보안 그룹이 지정되지 않았습니다.")
     if desired_count < 0:
         raise InfraError(f"desired_count 는 0 이상이어야 합니다: {desired_count}")
+
+    # UpdateService 는 이 구조체를 **통째로 교체**한다. 일부만 보내면 나머지
+    # 항목이 AWS 기본값으로 되돌아간다 — 누가 조정해 둔 값이 배포할 때마다
+    # 조용히 원복되는 셈이다. 그래서 두 퍼센트 값도 명시해, 기본값에 기대는
+    # 대신 **우리가 고른 값**이 되게 한다.
+    deployment_configuration = {
+        "deploymentCircuitBreaker": {
+            "enable": bool(circuit_breaker),
+            "rollback": bool(circuit_breaker),
+        },
+        # 새 태스크가 뜬 뒤에 옛 태스크를 내린다(무중단). 갱신 중 잠깐
+        # 태스크가 2개가 되지만 Fargate 는 초 단위 과금이라 몇 원 수준이다.
+        "minimumHealthyPercent": 100,
+        "maximumPercent": 200,
+    }
 
     network_configuration = {
         "awsvpcConfiguration": {
@@ -686,6 +834,7 @@ def ensure_service(
                 taskDefinition=task_definition,
                 desiredCount=desired_count,
                 networkConfiguration=network_configuration,
+                deploymentConfiguration=deployment_configuration,
                 forceNewDeployment=True,
             )
         except Exception as exc:  # noqa: BLE001
@@ -716,6 +865,7 @@ def ensure_service(
             desiredCount=desired_count,
             launchType="FARGATE",
             networkConfiguration=network_configuration,
+            deploymentConfiguration=deployment_configuration,
         )
 
     try:
@@ -757,6 +907,36 @@ def scale_service(ecs: Any, *, cluster: str, service: str, desired_count: int) -
             remedy="서비스가 존재하는지, ecs:UpdateService 권한이 있는지 확인하세요.",
         ) from exc
     return int(resp["service"].get("desiredCount", desired_count))
+
+
+def halt_service(ecs: Any, *, cluster: str, service: str) -> str:
+    """실패한 배포의 태스크 재생성을 멈춘다 (desiredCount → 0).
+
+    배포가 실패했고 **떠 있는 태스크가 하나도 없을 때** 부른다. 그냥 두면
+    ECS 가 죽는 태스크를 계속 새로 띄우고, 우리 기록에는 "자동 중단"이라고
+    적혀 있는 동안 요금만 쌓인다.
+
+    판단은 호출자(`ECSAgent._halt_failed_deployment`)가 한다. 예전에는
+    "되돌릴 이전 리비전이 있는가"로 갈랐는데, 그건 그 리비전이 지금 멀쩡히
+    떠 있다는 뜻이 아니어서 틀린 기준이었다.
+
+    실패해도 예외를 올리지 않는다. 이 함수는 **이미 실패를 처리하는 중**에
+    불리므로, 여기서 터지면 원래 실패 원인이 이 실패에 가려진다.
+    돌려주는 문자열은 사용자에게 보여줄 결과 설명이다.
+    """
+    try:
+        scale_service(ecs, cluster=cluster, service=service, desired_count=0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("실패한 배포를 멈추지 못했습니다: %s", error_message(exc))
+        return (
+            "태스크를 자동으로 멈추지 못했습니다 — AWS 콘솔에서 서비스 "
+            f"'{service}' 의 원하는 태스크 수를 0 으로 내려 과금을 멈추세요."
+        )
+    logger.warning("실패한 배포 중단: %s/%s 태스크 수를 0 으로 내렸습니다.", cluster, service)
+    return (
+        f"추가 과금을 막기 위해 서비스 '{service}' 의 태스크 수를 0 으로 "
+        "내렸습니다. 원인을 고친 뒤 다시 배포하면 복구됩니다."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -894,7 +1074,7 @@ def wait_for_public_url(
     # "IP 를 못 받았다"로 뭉개면 진짜 원인이 사라진다.
     if probe.last_error:
         raise InfraError(
-            f"태스크의 공인 IP 를 확인하는 중 AWS 호출이 계속 실패했습니다.",
+            "태스크의 공인 IP 를 확인하는 중 AWS 호출이 계속 실패했습니다.",
             detail=probe.last_error,
             remedy="권한표에 ecs:ListTasks, ecs:DescribeTasks, "
                    "ec2:DescribeNetworkInterfaces 가 있는지, AWS 자격증명이 "

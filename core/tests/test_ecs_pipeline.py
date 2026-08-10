@@ -1072,3 +1072,929 @@ def test_a_real_error_is_still_an_error():
         agent._check_ecs_service("c", "s", "us-east-1", missing_severity="warning")
     )
     assert check.severity == "error", "권한 거부를 '아직 없음'으로 삼켰다"
+
+
+# ===========================================================================
+# 보안 스캐너 결과 계약 — Codex 3차 #1
+#
+# `scan_all()` 은 `SecurityScanResult(image=..., dockerfile_path=...,
+# repo_path=...)` 로 결과를 만든 뒤 `compute_pass()` 를 부르고, 호출부는
+# `scan_passed` · `critical_count` 같은 이름으로 읽었다. 그런데 모델에는
+# 그 중 **아무것도 없었다.** `passed` 는 required 라서 스캔은 도구가 한 번
+# 돌기도 전에 ValidationError 로 죽었고, 확장에서 배포를 누르면 이미지를
+# 빌드해 ECR 에 올린 다음 정상 배포가 전부 "실패"로 기록됐다.
+#
+# 아래 테스트들은 스캐너를 **가짜로 바꾸지 않는다.** 예전 테스트가 놓친
+# 이유가 바로 `scan_all` 을 monkeypatch 해버렸기 때문이다 — 진짜 모델은
+# 한 번도 구성되지 않았다.
+# ===========================================================================
+
+
+@pytest.fixture
+def no_scanner_binaries(monkeypatch):
+    """스캐너 바이너리가 하나도 없는 환경을 **강제**한다.
+
+    이걸 환경에 맡기면 안 된다. trivy 가 깔린 개발 PC 에서는 스캔이 진짜로
+    성공해 `tool_errors` 가 비고, CI 컨테이너에서는 비어 있지 않다 — 같은
+    코드가 기계에 따라 다른 결과를 내는 테스트는 아무것도 지켜주지 못한다.
+    (실제로 그렇게 써서 한 번 깨뜨렸다.)
+    """
+    from core.security_scan import SecurityScanner
+
+    async def _missing(*_a, **_k):
+        raise FileNotFoundError("binary not installed")
+
+    monkeypatch.setattr(SecurityScanner, "_run_cmd", staticmethod(_missing))
+
+
+def test_scan_all_can_actually_build_its_own_result():
+    """[회귀] 스캐너가 결과 객체를 만드는 것부터 실패했다.
+
+    `SecurityScanResult(image=..., dockerfile_path=..., repo_path=...)` 는
+    모델에 `passed` 가 required 라서 ValidationError 로 죽었다. 도구가
+    깔려 있든 아니든 **여기까지는 반드시 와야 한다.**
+    """
+    from core.schemas import SecurityScanResult
+    from core.security_scan import security_scanner
+
+    result = asyncio.run(
+        security_scanner.scan_all(
+            image="alpine:3.19", dockerfile_path=None, repo_path=None
+        )
+    )
+    assert isinstance(result, SecurityScanResult)
+    # 호출부가 읽는 이름들이 실제로 나와야 한다.
+    for name in ("scan_passed", "critical_count", "hadolint_error_count",
+                 "secret_count", "tool_errors"):
+        assert hasattr(result, name), f"결과에 {name} 가 없다"
+
+
+def test_scan_all_reports_the_tools_that_could_not_run(no_scanner_binaries):
+    """도구가 없으면 "검사했는데 0건"으로 위장하지 않는다."""
+    from core.security_scan import security_scanner
+
+    result = asyncio.run(
+        security_scanner.scan_all(
+            image="alpine:3.19", dockerfile_path=None, repo_path=None
+        )
+    )
+    assert "trivy_not_installed" in result.tool_errors
+    assert result.passed, "도구 부재로 배포를 막으면 안 된다"
+
+
+def _scan_result(*findings):
+    from core.schemas import SecurityScanResult
+
+    result = SecurityScanResult(image="img")
+    result.findings = list(findings)
+    result.compute_pass()
+    return result
+
+
+def _finding(tool: str, severity: str, title: str):
+    from core.schemas import (
+        SecurityFinding,
+        SecurityScanSeverity,
+        SecurityScanTool,
+    )
+
+    return SecurityFinding(
+        tool=SecurityScanTool(tool),
+        severity=SecurityScanSeverity(severity),
+        title=title,
+    )
+
+
+def test_blocking_rules_match_the_design():
+    """설계서 §Q3: critical·hadolint error·시크릿 → 차단. high → 경고."""
+    assert _scan_result(_finding("trivy", "critical", "CVE-1")).blocked
+    assert _scan_result(_finding("hadolint", "critical", "DL3008")).blocked
+    assert _scan_result(_finding("gitleaks", "critical", "secret_leak:aws")).blocked
+
+    warn_only = _scan_result(_finding("trivy", "high", "CVE-2"))
+    assert warn_only.passed, "high 는 경고인데 배포를 막았다"
+    assert warn_only.high_count == 1
+
+
+def test_a_tool_that_never_ran_is_not_counted_as_a_clean_result():
+    """도구 부재는 취약점 0건이 아니다 — 막지는 않되 반드시 표시한다."""
+    result = _scan_result(_finding("trivy", "info", "trivy_not_installed"))
+    assert result.passed, "도구가 없다고 배포를 막으면 안 된다"
+    assert result.critical_count == 0
+    assert "trivy_not_installed" in result.tool_errors
+
+
+def test_the_counts_survive_serialisation():
+    """집계값이 property 로만 있으면 레코드를 통째로 직렬화할 때 사라진다."""
+    dumped = _scan_result(_finding("trivy", "critical", "CVE-1")).model_dump()
+    for field in ("critical_count", "high_count", "hadolint_error_count",
+                  "secret_count", "scan_passed"):
+        assert field in dumped, f"직렬화에서 {field} 가 빠졌다"
+
+
+def _attributes_read_from(
+    source_path: Path, receiver: str, *, inside: str | None = None
+) -> set[str]:
+    """소스에서 `<receiver>.<attr>` 로 읽는 속성 이름을 긁어온다.
+
+    `inside` 를 주면 그 이름의 함수 본문만 본다. 흔한 변수명(`result`)을
+    파일 전체에서 찾으면 남의 지역변수까지 걸려들어, 검사가 엉뚱한 것을
+    잡느라 정작 봐야 할 것을 못 본다.
+    """
+    import ast
+    import re
+
+    text = source_path.read_text(encoding="utf-8")
+    if inside is not None:
+        tree = ast.parse(text)
+        bodies = [
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == inside
+        ]
+        assert bodies, f"{source_path.name} 에서 {inside}() 를 못 찾았다"
+        text = "\n".join(ast.unparse(node) for node in bodies)
+    return set(re.findall(rf"\b{re.escape(receiver)}\.([a-z_][a-z0-9_]*)", text))
+
+
+def test_every_scan_field_the_deploy_path_reads_actually_exists():
+    """[계약] 읽는 쪽과 모델을 대조한다.
+
+    이번 사고의 본질은 "값을 바꾸면서 읽는 쪽을 확인하지 않은 것"이 아니라
+    그 반대 — **읽는 코드를 쓰면서 모델을 확인하지 않은 것**이다. 사람이
+    기억하는 대신 소스를 직접 읽어 대조한다.
+    """
+    from core.schemas import SecurityScanResult
+
+    core_dir = Path(__file__).resolve().parents[1]
+    readers = [
+        (core_dir / "agents" / "ecs_agent.py", "record.scan_result", None),
+        (core_dir / "security_scan.py", "result", "scan_all"),
+    ]
+
+    sample = SecurityScanResult()
+    wanted: set[str] = set()
+    for path, receiver, inside in readers:
+        assert path.is_file(), f"경로가 바뀌었다: {path}"
+        wanted |= _attributes_read_from(path, receiver, inside=inside)
+
+    # 읽기 전용 속성만 검사한다 — 대입은 모델 필드가 아니어도 무방.
+    assert {"scan_passed", "critical_count", "hadolint_error_count",
+            "secret_count", "compute_pass"} <= wanted, (
+        "대조할 속성을 못 찾았다 — 경로나 변수명이 바뀌어 이 검사가 "
+        "무력해졌다"
+    )
+    missing = [name for name in wanted if not hasattr(sample, name)]
+    assert not missing, f"읽는 코드는 있는데 모델에 없는 속성: {sorted(missing)}"
+
+
+def test_a_blocking_scan_fails_the_deploy_with_readable_numbers():
+    """게이트 메시지가 AttributeError 없이 만들어지는가."""
+    record = ECSDeployRecord()
+    record.scan_result = _scan_result(
+        _finding("trivy", "critical", "CVE-1"),
+        _finding("gitleaks", "critical", "secret_leak:aws"),
+    )
+    assert not record.scan_result.scan_passed
+    message = (
+        f"보안 스캔 실패: critical={record.scan_result.critical_count} "
+        f"hadolint_err={record.scan_result.hadolint_error_count} "
+        f"secrets={record.scan_result.secret_count}"
+    )
+    assert message == "보안 스캔 실패: critical=1 hadolint_err=0 secrets=1"
+
+
+# ===========================================================================
+# 서킷 브레이커가 **실제로** 배포를 멈추는가 — Codex 3차 #2
+#
+# 예전에는 브레이커가 "작동"해도 우리 기록의 상태값만 바뀌었다. AWS 에는
+# 아무 말도 하지 않았으므로 ECS 는 죽는 태스크를 계속 새로 띄웠다.
+# 기록에는 "자동 중단", 청구서에는 계속 과금.
+# ===========================================================================
+
+
+class RecordingEcs:
+    """update_service / create_service 호출 인자를 그대로 보관한다."""
+
+    def __init__(self):
+        self.created: list[dict] = []
+        self.updated: list[dict] = []
+
+    def describe_services(self, **_):
+        return {"services": []}
+
+    def create_service(self, **kwargs):
+        self.created.append(kwargs)
+        return {"service": {"serviceArn": "arn:svc", "desiredCount":
+                            kwargs.get("desiredCount", 1)}}
+
+    def update_service(self, **kwargs):
+        self.updated.append(kwargs)
+        return {"service": {"serviceArn": "arn:svc", "desiredCount":
+                            kwargs.get("desiredCount", 1)}}
+
+
+def _breaker_config(kwargs: dict) -> dict:
+    return kwargs.get("deploymentConfiguration", {}).get(
+        "deploymentCircuitBreaker", {}
+    )
+
+
+def _assert_percentages_are_explicit(kwargs: dict) -> None:
+    """UpdateService 는 이 구조체를 **통째로 교체**한다.
+
+    일부만 보내면 나머지는 AWS 기본값으로 되돌아간다 — 누가 맞춰둔 값이
+    배포할 때마다 조용히 원복된다. 그래서 두 퍼센트 값도 명시해야 한다.
+    """
+    config = kwargs.get("deploymentConfiguration", {})
+    assert config.get("minimumHealthyPercent") is not None, (
+        "minimumHealthyPercent 를 안 보냈다 — AWS 기본값으로 되돌아간다"
+    )
+    assert config.get("maximumPercent") is not None, (
+        "maximumPercent 를 안 보냈다 — AWS 기본값으로 되돌아간다"
+    )
+
+
+def test_a_new_service_enables_the_ecs_circuit_breaker():
+    """[회귀] ECS 자체 브레이커가 꺼져 있으면 죽는 태스크가 무한 재생성된다."""
+    ecs = RecordingEcs()
+    aws_infra.ensure_service(
+        ecs, cluster="c", service="s", task_definition="td:1",
+        subnet_ids=["subnet-1"], security_group_ids=["sg-1"],
+    )
+    assert ecs.created, "서비스를 만들지 않았다"
+    assert _breaker_config(ecs.created[0]) == {"enable": True, "rollback": True}
+    _assert_percentages_are_explicit(ecs.created[0])
+
+
+def test_an_updated_service_enables_it_too():
+    """갱신 경로만 빠지면 두 번째 배포부터 보호가 사라진다."""
+    ecs = RecordingEcs()
+    ecs.describe_services = lambda **_: {
+        "services": [{"status": "ACTIVE", "serviceName": "s"}]
+    }
+    aws_infra.ensure_service(
+        ecs, cluster="c", service="s", task_definition="td:2",
+        subnet_ids=["subnet-1"], security_group_ids=["sg-1"],
+    )
+    assert ecs.updated, "서비스를 갱신하지 않았다"
+    assert _breaker_config(ecs.updated[0]) == {"enable": True, "rollback": True}
+    _assert_percentages_are_explicit(ecs.updated[0])
+
+
+def test_the_breaker_can_be_turned_off_explicitly():
+    ecs = RecordingEcs()
+    aws_infra.ensure_service(
+        ecs, cluster="c", service="s", task_definition="td:1",
+        subnet_ids=["subnet-1"], security_group_ids=["sg-1"],
+        circuit_breaker=False,
+    )
+    assert _breaker_config(ecs.created[0]) == {"enable": False, "rollback": False}
+
+
+def _halt(record, ecs, **request_overrides):
+    agent = ECSAgent()
+    asyncio.run(
+        agent._halt_failed_deployment(
+            make_request(**request_overrides), record, {"ecs": ecs}
+        )
+    )
+
+
+def test_a_failed_deploy_with_nothing_running_is_scaled_to_zero():
+    """[회귀] 아무것도 안 떠 있는데 서비스를 놔두면 ECS 가 계속 재시도한다."""
+    ecs = RecordingEcs()
+    record = ECSDeployRecord()
+    record.circuit_breaker_triggered = True
+    record.running_task_count = 0
+
+    _halt(record, ecs)
+
+    assert [u.get("desiredCount") for u in ecs.updated] == [0], (
+        "실패했고 떠 있는 태스크도 없는데 태스크 수를 0 으로 내리지 않았다 — "
+        "기록만 '자동 중단'이고 과금은 계속된다"
+    )
+    assert "0" in record.provisioned.get("halt", "")
+
+
+def test_an_ecs_rollback_is_never_scaled_to_zero():
+    """[부정 통제] ECS 가 되살린 이전 버전을 우리 손으로 끄면 안 된다."""
+    ecs = RecordingEcs()
+    record = ECSDeployRecord()
+    record.circuit_breaker_triggered = True
+    record.ecs_rolled_back = True
+    record.running_task_count = 0   # 되돌리는 중이라 아직 0 일 수 있다
+
+    _halt(record, ecs)
+
+    assert ecs.updated == [], "ECS 가 복구한 서비스를 우리가 내렸다"
+
+
+def test_a_slow_app_that_is_actually_running_is_not_killed():
+    """뜨긴 떴는데 느린 앱을 자동으로 꺼버리면 멀쩡한 배포를 죽인다."""
+    ecs = RecordingEcs()
+    record = ECSDeployRecord()
+    record.running_task_count = 1
+
+    _halt(record, ecs)
+
+    assert ecs.updated == []
+    warning = record.provisioned.get("cost_warning", "")
+    assert "stop" in warning, "끄는 방법을 알려주지 않았다"
+    assert "헬스체크" in warning, (
+        "헬스체크가 없어서 이 상태를 자동으로 못 잡는다는 사실을 안 알렸다"
+    )
+
+
+def test_the_halt_decision_does_not_rely_on_the_previous_revision():
+    """[회귀] `previous_task_definition_arn` 은 "되돌아갈 곳이 있다"의 증거가 아니다.
+
+    삭제됐다 다시 만들어진 서비스도, 똑같이 망가진 이전 리비전도 그 값을
+    채운다. 예전 판정은 그걸 믿고 중지를 건너뛰었다 — 아무것도 안 떠 있는
+    서비스를 "이전 버전으로 계속 동작합니다"라고 안내하면서.
+    """
+    ecs = RecordingEcs()
+    record = ECSDeployRecord()
+    record.circuit_breaker_triggered = True
+    record.previous_task_definition_arn = "arn:aws:ecs:us-east-1:1:task-definition/app:7"
+    record.running_task_count = 0   # 그 리비전은 지금 떠 있지 않다
+
+    _halt(record, ecs)
+
+    assert [u.get("desiredCount") for u in ecs.updated] == [0], (
+        "이전 리비전이 있다는 이유만으로 중지를 건너뛰었다"
+    )
+
+
+def test_failing_to_stop_the_service_does_not_hide_the_real_failure():
+    """중지 시도가 터지면 원래 실패 원인이 그 예외에 가려진다."""
+    class Broken(RecordingEcs):
+        def update_service(self, **_):
+            raise client_error("AccessDeniedException", "no ecs:UpdateService")
+
+    message = aws_infra.halt_service(Broken(), cluster="c", service="s")
+    assert "콘솔" in message, "직접 끄는 방법을 알려주지 않았다"
+
+
+# ===========================================================================
+# 서브넷만 지정했을 때 VPC 해석 — Codex 3차 #3
+# ===========================================================================
+
+
+def _vpc_with_subnets(ec2, cidrs, *, with_igw=False):
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]
+    vpc_id = vpc["VpcId"]
+    ids = []
+    for cidr in cidrs:
+        subnet = ec2.create_subnet(VpcId=vpc_id, CidrBlock=cidr)["Subnet"]
+        ids.append(subnet["SubnetId"])
+    if with_igw:
+        igw = ec2.create_internet_gateway()["InternetGateway"]["InternetGatewayId"]
+        ec2.attach_internet_gateway(InternetGatewayId=igw, VpcId=vpc_id)
+        table = ec2.create_route_table(VpcId=vpc_id)["RouteTable"]["RouteTableId"]
+        ec2.create_route(RouteTableId=table, DestinationCidrBlock="0.0.0.0/0",
+                         GatewayId=igw)
+        for subnet_id in ids:
+            ec2.associate_route_table(RouteTableId=table, SubnetId=subnet_id)
+    return vpc_id, ids
+
+
+def test_supplied_subnets_reveal_their_vpc():
+    """[회귀] 예전에는 vpc_id 를 빈 문자열로 두고 넘어갔다."""
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        vpc_id, subnet_ids = _vpc_with_subnets(
+            ec2, ["10.0.1.0/24", "10.0.2.0/24"], with_igw=True
+        )
+        target = aws_infra.resolve_subnet_network(ec2, subnet_ids)
+
+    assert target.vpc_id == vpc_id
+    assert set(target.subnet_ids) == set(subnet_ids)
+    assert target.internet_routable is True
+
+
+def test_user_chosen_subnets_are_warned_about_not_blocked():
+    """사용자가 직접 찍어 준 서브넷은 막지 않는다.
+
+    PrivateLink 엔드포인트로 ECR 에 닿는 사설 서브넷은 두 신호가 모두
+    "인터넷 없음"인데도 멀쩡히 동작한다. 우리가 모르는 구성을 사용자가
+    알고 있을 수 있으므로, 여기서 하드 실패시키면 정상 환경을 검증 로직으로
+    깨뜨리게 된다 — 전에 한 번 한 실수다.
+    """
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        _, subnet_ids = _vpc_with_subnets(ec2, ["10.0.1.0/24"], with_igw=False)
+        for subnet_id in subnet_ids:
+            ec2.modify_subnet_attribute(
+                SubnetId=subnet_id, MapPublicIpOnLaunch={"Value": False}
+            )
+        target = aws_infra.resolve_subnet_network(ec2, subnet_ids)
+
+    assert set(target.subnet_ids) == set(subnet_ids), "사용자가 고른 서브넷을 버렸다"
+    assert target.internet_routable is False, (
+        "확인하지 못한 것을 확인했다고 보고하면 경고가 사라진다"
+    )
+
+
+def test_auto_discovery_still_refuses_when_it_cannot_reach_the_internet():
+    """[부정 통제] 반대쪽은 여전히 막아야 한다.
+
+    자동 탐색은 **우리가** 서브넷을 골랐다는 뜻이다. 우리가 고른 게 안 되는
+    것이면 4분 뒤 CannotPullContainerError 를 보여주는 대신 지금 막는다.
+    """
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        for subnet in ec2.describe_subnets()["Subnets"]:
+            ec2.modify_subnet_attribute(
+                SubnetId=subnet["SubnetId"], MapPublicIpOnLaunch={"Value": False}
+            )
+        with pytest.raises(aws_infra.NetworkNotFound) as caught:
+            aws_infra.discover_default_network(ec2)
+
+    assert "인터넷" in str(caught.value)
+
+
+def test_more_subnets_than_ecs_accepts_are_refused_by_number():
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        _, subnet_ids = _vpc_with_subnets(
+            ec2, [f"10.0.{n}.0/24" for n in range(1, 19)], with_igw=True
+        )
+        with pytest.raises(aws_infra.NetworkNotFound) as caught:
+            aws_infra.resolve_subnet_network(ec2, subnet_ids)
+
+    assert "16" in str(caught.value)
+
+
+def test_user_chosen_subnets_are_not_silently_trimmed():
+    """[회귀] 자동 탐색은 3개로 자르지만, 사용자가 다섯 개를 적었다면 다섯 개다.
+
+    말없이 줄이면 AZ 를 넓게 쓰려던 의도가 조용히 무너진다.
+    """
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        _, subnet_ids = _vpc_with_subnets(
+            ec2, [f"10.0.{n}.0/24" for n in range(1, 6)], with_igw=True
+        )
+        target = aws_infra.resolve_subnet_network(ec2, subnet_ids)
+
+    assert len(target.subnet_ids) == 5, (
+        f"사용자가 5개를 지정했는데 {len(target.subnet_ids)}개만 남겼다"
+    )
+
+
+def test_a_private_subnet_is_dropped_instead_of_being_mixed_in():
+    """[회귀] 공인·사설을 섞어 넘기면 태스크 배치에 따라 되기도 안 되기도 한다.
+
+    예전에는 전부 그대로 넘기면서 `internet_routable=True` 라고까지
+    보고했다 — 재현이 안 되는 최악의 실패 모양이다.
+    """
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        vpc_id, public_ids = _vpc_with_subnets(ec2, ["10.0.1.0/24"], with_igw=True)
+        private = ec2.create_subnet(
+            VpcId=vpc_id, CidrBlock="10.0.9.0/24"
+        )["Subnet"]["SubnetId"]
+        target = aws_infra.resolve_subnet_network(ec2, public_ids + [private])
+
+    assert private not in target.subnet_ids, (
+        "인터넷으로 못 나가는 서브넷을 그대로 넘겼다"
+    )
+    assert set(target.subnet_ids) == set(public_ids)
+    assert target.internet_routable is True
+
+
+def test_the_public_ip_flag_is_accepted_as_a_weaker_signal():
+    """라우팅에 igw- 가 안 보여도 공인 IP 자동 할당이 켜져 있으면 진행한다.
+
+    다만 **확인했다고 말하지는 않는다** — 그 구분이 사라지면 경고가
+    사라지고, 이미지 pull 실패의 첫 단서도 함께 사라진다.
+    """
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        _, subnet_ids = _vpc_with_subnets(ec2, ["10.0.1.0/24"], with_igw=False)
+        for subnet_id in subnet_ids:
+            ec2.modify_subnet_attribute(
+                SubnetId=subnet_id, MapPublicIpOnLaunch={"Value": True}
+            )
+        target = aws_infra.resolve_subnet_network(ec2, subnet_ids)
+
+    assert set(target.subnet_ids) == set(subnet_ids)
+    assert target.internet_routable is False, (
+        "보조 신호로 진행한 것을 '확인됨'으로 보고했다"
+    )
+
+
+def test_subnets_from_two_vpcs_are_rejected():
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        _, first = _vpc_with_subnets(ec2, ["10.0.1.0/24"])
+        second_vpc = ec2.create_vpc(CidrBlock="10.1.0.0/16")["Vpc"]["VpcId"]
+        second = ec2.create_subnet(
+            VpcId=second_vpc, CidrBlock="10.1.1.0/24"
+        )["Subnet"]["SubnetId"]
+
+        with pytest.raises(aws_infra.NetworkNotFound) as caught:
+            aws_infra.resolve_subnet_network(ec2, first + [second])
+
+    assert "다른 VPC" in str(caught.value)
+
+
+def test_a_typo_in_a_subnet_id_is_reported_before_anything_is_created():
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        with pytest.raises(aws_infra.NetworkNotFound) as caught:
+            aws_infra.resolve_subnet_network(ec2, ["subnet-deadbeef"])
+
+    assert "subnet-deadbeef" in str(caught.value)
+
+
+def test_custom_subnets_no_longer_require_a_paired_security_group():
+    """[회귀] 요청 모델은 보안 그룹을 생략하면 자동 생성한다고 말한다.
+
+    그런데 서브넷만 지정하면 VPC 를 몰라 그 자동 생성이 항상 실패했다 —
+    문서에도 없는 "둘은 반드시 함께" 규칙이 조용히 생겨 있었다.
+    """
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    agent = ECSAgent()
+    with moto.mock_aws():
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        _, subnet_ids = _vpc_with_subnets(ec2, ["10.0.1.0/24"], with_igw=True)
+        clients = {
+            "ec2": ec2,
+            "ecs": boto3.client("ecs", region_name="us-east-1"),
+            "logs": boto3.client("logs", region_name="us-east-1"),
+        }
+        request = make_request(
+            provision=True, subnet_ids=subnet_ids, security_group_ids=[]
+        )
+        record = ECSDeployRecord()
+        target = asyncio.run(agent._step_provision(request, record, clients))
+
+        groups = ec2.describe_security_groups(
+            GroupIds=[record.provisioned["security_groups"]]
+        )["SecurityGroups"]
+
+    assert target.vpc_id, "VPC 를 해석하지 못했다"
+    assert record.provisioned["vpc"] == target.vpc_id
+    assert groups[0]["VpcId"] == target.vpc_id
+    assert request.security_group_ids == [groups[0]["GroupId"]], (
+        "만든 보안 그룹을 뒤 단계가 쓸 수 있게 요청에 되돌려 심지 않았다"
+    )
+
+
+# ===========================================================================
+# ECS 자동 롤백을 성공으로 착각하지 않는가
+#
+# 서킷 브레이커에 rollback=True 를 켜면서 새로 생긴 위험이다. ECS 는 우리
+# 리비전을 버리고 **이전 리비전을 다시 PRIMARY 로 올린다.** 그러면
+# rolloutState=COMPLETED, running>=desired 가 되므로, 그것만 보던 폴러는
+# "배포 성공"이라고 보고한다 — 사용자는 배포되지 않은 코드를 배포됐다고 믿고,
+# URL 도 200 을 돌려준다(이전 버전이 응답하니까).
+# ===========================================================================
+
+
+OUR_ARN = "arn:aws:ecs:us-east-1:1:task-definition/app:8"
+OLD_ARN = "arn:aws:ecs:us-east-1:1:task-definition/app:7"
+
+
+def _poll(frames, monkeypatch, record=None):
+    import boto3
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: FakePollEcs(frames))
+    record = record if record is not None else ECSDeployRecord()
+    result = asyncio.run(ECSAgent()._step_poll_deployment(make_request(), record))
+    return result, record
+
+
+def test_an_ecs_rollback_is_not_reported_as_a_successful_deploy(monkeypatch):
+    """[회귀] 되돌아간 이전 버전이 응답한다고 우리 배포가 성공한 게 아니다."""
+    record = ECSDeployRecord()
+    record.task_definition_arn = OUR_ARN
+    frames = [
+        {"runningCount": 0, "desiredCount": 1, "failedTasks": 1,
+         "rolloutState": "IN_PROGRESS", "taskDefinition": OUR_ARN},
+        # ECS 가 이전 리비전을 되살렸다 — 겉보기에는 완벽한 성공이다.
+        {"runningCount": 1, "desiredCount": 1, "failedTasks": 0,
+         "rolloutState": "COMPLETED", "taskDefinition": OLD_ARN},
+    ]
+    (success, _f, breaker), record = _poll(frames, monkeypatch, record)
+
+    assert success is False, "롤백된 배포를 성공이라고 보고했다"
+    assert record.ecs_rolled_back is True
+    assert "app:7" in record.provisioned.get("ecs_rollback", "")
+
+
+def test_a_normal_deploy_of_our_own_revision_still_succeeds(monkeypatch):
+    """[부정 통제] 태스크 정의를 대조한다고 정상 배포를 막으면 안 된다."""
+    record = ECSDeployRecord()
+    record.task_definition_arn = OUR_ARN
+    frames = [
+        {"runningCount": 1, "desiredCount": 1, "failedTasks": 0,
+         "rolloutState": "COMPLETED", "taskDefinition": OUR_ARN},
+    ]
+    (success, _f, _b), record = _poll(frames, monkeypatch, record)
+
+    assert success is True
+    assert record.ecs_rolled_back is False
+
+
+def test_a_deployment_ecs_itself_failed_counts_as_a_breaker_trip(monkeypatch):
+    """AWS 의 판정을 우리 sliding window 보다 우선한다.
+
+    우리 창은 15초 간격 표본이라 ECS 브레이커보다 늦게 반응하거나 아예
+    임계값에 못 미친다. 그때 FAILED 를 평범한 실패로 처리하면 중지 로직이
+    한 번도 돌지 않는다.
+    """
+    frames = [
+        {"runningCount": 0, "desiredCount": 1, "failedTasks": 1,
+         "rolloutState": "FAILED", "taskDefinition": OUR_ARN},
+    ]
+    (success, _f, breaker), _record = _poll(frames, monkeypatch)
+
+    assert success is False
+    assert breaker is True
+
+
+def test_the_last_running_count_is_recorded_for_the_halt_decision(monkeypatch):
+    frames = [
+        {"runningCount": 2, "desiredCount": 3, "failedTasks": 0,
+         "rolloutState": "IN_PROGRESS", "taskDefinition": OUR_ARN},
+    ]
+    _result, record = _poll(frames, monkeypatch)
+    assert record.running_task_count == 2
+
+
+def test_a_missing_service_says_so_instead_of_crashing(monkeypatch):
+    """[회귀] `resp.get("services", [{}])[0]` 는 IndexError 를 낸다.
+
+    describe_services 는 없는 서비스에 대해 **키는 있고 목록은 빈** 응답을
+    준다. 기본값 `[{}]` 는 절대 적용되지 않는다. 사용자에게는 "배포 중
+    예상치 못한 오류"로만 보였다.
+    """
+    import boto3
+
+    class Gone:
+        def describe_services(self, **_):
+            return {"services": [], "failures": [{"reason": "MISSING"}]}
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: Gone())
+    with pytest.raises(aws_infra.InfraError) as caught:
+        asyncio.run(ECSAgent()._step_poll_deployment(make_request(), ECSDeployRecord()))
+
+    assert "MISSING" in (caught.value.detail or "")
+    assert "삭제" in (caught.value.remedy or "")
+
+
+def test_no_rollback_proposal_is_offered_for_something_ecs_already_undid(monkeypatch):
+    """이미 되돌아간 일을 "승인하면 되돌립니다"라고 안내하면 안 된다.
+
+    그 승인은 같은 리비전을 한 번 더 배포한다.
+    """
+    agent = ECSAgent()
+    record = ECSDeployRecord()
+    record.ecs_rolled_back = True
+    record.previous_task_definition_arn = OLD_ARN
+
+    called = []
+
+    async def _spy(req, rec):
+        called.append(rec)
+        return "rollback-xxxx"
+
+    monkeypatch.setattr(agent, "_create_rollback_proposal", _spy)
+
+    async def _fake_poll(req, rec):
+        return False, 3, True
+
+    monkeypatch.setattr(agent, "_step_poll_deployment", _fake_poll)
+    result = asyncio.run(
+        _run_failure_branch(agent, record)
+    )
+    assert called == [], "ECS 가 이미 되돌린 배포에 롤백 제안을 또 만들었다"
+    assert result.status == ECSDeployStatus.ROLLED_BACK
+    assert "실행되고 있지 않습니다" in (result.error_message or "")
+
+
+async def _run_failure_branch(agent, record):
+    """`_deploy_pipeline` 의 실패 분기만 떼어 재현한다.
+
+    파이프라인 전체를 돌리려면 AWS 가 필요하다. 여기서 보려는 것은
+    "ECS 가 되돌렸을 때 어떤 기록이 남는가" 하나다.
+    """
+    request = make_request()
+    record.health_check_failures = 3
+    record.circuit_breaker_triggered = True
+    record.status = ECSDeployStatus.CIRCUIT_BREAKER_TRIGGERED
+    if record.ecs_rolled_back:
+        record.status = ECSDeployStatus.ROLLED_BACK
+        record.error_message = (
+            "배포 실패 — ECS 가 이전 버전으로 자동 복구했습니다. "
+            "이번에 올린 이미지는 실행되고 있지 않습니다."
+        )
+        return record
+    record.rollback_proposal_id = await agent._create_rollback_proposal(request, record)
+    return record
+
+
+def test_the_failure_branch_helper_matches_the_real_pipeline():
+    """[메타] 위 헬퍼가 실제 코드와 어긋나면 그 테스트는 아무것도 못 지킨다."""
+    import inspect
+
+    source = inspect.getsource(ECSAgent._deploy_pipeline)
+    assert "if record.ecs_rolled_back:" in source, (
+        "파이프라인에서 ECS 롤백 분기가 사라졌다"
+    )
+    assert source.index("if record.ecs_rolled_back:") < source.index(
+        "record.rollback_proposal_id = await self._create_rollback_proposal"
+    ), "롤백 제안 생성보다 뒤로 밀리면 제안이 먼저 만들어져 버린다"
+
+
+# ===========================================================================
+# 못 돌린 보안 검사를 사용자에게 알리는가
+# ===========================================================================
+
+
+def test_a_scan_that_never_ran_shows_up_in_the_record(no_scanner_binaries):
+    """[회귀] tool_errors 를 계산만 하고 아무도 안 읽으면 없는 것과 같다.
+
+    trivy 가 없거나 이미지를 못 받아오면 findings 가 비고, 그대로 두면
+    "취약점 0건 = 안전"으로 읽힌다.
+    """
+    agent = ECSAgent()
+    record = ECSDeployRecord()
+    request = make_request(workspace_path=None)
+
+    record = asyncio.run(
+        agent._step_security_scan(request, record, "alpine:3.19")
+    )
+
+    assert record.scan_result is not None
+    assert record.scan_result.tool_errors, "도구 부재가 결과에 안 남았다"
+    warning = record.provisioned.get("scan_warning", "")
+    assert "검사 결과가 아닙니다" in warning, (
+        "검사를 못 돌렸다는 사실이 사용자에게 닿지 않는다"
+    )
+
+
+def test_every_scanner_leaves_a_trace_when_the_binary_is_missing(
+    no_scanner_binaries,
+):
+    """[회귀] 조용히 실패한 스캐너는 "위반 0건"으로 둔갑한다.
+
+    trivy 만 흔적을 남기고 hadolint·gitleaks 는 예외를 삼켰다. 그러면
+    Dockerfile 을 한 번도 안 본 배포가 보안 게이트를 통과한다.
+    """
+    from core.schemas import _SCAN_NOT_PERFORMED_TITLES
+    from core.security_scan import SecurityScanner
+
+    scanner = SecurityScanner()
+    cases = {
+        "hadolint": lambda: scanner._run_hadolint("/tmp/Dockerfile"),
+        "gitleaks": lambda: scanner._run_gitleaks("/tmp"),
+        "trivy": lambda: scanner._run_trivy("img:v1"),
+    }
+    for tool, run in cases.items():
+        titles = {f.title for f in asyncio.run(run())}
+        assert titles & _SCAN_NOT_PERFORMED_TITLES, (
+            f"{tool} 가 실행되지 못했는데 아무 흔적도 안 남겼다: {titles}"
+        )
+
+
+def test_a_scanner_that_crashes_mid_run_also_leaves_a_trace(monkeypatch):
+    """도구는 깔려 있는데 **실행이 터진** 경우.
+
+    위 테스트는 바이너리 부재(FileNotFoundError) 경로만 친다. 진짜 위험한
+    건 이쪽이다 — 도구가 있으니 사용자는 검사가 돌았다고 믿는데, 예외가
+    조용히 삼켜져 findings 가 비어 나온다.
+    """
+    from core.schemas import _SCAN_NOT_PERFORMED_TITLES
+    from core.security_scan import SecurityScanner
+
+    scanner = SecurityScanner()
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("hadolint died")
+
+    monkeypatch.setattr(SecurityScanner, "_run_cmd", staticmethod(_boom))
+
+    for tool, run in {
+        "hadolint": lambda: scanner._run_hadolint("/tmp/Dockerfile"),
+        "gitleaks": lambda: scanner._run_gitleaks("/tmp"),
+        "trivy": lambda: scanner._run_trivy("img:v1"),
+    }.items():
+        titles = {f.title for f in asyncio.run(run())}
+        assert titles & _SCAN_NOT_PERFORMED_TITLES, (
+            f"{tool} 실행이 터졌는데 결과에는 아무 흔적도 없다: {titles}"
+        )
+
+
+def test_the_marker_titles_the_scanner_emits_are_the_ones_the_model_knows():
+    """[계약] 스캐너가 쓰는 제목과 모델이 아는 제목이 어긋나면 조용히 새어나간다."""
+    import re
+
+    from core.schemas import _SCAN_NOT_PERFORMED_TITLES
+
+    source = (Path(__file__).resolve().parents[1] / "security_scan.py").read_text(
+        encoding="utf-8"
+    )
+    emitted = set(re.findall(r'title="((?:trivy|hadolint|gitleaks)_[a-z_]+)"', source))
+    assert emitted, "스캐너에서 마커 제목을 하나도 못 찾았다 — 검사가 무력해졌다"
+    assert emitted <= _SCAN_NOT_PERFORMED_TITLES, (
+        "스캐너는 내보내는데 모델이 모르는 마커: "
+        f"{sorted(emitted - _SCAN_NOT_PERFORMED_TITLES)}"
+    )
+
+
+# ===========================================================================
+# 경고가 확장 화면까지 닿는가
+#
+# 확장은 log_tail 의 **끝 몇 줄만** 그린다. 그래서 "기록에 남겼다"와
+# "사용자가 봤다"는 다른 얘기다. 실제로 scan_warning 은 기록에는 있었지만
+# 항상 잘려 나가고 있었다.
+# ===========================================================================
+
+
+def _extension_tail_slice() -> int:
+    """확장 소스에서 log_tail 을 몇 줄이나 그리는지 읽어온다."""
+    import re
+
+    root = Path(__file__).resolve().parents[2] / "extension"
+    sizes = set()
+    for path in list(root.rglob("*.ts")) + list(root.rglob("*.js")):
+        if "node_modules" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for match in re.finditer(r"log_tail[^\n]{0,80}?slice\(\s*-(\d+)", text):
+            sizes.add(int(match.group(1)))
+        for match in re.finditer(r"\(s\.log_tail \|\| \[\]\)\.slice\(-(\d+)\)", text):
+            sizes.add(int(match.group(1)))
+    return min(sizes) if sizes else 3
+
+
+def test_warnings_survive_the_slice_the_extension_applies():
+    """[회귀] 경고는 log_tail 맨 뒤에 있어야 화면에 남는다."""
+    from core.api.routes.deploy_ecs import to_status_response
+
+    record = ECSDeployRecord()
+    record.provisioned = {
+        "cluster": "c",
+        "log_group": "/ecs/app",
+        "scan_warning": "실행되지 않은 보안 검사가 있습니다: trivy_not_installed",
+        "subnets": "subnet-1",
+        "security_groups": "sg-1",
+        "service": "app (updated)",
+    }
+    record.image_uri = "1.dkr.ecr/app:1"
+    record.service_url = "http://1.2.3.4:8000"
+
+    tail = to_status_response(record).log_tail
+    shown = tail[-_extension_tail_slice():]
+    assert any("scan_warning" in line for line in shown), (
+        "보안 검사를 못 돌렸다는 경고가 화면에 보이는 범위 밖으로 잘렸다: "
+        f"{shown}"
+    )
+    assert "scan_warning" in tail[-1], (
+        "마지막 한 줄만 보여주는 화면(WorkbenchPanel)에서도 보여야 한다"
+    )
+
+
+def test_plain_facts_still_come_before_the_warnings():
+    """[부정 통제] 순서를 바꾼다고 정보가 사라지면 안 된다."""
+    from core.api.routes.deploy_ecs import to_status_response
+
+    record = ECSDeployRecord()
+    record.provisioned = {"cluster": "c", "halt": "태스크 수를 0 으로 내렸습니다"}
+    record.image_uri = "img"
+
+    tail = to_status_response(record).log_tail
+    assert [line.split(":")[0] for line in tail] == ["cluster", "image", "halt"]

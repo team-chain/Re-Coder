@@ -22,7 +22,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 
 SCHEMA_VERSION = "6.4"
@@ -1219,15 +1225,105 @@ class SecurityFinding(BaseModel):
     title:       str
     description: Optional[str] = None
     location:    Optional[str] = None
+    #: 조치 방법. security_scan.py 는 처음부터 이 값을 채워 보내고 있었는데
+    #: 모델에 자리가 없어 pydantic 이 조용히 버렸다 (extra="ignore" 기본값).
+    #: 지금 이 값을 화면에 그리는 곳은 없지만, 스캐너가 만들어 놓은 정보를
+    #: 모델에서 버리는 상태는 그 자체로 함정이다 — 나중에 쓰려는 사람은
+    #: "값을 넣었는데 왜 안 오지"로 시간을 쓰게 된다.
+    fix_suggestion: Optional[str] = None
     redacted:    bool = False
 
 
+#: "스캔을 못 했다"는 뜻의 finding 제목. 이건 취약점이 아니라 **검사 부재**이므로
+#: 차단 사유로 세지 않되, tool_errors 로 올려 사용자가 "0건 = 안전"으로
+#: 오해하지 않게 한다.
+_SCAN_NOT_PERFORMED_TITLES = frozenset({
+    "trivy_not_installed", "trivy_scan_failed",
+    "hadolint_not_installed", "hadolint_scan_failed",
+    "gitleaks_not_installed", "gitleaks_scan_failed",
+})
+
+
 class SecurityScanResult(BaseModel):
-    passed:      bool
+    """Trivy·Hadolint·gitleaks 통합 결과.
+
+    차단 규칙(설계서 §Q3):
+      - Trivy critical → 차단 / Trivy high → 경고
+      - Hadolint error → 차단 / warning    → 경고
+      - 시크릿         → 항상 차단
+
+    집계값은 **findings 에서 파생**한다. 따로 저장하면 findings 를 고친 뒤
+    숫자만 옛날 값으로 남는 어긋남이 생긴다.
+
+    `passed` 는 직접 넣지 말고 `compute_pass()` 로 계산한다. 기본값이 True 인
+    이유는 스캐너가 결과 객체를 **먼저 만들고** findings 를 채운 뒤
+    compute_pass() 를 부르기 때문이다 — 여기가 required 라서 스캐너가
+    구성 시점에 ValidationError 로 죽고 있었다.
+    """
+    passed:      bool = True
     blocked:     bool = False
     findings:    list[SecurityFinding] = Field(default_factory=list)
     tool_errors: list[str] = Field(default_factory=list)
     scanned_at:  str = Field(default_factory=lambda: __import__('datetime').datetime.utcnow().isoformat())
+
+    #: 무엇을 대상으로 돌렸는가. 셋 다 None 이면 아무것도 검사하지 않은 것이다.
+    image:           Optional[str] = None
+    dockerfile_path: Optional[str] = None
+    repo_path:       Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # 집계 — computed_field 로 선언해 model_dump()/JSON 응답에도 실린다.
+    # (순수 property 로 두면 서버가 dict 를 손으로 조립하는 경로에서만 보이고,
+    #  레코드를 통째로 직렬화하는 경로에서는 조용히 사라진다.)
+    # ------------------------------------------------------------------
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def critical_count(self) -> int:
+        return sum(1 for f in self.findings
+                   if f.tool == SecurityScanTool.TRIVY
+                   and f.severity == SecurityScanSeverity.CRITICAL)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def high_count(self) -> int:
+        return sum(1 for f in self.findings
+                   if f.tool == SecurityScanTool.TRIVY
+                   and f.severity == SecurityScanSeverity.HIGH)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def hadolint_error_count(self) -> int:
+        """hadolint level=error 건수. _run_hadolint 가 error 를 CRITICAL 로 올린다."""
+        return sum(1 for f in self.findings
+                   if f.tool == SecurityScanTool.HADOLINT
+                   and f.severity == SecurityScanSeverity.CRITICAL)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def secret_count(self) -> int:
+        """시크릿 탐지 건수. gitleaks 와 내장 폴백 스캐너가 같은 제목을 쓴다."""
+        return sum(1 for f in self.findings
+                   if (f.title or "").startswith("secret_leak:"))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def scan_passed(self) -> bool:
+        """`passed` 의 별칭. ECS 경로가 이 이름으로 읽는다."""
+        return self.passed
+
+    def compute_pass(self) -> bool:
+        """findings 로부터 차단 여부를 확정한다."""
+        self.tool_errors = sorted({
+            f.title for f in self.findings if f.title in _SCAN_NOT_PERFORMED_TITLES
+        })
+        self.passed = (
+            self.critical_count == 0
+            and self.hadolint_error_count == 0
+            and self.secret_count == 0
+        )
+        self.blocked = not self.passed
+        return self.passed
 
 
 # ---------------------------------------------------------------------------
@@ -1388,6 +1484,13 @@ class ECSDeployRecord(BaseModel):
     # 폴링 / Circuit Breaker
     health_check_failures:          int = 0
     circuit_breaker_triggered:      bool = False
+    #: 마지막 폴링에서 실제로 떠 있던 태스크 수. 실패 처리에서 "아무것도
+    #: 못 뜬 상태"와 "뜨긴 떴는데 느린 상태"를 가르는 데 쓴다.
+    running_task_count:             int = 0
+    #: ECS 서킷 브레이커가 우리 리비전을 버리고 이전 리비전으로 되돌렸는가.
+    #: 이 경우 서비스는 **동작하지만 우리가 올린 이미지가 아니다** —
+    #: 성공으로 보고하면 사용자는 배포되지 않은 코드를 배포됐다고 믿는다.
+    ecs_rolled_back:                bool = False
 
     # Rollback proposal (설계서 §Q3-A Approval Level 3)
     rollback_proposal_id:           Optional[str] = None
