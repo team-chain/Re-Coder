@@ -1,4 +1,4 @@
-"""AWS connect는 STS 검증만 수행하며 키를 파일에 저장하지 않는지 확인한다."""
+"""AWS connect는 키를 파일에 저장하지 않고 현재 Core 진단을 갱신하는지 확인한다."""
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +20,7 @@ def test_connect_validates_and_keeps_credentials_in_current_core(monkeypatch: py
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ORIGINAL_SECRET")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     received: dict[str, str] = {}
+    diagnostics_refreshed = False
 
     def fake_sts(*, profile: str | None, region: str) -> dict[str, str]:
         received["access_key"] = os.environ["AWS_ACCESS_KEY_ID"]
@@ -29,7 +30,10 @@ def test_connect_validates_and_keeps_credentials_in_current_core(monkeypatch: py
         return {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/test", "user_id": "AIDA"}
 
     monkeypatch.setattr(aws, "_call_sts_get_caller_identity", fake_sts)
-    monkeypatch.setattr(aws, "_refresh_diagnostics_cache", lambda: pytest.fail("connect must not refresh persistent diagnostics"))
+    def fake_refresh_diagnostics() -> None:
+        nonlocal diagnostics_refreshed
+        diagnostics_refreshed = True
+    monkeypatch.setattr(aws, "_refresh_diagnostics_cache", fake_refresh_diagnostics)
 
     result = asyncio.run(aws.connect_aws(aws.AwsConnectRequest(
         access_key_id="AKIA12345678901234",
@@ -40,6 +44,7 @@ def test_connect_validates_and_keeps_credentials_in_current_core(monkeypatch: py
     assert result.ready is True
     assert result.identity and result.identity.account == "123456789012"
     assert result.storage == "secret_storage"
+    assert diagnostics_refreshed is True
     assert received == {
         "access_key": "AKIA12345678901234",
         "secret_key": "secret-key-for-test",
@@ -56,6 +61,7 @@ def test_connect_does_not_call_legacy_file_writer(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(aws, "_call_sts_get_caller_identity", lambda **_: {"account": "1", "arn": "arn", "user_id": "id"})
     monkeypatch.setattr(aws, "_save_recoder_credentials", lambda *args: pytest.fail("connect must not write ~/.recoder"))
     monkeypatch.setattr(aws, "_save_aws_credentials_file", lambda *args: pytest.fail("connect must not write ~/.aws"))
+    monkeypatch.setattr(aws, "_refresh_diagnostics_cache", lambda: None)
 
     result = asyncio.run(aws.connect_aws(aws.AwsConnectRequest(
         access_key_id="AKIA12345678901234",
