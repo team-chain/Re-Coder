@@ -12,13 +12,16 @@ Local Core — Q3: ECS Deployment API Routes
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
+
+import json
+import os
+from pathlib import Path
 
 from core.agents.ecs_agent import ECSAgent
 from core.schemas import (
@@ -34,13 +37,100 @@ logger = logging.getLogger(__name__)
 # (로그 그룹 이름 문자열만 걸린다) 깨질 호출자 없이 맞출 수 있다.
 router = APIRouter(prefix="/api/ecs", tags=["ecs"])
 
-# 인메모리 배포 레코드 저장소 (실제 환경에서는 SQLite/DB로 대체)
-_deploy_records: Dict[str, ECSDeployRecord] = {}
+#: 아직 끝나지 않은 배포로 볼 상태.
+_ACTIVE_STATUSES = frozenset({ECSDeployStatus.PENDING, ECSDeployStatus.IN_PROGRESS})
+
+
+#: 배포 기록 저장 파일. 테스트는 환경변수로 다른 경로를 준다.
+def _store_path() -> Path:
+    override = os.environ.get("RECODER_ECS_STORE")
+    if override:
+        return Path(override)
+    return Path.home() / ".recoder" / "ecs_deployments.json"
+
+
+#: 재시작 뒤에도 살아남는 최근 기록 수. 이보다 오래된 건 버린다.
+_MAX_STORED_RECORDS = 50
+
+
+def _save_records() -> None:
+    """기록을 디스크에 남긴다. 실패해도 배포를 막지 않는다.
+
+    **이게 없으면 돈이 샌다.** 예전에는 기록이 프로세스 메모리에만 있었다.
+    Core 를 재시작하면(리포에 `restart-core.bat` 이 있을 만큼 흔한 일이다)
+    ECS 서비스는 desiredCount=1 로 계속 돌면서 과금되는데, 상태 조회는
+    빈 기본값(`stage="idle"`)을 돌려줬다. 사이드바에는 배포된 게 아무것도
+    없다고 뜨고, 멈출 방법도 화면에 없다. 커스텀 이름을 쓴 사용자는
+    배포 중지 엔드포인트의 기본값(recoder-cluster/recoder-app)조차 안 맞아
+    제품 안에서는 손쓸 수가 없었다.
+    """
+    try:
+        recent = sorted(
+            _deploy_records.values(), key=lambda r: r.started_at, reverse=True
+        )[:_MAX_STORED_RECORDS]
+        path = _store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = [r.model_dump(mode="json") for r in recent]
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)   # 원자적 교체 — 반쯤 쓰인 파일을 남기지 않는다
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("배포 기록을 저장하지 못했습니다: %s", exc)
+
+
+def _load_records() -> Dict[str, ECSDeployRecord]:
+    """디스크에서 기록을 복구한다.
+
+    **아직 진행 중이던 기록은 진행 중으로 되살리지 않는다.** 그 파이프라인을
+    돌리던 프로세스는 이미 죽었으므로 아무도 그 배포를 이어가지 않는다.
+    진행 중으로 두면 409 동시 배포 가드가 그 서비스를 영원히 잠근다.
+    대신 "결과를 알 수 없음"으로 끝맺고, 태스크가 떠 있을 수 있다는 경고와
+    함께 클러스터·서비스 이름을 남긴다 — 그래야 멈출 수 있다.
+    """
+    out: Dict[str, ECSDeployRecord] = {}
+    path = _store_path()
+    if not path.is_file():
+        return out
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("배포 기록을 읽지 못했습니다(무시하고 진행): %s", exc)
+        return out
+
+    for item in raw if isinstance(raw, list) else []:
+        try:
+            record = ECSDeployRecord(**item)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("배포 기록 한 건을 건너뜁니다: %s", exc)
+            continue
+        if record.status in _ACTIVE_STATUSES:
+            record.status = ECSDeployStatus.FAILED
+            record.completed_at = record.completed_at or datetime.now(timezone.utc)
+            record.error_message = (
+                "Core 가 재시작되어 이 배포의 결과를 알 수 없습니다."
+            )
+            record.error_remedy = (
+                f"AWS 콘솔이나 배포 중지로 '{record.cluster}/{record.service}' "
+                "상태를 확인하세요."
+            )
+            record.provisioned["cost_warning"] = (
+                f"서비스 '{record.service}' 의 태스크가 계속 떠 있을 수 "
+                "있습니다 — 요금이 발생합니다. 배포 중지"
+                "(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 내리세요."
+            )
+            logger.warning(
+                "재시작 전 진행 중이던 배포를 발견했습니다: %s (%s/%s)",
+                record.deployment_id, record.cluster, record.service,
+            )
+        out[record.deployment_id] = record
+    return out
+
+
+# 배포 레코드 저장소. 메모리에 두되 디스크에 백업하고, 기동 때 되읽는다.
+_deploy_records: Dict[str, ECSDeployRecord] = _load_records()
 _ecs_agent = ECSAgent()
 
 
-#: 아직 끝나지 않은 배포로 볼 상태.
-_ACTIVE_STATUSES = frozenset({ECSDeployStatus.PENDING, ECSDeployStatus.IN_PROGRESS})
 
 
 def _active_deployment(cluster: str, service: str) -> Optional[ECSDeployRecord]:
@@ -201,6 +291,9 @@ async def start_deployment(
         )
 
     # 백그라운드에서 ECS 파이프라인 실행
+    # 파이프라인이 시작되기 **전에** 남긴다. 여기서 죽어도 클러스터·서비스
+    # 이름은 남아 있어야 나중에 멈출 수 있다.
+    _save_records()
     background_tasks.add_task(_run_deployment, deployment_id, request)
 
     logger.info(
@@ -225,6 +318,7 @@ async def _run_deployment(deployment_id: str, request: ECSDeployRequest) -> None
         if result is not record:
             result.deployment_id = deployment_id
         _deploy_records[deployment_id] = result
+        _save_records()
         logger.info("배포 %s 종료: status=%s", deployment_id, result.status)
     except Exception as exc:
         logger.error("배포 %s 가 예외로 중단됨: %s", deployment_id, exc, exc_info=True)
@@ -232,6 +326,7 @@ async def _run_deployment(deployment_id: str, request: ECSDeployRequest) -> None
             record.status = ECSDeployStatus.FAILED
             record.error_message = str(exc)
             record.completed_at = datetime.now(timezone.utc)
+            _save_records()
 
 
 # ---------------------------------------------------------------------------
@@ -289,10 +384,18 @@ async def list_deployments(
 @router.post("/deploy/{deployment_id}/cancel", response_model=ECSDeployRecord)
 async def cancel_deployment(deployment_id: str) -> ECSDeployRecord:
     """
-    진행 중인 배포를 취소 요청합니다.
+    진행 중인 배포에 취소를 **요청**합니다.
 
-    PENDING 또는 IN_PROGRESS 상태의 배포만 취소 가능합니다.
-    실제 ECS 서비스를 즉시 중단하지는 않으며, rollback proposal이 생성됩니다.
+    PENDING 또는 IN_PROGRESS 상태의 배포만 취소할 수 있습니다.
+
+    즉시 끊지는 않습니다. 파이프라인이 현재 단계를 마치는 즉시 멈추고,
+    그때 상태가 CANCELLED 로 바뀝니다. docker build 를 반쯤 자르면 무엇이
+    남았는지 알 수 없기 때문입니다. 그 사이 이 배포는 계속 "진행 중"으로
+    보이며, 같은 서비스에 대한 새 배포는 409 로 막힙니다.
+
+    서비스를 **이번 배포가 새로 만들었다면** 태스크 수를 0 으로 내립니다.
+    기존 서비스를 갱신하던 중이었다면 건드리지 않습니다 — 취소는 "이번
+    배포를 그만둔다"이지 "돌던 앱을 내린다"가 아니기 때문입니다.
     """
     record = _deploy_records.get(deployment_id)
     if not record:
@@ -300,6 +403,10 @@ async def cancel_deployment(deployment_id: str) -> ECSDeployRecord:
             status_code=404,
             detail={"error": "not_found", "deployment_id": deployment_id},
         )
+
+    if record.cancel_requested:
+        # 두 번 눌러도 조용히 같은 결과를 돌려준다.
+        return record
 
     if record.status not in (ECSDeployStatus.PENDING, ECSDeployStatus.IN_PROGRESS):
         raise HTTPException(
@@ -311,11 +418,20 @@ async def cancel_deployment(deployment_id: str) -> ECSDeployRecord:
             },
         )
 
-    record.status = ECSDeployStatus.FAILED
-    record.error_message = "사용자 요청으로 취소됨"
-    record.completed_at = datetime.now(timezone.utc)
+    # **신호만 남긴다. 상태는 파이프라인이 실제로 멈춘 뒤에 바뀐다.**
+    #
+    # 예전에는 여기서 바로 FAILED + completed_at 을 찍었다. 두 가지가 깨졌다:
+    #  (1) 파이프라인은 취소를 전혀 모른 채 계속 돌아 이미지를 올리고
+    #      서비스를 만든 뒤 같은 기록을 SUCCEEDED 로 덮어썼다. 사용자는
+    #      "취소됨"을 보고 손을 뗐는데 Fargate 태스크는 계속 과금됐다.
+    #  (2) 상태가 활성 목록에서 빠지니 409 동시 배포 가드가 뚫려, 같은
+    #      서비스에 두 번째 파이프라인이 들어왔다. 그러면 첫 번째 폴러가
+    #      남의 리비전을 보고 "ECS 가 자동 복구했습니다"라는 없는 사실을
+    #      보고한다.
+    record.cancel_requested = True
+    _save_records()
 
-    logger.info("Deployment %s cancelled by user request", deployment_id)
+    logger.info("Deployment %s cancel requested", deployment_id)
     return record
 
 

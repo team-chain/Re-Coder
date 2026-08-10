@@ -201,6 +201,7 @@ _RUNNING_STATES = {ECSDeployStatus.PENDING, ECSDeployStatus.IN_PROGRESS}
 #: 만들었는지"의 기록일 뿐이라 잘려도 되지만, 이것들은 잘리면 안 된다.
 _WARNING_KEYS = (
     "scan_warning",       # 보안 검사를 못 돌렸다
+    "url_warning",        # 배포는 끝났는데 URL 접속이 확인 안 됐다
     "network_warning",    # 인터넷 경로를 확인 못 했다
     "health_check",       # 헬스체크가 없어 ECS 가 앱 상태를 못 본다
     "cost_warning",       # 태스크가 아직 떠 있어 요금이 붙는다
