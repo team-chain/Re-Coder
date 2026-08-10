@@ -536,6 +536,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'workspace.deploy.remediation.apply': {
+                const proposalId = (payload as { proposalId?: string } | undefined)?.proposalId;
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                if (!proposalId) {
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', {
+                        message: '적용할 수정안 정보가 없습니다. 다시 검사해 주세요.',
+                    });
+                    break;
+                }
+                try {
+                    const result = await this._apiClient.applyDeployRemediation(proposalId, workspacePath);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationResult', result);
+                } catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', { message });
+                }
+                break;
+            }
             case 'workspace.deploy.chooseTarget': {
                 const p = (payload ?? {}) as {
                     target?: 'ecs' | 's3' | 'local';
@@ -763,17 +781,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         region: p.region?.trim() || 'ap-northeast-2',
                         sessionToken: p.sessionToken,
                     });
-                    // 새 Core는 SecretStorage에서 주입받는다. 이 재시작으로 현재
-                    // 세션도 재시작 후 상태와 동일한 자격증명을 사용한다.
-                    await this._coreManager.restart();
-                    const connected = await this._apiClient.getAwsStatus();
-                    this.postMessage('aws.configure.result', { ok: true, status: connected });
-                    this.postMessage('aws.status', connected);
+                    // /api/aws/connect는 검증을 통과한 키를 현재 Core 메모리에만
+                    // 적용한다. 재시작은 다음 Core 시작 시 SecretStorage 주입으로
+                    // 처리하므로, 여기서 Core를 죽여 연결 직후 상태가 사라지지 않게 한다.
+                    // connect 응답에는 이번 등록에서 수행한 권한 점검 결과가 들어 있다.
+                    // 여기서 status API로 다시 덮어쓰면 permission_check가 사라져
+                    // 등록 직후 경고가 보이지 않으므로, 검증 응답을 그대로 전달한다.
+                    this.postMessage('aws.configure.result', { ok: true, status });
+                    this.postMessage('aws.status', status);
                     void this.handleMessage({ type: 'runDiagnostics', payload: {} });
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.configure.result', { ok: false, message: msg });
                     this.postMessage('errorMessage', { message: `AWS 자격증명 등록 실패: ${msg}` });
+                }
+                break;
+            }
+            case 'aws.permissions.check': {
+                try {
+                    const status = await this._apiClient.checkAwsPermissions();
+                    this.postMessage('aws.permissions.result', { ok: true, status });
+                    this.postMessage('aws.status', status);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.permissions.result', { ok: false, message: msg });
                 }
                 break;
             }
