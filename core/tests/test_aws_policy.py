@@ -1831,6 +1831,16 @@ def runtime_actions() -> set[str]:
                 ecs, cluster="recoder-probe", service="recoder-probe-svc",
                 desired_count=0,
             )
+            # 사용자가 서브넷을 직접 지정한 경로. 자동 탐색과 **다른 함수**를
+            # 타므로 여기서 부르지 않으면 이 경로의 AWS 호출은 권한표 증거에
+            # 한 줄도 남지 않는다 — 정적 스캐너가 aws_infra 를 못 본다는
+            # 이유로 이 기록기를 만들었는데, 새로 추가한 함수를 안 부르면
+            # 같은 구멍이 그대로 다시 생긴다.
+            aws_infra.resolve_subnet_network(ec2, list(net.subnet_ids))
+            # 실패한 배포를 멈추는 경로.
+            aws_infra.halt_service(
+                ecs, cluster="recoder-probe", service="recoder-probe-svc"
+            )
             # URL 확인 경로 — 태스크가 실제로 떠 있어야 우리 코드가
             # DescribeTasks 와 DescribeNetworkInterfaces 까지 간다.
             # run_task 는 **픽스처의 준비 작업**이지 우리 코드가 하는 일이

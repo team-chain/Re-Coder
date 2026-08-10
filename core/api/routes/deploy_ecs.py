@@ -197,21 +197,41 @@ _STAGE_TEXT = {
 
 _RUNNING_STATES = {ECSDeployStatus.PENDING, ECSDeployStatus.IN_PROGRESS}
 
+#: `provisioned` 중 **사용자가 반드시 봐야 하는** 항목. 나머지는 "무엇을
+#: 만들었는지"의 기록일 뿐이라 잘려도 되지만, 이것들은 잘리면 안 된다.
+_WARNING_KEYS = (
+    "scan_warning",       # 보안 검사를 못 돌렸다
+    "network_warning",    # 인터넷 경로를 확인 못 했다
+    "health_check",       # 헬스체크가 없어 ECS 가 앱 상태를 못 본다
+    "cost_warning",       # 태스크가 아직 떠 있어 요금이 붙는다
+    "halt",               # 태스크 수를 0 으로 내렸다
+    "ecs_rollback",       # ECS 가 이전 버전으로 되돌렸다
+)
+
 
 def to_status_response(record: Optional[ECSDeployRecord]) -> EcsDeployStatusResponse:
     """코어 배포 기록 → 확장 폴링 응답."""
     if record is None:
         return EcsDeployStatusResponse()
 
-    log_tail: list[str] = []
-    for key, value in (record.provisioned or {}).items():
-        log_tail.append(f"{key}: {value}")
+    # 확장은 log_tail 의 **끝 몇 줄만** 보여준다
+    # (workbenchHtml.ts 는 `.slice(-3)`, WorkbenchPanel.ts 는 마지막 한 줄).
+    # 그래서 순서가 곧 가시성이다. 예전에는 provisioned 를 먼저 다 쏟고
+    # image·url 을 뒤에 붙였는데, 그러면 정작 사용자가 봐야 할 경고
+    # ("보안 검사를 못 돌렸다", "태스크가 계속 떠 있다")가 항상 잘려 나갔다.
+    # 경고를 **맨 뒤**로 보낸다.
+    provisioned = dict(record.provisioned or {})
+    warnings = {k: v for k, v in provisioned.items() if k in _WARNING_KEYS}
+    facts = {k: v for k, v in provisioned.items() if k not in _WARNING_KEYS}
+
+    log_tail: list[str] = [f"{k}: {v}" for k, v in facts.items()]
     if record.image_uri:
         log_tail.append(f"image: {record.image_uri}")
     if record.service_url:
         log_tail.append(f"url: {record.service_url}")
     if record.error_detail:
         log_tail.append(f"detail: {record.error_detail}")
+    log_tail.extend(f"{k}: {v}" for k, v in warnings.items())
 
     return EcsDeployStatusResponse(
         running=record.status in _RUNNING_STATES,
