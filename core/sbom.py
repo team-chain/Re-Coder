@@ -58,10 +58,18 @@ class SBOMGenerator:
 
         # 컨테이너 안에서 결과를 쓰고 호스트 경로로 마운트해 받는다.
         # 이미지 자체는 로컬 도커 데몬에서 읽으므로 소켓도 함께 넘긴다.
+        #
+        # **`as_posix()` 가 필요하다.** 윈도우에서 `str(Path)` 는
+        # `C:\Users\...\sbom` 처럼 역슬래시로 나오는데, `-v` 인자는
+        # 콜론으로 호스트·컨테이너 경로를 가르므로 역슬래시가 섞이면
+        # 파싱이 흔들린다. Docker Desktop 은 `C:/Users/...` 형태를 받는다.
+        # (개발 PC 가 전부 한국어 윈도우인데 이걸 리눅스 기준으로만 짜면
+        #  테스트는 통과하고 실제 배포만 깨진다 — 실제로 그랬다.)
+        host_dir = output_path.parent.as_posix()
         return [
             "docker", "run", "--rm",
             "-v", "/var/run/docker.sock:/var/run/docker.sock",
-            "-v", f"{output_path.parent}:/out",
+            "-v", f"{host_dir}:/out",
             _SYFT_IMAGE,
             f"docker:{image}",
             "-o", f"cyclonedx-json=/out/{output_path.name}",
