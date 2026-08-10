@@ -67,7 +67,7 @@ def client_error(code: str, message: str = "boom"):
 
 
 @pytest.fixture
-def app_client(monkeypatch):
+def app_client(monkeypatch, tmp_path):
     """미들웨어 없이 라우터만 올린 테스트 클라이언트."""
     pytest.importorskip("fastapi")
     from fastapi import FastAPI
@@ -86,6 +86,10 @@ def app_client(monkeypatch):
         return _Allow()
 
     monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
+    # 기록 저장소를 임시 경로로 돌린다. 안 그러면 개발자 홈의
+    # ~/.recoder/ecs_deployments.json 을 테스트가 읽고 쓴다 — 실제 배포
+    # 기록을 테스트가 덮어쓰는 건 물론이고, 남의 기록 때문에 결과가 달라진다.
+    monkeypatch.setenv("RECODER_ECS_STORE", str(tmp_path / "ecs_deployments.json"))
     ecs_routes._deploy_records.clear()
 
     app = FastAPI()
@@ -1998,3 +2002,520 @@ def test_plain_facts_still_come_before_the_warnings():
 
     tail = to_status_response(record).log_tail
     assert [line.split(":")[0] for line in tail] == ["cluster", "image", "halt"]
+
+
+# ===========================================================================
+# 취소가 **실제로** 멈추는가 — P1
+#
+# 예전 취소는 기록의 status 만 FAILED 로 바꿨다. 파이프라인은 그걸 모른 채
+# 계속 돌아 이미지를 올리고 서비스를 만든 뒤 같은 기록을 SUCCEEDED 로
+# 덮어썼다. 사용자는 "취소됨"을 보고 손을 뗐는데 Fargate 태스크는 계속
+# 과금됐다. 게다가 상태가 활성 목록에서 빠져 409 가드까지 뚫렸다.
+# ===========================================================================
+
+
+def test_cancel_actually_stops_the_pipeline():
+    """[회귀] 취소 신호가 단계 경계에서 파이프라인을 끊어야 한다."""
+    agent = ECSAgent()
+    record = ECSDeployRecord()
+    record.cancel_requested = True
+
+    with pytest.raises(ECSAgent._Cancelled):
+        agent._abort_if_cancelled(record, "빌드")
+
+
+def test_a_pipeline_that_is_not_cancelled_runs_on():
+    """[부정 통제] 취소를 안 눌렀으면 아무 일도 없어야 한다."""
+    ECSAgent()._abort_if_cancelled(ECSDeployRecord(), "빌드")
+
+
+def test_the_pipeline_checks_for_cancellation_before_it_costs_money():
+    """[계약] 서비스를 만들기 **전에** 확인 지점이 있어야 한다.
+
+    태스크가 뜬 뒤에야 확인하면, 취소를 눌러도 이미 과금이 시작돼 있다.
+    """
+    import inspect
+
+    source = inspect.getsource(ECSAgent._deploy_pipeline)
+    before_service = source.split("7. 서비스 확보")[0]
+
+    # 개수만 세면 하나쯤 지워도 통과한다. **각 지점을 이름으로** 확인한다.
+    for step in ("preflight", "인프라 확보", "빌드·업로드", "보안 스캔",
+                 "태스크 정의 등록"):
+        assert f'_abort_if_cancelled(record, "{step}")' in before_service, (
+            f"'{step}' 뒤의 취소 확인 지점이 사라졌다 — 그 단계에서 취소하면 "
+            "파이프라인이 계속 달려 다음 단계까지 진행한다"
+        )
+    # 폴링 루프 안에도 있어야 한다 — 없으면 최대 10분을 더 기다린다.
+    assert "_abort_if_cancelled" in inspect.getsource(
+        ECSAgent._step_poll_deployment
+    ), "폴링 중에는 취소가 안 먹는다"
+
+
+def test_cancel_only_marks_a_request_so_the_409_guard_still_holds(app_client):
+    """[회귀] 취소가 상태를 바로 바꾸면 같은 서비스에 두 번째 배포가 들어온다.
+
+    두 번째 파이프라인이 들어오면 첫 번째 폴러는 남의 리비전을 PRIMARY 로
+    보고 "ECS 가 이전 버전으로 자동 복구했습니다"라는 **없는 사실**을
+    보고한다. 게다가 그 분기는 태스크 중지를 일부러 건너뛴다.
+
+    (배포를 실제로 돌리지 않고 진행 중 기록을 직접 넣는다. TestClient 는
+     백그라운드 작업이 끝날 때까지 응답을 붙들고 있어서, 여기서 진짜
+     파이프라인을 띄우면 테스트가 멈춘다.)
+    """
+    client, ecs_routes = app_client
+
+    live = ECSDeployRecord(
+        project_id="p", cluster="c", service="s",
+        status=ECSDeployStatus.IN_PROGRESS,
+    )
+    ecs_routes._deploy_records[live.deployment_id] = live
+
+    cancelled = client.post(f"/api/ecs/deploy/{live.deployment_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    body = cancelled.json()
+
+    assert body["cancel_requested"] is True, "취소 신호가 안 남았다"
+    assert body["status"] == "in_progress", (
+        f"파이프라인이 아직 안 멈췄는데 상태를 끝난 것으로 바꿨다: {body['status']}"
+    )
+    assert body["completed_at"] is None, (
+        "멈추지도 않았는데 종료 시각을 찍었다"
+    )
+
+    second = client.post(
+        "/api/ecs/deploy",
+        json={"project_id": "p", "cluster": "c", "service": "s", "image": "i"},
+    )
+    assert second.status_code == 409, (
+        "취소 요청 뒤 같은 서비스에 두 번째 파이프라인이 들어왔다"
+    )
+
+
+def test_cancelling_twice_is_harmless(app_client):
+    client, ecs_routes = app_client
+    live = ECSDeployRecord(project_id="p", cluster="c", service="s",
+                           status=ECSDeployStatus.IN_PROGRESS)
+    ecs_routes._deploy_records[live.deployment_id] = live
+
+    first = client.post(f"/api/ecs/deploy/{live.deployment_id}/cancel")
+    second = client.post(f"/api/ecs/deploy/{live.deployment_id}/cancel")
+    assert first.status_code == 200 and second.status_code == 200
+    assert second.json()["cancel_requested"] is True
+
+
+def test_the_cancelled_pipeline_ends_as_cancelled_not_succeeded():
+    """[회귀] 취소한 배포가 나중에 SUCCEEDED 로 덮어써지면 안 된다.
+
+    예전에는 취소가 status 만 바꿨고 파이프라인은 끝까지 달려 같은 기록에
+    SUCCEEDED 를 썼다 — 취소한 배포가 성공으로 남았다.
+    """
+    agent = ECSAgent()
+    record = ECSDeployRecord(status=ECSDeployStatus.IN_PROGRESS)
+    record.cancel_requested = True
+
+    with pytest.raises(ECSAgent._Cancelled):
+        agent._abort_if_cancelled(record, "빌드·업로드")
+
+    # 파이프라인의 취소 분기가 하는 일을 그대로 확인한다.
+    source = __import__("inspect").getsource(ECSAgent._deploy_pipeline)
+    branch = source.split("except ECSAgent._Cancelled", 1)[1].split("except ")[0]
+    assert "ECSDeployStatus.CANCELLED" in branch, (
+        "취소로 끝났는데 CANCELLED 상태를 안 남긴다"
+    )
+    assert "_stop_after_cancel" in branch, "취소 뒤 뒷정리를 안 한다"
+
+
+def test_cancel_scales_down_only_a_service_this_run_created():
+    """취소는 "이번 배포를 그만둔다"이지 "돌던 앱을 내린다"가 아니다."""
+    agent = ECSAgent()
+
+    created = ECSDeployRecord()
+    created.provisioned["service"] = "app (created)"
+    created.service_created_by_this_run = True
+    ecs_created = RecordingEcs()
+    asyncio.run(agent._stop_after_cancel(make_request(), created, {"ecs": ecs_created}))
+    assert [u.get("desiredCount") for u in ecs_created.updated] == [0]
+
+    updated = ECSDeployRecord()
+    updated.provisioned["service"] = "app (updated)"
+    updated.service_created_by_this_run = False
+    ecs_updated = RecordingEcs()
+    asyncio.run(agent._stop_after_cancel(make_request(), updated, {"ecs": ecs_updated}))
+    assert ecs_updated.updated == [], (
+        "사용자가 원래 돌리던 앱을 취소가 내려버렸다"
+    )
+    assert "cost_warning" in updated.provisioned
+
+
+def test_cancelling_before_the_service_exists_touches_nothing():
+    agent = ECSAgent()
+    record = ECSDeployRecord()   # provisioned["service"] 없음
+    ecs = RecordingEcs()
+    asyncio.run(agent._stop_after_cancel(make_request(), record, {"ecs": ecs}))
+    assert ecs.updated == []
+
+
+# ===========================================================================
+# 네트워크가 끊긴 것과 앱이 아픈 것 — P1
+# ===========================================================================
+
+
+def test_a_network_blip_does_not_trip_the_circuit_breaker(monkeypatch):
+    """[회귀] wifi 가 45초 끊겼다고 멀쩡한 배포를 내리면 안 된다.
+
+    예전에는 describe_services 실패를 그대로 실패 창에 넣었다. 3표본에
+    50% 면 트립이므로, 연속 3회 실패(45초)로 서킷 브레이커가 걸리고
+    `running_task_count == 0` 이라 서비스가 0 으로 내려갔다. 사용자에게는
+    "배포 Health Check 실패"라고 표시됐다 — 앱은 멀쩡한데.
+
+    자격증명 예외 목록만으로는 못 막았다. 연결 오류는 `.response` 가 없어
+    `error_code()` 가 "" 를 돌려주므로 그 목록에 **절대** 안 걸린다.
+    """
+    import boto3
+    from botocore.exceptions import EndpointConnectionError
+
+    healthy = {"runningCount": 1, "desiredCount": 1, "failedTasks": 0,
+               "rolloutState": "IN_PROGRESS", "taskDefinition": OUR_ARN}
+    blip = EndpointConnectionError(endpoint_url="https://ecs.us-east-1.amazonaws.com")
+    done = {"runningCount": 1, "desiredCount": 1, "failedTasks": 0,
+            "rolloutState": "COMPLETED", "taskDefinition": OUR_ARN}
+
+    frames = [healthy, healthy, blip, blip, blip, done]
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: FakePollEcs(frames))
+
+    record = ECSDeployRecord()
+    record.task_definition_arn = OUR_ARN
+    success, _failures, breaker = asyncio.run(
+        ECSAgent()._step_poll_deployment(make_request(), record)
+    )
+    assert breaker is False, "네트워크 끊김이 서킷 브레이커를 걸었다"
+    assert success is True, "연결이 돌아왔는데 배포를 실패로 처리했다"
+
+
+def test_scattered_blips_never_accumulate_into_a_giveup(monkeypatch):
+    """[회귀] 연속 카운터는 성공할 때마다 0 으로 돌아가야 한다.
+
+    안 그러면 10분 폴링 동안 산발적으로 몇 번 끊긴 것만으로 배포를
+    포기한다 — 그 사이 배포는 정상적으로 끝나가고 있는데.
+    """
+    import boto3
+    from botocore.exceptions import EndpointConnectionError
+
+    blip = EndpointConnectionError(endpoint_url="https://ecs.us-east-1.amazonaws.com")
+    healthy = {"runningCount": 0, "desiredCount": 1, "failedTasks": 0,
+               "rolloutState": "IN_PROGRESS", "taskDefinition": OUR_ARN}
+    done = {"runningCount": 1, "desiredCount": 1, "failedTasks": 0,
+            "rolloutState": "COMPLETED", "taskDefinition": OUR_ARN}
+
+    # 총 6번 끊기지만 연속으로는 최대 1번.
+    frames = [blip, healthy] * 6 + [done]
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: FakePollEcs(frames))
+
+    record = ECSDeployRecord()
+    record.task_definition_arn = OUR_ARN
+    success, _f, breaker = asyncio.run(
+        ECSAgent()._step_poll_deployment(make_request(), record)
+    )
+    assert success is True, "산발적인 끊김이 쌓여서 배포를 포기했다"
+    assert breaker is False
+
+
+def test_a_sustained_outage_says_it_is_a_connection_problem(monkeypatch):
+    """[부정 통제] 계속 못 부르면 포기하되, **앱 탓으로 돌리지 않는다.**"""
+    import boto3
+    from botocore.exceptions import EndpointConnectionError
+
+    blip = EndpointConnectionError(endpoint_url="https://ecs.us-east-1.amazonaws.com")
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: FakePollEcs([blip] * 20))
+
+    with pytest.raises(aws_infra.InfraError) as caught:
+        asyncio.run(ECSAgent()._step_poll_deployment(make_request(), ECSDeployRecord()))
+
+    message = caught.value.message
+    assert "연결" in message, f"연결 문제라고 말하지 않았다: {message}"
+    assert "Health Check" not in message, "네트워크 문제를 앱 탓으로 돌렸다"
+    assert "진행 중일 수 있습니다" in (caught.value.remedy or ""), (
+        "배포가 살아 있을 수 있다는 사실을 안 알렸다"
+    )
+
+
+# ===========================================================================
+# 실패로 끝났는데 태스크가 떠 있을 수 있는 경우 — P1
+# ===========================================================================
+
+
+def test_a_failure_after_the_service_exists_always_warns_about_cost():
+    """[회귀] 자격증명 만료가 이 환경에서 가장 흔한 실패다.
+
+    서비스는 이미 만들어져 태스크가 도는데 기록은 그냥 "실패"였다.
+    사용자는 실패했다고 믿고 손을 떼고, Fargate 는 계속 과금한다.
+    """
+    record = ECSDeployRecord()
+    record.provisioned["service"] = "app (created)"
+
+    ECSAgent._warn_if_resources_may_be_running(make_request(), record)
+
+    warning = record.provisioned.get("cost_warning", "")
+    assert "stop" in warning, "끄는 방법을 안 알려줬다"
+
+
+def test_no_cost_warning_before_any_service_was_touched():
+    """[부정 통제] 아무것도 안 만들었으면 겁주지 않는다."""
+    record = ECSDeployRecord()
+    ECSAgent._warn_if_resources_may_be_running(make_request(), record)
+    assert "cost_warning" not in record.provisioned
+
+
+def test_the_warning_does_not_overwrite_an_actual_halt():
+    record = ECSDeployRecord()
+    record.provisioned["service"] = "app (created)"
+    record.provisioned["halt"] = "태스크 수를 0 으로 내렸습니다"
+    ECSAgent._warn_if_resources_may_be_running(make_request(), record)
+    assert "cost_warning" not in record.provisioned
+
+
+def test_every_terminal_failure_path_reports_cost(monkeypatch):
+    """[계약] 실패 분기 세 곳 모두 비용 안내를 거쳐야 한다."""
+    import inspect
+
+    source = inspect.getsource(ECSAgent._deploy_pipeline)
+    for branch in ("except InfraError", "except Exception"):
+        after = source.split(branch, 1)[1].split("except ")[0]
+        assert "_warn_if_resources_may_be_running" in after, (
+            f"{branch} 분기에서 비용 안내가 빠졌다"
+        )
+
+
+# ===========================================================================
+# Core 재시작 — P1
+# ===========================================================================
+
+
+def test_a_deployment_survives_a_core_restart(tmp_path, monkeypatch):
+    """[회귀] 예전에는 기록이 메모리에만 있었다.
+
+    Core 를 재시작하면(리포에 restart-core.bat 이 있을 만큼 흔하다) ECS
+    서비스는 계속 돌며 과금되는데 상태 조회는 "idle" 을 돌려줬다. 화면에는
+    배포된 게 없다고 뜨고, 멈출 방법도 없었다.
+    """
+    from api.routes import ecs as ecs_routes
+
+    store = tmp_path / "ecs_deployments.json"
+    monkeypatch.setenv("RECODER_ECS_STORE", str(store))
+    monkeypatch.setattr(ecs_routes, "_deploy_records", {})
+
+    live = ECSDeployRecord(
+        cluster="my-cluster", service="my-app",
+        status=ECSDeployStatus.IN_PROGRESS,
+    )
+    ecs_routes._deploy_records[live.deployment_id] = live
+    ecs_routes._save_records()
+
+    # ── 여기서 프로세스가 죽었다고 치고, 새로 읽는다 ──
+    restored = ecs_routes._load_records()
+
+    assert live.deployment_id in restored, "재시작 뒤 배포가 사라졌다"
+    back = restored[live.deployment_id]
+    assert back.cluster == "my-cluster" and back.service == "my-app", (
+        "멈추려면 이름이 필요한데 그게 사라졌다"
+    )
+    assert "my-app" in back.provisioned.get("cost_warning", ""), (
+        "태스크가 떠 있을 수 있다는 사실을 안 알렸다"
+    )
+
+
+def test_a_restart_does_not_lock_the_service_behind_409_forever(tmp_path, monkeypatch):
+    """진행 중이던 기록을 그대로 되살리면 그 서비스는 영원히 잠긴다.
+
+    그 파이프라인을 돌리던 프로세스는 죽었으므로 아무도 이어가지 않는데,
+    409 가드는 계속 "배포가 돌고 있다"고 막는다.
+    """
+    from api.routes import ecs as ecs_routes
+
+    store = tmp_path / "ecs_deployments.json"
+    monkeypatch.setenv("RECODER_ECS_STORE", str(store))
+    monkeypatch.setattr(ecs_routes, "_deploy_records", {})
+
+    live = ECSDeployRecord(cluster="c", service="s",
+                           status=ECSDeployStatus.IN_PROGRESS)
+    ecs_routes._deploy_records[live.deployment_id] = live
+    ecs_routes._save_records()
+
+    monkeypatch.setattr(ecs_routes, "_deploy_records", ecs_routes._load_records())
+    assert ecs_routes._active_deployment("c", "s") is None, (
+        "재시작 뒤에도 배포가 '진행 중'으로 남아 그 서비스를 영구히 잠갔다"
+    )
+
+
+def test_a_corrupt_store_does_not_break_startup(tmp_path, monkeypatch):
+    """[부정 통제] 기록 파일이 깨졌다고 Core 가 못 뜨면 안 된다."""
+    from api.routes import ecs as ecs_routes
+
+    store = tmp_path / "ecs_deployments.json"
+    store.write_text("{ this is not json", encoding="utf-8")
+    monkeypatch.setenv("RECODER_ECS_STORE", str(store))
+    assert ecs_routes._load_records() == {}
+
+
+def test_finished_deployments_are_restored_untouched(tmp_path, monkeypatch):
+    """끝난 배포에까지 "결과를 알 수 없음"을 덧씌우면 안 된다."""
+    from api.routes import ecs as ecs_routes
+
+    store = tmp_path / "ecs_deployments.json"
+    monkeypatch.setenv("RECODER_ECS_STORE", str(store))
+    monkeypatch.setattr(ecs_routes, "_deploy_records", {})
+
+    done = ECSDeployRecord(cluster="c", service="s",
+                           status=ECSDeployStatus.SUCCEEDED,
+                           service_url="http://1.2.3.4:8000")
+    ecs_routes._deploy_records[done.deployment_id] = done
+    ecs_routes._save_records()
+
+    back = ecs_routes._load_records()[done.deployment_id]
+    assert back.status == ECSDeployStatus.SUCCEEDED
+    assert back.service_url == "http://1.2.3.4:8000"
+    assert "cost_warning" not in back.provisioned
+
+
+# ===========================================================================
+# URL 접속을 확인 못 한 성공 — DoD 1번
+# ===========================================================================
+
+
+def test_an_unverified_url_is_visible_on_the_success_screen():
+    """[회귀] 확장의 done 분기는 `error` 를 읽지 않고 "배포 완료 ✓" 만 그린다.
+
+    카드 DoD 1번이 "URL 로 접속됨"인데, 접속을 확인하지 못한 사실이
+    화면에서 사라지면 DoD 를 못 지켰는지도 모른 채 넘어간다.
+    """
+    from core.api.routes.deploy_ecs import _WARNING_KEYS, to_status_response
+
+    assert "url_warning" in _WARNING_KEYS
+
+    record = ECSDeployRecord(status=ECSDeployStatus.SUCCEEDED)
+    record.provisioned = {
+        "cluster": "c",
+        "url_warning": "주소(http://1.2.3.4:8000)에 접속을 확인하지 못했습니다",
+    }
+    record.service_url = "http://1.2.3.4:8000"
+
+    response = to_status_response(record)
+    assert response.stage == "done"
+    assert "url_warning" in response.log_tail[-1], (
+        "성공 화면에서 '접속 확인 못 함'이 잘려 나갔다"
+    )
+
+
+def test_starting_a_deployment_writes_it_to_disk_before_running(app_client, monkeypatch):
+    """[회귀] 파이프라인이 돌기 **전에** 기록이 디스크에 있어야 한다.
+
+    프로세스가 배포 도중 죽으면 메모리 기록은 사라진다. 시작 시점에 남겨야
+    재시작 뒤에도 클러스터·서비스 이름을 알고 태스크를 멈출 수 있다.
+    """
+    import json
+    import os
+
+    client, ecs_routes = app_client
+
+    store = Path(os.environ["RECODER_ECS_STORE"])
+    seen_at_start: list[list] = []
+
+    async def _capture(request, record=None):
+        # **파이프라인이 시작되는 순간** 디스크에 뭐가 있는지 본다.
+        # 끝난 뒤에 확인하면 종료 시점의 저장 때문에 항상 통과해버려서,
+        # 시작 전 저장이 사라져도 눈치채지 못한다.
+        seen_at_start.append(
+            json.loads(store.read_text(encoding="utf-8")) if store.is_file() else []
+        )
+        return record
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _capture)
+
+    resp = client.post(
+        "/api/ecs/deploy",
+        json={"project_id": "p", "cluster": "kluster", "service": "svc",
+              "image": "i"},
+    )
+    assert resp.status_code == 202, resp.text
+    assert seen_at_start, "배포 파이프라인이 시작되지 않았다"
+    assert any(
+        r["cluster"] == "kluster" and r["service"] == "svc"
+        for r in seen_at_start[0]
+    ), (
+        "파이프라인이 시작될 때 디스크에 기록이 없었다 — 여기서 프로세스가 "
+        "죽으면 돌고 있는 서비스의 이름조차 알 수 없어 멈출 방법이 없다"
+    )
+
+
+def test_the_module_restores_its_records_on_import(tmp_path, monkeypatch):
+    """[회귀] 저장만 하고 안 읽으면 재시작 문제는 그대로다."""
+    import importlib
+    import json
+
+    store = tmp_path / "ecs_deployments.json"
+    orphan = ECSDeployRecord(
+        cluster="c", service="s", status=ECSDeployStatus.IN_PROGRESS
+    )
+    store.write_text(
+        json.dumps([orphan.model_dump(mode="json")], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RECODER_ECS_STORE", str(store))
+
+    from api.routes import ecs as ecs_routes
+
+    reloaded = importlib.reload(ecs_routes)
+    try:
+        assert orphan.deployment_id in reloaded._deploy_records, (
+            "기동할 때 디스크의 배포 기록을 읽지 않는다 — 재시작하면 "
+            "돌고 있는 서비스가 화면에서 사라진다"
+        )
+    finally:
+        monkeypatch.delenv("RECODER_ECS_STORE", raising=False)
+        importlib.reload(ecs_routes)
+
+
+def test_an_unreachable_url_writes_the_warning_during_the_real_step(monkeypatch):
+    """[회귀] 경고 문자열을 손으로 만든 테스트는 그 단계가 실제로 쓰는지 못 본다."""
+    from core.agents import ecs_agent as agent_module
+
+    monkeypatch.setattr(
+        agent_module.aws_infra, "wait_for_public_url",
+        lambda *a, **k: "http://1.2.3.4:8000",
+    )
+    monkeypatch.setattr(
+        agent_module, "_probe_http",
+        lambda *a, **k: (False, "URLError: timed out"),
+    )
+
+    record = ECSDeployRecord()
+    request = make_request(url_wait_timeout=5)
+    asyncio.run(
+        ECSAgent()._step_resolve_url(request, record, {"ecs": None, "ec2": None})
+    )
+
+    assert "url_warning" in record.provisioned, (
+        "접속 확인에 실패했는데 성공 화면에 보일 경고를 안 남겼다"
+    )
+    assert "1.2.3.4" in record.provisioned["url_warning"]
+
+
+def test_a_reachable_url_leaves_no_warning(monkeypatch):
+    """[부정 통제] 접속이 되면 경고를 만들면 안 된다."""
+    from core.agents import ecs_agent as agent_module
+
+    monkeypatch.setattr(
+        agent_module.aws_infra, "wait_for_public_url",
+        lambda *a, **k: "http://1.2.3.4:8000",
+    )
+    monkeypatch.setattr(agent_module, "_probe_http", lambda *a, **k: (True, "HTTP 200"))
+
+    record = ECSDeployRecord()
+    asyncio.run(
+        ECSAgent()._step_resolve_url(
+            make_request(url_wait_timeout=5), record, {"ecs": None, "ec2": None}
+        )
+    )
+    assert "url_warning" not in record.provisioned
+    assert record.service_url == "http://1.2.3.4:8000"

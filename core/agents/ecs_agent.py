@@ -41,6 +41,10 @@ _POLL_INTERVAL = 15           # CloudWatch 폴링 간격 (초)
 _MAX_POLL_ATTEMPTS = 40       # 최대 폴링 횟수 (= 10분)
 _CIRCUIT_BREAKER_WINDOW = 300 # 5분 (초)
 _CIRCUIT_BREAKER_THRESHOLD = 0.5  # 50%
+#: AWS 를 연속 몇 번 못 부르면 포기할지. 15초 간격이므로 5회 = 75초.
+#: 이건 "앱이 아프다"가 아니라 "우리가 못 본다"이므로 서킷 브레이커와
+#: 별도로 센다. 섞으면 네트워크 끊김이 배포 실패로 둔갑한다.
+_MAX_CONSECUTIVE_API_ERRORS = 5
 
 #: 더 이상 진행하지 않는 상태. 여기에 들어가면 종료 시각이 찍혀야 한다.
 _TERMINAL_STATUSES = frozenset({
@@ -176,6 +180,26 @@ class ECSAgent:
                 if result.completed_at is None:
                     result.completed_at = datetime.now(timezone.utc)
 
+    class _Cancelled(Exception):
+        """사용자가 취소를 요청했다. 파이프라인 내부 전용 신호."""
+
+    @staticmethod
+    def _abort_if_cancelled(rec: ECSDeployRecord, step: str) -> None:
+        """단계 경계마다 취소 신호를 확인한다.
+
+        취소가 **표시만 되고 실제로는 아무것도 멈추지 않던** 문제를 막는다.
+        예전에는 취소 엔드포인트가 기록의 상태만 FAILED 로 바꿨고,
+        파이프라인은 그걸 모른 채 계속 돌아 이미지를 올리고 서비스를 만든 뒤
+        같은 기록을 SUCCEEDED 로 덮어썼다. 사용자는 "취소됨"을 보고 손을
+        뗐는데 Fargate 태스크는 계속 돌면서 과금됐다.
+
+        단계 **중간**에는 끊지 않는다. docker build 를 반쯤 자르면 뭐가
+        남았는지 알 수 없게 된다. 대신 단계가 끝나는 즉시 멈춘다.
+        """
+        if rec.cancel_requested:
+            logger.info("배포 취소 요청 확인 — '%s' 단계 뒤에서 중단합니다.", step)
+            raise ECSAgent._Cancelled(step)
+
     async def _deploy_pipeline(
         self,
         request: ECSDeployRequest,
@@ -231,10 +255,17 @@ class ECSAgent:
 
             # 2. 인프라 확보 (없으면 생성, 있으면 재사용)
             record.status = ECSDeployStatus.IN_PROGRESS
+            self._abort_if_cancelled(record, "preflight")
             network = await self._step_provision(request, record, clients)
+
+            self._abort_if_cancelled(record, "인프라 확보")
 
             # 3. 이미지 빌드 + ECR 업로드
             image_uri = await self._step_build_and_push(request, record, clients)
+
+            # 여기서 멈추면 ECR 에 이미지만 남는다 — 태스크는 안 떴으므로
+            # 과금 0원이고, 리포지토리 수명 정책이 알아서 정리한다.
+            self._abort_if_cancelled(record, "빌드·업로드")
 
             # 4. 보안 스캔 — 이제 **실제로 올라간 이미지**를 스캔한다
             if request.run_security_scan:
@@ -270,12 +301,18 @@ class ECSAgent:
                     "쓰세요."
                 )
 
+            self._abort_if_cancelled(record, "보안 스캔")
+
             # 6. Task Definition 생성 + 등록
             task_def_arn, prev_arn = await self._step_register_task_definition(
                 request, clients, image_uri
             )
             record.task_definition_arn = task_def_arn
             record.previous_task_definition_arn = prev_arn
+
+            # **마지막 안전한 지점.** 이 뒤로는 서비스가 만들어지고
+            # 태스크가 떠서 과금이 시작된다.
+            self._abort_if_cancelled(record, "태스크 정의 등록")
 
             # 7. 서비스 확보 (없으면 생성, 있으면 새 태스크 정의로 갱신)
             await self._step_ensure_service(request, record, clients,
@@ -374,6 +411,17 @@ class ECSAgent:
             )
             return record
 
+        except ECSAgent._Cancelled as stop:
+            # 사용자가 취소했다. **여기서 상태를 정한다** — 취소 엔드포인트가
+            # 아니라. 그래야 파이프라인이 실제로 멈춘 뒤에야 배포가 끝난
+            # 것으로 취급되고, 그 전까지는 409 가드가 두 번째 파이프라인을
+            # 막아준다.
+            logger.info("배포 취소 완료: %s 단계에서 중단", stop)
+            record.status = ECSDeployStatus.CANCELLED
+            record.error_message = f"사용자 요청으로 취소되었습니다 ({stop} 단계 뒤)"
+            await self._stop_after_cancel(request, record, clients)
+            return record
+
         except InfraError as exc:
             # 우리가 만든 오류 — 사람이 읽을 수 있는 문장과 대처법이 이미 있다.
             logger.error("ECS 배포 실패: %s | %s", exc.message, exc.detail)
@@ -381,6 +429,7 @@ class ECSAgent:
             record.error_message = exc.message
             record.error_remedy = exc.remedy or None
             record.error_detail = exc.detail or None
+            self._warn_if_resources_may_be_running(request, record)
             return record
 
         except Exception as exc:
@@ -394,6 +443,7 @@ class ECSAgent:
                 "AWS 자격증명이 만료되지 않았는지 확인한 뒤 다시 시도하세요. "
                 "계속 실패하면 Core 로그를 확인하세요."
             )
+            self._warn_if_resources_may_be_running(request, record)
             return record
 
     # ------------------------------------------------------------------
@@ -731,6 +781,9 @@ class ECSAgent:
 
         result = await loop.run_in_executor(None, _work)
         rec.provisioned["service"] = f"{req.service} ({result.action})"
+        # 취소·실패 때 태스크를 0 으로 내려도 되는지 판단하는 근거.
+        # 갱신이었다면 원래 돌던 서비스이므로 함부로 내리면 안 된다.
+        rec.service_created_by_this_run = result.action == "created"
         logger.info(
             "ECS 서비스 %s: %s/%s",
             "생성" if result.action == "created" else "갱신",
@@ -777,6 +830,26 @@ class ECSAgent:
                 ),
             )
             if not reachable:
+                # 상태는 SUCCEEDED 로 둔다 — ECS 기준으로 배포는 실제로
+                # 끝났고 태스크는 healthy 다. FAILED 로 바꾸면 느리게 뜨는
+                # 정상 앱을 실패로 몰고 태스크까지 내리게 된다.
+                #
+                # 다만 **조용히 초록불을 켜지는 않는다.** 확장의 done 분기는
+                # `error` 를 읽지 않고 "배포 완료 ✓" 만 그린다. 그래서
+                # provisioned 의 경고 키로 보낸다 — 그건 log_tail 맨 뒤에
+                # 실려 done 화면에서도 보인다. 카드 DoD 1번이 "URL 로
+                # 접속됨"인데, 접속을 확인하지 못한 사실이 화면에서 사라지면
+                # DoD 를 스스로 못 지켰는지도 모르게 된다.
+                rec.provisioned["url_warning"] = (
+                    f"주소({rec.service_url})에 접속을 확인하지 못했습니다 "
+                    f"({detail}). 앱이 기동 중일 수 있으니 잠시 뒤 다시 "
+                    f"열어보세요. 계속 안 되면 CloudWatch 로그 그룹 "
+                    f"{self.log_group_name(req)} 를 확인하세요."
+                )
+                logger.warning(
+                    "배포는 끝났지만 접속 확인 실패: %s (%s)",
+                    rec.service_url, detail,
+                )
                 rec.error_message = (
                     f"태스크는 떴고 주소({rec.service_url})도 받았지만 "
                     "아직 응답하지 않습니다."
@@ -791,6 +864,10 @@ class ECSAgent:
                 logger.info("접속 확인 완료: %s", rec.service_url)
         except InfraError as exc:
             logger.warning("공개 주소를 확인하지 못했습니다: %s", exc.message)
+            rec.provisioned["url_warning"] = (
+                f"접속 주소를 확인하지 못했습니다: {exc.message}"
+                + (f" ({exc.remedy})" if exc.remedy else "")
+            )
             rec.error_remedy = exc.remedy or None
             rec.error_detail = exc.detail or None
             rec.error_message = (
@@ -823,9 +900,14 @@ class ECSAgent:
         #: AWS 가 돌려주는 failedTasks 는 누적값이라 직전 값을 들고 있어야
         #: 신규 실패만 셀 수 있다.
         previous_failed_tasks = 0
+        #: AWS 를 연속으로 못 부른 횟수. 앱 건강과 **별도로** 센다.
+        consecutive_api_errors = 0
 
         for attempt in range(_MAX_POLL_ATTEMPTS):
             await asyncio.sleep(_POLL_INTERVAL)
+            # 폴링은 최대 10분이다. 그 사이 취소를 눌렀는데 10분을 다
+            # 기다리게 하면, 사용자는 취소가 안 먹은 줄 알고 창을 닫는다.
+            self._abort_if_cancelled(rec, f"배포 상태 확인 {attempt + 1}회차")
 
             try:
                 resp = ecs.describe_services(cluster=req.cluster, services=[req.service])
@@ -842,14 +924,31 @@ class ECSAgent:
                                "확인하세요. 학교 계정은 세션이 4시간마다 끊깁니다. "
                                "이미 시작된 태스크는 그대로 떠 있습니다.",
                     ) from exc
-                logger.warning("describe_services 실패 (%d회차): %s", attempt + 1, exc)
-                # 그 밖의 일시적 AWS 오류는 fail 1건으로만 기록하고 계속 시도
-                window.append((datetime.now(timezone.utc), "fail"))
-                total_failures += 1
-                self._trim_window(window, _CIRCUIT_BREAKER_WINDOW)
-                if self._breaker_trips(window):
-                    logger.warning("서킷 브레이커 작동 (AWS 오류율)")
-                    return False, total_failures, True
+                # **AWS 에 못 물어본 것을 앱이 아픈 것으로 세지 않는다.**
+                # 예전에는 여기서 fail 을 창에 넣었다. 그러면 노트북 wifi 가
+                # 45초만 끊겨도 (3표본 × 50%) 서킷 브레이커가 걸리고,
+                # 멀쩡히 기동 중이던 새 서비스가 0 으로 내려가면서
+                # "배포 Health Check 실패"라고 보고됐다. 사용자는 정상인
+                # CloudWatch 로그를 들여다보게 된다.
+                #
+                # 자격증명 오류만 걸러낸 게 부족했던 이유: 연결 오류는
+                # `.response` 자체가 없어서 error_code() 가 "" 를 돌려주므로
+                # 그 allow-list 에 **절대** 걸리지 않는다.
+                consecutive_api_errors += 1
+                logger.warning(
+                    "describe_services 실패 (%d회차, 연속 %d회): %s",
+                    attempt + 1, consecutive_api_errors, exc,
+                )
+                if consecutive_api_errors >= _MAX_CONSECUTIVE_API_ERRORS:
+                    raise InfraError(
+                        "배포 상태를 확인할 수 없습니다 — AWS 에 연결하지 "
+                        f"못했습니다({consecutive_api_errors}회 연속 실패).",
+                        detail=aws_infra.error_message(exc),
+                        remedy="네트워크 연결을 확인하세요. **배포 자체는 "
+                               "계속 진행 중일 수 있습니다** — 사이드바에서 "
+                               "배포 상태를 다시 조회하거나 AWS 콘솔에서 "
+                               "서비스를 확인하세요.",
+                    ) from exc
                 continue
             # describe_services 는 없는 서비스에 대해 빈 목록과 failures 를
             # 돌려준다 — 키가 있으므로 `.get(..., [{}])` 기본값은 절대 안 뜬다.
@@ -864,6 +963,7 @@ class ECSAgent:
                     remedy="서비스가 삭제되지 않았는지, 클러스터·서비스 이름과 "
                            "리전이 맞는지 확인하세요.",
                 )
+            consecutive_api_errors = 0
             svc = services[0]
             deployments = svc.get("deployments", [])
 
@@ -1021,6 +1121,63 @@ class ECSAgent:
             lambda: aws_infra.halt_service(
                 clients["ecs"], cluster=req.cluster, service=req.service
             ),
+        )
+
+    async def _stop_after_cancel(
+        self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict
+    ) -> None:
+        """취소 후 뒷정리. 돈이 새는 것만 막고, 남의 것은 건드리지 않는다.
+
+        취소는 "이번 배포를 그만둔다"이지 "내 앱을 내린다"가 아니다.
+        그래서 **이번 실행에서 새로 만든 서비스만** 0 으로 내린다. 원래
+        돌던 서비스를 갱신하던 중이었다면 그건 사용자의 운영 중인 앱이므로,
+        내리는 순간 요청하지도 않은 장애를 만드는 셈이다.
+        """
+        if not rec.provisioned.get("service"):
+            # 서비스 단계 전에 멈췄다 — 떠 있는 태스크가 없다.
+            return
+
+        if not rec.service_created_by_this_run:
+            rec.provisioned["cost_warning"] = (
+                "이 배포는 기존 서비스를 갱신하던 중이었습니다. 원래 앱을 "
+                "내리지 않으려고 태스크는 그대로 두었습니다 — 정말 멈추려면 "
+                "배포 중지(POST /api/deploy/ecs/stop)를 쓰세요."
+            )
+            return
+
+        loop = asyncio.get_running_loop()
+        rec.provisioned["halt"] = await loop.run_in_executor(
+            None,
+            lambda: aws_infra.halt_service(
+                clients["ecs"], cluster=req.cluster, service=req.service
+            ),
+        )
+
+    @staticmethod
+    def _warn_if_resources_may_be_running(
+        req: ECSDeployRequest, rec: ECSDeployRecord
+    ) -> None:
+        """실패로 끝났는데 태스크가 떠 있을 수 있는 경우 반드시 알린다.
+
+        폴링 중 자격증명이 만료되는 경우가 이 환경에서 가장 흔한 실패다
+        (학교 계정은 4시간마다 끊기고 폴링 창은 10분이다). 그때 서비스는
+        이미 만들어져 태스크가 돌고 있는데, 예전에는 그냥 "실패"로만
+        보고했다. 사용자는 실패했다고 믿고 손을 떼는데 Fargate 는 계속
+        과금한다. 게다가 안내문이 "다시 시도하세요"였으므로, 재시도가
+        버려진 배포 위에 또 하나를 얹었다.
+
+        여기서 AWS 를 부르지 않는 이유: 이 경로에 오는 가장 큰 원인이
+        **AWS 를 못 부르는 상황**이다. 그래서 끄는 방법을 알려주기만 한다.
+        """
+        if not rec.provisioned.get("service"):
+            return
+        if "halt" in rec.provisioned or "cost_warning" in rec.provisioned:
+            return
+        rec.provisioned["cost_warning"] = (
+            f"서비스 '{req.service}' 는 이미 만들어졌고 태스크가 떠 있을 수 "
+            "있습니다 — 배포는 실패했지만 요금은 계속 발생합니다. "
+            "배포 중지(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 "
+            "내리거나, 원인을 고친 뒤 다시 배포하세요."
         )
 
     async def _create_rollback_proposal(
