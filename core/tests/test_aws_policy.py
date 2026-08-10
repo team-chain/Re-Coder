@@ -111,10 +111,16 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "sts:GetCallerIdentity":        "계정 단위 조회 — 리소스가 없다",
         "ecr:GetAuthorizationToken":    "계정 단위 토큰 발급",
         "ecs:RegisterTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
-        "ecs:DescribeTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
-        "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
-        "bedrock:ListFoundationModels": "계정 단위 조회",
-    }
+            "ecs:DescribeTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
+            "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
+            "bedrock:ListFoundationModels": "계정 단위 조회",
+            "iam:SimulatePrincipalPolicy":  "IAM 시뮬레이션 API 가 리소스 단위 제한 미지원",
+            "iam:ListAttachedUserPolicies": "연결하는 IAM 사용자 이름을 정책 생성 시 알 수 없는 읽기 전용 조회",
+            "iam:ListUserPolicies":         "연결하는 IAM 사용자 이름을 정책 생성 시 알 수 없는 읽기 전용 조회",
+            "iam:GetUserPolicy":            "연결하는 IAM 사용자 이름을 정책 생성 시 알 수 없는 읽기 전용 조회",
+            "iam:GetPolicy":                "연결된 관리형 정책 ARN을 정책 생성 시 알 수 없는 읽기 전용 조회",
+            "iam:GetPolicyVersion":         "연결된 관리형 정책 ARN을 정책 생성 시 알 수 없는 읽기 전용 조회",
+        }
     for stmt in ap.build_policy()["Statement"]:
         if stmt["Resource"] != "*":
             continue
