@@ -453,6 +453,52 @@ def _ecs_statements(
             "Resource": exec_role,
         },
         {
+            # AWS 연결 시점에 현재 키가 실제 배포 권한을 갖는지 미리 점검한다.
+            # 이 API는 리소스 단위 제한을 지원하지 않아 *가 불가피하지만 읽기
+            # 전용 시뮬레이션이며, 배포 대상 액션만 평가하도록 코드가 제한한다.
+            "Sid": "SimulateDeploymentKeyPermissions",
+            "Effect": "Allow",
+            "Action": ["iam:SimulatePrincipalPolicy"],
+            "Resource": "*",
+        },
+        {
+            # 현재 IAM 사용자의 연결 정책과 인라인 정책을 읽는다.
+            # 연결하는 사용자 이름은 정책 생성 시점에 알 수 없다. 이 IAM 읽기
+            # 액션은 자원 변경 권한이 전혀 없으므로, 사용자 ARN 와일드카드 대신
+            # 명시적인 읽기 전용 예외로 둔다.
+            "Sid": "ReadDeploymentUserPolicies",
+            "Effect": "Allow",
+            "Action": [
+                "iam:ListAttachedUserPolicies",
+                "iam:ListUserPolicies",
+                "iam:GetUserPolicy",
+            ],
+            "Resource": "*",
+        },
+        {
+            # ECS에 넘길 실행·태스크 역할의 연결·인라인 정책만 읽는다.
+            # role/* 를 쓰면 계정의 모든 역할 정보를 열어 최소권한이 깨진다.
+            "Sid": "ReadDeploymentRolePolicies",
+            "Effect": "Allow",
+            "Action": [
+                "iam:ListAttachedRolePolicies",
+                "iam:ListRolePolicies",
+                "iam:GetRolePolicy",
+            ],
+            "Resource": pass_targets[0] if len(pass_targets) == 1 else pass_targets,
+        },
+        {
+            # 연결된 관리형 정책의 기본 버전을 읽어 전체 권한인지 판별한다.
+            # 연결된 정책 ARN도 등록 전에는 알 수 없으며, 모두 읽기 전용이다.
+            "Sid": "ReadAttachedManagedPolicyDocuments",
+            "Effect": "Allow",
+            "Action": [
+                "iam:GetPolicy",
+                "iam:GetPolicyVersion",
+            ],
+            "Resource": "*",
+        },
+        {
             # Task Definition 을 등록하려면 거기 붙는 역할마다 PassRole 이 필요하다.
             # **실행 역할과 태스크 역할은 서로 다른 역할이다** — ecs_agent 가
             # ECS_EXECUTION_ROLE_ARN 과 ECS_TASK_ROLE_ARN 을 따로 넘긴다.
