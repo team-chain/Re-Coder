@@ -24,6 +24,13 @@ from typing import TypedDict
 
 ADR_DIR = "docs/adr"
 
+# 내부용 예약 결정 id 접두사.
+# FR-02-05(항상 선택지·사람 승인)를 지키려면 설계 결정이 없는 요청에도
+# 확인 카드를 띄워야 한다. 그 확인 카드는 "설계 결정"이 아니므로 ADR 로
+# 남기지 않는다 — 이 접두사로 시작하는 결정은 정규화 단계에서 걸러진다.
+RESERVED_ID_PREFIX = "__"
+CONFIRM_DECISION_ID = "__confirm__"
+
 # 프롬프트 오염·비대화 방지 상한 (결정 텍스트는 웹뷰를 거친 비신뢰 입력)
 MAX_DECISIONS = 10
 MAX_FIELD_CHARS = 200
@@ -51,15 +58,35 @@ class NormalizedDecision(TypedDict):
 
 
 def _clean(value: object, limit: int = MAX_FIELD_CHARS) -> str:
-    """비신뢰 입력을 한 줄로 눕히고 길이를 제한한다.
+    """비신뢰 입력을 한 줄로 눕히고 길이를 제한한다. **멱등이어야 한다.**
 
     개행을 남기면 프롬프트의 다른 섹션인 척하거나(프롬프트 인젝션)
     ADR 마크다운 구조를 깨뜨릴 수 있어 공백으로 접는다.
+
+    자른 **뒤에** 다시 strip 하는 순서가 중요하다. 먼저 strip 하고 자르면
+    상한 경계가 공백에 걸릴 때 결과 끝에 공백이 남고, 한 번 더 적용했을 때
+    그 공백이 사라져 **값이 달라진다**(`f(f(x)) != f(x)`).
+    이 함수는 발급(generate_plan)·검증(승인 게이트)·기록(normalize_decisions)
+    세 곳에서 각각 호출되므로, 멱등이 아니면 "발급 때 서로 다른 두 값이
+    검증 때 같아지는" 어긋남이 생긴다 — 정상 승인이 거절되는 원인이었다.
     """
     text = str(value or "")
     text = re.sub(r"[\r\n\t]+", " ", text)
-    text = re.sub(r"\s{2,}", " ", text).strip()
-    return text[:limit]
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()[:limit].strip()
+
+
+def canonical_key(value: object) -> str:
+    """결정 id·선택지 key 의 **정규형**. 비교와 기록이 반드시 이걸 통해야 한다.
+
+    승인 게이트(code_agent)와 기록(normalize_decisions)이 서로 다른 방식으로
+    키를 비교하면, 게이트에서는 서로 다른 두 키가 기록 단계에서는 같아진다.
+    그러면 사용자가 고른 것과 **다른 선택지**의 라벨·근거가 ADR 에 남는다.
+    (예: 앞 200자가 같은 두 키, 내부 공백만 다른 두 키)
+
+    그래서 정규형을 한 곳에서만 정의하고 양쪽이 같은 함수를 쓴다.
+    """
+    return _clean(value)
 
 
 def _clean_list(values: object, limit: int = MAX_LIST_ITEMS) -> list[str]:
@@ -99,16 +126,29 @@ def normalize_decisions(decisions: list | None) -> list[NormalizedDecision]:
             continue
 
         did = _clean(d.get("id")) or chosen_key
+        if did == CONFIRM_DECISION_ID:
+            # 확인 카드 — 승인 흐름에는 쓰이되 설계 결정이 아니므로 ADR 로 남기지 않는다.
+            #
+            # 여기서 접두사(`__`) 전체를 거르지 않는 이유: 그렇게 하면 모델이
+            # 만들어낸 `__` 로 시작하는 **진짜 결정**까지 조용히 사라져,
+            # 사용자가 고른 선택이 프롬프트에도 ADR 에도 안 실린 채 코드가 생성된다.
+            # 예약 네임스페이스 침범은 code_agent.generate_plan 이 파싱 시점에
+            # 일반 id 로 옮겨 붙여 막는다(RESERVED_ID_PREFIX). 이 필터는 실제
+            # 확인 카드 하나만 정확히 집어낸다.
+            continue
+
         raw_options = d.get("options") if isinstance(d.get("options"), list) else []
 
         chosen_opt: dict = {}
         alternatives: list[Alternative] = []
+        offered = False
         for opt in raw_options:
             if not isinstance(opt, dict):
                 continue
             key = _clean(opt.get("key"))
             if not key:
                 continue
+            offered = True
             if key == chosen_key:
                 chosen_opt = opt
             elif len(alternatives) < MAX_ALTERNATIVES:
@@ -117,6 +157,16 @@ def normalize_decisions(decisions: list | None) -> list[NormalizedDecision]:
                     "summary": _clean(opt.get("summary")),
                     "cons": _clean_list(opt.get("cons")),
                 })
+
+        if offered and not chosen_opt:
+            # 선택지를 제시해 놓고 그중 어느 것도 아닌 값이 왔다.
+            # 이걸 살려두면 아래 `or chosen_key` 폴백이 알 수 없는 키를 그대로
+            # 선택 라벨로 삼아, 아무도 승인하지 않은 결정이 프롬프트와 ADR 에
+            # 실린다. 승인 게이트(code_agent._approval_state)가 이미 막지만,
+            # 기록을 만드는 이 지점에서도 한 번 더 끊는다.
+            continue
+        # 선택지 자체가 없는 최소 형태({"id","chosen_key"})는 종전대로 허용한다
+        # — 대조할 목록이 없으므로 chosen_key 를 라벨로 쓰는 것이 유일한 해석이다.
 
         out.append({
             "id": did,
@@ -191,7 +241,13 @@ def build_adr_markdown(index: int, decision: NormalizedDecision, instruction: st
     cons = decision.get("cons") or []
     impact = decision.get("impact")
     alts = decision.get("alternatives") or []
+    # 요청문은 프롬프트에는 전문이 들어가고 ADR 에는 상한까지만 들어간다.
+    # 잘렸다는 표시가 없으면, ADR 만 읽는 사람은 잘린 문장을 요청 전문으로
+    # 오해한다(뒤에 붙어 있던 제약이 사라진 것처럼 보인다).
+    full_req = _clean(instruction, MAX_INSTRUCTION_CHARS * 4)
     req = _clean(instruction, MAX_INSTRUCTION_CHARS)
+    if len(full_req) > len(req):
+        req = f"{req} …(이하 생략, 전문은 코드 생성에 사용됨)"
 
     lines = [
         f"# ADR-{index:03d}: {title}",
