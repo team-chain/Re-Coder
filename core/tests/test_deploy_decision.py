@@ -1,6 +1,8 @@
 """AI-DLC 배포 대상 결정: 감지 추천과 ADR 산출을 검증한다."""
 from __future__ import annotations
 
+import asyncio
+
 try:
     from api.routes import deploy
 except ImportError:  # pragma: no cover - package 실행 호환
@@ -48,3 +50,31 @@ def test_deploy_decision_routes_are_registered():
     paths = {route.path for route in deploy.router.routes}
     assert "/api/deploy/preflight" in paths
     assert "/api/deploy/decision" in paths
+    assert "/api/deploy/remediations/{proposal_id}/apply" in paths
+
+
+def test_deploy_preflight_includes_block_reasons_and_fixes(tmp_path):
+    """배포 화면은 감지 정보뿐 아니라 정적 검사 차단 사유도 받아야 한다."""
+    (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+    result = asyncio.run(deploy.deploy_preflight(
+        deploy.DeployPreflightRequest(workspace_path=str(tmp_path))
+    ))
+
+    assert "blocked" in result
+    assert "reasons" in result
+    assert "fixes" in result
+    assert result["blocked"] is True
+    assert result["reasons"]
+    assert {"code", "message", "fix", "remediation_available"} <= result["reasons"][0].keys()
+
+    dockerfile_issue = next(reason for reason in result["reasons"] if reason["code"] == "MISSING_DOCKERFILE")
+    assert dockerfile_issue["remediation_available"] is True
+    assert dockerfile_issue["proposal_id"]
+
+    applied = asyncio.run(deploy.apply_deployment_remediation(
+        dockerfile_issue["proposal_id"],
+        deploy.DeploymentRemediationApplyRequest(workspace_path=str(tmp_path)),
+    ))
+    assert applied["success"] is True
+    assert (tmp_path / "Dockerfile").is_file()
