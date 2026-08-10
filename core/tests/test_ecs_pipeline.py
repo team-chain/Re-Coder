@@ -119,7 +119,8 @@ def test_extension_deploy_button_reaches_the_agent(app_client, monkeypatch):
         json={"ecs_cluster": "recoder-cluster", "ecs_service": "recoder-app"},
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "started"
+    # 사이드바는 status === 'ok' 일 때만 폴링을 시작한다.
+    assert resp.json()["status"] == "ok"
     assert len(started) == 1
     assert started[0].cluster == "recoder-cluster"
 
@@ -203,7 +204,8 @@ def test_status_endpoint_reports_the_live_record(app_client, monkeypatch):
 
     body = client.get("/api/deploy/ecs/status").json()
     assert body["running"] is True
-    assert body["stage"] == "배포 중"
+    assert body["stage"] == "deploying", "기계 토큰이 아니다"
+    assert body["stage_text"] == "배포 중", "사람용 문구는 따로 와야 한다"
     assert body["image_uri"] == "repo/app:v1"
     assert any("cluster" in line for line in body["log_tail"])
 
@@ -886,3 +888,187 @@ def test_http_probe_still_treats_404_as_reachable():
     finally:
         urllib.request.urlopen = original
     assert ok is True
+
+
+# ===========================================================================
+# 확장과의 계약 (Codex 2차 리뷰)
+#
+# 여기 모은 검사들은 전부 같은 실패에서 나왔다 — **내가 만든 값을 누가
+# 소비하는지 보지 않고 바꾼 것.** 두 번 연속 같은 유형으로 리뷰에 걸렸다.
+# 그래서 개별 수정이 아니라, 확장 소스를 직접 읽어 계약을 고정한다.
+# ===========================================================================
+
+EXTENSION_DIRS = [ROOT / "extension" / "src", ROOT / "extension" / "media"]
+
+
+def _extension_literals(field: str) -> set[str]:
+    """확장 소스가 `<field> === '값'` 으로 비교하는 리터럴을 모은다."""
+    import re
+
+    pattern = re.compile(rf"\.{field}\s*===\s*['\"]([\w-]+)['\"]")
+    found: set[str] = set()
+    for base in EXTENSION_DIRS:
+        if not base.is_dir():
+            continue
+        for path in list(base.rglob("*.ts")) + list(base.rglob("*.js")):
+            if "node_modules" in path.parts:
+                continue
+            found |= set(pattern.findall(path.read_text(encoding="utf-8",
+                                                        errors="replace")))
+    return found
+
+
+def test_stage_values_are_ascii_machine_tokens():
+    """[회귀] `stage` 는 UI 문구가 아니라 계약이다.
+
+    한국어("완료"/"실패")를 넣었더니 확장 네 곳의 `stage === 'done'`
+    분기가 전부 빗나갔다. `running` 이 false 로 바뀌어 폴링은 멈추는데
+    완료 표시도 실패 알림도 뜨지 않는 상태가 됐다.
+    """
+    from api.routes.deploy_ecs import _STAGE_TOKEN
+
+    for status, token in _STAGE_TOKEN.items():
+        assert token.isascii(), f"{status} → {token!r} 이 기계 토큰이 아니다"
+        assert token.islower() and " " not in token, f"{status} → {token!r}"
+
+
+def test_every_terminal_status_reaches_done_or_failed():
+    """부정 통제: 종료 상태에 새 토큰을 만들면 UI 가 아무것도 표시하지 않는다.
+
+    확장은 `if (!running) { if done ... else if failed ... }` 구조다.
+    취소·롤백·서킷브레이커가 제3의 토큰을 내면 조용히 사라진다.
+    """
+    from api.routes.deploy_ecs import _RUNNING_STATES, _STAGE_TOKEN
+
+    for status, token in _STAGE_TOKEN.items():
+        if status in _RUNNING_STATES:
+            continue
+        assert token in {"done", "failed"}, (
+            f"{status} → {token!r}: 종료 상태인데 UI 가 처리하지 못하는 토큰"
+        )
+
+
+def test_the_stage_tokens_the_extension_branches_on_are_producible():
+    """확장 소스에서 실제 비교값을 읽어 대조한다.
+
+    한쪽만 바뀌면 여기서 걸린다.
+    """
+    from api.routes.deploy_ecs import _STAGE_TOKEN
+
+    branched_on = _extension_literals("stage")
+    assert branched_on, (
+        "확장 소스에서 stage 비교값을 하나도 못 찾았다 — 경로가 바뀌었거나 "
+        "이 검사가 무력해졌다"
+    )
+
+    # 확장은 여러 배포 흐름(로컬·EC2·ECS)을 한 파일에서 다룬다. `building`
+    # `running` 같은 값은 다른 흐름의 것이므로 ECS 가 낼 필요가 없다.
+    # ECS 에서 중요한 건 **종료 분기 두 개**다 — 이게 안 맞으면 배포가
+    # 끝났는데 UI 가 아무 말도 하지 않는다.
+    terminal = {"done", "failed"}
+    assert terminal <= branched_on, (
+        f"확장이 더 이상 {sorted(terminal)} 로 분기하지 않는다 — 계약이 "
+        "바뀌었으니 서버 매핑도 함께 봐야 한다"
+    )
+    producible = set(_STAGE_TOKEN.values())
+    assert terminal <= producible, (
+        "서버가 확장의 종료 분기 값을 못 내보낸다: "
+        f"{sorted(terminal - producible)}"
+    )
+
+
+def test_start_response_uses_the_token_the_sidebar_recognises(app_client, monkeypatch):
+    """[회귀] 사이드바는 `status === 'ok'` 일 때만 폴링을 시작한다.
+
+    "started" 를 돌려주면 시작 실패로 읽혀서, 배포는 도는데 아무도
+    지켜보지 않는 상태가 된다.
+    """
+    client, ecs_routes = app_client
+
+    async def _fake_deploy(request, record=None):
+        if record is not None:
+            record.status = ECSDeployStatus.SUCCEEDED
+            return record
+        return ECSDeployRecord(status=ECSDeployStatus.SUCCEEDED)
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+    body = client.post("/api/deploy/ecs", json={}).json()
+
+    recognised = _extension_literals("status")
+    assert "ok" in recognised, "확장이 더 이상 status === 'ok' 를 안 본다"
+    assert body["status"] == "ok", (
+        f"사이드바가 인식하지 못하는 시작 토큰: {body['status']!r}"
+    )
+
+
+def test_status_response_fields_stay_ascii_where_machines_read_them():
+    """부정 통제: 기계가 읽는 필드에 번역문이 섞이면 안 된다.
+
+    사람이 읽을 문구는 `stage_text` 로 따로 보낸다.
+    """
+    from api.routes.deploy_ecs import EcsDeployStatusResponse
+
+    defaults = EcsDeployStatusResponse()
+    assert defaults.stage.isascii()
+    # stage_text 는 반대로 사람용이므로 비어 있거나 한국어여도 된다.
+    assert hasattr(defaults, "stage_text")
+
+
+# ---------------------------------------------------------------------------
+# preflight — 빈 계정
+# ---------------------------------------------------------------------------
+
+
+def test_cluster_not_found_exception_is_treated_as_creatable():
+    """[회귀] 빈 계정에서 `describe_services` 는 빈 목록이 아니라
+    `ClusterNotFoundException` 을 던진다.
+
+    이걸 일반 오류로 처리하면 `_boto3_error` 가 severity="error" 로
+    떨어뜨려서 `missing_severity="warning"` 이 아예 적용되지 않는다.
+    결과적으로 **빈 계정의 첫 배포가 preflight 에서 막힌다** — 클러스터를
+    만들어 주는 코드가 바로 다음 단계에 있는데도.
+    """
+    from core.agents.preflight_agent import PreflightAgent
+
+    agent = PreflightAgent()
+
+    class _EmptyAccount:
+        @staticmethod
+        def describe_services(**_):
+            raise client_error("ClusterNotFoundException", "cluster not found")
+
+        @staticmethod
+        def describe_clusters(**_):
+            raise client_error("ClusterNotFoundException", "cluster not found")
+
+    agent._ecs_client = lambda _r: _EmptyAccount()
+
+    service = asyncio.run(
+        agent._check_ecs_service("c", "s", "us-east-1", missing_severity="warning")
+    )
+    cluster = asyncio.run(
+        agent._check_ecs_cluster("c", "us-east-1", missing_severity="warning")
+    )
+    for check in (service, cluster):
+        assert check.severity == "warning", (
+            "빈 계정을 점검 실패로 처리했다 — 첫 배포가 막힌다"
+        )
+        assert "자동으로 생성" in (check.fix_guide or "")
+
+
+def test_a_real_error_is_still_an_error():
+    """반대 방향 — 권한 거부까지 '아직 없음'으로 삼키면 안 된다."""
+    from core.agents.preflight_agent import PreflightAgent
+
+    agent = PreflightAgent()
+
+    class _Denied:
+        @staticmethod
+        def describe_services(**_):
+            raise client_error("AccessDeniedException", "not authorized")
+
+    agent._ecs_client = lambda _r: _Denied()
+    check = asyncio.run(
+        agent._check_ecs_service("c", "s", "us-east-1", missing_severity="warning")
+    )
+    assert check.severity == "error", "권한 거부를 '아직 없음'으로 삼켰다"

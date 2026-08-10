@@ -31,6 +31,32 @@ _REQUIRED_READ_ACTIONS = [
 ]
 
 
+#: "조회했더니 그 리소스가 없더라"로 봐야 하는 AWS 오류 코드.
+#:
+#: 빈 계정에서 `describe_services` 는 빈 목록을 돌려주지 않고
+#: **`ClusterNotFoundException` 을 던진다.** 이걸 일반 오류로 처리하면
+#: `_boto3_error` 가 severity="error" 로 떨어뜨리고, 그러면
+#: `missing_severity="warning"` 이 아예 적용되지 않는다. 결과적으로
+#: 빈 계정의 첫 배포가 preflight 에서 막힌다 — 클러스터를 만들어 주는
+#: 코드가 바로 다음 단계에 있는데도.
+_NOT_FOUND_CODES = frozenset({
+    "ClusterNotFoundException",
+    "ServiceNotFoundException",
+    "ServiceNotActiveException",
+})
+
+
+def _is_not_found(exc: Exception) -> bool:
+    """리소스가 아직 없다는 뜻의 예외인가."""
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        error = response.get("Error")
+        if isinstance(error, dict) and error.get("Code") in _NOT_FOUND_CODES:
+            return True
+    # botocore 가 없거나 예외 타입이 다른 환경을 위한 보조 판정
+    return any(code in str(exc) for code in _NOT_FOUND_CODES)
+
+
 class PreflightAgent:
     """
     ECS 배포 전 AWS 리소스 사전 점검 에이전트.
@@ -117,17 +143,14 @@ class PreflightAgent:
             active = [c for c in clusters if c.get("status") == "ACTIVE"]
             if active:
                 return PreflightCheck(name=name, passed=True, detail=f"클러스터 '{cluster}' ACTIVE", severity="error")
-            return PreflightCheck(
-                name=name, passed=False, severity=missing_severity,
-                detail=f"클러스터 '{cluster}'를 찾을 수 없습니다",
-                fix_guide=(
-                    "배포 중에 자동으로 생성됩니다"
-                    if missing_severity == "warning"
-                    else f"`aws ecs create-cluster --cluster-name {cluster} "
-                         f"--region {region}` 를 실행하세요"
-                ),
-            )
+            return self._missing(name, cluster, missing_severity, "클러스터",
+                                 f"`aws ecs create-cluster --cluster-name {cluster} "
+                                 f"--region {region}` 를 실행하세요")
         except Exception as e:
+            if _is_not_found(e):
+                return self._missing(name, cluster, missing_severity, "클러스터",
+                                     f"`aws ecs create-cluster --cluster-name "
+                                     f"{cluster} --region {region}` 를 실행하세요")
             return self._boto3_error(name, e)
 
     async def _check_ecs_service(
@@ -147,16 +170,14 @@ class PreflightAgent:
                     name=name, passed=True, severity="error",
                     detail=f"서비스 '{service}' ACTIVE (running={running}, desired={desired})",
                 )
-            return PreflightCheck(
-                name=name, passed=False, severity=missing_severity,
-                detail=f"서비스 '{service}'를 찾을 수 없습니다",
-                fix_guide=(
-                    "배포 중에 자동으로 생성됩니다"
-                    if missing_severity == "warning"
-                    else "ECS 콘솔에서 서비스를 먼저 생성하세요"
-                ),
-            )
+            return self._missing(name, service, missing_severity, "서비스",
+                                 "ECS 콘솔에서 서비스를 먼저 생성하세요")
         except Exception as e:
+            # 빈 계정에서는 클러스터가 없어 ClusterNotFoundException 이 난다.
+            # 그건 "아직 안 만들어졌다"이지 점검 실패가 아니다.
+            if _is_not_found(e):
+                return self._missing(name, service, missing_severity, "서비스",
+                                     "ECS 콘솔에서 서비스를 먼저 생성하세요")
             return self._boto3_error(name, e)
 
     async def _check_iam_role(self, role_name: str, region: str) -> PreflightCheck:
@@ -236,6 +257,22 @@ class PreflightAgent:
         if self._boto3 is None:
             raise RuntimeError("boto3 not installed")
         return self._boto3.client("logs", region_name=region)
+
+    @staticmethod
+    def _missing(
+        name: str, resource: str, severity: str, kind: str, manual_guide: str
+    ) -> PreflightCheck:
+        """아직 없는 리소스에 대한 점검 결과.
+
+        `severity` 가 warning 이면 배포를 막지 않는다 — 파이프라인이
+        만들어 줄 것이기 때문이다.
+        """
+        return PreflightCheck(
+            name=name, passed=False, severity=severity,
+            detail=f"{kind} '{resource}'를 찾을 수 없습니다",
+            fix_guide=("배포 중에 자동으로 생성됩니다"
+                       if severity == "warning" else manual_guide),
+        )
 
     @staticmethod
     def _boto3_error(name: str, exc: Exception, severity: str = "error") -> PreflightCheck:
