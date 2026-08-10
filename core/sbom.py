@@ -74,12 +74,15 @@ class SBOMGenerator:
 
             logger.info("SBOM generated: %s (%d packages) → %s", image, package_count, output_path)
 
+            # `generated_at` 은 str 필드다. datetime 을 넣으면 pydantic 이
+            # ValidationError 를 내고, 그걸 아래 `except Exception` 이 삼켜
+            # **성공한 SBOM 이 매번 빈 결과로 둔갑**했다. `sbom_format` 은
+            # 모델에 없는 이름이라 조용히 버려지고 있었다.
             return SBOMRecord(
                 image=image,
                 sbom_path=str(output_path),
-                sbom_format="cyclonedx-json",
                 package_count=package_count,
-                generated_at=datetime.now(timezone.utc),
+                generated_at=datetime.now(timezone.utc).isoformat(),
             )
 
         except FileNotFoundError:

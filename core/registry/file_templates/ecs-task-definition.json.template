@@ -23,8 +23,7 @@
         "options": {
           "awslogs-group": "/ecs/{{task_definition_family}}",
           "awslogs-region": "{{region}}",
-          "awslogs-stream-prefix": "ecs",
-          "awslogs-create-group": "true"
+          "awslogs-stream-prefix": "ecs"
         }
       }
     }
