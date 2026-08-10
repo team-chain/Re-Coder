@@ -152,7 +152,44 @@ def test_policy_denial_is_403_not_503(app_client, monkeypatch):
     assert resp.json()["detail"]["error"] == "policy_denied"
 
 
-def test_unreachable_opa_is_503(app_client, monkeypatch):
+def test_unreachable_opa_falls_back_to_the_local_rules(app_client, monkeypatch):
+    """OPA 서버가 없으면 로컬 내장 규칙으로 판단한다.
+
+    **계약이 바뀐 자리다.** 예전에는 여기서 무조건 503 이었는데, 리포
+    어디에도 OPA 를 띄우는 것이 없어서 결과적으로 확장의 배포 버튼이
+    한 번도 성공할 수 없었다. 정책을 건너뛰는 게 아니라, 이 경로를
+    대체하기 전 구현이 쓰던 것과 같은 로컬 규칙을 적용한다.
+    """
+    client, ecs_routes = app_client
+    from core import opa_client as opa_module
+
+    class _Unavailable:
+        decision = "deny"
+        reason = "OPA 연결 실패"
+        fix_suggestion = None
+        opa_available = False
+
+    async def _evaluate(**_kwargs):
+        return _Unavailable()
+
+    async def _fake_deploy(request, record=None):
+        record.status = ECSDeployStatus.SUCCEEDED
+        return record
+
+    monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+
+    resp = client.post("/api/deploy/ecs", json={})
+    assert resp.status_code == 200, resp.text
+
+
+def test_a_deny_that_survives_the_local_fallback_is_still_reported(
+    app_client, monkeypatch
+):
+    """[부정 통제] 폴백이 막으면 그대로 막혀야 한다.
+
+    폴백이 있다고 해서 OPA 부재가 자유 통과권이 되면 안 된다.
+    """
     client, _ = app_client
     from core import opa_client as opa_module
 
@@ -166,9 +203,16 @@ def test_unreachable_opa_is_503(app_client, monkeypatch):
         return _Unavailable()
 
     monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
-    resp = client.post("/api/deploy/ecs", json={})
-    assert resp.status_code == 503
-    assert resp.json()["detail"]["error"] == "opa_unavailable"
+    # SBOM 을 끄면 로컬 규칙 1번(SBOM 필수)에 걸린다.
+    resp = client.post(
+        "/api/ecs/deploy",
+        json={"project_id": "p", "cluster": "c", "service": "s",
+              "image": "i", "generate_sbom": False},
+    )
+    assert resp.status_code >= 400, "폴백이 게이트를 없애버렸다"
+    assert resp.json()["detail"]["error"] in (
+        "policy_denied", "opa_unavailable", "security_escalation_required"
+    )
 
 
 def test_a_broken_policy_client_is_not_reported_as_an_opa_outage(
@@ -2519,3 +2563,389 @@ def test_a_reachable_url_leaves_no_warning(monkeypatch):
     )
     assert "url_warning" not in record.provisioned
     assert record.service_url == "http://1.2.3.4:8000"
+
+
+# ===========================================================================
+# 스톡 설치에서 배포 버튼이 동작하는가 — P1
+#
+# 리포 어디에도 OPA 를 띄우는 것이 없다. 확장이 보내는 요청은
+# approval_level 기본값이 3 이라 `_fail_closed` 가 항상 deny 를 돌려주고,
+# 라우트는 503 을 낸다. 즉 스톡 상태에서 배포 버튼은 **한 번도 성공할 수
+# 없었다.** 게다가 /ready 는 Docker 와 STS 만 보고 "준비됨"이라고 한다.
+# ===========================================================================
+
+
+@pytest.fixture
+def app_client_without_opa(monkeypatch, tmp_path):
+    """OPA 서버가 없는 스톡 환경. (기본 픽스처는 OPA 를 통과로 스텁한다)"""
+    pytest.importorskip("fastapi")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.routes import deploy_ecs, ecs as ecs_routes
+    from core import opa_client as opa_module
+
+    async def _unreachable(**kwargs):
+        # 실제 오프라인 동작을 그대로 쓴다 — 여기서 결과를 손으로 만들면
+        # fail-closed 규칙이 바뀌어도 테스트가 눈치채지 못한다.
+        return opa_module.OPAClient._fail_closed(
+            kwargs.get("level", 3), "OPA 서버에 연결할 수 없습니다"
+        )
+
+    monkeypatch.setattr(opa_module.opa_client, "evaluate", _unreachable)
+    monkeypatch.setenv("RECODER_ECS_STORE", str(tmp_path / "s.json"))
+    ecs_routes._deploy_records.clear()
+
+    app = FastAPI()
+    app.include_router(ecs_routes.router)
+    app.include_router(deploy_ecs.router)
+    return TestClient(app, raise_server_exceptions=False), ecs_routes
+
+
+def test_the_deploy_button_works_without_an_opa_server(
+    app_client_without_opa, monkeypatch
+):
+    """[회귀] OPA 가 없다고 배포 버튼이 항상 503 이면 제품이 아니다."""
+    client, ecs_routes = app_client_without_opa
+
+    async def _fake_deploy(request, record=None):
+        if record is not None:
+            record.status = ECSDeployStatus.SUCCEEDED
+            return record
+        return ECSDeployRecord(status=ECSDeployStatus.SUCCEEDED)
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+
+    resp = client.post("/api/deploy/ecs", json={})
+    assert resp.status_code == 200, (
+        f"OPA 서버가 없다고 배포가 막혔다: {resp.status_code} {resp.text}"
+    )
+    assert resp.json()["status"] == "ok"
+
+
+def test_the_fallback_says_it_used_local_rules(app_client_without_opa, monkeypatch):
+    """정책을 건너뛴 게 아니라 로컬 규칙으로 판단했다는 걸 알려야 한다."""
+    client, ecs_routes = app_client_without_opa
+    seen: list = []
+
+    async def _fake_deploy(request, record=None):
+        seen.append(record)
+        record.status = ECSDeployStatus.SUCCEEDED
+        return record
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+    client.post("/api/deploy/ecs", json={})
+
+    assert seen and "policy_warning" in seen[0].provisioned, (
+        "로컬 폴백을 썼다는 사실을 사용자에게 안 알렸다"
+    )
+
+
+def test_the_fallback_still_applies_the_preset_rules(app_client_without_opa, monkeypatch):
+    """[부정 통제] 폴백은 무조건 통과가 아니다 — SBOM 없는 배포는 막는다."""
+    client, ecs_routes = app_client_without_opa
+
+    async def _fake_deploy(request, record=None):
+        record.status = ECSDeployStatus.SUCCEEDED
+        return record
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+
+    resp = client.post(
+        "/api/ecs/deploy",
+        json={"project_id": "p", "cluster": "c", "service": "s", "image": "i",
+              "generate_sbom": False},
+    )
+    assert resp.status_code >= 400, (
+        "폴백이 SBOM 없는 배포까지 통과시켰다 — 그건 게이트를 없앤 것이다"
+    )
+
+
+# ===========================================================================
+# 보안 게이트가 무엇을 왜 막았는지 말하는가 — P1
+# ===========================================================================
+
+
+def test_the_scan_gate_names_secrets_and_where_they_are():
+    """[회귀] 예전 메시지는 숫자만 나열하고 대처법은 의존성 얘기뿐이었다.
+
+    실제로 가장 자주 걸리는 게 시크릿인데 한 마디도 없어서, 사용자는
+    엉뚱한 곳을 고치게 됐다.
+    """
+    from core.schemas import (
+        SecurityFinding, SecurityScanResult,
+        SecurityScanSeverity as Sev, SecurityScanTool as Tool,
+    )
+
+    result = SecurityScanResult()
+    result.findings = [
+        SecurityFinding(tool=Tool.GITLEAKS, severity=Sev.CRITICAL,
+                        title="secret_leak:aws_access_key_id",
+                        location="tests/test_aws.py:1287"),
+    ]
+    result.compute_pass()
+
+    message, remedy = ECSAgent._scan_gate_message(result)
+    assert "시크릿" in message, f"무엇이 걸렸는지 안 말했다: {message}"
+    assert "tests/test_aws.py:1287" in remedy, "어느 파일인지 안 알려줬다"
+
+
+def test_a_passing_scan_produces_no_gate_message():
+    from core.schemas import SecurityScanResult
+
+    clean = SecurityScanResult()
+    clean.compute_pass()
+    assert ECSAgent._scan_gate_message(clean) is None
+    assert ECSAgent._scan_gate_message(None) is None
+
+
+def test_a_secret_in_the_workspace_blocks_before_anything_is_built(tmp_path, monkeypatch):
+    """[회귀] 워크스페이스에 자격증명이 있으면 **빌드 전에** 막아야 한다.
+
+    예전에는 스캔이 통째로 푸시 뒤에 있었다. 테스트용 AWS 키 하나만 있어도
+    몇 분에 걸쳐 빌드하고 ECR 에 올린 다음에야 막혔다.
+
+    소스를 읽는 게 아니라 파이프라인을 실제로 돌려 **빌드가 불렸는지**를
+    본다. 문자열만 확인하면 그 호출을 `if False:` 로 감싸도 통과한다.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+    (workspace / "config.py").write_text(
+        'AWS_KEY = "AKIA' + "Z" * 16 + '"\n', encoding="utf-8"
+    )
+
+    agent = ECSAgent()
+    built: list[str] = []
+
+    async def _no_build(self, req, rec, clients):
+        built.append("built")
+        return "img:1"
+
+    async def _no_provision(self, req, rec, clients):
+        return aws_infra.NetworkTarget(vpc_id="vpc-1", subnet_ids=("subnet-1",))
+
+    monkeypatch.setattr(ECSAgent, "_clients", staticmethod(lambda region: {}))
+    monkeypatch.setattr(ECSAgent, "_step_provision", _no_provision)
+    monkeypatch.setattr(ECSAgent, "_step_build_and_push", _no_build)
+
+    request = make_request(
+        workspace_path=str(workspace), run_security_scan=True, provision=True
+    )
+    record = asyncio.run(agent._deploy_pipeline(request, ECSDeployRecord()))
+
+    assert built == [], (
+        "시크릿이 있는데도 이미지를 빌드했다 — 막힐 배포를 위해 ECR 에 "
+        "이미지를 올리게 된다"
+    )
+    assert record.status == ECSDeployStatus.FAILED
+    assert "시크릿" in (record.error_message or ""), record.error_message
+
+
+def test_a_clean_workspace_is_not_blocked(tmp_path, monkeypatch):
+    """[부정 통제] 깨끗한 워크스페이스까지 막으면 아무도 배포를 못 한다."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+    (workspace / "app.py").write_text("print('hello')\n", encoding="utf-8")
+
+    agent = ECSAgent()
+    built: list[str] = []
+
+    async def _build(self, req, rec, clients):
+        built.append("built")
+        raise aws_infra.InfraError("여기까지만 확인한다")
+
+    async def _no_provision(self, req, rec, clients):
+        return aws_infra.NetworkTarget(vpc_id="vpc-1", subnet_ids=("subnet-1",))
+
+    monkeypatch.setattr(ECSAgent, "_clients", staticmethod(lambda region: {}))
+    monkeypatch.setattr(ECSAgent, "_step_provision", _no_provision)
+    monkeypatch.setattr(ECSAgent, "_step_build_and_push", _build)
+
+    request = make_request(
+        workspace_path=str(workspace), run_security_scan=True, provision=True
+    )
+    asyncio.run(agent._deploy_pipeline(request, ECSDeployRecord()))
+    assert built == ["built"], "깨끗한 워크스페이스인데 빌드까지 못 갔다"
+
+
+def test_the_image_scan_keeps_the_findings_the_source_scan_already_made():
+    """두 번에 나눠 돌리므로, 뒤 결과가 앞 결과를 덮어쓰면 안 된다."""
+    from core.schemas import (
+        SecurityFinding, SecurityScanResult,
+        SecurityScanSeverity as Sev, SecurityScanTool as Tool,
+    )
+    from core.security_scan import security_scanner
+
+    earlier = SecurityScanResult(repo_path="/ws")
+    earlier.findings = [
+        SecurityFinding(tool=Tool.GITLEAKS, severity=Sev.CRITICAL,
+                        title="secret_leak:aws_access_key_id", location="a.py:1"),
+    ]
+    earlier.compute_pass()
+
+    record = ECSDeployRecord()
+    record.scan_result = earlier
+
+    async def _image_only(image=None, dockerfile_path=None, repo_path=None):
+        assert repo_path is None, "소스를 두 번 훑고 있다"
+        assert dockerfile_path is None
+        out = SecurityScanResult(image=image)
+        out.compute_pass()
+        return out
+
+    original = security_scanner.scan_all
+    security_scanner.scan_all = _image_only
+    try:
+        record = asyncio.run(
+            ECSAgent()._step_security_scan(make_request(), record, "img:1")
+        )
+    finally:
+        security_scanner.scan_all = original
+
+    assert record.scan_result.secret_count == 1, (
+        "이미지 스캔이 앞 단계에서 찾은 시크릿을 지워버렸다"
+    )
+    assert record.scan_result.blocked is True
+
+
+# ===========================================================================
+# 태스크 정의가 실계정에서 통하는가 — P1
+# ===========================================================================
+
+
+def test_the_log_driver_does_not_ask_the_execution_role_to_create_the_group():
+    """[회귀] `awslogs-create-group: "true"` 는 실행 역할에 없는 권한을 요구한다.
+
+    AWS 관리형 `AmazonECSTaskExecutionRolePolicy` 에는 logs:CreateLogGroup 이
+    없다. 그러면 컨테이너가 기동 중에 죽고, 정작 로그 그룹은 비어 있어서
+    "CloudWatch 로그를 보세요"라는 안내가 아무 도움이 안 된다.
+    (우리 문서 docs/aws-minimum-permissions.md 에도 같은 경고가 있다.)
+
+    로그 그룹은 우리가 `ensure_log_group` 으로 직접 만든다.
+    """
+    template = (
+        Path(__file__).resolve().parents[1]
+        / "registry" / "file_templates" / "ecs-task-definition.json.template"
+    ).read_text(encoding="utf-8")
+    assert "awslogs-create-group" not in template, (
+        "실행 역할이 못 하는 일을 로그 드라이버에게 시키고 있다"
+    )
+    assert "awslogs-stream-prefix" in template, "스트림 접두어까지 지우면 안 된다"
+
+
+def test_no_task_role_is_emitted_when_none_is_configured(monkeypatch):
+    """[회귀] `ecsTaskRole` 은 AWS 가 만들어 주지 않는 역할이다.
+
+    그런데 태스크 정의에 항상 들어갔다. 평범한 계정에서 기본 설정으로
+    배포하면 없는 역할을 가리켜 PassRole 거부나 "unable to assume the role"
+    로 죽는다. preflight 는 실행 역할만 보므로 잡지도 못한다.
+    """
+    from core import aws_policy
+
+    monkeypatch.delenv(aws_policy.ENV_TASK_ROLE_ARN, raising=False)
+
+    rendered = ECSAgent()._render_task_definition(
+        make_request(),
+        image="1.dkr.ecr.us-east-1.amazonaws.com/app:1",
+        execution_role_arn="arn:aws:iam::111111111111:role/ecsTaskExecutionRole",
+        task_role_arn="",
+    )
+    assert "taskRoleArn" not in rendered, (
+        "지정하지도 않은 태스크 역할을 태스크 정의에 넣었다"
+    )
+
+
+def test_the_default_task_role_is_not_invented(monkeypatch):
+    """[회귀] 환경변수가 없으면 태스크 역할 ARN 자체를 만들지 않는다.
+
+    `resolve_roles()` 의 기본값 `ecsTaskRole` 은 AWS 가 만들어 주지 않는
+    역할이다. ARN 을 만들어 넘기는 순간 태스크 정의에 들어가고, 없는 역할을
+    가리켜 배포가 죽는다.
+    """
+    from core import aws_policy
+
+    monkeypatch.delenv(aws_policy.ENV_TASK_ROLE_ARN, raising=False)
+
+    class _Sts:
+        @staticmethod
+        def get_caller_identity():
+            return {"Account": "111111111111"}
+
+    exec_arn, task_arn = ECSAgent()._resolve_role_arns(
+        make_request(), {"sts": _Sts()}
+    )
+    assert exec_arn.startswith("arn:aws:iam::111111111111:role/")
+    assert task_arn == "", (
+        f"지정하지도 않은 태스크 역할 ARN 을 만들어냈다: {task_arn}"
+    )
+
+
+def test_an_explicit_task_role_env_var_is_honoured(monkeypatch):
+    """[부정 통제] 지정했으면 반드시 만들어야 한다."""
+    from core import aws_policy
+
+    monkeypatch.setenv(aws_policy.ENV_TASK_ROLE_ARN, "myTaskRole")
+
+    class _Sts:
+        @staticmethod
+        def get_caller_identity():
+            return {"Account": "111111111111"}
+
+    _exec, task_arn = ECSAgent()._resolve_role_arns(make_request(), {"sts": _Sts()})
+    assert task_arn.endswith("role/myTaskRole"), task_arn
+
+
+def test_a_configured_task_role_is_still_used():
+    """[부정 통제] 지정했으면 반드시 들어가야 한다."""
+    rendered = ECSAgent()._render_task_definition(
+        make_request(),
+        image="1.dkr.ecr.us-east-1.amazonaws.com/app:1",
+        execution_role_arn="arn:aws:iam::111111111111:role/exec",
+        task_role_arn="arn:aws:iam::111111111111:role/myTaskRole",
+    )
+    assert rendered["taskRoleArn"] == "arn:aws:iam::111111111111:role/myTaskRole"
+
+
+def test_a_bogus_task_role_arn_is_still_rejected():
+    with pytest.raises(aws_infra.InfraError):
+        ECSAgent()._render_task_definition(
+            make_request(),
+            image="img",
+            execution_role_arn="arn:aws:iam::111111111111:role/exec",
+            task_role_arn="arn:aws:iam::000000000000:role/ghost",
+        )
+
+
+# ===========================================================================
+# SBOM 이 실제로 만들어지는가
+# ===========================================================================
+
+
+def test_the_sbom_record_model_accepts_what_the_generator_produces():
+    """[회귀] generated_at 은 str 필드인데 datetime 을 넣고 있었다.
+
+    pydantic ValidationError 가 나고 `except Exception` 이 그걸 삼켜서,
+    **성공한 SBOM 이 매번 빈 결과로 둔갑**했다. 그런데도 기록에는
+    sbom_version 이 찍혔다.
+    """
+    import inspect
+
+    from core.schemas import SBOMRecord
+    from core import sbom as sbom_module
+
+    source = inspect.getsource(sbom_module.SBOMGenerator.generate)
+    assert "generated_at=datetime.now(timezone.utc).isoformat()" in source, (
+        "생성기가 여전히 datetime 을 넣고 있다"
+    )
+    assert "sbom_format=" not in source, "모델에 없는 필드를 넘기고 있다"
+
+    # 모델이 실제로 그 값을 받는지도 확인한다.
+    from datetime import datetime as _dt, timezone as _tz
+
+    record = SBOMRecord(
+        image="img", sbom_path="/tmp/s.json", package_count=2,
+        generated_at=_dt.now(_tz.utc).isoformat(),
+    )
+    assert record.package_count == 2 and record.sbom_path

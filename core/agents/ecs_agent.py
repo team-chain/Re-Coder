@@ -260,6 +260,19 @@ class ECSAgent:
 
             self._abort_if_cancelled(record, "인프라 확보")
 
+            # 3-0. 소스·Dockerfile 보안 검사 — **빌드 전에** 한다.
+            #      시크릿이나 Dockerfile 오류는 이미지를 만들어 보지 않아도
+            #      알 수 있다. 예전에는 스캔이 통째로 푸시 **뒤**에 있어서,
+            #      워크스페이스에 테스트용 AWS 키 하나만 있어도 몇 분에 걸쳐
+            #      빌드하고 ECR 에 올린 다음에야 막혔다.
+            if request.run_security_scan:
+                record = await self._step_scan_sources(request, record)
+                blocked = self._scan_gate_message(record.scan_result)
+                if blocked:
+                    record.status = ECSDeployStatus.FAILED
+                    record.error_message, record.error_remedy = blocked
+                    return record
+
             # 3. 이미지 빌드 + ECR 업로드
             image_uri = await self._step_build_and_push(request, record, clients)
 
@@ -267,20 +280,14 @@ class ECSAgent:
             # 과금 0원이고, 리포지토리 수명 정책이 알아서 정리한다.
             self._abort_if_cancelled(record, "빌드·업로드")
 
-            # 4. 보안 스캔 — 이제 **실제로 올라간 이미지**를 스캔한다
+            # 4. 이미지 취약점 검사 — 이건 이미지가 있어야만 할 수 있다.
             if request.run_security_scan:
                 record = await self._step_security_scan(request, record, image_uri)
-                if record.scan_result and not record.scan_result.scan_passed:
+                blocked = self._scan_gate_message(record.scan_result)
+                if blocked:
                     record.status = ECSDeployStatus.FAILED
-                    record.error_message = (
-                        f"보안 스캔 실패: critical={record.scan_result.critical_count} "
-                        f"hadolint_err={record.scan_result.hadolint_error_count} "
-                        f"secrets={record.scan_result.secret_count}"
-                    )
-                    record.error_remedy = (
-                        "취약한 의존성을 올리거나 Dockerfile 을 고친 뒤 다시 "
-                        "배포하세요."
-                    )
+                    record.error_message, record.error_remedy = blocked
+                    self._warn_if_resources_may_be_running(request, record)
                     return record
 
             # 5. SBOM 생성
@@ -617,6 +624,86 @@ class ECSAgent:
         req.image = result.image_uri
         return result.image_uri
 
+    @staticmethod
+    def _scan_gate_message(result) -> tuple[str, str] | None:
+        """차단 사유와 대처법. 통과면 None.
+
+        예전 메시지는 숫자 세 개만 나열하고 대처법은 "취약한 의존성을
+        올리거나 Dockerfile 을 고치세요"였다. **시크릿은 한 마디도 없었다.**
+        그런데 실제로 가장 자주 걸리는 게 시크릿이라, 사용자는 엉뚱한 곳을
+        고치게 된다. 무엇이 걸렸는지, 어느 파일인지까지 말해준다.
+        """
+        if result is None or result.scan_passed:
+            return None
+
+        reasons: list[str] = []
+        fixes: list[str] = []
+
+        if result.secret_count:
+            spots = [
+                f.location for f in result.findings
+                if (f.title or "").startswith("secret_leak:") and f.location
+            ]
+            shown = ", ".join(spots[:3])
+            more = f" 외 {len(spots) - 3}곳" if len(spots) > 3 else ""
+            reasons.append(f"시크릿 의심 {result.secret_count}건")
+            fixes.append(
+                f"소스에서 자격증명을 제거하세요({shown}{more}). "
+                "테스트용 더미 값이라면 'EXAMPLE' 같은 표시를 넣거나 "
+                ".env / AWS Secrets Manager 로 옮기세요."
+            )
+        if result.critical_count:
+            reasons.append(f"critical 취약점 {result.critical_count}건")
+            fixes.append("베이스 이미지를 올리거나 취약한 패키지를 교체하세요.")
+        if result.hadolint_error_count:
+            reasons.append(f"Dockerfile 오류 {result.hadolint_error_count}건")
+            fixes.append("hadolint 오류를 수정하세요.")
+
+        if not reasons:   # 방어: blocked 인데 이유를 못 찾은 경우
+            reasons.append("보안 검사 위반")
+            fixes.append("사이드바의 검사 결과를 확인하세요.")
+
+        return "보안 검사 차단: " + ", ".join(reasons), " ".join(fixes)
+
+    async def _step_scan_sources(
+        self, req: ECSDeployRequest, rec: ECSDeployRecord
+    ) -> ECSDeployRecord:
+        """이미지 없이 할 수 있는 검사 — Dockerfile(hadolint) 과 시크릿."""
+        if not req.workspace_path:
+            logger.warning(
+                "작업 폴더가 없어 Dockerfile·시크릿 검사를 건너뜁니다."
+            )
+            return rec
+
+        dockerfile_path: str | None = None
+        candidate = Path(req.workspace_path) / req.dockerfile
+        if candidate.is_file():
+            dockerfile_path = str(candidate)
+        else:
+            logger.warning("Dockerfile 을 찾지 못했습니다: %s", candidate)
+
+        rec.scan_result = await security_scanner.scan_all(
+            image=None,
+            dockerfile_path=dockerfile_path,
+            repo_path=req.workspace_path,
+        )
+        self._record_scan_gaps(rec)
+        return rec
+
+    @staticmethod
+    def _record_scan_gaps(rec: ECSDeployRecord) -> None:
+        """못 돌린 검사를 사용자에게 알린다."""
+        if rec.scan_result is None or not rec.scan_result.tool_errors:
+            return
+        rec.provisioned["scan_warning"] = (
+            "실행되지 않은 보안 검사가 있습니다: "
+            + ", ".join(rec.scan_result.tool_errors)
+            + " — 이 배포의 '취약점 0건'은 검사 결과가 아닙니다."
+        )
+        logger.warning(
+            "보안 검사 일부 미실행: %s", ", ".join(rec.scan_result.tool_errors)
+        )
+
     async def _step_security_scan(
         self, req: ECSDeployRequest, rec: ECSDeployRecord, image: str
     ) -> ECSDeployRecord:
@@ -628,39 +715,26 @@ class ECSAgent:
         "Hadolint error=block, gitleaks always-block" 이라고 적혀 있었다.
         즉 두 게이트가 **있는 척만** 하고 있었다.
         """
-        dockerfile_path: str | None = None
-        repo_path: str | None = None
-        if req.workspace_path:
-            repo_path = req.workspace_path
-            candidate = Path(req.workspace_path) / req.dockerfile
-            if candidate.is_file():
-                dockerfile_path = str(candidate)
-            else:
-                logger.warning(
-                    "Dockerfile 을 찾지 못해 hadolint 검사를 건너뜁니다: %s", candidate
-                )
-        else:
-            logger.warning(
-                "작업 폴더가 없어 hadolint·gitleaks 검사를 건너뜁니다 "
-                "(이미지 취약점 검사만 수행)."
-            )
-
+        # 소스·Dockerfile 은 빌드 **전에** 이미 봤다(`_step_scan_sources`).
+        # 여기서 또 돌리면 같은 검사를 두 번 하고, 결과 객체를 덮어써서
+        # 앞 단계에서 찾은 것이 사라진다.
+        previous = rec.scan_result
         rec.scan_result = await security_scanner.scan_all(
-            image=image, dockerfile_path=dockerfile_path, repo_path=repo_path
+            image=image, dockerfile_path=None, repo_path=None
         )
+        if previous is not None:
+            # 앞 단계 결과를 합친다 — 사용자에게는 한 번의 검사로 보여야 한다.
+            rec.scan_result.findings = list(previous.findings) + list(
+                rec.scan_result.findings
+            )
+            rec.scan_result.dockerfile_path = previous.dockerfile_path
+            rec.scan_result.repo_path = previous.repo_path
+            rec.scan_result.compute_pass()
         # **못 돌린 검사는 반드시 말한다.** 도구가 안 깔렸거나 이미지를 못
         # 받아오면 findings 가 비고, 그대로 두면 "취약점 0건 = 안전"으로
         # 읽힌다. 스캐너는 그 사실을 tool_errors 에 담아 주는데, 예전에는
         # 아무도 읽지 않아서 사용자에게 닿지 않았다.
-        if rec.scan_result.tool_errors:
-            rec.provisioned["scan_warning"] = (
-                "실행되지 않은 보안 검사가 있습니다: "
-                + ", ".join(rec.scan_result.tool_errors)
-                + " — 이 배포의 '취약점 0건'은 검사 결과가 아닙니다."
-            )
-            logger.warning(
-                "보안 검사 일부 미실행: %s", ", ".join(rec.scan_result.tool_errors)
-            )
+        self._record_scan_gaps(rec)
         return rec
 
     async def _step_sbom(
@@ -709,9 +783,20 @@ class ECSAgent:
         exec_arn = aws_policy._arn(
             "iam", f"role/{execution_name}", ctx, global_service=True
         )
-        task_arn = aws_policy._arn(
-            "iam", f"role/{task_name}", ctx, global_service=True
-        )
+        # **태스크 역할은 명시적으로 설정했을 때만 쓴다.**
+        #
+        # `resolve_roles()` 의 기본값은 `ecsTaskRole` 인데, 그건 AWS 가
+        # 만들어 주는 역할이 **아니다**(실행 역할과 달리 콘솔이 자동 생성해
+        # 주지 않고, 우리 문서도 만들라고 안내하지 않는다). 그런데 태스크
+        # 정의에는 항상 들어갔다. 그래서 평범한 계정에서 기본 설정으로
+        # 배포하면 없는 역할을 가리켜 PassRole 거부나 "unable to assume the
+        # role" 로 죽었다 — 정작 태스크 역할은 앱이 AWS API 를 부를 때만
+        # 필요하고, 샘플 앱을 포함한 대부분의 컨테이너는 필요 없는데도.
+        task_arn = ""
+        if aws_policy.role_from_env(aws_policy.ENV_TASK_ROLE_ARN):
+            task_arn = aws_policy._arn(
+                "iam", f"role/{task_name}", ctx, global_service=True
+            )
         return exec_arn, task_arn
 
     async def _step_register_task_definition(
@@ -1221,6 +1306,8 @@ class ECSAgent:
         이제 호출자가 STS 로 확인한 실제 ARN 을 넘긴다.
         """
         for label, arn in (("실행 역할", execution_role_arn), ("태스크 역할", task_role_arn)):
+            if not arn:
+                continue
             if not arn.startswith("arn:") or "::000000000000:" in arn:
                 raise InfraError(
                     f"{label} ARN 이 올바르지 않습니다: {arn}",
@@ -1246,6 +1333,26 @@ class ECSAgent:
             template_str = template_str.replace(key, str(value))
 
         rendered = json.loads(template_str)
+
+        # **태스크 역할은 없으면 뺀다.**
+        #
+        # AWS 는 `ecsTaskExecutionRole` 은 콘솔에서 자동으로 만들어 주지만
+        # `ecsTaskRole` 은 **아무도 만들어 주지 않는다.** 그런데 템플릿은
+        # 이 키를 항상 넣었고, 기본값이 그 없는 역할이었다. 결과적으로
+        # 평범한 AWS 계정에서 기본 설정으로 배포하면 RegisterTaskDefinition
+        # 이 PassRole 로 거부되거나, 태스크가 "unable to assume the role"
+        # 로 기동에 실패했다. preflight 는 실행 역할만 확인하므로 이걸
+        # 잡아내지도 못한다.
+        #
+        # 태스크 역할은 **앱이 AWS API 를 부를 때만** 필요하다. 샘플 앱을
+        # 포함해 대부분의 컨테이너는 필요 없다. 그래서 명시적으로 지정된
+        # 경우에만 넣고, 아니면 키 자체를 뺀다.
+        if not task_role_arn:
+            rendered.pop("taskRoleArn", None)
+            logger.info(
+                "태스크 역할이 지정되지 않아 taskRoleArn 을 넣지 않습니다 "
+                "(앱이 AWS API 를 부른다면 ECS_TASK_ROLE_ARN 을 설정하세요)."
+            )
         # 템플릿의 로그 그룹 이름과 우리가 실제로 만든 그룹 이름이 어긋나면
         # 컨테이너가 로그를 못 남기고 태스크 시작 자체가 실패한다.
         # 파생값을 원본과 같은 곳에서 계산해 어긋날 여지를 없앤다.

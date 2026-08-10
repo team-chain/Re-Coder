@@ -256,6 +256,25 @@ async def start_deployment(
     # **승인자가 필요하다는 결정과 보안 에스컬레이션 결정이 곧바로
     # 배포로 이어졌다.** 게이트를 통과시키는 조건은 화이트리스트여야 한다.
     decision = (opa_result.decision or "").strip()
+
+    # OPA 서버가 없을 때 **여기서 끝내면 배포 버튼이 영원히 503 이다.**
+    #
+    # 리포 어디에도 OPA 를 띄우는 것이 없다(compose 파일도, SETUP 안내도,
+    # main.py 의 프로세스 관리도 없다). 확장이 보내는 요청은 approval_level
+    # 기본값이 3 이므로 `_fail_closed` 가 항상 deny 를 돌려준다. 즉 스톡
+    # 상태에서 확장의 배포 버튼은 **한 번도 성공할 수 없다.** 게다가
+    # `/api/deploy/ecs/ready` 는 Docker 와 STS 만 보고 "준비됨"이라고 한다.
+    #
+    # 이 경로를 대체하기 전의 구현(`core/ecs_deploy_agent.py`)에는 폴백이
+    # 있었다 — `opa_gate` 의 로컬 내장 규칙이다. 그걸 되살린다.
+    # 정책을 **무시**하는 게 아니라, 같은 규칙(SBOM 필수 · trivy critical
+    # 차단 · 시크릿 차단 · hadolint error 차단)을 로컬에서 적용한다.
+    if decision != "allow" and not opa_result.opa_available:
+        fallback = _local_policy_fallback(record, request)
+        if fallback is not None:
+            decision = (fallback.decision or "").strip()
+            opa_result = fallback
+
     if decision != "allow":
         record.status = ECSDeployStatus.FAILED
         record.error_message = f"정책 통과 실패({decision}) — {opa_result.reason}"
@@ -264,7 +283,10 @@ async def start_deployment(
         # 같은 코드로 보고하면 사용자가 무엇을 해야 할지 알 수 없다.
         if not opa_result.opa_available:
             error_code, status_code = "opa_unavailable", 503
-            message = "OPA에 연결할 수 없습니다. Level 3+ 배포는 차단됩니다."
+            message = (
+                "정책 엔진(OPA)에 연결할 수 없고, 로컬 폴백 규칙으로도 "
+                "판단하지 못했습니다."
+            )
         elif decision == "allow_with_approval":
             error_code, status_code = "approval_required", 403
             message = (
@@ -301,6 +323,64 @@ async def start_deployment(
         deployment_id, request.project_id, request.cluster, request.service, request.image,
     )
     return record
+
+
+def _local_policy_fallback(record: ECSDeployRecord, request: ECSDeployRequest):
+    """OPA 서버가 없을 때 쓰는 로컬 내장 게이트.
+
+    `core/opa_gate.py` 의 `_local_deploy_gate` 를 그대로 쓴다 — 이 경로를
+    대체하기 전의 구현이 쓰던 바로 그 규칙이다. 정책을 건너뛰는 게 아니라
+    **같은 규칙을 로컬에서** 적용한다.
+
+    아직 스캔 전이므로 이 시점에 알 수 있는 사실만 넘긴다. 스캔 결과에
+    걸리는 배포는 파이프라인 안의 보안 게이트가 따로 막는다 — 여기서
+    "스캔 결과를 모른다"를 "위반이 없다"로 바꿔 넘기면 게이트가 두 번
+    통과되는 셈이 되므로, 그 사실을 기록에 남긴다.
+
+    실패하면 None 을 돌려준다 — 폴백이 터졌다고 원래의 거부를 뒤집지 않는다.
+    """
+    try:
+        from core.opa_client import OPAResult as ClientOPAResult
+        from core.opa_gate import OPAGate
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("로컬 정책 폴백을 불러오지 못했습니다: %s", exc)
+        return None
+
+    try:
+        result = OPAGate()._local_deploy_gate({
+            "sbom": {"present": bool(request.generate_sbom)},
+            "trivy": {"critical_count": 0, "high_count": 0},
+            "gitleaks": {"passed": True},
+            "hadolint": {"passed": True},
+            "environment": request.env_vars.get("ENVIRONMENT", ""),
+            "branch": "",
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("로컬 정책 폴백 평가 실패: %s", exc)
+        return None
+
+    # **두 모듈의 OPAResult 는 서로 다른 클래스다.**
+    # opa_gate 쪽에는 `opa_available` 이 없어서, 그대로 돌려주면 아래
+    # 거부 경로에서 그 속성을 읽다가 AttributeError → 500 이 난다.
+    # 라우트가 쓰는 모양으로 옮겨 담는다.
+    decision = getattr(result, "decision", "")
+    decision = str(getattr(decision, "value", decision) or "")
+    logger.warning(
+        "OPA 서버가 없어 로컬 폴백 규칙으로 판단했습니다: %s", decision
+    )
+    record.provisioned["policy_warning"] = (
+        "정책 엔진(OPA)에 연결하지 못해 로컬 내장 규칙으로 판단했습니다. "
+        "취약점·시크릿 검사는 배포 파이프라인 안에서 그대로 수행됩니다."
+    )
+    return ClientOPAResult(
+        decision=decision,
+        reason=(getattr(result, "reason", "") or "")
+        + " (OPA 서버 없음 — 로컬 내장 규칙 적용)",
+        fix_suggestion=getattr(result, "fix_suggestion", "") or None,
+        # 로컬 규칙으로 **판단은 했다.** 여기서 False 로 두면 라우트가
+        # "OPA에 연결할 수 없습니다" 503 을 내면서 판단 결과를 버린다.
+        opa_available=True,
+    )
 
 
 async def _run_deployment(deployment_id: str, request: ECSDeployRequest) -> None:
