@@ -1,0 +1,116 @@
+﻿name: Codex 코드 리뷰 요청
+
+# ── 왜 이 워크플로가 필요한가 ────────────────────────────────────────────
+# Codex 코드 검토의 "모든 PR 검토"(외부 기여자 포함)는 **Pro 전용**이다.
+# Plus 에서는 "내 PR 검토"까지만 고를 수 있어서, 연결한 사람 본인의 PR 만
+# 자동 검토되고 팀원 PR 은 그냥 지나간다.
+#
+# 그런데 `@codex review` **멘션**은 남의 PR 에서도 동작한다(실측 확인).
+# 그래서 팀원이 PR 을 열면 연결 계정 이름으로 멘션을 대신 달아 준다.
+#
+# ── 왜 PAT 인가 ──────────────────────────────────────────────────────
+# 기본 `GITHUB_TOKEN` 으로 코멘트를 달면 작성자가 `github-actions[bot]` 이 된다.
+# Codex 는 **연결된 사용자**의 멘션에 반응하므로 봇 코멘트로는 안 돈다.
+# `CODEX_REVIEW_TOKEN` 은 Re-Coder 저장소의 `Pull requests: write` 하나만 가진
+# fine-grained PAT 이다. 유출돼도 할 수 있는 일은 이 저장소 PR 에 코멘트를
+# 다는 것뿐이고, 저장소 시크릿은 등록 후 다시 읽을 수 없다.
+#
+# ── 트리거 세 가지 ───────────────────────────────────────────────────
+#   1. PR 이 열릴 때        — 자동. 아무것도 안 해도 된다.
+#   2. `/review` 코멘트     — 고쳐서 다시 받고 싶을 때. PR 안에서 바로.
+#   3. Actions 의 Run 버튼  — PR 번호를 직접 넣어 부를 때.
+#
+# ── 주의 ────────────────────────────────────────────────────────────
+# 워크플로 등록은 기본 브랜치(develop) 기준이다. 이 파일이 develop 에
+# 병합된 **다음** PR 부터 동작한다. 이 PR 자신에게는 걸리지 않는다.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: '리뷰를 요청할 PR 번호'
+        required: true
+        type: string
+
+# PAT 로 코멘트를 달기 때문에 기본 토큰 권한은 필요 없다. 최소로 둔다.
+permissions:
+  contents: read
+
+# 같은 PR 에 대한 요청이 겹치면 마지막 것만 남긴다. `/review` 를 연달아
+# 눌러 Codex 사용량을 두 배로 태우는 일을 막는다.
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  request-review:
+    name: '@codex review 요청'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # 세 경로의 조건이 서로 다르다.
+    #
+    #  · pull_request  — draft 는 제외(아직 볼 단계가 아니다).
+    #                    **연결 계정 본인의 PR 도 제외** — 개인 설정으로 이미
+    #                    자동 검토되므로 여기서 또 부르면 같은 PR 을 두 번
+    #                    검토해 Plus 사용량만 깎는다.
+    #  · issue_comment — 이슈에도 붙는 이벤트라 PR 인지 확인해야 한다.
+    #                    그리고 **공개 저장소**이므로 아무나 `/review` 로 남의
+    #                    사용량을 태우지 못하게 협업자로 제한한다.
+    #  · dispatch      — 버튼을 누를 수 있는 사람이 이미 쓰기 권한자다.
+    if: >-
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.user.login != 'LDK511'
+      ) || (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        startsWith(github.event.comment.body, '/review') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      ) || (
+        github.event_name == 'workflow_dispatch'
+      )
+
+    steps:
+      - name: PR 번호 확인
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          FROM_PR: ${{ github.event.pull_request.number }}
+          FROM_COMMENT: ${{ github.event.issue.number }}
+          FROM_INPUT: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request)      PR="$FROM_PR" ;;
+            issue_comment)     PR="$FROM_COMMENT" ;;
+            workflow_dispatch) PR="$FROM_INPUT" ;;
+            *) echo "::error::처리할 수 없는 이벤트: $EVENT"; exit 1 ;;
+          esac
+          # 버튼으로 들어온 값은 사람이 손으로 넣는다 — 숫자인지 확인한다.
+          if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+            echo "::error::PR 번호가 올바르지 않습니다: '$PR'"
+            exit 1
+          fi
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "::notice::PR #$PR 에 Codex 리뷰를 요청합니다 (트리거: $EVENT)"
+
+      - name: '@codex review 코멘트 달기'
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
+          PR: ${{ steps.target.outputs.pr }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # 시크릿이 없으면 **조용히 넘어가지 않는다.** 그냥 통과시키면
+          # 리뷰가 안 붙었다는 사실을 아무도 모른 채 머지된다.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::CODEX_REVIEW_TOKEN 시크릿이 없습니다. 저장소 Settings → Secrets and variables → Actions 에서 추가하세요."
+            exit 1
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body "@codex review"
