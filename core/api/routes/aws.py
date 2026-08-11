@@ -139,6 +139,10 @@ class AwsPermissionCheck(BaseModel):
     """배포에 필요한 IAM 권한을 읽기 전용으로 점검한 결과."""
 
     inspected: bool = False
+    #: STS assumed-role ARN에서 IAM 역할 경로를 복원하지 못해 시뮬레이션만
+    #: 완료할 수 없는 경우. 명시적인 부족 권한이 없으면 UI는 안내 후 배포를
+    #: 진행할 수 있다.
+    advisory_only: bool = False
     required_actions: list[str] = Field(default_factory=list)
     missing_actions: list[str] = Field(default_factory=list)
     excessive_policies: list[str] = Field(default_factory=list)
@@ -181,7 +185,6 @@ REQUIRED_DEPLOY_ACTIONS = [
     "ecs:DescribeTasks",
     "iam:GetRole",
     "iam:PassRole",
-    "iam:CreateServiceLinkedRole",
     "logs:DescribeLogGroups",
     "logs:CreateLogGroup",
     "ec2:DescribeVpcs",
@@ -199,6 +202,13 @@ REQUIRED_DEPLOY_ACTIONS = [
 OPTIONAL_COST_CONTROL_ACTIONS = {
     "ecr:PutLifecyclePolicy",
     "logs:PutRetentionPolicy",
+}
+
+# ECS 서비스 연결 역할은 계정에 아직 없을 때만 CreateService 과정에서 필요하다.
+# 이미 존재하는 계정에서는 이 권한 없이도 정상 배포되므로, 거부되더라도
+# 배포 차단이 아닌 조건부 안내로만 보여 준다.
+OPTIONAL_CONDITIONAL_ACTIONS = {
+    "iam:CreateServiceLinkedRole",
 }
 
 _BROAD_POLICY_NAMES = {
@@ -464,6 +474,21 @@ def _iam_principal_arn(identity_arn: str) -> Optional[str]:
     return None
 
 
+def _assumed_role_name(identity_arn: str) -> Optional[str]:
+    """STS assumed-role ARN에서 역할의 마지막 이름만 읽는다.
+
+    STS ARN에는 IAM 역할 path가 없으므로, 이 이름으로 GetRole을 시도해 실제
+    IAM ARN을 얻는다. 읽기 권한이 없으면 호출자는 계속 배포할 수 있으므로
+    이후 시뮬레이션 결과를 advisory로만 취급할 수 있게 ``None``이 아니다.
+    """
+    marker = ":assumed-role/"
+    if ":sts:" not in identity_arn or marker not in identity_arn:
+        return None
+    role_and_session = identity_arn.split(marker, 1)[1]
+    role_name = role_and_session.rsplit("/", 1)[0]
+    return role_name.rsplit("/", 1)[-1] or None
+
+
 def _policy_is_administrator(document: Any) -> bool:
     """관리형/인라인 정책 문서가 사실상 전체 권한인지 판별한다."""
     if isinstance(document, str):
@@ -548,7 +573,8 @@ def _inspect_deploy_permissions(
     함께 전달한다.
     """
     report = AwsPermissionCheck(required_actions=list(REQUIRED_DEPLOY_ACTIONS))
-    principal_arn = _iam_principal_arn(identity.get("arn", ""))
+    identity_arn = identity.get("arn", "")
+    principal_arn = _iam_principal_arn(identity_arn)
     if not principal_arn:
         report.warnings.append("IAM 사용자 또는 역할 ARN을 확인할 수 없어 권한 점검을 건너뛰었습니다.")
         return report
@@ -564,6 +590,21 @@ def _inspect_deploy_permissions(
     except Exception as exc:  # noqa: BLE001
         report.warnings.append(f"IAM 권한 점검을 시작할 수 없습니다: {exc}")
         return report
+
+    # assumed-role ARN에는 `/team/Deployer` 같은 IAM 역할 path가 빠진다.
+    # GetRole을 허용한 계정에서는 정확한 ARN으로 바꿔 시뮬레이션한다. 이 읽기
+    # 권한이 없는 계정도 배포 자체는 가능하므로, 아래에서 시뮬레이션이 전부
+    # 실패한 경우에만 advisory로 돌린다.
+    unresolved_assumed_role_path = False
+    assumed_role_name = _assumed_role_name(identity_arn)
+    if assumed_role_name:
+        try:
+            resolved_arn = str(iam.get_role(RoleName=assumed_role_name)["Role"]["Arn"])
+            if resolved_arn:
+                principal_arn = resolved_arn
+        except Exception as exc:  # noqa: BLE001
+            unresolved_assumed_role_path = True
+            logger.info("[aws] assumed-role IAM path lookup unavailable: %s", exc)
 
     account_id = identity.get("account", "") or principal_arn.split(":")[4]
     partition = _simulation_partition(identity.get("arn", ""))
@@ -671,10 +712,15 @@ def _inspect_deploy_permissions(
     report.missing_actions = [
         action for action in denied_actions
         if action not in OPTIONAL_COST_CONTROL_ACTIONS
+        and action not in OPTIONAL_CONDITIONAL_ACTIONS
     ]
     optional_cost_actions = [
         action for action in denied_actions
         if action in OPTIONAL_COST_CONTROL_ACTIONS
+    ]
+    optional_conditional_actions = [
+        action for action in denied_actions
+        if action in OPTIONAL_CONDITIONAL_ACTIONS
     ]
     # 일부 그룹만 확인했거나 IAM Simulator 호출이 하나라도 실패했다면, 이
     # 결과는 "점검 완료"가 아니다. UI는 inspected + missing 없음일 때만
@@ -684,6 +730,8 @@ def _inspect_deploy_permissions(
         and not deferred_actions
         and set(REQUIRED_DEPLOY_ACTIONS).issubset(simulated_actions)
     )
+    if unresolved_assumed_role_path and failed_actions and not report.missing_actions:
+        report.advisory_only = True
     if report.missing_actions:
         report.warnings.append("ECS 배포에 필요한 권한 일부가 실제 배포 대상에서 허용되지 않았습니다.")
     if optional_cost_actions:
@@ -691,6 +739,18 @@ def _inspect_deploy_permissions(
             "배포는 가능하지만 비용 최적화 설정 권한이 없습니다: "
             f"{', '.join(optional_cost_actions)}. "
             "ECR 이미지 자동 정리 또는 CloudWatch 로그 보존기간 설정이 적용되지 않을 수 있습니다."
+        )
+    if optional_conditional_actions:
+        report.warnings.append(
+            "ECS 서비스 연결 역할 생성 권한이 없습니다. 계정에 "
+            "AWSServiceRoleForECS가 이미 있으면 배포는 계속할 수 있고, "
+            "없다면 AWS 콘솔에서 ECS를 한 번 열거나 해당 권한을 추가하세요."
+        )
+    if report.advisory_only:
+        report.warnings.append(
+            "현재 자격증명은 IAM 역할 경로가 있는 assumed-role일 수 있어 권한 "
+            "시뮬레이션을 완료하지 못했습니다. 명시적으로 거부된 권한은 없어 "
+            "배포를 계속할 수 있지만, AWS에서 권한 오류가 나면 역할 정책을 확인하세요."
         )
     if failed_actions:
         report.warnings.append("IAM 권한 시뮬레이션 권한이 없어 일부 배포 권한을 자동 확인하지 못했습니다.")

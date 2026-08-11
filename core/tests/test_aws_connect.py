@@ -192,6 +192,67 @@ def test_cost_control_permission_denial_warns_without_blocking_ecs_deploy(
     assert any("비용 최적화" in warning for warning in report.warnings)
 
 
+def test_existing_ecs_service_linked_role_permission_is_advisory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """이미 ECS 서비스 연결 역할이 있으면 생성 권한 거부로 배포를 막지 않는다."""
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            return {"EvaluationResults": [
+                {
+                    "EvalActionName": action,
+                    "EvalDecision": "implicitDeny" if action == "iam:CreateServiceLinkedRole" else "allowed",
+                }
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+    )
+
+    assert report.inspected is True
+    assert report.missing_actions == []
+    assert any("서비스 연결 역할" in warning for warning in report.warnings)
+
+
+def test_unresolved_assumed_role_path_is_advisory_not_a_deploy_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STS ARN에 path가 빠져 source role을 찾지 못해도 명시 거부가 없으면 진행한다."""
+    class FakeIam:
+        def get_role(self, **_: object) -> dict:
+            raise RuntimeError("AccessDenied")
+
+        def simulate_principal_policy(self, **_: object) -> dict:
+            raise RuntimeError("PolicySourceArn arn:aws:iam::123456789012:role/Deployer does not exist")
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:sts::123456789012:assumed-role/Deployer/session"},
+        "ap-northeast-2",
+    )
+
+    assert report.inspected is False
+    assert report.advisory_only is True
+    assert report.missing_actions == []
+
+
 def test_permission_simulation_uses_deployment_resources_and_passrole_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
