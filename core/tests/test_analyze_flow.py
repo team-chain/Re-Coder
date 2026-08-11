@@ -814,3 +814,25 @@ def test_waiter_cancellation_does_not_kill_other_waiters(monkeypatch):
         f"대기자 취소가 다른 요청까지 죽였다: {results}"
     )
     assert results[0].event_id != results[1].event_id
+
+
+def test_scalar_suggested_actions_does_not_crash(monkeypatch):
+    """[Codex P2 크리티컬] suggested_actions 가 스칼라(정수)여도 analyze() 안 터짐."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    class _Resp:
+        # 스키마 위반: suggested_actions 가 리스트가 아니라 정수
+        text = '{"has_error": true, "error_summary": "boom", "importance_score": 50, "event_type": "error_detected", "suggested_actions": 1}'
+        model_used = "fake"
+
+    monkeypatch.setattr(analyzer, "get_router",
+                        lambda: type("R", (), {"call": lambda self, *a, **k: _Resp()})())
+
+    req = AnalyzeRequest(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+    event = asyncio.run(analyzer.analyze(req, session_id="s"))  # 예전엔 TypeError
+    assert event is not None
+    assert event.suggested_actions == []

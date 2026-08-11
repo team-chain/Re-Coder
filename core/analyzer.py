@@ -399,11 +399,18 @@ def _parse_event_type(value: str, default: EventType = EventType.TASK_CHANGE) ->
 
 
 def _parse_user_actions(values: list[str] | str | None) -> list[UserAction]:
-    """문자열 또는 리스트를 UserAction 리스트로 변환."""
+    """문자열 또는 리스트를 UserAction 리스트로 변환.
+
+    LLM 이 스키마를 안 지켜 스칼라(예: `"suggested_actions": 1`)를 줄 수 있다.
+    그대로 순회하면 TypeError 가 _run_llm_analysis 폴백 **밖**(AgentEvent 생성
+    시점)에서 터져 analyze() 가 통째로 죽는다. str/list 외에는 빈 리스트로.
+    """
     if not values:
         return []
     if isinstance(values, str):
         values = [values]
+    if not isinstance(values, (list, tuple)):
+        return []
 
     actions = []
     for v in values:
