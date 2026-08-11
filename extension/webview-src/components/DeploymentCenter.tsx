@@ -198,6 +198,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         // 사용하지 않으므로 권한 검사에도 전달하지 않는다.
         ecsCluster: ecs.ecs_cluster,
         ecsService: ecs.ecs_service,
+        taskFamily: ecs.task_family,
         awsRegion: ecs.aws_region,
       },
     });

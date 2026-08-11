@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from .deploy_ecs import DEFAULT_CLUSTER as ECS_DEFAULT_CLUSTER
 from .deploy_ecs import DEFAULT_SERVICE as ECS_DEFAULT_SERVICE
+from .deploy_ecs import DEFAULT_TASK_FAMILY as ECS_DEFAULT_TASK_FAMILY
 
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     import aws_policy
@@ -101,6 +102,7 @@ class AwsDeploymentPermissionContext(BaseModel):
     ecr_repo: str = ""
     ecs_cluster: str = ""
     ecs_service: str = ""
+    task_family: str = ""
     aws_region: str = ""
     task_execution_role: str = ""
     task_role: str = ""
@@ -518,6 +520,7 @@ def _resolved_permission_context(
         ecr_repo=(supplied.ecr_repo or ecs_service).strip(),
         ecs_cluster=ecs_cluster,
         ecs_service=ecs_service,
+        task_family=(supplied.task_family or ECS_DEFAULT_TASK_FAMILY).strip(),
         aws_region=(supplied.aws_region or "").strip(),
         task_execution_role=execution_role,
         task_role=task_role,
@@ -601,7 +604,13 @@ def _inspect_deploy_permissions(
         f"{context.ecs_cluster}/{context.ecs_service}"
     )
     task_arn = f"arn:{partition}:ecs:{simulation_region}:{account_id}:task/{context.ecs_cluster}/*"
-    log_group_arn = f"arn:{partition}:logs:{simulation_region}:{account_id}:log-group:/ecs/*"
+    # ECSAgent.log_group_name()은 task_definition_family에서 이 경로를
+    # 결정한다. 와일드카드를 넣으면 실제 한 그룹에만 준 최소권한 정책이
+    # implicitDeny로 오판된다.
+    log_group_arn = (
+        f"arn:{partition}:logs:{simulation_region}:{account_id}:"
+        f"log-group:/ecs/{context.task_family}"
+    )
     vpc_arn = f"arn:{partition}:ec2:{simulation_region}:{account_id}:vpc/*"
     security_group_arn = f"arn:{partition}:ec2:{simulation_region}:{account_id}:security-group/*"
     # Extension 요청의 provision 기본값은 true다. 아래는 배포가 실제로
