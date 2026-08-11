@@ -241,10 +241,11 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   useEffect(() => {
     // ECS 이상 감지는 사용자가 다른 배포 탭을 보고 있어도 카드로 보여야 한다.
     // 실제 롤백은 이 폴링이 아니라 아래 승인 버튼으로만 호출된다.
-    postMessage("workspace.deploy.ecs.status");
-    const timer = window.setInterval(() => postMessage("workspace.deploy.ecs.status"), 4000);
+    const poll = () => postMessage("workspace.deploy.ecs.status", { reportProgress: target === "ecs" });
+    poll();
+    const timer = window.setInterval(poll, 4000);
     return () => window.clearInterval(timer);
-  }, [postMessage]);
+  }, [target, postMessage]);
   useEffect(() => {
     // ECS 감시 폴링과 별개로 EC2 탭의 기존 상태 폴링을 유지한다.
     if (target !== "ec2") return;

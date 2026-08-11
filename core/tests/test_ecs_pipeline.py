@@ -4829,6 +4829,28 @@ def test_ecs_rollback_status_exposes_a_pending_proposal_without_aws_call(app_cli
     assert called == [], "상태 조회가 ECS UpdateService를 호출하면 자동 롤백이다"
 
 
+def test_ecs_status_keeps_an_actionable_older_service_rollback_proposal(app_client):
+    """[P2] 다른 서비스의 최신 기록이 기존 승인 카드를 지우면 안 된다."""
+    client, ecs_routes = app_client
+    pending = _pending_ecs_rollback_record()
+    latest = ECSDeployRecord(
+        deployment_id="other-service-latest",
+        cluster="other-cluster",
+        service="other-service",
+        region="ap-northeast-2",
+        status=ECSDeployStatus.FAILED,
+        started_at=pending.started_at + timedelta(seconds=1),
+    )
+    ecs_routes._deploy_records[pending.deployment_id] = pending
+    ecs_routes._deploy_records[latest.deployment_id] = latest
+
+    response = client.get("/api/deploy/ecs/status")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deployment_id"] == latest.deployment_id
+    assert body["rollback_proposal"]["proposal_id"] == pending.rollback_proposal_id
+
+
 def test_ignoring_ecs_rollback_never_calls_aws(app_client, monkeypatch):
     """[D17] 무시 버튼은 ECS를 건드리지 않고 감사 기록만 남긴다."""
     from api.routes import deploy_ecs

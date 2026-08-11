@@ -437,7 +437,20 @@ async def deploy_ecs_status() -> EcsDeployStatusResponse:
     if not records:
         return EcsDeployStatusResponse()
     latest = max(records, key=lambda r: r.started_at)
-    return to_status_response(latest)
+    response = to_status_response(latest)
+    # 진행 상태는 최신 배포 하나를 보여 주되, 사용자의 결정을 기다리는
+    # 롤백 제안은 다른 서비스의 최신 기록 때문에 사라지면 안 된다.
+    # pending과 재시도 가능한 failed만 카드에 노출한다.
+    actionable = [
+        record for record in records
+        if (record.rollback_proposal_status or "pending") in {"pending", "failed"}
+        and record.rollback_proposal_id
+        and record.previous_task_definition_arn
+    ]
+    if actionable:
+        newest_proposal_record = max(actionable, key=lambda r: r.started_at)
+        response.rollback_proposal = _rollback_proposal_from_record(newest_proposal_record)
+    return response
 
 
 @router.post("/api/deploy/ecs/rollback", response_model=EcsRollbackResponse)
