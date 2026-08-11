@@ -155,6 +155,43 @@ def test_permission_check_warns_for_missing_actions_and_administrator_policy(mon
     assert any("너무 강력" in warning or "전체 권한" in warning for warning in report.warnings)
 
 
+def test_cost_control_permission_denial_warns_without_blocking_ecs_deploy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """수명 주기·로그 보존 설정은 best-effort라 배포 게이트가 아니다."""
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            return {"EvaluationResults": [
+                {
+                    "EvalActionName": action,
+                    "EvalDecision": (
+                        "implicitDeny" if action in aws.OPTIONAL_COST_CONTROL_ACTIONS else "allowed"
+                    ),
+                }
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+    )
+
+    assert report.inspected is True
+    assert report.missing_actions == []
+    assert any("비용 최적화" in warning for warning in report.warnings)
+
+
 def test_permission_simulation_uses_deployment_resources_and_passrole_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
