@@ -4869,7 +4869,10 @@ def test_approved_ecs_rollback_updates_the_previous_task_definition(app_client, 
 
         def client(self, name):
             assert name == "ecs"
-            return object()
+            return self
+
+        def describe_services(self, **_kwargs):
+            return {"services": [{"taskDefinition": record.task_definition_arn}]}
 
     def _revert(_ecs, *, cluster, service, task_definition):
         calls.append((cluster, service, task_definition))
@@ -4888,3 +4891,84 @@ def test_approved_ecs_rollback_updates_the_previous_task_definition(app_client, 
     assert record.rollback_proposal_status == "completed"
     assert record.status == ECSDeployStatus.ROLLED_BACK
     assert "사용자 승인" in response.json()["adr"]["content"]
+
+
+def test_an_old_ecs_rollback_proposal_cannot_overwrite_a_newer_deployment(app_client, monkeypatch):
+    """[P1] 서비스가 새 리비전으로 진행됐으면 오래된 승인은 차단한다."""
+    import boto3
+    from api.routes import deploy_ecs
+
+    client, ecs_routes = app_client
+    record = _pending_ecs_rollback_record()
+    ecs_routes._deploy_records[record.deployment_id] = record
+    calls = []
+
+    class _Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        def client(self, _name):
+            return self
+
+        def describe_services(self, **_kwargs):
+            return {"services": [{"taskDefinition": "arn:aws:ecs:ap-northeast-2:123:task-definition/app:5"}]}
+
+    monkeypatch.setattr(boto3.session, "Session", _Session)
+    monkeypatch.setattr(
+        deploy_ecs.aws_infra,
+        "revert_service_task_definition",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    response = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": True},
+    )
+    assert response.status_code == 409, response.text
+    assert calls == [], "오래된 제안이 최신 배포를 이전 리비전으로 덮어썼다"
+    assert record.rollback_proposal_status == "superseded"
+
+
+def test_a_transient_ecs_rollback_failure_can_be_approved_again(app_client, monkeypatch):
+    """[P2] 만료된 임시 자격증명을 고친 뒤 같은 제안을 재시도할 수 있다."""
+    import boto3
+    from api.routes import deploy_ecs
+
+    client, ecs_routes = app_client
+    record = _pending_ecs_rollback_record()
+    ecs_routes._deploy_records[record.deployment_id] = record
+
+    class _Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        def client(self, _name):
+            return self
+
+        def describe_services(self, **_kwargs):
+            return {"services": [{"taskDefinition": record.task_definition_arn}]}
+
+    outcomes = iter([
+        "취소했지만 이전 버전으로 되돌리지 못했습니다",
+        "이전 태스크 정의로 되돌렸습니다",
+    ])
+    monkeypatch.setattr(boto3.session, "Session", _Session)
+    monkeypatch.setattr(
+        deploy_ecs.aws_infra,
+        "revert_service_task_definition",
+        lambda *_args, **_kwargs: next(outcomes),
+    )
+
+    failed = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": True},
+    )
+    assert failed.status_code == 502, failed.text
+    assert record.rollback_proposal_status == "failed"
+
+    retried = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": True},
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "completed"

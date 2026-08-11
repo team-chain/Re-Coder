@@ -922,7 +922,7 @@ export class ApiClient {
             previous_task_definition: string;
             current_task_definition: string;
             approval_level: number;
-            status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed';
+            status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed' | 'superseded';
         } | null;
     }> {
         const resp = await this.request<{
@@ -944,7 +944,7 @@ export class ApiClient {
                 previous_task_definition: string;
                 current_task_definition: string;
                 approval_level: number;
-                status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed';
+                status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed' | 'superseded';
             } | null;
         }>('GET', '/api/deploy/ecs/status');
         if (!resp.success || !resp.data) {
