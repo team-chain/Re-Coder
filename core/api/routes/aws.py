@@ -156,8 +156,9 @@ class AwsStatus(BaseModel):
     permission_check: Optional[AwsPermissionCheck] = None
 
 
-# ECS Fargate 배포에 쓰는 최소 작업 목록. 이 목록은 배포 가능 여부를 알려 주기
-# 위한 것이며, 실제 정책은 대상 ECR 리포지토리/Task Role로 더 좁혀야 한다.
+# ECS Fargate 배포를 실제로 시작하기 위한 최소 작업 목록. 이 목록은 배포
+# 가능 여부를 결정하므로, 실제 정책은 대상 ECR 리포지토리/Task Role로 더
+# 좁혀야 한다.
 REQUIRED_DEPLOY_ACTIONS = [
     "ecr:GetAuthorizationToken",
     "ecr:CreateRepository",
@@ -169,7 +170,6 @@ REQUIRED_DEPLOY_ACTIONS = [
     "ecr:PutImage",
     "ecr:BatchGetImage",
     "ecr:GetDownloadUrlForLayer",
-    "ecr:PutLifecyclePolicy",
     "ecs:DescribeClusters",
     "ecs:CreateCluster",
     "ecs:DescribeServices",
@@ -184,7 +184,6 @@ REQUIRED_DEPLOY_ACTIONS = [
     "iam:CreateServiceLinkedRole",
     "logs:DescribeLogGroups",
     "logs:CreateLogGroup",
-    "logs:PutRetentionPolicy",
     "ec2:DescribeVpcs",
     "ec2:DescribeSubnets",
     "ec2:DescribeRouteTables",
@@ -193,6 +192,14 @@ REQUIRED_DEPLOY_ACTIONS = [
     "ec2:CreateSecurityGroup",
     "ec2:AuthorizeSecurityGroupIngress",
 ]
+
+# 비용 누적을 줄이는 설정이다. 실제 파이프라인도 이 두 호출의 실패를 경고로
+# 기록한 뒤 배포를 계속하므로, 여기서 권한이 없다고 ECS 배포 자체를 막으면
+# 안 된다. 다만 사용자가 비용 제어를 보완할 수 있게 결과에는 경고를 남긴다.
+OPTIONAL_COST_CONTROL_ACTIONS = {
+    "ecr:PutLifecyclePolicy",
+    "logs:PutRetentionPolicy",
+}
 
 _BROAD_POLICY_NAMES = {
     "administratoraccess",
@@ -657,9 +664,17 @@ def _inspect_deploy_permissions(
             failed_actions.extend(actions)
             logger.info("[aws] IAM permission simulation unavailable for %s: %s", actions, exc)
 
-    report.missing_actions = [
+    denied_actions = [
         action for action in simulated_actions
         if any(decision.lower() != "allowed" for decision in decisions.get(action, ["implicitDeny"]))
+    ]
+    report.missing_actions = [
+        action for action in denied_actions
+        if action not in OPTIONAL_COST_CONTROL_ACTIONS
+    ]
+    optional_cost_actions = [
+        action for action in denied_actions
+        if action in OPTIONAL_COST_CONTROL_ACTIONS
     ]
     # 일부 그룹만 확인했거나 IAM Simulator 호출이 하나라도 실패했다면, 이
     # 결과는 "점검 완료"가 아니다. UI는 inspected + missing 없음일 때만
@@ -671,6 +686,12 @@ def _inspect_deploy_permissions(
     )
     if report.missing_actions:
         report.warnings.append("ECS 배포에 필요한 권한 일부가 실제 배포 대상에서 허용되지 않았습니다.")
+    if optional_cost_actions:
+        report.warnings.append(
+            "배포는 가능하지만 비용 최적화 설정 권한이 없습니다: "
+            f"{', '.join(optional_cost_actions)}. "
+            "ECR 이미지 자동 정리 또는 CloudWatch 로그 보존기간 설정이 적용되지 않을 수 있습니다."
+        )
     if failed_actions:
         report.warnings.append("IAM 권한 시뮬레이션 권한이 없어 일부 배포 권한을 자동 확인하지 못했습니다.")
     if deferred_actions:
