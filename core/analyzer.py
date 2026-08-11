@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -22,15 +23,48 @@ from typing import Optional
 from llm.base import LLMRequest
 from llm.router import get_router
 from schemas import AgentEvent, AnalyzeRequest, EventType, UserAction
-from context_gate import run_gate, mask_secrets
+from context_gate import run_gate, mask_secrets, anonymize_paths, strip_terminal_noise
 from trigger_detector import should_trigger_with_reasons
 
-#: LLM 프롬프트·이벤트에 실릴 수 있는 **모든 텍스트 필드**. 하나라도 빠지면
-#: 그 필드로 시크릿·PII 가 마스킹 없이 새어나간다. 여기 한 곳에서 관리한다.
-_MASKED_FIELDS = ("terminal_output", "selected_text", "project_files_summary")
+#: **출력 경로(LLM 프롬프트·이벤트·트리거 사유)로 나가는 텍스트 필드** 전부.
+#: 하나라도 빠지면 그 필드로 시크릿·PII 가 마스킹 없이 새어나간다.
+#: - terminal_output / selected_text / project_files_summary → LLM 프롬프트
+#: - command → 트리거 사유(matched)에 담겨 AgentEvent.to_dict() 로 나간다
+#: (workspace_path·active_file_path·project_id 는 **현재** 출력 경로에 안 실린다.
+#:  나중에 이들을 프롬프트/이벤트에 추가한다면 반드시 여기에 함께 넣어야 한다 —
+#:  특히 active_file_path 는 사용자 절대경로다.)
+#: 필드 추가 시 여기 한 곳만 고치면 전 경로가 덮인다.
+_MASKED_FIELDS = ("terminal_output", "selected_text", "project_files_summary", "command")
 
-# 에러 중복 체크용 캐시 (60초 내 동일 에러 → 기존 이벤트 재사용)
-_error_cache: dict[str, tuple[float, AgentEvent]] = {}
+
+def _safe_int(value, default: int) -> int:
+    """LLM 응답의 숫자 필드를 안전하게 정수화한다.
+
+    LLM 이 `null`·`"high"` 같은 걸 돌려줘도(json_schema 강제가 없는 라우터·폴백
+    파서 경로) 여기서 크래시하지 않는다. event_type·suggested_actions 는
+    _parse_* 로 방어하는데 숫자만 무방비면 응답 하나로 분석이 실패한다.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _scrub(text: str) -> str:
+    """게이트 정상경로와 **동일한** 동기 스크럽.
+
+    `_run_gate_sync` 가 하는 것: ANSI 소음 제거 → 시크릿 마스킹 → 경로 익명화.
+    fail-closed 폴백이 이 중 하나라도 빠뜨리면 그 종류의 PII(특히 절대경로)가
+    정상경로에선 지워지는데 폴백에선 새는 비대칭이 생긴다.
+    """
+    if not text:
+        return text
+    return anonymize_paths(mask_secrets(strip_terminal_noise(text)))
+
+# LLM **분석 결과**만 캐싱한다(60초). 이벤트가 아니라 응답 dict 를 담는다 —
+# event_id·트리거 메타데이터·컨텍스트는 매 호출 새로 만들어야 세션/명령이 다른
+# 요청이 남의 이벤트를 물려받지 않는다. 캐시 대상은 프롬프트에만 의존한다.
+_llm_cache: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL_SECONDS = 60
 
 
@@ -169,29 +203,31 @@ async def _mask_context(request: AnalyzeRequest) -> tuple[AnalyzeRequest, float]
                 updates[name] = (await run_gate(value)).text
         return request.model_copy(update=updates), gate.quality_score
     except Exception as e:
-        # fail-closed: 게이트가 죽어도 원문을 흘리지 않는다.
-        print(f"[analyzer] Context Gate 실패 — 정규식 폴백 마스킹 적용(fail-closed): {e}")
+        # fail-closed: 게이트가 죽어도 원문을 흘리지 않는다. 정상경로와 **같은**
+        # 스크럽(_scrub: ANSI+시크릿+경로)을 모든 필드에 적용한다.
+        print(f"[analyzer] Context Gate 실패 — 동기 스크럽 폴백 적용(fail-closed): {e}")
         updates = {}
         for name in _MASKED_FIELDS:
             value = getattr(request, name, None)
             if value:
-                updates[name] = mask_secrets(value)
+                updates[name] = _scrub(value)
         return request.model_copy(update=updates), 0.3
 
 
-def _scoped_cache_key(request: AnalyzeRequest) -> str:
-    """캐시 키를 **요청 전체 범위**로 만든다.
+def _llm_cache_key(request: AnalyzeRequest) -> str:
+    """LLM **분석 결과**를 캐싱하는 키.
 
-    예전엔 추출한 error_text 하나로만 키를 만들었다. 그래서 60초 안에 온
-    두 요청이 (a) 같은 에러이거나 (b) 둘 다 에러가 없으면, 워크스페이스·세션·
-    선택 코드가 달라도 키가 같아져 **두 번째 요청이 첫 요청의 이벤트(그 안의
-    contexts 포함)를 그대로 돌려받았다.** 릴레이처럼 여러 사용자가 한 코어를
-    쓰면 **남의 컨텍스트가 새는** 경로다.
-    지금은 마스킹된 컨텍스트 전체로 키를 만들어, 내용이 완전히 같을 때만
-    (=진짜 동일 요청 재제출) 캐시가 맞는다.
+    핵심 원칙: 캐시하는 건 LLM 응답 하나뿐이고, 그것은 **프롬프트를 결정하는
+    필드**(terminal_output·selected_text·project_files_summary)에만 의존한다.
+    - command 는 프롬프트에 안 들어가고 트리거 점수/사유에만 영향 → 키에서 뺀다.
+    - session_id 는 event_id 에만 영향 → 키에서 뺀다.
+    이 값들은 매 호출 **이벤트를 새로 만들며** 반영하므로, 캐시 히트여도
+    남의 세션/명령 메타데이터를 물려받지 않는다.
     """
-    parts = [request.workspace_path or ""]
-    parts += [getattr(request, name, None) or "" for name in _MASKED_FIELDS]
+    parts = [
+        getattr(request, name, None) or ""
+        for name in ("terminal_output", "selected_text", "project_files_summary")
+    ]
     return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -345,6 +381,40 @@ def _parse_user_actions(values: list[str] | str | None) -> list[UserAction]:
     return actions
 
 
+def _run_llm_analysis(request: AnalyzeRequest, error_text: str) -> dict:
+    """LLM 을 호출해 분석 dict 를 돌려준다. 실패하면 기본 응답으로 폴백.
+
+    반환값은 **컨텍스트 독립적**이다(프롬프트에만 의존). 그래서 캐싱해도
+    안전하다 — event_id·트리거·세션은 여기 들어오지 않는다.
+    """
+    prompt = _build_prompt(request)
+    try:
+        llm_resp = get_router().call(
+            LLMRequest(
+                prompt=prompt,
+                system=_SYSTEM_INSTRUCTION,
+                json_schema=_RESPONSE_SCHEMA,
+                max_tokens=1024,
+                temperature=0.3,
+            ),
+            agent="analyzer",
+            operation="analyze_context",
+        )
+        raw_response = llm_resp.text.strip()
+        print(f"[analyzer] LLM 응답 길이: {len(raw_response)}자 (model={llm_resp.model_used})")
+        return _extract_json_response(raw_response)
+    except Exception as e:
+        print(f"[analyzer] LLM 호출 실패: {e}")
+        return {
+            "has_error": bool(error_text),
+            "error_type": "unknown",
+            "error_summary": error_text[:100] if error_text else "분석 불가능",
+            "suggested_actions": [],
+            "importance_score": 20,
+            "event_type": "error_detected" if error_text else "unknown",
+        }
+
+
 async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
     """
     AnalyzeRequest를 받아 AgentEvent를 생성 및 반환한다.
@@ -372,29 +442,16 @@ async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
     request, quality_score = await _mask_context(request)
     print(f"[analyzer] Context Gate 완료 | quality_score={quality_score:.2f}")
 
-    # 2. 중복 체크 — 캐시 키는 **요청 전체 범위**로 만든다(교차 오염 방지).
-    #    error_text 는 마스킹된 terminal_output 에서 뽑는다(예전엔 스키마에서
-    #    사라진 request.error_text 를 읽어 AttributeError 로 죽었다).
+    # 2. error_text 추출 (마스킹된 terminal_output 에서).
     error_text = _extract_error_text(request.terminal_output or "")
-    cache_key = _scoped_cache_key(request)
     now = time.time()
 
-    if cache_key in _error_cache:
-        cached_time, cached_event = _error_cache[cache_key]
-        if now - cached_time < _CACHE_TTL_SECONDS:
-            print(f"[analyzer] 캐시 히트 (경과: {now - cached_time:.1f}초)")
-            return cached_event
-
-    # 캐시 정리: 만료된 항목 제거
-    expired = [k for k, (t, _) in _error_cache.items() if now - t >= _CACHE_TTL_SECONDS]
-    for k in expired:
-        del _error_cache[k]
-
-    # 3. trigger_score 계산
-    #    시그니처는 (errors, new_commands, text_changed, window_switched,
-    #    uia_failure) 5개이고 (trigger, score, need_capture, reasons) 4개를
-    #    돌려준다. 예전 코드는 인자 2개만 넘기고 2개만 받아 **TypeError 로
-    #    죽었다** — 이 지점은 try 로 감싸여 있지도 않아 요청 전체가 실패했다.
+    # 3. trigger_score — **매 호출 새로** 계산한다.
+    #    command 가 여기 반영되므로(마스킹된 상태로 전달) 명령이 다른 요청은
+    #    다른 트리거 사유를 받는다. 캐시(=LLM 응답)와 분리돼 있어야 남의 명령
+    #    메타데이터를 물려받지 않는다.
+    #    시그니처: (errors, new_commands, text_changed, window_switched,
+    #    uia_failure) → (trigger, score, need_capture, reasons).
     should_trigger, raw_score, _need_capture, reasons = should_trigger_with_reasons(
         [error_text] if error_text else [],
         [request.command] if request.command else [],
@@ -404,42 +461,30 @@ async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
     )
     trigger_score = int(raw_score)
 
-    # 4. LLM 호출
-    prompt = _build_prompt(request)
-    try:
-        llm_resp = get_router().call(
-            LLMRequest(
-                prompt=prompt,
-                system=_SYSTEM_INSTRUCTION,
-                json_schema=_RESPONSE_SCHEMA,
-                max_tokens=1024,
-                temperature=0.3,
-            ),
-            agent="analyzer",
-            operation="analyze_context",
-        )
-        raw_response = llm_resp.text.strip()
-        print(f"[analyzer] LLM 응답 길이: {len(raw_response)}자 (model={llm_resp.model_used})")
+    # 4. LLM 분석 — 프롬프트가 같으면 캐시 재사용(60초). **이벤트가 아니라
+    #    응답 dict 만** 캐싱한다. 캐시 히트여도 이벤트는 아래에서 이 요청 기준
+    #    (event_id·contexts·trigger)으로 새로 만든다 → 교차 오염 없음.
+    llm_key = _llm_cache_key(request)
+    expired = [k for k, (t, _) in _llm_cache.items() if now - t >= _CACHE_TTL_SECONDS]
+    for k in expired:
+        del _llm_cache[k]
 
-        response_data = _extract_json_response(raw_response)
-    except Exception as e:
-        print(f"[analyzer] LLM 호출 실패: {e}")
-        # 에러 시 기본 응답 생성
-        response_data = {
-            "has_error": bool(error_text),
-            "error_type": "unknown",
-            "error_summary": error_text[:100] if error_text else "분석 불가능",
-            "suggested_actions": [],
-            "importance_score": 20,
-            "event_type": "error_detected" if error_text else "unknown",
-        }
+    cached = _llm_cache.get(llm_key)
+    if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+        response_data = cached[1]
+        print(f"[analyzer] LLM 분석 캐시 히트 (경과: {now - cached[0]:.1f}초)")
+    else:
+        # 동기 LLM 호출(수 초~수십 초)을 스레드로 빼 이벤트 루프를 막지 않는다
+        # — 릴레이에서 한 사용자의 응답 대기 동안 다른 사용자 폴링이 멈추지 않게.
+        response_data = await asyncio.to_thread(_run_llm_analysis, request, error_text)
+        _llm_cache[llm_key] = (now, response_data)
 
-    # 5. AgentEvent 생성
+    # 5. AgentEvent 생성 — 매 호출 새로.
     has_error = response_data.get("has_error", False)
     error_type = response_data.get("error_type", "")
     error_summary = response_data.get("error_summary", "")
     suggested_actions = response_data.get("suggested_actions", [])
-    importance_score = int(response_data.get("importance_score", 50))
+    importance_score = _safe_int(response_data.get("importance_score", 50), 50)
     event_type_str = response_data.get("event_type", "unknown")
 
     # AgentEvent 는 dataclass 이고 필드가 아래가 전부다. 예전 코드는
@@ -474,8 +519,5 @@ async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
 
     print(f"[analyzer] 분석 완료 | event_type={event.event_type.value} | "
           f"has_error={has_error} | importance={importance_score}")
-
-    # 캐시 저장 (키는 요청 전체 범위 — 교차 오염 방지)
-    _error_cache[cache_key] = (now, event)
 
     return event
