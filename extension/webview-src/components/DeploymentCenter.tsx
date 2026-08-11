@@ -193,10 +193,9 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     pendingEcsDeploymentRef.current = { ...ecs, container_port: Number(ecs.container_port) };
     postMessage("aws.permissions.check", {
       deploymentContext: {
-        // ECSDeployRequest의 repo_name 기본값과 반드시 같아야 한다.
-        ecrRepo: "recoder-app",
-        // 실제 ECS 배포가 push하는 registry 계정의 ECR 권한을 검사한다.
-        ecrRegistry: ecs.ecr_registry,
+        // repo는 서버가 ECSAgent.ecr_repo_name()과 같은 규칙(빈 값이면
+        // service 이름)으로 결정한다. 별도 registry는 현재 ECS 어댑터가
+        // 사용하지 않으므로 권한 검사에도 전달하지 않는다.
         ecsCluster: ecs.ecs_cluster,
         ecsService: ecs.ecs_service,
         awsRegion: ecs.aws_region,
