@@ -1558,6 +1558,12 @@ class ECSDeployRecord(BaseModel):
     # Rollback proposal (설계서 §Q3-A Approval Level 3)
     rollback_proposal_id:           Optional[str] = None
     rollback_approval_level:        Optional[int] = None
+    #: pending | approving | completed | ignored | failed. 제안과 실제 실행을
+    #: 분리해서, 승인 버튼을 누르기 전에는 ECS 를 절대 건드리지 않는다.
+    rollback_proposal_status:       Optional[str] = None
+    #: 승인/무시 결과를 포함한 감사 로그. `provisioned` 는 문자열만 허용하므로
+    #: 구조화된 상태는 전용 필드로 보존한다.
+    rollback_completed_at:           Optional[datetime] = None
 
     # Lifecycle
     error_message:                  Optional[str] = None

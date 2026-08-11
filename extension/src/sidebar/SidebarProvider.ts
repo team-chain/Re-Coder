@@ -521,8 +521,44 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'workspace.deploy.ecs.status': {
                 try {
                     const status = await this._apiClient.getEcsDeployStatus();
-                    this.postMessage('workspace.deploy.result', { message: status.error || `ECS: ${status.stage}` });
+                    // 상태 폴링은 요청한 큰 창에만 돌려준다. 특히 롤백 제안은
+                    // 다른 웹뷰의 배포에 붙으면 안 된다.
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.statusResult', status);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.result', {
+                        message: status.error || `ECS: ${status.stage}`,
+                    });
                 } catch { /* status polling is best effort */ }
+                break;
+            }
+            case 'workspace.deploy.ecs.rollback': {
+                const p = (payload ?? {}) as { proposalId?: string; approved?: boolean };
+                if (!p.proposalId || typeof p.approved !== 'boolean') {
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.rollbackError', {
+                        message: '롤백 제안 또는 승인 여부가 올바르지 않습니다.',
+                    });
+                    break;
+                }
+                try {
+                    const result = await this._apiClient.resolveEcsRollback(p.proposalId, p.approved);
+                    // 사용자 결정은 결과와 함께 ADR로 남긴다. AWS 호출 자체는
+                    // Core가 끝낸 뒤이므로, 기록 저장 실패가 롤백 결과를 뒤집지
+                    // 않도록 별도로 처리한다.
+                    let adrPath = '';
+                    let adrWarning = '';
+                    try {
+                        adrPath = await this.writeWorkspaceFile(result.adr.file, result.adr.content);
+                    } catch (err) {
+                        adrWarning = ` ADR 기록 저장 실패: ${err instanceof Error ? err.message : String(err)}`;
+                    }
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.rollbackResult', {
+                        ...result,
+                        adr_path: adrPath,
+                        message: `${result.message}${adrWarning}`,
+                    });
+                } catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.rollbackError', { message });
+                }
                 break;
             }
             case 'workspace.deploy.preflight': {
