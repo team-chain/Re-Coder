@@ -437,7 +437,13 @@ def _run_llm_analysis(request: AnalyzeRequest, error_text: str) -> dict:
         )
         raw_response = llm_resp.text.strip()
         print(f"[analyzer] LLM 응답 길이: {len(raw_response)}자 (model={llm_resp.model_used})")
-        return _extract_json_response(raw_response)
+        parsed = _extract_json_response(raw_response)
+        # 스키마를 강제 안 하는 라우트에선 provider 가 객체 아닌 JSON(null·[]·숫자)
+        # 을 줄 수 있다. 그대로 캐싱·반환하면 analyze() 의 response_data.get(...) 이
+        # AttributeError 로 터진다. dict 가 아니면 무효로 보고 폴백으로 떨어진다.
+        if not isinstance(parsed, dict):
+            raise ValueError(f"LLM 응답 최상위가 객체가 아님: {type(parsed).__name__}")
+        return parsed
     except Exception as e:
         print(f"[analyzer] LLM 호출 실패: {e}")
         return {
@@ -461,7 +467,11 @@ async def _analyze_llm_deduped(
     """
     inflight = _llm_inflight.get(llm_key)
     if inflight is not None:
-        return await inflight
+        # **shield 로 감싼다.** 그냥 `await inflight` 하면, 이 대기자가 취소될 때
+        # (클라이언트 연결 종료 등) 취소가 공유 future 로 전파돼 **다른 대기자
+        # 전원**이 같이 취소된다 — 리더의 provider 호출은 멀쩡히 진행 중인데도.
+        # shield 는 취소를 이 대기자에게만 국한하고 공유 future 는 살려둔다.
+        return await asyncio.shield(inflight)
 
     loop = asyncio.get_event_loop()
     fut: "asyncio.Future" = loop.create_future()
