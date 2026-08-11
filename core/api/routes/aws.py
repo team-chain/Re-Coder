@@ -26,7 +26,6 @@ import configparser
 import json
 import logging
 import os
-import re
 import stat
 import sys
 from urllib.parse import unquote
@@ -36,6 +35,9 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+
+from .deploy_ecs import DEFAULT_CLUSTER as ECS_DEFAULT_CLUSTER
+from .deploy_ecs import DEFAULT_SERVICE as ECS_DEFAULT_SERVICE
 
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     import aws_policy
@@ -97,7 +99,6 @@ class AwsDeploymentPermissionContext(BaseModel):
     """
 
     ecr_repo: str = ""
-    ecr_registry: str = ""
     ecs_cluster: str = ""
     ecs_service: str = ""
     aws_region: str = ""
@@ -166,14 +167,29 @@ REQUIRED_DEPLOY_ACTIONS = [
     "ecr:PutImage",
     "ecr:BatchGetImage",
     "ecr:GetDownloadUrlForLayer",
+    "ecr:PutLifecyclePolicy",
     "ecs:DescribeClusters",
+    "ecs:CreateCluster",
     "ecs:DescribeServices",
     "ecs:RegisterTaskDefinition",
     "ecs:DescribeTaskDefinition",
     "ecs:UpdateService",
+    "ecs:CreateService",
+    "ecs:ListTasks",
+    "ecs:DescribeTasks",
     "iam:GetRole",
     "iam:PassRole",
+    "iam:CreateServiceLinkedRole",
     "logs:DescribeLogGroups",
+    "logs:CreateLogGroup",
+    "logs:PutRetentionPolicy",
+    "ec2:DescribeVpcs",
+    "ec2:DescribeSubnets",
+    "ec2:DescribeRouteTables",
+    "ec2:DescribeSecurityGroups",
+    "ec2:DescribeNetworkInterfaces",
+    "ec2:CreateSecurityGroup",
+    "ec2:AuthorizeSecurityGroupIngress",
 ]
 
 _BROAD_POLICY_NAMES = {
@@ -486,37 +502,26 @@ def _resolved_permission_context(
         # 재호출하면 똑같은 ValueError가 다시 난다. 키(STS)는 유효할 수 있으니
         # 연결을 실패시키지 않고 점검 불완전 상태와 설정 안내를 반환한다.
         return None, f"ECS 역할 설정이 올바르지 않아 권한 점검을 완료하지 못했습니다: {exc}"
+    # 확장 ECS 어댑터가 쓰는 기본값과 **같은 값**을 먼저 확정한다. 빈 값을
+    # 환경변수에서 읽으면 점검은 통과했는데 실제 배포는 recoder-* 대상으로
+    # 나가는 두 개의 서로 다른 계약이 생긴다.
+    ecs_cluster = (supplied.ecs_cluster or ECS_DEFAULT_CLUSTER).strip()
+    ecs_service = (supplied.ecs_service or ECS_DEFAULT_SERVICE).strip()
     return AwsDeploymentPermissionContext(
         # ECS 배포 경로는 ECR_REPOSITORY 환경변수를 읽지 않고
         # ECSDeployRequest.repo_name(기본 recoder-app)을 쓴다. 여기에서만
         # ECR_REPOSITORY를 보면 권한 점검은 통과했는데 실제 push가 다른
         # 저장소로 나가 실패하는 상태가 된다.
-        ecr_repo=(supplied.ecr_repo or "recoder-app").strip(),
-        # ECSDeployRequest는 요청값이 없을 때 ECR_REGISTRY를 사용한다. 따라서
-        # 권한 점검도 같은 레지스트리를 기준으로 삼아야 한다.
-        ecr_registry=(supplied.ecr_registry or os.getenv("ECR_REGISTRY") or "").strip(),
-        ecs_cluster=(supplied.ecs_cluster or os.getenv("ECS_CLUSTER") or "").strip(),
-        ecs_service=(supplied.ecs_service or os.getenv("ECS_SERVICE") or "").strip(),
+        # ECSAgent.ecr_repo_name()과 같다. repo_name을 보내지 않은 확장 요청은
+        # service 이름으로 ECR 리포지토리를 정하므로 recoder-app을 고정하면 안
+        # 된다.
+        ecr_repo=(supplied.ecr_repo or ecs_service).strip(),
+        ecs_cluster=ecs_cluster,
+        ecs_service=ecs_service,
         aws_region=(supplied.aws_region or "").strip(),
         task_execution_role=execution_role,
         task_role=task_role,
     ), None
-
-
-def _ecr_registry_account_id(registry: str) -> Optional[str]:
-    """사설 ECR registry endpoint에서 AWS 계정 번호를 추출한다.
-
-    ECS 배포는 ``123456789012.dkr.ecr.<region>.amazonaws.com`` 형식의
-    레지스트리에 이미지를 push한다. 서로 다른 계정 레지스트리도 실제 대상 ARN
-    으로 검사해야 하므로, caller 계정과 registry 계정을 혼용하지 않는다.
-    """
-    if not registry:
-        return None
-    match = re.match(
-        r"^(?P<account>\d{12})\.dkr\.ecr\.[^.]+\.amazonaws\.com(?:\.cn)?(?:/|$)",
-        registry,
-    )
-    return match.group("account") if match else None
 
 
 def _inspect_deploy_permissions(
@@ -556,17 +561,10 @@ def _inspect_deploy_permissions(
         report.warnings.append("AWS 계정 또는 리전 정보를 확인할 수 없어 리소스별 권한 점검을 건너뛰었습니다.")
         return report
 
-    registry_account_id = _ecr_registry_account_id(context.ecr_registry)
-    if context.ecr_registry and registry_account_id is None:
-        report.warnings.append(
-            "입력한 ECR Registry에서 AWS 계정 번호를 확인할 수 없어 실제 push 대상 권한 점검을 완료하지 못했습니다."
-        )
-        return report
-    # ecr_registry가 비어 있으면 실제 배포도 아직 환경변수에서 보완되지 않은
-    # 상태다. 이 경우 caller 계정을 사용하되, 레지스트리가 입력된 경우에는
-    # 반드시 그 endpoint의 계정을 사용한다.
-    ecr_account_id = registry_account_id or account_id
-    ecr_arn = f"arn:{partition}:ecr:{simulation_region}:{ecr_account_id}:repository/{context.ecr_repo}"
+    # Extension ECS 어댑터는 caller 계정의 ECR client가 돌려준 repositoryUri로
+    # 이미지를 올린다. 별도 ecr_registry 입력값은 실제 배포에 쓰이지 않으므로
+    # 여기서만 다른 계정을 시뮬레이션하지 않는다.
+    ecr_arn = f"arn:{partition}:ecr:{simulation_region}:{account_id}:repository/{context.ecr_repo}"
     role_arns = [
         f"arn:{partition}:iam::{account_id}:role/{context.task_execution_role}",
     ]
@@ -579,12 +577,14 @@ def _inspect_deploy_permissions(
         ([
             "ecr:GetAuthorizationToken", "ecs:RegisterTaskDefinition",
             "ecs:DescribeTaskDefinition", "logs:DescribeLogGroups",
+            "ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeRouteTables",
+            "ec2:DescribeSecurityGroups", "ec2:DescribeNetworkInterfaces",
         ], ["*"], None),
         ([
             "ecr:CreateRepository", "ecr:DescribeRepositories",
             "ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload",
             "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:PutImage",
-            "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer",
+            "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:PutLifecyclePolicy",
         ], [ecr_arn], None),
         # PreflightAgent는 실행 역할 존재를 확인한다. task role은 PassRole만
         # 필요하므로 GetRole 대상에 불필요하게 추가하지 않는다.
@@ -595,20 +595,37 @@ def _inspect_deploy_permissions(
             "ContextKeyType": "string",
         }]),
     ]
+    cluster_arn = f"arn:{partition}:ecs:{simulation_region}:{account_id}:cluster/{context.ecs_cluster}"
+    service_arn = (
+        f"arn:{partition}:ecs:{simulation_region}:{account_id}:service/"
+        f"{context.ecs_cluster}/{context.ecs_service}"
+    )
+    task_arn = f"arn:{partition}:ecs:{simulation_region}:{account_id}:task/{context.ecs_cluster}/*"
+    log_group_arn = f"arn:{partition}:logs:{simulation_region}:{account_id}:log-group:/ecs/*"
+    vpc_arn = f"arn:{partition}:ec2:{simulation_region}:{account_id}:vpc/*"
+    security_group_arn = f"arn:{partition}:ec2:{simulation_region}:{account_id}:security-group/*"
+    # Extension 요청의 provision 기본값은 true다. 아래는 배포가 실제로
+    # 확보하는 클러스터·로그 그룹·네트워크·보안 그룹·서비스의 권한을 같은
+    # 리소스 문맥으로 검사한다.
+    simulations.extend([
+        (["ecs:DescribeClusters", "ecs:CreateCluster"], [cluster_arn], None),
+        (["ecs:DescribeServices", "ecs:UpdateService", "ecs:CreateService"], [service_arn], None),
+        (["ecs:ListTasks"], ["*"], [{
+            "ContextKeyName": "ecs:cluster",
+            "ContextKeyValues": [cluster_arn],
+            "ContextKeyType": "string",
+        }]),
+        (["ecs:DescribeTasks"], [task_arn], None),
+        (["iam:CreateServiceLinkedRole"], ["*"], [{
+            "ContextKeyName": "iam:AWSServiceName",
+            "ContextKeyValues": ["ecs.amazonaws.com"],
+            "ContextKeyType": "string",
+        }]),
+        (["logs:CreateLogGroup", "logs:PutRetentionPolicy"], [log_group_arn], None),
+        (["ec2:CreateSecurityGroup"], [vpc_arn, security_group_arn], None),
+        (["ec2:AuthorizeSecurityGroupIngress"], [security_group_arn], None),
+    ])
     deferred_actions: list[str] = []
-    if context.ecs_cluster:
-        cluster_arn = f"arn:{partition}:ecs:{simulation_region}:{account_id}:cluster/{context.ecs_cluster}"
-        simulations.append((["ecs:DescribeClusters"], [cluster_arn], None))
-    else:
-        deferred_actions.append("ecs:DescribeClusters")
-    if context.ecs_cluster and context.ecs_service:
-        service_arn = (
-            f"arn:{partition}:ecs:{simulation_region}:{account_id}:service/"
-            f"{context.ecs_cluster}/{context.ecs_service}"
-        )
-        simulations.append((["ecs:DescribeServices", "ecs:UpdateService"], [service_arn], None))
-    else:
-        deferred_actions.extend(["ecs:DescribeServices", "ecs:UpdateService"])
 
     decisions: dict[str, list[str]] = {}
     simulated_actions: list[str] = []

@@ -725,7 +725,6 @@ export class ApiClient {
     /** POST /api/aws/permissions/check — 실제 ECS 대상 기준으로 현재 키 권한 점검. */
     async checkAwsPermissions(deploymentContext?: {
         ecrRepo?: string;
-        ecrRegistry?: string;
         ecsCluster?: string;
         ecsService?: string;
         awsRegion?: string;
@@ -735,7 +734,6 @@ export class ApiClient {
         const resp = await this.request<AwsStatus>('POST', '/api/aws/permissions/check', {
             deployment_context: deploymentContext ? {
                 ecr_repo: deploymentContext.ecrRepo ?? '',
-                ecr_registry: deploymentContext.ecrRegistry ?? '',
                 ecs_cluster: deploymentContext.ecsCluster ?? '',
                 ecs_service: deploymentContext.ecsService ?? '',
                 aws_region: deploymentContext.awsRegion ?? '',

@@ -44,6 +44,19 @@ def test_permission_context_uses_the_ecs_request_repo_not_unused_environment(
     assert context.ecr_repo == "recoder-app"
 
 
+def test_permission_context_uses_ecs_adapter_defaults_and_service_repo() -> None:
+    """빈 확장 폼도 실제 ECS 어댑터와 같은 대상 ARN을 검사한다."""
+    context, error = aws._resolved_permission_context(
+        aws.AwsDeploymentPermissionContext(ecs_service="team-service")
+    )
+
+    assert error is None
+    assert context is not None
+    assert context.ecs_cluster == "recoder-cluster"
+    assert context.ecs_service == "team-service"
+    assert context.ecr_repo == "team-service"
+
+
 def test_connect_validates_and_keeps_credentials_in_current_core(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "ORIGINAL_ACCESS_KEY")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ORIGINAL_SECRET")
@@ -198,7 +211,7 @@ def test_permission_simulation_uses_deployment_resources_and_passrole_context(
     }]
 
 
-def test_permission_simulation_skips_empty_task_role_and_uses_registry_account(
+def test_permission_simulation_skips_empty_task_role_and_uses_deploy_account_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """기본 task role은 PassRole 대상이 아니며 ECR은 실제 registry 계정을 쓴다."""
@@ -225,7 +238,6 @@ def test_permission_simulation_skips_empty_task_role_and_uses_registry_account(
     monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
     context = aws.AwsDeploymentPermissionContext(
         ecr_repo="recoder-app",
-        ecr_registry="210987654321.dkr.ecr.ap-northeast-2.amazonaws.com",
         ecs_cluster="cluster",
         ecs_service="service",
         task_execution_role="recoder/EcsExecution",
@@ -241,11 +253,15 @@ def test_permission_simulation_skips_empty_task_role_and_uses_registry_account(
     assert report.inspected is True
     ecr_call = next(call for call in calls if "ecr:PutImage" in call["ActionNames"])
     assert ecr_call["ResourceArns"] == [
-        "arn:aws:ecr:ap-northeast-2:210987654321:repository/recoder-app",
+        "arn:aws:ecr:ap-northeast-2:123456789012:repository/recoder-app",
     ]
     passrole_call = next(call for call in calls if call["ActionNames"] == ["iam:PassRole"])
     assert passrole_call["ResourceArns"] == [
         "arn:aws:iam::123456789012:role/recoder/EcsExecution",
+    ]
+    provision_call = next(call for call in calls if "ecs:CreateService" in call["ActionNames"])
+    assert provision_call["ResourceArns"] == [
+        "arn:aws:ecs:ap-northeast-2:123456789012:service/cluster/service",
     ]
 
 
@@ -267,9 +283,11 @@ def test_invalid_configured_role_keeps_sts_connection_and_marks_check_incomplete
 def test_incomplete_permission_simulation_is_not_marked_as_completed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """클러스터/서비스가 없거나 IAM Simulator 일부 호출이 실패하면 초록 완료 금지."""
+    """IAM Simulator 그룹 하나라도 실패하면 초록 완료로 보이면 안 된다."""
     class FakeIam:
         def simulate_principal_policy(self, **kwargs: object) -> dict:
+            if "ecs:CreateService" in kwargs["ActionNames"]:  # type: ignore[operator]
+                raise RuntimeError("simulator unavailable")
             return {"EvaluationResults": [
                 {"EvalActionName": action, "EvalDecision": "allowed"}
                 for action in kwargs["ActionNames"]  # type: ignore[index]
@@ -286,9 +304,6 @@ def test_incomplete_permission_simulation_is_not_marked_as_completed(
             return FakeIam()
 
     monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
-    monkeypatch.delenv("ECS_CLUSTER", raising=False)
-    monkeypatch.delenv("ECS_SERVICE", raising=False)
-
     report = aws._inspect_deploy_permissions(
         {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
         "ap-northeast-2",
@@ -296,4 +311,4 @@ def test_incomplete_permission_simulation_is_not_marked_as_completed(
 
     assert report.missing_actions == []
     assert report.inspected is False
-    assert any("다시 점검" in warning for warning in report.warnings)
+    assert any("일부 배포 권한을 자동 확인하지 못했습니다" in warning for warning in report.warnings)
