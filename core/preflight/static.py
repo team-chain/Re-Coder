@@ -206,27 +206,39 @@ class StaticPreflightRunner:
     # 동기 진입점
     # ------------------------------------------------------------------
 
-    def run_sync(self) -> PreflightRun:
-        """모든 검사를 thread pool 로 병렬 실행 + 종합."""
+    def run_sync(
+        self, check_codes: Optional[set[PreflightCheckCode]] = None,
+    ) -> PreflightRun:
+        """선택한 검사만 thread pool 로 병렬 실행 + 종합.
+
+        ``None``이면 기존처럼 12종 전체를 실행한다. 배포 대상 선택 전에는
+        S3와 무관한 컨테이너 검사를 뒤로 미룰 수 있도록 선택 집합을 받는다.
+        """
+        registry = [
+            (code, fn) for code, fn in CHECK_REGISTRY
+            if check_codes is None or code in check_codes
+        ]
         results: list[CheckResult] = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures = {
                 pool.submit(self._safe_invoke, fn, code): code
-                for code, fn in CHECK_REGISTRY
+                for code, fn in registry
             }
             for future in futures:
                 results.append(future.result())
 
-        return self._aggregate(results)
+        return self._aggregate(results, registry)
 
     # ------------------------------------------------------------------
     # 비동기 진입점 (FastAPI 핸들러용)
     # ------------------------------------------------------------------
 
-    async def run_async(self) -> PreflightRun:
+    async def run_async(
+        self, check_codes: Optional[set[PreflightCheckCode]] = None,
+    ) -> PreflightRun:
         """thread pool 실행을 async wrapper 로."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.run_sync)
+        return await loop.run_in_executor(None, self.run_sync, check_codes)
 
     # ------------------------------------------------------------------
     # 내부 — 단일 검사 호출 + 예외 흡수
@@ -262,10 +274,14 @@ class StaticPreflightRunner:
     # 종합 — CheckResult 들 → PreflightRun
     # ------------------------------------------------------------------
 
-    def _aggregate(self, results: list[CheckResult]) -> PreflightRun:
+    def _aggregate(
+        self,
+        results: list[CheckResult],
+        registry: list[tuple[PreflightCheckCode, CheckFn]] = CHECK_REGISTRY,
+    ) -> PreflightRun:
         """검사 결과들로 PreflightRun 구성."""
         # 결과 정렬 — CHECK_REGISTRY 순서대로 (decisive ordering for UI)
-        order = {code: i for i, (code, _) in enumerate(CHECK_REGISTRY)}
+        order = {code: i for i, (code, _) in enumerate(registry)}
         results.sort(key=lambda r: order.get(r.code, 999))
 
         blockers = [r.blocker for r in results if r.blocker]

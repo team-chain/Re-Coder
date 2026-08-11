@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+from fastapi import HTTPException
+
 try:
     from api.routes import deploy
 except ImportError:  # pragma: no cover - package 실행 호환
@@ -24,13 +27,29 @@ def test_deploy_preflight_recommends_ecs_for_fastapi_with_sqlite(tmp_path):
 
 def test_deploy_preflight_recommends_s3_for_static_site(tmp_path):
     (tmp_path / "index.html").write_text("<div id='root'></div>", encoding="utf-8")
-    (tmp_path / "package.json").write_text('{"devDependencies":{"vite":"latest"}}', encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"devDependencies":{"vite":"5.0.0"}}', encoding="utf-8")
 
     result = deploy._deployment_preflight(str(tmp_path))
 
     assert result["app_kind"] == "static"
     assert result["recommended_target"] == "s3"
     assert "정적 HTML 엔트리" in result["evidence"]
+
+
+def test_static_site_preflight_defers_container_only_blockers(tmp_path):
+    """S3 추천 단계에서 Docker·서버·PORT 전제 때문에 막히면 안 된다."""
+    (tmp_path / "index.html").write_text("<main>static</main>", encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"devDependencies":{"vite":"5.0.0"}}', encoding="utf-8")
+    (tmp_path / ".gitignore").write_text(".env\n", encoding="utf-8")
+
+    result = asyncio.run(deploy.deploy_preflight(
+        deploy.DeployPreflightRequest(workspace_path=str(tmp_path))
+    ))
+
+    assert result["recommended_target"] == "s3"
+    assert result["blocked"] is False
+    codes = {reason["code"] for reason in result["reasons"]}
+    assert not {"MISSING_DOCKERFILE", "MISSING_REQUIRED_ENV", "MISSING_HEALTH_ENDPOINT", "APP_ENTRYPOINT_NOT_FOUND"} & codes
 
 
 def test_deployment_choice_builds_adr_with_selected_target_and_evidence(tmp_path):
@@ -78,3 +97,39 @@ def test_deploy_preflight_includes_block_reasons_and_fixes(tmp_path):
     ))
     assert applied["success"] is True
     assert (tmp_path / "Dockerfile").is_file()
+
+
+def test_remediation_cannot_be_applied_to_a_different_workspace(tmp_path):
+    """결정론적 proposal ID여도 원래 검사한 폴더 밖에는 쓰지 않는다."""
+    source = tmp_path / "source"
+    other = tmp_path / "other"
+    source.mkdir()
+    other.mkdir()
+    (source / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+    result = asyncio.run(deploy.deploy_preflight(
+        deploy.DeployPreflightRequest(workspace_path=str(source))
+    ))
+    dockerfile_issue = next(reason for reason in result["reasons"] if reason["code"] == "MISSING_DOCKERFILE")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(deploy.apply_deployment_remediation(
+            dockerfile_issue["proposal_id"],
+            deploy.DeploymentRemediationApplyRequest(workspace_path=str(other)),
+        ))
+
+    assert exc.value.status_code == 409
+    assert not (other / "Dockerfile").exists()
+
+
+def test_env_example_is_guidance_not_an_automatic_unblocker(tmp_path):
+    """.env.example 생성은 실제 .env required_env 검사를 통과시키지 않는다."""
+    (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+    result = asyncio.run(deploy.deploy_preflight(
+        deploy.DeployPreflightRequest(workspace_path=str(tmp_path))
+    ))
+    env_issue = next(reason for reason in result["reasons"] if reason["code"] == "MISSING_REQUIRED_ENV")
+
+    assert env_issue["proposal_id"]
+    assert env_issue["remediation_available"] is False

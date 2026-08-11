@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -39,7 +40,24 @@ _deployment_plans: dict[str, DeploymentPlan] = {}
 _deployment_records: dict[str, DeploymentRecord] = {}
 # Static Preflight가 만든 수정안은 사용자가 배포 화면에서 "자동 수정"을 눌렀을
 # 때만 적용한다. 프로세스 메모리에만 두므로 Core 재시작 후에는 다시 검사해야 한다.
-_deployment_remediation_proposals: dict[str, object] = {}
+@dataclass(frozen=True)
+class _StoredDeploymentRemediation:
+    proposal: object
+    workspace_root: Path
+
+
+_deployment_remediation_proposals: dict[str, _StoredDeploymentRemediation] = {}
+
+# S3/정적 사이트를 고르기 전에는 서버 런타임·Docker·포트 가정을 검사하지
+# 않는다. 시크릿·취약점·잠재적인 .env 유출 검사는 배포 대상과 무관하므로
+# 계속 먼저 확인한다.
+_STATIC_TARGET_INDEPENDENT_CHECK_CODES = {
+    "ENV_FILE_NOT_GITIGNORED",
+    "INVALID_ENV_FORMAT",
+    "UNPINNED_DEPENDENCIES",
+    "CRITICAL_VULNERABILITY",
+    "SECRET_LEAK_RISK",
+}
 
 # ---------------------------------------------------------------------------
 # Request models
@@ -289,7 +307,7 @@ def _detect_preflight_contract_stack(root: Path):
     return ContractStack.CUSTOM
 
 
-def _run_deployment_safety_preflight(workspace_path: str) -> dict:
+def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unknown") -> dict:
     """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다."""
     root = Path(workspace_path)
     if not root.is_dir():
@@ -297,20 +315,32 @@ def _run_deployment_safety_preflight(workspace_path: str) -> dict:
 
     try:
         from preflight import StaticPreflightRunner
+        from preflight.static import CHECK_REGISTRY
         from preflight.contract_loader import build_default_contract, load_contract
         from remediation import generate_proposals
     except ImportError:  # pragma: no cover - package 실행 호환
         from core.preflight import StaticPreflightRunner  # type: ignore
+        from core.preflight.static import CHECK_REGISTRY  # type: ignore
         from core.preflight.contract_loader import build_default_contract, load_contract  # type: ignore
         from core.remediation import generate_proposals  # type: ignore
 
     contract = load_contract(root)
     if contract is None:
         contract = build_default_contract(_detect_preflight_contract_stack(root))
-    run = StaticPreflightRunner(str(root), contract).run_sync()
+    static_check_codes = None
+    if app_kind == "static":
+        static_check_codes = {
+            code for code, _ in CHECK_REGISTRY
+            if code.value in _STATIC_TARGET_INDEPENDENT_CHECK_CODES
+        }
+    run = StaticPreflightRunner(str(root), contract).run_sync(static_check_codes)
     proposals = generate_proposals(run, contract, root)
+    workspace_root = root.resolve()
     for proposal in proposals:
-        _deployment_remediation_proposals[proposal.proposal_id] = proposal
+        _deployment_remediation_proposals[proposal.proposal_id] = _StoredDeploymentRemediation(
+            proposal=proposal,
+            workspace_root=workspace_root,
+        )
 
     proposal_by_code = {
         proposal.source_blocker_code.value: proposal
@@ -320,12 +350,22 @@ def _run_deployment_safety_preflight(workspace_path: str) -> dict:
     def issue_payload(issue) -> dict:
         code = issue.code.value if hasattr(issue.code, "value") else str(issue.code)
         proposal = proposal_by_code.get(code)
+        # 이 제안은 .env가 아닌 .env.example만 만들어 실제 required_env
+        # 검사 결과를 해소하지 못한다. 카드에서 자동 수정으로 보이면 "성공" 후
+        # 재검사에서도 동일하게 막히므로, 작성 안내로만 표시한다.
+        env_example_guidance = bool(
+            code == "MISSING_REQUIRED_ENV"
+            and proposal
+            and getattr(proposal, "target_path", None) == ".env.example"
+        )
         return {
             "code": code,
             "message": issue.message,
             "fix": issue.fix_hint or (proposal.summary if proposal else "수정 방법을 확인한 뒤 다시 검사하세요."),
             "severity": issue.severity.value if hasattr(issue.severity, "value") else str(issue.severity),
-            "remediation_available": bool(proposal and proposal.auto_apply_available),
+            "remediation_available": bool(
+                proposal and proposal.auto_apply_available and not env_example_guidance
+            ),
             "proposal_id": proposal.proposal_id if proposal else None,
         }
 
@@ -398,7 +438,11 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
     """
     try:
         detected = await asyncio.to_thread(_deployment_preflight, request.workspace_path)
-        safety = await asyncio.to_thread(_run_deployment_safety_preflight, request.workspace_path)
+        safety = await asyncio.to_thread(
+            _run_deployment_safety_preflight,
+            request.workspace_path,
+            detected["app_kind"],
+        )
         return {**detected, **safety}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -410,12 +454,18 @@ async def apply_deployment_remediation(
     request: DeploymentRemediationApplyRequest,
 ) -> dict:
     """사용자가 명시적으로 누른 자동 수정만 안전하게 적용한다."""
-    proposal = _deployment_remediation_proposals.get(proposal_id)
-    if proposal is None:
+    stored = _deployment_remediation_proposals.get(proposal_id)
+    if stored is None:
         raise HTTPException(status_code=404, detail="수정안을 찾을 수 없습니다. 다시 검사해 주세요.")
-    workspace = Path(request.workspace_path)
+    workspace = Path(request.workspace_path).resolve()
     if not workspace.is_dir():
         raise HTTPException(status_code=400, detail="유효한 워크스페이스 경로가 아닙니다.")
+    if workspace != stored.workspace_root:
+        raise HTTPException(
+            status_code=409,
+            detail="이 수정안은 원래 검사한 워크스페이스에서만 적용할 수 있습니다. 다시 검사해 주세요.",
+        )
+    proposal = stored.proposal
 
     try:
         from remediation import apply_proposal
