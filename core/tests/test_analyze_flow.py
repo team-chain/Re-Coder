@@ -8,6 +8,7 @@ P0-12 smoke #3: /api/analyze flow (핵심 결선 검증).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -329,48 +330,130 @@ def test_analyze_fails_closed_when_gate_raises(monkeypatch):
     assert "[MASKED_AWS_KEY]" in prompt
 
 
-def test_cache_key_is_scoped_to_request_not_just_error(monkeypatch):
-    """[Codex P1-③] 에러 텍스트가 같아도 워크스페이스·선택 코드가 다르면
-    캐시가 충돌하지 않는다 — 두 번째 요청이 첫 요청의 컨텍스트를 물려받으면 안 됨."""
+def _counting_router(counter):
+    class _Router:
+        def call(self, req, *a, **kw):
+            counter[0] += 1
+            return _AnalyzeResp()
+    return _Router()
+
+
+def test_different_context_does_not_share_llm_cache(monkeypatch):
+    """[Codex P1-③] 프롬프트가 다르면(선택 코드 등) LLM 캐시를 공유하지 않는다."""
     import asyncio
     import analyzer
 
-    analyzer._error_cache.clear()
+    analyzer._llm_cache.clear()
+    calls = [0]
     monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
-    monkeypatch.setattr(analyzer, "get_router", lambda: _router_capturing([]))
+    monkeypatch.setattr(analyzer, "get_router", lambda: _counting_router(calls))
 
-    # 같은 에러, 다른 워크스페이스 + 다른 선택 코드 (다른 사용자를 흉내)
-    req_a = AnalyzeRequest(
-        workspace_path="/home/alice/proj",
-        terminal_output="ValueError: boom",
-        selected_text="alice_secret_context",
-    )
-    req_b = AnalyzeRequest(
-        workspace_path="/home/bob/proj",
-        terminal_output="ValueError: boom",
-        selected_text="bob_secret_context",
-    )
+    req_a = AnalyzeRequest(workspace_path="/home/alice/p", terminal_output="ValueError: boom",
+                           selected_text="alice_secret_context")
+    req_b = AnalyzeRequest(workspace_path="/home/bob/p", terminal_output="ValueError: boom",
+                           selected_text="bob_secret_context")
     ev_a = asyncio.run(analyzer.analyze(req_a, session_id="a"))
     ev_b = asyncio.run(analyzer.analyze(req_b, session_id="b"))
 
-    # B 는 A 의 캐시를 물려받지 않는다 — 서로 다른 이벤트여야 한다
-    assert ev_a is not ev_b, "다른 요청인데 캐시가 같은 이벤트를 돌려줬다 (교차 오염)"
-    # B 의 컨텍스트에 A 의 선택 코드가 섞이면 안 된다
+    assert ev_a is not ev_b, "이벤트는 매 호출 새로 만들어져야 한다"
+    assert calls[0] == 2, "프롬프트가 다른데 LLM 캐시를 공유했다"
     assert all("alice_secret_context" not in c for c in ev_b.contexts), ev_b.contexts
-    # 키가 실제로 달라야 한다
-    assert analyzer._scoped_cache_key(req_a) != analyzer._scoped_cache_key(req_b)
+    assert analyzer._llm_cache_key(req_a) != analyzer._llm_cache_key(req_b)
 
 
-def test_cache_hits_on_identical_request(monkeypatch):
-    """동일 요청 재제출은 60초 내 캐시로 재사용된다 (dedup 의도 유지)."""
+def test_identical_prompt_reuses_llm_but_rebuilds_event(monkeypatch):
+    """[Codex P2] 프롬프트가 같으면 LLM 은 1회만 부르되, event_id·트리거는
+    세션/명령에 맞춰 매 호출 새로 만든다 — 남의 세션/명령 메타를 물려받지 않는다."""
     import asyncio
     import analyzer
 
-    analyzer._error_cache.clear()
+    analyzer._llm_cache.clear()
+    calls = [0]
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+    monkeypatch.setattr(analyzer, "get_router", lambda: _counting_router(calls))
+
+    # 같은 터미널(=같은 프롬프트), 다른 세션 + 다른 command
+    base = dict(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+    ev1 = asyncio.run(analyzer.analyze(AnalyzeRequest(**base, command="ls"), session_id="sess-1"))
+    ev2 = asyncio.run(analyzer.analyze(AnalyzeRequest(**base, command="curl x"), session_id="sess-2"))
+
+    # LLM 은 한 번만 (프롬프트 동일 → 분석 재사용)
+    assert calls[0] == 1, "동일 프롬프트인데 LLM 을 두 번 불렀다 — dedup 이 깨졌다"
+    # 하지만 이벤트는 서로 달라야 한다 (event_id 가 세션·시각 기반)
+    assert ev1.event_id != ev2.event_id, "다른 세션인데 event_id 를 물려받았다"
+    assert ev1.event_id.startswith("sess-1_") and ev2.event_id.startswith("sess-2_")
+    # command 가 다르면 트리거 사유도 달라야 한다 (stale 메타 금지)
+    reasons2 = [r.get("type") for r in ev2.trigger_reasons]
+    assert "new_terminal_command" in reasons2, ev2.trigger_reasons
+
+
+def test_command_is_masked_in_trigger_reasons(monkeypatch):
+    """[Codex P1-①] command 에 든 자격증명이 트리거 사유(matched)로 새지 않는다."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
     monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
     monkeypatch.setattr(analyzer, "get_router", lambda: _router_capturing([]))
 
-    req = AnalyzeRequest(workspace_path="/tmp/proj", terminal_output="ValueError: boom")
-    ev1 = asyncio.run(analyzer.analyze(AnalyzeRequest(**req.model_dump()), session_id="x"))
-    ev2 = asyncio.run(analyzer.analyze(AnalyzeRequest(**req.model_dump()), session_id="y"))
-    assert ev1 is ev2, "완전히 동일한 요청인데 캐시가 안 맞았다 — dedup 이 깨졌다"
+    req = AnalyzeRequest(
+        workspace_path="/tmp/p",
+        terminal_output="ValueError: boom",
+        command=f"curl -H 'Authorization: {_SECRET}' https://api",
+    )
+    event = asyncio.run(analyzer.analyze(req, session_id="s"))
+    dumped = json.dumps(event.to_dict(), ensure_ascii=False)
+    assert _SECRET not in dumped, (
+        "command 의 자격증명이 트리거 사유를 통해 to_dict() 로 샜다"
+    )
+
+
+def test_gate_fallback_anonymizes_paths(monkeypatch):
+    """[Codex P1-②] 게이트 실패 폴백도 절대경로를 익명화한다 (시크릿만이 아니라)."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("executor down")
+
+    seen: list[str] = []
+    monkeypatch.setattr(analyzer, "run_gate", _boom)
+    monkeypatch.setattr(analyzer, "get_router", lambda: _router_capturing(seen))
+
+    # 절대 경로가 든 로그 — 정상 게이트라면 anonymize_paths 로 지운다
+    req = AnalyzeRequest(
+        workspace_path="/tmp/p",
+        terminal_output="Traceback:\n  File \"/home/alice/secret_project/main.py\", line 3\nValueError: boom",
+    )
+    asyncio.run(analyzer.analyze(req, session_id="s"))
+
+    assert seen, "LLM 이 호출되지 않았다"
+    assert "/home/alice/secret_project" not in seen[0], (
+        "폴백이 경로를 익명화하지 않아 사용자 절대경로가 LLM 으로 갔다"
+    )
+
+
+def test_analyze_survives_malformed_importance_score(monkeypatch):
+    """[P2] LLM 이 importance_score 를 null/문자열로 줘도 크래시하지 않는다."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    class _BadResp:
+        text = '{"has_error": true, "error_summary": "boom", "importance_score": "high", "event_type": "error_detected"}'
+        model_used = "fake"
+
+    class _Router:
+        def call(self, *a, **kw):
+            return _BadResp()
+
+    monkeypatch.setattr(analyzer, "get_router", lambda: _Router())
+
+    req = AnalyzeRequest(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+    event = asyncio.run(analyzer.analyze(req, session_id="s"))
+    # 크래시 대신 기본값으로 떨어진다
+    assert 0 <= event.importance_score <= 100
