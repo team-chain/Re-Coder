@@ -22,7 +22,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 
 SCHEMA_VERSION = "6.4"
@@ -1219,15 +1225,137 @@ class SecurityFinding(BaseModel):
     title:       str
     description: Optional[str] = None
     location:    Optional[str] = None
+    #: 조치 방법. security_scan.py 는 처음부터 이 값을 채워 보내고 있었는데
+    #: 모델에 자리가 없어 pydantic 이 조용히 버렸다 (extra="ignore" 기본값).
+    #: 지금 이 값을 화면에 그리는 곳은 없지만, 스캐너가 만들어 놓은 정보를
+    #: 모델에서 버리는 상태는 그 자체로 함정이다 — 나중에 쓰려는 사람은
+    #: "값을 넣었는데 왜 안 오지"로 시간을 쓰게 된다.
+    fix_suggestion: Optional[str] = None
     redacted:    bool = False
 
 
+#: "스캔을 못 했다"는 뜻의 finding 제목. 이건 취약점이 아니라 **검사 부재**이므로
+#: 차단 사유로 세지 않되, tool_errors 로 올려 사용자가 "0건 = 안전"으로
+#: 오해하지 않게 한다.
+_SCAN_NOT_PERFORMED_TITLES = frozenset({
+    "trivy_not_installed", "trivy_scan_failed",
+    "hadolint_not_installed", "hadolint_scan_failed",
+    "gitleaks_not_installed", "gitleaks_scan_failed",
+})
+
+#: 이 중 하나라도 못 돌면 **배포를 막는다.** 배포를 게이트하는 이미지
+#: 취약점 검사가 실행되지 못한 경우다. 소스 검사(hadolint·gitleaks)는
+#: 자문이라 여기 넣지 않는다 (`compute_pass` 주석 참고).
+_IMAGE_SCAN_REQUIRED_TITLES = frozenset({
+    "trivy_not_installed", "trivy_scan_failed",
+})
+
+
 class SecurityScanResult(BaseModel):
-    passed:      bool
+    """Trivy·Hadolint·gitleaks 통합 결과.
+
+    차단 규칙(설계서 §Q3):
+      - Trivy critical → 차단 / Trivy high → 경고
+      - Hadolint error → 차단 / warning    → 경고
+      - 시크릿         → 항상 차단
+
+    집계값은 **findings 에서 파생**한다. 따로 저장하면 findings 를 고친 뒤
+    숫자만 옛날 값으로 남는 어긋남이 생긴다.
+
+    `passed` 는 직접 넣지 말고 `compute_pass()` 로 계산한다. 기본값이 True 인
+    이유는 스캐너가 결과 객체를 **먼저 만들고** findings 를 채운 뒤
+    compute_pass() 를 부르기 때문이다 — 여기가 required 라서 스캐너가
+    구성 시점에 ValidationError 로 죽고 있었다.
+    """
+    passed:      bool = True
     blocked:     bool = False
     findings:    list[SecurityFinding] = Field(default_factory=list)
     tool_errors: list[str] = Field(default_factory=list)
     scanned_at:  str = Field(default_factory=lambda: __import__('datetime').datetime.utcnow().isoformat())
+
+    #: 무엇을 대상으로 돌렸는가. 셋 다 None 이면 아무것도 검사하지 않은 것이다.
+    image:           Optional[str] = None
+    dockerfile_path: Optional[str] = None
+    repo_path:       Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # 집계 — computed_field 로 선언해 model_dump()/JSON 응답에도 실린다.
+    # (순수 property 로 두면 서버가 dict 를 손으로 조립하는 경로에서만 보이고,
+    #  레코드를 통째로 직렬화하는 경로에서는 조용히 사라진다.)
+    # ------------------------------------------------------------------
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def critical_count(self) -> int:
+        return sum(1 for f in self.findings
+                   if f.tool == SecurityScanTool.TRIVY
+                   and f.severity == SecurityScanSeverity.CRITICAL)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def high_count(self) -> int:
+        return sum(1 for f in self.findings
+                   if f.tool == SecurityScanTool.TRIVY
+                   and f.severity == SecurityScanSeverity.HIGH)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def hadolint_error_count(self) -> int:
+        """hadolint level=error 건수. _run_hadolint 가 error 를 CRITICAL 로 올린다."""
+        return sum(1 for f in self.findings
+                   if f.tool == SecurityScanTool.HADOLINT
+                   and f.severity == SecurityScanSeverity.CRITICAL)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def secret_count(self) -> int:
+        """시크릿 탐지 건수. gitleaks 와 내장 폴백 스캐너가 같은 제목을 쓴다."""
+        return sum(1 for f in self.findings
+                   if (f.title or "").startswith("secret_leak:"))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def scan_passed(self) -> bool:
+        """`passed` 의 별칭. ECS 경로가 이 이름으로 읽는다."""
+        return self.passed
+
+    def compute_pass(self) -> bool:
+        """findings 로부터 차단 여부를 확정한다.
+
+        **이미지 취약점 검사가 실행되지 못했으면 통과가 아니다.** trivy 가
+        없거나, 시간이 초과되거나, ECR 이미지를 못 받아오면 스캐너는
+        `trivy_*` 흔적만 남긴다. 취약점이 **관측되지 않은** 것이지 **없는**
+        것이 아니다. 그런데 예전 계산은 그 경우에도 `passed=True` 를 줬다 —
+        한 번도 들여다보지 않은 이미지가 게이트를 통과했다.
+
+        배포 계약은 "이미지 스캔이 배포를 막는다"이다. 스캔이 못 돌았으면
+        막을 근거를 못 만든 것이므로, **fail-closed** 로 막는다.
+        `run_security_scan=False` 를 폴백에서 막은 것과 같은 규칙 — 검사하지
+        않은 것을 "위반 없음"으로 바꾸지 않는다.
+
+        ## 왜 trivy 만인가
+
+        빌드 **전** 소스 검사(hadolint·gitleaks)는 의도적으로 **자문(advisory)**
+        이다 — 개발 PC 에 그 도구가 없어도 배포는 되게 하고, 못 돌린 것은
+        `scan_warning` 으로 표면화한다. 여기서 그것까지 막으면 도구 없는
+        PC 에서는 아무도 배포를 못 한다. 그래서 **배포를 게이트하는 이미지
+        스캔(trivy)** 이 못 돈 경우만 막는다. 이미지 스캐너를 더 추가하면
+        그 미실행 표식도 아래 목록에 넣어야 한다.
+        """
+        self.tool_errors = sorted({
+            f.title for f in self.findings if f.title in _SCAN_NOT_PERFORMED_TITLES
+        })
+        image_scan_failed = any(
+            t in _IMAGE_SCAN_REQUIRED_TITLES for t in self.tool_errors
+        )
+        self.passed = (
+            not image_scan_failed
+            and self.critical_count == 0
+            and self.hadolint_error_count == 0
+            and self.secret_count == 0
+        )
+        self.blocked = not self.passed
+        return self.passed
 
 
 # ---------------------------------------------------------------------------
@@ -1258,6 +1386,22 @@ class ECSDeployStatus(str, Enum):
     CIRCUIT_BREAKER_TRIGGERED  = "circuit_breaker_triggered"
 
 
+def _default_ecs_region() -> str:
+    """ECS 배포 기본 리전.
+
+    AWS_REGION / AWS_DEFAULT_REGION 을 순서대로 보고, 없으면 us-east-1.
+    us-east-1 인 이유는 개발·검증 환경(AWS Academy Learner Lab)이
+    us-east-1 과 us-west-2 만 허용하기 때문이다.
+    """
+    import os as _os
+
+    for key in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+        value = (_os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return "us-east-1"
+
+
 class ECSDeployRequest(BaseModel):
     """
     Q3 ECS Rolling Update 요청. ecs_agent.deploy() 의 입력.
@@ -1268,8 +1412,16 @@ class ECSDeployRequest(BaseModel):
     project_id:              str
     cluster:                 str
     service:                 str
-    image:                   str
-    region:                  str = "ap-northeast-2"
+    #: 이미 ECR 에 있는 이미지를 그대로 쓸 때 지정. `workspace_path` 를
+    #: 주면 여기에 빌드 결과가 채워지므로 비워도 된다.
+    image:                   str = ""
+    #: 기본 리전. 환경변수 AWS_REGION 을 먼저 보고, 없으면 us-east-1.
+    #:
+    #: 원래 기본값은 ap-northeast-2(서울)였다. 그런데 개발·검증 환경인
+    #: AWS Academy Learner Lab 은 us-east-1 / us-west-2 만 허용해서,
+    #: 기본값 그대로 배포하면 전 단계가 조용히 거부당한다. 환경변수를
+    #: 먼저 보게 해서 서울로 쓰던 쪽도 깨지지 않게 한다.
+    region:                  str = Field(default_factory=_default_ecs_region)
 
     # Task Definition 렌더링용
     task_definition_family:  str = "recoder-task"
@@ -1277,12 +1429,53 @@ class ECSDeployRequest(BaseModel):
     cpu:                     str = "256"        # ECS Fargate vCPU units
     memory:                  str = "512"        # MiB
     health_check_path:       str = "/health"
+    container_port:          int = Field(default=8000, ge=1, le=65535)
+    #: ECS 컨테이너 헬스체크 명령. **비우면 ECS 가 컨테이너 상태를
+    #: 감시하지 않는다** — 프로세스는 살아 있는데 앱이 죽은 경우를
+    #: 못 잡고, 롤백·서킷 브레이커도 걸리지 않는다.
+    #:
+    #: 기본값을 두지 않는 이유: 이미지마다 쓸 수 있는 명령이 다르다.
+    #: curl 을 박아뒀다가 런타임 이미지에 curl 이 없어 컨테이너가 무한
+    #: 재시작한 적이 있다. 이미지에 확실히 있는 명령을 호출자가 정한다.
+    #: 파이썬 이미지는 `python_http_health_check()` 헬퍼를 쓰면 된다.
+    health_check_command:    Optional[list[str]] = None
     env_vars:                dict[str, str] = Field(default_factory=dict)
 
+    # ── 빌드 · 업로드 (FR-05-04) ────────────────────────────────────────
+    #: 이미지를 빌드할 로컬 작업 폴더. 비우면 빌드를 건너뛰고 `image` 를 쓴다.
+    workspace_path:          Optional[str] = None
+    dockerfile:              str = "Dockerfile"
+    #: 올릴 ECR 리포지토리 이름. 비우면 service 이름을 쓴다.
+    ecr_repo:                Optional[str] = None
+    #: 이미지 태그. 비우면 배포 시각으로 만든다.
+    image_tag:               Optional[str] = None
+
+    # ── 인프라 확보 (FR-05-04) ──────────────────────────────────────────
+    #: 참이면 클러스터·로그그룹·ECR·보안그룹·서비스를 없을 때 만들어 준다.
+    #: 이미 있으면 그대로 재사용한다(멱등).
+    provision:               bool = True
+    #: 띄울 태스크 수. 0 이면 서비스만 만들고 태스크는 띄우지 않는다
+    #: (Fargate 는 실행 중인 태스크에만 과금되므로 이 상태는 0원).
+    desired_count:           int = Field(default=1, ge=0, le=10)
+    #: 사용할 서브넷. 비우면 기본 VPC 에서 자동으로 찾는다.
+    subnet_ids:              list[str] = Field(default_factory=list)
+    #: 사용할 보안 그룹. 비우면 앱 포트를 여는 그룹을 만들어 쓴다.
+    security_group_ids:      list[str] = Field(default_factory=list)
+
     # 파이프라인 옵션
+    #: 어느 브랜치에서 배포하는가. **정책 평가에만 쓴다.**
+    #: 프리셋 규칙 중 "프로덕션은 main 에서만"이 이 값을 본다. 비어 있으면
+    #: 그 규칙이 **아무것도 막지 못한다** — 값을 안 넘기면 규칙이 있으나
+    #: 마나가 된다.
+    branch:                  str = ""
+    #: 배포 대상 환경(staging / production 등). 위 규칙의 다른 한 축이다.
+    environment:             str = ""
+
     run_preflight:           bool = True
     run_security_scan:       bool = True
     generate_sbom:           bool = True
+    #: 태스크 공인 IP 를 기다릴 최대 시간(초). 0 이면 URL 확인을 건너뛴다.
+    url_wait_timeout:        float = Field(default=300.0, ge=0)
 
     # 정책
     approval_level:          int = Field(default=3, ge=1, le=4)
@@ -1315,9 +1508,52 @@ class ECSDeployRecord(BaseModel):
     task_definition_arn:            Optional[str] = None
     previous_task_definition_arn:   Optional[str] = None
 
+    # ── FR-05-04 결과 ───────────────────────────────────────────────────
+    #: 카드 DoD 1번 "URL 로 접속됨". 배포가 성공하면 여기에 주소가 담긴다.
+    service_url:                    Optional[str] = None
+    #: ECR 에 올라간 최종 이미지 주소 (repositoryUri:tag).
+    image_uri:                      Optional[str] = None
+    image_digest:                   Optional[str] = None
+    #: 이번 실행에서 확보한 리소스들 — 무엇이 새로 생겼고 무엇을 재사용했는지.
+    #:
+    #: **값은 문자열만 넣는다.** 파이단틱은 dict 에 in-place 로 넣는 값까지
+    #: 검사하지 않으므로, list 를 넣어도 쓰는 순간에는 아무 일도 안 일어난다.
+    #: 대신 `_load_records()` 가 다시 읽을 때 ValidationError 가 나서 그
+    #: **기록 한 건이 통째로 버려진다.** 진행 중이던 배포가 그렇게 사라지면
+    #: 비용 경고도 클러스터·서비스 이름도 함께 없어져서, 떠 있는 태스크를
+    #: 제품 안에서 멈출 방법이 사라진다 — `_save_records` 가 막으려던 바로
+    #: 그 상황이다. 구조화된 값이 필요하면 아래 `scan_gaps` 처럼 **전용
+    #: 필드**를 만든다.
+    provisioned:                    dict[str, str] = Field(default_factory=dict)
+    #: 실행하지 못한 보안 검사의 사유 목록. `provisioned["scan_warning"]`
+    #: 문구를 **중복 없이 다시 렌더하기 위한 재료**다 (`_add_scan_gaps`).
+    scan_gaps:                      list[str] = Field(default_factory=list)
+    #: 실패했을 때 사용자가 할 수 있는 일 (DoD 3번).
+    error_remedy:                   Optional[str] = None
+    #: 실패 원인의 AWS 원문. 사람용 메시지와 분리해서 보존한다.
+    error_detail:                   Optional[str] = None
+
     # 폴링 / Circuit Breaker
     health_check_failures:          int = 0
     circuit_breaker_triggered:      bool = False
+    #: 마지막 폴링에서 실제로 떠 있던 태스크 수. 실패 처리에서 "아무것도
+    #: 못 뜬 상태"와 "뜨긴 떴는데 느린 상태"를 가르는 데 쓴다.
+    running_task_count:             int = 0
+    #: 사용자가 취소를 요청했는가. **상태값이 아니라 신호다.**
+    #: 취소 엔드포인트가 상태를 바로 FAILED 로 바꿔버리면 두 가지가 망가진다:
+    #: (1) 파이프라인은 그걸 모르고 계속 돌아 태스크를 띄운 뒤 SUCCEEDED 로
+    #:     덮어쓰고, (2) 409 동시 배포 가드가 그 배포를 "끝난 것"으로 보게 되어
+    #:     같은 서비스에 두 번째 파이프라인이 들어온다.
+    #: 그래서 신호만 남기고, 상태는 파이프라인이 실제로 멈춘 뒤에 바꾼다.
+    cancel_requested:               bool = False
+    #: 이번 실행에서 서비스를 **새로 만들었는가**. 취소·실패 때 태스크를
+    #: 내려도 되는지 판단한다 — 원래 돌던 서비스를 갱신한 경우라면
+    #: 내리는 순간 사용자가 요청하지도 않은 장애가 된다.
+    service_created_by_this_run:    bool = False
+    #: ECS 서킷 브레이커가 우리 리비전을 버리고 이전 리비전으로 되돌렸는가.
+    #: 이 경우 서비스는 **동작하지만 우리가 올린 이미지가 아니다** —
+    #: 성공으로 보고하면 사용자는 배포되지 않은 코드를 배포됐다고 믿는다.
+    ecs_rolled_back:                bool = False
 
     # Rollback proposal (설계서 §Q3-A Approval Level 3)
     rollback_proposal_id:           Optional[str] = None

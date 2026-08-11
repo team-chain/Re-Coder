@@ -1251,10 +1251,30 @@ html[data-mode="sidebar"] .deploy-grid{ }
     const stepper = $(stepperId);
     if (!stepper) return;
     const items = stepper.querySelectorAll('.stepper-item');
+
+    // 서버가 보내는 stage 가 이 스테퍼의 data-step 에 없을 수 있다
+    // (ECS 는 idle/deploying/done/failed 만 보낸다). 예전에는 그럴 때
+    // 일치하는 항목을 못 찾아 **모든 단계가 done 으로 칠해졌다** —
+    // 배포가 실패했는데 6단계 전부 초록불에 "완료 ✓" 가 떴다.
+    // 먼저 일치 여부부터 확인한다.
+    let matched = false;
+    items.forEach(item => { if (item.dataset.step === currentStage) matched = true; });
+
     let passed = true;
     items.forEach(item => {
       const step = item.dataset.step;
       item.classList.remove('active','done','fail');
+      if (!matched){
+        // 어디까지 왔는지 모른다. 끝난 상태면 마지막 칸에만 결과를 찍고,
+        // 그 외에는 아무것도 칠하지 않는다. 모르는 것을 완료로 칠하는 것이
+        // 최악이다.
+        if (finalStage === 'failed' && item === items[items.length - 1]){
+          item.classList.add('fail');
+        } else if (finalStage === 'done'){
+          item.classList.add('done');
+        }
+        return;
+      }
       if (step === currentStage){
         if (finalStage === 'failed') item.classList.add('fail');
         else if (finalStage === 'done') item.classList.add('done');

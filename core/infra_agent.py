@@ -298,6 +298,20 @@ def generate_docker_compose(
 
     has_db = _detect_db_driver(str(project_root))
 
+    # 템플릿의 {env_file_block} 자리에 넣을 값. **실제로 `.env` 가 있을 때만**
+    # env_file 블록을 넣는다. 없으면 빈 문자열이되 **반드시 넘긴다** — render()
+    # 는 없는 플레이스홀더를 필수 누락으로 보고 ValueError 를 내서
+    # docker-compose 생성이 통째로 실패하던 원인이었다.
+    #
+    # `.env.example` 만 있고 `.env` 는 없는 경우(갓 클론한 저장소의 흔한 상태 —
+    # `.env` 는 보통 gitignore)에는 넣지 않는다. docker compose 는 `env_file:
+    # - .env` 를 **필수**로 취급해서, 없는 `.env` 를 가리키면 생성된 compose 가
+    # `docker compose up` 에서 아예 안 뜬다. 사용자가 `.env.example` 를 복사해
+    # `.env` 를 만들면 그때 자연히 잡힌다.
+    env_file_block = ""
+    if (project_root / ".env").exists():
+        env_file_block = "    env_file:\n      - .env\n"
+
     # FileRegistry에서 docker-compose 템플릿 가져오기
     registry = get_file_registry()
     content = registry.render(
@@ -308,6 +322,7 @@ def generate_docker_compose(
             "host_port": default_port,
             "container_port": default_port,
             "health_check_path": "/health",
+            "env_file_block": env_file_block,
         },
     )
 

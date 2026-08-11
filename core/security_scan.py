@@ -198,7 +198,19 @@ class SecurityScanner:
                 description="hadolint가 설치되지 않아 스캔을 건너뜁니다",
             ))
         except Exception as exc:
+            # 조용히 넘어가면 findings 가 빈 채로 돌아가고, 호출부는
+            # "위반 0건 = 통과"로 읽는다. Dockerfile 을 한 번도 안 본 배포가
+            # 게이트를 통과하게 된다 — trivy 쪽과 같은 이유로 흔적을 남긴다.
             logger.warning("Hadolint scan failed: %s", exc)
+            findings.append(SecurityFinding(
+                tool=SecurityScanTool.HADOLINT,
+                severity=SecurityScanSeverity.INFO,
+                title="hadolint_scan_failed",
+                description=(
+                    f"Hadolint 검사가 실패해 Dockerfile 을 보지 못했습니다: {exc} — "
+                    f"이 결과의 '위반 없음'은 검사 결과가 아닙니다."
+                ),
+            ))
         return findings
 
     # ------------------------------------------------------------------
@@ -249,6 +261,15 @@ class SecurityScanner:
             ))
         except Exception as exc:
             logger.warning("gitleaks scan failed: %s", exc)
+            findings.append(SecurityFinding(
+                tool=SecurityScanTool.GITLEAKS,
+                severity=SecurityScanSeverity.INFO,
+                title="gitleaks_scan_failed",
+                description=(
+                    f"gitleaks 검사가 실패해 저장소를 보지 못했습니다: {exc} — "
+                    f"이 결과의 '시크릿 없음'은 검사 결과가 아닙니다."
+                ),
+            ))
         finally:
             try:
                 os.unlink(output_path)
