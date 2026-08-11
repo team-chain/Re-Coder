@@ -12,6 +12,7 @@ Local Core — Q3: ECS Deployment API Routes
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -23,6 +24,7 @@ import json
 import os
 from pathlib import Path
 
+from core import branch_source
 from core.agents.ecs_agent import ECSAgent
 from core.schemas import (
     ECSDeployRecord,
@@ -189,6 +191,25 @@ async def start_deployment(
             },
         )
 
+    # **정책이 보는 값은 여기서 확정한다.**
+    #
+    # 이 라우트가 두 경로의 합류점이다 — 확장은 `/api/deploy/ecs` 를 거쳐
+    # 여기로 오고, 디스코드 봇과 직접 호출은 곧바로 여기로 온다. 브랜치
+    # 판단을 확장용 변환기에만 뒀더니 **직접 호출 경로가 통째로 비어 있었다**:
+    # `{"branch": "main"}` 한 줄이면 "프로덕션은 main 에서만"이 그냥 통과했다.
+    # 승인 레벨(`_effective_approval_level`)과 같은 이유로, 게이트 재료는
+    # 합류점에서 서버가 정한다.
+    #
+    # git 은 동기 호출이라 이벤트 루프에서 직접 돌리지 않는다.
+    loop = asyncio.get_running_loop()
+    request.branch = await loop.run_in_executor(
+        None,
+        lambda: branch_source.resolve_branch(request.workspace_path, request.branch),
+    )
+    # 환경 이름도 여기서 접는다. Rego 프리셋이 `environment == "production"`
+    # 을 정확히 비교하므로 `"Production"` 한 글자 차이로 규칙이 안 걸린다.
+    request.environment = (request.environment or "").strip().lower()
+
     deployment_id = str(uuid4())
 
     # 초기 PENDING 레코드 등록
@@ -220,7 +241,7 @@ async def start_deployment(
     try:
         opa_result = await opa_client.evaluate(
             action="ecs_deploy",
-            level=request.approval_level,
+            level=_effective_approval_level(request),
             context=_policy_context(request),
             resource_type="ecs_service",
             resource_id=f"{request.cluster}/{request.service}",
@@ -262,7 +283,17 @@ async def start_deployment(
     # 있었다 — `opa_gate` 의 로컬 내장 규칙이다. 그걸 되살린다.
     # 정책을 **무시**하는 게 아니라, 같은 규칙(SBOM 필수 · trivy critical
     # 차단 · 시크릿 차단 · hadolint error 차단)을 로컬에서 적용한다.
-    if decision != "allow" and not opa_result.opa_available:
+    # **조건은 "OPA 가 없다" 하나다.** 예전에는 `decision != "allow"` 도 같이
+    # 봤는데, `OPAClient._fail_closed` 는 승인 레벨 1~2 에서 OPA 가 없으면
+    # `decision="allow", opa_available=False` 를 돌려준다. 그래서 요청 본문에
+    # `approval_level: 1` 한 줄만 넣으면 **로컬 규칙이 아예 호출되지 않고**
+    # SBOM·스캔·브랜치 규칙이 전부 건너뛰어졌다. 판단 재료가 없어서가 아니라
+    # 판단 자체를 안 하는 경로였다.
+    #
+    # 위의 `_effective_approval_level` 로 레벨 자체도 못 낮추게 했지만,
+    # 여기 조건은 레벨과 **무관하게** 성립해야 한다 — OPA 가 없으면 로컬
+    # 규칙이 판단한다. 한쪽만 고치면 다음에 레벨 정책이 바뀔 때 또 갈라진다.
+    if not opa_result.opa_available:
         fallback = _local_policy_fallback(record, request)
         if fallback is not None:
             decision = (fallback.decision or "").strip()
@@ -293,6 +324,17 @@ async def start_deployment(
         else:
             error_code, status_code = "policy_denied", 403
             message = f"OPA 정책이 이 배포를 거부했습니다: {opa_result.reason}"
+
+        # **거부도 남긴다.** 성공 경로에서만 저장하면, 코어를 다시 켰을 때
+        # "왜 막혔는지"가 통째로 사라진다. 사용자가 다시 눌러 보고 또 막히는
+        # 동안 이유는 로그에만 남아 있는 상태가 된다.
+        #
+        # 사유만 남기고 고치는 법과 끝난 시각을 빼면 반쪽이다 — 사이드바는
+        # `remedy` 와 `finished_at` 을 읽고, 둘이 비면 "실패했는데 언제 왜
+        # 실패했는지 모르는" 카드가 된다.
+        record.error_remedy = opa_result.fix_suggestion or message
+        record.completed_at = datetime.now(timezone.utc)
+        _save_records()
 
         raise HTTPException(
             status_code=status_code,
@@ -339,6 +381,49 @@ def _policy_context(request: ECSDeployRequest) -> dict:
     }
 
 
+#: ECS 배포의 **최소** 승인 레벨. 컨테이너를 실제로 띄우고 과금을 발생시키는
+#: 작업이라 설계상 Level 3 이다.
+#:
+#: `approval_level` 은 요청 **본문**에 있는 값이라 클라이언트가 정한다. 그걸
+#: 그대로 쓰면 `{"approval_level": 1}` 한 줄로 `OPAClient._fail_closed` 의
+#: "Level 1~2 는 OPA 없어도 allow" 갈래에 올라탈 수 있다. 게이트를 통과하는
+#: 조건을 **호출자가 고를 수 있으면 그건 게이트가 아니다.**
+#:
+#: 올리는 것은 막지 않는다 — 더 엄격하게 검사받겠다는 요청은 존중해도 된다.
+ECS_DEPLOY_MIN_APPROVAL_LEVEL = 3
+
+
+def _effective_approval_level(request: ECSDeployRequest) -> int:
+    """정책 평가에 실제로 쓸 승인 레벨. 내리는 것만 막는다."""
+    requested = int(getattr(request, "approval_level", ECS_DEPLOY_MIN_APPROVAL_LEVEL))
+    if requested < ECS_DEPLOY_MIN_APPROVAL_LEVEL:
+        logger.warning(
+            "요청이 승인 레벨 %d 를 보냈지만 ECS 배포는 최소 %d 입니다 — 올려서 평가합니다.",
+            requested, ECS_DEPLOY_MIN_APPROVAL_LEVEL,
+        )
+        return ECS_DEPLOY_MIN_APPROVAL_LEVEL
+    return requested
+
+
+#: OPA 가 없는 상태에서 스캔까지 끈 요청을 막을 때 쓰는 문구.
+#: 상수로 빼 둔다 — 라우트가 내려보내는 문구와 테스트가 읽는 문구가
+#: 갈라지면, 문구만 바꿨는데 테스트는 계속 통과하는 상황이 생긴다.
+_FALLBACK_SCAN_OFF_REASON = (
+    "정책 엔진(OPA)에 연결할 수 없는 상태에서는 보안 스캔을 끈 배포를 "
+    "허용하지 않습니다. run_security_scan=false 면 취약점·시크릿·Dockerfile "
+    "검사가 배포 경로 어디에서도 수행되지 않는데, 로컬 폴백에는 그 결과를 "
+    "대신 확인할 방법이 없습니다."
+)
+_FALLBACK_SCAN_OFF_FIX = (
+    "run_security_scan 을 켜고 다시 요청하세요. 스캔 없이 배포해야 한다면 "
+    "정책 엔진(OPA)을 띄운 뒤 그쪽 정책으로 판단받아야 합니다."
+)
+_FALLBACK_SCAN_OFF_WARNING = (
+    "정책 엔진(OPA)에 연결하지 못했고, 요청이 보안 스캔을 끈 상태여서 "
+    "로컬 내장 규칙이 배포를 거부했습니다."
+)
+
+
 def _local_policy_fallback(record: ECSDeployRecord, request: ECSDeployRequest):
     """OPA 서버가 없을 때 쓰는 로컬 내장 게이트.
 
@@ -355,10 +440,33 @@ def _local_policy_fallback(record: ECSDeployRecord, request: ECSDeployRequest):
     """
     try:
         from core.opa_client import OPAResult as ClientOPAResult
-        from core.opa_gate import OPAGate
+        from core.opa_gate import OPADecision, OPAGate
     except Exception as exc:  # noqa: BLE001
         logger.warning("로컬 정책 폴백을 불러오지 못했습니다: %s", exc)
         return None
+
+    # **스캔을 끈 배포는 폴백이 통과시킬 수 없다.**
+    #
+    # 아래에서 trivy/gitleaks/hadolint 를 "위반 없음"으로 넘기는 근거는 단
+    # 하나 — **파이프라인이 곧 실제로 검사하기 때문**이다. 그런데
+    # `run_security_scan=False` 면 `_step_scan_sources` 와 `_step_security_scan`
+    # 이 통째로 건너뛰어진다. 그 상태에서도 통과값을 만들어 넘기면,
+    # **OPA 가 꺼져 있는 기본 상태에서 승인 레벨 3 배포가 보안 검사를
+    # 하나도 거치지 않고 나간다.** 근거가 사라지면 값도 만들면 안 된다.
+    if not request.run_security_scan:
+        logger.warning(
+            "OPA 서버가 없고 보안 스캔도 꺼져 있어 배포를 거부합니다 "
+            "(project=%s image=%s)", request.project_id, request.image,
+        )
+        record.provisioned["policy_warning"] = _FALLBACK_SCAN_OFF_WARNING
+        return ClientOPAResult(
+            decision=OPADecision.DENY.value,
+            reason=_FALLBACK_SCAN_OFF_REASON,
+            fix_suggestion=_FALLBACK_SCAN_OFF_FIX,
+            # **판단은 했다.** False 로 두면 라우트가 503("OPA 에 연결할 수
+            # 없습니다")을 내면서 이 거부 사유를 통째로 버린다.
+            opa_available=True,
+        )
 
     try:
         context = _policy_context(request)
@@ -367,6 +475,11 @@ def _local_policy_fallback(record: ECSDeployRecord, request: ECSDeployRequest):
             # "그렇게 하겠다는 요청"이고, 실제 결과는 파이프라인 안의 게이트가
             # 강제한다 (`_step_sbom` 이 SBOM 생성 실패를 배포 실패로 올리고,
             # `_scan_gate_message` 가 스캔 위반을 막는다).
+            # 스캔이 꺼진 경우는 위에서 이미 거부됐으므로, 여기 도달했다는
+            # 것은 두 스캔 단계가 **호출된다**는 뜻이다. 그중 못 돈 검사가
+            # 있으면(작업 폴더 없음, 스캐너 미설치) `_record_scan_gaps` 가
+            # `scan_warning` 으로 남겨 사용자가 "0건"을 결과로 오해하지
+            # 않게 한다 — 여기서 그것까지 판단할 수는 없다.
             "sbom": {"present": bool(request.generate_sbom)},
             "trivy": {"critical_count": 0, "high_count": 0},
             "gitleaks": {"passed": True},

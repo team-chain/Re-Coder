@@ -1483,7 +1483,19 @@ class ECSDeployRecord(BaseModel):
     image_uri:                      Optional[str] = None
     image_digest:                   Optional[str] = None
     #: 이번 실행에서 확보한 리소스들 — 무엇이 새로 생겼고 무엇을 재사용했는지.
+    #:
+    #: **값은 문자열만 넣는다.** 파이단틱은 dict 에 in-place 로 넣는 값까지
+    #: 검사하지 않으므로, list 를 넣어도 쓰는 순간에는 아무 일도 안 일어난다.
+    #: 대신 `_load_records()` 가 다시 읽을 때 ValidationError 가 나서 그
+    #: **기록 한 건이 통째로 버려진다.** 진행 중이던 배포가 그렇게 사라지면
+    #: 비용 경고도 클러스터·서비스 이름도 함께 없어져서, 떠 있는 태스크를
+    #: 제품 안에서 멈출 방법이 사라진다 — `_save_records` 가 막으려던 바로
+    #: 그 상황이다. 구조화된 값이 필요하면 아래 `scan_gaps` 처럼 **전용
+    #: 필드**를 만든다.
     provisioned:                    dict[str, str] = Field(default_factory=dict)
+    #: 실행하지 못한 보안 검사의 사유 목록. `provisioned["scan_warning"]`
+    #: 문구를 **중복 없이 다시 렌더하기 위한 재료**다 (`_add_scan_gaps`).
+    scan_gaps:                      list[str] = Field(default_factory=list)
     #: 실패했을 때 사용자가 할 수 있는 일 (DoD 3번).
     error_remedy:                   Optional[str] = None
     #: 실패 원인의 AWS 원문. 사람용 메시지와 분리해서 보존한다.

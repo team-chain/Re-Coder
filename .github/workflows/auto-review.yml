@@ -1,4 +1,4 @@
-﻿name: Codex 코드 리뷰 요청
+name: Codex 코드 리뷰 요청
 
 # ── 왜 이 워크플로가 필요한가 ────────────────────────────────────────────
 # Codex 코드 검토의 "모든 PR 검토"(외부 기여자 포함)는 **Pro 전용**이다.
@@ -66,6 +66,7 @@ jobs:
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
         github.event.pull_request.user.login != 'LDK511'
       ) || (
         github.event_name == 'issue_comment' &&

@@ -724,23 +724,27 @@ def test_policy_and_deploy_path_agree_on_role_names(monkeypatch):
 
     from api.routes import aws as route
 
-    # ① 기본 (환경변수 없음)
+    # ① 기본 (환경변수 없음) — 배포는 태스크 역할을 **안 붙인다.**
+    #    그러면 권한표에도 없어야 한다. 있으면 아무도 안 쓰는 역할에
+    #    PassRole 을 열어 둔 것이다.
     monkeypatch.delenv(ap.ENV_EXECUTION_ROLE_ARN, raising=False)
     monkeypatch.delenv(ap.ENV_TASK_ROLE_ARN, raising=False)
     exec_role, task = route._resolve_roles(False, "", "")
-    assert (exec_role, task) == (ap.configured_execution_role(),
-                                 ap.configured_task_role())
+    assert (exec_role, task) == (ap.configured_execution_role(), "")
     assert authorized(ap.build_policy(["ecs"], "123456789012", "us-east-1", exec_role,
-                                      task_role=task)) == {exec_role, task}
+                                      task_role=task)) == {exec_role}
 
     # ② 배포 경로가 환경변수로 다른 역할을 쓰도록 설정된 경우
     monkeypatch.setenv(ap.ENV_EXECUTION_ROLE_ARN, "arn:aws:iam::1:role/MyExec")
     monkeypatch.setenv(ap.ENV_TASK_ROLE_ARN, "arn:aws:iam::1:role/MyTask")
     assert ap.configured_execution_role() == "MyExec"
-    assert ap.configured_task_role() == "MyTask"
+    assert ap.task_role_if_configured() == "MyTask"
     exec_role, task = route._resolve_roles(False, "", "")
     assert (exec_role, task) == ("MyExec", "MyTask"), \
         "환경변수로 지정한 역할이 권한표에 반영되지 않는다"
+    assert authorized(ap.build_policy(["ecs"], "123456789012", "us-east-1", exec_role,
+                                      task_role=task)) == {"MyExec", "MyTask"}, \
+        "설정한 태스크 역할이 PassRole 대상에서 빠졌다 — 등록이 거부된다"
 
     # ③ 학교 계정 자동 판단보다 환경변수가 앞선다 (배포 경로가 그걸 보므로)
     assert route._resolve_roles(True, "", "") == ("MyExec", "MyTask")
@@ -767,7 +771,7 @@ def test_academy_does_not_silently_diverge_from_the_deploy_path(monkeypatch):
     monkeypatch.delenv(ap.ENV_EXECUTION_ROLE_ARN, raising=False)
     monkeypatch.delenv(ap.ENV_TASK_ROLE_ARN, raising=False)
 
-    deploy = (ap.configured_execution_role(), ap.configured_task_role())
+    deploy = (ap.configured_execution_role(), ap.task_role_if_configured())
     assert route._resolve_roles(True, "", "") == deploy, \
         "학교 계정에서 정책과 배포가 다른 역할을 가리킨다"
     assert route._resolve_roles(False, "", "") == deploy
@@ -787,6 +791,41 @@ def test_academy_advice_disappears_once_the_env_vars_are_set(monkeypatch):
     monkeypatch.setenv(ap.ENV_TASK_ROLE_ARN, f"arn:aws:iam::123456789012:role/{lab}")
     assert route._academy_role_advice(True) == []
     assert route._resolve_roles(True, "", "") == (lab, lab)
+
+
+def test_the_policy_page_does_not_contradict_itself_about_the_task_role(monkeypatch):
+    """[회귀] 같은 화면이 "설정하세요"와 "필요 없습니다"를 나란히 말하면 안 된다.
+
+    태스크 역할은 안 정하는 것이 정상이 됐다. 그런데 학교 계정 안내가
+    태스크 역할까지 설정됐는지로 판단하면,
+    실행 역할만 제대로 맞춰 둔 사람에게 "태스크 역할도 설정하세요"라고
+    한 뒤 바로 다음 줄에서 "태스크 역할은 이 권한표에 없고 필요 없습니다"를
+    붙이게 된다. 사용자는 어느 쪽을 믿어야 할지 알 수 없다.
+    """
+    from api.routes import aws as route
+    lab = ap.ACADEMY_TASK_EXECUTION_ROLE
+    monkeypatch.setenv(ap.ENV_EXECUTION_ROLE_ARN, f"arn:aws:iam::123456789012:role/{lab}")
+    monkeypatch.delenv(ap.ENV_TASK_ROLE_ARN, raising=False)
+
+    _exec, task = route._resolve_roles(True, "", "")
+    assert task == "", "태스크 역할을 안 정했는데 이름이 붙었다"
+
+    # 실행 역할을 이미 맞춰 뒀으면 **더 할 일이 없다.** 여기서 안내가 남으면
+    # "태스크 역할도 설정하세요"와 바로 아래 "태스크 역할은 필요 없습니다"가
+    # 나란히 뜬다.
+    assert route._academy_role_advice(True) == [], (
+        f"실행 역할만 설정한 학교 계정에게 아직 할 일이 있다고 말한다: "
+        f"{route._academy_role_advice(True)}"
+    )
+
+    text = " ".join(route._task_role_note(task))
+    assert "권한표에 들어 있지 않습니다" in text, (
+        "태스크 역할이 왜 빠졌는지 아무 설명이 없다 — 사용자는 빠뜨린 줄 안다"
+    )
+
+    # 아직 실행 역할도 안 맞춘 사람에게는 여전히 안내가 나가야 한다.
+    monkeypatch.delenv(ap.ENV_EXECUTION_ROLE_ARN, raising=False)
+    assert route._academy_role_advice(True), "학교 계정 안내가 통째로 사라졌다"
 
 
 @pytest.mark.parametrize("env", [ap.ENV_EXECUTION_ROLE_ARN, ap.ENV_TASK_ROLE_ARN])
@@ -848,16 +887,76 @@ def test_ecr_listing_denial_is_reported_as_normal_not_as_broken_credentials():
     assert "자격증명 문제가 아닙니다" in body["message"]
 
 
-def test_execution_role_and_task_role_are_different_and_both_passable():
-    """둘은 서로 다른 역할이다. 기본값이 같아지면 한쪽을 잊었다는 뜻이다."""
-    assert ap.TASK_EXECUTION_ROLE != ap.TASK_ROLE
-    stmt = next(s for s in ap.build_policy(["ecs"], "123456789012", "us-east-1")["Statement"]
-                if "iam:PassRole" in s["Action"])
+def _pass_role_names(policy: dict) -> set[str]:
+    stmt = next(s for s in policy["Statement"] if "iam:PassRole" in s["Action"])
     res = stmt["Resource"]
     arns = [res] if isinstance(res, str) else res
-    names = {a.rsplit("/", 1)[-1] for a in arns}
+    return {a.rsplit("/", 1)[-1] for a in arns}
+
+
+def test_execution_role_and_task_role_are_different_and_both_passable():
+    """둘은 서로 다른 역할이다. 태스크 역할을 **쓸 때는** 둘 다 인가돼야 한다."""
+    assert ap.TASK_EXECUTION_ROLE != ap.TASK_ROLE
+    names = _pass_role_names(ap.build_policy(
+        ["ecs"], "123456789012", "us-east-1", task_role=ap.TASK_ROLE))
     assert names == {ap.TASK_EXECUTION_ROLE, ap.TASK_ROLE}, \
         f"PassRole 대상이 두 역할을 다 덮지 않는다: {names}"
+
+
+def test_unused_task_role_gets_no_permissions():
+    """[보안 · 회귀] 배포가 **안 쓰는** 태스크 역할에는 권한을 주지 않는다.
+
+    `ECS_TASK_ROLE_ARN` 이 없으면 `ecs_agent._resolve_role_arns` 는
+    `taskRoleArn` 을 태스크 정의에 넣지 않는다. 그런데 권한표는 기본 이름
+    `ecsTaskRole` 에 `iam:PassRole` 과 정책 읽기를 계속 열어 줬다.
+
+    그 이름의 역할이 계정에 이미 있고 권한이 넓다면 — 학교 계정처럼 미리
+    만들어진 역할이 흔하다 — ReCoder 배포용으로만 발급한 키로 **그 역할을
+    단 임의의 태스크를 등록해 실행**할 수 있다. 쓰지도 않는 권한 하나가
+    권한 상승 경로가 되는 형태다.
+    """
+    policy = ap.build_policy(["ecs"], "123456789012", "us-east-1")
+    text = json.dumps(policy)
+    assert ap.TASK_ROLE not in text, (
+        f"안 쓰는 태스크 역할 '{ap.TASK_ROLE}' 에 권한이 남아 있다"
+    )
+    assert _pass_role_names(policy) == {ap.TASK_EXECUTION_ROLE}
+
+    # 정책 읽기 쪽도 같이 좁아져야 한다 — PassRole 만 빼고 여기 남으면
+    # "역할을 못 넘기지만 그 역할의 정책은 읽을 수 있는" 어정쩡한 상태가 된다.
+    read = next(s for s in policy["Statement"]
+                if s["Sid"] == "ReadDeploymentRolePolicies")
+    res = read["Resource"]
+    assert isinstance(res, str) and res.endswith(f"role/{ap.TASK_EXECUTION_ROLE}"), res
+
+
+def test_configured_task_role_is_included_again(monkeypatch):
+    """[회귀] 좁히다가 **필요한 것까지 빼면** RegisterTaskDefinition 이 거부된다.
+
+    위 테스트만 있으면 "태스크 역할을 영영 안 넣는다"로 고쳐도 통과한다.
+    반대 방향을 같이 못 박아야 검증이 헛돌지 않는다.
+    """
+    monkeypatch.setenv(ap.ENV_TASK_ROLE_ARN, "arn:aws:iam::123456789012:role/MyTask")
+    exec_name, task_name = ap.resolve_roles()
+    assert task_name == "MyTask"
+    names = _pass_role_names(ap.build_policy(
+        ["ecs"], "123456789012", "us-east-1", exec_name, task_role=task_name))
+    assert "MyTask" in names, names
+
+
+def test_deploy_path_and_policy_use_the_same_task_role_decision(monkeypatch):
+    """[불변식] "태스크 역할을 쓰는가"를 두 곳이 따로 판단하면 안 된다.
+
+    배포 경로가 환경변수를 직접 읽고 권한표가 다른 기준을 쓰면, 한쪽만
+    바뀔 때 조용히 갈라진다. 두 곳 모두 `resolve_roles()` 의 빈 문자열을
+    근거로 삼는지 확인한다.
+    """
+    source = (CORE_DIR / "agents" / "ecs_agent.py").read_text(encoding="utf-8")
+    body = source.split("def _resolve_role_arns", 1)[1].split("\n    async def", 1)[0]
+    assert "ENV_TASK_ROLE_ARN" not in body, (
+        "배포 경로가 환경변수를 다시 읽어 따로 판단한다 — 권한표와 갈라진다"
+    )
+    assert "resolve_roles()" in body
 
 
 def test_same_role_for_both_is_not_duplicated():
@@ -1041,7 +1140,9 @@ def test_role_paths_are_preserved_in_arns(monkeypatch):
     stmt = next(s for s in ap.build_policy(["ecs"], "123456789012", "us-east-1",
                                            role)["Statement"]
                 if "iam:PassRole" in s["Action"])
-    assert any(a.endswith("role/team/EcsExec") for a in stmt["Resource"]), stmt
+    res = stmt["Resource"]
+    arns = [res] if isinstance(res, str) else res
+    assert any(a.endswith("role/team/EcsExec") for a in arns), stmt
 
 
 def test_preflight_asks_for_the_role_without_its_path():

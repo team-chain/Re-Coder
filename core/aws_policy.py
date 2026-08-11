@@ -58,10 +58,14 @@ TASK_EXECUTION_ROLE = "ecsTaskExecutionRole"
 #: 컨테이너 **안의 코드**가 AWS 를 부를 때 쓰는 역할. 실행 역할과 **다르다.**
 #:
 #: 실행 역할(execution role)은 ECS 가 이미지를 받아오고 로그를 쓸 때 쓰고,
-#: 태스크 역할(task role)은 컨테이너 안 애플리케이션이 쓴다. `ecs_agent.py` 가
-#: `ECS_TASK_ROLE_ARN`(기본 `ecsTaskRole`)으로 **둘을 따로** 넘기므로,
-#: `RegisterTaskDefinition` 은 **두 역할 모두에 대해** `iam:PassRole` 을 요구한다.
-#: 하나만 주면 배포 마지막 단계에서 AccessDenied 가 난다.
+#: 태스크 역할(task role)은 컨테이너 안 애플리케이션이 쓴다.
+#:
+#: **이건 기본값이 아니라 이름 규칙일 뿐이다.** 태스크 역할은 앱이 AWS API 를
+#: 직접 부를 때만 필요하고, AWS 가 만들어 주지도 않는다. 그래서 배포는
+#: `ECS_TASK_ROLE_ARN` 이 설정됐을 때만 `taskRoleArn` 을 붙이고, 권한표도
+#: 그때만 `iam:PassRole` 을 넣는다 (`task_role_if_configured()`).
+#: 쓰는데 안 주면 `RegisterTaskDefinition` 이 AccessDenied 로 죽고,
+#: 안 쓰는데 주면 그 역할이 넓을 때 권한 상승 경로가 된다.
 TASK_ROLE = "ecsTaskRole"
 
 #: AWS Academy 러너랩이 미리 만들어 두는 역할. 학교 계정에서 개발할 때 쓴다.
@@ -257,9 +261,30 @@ def configured_execution_role() -> str:
     return role_from_env(ENV_EXECUTION_ROLE_ARN) or TASK_EXECUTION_ROLE
 
 
-def configured_task_role() -> str:
-    """배포 경로가 실제로 쓸 태스크 역할 이름."""
-    return role_from_env(ENV_TASK_ROLE_ARN) or TASK_ROLE
+def task_role_if_configured() -> str:
+    """태스크 정의에 **실제로 붙을** 태스크 역할 이름. 안 붙이면 "".
+
+    ## 왜 기본값으로 떨어지면 안 되나
+
+    배포 경로(`agents/ecs_agent._resolve_role_arns`)는 `ECS_TASK_ROLE_ARN`
+    이 설정됐을 때만 `taskRoleArn` 을 태스크 정의에 넣는다. 기본 이름
+    `ecsTaskRole` 은 AWS 가 만들어 주지 않는 역할이라, 안 붙이는 게 맞다.
+
+    그런데 권한표는 그 사실을 모른 채 `ecsTaskRole` 에 `iam:PassRole` 과
+    정책 읽기를 계속 열어 줬다. **아무도 쓰지 않는 역할에 대한 권한**이다.
+    그 이름의 역할이 계정에 우연히 존재하고 권한이 넓다면, ReCoder 배포용
+    으로만 발급한 키로 그 역할을 단 임의의 태스크를 등록해 실행할 수 있다 —
+    최소권한이 무너지는 경로다.
+
+    그래서 "배포가 실제로 쓸 때만 권한을 준다"를 한 함수에 못 박는다.
+
+    실행 역할과 짝이 안 맞아 보이지만(`configured_execution_role()` 은 기본
+    이름으로 떨어진다) 그게 맞다. 실행 역할은 배포에 **항상** 필요하고,
+    태스크 역할은 아니다. 예전에 "설정 없으면 `ecsTaskRole`" 을 돌려주는
+    함수를 하나 더 두었다가, 안내 문구와 권한표가 서로 다른 함수를 보고
+    갈라졌다 — 그래서 이 판단을 하는 함수는 여기 **하나만** 둔다.
+    """
+    return role_from_env(ENV_TASK_ROLE_ARN) or ""
 
 
 def resolve_roles(execution: str = "", task: str = "") -> tuple[str, str]:
@@ -284,6 +309,13 @@ def resolve_roles(execution: str = "", task: str = "") -> tuple[str, str]:
     쓴다. 그래야 정책과 배포가 같은 값을 본다.
 
     우선순위: **직접 지정 → 환경변수 → 기본값**
+
+    ## 태스크 역할만 기본값이 없다
+
+    실행 역할은 배포에 **항상** 필요하지만 태스크 역할은 아니다. 배포 경로는
+    `ECS_TASK_ROLE_ARN` 이 있을 때만 `taskRoleArn` 을 붙인다. 그래서 여기서도
+    설정이 없으면 빈 문자열을 돌려준다 — `task_role_if_configured()` 참고.
+    빈 문자열은 "권한표에 태스크 역할 항목을 넣지 않는다"는 뜻이다.
     """
     exec_name = (execution or "").strip()
     task_name = (task or "").strip()
@@ -291,7 +323,7 @@ def resolve_roles(execution: str = "", task: str = "") -> tuple[str, str]:
         _check_role_name("실행 역할(task_execution_role)", exec_name)
         if exec_name else configured_execution_role(),
         _check_role_name("태스크 역할(task_role)", task_name)
-        if task_name else configured_task_role(),
+        if task_name else task_role_if_configured(),
     )
 
 
@@ -393,19 +425,25 @@ def _sts_statements() -> list[dict]:
 def _ecs_statements(
     ctx: ArnContext,
     task_execution_role: str = TASK_EXECUTION_ROLE,
-    task_role: str = TASK_ROLE,
+    task_role: str = "",
     cluster: str = DEFAULT_CLUSTER,
     service: str = DEFAULT_SERVICE,
     ecr_repo: str = DEFAULT_ECR_REPO,
 ) -> list[dict]:
-    """컨테이너 배포 (ECS Fargate + ECR)."""
+    """컨테이너 배포 (ECS Fargate + ECR).
+
+    `task_role` 이 비어 있으면 태스크 역할에 대한 권한을 **한 줄도 넣지
+    않는다.** 배포 경로가 그때 `taskRoleArn` 을 안 붙이기 때문이다
+    (`task_role_if_configured()` 참고). 안 쓰는 역할에 PassRole 을 주면
+    그 역할이 넓을 때 권한 상승 경로가 된다.
+    """
     repo = _arn("ecr", f"repository/{ecr_repo}", ctx)
     exec_role = _arn("iam", f"role/{task_execution_role}", ctx,
                      global_service=True)
     # 실행 역할과 태스크 역할이 같을 수 있다(학교 계정은 둘 다 LabRole).
     # 같으면 ARN 을 중복해 넣지 않는다 — 정책이 지저분해지고 비교가 어려워진다.
     pass_targets = [exec_role]
-    if task_role != task_execution_role:
+    if task_role and task_role != task_execution_role:
         pass_targets.append(
             _arn("iam", f"role/{task_role}", ctx, global_service=True)
         )
@@ -535,7 +573,9 @@ def _ecs_statements(
             # Task Definition 을 등록하려면 거기 붙는 역할마다 PassRole 이 필요하다.
             # **실행 역할과 태스크 역할은 서로 다른 역할이다** — ecs_agent 가
             # ECS_EXECUTION_ROLE_ARN 과 ECS_TASK_ROLE_ARN 을 따로 넘긴다.
-            # 하나만 주면 RegisterTaskDefinition 이 거부된다.
+            # 태스크 역할을 쓰는데 안 주면 RegisterTaskDefinition 이 거부된다.
+            # 반대로 **안 쓰는데 주면** 최소권한이 깨진다 — 그래서
+            # `task_role` 이 비면 대상에서 빠진다(위 pass_targets).
             #
             # 조건을 걸어 **ECS 작업에 넘길 때만** 허용한다 — 이게 없으면
             # 이 키로 아무 서비스에나 역할을 넘길 수 있어 권한 상승이 된다.
@@ -737,7 +777,7 @@ def build_policy(
     region: str = "",
     task_execution_role: str = TASK_EXECUTION_ROLE,
     *,
-    task_role: str = TASK_ROLE,
+    task_role: str = "",
     cluster: str = DEFAULT_CLUSTER,
     service: str = DEFAULT_SERVICE,
     ecr_repo: str = DEFAULT_ECR_REPO,
@@ -755,12 +795,16 @@ def build_policy(
 
       - `task_execution_role` / `task_role` — 학교(AWS Academy) 계정은 역할을
         만들 수 없어 둘 다 `LabRole` 이다. 그리고 일반 계정에서도 이 둘은
-        **서로 다른 역할**이라 PassRole 대상이 둘이다.
+        **서로 다른 역할**이라, 태스크 역할을 쓰는 배포라면 PassRole 대상이
+        둘이 된다.
       - `cluster` / `service` — 사용자가 이미 있는 클러스터(`default` 등)에
         배포할 수 있다. 기본값 `recoder-*` 로 고정하면 그런 사용자는 정책을
         그대로 붙여도 배포 전 점검에서 막힌다.
 
-    모르면 기본값(우리가 만드는 자원의 이름 규칙)을 쓴다.
+    모르면 기본값(우리가 만드는 자원의 이름 규칙)을 쓴다. **단 `task_role`
+    만 예외로 기본값이 없다** — 비우면 태스크 역할 권한을 아예 넣지 않는다.
+    배포 경로가 설정됐을 때만 그 역할을 쓰기 때문이다
+    (`task_role_if_configured()`).
     """
     selected = tuple(targets) if targets else DEFAULT_TARGETS
     unknown = [t for t in selected if t not in _BUILDERS]
@@ -774,8 +818,11 @@ def build_policy(
         "실행 역할(task_execution_role)",
         (task_execution_role or "").strip() or TASK_EXECUTION_ROLE,
     )
-    task_name = _check_role_name(
-        "태스크 역할(task_role)", (task_role or "").strip() or TASK_ROLE
+    # **비어 있으면 기본 이름으로 채우지 않는다.** 채우면 배포가 쓰지도
+    # 않는 `ecsTaskRole` 에 PassRole 을 열게 된다 (`_ecs_statements` 주석).
+    raw_task = (task_role or "").strip()
+    task_name = (
+        _check_role_name("태스크 역할(task_role)", raw_task) if raw_task else ""
     )
     cluster_name = _check_ecs_name("클러스터", (cluster or "").strip() or DEFAULT_CLUSTER)
     service_name = _check_ecs_name("서비스", (service or "").strip() or DEFAULT_SERVICE)

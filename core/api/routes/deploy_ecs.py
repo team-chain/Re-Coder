@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -111,35 +110,6 @@ DEFAULT_CLUSTER = "recoder-cluster"
 DEFAULT_SERVICE = "recoder-app"
 
 
-def _current_branch(workspace_path: Optional[str]) -> str:
-    """작업 폴더의 현재 git 브랜치. 못 알아내면 빈 문자열.
-
-    **브랜치를 채우는 사람이 아무도 없었다.** 확장의 배포 화면에는 브랜치
-    입력칸 자체가 없고, 사이드바는 `branch: p.branch || ''` 로 빈 문자열을
-    보낸다. 그 결과 "프로덕션은 main 브랜치에서만" 규칙이 판단 재료를
-    못 받아 **어떤 브랜치에서든 프로덕션 배포가 통과**했다.
-
-    값을 넘기는 배관만 고치고 값을 만드는 곳을 안 고치면, 규칙은 여전히
-    아무것도 막지 못한다. 작업 폴더를 이미 받고 있으니 여기서 알아낸다.
-    """
-    if not workspace_path:
-        return ""
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=workspace_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=5,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.info("git 브랜치를 확인하지 못했습니다: %s", exc)
-        return ""
-    if proc.returncode != 0:
-        return ""
-    name = (proc.stdout or "").strip()
-    # 분리된 HEAD 는 브랜치가 아니다. 이름인 척하면 규칙이 오판한다.
-    return "" if name in ("", "HEAD") else name
-
-
 def to_core_request(
     body: ExtensionEcsDeployRequest, *, project_id: str = "extension"
 ) -> ECSDeployRequest:
@@ -178,11 +148,21 @@ def to_core_request(
     # 버렸다. 그러면 "프로덕션은 main 에서만" 규칙이 브랜치를 모른 채
     # 평가돼 어떤 브랜치에서든 프로덕션 배포가 통과한다.
     if body.environment:
+        # 대소문자 정규화는 **여기서 하지 않는다.** 두 라우트의 합류점인
+        # `ecs.start_deployment` 이 정책 평가 직전에 한 번만 접는다 — 정규화가
+        # 두 군데 있으면 한쪽만 바뀔 때 조용히 갈라진다. 컨테이너에 넣는
+        # 환경변수는 사용자가 쓴 그대로 둔다(그건 앱이 읽는 값이다).
         fields["environment"] = body.environment.strip()
         fields["env_vars"] = {"ENVIRONMENT": body.environment}
-    branch = (body.branch or "").strip() or _current_branch(body.workspace_path)
-    if branch:
-        fields["branch"] = branch
+    # **브랜치는 여기서 정하지 않는다.**
+    #
+    # 두 라우트의 합류점인 `ecs.start_deployment` 이 정책 평가 직전에
+    # `branch_source.resolve_branch` 로 한 번만 확정한다. 여기서도 부르면
+    # 같은 배포에 git 이 네 번 뜨고(느리다), 그 사이에 사용자가 브랜치를
+    # 바꾸면 **판단한 브랜치와 요청에 담긴 브랜치가 달라진다.**
+    # 여기서는 호출자가 보낸 값을 그대로 실어 보내기만 한다.
+    if (body.branch or "").strip():
+        fields["branch"] = body.branch.strip()  # type: ignore[union-attr]
     if body.skip_opa:
         # **일부러 반영하지 않는다.** 클라이언트가 보낸 플래그 하나로 정책
         # 게이트를 끌 수 있으면 게이트가 아니다. 다만 조용히 무시하면
@@ -245,6 +225,7 @@ _WARNING_KEYS = (
     "cost_warning",       # 태스크가 아직 떠 있어 요금이 붙는다
     "halt",               # 태스크 수를 0 으로 내렸다
     "ecs_rollback",       # ECS 가 이전 버전으로 되돌렸다
+    "policy_warning",     # 정책 엔진 없이 로컬 규칙으로 판단했다
 )
 
 
@@ -302,8 +283,14 @@ async def deploy_ecs(
     """확장의 ECS 배포 버튼. 예전에는 이 주소가 없어서 404 였다."""
     from api.routes import ecs as ecs_routes
 
+    # **이벤트 루프에서 git 을 돌리지 않는다.**
+    # `to_core_request` 는 브랜치를 알아내려고 `git rev-parse` 를 동기로
+    # 부른다(최대 5초). 그 5초 동안 같은 루프에서 도는 사이드바 상태 폴링이
+    # 전부 멈춘다 — 사용자 눈에는 "배포 버튼을 눌렀는데 화면이 얼었다"로
+    # 보인다. 아래 준비 확인이 이미 같은 이유로 executor 를 쓴다.
+    loop = asyncio.get_running_loop()
     try:
-        core_request = to_core_request(body)
+        core_request = await loop.run_in_executor(None, lambda: to_core_request(body))
     except Exception as exc:  # noqa: BLE001 - 검증 실패를 400 으로 바꾼다
         raise HTTPException(
             status_code=400,

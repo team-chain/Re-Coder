@@ -55,6 +55,61 @@ def make_request(**overrides) -> ECSDeployRequest:
     return ECSDeployRequest(**fields)
 
 
+def init_git_repo(path, branch: str = "main"):
+    """테스트용 git 저장소 하나를 만들고 `run(*args)` 를 돌려준다.
+
+    git 이 없으면 **실패가 아니라 skip** 한다. 조용히 실패하게 두면
+    "브랜치를 못 알아냄"이 되어, 테스트가 확인하려던 것과 정반대의 이유로
+    통과해 버린다.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    if not shutil.which("git"):
+        pytest.skip("git 이 없어 브랜치 판정을 확인할 수 없다")
+
+    path.mkdir(parents=True, exist_ok=True)
+
+    # **개발자 개인 설정과 격리한다.** 전역 커밋 서명이나 전역 pre-commit
+    # 훅이 걸려 있으면 아래 커밋이 실패하고, 그러면 이 테스트들이 "확인할 수
+    # 없어서 skip" 이 아니라 **엉뚱한 이유로 실패**한다.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+    })
+    safe = ("-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + os.devnull)
+
+    def run(*args):
+        head, rest = args[0], args[1:]
+        argv = [head, *safe, *rest] if head == "git" else list(args)
+        return subprocess.run(
+            argv, cwd=path, capture_output=True, text=True, env=env
+        )
+
+    if run("git", "init", "-q", "-b", branch).returncode != 0:
+        pytest.skip("git init -b 를 지원하지 않는 git 이다 (2.28 미만)")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    (path / "f.txt").write_text("x", encoding="utf-8")
+    run("git", "add", "-A")
+    # 커밋이 실패하면 HEAD 가 unborn 이라 `rev-parse` 가 128 로 죽고 브랜치가
+    # ""로 나온다. 그건 테스트가 확인하려던 것과 **정반대 이유**로 통과하는
+    # 것이다. 여기서 멈춰야 한다.
+    commit = run("git", "commit", "-qm", "init")
+    assert commit.returncode == 0, (
+        "테스트용 커밋이 실패했다 — 이대로면 브랜치 판정이 헛돈다:\n"
+        f"{commit.stdout}{commit.stderr}"
+    )
+    head = run("git", "rev-parse", "--abbrev-ref", "HEAD")
+    assert head.stdout.strip() == branch, (
+        f"저장소가 기대한 브랜치에 있지 않다: {head.stdout.strip()!r} != {branch!r}"
+    )
+    return run
+
+
 def client_error(code: str, message: str = "boom"):
     from botocore.exceptions import ClientError
 
@@ -3307,21 +3362,504 @@ def test_the_route_fallback_rejects_production_from_a_feature_branch():
     """
     from core.api.routes import ecs as ecs_routes
 
-    blocked = ecs_routes._local_policy_fallback(
-        ECSDeployRecord(),
-        make_request(environment="production", branch="feat/x", generate_sbom=True),
-    )
+    def judge(**over):
+        return ecs_routes._local_policy_fallback(
+            ECSDeployRecord(),
+            make_request(environment="production", generate_sbom=True,
+                         run_security_scan=True, **over),
+        )
+
+    blocked = judge(branch="feat/x")
     assert blocked is not None
     assert blocked.decision != "allow", (
         "기능 브랜치에서 프로덕션 배포가 폴백을 통과했다"
     )
 
-    allowed = ecs_routes._local_policy_fallback(
-        ECSDeployRecord(),
-        make_request(environment="production", branch="main", generate_sbom=True),
-    )
+    allowed = judge(branch="main")
     assert allowed is not None and allowed.decision == "allow", (
         "main 에서의 프로덕션 배포까지 막았다"
+    )
+
+
+def test_production_is_denied_when_the_branch_cannot_be_proven(tmp_path):
+    """[보안 · 회귀] **모르는 브랜치는 통과시키지 않는다.**
+
+    예전 규칙은 `branch and branch not in (...)` 이라 브랜치가 빈 문자열이면
+    통째로 건너뛰었다. 그런데 브랜치를 모르는 경우 — 분리된 HEAD, git 이
+    아닌 작업 폴더, 확장이 값을 안 보낸 경우 — 가 **가장 흔한 경우**다.
+    즉 "프로덕션은 main 에서만"은 조문만 있고 한 번도 막은 적이 없었다.
+
+    브랜치를 채우는 배관을 고치는 것만으로는 부족하다. 배관이 실패했을 때
+    어디로 기우느냐가 실제 규칙이다.
+    """
+    from core.api.routes import ecs as ecs_routes
+    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
+
+    # ① 규칙 자체 — 빈 브랜치 + production 이면 거부
+    denied = ecs_routes._local_policy_fallback(
+        ECSDeployRecord(),
+        make_request(environment="production", branch="", generate_sbom=True,
+                     run_security_scan=True),
+    )
+    assert denied is not None and denied.decision != "allow", (
+        "브랜치를 모르는 프로덕션 배포가 통과했다"
+    )
+    assert "브랜치" in (denied.reason or "")
+
+    # ② git 이 아닌 작업 폴더 → 요청의 branch 가 비고, 그 요청은 거부돼야 한다
+    core_request = to_core_request(
+        ExtensionEcsDeployRequest(workspace_path=str(tmp_path),
+                                  environment="production")
+    )
+    assert core_request.branch == ""
+    core_request.generate_sbom = True
+    core_request.run_security_scan = True
+    assert ecs_routes._local_policy_fallback(
+        ECSDeployRecord(), core_request
+    ).decision != "allow", (
+        "git 이 아닌 폴더에서 프로덕션 배포가 그대로 나갔다"
+    )
+
+    # ③ 프로덕션이 아니면 브랜치를 몰라도 막지 않는다 (과잉 차단 방지)
+    staging = ecs_routes._local_policy_fallback(
+        ECSDeployRecord(),
+        make_request(environment="staging", branch="", generate_sbom=True,
+                     run_security_scan=True),
+    )
+    assert staging is not None and staging.decision == "allow", (
+        "스테이징까지 막았다 — 이러면 아무도 못 쓴다"
+    )
+
+
+def test_a_detached_head_cannot_deploy_to_production(tmp_path):
+    """[회귀] 분리된 HEAD 에서 `git rev-parse --abbrev-ref` 는 "HEAD" 를 준다.
+
+    그걸 브랜치 이름으로 넘기면 규칙이 "현재: HEAD" 라는 엉뚱한 사유를 낸다.
+    빈 값으로 정규화하고, 정규화된 빈 값이 **거부**로 이어지는지 본다 —
+    정규화만 하고 거부로 이어지지 않으면 그게 바로 우회 경로다.
+    """
+    from core import branch_source
+    from core.api.routes import ecs as ecs_routes
+
+    repo = tmp_path / "ws"
+    run = init_git_repo(repo, branch="main")
+    head = run("git", "rev-parse", "HEAD").stdout.strip()
+    run("git", "checkout", "-q", head)
+
+    observed = branch_source.current_branch(str(repo))
+    assert observed == "", f"분리된 HEAD 가 브랜치 이름인 척했다: {observed!r}"
+    # 신고가 없으면 빈 값 그대로 — 그리고 빈 값은 프로덕션에서 거부다.
+    assert branch_source.resolve_branch(str(repo), "") == ""
+
+    result = ecs_routes._local_policy_fallback(
+        ECSDeployRecord(),
+        make_request(environment="production", branch="",
+                     generate_sbom=True, run_security_scan=True),
+    )
+    assert result is not None and result.decision != "allow", (
+        "분리된 HEAD 에서 프로덕션 배포가 통과했다"
+    )
+
+
+def test_the_fallback_will_not_pass_a_deployment_with_scans_turned_off():
+    """[보안 · 회귀] 안 한 검사를 "통과"로 지어내지 않는다.
+
+    폴백이 trivy/gitleaks/hadolint 를 "위반 없음"으로 넘기는 근거는 단 하나 —
+    **파이프라인이 곧 실제로 검사하기 때문**이다. `run_security_scan=false`
+    면 `_step_scan_sources` 와 `_step_security_scan` 이 통째로 건너뛰어져
+    그 근거가 사라진다.
+
+    그런데 OPA 는 리포 어디에도 띄우는 곳이 없어 **폴백이 기본 경로**다.
+    즉 이 구멍은 예외 상황이 아니라, 기본 상태에서 승인 레벨 3 배포가
+    보안 검사를 하나도 안 거치고 나가는 경로였다.
+    """
+    from core.api.routes import ecs as ecs_routes
+
+    record = ECSDeployRecord()
+    denied = ecs_routes._local_policy_fallback(
+        record, make_request(run_security_scan=False, generate_sbom=True)
+    )
+    assert denied is not None, "폴백이 None 을 돌려주면 라우트가 503 으로 덮어쓴다"
+    assert denied.decision != "allow", "스캔을 끈 배포가 폴백을 통과했다"
+    assert denied.opa_available is True, (
+        "opa_available=False 면 라우트가 이 거부 사유를 버리고 503 을 낸다"
+    )
+    assert "run_security_scan" in (denied.reason or ""), denied.reason
+    assert record.provisioned.get("policy_warning"), "왜 막혔는지 기록이 없다"
+
+    # 반대 방향 — 스캔을 켜면 통과해야 한다. 이게 없으면 "폴백은 항상 거부"로
+    # 고쳐도 위 단언이 그대로 통과해 버린다.
+    allowed = ecs_routes._local_policy_fallback(
+        ECSDeployRecord(),
+        make_request(run_security_scan=True, generate_sbom=True),
+    )
+    assert allowed is not None and allowed.decision == "allow", (
+        "스캔을 켠 정상 배포까지 막았다"
+    )
+
+
+def test_a_low_approval_level_cannot_skip_the_policy_gate():
+    """[보안 · 회귀] 게이트를 통과하는 조건을 **호출자가 고를 수 있으면 안 된다.**
+
+    `OPAClient._fail_closed` 는 OPA 가 없을 때 레벨 1~2 를
+    `decision="allow", opa_available=False` 로 통과시킨다. 라우트는 예전에
+    `decision != "allow"` 일 때만 로컬 폴백을 불렀으므로, 요청 본문에
+    `approval_level: 1` 한 줄만 넣으면 **SBOM·스캔·브랜치 규칙이 전부
+    호출조차 되지 않았다.** 스캔을 끈 배포를 막는 규칙을 아무리 정교하게
+    만들어도 그 앞에서 통째로 우회됐다.
+
+    두 가지를 함께 확인한다 — 레벨을 못 내리는 것과, 레벨과 무관하게
+    OPA 가 없으면 로컬 규칙이 판단하는 것.
+    """
+    from core.api.routes import ecs as ecs_routes
+
+    # 바닥은 **구체적인 값**이어야 한다. 상수와 비교만 하면 상수를 1 로
+    # 낮춰도 테스트가 그대로 통과한다 — 지키려던 것이 사라진다.
+    assert ecs_routes.ECS_DEPLOY_MIN_APPROVAL_LEVEL >= 3, (
+        "ECS 배포는 컨테이너를 띄우고 과금을 발생시키는 Level 3 작업이다. "
+        "바닥이 2 이하면 OPA 가 없을 때 fail-closed 가 통과시킨다"
+    )
+    assert ecs_routes._effective_approval_level(make_request(approval_level=1)) == 3
+    assert ecs_routes._effective_approval_level(make_request(approval_level=4)) == 4, \
+        "더 엄격하게 받겠다는 요청까지 깎으면 안 된다"
+
+
+def test_a_low_approval_level_cannot_skip_the_policy_gate_through_the_route(
+    app_client, monkeypatch
+):
+    """[보안 · 회귀] 위 단위 확인을 **라우트를 관통해** 다시 본다.
+
+    함수만 확인하면 라우트가 그 함수를 안 부르도록 바뀌어도 통과한다.
+    실제로 그 형태였다 — 레벨을 낮추면 `_fail_closed` 가 allow 를 주고,
+    라우트는 allow 면 로컬 폴백을 아예 안 불렀다.
+    """
+    from core import opa_client as opa_module
+
+    client, ecs_routes = app_client
+
+    class _OfflineAllow:
+        """OPA 가 없는데 `allow` 를 돌려주는 경우.
+
+        `OPAClient._fail_closed` 가 레벨 1~2 에서 실제로 이렇게 답한다.
+        여기서는 **레벨과 무관하게** 이 답을 강제한다 — 라우트가 결정값이
+        아니라 `opa_available` 로 폴백을 부르는지 그 자체를 보기 위해서다.
+        레벨 바닥(`_effective_approval_level`)이 있어서 실제로는 이 답이
+        안 나오지만, 두 방어선 중 하나만 살아 있어도 통과하는 테스트는
+        나머지 하나가 조용히 사라지는 것을 못 잡는다.
+        """
+        decision = "allow"
+        reason = "OPA 오프라인"
+        fix_suggestion = None
+        opa_available = False
+        required_approvers = 0
+
+    seen_levels: list[int] = []
+
+    async def _evaluate(**kwargs):
+        seen_levels.append(kwargs["level"])
+        return _OfflineAllow()
+
+    monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
+
+    started: list = []
+
+    async def _fake_deploy(request, record=None):
+        started.append(request)
+        return record
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+
+    body = {
+        "project_id": "p",
+        "cluster": "recoder-cluster",
+        "service": "recoder-app",
+        "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1",
+        "region": "us-east-1",
+        "run_security_scan": False,
+        "generate_sbom": False,
+        "environment": "production",
+        "branch": "feat/evil",
+    }
+
+    for level in (1, 2, 3, 4):
+        ecs_routes._deploy_records.clear()
+        resp = client.post("/api/ecs/deploy", json={**body, "approval_level": level})
+        assert resp.status_code == 403, (
+            f"승인 레벨 {level} 로 스캔·SBOM 없는 프로덕션 배포가 통과했다: "
+            f"{resp.status_code} {resp.text}"
+        )
+    assert not started, "게이트를 못 넘었는데 파이프라인이 시작됐다"
+    assert min(seen_levels) >= ecs_routes.ECS_DEPLOY_MIN_APPROVAL_LEVEL, (
+        f"요청이 보낸 낮은 승인 레벨이 그대로 정책 평가에 넘어갔다: {seen_levels}"
+    )
+
+    # 반대 방향 — 정상 요청은 레벨 1 로 보내도 통과해야 한다.
+    ecs_routes._deploy_records.clear()
+    ok = client.post("/api/ecs/deploy", json={
+        **body, "approval_level": 1, "run_security_scan": True,
+        "generate_sbom": True, "environment": "", "branch": "",
+    })
+    assert ok.status_code == 202, (
+        f"OPA 없이도 통과해야 하는 정상 배포까지 막았다: {ok.status_code} {ok.text}"
+    )
+
+
+def test_the_local_gate_is_not_looser_than_the_real_rego_policy():
+    """[불변식] 폴백은 대신 판단하는 것이지 **더 봐주는 것**이 아니다.
+
+    실제 Rego 프리셋(`PROD_MAIN_BRANCH_ONLY`)은 `branch != "main"` 이면
+    거부한다. 로컬 폴백만 `master` 를 열어 두면, OPA 가 떠 있느냐에 따라
+    같은 배포의 결과가 뒤집힌다 — 그건 정책이 아니라 우연이다.
+
+    허용 목록을 여기 박아 두지 않고 Rego 원문에서 뽑아 비교한다. 박아 두면
+    한쪽만 바뀔 때 이 테스트가 같이 낡아서 아무것도 못 잡는다.
+    """
+    import re
+
+    from core.opa_gate import production_branches
+
+    rego_path = (Path(__file__).resolve().parents[2] / "control_plane" / "services"
+                 / "policy_service.py")
+    if not rego_path.is_file():
+        pytest.skip("control_plane 이 없는 배포본이다")
+    rego = rego_path.read_text(encoding="utf-8")
+    snippet = rego.split("PolicyPresetKey.PROD_MAIN_BRANCH_ONLY", 1)[1].split('"""', 2)[1]
+    allowed = set(re.findall(r'input\.context\.branch\s*!=\s*"([^"]+)"', snippet))
+    assert allowed, f"Rego 프리셋에서 허용 브랜치를 못 읽었다: {snippet!r}"
+
+    default = production_branches()
+    # 위쪽 경계 — 폴백이 Rego 보다 느슨하면 OPA 가용성에 따라 결과가 뒤집힌다.
+    assert set(default) <= allowed, (
+        f"로컬 폴백이 Rego 보다 느슨하다. 폴백={default} Rego={sorted(allowed)}"
+    )
+    # 아래쪽 경계 — 이게 없으면 목록을 비워 **모든 프로덕션 배포를 막아도**
+    # 위 단언은 그대로 통과한다. 과잉 차단도 규칙이 깨진 것이다.
+    assert set(default) == allowed, (
+        f"폴백이 Rego 보다 좁다 — OPA 가 켜지면 통과할 배포를 지금 막고 있다: "
+        f"폴백={default} Rego={sorted(allowed)}"
+    )
+
+
+def test_a_master_default_repository_has_a_way_out(monkeypatch):
+    """[사용성] 기본 브랜치가 `master` 인 팀이 제품 안에서 막히면 안 된다.
+
+    OPA 를 띄우는 곳이 리포에 없으므로 이 폴백이 **기본 경로**다. `main`
+    하나만 허용하면 `master` 저장소는 프로덕션 배포를 아예 못 하는데,
+    "main 으로 머지하세요"는 그 팀에게 실행 불가능한 안내다.
+
+    조건을 넓히는 손잡이는 **요청 본문이 아니라 서버 설정**이어야 한다 —
+    호출자가 게이트 조건을 고를 수 있으면 그건 게이트가 아니다.
+    """
+    from core.api.routes import ecs as ecs_routes
+    from core.opa_gate import ENV_PRODUCTION_BRANCHES
+
+    def judge(branch):
+        return ecs_routes._local_policy_fallback(
+            ECSDeployRecord(),
+            make_request(environment="production", branch=branch,
+                         generate_sbom=True, run_security_scan=True),
+        )
+
+    monkeypatch.delenv(ENV_PRODUCTION_BRANCHES, raising=False)
+    denied = judge("master")
+    assert denied.decision != "allow"
+    assert ENV_PRODUCTION_BRANCHES in (denied.fix_suggestion or ""), (
+        f"막기만 하고 빠져나갈 방법을 안 알려준다: {denied.fix_suggestion}"
+    )
+
+    monkeypatch.setenv(ENV_PRODUCTION_BRANCHES, "main,master")
+    assert judge("master").decision == "allow"
+    assert judge("feat/x").decision != "allow", "넓히랬더니 통째로 열렸다"
+
+    # 빈 값으로 설정해 전부 막아 버리는 실수는 기본값으로 되돌린다.
+    monkeypatch.setenv(ENV_PRODUCTION_BRANCHES, "  ,  ")
+    assert judge("main").decision == "allow"
+
+
+def test_a_missing_workspace_is_recorded_not_swallowed(tmp_path):
+    """[회귀] 못 돌린 검사는 **기록에 남아야** 한다.
+
+    작업 폴더가 없으면 시크릿·Dockerfile 검사를 할 수 없다(이미지만 다시
+    올리는 경우). 예전에는 로그만 남기고 조용히 넘어갔다 — 사이드바는
+    로그가 아니라 `provisioned` 를 읽으므로, 사용자에게는 "보안 검사 켜고
+    배포 성공"으로만 보였다.
+    """
+    rec = ECSDeployRecord()
+    out = asyncio.run(
+        ECSAgent()._step_scan_sources(make_request(workspace_path=None), rec)
+    )
+    assert out.provisioned.get("scan_warning"), (
+        "소스 검사를 건너뛰었는데 기록에 아무 말이 없다"
+    )
+    assert "시크릿" in out.provisioned["scan_warning"]
+
+
+def test_a_missing_dockerfile_is_recorded_too(tmp_path, monkeypatch):
+    """[회귀] Dockerfile 이 없으면 hadolint 는 돌 수 없다 — 그것도 남겨야 한다.
+
+    작업 폴더는 있는데 Dockerfile 만 없는 경우가 실제로 흔하다(경로를 다르게
+    쓰거나 하위 폴더에 둔 경우). 조용히 넘어가면 "Dockerfile 검사 통과"로
+    보인다.
+    """
+    from core.schemas import SecurityScanResult
+
+    async def _scan_all(**_kwargs):
+        return SecurityScanResult(image=None, findings=[], tool_errors=[])
+
+    monkeypatch.setattr(
+        "core.agents.ecs_agent.security_scanner.scan_all", _scan_all
+    )
+
+    rec = ECSDeployRecord()
+    out = asyncio.run(
+        ECSAgent()._step_scan_sources(
+            make_request(workspace_path=str(tmp_path)), rec
+        )
+    )
+    assert "Dockerfile" in (out.provisioned.get("scan_warning") or ""), (
+        f"Dockerfile 이 없는데 아무 말이 없다: {out.provisioned}"
+    )
+
+
+def test_two_different_scan_gaps_do_not_erase_each_other():
+    """[회귀] 뒤에 생긴 경고가 앞의 경고를 덮어쓰면 빠진 검사 하나가 사라진다."""
+    from core.schemas import SecurityScanResult
+
+    agent = ECSAgent()
+    rec = ECSDeployRecord()
+    agent._add_scan_gaps(rec, ["작업 폴더 없음 — 시크릿·Dockerfile 검사 불가"])
+    rec.scan_result = SecurityScanResult(
+        image="img:1", tool_errors=["trivy 미설치"], findings=[]
+    )
+    agent._record_scan_gaps(rec)
+    warning = rec.provisioned["scan_warning"]
+    assert "시크릿" in warning and "trivy" in warning, (
+        f"경고 하나가 사라졌다: {warning}"
+    )
+
+
+def test_the_same_scan_gap_is_not_reported_twice():
+    """[회귀] 같은 말을 두 번 하면 사용자는 새 문제가 생긴 줄 안다.
+
+    빌드 전·후로 두 번 검사하는데, 두 번째의 `tool_errors` 는 첫 번째의
+    **상위 집합**이다(결과가 누적되고 `compute_pass()` 가 다시 계산된다).
+    문자열을 그냥 이어 붙이면, 스캐너가 하나도 안 깔린 **가장 흔한
+    상황**에서 같은 경고가 두 줄로 나온다.
+    """
+    from core.schemas import SecurityScanResult
+
+    agent = ECSAgent()
+    rec = ECSDeployRecord()
+
+    rec.scan_result = SecurityScanResult(
+        image=None, tool_errors=["hadolint 미설치", "gitleaks 미설치"], findings=[]
+    )
+    agent._record_scan_gaps(rec)
+
+    # 두 번째 호출 — 첫 번째 목록을 포함한 더 긴 목록
+    rec.scan_result = SecurityScanResult(
+        image="img:1",
+        tool_errors=["hadolint 미설치", "gitleaks 미설치", "trivy 미설치"],
+        findings=[],
+    )
+    agent._record_scan_gaps(rec)
+
+    warning = rec.provisioned["scan_warning"]
+    assert warning.count("hadolint 미설치") == 1, f"같은 경고가 중복됐다: {warning}"
+    assert warning.count("gitleaks 미설치") == 1, f"같은 경고가 중복됐다: {warning}"
+    assert "trivy 미설치" in warning, warning
+    assert warning.count("실행되지 않은 보안 검사") == 1, warning
+
+
+def test_the_policy_fallback_warning_survives_the_sidebar_truncation():
+    """[회귀] 확장은 `log_tail` 의 **끝 세 줄만** 보여준다.
+
+    "정책 엔진 없이 로컬 규칙으로 판단했다"는 사용자가 반드시 봐야 할
+    경고인데 `_WARNING_KEYS` 에 없으면 앞쪽 사실들 사이에 섞여 잘려 나간다.
+    경고를 남기는 코드와 경고를 뒤로 미는 목록이 따로 놀면, 남긴 사람은
+    남겼다고 믿고 사용자는 못 보는 상태가 된다.
+    """
+    from core.api.routes.deploy_ecs import to_status_response
+
+    rec = ECSDeployRecord(status=ECSDeployStatus.SUCCEEDED)
+    # 경고를 **맨 앞에** 넣는다. 실제로 그렇게 들어간다 — 정책 판단은
+    # 파이프라인이 시작되기 전이고, 클러스터·서브넷 같은 사실은 그 뒤에
+    # 쌓인다. 뒤에 넣고 확인하면 dict 순서 덕에 우연히 통과한다.
+    rec.provisioned["policy_warning"] = (
+        "정책 엔진(OPA)에 연결하지 못해 로컬 규칙으로 판단했습니다."
+    )
+    rec.provisioned.update({
+        "cluster": "recoder-cluster",
+        "service": "recoder-app",
+        "subnets": "subnet-1,subnet-2",
+        "log_group": "/ecs/recoder",
+        "task_definition": "arn:aws:ecs:us-east-1:1:task-definition/recoder:7",
+    })
+    tail = to_status_response(rec).log_tail
+    assert any("policy_warning" in line for line in tail[-3:]), (
+        f"경고가 확장이 보여주는 마지막 세 줄 밖으로 밀려났다: {tail}"
+    )
+
+
+def test_scan_gap_bookkeeping_does_not_destroy_the_saved_record(tmp_path, monkeypatch):
+    """[회귀] `provisioned` 에 list 를 넣으면 **기록이 통째로 사라진다.**
+
+    `provisioned` 는 `dict[str, str]` 이다. 파이단틱은 dict 안쪽에 in-place
+    로 넣는 값까지 검사하지 않으므로, list 를 넣어도 **쓸 때는 아무 일도
+    일어나지 않는다.** 대신 `_load_records()` 가 다시 읽을 때
+    ValidationError 가 나고 `except → continue` 가 그 기록을 버린다.
+
+    스캐너가 하나도 안 깔린 상태가 가장 흔하므로 거의 모든 배포가 이 값을
+    남긴다. 그 상태에서 코어를 재시작하면 진행 중이던 배포 기록이 사라지고,
+    비용 경고도 클러스터·서비스 이름도 함께 없어져 **떠 있는 Fargate 태스크를
+    제품 안에서 멈출 방법이 없어진다** — `_save_records` 가 막으려던 바로 그
+    상황이다.
+    """
+    from core.api.routes import ecs as ecs_routes
+    from core.api.routes.deploy_ecs import to_status_response
+
+    rec = ECSDeployRecord(
+        deployment_id="d1", cluster="c", service="s",
+        status=ECSDeployStatus.IN_PROGRESS,
+    )
+    ECSAgent()._add_scan_gaps(rec, ["trivy 미설치", "gitleaks 미설치"])
+
+    # ① `provisioned` 의 문자열 계약을 깨지 않는다
+    for key, value in rec.provisioned.items():
+        assert isinstance(value, str), (
+            f"provisioned[{key!r}] 가 문자열이 아니다: {value!r} — "
+            "재기동 시 이 기록이 통째로 버려진다"
+        )
+
+    # ② 저장 → 재기동 → 로드 왕복에서 살아남는다
+    monkeypatch.setenv("RECODER_ECS_STORE", str(tmp_path / "store.json"))
+    monkeypatch.setattr(ecs_routes, "_deploy_records", {"d1": rec})
+    ecs_routes._save_records()
+    loaded = ecs_routes._load_records()
+    assert "d1" in loaded, "재기동 후 배포 기록이 사라졌다 — 떠 있는 태스크를 못 멈춘다"
+    assert loaded["d1"].scan_gaps == ["trivy 미설치", "gitleaks 미설치"]
+
+    # ③ 사용자에게는 문구 하나만 보인다 (문구를 만든 재료는 안 보인다)
+    tail = to_status_response(rec).log_tail
+    assert not any(line.startswith("scan_gaps:") for line in tail), tail
+    assert any("scan_warning" in line for line in tail), tail
+
+
+def test_scans_off_is_actually_reachable_through_the_deploy_route():
+    """[메타] 위 테스트가 지키는 구멍이 **실제로 열려 있었는지** 확인한다.
+
+    `run_security_scan=False` 를 아무도 보낼 수 없다면 위 테스트는 아무것도
+    지키지 않는다. 코어 요청 모델이 그 값을 받고, 파이프라인이 그때 스캔
+    단계를 건너뛴다는 두 가지가 모두 사실이어야 의미가 있다.
+    """
+    import inspect
+
+    assert make_request(run_security_scan=False).run_security_scan is False
+
+    source = inspect.getsource(ECSAgent._deploy_pipeline)
+    assert source.count("if request.run_security_scan:") == 2, (
+        "파이프라인의 스캔 단계 두 개가 이 플래그로 갈리지 않는다 — "
+        "테스트가 지키려는 구멍이 여기가 아니게 됐다"
     )
 
 
@@ -3344,40 +3882,281 @@ def test_the_branch_is_derived_from_the_workspace_when_the_caller_omits_it(tmp_p
     확장 배포 화면에는 브랜치 입력칸이 아예 없고 사이드바는 빈 문자열을
     보낸다. 그래서 "프로덕션은 main 에서만" 규칙이 판단 재료를 못 받았다.
     """
-    import subprocess
-
-    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
+    from core import branch_source
 
     repo = tmp_path / "ws"
-    repo.mkdir()
-    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True)
-    run("git", "init", "-q", "-b", "feat/xyz")
-    run("git", "config", "user.email", "t@t")
-    run("git", "config", "user.name", "t")
-    (repo / "f.txt").write_text("x", encoding="utf-8")
-    run("git", "add", "-A")
-    run("git", "commit", "-qm", "init")
+    init_git_repo(repo, branch="feat/xyz")
 
-    core_request = to_core_request(
-        ExtensionEcsDeployRequest(workspace_path=str(repo), environment="production")
-    )
-    assert core_request.branch == "feat/xyz", (
-        f"작업 폴더에서 브랜치를 못 알아냈다: {core_request.branch!r}"
+    assert branch_source.resolve_branch(str(repo), "") == "feat/xyz", (
+        "작업 폴더에서 브랜치를 못 알아냈다"
     )
 
 
-def test_an_explicit_branch_wins_over_the_workspace(tmp_path):
-    """[부정 통제] 호출자가 준 값이 우선이어야 한다."""
+def test_an_explicit_branch_is_used_when_git_cannot_tell(tmp_path):
+    """[부정 통제] 관측할 수 없을 때는 호출자가 준 값을 쓴다.
+
+    git 저장소가 아닌 폴더나 워크스페이스 없는 CI 호출에서는 이것 말고
+    브랜치를 알 방법이 없다. 여기까지 막으면 아무도 못 쓴다.
+    """
+    from core import branch_source
     from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
 
+    assert branch_source.resolve_branch(str(tmp_path), "main") == "main"
+    assert branch_source.resolve_branch(None, "main") == "main"
     core_request = to_core_request(
         ExtensionEcsDeployRequest(workspace_path=str(tmp_path), branch="main")
     )
     assert core_request.branch == "main"
 
 
+def test_a_claimed_branch_cannot_override_the_real_one(tmp_path):
+    """[보안 · 회귀] 자기 신고가 증거를 이기면 규칙이 아니다.
+
+    작업 폴더는 `feat/evil` 인데 요청 본문에 `branch: main` 한 줄만 넣으면
+    "프로덕션은 main 에서만" 규칙이 그대로 통과했다. 승인 레벨을 본문에서
+    못 내리게 막아 놓고 브랜치는 자기 신고를 믿으면, 같은 구멍이 이름만
+    바꿔 남아 있는 셈이다.
+    """
+    from core import branch_source
+    from core.api.routes import ecs as ecs_routes
+
+    repo = tmp_path / "ws"
+    init_git_repo(repo, branch="feat/evil")
+
+    resolved = branch_source.resolve_branch(str(repo), "main")
+    assert resolved == "feat/evil", (
+        f"요청이 신고한 브랜치가 작업 폴더의 실제 브랜치를 덮어썼다: {resolved!r}"
+    )
+
+    result = ecs_routes._local_policy_fallback(
+        ECSDeployRecord(),
+        make_request(environment="production", branch=resolved,
+                     generate_sbom=True, run_security_scan=True),
+    )
+    assert result is not None and result.decision != "allow", (
+        "branch 를 main 이라고 신고한 것만으로 프로덕션 배포가 통과했다"
+    )
+
+
+@pytest.mark.parametrize("env_name", ["production", "Production", "PRODUCTION"])
+def test_the_production_rule_is_not_defeated_by_capitalisation(env_name):
+    """[회귀] 환경 이름 대소문자 하나로 게이트가 통째로 사라지면 안 된다."""
+    from core.api.routes import ecs as ecs_routes
+
+    result = ecs_routes._local_policy_fallback(
+        ECSDeployRecord(),
+        make_request(environment=env_name, branch="feat/x",
+                     generate_sbom=True, run_security_scan=True),
+    )
+    assert result is not None and result.decision != "allow", (
+        f"environment={env_name!r} 로 프로덕션 규칙을 우회했다"
+    )
+
+
+@pytest.mark.parametrize("env_name", ["Production", "PRODUCTION", " production "])
+def test_the_environment_is_normalised_before_it_reaches_either_engine(
+    env_name, app_client, monkeypatch
+):
+    """[회귀] 로컬 폴백에서만 대소문자를 접으면 **OPA 가 켜졌을 때** 뚫린다.
+
+    실제 Rego 프리셋은 `input.context.environment == "production"` 을 정확히
+    비교한다. 폴백에서만 접으면, OPA 가 꺼져 있을 땐 막히고 켜져 있을 땐
+    통과하는 배포가 생긴다 — 같은 요청의 결과가 인프라 상태에 따라 뒤집힌다.
+    그래서 요청이 라우트에 들어오는 지점에서 값을 정규화한다.
+    """
+    from core import opa_client as opa_module
+
+    client, ecs_routes = app_client
+    seen: list[dict] = []
+
+    class _Allow:
+        decision, reason, fix_suggestion = "allow", "", None
+        opa_available, required_approvers = True, 0
+
+    async def _evaluate(**kwargs):
+        seen.append(kwargs["context"])
+        return _Allow()
+
+    async def _fake_deploy(request, record=None):
+        return record
+
+    monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+
+    resp = client.post("/api/ecs/deploy", json={
+        "project_id": "p", "cluster": "recoder-cluster", "service": "recoder-app",
+        "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1",
+        "region": "us-east-1", "environment": env_name, "branch": "main",
+    })
+    assert resp.status_code == 202, resp.text
+    assert seen and seen[0]["environment"] == "production", (
+        f"정책 엔진이 정규화되지 않은 환경 이름을 봤다: {seen[0]['environment']!r}"
+    )
+
+
+def test_the_core_route_also_refuses_a_claimed_branch(tmp_path, app_client, monkeypatch):
+    """[보안 · 회귀] 브랜치 검증이 **확장용 변환기에만** 있으면 한쪽 문이 열려 있다.
+
+    `/api/deploy/ecs`(확장)는 `to_core_request` 를 거치지만,
+    `/api/ecs/deploy`(디스코드 봇·직접 호출)는 `ECSDeployRequest` 를 그대로
+    받는다. 변환기에서만 브랜치를 검증하면 후자에서는 `{"branch": "main"}`
+    한 줄로 프로덕션 게이트가 그냥 통과한다 — 고친 문 옆에 안 고친 문이
+    나란히 있는 셈이다. 두 경로의 합류점인 이 라우트에서 확정해야 한다.
+    """
+    from core import opa_client as opa_module
+
+    client, ecs_routes = app_client
+    repo = tmp_path / "ws"
+    init_git_repo(repo, branch="feat/evil")
+
+    class _OfflineDeny:
+        decision, reason, fix_suggestion = "deny", "OPA 오프라인", None
+        opa_available, required_approvers = False, 0
+
+    async def _evaluate(**_kwargs):
+        return _OfflineDeny()
+
+    started: list = []
+
+    async def _fake_deploy(request, record=None):
+        started.append(request)
+        return record
+
+    monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+
+    resp = client.post("/api/ecs/deploy", json={
+        "project_id": "p", "cluster": "recoder-cluster", "service": "recoder-app",
+        "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1",
+        "region": "us-east-1", "workspace_path": str(repo),
+        "environment": "production", "branch": "main",
+        "run_security_scan": True, "generate_sbom": True,
+    })
+    assert resp.status_code == 403, (
+        f"작업 폴더는 feat/evil 인데 branch=main 신고만으로 통과했다: "
+        f"{resp.status_code} {resp.text}"
+    )
+    assert not started, "게이트를 못 넘었는데 파이프라인이 시작됐다"
+
+    # 거부도 기록에 남아야 한다. 성공 경로에서만 저장하면 코어를 다시 켰을 때
+    # "왜 막혔는지"가 통째로 사라지고, 사용자는 같은 벽에 다시 부딪힌다.
+    saved = ecs_routes._load_records()
+    assert saved, "정책 거부 기록이 저장되지 않았다"
+    denied = list(saved.values())[-1]
+    assert denied.status == ECSDeployStatus.FAILED
+    assert "정책" in (denied.error_message or ""), denied.error_message
+    # 사유만 남기고 **고치는 법**과 끝난 시각을 빼면 반쪽이다 — 사이드바는
+    # 그 둘을 읽고, 비면 "언제 왜 실패했는지 모르는" 카드가 된다.
+    assert denied.error_remedy, "왜 막혔는지만 있고 어떻게 풀지가 없다"
+    assert denied.completed_at is not None, "끝난 시각이 비어 있다"
+
+
+def test_an_untracked_subdirectory_still_cannot_launder_the_branch(tmp_path):
+    """[보안 · 회귀] 추적 여부로 "관측 실패"를 판정하면 **더 큰 구멍**이 된다.
+
+    `git rev-parse` 는 상위 폴더로 거슬러 올라가 가장 가까운 저장소를 찾는다.
+    그게 무관한 저장소일 수 있다는 이유로 "이 폴더가 추적되는가"(`git
+    ls-files`)를 조건으로 걸었더니, 정반대의 결과가 나왔다.
+
+      - 작업 폴더를 `.gitignore` 에 한 줄 넣거나 아직 커밋만 안 해도
+        "관측 실패"가 되고, 규칙이 **호출자의 신고를 믿는 쪽으로** 넘어간다.
+        즉 `.gitignore` 한 줄로 브랜치 검사를 통째로 우회할 수 있었다.
+      - `git ls-files` 는 인덱스를 갱신하면서 저장소의 `core.fsmonitor`
+        프로그램을 실행한다 — 남이 준 `.git` 이 섞인 폴더를 배포하면 임의
+        실행이 된다. `rev-parse` 는 그러지 않는다.
+
+    **모호하면 관측값 쪽으로 기운다.** 상위 저장소의 브랜치라도 그건 호출자가
+    고를 수 없는 값이라, 신고로 떨어지는 것보다 항상 안전하다.
+    """
+    from core import branch_source
+
+    repo = tmp_path / "repo"
+    init_git_repo(repo, branch="feat/evil")
+    (repo / ".gitignore").write_text("app/\n", encoding="utf-8")
+    app = repo / "app"
+    app.mkdir()
+    (app / "main.py").write_text("x", encoding="utf-8")
+
+    assert branch_source.resolve_branch(str(app), "main") == "feat/evil", (
+        "무시(.gitignore)되는 폴더라는 이유로 신고한 브랜치를 믿었다 — "
+        "gitignore 한 줄로 프로덕션 게이트가 열린다"
+    )
+
+    # 아직 커밋 전인 새 폴더도 마찬가지 — 관측값이 있으면 관측값을 쓴다.
+    fresh = repo / "brand_new"
+    fresh.mkdir()
+    (fresh / "main.py").write_text("x", encoding="utf-8")
+    assert branch_source.resolve_branch(str(fresh), "main") == "feat/evil"
+
+    # 모노레포의 추적되는 하위 폴더도 당연히 인정한다.
+    tracked = repo / "apps" / "api"
+    tracked.mkdir(parents=True)
+    (tracked / "main.py").write_text("x", encoding="utf-8")
+    assert branch_source.current_branch(str(tracked)) == "feat/evil"
+
+
+def test_the_branch_lookup_does_not_run_repository_supplied_programs(
+    tmp_path, monkeypatch
+):
+    """[보안] 배포 대상 폴더의 `.git/config` 가 **바깥 프로그램을 실행**하면 안 된다.
+
+    `core.fsmonitor` / `core.hooksPath` 는 저장소가 들고 다니는 설정이고,
+    `git ls-files` 나 `git commit` 같은 하위 명령이 그 프로그램을 실행한다.
+    남이 준 프로젝트 압축에는 `.git` 이 딸려 오는 일이 흔한데, 그 폴더를
+    배포하면 이 코드는 HTTP 핸들러 안에서 돈다.
+
+    지금 쓰는 `rev-parse` 는 그 설정을 실행하지 않지만, **나중에 하위 명령이
+    하나라도 늘면 즉시 실행 경로가 된다**(실제로 그런 갈래를 넣었다가
+    되돌렸다). 그래서 "어떤 git 호출이든 저장소 설정으로 바깥 프로그램을
+    실행하지 않는다"를 호출 규약으로 못 박는다.
+    """
+    from core import branch_source
+
+    repo = tmp_path / "repo"
+    init_git_repo(repo, branch="main")
+
+    calls: list[list[str]] = []
+    real = branch_source.subprocess.run
+
+    def _spy(argv, *args, **kwargs):
+        calls.append(list(argv))
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(branch_source.subprocess, "run", _spy)
+    assert branch_source.current_branch(str(repo)) == "main"
+
+    assert calls, "git 을 아예 부르지 않았다"
+    for argv in calls:
+        joined = " ".join(argv)
+        assert "core.fsmonitor=" in joined, (
+            f"저장소가 지정한 fsmonitor 프로그램이 실행될 수 있다: {joined}"
+        )
+        assert "core.hooksPath=" in joined, (
+            f"저장소가 지정한 훅이 실행될 수 있다: {joined}"
+        )
+
+    # 상속된 `GIT_DIR` / `GIT_WORK_TREE` 는 **cwd 를 무시하게 만든다.**
+    # 코어가 git 훅이나 래퍼에서 실행되면 실제로 그런 값이 들어온다.
+    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/somewhere/else")
+    leaked = [k for k in branch_source._git_env()
+              if k.startswith("GIT_")
+              and k not in ("GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS")]
+    assert not leaked, f"git 환경변수가 그대로 상속된다: {leaked}"
+    assert branch_source.current_branch(str(repo)) == "main", (
+        "상속된 GIT_DIR 때문에 엉뚱한 저장소를 봤다"
+    )
+
+
 def test_a_non_git_workspace_does_not_break_the_request(tmp_path):
-    """git 저장소가 아니어도 배포는 되어야 한다."""
+    """git 저장소가 아니어도 **요청 자체는** 만들어져야 한다.
+
+    빈 브랜치는 "제한 없음"이 아니라 "모름"이다. 여기서는 요청이 400 으로
+    터지지 않는 것만 본다 — 그 "모름"이 프로덕션에서 거부로 이어지는지는
+    `test_production_is_denied_when_the_branch_cannot_be_proven` 이 지킨다.
+    (예전에는 이 테스트만 있어서, 빈 브랜치가 통과로 이어지는 것을 오히려
+    정상으로 못 박고 있었다.)
+    """
     from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
 
     core_request = to_core_request(
@@ -3437,59 +4216,32 @@ def test_the_sbom_failure_reason_reaches_the_record():
     )
 
 
-def test_a_detached_head_is_not_treated_as_a_branch(tmp_path):
-    """[회귀] `git rev-parse --abbrev-ref HEAD` 는 분리된 HEAD 에서 "HEAD" 를 준다.
-
-    그걸 브랜치 이름으로 넘기면 "프로덕션은 main 에서만" 규칙이 존재하지
-    않는 브랜치를 근거로 판단한다.
-    """
-    import subprocess
-
-    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
-
-    repo = tmp_path / "ws"
-    repo.mkdir()
-    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True)
-    run("git", "init", "-q", "-b", "main")
-    run("git", "config", "user.email", "t@t")
-    run("git", "config", "user.name", "t")
-    (repo / "f.txt").write_text("x", encoding="utf-8")
-    run("git", "add", "-A")
-    run("git", "commit", "-qm", "init")
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                          capture_output=True, text=True).stdout.strip()
-    run("git", "checkout", "-q", head)   # 분리된 HEAD
-
-    core_request = to_core_request(
-        ExtensionEcsDeployRequest(workspace_path=str(repo))
-    )
-    assert core_request.branch == "", (
-        f"분리된 HEAD 를 브랜치로 넘겼다: {core_request.branch!r}"
-    )
-
-
 def test_the_branch_lookup_cannot_hang_the_request(monkeypatch, tmp_path):
     """git 이 멈추면 배포 요청 전체가 멈춘다 — 시간 제한이 있어야 한다.
 
-    `to_core_request` 는 HTTP 핸들러 안에서 동기로 돈다. 여기서 git 이
+    브랜치 조회는 HTTP 핸들러가 부르는 동기 호출이다. 여기서 git 이
     자격증명 프롬프트 같은 걸로 붙잡히면 요청이 영영 안 끝난다.
     """
-    from core.api.routes import deploy_ecs as routes
+    from core import branch_source
 
     seen: list[dict] = []
-    real = routes.subprocess.run
+    real = branch_source.subprocess.run
 
     def _spy(*args, **kwargs):
         seen.append(kwargs)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(routes.subprocess, "run", _spy)
-    routes.to_core_request(
-        routes.ExtensionEcsDeployRequest(workspace_path=str(tmp_path))
-    )
+    monkeypatch.setattr(branch_source.subprocess, "run", _spy)
+    branch_source.current_branch(str(tmp_path))
 
     assert seen, "git 을 아예 부르지 않았다"
-    assert seen[0].get("timeout"), "git 호출에 시간 제한이 없다"
+    assert all(call.get("timeout") for call in seen), (
+        f"시간 제한 없는 git 호출이 있다: {seen}"
+    )
+    # 자격증명 프롬프트로 멈추는 것도 같은 종류의 정지다.
+    assert all(
+        call.get("env", {}).get("GIT_TERMINAL_PROMPT") == "0" for call in seen
+    ), "git 이 자격증명 프롬프트를 띄울 수 있다 — 요청이 영영 안 끝난다"
 
 
 def test_the_sbom_mount_path_survives_windows():
