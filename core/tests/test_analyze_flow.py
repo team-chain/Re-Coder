@@ -457,3 +457,33 @@ def test_analyze_survives_malformed_importance_score(monkeypatch):
     event = asyncio.run(analyzer.analyze(req, session_id="s"))
     # 크래시 대신 기본값으로 떨어진다
     assert 0 <= event.importance_score <= 100
+
+
+def test_short_command_is_preserved_not_emptied(monkeypatch):
+    """[Codex P2] 'ls'·'pwd' 같은 짧은(5자 미만) 명령이 게이트에 비워지지 않는다.
+
+    run_gate 는 실제 것을 써서 짧은 입력을 비우는 동작을 재현하되, command 는
+    _scrub 경로라 보존돼야 한다. 보존 안 되면 new_terminal_command 트리거 사유가
+    통째로 사라진다.
+    """
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    seen: list[str] = []
+    monkeypatch.setattr(analyzer, "get_router", lambda: _router_capturing(seen))
+
+    req = AnalyzeRequest(
+        workspace_path="/tmp/p",
+        terminal_output="Traceback:\nValueError: this is long enough to survive the gate",
+        command="ls",
+    )
+    event = asyncio.run(analyzer.analyze(req, session_id="s"))
+
+    reason_types = [r.get("type") for r in event.trigger_reasons]
+    assert "new_terminal_command" in reason_types, (
+        f"짧은 명령 'ls' 가 게이트에 비워져 트리거 사유가 사라졌다: {event.trigger_reasons}"
+    )
+    matched = [r.get("matched") for r in event.trigger_reasons
+               if r.get("type") == "new_terminal_command"]
+    assert matched and "ls" in matched[0]
