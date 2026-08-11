@@ -221,11 +221,20 @@ async def _run_handler(command_type: str, payload: Dict[str, Any]) -> Dict[str, 
         except Exception as exc:
             return {"status": "error", "error": f"analyzer not available: {exc}"}
         try:
+            # 릴레이는 에러 본문을 `error_text` 로 따로 보낼 수 있는데,
+            # AnalyzeRequest 스키마엔 그 필드가 없어 조용히 버려졌다. 그러면
+            # analyzer 는 빈 문자열을 분석해 "에러 없음"을 성공으로 돌려준다.
+            # terminal_output 이 비어 있을 때만 error_text 를 그 자리에 넣는다.
+            terminal_output = payload.get("terminal_output", "") or payload.get("error_text", "")
             req = AnalyzeRequest(
                 workspace_path=payload.get("workspace_path", ""),
-                terminal_output=payload.get("terminal_output", ""),
+                terminal_output=terminal_output,
                 project_id=payload.get("project_id", ""),
-                error_text=payload.get("error_text", ""),
+                selected_text=payload.get("selected_text", ""),
+                command=payload.get("command", ""),
+                # analyzer 가 프롬프트·캐시 키에 쓰는 필드 — 빠뜨리면 클라우드
+                # 분석이 프로젝트 맥락을 잃어 진단 품질이 떨어진다.
+                project_files_summary=payload.get("project_files_summary", ""),
             )
             res = await analyzer_analyze(req, session_id=payload.get("session_id", ""))
             return {"status": "ok", "result": _safe_to_dict(res)}
