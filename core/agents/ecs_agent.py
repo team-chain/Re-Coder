@@ -396,6 +396,7 @@ class ECSAgent:
                 # 않는데, 예전에는 그때도 "생성됨"이라고 보고했다.
                 if record.rollback_proposal_id:
                     record.rollback_approval_level = 3  # 설계서 §Q3-A
+                    record.rollback_proposal_status = "pending"
                     record.error_message = (
                         "배포 Health Check 실패 — 롤백 제안을 만들었습니다 "
                         "(승인 Level 3 필요)"
@@ -1314,9 +1315,11 @@ class ECSAgent:
 
         이제 세 겹이다.
 
-        1) ECS 자체 서킷 브레이커(`ensure_service`, rollback=True) — 되돌아갈
-           버전이 있으면 ECS 가 그 버전을 되살린다.
-        2) 되살린 걸 **성공으로 착각하지 않기** (`ecs_rolled_back`).
+        1) ECS 자체 서킷 브레이커 — 실패 태스크의 무한 재시작을 멈춘다.
+           일반 ReCoder 배포에서는 자동 롤백을 끈다. 이전 버전 복귀는
+           사람이 승인한 `/api/deploy/ecs/rollback`만 할 수 있다.
+        2) 과거에 자동 롤백이 켜진 서비스가 되돌아간 경우에는 그것을
+           성공으로 착각하지 않는다 (`ecs_rolled_back`).
         3) 그러고도 아무것도 안 떠 있으면 여기서 태스크 수를 0 으로 내린다.
 
         판단 기준은 `previous_task_definition_arn` 이 아니라 **실제로 떠 있는

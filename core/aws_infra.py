@@ -929,6 +929,7 @@ def ensure_service(
     desired_count: int = 1,
     assign_public_ip: bool = True,
     circuit_breaker: bool = True,
+    circuit_breaker_rollback: bool = False,
     sleep: Callable[[float], None] = time.sleep,
 ) -> ServiceResult:
     """Fargate 서비스를 확보한다. 있으면 새 태스크 정의로 갱신한다.
@@ -942,9 +943,13 @@ def ensure_service(
     멈추게 하지는 못한다 — 기록에는 "자동 중단"이라 적히는데 AWS 에서는
     태스크가 계속 뜨고 요금이 계속 붙는 상태가 된다.
 
-    `rollback=True` 를 함께 켜므로, 되돌아갈 이전 버전이 있으면 ECS 가
-    스스로 그 버전으로 되돌린다. 첫 배포처럼 되돌아갈 곳이 없으면 배포를
-    FAILED 로 끝내고 태스크 재생성을 멈춘다.
+    기본값은 **자동 롤백을 끈다.** ECS가 이전 버전으로 즉시 되돌리면
+    Watchdog 이상 감지 → 사용자 승인이라는 제품 안전 규칙을 우회한다.
+    대신 실패 상태를 기록하고, 사용자가 `/api/deploy/ecs/rollback`을
+    명시적으로 승인할 때만 이전 Task Definition으로 복귀한다.
+
+    운영자가 별도로 자동 복구를 원할 때만 `circuit_breaker_rollback=True`를
+    넘긴다. 이 옵션은 일반 ReCoder 배포 경로에서는 사용하지 않는다.
     """
     subnets = [str(s) for s in subnet_ids]
     groups = [str(g) for g in security_group_ids]
@@ -962,7 +967,7 @@ def ensure_service(
     deployment_configuration = {
         "deploymentCircuitBreaker": {
             "enable": bool(circuit_breaker),
-            "rollback": bool(circuit_breaker),
+            "rollback": bool(circuit_breaker and circuit_breaker_rollback),
         },
         # 새 태스크가 뜬 뒤에 옛 태스크를 내린다(무중단). 갱신 중 잠깐
         # 태스크가 2개가 되지만 Fargate 는 초 단위 과금이라 몇 원 수준이다.

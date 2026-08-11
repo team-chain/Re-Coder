@@ -25,6 +25,18 @@ type Preflight = {
   reasons?: PreflightIssue[];
   warnings?: PreflightIssue[];
 };
+type EcsRollbackProposal = {
+  proposal_id: string;
+  deployment_id: string;
+  cluster: string;
+  service: string;
+  region: string;
+  reason: string;
+  previous_task_definition: string;
+  current_task_definition: string;
+  approval_level: number;
+  status: "pending" | "approving" | "completed" | "ignored" | "failed" | "superseded";
+};
 
 const input: React.CSSProperties = {
   width: "100%", background: "var(--vscode-input-background, #252526)", color: "var(--vscode-input-foreground, #ddd)",
@@ -98,6 +110,49 @@ const DeploymentBlockers: React.FC<{
   </div>
 );
 
+/** 기존 결정 카드 UI를 그대로 써서, 롤백도 제안 → 선택 → 실행 순서를 지킨다. */
+const EcsRollbackApprovalCard: React.FC<{
+  proposal: EcsRollbackProposal;
+  submitting: boolean;
+  onResolve: (approved: boolean) => void;
+}> = ({ proposal, submitting, onResolve }) => {
+  const [selected, setSelected] = useState<"rollback" | "ignore">();
+  useEffect(() => setSelected(undefined), [proposal.proposal_id]);
+  const target = proposal.previous_task_definition.split(":").pop() || proposal.previous_task_definition;
+  return (
+    <div style={{ marginBottom: 16, border: "1px solid rgba(241, 196, 15, .7)", borderRadius: 9, overflow: "hidden", background: "rgba(241, 196, 15, .07)" }}>
+      <div style={{ padding: "13px 15px", borderBottom: "1px solid rgba(241, 196, 15, .35)" }}>
+        <div style={{ fontSize: 14, fontWeight: 750, color: "var(--vscode-editorWarning-foreground, #f1c40f)" }}>⚠️ 이상 감지 · 이전 버전으로 롤백할까요?</div>
+        <div style={{ marginTop: 7, fontSize: 12, lineHeight: 1.5 }}>{proposal.reason}</div>
+        {proposal.status === "failed" && <div style={{ marginTop: 7, fontSize: 11, color: "var(--vscode-editorWarning-foreground, #f1c40f)" }}>이전 롤백 요청이 실패했습니다. AWS 자격증명 또는 ECS 상태를 고친 뒤 다시 승인할 수 있습니다.</div>}
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--vscode-descriptionForeground, #aaa)", lineHeight: 1.55 }}>
+          대상: <b>{proposal.cluster}/{proposal.service}</b> · {proposal.region}<br />
+          복귀 버전: <code>{target}</code> · 승인 레벨 {proposal.approval_level}
+        </div>
+      </div>
+      <div style={{ padding: 12 }}>
+        <DecisionOptionCards
+          radioName={`ecs-rollback-${proposal.proposal_id}`}
+          selectedKey={selected}
+          disabled={submitting}
+          onSelect={(key) => setSelected(key as "rollback" | "ignore")}
+          options={[
+            { key: "rollback", label: "↩ 이전 버전으로 롤백", summary: "이전 Task Definition으로 ECS 서비스를 갱신합니다.", detail: "승인 전에는 AWS 리소스를 변경하지 않습니다.", recommended: true },
+            { key: "ignore", label: "현재 버전 유지 · 무시", summary: "이번 제안을 닫고 ECS 서비스를 변경하지 않습니다.", detail: "나중에 원인을 고친 뒤 다시 배포할 수 있습니다." },
+          ]}
+        />
+        <button
+          disabled={!selected || submitting}
+          onClick={() => onResolve(selected === "rollback")}
+          style={{ ...button, marginTop: 12, opacity: !selected || submitting ? .55 : 1, background: selected === "rollback" ? "var(--vscode-editorWarning-foreground, #c58b00)" : button.background }}
+        >
+          {submitting ? "결정 처리 중…" : selected === "rollback" ? (proposal.status === "failed" ? "롤백 다시 승인 →" : "롤백 승인 →") : "무시하고 현재 버전 유지"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
 export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpenDocker }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [target, setTarget] = useState<Target>("decision");
@@ -110,6 +165,8 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const pendingEcsDeploymentRef = useRef<Record<string, unknown> | null>(null);
   const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
   const [awsReady, setAwsReady] = useState(false);
+  const [rollbackProposal, setRollbackProposal] = useState<EcsRollbackProposal | null>(null);
+  const [resolvingRollback, setResolvingRollback] = useState(false);
   const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: "ap-northeast-2", ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
   const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "ap-northeast-2", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512" });
 
@@ -159,6 +216,22 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       setMessage(`${result.message ?? "자동 수정을 적용했습니다."} ${result.applied_files?.length ? `변경 파일: ${result.applied_files.join(", ")}. ` : ""}이제 다시 검사해 주세요.`);
     }
     if (type === "workspace.deploy.remediationError") { setApplyingProposalId(null); setMessage((payload as { message?: string })?.message ?? "자동 수정 적용에 실패했습니다."); }
+    if (type === "workspace.deploy.ecs.statusResult") {
+      const status = payload as { rollback_proposal?: EcsRollbackProposal | null };
+      const next = status.rollback_proposal;
+      if (next?.status === "pending" || next?.status === "failed") setRollbackProposal(next);
+      else setRollbackProposal(null);
+    }
+    if (type === "workspace.deploy.ecs.rollbackResult") {
+      const result = payload as { message?: string; adr_path?: string };
+      setResolvingRollback(false);
+      setRollbackProposal(null);
+      setMessage(`${result.message ?? "롤백 결정을 기록했습니다."}${result.adr_path ? ` 기록: ${result.adr_path}` : ""}`);
+    }
+    if (type === "workspace.deploy.ecs.rollbackError") {
+      setResolvingRollback(false);
+      setMessage((payload as { message?: string })?.message ?? "롤백 처리에 실패했습니다.");
+    }
     if (type === "workspace.deploy.result") setMessage((payload as { message?: string })?.message ?? "배포 요청을 보냈습니다.");
     if (type === "aws.status") setAwsReady(Boolean((payload as { ready?: boolean })?.ready));
     if (type === "errorMessage") setMessage((payload as { message?: string })?.message ?? "요청 처리에 실패했습니다.");
@@ -166,8 +239,18 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
 
   useEffect(() => { runPreflight(); postMessage("aws.status"); }, [runPreflight, postMessage]);
   useEffect(() => {
-    if (target !== "ec2" && target !== "ecs") return;
-    const timer = window.setInterval(() => postMessage(target === "ec2" ? "workspace.deploy.ec2.status" : "workspace.deploy.ecs.status"), 4000);
+    // ECS 이상 감지는 사용자가 다른 배포 탭을 보고 있어도 카드로 보여야 한다.
+    // 실제 롤백은 이 폴링이 아니라 아래 승인 버튼으로만 호출된다.
+    const poll = () => postMessage("workspace.deploy.ecs.status", { reportProgress: target === "ecs" });
+    poll();
+    const timer = window.setInterval(poll, 4000);
+    return () => window.clearInterval(timer);
+  }, [target, postMessage]);
+  useEffect(() => {
+    // ECS 감시 폴링과 별개로 EC2 탭의 기존 상태 폴링을 유지한다.
+    if (target !== "ec2") return;
+    postMessage("workspace.deploy.ec2.status");
+    const timer = window.setInterval(() => postMessage("workspace.deploy.ec2.status"), 4000);
     return () => window.clearInterval(timer);
   }, [target, postMessage]);
 
@@ -206,12 +289,19 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       },
     });
   };
+  const resolveRollback = (approved: boolean) => {
+    if (!rollbackProposal || resolvingRollback) return;
+    setResolvingRollback(true);
+    setMessage(approved ? "이전 버전 롤백 승인을 전송했습니다…" : "롤백 제안을 무시하는 중…");
+    postMessage("workspace.deploy.ecs.rollback", { proposalId: rollbackProposal.proposal_id, approved });
+  };
   const update = <T extends Record<string, string>>(set: React.Dispatch<React.SetStateAction<T>>, key: keyof T, value: string) => set(cur => ({ ...cur, [key]: value }));
 
   return (
     <div style={{ fontFamily: "var(--vscode-font-family)", color: "var(--vscode-foreground, #ddd)" }}>
       <div style={{ fontSize: 18, fontWeight: 650, marginBottom: 5 }}>배포 센터</div>
       <div style={{ fontSize: 12, color: "var(--vscode-descriptionForeground, #999)", marginBottom: 16 }}>감지 결과를 확인하고, 배포 대상은 직접 선택하세요.</div>
+      {rollbackProposal && <EcsRollbackApprovalCard proposal={rollbackProposal} submitting={resolvingRollback} onResolve={resolveRollback} />}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 7, marginBottom: 18 }}>
         {([ ["decision", "배포 결정"], ["aws", awsReady ? "AWS 연결됨" : "AWS 연결"], ["docker", "Local"], ["actions", "Actions"], ["ec2", "EC2"], ["ecs", "ECS"] ] as [Target, string][]).map(([id, label]) => <button key={id} onClick={() => { setTarget(id); setMessage(""); }} style={{ padding: "9px 6px", borderRadius: 6, border: `1px solid ${target === id ? "var(--vscode-focusBorder, #3794ff)" : "var(--vscode-panel-border, #3f3f3f)"}`, background: target === id ? "var(--vscode-list-activeSelectionBackground, #094771)" : "var(--vscode-editorWidget-background, #252526)", color: id === "aws" && awsReady ? "var(--vscode-charts-green, #4ec9b0)" : "var(--vscode-foreground, #ddd)", cursor: "pointer", fontSize: 11, fontWeight: target === id ? 600 : 400 }}>{label}</button>)}
       </div>

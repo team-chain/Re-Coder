@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -32,10 +33,15 @@ from pydantic import BaseModel, Field
 # (isinstance 가 거짓이 된다). 협력 상대인 api/routes/ecs.py 가
 # `core.schemas` 를 쓰므로 여기서도 같은 쪽을 본다.
 from core.schemas import ECSDeployRecord, ECSDeployRequest, ECSDeployStatus
+from core import aws_infra
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["deploy-ecs"])
+
+
+class _StaleRollbackProposalError(RuntimeError):
+    """승인 대기 중 서비스가 다른 Task Definition으로 진행된 경우."""
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +98,43 @@ class EcsDeployStatusResponse(BaseModel):
     deployment_id: str = ""
     #: 사람이 읽을 단계 문구. `stage` 는 기계 토큰이므로 번역하지 않는다.
     stage_text: str = ""
+    #: Health Check 실패 뒤 사용자 승인을 기다리는 ECS 롤백 제안.
+    #: `None` 이면 승인할 롤백이 없다.
+    rollback_proposal: Optional["EcsRollbackProposal"] = None
+
+
+class EcsRollbackProposal(BaseModel):
+    """ECS 이상 감지 후 사람이 검토하는 롤백 제안."""
+
+    proposal_id: str
+    deployment_id: str
+    cluster: str
+    service: str
+    region: str
+    reason: str
+    previous_task_definition: str
+    current_task_definition: str = ""
+    approval_level: int = 3
+    status: str = "pending"
+
+
+class EcsRollbackRequest(BaseModel):
+    """`approved=True`일 때만 실제 ECS 서비스 갱신을 허용한다."""
+
+    proposal_id: str = Field(min_length=1)
+    approved: bool
+
+
+class EcsRollbackResponse(BaseModel):
+    status: str
+    message: str
+    deployment_id: str
+    proposal_id: str
+    adr: dict[str, str]
+
+
+# `EcsDeployStatusResponse` 가 아래 클래스의 forward reference 를 가진다.
+EcsDeployStatusResponse.model_rebuild()
 
 
 class EcsReadyResponse(BaseModel):
@@ -232,7 +275,37 @@ _WARNING_KEYS = (
     "rollback",           # 취소로 이전 태스크 정의로 되돌렸다
     "policy_warning",     # 정책 엔진 없이 로컬 규칙으로 판단했다
     "service_warning",    # 앱이 내려가 있다 (요금 문제가 아니라 가용성 문제)
+    "rollback_approval",  # 사용자가 승인/무시한 ECS 롤백 결과
 )
+
+
+def _rollback_proposal_from_record(
+    record: ECSDeployRecord,
+) -> Optional[EcsRollbackProposal]:
+    """에이전트가 남긴 최소 제안 정보를 UI 계약으로 완성한다.
+
+    에이전트는 AWS 파이프라인만 책임지고, 이 호환 라우트가 사람이 읽는
+    카드 데이터와 승인 API를 책임진다. 그래서 health 실패 경로가 UI를 직접
+    호출하지 않아도 상태 폴링만으로 카드가 복구된다.
+    """
+    if not record.rollback_proposal_id or not record.previous_task_definition_arn:
+        return None
+    return EcsRollbackProposal(
+        proposal_id=record.rollback_proposal_id,
+        deployment_id=record.deployment_id,
+        cluster=record.cluster or "",
+        service=record.service or "",
+        region=record.region or "",
+        reason=(
+            f"배포 후 헬스 체크가 {record.health_check_failures}회 실패했습니다."
+            if record.health_check_failures
+            else (record.error_message or "배포 상태 이상이 감지되었습니다.")
+        ),
+        previous_task_definition=record.previous_task_definition_arn,
+        current_task_definition=record.task_definition_arn or "",
+        approval_level=record.rollback_approval_level or 3,
+        status=record.rollback_proposal_status or "pending",
+    )
 
 
 def to_status_response(record: Optional[ECSDeployRecord]) -> EcsDeployStatusResponse:
@@ -272,7 +345,41 @@ def to_status_response(record: Optional[ECSDeployRecord]) -> EcsDeployStatusResp
         service_url=record.service_url or "",
         remedy=record.error_remedy or "",
         deployment_id=record.deployment_id,
+        rollback_proposal=_rollback_proposal_from_record(record),
     )
+
+
+def _find_rollback_record(proposal_id: str) -> ECSDeployRecord:
+    """제안 ID는 배포 기록에만 귀속된다. 다른 배포에 적용할 수 없다."""
+    from api.routes import ecs as ecs_routes
+
+    for record in ecs_routes._deploy_records.values():
+        if record.rollback_proposal_id == proposal_id:
+            return record
+    raise HTTPException(status_code=404, detail="롤백 제안을 찾을 수 없습니다. 다시 상태를 확인하세요.")
+
+
+def _rollback_adr(record: ECSDeployRecord, *, approved: bool, result: str) -> dict[str, str]:
+    """VS Code가 워크스페이스에 쓸 승인 감사 기록을 만든다."""
+    action = "승인" if approved else "무시"
+    outcome = "이전 태스크 정의로 복귀를 요청했습니다" if result == "completed" else "현재 버전을 유지합니다"
+    safe_id = record.deployment_id.replace("/", "-")[:12]
+    return {
+        "file": f"docs/adr/ADR-ecs-rollback-{safe_id}.md",
+        "content": "\n".join([
+            "# ECS 롤백 결정 기록",
+            "",
+            f"- 배포 ID: `{record.deployment_id}`",
+            f"- 대상: `{record.cluster}/{record.service}` ({record.region})",
+            f"- 이상: {record.error_message or '배포 후 헬스 체크 실패'}",
+            f"- 결정: 사용자 {action}",
+            f"- 결과: {outcome}",
+            f"- 이전 Task Definition: `{record.previous_task_definition_arn}`",
+            "",
+            "이 기록은 이상 감지 후 자동 롤백하지 않고 사용자 승인을 받은 결과입니다.",
+            "",
+        ]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +437,149 @@ async def deploy_ecs_status() -> EcsDeployStatusResponse:
     if not records:
         return EcsDeployStatusResponse()
     latest = max(records, key=lambda r: r.started_at)
-    return to_status_response(latest)
+    response = to_status_response(latest)
+    # 진행 상태는 최신 배포 하나를 보여 주되, 사용자의 결정을 기다리는
+    # 롤백 제안은 다른 서비스의 최신 기록 때문에 사라지면 안 된다.
+    # pending과 재시도 가능한 failed만 카드에 노출한다.
+    actionable = [
+        record for record in records
+        if (record.rollback_proposal_status or "pending") in {"pending", "failed"}
+        and record.rollback_proposal_id
+        and record.previous_task_definition_arn
+    ]
+    if actionable:
+        newest_proposal_record = max(actionable, key=lambda r: r.started_at)
+        response.rollback_proposal = _rollback_proposal_from_record(newest_proposal_record)
+    return response
+
+
+@router.post("/api/deploy/ecs/rollback", response_model=EcsRollbackResponse)
+async def resolve_ecs_rollback(body: EcsRollbackRequest) -> EcsRollbackResponse:
+    """ECS 롤백 제안을 사용자가 승인하거나 무시한다.
+
+    이 엔드포인트는 제안 생성과 실제 AWS 변경을 의도적으로 분리한다.
+    `approved=False` 는 감사 기록만 남기며 AWS API를 전혀 호출하지 않는다.
+    `approved=True` 한 경우에만 이전 Task Definition으로 UpdateService를
+    요청한다. 따라서 감지·표시만으로 자동 롤백되는 경로는 존재하지 않는다.
+    """
+    from api.routes import ecs as ecs_routes
+
+    record = _find_rollback_record(body.proposal_id)
+    proposal_status = record.rollback_proposal_status or "pending"
+    # 일시적인 AWS 오류로 실패한 제안은 같은 사용자가 다시 승인해 재시도할
+    # 수 있다. 완료·무시·새 배포로 대체된 제안은 절대 되살리지 않는다.
+    if proposal_status not in {"pending", "failed"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "이미 처리 중이거나 처리한 롤백 제안입니다. "
+                f"현재 상태: {proposal_status}"
+            ),
+        )
+    if not record.previous_task_definition_arn:
+        raise HTTPException(status_code=409, detail="되돌릴 이전 Task Definition 정보가 없습니다.")
+    if not record.cluster or not record.service or not record.region:
+        raise HTTPException(status_code=409, detail="롤백 대상 ECS 리소스 정보가 불완전합니다.")
+
+    # 무시는 ECS 호출 없이 기록만 남긴다. 이 분기가 승인 전 자동 실행을
+    # 구조적으로 막는 안전장치다.
+    if not body.approved:
+        record.rollback_proposal_status = "ignored"
+        record.rollback_completed_at = datetime.now(timezone.utc)
+        record.provisioned["rollback_approval"] = (
+            "사용자가 롤백 제안을 무시했습니다. ECS 서비스는 변경하지 않았습니다."
+        )
+        ecs_routes._save_records()
+        return EcsRollbackResponse(
+            status="ignored",
+            message="롤백 제안을 무시했습니다. 현재 ECS 서비스는 변경하지 않았습니다.",
+            deployment_id=record.deployment_id,
+            proposal_id=body.proposal_id,
+            adr=_rollback_adr(record, approved=False, result="ignored"),
+        )
+
+    # await 전에는 이벤트 루프가 양보되지 않으므로, 상태를 먼저 바꿔 두면
+    # 두 웹뷰에서 동시에 승인해도 UpdateService는 한 번만 호출된다.
+    record.rollback_proposal_status = "approving"
+    ecs_routes._save_records()
+
+    def _apply() -> str:
+        import boto3
+
+        ecs = boto3.session.Session(region_name=record.region).client("ecs")
+        current = ecs.describe_services(
+            cluster=record.cluster or "", services=[record.service or ""],
+        ).get("services", [])
+        current_task_definition = (
+            str(current[0].get("taskDefinition") or "") if current else ""
+        )
+        # 제안을 낸 실패 배포의 Task Definition이 아직 PRIMARY일 때만
+        # 되돌린다. 새 배포나 콘솔 수동 변경이 있었다면 오래된 제안은
+        # 더 위험하므로 사용자 승인이라도 실행하지 않는다.
+        if not record.task_definition_arn or current_task_definition != record.task_definition_arn:
+            raise _StaleRollbackProposalError(
+                "서비스가 롤백 제안 이후 다른 Task Definition으로 변경되었습니다."
+            )
+        return aws_infra.revert_service_task_definition(
+            ecs,
+            cluster=record.cluster or "",
+            service=record.service or "",
+            task_definition=record.previous_task_definition_arn or "",
+        )
+
+    try:
+        # 새 배포는 예약(PENDING)되는 즉시 여기서 보인다. 예약된 배포가
+        # 있으면 그 배포가 서비스를 갱신하기 전에 오래된 롤백을 막는다.
+        # 반대로 이 잠금을 먼저 잡은 승인 중에는 새 배포의 AWS 갱신이
+        # 대기하므로 describe와 UpdateService 사이의 TOCTOU가 사라진다.
+        async with ecs_routes.service_operation_lock(record.cluster, record.service):
+            active = ecs_routes._active_deployment(record.cluster, record.service)
+            if active is not None and active.deployment_id != record.deployment_id:
+                raise _StaleRollbackProposalError(
+                    "새 배포가 이미 시작되어 기존 롤백 제안을 실행하지 않습니다."
+                )
+            result = await asyncio.to_thread(_apply)
+    except _StaleRollbackProposalError as exc:
+        record.rollback_proposal_status = "superseded"
+        record.rollback_completed_at = datetime.now(timezone.utc)
+        record.provisioned["rollback_approval"] = f"오래된 제안을 차단했습니다: {exc}"
+        ecs_routes._save_records()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - AWS 오류를 재시도 가능한 제안으로 보존
+        record.rollback_proposal_status = "failed"
+        record.provisioned["rollback_approval"] = f"사용자 승인 후 롤백 호출 실패: {exc}"
+        ecs_routes._save_records()
+        raise HTTPException(
+            status_code=502,
+            detail="이전 버전으로 되돌리지 못했습니다. AWS 권한과 ECS 상태를 확인하세요.",
+        ) from exc
+
+    # aws_infra 는 취소 경로와 호환되도록 실패를 문장으로 돌려준다. 그 문장을
+    # 성공으로 기록하지 않아야 UI가 거짓 완료를 표시하지 않는다.
+    if result.startswith("취소했지만"):
+        record.rollback_proposal_status = "failed"
+        record.provisioned["rollback_approval"] = f"사용자 승인 후 롤백 실패: {result}"
+        ecs_routes._save_records()
+        raise HTTPException(status_code=502, detail=result)
+
+    record.rollback_proposal_status = "completed"
+    record.rollback_completed_at = datetime.now(timezone.utc)
+    record.status = ECSDeployStatus.ROLLED_BACK
+    record.error_message = "사용자 승인으로 이전 버전 롤백을 요청했습니다."
+    record.error_remedy = "ECS 서비스 안정화 상태와 CloudWatch 로그를 확인하세요."
+    record.provisioned["rollback_approval"] = result
+    ecs_routes._save_records()
+    logger.info(
+        "ECS rollback approved: deployment=%s proposal=%s target=%s/%s",
+        record.deployment_id, body.proposal_id, record.cluster, record.service,
+    )
+    return EcsRollbackResponse(
+        status="completed",
+        message="승인한 롤백을 요청했습니다. ECS 서비스가 이전 Task Definition으로 전환 중입니다.",
+        deployment_id=record.deployment_id,
+        proposal_id=body.proposal_id,
+        adr=_rollback_adr(record, approved=True, result="completed"),
+    )
 
 
 @router.get("/api/deploy/ecs/ready", response_model=EcsReadyResponse)

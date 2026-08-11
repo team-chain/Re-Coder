@@ -146,6 +146,7 @@ def app_client(monkeypatch, tmp_path):
     # 기록을 테스트가 덮어쓰는 건 물론이고, 남의 기록 때문에 결과가 달라진다.
     monkeypatch.setenv("RECODER_ECS_STORE", str(tmp_path / "ecs_deployments.json"))
     ecs_routes._deploy_records.clear()
+    ecs_routes._service_operation_locks.clear()
 
     app = FastAPI()
     app.include_router(ecs_routes.router)
@@ -1483,20 +1484,20 @@ def _assert_percentages_are_explicit(kwargs: dict) -> None:
     )
 
 
-def test_a_new_service_enables_the_ecs_circuit_breaker():
-    """[회귀] ECS 자체 브레이커가 꺼져 있으면 죽는 태스크가 무한 재생성된다."""
+def test_a_new_service_enables_the_ecs_circuit_breaker_without_auto_rollback():
+    """[D17] 실패 반복은 멈추되, 이전 버전 복귀는 사람 승인을 기다린다."""
     ecs = RecordingEcs()
     aws_infra.ensure_service(
         ecs, cluster="c", service="s", task_definition="td:1",
         subnet_ids=["subnet-1"], security_group_ids=["sg-1"],
     )
     assert ecs.created, "서비스를 만들지 않았다"
-    assert _breaker_config(ecs.created[0]) == {"enable": True, "rollback": True}
+    assert _breaker_config(ecs.created[0]) == {"enable": True, "rollback": False}
     _assert_percentages_are_explicit(ecs.created[0])
 
 
-def test_an_updated_service_enables_it_too():
-    """갱신 경로만 빠지면 두 번째 배포부터 보호가 사라진다."""
+def test_an_updated_service_keeps_auto_rollback_disabled_too():
+    """갱신 경로도 카드 승인 없이 이전 리비전으로 돌아가면 안 된다."""
     ecs = RecordingEcs()
     ecs.describe_services = lambda **_: {
         "services": [{"status": "ACTIVE", "serviceName": "s"}]
@@ -1506,7 +1507,7 @@ def test_an_updated_service_enables_it_too():
         subnet_ids=["subnet-1"], security_group_ids=["sg-1"],
     )
     assert ecs.updated, "서비스를 갱신하지 않았다"
-    assert _breaker_config(ecs.updated[0]) == {"enable": True, "rollback": True}
+    assert _breaker_config(ecs.updated[0]) == {"enable": True, "rollback": False}
     _assert_percentages_are_explicit(ecs.updated[0])
 
 
@@ -4779,3 +4780,249 @@ def test_a_real_default_route_is_accepted():
     assert aws_infra._route_table_has_igw(_routes(
         {"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-123"},
     )) is True
+
+
+# ===========================================================================
+# ECS 롤백 제안 → 사람 승인 — 자동 실행 금지
+# ===========================================================================
+
+
+def _pending_ecs_rollback_record():
+    """승인을 기다리는 health-failure 기록 하나를 만든다."""
+    record = ECSDeployRecord(
+        deployment_id="rollback-deployment",
+        cluster="recoder-cluster",
+        service="recoder-app",
+        region="ap-northeast-2",
+        status=ECSDeployStatus.FAILED,
+        task_definition_arn="arn:aws:ecs:ap-northeast-2:123:task-definition/app:4",
+        previous_task_definition_arn="arn:aws:ecs:ap-northeast-2:123:task-definition/app:3",
+        rollback_proposal_id="rollback-deployment",
+        rollback_approval_level=3,
+        rollback_proposal_status="pending",
+        health_check_failures=3,
+        error_message="배포 Health Check 실패 — 롤백 제안을 만들었습니다",
+    )
+    return record
+
+
+def test_ecs_rollback_status_exposes_a_pending_proposal_without_aws_call(app_client, monkeypatch):
+    """[D17] Watchdog 감지/상태 조회만으로는 절대 롤백하지 않는다."""
+    from api.routes import deploy_ecs
+
+    client, ecs_routes = app_client
+    record = _pending_ecs_rollback_record()
+    ecs_routes._deploy_records[record.deployment_id] = record
+    called = []
+    monkeypatch.setattr(
+        deploy_ecs.aws_infra,
+        "revert_service_task_definition",
+        lambda *_args, **_kwargs: called.append(True),
+    )
+
+    response = client.get("/api/deploy/ecs/status")
+    assert response.status_code == 200, response.text
+    proposal = response.json()["rollback_proposal"]
+    assert proposal["proposal_id"] == record.rollback_proposal_id
+    assert proposal["status"] == "pending"
+    assert proposal["previous_task_definition"] == record.previous_task_definition_arn
+    assert called == [], "상태 조회가 ECS UpdateService를 호출하면 자동 롤백이다"
+
+
+def test_ecs_status_keeps_an_actionable_older_service_rollback_proposal(app_client):
+    """[P2] 다른 서비스의 최신 기록이 기존 승인 카드를 지우면 안 된다."""
+    client, ecs_routes = app_client
+    pending = _pending_ecs_rollback_record()
+    latest = ECSDeployRecord(
+        deployment_id="other-service-latest",
+        cluster="other-cluster",
+        service="other-service",
+        region="ap-northeast-2",
+        status=ECSDeployStatus.FAILED,
+        started_at=pending.started_at + timedelta(seconds=1),
+    )
+    ecs_routes._deploy_records[pending.deployment_id] = pending
+    ecs_routes._deploy_records[latest.deployment_id] = latest
+
+    response = client.get("/api/deploy/ecs/status")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deployment_id"] == latest.deployment_id
+    assert body["rollback_proposal"]["proposal_id"] == pending.rollback_proposal_id
+
+
+def test_ignoring_ecs_rollback_never_calls_aws(app_client, monkeypatch):
+    """[D17] 무시 버튼은 ECS를 건드리지 않고 감사 기록만 남긴다."""
+    from api.routes import deploy_ecs
+
+    client, ecs_routes = app_client
+    record = _pending_ecs_rollback_record()
+    ecs_routes._deploy_records[record.deployment_id] = record
+    called = []
+    monkeypatch.setattr(
+        deploy_ecs.aws_infra,
+        "revert_service_task_definition",
+        lambda *_args, **_kwargs: called.append(True),
+    )
+
+    response = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": False},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "ignored"
+    assert called == []
+    assert record.rollback_proposal_status == "ignored"
+    assert "변경하지 않았습니다" in record.provisioned["rollback_approval"]
+
+
+def test_approved_ecs_rollback_updates_the_previous_task_definition(app_client, monkeypatch):
+    """[D17] 명시적 승인 한 번이 있어야만 이전 Task Definition으로 되돌린다."""
+    import boto3
+    from api.routes import deploy_ecs
+
+    client, ecs_routes = app_client
+    record = _pending_ecs_rollback_record()
+    ecs_routes._deploy_records[record.deployment_id] = record
+    calls = []
+
+    class _Session:
+        def __init__(self, *, region_name):
+            assert region_name == "ap-northeast-2"
+
+        def client(self, name):
+            assert name == "ecs"
+            return self
+
+        def describe_services(self, **_kwargs):
+            return {"services": [{"taskDefinition": record.task_definition_arn}]}
+
+    def _revert(_ecs, *, cluster, service, task_definition):
+        calls.append((cluster, service, task_definition))
+        return "이전 태스크 정의로 되돌렸습니다"
+
+    monkeypatch.setattr(boto3.session, "Session", _Session)
+    monkeypatch.setattr(deploy_ecs.aws_infra, "revert_service_task_definition", _revert)
+
+    response = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": True},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "completed"
+    assert calls == [("recoder-cluster", "recoder-app", record.previous_task_definition_arn)]
+    assert record.rollback_proposal_status == "completed"
+    assert record.status == ECSDeployStatus.ROLLED_BACK
+    assert "사용자 승인" in response.json()["adr"]["content"]
+
+
+def test_an_old_ecs_rollback_proposal_cannot_overwrite_a_newer_deployment(app_client, monkeypatch):
+    """[P1] 서비스가 새 리비전으로 진행됐으면 오래된 승인은 차단한다."""
+    import boto3
+    from api.routes import deploy_ecs
+
+    client, ecs_routes = app_client
+    record = _pending_ecs_rollback_record()
+    ecs_routes._deploy_records[record.deployment_id] = record
+    calls = []
+
+    class _Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        def client(self, _name):
+            return self
+
+        def describe_services(self, **_kwargs):
+            return {"services": [{"taskDefinition": "arn:aws:ecs:ap-northeast-2:123:task-definition/app:5"}]}
+
+    monkeypatch.setattr(boto3.session, "Session", _Session)
+    monkeypatch.setattr(
+        deploy_ecs.aws_infra,
+        "revert_service_task_definition",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    response = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": True},
+    )
+    assert response.status_code == 409, response.text
+    assert calls == [], "오래된 제안이 최신 배포를 이전 리비전으로 덮어썼다"
+    assert record.rollback_proposal_status == "superseded"
+
+
+def test_a_reserved_new_ecs_deployment_blocks_an_old_rollback_approval(app_client, monkeypatch):
+    """[P1] 새 배포가 AWS 갱신 대기 중이어도 오래된 롤백은 먼저 실행 못 한다."""
+    from api.routes import deploy_ecs
+
+    client, ecs_routes = app_client
+    record = _pending_ecs_rollback_record()
+    newer = ECSDeployRecord(
+        deployment_id="newer-deployment",
+        cluster=record.cluster,
+        service=record.service,
+        region=record.region,
+        status=ECSDeployStatus.PENDING,
+    )
+    ecs_routes._deploy_records[record.deployment_id] = record
+    ecs_routes._deploy_records[newer.deployment_id] = newer
+    called = []
+    monkeypatch.setattr(
+        deploy_ecs.aws_infra,
+        "revert_service_task_definition",
+        lambda *_args, **_kwargs: called.append(True),
+    )
+
+    response = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": True},
+    )
+    assert response.status_code == 409, response.text
+    assert called == []
+    assert record.rollback_proposal_status == "superseded"
+
+
+def test_a_transient_ecs_rollback_failure_can_be_approved_again(app_client, monkeypatch):
+    """[P2] 만료된 임시 자격증명을 고친 뒤 같은 제안을 재시도할 수 있다."""
+    import boto3
+    from api.routes import deploy_ecs
+
+    client, ecs_routes = app_client
+    record = _pending_ecs_rollback_record()
+    ecs_routes._deploy_records[record.deployment_id] = record
+
+    class _Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        def client(self, _name):
+            return self
+
+        def describe_services(self, **_kwargs):
+            return {"services": [{"taskDefinition": record.task_definition_arn}]}
+
+    outcomes = iter([
+        "취소했지만 이전 버전으로 되돌리지 못했습니다",
+        "이전 태스크 정의로 되돌렸습니다",
+    ])
+    monkeypatch.setattr(boto3.session, "Session", _Session)
+    monkeypatch.setattr(
+        deploy_ecs.aws_infra,
+        "revert_service_task_definition",
+        lambda *_args, **_kwargs: next(outcomes),
+    )
+
+    failed = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": True},
+    )
+    assert failed.status_code == 502, failed.text
+    assert record.rollback_proposal_status == "failed"
+
+    retried = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": True},
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "completed"

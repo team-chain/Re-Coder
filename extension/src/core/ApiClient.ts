@@ -912,6 +912,18 @@ export class ApiClient {
         error: string;
         started_at: string;
         finished_at: string;
+        rollback_proposal?: {
+            proposal_id: string;
+            deployment_id: string;
+            cluster: string;
+            service: string;
+            region: string;
+            reason: string;
+            previous_task_definition: string;
+            current_task_definition: string;
+            approval_level: number;
+            status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed' | 'superseded';
+        } | null;
     }> {
         const resp = await this.request<{
             running: boolean;
@@ -922,9 +934,42 @@ export class ApiClient {
             error: string;
             started_at: string;
             finished_at: string;
+            rollback_proposal?: {
+                proposal_id: string;
+                deployment_id: string;
+                cluster: string;
+                service: string;
+                region: string;
+                reason: string;
+                previous_task_definition: string;
+                current_task_definition: string;
+                approval_level: number;
+                status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed' | 'superseded';
+            } | null;
         }>('GET', '/api/deploy/ecs/status');
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'ECS 상태 조회 실패');
+        }
+        return resp.data;
+    }
+
+    /** POST /api/deploy/ecs/rollback — 제안을 승인할 때만 ECS 이전 버전으로 복귀. */
+    async resolveEcsRollback(proposalId: string, approved: boolean): Promise<{
+        status: 'completed' | 'ignored';
+        message: string;
+        deployment_id: string;
+        proposal_id: string;
+        adr: { file: string; content: string };
+    }> {
+        const resp = await this.request<{
+            status: 'completed' | 'ignored';
+            message: string;
+            deployment_id: string;
+            proposal_id: string;
+            adr: { file: string; content: string };
+        }>('POST', '/api/deploy/ecs/rollback', { proposal_id: proposalId, approved });
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'ECS 롤백 처리 실패');
         }
         return resp.data;
     }
