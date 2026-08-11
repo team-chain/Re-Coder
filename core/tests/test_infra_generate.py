@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from infra_agent import generate_dockerfile, generate_docker_compose
-from schemas import InfraFileProposal, ProjectProfile, ProjectStack
+from schemas import FileType, InfraFileProposal, ProjectProfile, ProjectStack
 
 
 @pytest.fixture
@@ -34,7 +34,10 @@ def test_generate_dockerfile_returns_proposal(fake_fastapi_project: Path, monkey
     )
     assert isinstance(proposal, InfraFileProposal)
     assert proposal.proposal_id, "proposal_id 가 비어있음"
-    assert proposal.file_type == "Dockerfile"
+    # file_type 은 **타입**(enum 값 "dockerfile"), target_path 는 **파일명**
+    # ("Dockerfile"). 예전 테스트는 둘을 혼동해 file_type 을 "Dockerfile" 과
+    # 비교했다 — enum 값이 소문자라 항상 실패했다.
+    assert proposal.file_type == FileType.DOCKERFILE
     assert proposal.target_path == "Dockerfile"
     assert proposal.content, "content 가 비어있음"
     assert "python" in proposal.content.lower(), proposal.content
@@ -72,3 +75,26 @@ def test_generate_docker_compose(fake_fastapi_project: Path):
     )
     assert isinstance(proposal, InfraFileProposal)
     assert "services:" in proposal.content
+
+
+def test_docker_compose_env_file_only_when_env_exists(fake_fastapi_project: Path):
+    """[회귀] `.env` 가 실제로 있을 때만 env_file 을 참조한다.
+
+    `.env.example` 만 있고 `.env` 는 없는 상태(갓 클론한 저장소의 흔한 모습)
+    에서 `env_file: - .env` 를 넣으면, docker compose 가 없는 `.env` 를 필수로
+    찾아 생성된 compose 가 `docker compose up` 에서 안 뜬다.
+    """
+    def _compose(root: Path) -> str:
+        return generate_docker_compose(workspace_path=str(root)).content
+
+    # ① `.env.example` 만 있고 `.env` 는 없음 → env_file 없어야 한다
+    (fake_fastapi_project / ".env.example").write_text("KEY=\n", encoding="utf-8")
+    content = _compose(fake_fastapi_project)
+    assert "env_file" not in content, (
+        ".env 가 없는데 env_file 을 참조한다 — compose 가 안 뜬다"
+    )
+
+    # ② 실제 `.env` 가 있으면 env_file 을 넣는다
+    (fake_fastapi_project / ".env").write_text("KEY=v\n", encoding="utf-8")
+    content = _compose(fake_fastapi_project)
+    assert "env_file" in content and ".env" in content

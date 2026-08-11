@@ -41,17 +41,20 @@ def test_extract_error_text_fallback_to_last_30_lines():
 
 
 def test_analyze_request_dataclass_round_trip():
+    # `AnalyzeRequest` 는 확장이 보내는 분석 페이로드다. 예전 테스트는
+    # error_text·related_files·file_context 를 검사했는데, 그 필드들은 지금
+    # 모델에 없다(pydantic 이 조용히 무시). 현재 모델의 실제 필드로 왕복한다.
     req = AnalyzeRequest(
         workspace_path="/tmp/proj",
-        terminal_output="ModuleNotFoundError",
-        error_text="ModuleNotFoundError: No module named 'foo'",
-        related_files=["main.py"],
-        file_context="import foo\n",
+        terminal_output="ModuleNotFoundError: No module named 'foo'",
+        selected_text="import foo\n",
+        command="pytest",
     )
     d = req.to_dict()
-    assert d["error_text"].startswith("ModuleNotFoundError")
-    assert d["related_files"] == ["main.py"]
-    assert d["file_context"] == "import foo\n"
+    assert d["workspace_path"] == "/tmp/proj"
+    assert d["terminal_output"].startswith("ModuleNotFoundError")
+    assert d["selected_text"] == "import foo\n"
+    assert d["command"] == "pytest"
 
 
 def test_patch_proposal_to_dict_shape():
