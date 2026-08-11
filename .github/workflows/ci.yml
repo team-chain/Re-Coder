@@ -42,23 +42,7 @@ jobs:
         working-directory: core
         env:
           PYTHONPATH: .
-        # NOTE: 아래 4건은 코드 변경을 못 따라간 '낡은 테스트'로, 회차1 이전부터 실패 중.
-        #       CI 도입을 막지 않도록 임시 격리한다. 별도 태스크로 수리 후 이 줄을 제거할 것.
+        # 낡은 테스트 4건(FR 회차2 「낡은 테스트 4건 수리」, PR #14)은 수리 완료로
+        # 격리를 해제했다. 이제 전체 스위트가 게이팅에 그대로 들어간다.
         run: |
-          pytest tests/ -q \
-            --deselect tests/test_analyze_flow.py::test_analyze_request_dataclass_round_trip \
-            --deselect tests/test_command_registry.py::test_approval_levels_partition \
-            --deselect tests/test_infra_generate.py::test_generate_dockerfile_returns_proposal \
-            --deselect tests/test_infra_generate.py::test_generate_docker_compose
-
-      - name: 격리된 낡은 테스트 (실패해도 CI 통과 — 현황 가시화용)
-        working-directory: core
-        continue-on-error: true
-        env:
-          PYTHONPATH: .
-        run: |
-          pytest -q \
-            tests/test_analyze_flow.py::test_analyze_request_dataclass_round_trip \
-            tests/test_command_registry.py::test_approval_levels_partition \
-            tests/test_infra_generate.py::test_generate_dockerfile_returns_proposal \
-            tests/test_infra_generate.py::test_generate_docker_compose
+          pytest tests/ -q
