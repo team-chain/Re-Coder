@@ -487,3 +487,62 @@ def test_short_command_is_preserved_not_emptied(monkeypatch):
     matched = [r.get("matched") for r in event.trigger_reasons
                if r.get("type") == "new_terminal_command"]
     assert matched and "ls" in matched[0]
+
+
+# ---------------------------------------------------------------------------
+# [Codex P2 3건] 초장문 1줄 캡 · event_id 유일성 · 릴레이 project_summary
+# ---------------------------------------------------------------------------
+
+def test_single_long_line_is_char_capped():
+    """[P2①] 에러 패턴 없는 초장문 1줄도 문자 상한으로 잘린다."""
+    import analyzer
+
+    giant = "x" * 50_000  # 한 줄 50KB (줄 컷으로는 안 잘림)
+    out = analyzer._extract_error_text(giant)
+    assert len(out) <= analyzer._MAX_CHARS + 40, len(out)
+
+    prompt = analyzer._build_prompt(
+        AnalyzeRequest(workspace_path="/tmp/p", terminal_output=giant)
+    )
+    # 프롬프트 전체도 원문(50KB)보다 훨씬 작아야 한다
+    assert len(prompt) < 20_000, len(prompt)
+
+
+def test_event_ids_are_unique_within_same_session(monkeypatch):
+    """[P2②] 같은 세션 1초 내 두 분석도 event_id 가 겹치지 않는다."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+    monkeypatch.setattr(analyzer, "get_router", lambda: _router_capturing([]))
+
+    req = AnalyzeRequest(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+    ev1 = asyncio.run(analyzer.analyze(AnalyzeRequest(**req.model_dump()), session_id="s"))
+    ev2 = asyncio.run(analyzer.analyze(AnalyzeRequest(**req.model_dump()), session_id="s"))
+    assert ev1.event_id != ev2.event_id, "같은 세션 이벤트가 같은 id 를 받았다"
+
+
+def test_relay_forwards_project_files_summary(monkeypatch):
+    """[P2③] 릴레이가 project_files_summary 를 analyzer 로 넘긴다."""
+    import asyncio
+    import analyzer
+    from relay import poller
+
+    captured: dict = {}
+
+    async def _fake(request, session_id=""):
+        captured["summary"] = request.project_files_summary
+
+        class _Ev:
+            def to_dict(self):
+                return {}
+        return _Ev()
+
+    monkeypatch.setattr(analyzer, "analyze", _fake)
+    asyncio.run(poller._run_handler("analyze", {
+        "workspace_path": "/tmp/p",
+        "terminal_output": "ValueError: boom",
+        "project_files_summary": "FastAPI + SQLite 프로젝트",
+    }))
+    assert captured["summary"] == "FastAPI + SQLite 프로젝트"

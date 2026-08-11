@@ -232,6 +232,9 @@ async def _run_handler(command_type: str, payload: Dict[str, Any]) -> Dict[str, 
                 project_id=payload.get("project_id", ""),
                 selected_text=payload.get("selected_text", ""),
                 command=payload.get("command", ""),
+                # analyzer 가 프롬프트·캐시 키에 쓰는 필드 — 빠뜨리면 클라우드
+                # 분석이 프로젝트 맥락을 잃어 진단 품질이 떨어진다.
+                project_files_summary=payload.get("project_files_summary", ""),
             )
             res = await analyzer_analyze(req, session_id=payload.get("session_id", ""))
             return {"status": "ok", "result": _safe_to_dict(res)}
