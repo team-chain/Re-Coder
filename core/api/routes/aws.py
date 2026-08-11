@@ -26,6 +26,7 @@ import configparser
 import json
 import logging
 import os
+import re
 import stat
 import sys
 from urllib.parse import unquote
@@ -96,6 +97,7 @@ class AwsDeploymentPermissionContext(BaseModel):
     """
 
     ecr_repo: str = ""
+    ecr_registry: str = ""
     ecs_cluster: str = ""
     ecs_service: str = ""
     aws_region: str = ""
@@ -490,12 +492,31 @@ def _resolved_permission_context(
         # ECR_REPOSITORY를 보면 권한 점검은 통과했는데 실제 push가 다른
         # 저장소로 나가 실패하는 상태가 된다.
         ecr_repo=(supplied.ecr_repo or "recoder-app").strip(),
+        # ECSDeployRequest는 요청값이 없을 때 ECR_REGISTRY를 사용한다. 따라서
+        # 권한 점검도 같은 레지스트리를 기준으로 삼아야 한다.
+        ecr_registry=(supplied.ecr_registry or os.getenv("ECR_REGISTRY") or "").strip(),
         ecs_cluster=(supplied.ecs_cluster or os.getenv("ECS_CLUSTER") or "").strip(),
         ecs_service=(supplied.ecs_service or os.getenv("ECS_SERVICE") or "").strip(),
         aws_region=(supplied.aws_region or "").strip(),
         task_execution_role=execution_role,
         task_role=task_role,
     ), None
+
+
+def _ecr_registry_account_id(registry: str) -> Optional[str]:
+    """사설 ECR registry endpoint에서 AWS 계정 번호를 추출한다.
+
+    ECS 배포는 ``123456789012.dkr.ecr.<region>.amazonaws.com`` 형식의
+    레지스트리에 이미지를 push한다. 서로 다른 계정 레지스트리도 실제 대상 ARN
+    으로 검사해야 하므로, caller 계정과 registry 계정을 혼용하지 않는다.
+    """
+    if not registry:
+        return None
+    match = re.match(
+        r"^(?P<account>\d{12})\.dkr\.ecr\.[^.]+\.amazonaws\.com(?:\.cn)?(?:/|$)",
+        registry,
+    )
+    return match.group("account") if match else None
 
 
 def _inspect_deploy_permissions(
@@ -535,11 +556,21 @@ def _inspect_deploy_permissions(
         report.warnings.append("AWS 계정 또는 리전 정보를 확인할 수 없어 리소스별 권한 점검을 건너뛰었습니다.")
         return report
 
-    ecr_arn = f"arn:{partition}:ecr:{simulation_region}:{account_id}:repository/{context.ecr_repo}"
+    registry_account_id = _ecr_registry_account_id(context.ecr_registry)
+    if context.ecr_registry and registry_account_id is None:
+        report.warnings.append(
+            "입력한 ECR Registry에서 AWS 계정 번호를 확인할 수 없어 실제 push 대상 권한 점검을 완료하지 못했습니다."
+        )
+        return report
+    # ecr_registry가 비어 있으면 실제 배포도 아직 환경변수에서 보완되지 않은
+    # 상태다. 이 경우 caller 계정을 사용하되, 레지스트리가 입력된 경우에는
+    # 반드시 그 endpoint의 계정을 사용한다.
+    ecr_account_id = registry_account_id or account_id
+    ecr_arn = f"arn:{partition}:ecr:{simulation_region}:{ecr_account_id}:repository/{context.ecr_repo}"
     role_arns = [
         f"arn:{partition}:iam::{account_id}:role/{context.task_execution_role}",
     ]
-    if context.task_role != context.task_execution_role:
+    if context.task_role and context.task_role != context.task_execution_role:
         role_arns.append(f"arn:{partition}:iam::{account_id}:role/{context.task_role}")
 
     # ResourceArns는 액션별로만 보낸다. 모든 ARN을 한 요청에 섞으면 ECR 액션을

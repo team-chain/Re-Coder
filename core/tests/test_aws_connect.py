@@ -198,6 +198,57 @@ def test_permission_simulation_uses_deployment_resources_and_passrole_context(
     }]
 
 
+def test_permission_simulation_skips_empty_task_role_and_uses_registry_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """기본 task role은 PassRole 대상이 아니며 ECR은 실제 registry 계정을 쓴다."""
+    calls: list[dict[str, object]] = []
+
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            calls.append(kwargs)
+            return {"EvaluationResults": [
+                {"EvalActionName": action, "EvalDecision": "allowed"}
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    context = aws.AwsDeploymentPermissionContext(
+        ecr_repo="recoder-app",
+        ecr_registry="210987654321.dkr.ecr.ap-northeast-2.amazonaws.com",
+        ecs_cluster="cluster",
+        ecs_service="service",
+        task_execution_role="recoder/EcsExecution",
+        task_role="",
+    )
+
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+        context,
+    )
+
+    assert report.inspected is True
+    ecr_call = next(call for call in calls if "ecr:PutImage" in call["ActionNames"])
+    assert ecr_call["ResourceArns"] == [
+        "arn:aws:ecr:ap-northeast-2:210987654321:repository/recoder-app",
+    ]
+    passrole_call = next(call for call in calls if call["ActionNames"] == ["iam:PassRole"])
+    assert passrole_call["ResourceArns"] == [
+        "arn:aws:iam::123456789012:role/recoder/EcsExecution",
+    ]
+
+
 def test_invalid_configured_role_keeps_sts_connection_and_marks_check_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
