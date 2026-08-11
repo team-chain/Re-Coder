@@ -133,12 +133,20 @@ GET /api/aws/policy?task_execution_role=LabRole&task_role=LabRole
 | `service` | `recoder-*` | 서비스 이름이 `recoder-` 로 시작하지 않을 때 |
 | `ecr_repo` | `recoder-*` | 이미 있는 이미지 저장소에 올릴 때 |
 | `task_execution_role` | `ecsTaskExecutionRole` | 환경변수로 다른 역할을 쓸 때 |
-| `task_role` | `ecsTaskRole` | 환경변수로 다른 역할을 쓸 때 |
+| `task_role` | **없음(빈 값)** | 컨테이너 안 앱이 AWS API 를 직접 부를 때만 |
 | `region` | 세션에서 자동 | 세션 리전과 다른 곳에 배포할 때 |
 
 **역할은 자동으로 바꾸지 않습니다.** 학교 계정으로 접속한 것이 확인되면
 "환경변수를 이렇게 설정하세요"라고 안내만 합니다. 정책만 `LabRole` 로 바꿔봐야
 실제 배포 코드는 환경변수를 보므로 둘이 갈라지기 때문입니다.
+
+**태스크 역할은 기본으로 들어가지 않습니다.** 실행 역할(execution role)은 ECS 가
+이미지를 받아오고 로그를 쓸 때 쓰므로 항상 필요하지만, 태스크 역할(task role)은
+컨테이너 **안의 앱**이 AWS API 를 부를 때만 필요합니다. 배포 코드도
+`ECS_TASK_ROLE_ARN` 이 설정됐을 때만 `taskRoleArn` 을 붙입니다. 안 쓰는 역할에
+`iam:PassRole` 을 열어 두면, 그 이름의 역할이 계정에 이미 있고 권한이 넓을 때
+이 키로 그 역할을 단 태스크를 띄울 수 있습니다. 필요하면
+`ECS_TASK_ROLE_ARN` 을 설정한 뒤 권한표를 다시 받으세요.
 
 ### 역할을 환경변수로 지정했다면
 
