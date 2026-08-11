@@ -78,9 +78,36 @@ def test_invalid_image_name_blocked():
 
 
 def test_approval_levels_partition():
+    """승인 레벨은 **위험도 순서**를 지켜야 한다.
+
+    예전 테스트는 "레벨2=docker, 레벨3=ssh" 라고 못 박았는데, 그 뒤 레지스트리가
+    커지며 레벨2 에 로컬 조회(ecs_describe_service)·SBOM(syft_sbom) 이,
+    레벨3 에 docker_tag_ecr 가 들어와 그 전제가 깨졌다. 이름 매칭 대신 **실제
+    위험도 불변식**으로 바꾼다.
+    """
     reg = get_command_registry()
-    level2 = reg.list_templates_by_approval_level(2)
-    level3 = reg.list_templates_by_approval_level(3)
-    # Level 2 는 docker_*, Level 3 는 ssh_*
-    assert all("docker" in t.template_id for t in level2)
-    assert all("ssh" in t.template_id for t in level3) or len(level3) == 0
+    by_level = {lvl: reg.list_templates_by_approval_level(lvl) for lvl in (1, 2, 3, 4)}
+    all_templates = [t for lvl in (1, 2, 3, 4) for t in by_level[lvl]]
+
+    def is_remote_exec(tid: str) -> bool:      # 원격 셸 실행
+        return "ssh" in tid
+
+    def is_remote_mutate(tid: str) -> bool:    # 원격 상태 변경(레지스트리 push / 서비스 갱신)
+        return "push" in tid or tid.startswith("ecs_update")
+
+    # 레벨 2 는 로컬·비파괴 작업만 — 원격 실행도, 원격 상태 변경도 없어야 한다.
+    for t in by_level[2]:
+        assert not is_remote_exec(t.template_id), t.template_id
+        assert not is_remote_mutate(t.template_id), t.template_id
+
+    # 원격 셸 실행(ssh)은 최소 레벨 3.
+    ssh = [t for t in all_templates if is_remote_exec(t.template_id)]
+    assert ssh, "ssh 템플릿이 사라졌다 — 테스트가 헛돈다"
+    for t in ssh:
+        assert t.approval_level >= 3, (t.template_id, t.approval_level)
+
+    # 원격 상태 변경(레지스트리 push / 서비스 갱신)은 가장 높은 레벨 4.
+    mutate = [t for t in all_templates if is_remote_mutate(t.template_id)]
+    assert mutate, "원격 상태 변경 템플릿이 사라졌다 — 테스트가 헛돈다"
+    for t in mutate:
+        assert t.approval_level == 4, (t.template_id, t.approval_level)
