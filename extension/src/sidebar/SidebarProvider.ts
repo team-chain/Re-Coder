@@ -524,9 +524,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     // 상태 폴링은 요청한 큰 창에만 돌려준다. 특히 롤백 제안은
                     // 다른 웹뷰의 배포에 붙으면 안 된다.
                     this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.statusResult', status);
-                    this.postMessageToWebview(requestWebview, 'workspace.deploy.result', {
-                        message: status.error || `ECS: ${status.stage}`,
-                    });
+                    // 배경 감시는 카드 정보만 갱신한다. 현재 ECS 탭에서
+                    // 진행 상황을 보고 있을 때만 일반 상태 문구를 바꾼다.
+                    const reportProgress = Boolean((payload as { reportProgress?: boolean } | undefined)?.reportProgress);
+                    if (reportProgress) {
+                        this.postMessageToWebview(requestWebview, 'workspace.deploy.result', {
+                            message: status.error || `ECS: ${status.stage}`,
+                        });
+                    }
                 } catch { /* status polling is best effort */ }
                 break;
             }
