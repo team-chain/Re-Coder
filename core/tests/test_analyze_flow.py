@@ -753,3 +753,64 @@ def test_invalid_event_type_with_error_falls_back_to_error_detected(monkeypatch)
     req = AnalyzeRequest(workspace_path="/tmp/p", terminal_output="ValueError: boom")
     event = asyncio.run(analyzer.analyze(req, session_id="s"))
     assert event.event_type == EventType.ERROR_DETECTED, event.event_type
+
+
+def test_non_dict_llm_response_does_not_crash(monkeypatch):
+    """[Codex P2 크리티컬] provider 가 객체 아닌 JSON(null/[])을 줘도 크래시 안 함."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    for bad in ("null", "[]", "123", '"just a string"'):
+        class _Resp:
+            text = bad
+            model_used = "fake"
+        monkeypatch.setattr(analyzer, "get_router",
+                            lambda r=_Resp: type("R", (), {"call": lambda self, *a, **k: r()})())
+        analyzer._llm_cache.clear()
+        req = AnalyzeRequest(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+        event = asyncio.run(analyzer.analyze(req, session_id="s"))
+        # 크래시 대신 폴백 이벤트가 나와야 한다
+        assert event is not None, bad
+        assert isinstance(event.to_dict(), dict), bad
+
+
+def test_waiter_cancellation_does_not_kill_other_waiters(monkeypatch):
+    """[Codex P2] 대기자 하나가 취소돼도 다른 대기자는 정상 완료한다(shield)."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    analyzer._llm_inflight.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    class _SlowRouter:
+        def call(self, *a, **kw):
+            import time as _t
+            _t.sleep(0.3)
+            class _R:
+                text = '{"has_error": true, "error_summary": "x", "importance_score": 10, "event_type": "error_detected"}'
+                model_used = "fake"
+            return _R()
+
+    monkeypatch.setattr(analyzer, "get_router", lambda: _SlowRouter())
+
+    async def _run():
+        base = dict(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+        leader = asyncio.create_task(analyzer.analyze(AnalyzeRequest(**base), session_id="L"))
+        await asyncio.sleep(0.05)
+        w1 = asyncio.create_task(analyzer.analyze(AnalyzeRequest(**base), session_id="W1"))
+        w2 = asyncio.create_task(analyzer.analyze(AnalyzeRequest(**base), session_id="W2"))
+        await asyncio.sleep(0.05)
+        w1.cancel()  # 대기자 하나만 취소
+        # 리더와 남은 대기자는 정상 완료해야 한다
+        results = await asyncio.gather(leader, w2, return_exceptions=True)
+        return results
+
+    results = asyncio.run(_run())
+    assert all(not isinstance(r, Exception) for r in results), (
+        f"대기자 취소가 다른 요청까지 죽였다: {results}"
+    )
+    assert results[0].event_id != results[1].event_id
