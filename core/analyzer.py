@@ -68,6 +68,11 @@ def _scrub(text: str) -> str:
 _llm_cache: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL_SECONDS = 60
 
+# **진행 중인** LLM 호출을 프롬프트 키별로 하나만 유지한다. to_thread 로 넘어가는
+# 사이 같은 프롬프트의 동시 요청이 전부 캐시 미스를 보고 각자 provider 를 부르면
+# 비용이 배로 들고 rate limit 에 걸린다. 먼저 시작한 호출의 future 를 나눠 기다린다.
+_llm_inflight: dict[str, "asyncio.Future"] = {}
+
 
 # ── 터미널 출력에서 에러 본문 추출 ────────────────────────────────────
 #
@@ -115,6 +120,10 @@ _FALLBACK_TAIL_LINES = 30
 #: 폴백이 그 한 줄을 그대로 통과시켜 프롬프트가 모델 입력 한도를 넘는다.
 #: 마지막에 문자 상한으로 한 번 더 자른다.
 _MAX_CHARS = 4000
+
+#: 프롬프트 **컨텍스트 블록 전체**의 상한. 필드별 캡(_MAX_CHARS)만으로는 필드가
+#: 여럿일 때 합계가 커진다. 스키마는 이 캡에서 제외한다(잘리면 안 됨).
+_MAX_PROMPT_CHARS = 8000
 
 
 def _cap_chars(text: str, limit: int = _MAX_CHARS) -> str:
@@ -302,43 +311,35 @@ def _build_prompt(request: AnalyzeRequest) -> str:
     에러 본문은 `terminal_output` 에서 뽑고, 파일 맥락은 현재 스키마에 있는
     `selected_text` · `project_files_summary` 로 대신한다.
     """
-    lines = [
-        "다음 컨텍스트를 분석하고 JSON으로 응답하세요.",
-        "",
+    # 컨텍스트 블록. 각 필드에 문자 상한을 걸고(터미널만 캡하면 거대한
+    # selected_text·project_files_summary 가 그대로 실린다), **마지막에 블록
+    # 전체에도 총량 상한**을 건다. 필드별 캡(4000)만으로는 필드가 여럿이면
+    # 합쳐서 모델 입력 한도를 넘길 수 있다.
+    ctx: list[str] = [
         "[에러 텍스트]",
         _extract_error_text(request.terminal_output or "") or "(없음)",
         "",
     ]
-
     if request.selected_text:
-        lines.extend([
-            "[선택한 코드]",
-            request.selected_text,
-            "",
-        ])
-
+        ctx.extend(["[선택한 코드]", _cap_chars(request.selected_text), ""])
     if request.project_files_summary:
-        lines.extend([
-            "[프로젝트 파일]",
-            request.project_files_summary,
-            "",
-        ])
-
-    # 원문을 통째로 넣지 않는다 — 에러 본문 + 앞 맥락만.
+        ctx.extend(["[프로젝트 파일]", _cap_chars(request.project_files_summary), ""])
     trimmed = _trim_terminal_output(request.terminal_output or "")
     if trimmed:
-        lines.extend([
-            "[터미널 출력]",
-            trimmed,
-            "",
-        ])
+        ctx.extend(["[터미널 출력]", trimmed, ""])
 
-    lines.extend([
+    context_blob = _cap_chars("\n".join(ctx), _MAX_PROMPT_CHARS)
+
+    # 응답 형식(JSON 스키마)은 **캡 대상에서 제외**한다 — 잘리면 LLM 이
+    # 출력 형식을 못 지킨다. 컨텍스트만 줄이고 스키마는 항상 온전히 붙인다.
+    return "\n".join([
+        "다음 컨텍스트를 분석하고 JSON으로 응답하세요.",
+        "",
+        context_blob,
+        "",
         "[응답 형식]",
         json.dumps(_RESPONSE_SCHEMA, ensure_ascii=False),
     ])
-
-    return "\n".join(lines)
 
 
 def _extract_json_response(raw: str) -> dict:
@@ -382,12 +383,19 @@ def _extract_json_response(raw: str) -> dict:
         raise ValueError(f"닫히지 않은 JSON: {raw[:200]}")
 
 
-def _parse_event_type(value: str) -> EventType:
-    """문자열을 EventType으로 변환."""
+def _parse_event_type(value: str, default: EventType = EventType.TASK_CHANGE) -> EventType:
+    """문자열을 EventType으로 변환.
+
+    EventType 에는 UNKNOWN 멤버가 **없다.** 예전 코드는 알 수 없는 값이 오면
+    존재하지 않는 EventType.UNKNOWN 에 접근해 AttributeError 로 죽었다 —
+    LLM 실패 폴백('unknown')이 여기서 다시 터져 폴백이 무의미했다.
+    알 수 없으면 `default` 로 떨어진다(호출부가 에러 문맥이면 ERROR_DETECTED 를,
+    아니면 중립적인 TASK_CHANGE 를 넘긴다).
+    """
     try:
         return EventType(value)
     except (ValueError, AttributeError):
-        return EventType.UNKNOWN
+        return default
 
 
 def _parse_user_actions(values: list[str] | str | None) -> list[UserAction]:
@@ -412,8 +420,10 @@ def _run_llm_analysis(request: AnalyzeRequest, error_text: str) -> dict:
     반환값은 **컨텍스트 독립적**이다(프롬프트에만 의존). 그래서 캐싱해도
     안전하다 — event_id·트리거·세션은 여기 들어오지 않는다.
     """
-    prompt = _build_prompt(request)
     try:
+        # _build_prompt 도 try 안에 둔다 — 여기서 예외가 나면(그리고 dedup 리더
+        # 라면) 대기자 전원에게 전파돼 한꺼번에 죽는다. 폴백으로 감싼다.
+        prompt = _build_prompt(request)
         llm_resp = get_router().call(
             LLMRequest(
                 prompt=prompt,
@@ -436,8 +446,42 @@ def _run_llm_analysis(request: AnalyzeRequest, error_text: str) -> dict:
             "error_summary": error_text[:100] if error_text else "분석 불가능",
             "suggested_actions": [],
             "importance_score": 20,
-            "event_type": "error_detected" if error_text else "unknown",
+            "event_type": "error_detected" if error_text else "task_change",
         }
+
+
+async def _analyze_llm_deduped(
+    llm_key: str, request: AnalyzeRequest, error_text: str, now: float
+) -> dict:
+    """LLM 분석을 실행하되, **같은 프롬프트의 동시 호출은 하나로 합친다.**
+
+    이미 같은 키로 진행 중인 호출이 있으면 그 future 를 기다린다. 없으면
+    내가 future 를 등록하고 실제 호출한 뒤 결과를 채워 넣는다. 단일 스레드
+    이벤트 루프이므로 등록~await 사이에 다른 코루틴이 끼어들지 않는다.
+    """
+    inflight = _llm_inflight.get(llm_key)
+    if inflight is not None:
+        return await inflight
+
+    loop = asyncio.get_event_loop()
+    fut: "asyncio.Future" = loop.create_future()
+    _llm_inflight[llm_key] = fut
+    try:
+        response_data = await asyncio.to_thread(_run_llm_analysis, request, error_text)
+        # 캐시를 먼저 채우고(뒤늦은 요청이 캐시로 잡히게) future 를 완료한다.
+        _llm_cache[llm_key] = (now, response_data)
+        if not fut.done():
+            fut.set_result(response_data)
+        return response_data
+    except BaseException as exc:
+        # 리더가 **취소**(CancelledError 는 BaseException)되거나 예외로 죽어도,
+        # future 를 반드시 종결한다. 안 그러면 같은 키를 `await` 하던 대기자가
+        # 영원히 깨어나지 못하고 hang 한다. 대기자에겐 취소로 전파한다.
+        if not fut.done():
+            fut.cancel()
+        raise
+    finally:
+        _llm_inflight.pop(llm_key, None)
 
 
 async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
@@ -499,10 +543,7 @@ async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
         response_data = cached[1]
         print(f"[analyzer] LLM 분석 캐시 히트 (경과: {now - cached[0]:.1f}초)")
     else:
-        # 동기 LLM 호출(수 초~수십 초)을 스레드로 빼 이벤트 루프를 막지 않는다
-        # — 릴레이에서 한 사용자의 응답 대기 동안 다른 사용자 폴링이 멈추지 않게.
-        response_data = await asyncio.to_thread(_run_llm_analysis, request, error_text)
-        _llm_cache[llm_key] = (now, response_data)
+        response_data = await _analyze_llm_deduped(llm_key, request, error_text, now)
 
     # 5. AgentEvent 생성 — 매 호출 새로.
     has_error = response_data.get("has_error", False)
@@ -526,21 +567,30 @@ async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
     if trimmed:
         contexts.append(trimmed)
     if request.selected_text:
-        contexts.append(request.selected_text)
+        contexts.append(_cap_chars(request.selected_text))
 
+    # error_text 는 에러 패턴이 없을 때도 '마지막 30줄'을 돌려준다. LLM 이
+    # has_error=false 로 분류했다면 그건 **정상 출력**이므로 raw_errors·error_text
+    # 에 넣지 않는다 — 넣으면 소비처가 정상 출력을 '감지된 에러'로 오해한다.
+    event_error_text = error_text if has_error else ""
     event = AgentEvent(
         # event_id 는 매 이벤트 고유해야 한다. `{session_id}_{초}` 만으로는 같은
         # 세션이 1초 안에 두 번 분석하면(특히 LLM 캐시 히트로 빨라질 때) 충돌하고,
         # 빈 기본 session_id 면 릴레이의 무관한 요청끼리도 겹친다. uuid 로 유일화.
         event_id=f"{session_id or 'anon'}_{int(now)}_{uuid.uuid4().hex[:8]}",
-        event_type=_parse_event_type(event_type_str),
+        # LLM 이 enum 밖 문자열을 줘도 안전. 에러 문맥이면 ERROR_DETECTED 로
+        # 떨어져 event_type 으로 분기하는 소비처가 에러를 놓치지 않게 한다.
+        event_type=_parse_event_type(
+            event_type_str,
+            EventType.ERROR_DETECTED if has_error else EventType.TASK_CHANGE,
+        ),
         summary=summary,
         contexts=contexts,
         importance_score=min(100, max(0, importance_score)),
         suggested_actions=_parse_user_actions(suggested_actions),
         created_at=datetime.now().isoformat(),
-        raw_errors=[error_text] if error_text else [],
-        error_text=error_text,
+        raw_errors=[event_error_text] if event_error_text else [],
+        error_text=event_error_text,
         trigger_score=trigger_score,
         trigger_reasons=reasons,
     )

@@ -546,3 +546,210 @@ def test_relay_forwards_project_files_summary(monkeypatch):
         "project_files_summary": "FastAPI + SQLite 프로젝트",
     }))
     assert captured["summary"] == "FastAPI + SQLite 프로젝트"
+
+
+# ---------------------------------------------------------------------------
+# [Codex P2 4건] 폴백 event_type 유효화 · 정상출력을 에러로 직렬화 금지 ·
+#                모든 컨텍스트 필드 캡 · 동시 LLM 호출 중복 제거
+# ---------------------------------------------------------------------------
+
+def test_llm_failure_fallback_returns_valid_event_no_error(monkeypatch):
+    """[P2①] LLM 실패 + 에러 없는 컨텍스트에서도 크래시 없이 이벤트를 돌려준다."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    class _BoomRouter:
+        def call(self, *a, **kw):
+            raise RuntimeError("provider down")
+
+    monkeypatch.setattr(analyzer, "get_router", lambda: _BoomRouter())
+
+    # 에러 패턴 없는 선택 코드 위주 요청
+    req = AnalyzeRequest(workspace_path="/tmp/p", terminal_output="", selected_text="x = 1")
+    event = asyncio.run(analyzer.analyze(req, session_id="s"))
+    assert event is not None
+    # 예전엔 EventType.UNKNOWN 접근으로 AttributeError 가 났다
+    assert event.event_type is not None
+
+
+def test_invalid_event_type_from_llm_does_not_crash():
+    """[P2①] LLM 이 EventType 에 없는 값을 줘도 _parse_event_type 이 크래시하지 않는다.
+
+    예전 except 분기는 존재하지 않는 EventType.UNKNOWN 에 접근해 AttributeError
+    로 죽었다. 그 분기를 직접 찌른다.
+    """
+    import analyzer
+    from schemas import EventType
+
+    assert not hasattr(EventType, "UNKNOWN")  # 이 전제가 깨지면 버그 자체가 없어진 것
+    result = analyzer._parse_event_type("totally_bogus_value")
+    assert isinstance(result, EventType)
+
+
+def test_normal_output_not_serialized_as_error(monkeypatch):
+    """[P2②] LLM 이 has_error=false 로 보면 정상 출력을 error_text/raw_errors 에 안 넣는다."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    class _NoErrResp:
+        text = '{"has_error": false, "error_summary": "빌드 성공", "importance_score": 10, "event_type": "task_change"}'
+        model_used = "fake"
+
+    class _Router:
+        def call(self, *a, **kw):
+            return _NoErrResp()
+
+    monkeypatch.setattr(analyzer, "get_router", lambda: _Router())
+
+    # 에러 패턴 없는 평범한 출력 → _extract_error_text 는 마지막 30줄을 주지만
+    # LLM 이 에러 아님으로 분류하면 이벤트엔 안 실려야 한다
+    req = AnalyzeRequest(workspace_path="/tmp/p",
+                         terminal_output="\n".join(f"line {i}" for i in range(40)))
+    event = asyncio.run(analyzer.analyze(req, session_id="s"))
+    assert event.error_text == "", event.error_text
+    assert event.raw_errors == [], event.raw_errors
+
+
+def test_large_selected_text_is_bounded_in_prompt():
+    """[P2③] 거대한 selected_text·project_files_summary 도 프롬프트에서 상한이 걸린다."""
+    import analyzer
+
+    huge = "A" * 200_000
+    prompt = analyzer._build_prompt(AnalyzeRequest(
+        workspace_path="/tmp/p",
+        terminal_output="ValueError: boom",
+        selected_text=huge,
+        project_files_summary=huge,
+    ))
+    # 두 필드 합쳐 40만자였는데 프롬프트가 그 근처면 캡이 안 걸린 것
+    assert len(prompt) < 20_000, len(prompt)
+
+
+def test_concurrent_same_prompt_calls_llm_once(monkeypatch):
+    """[P2④] 같은 프롬프트의 동시 요청은 provider 를 한 번만 부른다."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    analyzer._llm_inflight.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    calls = [0]
+
+    class _SlowResp:
+        text = '{"has_error": true, "error_summary": "boom", "importance_score": 50, "event_type": "error_detected"}'
+        model_used = "fake"
+
+    class _Router:
+        def call(self, *a, **kw):
+            calls[0] += 1
+            return _SlowResp()
+
+    monkeypatch.setattr(analyzer, "get_router", lambda: _Router())
+
+    async def _run():
+        base = dict(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+        # 같은 프롬프트로 동시 3건
+        return await asyncio.gather(*[
+            analyzer.analyze(AnalyzeRequest(**base), session_id=f"s{i}")
+            for i in range(3)
+        ])
+
+    events = asyncio.run(_run())
+    assert len(events) == 3
+    assert calls[0] == 1, f"동시 동일 프롬프트인데 provider 를 {calls[0]}회 불렀다"
+    # 이벤트는 각각 고유해야 한다(캐시로 합쳐도 이벤트는 새로)
+    assert len({e.event_id for e in events}) == 3
+
+
+# ---------------------------------------------------------------------------
+# [자체검수 P1/P2] dedup 취소 hang · 총량 캡 · 폴백 event_type
+# ---------------------------------------------------------------------------
+
+def test_dedup_leader_cancel_does_not_hang_waiter(monkeypatch):
+    """[P1] dedup 리더가 취소돼도 같은 키 대기자가 hang 하지 않는다."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    analyzer._llm_inflight.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    started = asyncio.Event() if False else None  # placeholder
+
+    class _BlockingRouter:
+        def call(self, *a, **kw):
+            import time as _t
+            _t.sleep(0.3)  # 리더를 to_thread 안에 붙잡아 둔다
+            class _R:
+                text = '{"has_error": true, "error_summary": "x", "importance_score": 10, "event_type": "error_detected"}'
+                model_used = "fake"
+            return _R()
+
+    monkeypatch.setattr(analyzer, "get_router", lambda: _BlockingRouter())
+
+    async def _run():
+        base = dict(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+        leader = asyncio.create_task(analyzer.analyze(AnalyzeRequest(**base), session_id="L"))
+        await asyncio.sleep(0.05)  # 리더가 future 등록 + to_thread 진입하도록
+        waiter = asyncio.create_task(analyzer.analyze(AnalyzeRequest(**base), session_id="W"))
+        await asyncio.sleep(0.05)  # 대기자가 inflight future 를 await 하도록
+        leader.cancel()            # 리더 취소
+        # 대기자는 hang 하지 않고 **종결**돼야 한다. wait_for 가 타임아웃하면
+        # = 대기자가 orphan future 에 걸려 hang 한 것 → 실패로 본다.
+        try:
+            await asyncio.wait_for(waiter, timeout=2.0)
+        except asyncio.TimeoutError:
+            waiter.cancel()
+            raise AssertionError("대기자가 hang 했다 — dedup future 가 고아가 됐다")
+        except (asyncio.CancelledError, Exception):
+            pass  # 취소 전파 또는 자체 완료 = hang 아님 (성공)
+        return True
+
+    assert asyncio.run(_run()) is True
+
+
+def test_total_prompt_capped_across_fields():
+    """[P2] 필드가 여럿이어도 프롬프트 컨텍스트 총량이 상한을 넘지 않는다."""
+    import analyzer
+
+    # 에러 패턴이 없는 거대 blob — 추출로 짧아지지 않아 필드별 4000 캡이 걸린다.
+    # 그런 필드 4개(에러텍스트/선택/프로젝트/터미널)면 총량 캡 없이는 ~16000자.
+    huge = "B" * 100_000
+    prompt = analyzer._build_prompt(AnalyzeRequest(
+        workspace_path="/tmp/p",
+        terminal_output=huge,
+        selected_text=huge,
+        project_files_summary=huge,
+    ))
+    # 총량 캡(_MAX_PROMPT_CHARS=8000) + 스키마·라벨 여유. 캡 없으면 16000+ 이라 실패.
+    assert len(prompt) < analyzer._MAX_PROMPT_CHARS + 3000, len(prompt)
+    # 스키마는 잘리지 않고 온전히 남아야 한다
+    assert "[응답 형식]" in prompt
+    assert "has_error" in prompt
+
+
+def test_invalid_event_type_with_error_falls_back_to_error_detected(monkeypatch):
+    """[낮음] has_error=true 인데 event_type 이 enum 밖이면 ERROR_DETECTED 로 떨어진다."""
+    import asyncio
+    import analyzer
+    from schemas import EventType
+
+    analyzer._llm_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    class _Resp:
+        text = '{"has_error": true, "error_summary": "boom", "importance_score": 50, "event_type": "nonsense"}'
+        model_used = "fake"
+
+    monkeypatch.setattr(analyzer, "get_router", lambda: type("R", (), {"call": lambda self, *a, **k: _Resp()})())
+
+    req = AnalyzeRequest(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+    event = asyncio.run(analyzer.analyze(req, session_id="s"))
+    assert event.event_type == EventType.ERROR_DETECTED, event.event_type
