@@ -146,6 +146,7 @@ def app_client(monkeypatch, tmp_path):
     # 기록을 테스트가 덮어쓰는 건 물론이고, 남의 기록 때문에 결과가 달라진다.
     monkeypatch.setenv("RECODER_ECS_STORE", str(tmp_path / "ecs_deployments.json"))
     ecs_routes._deploy_records.clear()
+    ecs_routes._service_operation_locks.clear()
 
     app = FastAPI()
     app.include_router(ecs_routes.router)
@@ -4926,6 +4927,37 @@ def test_an_old_ecs_rollback_proposal_cannot_overwrite_a_newer_deployment(app_cl
     )
     assert response.status_code == 409, response.text
     assert calls == [], "오래된 제안이 최신 배포를 이전 리비전으로 덮어썼다"
+    assert record.rollback_proposal_status == "superseded"
+
+
+def test_a_reserved_new_ecs_deployment_blocks_an_old_rollback_approval(app_client, monkeypatch):
+    """[P1] 새 배포가 AWS 갱신 대기 중이어도 오래된 롤백은 먼저 실행 못 한다."""
+    from api.routes import deploy_ecs
+
+    client, ecs_routes = app_client
+    record = _pending_ecs_rollback_record()
+    newer = ECSDeployRecord(
+        deployment_id="newer-deployment",
+        cluster=record.cluster,
+        service=record.service,
+        region=record.region,
+        status=ECSDeployStatus.PENDING,
+    )
+    ecs_routes._deploy_records[record.deployment_id] = record
+    ecs_routes._deploy_records[newer.deployment_id] = newer
+    called = []
+    monkeypatch.setattr(
+        deploy_ecs.aws_infra,
+        "revert_service_task_definition",
+        lambda *_args, **_kwargs: called.append(True),
+    )
+
+    response = client.post(
+        "/api/deploy/ecs/rollback",
+        json={"proposal_id": record.rollback_proposal_id, "approved": True},
+    )
+    assert response.status_code == 409, response.text
+    assert called == []
     assert record.rollback_proposal_status == "superseded"
 
 

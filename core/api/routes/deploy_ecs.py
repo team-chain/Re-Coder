@@ -515,7 +515,17 @@ async def resolve_ecs_rollback(body: EcsRollbackRequest) -> EcsRollbackResponse:
         )
 
     try:
-        result = await asyncio.to_thread(_apply)
+        # 새 배포는 예약(PENDING)되는 즉시 여기서 보인다. 예약된 배포가
+        # 있으면 그 배포가 서비스를 갱신하기 전에 오래된 롤백을 막는다.
+        # 반대로 이 잠금을 먼저 잡은 승인 중에는 새 배포의 AWS 갱신이
+        # 대기하므로 describe와 UpdateService 사이의 TOCTOU가 사라진다.
+        async with ecs_routes.service_operation_lock(record.cluster, record.service):
+            active = ecs_routes._active_deployment(record.cluster, record.service)
+            if active is not None and active.deployment_id != record.deployment_id:
+                raise _StaleRollbackProposalError(
+                    "새 배포가 이미 시작되어 기존 롤백 제안을 실행하지 않습니다."
+                )
+            result = await asyncio.to_thread(_apply)
     except _StaleRollbackProposalError as exc:
         record.rollback_proposal_status = "superseded"
         record.rollback_completed_at = datetime.now(timezone.utc)
