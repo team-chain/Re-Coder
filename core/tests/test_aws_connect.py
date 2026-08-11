@@ -55,6 +55,7 @@ def test_permission_context_uses_ecs_adapter_defaults_and_service_repo() -> None
     assert context.ecs_cluster == "recoder-cluster"
     assert context.ecs_service == "team-service"
     assert context.ecr_repo == "team-service"
+    assert context.task_family == "recoder-task"
 
 
 def test_connect_validates_and_keeps_credentials_in_current_core(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -262,6 +263,47 @@ def test_permission_simulation_skips_empty_task_role_and_uses_deploy_account_reg
     provision_call = next(call for call in calls if "ecs:CreateService" in call["ActionNames"])
     assert provision_call["ResourceArns"] == [
         "arn:aws:ecs:ap-northeast-2:123456789012:service/cluster/service",
+    ]
+    logs_call = next(call for call in calls if "logs:CreateLogGroup" in call["ActionNames"])
+    assert logs_call["ResourceArns"] == [
+        "arn:aws:logs:ap-northeast-2:123456789012:log-group:/ecs/recoder-task",
+    ]
+
+
+def test_permission_simulation_uses_selected_task_family_log_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            calls.append(kwargs)
+            return {"EvaluationResults": [
+                {"EvalActionName": action, "EvalDecision": "allowed"}
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+        aws.AwsDeploymentPermissionContext(task_family="team-task"),
+    )
+
+    assert report.inspected is True
+    logs_call = next(call for call in calls if "logs:CreateLogGroup" in call["ActionNames"])
+    assert logs_call["ResourceArns"] == [
+        "arn:aws:logs:ap-northeast-2:123456789012:log-group:/ecs/team-task",
     ]
 
 

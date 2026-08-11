@@ -727,6 +727,7 @@ export class ApiClient {
         ecrRepo?: string;
         ecsCluster?: string;
         ecsService?: string;
+        taskFamily?: string;
         awsRegion?: string;
         taskExecutionRole?: string;
         taskRole?: string;
@@ -736,6 +737,7 @@ export class ApiClient {
                 ecr_repo: deploymentContext.ecrRepo ?? '',
                 ecs_cluster: deploymentContext.ecsCluster ?? '',
                 ecs_service: deploymentContext.ecsService ?? '',
+                task_family: deploymentContext.taskFamily ?? '',
                 aws_region: deploymentContext.awsRegion ?? '',
                 task_execution_role: deploymentContext.taskExecutionRole ?? '',
                 task_role: deploymentContext.taskRole ?? '',
