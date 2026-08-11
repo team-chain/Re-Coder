@@ -285,3 +285,121 @@ def test_code_plan_route_forwards_context_files(monkeypatch):
 
     assert result["decisions"] == []
     assert captured["context_files"] == context_files
+
+
+# ---------------------------------------------------------------------------
+# [회귀] 워크스페이스 경로를 프로세스 전역 env 로 흘리지 않는다
+#
+# 회차1 에서 교차 오염(P1, 커밋 489e3be)을 잡을 때 `project_root` 인자 전달만
+# 추가하고 `os.environ["RECODER_PROJECT_ROOT"] = ...` 쓰기는 지우지 않아
+# 사고 경로가 남아 있었다. 라우트가 to_thread 로 넘어가며 실행을 양보하는
+# 사이 다른 창의 요청이 전역을 덮어쓰거나, 경로를 안 보낸 요청이
+# code_agent._project_root() 폴백으로 그 전역을 읽으면 **남의 워크스페이스**
+# 를 기준으로 코드·ADR 이 만들어진다.
+# ---------------------------------------------------------------------------
+
+def _run_route_and_capture_env(monkeypatch, tmp_path, *, route: str) -> dict:
+    """라우트를 한 번 호출하고, 넘어간 인자와 전역 env 변화를 함께 돌려준다."""
+    import os
+
+    from api.routes import analyze as analyze_routes
+
+    captured: dict = {}
+
+    def _fake(**kwargs):
+        # 라우트가 스레드로 넘긴 시점의 전역 상태를 그대로 기록한다.
+        captured.update(kwargs)
+        captured["_env_seen"] = os.environ.get("RECODER_PROJECT_ROOT", "")
+        return {"decisions": [], "ops": [], "model": "fake-model"}
+
+    workspace = tmp_path / "my-workspace"
+    workspace.mkdir()
+
+    # 전역이 원래 비어 있는 상태에서 시작 (다른 테스트 잔재 차단)
+    monkeypatch.delenv("RECODER_PROJECT_ROOT", raising=False)
+
+    if route == "plan":
+        monkeypatch.setattr(code_agent, "generate_plan", _fake)
+        asyncio.run(analyze_routes.code_plan_route(analyze_routes.CodePlanRequest(
+            instruction="계획 세워줘",
+            workspace_path=str(workspace),
+        )))
+    else:
+        monkeypatch.setattr(code_agent, "generate_code", _fake)
+        asyncio.run(analyze_routes.generate_code_route(analyze_routes.CodeGenerateRequest(
+            instruction="만들어줘",
+            workspace_path=str(workspace),
+        )))
+
+    captured["_env_after"] = os.environ.get("RECODER_PROJECT_ROOT", "")
+    captured["_workspace"] = str(workspace)
+    return captured
+
+
+@pytest.mark.parametrize("route", ["generate", "plan"])
+def test_route_does_not_leak_workspace_into_global_env(monkeypatch, tmp_path, route):
+    """워크스페이스는 **인자로만** 전달되고 전역 env 는 건드리지 않는다."""
+    captured = _run_route_and_capture_env(monkeypatch, tmp_path, route=route)
+
+    # ① 경로는 인자로 제대로 넘어갔다
+    assert captured["project_root"] == captured["_workspace"], (
+        "워크스페이스 경로가 인자로 전달되지 않았다 — 폴백에 의존하게 된다"
+    )
+
+    # ② 전역 env 는 호출 중에도, 후에도 오염되지 않았다
+    assert captured["_env_seen"] == "", (
+        "라우트가 RECODER_PROJECT_ROOT 전역에 워크스페이스를 심었다 — "
+        "동시 요청이 서로의 워크스페이스를 덮어쓰는 교차 오염 경로가 부활했다"
+    )
+    assert captured["_env_after"] == "", (
+        "라우트 종료 후에도 RECODER_PROJECT_ROOT 전역이 남아 있다 — "
+        "경로를 안 보낸 다음 요청이 이 값을 폴백으로 읽는다"
+    )
+
+
+def test_request_without_workspace_does_not_inherit_previous_workspace(monkeypatch, tmp_path):
+    """[핵심] A 창 요청 뒤에 온 경로 없는 B 요청이 A 의 워크스페이스를 잡지 않는다.
+
+    이것이 실제 사고 시나리오다. 전역 쓰기가 있으면 B 의 `project_root` 는
+    비어 있고, code_agent._project_root() 가 A 가 심어둔 전역을 읽어
+    **B 가 A 의 워크스페이스에 파일을 쓴다.**
+    """
+    import os
+
+    from api.routes import analyze as analyze_routes
+
+    monkeypatch.delenv("RECODER_PROJECT_ROOT", raising=False)
+
+    workspace_a = tmp_path / "window-a"
+    workspace_a.mkdir()
+
+    seen: list[dict] = []
+
+    def _fake(**kwargs):
+        seen.append({
+            "project_root": kwargs.get("project_root", ""),
+            "env": os.environ.get("RECODER_PROJECT_ROOT", ""),
+        })
+        return {"decisions": [], "ops": [], "model": "fake-model"}
+
+    monkeypatch.setattr(code_agent, "generate_code", _fake)
+
+    # A 창: 워크스페이스를 명시해 요청
+    asyncio.run(analyze_routes.generate_code_route(analyze_routes.CodeGenerateRequest(
+        instruction="A 창 요청",
+        workspace_path=str(workspace_a),
+    )))
+
+    # B 창: 워크스페이스 없이 요청 (폴더를 안 연 창)
+    asyncio.run(analyze_routes.generate_code_route(analyze_routes.CodeGenerateRequest(
+        instruction="B 창 요청",
+    )))
+
+    assert len(seen) == 2
+    assert seen[0]["project_root"] == str(workspace_a)
+    # B 는 A 의 경로를 인자로도, 전역으로도 물려받으면 안 된다
+    assert seen[1]["project_root"] == "", "B 요청이 A 의 경로를 인자로 물려받았다"
+    assert str(workspace_a) not in seen[1]["env"], (
+        "B 요청 시점에 전역 env 가 A 의 워크스페이스를 가리킨다 — "
+        "code_agent._project_root() 폴백이 이걸 읽어 B 가 A 의 폴더에 파일을 쓴다"
+    )
