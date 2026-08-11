@@ -135,13 +135,16 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     }
     if (type === "workspace.deploy.decisionError") { setSavingDecision(false); setMessage((payload as { message?: string })?.message ?? "배포 대상 기록에 실패했습니다."); }
     if (type === "aws.permissions.result" && pendingEcsDeploymentRef.current) {
-      const result = payload as { ok?: boolean; status?: { permission_check?: { inspected?: boolean; missing_actions?: string[]; warnings?: string[] } }; message?: string };
+      const result = payload as { ok?: boolean; status?: { permission_check?: { inspected?: boolean; advisory_only?: boolean; missing_actions?: string[]; warnings?: string[] } }; message?: string };
       const deploymentRequest = pendingEcsDeploymentRef.current;
       pendingEcsDeploymentRef.current = null;
       setCheckingEcsPermissions(false);
       const permission = result.status?.permission_check;
-      if (result.ok && permission?.inspected && (permission.missing_actions?.length ?? 0) === 0) {
-        setMessage("ECS 배포 대상 리전의 권한을 확인했습니다. 배포를 시작합니다…");
+      const canProceed = result.ok && (permission?.missing_actions?.length ?? 0) === 0 && (permission?.inspected || permission?.advisory_only);
+      if (canProceed) {
+        setMessage(permission?.advisory_only
+          ? "IAM 역할 경로 때문에 권한 시뮬레이션을 완료하지 못했습니다. 명시적인 부족 권한은 없어 배포를 시작합니다…"
+          : "ECS 배포 대상 리전의 권한을 확인했습니다. 배포를 시작합니다…");
         postMessage("workspace.deploy.ecs", deploymentRequest);
       } else {
         const detail = permission?.missing_actions?.length
