@@ -131,6 +131,20 @@ def _load_records() -> Dict[str, ECSDeployRecord]:
 # 배포 레코드 저장소. 메모리에 두되 디스크에 백업하고, 기동 때 되읽는다.
 _deploy_records: Dict[str, ECSDeployRecord] = _load_records()
 _ecs_agent = ECSAgent()
+# 같은 ECS 서비스의 배포와 사람 승인 롤백은 서로 다른 요청이어도
+# `describe → update` 사이에 끼어들면 안 된다. 키 단위 잠금으로 다른
+# 서비스의 배포는 막지 않으면서 해당 서비스의 AWS 변경만 직렬화한다.
+_service_operation_locks: Dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def service_operation_lock(cluster: str, service: str) -> asyncio.Lock:
+    """클러스터/서비스 하나의 배포·롤백 AWS 변경을 직렬화하는 잠금."""
+    key = (cluster, service)
+    lock = _service_operation_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _service_operation_locks[key] = lock
+    return lock
 
 
 
@@ -588,21 +602,22 @@ async def _run_deployment(deployment_id: str, request: ECSDeployRequest) -> None
     로그도 배포가 끝날 때까지 하나도 안 보였다.
     """
     record = _deploy_records.get(deployment_id)
-    try:
-        result = await _ecs_agent.deploy(request, record=record)
-        # deploy() 가 새 기록을 만들었을 경우(record=None) 에만 id 를 맞춘다.
-        if result is not record:
-            result.deployment_id = deployment_id
-        _deploy_records[deployment_id] = result
-        _save_records()
-        logger.info("배포 %s 종료: status=%s", deployment_id, result.status)
-    except Exception as exc:
-        logger.error("배포 %s 가 예외로 중단됨: %s", deployment_id, exc, exc_info=True)
-        if record is not None:
-            record.status = ECSDeployStatus.FAILED
-            record.error_message = str(exc)
-            record.completed_at = datetime.now(timezone.utc)
+    async with service_operation_lock(request.cluster, request.service):
+        try:
+            result = await _ecs_agent.deploy(request, record=record)
+            # deploy() 가 새 기록을 만들었을 경우(record=None) 에만 id 를 맞춘다.
+            if result is not record:
+                result.deployment_id = deployment_id
+            _deploy_records[deployment_id] = result
             _save_records()
+            logger.info("배포 %s 종료: status=%s", deployment_id, result.status)
+        except Exception as exc:
+            logger.error("배포 %s 가 예외로 중단됨: %s", deployment_id, exc, exc_info=True)
+            if record is not None:
+                record.status = ECSDeployStatus.FAILED
+                record.error_message = str(exc)
+                record.completed_at = datetime.now(timezone.utc)
+                _save_records()
 
 
 # ---------------------------------------------------------------------------
