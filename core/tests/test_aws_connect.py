@@ -37,8 +37,10 @@ def test_permission_context_uses_the_ecs_request_repo_not_unused_environment(
     """ECR_REPOSITORY는 ECSDeployRequest가 읽지 않으므로 검사에도 쓰면 안 된다."""
     monkeypatch.setenv("ECR_REPOSITORY", "different-repository")
 
-    context = aws._resolved_permission_context(None)
+    context, error = aws._resolved_permission_context(None)
 
+    assert error is None
+    assert context is not None
     assert context.ecr_repo == "recoder-app"
 
 
@@ -168,6 +170,7 @@ def test_permission_simulation_uses_deployment_resources_and_passrole_context(
         ecr_repo="team-api",
         ecs_cluster="team-cluster",
         ecs_service="team-service",
+        aws_region="us-west-2",
         task_execution_role="team/EcsExecution",
         task_role="team/EcsTask",
     )
@@ -181,7 +184,7 @@ def test_permission_simulation_uses_deployment_resources_and_passrole_context(
     assert report.missing_actions == []
     ecr_call = next(call for call in calls if "ecr:PutImage" in call["ActionNames"])
     assert ecr_call["ResourceArns"] == [
-        "arn:aws:ecr:ap-northeast-2:123456789012:repository/team-api",
+        "arn:aws:ecr:us-west-2:123456789012:repository/team-api",
     ]
     passrole_call = next(call for call in calls if call["ActionNames"] == ["iam:PassRole"])
     assert passrole_call["ResourceArns"] == [
@@ -193,6 +196,21 @@ def test_permission_simulation_uses_deployment_resources_and_passrole_context(
         "ContextKeyValues": ["ecs-tasks.amazonaws.com"],
         "ContextKeyType": "string",
     }]
+
+
+def test_invalid_configured_role_keeps_sts_connection_and_marks_check_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """잘못된 역할 환경변수는 재파싱하지 않고 경고로만 반환한다."""
+    monkeypatch.setenv("ECS_EXECUTION_ROLE_ARN", "invalid*role")
+
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+    )
+
+    assert report.inspected is False
+    assert any("ECS 역할 설정" in warning for warning in report.warnings)
 
 
 def test_incomplete_permission_simulation_is_not_marked_as_completed(
