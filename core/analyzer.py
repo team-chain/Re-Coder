@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -21,8 +22,12 @@ from typing import Optional
 from llm.base import LLMRequest
 from llm.router import get_router
 from schemas import AgentEvent, AnalyzeRequest, EventType, UserAction
-from context_gate import run_gate
-from trigger_detector import should_trigger_with_reasons, _error_fingerprint
+from context_gate import run_gate, mask_secrets
+from trigger_detector import should_trigger_with_reasons
+
+#: LLM 프롬프트·이벤트에 실릴 수 있는 **모든 텍스트 필드**. 하나라도 빠지면
+#: 그 필드로 시크릿·PII 가 마스킹 없이 새어나간다. 여기 한 곳에서 관리한다.
+_MASKED_FIELDS = ("terminal_output", "selected_text", "project_files_summary")
 
 # 에러 중복 체크용 캐시 (60초 내 동일 에러 → 기존 이벤트 재사용)
 _error_cache: dict[str, tuple[float, AgentEvent]] = {}
@@ -136,6 +141,58 @@ def _trim_terminal_output(
         # 잘라냈다는 사실을 남긴다. 없으면 LLM 이 이게 로그 전부라고 읽는다.
         out = "… (앞부분 생략)\n" + out
     return out
+
+
+# ── 컨텍스트 마스킹 (LLM 에 나가기 전 시크릿·PII 제거) ─────────────────
+#
+# LLM 프롬프트에 실리는 건 terminal_output 하나가 아니다. selected_text(사용자가
+# 고른 코드 — 자격증명·설정 파일일 수 있다)와 project_files_summary 도 함께
+# 들어간다. **셋 다** 게이트를 통과해야 한다. 그리고 게이트가 터지면 원문을
+# 흘리는 게 아니라 동기 정규식 스크러버로 가리고 계속한다(fail-closed).
+
+async def _mask_context(request: AnalyzeRequest) -> tuple[AnalyzeRequest, float]:
+    """모든 텍스트 필드를 마스킹한 요청과 quality_score 를 돌려준다.
+
+    게이트가 예외를 던져도 **원문을 그대로 넘기지 않는다.** `mask_secrets`
+    (동기 정규식)로 모든 필드를 가린 뒤 최소 품질로 계속한다.
+    """
+    try:
+        # terminal_output 으로 품질을 재고 동시에 마스킹한다.
+        gate = await run_gate(request.terminal_output or "")
+        updates: dict[str, Optional[str]] = {"terminal_output": gate.text}
+        # 나머지 텍스트 필드도 같은 게이트로 가린다.
+        for name in _MASKED_FIELDS:
+            if name == "terminal_output":
+                continue
+            value = getattr(request, name, None)
+            if value:
+                updates[name] = (await run_gate(value)).text
+        return request.model_copy(update=updates), gate.quality_score
+    except Exception as e:
+        # fail-closed: 게이트가 죽어도 원문을 흘리지 않는다.
+        print(f"[analyzer] Context Gate 실패 — 정규식 폴백 마스킹 적용(fail-closed): {e}")
+        updates = {}
+        for name in _MASKED_FIELDS:
+            value = getattr(request, name, None)
+            if value:
+                updates[name] = mask_secrets(value)
+        return request.model_copy(update=updates), 0.3
+
+
+def _scoped_cache_key(request: AnalyzeRequest) -> str:
+    """캐시 키를 **요청 전체 범위**로 만든다.
+
+    예전엔 추출한 error_text 하나로만 키를 만들었다. 그래서 60초 안에 온
+    두 요청이 (a) 같은 에러이거나 (b) 둘 다 에러가 없으면, 워크스페이스·세션·
+    선택 코드가 달라도 키가 같아져 **두 번째 요청이 첫 요청의 이벤트(그 안의
+    contexts 포함)를 그대로 돌려받았다.** 릴레이처럼 여러 사용자가 한 코어를
+    쓰면 **남의 컨텍스트가 새는** 경로다.
+    지금은 마스킹된 컨텍스트 전체로 키를 만들어, 내용이 완전히 같을 때만
+    (=진짜 동일 요청 재제출) 캐시가 맞는다.
+    """
+    parts = [request.workspace_path or ""]
+    parts += [getattr(request, name, None) or "" for name in _MASKED_FIELDS]
+    return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
 
 
 _SYSTEM_INSTRUCTION = """당신은 DevOps 특화 AI 에이전트입니다.
@@ -308,35 +365,24 @@ async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
     """
     print(f"[analyzer] 분석 시작 | 세션: {session_id}")
 
-    # 1. Context Gate 통과 (마스킹 + quality_score)
-    #    `run_gate` 는 **async 이고 문자열을 받아 GateResult 를 돌려준다.**
-    #    예전 코드는 request 객체를 넘기고 await 도 안 해서 코루틴이 반환됐고,
-    #    바로 아래 `.get(...)` 이 터지면서 except 로 빠졌다. 그 결과
-    #    **마스킹이 통째로 스킵**돼 시크릿·PII 가 그대로 LLM 으로 갔다.
-    #    로그에만 남고 결과에는 흔적이 없어서 알아채기 어려웠다.
-    quality_score = 0.3
-    try:
-        gate = await run_gate(request.terminal_output or "")
-        quality_score = gate.quality_score
-        # 마스킹된 본문을 이후 단계가 쓰도록 요청을 갈아끼운다.
-        request = request.model_copy(update={"terminal_output": gate.text})
-        print(f"[analyzer] Context Gate 완료 | quality_score={quality_score:.2f}")
-    except Exception as e:
-        # 게이트가 죽어도 분석 자체는 계속한다. 다만 **마스킹이 안 된 상태**
-        # 이므로 그 사실을 로그에 분명히 남긴다.
-        print(f"[analyzer] Context Gate 에러(마스킹 미적용): {e}")
+    # 1. Context Gate 통과 — **모든 텍스트 필드** 마스킹 + quality_score.
+    #    terminal_output 뿐 아니라 selected_text·project_files_summary 도
+    #    프롬프트에 실리므로 셋 다 가린다. 게이트가 죽으면 원문을 흘리지 않고
+    #    정규식 폴백으로 가린다(fail-closed). 자세한 사유는 _mask_context 참조.
+    request, quality_score = await _mask_context(request)
+    print(f"[analyzer] Context Gate 완료 | quality_score={quality_score:.2f}")
 
-    # 2. error_fingerprint 중복 체크
-    #    (예전엔 request.error_text 를 읽었는데 그 필드는 스키마에서 사라졌다
-    #     — 여기서 AttributeError 로 죽고 있었다. 터미널 출력에서 뽑는다.)
+    # 2. 중복 체크 — 캐시 키는 **요청 전체 범위**로 만든다(교차 오염 방지).
+    #    error_text 는 마스킹된 terminal_output 에서 뽑는다(예전엔 스키마에서
+    #    사라진 request.error_text 를 읽어 AttributeError 로 죽었다).
     error_text = _extract_error_text(request.terminal_output or "")
-    fingerprint = _error_fingerprint([error_text])
+    cache_key = _scoped_cache_key(request)
     now = time.time()
 
-    if fingerprint in _error_cache:
-        cached_time, cached_event = _error_cache[fingerprint]
+    if cache_key in _error_cache:
+        cached_time, cached_event = _error_cache[cache_key]
         if now - cached_time < _CACHE_TTL_SECONDS:
-            print(f"[analyzer] 캐시 히트: {fingerprint} (경과: {now - cached_time:.1f}초)")
+            print(f"[analyzer] 캐시 히트 (경과: {now - cached_time:.1f}초)")
             return cached_event
 
     # 캐시 정리: 만료된 항목 제거
@@ -429,7 +475,7 @@ async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
     print(f"[analyzer] 분석 완료 | event_type={event.event_type.value} | "
           f"has_error={has_error} | importance={importance_score}")
 
-    # 캐시 저장
-    _error_cache[fingerprint] = (now, event)
+    # 캐시 저장 (키는 요청 전체 범위 — 교차 오염 방지)
+    _error_cache[cache_key] = (now, event)
 
     return event
