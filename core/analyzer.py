@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 import time
+import uuid
 from datetime import datetime
 from typing import Optional
 
@@ -109,6 +110,19 @@ _CONTEXT_LINES_BEFORE = 10
 #: 패턴이 하나도 안 맞을 때 남길 꼬리 줄 수.
 _FALLBACK_TAIL_LINES = 30
 
+#: 추출·트리밍 결과의 **문자 수 상한**. 줄 단위 컷만으로는 못 막는 경우가 있다 —
+#: 미니파이 번들 출력이나 JSON 진단처럼 **한 줄이 통째로 수십 KB**면 30줄
+#: 폴백이 그 한 줄을 그대로 통과시켜 프롬프트가 모델 입력 한도를 넘는다.
+#: 마지막에 문자 상한으로 한 번 더 자른다.
+_MAX_CHARS = 4000
+
+
+def _cap_chars(text: str, limit: int = _MAX_CHARS) -> str:
+    """문자 수를 상한으로 자른다. 잘리면 **뒤쪽(에러가 대개 끝에 있다)**을 남긴다."""
+    if len(text) <= limit:
+        return text
+    return "…(길이 초과, 뒷부분만)\n" + text[-limit:]
+
 
 def _match_error_block(terminal_output: str) -> Optional[str]:
     """알려진 에러 패턴에 맞는 본문을 돌려준다. 못 찾으면 None."""
@@ -120,14 +134,17 @@ def _match_error_block(terminal_output: str) -> Optional[str]:
 
 
 def _extract_error_text(terminal_output: str) -> str:
-    """터미널 출력에서 에러 본문만 추출. 못 찾으면 마지막 30줄을 반환."""
+    """터미널 출력에서 에러 본문만 추출. 못 찾으면 마지막 30줄을 반환.
+
+    줄 수뿐 아니라 **문자 수 상한**도 적용한다(초장문 1줄 로그 대비).
+    """
     if not terminal_output:
         return ""
     body = _match_error_block(terminal_output)
     if body is not None:
-        return body
+        return _cap_chars(body)
     lines = terminal_output.strip().splitlines()
-    return "\n".join(lines[-_FALLBACK_TAIL_LINES:])
+    return _cap_chars("\n".join(lines[-_FALLBACK_TAIL_LINES:]))
 
 
 def _trim_terminal_output(
@@ -152,11 +169,11 @@ def _trim_terminal_output(
     if body is None:
         # 에러 형태를 못 찾음 → 꼬리만 남긴다 (앞에 맥락을 더 붙이지 않는다)
         lines = text.strip().splitlines()
-        return "\n".join(lines[-_FALLBACK_TAIL_LINES:])
+        return _cap_chars("\n".join(lines[-_FALLBACK_TAIL_LINES:]))
 
     body_lines = body.splitlines()
     if not body_lines:
-        return body
+        return _cap_chars(body)
 
     lines = text.splitlines()
     first = body_lines[0].strip()
@@ -174,7 +191,7 @@ def _trim_terminal_output(
     if head_from > 0:
         # 잘라냈다는 사실을 남긴다. 없으면 LLM 이 이게 로그 전부라고 읽는다.
         out = "… (앞부분 생략)\n" + out
-    return out
+    return _cap_chars(out)
 
 
 # ── 컨텍스트 마스킹 (LLM 에 나가기 전 시크릿·PII 제거) ─────────────────
@@ -512,7 +529,10 @@ async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
         contexts.append(request.selected_text)
 
     event = AgentEvent(
-        event_id=f"{session_id}_{int(now)}",
+        # event_id 는 매 이벤트 고유해야 한다. `{session_id}_{초}` 만으로는 같은
+        # 세션이 1초 안에 두 번 분석하면(특히 LLM 캐시 히트로 빨라질 때) 충돌하고,
+        # 빈 기본 session_id 면 릴레이의 무관한 요청끼리도 겹친다. uuid 로 유일화.
+        event_id=f"{session_id or 'anon'}_{int(now)}_{uuid.uuid4().hex[:8]}",
         event_type=_parse_event_type(event_type_str),
         summary=summary,
         contexts=contexts,
