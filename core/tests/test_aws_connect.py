@@ -31,6 +31,17 @@ def test_permission_check_covers_every_ecs_preflight_and_deploy_action() -> None
     assert expected <= set(aws.REQUIRED_DEPLOY_ACTIONS)
 
 
+def test_permission_context_uses_the_ecs_request_repo_not_unused_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ECR_REPOSITORY는 ECSDeployRequest가 읽지 않으므로 검사에도 쓰면 안 된다."""
+    monkeypatch.setenv("ECR_REPOSITORY", "different-repository")
+
+    context = aws._resolved_permission_context(None)
+
+    assert context.ecr_repo == "recoder-app"
+
+
 def test_connect_validates_and_keeps_credentials_in_current_core(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "ORIGINAL_ACCESS_KEY")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ORIGINAL_SECRET")
@@ -182,3 +193,38 @@ def test_permission_simulation_uses_deployment_resources_and_passrole_context(
         "ContextKeyValues": ["ecs-tasks.amazonaws.com"],
         "ContextKeyType": "string",
     }]
+
+
+def test_incomplete_permission_simulation_is_not_marked_as_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """클러스터/서비스가 없거나 IAM Simulator 일부 호출이 실패하면 초록 완료 금지."""
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            return {"EvaluationResults": [
+                {"EvalActionName": action, "EvalDecision": "allowed"}
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    monkeypatch.delenv("ECS_CLUSTER", raising=False)
+    monkeypatch.delenv("ECS_SERVICE", raising=False)
+
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+    )
+
+    assert report.missing_actions == []
+    assert report.inspected is False
+    assert any("다시 점검" in warning for warning in report.warnings)

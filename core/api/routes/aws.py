@@ -471,7 +471,7 @@ def _simulation_partition(identity_arn: str) -> str:
 def _resolved_permission_context(
     context: Optional[AwsDeploymentPermissionContext],
 ) -> AwsDeploymentPermissionContext:
-    """명시 입력 → 실제 배포 환경변수 → 안전한 기본값 순으로 대상을 정한다."""
+    """명시 입력 → 실제 ECS 요청 기본값 순으로 검사 대상을 정한다."""
     supplied = context or AwsDeploymentPermissionContext()
     try:
         execution_role, task_role = aws_policy.resolve_roles(
@@ -483,9 +483,11 @@ def _resolved_permission_context(
         execution_role = aws_policy.configured_execution_role()
         task_role = aws_policy.configured_task_role()
     return AwsDeploymentPermissionContext(
-        # ECSDeployRequest의 실제 기본 repo_name과 맞춘다. 환경변수로 실제
-        # 리포지토리를 지정했다면 그 값을 우선한다.
-        ecr_repo=(supplied.ecr_repo or os.getenv("ECR_REPOSITORY") or "recoder-app").strip(),
+        # ECS 배포 경로는 ECR_REPOSITORY 환경변수를 읽지 않고
+        # ECSDeployRequest.repo_name(기본 recoder-app)을 쓴다. 여기에서만
+        # ECR_REPOSITORY를 보면 권한 점검은 통과했는데 실제 push가 다른
+        # 저장소로 나가 실패하는 상태가 된다.
+        ecr_repo=(supplied.ecr_repo or "recoder-app").strip(),
         ecs_cluster=(supplied.ecs_cluster or os.getenv("ECS_CLUSTER") or "").strip(),
         ecs_service=(supplied.ecs_service or os.getenv("ECS_SERVICE") or "").strip(),
         task_execution_role=execution_role,
@@ -595,7 +597,14 @@ def _inspect_deploy_permissions(
         action for action in simulated_actions
         if any(decision.lower() != "allowed" for decision in decisions.get(action, ["implicitDeny"]))
     ]
-    report.inspected = bool(simulated_actions)
+    # 일부 그룹만 확인했거나 IAM Simulator 호출이 하나라도 실패했다면, 이
+    # 결과는 "점검 완료"가 아니다. UI는 inspected + missing 없음일 때만
+    # 초록 완료를 표시하므로, 여기서 엄격하게 완료 여부를 구분한다.
+    report.inspected = (
+        not failed_actions
+        and not deferred_actions
+        and set(REQUIRED_DEPLOY_ACTIONS).issubset(simulated_actions)
+    )
     if report.missing_actions:
         report.warnings.append("ECS 배포에 필요한 권한 일부가 실제 배포 대상에서 허용되지 않았습니다.")
     if failed_actions:
