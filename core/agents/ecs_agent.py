@@ -706,8 +706,18 @@ class ECSAgent:
     async def _step_scan_sources(
         self, req: ECSDeployRequest, rec: ECSDeployRecord
     ) -> ECSDeployRecord:
-        """이미지 없이 할 수 있는 검사 — Dockerfile(hadolint) 과 시크릿."""
+        """이미지 없이 할 수 있는 검사 — Dockerfile(hadolint) 과 시크릿.
+
+        **못 돌렸으면 못 돌렸다고 남긴다.** 이 단계가 조용히 넘어가면
+        `scan_result` 가 None 인 채로 게이트를 지나가고, 사용자는 "보안 검사
+        켜고 배포했다"고 믿는데 시크릿 검사도 Dockerfile 검사도 한 적이 없는
+        상태가 된다. 로그만 남기는 것으로는 부족하다 — 사이드바는 로그가
+        아니라 `provisioned` 의 경고를 읽는다.
+        """
         if not req.workspace_path:
+            self._add_scan_gaps(
+                rec, ["작업 폴더 없음 — 시크릿·Dockerfile 검사 불가"]
+            )
             logger.warning(
                 "작업 폴더가 없어 Dockerfile·시크릿 검사를 건너뜁니다."
             )
@@ -718,6 +728,9 @@ class ECSAgent:
         if candidate.is_file():
             dockerfile_path = str(candidate)
         else:
+            self._add_scan_gaps(
+                rec, [f"Dockerfile 없음({candidate}) — Dockerfile 검사 불가"]
+            )
             logger.warning("Dockerfile 을 찾지 못했습니다: %s", candidate)
 
         rec.scan_result = await security_scanner.scan_all(
@@ -729,18 +742,50 @@ class ECSAgent:
         return rec
 
     @staticmethod
-    def _record_scan_gaps(rec: ECSDeployRecord) -> None:
-        """못 돌린 검사를 사용자에게 알린다."""
-        if rec.scan_result is None or not rec.scan_result.tool_errors:
+    def _add_scan_gaps(rec: ECSDeployRecord, reasons: list[str]) -> None:
+        """못 돌린 검사를 **누적하되 중복 없이** 모아 한 줄로 보여준다.
+
+        ## 왜 문자열을 이어 붙이면 안 되나
+
+        이 함수는 배포 한 번에 여러 번 불린다 — 빌드 전 소스 검사, 빌드 후
+        이미지 검사, 그리고 작업 폴더·Dockerfile 이 없을 때. 스캐너가 하나도
+        안 깔린 **가장 흔한 상황**에서는 두 번의 `tool_errors` 가 겹치므로,
+        앞 문구에 뒷 문구를 그냥 이어 붙이면 같은 말이 두 번 나온다.
+
+        사유를 **모아 두고 문구는 매번 다시 렌더**한다. 그러면 몇 번을
+        불러도 결과가 같다.
+
+        ## 왜 `provisioned` 에 안 담나
+
+        `provisioned` 는 `dict[str, str]` 이다. 거기에 list 를 in-place 로
+        넣으면 파이단틱이 검사하지 않아 **쓸 때는 조용히 통과**하고,
+        `_load_records()` 가 다시 읽을 때 ValidationError 로 기록 한 건이
+        통째로 버려진다. 진행 중이던 배포가 그렇게 사라지면 비용 경고도
+        클러스터 이름도 없어져 떠 있는 태스크를 멈출 방법이 사라진다 —
+        `_save_records` 가 막으려던 바로 그 상황이다.
+        그래서 전용 필드 `ECSDeployRecord.scan_gaps` 를 쓴다.
+        """
+        gaps = list(rec.scan_gaps)
+        for reason in reasons:
+            reason = (reason or "").strip()
+            if reason and reason not in gaps:
+                gaps.append(reason)
+        if not gaps:
             return
+        rec.scan_gaps = gaps
         rec.provisioned["scan_warning"] = (
             "실행되지 않은 보안 검사가 있습니다: "
-            + ", ".join(rec.scan_result.tool_errors)
+            + ", ".join(gaps)
             + " — 이 배포의 '취약점 0건'은 검사 결과가 아닙니다."
         )
-        logger.warning(
-            "보안 검사 일부 미실행: %s", ", ".join(rec.scan_result.tool_errors)
-        )
+        logger.warning("보안 검사 일부 미실행: %s", ", ".join(gaps))
+
+    @classmethod
+    def _record_scan_gaps(cls, rec: ECSDeployRecord) -> None:
+        """스캐너가 보고한 미실행 목록을 경고에 합친다."""
+        if rec.scan_result is None or not rec.scan_result.tool_errors:
+            return
+        cls._add_scan_gaps(rec, list(rec.scan_result.tool_errors))
 
     async def _step_security_scan(
         self, req: ECSDeployRequest, rec: ECSDeployRecord, image: str
@@ -846,15 +891,19 @@ class ECSAgent:
         )
         # **태스크 역할은 명시적으로 설정했을 때만 쓴다.**
         #
-        # `resolve_roles()` 의 기본값은 `ecsTaskRole` 인데, 그건 AWS 가
-        # 만들어 주는 역할이 **아니다**(실행 역할과 달리 콘솔이 자동 생성해
-        # 주지 않고, 우리 문서도 만들라고 안내하지 않는다). 그런데 태스크
-        # 정의에는 항상 들어갔다. 그래서 평범한 계정에서 기본 설정으로
-        # 배포하면 없는 역할을 가리켜 PassRole 거부나 "unable to assume the
-        # role" 로 죽었다 — 정작 태스크 역할은 앱이 AWS API 를 부를 때만
-        # 필요하고, 샘플 앱을 포함한 대부분의 컨테이너는 필요 없는데도.
+        # 기본 이름 `ecsTaskRole` 은 AWS 가 만들어 주는 역할이 **아니다**
+        # (실행 역할과 달리 콘솔이 자동 생성해 주지 않고, 우리 문서도 만들라고
+        # 안내하지 않는다). 그런데 태스크 정의에는 항상 들어갔다. 그래서
+        # 평범한 계정에서 기본 설정으로 배포하면 없는 역할을 가리켜 PassRole
+        # 거부나 "unable to assume the role" 로 죽었다 — 정작 태스크 역할은
+        # 앱이 AWS API 를 부를 때만 필요하고, 샘플 앱을 포함한 대부분의
+        # 컨테이너는 필요 없는데도.
+        #
+        # 판단 근거는 `resolve_roles()` 가 돌려준 **빈 문자열 하나**다. 여기서
+        # 환경변수를 다시 읽어 따로 판단하면 권한표(`build_policy`)와 배포가
+        # 서로 다른 근거로 갈라진다 — 이 파일이 이미 한 번 겪은 실패다.
         task_arn = ""
-        if aws_policy.role_from_env(aws_policy.ENV_TASK_ROLE_ARN):
+        if task_name:
             task_arn = aws_policy._arn(
                 "iam", f"role/{task_name}", ctx, global_service=True
             )
@@ -889,9 +938,17 @@ class ECSAgent:
             raise InfraError(
                 "태스크 정의를 등록하지 못했습니다.",
                 detail=aws_infra.error_message(exc),
-                remedy=f"권한표의 iam:PassRole 이 {exec_arn} 과 {task_arn} 에 "
-                       "대해 허용돼 있는지 확인하세요. 학교 계정은 두 역할 모두 "
-                       "LabRole 이어야 합니다.",
+                # 태스크 역할은 안 붙는 것이 기본이다. 빈 값을 그대로 문장에
+                # 끼워 넣으면 "... 과  에 대해" 처럼 말이 안 되는 안내가 나가고,
+                # 사용자는 있지도 않은 역할을 찾게 된다.
+                remedy=(
+                    f"권한표의 iam:PassRole 이 {exec_arn} 과 {task_arn} 에 대해 "
+                    "허용돼 있는지 확인하세요. 학교 계정은 두 역할 모두 "
+                    "LabRole 이어야 합니다."
+                    if task_arn else
+                    f"권한표의 iam:PassRole 이 {exec_arn} 에 대해 허용돼 있는지 "
+                    "확인하세요. 학교 계정은 실행 역할이 LabRole 이어야 합니다."
+                ),
             ) from exc
 
         arn = resp["taskDefinition"]["taskDefinitionArn"]
