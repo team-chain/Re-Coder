@@ -574,14 +574,19 @@ class CodeGenerateRequest(BaseModel):
 @router.post("/api/code/generate")
 async def generate_code_route(body: CodeGenerateRequest) -> dict:
     import asyncio as _asyncio
-    import os as _os
     import uuid as _uuid
 
     if not (body.instruction or "").strip():
         raise HTTPException(status_code=400, detail="instruction 이 비어 있습니다.")
 
-    if body.workspace_path and Path(body.workspace_path).exists():
-        _os.environ["RECODER_PROJECT_ROOT"] = body.workspace_path
+    # NOTE: 예전에는 여기서 `RECODER_PROJECT_ROOT` 전역 env 에 워크스페이스
+    # 경로를 심었다. 아래 to_thread 로 넘어가는 지점에서 실행이 양보되므로,
+    # 그 사이 **다른 창의 요청**이 전역을 덮어쓰면 이 요청이 남의 워크스페이스
+    # 를 기준으로 파일을 만든다(회차1 교차 오염 P1, 커밋 489e3be). 그때
+    # `project_root` 인자 전달만 추가하고 전역 쓰기를 지우지 않아 사고 경로가
+    # 남아 있었다 — 경로를 안 보낸 요청이 `_project_root()` 폴백으로 그 전역을
+    # 읽으면 여전히 남의 워크스페이스를 잡는다. 그래서 쓰기 자체를 없앤다.
+    # 요청별 경로는 항상 인자로만 넘긴다(아래 project_root=).
 
     open_file = None
     if body.open_file_path or body.open_file_content:
@@ -722,14 +727,12 @@ ReCoder:"""
 @router.post("/api/code/plan")
 async def code_plan_route(body: CodePlanRequest) -> dict:
     import asyncio as _asyncio
-    import os as _os
     import uuid as _uuid
 
     if not (body.instruction or "").strip():
         raise HTTPException(status_code=400, detail="instruction 이 비어 있습니다.")
 
-    if body.workspace_path and Path(body.workspace_path).exists():
-        _os.environ["RECODER_PROJECT_ROOT"] = body.workspace_path
+    # generate 와 동일 — 전역 env 쓰기 없음. 사유는 generate_code_route 주석 참조.
 
     open_file = None
     if body.open_file_path or body.open_file_content:
