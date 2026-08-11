@@ -20,6 +20,11 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 
+import json
+import os
+from pathlib import Path
+
+from core import branch_source
 from core.agents.ecs_agent import ECSAgent
 from core.schemas import (
     ECSDeployRecord,
@@ -28,11 +33,116 @@ from core.schemas import (
 )
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/ecs", tags=["ecs"])
+# 접두어가 "/ecs" 였다. 다른 라우터는 전부 "/api/..." 를 쓰는데 여기만
+# 달라서, 디스코드 봇이 부르는 "/api/ecs/deploy" 가 404 였다.
+# 리포 전체를 확인한 결과 "/ecs/..." 를 부르는 코드는 없었으므로
+# (로그 그룹 이름 문자열만 걸린다) 깨질 호출자 없이 맞출 수 있다.
+router = APIRouter(prefix="/api/ecs", tags=["ecs"])
 
-# 인메모리 배포 레코드 저장소 (실제 환경에서는 SQLite/DB로 대체)
-_deploy_records: Dict[str, ECSDeployRecord] = {}
+#: 아직 끝나지 않은 배포로 볼 상태.
+_ACTIVE_STATUSES = frozenset({ECSDeployStatus.PENDING, ECSDeployStatus.IN_PROGRESS})
+
+
+#: 배포 기록 저장 파일. 테스트는 환경변수로 다른 경로를 준다.
+def _store_path() -> Path:
+    override = os.environ.get("RECODER_ECS_STORE")
+    if override:
+        return Path(override)
+    return Path.home() / ".recoder" / "ecs_deployments.json"
+
+
+#: 재시작 뒤에도 살아남는 최근 기록 수. 이보다 오래된 건 버린다.
+_MAX_STORED_RECORDS = 50
+
+
+def _save_records() -> None:
+    """기록을 디스크에 남긴다. 실패해도 배포를 막지 않는다.
+
+    **이게 없으면 돈이 샌다.** 예전에는 기록이 프로세스 메모리에만 있었다.
+    Core 를 재시작하면(리포에 `restart-core.bat` 이 있을 만큼 흔한 일이다)
+    ECS 서비스는 desiredCount=1 로 계속 돌면서 과금되는데, 상태 조회는
+    빈 기본값(`stage="idle"`)을 돌려줬다. 사이드바에는 배포된 게 아무것도
+    없다고 뜨고, 멈출 방법도 화면에 없다. 커스텀 이름을 쓴 사용자는
+    배포 중지 엔드포인트의 기본값(recoder-cluster/recoder-app)조차 안 맞아
+    제품 안에서는 손쓸 수가 없었다.
+    """
+    try:
+        recent = sorted(
+            _deploy_records.values(), key=lambda r: r.started_at, reverse=True
+        )[:_MAX_STORED_RECORDS]
+        path = _store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = [r.model_dump(mode="json") for r in recent]
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)   # 원자적 교체 — 반쯤 쓰인 파일을 남기지 않는다
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("배포 기록을 저장하지 못했습니다: %s", exc)
+
+
+def _load_records() -> Dict[str, ECSDeployRecord]:
+    """디스크에서 기록을 복구한다.
+
+    **아직 진행 중이던 기록은 진행 중으로 되살리지 않는다.** 그 파이프라인을
+    돌리던 프로세스는 이미 죽었으므로 아무도 그 배포를 이어가지 않는다.
+    진행 중으로 두면 409 동시 배포 가드가 그 서비스를 영원히 잠근다.
+    대신 "결과를 알 수 없음"으로 끝맺고, 태스크가 떠 있을 수 있다는 경고와
+    함께 클러스터·서비스 이름을 남긴다 — 그래야 멈출 수 있다.
+    """
+    out: Dict[str, ECSDeployRecord] = {}
+    path = _store_path()
+    if not path.is_file():
+        return out
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("배포 기록을 읽지 못했습니다(무시하고 진행): %s", exc)
+        return out
+
+    for item in raw if isinstance(raw, list) else []:
+        try:
+            record = ECSDeployRecord(**item)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("배포 기록 한 건을 건너뜁니다: %s", exc)
+            continue
+        if record.status in _ACTIVE_STATUSES:
+            record.status = ECSDeployStatus.FAILED
+            record.completed_at = record.completed_at or datetime.now(timezone.utc)
+            record.error_message = (
+                "Core 가 재시작되어 이 배포의 결과를 알 수 없습니다."
+            )
+            record.error_remedy = (
+                f"AWS 콘솔이나 배포 중지로 '{record.cluster}/{record.service}' "
+                "상태를 확인하세요."
+            )
+            record.provisioned["cost_warning"] = (
+                f"서비스 '{record.service}' 의 태스크가 계속 떠 있을 수 "
+                "있습니다 — 요금이 발생합니다. 배포 중지"
+                "(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 내리세요."
+            )
+            logger.warning(
+                "재시작 전 진행 중이던 배포를 발견했습니다: %s (%s/%s)",
+                record.deployment_id, record.cluster, record.service,
+            )
+        out[record.deployment_id] = record
+    return out
+
+
+# 배포 레코드 저장소. 메모리에 두되 디스크에 백업하고, 기동 때 되읽는다.
+_deploy_records: Dict[str, ECSDeployRecord] = _load_records()
 _ecs_agent = ECSAgent()
+
+
+
+
+def _active_deployment(cluster: str, service: str) -> Optional[ECSDeployRecord]:
+    """같은 클러스터·서비스에서 아직 돌고 있는 배포. 없으면 None."""
+    for record in _deploy_records.values():
+        if record.status not in _ACTIVE_STATUSES:
+            continue
+        if record.cluster == cluster and record.service == service:
+            return record
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -59,11 +169,97 @@ async def start_deployment(
 
     OPA 정책 위반 시 400 반환 (fail-closed Level ≥ 3).
     """
-    deployment_id = str(uuid4())
+    # **자리를 먼저 잡는다.** 확인과 등록 사이에 await 가 하나라도 들어가면
+    # 그 틈으로 두 번째 요청이 들어온다 — 자세한 것은 `_reserve_deployment`.
+    record = _reserve_deployment(request)
 
-    # 초기 PENDING 레코드 등록
+    try:
+        # **정책이 보는 값은 여기서 확정한다.**
+        #
+        # 이 라우트가 두 경로의 합류점이다 — 확장은 `/api/deploy/ecs` 를 거쳐
+        # 여기로 오고, 디스코드 봇과 직접 호출은 곧바로 여기로 온다. 브랜치
+        # 판단을 확장용 변환기에만 뒀더니 **직접 호출 경로가 통째로 비어
+        # 있었다**: `{"branch": "main"}` 한 줄이면 "프로덕션은 main 에서만"이
+        # 그냥 통과했다. 승인 레벨(`_effective_approval_level`)과 같은 이유로,
+        # 게이트 재료는 합류점에서 서버가 정한다.
+        #
+        # git 은 동기 호출이라 이벤트 루프에서 직접 돌리지 않는다.
+        loop = asyncio.get_running_loop()
+        request.branch = await loop.run_in_executor(
+            None,
+            lambda: branch_source.resolve_branch(request.workspace_path, request.branch),
+        )
+        # 환경 이름도 여기서 접는다. Rego 프리셋이 `environment == "production"`
+        # 을 정확히 비교하므로 `"Production"` 한 글자 차이로 규칙이 안 걸린다.
+        request.environment = (request.environment or "").strip().lower()
+
+        return await _gate_and_start(record, request, background_tasks)
+    except BaseException:
+        # **예약을 잡아 놓고 죽으면 그 서비스는 영영 409 가 된다.**
+        # 아래 게이트 경로는 자기 사유로 FAILED 를 남기므로 그때는 건드리지
+        # 않고, 그 외의 예기치 못한 실패만 여기서 정리한다.
+        #
+        # `Exception` 이 아니라 `BaseException` 인 이유: 이 구간에서 가장
+        # 그럴듯한 중단은 `asyncio.CancelledError`(우아한 종료 중 요청 취소)
+        # 인데 그건 `Exception` 이 아니다. 정작 막으려던 경우를 놓친다.
+        if record.status in _ACTIVE_STATUSES:
+            record.status = ECSDeployStatus.FAILED
+            record.completed_at = datetime.now(timezone.utc)
+            record.error_message = record.error_message or (
+                "배포를 시작하지 못했습니다."
+            )
+            record.error_remedy = record.error_remedy or (
+                "Core 로그와 작업 폴더를 확인한 뒤 다시 시도하세요. "
+                "AWS 자원은 아직 아무것도 만들어지지 않았습니다."
+            )
+            # **디스크에도 반영한다.** 메모리에서만 FAILED 로 바꾸면,
+            # 다른 요청이 흘린 `_save_records()` 가 이미 이 기록을 PENDING
+            # 으로 써 놓은 경우 그 상태가 남는다. 재기동하면 `_load_records`
+            # 가 그걸 "결과를 모르는 진행 중 배포"로 보고 **있지도 않은
+            # Fargate 태스크에 대한 요금 경고**를 만들어 낸다 — AWS 를 한 번도
+            # 부른 적 없는 배포인데.
+            _save_records()
+        raise
+
+
+def _reserve_deployment(request: ECSDeployRequest) -> ECSDeployRecord:
+    """진행 중 확인과 자리 예약을 **한 번에** 끝내고 기록을 돌려준다.
+
+    ## 왜 하나로 묶나
+
+    "이미 도는 배포가 있나" 확인과 "내 기록을 넣는다" 사이에 `await` 가
+    하나라도 있으면, 그 사이에 두 번째 요청이 같은 확인을 통과한다.
+    확장의 배포 버튼을 두 번 빠르게 누르면 파이프라인이 두 개 뜨고, 둘 다
+    같은 태그로 빌드해 같은 ECR 리포에 올리고 같은 ECS 서비스를 갱신한다.
+    게다가 `/api/deploy/ecs/status` 는 가장 최근 것 하나만 보여줘서, 먼저
+    시작한 배포는 사용자 눈에서 사라진 채 계속 돌아간다.
+
+    실제로 그 틈이 생겼다 — 브랜치 판정을 executor 로 옮기면서 확인과 등록
+    사이에 `await` 가 들어갔고, git 서브프로세스가 도는 수십~수백 ms 동안
+    창이 열렸다.
+
+    **이 함수가 동기라는 것이 원자성의 근거다.** 동기 함수 안에는 `await` 를
+    쓸 수 없으므로, 나중에 누가 무엇을 추가해도 이 구간은 쪼개지지 않는다
+    (이벤트 루프는 단일 스레드다). 주석으로 "여기 await 넣지 마세요"라고
+    적어 두는 것과는 강도가 다르다.
+    """
+    active = _active_deployment(request.cluster, request.service)
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "deployment_in_progress",
+                "message": (
+                    f"{request.cluster}/{request.service} 에 이미 진행 중인 "
+                    "배포가 있습니다. 끝난 뒤 다시 시도하세요."
+                ),
+                "deployment_id": active.deployment_id,
+                "started_at": active.started_at.isoformat() if active.started_at else "",
+            },
+        )
+
     record = ECSDeployRecord(
-        deployment_id=deployment_id,
+        deployment_id=str(uuid4()),
         project_id=request.project_id,
         cluster=request.cluster,
         service=request.service,
@@ -71,55 +267,154 @@ async def start_deployment(
         image=request.image,
         status=ECSDeployStatus.PENDING,
     )
-    _deploy_records[deployment_id] = record
+    _deploy_records[record.deployment_id] = record
+    return record
+
+
+async def _gate_and_start(
+    record: ECSDeployRecord,
+    request: ECSDeployRequest,
+    background_tasks: BackgroundTasks,
+) -> ECSDeployRecord:
+    """정책 게이트를 통과시키고 파이프라인을 백그라운드로 띄운다."""
+    deployment_id = record.deployment_id
 
     # OPA 정책 평가 (core/opa_client.py)
-    try:
-        from core.opa_client import opa_client
+    #
+    # 이 블록은 예전에 잘못된 인자 이름(policy_path / input_data /
+    # security_level)으로 evaluate() 를 불렀다. 실제 시그니처는
+    # (action, level, context, ...) 라서 매번 TypeError 가 났고, 그걸 아래
+    # `except Exception` 이 삼켜 "OPA에 연결할 수 없습니다"로 바꿔 내보냈다.
+    # 결과: **모든 ECS 배포 요청이 항상 503.** 우리 코드의 타입 오류가
+    # 외부 서비스 장애로 둔갑하는, 원인을 절대 못 찾는 형태였다.
+    #
+    # OPAClient.evaluate() 는 이미 내부에서 fail-closed 를 한다
+    # (연결 실패 시 Level 3~4 는 deny, 1~2 는 allow). 그래서 여기서
+    # 한 겹 더 감싸지 않는다 — 그 중복이 위 사고의 원인이었다.
+    from core.opa_client import opa_client
 
-        policy_input = {
-            "action": "ecs_deploy",
-            "project_id": request.project_id,
-            "image": request.image,
-            "cluster": request.cluster,
-            "region": request.region,
-            "run_security_scan": request.run_security_scan,
-            "generate_sbom": request.generate_sbom,
-        }
+    try:
         opa_result = await opa_client.evaluate(
-            policy_path="recoder/deploy/allow",
-            input_data=policy_input,
-            security_level=request.security_level,
+            action="ecs_deploy",
+            level=_effective_approval_level(request),
+            context=_policy_context(request),
+            resource_type="ecs_service",
+            resource_id=f"{request.cluster}/{request.service}",
         )
-        if not opa_result.get("result", {}).get("allow", True):
-            record.status = ECSDeployStatus.FAILED
-            record.error_message = "OPA 정책 거부 — 배포 권한 없음"
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "policy_denied",
-                    "message": "OPA 정책이 이 배포를 거부했습니다",
-                    "deployment_id": deployment_id,
-                },
+    except Exception as opa_exc:  # noqa: BLE001
+        # 여기까지 왔다면 클라이언트 자체의 결함이다(시그니처·구현 오류).
+        # 그걸 "OPA 장애"로 보고하면 사용자는 영원히 엉뚱한 곳을 본다.
+        logger.error("OPA 평가 호출 자체가 실패했습니다", exc_info=True)
+        # 종료 기록은 **한 벌로** 남긴다. 사유만 쓰고 끝난 시각·구제책을
+        # 빼면 확장은 "끝났는데 언제 왜 끝났는지 모르는" 카드를 그린다
+        # (`to_status_response` 가 remedy/finished_at 을 읽는다).
+        record.status = ECSDeployStatus.FAILED
+        record.completed_at = datetime.now(timezone.utc)
+        record.error_message = f"정책 평가를 실행하지 못했습니다: {opa_exc}"
+        record.error_remedy = (
+            "Core 로그의 정책 평가 오류를 확인하세요. AWS 자원은 아직 "
+            "아무것도 만들어지지 않았습니다."
+        )
+        _save_records()
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "policy_evaluation_crashed",
+                "message": f"정책 평가 중 내부 오류가 발생했습니다: {opa_exc}",
+                "deployment_id": deployment_id,
+            },
+        ) from opa_exc
+
+    # **"allow" 하나만 통과시킨다.**
+    #
+    # 예전에는 `decision.startswith("deny")` 로만 막았다. 그런데 결정값은
+    # 다섯 가지다 — allow / allow_with_approval / deny /
+    # deny_with_fix_suggestion / escalate_to_security. 앞의 조건은
+    # `allow_with_approval` 과 `escalate_to_security` 를 통과시켜서,
+    # **승인자가 필요하다는 결정과 보안 에스컬레이션 결정이 곧바로
+    # 배포로 이어졌다.** 게이트를 통과시키는 조건은 화이트리스트여야 한다.
+    decision = (opa_result.decision or "").strip()
+
+    # OPA 서버가 없을 때 **여기서 끝내면 배포 버튼이 영원히 503 이다.**
+    #
+    # 리포 어디에도 OPA 를 띄우는 것이 없다(compose 파일도, SETUP 안내도,
+    # main.py 의 프로세스 관리도 없다). 확장이 보내는 요청은 approval_level
+    # 기본값이 3 이므로 `_fail_closed` 가 항상 deny 를 돌려준다. 즉 스톡
+    # 상태에서 확장의 배포 버튼은 **한 번도 성공할 수 없다.** 게다가
+    # `/api/deploy/ecs/ready` 는 Docker 와 STS 만 보고 "준비됨"이라고 한다.
+    #
+    # 이 경로를 대체하기 전의 구현(`core/ecs_deploy_agent.py`)에는 폴백이
+    # 있었다 — `opa_gate` 의 로컬 내장 규칙이다. 그걸 되살린다.
+    # 정책을 **무시**하는 게 아니라, 같은 규칙(SBOM 필수 · trivy critical
+    # 차단 · 시크릿 차단 · hadolint error 차단)을 로컬에서 적용한다.
+    # **조건은 "OPA 가 없다" 하나다.** 예전에는 `decision != "allow"` 도 같이
+    # 봤는데, `OPAClient._fail_closed` 는 승인 레벨 1~2 에서 OPA 가 없으면
+    # `decision="allow", opa_available=False` 를 돌려준다. 그래서 요청 본문에
+    # `approval_level: 1` 한 줄만 넣으면 **로컬 규칙이 아예 호출되지 않고**
+    # SBOM·스캔·브랜치 규칙이 전부 건너뛰어졌다. 판단 재료가 없어서가 아니라
+    # 판단 자체를 안 하는 경로였다.
+    #
+    # 위의 `_effective_approval_level` 로 레벨 자체도 못 낮추게 했지만,
+    # 여기 조건은 레벨과 **무관하게** 성립해야 한다 — OPA 가 없으면 로컬
+    # 규칙이 판단한다. 한쪽만 고치면 다음에 레벨 정책이 바뀔 때 또 갈라진다.
+    if not opa_result.opa_available:
+        fallback = _local_policy_fallback(record, request)
+        if fallback is not None:
+            decision = (fallback.decision or "").strip()
+            opa_result = fallback
+
+    if decision != "allow":
+        record.status = ECSDeployStatus.FAILED
+        record.error_message = f"정책 통과 실패({decision}) — {opa_result.reason}"
+
+        # OPA 에 못 닿아서 나온 거부와, 정책이 실제로 막은 거부는 다르다.
+        # 같은 코드로 보고하면 사용자가 무엇을 해야 할지 알 수 없다.
+        if not opa_result.opa_available:
+            error_code, status_code = "opa_unavailable", 503
+            message = (
+                "정책 엔진(OPA)에 연결할 수 없고, 로컬 폴백 규칙으로도 "
+                "판단하지 못했습니다."
             )
-    except HTTPException:
-        raise
-    except Exception as opa_exc:
-        # OPA 연결 실패 → fail-closed (Level ≥ 3)
-        if request.security_level >= 3:
-            record.status = ECSDeployStatus.FAILED
-            record.error_message = f"OPA 연결 실패 (fail-closed): {opa_exc}"
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": "opa_unavailable",
-                    "message": "OPA에 연결할 수 없습니다. Level 3+ 배포는 차단됩니다.",
-                    "deployment_id": deployment_id,
-                },
+        elif decision == "allow_with_approval":
+            error_code, status_code = "approval_required", 403
+            message = (
+                f"이 배포는 승인이 필요합니다(필요 승인자 "
+                f"{opa_result.required_approvers}명). 승인 절차를 거친 뒤 "
+                "다시 시도하세요."
             )
-        logger.warning("OPA 연결 실패 (Level %d, pass-through): %s", request.security_level, opa_exc)
+        elif decision == "escalate_to_security":
+            error_code, status_code = "security_escalation_required", 403
+            message = "이 배포는 보안팀 검토가 필요합니다."
+        else:
+            error_code, status_code = "policy_denied", 403
+            message = f"OPA 정책이 이 배포를 거부했습니다: {opa_result.reason}"
+
+        # **거부도 남긴다.** 성공 경로에서만 저장하면, 코어를 다시 켰을 때
+        # "왜 막혔는지"가 통째로 사라진다. 사용자가 다시 눌러 보고 또 막히는
+        # 동안 이유는 로그에만 남아 있는 상태가 된다.
+        #
+        # 사유만 남기고 고치는 법과 끝난 시각을 빼면 반쪽이다 — 사이드바는
+        # `remedy` 와 `finished_at` 을 읽고, 둘이 비면 "실패했는데 언제 왜
+        # 실패했는지 모르는" 카드가 된다.
+        record.error_remedy = opa_result.fix_suggestion or message
+        record.completed_at = datetime.now(timezone.utc)
+        _save_records()
+
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error": error_code,
+                "decision": decision,
+                "message": message,
+                "fix_suggestion": opa_result.fix_suggestion,
+                "deployment_id": deployment_id,
+            },
+        )
 
     # 백그라운드에서 ECS 파이프라인 실행
+    # 파이프라인이 시작되기 **전에** 남긴다. 여기서 죽어도 클러스터·서비스
+    # 이름은 남아 있어야 나중에 멈출 수 있다.
+    _save_records()
     background_tasks.add_task(_run_deployment, deployment_id, request)
 
     logger.info(
@@ -129,20 +424,185 @@ async def start_deployment(
     return record
 
 
-async def _run_deployment(deployment_id: str, request: ECSDeployRequest) -> None:
-    """백그라운드 배포 태스크."""
-    try:
-        result = await _ecs_agent.deploy(request)
-        result.deployment_id = deployment_id
-        _deploy_records[deployment_id] = result
-        logger.info(
-            "Deployment %s finished: status=%s", deployment_id, result.status
+def _policy_context(request: ECSDeployRequest) -> dict:
+    """정책 평가가 보는 사실들. **OPA 와 로컬 폴백이 같은 함수를 쓴다.**
+
+    갈라 놓으면 한쪽만 값을 받는다. 실제로 그랬다 — OPA 컨텍스트에도
+    폴백에도 `branch` 가 없어서, "프로덕션은 main 브랜치에서만" 규칙이
+    **어느 경로로도 아무것도 막지 못했다.** 규칙은 있는데 판단 재료가
+    없으면 그 규칙은 없는 것과 같다.
+    """
+    return {
+        "project_id": request.project_id,
+        "image": request.image,
+        "cluster": request.cluster,
+        "service": request.service,
+        "region": request.region,
+        "run_security_scan": request.run_security_scan,
+        "generate_sbom": request.generate_sbom,
+        "environment": request.environment or "",
+        "branch": request.branch or "",
+    }
+
+
+#: ECS 배포의 **최소** 승인 레벨. 컨테이너를 실제로 띄우고 과금을 발생시키는
+#: 작업이라 설계상 Level 3 이다.
+#:
+#: `approval_level` 은 요청 **본문**에 있는 값이라 클라이언트가 정한다. 그걸
+#: 그대로 쓰면 `{"approval_level": 1}` 한 줄로 `OPAClient._fail_closed` 의
+#: "Level 1~2 는 OPA 없어도 allow" 갈래에 올라탈 수 있다. 게이트를 통과하는
+#: 조건을 **호출자가 고를 수 있으면 그건 게이트가 아니다.**
+#:
+#: 올리는 것은 막지 않는다 — 더 엄격하게 검사받겠다는 요청은 존중해도 된다.
+ECS_DEPLOY_MIN_APPROVAL_LEVEL = 3
+
+
+def _effective_approval_level(request: ECSDeployRequest) -> int:
+    """정책 평가에 실제로 쓸 승인 레벨. 내리는 것만 막는다."""
+    requested = int(getattr(request, "approval_level", ECS_DEPLOY_MIN_APPROVAL_LEVEL))
+    if requested < ECS_DEPLOY_MIN_APPROVAL_LEVEL:
+        logger.warning(
+            "요청이 승인 레벨 %d 를 보냈지만 ECS 배포는 최소 %d 입니다 — 올려서 평가합니다.",
+            requested, ECS_DEPLOY_MIN_APPROVAL_LEVEL,
         )
+        return ECS_DEPLOY_MIN_APPROVAL_LEVEL
+    return requested
+
+
+#: OPA 가 없는 상태에서 스캔까지 끈 요청을 막을 때 쓰는 문구.
+#: 상수로 빼 둔다 — 라우트가 내려보내는 문구와 테스트가 읽는 문구가
+#: 갈라지면, 문구만 바꿨는데 테스트는 계속 통과하는 상황이 생긴다.
+_FALLBACK_SCAN_OFF_REASON = (
+    "정책 엔진(OPA)에 연결할 수 없는 상태에서는 보안 스캔을 끈 배포를 "
+    "허용하지 않습니다. run_security_scan=false 면 취약점·시크릿·Dockerfile "
+    "검사가 배포 경로 어디에서도 수행되지 않는데, 로컬 폴백에는 그 결과를 "
+    "대신 확인할 방법이 없습니다."
+)
+_FALLBACK_SCAN_OFF_FIX = (
+    "run_security_scan 을 켜고 다시 요청하세요. 스캔 없이 배포해야 한다면 "
+    "정책 엔진(OPA)을 띄운 뒤 그쪽 정책으로 판단받아야 합니다."
+)
+_FALLBACK_SCAN_OFF_WARNING = (
+    "정책 엔진(OPA)에 연결하지 못했고, 요청이 보안 스캔을 끈 상태여서 "
+    "로컬 내장 규칙이 배포를 거부했습니다."
+)
+
+
+def _local_policy_fallback(record: ECSDeployRecord, request: ECSDeployRequest):
+    """OPA 서버가 없을 때 쓰는 로컬 내장 게이트.
+
+    `core/opa_gate.py` 의 `_local_deploy_gate` 를 그대로 쓴다 — 이 경로를
+    대체하기 전의 구현이 쓰던 바로 그 규칙이다. 정책을 건너뛰는 게 아니라
+    **같은 규칙을 로컬에서** 적용한다.
+
+    아직 스캔 전이므로 이 시점에 알 수 있는 사실만 넘긴다. 스캔 결과에
+    걸리는 배포는 파이프라인 안의 보안 게이트가 따로 막는다 — 여기서
+    "스캔 결과를 모른다"를 "위반이 없다"로 바꿔 넘기면 게이트가 두 번
+    통과되는 셈이 되므로, 그 사실을 기록에 남긴다.
+
+    실패하면 None 을 돌려준다 — 폴백이 터졌다고 원래의 거부를 뒤집지 않는다.
+    """
+    try:
+        from core.opa_client import OPAResult as ClientOPAResult
+        from core.opa_gate import OPADecision, OPAGate
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("로컬 정책 폴백을 불러오지 못했습니다: %s", exc)
+        return None
+
+    # **스캔을 끈 배포는 폴백이 통과시킬 수 없다.**
+    #
+    # 아래에서 trivy/gitleaks/hadolint 를 "위반 없음"으로 넘기는 근거는 단
+    # 하나 — **파이프라인이 곧 실제로 검사하기 때문**이다. 그런데
+    # `run_security_scan=False` 면 `_step_scan_sources` 와 `_step_security_scan`
+    # 이 통째로 건너뛰어진다. 그 상태에서도 통과값을 만들어 넘기면,
+    # **OPA 가 꺼져 있는 기본 상태에서 승인 레벨 3 배포가 보안 검사를
+    # 하나도 거치지 않고 나간다.** 근거가 사라지면 값도 만들면 안 된다.
+    if not request.run_security_scan:
+        logger.warning(
+            "OPA 서버가 없고 보안 스캔도 꺼져 있어 배포를 거부합니다 "
+            "(project=%s image=%s)", request.project_id, request.image,
+        )
+        record.provisioned["policy_warning"] = _FALLBACK_SCAN_OFF_WARNING
+        return ClientOPAResult(
+            decision=OPADecision.DENY.value,
+            reason=_FALLBACK_SCAN_OFF_REASON,
+            fix_suggestion=_FALLBACK_SCAN_OFF_FIX,
+            # **판단은 했다.** False 로 두면 라우트가 503("OPA 에 연결할 수
+            # 없습니다")을 내면서 이 거부 사유를 통째로 버린다.
+            opa_available=True,
+        )
+
+    try:
+        context = _policy_context(request)
+        result = OPAGate()._local_deploy_gate({
+            # SBOM·스캔 결과는 **이 시점에 아직 없다.** 여기서 넘기는 값은
+            # "그렇게 하겠다는 요청"이고, 실제 결과는 파이프라인 안의 게이트가
+            # 강제한다 (`_step_sbom` 이 SBOM 생성 실패를 배포 실패로 올리고,
+            # `_scan_gate_message` 가 스캔 위반을 막는다).
+            # 스캔이 꺼진 경우는 위에서 이미 거부됐으므로, 여기 도달했다는
+            # 것은 두 스캔 단계가 **호출된다**는 뜻이다. 그중 못 돈 검사가
+            # 있으면(작업 폴더 없음, 스캐너 미설치) `_record_scan_gaps` 가
+            # `scan_warning` 으로 남겨 사용자가 "0건"을 결과로 오해하지
+            # 않게 한다 — 여기서 그것까지 판단할 수는 없다.
+            "sbom": {"present": bool(request.generate_sbom)},
+            "trivy": {"critical_count": 0, "high_count": 0},
+            "gitleaks": {"passed": True},
+            "hadolint": {"passed": True},
+            "environment": context["environment"],
+            "branch": context["branch"],
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("로컬 정책 폴백 평가 실패: %s", exc)
+        return None
+
+    # **두 모듈의 OPAResult 는 서로 다른 클래스다.**
+    # opa_gate 쪽에는 `opa_available` 이 없어서, 그대로 돌려주면 아래
+    # 거부 경로에서 그 속성을 읽다가 AttributeError → 500 이 난다.
+    # 라우트가 쓰는 모양으로 옮겨 담는다.
+    decision = getattr(result, "decision", "")
+    decision = str(getattr(decision, "value", decision) or "")
+    logger.warning(
+        "OPA 서버가 없어 로컬 폴백 규칙으로 판단했습니다: %s", decision
+    )
+    record.provisioned["policy_warning"] = (
+        "정책 엔진(OPA)에 연결하지 못해 로컬 내장 규칙으로 판단했습니다. "
+        "취약점·시크릿 검사는 배포 파이프라인 안에서 그대로 수행됩니다."
+    )
+    return ClientOPAResult(
+        decision=decision,
+        reason=(getattr(result, "reason", "") or "")
+        + " (OPA 서버 없음 — 로컬 내장 규칙 적용)",
+        fix_suggestion=getattr(result, "fix_suggestion", "") or None,
+        # 로컬 규칙으로 **판단은 했다.** 여기서 False 로 두면 라우트가
+        # "OPA에 연결할 수 없습니다" 503 을 내면서 판단 결과를 버린다.
+        opa_available=True,
+    )
+
+
+async def _run_deployment(deployment_id: str, request: ECSDeployRequest) -> None:
+    """백그라운드 배포 태스크.
+
+    저장소에 있는 **바로 그 기록 객체**를 에이전트에 넘긴다. 예전에는
+    에이전트가 자기 기록을 따로 만들어 채우고 끝에 통째로 교체했는데,
+    그동안 사이드바 폴링은 계속 초기 PENDING 만 봤다 — 진행 단계도
+    로그도 배포가 끝날 때까지 하나도 안 보였다.
+    """
+    record = _deploy_records.get(deployment_id)
+    try:
+        result = await _ecs_agent.deploy(request, record=record)
+        # deploy() 가 새 기록을 만들었을 경우(record=None) 에만 id 를 맞춘다.
+        if result is not record:
+            result.deployment_id = deployment_id
+        _deploy_records[deployment_id] = result
+        _save_records()
+        logger.info("배포 %s 종료: status=%s", deployment_id, result.status)
     except Exception as exc:
-        logger.error("Deployment %s crashed: %s", deployment_id, exc, exc_info=True)
-        if deployment_id in _deploy_records:
-            _deploy_records[deployment_id].status = ECSDeployStatus.FAILED
-            _deploy_records[deployment_id].error_message = str(exc)
+        logger.error("배포 %s 가 예외로 중단됨: %s", deployment_id, exc, exc_info=True)
+        if record is not None:
+            record.status = ECSDeployStatus.FAILED
+            record.error_message = str(exc)
+            record.completed_at = datetime.now(timezone.utc)
+            _save_records()
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +638,7 @@ async def list_deployments(
     """
     최근 배포 목록을 반환합니다.
 
-    project_id, cluster로 필터링 가능. 최신순(created_at 내림차순) 정렬.
+    project_id, cluster로 필터링 가능. 최신순(started_at 내림차순) 정렬.
     """
     records = list(_deploy_records.values())
 
@@ -188,7 +648,8 @@ async def list_deployments(
         records = [r for r in records if r.cluster == cluster]
 
     # 최신순 정렬
-    records.sort(key=lambda r: r.created_at, reverse=True)
+    # ECSDeployRecord 에는 created_at 이 없다 — 시작 시각이 started_at 이다.
+    records.sort(key=lambda r: r.started_at, reverse=True)
     return records[:limit]
 
 
@@ -199,10 +660,18 @@ async def list_deployments(
 @router.post("/deploy/{deployment_id}/cancel", response_model=ECSDeployRecord)
 async def cancel_deployment(deployment_id: str) -> ECSDeployRecord:
     """
-    진행 중인 배포를 취소 요청합니다.
+    진행 중인 배포에 취소를 **요청**합니다.
 
-    PENDING 또는 IN_PROGRESS 상태의 배포만 취소 가능합니다.
-    실제 ECS 서비스를 즉시 중단하지는 않으며, rollback proposal이 생성됩니다.
+    PENDING 또는 IN_PROGRESS 상태의 배포만 취소할 수 있습니다.
+
+    즉시 끊지는 않습니다. 파이프라인이 현재 단계를 마치는 즉시 멈추고,
+    그때 상태가 CANCELLED 로 바뀝니다. docker build 를 반쯤 자르면 무엇이
+    남았는지 알 수 없기 때문입니다. 그 사이 이 배포는 계속 "진행 중"으로
+    보이며, 같은 서비스에 대한 새 배포는 409 로 막힙니다.
+
+    서비스를 **이번 배포가 새로 만들었다면** 태스크 수를 0 으로 내립니다.
+    기존 서비스를 갱신하던 중이었다면 건드리지 않습니다 — 취소는 "이번
+    배포를 그만둔다"이지 "돌던 앱을 내린다"가 아니기 때문입니다.
     """
     record = _deploy_records.get(deployment_id)
     if not record:
@@ -210,6 +679,10 @@ async def cancel_deployment(deployment_id: str) -> ECSDeployRecord:
             status_code=404,
             detail={"error": "not_found", "deployment_id": deployment_id},
         )
+
+    if record.cancel_requested:
+        # 두 번 눌러도 조용히 같은 결과를 돌려준다.
+        return record
 
     if record.status not in (ECSDeployStatus.PENDING, ECSDeployStatus.IN_PROGRESS):
         raise HTTPException(
@@ -221,11 +694,20 @@ async def cancel_deployment(deployment_id: str) -> ECSDeployRecord:
             },
         )
 
-    record.status = ECSDeployStatus.FAILED
-    record.error_message = "사용자 요청으로 취소됨"
-    record.completed_at = datetime.now(timezone.utc)
+    # **신호만 남긴다. 상태는 파이프라인이 실제로 멈춘 뒤에 바뀐다.**
+    #
+    # 예전에는 여기서 바로 FAILED + completed_at 을 찍었다. 두 가지가 깨졌다:
+    #  (1) 파이프라인은 취소를 전혀 모른 채 계속 돌아 이미지를 올리고
+    #      서비스를 만든 뒤 같은 기록을 SUCCEEDED 로 덮어썼다. 사용자는
+    #      "취소됨"을 보고 손을 뗐는데 Fargate 태스크는 계속 과금됐다.
+    #  (2) 상태가 활성 목록에서 빠지니 409 동시 배포 가드가 뚫려, 같은
+    #      서비스에 두 번째 파이프라인이 들어왔다. 그러면 첫 번째 폴러가
+    #      남의 리비전을 보고 "ECS 가 자동 복구했습니다"라는 없는 사실을
+    #      보고한다.
+    record.cancel_requested = True
+    _save_records()
 
-    logger.info("Deployment %s cancelled by user request", deployment_id)
+    logger.info("Deployment %s cancel requested", deployment_id)
     return record
 
 

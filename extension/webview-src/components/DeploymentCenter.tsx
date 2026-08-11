@@ -7,7 +7,24 @@ import { AwsConnection } from "./AwsConnection";
 type Target = "decision" | "docker" | "actions" | "ec2" | "ecs" | "s3" | "aws";
 type Proposal = { proposal_id: string; target_path: string; content: string; approval_level: number };
 type DeployTarget = "ecs" | "s3" | "local";
-type Preflight = { app_kind: "server" | "static" | "unknown"; summary: string; evidence: string[]; recommended_target: DeployTarget };
+type PreflightIssue = {
+  code: string;
+  message: string;
+  fix: string;
+  severity: string;
+  remediation_available: boolean;
+  proposal_id: string | null;
+};
+type Preflight = {
+  app_kind: "server" | "static" | "unknown";
+  summary: string;
+  evidence: string[];
+  recommended_target: DeployTarget;
+  blocked?: boolean;
+  score?: number;
+  reasons?: PreflightIssue[];
+  warnings?: PreflightIssue[];
+};
 
 const input: React.CSSProperties = {
   width: "100%", background: "var(--vscode-input-background, #252526)", color: "var(--vscode-input-foreground, #ddd)",
@@ -36,6 +53,51 @@ const EcsCostNotice: React.FC = () => (
   </div>
 );
 
+const issueNames: Record<string, string> = {
+  MISSING_REQUIRED_ENV: "필수 설정값이 빠져 있어요",
+  ENV_FILE_NOT_GITIGNORED: "비밀 설정 파일이 Git에 올라갈 수 있어요",
+  INVALID_ENV_FORMAT: "환경설정 파일 형식이 올바르지 않아요",
+  MISSING_HEALTH_ENDPOINT: "서비스 상태 확인 주소가 없어요",
+  APP_ENTRYPOINT_NOT_FOUND: "앱을 시작할 파일을 찾지 못했어요",
+  MISSING_DOCKERFILE: "컨테이너 실행 설정(Dockerfile)이 없어요",
+  DOCKERFILE_BUILD_RISK: "컨테이너 설정에 배포 위험이 있어요",
+  HOST_PORT_CONFLICT: "사용하려는 포트가 이미 사용 중이에요",
+  APP_PORT_MISMATCH: "앱 포트와 배포 포트가 서로 달라요",
+  UNPINNED_DEPENDENCIES: "라이브러리 버전이 고정되지 않았어요",
+  CRITICAL_VULNERABILITY: "의존성에서 심각한 보안 취약점이 발견됐어요",
+  SECRET_LEAK_RISK: "코드에 비밀키가 직접 들어 있을 수 있어요",
+};
+
+const DeploymentBlockers: React.FC<{
+  reasons: PreflightIssue[];
+  checking: boolean;
+  applyingProposalId: string | null;
+  onApply: (proposalId: string) => void;
+  onRerun: () => void;
+}> = ({ reasons, checking, applyingProposalId, onApply, onRerun }) => (
+  <div style={{ border: "1px solid rgba(241, 76, 76, .62)", borderRadius: 7, padding: 13, background: "rgba(241, 76, 76, .08)" }}>
+    <div style={{ fontSize: 13, fontWeight: 700, color: "var(--vscode-editorError-foreground, #f14c4c)" }}>배포 전에 고쳐야 할 문제가 있어요</div>
+    <div style={{ marginTop: 5, color: "var(--vscode-descriptionForeground, #bbb)", fontSize: 11, lineHeight: 1.5 }}>문제를 해결한 뒤 다시 검사하면 배포 대상을 선택할 수 있습니다.</div>
+    <div style={{ display: "grid", gap: 9, marginTop: 12 }}>
+      {reasons.map((issue) => (
+        <div key={issue.code} style={{ padding: "10px 11px", borderRadius: 6, border: "1px solid var(--vscode-panel-border, #3f3f3f)", background: "var(--vscode-editorWidget-background, #252526)" }}>
+          <div style={{ fontSize: 12, fontWeight: 650 }}>문제 · {issueNames[issue.code] ?? issue.message}</div>
+          {issueNames[issue.code] && <div style={{ marginTop: 4, fontSize: 11, color: "var(--vscode-descriptionForeground, #aaa)", lineHeight: 1.45 }}>{issue.message}</div>}
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--vscode-panel-border, #3f3f3f)", fontSize: 11, lineHeight: 1.45 }}><b style={{ color: "var(--vscode-textLink-foreground, #75beff)" }}>수정 방법 · </b>{issue.fix}</div>
+          {issue.remediation_available && issue.proposal_id && (
+            <button onClick={() => onApply(issue.proposal_id!)} disabled={Boolean(applyingProposalId)} style={{ ...button, marginTop: 9, padding: "6px 9px", opacity: applyingProposalId && applyingProposalId !== issue.proposal_id ? .55 : 1 }}>
+              {applyingProposalId === issue.proposal_id ? "자동 수정 적용 중…" : "자동 수정"}
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+    <button onClick={onRerun} disabled={checking || Boolean(applyingProposalId)} style={{ ...button, marginTop: 13 }}>
+      {checking ? "다시 검사 중…" : "다시 검사"}
+    </button>
+  </div>
+);
+
 export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpenDocker }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [target, setTarget] = useState<Target>("decision");
@@ -44,8 +106,12 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [checking, setChecking] = useState(true);
   const [savingDecision, setSavingDecision] = useState(false);
+<<<<<<< HEAD
   const [checkingEcsPermissions, setCheckingEcsPermissions] = useState(false);
   const pendingEcsDeploymentRef = useRef<Record<string, unknown> | null>(null);
+=======
+  const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
+>>>>>>> origin/develop
   const [awsReady, setAwsReady] = useState(false);
   const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: "ap-northeast-2", ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
   const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "ap-northeast-2", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512" });
@@ -71,6 +137,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       setMessage(`선택 근거를 ${result.adr_path}에 기록했습니다.`);
     }
     if (type === "workspace.deploy.decisionError") { setSavingDecision(false); setMessage((payload as { message?: string })?.message ?? "배포 대상 기록에 실패했습니다."); }
+<<<<<<< HEAD
     if (type === "aws.permissions.result" && pendingEcsDeploymentRef.current) {
       const result = payload as { ok?: boolean; status?: { permission_check?: { inspected?: boolean; missing_actions?: string[]; warnings?: string[] } }; message?: string };
       const deploymentRequest = pendingEcsDeploymentRef.current;
@@ -87,6 +154,14 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         setMessage(`ECS 배포를 시작하지 않았습니다. ${detail}`);
       }
     }
+=======
+    if (type === "workspace.deploy.remediationResult") {
+      const result = payload as { message?: string; applied_files?: string[] };
+      setApplyingProposalId(null);
+      setMessage(`${result.message ?? "자동 수정을 적용했습니다."} ${result.applied_files?.length ? `변경 파일: ${result.applied_files.join(", ")}. ` : ""}이제 다시 검사해 주세요.`);
+    }
+    if (type === "workspace.deploy.remediationError") { setApplyingProposalId(null); setMessage((payload as { message?: string })?.message ?? "자동 수정 적용에 실패했습니다."); }
+>>>>>>> origin/develop
     if (type === "workspace.deploy.result") setMessage((payload as { message?: string })?.message ?? "배포 요청을 보냈습니다.");
     if (type === "aws.status") setAwsReady(Boolean((payload as { ready?: boolean })?.ready));
     if (type === "errorMessage") setMessage((payload as { message?: string })?.message ?? "요청 처리에 실패했습니다.");
@@ -100,7 +175,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   }, [target, postMessage]);
 
   const chooseTarget = (choice: DeployTarget) => {
-    if (!preflight || savingDecision) return;
+    if (!preflight || preflight.blocked || savingDecision) return;
     if (choice !== "local" && !awsReady) {
       setTarget("aws");
       setMessage("원격 배포 전에 AWS 계정을 연결하세요.");
@@ -108,6 +183,12 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     }
     setSavingDecision(true);
     postMessage("workspace.deploy.chooseTarget", { target: choice, evidence: preflight.evidence });
+  };
+  const applyRemediation = (proposalId: string) => {
+    if (applyingProposalId) return;
+    setApplyingProposalId(proposalId);
+    setMessage("");
+    postMessage("workspace.deploy.remediation.apply", { proposalId });
   };
   const generateActions = () => { setMessage("GitHub Actions 워크플로우 생성 중…"); postMessage("generateGithubActions", { workspacePath: "" }); };
   const deployEc2 = () => { setMessage("EC2 배포 요청 전송 중…"); postMessage("workspace.deploy.ec2", { ...ec2, host_port: Number(ec2.host_port), container_port: Number(ec2.container_port) }); };
@@ -142,12 +223,16 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--vscode-panel-border, #3f3f3f)", background: "linear-gradient(120deg, rgba(55,148,255,.16), transparent)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}><span>⌕</span> {checking ? "프로젝트 구성 확인 중…" : `감지됨: ${preflight?.summary}`}</div>
           {!checking && <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>{preflight?.evidence.map(item => <span key={item} style={{ padding: "3px 7px", borderRadius: 99, fontSize: 11, color: "var(--vscode-textLink-foreground, #75beff)", background: "rgba(55,148,255,.13)", border: "1px solid rgba(55,148,255,.28)" }}>{item}</span>)}</div>}
-          <button onClick={runPreflight} disabled={checking} style={{ marginTop: 11, border: "none", background: "transparent", padding: 0, color: "var(--vscode-textLink-foreground, #75beff)", cursor: "pointer", fontSize: 11 }}>다시 감지</button>
+          <button onClick={runPreflight} disabled={checking || Boolean(applyingProposalId)} style={{ marginTop: 11, border: "none", background: "transparent", padding: 0, color: "var(--vscode-textLink-foreground, #75beff)", cursor: "pointer", fontSize: 11 }}>다시 검사</button>
         </div>
         <div style={{ padding: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 650, margin: "0 0 9px 2px" }}>이 앱을 어디에 배포할까요?</div>
-          <DecisionOptionCards options={choices.map(choice => ({ ...choice, label: `${choice.icon}  ${choice.label}`, recommended: preflight?.recommended_target === choice.key }))} onSelect={(key) => chooseTarget(key as DeployTarget)} disabled={checking || savingDecision} />
-          <div style={{ margin: "11px 2px 1px", fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>선택 근거는 <code>docs/adr</code>에 기록됩니다. 실제 원격 배포는 필요한 설정을 확인한 다음 시작됩니다.</div>
+          {preflight?.blocked ? (
+            <DeploymentBlockers reasons={preflight.reasons ?? []} checking={checking} applyingProposalId={applyingProposalId} onApply={applyRemediation} onRerun={runPreflight} />
+          ) : <>
+            <div style={{ fontSize: 12, fontWeight: 650, margin: "0 0 9px 2px" }}>이 앱을 어디에 배포할까요?</div>
+            <DecisionOptionCards options={choices.map(choice => ({ ...choice, label: `${choice.icon}  ${choice.label}`, recommended: preflight?.recommended_target === choice.key }))} onSelect={(key) => chooseTarget(key as DeployTarget)} disabled={checking || savingDecision} />
+            <div style={{ margin: "11px 2px 1px", fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>선택 근거는 <code>docs/adr</code>에 기록됩니다. 실제 원격 배포는 필요한 설정을 확인한 다음 시작됩니다.</div>
+          </>}
         </div>
       </div>}
 

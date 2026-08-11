@@ -45,8 +45,11 @@ USER appuser
 EXPOSE {{PORT}}
 
 # Health check
+# curl 을 쓰지 않는다 — curl 은 builder 스테이지에만 설치되고 runtime
+# (python:slim) 에는 없다. curl 로 두면 컨테이너가 항상 UNHEALTHY 가 되고
+# ECS 가 태스크를 무한 재시작한다. python 은 이 이미지에 반드시 있다.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:{{PORT}}/health || exit 1
+    CMD python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:{{PORT}}/health', timeout=5).status == 200 else 1)" || exit 1
 
 # Start application with uvicorn
 CMD ["uvicorn", "{{APP_MODULE}}:app", "--host", "0.0.0.0", "--port", "{{PORT}}", "--workers", "2"]

@@ -1210,18 +1210,47 @@ def _looks_like_academy(arn: str) -> bool:
     return any(marker in (arn or "") for marker in ACADEMY_ARN_MARKERS)
 
 
+def _shared_profile_names() -> set[str]:
+    """`~/.aws/credentials` · `~/.aws/config` 에 **실제로 존재하는** 프로필 이름."""
+    names: set[str] = set()
+    for path, prefix in ((AWS_CREDENTIALS_FILE, ""), (AWS_CONFIG_FILE, "profile ")):
+        if not path.exists():
+            continue
+        cp = configparser.RawConfigParser()
+        try:
+            cp.read(path, encoding="utf-8")
+        except Exception:  # pragma: no cover - 깨진 파일이 권한표를 막지 않는다
+            continue
+        for section in cp.sections():
+            names.add(section[len(prefix):] if prefix and section.startswith(prefix)
+                      else section)
+    return names
+
+
 def _effective_profile() -> Optional[str]:
-    """배포가 **실제로** 쓸 프로필. 모르면 None(=boto3 기본 체인).
+    """배포가 **실제로** 쓸 프로필. 없거나 못 쓰면 None(=boto3 기본 체인).
 
-    `AWS_PROFILE` 을 무시하면 안 된다. 배포 클라이언트는 boto3 기본 체인을
-    쓰므로 그 환경변수를 따른다. 그런데 `_detect_credential_source()` 는
-    `AWS_PROFILE` 을 읽지 않고 `"default"` 를 돌려준다 — 그 값을 세션에
-    넘기면 **정책은 default 계정, 배포는 AWS_PROFILE 계정**이 되어
-    사용자가 시킨 대로 붙여도 AccessDenied 가 난다.
+    두 가지를 거른다.
 
-    None 을 돌려주면 boto3 가 자기 체인대로(=AWS_PROFILE 포함) 고른다.
+    **① 자격증명이 환경변수에 이미 주입돼 있으면 프로필을 넘기지 않는다.**
+    ReCoder 기본 저장 방식(`storage="recoder"`)은 키를 `~/.recoder/` 에 두고
+    환경변수로 주입하면서 `AWS_PROFILE` 에 `"recoder"` 라는 **라벨**을 같이
+    심는다. 그런데 그 이름의 공유 프로필은 존재하지 않는다. 그대로 세션에
+    넘기면 `ProfileNotFound` 로 죽고, 멀쩡한 자격증명이 연결돼 있는데도
+    권한표가 자리표시자만 담아 나간다.
+
+    **② 이름이 있어도 공유 프로필로 존재할 때만 쓴다.** 없는 이름을 넘기는
+    것보다 boto3 기본 체인에 맡기는 편이 항상 낫다.
+
+    `AWS_PROFILE` 자체는 계속 존중한다 — 배포 클라이언트가 그걸 보기 때문에,
+    무시하면 정책과 배포가 다른 계정을 가리킨다.
     """
-    return (os.environ.get("AWS_PROFILE") or "").strip() or _active_profile or None
+    if os.environ.get("AWS_ACCESS_KEY_ID"):
+        return None
+    name = (os.environ.get("AWS_PROFILE") or "").strip() or _active_profile
+    if not name:
+        return None
+    return name if name in _shared_profile_names() else None
 
 
 def _deployment_identity() -> tuple[str, str, str]:
@@ -1237,9 +1266,17 @@ def _deployment_identity() -> tuple[str, str, str]:
     """
     _load_into_process_if_needed()
     profile = _effective_profile()
-    try:
-        session = _build_boto3_session(profile=profile, region="")
-    except Exception:  # pragma: no cover - 세션 실패가 권한표를 막지 않는다
+    session = None
+    for attempt in ([profile] if profile else []) + [None]:
+        try:
+            session = _build_boto3_session(profile=attempt, region="")
+            break
+        except Exception:
+            # 프로필로 실패하면 프로필 **없이** 한 번 더 시도한다.
+            # 자격증명이 환경변수에 있는데 이름 하나 때문에 통째로 포기하면,
+            # 멀쩡한 사용자가 자리표시자만 받는다.
+            logger.info("[aws] 프로필 %r 로 세션 실패 — 기본 체인으로 재시도", attempt)
+    if session is None:  # pragma: no cover - boto3 자체가 없는 경우
         return "", "", ""
 
     region = (getattr(session, "region_name", "") or "").strip()
@@ -1268,6 +1305,24 @@ def _resolve_roles(
     return aws_policy.resolve_roles(task_execution_role, task_role)
 
 
+def _task_role_note(task_role: str) -> list[str]:
+    """태스크 역할이 없을 때 **왜 없는지** 알려준다.
+
+    권한표에서 항목 하나가 사라지면 사용자는 빠뜨린 줄 안다. 없는 게
+    맞다는 걸 말해 줘야 한다 — 그리고 앱이 AWS API 를 부르는 경우에는
+    어떻게 넣는지도.
+    """
+    if task_role:
+        return []
+    return [
+        f"태스크 역할(taskRoleArn)은 이 권한표에 들어 있지 않습니다. "
+        f"컨테이너 안의 앱이 AWS API 를 직접 부르지 않으면 필요 없고, "
+        f"안 쓰는 역할에 iam:PassRole 을 주면 그만큼 권한이 넓어집니다. "
+        f"필요하면 {aws_policy.ENV_TASK_ROLE_ARN} 환경변수를 설정한 뒤 "
+        f"권한표를 다시 받으세요 — 그때 자동으로 포함됩니다"
+    ]
+
+
 def _academy_role_advice(academy: bool) -> list[str]:
     """학교 계정인데 역할 환경변수가 안 잡혀 있으면 알려준다.
 
@@ -1277,16 +1332,22 @@ def _academy_role_advice(academy: bool) -> list[str]:
     if not academy:
         return []
     lab = aws_policy.ACADEMY_TASK_EXECUTION_ROLE
-    if (aws_policy.configured_execution_role() == lab
-            and aws_policy.configured_task_role() == lab):
+    # **실행 역할만 보면 된다.** 태스크 역할은 안 정하는 게 정상이다
+    # (`task_role_if_configured()`). 태스크 역할까지 요구하면, 실행 역할을
+    # 제대로 맞춰 둔 사람에게 "태스크 역할도 설정하세요"라고 잔소리해 놓고
+    # 바로 다음 줄에서 "태스크 역할은 이 권한표에 없고 필요 없습니다"라고
+    # 말하게 된다 — 사용자는 어느 쪽을 믿어야 할지 알 수 없다.
+    if aws_policy.configured_execution_role() == lab:
         return []
     return [
         f"⚠ 학교(AWS Academy) 계정으로 보입니다. 이 계정에는 "
         f"'{aws_policy.TASK_EXECUTION_ROLE}' 이 없고 '{lab}' 만 있습니다. "
-        f"아래 두 환경변수를 설정한 뒤 이 권한표를 다시 받으세요 — "
+        f"아래 환경변수를 설정한 뒤 이 권한표를 다시 받으세요 — "
         f"설정해야 정책과 실제 배포가 같은 역할을 봅니다:\n"
         f"    {aws_policy.ENV_EXECUTION_ROLE_ARN}=arn:aws:iam::<계정ID>:role/{lab}\n"
-        f"    {aws_policy.ENV_TASK_ROLE_ARN}=arn:aws:iam::<계정ID>:role/{lab}"
+        f"  (컨테이너 안 앱이 AWS API 를 부른다면 "
+        f"{aws_policy.ENV_TASK_ROLE_ARN} 도 같은 값으로 설정하세요. "
+        f"안 부르면 설정하지 않는 편이 권한이 좁습니다.)"
     ]
 
 
@@ -1309,12 +1370,16 @@ async def get_minimum_policy(
     ## 이름 인자들
 
     `task_execution_role` / `task_role` 은 ECS 작업에 붙는 역할 **이름**이다.
-    **둘은 서로 다른 역할이고, `RegisterTaskDefinition` 은 둘 다에 대해
-    `iam:PassRole` 을 요구한다.**
+    둘은 서로 다른 역할이고, 태스크 역할까지 쓰는 배포라면
+    `RegisterTaskDefinition` 이 둘 다에 대해 `iam:PassRole` 을 요구한다.
 
-    학교(AWS Academy) 계정에서 접속한 것이 확인되면 **둘 다** `LabRole` 로
-    맞춘다. 학교 계정에는 역할을 만들 수 없어서, 한쪽만 바꾸면 나머지가
-    존재하지 않는 역할을 가리키게 된다.
+    **`task_role` 은 비우는 것이 기본이다.** 배포 경로는
+    `ECS_TASK_ROLE_ARN` 이 설정됐을 때만 태스크 역할을 붙이므로, 안 붙이는
+    배포에 그 역할 권한을 넣으면 쓰지도 않는 권한만 넓어진다.
+
+    학교(AWS Academy) 계정이라도 **역할을 자동으로 바꾸지 않는다.** 배포
+    경로가 환경변수만 보기 때문에, 정책만 `LabRole` 로 바꾸면 둘이 갈라진다.
+    대신 `_academy_role_advice()` 로 환경변수를 설정하라고 안내한다.
 
     `cluster` / `service` 는 배포 대상 이름이다. 비우면 우리가 만드는 자원의
     기본 규칙(`recoder-*`)을 쓴다. **이미 있는 클러스터(`default` 등)에
@@ -1383,5 +1448,7 @@ async def get_minimum_policy(
         service=names["service"],
         ecr_repo=names["ecr_repo"],
         is_academy_account=academy,
-        steps=_academy_role_advice(academy) + _policy_steps(unknowns, academy),
+        steps=_academy_role_advice(academy)
+        + _task_role_note(task)
+        + _policy_steps(unknowns, academy),
     )

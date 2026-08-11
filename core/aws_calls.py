@@ -63,10 +63,13 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ── 스캔 범위 ────────────────────────────────────────────────────────
 #
@@ -886,14 +889,81 @@ def iam_roles_in_source(root: str | Path) -> dict[str, list[str]]:
         if path.name in SKIPPED_FILES or path.name in _ROLE_SCAN_SKIP_FILES:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
+        for name, line in _roles_in_module(text, rel):
+            found.setdefault(name, []).append(f"{rel}:{line}")
+    return found
+
+
+def _docstring_node_ids(tree: ast.AST) -> set[int]:
+    """모듈·클래스·함수 docstring 노드의 id 집합."""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            ids.add(id(first.value))
+    return ids
+
+
+def _roles_in_module(text: str, rel: str) -> list[tuple[str, int]]:
+    """이 파일이 **코드에서** 쓰는 IAM 역할 이름과 줄 번호.
+
+    원문을 정규식으로 훑지 않고 AST 의 문자열 리터럴만 본다. 이유가 둘이다.
+
+    1. docstring 과 주석은 코드가 아니다. 설명문에 예시 ARN 을 적었다는
+       이유로 "코드가 이 역할을 쓴다"고 보고하면 오탐이고, 오탐이 쌓이면
+       사람이 이 검사를 통째로 무시하게 된다.
+    2. f-string 안의 리터럴 조각도 AST 로는 보인다. 이 검사가 전에 실제
+       리포에서 아무것도 못 잡던 이유가 f-string 을 통째로 놓쳐서였다.
+       (`f"...:role/{name}"` 처럼 이름이 변수면 여전히 안 잡히는데 그건
+        맞는 동작이다 — 리터럴이 아니니 대조할 대상 자체가 없다.)
+
+    파싱에 실패하면 원문 정규식으로 물러선다. 조용히 건너뛰면 검사는
+    도는데 아무것도 안 보는 상태가 된다.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        logger.warning("역할 스캔: 파싱 실패로 원문 대조로 물러섭니다 — %s", rel)
+        fallback: list[tuple[str, int]] = []
         for pattern in (_ROLE_IN_ARN, _ROLE_IN_CHECK):
             for match in pattern.finditer(text):
                 name = match.group(1)
-                if "{" in name:  # 템플릿 자리표시자는 실제 이름이 아니다
-                    continue
-                line = text.count("\n", 0, match.start()) + 1
-                found.setdefault(name, []).append(f"{rel}:{line}")
-    return found
+                if "{" not in name:
+                    fallback.append((name, text.count("\n", 0, match.start()) + 1))
+        return fallback
+
+    docstrings = _docstring_node_ids(tree)
+    results: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        # (a) 문자열 리터럴 안의 ":role/이름"
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) in docstrings:
+                continue
+            for match in _ROLE_IN_ARN.finditer(node.value):
+                name = match.group(1)
+                if "{" not in name:
+                    results.append((name, node.lineno))
+        # (b) _check_iam_role("이름") 호출
+        elif isinstance(node, ast.Call):
+            func = node.func
+            fname = getattr(func, "id", None) or getattr(func, "attr", None)
+            if fname != "_check_iam_role" or not node.args:
+                continue
+            first_arg = node.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                results.append((first_arg.value, node.lineno))
+    return results
 
 
 def missing_from_policy(actions: set[str], granted: set[str]) -> list[str]:
