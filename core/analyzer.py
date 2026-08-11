@@ -179,28 +179,36 @@ def _trim_terminal_output(
 
 # ── 컨텍스트 마스킹 (LLM 에 나가기 전 시크릿·PII 제거) ─────────────────
 #
-# LLM 프롬프트에 실리는 건 terminal_output 하나가 아니다. selected_text(사용자가
-# 고른 코드 — 자격증명·설정 파일일 수 있다)와 project_files_summary 도 함께
-# 들어간다. **셋 다** 게이트를 통과해야 한다. 그리고 게이트가 터지면 원문을
-# 흘리는 게 아니라 동기 정규식 스크러버로 가리고 계속한다(fail-closed).
+# LLM 프롬프트·이벤트·트리거 사유에 실리는 텍스트 필드를 **전부** 가린다.
+# 단, 필드별로 방식이 다르다:
+#  - terminal_output → run_gate. 여기서 quality_score 를 얻는다.
+#  - 나머지(selected_text·project_files_summary·command) → 동기 _scrub(마스킹만).
+#    run_gate 를 쓰면 5자 미만 입력을 **빈 문자열로 만들어**('ls'·'pwd' 같은
+#    짧은 명령, 한 글자 선택) 트리거 사유·프롬프트에서 통째로 날려버린다.
+#    _scrub 은 길이와 무관하게 마스킹만 하므로 짧은 값도 보존한다.
+# 게이트가 터지면 원문을 흘리는 게 아니라 _scrub 로 가리고 계속한다(fail-closed).
 
 async def _mask_context(request: AnalyzeRequest) -> tuple[AnalyzeRequest, float]:
     """모든 텍스트 필드를 마스킹한 요청과 quality_score 를 돌려준다.
 
-    게이트가 예외를 던져도 **원문을 그대로 넘기지 않는다.** `mask_secrets`
-    (동기 정규식)로 모든 필드를 가린 뒤 최소 품질로 계속한다.
+    게이트가 예외를 던져도 **원문을 그대로 넘기지 않는다.** 정상경로와 같은
+    동기 스크럽(_scrub)으로 모든 필드를 가린 뒤 최소 품질로 계속한다.
     """
     try:
-        # terminal_output 으로 품질을 재고 동시에 마스킹한다.
+        # terminal_output 으로 품질을 잰다. run_gate 는 짧은(5자 미만) 입력을
+        # 비우므로, 원문이 있는데 비워졌으면 마스킹만 해서 보존한다.
         gate = await run_gate(request.terminal_output or "")
-        updates: dict[str, Optional[str]] = {"terminal_output": gate.text}
-        # 나머지 텍스트 필드도 같은 게이트로 가린다.
+        term = gate.text
+        if not term and (request.terminal_output or "").strip():
+            term = _scrub(request.terminal_output)
+        updates: dict[str, Optional[str]] = {"terminal_output": term}
+        # 나머지 필드는 **마스킹만**(짧은 값 보존).
         for name in _MASKED_FIELDS:
             if name == "terminal_output":
                 continue
             value = getattr(request, name, None)
             if value:
-                updates[name] = (await run_gate(value)).text
+                updates[name] = _scrub(value)
         return request.model_copy(update=updates), gate.quality_score
     except Exception as e:
         # fail-closed: 게이트가 죽어도 원문을 흘리지 않는다. 정상경로와 **같은**
