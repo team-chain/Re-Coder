@@ -799,7 +799,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'aws.permissions.check': {
                 try {
-                    const status = await this._apiClient.checkAwsPermissions();
+                    const p = (payload ?? {}) as {
+                        deploymentContext?: Parameters<ApiClient['checkAwsPermissions']>[0];
+                    };
+                    const status = await this._apiClient.checkAwsPermissions(p.deploymentContext);
                     this.postMessage('aws.permissions.result', { ok: true, status });
                     this.postMessage('aws.status', status);
                 } catch (err) {

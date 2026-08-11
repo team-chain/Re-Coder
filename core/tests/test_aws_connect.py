@@ -20,6 +20,44 @@ def test_permission_check_route_is_registered() -> None:
     assert "/api/aws/permissions/check" in paths
 
 
+def test_permission_check_covers_every_ecs_preflight_and_deploy_action() -> None:
+    """초록 권한 점검 뒤 ECS preflight가 권한 부족으로 실패하면 안 된다."""
+    expected = {
+        "iam:GetRole",
+        "ecr:DescribeRepositories",
+        "logs:DescribeLogGroups",
+        "ecs:DescribeTaskDefinition",
+    }
+    assert expected <= set(aws.REQUIRED_DEPLOY_ACTIONS)
+
+
+def test_permission_context_uses_the_ecs_request_repo_not_unused_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ECR_REPOSITORY는 ECSDeployRequest가 읽지 않으므로 검사에도 쓰면 안 된다."""
+    monkeypatch.setenv("ECR_REPOSITORY", "different-repository")
+
+    context, error = aws._resolved_permission_context(None)
+
+    assert error is None
+    assert context is not None
+    assert context.ecr_repo == "recoder-app"
+
+
+def test_permission_context_uses_ecs_adapter_defaults_and_service_repo() -> None:
+    """빈 확장 폼도 실제 ECS 어댑터와 같은 대상 ARN을 검사한다."""
+    context, error = aws._resolved_permission_context(
+        aws.AwsDeploymentPermissionContext(ecs_service="team-service")
+    )
+
+    assert error is None
+    assert context is not None
+    assert context.ecs_cluster == "recoder-cluster"
+    assert context.ecs_service == "team-service"
+    assert context.ecr_repo == "team-service"
+    assert context.task_family == "recoder-task"
+
+
 def test_connect_validates_and_keeps_credentials_in_current_core(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "ORIGINAL_ACCESS_KEY")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ORIGINAL_SECRET")
@@ -102,6 +140,8 @@ def test_permission_check_warns_for_missing_actions_and_administrator_policy(mon
             return FakeIam()
 
     monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    monkeypatch.setenv("ECS_CLUSTER", "recoder-cluster")
+    monkeypatch.setenv("ECS_SERVICE", "recoder-service")
 
     report = aws._inspect_deploy_permissions(
         {"arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
@@ -113,3 +153,302 @@ def test_permission_check_warns_for_missing_actions_and_administrator_policy(mon
     assert "AdministratorAccess" in report.excessive_policies
     assert "인라인 정책: DeployAdmin" in report.excessive_policies
     assert any("너무 강력" in warning or "전체 권한" in warning for warning in report.warnings)
+
+
+def test_cost_control_permission_denial_warns_without_blocking_ecs_deploy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """수명 주기·로그 보존 설정은 best-effort라 배포 게이트가 아니다."""
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            return {"EvaluationResults": [
+                {
+                    "EvalActionName": action,
+                    "EvalDecision": (
+                        "implicitDeny" if action in aws.OPTIONAL_COST_CONTROL_ACTIONS else "allowed"
+                    ),
+                }
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+    )
+
+    assert report.inspected is True
+    assert report.missing_actions == []
+    assert any("비용 최적화" in warning for warning in report.warnings)
+
+
+def test_existing_ecs_service_linked_role_permission_is_advisory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """이미 ECS 서비스 연결 역할이 있으면 생성 권한 거부로 배포를 막지 않는다."""
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            return {"EvaluationResults": [
+                {
+                    "EvalActionName": action,
+                    "EvalDecision": "implicitDeny" if action == "iam:CreateServiceLinkedRole" else "allowed",
+                }
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+    )
+
+    assert report.inspected is True
+    assert report.missing_actions == []
+    assert any("서비스 연결 역할" in warning for warning in report.warnings)
+
+
+def test_unresolved_assumed_role_path_is_advisory_not_a_deploy_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STS ARN에 path가 빠져 source role을 찾지 못해도 명시 거부가 없으면 진행한다."""
+    class FakeIam:
+        def get_role(self, **_: object) -> dict:
+            raise RuntimeError("AccessDenied")
+
+        def simulate_principal_policy(self, **_: object) -> dict:
+            raise RuntimeError("PolicySourceArn arn:aws:iam::123456789012:role/Deployer does not exist")
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:sts::123456789012:assumed-role/Deployer/session"},
+        "ap-northeast-2",
+    )
+
+    assert report.inspected is False
+    assert report.advisory_only is True
+    assert report.missing_actions == []
+
+
+def test_permission_simulation_uses_deployment_resources_and_passrole_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """최소권한 정책과 같은 ARN·조건으로만 IAM Simulator를 호출한다."""
+    calls: list[dict[str, object]] = []
+
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            calls.append(kwargs)
+            return {"EvaluationResults": [
+                {"EvalActionName": action, "EvalDecision": "allowed"}
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    context = aws.AwsDeploymentPermissionContext(
+        ecr_repo="team-api",
+        ecs_cluster="team-cluster",
+        ecs_service="team-service",
+        aws_region="us-west-2",
+        task_execution_role="team/EcsExecution",
+        task_role="team/EcsTask",
+    )
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+        context,
+    )
+
+    assert report.inspected is True
+    assert report.missing_actions == []
+    ecr_call = next(call for call in calls if "ecr:PutImage" in call["ActionNames"])
+    assert ecr_call["ResourceArns"] == [
+        "arn:aws:ecr:us-west-2:123456789012:repository/team-api",
+    ]
+    passrole_call = next(call for call in calls if call["ActionNames"] == ["iam:PassRole"])
+    assert passrole_call["ResourceArns"] == [
+        "arn:aws:iam::123456789012:role/team/EcsExecution",
+        "arn:aws:iam::123456789012:role/team/EcsTask",
+    ]
+    assert passrole_call["ContextEntries"] == [{
+        "ContextKeyName": "iam:PassedToService",
+        "ContextKeyValues": ["ecs-tasks.amazonaws.com"],
+        "ContextKeyType": "string",
+    }]
+
+
+def test_permission_simulation_skips_empty_task_role_and_uses_deploy_account_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """기본 task role은 PassRole 대상이 아니며 ECR은 실제 registry 계정을 쓴다."""
+    calls: list[dict[str, object]] = []
+
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            calls.append(kwargs)
+            return {"EvaluationResults": [
+                {"EvalActionName": action, "EvalDecision": "allowed"}
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    context = aws.AwsDeploymentPermissionContext(
+        ecr_repo="recoder-app",
+        ecs_cluster="cluster",
+        ecs_service="service",
+        task_execution_role="recoder/EcsExecution",
+        task_role="",
+    )
+
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+        context,
+    )
+
+    assert report.inspected is True
+    ecr_call = next(call for call in calls if "ecr:PutImage" in call["ActionNames"])
+    assert ecr_call["ResourceArns"] == [
+        "arn:aws:ecr:ap-northeast-2:123456789012:repository/recoder-app",
+    ]
+    passrole_call = next(call for call in calls if call["ActionNames"] == ["iam:PassRole"])
+    assert passrole_call["ResourceArns"] == [
+        "arn:aws:iam::123456789012:role/recoder/EcsExecution",
+    ]
+    provision_call = next(call for call in calls if "ecs:CreateService" in call["ActionNames"])
+    assert provision_call["ResourceArns"] == [
+        "arn:aws:ecs:ap-northeast-2:123456789012:service/cluster/service",
+    ]
+    logs_call = next(call for call in calls if "logs:CreateLogGroup" in call["ActionNames"])
+    assert logs_call["ResourceArns"] == [
+        "arn:aws:logs:ap-northeast-2:123456789012:log-group:/ecs/recoder-task",
+    ]
+
+
+def test_permission_simulation_uses_selected_task_family_log_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            calls.append(kwargs)
+            return {"EvaluationResults": [
+                {"EvalActionName": action, "EvalDecision": "allowed"}
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+        aws.AwsDeploymentPermissionContext(task_family="team-task"),
+    )
+
+    assert report.inspected is True
+    logs_call = next(call for call in calls if "logs:CreateLogGroup" in call["ActionNames"])
+    assert logs_call["ResourceArns"] == [
+        "arn:aws:logs:ap-northeast-2:123456789012:log-group:/ecs/team-task",
+    ]
+
+
+def test_invalid_configured_role_keeps_sts_connection_and_marks_check_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """잘못된 역할 환경변수는 재파싱하지 않고 경고로만 반환한다."""
+    monkeypatch.setenv("ECS_EXECUTION_ROLE_ARN", "invalid*role")
+
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+    )
+
+    assert report.inspected is False
+    assert any("ECS 역할 설정" in warning for warning in report.warnings)
+
+
+def test_incomplete_permission_simulation_is_not_marked_as_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IAM Simulator 그룹 하나라도 실패하면 초록 완료로 보이면 안 된다."""
+    class FakeIam:
+        def simulate_principal_policy(self, **kwargs: object) -> dict:
+            if "ecs:CreateService" in kwargs["ActionNames"]:  # type: ignore[operator]
+                raise RuntimeError("simulator unavailable")
+            return {"EvaluationResults": [
+                {"EvalActionName": action, "EvalDecision": "allowed"}
+                for action in kwargs["ActionNames"]  # type: ignore[index]
+            ]}
+
+        def list_attached_user_policies(self, **_: object) -> dict:
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_: object) -> dict:
+            return {"PolicyNames": []}
+
+    class FakeSession:
+        def client(self, *_: object, **__: object) -> FakeIam:
+            return FakeIam()
+
+    monkeypatch.setattr(aws, "_build_boto3_session", lambda **_: FakeSession())
+    report = aws._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/recoder-deployer"},
+        "ap-northeast-2",
+    )
+
+    assert report.missing_actions == []
+    assert report.inspected is False
+    assert any("일부 배포 권한을 자동 확인하지 못했습니다" in warning for warning in report.warnings)
