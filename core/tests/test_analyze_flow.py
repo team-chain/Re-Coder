@@ -240,3 +240,137 @@ def test_patch_proposal_to_dict_shape():
     assert isinstance(d["patches"], list) and len(d["patches"]) == 1
     assert d["patches"][0]["file"] == "main.py"
     assert d["risk_level"] == "low"
+
+
+# ---------------------------------------------------------------------------
+# [Codex P1] 마스킹·캐시 3건 — analyzer 가 LLM 에 보내는 모든 텍스트 필드를
+# 가리고, 게이트 실패 시 fail-closed 하며, 캐시가 요청 범위로 좁혀지는지.
+# ---------------------------------------------------------------------------
+
+_SECRET = "AKIAIOSFODNN7EXAMPLE"
+
+
+def _fake_gate_factory():
+    """입력에 든 AKIA 키를 실제로 가리는 가짜 run_gate (필드별 검증용)."""
+    async def _fake_run_gate(text, *a, **kw):
+        class _G:
+            pass
+        g = _G()
+        g.text = (text or "").replace(_SECRET, "[MASKED_AWS_KEY]")
+        g.quality_score = 0.9
+        return g
+    return _fake_run_gate
+
+
+class _AnalyzeResp:
+    text = '{"has_error": true, "error_summary": "boom", "importance_score": 50, "event_type": "error_detected"}'
+    model_used = "fake"
+
+
+def _router_capturing(seen_prompts):
+    class _Router:
+        def call(self, req, *a, **kw):
+            seen_prompts.append(req.prompt)
+            return _AnalyzeResp()
+    return _Router()
+
+
+def test_analyze_masks_selected_text_and_project_summary(monkeypatch):
+    """[Codex P1-①] terminal_output 뿐 아니라 selected_text·project_files_summary
+    도 마스킹돼야 한다. 자격증명 파일을 '선택'해 보내면 그 내용이 새면 안 된다."""
+    import asyncio
+    import analyzer
+
+    seen: list[str] = []
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+    monkeypatch.setattr(analyzer, "get_router", lambda: _router_capturing(seen))
+
+    req = AnalyzeRequest(
+        workspace_path="/tmp/proj",
+        terminal_output="ValueError: boom",
+        selected_text=f"aws_access_key_id = {_SECRET}",
+        project_files_summary=f"config: {_SECRET}",
+    )
+    event = asyncio.run(analyzer.analyze(req, session_id="s1"))
+
+    assert seen, "LLM 이 호출되지 않았다"
+    prompt = seen[0]
+    assert _SECRET not in prompt, "selected_text/project_files_summary 로 시크릿이 샜다"
+    assert "[MASKED_AWS_KEY]" in prompt
+    # 이벤트에 남는 컨텍스트에도 원문 시크릿이 없어야 한다
+    assert all(_SECRET not in c for c in event.contexts), event.contexts
+
+
+def test_analyze_fails_closed_when_gate_raises(monkeypatch):
+    """[Codex P1-②] run_gate 가 터지면 원문을 흘리지 않고 정규식 폴백으로 가린다."""
+    import asyncio
+    import analyzer
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("executor down")
+
+    seen: list[str] = []
+    monkeypatch.setattr(analyzer, "run_gate", _boom)
+    monkeypatch.setattr(analyzer, "get_router", lambda: _router_capturing(seen))
+
+    req = AnalyzeRequest(
+        workspace_path="/tmp/proj",
+        terminal_output=f"export AWS_ACCESS_KEY_ID={_SECRET}\nValueError: boom",
+        selected_text=f"key={_SECRET}",
+    )
+    asyncio.run(analyzer.analyze(req, session_id="s1"))
+
+    assert seen, "LLM 이 호출되지 않았다"
+    prompt = seen[0]
+    # 게이트가 죽었어도 원문 시크릿이 프롬프트에 실리면 안 된다 (fail-closed)
+    assert _SECRET not in prompt, (
+        "게이트 실패 시 마스킹 안 된 원문이 LLM 으로 갔다 — fail-open 회귀"
+    )
+    assert "[MASKED_AWS_KEY]" in prompt
+
+
+def test_cache_key_is_scoped_to_request_not_just_error(monkeypatch):
+    """[Codex P1-③] 에러 텍스트가 같아도 워크스페이스·선택 코드가 다르면
+    캐시가 충돌하지 않는다 — 두 번째 요청이 첫 요청의 컨텍스트를 물려받으면 안 됨."""
+    import asyncio
+    import analyzer
+
+    analyzer._error_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+    monkeypatch.setattr(analyzer, "get_router", lambda: _router_capturing([]))
+
+    # 같은 에러, 다른 워크스페이스 + 다른 선택 코드 (다른 사용자를 흉내)
+    req_a = AnalyzeRequest(
+        workspace_path="/home/alice/proj",
+        terminal_output="ValueError: boom",
+        selected_text="alice_secret_context",
+    )
+    req_b = AnalyzeRequest(
+        workspace_path="/home/bob/proj",
+        terminal_output="ValueError: boom",
+        selected_text="bob_secret_context",
+    )
+    ev_a = asyncio.run(analyzer.analyze(req_a, session_id="a"))
+    ev_b = asyncio.run(analyzer.analyze(req_b, session_id="b"))
+
+    # B 는 A 의 캐시를 물려받지 않는다 — 서로 다른 이벤트여야 한다
+    assert ev_a is not ev_b, "다른 요청인데 캐시가 같은 이벤트를 돌려줬다 (교차 오염)"
+    # B 의 컨텍스트에 A 의 선택 코드가 섞이면 안 된다
+    assert all("alice_secret_context" not in c for c in ev_b.contexts), ev_b.contexts
+    # 키가 실제로 달라야 한다
+    assert analyzer._scoped_cache_key(req_a) != analyzer._scoped_cache_key(req_b)
+
+
+def test_cache_hits_on_identical_request(monkeypatch):
+    """동일 요청 재제출은 60초 내 캐시로 재사용된다 (dedup 의도 유지)."""
+    import asyncio
+    import analyzer
+
+    analyzer._error_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+    monkeypatch.setattr(analyzer, "get_router", lambda: _router_capturing([]))
+
+    req = AnalyzeRequest(workspace_path="/tmp/proj", terminal_output="ValueError: boom")
+    ev1 = asyncio.run(analyzer.analyze(AnalyzeRequest(**req.model_dump()), session_id="x"))
+    ev2 = asyncio.run(analyzer.analyze(AnalyzeRequest(**req.model_dump()), session_id="y"))
+    assert ev1 is ev2, "완전히 동일한 요청인데 캐시가 안 맞았다 — dedup 이 깨졌다"
