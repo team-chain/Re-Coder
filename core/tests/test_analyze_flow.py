@@ -1,5 +1,10 @@
 """
-P0-12 smoke #3: /api/analyze flow (server.py 의 핵심 결선 검증).
+P0-12 smoke #3: /api/analyze flow (핵심 결선 검증).
+
+주의: 에러 추출 테스트는 예전에 `server.py` 의 함수를 가져다 썼다. 그런데
+`server.py` 는 아무도 import 하지 않는 죽은 파일이라, **살아있는 경로에는
+없는 기능을 테스트가 통과시키고 있었다.** 지금은 정식 위치인 `analyzer` 를
+검사한다.
 """
 from __future__ import annotations
 
@@ -11,7 +16,7 @@ from schemas import AnalyzeRequest, FilePatch, PatchProposal, RiskLevel
 
 
 def test_extract_error_text_traceback():
-    from server import _extract_error_text  # type: ignore
+    from analyzer import _extract_error_text
     log = (
         "running uvicorn ...\n"
         "Traceback (most recent call last):\n"
@@ -20,24 +25,181 @@ def test_extract_error_text_traceback():
         "ModuleNotFoundError: No module named 'fastapi'\n"
     )
     out = _extract_error_text(log)
-    assert "Traceback" in out or "ModuleNotFoundError" in out, out
+    assert "Traceback" in out, out
+    # 예전 판은 들여쓰기가 끝나는 지점에서 끊어 **예외 줄을 통째로 잘라냈다.**
+    # 기존 단언이 `or` 라서 앞 조건으로 통과해 이 결함을 못 잡았다.
+    assert "ModuleNotFoundError: No module named 'fastapi'" in out, (
+        "에러의 핵심(예외 타입·메시지)이 빠졌다 — 진단에 가장 필요한 줄이다"
+    )
 
 
 def test_extract_error_text_ts_compile():
-    from server import _extract_error_text  # type: ignore
+    from analyzer import _extract_error_text
     log = "src/index.ts:10:5\nerror TS2322: Type 'string' is not assignable to type 'number'.\n"
     out = _extract_error_text(log)
     assert "TS2322" in out
 
 
 def test_extract_error_text_fallback_to_last_30_lines():
-    from server import _extract_error_text  # type: ignore
+    from analyzer import _extract_error_text
     # 패턴이 매치되지 않는 일반 출력 → 마지막 30 줄 폴백 (50 lines, last 30 = 20..49)
     log = "\n".join(f"info {i}" for i in range(50))
     out = _extract_error_text(log)
     assert "info 49" in out
     assert "info 20" in out
     assert "info 0\n" not in out
+
+
+# ---------------------------------------------------------------------------
+# [회귀] analyzer 가 사라진 스키마 필드를 읽어 즉사하던 문제 + 원문 통째 전송
+#
+# `AnalyzeRequest` 에서 error_text·file_context 가 제거됐는데 analyzer 는 계속
+# 그 필드를 읽었다. 그것도 LLM 호출 try 블록 **밖**이라 폴백조차 안 걸렸다.
+# 살아있는 호출처(MCP 도구 recoder_analyze, 릴레이 analyze 명령)가 전부
+# 에러 응답만 뱉고 있었다.
+# ---------------------------------------------------------------------------
+
+def _long_build_log(error_tail: str) -> str:
+    return "\n".join(f"info {i}" for i in range(300)) + "\n$ pytest -q\n" + error_tail
+
+
+def test_build_prompt_does_not_crash_on_current_schema():
+    """[회귀] 현재 스키마의 요청으로 프롬프트를 만들 수 있어야 한다."""
+    import analyzer
+
+    req = AnalyzeRequest(
+        workspace_path="/tmp/proj",
+        terminal_output="Traceback (most recent call last):\nValueError: boom",
+        selected_text="x = 1\n",
+        command="pytest",
+    )
+    # 예전 코드는 여기서 AttributeError 로 죽었다.
+    prompt = analyzer._build_prompt(req)
+    assert "ValueError: boom" in prompt
+    assert "[선택한 코드]" in prompt and "x = 1" in prompt
+
+
+def test_build_prompt_shrinks_long_terminal_output():
+    """[회귀] 긴 빌드 로그는 에러 중심으로 줄어든다 (원문 통째 금지)."""
+    import analyzer
+
+    log = _long_build_log(
+        "Traceback (most recent call last):\n"
+        '  File "main.py", line 1, in <module>\n'
+        "    import fastapi\n"
+        "ModuleNotFoundError: No module named 'fastapi'\n"
+    )
+    req = AnalyzeRequest(workspace_path="/tmp/proj", terminal_output=log)
+    prompt = analyzer._build_prompt(req)
+
+    # ① 에러 본문은 살아 있다
+    assert "ModuleNotFoundError" in prompt
+
+    # ② 노이즈(로그 앞부분)는 실리지 않는다
+    assert "info 0" not in prompt, "로그 앞부분이 그대로 프롬프트에 실렸다"
+    assert "info 100" not in prompt
+
+    # ③ 직전 맥락(실행한 명령)은 남는다 — 진단에 필요하다
+    assert "$ pytest -q" in prompt, "에러 직전 맥락까지 잘려나갔다"
+
+    # ④ 전체적으로 원문보다 확실히 짧다
+    assert len(prompt) < len(log), (len(prompt), len(log))
+
+
+def test_build_prompt_keeps_context_lines_before_error():
+    """에러 본문 앞 N줄이 함께 실린다."""
+    import analyzer
+
+    log = "\n".join([f"step {i}" for i in range(40)]) + "\nValueError: boom\n"
+    req = AnalyzeRequest(workspace_path="/tmp/proj", terminal_output=log)
+    prompt = analyzer._build_prompt(req)
+
+    assert "ValueError: boom" in prompt
+    assert "step 39" in prompt, "에러 직전 줄이 빠졌다"
+    assert "step 0" not in prompt, "앞부분까지 다 실렸다"
+
+
+def test_analyze_uses_terminal_output_for_fingerprint(monkeypatch):
+    """[회귀] analyze() 가 사라진 error_text 필드를 읽지 않는다.
+
+    예전 코드는 `request.error_text` 를 읽어 **호출 즉시** AttributeError 로
+    죽었다. 여기서는 LLM 을 가짜로 바꿔 그 지점을 지나가는지만 본다.
+    """
+    import asyncio
+
+    import analyzer
+
+    class _Resp:
+        text = '{"has_error": true, "error_summary": "boom", "importance_score": 50, "event_type": "error_detected"}'
+        model_used = "fake"
+
+    class _Router:
+        def call(self, *a, **kw):
+            return _Resp()
+
+    monkeypatch.setattr(analyzer, "get_router", lambda: _Router())
+
+    req = AnalyzeRequest(
+        workspace_path="/tmp/proj",
+        terminal_output="Traceback (most recent call last):\nValueError: boom",
+    )
+    event = asyncio.run(analyzer.analyze(req, session_id="s1"))
+    assert event is not None
+    # 에러 본문이 terminal_output 에서 뽑혀 이벤트에 담긴다
+    assert "ValueError" in event.error_text
+    assert event.raw_errors and "ValueError" in event.raw_errors[0]
+    assert "boom" in event.summary
+    # 직렬화까지 되어야 MCP·릴레이가 결과를 돌려줄 수 있다
+    assert isinstance(event.to_dict(), dict)
+
+
+def test_analyze_applies_context_gate_masking(monkeypatch):
+    """[회귀] Context Gate 의 마스킹 결과가 실제로 반영된다.
+
+    `run_gate` 는 async 인데 예전 코드는 await 없이 불러 코루틴을 받았고,
+    바로 다음 줄에서 터져 except 로 빠졌다. 그 결과 **마스킹이 통째로
+    스킵**돼 시크릿·PII 가 그대로 LLM 으로 갔다. 로그에만 남고 결과에는
+    흔적이 없어 알아채기 어려웠다 — 그래서 여기서 못 박는다.
+    """
+    import asyncio
+
+    import analyzer
+
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    raw = f"export AWS_ACCESS_KEY_ID={secret}\nValueError: boom"
+    masked = "export AWS_ACCESS_KEY_ID=[REDACTED]\nValueError: boom"
+
+    class _Gate:
+        text = masked
+        quality_score = 0.9
+
+    async def _fake_run_gate(_text, *a, **kw):
+        return _Gate()
+
+    seen_prompts: list[str] = []
+
+    class _Resp:
+        text = '{"has_error": true, "error_summary": "boom", "importance_score": 50, "event_type": "error_detected"}'
+        model_used = "fake"
+
+    class _Router:
+        def call(self, req, *a, **kw):
+            seen_prompts.append(req.prompt)
+            return _Resp()
+
+    monkeypatch.setattr(analyzer, "run_gate", _fake_run_gate)
+    monkeypatch.setattr(analyzer, "get_router", lambda: _Router())
+
+    req = AnalyzeRequest(workspace_path="/tmp/proj", terminal_output=raw)
+    event = asyncio.run(analyzer.analyze(req, session_id="s2"))
+
+    assert seen_prompts, "LLM 이 호출되지 않았다"
+    assert secret not in seen_prompts[0], (
+        "마스킹 전 원문이 LLM 프롬프트에 실렸다 — Context Gate 가 무시됐다"
+    )
+    assert "[REDACTED]" in seen_prompts[0]
+    # 이벤트에 남는 컨텍스트도 마스킹된 본문이어야 한다
+    assert all(secret not in c for c in event.contexts), event.contexts
 
 
 def test_analyze_request_dataclass_round_trip():
