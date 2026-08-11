@@ -328,6 +328,15 @@ class ECSAgent:
             # 8. desired_count 가 0 이면 띄울 태스크가 없다 — 폴링도 URL 도
             #    의미가 없다. 여기서 성공으로 끝낸다(과금 0원 상태).
             if request.desired_count == 0:
+                # **끝내기 전에 취소를 한 번 더 본다.**
+                #
+                # 취소는 "지금 도는 단계가 끝난 뒤" 반영된다고 문서에 적어
+                # 놨는데, 이 갈래만 그 약속을 안 지켰다. 바로 위
+                # `_step_ensure_service` 가 AWS 를 기다리는 동안 사용자가
+                # 취소를 눌러도, 여기서 곧장 SUCCEEDED 로 덮어써서 **취소가
+                # 없었던 일이 된다.** 다른 종료 지점(URL 확인 뒤)은 이미
+                # 같은 이유로 다시 확인하고 있다.
+                self._abort_if_cancelled(record, "서비스 확보")
                 record.status = ECSDeployStatus.SUCCEEDED
                 record.completed_at = datetime.now(timezone.utc)
                 logger.info(
@@ -696,6 +705,18 @@ class ECSAgent:
         if result.hadolint_error_count:
             reasons.append(f"Dockerfile 오류 {result.hadolint_error_count}건")
             fixes.append("hadolint 오류를 수정하세요.")
+
+        # **검사가 못 돈 것도 차단 사유다.** 취약점 0 건이 아니라 "검사 안 됨"
+        # 이므로, 위 세 건과 별개로 반드시 표면화한다.
+        if getattr(result, "tool_errors", None):
+            names = ", ".join(result.tool_errors)
+            reasons.append(f"실행되지 못한 검사({names})")
+            fixes.append(
+                "해당 스캐너를 설치하거나(trivy·gitleaks·hadolint), ECR "
+                "이미지를 못 받아온 경우라면 권한표의 ecr:BatchGetImage · "
+                "ecr:GetDownloadUrlForLayer 를 확인한 뒤 다시 배포하세요. "
+                "검사하지 않은 이미지는 배포하지 않습니다."
+            )
 
         if not reasons:   # 방어: blocked 인데 이유를 못 찾은 경우
             reasons.append("보안 검사 위반")
@@ -1353,15 +1374,62 @@ class ECSAgent:
             # 서비스 단계 전에 멈췄다 — 떠 있는 태스크가 없다.
             return
 
-        if not rec.service_created_by_this_run:
-            rec.provisioned["cost_warning"] = (
-                "이 배포는 기존 서비스를 갱신하던 중이었습니다. 원래 앱을 "
-                "내리지 않으려고 태스크는 그대로 두었습니다 — 정말 멈추려면 "
-                "배포 중지(POST /api/deploy/ecs/stop)를 쓰세요."
-            )
+        # **태스크를 0 개로 요청한 배포는 이야기가 다르다.**
+        #
+        # 이 함수는 `desired_count >= 1` 만 오던 시절에 쓰였다. 태스크 0 개
+        # 갈래에도 취소 확인을 넣으면서 여기로 오게 됐는데, 아래 두 문장이
+        # 그 경우에는 **둘 다 거짓말**이 된다.
+        #
+        #   - "태스크는 그대로 두었습니다" — `ensure_service` 가 이미
+        #     `desiredCount=0` 으로 갱신했다. 사용자 앱은 내려가 있는데
+        #     화면에는 그대로 두었다고 뜬다. 게다가 이 문구는
+        #     `cost_warning` 키로 나가서 사이드바가 "요금이 나가고 있다"로
+        #     보여준다 — 사실은 정반대다.
+        #   - `halt_service` 로 0 으로 내리기 — 이미 0 이다. 실패 경로에서
+        #     굳이 AWS 를 한 번 더 부르는 셈이고, 여기 온 원인이 자격증명
+        #     문제라면 그 호출이 또 터진다.
+        if req.desired_count == 0:
+            if not rec.service_created_by_this_run:
+                rec.provisioned["service_warning"] = (
+                    "취소했지만 이 배포는 이미 기존 서비스의 태스크 수를 "
+                    "0 으로 바꾼 뒤였습니다 — 원래 앱이 내려가 있습니다. "
+                    "되돌리려면 태스크 수를 원래대로 올려 다시 배포하세요."
+                )
             return
 
         loop = asyncio.get_running_loop()
+
+        if not rec.service_created_by_this_run:
+            # **취소만으로는 롤아웃이 안 멈춘다.**
+            #
+            # 기존 서비스를 갱신하던 중이었다면 `ensure_service` 가 이미
+            # `UpdateService` 로 **새(=취소된) 태스크 정의로 롤아웃을
+            # 시작**했다. 여기서 그냥 돌아가면 ECS 는 태스크를 0 으로 내리지
+            # 않았다는 이유로 안심하는 게 아니라, 계속해서 옛 태스크를 방금
+            # 취소한 버전으로 갈아치운다. 기록은 CANCELLED 인데 실제 배포는
+            # 끝까지 나간다.
+            #
+            # 그래서 **이전 리비전으로 되돌린다.** 이전 리비전을 모르면
+            # (첫 배포라 이전이 없었거나 등록 전에 취소된 경우) 되돌릴 대상이
+            # 없으므로, 그때만 사용자가 직접 멈추도록 안내한다.
+            prev = rec.previous_task_definition_arn
+            if prev:
+                rec.provisioned["rollback"] = await loop.run_in_executor(
+                    None,
+                    lambda: aws_infra.revert_service_task_definition(
+                        clients["ecs"], cluster=req.cluster,
+                        service=req.service, task_definition=prev,
+                    ),
+                )
+            else:
+                rec.provisioned["cost_warning"] = (
+                    "취소했지만 이 배포는 이미 기존 서비스의 롤아웃을 "
+                    "시작한 뒤였고, 되돌릴 이전 태스크 정의를 찾지 못했습니다. "
+                    "배포 중지(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 "
+                    "내리거나 AWS 콘솔에서 서비스를 직접 되돌리세요."
+                )
+            return
+
         rec.provisioned["halt"] = await loop.run_in_executor(
             None,
             lambda: aws_infra.halt_service(
