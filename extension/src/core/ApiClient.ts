@@ -722,9 +722,27 @@ export class ApiClient {
         };
     }
 
-    /** POST /api/aws/permissions/check — 현재 키를 다시 입력하지 않고 권한만 점검. */
-    async checkAwsPermissions(): Promise<AwsStatus> {
-        const resp = await this.request<AwsStatus>('POST', '/api/aws/permissions/check');
+    /** POST /api/aws/permissions/check — 실제 ECS 대상 기준으로 현재 키 권한 점검. */
+    async checkAwsPermissions(deploymentContext?: {
+        ecrRepo?: string;
+        ecsCluster?: string;
+        ecsService?: string;
+        taskFamily?: string;
+        awsRegion?: string;
+        taskExecutionRole?: string;
+        taskRole?: string;
+    }): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/permissions/check', {
+            deployment_context: deploymentContext ? {
+                ecr_repo: deploymentContext.ecrRepo ?? '',
+                ecs_cluster: deploymentContext.ecsCluster ?? '',
+                ecs_service: deploymentContext.ecsService ?? '',
+                task_family: deploymentContext.taskFamily ?? '',
+                aws_region: deploymentContext.awsRegion ?? '',
+                task_execution_role: deploymentContext.taskExecutionRole ?? '',
+                task_role: deploymentContext.taskRole ?? '',
+            } : undefined,
+        });
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 권한 점검 실패');
         }

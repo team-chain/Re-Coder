@@ -36,6 +36,10 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from .deploy_ecs import DEFAULT_CLUSTER as ECS_DEFAULT_CLUSTER
+from .deploy_ecs import DEFAULT_SERVICE as ECS_DEFAULT_SERVICE
+from .deploy_ecs import DEFAULT_TASK_FAMILY as ECS_DEFAULT_TASK_FAMILY
+
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     import aws_policy
 except ImportError:  # pragma: no cover
@@ -87,6 +91,23 @@ class AwsConfigureRequest(BaseModel):
     session_token: str = ""   # 임시 자격증명용 (선택)
 
 
+class AwsDeploymentPermissionContext(BaseModel):
+    """IAM Simulator에 전달할 실제 ECS 배포 대상.
+
+    연결 시점에는 아직 ECS 이름을 모를 수 있으므로 빈 값은 환경변수에서
+    보완한다. 이름이 끝까지 없으면 해당 리소스 한정 액션은 "권한 없음"으로
+    오판하지 않고, 배포 설정을 입력한 후 다시 점검하도록 안내한다.
+    """
+
+    ecr_repo: str = ""
+    ecs_cluster: str = ""
+    ecs_service: str = ""
+    task_family: str = ""
+    aws_region: str = ""
+    task_execution_role: str = ""
+    task_role: str = ""
+
+
 class AwsConnectRequest(BaseModel):
     """VS Code SecretStorage에 보관하기 전, STS로 키만 검증하는 요청.
 
@@ -99,6 +120,13 @@ class AwsConnectRequest(BaseModel):
     secret_access_key: str = Field(..., min_length=8, max_length=256)
     region: str = ""
     session_token: str = ""
+    deployment_context: Optional[AwsDeploymentPermissionContext] = None
+
+
+class AwsPermissionCheckRequest(BaseModel):
+    """이미 연결된 키를 실제 배포 대상 기준으로 다시 검사하는 요청."""
+
+    deployment_context: Optional[AwsDeploymentPermissionContext] = None
 
 
 class AwsIdentity(BaseModel):
@@ -111,6 +139,10 @@ class AwsPermissionCheck(BaseModel):
     """배포에 필요한 IAM 권한을 읽기 전용으로 점검한 결과."""
 
     inspected: bool = False
+    #: STS assumed-role ARN에서 IAM 역할 경로를 복원하지 못해 시뮬레이션만
+    #: 완료할 수 없는 경우. 명시적인 부족 권한이 없으면 UI는 안내 후 배포를
+    #: 진행할 수 있다.
+    advisory_only: bool = False
     required_actions: list[str] = Field(default_factory=list)
     missing_actions: list[str] = Field(default_factory=list)
     excessive_policies: list[str] = Field(default_factory=list)
@@ -128,22 +160,56 @@ class AwsStatus(BaseModel):
     permission_check: Optional[AwsPermissionCheck] = None
 
 
-# ECS Fargate 배포에 쓰는 최소 작업 목록. 이 목록은 배포 가능 여부를 알려 주기
-# 위한 것이며, 실제 정책은 대상 ECR 리포지토리/Task Role로 더 좁혀야 한다.
+# ECS Fargate 배포를 실제로 시작하기 위한 최소 작업 목록. 이 목록은 배포
+# 가능 여부를 결정하므로, 실제 정책은 대상 ECR 리포지토리/Task Role로 더
+# 좁혀야 한다.
 REQUIRED_DEPLOY_ACTIONS = [
     "ecr:GetAuthorizationToken",
+    "ecr:CreateRepository",
+    "ecr:DescribeRepositories",
     "ecr:BatchCheckLayerAvailability",
     "ecr:InitiateLayerUpload",
     "ecr:UploadLayerPart",
     "ecr:CompleteLayerUpload",
     "ecr:PutImage",
     "ecr:BatchGetImage",
+    "ecr:GetDownloadUrlForLayer",
     "ecs:DescribeClusters",
+    "ecs:CreateCluster",
     "ecs:DescribeServices",
     "ecs:RegisterTaskDefinition",
+    "ecs:DescribeTaskDefinition",
     "ecs:UpdateService",
+    "ecs:CreateService",
+    "ecs:ListTasks",
+    "ecs:DescribeTasks",
+    "iam:GetRole",
     "iam:PassRole",
+    "logs:DescribeLogGroups",
+    "logs:CreateLogGroup",
+    "ec2:DescribeVpcs",
+    "ec2:DescribeSubnets",
+    "ec2:DescribeRouteTables",
+    "ec2:DescribeSecurityGroups",
+    "ec2:DescribeNetworkInterfaces",
+    "ec2:CreateSecurityGroup",
+    "ec2:AuthorizeSecurityGroupIngress",
 ]
+
+# 비용 누적을 줄이는 설정이다. 실제 파이프라인도 이 두 호출의 실패를 경고로
+# 기록한 뒤 배포를 계속하므로, 여기서 권한이 없다고 ECS 배포 자체를 막으면
+# 안 된다. 다만 사용자가 비용 제어를 보완할 수 있게 결과에는 경고를 남긴다.
+OPTIONAL_COST_CONTROL_ACTIONS = {
+    "ecr:PutLifecyclePolicy",
+    "logs:PutRetentionPolicy",
+}
+
+# ECS 서비스 연결 역할은 계정에 아직 없을 때만 CreateService 과정에서 필요하다.
+# 이미 존재하는 계정에서는 이 권한 없이도 정상 배포되므로, 거부되더라도
+# 배포 차단이 아닌 조건부 안내로만 보여 준다.
+OPTIONAL_CONDITIONAL_ACTIONS = {
+    "iam:CreateServiceLinkedRole",
+}
 
 _BROAD_POLICY_NAMES = {
     "administratoraccess",
@@ -408,6 +474,21 @@ def _iam_principal_arn(identity_arn: str) -> Optional[str]:
     return None
 
 
+def _assumed_role_name(identity_arn: str) -> Optional[str]:
+    """STS assumed-role ARN에서 역할의 마지막 이름만 읽는다.
+
+    STS ARN에는 IAM 역할 path가 없으므로, 이 이름으로 GetRole을 시도해 실제
+    IAM ARN을 얻는다. 읽기 권한이 없으면 호출자는 계속 배포할 수 있으므로
+    이후 시뮬레이션 결과를 advisory로만 취급할 수 있게 ``None``이 아니다.
+    """
+    marker = ":assumed-role/"
+    if ":sts:" not in identity_arn or marker not in identity_arn:
+        return None
+    role_and_session = identity_arn.split(marker, 1)[1]
+    role_name = role_and_session.rsplit("/", 1)[0]
+    return role_name.rsplit("/", 1)[-1] or None
+
+
 def _policy_is_administrator(document: Any) -> bool:
     """관리형/인라인 정책 문서가 사실상 전체 권한인지 판별한다."""
     if isinstance(document, str):
@@ -434,48 +515,250 @@ def _policy_is_administrator(document: Any) -> bool:
     return False
 
 
-def _inspect_deploy_permissions(identity: dict[str, str], region: str) -> AwsPermissionCheck:
-    """IAM simulation과 정책 이름으로 부족·과다 권한을 읽기 전용 점검한다.
+def _simulation_partition(identity_arn: str) -> str:
+    """STS ARN의 partition을 보존한다 (일반 aws / GovCloud / 중국 리전)."""
+    parts = (identity_arn or "").split(":", 2)
+    return parts[1] if len(parts) > 1 and parts[0] == "arn" else "aws"
 
-    IAM 읽기/시뮬레이션 권한이 없는 키도 정상적인 배포 키일 수 있다. 이 경우
-    연결을 막지 않고, 확인할 수 없었다는 안내만 반환한다.
+
+def _resolved_permission_context(
+    context: Optional[AwsDeploymentPermissionContext],
+) -> tuple[Optional[AwsDeploymentPermissionContext], Optional[str]]:
+    """명시 입력 → 실제 ECS 요청 기본값 순으로 검사 대상을 정한다."""
+    supplied = context or AwsDeploymentPermissionContext()
+    try:
+        execution_role, task_role = aws_policy.resolve_roles(
+            supplied.task_execution_role,
+            supplied.task_role,
+        )
+    except ValueError as exc:
+        # configured_execution_role()도 같은 환경변수를 다시 파싱하므로 여기서
+        # 재호출하면 똑같은 ValueError가 다시 난다. 키(STS)는 유효할 수 있으니
+        # 연결을 실패시키지 않고 점검 불완전 상태와 설정 안내를 반환한다.
+        return None, f"ECS 역할 설정이 올바르지 않아 권한 점검을 완료하지 못했습니다: {exc}"
+    # 확장 ECS 어댑터가 쓰는 기본값과 **같은 값**을 먼저 확정한다. 빈 값을
+    # 환경변수에서 읽으면 점검은 통과했는데 실제 배포는 recoder-* 대상으로
+    # 나가는 두 개의 서로 다른 계약이 생긴다.
+    ecs_cluster = (supplied.ecs_cluster or ECS_DEFAULT_CLUSTER).strip()
+    ecs_service = (supplied.ecs_service or ECS_DEFAULT_SERVICE).strip()
+    return AwsDeploymentPermissionContext(
+        # ECS 배포 경로는 ECR_REPOSITORY 환경변수를 읽지 않고
+        # ECSDeployRequest.repo_name(기본 recoder-app)을 쓴다. 여기에서만
+        # ECR_REPOSITORY를 보면 권한 점검은 통과했는데 실제 push가 다른
+        # 저장소로 나가 실패하는 상태가 된다.
+        # ECSAgent.ecr_repo_name()과 같다. repo_name을 보내지 않은 확장 요청은
+        # service 이름으로 ECR 리포지토리를 정하므로 recoder-app을 고정하면 안
+        # 된다.
+        ecr_repo=(supplied.ecr_repo or ecs_service).strip(),
+        ecs_cluster=ecs_cluster,
+        ecs_service=ecs_service,
+        task_family=(supplied.task_family or ECS_DEFAULT_TASK_FAMILY).strip(),
+        aws_region=(supplied.aws_region or "").strip(),
+        task_execution_role=execution_role,
+        task_role=task_role,
+    ), None
+
+
+def _inspect_deploy_permissions(
+    identity: dict[str, str],
+    region: str,
+    deployment_context: Optional[AwsDeploymentPermissionContext] = None,
+) -> AwsPermissionCheck:
+    """실제 ECS 대상 ARN과 조건을 넣어 IAM 권한을 읽기 전용 점검한다.
+
+    ``simulate_principal_policy``에 ResourceArns 없이 액션만 넘기면 IAM은
+    리소스 한정 정책을 wildcard 대상에 대입한다. 그러면 정상적인 ECR/ECS
+    최소권한 정책도 거부로 나올 수 있다. 따라서 리포지토리·클러스터·서비스·
+    역할 ARN을 액션 종류별로 분리하고, PassRole에는 정책과 같은 ECS 조건을
+    함께 전달한다.
     """
     report = AwsPermissionCheck(required_actions=list(REQUIRED_DEPLOY_ACTIONS))
-    principal_arn = _iam_principal_arn(identity.get("arn", ""))
+    identity_arn = identity.get("arn", "")
+    principal_arn = _iam_principal_arn(identity_arn)
     if not principal_arn:
         report.warnings.append("IAM 사용자 또는 역할 ARN을 확인할 수 없어 권한 점검을 건너뛰었습니다.")
         return report
 
+    context, context_error = _resolved_permission_context(deployment_context)
+    if context_error or context is None:
+        report.warnings.append(context_error or "ECS 배포 설정을 확인할 수 없습니다.")
+        return report
+    simulation_region = (context.aws_region or region).strip()
     try:
-        session = _build_boto3_session(region=region)
-        iam = session.client("iam", region_name=region)
+        session = _build_boto3_session(region=simulation_region)
+        iam = session.client("iam", region_name=simulation_region)
     except Exception as exc:  # noqa: BLE001
         report.warnings.append(f"IAM 권한 점검을 시작할 수 없습니다: {exc}")
         return report
 
-    try:
-        simulation = iam.simulate_principal_policy(
-            PolicySourceArn=principal_arn,
-            ActionNames=REQUIRED_DEPLOY_ACTIONS,
-        )
-        results = simulation.get("EvaluationResults", [])
-        decisions = {
-            item.get("EvalActionName", ""): item.get("EvalDecision", "implicitDeny")
-            for item in results
-        }
-        report.missing_actions = [
-            action for action in REQUIRED_DEPLOY_ACTIONS
-            if decisions.get(action, "implicitDeny").lower() != "allowed"
-        ]
-        report.inspected = True
-        if report.missing_actions:
-            report.warnings.append("ECS 배포에 필요한 권한 일부가 허용되지 않았습니다.")
-    except Exception as exc:  # noqa: BLE001
+    # assumed-role ARN에는 `/team/Deployer` 같은 IAM 역할 path가 빠진다.
+    # GetRole을 허용한 계정에서는 정확한 ARN으로 바꿔 시뮬레이션한다. 이 읽기
+    # 권한이 없는 계정도 배포 자체는 가능하므로, 아래에서 시뮬레이션이 전부
+    # 실패한 경우에만 advisory로 돌린다.
+    unresolved_assumed_role_path = False
+    assumed_role_name = _assumed_role_name(identity_arn)
+    if assumed_role_name:
+        try:
+            resolved_arn = str(iam.get_role(RoleName=assumed_role_name)["Role"]["Arn"])
+            if resolved_arn:
+                principal_arn = resolved_arn
+        except Exception as exc:  # noqa: BLE001
+            unresolved_assumed_role_path = True
+            logger.info("[aws] assumed-role IAM path lookup unavailable: %s", exc)
+
+    account_id = identity.get("account", "") or principal_arn.split(":")[4]
+    partition = _simulation_partition(identity.get("arn", ""))
+    if not account_id or not simulation_region:
+        report.warnings.append("AWS 계정 또는 리전 정보를 확인할 수 없어 리소스별 권한 점검을 건너뛰었습니다.")
+        return report
+
+    # Extension ECS 어댑터는 caller 계정의 ECR client가 돌려준 repositoryUri로
+    # 이미지를 올린다. 별도 ecr_registry 입력값은 실제 배포에 쓰이지 않으므로
+    # 여기서만 다른 계정을 시뮬레이션하지 않는다.
+    ecr_arn = f"arn:{partition}:ecr:{simulation_region}:{account_id}:repository/{context.ecr_repo}"
+    role_arns = [
+        f"arn:{partition}:iam::{account_id}:role/{context.task_execution_role}",
+    ]
+    if context.task_role and context.task_role != context.task_execution_role:
+        role_arns.append(f"arn:{partition}:iam::{account_id}:role/{context.task_role}")
+
+    # ResourceArns는 액션별로만 보낸다. 모든 ARN을 한 요청에 섞으면 ECR 액션을
+    # ECS ARN에, PassRole을 ECR ARN에 대입하는 교차 조합이 되어 다시 오판한다.
+    simulations: list[tuple[list[str], list[str], Optional[list[dict[str, object]]]]] = [
+        ([
+            "ecr:GetAuthorizationToken", "ecs:RegisterTaskDefinition",
+            "ecs:DescribeTaskDefinition", "logs:DescribeLogGroups",
+            "ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeRouteTables",
+            "ec2:DescribeSecurityGroups", "ec2:DescribeNetworkInterfaces",
+        ], ["*"], None),
+        ([
+            "ecr:CreateRepository", "ecr:DescribeRepositories",
+            "ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload",
+            "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:PutImage",
+            "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:PutLifecyclePolicy",
+        ], [ecr_arn], None),
+        # PreflightAgent는 실행 역할 존재를 확인한다. task role은 PassRole만
+        # 필요하므로 GetRole 대상에 불필요하게 추가하지 않는다.
+        (["iam:GetRole"], [role_arns[0]], None),
+        (["iam:PassRole"], role_arns, [{
+            "ContextKeyName": "iam:PassedToService",
+            "ContextKeyValues": ["ecs-tasks.amazonaws.com"],
+            "ContextKeyType": "string",
+        }]),
+    ]
+    cluster_arn = f"arn:{partition}:ecs:{simulation_region}:{account_id}:cluster/{context.ecs_cluster}"
+    service_arn = (
+        f"arn:{partition}:ecs:{simulation_region}:{account_id}:service/"
+        f"{context.ecs_cluster}/{context.ecs_service}"
+    )
+    task_arn = f"arn:{partition}:ecs:{simulation_region}:{account_id}:task/{context.ecs_cluster}/*"
+    # ECSAgent.log_group_name()은 task_definition_family에서 이 경로를
+    # 결정한다. 와일드카드를 넣으면 실제 한 그룹에만 준 최소권한 정책이
+    # implicitDeny로 오판된다.
+    log_group_arn = (
+        f"arn:{partition}:logs:{simulation_region}:{account_id}:"
+        f"log-group:/ecs/{context.task_family}"
+    )
+    vpc_arn = f"arn:{partition}:ec2:{simulation_region}:{account_id}:vpc/*"
+    security_group_arn = f"arn:{partition}:ec2:{simulation_region}:{account_id}:security-group/*"
+    # Extension 요청의 provision 기본값은 true다. 아래는 배포가 실제로
+    # 확보하는 클러스터·로그 그룹·네트워크·보안 그룹·서비스의 권한을 같은
+    # 리소스 문맥으로 검사한다.
+    simulations.extend([
+        (["ecs:DescribeClusters", "ecs:CreateCluster"], [cluster_arn], None),
+        (["ecs:DescribeServices", "ecs:UpdateService", "ecs:CreateService"], [service_arn], None),
+        (["ecs:ListTasks"], ["*"], [{
+            "ContextKeyName": "ecs:cluster",
+            "ContextKeyValues": [cluster_arn],
+            "ContextKeyType": "string",
+        }]),
+        (["ecs:DescribeTasks"], [task_arn], None),
+        (["iam:CreateServiceLinkedRole"], ["*"], [{
+            "ContextKeyName": "iam:AWSServiceName",
+            "ContextKeyValues": ["ecs.amazonaws.com"],
+            "ContextKeyType": "string",
+        }]),
+        (["logs:CreateLogGroup", "logs:PutRetentionPolicy"], [log_group_arn], None),
+        (["ec2:CreateSecurityGroup"], [vpc_arn, security_group_arn], None),
+        (["ec2:AuthorizeSecurityGroupIngress"], [security_group_arn], None),
+    ])
+    deferred_actions: list[str] = []
+
+    decisions: dict[str, list[str]] = {}
+    simulated_actions: list[str] = []
+    failed_actions: list[str] = []
+    for actions, resource_arns, context_entries in simulations:
+        try:
+            params: dict[str, object] = {
+                "PolicySourceArn": principal_arn,
+                "ActionNames": actions,
+                "ResourceArns": resource_arns,
+            }
+            if context_entries:
+                params["ContextEntries"] = context_entries
+            simulation = iam.simulate_principal_policy(**params)
+            simulated_actions.extend(actions)
+            for item in simulation.get("EvaluationResults", []):
+                action = item.get("EvalActionName", "")
+                decisions.setdefault(action, []).append(item.get("EvalDecision", "implicitDeny"))
+        except Exception as exc:  # noqa: BLE001
+            failed_actions.extend(actions)
+            logger.info("[aws] IAM permission simulation unavailable for %s: %s", actions, exc)
+
+    denied_actions = [
+        action for action in simulated_actions
+        if any(decision.lower() != "allowed" for decision in decisions.get(action, ["implicitDeny"]))
+    ]
+    report.missing_actions = [
+        action for action in denied_actions
+        if action not in OPTIONAL_COST_CONTROL_ACTIONS
+        and action not in OPTIONAL_CONDITIONAL_ACTIONS
+    ]
+    optional_cost_actions = [
+        action for action in denied_actions
+        if action in OPTIONAL_COST_CONTROL_ACTIONS
+    ]
+    optional_conditional_actions = [
+        action for action in denied_actions
+        if action in OPTIONAL_CONDITIONAL_ACTIONS
+    ]
+    # 일부 그룹만 확인했거나 IAM Simulator 호출이 하나라도 실패했다면, 이
+    # 결과는 "점검 완료"가 아니다. UI는 inspected + missing 없음일 때만
+    # 초록 완료를 표시하므로, 여기서 엄격하게 완료 여부를 구분한다.
+    report.inspected = (
+        not failed_actions
+        and not deferred_actions
+        and set(REQUIRED_DEPLOY_ACTIONS).issubset(simulated_actions)
+    )
+    if unresolved_assumed_role_path and failed_actions and not report.missing_actions:
+        report.advisory_only = True
+    if report.missing_actions:
+        report.warnings.append("ECS 배포에 필요한 권한 일부가 실제 배포 대상에서 허용되지 않았습니다.")
+    if optional_cost_actions:
         report.warnings.append(
-            "IAM 권한 시뮬레이션 권한이 없어 부족 권한을 자동 확인하지 못했습니다. "
-            "배포용 최소권한 정책을 확인하세요."
+            "배포는 가능하지만 비용 최적화 설정 권한이 없습니다: "
+            f"{', '.join(optional_cost_actions)}. "
+            "ECR 이미지 자동 정리 또는 CloudWatch 로그 보존기간 설정이 적용되지 않을 수 있습니다."
         )
-        logger.info("[aws] IAM permission simulation unavailable: %s", exc)
+    if optional_conditional_actions:
+        report.warnings.append(
+            "ECS 서비스 연결 역할 생성 권한이 없습니다. 계정에 "
+            "AWSServiceRoleForECS가 이미 있으면 배포는 계속할 수 있고, "
+            "없다면 AWS 콘솔에서 ECS를 한 번 열거나 해당 권한을 추가하세요."
+        )
+    if report.advisory_only:
+        report.warnings.append(
+            "현재 자격증명은 IAM 역할 경로가 있는 assumed-role일 수 있어 권한 "
+            "시뮬레이션을 완료하지 못했습니다. 명시적으로 거부된 권한은 없어 "
+            "배포를 계속할 수 있지만, AWS에서 권한 오류가 나면 역할 정책을 확인하세요."
+        )
+    if failed_actions:
+        report.warnings.append("IAM 권한 시뮬레이션 권한이 없어 일부 배포 권한을 자동 확인하지 못했습니다.")
+    if deferred_actions:
+        report.warnings.append(
+            "ECS 클러스터·서비스가 아직 설정되지 않아 "
+            f"{', '.join(deferred_actions)} 권한은 배포 설정 입력 후 다시 점검해야 합니다."
+        )
 
     # 명백히 과도한 AWS 관리형 정책을 확인한다. 정책 본문을 읽을 권한이 없더라도
     # 이름만으로 확실한 정책은 표시한다.
@@ -623,7 +906,9 @@ async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
             session_token=req.session_token,
         )
         identity = _call_sts_get_caller_identity(profile=None, region=region)
-        permission_check = _inspect_deploy_permissions(identity, region)
+        permission_check = _inspect_deploy_permissions(
+            identity, region, req.deployment_context,
+        )
     except Exception:
         _restore_environment(snapshot, prior_profile)
         raise
@@ -725,7 +1010,9 @@ async def get_aws_status() -> AwsStatus:
 
 
 @router.post("/api/aws/permissions/check", response_model=AwsStatus)
-async def check_aws_permissions() -> AwsStatus:
+async def check_aws_permissions(
+    req: Optional[AwsPermissionCheckRequest] = None,
+) -> AwsStatus:
     """저장·재입력 없이 현재 연결된 자격증명의 배포 권한을 다시 점검한다."""
     status = await get_aws_status()
     if not status.ready or status.identity is None:
@@ -735,7 +1022,11 @@ async def check_aws_permissions() -> AwsStatus:
         "arn": status.identity.arn,
         "user_id": status.identity.user_id,
     }
-    status.permission_check = _inspect_deploy_permissions(identity, status.region or DEFAULT_REGION)
+    status.permission_check = _inspect_deploy_permissions(
+        identity,
+        status.region or DEFAULT_REGION,
+        req.deployment_context if req else None,
+    )
     return status
 
 

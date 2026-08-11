@@ -108,6 +108,9 @@ class EcsReadyResponse(BaseModel):
 #: 맞춰야 한다 — 다르면 정책이 인가한 리소스와 실제 리소스가 어긋난다.
 DEFAULT_CLUSTER = "recoder-cluster"
 DEFAULT_SERVICE = "recoder-app"
+#: 코어 ECS 요청의 기본 Task Definition family와 맞춘다. 권한 점검도 이
+#: 값을 가져와 실제 CloudWatch 로그 그룹(`/ecs/<family>`)을 검사한다.
+DEFAULT_TASK_FAMILY = "recoder-task"
 
 
 def to_core_request(
@@ -139,8 +142,9 @@ def to_core_request(
         fields["cpu"] = body.cpu.strip()  # type: ignore[union-attr]
     if (body.memory or "").strip():
         fields["memory"] = body.memory.strip()  # type: ignore[union-attr]
-    if (body.task_family or "").strip():
-        fields["task_definition_family"] = body.task_family.strip()  # type: ignore[union-attr]
+    fields["task_definition_family"] = (
+        (body.task_family or "").strip() or DEFAULT_TASK_FAMILY
+    )
     if body.desired_count is not None:
         fields["desired_count"] = body.desired_count
     # **정책 평가가 보는 두 값은 반드시 넘긴다.**

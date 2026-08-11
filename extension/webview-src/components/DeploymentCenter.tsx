@@ -1,5 +1,5 @@
 /** ReCoder Workspace 안에서 사용하는 배포 센터와 AI-DLC 배포 결정 카드. */
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { AwsConnection } from "./AwsConnection";
@@ -106,6 +106,8 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [checking, setChecking] = useState(true);
   const [savingDecision, setSavingDecision] = useState(false);
+  const [checkingEcsPermissions, setCheckingEcsPermissions] = useState(false);
+  const pendingEcsDeploymentRef = useRef<Record<string, unknown> | null>(null);
   const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
   const [awsReady, setAwsReady] = useState(false);
   const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: "ap-northeast-2", ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
@@ -132,6 +134,25 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       setMessage(`선택 근거를 ${result.adr_path}에 기록했습니다.`);
     }
     if (type === "workspace.deploy.decisionError") { setSavingDecision(false); setMessage((payload as { message?: string })?.message ?? "배포 대상 기록에 실패했습니다."); }
+    if (type === "aws.permissions.result" && pendingEcsDeploymentRef.current) {
+      const result = payload as { ok?: boolean; status?: { permission_check?: { inspected?: boolean; advisory_only?: boolean; missing_actions?: string[]; warnings?: string[] } }; message?: string };
+      const deploymentRequest = pendingEcsDeploymentRef.current;
+      pendingEcsDeploymentRef.current = null;
+      setCheckingEcsPermissions(false);
+      const permission = result.status?.permission_check;
+      const canProceed = result.ok && (permission?.missing_actions?.length ?? 0) === 0 && (permission?.inspected || permission?.advisory_only);
+      if (canProceed) {
+        setMessage(permission?.advisory_only
+          ? "IAM 역할 경로 때문에 권한 시뮬레이션을 완료하지 못했습니다. 명시적인 부족 권한은 없어 배포를 시작합니다…"
+          : "ECS 배포 대상 리전의 권한을 확인했습니다. 배포를 시작합니다…");
+        postMessage("workspace.deploy.ecs", deploymentRequest);
+      } else {
+        const detail = permission?.missing_actions?.length
+          ? `부족 권한: ${permission.missing_actions.join(", ")}`
+          : (permission?.warnings?.[0] ?? result.message ?? "ECS 배포 대상 권한을 완료 확인하지 못했습니다.");
+        setMessage(`ECS 배포를 시작하지 않았습니다. ${detail}`);
+      }
+    }
     if (type === "workspace.deploy.remediationResult") {
       const result = payload as { message?: string; applied_files?: string[] };
       setApplyingProposalId(null);
@@ -170,7 +191,20 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const deployEc2 = () => { setMessage("EC2 배포 요청 전송 중…"); postMessage("workspace.deploy.ec2", { ...ec2, host_port: Number(ec2.host_port), container_port: Number(ec2.container_port) }); };
   const deployEcs = () => {
     if (!awsReady) { setTarget("aws"); setMessage("ECS 배포를 시작하려면 AWS 계정을 연결하세요."); return; }
-    setMessage("ECS Fargate 배포 요청 전송 중…"); postMessage("workspace.deploy.ecs", { ...ecs, container_port: Number(ecs.container_port) });
+    setCheckingEcsPermissions(true);
+    setMessage("입력한 ECS 리전과 대상 리소스의 권한을 확인 중…");
+    pendingEcsDeploymentRef.current = { ...ecs, container_port: Number(ecs.container_port) };
+    postMessage("aws.permissions.check", {
+      deploymentContext: {
+        // repo는 서버가 ECSAgent.ecr_repo_name()과 같은 규칙(빈 값이면
+        // service 이름)으로 결정한다. 별도 registry는 현재 ECS 어댑터가
+        // 사용하지 않으므로 권한 검사에도 전달하지 않는다.
+        ecsCluster: ecs.ecs_cluster,
+        ecsService: ecs.ecs_service,
+        taskFamily: ecs.task_family,
+        awsRegion: ecs.aws_region,
+      },
+    });
   };
   const update = <T extends Record<string, string>>(set: React.Dispatch<React.SetStateAction<T>>, key: keyof T, value: string) => set(cur => ({ ...cur, [key]: value }));
 
@@ -205,7 +239,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       {target === "s3" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>S3 정적 호스팅</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>정적 배포 대상을 선택했고 ADR에 기록했습니다. 다음으로 CI/CD 워크플로우를 생성해 검토·승인할 수 있습니다.</p><button onClick={generateActions} style={button}>배포 워크플로우 생성</button></div>}
       {target === "actions" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>GitHub Actions</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>프로젝트에 맞는 CI/CD 워크플로우를 생성하고, 승인 후 <code>.github/workflows/deploy.yml</code>에 저장합니다.</p><button onClick={generateActions} style={button}>워크플로우 생성</button>{proposal && <><pre style={{ marginTop: 12, maxHeight: 280, overflow: "auto", background: "var(--vscode-textCodeBlock-background, #1e1e1e)", borderRadius: 5, padding: 10, fontSize: 11 }}>{proposal.content}</pre><button onClick={() => postMessage("approveGithubActions", { proposalId: proposal.proposal_id, approved: true })} style={{ ...button, marginTop: 10 }}>승인하고 저장</button></>}</div>}
       {target === "ec2" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>EC2 배포</b><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["host_port", "호스트 포트"], ["container_port", "컨테이너 포트"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ec2_host", "EC2 Host"], ["ec2_ssh_key", "SSH 키 경로"], ["ec2_user", "EC2 사용자"] ] as [keyof typeof ec2, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ec2[key]} onChange={e => update(setEc2, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}</div><button onClick={deployEc2} style={{ ...button, marginTop: 14 }}>EC2 배포 실행</button></div>}
-      {target === "ecs" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>ECS Fargate 배포</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.45 }}>선택 근거가 ADR에 기록되었습니다. 아래 운영 정보를 확인한 뒤 배포를 시작하세요.</p><EcsCostNotice /><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ecs_cluster", "ECS Cluster"], ["ecs_service", "ECS Service"], ["task_family", "Task Family"], ["container_port", "컨테이너 포트"], ["cpu", "CPU"], ["memory", "Memory"] ] as [keyof typeof ecs, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ecs[key]} onChange={e => update(setEcs, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}</div><button onClick={deployEcs} style={{ ...button, marginTop: 14 }}>ECS 배포 실행</button></div>}
+      {target === "ecs" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>ECS Fargate 배포</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.45 }}>선택 근거가 ADR에 기록되었습니다. 입력한 리전과 ECS 대상의 권한을 확인한 뒤 배포를 시작합니다.</p><EcsCostNotice /><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ecs_cluster", "ECS Cluster"], ["ecs_service", "ECS Service"], ["task_family", "Task Family"], ["container_port", "컨테이너 포트"], ["cpu", "CPU"], ["memory", "Memory"] ] as [keyof typeof ecs, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ecs[key]} onChange={e => update(setEcs, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}</div><button disabled={checkingEcsPermissions} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : "ECS 배포 실행"}</button></div>}
       {message && <div style={{ marginTop: 12, padding: "8px 10px", borderRadius: 5, background: "var(--vscode-editorInfo-background, rgba(55,148,255,.12))", color: "var(--vscode-editorInfo-foreground, #75beff)", fontSize: 12 }}>{message}</div>}
     </div>
   );
