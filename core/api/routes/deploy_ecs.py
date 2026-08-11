@@ -225,7 +225,9 @@ _WARNING_KEYS = (
     "cost_warning",       # 태스크가 아직 떠 있어 요금이 붙는다
     "halt",               # 태스크 수를 0 으로 내렸다
     "ecs_rollback",       # ECS 가 이전 버전으로 되돌렸다
+    "rollback",           # 취소로 이전 태스크 정의로 되돌렸다
     "policy_warning",     # 정책 엔진 없이 로컬 규칙으로 판단했다
+    "service_warning",    # 앱이 내려가 있다 (요금 문제가 아니라 가용성 문제)
 )
 
 
@@ -283,14 +285,13 @@ async def deploy_ecs(
     """확장의 ECS 배포 버튼. 예전에는 이 주소가 없어서 404 였다."""
     from api.routes import ecs as ecs_routes
 
-    # **이벤트 루프에서 git 을 돌리지 않는다.**
-    # `to_core_request` 는 브랜치를 알아내려고 `git rev-parse` 를 동기로
-    # 부른다(최대 5초). 그 5초 동안 같은 루프에서 도는 사이드바 상태 폴링이
-    # 전부 멈춘다 — 사용자 눈에는 "배포 버튼을 눌렀는데 화면이 얼었다"로
-    # 보인다. 아래 준비 확인이 이미 같은 이유로 executor 를 쓴다.
-    loop = asyncio.get_running_loop()
+    # `to_core_request` 는 이제 **필드 변환만** 한다 — git 도 파일 접근도
+    # 없다. 브랜치 판정은 두 라우트의 합류점인 `ecs.start_deployment` 이
+    # executor 에서 한 번만 한다. 그래서 여기서 스레드로 넘기지 않는다.
+    # (예전에는 여기서 `git rev-parse` 를 동기로 불러 이벤트 루프를 최대
+    #  5초 멈췄고, 그동안 사이드바 폴링이 통째로 얼었다.)
     try:
-        core_request = await loop.run_in_executor(None, lambda: to_core_request(body))
+        core_request = to_core_request(body)
     except Exception as exc:  # noqa: BLE001 - 검증 실패를 400 으로 바꾼다
         raise HTTPException(
             status_code=400,

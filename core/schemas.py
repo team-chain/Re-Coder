@@ -1243,6 +1243,13 @@ _SCAN_NOT_PERFORMED_TITLES = frozenset({
     "gitleaks_not_installed", "gitleaks_scan_failed",
 })
 
+#: 이 중 하나라도 못 돌면 **배포를 막는다.** 배포를 게이트하는 이미지
+#: 취약점 검사가 실행되지 못한 경우다. 소스 검사(hadolint·gitleaks)는
+#: 자문이라 여기 넣지 않는다 (`compute_pass` 주석 참고).
+_IMAGE_SCAN_REQUIRED_TITLES = frozenset({
+    "trivy_not_installed", "trivy_scan_failed",
+})
+
 
 class SecurityScanResult(BaseModel):
     """Trivy·Hadolint·gitleaks 통합 결과.
@@ -1313,12 +1320,37 @@ class SecurityScanResult(BaseModel):
         return self.passed
 
     def compute_pass(self) -> bool:
-        """findings 로부터 차단 여부를 확정한다."""
+        """findings 로부터 차단 여부를 확정한다.
+
+        **이미지 취약점 검사가 실행되지 못했으면 통과가 아니다.** trivy 가
+        없거나, 시간이 초과되거나, ECR 이미지를 못 받아오면 스캐너는
+        `trivy_*` 흔적만 남긴다. 취약점이 **관측되지 않은** 것이지 **없는**
+        것이 아니다. 그런데 예전 계산은 그 경우에도 `passed=True` 를 줬다 —
+        한 번도 들여다보지 않은 이미지가 게이트를 통과했다.
+
+        배포 계약은 "이미지 스캔이 배포를 막는다"이다. 스캔이 못 돌았으면
+        막을 근거를 못 만든 것이므로, **fail-closed** 로 막는다.
+        `run_security_scan=False` 를 폴백에서 막은 것과 같은 규칙 — 검사하지
+        않은 것을 "위반 없음"으로 바꾸지 않는다.
+
+        ## 왜 trivy 만인가
+
+        빌드 **전** 소스 검사(hadolint·gitleaks)는 의도적으로 **자문(advisory)**
+        이다 — 개발 PC 에 그 도구가 없어도 배포는 되게 하고, 못 돌린 것은
+        `scan_warning` 으로 표면화한다. 여기서 그것까지 막으면 도구 없는
+        PC 에서는 아무도 배포를 못 한다. 그래서 **배포를 게이트하는 이미지
+        스캔(trivy)** 이 못 돈 경우만 막는다. 이미지 스캐너를 더 추가하면
+        그 미실행 표식도 아래 목록에 넣어야 한다.
+        """
         self.tool_errors = sorted({
             f.title for f in self.findings if f.title in _SCAN_NOT_PERFORMED_TITLES
         })
+        image_scan_failed = any(
+            t in _IMAGE_SCAN_REQUIRED_TITLES for t in self.tool_errors
+        )
         self.passed = (
-            self.critical_count == 0
+            not image_scan_failed
+            and self.critical_count == 0
             and self.hadolint_error_count == 0
             and self.secret_count == 0
         )

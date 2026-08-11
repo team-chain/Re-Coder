@@ -169,13 +169,80 @@ async def start_deployment(
 
     OPA 정책 위반 시 400 반환 (fail-closed Level ≥ 3).
     """
-    # **같은 서비스에 배포가 이미 돌고 있으면 새로 시작하지 않는다.**
-    #
-    # 확장의 배포 버튼을 두 번 누르거나 재시도하면 예전에는 파이프라인이
-    # 두 개 동시에 떴다. 둘 다 같은 태그로 빌드해 같은 ECR 리포에 올리고
-    # 같은 ECS 서비스를 갱신하므로 docker/ECR 작업이 뒤엉킨다. 게다가
-    # `/api/deploy/ecs/status` 는 **가장 최근에 시작된 것 하나만** 보여줘서,
-    # 먼저 시작한 배포는 사용자 눈에서 사라진 채 계속 돌아간다.
+    # **자리를 먼저 잡는다.** 확인과 등록 사이에 await 가 하나라도 들어가면
+    # 그 틈으로 두 번째 요청이 들어온다 — 자세한 것은 `_reserve_deployment`.
+    record = _reserve_deployment(request)
+
+    try:
+        # **정책이 보는 값은 여기서 확정한다.**
+        #
+        # 이 라우트가 두 경로의 합류점이다 — 확장은 `/api/deploy/ecs` 를 거쳐
+        # 여기로 오고, 디스코드 봇과 직접 호출은 곧바로 여기로 온다. 브랜치
+        # 판단을 확장용 변환기에만 뒀더니 **직접 호출 경로가 통째로 비어
+        # 있었다**: `{"branch": "main"}` 한 줄이면 "프로덕션은 main 에서만"이
+        # 그냥 통과했다. 승인 레벨(`_effective_approval_level`)과 같은 이유로,
+        # 게이트 재료는 합류점에서 서버가 정한다.
+        #
+        # git 은 동기 호출이라 이벤트 루프에서 직접 돌리지 않는다.
+        loop = asyncio.get_running_loop()
+        request.branch = await loop.run_in_executor(
+            None,
+            lambda: branch_source.resolve_branch(request.workspace_path, request.branch),
+        )
+        # 환경 이름도 여기서 접는다. Rego 프리셋이 `environment == "production"`
+        # 을 정확히 비교하므로 `"Production"` 한 글자 차이로 규칙이 안 걸린다.
+        request.environment = (request.environment or "").strip().lower()
+
+        return await _gate_and_start(record, request, background_tasks)
+    except BaseException:
+        # **예약을 잡아 놓고 죽으면 그 서비스는 영영 409 가 된다.**
+        # 아래 게이트 경로는 자기 사유로 FAILED 를 남기므로 그때는 건드리지
+        # 않고, 그 외의 예기치 못한 실패만 여기서 정리한다.
+        #
+        # `Exception` 이 아니라 `BaseException` 인 이유: 이 구간에서 가장
+        # 그럴듯한 중단은 `asyncio.CancelledError`(우아한 종료 중 요청 취소)
+        # 인데 그건 `Exception` 이 아니다. 정작 막으려던 경우를 놓친다.
+        if record.status in _ACTIVE_STATUSES:
+            record.status = ECSDeployStatus.FAILED
+            record.completed_at = datetime.now(timezone.utc)
+            record.error_message = record.error_message or (
+                "배포를 시작하지 못했습니다."
+            )
+            record.error_remedy = record.error_remedy or (
+                "Core 로그와 작업 폴더를 확인한 뒤 다시 시도하세요. "
+                "AWS 자원은 아직 아무것도 만들어지지 않았습니다."
+            )
+            # **디스크에도 반영한다.** 메모리에서만 FAILED 로 바꾸면,
+            # 다른 요청이 흘린 `_save_records()` 가 이미 이 기록을 PENDING
+            # 으로 써 놓은 경우 그 상태가 남는다. 재기동하면 `_load_records`
+            # 가 그걸 "결과를 모르는 진행 중 배포"로 보고 **있지도 않은
+            # Fargate 태스크에 대한 요금 경고**를 만들어 낸다 — AWS 를 한 번도
+            # 부른 적 없는 배포인데.
+            _save_records()
+        raise
+
+
+def _reserve_deployment(request: ECSDeployRequest) -> ECSDeployRecord:
+    """진행 중 확인과 자리 예약을 **한 번에** 끝내고 기록을 돌려준다.
+
+    ## 왜 하나로 묶나
+
+    "이미 도는 배포가 있나" 확인과 "내 기록을 넣는다" 사이에 `await` 가
+    하나라도 있으면, 그 사이에 두 번째 요청이 같은 확인을 통과한다.
+    확장의 배포 버튼을 두 번 빠르게 누르면 파이프라인이 두 개 뜨고, 둘 다
+    같은 태그로 빌드해 같은 ECR 리포에 올리고 같은 ECS 서비스를 갱신한다.
+    게다가 `/api/deploy/ecs/status` 는 가장 최근 것 하나만 보여줘서, 먼저
+    시작한 배포는 사용자 눈에서 사라진 채 계속 돌아간다.
+
+    실제로 그 틈이 생겼다 — 브랜치 판정을 executor 로 옮기면서 확인과 등록
+    사이에 `await` 가 들어갔고, git 서브프로세스가 도는 수십~수백 ms 동안
+    창이 열렸다.
+
+    **이 함수가 동기라는 것이 원자성의 근거다.** 동기 함수 안에는 `await` 를
+    쓸 수 없으므로, 나중에 누가 무엇을 추가해도 이 구간은 쪼개지지 않는다
+    (이벤트 루프는 단일 스레드다). 주석으로 "여기 await 넣지 마세요"라고
+    적어 두는 것과는 강도가 다르다.
+    """
     active = _active_deployment(request.cluster, request.service)
     if active is not None:
         raise HTTPException(
@@ -191,30 +258,8 @@ async def start_deployment(
             },
         )
 
-    # **정책이 보는 값은 여기서 확정한다.**
-    #
-    # 이 라우트가 두 경로의 합류점이다 — 확장은 `/api/deploy/ecs` 를 거쳐
-    # 여기로 오고, 디스코드 봇과 직접 호출은 곧바로 여기로 온다. 브랜치
-    # 판단을 확장용 변환기에만 뒀더니 **직접 호출 경로가 통째로 비어 있었다**:
-    # `{"branch": "main"}` 한 줄이면 "프로덕션은 main 에서만"이 그냥 통과했다.
-    # 승인 레벨(`_effective_approval_level`)과 같은 이유로, 게이트 재료는
-    # 합류점에서 서버가 정한다.
-    #
-    # git 은 동기 호출이라 이벤트 루프에서 직접 돌리지 않는다.
-    loop = asyncio.get_running_loop()
-    request.branch = await loop.run_in_executor(
-        None,
-        lambda: branch_source.resolve_branch(request.workspace_path, request.branch),
-    )
-    # 환경 이름도 여기서 접는다. Rego 프리셋이 `environment == "production"`
-    # 을 정확히 비교하므로 `"Production"` 한 글자 차이로 규칙이 안 걸린다.
-    request.environment = (request.environment or "").strip().lower()
-
-    deployment_id = str(uuid4())
-
-    # 초기 PENDING 레코드 등록
     record = ECSDeployRecord(
-        deployment_id=deployment_id,
+        deployment_id=str(uuid4()),
         project_id=request.project_id,
         cluster=request.cluster,
         service=request.service,
@@ -222,7 +267,17 @@ async def start_deployment(
         image=request.image,
         status=ECSDeployStatus.PENDING,
     )
-    _deploy_records[deployment_id] = record
+    _deploy_records[record.deployment_id] = record
+    return record
+
+
+async def _gate_and_start(
+    record: ECSDeployRecord,
+    request: ECSDeployRequest,
+    background_tasks: BackgroundTasks,
+) -> ECSDeployRecord:
+    """정책 게이트를 통과시키고 파이프라인을 백그라운드로 띄운다."""
+    deployment_id = record.deployment_id
 
     # OPA 정책 평가 (core/opa_client.py)
     #
@@ -250,8 +305,17 @@ async def start_deployment(
         # 여기까지 왔다면 클라이언트 자체의 결함이다(시그니처·구현 오류).
         # 그걸 "OPA 장애"로 보고하면 사용자는 영원히 엉뚱한 곳을 본다.
         logger.error("OPA 평가 호출 자체가 실패했습니다", exc_info=True)
+        # 종료 기록은 **한 벌로** 남긴다. 사유만 쓰고 끝난 시각·구제책을
+        # 빼면 확장은 "끝났는데 언제 왜 끝났는지 모르는" 카드를 그린다
+        # (`to_status_response` 가 remedy/finished_at 을 읽는다).
         record.status = ECSDeployStatus.FAILED
+        record.completed_at = datetime.now(timezone.utc)
         record.error_message = f"정책 평가를 실행하지 못했습니다: {opa_exc}"
+        record.error_remedy = (
+            "Core 로그의 정책 평가 오류를 확인하세요. AWS 자원은 아직 "
+            "아무것도 만들어지지 않았습니다."
+        )
+        _save_records()
         raise HTTPException(
             status_code=500,
             detail={

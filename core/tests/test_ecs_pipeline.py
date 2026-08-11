@@ -274,7 +274,7 @@ def test_a_broken_policy_client_is_not_reported_as_an_opa_outage(
     app_client, monkeypatch
 ):
     """부정 통제: 우리 쪽 결함을 외부 장애로 보고하면 원인을 못 찾는다."""
-    client, _ = app_client
+    client, ecs_routes = app_client
     from core import opa_client as opa_module
 
     async def _explode(**_kwargs):
@@ -284,6 +284,20 @@ def test_a_broken_policy_client_is_not_reported_as_an_opa_outage(
     resp = client.post("/api/deploy/ecs", json={})
     assert resp.status_code == 500
     assert resp.json()["detail"]["error"] == "policy_evaluation_crashed"
+
+    # 끝난 기록은 **한 벌로** 남아야 한다. 사유만 쓰고 끝난 시각·구제책을
+    # 빼면 확장은 "끝났는데 언제 왜 끝났는지 모르는" 카드를 그린다.
+    crashed = list(ecs_routes._deploy_records.values())[-1]
+    assert crashed.status == ECSDeployStatus.FAILED
+    assert crashed.completed_at is not None, "종료 시각이 비어 있다"
+    assert crashed.error_remedy, "무엇을 하라는 말이 없다"
+    # 그리고 재기동해도 남아 있어야 한다 — 저장을 안 하면 흔적이 사라진다.
+    reloaded = ecs_routes._load_records().get(crashed.deployment_id)
+    assert reloaded is not None, "정책 평가 크래시 기록이 디스크에 안 남았다"
+    assert reloaded.status == ECSDeployStatus.FAILED
+    assert "cost_warning" not in reloaded.provisioned, (
+        "AWS 를 부른 적도 없는 배포에 요금 경고가 붙었다"
+    )
 
 
 def test_status_endpoint_reports_the_live_record(app_client, monkeypatch):
@@ -684,7 +698,11 @@ def test_the_route_calls_opa_with_arguments_its_real_signature_accepts():
     from api.routes import ecs as ecs_routes
     from core.opa_client import OPAClient
 
-    source = textwrap.dedent(inspect.getsource(ecs_routes.start_deployment))
+    # 게이트 호출은 `_gate_and_start` 로 빠졌다 — 라우트만 보면 못 찾는다.
+    source = textwrap.dedent(
+        inspect.getsource(ecs_routes.start_deployment)
+        + inspect.getsource(ecs_routes._gate_and_start)
+    )
     call = next(
         node
         for node in ast.walk(ast.parse(source))
@@ -1242,7 +1260,12 @@ def test_scan_all_can_actually_build_its_own_result():
 
 
 def test_scan_all_reports_the_tools_that_could_not_run(no_scanner_binaries):
-    """도구가 없으면 "검사했는데 0건"으로 위장하지 않는다."""
+    """도구가 없으면 "검사했는데 0건"으로 위장하지 않는다.
+
+    그리고 **이미지 스캔(trivy)이 못 돌았으면 막는다.** 한 번도 들여다보지
+    않은 이미지가 게이트를 통과하면 안 된다 — 검사 안 함은 위반 없음이
+    아니다.
+    """
     from core.security_scan import security_scanner
 
     result = asyncio.run(
@@ -1251,7 +1274,7 @@ def test_scan_all_reports_the_tools_that_could_not_run(no_scanner_binaries):
         )
     )
     assert "trivy_not_installed" in result.tool_errors
-    assert result.passed, "도구 부재로 배포를 막으면 안 된다"
+    assert not result.passed, "이미지를 스캔하지 못했는데 배포를 통과시켰다"
 
 
 def _scan_result(*findings):
@@ -1288,12 +1311,45 @@ def test_blocking_rules_match_the_design():
     assert warn_only.high_count == 1
 
 
-def test_a_tool_that_never_ran_is_not_counted_as_a_clean_result():
-    """도구 부재는 취약점 0건이 아니다 — 막지는 않되 반드시 표시한다."""
+def test_the_image_scanner_failing_to_run_blocks_the_deploy():
+    """[보안] 이미지 취약점 검사(trivy)가 못 돌면 배포를 막는다.
+
+    취약점이 0 건인 게 아니라 **검사를 못 한** 것이다. 배포 계약은 이미지
+    스캔이 배포를 게이트하는 것이므로, 못 돈 경우 fail-closed 로 막는다.
+    """
     result = _scan_result(_finding("trivy", "info", "trivy_not_installed"))
-    assert result.passed, "도구가 없다고 배포를 막으면 안 된다"
+    assert not result.passed, "이미지를 스캔하지 못했는데 통과시켰다"
     assert result.critical_count == 0
     assert "trivy_not_installed" in result.tool_errors
+
+    failed = _scan_result(_finding("trivy", "info", "trivy_scan_failed"))
+    assert not failed.passed, "trivy 가 터졌는데 통과시켰다"
+
+
+def test_the_gate_message_names_the_scanner_that_could_not_run():
+    """차단당한 사용자가 **왜** 막혔는지 알아야 고친다."""
+    result = _scan_result(_finding("trivy", "info", "trivy_not_installed"))
+    blocked = ECSAgent._scan_gate_message(result)
+    assert blocked is not None, "이미지 스캔 실패인데 게이트가 안 막았다"
+    reason, fix = blocked
+    assert "trivy_not_installed" in reason, reason
+    assert "ecr:BatchGetImage" in fix or "설치" in fix, fix
+
+
+def test_a_missing_source_scanner_does_not_block_the_deploy():
+    """[부정 통제] 소스 검사(hadolint·gitleaks)는 자문이다 — 없다고 막지 않는다.
+
+    개발 PC 에 그 도구가 없어도 배포는 되게 하고, 못 돌린 것은 경고로만
+    표면화한다. 여기까지 막으면 도구 없는 PC 에서는 아무도 배포를 못 한다.
+    이미지 스캔(trivy)이 못 돈 경우만 막는다(위 테스트).
+    """
+    result = _scan_result(
+        _finding("hadolint", "info", "hadolint_not_installed"),
+        _finding("gitleaks", "info", "gitleaks_not_installed"),
+    )
+    assert result.passed, "소스 검사 도구가 없다고 배포를 막았다"
+    assert "hadolint_not_installed" in result.tool_errors
+    assert "gitleaks_not_installed" in result.tool_errors
 
 
 def test_the_counts_survive_serialisation():
@@ -2292,6 +2348,174 @@ def test_the_cancelled_pipeline_ends_as_cancelled_not_succeeded():
         "취소로 끝났는데 CANCELLED 상태를 안 남긴다"
     )
     assert "_stop_after_cancel" in branch, "취소 뒤 뒷정리를 안 한다"
+
+
+def test_cancel_is_honoured_before_the_zero_count_success_return():
+    """[회귀] `desired_count=0` 갈래만 취소 재확인을 건너뛰었다.
+
+    취소는 "지금 도는 단계가 끝난 뒤" 반영된다고 문서에 적어 놨다. 그런데
+    태스크를 0 개로 두는 배포는 서비스 생성 직후 곧장 SUCCEEDED 를 쓰고
+    끝나서, `_step_ensure_service` 가 AWS 를 기다리는 동안 사용자가 누른
+    취소를 **없었던 일로 덮어썼다.** 다른 종료 지점(URL 확인 뒤)은 이미
+    같은 이유로 다시 확인하고 있었는데 여기만 빠져 있었다.
+
+    파이프라인 전체를 돌리지 않고 그 갈래만 본다 — 서비스 확보 직후
+    취소가 걸려 있으면 성공으로 끝나면 안 된다.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(ECSAgent._deploy_pipeline))
+    tree = ast.parse(source)
+
+    zero = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and "desired_count == 0" in ast.unparse(node.test)
+    )
+    calls = [
+        node.func.attr for node in ast.walk(zero)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    ]
+    assert "_abort_if_cancelled" in calls, (
+        "태스크 0 개 갈래가 취소를 다시 확인하지 않고 성공으로 끝낸다"
+    )
+
+    # 확인이 성공 기록보다 **먼저** 와야 한다. 뒤에 있으면 이미 덮어쓴 뒤다.
+    abort_line = min(
+        node.lineno for node in ast.walk(zero)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_abort_if_cancelled"
+    )
+    succeeded_line = min(
+        node.lineno for node in ast.walk(zero)
+        if isinstance(node, ast.Attribute) and node.attr == "SUCCEEDED"
+    )
+    assert abort_line < succeeded_line, (
+        "취소 확인이 SUCCEEDED 기록보다 뒤에 있다 — 이미 덮어쓴 다음이다"
+    )
+
+    # 그리고 실제로 예외가 나야 한다.
+    agent = ECSAgent()
+    cancelled = ECSDeployRecord(status=ECSDeployStatus.IN_PROGRESS)
+    cancelled.cancel_requested = True
+    with pytest.raises(ECSAgent._Cancelled):
+        agent._abort_if_cancelled(cancelled, "서비스 확보")
+    assert cancelled.status != ECSDeployStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize("created_here", [True, False])
+def test_a_cancelled_zero_count_deploy_reports_the_truth(created_here, monkeypatch):
+    """[회귀] 태스크 0 개 배포를 취소했을 때 **뒷정리 문구가 거짓말이면 안 된다.**
+
+    앞 테스트는 취소가 걸리는지만 본다. 취소가 걸리게 만들자 이번엔
+    `_stop_after_cancel` 이 문제였다 — 그 함수는 `desired_count >= 1` 만
+    오던 시절에 쓰였다.
+
+      - 기존 서비스 갱신이었다면 "원래 앱을 내리지 않으려고 태스크는 그대로
+        두었습니다"라고 `cost_warning` 에 쓴다. 그런데 `ensure_service` 가
+        이미 `desiredCount=0` 으로 바꾼 뒤다 — **앱은 내려가 있는데 화면은
+        그대로 두었다고 하고, 그것도 "요금이 나간다" 칸에 뜬다.**
+      - 이번 실행이 만든 서비스였다면 `halt_service` 로 0 으로 내린다.
+        이미 0 이다. 실패 경로에서 AWS 를 한 번 더 부르는데, 여기 온 원인이
+        자격증명 문제라면 그 호출이 또 터진다.
+
+    파이프라인을 실제로 돌려서 결과 문구를 본다 — 소스만 보면 이 결함이
+    통째로 안 보인다.
+    """
+    agent = ECSAgent()
+    halted: list[tuple[str, str]] = []
+
+    async def _no_provision(self, req, rec, clients):
+        return aws_infra.NetworkTarget(vpc_id="vpc-1", subnet_ids=("subnet-1",))
+
+    async def _no_build(self, req, rec, clients):
+        return "123456789012.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1"
+
+    async def _register(self, req, clients, image):
+        return "arn:aws:ecs:us-east-1:1:task-definition/recoder:7", None
+
+    async def _ensure(self, req, rec, clients, task_def_arn, network):
+        # 서비스 단계가 AWS 를 기다리는 동안 사용자가 취소를 눌렀다.
+        rec.provisioned["service"] = "recoder-app (%s)" % (
+            "created" if created_here else "updated"
+        )
+        rec.service_created_by_this_run = created_here
+        rec.cancel_requested = True
+
+    monkeypatch.setattr(ECSAgent, "_clients", staticmethod(lambda region: {}))
+    monkeypatch.setattr(ECSAgent, "_step_provision", _no_provision)
+    monkeypatch.setattr(ECSAgent, "_step_build_and_push", _no_build)
+    monkeypatch.setattr(ECSAgent, "_step_register_task_definition", _register)
+    monkeypatch.setattr(ECSAgent, "_step_ensure_service", _ensure)
+    monkeypatch.setattr(
+        aws_infra, "halt_service",
+        lambda ecs, *, cluster, service: halted.append((cluster, service)) or "halted",
+    )
+
+    record = asyncio.run(agent._deploy_pipeline(
+        make_request(desired_count=0, provision=True), ECSDeployRecord()
+    ))
+
+    assert record.status == ECSDeployStatus.CANCELLED, (
+        f"취소를 눌렀는데 {record.status} 로 끝났다"
+    )
+    assert halted == [], (
+        "태스크를 0 개로 요청한 배포인데 굳이 0 으로 내리는 AWS 호출을 했다"
+    )
+    assert "그대로 두었습니다" not in record.provisioned.get("cost_warning", ""), (
+        "태스크가 이미 0 인데 '태스크는 그대로 두었습니다'라고 안내한다"
+    )
+    if not created_here:
+        assert "내려가 있습니다" in record.provisioned.get("service_warning", ""), (
+            "기존 앱을 0 으로 내려놓고 아무 말도 안 한다"
+        )
+
+
+def test_cancelling_an_update_rolls_the_service_back():
+    """[회귀] 기존 서비스 갱신을 취소하면 **롤아웃을 되돌려야** 한다.
+
+    `ensure_service` 가 이미 `UpdateService` 로 새(취소된) 태스크 정의로
+    롤아웃을 시작했다. 태스크를 0 으로 안 내렸다고 안심하고 돌아가면, ECS 는
+    계속해서 옛 태스크를 방금 취소한 버전으로 갈아치운다 — 기록은 CANCELLED
+    인데 실제 배포는 끝까지 나간다. 이전 리비전으로 되돌려 그 롤아웃을 멈춘다.
+    """
+    agent = ECSAgent()
+
+    updated = ECSDeployRecord()
+    updated.provisioned["service"] = "app (updated)"
+    updated.service_created_by_this_run = False
+    updated.previous_task_definition_arn = "arn:aws:ecs:...:task-definition/app:6"
+
+    ecs = RecordingEcs()
+    asyncio.run(agent._stop_after_cancel(make_request(), updated, {"ecs": ecs}))
+
+    # 이전 태스크 정의로 UpdateService 가 나가야 한다.
+    assert any(
+        u.get("taskDefinition") == "arn:aws:ecs:...:task-definition/app:6"
+        for u in ecs.updated
+    ), f"롤아웃을 되돌리지 않았다: {ecs.updated}"
+    assert updated.provisioned.get("rollback"), "되돌렸다는 안내가 없다"
+    # 태스크를 0 으로 내리는 halt 는 아니다 — 남의 앱이므로.
+    assert all(u.get("desiredCount") != 0 for u in ecs.updated)
+
+
+def test_cancelling_an_update_with_no_previous_revision_warns_clearly():
+    """[부정 통제] 되돌릴 이전 리비전이 없으면 사용자가 직접 멈추게 안내한다."""
+    agent = ECSAgent()
+    rec = ECSDeployRecord()
+    rec.provisioned["service"] = "app (updated)"
+    rec.service_created_by_this_run = False
+    rec.previous_task_definition_arn = None
+
+    ecs = RecordingEcs()
+    asyncio.run(agent._stop_after_cancel(make_request(), rec, {"ecs": ecs}))
+
+    assert ecs.updated == [], "되돌릴 리비전이 없는데 UpdateService 를 불렀다"
+    assert "배포 중지" in rec.provisioned.get("cost_warning", ""), (
+        "되돌리지도 못하고 멈추는 법도 안 알려준다"
+    )
 
 
 def test_cancel_scales_down_only_a_service_this_run_created():
@@ -3498,6 +3722,219 @@ def test_the_fallback_will_not_pass_a_deployment_with_scans_turned_off():
     )
 
 
+def test_the_duplicate_guard_cannot_be_split_by_an_await():
+    """[동시성 · 회귀] 확인과 예약 사이에 `await` 가 들어가면 창이 열린다.
+
+    확장 배포 버튼을 두 번 빠르게 누르면 두 요청이 같은 "진행 중 배포 없음"
+    확인을 통과할 수 있다. 그러면 파이프라인이 둘 뜨고, 같은 태그로 빌드해
+    같은 ECR 리포에 올리고 같은 ECS 서비스를 갱신한다. 게다가 상태 API 는
+    최근 것 하나만 보여줘서 먼저 시작한 배포는 화면에서 사라진 채 계속 돈다.
+
+    실제로 그 창이 생겼다 — 브랜치 판정을 executor 로 옮기면서 확인과 등록
+    사이에 `await` 가 들어갔고, git 서브프로세스가 도는 동안 열려 있었다.
+
+    **동기 함수 하나로 묶는 것이 원자성의 근거다.** 주석이 아니라 언어가
+    막아야 나중에 누가 무엇을 추가해도 쪼개지지 않는다.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from core.api.routes import ecs as ecs_routes
+
+    assert not inspect.iscoroutinefunction(ecs_routes._reserve_deployment), (
+        "예약이 async 가 되면 그 안에 await 를 넣을 수 있게 된다 — "
+        "확인과 등록이 쪼개지는 순간 중복 배포가 다시 가능해진다"
+    )
+    # 독스트링·주석이 아니라 **코드**에 await 가 없어야 한다.
+    reserve_body = inspect.getsource(ecs_routes._reserve_deployment)
+    assert not any(
+        isinstance(node, (ast.Await, ast.AsyncFor, ast.AsyncWith))
+        for node in ast.walk(ast.parse(textwrap.dedent(reserve_body)))
+    ), "예약 구간에 await 가 생겼다 — 그 지점에서 확인과 등록이 쪼개진다"
+
+    # 라우트는 **아무것도 await 하기 전에** 자리를 잡아야 한다.
+    # 주석에 적힌 "await" 글자에 걸리지 않게 AST 로 본다.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ecs_routes.start_deployment)))
+    reserve_lines = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_reserve_deployment"
+    ]
+    await_lines = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Await)]
+    assert reserve_lines, "라우트가 예약 함수를 부르지 않는다"
+    assert not await_lines or min(reserve_lines) < min(await_lines), (
+        "자리를 잡기 전에 await 하는 코드가 생겼다 — 그 틈으로 두 번째 "
+        f"요청이 들어온다 (예약 {min(reserve_lines)}행, 첫 await {min(await_lines)}행)"
+    )
+
+
+def test_genuinely_concurrent_deploys_do_not_both_start(monkeypatch, tmp_path):
+    """[동시성 · 회귀] **정말로 겹치게** 세 요청을 보낸다.
+
+    `TestClient.post` 는 동기라서 요청 하나가 끝나야 다음이 나간다 — 즉
+    이 결함이 사는 창(첫 요청이 브랜치 판정을 기다리는 동안)을 아예 만들지
+    못한다. 그래서 순차 호출로 409 를 확인하는 테스트는 고치기 전 코드에서도
+    그대로 통과했다. 진짜로 겹치려면 ASGI 전송 위에서 `asyncio.gather` 로
+    보내고, 브랜치 판정이 **실제로 워커 스레드를 붙잡게** 해야 한다.
+
+    고치기 전 모양(확인 → await → 삽입)에서는 셋 다 202 가 나고 기록이
+    세 개 생긴다.
+    """
+    import time
+
+    import httpx
+    from fastapi import FastAPI
+
+    from api.routes import deploy_ecs, ecs as ecs_routes
+    from core import branch_source
+    from core import opa_client as opa_module
+
+    class _Allow:
+        decision, reason, fix_suggestion = "allow", "", None
+        opa_available, required_approvers = True, 0
+
+    async def _evaluate(**_kwargs):
+        return _Allow()
+
+    async def _fake_deploy(request, record=None):
+        # 이긴 요청의 기록이 나머지가 확인하는 동안 PENDING 으로 남아 있어야
+        # 한다. 바로 끝내면 창이 닫혀 테스트가 헛돈다.
+        await asyncio.sleep(0.2)
+        return record
+
+    def _slow_resolve(_workspace, claimed=""):
+        # **동기 sleep** 이어야 한다. 라우트가 executor 로 넘기므로 진짜
+        # 워커 스레드를 붙잡아야 코루틴이 await 지점에 머문다.
+        time.sleep(0.3)
+        return claimed or ""
+
+    monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+    monkeypatch.setattr(branch_source, "resolve_branch", _slow_resolve)
+    monkeypatch.setenv("RECODER_ECS_STORE", str(tmp_path / "store.json"))
+    monkeypatch.setattr(ecs_routes, "_deploy_records", {})
+
+    app = FastAPI()
+    app.include_router(ecs_routes.router)
+    app.include_router(deploy_ecs.router)
+
+    body = {
+        "project_id": "p", "cluster": "recoder-cluster", "service": "recoder-app",
+        "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1",
+        "region": "us-east-1", "workspace_path": str(tmp_path),
+    }
+
+    async def _fire_three():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            return await asyncio.gather(*(
+                c.post("/api/ecs/deploy", json=body) for _ in range(3)
+            ))
+
+    codes = sorted(r.status_code for r in asyncio.run(_fire_three()))
+    assert codes == [202, 409, 409], (
+        f"같은 클러스터/서비스에 배포가 여러 개 시작됐다: {codes}"
+    )
+    assert len(ecs_routes._deploy_records) == 1, (
+        f"409 를 돌려주고도 기록을 남겼다: {list(ecs_routes._deploy_records)}"
+    )
+
+
+def test_a_failure_before_the_gate_releases_the_reservation(app_client, monkeypatch):
+    """[회귀] 자리를 잡아 놓고 죽으면 그 서비스는 **영영 409** 가 된다.
+
+    예약을 먼저 하도록 바꾼 대가다. PENDING 으로 남은 기록이 다음 배포를
+    계속 막으므로, 게이트에 닿기 전에 터진 경우도 반드시 정리해야 한다.
+    """
+    from core import branch_source
+
+    client, ecs_routes = app_client
+    boom = {"count": 0}
+
+    def _explode(*_args, **_kwargs):
+        boom["count"] += 1
+        raise RuntimeError("git 이 이상하다")
+
+    monkeypatch.setattr(branch_source, "resolve_branch", _explode)
+
+    body = {
+        "project_id": "p", "cluster": "recoder-cluster", "service": "recoder-app",
+        "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1",
+        "region": "us-east-1",
+    }
+    first = client.post("/api/ecs/deploy", json=body)
+    assert boom["count"] == 1
+    assert first.status_code >= 500
+
+    stuck = [r for r in ecs_routes._deploy_records.values()
+             if r.status in ecs_routes._ACTIVE_STATUSES]
+    assert not stuck, (
+        f"예약이 PENDING 으로 남아 이 서비스는 영영 409 가 된다: {stuck}"
+    )
+
+    dead = list(ecs_routes._deploy_records.values())[-1]
+    assert dead.error_remedy, "왜 못 시작했는지만 있고 어떻게 할지가 없다"
+
+    # **디스크에도 반영돼야 한다.** 메모리에서만 FAILED 로 바꾸면, 다른
+    # 요청이 흘린 `_save_records()` 가 이미 PENDING 으로 써 놓은 경우 그게
+    # 남는다. 재기동하면 `_load_records` 가 그걸 "결과를 모르는 진행 중
+    # 배포"로 보고 **있지도 않은 Fargate 태스크에 대한 요금 경고**를 만든다 —
+    # AWS 를 한 번도 부른 적 없는 배포인데.
+    reloaded = ecs_routes._load_records().get(dead.deployment_id)
+    assert reloaded is not None, "실패 기록이 디스크에 아예 안 남았다"
+    assert reloaded.status == ECSDeployStatus.FAILED, (
+        f"디스크에는 아직 {reloaded.status} 로 남아 있다"
+    )
+    assert "cost_warning" not in reloaded.provisioned, (
+        "AWS 를 부른 적도 없는 배포에 요금 경고가 붙었다: "
+        f"{reloaded.provisioned.get('cost_warning')}"
+    )
+
+    # 그리고 다음 요청은 정상적으로 들어가야 한다.
+    monkeypatch.setattr(branch_source, "resolve_branch", lambda *a, **k: "")
+
+    async def _fake_deploy(request, record=None):
+        return record
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
+    assert client.post("/api/ecs/deploy", json=body).status_code == 202
+
+
+def test_a_cancelled_request_does_not_leave_the_service_locked(monkeypatch, tmp_path):
+    """[회귀] `except Exception` 은 **가장 그럴듯한 중단을 놓친다.**
+
+    이 구간에서 제일 일어날 법한 중단은 `asyncio.CancelledError` 다 —
+    우아한 종료(`timeout_graceful_shutdown`) 중에 요청이 executor 안의 git
+    호출에서 기다리고 있으면 그렇게 끊긴다. 그런데 그건 `Exception` 이
+    아니라 `BaseException` 이라, `except Exception` 으로는 안 걸린다.
+    잡아 놓은 자리가 PENDING 으로 남아 그 서비스는 영영 409 가 된다 —
+    핸들러가 막겠다고 적어 놓은 바로 그 상황이다.
+    """
+    from fastapi import BackgroundTasks
+
+    from api.routes import ecs as ecs_routes
+    from core import branch_source
+
+    def _cancelled(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(branch_source, "resolve_branch", _cancelled)
+    monkeypatch.setenv("RECODER_ECS_STORE", str(tmp_path / "store.json"))
+    monkeypatch.setattr(ecs_routes, "_deploy_records", {})
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ecs_routes.start_deployment(
+            make_request(), BackgroundTasks(), None
+        ))
+
+    stuck = [r for r in ecs_routes._deploy_records.values()
+             if r.status in ecs_routes._ACTIVE_STATUSES]
+    assert not stuck, (
+        f"요청이 취소됐는데 예약이 PENDING 으로 남았다 — 이 서비스는 "
+        f"영영 409 가 된다: {stuck}"
+    )
+
+
 def test_a_low_approval_level_cannot_skip_the_policy_gate():
     """[보안 · 회귀] 게이트를 통과하는 조건을 **호출자가 고를 수 있으면 안 된다.**
 
@@ -3798,6 +4235,33 @@ def test_the_policy_fallback_warning_survives_the_sidebar_truncation():
     tail = to_status_response(rec).log_tail
     assert any("policy_warning" in line for line in tail[-3:]), (
         f"경고가 확장이 보여주는 마지막 세 줄 밖으로 밀려났다: {tail}"
+    )
+
+
+def test_the_service_down_warning_survives_the_sidebar_truncation():
+    """[회귀] "앱이 내려가 있다"는 잘려 나가면 안 되는 종류의 말이다.
+
+    태스크 0 개 배포를 취소하면 기존 서비스가 0 으로 내려간 채 끝난다.
+    그 사실이 `log_tail` 앞쪽 사실들 사이에 섞여 잘리면, 사용자는 앱이
+    죽은 줄도 모른 채 화면을 닫는다.
+    """
+    from core.api.routes.deploy_ecs import to_status_response
+
+    rec = ECSDeployRecord(status=ECSDeployStatus.CANCELLED)
+    rec.provisioned["service_warning"] = (
+        "취소했지만 이 배포는 이미 기존 서비스의 태스크 수를 0 으로 바꾼 "
+        "뒤였습니다 — 원래 앱이 내려가 있습니다."
+    )
+    rec.provisioned.update({
+        "cluster": "recoder-cluster",
+        "service": "recoder-app (updated)",
+        "subnets": "subnet-1,subnet-2",
+        "log_group": "/ecs/recoder",
+        "task_definition": "arn:aws:ecs:us-east-1:1:task-definition/recoder:7",
+    })
+    tail = to_status_response(rec).log_tail
+    assert any("service_warning" in line for line in tail[-3:]), (
+        f"앱이 내려갔다는 경고가 마지막 세 줄 밖으로 밀려났다: {tail}"
     )
 
 

@@ -1064,6 +1064,37 @@ def scale_service(ecs: Any, *, cluster: str, service: str, desired_count: int) -
     return int(resp["service"].get("desiredCount", desired_count))
 
 
+def revert_service_task_definition(
+    ecs: Any, *, cluster: str, service: str, task_definition: str
+) -> str:
+    """서비스를 **이전 태스크 정의로 되돌린다** (취소·롤백용).
+
+    `UpdateService` 로 갱신을 시작한 뒤 취소가 들어오면, 그냥 두면 ECS 가
+    새(취소된) 태스크 정의로 롤아웃을 끝까지 진행한다. 이전 리비전으로 다시
+    `UpdateService` 를 걸어 그 롤아웃을 멈추고 되돌린다.
+
+    `halt_service` 와 같은 규약: **이미 취소를 처리하는 중**이므로 여기서
+    터져도 예외를 올리지 않고, 사용자에게 보여줄 결과 문자열을 돌려준다.
+    """
+    try:
+        ecs.update_service(
+            cluster=cluster, service=service, taskDefinition=task_definition
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("취소 롤백 실패: %s", error_message(exc))
+        return (
+            "취소했지만 이전 버전으로 되돌리지 못했습니다 — AWS 콘솔에서 "
+            f"서비스 '{service}' 를 이전 태스크 정의로 되돌리거나 태스크 수를 "
+            "0 으로 내리세요."
+        )
+    logger.info("취소로 서비스를 이전 태스크 정의로 되돌렸습니다: %s/%s → %s",
+                cluster, service, task_definition)
+    return (
+        f"취소했습니다. 서비스 '{service}' 를 이전 태스크 정의로 되돌려 "
+        "진행 중이던 롤아웃을 멈췄습니다."
+    )
+
+
 def halt_service(ecs: Any, *, cluster: str, service: str) -> str:
     """실패한 배포의 태스크 재생성을 멈춘다 (desiredCount → 0).
 
