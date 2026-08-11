@@ -98,6 +98,7 @@ class AwsDeploymentPermissionContext(BaseModel):
     ecr_repo: str = ""
     ecs_cluster: str = ""
     ecs_service: str = ""
+    aws_region: str = ""
     task_execution_role: str = ""
     task_role: str = ""
 
@@ -470,7 +471,7 @@ def _simulation_partition(identity_arn: str) -> str:
 
 def _resolved_permission_context(
     context: Optional[AwsDeploymentPermissionContext],
-) -> AwsDeploymentPermissionContext:
+) -> tuple[Optional[AwsDeploymentPermissionContext], Optional[str]]:
     """명시 입력 → 실제 ECS 요청 기본값 순으로 검사 대상을 정한다."""
     supplied = context or AwsDeploymentPermissionContext()
     try:
@@ -478,10 +479,11 @@ def _resolved_permission_context(
             supplied.task_execution_role,
             supplied.task_role,
         )
-    except ValueError:
-        # 역할 설정이 잘못됐을 때 권한 점검 자체가 500으로 죽지 않게 한다.
-        execution_role = aws_policy.configured_execution_role()
-        task_role = aws_policy.configured_task_role()
+    except ValueError as exc:
+        # configured_execution_role()도 같은 환경변수를 다시 파싱하므로 여기서
+        # 재호출하면 똑같은 ValueError가 다시 난다. 키(STS)는 유효할 수 있으니
+        # 연결을 실패시키지 않고 점검 불완전 상태와 설정 안내를 반환한다.
+        return None, f"ECS 역할 설정이 올바르지 않아 권한 점검을 완료하지 못했습니다: {exc}"
     return AwsDeploymentPermissionContext(
         # ECS 배포 경로는 ECR_REPOSITORY 환경변수를 읽지 않고
         # ECSDeployRequest.repo_name(기본 recoder-app)을 쓴다. 여기에서만
@@ -490,9 +492,10 @@ def _resolved_permission_context(
         ecr_repo=(supplied.ecr_repo or "recoder-app").strip(),
         ecs_cluster=(supplied.ecs_cluster or os.getenv("ECS_CLUSTER") or "").strip(),
         ecs_service=(supplied.ecs_service or os.getenv("ECS_SERVICE") or "").strip(),
+        aws_region=(supplied.aws_region or "").strip(),
         task_execution_role=execution_role,
         task_role=task_role,
-    )
+    ), None
 
 
 def _inspect_deploy_permissions(
@@ -514,21 +517,25 @@ def _inspect_deploy_permissions(
         report.warnings.append("IAM 사용자 또는 역할 ARN을 확인할 수 없어 권한 점검을 건너뛰었습니다.")
         return report
 
+    context, context_error = _resolved_permission_context(deployment_context)
+    if context_error or context is None:
+        report.warnings.append(context_error or "ECS 배포 설정을 확인할 수 없습니다.")
+        return report
+    simulation_region = (context.aws_region or region).strip()
     try:
-        session = _build_boto3_session(region=region)
-        iam = session.client("iam", region_name=region)
+        session = _build_boto3_session(region=simulation_region)
+        iam = session.client("iam", region_name=simulation_region)
     except Exception as exc:  # noqa: BLE001
         report.warnings.append(f"IAM 권한 점검을 시작할 수 없습니다: {exc}")
         return report
 
-    context = _resolved_permission_context(deployment_context)
     account_id = identity.get("account", "") or principal_arn.split(":")[4]
     partition = _simulation_partition(identity.get("arn", ""))
-    if not account_id or not region:
+    if not account_id or not simulation_region:
         report.warnings.append("AWS 계정 또는 리전 정보를 확인할 수 없어 리소스별 권한 점검을 건너뛰었습니다.")
         return report
 
-    ecr_arn = f"arn:{partition}:ecr:{region}:{account_id}:repository/{context.ecr_repo}"
+    ecr_arn = f"arn:{partition}:ecr:{simulation_region}:{account_id}:repository/{context.ecr_repo}"
     role_arns = [
         f"arn:{partition}:iam::{account_id}:role/{context.task_execution_role}",
     ]
@@ -559,13 +566,13 @@ def _inspect_deploy_permissions(
     ]
     deferred_actions: list[str] = []
     if context.ecs_cluster:
-        cluster_arn = f"arn:{partition}:ecs:{region}:{account_id}:cluster/{context.ecs_cluster}"
+        cluster_arn = f"arn:{partition}:ecs:{simulation_region}:{account_id}:cluster/{context.ecs_cluster}"
         simulations.append((["ecs:DescribeClusters"], [cluster_arn], None))
     else:
         deferred_actions.append("ecs:DescribeClusters")
     if context.ecs_cluster and context.ecs_service:
         service_arn = (
-            f"arn:{partition}:ecs:{region}:{account_id}:service/"
+            f"arn:{partition}:ecs:{simulation_region}:{account_id}:service/"
             f"{context.ecs_cluster}/{context.ecs_service}"
         )
         simulations.append((["ecs:DescribeServices", "ecs:UpdateService"], [service_arn], None))
