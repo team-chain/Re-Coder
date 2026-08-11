@@ -106,12 +106,9 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [checking, setChecking] = useState(true);
   const [savingDecision, setSavingDecision] = useState(false);
-<<<<<<< HEAD
   const [checkingEcsPermissions, setCheckingEcsPermissions] = useState(false);
   const pendingEcsDeploymentRef = useRef<Record<string, unknown> | null>(null);
-=======
   const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
->>>>>>> origin/develop
   const [awsReady, setAwsReady] = useState(false);
   const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: "ap-northeast-2", ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
   const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "ap-northeast-2", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512" });
@@ -137,7 +134,6 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       setMessage(`선택 근거를 ${result.adr_path}에 기록했습니다.`);
     }
     if (type === "workspace.deploy.decisionError") { setSavingDecision(false); setMessage((payload as { message?: string })?.message ?? "배포 대상 기록에 실패했습니다."); }
-<<<<<<< HEAD
     if (type === "aws.permissions.result" && pendingEcsDeploymentRef.current) {
       const result = payload as { ok?: boolean; status?: { permission_check?: { inspected?: boolean; missing_actions?: string[]; warnings?: string[] } }; message?: string };
       const deploymentRequest = pendingEcsDeploymentRef.current;
@@ -154,14 +150,12 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         setMessage(`ECS 배포를 시작하지 않았습니다. ${detail}`);
       }
     }
-=======
     if (type === "workspace.deploy.remediationResult") {
       const result = payload as { message?: string; applied_files?: string[] };
       setApplyingProposalId(null);
       setMessage(`${result.message ?? "자동 수정을 적용했습니다."} ${result.applied_files?.length ? `변경 파일: ${result.applied_files.join(", ")}. ` : ""}이제 다시 검사해 주세요.`);
     }
     if (type === "workspace.deploy.remediationError") { setApplyingProposalId(null); setMessage((payload as { message?: string })?.message ?? "자동 수정 적용에 실패했습니다."); }
->>>>>>> origin/develop
     if (type === "workspace.deploy.result") setMessage((payload as { message?: string })?.message ?? "배포 요청을 보냈습니다.");
     if (type === "aws.status") setAwsReady(Boolean((payload as { ready?: boolean })?.ready));
     if (type === "errorMessage") setMessage((payload as { message?: string })?.message ?? "요청 처리에 실패했습니다.");
@@ -201,6 +195,8 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       deploymentContext: {
         // ECSDeployRequest의 repo_name 기본값과 반드시 같아야 한다.
         ecrRepo: "recoder-app",
+        // 실제 ECS 배포가 push하는 registry 계정의 ECR 권한을 검사한다.
+        ecrRegistry: ecs.ecr_registry,
         ecsCluster: ecs.ecs_cluster,
         ecsService: ecs.ecs_service,
         awsRegion: ecs.aws_region,
