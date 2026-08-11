@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["deploy-ecs"])
 
 
+class _StaleRollbackProposalError(RuntimeError):
+    """승인 대기 중 서비스가 다른 Task Definition으로 진행된 경우."""
+
+
 # ---------------------------------------------------------------------------
 # 확장이 보내는 모양
 # ---------------------------------------------------------------------------
@@ -449,7 +453,9 @@ async def resolve_ecs_rollback(body: EcsRollbackRequest) -> EcsRollbackResponse:
 
     record = _find_rollback_record(body.proposal_id)
     proposal_status = record.rollback_proposal_status or "pending"
-    if proposal_status != "pending":
+    # 일시적인 AWS 오류로 실패한 제안은 같은 사용자가 다시 승인해 재시도할
+    # 수 있다. 완료·무시·새 배포로 대체된 제안은 절대 되살리지 않는다.
+    if proposal_status not in {"pending", "failed"}:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -488,6 +494,19 @@ async def resolve_ecs_rollback(body: EcsRollbackRequest) -> EcsRollbackResponse:
         import boto3
 
         ecs = boto3.session.Session(region_name=record.region).client("ecs")
+        current = ecs.describe_services(
+            cluster=record.cluster or "", services=[record.service or ""],
+        ).get("services", [])
+        current_task_definition = (
+            str(current[0].get("taskDefinition") or "") if current else ""
+        )
+        # 제안을 낸 실패 배포의 Task Definition이 아직 PRIMARY일 때만
+        # 되돌린다. 새 배포나 콘솔 수동 변경이 있었다면 오래된 제안은
+        # 더 위험하므로 사용자 승인이라도 실행하지 않는다.
+        if not record.task_definition_arn or current_task_definition != record.task_definition_arn:
+            raise _StaleRollbackProposalError(
+                "서비스가 롤백 제안 이후 다른 Task Definition으로 변경되었습니다."
+            )
         return aws_infra.revert_service_task_definition(
             ecs,
             cluster=record.cluster or "",
@@ -497,6 +516,12 @@ async def resolve_ecs_rollback(body: EcsRollbackRequest) -> EcsRollbackResponse:
 
     try:
         result = await asyncio.to_thread(_apply)
+    except _StaleRollbackProposalError as exc:
+        record.rollback_proposal_status = "superseded"
+        record.rollback_completed_at = datetime.now(timezone.utc)
+        record.provisioned["rollback_approval"] = f"오래된 제안을 차단했습니다: {exc}"
+        ecs_routes._save_records()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - AWS 오류를 재시도 가능한 제안으로 보존
         record.rollback_proposal_status = "failed"
         record.provisioned["rollback_approval"] = f"사용자 승인 후 롤백 호출 실패: {exc}"
