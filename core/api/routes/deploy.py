@@ -569,6 +569,32 @@ def _strip_js_comments(text: str) -> str:
     return "".join(out)
 
 
+#: Astro 를 서버로 만드는 어댑터. 이게 있으면 산출물이 정적 파일이 아니다.
+_ASTRO_SERVER_ADAPTERS = (
+    "@astrojs/node", "@astrojs/vercel", "@astrojs/netlify",
+    "@astrojs/cloudflare", "@astrojs/deno",
+)
+
+
+def _astro_is_server(app_root: Path, node_deps: set[str]) -> bool:
+    """Astro 가 **서버 모드**인지.
+
+    Astro 는 기본이 정적이지만 `output: 'server'`(또는 `'hybrid'`)로 두고
+    어댑터를 붙이면 서버 런타임이 필요하다. 그걸 안 보면 SSR Astro 앱에
+    S3 를 권하게 된다 — 올려도 동작하지 않는 추천이다.
+
+    Next.js 를 반대 방향으로 다루면서(정적 export 감지) 같은 종류의 설정이
+    Astro 에도 있다는 걸 안 봤다.
+    """
+    if any(a in node_deps for a in _ASTRO_SERVER_ADAPTERS):
+        return True
+    for name in ("astro.config.mjs", "astro.config.js", "astro.config.ts", "astro.config.cjs"):
+        text = _strip_js_comments(_read_text_if_exists(app_root / name, 20_000))
+        if re.search(r"['\"]?output['\"]?\s*:\s*['\"](?:server|hybrid)['\"]", text):
+            return True
+    return False
+
+
 def _next_is_static_export(app_root: Path, pkg: dict) -> bool:
     """Next.js 가 **정적 export** 설정인지.
 
@@ -629,10 +655,14 @@ def _deployment_preflight(workspace_path: str) -> dict:
         if dep in node_deps:
             server_evidence.append(f"{label} 서버")
             break
-    for dep, label in _NODE_STATIC_DEPS.items():
-        if dep in node_deps:
-            static_evidence.append(f"{label} 빌드")
-            break
+    # Astro 는 정적/서버 양쪽이라 설정을 봐야 한다.
+    if "astro" in node_deps and _astro_is_server(root, node_deps):
+        server_evidence.append("Astro 서버(SSR)")
+    else:
+        for dep, label in _NODE_STATIC_DEPS.items():
+            if dep in node_deps:
+                static_evidence.append(f"{label} 빌드")
+                break
 
     # ── 그 밖의 서버 런타임 ──────────────────────────────────────────
     # 같은 파일의 `_detect_stack` 은 이미 이것들을 보고 있었다. 판정이

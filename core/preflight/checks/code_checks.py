@@ -50,9 +50,49 @@ _NODE_FILES_GLOB = ("*.js", "*.ts", "*.mjs")
 _ENTRYPOINT_CANDIDATES: dict[ContractStack, tuple[str, ...]] = {
     ContractStack.PYTHON_FASTAPI: ("main.py", "app.py", "app/main.py", "src/main.py"),
     ContractStack.PYTHON_FLASK:   ("app.py", "main.py", "wsgi.py", "src/app.py"),
-    ContractStack.NODE_EXPRESS:   ("index.js", "server.js", "app.js", "src/index.js", "src/server.js"),
+    #: NODE_EXPRESS 는 "Next 가 아닌 모든 Node 프로젝트"의 폴백이라 NestJS·
+    #: Fastify·Koa 도 여기로 온다. 그 생태계는 **TypeScript 진입점이 기본**이다
+    #: (NestJS 는 `src/main.ts`). `.js` 만 두면 서버로 판정해 놓고 진입점을
+    #: 못 찾아 막는 막다른 길이 된다.
+    ContractStack.NODE_EXPRESS: (
+        "index.js", "server.js", "app.js", "src/index.js", "src/server.js",
+        "src/main.ts", "src/index.ts", "src/app.ts",
+        "main.ts", "index.ts", "server.ts",
+        "dist/main.js", "dist/index.js",
+    ),
     ContractStack.NODE_NEXT:      ("next.config.js", "next.config.mjs", "pages/_app.js", "pages/_app.tsx", "app/page.tsx"),
-    ContractStack.CUSTOM:         ("main.py", "app.py", "index.js", "server.js", "main.go", "main.rs"),
+    #: CUSTOM 은 "위 넷 중 어디에도 안 맞는 전부"다. 그래서 후보 목록이
+    #: **배포 대상 감지기가 서버로 인정하는 런타임을 전부 덮어야** 한다.
+    #:
+    #: 안 그러면 "Spring 빌드를 찾았습니다 → 서버형"이라고 해놓고 바로
+    #: 다음 단계에서 "진입점을 못 찾겠습니다"로 막는다. 확장은 `blocked` 가
+    #: 참이면 배포 대상 선택을 통째로 비활성화하므로 **사용자가 아무것도
+    #: 할 수 없는 막다른 길**이 된다.
+    #:
+    #: 실측으로 Spring(maven/gradle)·Rails·PHP·Procfile·docker-compose
+    #: 6가지가 그 상태였다. Go 만 통과했는데 그건 `main.go` 가 우연히
+    #: 목록에 있어서였다.
+    #:
+    #: `check_app_entrypoint` 은 `exists()` 로 보므로 **폴더도 후보가 된다**
+    #: (`src/main/java` 처럼 진입점이 패키지 트리 깊숙이 있는 경우).
+    ContractStack.CUSTOM: (
+        # 파이썬·Node (스택 감지가 실패했을 때의 폴백)
+        "main.py", "app.py", "index.js", "server.js",
+        "src/index.js", "src/index.ts", "src/main.ts",
+        # Django — `_detect_preflight_contract_stack` 이 FastAPI/Flask 만
+        # 구분하므로 Django 는 CUSTOM 으로 온다. 관례 진입점을 넣어 둔다.
+        "manage.py", "wsgi.py", "asgi.py", "config/wsgi.py", "src/manage.py",
+        # Go · Rust
+        "main.go", "cmd", "main.rs", "src/main.rs",
+        # Java · Kotlin
+        "src/main/java", "src/main/kotlin",
+        # Ruby
+        "config.ru", "app.rb", "main.rb",
+        # PHP
+        "public/index.php", "index.php", "artisan",
+        # 컨테이너·프로세스 선언 — 시작 방법이 여기 적혀 있다.
+        "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "Procfile",
+    ),
 }
 
 

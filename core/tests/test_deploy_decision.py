@@ -619,26 +619,82 @@ def test_safety_preflight_takes_no_app_root_argument():
     assert params == ["workspace_path", "app_kind"], params
 
 
-@pytest.mark.parametrize("files,label", [
-    ({"requirements.txt": "fastapi\n", "main.py": "from fastapi import FastAPI\napp=FastAPI()\n"}, "FastAPI 루트"),
-    ({"requirements.txt": "fastapi\n", "src/main.py": "from fastapi import FastAPI\napp=FastAPI()\n"}, "FastAPI src/"),
-    ({"src/main.py": "from fastapi import FastAPI\napp=FastAPI()\n"}, "의존성 없이 src/"),
+#: **감지기가 "서버형"이라고 말할 수 있는 모든 경로**의 최소 픽스처.
+#:
+#: 이 표는 `_deployment_preflight` 가 서버 근거를 붙이는 자리와 1:1 로
+#: 대응해야 한다. 새 런타임 신호를 추가하면 **여기에도 추가**해야 아래
+#: 불변식이 그 런타임을 실제로 덮는다.
+#:
+#: 왜 이렇게까지 하냐 — 예전 판에서는 이 불변식을 FastAPI·Go·Express·
+#: Dockerfile 네 개로만 돌렸고, 그중 Go 는 `main.go` 가, Dockerfile 픽스처는
+#: `server.js` 가 우연히 진입점 후보에 있어서 **운으로 통과**했다. 정작
+#: Spring·Rails·PHP·Procfile·docker-compose·NestJS 6가지가 막다른 길이었는데
+#: 테스트는 초록이었다.
+_SERVER_FIXTURES = [
+    ({"requirements.txt": "fastapi\n", "main.py": "from fastapi import FastAPI\napp=FastAPI()\n"}, "FastAPI"),
+    ({"requirements.txt": "flask\n", "app.py": "from flask import Flask\n"}, "Flask"),
+    ({"requirements.txt": "django\n", "manage.py": "import django\n"}, "Django"),
+    ({"requirements.txt": "fastapi\n", "src/main.py": "from fastapi import FastAPI\n"}, "FastAPI (src 배치)"),
+    ({"src/main.py": "from fastapi import FastAPI\n"}, "의존성 선언 없이 import 만"),
+    ({"package.json": '{"dependencies":{"express":"^4"}}', "index.js": "x"}, "Express"),
+    ({"package.json": '{"dependencies":{"@nestjs/core":"^10"}}', "src/main.ts": "x"}, "NestJS"),
+    ({"package.json": '{"dependencies":{"fastify":"^4"}}', "src/index.ts": "x"}, "Fastify"),
+    ({"package.json": '{"dependencies":{"koa":"^2"}}', "app.js": "x"}, "Koa"),
+    ({"package.json": '{"dependencies":{"next":"14"}}', "next.config.js": "module.exports={}"}, "Next SSR"),
+    ({"package.json": '{"dependencies":{"astro":"^4","@astrojs/node":"^8"}}',
+      "astro.config.mjs": "export default { output: 'server' }\n", "src/index.ts": "x"}, "Astro SSR"),
     ({"go.mod": "module x\n", "main.go": "package main\n"}, "Go"),
-    ({"package.json": '{"dependencies":{"express":"^4"}}', "index.js": "require('express')\n"}, "Express"),
-    ({"Dockerfile": "FROM node:20\n", "server.js": "x\n"}, "Dockerfile 만"),
-])
-def test_server_verdict_never_leads_to_an_entrypoint_dead_end(tmp_path, files, label):
+    ({"go.mod": "module x\n", "cmd/api/main.go": "package main\n"}, "Go (cmd 배치)"),
+    ({"pom.xml": "<project/>", "src/main/java/App.java": "class App{}"}, "Spring (maven)"),
+    ({"build.gradle": "plugins{}", "src/main/java/App.java": "class App{}"}, "Spring (gradle)"),
+    ({"build.gradle.kts": "plugins{}", "src/main/kotlin/App.kt": "fun main(){}"}, "Kotlin"),
+    ({"Gemfile": 'gem "rails"\n', "config.ru": "run App\n"}, "Rails"),
+    ({"composer.json": '{"require":{"laravel/framework":"^11"}}', "public/index.php": "<?php"}, "PHP"),
+    ({"Dockerfile": "FROM node:20\nCMD [\"node\",\"x\"]\n"}, "Dockerfile 만"),
+    ({"docker-compose.yml": "services:\n  api:\n    image: x\n"}, "docker-compose 만"),
+    ({"Procfile": "web: ./run\n"}, "Procfile 만"),
+]
+
+
+@pytest.mark.parametrize("files,label", _SERVER_FIXTURES)
+def test_every_server_runtime_is_actually_deployable(tmp_path, files, label):
     """**불변식** — "서버형"이라고 판정했으면 진입점을 못 찾아 막히면 안 된다.
 
-    감지와 안전 검사가 서로 다른 깊이를 보면 이 불변식이 깨진다. 4라운드
-    동안 반복된 P1 이 전부 이 형태였으므로, 개별 사례가 아니라 **불변식**
-    으로 고정한다.
+    확장은 `blocked` 가 참이면 배포 대상 선택을 통째로 비활성화한다. 즉
+    이 불변식이 깨지면 **사용자가 아무것도 할 수 없는 막다른 길**이 된다.
+
+    Codex 리뷰 5라운드 중 P1 이 전부 이 형태였다. 개별 사례를 하나씩 막는
+    대신 감지기가 서버로 인정하는 **모든 경로**에 대해 검사한다.
     """
     _write(tmp_path, {**files, ".gitignore": ".env\n", ".git/config": ""})
     detected = deploy._deployment_preflight(str(tmp_path))
-    if detected["app_kind"] != "server":
-        pytest.skip(f"{label}: 서버형으로 판정되지 않음")
+    assert detected["app_kind"] == "server", f"{label}: 서버형으로 판정되지 않았다 — {detected}"
+
     safety = deploy._run_deployment_safety_preflight(str(tmp_path), detected["app_kind"])
     assert "APP_ENTRYPOINT_NOT_FOUND" not in [r["code"] for r in safety["reasons"]], (
-        f"{label}: 서버형이라고 해놓고 진입점을 못 찾아 막았다"
+        f"{label}: 서버형이라고 해놓고 진입점을 못 찾아 막았다 — "
+        f"진입점 후보에 이 런타임의 관례 경로가 없다"
     )
+
+
+@pytest.mark.parametrize("config,deps,expected,label", [
+    ("export default { output: 'server' }\n", '"@astrojs/node":"^8"', "server", "output:server + 어댑터"),
+    ("export default { output: 'hybrid' }\n", "", "server", "hybrid"),
+    ("", '"@astrojs/vercel":"^7"', "server", "어댑터만 있어도 서버"),
+    ("", "", "static", "기본은 정적"),
+    ("export default { output: 'static' }\n", "", "static", "명시적 static"),
+    ("// output: 'server'  ← 예전 설정\nexport default {}\n", "", "static", "주석 처리된 server"),
+])
+def test_astro_output_mode_decides_the_target(tmp_path, config, deps, expected, label):
+    """[Codex P2] Astro 는 정적/서버 양쪽이다.
+
+    `output: 'server'` 나 어댑터가 있으면 서버 런타임이 필요한데, 정적으로
+    보면 **올려도 동작하지 않는 S3 를 권하게 된다.** Next.js 를 반대 방향으로
+    다루면서(정적 export 감지) 같은 종류의 설정이 Astro 에도 있다는 걸
+    안 봤다.
+    """
+    files = {"package.json": '{"dependencies":{"astro":"^4"%s}}' % (("," + deps) if deps else "")}
+    if config:
+        files["astro.config.mjs"] = config
+    _write(tmp_path, files)
+    assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == expected, label
