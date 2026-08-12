@@ -77,15 +77,13 @@ _ENTRYPOINT_CANDIDATES: dict[ContractStack, tuple[str, ...]] = {
     #: (`src/main/java` 처럼 진입점이 패키지 트리 깊숙이 있는 경우).
     ContractStack.CUSTOM: (
         # 파이썬·Node (스택 감지가 실패했을 때의 폴백)
-        "main.py", "app.py", "index.js", "server.js",
-        "src/index.js", "src/index.ts", "src/main.ts",
+        "main.py", "app.py", "index.js", "server.js", "app.js",
+        "src/index.js", "src/index.ts", "src/main.ts", "src/app.js", "src/app.ts",
         # Django — `_detect_preflight_contract_stack` 이 FastAPI/Flask 만
         # 구분하므로 Django 는 CUSTOM 으로 온다. 관례 진입점을 넣어 둔다.
         "manage.py", "wsgi.py", "asgi.py", "config/wsgi.py", "src/manage.py",
         # Go · Rust
-        "main.go", "cmd", "main.rs", "src/main.rs",
-        # Java · Kotlin
-        "src/main/java", "src/main/kotlin",
+        "main.go", "main.rs", "src/main.rs",
         # Ruby
         "config.ru", "app.rb", "main.rb",
         # PHP
@@ -279,6 +277,73 @@ def check_missing_health_endpoint(
 # ---------------------------------------------------------------------------
 
 
+#: 파일 이름만으로는 알 수 없어 **내용을 봐야** 하는 진입점.
+#:
+#: Java/Kotlin 은 진입점이 `src/main/java/com/x/App.java` 처럼 패키지 트리
+#: 깊숙이 있고 이름도 제각각이다. 폴더 존재로 대신하면 라이브러리도 통과하므로
+#: 실행 가능한 main 선언을 직접 찾는다.
+_EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str]"], ...] = (
+    (
+        "java",
+        ("src/main/java/**/*.java", "src/*/src/main/java/**/*.java", "**/*.java"),
+        re.compile(r"\bstatic\s+void\s+main\s*\("),
+    ),
+    (
+        "kotlin",
+        ("src/main/kotlin/**/*.kt", "**/*.kt"),
+        re.compile(r"^\s*(?:@\w+\s+)*fun\s+main\s*\(", re.M),
+    ),
+    (
+        "go",
+        ("cmd/**/*.go", "**/*.go"),
+        re.compile(r"^\s*func\s+main\s*\(", re.M),
+    ),
+    (
+        "php",
+        ("public/*.php", "*.php"),
+        re.compile(r"<\?php"),
+    ),
+)
+
+#: 프로브가 훑을 파일 수 상한. 큰 저장소에서 몇 초씩 걸리면 안 된다.
+_PROBE_MAX_FILES = 60
+
+
+def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
+    """실행 진입점을 **내용으로** 찾는다. 못 찾으면 None.
+
+    반환값은 찾은 파일의 워크스페이스 상대 경로다(진단에 쓰인다).
+    """
+    skipped = {
+        "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
+        ".git", "target", ".gradle", "vendor", "out", "test", "tests",
+    }
+    for _label, patterns, pattern_re in _EXECUTABLE_ENTRYPOINT_PROBES:
+        scanned = 0
+        for glob_pattern in patterns:
+            for path in workspace.glob(glob_pattern):
+                if scanned >= _PROBE_MAX_FILES:
+                    break
+                try:
+                    rel_parts = path.relative_to(workspace).parts
+                except ValueError:
+                    continue
+                if any(part in skipped for part in rel_parts):
+                    continue
+                if not path.is_file():
+                    continue
+                scanned += 1
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")[:40_000]
+                except OSError:
+                    continue
+                if pattern_re.search(text):
+                    return path.relative_to(workspace).as_posix()
+            if scanned >= _PROBE_MAX_FILES:
+                break
+    return None
+
+
 def check_app_entrypoint(
     workspace: Path,
     contract: ReleaseContract,
@@ -293,15 +358,30 @@ def check_app_entrypoint(
 
     found: Optional[str] = None
     for rel in candidates:
-        if (workspace / rel).exists():
+        # **폴더가 아니라 파일이어야 한다.**
+        #
+        # 예전엔 `exists()` 로만 봐서 `src/main/java` 같은 **폴더가 있다는
+        # 이유로** 진입점을 찾았다고 판정했다. 그러면 실행 가능한 main 이
+        # 하나도 없는 라이브러리도 통과해, 뜨지 않는 이미지를 배포 준비
+        # 완료로 보고한다 — 검사를 약화시키는 형태다.
+        if (workspace / rel).is_file():
             found = rel
             break
+
+    # 파일 후보로 못 찾았으면, **실행 진입점을 내용으로 확인**한다.
+    # Java/Kotlin 처럼 진입점이 패키지 트리 깊숙이 있는 런타임을 위한 것이며,
+    # 폴더 존재가 아니라 `static void main` / `func main` 을 실제로 찾는다.
+    probe_hit: Optional[str] = None
+    if found is None:
+        probe_hit = _find_executable_entrypoint(workspace)
 
     details = {
         "stack": stack.value,
         "candidates": list(candidates),
-        "found": found,
+        "found": found or probe_hit,
+        "found_by": "candidate" if found else ("probe" if probe_hit else None),
     }
+    found = found or probe_hit
 
     if found:
         return CheckResult(

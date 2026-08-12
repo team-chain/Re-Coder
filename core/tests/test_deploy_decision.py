@@ -644,9 +644,11 @@ _SERVER_FIXTURES = [
     ({"package.json": '{"dependencies":{"astro":"^4","@astrojs/node":"^8"}}',
       "astro.config.mjs": "export default { output: 'server' }\n", "src/index.ts": "x"}, "Astro SSR"),
     ({"go.mod": "module x\n", "main.go": "package main\n"}, "Go"),
-    ({"go.mod": "module x\n", "cmd/api/main.go": "package main\n"}, "Go (cmd 배치)"),
-    ({"pom.xml": "<project/>", "src/main/java/App.java": "class App{}"}, "Spring (maven)"),
-    ({"build.gradle": "plugins{}", "src/main/java/App.java": "class App{}"}, "Spring (gradle)"),
+    ({"go.mod": "module x\n", "cmd/api/main.go": "package main\nfunc main() {}\n"}, "Go (cmd 배치)"),
+    ({"pom.xml": "<project/>",
+      "src/main/java/App.java": "class App { public static void main(String[] a) {} }"}, "Spring (maven)"),
+    ({"build.gradle": "plugins{}",
+      "src/main/java/App.java": "class App { public static void main(String[] a) {} }"}, "Spring (gradle)"),
     ({"build.gradle.kts": "plugins{}", "src/main/kotlin/App.kt": "fun main(){}"}, "Kotlin"),
     ({"Gemfile": 'gem "rails"\n', "config.ru": "run App\n"}, "Rails"),
     ({"composer.json": '{"require":{"laravel/framework":"^11"}}', "public/index.php": "<?php"}, "PHP"),
@@ -698,3 +700,137 @@ def test_astro_output_mode_decides_the_target(tmp_path, config, deps, expected, 
         files["astro.config.mjs"] = config
     _write(tmp_path, files)
     assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == expected, label
+
+
+# ── [회귀] Codex 6차 — P1 2건 + P2 2건 ───────────────────────────────
+#
+# 이번 4건은 전부 **감지기를 넓힌 만큼 뒤쪽 검사가 못 따라온** 형태다.
+# preflight 계층이 지원하는 스택은 4개(FastAPI/Flask/Express/Next)+CUSTOM 뿐인데
+# 감지기만 런타임을 늘리면, 진입점 후보·health 검사 문법·계약 스택이 어긋난다.
+
+
+@pytest.mark.parametrize("dep,entry,label", [
+    ("fastify", "src/index.ts", "Fastify"),
+    ("koa", "app.js", "Koa"),
+    ("hono", "src/index.ts", "Hono"),
+    ("@nestjs/core", "src/main.ts", "NestJS"),
+])
+def test_non_express_node_runtimes_are_not_forced_into_express_checks(tmp_path, dep, entry, label):
+    """[Codex P1] Express 가 아닌 Node 런타임을 NODE_EXPRESS 로 보내면 막힌다.
+
+    그 스택의 health 검사는 `app.get(...)`·`router.get(...)` 이라는 Express
+    문법만 안다. Fastify(`fastify.get`)·NestJS(`@Get()` 데코레이터)는 멀쩡히
+    `/health` 를 정의해도 인식되지 않아 `MISSING_HEALTH_ENDPOINT` 로 막힌다 —
+    **사용자가 고칠 것이 없는데 막히는** 형태다.
+
+    CUSTOM 의 health 검사는 차단이 아니라 경고("직접 확인하세요")다.
+    모르는 것을 아는 척해서 막는 것보다 낫다.
+    """
+    try:
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.schemas import ContractStack  # type: ignore
+
+    _write(tmp_path, {
+        "package.json": '{"dependencies":{"%s":"^1"}}' % dep,
+        entry: "x",
+        ".gitignore": ".env\n", ".git/config": "", ".env": "X=1\n",
+    })
+    assert deploy._detect_preflight_contract_stack(tmp_path) == ContractStack.CUSTOM, label
+
+    detected = deploy._deployment_preflight(str(tmp_path))
+    assert detected["app_kind"] == "server", label
+    safety = deploy._run_deployment_safety_preflight(str(tmp_path), detected["app_kind"])
+    codes = [r["code"] for r in safety["reasons"]]
+    assert "MISSING_HEALTH_ENDPOINT" not in codes, f"{label}: {codes}"
+    assert "APP_ENTRYPOINT_NOT_FOUND" not in codes, f"{label}: {codes}"
+
+
+def test_express_still_maps_to_the_express_stack(tmp_path):
+    """반대 방향 — Express 는 여전히 NODE_EXPRESS 여야 검사가 의미 있다."""
+    try:
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.schemas import ContractStack  # type: ignore
+
+    _write(tmp_path, {"package.json": '{"dependencies":{"express":"^4"}}', "index.js": "x"})
+    assert deploy._detect_preflight_contract_stack(tmp_path) == ContractStack.NODE_EXPRESS
+
+
+def test_a_java_library_without_main_is_not_treated_as_deployable(tmp_path):
+    """[Codex P1] 폴더 존재를 진입점으로 인정하면 **검사가 약해진다.**
+
+    `src/main/java` 가 있다는 이유로 통과시키면, 실행 가능한 main 이 하나도
+    없는 라이브러리도 "배포 준비 완료"가 된다 — 뜨지 않는 이미지를 승인하는
+    셈이다.
+    """
+    _write(tmp_path, {
+        "pom.xml": "<project/>",
+        "src/main/java/com/x/Util.java": "class Util { int add(int a){ return a; } }",
+        ".gitignore": ".env\n", ".git/config": "", ".env": "X=1\n",
+    })
+    detected = deploy._deployment_preflight(str(tmp_path))
+    safety = deploy._run_deployment_safety_preflight(str(tmp_path), detected["app_kind"])
+    assert "APP_ENTRYPOINT_NOT_FOUND" in [r["code"] for r in safety["reasons"]], safety["reasons"]
+
+
+def test_a_java_app_with_a_main_method_is_deployable(tmp_path):
+    """반대 방향 — 진짜 main 이 있으면 통과해야 한다."""
+    _write(tmp_path, {
+        "pom.xml": "<project/>",
+        "src/main/java/com/x/App.java": "class App { public static void main(String[] a) {} }",
+        ".gitignore": ".env\n", ".git/config": "", ".env": "X=1\n",
+    })
+    detected = deploy._deployment_preflight(str(tmp_path))
+    safety = deploy._run_deployment_safety_preflight(str(tmp_path), detected["app_kind"])
+    assert "APP_ENTRYPOINT_NOT_FOUND" not in [r["code"] for r in safety["reasons"]]
+
+
+@pytest.mark.parametrize("toml,expected,label", [
+    ('[project]\nname="lib"\ndependencies=["requests"]\n\n[dependency-groups]\ndjango = ["pytest"]\n',
+     "static", "그룹 이름이 django"),
+    ('[project]\nname="lib"\ndependencies=["requests"]\n\n[project.optional-dependencies]\nfastapi = ["httpx"]\n',
+     "static", "extra 이름이 fastapi"),
+    ('[project]\nname="api"\ndependencies=["fastapi"]\n', "server", "진짜 의존성"),
+    ('[project]\nname="api"\ndependencies=[]\n\n[project.optional-dependencies]\nweb = ["django>=5"]\n',
+     "server", "extra 값에 django"),
+    ('[tool.poetry.dependencies]\npython="^3.12"\nflask="^3"\n', "server", "poetry 키는 패키지 이름"),
+    ('[tool.poetry.group.dev.dependencies]\nfastapi="^0.1"\n', "server", "poetry group 안쪽은 테이블"),
+])
+def test_dependency_group_names_are_not_dependencies(tmp_path, toml, expected, label):
+    """[Codex P2] `[dependency-groups] django = [...]` 의 키는 **그룹 이름**이다.
+
+    키까지 걷으면 그룹/extra 이름이 우연히 `django`·`fastapi` 인 프로젝트가
+    서버로 판정돼 ECS 를 추천받는다.
+    """
+    _write(tmp_path, {"pyproject.toml": toml, "index.html": "<html></html>"})
+    assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == expected, label
+
+
+@pytest.mark.parametrize("text,expected,label", [
+    ("module.exports = { output: 'export' }", "export", "맨 키"),
+    ('module.exports = { "output": "export" }', "export", "따옴표 키"),
+    ('const hint = "set output: \'export\' for static deployments"\nmodule.exports = {}',
+     None, "문서 문자열 안 ← P2"),
+    ("// output: 'export'\nmodule.exports = {}", None, "주석 안"),
+    ("module.exports = { outputFileTracing: true }", None, "비슷한 다른 키"),
+    ("module.exports = { assetPrefix: 'https://x.com', output: 'export' }", "export", "URL 뒤 같은 줄"),
+])
+def test_config_key_scanner_ignores_string_literals(text, expected, label):
+    """[Codex P2] 정규식은 **문자열 안의 같은 글자**에 속는다.
+
+    `const hint = "set output: 'export' for static"` 같은 설명문이 있으면 SSR
+    설정을 정적으로 오판해 S3 를 권한다. 주석을 지워도 남는 문제라, 키 위치를
+    실제로 판별하는 스캐너로 바꿨다.
+    """
+    stripped = deploy._strip_js_comments(text)
+    assert deploy._js_config_string_value(stripped, "output") == expected, label
+
+
+def test_next_ssr_with_a_documentation_string_is_still_a_server(tmp_path):
+    """통합 확인 — 설명문에 속아 SSR 앱에 S3 를 권하면 안 된다."""
+    _write(tmp_path, {
+        "package.json": '{"dependencies":{"next":"14"}}',
+        "next.config.js": 'const hint = "set output: \'export\' for static";\nmodule.exports = { reactStrictMode: true };\n',
+    })
+    assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == "server"

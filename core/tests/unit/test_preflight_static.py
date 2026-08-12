@@ -513,3 +513,54 @@ def test_runner__safe_workspace_path_rejects_invalid() -> None:
     with pytest.raises(ValueError):
         StaticPreflightRunner("/this/path/should/not/exist/12345", make_contract())
 
+
+
+def test_entrypoint_candidate_must_be_a_file_not_a_directory(tmp_path):
+    """[회귀] 진입점 후보가 **폴더**면 인정하지 않는다.
+
+    `exists()` 로만 보면 `src/main/java` 같은 폴더가 있다는 이유로 진입점을
+    찾았다고 판정한다. 그러면 실행 가능한 main 이 하나도 없는 라이브러리도
+    통과해, **뜨지 않는 이미지를 배포 준비 완료로 보고**한다.
+
+    지금은 폴더 후보를 목록에서 뺐지만, 나중에 누가 다시 넣어도 여기서
+    막히도록 판정 자체를 고정한다.
+    """
+    try:
+        from preflight.checks.code_checks import check_app_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import check_app_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    # `main.py` 라는 이름의 **폴더**만 있다 — 실행할 수 있는 것이 없다.
+    (tmp_path / "main.py").mkdir()
+    contract = build_default_contract(ContractStack.CUSTOM)
+    assert not check_app_entrypoint(tmp_path, contract).passed
+
+    # 같은 이름의 **파일**이면 통과한다.
+    other = tmp_path / "real"
+    other.mkdir()
+    (other / "main.py").write_text("print(1)\n", encoding="utf-8")
+    assert check_app_entrypoint(other, contract).passed
+
+
+def test_executable_probe_requires_a_real_main_declaration(tmp_path):
+    """내용 프로브는 **선언을 실제로 찾아야** 한다 — 파일 존재만으로는 부족."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    lib = tmp_path / "lib"
+    (lib / "src" / "main" / "java" / "com" / "x").mkdir(parents=True)
+    (lib / "src" / "main" / "java" / "com" / "x" / "Util.java").write_text(
+        "class Util { int add(int a) { return a; } }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(lib) is None
+
+    app = tmp_path / "app"
+    (app / "src" / "main" / "java" / "com" / "x").mkdir(parents=True)
+    (app / "src" / "main" / "java" / "com" / "x" / "App.java").write_text(
+        "class App { public static void main(String[] a) {} }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(app) is not None

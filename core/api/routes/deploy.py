@@ -329,8 +329,33 @@ _DEP_SECTION_RE = re.compile(
 )
 
 
+def _collect_group_values(value: object, out: set[str]) -> None:
+    """**그룹 컨테이너**에서 의존성을 거둔다 — 키는 그룹 이름이므로 버린다.
+
+    `[project.optional-dependencies]` 와 `[dependency-groups]` 는
+    `이름 -> [의존성 목록]` 모양이다. 그 **키는 extra/그룹 이름**이지
+    패키지가 아니다.
+
+        [dependency-groups]
+        django = ["pytest"]        # ← 이건 "django 를 쓴다"가 아니다
+
+    키까지 걷으면 그룹 이름이 우연히 `django`·`fastapi` 인 프로젝트가
+    서버로 판정돼 ECS 를 추천받는다.
+    """
+    if isinstance(value, dict):
+        for item in value.values():
+            _collect_dep_names(item, out)
+    else:
+        _collect_dep_names(value, out)
+
+
 def _collect_dep_names(value: object, out: set[str]) -> None:
-    """`tomllib` 로 읽은 값에서 의존성 이름만 거둬들인다."""
+    """**의존성 테이블**에서 이름을 거둔다.
+
+    문자열/리스트는 요구사항 표기(`"fastapi>=0.110"`), dict 는 poetry 형태
+    (`fastapi = "^0.110"`)라 **키가 패키지 이름**이다. 그룹 컨테이너에는
+    쓰면 안 된다 — `_collect_group_values` 를 쓸 것.
+    """
     if isinstance(value, str):
         m = _REQ_LINE_RE.match(value)
         if m:
@@ -373,8 +398,10 @@ def _python_deps(app_root: Path) -> set[str]:
             project = parsed.get("project")
             if isinstance(project, dict):
                 _collect_dep_names(project.get("dependencies"), deps)
-                _collect_dep_names(project.get("optional-dependencies"), deps)
-            _collect_dep_names(parsed.get("dependency-groups"), deps)
+                # extra 이름은 패키지가 아니다 — 값만 본다.
+                _collect_group_values(project.get("optional-dependencies"), deps)
+            # 그룹 이름도 마찬가지.
+            _collect_group_values(parsed.get("dependency-groups"), deps)
             tool = parsed.get("tool")
             poetry = tool.get("poetry") if isinstance(tool, dict) else None
             if isinstance(poetry, dict):
@@ -382,6 +409,8 @@ def _python_deps(app_root: Path) -> set[str]:
                 _collect_dep_names(poetry.get("dev-dependencies"), deps)
                 groups = poetry.get("group")
                 if isinstance(groups, dict):
+                    # poetry 의 group 은 `[tool.poetry.group.<이름>.dependencies]`
+                    # 라 그 안쪽이 진짜 의존성 테이블이다(키가 패키지 이름).
                     for group in groups.values():
                         if isinstance(group, dict):
                             _collect_dep_names(group.get("dependencies"), deps)
@@ -590,9 +619,96 @@ def _astro_is_server(app_root: Path, node_deps: set[str]) -> bool:
         return True
     for name in ("astro.config.mjs", "astro.config.js", "astro.config.ts", "astro.config.cjs"):
         text = _strip_js_comments(_read_text_if_exists(app_root / name, 20_000))
-        if re.search(r"['\"]?output['\"]?\s*:\s*['\"](?:server|hybrid)['\"]", text):
+        if _js_config_string_value(text, "output") in ("server", "hybrid"):
             return True
     return False
+
+
+def _js_config_string_value(text: str, key: str) -> Optional[str]:
+    """JS/JSON 설정에서 `key: "값"` 의 **값**을 꺼낸다. 없으면 None.
+
+    정규식으로는 안 된다. `const hint = "set output: 'export' for static"`
+    같은 **문서 문자열 안**에도 같은 모양이 들어 있어서, 정규식은 SSR 설정을
+    정적으로 오판한다. 주석을 지워도 남는 문제다.
+
+    그래서 문자열 상태를 따라가며 훑고, **문자열 밖에 있는 식별자**이거나
+    **따옴표로 감싼 키**(`"output": ...`)일 때만 키로 인정한다. 값도 바로
+    뒤에 오는 문자열 리터럴만 읽는다.
+
+    완전한 JS 파서는 아니다 — 중첩 객체 안의 같은 키도 잡는다. 다만
+    "문자열 안의 글자를 설정으로 오인하는" 오판은 없앤다.
+    """
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+
+        # 문자열 리터럴 — 통째로 건너뛰되, 그 내용이 키일 수 있으므로 기억한다.
+        if ch in "\"'`":
+            quote = ch
+            j = i + 1
+            buf = []
+            while j < n:
+                if text[j] == "\\" and j + 1 < n:
+                    buf.append(text[j + 1])
+                    j += 2
+                    continue
+                if text[j] == quote:
+                    break
+                buf.append(text[j])
+                j += 1
+            literal = "".join(buf)
+            after = j + 1
+            # `"output": "export"` — 따옴표로 감싼 키
+            k = after
+            while k < n and text[k] in " \t\r\n":
+                k += 1
+            if literal == key and k < n and text[k] == ":":
+                value = _read_js_string_after(text, k + 1)
+                if value is not None:
+                    return value
+            i = after
+            continue
+
+        # 문자열 밖의 맨 식별자 — `output: 'export'`
+        if ch.isalpha() or ch == "_" or ch == "$":
+            j = i
+            while j < n and (text[j].isalnum() or text[j] in "_$"):
+                j += 1
+            word = text[i:j]
+            k = j
+            while k < n and text[k] in " \t\r\n":
+                k += 1
+            if word == key and k < n and text[k] == ":":
+                value = _read_js_string_after(text, k + 1)
+                if value is not None:
+                    return value
+            i = j
+            continue
+
+        i += 1
+    return None
+
+
+def _read_js_string_after(text: str, start: int) -> Optional[str]:
+    """`start` 위치부터 공백을 건너뛰고 **문자열 리터럴 하나**를 읽는다."""
+    i, n = start, len(text)
+    while i < n and text[i] in " \t\r\n":
+        i += 1
+    if i >= n or text[i] not in "\"'`":
+        return None
+    quote = text[i]
+    i += 1
+    buf = []
+    while i < n:
+        if text[i] == "\\" and i + 1 < n:
+            buf.append(text[i + 1])
+            i += 2
+            continue
+        if text[i] == quote:
+            return "".join(buf)
+        buf.append(text[i])
+        i += 1
+    return None
 
 
 def _next_is_static_export(app_root: Path, pkg: dict) -> bool:
@@ -603,10 +719,9 @@ def _next_is_static_export(app_root: Path, pkg: dict) -> bool:
     """
     for name in ("next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"):
         text = _strip_js_comments(_read_text_if_exists(app_root / name, 20_000))
-        # `{ "output": "export" }` 처럼 **키에 따옴표**를 쓰는 것도 유효한
-        # JS/JSON 표기다. 키 따옴표를 허용하지 않으면 정적 export 설정을
-        # 서버로 오분류해 S3 대신 ECS 를 권한다.
-        if re.search(r"['\"]?output['\"]?\s*:\s*['\"]export['\"]", text):
+        # 따옴표 있는 키(`"output": "export"`)와 없는 키를 모두 받되,
+        # **문자열 안의 같은 글자에는 속지 않는다.**
+        if _js_config_string_value(text, "output") == "export":
             return True
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
     return any("next export" in str(v) for v in (scripts or {}).values())
@@ -777,8 +892,21 @@ def _detect_preflight_contract_stack(root: Path):
     node_deps, _pkg = _node_deps(root)
     if "next" in node_deps:
         return ContractStack.NODE_NEXT
-    if node_deps or (root / "package.json").is_file():
+    # **Express 일 때만 NODE_EXPRESS 다.**
+    #
+    # 예전엔 `package.json` 만 있으면 전부 NODE_EXPRESS 였다. 그런데 그 스택의
+    # health 검사는 `app.get(...)`·`router.get(...)` 이라는 **Express 문법만**
+    # 안다. Fastify(`fastify.get`)·NestJS(`@Get()` 데코레이터)·Koa·Hono 는
+    # 멀쩡히 `/health` 를 정의해 놓아도 인식되지 않아 `MISSING_HEALTH_ENDPOINT`
+    # 로 **막힌다** — 사용자가 고칠 것이 없는데 막히는 형태다.
+    #
+    # 그래서 확신할 수 있는 경우에만 NODE_EXPRESS 로 보내고, 나머지 Node 는
+    # CUSTOM 으로 둔다. CUSTOM 의 health 검사는 차단이 아니라 **경고**다
+    # ("직접 확인하세요"). 모르는 것을 아는 척해서 막는 것보다 낫다.
+    if "express" in node_deps:
         return ContractStack.NODE_EXPRESS
+    if node_deps or (root / "package.json").is_file():
+        return ContractStack.CUSTOM
 
     python_names = _python_deps(root) | _python_imported_modules(root)
     if "fastapi" in python_names:
