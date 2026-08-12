@@ -8,6 +8,8 @@ planning, execution, records, and rollback.
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -214,67 +216,544 @@ def _read_text_if_exists(path: Path, limit: int = 100_000) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# FR-05-01 앱 종류 감지
+#
+# 이 판정은 사용자에게 **"어디에 올릴까요?" 카드의 추천 근거**로 그대로
+# 보인다(확정 D7). 그래서 맞히는 것만큼 **왜 그렇게 봤는지 말할 수 있는
+# 것**이 중요하다. `evidence` 는 로그가 아니라 화면에 뜨는 문장이다.
+#
+# 실측으로 확인한 예전 판의 구멍(12개 형태 중 8개 오답):
+#   · 최상위 `*.py` 만 봐서 `src/main.py` 의 FastAPI 를 못 봄
+#   · 정적 빌더가 vite 뿐 — CRA·Astro·Angular·Vue CLI 전부 미탐
+#   · `go.mod`/`pom.xml`/`Gemfile` 을 안 봄 (같은 파일의 `_detect_stack` 은 봄)
+#   · Dockerfile 이라는 **가장 강한 서버 신호**를 아예 안 봄
+#   · 모노레포(backend/ + frontend/)를 통째로 못 봄
+#   · 부분 문자열 매칭이라 주석의 `# fastapi 는 쓰지 않는다` 를 서버로 오탐
+#   · Next.js 정적 export(`output: 'export'`)를 서버로 오분류
+# ---------------------------------------------------------------------------
+
+#: 탐색에서 제외할 폴더.
+#:
+#: 들어가면 느려지기만 하는 게 아니라, **남의 의존성 안에 있는 파일을 이
+#: 프로젝트의 증거로 삼는다.** `node_modules` 안에는 express 도 vite 도 다
+#: 들어 있어서, 한 번 들어가면 모든 프로젝트가 서버형이 된다.
+_SKIP_DIRS = frozenset({
+    "node_modules", ".git", ".hg", ".svn", ".venv", "venv", "env", ".env",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "dist", "build", "out", ".next", ".nuxt", ".svelte-kit", ".output",
+    "target", ".gradle", "vendor", "coverage", "htmlcov",
+    ".idea", ".vscode", ".terraform", "site-packages", ".tox", ".cache",
+})
+
+#: 여기 하나라도 있으면 "앱 루트"로 본다.
+_MANIFEST_FILES = (
+    "requirements.txt", "pyproject.toml", "Pipfile", "setup.py",
+    "package.json", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts",
+    "Gemfile", "composer.json", "Cargo.toml",
+    "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "Procfile",
+)
+
+#: 탐색 상한. 큰 모노레포에서 이벤트 루프 밖이라도 수 초씩 걸리면 안 된다.
+_MAX_SCAN_DEPTH = 3
+_MAX_APP_ROOTS = 12
+
+#: 서버 런타임을 뜻하는 파이썬 의존성 (정규화된 이름으로 정확히 비교).
+_PY_SERVER_DEPS = {
+    "fastapi": "FastAPI", "flask": "Flask", "django": "Django",
+    "starlette": "Starlette", "litestar": "Litestar", "sanic": "Sanic",
+    "tornado": "Tornado", "aiohttp": "aiohttp", "bottle": "Bottle",
+    "falcon": "Falcon", "quart": "Quart", "pyramid": "Pyramid",
+    "gunicorn": "Gunicorn", "uvicorn": "Uvicorn", "hypercorn": "Hypercorn",
+    "waitress": "Waitress",
+}
+
+#: 서버 런타임을 뜻하는 Node 의존성.
+_NODE_SERVER_DEPS = {
+    "express": "Express", "@nestjs/core": "NestJS", "koa": "Koa",
+    "fastify": "Fastify", "@hapi/hapi": "hapi", "@adonisjs/core": "AdonisJS",
+    "socket.io": "Socket.IO", "@apollo/server": "Apollo Server",
+    "apollo-server": "Apollo Server", "restify": "restify",
+    "@feathersjs/feathers": "Feathers", "h3": "h3", "hono": "Hono",
+}
+
+#: 정적 산출물을 만드는 빌더.
+_NODE_STATIC_DEPS = {
+    "vite": "Vite", "react-scripts": "Create React App",
+    "@angular/cli": "Angular CLI", "@vue/cli-service": "Vue CLI",
+    "astro": "Astro", "gatsby": "Gatsby", "@11ty/eleventy": "Eleventy",
+    "parcel": "Parcel", "@sveltejs/adapter-static": "SvelteKit (정적)",
+    "vuepress": "VuePress", "@docusaurus/core": "Docusaurus",
+}
+
+#: **`webpack` 은 뺐다.** 라이브러리·CLI·VS Code 확장이 번들러로 흔히 쓰는
+#: devDependency 라, 넣어 두면 이 저장소의 `extension/` 자체가
+#: "정적 웹 앱 — webpack 빌드"로 판정된다(실측). 정적 산출물을 만든다는
+#: 신호로는 너무 약하다.
+
+#: 파이썬 소스에서 프레임워크를 찾을 때 쓰는 **실제 import 문** 패턴.
+#: 부분 문자열 검색은 주석 한 줄에 속는다 — 실측으로 확인한 오탐이다.
+_PY_IMPORT_RE = re.compile(
+    r"^[ \t]*(?:from[ \t]+(?P<from>[\w.]+)|import[ \t]+(?P<import>[\w.,\s]+))",
+    re.MULTILINE,
+)
+
+#: `requirements.txt` 한 줄에서 패키지 이름만 떼어낸다.
+#: `fastapi[all]>=0.110  # 주석` → `fastapi`
+_REQ_LINE_RE = re.compile(r"^\s*(?:-e\s+)?([A-Za-z0-9._-]+)")
+
+#: 여러 줄 문자열(삼중따옴표) 블록. import 문을 찾기 전에 지운다.
+_TRIPLE_QUOTED_RE = re.compile(r'"""(?:.|\n)*?"""' + r"|'''(?:.|\n)*?'''")
+
+
+def _normalize_dep(name: str) -> str:
+    """PEP 503 방식으로 패키지 이름을 정규화한다 (`Flask_SQLAlchemy` → `flask-sqlalchemy`)."""
+    return re.sub(r"[-_.]+", "-", (name or "").strip()).lower()
+
+
+#: 서버라고 거의 확정할 수 있는 표식. 앱 루트가 상한을 넘칠 때 **이런
+#: 폴더를 먼저 남긴다.**
+#:
+#: 이름순으로 자르면 `packages/ui-00` … `ui-11` 이 자리를 다 차지하고
+#: `packages/zz-api`(Dockerfile + express)가 잘려 나간다. 그러면 백엔드가
+#: 있는 모노레포를 **정적 사이트로 판정해 S3 를 권하게 된다** — 모노레포를
+#: 보려고 넣은 탐색이 정확히 그 지점에서 무너지는 형태다.
+_STRONG_SERVER_MANIFESTS = (
+    "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "Procfile",
+    "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "Gemfile",
+    "requirements.txt", "pyproject.toml",
+)
+
+#: 탐색할 디렉터리 수의 절대 상한. 앱 루트 상한(`_MAX_APP_ROOTS`)과 별개로,
+#: 거대한 저장소에서 디렉터리를 세는 일 자체를 끊는다.
+_MAX_DIRS_SCANNED = 4000
+
+
+def _iter_app_roots(root: Path) -> list[Path]:
+    """워크스페이스 안에서 **앱으로 보이는 폴더들**.
+
+    모노레포(`backend/` + `frontend/`)를 통째로 놓치던 것을 막는다. 루트는
+    표식 파일이 없어도 항상 포함한다 — 루트만 보던 예전 동작을 잃지 않기
+    위해서다.
+
+    후보를 다 모은 **뒤에** 자른다. 찾는 도중에 자르면 이름순으로 앞선
+    폴더가 자리를 다 차지해 정작 중요한 백엔드가 잘려 나간다.
+    """
+    candidates: list[tuple[int, int, Path]] = []   # (우선순위, 발견순서, 경로)
+    seen: set[str] = set()
+    scanned = 0
+    order = 0
+
+    try:
+        seen.add(os.path.normcase(str(root.resolve())))
+    except OSError:
+        seen.add(os.path.normcase(str(root)))
+
+    queue: list[tuple[Path, int]] = [(root, 0)]
+    while queue and scanned < _MAX_DIRS_SCANNED:
+        current, depth = queue.pop(0)
+        if depth >= _MAX_SCAN_DEPTH:
+            continue
+        try:
+            # `os.scandir` 은 디렉터리 여부를 dirent 로 판단해 파일마다
+            # stat 을 걸지 않는다. 파일 12만 개짜리 asset 폴더 하나에서
+            # `iterdir()+is_dir()` 이 0.6초를 더하던 것을 없앤다.
+            with os.scandir(current) as entries:
+                children = []
+                for entry in entries:
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            # 파일은 **상한에 세지 않는다.** 파일 12만 개짜리
+                            # asset 폴더 하나가 예산을 다 먹으면, 정작 봐야 할
+                            # backend/ 폴더에 도달하지 못한 채 탐색이 끝난다.
+                            continue
+                    except OSError:
+                        continue
+                    scanned += 1
+                    if scanned >= _MAX_DIRS_SCANNED:
+                        break
+                    if entry.name in _SKIP_DIRS or entry.name.startswith("."):
+                        continue
+                    children.append(Path(entry.path))
+        except OSError:
+            continue
+
+        for child in sorted(children):
+            # **심볼릭 링크로 같은 폴더를 여러 번 잡지 않는다.** 안 막으면
+            # 근거 문장에 "FastAPI 서버 (mirror/api/)" 같은 중복이 쌓인다.
+            #
+            # 위의 `follow_symlinks=False` 와 **이중 방어**다. 변이 시험에서
+            # 하나만 없애면 다른 하나가 막아 테스트가 안 깨지고, 둘 다
+            # 없애야 깨진다. 하드링크·Windows 정션·같은 폴더를 두 번 가리키는
+            # 경우까지 있어서 한 겹으로 두지 않는다.
+            try:
+                key = os.path.normcase(str(child.resolve()))
+            except OSError:
+                key = os.path.normcase(str(child))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if any((child / m).is_file() for m in _STRONG_SERVER_MANIFESTS):
+                priority = 0
+            elif any((child / m).is_file() for m in _MANIFEST_FILES):
+                priority = 1
+            else:
+                priority = None  # 앱 루트는 아니지만 더 내려가 볼 수는 있다
+            if priority is not None:
+                candidates.append((priority, order, child))
+                order += 1
+            queue.append((child, depth + 1))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    picked = [path for _, _, path in candidates[: max(0, _MAX_APP_ROOTS - 1)]]
+    return [root, *picked]
+
+
+#: 의존성이 **실제로 선언되는** TOML 섹션. 여기 밖은 보지 않는다.
+#:
+#: 파일 전체를 훑으면 `description = "django 없이 만든 정적 사이트"` 의 한
+#: 단어나 `[tool.mypy]` 아래 키가 의존성으로 둔갑한다. 그러면 본문에
+#: "django 없이"라고 적힌 프로젝트를 화면에 **"Django 서버"** 라고 표시하게
+#: 된다 — 근거를 보여주는 기능이 근거를 지어내는 셈이다. 실측으로 확인한
+#: 오탐이며, `requirements.txt` 에서만 주석을 막고 여기서는 안 막은 것이
+#: 원인이었다.
+_DEP_SECTION_RE = re.compile(
+    r"^(project\.optional-dependencies(\.[\w-]+)?"
+    r"|dependency-groups"
+    r"|tool\.poetry\.dependencies"
+    r"|tool\.poetry\.dev-dependencies"
+    r"|tool\.poetry\.group\.[\w-]+\.dependencies"
+    r"|tool\.pdm\.dev-dependencies)$"
+)
+
+
+def _collect_dep_names(value: object, out: set[str]) -> None:
+    """`tomllib` 로 읽은 값에서 의존성 이름만 거둬들인다."""
+    if isinstance(value, str):
+        m = _REQ_LINE_RE.match(value)
+        if m:
+            out.add(_normalize_dep(m.group(1)))
+    elif isinstance(value, list):
+        for item in value:
+            _collect_dep_names(item, out)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            # poetry 형식은 키가 이름이다: `fastapi = "^0.110"`
+            out.add(_normalize_dep(str(key)))
+            if isinstance(item, list):
+                _collect_dep_names(item, out)
+
+
+def _python_deps(app_root: Path) -> set[str]:
+    """선언된 파이썬 의존성 이름 집합.
+
+    주석·설명문·도구 설정은 **의존성이 아니다.** 섹션을 정확히 지정해서
+    읽는다.
+    """
+    deps: set[str] = set()
+
+    for line in _read_text_if_exists(app_root / "requirements.txt").splitlines():
+        line = line.split("#", 1)[0]
+        m = _REQ_LINE_RE.match(line)
+        if m:
+            deps.add(_normalize_dep(m.group(1)))
+
+    pyproject = _read_text_if_exists(app_root / "pyproject.toml")
+    if pyproject:
+        parsed: object = None
+        try:
+            import tomllib  # 3.11+ 표준 라이브러리
+            parsed = tomllib.loads(pyproject)
+        except Exception:  # noqa: BLE001 — 깨진 TOML 은 흔하다
+            parsed = None
+
+        if isinstance(parsed, dict):
+            project = parsed.get("project")
+            if isinstance(project, dict):
+                _collect_dep_names(project.get("dependencies"), deps)
+                _collect_dep_names(project.get("optional-dependencies"), deps)
+            _collect_dep_names(parsed.get("dependency-groups"), deps)
+            tool = parsed.get("tool")
+            poetry = tool.get("poetry") if isinstance(tool, dict) else None
+            if isinstance(poetry, dict):
+                _collect_dep_names(poetry.get("dependencies"), deps)
+                _collect_dep_names(poetry.get("dev-dependencies"), deps)
+                groups = poetry.get("group")
+                if isinstance(groups, dict):
+                    for group in groups.values():
+                        if isinstance(group, dict):
+                            _collect_dep_names(group.get("dependencies"), deps)
+        else:
+            # TOML 을 못 읽었으면 **섹션 헤더를 따라가며** 의존성 구간만 본다.
+            # 파일 전체를 훑는 방식으로는 되돌아가지 않는다.
+            section = ""
+            in_project_deps = False
+            for raw in pyproject.splitlines():
+                line = raw.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                header = re.match(r"^\[+([^\]]+)\]+$", line)
+                if header:
+                    section = header.group(1).strip()
+                    in_project_deps = False
+                    continue
+                if section == "project" and re.match(r"^dependencies\s*=", line):
+                    in_project_deps = True
+                elif section == "project" and re.match(r"^[A-Za-z0-9._-]+\s*=", line):
+                    in_project_deps = False
+                if not (_DEP_SECTION_RE.match(section) or in_project_deps):
+                    continue
+                for quoted in re.findall(r'"([A-Za-z0-9._-]+)[^"]*"', line):
+                    deps.add(_normalize_dep(quoted))
+                key = re.match(r"^([A-Za-z0-9._-]+)\s*=", line)
+                if key and not in_project_deps:
+                    deps.add(_normalize_dep(key.group(1)))
+
+    pipfile = _read_text_if_exists(app_root / "Pipfile")
+    if pipfile:
+        section = ""
+        for raw in pipfile.splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            header = re.match(r"^\[([^\]]+)\]$", line)
+            if header:
+                section = header.group(1).strip()
+                continue
+            if section not in ("packages", "dev-packages"):
+                continue
+            key = re.match(r'^"?([A-Za-z0-9._-]+)"?\s*=', line)
+            if key:
+                deps.add(_normalize_dep(key.group(1)))
+
+    return deps
+
+
+def _python_imported_modules(app_root: Path) -> set[str]:
+    """실제 `import` 문에 등장하는 최상위 모듈 이름.
+
+    의존성 선언이 없는 프로젝트를 위한 보조 근거다. **부분 문자열이 아니라
+    import 문**을 보기 때문에 주석이나 문자열에 속지 않는다.
+    """
+    modules: set[str] = set()
+    files: list[Path] = []
+    for pattern in ("*.py", "*/*.py", "*/*/*.py"):
+        for p in app_root.glob(pattern):
+            # **워크스페이스 안쪽 경로만 본다.** `p.parts` 는 절대경로의 모든
+            # 요소라, 조상 폴더 이름이 `build`·`out`·`env` 이거나 `.` 로
+            # 시작하면(예: `~/.recoder/ws`) 이 폴백이 통째로 무력화된다.
+            try:
+                rel_parts = p.relative_to(app_root).parts
+            except ValueError:
+                rel_parts = p.parts
+            if any(part in _SKIP_DIRS or part.startswith(".") for part in rel_parts):
+                continue
+            files.append(p)
+            if len(files) >= 30:
+                break
+        if len(files) >= 30:
+            break
+
+    for path in files:
+        text = _read_text_if_exists(path, 20_000)
+        # **여러 줄 문자열 안의 import 문은 코드가 아니다.**
+        # 이 프로젝트는 코드 생성기라 템플릿 문자열이 흔하다 —
+        # `TEMPLATE = """\nfrom flask import Flask\n"""` 를 Flask 서버로
+        # 읽으면 템플릿을 가진 모든 프로젝트가 서버가 된다.
+        text = _TRIPLE_QUOTED_RE.sub("", text)
+        for m in _PY_IMPORT_RE.finditer(text):
+            raw = m.group("from") or m.group("import") or ""
+            for piece in raw.split(","):
+                top = piece.strip().split(".", 1)[0].strip()
+                if top:
+                    modules.add(_normalize_dep(top))
+    return modules
+
+
+def _node_deps(app_root: Path) -> tuple[set[str], dict]:
+    """`package.json` 의 의존성 이름 집합과 원본 dict.
+
+    문자열 검색이 아니라 **JSON 키로 정확히** 본다.
+    """
+    raw = _read_text_if_exists(app_root / "package.json")
+    if not raw.strip():
+        return set(), {}
+    try:
+        import json as _json
+        pkg = _json.loads(raw)
+    except Exception:  # noqa: BLE001 — 깨진 package.json 도 흔하다
+        return set(), {}
+    if not isinstance(pkg, dict):
+        return set(), {}
+    names: set[str] = set()
+    # `peerDependencies` 는 보지 않는다. Next 플러그인 패키지가 그것만으로
+    # "Next.js 서버"가 되어 라이브러리를 배포 대상으로 만든다.
+    for section in ("dependencies", "devDependencies"):
+        block = pkg.get(section)
+        if isinstance(block, dict):
+            names.update(str(k).lower() for k in block)
+    return names, pkg
+
+
+def _next_is_static_export(app_root: Path, pkg: dict) -> bool:
+    """Next.js 가 **정적 export** 설정인지.
+
+    `output: 'export'` 면 산출물이 정적 파일이라 S3 로 올리는 게 맞다.
+    이걸 안 보면 정적 사이트를 컨테이너로 띄우라고 권하게 된다.
+    """
+    for name in ("next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"):
+        text = _read_text_if_exists(app_root / name, 20_000)
+        if re.search(r"output\s*:\s*['\"]export['\"]", text):
+            return True
+    scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+    return any("next export" in str(v) for v in (scripts or {}).values())
+
+
+def _label_for(app_root: Path, workspace_root: Path) -> str:
+    """근거 문장에 붙일 위치 표시. 루트면 빈 문자열."""
+    try:
+        rel = app_root.relative_to(workspace_root).as_posix()
+    except ValueError:
+        return ""
+    return "" if rel in ("", ".") else f" ({rel}/)"
+
+
 def _deployment_preflight(workspace_path: str) -> dict:
-    """프로젝트 파일만으로 서버형/정적 앱을 판별해 배포 선택지를 추천한다."""
+    """프로젝트 파일만으로 서버형/정적 앱을 판별해 배포 선택지를 추천한다.
+
+    반환 계약은 예전과 같다 — `app_kind` · `summary` · `evidence` ·
+    `recommended_target`. 확장의 배포 카드와 `_run_deployment_safety_preflight`
+    가 이 모양에 의존한다.
+    """
     root = Path(workspace_path)
     if not root.is_dir():
         raise ValueError("유효한 워크스페이스 경로가 아닙니다.")
 
-    evidence: list[str] = []
-    requirements = _read_text_if_exists(root / "requirements.txt")
-    pyproject = _read_text_if_exists(root / "pyproject.toml")
-    python_config = f"{requirements}\n{pyproject}".lower()
-    python_files = list(root.glob("*.py"))[:20]
-    python_source = "\n".join(_read_text_if_exists(p, 20_000) for p in python_files).lower()
-    has_fastapi = "fastapi" in python_config or "fastapi" in python_source
-    has_flask = "flask" in python_config or "flask" in python_source
-    has_django = "django" in python_config or "django" in python_source
-    if has_fastapi:
-        evidence.append("FastAPI 서버")
-    elif has_flask:
-        evidence.append("Flask 서버")
-    elif has_django:
-        evidence.append("Django 서버")
+    server_evidence: list[str] = []
+    static_evidence: list[str] = []
+    extra_evidence: list[str] = []
 
-    package_text = _read_text_if_exists(root / "package.json").lower()
-    has_node_server = any(dep in package_text for dep in ('"next"', '"express"', '"@nestjs/core"'))
-    if '"next"' in package_text:
-        evidence.append("Next.js 서버")
-    elif '"express"' in package_text:
-        evidence.append("Express 서버")
-    elif '"@nestjs/core"' in package_text:
-        evidence.append("NestJS 서버")
+    for app_root in _iter_app_roots(root):
+        where = _label_for(app_root, root)
 
-    has_sqlite_file = any(root.glob("*.db")) or any(root.glob("*.sqlite")) or any(root.glob("*.sqlite3"))
-    has_sqlite_dependency = "sqlite" in python_config or "sqlite" in python_source
-    if has_sqlite_file or has_sqlite_dependency:
-        evidence.append("SQLite 데이터 저장")
+        # ── 파이썬 ──────────────────────────────────────────────────
+        py_deps = _python_deps(app_root)
+        py_modules: set[str] | None = None
+        for dep, label in _PY_SERVER_DEPS.items():
+            if dep in py_deps:
+                server_evidence.append(f"{label} 서버{where}")
+                break
+        else:
+            # 의존성 선언이 없으면 실제 import 문을 본다.
+            if any((app_root / f).is_file() for f in ("main.py", "app.py", "manage.py", "wsgi.py", "asgi.py")) or list(app_root.glob("*.py"))[:1]:
+                py_modules = _python_imported_modules(app_root)
+                for dep, label in _PY_SERVER_DEPS.items():
+                    if dep in py_modules:
+                        server_evidence.append(f"{label} 서버{where}")
+                        break
 
-    has_static_entry = (root / "index.html").is_file()
-    has_static_builder = '"vite"' in package_text or (root / "vite.config.ts").is_file() or (root / "vite.config.js").is_file()
-    if has_static_entry:
-        evidence.append("정적 HTML 엔트리")
-    if has_static_builder:
-        evidence.append("정적 번들 빌드")
+        # ── Node ────────────────────────────────────────────────────
+        node_deps, pkg = _node_deps(app_root)
+        if "next" in node_deps:
+            if _next_is_static_export(app_root, pkg):
+                static_evidence.append(f"Next.js 정적 export{where}")
+            else:
+                server_evidence.append(f"Next.js 서버{where}")
+        for dep, label in _NODE_SERVER_DEPS.items():
+            if dep in node_deps:
+                server_evidence.append(f"{label} 서버{where}")
+                break
+        for dep, label in _NODE_STATIC_DEPS.items():
+            if dep in node_deps:
+                static_evidence.append(f"{label} 빌드{where}")
+                break
 
-    if has_fastapi or has_flask or has_django or has_node_server:
+        # ── 그 밖의 서버 런타임 ──────────────────────────────────────
+        # 같은 파일의 `_detect_stack` 은 이미 이것들을 보고 있었다. 판정이
+        # 두 함수에서 갈리면 Dockerfile 은 만들어 주면서 배포 대상은
+        # "잘 모르겠다"고 하는 앞뒤 안 맞는 화면이 된다.
+        if (app_root / "go.mod").is_file():
+            server_evidence.append(f"Go 모듈{where}")
+        if (app_root / "pom.xml").is_file() or (app_root / "build.gradle").is_file() \
+                or (app_root / "build.gradle.kts").is_file():
+            server_evidence.append(f"Java/Spring 빌드{where}")
+        if (app_root / "Gemfile").is_file():
+            server_evidence.append(f"Ruby/Rails{where}")
+        if (app_root / "composer.json").is_file():
+            server_evidence.append(f"PHP/Composer{where}")
+
+        # ── 컨테이너·프로세스 선언 ───────────────────────────────────
+        # **가장 강한 서버 신호인데 예전 판은 아예 보지 않았다.**
+        # 컨테이너로 띄우도록 만들어 둔 앱을 정적 호스팅으로 권할 수는 없다.
+        if (app_root / "Dockerfile").is_file():
+            server_evidence.append(f"Dockerfile{where}")
+        elif (app_root / "docker-compose.yml").is_file() or (app_root / "docker-compose.yaml").is_file():
+            server_evidence.append(f"docker-compose{where}")
+        if (app_root / "Procfile").is_file():
+            server_evidence.append(f"Procfile{where}")
+
+        # ── 정적 사이트 ──────────────────────────────────────────────
+        for entry in ("index.html", "public/index.html", "src/index.html"):
+            if (app_root / entry).is_file():
+                static_evidence.append(f"정적 HTML 엔트리{where}")
+                break
+        if (app_root / "_config.yml").is_file():
+            static_evidence.append(f"Jekyll 사이트{where}")
+        # 괄호가 없으면 `hugo.toml or (config.toml and content/)` 로 읽혀
+        # 두 줄이 서로 다른 규칙으로 동작한다. `config.toml` 은 Hugo 전용이
+        # 아니므로 `content/` 를 함께 요구하고, `hugo.toml` 은 그 자체로 확정이다.
+        if (app_root / "hugo.toml").is_file() or (
+            (app_root / "config.toml").is_file() and (app_root / "content").is_dir()
+        ):
+            static_evidence.append(f"Hugo 사이트{where}")
+        for name in ("vite.config.ts", "vite.config.js", "vite.config.mjs"):
+            if (app_root / name).is_file():
+                static_evidence.append(f"Vite 설정{where}")
+                break
+
+        # ── 부가 정보 (판정에는 쓰지 않고 근거로만 보여준다) ──────────
+        if any(app_root.glob("*.db")) or any(app_root.glob("*.sqlite")) or any(app_root.glob("*.sqlite3")) \
+                or any(d.startswith("sqlite") or d == "aiosqlite" for d in py_deps):
+            extra_evidence.append(f"SQLite 데이터 저장{where}")
+
+    # 중복 제거 — 순서는 유지한다(먼저 나온 근거가 더 중요하다).
+    def _dedup(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        return [x for x in items if not (x in seen or seen.add(x))]
+
+    server_evidence = _dedup(server_evidence)
+    static_evidence = _dedup(static_evidence)
+    extra_evidence = _dedup(extra_evidence)
+
+    if server_evidence:
+        evidence = server_evidence + extra_evidence
+        # 두 신호가 같이 있으면 **그 사실을 숨기지 않는다.** 서버형을 고르는
+        # 이유는 "서버가 정적 파일도 서빙할 수 있어서"이지 정적 신호가
+        # 없어서가 아니다. 사용자가 반대로 고를 수도 있어야 한다(D5).
+        if static_evidence:
+            evidence = evidence + [
+                "정적 빌드 신호도 있음: " + "·".join(static_evidence[:3])
+            ]
         return {
             "app_kind": "server",
-            "summary": f"서버형 앱 — {'·'.join(evidence) or '서버 런타임 포함'}",
+            "summary": f"서버형 앱 — {'·'.join(server_evidence[:4])}",
             "evidence": evidence,
             "recommended_target": "ecs",
         }
-    if has_static_entry or has_static_builder:
+
+    if static_evidence:
         return {
             "app_kind": "static",
-            "summary": f"정적 웹 앱 — {'·'.join(evidence) or '정적 파일 구성'}",
-            "evidence": evidence,
+            "summary": f"정적 웹 앱 — {'·'.join(static_evidence[:4])}",
+            "evidence": static_evidence + extra_evidence,
             "recommended_target": "s3",
         }
+
     return {
         "app_kind": "unknown",
         "summary": "프로젝트 유형을 확신하기 어려움",
-        "evidence": evidence or ["명확한 서버 또는 정적 빌드 설정을 찾지 못함"],
+        "evidence": extra_evidence or ["명확한 서버 또는 정적 빌드 설정을 찾지 못함"],
         "recommended_target": "local",
     }
 

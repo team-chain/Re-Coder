@@ -134,12 +134,64 @@ def _cap_chars(text: str, limit: int = _MAX_CHARS) -> str:
 
 
 def _match_error_block(terminal_output: str) -> Optional[str]:
-    """알려진 에러 패턴에 맞는 본문을 돌려준다. 못 찾으면 None."""
+    """알려진 에러 패턴에 맞는 본문을 돌려준다. 못 찾으면 None.
+
+    **가장 나중에 나온 에러를 고른다.**
+
+    예전에는 패턴 목록을 순서대로 돌며 `search()` 로 *첫* 매치를 반환했다.
+    그래서 두 가지가 어긋났다.
+
+    1. 로그에 에러가 여럿이면 **맨 처음 것**을 집었다. 그런데 사용자가
+       방금 겪은 것은 마지막 에러다. 앞의 에러는 이미 고쳤거나 무관한
+       경고인 경우가 많다 — 재시도하는 빌드 로그가 특히 그렇다.
+    2. 패턴 **목록 순서**가 로그 순서를 이겼다. 앞쪽에 Traceback 이 있으면
+       뒤에 아무리 최신 `npm ERR!` 가 있어도 Traceback 이 이겼다.
+
+    그래서 모든 패턴의 모든 매치를 모아 **끝나는 위치가 가장 뒤인 것**을
+    고른다. 끝 위치가 같으면 **시작이 이른 쪽**을 고르는데, 이게 중요하다 —
+    Traceback 블록 안의 `ValueError: ...` 줄은 두 번째 패턴에도 걸리고
+    끝 위치가 같다. 시작이 이른 쪽을 택해야 프레임이 붙은 **전체 블록**이
+    남고, 예외 한 줄만 남는 사고를 피한다.
+    """
+    m = _find_error_match(terminal_output)
+    return m.group(1).strip() if m is not None else None
+
+
+def _find_error_match(terminal_output: str) -> Optional["re.Match"]:
+    """위 규칙으로 고른 매치 **객체**. 위치가 필요한 호출자를 위해 분리했다.
+
+    `_trim_terminal_output` 이 본문 첫 줄을 원문에서 다시 찾는 방식이었는데,
+    이제 **같은 에러 줄이 여러 번 나오는 로그**(재시도 빌드)에서 마지막
+    것을 고르므로 그 방식이 어긋난다 — 첫 번째 등장 위치를 찾아 엉뚱한
+    앞 맥락을 붙이게 된다. 위치를 그대로 넘겨 그 어긋남을 없앤다.
+    """
+    best: Optional[re.Match] = None
     for pat in _ERROR_PATTERNS:
-        m = pat.search(terminal_output)
-        if m:
-            return m.group(1).strip()
-    return None
+        for m in pat.finditer(terminal_output):
+            if best is None or (m.end(), -m.start()) > (best.end(), -best.start()):
+                best = m
+    return best
+
+
+def _as_bool(value: object) -> bool:
+    """LLM 이 준 값을 불리언으로 해석한다.
+
+    모델은 `has_error` 를 진짜 불리언이 아니라 **문자열** `"false"` 로 주는
+    일이 잦다. 파이썬에서 `"false"` 는 참이므로, 그대로 쓰면 **정상 출력이
+    에러로 분류된다** — 사용자에게는 멀쩡한 실행 결과에 빨간 에러 카드가
+    뜨는 형태로 보인다.
+
+    모호하면 **거짓으로 본다.** 없는 에러를 만들어 보여주는 쪽이, 있는
+    에러를 놓치는 것보다 신뢰를 더 크게 깎는다. 진짜 에러는 어차피
+    `_extract_error_text` 가 따로 잡는다.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "y", "1")
+    return bool(value)
 
 
 def _extract_error_text(terminal_output: str) -> str:
@@ -174,24 +226,23 @@ def _trim_terminal_output(
     if not text.strip():
         return ""
 
-    body = _match_error_block(text)
-    if body is None:
+    match = _find_error_match(text)
+    if match is None:
         # 에러 형태를 못 찾음 → 꼬리만 남긴다 (앞에 맥락을 더 붙이지 않는다)
         lines = text.strip().splitlines()
         return _cap_chars("\n".join(lines[-_FALLBACK_TAIL_LINES:]))
 
+    body = match.group(1).strip()
     body_lines = body.splitlines()
     if not body_lines:
         return _cap_chars(body)
 
     lines = text.splitlines()
-    first = body_lines[0].strip()
-    start = next(
-        (i for i, line in enumerate(lines) if line.strip() == first),
-        None,
-    )
-    if start is None:
-        # 본문 첫 줄을 원문에서 못 찾음(정규식이 다듬은 경우) → 본문만
+    # **매치 위치로 줄 번호를 구한다.** 본문 첫 줄을 원문에서 다시 찾으면,
+    # 같은 에러가 여러 번 나오는 로그에서 *첫* 등장을 집어 엉뚱한 앞
+    # 맥락이 붙는다(재시도하는 빌드 로그가 정확히 그 형태다).
+    start = text.count("\n", 0, match.start())
+    if start >= len(lines):
         return body
 
     head_from = max(0, start - context_lines)
@@ -454,6 +505,14 @@ def _run_llm_analysis(request: AnalyzeRequest, error_text: str) -> dict:
     except Exception as e:
         print(f"[analyzer] LLM 호출 실패: {e}")
         return {
+            # **폴백 표식.** 이 응답은 캐시에 넣지 않는다 — 아래
+            # `_analyze_llm_deduped` 가 이 키를 보고 거른다.
+            #
+            # 폴백을 캐싱하면 provider 가 5초 흔들린 대가로 **TTL 내내**
+            # 모든 요청이 "분석 불가능"을 돌려받는다. 사용자는 다시 눌러도
+            # 같은 답만 보고 제품이 고장 났다고 판단한다. 일시적 장애가
+            # 지속적 장애로 굳는 형태다.
+            "_fallback": True,
             "has_error": bool(error_text),
             "error_type": "unknown",
             "error_summary": error_text[:100] if error_text else "분석 불가능",
@@ -485,8 +544,12 @@ async def _analyze_llm_deduped(
     _llm_inflight[llm_key] = fut
     try:
         response_data = await asyncio.to_thread(_run_llm_analysis, request, error_text)
+        # **폴백은 캐싱하지 않는다.** 표식은 여기서 떼어 내보낸다 —
+        # 호출부가 알 필요가 없고, 이벤트에 실려 나가서도 안 된다.
+        is_fallback = bool(response_data.pop("_fallback", False))
         # 캐시를 먼저 채우고(뒤늦은 요청이 캐시로 잡히게) future 를 완료한다.
-        _llm_cache[llm_key] = (now, response_data)
+        if not is_fallback:
+            _llm_cache[llm_key] = (now, response_data)
         if not fut.done():
             fut.set_result(response_data)
         return response_data
@@ -563,7 +626,9 @@ async def analyze(request: AnalyzeRequest, session_id: str = "") -> AgentEvent:
         response_data = await _analyze_llm_deduped(llm_key, request, error_text, now)
 
     # 5. AgentEvent 생성 — 매 호출 새로.
-    has_error = response_data.get("has_error", False)
+    # 모델이 `"false"` 문자열로 주는 일이 잦다 — 그대로 쓰면 정상 출력이
+    # 에러로 분류된다.
+    has_error = _as_bool(response_data.get("has_error", False))
     error_type = response_data.get("error_type", "")
     error_summary = response_data.get("error_summary", "")
     suggested_actions = response_data.get("suggested_actions", [])

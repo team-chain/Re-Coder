@@ -836,3 +836,183 @@ def test_scalar_suggested_actions_does_not_crash(monkeypatch):
     event = asyncio.run(analyzer.analyze(req, session_id="s"))  # 예전엔 TypeError
     assert event is not None
     assert event.suggested_actions == []
+
+
+# ── [회귀] analyzer 후속 품질 P2 3건 ──────────────────────────────────
+#
+# 카드: 「analyzer 후속 품질 P2 3건 (캐싱·has_error·최신 에러 선택)」
+# PR #18 리뷰에서 나왔으나 크리티컬이 아니라 머지 후로 미뤄둔 것들.
+
+
+def _failing_router():
+    """provider 가 죽은 상황."""
+    class _Router:
+        def call(self, req, *a, **kw):
+            raise RuntimeError("provider 일시 장애")
+    return _Router()
+
+
+def test_llm_failure_fallback_is_not_cached(monkeypatch):
+    """[①] 폴백 응답을 캐싱하면 일시 장애가 **지속 장애로 굳는다.**
+
+    provider 가 잠깐 흔들린 대가로 TTL(60초) 내내 모든 요청이 "분석 불가능"을
+    돌려받는다. 사용자는 다시 눌러도 같은 답만 보고 제품이 고장 났다고
+    판단한다.
+    """
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+
+    # 1) provider 장애 → 폴백
+    monkeypatch.setattr(analyzer, "get_router", _failing_router)
+    req = AnalyzeRequest(workspace_path="/tmp/p", terminal_output="ValueError: boom")
+    asyncio.run(analyzer.analyze(req, session_id="s1"))
+    assert not analyzer._llm_cache, f"폴백이 캐시에 들어갔다: {analyzer._llm_cache}"
+
+    # 2) provider 회복 → 곧바로 정상 분석이 나와야 한다
+    calls = [0]
+    monkeypatch.setattr(analyzer, "get_router", lambda: _counting_router(calls))
+    asyncio.run(analyzer.analyze(req, session_id="s2"))
+    assert calls[0] == 1, "회복 후에도 폴백 캐시를 재사용했다"
+    assert analyzer._llm_cache, "정상 응답은 캐싱돼야 한다"
+
+
+def test_fallback_marker_never_leaks_to_the_caller(monkeypatch):
+    """폴백 표식은 내부용이다 — 이벤트나 응답에 실려 나가면 안 된다."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+    monkeypatch.setattr(analyzer, "get_router", _failing_router)
+
+    ev = asyncio.run(analyzer.analyze(
+        AnalyzeRequest(workspace_path="/tmp/p", terminal_output="ValueError: boom"),
+        session_id="s1",
+    ))
+    assert "_fallback" not in json.dumps(ev.to_dict(), ensure_ascii=False)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (True, True), (False, False),
+    ("true", True), ("True", True), ("TRUE", True),
+    ("false", False), ("False", False), ("FALSE", False),
+    ("no", False), ("0", False), ("", False),
+    (1, True), (0, False), (None, False),
+])
+def test_has_error_string_is_interpreted_not_truthy(raw, expected):
+    """[②] 모델이 `"false"` 문자열을 주면 파이썬에서는 **참**이다.
+
+    그대로 쓰면 정상 출력이 에러로 분류돼, 멀쩡한 실행 결과에 빨간 에러
+    카드가 뜬다.
+    """
+    import analyzer
+    assert analyzer._as_bool(raw) is expected
+
+
+def test_normal_output_is_not_flagged_when_model_returns_string_false(monkeypatch):
+    """[②] 통합 경로에서도 확인한다."""
+    import asyncio
+    import analyzer
+
+    analyzer._llm_cache.clear()
+
+    class _StringFalseResp:
+        text = json.dumps({
+            "has_error": "false",          # ← 문자열
+            "error_summary": "정상 종료",
+            "importance_score": 10,
+            "event_type": "task_change",
+            "suggested_actions": [],
+        })
+        model_used = "test"
+
+    class _Router:
+        def call(self, req, *a, **kw):
+            return _StringFalseResp()
+
+    monkeypatch.setattr(analyzer, "run_gate", _fake_gate_factory())
+    monkeypatch.setattr(analyzer, "get_router", lambda: _Router())
+
+    ev = asyncio.run(analyzer.analyze(
+        AnalyzeRequest(workspace_path="/tmp/p", terminal_output="build finished"),
+        session_id="s1",
+    ))
+    from schemas import EventType as _EventType
+
+    payload = ev.to_dict()
+    assert ev.event_type != _EventType.ERROR_DETECTED, payload
+    # **여기가 실제로 갈라지는 지점이다.** `"false"` 를 참으로 읽으면 정상
+    # 출력이 에러로 직렬화돼 `error_text`·`raw_errors` 가 채워지고, 사용자
+    # 화면에 빨간 에러 카드가 뜬다. event_type 만 보면 모델이 준 값
+    # ("task_change")에 가려 차이가 드러나지 않는다.
+    assert payload["error_text"] == "", payload
+    assert payload["raw_errors"] == [], payload
+
+
+def test_latest_error_wins_over_the_first_one():
+    """[③] 사용자가 방금 겪은 것은 **마지막** 에러다.
+
+    앞의 에러는 이미 고쳤거나 무관한 경고인 경우가 많다 — 재시도하는 빌드
+    로그가 정확히 그 형태다. 예전에는 패턴 목록 순서가 로그 순서를 이겨서,
+    앞쪽 Traceback 이 뒤쪽 최신 `npm ERR!` 를 항상 눌렀다.
+    """
+    import analyzer
+
+    log = (
+        "$ npm run build\n"
+        "Traceback (most recent call last):\n"
+        '  File "old.py", line 1, in <module>\n'
+        "    import gone\n"
+        "ModuleNotFoundError: No module named 'gone'\n"
+        "(위 에러는 고쳤음)\n"
+        "$ npm run build\n"
+        "npm ERR! code ELIFECYCLE\n"
+        "npm ERR! Failed at the build script."
+    )
+    out = analyzer._extract_error_text(log)
+    assert "npm ERR!" in out, out
+    assert "ModuleNotFoundError" not in out, out
+
+
+def test_traceback_frames_are_not_lost_to_the_inner_exception_line():
+    """[③ 반대 방향] Traceback 안의 예외 줄도 두 번째 패턴에 걸린다.
+
+    끝 위치가 같으므로, 시작이 이른 쪽(=전체 블록)을 골라야 프레임이
+    살아남는다. 여기서 틀리면 "가장 최신"을 고르려다 **가장 유용한 정보**를
+    버리게 된다.
+    """
+    import analyzer
+
+    tb = (
+        "Traceback (most recent call last):\n"
+        '  File "a.py", line 3, in <module>\n'
+        '    raise ValueError("boom")\n'
+        "ValueError: boom"
+    )
+    out = analyzer._extract_error_text(tb)
+    assert "Traceback" in out and 'File "a.py"' in out and "ValueError: boom" in out, out
+
+
+def test_context_follows_the_latest_occurrence_of_a_repeated_error():
+    """[③] 같은 에러가 두 번 나오면 앞 맥락도 **최신 쪽** 것이어야 한다.
+
+    본문 첫 줄을 원문에서 다시 찾는 방식이면 첫 등장을 집어, 최신 에러에
+    엉뚱한 옛 맥락이 붙는다.
+    """
+    import analyzer
+
+    log = "\n".join([
+        "$ 1차 시도",
+        "무관한 줄",
+        "ValueError: same",
+        "중간 줄 A",
+        "중간 줄 B",
+        "$ 2차 시도 (최신)",
+        "ValueError: same",
+    ])
+    trimmed = analyzer._trim_terminal_output(log, context_lines=2)
+    assert "2차 시도" in trimmed, trimmed
+    assert "1차 시도" not in trimmed, trimmed

@@ -883,3 +883,357 @@ def test_concurrent_requests_do_not_share_root(tmp_path, monkeypatch):
     t1.start(); t2.start(); t1.join(); t2.join()
 
     assert seen["A"] == a and seen["B"] == b
+
+
+# ── [회귀] ADR 번호 예약 — 승인 전 제안끼리 번호가 겹치던 것 ──────────────
+#
+# 카드: 「ADR 번호가 생성 시점 기준이라 앞 기록을 덮어씀」 (FR-02-04)
+# DoD: 연속 생성 후 적용해도 ADR 유실 0
+#
+# Core 는 워크스페이스에 직접 쓰지 않는다. 번호를 정하는 시점(생성)과
+# 파일이 생기는 시점(사용자 승인 후 확장이 기록) 사이에 사람이 끼어들어서,
+# 디스크만 스캔하면 아직 없는 파일을 근거로 삼을 수 없다.
+
+
+def _adr_store(tmp_path, monkeypatch):
+    """이 테스트만의 예약 장부를 쓰게 한다."""
+    store = tmp_path / "store" / "adr_reservations.json"
+    monkeypatch.setenv("RECODER_ADR_STORE", str(store))
+    return store
+
+
+def _one_decision(did: str):
+    return adr.normalize_decisions([{
+        "id": did,
+        "question": f"{did} 를 어떻게 할까?",
+        "chosen_key": "a",
+        "options": [{"key": "a", "label": "A안"}, {"key": "b", "label": "B안"}],
+    }])
+
+
+def test_pending_proposals_do_not_reuse_the_same_number(tmp_path, monkeypatch):
+    """[회귀·핵심] 승인 전에 두 번 생성하면 번호가 달라야 한다.
+
+    예전에는 둘 다 ADR-001 을 받았고, 나중에 적용한 쪽이 앞의 기록을
+    통째로 덮어썼다.
+    """
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    first = adr.build_adr_ops(_one_decision("d1"), "요청 A", ws)
+    second = adr.build_adr_ops(_one_decision("d2"), "요청 B", ws)
+
+    assert first and second
+    assert first[0]["file"] != second[0]["file"], (
+        f"승인 전 제안 둘이 같은 파일을 가리킨다: {first[0]['file']}"
+    )
+    assert "ADR-001" in first[0]["file"]
+    assert "ADR-002" in second[0]["file"]
+    # 본문 제목도 같이 움직여야 한다 — 파일명만 바뀌고 제목이 001 로
+    # 남으면 문서 안에서 번호가 어긋난다.
+    assert first[0]["content"].startswith("# ADR-001:")
+    assert second[0]["content"].startswith("# ADR-002:")
+
+
+def test_no_adr_is_lost_when_both_proposals_are_applied(tmp_path, monkeypatch):
+    """[회귀] DoD 그대로 — 연속 생성 후 **둘 다 적용**해도 유실 0."""
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    # **결정 id 를 같게 둔다.** 슬러그가 달라지면 번호가 겹쳐도 파일명이
+    # 갈라져 덮어쓰기가 안 일어난다 — 그러면 이 테스트는 아무것도 못 잡는다.
+    # 같은 id 가 나오는 건 가짜 상황이 아니다: `/api/deploy/decision` 은
+    # 매번 `deployment-target` 으로 ADR 을 만들기 때문에, 사용자가 배포
+    # 대상을 골랐다가 바꾸면 정확히 이 형태가 된다.
+    ops = [
+        adr.build_adr_ops(_one_decision("deployment-target"), "요청 A", ws)[0],
+        adr.build_adr_ops(_one_decision("deployment-target"), "요청 B", ws)[0],
+        adr.build_adr_ops(_one_decision("deployment-target"), "요청 C", ws)[0],
+    ]
+    assert len({op["file"] for op in ops}) == 3, (
+        f"같은 결정을 다시 골랐더니 같은 파일을 가리킨다: {[o['file'] for o in ops]}"
+    )
+    # 확장이 하는 일: 받은 경로에 그대로 쓴다(덮어쓰기 방어 없음).
+    # 적용 순서를 뒤집어도 결과가 같아야 한다.
+    for op in reversed(ops):
+        target = ws / op["file"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(op["content"], encoding="utf-8")
+
+    written = sorted(p.name for p in (ws / "docs" / "adr").glob("ADR-*.md"))
+    assert len(written) == 3, f"ADR 이 유실됐다: {written}"
+
+
+def test_multiple_decisions_in_one_batch_still_get_distinct_numbers(tmp_path, monkeypatch):
+    """한 번의 생성에 결정이 여럿이어도 번호가 겹치지 않는다."""
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    decisions = adr.normalize_decisions([
+        {"id": f"d{i}", "question": f"질문 {i}", "chosen_key": "a",
+         "options": [{"key": "a", "label": "A"}, {"key": "b", "label": "B"}]}
+        for i in range(3)
+    ])
+    ops = adr.build_adr_ops(decisions, "한 번에 셋", ws)
+    files = [op["file"] for op in ops]
+    assert len(set(files)) == 3
+    # 다음 생성은 그 뒤에서 이어져야 한다.
+    nxt = adr.build_adr_ops(_one_decision("d9"), "그다음", ws)
+    assert "ADR-004" in nxt[0]["file"]
+
+
+def test_applied_files_still_win_when_the_ledger_is_behind(tmp_path, monkeypatch):
+    """장부가 뒤처져 있어도 **디스크에 있는 파일**을 넘어선 번호를 준다.
+
+    사용자가 장부(`~/.recoder`)를 지우거나 다른 PC 에서 만든 ADR 을
+    받아왔을 때, 장부만 믿으면 기존 파일을 덮어쓴다.
+    """
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    d = ws / "docs" / "adr"
+    d.mkdir(parents=True)
+    (d / "ADR-009-old.md").write_text("기존 기록", encoding="utf-8")
+
+    op = adr.build_adr_ops(_one_decision("d1"), "요청", ws)[0]
+    assert "ADR-010" in op["file"]
+
+
+def test_reservations_are_per_workspace(tmp_path, monkeypatch):
+    """워크스페이스가 다르면 번호도 독립이다."""
+    _adr_store(tmp_path, monkeypatch)
+    a = tmp_path / "wsA"; a.mkdir()
+    b = tmp_path / "wsB"; b.mkdir()
+
+    adr.build_adr_ops(_one_decision("d1"), "A", a)
+    op_b = adr.build_adr_ops(_one_decision("d1"), "B", b)[0]
+    assert "ADR-001" in op_b["file"], "다른 워크스페이스인데 번호를 나눠 쓴다"
+
+
+def test_reservations_are_per_target_folder(tmp_path, monkeypatch):
+    """같은 루트라도 target_folder 가 다르면 기록 위치가 달라 번호도 독립이다."""
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    adr.build_adr_ops(_one_decision("d1"), "A", ws, "svc-a")
+    op = adr.build_adr_ops(_one_decision("d1"), "B", ws, "svc-b")[0]
+    assert "ADR-001" in op["file"]
+
+
+def test_generation_survives_an_unwritable_ledger_path(tmp_path, monkeypatch):
+    """[실제 형태] 장부를 만들 수 없는 경로여도 ADR 생성은 계속된다.
+
+    장부의 부모가 **파일**이라 `mkdir` 이 실패한다 — 권한 없는 홈이나
+    읽기 전용 파일 시스템에서 실제로 나는 형태다.
+    """
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("나는 파일이다", encoding="utf-8")
+    monkeypatch.setenv("RECODER_ADR_STORE", str(blocker / "adr_reservations.json"))
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    ops = adr.build_adr_ops(_one_decision("d1"), "요청", ws)
+    assert ops and "ADR-001" in ops[0]["file"]
+
+
+def test_generation_survives_a_ledger_layer_that_raises(tmp_path, monkeypatch):
+    """장부 계층이 예상 밖으로 터져도 ADR 생성은 실패하지 않는다.
+
+    장부는 개선 장치이지 필수 의존이 아니다. **새로 들인 의존이 새 실패
+    모드를 만들면 안 된다** — 막히면 동작이 장부가 없던 예전으로 되돌아갈
+    뿐이어야 한다.
+    """
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("읽기 전용 파일 시스템")
+
+    monkeypatch.setattr(adr, "_write_reservations", _boom)
+    ops = adr.build_adr_ops(_one_decision("d1"), "요청", ws)
+    assert ops and "ADR-001" in ops[0]["file"]
+
+    monkeypatch.setattr(adr, "_read_reservations", _boom)
+    ops2 = adr.build_adr_ops(_one_decision("d2"), "요청", ws)
+    assert ops2, "장부가 터졌다고 ADR 생성이 실패하면 안 된다"
+    # 디스크 장부가 통째로 죽어도 **프로세스 안 기억**이 번호를 지킨다.
+    assert ops2[0]["file"] != ops[0]["file"], (
+        f"장부 실패 시 번호가 되풀이됐다: {ops2[0]['file']}"
+    )
+
+
+def test_in_process_memory_keeps_numbers_apart_when_the_disk_ledger_is_dead(tmp_path, monkeypatch):
+    """[회귀] 디스크 장부 저장이 계속 실패해도 번호가 1,1,1 로 되풀이되지 않는다.
+
+    Windows 에서 `os.replace` 는 대상 파일이 열려 있으면 PermissionError 를
+    낸다(백신 실시간 검사·OneDrive 동기화). 그 경우 예전 구현은 장부를 한
+    번도 갱신하지 못한 채 **아무 표시 없이** 같은 번호를 계속 내줬다 —
+    막으려던 덮어쓰기 사고가 그대로 재발한다.
+    """
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    def _no_write(_data):
+        raise PermissionError("다른 프로세스가 파일을 사용 중입니다")
+
+    monkeypatch.setattr(adr, "_write_reservations", _no_write)
+    got = [adr.allocate_adr_indexes(ws, "", 1) for _ in range(4)]
+    assert got == [1, 2, 3, 4], f"디스크가 죽었을 때 번호가 겹쳤다: {got}"
+
+
+def test_a_failed_file_scan_is_not_swallowed(tmp_path, monkeypatch):
+    """[중요] 파일 스캔 실패는 **삼키지 않는다.**
+
+    디스크의 ADR 을 못 읽었는데 1 번부터 다시 주면 기존 기록을 덮어쓴다 —
+    장부가 막으려던 바로 그 사고다. 장부 오류와 달리 이건 터져야 한다.
+    """
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("스캔 실패")
+
+    monkeypatch.setattr(adr, "_scanned_max_index", _boom)
+    with pytest.raises(OSError):
+        adr.build_adr_ops(_one_decision("d1"), "요청", ws)
+
+
+def test_corrupt_ledger_does_not_break_generation(tmp_path, monkeypatch):
+    """잘린/깨진 JSON 장부를 만나도 생성은 계속된다."""
+    store = _adr_store(tmp_path, monkeypatch)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text('{"a": 1,', encoding="utf-8")   # 잘린 JSON
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    ops = adr.build_adr_ops(_one_decision("d1"), "요청", ws)
+    assert ops and "ADR-001" in ops[0]["file"]
+
+
+def test_ledger_key_folds_case_like_windows(tmp_path, monkeypatch):
+    """[Windows] 같은 폴더가 대소문자만 달리 들어와도 번호를 나눠 쓰지 않는다.
+
+    리눅스에서 `os.path.normcase` 는 항등함수라, 그대로 두면 이 테스트는
+    `f(x) == f(x)` 를 단언하는 셈이 되어 아무것도 검증하지 못한다.
+    그래서 Windows 의 동작을 주입해 확인한다.
+    """
+    import os as _os
+
+    _adr_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(_os.path, "normcase", lambda p: str(p).lower())
+
+    lower = tmp_path / "ws"
+    lower.mkdir()
+    upper = tmp_path / "WS"          # 같은 폴더를 가리키는 다른 표기(Windows 기준)
+
+    assert adr._store_key(adr.adr_output_dir(upper)) == \
+        adr._store_key(adr.adr_output_dir(lower)), "대소문자가 접히지 않는다"
+
+    first = adr.build_adr_ops(_one_decision("d1"), "A", lower)[0]
+    second = adr.build_adr_ops(_one_decision("d2"), "B", upper)[0]
+    assert first["file"] != second["file"], (
+        "대소문자만 다른 같은 폴더인데 번호를 나눠 썼다"
+    )
+
+
+def test_next_adr_index_is_read_only(tmp_path, monkeypatch):
+    """조회는 번호를 소모하지 않는다 — 두 번 불러도 같은 값."""
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    assert adr.next_adr_index(ws) == 1
+    assert adr.next_adr_index(ws) == 1
+    adr.allocate_adr_indexes(ws, "", 1)
+    assert adr.next_adr_index(ws) == 2
+
+
+def test_concurrent_allocation_never_hands_out_the_same_number(tmp_path, monkeypatch):
+    """스레드가 동시에 발급받아도 번호가 겹치지 않는다."""
+    import threading
+
+    _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    got: list[int] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        n = adr.allocate_adr_indexes(ws, "", 1)
+        with lock:
+            got.append(n)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # **겹치지 않는 것**만 요구한다. 구멍(빠진 번호)은 설계상 허용이며
+    # (`adr.py` 주석 참조), 연속을 요구하면 나중에 블록 예약 같은 정당한
+    # 변경에도 부당하게 깨진다.
+    assert len(set(got)) == len(got), f"번호가 겹쳤다: {sorted(got)}"
+    assert all(n >= 1 for n in got)
+
+
+def test_ledger_is_written_atomically(tmp_path, monkeypatch):
+    """[회귀] 장부는 임시 파일에 쓴 뒤 원자적으로 교체한다.
+
+    바로 덮어쓰면 쓰는 도중 죽었을 때 **잘린 JSON** 이 남고, 그다음부터
+    장부를 못 읽어 예약이 통째로 사라진다. docstring 이 그렇게 주장하므로
+    실제로 그런지 확인한다.
+    """
+    import os as _os
+
+    store = _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    replaced: list[tuple[str, str]] = []
+    real_replace = _os.replace
+
+    def _spy(src, dst, *a, **kw):
+        replaced.append((str(src), str(dst)))
+        return real_replace(src, dst, *a, **kw)
+
+    monkeypatch.setattr(_os, "replace", _spy)
+    adr.build_adr_ops(_one_decision("d1"), "요청", ws)
+
+    assert replaced, "os.replace 로 교체하지 않았다 — 직접 덮어쓰고 있다"
+    src, dst = replaced[-1]
+    assert dst == str(store)
+    assert src != dst and src.endswith(".tmp")
+    # 임시 파일은 남지 않아야 한다.
+    assert not list(store.parent.glob("*.tmp"))
+
+
+def test_ledger_survives_a_crash_midway_through_writing(tmp_path, monkeypatch):
+    """쓰는 도중 죽어도 **기존 장부는 멀쩡하다.**"""
+    import os as _os
+
+    store = _adr_store(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    adr.build_adr_ops(_one_decision("d1"), "요청", ws)      # 정상 1회
+    before = store.read_text(encoding="utf-8")
+
+    def _die(*_a, **_kw):
+        raise OSError("쓰는 도중 죽음")
+
+    monkeypatch.setattr(_os, "replace", _die)
+    adr.build_adr_ops(_one_decision("d2"), "요청", ws)      # 저장 실패
+
+    import json as _json
+    assert _json.loads(store.read_text(encoding="utf-8")) == _json.loads(before), (
+        "실패한 쓰기가 기존 장부를 훼손했다"
+    )
