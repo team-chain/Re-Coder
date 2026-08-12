@@ -152,21 +152,35 @@ def _write(root, files):
     return root
 
 
-def test_detects_python_server_below_the_top_level(tmp_path):
-    """[미탐] `src/main.py` 의 FastAPI — 예전엔 최상위 *.py 만 봤다."""
+def test_detects_python_server_in_a_src_layout(tmp_path):
+    """[미탐] `src/main.py` 의 FastAPI — 예전엔 최상위 *.py 만 봤다.
+
+    `src/` 배치는 진입점 검사(`check_app_entrypoint`)의 후보에도 들어 있어서
+    감지와 검사가 어긋나지 않는다. 더 깊은 하위 폴더(모노레포)는 일부러
+    보지 않는다 — 아래 `test_monorepo_is_not_claimed_as_supported` 참고.
+    """
     _write(tmp_path, {
+        "requirements.txt": "fastapi\nuvicorn\n",
         "src/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
-        "src/requirements.txt": "fastapi\nuvicorn\n",
     })
     result = deploy._deployment_preflight(str(tmp_path))
     assert result["app_kind"] == "server"
     assert result["recommended_target"] == "ecs"
-    # 근거는 화면에 뜨는 문장이다 — 어디서 찾았는지 말해야 한다.
-    assert any("src/" in e for e in result["evidence"]), result["evidence"]
+
+
+def test_detects_python_server_from_src_imports_without_declared_deps(tmp_path):
+    """의존성 선언이 없어도 `src/main.py` 의 import 로 찾는다."""
+    _write(tmp_path, {"src/main.py": "from fastapi import FastAPI\napp = FastAPI()\n"})
+    assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == "server"
 
 
 def test_detects_create_react_app_as_static(tmp_path):
-    """[미탐] 정적 빌더가 vite 뿐이라 CRA 를 통째로 놓쳤다."""
+    """[미탐] 정적 빌더가 vite 뿐이라 CRA 를 통째로 놓쳤다.
+
+    `public/index.html` 만으로도 정적 판정은 나오므로, **빌더를 실제로
+    알아봤는지**까지 단언한다. 판정만 보면 빌더 목록에서 CRA 를 빼도
+    테스트가 통과한다(변이 시험에서 실제로 살아남았다).
+    """
     _write(tmp_path, {
         "package.json": '{"dependencies":{"react":"^18","react-scripts":"5.0.1"}}',
         "public/index.html": "<html></html>",
@@ -174,6 +188,22 @@ def test_detects_create_react_app_as_static(tmp_path):
     result = deploy._deployment_preflight(str(tmp_path))
     assert result["app_kind"] == "static"
     assert result["recommended_target"] == "s3"
+    assert "Create React App" in "·".join(result["evidence"]), result["evidence"]
+
+
+@pytest.mark.parametrize("dep,label", [
+    ("react-scripts", "Create React App"),
+    ("@angular/cli", "Angular CLI"),
+    ("@vue/cli-service", "Vue CLI"),
+    ("gatsby", "Gatsby"),
+    ("vite", "Vite"),
+])
+def test_static_builders_are_named_in_the_evidence(tmp_path, dep, label):
+    """근거는 화면에 그대로 뜬다 — 어떤 빌더를 알아봤는지 말해야 한다(D7)."""
+    _write(tmp_path, {"package.json": '{"devDependencies":{"%s":"1.0.0"}}' % dep})
+    result = deploy._deployment_preflight(str(tmp_path))
+    assert result["app_kind"] == "static", result
+    assert label in "·".join(result["evidence"]), result["evidence"]
 
 
 def test_detects_astro_as_static(tmp_path):
@@ -209,19 +239,6 @@ def test_dockerfile_alone_is_a_server_signal(tmp_path):
     result = deploy._deployment_preflight(str(tmp_path))
     assert result["app_kind"] == "server"
     assert "Dockerfile" in "·".join(result["evidence"])
-
-
-def test_detects_app_inside_a_monorepo(tmp_path):
-    """[미탐] backend/ + frontend/ 구조를 통째로 못 봤다."""
-    _write(tmp_path, {
-        "backend/requirements.txt": "fastapi\n",
-        "backend/main.py": "from fastapi import FastAPI",
-        "frontend/package.json": '{"dependencies":{"react":"^18","vite":"^5"}}',
-    })
-    result = deploy._deployment_preflight(str(tmp_path))
-    assert result["app_kind"] == "server"
-    # 정적 신호가 같이 있으면 숨기지 않는다 — 사용자가 반대로 고를 수 있어야 한다(D5).
-    assert any("정적" in e for e in result["evidence"]), result["evidence"]
 
 
 def test_a_comment_mentioning_a_framework_is_not_a_server(tmp_path):
@@ -344,25 +361,6 @@ def test_real_pyproject_dependencies_are_still_detected(tmp_path, pyproject):
     assert result["app_kind"] == "server", result
 
 
-def test_backend_is_found_even_when_it_sorts_last_in_a_big_monorepo(tmp_path):
-    """[P1-2] 앱 루트 상한을 이름순으로 자르면 백엔드가 잘려 나간다.
-
-    `packages/ui-00` … `ui-13` 이 자리를 다 차지하고 `packages/zz-api`
-    (Dockerfile + express)가 밀려나면, 백엔드가 있는 모노레포를 정적
-    사이트로 판정해 **S3 를 권하게 된다.** 모노레포를 보려고 넣은 탐색이
-    정확히 그 지점에서 무너지는 형태다.
-    """
-    files = {f"packages/ui-{i:02d}/package.json": '{"dependencies":{"react":"^18"}}'
-             for i in range(14)}
-    files["packages/zz-api/package.json"] = '{"dependencies":{"express":"^4"}}'
-    files["packages/zz-api/Dockerfile"] = "FROM node:20"
-    _write(tmp_path, files)
-
-    result = deploy._deployment_preflight(str(tmp_path))
-    assert result["app_kind"] == "server", result
-    assert "zz-api" in "·".join(result["evidence"]), result["evidence"]
-
-
 def test_ancestor_directory_named_build_does_not_disable_import_fallback(tmp_path):
     """[P2-1] 제외 검사가 절대경로 전체를 보면, 상위 폴더 이름 하나로 폴백이 죽는다."""
     ws = tmp_path / "build" / "ws"
@@ -379,24 +377,6 @@ def test_webpack_alone_is_not_a_static_site(tmp_path):
     _write(tmp_path, {"package.json": '{"name":"lib","devDependencies":{"webpack":"^5"}}'})
     result = deploy._deployment_preflight(str(tmp_path))
     assert result["app_kind"] != "static", result
-
-
-def test_symlinked_duplicate_of_the_same_app_is_not_counted_twice(tmp_path):
-    """[P2-3] 심볼릭 링크로 같은 폴더가 여러 번 잡히면 근거가 중복된다."""
-    import os as _os
-
-    _write(tmp_path, {
-        "api/requirements.txt": "fastapi\n",
-        "api/main.py": "from fastapi import FastAPI",
-    })
-    try:
-        _os.symlink(tmp_path, tmp_path / "mirror", target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("이 환경에서는 심볼릭 링크를 만들 수 없다")
-
-    result = deploy._deployment_preflight(str(tmp_path))
-    assert not [e for e in result["evidence"] if "mirror" in e], result["evidence"]
-    assert len(result["evidence"]) == len(set(result["evidence"]))
 
 
 def test_import_inside_a_triple_quoted_template_is_not_code(tmp_path):
@@ -438,32 +418,6 @@ def test_next_as_a_peer_dependency_is_not_a_next_server(tmp_path):
     assert result["app_kind"] != "server", result
 
 
-def test_detection_stays_fast_on_a_large_tree(tmp_path):
-    """[P2-6] 데모 중 감지가 몇 초씩 걸리면 안 된다.
-
-    파일이 많은 asset 폴더가 탐색 예산을 다 먹어 정작 백엔드에 도달하지
-    못하는 일도 없어야 한다.
-    """
-    import time
-
-    assets = tmp_path / "assets"
-    assets.mkdir()
-    for i in range(4000):
-        (assets / f"f{i}.bin").write_text("", encoding="utf-8")
-    _write(tmp_path, {
-        "backend/requirements.txt": "fastapi\n",
-        "index.html": "<html></html>",
-    })
-
-    started = time.perf_counter()
-    result = deploy._deployment_preflight(str(tmp_path))
-    elapsed = time.perf_counter() - started
-
-    assert result["app_kind"] == "server", result
-    assert any("backend" in e for e in result["evidence"]), result["evidence"]
-    assert elapsed < 3.0, f"감지에 {elapsed:.2f}s 걸렸다"
-
-
 def test_pyproject_fallback_parser_also_limits_sections(tmp_path):
     """[P1-1] `tomllib` 이 못 읽는 TOML 에서도 섹션 제한이 살아 있어야 한다.
 
@@ -486,47 +440,6 @@ def test_pyproject_fallback_parser_also_limits_sections(tmp_path):
     _write(tmp_path, {"pyproject.toml": broken, "index.html": "<html></html>"})
     result = deploy._deployment_preflight(str(tmp_path))
     assert result["app_kind"] == "static", result
-
-
-def test_a_file_heavy_folder_does_not_exhaust_the_scan_budget(tmp_path):
-    """[P2-6] 파일이 많은 폴더 하나가 탐색 예산을 다 먹으면 안 된다.
-
-    파일을 상한에 세면, 먼저 만난 asset 폴더에서 예산이 바닥나 **그 뒤에
-    있는 backend/ 에 도달하지 못한 채** 탐색이 끝난다. 그러면 백엔드가 있는
-    프로젝트를 정적 사이트로 판정한다.
-    """
-    assets = tmp_path / "a-assets"
-    assets.mkdir()
-    for i in range(5000):
-        (assets / f"f{i}.bin").write_text("", encoding="utf-8")
-
-    _write(tmp_path, {
-        "svc/backend/requirements.txt": "fastapi\n",
-        "index.html": "<html></html>",
-    })
-
-    result = deploy._deployment_preflight(str(tmp_path))
-    assert result["app_kind"] == "server", result
-    assert any("backend" in e for e in result["evidence"]), result["evidence"]
-
-
-def test_symlinked_directories_are_never_traversed(tmp_path):
-    """심볼릭 링크는 **애초에 들어가지 않는다.**
-
-    순환 링크에서 무한 루프가 나지 않는 근본 이유가 깊이 상한이 아니라
-    이것이다. 링크를 따라가기 시작하면 같은 앱이 경로만 다르게 여러 번
-    잡혀 근거 문장이 중복된다.
-    """
-    import os as _os
-
-    _write(tmp_path, {"api/requirements.txt": "fastapi\n"})
-    try:
-        _os.symlink(tmp_path, tmp_path / "mirror", target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("이 환경에서는 심볼릭 링크를 만들 수 없다")
-
-    roots = deploy._iter_app_roots(tmp_path)
-    assert not [p for p in roots if "mirror" in str(p)], roots
 
 
 # ── [회귀] Codex PR 리뷰 P2 (2026-08-12) ──────────────────────────────
@@ -597,59 +510,6 @@ APP_FILES = {
 REPO_FILES = {".gitignore": ".env\n", ".git/config": ""}
 
 
-def test_detected_app_root_is_reported(tmp_path):
-    """감지 결과에 **어느 폴더에서 찾았는지**가 실려야 한다."""
-    _write(tmp_path, {f"backend/{k}": v for k, v in APP_FILES.items()})
-    result = deploy._deployment_preflight(str(tmp_path))
-    assert result["app_kind"] == "server"
-    assert result["app_root"] == "backend", result
-
-    flat = tmp_path / "flat"
-    _write(flat, APP_FILES)
-    assert deploy._deployment_preflight(str(flat))["app_root"] == "", "루트면 빈 문자열"
-
-
-def test_safety_preflight_checks_the_detected_app_root(tmp_path):
-    """[Codex P1] 감지는 `backend/` 를 찾았는데 검사는 루트만 뒤지던 것.
-
-    그러면 방금 앱을 찾아 놓고 `APP_ENTRYPOINT_NOT_FOUND` 로 막는다. 확장은
-    `blocked` 가 참이면 배포 대상 선택을 통째로 비활성화하므로 **사용자가
-    아무것도 할 수 없는 막다른 길**이 된다. 하위 폴더 탐색을 넣으면서 만든
-    구멍이다.
-    """
-    _write(tmp_path, {**{f"backend/{k}": v for k, v in APP_FILES.items()}, **REPO_FILES})
-    detected = deploy._deployment_preflight(str(tmp_path))
-    safety = deploy._run_deployment_safety_preflight(
-        str(tmp_path), detected["app_kind"], detected["app_root"]
-    )
-    codes = [r["code"] for r in safety["reasons"]]
-    assert "APP_ENTRYPOINT_NOT_FOUND" not in codes, codes
-    assert safety["checked_path"] == "backend", safety
-
-
-def test_nested_and_root_layouts_produce_the_same_verdict(tmp_path):
-    """[Codex P1] **같은 앱이면 어디에 있든 같은 결과**여야 한다.
-
-    이게 이 수정의 진짜 기준이다. 개별 검사 하나를 통과시키는 게 아니라,
-    폴더 배치 때문에 판단이 갈리지 않게 하는 것이다.
-    """
-    flat = tmp_path / "flat"
-    _write(flat, {**APP_FILES, **REPO_FILES})
-    nested = tmp_path / "nested"
-    _write(nested, {**{f"backend/{k}": v for k, v in APP_FILES.items()}, **REPO_FILES,
-                    "frontend/package.json": '{"dependencies":{"react":"^18"}}'})
-
-    a = deploy._deployment_preflight(str(flat))
-    b = deploy._deployment_preflight(str(nested))
-    sa = deploy._run_deployment_safety_preflight(str(flat), a["app_kind"], a["app_root"])
-    sb = deploy._run_deployment_safety_preflight(str(nested), b["app_kind"], b["app_root"])
-
-    assert [r["code"] for r in sa["reasons"]] == [r["code"] for r in sb["reasons"]], (
-        f"루트={[r['code'] for r in sa['reasons']]} / "
-        f"하위={[r['code'] for r in sb['reasons']]}"
-    )
-
-
 def test_contract_stack_detection_matches_the_app_detector(tmp_path):
     """[Codex P1 원인] 두 감지기가 서로 다른 기준을 쓰면 안 된다.
 
@@ -669,103 +529,6 @@ def test_contract_stack_detection_matches_the_app_detector(tmp_path):
     flask_root = tmp_path / "flask_app"
     _write(flask_root, {"requirements.txt": "flask\n", "src/app.py": "from flask import Flask\n"})
     assert deploy._detect_preflight_contract_stack(flask_root) == ContractStack.PYTHON_FLASK
-
-
-def test_safety_preflight_rejects_an_app_root_outside_the_workspace(tmp_path):
-    """`app_root` 는 응답에 실려 확장까지 갔다 돌아온다 — 경로 탈출을 막는다.
-
-    `checked_path` 만 보면 부족하다. 탈출에 성공해도 상대경로 계산이 실패해
-    빈 문자열이 나오기 때문이다. **실제로 어느 폴더를 검사했는지**가
-    결과로 드러나게 만들어 대조한다.
-    """
-    ws = tmp_path / "ws"
-    _write(ws, {**REPO_FILES, "requirements.txt": "fastapi\n", "src/main.py": "from fastapi import FastAPI\n"})
-    # 바깥 폴더에는 Dockerfile 이 있다 — 여기를 검사하면 MISSING_DOCKERFILE 이 사라진다.
-    outside = tmp_path / "outside"
-    _write(outside, {"requirements.txt": "fastapi\n", "src/main.py": "from fastapi import FastAPI\n",
-                     "Dockerfile": "FROM python:3.12\n"})
-
-    escaped = deploy._run_deployment_safety_preflight(str(ws), "server", "../outside")
-    inside = deploy._run_deployment_safety_preflight(str(ws), "server", "")
-
-    assert escaped["checked_path"] == "", escaped
-    assert [r["code"] for r in escaped["reasons"]] == [r["code"] for r in inside["reasons"]], (
-        "워크스페이스 밖을 검사했다"
-    )
-
-
-def test_preflight_route_passes_the_detected_app_root(tmp_path):
-    """[Codex P1] 라우트가 감지 결과의 `app_root` 를 검사에 실제로 넘기는가.
-
-    함수 단위로만 검증하면 **배선이 빠져도 통과한다** — 변이 시험에서 실제로
-    살아남았다. 사용자가 지나는 경로 그대로 확인한다.
-    """
-    import asyncio as _asyncio
-
-    _write(tmp_path, {**{f"backend/{k}": v for k, v in APP_FILES.items()}, **REPO_FILES})
-    payload = _asyncio.run(
-        deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path)))
-    )
-    assert payload["app_root"] == "backend", payload
-    assert payload["checked_path"] == "backend", payload
-    assert "APP_ENTRYPOINT_NOT_FOUND" not in [r["code"] for r in payload["reasons"]]
-
-
-def test_applied_remediation_lands_in_the_app_root(tmp_path):
-    """[Codex P1] 수정안이 **검사한 폴더**에 실제로 쓰이는가.
-
-    저장 구조만 확인하면 적용 경로가 워크스페이스 루트로 되돌아가도
-    통과한다 — 이것도 변이 시험에서 살아남았다. 파일이 어디 생기는지를 본다.
-    """
-    import asyncio as _asyncio
-
-    # Dockerfile 을 빼서 MISSING_DOCKERFILE 제안이 나오게 한다.
-    app = {k: v for k, v in APP_FILES.items() if k != "Dockerfile"}
-    _write(tmp_path, {**{f"backend/{k}": v for k, v in app.items()}, **REPO_FILES})
-
-    detected = deploy._deployment_preflight(str(tmp_path))
-    deploy._deployment_remediation_proposals.clear()
-    safety = deploy._run_deployment_safety_preflight(
-        str(tmp_path), detected["app_kind"], detected["app_root"]
-    )
-    target = next(
-        (r for r in safety["reasons"]
-         if r["code"] == "MISSING_DOCKERFILE" and r["remediation_available"]),
-        None,
-    )
-    if target is None:
-        pytest.skip("이 조합에서 자동 적용 가능한 Dockerfile 제안이 나오지 않는다")
-
-    _asyncio.run(deploy.apply_deployment_remediation(
-        target["proposal_id"],
-        deploy.DeploymentRemediationApplyRequest(workspace_path=str(tmp_path)),
-    ))
-
-    assert (tmp_path / "backend" / "Dockerfile").is_file(), "앱 루트에 안 생겼다"
-    assert not (tmp_path / "Dockerfile").exists(), "워크스페이스 루트에 생겼다"
-
-
-def test_remediation_is_applied_to_the_checked_folder(tmp_path):
-    """수정안은 **검사한 폴더**에 적용돼야 한다.
-
-    `backend/` 를 검사해 만든 제안을 워크스페이스 루트에 적용하면 파일이
-    엉뚱한 곳에 생긴다.
-    """
-    _write(tmp_path, {**{f"backend/{k}": v for k, v in APP_FILES.items()}, **REPO_FILES})
-    detected = deploy._deployment_preflight(str(tmp_path))
-    # 제안 저장소는 모듈 전역이라 다른 테스트의 잔여물이 섞인다.
-    # 이 테스트가 만든 것만 보도록 먼저 비운다.
-    deploy._deployment_remediation_proposals.clear()
-    safety = deploy._run_deployment_safety_preflight(
-        str(tmp_path), detected["app_kind"], detected["app_root"]
-    )
-    ids = {r["proposal_id"] for r in safety["reasons"] if r["proposal_id"]}
-    stored = [deploy._deployment_remediation_proposals[i] for i in ids]
-    assert stored, "제안이 하나도 만들어지지 않았다"
-    for item in stored:
-        # 소유권은 워크스페이스 기준, 적용은 앱 루트 기준.
-        assert item.workspace_root == tmp_path.resolve()
-        assert item.app_root == (tmp_path / "backend").resolve()
 
 
 @pytest.mark.parametrize("src,label", [
@@ -804,111 +567,78 @@ _CONTRACT_YML = (
 )
 
 
-def test_framework_evidence_beats_root_container_metadata(tmp_path):
-    """[Codex P1] 저장소 루트의 `Dockerfile` 이 앱 루트를 선점하던 것.
 
-    루트를 먼저 방문하므로 Dockerfile 이 `server_app_root` 를 잡으면, 뒤에
-    나온 `backend/` 의 FastAPI 근거가 그걸 못 이겼다. 그러면 검사가 다시
-    루트로 가서 `APP_ENTRYPOINT_NOT_FOUND` 막다른 길이 그대로 재발한다.
+# ── 모노레포는 **의도적으로 지원하지 않는다** ──────────────────────────
+#
+# 하위 폴더까지 훑어 모노레포를 지원하는 판을 만들었다가 되돌렸다.
+# Codex 리뷰 4라운드에서 P1 5건이 전부 그 한 곳에서 나왔기 때문이다.
+#
+# 원인은 기능이 나빠서가 아니라 **끼워 넣는 방식이 이 코드베이스의 전제와
+# 안 맞아서**다. preflight 계층 전체가 "검사 대상 = 워크스페이스 루트"를
+# 전제로 짜여 있다 — 계약 로딩, 계약 상대 경로, `.gitignore` 탐색, 진입점
+# 후보, 수정안 적용 경로가 전부 그렇다. 거기에 "앱 루트는 따로 있을 수
+# 있다"를 한 겹씩 끼워 넣으니 전제가 깨진 자리가 계속 드러났다.
+#
+# 제대로 하려면 preflight 계층을 앱 루트 기준으로 한 번에 재설계해야 한다
+# (회차4). 그때까지는 **모르는 것을 모른다고 말한다.**
 
-    컨테이너 선언은 "여기서 뭔가를 띄운다"는 일반적 메타데이터고,
-    프레임워크와 진입점을 가진 폴더가 있으면 그쪽이 앱 루트다.
+
+def test_monorepo_is_not_claimed_as_supported(tmp_path):
+    """모노레포는 `unknown` 으로 두고 사용자에게 묻는다.
+
+    절반만 아는 것보다 낫다. 하위 폴더의 앱을 "서버형"이라고 판정해 놓으면,
+    안전 검사는 루트만 보므로 `APP_ENTRYPOINT_NOT_FOUND` 로 막혀 **사용자가
+    아무것도 할 수 없는 막다른 길**이 된다.
     """
     _write(tmp_path, {
-        "Dockerfile": "FROM python:3.12\n",
-        "backend/requirements.txt": "fastapi\nuvicorn\n",
-        "backend/src/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
-        **REPO_FILES,
-    })
-    detected = deploy._deployment_preflight(str(tmp_path))
-    assert detected["app_root"] == "backend", detected
-
-    safety = deploy._run_deployment_safety_preflight(
-        str(tmp_path), detected["app_kind"], detected["app_root"]
-    )
-    assert "APP_ENTRYPOINT_NOT_FOUND" not in [r["code"] for r in safety["reasons"]]
-
-
-def test_container_metadata_still_used_when_nothing_stronger_exists(tmp_path):
-    """반대 방향 — 프레임워크 근거가 없으면 컨테이너 선언이라도 쓴다."""
-    _write(tmp_path, {"svc/Dockerfile": "FROM node:20\n", **REPO_FILES})
-    detected = deploy._deployment_preflight(str(tmp_path))
-    assert detected["app_kind"] == "server"
-    assert detected["app_root"] == "svc", detected
-
-
-def test_workspace_release_contract_is_not_discarded_for_nested_apps(tmp_path):
-    """[Codex P1] 루트의 `recoder.yml` 을 조용히 버리면 정책이 사라진다.
-
-    검사 위치만 앱 루트로 옮기면서 계약도 거기서만 찾으면, 사용자가 정한
-    `required_env`·포트·정책이 더는 강제되지 않는다 — **사용자 계약이라면
-    막았을 배포가 통과**한다.
-    """
-    _write(tmp_path, {
-        "recoder.yml": _CONTRACT_YML,
         "backend/requirements.txt": "fastapi\n",
-        "backend/src/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
-        **REPO_FILES,
+        "backend/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
+        "frontend/package.json": '{"dependencies":{"react":"^18","vite":"^5"}}',
     })
-    detected = deploy._deployment_preflight(str(tmp_path))
-    safety = deploy._run_deployment_safety_preflight(
-        str(tmp_path), detected["app_kind"], detected["app_root"]
-    )
-    env_blockers = [r for r in safety["reasons"] if r["code"] == "MISSING_REQUIRED_ENV"]
-    assert env_blockers, safety["reasons"]
-    assert "SUPER_SECRET_KEY" in env_blockers[0]["fix"], env_blockers
+    result = deploy._deployment_preflight(str(tmp_path))
+    assert result["app_kind"] == "unknown", result
+    assert result["recommended_target"] == "local", result
 
 
-def test_app_root_contract_wins_over_the_workspace_contract(tmp_path):
-    """앱 루트에 자체 계약이 있으면 그쪽이 더 구체적이므로 우선한다."""
-    _write(tmp_path, {
-        "recoder.yml": _CONTRACT_YML,
-        "backend/recoder.yml": _CONTRACT_YML.replace("SUPER_SECRET_KEY", "BACKEND_ONLY_KEY"),
-        "backend/requirements.txt": "fastapi\n",
-        "backend/src/main.py": "from fastapi import FastAPI\n",
-        **REPO_FILES,
-    })
-    detected = deploy._deployment_preflight(str(tmp_path))
-    safety = deploy._run_deployment_safety_preflight(
-        str(tmp_path), detected["app_kind"], detected["app_root"]
-    )
-    env_blockers = [r for r in safety["reasons"] if r["code"] == "MISSING_REQUIRED_ENV"]
-    assert env_blockers and "BACKEND_ONLY_KEY" in env_blockers[0]["fix"], env_blockers
+def test_detection_result_has_no_app_root_field(tmp_path):
+    """`app_root` 전파를 되돌렸다 — 되살아나면 여기서 잡힌다.
 
-
-def test_app_root_is_revalidated_right_before_applying(tmp_path):
-    """[Codex P2] 검사와 적용 사이에 폴더가 링크로 바뀌면 승인 범위 밖에 쓴다.
-
-    앞선 소유권 확인은 **워크스페이스만** 보므로 이 경로를 막지 못한다.
+    이 필드가 다시 생기면 그것을 소비하는 계층(계약·gitignore·진입점·수정안
+    적용)이 함께 따라와야 한다. 한 곳만 넓히면 4라운드 동안 반복된 그
+    형태가 되풀이된다.
     """
-    import asyncio as _asyncio
-    import os as _os
-    import shutil as _shutil
+    _write(tmp_path, {"requirements.txt": "fastapi\n", "main.py": "from fastapi import FastAPI\n"})
+    assert "app_root" not in deploy._deployment_preflight(str(tmp_path))
 
-    app = {k: v for k, v in APP_FILES.items() if k != "Dockerfile"}
-    _write(tmp_path, {**{f"backend/{k}": v for k, v in app.items()}, **REPO_FILES})
-    outside = tmp_path.parent / f"outside-{tmp_path.name}"
-    outside.mkdir(exist_ok=True)
 
+def test_safety_preflight_takes_no_app_root_argument():
+    """안전 검사는 워크스페이스 루트만 받는다."""
+    import inspect
+
+    params = list(inspect.signature(deploy._run_deployment_safety_preflight).parameters)
+    assert params == ["workspace_path", "app_kind"], params
+
+
+@pytest.mark.parametrize("files,label", [
+    ({"requirements.txt": "fastapi\n", "main.py": "from fastapi import FastAPI\napp=FastAPI()\n"}, "FastAPI 루트"),
+    ({"requirements.txt": "fastapi\n", "src/main.py": "from fastapi import FastAPI\napp=FastAPI()\n"}, "FastAPI src/"),
+    ({"src/main.py": "from fastapi import FastAPI\napp=FastAPI()\n"}, "의존성 없이 src/"),
+    ({"go.mod": "module x\n", "main.go": "package main\n"}, "Go"),
+    ({"package.json": '{"dependencies":{"express":"^4"}}', "index.js": "require('express')\n"}, "Express"),
+    ({"Dockerfile": "FROM node:20\n", "server.js": "x\n"}, "Dockerfile 만"),
+])
+def test_server_verdict_never_leads_to_an_entrypoint_dead_end(tmp_path, files, label):
+    """**불변식** — "서버형"이라고 판정했으면 진입점을 못 찾아 막히면 안 된다.
+
+    감지와 안전 검사가 서로 다른 깊이를 보면 이 불변식이 깨진다. 4라운드
+    동안 반복된 P1 이 전부 이 형태였으므로, 개별 사례가 아니라 **불변식**
+    으로 고정한다.
+    """
+    _write(tmp_path, {**files, ".gitignore": ".env\n", ".git/config": ""})
     detected = deploy._deployment_preflight(str(tmp_path))
-    deploy._deployment_remediation_proposals.clear()
-    safety = deploy._run_deployment_safety_preflight(
-        str(tmp_path), detected["app_kind"], detected["app_root"]
+    if detected["app_kind"] != "server":
+        pytest.skip(f"{label}: 서버형으로 판정되지 않음")
+    safety = deploy._run_deployment_safety_preflight(str(tmp_path), detected["app_kind"])
+    assert "APP_ENTRYPOINT_NOT_FOUND" not in [r["code"] for r in safety["reasons"]], (
+        f"{label}: 서버형이라고 해놓고 진입점을 못 찾아 막았다"
     )
-    proposal_id = next((r["proposal_id"] for r in safety["reasons"] if r["proposal_id"]), None)
-    if proposal_id is None:
-        pytest.skip("자동 적용 가능한 제안이 없다")
-
-    _shutil.rmtree(tmp_path / "backend")
-    try:
-        _os.symlink(outside, tmp_path / "backend", target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("이 환경에서는 심볼릭 링크를 만들 수 없다")
-
-    with pytest.raises(HTTPException) as caught:
-        _asyncio.run(deploy.apply_deployment_remediation(
-            proposal_id,
-            deploy.DeploymentRemediationApplyRequest(workspace_path=str(tmp_path)),
-        ))
-    assert caught.value.status_code == 409
-    assert not list(outside.iterdir()), "워크스페이스 밖에 파일이 생겼다"

@@ -45,12 +45,7 @@ _deployment_records: dict[str, DeploymentRecord] = {}
 @dataclass(frozen=True)
 class _StoredDeploymentRemediation:
     proposal: object
-    #: 소유권 확인용 — 확장이 보내는 **워크스페이스** 루트와 대조한다.
     workspace_root: Path
-    #: 수정안을 실제로 적용할 폴더. 모노레포면 `backend/` 처럼 워크스페이스
-    #: 루트가 아닐 수 있다. 이걸 따로 두지 않으면 `backend/` 를 검사해 만든
-    #: Dockerfile 제안이 **워크스페이스 루트에** 쓰인다.
-    app_root: Path
 
 
 _deployment_remediation_proposals: dict[str, _StoredDeploymentRemediation] = {}
@@ -252,17 +247,6 @@ _SKIP_DIRS = frozenset({
 })
 
 #: 여기 하나라도 있으면 "앱 루트"로 본다.
-_MANIFEST_FILES = (
-    "requirements.txt", "pyproject.toml", "Pipfile", "setup.py",
-    "package.json", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts",
-    "Gemfile", "composer.json", "Cargo.toml",
-    "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "Procfile",
-)
-
-#: 탐색 상한. 큰 모노레포에서 이벤트 루프 밖이라도 수 초씩 걸리면 안 된다.
-_MAX_SCAN_DEPTH = 3
-_MAX_APP_ROOTS = 12
-
 #: 서버 런타임을 뜻하는 파이썬 의존성 (정규화된 이름으로 정확히 비교).
 _PY_SERVER_DEPS = {
     "fastapi": "FastAPI", "flask": "Flask", "django": "Django",
@@ -329,106 +313,12 @@ def _normalize_dep(name: str) -> str:
 #: `packages/zz-api`(Dockerfile + express)가 잘려 나간다. 그러면 백엔드가
 #: 있는 모노레포를 **정적 사이트로 판정해 S3 를 권하게 된다** — 모노레포를
 #: 보려고 넣은 탐색이 정확히 그 지점에서 무너지는 형태다.
-_STRONG_SERVER_MANIFESTS = (
-    "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "Procfile",
-    "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "Gemfile",
-    "requirements.txt", "pyproject.toml",
-)
-
-#: 탐색할 디렉터리 수의 절대 상한. 앱 루트 상한(`_MAX_APP_ROOTS`)과 별개로,
-#: 거대한 저장소에서 디렉터리를 세는 일 자체를 끊는다.
-_MAX_DIRS_SCANNED = 4000
-
-
-def _iter_app_roots(root: Path) -> list[Path]:
-    """워크스페이스 안에서 **앱으로 보이는 폴더들**.
-
-    모노레포(`backend/` + `frontend/`)를 통째로 놓치던 것을 막는다. 루트는
-    표식 파일이 없어도 항상 포함한다 — 루트만 보던 예전 동작을 잃지 않기
-    위해서다.
-
-    후보를 다 모은 **뒤에** 자른다. 찾는 도중에 자르면 이름순으로 앞선
-    폴더가 자리를 다 차지해 정작 중요한 백엔드가 잘려 나간다.
-    """
-    candidates: list[tuple[int, int, Path]] = []   # (우선순위, 발견순서, 경로)
-    seen: set[str] = set()
-    scanned = 0
-    order = 0
-
-    try:
-        seen.add(os.path.normcase(str(root.resolve())))
-    except OSError:
-        seen.add(os.path.normcase(str(root)))
-
-    queue: list[tuple[Path, int]] = [(root, 0)]
-    while queue and scanned < _MAX_DIRS_SCANNED:
-        current, depth = queue.pop(0)
-        if depth >= _MAX_SCAN_DEPTH:
-            continue
-        try:
-            # `os.scandir` 은 디렉터리 여부를 dirent 로 판단해 파일마다
-            # stat 을 걸지 않는다. 파일 12만 개짜리 asset 폴더 하나에서
-            # `iterdir()+is_dir()` 이 0.6초를 더하던 것을 없앤다.
-            with os.scandir(current) as entries:
-                children = []
-                for entry in entries:
-                    try:
-                        if not entry.is_dir(follow_symlinks=False):
-                            # 파일은 **상한에 세지 않는다.** 파일 12만 개짜리
-                            # asset 폴더 하나가 예산을 다 먹으면, 정작 봐야 할
-                            # backend/ 폴더에 도달하지 못한 채 탐색이 끝난다.
-                            continue
-                    except OSError:
-                        continue
-                    scanned += 1
-                    if scanned >= _MAX_DIRS_SCANNED:
-                        break
-                    if entry.name in _SKIP_DIRS or entry.name.startswith("."):
-                        continue
-                    children.append(Path(entry.path))
-        except OSError:
-            continue
-
-        for child in sorted(children):
-            # **심볼릭 링크로 같은 폴더를 여러 번 잡지 않는다.** 안 막으면
-            # 근거 문장에 "FastAPI 서버 (mirror/api/)" 같은 중복이 쌓인다.
-            #
-            # 위의 `follow_symlinks=False` 와 **이중 방어**다. 변이 시험에서
-            # 하나만 없애면 다른 하나가 막아 테스트가 안 깨지고, 둘 다
-            # 없애야 깨진다. 하드링크·Windows 정션·같은 폴더를 두 번 가리키는
-            # 경우까지 있어서 한 겹으로 두지 않는다.
-            try:
-                key = os.path.normcase(str(child.resolve()))
-            except OSError:
-                key = os.path.normcase(str(child))
-            if key in seen:
-                continue
-            seen.add(key)
-
-            if any((child / m).is_file() for m in _STRONG_SERVER_MANIFESTS):
-                priority = 0
-            elif any((child / m).is_file() for m in _MANIFEST_FILES):
-                priority = 1
-            else:
-                priority = None  # 앱 루트는 아니지만 더 내려가 볼 수는 있다
-            if priority is not None:
-                candidates.append((priority, order, child))
-                order += 1
-            queue.append((child, depth + 1))
-
-    candidates.sort(key=lambda item: (item[0], item[1]))
-    picked = [path for _, _, path in candidates[: max(0, _MAX_APP_ROOTS - 1)]]
-    return [root, *picked]
-
-
 #: 의존성이 **실제로 선언되는** TOML 섹션. 여기 밖은 보지 않는다.
 #:
 #: 파일 전체를 훑으면 `description = "django 없이 만든 정적 사이트"` 의 한
 #: 단어나 `[tool.mypy]` 아래 키가 의존성으로 둔갑한다. 그러면 본문에
 #: "django 없이"라고 적힌 프로젝트를 화면에 **"Django 서버"** 라고 표시하게
-#: 된다 — 근거를 보여주는 기능이 근거를 지어내는 셈이다. 실측으로 확인한
-#: 오탐이며, `requirements.txt` 에서만 주석을 막고 여기서는 안 막은 것이
-#: 원인이었다.
+#: 된다 — 근거를 보여주는 기능이 근거를 지어내는 셈이다.
 _DEP_SECTION_RE = re.compile(
     r"^(project\.optional-dependencies(\.[\w-]+)?"
     r"|dependency-groups"
@@ -549,7 +439,18 @@ def _python_imported_modules(app_root: Path) -> set[str]:
     """
     modules: set[str] = set()
     files: list[Path] = []
-    for pattern in ("*.py", "*/*.py", "*/*/*.py"):
+    # **진입점 검사와 같은 깊이만 본다.**
+    #
+    # 예전엔 `*/*.py`·`*/*/*.py` 까지 훑어서 `backend/main.py` 도 봤다. 그런데
+    # 안전 검사(`check_app_entrypoint`)의 후보는 `main.py`·`app.py`·
+    # `app/main.py`·`src/main.py` 뿐이다. 그래서 모노레포를 "서버형"으로
+    # 판정해 놓고 바로 다음 단계에서 `APP_ENTRYPOINT_NOT_FOUND` 로 막는
+    # **막다른 길**이 생긴다.
+    #
+    # 여기서 절반만 아는 것보다, 모르는 것을 모른다고 하는 편이 낫다 —
+    # 모노레포는 preflight 계층 전체를 앱 루트 기준으로 재설계해야 제대로
+    # 된다(회차4). 그때까지는 후보와 같은 깊이만 본다.
+    for pattern in ("*.py", "src/*.py", "app/*.py"):
         for p in app_root.glob(pattern):
             # **워크스페이스 안쪽 경로만 본다.** `p.parts` 는 절대경로의 모든
             # 요소라, 조상 폴더 이름이 `build`·`out`·`env` 이거나 `.` 로
@@ -685,36 +586,15 @@ def _next_is_static_export(app_root: Path, pkg: dict) -> bool:
     return any("next export" in str(v) for v in (scripts or {}).values())
 
 
-def _label_for(app_root: Path, workspace_root: Path) -> str:
-    """근거 문장에 붙일 위치 표시. 루트면 빈 문자열."""
-    try:
-        rel = app_root.relative_to(workspace_root).as_posix()
-    except ValueError:
-        return ""
-    return "" if rel in ("", ".") else f" ({rel}/)"
-
-
-def _relative_app_root(app_root: Optional[Path], workspace_root: Path) -> str:
-    """감지한 앱 루트를 **워크스페이스 상대 posix 경로**로. 루트면 빈 문자열.
-
-    문자열로 돌려주는 이유는 이 값이 JSON 응답에 실려 확장까지 가고,
-    다시 `_run_deployment_safety_preflight` 로 들어오기 때문이다.
-    """
-    if app_root is None:
-        return ""
-    try:
-        rel = app_root.resolve().relative_to(workspace_root.resolve()).as_posix()
-    except (ValueError, OSError):
-        return ""
-    return "" if rel in ("", ".") else rel
-
-
 def _deployment_preflight(workspace_path: str) -> dict:
     """프로젝트 파일만으로 서버형/정적 앱을 판별해 배포 선택지를 추천한다.
 
-    반환 계약은 예전과 같다 — `app_kind` · `summary` · `evidence` ·
-    `recommended_target`. 확장의 배포 카드와 `_run_deployment_safety_preflight`
-    가 이 모양에 의존한다.
+    **워크스페이스 루트만 본다.** 하위 폴더까지 훑어 모노레포를 지원하는
+    판을 만들었다가 되돌렸다 — 이유는 아래 「모노레포」 절에 적어 뒀다.
+
+    반환 계약: `app_kind` · `summary` · `evidence` · `recommended_target`.
+    확장의 배포 카드와 `_run_deployment_safety_preflight` 가 이 모양에
+    의존한다.
     """
     root = Path(workspace_path)
     if not root.is_dir():
@@ -723,133 +603,84 @@ def _deployment_preflight(workspace_path: str) -> dict:
     server_evidence: list[str] = []
     static_evidence: list[str] = []
     extra_evidence: list[str] = []
-    # **어느 폴더에서 그 신호를 찾았는지**도 같이 돌려준다.
-    #
-    # 이걸 안 넘기면, 감지는 `backend/` 에서 FastAPI 를 찾아 "서버형"이라고
-    # 해놓고 바로 다음 단계인 안전 검사는 워크스페이스 루트만 뒤져
-    # `APP_ENTRYPOINT_NOT_FOUND` 로 막는다. 확장은 `blocked` 가 참이면 배포
-    # 대상 선택을 통째로 비활성화하므로, **사용자가 아무것도 할 수 없는
-    # 막다른 길**이 된다. 하위 폴더 탐색을 넣으면서 만든 구멍이다.
-    # **근거의 종류를 나눠 둔다.**
-    #
-    # 저장소 루트에 `Dockerfile` 하나만 있고 진짜 앱은 `backend/` 에 있는
-    # 배치가 흔하다. 루트를 먼저 방문하므로 Dockerfile 이 앱 루트를 선점하면,
-    # 뒤에 나온 FastAPI 근거가 그걸 못 이겨 검사가 다시 루트로 가고
-    # `APP_ENTRYPOINT_NOT_FOUND` 막다른 길이 그대로 재발한다.
-    #
-    # 컨테이너·프로세스 선언은 "여기 앱이 있다"가 아니라 "여기서 뭔가를
-    # 띄운다"는 **일반적 메타데이터**다. 프레임워크와 진입점을 실제로 가진
-    # 폴더가 있으면 그쪽이 이겨야 한다.
-    strong_server_root: Optional[Path] = None    # 프레임워크·런타임 근거
-    generic_server_root: Optional[Path] = None   # Dockerfile·compose·Procfile
-    static_app_root: Optional[Path] = None
 
-    for app_root in _iter_app_roots(root):
-        where = _label_for(app_root, root)
-        before_static = len(static_evidence)
-        strong_here = False
-        generic_here = False
-
-        # ── 파이썬 ──────────────────────────────────────────────────
-        py_deps = _python_deps(app_root)
-        py_modules: set[str] | None = None
+    # ── 파이썬 ──────────────────────────────────────────────────────
+    py_deps = _python_deps(root)
+    for dep, label in _PY_SERVER_DEPS.items():
+        if dep in py_deps:
+            server_evidence.append(f"{label} 서버")
+            break
+    else:
+        # 의존성 선언이 없으면 실제 import 문을 본다.
+        py_modules = _python_imported_modules(root)
         for dep, label in _PY_SERVER_DEPS.items():
-            if dep in py_deps:
-                server_evidence.append(f"{label} 서버{where}")
-                strong_here = True
+            if dep in py_modules:
+                server_evidence.append(f"{label} 서버")
                 break
+
+    # ── Node ────────────────────────────────────────────────────────
+    node_deps, pkg = _node_deps(root)
+    if "next" in node_deps:
+        if _next_is_static_export(root, pkg):
+            static_evidence.append("Next.js 정적 export")
         else:
-            # 의존성 선언이 없으면 실제 import 문을 본다.
-            if any((app_root / f).is_file() for f in ("main.py", "app.py", "manage.py", "wsgi.py", "asgi.py")) or list(app_root.glob("*.py"))[:1]:
-                py_modules = _python_imported_modules(app_root)
-                for dep, label in _PY_SERVER_DEPS.items():
-                    if dep in py_modules:
-                        server_evidence.append(f"{label} 서버{where}")
-                        strong_here = True
-                        break
+            server_evidence.append("Next.js 서버")
+    for dep, label in _NODE_SERVER_DEPS.items():
+        if dep in node_deps:
+            server_evidence.append(f"{label} 서버")
+            break
+    for dep, label in _NODE_STATIC_DEPS.items():
+        if dep in node_deps:
+            static_evidence.append(f"{label} 빌드")
+            break
 
-        # ── Node ────────────────────────────────────────────────────
-        node_deps, pkg = _node_deps(app_root)
-        if "next" in node_deps:
-            if _next_is_static_export(app_root, pkg):
-                static_evidence.append(f"Next.js 정적 export{where}")
-            else:
-                server_evidence.append(f"Next.js 서버{where}")
-                strong_here = True
-        for dep, label in _NODE_SERVER_DEPS.items():
-            if dep in node_deps:
-                server_evidence.append(f"{label} 서버{where}")
-                strong_here = True
-                break
-        for dep, label in _NODE_STATIC_DEPS.items():
-            if dep in node_deps:
-                static_evidence.append(f"{label} 빌드{where}")
-                break
+    # ── 그 밖의 서버 런타임 ──────────────────────────────────────────
+    # 같은 파일의 `_detect_stack` 은 이미 이것들을 보고 있었다. 판정이
+    # 두 함수에서 갈리면 Dockerfile 은 만들어 주면서 배포 대상은
+    # "잘 모르겠다"고 하는 앞뒤 안 맞는 화면이 된다.
+    if (root / "go.mod").is_file():
+        server_evidence.append("Go 모듈")
+    if (root / "pom.xml").is_file() or (root / "build.gradle").is_file() \
+            or (root / "build.gradle.kts").is_file():
+        server_evidence.append("Java/Spring 빌드")
+    if (root / "Gemfile").is_file():
+        server_evidence.append("Ruby/Rails")
+    if (root / "composer.json").is_file():
+        server_evidence.append("PHP/Composer")
 
-        # ── 그 밖의 서버 런타임 ──────────────────────────────────────
-        # 같은 파일의 `_detect_stack` 은 이미 이것들을 보고 있었다. 판정이
-        # 두 함수에서 갈리면 Dockerfile 은 만들어 주면서 배포 대상은
-        # "잘 모르겠다"고 하는 앞뒤 안 맞는 화면이 된다.
-        if (app_root / "go.mod").is_file():
-            server_evidence.append(f"Go 모듈{where}")
-            strong_here = True
-        if (app_root / "pom.xml").is_file() or (app_root / "build.gradle").is_file() \
-                or (app_root / "build.gradle.kts").is_file():
-            server_evidence.append(f"Java/Spring 빌드{where}")
-            strong_here = True
-        if (app_root / "Gemfile").is_file():
-            server_evidence.append(f"Ruby/Rails{where}")
-            strong_here = True
-        if (app_root / "composer.json").is_file():
-            server_evidence.append(f"PHP/Composer{where}")
-            strong_here = True
+    # ── 컨테이너·프로세스 선언 ───────────────────────────────────────
+    # **가장 강한 서버 신호인데 예전 판은 아예 보지 않았다.**
+    # 컨테이너로 띄우도록 만들어 둔 앱을 정적 호스팅으로 권할 수는 없다.
+    if (root / "Dockerfile").is_file():
+        server_evidence.append("Dockerfile")
+    elif (root / "docker-compose.yml").is_file() or (root / "docker-compose.yaml").is_file():
+        server_evidence.append("docker-compose")
+    if (root / "Procfile").is_file():
+        server_evidence.append("Procfile")
 
-        # ── 컨테이너·프로세스 선언 ───────────────────────────────────
-        # **가장 강한 서버 신호인데 예전 판은 아예 보지 않았다.**
-        # 컨테이너로 띄우도록 만들어 둔 앱을 정적 호스팅으로 권할 수는 없다.
-        if (app_root / "Dockerfile").is_file():
-            server_evidence.append(f"Dockerfile{where}")
-            generic_here = True
-        elif (app_root / "docker-compose.yml").is_file() or (app_root / "docker-compose.yaml").is_file():
-            server_evidence.append(f"docker-compose{where}")
-            generic_here = True
-        if (app_root / "Procfile").is_file():
-            server_evidence.append(f"Procfile{where}")
-            generic_here = True
+    # ── 정적 사이트 ──────────────────────────────────────────────────
+    for entry in ("index.html", "public/index.html", "src/index.html"):
+        if (root / entry).is_file():
+            static_evidence.append("정적 HTML 엔트리")
+            break
+    if (root / "_config.yml").is_file():
+        static_evidence.append("Jekyll 사이트")
+    # 괄호가 없으면 `hugo.toml or (config.toml and content/)` 로 읽혀 두 줄이
+    # 서로 다른 규칙으로 동작한다. `config.toml` 은 Hugo 전용이 아니므로
+    # `content/` 를 함께 요구하고, `hugo.toml` 은 그 자체로 확정이다.
+    if (root / "hugo.toml").is_file() or (
+        (root / "config.toml").is_file() and (root / "content").is_dir()
+    ):
+        static_evidence.append("Hugo 사이트")
+    for name in ("vite.config.ts", "vite.config.js", "vite.config.mjs"):
+        if (root / name).is_file():
+            static_evidence.append("Vite 설정")
+            break
 
-        # ── 정적 사이트 ──────────────────────────────────────────────
-        for entry in ("index.html", "public/index.html", "src/index.html"):
-            if (app_root / entry).is_file():
-                static_evidence.append(f"정적 HTML 엔트리{where}")
-                break
-        if (app_root / "_config.yml").is_file():
-            static_evidence.append(f"Jekyll 사이트{where}")
-        # 괄호가 없으면 `hugo.toml or (config.toml and content/)` 로 읽혀
-        # 두 줄이 서로 다른 규칙으로 동작한다. `config.toml` 은 Hugo 전용이
-        # 아니므로 `content/` 를 함께 요구하고, `hugo.toml` 은 그 자체로 확정이다.
-        if (app_root / "hugo.toml").is_file() or (
-            (app_root / "config.toml").is_file() and (app_root / "content").is_dir()
-        ):
-            static_evidence.append(f"Hugo 사이트{where}")
-        for name in ("vite.config.ts", "vite.config.js", "vite.config.mjs"):
-            if (app_root / name).is_file():
-                static_evidence.append(f"Vite 설정{where}")
-                break
-
-        # ── 부가 정보 (판정에는 쓰지 않고 근거로만 보여준다) ──────────
-        if any(app_root.glob("*.db")) or any(app_root.glob("*.sqlite")) or any(app_root.glob("*.sqlite3")) \
-                or any(d.startswith("sqlite") or d == "aiosqlite" for d in py_deps):
-            extra_evidence.append(f"SQLite 데이터 저장{where}")
-
-        # 가장 먼저 근거를 낸 폴더를 그 종류의 앱 루트로 삼는다.
-        # `_iter_app_roots` 가 강한 서버 표식이 있는 폴더를 앞에 두므로,
-        # 먼저 나온 것이 더 확실한 후보다.
-        if strong_here and strong_server_root is None:
-            strong_server_root = app_root
-        if generic_here and generic_server_root is None:
-            generic_server_root = app_root
-        if static_app_root is None and len(static_evidence) > before_static:
-            static_app_root = app_root
+    # ── 부가 정보 (판정에는 쓰지 않고 근거로만 보여준다) ──────────────
+    if any(root.glob("*.db")) or any(root.glob("*.sqlite")) or any(root.glob("*.sqlite3")) \
+            or any(d.startswith("sqlite") or d == "aiosqlite" for d in py_deps):
+        extra_evidence.append("SQLite 데이터 저장")
 
     # 중복 제거 — 순서는 유지한다(먼저 나온 근거가 더 중요하다).
     def _dedup(items: list[str]) -> list[str]:
@@ -874,7 +705,6 @@ def _deployment_preflight(workspace_path: str) -> dict:
             "summary": f"서버형 앱 — {'·'.join(server_evidence[:4])}",
             "evidence": evidence,
             "recommended_target": "ecs",
-            "app_root": _relative_app_root(strong_server_root or generic_server_root, root),
         }
 
     if static_evidence:
@@ -883,7 +713,6 @@ def _deployment_preflight(workspace_path: str) -> dict:
             "summary": f"정적 웹 앱 — {'·'.join(static_evidence[:4])}",
             "evidence": static_evidence + extra_evidence,
             "recommended_target": "s3",
-            "app_root": _relative_app_root(static_app_root, root),
         }
 
     return {
@@ -891,7 +720,6 @@ def _deployment_preflight(workspace_path: str) -> dict:
         "summary": "프로젝트 유형을 확신하기 어려움",
         "evidence": extra_evidence or ["명확한 서버 또는 정적 빌드 설정을 찾지 못함"],
         "recommended_target": "local",
-        "app_root": "",
     }
 
 
@@ -930,37 +758,11 @@ def _detect_preflight_contract_stack(root: Path):
     return ContractStack.CUSTOM
 
 
-def _run_deployment_safety_preflight(
-    workspace_path: str,
-    app_kind: str = "unknown",
-    app_root: str = "",
-) -> dict:
-    """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다.
-
-    `app_root` 는 `_deployment_preflight` 가 **실제로 앱을 찾은 폴더**의
-    워크스페이스 상대 경로다. 모노레포(`backend/src/main.py` +
-    `backend/requirements.txt`)에서 이걸 안 받으면, 감지는 앱을 찾아
-    "서버형"이라고 해놓고 검사는 루트만 뒤져 `APP_ENTRYPOINT_NOT_FOUND` 로
-    막는다. 확장은 `blocked` 가 참이면 배포 대상 선택을 비활성화하므로
-    **사용자가 아무것도 할 수 없는 막다른 길**이 된다.
-    """
+def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unknown") -> dict:
+    """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다."""
     root = Path(workspace_path)
     if not root.is_dir():
         raise ValueError("유효한 워크스페이스 경로가 아닙니다.")
-
-    # 검사 대상 폴더. 경로 탈출은 허용하지 않는다 — 이 값은 응답에 실려
-    # 확장까지 갔다가 되돌아오므로, 우리 감지 결과라고 가정하지 않는다.
-    check_root = root
-    rel = (app_root or "").strip().strip("/\\")
-    if rel:
-        candidate = (root / rel)
-        try:
-            resolved = candidate.resolve()
-            resolved.relative_to(root.resolve())
-            if resolved.is_dir():
-                check_root = candidate
-        except (ValueError, OSError):
-            check_root = root
 
     try:
         from preflight import StaticPreflightRunner
@@ -973,35 +775,22 @@ def _run_deployment_safety_preflight(
         from core.preflight.contract_loader import build_default_contract, load_contract  # type: ignore
         from core.remediation import generate_proposals  # type: ignore
 
-    # **사용자가 정한 계약을 조용히 버리지 않는다.**
-    #
-    # `recoder.yml` 은 문서상 워크스페이스 루트에 둔다. 검사 위치만 앱 루트로
-    # 옮기면서 계약도 거기서만 찾으면, 루트의 계약이 통째로 무시되고 기본값이
-    # 만들어진다 — `preflight.required_env`·포트·정책이 더는 강제되지 않아,
-    # **사용자 계약이라면 막았을 배포가 통과**한다.
-    #
-    # 우선순위: 앱 루트의 계약(더 구체적) → 워크스페이스 루트의 계약 →
-    # 그래도 없으면 앱 루트 기준으로 기본 계약을 만든다.
-    contract = load_contract(check_root)
-    if contract is None and check_root != root:
-        contract = load_contract(root)
+    contract = load_contract(root)
     if contract is None:
-        contract = build_default_contract(_detect_preflight_contract_stack(check_root))
+        contract = build_default_contract(_detect_preflight_contract_stack(root))
     static_check_codes = None
     if app_kind == "static":
         static_check_codes = {
             code for code, _ in CHECK_REGISTRY
             if code.value in _STATIC_TARGET_INDEPENDENT_CHECK_CODES
         }
-    run = StaticPreflightRunner(str(check_root), contract).run_sync(static_check_codes)
-    proposals = generate_proposals(run, contract, check_root)
+    run = StaticPreflightRunner(str(root), contract).run_sync(static_check_codes)
+    proposals = generate_proposals(run, contract, root)
     workspace_root = root.resolve()
-    applied_root = check_root.resolve()
     for proposal in proposals:
         _deployment_remediation_proposals[proposal.proposal_id] = _StoredDeploymentRemediation(
             proposal=proposal,
             workspace_root=workspace_root,
-            app_root=applied_root,
         )
 
     proposal_by_code = {
@@ -1045,9 +834,6 @@ def _run_deployment_safety_preflight(
             for reason in reasons
         ],
         "warnings": warnings,
-        # 어느 폴더를 검사했는지 알려준다. 근거를 보여주는 화면인데 검사
-        # 대상이 루트가 아닐 수 있으면 그 사실도 보여야 한다.
-        "checked_path": _relative_app_root(check_root, root),
     }
 
 
@@ -1107,7 +893,6 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
             _run_deployment_safety_preflight,
             request.workspace_path,
             detected["app_kind"],
-            detected.get("app_root", ""),
         )
         return {**detected, **safety}
     except ValueError as exc:
@@ -1138,25 +923,7 @@ async def apply_deployment_remediation(
     except ImportError:  # pragma: no cover - package 실행 호환
         from core.remediation import apply_proposal  # type: ignore
 
-    # **적용은 검사한 폴더에 한다.** 워크스페이스 루트에 적용하면
-    # `backend/` 를 검사해 만든 Dockerfile 이 엉뚱한 곳에 생긴다.
-    #
-    # 다만 **지금 다시 확인한다.** 검사 시점과 적용 시점 사이에 사용자가
-    # 그 폴더를 심볼릭 링크로 바꿔치기하면, 저장해 둔 경로가 워크스페이스
-    # 밖을 가리키게 되고 생성된 파일이 승인 범위 밖에 쓰인다. 앞선 소유권
-    # 확인은 워크스페이스만 봤으므로 이 경로를 막지 못한다.
-    try:
-        target_root = stored.app_root.resolve(strict=True)
-        target_root.relative_to(stored.workspace_root)
-        if not target_root.is_dir():
-            raise ValueError("검사한 폴더가 더 이상 폴더가 아닙니다.")
-    except (ValueError, OSError) as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="검사한 폴더가 그 사이에 바뀌었습니다. 다시 검사해 주세요.",
-        ) from exc
-
-    result = await asyncio.to_thread(apply_proposal, proposal, target_root)
+    result = await asyncio.to_thread(apply_proposal, proposal, workspace)
     payload = {
         "success": result.success,
         "proposal_id": result.proposal_id,
