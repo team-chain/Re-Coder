@@ -527,3 +527,60 @@ def test_symlinked_directories_are_never_traversed(tmp_path):
 
     roots = deploy._iter_app_roots(tmp_path)
     assert not [p for p in roots if "mirror" in str(p)], roots
+
+
+# ── [회귀] Codex PR 리뷰 P2 (2026-08-12) ──────────────────────────────
+
+
+@pytest.mark.parametrize("src,label", [
+    ("import os\nfrom fastapi import FastAPI\napp = FastAPI()\n", "import 하나 먼저"),
+    ("import os, sys\nimport json\nfrom flask import Flask\n", "복수 import 먼저"),
+    ("import os\nimport sys\nimport json\nfrom django.conf import settings\n", "여러 줄"),
+])
+def test_framework_import_after_other_imports_is_still_found(tmp_path, src, label):
+    """[Codex P2] import 캡처가 개행을 넘어가 다음 줄을 삼키던 것.
+
+    `[\\w.,\\s]+` 의 `\\s` 가 개행을 포함해서, `import os` 가 다음 줄의
+    `from fastapi import FastAPI` 까지 한 덩어리로 먹었다. 그러면
+    `os\\nfrom fastapi import fastapi\\napp` 같은 없는 모듈 이름이 만들어지고
+    **그 줄은 다시 매치되지 않는다.** 프레임워크 import 앞에 다른 import 가
+    하나만 있어도 감지가 통째로 실패한다 — 거의 모든 실제 파일이 그렇다.
+    """
+    _write(tmp_path, {"main.py": src})
+    result = deploy._deployment_preflight(str(tmp_path))
+    assert result["app_kind"] == "server", f"{label}: {result}"
+
+
+def test_import_capture_does_not_span_lines(tmp_path):
+    """같은 것을 모듈 목록 수준에서 직접 확인한다."""
+    _write(tmp_path, {"main.py": "import os\nfrom fastapi import FastAPI\n"})
+    mods = deploy._python_imported_modules(tmp_path)
+    assert "fastapi" in mods and "os" in mods, mods
+    assert not any("\n" in m for m in mods), f"개행이 섞인 모듈 이름: {mods}"
+
+
+@pytest.mark.parametrize("config,expected,label", [
+    ("module.exports = {\n  // output: 'export'\n  reactStrictMode: true,\n}\n",
+     "server", "줄 주석"),
+    ("module.exports = {\n  /* output: 'export' */\n  reactStrictMode: true,\n}\n",
+     "server", "블록 주석"),
+    ("module.exports = { output: 'export' }\n", "static", "진짜 설정"),
+    # **같은 줄**에 둔다. 다음 줄에 두면 URL 뒤를 통째로 주석 처리해도
+    # 설정이 살아남아, 따옴표 추적이 빠져도 테스트가 통과한다(변이 시험에서
+    # 실제로 살아남았다).
+    ("module.exports = { assetPrefix: 'https://cdn.example.com', output: 'export' }\n",
+     "static", "URL 의 // 는 주석이 아니다 (같은 줄)"),
+])
+def test_commented_out_next_export_is_not_a_static_signal(tmp_path, config, expected, label):
+    """[Codex P2] 주석으로 남긴 `output: 'export'` 에 속아 SSR 앱에 S3 를 권했다.
+
+    예전 설정을 주석으로 남기는 건 아주 흔하다. `requirements.txt` 와
+    `pyproject.toml` 에서 같은 형태의 오탐을 이미 막았는데 여기만 남아
+    있었다.
+    """
+    _write(tmp_path, {
+        "package.json": '{"dependencies":{"next":"14"}}',
+        "next.config.js": config,
+    })
+    result = deploy._deployment_preflight(str(tmp_path))
+    assert result["app_kind"] == expected, f"{label}: {result}"

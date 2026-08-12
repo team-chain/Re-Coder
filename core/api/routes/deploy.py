@@ -293,8 +293,14 @@ _NODE_STATIC_DEPS = {
 
 #: 파이썬 소스에서 프레임워크를 찾을 때 쓰는 **실제 import 문** 패턴.
 #: 부분 문자열 검색은 주석 한 줄에 속는다 — 실측으로 확인한 오탐이다.
+#: **`\s` 를 쓰면 안 된다.** `\s` 는 개행을 포함하므로
+#: `import os` 다음 줄의 `from fastapi import FastAPI` 까지 한 덩어리로
+#: 삼켜, `os\nfrom fastapi import fastapi\napp` 같은 없는 모듈 이름이
+#: 만들어지고 **그 뒤 줄은 다시 매치되지 않는다.** 즉 프레임워크 import
+#: 앞에 다른 import 가 하나만 있어도 감지가 통째로 실패한다.
+#: 가로 공백(스페이스·탭)만 허용한다.
 _PY_IMPORT_RE = re.compile(
-    r"^[ \t]*(?:from[ \t]+(?P<from>[\w.]+)|import[ \t]+(?P<import>[\w.,\s]+))",
+    r"^[ \t]*(?:from[ \t]+(?P<from>[\w.]+)|import[ \t]+(?P<import>[\w., \t]+))",
     re.MULTILINE,
 )
 
@@ -596,6 +602,61 @@ def _node_deps(app_root: Path) -> tuple[set[str], dict]:
     return names, pkg
 
 
+def _strip_js_comments(text: str) -> str:
+    """JS 소스에서 주석을 지운다. 문자열 리터럴 안의 `//` 는 건드리지 않는다.
+
+    **왜 필요한가.** SSR 로 쓰는 Next 프로젝트가 예전 설정을 주석으로 남겨
+    두는 일은 아주 흔하다.
+
+        module.exports = {
+          // output: 'export'   ← 예전에 쓰던 것
+          reactStrictMode: true,
+        }
+
+    주석을 안 지우면 이 한 줄에 속아 **서버가 필요한 앱에 S3 를 추천한다.**
+    `requirements.txt` 와 `pyproject.toml` 에서 이미 같은 형태의 오탐을
+    막았는데 여기만 남아 있었다 — 하나를 고칠 때 같은 성질의 다른 자리를
+    함께 훑어야 한다는 게 또 확인됐다.
+
+    URL(`https://...`)의 `//` 를 주석으로 오인하지 않도록 따옴표 상태를
+    따라간다.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    quote = ""          # 현재 열려 있는 따옴표 (없으면 "")
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:       # 이스케이프는 통째로 넘긴다
+                out.append(nxt)
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'`":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            i += 2
+            while i < n and not (text[i] == "*" and i + 1 < n and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _next_is_static_export(app_root: Path, pkg: dict) -> bool:
     """Next.js 가 **정적 export** 설정인지.
 
@@ -603,7 +664,7 @@ def _next_is_static_export(app_root: Path, pkg: dict) -> bool:
     이걸 안 보면 정적 사이트를 컨테이너로 띄우라고 권하게 된다.
     """
     for name in ("next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"):
-        text = _read_text_if_exists(app_root / name, 20_000)
+        text = _strip_js_comments(_read_text_if_exists(app_root / name, 20_000))
         if re.search(r"output\s*:\s*['\"]export['\"]", text):
             return True
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}

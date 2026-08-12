@@ -1016,3 +1016,56 @@ def test_context_follows_the_latest_occurrence_of_a_repeated_error():
     trimmed = analyzer._trim_terminal_output(log, context_lines=2)
     assert "2차 시도" in trimmed, trimmed
     assert "1차 시도" not in trimmed, trimmed
+
+
+def test_npm_error_block_is_grouped_not_reduced_to_its_last_line():
+    """[Codex P2] npm 진단의 **마지막 줄은 거의 항상 로그 파일 경로 안내**다.
+
+    한 줄씩 매치하면 "가장 나중"이 그 안내문이 되어, 에러 카드에 원인 대신
+    `npm ERR!  C:\\...\\_logs\\...-debug.log` 가 뜬다. 「최신 에러를 고른다」로
+    바꾸면서 만든 회귀다 — 그 전에는 첫 매치라 `code ELIFECYCLE` 이 나왔다.
+    """
+    import analyzer
+
+    log = (
+        "> build\n> next build\n\n"
+        "Failed to compile.\n"
+        "./src/app/page.tsx\n"
+        "Type error: Property 'foo' does not exist on type 'Bar'.\n\n"
+        "npm ERR! code ELIFECYCLE\n"
+        "npm ERR! errno 1\n"
+        "npm ERR! my-app@0.1.0 build: `next build`\n"
+        "npm ERR! Exit status 1\n"
+        "npm ERR!\n"
+        "npm ERR! Failed at the my-app@0.1.0 build script.\n\n"
+        "npm ERR! A complete log of this run can be found in:\n"
+        "npm ERR!     /home/u/.npm/_logs/2026-08-12T02_11_43_120Z-debug.log"
+    )
+
+    out = analyzer._extract_error_text(log)
+    # 로그 경로 한 줄만 남으면 안 된다.
+    assert out.count("\n") > 0, f"한 줄만 잡혔다: {out!r}"
+    assert "code ELIFECYCLE" in out, out
+    assert "Failed at the my-app@0.1.0 build script." in out, out
+
+    # 진짜 원인은 블록 앞에 있으므로 맥락에 들어와야 한다.
+    trimmed = analyzer._trim_terminal_output(log)
+    assert "Type error: Property 'foo'" in trimmed, trimmed
+
+
+def test_a_later_traceback_still_beats_an_earlier_npm_block():
+    """블록으로 묶었다고 '최신 우선' 규칙이 깨지면 안 된다."""
+    import analyzer
+
+    log = (
+        "npm ERR! code ELIFECYCLE\n"
+        "npm ERR! Exit status 1\n"
+        "(위 에러는 고쳤음)\n"
+        "Traceback (most recent call last):\n"
+        '  File "a.py", line 1, in <module>\n'
+        "    import gone\n"
+        "ModuleNotFoundError: No module named 'gone'"
+    )
+    out = analyzer._extract_error_text(log)
+    assert "ModuleNotFoundError" in out, out
+    assert "ELIFECYCLE" not in out, out

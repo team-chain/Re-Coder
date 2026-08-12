@@ -104,7 +104,14 @@ _ERROR_PATTERNS = [
     ),
     re.compile(r"^(\w+(?:Error|Exception):.*?)$", re.M),
     re.compile(r"^(error\s+TS\d+:.*?)$", re.M | re.I),
-    re.compile(r"^(npm ERR!.*?)$", re.M),
+    # npm 은 진단을 **여러 줄에 걸쳐** 뱉고, 그 마지막 줄은 거의 항상
+    # `npm ERR!     C:\...\_logs\...-debug.log` 라는 **로그 파일 경로 안내**다.
+    # 한 줄씩 매치하면 "가장 나중"이 그 안내문이 되어, 에러 카드에 원인 대신
+    # 로그 경로가 뜬다. 실제 로그로 재현했다.
+    #
+    # 그래서 **붙어 있는 npm ERR! 줄들을 한 덩어리로** 본다. 사이의 빈 줄은
+    # 같은 블록으로 이어 붙인다 — npm 이 실제로 빈 줄을 끼워 넣는다.
+    re.compile(r"^(npm ERR![^\n]*(?:\n(?:[ \t]*\n)*npm ERR![^\n]*)*)", re.M),
     re.compile(r"^(yarn run.*?ERROR.*?)$", re.M | re.I),
 ]
 
