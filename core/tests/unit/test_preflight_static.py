@@ -553,3 +553,84 @@ def test_gitignore_search_stops_at_the_repository_boundary(tmp_path):
     inner.mkdir()
 
     assert _find_gitignore(inner) is None, "저장소 경계를 넘어 찾았다"
+
+
+# ── [회귀] Codex 3차 P1 — gitignore 앵커 시맨틱 ───────────────────────
+
+
+def _matches(path, patterns):
+    try:
+        from preflight.checks.env_checks import _env_pattern_matches
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.env_checks import _env_pattern_matches  # type: ignore
+    return _env_pattern_matches(path, patterns)
+
+
+def test_root_anchored_pattern_does_not_cover_a_nested_env():
+    """[Codex P1] 이건 **놓치는 쪽**의 오류라 오탐보다 나쁘다.
+
+    저장소 루트 `.gitignore` 에 `/.env` 만 있으면 git 은 루트의 `.env` 만
+    무시한다. 파일 이름만 비교하면 `backend/.env` 도 무시된다고 판단해,
+    **실제로 추적되는 백엔드 시크릿을 통과**시킨다.
+    """
+    assert _matches(".env", ["/.env"]) is True
+    assert _matches("backend/.env", ["/.env"]) is False
+
+
+@pytest.mark.parametrize("path,patterns,expected,label", [
+    ("backend/.env", [".env"], True, "이름 패턴은 어느 깊이에나"),
+    ("backend/.env", ["*.env"], True, "와일드카드"),
+    (".env.local", [".env.*"], True, "점 포함 와일드카드"),
+    ("backend/.env", ["backend/.env"], True, "중간 / 는 고정"),
+    ("other/.env", ["backend/.env"], False, "고정 패턴은 다른 폴더에 안 걸림"),
+    ("backend/.env", ["**/.env"], True, "** 패턴"),
+    ("a/b/.env", ["/a/*/.env"], True, "* 는 한 단계"),
+    ("a/b/c/.env", ["/a/*/.env"], False, "* 는 / 를 넘지 않는다"),
+    ("backend/.env", ["backend/"], True, "폴더가 무시되면 그 아래 전부"),
+    ("backend/.env", ["frontend/"], False, "다른 폴더는 무관"),
+    ("backend/.env", [".env", "!backend/.env"], False, "부정 규칙이 나중이면 이김"),
+    ("backend/.env", ["!backend/.env", ".env"], True, "순서가 뒤집히면 무시됨"),
+    ("backend/.env", [], False, "패턴이 없으면 무시 안 됨"),
+])
+def test_gitignore_semantics(path, patterns, expected, label):
+    """git 규칙 중 이 검사에 필요한 것들."""
+    assert _matches(path, patterns) is expected, label
+
+
+def test_env_path_is_measured_from_the_gitignore_directory(tmp_path):
+    """검사 대상 경로는 **`.gitignore` 가 있는 폴더 기준**이어야 한다."""
+    try:
+        from preflight.checks.env_checks import _env_path_relative_to
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.env_checks import _env_path_relative_to  # type: ignore
+
+    (tmp_path / ".git").mkdir()
+    gitignore = tmp_path / ".gitignore"
+    gitignore.write_text("/.env\n", encoding="utf-8")
+    backend = tmp_path / "backend"
+    backend.mkdir()
+
+    assert _env_path_relative_to(backend, ".env", gitignore) == "backend/.env"
+    assert _env_path_relative_to(tmp_path, ".env", gitignore) == ".env"
+
+
+def test_nested_secret_is_reported_when_only_the_root_env_is_ignored(tmp_path):
+    """통합 확인 — 루트만 무시하는 설정에서 backend/.env 는 막혀야 한다."""
+    try:
+        from preflight.checks.env_checks import check_env_file_gitignored
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.env_checks import check_env_file_gitignored  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text("/.env\n", encoding="utf-8")
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+    contract = build_default_contract(ContractStack.PYTHON_FASTAPI)
+    result = check_env_file_gitignored(backend, contract)
+    assert not result.passed, "추적되는 시크릿을 통과시켰다"

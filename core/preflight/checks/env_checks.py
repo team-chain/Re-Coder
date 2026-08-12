@@ -194,22 +194,109 @@ def _gitignore_patterns(workspace: Path) -> list[str]:
         return []
 
 
-def _env_pattern_matches(env_filename: str, patterns: list[str]) -> bool:
-    """env_filename 이 gitignore 패턴들 중 하나에 매칭되는지.
+def _glob_to_regex(pattern: str, *, anchored: bool) -> str:
+    """gitignore 글롭 → 정규식. `*` 는 `/` 를 넘지 않는다(git 규칙)."""
+    out: list[str] = []
+    i, n = 0, len(pattern)
+    while i < n:
+        ch = pattern[i]
+        if ch == "*":
+            if i + 1 < n and pattern[i + 1] == "*":
+                out.append(".*")
+                i += 2
+                if i < n and pattern[i] == "/":
+                    i += 1
+                continue
+            out.append("[^/]*")
+        elif ch == "?":
+            out.append("[^/]")
+        elif ch == "[":
+            close = pattern.find("]", i + 1)
+            if close == -1:
+                out.append(re.escape(ch))
+            else:
+                out.append(pattern[i:close + 1])
+                i = close + 1
+                continue
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    body = "".join(out)
+    # 앵커가 없는 패턴은 어느 깊이에서나 맞는다.
+    return body if anchored else rf"(?:.*/)?{body}"
 
-    완전 정확한 gitignore 시맨틱은 아니지만 일반적인 케이스 (`.env`, `.env.*`,
-    `*.env`, 절대경로) 는 처리.
+
+def _env_pattern_matches(env_path: str, patterns: list[str]) -> bool:
+    """`env_path` 가 gitignore 패턴에 걸리는지.
+
+    **`env_path` 는 `.gitignore` 가 있는 폴더 기준 상대 경로다.** 파일 이름만
+    넘기면 안 된다 — git 은 `/`로 시작하는 패턴을 `.gitignore` 가 있는 폴더에
+    **고정**해서 적용하기 때문이다.
+
+    저장소 루트의 `.gitignore` 에 `/.env` 만 있는 모노레포를 생각해 보자.
+    이름만 비교하면 `backend/.env` 도 무시된다고 판단하지만, git 은 루트의
+    `.env` 만 무시한다. 즉 **백엔드의 시크릿은 실제로 추적되는데 검사는
+    통과**한다 — 오탐보다 나쁜, 놓치는 쪽의 오류다.
+
+    git 규칙 중 이 검사에 필요한 것만 구현한다:
+      · `/` 로 시작 → `.gitignore` 폴더에 고정
+      · 중간에 `/` 포함 → 마찬가지로 고정
+      · `/` 없음 → 어느 깊이의 이름에나 매칭
+      · `!` 로 시작 → 부정. **마지막에 매칭된 규칙이 이긴다.**
+      · 끝의 `/` 는 디렉터리 표시 — 여기서는 떼고 본다
     """
-    base = env_filename.split("/")[-1]
-    for p in patterns:
-        if p in {env_filename, base, f"./{env_filename}", f"/{env_filename}"}:
-            return True
-        # 와일드카드 간이 처리
-        if "*" in p:
-            regex = re.escape(p).replace(r"\*", ".*")
-            if re.fullmatch(regex, env_filename) or re.fullmatch(regex, base):
-                return True
-    return False
+    target = (env_path or "").replace("\\", "/")
+    # **`lstrip("./")` 을 쓰면 안 된다.** 문자 *집합*을 지우기 때문에
+    # `.env` 가 `env` 로 깎여 모든 비교가 어긋난다. 접두사만 떼어낸다.
+    while target.startswith("./"):
+        target = target[2:]
+    target = target.lstrip("/")
+    if not target:
+        return False
+
+    # **조상 폴더도 함께 본다.** git 에서 어떤 폴더가 무시되면 그 아래
+    # 전부가 무시된다 — `backend/` 한 줄이 `backend/.env` 를 덮는다.
+    parts = target.split("/")
+    candidates = [target] + ["/".join(parts[:i]) for i in range(1, len(parts))]
+
+    ignored = False
+    for raw in patterns:
+        pattern = raw.strip()
+        if not pattern:
+            continue
+        negate = pattern.startswith("!")
+        if negate:
+            pattern = pattern[1:]
+        pattern = pattern.rstrip("/")
+        if not pattern:
+            continue
+        if pattern.startswith("/"):
+            anchored, pattern = True, pattern[1:]
+        else:
+            anchored = "/" in pattern
+        try:
+            regex = re.compile(_glob_to_regex(pattern, anchored=anchored))
+        except re.error:
+            continue
+        if any(regex.fullmatch(c) for c in candidates):
+            ignored = not negate
+    return ignored
+
+
+def _env_path_relative_to(workspace: Path, env_file: str, gitignore_path: Path) -> str:
+    """검사 대상 env 파일을 **`.gitignore` 가 있는 폴더 기준** 상대 경로로.
+
+    `.gitignore` 가 상위 폴더에 있으면 `backend/.env` 같은 경로가 된다.
+    이 경로로 비교해야 `/`로 고정된 패턴을 git 과 같게 판정할 수 있다.
+    """
+    fallback = (env_file or "").replace("\\", "/")
+    while fallback.startswith("./"):
+        fallback = fallback[2:]
+    try:
+        env_abs = (workspace / env_file).resolve()
+        return env_abs.relative_to(gitignore_path.parent.resolve()).as_posix()
+    except (ValueError, OSError):
+        return fallback
 
 
 def check_env_file_gitignored(
@@ -250,7 +337,7 @@ def check_env_file_gitignored(
             details=details,
         )
 
-    if _env_pattern_matches(env_file, patterns):
+    if _env_pattern_matches(_env_path_relative_to(workspace, env_file, gitignore_path), patterns):
         return CheckResult(
             code=PreflightCheckCode.ENV_FILE_NOT_GITIGNORED,
             passed=True,

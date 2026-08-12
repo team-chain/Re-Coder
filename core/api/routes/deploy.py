@@ -730,13 +730,25 @@ def _deployment_preflight(workspace_path: str) -> dict:
     # `APP_ENTRYPOINT_NOT_FOUND` 로 막는다. 확장은 `blocked` 가 참이면 배포
     # 대상 선택을 통째로 비활성화하므로, **사용자가 아무것도 할 수 없는
     # 막다른 길**이 된다. 하위 폴더 탐색을 넣으면서 만든 구멍이다.
-    server_app_root: Optional[Path] = None
+    # **근거의 종류를 나눠 둔다.**
+    #
+    # 저장소 루트에 `Dockerfile` 하나만 있고 진짜 앱은 `backend/` 에 있는
+    # 배치가 흔하다. 루트를 먼저 방문하므로 Dockerfile 이 앱 루트를 선점하면,
+    # 뒤에 나온 FastAPI 근거가 그걸 못 이겨 검사가 다시 루트로 가고
+    # `APP_ENTRYPOINT_NOT_FOUND` 막다른 길이 그대로 재발한다.
+    #
+    # 컨테이너·프로세스 선언은 "여기 앱이 있다"가 아니라 "여기서 뭔가를
+    # 띄운다"는 **일반적 메타데이터**다. 프레임워크와 진입점을 실제로 가진
+    # 폴더가 있으면 그쪽이 이겨야 한다.
+    strong_server_root: Optional[Path] = None    # 프레임워크·런타임 근거
+    generic_server_root: Optional[Path] = None   # Dockerfile·compose·Procfile
     static_app_root: Optional[Path] = None
 
     for app_root in _iter_app_roots(root):
         where = _label_for(app_root, root)
-        before_server = len(server_evidence)
         before_static = len(static_evidence)
+        strong_here = False
+        generic_here = False
 
         # ── 파이썬 ──────────────────────────────────────────────────
         py_deps = _python_deps(app_root)
@@ -744,6 +756,7 @@ def _deployment_preflight(workspace_path: str) -> dict:
         for dep, label in _PY_SERVER_DEPS.items():
             if dep in py_deps:
                 server_evidence.append(f"{label} 서버{where}")
+                strong_here = True
                 break
         else:
             # 의존성 선언이 없으면 실제 import 문을 본다.
@@ -752,6 +765,7 @@ def _deployment_preflight(workspace_path: str) -> dict:
                 for dep, label in _PY_SERVER_DEPS.items():
                     if dep in py_modules:
                         server_evidence.append(f"{label} 서버{where}")
+                        strong_here = True
                         break
 
         # ── Node ────────────────────────────────────────────────────
@@ -761,9 +775,11 @@ def _deployment_preflight(workspace_path: str) -> dict:
                 static_evidence.append(f"Next.js 정적 export{where}")
             else:
                 server_evidence.append(f"Next.js 서버{where}")
+                strong_here = True
         for dep, label in _NODE_SERVER_DEPS.items():
             if dep in node_deps:
                 server_evidence.append(f"{label} 서버{where}")
+                strong_here = True
                 break
         for dep, label in _NODE_STATIC_DEPS.items():
             if dep in node_deps:
@@ -776,23 +792,30 @@ def _deployment_preflight(workspace_path: str) -> dict:
         # "잘 모르겠다"고 하는 앞뒤 안 맞는 화면이 된다.
         if (app_root / "go.mod").is_file():
             server_evidence.append(f"Go 모듈{where}")
+            strong_here = True
         if (app_root / "pom.xml").is_file() or (app_root / "build.gradle").is_file() \
                 or (app_root / "build.gradle.kts").is_file():
             server_evidence.append(f"Java/Spring 빌드{where}")
+            strong_here = True
         if (app_root / "Gemfile").is_file():
             server_evidence.append(f"Ruby/Rails{where}")
+            strong_here = True
         if (app_root / "composer.json").is_file():
             server_evidence.append(f"PHP/Composer{where}")
+            strong_here = True
 
         # ── 컨테이너·프로세스 선언 ───────────────────────────────────
         # **가장 강한 서버 신호인데 예전 판은 아예 보지 않았다.**
         # 컨테이너로 띄우도록 만들어 둔 앱을 정적 호스팅으로 권할 수는 없다.
         if (app_root / "Dockerfile").is_file():
             server_evidence.append(f"Dockerfile{where}")
+            generic_here = True
         elif (app_root / "docker-compose.yml").is_file() or (app_root / "docker-compose.yaml").is_file():
             server_evidence.append(f"docker-compose{where}")
+            generic_here = True
         if (app_root / "Procfile").is_file():
             server_evidence.append(f"Procfile{where}")
+            generic_here = True
 
         # ── 정적 사이트 ──────────────────────────────────────────────
         for entry in ("index.html", "public/index.html", "src/index.html"):
@@ -821,8 +844,10 @@ def _deployment_preflight(workspace_path: str) -> dict:
         # 가장 먼저 근거를 낸 폴더를 그 종류의 앱 루트로 삼는다.
         # `_iter_app_roots` 가 강한 서버 표식이 있는 폴더를 앞에 두므로,
         # 먼저 나온 것이 더 확실한 후보다.
-        if server_app_root is None and len(server_evidence) > before_server:
-            server_app_root = app_root
+        if strong_here and strong_server_root is None:
+            strong_server_root = app_root
+        if generic_here and generic_server_root is None:
+            generic_server_root = app_root
         if static_app_root is None and len(static_evidence) > before_static:
             static_app_root = app_root
 
@@ -849,7 +874,7 @@ def _deployment_preflight(workspace_path: str) -> dict:
             "summary": f"서버형 앱 — {'·'.join(server_evidence[:4])}",
             "evidence": evidence,
             "recommended_target": "ecs",
-            "app_root": _relative_app_root(server_app_root, root),
+            "app_root": _relative_app_root(strong_server_root or generic_server_root, root),
         }
 
     if static_evidence:
@@ -948,7 +973,18 @@ def _run_deployment_safety_preflight(
         from core.preflight.contract_loader import build_default_contract, load_contract  # type: ignore
         from core.remediation import generate_proposals  # type: ignore
 
+    # **사용자가 정한 계약을 조용히 버리지 않는다.**
+    #
+    # `recoder.yml` 은 문서상 워크스페이스 루트에 둔다. 검사 위치만 앱 루트로
+    # 옮기면서 계약도 거기서만 찾으면, 루트의 계약이 통째로 무시되고 기본값이
+    # 만들어진다 — `preflight.required_env`·포트·정책이 더는 강제되지 않아,
+    # **사용자 계약이라면 막았을 배포가 통과**한다.
+    #
+    # 우선순위: 앱 루트의 계약(더 구체적) → 워크스페이스 루트의 계약 →
+    # 그래도 없으면 앱 루트 기준으로 기본 계약을 만든다.
     contract = load_contract(check_root)
+    if contract is None and check_root != root:
+        contract = load_contract(root)
     if contract is None:
         contract = build_default_contract(_detect_preflight_contract_stack(check_root))
     static_check_codes = None
@@ -1104,7 +1140,23 @@ async def apply_deployment_remediation(
 
     # **적용은 검사한 폴더에 한다.** 워크스페이스 루트에 적용하면
     # `backend/` 를 검사해 만든 Dockerfile 이 엉뚱한 곳에 생긴다.
-    result = await asyncio.to_thread(apply_proposal, proposal, stored.app_root)
+    #
+    # 다만 **지금 다시 확인한다.** 검사 시점과 적용 시점 사이에 사용자가
+    # 그 폴더를 심볼릭 링크로 바꿔치기하면, 저장해 둔 경로가 워크스페이스
+    # 밖을 가리키게 되고 생성된 파일이 승인 범위 밖에 쓰인다. 앞선 소유권
+    # 확인은 워크스페이스만 봤으므로 이 경로를 막지 못한다.
+    try:
+        target_root = stored.app_root.resolve(strict=True)
+        target_root.relative_to(stored.workspace_root)
+        if not target_root.is_dir():
+            raise ValueError("검사한 폴더가 더 이상 폴더가 아닙니다.")
+    except (ValueError, OSError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="검사한 폴더가 그 사이에 바뀌었습니다. 다시 검사해 주세요.",
+        ) from exc
+
+    result = await asyncio.to_thread(apply_proposal, proposal, target_root)
     payload = {
         "success": result.success,
         "proposal_id": result.proposal_id,

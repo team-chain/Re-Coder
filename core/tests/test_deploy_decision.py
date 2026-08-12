@@ -793,3 +793,122 @@ def test_quoted_next_output_key_is_accepted(tmp_path, config, expected, label):
         "next.config.js": config,
     })
     assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == expected, label
+
+
+# ── [회귀] Codex 3차 P1/P2 ────────────────────────────────────────────
+
+_CONTRACT_YML = (
+    "project:\n  name: demo\n  stack: python-fastapi\n"
+    "runtime:\n  env_file: .env\n  port: 9999\n"
+    "preflight:\n  required_env: [SUPER_SECRET_KEY]\n"
+)
+
+
+def test_framework_evidence_beats_root_container_metadata(tmp_path):
+    """[Codex P1] 저장소 루트의 `Dockerfile` 이 앱 루트를 선점하던 것.
+
+    루트를 먼저 방문하므로 Dockerfile 이 `server_app_root` 를 잡으면, 뒤에
+    나온 `backend/` 의 FastAPI 근거가 그걸 못 이겼다. 그러면 검사가 다시
+    루트로 가서 `APP_ENTRYPOINT_NOT_FOUND` 막다른 길이 그대로 재발한다.
+
+    컨테이너 선언은 "여기서 뭔가를 띄운다"는 일반적 메타데이터고,
+    프레임워크와 진입점을 가진 폴더가 있으면 그쪽이 앱 루트다.
+    """
+    _write(tmp_path, {
+        "Dockerfile": "FROM python:3.12\n",
+        "backend/requirements.txt": "fastapi\nuvicorn\n",
+        "backend/src/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
+        **REPO_FILES,
+    })
+    detected = deploy._deployment_preflight(str(tmp_path))
+    assert detected["app_root"] == "backend", detected
+
+    safety = deploy._run_deployment_safety_preflight(
+        str(tmp_path), detected["app_kind"], detected["app_root"]
+    )
+    assert "APP_ENTRYPOINT_NOT_FOUND" not in [r["code"] for r in safety["reasons"]]
+
+
+def test_container_metadata_still_used_when_nothing_stronger_exists(tmp_path):
+    """반대 방향 — 프레임워크 근거가 없으면 컨테이너 선언이라도 쓴다."""
+    _write(tmp_path, {"svc/Dockerfile": "FROM node:20\n", **REPO_FILES})
+    detected = deploy._deployment_preflight(str(tmp_path))
+    assert detected["app_kind"] == "server"
+    assert detected["app_root"] == "svc", detected
+
+
+def test_workspace_release_contract_is_not_discarded_for_nested_apps(tmp_path):
+    """[Codex P1] 루트의 `recoder.yml` 을 조용히 버리면 정책이 사라진다.
+
+    검사 위치만 앱 루트로 옮기면서 계약도 거기서만 찾으면, 사용자가 정한
+    `required_env`·포트·정책이 더는 강제되지 않는다 — **사용자 계약이라면
+    막았을 배포가 통과**한다.
+    """
+    _write(tmp_path, {
+        "recoder.yml": _CONTRACT_YML,
+        "backend/requirements.txt": "fastapi\n",
+        "backend/src/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
+        **REPO_FILES,
+    })
+    detected = deploy._deployment_preflight(str(tmp_path))
+    safety = deploy._run_deployment_safety_preflight(
+        str(tmp_path), detected["app_kind"], detected["app_root"]
+    )
+    env_blockers = [r for r in safety["reasons"] if r["code"] == "MISSING_REQUIRED_ENV"]
+    assert env_blockers, safety["reasons"]
+    assert "SUPER_SECRET_KEY" in env_blockers[0]["fix"], env_blockers
+
+
+def test_app_root_contract_wins_over_the_workspace_contract(tmp_path):
+    """앱 루트에 자체 계약이 있으면 그쪽이 더 구체적이므로 우선한다."""
+    _write(tmp_path, {
+        "recoder.yml": _CONTRACT_YML,
+        "backend/recoder.yml": _CONTRACT_YML.replace("SUPER_SECRET_KEY", "BACKEND_ONLY_KEY"),
+        "backend/requirements.txt": "fastapi\n",
+        "backend/src/main.py": "from fastapi import FastAPI\n",
+        **REPO_FILES,
+    })
+    detected = deploy._deployment_preflight(str(tmp_path))
+    safety = deploy._run_deployment_safety_preflight(
+        str(tmp_path), detected["app_kind"], detected["app_root"]
+    )
+    env_blockers = [r for r in safety["reasons"] if r["code"] == "MISSING_REQUIRED_ENV"]
+    assert env_blockers and "BACKEND_ONLY_KEY" in env_blockers[0]["fix"], env_blockers
+
+
+def test_app_root_is_revalidated_right_before_applying(tmp_path):
+    """[Codex P2] 검사와 적용 사이에 폴더가 링크로 바뀌면 승인 범위 밖에 쓴다.
+
+    앞선 소유권 확인은 **워크스페이스만** 보므로 이 경로를 막지 못한다.
+    """
+    import asyncio as _asyncio
+    import os as _os
+    import shutil as _shutil
+
+    app = {k: v for k, v in APP_FILES.items() if k != "Dockerfile"}
+    _write(tmp_path, {**{f"backend/{k}": v for k, v in app.items()}, **REPO_FILES})
+    outside = tmp_path.parent / f"outside-{tmp_path.name}"
+    outside.mkdir(exist_ok=True)
+
+    detected = deploy._deployment_preflight(str(tmp_path))
+    deploy._deployment_remediation_proposals.clear()
+    safety = deploy._run_deployment_safety_preflight(
+        str(tmp_path), detected["app_kind"], detected["app_root"]
+    )
+    proposal_id = next((r["proposal_id"] for r in safety["reasons"] if r["proposal_id"]), None)
+    if proposal_id is None:
+        pytest.skip("자동 적용 가능한 제안이 없다")
+
+    _shutil.rmtree(tmp_path / "backend")
+    try:
+        _os.symlink(outside, tmp_path / "backend", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("이 환경에서는 심볼릭 링크를 만들 수 없다")
+
+    with pytest.raises(HTTPException) as caught:
+        _asyncio.run(deploy.apply_deployment_remediation(
+            proposal_id,
+            deploy.DeploymentRemediationApplyRequest(workspace_path=str(tmp_path)),
+        ))
+    assert caught.value.status_code == 409
+    assert not list(outside.iterdir()), "워크스페이스 밖에 파일이 생겼다"
