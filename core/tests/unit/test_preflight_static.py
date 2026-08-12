@@ -512,3 +512,44 @@ def test_runner__safe_workspace_path_rejects_invalid() -> None:
         StaticPreflightRunner("", make_contract(), project_id="invalid")
     with pytest.raises(ValueError):
         StaticPreflightRunner("/this/path/should/not/exist/12345", make_contract())
+
+
+def test_gitignore_is_found_in_a_parent_directory(tmp_path):
+    """[회귀] `.gitignore` 는 보통 저장소 루트에 하나만 둔다.
+
+    모노레포에서 검사 대상이 `backend/` 일 때 그 폴더만 보면, 루트의
+    `.gitignore` 가 `.env` 를 이미 무시하고 있는데도 "gitignore 가 없다"고
+    막는다 — **사용자는 고칠 것이 없는데 막히는** 형태다.
+    """
+    try:
+        from preflight.checks.env_checks import _find_gitignore, _gitignore_patterns
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.env_checks import _find_gitignore, _gitignore_patterns  # type: ignore
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text(".env\n", encoding="utf-8")
+    nested = tmp_path / "backend" / "src"
+    nested.mkdir(parents=True)
+
+    assert _find_gitignore(nested) == tmp_path / ".gitignore"
+    assert ".env" in _gitignore_patterns(nested)
+
+
+def test_gitignore_search_stops_at_the_repository_boundary(tmp_path):
+    """저장소 루트에 `.gitignore` 가 없으면 **더 올라가지 않는다.**
+
+    남의 저장소나 홈 디렉터리의 `.gitignore` 를 이 프로젝트의 것으로
+    오인하면, 실제로는 secret 이 추적되고 있는데 통과시킨다.
+    """
+    try:
+        from preflight.checks.env_checks import _find_gitignore
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.env_checks import _find_gitignore  # type: ignore
+
+    (tmp_path / ".gitignore").write_text(".env\n", encoding="utf-8")   # 바깥쪽
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    inner = repo / "backend"
+    inner.mkdir()
+
+    assert _find_gitignore(inner) is None, "저장소 경계를 넘어 찾았다"

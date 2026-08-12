@@ -584,3 +584,212 @@ def test_commented_out_next_export_is_not_a_static_signal(tmp_path, config, expe
     })
     result = deploy._deployment_preflight(str(tmp_path))
     assert result["app_kind"] == expected, f"{label}: {result}"
+
+
+# ── [회귀] Codex PR 리뷰 2차 — P1 포함 ────────────────────────────────
+
+
+APP_FILES = {
+    "requirements.txt": "fastapi\nuvicorn\n",
+    "src/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
+    "Dockerfile": "FROM python:3.12\n",
+}
+REPO_FILES = {".gitignore": ".env\n", ".git/config": ""}
+
+
+def test_detected_app_root_is_reported(tmp_path):
+    """감지 결과에 **어느 폴더에서 찾았는지**가 실려야 한다."""
+    _write(tmp_path, {f"backend/{k}": v for k, v in APP_FILES.items()})
+    result = deploy._deployment_preflight(str(tmp_path))
+    assert result["app_kind"] == "server"
+    assert result["app_root"] == "backend", result
+
+    flat = tmp_path / "flat"
+    _write(flat, APP_FILES)
+    assert deploy._deployment_preflight(str(flat))["app_root"] == "", "루트면 빈 문자열"
+
+
+def test_safety_preflight_checks_the_detected_app_root(tmp_path):
+    """[Codex P1] 감지는 `backend/` 를 찾았는데 검사는 루트만 뒤지던 것.
+
+    그러면 방금 앱을 찾아 놓고 `APP_ENTRYPOINT_NOT_FOUND` 로 막는다. 확장은
+    `blocked` 가 참이면 배포 대상 선택을 통째로 비활성화하므로 **사용자가
+    아무것도 할 수 없는 막다른 길**이 된다. 하위 폴더 탐색을 넣으면서 만든
+    구멍이다.
+    """
+    _write(tmp_path, {**{f"backend/{k}": v for k, v in APP_FILES.items()}, **REPO_FILES})
+    detected = deploy._deployment_preflight(str(tmp_path))
+    safety = deploy._run_deployment_safety_preflight(
+        str(tmp_path), detected["app_kind"], detected["app_root"]
+    )
+    codes = [r["code"] for r in safety["reasons"]]
+    assert "APP_ENTRYPOINT_NOT_FOUND" not in codes, codes
+    assert safety["checked_path"] == "backend", safety
+
+
+def test_nested_and_root_layouts_produce_the_same_verdict(tmp_path):
+    """[Codex P1] **같은 앱이면 어디에 있든 같은 결과**여야 한다.
+
+    이게 이 수정의 진짜 기준이다. 개별 검사 하나를 통과시키는 게 아니라,
+    폴더 배치 때문에 판단이 갈리지 않게 하는 것이다.
+    """
+    flat = tmp_path / "flat"
+    _write(flat, {**APP_FILES, **REPO_FILES})
+    nested = tmp_path / "nested"
+    _write(nested, {**{f"backend/{k}": v for k, v in APP_FILES.items()}, **REPO_FILES,
+                    "frontend/package.json": '{"dependencies":{"react":"^18"}}'})
+
+    a = deploy._deployment_preflight(str(flat))
+    b = deploy._deployment_preflight(str(nested))
+    sa = deploy._run_deployment_safety_preflight(str(flat), a["app_kind"], a["app_root"])
+    sb = deploy._run_deployment_safety_preflight(str(nested), b["app_kind"], b["app_root"])
+
+    assert [r["code"] for r in sa["reasons"]] == [r["code"] for r in sb["reasons"]], (
+        f"루트={[r['code'] for r in sa['reasons']]} / "
+        f"하위={[r['code'] for r in sb['reasons']]}"
+    )
+
+
+def test_contract_stack_detection_matches_the_app_detector(tmp_path):
+    """[Codex P1 원인] 두 감지기가 서로 다른 기준을 쓰면 안 된다.
+
+    `_detect_preflight_contract_stack` 의 docstring 이 원래부터 "배포 대상
+    감지와 정적 Preflight 가 서로 다른 기준을 쓰지 않도록"이라고 못 박고
+    있었는데, 감지 쪽만 고치면서 그 약속이 깨졌다. 진입점이 `src/main.py` 면
+    CUSTOM 으로 떨어지고, CUSTOM 후보에는 `src/main.py` 가 없다.
+    """
+    try:
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.schemas import ContractStack  # type: ignore
+
+    _write(tmp_path, APP_FILES)
+    assert deploy._detect_preflight_contract_stack(tmp_path) == ContractStack.PYTHON_FASTAPI
+
+    flask_root = tmp_path / "flask_app"
+    _write(flask_root, {"requirements.txt": "flask\n", "src/app.py": "from flask import Flask\n"})
+    assert deploy._detect_preflight_contract_stack(flask_root) == ContractStack.PYTHON_FLASK
+
+
+def test_safety_preflight_rejects_an_app_root_outside_the_workspace(tmp_path):
+    """`app_root` 는 응답에 실려 확장까지 갔다 돌아온다 — 경로 탈출을 막는다.
+
+    `checked_path` 만 보면 부족하다. 탈출에 성공해도 상대경로 계산이 실패해
+    빈 문자열이 나오기 때문이다. **실제로 어느 폴더를 검사했는지**가
+    결과로 드러나게 만들어 대조한다.
+    """
+    ws = tmp_path / "ws"
+    _write(ws, {**REPO_FILES, "requirements.txt": "fastapi\n", "src/main.py": "from fastapi import FastAPI\n"})
+    # 바깥 폴더에는 Dockerfile 이 있다 — 여기를 검사하면 MISSING_DOCKERFILE 이 사라진다.
+    outside = tmp_path / "outside"
+    _write(outside, {"requirements.txt": "fastapi\n", "src/main.py": "from fastapi import FastAPI\n",
+                     "Dockerfile": "FROM python:3.12\n"})
+
+    escaped = deploy._run_deployment_safety_preflight(str(ws), "server", "../outside")
+    inside = deploy._run_deployment_safety_preflight(str(ws), "server", "")
+
+    assert escaped["checked_path"] == "", escaped
+    assert [r["code"] for r in escaped["reasons"]] == [r["code"] for r in inside["reasons"]], (
+        "워크스페이스 밖을 검사했다"
+    )
+
+
+def test_preflight_route_passes_the_detected_app_root(tmp_path):
+    """[Codex P1] 라우트가 감지 결과의 `app_root` 를 검사에 실제로 넘기는가.
+
+    함수 단위로만 검증하면 **배선이 빠져도 통과한다** — 변이 시험에서 실제로
+    살아남았다. 사용자가 지나는 경로 그대로 확인한다.
+    """
+    import asyncio as _asyncio
+
+    _write(tmp_path, {**{f"backend/{k}": v for k, v in APP_FILES.items()}, **REPO_FILES})
+    payload = _asyncio.run(
+        deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path)))
+    )
+    assert payload["app_root"] == "backend", payload
+    assert payload["checked_path"] == "backend", payload
+    assert "APP_ENTRYPOINT_NOT_FOUND" not in [r["code"] for r in payload["reasons"]]
+
+
+def test_applied_remediation_lands_in_the_app_root(tmp_path):
+    """[Codex P1] 수정안이 **검사한 폴더**에 실제로 쓰이는가.
+
+    저장 구조만 확인하면 적용 경로가 워크스페이스 루트로 되돌아가도
+    통과한다 — 이것도 변이 시험에서 살아남았다. 파일이 어디 생기는지를 본다.
+    """
+    import asyncio as _asyncio
+
+    # Dockerfile 을 빼서 MISSING_DOCKERFILE 제안이 나오게 한다.
+    app = {k: v for k, v in APP_FILES.items() if k != "Dockerfile"}
+    _write(tmp_path, {**{f"backend/{k}": v for k, v in app.items()}, **REPO_FILES})
+
+    detected = deploy._deployment_preflight(str(tmp_path))
+    deploy._deployment_remediation_proposals.clear()
+    safety = deploy._run_deployment_safety_preflight(
+        str(tmp_path), detected["app_kind"], detected["app_root"]
+    )
+    target = next(
+        (r for r in safety["reasons"]
+         if r["code"] == "MISSING_DOCKERFILE" and r["remediation_available"]),
+        None,
+    )
+    if target is None:
+        pytest.skip("이 조합에서 자동 적용 가능한 Dockerfile 제안이 나오지 않는다")
+
+    _asyncio.run(deploy.apply_deployment_remediation(
+        target["proposal_id"],
+        deploy.DeploymentRemediationApplyRequest(workspace_path=str(tmp_path)),
+    ))
+
+    assert (tmp_path / "backend" / "Dockerfile").is_file(), "앱 루트에 안 생겼다"
+    assert not (tmp_path / "Dockerfile").exists(), "워크스페이스 루트에 생겼다"
+
+
+def test_remediation_is_applied_to_the_checked_folder(tmp_path):
+    """수정안은 **검사한 폴더**에 적용돼야 한다.
+
+    `backend/` 를 검사해 만든 제안을 워크스페이스 루트에 적용하면 파일이
+    엉뚱한 곳에 생긴다.
+    """
+    _write(tmp_path, {**{f"backend/{k}": v for k, v in APP_FILES.items()}, **REPO_FILES})
+    detected = deploy._deployment_preflight(str(tmp_path))
+    # 제안 저장소는 모듈 전역이라 다른 테스트의 잔여물이 섞인다.
+    # 이 테스트가 만든 것만 보도록 먼저 비운다.
+    deploy._deployment_remediation_proposals.clear()
+    safety = deploy._run_deployment_safety_preflight(
+        str(tmp_path), detected["app_kind"], detected["app_root"]
+    )
+    ids = {r["proposal_id"] for r in safety["reasons"] if r["proposal_id"]}
+    stored = [deploy._deployment_remediation_proposals[i] for i in ids]
+    assert stored, "제안이 하나도 만들어지지 않았다"
+    for item in stored:
+        # 소유권은 워크스페이스 기준, 적용은 앱 루트 기준.
+        assert item.workspace_root == tmp_path.resolve()
+        assert item.app_root == (tmp_path / "backend").resolve()
+
+
+@pytest.mark.parametrize("src,label", [
+    ("import fastapi as fa\napp = fa.FastAPI()\n", "import X as Y"),
+    ("import flask as flask_app\n", "flask as flask_app"),
+    ("import os, fastapi as fa\n", "복수 + 별칭"),
+])
+def test_import_aliases_are_stripped(tmp_path, src, label):
+    """[Codex P2] `import fastapi as fa` 의 별칭을 안 떼면 모듈 이름이
+    `fastapi as fa` 가 되어 무엇과도 안 맞는다."""
+    _write(tmp_path, {"main.py": src})
+    result = deploy._deployment_preflight(str(tmp_path))
+    assert result["app_kind"] == "server", f"{label}: {result}"
+
+
+@pytest.mark.parametrize("config,expected,label", [
+    ('module.exports = { "output": "export" }\n', "static", "JSON 스타일 키"),
+    ("module.exports = { 'output': 'export' }\n", "static", "작은따옴표 키"),
+    ('module.exports = { "outputFileTracing": true }\n', "server", "비슷한 다른 키"),
+])
+def test_quoted_next_output_key_is_accepted(tmp_path, config, expected, label):
+    """[Codex P2] `{ "output": "export" }` 도 유효한 표기다."""
+    _write(tmp_path, {
+        "package.json": '{"dependencies":{"next":"14"}}',
+        "next.config.js": config,
+    })
+    assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == expected, label

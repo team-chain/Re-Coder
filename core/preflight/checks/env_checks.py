@@ -151,10 +151,38 @@ def check_missing_required_env(
 # ---------------------------------------------------------------------------
 
 
+def _find_gitignore(workspace: Path, max_levels: int = 6) -> Optional[Path]:
+    """`.gitignore` 를 **위로 올라가며** 찾는다. 못 찾으면 None.
+
+    `.gitignore` 는 보통 저장소 루트에 하나만 둔다. 그런데 모노레포에서는
+    검사 대상이 `backend/` 같은 하위 폴더다. 그 폴더만 보면, 루트의
+    `.gitignore` 가 `.env` 를 이미 무시하고 있는데도 "gitignore 파일이
+    없습니다"로 막는다 — **사용자는 고칠 것이 없는데 막히는** 형태다.
+
+    저장소 경계(`.git`)를 만나면 거기서 멈춘다. 남의 저장소나 홈 디렉터리의
+    `.gitignore` 를 이 프로젝트의 것으로 오인하지 않기 위해서다.
+    """
+    try:
+        current = workspace.resolve()
+    except OSError:
+        current = workspace
+    for _ in range(max_levels):
+        candidate = current / ".gitignore"
+        if candidate.is_file():
+            return candidate
+        if (current / ".git").exists():
+            return None          # 저장소 루트인데 없다 → 진짜로 없는 것
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+    return None
+
+
 def _gitignore_patterns(workspace: Path) -> list[str]:
-    """workspace/.gitignore 의 패턴 목록 (빈 줄/주석 제외)."""
-    gi = workspace / ".gitignore"
-    if not gi.exists():
+    """`.gitignore` 의 패턴 목록 (빈 줄/주석 제외)."""
+    gi = _find_gitignore(workspace)
+    if gi is None:
         return []
     try:
         return [
@@ -195,15 +223,19 @@ def check_env_file_gitignored(
     """
     start = time.monotonic()
     env_file = contract.runtime.env_file
+    # **존재 확인도 위로 올라가며** 한다. 여기만 `workspace / ".gitignore"` 를
+    # 보면, 패턴은 상위에서 찾아 왔는데 "파일이 없다"고 막는 어긋남이 생긴다.
+    gitignore_path = _find_gitignore(workspace)
     patterns = _gitignore_patterns(workspace)
 
     details = {
         "env_file": env_file,
-        "gitignore_exists": (workspace / ".gitignore").exists(),
+        "gitignore_exists": gitignore_path is not None,
+        "gitignore_path": str(gitignore_path) if gitignore_path else "",
         "patterns_count": len(patterns),
     }
 
-    if not (workspace / ".gitignore").exists():
+    if gitignore_path is None:
         return CheckResult(
             code=PreflightCheckCode.ENV_FILE_NOT_GITIGNORED,
             passed=False,

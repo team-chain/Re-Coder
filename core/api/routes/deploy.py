@@ -45,7 +45,12 @@ _deployment_records: dict[str, DeploymentRecord] = {}
 @dataclass(frozen=True)
 class _StoredDeploymentRemediation:
     proposal: object
+    #: 소유권 확인용 — 확장이 보내는 **워크스페이스** 루트와 대조한다.
     workspace_root: Path
+    #: 수정안을 실제로 적용할 폴더. 모노레포면 `backend/` 처럼 워크스페이스
+    #: 루트가 아닐 수 있다. 이걸 따로 두지 않으면 `backend/` 를 검사해 만든
+    #: Dockerfile 제안이 **워크스페이스 루트에** 쓰인다.
+    app_root: Path
 
 
 _deployment_remediation_proposals: dict[str, _StoredDeploymentRemediation] = {}
@@ -571,7 +576,13 @@ def _python_imported_modules(app_root: Path) -> set[str]:
         for m in _PY_IMPORT_RE.finditer(text):
             raw = m.group("from") or m.group("import") or ""
             for piece in raw.split(","):
-                top = piece.strip().split(".", 1)[0].strip()
+                # `import fastapi as fa` 의 별칭을 떼어낸다. 안 떼면 모듈
+                # 이름이 `fastapi as fa` 가 되어 무엇과도 안 맞는다.
+                # 공백으로 자른 첫 토큰이 실제 모듈 경로다.
+                head = piece.strip().split()
+                if not head:
+                    continue
+                top = head[0].split(".", 1)[0].strip()
                 if top:
                     modules.add(_normalize_dep(top))
     return modules
@@ -665,7 +676,10 @@ def _next_is_static_export(app_root: Path, pkg: dict) -> bool:
     """
     for name in ("next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"):
         text = _strip_js_comments(_read_text_if_exists(app_root / name, 20_000))
-        if re.search(r"output\s*:\s*['\"]export['\"]", text):
+        # `{ "output": "export" }` 처럼 **키에 따옴표**를 쓰는 것도 유효한
+        # JS/JSON 표기다. 키 따옴표를 허용하지 않으면 정적 export 설정을
+        # 서버로 오분류해 S3 대신 ECS 를 권한다.
+        if re.search(r"['\"]?output['\"]?\s*:\s*['\"]export['\"]", text):
             return True
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
     return any("next export" in str(v) for v in (scripts or {}).values())
@@ -678,6 +692,21 @@ def _label_for(app_root: Path, workspace_root: Path) -> str:
     except ValueError:
         return ""
     return "" if rel in ("", ".") else f" ({rel}/)"
+
+
+def _relative_app_root(app_root: Optional[Path], workspace_root: Path) -> str:
+    """감지한 앱 루트를 **워크스페이스 상대 posix 경로**로. 루트면 빈 문자열.
+
+    문자열로 돌려주는 이유는 이 값이 JSON 응답에 실려 확장까지 가고,
+    다시 `_run_deployment_safety_preflight` 로 들어오기 때문이다.
+    """
+    if app_root is None:
+        return ""
+    try:
+        rel = app_root.resolve().relative_to(workspace_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return ""
+    return "" if rel in ("", ".") else rel
 
 
 def _deployment_preflight(workspace_path: str) -> dict:
@@ -694,9 +723,20 @@ def _deployment_preflight(workspace_path: str) -> dict:
     server_evidence: list[str] = []
     static_evidence: list[str] = []
     extra_evidence: list[str] = []
+    # **어느 폴더에서 그 신호를 찾았는지**도 같이 돌려준다.
+    #
+    # 이걸 안 넘기면, 감지는 `backend/` 에서 FastAPI 를 찾아 "서버형"이라고
+    # 해놓고 바로 다음 단계인 안전 검사는 워크스페이스 루트만 뒤져
+    # `APP_ENTRYPOINT_NOT_FOUND` 로 막는다. 확장은 `blocked` 가 참이면 배포
+    # 대상 선택을 통째로 비활성화하므로, **사용자가 아무것도 할 수 없는
+    # 막다른 길**이 된다. 하위 폴더 탐색을 넣으면서 만든 구멍이다.
+    server_app_root: Optional[Path] = None
+    static_app_root: Optional[Path] = None
 
     for app_root in _iter_app_roots(root):
         where = _label_for(app_root, root)
+        before_server = len(server_evidence)
+        before_static = len(static_evidence)
 
         # ── 파이썬 ──────────────────────────────────────────────────
         py_deps = _python_deps(app_root)
@@ -778,6 +818,14 @@ def _deployment_preflight(workspace_path: str) -> dict:
                 or any(d.startswith("sqlite") or d == "aiosqlite" for d in py_deps):
             extra_evidence.append(f"SQLite 데이터 저장{where}")
 
+        # 가장 먼저 근거를 낸 폴더를 그 종류의 앱 루트로 삼는다.
+        # `_iter_app_roots` 가 강한 서버 표식이 있는 폴더를 앞에 두므로,
+        # 먼저 나온 것이 더 확실한 후보다.
+        if server_app_root is None and len(server_evidence) > before_server:
+            server_app_root = app_root
+        if static_app_root is None and len(static_evidence) > before_static:
+            static_app_root = app_root
+
     # 중복 제거 — 순서는 유지한다(먼저 나온 근거가 더 중요하다).
     def _dedup(items: list[str]) -> list[str]:
         seen: set[str] = set()
@@ -801,6 +849,7 @@ def _deployment_preflight(workspace_path: str) -> dict:
             "summary": f"서버형 앱 — {'·'.join(server_evidence[:4])}",
             "evidence": evidence,
             "recommended_target": "ecs",
+            "app_root": _relative_app_root(server_app_root, root),
         }
 
     if static_evidence:
@@ -809,6 +858,7 @@ def _deployment_preflight(workspace_path: str) -> dict:
             "summary": f"정적 웹 앱 — {'·'.join(static_evidence[:4])}",
             "evidence": static_evidence + extra_evidence,
             "recommended_target": "s3",
+            "app_root": _relative_app_root(static_app_root, root),
         }
 
     return {
@@ -816,6 +866,7 @@ def _deployment_preflight(workspace_path: str) -> dict:
         "summary": "프로젝트 유형을 확신하기 어려움",
         "evidence": extra_evidence or ["명확한 서버 또는 정적 빌드 설정을 찾지 못함"],
         "recommended_target": "local",
+        "app_root": "",
     }
 
 
@@ -830,28 +881,61 @@ def _detect_preflight_contract_stack(root: Path):
     except ImportError:  # pragma: no cover - package 실행 호환
         from core.schemas import ContractStack  # type: ignore
 
-    package_text = _read_text_if_exists(root / "package.json").lower()
-    if '"next"' in package_text:
+    # **배포 대상 감지와 같은 판단 근거를 쓴다.**
+    #
+    # 예전에는 최상위 `*.py` 를 부분 문자열로 훑었다. 그러면 진입점이
+    # `src/main.py` 인 흔한 배치에서 CUSTOM 으로 떨어지고, CUSTOM 의
+    # 진입점 후보에는 `src/main.py` 가 없어서 **방금 앱을 찾아 놓고
+    # `APP_ENTRYPOINT_NOT_FOUND` 로 막는** 앞뒤 안 맞는 결과가 나온다.
+    # (`PYTHON_FASTAPI` 후보에는 `src/main.py` 가 들어 있다.)
+    #
+    # 이 함수의 docstring 이 원래부터 "서로 다른 기준을 쓰지 않도록"이라고
+    # 못 박고 있었는데, 감지 쪽만 고치면서 그 약속이 깨졌다.
+    node_deps, _pkg = _node_deps(root)
+    if "next" in node_deps:
         return ContractStack.NODE_NEXT
-    if package_text:
+    if node_deps or (root / "package.json").is_file():
         return ContractStack.NODE_EXPRESS
 
-    python_source = "\n".join(
-        _read_text_if_exists(path, 4_000).lower()
-        for path in list(root.glob("*.py"))[:50]
-    )
-    if "fastapi" in python_source:
+    python_names = _python_deps(root) | _python_imported_modules(root)
+    if "fastapi" in python_names:
         return ContractStack.PYTHON_FASTAPI
-    if "flask" in python_source:
+    if "flask" in python_names:
         return ContractStack.PYTHON_FLASK
     return ContractStack.CUSTOM
 
 
-def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unknown") -> dict:
-    """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다."""
+def _run_deployment_safety_preflight(
+    workspace_path: str,
+    app_kind: str = "unknown",
+    app_root: str = "",
+) -> dict:
+    """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다.
+
+    `app_root` 는 `_deployment_preflight` 가 **실제로 앱을 찾은 폴더**의
+    워크스페이스 상대 경로다. 모노레포(`backend/src/main.py` +
+    `backend/requirements.txt`)에서 이걸 안 받으면, 감지는 앱을 찾아
+    "서버형"이라고 해놓고 검사는 루트만 뒤져 `APP_ENTRYPOINT_NOT_FOUND` 로
+    막는다. 확장은 `blocked` 가 참이면 배포 대상 선택을 비활성화하므로
+    **사용자가 아무것도 할 수 없는 막다른 길**이 된다.
+    """
     root = Path(workspace_path)
     if not root.is_dir():
         raise ValueError("유효한 워크스페이스 경로가 아닙니다.")
+
+    # 검사 대상 폴더. 경로 탈출은 허용하지 않는다 — 이 값은 응답에 실려
+    # 확장까지 갔다가 되돌아오므로, 우리 감지 결과라고 가정하지 않는다.
+    check_root = root
+    rel = (app_root or "").strip().strip("/\\")
+    if rel:
+        candidate = (root / rel)
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root.resolve())
+            if resolved.is_dir():
+                check_root = candidate
+        except (ValueError, OSError):
+            check_root = root
 
     try:
         from preflight import StaticPreflightRunner
@@ -864,22 +948,24 @@ def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unkno
         from core.preflight.contract_loader import build_default_contract, load_contract  # type: ignore
         from core.remediation import generate_proposals  # type: ignore
 
-    contract = load_contract(root)
+    contract = load_contract(check_root)
     if contract is None:
-        contract = build_default_contract(_detect_preflight_contract_stack(root))
+        contract = build_default_contract(_detect_preflight_contract_stack(check_root))
     static_check_codes = None
     if app_kind == "static":
         static_check_codes = {
             code for code, _ in CHECK_REGISTRY
             if code.value in _STATIC_TARGET_INDEPENDENT_CHECK_CODES
         }
-    run = StaticPreflightRunner(str(root), contract).run_sync(static_check_codes)
-    proposals = generate_proposals(run, contract, root)
+    run = StaticPreflightRunner(str(check_root), contract).run_sync(static_check_codes)
+    proposals = generate_proposals(run, contract, check_root)
     workspace_root = root.resolve()
+    applied_root = check_root.resolve()
     for proposal in proposals:
         _deployment_remediation_proposals[proposal.proposal_id] = _StoredDeploymentRemediation(
             proposal=proposal,
             workspace_root=workspace_root,
+            app_root=applied_root,
         )
 
     proposal_by_code = {
@@ -923,6 +1009,9 @@ def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unkno
             for reason in reasons
         ],
         "warnings": warnings,
+        # 어느 폴더를 검사했는지 알려준다. 근거를 보여주는 화면인데 검사
+        # 대상이 루트가 아닐 수 있으면 그 사실도 보여야 한다.
+        "checked_path": _relative_app_root(check_root, root),
     }
 
 
@@ -982,6 +1071,7 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
             _run_deployment_safety_preflight,
             request.workspace_path,
             detected["app_kind"],
+            detected.get("app_root", ""),
         )
         return {**detected, **safety}
     except ValueError as exc:
@@ -1012,7 +1102,9 @@ async def apply_deployment_remediation(
     except ImportError:  # pragma: no cover - package 실행 호환
         from core.remediation import apply_proposal  # type: ignore
 
-    result = await asyncio.to_thread(apply_proposal, proposal, workspace)
+    # **적용은 검사한 폴더에 한다.** 워크스페이스 루트에 적용하면
+    # `backend/` 를 검사해 만든 Dockerfile 이 엉뚱한 곳에 생긴다.
+    result = await asyncio.to_thread(apply_proposal, proposal, stored.app_root)
     payload = {
         "success": result.success,
         "proposal_id": result.proposal_id,
