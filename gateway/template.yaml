@@ -183,6 +183,23 @@ Resources:
             Path: /enroll
             Method: POST
 
+  VerifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: recoder-gw-verify
+      Handler: verify.handler
+      CodeUri: src/
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref GatewayTable
+      Events:
+        Verify:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /verify
+            Method: POST
+
   DeployFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -221,6 +238,8 @@ Outputs:
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/admin"
   EnrollEndpoint:
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/enroll"
+  VerifyEndpoint:
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/verify"
   TableName:
     Value: !Ref GatewayTable
   DeployEndpoint:

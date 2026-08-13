@@ -7,6 +7,7 @@ moto 로 DynamoDB 를 실제 흉내 내어 조건부 ADD 의 원자성을 검증
 """
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import boto3
@@ -40,16 +41,17 @@ def table(monkeypatch):
 
 
 def _student(table, sid="s1", used_total=0, used_today=0,
-             max_total=10_000, max_daily=1_000):
+             max_total=10_000, max_daily=1_000, today=None):
+    record_day = today or common._today()
     table.put_item(Item={
         "pk": f"STUDENT#{sid}", "sk": "META",
         "used_total_tokens": used_total, "used_today_tokens": used_today,
         "max_total_tokens": max_total, "max_daily_tokens": max_daily,
-        "today": common._today()})
+        "today": record_day})
     return {"pk": f"STUDENT#{sid}", "sk": "META",
             "used_total_tokens": used_total, "used_today_tokens": used_today,
             "max_total_tokens": max_total, "max_daily_tokens": max_daily,
-            "today": common._today()}
+            "today": record_day}
 
 
 def _used(table, sid="s1"):
@@ -76,6 +78,32 @@ def test_concurrent_style_reservations_serialize_on_the_counter(table):
     with pytest.raises(common.QuotaError):
         common.reserve_quota(item, 600)     # 잔여 400 < 600
     assert _used(table)[1] == 600
+
+
+def test_rollover_reset_and_reservation_are_atomic(table):
+    """두 stale 요청 중 뒤 요청이 앞 요청의 새 날짜 예약을 0으로 지우지 않는다."""
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
+    stale = _student(
+        table,
+        used_today=900,
+        max_daily=1_000,
+        today=yesterday,
+    )
+    first_snapshot = dict(stale)
+    second_snapshot = dict(stale)
+
+    # 빠른 검사는 날짜 전환 시 카운터를 변경하지 않는다.
+    common.check_quota_before(first_snapshot)
+    assert _used(table) == (0, 900)
+
+    common.reserve_quota(first_snapshot, 600)
+    with pytest.raises(common.QuotaError):
+        common.reserve_quota(second_snapshot, 600)
+
+    item = table.get_item(Key={"pk": "STUDENT#s1", "sk": "META"})["Item"]
+    assert item["today"] == common._today()
+    assert int(item["used_today_tokens"]) == 600
+    assert int(item["used_total_tokens"]) == 600
 
 
 def test_reconcile_returns_overreservation(table):

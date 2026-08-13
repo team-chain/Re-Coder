@@ -244,18 +244,17 @@ def check_rate(student_id: str, rpm: int) -> None:
 
 
 def check_quota_before(item: dict) -> None:
-    """호출 전 누적 사용량이 이미 한도 이상이면 차단."""
-    sid = item["pk"].split("#", 1)[1]
-    # 일일 리셋
-    if item.get("today") != _today():
-        _table().update_item(
-            Key={"pk": f"STUDENT#{sid}", "sk": "META"},
-            UpdateExpression="SET used_today_tokens = :z, today = :t",
-            ExpressionAttributeValues={":z": 0, ":t": _today()})
-        item["used_today_tokens"] = 0
+    """호출 전 누적 사용량을 빠르게 확인하되 카운터는 변경하지 않는다.
+
+    날짜 변경과 당일 예산 증가는 ``reserve_quota`` 의 단일 조건부 연산에서
+    처리한다. 여기서 별도로 0으로 초기화하면, 같은 stale 레코드를 읽은 동시
+    요청이 다른 요청의 예약을 지울 수 있다.
+    """
     if int(item.get("used_total_tokens", 0)) >= int(item.get("max_total_tokens", DEF_MAX_TOTAL)):
         raise QuotaError("total_exceeded", "총 토큰 한도를 모두 사용했습니다.")
-    if int(item.get("used_today_tokens", 0)) >= int(item.get("max_daily_tokens", DEF_MAX_DAILY)):
+    if (item.get("today") == _today()
+            and int(item.get("used_today_tokens", 0))
+            >= int(item.get("max_daily_tokens", DEF_MAX_DAILY))):
         raise QuotaError("daily_exceeded", "오늘의 토큰 한도를 모두 사용했습니다.")
     # 풀 전체 소프트 캡
     pool = get_pool()
@@ -365,22 +364,64 @@ def reserve_quota(item: dict, budget_tokens: int) -> None:
     sid = item["pk"].split("#", 1)[1]
     max_total = int(item.get("max_total_tokens", DEF_MAX_TOTAL))
     max_daily = int(item.get("max_daily_tokens", DEF_MAX_DAILY))
+    today = _today()
     # 풀을 먼저 선점해야 동시 요청들이 같은 사전 조회값을 보고 모두 유료
     # 호출로 진입하지 않는다. 학생 예약 실패 시 즉시 풀 선점분을 반환한다.
     _reserve_pool(budget_tokens)
+
+    same_day = {
+        "UpdateExpression": (
+            "ADD used_total_tokens :b, used_today_tokens :b"
+        ),
+        "ConditionExpression": (
+            "(attribute_not_exists(used_total_tokens) OR used_total_tokens <= :tm) "
+            "AND today = :today "
+            "AND (attribute_not_exists(used_today_tokens) OR used_today_tokens <= :dm)"
+        ),
+        "ExpressionAttributeValues": {
+            ":b": int(budget_tokens),
+            ":tm": max_total - int(budget_tokens),
+            ":dm": max_daily - int(budget_tokens),
+            ":today": today,
+        },
+    }
+    rollover = {
+        # 날짜 전환과 첫 예약을 한 번에 기록한다. 다른 요청이 먼저 오늘 날짜로
+        # 전환했다면 조건이 실패하고 아래 same-day 경로로 재시도한다.
+        "UpdateExpression": (
+            "SET used_today_tokens = :b, today = :today "
+            "ADD used_total_tokens :b"
+        ),
+        "ConditionExpression": (
+            "(attribute_not_exists(used_total_tokens) OR used_total_tokens <= :tm) "
+            "AND (attribute_not_exists(today) OR today <> :today)"
+        ),
+        "ExpressionAttributeValues": {
+            ":b": int(budget_tokens),
+            ":tm": max_total - int(budget_tokens),
+            ":today": today,
+        },
+    }
+    attempts = (
+        (same_day, rollover)
+        if item.get("today") == today
+        else (rollover, same_day)
+    )
     try:
-        _table().update_item(
-            Key={"pk": f"STUDENT#{sid}", "sk": "META"},
-            UpdateExpression="ADD used_total_tokens :b, used_today_tokens :b",
-            ConditionExpression=(
-                "(attribute_not_exists(used_total_tokens) OR used_total_tokens <= :tm) "
-                "AND (attribute_not_exists(used_today_tokens) OR used_today_tokens <= :dm)"
-            ),
-            ExpressionAttributeValues={
-                ":b": int(budget_tokens),
-                ":tm": max_total - int(budget_tokens),
-                ":dm": max_daily - int(budget_tokens),
-            })
+        last_error = None
+        for update in attempts:
+            try:
+                _table().update_item(
+                    Key={"pk": f"STUDENT#{sid}", "sk": "META"},
+                    **update,
+                )
+                return
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise
+                last_error = exc
+        assert last_error is not None
+        raise last_error
     except ClientError as exc:
         _release_pool_reservation(budget_tokens)
         if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
