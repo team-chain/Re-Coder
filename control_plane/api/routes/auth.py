@@ -404,6 +404,12 @@ async def enroll_device(
                 detail="User is not a member of this organization. Request an invite first.",
             )
         role = OrgRole.DEVELOPER
+        # **멤버십을 실제로 저장한다.** 역할을 지역 변수로만 들고 가면 토큰은
+        # 발급되지만, 이후 모든 요청의 get_current_device() 가
+        # get_member_role() == None 으로 거부해 — 조직의 첫 디바이스가
+        # 발급 즉시 쓸 수 없는 토큰을 쥐게 된다.
+        db.add(OrgMember(org_id=org_id, user_id=user_id, role=role))
+        await db.flush()
 
     svc = IdentityService(db)
     token_response = await svc.enroll_device(

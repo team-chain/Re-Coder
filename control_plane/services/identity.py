@@ -289,7 +289,12 @@ class IdentityService:
         if device is None:
             return None
         now = datetime.now(timezone.utc)
-        if device.status != DeviceStatus.ACTIVE or device.expires_at < now:
+        expires_at = device.expires_at
+        # SQLite 등 일부 백엔드는 tzinfo 를 벗겨 돌려준다 — naive/aware 비교는
+        # TypeError 로 죽으므로, naive 면 저장 규약(UTC)으로 간주한다.
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if device.status != DeviceStatus.ACTIVE or expires_at < now:
             return None
         return device
 
@@ -331,7 +336,40 @@ class IdentityService:
     # ------------------------------------------------------------------
 
     async def _get_device_by_token(self, raw_token: str) -> Optional[Device]:
+        """토큰 해시로 디바이스 조회 — **RLS 밖의 부트스트랩 경로**.
+
+        이 조회는 인증 그 자체라서 org 컨텍스트가 아직 없다. RLS 대상
+        롤에서 devices 를 직접 SELECT 하면 `app.current_org_id` 미설정으로
+        0행이 되어 **모든 유효 토큰이 401** 이 된다. 그래서 PostgreSQL 에선
+        SECURITY DEFINER 함수(auth_device_by_token_hash — migrations.py)를
+        통해 조회한다. 함수는 정확한 해시 일치만 허용하므로 격리를 깨지
+        않는다. 함수가 없거나 다른 백엔드(SQLite 테스트)면 직접 SELECT 로
+        폴백한다 — RLS 가 없는 환경에선 그게 예전과 같은 정상 경로다.
+        """
         token_hash = self._hash_token(raw_token)
+
+        dialect = ""
+        try:
+            dialect = self._db.get_bind().dialect.name
+        except Exception:  # noqa: BLE001
+            pass
+
+        if dialect == "postgresql":
+            from sqlalchemy import text as _text
+            try:
+                stmt = (
+                    select(Device)
+                    .from_statement(_text("SELECT * FROM auth_device_by_token_hash(:h)"))
+                )
+                result = await self._db.execute(stmt, {"h": token_hash})
+                return result.scalars().first()
+            except Exception as exc:  # noqa: BLE001
+                # 함수 미설치(구버전 스키마) — 직접 조회로 폴백. RLS 롤이면
+                # 이 폴백은 0행일 수 있으므로 경고를 남겨 원인을 추적 가능하게.
+                logger.warning(
+                    "auth_device_by_token_hash 함수 조회 실패 — 직접 SELECT 로 "
+                    "폴백합니다 (RLS 롤에서는 인증이 실패할 수 있음): %s", exc)
+
         result = await self._db.execute(
             select(Device).where(Device.token_hash == token_hash)
         )

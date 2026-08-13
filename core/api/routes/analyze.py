@@ -353,6 +353,17 @@ async def analyze(request: AnalyzeRequest) -> PatchProposal:
     except Exception:
         pass
 
+    # 4.6 승인 시 경계 검사에 쓸 워크스페이스 루트를 제안에 **고정**한다.
+    #     워크스페이스가 없으면 활성 파일의 부모 폴더가 경계다. 둘 다 없으면
+    #     빈 값으로 남고, 승인 핸들러가 fail-closed 로 거부한다.
+    _root = (request.workspace_path or "").strip()
+    if not _root and request.active_file_path:
+        try:
+            _root = str(Path(request.active_file_path).parent)
+        except Exception:  # noqa: BLE001
+            _root = ""
+    proposal.workspace_root = _root
+
     # 5. Store and update both caches
     _proposals[proposal.proposal_id] = proposal
     _fingerprint_to_proposal[fingerprint] = proposal.proposal_id
@@ -386,6 +397,29 @@ async def approve_patch(proposal_id: str, approved: bool) -> dict:
     unchanged: list[str] = []
     backups: dict[str, bytes] = {}
 
+    # ── 워크스페이스 경계 (fail-closed) ──────────────────────────────
+    # LLM 이 돌려준 patch.file 은 **비신뢰 입력**이다. 환각이나 프롬프트
+    # 주입으로 경계 밖 절대경로가 와도, 승인 한 번으로 워크스페이스 밖의
+    # 사용자 파일을 읽거나 덮어쓸 수 있으면 안 된다. 제안 생성 시 고정해 둔
+    # workspace_root 를 기준으로, 해석된(resolve) 경로가 그 안에 있어야만
+    # 진행한다. 루트가 비어 있으면 — 경계를 알 수 없으므로 — 거부한다.
+    root_raw = (getattr(proposal, "workspace_root", "") or "").strip()
+    if not root_raw:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "이 제안에는 워크스페이스 경계 정보가 없어 적용할 수 없습니다. "
+                "워크스페이스를 연 상태에서 다시 분석해 주세요."
+            ),
+        )
+    try:
+        workspace_root = Path(root_raw).resolve()
+    except OSError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"워크스페이스 경계를 해석할 수 없습니다: {exc}",
+        )
+
     try:
         for patch in proposal.patches:
             file_path = Path(patch.file)
@@ -394,6 +428,19 @@ async def approve_patch(proposal_id: str, approved: bool) -> dict:
                     status_code=422,
                     detail=f"Patch file path must be absolute: '{patch.file}'",
                 )
+
+            # resolve() 는 심볼릭 링크와 `..` 를 모두 푼다 — 문자열 비교로는
+            # `/ws/../etc/passwd` 나 링크 우회를 막을 수 없다.
+            resolved = file_path.resolve()
+            if not (resolved == workspace_root or resolved.is_relative_to(workspace_root)):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"패치 대상이 워크스페이스 밖입니다: '{patch.file}' — "
+                        "승인으로 워크스페이스 밖 파일을 수정할 수 없습니다."
+                    ),
+                )
+            file_path = resolved
 
             # Validate base_sha256
             if file_path.exists() and patch.base_sha256:
@@ -461,13 +508,61 @@ async def list_proposals() -> list[PatchProposal]:
 # ---------------------------------------------------------------------------
 
 
-def _norm_line(s: str) -> str:
-    """비교용 정규화: 따옴표 안 문자열은 와일드카드로(마스킹된 시크릿 ↔ 실제 시크릿
-    매칭), 앞뒤 공백 무시. 'KEY = "[REDACTED]"' 와 'KEY = "AKIA..."' 가 같다고 본다."""
+# 게이트가 시크릿을 가릴 때 쓰는 토큰 형태 (context_gate._MASK_PATTERNS 의
+# replacement 들 — [MASKED], [MASKED_AWS_KEY], [MASKED_JWT] …).
+_MASK_TOKEN_RE = __import__("re").compile(r"\[MASKED[A-Z_]*\]")
+
+#: 마스크 줄 전용 스캐너 — 따옴표 문자열 또는 마스크 토큰.
+_MASK_SCAN_RE = __import__("re").compile(r'"[^"]*"|\'[^\']*\'|\[MASKED[A-Z_]*\]')
+
+
+def _lines_match(diff_line: str, file_line: str) -> bool:
+    """diff 의 한 줄이 파일의 한 줄과 일치하는가.
+
+    예전 구현은 **모든** 따옴표 문자열을 와일드카드로 바꿨다. 그러면
+    `app.get("/a")` 와 `app.get("/b")` 처럼 문자열로만 구분되는 블록이
+    같아져서, diff 가 지목한 블록이 아니라 **파일에서 먼저 나오는 블록**에
+    패치가 적용됐다 — 승인된 편집이 소리 없이 엉뚱한 곳을 고치는 형태다.
+
+    지금은 두 단계다:
+    1. 공백을 정돈한 정확 비교. 대부분 여기서 끝난다.
+    2. diff 줄에 **마스크 토큰**([MASKED...])이 있을 때만 관용 비교 —
+       LLM 은 마스킹된 값을 보고 diff 를 쓰므로 실제 파일의 시크릿과
+       글자가 다를 수밖에 없다. 이때도 와일드카드는 마스크가 있는 자리
+       (마스크 품은 따옴표 문자열, 맨몸 마스크 토큰)에만 적용되고,
+       같은 줄의 다른 문자열 리터럴은 그대로 비교한다.
+    """
+    a, b = diff_line.strip(), file_line.strip()
+    if a == b:
+        return True
+    if not _MASK_TOKEN_RE.search(a):
+        return False
+    return _mask_tolerant_pattern(a).fullmatch(b) is not None
+
+
+def _mask_tolerant_pattern(diff_line: str) -> "__import__('re').Pattern":
+    """마스크 토큰이 든 diff 줄 → 파일 줄과 대조할 정규식.
+
+    - `"…[MASKED]…"` (마스크 품은 따옴표 문자열) → 같은 따옴표의 아무 내용
+    - 맨몸 `[MASKED...]` → 공백 아닌 아무 시퀀스 (`KEY=[MASKED]` ↔ `KEY=abc`)
+    - 마스크 없는 따옴표 문자열·나머지 글자 → **그대로** (구분자 역할 유지)
+    """
     import re as _re
-    out = _re.sub(r'"[^"]*"', '""', s)
-    out = _re.sub(r"'[^']*'", "''", out)
-    return out.strip()
+    pieces: list[str] = []
+    idx = 0
+    for m in _MASK_SCAN_RE.finditer(diff_line):
+        pieces.append(_re.escape(diff_line[idx:m.start()]))
+        tok = m.group(0)
+        if tok.startswith("["):
+            pieces.append(r"\S+")
+        elif _MASK_TOKEN_RE.search(tok):
+            q = tok[0]
+            pieces.append(q + ("[^%s]*" % q) + q)
+        else:
+            pieces.append(_re.escape(tok))
+        idx = m.end()
+    pieces.append(_re.escape(diff_line[idx:]))
+    return _re.compile("".join(pieces) + r"\Z")
 
 
 def _apply_unified_diff(file_path: Path, patch: FilePatch) -> bool:
@@ -526,10 +621,9 @@ def _apply_unified_diff(file_path: Path, patch: FilePatch) -> bool:
             continue  # 변경 없는 훅
         # old_block 을 파일에서 (정규화 기준) 찾는다.
         if old_block:
-            norm_old = [_norm_line(x) for x in old_block]
             found = -1
-            for i in range(0, len(lines) - len(norm_old) + 1):
-                if [_norm_line(lines[i + j]) for j in range(len(norm_old))] == norm_old:
+            for i in range(0, len(lines) - len(old_block) + 1):
+                if all(_lines_match(old_block[j], lines[i + j]) for j in range(len(old_block))):
                     found = i
                     break
             if found < 0:

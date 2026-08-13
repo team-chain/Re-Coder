@@ -41,6 +41,28 @@ _RLS_POLICIES = [
     "CREATE POLICY audit_org_isolation ON audit_events USING (org_id = current_setting('app.current_org_id', true)::text)",
 ]
 
+# ── 인증 부트스트랩: RLS 밖에서 토큰 → 디바이스 조회 ────────────────
+#
+# 닭-달걀 문제: RLS 정책은 `app.current_org_id` 를 요구하는데, org_id 는
+# **디바이스를 찾아야** 알 수 있다. 애플리케이션 롤이 RLS 대상이 되는 순간
+# validate_token() 의 devices 조회가 0행이 되어 모든 유효 토큰이 401 이 된다.
+#
+# 해법: 테이블 소유자 권한으로 도는 SECURITY DEFINER 함수 하나만 예외로
+# 열어 준다. 이 함수는 **정확한 token_hash 일치**로만 조회하므로, 실행
+# 권한이 있어도 해시 원문 없이는 아무 행도 얻을 수 없다. 인증이 끝나면
+# 미들웨어가 org 컨텍스트를 설정하고, 이후 모든 조회는 RLS 아래에서 돈다.
+_AUTH_BOOTSTRAP_FUNCTION = """
+CREATE OR REPLACE FUNCTION auth_device_by_token_hash(p_token_hash text)
+RETURNS SETOF devices
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = public
+AS $$
+    SELECT * FROM devices WHERE token_hash = p_token_hash
+$$;
+"""
+
 # AuditLog 불변성: UPDATE/DELETE 금지 트리거
 _AUDIT_IMMUTABILITY_TRIGGER = """
 CREATE OR REPLACE FUNCTION prevent_audit_modification()
@@ -75,3 +97,11 @@ async def init_db(apply_rls: bool = True) -> None:
                 logger.info("AuditLog immutability trigger applied")
             except Exception as exc:
                 logger.warning("Audit immutability trigger skipped: %s", exc)
+
+            # RLS 를 켰다면 인증 부트스트랩 함수도 함께 있어야 한다 —
+            # 없으면 토큰 검증이 RLS 에 막혀 모든 요청이 401 이 된다.
+            try:
+                await conn.execute(text(_AUTH_BOOTSTRAP_FUNCTION))
+                logger.info("Auth bootstrap function applied")
+            except Exception as exc:
+                logger.warning("Auth bootstrap function skipped: %s", exc)

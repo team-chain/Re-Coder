@@ -112,10 +112,14 @@ async def get_current_device(
     # 않으므로 예외를 삼키고 진행한다 — 이 경우 RLS 는 미적용이며,
     # ORM 레벨 org_id 필터링이 1차 방어선이 된다.
     # ──────────────────────────────────────────────────────────────────
+    # `SET LOCAL x = :param` 은 PostgreSQL 이 **바인드 파라미터를 허용하지
+    # 않아** 항상 문법 오류로 떨어진다 — 예외가 조용히 삼켜져 RLS 컨텍스트가
+    # 한 번도 설정되지 않는 형태였다. set_config(..., true) 가 SET LOCAL 과
+    # 같은 트랜잭션 범위 의미이면서 파라미터를 받는다.
     try:
         await db.execute(
-            text(f"SET LOCAL {_RLS_GUC_KEY} = :org_id"),
-            {"org_id": device.org_id},
+            text("SELECT set_config(:key, :org_id, true)"),
+            {"key": _RLS_GUC_KEY, "org_id": device.org_id},
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("RLS GUC set skipped (non-postgres backend?): %s", exc)

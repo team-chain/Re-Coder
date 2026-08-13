@@ -53,7 +53,13 @@ class User(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
     devices = relationship("Device", back_populates="user")
-    org_memberships = relationship("OrgMember", back_populates="user")
+    # OrgMember 는 users 로 가는 FK 가 둘이다(user_id·invited_by_user_id).
+    # foreign_keys 를 명시하지 않으면 매퍼 구성 시점에
+    # AmbiguousForeignKeysError 로 죽는다 — 관계를 처음 쓰는 코드가 곧 지뢰였다.
+    org_memberships = relationship(
+        "OrgMember", back_populates="user",
+        foreign_keys="OrgMember.user_id",
+    )
 
     __table_args__ = (
         UniqueConstraint("oidc_provider", "oidc_subject", name="uq_oidc_identity"),

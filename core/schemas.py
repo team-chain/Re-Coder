@@ -275,6 +275,10 @@ class PatchProposal(BaseModel):
     approval_level: ApprovalLevel = ApprovalLevel.CONFIRM
     patches: list[FilePatch]
     test_command: Optional[str] = None
+    #: 이 제안이 만들어진 워크스페이스 루트. 승인 시 모든 패치 대상이
+    #: 이 경계 안에 있어야 한다 — LLM 이 환각하거나 프롬프트 주입으로
+    #: 경계 밖 절대경로를 돌려줘도 사용자 파일을 덮어쓸 수 없게 한다.
+    workspace_root: str = ""
 
 
 class InfraFileProposal(BaseModel):
