@@ -546,6 +546,36 @@ def test_entrypoint_candidate_must_be_a_file_not_a_directory(tmp_path):
     assert check_app_entrypoint(other, contract).passed
 
 
+def test_root_main_go_requires_package_main_and_function(tmp_path):
+    """A root main.go filename must not bypass Go executable validation."""
+    try:
+        from preflight.checks.code_checks import check_app_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import check_app_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    (tmp_path / "go.mod").write_text("module example.com/lib\n", encoding="utf-8")
+    main_go = tmp_path / "main.go"
+    contract = build_default_contract(ContractStack.CUSTOM)
+
+    main_go.write_text(
+        "package generator\nfunc main() {}\n",
+        encoding="utf-8",
+    )
+    assert not check_app_entrypoint(tmp_path, contract).passed
+
+    main_go.write_text(
+        "package main\nfunc main() {}\n",
+        encoding="utf-8",
+    )
+    result = check_app_entrypoint(tmp_path, contract)
+    assert result.passed
+    assert result.details["found_by"] == "probe"
+
+
 def test_executable_probe_requires_a_real_main_declaration(tmp_path):
     """내용 프로브는 **선언을 실제로 찾아야** 한다 — 파일 존재만으로는 부족."""
     try:

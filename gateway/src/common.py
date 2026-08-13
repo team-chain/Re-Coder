@@ -396,11 +396,13 @@ def reserve_quota(item: dict, budget_tokens: int) -> str:
         ),
         "ConditionExpression": (
             "(attribute_not_exists(used_total_tokens) OR used_total_tokens <= :tm) "
-            "AND (attribute_not_exists(today) OR today <> :today)"
+            "AND (attribute_not_exists(today) OR today <> :today) "
+            "AND :b <= :daily"
         ),
         "ExpressionAttributeValues": {
             ":b": int(budget_tokens),
             ":tm": max_total - int(budget_tokens),
+            ":daily": max_daily,
             ":today": today,
         },
     }

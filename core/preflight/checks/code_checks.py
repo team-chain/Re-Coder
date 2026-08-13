@@ -83,8 +83,8 @@ _ENTRYPOINT_CANDIDATES: dict[ContractStack, tuple[str, ...]] = {
     #: 할 수 없는 막다른 길**이 된다.
     #:
     #: 실측으로 Spring(maven/gradle)·Rails·PHP·Procfile·docker-compose
-    #: 6가지가 그 상태였다. Go 만 통과했는데 그건 `main.go` 가 우연히
-    #: 목록에 있어서였다.
+    #: 6가지가 그 상태였다. Go 는 아래 내용 프로브가 package main 과
+    #: func main 을 함께 확인한다.
     #:
     #: `check_app_entrypoint` 은 `exists()` 로 보므로 **폴더도 후보가 된다**
     #: (`src/main/java` 처럼 진입점이 패키지 트리 깊숙이 있는 경우).
@@ -103,8 +103,9 @@ _ENTRYPOINT_CANDIDATES: dict[ContractStack, tuple[str, ...]] = {
         # Django — `_detect_preflight_contract_stack` 이 FastAPI/Flask 만
         # 구분하므로 Django 는 CUSTOM 으로 온다. 관례 진입점을 넣어 둔다.
         "manage.py", "wsgi.py", "asgi.py", "config/wsgi.py", "src/manage.py",
-        # Go · Rust
-        "main.go", "main.rs", "src/main.rs",
+        # Rust. Go main.go 는 파일명만으로 실행 가능성을 증명할 수 없으므로
+        # 아래 package main + func main 내용 프로브로만 인정한다.
+        "main.rs", "src/main.rs",
         # Ruby
         "config.ru", "app.rb", "main.rb",
         # PHP
@@ -369,7 +370,7 @@ _PROBE_MAX_FILES = 60
 #: 정당하다. 둘 다 있으면(폴리글랏) 둘 다 돈다 — 그건 오탐이 아니라 사실이다.
 #:
 #: 매니페스트가 하나도 없는 워크스페이스는 프로브가 전부 꺼진다. 그 경우
-#: 이름 기반 후보(`main.py`·`main.go`·`Dockerfile` 등)가 이미 앞 단계에서
+#: 이름 기반 후보(`main.py`·`main.rs`·`Dockerfile` 등)가 이미 앞 단계에서
 #: 처리했으므로, 여기 도달했다는 것 자체가 "진입점을 주장할 근거가 없다"는
 #: 뜻이다 — 막는 것이 맞다.
 _PROBE_RUNTIME_MANIFESTS: dict[str, tuple[str, ...]] = {

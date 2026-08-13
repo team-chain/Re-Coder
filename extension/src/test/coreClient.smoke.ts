@@ -15,6 +15,7 @@ import * as assert from 'node:assert/strict';
 
 import { CoreClient } from '../api/coreClient';
 import { buildDiscordLinkCommand } from '../gateway/discordLink';
+import { buildBridgeWebSocketUrl } from '../bridge/bridgeEndpoint';
 
 const TOKEN = 'test-token-123';
 
@@ -28,6 +29,26 @@ test('Discord link command uses the full enrollment token', () => {
 
 test('Discord link command rejects a bare student id', () => {
     assert.throws(() => buildDiscordLinkCommand('student42'));
+});
+
+test('bridge URL permits plaintext WebSocket only on loopback', () => {
+    const params = new URLSearchParams({ student: 's1' });
+    assert.equal(
+        buildBridgeWebSocketUrl('127.0.0.1', 7780, params),
+        'ws://127.0.0.1:7780/ws?student=s1',
+    );
+    assert.equal(
+        buildBridgeWebSocketUrl('::1', 7780, new URLSearchParams()),
+        'ws://[::1]:7780/ws',
+    );
+    assert.equal(
+        buildBridgeWebSocketUrl('bridge.example.com', 443, params),
+        'wss://bridge.example.com:443/ws?student=s1',
+    );
+    assert.equal(
+        buildBridgeWebSocketUrl('192.168.1.20', 7780, new URLSearchParams()),
+        'wss://192.168.1.20:7780/ws',
+    );
 });
 
 interface MockHandler {

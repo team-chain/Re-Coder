@@ -106,6 +106,28 @@ def test_rollover_reset_and_reservation_are_atomic(table):
     assert int(item["used_total_tokens"]) == 600
 
 
+def test_rollover_rejects_budget_larger_than_daily_cap(table):
+    """새 UTC 날짜의 첫 예약도 일일 한도보다 큰 예산을 허용하지 않는다."""
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
+    stale = _student(
+        table,
+        used_today=900,
+        max_daily=1_000,
+        today=yesterday,
+    )
+
+    with pytest.raises(common.QuotaError) as exc:
+        common.reserve_quota(stale, 1_200)
+
+    assert exc.value.code == "daily_exceeded"
+    item = table.get_item(Key={"pk": "STUDENT#s1", "sk": "META"})["Item"]
+    assert item["today"] == yesterday
+    assert int(item["used_today_tokens"]) == 900
+    assert int(item["used_total_tokens"]) == 0
+    pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
+    assert float(pool["used_cost_usd"]) == pytest.approx(0.0)
+
+
 def test_reconcile_returns_overreservation(table):
     """예약 600 → 실사용 200 이면 카운터가 200 으로 정산되고 풀 비용이 쌓인다."""
     item = _student(table)
