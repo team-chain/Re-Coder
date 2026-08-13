@@ -14,8 +14,21 @@ import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
 
 import { CoreClient } from '../api/coreClient';
+import { buildDiscordLinkCommand } from '../gateway/discordLink';
 
 const TOKEN = 'test-token-123';
+
+test('Discord link command uses the full enrollment token', () => {
+    const enrollmentToken = 'rcdr_student42_secret-value';
+    assert.equal(
+        buildDiscordLinkCommand(enrollmentToken),
+        `/recoder link ${enrollmentToken}`,
+    );
+});
+
+test('Discord link command rejects a bare student id', () => {
+    assert.throws(() => buildDiscordLinkCommand('student42'));
+});
 
 interface MockHandler {
     method: 'GET' | 'POST';

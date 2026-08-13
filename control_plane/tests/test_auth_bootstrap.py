@@ -91,6 +91,21 @@ def test_first_enrollment_persists_org_membership():
     _run(_scenario())
 
 
+def test_first_enrollment_locks_organization_row():
+    """The empty-organization claim must compile to a PostgreSQL row lock."""
+    from sqlalchemy.dialects import postgresql
+    from control_plane.api.routes.auth import _organization_bootstrap_lock
+
+    compiled = str(
+        _organization_bootstrap_lock("org-1").compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "FOR UPDATE" in compiled
+    assert "organizations.org_id = 'org-1'" in compiled
+
+
 def test_second_user_still_requires_invite():
     """[음성 대조] 멤버가 이미 있는 조직엔 자동 등록이 없다 — 403."""
     from fastapi import HTTPException
