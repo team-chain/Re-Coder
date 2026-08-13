@@ -62,7 +62,7 @@ def handler(event, context):
         # **유료 호출 전에 예산을 원자적으로 선점**한다. 사후 기록만으로는
         # 한도 직전의 큰 요청과 동시 요청 무리가 전부 통과한다.
         budget = common.estimate_request_tokens(messages, system, max_tokens)
-        reservation_day = common.reserve_quota(item, budget)
+        reservation = common.reserve_quota(item, budget)
         try:
             result = common.invoke_bedrock(
                 messages,
@@ -72,15 +72,12 @@ def handler(event, context):
                 output_schema=body.get("output_schema"),
             )
         except Exception:
-            common.release_reservation(
-                sid, budget, reservation_day)            # 실패 — 선점분 반환
+            common.release_reservation(reservation)      # 실패 — 선점분 반환
             raise
         cost = common.reconcile_usage(
-            sid,
-            budget,
+            reservation,
             result["input_tokens"],
             result["output_tokens"],
-            reservation_day,
         )
         result["cost_usd"] = round(cost, 6)
         return common.resp(200, result)

@@ -124,15 +124,15 @@ def test_rollover_rejects_budget_larger_than_daily_cap(table):
     assert item["today"] == yesterday
     assert int(item["used_today_tokens"]) == 900
     assert int(item["used_total_tokens"]) == 0
-    pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
-    assert float(pool["used_cost_usd"]) == pytest.approx(0.0)
+    pool = table.get_item(Key={"pk": "POOL", "sk": "META"}).get("Item", {})
+    assert float(pool.get("used_cost_usd", 0)) == pytest.approx(0.0)
 
 
 def test_reconcile_returns_overreservation(table):
     """예약 600 → 실사용 200 이면 카운터가 200 으로 정산되고 풀 비용이 쌓인다."""
     item = _student(table)
-    reservation_day = common.reserve_quota(item, 600)
-    cost = common.reconcile_usage("s1", 600, 150, 50, reservation_day)
+    reservation = common.reserve_quota(item, 600)
+    cost = common.reconcile_usage(reservation, 150, 50)
     assert _used(table) == (200, 200)
     pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
     assert int(pool["used_total_tokens"]) == 200
@@ -159,8 +159,8 @@ def test_shared_pool_is_reserved_before_paid_call(table, monkeypatch):
 def test_pool_reservation_is_reconciled_to_actual_cost(table, monkeypatch):
     monkeypatch.setattr(common, "POOL_SOFT_USD", 1.0)
     item = _student(table)
-    reservation_day = common.reserve_quota(item, 600)
-    actual_cost = common.reconcile_usage("s1", 600, 150, 50, reservation_day)
+    reservation = common.reserve_quota(item, 600)
+    actual_cost = common.reconcile_usage(reservation, 150, 50)
     pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
     assert float(pool["used_cost_usd"]) == pytest.approx(actual_cost)
 
@@ -169,17 +169,43 @@ def test_release_on_invoke_failure(table):
     """Bedrock 호출 실패 시 선점분이 전액 반환된다 — 실패한 호출이 한도를
     갉아먹으면 안 된다."""
     item = _student(table)
-    reservation_day = common.reserve_quota(item, 600)
-    common.release_reservation("s1", 600, reservation_day)
+    reservation = common.reserve_quota(item, 600)
+    common.release_reservation(reservation)
     assert _used(table) == (0, 0)
     pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
     assert float(pool["used_cost_usd"]) == pytest.approx(0.0)
 
 
+def test_expired_orphan_reservation_is_recovered(table, monkeypatch):
+    """A later invocation can release quota left by a terminated Lambda."""
+    clock = {"now": 1_700_000_000}
+    monkeypatch.setattr(common, "_now_epoch", lambda: clock["now"])
+    item = _student(table)
+
+    reservation = common.reserve_quota(item, 600)
+    stored = table.get_item(Key={
+        "pk": "RESERVATION",
+        "sk": reservation.reservation_key,
+    }).get("Item")
+    assert stored is not None
+    assert _used(table) == (600, 600)
+
+    clock["now"] = reservation.expires_at + 1
+    assert common.recover_expired_reservations() == 1
+    assert _used(table) == (0, 0)
+    pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
+    assert float(pool["used_cost_usd"]) == pytest.approx(0.0)
+    assert table.get_item(Key={
+        "pk": "RESERVATION",
+        "sk": reservation.reservation_key,
+    }).get("Item") is None
+    assert common.recover_expired_reservations() == 0
+
+
 def test_cross_midnight_release_does_not_decrement_new_day(table):
     """실패 반환은 예약 뒤 시작된 새 UTC 날짜의 카운터를 차감하지 않는다."""
     item = _student(table)
-    reservation_day = common.reserve_quota(item, 600)
+    reservation = common.reserve_quota(item, 600)
     next_day = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y%m%d")
     table.update_item(
         Key={"pk": "STUDENT#s1", "sk": "META"},
@@ -187,7 +213,7 @@ def test_cross_midnight_release_does_not_decrement_new_day(table):
         ExpressionAttributeValues={":day": next_day, ":used": 125},
     )
 
-    common.release_reservation("s1", 600, reservation_day)
+    common.release_reservation(reservation)
 
     assert _used(table) == (0, 125)
 
@@ -195,7 +221,7 @@ def test_cross_midnight_release_does_not_decrement_new_day(table):
 def test_cross_midnight_reconcile_does_not_decrement_new_day(table):
     """과대 예약 정산은 새 날짜 사용량을 음수 방향으로 오염시키지 않는다."""
     item = _student(table)
-    reservation_day = common.reserve_quota(item, 600)
+    reservation = common.reserve_quota(item, 600)
     next_day = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y%m%d")
     table.update_item(
         Key={"pk": "STUDENT#s1", "sk": "META"},
@@ -203,7 +229,7 @@ def test_cross_midnight_reconcile_does_not_decrement_new_day(table):
         ExpressionAttributeValues={":day": next_day, ":used": 125},
     )
 
-    common.reconcile_usage("s1", 600, 150, 50, reservation_day)
+    common.reconcile_usage(reservation, 150, 50)
 
     assert _used(table) == (200, 125)
 
@@ -249,7 +275,7 @@ def test_english_still_reserves_and_reconciles(table):
     item = _student(table, max_daily=100_000)
     budget = common.estimate_request_tokens(
         [{"content": [{"text": "hello world " * 10}]}], "", max_output_tokens=50)
-    reservation_day = common.reserve_quota(item, budget)
-    common.reconcile_usage("s1", budget, 20, 30, reservation_day)   # 실제 50
+    reservation = common.reserve_quota(item, budget)
+    common.reconcile_usage(reservation, 20, 30)   # 실제 50
     used_total, used_today = _used(table)
     assert used_today == 50, f"정산 후 실사용만 남아야: {used_today}"

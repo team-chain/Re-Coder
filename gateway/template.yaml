@@ -126,6 +126,12 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref GatewayTable
+        # SAM's DynamoDBCrudPolicy does not include transactional APIs.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:TransactWriteItems
+              Resource: !GetAtt GatewayTable.Arn
         # ── Bedrock 전용 최소권한: InvokeModel 만, 그 외 0 ──
         - Statement:
             - Effect: Allow

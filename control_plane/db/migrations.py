@@ -41,6 +41,15 @@ _RLS_POLICIES = [
     "CREATE POLICY audit_org_isolation ON audit_events USING (org_id = current_setting('app.current_org_id', true)::text)",
 ]
 
+# Each table's ENABLE/DROP/CREATE sequence is one replacement unit. A failure
+# after DROP must roll back the whole unit and preserve the previous policy.
+_RLS_POLICY_GROUPS = [
+    ("devices", _RLS_POLICIES[0:3]),
+    ("workspaces", _RLS_POLICIES[3:6]),
+    ("projects", _RLS_POLICIES[6:9]),
+    ("audit_events", _RLS_POLICIES[9:12]),
+]
+
 # ── 인증 부트스트랩: RLS 밖에서 토큰 → 디바이스 조회 ────────────────
 #
 # 닭-달걀 문제: RLS 정책은 `app.current_org_id` 를 요구하는데, org_id 는
@@ -87,34 +96,43 @@ CREATE TRIGGER audit_events_no_update
 ]
 
 
-async def _migrate_hash_version_column() -> None:
-    """audit_events.hash_version 이 없을 때만 독립 트랜잭션에서 추가한다."""
+async def _hash_version_column_exists() -> bool:
+    """Return whether the required audit hash-version column is present."""
     def _has_column(sync_conn) -> bool:
         from sqlalchemy import inspect as _inspect
         insp = _inspect(sync_conn)
-        try:
-            cols = {c["name"] for c in insp.get_columns("audit_events")}
-        except Exception:
-            return True  # 테이블 자체가 없으면 create_all 이 이미 만들었으므로 스킵
+        cols = {c["name"] for c in insp.get_columns("audit_events")}
         return "hash_version" in cols
 
-    try:
-        async with engine.connect() as conn:
-            exists = await conn.run_sync(_has_column)
-        if exists:
-            return
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("hash_version 존재 확인 실패 — 마이그레이션 스킵: %s", exc)
+    async with engine.connect() as conn:
+        return await conn.run_sync(_has_column)
+
+
+async def _migrate_hash_version_column() -> None:
+    """Add audit_events.hash_version or fail startup if it remains absent."""
+    if await _hash_version_column_exists():
         return
 
-    # 없을 때만, 자기 트랜잭션에서 ALTER. 실패는 이 트랜잭션에만 갇힌다.
     try:
         async with engine.begin() as conn:
             await conn.exec_driver_sql(
                 "ALTER TABLE audit_events ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1")
         logger.info("audit_events.hash_version 컬럼 추가")
-    except Exception as exc:  # noqa: BLE001 — 경쟁 등으로 이미 생겼으면 무시
-        logger.debug("hash_version ALTER 스킵: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        # A concurrent initializer may have won the ALTER race. Suppress the
+        # error only after a fresh transaction proves the column now exists.
+        try:
+            created_concurrently = await _hash_version_column_exists()
+        except Exception:  # noqa: BLE001
+            raise RuntimeError(
+                "audit_events.hash_version migration failed and could not be verified"
+            ) from exc
+        if created_concurrently:
+            logger.info("audit_events.hash_version was created concurrently")
+            return
+        raise RuntimeError(
+            "audit_events.hash_version migration failed and the column is still absent"
+        ) from exc
 
 
 async def _execute_ddl(label: str, stmt: str) -> bool:
@@ -150,6 +168,17 @@ async def _execute_ddl_group_atomic(label: str, statements: list[str]) -> bool:
         return False
 
 
+async def _apply_rls_policies() -> bool:
+    """Replace each table's RLS policy in one transaction."""
+    results = []
+    for table_name, statements in _RLS_POLICY_GROUPS:
+        results.append(await _execute_ddl_group_atomic(
+            f"RLS policy ({table_name})",
+            statements,
+        ))
+    return all(results)
+
+
 async def init_db(apply_rls: bool = True) -> None:
     """테이블 생성 + RLS + AuditLog 불변성 트리거 적용"""
     async with engine.begin() as conn:
@@ -166,8 +195,7 @@ async def init_db(apply_rls: bool = True) -> None:
     await _migrate_hash_version_column()
 
     if apply_rls:
-        for stmt in _RLS_POLICIES:
-            await _execute_ddl("RLS policy", stmt)
+        await _apply_rls_policies()
 
         # asyncpg 호환을 위해 문장별 execute를 유지하되, 교체 작업 전체는 한
         # 트랜잭션으로 묶어 CREATE TRIGGER 실패 시 기존 트리거를 복원한다.

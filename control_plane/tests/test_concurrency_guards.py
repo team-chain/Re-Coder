@@ -316,6 +316,87 @@ def test_audit_trigger_replacement_rolls_back_as_one_transaction(monkeypatch):
     assert fake_engine.transaction.rolled_back is True
 
 
+def test_rls_policy_replacements_are_grouped_per_table(monkeypatch):
+    """Every ENABLE/DROP/CREATE sequence is submitted as one atomic group."""
+    from control_plane.db import migrations
+
+    captured = []
+
+    async def _capture(label, statements):
+        captured.append((label, list(statements)))
+        return True
+
+    monkeypatch.setattr(migrations, "_execute_ddl_group_atomic", _capture)
+    assert asyncio.run(migrations._apply_rls_policies()) is True
+
+    assert len(captured) == 4
+    for label, statements in captured:
+        assert label.startswith("RLS policy (")
+        assert len(statements) == 3
+        assert statements[0].startswith("ALTER TABLE ")
+        assert statements[1].startswith("DROP POLICY ")
+        assert statements[2].startswith("CREATE POLICY ")
+
+
+def test_hash_version_migration_fails_if_column_remains_absent(monkeypatch):
+    """A real ALTER failure must stop startup instead of being swallowed."""
+    from control_plane.db import migrations
+
+    class _Connection:
+        async def exec_driver_sql(self, statement):
+            raise PermissionError("ALTER denied")
+
+    class _Transaction:
+        async def __aenter__(self):
+            return _Connection()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Transaction()
+
+    async def _absent():
+        return False
+
+    monkeypatch.setattr(migrations, "engine", _Engine())
+    monkeypatch.setattr(migrations, "_hash_version_column_exists", _absent)
+
+    with pytest.raises(RuntimeError, match="column is still absent"):
+        asyncio.run(migrations._migrate_hash_version_column())
+
+
+def test_hash_version_migration_accepts_confirmed_concurrent_winner(monkeypatch):
+    """Only a post-failure recheck proving the column exists may suppress ALTER."""
+    from control_plane.db import migrations
+
+    class _Connection:
+        async def exec_driver_sql(self, statement):
+            raise RuntimeError("duplicate column")
+
+    class _Transaction:
+        async def __aenter__(self):
+            return _Connection()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Transaction()
+
+    states = iter((False, True))
+
+    async def _column_state():
+        return next(states)
+
+    monkeypatch.setattr(migrations, "engine", _Engine())
+    monkeypatch.setattr(migrations, "_hash_version_column_exists", _column_state)
+
+    asyncio.run(migrations._migrate_hash_version_column())
+
+
 def test_init_db_survives_backend_without_rls(monkeypatch):
     """DDL 하나가 실패해도(sqlite 는 PG 문법 거부) 테이블 생성은 살아남는다 —
     예전엔 한 트랜잭션이라 첫 실패가 전체 셋업을 오염시켰다."""

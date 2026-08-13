@@ -15,7 +15,9 @@ import json
 import os
 import secrets
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import boto3
 from botocore.exceptions import ClientError
@@ -37,6 +39,14 @@ TOKEN_TTL_DAYS  = int(os.environ.get("GW_TOKEN_TTL_DAYS", "7"))                 
 POOL_CAP_USD    = float(os.environ.get("GW_POOL_CAP_USD", "20"))                 # 학생 풀 전체 천장
 POOL_SOFT_USD   = float(os.environ.get("GW_POOL_SOFT_USD", "18"))               # 게이트웨이 소프트 차단
 ENROLL_MAX      = int(os.environ.get("GW_MAX_STUDENTS", "0"))                    # 0 = 무제한, >0 = 자가발급 정원
+RESERVATION_TTL_SECONDS = max(
+    60,
+    int(os.environ.get("GW_RESERVATION_TTL_SECONDS", "120")),
+)
+RESERVATION_RECOVERY_LIMIT = max(
+    1,
+    int(os.environ.get("GW_RESERVATION_RECOVERY_LIMIT", "25")),
+)
 
 _ddb = None
 def _table():
@@ -307,89 +317,266 @@ def _reservation_cost(budget_tokens: int):
     ))
 
 
-def _reserve_pool(budget_tokens: int) -> None:
-    """Atomically reserve shared-pool cost before a paid Bedrock call."""
-    reserved_cost = _reservation_cost(budget_tokens)
-    soft_cap = _dec(POOL_SOFT_USD)
-    if reserved_cost > soft_cap:
-        raise QuotaError(
-            "pool_exceeded",
-            "이 요청의 최대 비용이 학생 풀의 남은 한도를 초과합니다.",
-        )
-    try:
-        _table().update_item(
-            Key={"pk": "POOL", "sk": "META"},
-            UpdateExpression="ADD used_cost_usd :c",
-            ConditionExpression=(
-                "attribute_not_exists(used_cost_usd) OR used_cost_usd <= :remaining"
-            ),
-            ExpressionAttributeValues={
-                ":c": reserved_cost,
-                ":remaining": soft_cap - reserved_cost,
-            },
-        )
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-            raise QuotaError(
-                "pool_exceeded",
-                "학생 풀 전체 한도에 도달했습니다.",
-            ) from exc
-        raise
+@dataclass(frozen=True)
+class QuotaReservation:
+    reservation_id: str
+    reservation_key: str
+    student_id: str
+    budget_tokens: int
+    reservation_day: str
+    reserved_cost_usd: Decimal
+    expires_at: int
 
 
-def _release_pool_reservation(budget_tokens: int) -> None:
-    _table().update_item(
-        Key={"pk": "POOL", "sk": "META"},
-        UpdateExpression="ADD used_cost_usd :c",
-        ExpressionAttributeValues={":c": -_reservation_cost(budget_tokens)},
+def _now_epoch() -> int:
+    return int(time.time())
+
+
+def _serialize_values(values: dict) -> dict:
+    # The client attached to a DynamoDB resource shares the resource's native
+    # Python-value transformer, including for transact_write_items.
+    return values
+
+
+def _transaction_cancelled(exc: ClientError) -> bool:
+    return exc.response.get("Error", {}).get("Code") in {
+        "ConditionalCheckFailedException",
+        "TransactionCanceledException",
+    }
+
+
+def _reservation_from_item(item: dict) -> QuotaReservation:
+    return QuotaReservation(
+        reservation_id=str(item["reservation_id"]),
+        reservation_key=str(item["sk"]),
+        student_id=str(item["student_id"]),
+        budget_tokens=int(item["budget_tokens"]),
+        reservation_day=str(item["reservation_day"]),
+        reserved_cost_usd=item["reserved_cost_usd"],
+        expires_at=int(item["expires_at"]),
     )
 
 
-def reserve_quota(item: dict, budget_tokens: int) -> str:
-    """호출 **전에** 예산을 원자적으로 선점한다.
+def _reservation_transaction(
+    student_id: str,
+    student_update: dict,
+    reservation: QuotaReservation,
+) -> None:
+    table = _table()
+    soft_cap = _dec(POOL_SOFT_USD)
+    reserved_cost = reservation.reserved_cost_usd
+    table.meta.client.transact_write_items(TransactItems=[
+        {
+            "Update": {
+                "TableName": table.name,
+                "Key": _serialize_values({"pk": "POOL", "sk": "META"}),
+                "UpdateExpression": "ADD used_cost_usd :c",
+                "ConditionExpression": (
+                    "attribute_not_exists(used_cost_usd) "
+                    "OR used_cost_usd <= :remaining"
+                ),
+                "ExpressionAttributeValues": _serialize_values({
+                    ":c": reserved_cost,
+                    ":remaining": soft_cap - reserved_cost,
+                }),
+            }
+        },
+        {
+            "Update": {
+                "TableName": table.name,
+                "Key": _serialize_values({
+                    "pk": f"STUDENT#{student_id}",
+                    "sk": "META",
+                }),
+                "UpdateExpression": student_update["UpdateExpression"],
+                "ConditionExpression": student_update["ConditionExpression"],
+                "ExpressionAttributeValues": _serialize_values(
+                    student_update["ExpressionAttributeValues"]
+                ),
+            }
+        },
+        {
+            "Put": {
+                "TableName": table.name,
+                "Item": _serialize_values({
+                    "pk": "RESERVATION",
+                    "sk": reservation.reservation_key,
+                    "reservation_id": reservation.reservation_id,
+                    "student_id": reservation.student_id,
+                    "budget_tokens": reservation.budget_tokens,
+                    "reservation_day": reservation.reservation_day,
+                    "reserved_cost_usd": reservation.reserved_cost_usd,
+                    "expires_at": reservation.expires_at,
+                    "created_at": _now_epoch(),
+                }),
+                "ConditionExpression": "attribute_not_exists(pk)",
+            }
+        },
+    ])
 
-    check_quota_before 는 이미 기록된 사용량을 읽기만 한다 — 한도 직전의
-    학생이 max_tokens 큰 요청 하나로 한도를 뚫고, 동시 요청 여럿이 같은
-    카운터를 보고 전부 통과한다. 유료 호출이 끝난 뒤에야 기록하므로 그때는
-    이미 돈이 나갔다.
 
-    DynamoDB 조건부 ADD 는 원자적이다: 조건(선점 후에도 한도 이내)을
-    검사하면서 같은 연산으로 카운터를 올리므로, 동시 요청은 순서대로
-    직렬화되고 한도를 넘는 예약은 ConditionalCheckFailed 로 거부된다.
-    실제 사용량과의 차액은 reconcile_usage 가 되돌린다. 반환값은 예약이
-    반영된 UTC 날짜이며, 실패 반환·정산 시 새 날짜의 카운터를 건드리지 않게
-    호출자가 그대로 전달해야 한다.
-    """
-    if int(budget_tokens) <= 0:
+def _settle_reservation(
+    reservation: QuotaReservation,
+    *,
+    student_delta: int,
+    actual_tokens: int,
+    pool_cost_delta,
+) -> bool:
+    """Atomically adjust counters and consume one reservation record."""
+    table = _table()
+    pool_values = {":c": pool_cost_delta}
+    pool_expression = "ADD used_cost_usd :c"
+    if int(actual_tokens) != 0:
+        pool_expression += ", used_total_tokens :t"
+        pool_values[":t"] = int(actual_tokens)
+
+    base_items = [{
+        "Update": {
+            "TableName": table.name,
+            "Key": _serialize_values({"pk": "POOL", "sk": "META"}),
+            "UpdateExpression": pool_expression,
+            "ExpressionAttributeValues": _serialize_values(pool_values),
+        }
+    }]
+    delete_item = {
+        "Delete": {
+            "TableName": table.name,
+            "Key": _serialize_values({
+                "pk": "RESERVATION",
+                "sk": reservation.reservation_key,
+            }),
+            "ConditionExpression": "reservation_id = :reservation_id",
+            "ExpressionAttributeValues": _serialize_values({
+                ":reservation_id": reservation.reservation_id,
+            }),
+        }
+    }
+
+    if int(student_delta) == 0:
+        attempts = [base_items + [delete_item]]
+    else:
+        student_key = _serialize_values({
+            "pk": f"STUDENT#{reservation.student_id}",
+            "sk": "META",
+        })
+        same_day = {
+            "Update": {
+                "TableName": table.name,
+                "Key": student_key,
+                "UpdateExpression": (
+                    "ADD used_total_tokens :d, used_today_tokens :d"
+                ),
+                "ConditionExpression": "today = :reservation_day",
+                "ExpressionAttributeValues": _serialize_values({
+                    ":d": int(student_delta),
+                    ":reservation_day": reservation.reservation_day,
+                }),
+            }
+        }
+        other_day = {
+            "Update": {
+                "TableName": table.name,
+                "Key": student_key,
+                "UpdateExpression": "ADD used_total_tokens :d",
+                "ConditionExpression": (
+                    "attribute_not_exists(today) OR today <> :reservation_day"
+                ),
+                "ExpressionAttributeValues": _serialize_values({
+                    ":d": int(student_delta),
+                    ":reservation_day": reservation.reservation_day,
+                }),
+            }
+        }
+        attempts = [
+            base_items + [same_day, delete_item],
+            base_items + [other_day, delete_item],
+        ]
+
+    for transaction_items in attempts:
+        try:
+            table.meta.client.transact_write_items(
+                TransactItems=transaction_items,
+            )
+            return True
+        except ClientError as exc:
+            if not _transaction_cancelled(exc):
+                raise
+    return False
+
+
+def recover_expired_reservations(*, limit: int | None = None) -> int:
+    """Release bounded, expired reservations left by terminated Lambdas."""
+    cutoff = f"{_now_epoch():010d}#\uffff"
+    response = _table().query(
+        KeyConditionExpression="pk = :pk AND sk <= :cutoff",
+        ExpressionAttributeValues={
+            ":pk": "RESERVATION",
+            ":cutoff": cutoff,
+        },
+        ConsistentRead=True,
+        Limit=int(limit or RESERVATION_RECOVERY_LIMIT),
+    )
+    recovered = 0
+    for item in response.get("Items", []):
+        reservation = _reservation_from_item(item)
+        if _settle_reservation(
+            reservation,
+            student_delta=-reservation.budget_tokens,
+            actual_tokens=0,
+            pool_cost_delta=-reservation.reserved_cost_usd,
+        ):
+            recovered += 1
+    return recovered
+
+
+def reserve_quota(item: dict, budget_tokens: int) -> QuotaReservation:
+    """Atomically reserve student/pool quota and create an expiring record."""
+    budget = int(budget_tokens)
+    if budget <= 0:
         raise QuotaError("invalid_budget", "예약 토큰은 1 이상이어야 합니다.")
+
+    # A later invocation repairs reservations orphaned by timeout/crash before
+    # it is allowed to consume more paid quota.
+    recover_expired_reservations()
 
     sid = item["pk"].split("#", 1)[1]
     max_total = int(item.get("max_total_tokens", DEF_MAX_TOTAL))
     max_daily = int(item.get("max_daily_tokens", DEF_MAX_DAILY))
     today = _today()
-    # 풀을 먼저 선점해야 동시 요청들이 같은 사전 조회값을 보고 모두 유료
-    # 호출로 진입하지 않는다. 학생 예약 실패 시 즉시 풀 선점분을 반환한다.
-    _reserve_pool(budget_tokens)
+    reserved_cost = _reservation_cost(budget)
+    if reserved_cost > _dec(POOL_SOFT_USD):
+        raise QuotaError("pool_exceeded", "요청 예산이 공유 비용 한도를 초과합니다.")
+    if budget > max_daily:
+        raise QuotaError("daily_exceeded", "요청 예산이 일일 토큰 한도를 초과합니다.")
+    if budget > max_total:
+        raise QuotaError("total_exceeded", "요청 예산이 전체 토큰 한도를 초과합니다.")
 
+    expires_at = _now_epoch() + RESERVATION_TTL_SECONDS
+    reservation_id = secrets.token_hex(16)
+    reservation = QuotaReservation(
+        reservation_id=reservation_id,
+        reservation_key=f"{expires_at:010d}#{reservation_id}",
+        student_id=sid,
+        budget_tokens=budget,
+        reservation_day=today,
+        reserved_cost_usd=reserved_cost,
+        expires_at=expires_at,
+    )
     same_day = {
-        "UpdateExpression": (
-            "ADD used_total_tokens :b, used_today_tokens :b"
-        ),
+        "UpdateExpression": "ADD used_total_tokens :b, used_today_tokens :b",
         "ConditionExpression": (
             "(attribute_not_exists(used_total_tokens) OR used_total_tokens <= :tm) "
             "AND today = :today "
             "AND (attribute_not_exists(used_today_tokens) OR used_today_tokens <= :dm)"
         ),
         "ExpressionAttributeValues": {
-            ":b": int(budget_tokens),
-            ":tm": max_total - int(budget_tokens),
-            ":dm": max_daily - int(budget_tokens),
+            ":b": budget,
+            ":tm": max_total - budget,
+            ":dm": max_daily - budget,
             ":today": today,
         },
     }
     rollover = {
-        # 날짜 전환과 첫 예약을 한 번에 기록한다. 다른 요청이 먼저 오늘 날짜로
-        # 전환했다면 조건이 실패하고 아래 same-day 경로로 재시도한다.
         "UpdateExpression": (
             "SET used_today_tokens = :b, today = :today "
             "ADD used_total_tokens :b"
@@ -400,8 +587,8 @@ def reserve_quota(item: dict, budget_tokens: int) -> str:
             "AND :b <= :daily"
         ),
         "ExpressionAttributeValues": {
-            ":b": int(budget_tokens),
-            ":tm": max_total - int(budget_tokens),
+            ":b": budget,
+            ":tm": max_total - budget,
             ":daily": max_daily,
             ":today": today,
         },
@@ -411,86 +598,59 @@ def reserve_quota(item: dict, budget_tokens: int) -> str:
         if item.get("today") == today
         else (rollover, same_day)
     )
-    try:
-        last_error = None
-        for update in attempts:
-            try:
-                _table().update_item(
-                    Key={"pk": f"STUDENT#{sid}", "sk": "META"},
-                    **update,
-                )
-                return today
-            except ClientError as exc:
-                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-                    raise
-                last_error = exc
-        assert last_error is not None
-        raise last_error
-    except ClientError as exc:
-        _release_pool_reservation(budget_tokens)
-        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-            raise QuotaError("daily_exceeded",
-                             "남은 토큰 한도가 이 요청의 예산보다 작습니다. "
-                             "max_tokens 를 줄이거나 내일 다시 시도하세요.")
-        raise
+    for update in attempts:
+        try:
+            _reservation_transaction(sid, update, reservation)
+            return reservation
+        except ClientError as exc:
+            if not _transaction_cancelled(exc):
+                raise
 
-
-def _adjust_reserved_usage(
-    student_id: str,
-    delta: int,
-    reservation_day: str,
-) -> None:
-    """Adjust total usage and the daily counter only on its reservation day."""
-    try:
-        _table().update_item(
-            Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
-            UpdateExpression="ADD used_total_tokens :d, used_today_tokens :d",
-            ConditionExpression="today = :reservation_day",
-            ExpressionAttributeValues={
-                ":d": int(delta),
-                ":reservation_day": reservation_day,
-            },
-        )
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-            raise
-        # A later request has already rolled the record to a new UTC day. The
-        # old reservation is no longer present in today's counter, so only the
-        # lifetime total must be adjusted.
-        _table().update_item(
-            Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
-            UpdateExpression="ADD used_total_tokens :d",
-            ExpressionAttributeValues={":d": int(delta)},
-        )
-
-
-def release_reservation(
-    student_id: str,
-    budget_tokens: int,
-    reservation_day: str,
-) -> None:
-    """호출 실패 시 선점분을 예약 날짜 기준으로 반환한다."""
-    _adjust_reserved_usage(student_id, -int(budget_tokens), reservation_day)
-    _release_pool_reservation(budget_tokens)
-
-
-def reconcile_usage(student_id: str, budget_tokens: int,
-                    input_tokens: int, output_tokens: int,
-                    reservation_day: str) -> float:
-    """예약분을 실사용량으로 정산하고 풀 카운터를 올린다. 비용(USD) 반환."""
-    cost = (input_tokens / 1000.0) * PRICE_IN_PER_1K + (output_tokens / 1000.0) * PRICE_OUT_PER_1K
-    actual = int(input_tokens) + int(output_tokens)
-    delta = actual - int(budget_tokens)          # 보통 음수(과대 예약 반환)
-    if delta != 0:
-        _adjust_reserved_usage(student_id, delta, reservation_day)
-    reserved_cost = _reservation_cost(budget_tokens)
-    _table().update_item(
+    pool = _table().get_item(
         Key={"pk": "POOL", "sk": "META"},
-        UpdateExpression="ADD used_total_tokens :t, used_cost_usd :c",
-        ExpressionAttributeValues={
-            ":t": actual,
-            ":c": _dec(cost) - reserved_cost,
-        })
+        ConsistentRead=True,
+    ).get("Item", {})
+    if pool.get("used_cost_usd", _dec(0)) > _dec(POOL_SOFT_USD) - reserved_cost:
+        raise QuotaError("pool_exceeded", "학생 전체 공유 한도에 도달했습니다.")
+
+    current = _table().get_item(
+        Key={"pk": f"STUDENT#{sid}", "sk": "META"},
+        ConsistentRead=True,
+    ).get("Item", {})
+    if int(current.get("used_total_tokens", 0)) > max_total - budget:
+        raise QuotaError("total_exceeded", "전체 토큰 한도에 도달했습니다.")
+    raise QuotaError("daily_exceeded", "일일 토큰 한도에 도달했습니다.")
+
+
+def release_reservation(reservation: QuotaReservation) -> None:
+    """Release a failed call exactly once."""
+    if not _settle_reservation(
+        reservation,
+        student_delta=-reservation.budget_tokens,
+        actual_tokens=0,
+        pool_cost_delta=-reservation.reserved_cost_usd,
+    ):
+        raise QuotaError("reservation_expired", "예약이 이미 만료되었거나 정산되었습니다.")
+
+
+def reconcile_usage(
+    reservation: QuotaReservation,
+    input_tokens: int,
+    output_tokens: int,
+) -> float:
+    """Consume one reservation and atomically reconcile actual usage."""
+    cost = (
+        (input_tokens / 1000.0) * PRICE_IN_PER_1K
+        + (output_tokens / 1000.0) * PRICE_OUT_PER_1K
+    )
+    actual = int(input_tokens) + int(output_tokens)
+    if not _settle_reservation(
+        reservation,
+        student_delta=actual - reservation.budget_tokens,
+        actual_tokens=actual,
+        pool_cost_delta=_dec(cost) - reservation.reserved_cost_usd,
+    ):
+        raise QuotaError("reservation_expired", "예약이 이미 만료되었거나 정산되었습니다.")
     return cost
 
 
@@ -510,7 +670,6 @@ def record_usage(student_id: str, input_tokens: int, output_tokens: int) -> floa
 
 
 def _dec(x: float):
-    from decimal import Decimal
     return Decimal(str(round(x, 6)))
 
 
