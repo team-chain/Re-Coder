@@ -26,7 +26,12 @@ def test_permission_check_covers_every_ecs_preflight_and_deploy_action() -> None
         "iam:GetRole",
         "ecr:DescribeRepositories",
         "logs:DescribeLogGroups",
-        "ecs:DescribeTaskDefinition",
+        #: ecs:DescribeTaskDefinition 은 여기 있었지만 뺐다. 살아있는 배포·
+        #: preflight 경로에 호출자가 없다(유일한 호출자였던 ecs_deploy_agent.py
+        #: 는 죽은 코드였고 함께 삭제). preflight 는 DescribeClusters ·
+        #: DescribeServices 만 쓴다.
+        "ecs:DescribeClusters",
+        "ecs:DescribeServices",
     }
     assert expected <= set(aws.REQUIRED_DEPLOY_ACTIONS)
 
