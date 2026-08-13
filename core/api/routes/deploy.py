@@ -8,6 +8,7 @@ planning, execution, records, and rollback.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import subprocess
@@ -30,6 +31,8 @@ from schemas import (
     RiskLevel,
     StackType,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["deploy"])
 
@@ -1479,16 +1482,55 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id):
 # ---------------------------------------------------------------------------
 
 
+#: LLM 이 죽어도 초안은 나와야 한다 — 템플릿만으로 만드는 Dockerfile.
+#:
+#: 예전에는 이 경로가 `agent is None`(의존성 누락) 일 때만 쓰였다. 그런데
+#: 실제로 사람을 막은 건 "에이전트가 없는 것"이 아니라 **에이전트는 있는데
+#: LLM 호출이 실패하는 것**이었다(자격증명 만료·rate limit·네트워크). 그때는
+#: 예외가 라우트를 그대로 뚫고 나가 Starlette 이 평문 `Internal Server Error`
+#: 를 반환했고, 사용자에게는 원인도 다음 행동도 없는 빨간 배너만 남았다.
+#: 그래서 두 경우 모두 이 폴백을 쓴다.
+def _dockerfile_from_template(workspace_path: str, stack) -> tuple[str, str]:
+    """(내용, 템플릿 id). 렌더 실패해도 최소 초안을 돌려준다."""
+    from registry import FileTemplateRegistry  # type: ignore
+
+    template_id = f"Dockerfile.{stack.value}"
+    try:
+        content = FileTemplateRegistry().render(
+            template_id, {"WORKSPACE": workspace_path},
+        )
+    except Exception:
+        content = (
+            f"# Auto-generated Dockerfile for {stack.value}\n"
+            "FROM python:3.11-slim\nWORKDIR /app\nCOPY . .\n"
+        )
+    return content, template_id
+
+
+#: 사용자에게 그대로 보여줄 문장. 원인 + **다음에 뭘 하면 되는지**까지 담는다.
+#: "Internal Server Error" 만 보여주면 사용자는 재시도 말고 할 수 있는 게 없다.
+def _ai_unavailable_note(exc: Exception) -> str:
+    reason = str(exc).strip() or exc.__class__.__name__
+    return (
+        f"AI 맞춤 생성을 건너뛰고 기본 템플릿으로 초안을 만들었습니다. "
+        f"원인: {reason} — AI 연결(자격증명·API 키)을 확인한 뒤 다시 생성하면 "
+        f"프로젝트에 맞춰 다듬어집니다. 지금 초안 그대로 사용해도 됩니다."
+    )
+
+
 @router.post("/api/deploy/dockerfile")
 async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
     """
     Generate a Dockerfile proposal for the workspace.
 
     Auto-detects the stack if not specified, then delegates to the
-    InfraAgent (or returns a template-based placeholder).
+    InfraAgent. **AI 호출이 실패해도 500 을 내지 않고** 템플릿 초안으로
+    폴백하며, 왜 AI 를 못 썼는지를 risk_reasons 에 담아 사용자에게 알린다.
     """
     stack = request.stack or _detect_stack(request.workspace_path)
 
+    proposal = None
+    ai_note = ""
     agent = _get_infra_agent()
     if agent is not None:
         # InfraAgent.generate_dockerfile(workspace_path, project: ProjectProfile)
@@ -1508,17 +1550,18 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
             proposal = await agent.generate_dockerfile(request.workspace_path, project)
         except TypeError:
             # 구버전 호환 — 일부 InfraAgent 구현은 시그니처가 다를 수 있음
-            proposal = await agent.generate_dockerfile(request.workspace_path)  # type: ignore[call-arg]
-    else:
-        # Placeholder: load from FileTemplateRegistry
-        from registry import FileTemplateRegistry  # type: ignore
-        reg = FileTemplateRegistry()
-        template_id = f"Dockerfile.{stack.value}"
-        try:
-            content = reg.render(template_id, {"WORKSPACE": request.workspace_path})
-        except Exception:
-            content = f"# Auto-generated Dockerfile for {stack.value}\nFROM python:3.11-slim\nWORKDIR /app\nCOPY . .\n"
+            try:
+                proposal = await agent.generate_dockerfile(request.workspace_path)  # type: ignore[call-arg]
+            except Exception as exc:  # noqa: BLE001
+                proposal, ai_note = None, _ai_unavailable_note(exc)
+        except Exception as exc:  # noqa: BLE001
+            # **여기가 데모에서 터진 지점.** LLM 제공자가 RuntimeError 를 던지면
+            # 위의 TypeError 절에 안 걸려 그대로 빠져나갔다.
+            logger.warning("Dockerfile AI 생성 실패, 템플릿 폴백: %s", exc)
+            proposal, ai_note = None, _ai_unavailable_note(exc)
 
+    if proposal is None:
+        content, template_id = _dockerfile_from_template(request.workspace_path, stack)
         proposal = InfraFileProposal(
             file_type=FileType.DOCKERFILE,
             target_path="Dockerfile",
@@ -1526,12 +1569,71 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
             base_template=template_id,
             risk_level=RiskLevel.LOW,
             approval_level=ApprovalLevel.CONFIRM,
+            risk_reasons=[ai_note] if ai_note else [],
         )
 
     if not getattr(proposal, "workspace_path", None):
         proposal = proposal.model_copy(update={
             "workspace_path": str(Path(request.workspace_path).expanduser().resolve()),
         })
+    _infra_proposals[proposal.proposal_id] = proposal
+    return proposal
+
+
+class ComposeRequest(BaseModel):
+    workspace_path: str
+    project_id: Optional[str] = None
+
+
+@router.post("/api/deploy/compose")
+async def generate_compose_route(request: ComposeRequest) -> InfraFileProposal:
+    """
+    docker-compose.yml 초안 생성.
+
+    이 라우트는 **없었다.** 확장의 「인프라 파일 생성」에는 Dockerfile ·
+    Compose · GitHub Actions 세 탭이 있는데 Compose 만 대응 엔드포인트가
+    없어서 탭이 동작할 수 없었다(호출하면 404). infra_agent 에 생성기는
+    이미 있었으므로 라우트만 붙인다.
+    """
+    ws_path = (request.workspace_path or "").strip()
+    if not ws_path:
+        raise HTTPException(status_code=400, detail="workspace_path 가 비어있습니다.")
+    if not Path(ws_path).expanduser().resolve().exists():
+        raise HTTPException(status_code=404, detail=f"워크스페이스 경로가 없습니다: {ws_path}")
+
+    try:
+        from infra_agent import generate_docker_compose  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"infra_agent.generate_docker_compose import 실패: {exc}",
+        ) from exc
+
+    # 스캔은 실패해도 진행한다 — project=None 이면 생성기가 자체 폴백을 쓴다.
+    try:
+        from project_scanner import get_project_scanner  # type: ignore
+        project = await asyncio.to_thread(get_project_scanner().scan, ws_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("프로젝트 스캔 실패, compose 폴백: %s", exc)
+        project = None
+
+    try:
+        proposal = await asyncio.to_thread(generate_docker_compose, project, ws_path)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"docker-compose.yml 생성 실패: {exc} — 워크스페이스에 인식 가능한 "
+                f"프로젝트 파일(package.json·requirements.txt 등)이 있는지 확인하세요."
+            ),
+        ) from exc
+
+    abs_ws = str(Path(ws_path).expanduser().resolve())
+    update = {"workspace_path": abs_ws}
+    if proposal.file_type != FileType.DOCKER_COMPOSE:
+        update["file_type"] = FileType.DOCKER_COMPOSE
+    proposal = proposal.model_copy(update=update)
+
     _infra_proposals[proposal.proposal_id] = proposal
     return proposal
 

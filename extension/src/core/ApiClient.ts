@@ -18,6 +18,7 @@ import {
     AwsEcrRepo,
 } from '../types';
 import { CoreManager } from './CoreManager';
+import { describeHttpError } from './httpError';
 
 export interface CodeSecretWarning {
     rule: string;
@@ -183,7 +184,11 @@ export class ApiClient {
                 }
                 let errorText = '';
                 try { errorText = await res.text(); } catch { errorText = `HTTP ${res.status}`; }
-                return { success: false, error: errorText || `HTTP ${res.status}`, timestamp };
+                return {
+                    success: false,
+                    error: describeHttpError(res.status, errorText),
+                    timestamp,
+                };
             }
 
             const json = await res.json();
@@ -379,6 +384,21 @@ export class ApiClient {
             { workspace_path: workspacePath, project_id: projectId }
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Dockerfile 생성 실패'); }
+        return resp.data;
+    }
+
+    /**
+     * docker-compose.yml 초안 생성.
+     *
+     * 「인프라 파일 생성」의 Compose 탭에 대응하는 호출. 예전에는 이 메서드도
+     * Core 라우트도 없어서 탭이 아무것도 못 했다.
+     */
+    async generateCompose(workspacePath: string, projectId?: string): Promise<InfraFileProposal> {
+        const resp = await this.request<InfraFileProposal>(
+            'POST', '/api/deploy/compose',
+            { workspace_path: workspacePath, project_id: projectId }
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'docker-compose.yml 생성 실패'); }
         return resp.data;
     }
 

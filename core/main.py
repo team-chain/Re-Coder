@@ -7,6 +7,7 @@ Includes Hybrid Cloud Relay (section 6.4.2 flow 1) with DynamoDB queue + RelayPo
 from __future__ import annotations
 
 import atexit
+import logging
 import multiprocessing
 import os
 import secrets
@@ -17,8 +18,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 try:
     from dotenv import load_dotenv
@@ -162,6 +164,32 @@ def create_app() -> FastAPI:
         description="Local AI-assisted DevOps backend for the ReCoder VSCode extension.",
         lifespan=lifespan,
     )
+
+    # ── 처리되지 않은 예외를 사람이 읽을 수 있는 JSON 으로 ──────────────
+    #
+    # Starlette 기본 동작은 **평문 `Internal Server Error`** 한 줄이다. 확장은
+    # 응답 본문을 그대로 배너에 띄우므로, 사용자에게는 `Error: Internal Server
+    # Error` 만 보이고 원인도 다음 행동도 없다. 데모에서 인프라 파일 생성이
+    # 정확히 이렇게 막혔다.
+    #
+    # 개별 라우트를 다 감싸는 것으로는 부족하다 — 미들웨어·직렬화·미처 못 본
+    # 경로에서 터지면 또 평문으로 돌아간다. 그래서 마지막 그물을 여기 친다.
+    # 예외 종류와 메시지까지만 담는다(스택 트레이스는 서버 로그로만).
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception):  # noqa: ANN202
+        logging.getLogger("recoder.core").exception(
+            "처리되지 않은 예외: %s %s", request.method, request.url.path,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": (
+                    f"{exc.__class__.__name__}: {exc} "
+                    f"(요청: {request.method} {request.url.path}) — 코어 로그에 "
+                    f"자세한 내용이 남았습니다."
+                ),
+            },
+        )
 
     app.add_middleware(
         CORSMiddleware,

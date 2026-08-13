@@ -416,6 +416,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 );
                 break;
             }
+            case 'generateCompose': {
+                const p = (payload ?? {}) as { workspacePath?: string; projectId?: string };
+                await this.handleGenerateCompose(
+                    p.workspacePath || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                    p.projectId,
+                );
+                break;
+            }
             case 'approveDockerfile': {
                 const { proposalId, approved } = payload as { proposalId: string; approved: boolean };
                 const dfResult = await this._apiClient.approveDockerfile(proposalId, approved);
@@ -1323,6 +1331,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this._state.isLoading = true;
             this.postMessage('stateUpdate', this._state);
             const proposal = await this._apiClient.generateDockerfile(workspacePath, projectId);
+            this._state.proposals.unshift(proposal);
+            this.postMessage('proposalReady', proposal);
+        } catch (err) {
+            this.postMessage('errorMessage', { message: String(err) });
+        } finally {
+            this._state.isLoading = false;
+            this.postMessage('stateUpdate', this._state);
+        }
+    }
+
+    /** docker-compose.yml 초안 생성 — 「인프라 파일 생성」 Compose 탭. */
+    private async handleGenerateCompose(workspacePath: string, projectId?: string): Promise<void> {
+        try {
+            this._state.isLoading = true;
+            this.postMessage('stateUpdate', this._state);
+            const proposal = await this._apiClient.generateCompose(workspacePath, projectId);
             this._state.proposals.unshift(proposal);
             this.postMessage('proposalReady', proposal);
         } catch (err) {

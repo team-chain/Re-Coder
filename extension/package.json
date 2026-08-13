@@ -291,7 +291,7 @@
     "pretest": "npm run compile",
     "test": "node ./out/test/runTest.js",
     "smoke": "npm run compile && node --test out/test/coreClient.smoke.js",
-    "test:webview": "npx tsc -p webview-src/tsconfig.test.json && node --test webview-tests/*.test.js"
+    "test:webview": "npm run compile && npx tsc -p webview-src/tsconfig.test.json && node --test webview-tests/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.19.41",

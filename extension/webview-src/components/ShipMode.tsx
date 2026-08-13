@@ -117,15 +117,26 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
 
   // ── Handlers ─────────────────────────────────────────────────────────────
 
-  const handleGenerateDockerfile = useCallback(() => {
+  //: 「인프라 파일 생성」의 **현재 탭에 맞는** 파일을 만든다.
+  //:
+  //: 예전에는 어느 탭에 있든 Dockerfile 만 생성했다. Compose 탭은 대응
+  //: 엔드포인트조차 없어서(404) 아무것도 못 했고, GitHub Actions 탭도 여기서는
+  //: 호출되지 않았다. 탭이 셋인데 동작은 하나뿐이라 사용자는 "탭을 골랐는데
+  //: 왜 Dockerfile 이 나오지" 상태가 됐다.
+  const handleGenerateInfraFile = useCallback(() => {
     setStep("generating");
     setError(null);
     setProposal(null);
     setScanResult(null);
     setPlan(null);
     setDeployResult(null);
-    postMessage("generateDockerfile", { workspacePath: "" /* extension fills */ });
-  }, [postMessage]);
+    const command = activeFileTab === "compose"
+      ? "generateCompose"
+      : activeFileTab === "actions"
+      ? "generateGithubActions"
+      : "generateDockerfile";
+    postMessage(command, { workspacePath: "" /* extension fills */ });
+  }, [postMessage, activeFileTab]);
 
   const handleApproveDockerfile = useCallback(() => {
     if (!proposal) { return; }
@@ -272,11 +283,25 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     { id: "actions", label: "GitHub Actions" },
   ];
 
-  // Derive displayed content for the active file tab
-  const activeContent = activeFileTab === "dockerfile" && proposal ? proposal.content : null;
-  const stackComment = activeFileTab === "dockerfile" && proposal
-    ? `# 스택: ${proposal.base_template ?? "auto-detected"}`
+  //: 지금 보고 있는 탭이 만들어 낸 초안만 보여 준다.
+  //:
+  //: 탭 이름이 아니라 **받은 제안의 file_type** 으로 판정한다. 탭만 보고
+  //: 판정하면, Compose 를 생성한 뒤 Dockerfile 탭으로 옮겼을 때 compose 내용이
+  //: Dockerfile 인 것처럼 표시된다.
+  const TAB_FILE_TYPE: Record<string, string> = {
+    dockerfile: "dockerfile",
+    compose: "docker_compose",
+    actions: "github_actions",
+  };
+  const matchesTab = !!proposal && proposal.file_type === TAB_FILE_TYPE[activeFileTab];
+  const activeContent = matchesTab ? proposal!.content : null;
+  const stackComment = matchesTab
+    ? `# 스택: ${proposal!.base_template ?? "auto-detected"}`
     : null;
+  //: AI 를 못 써서 템플릿으로 대신 만든 경우, 그 사유를 사용자에게 보여 준다.
+  //: (코어가 risk_reasons 에 담아 보낸다. 예전엔 이 상황이 500 이라 초안조차
+  //: 없었다.)
+  const fallbackNotes = matchesTab ? (proposal!.risk_reasons ?? []) : [];
 
   return (
     <div style={{ fontFamily: "var(--vscode-font-family, sans-serif)", fontSize: 12, color: "var(--vscode-editor-foreground)" }}>
@@ -377,13 +402,20 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             <span style={{ color: "#555", fontStyle: "italic" }}>
               {step === "generating"
                 ? "생성 중…"
-                : activeFileTab === "dockerfile"
-                ? "Dockerfile 생성 버튼을 누르면 여기에 표시됩니다."
-                : "Dockerfile 생성 후 활성화됩니다."}
+                : `${activeFileTab === "dockerfile" ? "Dockerfile"
+                    : activeFileTab === "compose" ? "docker-compose.yml"
+                    : ".github/workflows/deploy.yml"} 생성 버튼을 누르면 여기에 표시됩니다.`}
             </span>
           )}
         </div>
       </div>
+
+      {/* AI 를 못 써서 템플릿으로 만든 경우의 안내 — 초안은 이미 위에 있다. */}
+      {fallbackNotes.length > 0 && (
+        <div style={{ marginBottom: 10, border: "1px solid var(--vscode-inputValidation-warningBorder, #cca700)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", borderRadius: 5, padding: "7px 9px", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.5 }}>
+          {fallbackNotes.map((note, i) => <div key={i}>{note}</div>)}
+        </div>
+      )}
 
       {/* ── Loading spinner ── */}
       {(step === "generating" || step === "scanning" || step === "planning" || step === "deploying") && (
@@ -447,7 +479,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         <button
           onClick={() => {
             if (step === "idle") {
-              handleGenerateDockerfile();
+              handleGenerateInfraFile();
             } else if (step === "preview" && proposal) {
               if (proposal.approval_level <= 1) {
                 handleApproveDockerfile();
