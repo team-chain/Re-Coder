@@ -943,15 +943,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'code.apply': {
-                const { file, content, targetFolder } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string };
-                await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '');
+                const { file, content, targetFolder, ackKey } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; ackKey?: string };
+                await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '', ackKey ?? '');
                 break;
             }
             case 'code.applyAll': {
-                const { ops, targetFolder } = (payload ?? {}) as { ops?: Array<{ file: string; content: string }>; targetFolder?: string };
+                const { ops, targetFolder } = (payload ?? {}) as { ops?: Array<{ file: string; content: string; ackKey?: string }>; targetFolder?: string };
                 let okCount = 0;
                 for (const op of ops ?? []) {
-                    const ok = await this.handleCodeApply(op.file, op.content, targetFolder ?? '');
+                    // 파일마다 ackKey 를 되돌려 준다 — 웹뷰가 파일 단위로
+                    // 성공/실패를 구분해야 실패한 파일만 재시도할 수 있다.
+                    const ok = await this.handleCodeApply(op.file, op.content, targetFolder ?? '', op.ackKey ?? '');
                     if (ok) { okCount++; }
                 }
                 this.postMessage('code.applied', { file: `전체 ${okCount}개`, ok: okCount > 0 });
@@ -1195,17 +1197,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    /** 단일 파일 op 적용 — 워크스페이스에 직접 쓰고 에디터로 연다(Codex 식). 반환: 성공 여부. */
-    private async handleCodeApply(file: string, content: string, targetFolder: string = ''): Promise<boolean> {
+    /** 단일 파일 op 적용 — 워크스페이스에 직접 쓰고 에디터로 연다(Codex 식). 반환: 성공 여부.
+     *
+     * `ackKey` 는 웹뷰가 붙인 파일 식별자다. 성공(code.applied)·실패(code.error)
+     * 어느 쪽이든 그대로 되돌려 준다 — 웹뷰는 이 확인을 받아야만 "적용됨"을
+     * 표시한다. 확인 없이 표시하면 쓰기 실패가 성공으로 굳는다.
+     */
+    private async handleCodeApply(file: string, content: string, targetFolder: string = '', ackKey: string = ''): Promise<boolean> {
+        const ack = ackKey ? { ackKey } : {};
         const root = vscode.workspace.workspaceFolders?.[0]?.uri;
         if (!root) {
-            this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' });
+            this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.', ...ack });
             return false;
         }
         const combined = this._joinFolder(targetFolder, file);
         const safe = combined.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
         if (!safe) {
-            this.postMessage('code.error', { message: `잘못된 파일명: ${file}` });
+            this.postMessage('code.error', { message: `잘못된 파일명: ${file}`, ...ack });
             return false;
         }
         const uri = vscode.Uri.joinPath(root, safe);
@@ -1213,11 +1221,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
             await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
             await vscode.window.showTextDocument(uri, { preview: false });
-            this.postMessage('code.applied', { file: safe, ok: true });
+            this.postMessage('code.applied', { file: safe, ok: true, ...ack });
             return true;
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            this.postMessage('code.error', { message: `${safe} 적용 실패: ${msg}` });
+            this.postMessage('code.error', { message: `${safe} 적용 실패: ${msg}`, ...ack });
             return false;
         }
     }

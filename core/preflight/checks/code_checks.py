@@ -48,19 +48,32 @@ _NODE_FILES_GLOB = ("*.js", "*.ts", "*.mjs")
 
 #: 진입점 후보 파일들. 스택별로 우선순위.
 _ENTRYPOINT_CANDIDATES: dict[ContractStack, tuple[str, ...]] = {
-    ContractStack.PYTHON_FASTAPI: ("main.py", "app.py", "app/main.py", "src/main.py"),
-    ContractStack.PYTHON_FLASK:   ("app.py", "main.py", "wsgi.py", "src/app.py"),
+    ContractStack.PYTHON_FASTAPI: ("main.py", "app.py", "app/main.py", "src/main.py", "src/app.py"),
+    ContractStack.PYTHON_FLASK:   ("app.py", "main.py", "wsgi.py", "src/app.py", "src/main.py"),
     #: NODE_EXPRESS 는 "Next 가 아닌 모든 Node 프로젝트"의 폴백이라 NestJS·
     #: Fastify·Koa 도 여기로 온다. 그 생태계는 **TypeScript 진입점이 기본**이다
     #: (NestJS 는 `src/main.ts`). `.js` 만 두면 서버로 판정해 놓고 진입점을
     #: 못 찾아 막는 막다른 길이 된다.
     ContractStack.NODE_EXPRESS: (
-        "index.js", "server.js", "app.js", "src/index.js", "src/server.js",
-        "src/main.ts", "src/index.ts", "src/app.ts",
-        "main.ts", "index.ts", "server.ts",
-        "dist/main.js", "dist/index.js",
+        "index.js", "server.js", "app.js", "src/index.js", "src/server.js", "src/app.js",
+        "src/main.ts", "src/index.ts", "src/app.ts", "src/server.ts",
+        "main.ts", "index.ts", "server.ts", "app.ts",
+        "dist/main.js", "dist/index.js", "dist/server.js",
     ),
-    ContractStack.NODE_NEXT:      ("next.config.js", "next.config.mjs", "pages/_app.js", "pages/_app.tsx", "app/page.tsx"),
+    #: Next 는 **JS 와 TS 가 동등한 관례**다. `app/page.js`·`pages/index.jsx`
+    #: 만 있는 순수 JS App Router/Pages Router 프로젝트도 유효한 앱이고,
+    #: `src/` 아래로 옮기는 배치도 공식 지원이다. `.tsx` 하나만 두면 감지는
+    #: Next 라고 해놓고 진입점을 못 찾아 배포 대상 선택이 통째로 막힌다.
+    ContractStack.NODE_NEXT: (
+        "next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs",
+        # App Router — page 파일 (js/jsx/tsx 전부 관례)
+        "app/page.tsx", "app/page.jsx", "app/page.js",
+        "src/app/page.tsx", "src/app/page.jsx", "src/app/page.js",
+        # Pages Router — _app 과 index 둘 다 (한쪽만 있는 프로젝트가 흔하다)
+        "pages/_app.js", "pages/_app.jsx", "pages/_app.tsx",
+        "pages/index.js", "pages/index.jsx", "pages/index.tsx",
+        "src/pages/index.js", "src/pages/index.jsx", "src/pages/index.tsx",
+    ),
     #: CUSTOM 은 "위 넷 중 어디에도 안 맞는 전부"다. 그래서 후보 목록이
     #: **배포 대상 감지기가 서버로 인정하는 런타임을 전부 덮어야** 한다.
     #:
@@ -77,7 +90,15 @@ _ENTRYPOINT_CANDIDATES: dict[ContractStack, tuple[str, ...]] = {
     #: (`src/main/java` 처럼 진입점이 패키지 트리 깊숙이 있는 경우).
     ContractStack.CUSTOM: (
         # 파이썬·Node (스택 감지가 실패했을 때의 폴백)
-        "main.py", "app.py", "index.js", "server.js", "app.js",
+        #
+        # `src/main.py`·`src/app.py`·`app/main.py` 가 꼭 있어야 하는 이유:
+        # 감지기는 Starlette·Sanic 같은 비 FastAPI/Flask 파이썬 서버도
+        # 서버로 인정하는데, 그 계약 스택은 CUSTOM 이다. 파이썬은 내용
+        # 프로브가 없으므로 **이 목록이 파이썬 진입점의 전부**다 — src 배치를
+        # 빼면 "서버를 찾았습니다" 해놓고 진입점을 못 찾아 배포 대상 선택이
+        # 통째로 막힌다.
+        "main.py", "app.py", "src/main.py", "src/app.py", "app/main.py",
+        "index.js", "server.js", "app.js",
         "src/index.js", "src/index.ts", "src/main.ts", "src/app.js", "src/app.ts",
         # Django — `_detect_preflight_contract_stack` 이 FastAPI/Flask 만
         # 구분하므로 Django 는 CUSTOM 으로 온다. 관례 진입점을 넣어 둔다.

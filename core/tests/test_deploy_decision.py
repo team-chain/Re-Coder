@@ -652,6 +652,27 @@ _SERVER_FIXTURES = [
     ({"build.gradle.kts": "plugins{}", "src/main/kotlin/App.kt": "fun main(){}"}, "Kotlin"),
     ({"Gemfile": 'gem "rails"\n', "config.ru": "run App\n"}, "Rails"),
     ({"composer.json": '{"require":{"laravel/framework":"^11"}}', "public/index.php": "<?php"}, "PHP"),
+    # [Codex P1] 비 FastAPI/Flask 파이썬 서버 — 계약 스택은 CUSTOM 으로
+    # 떨어지는데, 파이썬은 내용 프로브가 없어 **후보 목록이 전부**다.
+    # src 배치를 빼면 "서버를 찾았습니다" 해놓고 진입점을 못 찾아 막는다.
+    ({"requirements.txt": "starlette\n", "src/main.py": "from starlette.applications import Starlette\n"},
+     "Starlette (src 배치)"),
+    ({"requirements.txt": "sanic\n", "src/app.py": "from sanic import Sanic\n"},
+     "Sanic (src/app 배치)"),
+    ({"requirements.txt": "starlette\n", "app/main.py": "from starlette.applications import Starlette\n"},
+     "Starlette (app/main 배치)"),
+    # [Codex P1] 순수 JS Next — JS 와 TS 는 동등한 관례다. tsx 만 받으면
+    # 유효한 JS App Router/Pages Router 앱이 막다른 길이 된다.
+    ({"package.json": '{"dependencies":{"next":"14"}}', "app/page.js": "export default function P(){}",
+      "app/api/health/route.js": "export function GET(){}"}, "Next JS App Router"),
+    ({"package.json": '{"dependencies":{"next":"14"}}', "app/page.jsx": "export default function P(){}"},
+     "Next JSX App Router"),
+    ({"package.json": '{"dependencies":{"next":"14"}}', "pages/index.js": "export default function H(){}"},
+     "Next Pages Router (_app 없음)"),
+    ({"package.json": '{"dependencies":{"next":"14"}}', "src/pages/index.tsx": "export default function H(){}"},
+     "Next src/pages 배치"),
+    ({"package.json": '{"dependencies":{"next":"14"}}', "next.config.ts": "export default {}"},
+     "Next TS 설정 파일만"),
     ({"Dockerfile": "FROM node:20\nCMD [\"node\",\"x\"]\n"}, "Dockerfile 만"),
     ({"docker-compose.yml": "services:\n  api:\n    image: x\n"}, "docker-compose 만"),
     ({"Procfile": "web: ./run\n"}, "Procfile 만"),

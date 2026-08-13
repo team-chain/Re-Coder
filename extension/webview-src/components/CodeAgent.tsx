@@ -17,10 +17,24 @@ interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
 interface DecisionChoice { id: string; question: string; chosen_key: string; options: DecisionOption[]; }
-interface Turn { id: number; prompt: string; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; }
+//: 턴은 **요청 시점의 대상 폴더를 함께 기억**한다.
+//:
+//: 사용자가 결과를 받은 뒤 폴더 선택을 바꾸고 나서 "적용"을 누르면, 현재
+//: 선택된 폴더가 아니라 **그 결과를 만들 때 쓴 폴더**에 써야 한다. 코드는
+//: 폴더 A 의 맥락으로 생성됐고 ADR 번호도 A 기준으로 예약됐는데 B 에 쓰면
+//: 같은 이름의 파일·ADR 이 덮어써진다. 적용·모두 적용·diff·경로 표시가
+//: 전부 이 고정값을 쓴다.
+interface Turn { id: number; prompt: string; targetFolder: string; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; }
 interface CtxFile { path: string; content: string; }
 interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; }
 interface DecisionModal { requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; }
+
+//: 파일 하나의 적용 상태.
+//:
+//: "적용됨"은 **확장 호스트가 실제로 썼다고 확인해 준 뒤에만** 붙는다.
+//: 클릭 즉시 적용됨으로 바꾸면, 대상이 읽기 전용이라 쓰기가 실패해도
+//: 버튼이 비활성화된 채 "적용됨"으로 남아 재시도가 불가능해진다.
+type ApplyStatus = "pending" | "applied" | "failed";
 
 let _turnSeq = 1;
 
@@ -31,7 +45,8 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
   const [targetFolder, setTargetFolder] = useState("");
   const [contextFiles, setContextFiles] = useState<CtxFile[]>([]);
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [applied, setApplied] = useState<Record<string, boolean>>({});
+  const [applyState, setApplyState] = useState<Record<string, ApplyStatus>>({});
+  const [applyErrors, setApplyErrors] = useState<Record<string, string>>({});
   const [decisionModal, setDecisionModal] = useState<DecisionModal | null>(null);
   const pendingRequestsRef = React.useRef<Record<number, PendingRequest>>({});
 
@@ -50,8 +65,27 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
         }
         return copy;
       });
+    } else if (type === "code.applied") {
+      // 확장 호스트의 **쓰기 확인**. ackKey 가 있어야 어느 파일의 응답인지
+      // 알 수 있다 — 없는 메시지(모두 적용의 총계 등)는 상태를 바꾸지 않는다.
+      const ack = payload as { ackKey?: string; ok?: boolean };
+      if (ack.ackKey) {
+        const key = ack.ackKey;
+        setApplyState((s) => ({ ...s, [key]: ack.ok === false ? "failed" : "applied" }));
+        if (ack.ok !== false) {
+          setApplyErrors((e) => { const copy = { ...e }; delete copy[key]; return copy; });
+        }
+      }
     } else if (type === "code.error") {
       const m = (payload as { message?: string })?.message ?? String(payload);
+      // 적용 실패(ackKey 있음)는 **그 파일의 상태**만 바꾼다. 턴을 건드리면
+      // 진행 중인 다른 생성 턴이 엉뚱하게 에러로 뒤집힌다.
+      const ackKey = (payload as { ackKey?: string })?.ackKey;
+      if (ackKey) {
+        setApplyState((s) => ({ ...s, [ackKey]: "failed" }));
+        setApplyErrors((e) => ({ ...e, [ackKey]: m }));
+        return;
+      }
       setTurns((ts) => {
         const copy = [...ts];
         const requestId = (payload as { requestId?: number })?.requestId;
@@ -96,7 +130,9 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
     if (!text) { return; }
     const id = _turnSeq++;
     pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles };
-    setTurns((ts) => [...ts, { id, prompt: text, status: "planning" }]);
+    // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
+    // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
+    setTurns((ts) => [...ts, { id, prompt: text, targetFolder, status: "planning" }]);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
   }, [input, targetFolder, contextFiles, postMessage]);
@@ -132,24 +168,36 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
     postMessage("code.generate", { requestId: decisionModal.requestId, instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices });
   }, [decisionModal, postMessage]);
 
-  const applyOp = useCallback((turnId: number, op: CodeOp) => {
-    postMessage("code.apply", { file: op.file, content: op.content, targetFolder });
-    setApplied((a) => ({ ...a, [`${turnId}:${op.file}`]: true }));
-  }, [postMessage, targetFolder]);
+  const applyOp = useCallback((turn: Turn, op: CodeOp) => {
+    const key = `${turn.id}:${op.file}`;
+    // "적용 중"까지만 낙관한다. "적용됨"은 호스트의 code.applied 확인이
+    // 와야 붙는다 — 쓰기 실패가 성공으로 굳는 것을 막는다.
+    setApplyState((s) => ({ ...s, [key]: "pending" }));
+    setApplyErrors((e) => { const copy = { ...e }; delete copy[key]; return copy; });
+    postMessage("code.apply", { file: op.file, content: op.content, targetFolder: turn.targetFolder, ackKey: key });
+  }, [postMessage]);
 
   const applyAll = useCallback((turn: Turn) => {
     if (!turn.result) { return; }
-    postMessage("code.applyAll", { ops: turn.result.ops, targetFolder });
-    setApplied((a) => {
-      const copy = { ...a };
-      for (const op of turn.result!.ops) { copy[`${turn.id}:${op.file}`] = true; }
+    const ops = turn.result.ops.map((op) => ({
+      file: op.file, content: op.content, ackKey: `${turn.id}:${op.file}`,
+    }));
+    setApplyState((s) => {
+      const copy = { ...s };
+      for (const op of turn.result!.ops) { copy[`${turn.id}:${op.file}`] = "pending"; }
       return copy;
     });
-  }, [postMessage, targetFolder]);
+    setApplyErrors((e) => {
+      const copy = { ...e };
+      for (const op of turn.result!.ops) { delete copy[`${turn.id}:${op.file}`]; }
+      return copy;
+    });
+    postMessage("code.applyAll", { ops, targetFolder: turn.targetFolder });
+  }, [postMessage]);
 
-  const showDiff = useCallback((op: CodeOp) => {
-    postMessage("code.diff", { file: op.file, content: op.content, targetFolder });
-  }, [postMessage, targetFolder]);
+  const showDiff = useCallback((turn: Turn, op: CodeOp) => {
+    postMessage("code.diff", { file: op.file, content: op.content, targetFolder: turn.targetFolder });
+  }, [postMessage]);
 
   const label: React.CSSProperties = {
     fontSize: 12, fontWeight: 600, color: "var(--vscode-foreground, #ddd)", marginBottom: 8,
@@ -267,11 +315,19 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
           )}
           {turn.status === "done" && turn.result && (
             <div>
-              {turn.result.ops.length > 1 && (
-                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
-                  <button onClick={() => applyAll(turn)} style={primaryBtn}>모두 적용</button>
-                </div>
-              )}
+              {turn.result.ops.length > 1 && (() => {
+                const keys = turn.result!.ops.map((op) => `${turn.id}:${op.file}`);
+                const anyPending = keys.some((k) => applyState[k] === "pending");
+                const allApplied = keys.every((k) => applyState[k] === "applied");
+                return (
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+                    <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied}
+                      style={{ ...primaryBtn, ...(anyPending || allApplied ? { opacity: 0.55, cursor: "default" } : {}) }}>
+                      {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : "모두 적용"}
+                    </button>
+                  </div>
+                );
+              })()}
               {turn.result.ops.map((op, i) => {
                 const key = `${turn.id}:${op.file}`;
                 const warned = !!(op.secret_warnings && op.secret_warnings.length);
@@ -283,17 +339,22 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
                           {op.action === "create" ? "새 파일" : "수정"}
                         </span>
                         <span style={{ fontSize: 11.5, fontFamily: "var(--vscode-editor-font-family, monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {targetFolder ? `${targetFolder}/${op.file}` : op.file}
+                          {turn.targetFolder ? `${turn.targetFolder}/${op.file}` : op.file}
                         </span>
                       </span>
                       <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
-                        {op.action === "edit" && <button onClick={() => showDiff(op)} style={ghostBtn}>변경 보기</button>}
-                        <button onClick={() => applyOp(turn.id, op)} disabled={applied[key]}
-                          style={{ ...primaryBtn, padding: "3px 11px", fontSize: 11, ...(applied[key] ? { background: "transparent", color: "#6cc070", cursor: "default" } : {}) }}>
-                          {applied[key] ? "적용됨" : "적용"}
+                        {op.action === "edit" && <button onClick={() => showDiff(turn, op)} style={ghostBtn}>변경 보기</button>}
+                        <button onClick={() => applyOp(turn, op)} disabled={applyState[key] === "pending" || applyState[key] === "applied"}
+                          style={{ ...primaryBtn, padding: "3px 11px", fontSize: 11, ...(applyState[key] === "applied" ? { background: "transparent", color: "#6cc070", cursor: "default" } : applyState[key] === "pending" ? { opacity: 0.6, cursor: "default" } : {}) }}>
+                          {applyState[key] === "applied" ? "적용됨" : applyState[key] === "pending" ? "적용 중…" : applyState[key] === "failed" ? "다시 적용" : "적용"}
                         </button>
                       </span>
                     </div>
+                    {applyState[key] === "failed" && applyErrors[key] && (
+                      <div style={{ background: "var(--vscode-inputValidation-errorBackground, rgba(239,68,68,0.1))", borderTop: "1px solid var(--vscode-inputValidation-errorBorder, #ef4444)", padding: "5px 8px", fontSize: 10.5, color: "var(--vscode-errorForeground, #f48771)" }}>
+                        {applyErrors[key]}
+                      </div>
+                    )}
                     <pre style={{ margin: 0, background: "var(--vscode-textCodeBlock-background, #1e1e1e)", color: "var(--vscode-editor-foreground, #ddd)", padding: "6px 8px", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 10.5, maxHeight: 150, overflow: "auto", whiteSpace: "pre", lineHeight: 1.5 }}>
                       {op.content.length > 1000 ? op.content.slice(0, 1000) + "\n…" : op.content}
                     </pre>
