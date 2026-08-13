@@ -63,20 +63,45 @@ AS $$
 $$;
 """
 
-# AuditLog 불변성: UPDATE/DELETE 금지 트리거
-_AUDIT_IMMUTABILITY_TRIGGER = """
+# AuditLog 불변성: UPDATE/DELETE 금지 트리거.
+#
+# **문장을 쪼개 둔 이유**: asyncpg 는 prepared statement 기반이라 한 execute()
+# 에 여러 SQL 문장을 넣으면 준비 단계에서 거부한다. 게다가 한 트랜잭션 안에서
+# 실패한 문장 뒤의 모든 문장은 InFailedSQLTransaction 으로 연쇄 실패하므로,
+# 각 문장은 **자기 트랜잭션**에서 실행해야 하나가 죽어도 나머지가 산다.
+_AUDIT_IMMUTABILITY_STATEMENTS = [
+    """
 CREATE OR REPLACE FUNCTION prevent_audit_modification()
 RETURNS TRIGGER AS $$
 BEGIN
     RAISE EXCEPTION 'AuditLog is immutable: UPDATE and DELETE are not permitted on audit_events';
 END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS audit_events_no_update ON audit_events;
+$$ LANGUAGE plpgsql
+""",
+    "DROP TRIGGER IF EXISTS audit_events_no_update ON audit_events",
+    """
 CREATE TRIGGER audit_events_no_update
     BEFORE UPDATE OR DELETE ON audit_events
-    FOR EACH ROW EXECUTE FUNCTION prevent_audit_modification();
-"""
+    FOR EACH ROW EXECUTE FUNCTION prevent_audit_modification()
+""",
+]
+
+
+async def _execute_ddl(label: str, stmt: str) -> bool:
+    """DDL 한 문장을 **독립 트랜잭션**에서 실행한다.
+
+    PostgreSQL 은 트랜잭션 안에서 문장 하나가 실패하면 그 뒤 모든 문장을
+    InFailedSQLTransaction 으로 거부한다. 예전처럼 하나의 engine.begin()
+    안에서 try/except 로 넘기면 — 첫 실패가 남은 셋업 전체를 조용히
+    무효화하고, 커밋 시점 롤백으로 **테이블 생성까지 되돌아갈 수 있다.**
+    """
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(stmt))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s skipped (%s): %s", label, stmt.strip()[:60], exc)
+        return False
 
 
 async def init_db(apply_rls: bool = True) -> None:
@@ -85,23 +110,19 @@ async def init_db(apply_rls: bool = True) -> None:
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Tables created")
 
-        if apply_rls:
-            for stmt in _RLS_POLICIES:
-                try:
-                    await conn.execute(text(stmt))
-                except Exception as exc:
-                    logger.warning("RLS policy skipped (%s): %s", stmt[:60], exc)
+    if apply_rls:
+        for stmt in _RLS_POLICIES:
+            await _execute_ddl("RLS policy", stmt)
 
-            try:
-                await conn.execute(text(_AUDIT_IMMUTABILITY_TRIGGER))
-                logger.info("AuditLog immutability trigger applied")
-            except Exception as exc:
-                logger.warning("Audit immutability trigger skipped: %s", exc)
+        # asyncpg 는 한 execute() 에 여러 문장을 허용하지 않는다 — 문장 단위로.
+        trigger_ok = all([
+            await _execute_ddl("Audit immutability", stmt)
+            for stmt in _AUDIT_IMMUTABILITY_STATEMENTS
+        ])
+        if trigger_ok:
+            logger.info("AuditLog immutability trigger applied")
 
-            # RLS 를 켰다면 인증 부트스트랩 함수도 함께 있어야 한다 —
-            # 없으면 토큰 검증이 RLS 에 막혀 모든 요청이 401 이 된다.
-            try:
-                await conn.execute(text(_AUTH_BOOTSTRAP_FUNCTION))
-                logger.info("Auth bootstrap function applied")
-            except Exception as exc:
-                logger.warning("Auth bootstrap function skipped: %s", exc)
+        # RLS 를 켰다면 인증 부트스트랩 함수도 함께 있어야 한다 —
+        # 없으면 토큰 검증이 RLS 에 막혀 모든 요청이 401 이 된다.
+        if await _execute_ddl("Auth bootstrap function", _AUTH_BOOTSTRAP_FUNCTION):
+            logger.info("Auth bootstrap function applied")

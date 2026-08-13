@@ -105,8 +105,6 @@ default allow = false
 default required_approvers = 0
 default escalate_to_security = false
 
-deny_reasons := set()
-
 '''
 
 _REGO_FOOTER = '''
@@ -125,27 +123,53 @@ allow_with_approval {
     required_approvers > 0
 }
 
-decision = "allow"                { allow }
-decision = "allow_with_approval"  { allow_with_approval }
-decision = "deny"                 { count(deny_reasons) > 0; not escalate_to_security }
-decision = "deny_with_fix_suggestion" {
-    count(deny_reasons) > 0
+# 자동 수정 제안이 가능한 거부 사유가 하나라도 있는가.
+has_fix_suggestion {
     deny_reasons[r]
     startswith(r, "trivy_")
+}
+
+# decision 은 **complete rule** 이라 두 몸통이 서로 다른 값을 동시에 내면
+# OPA 가 evaluation conflict 로 죽는다 — 호출자는 OPA 불능으로 오판하고,
+# Level 1-2 는 오프라인 허용 폴백까지 탈 수 있다. 그래서 다섯 갈래가
+# 정확히 상호배타이도록 조건을 서로 부정으로 잠근다.
+decision = "allow"                { allow }
+decision = "allow_with_approval"  { allow_with_approval }
+decision = "deny" {
+    count(deny_reasons) > 0
+    not escalate_to_security
+    not has_fix_suggestion
+}
+decision = "deny_with_fix_suggestion" {
+    count(deny_reasons) > 0
+    not escalate_to_security
+    has_fix_suggestion
 }
 decision = "escalate_to_security" { escalate_to_security }
 '''
 
 
 def _generate_rego(presets: list[PolicyPresetConfig]) -> str:
-    """활성화된 Preset들을 조합해 Rego 소스를 생성한다."""
+    """활성화된 Preset들을 조합해 Rego 소스를 생성한다.
+
+    `deny_reasons` 는 preset 조각들이 **partial set rule**
+    (`deny_reasons["…"] { … }`) 로 채운다. Rego 는 같은 이름의 complete
+    rule(`deny_reasons := set()`)과 partial rule 이 공존하면 컴파일을
+    거부하므로 — 그 상태로는 Trivy·브랜치·포트 번들이 하나라도 켜지면
+    load_to_opa() 가 실패해 정책 평가 자체가 불능이 된다 — 빈 complete
+    정의는 **partial rule 이 하나도 없을 때만** 내보낸다. (없으면
+    `count(deny_reasons)` 가 undefined 가 되어 allow 까지 무너진다.)
+    """
     snippets: list[str] = []
     for preset in presets:
         if preset.enabled:
             snippet = _PRESET_REGO_SNIPPETS.get(preset.key)
             if snippet:
                 snippets.append(snippet)
-    return _REGO_HEADER + "\n\n".join(snippets) + _REGO_FOOTER
+
+    has_partial_deny = any("deny_reasons[" in s for s in snippets)
+    empty_deny = "" if has_partial_deny else "deny_reasons := set()\n\n"
+    return _REGO_HEADER + empty_deny + "\n\n".join(snippets) + _REGO_FOOTER
 
 
 def _sha256(content: str) -> str:

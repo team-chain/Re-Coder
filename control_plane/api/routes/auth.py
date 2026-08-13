@@ -92,6 +92,21 @@ class _MemoryTempStore:
     def pop(self, key: str, default: Any = None) -> Optional[dict[str, Any]]:
         return self._store.pop(key, default)
 
+    def claim(self, key: str) -> Optional[dict[str, Any]]:
+        """**원자적 소비** — 유효하면 꺼내면서 지운다. 만료·부재면 None.
+
+        get 후 별도 pop 은 두 요청이 같은 토큰으로 동시에 들어왔을 때 둘 다
+        통과시킨다(1회용 계약 위반). dict.pop 은 GIL 아래 원자적이라 한
+        요청만 값을 가져간다.
+        """
+        meta = self._store.pop(key, None)
+        if meta is None:
+            return None
+        exp = meta.get("expires_at")
+        if exp and exp < datetime.now(timezone.utc):
+            return None
+        return meta
+
     def purge_expired(self) -> None:
         now = datetime.now(timezone.utc)
         for k, meta in list(self._store.items()):
@@ -157,6 +172,32 @@ class _RedisTempStore:
             self._client.delete(self._key(key))
             return meta
         return default
+
+    #: GET+DEL 을 한 번에 — 두 클라이언트가 같은 키를 동시에 소비하지 못한다.
+    _CLAIM_LUA = (
+        "local v = redis.call('GET', KEYS[1]) "
+        "if v then redis.call('DEL', KEYS[1]) end "
+        "return v"
+    )
+
+    def claim(self, key: str) -> Optional[dict[str, Any]]:
+        """**원자적 소비** — Lua 로 GET+DEL 을 한 왕복에 처리한다.
+
+        get() 후 delete() 두 왕복이면 그 사이에 다른 요청이 같은 토큰을
+        읽어 갈 수 있다 — 탈취된 temp_token 을 경합시켜 디바이스를 하나 더
+        등록하는 경로다.
+        """
+        import json
+        raw = self._client.eval(self._CLAIM_LUA, 1, self._key(key))
+        if raw is None:
+            return None
+        meta = json.loads(raw)
+        if "expires_at" in meta:
+            meta["expires_at"] = datetime.fromisoformat(meta["expires_at"])
+        exp = meta.get("expires_at")
+        if isinstance(exp, datetime) and exp < datetime.now(timezone.utc):
+            return None
+        return meta
 
     def purge_expired(self) -> None:
         # Redis EXPIRE 가 자동 만료. 별도 작업 불필요.
@@ -373,76 +414,85 @@ async def enroll_device(
     설계서 §Q2-A1 의 "모든 Device 등록은 AuditLog 에 기록" 도 함께 충족한다.
     """
     _purge_expired_temp_tokens()
-    token_data = _TEMP_TOKEN_STORE.get(body.temp_token)
+    # **원자적 소비.** get 으로 확인만 하고 나중에 pop 하면, 같은 temp_token
+    # 을 든 두 요청이 그 틈에 둘 다 통과해 디바이스가 두 개 등록된다 —
+    # 1회용 토큰 계약 위반이자, 탈취 토큰의 경합 등록 경로. claim 은 유효할
+    # 때만 꺼내면서 지우므로 한 요청만 진행한다. 등록이 실패하면 아래
+    # except 에서 되살려 사용자가 재시도할 수 있게 한다.
+    token_data = _TEMP_TOKEN_STORE.claim(body.temp_token)
     if token_data is None:
         raise HTTPException(status_code=401, detail="Invalid or expired temp_token")
-
-    now = datetime.now(timezone.utc)
-    if token_data["expires_at"] < now:
-        _TEMP_TOKEN_STORE.pop(body.temp_token, None)
-        raise HTTPException(status_code=401, detail="temp_token expired")
 
     user_id = token_data["user_id"]
     org_id = body.org_id
 
-    # RBAC: org의 멤버인지 확인 + 역할 조회
-    from control_plane.services.org_service import OrgService
-    org_svc = OrgService(db)
-    role = await org_svc.get_member_role(org_id, user_id)
-
-    if role is None:
-        # 최초 등록 시 아직 멤버가 없으면 developer로 자동 등록 (실제 운영에서는 초대 흐름 필수)
-        # 이 경우 org에 아무 멤버도 없어야 함
-        from control_plane.db.models import OrgMember
-        from sqlalchemy import select
-        existing = await db.execute(
-            select(OrgMember).where(OrgMember.org_id == org_id)
-        )
-        if existing.scalar_one_or_none() is not None:
-            raise HTTPException(
-                status_code=403,
-                detail="User is not a member of this organization. Request an invite first.",
-            )
-        role = OrgRole.DEVELOPER
-        # **멤버십을 실제로 저장한다.** 역할을 지역 변수로만 들고 가면 토큰은
-        # 발급되지만, 이후 모든 요청의 get_current_device() 가
-        # get_member_role() == None 으로 거부해 — 조직의 첫 디바이스가
-        # 발급 즉시 쓸 수 없는 토큰을 쥐게 된다.
-        db.add(OrgMember(org_id=org_id, user_id=user_id, role=role))
-        await db.flush()
-
-    svc = IdentityService(db)
-    token_response = await svc.enroll_device(
-        user_id=user_id,
-        org_id=org_id,
-        role=role,
-        request=body.enroll,
-    )
-
-    # temp_token 즉시 무효화
-    _TEMP_TOKEN_STORE.pop(body.temp_token, None)
-
-    # AuditLog: device.enrolled — 설계서 §Q2-A3 "Device 등록도 AuditLog 기록 100%"
     try:
-        audit_svc = AuditService(db)
-        ip = request.client.host if request.client else None
-        await audit_svc.record(
-            org_id=org_id,
-            actor_user_id=user_id,
-            actor_device_id=token_response.device_id if hasattr(token_response, "device_id") else None,
-            event=AuditEventCreate(
-                action=AuditAction.DEVICE_ENROLLED,
-                resource_type="device",
-                resource_id=getattr(token_response, "device_id", None),
-                ip_address=ip,
-                occurred_at=datetime.now(timezone.utc),
-                extra={"role": role.value, "platform": body.enroll.platform if hasattr(body.enroll, "platform") else None},
-            ),
-        )
-    except Exception as exc:  # AuditLog 실패가 사용자 흐름을 깨지 않도록 fail-soft
-        logger.warning("device.enrolled audit log failed: %s", exc)
 
-    return token_response
+        # RBAC: org의 멤버인지 확인 + 역할 조회
+        from control_plane.services.org_service import OrgService
+        org_svc = OrgService(db)
+        role = await org_svc.get_member_role(org_id, user_id)
+
+        if role is None:
+            # 최초 등록 시 아직 멤버가 없으면 developer로 자동 등록 (실제 운영에서는 초대 흐름 필수)
+            # 이 경우 org에 아무 멤버도 없어야 함
+            from control_plane.db.models import OrgMember
+            from sqlalchemy import select
+            existing = await db.execute(
+                select(OrgMember).where(OrgMember.org_id == org_id)
+            )
+            if existing.scalar_one_or_none() is not None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="User is not a member of this organization. Request an invite first.",
+                )
+            role = OrgRole.DEVELOPER
+            # **멤버십을 실제로 저장한다.** 역할을 지역 변수로만 들고 가면 토큰은
+            # 발급되지만, 이후 모든 요청의 get_current_device() 가
+            # get_member_role() == None 으로 거부해 — 조직의 첫 디바이스가
+            # 발급 즉시 쓸 수 없는 토큰을 쥐게 된다.
+            db.add(OrgMember(org_id=org_id, user_id=user_id, role=role))
+            await db.flush()
+
+        svc = IdentityService(db)
+        token_response = await svc.enroll_device(
+            user_id=user_id,
+            org_id=org_id,
+            role=role,
+            request=body.enroll,
+        )
+
+
+        # AuditLog: device.enrolled — 설계서 §Q2-A3 "Device 등록도 AuditLog 기록 100%"
+        try:
+            audit_svc = AuditService(db)
+            ip = request.client.host if request.client else None
+            await audit_svc.record(
+                org_id=org_id,
+                actor_user_id=user_id,
+                actor_device_id=token_response.device_id if hasattr(token_response, "device_id") else None,
+                event=AuditEventCreate(
+                    action=AuditAction.DEVICE_ENROLLED,
+                    resource_type="device",
+                    resource_id=getattr(token_response, "device_id", None),
+                    ip_address=ip,
+                    occurred_at=datetime.now(timezone.utc),
+                    extra={"role": role.value, "platform": body.enroll.platform if hasattr(body.enroll, "platform") else None},
+                ),
+            )
+        except Exception as exc:  # AuditLog 실패가 사용자 흐름을 깨지 않도록 fail-soft
+            logger.warning("device.enrolled audit log failed: %s", exc)
+
+        return token_response
+    except Exception:
+        # 등록 실패 — 소비한 claim 을 되살려 사용자가 같은 temp_token 으로
+        # 재시도할 수 있게 한다(잘못된 org 선택, 일시적 DB 오류 등). 만료가
+        # 지났으면 set 해도 claim 이 걸러낸다. 성공 시엔 소비된 채 남는다.
+        try:
+            _TEMP_TOKEN_STORE.set(body.temp_token, token_data)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
