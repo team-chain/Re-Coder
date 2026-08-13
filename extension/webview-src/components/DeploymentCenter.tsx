@@ -4,6 +4,21 @@ import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { AwsConnection } from "./AwsConnection";
 
+/**
+ * 감지 결과 한 줄. **값이 없을 때 undefined 를 그대로 노출하지 않는다.**
+ *
+ * 예전에는 `감지됨: ${preflight?.summary}` 였다. 코어 연결이 끊겨 preflight 가
+ * 아직(또는 영영) 없으면 화면에 그대로 `감지됨: undefined` 가 떴다. 사용자에게
+ * 아무 의미 없는 문자열이고, 제품이 고장 난 것처럼 보인다.
+ */
+export function describeDetection(summary: string | undefined | null): string {
+  const text = (summary ?? "").trim();
+  if (!text) {
+    return "확인할 수 없음 — 코어에 연결되면 다시 검사합니다.";
+  }
+  return `감지됨: ${text}`;
+}
+
 type Target = "decision" | "docker" | "actions" | "ec2" | "ecs" | "s3" | "aws";
 type Proposal = { proposal_id: string; target_path: string; content: string; approval_level: number };
 type DeployTarget = "ecs" | "s3" | "local";
@@ -310,7 +325,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
 
       {target === "decision" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 9, overflow: "hidden", background: "var(--vscode-editorWidget-background, #252526)" }}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--vscode-panel-border, #3f3f3f)", background: "linear-gradient(120deg, rgba(55,148,255,.16), transparent)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}><span>⌕</span> {checking ? "프로젝트 구성 확인 중…" : `감지됨: ${preflight?.summary}`}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}><span>⌕</span> {checking ? "프로젝트 구성 확인 중…" : describeDetection(preflight?.summary)}</div>
           {!checking && <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>{preflight?.evidence.map(item => <span key={item} style={{ padding: "3px 7px", borderRadius: 99, fontSize: 11, color: "var(--vscode-textLink-foreground, #75beff)", background: "rgba(55,148,255,.13)", border: "1px solid rgba(55,148,255,.28)" }}>{item}</span>)}</div>}
           <button onClick={runPreflight} disabled={checking || Boolean(applyingProposalId)} style={{ marginTop: 11, border: "none", background: "transparent", padding: 0, color: "var(--vscode-textLink-foreground, #75beff)", cursor: "pointer", fontSize: 11 }}>다시 검사</button>
         </div>

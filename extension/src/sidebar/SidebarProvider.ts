@@ -572,8 +572,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const result = await this._apiClient.getDeployPreflight(workspacePath);
                     this.postMessageToWebview(requestWebview, 'workspace.deploy.preflightResult', result);
                 } catch (err) {
+                    // 「다시 검사」는 **재연결 시도까지 포함해야** 한다.
+                    //
+                    // 예전에는 실패를 그대로 화면에 던졌다. 코어 연결이 끊긴
+                    // 상태에서는 몇 번을 눌러도 같은 `fetch failed` 만 반복됐고,
+                    // 사용자가 할 수 있는 건 창 리로드뿐이었다. 여기서 한 번
+                    // 재연결한 뒤 다시 시도한다.
+                    try {
+                        await this._coreManager.ensureRunning();
+                        await this._coreManager.refreshToken();
+                        const retried = await this._apiClient.getDeployPreflight(workspacePath);
+                        this.postMessageToWebview(
+                            requestWebview, 'workspace.deploy.preflightResult', retried,
+                        );
+                        break;
+                    } catch { /* 재연결해도 실패 — 아래에서 원래 오류를 알린다 */ }
                     const message = err instanceof Error ? err.message : String(err);
-                    this.postMessageToWebview(requestWebview, 'workspace.deploy.preflightError', { message });
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.preflightError', {
+                        message: `${message} (코어 재연결도 실패했습니다 — 코어가 실행 중인지 확인해 주세요.)`,
+                    });
                 }
                 break;
             }

@@ -148,11 +148,34 @@ class CoreSingleton:
     # Runtime config
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def current_entrypoint() -> str:
+        """이 프로세스를 띄운 실행 파일의 절대경로.
+
+        번들 바이너리(PyInstaller)면 실행 파일 자신, 소스 실행이면 main.py.
+        확장이 "떠 있는 Core 가 이 워크스페이스의 것인가" 를 판단하는 근거다.
+        """
+        import sys
+
+        if getattr(sys, "frozen", False):
+            return str(Path(sys.executable).resolve())
+        # sys.argv[0] 은 `python core/main.py` 의 main.py. 상대경로일 수 있어
+        # 반드시 절대화한다 — 확장이 문자열로 비교한다.
+        try:
+            return str(Path(sys.argv[0]).resolve())
+        except Exception:
+            return ""
+
     @classmethod
     def write_runtime(cls, port: int, token: str, pid: int) -> None:
         """Persist runtime configuration to ~/.recoder/runtime.json."""
         _RECODER_DIR.mkdir(parents=True, exist_ok=True)
-        config = RuntimeConfig(port=port, session_token=token, pid=pid)
+        config = RuntimeConfig(
+            port=port,
+            session_token=token,
+            pid=pid,
+            entrypoint=cls.current_entrypoint(),
+        )
         cls.RUNTIME_FILE.write_text(
             config.model_dump_json(indent=2), encoding="utf-8"
         )

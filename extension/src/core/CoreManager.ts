@@ -14,12 +14,15 @@ import * as cp from 'child_process';
 import { ChildProcess, spawn, execSync } from 'child_process';
 import { CoreHealth } from '../types';
 import { CoreClient } from '../api/coreClient';
+import { shouldReuseRunningCore } from './coreReuse';
 
 export interface RuntimeConfig {
     port: number;
     session_token: string;
     started_at?: string;
     pid?: number;
+    /** 이 Core 를 띄운 실행 파일의 절대경로. 구버전 Core 는 이 값이 없다. */
+    entrypoint?: string;
 }
 
 interface SpawnSpec {
@@ -112,8 +115,23 @@ export class CoreManager {
         }
 
         // 1) 정상 경로 — runtime.json + healthCheck.
-        if (!workspaceCore) {
-            const runtime = await this.readRuntime();
+        //
+        // 예전에는 이 블록 전체를 `if (!workspaceCore)` 로 감쌌다. 즉 ReCoder
+        // 저장소를 연 개발 모드에서는 **떠 있는 Core 를 찾는 시도조차 하지
+        // 않고** 곧장 재spawn 으로 떨어졌다. 그런데 개발 중에는 워크스페이스의
+        // Core 를 직접 띄워 두는 게 정상 사용법이라, 연결이 한 번 끊기면
+        // 창을 리로드하기 전까지 영영 복구되지 않았다(싱글턴 락·포트 충돌로
+        // 17894 ↔ 17895 를 오갔다).
+        //
+        // 이제는 항상 찾아보되, **재사용해도 되는 Core 인지**를 runtime.json 의
+        // entrypoint 로 판단한다(shouldReuseRunningCore). 원래 막으려던 것
+        // — 예전 VSIX 가 남긴 번들 Core 재사용 — 은 그대로 막힌다.
+        const runtime = await this.readRuntime();
+        const mayReuse = shouldReuseRunningCore(
+            workspaceCore ? workspaceCore.mainPy : null,
+            runtime?.entrypoint ?? null,
+        );
+        if (mayReuse) {
             if (runtime) {
                 this.port = runtime.port;
                 this.sessionToken = runtime.session_token;
