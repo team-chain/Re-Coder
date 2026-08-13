@@ -2085,3 +2085,61 @@ def test_every_runtime_call_is_granted_by_the_policy(runtime_actions):
         "실행 중 실제로 나갔는데 권한표에 없는 액션:\n  " + "\n  ".join(missing)
         + "\n(aws_policy.py 를 갱신하세요)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 권한표 ↔ 배포 전 권한 점검 목록 동기화
+# ---------------------------------------------------------------------------
+
+
+def test_required_deploy_actions_are_all_granted_by_the_policy():
+    """**권한표가 주는 것보다 더 많은 것을 요구하면 배포가 통째로 막힌다.**
+
+    사고 경위 (Codex 코드리뷰 P1, PR #28)
+        죽은 코드를 지우면서 `ecs:DescribeTaskDefinition` 을 권한표에서 뺐는데,
+        `api/routes/aws.py` 의 REQUIRED_DEPLOY_ACTIONS 에는 그대로 남겨 뒀다.
+        그 목록은 `simulate_principal_policy` 로 실제 시뮬레이션되고, 결과가
+        `missing_actions` 로 확장에 전달된다. DeploymentCenter 는
+        missing_actions 가 비지 않으면 **ECS 배포를 시작하지 않는다.**
+
+        즉 사용자가 발급받은 권한표를 그대로 적용해도 "권한이 부족합니다" 가
+        뜨고 배포 버튼이 영영 안 눌리는 상태가 된다. 테스트는 전부 초록이었다 —
+        두 목록을 대조하는 검사가 없었기 때문이다.
+
+    이 테스트가 지키는 불변식
+        권한 점검이 요구하는 모든 액션은 권한표가 실제로 준다.
+        (반대 방향은 검사하지 않는다 — 권한표는 배포 외 기능의 권한도 담는다.)
+    """
+    from api.routes import aws as aws_routes
+
+    granted = set(ap.used_actions(ap.build_policy()))
+    required = set(aws_routes.REQUIRED_DEPLOY_ACTIONS)
+
+    ungranted = sorted(required - granted)
+    assert not ungranted, (
+        "배포 전 권한 점검이 요구하는데 권한표가 주지 않는 액션 — 사용자가 "
+        "권한표를 그대로 적용해도 배포가 막힌다:\n  " + "\n  ".join(ungranted)
+    )
+
+
+def test_음성대조_대조가_실제로_차이를_잡아낸다(monkeypatch):
+    """위 테스트가 항상 통과하는 껍데기가 아닌지 확인한다.
+
+    없는 액션을 필수 목록에 하나 끼워 넣으면 **반드시** 걸려야 한다.
+    """
+    from api.routes import aws as aws_routes
+
+    monkeypatch.setattr(
+        aws_routes,
+        "REQUIRED_DEPLOY_ACTIONS",
+        [*aws_routes.REQUIRED_DEPLOY_ACTIONS, "ecs:그런권한없음"],
+    )
+    granted = set(ap.used_actions(ap.build_policy()))
+    required = set(aws_routes.REQUIRED_DEPLOY_ACTIONS)
+    #: **포함 여부만** 본다. "이것 하나뿐" 으로 검사하면 본 테스트가 깨진
+    #: 상태(다른 드리프트가 있을 때)에서 이 대조까지 같이 깨져, 독립적인
+    #: 대조 구실을 못 한다.
+    assert "ecs:그런권한없음" in (required - granted), (
+        "대조가 차이를 못 잡는다 — 위 테스트는 아무것도 증명하지 못한다"
+    )
+    assert "ecs:그런권한없음" not in granted

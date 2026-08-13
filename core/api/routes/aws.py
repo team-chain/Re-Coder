@@ -178,7 +178,6 @@ REQUIRED_DEPLOY_ACTIONS = [
     "ecs:CreateCluster",
     "ecs:DescribeServices",
     "ecs:RegisterTaskDefinition",
-    "ecs:DescribeTaskDefinition",
     "ecs:UpdateService",
     "ecs:CreateService",
     "ecs:ListTasks",
