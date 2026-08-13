@@ -333,7 +333,9 @@ async def oidc_callback(
     검증 후 state 는 즉시 폐기한다 (replay 차단).
     """
     _purge_expired_states()
-    state_meta = _STATE_STORE.pop(request.state, None)
+    # 원자적 소비 — Redis 다중 인스턴스에서 pop(get+del)은 두 콜백을
+    # 모두 통과시킨다(1회용 계약 위반). claim 은 GET+DEL 을 한 번에.
+    state_meta = _STATE_STORE.claim(request.state)
     if state_meta is None:
         raise HTTPException(status_code=401, detail="Invalid or expired OIDC state (CSRF check failed)")
     if state_meta.get("provider") != provider.value:

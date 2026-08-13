@@ -77,10 +77,19 @@ def _check_auth(request: web.Request) -> bool:
 
 
 def _verify_github_signature(body: bytes, signature: str) -> bool:
-    """GitHub Webhook HMAC-SHA256 서명 검증."""
+    """GitHub Webhook HMAC-SHA256 서명 검증.
+
+    시크릿 미설정을 "검증 통과" 로 바꾸면 안 된다 — 이 서버는 (키가 있을 때)
+    0.0.0.0 에 뜨므로, 그 상태에서는 인터넷의 아무나 위조 push/PR 페이로드를
+    보내 등록된 모든 길드의 배포 채널에 임의 링크를 뿌릴 수 있다. 시크릿이
+    없으면 검증할 수 없으므로 **거부한다**(fail-closed).
+    """
     if not GITHUB_WEBHOOK_SECRET:
-        log.warning("GITHUB_WEBHOOK_SECRET 미설정 — 서명 검증 건너뜀 (개발 모드)")
-        return True
+        log.warning("GITHUB_WEBHOOK_SECRET 미설정 — 웹훅을 거부합니다. "
+                    "GitHub 연동을 쓰려면 시크릿을 설정하세요.")
+        return False
+    if not signature:
+        return False
     expected = "sha256=" + hmac.new(
         GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
     ).hexdigest()

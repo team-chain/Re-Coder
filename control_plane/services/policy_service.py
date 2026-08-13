@@ -202,14 +202,25 @@ class PolicyService:
         request: PolicyBundleCreate,
         creator_user_id: str,
     ) -> PolicyBundleResponse:
-        """Preset 설정을 받아 Rego를 생성하고 PolicyBundle을 저장한다."""
-        # 현재 최신 버전 조회
-        result = await self._db.execute(
+        """Preset 설정을 받아 Rego를 생성하고 PolicyBundle을 저장한다.
+
+        조회→버전 증가→이전 비활성화를 **행 잠금 아래** 직렬화한다. 잠금이
+        없으면 두 관리자가 동시에 발행할 때 둘 다 같은 latest 를 읽어 같은
+        버전을 계산하고(uq_policy_bundle_version 위반으로 한쪽 500), 이전
+        active 비활성화도 lost update 로 어긋난다.
+        """
+        # 현재 최신 버전 조회 — FOR UPDATE 로 org 의 active bundle 행을 잠근다.
+        stmt = (
             select(PolicyBundle)
             .where(PolicyBundle.org_id == request.org_id, PolicyBundle.is_active == True)
             .order_by(PolicyBundle.created_at.desc())
             .limit(1)
         )
+        try:
+            stmt = stmt.with_for_update()
+        except Exception:  # noqa: BLE001 — SQLite 등 FOR UPDATE 미지원 백엔드
+            pass
+        result = await self._db.execute(stmt)
         latest = result.scalar_one_or_none()
         new_version = _next_version(latest.version if latest else None)
 

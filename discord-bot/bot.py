@@ -321,19 +321,28 @@ def _register_commands(group: app_commands.Group) -> None:
             await interaction.response.send_message(_get_deny_message(interaction), ephemeral=True)
             return
         import guild_store
-        sid = student_id.strip()
-        # 전체 토큰(rcdr_<sid>_<secret>)을 붙여넣으면 가운데 student_id만 추출
-        if sid.startswith("rcdr_") and sid.count("_") >= 2:
-            sid = sid.split("_", 2)[1]
-        if not sid:
-            await interaction.response.send_message("❌ student_id가 비어 있습니다.", ephemeral=True)
+        raw = student_id.strip()
+        # **소유 증명 필수.** student_id 만으로 바인딩하면 타인의 sid 를 자기
+        # 계정에 붙여 그 사람 VSCode 로 코드를 흘려보내거나 결과를 가로챌 수
+        # 있다. 전체 토큰(rcdr_<sid>_<secret>)을 요구하고 그 해시를 저장해,
+        # 브리지가 "이 sid 스트림을 받을 자격" 을 토큰 보유로만 인정하게 한다.
+        if not (raw.startswith("rcdr_") and raw.count("_") >= 2):
+            await interaction.response.send_message(
+                "❌ 전체 토큰이 필요합니다. `rcdr_<id>_<secret>` 형식의 토큰을 그대로 붙여넣으세요. "
+                "(student_id 만으로는 소유를 증명할 수 없어 연결을 거부합니다.)",
+                ephemeral=True,
+            )
             return
-        guild_store.set_binding(interaction.user.id, sid)
+        sid = raw.split("_", 2)[1]
+        if not sid:
+            await interaction.response.send_message("❌ 토큰에서 student_id를 읽을 수 없습니다.", ephemeral=True)
+            return
+        guild_store.set_binding(interaction.user.id, sid, guild_store._token_hash(raw))
         await interaction.response.send_message(
             f"✅ 연결 완료. 이제 이 디스코드 계정의 요청은 student_id `{sid}` 로 "
             f"브리지에 붙은 **당신의 VSCode**로만 전달됩니다.\n"
-            f"VSCode 확장 설정 `recoder.bridge.studentId` 에 `{sid}` 를 넣고 다시 연결하세요.\n"
-            f"⚠️ student_id 는 라우팅 식별자이니 타인에게 공개하지 마세요.",
+            f"VSCode 확장이 같은 토큰으로 브리지에 접속하면 본인 연결로 인증됩니다.\n"
+            f"⚠️ 토큰은 비밀번호입니다. 절대 타인에게 공개하지 마세요.",
             ephemeral=True,
         )
 

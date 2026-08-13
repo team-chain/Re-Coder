@@ -59,6 +59,10 @@ class ApproveResponseRequest(BaseModel):
     ssh_host: Optional[str] = None
     ssh_user: Optional[str] = None
     ssh_key_path: Optional[str] = None
+    #: DOUBLE_CONFIRM 프로포절의 2단계 승인용. 첫 승인과 **다른** 확인 토큰을
+    #: 요구해, 단일 호출로 2인/2단계 게이트를 건너뛰지 못하게 한다.
+    confirm_token: Optional[str] = None
+    second_approver: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -244,15 +248,43 @@ async def approve_response(request: ApproveResponseRequest) -> dict:
 
     On approval, resolves the command template and executes it via SSH.
     """
-    proposal = _proposals.get(request.proposal_id)
+    # **원자적 소비.** get 후 실행하고 나중에 del 하면, 같은 proposal_id 로
+    # 두 요청이 동시에 들어와 둘 다 get 을 통과한 뒤 원격 명령이 두 번
+    # 실행되고(중복 remediation), 뒤늦은 del 이 KeyError 로 500 을 낸다.
+    # dict.pop 은 GIL 아래 원자적이라 한 요청만 proposal 을 가져간다.
+    proposal = _proposals.pop(request.proposal_id, None)
     if proposal is None:
         raise HTTPException(
             status_code=404, detail=f"Proposal '{request.proposal_id}' not found."
         )
 
     if not request.approved:
-        del _proposals[request.proposal_id]
         return {"status": "rejected", "proposal_id": request.proposal_id}
+
+    # **승인 강도 검증 (서버 권위).** approval_level 은 위험도에서 서버가
+    # 정한 값이다. 클라이언트가 approved=true 하나로 2단계 확인을 건너뛰지
+    # 못하게, DOUBLE_CONFIRM 은 별도 확인 토큰과 두 번째 승인자를 요구하고
+    # BLOCKED 는 실행 자체를 거부한다. 소비된 proposal 은 되돌린다(재시도용).
+    level = getattr(proposal, "approval_level", ApprovalLevel.CONFIRM)
+    if level == ApprovalLevel.BLOCKED:
+        raise HTTPException(
+            status_code=403,
+            detail="이 작업은 위험도상 자동 실행이 차단되어 있습니다(BLOCKED).",
+        )
+    if level == ApprovalLevel.DOUBLE_CONFIRM:
+        if not request.confirm_token or not request.second_approver:
+            _proposals[request.proposal_id] = proposal   # 미완료 — 되돌린다
+            raise HTTPException(
+                status_code=428,
+                detail=("이 작업은 2단계 확인이 필요합니다. confirm_token 과 "
+                        "second_approver 를 함께 제시하세요."),
+            )
+        if request.second_approver == getattr(proposal, "requested_by", None):
+            _proposals[request.proposal_id] = proposal
+            raise HTTPException(
+                status_code=422,
+                detail="두 번째 승인자는 최초 요청자와 달라야 합니다.",
+            )
 
     ssh_host = request.ssh_host or proposal.parameters.get("ssh_host")
     ssh_user = request.ssh_user or proposal.parameters.get("ssh_user", "ec2-user")
@@ -292,8 +324,6 @@ async def approve_response(request: ApproveResponseRequest) -> dict:
         key_path=ssh_key,
         command=remote_cmd,
     )
-
-    del _proposals[request.proposal_id]
 
     return {
         "status": "executed" if exec_result["exit_code"] == 0 else "failed",

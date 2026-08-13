@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from schemas import (
@@ -143,13 +143,18 @@ async def list_sessions() -> list[SessionRecord]:
 
 
 @router.delete("/api/session/data")
-async def delete_data(older_than_days: int = 30) -> dict:
+async def delete_data(older_than_days: int = Query(30, ge=1)) -> dict:
     """
     Delete session data older than *older_than_days* days from
     ~/.recoder/sessions/.
 
     Also truncates the LLM call log to entries within the retention window.
     """
+    # **하한 검증.** older_than_days<=0 이면 cutoff 가 현재/미래가 되어 모든
+    # 세션과 비용 이력이 통째로 삭제된다. Query(ge=1) 로 이미 막지만, 직접
+    # 호출·구버전 클라이언트 대비로 방어를 한 번 더 둔다.
+    if older_than_days < 1:
+        raise HTTPException(status_code=422, detail="older_than_days must be >= 1")
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
     deleted_sessions = 0
     deleted_calls = 0

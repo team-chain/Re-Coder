@@ -60,6 +60,10 @@ class Permission(str, Enum):
     SECRET_UPDATE = "secret:update"
     PRODUCTION_DEPLOY = "production:deploy"
     BREAKGLASS_EXECUTE = "breakglass:execute"
+    #: 조직 멤버 초대·역할 변경·제거. DEVICE_ENROLL 과 분리해야 한다 —
+    #: 예전엔 초대가 DEVICE_ENROLL 로 걸려 DEVELOPER 가 임의 역할(OWNER 포함)을
+    #: 부여할 수 있었다. 이 권한은 OWNER/ADMIN 만 가진다.
+    MEMBER_MANAGE = "member:manage"
 
 
 class OfflineLevel(str, Enum):
@@ -317,7 +321,7 @@ ROLE_PERMISSIONS: dict[OrgRole, set[Permission]] = {
         Permission.DEPLOYMENT_REQUEST, Permission.DEPLOYMENT_APPROVE,
         Permission.POLICY_READ, Permission.POLICY_WRITE, Permission.POLICY_ASSIGN,
         Permission.AUDIT_READ, Permission.AUDIT_EXPORT,
-        Permission.SECRET_UPDATE,
+        Permission.SECRET_UPDATE, Permission.MEMBER_MANAGE,
     },
     OrgRole.DEVELOPER: {
         Permission.PROJECT_READ, Permission.PROJECT_WRITE,
@@ -490,3 +494,15 @@ class ApprovalRequestResponse(BaseModel):
     votes: list[ApprovalVoteResponse] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
+
+
+# 역할 서열 — 숫자가 클수록 상위 권한. 멤버 관리 시 "요청자가 자기보다 높은
+# 역할을 부여하거나 자기보다 높은 사람의 역할을 바꾸는 것" 을 막는 데 쓴다.
+ROLE_RANK: dict = {
+    OrgRole.VIEWER: 0,
+    OrgRole.AUDITOR: 1,
+    OrgRole.APPROVER: 2,
+    OrgRole.DEVELOPER: 2,
+    OrgRole.ADMIN: 3,
+    OrgRole.OWNER: 4,
+}

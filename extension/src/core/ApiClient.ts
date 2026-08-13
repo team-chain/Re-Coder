@@ -354,7 +354,7 @@ export class ApiClient {
             'POST',
             `/api/analyze/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? (resp.success ? 'applied' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     async listProposals(): Promise<PatchProposal[]> {
@@ -376,7 +376,7 @@ export class ApiClient {
             'POST',
             `/api/deploy/dockerfile/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? (resp.success ? 'saved' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     /**
@@ -403,7 +403,7 @@ export class ApiClient {
             'POST',
             `/api/deploy/github-actions/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? (resp.success ? 'saved' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // ── GitHub 인증 (VS Code OAuth → Core) ──────────────────────────────
@@ -486,7 +486,7 @@ export class ApiClient {
         const resp = await this.request<{ status: string }>(
             'POST', '/api/deploy/rollback', { deployment_id: deploymentId }
         );
-        return { status: resp.data?.status ?? (resp.success ? 'rolled_back' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // -----------------------------------------------------------------------
@@ -522,7 +522,7 @@ export class ApiClient {
             'POST', '/api/ops/approve',
             { proposal_id: proposalId, approved, ssh_host: sshHost, ssh_user: sshUser, ssh_key_path: sshKeyPath }
         );
-        return { status: resp.data?.status ?? (resp.success ? 'executed' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // -----------------------------------------------------------------------

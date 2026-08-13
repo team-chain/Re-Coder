@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 BRIDGE_BIND = os.getenv("RECODER_BRIDGE_BIND", "127.0.0.1")
 BRIDGE_PORT = int(os.getenv("RECODER_BRIDGE_PORT", "7780"))
 BRIDGE_TOKEN = os.getenv("RECODER_BRIDGE_TOKEN", "")
+#: 1 이면 student 라우팅에 토큰 소유 증명을 **강제**한다(운영 권장).
+REQUIRE_STUDENT_SECRET = os.getenv("RECODER_BRIDGE_REQUIRE_SECRET", "0") == "1"
 
 
 class BridgeHub:
@@ -89,8 +91,32 @@ class BridgeHub:
             log.warning("브리지 인증 실패 — IP=%s", request.remote)
             return web.Response(status=401, text="unauthorized")
 
-        # per-user 라우팅용 학생 식별자 (없으면 레거시 broadcast 대상)
+        # per-user 라우팅 식별자. **자칭 student 를 그대로 믿으면 안 된다** —
+        # 공유 BRIDGE_TOKEN 만으로는 아무나 ?student=<피해자sid> 로 붙어 그
+        # 학생의 코드 스트림을 받는다. 그래서 student 를 선언하려면 그 학생의
+        # **전체 토큰**(?secret= 또는 X-Student-Token)을 함께 제시하고, 링크
+        # 시 저장된 해시와 일치해야 한다. secret 없이 student 만 오면 거부.
         student = request.query.get("student", "").strip()
+        secret = (
+            request.headers.get("X-Student-Token", "")
+            or request.query.get("secret", "")
+        ).strip()
+
+        if student:
+            verified = False
+            try:
+                import guild_store
+                verified = guild_store.verify_student_secret(student, secret)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("student 소유 검증 실패(%s): %s", student, exc)
+            if not verified:
+                if REQUIRE_STUDENT_SECRET:
+                    log.warning("student=%s 소유 증명 실패 — 연결 거부(IP=%s)",
+                                student, request.remote)
+                    return web.Response(status=403, text="student ownership not proven")
+                # 완화 모드(레거시): 검증 실패 시 그 student 로 라우팅하지 않는다.
+                log.warning("student=%s 소유 미검증 — 라우팅 대상에서 제외", student)
+                student = ""
 
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)

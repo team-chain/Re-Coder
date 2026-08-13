@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import Header, APIRouter, BackgroundTasks, HTTPException, Query
 
 from core.agents.argocd_agent import argocd_agent
 from core.agents.rollback_pr_agent import rollback_pr_agent
@@ -106,7 +106,10 @@ async def list_syncs(
 async def get_app_status(
     app_name: str,
     argocd_server: str = Query(..., description="ArgoCD 서버 주소"),
-    argocd_token: str = Query(..., description="ArgoCD API 토큰"),
+    # 토큰은 **헤더로만** 받는다. 쿼리스트링에 실으면 uvicorn 액세스 로그·
+    # 프록시·브라우저 히스토리에 클러스터 배포 권한 토큰이 평문으로 남는다.
+    argocd_token: str = Header(..., alias="X-ArgoCD-Token",
+                               description="ArgoCD API 토큰 (헤더)"),
 ) -> dict:
     """ArgoCD Application의 현재 상태를 즉시 조회합니다."""
     try:

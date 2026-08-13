@@ -340,6 +340,15 @@ export class BridgeClient implements vscode.Disposable {
     private async _handleEnd(msg: BridgeMessage): Promise<void> {
         if (!this.session) return;
         const session = this.session;
+        // **filename 대조.** end 의 filename 이 현재 세션과 다르면 다른 파일의
+        // 뒤늦은 end 가 지금 세션을 종료·실행하는 것이다(연속 /make 인터리브).
+        // 무시한다 — 빈 파일 저장과 원치 않은 실행을 막는다.
+        if (msg.filename && session.filename && msg.filename !== session.filename) {
+            this.output.appendLine(
+                `[bridge] end filename 불일치: ${msg.filename} ≠ ${session.filename} — 무시`,
+            );
+            return;
+        }
         this.session = null;
 
         if (session.pendingFlush) {
@@ -429,6 +438,30 @@ export class BridgeClient implements vscode.Disposable {
         const ext = path.extname(session.filename).toLowerCase();
         const cwdUri = this._getWorkspaceRoot();
         const cwd = cwdUri?.fsPath;
+
+        // **실행 전 사용자 확인 필수.** auto_run 은 원격(디스코드 봇)이 보낸
+        // 코드를 이 머신의 셸에서 돌리는 것이다. 브리지에 붙은 서버의 신원을
+        // 완전히 보장할 수 없으므로(로컬 포트 선점·공유 토큰), 확인 없이
+        // 실행하면 임의 코드 실행 통로가 된다. `.html` 미리보기처럼 셸을
+        // 쓰지 않는 경로는 아래에서 계속 진행하고, 셸 실행은 여기서 막는다.
+        const EXECUTES_IN_SHELL = new Set(['.py', '.js', '.mjs', '.ts', '.sh', '.go']);
+        if (EXECUTES_IN_SHELL.has(ext)) {
+            const allowAuto = vscode.workspace
+                .getConfiguration('recoder.bridge')
+                .get<boolean>('allowAutoRun', false);
+            if (!allowAuto) {
+                const pick = await vscode.window.showWarningMessage(
+                    `ReCoder 브리지가 받은 "${session.filename}" 를 터미널에서 실행하려고 합니다. ` +
+                    `원격에서 전달된 코드입니다. 실행할까요?`,
+                    { modal: true },
+                    '실행', '이번만 건너뛰기',
+                );
+                if (pick !== '실행') {
+                    this.output.appendLine(`[bridge] auto_run 취소됨(사용자 거부): ${session.filename}`);
+                    return;
+                }
+            }
+        }
 
         // 디스크 sync 대기 — Windows 에서 write 직후 openExternal 이 0x2 (파일 없음) 뜨는 race 회피
         await new Promise<void>((resolve) => setTimeout(resolve, 250));
