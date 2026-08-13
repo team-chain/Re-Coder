@@ -625,8 +625,12 @@ def _inspect_deploy_permissions(
     # ECS ARN에, PassRole을 ECR ARN에 대입하는 교차 조합이 되어 다시 오판한다.
     simulations: list[tuple[list[str], list[str], Optional[list[dict[str, object]]]]] = [
         ([
+            # ecs:DescribeTaskDefinition 은 여기 있었지만 뺐다. 권한표가 더는
+            # 주지 않는 액션을 시뮬레이션하면 implicitDeny 가 나오고, 아래에서
+            # missing_actions 에 그대로 실려 **배포가 통째로 막힌다.**
+            # 시뮬레이션 목록은 권한표가 주는 범위를 넘어서면 안 된다.
             "ecr:GetAuthorizationToken", "ecs:RegisterTaskDefinition",
-            "ecs:DescribeTaskDefinition", "logs:DescribeLogGroups",
+            "logs:DescribeLogGroups",
             "ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeRouteTables",
             "ec2:DescribeSecurityGroups", "ec2:DescribeNetworkInterfaces",
         ], ["*"], None),

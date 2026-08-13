@@ -2143,3 +2143,142 @@ def test_음성대조_대조가_실제로_차이를_잡아낸다(monkeypatch):
         "대조가 차이를 못 잡는다 — 위 테스트는 아무것도 증명하지 못한다"
     )
     assert "ecs:그런권한없음" not in granted
+
+
+def _actions_actually_simulated(monkeypatch) -> set[str]:
+    """`_inspect_deploy_permissions` 가 IAM 에 **실제로 보내는** 액션 전부.
+
+    상수를 따로 두고 비교하면 상수와 코드가 갈라진다(그게 이 사고였다).
+    그래서 진짜 함수를 돌리고, IAM 클라이언트만 가짜로 바꿔 인자를 가로챈다.
+    """
+    from api.routes import aws as aws_routes
+
+    sent: set[str] = set()
+
+    class _FakeIam:
+        def simulate_principal_policy(self, **kwargs):
+            sent.update(kwargs.get("ActionNames", []))
+            return {
+                "EvaluationResults": [
+                    {"EvalActionName": a, "EvalDecision": "allowed"}
+                    for a in kwargs.get("ActionNames", [])
+                ]
+            }
+
+        def list_attached_user_policies(self, **_kw):
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_kw):
+            return {"PolicyNames": []}
+
+        def list_attached_role_policies(self, **_kw):
+            return {"AttachedPolicies": []}
+
+        def list_role_policies(self, **_kw):
+            return {"PolicyNames": []}
+
+    class _FakeSession:
+        region_name = "us-east-1"
+
+        def client(self, name, **_kw):
+            if name == "iam":
+                return _FakeIam()
+            raise AssertionError(f"예상 못한 클라이언트: {name}")
+
+    monkeypatch.setattr(aws_routes, "_build_boto3_session", lambda **_kw: _FakeSession())
+    aws_routes._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/tester"},
+        "us-east-1",
+    )
+    return sent
+
+
+def test_시뮬레이션하는_모든_액션을_권한표가_준다(monkeypatch):
+    """**시뮬레이션 목록이 권한표를 넘어서면 배포가 통째로 막힌다.**
+
+    사고 경위 (Codex 코드리뷰 P1, PR #28 — 두 번째 지적)
+        권한표에서 `ecs:DescribeTaskDefinition` 을 뺀 뒤 REQUIRED_DEPLOY_ACTIONS
+        만 맞췄는데, `_inspect_deploy_permissions` 안에는 **또 다른 목록**
+        (simulations 배치)이 있어서 그 액션을 계속 IAM 에 보내고 있었다.
+
+        missing_actions 는 REQUIRED_DEPLOY_ACTIONS 와 교집합을 내지 않고
+        **시뮬레이션한 액션 중 거부된 것 전부**로 채워진다. 그래서 사용자가
+        권한표를 그대로 적용해도 implicitDeny 가 잡히고 ECS 배포가 막혔다.
+
+        첫 수정에서 이걸 놓친 이유는 내가 넣은 회귀 테스트가
+        REQUIRED_DEPLOY_ACTIONS **한 목록만** 대조했기 때문이다. 목록이 셋인데
+        둘만 맞춘 셈이다.
+
+    이 테스트가 지키는 불변식
+        IAM 에 실제로 보내는 모든 액션은 권한표가 준다.
+        (의도적으로 없어도 되는 액션은 OPTIONAL_* 로 분류돼 missing_actions 에
+         들어가지 않으므로 제외한다.)
+    """
+    from api.routes import aws as aws_routes
+
+    simulated = _actions_actually_simulated(monkeypatch)
+    assert simulated, "시뮬레이션을 하나도 안 했다 — 가짜 클라이언트가 안 물렸다"
+
+    optional = aws_routes.OPTIONAL_COST_CONTROL_ACTIONS | aws_routes.OPTIONAL_CONDITIONAL_ACTIONS
+    granted = set(ap.used_actions(ap.build_policy()))
+
+    ungranted = sorted((simulated - optional) - granted)
+    assert not ungranted, (
+        "IAM 에 시뮬레이션하는데 권한표가 주지 않는 액션 — implicitDeny 가 나서 "
+        "사용자가 권한표를 그대로 적용해도 배포가 막힌다:\n  " + "\n  ".join(ungranted)
+    )
+
+
+def test_음성대조_가짜_IAM_이_실제로_인자를_가로챈다(monkeypatch):
+    """빈 집합이 돌아오면 위 검사는 공짜로 통과한다.
+
+    **여기에는 "무엇이 없어야 한다" 를 넣지 않는다.** 그런 단언을 섞으면
+    위 테스트가 깨지는 상태에서 이 대조까지 같이 깨져, 독립적인 대조 구실을
+    못 한다(앞선 대조에서 실제로 그 실수를 했다).
+    """
+    simulated = _actions_actually_simulated(monkeypatch)
+    for action in ("ecr:GetAuthorizationToken", "ecs:UpdateService", "iam:PassRole"):
+        assert action in simulated, f"{action} 을 못 가로챘다 — 가짜가 안 물렸다"
+
+
+def test_지운_액션은_더는_시뮬레이션되지_않는다(monkeypatch):
+    """권한표에서 뺀 액션이 시뮬레이션 목록에 남아 있으면 배포가 막힌다."""
+    assert "ecs:DescribeTaskDefinition" not in _actions_actually_simulated(monkeypatch)
+
+
+def test_필수_액션은_빠짐없이_시뮬레이션된다(monkeypatch):
+    """세 번째 목록 대조.
+
+    `report.inspected` 는 `set(REQUIRED_DEPLOY_ACTIONS).issubset(simulated)`
+    를 조건으로 삼는다. 필수인데 시뮬레이션에서 빠지면 점검이 영영 "완료"가
+    되지 않고, UI 는 초록을 못 띄운다 — 이번에는 반대 방향의 드리프트다.
+
+    목록이 셋(권한표 · REQUIRED_DEPLOY_ACTIONS · simulations 배치)이라 둘만
+    맞추면 나머지 하나에서 샌다. 실제로 그렇게 두 번 샜다.
+    """
+    from api.routes import aws as aws_routes
+
+    simulated = _actions_actually_simulated(monkeypatch)
+    not_simulated = sorted(set(aws_routes.REQUIRED_DEPLOY_ACTIONS) - simulated)
+    assert not not_simulated, (
+        "필수 목록에 있는데 시뮬레이션하지 않는 액션 — 권한 점검이 영영 "
+        "'완료' 로 안 바뀐다:\n  " + "\n  ".join(not_simulated)
+    )
+
+
+def test_시뮬레이션_초과분은_선택적_액션뿐이다(monkeypatch):
+    """필수도 아닌데 시뮬레이션하는 액션은 **선택적** 으로 분류돼 있어야 한다.
+
+    분류가 없으면 거부 시 missing_actions 에 실려 배포를 막는다.
+    """
+    from api.routes import aws as aws_routes
+
+    simulated = _actions_actually_simulated(monkeypatch)
+    optional = (
+        aws_routes.OPTIONAL_COST_CONTROL_ACTIONS | aws_routes.OPTIONAL_CONDITIONAL_ACTIONS
+    )
+    extra = sorted(simulated - set(aws_routes.REQUIRED_DEPLOY_ACTIONS) - optional)
+    assert not extra, (
+        "필수도 선택적도 아닌데 시뮬레이션한다 — 거부되면 배포가 막힌다:\n  "
+        + "\n  ".join(extra)
+    )
