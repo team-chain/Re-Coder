@@ -333,7 +333,7 @@ _EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str
     (
         "kotlin",
         ("src/main/kotlin/**/*.kt", "**/*.kt"),
-        re.compile(r"^\s*(?:@\w+\s+)*fun\s+main\s*\(", re.M),
+        re.compile(r"^\s*(?:@\w+\s+)*(?:suspend\s+)?fun\s+main\s*\(", re.M),
     ),
     (
         "go",
@@ -352,9 +352,6 @@ _EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str
         re.compile(r"<\?php"),
     ),
 )
-
-#: 프로브가 훑을 파일 수 상한. 큰 저장소에서 몇 초씩 걸리면 안 된다.
-_PROBE_MAX_FILES = 60
 
 #: 프로브를 **켜 주는 매니페스트**. 워크스페이스 루트에 이 파일이 있어야만
 #: 해당 언어의 프로브가 돈다.
@@ -505,11 +502,16 @@ def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
     for label, patterns, pattern_re in _EXECUTABLE_ENTRYPOINT_PROBES:
         if label not in enabled:
             continue
-        scanned = 0
+        # Patterns are ordered from conventional source roots to broad
+        # fallbacks. Track duplicates, but inspect every relevant source file:
+        # a valid launcher must not disappear merely because it is the 61st
+        # file returned by an OS-dependent directory enumeration.
+        seen_paths: set[Path] = set()
         for glob_pattern in patterns:
             for path in workspace.glob(glob_pattern):
-                if scanned >= _PROBE_MAX_FILES:
-                    break
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
                 try:
                     rel_parts = path.relative_to(workspace).parts
                 except ValueError:
@@ -518,15 +520,12 @@ def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
                     continue
                 if not path.is_file():
                     continue
-                scanned += 1
                 try:
                     text = path.read_text(encoding="utf-8", errors="ignore")[:40_000]
                 except OSError:
                     continue
                 if pattern_re.search(_strip_probe_noise(text, label)):
                     return path.relative_to(workspace).as_posix()
-            if scanned >= _PROBE_MAX_FILES:
-                break
     return None
 
 

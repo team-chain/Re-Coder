@@ -84,6 +84,51 @@ def test_tampering_any_persisted_field_breaks_the_chain():
     asyncio.run(_scenario())
 
 
+def test_v2_hash_normalizes_offset_timestamp_to_utc():
+    """A non-UTC aware timestamp survives a DB round trip without hash drift."""
+    from control_plane.services.audit import AuditService
+
+    source = datetime(
+        2026, 8, 13, 12, 0, 0,
+        tzinfo=timezone(timedelta(hours=9)),
+    )
+    assert AuditService._iso_utc(source) == "2026-08-13T03:00:00+00:00"
+
+    async def _scenario():
+        engine, Session = await _fresh()
+        async with Session() as db:
+            org = Organization(name="offset-org", slug="offset-org")
+            user = User(
+                email="offset@example.com",
+                display_name="offset",
+                is_active=True,
+                oidc_provider="github",
+                oidc_subject="offset",
+            )
+            db.add_all([org, user])
+            await db.flush()
+            org_id = org.org_id
+            user_id = user.user_id
+
+            response = await AuditService(db).record(
+                org_id=org_id,
+                actor_user_id=user_id,
+                event=_mk_event(occurred_at=source),
+            )
+            assert response.occurred_at.isoformat() == "2026-08-13T03:00:00+00:00"
+
+            # Force a real DB reload. SQLite drops timezone metadata, while
+            # PostgreSQL commonly returns TIMESTAMPTZ in UTC; both must hash to
+            # the same canonical instant used at insertion.
+            await db.commit()
+            db.expire_all()
+            ok, error = await AuditService(db).verify_chain(org_id)
+            assert ok, error
+        await engine.dispose()
+
+    asyncio.run(_scenario())
+
+
 def test_lost_device_can_sync_and_events_are_marked_suspicious():
     """[Codex P2 회귀] LOST 디바이스가 sync **전용** 경로로는 인증되고,
     큐 이벤트가 suspicious 로 기록된다. 일반 검증은 여전히 거부한다."""

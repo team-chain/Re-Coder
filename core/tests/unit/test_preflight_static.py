@@ -732,3 +732,44 @@ def test_probe_accepts_any_legal_java_modifier_order(tmp_path):
             "class App { %s }\n" % decl, encoding="utf-8")
         got = _find_executable_entrypoint(ws) is not None
         assert got == expected, f"{label}: expected {expected}, got {got}"
+
+
+def test_probe_searches_beyond_sixty_source_files(tmp_path):
+    """A valid launcher is not hidden by an arbitrary global file cutoff."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    source_root = tmp_path / "src" / "main" / "java" / "example"
+    source_root.mkdir(parents=True)
+    (tmp_path / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    for index in range(75):
+        (source_root / f"A{index:03}.java").write_text(
+            f"class A{index:03} {{ int value() {{ return {index}; }} }}\n",
+            encoding="utf-8",
+        )
+    launcher = source_root / "ZLauncher.java"
+    launcher.write_text(
+        "class ZLauncher { public static void main(String[] args) {} }\n",
+        encoding="utf-8",
+    )
+
+    assert _find_executable_entrypoint(tmp_path) == (
+        "src/main/java/example/ZLauncher.java"
+    )
+
+
+def test_probe_accepts_suspend_kotlin_main(tmp_path):
+    """Kotlin's valid top-level suspend main form is executable."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    source = tmp_path / "src" / "main" / "kotlin" / "App.kt"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+    source.write_text("suspend fun main() { runApp() }\n", encoding="utf-8")
+
+    assert _find_executable_entrypoint(tmp_path) == "src/main/kotlin/App.kt"
