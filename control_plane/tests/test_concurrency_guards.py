@@ -224,3 +224,27 @@ def test_init_db_survives_backend_without_rls(monkeypatch):
         await engine.dispose()
 
     asyncio.run(_scenario())
+
+
+def test_init_db_is_idempotent_on_existing_column(monkeypatch):
+    """[Codex P1 회귀] hash_version 컬럼이 이미 있는 DB 에서 init_db 를 다시
+    돌려도 중복 컬럼 오류로 초기화 전체가 죽지 않는다 (존재 확인 → 스킵)."""
+    from control_plane.db import migrations
+    from sqlalchemy.ext.asyncio import create_async_engine as _cae
+    from sqlalchemy import text
+
+    engine = _cae("sqlite+aiosqlite://")
+    monkeypatch.setattr(migrations, "engine", engine)
+
+    async def _scenario():
+        # 1회차 — 컬럼 생성
+        await migrations.init_db(apply_rls=True)
+        # 2회차 — 이미 있는 컬럼. 죽지 않고 완료되어야 한다.
+        await migrations.init_db(apply_rls=True)
+        async with engine.connect() as conn:
+            r = await conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='audit_events'"))
+            assert r.first() is not None, "재실행이 초기화를 깨뜨렸다"
+        await engine.dispose()
+
+    asyncio.run(_scenario())

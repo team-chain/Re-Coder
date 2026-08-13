@@ -95,3 +95,29 @@ def test_release_on_invoke_failure(table):
     common.reserve_quota(item, 600)
     common.release_reservation("s1", 600)
     assert _used(table) == (0, 0)
+
+
+def test_reservation_is_upper_bound_for_cjk(table):
+    """[Codex P1 회귀] CJK/이모지는 chars//4 로 과소예약되면 캡을 뚫는다 —
+    예약이 실제 토큰의 상한(UTF-8 바이트 이상)이어야 한다."""
+    text = "가" * 300                       # 900 bytes, 실제 토큰 대략 300+
+    msgs = [{"content": [{"text": text}]}]
+    budget = common.estimate_request_tokens(msgs, "", max_output_tokens=0)
+    assert budget >= len(text.encode("utf-8")), "예약이 바이트 상한 미만 — 과소예약"
+
+    # 한도 직전 학생: 잔여 200. CJK 요청 예약이 이를 초과하므로 거부돼야 한다.
+    item = _student(table, used_today=800, max_daily=1_000)
+    with pytest.raises(common.QuotaError):
+        common.reserve_quota(item, budget)
+
+
+def test_english_still_reserves_and_reconciles(table):
+    """[음성 대조] 영문은 과대 예약되지만 reconcile 이 되돌린다 — 캡은 지키되
+    낭비는 정산으로 회수."""
+    item = _student(table, max_daily=100_000)
+    budget = common.estimate_request_tokens(
+        [{"content": [{"text": "hello world " * 10}]}], "", max_output_tokens=50)
+    common.reserve_quota(item, budget)
+    common.reconcile_usage("s1", budget, 20, 30)   # 실제 50
+    used_total, used_today = _used(table)
+    assert used_today == 50, f"정산 후 실사용만 남아야: {used_today}"

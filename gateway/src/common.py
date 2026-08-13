@@ -273,16 +273,23 @@ MAX_TOKENS_CEILING = int(os.environ.get("GW_MAX_TOKENS_CEILING", "4096"))
 
 
 def estimate_request_tokens(messages, system: str, max_output_tokens: int) -> int:
-    """예약할 토큰 예산 추정 = 입력 근사(문자/4) + 출력 상한.
+    """예약할 토큰 예산 = 입력 **상한** + 출력 상한.
 
-    출력은 max_tokens 가 곧 상한이므로 정확하고, 입력은 근사치다 —
-    과대 예약분은 정산에서 되돌리므로 근사여도 안전한 쪽으로 기운다.
+    예약은 반드시 실제 사용량의 **상한**이어야 한다. `chars // 4`(영문 근사)는
+    CJK·이모지·랜덤 식별자·인코딩 데이터에서 실제 Bedrock 입력 토큰을 크게
+    과소평가한다 — 그러면 한도 직전 학생이 작은 예산만 예약하고 초과분은
+    사후 정산으로만 반영되어, 예약이 보장하려던 캡이 다시 뚫린다.
+
+    그래서 입력은 **UTF-8 바이트 수**를 상한으로 쓴다. 이 모델들의 토크나이저는
+    어떤 입력에서도 바이트 수보다 많은 토큰을 만들지 않으므로 바이트 수는
+    안전한 상한이다(영문은 과대 예약되지만, 과대분은 reconcile 이 되돌린다 —
+    과소예약이 캡을 뚫는 것보다 과대예약이 항상 안전하다).
     """
-    chars = len(system or "")
+    byte_len = len((system or "").encode("utf-8"))
     for m in messages or []:
         for c in m.get("content", []) or []:
-            chars += len(str(c.get("text", "")))
-    return (chars // 4) + 64 + int(max_output_tokens)
+            byte_len += len(str(c.get("text", "")).encode("utf-8"))
+    return byte_len + 64 + int(max_output_tokens)
 
 
 def reserve_quota(item: dict, budget_tokens: int) -> None:

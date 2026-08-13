@@ -87,6 +87,36 @@ CREATE TRIGGER audit_events_no_update
 ]
 
 
+async def _migrate_hash_version_column() -> None:
+    """audit_events.hash_version 이 없을 때만 독립 트랜잭션에서 추가한다."""
+    def _has_column(sync_conn) -> bool:
+        from sqlalchemy import inspect as _inspect
+        insp = _inspect(sync_conn)
+        try:
+            cols = {c["name"] for c in insp.get_columns("audit_events")}
+        except Exception:
+            return True  # 테이블 자체가 없으면 create_all 이 이미 만들었으므로 스킵
+        return "hash_version" in cols
+
+    try:
+        async with engine.connect() as conn:
+            exists = await conn.run_sync(_has_column)
+        if exists:
+            return
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hash_version 존재 확인 실패 — 마이그레이션 스킵: %s", exc)
+        return
+
+    # 없을 때만, 자기 트랜잭션에서 ALTER. 실패는 이 트랜잭션에만 갇힌다.
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                "ALTER TABLE audit_events ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1")
+        logger.info("audit_events.hash_version 컬럼 추가")
+    except Exception as exc:  # noqa: BLE001 — 경쟁 등으로 이미 생겼으면 무시
+        logger.debug("hash_version ALTER 스킵: %s", exc)
+
+
 async def _execute_ddl(label: str, stmt: str) -> bool:
     """DDL 한 문장을 **독립 트랜잭션**에서 실행한다.
 
@@ -110,16 +140,14 @@ async def init_db(apply_rls: bool = True) -> None:
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Tables created")
 
-        # 구 스키마 마이그레이션 — audit_events.hash_version 이 없으면 추가.
-        # 기존 행은 default 1(v1 부분 페이로드 포맷)로 남고, 신규 행은 v2 로
-        # 기록된다. 검증기가 행 버전에 맞춰 재계산하므로 옛 행이 위조로
-        # 오판되지 않는다.
-        try:
-            await conn.exec_driver_sql(
-                "ALTER TABLE audit_events ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1")
-            logger.info("audit_events.hash_version 컬럼 추가")
-        except Exception as exc:  # noqa: BLE001 — 이미 있으면 무시
-            logger.debug("hash_version 마이그레이션 스킵: %s", exc)
+    # 구 스키마 마이그레이션 — audit_events.hash_version 이 없으면 추가.
+    # **컬럼 존재를 먼저 확인**한 뒤, 없을 때만 **독립 트랜잭션**에서 ALTER 한다.
+    #   - create_all 이 신규 DB 엔 이미 이 컬럼을 만든다. 무조건 ADD COLUMN 하면
+    #     중복 컬럼 오류가 나고, PostgreSQL 은 그 오류로 트랜잭션이 abort 되어
+    #     같은 트랜잭션의 create_all 커밋까지 실패한다(뒤의 RLS 셋업도 스킵).
+    #   - 그래서 존재 확인 → 없으면 자기 트랜잭션에서만 ALTER. 실패해도
+    #     초기화 전체가 죽지 않는다.
+    await _migrate_hash_version_column()
 
     if apply_rls:
         for stmt in _RLS_POLICIES:
