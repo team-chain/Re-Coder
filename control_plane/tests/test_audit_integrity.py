@@ -142,3 +142,56 @@ def test_lost_device_can_sync_and_events_are_marked_suspicious():
         await engine.dispose()
 
     asyncio.run(_scenario())
+
+
+def test_legacy_v1_events_still_verify_after_upgrade():
+    """[Codex P1 회귀] 업그레이드 전 v1 포맷으로 해시된 행이 새 검증기에서도
+    위조 없이 통과한다. v1 은 부분 페이로드, v2 는 전체 페이로드로 재계산."""
+    from sqlalchemy import select
+    from control_plane.services.audit import AuditService
+
+    async def _scenario():
+        engine, Session = await _fresh()
+        async with Session() as db:
+            org = Organization(name="o", slug="v1compat")
+            u = User(email="v1@x.io", display_name="u", is_active=True,
+                     oidc_provider="github", oidc_subject="v1")
+            db.add_all([org, u]); await db.flush()
+            svc = AuditService(db)
+
+            # 옛 방식으로 v1 이벤트를 직접 만든다: v1 포맷으로 해시하고
+            # hash_version=1 로 저장(업그레이드 전 DB 상태 재현).
+            occ = datetime.now(timezone.utc)
+            genesis = "0" * 64
+            body_v1 = svc._v1_body(
+                org_id=org.org_id, seq=1,
+                actor_user_id=u.user_id, actor_device_id=None,
+                action=AuditAction.DEPLOYMENT_APPROVED.value,
+                resource_type="deployment", resource_id="d1",
+                occurred_at=occ.isoformat(), extra={})
+            h1 = svc._compute_hash(genesis, body_v1)
+            db.add(AuditEvent(
+                hash_version=1, org_id=org.org_id, seq=1,
+                actor_user_id=u.user_id, action=AuditAction.DEPLOYMENT_APPROVED,
+                resource_type="deployment", resource_id="d1",
+                before_state={"x": 1}, after_state={"x": 2},
+                ip_address="10.0.0.9", occurred_at=occ,
+                event_hash=h1, previous_event_hash=genesis,
+                policy_bundle_version="v1.0.0", extra={}, is_suspicious=False))
+            # counter 도 v1 행에 맞춰 세팅
+            from control_plane.db.models import AuditSeqCounter
+            db.add(AuditSeqCounter(org_id=org.org_id, last_seq=1, last_event_hash=h1))
+            await db.flush()
+
+            # 검증: v1 행이 통과해야 한다 (전체 페이로드로 재계산하면 깨진다).
+            ok, err = await svc.verify_chain(org.org_id)
+            assert ok, f"v1 행이 위조로 오판됨: {err}"
+
+            # 이어서 v2 이벤트를 정상 기록 → 체인 계속 유효.
+            await svc.record(org_id=org.org_id, actor_user_id=u.user_id,
+                             event=_mk_event())
+            ok2, err2 = await svc.verify_chain(org.org_id)
+            assert ok2, f"v1→v2 혼합 체인이 깨짐: {err2}"
+        await engine.dispose()
+
+    asyncio.run(_scenario())

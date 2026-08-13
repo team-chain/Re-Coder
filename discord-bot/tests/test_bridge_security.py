@@ -66,3 +66,53 @@ def test_registration_auth_denies_external_when_keyless(monkeypatch):
             self.headers = headers or {}
     assert api_server._check_auth(_Req("127.0.0.1")) is True
     assert api_server._check_auth(_Req("203.0.113.7")) is False
+
+
+def test_link_rejects_forged_token_against_gateway(monkeypatch):
+    """[Codex P1 회귀] 게이트웨이가 위조 토큰을 거부하면 /link 도 바인딩하지
+    않는다. rcdr_<피해자>_<아무거나> 는 형식은 맞지만 발급된 적 없다."""
+    import asyncio
+    import gateway_verify
+
+    monkeypatch.setattr(gateway_verify, "GATEWAY_URL", "https://gw.example")
+
+    async def _fake_post_reject(raw_token, timeout=10.0):
+        # 게이트웨이가 위조 토큰을 valid:false 로 응답하는 상황을 재현
+        return (False, "")
+    monkeypatch.setattr(gateway_verify, "verify_token", _fake_post_reject)
+
+    valid, sid = asyncio.run(gateway_verify.verify_token("rcdr_victim42_forged"))
+    assert valid is False and sid == "", "위조 토큰이 검증을 통과했다"
+
+
+def test_link_accepts_gateway_verified_token(monkeypatch):
+    """[음성 대조] 게이트웨이가 인정한 토큰은 통과하고 그 sid 로 바인딩된다."""
+    import asyncio
+    import gateway_verify
+
+    async def _fake_ok(raw_token, timeout=10.0):
+        return (True, "realstudent")
+    monkeypatch.setattr(gateway_verify, "verify_token", _fake_ok)
+
+    valid, sid = asyncio.run(gateway_verify.verify_token("rcdr_realstudent_realsecret"))
+    assert valid is True and sid == "realstudent"
+
+
+def test_gateway_verify_handler_rejects_unissued_token():
+    """게이트웨이 /verify 핸들러 자체 — 미등록 토큰은 valid:false."""
+    import json
+    import sys
+    from pathlib import Path
+    gw = Path(__file__).resolve().parents[2] / "gateway" / "src"
+    if str(gw) not in sys.path:
+        sys.path.insert(0, str(gw))
+    import common as gw_common
+    import verify as gw_verify
+
+    def _raise(_tok):
+        raise gw_common.QuotaError("unknown_token", "미등록")
+    gw_common.authenticate = _raise  # 미등록 토큰 시뮬레이션
+
+    resp = gw_verify.handler({"body": json.dumps({"token": "rcdr_x_y"})}, None)
+    body = json.loads(resp["body"])
+    assert body["valid"] is False

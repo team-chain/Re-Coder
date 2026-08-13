@@ -81,7 +81,16 @@ export class BridgeClient implements vscode.Disposable {
         return '';
     }
 
-    private _resolveEndpoint(): { url: string; token: string } {
+    /** 브리지 접속에 쓸 학생 토큰(소유 증명). SecretStorage 우선, 없으면 env. */
+    private async _getStudentToken(): Promise<string> {
+        try {
+            const fromSecret = await this.context.secrets.get('recoder.studentToken');
+            if (fromSecret) return fromSecret;
+        } catch { /* SecretStorage 접근 실패 시 env 로 폴백 */ }
+        return process.env.RECODER_STUDENT_TOKEN || '';
+    }
+
+    private _resolveEndpoint(studentToken: string): { url: string; token: string } {
         const cfg = vscode.workspace.getConfiguration('recoder.bridge');
         const host = cfg.get<string>('host', '127.0.0.1');
         const port = cfg.get<number>('port', 7780);
@@ -89,13 +98,17 @@ export class BridgeClient implements vscode.Disposable {
             cfg.get<string>('token', '') ||
             process.env.RECODER_BRIDGE_TOKEN ||
             '';
-        // Phase 2 per-user 라우팅 식별자: 설정값 우선, 없으면 게이트웨이 토큰에서 추출.
+        // Phase 2 per-user 라우팅 식별자: 설정값 우선, 없으면 학생 토큰에서 추출.
         const studentId =
             cfg.get<string>('studentId', '') ||
-            this._parseStudentId(process.env.RECODER_STUDENT_TOKEN || '');
+            this._parseStudentId(studentToken);
         const params = new URLSearchParams();
         if (token) params.set('token', token);
         if (studentId) params.set('student', studentId);
+        // **소유 증명 토큰을 함께 전송한다.** 이게 없으면 브리지의 student
+        // 검증이 항상 실패해, per-student 라우팅이 조용히 꺼지거나(REQUIRE=0)
+        // 403(REQUIRE=1) 이 된다 — 서버에만 검증을 넣고 전송을 빠뜨렸던 버그.
+        // URL 쿼리는 로그에 남으므로 secret 은 **헤더로만** 보낸다.
         const qs = params.toString() ? `?${params.toString()}` : '';
         return {
             url: `ws://${host}:${port}/ws${qs}`,
@@ -107,13 +120,26 @@ export class BridgeClient implements vscode.Disposable {
     public connect(): void {
         if (this.disposed) return;
         if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+        void this._connectAsync();
+    }
 
-        const { url, token } = this._resolveEndpoint();
-        this.output.appendLine(`[bridge] connecting to ${url.replace(token, '***')}`);
+    private async _connectAsync(): Promise<void> {
+        if (this.disposed) return;
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+
+        const studentToken = await this._getStudentToken();
+        if (this.disposed) return;
+        const { url, token } = this._resolveEndpoint(studentToken);
+        this.output.appendLine(`[bridge] connecting to ${token ? url.replace(token, '***') : url}`);
+
+        // secret 은 헤더로만 — 쿼리스트링에 실으면 액세스 로그에 평문으로 남는다.
+        const headers: Record<string, string> = {};
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        if (studentToken) headers['X-Student-Token'] = studentToken;
 
         try {
             this.ws = new WebSocket(url, {
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
+                headers,
                 handshakeTimeout: 5_000,
             });
         } catch (err) {

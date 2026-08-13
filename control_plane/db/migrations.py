@@ -110,6 +110,17 @@ async def init_db(apply_rls: bool = True) -> None:
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Tables created")
 
+        # 구 스키마 마이그레이션 — audit_events.hash_version 이 없으면 추가.
+        # 기존 행은 default 1(v1 부분 페이로드 포맷)로 남고, 신규 행은 v2 로
+        # 기록된다. 검증기가 행 버전에 맞춰 재계산하므로 옛 행이 위조로
+        # 오판되지 않는다.
+        try:
+            await conn.exec_driver_sql(
+                "ALTER TABLE audit_events ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1")
+            logger.info("audit_events.hash_version 컬럼 추가")
+        except Exception as exc:  # noqa: BLE001 — 이미 있으면 무시
+            logger.debug("hash_version 마이그레이션 스킵: %s", exc)
+
     if apply_rls:
         for stmt in _RLS_POLICIES:
             await _execute_ddl("RLS policy", stmt)

@@ -200,6 +200,10 @@ class AuditEvent(Base):
     policy_bundle_version = Column(String(100), nullable=True)
     extra = Column(JSON, default=dict)
     is_suspicious = Column(Boolean, default=False)    # lost device 이후 이벤트
+    # 해시 페이로드 포맷 버전. **기존 행은 v1**(부분 페이로드)로 남고, 신규
+    # 행은 v2(전체 페이로드)로 기록된다. 검증기는 행의 버전에 맞는 포맷으로
+    # 재계산하므로, 업그레이드 후에도 옛 행이 위조로 오판되지 않는다.
+    hash_version = Column(Integer, nullable=False, default=1, server_default="1")
 
     org = relationship("Organization", back_populates="audit_events")
 
