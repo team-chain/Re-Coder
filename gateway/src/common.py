@@ -268,6 +268,86 @@ def get_pool() -> dict:
     return r.get("Item", {"used_total_tokens": 0, "used_cost_usd": 0, "cap_usd": POOL_CAP_USD})
 
 
+# 호출당 출력 토큰 상한 — 호출자가 보내는 max_tokens 는 비신뢰 입력이다.
+MAX_TOKENS_CEILING = int(os.environ.get("GW_MAX_TOKENS_CEILING", "4096"))
+
+
+def estimate_request_tokens(messages, system: str, max_output_tokens: int) -> int:
+    """예약할 토큰 예산 추정 = 입력 근사(문자/4) + 출력 상한.
+
+    출력은 max_tokens 가 곧 상한이므로 정확하고, 입력은 근사치다 —
+    과대 예약분은 정산에서 되돌리므로 근사여도 안전한 쪽으로 기운다.
+    """
+    chars = len(system or "")
+    for m in messages or []:
+        for c in m.get("content", []) or []:
+            chars += len(str(c.get("text", "")))
+    return (chars // 4) + 64 + int(max_output_tokens)
+
+
+def reserve_quota(item: dict, budget_tokens: int) -> None:
+    """호출 **전에** 예산을 원자적으로 선점한다.
+
+    check_quota_before 는 이미 기록된 사용량을 읽기만 한다 — 한도 직전의
+    학생이 max_tokens 큰 요청 하나로 한도를 뚫고, 동시 요청 여럿이 같은
+    카운터를 보고 전부 통과한다. 유료 호출이 끝난 뒤에야 기록하므로 그때는
+    이미 돈이 나갔다.
+
+    DynamoDB 조건부 ADD 는 원자적이다: 조건(선점 후에도 한도 이내)을
+    검사하면서 같은 연산으로 카운터를 올리므로, 동시 요청은 순서대로
+    직렬화되고 한도를 넘는 예약은 ConditionalCheckFailed 로 거부된다.
+    실제 사용량과의 차액은 reconcile_usage 가 되돌린다.
+    """
+    sid = item["pk"].split("#", 1)[1]
+    max_total = int(item.get("max_total_tokens", DEF_MAX_TOTAL))
+    max_daily = int(item.get("max_daily_tokens", DEF_MAX_DAILY))
+    try:
+        _table().update_item(
+            Key={"pk": f"STUDENT#{sid}", "sk": "META"},
+            UpdateExpression="ADD used_total_tokens :b, used_today_tokens :b",
+            ConditionExpression=(
+                "(attribute_not_exists(used_total_tokens) OR used_total_tokens <= :tm) "
+                "AND (attribute_not_exists(used_today_tokens) OR used_today_tokens <= :dm)"
+            ),
+            ExpressionAttributeValues={
+                ":b": int(budget_tokens),
+                ":tm": max_total - int(budget_tokens),
+                ":dm": max_daily - int(budget_tokens),
+            })
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            raise QuotaError("daily_exceeded",
+                             "남은 토큰 한도가 이 요청의 예산보다 작습니다. "
+                             "max_tokens 를 줄이거나 내일 다시 시도하세요.")
+        raise
+
+
+def release_reservation(student_id: str, budget_tokens: int) -> None:
+    """호출 실패 시 선점분 반환."""
+    _table().update_item(
+        Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
+        UpdateExpression="ADD used_total_tokens :b, used_today_tokens :b",
+        ExpressionAttributeValues={":b": -int(budget_tokens)})
+
+
+def reconcile_usage(student_id: str, budget_tokens: int,
+                    input_tokens: int, output_tokens: int) -> float:
+    """예약분을 실사용량으로 정산하고 풀 카운터를 올린다. 비용(USD) 반환."""
+    cost = (input_tokens / 1000.0) * PRICE_IN_PER_1K + (output_tokens / 1000.0) * PRICE_OUT_PER_1K
+    actual = int(input_tokens) + int(output_tokens)
+    delta = actual - int(budget_tokens)          # 보통 음수(과대 예약 반환)
+    if delta != 0:
+        _table().update_item(
+            Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
+            UpdateExpression="ADD used_total_tokens :d, used_today_tokens :d",
+            ExpressionAttributeValues={":d": delta})
+    _table().update_item(
+        Key={"pk": "POOL", "sk": "META"},
+        UpdateExpression="ADD used_total_tokens :t, used_cost_usd :c",
+        ExpressionAttributeValues={":t": actual, ":c": _dec(cost)})
+    return cost
+
+
 def record_usage(student_id: str, input_tokens: int, output_tokens: int) -> float:
     """사용량을 학생·풀에 atomic 반영. 이번 호출 비용(USD) 반환."""
     cost = (input_tokens / 1000.0) * PRICE_IN_PER_1K + (output_tokens / 1000.0) * PRICE_OUT_PER_1K

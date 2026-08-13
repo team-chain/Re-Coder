@@ -76,6 +76,11 @@ class AuditService:
         new_seq = counter.last_seq + 1
 
         # 3. Hash 계산
+        # **해시는 감사 행의 전체 페이로드를 덮어야 한다.** before/after_state·
+        # ip_address·policy_bundle_version·is_suspicious 를 빼면 — 정책 판정과
+        # 상태 전이, 곧 감사 로그가 지키려는 바로 그 내용을 — DB 에서 고쳐도
+        # verify_chain() 이 유효하다고 보고한다. is_suspicious 는 기록 시점에만
+        # 정해지고 이후 변경 경로가 없으므로 해시에 넣어도 안전하다.
         event_body = self._canonical_json(
             org_id=org_id,
             seq=new_seq,
@@ -84,8 +89,13 @@ class AuditService:
             action=event.action.value,
             resource_type=event.resource_type,
             resource_id=event.resource_id,
-            occurred_at=event.occurred_at.isoformat(),
-            extra=event.extra,
+            before_state=event.before_state or {},
+            after_state=event.after_state or {},
+            ip_address=event.ip_address,
+            policy_bundle_version=event.policy_bundle_version,
+            is_suspicious=bool(is_suspicious),
+            occurred_at=self._iso_utc(event.occurred_at),
+            extra=event.extra or {},
         )
         event_hash = self._compute_hash(counter.last_event_hash, event_body)
 
@@ -207,7 +217,12 @@ class AuditService:
                 action=event.action.value,
                 resource_type=event.resource_type,
                 resource_id=event.resource_id,
-                occurred_at=event.occurred_at.isoformat(),
+                before_state=event.before_state or {},
+                after_state=event.after_state or {},
+                ip_address=event.ip_address,
+                policy_bundle_version=event.policy_bundle_version,
+                is_suspicious=bool(event.is_suspicious),
+                occurred_at=self._iso_utc(event.occurred_at),
                 extra=event.extra or {},
             )
             expected_hash = self._compute_hash(prev_hash, body)
@@ -279,6 +294,18 @@ class AuditService:
             self._db.add(counter)
             await self._db.flush()
         return counter
+
+    @staticmethod
+    def _iso_utc(dt) -> str:
+        """해시 입력용 시각 정규화 — naive(SQLite 왕복 등)는 UTC 로 간주.
+
+        기록 시각의 isoformat 과 검증 시각의 isoformat 이 tz 표기 하나로
+        달라지면 체인 전체가 위조 판정된다.
+        """
+        if dt.tzinfo is None:
+            from datetime import timezone as _tz
+            dt = dt.replace(tzinfo=_tz.utc)
+        return dt.isoformat()
 
     @staticmethod
     def _canonical_json(**kwargs: Any) -> str:

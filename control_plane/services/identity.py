@@ -285,6 +285,25 @@ class IdentityService:
         API 요청마다 Device Token을 검증한다.
         revoked / expired이면 None 반환.
         """
+        return await self._validate_token_with_statuses(
+            raw_token, (DeviceStatus.ACTIVE,))
+
+    async def validate_token_for_audit_sync(self, raw_token: str) -> Optional[Device]:
+        """감사 큐 동기화 **전용** 검증 — LOST 디바이스도 통과시킨다.
+
+        분실 디바이스가 오프라인 중 쌓은 감사 이벤트를 제출하는 경로다.
+        일반 validate_token 이 LOST 를 거부하므로, 이 완화가 없으면
+        "분실 디바이스 이벤트는 suspicious 로 표시해 동기화"라는 설계
+        (§Q2-A3)가 실행 불가능한 죽은 분기가 된다. REVOKED·만료는 여기서도
+        거부한다 — 완화는 정확히 LOST 하나뿐이고, 이 메서드는 sync 경로의
+        의존성에서만 쓰인다.
+        """
+        return await self._validate_token_with_statuses(
+            raw_token, (DeviceStatus.ACTIVE, DeviceStatus.LOST))
+
+    async def _validate_token_with_statuses(
+        self, raw_token: str, allowed_statuses: tuple
+    ) -> Optional[Device]:
         device = await self._get_device_by_token(raw_token)
         if device is None:
             return None
@@ -294,7 +313,7 @@ class IdentityService:
         # TypeError 로 죽으므로, naive 면 저장 규약(UTC)으로 간주한다.
         if expires_at is not None and expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if device.status != DeviceStatus.ACTIVE or expires_at < now:
+        if device.status not in allowed_statuses or expires_at < now:
             return None
         return device
 
