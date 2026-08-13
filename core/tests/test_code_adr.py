@@ -1237,3 +1237,62 @@ def test_ledger_survives_a_crash_midway_through_writing(tmp_path, monkeypatch):
     assert _json.loads(store.read_text(encoding="utf-8")) == _json.loads(before), (
         "실패한 쓰기가 기존 장부를 훼손했다"
     )
+
+
+# ── [Codex P1] 프로세스 **사이** 직렬화 ────────────────────────────────
+#
+# threading.Lock 은 프로세스 경계를 넘지 못한다. singleton 의
+# acquire_lock() 이 실패해도 서빙을 계속하는 경로가 있어, 같은
+# 워크스페이스를 두 Core 가 동시에 볼 수 있다. 그때 둘 다 같은
+# high-water 를 읽으면 같은 번호를 발급해 ADR 이 덮어써진다.
+
+def _alloc_in_child(store: str, ws: str, barrier, out):
+    """자식 프로세스에서 번호 1개를 발급한다 (spawn 안전한 최상위 함수)."""
+    import os as _os
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    core_dir = _Path(__file__).resolve().parents[1]
+    if str(core_dir) not in _sys.path:
+        _sys.path.insert(0, str(core_dir))
+    _os.environ["RECODER_ADR_STORE"] = store
+    # 경합 창을 인위적으로 넓힌다 — 잠금이 없으면 두 자식이 반드시
+    # 같은 창 안에서 겹치도록.
+    _os.environ["RECODER_ADR_TEST_HOLD"] = "0.5"
+    import adr as _adr
+
+    barrier.wait(timeout=10)
+    out.put(_adr.allocate_adr_indexes(_Path(ws)))
+
+
+def test_ledger_serializes_across_processes(tmp_path, monkeypatch):
+    """[Codex P1 회귀] 두 Core 프로세스가 동시에 발급해도 번호가 겹치지 않는다.
+
+    자식 둘을 배리어로 정확히 같은 순간에 출발시키고, 잠금 임계구역 안에
+    0.5초 지연(RECODER_ADR_TEST_HOLD)을 넣어 경합 창을 강제로 겹친다.
+    프로세스 간 잠금이 없으면 둘 다 같은 high-water(0)를 읽어 둘 다 1을
+    돌려준다 — 그게 Codex 가 지적한 시나리오다.
+    """
+    import multiprocessing as mp
+
+    store = tmp_path / "ledger.json"
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    ctx = mp.get_context("spawn")          # Windows 와 같은 시작 방식
+    barrier = ctx.Barrier(2)
+    out: "mp.queues.Queue" = ctx.Queue()
+    children = [
+        ctx.Process(target=_alloc_in_child, args=(str(store), str(ws), barrier, out))
+        for _ in range(2)
+    ]
+    for p in children:
+        p.start()
+    results = [out.get(timeout=30) for _ in children]
+    for p in children:
+        p.join(timeout=30)
+
+    assert sorted(results) == [1, 2], (
+        f"두 프로세스가 발급한 번호가 겹쳤다: {results} — "
+        "프로세스 간 잠금이 read-modify-write 를 직렬화하지 못하고 있다"
+    )

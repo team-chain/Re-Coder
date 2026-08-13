@@ -22,6 +22,8 @@ import logging
 import os
 import re
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
@@ -34,13 +36,90 @@ ADR_DIR = "docs/adr"
 #: 규약이며, 테스트는 `tests/conftest.py` 에서 임시 경로로 덮는다.
 ENV_ADR_STORE = "RECODER_ADR_STORE"
 
-#: 장부 읽기-수정-쓰기를 감싸는 잠금.
+#: [테스트 훅] 장부 잠금을 쥔 채 읽기-수정-쓰기 사이에서 이만큼 잔다(초).
+#: 경합 창을 인위적으로 넓혀, 프로세스 간 잠금이 실제로 직렬화하는지를
+#: 결정적으로 검증하기 위한 것이다. 운영에선 비어 있고 아무 일도 안 한다.
+ENV_ADR_TEST_HOLD = "RECODER_ADR_TEST_HOLD"
+
+#: 장부 읽기-수정-쓰기를 감싸는 **스레드** 잠금 (1단계).
 #:
-#: Core 는 `singleton.py` 가 프로세스를 하나로 강제하므로 **프로세스 안의
-#: 동시성만** 막으면 된다. 여러 Core 가 같은 워크스페이스를 동시에 보는
-#: 상황까지는 막지 못한다 — 그때도 장부가 깨지지는 않지만(원자적 교체)
-#: 번호는 겹칠 수 있다.
+#: 같은 프로세스 안의 동시 요청을 직렬화한다. 프로세스 **사이**는
+#: `_ledger_lock()` 의 OS 파일 잠금이 맡는다 — `singleton.py` 가 Core 를
+#: 하나로 강제하긴 하지만, `acquire_lock()` 이 실패해도 서빙을 계속하는
+#: 경로가 있어서 같은 워크스페이스를 두 Core 가 보는 상황이 실제로 있다.
+#: 그때 프로세스 잠금이 없으면 둘 다 같은 high-water 를 읽고 같은 번호를
+#: 발급해, 장부가 막으려던 덮어쓰기가 그대로 재발한다.
 _reservation_lock = threading.Lock()
+
+
+if os.name == "nt":  # pragma: no cover — Windows 전용 경로 (CI 는 Linux)
+    import msvcrt
+
+    def _os_lock(fp) -> None:
+        # LK_LOCK 은 약 10초 재시도 후 OSError 를 낸다 — 짧은 임계구역이므로
+        # 그 안에 풀리는 것이 정상이고, 안 풀리면 재시도를 계속한다.
+        while True:
+            try:
+                fp.seek(0)
+                msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                continue
+
+    def _os_unlock(fp) -> None:
+        fp.seek(0)
+        msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _os_lock(fp) -> None:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+
+    def _os_unlock(fp) -> None:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _ledger_lock():
+    """장부 파일 옆 `.lock` 에 OS 수준 배타 잠금 (2단계 — 프로세스 사이).
+
+    왜 파일 잠금인가: `threading.Lock` 은 프로세스 경계를 넘지 못한다.
+    두 Core 가 같은 워크스페이스의 ADR 을 동시에 발급하면 둘 다 같은
+    high-water 를 읽고 같은 번호를 돌려줘, 두 제안을 모두 적용했을 때
+    한쪽 ADR 이 덮어써진다. fcntl/msvcrt 잠금은 프로세스가 죽으면 OS 가
+    자동으로 회수하므로 stale lock 도 남지 않는다.
+
+    잠금을 얻지 못하는 환경(이상한 파일시스템 등)에서는 경고를 남기고
+    스레드 잠금만으로 진행한다 — 장부는 개선 장치이고, **새로 들인 의존이
+    ADR 생성 자체를 실패시키는 새 실패 모드를 만들면 안 된다**는 원칙은
+    여기에도 그대로 적용된다. 그 경우 동작은 이 수정 이전과 같아질 뿐이다.
+    """
+    lock_path = _reservation_store().with_name(
+        _reservation_store().name + ".lock")
+    fp = None
+    locked = False
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fp = open(lock_path, "a+b")
+        _os_lock(fp)
+        locked = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "ADR 장부의 프로세스 간 잠금을 얻지 못했습니다(%s) — "
+            "프로세스 내 잠금만으로 진행합니다: %s", lock_path, exc)
+    try:
+        yield locked
+    finally:
+        if fp is not None:
+            if locked:
+                try:
+                    _os_unlock(fp)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                fp.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 #: 프로세스 안에서만 유지하는 2차 방어선. **디스크 장부가 실패해도**
 #: 이 Core 가 살아 있는 동안은 같은 번호를 두 번 주지 않는다.
@@ -395,13 +474,22 @@ def allocate_adr_indexes(root: Path, target_folder: str = "", count: int = 1) ->
     # 장부 계층에서 무슨 일이 나든 번호는 정상적으로 발급하고, 그 경우
     # 동작이 장부가 없던 예전으로 되돌아갈 뿐이게 한다.
     key = _store_key(adr_output_dir(root, target_folder))
-    with _reservation_lock:
+    # 잠금 순서는 항상 스레드 → 파일. 순서가 일정해야 교착이 없다.
+    with _reservation_lock, _ledger_lock():
         try:
             data = _read_reservations()
             reserved = max(0, int(data.get(key, 0) or 0))
         except Exception as exc:  # noqa: BLE001
             logger.warning("ADR 예약 장부를 읽지 못해 파일 스캔만으로 진행합니다: %s", exc)
             data, reserved = {}, 0
+
+        # [테스트 훅] 경합 창을 넓힌다 — 운영에선 환경변수가 없어 0.
+        hold_raw = os.environ.get(ENV_ADR_TEST_HOLD, "")
+        if hold_raw:
+            try:
+                time.sleep(min(2.0, float(hold_raw)))
+            except ValueError:
+                pass
 
         start = max(scanned, reserved, _memory_reservations.get(key, 0)) + 1
         high_water = start + count - 1

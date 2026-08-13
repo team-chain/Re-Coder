@@ -286,7 +286,12 @@ _EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str
     (
         "java",
         ("src/main/java/**/*.java", "src/*/src/main/java/**/*.java", "**/*.java"),
-        re.compile(r"\bstatic\s+void\s+main\s*\("),
+        # `static` 과 `void` 사이에 다른 합법 수식어가 올 수 있다 —
+        # `static public void main` · `static final synchronized void main` 은
+        # 전부 유효한 진입점 선언이다. `static\s+void` 로 붙여 쓰면 그런
+        # 앱이 APP_ENTRYPOINT_NOT_FOUND 로 막힌다. `(?:\w+\s+)*` 는 세미콜론
+        # 같은 비단어 문자를 넘지 못하므로 다른 문장으로 새지 않는다.
+        re.compile(r"\bstatic\s+(?:\w+\s+)*void\s+main\s*\("),
     ),
     (
         "kotlin",

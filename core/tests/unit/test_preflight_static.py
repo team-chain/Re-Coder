@@ -655,3 +655,33 @@ class Doc {
     (kt / "Doc.kt").write_text(
         'val doc = """\nfun main() { example() }\n"""\n', encoding="utf-8")
     assert _find_executable_entrypoint(kt) is None
+
+
+def test_probe_accepts_any_legal_java_modifier_order(tmp_path):
+    """[Codex P2 회귀] `static public void main` 도 유효한 진입점 선언이다.
+
+    Java 는 수식어 순서가 자유다 — `static` 과 `void` 사이에 `public`·
+    `final`·`synchronized` 가 와도 합법이고 JVM 은 정상 기동한다. 정규식이
+    `static\\s+void` 붙은 순서만 받으면 그런 앱이 APP_ENTRYPOINT_NOT_FOUND
+    로 막힌다.
+    """
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    cases = [
+        ("static public void main(String[] a) {}", True, "static public"),
+        ("public static void main(String[] a) {}", True, "관례 순서"),
+        ("static final synchronized void main(String[] a) {}", True, "수식어 여러 개"),
+        # 다른 문장으로 새면 안 된다 — static 필드 뒤의 다른 메서드.
+        ("static int MAX = 3; public void mainframe(String[] a) {}", False, "비진입점"),
+    ]
+    for i, (decl, expected, label) in enumerate(cases):
+        ws = tmp_path / f"case{i}"
+        (ws / "src" / "main" / "java").mkdir(parents=True)
+        (ws / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+        (ws / "src" / "main" / "java" / "App.java").write_text(
+            "class App { %s }\n" % decl, encoding="utf-8")
+        got = _find_executable_entrypoint(ws) is not None
+        assert got == expected, f"{label}: expected {expected}, got {got}"
