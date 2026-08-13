@@ -111,7 +111,6 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "sts:GetCallerIdentity":        "계정 단위 조회 — 리소스가 없다",
         "ecr:GetAuthorizationToken":    "계정 단위 토큰 발급",
         "ecs:RegisterTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
-        "ecs:DescribeTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
         "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
         "bedrock:ListFoundationModels": "계정 단위 조회",
         # FR-04-01 — 연결하는 IAM 사용자·정책 이름을 **정책을 만드는 시점에는
@@ -228,6 +227,13 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "ecr:GetAuthorizationToken":
+        "agents/ecs_build.py:216 의 `ecr.get_authorization_token()` 이 실제 "
+        "호출이다. 그런데 그 `ecr` 은 `ecr_login(ecr: Any, ...)` 처럼 **Any 로 "
+        "받은 함수 인자**라, 정적 스캐너가 ECR 클라이언트인 줄 알 방법이 없다. "
+        "예전에는 죽은 ecs_deploy_agent.py 의 CLI 호출(`aws ecr "
+        "get-login-password`)이 이 근거를 우연히 지탱하고 있었고, 그 파일을 "
+        "지우자 **살아있는 기능의 권한 근거가 같이 사라졌다.** 그래서 못 박는다",
     "ecr:BatchCheckLayerAvailability":
         "docker push — 파이썬이 아니라 docker 데몬이 호출한다",
     "ecr:InitiateLayerUpload":
@@ -280,19 +286,29 @@ def test_scanner_actually_finds_the_calls_we_know_are_there(scan):
     눈으로 확인한 호출 몇 개를 못 박아, 스캐너가 죽으면 여기서 먼저 터지게 한다.
     """
     found = {(c.service, c.operation) for c in scan.calls}
+    #: 앵커는 **살아있는 파일의 호출**이어야 한다.
+    #:
+    #: 예전 앵커 중 넷(ecs.update_service · ecs.register_task_definition ·
+    #: ecr.create-repository · ecr.get-login-password)은 `core/server.py` 와
+    #: `core/ecs_deploy_agent.py` 에 있었다. 두 파일은 main.py 가 import 하지
+    #: 않는 죽은 코드였고, 지우는 순간 이 테스트가 깨졌다. 죽은 코드를
+    #: 앵커로 삼으면 "스캐너가 살아있다"가 아니라 "죽은 파일이 아직 있다"를
+    #: 검사하게 된다.
     must_find = {
-        ("sts", "get_caller_identity"),     # api/routes/aws.py
-        ("ecs", "update_service"),          # ecs_deploy_agent.py
-        ("ecs", "register_task_definition"),
-        ("ecs", "describe_services"),
-        ("iam", "get_role"),                # agents/preflight_agent.py
+        ("sts", "get_caller_identity"),        # api/routes/aws.py
+        ("ecs", "describe_services"),          # aws_infra.py
+        ("ecs", "describe_clusters"),          # agents/preflight_agent.py
+        ("iam", "get_role"),                   # agents/preflight_agent.py
+        ("iam", "simulate_principal_policy"),  # api/routes/aws.py
         ("logs", "describe_log_groups"),
         ("ecr", "describe_repositories"),
-        ("ecr", "create-repository"),       # AWS CLI 경로 — 정규식은 못 봤다
-        ("ecr", "get-login-password"),      # AWS CLI 경로
-        ("bedrock-runtime", "converse"),    # 인자로 넘어간 클라이언트
+        ("bedrock-runtime", "converse"),       # 인자로 넘어간 클라이언트
         ("bedrock", "list_foundation_models"),
     }
+    #: CLI 경로(`["aws", "ecr", ...]`)는 이제 살아있는 코드에 없다. 그 갈래의
+    #: 정확성은 합성 소스 테스트(test_cli_subcommand_maps_to_an_action,
+    #: _scan_snippet 계열)가 따로 지킨다 — 여기서 빠졌다고 검사가 사라진 게
+    #: 아니다.
     missing = sorted(must_find - found)
     assert not missing, (
         "스캐너가 알려진 호출을 못 찾았다 — 스캐너가 깨졌을 가능성이 크다:\n  "
