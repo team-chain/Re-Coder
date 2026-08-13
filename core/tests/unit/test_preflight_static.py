@@ -682,7 +682,15 @@ def test_probe_accepts_any_legal_java_modifier_order(tmp_path):
     cases = [
         ("static public void main(String[] a) {}", True, "static public"),
         ("public static void main(String[] a) {}", True, "관례 순서"),
-        ("static final synchronized void main(String[] a) {}", True, "수식어 여러 개"),
+        ("static final synchronized public void main(String[] a) {}", True, "수식어 여러 개"),
+        ("public static void main(String... args) {}", True, "varargs"),
+        ("static public void main(java.lang.String args[]) {}", True, "정규화 전 배열 표기"),
+        ("private static void main(int value) {}", False, "private + 잘못된 인자"),
+        ("public static void main(int value) {}", False, "String 배열 아님"),
+        ("static void main(String[] args) {}", False, "public 없음"),
+        ("public void main(String[] args) {}", False, "static 없음"),
+        ("public static void main(String value) {}", False, "단일 String"),
+        ("public static void main(String[] a, int n) {}", False, "인자 두 개"),
         # 다른 문장으로 새면 안 된다 — static 필드 뒤의 다른 메서드.
         ("static int MAX = 3; public void mainframe(String[] a) {}", False, "비진입점"),
     ]

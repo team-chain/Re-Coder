@@ -19,7 +19,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_plane.db.models import PolicyBundle
+from control_plane.db.models import Organization, PolicyBundle
 from control_plane.models.schemas import (
     OPADecisionStatus,
     PolicyBundleCreate,
@@ -188,6 +188,15 @@ def _next_version(current: Optional[str]) -> str:
     return "v" + ".".join(parts)
 
 
+def _organization_version_lock(org_id: str):
+    """Stable row lock used to serialize one organization's bundle versions."""
+    return (
+        select(Organization)
+        .where(Organization.org_id == org_id)
+        .with_for_update()
+    )
+
+
 # ---------------------------------------------------------------------------
 # PolicyService
 # ---------------------------------------------------------------------------
@@ -204,22 +213,25 @@ class PolicyService:
     ) -> PolicyBundleResponse:
         """Preset 설정을 받아 Rego를 생성하고 PolicyBundle을 저장한다.
 
-        조회→버전 증가→이전 비활성화를 **행 잠금 아래** 직렬화한다. 잠금이
+        조회→버전 증가→이전 비활성화를 **조직 행 잠금 아래** 직렬화한다. 잠금이
         없으면 두 관리자가 동시에 발행할 때 둘 다 같은 latest 를 읽어 같은
         버전을 계산하고(uq_policy_bundle_version 위반으로 한쪽 500), 이전
         active 비활성화도 lost update 로 어긋난다.
         """
-        # 현재 최신 버전 조회 — FOR UPDATE 로 org 의 active bundle 행을 잠근다.
+        # active bundle은 첫 발행 때 존재하지 않고, 발행 도중 inactive로 바뀌어
+        # 잠금 술어에서 사라진다. 수명 내내 존재하는 조직 행을 먼저 잠가야 모든
+        # 발행이 같은 직렬화 지점을 통과한다.
+        org_result = await self._db.execute(_organization_version_lock(request.org_id))
+        if org_result.scalar_one_or_none() is None:
+            raise ValueError(f"Organization '{request.org_id}' does not exist")
+
+        # 조직 잠금을 보유한 상태에서 현재 최신 active 버전을 읽는다.
         stmt = (
             select(PolicyBundle)
             .where(PolicyBundle.org_id == request.org_id, PolicyBundle.is_active == True)
             .order_by(PolicyBundle.created_at.desc())
             .limit(1)
         )
-        try:
-            stmt = stmt.with_for_update()
-        except Exception:  # noqa: BLE001 — SQLite 등 FOR UPDATE 미지원 백엔드
-            pass
         result = await self._db.execute(stmt)
         latest = result.scalar_one_or_none()
         new_version = _next_version(latest.version if latest else None)

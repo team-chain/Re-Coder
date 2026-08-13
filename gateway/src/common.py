@@ -345,7 +345,7 @@ def _release_pool_reservation(budget_tokens: int) -> None:
     )
 
 
-def reserve_quota(item: dict, budget_tokens: int) -> None:
+def reserve_quota(item: dict, budget_tokens: int) -> str:
     """호출 **전에** 예산을 원자적으로 선점한다.
 
     check_quota_before 는 이미 기록된 사용량을 읽기만 한다 — 한도 직전의
@@ -356,7 +356,9 @@ def reserve_quota(item: dict, budget_tokens: int) -> None:
     DynamoDB 조건부 ADD 는 원자적이다: 조건(선점 후에도 한도 이내)을
     검사하면서 같은 연산으로 카운터를 올리므로, 동시 요청은 순서대로
     직렬화되고 한도를 넘는 예약은 ConditionalCheckFailed 로 거부된다.
-    실제 사용량과의 차액은 reconcile_usage 가 되돌린다.
+    실제 사용량과의 차액은 reconcile_usage 가 되돌린다. 반환값은 예약이
+    반영된 UTC 날짜이며, 실패 반환·정산 시 새 날짜의 카운터를 건드리지 않게
+    호출자가 그대로 전달해야 한다.
     """
     if int(budget_tokens) <= 0:
         raise QuotaError("invalid_budget", "예약 토큰은 1 이상이어야 합니다.")
@@ -415,7 +417,7 @@ def reserve_quota(item: dict, budget_tokens: int) -> None:
                     Key={"pk": f"STUDENT#{sid}", "sk": "META"},
                     **update,
                 )
-                return
+                return today
             except ClientError as exc:
                 if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
                     raise
@@ -431,26 +433,54 @@ def reserve_quota(item: dict, budget_tokens: int) -> None:
         raise
 
 
-def release_reservation(student_id: str, budget_tokens: int) -> None:
-    """호출 실패 시 선점분 반환."""
-    _table().update_item(
-        Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
-        UpdateExpression="ADD used_total_tokens :b, used_today_tokens :b",
-        ExpressionAttributeValues={":b": -int(budget_tokens)})
+def _adjust_reserved_usage(
+    student_id: str,
+    delta: int,
+    reservation_day: str,
+) -> None:
+    """Adjust total usage and the daily counter only on its reservation day."""
+    try:
+        _table().update_item(
+            Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
+            UpdateExpression="ADD used_total_tokens :d, used_today_tokens :d",
+            ConditionExpression="today = :reservation_day",
+            ExpressionAttributeValues={
+                ":d": int(delta),
+                ":reservation_day": reservation_day,
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        # A later request has already rolled the record to a new UTC day. The
+        # old reservation is no longer present in today's counter, so only the
+        # lifetime total must be adjusted.
+        _table().update_item(
+            Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
+            UpdateExpression="ADD used_total_tokens :d",
+            ExpressionAttributeValues={":d": int(delta)},
+        )
+
+
+def release_reservation(
+    student_id: str,
+    budget_tokens: int,
+    reservation_day: str,
+) -> None:
+    """호출 실패 시 선점분을 예약 날짜 기준으로 반환한다."""
+    _adjust_reserved_usage(student_id, -int(budget_tokens), reservation_day)
     _release_pool_reservation(budget_tokens)
 
 
 def reconcile_usage(student_id: str, budget_tokens: int,
-                    input_tokens: int, output_tokens: int) -> float:
+                    input_tokens: int, output_tokens: int,
+                    reservation_day: str) -> float:
     """예약분을 실사용량으로 정산하고 풀 카운터를 올린다. 비용(USD) 반환."""
     cost = (input_tokens / 1000.0) * PRICE_IN_PER_1K + (output_tokens / 1000.0) * PRICE_OUT_PER_1K
     actual = int(input_tokens) + int(output_tokens)
     delta = actual - int(budget_tokens)          # 보통 음수(과대 예약 반환)
     if delta != 0:
-        _table().update_item(
-            Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
-            UpdateExpression="ADD used_total_tokens :d, used_today_tokens :d",
-            ExpressionAttributeValues={":d": delta})
+        _adjust_reserved_usage(student_id, delta, reservation_day)
     reserved_cost = _reservation_cost(budget_tokens)
     _table().update_item(
         Key={"pk": "POOL", "sk": "META"},

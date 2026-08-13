@@ -307,12 +307,27 @@ _EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str
     (
         "java",
         ("src/main/java/**/*.java", "src/*/src/main/java/**/*.java", "**/*.java"),
-        # `static` 과 `void` 사이에 다른 합법 수식어가 올 수 있다 —
-        # `static public void main` · `static final synchronized void main` 은
-        # 전부 유효한 진입점 선언이다. `static\s+void` 로 붙여 쓰면 그런
-        # 앱이 APP_ENTRYPOINT_NOT_FOUND 로 막힌다. `(?:\w+\s+)*` 는 세미콜론
-        # 같은 비단어 문자를 넘지 못하므로 다른 문장으로 새지 않는다.
-        re.compile(r"\bstatic\s+(?:\w+\s+)*void\s+main\s*\("),
+        # Java launcher가 호출할 수 있는 public static void main(String[])
+        # 또는 동등한 String... 서명만 인정한다. 수식어 순서는 자유이므로
+        # lookahead로 public/static 존재를 확인하고, 세미콜론·괄호·중괄호를
+        # 넘지 않는 수식어 구간과 정확한 단일 String 배열 인자를 검증한다.
+        re.compile(
+            r"""
+            \b
+            (?=[^;{}()]*\bpublic\b)
+            (?=[^;{}()]*\bstatic\b)
+            (?:(?:public|static|final|synchronized|strictfp)\s+)*
+            void\s+main\s*\(\s*
+            (?:final\s+)?
+            (?:
+                (?:java\.lang\.)?String\s*\[\s*\]\s+[\w$]+
+              | (?:java\.lang\.)?String\s*\.\.\.\s*[\w$]+
+              | (?:java\.lang\.)?String\s+[\w$]+\s*\[\s*\]
+            )
+            \s*\)
+            """,
+            re.X,
+        ),
     ),
     (
         "kotlin",

@@ -93,6 +93,66 @@ def test_vote_loads_request_with_row_lock():
     asyncio.run(_scenario())
 
 
+def test_policy_versioning_locks_stable_organization_row():
+    """Policy publication must lock the organization, not a mutable bundle row."""
+    from sqlalchemy.dialects import postgresql
+    from control_plane.services.policy_service import _organization_version_lock
+
+    compiled = str(
+        _organization_version_lock("org-1").compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "FROM organizations" in compiled
+    assert "organizations.org_id = 'org-1'" in compiled
+    assert "FOR UPDATE" in compiled
+
+
+def test_policy_versioning_still_increments_after_organization_lock():
+    """Sequential publishers observe the active bundle created before them."""
+    from control_plane.models.schemas import PolicyBundleCreate
+    from control_plane.services.policy_service import PolicyService
+
+    async def _scenario():
+        engine, Session = await _fresh()
+        async with Session() as setup:
+            creator = _user(20)
+            org = Organization(name="policy-org", slug="policy-org")
+            setup.add_all([creator, org])
+            await setup.commit()
+            creator_id = creator.user_id
+            org_id = org.org_id
+
+        async with Session() as first_session:
+            first = await PolicyService(first_session).create_bundle(
+                PolicyBundleCreate(
+                    org_id=org_id,
+                    display_name="first",
+                    presets=[],
+                ),
+                creator_user_id=creator_id,
+            )
+            await first_session.commit()
+
+        async with Session() as second_session:
+            second = await PolicyService(second_session).create_bundle(
+                PolicyBundleCreate(
+                    org_id=org_id,
+                    display_name="second",
+                    presets=[],
+                ),
+                creator_user_id=creator_id,
+            )
+            await second_session.commit()
+
+        assert first.version == "v1.0.0"
+        assert second.version == "v1.0.1"
+        await engine.dispose()
+
+    asyncio.run(_scenario())
+
+
 def test_duplicate_vote_rejected():
     """[음성 대조] 같은 사용자의 중복 투표는 거부."""
     from control_plane.services.approval_service import ApprovalService
