@@ -46,3 +46,32 @@ jobs:
         # 격리를 해제했다. 이제 전체 스위트가 게이팅에 그대로 들어간다.
         run: |
           pytest tests/ -q
+
+  # ── 웹뷰 렌더 테스트 ───────────────────────────────────────────────────
+  # 왜 필요한가: Workspace 창에서 결정 카드가 뜨지 않던 버그(showCodeAgent
+  # =false)는 파이썬 테스트로는 절대 못 잡는다. UI 가 조용히 사라져도 CI 가
+  # 초록이었기 때문에 데모 당일까지 아무도 몰랐다. 웹뷰를 Node 에서 실제로
+  # 렌더해서 핵심 경로가 화면에 붙어 있는지 확인한다.
+  webview:
+    name: webview 렌더 테스트 (extension)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Node 20 준비
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: 의존성 설치
+        working-directory: extension
+        run: npm ci
+
+      - name: 웹뷰 렌더 테스트
+        working-directory: extension
+        run: npm run test:webview

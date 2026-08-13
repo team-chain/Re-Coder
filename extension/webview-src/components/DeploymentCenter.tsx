@@ -4,6 +4,55 @@ import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { AwsConnection } from "./AwsConnection";
 
+//: 자격증명 리전을 못 읽었을 때만 쓰는 최후 기본값.
+//: 이 값을 **폼에 직접 박아 둔 것**이 사고의 원인이었다(아래 참고).
+export const FALLBACK_REGION = "ap-northeast-2";
+
+/**
+ * 배포 폼의 리전 기본값.
+ *
+ * 사고 경위
+ *   폼이 리전을 "ap-northeast-2" 로 하드코딩하고 있었다. 그런데 실제
+ *   자격증명(AWS Academy 랩)은 us-east-1 이었다. 그대로 「ECS 배포 실행」을
+ *   누르면 자격증명이 유효하지 않은 리전으로 요청이 나가 실패한다. 데모에서
+ *   실제 배포까지 못 간 원인 중 하나다.
+ *
+ * 규칙
+ *   · 사용자가 직접 고친 값이 있으면 **그 값을 유지한다**(입력을 덮어쓰지 않는다).
+ *   · 아직 기본값 그대로면 자격증명 리전으로 갈아끼운다.
+ */
+export function resolveRegionDefault(
+  credentialRegion: string | undefined | null,
+  currentValue: string,
+): string {
+  const credential = (credentialRegion ?? "").trim();
+  const current = (currentValue ?? "").trim();
+  if (!credential) { return current || FALLBACK_REGION; }
+  //: 아직 손대지 않은 상태(빈 값 또는 최후 기본값)에서만 따라간다.
+  if (!current || current === FALLBACK_REGION) { return credential; }
+  return current;
+}
+
+/**
+ * 폼 리전이 자격증명 리전과 다르면 실행 **전에** 낼 경고. 같으면 null.
+ *
+ * 막지는 않는다 — 다른 리전에 일부러 배포할 수 있다. 다만 조용히 실패하게
+ * 두지는 않는다. 원인을 찾는 데 오래 걸리는 종류의 실패다.
+ */
+export function regionMismatchWarning(
+  credentialRegion: string | undefined | null,
+  formRegion: string | undefined | null,
+): string | null {
+  const credential = (credentialRegion ?? "").trim().toLowerCase();
+  const form = (formRegion ?? "").trim().toLowerCase();
+  if (!credential || !form || credential === form) { return null; }
+  return (
+    `배포 리전(${form})이 현재 자격증명이 유효한 리전(${credential})과 다릅니다. `
+    + `이대로 실행하면 인증에 실패할 수 있습니다. 리전을 ${credential} 로 맞추거나, `
+    + `해당 리전에서 유효한 자격증명을 연결하세요.`
+  );
+}
+
 type Target = "decision" | "docker" | "actions" | "ec2" | "ecs" | "s3" | "aws";
 type Proposal = { proposal_id: string; target_path: string; content: string; approval_level: number };
 type DeployTarget = "ecs" | "s3" | "local";
@@ -165,10 +214,12 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const pendingEcsDeploymentRef = useRef<Record<string, unknown> | null>(null);
   const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
   const [awsReady, setAwsReady] = useState(false);
+  //: 현재 자격증명이 유효한 리전. 폼 기본값과 불일치 경고의 기준.
+  const [credentialRegion, setCredentialRegion] = useState("");
   const [rollbackProposal, setRollbackProposal] = useState<EcsRollbackProposal | null>(null);
   const [resolvingRollback, setResolvingRollback] = useState(false);
-  const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: "ap-northeast-2", ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
-  const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "ap-northeast-2", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512" });
+  const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: FALLBACK_REGION, ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
+  const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: FALLBACK_REGION, ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512" });
 
   const runPreflight = useCallback(() => {
     setChecking(true);
@@ -233,7 +284,19 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       setMessage((payload as { message?: string })?.message ?? "롤백 처리에 실패했습니다.");
     }
     if (type === "workspace.deploy.result") setMessage((payload as { message?: string })?.message ?? "배포 요청을 보냈습니다.");
-    if (type === "aws.status") setAwsReady(Boolean((payload as { ready?: boolean })?.ready));
+    if (type === "aws.status") {
+      const status = payload as { ready?: boolean; region?: string };
+      setAwsReady(Boolean(status?.ready));
+      // 자격증명 리전을 알게 되면 **아직 손대지 않은** 폼 기본값을 그쪽으로 맞춘다.
+      // 예전에는 폼이 ap-northeast-2 로 고정이라, us-east-1 자격증명으로
+      // 배포를 누르면 인증이 유효하지 않은 리전으로 요청이 나갔다.
+      const region = (status?.region ?? "").trim();
+      if (region) {
+        setCredentialRegion(region);
+        setEcs(cur => ({ ...cur, aws_region: resolveRegionDefault(region, cur.aws_region) }));
+        setEc2(cur => ({ ...cur, aws_region: resolveRegionDefault(region, cur.aws_region) }));
+      }
+    }
     if (type === "errorMessage") setMessage((payload as { message?: string })?.message ?? "요청 처리에 실패했습니다.");
   }, []));
 
@@ -271,9 +334,18 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     postMessage("workspace.deploy.remediation.apply", { proposalId });
   };
   const generateActions = () => { setMessage("GitHub Actions 워크플로우 생성 중…"); postMessage("generateGithubActions", { workspacePath: "" }); };
-  const deployEc2 = () => { setMessage("EC2 배포 요청 전송 중…"); postMessage("workspace.deploy.ec2", { ...ec2, host_port: Number(ec2.host_port), container_port: Number(ec2.container_port) }); };
+  const deployEc2 = () => {
+    const warning = regionMismatchWarning(credentialRegion, ec2.aws_region);
+    if (warning) { setMessage(warning); return; }
+    setMessage("EC2 배포 요청 전송 중…");
+    postMessage("workspace.deploy.ec2", { ...ec2, host_port: Number(ec2.host_port), container_port: Number(ec2.container_port) });
+  };
   const deployEcs = () => {
     if (!awsReady) { setTarget("aws"); setMessage("ECS 배포를 시작하려면 AWS 계정을 연결하세요."); return; }
+    // 리전이 어긋나면 **실행 전에** 멈춘다. 그대로 보내면 인증 실패로 끝나는데,
+    // 원인이 리전이라는 걸 알아채는 데 오래 걸린다(데모에서 실제로 그랬다).
+    const warning = regionMismatchWarning(credentialRegion, ecs.aws_region);
+    if (warning) { setMessage(warning); return; }
     setCheckingEcsPermissions(true);
     setMessage("입력한 ECS 리전과 대상 리소스의 권한을 확인 중…");
     pendingEcsDeploymentRef.current = { ...ecs, container_port: Number(ecs.container_port) };
