@@ -106,6 +106,58 @@ def test_first_enrollment_locks_organization_row():
     assert "organizations.org_id = 'org-1'" in compiled
 
 
+def test_missing_postgres_bootstrap_function_uses_savepoint_fallback(monkeypatch):
+    """A failed optional function probe must not abort the fallback transaction."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from control_plane.services.identity import IdentityService
+
+    async def _scenario():
+        engine, Session = await _fresh_session()
+        async with Session() as db:
+            user = User(email="fallback@x.io", display_name="fallback", is_active=True,
+                        oidc_provider="github", oidc_subject="fallback-user")
+            org = Organization(name="Fallback Org", slug="fallback-org")
+            db.add_all([user, org])
+            await db.flush()
+
+            service = IdentityService(db)
+            issued = await service.enroll_device(
+                user_id=user.user_id,
+                org_id=org.org_id,
+                role=OrgRole.DEVELOPER,
+                request=DeviceEnrollRequest(
+                    display_name="device", os_type="linux",
+                    vscode_version="1", extension_version="1",
+                ),
+            )
+
+            savepoints = []
+            original_begin_nested = AsyncSession.begin_nested
+
+            def _begin_nested_spy(session):
+                savepoints.append(True)
+                return original_begin_nested(session)
+
+            monkeypatch.setattr(AsyncSession, "begin_nested", _begin_nested_spy)
+            monkeypatch.setattr(db.get_bind().dialect, "name", "postgresql")
+
+            # SQLite has no auth_device_by_token_hash function. The simulated
+            # PostgreSQL branch therefore fails its probe, rolls back the nested
+            # transaction, and authenticates through the direct-query fallback.
+            device = await service._get_device_by_token(issued.token)
+            assert device is not None and device.device_id == issued.device_id
+            assert len(savepoints) == 1
+
+            # The surrounding transaction remains usable after the failed probe.
+            assert (await db.execute(
+                select(User).where(User.user_id == user.user_id)
+            )).scalar_one() is user
+        await engine.dispose()
+
+    _run(_scenario())
+
+
 def test_second_user_still_requires_invite():
     """[음성 대조] 멤버가 이미 있는 조직엔 자동 등록이 없다 — 403."""
     from fastapi import HTTPException

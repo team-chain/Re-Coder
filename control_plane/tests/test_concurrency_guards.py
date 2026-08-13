@@ -265,6 +265,57 @@ def test_audit_trigger_ddl_is_split_into_single_statements():
         assert ";" not in body_stripped.rstrip().rstrip(";"), f"복수 문장: {stmt[:60]}"
 
 
+def test_audit_trigger_replacement_rolls_back_as_one_transaction(monkeypatch):
+    """A failed final trigger statement must roll back the preceding DROP."""
+    from control_plane.db import migrations
+
+    class _Connection:
+        def __init__(self):
+            self.executed = []
+
+        async def execute(self, statement):
+            sql = str(statement)
+            self.executed.append(sql)
+            if sql == "CREATE NEW TRIGGER":
+                raise RuntimeError("create trigger failed")
+
+    class _Transaction:
+        def __init__(self, connection):
+            self.connection = connection
+            self.rolled_back = False
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self.rolled_back = exc_type is not None
+            return False
+
+    class _Engine:
+        def __init__(self):
+            self.connection = _Connection()
+            self.transaction = _Transaction(self.connection)
+            self.begin_calls = 0
+
+        def begin(self):
+            self.begin_calls += 1
+            return self.transaction
+
+    fake_engine = _Engine()
+    monkeypatch.setattr(migrations, "engine", fake_engine)
+
+    ok = asyncio.run(migrations._execute_ddl_group_atomic(
+        "Audit immutability",
+        ["CREATE FUNCTION", "DROP OLD TRIGGER", "CREATE NEW TRIGGER"],
+    ))
+
+    assert ok is False
+    assert fake_engine.begin_calls == 1
+    assert fake_engine.connection.executed == [
+        "CREATE FUNCTION", "DROP OLD TRIGGER", "CREATE NEW TRIGGER"]
+    assert fake_engine.transaction.rolled_back is True
+
+
 def test_init_db_survives_backend_without_rls(monkeypatch):
     """DDL 하나가 실패해도(sqlite 는 PG 문법 거부) 테이블 생성은 살아남는다 —
     예전엔 한 트랜잭션이라 첫 실패가 전체 셋업을 오염시켰다."""

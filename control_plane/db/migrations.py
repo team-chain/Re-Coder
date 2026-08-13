@@ -66,9 +66,9 @@ $$;
 # AuditLog 불변성: UPDATE/DELETE 금지 트리거.
 #
 # **문장을 쪼개 둔 이유**: asyncpg 는 prepared statement 기반이라 한 execute()
-# 에 여러 SQL 문장을 넣으면 준비 단계에서 거부한다. 게다가 한 트랜잭션 안에서
-# 실패한 문장 뒤의 모든 문장은 InFailedSQLTransaction 으로 연쇄 실패하므로,
-# 각 문장은 **자기 트랜잭션**에서 실행해야 하나가 죽어도 나머지가 산다.
+# 에 여러 SQL 문장을 넣으면 준비 단계에서 거부한다. 단, 함수 교체→기존 트리거
+# 제거→새 트리거 생성은 하나의 원자적 변경이어야 한다. 세 번 execute 하되 같은
+# 트랜잭션에서 실행해 마지막 문장이 실패하면 기존 트리거까지 복원한다.
 _AUDIT_IMMUTABILITY_STATEMENTS = [
     """
 CREATE OR REPLACE FUNCTION prevent_audit_modification()
@@ -134,6 +134,22 @@ async def _execute_ddl(label: str, stmt: str) -> bool:
         return False
 
 
+async def _execute_ddl_group_atomic(label: str, statements: list[str]) -> bool:
+    """Execute separate asyncpg-compatible statements in one transaction."""
+    try:
+        async with engine.begin() as conn:
+            for stmt in statements:
+                await conn.execute(text(stmt))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "%s rolled back after DDL failure: %s",
+            label,
+            exc,
+        )
+        return False
+
+
 async def init_db(apply_rls: bool = True) -> None:
     """테이블 생성 + RLS + AuditLog 불변성 트리거 적용"""
     async with engine.begin() as conn:
@@ -153,11 +169,12 @@ async def init_db(apply_rls: bool = True) -> None:
         for stmt in _RLS_POLICIES:
             await _execute_ddl("RLS policy", stmt)
 
-        # asyncpg 는 한 execute() 에 여러 문장을 허용하지 않는다 — 문장 단위로.
-        trigger_ok = all([
-            await _execute_ddl("Audit immutability", stmt)
-            for stmt in _AUDIT_IMMUTABILITY_STATEMENTS
-        ])
+        # asyncpg 호환을 위해 문장별 execute를 유지하되, 교체 작업 전체는 한
+        # 트랜잭션으로 묶어 CREATE TRIGGER 실패 시 기존 트리거를 복원한다.
+        trigger_ok = await _execute_ddl_group_atomic(
+            "Audit immutability",
+            _AUDIT_IMMUTABILITY_STATEMENTS,
+        )
         if trigger_ok:
             logger.info("AuditLog immutability trigger applied")
 

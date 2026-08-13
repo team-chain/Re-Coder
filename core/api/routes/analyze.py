@@ -508,12 +508,14 @@ async def list_proposals() -> list[PatchProposal]:
 # ---------------------------------------------------------------------------
 
 
-# 게이트가 시크릿을 가릴 때 쓰는 토큰 형태 (context_gate._MASK_PATTERNS 의
-# replacement 들 — [MASKED], [MASKED_AWS_KEY], [MASKED_JWT] …).
-_MASK_TOKEN_RE = __import__("re").compile(r"\[MASKED[A-Z_]*\]")
+# 게이트가 시크릿을 가릴 때 쓰는 토큰 형태. ContextGate의 세부 토큰
+# ([MASKED], [MASKED_AWS_KEY], …)과 선택적 게이트를 불러오지 못했을 때
+# _mask_request()가 쓰는 [REDACTED]를 모두 같은 마스킹 자리로 취급한다.
+_MASK_TOKEN_RE = __import__("re").compile(r"\[(?:MASKED[A-Z_]*|REDACTED)\]")
 
 #: 마스크 줄 전용 스캐너 — 따옴표 문자열 또는 마스크 토큰.
-_MASK_SCAN_RE = __import__("re").compile(r'"[^"]*"|\'[^\']*\'|\[MASKED[A-Z_]*\]')
+_MASK_SCAN_RE = __import__("re").compile(
+    r'"[^"]*"|\'[^\']*\'|\[(?:MASKED[A-Z_]*|REDACTED)\]')
 
 
 def _lines_match(diff_line: str, file_line: str) -> bool:
@@ -526,7 +528,7 @@ def _lines_match(diff_line: str, file_line: str) -> bool:
 
     지금은 두 단계다:
     1. 공백을 정돈한 정확 비교. 대부분 여기서 끝난다.
-    2. diff 줄에 **마스크 토큰**([MASKED...])이 있을 때만 관용 비교 —
+    2. diff 줄에 **마스크 토큰**([MASKED...] 또는 [REDACTED])이 있을 때만 관용 비교 —
        LLM 은 마스킹된 값을 보고 diff 를 쓰므로 실제 파일의 시크릿과
        글자가 다를 수밖에 없다. 이때도 와일드카드는 마스크가 있는 자리
        (마스크 품은 따옴표 문자열, 맨몸 마스크 토큰)에만 적용되고,
@@ -543,8 +545,8 @@ def _lines_match(diff_line: str, file_line: str) -> bool:
 def _mask_tolerant_pattern(diff_line: str) -> "__import__('re').Pattern":
     """마스크 토큰이 든 diff 줄 → 파일 줄과 대조할 정규식.
 
-    - `"…[MASKED]…"` (마스크 품은 따옴표 문자열) → 같은 따옴표의 아무 내용
-    - 맨몸 `[MASKED...]` → 공백 아닌 아무 시퀀스 (`KEY=[MASKED]` ↔ `KEY=abc`)
+    - `"…[MASKED]…"`/`"[REDACTED]"` → 같은 따옴표의 아무 내용
+    - 맨몸 마스크 토큰 → 공백 아닌 아무 시퀀스 (`KEY=[MASKED]` ↔ `KEY=abc`)
     - 마스크 없는 따옴표 문자열·나머지 글자 → **그대로** (구분자 역할 유지)
     """
     import re as _re

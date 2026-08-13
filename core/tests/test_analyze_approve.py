@@ -143,7 +143,8 @@ def test_patch_lands_on_the_block_named_in_the_diff(tmp_path):
     assert 'return fixed()' in text.split('"/b"')[1], "패치가 /b 블록에 적용되지 않았다"
 
 
-def test_masked_secret_line_still_matches_real_secret(tmp_path):
+@pytest.mark.parametrize("mask_token", ["[MASKED]", "[REDACTED]"])
+def test_masked_secret_line_still_matches_real_secret(tmp_path, mask_token):
     """[음성 대조] 마스킹된 시크릿 줄은 여전히 실제 값과 매칭된다 —
     구분자 보존이 마스크 관용까지 없애면 안 된다."""
     ws = tmp_path / "ws"; ws.mkdir()
@@ -152,7 +153,7 @@ def test_masked_secret_line_still_matches_real_secret(tmp_path):
 
     diff = (
         '@@ -1,2 +1,2 @@\n'
-        '-KEY = "[MASKED]"\n'
+        f'-KEY = "{mask_token}"\n'
         '+KEY = os.environ["KEY"]\n'
         ' MODE = "prod"\n'
     )
@@ -169,7 +170,9 @@ def test_masked_secret_line_still_matches_real_secret(tmp_path):
     ('app.get("/a")', 'app.get("/b")', False),
     ('app.get("/a")', 'app.get("/a")', True),
     ('KEY = "[MASKED]"', 'KEY = "AKIA99"', True),
+    ('KEY = "[REDACTED]"', 'KEY = "AKIA99"', True),
     ('aws_secret_access_key=[MASKED]', 'aws_secret_access_key=ab/c+1', True),
+    ('aws_secret_access_key=[REDACTED]', 'aws_secret_access_key=ab/c+1', True),
     ('token = "[MASKED_JWT]"', 'token = "eyJa.b.c"', True),
     ('cfg("/a", key="[MASKED]")', 'cfg("/a", key="s3cr3t")', True),
     ('cfg("/a", key="[MASKED]")', 'cfg("/b", key="s3cr3t")', False),
