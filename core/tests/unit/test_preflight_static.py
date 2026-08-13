@@ -555,12 +555,103 @@ def test_executable_probe_requires_a_real_main_declaration(tmp_path):
 
     lib = tmp_path / "lib"
     (lib / "src" / "main" / "java" / "com" / "x").mkdir(parents=True)
+    (lib / "pom.xml").write_text("<project/>\n", encoding="utf-8")
     (lib / "src" / "main" / "java" / "com" / "x" / "Util.java").write_text(
         "class Util { int add(int a) { return a; } }\n", encoding="utf-8")
     assert _find_executable_entrypoint(lib) is None
 
     app = tmp_path / "app"
     (app / "src" / "main" / "java" / "com" / "x").mkdir(parents=True)
+    (app / "pom.xml").write_text("<project/>\n", encoding="utf-8")
     (app / "src" / "main" / "java" / "com" / "x" / "App.java").write_text(
         "class App { public static void main(String[] a) {} }\n", encoding="utf-8")
     assert _find_executable_entrypoint(app) is not None
+
+
+def test_probe_only_runs_for_runtimes_the_manifest_claims(tmp_path):
+    """[Codex P1 회귀] 프로브는 **매니페스트가 주장하는 런타임**만 돈다.
+
+    Maven 프로젝트에 Java main 이 없고 `tools/generator.go` 에 `func main()`
+    만 있으면 — 예전 프로브는 그 Go 유틸을 앱의 진입점으로 받아들였다.
+    그러면 뜨지 않는 Java 이미지가 APP_ENTRYPOINT_NOT_FOUND 를 잃고
+    배포 준비 완료로 보고된다.
+    """
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint, check_app_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint, check_app_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    ws = tmp_path / "maven-with-go-util"
+    (ws / "tools").mkdir(parents=True)
+    (ws / "src" / "main" / "java" / "com" / "x").mkdir(parents=True)
+    (ws / "pom.xml").write_text("<project><artifactId>demo</artifactId></project>\n", encoding="utf-8")
+    (ws / "src" / "main" / "java" / "com" / "x" / "Util.java").write_text(
+        "class Util { int add(int a) { return a; } }\n", encoding="utf-8")
+    (ws / "tools" / "generator.go").write_text(
+        "package main\nfunc main() { /* codegen */ }\n", encoding="utf-8")
+
+    # Go 매니페스트(go.mod)가 없으므로 Go 프로브는 돌지 않는다 —
+    # Java main 이 없는 이 워크스페이스는 진입점이 없는 것이 맞다.
+    assert _find_executable_entrypoint(ws) is None
+    contract = build_default_contract(ContractStack.CUSTOM)
+    assert not check_app_entrypoint(ws, contract).passed
+
+    # [변이 시험] go.mod 를 추가하면 — 이제 Go 런타임을 주장하는 것이므로 —
+    # 같은 Go 파일이 진입점으로 인정된다. 스코프가 "언어 금지"가 아니라
+    # "매니페스트 근거"로 동작한다는 증거다.
+    (ws / "go.mod").write_text("module example.com/tools\n", encoding="utf-8")
+    assert _find_executable_entrypoint(ws) == "tools/generator.go"
+
+
+def test_probe_ignores_main_declarations_in_comments_and_strings(tmp_path):
+    """[Codex P1 회귀] 주석·문자열 안의 main 예시는 **선언이 아니다.**
+
+    Java 라이브러리의 문서 주석에 `// public static void main(String[] args)`
+    같은 예시가 있으면 — 예전 프로브는 원문 정규식 매칭이라 이것을 실행
+    선언으로 받아들여 APP_ENTRYPOINT_NOT_FOUND 를 억눌렀다.
+    """
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    # 1) Java — 줄 주석 · 블록 주석 · 문자열 리터럴 세 곳 모두에 미끼를 둔다.
+    ws = tmp_path / "java-lib"
+    (ws / "src" / "main" / "java").mkdir(parents=True)
+    (ws / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    (ws / "src" / "main" / "java" / "Doc.java").write_text(
+        '''// 사용 예: public static void main(String[] args)
+/* 옛 예제:
+   public static void main(String[] args) { run(); }
+*/
+class Doc {
+    String usage = "public static void main(String[] args)";
+}
+''', encoding="utf-8")
+    assert _find_executable_entrypoint(ws) is None
+
+    # [음성 대조] 진짜 선언을 추가하면 찾아진다 — 제거 로직이 선언까지
+    # 지우는 과잉 방어가 아니라는 증거.
+    (ws / "src" / "main" / "java" / "App.java").write_text(
+        "class App { public static void main(String[] a) {} }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(ws) is not None
+
+    # 2) Go — 주석 안의 func main 은 무시된다.
+    go = tmp_path / "go-lib"
+    go.mkdir()
+    (go / "go.mod").write_text("module x\n", encoding="utf-8")
+    (go / "doc.go").write_text(
+        "package lib\n// func main() { run() }\n/*\nfunc main() {}\n*/\n", encoding="utf-8")
+    assert _find_executable_entrypoint(go) is None
+
+    # 3) Kotlin — 원시 문자열(triple quote) 안의 fun main 은 무시된다.
+    kt = tmp_path / "kt-lib"
+    kt.mkdir()
+    (kt / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+    (kt / "Doc.kt").write_text(
+        'val doc = """\nfun main() { example() }\n"""\n', encoding="utf-8")
+    assert _find_executable_entrypoint(kt) is None

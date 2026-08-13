@@ -308,17 +308,155 @@ _EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str
 #: 프로브가 훑을 파일 수 상한. 큰 저장소에서 몇 초씩 걸리면 안 된다.
 _PROBE_MAX_FILES = 60
 
+#: 프로브를 **켜 주는 매니페스트**. 워크스페이스 루트에 이 파일이 있어야만
+#: 해당 언어의 프로브가 돈다.
+#:
+#: 이게 없으면 프로브는 "아무 언어든 실행 가능해 보이는 첫 파일"을 진입점으로
+#: 받아들인다. 실측 시나리오: Maven 프로젝트에 Java main 이 없는데
+#: `tools/generator.go` 에 `func main()` 이 있으면 — 그 Go 유틸을 앱의
+#: 진입점이라고 판정해 버린다. 그러면 뜨지 않는 Java 이미지가
+#: APP_ENTRYPOINT_NOT_FOUND 를 잃고 배포 준비 완료로 보고된다.
+#:
+#: 매니페스트는 "이 워크스페이스가 무슨 런타임이라고 주장하는가"의 근거다.
+#: `pom.xml` 이 있으면 Java/Kotlin 프로브가, `go.mod` 가 있으면 Go 프로브가
+#: 정당하다. 둘 다 있으면(폴리글랏) 둘 다 돈다 — 그건 오탐이 아니라 사실이다.
+#:
+#: 매니페스트가 하나도 없는 워크스페이스는 프로브가 전부 꺼진다. 그 경우
+#: 이름 기반 후보(`main.py`·`main.go`·`Dockerfile` 등)가 이미 앞 단계에서
+#: 처리했으므로, 여기 도달했다는 것 자체가 "진입점을 주장할 근거가 없다"는
+#: 뜻이다 — 막는 것이 맞다.
+_PROBE_RUNTIME_MANIFESTS: dict[str, tuple[str, ...]] = {
+    "java":   ("pom.xml", "build.gradle", "build.gradle.kts",
+               "settings.gradle", "settings.gradle.kts"),
+    "kotlin": ("pom.xml", "build.gradle", "build.gradle.kts",
+               "settings.gradle", "settings.gradle.kts"),
+    "go":     ("go.mod", "go.work"),
+    "php":    ("composer.json",),
+}
+
+#: 언어별 잡음 제거 규칙: (줄 주석 접두들, 블록주석 여부, 여러 줄 원시 문자열 구분자들)
+#: 일반 문자열(`"`·`'`)은 모든 언어에서 지운다.
+_PROBE_NOISE_RULES: dict[str, tuple[tuple[str, ...], bool, tuple[str, ...]]] = {
+    "java":   (("//",), True, ('"""',)),   # Java 15+ 텍스트 블록
+    "kotlin": (("//",), True, ('"""',)),   # Kotlin 원시 문자열
+    "go":     (("//",), True, ("`",)),     # Go 백틱 원시 문자열
+    "php":    (("//", "#"), True, ()),
+}
+
+
+def _strip_probe_noise(text: str, label: str) -> str:
+    """주석과 문자열 리터럴 내용을 공백으로 바꾼다. **개행은 보존**한다.
+
+    프로브는 원문 텍스트에 정규식을 그대로 돌렸다. 그래서 Java 라이브러리의
+    문서 주석에 있는 예시 한 줄 —
+
+        // public static void main(String[] args)
+
+    — 이 실행 선언으로 매칭돼 APP_ENTRYPOINT_NOT_FOUND 를 억눌렀다.
+    실행할 수 있는 것이 하나도 없는데 배포 준비 완료가 되는 형태다.
+
+    개행을 보존하는 이유: Kotlin/Go 프로브가 `^\\s*fun main` 같은
+    줄 앵커(re.M)를 쓴다. 지운 자리를 공백으로 채우면 줄 구조가 유지돼
+    앵커 의미가 변하지 않는다.
+    """
+    line_prefixes, block_comments, raw_delims = _PROBE_NOISE_RULES.get(
+        label, (("//",), True, ()))
+    out: list[str] = []
+    i, n = 0, len(text)
+
+    def _blank(seg: str) -> str:
+        return "".join("\n" if c == "\n" else " " for c in seg)
+
+    while i < n:
+        ch = text[i]
+
+        # 여러 줄 원시 문자열 (이스케이프 없음) — 일반 따옴표보다 먼저 본다.
+        matched_raw = False
+        for delim in raw_delims:
+            if text.startswith(delim, i):
+                end = text.find(delim, i + len(delim))
+                if end == -1:
+                    end = n - len(delim)
+                seg_end = end + len(delim)
+                out.append(delim + _blank(text[i + len(delim):end]) + delim)
+                i = seg_end
+                matched_raw = True
+                break
+        if matched_raw:
+            continue
+
+        # 일반 문자열 — 내용만 지운다 (이스케이프 처리).
+        if ch in "\"'":
+            j = i + 1
+            while j < n and text[j] != ch:
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if text[j] == "\n":       # 닫히지 않은 한 줄 문자열은 줄에서 끝낸다
+                    break
+                j += 1
+            out.append(ch + _blank(text[i + 1:j]))
+            if j < n and text[j] == ch:
+                out.append(ch)
+                j += 1
+            i = j
+            continue
+
+        # 줄 주석
+        matched_line = False
+        for prefix in line_prefixes:
+            if text.startswith(prefix, i):
+                j = text.find("\n", i)
+                if j == -1:
+                    j = n
+                out.append(_blank(text[i:j]))
+                i = j
+                matched_line = True
+                break
+        if matched_line:
+            continue
+
+        # 블록 주석
+        if block_comments and text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            out.append(_blank(text[i:j]))
+            i = j
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _enabled_probe_labels(workspace: Path) -> set[str]:
+    """루트 매니페스트가 켜 주는 프로브 라벨들."""
+    enabled: set[str] = set()
+    for label, manifests in _PROBE_RUNTIME_MANIFESTS.items():
+        if any((workspace / m).is_file() for m in manifests):
+            enabled.add(label)
+    return enabled
+
 
 def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
     """실행 진입점을 **내용으로** 찾는다. 못 찾으면 None.
 
     반환값은 찾은 파일의 워크스페이스 상대 경로다(진단에 쓰인다).
+
+    두 가지 방어가 걸려 있다:
+    1. **매니페스트 스코프** — 루트에 그 런타임의 매니페스트가 있어야만
+       해당 언어 프로브가 돈다 (`_PROBE_RUNTIME_MANIFESTS` 참고).
+    2. **잡음 제거** — 주석·문자열 안의 `static void main` 예시는
+       선언이 아니다 (`_strip_probe_noise` 참고).
     """
     skipped = {
         "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
         ".git", "target", ".gradle", "vendor", "out", "test", "tests",
     }
-    for _label, patterns, pattern_re in _EXECUTABLE_ENTRYPOINT_PROBES:
+    enabled = _enabled_probe_labels(workspace)
+    for label, patterns, pattern_re in _EXECUTABLE_ENTRYPOINT_PROBES:
+        if label not in enabled:
+            continue
         scanned = 0
         for glob_pattern in patterns:
             for path in workspace.glob(glob_pattern):
@@ -337,7 +475,7 @@ def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
                     text = path.read_text(encoding="utf-8", errors="ignore")[:40_000]
                 except OSError:
                     continue
-                if pattern_re.search(text):
+                if pattern_re.search(_strip_probe_noise(text, label)):
                     return path.relative_to(workspace).as_posix()
             if scanned >= _PROBE_MAX_FILES:
                 break

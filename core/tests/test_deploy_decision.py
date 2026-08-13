@@ -834,3 +834,58 @@ def test_next_ssr_with_a_documentation_string_is_still_a_server(tmp_path):
         "next.config.js": 'const hint = "set output: \'export\' for static";\nmodule.exports = { reactStrictMode: true };\n',
     })
     assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == "server"
+
+
+# ---------------------------------------------------------------------------
+# [Codex P2] output 감지는 **export 되는 설정**만 봐야 한다
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text,expected,label", [
+    # ── 오판을 막아야 하는 형태 ──────────────────────────────────────────
+    ("const example = { output: 'export' };\nmodule.exports = { reactStrictMode: true };",
+     None, "export 앞의 무관한 헬퍼 객체 ← P2 본판"),
+    ("module.exports = { reactStrictMode: true };\nconst late = { output: 'export' };",
+     None, "export 뒤의 무관한 객체"),
+    ("const example = { output: 'export' };", None, "export 자체가 없음"),
+    # ── 정상 인식을 유지해야 하는 형태 ──────────────────────────────────
+    ("module.exports = { output: 'export' }", "export", "직접 객체"),
+    ("export default { output: 'export' }", "export", "export default 객체"),
+    ("const cfg = { output: 'export' };\nmodule.exports = cfg;", "export", "식별자 해석 (module.exports)"),
+    ("const cfg = { output: 'export' };\nexport default cfg;", "export", "식별자 해석 (export default)"),
+    ("const cfg: NextConfig = { output: 'export' };\nexport default cfg;", "export", "TS 타입 표기"),
+    ("export default defineConfig({ output: 'server' })", "server", "defineConfig 래퍼 (Astro 형)"),
+    ("module.exports = withPlugins([], { output: 'export' })", "export", "플러그인 래퍼"),
+    ("module.exports = (phase) => ({ output: 'export' })", "export", "화살표 함수 설정"),
+    ("export default { output: 'export' } satisfies NextConfig", "export", "satisfies 후치"),
+    # ── 헬퍼가 있어도 export 쪽 값이 이긴다 ─────────────────────────────
+    ("const example = { output: 'server' };\nmodule.exports = { output: 'export' };",
+     "export", "헬퍼와 export 가 다른 값이면 export 쪽"),
+])
+def test_config_scanner_reads_only_the_exported_configuration(text, expected, label):
+    """[Codex P2 회귀] export 앞의 헬퍼 객체에 속아 SSR 앱에 S3 를 권했다.
+
+    `const example = { output: 'export' }; module.exports = { ... }` 처럼
+    **export 되지 않는 객체**의 값을 설정으로 읽으면, 서버가 필요한 앱의
+    산출물을 정적이라고 오판한다. 설정은 export 되는 표현식뿐이다.
+    """
+    stripped = deploy._strip_js_comments(text)
+    assert deploy._js_config_string_value(stripped, "output") == expected, label
+
+
+def test_next_ssr_with_helper_object_before_export_is_still_a_server(tmp_path):
+    """통합 확인 — Codex P2 시나리오 그대로. 헬퍼에 속아 S3 를 권하면 안 된다."""
+    _write(tmp_path, {
+        "package.json": '{"dependencies":{"next":"14"}}',
+        "next.config.js": "const example = { output: 'export' };\nmodule.exports = { reactStrictMode: true };\n",
+    })
+    assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == "server"
+
+
+def test_next_static_export_via_identifier_is_still_static(tmp_path):
+    """[음성 대조] 관례 형태(`const nextConfig = {...}; module.exports = nextConfig`)는
+    export 스코프를 좁혀도 **계속 정적으로 인식**되어야 한다."""
+    _write(tmp_path, {
+        "package.json": '{"dependencies":{"next":"14"}}',
+        "next.config.js": "const nextConfig = { output: 'export' };\nmodule.exports = nextConfig;\n",
+    })
+    assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == "static"

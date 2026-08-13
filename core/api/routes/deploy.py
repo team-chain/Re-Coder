@@ -624,20 +624,151 @@ def _astro_is_server(app_root: Path, node_deps: set[str]) -> bool:
     return False
 
 
+def _js_balanced_region(text: str, start: int, open_ch: str, close_ch: str) -> Optional[str]:
+    """`start` 의 여는 괄호부터 짝이 맞는 닫는 괄호까지의 텍스트.
+
+    문자열 리터럴 안의 괄호는 세지 않는다. 짝이 안 맞으면 None.
+    """
+    n = len(text)
+    if start >= n or text[start] != open_ch:
+        return None
+    depth = 0
+    i = start
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            quote = ch
+            i += 1
+            while i < n:
+                if text[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if text[i] == quote:
+                    break
+                i += 1
+            i += 1
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+        i += 1
+    return None
+
+
+_JS_EXPORT_MARKERS: tuple["re.Pattern[str]", ...] = (
+    re.compile(r"\bmodule\.exports\s*="),
+    re.compile(r"\bexport\s+default\b"),
+)
+
+
+def _js_exported_config_regions(text: str) -> list[str]:
+    """**export 되는 설정 표현식**의 텍스트 조각들만 골라낸다.
+
+    왜 필요한가. `_js_config_string_value` 는 파일 전체를 훑었다. 그래서
+    export 앞에 무관한 헬퍼 객체가 있으면 —
+
+        const example = { output: 'export' };   // export 안 됨
+        module.exports = { reactStrictMode: true };
+
+    — 헬퍼의 값을 설정으로 읽어, 서버가 필요한 앱에 S3 를 권했다.
+    실제 설정은 export 되는 객체뿐이다. 그래서 export 대상만 오려낸다.
+
+    다루는 형태:
+      module.exports = {...}                     → 객체 리터럴
+      export default {...} satisfies NextConfig  → 객체 리터럴 (뒤는 무시)
+      export default defineConfig({...})         → 호출 인자 전체
+      module.exports = withPlugins(a, {...})     → 호출 인자 전체
+      module.exports = (phase) => ({...})        → 화살표 함수 몸통
+      const cfg = {...}; module.exports = cfg    → 식별자 한 단계 해석
+      const cfg: NextConfig = {...}; export default cfg  → 타입 표기 허용
+
+    못 찾으면 빈 리스트를 돌려준다. 호출자는 "값 없음"으로 처리하는데,
+    그 방향이 안전하다 — output 을 못 읽으면 SSR(서버형)으로 남고,
+    서버형 추천은 정적 앱에도 동작하지만 그 반대는 동작하지 않는다.
+    """
+    n = len(text)
+
+    def _rhs(pos: int, depth: int) -> Optional[str]:
+        i = pos
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i >= n:
+            return None
+        ch = text[i]
+        if ch == "{":
+            return _js_balanced_region(text, i, "{", "}")
+        if ch == "(":
+            region = _js_balanced_region(text, i, "(", ")")
+            if region is None:
+                return None
+            # `(phase) => ...` — 매개변수였다면 화살표 뒤 몸통이 진짜 값이다.
+            k = i + len(region)
+            while k < n and text[k] in " \t\r\n":
+                k += 1
+            if text.startswith("=>", k):
+                return _rhs(k + 2, depth)
+            return region
+        if text.startswith("async", i):                   # async (phase) => ...
+            return _rhs(i + len("async"), depth)
+        if ch.isalpha() or ch in "_$":
+            j = i
+            while j < n and (text[j].isalnum() or text[j] in "_$."):
+                j += 1
+            ident = text[i:j]
+            k = j
+            while k < n and text[k] in " \t\r\n":
+                k += 1
+            if k < n and text[k] == "(":                  # defineConfig({...})
+                return _js_balanced_region(text, k, "(", ")")
+            # 맨 식별자 — 선언을 찾아 한 단계만 해석한다.
+            if depth < 2:
+                base = ident.split(".")[0]
+                decl = re.search(
+                    r"\b(?:const|let|var)\s+" + re.escape(base) + r"\b[^=;\n]*=",
+                    text)
+                if decl:
+                    return _rhs(decl.end(), depth + 1)
+            return None
+        return None
+
+    regions: list[str] = []
+    for marker in _JS_EXPORT_MARKERS:
+        for m in marker.finditer(text):
+            region = _rhs(m.end(), 0)
+            if region:
+                regions.append(region)
+    return regions
+
+
 def _js_config_string_value(text: str, key: str) -> Optional[str]:
-    """JS/JSON 설정에서 `key: "값"` 의 **값**을 꺼낸다. 없으면 None.
+    """JS/JSON 설정에서 **export 되는 설정 안의** `key: "값"` 을 꺼낸다. 없으면 None.
 
     정규식으로는 안 된다. `const hint = "set output: 'export' for static"`
     같은 **문서 문자열 안**에도 같은 모양이 들어 있어서, 정규식은 SSR 설정을
     정적으로 오판한다. 주석을 지워도 남는 문제다.
 
-    그래서 문자열 상태를 따라가며 훑고, **문자열 밖에 있는 식별자**이거나
-    **따옴표로 감싼 키**(`"output": ...`)일 때만 키로 인정한다. 값도 바로
-    뒤에 오는 문자열 리터럴만 읽는다.
+    그래서 두 단계로 좁힌다:
+    1. `_js_exported_config_regions` 로 **export 되는 표현식만** 오려낸다.
+       export 앞뒤의 헬퍼 객체·예시 코드는 설정이 아니다.
+    2. 그 조각 안에서 문자열 상태를 따라가며 훑고, **문자열 밖에 있는
+       식별자**이거나 **따옴표로 감싼 키**(`"output": ...`)일 때만 키로
+       인정한다. 값도 바로 뒤에 오는 문자열 리터럴만 읽는다.
 
-    완전한 JS 파서는 아니다 — 중첩 객체 안의 같은 키도 잡는다. 다만
-    "문자열 안의 글자를 설정으로 오인하는" 오판은 없앤다.
+    완전한 JS 파서는 아니다 — export 조각의 중첩 객체 안 같은 키도 잡는다.
+    다만 "export 되지 않는 글자를 설정으로 오인하는" 오판은 없앤다.
     """
+    for region in _js_exported_config_regions(text):
+        value = _js_scan_key_string(region, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _js_scan_key_string(text: str, key: str) -> Optional[str]:
+    """텍스트 조각에서 문자열 상태를 따라가며 `key: "값"` 을 찾는다."""
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
