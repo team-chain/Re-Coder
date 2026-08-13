@@ -21,6 +21,7 @@ os.environ.setdefault("GW_TABLE", "RecoderGatewayTest")
 os.environ.setdefault("GW_REGION", "us-east-1")
 
 import common  # noqa: E402
+import invoke  # noqa: E402
 
 
 @pytest.fixture()
@@ -88,6 +89,32 @@ def test_reconcile_returns_overreservation(table):
     assert cost > 0
 
 
+def test_shared_pool_is_reserved_before_paid_call(table, monkeypatch):
+    """동시 요청은 유료 호출 전에 같은 풀 비용 캡을 원자적으로 선점한다."""
+    monkeypatch.setattr(common, "POOL_SOFT_USD", 0.001)
+    first = _student(table, sid="s1", max_daily=10_000)
+    second = _student(table, sid="s2", max_daily=10_000)
+
+    common.reserve_quota(first, 600)  # worst-case $0.00075
+    pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
+    assert float(pool["used_cost_usd"]) == pytest.approx(0.00075)
+
+    with pytest.raises(common.QuotaError) as exc:
+        common.reserve_quota(second, 600)
+    assert exc.value.code == "pool_exceeded"
+    # 거부된 두 번째 요청은 학생 카운터를 건드리지 않는다.
+    assert _used(table, "s2") == (0, 0)
+
+
+def test_pool_reservation_is_reconciled_to_actual_cost(table, monkeypatch):
+    monkeypatch.setattr(common, "POOL_SOFT_USD", 1.0)
+    item = _student(table)
+    common.reserve_quota(item, 600)
+    actual_cost = common.reconcile_usage("s1", 600, 150, 50)
+    pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
+    assert float(pool["used_cost_usd"]) == pytest.approx(actual_cost)
+
+
 def test_release_on_invoke_failure(table):
     """Bedrock 호출 실패 시 선점분이 전액 반환된다 — 실패한 호출이 한도를
     갉아먹으면 안 된다."""
@@ -95,6 +122,29 @@ def test_release_on_invoke_failure(table):
     common.reserve_quota(item, 600)
     common.release_reservation("s1", 600)
     assert _used(table) == (0, 0)
+    pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
+    assert float(pool["used_cost_usd"]) == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("bad_value", [-1, 0, "not-an-int"])
+def test_invoke_rejects_invalid_max_tokens_before_reservation(monkeypatch, bad_value):
+    calls = []
+    monkeypatch.setattr(common, "authenticate", lambda token: {
+        "pk": "STUDENT#s1", "rpm": 10,
+    })
+    monkeypatch.setattr(common, "check_rate", lambda *args: None)
+    monkeypatch.setattr(common, "check_quota_before", lambda *args: None)
+    monkeypatch.setattr(common, "reserve_quota", lambda *args: calls.append(args))
+
+    response = invoke.handler({
+        "headers": {"Authorization": "Bearer token"},
+        "body": __import__("json").dumps({
+            "prompt": "hello",
+            "max_tokens": bad_value,
+        }),
+    }, None)
+    assert response["statusCode"] == 400
+    assert calls == []
 
 
 def test_reservation_is_upper_bound_for_cjk(table):

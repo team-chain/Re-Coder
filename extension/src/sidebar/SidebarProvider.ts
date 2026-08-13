@@ -647,7 +647,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'analyzeIncident': {
                 const { alertId } = payload as { alertId: string };
                 try {
-                    const proposal = await this._apiClient.analyzeIncident(alertId);
+                    const actorToken = await vscode.window.showInputBox({
+                        prompt: '1차 Ops 승인자 자격증명을 입력하세요',
+                        password: true,
+                        ignoreFocusOut: true,
+                    });
+                    if (!actorToken) { break; }
+                    const proposal = await this._apiClient.analyzeIncident(alertId, actorToken);
                     this._state.proposals.push(proposal);
                     this.postMessage('proposalReady', proposal);
                 } catch (err) {
@@ -657,7 +663,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'approveResponse': {
                 const { proposalId, approved } = payload as { proposalId: string; approved: boolean };
-                const opsResult = await this._apiClient.approveResponse(proposalId, approved);
+                const proposal = this._state.proposals.find(
+                    (p) => (p as ResponseProposal).proposal_id === proposalId
+                ) as ResponseProposal | undefined;
+                const actorToken = await vscode.window.showInputBox({
+                    prompt: approved
+                        ? '2차 Ops 승인자 자격증명을 입력하세요'
+                        : '거부 처리할 Ops 승인자 자격증명을 입력하세요',
+                    password: true,
+                    ignoreFocusOut: true,
+                });
+                if (!actorToken) { break; }
+                const opsResult = await this._apiClient.approveResponse(
+                    proposalId,
+                    approved,
+                    undefined,
+                    undefined,
+                    undefined,
+                    actorToken,
+                    proposal?.confirm_token,
+                );
                 if (opsResult.status === 'error') {
                     this.postMessage('errorMessage', { message: '응답 승인 실패' });
                 } else {

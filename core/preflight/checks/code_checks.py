@@ -322,7 +322,13 @@ _EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str
     (
         "go",
         ("cmd/**/*.go", "**/*.go"),
-        re.compile(r"^\s*func\s+main\s*\(", re.M),
+        # Go executable entrypoints require both a package-main declaration and
+        # func main in the same file. A helper named main in package generator
+        # is not buildable as an executable.
+        re.compile(
+            r"\A\s*package\s+main\b[\s\S]*?^\s*func\s+main\s*\(",
+            re.M,
+        ),
     ),
     (
         "php",

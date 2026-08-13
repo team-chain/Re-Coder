@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -37,6 +38,11 @@ router = APIRouter(tags=["ops"])
 _proposals: dict[str, ResponseProposal] = {}
 _alerts: dict[str, AlertRecord] = {}
 
+
+class _SSHNotDispatchedError(RuntimeError):
+    """The local SSH process could not start; remote execution is impossible."""
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -54,9 +60,6 @@ class FetchIncidentsRequest(BaseModel):
 class AnalyzeIncidentRequest(BaseModel):
     alert_id: str
     extra_context: Optional[str] = None
-    #: 이 분석·조치를 요청하는 주체(2단계 확인의 최초 요청자). 두 번째
-    #: 승인자는 이와 달라야 한다.
-    requested_by: Optional[str] = None
 
 
 class ApproveResponseRequest(BaseModel):
@@ -65,10 +68,8 @@ class ApproveResponseRequest(BaseModel):
     ssh_host: Optional[str] = None
     ssh_user: Optional[str] = None
     ssh_key_path: Optional[str] = None
-    #: DOUBLE_CONFIRM 프로포절의 2단계 승인용. 첫 승인과 **다른** 확인 토큰을
-    #: 요구해, 단일 호출로 2인/2단계 게이트를 건너뛰지 못하게 한다.
+    #: DOUBLE_CONFIRM 프로포절의 2단계 승인용 서버 발급 일회용 토큰.
     confirm_token: Optional[str] = None
-    second_approver: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,60 @@ def _get_ops_agent():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _authenticated_ops_actor(
+    x_ops_actor_token: Optional[str] = Header(
+        default=None,
+        alias="X-Ops-Actor-Token",
+    ),
+) -> str:
+    """Map an opaque credential to a server-controlled approver identity.
+
+    Configure ``RECODER_OPS_APPROVER_TOKENS`` as a JSON object such as
+    ``{"alice":"token-a","bob":"token-b"}``. Tokens must be unique so a
+    DOUBLE_CONFIRM decision always represents two independent credentials.
+    """
+    raw = os.getenv("RECODER_OPS_APPROVER_TOKENS", "").strip()
+    if not raw:
+        raise HTTPException(
+            status_code=503,
+            detail="Ops approver credentials are not configured.",
+        )
+    try:
+        configured = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Ops approver credentials are misconfigured.",
+        ) from exc
+    if not isinstance(configured, dict):
+        raise HTTPException(
+            status_code=503,
+            detail="Ops approver credentials are misconfigured.",
+        )
+
+    approvers: dict[str, str] = {}
+    for actor, token in configured.items():
+        if isinstance(actor, str) and actor.strip() and isinstance(token, str) and token:
+            approvers[actor.strip()] = token
+    if len(approvers) < 2 or len(set(approvers.values())) != len(approvers):
+        raise HTTPException(
+            status_code=503,
+            detail="Ops approver credentials are misconfigured.",
+        )
+    if not x_ops_actor_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing X-Ops-Actor-Token header.",
+        )
+    for actor, expected in approvers.items():
+        if secrets.compare_digest(
+            x_ops_actor_token.encode("utf-8"),
+            expected.encode("utf-8"),
+        ):
+            return actor
+    raise HTTPException(status_code=401, detail="Invalid ops approver credential.")
 
 
 async def _ssh_fetch_file(
@@ -163,8 +218,9 @@ async def _ssh_exec(
             "stdout": result.stdout[:4000],
             "stderr": result.stderr[:2000],
         }
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="SSH command timed out.")
+    except FileNotFoundError as exc:
+        # ssh 실행 파일조차 시작되지 않았으므로 원격 명령은 확실히 미전송이다.
+        raise _SSHNotDispatchedError("SSH client not found on this host.") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +260,10 @@ async def fetch_incidents(request: FetchIncidentsRequest) -> list[AlertRecord]:
 
 
 @router.post("/api/ops/analyze")
-async def analyze_incident(request: AnalyzeIncidentRequest) -> ResponseProposal:
+async def analyze_incident(
+    request: AnalyzeIncidentRequest,
+    authenticated_actor: str = Depends(_authenticated_ops_actor),
+) -> ResponseProposal:
     """
     Analyse a fetched AlertRecord and produce a ResponseProposal.
 
@@ -245,7 +304,9 @@ async def analyze_incident(request: AnalyzeIncidentRequest) -> ResponseProposal:
     # 아무 문자열이나 넣어 2단계를 건너뛰지 못하게, 여기서 예측 불가한 토큰을
     # 만들어 proposal 에 심는다(응답에는 exclude 되어 나가지 않는다 — 별도
     # 필드로 최초 요청자에게만 전달). 최초 요청자 신원도 함께 고정한다.
-    proposal.requested_by = request.requested_by
+    # Bind the proposal to the identity derived from server-side credentials,
+    # never to a caller-controlled request-body string.
+    proposal.requested_by = authenticated_actor
     confirm_token_plain = None
     if proposal.approval_level == ApprovalLevel.DOUBLE_CONFIRM:
         confirm_token_plain = secrets.token_urlsafe(24)
@@ -266,7 +327,10 @@ async def analyze_incident(request: AnalyzeIncidentRequest) -> ResponseProposal:
 
 
 @router.post("/api/ops/approve")
-async def approve_response(request: ApproveResponseRequest) -> dict:
+async def approve_response(
+    request: ApproveResponseRequest,
+    authenticated_actor: str = Depends(_authenticated_ops_actor),
+) -> dict:
     """
     Approve or reject an ops ResponseProposal.
 
@@ -300,12 +364,17 @@ async def approve_response(request: ApproveResponseRequest) -> dict:
             )
         if level == ApprovalLevel.DOUBLE_CONFIRM:
             issued = getattr(proposal, "confirm_token", None)
-            approver = (request.second_approver or "").strip()
-            if not request.confirm_token or not approver:
+            requester = (proposal.requested_by or "").strip()
+            if not requester:
+                raise HTTPException(
+                    status_code=409,
+                    detail="최초 요청자의 인증 신원이 없어 2인 승인을 진행할 수 없습니다.",
+                )
+            if not request.confirm_token:
                 raise HTTPException(
                     status_code=428,
                     detail=("이 작업은 2단계 확인이 필요합니다. 분석 단계에서 발급된 "
-                            "confirm_token 과 second_approver 를 함께 제시하세요."),
+                            "confirm_token 을 인증된 두 번째 승인자가 제시해야 합니다."),
                 )
             # **서버 발급 토큰과 정확히 일치**해야 한다 — 임의 문자열 차단.
             if not issued or not secrets.compare_digest(
@@ -315,8 +384,9 @@ async def approve_response(request: ApproveResponseRequest) -> dict:
                     status_code=403,
                     detail="confirm_token 이 유효하지 않습니다(서버가 발급한 값이 아님).",
                 )
-            # 두 번째 승인자는 최초 요청자와 달라야 한다(2인 확인).
-            if approver == (proposal.requested_by or ""):
+            # 두 신원 모두 서버가 자격증명에서 도출한다. 같은 호출자가 본문에
+            # 다른 이름을 써 넣어 2인 확인을 우회할 수 없다.
+            if authenticated_actor == requester:
                 raise HTTPException(
                     status_code=422,
                     detail="두 번째 승인자는 최초 요청자와 달라야 합니다.",
@@ -336,9 +406,9 @@ async def approve_response(request: ApproveResponseRequest) -> dict:
         raise
 
     # Build the remote command — 사용자 입력은 shlex.quote 로 escape (RCE 차단).
-    # 명령 빌드·SSH 예외는 **실행 전 실패**이므로 proposal 을 되돌려 재시도
-    # 가능하게 한다. _ssh_exec 이 반환하면(원격이 실제로 돌았으면) exit code 와
-    # 무관하게 소비된 채로 둔다.
+    # 명령 빌드 예외는 **실행 전 실패**이므로 proposal 을 되돌려 재시도
+    # 가능하게 한다. SSH dispatch 이후 예외는 실행 여부가 불명확하므로 복원하지
+    # 않는다. _ssh_exec 이 반환하면 exit code 와 무관하게 소비된 채로 둔다.
     import re as _re
     import shlex as _shlex
     _NAME_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$")
@@ -371,10 +441,19 @@ async def approve_response(request: ApproveResponseRequest) -> dict:
             key_path=ssh_key,
             command=remote_cmd,
         )
-    except Exception as exc:
-        # 원격이 돌지 않았다 — 되돌려 재시도 가능하게.
+    except _SSHNotDispatchedError as exc:
+        # 로컬 SSH 프로세스가 시작되지 않은 확정적 실행 전 실패만 재시도 가능.
         _proposals[request.proposal_id] = proposal
-        raise HTTPException(status_code=502, detail=f"SSH 실행 실패: {exc}") from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        # 타임아웃/연결 단절은 원격 명령이 시작된 뒤 발생했을 수도 있다. 이
+        # proposal 을 되살리면 비멱등 조치가 재시도 때 두 번 실행될 수 있으므로
+        # 소비된 상태로 유지하고 실행 결과를 '불명'으로 보고한다.
+        raise HTTPException(
+            status_code=502,
+            detail=("SSH 실행 결과를 확인할 수 없습니다. proposal 은 중복 실행 "
+                    f"방지를 위해 소비되었습니다: {exc}"),
+        ) from exc
 
     return {
         "status": "executed" if exec_result["exit_code"] == 0 else "failed",

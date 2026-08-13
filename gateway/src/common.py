@@ -269,7 +269,10 @@ def get_pool() -> dict:
 
 
 # 호출당 출력 토큰 상한 — 호출자가 보내는 max_tokens 는 비신뢰 입력이다.
-MAX_TOKENS_CEILING = int(os.environ.get("GW_MAX_TOKENS_CEILING", "4096"))
+MAX_TOKENS_CEILING = max(
+    1,
+    int(os.environ.get("GW_MAX_TOKENS_CEILING", "4096")),
+)
 
 
 def estimate_request_tokens(messages, system: str, max_output_tokens: int) -> int:
@@ -292,6 +295,57 @@ def estimate_request_tokens(messages, system: str, max_output_tokens: int) -> in
     return byte_len + 64 + int(max_output_tokens)
 
 
+def _reservation_cost(budget_tokens: int):
+    """Conservative USD upper bound for a token reservation.
+
+    The input/output split is unknown before the call, so charge every reserved
+    token at the more expensive configured rate. Reconciliation returns the
+    over-reservation after Bedrock reports actual usage.
+    """
+    return _dec((int(budget_tokens) / 1000.0) * max(
+        PRICE_IN_PER_1K,
+        PRICE_OUT_PER_1K,
+    ))
+
+
+def _reserve_pool(budget_tokens: int) -> None:
+    """Atomically reserve shared-pool cost before a paid Bedrock call."""
+    reserved_cost = _reservation_cost(budget_tokens)
+    soft_cap = _dec(POOL_SOFT_USD)
+    if reserved_cost > soft_cap:
+        raise QuotaError(
+            "pool_exceeded",
+            "이 요청의 최대 비용이 학생 풀의 남은 한도를 초과합니다.",
+        )
+    try:
+        _table().update_item(
+            Key={"pk": "POOL", "sk": "META"},
+            UpdateExpression="ADD used_cost_usd :c",
+            ConditionExpression=(
+                "attribute_not_exists(used_cost_usd) OR used_cost_usd <= :remaining"
+            ),
+            ExpressionAttributeValues={
+                ":c": reserved_cost,
+                ":remaining": soft_cap - reserved_cost,
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            raise QuotaError(
+                "pool_exceeded",
+                "학생 풀 전체 한도에 도달했습니다.",
+            ) from exc
+        raise
+
+
+def _release_pool_reservation(budget_tokens: int) -> None:
+    _table().update_item(
+        Key={"pk": "POOL", "sk": "META"},
+        UpdateExpression="ADD used_cost_usd :c",
+        ExpressionAttributeValues={":c": -_reservation_cost(budget_tokens)},
+    )
+
+
 def reserve_quota(item: dict, budget_tokens: int) -> None:
     """호출 **전에** 예산을 원자적으로 선점한다.
 
@@ -305,9 +359,15 @@ def reserve_quota(item: dict, budget_tokens: int) -> None:
     직렬화되고 한도를 넘는 예약은 ConditionalCheckFailed 로 거부된다.
     실제 사용량과의 차액은 reconcile_usage 가 되돌린다.
     """
+    if int(budget_tokens) <= 0:
+        raise QuotaError("invalid_budget", "예약 토큰은 1 이상이어야 합니다.")
+
     sid = item["pk"].split("#", 1)[1]
     max_total = int(item.get("max_total_tokens", DEF_MAX_TOTAL))
     max_daily = int(item.get("max_daily_tokens", DEF_MAX_DAILY))
+    # 풀을 먼저 선점해야 동시 요청들이 같은 사전 조회값을 보고 모두 유료
+    # 호출로 진입하지 않는다. 학생 예약 실패 시 즉시 풀 선점분을 반환한다.
+    _reserve_pool(budget_tokens)
     try:
         _table().update_item(
             Key={"pk": f"STUDENT#{sid}", "sk": "META"},
@@ -322,6 +382,7 @@ def reserve_quota(item: dict, budget_tokens: int) -> None:
                 ":dm": max_daily - int(budget_tokens),
             })
     except ClientError as exc:
+        _release_pool_reservation(budget_tokens)
         if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
             raise QuotaError("daily_exceeded",
                              "남은 토큰 한도가 이 요청의 예산보다 작습니다. "
@@ -335,6 +396,7 @@ def release_reservation(student_id: str, budget_tokens: int) -> None:
         Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
         UpdateExpression="ADD used_total_tokens :b, used_today_tokens :b",
         ExpressionAttributeValues={":b": -int(budget_tokens)})
+    _release_pool_reservation(budget_tokens)
 
 
 def reconcile_usage(student_id: str, budget_tokens: int,
@@ -348,10 +410,14 @@ def reconcile_usage(student_id: str, budget_tokens: int,
             Key={"pk": f"STUDENT#{student_id}", "sk": "META"},
             UpdateExpression="ADD used_total_tokens :d, used_today_tokens :d",
             ExpressionAttributeValues={":d": delta})
+    reserved_cost = _reservation_cost(budget_tokens)
     _table().update_item(
         Key={"pk": "POOL", "sk": "META"},
         UpdateExpression="ADD used_total_tokens :t, used_cost_usd :c",
-        ExpressionAttributeValues={":t": actual, ":c": _dec(cost)})
+        ExpressionAttributeValues={
+            ":t": actual,
+            ":c": _dec(cost) - reserved_cost,
+        })
     return cost
 
 

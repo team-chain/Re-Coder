@@ -42,8 +42,21 @@ def handler(event, context):
             prompt = body.get("prompt", "")
             messages = [{"role": "user", "content": [{"text": prompt}]}]
 
-        # max_tokens 는 호출자 입력이다 — 상한 없이는 예산 자체가 무의미하다.
-        max_tokens = min(int(body.get("max_tokens", 2048)), common.MAX_TOKENS_CEILING)
+        # max_tokens 는 호출자 입력이다. 음수/0을 예약 계산에 넣으면 학생
+        # 카운터가 감소해 동시 요청이 한도를 우회할 수 있으므로 예약 전에 거부.
+        try:
+            requested_max_tokens = int(body.get("max_tokens", 2048))
+        except (TypeError, ValueError):
+            return common.resp(400, {
+                "error": "invalid_max_tokens",
+                "message": "max_tokens 는 1 이상의 정수여야 합니다.",
+            })
+        if requested_max_tokens < 1:
+            return common.resp(400, {
+                "error": "invalid_max_tokens",
+                "message": "max_tokens 는 1 이상의 정수여야 합니다.",
+            })
+        max_tokens = min(requested_max_tokens, common.MAX_TOKENS_CEILING)
         system = body.get("system", "")
 
         # **유료 호출 전에 예산을 원자적으로 선점**한다. 사후 기록만으로는

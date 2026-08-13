@@ -24,13 +24,14 @@ def _proposal(level, pid="p1"):
         risk_level=RiskLevel.HIGH,
         risk_reasons=["t"],
         approval_level=level,
+        requested_by="alice",
     )
     return p  # 저장은 _proposals[dict-key] 로 직접 — 모델은 proposal_id 필드 없음
 
 
 def _approve(**kw):
     req = ops.ApproveResponseRequest(**kw)
-    return asyncio.run(ops.approve_response(req))
+    return asyncio.run(ops.approve_response(req, authenticated_actor="bob"))
 
 
 @pytest.fixture(autouse=True)

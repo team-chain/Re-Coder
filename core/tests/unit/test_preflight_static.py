@@ -648,6 +648,15 @@ class Doc {
         "package lib\n// func main() { run() }\n/*\nfunc main() {}\n*/\n", encoding="utf-8")
     assert _find_executable_entrypoint(go) is None
 
+    # func main alone is insufficient: Go only builds an executable from
+    # package main.
+    (go / "generator.go").write_text(
+        "package generator\nfunc main() { run() }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(go) is None
+    (go / "generator.go").write_text(
+        "package main\nfunc main() { run() }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(go) == "generator.go"
+
     # 3) Kotlin — 원시 문자열(triple quote) 안의 fun main 은 무시된다.
     kt = tmp_path / "kt-lib"
     kt.mkdir()
