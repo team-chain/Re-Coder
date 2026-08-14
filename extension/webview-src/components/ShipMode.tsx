@@ -48,10 +48,38 @@ interface DeploymentPlan {
   approval_level: 1 | 2 | 3 | 4;
 }
 
+export type InfraFileTab = "dockerfile" | "compose" | "actions";
+
+export const INFRA_FILE_TYPE_BY_TAB: Record<InfraFileTab, string> = {
+  dockerfile: "dockerfile",
+  compose: "docker_compose",
+  actions: "github_actions",
+};
+
+export function generationCommandForTab(
+  tab: InfraFileTab,
+): "generateDockerfile" | "generateCompose" | "generateGithubActions" {
+  if (tab === "compose") { return "generateCompose"; }
+  if (tab === "actions") { return "generateGithubActions"; }
+  return "generateDockerfile";
+}
+
+export function infraFileLabelForTab(tab: InfraFileTab): string {
+  if (tab === "compose") { return "docker-compose.yml"; }
+  if (tab === "actions") { return ".github/workflows/deploy.yml"; }
+  return "Dockerfile";
+}
+
+export function shouldRunDockerPipeline(fileType: string): boolean {
+  return fileType === INFRA_FILE_TYPE_BY_TAB.dockerfile;
+}
+
 type Step =
   | "idle"
   | "generating"
   | "preview"
+  | "saving"
+  | "saved"
   | "scanning"
   | "scanDone"
   | "planning"
@@ -80,8 +108,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showApproval, setShowApproval] = useState(false);
-  const [approvalContext, setApprovalContext] = useState<"dockerfile" | "deploy" | null>(null);
-  const [activeFileTab, setActiveFileTab] = useState<"dockerfile" | "compose" | "actions">("dockerfile");
+  const [approvalContext, setApprovalContext] = useState<"infra" | "deploy" | null>(null);
+  const [activeFileTab, setActiveFileTab] = useState<InfraFileTab>("dockerfile");
 
   // Message listener
   useMessage(
@@ -99,6 +127,23 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         setStep("scanDone");
       }
 
+      if (type === "infraApprovalResult") {
+        const result = payload as {
+          status?: string;
+          approved?: boolean;
+          file_type?: string;
+        };
+        // 탭 전환 중 보낸 거절 응답은 새 탭의 상태를 바꾸면 안 된다.
+        if (result.approved === true && result.status === "saved") {
+          if (shouldRunDockerPipeline(result.file_type ?? "")) {
+            setStep("scanning");
+            postMessage("runScan", { scanType: "trivy", workspacePath: "" });
+          } else {
+            setStep("saved");
+          }
+        }
+      }
+
       if (type === "deployResult") {
         const r = payload as { status: string; deployment_id?: string };
         setDeployResult(r);
@@ -112,7 +157,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         setError((payload as { message: string }).message);
         setStep("error");
       }
-    }, [])
+    }, [postMessage])
   );
 
   // ── Handlers ─────────────────────────────────────────────────────────────
@@ -130,23 +175,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     setScanResult(null);
     setPlan(null);
     setDeployResult(null);
-    const command = activeFileTab === "compose"
-      ? "generateCompose"
-      : activeFileTab === "actions"
-      ? "generateGithubActions"
-      : "generateDockerfile";
+    const command = generationCommandForTab(activeFileTab);
     postMessage(command, { workspacePath: "" /* extension fills */ });
   }, [postMessage, activeFileTab]);
 
-  const handleApproveDockerfile = useCallback(() => {
+  const handleApproveInfraFile = useCallback(() => {
     if (!proposal) { return; }
     postMessage("approveDockerfile", { proposalId: proposal.proposal_id, approved: true });
-    setStep("scanning");
+    setStep("saving");
     setShowApproval(false);
-    // Trigger Trivy scan after saving
-    setTimeout(() => {
-      postMessage("runScan", { scanType: "trivy", workspacePath: "" });
-    }, 500);
   }, [proposal, postMessage]);
 
   const handleRejectDockerfile = useCallback(() => {
@@ -156,6 +193,29 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     setProposal(null);
     setShowApproval(false);
   }, [proposal, postMessage]);
+
+  const handleSwitchFileTab = useCallback((tab: InfraFileTab) => {
+    if (tab === activeFileTab) { return; }
+
+    // 승인 대기 초안은 서버 메모리에도 보관된다. 탭을 바꾸며 UI에서만
+    // 숨기면 나중에 다른 파일로 오인해 승인하거나 서버에 고아로 남는다.
+    if (step === "preview" && proposal) {
+      postMessage("approveDockerfile", {
+        proposalId: proposal.proposal_id,
+        approved: false,
+      });
+    }
+
+    setActiveFileTab(tab);
+    setProposal(null);
+    setScanResult(null);
+    setPlan(null);
+    setDeployResult(null);
+    setError(null);
+    setShowApproval(false);
+    setApprovalContext(null);
+    setStep("idle");
+  }, [activeFileTab, step, proposal, postMessage]);
 
   const handleDeploy = useCallback(() => {
     if (!plan) { return; }
@@ -277,7 +337,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     );
   }
 
-  const fileTabs: { id: "dockerfile" | "compose" | "actions"; label: string }[] = [
+  const fileTabs: { id: InfraFileTab; label: string }[] = [
     { id: "dockerfile", label: "Dockerfile" },
     { id: "compose", label: "Compose" },
     { id: "actions", label: "GitHub Actions" },
@@ -288,12 +348,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   //: 탭 이름이 아니라 **받은 제안의 file_type** 으로 판정한다. 탭만 보고
   //: 판정하면, Compose 를 생성한 뒤 Dockerfile 탭으로 옮겼을 때 compose 내용이
   //: Dockerfile 인 것처럼 표시된다.
-  const TAB_FILE_TYPE: Record<string, string> = {
-    dockerfile: "dockerfile",
-    compose: "docker_compose",
-    actions: "github_actions",
-  };
-  const matchesTab = !!proposal && proposal.file_type === TAB_FILE_TYPE[activeFileTab];
+  const matchesTab = !!proposal && proposal.file_type === INFRA_FILE_TYPE_BY_TAB[activeFileTab];
+  const activeFileLabel = infraFileLabelForTab(activeFileTab);
+  const canSwitchFileTab = ["idle", "preview", "saved", "done", "error"].includes(step);
   const activeContent = matchesTab ? proposal!.content : null;
   const stackComment = matchesTab
     ? `# 스택: ${proposal!.base_template ?? "auto-detected"}`
@@ -318,7 +375,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveFileTab(tab.id)}
+              onClick={() => handleSwitchFileTab(tab.id)}
+              disabled={!canSwitchFileTab}
               style={{
                 display: "inline-flex",
                 alignItems: "center",
@@ -330,7 +388,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
                 color: isActive ? "#93c5fd" : "#888",
                 fontSize: 11,
                 fontWeight: isActive ? 600 : 400,
-                cursor: "pointer",
+                cursor: canSwitchFileTab ? "pointer" : "not-allowed",
+                opacity: canSwitchFileTab ? 1 : 0.55,
                 transition: "all 0.15s",
               }}
             >
@@ -359,10 +418,10 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#aaa" }}>
             <span style={{ fontWeight: 500 }}>
-              {activeFileTab === "dockerfile" ? "Dockerfile" : activeFileTab === "compose" ? "docker-compose.yml" : ".github/workflows/deploy.yml"}
+              {activeFileLabel}
             </span>
           </div>
-          {proposal && activeFileTab === "dockerfile" && (
+          {matchesTab && activeFileTab === "dockerfile" && (
             <button
               onClick={() => {/* preview action */}}
               style={{
@@ -402,9 +461,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             <span style={{ color: "#555", fontStyle: "italic" }}>
               {step === "generating"
                 ? "생성 중…"
-                : `${activeFileTab === "dockerfile" ? "Dockerfile"
-                    : activeFileTab === "compose" ? "docker-compose.yml"
-                    : ".github/workflows/deploy.yml"} 생성 버튼을 누르면 여기에 표시됩니다.`}
+                : `${activeFileLabel} 생성 버튼을 누르면 여기에 표시됩니다.`}
             </span>
           )}
         </div>
@@ -418,12 +475,13 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       )}
 
       {/* ── Loading spinner ── */}
-      {(step === "generating" || step === "scanning" || step === "planning" || step === "deploying") && (
+      {(step === "generating" || step === "saving" || step === "scanning" || step === "planning" || step === "deploying") && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, color: "#888" }}>
           <div style={{ width: 13, height: 13, border: "2px solid #3f3f3f", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />
           <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
           <span>
-            {step === "generating" ? "Dockerfile 생성 중…" :
+            {step === "generating" ? `${activeFileLabel} 생성 중…` :
+             step === "saving" ? `${activeFileLabel} 저장 중…` :
              step === "scanning" ? "보안 스캔 실행 중…" :
              step === "planning" ? "배포 플랜 생성 중…" :
              "배포 실행 중…"}
@@ -432,7 +490,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       )}
 
       {/* ── Required secrets warning ── */}
-      {proposal && proposal.required_secrets.length > 0 && (
+      {matchesTab && proposal && proposal.required_secrets.length > 0 && (
         <div style={{ marginBottom: 10, fontSize: 10, color: "#f59e0b", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 5, padding: "5px 9px" }}>
           ⚠ 필요한 환경변수: {proposal.required_secrets.join(", ")}
         </div>
@@ -466,6 +524,12 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         </div>
       )}
 
+      {step === "saved" && (
+        <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
+          ✓ {activeFileLabel} 저장 완료
+        </div>
+      )}
+
       {/* ── Error ── */}
       {step === "error" && error && (
         <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444", borderRadius: 5, padding: "8px 10px", color: "#ef4444", marginBottom: 10 }}>
@@ -480,18 +544,19 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           onClick={() => {
             if (step === "idle") {
               handleGenerateInfraFile();
-            } else if (step === "preview" && proposal) {
+            } else if (step === "preview" && proposal && matchesTab) {
               if (proposal.approval_level <= 1) {
-                handleApproveDockerfile();
+                handleApproveInfraFile();
               } else {
-                setApprovalContext("dockerfile");
+                setApprovalContext("infra");
                 setShowApproval(true);
               }
             } else if (step === "planReady") {
               setApprovalContext("deploy");
               setShowApproval(true);
-            } else if (step === "done" || step === "error") {
+            } else if (step === "saved" || step === "done" || step === "error") {
               setStep("idle");
+              setProposal(null);
               setDeployResult(null);
               setError(null);
             }
@@ -512,23 +577,25 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         >
           <span>✅</span>
           {step === "idle"
-            ? "Dockerfile 생성"
+            ? `${activeFileLabel} 생성`
             : step === "preview"
             ? `저장 Level ${proposal?.approval_level ?? 1}`
             : step === "planReady"
             ? "승인 (Level 2)"
             : step === "scanDone"
             ? "docker build / run"
+            : step === "saved"
+            ? "다른 파일 생성"
             : step === "done" || step === "error"
             ? "새 배포"
             : "처리 중…"}
         </button>
 
         {/* 보안 스캔 button */}
-        <button
+        {activeFileTab === "dockerfile" && <button
           onClick={() => {
-            if (step === "preview" && proposal) {
-              handleApproveDockerfile(); // saves then triggers scan
+            if (step === "preview" && proposal && matchesTab) {
+              handleApproveInfraFile(); // saves then triggers scan
             } else {
               postMessage("runScan", { scanType: "trivy", workspacePath: "" });
             }
@@ -550,19 +617,19 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           }}
         >
           <span>🔒</span> 보안 스캔
-        </button>
+        </button>}
       </div>
 
       {/* ── Approval Modal ── */}
-      {showApproval && approvalContext === "dockerfile" && proposal && (
+      {showApproval && approvalContext === "infra" && proposal && matchesTab && (
         <div style={{ marginTop: 10 }}>
           <ApprovalModal
             level={proposal.approval_level}
-            title={`Dockerfile 저장: ${proposal.target_path}`}
-            summary="AI가 생성한 Dockerfile을 워크스페이스에 저장합니다."
+            title={`파일 저장: ${proposal.target_path}`}
+            summary="생성된 인프라 파일을 워크스페이스에 저장합니다."
             riskLevel={proposal.risk_level}
             riskReasons={proposal.risk_reasons}
-            onApprove={handleApproveDockerfile}
+            onApprove={handleApproveInfraFile}
             onReject={handleRejectDockerfile}
           />
         </div>

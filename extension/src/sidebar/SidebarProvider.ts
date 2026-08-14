@@ -429,7 +429,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const dfResult = await this._apiClient.approveDockerfile(proposalId, approved);
                 this.postMessage('stateUpdate', { ...this._state });
                 if (dfResult.status === 'error') {
-                    this.postMessage('errorMessage', { message: 'Dockerfile 승인 실패' });
+                    this.postMessage('errorMessage', { message: '인프라 파일 승인 실패' });
+                } else {
+                    // 저장이 끝난 뒤에만 웹뷰가 다음 단계(Trivy 또는 완료)로
+                    // 넘어간다. 고정 지연으로 추측하면 느린 디스크에서 저장보다
+                    // 스캔이 먼저 실행될 수 있다.
+                    this.postMessage('infraApprovalResult', {
+                        ...dfResult,
+                        proposal_id: proposalId,
+                        approved,
+                    });
                 }
                 break;
             }

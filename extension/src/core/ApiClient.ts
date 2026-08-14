@@ -402,12 +402,19 @@ export class ApiClient {
         return resp.data;
     }
 
-    async approveDockerfile(proposalId: string, approved: boolean): Promise<{ status: string }> {
-        const resp = await this.request<{ status: string }>(
+    async approveDockerfile(
+        proposalId: string,
+        approved: boolean,
+    ): Promise<{ status: string; file_type?: string; path?: string }> {
+        const resp = await this.request<{ status: string; file_type?: string; path?: string }>(
             'POST',
             `/api/deploy/dockerfile/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
+        return {
+            status: resp.data?.status ?? 'error', // 서버 status 없으면 성공을 지어내지 않음
+            file_type: resp.data?.file_type,
+            path: resp.data?.path,
+        };
     }
 
     /**

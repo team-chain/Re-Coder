@@ -99,8 +99,41 @@ def test_dockerfile_폴백이면_이유와_다음행동을_함께_알려준다(c
     notes = " ".join(body.get("risk_reasons") or [])
 
     assert notes, "AI 를 왜 못 썼는지 알려주지 않는다"
-    assert "rate limit exceeded" in notes, "원인(원문)이 빠졌다"
+    assert "요청 한도" in notes, "사용자가 이해할 수 있는 원인 분류가 빠졌다"
     assert "다시 생성" in notes, "다음에 뭘 하면 되는지가 없다"
+
+
+def test_dockerfile_폴백_안내가_제공자_비밀을_노출하지_않는다(client, workspace, monkeypatch):
+    import api.routes.deploy as deploy_routes
+
+    class _AgentThatLeaksInError:
+        async def generate_dockerfile(self, *_args, **_kwargs):
+            raise RuntimeError("Authorization failed for API_KEY=super-secret-value")
+
+    monkeypatch.setattr(deploy_routes, "_get_infra_agent", lambda: _AgentThatLeaksInError())
+
+    body = _post(client, "/api/deploy/dockerfile", {"workspace_path": workspace}).json()
+    notes = " ".join(body.get("risk_reasons") or [])
+    assert "인증 정보" in notes
+    assert "super-secret-value" not in notes
+
+
+def test_agent_내부_TypeError가_유료호출을_두번_실행하지_않는다(client, workspace, monkeypatch):
+    import api.routes.deploy as deploy_routes
+
+    class _AgentThatRaisesTypeError:
+        calls = 0
+
+        async def generate_dockerfile(self, *_args, **_kwargs):
+            self.calls += 1
+            raise TypeError("provider response shape changed")
+
+    agent = _AgentThatRaisesTypeError()
+    monkeypatch.setattr(deploy_routes, "_get_infra_agent", lambda: agent)
+
+    resp = _post(client, "/api/deploy/dockerfile", {"workspace_path": workspace})
+    assert resp.status_code == 200
+    assert agent.calls == 1, "TypeError를 구버전 시그니처로 오인해 AI를 두 번 호출했다"
 
 
 def test_음성대조_AI가_정상이면_폴백_안내가_붙지_않는다(client, workspace, monkeypatch):
@@ -172,34 +205,39 @@ def test_빈_워크스페이스_경로는_400(client, path):
     assert "workspace_path" in resp.json()["detail"]
 
 
-def test_처리되지_않은_예외도_평문이_아니라_JSON_이유로_나온다(client, workspace, monkeypatch):
+def test_처리되지_않은_예외는_비밀없이_JSON_오류_ID로_나온다():
     """
     마지막 그물. 라우트를 하나 고쳐도 다른 경로에서 같은 증상이 나면 소용없다.
 
     예전 동작: 본문이 정확히 `Internal Server Error` (평문) → 확장이 그대로
     배너에 띄움 → 사용자는 원인도 다음 행동도 모름.
     """
-    import api.routes.deploy as deploy_routes
+    app = main.create_app()
+    app.state.session_token = TOKEN
 
-    class _AgentThatExplodesOutsideHandledPath:
-        async def generate_dockerfile(self, *_args, **_kwargs):
-            raise RuntimeError("boom")
+    @app.get("/__test_unhandled")
+    async def _boom():
+        raise RuntimeError("DB_PASSWORD=super-secret-value")
 
-    def _boom():
-        raise MemoryError("의도적으로 라우트 밖에서 터뜨림")
-
-    monkeypatch.setattr(deploy_routes, "_get_infra_agent", _boom)
-
-    resp = _post(client, "/api/deploy/dockerfile", {"workspace_path": workspace})
+    local_client = TestClient(
+        app,
+        raise_server_exceptions=False,
+        client=("127.0.0.1", 5555),
+    )
+    resp = local_client.get(
+        "/__test_unhandled",
+        headers={"X-Session-Token": TOKEN},
+    )
 
     assert resp.status_code == 500
     assert resp.text.strip() != "Internal Server Error", (
         "여전히 평문 Internal Server Error 다 — 사용자에게 아무 정보가 없다"
     )
     detail = resp.json()["detail"]
-    assert "MemoryError" in detail, "예외 종류가 없다"
-    assert "의도적으로 라우트 밖에서 터뜨림" in detail, "원인 메시지가 없다"
-    assert "/api/deploy/dockerfile" in detail, "어느 요청에서 났는지가 없다"
+    assert "오류 ID:" in detail, "서버 로그와 연결할 추적 ID가 없다"
+    assert "다시 시도" in detail, "다음 행동이 없다"
+    assert "super-secret-value" not in detail, "내부 예외의 비밀이 응답에 노출됐다"
+    assert "DB_PASSWORD" not in detail
 
 
 def test_음성대조_정상_요청은_전역_핸들러를_타지_않는다(client, workspace):
@@ -230,6 +268,7 @@ def test_actions_초안이_승인시_워크스페이스에_저장된다(client, 
     )
 
     assert resp.status_code == 200, resp.text[:200]
+    assert resp.json()["file_type"] == "github_actions"
     written = (gh / "deploy.yml").read_text(encoding="utf-8")
     assert "기존 워크플로" not in written, "덮어쓰기가 안 됐다"
     assert "name: CI" in written

@@ -8,6 +8,7 @@ planning, execution, records, and rollback.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -1474,7 +1475,13 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id):
         target = Path(root).expanduser().resolve() / target
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(proposal.content, encoding="utf-8")
-    return {"status": "saved", "proposal_id": proposal_id, "path": str(target)}
+    file_type = getattr(proposal.file_type, "value", proposal.file_type)
+    return {
+        "status": "saved",
+        "proposal_id": proposal_id,
+        "path": str(target),
+        "file_type": file_type,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1509,8 +1516,27 @@ def _dockerfile_from_template(workspace_path: str, stack) -> tuple[str, str]:
 
 #: 사용자에게 그대로 보여줄 문장. 원인 + **다음에 뭘 하면 되는지**까지 담는다.
 #: "Internal Server Error" 만 보여주면 사용자는 재시도 말고 할 수 있는 게 없다.
-def _ai_unavailable_note(exc: Exception) -> str:
-    reason = str(exc).strip() or exc.__class__.__name__
+def _public_ai_failure_reason(exc: Exception | None) -> str:
+    """Return an actionable reason without exposing provider error details."""
+    if exc is None:
+        return "AI 에이전트를 초기화하지 못했습니다."
+
+    message = str(exc).lower()
+    if any(token in message for token in ("rate limit", "throttl", "quota")):
+        return "AI 제공자의 요청 한도에 도달했습니다."
+    if any(token in message for token in (
+        "credential", "api key", "api_key", "unauthorized", "forbidden", "auth",
+    )):
+        return "AI 인증 정보 또는 자격증명을 확인하지 못했습니다."
+    if any(token in message for token in ("timeout", "timed out")):
+        return "AI 제공자의 응답 시간이 초과됐습니다."
+    if any(token in message for token in ("connection", "network", "dns")):
+        return "AI 제공자와 네트워크 연결에 실패했습니다."
+    return f"AI 제공자 호출에 실패했습니다 ({exc.__class__.__name__})."
+
+
+def _ai_unavailable_note(exc: Exception | None) -> str:
+    reason = _public_ai_failure_reason(exc)
     return (
         f"AI 맞춤 생성을 건너뛰고 기본 템플릿으로 초안을 만들었습니다. "
         f"원인: {reason} — AI 연결(자격증명·API 키)을 확인한 뒤 다시 생성하면 "
@@ -1546,19 +1572,29 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
                 workspace_path=request.workspace_path,
                 stack=stack,
             )
+        generate = agent.generate_dockerfile
         try:
-            proposal = await agent.generate_dockerfile(request.workspace_path, project)
-        except TypeError:
-            # 구버전 호환 — 일부 InfraAgent 구현은 시그니처가 다를 수 있음
+            # 호출 뒤 발생한 TypeError를 "구버전 시그니처"로 오인해 유료 LLM
+            # 호출을 두 번 실행하지 않는다. 호출 전에 시그니처를 판정한다.
             try:
-                proposal = await agent.generate_dockerfile(request.workspace_path)  # type: ignore[call-arg]
-            except Exception as exc:  # noqa: BLE001
-                proposal, ai_note = None, _ai_unavailable_note(exc)
+                signature = inspect.signature(generate)
+            except (TypeError, ValueError):
+                # 서명을 읽을 수 없는 callable은 현재(2인자) 계약을 따른다.
+                args = (request.workspace_path, project)
+            else:
+                try:
+                    signature.bind(request.workspace_path, project)
+                    args = (request.workspace_path, project)
+                except TypeError:
+                    args = (request.workspace_path,)
+            proposal = await generate(*args)
         except Exception as exc:  # noqa: BLE001
             # **여기가 데모에서 터진 지점.** LLM 제공자가 RuntimeError 를 던지면
-            # 위의 TypeError 절에 안 걸려 그대로 빠져나갔다.
+            # 그대로 빠져나가지 않고 템플릿으로 폴백한다.
             logger.warning("Dockerfile AI 생성 실패, 템플릿 폴백: %s", exc)
             proposal, ai_note = None, _ai_unavailable_note(exc)
+    else:
+        ai_note = _ai_unavailable_note(None)
 
     if proposal is None:
         content, template_id = _dockerfile_from_template(request.workspace_path, stack)
@@ -1649,8 +1685,13 @@ async def approve_dockerfile(proposal_id: str, approved: bool, workspace_path: s
         raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found.")
 
     if not approved:
+        file_type = getattr(proposal.file_type, "value", proposal.file_type)
         del _infra_proposals[proposal_id]
-        return {"status": "rejected", "proposal_id": proposal_id}
+        return {
+            "status": "rejected",
+            "proposal_id": proposal_id,
+            "file_type": file_type,
+        }
 
     result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id)
     del _infra_proposals[proposal_id]

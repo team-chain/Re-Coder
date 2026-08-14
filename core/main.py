@@ -174,19 +174,23 @@ def create_app() -> FastAPI:
     #
     # 개별 라우트를 다 감싸는 것으로는 부족하다 — 미들웨어·직렬화·미처 못 본
     # 경로에서 터지면 또 평문으로 돌아간다. 그래서 마지막 그물을 여기 친다.
-    # 예외 종류와 메시지까지만 담는다(스택 트레이스는 서버 로그로만).
+    # 내부 예외 메시지에는 경로·자격증명 등이 포함될 수 있으므로 응답에는
+    # 추적용 오류 ID만 담고, 예외와 스택 트레이스는 서버 로그에만 남긴다.
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception):  # noqa: ANN202
+        error_id = secrets.token_hex(8)
         logging.getLogger("recoder.core").exception(
-            "처리되지 않은 예외: %s %s", request.method, request.url.path,
+            "처리되지 않은 예외 [%s]: %s %s",
+            error_id,
+            request.method,
+            request.url.path,
         )
         return JSONResponse(
             status_code=500,
             content={
                 "detail": (
-                    f"{exc.__class__.__name__}: {exc} "
-                    f"(요청: {request.method} {request.url.path}) — 코어 로그에 "
-                    f"자세한 내용이 남았습니다."
+                    "코어에서 처리되지 않은 내부 오류가 발생했습니다. "
+                    f"오류 ID: {error_id} — 코어 로그를 확인한 뒤 다시 시도해 주세요."
                 ),
             },
         )
