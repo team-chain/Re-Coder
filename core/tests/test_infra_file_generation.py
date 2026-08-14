@@ -136,6 +136,92 @@ def test_agent_내부_TypeError가_유료호출을_두번_실행하지_않는다
     assert agent.calls == 1, "TypeError를 구버전 시그니처로 오인해 AI를 두 번 호출했다"
 
 
+@pytest.mark.parametrize(
+    "stack, expected_lines",
+    [
+        ("python-fastapi", ("FROM python:3.11-slim", '"main:app"', "EXPOSE 8000")),
+        ("python-flask", ("FROM python:3.11-slim", "gunicorn", "EXPOSE 8000")),
+        ("node-express", ("FROM node:20-alpine", '"dist/index.js"', "EXPOSE 3000")),
+        ("node-next", ("FROM node:20-alpine", "ENV PORT=3000", "EXPOSE 3000")),
+        ("node-nest", ("FROM node:20-alpine", '"dist/main.js"', "EXPOSE 3000")),
+    ],
+)
+def test_AI_실패_폴백은_필수값이_채워진_빌드가능한_초안이다(
+    client, workspace, monkeypatch, stack, expected_lines,
+):
+    import api.routes.deploy as deploy_routes
+
+    class _AgentThatFails:
+        async def generate_dockerfile(self, *_args, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(deploy_routes, "_get_infra_agent", lambda: _AgentThatFails())
+
+    body = _post(
+        client,
+        "/api/deploy/dockerfile",
+        {"workspace_path": workspace, "stack": stack},
+    ).json()
+
+    content = body["content"]
+    assert "{{" not in content and "}}" not in content, (
+        "템플릿 필수값이 치환되지 않은 Dockerfile을 반환했다"
+    )
+    for line in expected_lines:
+        assert line in content
+
+
+def test_새_템플릿_토큰이_추가돼도_미치환_초안을_반환하지_않는다(
+    workspace, monkeypatch,
+):
+    import api.routes.deploy as deploy_routes
+    from schemas import StackType
+
+    class _RegistryWithUnknownMarker:
+        def render(self, *_args, **_kwargs):
+            return "FROM node:{{FUTURE_NODE_VERSION}}-alpine\n"
+
+    import registry
+    monkeypatch.setattr(registry, "FileTemplateRegistry", _RegistryWithUnknownMarker)
+
+    content, template_id = deploy_routes._dockerfile_from_template(
+        workspace, StackType.NODE_EXPRESS,
+    )
+
+    assert "{{" not in content and "}}" not in content
+    assert content.startswith("# Auto-generated Dockerfile")
+    assert template_id == "builtin-minimal.node-express"
+
+
+def test_AI가_미치환_토큰을_돌려줘도_승인가능한_초안으로_폴백한다(
+    client, workspace, monkeypatch,
+):
+    import api.routes.deploy as deploy_routes
+    from schemas import ApprovalLevel, FileType, InfraFileProposal, RiskLevel
+
+    class _IncompleteAgent:
+        async def generate_dockerfile(self, *_args, **_kwargs):
+            return InfraFileProposal(
+                file_type=FileType.DOCKERFILE,
+                target_path="Dockerfile",
+                content="FROM node:{{NODE_VERSION}}-alpine\n",
+                risk_level=RiskLevel.LOW,
+                approval_level=ApprovalLevel.CONFIRM,
+            )
+
+    monkeypatch.setattr(deploy_routes, "_get_infra_agent", lambda: _IncompleteAgent())
+
+    body = _post(
+        client,
+        "/api/deploy/dockerfile",
+        {"workspace_path": workspace, "stack": "node-express"},
+    ).json()
+
+    assert "{{" not in body["content"] and "}}" not in body["content"]
+    assert "FROM node:20-alpine" in body["content"]
+    assert any("채워지지 않은 템플릿 값" in note for note in body["risk_reasons"])
+
+
 def test_음성대조_AI가_정상이면_폴백_안내가_붙지_않는다(client, workspace, monkeypatch):
     """
     위 두 테스트가 의미 있으려면, 정상일 때는 안내가 **없어야** 한다.

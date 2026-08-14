@@ -1497,19 +1497,65 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id):
 #: 예외가 라우트를 그대로 뚫고 나가 Starlette 이 평문 `Internal Server Error`
 #: 를 반환했고, 사용자에게는 원인도 다음 행동도 없는 빨간 배너만 남았다.
 #: 그래서 두 경우 모두 이 폴백을 쓴다.
-def _dockerfile_from_template(workspace_path: str, stack) -> tuple[str, str]:
-    """(내용, 템플릿 id). 렌더 실패해도 최소 초안을 돌려준다."""
+_DOCKERFILE_TEMPLATE_BY_STACK = {
+    StackType.PYTHON_FASTAPI: "Dockerfile.python-fastapi",
+    StackType.PYTHON_FLASK: "Dockerfile.python-flask",
+    StackType.PYTHON_DJANGO: "Dockerfile.python-flask",
+    StackType.NODE_EXPRESS: "Dockerfile.node-express",
+    StackType.NODE_NEXT: "Dockerfile.node-next",
+    StackType.NODE_NEST: "Dockerfile.node-express",
+}
+
+_UNRESOLVED_FILE_TEMPLATE_RE = re.compile(r"\{\{[^{}\r\n]+\}\}")
+
+
+def _dockerfile_template_defaults(workspace_path: str, stack: StackType) -> dict[str, str]:
+    """Return safe, complete values for every registered Dockerfile marker."""
+    raw_name = Path(workspace_path).expanduser().resolve().name
+    app_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw_name).strip("-.")[:63] or "app"
+    is_node = stack in {
+        StackType.NODE_EXPRESS,
+        StackType.NODE_NEXT,
+        StackType.NODE_NEST,
+    }
+    return {
+        "APP_NAME": app_name,
+        "PYTHON_VERSION": "3.11",
+        "NODE_VERSION": "20",
+        "PORT": "3000" if is_node else "8000",
+        "APP_MODULE": "main",
+        "START_SCRIPT": (
+            "dist/main.js" if stack == StackType.NODE_NEST else "dist/index.js"
+        ),
+    }
+
+
+def _dockerfile_from_template(workspace_path: str, stack: StackType) -> tuple[str, str]:
+    """(내용, 템플릿 id). 미치환 토큰이 있으면 안전한 최소안으로 내린다."""
     from registry import FileTemplateRegistry  # type: ignore
 
-    template_id = f"Dockerfile.{stack.value}"
+    template_id = _DOCKERFILE_TEMPLATE_BY_STACK.get(
+        stack, f"Dockerfile.{stack.value}",
+    )
     try:
         content = FileTemplateRegistry().render(
-            template_id, {"WORKSPACE": workspace_path},
+            template_id,
+            _dockerfile_template_defaults(workspace_path, stack),
         )
-    except Exception:
+        unresolved = _UNRESOLVED_FILE_TEMPLATE_RE.search(content)
+        if unresolved:
+            raise ValueError(
+                f"unresolved file-template marker: {unresolved.group(0)}"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Dockerfile 템플릿 렌더 실패, 최소안 사용: %s", exc)
+        template_id = f"builtin-minimal.{stack.value}"
         content = (
             f"# Auto-generated Dockerfile for {stack.value}\n"
-            "FROM python:3.11-slim\nWORKDIR /app\nCOPY . .\n"
+            "FROM alpine:3.20\n"
+            "WORKDIR /app\n"
+            "COPY . .\n"
+            "CMD [\"sh\", \"-c\", \"echo 'Set the application start command'; sleep 3600\"]\n"
         )
     return content, template_id
 
@@ -1595,6 +1641,22 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
             proposal, ai_note = None, _ai_unavailable_note(exc)
     else:
         ai_note = _ai_unavailable_note(None)
+
+    # LLM이 일부 값만 반환하면 Registry가 나머지 {{TOKEN}}을 그대로 둔다.
+    # AI 경로도 승인 가능한 완성본만 통과시키고, 불완전하면 검증된 폴백으로
+    # 내린다.
+    if proposal is not None:
+        unresolved = _UNRESOLVED_FILE_TEMPLATE_RE.search(proposal.content)
+        if unresolved:
+            logger.warning(
+                "Dockerfile AI 결과에 미치환 토큰이 있어 템플릿 폴백: %s",
+                unresolved.group(0),
+            )
+            proposal = None
+            ai_note = (
+                "AI 맞춤 생성 결과에 채워지지 않은 템플릿 값이 있어 기본 "
+                "템플릿으로 다시 만들었습니다. 내용을 검토한 뒤 저장해 주세요."
+            )
 
     if proposal is None:
         content, template_id = _dockerfile_from_template(request.workspace_path, stack)
