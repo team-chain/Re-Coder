@@ -141,6 +141,7 @@ def test_agent_내부_TypeError가_유료호출을_두번_실행하지_않는다
     [
         ("python-fastapi", ("FROM python:3.11-slim", '"main:app"', "EXPOSE 8000")),
         ("python-flask", ("FROM python:3.11-slim", "gunicorn", "EXPOSE 5000")),
+        ("python-django", ("FROM python:3.11-slim", '"config.wsgi:application"', "EXPOSE 8000")),
         ("node-express", ("FROM node:20-alpine", '"index.js"', "EXPOSE 3000")),
         ("node-next", ("FROM node:20-alpine", "ENV PORT=3000", "EXPOSE 3000")),
         ("node-nest", ("FROM node:20-alpine", '"dist/main.js"', "EXPOSE 3000")),
@@ -171,11 +172,10 @@ def test_AI_실패_폴백은_필수값이_채워진_빌드가능한_초안이다
         assert line in content
 
 
-def test_새_템플릿_토큰이_추가돼도_미치환_초안을_반환하지_않는다(
-    workspace, monkeypatch,
+def test_새_템플릿_토큰이_추가되면_실행불가_초안_대신_명시적으로_실패한다(
+    client, workspace, monkeypatch,
 ):
     import api.routes.deploy as deploy_routes
-    from schemas import StackType
 
     class _RegistryWithUnknownMarker:
         def render(self, *_args, **_kwargs):
@@ -183,14 +183,66 @@ def test_새_템플릿_토큰이_추가돼도_미치환_초안을_반환하지_�
 
     import registry
     monkeypatch.setattr(registry, "FileTemplateRegistry", _RegistryWithUnknownMarker)
+    monkeypatch.setattr(deploy_routes, "_get_infra_agent", lambda: None)
 
-    content, template_id = deploy_routes._dockerfile_from_template(
-        workspace, StackType.NODE_EXPRESS,
+    response = _post(
+        client,
+        "/api/deploy/dockerfile",
+        {"workspace_path": workspace, "stack": "node-express"},
     )
 
-    assert "{{" not in content and "}}" not in content
-    assert content.startswith("# Auto-generated Dockerfile")
-    assert template_id == "builtin-minimal.node-express"
+    assert response.status_code == 503
+    assert "템플릿 설치 상태" in response.json()["detail"]
+    assert "FUTURE_NODE_VERSION" not in response.text
+
+
+@pytest.mark.parametrize(
+    "marker, expected_stack",
+    [
+        (None, "unknown"),
+        ("go.mod", "go"),
+        ("pom.xml", "java-spring"),
+        ("Gemfile", "ruby-rails"),
+    ],
+)
+def test_AI가_없고_검증된_템플릿도_없는_자동감지_스택은_가짜_초안을_거부한다(
+    client, tmp_path, monkeypatch, marker, expected_stack,
+):
+    import api.routes.deploy as deploy_routes
+
+    if marker is not None:
+        (tmp_path / marker).write_text("module example\n", encoding="utf-8")
+    monkeypatch.setattr(deploy_routes, "_get_infra_agent", lambda: None)
+
+    response = _post(
+        client,
+        "/api/deploy/dockerfile",
+        {"workspace_path": str(tmp_path)},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert expected_stack in detail
+    assert "AI Ready" in detail
+    assert "sleep 3600" not in response.text
+
+
+@pytest.mark.parametrize("stack", ["static", "custom"])
+def test_AI가_없는_명시적_지원불가_스택도_가짜_초안을_거부한다(
+    client, tmp_path, monkeypatch, stack,
+):
+    import api.routes.deploy as deploy_routes
+
+    monkeypatch.setattr(deploy_routes, "_get_infra_agent", lambda: None)
+
+    response = _post(
+        client,
+        "/api/deploy/dockerfile",
+        {"workspace_path": str(tmp_path), "stack": stack},
+    )
+
+    assert response.status_code == 422
+    assert stack in response.json()["detail"]
 
 
 def test_AI가_미치환_토큰을_돌려줘도_승인가능한_초안으로_폴백한다(

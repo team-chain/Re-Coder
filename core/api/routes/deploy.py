@@ -1514,6 +1514,14 @@ _SAFE_PYTHON_TARGET_RE = re.compile(
 )
 
 
+class _UnsupportedDockerfileFallback(ValueError):
+    """AI 없이 검증된 Dockerfile을 만들 수 없는 스택."""
+
+
+class _DockerfileTemplateRenderError(RuntimeError):
+    """지원 스택의 로컬 템플릿이 완전한 Dockerfile을 만들지 못한 경우."""
+
+
 def _safe_node_entrypoint(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1732,12 +1740,21 @@ def _dockerfile_from_template(
     stack: StackType,
     project: object | None = None,
 ) -> tuple[str, str]:
-    """(내용, 템플릿 id). 미치환 토큰이 있으면 안전한 최소안으로 내린다."""
+    """검증된 로컬 템플릿으로 완전한 Dockerfile을 렌더한다.
+
+    실행 명령을 모르는 스택이나 손상된 템플릿을 `sleep` 컨테이너로
+    위장하지 않는다. 호출자는 명시적 오류로 사용자에게 알려야 한다.
+    """
     from registry import FileTemplateRegistry  # type: ignore
 
-    template_id = _DOCKERFILE_TEMPLATE_BY_STACK.get(
-        stack, f"Dockerfile.{stack.value}",
-    )
+    template_id = _DOCKERFILE_TEMPLATE_BY_STACK.get(stack)
+    if template_id is None:
+        raise _UnsupportedDockerfileFallback(
+            f"{stack.value} 스택은 AI 없이 검증된 Dockerfile 폴백을 제공하지 "
+            "않습니다. AI Ready를 복구하거나 프로젝트에 Dockerfile을 직접 "
+            "추가한 뒤 다시 시도하세요."
+        )
+
     try:
         content = FileTemplateRegistry().render(
             template_id,
@@ -1749,15 +1766,10 @@ def _dockerfile_from_template(
                 f"unresolved file-template marker: {unresolved.group(0)}"
             )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Dockerfile 템플릿 렌더 실패, 최소안 사용: %s", exc)
-        template_id = f"builtin-minimal.{stack.value}"
-        content = (
-            f"# Auto-generated Dockerfile for {stack.value}\n"
-            "FROM alpine:3.20\n"
-            "WORKDIR /app\n"
-            "COPY . .\n"
-            "CMD [\"sh\", \"-c\", \"echo 'Set the application start command'; sleep 3600\"]\n"
-        )
+        logger.error("Dockerfile 템플릿 렌더 실패: %s", exc)
+        raise _DockerfileTemplateRenderError(
+            f"{stack.value} 기본 Dockerfile 템플릿을 완전하게 렌더하지 못했습니다."
+        ) from exc
     return content, template_id
 
 
@@ -1870,9 +1882,20 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
             )
 
     if proposal is None:
-        content, template_id = _dockerfile_from_template(
-            request.workspace_path, stack, project,
-        )
+        try:
+            content, template_id = _dockerfile_from_template(
+                request.workspace_path, stack, project,
+            )
+        except _UnsupportedDockerfileFallback as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except _DockerfileTemplateRenderError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "검증된 기본 Dockerfile 템플릿을 생성하지 못했습니다. "
+                    "ReCoder 템플릿 설치 상태를 확인한 뒤 다시 시도하세요."
+                ),
+            ) from exc
         proposal = InfraFileProposal(
             file_type=FileType.DOCKERFILE,
             target_path="Dockerfile",
