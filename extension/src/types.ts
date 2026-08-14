@@ -245,6 +245,8 @@ export interface ResponseProposal {
   risk_level: RiskLevel;
   risk_reasons: string[];
   approval_level: ApprovalLevel;
+  /** DOUBLE_CONFIRM 서버 발급 일회용 토큰. 두 번째 인증 주체가 승인 시 제시. */
+  confirm_token?: string;
 }
 
 // ---------------------------------------------------------------------------

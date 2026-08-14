@@ -121,7 +121,8 @@ export class ApiClient {
         path: string,
         body?: unknown,
         _retried = false,
-        timeoutMs = 30000
+        timeoutMs = 30000,
+        extraHeaders: Record<string, string> = {},
     ): Promise<ApiResponse<T>> {
         // 토큰이 비어있으면 runtime.json 에서 즉시 refresh.
         // ensureRunning() 완료 전 PollingService 가 호출하는 race condition 방지.
@@ -144,6 +145,7 @@ export class ApiClient {
         const url = `http://127.0.0.1:${port}${path}`;
 
         const headers: Record<string, string> = {
+            ...extraHeaders,
             'Content-Type': 'application/json',
             'X-Session-Token': token,
         };
@@ -168,7 +170,7 @@ export class ApiClient {
                 // 다시 읽어와도 미들웨어가 다른 이유로 401/403 을 냈을 가능성 차단).
                 if ((res.status === 401 || res.status === 403) && !_retried) {
                     try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
-                    return this.request<T>(method, path, body, true, timeoutMs);
+                    return this.request<T>(method, path, body, true, timeoutMs, extraHeaders);
                 }
                 let errorText = '';
                 try { errorText = await res.text(); } catch { errorText = `HTTP ${res.status}`; }
@@ -354,7 +356,7 @@ export class ApiClient {
             'POST',
             `/api/analyze/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? (resp.success ? 'applied' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     async listProposals(): Promise<PatchProposal[]> {
@@ -376,7 +378,7 @@ export class ApiClient {
             'POST',
             `/api/deploy/dockerfile/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? (resp.success ? 'saved' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     /**
@@ -403,7 +405,7 @@ export class ApiClient {
             'POST',
             `/api/deploy/github-actions/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? (resp.success ? 'saved' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // ── GitHub 인증 (VS Code OAuth → Core) ──────────────────────────────
@@ -486,7 +488,7 @@ export class ApiClient {
         const resp = await this.request<{ status: string }>(
             'POST', '/api/deploy/rollback', { deployment_id: deploymentId }
         );
-        return { status: resp.data?.status ?? (resp.success ? 'rolled_back' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // -----------------------------------------------------------------------
@@ -502,10 +504,17 @@ export class ApiClient {
         return resp.success && resp.data ? resp.data : [];
     }
 
-    async analyzeIncident(alertId: string, extraContext?: string): Promise<ResponseProposal> {
+    async analyzeIncident(
+        alertId: string,
+        actorToken: string,
+        extraContext?: string,
+    ): Promise<ResponseProposal> {
         const resp = await this.request<ResponseProposal>(
             'POST', '/api/ops/analyze',
-            { alert_id: alertId, extra_context: extraContext }
+            { alert_id: alertId, extra_context: extraContext },
+            false,
+            30000,
+            { 'X-Ops-Actor-Token': actorToken },
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '인시던트 분석 실패'); }
         return resp.data;
@@ -517,12 +526,24 @@ export class ApiClient {
         sshHost?: string,
         sshUser?: string,
         sshKeyPath?: string,
+        actorToken?: string,
+        confirmToken?: string,
     ): Promise<{ status: string }> {
         const resp = await this.request<{ status: string }>(
             'POST', '/api/ops/approve',
-            { proposal_id: proposalId, approved, ssh_host: sshHost, ssh_user: sshUser, ssh_key_path: sshKeyPath }
+            {
+                proposal_id: proposalId,
+                approved,
+                ssh_host: sshHost,
+                ssh_user: sshUser,
+                ssh_key_path: sshKeyPath,
+                confirm_token: confirmToken,
+            },
+            false,
+            30000,
+            actorToken ? { 'X-Ops-Actor-Token': actorToken } : {},
         );
-        return { status: resp.data?.status ?? (resp.success ? 'executed' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // -----------------------------------------------------------------------

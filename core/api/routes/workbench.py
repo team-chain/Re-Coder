@@ -277,12 +277,17 @@ async def trigger_preflight(req: PreflightRunRequest) -> dict:
             contract = build_default_contract(_detect_contract_stack(ws))
         runner = StaticPreflightRunner(str(ws), contract, project_id=req.project_id)
         run = runner.run_sync()
-    except Exception as exc:  # pragma: no cover — preflight 모듈 자체가 없을 때만 graceful
-        log.warning("Preflight 실행 실패, mock 으로 대체: %s", exc)
+    except Exception as exc:
+        # **fail-closed.** 예전엔 여기서 status=PASSED, score=85 mock 으로
+        # 대체했다 — 잘못된 recoder.yml 로 load_contract 가 던지기만 해도
+        # 검사를 한 건도 안 돌린 채 CI 게이트(risk_score >= 임계)가 초록으로
+        # 통과했다. 검사를 못 돌렸으면 통과가 아니라 ERROR 다. 건강 점수는
+        # 최저(0), 파생 risk_score는 최대(100)로 두어 배포를 막는다.
+        log.error("Preflight 실행 실패 — fail-closed(BLOCKED)로 처리: %s", exc)
         run = PreflightRun(
             project_id=req.project_id,
-            status=PreflightStatus.PASSED,
-            score=85,
+            status=PreflightStatus.BLOCKED,
+            score=0,
         )
 
     save_preflight_run(db, run)

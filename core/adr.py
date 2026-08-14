@@ -17,12 +17,119 @@ ADR 은 생성 코드와 함께 ops 로 반환되어 확장이 한 번에 기록
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
+logger = logging.getLogger(__name__)
+
 ADR_DIR = "docs/adr"
+
+#: ADR 번호 예약 장부의 경로를 덮는 환경변수. `RECODER_ECS_STORE` 와 같은
+#: 규약이며, 테스트는 `tests/conftest.py` 에서 임시 경로로 덮는다.
+ENV_ADR_STORE = "RECODER_ADR_STORE"
+
+#: [테스트 훅] 장부 잠금을 쥔 채 읽기-수정-쓰기 사이에서 이만큼 잔다(초).
+#: 경합 창을 인위적으로 넓혀, 프로세스 간 잠금이 실제로 직렬화하는지를
+#: 결정적으로 검증하기 위한 것이다. 운영에선 비어 있고 아무 일도 안 한다.
+ENV_ADR_TEST_HOLD = "RECODER_ADR_TEST_HOLD"
+
+#: 장부 읽기-수정-쓰기를 감싸는 **스레드** 잠금 (1단계).
+#:
+#: 같은 프로세스 안의 동시 요청을 직렬화한다. 프로세스 **사이**는
+#: `_ledger_lock()` 의 OS 파일 잠금이 맡는다 — `singleton.py` 가 Core 를
+#: 하나로 강제하긴 하지만, `acquire_lock()` 이 실패해도 서빙을 계속하는
+#: 경로가 있어서 같은 워크스페이스를 두 Core 가 보는 상황이 실제로 있다.
+#: 그때 프로세스 잠금이 없으면 둘 다 같은 high-water 를 읽고 같은 번호를
+#: 발급해, 장부가 막으려던 덮어쓰기가 그대로 재발한다.
+_reservation_lock = threading.Lock()
+
+
+if os.name == "nt":  # pragma: no cover — Windows 전용 경로 (CI 는 Linux)
+    import msvcrt
+
+    def _os_lock(fp) -> None:
+        # LK_LOCK 은 약 10초 재시도 후 OSError 를 낸다 — 짧은 임계구역이므로
+        # 그 안에 풀리는 것이 정상이고, 안 풀리면 재시도를 계속한다.
+        while True:
+            try:
+                fp.seek(0)
+                msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                continue
+
+    def _os_unlock(fp) -> None:
+        fp.seek(0)
+        msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _os_lock(fp) -> None:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+
+    def _os_unlock(fp) -> None:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _ledger_lock():
+    """장부 파일 옆 `.lock` 에 OS 수준 배타 잠금 (2단계 — 프로세스 사이).
+
+    왜 파일 잠금인가: `threading.Lock` 은 프로세스 경계를 넘지 못한다.
+    두 Core 가 같은 워크스페이스의 ADR 을 동시에 발급하면 둘 다 같은
+    high-water 를 읽고 같은 번호를 돌려줘, 두 제안을 모두 적용했을 때
+    한쪽 ADR 이 덮어써진다. fcntl/msvcrt 잠금은 프로세스가 죽으면 OS 가
+    자동으로 회수하므로 stale lock 도 남지 않는다.
+
+    잠금을 얻지 못하는 환경(이상한 파일시스템 등)에서는 경고를 남기고
+    스레드 잠금만으로 진행한다 — 장부는 개선 장치이고, **새로 들인 의존이
+    ADR 생성 자체를 실패시키는 새 실패 모드를 만들면 안 된다**는 원칙은
+    여기에도 그대로 적용된다. 그 경우 동작은 이 수정 이전과 같아질 뿐이다.
+    """
+    lock_path = _reservation_store().with_name(
+        _reservation_store().name + ".lock")
+    fp = None
+    locked = False
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fp = open(lock_path, "a+b")
+        _os_lock(fp)
+        locked = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "ADR 장부의 프로세스 간 잠금을 얻지 못했습니다(%s) — "
+            "프로세스 내 잠금만으로 진행합니다: %s", lock_path, exc)
+    try:
+        yield locked
+    finally:
+        if fp is not None:
+            if locked:
+                try:
+                    _os_unlock(fp)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                fp.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+#: 프로세스 안에서만 유지하는 2차 방어선. **디스크 장부가 실패해도**
+#: 이 Core 가 살아 있는 동안은 같은 번호를 두 번 주지 않는다.
+#:
+#: 필요한 이유: Windows 에서 `os.replace` 는 대상 파일이 열려 있으면
+#: `PermissionError` 를 낸다(백신 실시간 검사·OneDrive 동기화·편집기).
+#: 그러면 장부가 한 번도 갱신되지 않아 발급이 계속 1, 1, 1 로 나오고,
+#: 이 장치가 막으려던 덮어쓰기 사고가 사용자 모르게 그대로 재발한다.
+#: 데모용 워크스페이스가 OneDrive 폴더 아래에 있으면 실제로 밟는 경로다.
+_memory_reservations: dict[str, int] = {}
 
 # 내부용 예약 결정 id 접두사.
 # FR-02-05(항상 선택지·사람 승인)를 지키려면 설계 결정이 없는 요청에도
@@ -219,8 +326,8 @@ def adr_output_dir(root: Path, target_folder: str = "") -> Path:
     return base / ADR_DIR
 
 
-def next_adr_index(root: Path, target_folder: str = "") -> int:
-    """기존 ADR-NNN 파일을 스캔해 다음 번호를 돌려준다."""
+def _scanned_max_index(root: Path, target_folder: str = "") -> int:
+    """디스크에 **이미 기록된** ADR 중 가장 큰 번호. 없으면 0."""
     adr_dir = adr_output_dir(root, target_folder)
     max_n = 0
     if adr_dir.is_dir():
@@ -228,7 +335,178 @@ def next_adr_index(root: Path, target_folder: str = "") -> int:
             m = re.match(r"ADR-(\d+)", p.name)
             if m:
                 max_n = max(max_n, int(m.group(1)))
-    return max_n + 1
+    return max_n
+
+
+# ── 번호 예약 장부 ────────────────────────────────────────────────────
+#
+# **왜 장부가 필요한가.**
+#
+# 이 프로젝트의 신뢰 모델상 Core 는 워크스페이스에 직접 쓰지 않는다. 결정을
+# ADR ops 로 만들어 돌려주면 **사용자가 승인한 뒤** 확장이 파일을 쓴다(D6).
+# 그래서 "번호를 정하는 시점"과 "파일이 생기는 시점" 사이에 사람의 승인이
+# 끼어들고, 그 사이에 다음 요청이 들어올 수 있다.
+#
+#   1. 요청 A 생성 → 디스크에 ADR 0개 → ADR-001 로 만들어 제안 (파일 없음)
+#   2. 요청 B 생성 → 디스크는 **여전히** 0개 → 또 ADR-001 로 제안
+#   3. A 승인 → ADR-001 기록
+#   4. B 승인 → ADR-001 **덮어씀** → A 의 결정 기록이 사라진다
+#
+# 디스크만 스캔하면 이 경로를 절대 막을 수 없다. 아직 존재하지 않는 파일이
+# 근거이기 때문이다. 그래서 **발급한 번호를 따로 적어 둔다.**
+#
+# 번호에 구멍이 생기는 것은 허용한다 — 사용자가 제안을 버리면 그 번호는
+# 비게 된다. 카드의 완료 기준은 "번호가 연속"이 아니라 **"ADR 유실 0"** 이고,
+# 둘 중 하나를 골라야 한다면 구멍이 덮어쓰기보다 압도적으로 낫다.
+
+
+def _reservation_store() -> Path:
+    """장부 파일 경로. 호출할 때마다 환경변수를 다시 읽는다.
+
+    임포트 시점에 고정하면 테스트가 `monkeypatch.setenv` 로 덮을 수 없다
+    (`sbom.py` 가 그 형태라 같은 실수를 반복하지 않는다).
+    """
+    raw = (os.environ.get(ENV_ADR_STORE) or "").strip()
+    if raw:
+        return Path(raw)
+    home = (os.environ.get("RECODER_HOME") or "").strip()
+    base = Path(home) if home else (Path.home() / ".recoder")
+    return base / "adr_reservations.json"
+
+
+def _store_key(adr_dir: Path) -> str:
+    """장부의 키. 워크스페이스마다 번호가 독립이어야 한다.
+
+    `normcase` 를 거치는 이유는 Windows 다 — 같은 폴더가 `C:\\proj` 와
+    `c:\\proj` 로 들어오면 키가 갈라져 번호가 겹친다.
+    """
+    try:
+        resolved = str(adr_dir.resolve())
+    except Exception:  # noqa: BLE001 — 존재하지 않는 경로 등
+        resolved = str(adr_dir)
+    return os.path.normcase(resolved)
+
+
+def _read_reservations() -> dict:
+    """장부 전체. 읽지 못하면 **빈 장부로 간주하고 계속 간다.**
+
+    장부가 깨졌다고 ADR 생성 자체를 실패시키지는 않는다. 그 경우 동작은
+    장부가 없던 예전과 같아질 뿐이고, 그 사실은 로그로 남긴다.
+    """
+    path = _reservation_store()
+    try:
+        with path.open(encoding="utf-8") as fp:
+            data = json.load(fp)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ADR 예약 장부를 읽지 못했습니다(%s): %s", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_reservations(data: dict) -> bool:
+    """장부 저장. 임시 파일에 쓴 뒤 원자적으로 교체한다.
+
+    바로 덮어쓰면 쓰는 도중 죽었을 때 **잘린 JSON** 이 남고, 그다음부터
+    장부를 못 읽어 예약이 통째로 사라진다.
+    """
+    path = _reservation_store()
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as fp:
+            json.dump(data, fp, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ADR 예약 장부를 저장하지 못했습니다(%s): %s", path, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def reserved_adr_index(root: Path, target_folder: str = "") -> int:
+    """이 워크스페이스에서 **이미 발급한** 가장 큰 번호. 없으면 0.
+
+    디스크 장부와 프로세스 안 기억 중 **큰 쪽**을 쓴다. 장부 저장이 막혀도
+    이 Core 가 살아 있는 동안은 번호가 겹치지 않게 하기 위해서다.
+    """
+    key = _store_key(adr_output_dir(root, target_folder))
+    raw = _read_reservations().get(key)
+    try:
+        on_disk = max(0, int(raw))
+    except (TypeError, ValueError):
+        on_disk = 0
+    return max(on_disk, _memory_reservations.get(key, 0))
+
+
+def next_adr_index(root: Path, target_folder: str = "") -> int:
+    """다음에 쓸 ADR 번호.
+
+    디스크에 기록된 파일과 **아직 승인되지 않은 발급분**을 모두 넘어선
+    번호를 돌려준다. 예약하지는 않는다 — 조회 전용이다.
+    """
+    return max(
+        _scanned_max_index(root, target_folder),
+        reserved_adr_index(root, target_folder),
+    ) + 1
+
+
+def allocate_adr_indexes(root: Path, target_folder: str = "", count: int = 1) -> int:
+    """`count` 개의 연속된 번호를 예약하고 **시작 번호**를 돌려준다.
+
+    장부에 쓰지 못해도 번호는 정상적으로 돌려준다. 그 경우 동작이 장부가
+    없던 예전으로 되돌아갈 뿐이며, 발급을 실패시켜 ADR 을 아예 못 만들게
+    하는 것보다 낫다.
+    """
+    if count <= 0:
+        return next_adr_index(root, target_folder)
+
+    # 스캔은 감싸지 않는다. 디스크에 있는 파일을 못 읽었는데 1 부터 다시
+    # 주면 **기존 기록을 덮어쓴다** — 장부가 막으려던 바로 그 사고다.
+    # 여기서 터지면 터지는 게 맞다.
+    scanned = _scanned_max_index(root, target_folder)
+
+    # 장부는 개선 장치다. **새로 들인 의존이 새 실패 모드를 만들면 안 된다.**
+    # 장부 계층에서 무슨 일이 나든 번호는 정상적으로 발급하고, 그 경우
+    # 동작이 장부가 없던 예전으로 되돌아갈 뿐이게 한다.
+    key = _store_key(adr_output_dir(root, target_folder))
+    # 잠금 순서는 항상 스레드 → 파일. 순서가 일정해야 교착이 없다.
+    with _reservation_lock, _ledger_lock():
+        try:
+            data = _read_reservations()
+            reserved = max(0, int(data.get(key, 0) or 0))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ADR 예약 장부를 읽지 못해 파일 스캔만으로 진행합니다: %s", exc)
+            data, reserved = {}, 0
+
+        # [테스트 훅] 경합 창을 넓힌다 — 운영에선 환경변수가 없어 0.
+        hold_raw = os.environ.get(ENV_ADR_TEST_HOLD, "")
+        if hold_raw:
+            try:
+                time.sleep(min(2.0, float(hold_raw)))
+            except ValueError:
+                pass
+
+        start = max(scanned, reserved, _memory_reservations.get(key, 0)) + 1
+        high_water = start + count - 1
+
+        # **기억부터 올린다.** 디스크 쓰기가 실패해도 이 프로세스 안에서는
+        # 번호가 절대 겹치지 않아야 한다.
+        _memory_reservations[key] = high_water
+
+        try:
+            data[key] = high_water
+            _write_reservations(data)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "ADR 예약 장부를 갱신하지 못했습니다 — Core 를 다시 켜면 승인 전 "
+                "제안끼리 번호가 겹칠 수 있습니다: %s", exc,
+            )
+    return start
 
 
 def build_adr_markdown(index: int, decision: NormalizedDecision, instruction: str) -> str:
@@ -292,9 +570,13 @@ def build_adr_ops(
 
     경로는 워크스페이스 상대(`docs/adr/...`)로 둔다. 확장이 `target_folder`
     를 붙여 기록하므로, 번호 스캔에도 동일한 `target_folder` 를 넘긴다.
+
+    번호는 **여기서 예약한다.** 조회(`next_adr_index`)로 끝내면, 승인 전인
+    제안이 여럿 있을 때 모두 같은 번호를 받아 나중에 적용한 것이 앞의
+    기록을 덮어쓴다.
     """
     ops: list[dict] = []
-    n = next_adr_index(root, target_folder)
+    n = allocate_adr_indexes(root, target_folder, len(decisions))
     for d in decisions:
         slug = slugify(d.get("id") or d.get("question") or "")
         ops.append({

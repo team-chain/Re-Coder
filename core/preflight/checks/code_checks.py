@@ -11,6 +11,7 @@ AST 기반 탐지는 First Run Wizard (D 영역) 의 본 작업. 본 검사는 �
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -48,11 +49,71 @@ _NODE_FILES_GLOB = ("*.js", "*.ts", "*.mjs")
 
 #: 진입점 후보 파일들. 스택별로 우선순위.
 _ENTRYPOINT_CANDIDATES: dict[ContractStack, tuple[str, ...]] = {
-    ContractStack.PYTHON_FASTAPI: ("main.py", "app.py", "app/main.py", "src/main.py"),
-    ContractStack.PYTHON_FLASK:   ("app.py", "main.py", "wsgi.py", "src/app.py"),
-    ContractStack.NODE_EXPRESS:   ("index.js", "server.js", "app.js", "src/index.js", "src/server.js"),
-    ContractStack.NODE_NEXT:      ("next.config.js", "next.config.mjs", "pages/_app.js", "pages/_app.tsx", "app/page.tsx"),
-    ContractStack.CUSTOM:         ("main.py", "app.py", "index.js", "server.js", "main.go", "main.rs"),
+    ContractStack.PYTHON_FASTAPI: ("main.py", "app.py", "app/main.py", "src/main.py", "src/app.py"),
+    ContractStack.PYTHON_FLASK:   ("app.py", "main.py", "wsgi.py", "src/app.py", "src/main.py"),
+    #: NODE_EXPRESS 는 "Next 가 아닌 모든 Node 프로젝트"의 폴백이라 NestJS·
+    #: Fastify·Koa 도 여기로 온다. 그 생태계는 **TypeScript 진입점이 기본**이다
+    #: (NestJS 는 `src/main.ts`). `.js` 만 두면 서버로 판정해 놓고 진입점을
+    #: 못 찾아 막는 막다른 길이 된다.
+    ContractStack.NODE_EXPRESS: (
+        "index.js", "server.js", "app.js", "src/index.js", "src/server.js", "src/app.js",
+        "src/main.ts", "src/index.ts", "src/app.ts", "src/server.ts",
+        "main.ts", "index.ts", "server.ts", "app.ts",
+        "dist/main.js", "dist/index.js", "dist/server.js",
+    ),
+    #: Next 는 **JS 와 TS 가 동등한 관례**다. `app/page.js`·`pages/index.jsx`
+    #: 만 있는 순수 JS App Router/Pages Router 프로젝트도 유효한 앱이고,
+    #: `src/` 아래로 옮기는 배치도 공식 지원이다. `.tsx` 하나만 두면 감지는
+    #: Next 라고 해놓고 진입점을 못 찾아 배포 대상 선택이 통째로 막힌다.
+    ContractStack.NODE_NEXT: (
+        "next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs",
+        # App Router — page 파일 (js/jsx/tsx 전부 관례)
+        "app/page.tsx", "app/page.jsx", "app/page.js",
+        "src/app/page.tsx", "src/app/page.jsx", "src/app/page.js",
+        # Pages Router — _app 과 index 둘 다 (한쪽만 있는 프로젝트가 흔하다)
+        "pages/_app.js", "pages/_app.jsx", "pages/_app.tsx",
+        "pages/index.js", "pages/index.jsx", "pages/index.tsx",
+        "src/pages/index.js", "src/pages/index.jsx", "src/pages/index.tsx",
+    ),
+    #: CUSTOM 은 "위 넷 중 어디에도 안 맞는 전부"다. 그래서 후보 목록이
+    #: **배포 대상 감지기가 서버로 인정하는 런타임을 전부 덮어야** 한다.
+    #:
+    #: 안 그러면 "Spring 빌드를 찾았습니다 → 서버형"이라고 해놓고 바로
+    #: 다음 단계에서 "진입점을 못 찾겠습니다"로 막는다. 확장은 `blocked` 가
+    #: 참이면 배포 대상 선택을 통째로 비활성화하므로 **사용자가 아무것도
+    #: 할 수 없는 막다른 길**이 된다.
+    #:
+    #: 실측으로 Spring(maven/gradle)·Rails·PHP·Procfile·docker-compose
+    #: 6가지가 그 상태였다. Go 는 아래 내용 프로브가 package main 과
+    #: func main 을 함께 확인한다.
+    #:
+    #: `check_app_entrypoint` 은 `exists()` 로 보므로 **폴더도 후보가 된다**
+    #: (`src/main/java` 처럼 진입점이 패키지 트리 깊숙이 있는 경우).
+    ContractStack.CUSTOM: (
+        # 파이썬·Node (스택 감지가 실패했을 때의 폴백)
+        #
+        # `src/main.py`·`src/app.py`·`app/main.py` 가 꼭 있어야 하는 이유:
+        # 감지기는 Starlette·Sanic 같은 비 FastAPI/Flask 파이썬 서버도
+        # 서버로 인정하는데, 그 계약 스택은 CUSTOM 이다. 파이썬은 내용
+        # 프로브가 없으므로 **이 목록이 파이썬 진입점의 전부**다 — src 배치를
+        # 빼면 "서버를 찾았습니다" 해놓고 진입점을 못 찾아 배포 대상 선택이
+        # 통째로 막힌다.
+        "main.py", "app.py", "src/main.py", "src/app.py", "app/main.py",
+        "index.js", "server.js", "app.js",
+        "src/index.js", "src/index.ts", "src/main.ts", "src/app.js", "src/app.ts",
+        # Django — `_detect_preflight_contract_stack` 이 FastAPI/Flask 만
+        # 구분하므로 Django 는 CUSTOM 으로 온다. 관례 진입점을 넣어 둔다.
+        "manage.py", "wsgi.py", "asgi.py", "config/wsgi.py", "src/manage.py",
+        # Rust. Go main.go 는 파일명만으로 실행 가능성을 증명할 수 없으므로
+        # 아래 package main + func main 내용 프로브로만 인정한다.
+        "main.rs", "src/main.rs",
+        # Ruby
+        "config.ru", "app.rb", "main.rb",
+        # PHP
+        "public/index.php", "index.php", "artisan",
+        # 컨테이너·프로세스 선언 — 시작 방법이 여기 적혀 있다.
+        "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "Procfile",
+    ),
 }
 
 
@@ -239,6 +300,263 @@ def check_missing_health_endpoint(
 # ---------------------------------------------------------------------------
 
 
+#: 파일 이름만으로는 알 수 없어 **내용을 봐야** 하는 진입점.
+#:
+#: Java/Kotlin 은 진입점이 `src/main/java/com/x/App.java` 처럼 패키지 트리
+#: 깊숙이 있고 이름도 제각각이다. 폴더 존재로 대신하면 라이브러리도 통과하므로
+#: 실행 가능한 main 선언을 직접 찾는다.
+_EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str]"], ...] = (
+    (
+        "java",
+        ("src/main/java/**/*.java", "src/*/src/main/java/**/*.java", "**/*.java"),
+        # Java launcher가 호출할 수 있는 public static void main(String[])
+        # 또는 동등한 String... 서명만 인정한다. 수식어 순서는 자유이므로
+        # lookahead로 public/static 존재를 확인하고, 세미콜론·괄호·중괄호를
+        # 넘지 않는 수식어 구간과 정확한 단일 String 배열 인자를 검증한다.
+        re.compile(
+            r"""
+            \b
+            (?=[^;{}()]*\bpublic\b)
+            (?=[^;{}()]*\bstatic\b)
+            (?:(?:public|static|final|synchronized|strictfp)\s+)*
+            void\s+main\s*\(\s*
+            (?:final\s+)?
+            (?:
+                (?:java\.lang\.)?String\s*\[\s*\]\s+[\w$]+
+              | (?:java\.lang\.)?String\s*\.\.\.\s*[\w$]+
+              | (?:java\.lang\.)?String\s+[\w$]+\s*\[\s*\]
+            )
+            \s*\)
+            """,
+            re.X,
+        ),
+    ),
+    (
+        "kotlin",
+        ("src/main/kotlin/**/*.kt", "**/*.kt"),
+        re.compile(r"^\s*(?:@\w+\s+)*(?:suspend\s+)?fun\s+main\s*\(", re.M),
+    ),
+    (
+        "go",
+        ("cmd/**/*.go", "**/*.go"),
+        # Go executable entrypoints require both a package-main declaration and
+        # func main in the same file. A helper named main in package generator
+        # is not buildable as an executable.
+        re.compile(
+            r"\A\s*package\s+main\b[\s\S]*?^\s*func\s+main\s*\(",
+            re.M,
+        ),
+    ),
+)
+
+#: 프로브를 **켜 주는 매니페스트**. 워크스페이스 루트에 이 파일이 있어야만
+#: 해당 언어의 프로브가 돈다.
+#:
+#: 이게 없으면 프로브는 "아무 언어든 실행 가능해 보이는 첫 파일"을 진입점으로
+#: 받아들인다. 실측 시나리오: Maven 프로젝트에 Java main 이 없는데
+#: `tools/generator.go` 에 `func main()` 이 있으면 — 그 Go 유틸을 앱의
+#: 진입점이라고 판정해 버린다. 그러면 뜨지 않는 Java 이미지가
+#: APP_ENTRYPOINT_NOT_FOUND 를 잃고 배포 준비 완료로 보고된다.
+#:
+#: 매니페스트는 "이 워크스페이스가 무슨 런타임이라고 주장하는가"의 근거다.
+#: `pom.xml` 이 있으면 Java/Kotlin 프로브가, `go.mod` 가 있으면 Go 프로브가
+#: 정당하다. 둘 다 있으면(폴리글랏) 둘 다 돈다 — 그건 오탐이 아니라 사실이다.
+#:
+#: 매니페스트가 하나도 없는 워크스페이스는 프로브가 전부 꺼진다. 그 경우
+#: 이름 기반 후보(`main.py`·`main.rs`·`Dockerfile` 등)가 이미 앞 단계에서
+#: 처리했으므로, 여기 도달했다는 것 자체가 "진입점을 주장할 근거가 없다"는
+#: 뜻이다 — 막는 것이 맞다.
+_PROBE_RUNTIME_MANIFESTS: dict[str, tuple[str, ...]] = {
+    "java":   ("pom.xml", "build.gradle", "build.gradle.kts",
+               "settings.gradle", "settings.gradle.kts"),
+    "kotlin": ("pom.xml", "build.gradle", "build.gradle.kts",
+               "settings.gradle", "settings.gradle.kts"),
+    "go":     ("go.mod", "go.work"),
+}
+
+#: 언어별 잡음 제거 규칙: (줄 주석 접두들, 블록주석 여부, 여러 줄 원시 문자열 구분자들)
+#: 일반 문자열(`"`·`'`)은 모든 언어에서 지운다.
+_PROBE_NOISE_RULES: dict[str, tuple[tuple[str, ...], bool, tuple[str, ...]]] = {
+    "java":   (("//",), True, ('"""',)),   # Java 15+ 텍스트 블록
+    "kotlin": (("//",), True, ('"""',)),   # Kotlin 원시 문자열
+    "go":     (("//",), True, ("`",)),     # Go 백틱 원시 문자열
+}
+
+
+def _strip_probe_noise(text: str, label: str) -> str:
+    """주석과 문자열 리터럴 내용을 공백으로 바꾼다. **개행은 보존**한다.
+
+    프로브는 원문 텍스트에 정규식을 그대로 돌렸다. 그래서 Java 라이브러리의
+    문서 주석에 있는 예시 한 줄 —
+
+        // public static void main(String[] args)
+
+    — 이 실행 선언으로 매칭돼 APP_ENTRYPOINT_NOT_FOUND 를 억눌렀다.
+    실행할 수 있는 것이 하나도 없는데 배포 준비 완료가 되는 형태다.
+
+    개행을 보존하는 이유: Kotlin/Go 프로브가 `^\\s*fun main` 같은
+    줄 앵커(re.M)를 쓴다. 지운 자리를 공백으로 채우면 줄 구조가 유지돼
+    앵커 의미가 변하지 않는다.
+    """
+    line_prefixes, block_comments, raw_delims = _PROBE_NOISE_RULES.get(
+        label, (("//",), True, ()))
+    out: list[str] = []
+    i, n = 0, len(text)
+
+    def _blank(seg: str) -> str:
+        return "".join("\n" if c == "\n" else " " for c in seg)
+
+    while i < n:
+        ch = text[i]
+
+        # 여러 줄 원시 문자열 (이스케이프 없음) — 일반 따옴표보다 먼저 본다.
+        matched_raw = False
+        for delim in raw_delims:
+            if text.startswith(delim, i):
+                end = text.find(delim, i + len(delim))
+                if end == -1:
+                    end = n - len(delim)
+                seg_end = end + len(delim)
+                out.append(delim + _blank(text[i + len(delim):end]) + delim)
+                i = seg_end
+                matched_raw = True
+                break
+        if matched_raw:
+            continue
+
+        # 일반 문자열 — 내용만 지운다 (이스케이프 처리).
+        if ch in "\"'":
+            j = i + 1
+            while j < n and text[j] != ch:
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if text[j] == "\n":       # 닫히지 않은 한 줄 문자열은 줄에서 끝낸다
+                    break
+                j += 1
+            out.append(ch + _blank(text[i + 1:j]))
+            if j < n and text[j] == ch:
+                out.append(ch)
+                j += 1
+            i = j
+            continue
+
+        # 줄 주석
+        matched_line = False
+        for prefix in line_prefixes:
+            if text.startswith(prefix, i):
+                j = text.find("\n", i)
+                if j == -1:
+                    j = n
+                out.append(_blank(text[i:j]))
+                i = j
+                matched_line = True
+                break
+        if matched_line:
+            continue
+
+        # 블록 주석
+        if block_comments and text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            out.append(_blank(text[i:j]))
+            i = j
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _enabled_probe_labels(workspace: Path) -> set[str]:
+    """루트 매니페스트가 켜 주는 프로브 라벨들."""
+    enabled: set[str] = set()
+    for label, manifests in _PROBE_RUNTIME_MANIFESTS.items():
+        if any((workspace / m).is_file() for m in manifests):
+            enabled.add(label)
+    return enabled
+
+
+def _find_composer_bin_entrypoint(workspace: Path) -> Optional[str]:
+    """Return an existing Composer-configured CLI executable, if any."""
+    manifest = workspace / "composer.json"
+    if not manifest.is_file():
+        return None
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+    configured = data.get("bin", [])
+    if isinstance(configured, str):
+        configured = [configured]
+    if not isinstance(configured, list):
+        return None
+
+    workspace_root = workspace.resolve()
+    for rel in configured:
+        if not isinstance(rel, str) or not rel.strip():
+            continue
+        candidate = (workspace / rel).resolve()
+        try:
+            relative = candidate.relative_to(workspace_root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return relative.as_posix()
+    return None
+
+
+def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
+    """실행 진입점을 **내용으로** 찾는다. 못 찾으면 None.
+
+    반환값은 찾은 파일의 워크스페이스 상대 경로다(진단에 쓰인다).
+
+    두 가지 방어가 걸려 있다:
+    1. **매니페스트 스코프** — 루트에 그 런타임의 매니페스트가 있어야만
+       해당 언어 프로브가 돈다 (`_PROBE_RUNTIME_MANIFESTS` 참고).
+    2. **잡음 제거** — 주석·문자열 안의 `static void main` 예시는
+       선언이 아니다 (`_strip_probe_noise` 참고).
+    """
+    skipped = {
+        "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
+        ".git", "target", ".gradle", "vendor", "out", "test", "tests",
+    }
+    composer_bin = _find_composer_bin_entrypoint(workspace)
+    if composer_bin:
+        return composer_bin
+
+    enabled = _enabled_probe_labels(workspace)
+    for label, patterns, pattern_re in _EXECUTABLE_ENTRYPOINT_PROBES:
+        if label not in enabled:
+            continue
+        # Patterns are ordered from conventional source roots to broad
+        # fallbacks. Track duplicates, but inspect every relevant source file:
+        # a valid launcher must not disappear merely because it is the 61st
+        # file returned by an OS-dependent directory enumeration.
+        seen_paths: set[Path] = set()
+        for glob_pattern in patterns:
+            for path in workspace.glob(glob_pattern):
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                try:
+                    rel_parts = path.relative_to(workspace).parts
+                except ValueError:
+                    continue
+                if any(part in skipped for part in rel_parts):
+                    continue
+                if not path.is_file():
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if pattern_re.search(_strip_probe_noise(text, label)):
+                    return path.relative_to(workspace).as_posix()
+    return None
+
+
 def check_app_entrypoint(
     workspace: Path,
     contract: ReleaseContract,
@@ -253,15 +571,30 @@ def check_app_entrypoint(
 
     found: Optional[str] = None
     for rel in candidates:
-        if (workspace / rel).exists():
+        # **폴더가 아니라 파일이어야 한다.**
+        #
+        # 예전엔 `exists()` 로만 봐서 `src/main/java` 같은 **폴더가 있다는
+        # 이유로** 진입점을 찾았다고 판정했다. 그러면 실행 가능한 main 이
+        # 하나도 없는 라이브러리도 통과해, 뜨지 않는 이미지를 배포 준비
+        # 완료로 보고한다 — 검사를 약화시키는 형태다.
+        if (workspace / rel).is_file():
             found = rel
             break
+
+    # 파일 후보로 못 찾았으면, **실행 진입점을 내용으로 확인**한다.
+    # Java/Kotlin 처럼 진입점이 패키지 트리 깊숙이 있는 런타임을 위한 것이며,
+    # 폴더 존재가 아니라 `static void main` / `func main` 을 실제로 찾는다.
+    probe_hit: Optional[str] = None
+    if found is None:
+        probe_hit = _find_executable_entrypoint(workspace)
 
     details = {
         "stack": stack.value,
         "candidates": list(candidates),
-        "found": found,
+        "found": found or probe_hit,
+        "found_by": "candidate" if found else ("probe" if probe_hit else None),
     }
+    found = found or probe_hit
 
     if found:
         return CheckResult(

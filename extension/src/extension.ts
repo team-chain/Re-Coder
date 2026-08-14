@@ -40,16 +40,20 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // ── Discord bridge client (ws://127.0.0.1:7780/ws) ──────────────────────
     // 봇의 /make 채널에서 생성된 코드를 받아 워크스페이스에 자동 저장.
-    const bridgeClient = new BridgeClient(context);
-    context.subscriptions.push(bridgeClient);
-    bridgeClient.connect();
+    // **활성 클라이언트를 가변 홀더로 추적한다.** const 로 잡고 재연결 때마다
+    // 새 인스턴스를 만들면, dispose 는 항상 최초 인스턴스만 정리하고 이전
+    // 클라이언트들이 살아남는다 — 봇 스트림 하나를 여러 클라이언트가 각각
+    // 처리해 같은 문서에 중복 편집·중복 실행이 일어난다.
+    let activeBridge = new BridgeClient(context);
+    context.subscriptions.push(activeBridge);
+    activeBridge.connect();
 
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.bridge.reconnect', () => {
-            bridgeClient.dispose();
-            const newClient = new BridgeClient(context);
-            context.subscriptions.push(newClient);
-            newClient.connect();
+            activeBridge.dispose();
+            activeBridge = new BridgeClient(context);
+            context.subscriptions.push(activeBridge);
+            activeBridge.connect();
             vscode.window.showInformationMessage('ReCoder Bridge 재연결 시도');
         }),
     );

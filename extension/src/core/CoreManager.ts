@@ -417,12 +417,21 @@ export class CoreManager {
     }
 
     async shutdown(force: boolean = false): Promise<void> {
-        const runtime = await this.readRuntime();
-        const pid = this.coreProcess?.pid ?? runtime?.pid;
+        // **이 매니저가 직접 띄운 프로세스만 죽인다.**
+        //
+        // runtime.json 의 PID 는 공유 자원이다 — 두 번째 VSCode 창은 기존
+        // Core 에 붙기만 하고 coreProcess 가 null 인데, 여기서 runtime PID 로
+        // 폴백해 죽이면 **다른 창이 소유한 Core 를 종료**한다. 아무 보조 창
+        // 하나만 닫아도 열려 있는 모든 창의 연결이 끊기는 형태다.
+        //
+        // 붙기만 한 창의 정리는 연결 해제(_client = null)로 끝난다. Core 는
+        // 소유 창이 닫힐 때 그 창의 shutdown 이 거두고, 소유 창이 비정상
+        // 종료된 경우는 singleton 의 stale-lock 회수 경로가 처리한다.
         const proc = this.coreProcess;
+        const pid = proc?.pid;
         this._client = null;
 
-        if (!pid && !proc) { return; }
+        if (!proc || !pid) { return; }
 
         if (process.platform === 'win32') {
             if (pid) {

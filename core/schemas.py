@@ -275,6 +275,10 @@ class PatchProposal(BaseModel):
     approval_level: ApprovalLevel = ApprovalLevel.CONFIRM
     patches: list[FilePatch]
     test_command: Optional[str] = None
+    #: 이 제안이 만들어진 워크스페이스 루트. 승인 시 모든 패치 대상이
+    #: 이 경계 안에 있어야 한다 — LLM 이 환각하거나 프롬프트 주입으로
+    #: 경계 밖 절대경로를 돌려줘도 사용자 파일을 덮어쓸 수 없게 한다.
+    workspace_root: str = ""
 
 
 class InfraFileProposal(BaseModel):
@@ -364,6 +368,7 @@ class ResponseProposal(BaseModel):
     """AI-generated remediation proposal for an ops alert."""
 
     schema_version: str = "1.0"
+    proposal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     alert_id: str
     action_type: ActionType
     target_container: Optional[str] = None
@@ -372,6 +377,12 @@ class ResponseProposal(BaseModel):
     risk_level: RiskLevel = RiskLevel.MEDIUM
     risk_reasons: list[str] = Field(default_factory=list)
     approval_level: ApprovalLevel = ApprovalLevel.CONFIRM
+    #: 최초 요청자 신원(2단계 확인 시 두 번째 승인자와 대조).
+    requested_by: Optional[str] = None
+    #: DOUBLE_CONFIRM 용 **서버 발급** 일회용 확인 토큰. 승인 요청은 이 값과
+    #: 정확히 일치하는 토큰을 제시해야 한다 — 임의 문자열은 통과하지 못한다.
+    #: 응답 직렬화에서 제외(exclude)해 네트워크로 새지 않게 한다.
+    confirm_token: Optional[str] = Field(default=None, exclude=True)
 
 
 # ---------------------------------------------------------------------------

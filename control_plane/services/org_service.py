@@ -26,6 +26,7 @@ from control_plane.models.schemas import (
     ProjectCreate,
     ProjectResponse,
     ROLE_PERMISSIONS,
+    ROLE_RANK,
     RoleChangeRequest,
     WorkspaceCreate,
     WorkspaceResponse,
@@ -128,6 +129,16 @@ class OrgService:
                 f"Role '{role.value}' does not have permission '{permission.value}'"
             )
 
+    async def _enforce_role_ceiling(
+        self, org_id: str, requester_user_id: str, target_role
+    ) -> None:
+        """요청자가 부여하려는 역할이 자기 서열 이하인지 검사한다."""
+        requester_role = await self.get_member_role(org_id, requester_user_id)
+        if ROLE_RANK.get(target_role, 99) > ROLE_RANK.get(requester_role, -1):
+            raise PermissionError(
+                "자신보다 높은 역할을 부여할 수 없습니다."
+            )
+
     async def add_member(
         self,
         org_id: str,
@@ -135,8 +146,12 @@ class OrgService:
         invite: OrgMemberInvite,
     ) -> OrgMemberResponse:
         """멤버 초대 (이메일 기준, 이미 가입된 사용자만)"""
-        # 초대자 권한 확인
-        await self.require_permission(org_id, inviter_user_id, Permission.DEVICE_ENROLL)
+        # **MEMBER_MANAGE 로 게이팅.** 예전엔 DEVICE_ENROLL 로 걸려 DEVELOPER 가
+        # 임의 역할(OWNER 포함)을 부여할 수 있었다 — 조직 탈취 경로였다.
+        await self.require_permission(org_id, inviter_user_id, Permission.MEMBER_MANAGE)
+        # **역할 상한.** 요청자는 자기 서열보다 높은 역할을 부여할 수 없다.
+        # OWNER 부여는 OWNER 만 가능하다.
+        await self._enforce_role_ceiling(org_id, inviter_user_id, invite.role)
 
         # 초대 대상 user 조회
         result = await self._db.execute(
@@ -208,8 +223,8 @@ class OrgService:
         requester_user_id: str,
         request: RoleChangeRequest,
     ) -> OrgMemberResponse:
-        """역할 변경. 최소 1명의 owner 보장."""
-        await self.require_permission(org_id, requester_user_id, Permission.POLICY_ASSIGN)
+        """역할 변경. 최소 1명의 owner 보장 + 상향 승격 방지."""
+        await self.require_permission(org_id, requester_user_id, Permission.MEMBER_MANAGE)
 
         result = await self._db.execute(
             select(OrgMember).where(
@@ -220,6 +235,17 @@ class OrgService:
         member = result.scalar_one_or_none()
         if member is None:
             raise ValueError(f"User {request.user_id} is not a member of org {org_id}")
+
+        # **권한 상승 방지.** 요청자는 (1) 자기보다 높은 역할을 부여할 수 없고,
+        # (2) 자기와 같거나 높은 서열의 멤버를 변경할 수 없다. 이 검사가 없으면
+        # ADMIN 이 자기 자신을 OWNER 로 자가 승격한 뒤 기존 owner 를 강등할 수
+        # 있었다. self-target OWNER 승격도 (1)에 걸린다.
+        requester_role = await self.get_member_role(org_id, requester_user_id)
+        req_rank = ROLE_RANK.get(requester_role, -1)
+        if ROLE_RANK.get(request.new_role, 99) > req_rank:
+            raise PermissionError("자신보다 높은 역할을 부여할 수 없습니다.")
+        if ROLE_RANK.get(member.role, 99) >= req_rank and requester_user_id != request.user_id:
+            raise PermissionError("자신과 같거나 높은 서열의 멤버 역할은 변경할 수 없습니다.")
 
         # owner → non-owner 변경 시 다른 owner 있는지 확인
         if member.role == OrgRole.OWNER and request.new_role != OrgRole.OWNER:

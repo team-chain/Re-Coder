@@ -9,6 +9,7 @@ Static Preflight 12종 검사 단위 테스트.
 
 from __future__ import annotations
 
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -512,3 +513,332 @@ def test_runner__safe_workspace_path_rejects_invalid() -> None:
         StaticPreflightRunner("", make_contract(), project_id="invalid")
     with pytest.raises(ValueError):
         StaticPreflightRunner("/this/path/should/not/exist/12345", make_contract())
+
+
+
+def test_entrypoint_candidate_must_be_a_file_not_a_directory(tmp_path):
+    """[회귀] 진입점 후보가 **폴더**면 인정하지 않는다.
+
+    `exists()` 로만 보면 `src/main/java` 같은 폴더가 있다는 이유로 진입점을
+    찾았다고 판정한다. 그러면 실행 가능한 main 이 하나도 없는 라이브러리도
+    통과해, **뜨지 않는 이미지를 배포 준비 완료로 보고**한다.
+
+    지금은 폴더 후보를 목록에서 뺐지만, 나중에 누가 다시 넣어도 여기서
+    막히도록 판정 자체를 고정한다.
+    """
+    try:
+        from preflight.checks.code_checks import check_app_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import check_app_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    # `main.py` 라는 이름의 **폴더**만 있다 — 실행할 수 있는 것이 없다.
+    (tmp_path / "main.py").mkdir()
+    contract = build_default_contract(ContractStack.CUSTOM)
+    assert not check_app_entrypoint(tmp_path, contract).passed
+
+    # 같은 이름의 **파일**이면 통과한다.
+    other = tmp_path / "real"
+    other.mkdir()
+    (other / "main.py").write_text("print(1)\n", encoding="utf-8")
+    assert check_app_entrypoint(other, contract).passed
+
+
+def test_root_main_go_requires_package_main_and_function(tmp_path):
+    """A root main.go filename must not bypass Go executable validation."""
+    try:
+        from preflight.checks.code_checks import check_app_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import check_app_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    (tmp_path / "go.mod").write_text("module example.com/lib\n", encoding="utf-8")
+    main_go = tmp_path / "main.go"
+    contract = build_default_contract(ContractStack.CUSTOM)
+
+    main_go.write_text(
+        "package generator\nfunc main() {}\n",
+        encoding="utf-8",
+    )
+    assert not check_app_entrypoint(tmp_path, contract).passed
+
+    main_go.write_text(
+        "package main\nfunc main() {}\n",
+        encoding="utf-8",
+    )
+    result = check_app_entrypoint(tmp_path, contract)
+    assert result.passed
+    assert result.details["found_by"] == "probe"
+
+
+def test_executable_probe_requires_a_real_main_declaration(tmp_path):
+    """내용 프로브는 **선언을 실제로 찾아야** 한다 — 파일 존재만으로는 부족."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    lib = tmp_path / "lib"
+    (lib / "src" / "main" / "java" / "com" / "x").mkdir(parents=True)
+    (lib / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    (lib / "src" / "main" / "java" / "com" / "x" / "Util.java").write_text(
+        "class Util { int add(int a) { return a; } }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(lib) is None
+
+    app = tmp_path / "app"
+    (app / "src" / "main" / "java" / "com" / "x").mkdir(parents=True)
+    (app / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    (app / "src" / "main" / "java" / "com" / "x" / "App.java").write_text(
+        "class App { public static void main(String[] a) {} }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(app) is not None
+
+
+def test_probe_only_runs_for_runtimes_the_manifest_claims(tmp_path):
+    """[Codex P1 회귀] 프로브는 **매니페스트가 주장하는 런타임**만 돈다.
+
+    Maven 프로젝트에 Java main 이 없고 `tools/generator.go` 에 `func main()`
+    만 있으면 — 예전 프로브는 그 Go 유틸을 앱의 진입점으로 받아들였다.
+    그러면 뜨지 않는 Java 이미지가 APP_ENTRYPOINT_NOT_FOUND 를 잃고
+    배포 준비 완료로 보고된다.
+    """
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint, check_app_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint, check_app_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    ws = tmp_path / "maven-with-go-util"
+    (ws / "tools").mkdir(parents=True)
+    (ws / "src" / "main" / "java" / "com" / "x").mkdir(parents=True)
+    (ws / "pom.xml").write_text("<project><artifactId>demo</artifactId></project>\n", encoding="utf-8")
+    (ws / "src" / "main" / "java" / "com" / "x" / "Util.java").write_text(
+        "class Util { int add(int a) { return a; } }\n", encoding="utf-8")
+    (ws / "tools" / "generator.go").write_text(
+        "package main\nfunc main() { /* codegen */ }\n", encoding="utf-8")
+
+    # Go 매니페스트(go.mod)가 없으므로 Go 프로브는 돌지 않는다 —
+    # Java main 이 없는 이 워크스페이스는 진입점이 없는 것이 맞다.
+    assert _find_executable_entrypoint(ws) is None
+    contract = build_default_contract(ContractStack.CUSTOM)
+    assert not check_app_entrypoint(ws, contract).passed
+
+    # [변이 시험] go.mod 를 추가하면 — 이제 Go 런타임을 주장하는 것이므로 —
+    # 같은 Go 파일이 진입점으로 인정된다. 스코프가 "언어 금지"가 아니라
+    # "매니페스트 근거"로 동작한다는 증거다.
+    (ws / "go.mod").write_text("module example.com/tools\n", encoding="utf-8")
+    assert _find_executable_entrypoint(ws) == "tools/generator.go"
+
+
+def test_probe_ignores_main_declarations_in_comments_and_strings(tmp_path):
+    """[Codex P1 회귀] 주석·문자열 안의 main 예시는 **선언이 아니다.**
+
+    Java 라이브러리의 문서 주석에 `// public static void main(String[] args)`
+    같은 예시가 있으면 — 예전 프로브는 원문 정규식 매칭이라 이것을 실행
+    선언으로 받아들여 APP_ENTRYPOINT_NOT_FOUND 를 억눌렀다.
+    """
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    # 1) Java — 줄 주석 · 블록 주석 · 문자열 리터럴 세 곳 모두에 미끼를 둔다.
+    ws = tmp_path / "java-lib"
+    (ws / "src" / "main" / "java").mkdir(parents=True)
+    (ws / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    (ws / "src" / "main" / "java" / "Doc.java").write_text(
+        '''// 사용 예: public static void main(String[] args)
+/* 옛 예제:
+   public static void main(String[] args) { run(); }
+*/
+class Doc {
+    String usage = "public static void main(String[] args)";
+}
+''', encoding="utf-8")
+    assert _find_executable_entrypoint(ws) is None
+
+    # [음성 대조] 진짜 선언을 추가하면 찾아진다 — 제거 로직이 선언까지
+    # 지우는 과잉 방어가 아니라는 증거.
+    (ws / "src" / "main" / "java" / "App.java").write_text(
+        "class App { public static void main(String[] a) {} }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(ws) is not None
+
+    # 2) Go — 주석 안의 func main 은 무시된다.
+    go = tmp_path / "go-lib"
+    go.mkdir()
+    (go / "go.mod").write_text("module x\n", encoding="utf-8")
+    (go / "doc.go").write_text(
+        "package lib\n// func main() { run() }\n/*\nfunc main() {}\n*/\n", encoding="utf-8")
+    assert _find_executable_entrypoint(go) is None
+
+    # func main alone is insufficient: Go only builds an executable from
+    # package main.
+    (go / "generator.go").write_text(
+        "package generator\nfunc main() { run() }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(go) is None
+    (go / "generator.go").write_text(
+        "package main\nfunc main() { run() }\n", encoding="utf-8")
+    assert _find_executable_entrypoint(go) == "generator.go"
+
+    # 3) Kotlin — 원시 문자열(triple quote) 안의 fun main 은 무시된다.
+    kt = tmp_path / "kt-lib"
+    kt.mkdir()
+    (kt / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+    (kt / "Doc.kt").write_text(
+        'val doc = """\nfun main() { example() }\n"""\n', encoding="utf-8")
+    assert _find_executable_entrypoint(kt) is None
+
+
+def test_probe_accepts_any_legal_java_modifier_order(tmp_path):
+    """[Codex P2 회귀] `static public void main` 도 유효한 진입점 선언이다.
+
+    Java 는 수식어 순서가 자유다 — `static` 과 `void` 사이에 `public`·
+    `final`·`synchronized` 가 와도 합법이고 JVM 은 정상 기동한다. 정규식이
+    `static\\s+void` 붙은 순서만 받으면 그런 앱이 APP_ENTRYPOINT_NOT_FOUND
+    로 막힌다.
+    """
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    cases = [
+        ("static public void main(String[] a) {}", True, "static public"),
+        ("public static void main(String[] a) {}", True, "관례 순서"),
+        ("static final synchronized public void main(String[] a) {}", True, "수식어 여러 개"),
+        ("public static void main(String... args) {}", True, "varargs"),
+        ("static public void main(java.lang.String args[]) {}", True, "정규화 전 배열 표기"),
+        ("private static void main(int value) {}", False, "private + 잘못된 인자"),
+        ("public static void main(int value) {}", False, "String 배열 아님"),
+        ("static void main(String[] args) {}", False, "public 없음"),
+        ("public void main(String[] args) {}", False, "static 없음"),
+        ("public static void main(String value) {}", False, "단일 String"),
+        ("public static void main(String[] a, int n) {}", False, "인자 두 개"),
+        # 다른 문장으로 새면 안 된다 — static 필드 뒤의 다른 메서드.
+        ("static int MAX = 3; public void mainframe(String[] a) {}", False, "비진입점"),
+    ]
+    for i, (decl, expected, label) in enumerate(cases):
+        ws = tmp_path / f"case{i}"
+        (ws / "src" / "main" / "java").mkdir(parents=True)
+        (ws / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+        (ws / "src" / "main" / "java" / "App.java").write_text(
+            "class App { %s }\n" % decl, encoding="utf-8")
+        got = _find_executable_entrypoint(ws) is not None
+        assert got == expected, f"{label}: expected {expected}, got {got}"
+
+
+def test_probe_searches_beyond_sixty_source_files(tmp_path):
+    """A valid launcher is not hidden by an arbitrary global file cutoff."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    source_root = tmp_path / "src" / "main" / "java" / "example"
+    source_root.mkdir(parents=True)
+    (tmp_path / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    for index in range(75):
+        (source_root / f"A{index:03}.java").write_text(
+            f"class A{index:03} {{ int value() {{ return {index}; }} }}\n",
+            encoding="utf-8",
+        )
+    launcher = source_root / "ZLauncher.java"
+    launcher.write_text(
+        "class ZLauncher { public static void main(String[] args) {} }\n",
+        encoding="utf-8",
+    )
+
+    assert _find_executable_entrypoint(tmp_path) == (
+        "src/main/java/example/ZLauncher.java"
+    )
+
+
+def test_probe_accepts_suspend_kotlin_main(tmp_path):
+    """Kotlin's valid top-level suspend main form is executable."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    source = tmp_path / "src" / "main" / "kotlin" / "App.kt"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+    source.write_text("suspend fun main() { runApp() }\n", encoding="utf-8")
+
+    assert _find_executable_entrypoint(tmp_path) == "src/main/kotlin/App.kt"
+
+
+def test_probe_does_not_treat_arbitrary_php_source_as_entrypoint(tmp_path):
+    """A Composer library is not deployable merely because PHP files have tags."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    source = tmp_path / "src" / "Foo.php"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"name": "example/library"}),
+        encoding="utf-8",
+    )
+    source.write_text("<?php\nclass Foo {}\n", encoding="utf-8")
+
+    assert _find_executable_entrypoint(tmp_path) is None
+    result = check_app_entrypoint(
+        tmp_path,
+        build_default_contract(ContractStack.CUSTOM),
+    )
+    assert not result.passed
+
+
+def test_probe_accepts_existing_composer_bin_entrypoint(tmp_path):
+    """An explicit Composer bin file is executable evidence for a CLI package."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    executable = tmp_path / "bin" / "console"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/usr/bin/env php\n<?php\n", encoding="utf-8")
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"name": "example/tool", "bin": ["bin/console"]}),
+        encoding="utf-8",
+    )
+
+    assert _find_executable_entrypoint(tmp_path) == "bin/console"
+
+
+def test_probe_reads_launcher_after_character_40000(tmp_path):
+    """A valid launcher near the end of a large source file remains visible."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    source = tmp_path / "src" / "main" / "java" / "LargeApp.java"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    source.write_text(
+        "class LargeApp {\n"
+        + ("int padding = 0;\n" * 3_000)
+        + "public static void main(String[] args) {}\n}\n",
+        encoding="utf-8",
+    )
+    assert source.stat().st_size > 40_000
+
+    assert _find_executable_entrypoint(tmp_path) == (
+        "src/main/java/LargeApp.java"
+    )

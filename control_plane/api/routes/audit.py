@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.api.middleware.device_auth import (
     DeviceContext,
+    get_audit_sync_device,
     get_current_device,
     require_permission_dep,
 )
@@ -67,11 +68,15 @@ async def list_audit_events(
 async def sync_pending_events(
     org_id: str,
     request: AuditSyncRequest,
-    ctx: DeviceContext = Depends(get_current_device),
+    ctx: DeviceContext = Depends(get_audit_sync_device),
     db: AsyncSession = Depends(get_db),
 ) -> AuditSyncResponse:
     """
     오프라인 모드 중 쌓인 pending AuditLog 재전송.
+
+    인증은 get_audit_sync_device 를 쓴다 — 일반 인증은 LOST 디바이스를
+    401 로 끊어 아래 suspicious 분기가 죽은 코드가 되기 때문이다. 이
+    완화는 이 라우트 하나에만 적용된다.
 
     설계서 §Q2-A3:
     - device가 lost로 표시된 경우 is_suspicious=True

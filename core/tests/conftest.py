@@ -29,6 +29,17 @@ os.environ.setdefault(
     str(Path(tempfile.mkdtemp(prefix="recoder-test-store-")) / "ecs_deployments.json"),
 )
 
+# **ADR 번호 예약 장부도 같은 이유로 떼어 놓는다.**
+#
+# 기본 경로가 `~/.recoder/adr_reservations.json` 이라, 막지 않으면 테스트가
+# 개발자의 진짜 장부에 번호를 적는다. 그러면 `build_adr_ops` 를 부르는
+# 테스트가 실행될 때마다 번호가 올라가고, 번호를 단언하는 테스트는
+# **몇 번째로 돌리느냐에 따라 결과가 달라진다.**
+os.environ.setdefault(
+    "RECODER_ADR_STORE",
+    str(Path(tempfile.mkdtemp(prefix="recoder-test-adr-")) / "adr_reservations.json"),
+)
+
 # 테스트 중에는 실제 LLM 호출을 막기 위한 환경변수
 os.environ.setdefault("RECODER_TEST_MODE", "1")
 # infra_agent 의 LLM 커스터마이징도 비활성화 → 템플릿 그대로 반환되도록

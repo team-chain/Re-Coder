@@ -59,17 +59,37 @@ def set_bot(bot) -> None:
 # ---------------------------------------------------------------------------
 
 def _check_auth(request: web.Request) -> bool:
+    """등록·브리지 관리 요청 인증.
+
+    키 미설정을 "인증 통과"로 바꾸면 안 된다 — 이 서버는 0.0.0.0 에 뜨므로
+    그 상태에서는 네트워크의 아무나 길드 자격증명을 덮어쓰고 브리지 채널을
+    바꿀 수 있다. 키가 없으면: (1) start_api_server 가 루프백에만 바인드하고
+    (2) 여기서도 루프백 밖 요청은 전부 거부한다 — 이중 방어다.
+    """
     if not REGISTRATION_KEY:
-        log.warning("BOT_REGISTRATION_KEY가 설정되지 않아 인증을 건너뜁니다.")
-        return True
-    return request.headers.get("X-Registration-Key") == REGISTRATION_KEY
+        peer = request.remote or ""
+        if peer in ("127.0.0.1", "::1", "localhost"):
+            return True
+        log.warning("BOT_REGISTRATION_KEY 미설정 상태에서 외부(%s) 요청 거부", peer)
+        return False
+    supplied = request.headers.get("X-Registration-Key") or ""
+    return hmac.compare_digest(supplied, REGISTRATION_KEY)
 
 
 def _verify_github_signature(body: bytes, signature: str) -> bool:
-    """GitHub Webhook HMAC-SHA256 서명 검증."""
+    """GitHub Webhook HMAC-SHA256 서명 검증.
+
+    시크릿 미설정을 "검증 통과" 로 바꾸면 안 된다 — 이 서버는 (키가 있을 때)
+    0.0.0.0 에 뜨므로, 그 상태에서는 인터넷의 아무나 위조 push/PR 페이로드를
+    보내 등록된 모든 길드의 배포 채널에 임의 링크를 뿌릴 수 있다. 시크릿이
+    없으면 검증할 수 없으므로 **거부한다**(fail-closed).
+    """
     if not GITHUB_WEBHOOK_SECRET:
-        log.warning("GITHUB_WEBHOOK_SECRET 미설정 — 서명 검증 건너뜀 (개발 모드)")
-        return True
+        log.warning("GITHUB_WEBHOOK_SECRET 미설정 — 웹훅을 거부합니다. "
+                    "GitHub 연동을 쓰려면 시크릿을 설정하세요.")
+        return False
+    if not signature:
+        return False
     expected = "sha256=" + hmac.new(
         GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
     ).hexdigest()
@@ -620,13 +640,23 @@ def create_app() -> web.Application:
 
 
 async def start_api_server(port: int = 8765, bot=None) -> web.AppRunner:
-    """봇과 함께 API 서버를 시작한다."""
+    """봇과 함께 API 서버를 시작한다.
+
+    BOT_REGISTRATION_KEY 가 없으면 **루프백에만** 바인드한다. 키 없이
+    0.0.0.0 으로 열면 등록·브리지 관리 API 전부가 무인증으로 노출된다 —
+    비밀이 없다는 것이 곧 권한이 되면 안 된다.
+    """
     if bot is not None:
         set_bot(bot)
     app = create_app()
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    host = "0.0.0.0" if REGISTRATION_KEY else "127.0.0.1"
+    if not REGISTRATION_KEY:
+        log.warning(
+            "BOT_REGISTRATION_KEY 미설정 — API 서버를 루프백(127.0.0.1)에만 "
+            "바인드합니다. 외부에서 쓰려면 키를 설정하세요.")
+    site = web.TCPSite(runner, host, port)
     await site.start()
-    log.info("Bot 등록 API 서버 시작: http://0.0.0.0:%d", port)
+    log.info("Bot 등록 API 서버 시작: http://%s:%d", host, port)
     return runner

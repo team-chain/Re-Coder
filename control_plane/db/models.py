@@ -53,7 +53,13 @@ class User(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
     devices = relationship("Device", back_populates="user")
-    org_memberships = relationship("OrgMember", back_populates="user")
+    # OrgMember 는 users 로 가는 FK 가 둘이다(user_id·invited_by_user_id).
+    # foreign_keys 를 명시하지 않으면 매퍼 구성 시점에
+    # AmbiguousForeignKeysError 로 죽는다 — 관계를 처음 쓰는 코드가 곧 지뢰였다.
+    org_memberships = relationship(
+        "OrgMember", back_populates="user",
+        foreign_keys="OrgMember.user_id",
+    )
 
     __table_args__ = (
         UniqueConstraint("oidc_provider", "oidc_subject", name="uq_oidc_identity"),
@@ -194,6 +200,10 @@ class AuditEvent(Base):
     policy_bundle_version = Column(String(100), nullable=True)
     extra = Column(JSON, default=dict)
     is_suspicious = Column(Boolean, default=False)    # lost device 이후 이벤트
+    # 해시 페이로드 포맷 버전. **기존 행은 v1**(부분 페이로드)로 남고, 신규
+    # 행은 v2(전체 페이로드)로 기록된다. 검증기는 행의 버전에 맞는 포맷으로
+    # 재계산하므로, 업그레이드 후에도 옛 행이 위조로 오판되지 않는다.
+    hash_version = Column(Integer, nullable=False, default=1, server_default="1")
 
     org = relationship("Organization", back_populates="audit_events")
 

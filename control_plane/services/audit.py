@@ -76,6 +76,12 @@ class AuditService:
         new_seq = counter.last_seq + 1
 
         # 3. Hash 계산
+        # **해시는 감사 행의 전체 페이로드를 덮어야 한다.** before/after_state·
+        # ip_address·policy_bundle_version·is_suspicious 를 빼면 — 정책 판정과
+        # 상태 전이, 곧 감사 로그가 지키려는 바로 그 내용을 — DB 에서 고쳐도
+        # verify_chain() 이 유효하다고 보고한다. is_suspicious 는 기록 시점에만
+        # 정해지고 이후 변경 경로가 없으므로 해시에 넣어도 안전하다.
+        occurred_at_utc = self._as_utc(event.occurred_at)
         event_body = self._canonical_json(
             org_id=org_id,
             seq=new_seq,
@@ -84,13 +90,19 @@ class AuditService:
             action=event.action.value,
             resource_type=event.resource_type,
             resource_id=event.resource_id,
-            occurred_at=event.occurred_at.isoformat(),
-            extra=event.extra,
+            before_state=event.before_state or {},
+            after_state=event.after_state or {},
+            ip_address=event.ip_address,
+            policy_bundle_version=event.policy_bundle_version,
+            is_suspicious=bool(is_suspicious),
+            occurred_at=occurred_at_utc.isoformat(),
+            extra=event.extra or {},
         )
         event_hash = self._compute_hash(counter.last_event_hash, event_body)
 
         # 4. INSERT
         audit = AuditEvent(
+            hash_version=2,
             org_id=org_id,
             seq=new_seq,
             actor_user_id=actor_user_id,
@@ -101,7 +113,7 @@ class AuditService:
             before_state=event.before_state,
             after_state=event.after_state,
             ip_address=event.ip_address,
-            occurred_at=event.occurred_at,
+            occurred_at=occurred_at_utc,
             event_hash=event_hash,
             previous_event_hash=counter.last_event_hash,
             policy_bundle_version=event.policy_bundle_version,
@@ -125,7 +137,7 @@ class AuditService:
             action=event.action,
             resource_type=event.resource_type,
             resource_id=event.resource_id,
-            occurred_at=event.occurred_at,
+            occurred_at=occurred_at_utc,
             event_hash=event_hash,
             previous_event_hash=audit.previous_event_hash,
             policy_bundle_version=event.policy_bundle_version,
@@ -199,17 +211,53 @@ class AuditService:
                     f"got {event.previous_event_hash[:12]}…"
                 )
             # 재계산 검증
-            body = self._canonical_json(
-                org_id=event.org_id,
-                seq=event.seq,
-                actor_user_id=event.actor_user_id,
-                actor_device_id=event.actor_device_id,
-                action=event.action.value,
-                resource_type=event.resource_type,
-                resource_id=event.resource_id,
-                occurred_at=event.occurred_at.isoformat(),
-                extra=event.extra or {},
-            )
+            # 행의 hash_version 에 맞는 포맷으로 재계산한다. 기존 행(v1 또는
+            # 컬럼 부재→None)은 부분 페이로드로, 신규 행(v2)은 전체 페이로드로.
+            ver = getattr(event, "hash_version", None) or 1
+            if ver >= 2:
+                body = self._canonical_json(
+                    org_id=event.org_id,
+                    seq=event.seq,
+                    actor_user_id=event.actor_user_id,
+                    actor_device_id=event.actor_device_id,
+                    action=event.action.value,
+                    resource_type=event.resource_type,
+                    resource_id=event.resource_id,
+                    before_state=event.before_state or {},
+                    after_state=event.after_state or {},
+                    ip_address=event.ip_address,
+                    policy_bundle_version=event.policy_bundle_version,
+                    is_suspicious=bool(event.is_suspicious),
+                    occurred_at=self._iso_utc(event.occurred_at),
+                    extra=event.extra or {},
+                )
+            else:
+                # v1 은 occurred_at 을 .isoformat() 원문으로 해시했다. 백엔드마다
+                # tz 표기가 달라질 수 있어(예: SQLite 는 tz 를 벗긴다), 저장된
+                # 표기와 UTC 정규화 표기 **둘 다** 시도해 하나라도 원 해시를
+                # 재현하면 통과로 본다. 값 자체가 바뀌면 둘 다 실패하므로 위조
+                # 탐지는 유지된다.
+                candidates = []
+                seen_occ = set()
+                for occ_str in (event.occurred_at.isoformat(), self._iso_utc(event.occurred_at)):
+                    if occ_str in seen_occ:
+                        continue
+                    seen_occ.add(occ_str)
+                    candidates.append(self._v1_body(
+                        org_id=event.org_id,
+                        seq=event.seq,
+                        actor_user_id=event.actor_user_id,
+                        actor_device_id=event.actor_device_id,
+                        action=event.action.value,
+                        resource_type=event.resource_type,
+                        resource_id=event.resource_id,
+                        occurred_at=occ_str,
+                        extra=event.extra or {},
+                    ))
+                if any(self._compute_hash(prev_hash, c) == event.event_hash for c in candidates):
+                    prev_hash = event.event_hash
+                    continue
+                return False, f"Hash mismatch at seq={event.seq}"
             expected_hash = self._compute_hash(prev_hash, body)
             if expected_hash != event.event_hash:
                 return False, f"Hash mismatch at seq={event.seq}"
@@ -279,6 +327,40 @@ class AuditService:
             self._db.add(counter)
             await self._db.flush()
         return counter
+
+    @staticmethod
+    def _v1_body(*, org_id, seq, actor_user_id, actor_device_id, action,
+                 resource_type, resource_id, occurred_at, extra) -> str:
+        """**업그레이드 전(v1) 해시 페이로드**를 그대로 재현한다.
+
+        옛 코드는 before/after_state·ip·policy_version·is_suspicious 를 넣지
+        않았고 occurred_at 을 .isoformat() 원문으로 썼다. 기존 행을 검증할 때
+        이 포맷으로 재계산해야 위조 없이 통과한다.
+        """
+        import json as _json
+        return _json.dumps({
+            "org_id": org_id, "seq": seq,
+            "actor_user_id": actor_user_id, "actor_device_id": actor_device_id,
+            "action": action, "resource_type": resource_type,
+            "resource_id": resource_id,
+            "occurred_at": occurred_at, "extra": extra,
+        }, sort_keys=True, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _as_utc(dt: datetime) -> datetime:
+        """Normalize an audit timestamp to one canonical UTC instant."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    @staticmethod
+    def _iso_utc(dt: datetime) -> str:
+        """해시 입력용 시각 정규화 — naive(SQLite 왕복 등)는 UTC 로 간주.
+
+        기록 시각의 isoformat 과 검증 시각의 isoformat 이 tz 표기 하나로
+        달라지면 체인 전체가 위조 판정된다.
+        """
+        return AuditService._as_utc(dt).isoformat()
 
     @staticmethod
     def _canonical_json(**kwargs: Any) -> str:

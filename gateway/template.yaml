@@ -126,6 +126,12 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref GatewayTable
+        # SAM's DynamoDBCrudPolicy does not include transactional APIs.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:TransactWriteItems
+              Resource: !GetAtt GatewayTable.Arn
         # ── Bedrock 전용 최소권한: InvokeModel 만, 그 외 0 ──
         - Statement:
             - Effect: Allow
@@ -183,6 +189,23 @@ Resources:
             Path: /enroll
             Method: POST
 
+  VerifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: recoder-gw-verify
+      Handler: verify.handler
+      CodeUri: src/
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref GatewayTable
+      Events:
+        Verify:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /verify
+            Method: POST
+
   DeployFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -221,6 +244,8 @@ Outputs:
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/admin"
   EnrollEndpoint:
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/enroll"
+  VerifyEndpoint:
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/verify"
   TableName:
     Value: !Ref GatewayTable
   DeployEndpoint:

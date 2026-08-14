@@ -12,7 +12,7 @@
  *   { type: 'error', filename, error }
  *   { type: 'info',  filename, message }
  *
- * 인증: Authorization: Bearer <token>  또는  ?token=<token>
+ * 인증: Authorization: Bearer <token> 헤더 전용
  *   token 은 VS Code 설정 `recoder.bridge.token` 또는 환경변수
  *   `RECODER_BRIDGE_TOKEN` (둘 중 우선순위는 설정 → env) 에서 읽음.
  *
@@ -27,6 +27,7 @@
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
 import * as path from 'path';
+import { buildBridgeWebSocketUrl } from './bridgeEndpoint';
 
 interface BridgeMessage {
     type: string;
@@ -81,7 +82,16 @@ export class BridgeClient implements vscode.Disposable {
         return '';
     }
 
-    private _resolveEndpoint(): { url: string; token: string } {
+    /** 브리지 접속에 쓸 학생 토큰(소유 증명). SecretStorage 우선, 없으면 env. */
+    private async _getStudentToken(): Promise<string> {
+        try {
+            const fromSecret = await this.context.secrets.get('recoder.studentToken');
+            if (fromSecret) return fromSecret;
+        } catch { /* SecretStorage 접근 실패 시 env 로 폴백 */ }
+        return process.env.RECODER_STUDENT_TOKEN || '';
+    }
+
+    private _resolveEndpoint(studentToken: string): { url: string; token: string } {
         const cfg = vscode.workspace.getConfiguration('recoder.bridge');
         const host = cfg.get<string>('host', '127.0.0.1');
         const port = cfg.get<number>('port', 7780);
@@ -89,16 +99,20 @@ export class BridgeClient implements vscode.Disposable {
             cfg.get<string>('token', '') ||
             process.env.RECODER_BRIDGE_TOKEN ||
             '';
-        // Phase 2 per-user 라우팅 식별자: 설정값 우선, 없으면 게이트웨이 토큰에서 추출.
+        // Phase 2 per-user 라우팅 식별자: 설정값 우선, 없으면 학생 토큰에서 추출.
         const studentId =
             cfg.get<string>('studentId', '') ||
-            this._parseStudentId(process.env.RECODER_STUDENT_TOKEN || '');
+            this._parseStudentId(studentToken);
         const params = new URLSearchParams();
-        if (token) params.set('token', token);
         if (studentId) params.set('student', studentId);
-        const qs = params.toString() ? `?${params.toString()}` : '';
+        // **소유 증명 토큰을 함께 전송한다.** 이게 없으면 브리지의 student
+        // 검증이 항상 실패해, per-student 라우팅이 조용히 꺼지거나(REQUIRE=0)
+        // 403(REQUIRE=1) 이 된다 — 서버에만 검증을 넣고 전송을 빠뜨렸던 버그.
+        // URL 쿼리는 로그에 남으므로 secret 은 **헤더로만** 보낸다.
         return {
-            url: `ws://${host}:${port}/ws${qs}`,
+            // Persistent student credentials may be sent only over TLS when
+            // traffic can leave this machine. Loopback keeps ws for local dev.
+            url: buildBridgeWebSocketUrl(host, port, params),
             token,
         };
     }
@@ -107,13 +121,26 @@ export class BridgeClient implements vscode.Disposable {
     public connect(): void {
         if (this.disposed) return;
         if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+        void this._connectAsync();
+    }
 
-        const { url, token } = this._resolveEndpoint();
-        this.output.appendLine(`[bridge] connecting to ${url.replace(token, '***')}`);
+    private async _connectAsync(): Promise<void> {
+        if (this.disposed) return;
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+
+        const studentToken = await this._getStudentToken();
+        if (this.disposed) return;
+        const { url, token } = this._resolveEndpoint(studentToken);
+        this.output.appendLine(`[bridge] connecting to ${token ? url.replace(token, '***') : url}`);
+
+        // secret 은 헤더로만 — 쿼리스트링에 실으면 액세스 로그에 평문으로 남는다.
+        const headers: Record<string, string> = {};
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        if (studentToken) headers['X-Student-Token'] = studentToken;
 
         try {
             this.ws = new WebSocket(url, {
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
+                headers,
                 handshakeTimeout: 5_000,
             });
         } catch (err) {
@@ -340,6 +367,15 @@ export class BridgeClient implements vscode.Disposable {
     private async _handleEnd(msg: BridgeMessage): Promise<void> {
         if (!this.session) return;
         const session = this.session;
+        // **filename 대조.** end 의 filename 이 현재 세션과 다르면 다른 파일의
+        // 뒤늦은 end 가 지금 세션을 종료·실행하는 것이다(연속 /make 인터리브).
+        // 무시한다 — 빈 파일 저장과 원치 않은 실행을 막는다.
+        if (msg.filename && session.filename && msg.filename !== session.filename) {
+            this.output.appendLine(
+                `[bridge] end filename 불일치: ${msg.filename} ≠ ${session.filename} — 무시`,
+            );
+            return;
+        }
         this.session = null;
 
         if (session.pendingFlush) {
@@ -429,6 +465,30 @@ export class BridgeClient implements vscode.Disposable {
         const ext = path.extname(session.filename).toLowerCase();
         const cwdUri = this._getWorkspaceRoot();
         const cwd = cwdUri?.fsPath;
+
+        // **실행 전 사용자 확인 필수.** auto_run 은 원격(디스코드 봇)이 보낸
+        // 코드를 이 머신의 셸에서 돌리는 것이다. 브리지에 붙은 서버의 신원을
+        // 완전히 보장할 수 없으므로(로컬 포트 선점·공유 토큰), 확인 없이
+        // 실행하면 임의 코드 실행 통로가 된다. `.html` 미리보기처럼 셸을
+        // 쓰지 않는 경로는 아래에서 계속 진행하고, 셸 실행은 여기서 막는다.
+        const EXECUTES_IN_SHELL = new Set(['.py', '.js', '.mjs', '.ts', '.sh', '.go']);
+        if (EXECUTES_IN_SHELL.has(ext)) {
+            const allowAuto = vscode.workspace
+                .getConfiguration('recoder.bridge')
+                .get<boolean>('allowAutoRun', false);
+            if (!allowAuto) {
+                const pick = await vscode.window.showWarningMessage(
+                    `ReCoder 브리지가 받은 "${session.filename}" 를 터미널에서 실행하려고 합니다. ` +
+                    `원격에서 전달된 코드입니다. 실행할까요?`,
+                    { modal: true },
+                    '실행', '이번만 건너뛰기',
+                );
+                if (pick !== '실행') {
+                    this.output.appendLine(`[bridge] auto_run 취소됨(사용자 거부): ${session.filename}`);
+                    return;
+                }
+            }
+        }
 
         // 디스크 sync 대기 — Windows 에서 write 직후 openExternal 이 0x2 (파일 없음) 뜨는 race 회피
         await new Promise<void>((resolve) => setTimeout(resolve, 250));

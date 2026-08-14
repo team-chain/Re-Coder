@@ -87,6 +87,21 @@ def is_allowed(interaction: Interaction) -> bool:
 
 # ── 에러 메시지 생성 ────────────────────────────────────────────────────────
 
+def is_user_allowed_in_guild(guild_id: int, user_id: int) -> bool:
+    """Interaction 객체 없이(예: on_message 자동 처리) 인가를 판정한다.
+
+    화이트리스트(§6.1.4)만 확인한다 — 자동 처리 경로에는 member 객체·권한
+    비트가 없을 수 있으므로, 명시적으로 등록된 사용자만 통과시킨다. 관리자·
+    역할 기반 통과는 슬래시 커맨드(is_allowed)에서만 적용한다.
+    """
+    if not guild_id or not user_id:
+        return False
+    try:
+        return guild_store.is_user_allowed(guild_id, user_id)
+    except Exception:
+        return False
+
+
 def _get_deny_message(interaction: Interaction) -> str:
     """사용자에게 보여줄 거부 이유 메시지를 반환한다."""
     if interaction.guild is None:

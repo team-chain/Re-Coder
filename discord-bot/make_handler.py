@@ -593,16 +593,39 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
     if not content:
         return
 
-    # (파일명/의도는 연결 확인 뒤 intent 분기에서 결정)
+    # **인가 게이트.** make 채널의 메시지는 슬래시 커맨드와 달리 자동
+    # 처리되므로, 여기서 막지 않으면 서버의 누구든 "run.sh 만들어서 실행해줘"
+    # 한 줄로 브리지에 붙은 VSCode 에서 코드를 실행시킬 수 있다.
+    try:
+        from middleware.auth import is_user_allowed_in_guild
+        gid = message.guild.id if message.guild else 0
+        if not is_user_allowed_in_guild(gid, message.author.id):
+            return
+    except Exception:
+        # 인가 모듈을 못 불러오면 안전한 쪽 — 처리하지 않는다.
+        return
 
     # Phase 2 per-user 라우팅: 이 Discord 사용자에 바인딩된 student_id 해석.
-    # 있으면 그 학생 본인 VSCode 연결로만, 없으면 레거시 broadcast(단일 PC 데모).
     target = ""
     if guild_store is not None:
         try:
             target = guild_store.get_student_id(message.author.id) or ""
         except Exception:
             target = ""
+
+    # **broadcast 금지.** target 이 없으면(미바인딩) 브리지에 붙은 전원에게
+    # 코드를 뿌리게 된다 — 원격 코드 실행 증폭기다. 바인딩된 본인 연결로만
+    # 보낸다. 미바인딩이면 안내하고 종료한다.
+    if not target:
+        try:
+            await message.reply(
+                "먼저 `/recoder link <토큰>` 으로 본인 VSCode를 연결하세요. "
+                "연결 없이는 코드를 보낼 대상이 없습니다.",
+                mention_author=False,
+            )
+        except Exception:
+            pass
+        return
 
     collected: "list[str]" = []  # 생성된 코드 전체 누적(세션 저장·재실행용)
 
@@ -631,9 +654,8 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
                     return 0  # 아직 서문 구간 — 전송 보류
             else:
                 collected.append(_text)
-        if target:
-            return await hub.send_to_student(target, event)
-        return await hub.broadcast(event)
+        # target 은 위에서 보장됨 — 본인 연결로만.
+        return await hub.send_to_student(target, event)
 
     # VSCode 브리지 연결 확인 (per-user면 본인 연결만 확인)
     if target:
@@ -1147,15 +1169,18 @@ async def run_generation(channel, content: str, discord_user_id: int = 0) -> dic
         except Exception:
             target = ""
 
+    # **broadcast 금지.** 바인딩 없이 생성하면 전원 VSCode 로 뿌려진다.
+    if not target:
+        return {"ok": False, "filename": "", "language": "", "code": "",
+                "error": "본인 VSCode가 연결되지 않았습니다. /recoder link <토큰> 후 다시 시도하세요."}
+
     collected: "list[str]" = []
 
     async def emit(event: dict) -> int:
         if event.get("type") == "chunk":
             collected.append(event.get("text", ""))
         try:
-            if target:
-                return await hub.send_to_student(target, event)
-            return await hub.broadcast(event)
+            return await hub.send_to_student(target, event)
         except Exception:
             return 0
 
