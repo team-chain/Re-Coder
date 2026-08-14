@@ -97,16 +97,27 @@ def _detect_stack(project_path: str) -> tuple[str, dict]:
     )
 
 
-def _detect_db_driver(project_path: str) -> bool:
+def _detect_db_driver(project_path: str) -> Optional[str]:
     """
-    DB 드라이버 존재 여부를 확인해 docker-compose 필요 여부 판단.
+    설정과 의존성에서 DB 엔진을 확인한다.
+
+    ORM 자체(sqlalchemy/prisma/typeorm)나 빈 DATABASE_URL 표시는 엔진을
+    결정하지 못하므로 다중 서비스의 근거로 쓰지 않는다. 엔진을 모르는
+    상태에서 PostgreSQL을 임의로 붙이면 MySQL 프로젝트를 깨뜨리기 때문이다.
 
     Returns:
-        bool: DB 드라이버가 감지되면 True (docker-compose 필요)
+        "postgresql", "mysql", 또는 엔진을 확정할 수 없으면 None
     """
     p = Path(project_path)
     signals: list[str] = []
-    for name in ("requirements.txt", "pyproject.toml", "package.json", ".env.example"):
+    for name in (
+        "requirements.txt",
+        "pyproject.toml",
+        "package.json",
+        ".env",
+        ".env.example",
+        "prisma/schema.prisma",
+    ):
         target = p / name
         if target.exists():
             try:
@@ -117,19 +128,33 @@ def _detect_db_driver(project_path: str) -> bool:
                 pass
 
     content = "\n".join(signals)
-    db_drivers = [
-        "database_url",
-        "psycopg2",
-        "pymysql",
-        "aiomysql",
-        "asyncpg",
-        "sqlalchemy",
-        "prisma",
-        "typeorm",
-        '"pg"',
-        "mysql2",
-    ]
-    return any(d in content for d in db_drivers)
+
+    # 실제 URL 또는 Prisma provider는 설치만 된 드라이버보다 강한 신호다.
+    configured_postgres = bool(re.search(
+        r"(?:postgres(?:ql)?(?:\+[a-z0-9_-]+)?://|"
+        r"provider\s*=\s*['\"]postgresql['\"])",
+        content,
+    ))
+    configured_mysql = bool(re.search(
+        r"(?:mysql(?:\+[a-z0-9_-]+)?://|"
+        r"provider\s*=\s*['\"]mysql['\"])",
+        content,
+    ))
+    if configured_postgres != configured_mysql:
+        return "postgresql" if configured_postgres else "mysql"
+
+    postgres_driver = bool(re.search(
+        r"(?:\bpsycopg(?:2(?:-binary)?|3)?\b|\basyncpg\b|['\"]pg['\"]\s*:)",
+        content,
+    ))
+    mysql_driver = bool(re.search(
+        r"(?:\bpymysql\b|\baiomysql\b|\bmysqlclient\b|"
+        r"\bmysql-connector(?:-python)?\b|['\"]mysql2['\"]\s*:)",
+        content,
+    ))
+    if postgres_driver != mysql_driver:
+        return "postgresql" if postgres_driver else "mysql"
+    return None
 
 
 def _resolve_project_path(project_path: str | Path = ".") -> Path:
@@ -296,7 +321,7 @@ def generate_docker_compose(
         stack, meta = _detect_stack(str(project_root))
         default_port = meta.get("port", "8000")
 
-    has_db = _detect_db_driver(str(project_root))
+    db_engine = _detect_db_driver(str(project_root))
 
     # 템플릿의 {env_file_block} 자리에 넣을 값. **실제로 `.env` 가 있을 때만**
     # env_file 블록을 넣는다. 없으면 빈 문자열이되 **반드시 넘긴다** — render()
@@ -314,7 +339,10 @@ def generate_docker_compose(
 
     # FileRegistry에서 docker-compose 템플릿 가져오기
     registry = get_file_registry()
-    compose_template = "docker-compose-db" if has_db else "docker-compose"
+    compose_template = {
+        "postgresql": "docker-compose-db",
+        "mysql": "docker-compose-mysql",
+    }.get(db_engine, "docker-compose")
     content = registry.render(
         compose_template,
         {
@@ -332,7 +360,7 @@ def generate_docker_compose(
         file_type=FileType.DOCKER_COMPOSE,
         target_path="docker-compose.yml",
         content=content,
-        base_template="db-multi" if has_db else "single",
+        base_template="db-multi" if db_engine else "single",
         risk_level=RiskLevel.LOW,
         approval_level=1,  # 로컬 파일 생성
     )

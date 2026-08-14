@@ -342,15 +342,6 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     );
   };
 
-  if (!isAiReady) {
-    return (
-      <div style={{ padding: 16, color: "var(--vscode-descriptionForeground)", textAlign: "center", fontSize: 12 }}>
-        Ship Mode는 AI Ready가 필요합니다.{" "}
-        <span style={{ color: "#4a9eff" }}>진단 탭에서 확인</span>
-      </div>
-    );
-  }
-
   const fileTabs: { id: InfraFileTab; label: string }[] = [
     { id: "dockerfile", label: "Dockerfile" },
     { id: "compose", label: "Compose" },
@@ -377,6 +368,24 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
 
   return (
     <div style={{ fontFamily: "var(--vscode-font-family, sans-serif)", fontSize: 12, color: "var(--vscode-editor-foreground)" }}>
+
+      {!isAiReady && (
+        <div
+          role="status"
+          style={{
+            marginBottom: 10,
+            padding: "8px 10px",
+            border: "1px solid var(--vscode-notificationsWarningIcon-foreground, #cca700)",
+            borderRadius: 4,
+            color: "var(--vscode-descriptionForeground)",
+            fontSize: 11,
+            lineHeight: 1.5,
+          }}
+        >
+          AI 연결이 없어 인프라 파일은 로컬 템플릿 폴백으로 생성됩니다.
+          Build의 AI 분석 기능은 진단에서 AI Ready를 복구한 뒤 사용할 수 있습니다.
+        </div>
+      )}
 
       {/* ── Section header ── */}
       <div style={{ fontSize: 11, fontWeight: 600, color: "var(--vscode-descriptionForeground, #888)", marginBottom: 10 }}>

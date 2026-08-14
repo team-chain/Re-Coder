@@ -68,13 +68,16 @@ CMD ["npm", "start"]
 # UX 노트:
 # - healthcheck 는 wget(기본)·curl(폴백) 둘 다 시도하는 sh -c 형태로 작성해
 #   alpine/slim 이미지에서도 동작.
-# - {env_file_block} 자리에는 .env.example 이 있으면 'env_file: [".env"]' 가 들어감.
+# - {env_file_block} 자리에는 실제 .env 가 있으면 'env_file: [".env"]' 가 들어감.
 # - {image} 는 'recoder-app:${{IMAGE_TAG:-latest}}' 형태로 받아 git SHA 태깅 가능.
 
 _DOCKER_COMPOSE_BASE = """\
 version: '3.9'
 services:
   app:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: {image}
     container_name: {container_name}
     ports:
@@ -92,6 +95,9 @@ _DOCKER_COMPOSE_WITH_DB = """\
 version: '3.9'
 services:
   app:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: {image}
     container_name: {container_name}
     ports:
@@ -124,6 +130,51 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+volumes:
+  db_data:
+"""
+
+_DOCKER_COMPOSE_WITH_MYSQL = """\
+version: '3.9'
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: {image}
+    container_name: {container_name}
+    ports:
+      - "{host_port}:{container_port}"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+{env_file_block}    environment:
+      DATABASE_URL: mysql://app:app@db:3306/app
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:{container_port}{health_check_path} || curl -fs http://localhost:{container_port}{health_check_path} || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  db:
+    image: mysql:8.4
+    container_name: {container_name}-db
+    restart: unless-stopped
+    environment:
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app
+      MYSQL_DATABASE: app
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uapp -papp --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
 volumes:
   db_data:
@@ -337,6 +388,15 @@ class FileRegistry:
                 template_id="docker-compose-db",
                 file_type="docker-compose",
                 base_content=_DOCKER_COMPOSE_WITH_DB,
+                customizable_sections=[
+                    "image", "container_name", "host_port", "container_port",
+                    "health_check_path", "env_file_block",
+                ],
+            ),
+            "docker-compose-mysql": FileTemplate(
+                template_id="docker-compose-mysql",
+                file_type="docker-compose",
+                base_content=_DOCKER_COMPOSE_WITH_MYSQL,
                 customizable_sections=[
                     "image", "container_name", "host_port", "container_port",
                     "health_check_path", "env_file_block",
