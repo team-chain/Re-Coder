@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
@@ -1507,30 +1508,230 @@ _DOCKERFILE_TEMPLATE_BY_STACK = {
 }
 
 _UNRESOLVED_FILE_TEMPLATE_RE = re.compile(r"\{\{[^{}\r\n]+\}\}")
+_SAFE_NODE_ENTRYPOINT_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+_SAFE_PYTHON_TARGET_RE = re.compile(
+    r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*$"
+)
 
 
-def _dockerfile_template_defaults(workspace_path: str, stack: StackType) -> dict[str, str]:
+def _safe_node_entrypoint(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().strip("\"'").replace("\\", "/")
+    while candidate.startswith("./"):
+        candidate = candidate[2:]
+    if (
+        not candidate
+        or not _SAFE_NODE_ENTRYPOINT_RE.fullmatch(candidate)
+        or candidate.startswith("/")
+        or ".." in candidate.split("/")
+        or Path(candidate).suffix.lower() not in {".js", ".cjs", ".mjs"}
+    ):
+        return None
+    return candidate
+
+
+def _entrypoint_from_node_command(command: object) -> str | None:
+    if not isinstance(command, str):
+        return None
+    match = re.search(
+        r"(?:^|\s)(?:node|nodemon)\s+"
+        r"(?:--[A-Za-z0-9_-]+(?:=[^\s]+)?\s+)*"
+        r"[\"']?([^\"'\s;&|]+)",
+        command,
+    )
+    return _safe_node_entrypoint(match.group(1)) if match else None
+
+
+def _discover_node_entrypoint(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None,
+) -> str:
+    root = Path(workspace_path).expanduser().resolve()
+    package: dict = {}
+    try:
+        loaded = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            package = loaded
+    except (OSError, ValueError):
+        pass
+
+    candidates: list[object] = []
+    scripts = package.get("scripts")
+    if isinstance(scripts, dict):
+        candidates.extend(
+            _entrypoint_from_node_command(scripts.get(name))
+            for name in ("start:prod", "start")
+        )
+    # `scripts.start`는 실제 서버 실행 계약이고 `main`은 라이브러리 export일
+    # 수도 있으므로 start 명령을 우선한다.
+    candidates.append(package.get("main"))
+
+    candidates.extend(
+        path for path in (
+            "index.js", "server.js", "app.js",
+            "src/index.js", "src/server.js", "src/app.js",
+        )
+        if (root / path).is_file()
+    )
+    candidates.append(
+        _entrypoint_from_node_command(
+            getattr(project, "default_run_command", None),
+        )
+    )
+    candidates.append(
+        "dist/main.js" if stack == StackType.NODE_NEST else "index.js"
+    )
+
+    for value in candidates:
+        entrypoint = _safe_node_entrypoint(value)
+        if entrypoint:
+            return entrypoint
+    return "index.js"
+
+
+def _python_module_for_path(root: Path, path: Path) -> str | None:
+    try:
+        parts = list(path.relative_to(root).with_suffix("").parts)
+    except ValueError:
+        return None
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    if not parts or not all(part.isidentifier() for part in parts):
+        return None
+    return ".".join(parts)
+
+
+def _python_source_candidates(root: Path) -> list[Path]:
+    preferred = [
+        root / relative for relative in (
+            "main.py", "app.py", "src/main.py", "src/app.py", "app/main.py",
+        )
+    ]
+    seen = {path for path in preferred}
+    discovered: list[Path] = []
+    try:
+        paths = sorted(root.rglob("*.py"))
+    except OSError:
+        paths = []
+    for path in paths:
+        try:
+            relative_parts = path.relative_to(root).parts[:-1]
+        except ValueError:
+            continue
+        if any(part in _SKIP_DIRS or part.startswith(".") for part in relative_parts):
+            continue
+        if path not in seen:
+            discovered.append(path)
+    return [path for path in preferred if path.is_file()] + discovered
+
+
+def _discover_python_target(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None,
+) -> str:
+    root = Path(workspace_path).expanduser().resolve()
+    if stack == StackType.PYTHON_DJANGO:
+        for path in _python_source_candidates(root):
+            if path.name != "wsgi.py":
+                continue
+            module = _python_module_for_path(root, path)
+            if module:
+                return f"{module}:application"
+        default_target = "config.wsgi:application"
+    else:
+        factory = "FastAPI" if stack == StackType.PYTHON_FASTAPI else "Flask"
+        factory_re = re.compile(
+            rf"^[ \t]*(?P<name>[A-Za-z_]\w*)[ \t]*(?::[^=\n]+)?="
+            rf"[ \t]*(?:[A-Za-z_]\w*\.)?{factory}[ \t]*\(",
+            re.MULTILINE,
+        )
+        for path in _python_source_candidates(root):
+            try:
+                source = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            match = factory_re.search(source)
+            module = _python_module_for_path(root, path)
+            if match and module:
+                return f"{module}:{match.group('name')}"
+        default_target = "main:app" if stack == StackType.PYTHON_FASTAPI else "app:app"
+
+    run_command = getattr(project, "default_run_command", None)
+    if isinstance(run_command, str):
+        match = re.search(
+            r"(?:uvicorn|hypercorn|gunicorn)\s+"
+            r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*)",
+            run_command,
+        )
+        if match and _SAFE_PYTHON_TARGET_RE.fullmatch(match.group(1)):
+            return match.group(1)
+    return default_target
+
+
+def _dockerfile_template_defaults(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None = None,
+) -> dict[str, str]:
     """Return safe, complete values for every registered Dockerfile marker."""
     raw_name = Path(workspace_path).expanduser().resolve().name
     app_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw_name).strip("-.")[:63] or "app"
-    is_node = stack in {
+    node_stacks = {
         StackType.NODE_EXPRESS,
         StackType.NODE_NEXT,
         StackType.NODE_NEST,
     }
+    python_stacks = {
+        StackType.PYTHON_FASTAPI,
+        StackType.PYTHON_FLASK,
+        StackType.PYTHON_DJANGO,
+    }
+    default_ports = {
+        StackType.PYTHON_FASTAPI: 8000,
+        StackType.PYTHON_FLASK: 5000,
+        StackType.PYTHON_DJANGO: 8000,
+        StackType.NODE_EXPRESS: 3000,
+        StackType.NODE_NEXT: 3000,
+        StackType.NODE_NEST: 3000,
+    }
+    detected_port = getattr(project, "default_port", None)
+    port = (
+        detected_port
+        if isinstance(detected_port, int) and not isinstance(detected_port, bool)
+        else default_ports.get(stack, 8000)
+    )
+    detected_health_path = getattr(project, "health_check_path", None)
+    health_path = (
+        detected_health_path
+        if isinstance(detected_health_path, str)
+        and re.fullmatch(r"/[A-Za-z0-9._~%/@+-]*", detected_health_path)
+        else "/health"
+    )
     return {
         "APP_NAME": app_name,
         "PYTHON_VERSION": "3.11",
         "NODE_VERSION": "20",
-        "PORT": "3000" if is_node else "8000",
-        "APP_MODULE": "main",
+        "PORT": str(port),
+        "HEALTH_CHECK_PATH": str(health_path),
+        "APP_TARGET": (
+            _discover_python_target(workspace_path, stack, project)
+            if stack in python_stacks else "main:app"
+        ),
         "START_SCRIPT": (
-            "dist/main.js" if stack == StackType.NODE_NEST else "dist/index.js"
+            _discover_node_entrypoint(workspace_path, stack, project)
+            if stack in node_stacks else "index.js"
         ),
     }
 
 
-def _dockerfile_from_template(workspace_path: str, stack: StackType) -> tuple[str, str]:
+def _dockerfile_from_template(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None = None,
+) -> tuple[str, str]:
     """(내용, 템플릿 id). 미치환 토큰이 있으면 안전한 최소안으로 내린다."""
     from registry import FileTemplateRegistry  # type: ignore
 
@@ -1540,7 +1741,7 @@ def _dockerfile_from_template(workspace_path: str, stack: StackType) -> tuple[st
     try:
         content = FileTemplateRegistry().render(
             template_id,
-            _dockerfile_template_defaults(workspace_path, stack),
+            _dockerfile_template_defaults(workspace_path, stack, project),
         )
         unresolved = _UNRESOLVED_FILE_TEMPLATE_RE.search(content)
         if unresolved:
@@ -1602,6 +1803,7 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
     stack = request.stack or _detect_stack(request.workspace_path)
 
     proposal = None
+    project = None
     ai_note = ""
     agent = _get_infra_agent()
     if agent is not None:
@@ -1611,6 +1813,15 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
         try:
             from project_scanner import get_project_scanner  # type: ignore
             project = get_project_scanner().scan(request.workspace_path)
+            # 호출자가 스택을 명시했으면 파일 휴리스틱보다 우선한다. 서로
+            # 다른 스택에서 계산된 포트/실행 명령까지 가져오면 FastAPI에
+            # Express의 3000/index.js를 적용하는 식의 교차 오염이 생긴다.
+            if request.stack is not None and project.stack != stack:
+                project = project.model_copy(update={
+                    "stack": stack,
+                    "default_port": None,
+                    "default_run_command": None,
+                })
         except Exception:
             # 폴백 — 빈 ProjectProfile (필수 필드만)
             from schemas import ProjectProfile  # type: ignore
@@ -1659,7 +1870,9 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
             )
 
     if proposal is None:
-        content, template_id = _dockerfile_from_template(request.workspace_path, stack)
+        content, template_id = _dockerfile_from_template(
+            request.workspace_path, stack, project,
+        )
         proposal = InfraFileProposal(
             file_type=FileType.DOCKERFILE,
             target_path="Dockerfile",

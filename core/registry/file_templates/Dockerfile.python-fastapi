@@ -1,7 +1,8 @@
 # ==============================================================================
 # ReCoder File Template: Dockerfile.python-fastapi
 # Production-grade Dockerfile for Python / FastAPI applications
-# Placeholders: {{APP_NAME}}, {{PYTHON_VERSION}}, {{PORT}}, {{APP_MODULE}}
+# Placeholders: {{APP_NAME}}, {{PYTHON_VERSION}}, {{PORT}}, {{APP_TARGET}},
+#               {{HEALTH_CHECK_PATH}}
 # ==============================================================================
 
 # ---- Build stage ----
@@ -15,10 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies into a target directory for copying
-COPY requirements.txt .
+# requirements.txt와 pyproject.toml 프로젝트를 모두 지원한다.
+COPY . .
 RUN pip install --upgrade pip && \
-    pip install --prefix=/install --no-cache-dir -r requirements.txt
+    if [ -f requirements.txt ]; then \
+        pip install --prefix=/install --no-cache-dir -r requirements.txt; \
+    elif [ -f pyproject.toml ]; then \
+        pip install --prefix=/install --no-cache-dir .; \
+    fi
 
 # ---- Runtime stage ----
 FROM python:{{PYTHON_VERSION}}-slim AS runtime
@@ -49,7 +54,7 @@ EXPOSE {{PORT}}
 # (python:slim) 에는 없다. curl 로 두면 컨테이너가 항상 UNHEALTHY 가 되고
 # ECS 가 태스크를 무한 재시작한다. python 은 이 이미지에 반드시 있다.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:{{PORT}}/health', timeout=5).status == 200 else 1)" || exit 1
+    CMD python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:{{PORT}}{{HEALTH_CHECK_PATH}}', timeout=5).status == 200 else 1)" || exit 1
 
 # Start application with uvicorn
-CMD ["uvicorn", "{{APP_MODULE}}:app", "--host", "0.0.0.0", "--port", "{{PORT}}", "--workers", "2"]
+CMD ["uvicorn", "{{APP_TARGET}}", "--host", "0.0.0.0", "--port", "{{PORT}}", "--workers", "2"]

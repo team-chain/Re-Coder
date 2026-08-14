@@ -140,8 +140,8 @@ def test_agent_내부_TypeError가_유료호출을_두번_실행하지_않는다
     "stack, expected_lines",
     [
         ("python-fastapi", ("FROM python:3.11-slim", '"main:app"', "EXPOSE 8000")),
-        ("python-flask", ("FROM python:3.11-slim", "gunicorn", "EXPOSE 8000")),
-        ("node-express", ("FROM node:20-alpine", '"dist/index.js"', "EXPOSE 3000")),
+        ("python-flask", ("FROM python:3.11-slim", "gunicorn", "EXPOSE 5000")),
+        ("node-express", ("FROM node:20-alpine", '"index.js"', "EXPOSE 3000")),
         ("node-next", ("FROM node:20-alpine", "ENV PORT=3000", "EXPOSE 3000")),
         ("node-nest", ("FROM node:20-alpine", '"dist/main.js"', "EXPOSE 3000")),
     ],
@@ -220,6 +220,70 @@ def test_AI가_미치환_토큰을_돌려줘도_승인가능한_초안으로_폴
     assert "{{" not in body["content"] and "}}" not in body["content"]
     assert "FROM node:20-alpine" in body["content"]
     assert any("채워지지 않은 템플릿 값" in note for note in body["risk_reasons"])
+
+
+def test_Express_폴백은_manifest의_일반_진입점을_복사하고_실행한다(
+    client, tmp_path, monkeypatch,
+):
+    import api.routes.deploy as deploy_routes
+
+    (tmp_path / "package.json").write_text(
+        json.dumps({
+            "name": "plain-express",
+            "main": "lib/library.js",
+            "scripts": {"start": "node server.js"},
+            "dependencies": {"express": "^5.0.0"},
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "server.js").write_text("require('express')();\n", encoding="utf-8")
+
+    class _AgentThatFails:
+        async def generate_dockerfile(self, *_args, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(deploy_routes, "_get_infra_agent", lambda: _AgentThatFails())
+
+    body = _post(
+        client,
+        "/api/deploy/dockerfile",
+        {"workspace_path": str(tmp_path), "stack": "node-express"},
+    ).json()
+
+    content = body["content"]
+    assert 'CMD ["node", "server.js"]' in content
+    assert "COPY --from=builder --chown=appuser:appgroup /app ./" in content
+    assert "/app/dist ./dist" not in content
+    assert "npm install --omit=dev" in content, "lockfile 없는 npm 프로젝트도 빌드돼야 한다"
+
+
+def test_FastAPI_폴백은_중첩된_실제_ASGI_대상을_실행한다(
+    client, tmp_path, monkeypatch,
+):
+    import api.routes.deploy as deploy_routes
+
+    api_dir = tmp_path / "src" / "api"
+    api_dir.mkdir(parents=True)
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n", encoding="utf-8")
+    (api_dir / "server.py").write_text(
+        "from fastapi import FastAPI\nservice = FastAPI()\n",
+        encoding="utf-8",
+    )
+
+    class _AgentThatFails:
+        async def generate_dockerfile(self, *_args, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(deploy_routes, "_get_infra_agent", lambda: _AgentThatFails())
+
+    body = _post(
+        client,
+        "/api/deploy/dockerfile",
+        {"workspace_path": str(tmp_path), "stack": "python-fastapi"},
+    ).json()
+
+    assert '"src.api.server:service"' in body["content"]
+    assert '"main:app"' not in body["content"]
 
 
 def test_음성대조_AI가_정상이면_폴백_안내가_붙지_않는다(client, workspace, monkeypatch):

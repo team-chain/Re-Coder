@@ -77,6 +77,30 @@ def test_generate_docker_compose(fake_fastapi_project: Path):
     assert "services:" in proposal.content
 
 
+def test_generate_docker_compose_uses_db_template_when_driver_is_detected(
+    fake_fastapi_project: Path,
+):
+    with (fake_fastapi_project / "requirements.txt").open("a", encoding="utf-8") as f:
+        f.write("asyncpg\n")
+
+    proposal = generate_docker_compose(workspace_path=str(fake_fastapi_project))
+
+    assert proposal.base_template == "db-multi"
+    assert "  db:" in proposal.content
+    assert "postgres:16-alpine" in proposal.content
+    assert "DATABASE_URL: postgresql://app:app@db:5432/app" in proposal.content
+
+
+def test_generate_docker_compose_without_driver_stays_single_service(
+    fake_fastapi_project: Path,
+):
+    proposal = generate_docker_compose(workspace_path=str(fake_fastapi_project))
+
+    assert proposal.base_template == "single"
+    assert "  db:" not in proposal.content
+    assert "DATABASE_URL:" not in proposal.content
+
+
 def test_docker_compose_env_file_only_when_env_exists(fake_fastapi_project: Path):
     """[회귀] `.env` 가 실제로 있을 때만 env_file 을 참조한다.
 

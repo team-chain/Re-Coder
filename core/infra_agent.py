@@ -314,8 +314,9 @@ def generate_docker_compose(
 
     # FileRegistry에서 docker-compose 템플릿 가져오기
     registry = get_file_registry()
+    compose_template = "docker-compose-db" if has_db else "docker-compose"
     content = registry.render(
-        "docker-compose",
+        compose_template,
         {
             "image": "recoder-app:latest",
             "container_name": "recoder-app",
