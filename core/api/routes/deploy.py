@@ -1679,6 +1679,75 @@ def _discover_python_target(
     return default_target
 
 
+#: 스캐너가 넣는 값. **탐지 결과가 아니라 하드코딩된 기본값**이다
+#: (core/project_scanner.py). 그래서 이 값과 같으면 "사람이 정한 것" 으로
+#: 볼 수 없고, 스택 관례를 적용해야 한다.
+_SCANNER_DEFAULT_HEALTH_PATH = "/health"
+
+_HEALTH_PATH_RE = re.compile(r"/[A-Za-z0-9._~%/@+-]*")
+
+#: Next.js 의 health 라우트가 놓이는 자리들. App Router / Pages Router,
+#: 그리고 src/ 레이아웃까지 본다.
+_NEXT_HEALTH_CANDIDATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("/api/health", (
+        "app/api/health/route.js", "app/api/health/route.ts",
+        "src/app/api/health/route.js", "src/app/api/health/route.ts",
+        "pages/api/health.js", "pages/api/health.ts",
+        "src/pages/api/health.js", "src/pages/api/health.ts",
+        "pages/api/health/index.js", "pages/api/health/index.ts",
+    )),
+    ("/health", (
+        "app/health/route.js", "app/health/route.ts",
+        "src/app/health/route.js", "src/app/health/route.ts",
+    )),
+)
+
+
+def _discover_health_path(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None = None,
+) -> str:
+    """Dockerfile HEALTHCHECK 가 찌를 경로.
+
+    왜 프로필 값을 그대로 못 쓰는가
+        `project_scanner` 는 `health_check_path="/health"` 를 **하드코딩**한다.
+        탐지한 적이 없다. 그래서 Next.js 처럼 `/api/` 아래에 라우트를 두는
+        스택에서 그대로 쓰면, 렌더된 Dockerfile 이 없는 경로를 찔러
+        **정상 컨테이너가 계속 unhealthy** 가 된다. 예전 node-next 템플릿이
+        `/api/health` 를 박아 뒀던 것도 그래서였는데, 플레이스홀더로 바꾸면서
+        그 지식이 사라졌다.
+
+    순서
+        1. 프로필 값이 기본값과 **다르면** 사람이 정한 것으로 보고 존중한다.
+        2. Next.js 면 실제 라우트 파일을 찾아본다.
+        3. 못 찾으면 스택 관례(Next 는 /api/health), 그 외엔 /health.
+    """
+    configured = getattr(project, "health_check_path", None)
+    if (
+        isinstance(configured, str)
+        and _HEALTH_PATH_RE.fullmatch(configured)
+        and configured != _SCANNER_DEFAULT_HEALTH_PATH
+    ):
+        return configured
+
+    if stack == StackType.NODE_NEXT:
+        try:
+            root = Path(workspace_path).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return "/api/health"
+        for path, candidates in _NEXT_HEALTH_CANDIDATES:
+            if any((root / c).is_file() for c in candidates):
+                return path
+        #: 아무것도 못 찾아도 /health 로 되돌리지 않는다 — Next 에서 그 경로는
+        #: 라우트가 아니라 거의 확실히 404 다.
+        return "/api/health"
+
+    if isinstance(configured, str) and _HEALTH_PATH_RE.fullmatch(configured):
+        return configured
+    return _SCANNER_DEFAULT_HEALTH_PATH
+
+
 def _dockerfile_template_defaults(
     workspace_path: str,
     stack: StackType,
@@ -1711,13 +1780,7 @@ def _dockerfile_template_defaults(
         if isinstance(detected_port, int) and not isinstance(detected_port, bool)
         else default_ports.get(stack, 8000)
     )
-    detected_health_path = getattr(project, "health_check_path", None)
-    health_path = (
-        detected_health_path
-        if isinstance(detected_health_path, str)
-        and re.fullmatch(r"/[A-Za-z0-9._~%/@+-]*", detected_health_path)
-        else "/health"
-    )
+    health_path = _discover_health_path(workspace_path, stack, project)
     return {
         "APP_NAME": app_name,
         "PYTHON_VERSION": "3.11",

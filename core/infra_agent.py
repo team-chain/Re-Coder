@@ -293,6 +293,61 @@ def generate_dockerfile(
     )
 
 
+def compose_health_check_block(
+    stack: str,
+    container_port: str,
+    health_check_path: str = "/health",
+    start_period: str = "10s",
+) -> str:
+    """compose 의 app healthcheck 블록. 못 만들면 **빈 문자열**.
+
+    왜 wget/curl 을 안 쓰는가
+        예전 템플릿은 `wget --spider || curl -fs` 를 박아 뒀는데, 정작
+        우리가 만들어 주는 런타임 이미지에 그 둘이 **모두 없다.**
+        python:slim(Debian slim) 도 node:20-slim 도 담지 않는다.
+        그래서 앱이 멀쩡히 떠 있어도 compose 는 영구히 unhealthy 로 보고하고,
+        `depends_on: condition: service_healthy` 가 걸린 쪽은 아예 못 뜬다.
+        Dockerfile 템플릿 쪽은 같은 이유로 이미 python urllib 로 고쳤는데
+        compose 만 남아 있었다.
+
+    왜 exec 형식(CMD)인가
+        CMD-SHELL 로 두면 YAML 큰따옴표 안에 명령의 따옴표가 또 들어가
+        이스케이프가 깨지기 쉽다. 리스트 형식은 셸을 안 거치므로
+        인용 문제가 아예 없다.
+
+    모르는 스택이면 빈 문자열
+        **항상 실패하는 헬스체크는 없는 것보다 나쁘다.** 정상 컨테이너를
+        unhealthy 로 표시해 재시작 루프를 만든다.
+    """
+    url = f"http://127.0.0.1:{container_port}{health_check_path}"
+
+    if stack.startswith("python"):
+        #: python 은 이 이미지에 반드시 있다. 작은따옴표만 써서 YAML
+        #: 큰따옴표 문자열 안에 그대로 들어가게 한다.
+        probe = (
+            '["CMD", "python", "-c", '
+            f"\"import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('{url}', "
+            'timeout=5).status == 200 else 1)"]'
+        )
+    elif stack.startswith("node"):
+        probe = (
+            '["CMD", "node", "-e", '
+            f"\"require('http').get('{url}', r => process.exit(r.statusCode === 200 ? 0 : 1))"
+            ".on('error', () => process.exit(1))\"]"
+        )
+    else:
+        return ""
+
+    return (
+        "    healthcheck:\n"
+        f"      test: {probe}\n"
+        "      interval: 30s\n"
+        "      timeout: 10s\n"
+        "      retries: 3\n"
+        f"      start_period: {start_period}\n"
+    )
+
+
 def generate_docker_compose(
     project_profile: Optional[ProjectProfile] = None,
     workspace_path: str = ".",
@@ -343,6 +398,8 @@ def generate_docker_compose(
         "postgresql": "docker-compose-db",
         "mysql": "docker-compose-mysql",
     }.get(db_engine, "docker-compose")
+
+    health_path = _compose_health_path(project_profile, stack)
     content = registry.render(
         compose_template,
         {
@@ -350,10 +407,35 @@ def generate_docker_compose(
             "container_name": "recoder-app",
             "host_port": default_port,
             "container_port": default_port,
-            "health_check_path": "/health",
             "env_file_block": env_file_block,
+            "health_check_block": compose_health_check_block(
+                stack,
+                default_port,
+                health_path,
+                start_period="15s" if db_engine else "10s",
+            ),
         },
     )
+
+    # ── build 가 가리키는 Dockerfile 이 실제로 있는가 ────────────────────
+    #
+    # 템플릿은 `build: context: . / dockerfile: Dockerfile` 을 쓴다. 그런데
+    # 「인프라 파일 생성」의 Compose 탭은 Dockerfile 탭보다 **먼저** 눌릴 수
+    # 있고, 이 경로는 Dockerfile 을 만들지 않는다. 그대로 두면 제안은
+    # "생성 성공" 으로 저장되지만 `docker compose up` 은 없는 파일을
+    # 빌드하려다 실패한다 — 사용자는 왜 실패했는지 알 수 없다.
+    #
+    # 여기서 Dockerfile 을 대신 만들어 주지는 **않는다.** Dockerfile 은
+    # 승인 등급이 더 높은(CONFIRM) 산출물이라, compose 생성이 조용히
+    # 끼워 넣으면 사람 승인 원칙(D6)을 우회하게 된다. 대신 무엇을 먼저
+    # 해야 하는지 그대로 말해 준다.
+    risk_reasons: list[str] = []
+    if not (project_root / "Dockerfile").exists():
+        risk_reasons.append(
+            "이 compose 는 같은 폴더의 Dockerfile 을 빌드합니다. 아직 "
+            "Dockerfile 이 없으니 「Dockerfile」 탭에서 먼저 생성·승인하세요. "
+            "그 전에는 docker compose up 이 빌드 단계에서 실패합니다."
+        )
 
     return InfraFileProposal(
         proposal_id=uuid.uuid4().hex,
@@ -363,7 +445,24 @@ def generate_docker_compose(
         base_template="db-multi" if db_engine else "single",
         risk_level=RiskLevel.LOW,
         approval_level=1,  # 로컬 파일 생성
+        risk_reasons=risk_reasons,
     )
+
+
+def _compose_health_path(project_profile: Optional[ProjectProfile], stack: str) -> str:
+    """compose 헬스체크가 찌를 경로.
+
+    스캐너의 `health_check_path` 는 **항상 "/health" 로 하드코딩**되어 있어서
+    (project_scanner.py) 그대로 믿으면 Next.js 처럼 규약이 다른 스택에서
+    없는 경로를 찌른다. 프로필 값이 기본값과 다르면 사람이 정한 것으로 보고
+    존중하고, 기본값 그대로면 스택 관례를 쓴다.
+    """
+    configured = getattr(project_profile, "health_check_path", None) if project_profile else None
+    if isinstance(configured, str) and configured.startswith("/") and configured != "/health":
+        return configured
+    if stack == "node-next":
+        return "/api/health"
+    return "/health"
 
 
 # ReCoder Preflight 게이트 job — CI 워크플로 뒤에 append 된다.

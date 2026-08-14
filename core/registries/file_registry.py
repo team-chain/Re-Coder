@@ -66,10 +66,20 @@ CMD ["npm", "start"]
 # ── docker-compose 템플릿 ─────────────────────────────────────────────
 #
 # UX 노트:
-# - healthcheck 는 wget(기본)·curl(폴백) 둘 다 시도하는 sh -c 형태로 작성해
-#   alpine/slim 이미지에서도 동작.
 # - {env_file_block} 자리에는 실제 .env 가 있으면 'env_file: [".env"]' 가 들어감.
 # - {image} 는 'recoder-app:${{IMAGE_TAG:-latest}}' 형태로 받아 git SHA 태깅 가능.
+#
+# healthcheck 는 **여기 하드코딩하지 않는다.** 예전에는
+#     wget -q --spider ... || curl -fs ...
+# 를 박아 뒀는데, 정작 우리가 만들어 주는 이미지에 그 둘이 **모두 없다.**
+# python:slim 도 node:slim 도 wget/curl 을 담지 않는다(그래서 Dockerfile
+# 템플릿 쪽은 이미 python -c urllib 로 고쳤다). 그 상태로 두면 앱이
+# 정상 기동해도 compose 가 영구히 unhealthy 로 표시하고, depends_on
+# 조건이 걸린 서비스는 아예 못 뜬다. **틀렸는데 예외가 안 나는** 실패라
+# 아무도 모른 채로 남는다.
+# 그래서 스택을 아는 쪽(infra_agent)이 실행 가능한 명령을 만들어
+# {health_check_block} 으로 넣어 준다. 스택을 모르면 블록을 통째로 비운다 —
+# 항상 실패하는 헬스체크보다 없는 편이 낫다.
 
 _DOCKER_COMPOSE_BASE = """\
 version: '3.9'
@@ -83,13 +93,7 @@ services:
     ports:
       - "{host_port}:{container_port}"
     restart: unless-stopped
-{env_file_block}    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:{container_port}{health_check_path} || curl -fs http://localhost:{container_port}{health_check_path} || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-"""
+{env_file_block}{health_check_block}"""
 
 _DOCKER_COMPOSE_WITH_DB = """\
 version: '3.9'
@@ -108,13 +112,7 @@ services:
         condition: service_healthy
 {env_file_block}    environment:
       DATABASE_URL: postgresql://app:app@db:5432/app
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:{container_port}{health_check_path} || curl -fs http://localhost:{container_port}{health_check_path} || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
+{health_check_block}
   db:
     image: postgres:16-alpine
     container_name: {container_name}-db
@@ -152,13 +150,7 @@ services:
         condition: service_healthy
 {env_file_block}    environment:
       DATABASE_URL: mysql://app:app@db:3306/app
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:{container_port}{health_check_path} || curl -fs http://localhost:{container_port}{health_check_path} || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
+{health_check_block}
   db:
     image: mysql:8.4
     container_name: {container_name}-db
@@ -381,7 +373,7 @@ class FileRegistry:
                 base_content=_DOCKER_COMPOSE_BASE,
                 customizable_sections=[
                     "image", "container_name", "host_port", "container_port",
-                    "health_check_path", "env_file_block", "environment",
+                    "health_check_block", "env_file_block", "environment",
                 ],
             ),
             "docker-compose-db": FileTemplate(
@@ -390,7 +382,7 @@ class FileRegistry:
                 base_content=_DOCKER_COMPOSE_WITH_DB,
                 customizable_sections=[
                     "image", "container_name", "host_port", "container_port",
-                    "health_check_path", "env_file_block",
+                    "health_check_block", "env_file_block",
                 ],
             ),
             "docker-compose-mysql": FileTemplate(
@@ -399,7 +391,7 @@ class FileRegistry:
                 base_content=_DOCKER_COMPOSE_WITH_MYSQL,
                 customizable_sections=[
                     "image", "container_name", "host_port", "container_port",
-                    "health_check_path", "env_file_block",
+                    "health_check_block", "env_file_block",
                 ],
             ),
             "github-actions-deploy": FileTemplate(
