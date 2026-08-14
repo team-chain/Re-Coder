@@ -263,14 +263,14 @@ PINNED_ACTIONS: dict[str, str] = {
 #: 그 카드가 끝나면 코드에서 호출이 발견되고, 아래 자기청소 테스트가
 #: "이제 여기서 빼라"고 알려준다.
 PLANNED_ACTIONS: dict[str, str] = {
-    "s3:CreateBucket":       "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:ListBucket":         "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:GetBucketLocation":  "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:PutBucketWebsite":   "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:PutBucketPolicy":    "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:PutObject":          "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:GetObject":          "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:DeleteObject":       "FR-05-03 S3 배포 BYO 전환 — 미착수",
+    # FR-05-03 S3 배포 BYO 전환으로 대부분은 코드가 실제로 쓰게 됐다
+    # (core/api/routes/deploy_s3.py). 아래 셋만 아직 호출이 없다.
+    "s3:GetObject":
+        "FR-05-03 — 배포된 사이트를 코어가 되읽는 경로(배포 검증)가 아직 없다. "
+        "공개 읽기는 버킷 정책이 익명에게 주는 것이라 사용자 IAM 과 무관하다",
+    "s3:DeleteObject":
+        "FR-05-03 후속 — 재배포 시 사라진 파일 정리(prune)가 아직 없다. "
+        "지금은 덮어쓰기만 한다",
 }
 
 

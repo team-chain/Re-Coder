@@ -691,12 +691,15 @@ def _ecs_statements(
 
 
 def _s3_statements(ctx: ArnContext) -> list[dict]:
-    """정적 사이트 배포 (S3).
+    """정적 사이트 배포 (S3, BYO).
 
-    현재 코어에는 BYO S3 업로드 경로가 아직 없다(게이트웨이가 팀 버킷에
-    올린다). FR-05-03「S3 배포 BYO 전환」이 끝나면 이 권한이 쓰인다.
-    미리 넣어두는 이유는, 정책을 두 번 발급받게 하면 사용자가 중간에
-    막히기 때문이다.
+    FR-05-03「S3 배포 BYO 전환」으로 코어가 사용자 계정 버킷에 직접 올린다
+    (core/api/routes/deploy_s3.py). 예전에는 운영자 게이트웨이가 팀 버킷에
+    대신 올려서 이 권한이 쓰이지 않았다.
+
+    PutPublicAccessBlock 이 함께 필요한 이유: 최신 S3 는 공개 버킷 정책을
+    기본 차단한다. 차단을 풀지 않으면 PutBucketPolicy 는 성공하는데 링크만
+    403 이 되어, 원인을 찾기 어렵다.
     """
     # S3 버킷 ARN 은 리전·계정 칸이 비지만 **파티션은 따라간다.**
     bucket = f"arn:{ctx.partition}:s3:::{RESOURCE_PREFIX}-*"
@@ -710,6 +713,7 @@ def _s3_statements(ctx: ArnContext) -> list[dict]:
                 "s3:GetBucketLocation",
                 "s3:PutBucketWebsite",
                 "s3:PutBucketPolicy",
+                "s3:PutBucketPublicAccessBlock",
             ],
             "Resource": bucket,
         },

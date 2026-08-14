@@ -40,6 +40,7 @@ from api.routes import (  # noqa: E402
     analyze,
     deploy,
     deploy_ecs,
+    deploy_s3,
     ops,
     session,
     policy,
@@ -219,6 +220,8 @@ def create_app() -> FastAPI:
     app.include_router(ecs.router)
     # 확장이 부르는 /api/deploy/ecs* 호환 계층 (FR-05-04)
     app.include_router(deploy_ecs.router)
+    # FR-05-03 사용자 계정 S3 정적 배포(BYO)
+    app.include_router(deploy_s3.router)
     app.include_router(gitops.router)
     app.include_router(incident.router)
     app.include_router(workbench.router)
