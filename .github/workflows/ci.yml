@@ -75,3 +75,37 @@ jobs:
       - name: 웹뷰 렌더 테스트
         working-directory: extension
         run: npm run test:webview
+
+  # ── Watchdog 감시 로직 ─────────────────────────────────────────────────
+  # 왜 필요한가: 이상 판정은 **틀려도 예외가 안 난다.** 너무 민감하면 멀쩡한
+  # 배포마다 롤백을 권해 사람이 경고를 무시하게 되고, 너무 둔감하면 죽은 앱을
+  # 정상이라고 말한다. 둘 다 조용히 일어나므로 검사를 게이팅에 넣는다.
+  watchdog:
+    name: pytest (watchdog)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 준비
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: core/requirements-dev.txt
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          # ECS 검사는 moto 로 실제 서비스를 만들어 돌린다. 응답 모양을
+          # 상상해서 쓰면 그 상상이 틀렸을 때 테스트만 통과한다.
+          pip install -r core/requirements-dev.txt
+
+      - name: 테스트 실행
+        working-directory: watchdog
+        env:
+          PYTHONPATH: .
+        run: |
+          pytest tests/ -q

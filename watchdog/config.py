@@ -43,6 +43,20 @@ ENV_SPAM_WINDOW = ENV_PREFIX + "SPAM_WINDOW_SECONDS"
 ENV_HEALTH_TIMEOUT = ENV_PREFIX + "HEALTH_TIMEOUT"
 ENV_DEPLOYMENT_ID = ENV_PREFIX + "DEPLOYMENT_ID"
 
+# ── ECS/CloudWatch 감시 (FR-06-01/02) ────────────────────────────────
+# 비워 두면 ECS 감시를 하지 않는다. 로컬 도커만 쓰는 설치에서도 그대로 돈다.
+ENV_ECS_CLUSTER = ENV_PREFIX + "ECS_CLUSTER"
+ENV_ECS_SERVICE = ENV_PREFIX + "ECS_SERVICE"
+ENV_AWS_REGION = ENV_PREFIX + "AWS_REGION"
+ENV_ALB_NAME = ENV_PREFIX + "ALB_NAME"
+ENV_TARGET_GROUP = ENV_PREFIX + "TARGET_GROUP"
+ENV_ECS_INTERVAL = ENV_PREFIX + "ECS_INTERVAL"
+ENV_ECS_WINDOW = ENV_PREFIX + "ECS_WINDOW_SECONDS"
+ENV_ERROR_RATE = ENV_PREFIX + "ERROR_RATE_THRESHOLD"
+ENV_MIN_REQUESTS = ENV_PREFIX + "MIN_REQUESTS"
+ENV_P95_SECONDS = ENV_PREFIX + "P95_THRESHOLD_SECONDS"
+ENV_UNHEALTHY_POLLS = ENV_PREFIX + "UNHEALTHY_POLLS"
+
 
 # ---------------------------------------------------------------------------
 # Config dataclass
@@ -65,7 +79,26 @@ class WatchdogConfig:
     spam_window_seconds: float = 60.0
     health_timeout_seconds: float = 5.0
     deployment_id: Optional[str] = None
+    # ── ECS/CloudWatch 감시 (FR-06-01/02) ────────────────────────────
+    #: 클러스터·서비스가 둘 다 있어야 ECS 감시를 켠다. 로컬 도커만 쓰는
+    #: 설치에서는 비어 있고, 그때는 이 경로가 통째로 꺼진다.
+    ecs_cluster: str = ""
+    ecs_service: str = ""
+    aws_region: str = ""
+    alb_name: str = ""
+    target_group: str = ""
+    ecs_interval_seconds: float = 60.0
+    #: 지표 관측 창. 배포 직후 집중 감시도 같은 길이를 쓴다(기본 5분).
+    ecs_window_seconds: int = 300
+    error_rate_threshold: float = 0.05
+    min_requests: int = 20
+    p95_threshold_seconds: float = 3.0
+    unhealthy_polls: int = 3
     extra: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def ecs_enabled(self) -> bool:
+        return bool(self.ecs_cluster and self.ecs_service)
 
     def summary(self) -> str:
         return (
@@ -188,6 +221,21 @@ def load_config(dotenv_path: Optional[Path] = None) -> WatchdogConfig:
         spam_window_seconds=_to_float(os.environ.get(ENV_SPAM_WINDOW), 60.0),
         health_timeout_seconds=_to_float(os.environ.get(ENV_HEALTH_TIMEOUT), 5.0),
         deployment_id=(os.environ.get(ENV_DEPLOYMENT_ID, "").strip() or None),
+        ecs_cluster=os.environ.get(ENV_ECS_CLUSTER, "").strip(),
+        ecs_service=os.environ.get(ENV_ECS_SERVICE, "").strip(),
+        aws_region=(
+            os.environ.get(ENV_AWS_REGION, "").strip()
+            or os.environ.get("AWS_REGION", "").strip()
+            or os.environ.get("AWS_DEFAULT_REGION", "").strip()
+        ),
+        alb_name=os.environ.get(ENV_ALB_NAME, "").strip(),
+        target_group=os.environ.get(ENV_TARGET_GROUP, "").strip(),
+        ecs_interval_seconds=max(15.0, _to_float(os.environ.get(ENV_ECS_INTERVAL), 60.0)),
+        ecs_window_seconds=max(60, _to_int(os.environ.get(ENV_ECS_WINDOW), 300)),
+        error_rate_threshold=_to_float(os.environ.get(ENV_ERROR_RATE), 0.05),
+        min_requests=_to_int(os.environ.get(ENV_MIN_REQUESTS), 20),
+        p95_threshold_seconds=_to_float(os.environ.get(ENV_P95_SECONDS), 3.0),
+        unhealthy_polls=_to_int(os.environ.get(ENV_UNHEALTHY_POLLS), 3),
     )
     return cfg
 

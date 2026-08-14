@@ -67,6 +67,11 @@ try:
     )
     from .masking import MASK_VERSION, mask_lines, mask_text
     from .notifier import notify_discord
+    from .cloudwatch_monitor import (
+        CloudWatchUnavailableError, EcsTarget,
+        collect_service_health, collect_traffic_metrics,
+    )
+    from .cloudwatch_thresholds import Thresholds, judge, next_unhealthy_streak
 except ImportError:  # 스크립트로 직접 실행될 때
     # /opt/recoder/watchdog/recoder_watchdog.py 처럼 절대 경로 실행 케이스
     _here = Path(__file__).resolve().parent
@@ -86,6 +91,13 @@ except ImportError:  # 스크립트로 직접 실행될 때
     )
     from watchdog.masking import MASK_VERSION, mask_lines, mask_text  # type: ignore
     from watchdog.notifier import notify_discord  # type: ignore
+    from watchdog.cloudwatch_monitor import (  # type: ignore
+        CloudWatchUnavailableError, EcsTarget,
+        collect_service_health, collect_traffic_metrics,
+    )
+    from watchdog.cloudwatch_thresholds import (  # type: ignore
+        Thresholds, judge, next_unhealthy_streak,
+    )
 
 
 log = logging.getLogger("recoder.watchdog")
@@ -173,6 +185,9 @@ class RecoderWatchdog:
         self._events_stream: Optional[DockerEventStream] = None
         self._last_health_run_at: float = 0.0
         self._docker_unavailable_since: Optional[float] = None
+        #: ECS 가 연속으로 목표치를 못 채운 횟수. 정상으로 돌아오면 0 이 된다.
+        self._ecs_unhealthy_streak: int = 0
+        self._ecs_unavailable_since: Optional[float] = None
         # 최근 알림 정보 (디버그/테스트용)
         self._recent_alerts: Deque[Dict[str, Any]] = deque(maxlen=100)
 
@@ -208,6 +223,7 @@ class RecoderWatchdog:
 
         next_poll_at = 0.0
         next_health_at = 0.0
+        next_ecs_at = 0.0
         try:
             while not self.shutdown_event.is_set():
                 now = time.monotonic()
@@ -217,6 +233,9 @@ class RecoderWatchdog:
                 if now >= next_health_at:
                     self._safe_health_checks()
                     next_health_at = now + self.cfg.health_interval_seconds
+                if self.cfg.ecs_enabled and now >= next_ecs_at:
+                    self._safe_poll_ecs()
+                    next_ecs_at = now + self.cfg.ecs_interval_seconds
                 # 짧게 sleep — shutdown 신호 빠른 반응
                 self.shutdown_event.wait(timeout=min(1.0, self.cfg.poll_interval_seconds))
         except Exception as exc:  # noqa: BLE001 — 메인 루프 보호
@@ -226,6 +245,116 @@ class RecoderWatchdog:
             self._stop_events_thread()
             log.info("recoder watchdog stopped")
         return 0
+
+    # -----------------------------------------------------------------
+    # ECS / CloudWatch polling (FR-06-01/02)
+    # -----------------------------------------------------------------
+
+    def _safe_poll_ecs(self) -> None:
+        """AWS 를 못 읽어도 데몬을 죽이지 않는다.
+
+        다만 **조용히 넘어가지도 않는다.** 감시가 꺼진 것을 정상으로 두면,
+        앱이 죽어도 아무 알림이 안 온다. 일정 시간 이상 계속 못 읽으면
+        그 자체를 알린다(docker daemon 이 죽었을 때와 같은 규약).
+        """
+        try:
+            self._poll_ecs()
+            self._ecs_unavailable_since = None
+        except CloudWatchUnavailableError as exc:
+            now = time.time()
+            if self._ecs_unavailable_since is None:
+                self._ecs_unavailable_since = now
+            log.warning("ECS 감시 실패: %s", exc)
+            if now - self._ecs_unavailable_since >= 180:
+                self._emit_alert(
+                    alert_type="ecs_monitoring_unavailable",
+                    severity="warning",
+                    container_name=f"{self.cfg.ecs_cluster}/{self.cfg.ecs_service}",
+                    message=(
+                        f"3분 넘게 ECS 상태를 읽지 못했습니다 — 이 서비스는 지금 "
+                        f"감시되지 않고 있습니다. AWS 자격증명과 권한을 확인하세요. ({exc})"
+                    ),
+                    logs_excerpt=[],
+                    health_check_result={},
+                    metric_snapshot={},
+                )
+                self._ecs_unavailable_since = now      # 재알림 간격 확보
+        except Exception as exc:  # noqa: BLE001 — 감시 루프 보호
+            # **예기치 못한 오류도 "감시 안 됨" 으로 센다.**
+            #
+            # 여기서 그냥 로그만 남기고 넘어가면, 원인이 무엇이든 계속 실패하는
+            # 동안 사용자에게는 아무 알림이 안 간다. 앱이 죽어도 조용하다 —
+            # 이 기능에서 가장 위험한 실패 방식이다. 그래서 위 분기와 같은
+            # 타이머를 공유해, 오래 이어지면 반드시 드러나게 한다.
+            #
+            # (import 경로가 갈려 CloudWatchUnavailableError 의 클래스 객체가
+            #  달라지는 경우처럼, 전용 분기를 비껴가는 상황이 실제로 있다.)
+            log.exception("ECS 감시 중 예기치 못한 오류: %s", exc)
+            now = time.time()
+            if self._ecs_unavailable_since is None:
+                self._ecs_unavailable_since = now
+            if now - self._ecs_unavailable_since >= 180:
+                self._emit_alert(
+                    alert_type="ecs_monitoring_unavailable",
+                    severity="warning",
+                    container_name=f"{self.cfg.ecs_cluster}/{self.cfg.ecs_service}",
+                    message=(
+                        f"3분 넘게 ECS 상태를 읽지 못했습니다 — 이 서비스는 지금 "
+                        f"감시되지 않고 있습니다. ({exc.__class__.__name__}: {exc})"
+                    ),
+                    logs_excerpt=[],
+                    health_check_result={},
+                    metric_snapshot={},
+                )
+                self._ecs_unavailable_since = now
+
+    def _poll_ecs(self) -> None:
+        target = EcsTarget(
+            cluster=self.cfg.ecs_cluster,
+            service=self.cfg.ecs_service,
+            region=self.cfg.aws_region,
+            load_balancer=self.cfg.alb_name,
+            target_group=self.cfg.target_group,
+        )
+        window = self.cfg.ecs_window_seconds
+
+        health = collect_service_health(target, window_seconds=window)
+        metrics = collect_traffic_metrics(target, window_seconds=window)
+
+        # 연속 미달 횟수는 **판정 전에** 갱신한다 — 이번 관측을 포함해서 센다.
+        self._ecs_unhealthy_streak = next_unhealthy_streak(health, self._ecs_unhealthy_streak)
+
+        thresholds = Thresholds(
+            error_rate=self.cfg.error_rate_threshold,
+            min_requests=self.cfg.min_requests,
+            p95_seconds=self.cfg.p95_threshold_seconds,
+            unhealthy_polls=self.cfg.unhealthy_polls,
+        )
+        anomalies = judge(health, metrics, thresholds, self._ecs_unhealthy_streak)
+
+        snapshot = {
+            "running": health.running,
+            "desired": health.desired,
+            "pending": health.pending,
+            "stopped_recently": health.stopped_recently,
+            "requests": metrics.requests,
+            "errors_5xx": metrics.errors_5xx,
+            "error_rate": metrics.error_rate,
+            "p95_seconds": metrics.p95_seconds,
+            "window_seconds": window,
+        }
+        log.debug("ECS 상태 %s", snapshot)
+
+        for anomaly in anomalies:
+            self._emit_alert(
+                alert_type=anomaly.alert_type,
+                severity=anomaly.severity,
+                container_name=f"{self.cfg.ecs_cluster}/{self.cfg.ecs_service}",
+                message=anomaly.message,
+                logs_excerpt=[],
+                health_check_result={},
+                metric_snapshot={**snapshot, **anomaly.metrics},
+            )
 
     # -----------------------------------------------------------------
     # Container polling
