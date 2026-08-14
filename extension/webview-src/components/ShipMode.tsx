@@ -74,7 +74,7 @@ export function shouldRunDockerPipeline(fileType: string): boolean {
   return fileType === INFRA_FILE_TYPE_BY_TAB.dockerfile;
 }
 
-type Step =
+export type Step =
   | "idle"
   | "generating"
   | "preview"
@@ -88,6 +88,20 @@ type Step =
   | "healthCheck"
   | "done"
   | "error";
+
+const SECURITY_SCAN_BLOCKING_STEPS: ReadonlySet<Step> = new Set([
+  "generating",
+  "saving",
+  "scanning",
+  "planning",
+  "planReady",
+  "deploying",
+  "healthCheck",
+]);
+
+export function canRunSecurityScan(step: Step): boolean {
+  return !SECURITY_SCAN_BLOCKING_STEPS.has(step);
+}
 
 // ---------------------------------------------------------------------------
 // ShipMode
@@ -351,6 +365,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const matchesTab = !!proposal && proposal.file_type === INFRA_FILE_TYPE_BY_TAB[activeFileTab];
   const activeFileLabel = infraFileLabelForTab(activeFileTab);
   const canSwitchFileTab = ["idle", "preview", "saved", "done", "error"].includes(step);
+  const securityScanEnabled = canRunSecurityScan(step);
   const activeContent = matchesTab ? proposal!.content : null;
   const stackComment = matchesTab
     ? `# 스택: ${proposal!.base_template ?? "auto-detected"}`
@@ -594,13 +609,14 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         {/* 보안 스캔 button */}
         {activeFileTab === "dockerfile" && <button
           onClick={() => {
+            if (!securityScanEnabled) { return; }
             if (step === "preview" && proposal && matchesTab) {
               handleApproveInfraFile(); // saves then triggers scan
             } else {
               postMessage("runScan", { scanType: "trivy", workspacePath: "" });
             }
           }}
-          disabled={step === "generating" || step === "scanning"}
+          disabled={!securityScanEnabled}
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -612,8 +628,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             padding: "6px 12px",
             fontSize: 12,
             fontWeight: 500,
-            cursor: step === "generating" || step === "scanning" ? "not-allowed" : "pointer",
-            opacity: step === "generating" || step === "scanning" ? 0.5 : 1,
+            cursor: securityScanEnabled ? "pointer" : "not-allowed",
+            opacity: securityScanEnabled ? 1 : 0.5,
           }}
         >
           <span>🔒</span> 보안 스캔
