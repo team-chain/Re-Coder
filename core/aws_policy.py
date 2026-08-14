@@ -497,7 +497,6 @@ def _ecs_statements(
             "Effect": "Allow",
             "Action": [
                 "ecs:RegisterTaskDefinition",
-                "ecs:DescribeTaskDefinition",
             ],
             "Resource": "*",
         },
