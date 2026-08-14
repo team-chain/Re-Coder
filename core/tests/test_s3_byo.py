@@ -218,3 +218,59 @@ def test_오류_문서도_index_html_로_보낸다():
     config = s3_byo.website_configuration()
     assert config["IndexDocument"]["Suffix"] == "index.html"
     assert config["ErrorDocument"]["Key"] == "index.html"
+
+
+# ---------------------------------------------------------------------------
+# 파티션 (Codex 코드리뷰 P2 — 중국·GovCloud 리전)
+# ---------------------------------------------------------------------------
+#
+# aws_policy.py 는 이미 파티션을 구분해 ARN 을 만든다. 여기만 arn:aws / 
+# amazonaws.com 을 못 박으면, 그 정책으로 이 경로에 도달할 수는 있는데
+# PutBucketPolicy 의 Resource 가 안 맞고 공개 URL 도 안 열린다.
+
+
+@pytest.mark.parametrize(
+    "region, expected",
+    [
+        ("us-east-1", "aws"),
+        ("ap-northeast-2", "aws"),
+        ("cn-north-1", "aws-cn"),
+        ("cn-northwest-1", "aws-cn"),
+        ("us-gov-west-1", "aws-us-gov"),
+    ],
+)
+def test_리전에서_파티션을_끌어낸다(region, expected):
+    assert s3_byo.partition_for_region(region) == expected
+
+
+def test_중국_리전은_DNS_접미사가_다르다():
+    """접미사를 틀리면 버킷 생성·설정은 다 되는데 **URL 만** 안 열린다."""
+    assert s3_byo.dns_suffix_for_region("cn-north-1") == "amazonaws.com.cn"
+    assert s3_byo.dns_suffix_for_region("us-east-1") == "amazonaws.com"
+
+
+def test_중국_리전_웹사이트_URL(): 
+    url = s3_byo.website_url("b", "cn-north-1")
+    assert url.endswith(".amazonaws.com.cn"), url
+    assert "cn-north-1" in url
+
+
+def test_음성대조_일반_리전_URL_은_그대로다():
+    # 전부 .cn 을 붙이면 위 검사는 통과해도 실제 사용자는 다 깨진다.
+    assert s3_byo.website_url("b", "us-east-1").endswith(".amazonaws.com")
+    assert not s3_byo.website_url("b", "ap-northeast-2").endswith(".cn")
+
+
+def test_공개_정책_ARN_이_파티션을_따라간다():
+    policy = s3_byo.public_read_policy("mybucket", "cn-north-1")
+    assert policy["Statement"][0]["Resource"] == "arn:aws-cn:s3:::mybucket/*"
+
+
+def test_음성대조_일반_리전_정책_ARN_은_arn_aws():
+    policy = s3_byo.public_read_policy("mybucket", "us-east-1")
+    assert policy["Statement"][0]["Resource"] == "arn:aws:s3:::mybucket/*"
+
+
+def test_리전을_안_주면_기본_파티션(): 
+    """호출부가 리전을 빠뜨려도 기존 동작(arn:aws)이 유지돼야 한다."""
+    assert s3_byo.public_read_policy("b")["Statement"][0]["Resource"].startswith("arn:aws:")

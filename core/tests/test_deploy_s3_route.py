@@ -173,3 +173,123 @@ def test_음성대조_정상_배포는_오류_필드를_달지_않는다(client)
     body = _deploy(client).json()
     assert "detail" not in body
     assert body["index_copied_from"] is None
+
+
+# ---------------------------------------------------------------------------
+# Codex 코드리뷰 P2 — 프로필·자격증명·기존 버킷 리전
+# ---------------------------------------------------------------------------
+
+
+def test_리전은_요청한_프로필에서_뽑는다(monkeypatch):
+    """자격증명과 리전이 **다른 프로필**에서 오면 엉뚱한 리전에 배포된다.
+
+    예전에는 리전을 `_deployment_identity()` 로 구했는데, 그건 전역 활성
+    프로필을 본다. 요청이 profile 을 지정하면 자격증명은 그 프로필, 리전은
+    다른 프로필이 되어, 다른 리전용으로 설정된 프로필이 **조용히** 엉뚱한
+    리전에 올린다.
+    """
+    from api.routes import aws as aws_routes
+    from api.routes import deploy_s3
+
+    seen: dict[str, object] = {}
+
+    class _Session:
+        def __init__(self, profile, region):
+            self.profile = profile
+            #: 프로필이 자기 리전을 들고 있는 상황을 흉내낸다.
+            self.region_name = region or ("eu-central-1" if profile == "lab" else "us-east-1")
+
+    def _fake_build(profile=None, region=None):
+        seen["profile"] = profile
+        return _Session(profile, region)
+
+    monkeypatch.setattr(aws_routes, "_build_boto3_session", _fake_build)
+    monkeypatch.setattr(aws_routes, "_effective_profile", lambda: "default-profile")
+
+    session, region = deploy_s3._session_and_region("lab", "")
+
+    assert seen["profile"] == "lab", "요청한 프로필로 세션을 안 만들었다"
+    assert region == "eu-central-1", (
+        f"자격증명은 lab 프로필인데 리전이 {region} 이다 — 다른 프로필의 리전을 쓴 것"
+    )
+    assert session.profile == "lab"
+
+
+def test_음성대조_요청이_리전을_주면_그게_이긴다(monkeypatch):
+    """프로필 리전이 항상 이기면 사용자가 리전을 고를 수 없다."""
+    from api.routes import aws as aws_routes
+    from api.routes import deploy_s3
+
+    class _Session:
+        def __init__(self, region):
+            self.region_name = region or "eu-central-1"
+
+    monkeypatch.setattr(
+        aws_routes, "_build_boto3_session", lambda profile=None, region=None: _Session(region),
+    )
+    monkeypatch.setattr(aws_routes, "_effective_profile", lambda: "")
+
+    _, region = deploy_s3._session_and_region("lab", "ap-northeast-2")
+    assert region == "ap-northeast-2"
+
+
+@mock_aws
+def test_자격증명이_없으면_500이_아니라_401과_할_일을_알려준다(client, monkeypatch):
+    """NoCredentialsError 는 ClientError 가 아니라 BotoCoreError 다.
+
+    예전에는 그래서 핸들러를 지나쳐 바깥 catch-all 의 500 + 원문 예외로
+    나갔고, 정작 사용자가 해야 할 일(AWS 연결)은 어디에도 없었다.
+    """
+    from botocore.exceptions import NoCredentialsError
+
+    from api.routes import deploy_s3
+
+    class _Sts:
+        def get_caller_identity(self):
+            raise NoCredentialsError()
+
+    class _Session:
+        region_name = REGION
+
+        def client(self, name, **_kw):
+            if name == "sts":
+                return _Sts()
+            raise AssertionError(f"sts 이후로 진행되면 안 된다: {name}")
+
+    monkeypatch.setattr(
+        deploy_s3, "_session_and_region", lambda *_a, **_k: (_Session(), REGION),
+    )
+
+    resp = _deploy(client)
+    assert resp.status_code == 401, f"{resp.status_code} {resp.text[:200]}"
+    assert "자격증명" in resp.json()["detail"]
+
+
+@mock_aws
+def test_이미_다른_리전에_있는_버킷이면_그_리전_URL_을_돌려준다(client):
+    """버킷 이름은 리전과 무관하게 유일하다.
+
+    처음 us-east-1 에 만든 뒤 다른 리전으로 배포하면 head_bucket 은 그냥
+    성공한다. 요청 리전으로 URL 을 만들면 **그 주소에는 이 버킷이 없다.**
+    """
+    first = _deploy(client).json()          # us-east-1 에 생성
+    bucket = first["bucket"]
+
+    second = _deploy(client, region="ap-northeast-2").json()
+
+    assert second["bucket"] == bucket
+    assert second["region"] == "us-east-1", (
+        f"버킷은 us-east-1 에 있는데 응답 리전이 {second['region']} 이다"
+    )
+    assert "us-east-1" in second["url"], second["url"]
+    assert "ap-northeast-2" not in second["url"]
+    assert "us-east-1" in second["message"], "리전이 바뀐 사실을 사용자에게 안 알렸다"
+
+
+@mock_aws
+def test_음성대조_같은_리전_재배포는_안내를_덧붙이지_않는다(client):
+    """항상 안내가 붙으면 위 검사는 의미가 없고 사용자는 문구를 무시하게 된다."""
+    _deploy(client)
+    again = _deploy(client).json()
+    assert again["region"] == REGION
+    assert "이미" not in again["message"], again["message"]

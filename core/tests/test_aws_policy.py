@@ -259,9 +259,6 @@ PINNED_ACTIONS: dict[str, str] = {
 PLANNED_ACTIONS: dict[str, str] = {
     # FR-05-03 S3 배포 BYO 전환으로 대부분은 코드가 실제로 쓰게 됐다
     # (core/api/routes/deploy_s3.py). 아래 셋만 아직 호출이 없다.
-    "s3:GetBucketLocation":
-        "FR-05-03 — 배포 후 버킷 리전 확인 UI 가 붙으면 쓰인다. 지금은 "
-        "요청 리전을 그대로 신뢰한다",
     "s3:GetObject":
         "FR-05-03 — 배포된 사이트를 코어가 되읽는 경로(배포 검증)가 아직 없다. "
         "공개 읽기는 버킷 정책이 익명에게 주는 것이라 사용자 IAM 과 무관하다",

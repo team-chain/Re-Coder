@@ -68,6 +68,35 @@ class S3DeployError(ValueError):
 
 
 # ---------------------------------------------------------------------------
+# 파티션 (aws / aws-cn / aws-us-gov)
+# ---------------------------------------------------------------------------
+#
+# aws_policy.py 가 이미 파티션을 구분해 ARN 을 만든다. 여기만 `arn:aws:` 와
+# `amazonaws.com` 을 못 박으면, 그 정책으로는 이 경로에 도달할 수 있는데
+# 정작 PutBucketPolicy 의 Resource 가 안 맞고 공개 URL 도 열리지 않는다.
+# 한쪽만 파티션을 알면 나머지 한쪽에서 조용히 어긋난다.
+
+
+def partition_for_region(region: str) -> str:
+    """리전 → AWS 파티션 이름."""
+    r = (region or "").strip().lower()
+    if r.startswith("cn-"):
+        return "aws-cn"
+    if r.startswith("us-gov-"):
+        return "aws-us-gov"
+    return "aws"
+
+
+def dns_suffix_for_region(region: str) -> str:
+    """리전 → 엔드포인트 DNS 접미사.
+
+    중국 리전만 `amazonaws.com.cn` 을 쓴다. 이걸 틀리면 버킷 생성과 웹사이트
+    설정은 다 성공하는데 **돌려준 URL 만 열리지 않는다.**
+    """
+    return "amazonaws.com.cn" if partition_for_region(region) == "aws-cn" else "amazonaws.com"
+
+
+# ---------------------------------------------------------------------------
 # 이름 · 경로
 # ---------------------------------------------------------------------------
 
@@ -204,9 +233,15 @@ def plan_upload(files: list[dict]) -> UploadPlan:
 
 
 def website_url(bucket: str, region: str) -> str:
-    """정적 웹사이트 호스팅 엔드포인트 URL."""
+    """정적 웹사이트 호스팅 엔드포인트 URL.
+
+    두 가지를 리전에서 끌어낸다.
+      · 구분자 — 초기 리전은 `s3-website-<region>`, 이후 리전은 `s3-website.<region>`
+      · DNS 접미사 — 중국 리전만 `amazonaws.com.cn`
+    둘 중 하나만 틀려도 업로드는 성공하는데 링크만 안 열린다.
+    """
     separator = "-" if region in _DASH_WEBSITE_REGIONS else "."
-    return f"http://{bucket}.s3-website{separator}{region}.amazonaws.com"
+    return f"http://{bucket}.s3-website{separator}{region}.{dns_suffix_for_region(region)}"
 
 
 def create_bucket_kwargs(bucket: str, region: str) -> dict:
@@ -222,11 +257,15 @@ def create_bucket_kwargs(bucket: str, region: str) -> dict:
     return kwargs
 
 
-def public_read_policy(bucket: str) -> dict:
+def public_read_policy(bucket: str, region: str = "") -> dict:
     """정적 사이트를 열 수 있게 하는 최소 버킷 정책.
 
     **읽기만** 허용한다. 쓰기를 열면 아무나 사이트를 덮어쓸 수 있다.
+
+    Resource ARN 의 파티션은 리전에서 끌어낸다. `arn:aws:` 로 못 박으면
+    중국 리전(aws-cn)에서 PutBucketPolicy 가 리소스를 못 맞춘다.
     """
+    partition = partition_for_region(region)
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -235,7 +274,7 @@ def public_read_policy(bucket: str) -> dict:
                 "Effect": "Allow",
                 "Principal": "*",
                 "Action": "s3:GetObject",
-                "Resource": f"arn:aws:s3:::{bucket}/*",
+                "Resource": f"arn:{partition}:s3:::{bucket}/*",
             }
         ],
     }
