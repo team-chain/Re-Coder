@@ -782,7 +782,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         log.info("config: %s", cfg.summary())
         ok = docker_is_healthy()
         log.info("docker daemon healthy: %s", ok)
+        #: 설정 실수는 여기서 잡아야 한다. 데몬을 띄운 뒤에는 3분을 기다려야
+        #: 알림으로 드러나고, 그 전까지는 감시가 도는 것처럼 보인다.
+        problem = cfg.ecs_config_problem()
+        if problem:
+            log.error("ECS 감시 설정 오류: %s", problem)
+            return 1
+        if not cfg.ecs_enabled:
+            log.info(
+                "ECS 감시: 꺼짐 (RECODER_WATCHDOG_ECS_CLUSTER/ECS_SERVICE 미설정) "
+                "— 배포된 앱은 감시되지 않습니다"
+            )
         return 0 if ok else 1
+
+    #: 켠 줄 알았는데 안 켜진 경우를 기동 시점에 드러낸다.
+    problem = cfg.ecs_config_problem()
+    if problem:
+        log.error("ECS 감시 설정 오류: %s", problem)
 
     wd = RecoderWatchdog(cfg)
     return wd.run()

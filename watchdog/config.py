@@ -100,13 +100,38 @@ class WatchdogConfig:
     def ecs_enabled(self) -> bool:
         return bool(self.ecs_cluster and self.ecs_service)
 
+    def ecs_config_problem(self) -> Optional[str]:
+        """ECS 감시를 켰는데 못 도는 설정이면 그 이유. 문제 없으면 None.
+
+        **설정 실수는 조용히 실패한다.** 리전을 빼먹으면 botocore 가
+        `Invalid endpoint: https://ecs..amazonaws.com` 을 낼 뿐이라 로그를
+        봐도 무엇을 고쳐야 하는지 알 수 없고, 그 사이 사람들은 감시가 도는
+        줄 안다.
+        """
+        if not self.ecs_enabled:
+            return None
+        if not self.aws_region.strip():
+            return (
+                "ECS 감시를 켰지만 리전이 없습니다 — RECODER_WATCHDOG_AWS_REGION "
+                "(또는 AWS_REGION) 을 설정하세요."
+            )
+        return None
+
     def summary(self) -> str:
+        #: ECS 감시 여부를 요약에 넣는다. 안 넣으면 `--check` 로도 감시가
+        #: 켜졌는지 알 수 없어, 꺼진 채로 돌아도 아무도 모른다.
+        if self.ecs_enabled:
+            ecs = (f"{self.ecs_cluster}/{self.ecs_service}@"
+                   f"{self.aws_region or '리전없음'} alb={'yes' if self.alb_name else 'no'}")
+        else:
+            ecs = "off"
         return (
             f"project_id={self.project_id} host={self.host} env={self.environment} "
             f"poll={self.poll_interval_seconds}s health={self.health_interval_seconds}s "
             f"incident_path={self.incident_path} "
             f"discord_configured={'yes' if self.discord_webhook_url else 'no'} "
-            f"health_urls={list(self.health_check_urls.keys())}"
+            f"health_urls={list(self.health_check_urls.keys())} "
+            f"ecs={ecs}"
         )
 
 

@@ -8,6 +8,7 @@ FR-06-01/02 Watchdog — 데몬 배선
 DoD: "일부러 죽인 앱(크래시 코드 배포)에서 '이상' 이벤트가 발생함"
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -188,6 +189,73 @@ def test_전용_분기를_비껴간_오류도_결국_드러난다(cfg, monkeypat
 
     types = {a["alert_type"] for a in _alerts(dog)}
     assert "ecs_monitoring_unavailable" in types, "감시가 죽었는데 아무도 모른다"
+
+
+# ---------------------------------------------------------------------------
+# 설치·설정 — **코드가 맞아도 켜지지 않으면 없는 기능이다.**
+# ---------------------------------------------------------------------------
+
+WATCHDOG_DIR = Path(__file__).resolve().parents[1]
+
+
+def test_설치_템플릿에_ECS_설정_항목이_있다():
+    """**이 테스트가 없어서 실제로 놓칠 뻔했다.**
+
+    install.sh 가 /etc/recoder/watchdog.env 를 고정 템플릿으로 만든다.
+    거기에 ECS 항목이 없으면 설치된 데몬은 ecs_enabled=False 로만 돌고,
+    이 브랜치의 코드는 **한 줄도 실행되지 않는다.** 테스트는 전부 통과하고,
+    앱이 죽어도 알림은 없다.
+    """
+    script = (WATCHDOG_DIR / "install.sh").read_text(encoding="utf-8")
+    for key in (
+        "RECODER_WATCHDOG_ECS_CLUSTER",
+        "RECODER_WATCHDOG_ECS_SERVICE",
+        "RECODER_WATCHDOG_AWS_REGION",
+        "RECODER_WATCHDOG_ALB_NAME",
+        "RECODER_WATCHDOG_UNHEALTHY_POLLS",
+    ):
+        assert key in script, f"설치 템플릿에 {key} 가 없다 — 감시가 영영 안 켜진다"
+
+
+def test_음성대조_템플릿_검사가_아무_문자열이나_통과시키지_않는다():
+    """위 테스트가 항상 참이면 아무것도 증명하지 못한다."""
+    script = (WATCHDOG_DIR / "install.sh").read_text(encoding="utf-8")
+    assert "RECODER_WATCHDOG_ECS_없는키" not in script
+
+
+def test_리전을_빼먹으면_설정_오류로_알려준다(cfg):
+    """botocore 는 `Invalid endpoint: https://ecs..amazonaws.com` 만 낸다.
+
+    그 메시지로는 무엇을 고쳐야 하는지 알 수 없어서, 감시가 안 도는데도
+    도는 줄 알게 된다.
+    """
+    cfg.aws_region = ""
+    problem = cfg.ecs_config_problem()
+    assert problem is not None
+    assert "RECODER_WATCHDOG_AWS_REGION" in problem
+
+
+def test_음성대조_제대로_설정하면_문제_없음(cfg):
+    assert cfg.ecs_config_problem() is None
+
+
+def test_ECS를_안_쓰는_설치는_설정_오류가_아니다(tmp_path):
+    """로컬 도커만 쓰는 설치가 --check 에서 실패하면 안 된다."""
+    from config import WatchdogConfig as C
+    plain = C(
+        project_id="p", host="h", environment="e", discord_webhook_url=None,
+        incident_path=tmp_path / "i.jsonl", health_check_urls={},
+        poll_interval_seconds=5.0, health_interval_seconds=30.0, log_level="INFO",
+    )
+    assert plain.ecs_config_problem() is None
+    assert "ecs=off" in plain.summary(), "감시가 꺼진 사실이 로그에 안 보인다"
+
+
+def test_요약에_감시_대상이_드러난다(cfg):
+    """--check 로도 감시가 켜졌는지 알 수 없으면, 꺼진 채 돌아도 아무도 모른다."""
+    summary = cfg.summary()
+    assert "recoder-cluster/recoder-svc" in summary
+    assert "us-east-1" in summary
 
 
 def test_지표가_알림에_함께_실린다(cfg, monkeypatch):

@@ -247,6 +247,31 @@ def test_음성대조_요청이_없던_창은_0으로_읽는다(monkeypatch):
     assert window.p95_seconds is None
 
 
+def test_리전이_비면_무엇을_설정해야_하는지_말한다():
+    """botocore 의 `Invalid endpoint: https://ecs..amazonaws.com` 로는
+
+    무엇이 잘못됐는지 알 수 없다. 감시가 안 도는 이유가 로그에 안 보이면
+    사람들은 감시가 도는 줄 안다.
+    """
+    with pytest.raises(CloudWatchUnavailableError) as exc:
+        M.collect_service_health(EcsTarget(cluster="c", service="s", region=""))
+    assert "RECODER_WATCHDOG_AWS_REGION" in str(exc.value)
+
+
+def test_음성대조_리전이_있으면_리전_오류를_내지_않는다(monkeypatch):
+    """전부 리전 오류로 처리하면 위 테스트는 아무것도 증명하지 못한다."""
+    class _Ecs:
+        def describe_services(self, **_kw):
+            return {"services": [{"runningCount": 1, "desiredCount": 1, "pendingCount": 0}]}
+
+        def list_tasks(self, **_kw):
+            return {"taskArns": []}
+
+    monkeypatch.setattr(M, "_clients", lambda *a, **k: (_Ecs(), object()))
+    health = M.collect_service_health(TARGET)
+    assert health.running == 1
+
+
 def test_TargetGroup_차원이_함께_전달된다(monkeypatch):
     """LoadBalancer 만 주면 다른 대상 그룹의 트래픽까지 섞여 들어온다."""
     calls = _with_cw(monkeypatch, _FakeCloudWatch({}))

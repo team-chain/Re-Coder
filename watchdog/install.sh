@@ -148,6 +148,37 @@ RECODER_WATCHDOG_SPAM_WINDOW_SECONDS=${RECODER_WATCHDOG_SPAM_WINDOW_SECONDS:-60}
 # 파일 경로 / 로깅
 RECODER_WATCHDOG_INCIDENT_PATH=${RECODER_WATCHDOG_INCIDENT_PATH:-/var/log/recoder/incidents.jsonl}
 RECODER_WATCHDOG_LOG_LEVEL=${RECODER_WATCHDOG_LOG_LEVEL:-INFO}
+
+# ── 배포된 ECS 서비스 감시 (FR-06-01/02) ──────────────────────────────
+# 여기를 비워 두면 ECS 감시가 통째로 꺼진다. 로컬 도커만 쓰는 설치는 그대로
+# 두면 되고, Fargate 로 올린 앱을 지켜보려면 클러스터·서비스·리전을 채운다.
+#
+# **이 항목들이 템플릿에 없으면 코드가 아무리 맞아도 소용없다.** 설치된
+# 데몬은 영원히 ECS 를 안 보고, 그 동안 앱이 죽어도 알림이 없다.
+RECODER_WATCHDOG_ECS_CLUSTER=${RECODER_WATCHDOG_ECS_CLUSTER:-}
+RECODER_WATCHDOG_ECS_SERVICE=${RECODER_WATCHDOG_ECS_SERVICE:-}
+# 클러스터·서비스를 채웠으면 리전도 **반드시** 함께 채운다.
+RECODER_WATCHDOG_AWS_REGION=${RECODER_WATCHDOG_AWS_REGION:-}
+
+# ALB 지표(에러율·p95). 비워 두면 헬스만 보고 트래픽 지표는 건너뛴다.
+# 값은 CloudWatch 차원 형식이다 — ARN 전체가 아니라 그 뒷부분만 쓴다.
+#   ALB_NAME     예: app/recoder-alb/1a2b3c4d5e6f7g8h
+#   TARGET_GROUP 예: targetgroup/recoder-tg/1a2b3c4d5e6f7g8h
+RECODER_WATCHDOG_ALB_NAME=${RECODER_WATCHDOG_ALB_NAME:-}
+RECODER_WATCHDOG_TARGET_GROUP=${RECODER_WATCHDOG_TARGET_GROUP:-}
+
+# ECS 폴링 주기 / 지표 관측 창 (초)
+RECODER_WATCHDOG_ECS_INTERVAL=${RECODER_WATCHDOG_ECS_INTERVAL:-60}
+RECODER_WATCHDOG_ECS_WINDOW_SECONDS=${RECODER_WATCHDOG_ECS_WINDOW_SECONDS:-300}
+
+# ECS 임계치
+#   MIN_REQUESTS 미만이면 에러율로 판정하지 않는다 — 요청 1건 중 1건이
+#   5xx 면 에러율 100% 라, 배포 직후엔 거의 항상 그렇게 된다.
+RECODER_WATCHDOG_ERROR_RATE_THRESHOLD=${RECODER_WATCHDOG_ERROR_RATE_THRESHOLD:-0.05}
+RECODER_WATCHDOG_MIN_REQUESTS=${RECODER_WATCHDOG_MIN_REQUESTS:-20}
+RECODER_WATCHDOG_P95_THRESHOLD_SECONDS=${RECODER_WATCHDOG_P95_THRESHOLD_SECONDS:-3.0}
+#   배포 중 running < desired 는 정상이다. 연속 이 횟수를 넘을 때만 알린다.
+RECODER_WATCHDOG_UNHEALTHY_POLLS=${RECODER_WATCHDOG_UNHEALTHY_POLLS:-3}
 EOF
     chmod 0640 "${ENV_FILE}"
 }

@@ -50,6 +50,16 @@ class EcsTarget:
 
 def _clients(target: EcsTarget, session: Any = None) -> tuple[Any, Any]:
     """(ecs, cloudwatch). session 을 주면 그 자격증명을 쓴다(BYO)."""
+    if not target.region.strip():
+        #: 리전이 비면 botocore 가 `Invalid endpoint: https://ecs..amazonaws.com`
+        #: 을 낸다. 그 메시지로는 무엇을 설정해야 하는지 알 수 없어서, 설정
+        #: 실수를 설정 실수라고 말해 준다. 감시가 안 도는 이유가 로그에
+        #: 안 보이면 사람들은 감시가 도는 줄 안다.
+        raise CloudWatchUnavailableError(
+            "AWS 리전이 설정되지 않았습니다 — RECODER_WATCHDOG_AWS_REGION "
+            "(또는 AWS_REGION) 을 설정하세요. 지금은 ECS 감시가 동작하지 않습니다."
+        )
+
     try:
         import boto3  # type: ignore
     except ImportError as exc:  # pragma: no cover - 배포 환경엔 항상 있다
