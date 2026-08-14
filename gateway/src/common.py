@@ -10,6 +10,7 @@ Phase 1: 운영자 AWS 계정의 Bedrock 을 학생이 키 없이 쓰도록 중�
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -292,16 +293,28 @@ def estimate_request_tokens(messages, system: str, max_output_tokens: int) -> in
     과소평가한다 — 그러면 한도 직전 학생이 작은 예산만 예약하고 초과분은
     사후 정산으로만 반영되어, 예약이 보장하려던 캡이 다시 뚫린다.
 
-    그래서 입력은 **UTF-8 바이트 수**를 상한으로 쓴다. 이 모델들의 토크나이저는
-    어떤 입력에서도 바이트 수보다 많은 토큰을 만들지 않으므로 바이트 수는
-    안전한 상한이다(영문은 과대 예약되지만, 과대분은 reconcile 이 되돌린다 —
-    과소예약이 캡을 뚫는 것보다 과대예약이 항상 안전하다).
+    그래서 Converse 에 전달되는 메시지 구조 전체를 compact JSON 으로 직렬화한
+    **UTF-8 바이트 수**를 상한으로 쓴다. role/content/text 키와 배열·객체 구분자가
+    메시지와 콘텐츠 블록마다 반복되므로 짧은 턴이 많아도 framing 비용이 함께
+    증가한다. 바이너리 블록은 base64 로 확장해 계산한다. 고정 64는 모델별 내부
+    프롬프트 여유분이다. 과대분은 reconcile 이 되돌린다.
     """
-    byte_len = len((system or "").encode("utf-8"))
-    for m in messages or []:
-        for c in m.get("content", []) or []:
-            byte_len += len(str(c.get("text", "")).encode("utf-8"))
-    return byte_len + 64 + int(max_output_tokens)
+    payload = {"messages": messages or []}
+    if system:
+        payload["system"] = [{"text": system}]
+
+    def _json_default(value):
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return base64.b64encode(bytes(value)).decode("ascii")
+        return str(value)
+
+    framed_bytes = len(json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=_json_default,
+    ).encode("utf-8"))
+    return framed_bytes + 64 + int(max_output_tokens)
 
 
 def _reservation_cost(budget_tokens: int):

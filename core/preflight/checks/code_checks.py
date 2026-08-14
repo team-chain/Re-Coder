@@ -11,6 +11,7 @@ AST 기반 탐지는 First Run Wizard (D 영역) 의 본 작업. 본 검사는 �
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -346,11 +347,6 @@ _EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str
             re.M,
         ),
     ),
-    (
-        "php",
-        ("public/*.php", "*.php"),
-        re.compile(r"<\?php"),
-    ),
 )
 
 #: 프로브를 **켜 주는 매니페스트**. 워크스페이스 루트에 이 파일이 있어야만
@@ -376,7 +372,6 @@ _PROBE_RUNTIME_MANIFESTS: dict[str, tuple[str, ...]] = {
     "kotlin": ("pom.xml", "build.gradle", "build.gradle.kts",
                "settings.gradle", "settings.gradle.kts"),
     "go":     ("go.mod", "go.work"),
-    "php":    ("composer.json",),
 }
 
 #: 언어별 잡음 제거 규칙: (줄 주석 접두들, 블록주석 여부, 여러 줄 원시 문자열 구분자들)
@@ -385,7 +380,6 @@ _PROBE_NOISE_RULES: dict[str, tuple[tuple[str, ...], bool, tuple[str, ...]]] = {
     "java":   (("//",), True, ('"""',)),   # Java 15+ 텍스트 블록
     "kotlin": (("//",), True, ('"""',)),   # Kotlin 원시 문자열
     "go":     (("//",), True, ("`",)),     # Go 백틱 원시 문자열
-    "php":    (("//", "#"), True, ()),
 }
 
 
@@ -483,6 +477,36 @@ def _enabled_probe_labels(workspace: Path) -> set[str]:
     return enabled
 
 
+def _find_composer_bin_entrypoint(workspace: Path) -> Optional[str]:
+    """Return an existing Composer-configured CLI executable, if any."""
+    manifest = workspace / "composer.json"
+    if not manifest.is_file():
+        return None
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+    configured = data.get("bin", [])
+    if isinstance(configured, str):
+        configured = [configured]
+    if not isinstance(configured, list):
+        return None
+
+    workspace_root = workspace.resolve()
+    for rel in configured:
+        if not isinstance(rel, str) or not rel.strip():
+            continue
+        candidate = (workspace / rel).resolve()
+        try:
+            relative = candidate.relative_to(workspace_root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return relative.as_posix()
+    return None
+
+
 def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
     """실행 진입점을 **내용으로** 찾는다. 못 찾으면 None.
 
@@ -498,6 +522,10 @@ def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
         "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
         ".git", "target", ".gradle", "vendor", "out", "test", "tests",
     }
+    composer_bin = _find_composer_bin_entrypoint(workspace)
+    if composer_bin:
+        return composer_bin
+
     enabled = _enabled_probe_labels(workspace)
     for label, patterns, pattern_re in _EXECUTABLE_ENTRYPOINT_PROBES:
         if label not in enabled:
@@ -521,7 +549,7 @@ def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
                 if not path.is_file():
                     continue
                 try:
-                    text = path.read_text(encoding="utf-8", errors="ignore")[:40_000]
+                    text = path.read_text(encoding="utf-8", errors="ignore")
                 except OSError:
                     continue
                 if pattern_re.search(_strip_probe_noise(text, label)):

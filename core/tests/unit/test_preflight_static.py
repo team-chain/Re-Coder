@@ -9,6 +9,7 @@ Static Preflight 12종 검사 단위 테스트.
 
 from __future__ import annotations
 
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -773,3 +774,71 @@ def test_probe_accepts_suspend_kotlin_main(tmp_path):
     source.write_text("suspend fun main() { runApp() }\n", encoding="utf-8")
 
     assert _find_executable_entrypoint(tmp_path) == "src/main/kotlin/App.kt"
+
+
+def test_probe_does_not_treat_arbitrary_php_source_as_entrypoint(tmp_path):
+    """A Composer library is not deployable merely because PHP files have tags."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    source = tmp_path / "src" / "Foo.php"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"name": "example/library"}),
+        encoding="utf-8",
+    )
+    source.write_text("<?php\nclass Foo {}\n", encoding="utf-8")
+
+    assert _find_executable_entrypoint(tmp_path) is None
+    result = check_app_entrypoint(
+        tmp_path,
+        build_default_contract(ContractStack.CUSTOM),
+    )
+    assert not result.passed
+
+
+def test_probe_accepts_existing_composer_bin_entrypoint(tmp_path):
+    """An explicit Composer bin file is executable evidence for a CLI package."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    executable = tmp_path / "bin" / "console"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/usr/bin/env php\n<?php\n", encoding="utf-8")
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"name": "example/tool", "bin": ["bin/console"]}),
+        encoding="utf-8",
+    )
+
+    assert _find_executable_entrypoint(tmp_path) == "bin/console"
+
+
+def test_probe_reads_launcher_after_character_40000(tmp_path):
+    """A valid launcher near the end of a large source file remains visible."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    source = tmp_path / "src" / "main" / "java" / "LargeApp.java"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    source.write_text(
+        "class LargeApp {\n"
+        + ("int padding = 0;\n" * 3_000)
+        + "public static void main(String[] args) {}\n}\n",
+        encoding="utf-8",
+    )
+    assert source.stat().st_size > 40_000
+
+    assert _find_executable_entrypoint(tmp_path) == (
+        "src/main/java/LargeApp.java"
+    )

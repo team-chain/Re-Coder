@@ -5,6 +5,7 @@
 뚫고, (2) 동시 요청 무리가 같은 카운터를 보고 전부 통과한다.
 moto 로 DynamoDB 를 실제 흉내 내어 조건부 ADD 의 원자성을 검증한다.
 """
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -267,6 +268,40 @@ def test_reservation_is_upper_bound_for_cjk(table):
     item = _student(table, used_today=800, max_daily=1_000)
     with pytest.raises(common.QuotaError):
         common.reserve_quota(item, budget)
+
+
+def test_reservation_scales_with_message_and_content_framing(table):
+    """Many tiny turns reserve their repeated Converse framing before the call."""
+    messages = [
+        {"role": "user" if index % 2 == 0 else "assistant",
+         "content": [{"text": "x"}, {"text": "y"}]}
+        for index in range(100)
+    ]
+    budget = common.estimate_request_tokens(
+        messages,
+        "system",
+        max_output_tokens=0,
+    )
+    wire_payload = {
+        "messages": messages,
+        "system": [{"text": "system"}],
+    }
+    framed_bytes = len(json.dumps(
+        wire_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8"))
+
+    assert budget == framed_bytes + 64
+    raw_text_only = 200 + len("system") + 64
+    assert budget > raw_text_only
+
+    # The old fixed-overhead estimator would have admitted this request. The
+    # framing-aware budget must reject it before a paid call can cross the cap.
+    item = _student(table, max_daily=raw_text_only)
+    with pytest.raises(common.QuotaError) as exc:
+        common.reserve_quota(item, budget)
+    assert exc.value.code == "daily_exceeded"
 
 
 def test_english_still_reserves_and_reconciles(table):
