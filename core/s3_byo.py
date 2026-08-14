@@ -146,13 +146,34 @@ def project_fingerprint(project: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:6]
 
 
+def account_fingerprint(account_id: str) -> str:
+    """계정 번호의 지문 12자.
+
+    왜 뒤 6자리를 안 쓰나
+        S3 이름공간은 **전 세계 공용**이다. 뒤 6자리만 쓰면 서로 다른 계정이
+        같은 접미사를 가질 수 있다(111111123456 과 222222123456). 그러면 같은
+        프로젝트를 배포한 두 계정이 같은 버킷 이름을 만들고, 두 번째 계정은
+        "이미 다른 계정에 있습니다"(409) 를 맞는다 — 자기 잘못이 아닌데.
+
+    왜 계정 번호를 그대로 안 쓰나
+        이 이름은 **공개 웹사이트 URL 에 그대로 노출된다.** 계정 번호는 비밀은
+        아니지만 굳이 공개할 이유도 없다. 지문은 유일성은 그대로 주면서
+        번호를 드러내지 않는다.
+    """
+    import hashlib
+
+    raw = re.sub(r"\D", "", account_id or "") or "unknown-account"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
 def bucket_name(project: str, account_id: str) -> str:
     """사용자 계정 안에서 쓸 배포 버킷 이름.
 
-    형태: `recoder-<슬러그>-<프로젝트지문6>-<계정뒤6>`
+    형태: `recoder-<슬러그>-<프로젝트지문6>-<계정지문12>`
 
-    · 계정 뒤 6자리 — S3 버킷 이름은 **전 세계에서 유일**해야 한다. 프로젝트
+    · 계정 지문 — S3 버킷 이름은 **전 세계에서 유일**해야 한다. 프로젝트
       이름만 쓰면 남이 이미 만든 이름과 부딪혀 CreateBucket 이 실패한다.
+      뒤 6자리만 쓰면 다른 계정끼리 겹칠 수 있어 지문을 쓴다.
     · 프로젝트 지문 — 슬러그가 같아지는 서로 다른 프로젝트를 갈라 놓는다
       (위 project_fingerprint 참고).
 
@@ -160,7 +181,7 @@ def bucket_name(project: str, account_id: str) -> str:
     같은 (프로젝트, 계정) 이면 항상 같은 이름이어야 한다 — 재배포가 같은
     버킷으로 가야 하기 때문이다.
     """
-    account_suffix = re.sub(r"\D", "", account_id or "")[-6:] or "000000"
+    account_suffix = account_fingerprint(account_id)
     fingerprint = project_fingerprint(project)
     #: 63자 상한. 지문과 계정 접미사는 **유일성의 근거라 자르지 않고**,
     #: 가운데 슬러그만 줄인다.
@@ -196,10 +217,22 @@ def content_type(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: 업로드 인코딩. 확장이 파일을 읽어 보낼 때 무엇으로 담았는지 알려준다.
+#:
+#: 기본은 텍스트다. 이미지·폰트·wasm 처럼 **UTF-8 로 표현할 수 없는** 파일은
+#: base64 로 담아 보내야 한다. 예전에는 이 구분이 없어서 무조건
+#: `content.encode("utf-8")` 을 했고, 바이너리는 대체 문자(U+FFFD)로 망가진
+#: 채 올라갔다. content-type 표에는 png·woff·wasm 이 있으니 **되는 줄 알고
+#: 올렸다가 깨진 사이트를 받는** 형태였다.
+TEXT_ENCODING = "utf-8"
+BASE64_ENCODING = "base64"
+_ALLOWED_ENCODINGS = (TEXT_ENCODING, BASE64_ENCODING)
+
+
 @dataclass
 class UploadItem:
     key: str
-    content: str
+    data: bytes
     content_type: str
 
 
@@ -242,17 +275,34 @@ def plan_upload(files: list[dict]) -> UploadPlan:
         content = (entry or {}).get("content")
         if not isinstance(content, str):
             raise S3DeployError(f"{key}: 파일 내용이 문자열이 아닙니다.")
-        size = len(content.encode("utf-8"))
-        if size > MAX_BYTES_PER_FILE:
+
+        encoding = str((entry or {}).get("encoding") or TEXT_ENCODING).strip().lower()
+        if encoding not in _ALLOWED_ENCODINGS:
             raise S3DeployError(
-                f"{key}: 파일이 너무 큽니다 ({size:,} 바이트, 상한 "
+                f"{key}: 알 수 없는 encoding '{encoding}'. "
+                f"{TEXT_ENCODING} 또는 {BASE64_ENCODING} 만 씁니다."
+            )
+        if encoding == BASE64_ENCODING:
+            import base64 as _b64
+            import binascii
+
+            try:
+                data = _b64.b64decode(content, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise S3DeployError(f"{key}: base64 로 읽을 수 없습니다 ({exc}).") from exc
+        else:
+            data = content.encode("utf-8")
+
+        if len(data) > MAX_BYTES_PER_FILE:
+            raise S3DeployError(
+                f"{key}: 파일이 너무 큽니다 ({len(data):,} 바이트, 상한 "
                 f"{MAX_BYTES_PER_FILE:,})."
             )
         if key in seen:
             raise S3DeployError(f"같은 경로가 두 번 들어왔습니다: {key}")
         seen.add(key)
 
-        plan.items.append(UploadItem(key, content, content_type(key)))
+        plan.items.append(UploadItem(key, data, content_type(key)))
         if key.lower().endswith((".html", ".htm")):
             html_keys.append(key)
 
@@ -264,7 +314,7 @@ def plan_upload(files: list[dict]) -> UploadPlan:
             )
         source = html_keys[0]
         original = next(item for item in plan.items if item.key == source)
-        plan.items.append(UploadItem("index.html", original.content, content_type("index.html")))
+        plan.items.append(UploadItem("index.html", original.data, content_type("index.html")))
         plan.index_copied_from = source
 
     return plan

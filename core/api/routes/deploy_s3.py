@@ -63,7 +63,8 @@ router = APIRouter(tags=["deploy-s3"])
 class S3DeployRequest(BaseModel):
     #: 버킷 이름의 근거. 워크스페이스 폴더 이름을 그대로 보내면 된다.
     project: str
-    #: [{"path": "index.html", "content": "..."}] — 확장이 읽어서 보낸다.
+    #: [{"path": "index.html", "content": "...", "encoding": "utf-8"|"base64"}]
+    #: 이미지·폰트·wasm 은 encoding="base64" 로 담아야 한다. 텍스트가 기본.
     files: list[dict]
     region: Optional[str] = None
     profile: Optional[str] = None
@@ -236,7 +237,7 @@ def _deploy_sync(request: S3DeployRequest, session, region: str) -> S3DeployResp
             client.put_object(
                 Bucket=bucket,
                 Key=item.key,
-                Body=item.content.encode("utf-8"),
+                Body=item.data,
                 ContentType=item.content_type,
                 #: 재배포 직후 옛 화면이 뜨지 않게 캐시를 끈다. 데모에서
                 #: "고쳤는데 그대로인데요" 로 시간을 버리는 걸 막는다.

@@ -37,10 +37,10 @@ def test_버킷_이름은_S3_규칙을_지킨다():
         assert not name.startswith("-") and not name.endswith("-")
 
 
-def test_버킷_이름이_길어져도_계정_접미사는_살아남는다():
-    """접미사가 유일성의 근거다. 잘라내면 충돌 방지가 무너진다."""
+def test_버킷_이름이_길어져도_계정_지문은_살아남는다():
+    """지문이 유일성의 근거다. 잘라내면 충돌 방지가 무너진다."""
     name = s3_byo.bucket_name("z" * 200, "413113423592")
-    assert name.endswith("423592"), name
+    assert name.endswith(s3_byo.account_fingerprint("413113423592")), name
     assert len(name) <= 63
 
 
@@ -112,7 +112,7 @@ def test_index_html_이_없으면_첫_HTML_을_진입문서로_복제한다():
     assert "index.html" in plan.keys
     assert plan.index_copied_from == "home.html"
     index = next(i for i in plan.items if i.key == "index.html")
-    assert index.content == "<h1>hi</h1>"
+    assert index.data == b"<h1>hi</h1>"
     assert index.content_type.startswith("text/html")
 
 
@@ -124,7 +124,7 @@ def test_음성대조_index_html_이_있으면_복제하지_않는다():
     assert plan.index_copied_from is None
     assert plan.keys.count("index.html") == 1
     index = next(i for i in plan.items if i.key == "index.html")
-    assert index.content == "<h1>real</h1>", "엉뚱한 파일이 진입 문서가 됐다"
+    assert index.data == b"<h1>real</h1>", "엉뚱한 파일이 진입 문서가 됐다"
 
 
 def test_HTML_이_하나도_없으면_거부한다():
@@ -320,10 +320,10 @@ def test_지문이_들어가도_길이_규칙을_지킨다():
         assert re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", name), name
 
 
-def test_길어도_지문과_계정_접미사는_안_잘린다():
+def test_길어도_지문_둘은_안_잘린다():
     """이 둘이 유일성의 근거다. 자르면 충돌 방지가 무너진다."""
     name = s3_byo.bucket_name("z" * 300, "413113423592")
-    assert name.endswith("-423592")
+    assert name.endswith("-" + s3_byo.account_fingerprint("413113423592"))
     assert s3_byo.project_fingerprint("z" * 300) in name
 
 
@@ -359,3 +359,89 @@ def test_파티션_판정은_권한표와_같은_구현을_쓴다():
 def test_격리_리전은_DNS_접미사도_다르다():
     assert s3_byo.website_url("b", "us-iso-east-1").endswith(".c2s.ic.gov")
     assert s3_byo.website_url("b", "us-isob-east-1").endswith(".sc2s.sgov.gov")
+
+
+# ---------------------------------------------------------------------------
+# Codex 코드리뷰 P2 (3차) — 바이너리 자산 / 계정 충돌
+# ---------------------------------------------------------------------------
+
+
+def test_바이너리는_base64_로_원본_바이트가_보존된다():
+    """content_type 표에 png·woff·wasm 이 있는데 UTF-8 로만 받으면 다 깨진다.
+
+    사용자는 "되는 줄 알고" 이미지를 올렸다가 깨진 사이트를 받는다.
+    """
+    import base64
+
+    png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\xff\xfe"
+    plan = s3_byo.plan_upload([
+        {"path": "index.html", "content": "<img src=logo.png>"},
+        {"path": "logo.png", "content": base64.b64encode(png).decode(), "encoding": "base64"},
+    ])
+    logo = next(i for i in plan.items if i.key == "logo.png")
+    assert logo.data == png, "원본 바이트가 보존되지 않았다"
+    assert logo.content_type == "image/png"
+
+
+def test_음성대조_텍스트는_base64로_해석하지_않는다():
+    """encoding 을 안 주면 그대로 텍스트다.
+
+    무조건 base64 로 읽으면 평범한 HTML 이 깨지거나 거부된다.
+    """
+    plan = s3_byo.plan_upload([{"path": "index.html", "content": "<h1>안녕</h1>"}])
+    assert plan.items[0].data == "<h1>안녕</h1>".encode("utf-8")
+
+
+def test_깨진_base64_는_이유를_알려주며_거부한다():
+    with pytest.raises(s3_byo.S3DeployError) as exc:
+        s3_byo.plan_upload([
+            {"path": "index.html", "content": "<h1>hi</h1>"},
+            {"path": "a.png", "content": "!!!not base64!!!", "encoding": "base64"},
+        ])
+    assert "base64" in str(exc.value)
+
+
+def test_모르는_encoding_은_거부한다():
+    with pytest.raises(s3_byo.S3DeployError) as exc:
+        s3_byo.plan_upload([{"path": "index.html", "content": "x", "encoding": "gzip"}])
+    assert "gzip" in str(exc.value)
+
+
+def test_크기_상한은_디코딩된_바이트_기준이다():
+    """base64 문자열 길이가 아니라 실제 바이트로 재야 한다(약 4/3 차이)."""
+    import base64
+
+    payload = b"a" * (s3_byo.MAX_BYTES_PER_FILE + 1)
+    with pytest.raises(s3_byo.S3DeployError) as exc:
+        s3_byo.plan_upload([
+            {"path": "index.html", "content": "<h1>hi</h1>"},
+            {"path": "big.png", "content": base64.b64encode(payload).decode(),
+             "encoding": "base64"},
+        ])
+    assert "너무 큽니다" in str(exc.value)
+
+
+def test_계정_뒤_6자리가_같아도_버킷이_갈린다():
+    """S3 이름공간은 전 세계 공용이다.
+
+    뒤 6자리만 쓰면 111111123456 과 222222123456 이 같은 이름을 만들고,
+    두 번째 계정은 자기 잘못이 아닌 409 를 맞는다.
+    """
+    a = s3_byo.bucket_name("blog", "111111123456")
+    b = s3_byo.bucket_name("blog", "222222123456")
+    assert a != b, "다른 계정인데 같은 버킷 이름이 나온다"
+
+
+def test_계정_번호가_버킷_이름에_그대로_드러나지_않는다():
+    """이 이름은 공개 웹사이트 URL 에 그대로 노출된다."""
+    account = "413113423592"
+    name = s3_byo.bucket_name("blog", account)
+    assert account not in name
+    assert account[-6:] not in name
+
+
+def test_음성대조_같은_계정은_항상_같은_지문():
+    """지문이 흔들리면 재배포마다 버킷이 새로 생긴다."""
+    assert s3_byo.account_fingerprint("413113423592") == s3_byo.account_fingerprint("413113423592")
+    #: 하이픈·공백이 섞여 들어와도 같은 계정으로 본다.
+    assert s3_byo.account_fingerprint("4131-1342-3592") == s3_byo.account_fingerprint("413113423592")
