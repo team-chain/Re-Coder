@@ -38,6 +38,7 @@ def table(monkeypatch):
                                   {"AttributeName": "sk", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST")
         monkeypatch.setattr(common, "_ddb", t)
+        monkeypatch.setattr(common, "_ddb_tx_client", None)
         yield t
 
 
@@ -58,6 +59,19 @@ def _student(table, sid="s1", used_total=0, used_today=0,
 def _used(table, sid="s1"):
     it = table.get_item(Key={"pk": f"STUDENT#{sid}", "sk": "META"})["Item"]
     return int(it["used_total_tokens"]), int(it["used_today_tokens"])
+
+
+def test_transaction_values_use_dynamodb_attribute_types():
+    values = common._serialize_values({
+        "pk": "POOL",
+        "tokens": 7,
+        "cost": common._dec(0.25),
+    })
+    assert values == {
+        "pk": {"S": "POOL"},
+        "tokens": {"N": "7"},
+        "cost": {"N": "0.25"},
+    }
 
 
 def test_single_request_cannot_blow_past_remaining_allowance(table):
@@ -133,6 +147,7 @@ def test_reconcile_returns_overreservation(table):
     """예약 600 → 실사용 200 이면 카운터가 200 으로 정산되고 풀 비용이 쌓인다."""
     item = _student(table)
     reservation = common.reserve_quota(item, 600)
+    common.mark_reservation_dispatched(reservation)
     cost = common.reconcile_usage(reservation, 150, 50)
     assert _used(table) == (200, 200)
     pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
@@ -161,20 +176,35 @@ def test_pool_reservation_is_reconciled_to_actual_cost(table, monkeypatch):
     monkeypatch.setattr(common, "POOL_SOFT_USD", 1.0)
     item = _student(table)
     reservation = common.reserve_quota(item, 600)
+    common.mark_reservation_dispatched(reservation)
     actual_cost = common.reconcile_usage(reservation, 150, 50)
     pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
     assert float(pool["used_cost_usd"]) == pytest.approx(actual_cost)
 
 
-def test_release_on_invoke_failure(table):
-    """Bedrock 호출 실패 시 선점분이 전액 반환된다 — 실패한 호출이 한도를
-    갉아먹으면 안 된다."""
+def test_release_before_dispatch(table):
+    """A failure proven to occur before dispatch releases the reservation."""
     item = _student(table)
     reservation = common.reserve_quota(item, 600)
     common.release_reservation(reservation)
     assert _used(table) == (0, 0)
     pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
     assert float(pool["used_cost_usd"]) == pytest.approx(0.0)
+
+
+def test_dispatched_reservation_cannot_be_refunded(table):
+    """No error path may turn an ambiguous paid call back into free quota."""
+    item = _student(table)
+    reservation = common.reserve_quota(item, 600)
+    common.mark_reservation_dispatched(reservation)
+
+    with pytest.raises(common.QuotaError) as caught:
+        common.release_reservation(reservation)
+
+    assert caught.value.code == "reservation_expired"
+    assert _used(table) == (600, 600)
+    pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
+    assert float(pool["used_cost_usd"]) == pytest.approx(0.00075)
 
 
 def test_expired_orphan_reservation_is_recovered(table, monkeypatch):
@@ -203,6 +233,80 @@ def test_expired_orphan_reservation_is_recovered(table, monkeypatch):
     assert common.recover_expired_reservations() == 0
 
 
+def test_expired_dispatched_reservation_is_charged_and_ledgered(table, monkeypatch):
+    """A post-dispatch crash never refunds quota that AWS may have charged."""
+    clock = {"now": 1_700_000_000}
+    monkeypatch.setattr(common, "_now_epoch", lambda: clock["now"])
+    item = _student(table)
+
+    reservation = common.reserve_quota(item, 600)
+    common.mark_reservation_dispatched(reservation)
+    stored = table.get_item(Key={
+        "pk": "RESERVATION",
+        "sk": reservation.reservation_key,
+    })["Item"]
+    assert stored["status"] == "DISPATCHED"
+
+    clock["now"] = reservation.expires_at + 1
+    assert common.recover_expired_reservations() == 1
+
+    # The student's conservative reservation remains charged. The shared pool
+    # gains token usage while retaining the already-reserved worst-case cost.
+    assert _used(table) == (600, 600)
+    pool = table.get_item(Key={"pk": "POOL", "sk": "META"})["Item"]
+    assert int(pool["used_total_tokens"]) == 600
+    assert float(pool["used_cost_usd"]) == pytest.approx(0.00075)
+    assert table.get_item(Key={
+        "pk": "RESERVATION",
+        "sk": reservation.reservation_key,
+    }).get("Item") is None
+
+    ledger = table.get_item(Key={
+        "pk": "USAGE#s1",
+        "sk": f"AMBIGUOUS#{reservation.reservation_id}",
+    })["Item"]
+    assert ledger["status"] == "AMBIGUOUS"
+    assert int(ledger["charged_tokens"]) == 600
+    assert ledger["reason"] == "expired_after_dispatch"
+
+
+def test_invoke_timeout_after_dispatch_is_charged(table, monkeypatch):
+    """The handler records ambiguous usage instead of refunding a timeout."""
+    student = _student(table, max_total=100_000, max_daily=100_000)
+    monkeypatch.setattr(common, "authenticate", lambda token: student)
+    monkeypatch.setattr(common, "check_rate", lambda *args: None)
+    monkeypatch.setattr(common, "check_quota_before", lambda *args: None)
+
+    def _timeout(*args, **kwargs):
+        raise TimeoutError("Bedrock response timed out")
+
+    monkeypatch.setattr(common, "invoke_bedrock", _timeout)
+    response = invoke.handler({
+        "headers": {"Authorization": "Bearer token"},
+        "body": json.dumps({"prompt": "hello", "max_tokens": 10}),
+    }, None)
+
+    assert response["statusCode"] == 500
+    budget = common.estimate_request_tokens(
+        [{"role": "user", "content": [{"text": "hello"}]}],
+        "",
+        10,
+    )
+    assert _used(table) == (budget, budget)
+    reservations = table.query(
+        KeyConditionExpression="pk = :pk",
+        ExpressionAttributeValues={":pk": "RESERVATION"},
+    )["Items"]
+    assert reservations == []
+    ledger = table.query(
+        KeyConditionExpression="pk = :pk",
+        ExpressionAttributeValues={":pk": "USAGE#s1"},
+    )["Items"]
+    assert len(ledger) == 1
+    assert ledger[0]["status"] == "AMBIGUOUS"
+    assert int(ledger[0]["charged_tokens"]) == budget
+
+
 def test_cross_midnight_release_does_not_decrement_new_day(table):
     """실패 반환은 예약 뒤 시작된 새 UTC 날짜의 카운터를 차감하지 않는다."""
     item = _student(table)
@@ -223,6 +327,7 @@ def test_cross_midnight_reconcile_does_not_decrement_new_day(table):
     """과대 예약 정산은 새 날짜 사용량을 음수 방향으로 오염시키지 않는다."""
     item = _student(table)
     reservation = common.reserve_quota(item, 600)
+    common.mark_reservation_dispatched(reservation)
     next_day = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y%m%d")
     table.update_item(
         Key={"pk": "STUDENT#s1", "sk": "META"},
@@ -311,6 +416,7 @@ def test_english_still_reserves_and_reconciles(table):
     budget = common.estimate_request_tokens(
         [{"content": [{"text": "hello world " * 10}]}], "", max_output_tokens=50)
     reservation = common.reserve_quota(item, budget)
+    common.mark_reservation_dispatched(reservation)
     common.reconcile_usage(reservation, 20, 30)   # 실제 50
     used_total, used_today = _used(table)
     assert used_today == 50, f"정산 후 실사용만 남아야: {used_today}"

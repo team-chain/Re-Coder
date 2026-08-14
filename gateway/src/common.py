@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import boto3
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 # ── 환경변수 ────────────────────────────────────────────────────────
@@ -50,11 +51,23 @@ RESERVATION_RECOVERY_LIMIT = max(
 )
 
 _ddb = None
+_ddb_tx_client = None
+_TYPE_SERIALIZER = TypeSerializer()
+
+
 def _table():
     global _ddb
     if _ddb is None:
         _ddb = boto3.resource("dynamodb", region_name=REGION).Table(TABLE_NAME)
     return _ddb
+
+
+def _transaction_client():
+    """Return a raw DynamoDB client for explicitly serialized transactions."""
+    global _ddb_tx_client
+    if _ddb_tx_client is None:
+        _ddb_tx_client = boto3.client("dynamodb", region_name=REGION)
+    return _ddb_tx_client
 
 _bedrock = None
 def _bedrock_client():
@@ -339,6 +352,7 @@ class QuotaReservation:
     reservation_day: str
     reserved_cost_usd: Decimal
     expires_at: int
+    status: str = "RESERVED"
 
 
 def _now_epoch() -> int:
@@ -346,9 +360,11 @@ def _now_epoch() -> int:
 
 
 def _serialize_values(values: dict) -> dict:
-    # The client attached to a DynamoDB resource shares the resource's native
-    # Python-value transformer, including for transact_write_items.
-    return values
+    """Serialize native Python values for the raw DynamoDB transaction API."""
+    return {
+        key: _TYPE_SERIALIZER.serialize(value)
+        for key, value in values.items()
+    }
 
 
 def _transaction_cancelled(exc: ClientError) -> bool:
@@ -367,6 +383,9 @@ def _reservation_from_item(item: dict) -> QuotaReservation:
         reservation_day=str(item["reservation_day"]),
         reserved_cost_usd=item["reserved_cost_usd"],
         expires_at=int(item["expires_at"]),
+        # Records created before lifecycle tracking are conservatively treated
+        # as dispatched: refunding an unknown in-flight call can reopen caps.
+        status=str(item.get("status", "DISPATCHED")),
     )
 
 
@@ -378,7 +397,7 @@ def _reservation_transaction(
     table = _table()
     soft_cap = _dec(POOL_SOFT_USD)
     reserved_cost = reservation.reserved_cost_usd
-    table.meta.client.transact_write_items(TransactItems=[
+    _transaction_client().transact_write_items(TransactItems=[
         {
             "Update": {
                 "TableName": table.name,
@@ -421,6 +440,7 @@ def _reservation_transaction(
                     "reserved_cost_usd": reservation.reserved_cost_usd,
                     "expires_at": reservation.expires_at,
                     "created_at": _now_epoch(),
+                    "status": "RESERVED",
                 }),
                 "ConditionExpression": "attribute_not_exists(pk)",
             }
@@ -434,6 +454,7 @@ def _settle_reservation(
     student_delta: int,
     actual_tokens: int,
     pool_cost_delta,
+    expected_status: str,
 ) -> bool:
     """Atomically adjust counters and consume one reservation record."""
     table = _table()
@@ -458,9 +479,13 @@ def _settle_reservation(
                 "pk": "RESERVATION",
                 "sk": reservation.reservation_key,
             }),
-            "ConditionExpression": "reservation_id = :reservation_id",
+            "ConditionExpression": (
+                "reservation_id = :reservation_id AND #status = :expected_status"
+            ),
+            "ExpressionAttributeNames": {"#status": "status"},
             "ExpressionAttributeValues": _serialize_values({
                 ":reservation_id": reservation.reservation_id,
+                ":expected_status": expected_status,
             }),
         }
     }
@@ -507,7 +532,7 @@ def _settle_reservation(
 
     for transaction_items in attempts:
         try:
-            table.meta.client.transact_write_items(
+            _transaction_client().transact_write_items(
                 TransactItems=transaction_items,
             )
             return True
@@ -517,8 +542,102 @@ def _settle_reservation(
     return False
 
 
+def mark_reservation_dispatched(reservation: QuotaReservation) -> None:
+    """Durably mark a reservation before handing the request to Bedrock."""
+    try:
+        _table().update_item(
+            Key={
+                "pk": "RESERVATION",
+                "sk": reservation.reservation_key,
+            },
+            UpdateExpression=(
+                "SET #status = :dispatched, dispatched_at = :dispatched_at"
+            ),
+            ConditionExpression=(
+                "reservation_id = :reservation_id AND #status = :reserved"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":reservation_id": reservation.reservation_id,
+                ":reserved": "RESERVED",
+                ":dispatched": "DISPATCHED",
+                ":dispatched_at": _now_epoch(),
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            raise QuotaError(
+                "reservation_state",
+                "예약을 Bedrock 전송 상태로 전환하지 못했습니다.",
+            ) from exc
+        raise
+
+
+def finalize_ambiguous_reservation(
+    reservation: QuotaReservation,
+    *,
+    reason: str,
+) -> bool:
+    """Conservatively charge a dispatched call and preserve a durable ledger."""
+    table = _table()
+    recorded_at = _now_epoch()
+    try:
+        _transaction_client().transact_write_items(TransactItems=[
+            {
+                "Update": {
+                    "TableName": table.name,
+                    "Key": _serialize_values({"pk": "POOL", "sk": "META"}),
+                    "UpdateExpression": "ADD used_total_tokens :tokens",
+                    "ExpressionAttributeValues": _serialize_values({
+                        ":tokens": reservation.budget_tokens,
+                    }),
+                }
+            },
+            {
+                "Delete": {
+                    "TableName": table.name,
+                    "Key": _serialize_values({
+                        "pk": "RESERVATION",
+                        "sk": reservation.reservation_key,
+                    }),
+                    "ConditionExpression": (
+                        "reservation_id = :reservation_id AND "
+                        "(attribute_not_exists(#status) OR #status = :dispatched)"
+                    ),
+                    "ExpressionAttributeNames": {"#status": "status"},
+                    "ExpressionAttributeValues": _serialize_values({
+                        ":reservation_id": reservation.reservation_id,
+                        ":dispatched": "DISPATCHED",
+                    }),
+                }
+            },
+            {
+                "Put": {
+                    "TableName": table.name,
+                    "Item": _serialize_values({
+                        "pk": f"USAGE#{reservation.student_id}",
+                        "sk": f"AMBIGUOUS#{reservation.reservation_id}",
+                        "reservation_id": reservation.reservation_id,
+                        "reservation_day": reservation.reservation_day,
+                        "status": "AMBIGUOUS",
+                        "charged_tokens": reservation.budget_tokens,
+                        "charged_cost_usd": reservation.reserved_cost_usd,
+                        "reason": str(reason)[:500],
+                        "recorded_at": recorded_at,
+                    }),
+                    "ConditionExpression": "attribute_not_exists(pk)",
+                }
+            },
+        ])
+        return True
+    except ClientError as exc:
+        if _transaction_cancelled(exc):
+            return False
+        raise
+
+
 def recover_expired_reservations(*, limit: int | None = None) -> int:
-    """Release bounded, expired reservations left by terminated Lambdas."""
+    """Recover expired reservations according to their durable lifecycle."""
     cutoff = f"{_now_epoch():010d}#\uffff"
     response = _table().query(
         KeyConditionExpression="pk = :pk AND sk <= :cutoff",
@@ -532,12 +651,23 @@ def recover_expired_reservations(*, limit: int | None = None) -> int:
     recovered = 0
     for item in response.get("Items", []):
         reservation = _reservation_from_item(item)
-        if _settle_reservation(
-            reservation,
-            student_delta=-reservation.budget_tokens,
-            actual_tokens=0,
-            pool_cost_delta=-reservation.reserved_cost_usd,
-        ):
+        if reservation.status == "RESERVED":
+            settled = _settle_reservation(
+                reservation,
+                student_delta=-reservation.budget_tokens,
+                actual_tokens=0,
+                pool_cost_delta=-reservation.reserved_cost_usd,
+                expected_status="RESERVED",
+            )
+        else:
+            # Once dispatch may have occurred, refunding would let a charged
+            # call reuse student/pool quota. Preserve the full conservative
+            # reservation in an immutable usage record instead.
+            settled = finalize_ambiguous_reservation(
+                reservation,
+                reason="expired_after_dispatch",
+            )
+        if settled:
             recovered += 1
     return recovered
 
@@ -636,12 +766,13 @@ def reserve_quota(item: dict, budget_tokens: int) -> QuotaReservation:
 
 
 def release_reservation(reservation: QuotaReservation) -> None:
-    """Release a failed call exactly once."""
+    """Release a reservation only while it is provably undispatched."""
     if not _settle_reservation(
         reservation,
         student_delta=-reservation.budget_tokens,
         actual_tokens=0,
         pool_cost_delta=-reservation.reserved_cost_usd,
+        expected_status="RESERVED",
     ):
         raise QuotaError("reservation_expired", "예약이 이미 만료되었거나 정산되었습니다.")
 
@@ -662,6 +793,7 @@ def reconcile_usage(
         student_delta=actual - reservation.budget_tokens,
         actual_tokens=actual,
         pool_cost_delta=_dec(cost) - reservation.reserved_cost_usd,
+        expected_status="DISPATCHED",
     ):
         raise QuotaError("reservation_expired", "예약이 이미 만료되었거나 정산되었습니다.")
     return cost
