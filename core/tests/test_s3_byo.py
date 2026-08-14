@@ -274,3 +274,88 @@ def test_음성대조_일반_리전_정책_ARN_은_arn_aws():
 def test_리전을_안_주면_기본_파티션(): 
     """호출부가 리전을 빠뜨려도 기존 동작(arn:aws)이 유지돼야 한다."""
     assert s3_byo.public_read_policy("b")["Statement"][0]["Resource"].startswith("arn:aws:")
+
+
+# ---------------------------------------------------------------------------
+# Codex 코드리뷰 P2 — 슬러그 충돌 / 격리 파티션
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "a, b, why",
+    [
+        ("a_b", "a b", "밑줄과 공백이 둘 다 하이픈이 된다"),
+        ("블로그", "게시판", "비ASCII 는 슬러그가 전부 fallback 으로 뭉개진다"),
+        ("z" * 200, "z" * 201, "앞 40자가 같다"),
+        ("My-App", "my app", "대소문자·구분자만 다르다"),
+    ],
+)
+def test_슬러그가_같아지는_프로젝트도_버킷이_갈린다(a, b, why):
+    """**같은 버킷을 쓰면 두 사이트가 섞여서 배포된다.**
+
+    두 번째 배포가 첫 번째 버킷을 재배포로 취급해, 겹치는 파일만 덮어쓰고
+    나머지는 남긴다. 조용히 일어나서 알아채기도 어렵다.
+    """
+    account = "413113423592"
+    assert s3_byo.bucket_name(a, account) != s3_byo.bucket_name(b, account), why
+
+
+def test_음성대조_같은_프로젝트는_항상_같은_버킷이다():
+    """지문이 매번 달라지면 재배포마다 새 버킷이 생겨 URL 이 바뀐다.
+
+    파이썬 `hash()` 는 프로세스마다 값이 달라진다(PYTHONHASHSEED). 그걸
+    쓰지 않았는지 확인하는 대조이기도 하다.
+    """
+    account = "413113423592"
+    assert s3_byo.bucket_name("blog", account) == s3_byo.bucket_name("blog", account)
+    assert s3_byo.project_fingerprint("blog") == s3_byo.project_fingerprint("blog")
+
+
+def test_지문이_들어가도_길이_규칙을_지킨다():
+    import re
+
+    for project in ["z" * 300, "블로그" * 50, "a"]:
+        name = s3_byo.bucket_name(project, "413113423592")
+        assert 3 <= len(name) <= 63, f"{name} ({len(name)})"
+        assert re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", name), name
+
+
+def test_길어도_지문과_계정_접미사는_안_잘린다():
+    """이 둘이 유일성의 근거다. 자르면 충돌 방지가 무너진다."""
+    name = s3_byo.bucket_name("z" * 300, "413113423592")
+    assert name.endswith("-423592")
+    assert s3_byo.project_fingerprint("z" * 300) in name
+
+
+@pytest.mark.parametrize(
+    "region, partition",
+    [
+        ("us-iso-east-1", "aws-iso"),
+        ("us-isob-east-1", "aws-iso-b"),
+    ],
+)
+def test_격리_리전_파티션(region, partition):
+    """권한표(aws_policy)가 이미 이 리전들을 지원한다 — 여기만 빠지면 어긋난다."""
+    assert s3_byo.partition_for_region(region) == partition
+    assert s3_byo.public_read_policy("b", region)["Statement"][0]["Resource"].startswith(
+        f"arn:{partition}:s3:::"
+    )
+
+
+def test_파티션_판정은_권한표와_같은_구현을_쓴다():
+    """규칙이 두 벌이면 반드시 갈라진다.
+
+    실제로 처음엔 여기에 규칙을 베껴 썼다가 격리 리전을 빠뜨렸다.
+    """
+    import aws_policy
+
+    for region in [
+        "us-east-1", "ap-northeast-2", "cn-north-1", "cn-northwest-1",
+        "us-gov-west-1", "us-iso-east-1", "us-isob-east-1",
+    ]:
+        assert s3_byo.partition_for_region(region) == aws_policy.partition_for(region), region
+
+
+def test_격리_리전은_DNS_접미사도_다르다():
+    assert s3_byo.website_url("b", "us-iso-east-1").endswith(".c2s.ic.gov")
+    assert s3_byo.website_url("b", "us-isob-east-1").endswith(".sc2s.sgov.gov")
