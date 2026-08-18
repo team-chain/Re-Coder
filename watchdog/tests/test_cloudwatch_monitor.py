@@ -85,8 +85,23 @@ def test_클러스터가_아예_없어도_예외로_올린다(aws_env):
         M.collect_service_health(EcsTarget(cluster="없음", service="없음", region=REGION))
 
 
-def test_중단_태스크_조회가_실패해도_헬스는_돌려준다():
-    """중단 태스크는 보조 정보다. 이것 때문에 running/desired 까지 못 보면 안 된다."""
+def test_중단_태스크를_못_읽으면_0이_아니라_None():
+    """**예전에는 여기서 0 을 돌려줬고, 테스트가 그걸 고정해 두고 있었다.**
+
+    `ecs:ListTasks` 권한이 없는 인스턴스에서 크래시 루프 감지가 영구히
+    죽는데, 스냅샷에는 "중단 0건" 이 남아 정상으로 보였다.
+    """
+    class _Ecs:
+        def list_tasks(self, **_kw):
+            raise RuntimeError("권한 없음")
+
+    count, reason = M._recent_stopped_tasks(_Ecs(), TARGET, 300)
+    assert count is None, "못 읽은 것을 0건으로 보고하면 감시가 죽은 걸 정상이라 말한다"
+    assert reason == ""
+
+
+def test_못_읽어도_running_desired_는_돌려준다(monkeypatch):
+    """중단 태스크는 보조 정보다. 이것 때문에 헬스 전체를 못 보면 안 된다."""
     class _Ecs:
         def describe_services(self, **_kw):
             return {"services": [{"runningCount": 2, "desiredCount": 2, "pendingCount": 0}]}
@@ -94,8 +109,10 @@ def test_중단_태스크_조회가_실패해도_헬스는_돌려준다():
         def list_tasks(self, **_kw):
             raise RuntimeError("권한 없음")
 
-    health = M._recent_stopped_tasks(_Ecs(), TARGET, 300)
-    assert health == (0, "")
+    monkeypatch.setattr(M, "_clients", lambda *a, **k: (_Ecs(), object()))
+    health = M.collect_service_health(TARGET)
+    assert health.running == 2 and health.desired == 2
+    assert health.stopped_recently is None
 
 
 def test_관측_창_밖에서_멈춘_태스크는_세지_않는다():
@@ -272,11 +289,164 @@ def test_음성대조_리전이_있으면_리전_오류를_내지_않는다(monk
     assert health.running == 1
 
 
-def test_TargetGroup_차원이_함께_전달된다(monkeypatch):
-    """LoadBalancer 만 주면 다른 대상 그룹의 트래픽까지 섞여 들어온다."""
+def test_타깃_지표는_TargetGroup_차원을_함께_보낸다(monkeypatch):
+    """TargetGroup 을 빼면 다른 대상 그룹의 트래픽까지 섞여 들어온다."""
     calls = _with_cw(monkeypatch, _FakeCloudWatch({}))
     M.collect_traffic_metrics(ALB_TARGET)
 
-    dims = {d["Name"]: d["Value"] for d in calls[0]["Dimensions"]}
-    assert dims["LoadBalancer"] == "app/recoder-alb/abc123"
-    assert dims["TargetGroup"] == "targetgroup/recoder-tg/def456"
+    by_name = {c["MetricName"]: {d["Name"]: d["Value"] for d in c["Dimensions"]} for c in calls}
+    for metric in ("HTTPCode_Target_5XX_Count", "TargetResponseTime"):
+        assert by_name[metric]["TargetGroup"] == "targetgroup/recoder-tg/def456"
+        assert by_name[metric]["LoadBalancer"] == "app/recoder-alb/abc123"
+
+
+def test_ALB_자체_지표는_TargetGroup_차원을_붙이지_않는다(monkeypatch):
+    """**이걸 붙이면 최악의 장애가 안 보인다.**
+
+    타깃이 전부 죽으면 ALB 가 자기가 503 을 내는데, 그건 TargetGroup 차원에
+    안 잡힌다. RequestCount 도 TargetGroup 으로 읽으면 0 이라, 전면 장애가
+    "요청 0건, 에러 0건" 으로 보인다.
+    """
+    calls = _with_cw(monkeypatch, _FakeCloudWatch({}))
+    M.collect_traffic_metrics(ALB_TARGET)
+
+    by_name = {c["MetricName"]: {d["Name"] for d in c["Dimensions"]} for c in calls}
+    assert "HTTPCode_ELB_5XX_Count" in by_name, "ALB 자체 5xx 를 아예 안 읽는다"
+    assert by_name["HTTPCode_ELB_5XX_Count"] == {"LoadBalancer"}
+    assert by_name["RequestCount"] == {"LoadBalancer"}
+
+
+def test_타깃이_전부_죽은_장애가_지표에_드러난다(monkeypatch):
+    """헬시 타깃 0 → ALB 가 503. ECS 는 running==desired 라 조용하다.
+
+    이 경로에서 알림이 안 나가면, 사용자에게 앱이 완전히 죽은 동안
+    감시는 "이상 없음" 이라고 말한다.
+    """
+    fake = _FakeCloudWatch({
+        "RequestCount": {"Datapoints": [{"Sum": 300.0}]},
+        "HTTPCode_Target_5XX_Count": {"Datapoints": []},        # 타깃까지 안 감
+        "HTTPCode_ELB_5XX_Count": {"Datapoints": [{"Sum": 300.0}]},
+    })
+    _with_cw(monkeypatch, fake)
+
+    window = M.collect_traffic_metrics(ALB_TARGET)
+    assert window.requests == 300
+    assert window.errors_5xx == 300
+    assert window.error_rate == 1.0
+
+    from cloudwatch_thresholds import ServiceHealth, judge
+    anomalies = judge(ServiceHealth(running=2, desired=2, stopped_recently=0), window)
+    assert any(a.alert_type == "http_5xx_spike" for a in anomalies), "전면 장애인데 조용하다"
+
+
+def test_음성대조_타깃_5xx만_있어도_합산된다(monkeypatch):
+    """ELB 쪽만 보면 반대로 평범한 애플리케이션 오류를 놓친다."""
+    fake = _FakeCloudWatch({
+        "RequestCount": {"Datapoints": [{"Sum": 1000.0}]},
+        "HTTPCode_Target_5XX_Count": {"Datapoints": [{"Sum": 90.0}]},
+        "HTTPCode_ELB_5XX_Count": {"Datapoints": []},
+    })
+    _with_cw(monkeypatch, fake)
+    window = M.collect_traffic_metrics(ALB_TARGET)
+    assert window.errors_5xx == 90
+
+
+def test_Period_는_60의_배수로_보낸다(monkeypatch):
+    """60의 배수가 아니면 CloudWatch 가 거부하고, 지표가 조용히 사라진다."""
+    calls = _with_cw(monkeypatch, _FakeCloudWatch({}))
+    M.collect_traffic_metrics(ALB_TARGET, window_seconds=301)
+    assert calls, "지표를 아예 안 불렀다"
+    for call in calls:
+        assert call["Period"] % 60 == 0, f"{call['MetricName']} 의 Period={call['Period']}"
+        assert call["Period"] >= 60
+
+
+# ---------------------------------------------------------------------------
+# 크래시 vs 의도적 중단
+# ---------------------------------------------------------------------------
+
+
+def _ecs_with_tasks(tasks: list, pages: int = 1):
+    class _Ecs:
+        def __init__(self):
+            self.page = 0
+
+        def list_tasks(self, **kw):
+            self.page += 1
+            arns = [f"a{i}" for i in range(len(tasks))]
+            if self.page < pages:
+                return {"taskArns": arns, "nextToken": f"t{self.page}"}
+            return {"taskArns": arns}
+
+        def describe_tasks(self, **kw):
+            return {"tasks": tasks}
+    return _Ecs()
+
+
+def test_정상_배포로_멈춘_태스크는_크래시로_세지_않는다():
+    """**정상 배포마다 critical 경보가 나가면 아무도 경고를 안 믿는다.**
+
+    desiredCount=2 서비스를 배포하면 옛 태스크 2개가 멈추고, 그것만으로
+    task_restarts(기본 2)가 채워져 「크래시 반복」이 나갔다.
+    """
+    now = datetime.now(timezone.utc)
+    tasks = [
+        {"stoppedAt": now - timedelta(seconds=30),
+         "stoppedReason": "Scaling activity initiated by deployment ecs-svc/123"},
+        {"stoppedAt": now - timedelta(seconds=25),
+         "stoppedReason": "Scaling activity initiated by deployment ecs-svc/123"},
+    ]
+    count, _ = M._recent_stopped_tasks(_ecs_with_tasks(tasks), TARGET, 300)
+    assert count == 0, "정상 배포를 크래시 루프로 셌다"
+
+
+def test_음성대조_진짜_크래시는_그대로_센다():
+    """전부 걸러내면 위 테스트는 통과해도 크래시 루프를 영영 못 잡는다."""
+    now = datetime.now(timezone.utc)
+    tasks = [
+        {"stoppedAt": now - timedelta(seconds=30),
+         "stoppedReason": "Essential container in task exited"},
+        {"stoppedAt": now - timedelta(seconds=10),
+         "stoppedReason": "OutOfMemoryError: Container killed due to memory usage"},
+    ]
+    count, reason = M._recent_stopped_tasks(_ecs_with_tasks(tasks), TARGET, 300)
+    assert count == 2
+    assert "OutOfMemory" in reason, "가장 최근 사유가 아니라 나열 순서를 따랐다"
+
+
+def test_모르는_사유는_크래시로_센다():
+    """새로운 실패 방식을 놓치는 쪽이 더 위험하다 — 화이트리스트가 아니라 블랙리스트."""
+    now = datetime.now(timezone.utc)
+    tasks = [
+        {"stoppedAt": now - timedelta(seconds=5), "stoppedReason": "처음 보는 사유"},
+        {"stoppedAt": now - timedelta(seconds=6), "stoppedReason": ""},
+    ]
+    count, _ = M._recent_stopped_tasks(_ecs_with_tasks(tasks), TARGET, 300)
+    assert count == 2
+
+
+def test_아직_안_멈춘_태스크는_세지_않는다():
+    """`desiredStatus=STOPPED` 는 draining 중(stoppedAt 없음)도 돌려준다.
+
+    예전에는 그것들이 창 필터를 그냥 통과해 배포 중 오탐을 키웠다.
+    """
+    now = datetime.now(timezone.utc)
+    tasks = [
+        {"stoppedReason": "Essential container in task exited"},          # stoppedAt 없음
+        {"stoppedAt": now - timedelta(seconds=10), "stoppedReason": "Essential container in task exited"},
+    ]
+    count, _ = M._recent_stopped_tasks(_ecs_with_tasks(tasks), TARGET, 300)
+    assert count == 1, "아직 안 멈춘 태스크까지 셌다"
+
+
+def test_중단_태스크_목록을_페이지네이션한다():
+    """**장애가 심할수록 조용해지는** 역전을 막는다.
+
+    크래시 루프가 오래되면 STOPPED 태스크가 쌓이는데, 첫 100개만 보면
+    그게 전부 창 밖일 수 있다.
+    """
+    now = datetime.now(timezone.utc)
+    tasks = [{"stoppedAt": now, "stoppedReason": "Essential container in task exited"}]
+    ecs = _ecs_with_tasks(tasks, pages=3)
+    M._recent_stopped_tasks(ecs, TARGET, 300)
+    assert ecs.page == 3, f"nextToken 을 안 따라갔다(페이지 {ecs.page})"

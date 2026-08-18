@@ -15,7 +15,6 @@ from cloudwatch_thresholds import (
     MetricWindow,
     ServiceHealth,
     Thresholds,
-    is_intensive_window,
     judge,
     next_unhealthy_streak,
 )
@@ -190,14 +189,10 @@ def test_여러_이상이_동시에_잡힌다():
 
 
 # ---------------------------------------------------------------------------
-# 배포 직후 집중 감시
+# 배포 직후 집중 감시 — **삭제됨**
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "elapsed, expected",
-    [(0, True), (60, True), (300, True), (301, False), (3600, False), (None, False), (-5, False)],
-)
-def test_배포_직후_5분이_집중_감시_구간(elapsed, expected):
-    """문제는 대개 배포 직후에 드러나고, 그때 빨리 잡아야 롤백 제안이 의미가 있다."""
-    assert is_intensive_window(elapsed) is expected
+#
+# is_intensive_window 는 구현·문서·테스트가 다 있었는데 **호출하는 곳이
+# 없었다.** 이 테스트가 초록이라 읽는 사람은 배포 직후 감시가 촘촘해진다고
+# 믿게 되지만, 실제 폴링 주기는 ecs_interval_seconds 고정이었다.
+# 테스트가 없는 기능을 있는 것처럼 보증하고 있었으므로 함께 지운다.

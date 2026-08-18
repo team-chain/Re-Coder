@@ -27,6 +27,14 @@ from cloudwatch_thresholds import MetricWindow, ServiceHealth
 
 log = logging.getLogger(__name__)
 
+#: list_tasks 페이지 상한. 100개/페이지 → 최대 500건까지 본다.
+_MAX_TASK_PAGES = 5
+
+
+def _valid_period(seconds: int) -> int:
+    """CloudWatch 가 받아 주는 Period(60의 배수, 최소 60)."""
+    return max(60, (int(seconds) // 60) * 60)
+
 
 class CloudWatchUnavailableError(RuntimeError):
     """AWS 를 못 읽는다 — 호출자가 재시도·알림 정책을 정한다.
@@ -114,40 +122,104 @@ def collect_service_health(
     return health
 
 
-def _recent_stopped_tasks(ecs: Any, target: EcsTarget, window_seconds: int) -> tuple[int, str]:
-    """(관측 창 안에서 멈춘 태스크 수, 가장 최근 중단 사유).
+#: **의도적으로** 멈춘 태스크의 사유. 크래시로 세지 않는다.
+#:
+#: 이걸 안 거르면 `desiredCount=2` 서비스를 **정상 배포할 때마다** 옛 태스크
+#: 2개가 멈추면서 task_restarts(기본 2)를 채워 critical 「크래시 반복」이
+#: 나간다. 멀쩡한 배포마다 경보가 나면 사람이 경고를 무시하기 시작하고,
+#: 그 시점에 감시 기능은 죽은 것과 같다.
+#:
+#: 화이트리스트가 아니라 **블랙리스트**인 이유: 모르는 사유는 크래시로
+#: 센다. 새로운 실패 방식을 놓치는 쪽이 더 위험하다.
+_DELIBERATE_STOP_MARKERS = (
+    "scaling activity initiated by deployment",
+    "task stopped by user",
+    "stopped by user",
+    "service scheduler",
+    "deployment",
+)
 
-    실패해도 예외를 올리지 않는다 — 이건 **보조 정보**다. 이것 때문에 헬스
-    수집 전체가 실패하면, 정작 중요한 running/desired 도 못 보게 된다.
+
+def _is_deliberate_stop(reason: str) -> bool:
+    low = reason.strip().lower()
+    if not low:
+        return False
+    return any(marker in low for marker in _DELIBERATE_STOP_MARKERS)
+
+
+def _recent_stopped_tasks(
+    ecs: Any, target: EcsTarget, window_seconds: int,
+) -> tuple[Optional[int], str]:
+    """(관측 창 안에서 크래시로 멈춘 태스크 수, 가장 최근 중단 사유).
+
+    **못 읽으면 None 이다. 0 이 아니다.** 예전에는 예외를 삼키고 0 을
+    돌려줬는데, 그러면 `ecs:ListTasks` 권한이 없는 인스턴스에서 크래시 루프
+    감지가 영구히 죽고도 스냅샷에는 "중단 0건" 이 남는다 — 감시가 꺼진 것을
+    정상으로 보고하는 셈이다.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+
+    arns: list = []
     try:
-        arns = ecs.list_tasks(
-            cluster=target.cluster, serviceName=target.service, desiredStatus="STOPPED",
-        ).get("taskArns") or []
+        token: Optional[str] = None
+        #: 페이지네이션. 크래시 루프가 심할수록 STOPPED 태스크가 쌓이는데,
+        #: 첫 100개만 보면 그게 전부 창 밖일 수 있어 **장애가 심해질수록
+        #: 감지가 조용해지는** 역전이 생긴다.
+        for _ in range(_MAX_TASK_PAGES):
+            kwargs = dict(
+                cluster=target.cluster, serviceName=target.service,
+                desiredStatus="STOPPED",
+            )
+            if token:
+                kwargs["nextToken"] = token
+            page = ecs.list_tasks(**kwargs)
+            arns.extend(page.get("taskArns") or [])
+            token = page.get("nextToken")
+            if not token:
+                break
+        else:
+            log.warning(
+                "중단 태스크가 %d페이지를 넘습니다 — 최근 %d건까지만 셉니다.",
+                _MAX_TASK_PAGES, len(arns),
+            )
+
         if not arns:
             return 0, ""
-        described = ecs.describe_tasks(cluster=target.cluster, tasks=arns[:100])
+
+        tasks: list = []
+        for start in range(0, len(arns), 100):     # DescribeTasks 는 100개 상한
+            tasks.extend(
+                ecs.describe_tasks(
+                    cluster=target.cluster, tasks=arns[start:start + 100],
+                ).get("tasks") or []
+            )
     except Exception as exc:  # noqa: BLE001
-        log.info("중단 태스크 조회 생략: %s", exc)
-        return 0, ""
+        #: 여기서 0 을 돌려주면 "재시작 없음" 이라고 단언하게 된다.
+        log.warning("중단 태스크를 읽지 못했습니다(크래시 루프 감지 불가): %s", exc)
+        return None, ""
 
     count = 0
     latest_at: Optional[datetime] = None
     latest_reason = ""
-    for task in described.get("tasks") or []:
+    for task in tasks:
         stopped_at = task.get("stoppedAt")
-        if isinstance(stopped_at, datetime):
-            at = stopped_at if stopped_at.tzinfo else stopped_at.replace(tzinfo=timezone.utc)
-            if at < cutoff:
-                continue
-        count += 1
+        if not isinstance(stopped_at, datetime):
+            #: `ListTasks(desiredStatus=STOPPED)` 는 **아직 draining 중**이라
+            #: stoppedAt 이 없는 태스크도 돌려준다. 예전에는 그것들이 창
+            #: 필터를 그냥 통과해 배포 중 오탐을 키웠다. 멈추지 않은 것은
+            #: 세지 않는다.
+            continue
+        at = stopped_at if stopped_at.tzinfo else stopped_at.replace(tzinfo=timezone.utc)
+        if at < cutoff:
+            continue
+
         reason = str(task.get("stoppedReason") or "").strip()
-        if reason and (latest_at is None or (
-            isinstance(stopped_at, datetime) and stopped_at.replace(
-                tzinfo=stopped_at.tzinfo or timezone.utc) > latest_at
-        )):
-            latest_at = stopped_at if isinstance(stopped_at, datetime) else latest_at
+        if _is_deliberate_stop(reason):
+            continue
+
+        count += 1
+        if latest_at is None or at > latest_at:
+            latest_at = at
             latest_reason = reason
     return count, latest_reason
 
@@ -173,16 +245,36 @@ def collect_traffic_metrics(
     end = datetime.now(timezone.utc)
     start = end - timedelta(seconds=window_seconds)
 
-    dimensions = [{"Name": "LoadBalancer", "Value": target.load_balancer}]
+    #: 차원을 둘로 나눈다. **이걸 뭉뚱그리면 최악의 장애를 놓친다.**
+    #:
+    #: 대상 그룹에 healthy 타깃이 하나도 없으면 ALB 가 **자기가** 503 을 낸다.
+    #: 그 503 은 HTTPCode_ELB_5XX_Count 에만 잡히고 Target_5XX 에는 안 잡힌다.
+    #: 그리고 TargetGroup 차원으로 RequestCount 를 읽으면 그것도 0 이다.
+    #: 예전 구현은 Target_5XX 하나만 TargetGroup 차원으로 읽어서, 전면 장애가
+    #: "요청 0건, 에러 0건" 으로 보였다 — 알림이 하나도 안 나갔다.
+    lb_only = [{"Name": "LoadBalancer", "Value": target.load_balancer}]
+    per_target = list(lb_only)
     if target.target_group:
-        dimensions.append({"Name": "TargetGroup", "Value": target.target_group})
+        per_target.append({"Name": "TargetGroup", "Value": target.target_group})
 
-    window.requests = _sum_metric(cw, "RequestCount", dimensions, start, end, window_seconds)
-    window.errors_5xx = _sum_metric(
-        cw, "HTTPCode_Target_5XX_Count", dimensions, start, end, window_seconds,
+    #: 요청 수는 **ALB 가 받은 전체**로 센다. 타깃이 다 죽어도 사용자는
+    #: 요청을 보내고 있고, 그게 에러율의 분모여야 한다.
+    window.requests = _sum_metric(cw, "RequestCount", lb_only, start, end, window_seconds)
+
+    target_5xx = _sum_metric(
+        cw, "HTTPCode_Target_5XX_Count", per_target, start, end, window_seconds,
     )
+    elb_5xx = _sum_metric(
+        cw, "HTTPCode_ELB_5XX_Count", lb_only, start, end, window_seconds,
+    )
+    #: 하나라도 못 읽었으면 합계도 모르는 값이다 — 0 으로 채우지 않는다.
+    if target_5xx is None and elb_5xx is None:
+        window.errors_5xx = None
+    else:
+        window.errors_5xx = (target_5xx or 0) + (elb_5xx or 0)
+
     window.p95_seconds = _p95_metric(
-        cw, "TargetResponseTime", dimensions, start, end, window_seconds,
+        cw, "TargetResponseTime", per_target, start, end, window_seconds,
     )
     return window
 
@@ -198,7 +290,10 @@ def _sum_metric(
             Dimensions=dimensions,
             StartTime=start,
             EndTime=end,
-            Period=max(60, period),
+            #: Period 는 60의 배수여야 한다. 아니면 CloudWatch 가 요청을
+            #: 거부하고, 그 예외가 여기서 None 으로 삼켜져 지표가 조용히
+            #: 사라진다(ECS_WINDOW_SECONDS=301 같은 값에서 실제로 그렇다).
+            Period=_valid_period(period),
             Statistics=["Sum"],
         )
     except Exception as exc:  # noqa: BLE001
@@ -224,7 +319,7 @@ def _p95_metric(
             Dimensions=dimensions,
             StartTime=start,
             EndTime=end,
-            Period=max(60, period),
+            Period=_valid_period(period),
             ExtendedStatistics=["p95"],
         )
     except Exception as exc:  # noqa: BLE001

@@ -217,6 +217,69 @@ def test_설치_템플릿에_ECS_설정_항목이_있다():
         assert key in script, f"설치 템플릿에 {key} 가 없다 — 감시가 영영 안 켜진다"
 
 
+def test_설치_스크립트가_watchdog_의_모든_모듈을_복사한다():
+    """**이 검사가 없어서 데몬 전체가 죽는 결함을 놓쳤다.**
+
+    install.sh 가 복사할 파일을 손으로 나열하고 있었고, 새 모듈 두 개를
+    거기 넣는 걸 잊었다. recoder_watchdog.py 는 그걸 최상단에서 import
+    하므로 설치된 데몬이 ModuleNotFoundError 로 죽었다 — ECS 감시만이
+    아니라 컨테이너 크래시·OOM 감시까지 통째로.
+
+    앞의 환경변수 검사는 통과했다. 키만 grep 했지 파일 목록은 안 봤기
+    때문이다. 그래서 여기서는 **실제 파일 목록**과 대조한다.
+    """
+    script = (WATCHDOG_DIR / "install.sh").read_text(encoding="utf-8")
+    modules = sorted(p.name for p in WATCHDOG_DIR.glob("*.py"))
+    assert modules, "watchdog 에 .py 가 하나도 없다"
+
+    #: 목록을 손으로 유지하는 방식 자체가 결함이었으므로, 개별 이름이 아니라
+    #: "디렉토리의 .py 를 전부 가져오는가" 를 본다.
+    assert '"${SCRIPT_DIR}"/*.py' in script, (
+        "install.sh 가 아직 파일을 손으로 나열한다 — 새 모듈을 또 빠뜨린다. "
+        f"현재 모듈 {len(modules)}개: {modules}"
+    )
+
+
+def test_설치_스크립트가_boto3_를_설치한다():
+    """없으면 모든 ECS 폴링이 실패하고, 메시지는 엉뚱하게 자격증명을 가리킨다."""
+    script = (WATCHDOG_DIR / "install.sh").read_text(encoding="utf-8")
+    assert "boto3" in script
+
+
+def test_감시_모듈이_없어도_데몬은_계속_돈다():
+    """**감시 도구가 자기 확장 기능 때문에 죽는 것이 가장 나쁜 실패다.**
+
+    ECS 모듈을 못 불러와도 컨테이너 크래시·OOM 감시는 계속돼야 한다.
+    """
+    assert hasattr(W, "ecs_monitoring_importable")
+    assert W.ecs_monitoring_importable() is None, "정상 환경인데 import 가 깨졌다"
+
+    source = (WATCHDOG_DIR / "recoder_watchdog.py").read_text(encoding="utf-8")
+    head = source[: source.index("log = logging.getLogger")]
+    assert "cloudwatch_monitor" not in head, (
+        "ECS 모듈이 필수 import 블록에 있다 — 없으면 데몬 전체가 죽는다"
+    )
+
+
+def test_ECS_모듈이_없으면_폴링을_시도하지_않는다(cfg, monkeypatch):
+    """설정만 보고 돌면 매 주기 NameError 가 난다."""
+    monkeypatch.setattr(W, "_ECS_IMPORT_ERROR", "No module named 'cloudwatch_monitor'")
+    dog = W.RecoderWatchdog(cfg)
+    assert cfg.ecs_enabled is True
+    assert dog._ecs_active is False
+
+
+def test_음성대조_모듈이_있으면_폴링이_켜진다(cfg):
+    assert W.RecoderWatchdog(cfg)._ecs_active is True
+
+
+def test_재시작_임계치도_환경변수로_조절된다(cfg):
+    """이것만 환경변수가 없어서, 오탐이 나도 운영자가 손쓸 수 없었다."""
+    assert hasattr(cfg, "task_restarts")
+    script = (WATCHDOG_DIR / "install.sh").read_text(encoding="utf-8")
+    assert "RECODER_WATCHDOG_TASK_RESTARTS" in script
+
+
 def test_음성대조_템플릿_검사가_아무_문자열이나_통과시키지_않는다():
     """위 테스트가 항상 참이면 아무것도 증명하지 못한다."""
     script = (WATCHDOG_DIR / "install.sh").read_text(encoding="utf-8")

@@ -75,24 +75,39 @@ install_python_deps() {
             ;;
     esac
 
-    log "pip 의존성 설치: requests, psutil"
-    if ! python3 -m pip install --upgrade --no-cache-dir requests psutil; then
+    # boto3 는 ECS/CloudWatch 감시(FR-06-01/02)에만 쓰인다. ECS 를 안 쓰는
+    # 설치에서도 넣어 두는 이유: 나중에 watchdog.env 에 ECS_CLUSTER 만 채우면
+    # 바로 켜져야 하는데, 그때 boto3 가 없으면 "AWS 자격증명과 권한을
+    # 확인하세요" 라는 **원인과 다른** 안내만 반복된다.
+    log "pip 의존성 설치: requests, psutil, boto3"
+    if ! python3 -m pip install --upgrade --no-cache-dir requests psutil boto3; then
         # pip 가 너무 오래된 경우 폴백
-        python3 -m pip install --no-cache-dir requests psutil
+        python3 -m pip install --no-cache-dir requests psutil boto3
     fi
 }
 
 copy_sources() {
     log "watchdog 소스 복사 → ${INSTALL_PREFIX}"
     mkdir -p "${INSTALL_PREFIX}"
-    cp -f \
-        "${SCRIPT_DIR}/__init__.py" \
-        "${SCRIPT_DIR}/recoder_watchdog.py" \
-        "${SCRIPT_DIR}/config.py" \
-        "${SCRIPT_DIR}/docker_monitor.py" \
-        "${SCRIPT_DIR}/notifier.py" \
-        "${SCRIPT_DIR}/masking.py" \
-        "${INSTALL_PREFIX}/"
+
+    # **파일을 하나씩 나열하지 않는다.** 예전에는 6개를 손으로 적어 뒀는데,
+    # cloudwatch_monitor.py / cloudwatch_thresholds.py 를 추가하면서 이 목록에
+    # 넣는 걸 잊었다. recoder_watchdog.py 는 그 둘을 최상단에서 import 하므로
+    # 설치된 데몬이 ModuleNotFoundError 로 죽었다 — ECS 감시만이 아니라
+    # 컨테이너 크래시·OOM 감시까지 통째로. systemd 가 20번 재시작한 뒤
+    # unit 을 failed 로 두고, journal 의 traceback 말고는 아무 신호가 없다.
+    #
+    # 목록을 유지보수하는 방식 자체가 결함이었다. 디렉토리에 있는 .py 를
+    # 전부 가져온다.
+    shopt -s nullglob
+    local sources=("${SCRIPT_DIR}"/*.py)
+    shopt -u nullglob
+    if [[ ${#sources[@]} -eq 0 ]]; then
+        err "복사할 .py 파일이 없습니다: ${SCRIPT_DIR}"
+        exit 1
+    fi
+    log "복사 대상 ${#sources[@]}개: $(basename -a "${sources[@]}" | tr '\n' ' ')"
+    cp -f "${sources[@]}" "${INSTALL_PREFIX}/"
 
     # 패키지 import 경로 호환 — /opt/recoder/watchdog 이 패키지처럼 동작하려면
     # /opt/recoder 가 sys.path 에 있어야 한다. recoder_watchdog.py 가 자동으로 추가.
@@ -179,6 +194,9 @@ RECODER_WATCHDOG_MIN_REQUESTS=${RECODER_WATCHDOG_MIN_REQUESTS:-20}
 RECODER_WATCHDOG_P95_THRESHOLD_SECONDS=${RECODER_WATCHDOG_P95_THRESHOLD_SECONDS:-3.0}
 #   배포 중 running < desired 는 정상이다. 연속 이 횟수를 넘을 때만 알린다.
 RECODER_WATCHDOG_UNHEALTHY_POLLS=${RECODER_WATCHDOG_UNHEALTHY_POLLS:-3}
+#   관측 창 안에서 이 횟수 이상 크래시로 멈추면 재시작 루프로 본다.
+#   정상 배포로 멈춘 태스크(deployment/scaling)는 세지 않는다.
+RECODER_WATCHDOG_TASK_RESTARTS=${RECODER_WATCHDOG_TASK_RESTARTS:-2}
 EOF
     chmod 0640 "${ENV_FILE}"
 }

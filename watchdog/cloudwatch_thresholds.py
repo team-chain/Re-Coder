@@ -53,8 +53,12 @@ class ServiceHealth:
     running: int = 0
     desired: int = 0
     pending: int = 0
-    #: 관측 창 안에서 멈춘 태스크 수.
-    stopped_recently: int = 0
+    #: 관측 창 안에서 **크래시로** 멈춘 태스크 수.
+    #:
+    #: **None 은 "못 읽었다" 이지 "0건" 이 아니다.** ListTasks 가 권한 부족으로
+    #: 실패했을 때 0 으로 두면 "재시작 없음, 정상" 이라고 보고하게 되고,
+    #: 크래시 루프 감지가 영구히 죽은 채로 조용히 남는다.
+    stopped_recently: Optional[int] = None
     #: 가장 최근에 멈춘 이유(있으면). 사용자에게 그대로 보여 준다.
     last_stopped_reason: str = ""
 
@@ -136,7 +140,10 @@ def judge(
     #
     # 위 검사와 별개다. 태스크가 죽고 곧바로 다시 떠서 running==desired 로
     # 보이는 동안에도 앱은 계속 크래시 중일 수 있다(크래시 루프).
-    if health.stopped_recently >= thresholds.task_restarts:
+    #: None(못 읽음)이면 건너뛴다. 0 으로 취급하면 "재시작 없음" 이라고
+    #: 단언하게 되는데, 실제로는 아무것도 모르는 상태다.
+    if (health.stopped_recently or 0) >= thresholds.task_restarts \
+            and health.stopped_recently is not None:
         found.append(Anomaly(
             alert_type="ecs_task_restart_loop",
             severity="critical",
@@ -198,12 +205,9 @@ def next_unhealthy_streak(health: ServiceHealth, current_streak: int) -> int:
     return current_streak + 1
 
 
-def is_intensive_window(seconds_since_deploy: Optional[float], window_seconds: int = 300) -> bool:
-    """배포 직후 집중 감시 구간인가 (기본 5분).
-
-    이 구간에서는 폴링을 촘촘히 한다. 문제는 대개 배포 직후에 드러나고,
-    그때 빨리 잡아야 롤백 제안이 의미가 있다.
-    """
-    if seconds_since_deploy is None:
-        return False
-    return 0 <= seconds_since_deploy <= window_seconds
+#: 참고 — `is_intensive_window`(배포 직후 집중 감시 구간) 는 **삭제했다.**
+#: 구현·문서·테스트가 다 있었지만 **호출하는 곳이 한 군데도 없었다.**
+#: docstring 은 "이 구간에서는 폴링을 촘촘히 한다" 고 했는데 실제 폴링은
+#: ecs_interval_seconds 고정이라, 읽는 사람에게 없는 기능을 있다고 말하는
+#: 코드였다. 같은 브랜치에서 `is_scaled_down` 을 지운 이유와 같다.
+#: 배포 시각을 데몬에 넘길 수단이 생기면 그때 다시 넣는다.

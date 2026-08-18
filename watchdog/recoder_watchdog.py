@@ -67,11 +67,6 @@ try:
     )
     from .masking import MASK_VERSION, mask_lines, mask_text
     from .notifier import notify_discord
-    from .cloudwatch_monitor import (
-        CloudWatchUnavailableError, EcsTarget,
-        collect_service_health, collect_traffic_metrics,
-    )
-    from .cloudwatch_thresholds import Thresholds, judge, next_unhealthy_streak
 except ImportError:  # 스크립트로 직접 실행될 때
     # /opt/recoder/watchdog/recoder_watchdog.py 처럼 절대 경로 실행 케이스
     _here = Path(__file__).resolve().parent
@@ -91,16 +86,55 @@ except ImportError:  # 스크립트로 직접 실행될 때
     )
     from watchdog.masking import MASK_VERSION, mask_lines, mask_text  # type: ignore
     from watchdog.notifier import notify_discord  # type: ignore
-    from watchdog.cloudwatch_monitor import (  # type: ignore
-        CloudWatchUnavailableError, EcsTarget,
-        collect_service_health, collect_traffic_metrics,
-    )
-    from watchdog.cloudwatch_thresholds import (  # type: ignore
-        Thresholds, judge, next_unhealthy_streak,
-    )
 
 
 log = logging.getLogger("recoder.watchdog")
+
+
+# ---------------------------------------------------------------------------
+# ECS/CloudWatch 감시 (FR-06-01/02) — **선택 기능으로 import 한다**
+# ---------------------------------------------------------------------------
+#
+# 여기서 실패해도 데몬은 계속 돈다. 예전에는 이 import 가 위의 필수 블록
+# 안에 있었고, install.sh 가 두 모듈을 복사하지 않아 설치된 데몬이
+# ModuleNotFoundError 로 죽었다. ECS 감시만 꺼진 게 아니라 컨테이너 크래시·
+# OOM·헬스체크 감시까지 전부 멈췄다.
+#
+# **감시 도구가 자기 확장 기능 때문에 죽는 것이 가장 나쁜 실패다.** 부가
+# 기능은 없으면 없는 대로 두고, 없다는 사실을 시끄럽게 말한다.
+_ECS_IMPORT_ERROR: Optional[str] = None
+try:
+    try:
+        from .cloudwatch_monitor import (
+            CloudWatchUnavailableError, EcsTarget,
+            collect_service_health, collect_traffic_metrics,
+        )
+        from .cloudwatch_thresholds import Thresholds, judge, next_unhealthy_streak
+    except ImportError:
+        from watchdog.cloudwatch_monitor import (  # type: ignore
+            CloudWatchUnavailableError, EcsTarget,
+            collect_service_health, collect_traffic_metrics,
+        )
+        from watchdog.cloudwatch_thresholds import (  # type: ignore
+            Thresholds, judge, next_unhealthy_streak,
+        )
+except ImportError as _exc:  # pragma: no cover - 설치 누락 시에만
+    _ECS_IMPORT_ERROR = str(_exc)
+
+    class CloudWatchUnavailableError(RuntimeError):  # type: ignore[no-redef]
+        """ECS 감시 모듈이 없을 때의 자리 표시자."""
+
+    EcsTarget = None  # type: ignore[assignment]
+    collect_service_health = None  # type: ignore[assignment]
+    collect_traffic_metrics = None  # type: ignore[assignment]
+    Thresholds = None  # type: ignore[assignment]
+    judge = None  # type: ignore[assignment]
+    next_unhealthy_streak = None  # type: ignore[assignment]
+
+
+def ecs_monitoring_importable() -> Optional[str]:
+    """ECS 감시를 쓸 수 없으면 그 이유, 쓸 수 있으면 None."""
+    return _ECS_IMPORT_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +222,9 @@ class RecoderWatchdog:
         #: ECS 가 연속으로 목표치를 못 채운 횟수. 정상으로 돌아오면 0 이 된다.
         self._ecs_unhealthy_streak: int = 0
         self._ecs_unavailable_since: Optional[float] = None
+        #: 설정이 켜져 있어도 **모듈이 없으면 못 돈다.** 둘을 따로 두어야
+        #: "켰는데 안 돌고 있다" 를 로그로 말할 수 있다.
+        self._ecs_active: bool = bool(cfg.ecs_enabled) and _ECS_IMPORT_ERROR is None
         # 최근 알림 정보 (디버그/테스트용)
         self._recent_alerts: Deque[Dict[str, Any]] = deque(maxlen=100)
 
@@ -233,7 +270,7 @@ class RecoderWatchdog:
                 if now >= next_health_at:
                     self._safe_health_checks()
                     next_health_at = now + self.cfg.health_interval_seconds
-                if self.cfg.ecs_enabled and now >= next_ecs_at:
+                if self._ecs_active and now >= next_ecs_at:
                     self._safe_poll_ecs()
                     next_ecs_at = now + self.cfg.ecs_interval_seconds
                 # 짧게 sleep — shutdown 신호 빠른 반응
@@ -329,6 +366,7 @@ class RecoderWatchdog:
             min_requests=self.cfg.min_requests,
             p95_seconds=self.cfg.p95_threshold_seconds,
             unhealthy_polls=self.cfg.unhealthy_polls,
+            task_restarts=self.cfg.task_restarts,
         )
         anomalies = judge(health, metrics, thresholds, self._ecs_unhealthy_streak)
 
@@ -788,6 +826,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if problem:
             log.error("ECS 감시 설정 오류: %s", problem)
             return 1
+        if cfg.ecs_enabled and _ECS_IMPORT_ERROR:
+            log.error(
+                "ECS 감시를 켰지만 감시 모듈을 불러올 수 없습니다: %s — "
+                "boto3 설치와 cloudwatch_monitor.py/cloudwatch_thresholds.py "
+                "설치 여부를 확인하세요. 지금 배포된 앱은 감시되지 않습니다.",
+                _ECS_IMPORT_ERROR,
+            )
+            return 1
         if not cfg.ecs_enabled:
             log.info(
                 "ECS 감시: 꺼짐 (RECODER_WATCHDOG_ECS_CLUSTER/ECS_SERVICE 미설정) "
@@ -799,6 +845,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     problem = cfg.ecs_config_problem()
     if problem:
         log.error("ECS 감시 설정 오류: %s", problem)
+    if cfg.ecs_enabled and _ECS_IMPORT_ERROR:
+        log.error(
+            "ECS 감시를 켰지만 감시 모듈을 불러올 수 없습니다: %s — 나머지 "
+            "감시는 계속합니다. 배포된 앱은 감시되지 않습니다.",
+            _ECS_IMPORT_ERROR,
+        )
 
     wd = RecoderWatchdog(cfg)
     return wd.run()

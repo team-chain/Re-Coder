@@ -56,6 +56,7 @@ ENV_ERROR_RATE = ENV_PREFIX + "ERROR_RATE_THRESHOLD"
 ENV_MIN_REQUESTS = ENV_PREFIX + "MIN_REQUESTS"
 ENV_P95_SECONDS = ENV_PREFIX + "P95_THRESHOLD_SECONDS"
 ENV_UNHEALTHY_POLLS = ENV_PREFIX + "UNHEALTHY_POLLS"
+ENV_TASK_RESTARTS = ENV_PREFIX + "TASK_RESTARTS"
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,10 @@ class WatchdogConfig:
     min_requests: int = 20
     p95_threshold_seconds: float = 3.0
     unhealthy_polls: int = 3
+    #: 관측 창 안에서 이 횟수 이상 **크래시로** 멈추면 재시작 루프로 본다.
+    #: 예전에는 이것만 환경변수가 없어서, 오탐이 나도 운영자가 조절할 수단이
+    #: 없었다.
+    task_restarts: int = 2
     extra: Dict[str, str] = field(default_factory=dict)
 
     @property
@@ -261,6 +266,7 @@ def load_config(dotenv_path: Optional[Path] = None) -> WatchdogConfig:
         min_requests=_to_int(os.environ.get(ENV_MIN_REQUESTS), 20),
         p95_threshold_seconds=_to_float(os.environ.get(ENV_P95_SECONDS), 3.0),
         unhealthy_polls=_to_int(os.environ.get(ENV_UNHEALTHY_POLLS), 3),
+        task_restarts=_to_int(os.environ.get(ENV_TASK_RESTARTS), 2),
     )
     return cfg
 
