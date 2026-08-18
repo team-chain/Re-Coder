@@ -147,6 +147,48 @@ def test_Dockerfile_이_없으면_먼저_만들라고_알려준다(tmp_path):
     assert "탭" in joined, "무엇을 해야 하는지 안 알려준다"
 
 
+def test_자동생성이_안_되는_스택에는_그_탭으로_보내지_않는다(tmp_path):
+    """안내대로 따라갔더니 422 가 나오면, 사용자는 할 수 있는 게 없다."""
+    ws = _workspace(tmp_path, **{"go.mod": "module x\n"})
+    proposal = infra_agent.generate_docker_compose(_profile(ws, StackType.GO), str(ws))
+
+    joined = " ".join(proposal.risk_reasons)
+    assert joined, "Dockerfile 이 없는데 아무 말도 없다"
+    assert "탭" not in joined, "만들어 주지 못하는 탭으로 보낸다"
+    assert "직접 추가" in joined
+
+
+def test_pyproject만_있어도_헬스체크가_들어간다(tmp_path):
+    """Poetry 만 쓰는 FastAPI 는 스캐너가 custom 으로 분류한다.
+
+    스택 이름만 보면 헬스체크가 통째로 빠져서, Dockerfile 에는 있고
+    compose 에는 없는 어긋난 상태가 된다.
+    """
+    ws = _workspace(tmp_path, **{"pyproject.toml": "[project]\nname='x'\n"})
+    proposal = infra_agent.generate_docker_compose(_profile(ws, StackType.CUSTOM), str(ws))
+
+    test = _app_service(proposal.content)["healthcheck"]["test"]
+    assert test[1] == "python"
+
+
+def test_두_파일이_같은_헬스_경로를_찌른다(tmp_path):
+    """**판단이 두 군데로 갈리면 아무도 눈치채지 못한다.**
+
+    헬스체크가 틀려도 예외가 아니라 "영원히 unhealthy" 로 나타난다.
+    """
+    (tmp_path / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+    (tmp_path / "app" / "health").mkdir(parents=True)
+    (tmp_path / "app" / "health" / "route.ts").write_text("export function GET(){}", encoding="utf-8")
+    profile = _profile(tmp_path, StackType.NODE_NEXT)
+
+    dockerfile, _ = deploy._dockerfile_from_template(str(tmp_path), StackType.NODE_NEXT, profile)
+    compose = infra_agent.generate_docker_compose(profile, str(tmp_path)).content
+    compose_test = " ".join(yaml.safe_load(compose)["services"]["app"]["healthcheck"]["test"])
+
+    assert "/health" in compose_test and "/api/health" not in compose_test
+    assert "localhost:3000/health" in dockerfile, "Dockerfile 이 다른 경로를 찌른다"
+
+
 def test_음성대조_Dockerfile_이_있으면_그_경고는_없다(tmp_path):
     """항상 경고하면 위 테스트는 아무것도 증명하지 못한다."""
     ws = _workspace(

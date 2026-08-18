@@ -12,6 +12,23 @@ from typing import Optional
 
 from schemas import ProjectProfile, ProjectStack
 
+
+def _detect_health_path(workspace: Path, stack: ProjectStack) -> str:
+    """스택 관례 + 실제 라우트 파일로 헬스 경로를 정한다.
+
+    infra_agent 가 유일한 구현이다. import 가 실패해도 스캔 자체가 죽지는
+    않아야 하므로 기본값으로 물러선다.
+    """
+    try:
+        try:
+            from infra_agent import discover_health_path  # type: ignore
+        except ImportError:
+            from core.infra_agent import discover_health_path  # type: ignore
+    except Exception:  # noqa: BLE001 - 스캔이 이것 때문에 실패하면 안 된다
+        return "/health"
+    value = getattr(stack, "value", stack)
+    return discover_health_path(str(workspace), str(value))
+
 RECODER_HOME = Path.home() / ".recoder"
 
 
@@ -78,7 +95,11 @@ class ProjectScanner:
             package_manager=package_manager,
             default_run_command=default_run_command,
             default_port=default_port,
-            health_check_path="/health",
+            #: **하드코딩하지 않는다.** 예전에는 여기가 항상 "/health" 라,
+            #: Next.js 처럼 /api/ 아래에 라우트를 두는 스택에서 생성된
+            #: Dockerfile/compose 가 없는 경로를 찔러 컨테이너가 영원히
+            #: unhealthy 가 됐다. 판단은 infra_agent 한 곳에 모여 있다.
+            health_check_path=_detect_health_path(workspace, stack),
             dockerfile_path=dockerfile_path,
             compose_path=compose_path,
             deployment_target="local_docker",

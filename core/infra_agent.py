@@ -293,11 +293,37 @@ def generate_dockerfile(
     )
 
 
+def _runtime_family(stack: str, workspace_path: str = "") -> str:
+    """"python" | "node" | "" — compose 헬스체크에 쓸 런타임 계열.
+
+    스택 이름만으로는 부족하다. 스캐너는 requirements.txt / package.json 만
+    보므로, **Poetry(pyproject.toml)만 쓰는 FastAPI 프로젝트가 custom 으로
+    분류된다.** 그러면 Dockerfile 에는 헬스체크가 들어가는데 compose 에는
+    안 들어가서 둘이 어긋난다. 스택을 모르면 파일로 한 번 더 본다.
+    """
+    if stack.startswith("python"):
+        return "python"
+    if stack.startswith("node"):
+        return "node"
+    if not workspace_path:
+        return ""
+    try:
+        root = Path(workspace_path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return ""
+    if (root / "requirements.txt").is_file() or (root / "pyproject.toml").is_file():
+        return "python"
+    if (root / "package.json").is_file():
+        return "node"
+    return ""
+
+
 def compose_health_check_block(
     stack: str,
     container_port: str,
     health_check_path: str = "/health",
     start_period: str = "10s",
+    workspace_path: str = "",
 ) -> str:
     """compose 의 app healthcheck 블록. 못 만들면 **빈 문자열**.
 
@@ -321,7 +347,8 @@ def compose_health_check_block(
     """
     url = f"http://127.0.0.1:{container_port}{health_check_path}"
 
-    if stack.startswith("python"):
+    family = _runtime_family(stack, workspace_path)
+    if family == "python":
         #: python 은 이 이미지에 반드시 있다. 작은따옴표만 써서 YAML
         #: 큰따옴표 문자열 안에 그대로 들어가게 한다.
         probe = (
@@ -329,7 +356,7 @@ def compose_health_check_block(
             f"\"import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('{url}', "
             'timeout=5).status == 200 else 1)"]'
         )
-    elif stack.startswith("node"):
+    elif family == "node":
         probe = (
             '["CMD", "node", "-e", '
             f"\"require('http').get('{url}', r => process.exit(r.statusCode === 200 ? 0 : 1))"
@@ -399,7 +426,7 @@ def generate_docker_compose(
         "mysql": "docker-compose-mysql",
     }.get(db_engine, "docker-compose")
 
-    health_path = _compose_health_path(project_profile, stack)
+    health_path = _compose_health_path(project_profile, stack, str(project_root))
     content = registry.render(
         compose_template,
         {
@@ -413,6 +440,7 @@ def generate_docker_compose(
                 default_port,
                 health_path,
                 start_period="15s" if db_engine else "10s",
+                workspace_path=str(project_root),
             ),
         },
     )
@@ -431,11 +459,21 @@ def generate_docker_compose(
     # 해야 하는지 그대로 말해 준다.
     risk_reasons: list[str] = []
     if not (project_root / "Dockerfile").exists():
-        risk_reasons.append(
-            "이 compose 는 같은 폴더의 Dockerfile 을 빌드합니다. 아직 "
-            "Dockerfile 이 없으니 「Dockerfile」 탭에서 먼저 생성·승인하세요. "
-            "그 전에는 docker compose up 이 빌드 단계에서 실패합니다."
-        )
+        if _runtime_family(stack, str(project_root)):
+            #: 「Dockerfile」 탭이 실제로 만들어 줄 수 있는 스택일 때만 그리로
+            #: 보낸다. 지원하지 않는 스택(Go·Java·Ruby 등)에서는 그 탭이
+            #: 422 를 내므로, 안내대로 따라가면 막다른 길이다.
+            risk_reasons.append(
+                "이 compose 는 같은 폴더의 Dockerfile 을 빌드합니다. 아직 "
+                "Dockerfile 이 없으니 「Dockerfile」 탭에서 먼저 생성·승인하세요. "
+                "그 전에는 docker compose up 이 빌드 단계에서 실패합니다."
+            )
+        else:
+            risk_reasons.append(
+                "이 compose 는 같은 폴더의 Dockerfile 을 빌드하는데, 이 프로젝트는 "
+                "ReCoder 가 Dockerfile 을 자동 생성할 수 있는 스택이 아닙니다. "
+                "Dockerfile 을 직접 추가한 뒤 docker compose up 을 실행하세요."
+            )
 
     return InfraFileProposal(
         proposal_id=uuid.uuid4().hex,
@@ -449,20 +487,84 @@ def generate_docker_compose(
     )
 
 
-def _compose_health_path(project_profile: Optional[ProjectProfile], stack: str) -> str:
-    """compose 헬스체크가 찌를 경로.
+#: 스캐너가 넣는 값. **탐지 결과가 아니라 하드코딩된 기본값**이다
+#: (core/project_scanner.py). 이 값과 같으면 "사람이 정한 것" 으로 볼 수 없다.
+SCANNER_DEFAULT_HEALTH_PATH = "/health"
 
-    스캐너의 `health_check_path` 는 **항상 "/health" 로 하드코딩**되어 있어서
-    (project_scanner.py) 그대로 믿으면 Next.js 처럼 규약이 다른 스택에서
-    없는 경로를 찌른다. 프로필 값이 기본값과 다르면 사람이 정한 것으로 보고
-    존중하고, 기본값 그대로면 스택 관례를 쓴다.
+#: 생성 파일에 그대로 들어가는 값이라 문자를 제한한다. 큰따옴표·역슬래시가
+#: 섞이면 compose 의 YAML 인용이나 Dockerfile 의 명령이 깨진다.
+_HEALTH_PATH_RE = re.compile(r"/[A-Za-z0-9._~%/@+-]*")
+
+#: Next.js 의 health 라우트가 놓이는 자리. App Router / Pages Router,
+#: 그리고 src/ 레이아웃까지 본다.
+_NEXT_HEALTH_CANDIDATES: tuple = (
+    ("/api/health", (
+        "app/api/health/route.js", "app/api/health/route.ts",
+        "src/app/api/health/route.js", "src/app/api/health/route.ts",
+        "pages/api/health.js", "pages/api/health.ts",
+        "src/pages/api/health.js", "src/pages/api/health.ts",
+        "pages/api/health/index.js", "pages/api/health/index.ts",
+    )),
+    ("/health", (
+        "app/health/route.js", "app/health/route.ts",
+        "src/app/health/route.js", "src/app/health/route.ts",
+    )),
+)
+
+
+def discover_health_path(
+    workspace_path: str,
+    stack: str,
+    configured: Optional[str] = None,
+) -> str:
+    """헬스체크가 찌를 경로. **이 판단은 여기 한 곳에만 둔다.**
+
+    왜 하나로 합쳤나
+        예전에는 compose 쪽(infra_agent)과 Dockerfile 쪽(api/routes/deploy.py)에
+        각각 구현이 있었고, 둘이 서로 달랐다. compose 는 파일시스템을 안 보고
+        Next 면 무조건 /api/health 를, Dockerfile 쪽은 실제 라우트를 찾아
+        /health 를 돌려줄 수도 있었다. **같은 프로젝트에서 두 파일이 다른
+        경로를 찌른다.** 헬스체크가 틀리면 예외가 아니라 "영원히 unhealthy"
+        로 나타나므로, 갈라진 채로는 아무도 눈치채지 못한다.
+
+    왜 프로필 값을 그대로 못 쓰나
+        `project_scanner` 는 health_check_path 를 하드코딩한다. 탐지한 적이
+        없다. 그래서 Next.js 처럼 /api/ 아래에 라우트를 두는 스택에서 그대로
+        쓰면 없는 경로를 찌른다.
+
+    순서
+        1. 설정값이 스캐너 기본값과 **다르면** 사람이 정한 것으로 보고 존중한다.
+        2. Next.js 면 실제 라우트 파일을 찾아본다.
+        3. 못 찾으면 스택 관례(Next 는 /api/health), 그 외엔 /health.
     """
-    configured = getattr(project_profile, "health_check_path", None) if project_profile else None
-    if isinstance(configured, str) and configured.startswith("/") and configured != "/health":
+    if (
+        isinstance(configured, str)
+        and _HEALTH_PATH_RE.fullmatch(configured)
+        and configured != SCANNER_DEFAULT_HEALTH_PATH
+    ):
         return configured
+
     if stack == "node-next":
+        try:
+            root = Path(workspace_path).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return "/api/health"
+        for path, candidates in _NEXT_HEALTH_CANDIDATES:
+            if any((root / c).is_file() for c in candidates):
+                return path
+        #: 못 찾아도 /health 로 되돌리지 않는다 — Next 에서 그 경로는
+        #: 라우트가 아니라 거의 확실히 404 다.
         return "/api/health"
-    return "/health"
+
+    if isinstance(configured, str) and _HEALTH_PATH_RE.fullmatch(configured):
+        return configured
+    return SCANNER_DEFAULT_HEALTH_PATH
+
+
+def _compose_health_path(project_profile: Optional[ProjectProfile], stack: str,
+                         workspace_path: str) -> str:
+    configured = getattr(project_profile, "health_check_path", None) if project_profile else None
+    return discover_health_path(workspace_path, stack, configured)
 
 
 # ReCoder Preflight 게이트 job — CI 워크플로 뒤에 append 된다.
