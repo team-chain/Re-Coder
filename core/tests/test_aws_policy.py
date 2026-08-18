@@ -111,7 +111,6 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "sts:GetCallerIdentity":        "계정 단위 조회 — 리소스가 없다",
         "ecr:GetAuthorizationToken":    "계정 단위 토큰 발급",
         "ecs:RegisterTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
-        "ecs:DescribeTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
         "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
         "bedrock:ListFoundationModels": "계정 단위 조회",
         # FR-04-01 — 연결하는 IAM 사용자·정책 이름을 **정책을 만드는 시점에는
@@ -228,6 +227,13 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "ecr:GetAuthorizationToken":
+        "agents/ecs_build.py:216 의 `ecr.get_authorization_token()` 이 실제 "
+        "호출이다. 그런데 그 `ecr` 은 `ecr_login(ecr: Any, ...)` 처럼 **Any 로 "
+        "받은 함수 인자**라, 정적 스캐너가 ECR 클라이언트인 줄 알 방법이 없다. "
+        "예전에는 죽은 ecs_deploy_agent.py 의 CLI 호출(`aws ecr "
+        "get-login-password`)이 이 근거를 우연히 지탱하고 있었고, 그 파일을 "
+        "지우자 **살아있는 기능의 권한 근거가 같이 사라졌다.** 그래서 못 박는다",
     "ecr:BatchCheckLayerAvailability":
         "docker push — 파이썬이 아니라 docker 데몬이 호출한다",
     "ecr:InitiateLayerUpload":
@@ -257,14 +263,14 @@ PINNED_ACTIONS: dict[str, str] = {
 #: 그 카드가 끝나면 코드에서 호출이 발견되고, 아래 자기청소 테스트가
 #: "이제 여기서 빼라"고 알려준다.
 PLANNED_ACTIONS: dict[str, str] = {
-    "s3:CreateBucket":       "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:ListBucket":         "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:GetBucketLocation":  "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:PutBucketWebsite":   "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:PutBucketPolicy":    "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:PutObject":          "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:GetObject":          "FR-05-03 S3 배포 BYO 전환 — 미착수",
-    "s3:DeleteObject":       "FR-05-03 S3 배포 BYO 전환 — 미착수",
+    # FR-05-03 S3 배포 BYO 전환으로 대부분은 코드가 실제로 쓰게 됐다
+    # (core/api/routes/deploy_s3.py). 아래 셋만 아직 호출이 없다.
+    "s3:GetObject":
+        "FR-05-03 — 배포된 사이트를 코어가 되읽는 경로(배포 검증)가 아직 없다. "
+        "공개 읽기는 버킷 정책이 익명에게 주는 것이라 사용자 IAM 과 무관하다",
+    "s3:DeleteObject":
+        "FR-05-03 후속 — 재배포 시 사라진 파일 정리(prune)가 아직 없다. "
+        "지금은 덮어쓰기만 한다",
 }
 
 
@@ -280,19 +286,29 @@ def test_scanner_actually_finds_the_calls_we_know_are_there(scan):
     눈으로 확인한 호출 몇 개를 못 박아, 스캐너가 죽으면 여기서 먼저 터지게 한다.
     """
     found = {(c.service, c.operation) for c in scan.calls}
+    #: 앵커는 **살아있는 파일의 호출**이어야 한다.
+    #:
+    #: 예전 앵커 중 넷(ecs.update_service · ecs.register_task_definition ·
+    #: ecr.create-repository · ecr.get-login-password)은 `core/server.py` 와
+    #: `core/ecs_deploy_agent.py` 에 있었다. 두 파일은 main.py 가 import 하지
+    #: 않는 죽은 코드였고, 지우는 순간 이 테스트가 깨졌다. 죽은 코드를
+    #: 앵커로 삼으면 "스캐너가 살아있다"가 아니라 "죽은 파일이 아직 있다"를
+    #: 검사하게 된다.
     must_find = {
-        ("sts", "get_caller_identity"),     # api/routes/aws.py
-        ("ecs", "update_service"),          # ecs_deploy_agent.py
-        ("ecs", "register_task_definition"),
-        ("ecs", "describe_services"),
-        ("iam", "get_role"),                # agents/preflight_agent.py
+        ("sts", "get_caller_identity"),        # api/routes/aws.py
+        ("ecs", "describe_services"),          # aws_infra.py
+        ("ecs", "describe_clusters"),          # agents/preflight_agent.py
+        ("iam", "get_role"),                   # agents/preflight_agent.py
+        ("iam", "simulate_principal_policy"),  # api/routes/aws.py
         ("logs", "describe_log_groups"),
         ("ecr", "describe_repositories"),
-        ("ecr", "create-repository"),       # AWS CLI 경로 — 정규식은 못 봤다
-        ("ecr", "get-login-password"),      # AWS CLI 경로
-        ("bedrock-runtime", "converse"),    # 인자로 넘어간 클라이언트
+        ("bedrock-runtime", "converse"),       # 인자로 넘어간 클라이언트
         ("bedrock", "list_foundation_models"),
     }
+    #: CLI 경로(`["aws", "ecr", ...]`)는 이제 살아있는 코드에 없다. 그 갈래의
+    #: 정확성은 합성 소스 테스트(test_cli_subcommand_maps_to_an_action,
+    #: _scan_snippet 계열)가 따로 지킨다 — 여기서 빠졌다고 검사가 사라진 게
+    #: 아니다.
     missing = sorted(must_find - found)
     assert not missing, (
         "스캐너가 알려진 호출을 못 찾았다 — 스캐너가 깨졌을 가능성이 크다:\n  "
@@ -2068,4 +2084,201 @@ def test_every_runtime_call_is_granted_by_the_policy(runtime_actions):
     assert not missing, (
         "실행 중 실제로 나갔는데 권한표에 없는 액션:\n  " + "\n  ".join(missing)
         + "\n(aws_policy.py 를 갱신하세요)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 권한표 ↔ 배포 전 권한 점검 목록 동기화
+# ---------------------------------------------------------------------------
+
+
+def test_required_deploy_actions_are_all_granted_by_the_policy():
+    """**권한표가 주는 것보다 더 많은 것을 요구하면 배포가 통째로 막힌다.**
+
+    사고 경위 (Codex 코드리뷰 P1, PR #28)
+        죽은 코드를 지우면서 `ecs:DescribeTaskDefinition` 을 권한표에서 뺐는데,
+        `api/routes/aws.py` 의 REQUIRED_DEPLOY_ACTIONS 에는 그대로 남겨 뒀다.
+        그 목록은 `simulate_principal_policy` 로 실제 시뮬레이션되고, 결과가
+        `missing_actions` 로 확장에 전달된다. DeploymentCenter 는
+        missing_actions 가 비지 않으면 **ECS 배포를 시작하지 않는다.**
+
+        즉 사용자가 발급받은 권한표를 그대로 적용해도 "권한이 부족합니다" 가
+        뜨고 배포 버튼이 영영 안 눌리는 상태가 된다. 테스트는 전부 초록이었다 —
+        두 목록을 대조하는 검사가 없었기 때문이다.
+
+    이 테스트가 지키는 불변식
+        권한 점검이 요구하는 모든 액션은 권한표가 실제로 준다.
+        (반대 방향은 검사하지 않는다 — 권한표는 배포 외 기능의 권한도 담는다.)
+    """
+    from api.routes import aws as aws_routes
+
+    granted = set(ap.used_actions(ap.build_policy()))
+    required = set(aws_routes.REQUIRED_DEPLOY_ACTIONS)
+
+    ungranted = sorted(required - granted)
+    assert not ungranted, (
+        "배포 전 권한 점검이 요구하는데 권한표가 주지 않는 액션 — 사용자가 "
+        "권한표를 그대로 적용해도 배포가 막힌다:\n  " + "\n  ".join(ungranted)
+    )
+
+
+def test_음성대조_대조가_실제로_차이를_잡아낸다(monkeypatch):
+    """위 테스트가 항상 통과하는 껍데기가 아닌지 확인한다.
+
+    없는 액션을 필수 목록에 하나 끼워 넣으면 **반드시** 걸려야 한다.
+    """
+    from api.routes import aws as aws_routes
+
+    monkeypatch.setattr(
+        aws_routes,
+        "REQUIRED_DEPLOY_ACTIONS",
+        [*aws_routes.REQUIRED_DEPLOY_ACTIONS, "ecs:그런권한없음"],
+    )
+    granted = set(ap.used_actions(ap.build_policy()))
+    required = set(aws_routes.REQUIRED_DEPLOY_ACTIONS)
+    #: **포함 여부만** 본다. "이것 하나뿐" 으로 검사하면 본 테스트가 깨진
+    #: 상태(다른 드리프트가 있을 때)에서 이 대조까지 같이 깨져, 독립적인
+    #: 대조 구실을 못 한다.
+    assert "ecs:그런권한없음" in (required - granted), (
+        "대조가 차이를 못 잡는다 — 위 테스트는 아무것도 증명하지 못한다"
+    )
+    assert "ecs:그런권한없음" not in granted
+
+
+def _actions_actually_simulated(monkeypatch) -> set[str]:
+    """`_inspect_deploy_permissions` 가 IAM 에 **실제로 보내는** 액션 전부.
+
+    상수를 따로 두고 비교하면 상수와 코드가 갈라진다(그게 이 사고였다).
+    그래서 진짜 함수를 돌리고, IAM 클라이언트만 가짜로 바꿔 인자를 가로챈다.
+    """
+    from api.routes import aws as aws_routes
+
+    sent: set[str] = set()
+
+    class _FakeIam:
+        def simulate_principal_policy(self, **kwargs):
+            sent.update(kwargs.get("ActionNames", []))
+            return {
+                "EvaluationResults": [
+                    {"EvalActionName": a, "EvalDecision": "allowed"}
+                    for a in kwargs.get("ActionNames", [])
+                ]
+            }
+
+        def list_attached_user_policies(self, **_kw):
+            return {"AttachedPolicies": []}
+
+        def list_user_policies(self, **_kw):
+            return {"PolicyNames": []}
+
+        def list_attached_role_policies(self, **_kw):
+            return {"AttachedPolicies": []}
+
+        def list_role_policies(self, **_kw):
+            return {"PolicyNames": []}
+
+    class _FakeSession:
+        region_name = "us-east-1"
+
+        def client(self, name, **_kw):
+            if name == "iam":
+                return _FakeIam()
+            raise AssertionError(f"예상 못한 클라이언트: {name}")
+
+    monkeypatch.setattr(aws_routes, "_build_boto3_session", lambda **_kw: _FakeSession())
+    aws_routes._inspect_deploy_permissions(
+        {"account": "123456789012", "arn": "arn:aws:iam::123456789012:user/tester"},
+        "us-east-1",
+    )
+    return sent
+
+
+def test_시뮬레이션하는_모든_액션을_권한표가_준다(monkeypatch):
+    """**시뮬레이션 목록이 권한표를 넘어서면 배포가 통째로 막힌다.**
+
+    사고 경위 (Codex 코드리뷰 P1, PR #28 — 두 번째 지적)
+        권한표에서 `ecs:DescribeTaskDefinition` 을 뺀 뒤 REQUIRED_DEPLOY_ACTIONS
+        만 맞췄는데, `_inspect_deploy_permissions` 안에는 **또 다른 목록**
+        (simulations 배치)이 있어서 그 액션을 계속 IAM 에 보내고 있었다.
+
+        missing_actions 는 REQUIRED_DEPLOY_ACTIONS 와 교집합을 내지 않고
+        **시뮬레이션한 액션 중 거부된 것 전부**로 채워진다. 그래서 사용자가
+        권한표를 그대로 적용해도 implicitDeny 가 잡히고 ECS 배포가 막혔다.
+
+        첫 수정에서 이걸 놓친 이유는 내가 넣은 회귀 테스트가
+        REQUIRED_DEPLOY_ACTIONS **한 목록만** 대조했기 때문이다. 목록이 셋인데
+        둘만 맞춘 셈이다.
+
+    이 테스트가 지키는 불변식
+        IAM 에 실제로 보내는 모든 액션은 권한표가 준다.
+        (의도적으로 없어도 되는 액션은 OPTIONAL_* 로 분류돼 missing_actions 에
+         들어가지 않으므로 제외한다.)
+    """
+    from api.routes import aws as aws_routes
+
+    simulated = _actions_actually_simulated(monkeypatch)
+    assert simulated, "시뮬레이션을 하나도 안 했다 — 가짜 클라이언트가 안 물렸다"
+
+    optional = aws_routes.OPTIONAL_COST_CONTROL_ACTIONS | aws_routes.OPTIONAL_CONDITIONAL_ACTIONS
+    granted = set(ap.used_actions(ap.build_policy()))
+
+    ungranted = sorted((simulated - optional) - granted)
+    assert not ungranted, (
+        "IAM 에 시뮬레이션하는데 권한표가 주지 않는 액션 — implicitDeny 가 나서 "
+        "사용자가 권한표를 그대로 적용해도 배포가 막힌다:\n  " + "\n  ".join(ungranted)
+    )
+
+
+def test_음성대조_가짜_IAM_이_실제로_인자를_가로챈다(monkeypatch):
+    """빈 집합이 돌아오면 위 검사는 공짜로 통과한다.
+
+    **여기에는 "무엇이 없어야 한다" 를 넣지 않는다.** 그런 단언을 섞으면
+    위 테스트가 깨지는 상태에서 이 대조까지 같이 깨져, 독립적인 대조 구실을
+    못 한다(앞선 대조에서 실제로 그 실수를 했다).
+    """
+    simulated = _actions_actually_simulated(monkeypatch)
+    for action in ("ecr:GetAuthorizationToken", "ecs:UpdateService", "iam:PassRole"):
+        assert action in simulated, f"{action} 을 못 가로챘다 — 가짜가 안 물렸다"
+
+
+def test_지운_액션은_더는_시뮬레이션되지_않는다(monkeypatch):
+    """권한표에서 뺀 액션이 시뮬레이션 목록에 남아 있으면 배포가 막힌다."""
+    assert "ecs:DescribeTaskDefinition" not in _actions_actually_simulated(monkeypatch)
+
+
+def test_필수_액션은_빠짐없이_시뮬레이션된다(monkeypatch):
+    """세 번째 목록 대조.
+
+    `report.inspected` 는 `set(REQUIRED_DEPLOY_ACTIONS).issubset(simulated)`
+    를 조건으로 삼는다. 필수인데 시뮬레이션에서 빠지면 점검이 영영 "완료"가
+    되지 않고, UI 는 초록을 못 띄운다 — 이번에는 반대 방향의 드리프트다.
+
+    목록이 셋(권한표 · REQUIRED_DEPLOY_ACTIONS · simulations 배치)이라 둘만
+    맞추면 나머지 하나에서 샌다. 실제로 그렇게 두 번 샜다.
+    """
+    from api.routes import aws as aws_routes
+
+    simulated = _actions_actually_simulated(monkeypatch)
+    not_simulated = sorted(set(aws_routes.REQUIRED_DEPLOY_ACTIONS) - simulated)
+    assert not not_simulated, (
+        "필수 목록에 있는데 시뮬레이션하지 않는 액션 — 권한 점검이 영영 "
+        "'완료' 로 안 바뀐다:\n  " + "\n  ".join(not_simulated)
+    )
+
+
+def test_시뮬레이션_초과분은_선택적_액션뿐이다(monkeypatch):
+    """필수도 아닌데 시뮬레이션하는 액션은 **선택적** 으로 분류돼 있어야 한다.
+
+    분류가 없으면 거부 시 missing_actions 에 실려 배포를 막는다.
+    """
+    from api.routes import aws as aws_routes
+
+    simulated = _actions_actually_simulated(monkeypatch)
+    optional = (
+        aws_routes.OPTIONAL_COST_CONTROL_ACTIONS | aws_routes.OPTIONAL_CONDITIONAL_ACTIONS
+    )
+    extra = sorted(simulated - set(aws_routes.REQUIRED_DEPLOY_ACTIONS) - optional)
+    assert not extra, (
+        "필수도 선택적도 아닌데 시뮬레이션한다 — 거부되면 배포가 막힌다:\n  "
+        + "\n  ".join(extra)
     )

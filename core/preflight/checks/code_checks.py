@@ -11,6 +11,7 @@ AST 기반 탐지는 First Run Wizard (D 영역) 의 본 작업. 본 검사는 �
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -83,8 +84,8 @@ _ENTRYPOINT_CANDIDATES: dict[ContractStack, tuple[str, ...]] = {
     #: 할 수 없는 막다른 길**이 된다.
     #:
     #: 실측으로 Spring(maven/gradle)·Rails·PHP·Procfile·docker-compose
-    #: 6가지가 그 상태였다. Go 만 통과했는데 그건 `main.go` 가 우연히
-    #: 목록에 있어서였다.
+    #: 6가지가 그 상태였다. Go 는 아래 내용 프로브가 package main 과
+    #: func main 을 함께 확인한다.
     #:
     #: `check_app_entrypoint` 은 `exists()` 로 보므로 **폴더도 후보가 된다**
     #: (`src/main/java` 처럼 진입점이 패키지 트리 깊숙이 있는 경우).
@@ -103,8 +104,9 @@ _ENTRYPOINT_CANDIDATES: dict[ContractStack, tuple[str, ...]] = {
         # Django — `_detect_preflight_contract_stack` 이 FastAPI/Flask 만
         # 구분하므로 Django 는 CUSTOM 으로 온다. 관례 진입점을 넣어 둔다.
         "manage.py", "wsgi.py", "asgi.py", "config/wsgi.py", "src/manage.py",
-        # Go · Rust
-        "main.go", "main.rs", "src/main.rs",
+        # Rust. Go main.go 는 파일명만으로 실행 가능성을 증명할 수 없으므로
+        # 아래 package main + func main 내용 프로브로만 인정한다.
+        "main.rs", "src/main.rs",
         # Ruby
         "config.ru", "app.rb", "main.rb",
         # PHP
@@ -307,17 +309,32 @@ _EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str
     (
         "java",
         ("src/main/java/**/*.java", "src/*/src/main/java/**/*.java", "**/*.java"),
-        # `static` 과 `void` 사이에 다른 합법 수식어가 올 수 있다 —
-        # `static public void main` · `static final synchronized void main` 은
-        # 전부 유효한 진입점 선언이다. `static\s+void` 로 붙여 쓰면 그런
-        # 앱이 APP_ENTRYPOINT_NOT_FOUND 로 막힌다. `(?:\w+\s+)*` 는 세미콜론
-        # 같은 비단어 문자를 넘지 못하므로 다른 문장으로 새지 않는다.
-        re.compile(r"\bstatic\s+(?:\w+\s+)*void\s+main\s*\("),
+        # Java launcher가 호출할 수 있는 public static void main(String[])
+        # 또는 동등한 String... 서명만 인정한다. 수식어 순서는 자유이므로
+        # lookahead로 public/static 존재를 확인하고, 세미콜론·괄호·중괄호를
+        # 넘지 않는 수식어 구간과 정확한 단일 String 배열 인자를 검증한다.
+        re.compile(
+            r"""
+            \b
+            (?=[^;{}()]*\bpublic\b)
+            (?=[^;{}()]*\bstatic\b)
+            (?:(?:public|static|final|synchronized|strictfp)\s+)*
+            void\s+main\s*\(\s*
+            (?:final\s+)?
+            (?:
+                (?:java\.lang\.)?String\s*\[\s*\]\s+[\w$]+
+              | (?:java\.lang\.)?String\s*\.\.\.\s*[\w$]+
+              | (?:java\.lang\.)?String\s+[\w$]+\s*\[\s*\]
+            )
+            \s*\)
+            """,
+            re.X,
+        ),
     ),
     (
         "kotlin",
         ("src/main/kotlin/**/*.kt", "**/*.kt"),
-        re.compile(r"^\s*(?:@\w+\s+)*fun\s+main\s*\(", re.M),
+        re.compile(r"^\s*(?:@\w+\s+)*(?:suspend\s+)?fun\s+main\s*\(", re.M),
     ),
     (
         "go",
@@ -330,15 +347,7 @@ _EXECUTABLE_ENTRYPOINT_PROBES: tuple[tuple[str, tuple[str, ...], "re.Pattern[str
             re.M,
         ),
     ),
-    (
-        "php",
-        ("public/*.php", "*.php"),
-        re.compile(r"<\?php"),
-    ),
 )
-
-#: 프로브가 훑을 파일 수 상한. 큰 저장소에서 몇 초씩 걸리면 안 된다.
-_PROBE_MAX_FILES = 60
 
 #: 프로브를 **켜 주는 매니페스트**. 워크스페이스 루트에 이 파일이 있어야만
 #: 해당 언어의 프로브가 돈다.
@@ -354,7 +363,7 @@ _PROBE_MAX_FILES = 60
 #: 정당하다. 둘 다 있으면(폴리글랏) 둘 다 돈다 — 그건 오탐이 아니라 사실이다.
 #:
 #: 매니페스트가 하나도 없는 워크스페이스는 프로브가 전부 꺼진다. 그 경우
-#: 이름 기반 후보(`main.py`·`main.go`·`Dockerfile` 등)가 이미 앞 단계에서
+#: 이름 기반 후보(`main.py`·`main.rs`·`Dockerfile` 등)가 이미 앞 단계에서
 #: 처리했으므로, 여기 도달했다는 것 자체가 "진입점을 주장할 근거가 없다"는
 #: 뜻이다 — 막는 것이 맞다.
 _PROBE_RUNTIME_MANIFESTS: dict[str, tuple[str, ...]] = {
@@ -363,7 +372,6 @@ _PROBE_RUNTIME_MANIFESTS: dict[str, tuple[str, ...]] = {
     "kotlin": ("pom.xml", "build.gradle", "build.gradle.kts",
                "settings.gradle", "settings.gradle.kts"),
     "go":     ("go.mod", "go.work"),
-    "php":    ("composer.json",),
 }
 
 #: 언어별 잡음 제거 규칙: (줄 주석 접두들, 블록주석 여부, 여러 줄 원시 문자열 구분자들)
@@ -372,7 +380,6 @@ _PROBE_NOISE_RULES: dict[str, tuple[tuple[str, ...], bool, tuple[str, ...]]] = {
     "java":   (("//",), True, ('"""',)),   # Java 15+ 텍스트 블록
     "kotlin": (("//",), True, ('"""',)),   # Kotlin 원시 문자열
     "go":     (("//",), True, ("`",)),     # Go 백틱 원시 문자열
-    "php":    (("//", "#"), True, ()),
 }
 
 
@@ -470,6 +477,36 @@ def _enabled_probe_labels(workspace: Path) -> set[str]:
     return enabled
 
 
+def _find_composer_bin_entrypoint(workspace: Path) -> Optional[str]:
+    """Return an existing Composer-configured CLI executable, if any."""
+    manifest = workspace / "composer.json"
+    if not manifest.is_file():
+        return None
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+    configured = data.get("bin", [])
+    if isinstance(configured, str):
+        configured = [configured]
+    if not isinstance(configured, list):
+        return None
+
+    workspace_root = workspace.resolve()
+    for rel in configured:
+        if not isinstance(rel, str) or not rel.strip():
+            continue
+        candidate = (workspace / rel).resolve()
+        try:
+            relative = candidate.relative_to(workspace_root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return relative.as_posix()
+    return None
+
+
 def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
     """실행 진입점을 **내용으로** 찾는다. 못 찾으면 None.
 
@@ -485,15 +522,24 @@ def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
         "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
         ".git", "target", ".gradle", "vendor", "out", "test", "tests",
     }
+    composer_bin = _find_composer_bin_entrypoint(workspace)
+    if composer_bin:
+        return composer_bin
+
     enabled = _enabled_probe_labels(workspace)
     for label, patterns, pattern_re in _EXECUTABLE_ENTRYPOINT_PROBES:
         if label not in enabled:
             continue
-        scanned = 0
+        # Patterns are ordered from conventional source roots to broad
+        # fallbacks. Track duplicates, but inspect every relevant source file:
+        # a valid launcher must not disappear merely because it is the 61st
+        # file returned by an OS-dependent directory enumeration.
+        seen_paths: set[Path] = set()
         for glob_pattern in patterns:
             for path in workspace.glob(glob_pattern):
-                if scanned >= _PROBE_MAX_FILES:
-                    break
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
                 try:
                     rel_parts = path.relative_to(workspace).parts
                 except ValueError:
@@ -502,15 +548,12 @@ def _find_executable_entrypoint(workspace: Path) -> Optional[str]:
                     continue
                 if not path.is_file():
                     continue
-                scanned += 1
                 try:
-                    text = path.read_text(encoding="utf-8", errors="ignore")[:40_000]
+                    text = path.read_text(encoding="utf-8", errors="ignore")
                 except OSError:
                     continue
                 if pattern_re.search(_strip_probe_noise(text, label)):
                     return path.relative_to(workspace).as_posix()
-            if scanned >= _PROBE_MAX_FILES:
-                break
     return None
 
 

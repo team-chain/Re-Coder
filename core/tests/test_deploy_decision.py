@@ -643,7 +643,7 @@ _SERVER_FIXTURES = [
     ({"package.json": '{"dependencies":{"next":"14"}}', "next.config.js": "module.exports={}"}, "Next SSR"),
     ({"package.json": '{"dependencies":{"astro":"^4","@astrojs/node":"^8"}}',
       "astro.config.mjs": "export default { output: 'server' }\n", "src/index.ts": "x"}, "Astro SSR"),
-    ({"go.mod": "module x\n", "main.go": "package main\n"}, "Go"),
+    ({"go.mod": "module x\n", "main.go": "package main\nfunc main() {}\n"}, "Go"),
     ({"go.mod": "module x\n", "cmd/api/main.go": "package main\nfunc main() {}\n"}, "Go (cmd 배치)"),
     ({"pom.xml": "<project/>",
       "src/main/java/App.java": "class App { public static void main(String[] a) {} }"}, "Spring (maven)"),

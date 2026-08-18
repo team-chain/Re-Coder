@@ -9,6 +9,7 @@ Static Preflight 12종 검사 단위 테스트.
 
 from __future__ import annotations
 
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -546,6 +547,36 @@ def test_entrypoint_candidate_must_be_a_file_not_a_directory(tmp_path):
     assert check_app_entrypoint(other, contract).passed
 
 
+def test_root_main_go_requires_package_main_and_function(tmp_path):
+    """A root main.go filename must not bypass Go executable validation."""
+    try:
+        from preflight.checks.code_checks import check_app_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import check_app_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    (tmp_path / "go.mod").write_text("module example.com/lib\n", encoding="utf-8")
+    main_go = tmp_path / "main.go"
+    contract = build_default_contract(ContractStack.CUSTOM)
+
+    main_go.write_text(
+        "package generator\nfunc main() {}\n",
+        encoding="utf-8",
+    )
+    assert not check_app_entrypoint(tmp_path, contract).passed
+
+    main_go.write_text(
+        "package main\nfunc main() {}\n",
+        encoding="utf-8",
+    )
+    result = check_app_entrypoint(tmp_path, contract)
+    assert result.passed
+    assert result.details["found_by"] == "probe"
+
+
 def test_executable_probe_requires_a_real_main_declaration(tmp_path):
     """내용 프로브는 **선언을 실제로 찾아야** 한다 — 파일 존재만으로는 부족."""
     try:
@@ -682,7 +713,15 @@ def test_probe_accepts_any_legal_java_modifier_order(tmp_path):
     cases = [
         ("static public void main(String[] a) {}", True, "static public"),
         ("public static void main(String[] a) {}", True, "관례 순서"),
-        ("static final synchronized void main(String[] a) {}", True, "수식어 여러 개"),
+        ("static final synchronized public void main(String[] a) {}", True, "수식어 여러 개"),
+        ("public static void main(String... args) {}", True, "varargs"),
+        ("static public void main(java.lang.String args[]) {}", True, "정규화 전 배열 표기"),
+        ("private static void main(int value) {}", False, "private + 잘못된 인자"),
+        ("public static void main(int value) {}", False, "String 배열 아님"),
+        ("static void main(String[] args) {}", False, "public 없음"),
+        ("public void main(String[] args) {}", False, "static 없음"),
+        ("public static void main(String value) {}", False, "단일 String"),
+        ("public static void main(String[] a, int n) {}", False, "인자 두 개"),
         # 다른 문장으로 새면 안 된다 — static 필드 뒤의 다른 메서드.
         ("static int MAX = 3; public void mainframe(String[] a) {}", False, "비진입점"),
     ]
@@ -694,3 +733,112 @@ def test_probe_accepts_any_legal_java_modifier_order(tmp_path):
             "class App { %s }\n" % decl, encoding="utf-8")
         got = _find_executable_entrypoint(ws) is not None
         assert got == expected, f"{label}: expected {expected}, got {got}"
+
+
+def test_probe_searches_beyond_sixty_source_files(tmp_path):
+    """A valid launcher is not hidden by an arbitrary global file cutoff."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    source_root = tmp_path / "src" / "main" / "java" / "example"
+    source_root.mkdir(parents=True)
+    (tmp_path / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    for index in range(75):
+        (source_root / f"A{index:03}.java").write_text(
+            f"class A{index:03} {{ int value() {{ return {index}; }} }}\n",
+            encoding="utf-8",
+        )
+    launcher = source_root / "ZLauncher.java"
+    launcher.write_text(
+        "class ZLauncher { public static void main(String[] args) {} }\n",
+        encoding="utf-8",
+    )
+
+    assert _find_executable_entrypoint(tmp_path) == (
+        "src/main/java/example/ZLauncher.java"
+    )
+
+
+def test_probe_accepts_suspend_kotlin_main(tmp_path):
+    """Kotlin's valid top-level suspend main form is executable."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    source = tmp_path / "src" / "main" / "kotlin" / "App.kt"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+    source.write_text("suspend fun main() { runApp() }\n", encoding="utf-8")
+
+    assert _find_executable_entrypoint(tmp_path) == "src/main/kotlin/App.kt"
+
+
+def test_probe_does_not_treat_arbitrary_php_source_as_entrypoint(tmp_path):
+    """A Composer library is not deployable merely because PHP files have tags."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+        from preflight.contract_loader import build_default_contract
+        from schemas import ContractStack
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+        from core.preflight.contract_loader import build_default_contract  # type: ignore
+        from core.schemas import ContractStack  # type: ignore
+
+    source = tmp_path / "src" / "Foo.php"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"name": "example/library"}),
+        encoding="utf-8",
+    )
+    source.write_text("<?php\nclass Foo {}\n", encoding="utf-8")
+
+    assert _find_executable_entrypoint(tmp_path) is None
+    result = check_app_entrypoint(
+        tmp_path,
+        build_default_contract(ContractStack.CUSTOM),
+    )
+    assert not result.passed
+
+
+def test_probe_accepts_existing_composer_bin_entrypoint(tmp_path):
+    """An explicit Composer bin file is executable evidence for a CLI package."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    executable = tmp_path / "bin" / "console"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/usr/bin/env php\n<?php\n", encoding="utf-8")
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"name": "example/tool", "bin": ["bin/console"]}),
+        encoding="utf-8",
+    )
+
+    assert _find_executable_entrypoint(tmp_path) == "bin/console"
+
+
+def test_probe_reads_launcher_after_character_40000(tmp_path):
+    """A valid launcher near the end of a large source file remains visible."""
+    try:
+        from preflight.checks.code_checks import _find_executable_entrypoint
+    except ImportError:  # pragma: no cover
+        from core.preflight.checks.code_checks import _find_executable_entrypoint  # type: ignore
+
+    source = tmp_path / "src" / "main" / "java" / "LargeApp.java"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    source.write_text(
+        "class LargeApp {\n"
+        + ("int padding = 0;\n" * 3_000)
+        + "public static void main(String[] args) {}\n}\n",
+        encoding="utf-8",
+    )
+    assert source.stat().st_size > 40_000
+
+    assert _find_executable_entrypoint(tmp_path) == (
+        "src/main/java/LargeApp.java"
+    )
