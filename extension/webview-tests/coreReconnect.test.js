@@ -100,3 +100,84 @@ test('[음성 대조] 감지 결과가 있으면 그 내용을 그대로 보여�
   assert.strictEqual(out, '감지됨: Node.js 서버형 앱 (package.json · express)');
   assert.ok(!out.includes('확인할 수 없음'));
 });
+
+// ---------------------------------------------------------------------------
+// 코드리뷰 추가분 — 연결 실패와 애플리케이션 오류를 구분한다
+// ---------------------------------------------------------------------------
+//
+// 「다시 검사」에 재연결을 붙이면서 모든 실패를 연결 끊김으로 취급했다.
+// 코어는 멀쩡한데 preflight 가 500 을 내면 사용자에게는 "코어가 실행 중인지
+// 확인해 주세요" 가 뜨고 **진짜 원인은 안쪽 catch 가 삼켰다.**
+// dev 모드에서는 ensureRunning() 이 cleanupStale() 로 이어져 멀쩡한 코어를
+// SIGTERM/SIGKILL 하기까지 했다 — 애플리케이션 500 하나가 코어를 죽인다.
+
+const { isCoreConnectionFailure } = require('../out/core/coreReuse.js');
+
+test('연결이 끊긴 오류는 재연결 대상으로 본다', () => {
+  for (const message of [
+    'fetch failed',
+    'connect ECONNREFUSED 127.0.0.1:17894',
+    'socket hang up',
+    'The operation was aborted',
+    'request timeout',
+  ]) {
+    assert.strictEqual(
+      isCoreConnectionFailure(message), true,
+      `연결 실패인데 재연결을 안 한다: ${message}`
+    );
+  }
+});
+
+test('음성대조 — 애플리케이션 오류는 재연결 대상이 아니다', () => {
+  for (const message of [
+    'HTTP 500: Internal Server Error',
+    'preflight failed: permission denied reading package.json',
+    '워크스페이스 경로가 없습니다',
+    'HTTP 422: Unprocessable Entity',
+  ]) {
+    assert.strictEqual(
+      isCoreConnectionFailure(message), false,
+      `애플리케이션 오류에 재연결을 건다 — 진짜 원인이 가려지고 dev 모드에선 멀쩡한 코어가 죽는다: ${message}`
+    );
+  }
+});
+
+test('빈 메시지는 재연결 대상이 아니다', () => {
+  assert.strictEqual(isCoreConnectionFailure(''), false);
+  assert.strictEqual(isCoreConnectionFailure(undefined), false);
+});
+
+// ---------------------------------------------------------------------------
+// "코어에 연결되면 다시 검사합니다" 가 실제로 일어나는가
+// ---------------------------------------------------------------------------
+
+const deploymentCenterSource = require('node:fs').readFileSync(
+  require('node:path').join(__dirname, '../webview-src/components/DeploymentCenter.tsx'),
+  'utf8'
+);
+
+test('감지 결과가 없으면 자동으로 다시 검사한다', () => {
+  // 문구만 바꾸고 재검사를 안 하면 거짓말이다. 코어가 5초 뒤 돌아와도
+  // 화면은 "확인할 수 없음" 인 채로 영원히 남는다.
+  const {
+    PREFLIGHT_RETRY_INTERVAL_MS,
+    PREFLIGHT_RETRY_LIMIT,
+  } = require('../out/webview-test/components/DeploymentCenter.js');
+  assert.ok(PREFLIGHT_RETRY_INTERVAL_MS > 0);
+  assert.ok(PREFLIGHT_RETRY_LIMIT > 0, '무한 재시도는 죽은 코어를 계속 두드린다');
+  assert.match(
+    deploymentCenterSource,
+    /if \(preflight \|\| checking\) \{ return; \}/,
+    '재검사 타이머가 없다 — 문구가 약속한 동작이 안 일어난다'
+  );
+});
+
+test('감지 결과가 없으면 배포 대상 카드를 누를 수 없다', () => {
+  // 예전에는 활성처럼 보이는데 chooseTarget 이 즉시 return 해서, 눌러도
+  // 아무 일도 안 나고 메시지도 없었다. 고장을 숨긴 화면이 더 나쁘다.
+  assert.match(
+    deploymentCenterSource,
+    /disabled=\{checking \|\| savingDecision \|\| !preflight\}/,
+    '감지 결과 없이도 카드가 활성 상태로 보인다'
+  );
+});

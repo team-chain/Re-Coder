@@ -57,3 +57,36 @@ export function samePath(a: string, b: string): boolean {
         return false;
     }
 }
+
+/**
+ * 이 오류가 **코어에 못 닿아서** 난 것인가.
+ *
+ * 왜 구분해야 하나
+ *   「다시 검사」에 재연결을 붙이면서, 모든 실패를 연결 끊김으로 취급했다.
+ *   코어는 멀쩡한데 `/api/deploy/preflight` 가 500 을 내면 — 예를 들어
+ *   워크스페이스에 읽을 수 없는 파일이 있으면 — 사용자에게는 "코어가
+ *   실행 중인지 확인해 주세요" 가 뜨고 **진짜 원인은 안쪽 catch 가 삼킨다.**
+ *
+ *   게다가 dev 모드에서 entrypoint 가 안 맞으면 ensureRunning() 이
+ *   cleanupStale() 로 이어져 **멀쩡한 코어를 SIGTERM/SIGKILL 한다.**
+ *   애플리케이션 오류 하나가 코어를 죽이는 셈이다.
+ */
+export function isCoreConnectionFailure(message: string): boolean {
+    const text = (message ?? '').toLowerCase();
+    if (!text) { return false; }
+    return [
+        'fetch failed',
+        'econnrefused',
+        'econnreset',
+        'ehostunreach',
+        'enotfound',
+        'socket hang up',
+        'network error',
+        'failed to fetch',
+        'core not running',
+        'core is not running',
+        '코어가 실행',
+        'aborted',
+        'timeout',
+    ].some(marker => text.includes(marker));
+}
