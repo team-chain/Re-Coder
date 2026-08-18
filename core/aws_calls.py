@@ -116,6 +116,10 @@ OPERATION_TO_ACTION: dict[tuple[str, str], str] = {
     ("s3", "list_objects_v2"): "s3:ListBucket",
     ("s3", "head_bucket"):     "s3:ListBucket",
     ("s3", "head_object"):     "s3:GetObject",
+    # API 이름은 PutPublicAccessBlock 인데 **IAM 액션은 버킷이 붙는다.**
+    # 규칙대로 PutPublicAccessBlock 을 주면 실제로는 인가되지 않는다.
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutPublicAccessBlock.html
+    ("s3", "put_public_access_block"): "s3:PutBucketPublicAccessBlock",
     # boto3 가 제공하는 편의 함수 — 내부적으로 아래 API 로 풀린다.
     ("s3", "upload_file"):     "s3:PutObject",
     ("s3", "upload_fileobj"):  "s3:PutObject",

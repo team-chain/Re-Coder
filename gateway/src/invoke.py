@@ -62,7 +62,11 @@ def handler(event, context):
         # **유료 호출 전에 예산을 원자적으로 선점**한다. 사후 기록만으로는
         # 한도 직전의 큰 요청과 동시 요청 무리가 전부 통과한다.
         budget = common.estimate_request_tokens(messages, system, max_tokens)
-        common.reserve_quota(item, budget)
+        reservation = common.reserve_quota(item, budget)
+        # This durable transition happens immediately before dispatch. After it
+        # succeeds, any timeout/network error is ambiguous and must never be
+        # treated as proof that Bedrock consumed nothing.
+        common.mark_reservation_dispatched(reservation)
         try:
             result = common.invoke_bedrock(
                 messages,
@@ -71,11 +75,17 @@ def handler(event, context):
                 max_tokens=max_tokens,
                 output_schema=body.get("output_schema"),
             )
-        except Exception:
-            common.release_reservation(sid, budget)      # 실패 — 선점분 반환
+        except Exception as exc:
+            common.finalize_ambiguous_reservation(
+                reservation,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
             raise
         cost = common.reconcile_usage(
-            sid, budget, result["input_tokens"], result["output_tokens"])
+            reservation,
+            result["input_tokens"],
+            result["output_tokens"],
+        )
         result["cost_usd"] = round(cost, 6)
         return common.resp(200, result)
 

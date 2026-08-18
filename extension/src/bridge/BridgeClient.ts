@@ -12,7 +12,7 @@
  *   { type: 'error', filename, error }
  *   { type: 'info',  filename, message }
  *
- * 인증: Authorization: Bearer <token>  또는  ?token=<token>
+ * 인증: Authorization: Bearer <token> 헤더 전용
  *   token 은 VS Code 설정 `recoder.bridge.token` 또는 환경변수
  *   `RECODER_BRIDGE_TOKEN` (둘 중 우선순위는 설정 → env) 에서 읽음.
  *
@@ -27,6 +27,7 @@
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
 import * as path from 'path';
+import { buildBridgeWebSocketUrl } from './bridgeEndpoint';
 
 interface BridgeMessage {
     type: string;
@@ -103,15 +104,15 @@ export class BridgeClient implements vscode.Disposable {
             cfg.get<string>('studentId', '') ||
             this._parseStudentId(studentToken);
         const params = new URLSearchParams();
-        if (token) params.set('token', token);
         if (studentId) params.set('student', studentId);
         // **소유 증명 토큰을 함께 전송한다.** 이게 없으면 브리지의 student
         // 검증이 항상 실패해, per-student 라우팅이 조용히 꺼지거나(REQUIRE=0)
         // 403(REQUIRE=1) 이 된다 — 서버에만 검증을 넣고 전송을 빠뜨렸던 버그.
         // URL 쿼리는 로그에 남으므로 secret 은 **헤더로만** 보낸다.
-        const qs = params.toString() ? `?${params.toString()}` : '';
         return {
-            url: `ws://${host}:${port}/ws${qs}`,
+            // Persistent student credentials may be sent only over TLS when
+            // traffic can leave this machine. Loopback keeps ws for local dev.
+            url: buildBridgeWebSocketUrl(host, port, params),
             token,
         };
     }

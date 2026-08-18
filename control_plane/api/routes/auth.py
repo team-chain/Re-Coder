@@ -403,6 +403,18 @@ class EnrollDeviceBody(BaseModel):
     enroll: DeviceEnrollRequest
 
 
+def _organization_bootstrap_lock(org_id: str):
+    """Return the row-locking query that serializes first-member enrollment."""
+    from sqlalchemy import select
+    from control_plane.db.models import Organization
+
+    return (
+        select(Organization)
+        .where(Organization.org_id == org_id)
+        .with_for_update()
+    )
+
+
 @router.post("/devices/enroll", response_model=DeviceTokenResponse)
 async def enroll_device(
     body: EnrollDeviceBody,
@@ -432,14 +444,25 @@ async def enroll_device(
 
         # RBAC: org의 멤버인지 확인 + 역할 조회
         from control_plane.services.org_service import OrgService
+        from control_plane.db.models import OrgMember
+        from sqlalchemy import select
+
         org_svc = OrgService(db)
         role = await org_svc.get_member_role(org_id, user_id)
 
         if role is None:
-            # 최초 등록 시 아직 멤버가 없으면 developer로 자동 등록 (실제 운영에서는 초대 흐름 필수)
-            # 이 경우 org에 아무 멤버도 없어야 함
-            from control_plane.db.models import OrgMember
-            from sqlalchemy import select
+            # 조직 행을 잠가 빈 조직의 최초 멤버 등록을 직렬화한다. 잠금 없이
+            # 서로 다른 두 사용자가 동시에 빈 멤버십을 관찰하면 둘 다 유효한
+            # developer 자격 증명을 발급받을 수 있다.
+            locked_org = await db.execute(_organization_bootstrap_lock(org_id))
+            if locked_org.scalar_one_or_none() is None:
+                raise HTTPException(status_code=404, detail="Organization not found")
+
+            # 최초 조회 뒤 다른 부트스트랩 트랜잭션이 커밋했을 수 있으므로,
+            # 잠금을 보유한 상태에서 현재 사용자의 역할을 다시 확인한다.
+            role = await org_svc.get_member_role(org_id, user_id)
+
+        if role is None:
             existing = await db.execute(
                 select(OrgMember).where(OrgMember.org_id == org_id)
             )

@@ -179,11 +179,17 @@ const StepBar: React.FC<{ current: BuildStep }> = ({ current }) => {
 
 interface BuildModeProps {
   isActive: boolean;
-  /** 큰 ReCoder 작업 화면에서는 오른쪽 고정 대화 패널을 사용한다. */
-  showCodeAgent?: boolean;
 }
 
-export const BuildMode: React.FC<BuildModeProps> = ({ isActive, showCodeAgent = true }) => {
+//: CodeAgent(설계 결정 → 코드 생성)는 **어느 레이아웃에서도 숨기지 않는다.**
+//:
+//: 예전에는 `showCodeAgent` 플래그가 있었고, 큰 작업 화면(Workspace)에서는
+//: 오른쪽 대화 패널이 그 역할을 대신한다는 전제로 false 를 넘겼다. 그런데
+//: 그 대화 패널은 /api/chat 만 호출해서 설계 결정 단계(/api/code/plan)를
+//: 타지 않는다. 결과적으로 Workspace 창에서는 **결정 카드가 뜨는 경로가
+//: 아예 사라졌고**, D5(항상 선택지)·D6(사람 승인)가 UI 에서 소실됐다.
+//: 그래서 플래그 자체를 제거한다 — 다시 끄고 싶어도 끌 스위치가 없다.
+export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -458,7 +464,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, showCodeAgent = 
         </div>
       )}
 
-      {showCodeAgent && <CodeAgent isActive={isActive} />}
+      <CodeAgent isActive={isActive} />
 
 
     </div>

@@ -111,6 +111,15 @@ export interface CodeDecisionChoice {
     question: string;
     chosen_key: string;
     options: CodeDecisionOption[];
+    /**
+     * 이 결정이 프로젝트에 주는 영향. ADR 의 「## 영향」이 여기서 나온다.
+     *
+     * 예전에는 이 필드가 없어서 웹뷰가 값을 들고 있어도 전달되지 않았고,
+     * 코어(`adr.normalize_decisions`)가 빈 문자열로 읽어 모든 ADR 의 영향
+     * 항목이 `(영향 미기재)` 로 남았다. 선택(optional)으로 두면 같은 실수가
+     * 조용히 반복되므로 **필수**로 둔다.
+     */
+    impact: string;
 }
 
 export class ApiClient {

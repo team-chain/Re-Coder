@@ -16,7 +16,38 @@ interface CodeOp {
 interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
-interface DecisionChoice { id: string; question: string; chosen_key: string; options: DecisionOption[]; }
+//: 확정된 결정 하나. **`impact` 를 반드시 함께 보낸다.**
+//:
+//: 예전에는 여기서 impact 를 떨어뜨렸다. 화면(결정 모달)에는 영향 설명이
+//: 보이는데 서버로는 안 갔고, 코어의 `adr.normalize_decisions` 가
+//: `d.get("impact")` 로 읽으므로 항상 빈 문자열이 됐다. 그 결과 생성된 모든
+//: ADR 의 「## 영향」이 `(영향 미기재)` 로 남았다.
+export interface DecisionChoice {
+  id: string;
+  question: string;
+  chosen_key: string;
+  options: DecisionOption[];
+  impact: string;
+}
+
+//: 결정 목록 + 사용자의 선택 → 서버로 보낼 확정 결정 목록.
+//:
+//: 컴포넌트 밖의 순수 함수로 둔 이유: 이 변환이 ADR 내용을 결정하는데,
+//: 모달을 클릭해야만 도달하는 코드였어서 필드가 하나 빠져도 아무 테스트가
+//: 깨지지 않았다. 밖으로 꺼내 직접 검사한다.
+export function buildDecisionChoices(
+  decisions: Decision[],
+  selections: Record<string, string>,
+): DecisionChoice[] {
+  return decisions.map((decision) => ({
+    id: decision.id,
+    question: decision.question,
+    chosen_key: selections[decision.id],
+    options: decision.options,
+    //: 미기재를 빈 문자열로 정규화 — 코어가 `_clean` 으로 다시 다듬는다.
+    impact: decision.impact ?? "",
+  }));
+}
 //: 턴은 **요청 시점의 대상 폴더를 함께 기억**한다.
 //:
 //: 사용자가 결과를 받은 뒤 폴더 선택을 바꾸고 나서 "적용"을 누르면, 현재
@@ -157,12 +188,7 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
     if (!decisionModal) { return; }
     const request = pendingRequestsRef.current[decisionModal.requestId];
     if (!request) { setDecisionModal(null); return; }
-    const choices: DecisionChoice[] = decisionModal.decisions.map((decision) => ({
-      id: decision.id,
-      question: decision.question,
-      chosen_key: decisionModal.selections[decision.id],
-      options: decision.options,
-    }));
+    const choices = buildDecisionChoices(decisionModal.decisions, decisionModal.selections);
     setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId ? { ...turn, status: "generating" } : turn));
     setDecisionModal(null);
     postMessage("code.generate", { requestId: decisionModal.requestId, instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices });

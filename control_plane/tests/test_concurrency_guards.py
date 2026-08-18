@@ -93,6 +93,66 @@ def test_vote_loads_request_with_row_lock():
     asyncio.run(_scenario())
 
 
+def test_policy_versioning_locks_stable_organization_row():
+    """Policy publication must lock the organization, not a mutable bundle row."""
+    from sqlalchemy.dialects import postgresql
+    from control_plane.services.policy_service import _organization_version_lock
+
+    compiled = str(
+        _organization_version_lock("org-1").compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "FROM organizations" in compiled
+    assert "organizations.org_id = 'org-1'" in compiled
+    assert "FOR UPDATE" in compiled
+
+
+def test_policy_versioning_still_increments_after_organization_lock():
+    """Sequential publishers observe the active bundle created before them."""
+    from control_plane.models.schemas import PolicyBundleCreate
+    from control_plane.services.policy_service import PolicyService
+
+    async def _scenario():
+        engine, Session = await _fresh()
+        async with Session() as setup:
+            creator = _user(20)
+            org = Organization(name="policy-org", slug="policy-org")
+            setup.add_all([creator, org])
+            await setup.commit()
+            creator_id = creator.user_id
+            org_id = org.org_id
+
+        async with Session() as first_session:
+            first = await PolicyService(first_session).create_bundle(
+                PolicyBundleCreate(
+                    org_id=org_id,
+                    display_name="first",
+                    presets=[],
+                ),
+                creator_user_id=creator_id,
+            )
+            await first_session.commit()
+
+        async with Session() as second_session:
+            second = await PolicyService(second_session).create_bundle(
+                PolicyBundleCreate(
+                    org_id=org_id,
+                    display_name="second",
+                    presets=[],
+                ),
+                creator_user_id=creator_id,
+            )
+            await second_session.commit()
+
+        assert first.version == "v1.0.0"
+        assert second.version == "v1.0.1"
+        await engine.dispose()
+
+    asyncio.run(_scenario())
+
+
 def test_duplicate_vote_rejected():
     """[음성 대조] 같은 사용자의 중복 투표는 거부."""
     from control_plane.services.approval_service import ApprovalService
@@ -203,6 +263,138 @@ def test_audit_trigger_ddl_is_split_into_single_statements():
         # $$ 함수 몸통 밖에 문장 구분자가 없어야 단일 문장이다.
         body_stripped = stmt.split("$$")[0] + (stmt.split("$$")[-1] if "$$" in stmt else "")
         assert ";" not in body_stripped.rstrip().rstrip(";"), f"복수 문장: {stmt[:60]}"
+
+
+def test_audit_trigger_replacement_rolls_back_as_one_transaction(monkeypatch):
+    """A failed final trigger statement must roll back the preceding DROP."""
+    from control_plane.db import migrations
+
+    class _Connection:
+        def __init__(self):
+            self.executed = []
+
+        async def execute(self, statement):
+            sql = str(statement)
+            self.executed.append(sql)
+            if sql == "CREATE NEW TRIGGER":
+                raise RuntimeError("create trigger failed")
+
+    class _Transaction:
+        def __init__(self, connection):
+            self.connection = connection
+            self.rolled_back = False
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self.rolled_back = exc_type is not None
+            return False
+
+    class _Engine:
+        def __init__(self):
+            self.connection = _Connection()
+            self.transaction = _Transaction(self.connection)
+            self.begin_calls = 0
+
+        def begin(self):
+            self.begin_calls += 1
+            return self.transaction
+
+    fake_engine = _Engine()
+    monkeypatch.setattr(migrations, "engine", fake_engine)
+
+    ok = asyncio.run(migrations._execute_ddl_group_atomic(
+        "Audit immutability",
+        ["CREATE FUNCTION", "DROP OLD TRIGGER", "CREATE NEW TRIGGER"],
+    ))
+
+    assert ok is False
+    assert fake_engine.begin_calls == 1
+    assert fake_engine.connection.executed == [
+        "CREATE FUNCTION", "DROP OLD TRIGGER", "CREATE NEW TRIGGER"]
+    assert fake_engine.transaction.rolled_back is True
+
+
+def test_rls_policy_replacements_are_grouped_per_table(monkeypatch):
+    """Every ENABLE/DROP/CREATE sequence is submitted as one atomic group."""
+    from control_plane.db import migrations
+
+    captured = []
+
+    async def _capture(label, statements):
+        captured.append((label, list(statements)))
+        return True
+
+    monkeypatch.setattr(migrations, "_execute_ddl_group_atomic", _capture)
+    assert asyncio.run(migrations._apply_rls_policies()) is True
+
+    assert len(captured) == 4
+    for label, statements in captured:
+        assert label.startswith("RLS policy (")
+        assert len(statements) == 3
+        assert statements[0].startswith("ALTER TABLE ")
+        assert statements[1].startswith("DROP POLICY ")
+        assert statements[2].startswith("CREATE POLICY ")
+
+
+def test_hash_version_migration_fails_if_column_remains_absent(monkeypatch):
+    """A real ALTER failure must stop startup instead of being swallowed."""
+    from control_plane.db import migrations
+
+    class _Connection:
+        async def exec_driver_sql(self, statement):
+            raise PermissionError("ALTER denied")
+
+    class _Transaction:
+        async def __aenter__(self):
+            return _Connection()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Transaction()
+
+    async def _absent():
+        return False
+
+    monkeypatch.setattr(migrations, "engine", _Engine())
+    monkeypatch.setattr(migrations, "_hash_version_column_exists", _absent)
+
+    with pytest.raises(RuntimeError, match="column is still absent"):
+        asyncio.run(migrations._migrate_hash_version_column())
+
+
+def test_hash_version_migration_accepts_confirmed_concurrent_winner(monkeypatch):
+    """Only a post-failure recheck proving the column exists may suppress ALTER."""
+    from control_plane.db import migrations
+
+    class _Connection:
+        async def exec_driver_sql(self, statement):
+            raise RuntimeError("duplicate column")
+
+    class _Transaction:
+        async def __aenter__(self):
+            return _Connection()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Transaction()
+
+    states = iter((False, True))
+
+    async def _column_state():
+        return next(states)
+
+    monkeypatch.setattr(migrations, "engine", _Engine())
+    monkeypatch.setattr(migrations, "_hash_version_column_exists", _column_state)
+
+    asyncio.run(migrations._migrate_hash_version_column())
 
 
 def test_init_db_survives_backend_without_rls(monkeypatch):

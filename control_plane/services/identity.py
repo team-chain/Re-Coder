@@ -376,15 +376,22 @@ class IdentityService:
         if dialect == "postgresql":
             from sqlalchemy import text as _text
             try:
-                stmt = (
-                    select(Device)
-                    .from_statement(_text("SELECT * FROM auth_device_by_token_hash(:h)"))
-                )
-                result = await self._db.execute(stmt, {"h": token_hash})
-                return result.scalars().first()
+                # The optional function may be absent on RLS-free deployments.
+                # PostgreSQL marks the transaction failed after UndefinedFunction,
+                # so isolate the probe in a SAVEPOINT before falling back.
+                async with self._db.begin_nested():
+                    stmt = (
+                        select(Device)
+                        .from_statement(_text("SELECT * FROM auth_device_by_token_hash(:h)"))
+                    )
+                    result = await self._db.execute(stmt, {"h": token_hash})
+                    device = result.scalars().first()
+                return device
             except Exception as exc:  # noqa: BLE001
                 # 함수 미설치(구버전 스키마) — 직접 조회로 폴백. RLS 롤이면
                 # 이 폴백은 0행일 수 있으므로 경고를 남겨 원인을 추적 가능하게.
+                # begin_nested()가 실패한 함수 호출만 롤백했으므로 바깥
+                # 트랜잭션은 아래 SELECT를 계속 실행할 수 있다.
                 logger.warning(
                     "auth_device_by_token_hash 함수 조회 실패 — 직접 SELECT 로 "
                     "폴백합니다 (RLS 롤에서는 인증이 실패할 수 있음): %s", exc)

@@ -34,7 +34,6 @@ import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
 import { Replay } from "./components/Replay";
 import CodeMap from "./components/CodeMap";
-import CodeAgent from "./components/CodeAgent";
 import ChatPanel from "./components/ChatPanel";
 import DeploymentCenter from "./components/DeploymentCenter";
 
@@ -542,7 +541,10 @@ interface WorkspaceLayoutProps {
   postMessage: (type: string, payload?: unknown) => void;
 }
 
-const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
+//: 테스트에서 직접 렌더할 수 있도록 export 한다. 이 레이아웃에서 설계 결정
+//: 경로(CodeAgent)가 살아있는지가 회귀 대상이다 — 예전에 여기서만 숨겨져서
+//: Workspace 창에서 결정 카드가 뜨지 않는 버그가 있었다.
+export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
   view, diagnostics, coreStatus, showDiagnostics, isAiReady, isDockerReady, isOpsReady,
   costSummary, onSelectMode, onToggleDiagnostics, postMessage,
 }) => {
@@ -565,7 +567,7 @@ const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
 
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: view === "home" ? "0 14px 16px" : "14px 18px 18px" }}>
           {view === "home" && <Home isAiReady={isAiReady} isDockerReady={isDockerReady} isOpsReady={isOpsReady} onSelectMode={onSelectMode} postMessage={postMessage} awsReady={diagnostics?.aws_deploy_ready === "ready"} githubReady={(diagnostics as unknown as { github_ready?: string })?.github_ready === "ready"} showMap={false} />}
-          {view === "build" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><BuildMode isActive={isAiReady} showCodeAgent={false} /></>}
+          {view === "build" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><BuildMode isActive={isAiReady} /></>}
           {view === "ship" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><ShipMode isAiReady={isAiReady} isDockerReady={isDockerReady} /></>}
           {view === "deploy" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><DeploymentCenter onOpenDocker={() => onSelectMode("ship")} /></>}
           {view === "operate" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><OperateMode isActive={isOpsReady} /></>}
