@@ -1,7 +1,8 @@
 # ==============================================================================
 # ReCoder File Template: Dockerfile.node-express
 # Production-grade Dockerfile for Node.js / Express applications
-# Placeholders: {{APP_NAME}}, {{NODE_VERSION}}, {{PORT}}, {{START_SCRIPT}}
+# Placeholders: {{APP_NAME}}, {{NODE_VERSION}}, {{PORT}}, {{START_SCRIPT}},
+#               {{HEALTH_CHECK_PATH}}
 # ==============================================================================
 
 # ---- Dependency installation stage ----
@@ -17,8 +18,10 @@ RUN if [ -f yarn.lock ]; then \
         yarn install --frozen-lockfile --production; \
     elif [ -f pnpm-lock.yaml ]; then \
         npm install -g pnpm && pnpm install --frozen-lockfile --prod; \
-    else \
+    elif [ -f package-lock.json ]; then \
         npm ci --omit=dev; \
+    else \
+        npm install --omit=dev; \
     fi
 
 # ---- Build stage (for TypeScript / transpiled projects) ----
@@ -32,16 +35,16 @@ RUN if [ -f yarn.lock ]; then \
         yarn install --frozen-lockfile; \
     elif [ -f pnpm-lock.yaml ]; then \
         npm install -g pnpm && pnpm install --frozen-lockfile; \
-    else \
+    elif [ -f package-lock.json ]; then \
         npm ci; \
+    else \
+        npm install; \
     fi
 
 COPY . .
 
-# Run build if a build script exists
-RUN if [ -f package.json ] && grep -q '"build"' package.json; then \
-        npm run build; \
-    fi
+# npm 자체의 --if-present 판정을 사용해 scripts.build만 정확히 실행한다.
+RUN npm run build --if-present && rm -rf node_modules
 
 # ---- Runtime stage ----
 FROM node:{{NODE_VERSION}}-alpine AS runtime
@@ -59,12 +62,10 @@ RUN apk add --no-cache curl dumb-init
 
 WORKDIR /app
 
-# Copy production node_modules
-COPY --from=deps /app/node_modules ./node_modules
-
-# Copy built application
-COPY --from=builder --chown=appuser:appgroup /app/dist ./dist
-COPY --chown=appuser:appgroup package.json .
+# Copy the complete source/build output, then production-only dependencies.
+# Plain Express apps commonly start index.js/server.js without a dist folder.
+COPY --from=builder --chown=appuser:appgroup /app ./
+COPY --from=deps --chown=appuser:appgroup /app/node_modules ./node_modules
 
 USER appuser
 
@@ -72,7 +73,7 @@ EXPOSE {{PORT}}
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD curl -f http://localhost:{{PORT}}/health || exit 1
+    CMD curl -f http://localhost:{{PORT}}{{HEALTH_CHECK_PATH}} || exit 1
 
 # Use dumb-init for proper signal handling
 ENTRYPOINT ["dumb-init", "--"]

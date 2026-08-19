@@ -437,7 +437,7 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
         <StepRow
           icon={<Icon.Container size={19} />}
           label="Deploy"
-          enabled={isAiReady} hint="AI 필요"
+          enabled={true}
           onClick={() => onSelectMode("ship")}
         />
         <StepRow

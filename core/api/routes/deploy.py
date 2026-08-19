@@ -8,6 +8,9 @@ planning, execution, records, and rollback.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
+import logging
 import os
 import re
 import subprocess
@@ -30,6 +33,8 @@ from schemas import (
     RiskLevel,
     StackType,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["deploy"])
 
@@ -1471,12 +1476,347 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id):
         target = Path(root).expanduser().resolve() / target
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(proposal.content, encoding="utf-8")
-    return {"status": "saved", "proposal_id": proposal_id, "path": str(target)}
+    file_type = getattr(proposal.file_type, "value", proposal.file_type)
+    return {
+        "status": "saved",
+        "proposal_id": proposal_id,
+        "path": str(target),
+        "file_type": file_type,
+    }
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+#: LLM 이 죽어도 초안은 나와야 한다 — 템플릿만으로 만드는 Dockerfile.
+#:
+#: 예전에는 이 경로가 `agent is None`(의존성 누락) 일 때만 쓰였다. 그런데
+#: 실제로 사람을 막은 건 "에이전트가 없는 것"이 아니라 **에이전트는 있는데
+#: LLM 호출이 실패하는 것**이었다(자격증명 만료·rate limit·네트워크). 그때는
+#: 예외가 라우트를 그대로 뚫고 나가 Starlette 이 평문 `Internal Server Error`
+#: 를 반환했고, 사용자에게는 원인도 다음 행동도 없는 빨간 배너만 남았다.
+#: 그래서 두 경우 모두 이 폴백을 쓴다.
+_DOCKERFILE_TEMPLATE_BY_STACK = {
+    StackType.PYTHON_FASTAPI: "Dockerfile.python-fastapi",
+    StackType.PYTHON_FLASK: "Dockerfile.python-flask",
+    StackType.PYTHON_DJANGO: "Dockerfile.python-flask",
+    StackType.NODE_EXPRESS: "Dockerfile.node-express",
+    StackType.NODE_NEXT: "Dockerfile.node-next",
+    StackType.NODE_NEST: "Dockerfile.node-express",
+}
+
+_UNRESOLVED_FILE_TEMPLATE_RE = re.compile(r"\{\{[^{}\r\n]+\}\}")
+_SAFE_NODE_ENTRYPOINT_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+_SAFE_PYTHON_TARGET_RE = re.compile(
+    r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*$"
+)
+
+
+class _UnsupportedDockerfileFallback(ValueError):
+    """AI 없이 검증된 Dockerfile을 만들 수 없는 스택."""
+
+
+class _DockerfileTemplateRenderError(RuntimeError):
+    """지원 스택의 로컬 템플릿이 완전한 Dockerfile을 만들지 못한 경우."""
+
+
+def _safe_node_entrypoint(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().strip("\"'").replace("\\", "/")
+    while candidate.startswith("./"):
+        candidate = candidate[2:]
+    if (
+        not candidate
+        or not _SAFE_NODE_ENTRYPOINT_RE.fullmatch(candidate)
+        or candidate.startswith("/")
+        or ".." in candidate.split("/")
+        or Path(candidate).suffix.lower() not in {".js", ".cjs", ".mjs"}
+    ):
+        return None
+    return candidate
+
+
+def _entrypoint_from_node_command(command: object) -> str | None:
+    if not isinstance(command, str):
+        return None
+    match = re.search(
+        r"(?:^|\s)(?:node|nodemon)\s+"
+        r"(?:--[A-Za-z0-9_-]+(?:=[^\s]+)?\s+)*"
+        r"[\"']?([^\"'\s;&|]+)",
+        command,
+    )
+    return _safe_node_entrypoint(match.group(1)) if match else None
+
+
+def _discover_node_entrypoint(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None,
+) -> str:
+    root = Path(workspace_path).expanduser().resolve()
+    package: dict = {}
+    try:
+        loaded = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            package = loaded
+    except (OSError, ValueError):
+        pass
+
+    candidates: list[object] = []
+    scripts = package.get("scripts")
+    if isinstance(scripts, dict):
+        candidates.extend(
+            _entrypoint_from_node_command(scripts.get(name))
+            for name in ("start:prod", "start")
+        )
+    # `scripts.start`는 실제 서버 실행 계약이고 `main`은 라이브러리 export일
+    # 수도 있으므로 start 명령을 우선한다.
+    candidates.append(package.get("main"))
+
+    candidates.extend(
+        path for path in (
+            "index.js", "server.js", "app.js",
+            "src/index.js", "src/server.js", "src/app.js",
+        )
+        if (root / path).is_file()
+    )
+    candidates.append(
+        _entrypoint_from_node_command(
+            getattr(project, "default_run_command", None),
+        )
+    )
+    candidates.append(
+        "dist/main.js" if stack == StackType.NODE_NEST else "index.js"
+    )
+
+    for value in candidates:
+        entrypoint = _safe_node_entrypoint(value)
+        if entrypoint:
+            return entrypoint
+    return "index.js"
+
+
+def _python_module_for_path(root: Path, path: Path) -> str | None:
+    try:
+        parts = list(path.relative_to(root).with_suffix("").parts)
+    except ValueError:
+        return None
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    if not parts or not all(part.isidentifier() for part in parts):
+        return None
+    return ".".join(parts)
+
+
+def _python_source_candidates(root: Path) -> list[Path]:
+    preferred = [
+        root / relative for relative in (
+            "main.py", "app.py", "src/main.py", "src/app.py", "app/main.py",
+        )
+    ]
+    seen = {path for path in preferred}
+    discovered: list[Path] = []
+    try:
+        paths = sorted(root.rglob("*.py"))
+    except OSError:
+        paths = []
+    for path in paths:
+        try:
+            relative_parts = path.relative_to(root).parts[:-1]
+        except ValueError:
+            continue
+        if any(part in _SKIP_DIRS or part.startswith(".") for part in relative_parts):
+            continue
+        if path not in seen:
+            discovered.append(path)
+    return [path for path in preferred if path.is_file()] + discovered
+
+
+def _discover_python_target(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None,
+) -> str:
+    root = Path(workspace_path).expanduser().resolve()
+    if stack == StackType.PYTHON_DJANGO:
+        for path in _python_source_candidates(root):
+            if path.name != "wsgi.py":
+                continue
+            module = _python_module_for_path(root, path)
+            if module:
+                return f"{module}:application"
+        default_target = "config.wsgi:application"
+    else:
+        factory = "FastAPI" if stack == StackType.PYTHON_FASTAPI else "Flask"
+        factory_re = re.compile(
+            rf"^[ \t]*(?P<name>[A-Za-z_]\w*)[ \t]*(?::[^=\n]+)?="
+            rf"[ \t]*(?:[A-Za-z_]\w*\.)?{factory}[ \t]*\(",
+            re.MULTILINE,
+        )
+        for path in _python_source_candidates(root):
+            try:
+                source = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            match = factory_re.search(source)
+            module = _python_module_for_path(root, path)
+            if match and module:
+                return f"{module}:{match.group('name')}"
+        default_target = "main:app" if stack == StackType.PYTHON_FASTAPI else "app:app"
+
+    run_command = getattr(project, "default_run_command", None)
+    if isinstance(run_command, str):
+        match = re.search(
+            r"(?:uvicorn|hypercorn|gunicorn)\s+"
+            r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*)",
+            run_command,
+        )
+        if match and _SAFE_PYTHON_TARGET_RE.fullmatch(match.group(1)):
+            return match.group(1)
+    return default_target
+
+
+def _discover_health_path(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None = None,
+) -> str:
+    """Dockerfile HEALTHCHECK 가 찌를 경로.
+
+    **판단은 여기서 하지 않는다.** `infra_agent.discover_health_path` 한 곳에
+    모아 뒀다. 예전에는 compose 쪽과 여기에 각각 구현이 있었고 둘이 서로
+    달라서, 같은 Next.js 프로젝트에서 docker-compose.yml 과 Dockerfile 이
+    **다른 경로**를 찔렀다. 헬스체크가 틀리면 예외가 아니라 "영원히
+    unhealthy" 로 나타나므로 갈라진 채로는 아무도 눈치채지 못한다.
+    """
+    try:
+        from infra_agent import discover_health_path  # type: ignore
+    except ImportError:  # pragma: no cover - 저장소 루트에서 실행할 때
+        from core.infra_agent import discover_health_path  # type: ignore
+
+    configured = getattr(project, "health_check_path", None)
+    return discover_health_path(workspace_path, stack.value, configured)
+
+
+def _dockerfile_template_defaults(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None = None,
+) -> dict[str, str]:
+    """Return safe, complete values for every registered Dockerfile marker."""
+    raw_name = Path(workspace_path).expanduser().resolve().name
+    app_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw_name).strip("-.")[:63] or "app"
+    node_stacks = {
+        StackType.NODE_EXPRESS,
+        StackType.NODE_NEXT,
+        StackType.NODE_NEST,
+    }
+    python_stacks = {
+        StackType.PYTHON_FASTAPI,
+        StackType.PYTHON_FLASK,
+        StackType.PYTHON_DJANGO,
+    }
+    default_ports = {
+        StackType.PYTHON_FASTAPI: 8000,
+        StackType.PYTHON_FLASK: 5000,
+        StackType.PYTHON_DJANGO: 8000,
+        StackType.NODE_EXPRESS: 3000,
+        StackType.NODE_NEXT: 3000,
+        StackType.NODE_NEST: 3000,
+    }
+    detected_port = getattr(project, "default_port", None)
+    port = (
+        detected_port
+        if isinstance(detected_port, int) and not isinstance(detected_port, bool)
+        else default_ports.get(stack, 8000)
+    )
+    health_path = _discover_health_path(workspace_path, stack, project)
+    return {
+        "APP_NAME": app_name,
+        "PYTHON_VERSION": "3.11",
+        "NODE_VERSION": "20",
+        "PORT": str(port),
+        "HEALTH_CHECK_PATH": str(health_path),
+        "APP_TARGET": (
+            _discover_python_target(workspace_path, stack, project)
+            if stack in python_stacks else "main:app"
+        ),
+        "START_SCRIPT": (
+            _discover_node_entrypoint(workspace_path, stack, project)
+            if stack in node_stacks else "index.js"
+        ),
+    }
+
+
+def _dockerfile_from_template(
+    workspace_path: str,
+    stack: StackType,
+    project: object | None = None,
+) -> tuple[str, str]:
+    """검증된 로컬 템플릿으로 완전한 Dockerfile을 렌더한다.
+
+    실행 명령을 모르는 스택이나 손상된 템플릿을 `sleep` 컨테이너로
+    위장하지 않는다. 호출자는 명시적 오류로 사용자에게 알려야 한다.
+    """
+    from registry import FileTemplateRegistry  # type: ignore
+
+    template_id = _DOCKERFILE_TEMPLATE_BY_STACK.get(stack)
+    if template_id is None:
+        raise _UnsupportedDockerfileFallback(
+            f"{stack.value} 스택은 AI 없이 검증된 Dockerfile 폴백을 제공하지 "
+            "않습니다. AI Ready를 복구하거나 프로젝트에 Dockerfile을 직접 "
+            "추가한 뒤 다시 시도하세요."
+        )
+
+    try:
+        content = FileTemplateRegistry().render(
+            template_id,
+            _dockerfile_template_defaults(workspace_path, stack, project),
+        )
+        unresolved = _UNRESOLVED_FILE_TEMPLATE_RE.search(content)
+        if unresolved:
+            raise ValueError(
+                f"unresolved file-template marker: {unresolved.group(0)}"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Dockerfile 템플릿 렌더 실패: %s", exc)
+        raise _DockerfileTemplateRenderError(
+            f"{stack.value} 기본 Dockerfile 템플릿을 완전하게 렌더하지 못했습니다."
+        ) from exc
+    return content, template_id
+
+
+#: 사용자에게 그대로 보여줄 문장. 원인 + **다음에 뭘 하면 되는지**까지 담는다.
+#: "Internal Server Error" 만 보여주면 사용자는 재시도 말고 할 수 있는 게 없다.
+def _public_ai_failure_reason(exc: Exception | None) -> str:
+    """Return an actionable reason without exposing provider error details."""
+    if exc is None:
+        return "AI 에이전트를 초기화하지 못했습니다."
+
+    message = str(exc).lower()
+    if any(token in message for token in ("rate limit", "throttl", "quota")):
+        return "AI 제공자의 요청 한도에 도달했습니다."
+    if any(token in message for token in (
+        "credential", "api key", "api_key", "unauthorized", "forbidden", "auth",
+    )):
+        return "AI 인증 정보 또는 자격증명을 확인하지 못했습니다."
+    if any(token in message for token in ("timeout", "timed out")):
+        return "AI 제공자의 응답 시간이 초과됐습니다."
+    if any(token in message for token in ("connection", "network", "dns")):
+        return "AI 제공자와 네트워크 연결에 실패했습니다."
+    return f"AI 제공자 호출에 실패했습니다 ({exc.__class__.__name__})."
+
+
+def _ai_unavailable_note(exc: Exception | None) -> str:
+    reason = _public_ai_failure_reason(exc)
+    return (
+        f"AI 맞춤 생성을 건너뛰고 기본 템플릿으로 초안을 만들었습니다. "
+        f"원인: {reason} — AI 연결(자격증명·API 키)을 확인한 뒤 다시 생성하면 "
+        f"프로젝트에 맞춰 다듬어집니다. 지금 초안 그대로 사용해도 됩니다."
+    )
 
 
 @router.post("/api/deploy/dockerfile")
@@ -1485,10 +1825,14 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
     Generate a Dockerfile proposal for the workspace.
 
     Auto-detects the stack if not specified, then delegates to the
-    InfraAgent (or returns a template-based placeholder).
+    InfraAgent. **AI 호출이 실패해도 500 을 내지 않고** 템플릿 초안으로
+    폴백하며, 왜 AI 를 못 썼는지를 risk_reasons 에 담아 사용자에게 알린다.
     """
     stack = request.stack or _detect_stack(request.workspace_path)
 
+    proposal = None
+    project = None
+    ai_note = ""
     agent = _get_infra_agent()
     if agent is not None:
         # InfraAgent.generate_dockerfile(workspace_path, project: ProjectProfile)
@@ -1497,6 +1841,15 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
         try:
             from project_scanner import get_project_scanner  # type: ignore
             project = get_project_scanner().scan(request.workspace_path)
+            # 호출자가 스택을 명시했으면 파일 휴리스틱보다 우선한다. 서로
+            # 다른 스택에서 계산된 포트/실행 명령까지 가져오면 FastAPI에
+            # Express의 3000/index.js를 적용하는 식의 교차 오염이 생긴다.
+            if request.stack is not None and project.stack != stack:
+                project = project.model_copy(update={
+                    "stack": stack,
+                    "default_port": None,
+                    "default_run_command": None,
+                })
         except Exception:
             # 폴백 — 빈 ProjectProfile (필수 필드만)
             from schemas import ProjectProfile  # type: ignore
@@ -1504,21 +1857,61 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
                 workspace_path=request.workspace_path,
                 stack=stack,
             )
+        generate = agent.generate_dockerfile
         try:
-            proposal = await agent.generate_dockerfile(request.workspace_path, project)
-        except TypeError:
-            # 구버전 호환 — 일부 InfraAgent 구현은 시그니처가 다를 수 있음
-            proposal = await agent.generate_dockerfile(request.workspace_path)  # type: ignore[call-arg]
+            # 호출 뒤 발생한 TypeError를 "구버전 시그니처"로 오인해 유료 LLM
+            # 호출을 두 번 실행하지 않는다. 호출 전에 시그니처를 판정한다.
+            try:
+                signature = inspect.signature(generate)
+            except (TypeError, ValueError):
+                # 서명을 읽을 수 없는 callable은 현재(2인자) 계약을 따른다.
+                args = (request.workspace_path, project)
+            else:
+                try:
+                    signature.bind(request.workspace_path, project)
+                    args = (request.workspace_path, project)
+                except TypeError:
+                    args = (request.workspace_path,)
+            proposal = await generate(*args)
+        except Exception as exc:  # noqa: BLE001
+            # **여기가 데모에서 터진 지점.** LLM 제공자가 RuntimeError 를 던지면
+            # 그대로 빠져나가지 않고 템플릿으로 폴백한다.
+            logger.warning("Dockerfile AI 생성 실패, 템플릿 폴백: %s", exc)
+            proposal, ai_note = None, _ai_unavailable_note(exc)
     else:
-        # Placeholder: load from FileTemplateRegistry
-        from registry import FileTemplateRegistry  # type: ignore
-        reg = FileTemplateRegistry()
-        template_id = f"Dockerfile.{stack.value}"
-        try:
-            content = reg.render(template_id, {"WORKSPACE": request.workspace_path})
-        except Exception:
-            content = f"# Auto-generated Dockerfile for {stack.value}\nFROM python:3.11-slim\nWORKDIR /app\nCOPY . .\n"
+        ai_note = _ai_unavailable_note(None)
 
+    # LLM이 일부 값만 반환하면 Registry가 나머지 {{TOKEN}}을 그대로 둔다.
+    # AI 경로도 승인 가능한 완성본만 통과시키고, 불완전하면 검증된 폴백으로
+    # 내린다.
+    if proposal is not None:
+        unresolved = _UNRESOLVED_FILE_TEMPLATE_RE.search(proposal.content)
+        if unresolved:
+            logger.warning(
+                "Dockerfile AI 결과에 미치환 토큰이 있어 템플릿 폴백: %s",
+                unresolved.group(0),
+            )
+            proposal = None
+            ai_note = (
+                "AI 맞춤 생성 결과에 채워지지 않은 템플릿 값이 있어 기본 "
+                "템플릿으로 다시 만들었습니다. 내용을 검토한 뒤 저장해 주세요."
+            )
+
+    if proposal is None:
+        try:
+            content, template_id = _dockerfile_from_template(
+                request.workspace_path, stack, project,
+            )
+        except _UnsupportedDockerfileFallback as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except _DockerfileTemplateRenderError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "검증된 기본 Dockerfile 템플릿을 생성하지 못했습니다. "
+                    "ReCoder 템플릿 설치 상태를 확인한 뒤 다시 시도하세요."
+                ),
+            ) from exc
         proposal = InfraFileProposal(
             file_type=FileType.DOCKERFILE,
             target_path="Dockerfile",
@@ -1526,12 +1919,71 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
             base_template=template_id,
             risk_level=RiskLevel.LOW,
             approval_level=ApprovalLevel.CONFIRM,
+            risk_reasons=[ai_note] if ai_note else [],
         )
 
     if not getattr(proposal, "workspace_path", None):
         proposal = proposal.model_copy(update={
             "workspace_path": str(Path(request.workspace_path).expanduser().resolve()),
         })
+    _infra_proposals[proposal.proposal_id] = proposal
+    return proposal
+
+
+class ComposeRequest(BaseModel):
+    workspace_path: str
+    project_id: Optional[str] = None
+
+
+@router.post("/api/deploy/compose")
+async def generate_compose_route(request: ComposeRequest) -> InfraFileProposal:
+    """
+    docker-compose.yml 초안 생성.
+
+    이 라우트는 **없었다.** 확장의 「인프라 파일 생성」에는 Dockerfile ·
+    Compose · GitHub Actions 세 탭이 있는데 Compose 만 대응 엔드포인트가
+    없어서 탭이 동작할 수 없었다(호출하면 404). infra_agent 에 생성기는
+    이미 있었으므로 라우트만 붙인다.
+    """
+    ws_path = (request.workspace_path or "").strip()
+    if not ws_path:
+        raise HTTPException(status_code=400, detail="workspace_path 가 비어있습니다.")
+    if not Path(ws_path).expanduser().resolve().exists():
+        raise HTTPException(status_code=404, detail=f"워크스페이스 경로가 없습니다: {ws_path}")
+
+    try:
+        from infra_agent import generate_docker_compose  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"infra_agent.generate_docker_compose import 실패: {exc}",
+        ) from exc
+
+    # 스캔은 실패해도 진행한다 — project=None 이면 생성기가 자체 폴백을 쓴다.
+    try:
+        from project_scanner import get_project_scanner  # type: ignore
+        project = await asyncio.to_thread(get_project_scanner().scan, ws_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("프로젝트 스캔 실패, compose 폴백: %s", exc)
+        project = None
+
+    try:
+        proposal = await asyncio.to_thread(generate_docker_compose, project, ws_path)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"docker-compose.yml 생성 실패: {exc} — 워크스페이스에 인식 가능한 "
+                f"프로젝트 파일(package.json·requirements.txt 등)이 있는지 확인하세요."
+            ),
+        ) from exc
+
+    abs_ws = str(Path(ws_path).expanduser().resolve())
+    update = {"workspace_path": abs_ws}
+    if proposal.file_type != FileType.DOCKER_COMPOSE:
+        update["file_type"] = FileType.DOCKER_COMPOSE
+    proposal = proposal.model_copy(update=update)
+
     _infra_proposals[proposal.proposal_id] = proposal
     return proposal
 
@@ -1547,8 +1999,13 @@ async def approve_dockerfile(proposal_id: str, approved: bool, workspace_path: s
         raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found.")
 
     if not approved:
+        file_type = getattr(proposal.file_type, "value", proposal.file_type)
         del _infra_proposals[proposal_id]
-        return {"status": "rejected", "proposal_id": proposal_id}
+        return {
+            "status": "rejected",
+            "proposal_id": proposal_id,
+            "file_type": file_type,
+        }
 
     result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id)
     del _infra_proposals[proposal_id]

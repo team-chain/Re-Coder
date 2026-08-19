@@ -1,7 +1,7 @@
 # ==============================================================================
 # ReCoder File Template: Dockerfile.python-flask
 # Lightweight Dockerfile for Python / Flask apps (fast local build, < timeout)
-# Placeholders: {{APP_NAME}}, {{PYTHON_VERSION}}  (PORT/APP_MODULE pinned: 8000 / app:app)
+# Placeholders: {{APP_NAME}}, {{PYTHON_VERSION}}, {{PORT}}, {{APP_TARGET}}
 # ==============================================================================
 
 FROM python:{{PYTHON_VERSION}}-slim
@@ -12,12 +12,14 @@ LABEL org.opencontainers.image.title="{{APP_NAME}}" \
 
 WORKDIR /app
 
-# 의존성 먼저 설치 (레이어 캐시 활용).
-# flask / boto3 / gunicorn 은 순수 Python wheel 이라 build-essential·컴파일러가 필요 없다.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
 COPY . .
+
+# requirements.txt와 pyproject.toml 프로젝트를 모두 지원한다.
+RUN if [ -f requirements.txt ]; then \
+        pip install --no-cache-dir -r requirements.txt; \
+    elif [ -f pyproject.toml ]; then \
+        pip install --no-cache-dir .; \
+    fi
 
 # Security: run as non-root
 RUN groupadd --gid 1001 appgroup && \
@@ -25,9 +27,9 @@ RUN groupadd --gid 1001 appgroup && \
     chown -R appuser:appgroup /app
 USER appuser
 
-EXPOSE 8000
+EXPOSE {{PORT}}
 
 # NOTE: 런타임 헬스체크는 ReCoder 배포 에이전트가 직접 수행하므로
 #       curl(apt 설치 필요) 의존 HEALTHCHECK 는 생략해 빌드를 가볍게 유지한다.
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "120", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:{{PORT}}", "--workers", "2", "--timeout", "120", "{{APP_TARGET}}"]

@@ -23,3 +23,13 @@
 
 pytest>=8.0
 moto[server]>=5.0
+
+# Generated docker-compose files are parsed as YAML in the tests, because the
+# app health check embeds a command containing quotes. A string-only check
+# passes even when the quoting produces invalid YAML.
+#
+# PyYAML currently arrives anyway as a transitive dependency of moto's
+# cfn-lint. That is exactly the hidden-dependency problem described above:
+# if moto ever drops it, the YAML assertions turn into an ImportError on some
+# machines and a silent gap on others. Declare it.
+pyyaml>=6.0
