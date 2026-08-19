@@ -14,6 +14,12 @@ import {
 import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
 import { CoreManager } from '../core/CoreManager';
 import { isCoreConnectionFailure } from '../core/coreReuse';
+import {
+    collectStaticFiles,
+    pickStaticDir,
+    STATIC_DIR_CANDIDATES,
+    StaticFile,
+} from '../deploy/staticSite';
 import { PollingService } from '../core/PollingService';
 import { analyzeProject, analyzeFile } from '../codemap/analyzer';
 
@@ -871,6 +877,78 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     });
                     this.postMessage('errorMessage', { message: `AWS 상태 조회 실패: ${msg}` });
                 }
+                break;
+            }
+            case 'workspace.deploy.s3': {
+                // **코어에는 이 라우트가 완성돼 있었고 확장이 부르지 않았다.**
+                // 버킷 생성·공개 설정·업로드·URL 조립까지 다 되어 있는데,
+                // 사용자 파일을 읽어 보내는 쪽이 없어서 통째로 도달 불가능이었다.
+                const p = (payload ?? {}) as { dir?: string; region?: string };
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                if (!workspacePath) {
+                    this.postMessage('workspace.deploy.s3.result', {
+                        ok: false, message: '열린 워크스페이스가 없습니다.',
+                    });
+                    break;
+                }
+
+                const dirLabel = (p.dir ?? '').trim();
+                const root = dirLabel ? path.join(workspacePath, dirLabel) : workspacePath;
+                if (!fs.existsSync(root)) {
+                    this.postMessage('workspace.deploy.s3.result', {
+                        ok: false,
+                        message: `폴더를 찾을 수 없습니다: ${dirLabel || '.'} — 빌드를 먼저 실행했는지 확인하세요.`,
+                    });
+                    break;
+                }
+
+                let files: StaticFile[];
+                try {
+                    files = collectStaticFiles(root, fs, path.join, dirLabel);
+                } catch (err) {
+                    // 상한 초과는 자르지 않고 알린다. 조용히 30개만 올리면
+                    // 사이트가 반쯤 올라간 채로 "배포 성공" 이 된다.
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('workspace.deploy.s3.result', { ok: false, message: msg });
+                    break;
+                }
+
+                if (!files.length) {
+                    this.postMessage('workspace.deploy.s3.result', {
+                        ok: false,
+                        message: `${dirLabel || '워크스페이스 루트'} 에 올릴 파일이 없습니다. 빌드 산출물 폴더를 지정했는지 확인하세요.`,
+                    });
+                    break;
+                }
+
+                try {
+                    const result = await this._apiClient.deployS3({
+                        project: path.basename(workspacePath),
+                        files,
+                        region: (p.region ?? '').trim() || undefined,
+                    });
+                    this.postMessage('workspace.deploy.s3.result', { ok: true, result });
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('workspace.deploy.s3.result', { ok: false, message: msg });
+                }
+                break;
+            }
+            case 'workspace.deploy.s3.dirs': {
+                // 어떤 폴더가 있는지 웹뷰가 알 방법이 없다. 후보를 골라 준다.
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                let dirs: string[] = [];
+                if (workspacePath) {
+                    try {
+                        dirs = fs.readdirSync(workspacePath, { withFileTypes: true })
+                            .filter(e => e.isDirectory())
+                            .map(e => e.name);
+                    } catch { dirs = []; }
+                }
+                this.postMessage('workspace.deploy.s3.dirs', {
+                    suggested: pickStaticDir(dirs),
+                    candidates: STATIC_DIR_CANDIDATES.filter(c => dirs.includes(c)),
+                });
                 break;
             }
             case 'aws.policy': {

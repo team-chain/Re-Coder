@@ -17,6 +17,7 @@ import {
     AwsConnectInput,
     AwsEcrRepo,
     AwsPolicyResult,
+    S3DeployResult,
 } from '../types';
 import { CoreManager } from './CoreManager';
 import { describeHttpError } from './httpError';
@@ -860,6 +861,38 @@ export class ApiClient {
     async listAwsProfiles(): Promise<string[]> {
         const resp = await this.request<{ profiles: string[] }>('GET', '/api/aws/profiles');
         return resp.success && resp.data ? resp.data.profiles : [];
+    }
+
+    /**
+     * POST /api/deploy/s3 — 정적 사이트를 **사용자 자기 계정** 버킷에 배포.
+     *
+     * 코어에는 이 라우트가 완성돼 있었는데(버킷 생성·공개 설정·업로드·URL
+     * 조립까지) **확장이 한 번도 부르지 않았다.** 파일을 읽어 보내는 쪽이
+     * 없어서 그 경로 전체가 도달 불가능이었다.
+     *
+     * 바이너리는 반드시 `encoding: "base64"` 로 담아야 한다 — utf-8 로 보내면
+     * 업로드는 성공하고 브라우저에서만 깨진다.
+     */
+    async deployS3(input: {
+        project: string;
+        files: Array<{ path: string; content: string; encoding: 'utf-8' | 'base64' }>;
+        region?: string;
+        profile?: string;
+    }): Promise<S3DeployResult> {
+        const body: Record<string, unknown> = {
+            project: input.project,
+            files: input.files,
+        };
+        if (input.region) { body.region = input.region; }
+        if (input.profile) { body.profile = input.profile; }
+
+        const resp = await this.request<S3DeployResult>('POST', '/api/deploy/s3', body);
+        if (resp.success && resp.data) {
+            return resp.data;
+        }
+        //: 여기서 조용히 기본값을 돌려주면 "배포됐다" 로 보인다. 실패는
+        //: 실패로 올린다 — 호출자가 사용자에게 원인을 보여 준다.
+        throw new Error(resp.error ?? 'S3 배포에 실패했습니다.');
     }
 
     /**

@@ -398,6 +398,22 @@ export interface AwsPolicyResult {
   steps?: string[];
 }
 
+/**
+ * POST /api/deploy/s3 응답. 필드 이름은 코어 스키마(`S3DeployResponse`)와 1:1.
+ */
+export interface S3DeployResult {
+  status: string;
+  bucket: string;
+  region: string;
+  /** 공개 URL. 이걸 못 보여 주면 사용자는 배포하고도 어디로 가야 할지 모른다. */
+  url: string;
+  uploaded: string[];
+  bucket_created: boolean;
+  /** index.html 이 없어 다른 HTML 을 복제했다면 그 원본 경로. */
+  index_copied_from?: string | null;
+  message: string;
+}
+
 export interface AwsEcrRepo {
   name: string;
   uri: string;

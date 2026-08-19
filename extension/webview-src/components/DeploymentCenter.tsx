@@ -173,6 +173,15 @@ type Preflight = {
   reasons?: PreflightIssue[];
   warnings?: PreflightIssue[];
 };
+type S3Deployed = {
+  url: string;
+  bucket: string;
+  region: string;
+  uploaded: string[];
+  bucket_created: boolean;
+  index_copied_from?: string | null;
+  message: string;
+};
 type EcsRollbackProposal = {
   proposal_id: string;
   deployment_id: string;
@@ -319,9 +328,15 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   //: 사용자가 리전 입력란을 건드렸는가. 값으로 추측하면, 일부러 같은 값을
   //: 고른 경우와 구분이 안 돼 선택이 조용히 덮어써진다.
   const regionTouchedRef = useRef(false);
+  const s3DirTouchedRef = useRef(false);
   //: 불일치 경고를 이미 보여 준 조합("코어리전|폼리전"). 같은 조합으로 한 번
   //: 더 누르면 진행한다 — 경고이지 차단이 아니다.
   const [regionWarningAck, setRegionWarningAck] = useState("");
+  //: S3 정적 배포 — 올릴 폴더와 결과.
+  const [s3Dir, setS3Dir] = useState("");
+  const [s3DirTouched, setS3DirTouched] = useState(false);
+  const [s3Busy, setS3Busy] = useState(false);
+  const [s3Result, setS3Result] = useState<S3Deployed | null>(null);
   const [rollbackProposal, setRollbackProposal] = useState<EcsRollbackProposal | null>(null);
   const [resolvingRollback, setResolvingRollback] = useState(false);
   const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: "", ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
@@ -390,6 +405,22 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       setMessage((payload as { message?: string })?.message ?? "롤백 처리에 실패했습니다.");
     }
     if (type === "workspace.deploy.result") setMessage((payload as { message?: string })?.message ?? "배포 요청을 보냈습니다.");
+    if (type === "workspace.deploy.s3.dirs") {
+      //: 사용자가 직접 고른 폴더는 덮어쓰지 않는다.
+      const suggested = (payload as { suggested?: string })?.suggested ?? "";
+      setS3Dir(cur => (s3DirTouchedRef.current ? cur : suggested));
+    }
+    if (type === "workspace.deploy.s3.result") {
+      setS3Busy(false);
+      const r = payload as { ok?: boolean; result?: S3Deployed; message?: string };
+      if (r?.ok && r.result) {
+        setS3Result(r.result);
+        setMessage(r.result.message);
+      } else {
+        setS3Result(null);
+        setMessage(r?.message ?? "S3 배포에 실패했습니다.");
+      }
+    }
     if (type === "aws.status") {
       const status = payload as AwsStatusMessage;
       setAwsReady(Boolean(status?.ready));
@@ -408,6 +439,10 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   }, []));
 
   useEffect(() => { runPreflight(); postMessage("aws.status"); }, [runPreflight, postMessage]);
+  useEffect(() => {
+    //: S3 탭을 열 때 어떤 폴더가 있는지 물어본다. 웹뷰는 파일시스템을 못 본다.
+    if (target === "s3") { postMessage("workspace.deploy.s3.dirs"); }
+  }, [target, postMessage]);
   useEffect(() => {
     // **"코어에 연결되면 다시 검사합니다" 라고 써 놓고 아무것도 안 하면 거짓말이다.**
     //
@@ -550,7 +585,56 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       </div>}
 
       {target === "docker" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>로컬 Docker 배포</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>Dockerfile 생성, 보안 스캔, build/run 및 헬스체크를 진행합니다.</p><button onClick={onOpenDocker} style={button}>로컬에서 검증 시작</button></div>}
-      {target === "s3" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>S3 정적 호스팅</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>정적 배포 대상을 선택했고 ADR에 기록했습니다. 다음으로 CI/CD 워크플로우를 생성해 검토·승인할 수 있습니다.</p><button onClick={generateActions} style={button}>배포 워크플로우 생성</button></div>}
+      {target === "s3" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}>
+        <b>S3 정적 호스팅</b>
+        <p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55, fontSize: 12 }}>
+          본인 AWS 계정의 버킷에 직접 올립니다. 버킷이 없으면 만들고, 정적 웹사이트 호스팅까지 설정한 뒤 공개 URL을 돌려줍니다.
+        </p>
+        <label style={{ display: "block", fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
+          올릴 폴더 (비우면 워크스페이스 루트)
+          <input
+            value={s3Dir}
+            onChange={e => { s3DirTouchedRef.current = true; setS3DirTouched(true); setS3Dir(e.target.value); }}
+            placeholder="dist"
+            style={{ ...input, marginTop: 4 }}
+          />
+        </label>
+        {/*
+          빌드 산출물이 아니라 소스 폴더를 올리면 브라우저가 .tsx 를 실행할 수
+          없어 흰 화면이 나온다. 그 실패는 배포가 아니라 앱 문제처럼 보인다.
+        */}
+        <div style={{ marginTop: 6, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.5 }}>
+          빌드 산출물 폴더를 지정하세요. 파일은 최대 30개까지 올라갑니다.
+          {s3DirTouched ? "" : " (감지된 폴더를 자동으로 채웠습니다)"}
+        </div>
+        <button
+          disabled={s3Busy}
+          onClick={() => { setS3Busy(true); setS3Result(null); setMessage("S3에 올리는 중…"); postMessage("workspace.deploy.s3", { dir: s3Dir.trim(), region: ecs.aws_region.trim() }); }}
+          style={{ ...button, marginTop: 13, opacity: s3Busy ? .7 : 1 }}
+        >{s3Busy ? "배포 중…" : "S3에 배포"}</button>
+
+        {s3Result && (
+          <div style={{ marginTop: 13, padding: "10px 12px", borderRadius: 6, background: "rgba(78, 201, 176, .10)", border: "1px solid rgba(78, 201, 176, .32)" }}>
+            <div style={{ fontSize: 12, fontWeight: 650, color: "var(--vscode-charts-green, #4ec9b0)" }}>배포 완료</div>
+            {/*
+              **URL 을 안 보여 주면 사용자는 배포하고도 어디로 가야 할지 모른다.**
+              이 링크가 이 기능의 결과물 그 자체다.
+            */}
+            <div style={{ marginTop: 7, fontSize: 12, wordBreak: "break-all" }}>
+              <a href={s3Result.url} target="_blank" rel="noreferrer" style={{ color: "var(--vscode-textLink-foreground, #75beff)" }}>{s3Result.url}</a>
+            </div>
+            <div style={{ marginTop: 7, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>
+              버킷 {s3Result.bucket} · {s3Result.region}{s3Result.bucket_created ? " (새로 만듦)" : ""} · 파일 {s3Result.uploaded.length}개
+              {s3Result.index_copied_from ? ` · index.html 이 없어 ${s3Result.index_copied_from} 를 진입 문서로 함께 올렸습니다` : ""}
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--vscode-panel-border, #3f3f3f)" }}>
+          <div style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.5 }}>매번 손으로 올리는 대신 CI에서 배포하려면:</div>
+          <button onClick={generateActions} style={{ ...button, marginTop: 8, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>배포 워크플로우 생성</button>
+        </div>
+      </div>}
       {target === "actions" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>GitHub Actions</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>프로젝트에 맞는 CI/CD 워크플로우를 생성하고, 승인 후 <code>.github/workflows/deploy.yml</code>에 저장합니다.</p><button onClick={generateActions} style={button}>워크플로우 생성</button>{proposal && <><pre style={{ marginTop: 12, maxHeight: 280, overflow: "auto", background: "var(--vscode-textCodeBlock-background, #1e1e1e)", borderRadius: 5, padding: 10, fontSize: 11 }}>{proposal.content}</pre><button onClick={() => postMessage("approveGithubActions", { proposalId: proposal.proposal_id, approved: true })} style={{ ...button, marginTop: 10 }}>승인하고 저장</button></>}</div>}
       {target === "ec2" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>EC2 배포</b><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["host_port", "호스트 포트"], ["container_port", "컨테이너 포트"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ec2_host", "EC2 Host"], ["ec2_ssh_key", "SSH 키 경로"], ["ec2_user", "EC2 사용자"] ] as [keyof typeof ec2, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ec2[key]} onChange={e => update(setEc2, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}</div><button onClick={deployEc2} style={{ ...button, marginTop: 14 }}>EC2 배포 실행</button></div>}
       {target === "ecs" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>ECS Fargate 배포</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.45 }}>선택 근거가 ADR에 기록되었습니다. 입력한 리전과 ECS 대상의 권한을 확인한 뒤 배포를 시작합니다.</p><EcsCostNotice /><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ecs_cluster", "ECS Cluster"], ["ecs_service", "ECS Service"], ["task_family", "Task Family"], ["container_port", "컨테이너 포트"], ["cpu", "CPU"], ["memory", "Memory"] ] as [keyof typeof ecs, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ecs[key]} onChange={e => update(setEcs, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}</div><button disabled={checkingEcsPermissions} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : "ECS 배포 실행"}</button></div>}
