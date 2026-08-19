@@ -1,7 +1,7 @@
 # ==============================================================================
 # ReCoder File Template: Dockerfile.node-next
 # Production-grade Dockerfile for Next.js applications (standalone output)
-# Placeholders: {{APP_NAME}}, {{NODE_VERSION}}, {{PORT}}
+# Placeholders: {{APP_NAME}}, {{NODE_VERSION}}, {{PORT}}, {{HEALTH_CHECK_PATH}}
 # ==============================================================================
 
 # ---- Dependency installation stage ----
@@ -17,8 +17,10 @@ RUN if [ -f yarn.lock ]; then \
         yarn install --frozen-lockfile; \
     elif [ -f pnpm-lock.yaml ]; then \
         npm install -g pnpm && pnpm install --frozen-lockfile; \
-    else \
+    elif [ -f package-lock.json ]; then \
         npm ci; \
+    else \
+        npm install; \
     fi
 
 # ---- Build stage ----
@@ -55,10 +57,9 @@ RUN addgroup -g 1001 appgroup && \
 
 WORKDIR /app
 
-# Copy Next.js standalone output
-COPY --from=builder --chown=appuser:appgroup /app/.next/standalone ./
-COPY --from=builder --chown=appuser:appgroup /app/.next/static ./.next/static
-COPY --from=builder --chown=appuser:appgroup /app/public ./public
+# standalone 출력 설정 유무와 관계없이 `npm start`가 사용할 전체 빌드
+# 산출물과 의존성을 복사한다. public/이 없는 앱도 COPY 실패하지 않는다.
+COPY --from=builder --chown=appuser:appgroup /app ./
 
 USER appuser
 
@@ -66,7 +67,7 @@ EXPOSE {{PORT}}
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:{{PORT}}/api/health || exit 1
+    CMD curl -f http://localhost:{{PORT}}{{HEALTH_CHECK_PATH}} || exit 1
 
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "server.js"]
+CMD ["npm", "start"]

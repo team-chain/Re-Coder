@@ -1,5 +1,5 @@
 /** AWS BYO 계정 연결 — 키는 검증 뒤 VS Code SecretStorage에만 저장된다. */
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 
 type AwsStatus = {
@@ -27,14 +27,28 @@ export const AwsConnection: React.FC = () => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [accessKeyId, setAccessKeyId] = useState("");
   const [secretAccessKey, setSecretAccessKey] = useState("");
-  const [region, setRegion] = useState("ap-northeast-2");
+  //: **여기에 리전을 박아 두면 안 된다.** 예전에는 "ap-northeast-2" 가
+  //: 기본값이었고, 사용자가 그대로 두면 connect_aws 가 코어의 AWS_REGION 을
+  //: 그 값으로 덮어썼다. us-east-1 자격증명을 넣어도 코어는 ap-northeast-2 로
+  //: 바뀌고, 배포 센터는 그 값을 "현재 리전" 이라고 믿는다 — 리전 불일치
+  //: 경고까지 조용해져서, 아무도 어긋난 걸 모른 채 배포가 실패한다.
+  //: 코어가 이미 쓰고 있는 리전을 그대로 보여 주고, 바꾸려면 사용자가 친다.
+  const [region, setRegion] = useState("");
   const [status, setStatus] = useState<AwsStatus | null>(null);
+  //: useMessage 핸들러는 [] 의존으로 고정돼 있어 state 를 직접 읽으면 낡는다.
+  const regionTouchedRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => { postMessage("aws.status"); }, [postMessage]);
   useMessage(useCallback(({ type, payload }) => {
-    if (type === "aws.status") { setStatus(payload as AwsStatus); }
+    if (type === "aws.status") {
+      const next = payload as AwsStatus;
+      setStatus(next);
+      //: 사용자가 손대지 않았으면 코어의 현재 리전을 그대로 보여 준다.
+      const current = (next?.region ?? "").trim();
+      if (current) { setRegion(cur => (regionTouchedRef.current ? cur : current)); }
+    }
     if (type === "aws.configure.result") {
       const result = payload as { ok: boolean; status?: AwsStatus; message?: string };
       setBusy(false);
@@ -70,7 +84,10 @@ export const AwsConnection: React.FC = () => {
     setBusy(true);
     setError("");
     postMessage("aws.configure", {
-      accessKeyId: accessKeyId.trim(), secretAccessKey: secretAccessKey.trim(), region: region.trim() || "ap-northeast-2",
+      accessKeyId: accessKeyId.trim(), secretAccessKey: secretAccessKey.trim(),
+      //: 비어 있으면 **코어가 쓰던 리전을 유지**한다. 하드코딩한 값으로
+      //: 덮어쓰면 사용자가 고른 적 없는 리전이 시스템 전체의 "현재 리전" 이 된다.
+      region: region.trim() || (status?.region ?? "").trim(),
     });
   };
 
@@ -120,7 +137,7 @@ export const AwsConnection: React.FC = () => {
       <input autoComplete="off" spellCheck={false} type="password" value={secretAccessKey} onChange={e => setSecretAccessKey(e.target.value)} placeholder="비밀 키를 붙여 넣으세요" style={input} />
     </label>
     <label style={{ display: "block", marginTop: 11, fontSize: 12 }}>리전
-      <input autoComplete="off" spellCheck={false} value={region} onChange={e => setRegion(e.target.value)} placeholder="ap-northeast-2" style={input} />
+      <input autoComplete="off" spellCheck={false} value={region} onChange={e => { regionTouchedRef.current = true; setRegion(e.target.value); }} placeholder={status?.region || "예: us-east-1"} style={input} />
     </label>
     {error && <div role="alert" style={{ marginTop: 10, color: "var(--vscode-errorForeground, #f48771)", fontSize: 12, lineHeight: 1.45 }}>{error}</div>}
     {status?.message && !error && <div style={{ marginTop: 10, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11 }}>{status.message}</div>}

@@ -97,16 +97,27 @@ def _detect_stack(project_path: str) -> tuple[str, dict]:
     )
 
 
-def _detect_db_driver(project_path: str) -> bool:
+def _detect_db_driver(project_path: str) -> Optional[str]:
     """
-    DB 드라이버 존재 여부를 확인해 docker-compose 필요 여부 판단.
+    설정과 의존성에서 DB 엔진을 확인한다.
+
+    ORM 자체(sqlalchemy/prisma/typeorm)나 빈 DATABASE_URL 표시는 엔진을
+    결정하지 못하므로 다중 서비스의 근거로 쓰지 않는다. 엔진을 모르는
+    상태에서 PostgreSQL을 임의로 붙이면 MySQL 프로젝트를 깨뜨리기 때문이다.
 
     Returns:
-        bool: DB 드라이버가 감지되면 True (docker-compose 필요)
+        "postgresql", "mysql", 또는 엔진을 확정할 수 없으면 None
     """
     p = Path(project_path)
     signals: list[str] = []
-    for name in ("requirements.txt", "pyproject.toml", "package.json", ".env.example"):
+    for name in (
+        "requirements.txt",
+        "pyproject.toml",
+        "package.json",
+        ".env",
+        ".env.example",
+        "prisma/schema.prisma",
+    ):
         target = p / name
         if target.exists():
             try:
@@ -117,19 +128,33 @@ def _detect_db_driver(project_path: str) -> bool:
                 pass
 
     content = "\n".join(signals)
-    db_drivers = [
-        "database_url",
-        "psycopg2",
-        "pymysql",
-        "aiomysql",
-        "asyncpg",
-        "sqlalchemy",
-        "prisma",
-        "typeorm",
-        '"pg"',
-        "mysql2",
-    ]
-    return any(d in content for d in db_drivers)
+
+    # 실제 URL 또는 Prisma provider는 설치만 된 드라이버보다 강한 신호다.
+    configured_postgres = bool(re.search(
+        r"(?:postgres(?:ql)?(?:\+[a-z0-9_-]+)?://|"
+        r"provider\s*=\s*['\"]postgresql['\"])",
+        content,
+    ))
+    configured_mysql = bool(re.search(
+        r"(?:mysql(?:\+[a-z0-9_-]+)?://|"
+        r"provider\s*=\s*['\"]mysql['\"])",
+        content,
+    ))
+    if configured_postgres != configured_mysql:
+        return "postgresql" if configured_postgres else "mysql"
+
+    postgres_driver = bool(re.search(
+        r"(?:\bpsycopg(?:2(?:-binary)?|3)?\b|\basyncpg\b|['\"]pg['\"]\s*:)",
+        content,
+    ))
+    mysql_driver = bool(re.search(
+        r"(?:\bpymysql\b|\baiomysql\b|\bmysqlclient\b|"
+        r"\bmysql-connector(?:-python)?\b|['\"]mysql2['\"]\s*:)",
+        content,
+    ))
+    if postgres_driver != mysql_driver:
+        return "postgresql" if postgres_driver else "mysql"
+    return None
 
 
 def _resolve_project_path(project_path: str | Path = ".") -> Path:
@@ -268,6 +293,88 @@ def generate_dockerfile(
     )
 
 
+def _runtime_family(stack: str, workspace_path: str = "") -> str:
+    """"python" | "node" | "" — compose 헬스체크에 쓸 런타임 계열.
+
+    스택 이름만으로는 부족하다. 스캐너는 requirements.txt / package.json 만
+    보므로, **Poetry(pyproject.toml)만 쓰는 FastAPI 프로젝트가 custom 으로
+    분류된다.** 그러면 Dockerfile 에는 헬스체크가 들어가는데 compose 에는
+    안 들어가서 둘이 어긋난다. 스택을 모르면 파일로 한 번 더 본다.
+    """
+    if stack.startswith("python"):
+        return "python"
+    if stack.startswith("node"):
+        return "node"
+    if not workspace_path:
+        return ""
+    try:
+        root = Path(workspace_path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return ""
+    if (root / "requirements.txt").is_file() or (root / "pyproject.toml").is_file():
+        return "python"
+    if (root / "package.json").is_file():
+        return "node"
+    return ""
+
+
+def compose_health_check_block(
+    stack: str,
+    container_port: str,
+    health_check_path: str = "/health",
+    start_period: str = "10s",
+    workspace_path: str = "",
+) -> str:
+    """compose 의 app healthcheck 블록. 못 만들면 **빈 문자열**.
+
+    왜 wget/curl 을 안 쓰는가
+        예전 템플릿은 `wget --spider || curl -fs` 를 박아 뒀는데, 정작
+        우리가 만들어 주는 런타임 이미지에 그 둘이 **모두 없다.**
+        python:slim(Debian slim) 도 node:20-slim 도 담지 않는다.
+        그래서 앱이 멀쩡히 떠 있어도 compose 는 영구히 unhealthy 로 보고하고,
+        `depends_on: condition: service_healthy` 가 걸린 쪽은 아예 못 뜬다.
+        Dockerfile 템플릿 쪽은 같은 이유로 이미 python urllib 로 고쳤는데
+        compose 만 남아 있었다.
+
+    왜 exec 형식(CMD)인가
+        CMD-SHELL 로 두면 YAML 큰따옴표 안에 명령의 따옴표가 또 들어가
+        이스케이프가 깨지기 쉽다. 리스트 형식은 셸을 안 거치므로
+        인용 문제가 아예 없다.
+
+    모르는 스택이면 빈 문자열
+        **항상 실패하는 헬스체크는 없는 것보다 나쁘다.** 정상 컨테이너를
+        unhealthy 로 표시해 재시작 루프를 만든다.
+    """
+    url = f"http://127.0.0.1:{container_port}{health_check_path}"
+
+    family = _runtime_family(stack, workspace_path)
+    if family == "python":
+        #: python 은 이 이미지에 반드시 있다. 작은따옴표만 써서 YAML
+        #: 큰따옴표 문자열 안에 그대로 들어가게 한다.
+        probe = (
+            '["CMD", "python", "-c", '
+            f"\"import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('{url}', "
+            'timeout=5).status == 200 else 1)"]'
+        )
+    elif family == "node":
+        probe = (
+            '["CMD", "node", "-e", '
+            f"\"require('http').get('{url}', r => process.exit(r.statusCode === 200 ? 0 : 1))"
+            ".on('error', () => process.exit(1))\"]"
+        )
+    else:
+        return ""
+
+    return (
+        "    healthcheck:\n"
+        f"      test: {probe}\n"
+        "      interval: 30s\n"
+        "      timeout: 10s\n"
+        "      retries: 3\n"
+        f"      start_period: {start_period}\n"
+    )
+
+
 def generate_docker_compose(
     project_profile: Optional[ProjectProfile] = None,
     workspace_path: str = ".",
@@ -296,7 +403,7 @@ def generate_docker_compose(
         stack, meta = _detect_stack(str(project_root))
         default_port = meta.get("port", "8000")
 
-    has_db = _detect_db_driver(str(project_root))
+    db_engine = _detect_db_driver(str(project_root))
 
     # 템플릿의 {env_file_block} 자리에 넣을 값. **실제로 `.env` 가 있을 때만**
     # env_file 블록을 넣는다. 없으면 빈 문자열이되 **반드시 넘긴다** — render()
@@ -314,27 +421,150 @@ def generate_docker_compose(
 
     # FileRegistry에서 docker-compose 템플릿 가져오기
     registry = get_file_registry()
+    compose_template = {
+        "postgresql": "docker-compose-db",
+        "mysql": "docker-compose-mysql",
+    }.get(db_engine, "docker-compose")
+
+    health_path = _compose_health_path(project_profile, stack, str(project_root))
     content = registry.render(
-        "docker-compose",
+        compose_template,
         {
             "image": "recoder-app:latest",
             "container_name": "recoder-app",
             "host_port": default_port,
             "container_port": default_port,
-            "health_check_path": "/health",
             "env_file_block": env_file_block,
+            "health_check_block": compose_health_check_block(
+                stack,
+                default_port,
+                health_path,
+                start_period="15s" if db_engine else "10s",
+                workspace_path=str(project_root),
+            ),
         },
     )
+
+    # ── build 가 가리키는 Dockerfile 이 실제로 있는가 ────────────────────
+    #
+    # 템플릿은 `build: context: . / dockerfile: Dockerfile` 을 쓴다. 그런데
+    # 「인프라 파일 생성」의 Compose 탭은 Dockerfile 탭보다 **먼저** 눌릴 수
+    # 있고, 이 경로는 Dockerfile 을 만들지 않는다. 그대로 두면 제안은
+    # "생성 성공" 으로 저장되지만 `docker compose up` 은 없는 파일을
+    # 빌드하려다 실패한다 — 사용자는 왜 실패했는지 알 수 없다.
+    #
+    # 여기서 Dockerfile 을 대신 만들어 주지는 **않는다.** Dockerfile 은
+    # 승인 등급이 더 높은(CONFIRM) 산출물이라, compose 생성이 조용히
+    # 끼워 넣으면 사람 승인 원칙(D6)을 우회하게 된다. 대신 무엇을 먼저
+    # 해야 하는지 그대로 말해 준다.
+    risk_reasons: list[str] = []
+    if not (project_root / "Dockerfile").exists():
+        if _runtime_family(stack, str(project_root)):
+            #: 「Dockerfile」 탭이 실제로 만들어 줄 수 있는 스택일 때만 그리로
+            #: 보낸다. 지원하지 않는 스택(Go·Java·Ruby 등)에서는 그 탭이
+            #: 422 를 내므로, 안내대로 따라가면 막다른 길이다.
+            risk_reasons.append(
+                "이 compose 는 같은 폴더의 Dockerfile 을 빌드합니다. 아직 "
+                "Dockerfile 이 없으니 「Dockerfile」 탭에서 먼저 생성·승인하세요. "
+                "그 전에는 docker compose up 이 빌드 단계에서 실패합니다."
+            )
+        else:
+            risk_reasons.append(
+                "이 compose 는 같은 폴더의 Dockerfile 을 빌드하는데, 이 프로젝트는 "
+                "ReCoder 가 Dockerfile 을 자동 생성할 수 있는 스택이 아닙니다. "
+                "Dockerfile 을 직접 추가한 뒤 docker compose up 을 실행하세요."
+            )
 
     return InfraFileProposal(
         proposal_id=uuid.uuid4().hex,
         file_type=FileType.DOCKER_COMPOSE,
         target_path="docker-compose.yml",
         content=content,
-        base_template="db-multi" if has_db else "single",
+        base_template="db-multi" if db_engine else "single",
         risk_level=RiskLevel.LOW,
         approval_level=1,  # 로컬 파일 생성
+        risk_reasons=risk_reasons,
     )
+
+
+#: 스캐너가 넣는 값. **탐지 결과가 아니라 하드코딩된 기본값**이다
+#: (core/project_scanner.py). 이 값과 같으면 "사람이 정한 것" 으로 볼 수 없다.
+SCANNER_DEFAULT_HEALTH_PATH = "/health"
+
+#: 생성 파일에 그대로 들어가는 값이라 문자를 제한한다. 큰따옴표·역슬래시가
+#: 섞이면 compose 의 YAML 인용이나 Dockerfile 의 명령이 깨진다.
+_HEALTH_PATH_RE = re.compile(r"/[A-Za-z0-9._~%/@+-]*")
+
+#: Next.js 의 health 라우트가 놓이는 자리. App Router / Pages Router,
+#: 그리고 src/ 레이아웃까지 본다.
+_NEXT_HEALTH_CANDIDATES: tuple = (
+    ("/api/health", (
+        "app/api/health/route.js", "app/api/health/route.ts",
+        "src/app/api/health/route.js", "src/app/api/health/route.ts",
+        "pages/api/health.js", "pages/api/health.ts",
+        "src/pages/api/health.js", "src/pages/api/health.ts",
+        "pages/api/health/index.js", "pages/api/health/index.ts",
+    )),
+    ("/health", (
+        "app/health/route.js", "app/health/route.ts",
+        "src/app/health/route.js", "src/app/health/route.ts",
+    )),
+)
+
+
+def discover_health_path(
+    workspace_path: str,
+    stack: str,
+    configured: Optional[str] = None,
+) -> str:
+    """헬스체크가 찌를 경로. **이 판단은 여기 한 곳에만 둔다.**
+
+    왜 하나로 합쳤나
+        예전에는 compose 쪽(infra_agent)과 Dockerfile 쪽(api/routes/deploy.py)에
+        각각 구현이 있었고, 둘이 서로 달랐다. compose 는 파일시스템을 안 보고
+        Next 면 무조건 /api/health 를, Dockerfile 쪽은 실제 라우트를 찾아
+        /health 를 돌려줄 수도 있었다. **같은 프로젝트에서 두 파일이 다른
+        경로를 찌른다.** 헬스체크가 틀리면 예외가 아니라 "영원히 unhealthy"
+        로 나타나므로, 갈라진 채로는 아무도 눈치채지 못한다.
+
+    왜 프로필 값을 그대로 못 쓰나
+        `project_scanner` 는 health_check_path 를 하드코딩한다. 탐지한 적이
+        없다. 그래서 Next.js 처럼 /api/ 아래에 라우트를 두는 스택에서 그대로
+        쓰면 없는 경로를 찌른다.
+
+    순서
+        1. 설정값이 스캐너 기본값과 **다르면** 사람이 정한 것으로 보고 존중한다.
+        2. Next.js 면 실제 라우트 파일을 찾아본다.
+        3. 못 찾으면 스택 관례(Next 는 /api/health), 그 외엔 /health.
+    """
+    if (
+        isinstance(configured, str)
+        and _HEALTH_PATH_RE.fullmatch(configured)
+        and configured != SCANNER_DEFAULT_HEALTH_PATH
+    ):
+        return configured
+
+    if stack == "node-next":
+        try:
+            root = Path(workspace_path).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return "/api/health"
+        for path, candidates in _NEXT_HEALTH_CANDIDATES:
+            if any((root / c).is_file() for c in candidates):
+                return path
+        #: 못 찾아도 /health 로 되돌리지 않는다 — Next 에서 그 경로는
+        #: 라우트가 아니라 거의 확실히 404 다.
+        return "/api/health"
+
+    if isinstance(configured, str) and _HEALTH_PATH_RE.fullmatch(configured):
+        return configured
+    return SCANNER_DEFAULT_HEALTH_PATH
+
+
+def _compose_health_path(project_profile: Optional[ProjectProfile], stack: str,
+                         workspace_path: str) -> str:
+    configured = getattr(project_profile, "health_check_path", None) if project_profile else None
+    return discover_health_path(workspace_path, stack, configured)
 
 
 # ReCoder Preflight 게이트 job — CI 워크플로 뒤에 append 된다.

@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from infra_agent import generate_dockerfile, generate_docker_compose
 from schemas import FileType, InfraFileProposal, ProjectProfile, ProjectStack
@@ -75,6 +76,93 @@ def test_generate_docker_compose(fake_fastapi_project: Path):
     )
     assert isinstance(proposal, InfraFileProposal)
     assert "services:" in proposal.content
+
+
+def test_generate_docker_compose_uses_db_template_when_driver_is_detected(
+    fake_fastapi_project: Path,
+):
+    with (fake_fastapi_project / "requirements.txt").open("a", encoding="utf-8") as f:
+        f.write("asyncpg\n")
+
+    proposal = generate_docker_compose(workspace_path=str(fake_fastapi_project))
+
+    assert proposal.base_template == "db-multi"
+    assert "  db:" in proposal.content
+    assert "postgres:16-alpine" in proposal.content
+    assert "DATABASE_URL: postgresql://app:app@db:5432/app" in proposal.content
+    services = yaml.safe_load(proposal.content)["services"]
+    assert services["app"]["build"] == {
+        "context": ".",
+        "dockerfile": "Dockerfile",
+    }
+    assert services["db"]["image"] == "postgres:16-alpine"
+
+
+@pytest.mark.parametrize("driver", ["pymysql", "aiomysql"])
+def test_generate_docker_compose_matches_mysql_python_driver(
+    fake_fastapi_project: Path,
+    driver: str,
+):
+    with (fake_fastapi_project / "requirements.txt").open("a", encoding="utf-8") as f:
+        f.write(f"{driver}\n")
+
+    proposal = generate_docker_compose(workspace_path=str(fake_fastapi_project))
+
+    assert proposal.base_template == "db-multi"
+    assert "mysql:8.4" in proposal.content
+    assert "DATABASE_URL: mysql://app:app@db:3306/app" in proposal.content
+    assert "postgres:16-alpine" not in proposal.content
+    services = yaml.safe_load(proposal.content)["services"]
+    assert services["app"]["build"]["context"] == "."
+    assert services["db"]["image"] == "mysql:8.4"
+
+
+def test_generate_docker_compose_matches_node_mysql2_driver(tmp_path: Path):
+    (tmp_path / "package.json").write_text(
+        '{"dependencies":{"express":"^5.0.0","mysql2":"^3.0.0"}}',
+        encoding="utf-8",
+    )
+
+    proposal = generate_docker_compose(workspace_path=str(tmp_path))
+
+    assert "mysql:8.4" in proposal.content
+    assert "DATABASE_URL: mysql://app:app@db:3306/app" in proposal.content
+    assert "postgresql://" not in proposal.content
+    services = yaml.safe_load(proposal.content)["services"]
+    assert services["app"]["build"]["dockerfile"] == "Dockerfile"
+    assert services["db"]["environment"]["MYSQL_DATABASE"] == "app"
+
+
+def test_generate_docker_compose_without_driver_stays_single_service(
+    fake_fastapi_project: Path,
+):
+    proposal = generate_docker_compose(workspace_path=str(fake_fastapi_project))
+
+    assert proposal.base_template == "single"
+    assert "  db:" not in proposal.content
+    assert "DATABASE_URL:" not in proposal.content
+    services = yaml.safe_load(proposal.content)["services"]
+    assert services["app"]["build"] == {
+        "context": ".",
+        "dockerfile": "Dockerfile",
+    }
+
+
+def test_generic_orm_without_engine_does_not_guess_postgres(
+    fake_fastapi_project: Path,
+):
+    with (fake_fastapi_project / "requirements.txt").open("a", encoding="utf-8") as f:
+        f.write("sqlalchemy\n")
+    (fake_fastapi_project / ".env.example").write_text(
+        "DATABASE_URL=\n",
+        encoding="utf-8",
+    )
+
+    proposal = generate_docker_compose(workspace_path=str(fake_fastapi_project))
+
+    assert proposal.base_template == "single"
+    assert "  db:" not in proposal.content
+    assert "postgres:16-alpine" not in proposal.content
 
 
 def test_docker_compose_env_file_only_when_env_exists(fake_fastapi_project: Path):

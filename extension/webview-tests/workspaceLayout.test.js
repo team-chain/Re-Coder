@@ -32,14 +32,14 @@ const { BuildMode } = require('../out/webview-test/components/BuildMode.js');
 //: 코드 생성 경로가 화면에 붙어 있다는 뜻이다.
 const CODE_AGENT_MARKER = '코드 작성 및 수정';
 
-function renderWorkspace(view) {
+function renderWorkspace(view, isAiReady = true) {
   return renderToStaticMarkup(
     React.createElement(WorkspaceLayout, {
       view,
       diagnostics: null,
       coreStatus: 'ok',
       showDiagnostics: false,
-      isAiReady: true,
+      isAiReady,
       isDockerReady: true,
       isOpsReady: true,
       costSummary: null,
@@ -81,5 +81,29 @@ test('BuildMode 에 숨김 플래그를 넘겨도 CodeAgent 는 숨겨지지 않
   assert.ok(
     html.includes(CODE_AGENT_MARKER),
     'showCodeAgent 같은 숨김 스위치가 되살아났다 — 같은 버그가 재발할 수 있다'
+  );
+});
+
+test('AI가 준비되지 않아도 홈에서 Deploy에 진입할 수 있다', () => {
+  const html = renderWorkspace('home', false);
+  const labelIndex = html.indexOf('>Deploy<');
+  assert.ok(labelIndex >= 0, 'Deploy 항목이 렌더되지 않았다');
+  const buttonStart = html.lastIndexOf('<button', labelIndex);
+  const buttonEnd = html.indexOf('>', buttonStart);
+  const openingTag = html.slice(buttonStart, buttonEnd + 1);
+  assert.ok(!openingTag.includes('disabled'), 'AI 미설정 상태에서 Deploy가 비활성화됐다');
+});
+
+test('AI가 준비되지 않아도 Ship Mode가 템플릿 폴백 UI를 렌더한다', () => {
+  const html = renderWorkspace('ship', false);
+  assert.ok(html.includes('Dockerfile'), 'Dockerfile 생성 탭이 사라졌다');
+  assert.ok(html.includes('Compose'), 'Compose 생성 탭이 사라졌다');
+  assert.ok(
+    html.includes('로컬 템플릿 폴백으로 생성됩니다'),
+    'AI 미설정 시 폴백 동작을 안내하지 않는다'
+  );
+  assert.ok(
+    !html.includes('Ship Mode는 AI Ready가 필요합니다'),
+    'AI Ready 전체 차단 화면이 되살아났다'
   );
 });

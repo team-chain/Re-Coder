@@ -417,12 +417,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 );
                 break;
             }
+            case 'generateCompose': {
+                const p = (payload ?? {}) as { workspacePath?: string; projectId?: string };
+                await this.handleGenerateCompose(
+                    p.workspacePath || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                    p.projectId,
+                );
+                break;
+            }
             case 'approveDockerfile': {
                 const { proposalId, approved } = payload as { proposalId: string; approved: boolean };
                 const dfResult = await this._apiClient.approveDockerfile(proposalId, approved);
                 this.postMessage('stateUpdate', { ...this._state });
                 if (dfResult.status === 'error') {
-                    this.postMessage('errorMessage', { message: 'Dockerfile 승인 실패' });
+                    this.postMessage('errorMessage', { message: '인프라 파일 승인 실패' });
+                } else {
+                    // 저장이 끝난 뒤에만 웹뷰가 다음 단계(Trivy 또는 완료)로
+                    // 넘어간다. 고정 지연으로 추측하면 느린 디스크에서 저장보다
+                    // 스캔이 먼저 실행될 수 있다.
+                    this.postMessage('infraApprovalResult', {
+                        ...dfResult,
+                        proposal_id: proposalId,
+                        approved,
+                    });
                 }
                 break;
             }
@@ -1362,6 +1379,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this._state.isLoading = true;
             this.postMessage('stateUpdate', this._state);
             const proposal = await this._apiClient.generateDockerfile(workspacePath, projectId);
+            this._state.proposals.unshift(proposal);
+            this.postMessage('proposalReady', proposal);
+        } catch (err) {
+            this.postMessage('errorMessage', { message: String(err) });
+        } finally {
+            this._state.isLoading = false;
+            this.postMessage('stateUpdate', this._state);
+        }
+    }
+
+    /** docker-compose.yml 초안 생성 — 「인프라 파일 생성」 Compose 탭. */
+    private async handleGenerateCompose(workspacePath: string, projectId?: string): Promise<void> {
+        try {
+            this._state.isLoading = true;
+            this.postMessage('stateUpdate', this._state);
+            const proposal = await this._apiClient.generateCompose(workspacePath, projectId);
             this._state.proposals.unshift(proposal);
             this.postMessage('proposalReady', proposal);
         } catch (err) {

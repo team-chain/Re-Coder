@@ -17,6 +17,15 @@ ReCoder core 와 **독립적으로** 동작하며, Python 표준 라이브러리
 | `container_exit_nonzero` | `docker events --filter event=die` 의 exitCode != 0 | warning |
 | `container_memory_high` | docker stats 의 MemPerc >= 90% (조정 가능) | warning |
 | `docker_daemon_unavailable` | docker CLI/daemon 응답 불가 | warning |
+| `ecs_tasks_unhealthy` | ECS running < desired 가 3회 연속 (조정 가능) | critical / warning |
+| `ecs_task_restart_loop` | 관측 창 안에서 태스크가 2회 이상 중단 | critical |
+| `http_5xx_spike` | ALB 5xx 비율 > 5% (최소 요청 수 충족 시) | critical |
+| `latency_p95_high` | ALB TargetResponseTime p95 > 3초 | warning |
+| `ecs_monitoring_unavailable` | 3분 넘게 ECS/CloudWatch 를 못 읽음 | warning |
+
+아래 5종(ECS/CloudWatch)은 **`RECODER_WATCHDOG_ECS_CLUSTER` 와
+`ECS_SERVICE` 를 채웠을 때만** 동작한다. 비워 두면 그 경로가 통째로 꺼지고,
+로컬 도커 감시만 그대로 돈다. 켜졌는지는 `--check` 의 `ecs=` 항목으로 본다.
 
 감지 시 두 가지 작업을 동시 수행한다:
 
@@ -106,6 +115,41 @@ sudo \
 | `RECODER_WATCHDOG_DEPLOYMENT_ID` | (빈값) | 최근 배포 ID (incident 에 기록) |
 | `RECODER_WATCHDOG_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `RECODER_WATCHDOG_DOCKER_BIN` | `docker` | docker 바이너리 경로 |
+
+### ECS / CloudWatch 감시 (FR-06-01/02)
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `RECODER_WATCHDOG_ECS_CLUSTER` | (빈값) | 비우면 ECS 감시 **전체가 꺼짐** |
+| `RECODER_WATCHDOG_ECS_SERVICE` | (빈값) | 클러스터와 함께 있어야 켜진다 |
+| `RECODER_WATCHDOG_AWS_REGION` | `AWS_REGION` → `AWS_DEFAULT_REGION` | 위 둘을 채웠으면 **필수** |
+| `RECODER_WATCHDOG_ALB_NAME` | (빈값) | 비우면 헬스만 보고 트래픽 지표는 건너뜀 |
+| `RECODER_WATCHDOG_TARGET_GROUP` | (빈값) | 없으면 다른 대상 그룹 트래픽이 섞인다 |
+| `RECODER_WATCHDOG_ECS_INTERVAL` | `60` | ECS polling 주기 (초, 최소 15) |
+| `RECODER_WATCHDOG_ECS_WINDOW_SECONDS` | `300` | 지표 관측 창 (초, 최소 60) |
+| `RECODER_WATCHDOG_ERROR_RATE_THRESHOLD` | `0.05` | 5xx 비율 임계 (0~1) |
+| `RECODER_WATCHDOG_MIN_REQUESTS` | `20` | 이 미만이면 에러율로 판정하지 않음 |
+| `RECODER_WATCHDOG_P95_THRESHOLD_SECONDS` | `3.0` | p95 응답 시간 임계 (초) |
+| `RECODER_WATCHDOG_UNHEALTHY_POLLS` | `3` | 연속 desired 미달 임계 |
+
+`ALB_NAME` / `TARGET_GROUP` 은 ARN 전체가 아니라 **CloudWatch 차원 값**이다 —
+ARN 의 `loadbalancer/` 뒷부분만 쓴다.
+
+```
+ARN     arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/recoder-alb/1a2b3c4d5e6f7g8h
+ALB_NAME                                                                 app/recoder-alb/1a2b3c4d5e6f7g8h
+
+ARN          arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/recoder-tg/1a2b3c4d5e6f7g8h
+TARGET_GROUP                                                     targetgroup/recoder-tg/1a2b3c4d5e6f7g8h
+```
+
+필요한 IAM 권한: `ecs:DescribeServices`, `ecs:ListTasks`, `ecs:DescribeTasks`,
+`cloudwatch:GetMetricStatistics`.
+
+**`MIN_REQUESTS` 를 낮추지 말 것.** 요청 1건 중 1건이 5xx 면 에러율은 100% 다.
+배포 직후에는 트래픽이 거의 없어 거의 항상 그렇게 되고, 그 알림이 몇 번
+반복되면 사람들이 경고를 무시하기 시작한다 — 그 시점에 감시 기능은 꺼진 것과
+같다.
 
 ---
 
