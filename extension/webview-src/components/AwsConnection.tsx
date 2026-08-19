@@ -1,6 +1,7 @@
 /** AWS BYO 계정 연결 — 키는 검증 뒤 VS Code SecretStorage에만 저장된다. */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import { AwsPolicyGuide } from "./AwsPolicyGuide";
 
 type AwsStatus = {
   ready: boolean;
@@ -124,6 +125,11 @@ export const AwsConnection: React.FC = () => {
         <button disabled={busy} onClick={() => { setBusy(true); setError(""); postMessage("aws.clear"); }} style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>연결 해제</button>
       </div>
       {error && <div style={{ marginTop: 10, color: "var(--vscode-errorForeground, #f48771)", fontSize: 12 }}>{error}</div>}
+      {/*
+        연결된 뒤에도 필요하다. 권한 점검에서 빠진 액션이 나왔을 때, 무엇을
+        허용해야 하는지 같은 화면에서 바로 볼 수 있어야 한다.
+      */}
+      <AwsPolicyGuide region={status.region} />
     </div>;
   }
 
@@ -145,6 +151,12 @@ export const AwsConnection: React.FC = () => {
       <button disabled={busy} onClick={connect} style={button}>{busy ? "STS로 확인 중…" : "연결"}</button>
       <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html" target="_blank" rel="noreferrer" style={{ color: "var(--vscode-textLink-foreground, #75beff)", fontSize: 11 }}>키 만드는 법 보기</a>
     </div>
+    {/*
+      **연결 전에 가장 필요하다.** 키를 만들려면 어떤 권한을 붙일지부터
+      알아야 하는데, 지금까지는 그 답이 제품 안에 있으면서도 화면에 없었다.
+      그래서 사용자는 AdministratorAccess 를 붙이는 쪽으로 갔다.
+    */}
+    <AwsPolicyGuide region={region.trim() || status?.region} />
   </div>;
 };
 

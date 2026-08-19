@@ -16,6 +16,7 @@ import {
     AwsConfigureInput,
     AwsConnectInput,
     AwsEcrRepo,
+    AwsPolicyResult,
 } from '../types';
 import { CoreManager } from './CoreManager';
 import { describeHttpError } from './httpError';
@@ -859,6 +860,42 @@ export class ApiClient {
     async listAwsProfiles(): Promise<string[]> {
         const resp = await this.request<{ profiles: string[] }>('GET', '/api/aws/profiles');
         return resp.success && resp.data ? resp.data.profiles : [];
+    }
+
+    /**
+     * GET /api/aws/policy — ReCoder 가 요구하는 최소권한 IAM 정책.
+     *
+     * 코어에는 이 엔드포인트가 오래전부터 있었는데 **확장이 한 번도 부르지
+     * 않았다.** 그래서 사용자는 "권한이 없습니다" 라는 배포 실패만 보고,
+     * 무엇을 허용해야 하는지는 알 수 없었다. 필요한 건 정책 JSON 하나인데
+     * 그걸 얻을 방법이 제품 안에 없었던 것이다.
+     *
+     * 실패해도 예외를 던지지 않는다 — 이건 배포를 막는 경로가 아니라
+     * 사용자를 돕는 경로라, 여기서 throw 하면 도움을 주려다 화면을 깨뜨린다.
+     */
+    async getAwsPolicy(opts: {
+        targets?: string[];
+        cluster?: string;
+        service?: string;
+        ecrRepo?: string;
+        region?: string;
+        taskExecutionRole?: string;
+        taskRole?: string;
+    } = {}): Promise<AwsPolicyResult | null> {
+        const qs = new URLSearchParams();
+        if (opts.targets?.length) { qs.set('targets', opts.targets.join(',')); }
+        //: 빈 값은 아예 보내지 않는다. 코어는 빈 문자열을 "기본 규칙을 써라"
+        //: 로 읽지만, 굳이 보내면 의도가 흐려진다.
+        if (opts.cluster) { qs.set('cluster', opts.cluster); }
+        if (opts.service) { qs.set('service', opts.service); }
+        if (opts.ecrRepo) { qs.set('ecr_repo', opts.ecrRepo); }
+        if (opts.region) { qs.set('region', opts.region); }
+        if (opts.taskExecutionRole) { qs.set('task_execution_role', opts.taskExecutionRole); }
+        if (opts.taskRole) { qs.set('task_role', opts.taskRole); }
+
+        const path = qs.toString() ? `/api/aws/policy?${qs.toString()}` : '/api/aws/policy';
+        const resp = await this.request<AwsPolicyResult>('GET', path);
+        return resp.success && resp.data ? resp.data : null;
     }
 
     /**

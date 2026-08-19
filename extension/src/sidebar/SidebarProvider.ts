@@ -873,6 +873,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'aws.policy': {
+                // **코어에는 이 엔드포인트가 오래전부터 있었고, 확장이 한 번도
+                // 부르지 않았다.** 그래서 사용자는 "권한이 없습니다" 라는 배포
+                // 실패만 보고 무엇을 허용해야 하는지는 알 수 없었다.
+                const p = (payload ?? {}) as {
+                    targets?: string[];
+                    cluster?: string;
+                    service?: string;
+                    ecrRepo?: string;
+                    region?: string;
+                };
+                try {
+                    const policy = await this._apiClient.getAwsPolicy(p);
+                    if (!policy) {
+                        this.postMessage('aws.policy.result', {
+                            ok: false,
+                            message: '권한표를 가져오지 못했습니다. 코어가 실행 중인지 확인해 주세요.',
+                        });
+                        break;
+                    }
+                    this.postMessage('aws.policy.result', { ok: true, policy });
+                } catch (err) {
+                    // 여기서 실패해도 배포가 막히는 건 아니다 — 도움을 주려던
+                    // 경로이므로 원인만 그대로 전한다.
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.policy.result', { ok: false, message: msg });
+                }
+                break;
+            }
+            case 'aws.policy.copy': {
+                // 클립보드 복사는 웹뷰가 아니라 **확장에서** 한다. 웹뷰의
+                // navigator.clipboard 는 VS Code 웹뷰 샌드박스에서 막히는
+                // 경우가 있어, 조용히 아무 일도 안 일어난 것처럼 보인다.
+                const text = ((payload ?? {}) as { text?: string }).text ?? '';
+                if (!text.trim()) {
+                    this.postMessage('aws.policy.copied', { ok: false });
+                    break;
+                }
+                await vscode.env.clipboard.writeText(text);
+                this.postMessage('aws.policy.copied', { ok: true });
+                break;
+            }
             case 'aws.configure': {
                 const p = (payload ?? {}) as {
                     accessKeyId?: string;

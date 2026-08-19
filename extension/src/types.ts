@@ -371,6 +371,33 @@ export interface AwsConnectInput {
   sessionToken?: string;
 }
 
+/**
+ * GET /api/aws/policy 응답 — 콘솔에 붙여 넣을 최소권한 정책 + 따라 할 순서.
+ *
+ * 필드 이름은 코어 스키마(`AwsPolicyResponse`)와 1:1 로 맞춘다. 여기서
+ * camelCase 로 바꾸면 어느 쪽이 진짜인지 헷갈리고, 코어가 필드를 늘렸을 때
+ * 조용히 누락된다.
+ */
+export interface AwsPolicyResult {
+  policy: Record<string, unknown>;
+  /** 콘솔에 그대로 붙여넣을 문자열. 화면·복사 버튼이 쓰는 값. */
+  policy_json: string;
+  targets: string[];
+  action_count: number;
+  /** 계정/리전 자리표시자가 남아 있는가 — 남아 있으면 사용자가 채워야 한다. */
+  needs_manual_fill: boolean;
+  account_id?: string;
+  region?: string;
+  task_execution_role?: string;
+  task_role?: string;
+  cluster?: string;
+  service?: string;
+  ecr_repo?: string;
+  /** 학교(AWS Academy) 계정이면 IAM 사용자·정책을 만들 수 없어 안내가 갈린다. */
+  is_academy_account?: boolean;
+  steps?: string[];
+}
+
 export interface AwsEcrRepo {
   name: string;
   uri: string;
