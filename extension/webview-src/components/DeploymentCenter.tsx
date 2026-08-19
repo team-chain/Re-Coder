@@ -4,6 +4,132 @@ import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { AwsConnection } from "./AwsConnection";
 
+//: 예전에 폼에 박혀 있던 값. **이제 기본값으로 쓰지 않는다.**
+//: 여기 남겨 둔 이유는 회귀 테스트가 "이 값이 다시 기본값이 되지 않았는지"
+//: 를 검사하기 때문이다.
+export const FALLBACK_REGION = "ap-northeast-2";
+
+export type AwsStatusMessage = { ready?: boolean; region?: string };
+
+/**
+ * `aws.status` 에서 **믿을 수 있는** 리전만 꺼낸다. 없으면 빈 문자열.
+ *
+ * 왜 ready 를 보는가
+ *   `GET /api/aws/status` 는 자격증명이 없어도 리전을 돌려준다 — 그것도
+ *   `AWS_REGION` 이 없으면 서버 상수 "ap-northeast-2" 다. 그걸 그대로
+ *   받아 두면, 연결된 계정이 하나도 없는데도 "현재 리전은 ap-northeast-2"
+ *   라고 단언하고 그걸 근거로 사용자를 막게 된다.
+ */
+export function coreRegionFromStatus(status: AwsStatusMessage | null | undefined): string {
+  if (!status || !status.ready) { return ""; }
+  return (status.region ?? "").trim();
+}
+
+/**
+ * 배포 폼의 리전 기본값.
+ *
+ * 사고 경위
+ *   폼이 리전을 "ap-northeast-2" 로 하드코딩하고 있었다. 그런데 실제
+ *   자격증명(AWS Academy 랩)은 us-east-1 이었다. 그대로 「ECS 배포 실행」을
+ *   누르면 자격증명이 유효하지 않은 리전으로 요청이 나가 실패한다.
+ *
+ * 규칙
+ *   · 사용자가 한 번이라도 입력란을 건드렸으면 **그 값을 유지한다.**
+ *   · 아직 안 건드렸으면 코어가 쓰는 리전으로 갈아끼운다.
+ *
+ * `touched` 를 따로 받는 이유
+ *   예전에는 "값이 기본값과 같으면 안 건드린 것" 으로 추측했다. 그러면
+ *   사용자가 **일부러** 그 값을 고른 경우와 구분이 안 돼서, 다음 aws.status
+ *   가 오면 선택이 조용히 덮어써졌다.
+ */
+export function resolveRegionDefault(
+  coreRegion: string | undefined | null,
+  currentValue: string,
+  touched = false,
+): string {
+  const core = (coreRegion ?? "").trim();
+  const current = (currentValue ?? "").trim();
+  if (!core) { return current; }
+  if (touched) { return current; }
+  return core;
+}
+
+/**
+ * 폼 리전이 코어가 쓰는 리전과 다르면 실행 **전에** 낼 경고. 같으면 null.
+ *
+ * **막지 않는다.** 다른 리전에 일부러 배포할 수 있다(팀의 ECR/클러스터가
+ * 다른 리전에 있는 경우가 흔하다). 예전 구현은 여기서 곧바로 return 해
+ * 버려서 교차 리전 배포가 **아예 불가능**했고, EC2 는 원래 없던 차단까지
+ * 새로 생겼다. 지금은 한 번 보여 주고, 확인하면 진행한다.
+ *
+ * 문구도 고쳤다 — 이 값은 자격증명에서 유도한 게 아니라 코어의
+ * `AWS_REGION` 이다. "자격증명이 유효한 리전" 이라고 말하면 사실이 아니고,
+ * 그 거짓말 때문에 진짜 불일치를 못 알아채게 된다.
+ */
+export function regionMismatchWarning(
+  coreRegion: string | undefined | null,
+  formRegion: string | undefined | null,
+): string | null {
+  const core = (coreRegion ?? "").trim().toLowerCase();
+  const form = (formRegion ?? "").trim().toLowerCase();
+  if (!core || !form || core === form) { return null; }
+  return (
+    `배포 리전(${form})이 코어가 사용 중인 리전(${core})과 다릅니다. `
+    + `자격증명이 ${form} 에서 유효하지 않으면 인증에 실패합니다. `
+    + `그대로 진행하려면 한 번 더 누르세요.`
+  );
+}
+
+/**
+ * 리전이 비어 있으면 배포를 **막는다** — 이건 취향이 아니라 필수 입력이다.
+ *
+ * 예전에는 빈 값이면 하드코딩된 기본값이 대신 나갔다. 사용자가 고른 적 없는
+ * 리전으로 배포가 시작되고, 화면에는 나중에 다른 값이 표시됐다.
+ */
+export function regionBlockingError(formRegion: string | undefined | null): string | null {
+  if ((formRegion ?? "").trim()) { return null; }
+  return "AWS 리전을 입력하세요. (예: us-east-1)";
+}
+
+export type RegionGate = {
+  //: 배포를 진행해도 되는가.
+  ok: boolean;
+  //: 사용자에게 보여 줄 문구(없으면 null).
+  message: string | null;
+  //: 다음 클릭에서 "이미 확인했다" 로 인정할 조합. 진행/차단이면 null.
+  ack: string | null;
+};
+
+/**
+ * 배포 직전 리전 게이트. **컴포넌트 밖에 두는 이유가 있다.**
+ *
+ * 이 판단이 컴포넌트 안에 있었을 때는, 「차단이 아니라 확인인가」를 검사할
+ * 방법이 컴파일 결과에서 문자열을 grep 하는 것뿐이었다. 그 검사는 로직을
+ * 예전의 즉시 차단으로 되돌려도 **그대로 통과했다**(변이 시험에서 확인).
+ * 순수 함수로 빼면 동작 자체를 검사할 수 있다.
+ *
+ * 규칙
+ *   · 리전이 비면 막는다 — 필수 입력이다.
+ *   · 코어 리전과 다르면 **한 번** 경고하고 막는다.
+ *   · 같은 조합으로 다시 누르면 진행한다 — 다른 리전에 일부러 배포하는 건
+ *     정상적인 사용이다(팀의 ECR/클러스터가 다른 리전에 있는 경우).
+ */
+export function regionGate(
+  coreRegion: string | undefined | null,
+  formRegion: string | undefined | null,
+  acknowledged: string,
+): RegionGate {
+  const blocking = regionBlockingError(formRegion);
+  if (blocking) { return { ok: false, message: blocking, ack: null }; }
+
+  const warning = regionMismatchWarning(coreRegion, formRegion);
+  if (!warning) { return { ok: true, message: null, ack: null }; }
+
+  const key = `${(coreRegion ?? "").trim()}|${(formRegion ?? "").trim()}`;
+  if (acknowledged === key) { return { ok: true, message: null, ack: null }; }
+  return { ok: false, message: warning, ack: key };
+}
+
 type Target = "decision" | "docker" | "actions" | "ec2" | "ecs" | "s3" | "aws";
 type Proposal = { proposal_id: string; target_path: string; content: string; approval_level: number };
 type DeployTarget = "ecs" | "s3" | "local";
@@ -165,10 +291,19 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const pendingEcsDeploymentRef = useRef<Record<string, unknown> | null>(null);
   const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
   const [awsReady, setAwsReady] = useState(false);
+  //: 현재 자격증명이 유효한 리전. 폼 기본값과 불일치 경고의 기준.
+  //: 코어가 사용 중인 리전(AWS_REGION). **자격증명에서 유도한 값이 아니다.**
+  const [coreRegion, setCoreRegion] = useState("");
+  //: 사용자가 리전 입력란을 건드렸는가. 값으로 추측하면, 일부러 같은 값을
+  //: 고른 경우와 구분이 안 돼 선택이 조용히 덮어써진다.
+  const regionTouchedRef = useRef(false);
+  //: 불일치 경고를 이미 보여 준 조합("코어리전|폼리전"). 같은 조합으로 한 번
+  //: 더 누르면 진행한다 — 경고이지 차단이 아니다.
+  const [regionWarningAck, setRegionWarningAck] = useState("");
   const [rollbackProposal, setRollbackProposal] = useState<EcsRollbackProposal | null>(null);
   const [resolvingRollback, setResolvingRollback] = useState(false);
-  const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: "ap-northeast-2", ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
-  const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "ap-northeast-2", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512" });
+  const [ec2, setEc2] = useState({ image_name: "recoder-app", tag: "latest", host_port: "8000", container_port: "8000", aws_region: "", ecr_registry: "", ec2_host: "", ec2_ssh_key: "", ec2_user: "ec2-user" });
+  const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512" });
 
   const runPreflight = useCallback(() => {
     setChecking(true);
@@ -233,7 +368,20 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       setMessage((payload as { message?: string })?.message ?? "롤백 처리에 실패했습니다.");
     }
     if (type === "workspace.deploy.result") setMessage((payload as { message?: string })?.message ?? "배포 요청을 보냈습니다.");
-    if (type === "aws.status") setAwsReady(Boolean((payload as { ready?: boolean })?.ready));
+    if (type === "aws.status") {
+      const status = payload as AwsStatusMessage;
+      setAwsReady(Boolean(status?.ready));
+      // 코어가 쓰는 리전을 알게 되면 **아직 손대지 않은** 폼 값을 맞춘다.
+      // 예전에는 폼이 ap-northeast-2 로 고정이라, us-east-1 자격증명으로
+      // 배포를 누르면 인증이 유효하지 않은 리전으로 요청이 나갔다.
+      const region = coreRegionFromStatus(status);
+      if (region) {
+        setCoreRegion(region);
+        const touched = regionTouchedRef.current;
+        setEcs(cur => ({ ...cur, aws_region: resolveRegionDefault(region, cur.aws_region, touched) }));
+        setEc2(cur => ({ ...cur, aws_region: resolveRegionDefault(region, cur.aws_region, touched) }));
+      }
+    }
     if (type === "errorMessage") setMessage((payload as { message?: string })?.message ?? "요청 처리에 실패했습니다.");
   }, []));
 
@@ -271,9 +419,16 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     postMessage("workspace.deploy.remediation.apply", { proposalId });
   };
   const generateActions = () => { setMessage("GitHub Actions 워크플로우 생성 중…"); postMessage("generateGithubActions", { workspacePath: "" }); };
-  const deployEc2 = () => { setMessage("EC2 배포 요청 전송 중…"); postMessage("workspace.deploy.ec2", { ...ec2, host_port: Number(ec2.host_port), container_port: Number(ec2.container_port) }); };
+  const deployEc2 = () => {
+    if (!passesRegionCheck(ec2.aws_region)) { return; }
+    setMessage("EC2 배포 요청 전송 중…");
+    postMessage("workspace.deploy.ec2", { ...ec2, host_port: Number(ec2.host_port), container_port: Number(ec2.container_port) });
+  };
   const deployEcs = () => {
     if (!awsReady) { setTarget("aws"); setMessage("ECS 배포를 시작하려면 AWS 계정을 연결하세요."); return; }
+    // 리전이 어긋나면 **실행 전에** 멈춘다. 그대로 보내면 인증 실패로 끝나는데,
+    // 원인이 리전이라는 걸 알아채는 데 오래 걸린다(데모에서 실제로 그랬다).
+    if (!passesRegionCheck(ecs.aws_region)) { return; }
     setCheckingEcsPermissions(true);
     setMessage("입력한 ECS 리전과 대상 리소스의 권한을 확인 중…");
     pendingEcsDeploymentRef.current = { ...ecs, container_port: Number(ecs.container_port) };
@@ -295,7 +450,29 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     setMessage(approved ? "이전 버전 롤백 승인을 전송했습니다…" : "롤백 제안을 무시하는 중…");
     postMessage("workspace.deploy.ecs.rollback", { proposalId: rollbackProposal.proposal_id, approved });
   };
-  const update = <T extends Record<string, string>>(set: React.Dispatch<React.SetStateAction<T>>, key: keyof T, value: string) => set(cur => ({ ...cur, [key]: value }));
+  /**
+   * 배포 직전 리전 검사. 진행해도 되면 true.
+   *
+   * · 비어 있으면 **막는다** — 필수 입력이다. 예전에는 하드코딩된 기본값이
+   *   대신 나가서, 사용자가 고른 적 없는 리전으로 배포가 시작됐다.
+   * · 코어 리전과 다르면 경고를 한 번 보여 주고 막는다. 같은 조합으로 다시
+   *   누르면 진행한다 — 다른 리전에 일부러 배포하는 건 정상적인 사용이다.
+   */
+  const passesRegionCheck = (formRegion: string): boolean => {
+    const gate = regionGate(coreRegion, formRegion, regionWarningAck);
+    if (gate.message) { setMessage(gate.message); }
+    if (gate.ack) { setRegionWarningAck(gate.ack); }
+    return gate.ok;
+  };
+
+  const update = <T extends Record<string, string>>(set: React.Dispatch<React.SetStateAction<T>>, key: keyof T, value: string) => {
+    if (key === "aws_region") {
+      regionTouchedRef.current = true;
+      //: 값을 바꾸면 이전 확인은 무효다 — 새 조합을 다시 보여 줘야 한다.
+      setRegionWarningAck("");
+    }
+    set(cur => ({ ...cur, [key]: value }));
+  };
 
   return (
     <div style={{ fontFamily: "var(--vscode-font-family)", color: "var(--vscode-foreground, #ddd)" }}>
