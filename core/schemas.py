@@ -530,6 +530,17 @@ class RuntimeConfig(BaseModel):
     session_token: str
     pid: int
     started_at: datetime = Field(default_factory=datetime.utcnow)
+    #: 이 Core 를 띄운 실행 파일의 절대경로(main.py 또는 번들 바이너리).
+    #:
+    #: 확장이 "지금 떠 있는 Core 를 재사용해도 되는가" 를 판단하는 데 쓴다.
+    #: 개발 모드(ReCoder 저장소를 연 경우)에는 예전 VSIX 가 남긴 **번들** Core
+    #: 를 재사용하면 안 되는데, 이 값이 없으면 그 구분이 불가능해서 확장이
+    #: "떠 있는 Core 를 아예 못 찾는" 쪽으로 굴러갔다. 그 결과 코어를 직접
+    #: 실행해 둔 개발 환경에서는 연결이 끊기면 복구되지 않았다.
+    #:
+    #: Optional 인 이유는 이 필드가 없는 구버전 Core 의 runtime.json 도
+    #: 읽어야 하기 때문이다.
+    entrypoint: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

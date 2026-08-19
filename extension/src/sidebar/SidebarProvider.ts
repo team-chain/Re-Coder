@@ -13,6 +13,7 @@ import {
 } from '../types';
 import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
 import { CoreManager } from '../core/CoreManager';
+import { isCoreConnectionFailure } from '../core/coreReuse';
 import { PollingService } from '../core/PollingService';
 import { analyzeProject, analyzeFile } from '../codemap/analyzer';
 
@@ -589,8 +590,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const result = await this._apiClient.getDeployPreflight(workspacePath);
                     this.postMessageToWebview(requestWebview, 'workspace.deploy.preflightResult', result);
                 } catch (err) {
+                    // 「다시 검사」는 **재연결 시도까지 포함해야** 한다.
+                    //
+                    // 예전에는 실패를 그대로 화면에 던졌다. 코어 연결이 끊긴
+                    // 상태에서는 몇 번을 눌러도 같은 `fetch failed` 만 반복됐고,
+                    // 사용자가 할 수 있는 건 창 리로드뿐이었다. 여기서 한 번
+                    // 재연결한 뒤 다시 시도한다.
                     const message = err instanceof Error ? err.message : String(err);
-                    this.postMessageToWebview(requestWebview, 'workspace.deploy.preflightError', { message });
+
+                    // **연결 문제일 때만 재연결한다.**
+                    //
+                    // 예전에는 모든 실패를 연결 끊김으로 취급했다. 코어는
+                    // 멀쩡한데 preflight 가 500 을 내면 사용자에게는 "코어가
+                    // 실행 중인지 확인해 주세요" 가 뜨고 진짜 원인은 사라졌다.
+                    // dev 모드에서는 ensureRunning() 이 cleanupStale() 로 이어져
+                    // **멀쩡한 코어를 죽이기까지** 했다.
+                    if (!isCoreConnectionFailure(message)) {
+                        this.postMessageToWebview(
+                            requestWebview, 'workspace.deploy.preflightError', { message },
+                        );
+                        break;
+                    }
+
+                    try {
+                        await this._coreManager.ensureRunning();
+                        await this._coreManager.refreshToken();
+                        const retried = await this._apiClient.getDeployPreflight(workspacePath);
+                        this.postMessageToWebview(
+                            requestWebview, 'workspace.deploy.preflightResult', retried,
+                        );
+                        break;
+                    } catch (retryErr) {
+                        // 재시도의 **실제 오류**를 보여 준다. 예전에는 여기서
+                        // 통째로 삼키고 고정 문구만 붙였다.
+                        const retryMessage = retryErr instanceof Error
+                            ? retryErr.message : String(retryErr);
+                        this.postMessageToWebview(
+                            requestWebview, 'workspace.deploy.preflightError',
+                            { message: `${message} (재연결 후에도 실패: ${retryMessage})` },
+                        );
+                    }
                 }
                 break;
             }

@@ -130,6 +130,28 @@ export function regionGate(
   return { ok: false, message: warning, ack: key };
 }
 
+//: preflight 가 없을 때 자동 재검사 주기/횟수. 코어가 돌아오면 대개 첫
+//: 한두 번에 잡힌다. 무한 재시도는 죽은 코어를 계속 두드릴 뿐이다.
+export const PREFLIGHT_RETRY_INTERVAL_MS = 5000;
+export const PREFLIGHT_RETRY_LIMIT = 12;   // 최대 1분
+
+/**
+ * 감지 결과 한 줄. **값이 없을 때 undefined 를 그대로 노출하지 않는다.**
+ *
+ * 예전에는 `감지됨: ${preflight?.summary}` 였다. 코어 연결이 끊겨 preflight 가
+ * 아직(또는 영영) 없으면 화면에 그대로 `감지됨: undefined` 가 떴다. 사용자에게
+ * 아무 의미 없는 문자열이고, 제품이 고장 난 것처럼 보인다.
+ *
+ * 문구가 약속한 재검사는 `PREFLIGHT_RETRY_*` 타이머가 실제로 수행한다.
+ */
+export function describeDetection(summary: string | undefined | null): string {
+  const text = (summary ?? "").trim();
+  if (!text) {
+    return "확인할 수 없음 — 코어에 연결되면 다시 검사합니다.";
+  }
+  return `감지됨: ${text}`;
+}
+
 type Target = "decision" | "docker" | "actions" | "ec2" | "ecs" | "s3" | "aws";
 type Proposal = { proposal_id: string; target_path: string; content: string; approval_level: number };
 type DeployTarget = "ecs" | "s3" | "local";
@@ -387,6 +409,24 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
 
   useEffect(() => { runPreflight(); postMessage("aws.status"); }, [runPreflight, postMessage]);
   useEffect(() => {
+    // **"코어에 연결되면 다시 검사합니다" 라고 써 놓고 아무것도 안 하면 거짓말이다.**
+    //
+    // 코어가 끊긴 동안 preflight 는 null 로 남는다. 예전에는 그 상태에서
+    // 문구만 바뀌고 재검사는 영영 일어나지 않았다 — 코어가 5초 뒤 돌아와도
+    // 화면은 그대로였다. 여기서 실제로 다시 물어본다.
+    //
+    // 무한히 두드리지 않는다. 코어가 정말 죽어 있으면 조용히 기다리는 게
+    // 맞고, 사용자에게는 「다시 검사」 버튼이 있다.
+    if (preflight || checking) { return; }
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      if (attempts > PREFLIGHT_RETRY_LIMIT) { window.clearInterval(timer); return; }
+      runPreflight();
+    }, PREFLIGHT_RETRY_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [preflight, checking, runPreflight]);
+  useEffect(() => {
     // ECS 이상 감지는 사용자가 다른 배포 탭을 보고 있어도 카드로 보여야 한다.
     // 실제 롤백은 이 폴링이 아니라 아래 승인 버튼으로만 호출된다.
     const poll = () => postMessage("workspace.deploy.ecs.status", { reportProgress: target === "ecs" });
@@ -487,7 +527,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
 
       {target === "decision" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 9, overflow: "hidden", background: "var(--vscode-editorWidget-background, #252526)" }}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--vscode-panel-border, #3f3f3f)", background: "linear-gradient(120deg, rgba(55,148,255,.16), transparent)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}><span>⌕</span> {checking ? "프로젝트 구성 확인 중…" : `감지됨: ${preflight?.summary}`}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}><span>⌕</span> {checking ? "프로젝트 구성 확인 중…" : describeDetection(preflight?.summary)}</div>
           {!checking && <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>{preflight?.evidence.map(item => <span key={item} style={{ padding: "3px 7px", borderRadius: 99, fontSize: 11, color: "var(--vscode-textLink-foreground, #75beff)", background: "rgba(55,148,255,.13)", border: "1px solid rgba(55,148,255,.28)" }}>{item}</span>)}</div>}
           <button onClick={runPreflight} disabled={checking || Boolean(applyingProposalId)} style={{ marginTop: 11, border: "none", background: "transparent", padding: 0, color: "var(--vscode-textLink-foreground, #75beff)", cursor: "pointer", fontSize: 11 }}>다시 검사</button>
         </div>
@@ -496,7 +536,14 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
             <DeploymentBlockers reasons={preflight.reasons ?? []} checking={checking} applyingProposalId={applyingProposalId} onApply={applyRemediation} onRerun={runPreflight} />
           ) : <>
             <div style={{ fontSize: 12, fontWeight: 650, margin: "0 0 9px 2px" }}>이 앱을 어디에 배포할까요?</div>
-            <DecisionOptionCards options={choices.map(choice => ({ ...choice, label: `${choice.icon}  ${choice.label}`, recommended: preflight?.recommended_target === choice.key }))} onSelect={(key) => chooseTarget(key as DeployTarget)} disabled={checking || savingDecision} />
+            {/*
+              preflight 가 없으면 카드를 **비활성화한다.** 예전에는 활성처럼
+              보이는데 chooseTarget 이 `if (!preflight) return` 으로 즉시
+              돌아가서, 눌러도 아무 일도 안 나고 아무 메시지도 없었다.
+              고장을 숨긴 화면이 고장난 화면보다 나쁘다.
+            */}
+            <DecisionOptionCards options={choices.map(choice => ({ ...choice, label: `${choice.icon}  ${choice.label}`, recommended: preflight?.recommended_target === choice.key }))} onSelect={(key) => chooseTarget(key as DeployTarget)} disabled={checking || savingDecision || !preflight} />
+            {!preflight && <div style={{ margin: "9px 2px 0", fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>프로젝트 감지 결과가 없어 배포 대상을 고를 수 없습니다. 코어에 연결되면 자동으로 다시 검사합니다.</div>}
             <div style={{ margin: "11px 2px 1px", fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>선택 근거는 <code>docs/adr</code>에 기록됩니다. 실제 원격 배포는 필요한 설정을 확인한 다음 시작됩니다.</div>
           </>}
         </div>
