@@ -11,6 +11,26 @@ export const FALLBACK_REGION = "ap-northeast-2";
 
 export type AwsStatusMessage = { ready?: boolean; region?: string };
 
+const DEFAULT_ECS_CLUSTER = "recoder-cluster";
+const DEFAULT_ECS_SERVICE = "recoder-app";
+
+/**
+ * 정책 안내도 실제 ECS 배포 어댑터와 같은 기본값·ECR 규칙을 쓴다.
+ * `repo_name`을 별도로 보내지 않는 현재 요청은 ECR 저장소 이름으로 서비스명을
+ * 쓰므로, 여기서 recoder-app을 고정하면 사용자 지정 서비스와 어긋난다.
+ */
+export function ecsPolicyContext(ecs: {
+  ecs_cluster: string;
+  ecs_service: string;
+}): { cluster: string; service: string; ecrRepo: string } {
+  const service = ecs.ecs_service.trim() || DEFAULT_ECS_SERVICE;
+  return {
+    cluster: ecs.ecs_cluster.trim() || DEFAULT_ECS_CLUSTER,
+    service,
+    ecrRepo: service,
+  };
+}
+
 /**
  * `aws.status` 에서 **믿을 수 있는** 리전만 꺼낸다. 없으면 빈 문자열.
  *
@@ -558,7 +578,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         {([ ["decision", "배포 결정"], ["aws", awsReady ? "AWS 연결됨" : "AWS 연결"], ["docker", "Local"], ["actions", "Actions"], ["ec2", "EC2"], ["ecs", "ECS"] ] as [Target, string][]).map(([id, label]) => <button key={id} onClick={() => { setTarget(id); setMessage(""); }} style={{ padding: "9px 6px", borderRadius: 6, border: `1px solid ${target === id ? "var(--vscode-focusBorder, #3794ff)" : "var(--vscode-panel-border, #3f3f3f)"}`, background: target === id ? "var(--vscode-list-activeSelectionBackground, #094771)" : "var(--vscode-editorWidget-background, #252526)", color: id === "aws" && awsReady ? "var(--vscode-charts-green, #4ec9b0)" : "var(--vscode-foreground, #ddd)", cursor: "pointer", fontSize: 11, fontWeight: target === id ? 600 : 400 }}>{label}</button>)}
       </div>
 
-      {target === "aws" && <AwsConnection />}
+      {target === "aws" && <AwsConnection ecsPolicyContext={ecsPolicyContext(ecs)} />}
 
       {target === "decision" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 9, overflow: "hidden", background: "var(--vscode-editorWidget-background, #252526)" }}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--vscode-panel-border, #3f3f3f)", background: "linear-gradient(120deg, rgba(55,148,255,.16), transparent)" }}>

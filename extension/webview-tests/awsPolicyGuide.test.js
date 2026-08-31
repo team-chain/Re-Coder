@@ -108,6 +108,23 @@ test('권한표는 사용자가 고른 배포 대상만 요청한다', () => {
   assert.match(guide, /ECS 배포/);
 });
 
+test('ECS 권한표는 배포 폼에서 고른 클러스터·서비스·ECR 저장소를 요청한다', () => {
+  const guide = read('../webview-src/components/AwsPolicyGuide.tsx');
+  assert.match(guide, /ecsContext/, 'ECS 배포 대상 정보를 받을 수 없다');
+  assert.match(guide, /cluster:\s*ecsContext\.cluster\.trim\(\)/,
+    '사용자 지정 ECS 클러스터를 정책 요청에 담지 않는다');
+  assert.match(guide, /service:\s*ecsContext\.service\.trim\(\)/,
+    '사용자 지정 ECS 서비스를 정책 요청에 담지 않는다');
+  assert.match(guide, /ecrRepo:\s*ecsContext\.ecrRepo\.trim\(\)/,
+    '실제 ECR 저장소를 정책 요청에 담지 않는다');
+
+  const center = read('../webview-src/components/DeploymentCenter.tsx');
+  assert.match(center, /ecsPolicyContext\(ecs\)/,
+    'AWS 권한표 화면이 현재 ECS 폼 값을 전달받지 못한다');
+  assert.match(center, /ecrRepo:\s*service/,
+    'repo_name 없는 ECS 배포의 ECR 저장소는 서비스명과 같아야 한다');
+});
+
 test('권한표를 가져오는 중에는 대상 변경을 막아 오래된 응답을 표시하지 않는다', () => {
   const guide = read('../webview-src/components/AwsPolicyGuide.tsx');
   assert.match(guide, /if \(loading\) \{ return; \}/,

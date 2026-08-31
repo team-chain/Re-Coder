@@ -31,6 +31,12 @@ export type AwsPolicy = {
 
 type PolicyTarget = "ecs" | "s3" | "bedrock";
 
+export type EcsPolicyContext = {
+  cluster?: string;
+  service?: string;
+  ecrRepo?: string;
+};
+
 const POLICY_TARGET_OPTIONS: Array<{ value: PolicyTarget; label: string }> = [
   { value: "s3", label: "S3 정적 배포" },
   { value: "ecs", label: "ECS 배포" },
@@ -83,7 +89,7 @@ export function describePolicyScope(policy: AwsPolicy | null): string {
   return parts.join(" / ");
 }
 
-export const AwsPolicyGuide: React.FC<{ region?: string }> = ({ region }) => {
+export const AwsPolicyGuide: React.FC<{ region?: string; ecsContext?: EcsPolicyContext }> = ({ region, ecsContext }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [policy, setPolicy] = useState<AwsPolicy | null>(null);
   // 정책은 선택한 기능에만 한정한다. 비우면 API의 전체 기본값(ECS·S3·Bedrock)을
@@ -123,7 +129,19 @@ export const AwsPolicyGuide: React.FC<{ region?: string }> = ({ region }) => {
     setLoading(true);
     setError("");
     setCopied(false);
-    postMessage("aws.policy", { targets: selectedTargets, ...(region ? { region } : {}) });
+    // ECS를 고른 경우에는 배포 폼의 실제 대상도 전달해야 한다. 안 보내면
+    // 코어가 recoder-* 기본값으로 정책을 만들고, 사용자가 입력한 서비스에는
+    // AccessDenied가 나는 "최소권한" 정책이 된다.
+    const ecsOptions = selectedTargets.includes("ecs") ? {
+      ...(ecsContext?.cluster?.trim() ? { cluster: ecsContext.cluster.trim() } : {}),
+      ...(ecsContext?.service?.trim() ? { service: ecsContext.service.trim() } : {}),
+      ...(ecsContext?.ecrRepo?.trim() ? { ecrRepo: ecsContext.ecrRepo.trim() } : {}),
+    } : {};
+    postMessage("aws.policy", {
+      targets: selectedTargets,
+      ...(region ? { region } : {}),
+      ...ecsOptions,
+    });
   };
 
   const toggleTarget = (target: PolicyTarget) => {

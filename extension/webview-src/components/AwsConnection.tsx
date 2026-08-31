@@ -1,7 +1,7 @@
 /** AWS BYO 계정 연결 — 키는 검증 뒤 VS Code SecretStorage에만 저장된다. */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
-import { AwsPolicyGuide } from "./AwsPolicyGuide";
+import { AwsPolicyGuide, EcsPolicyContext } from "./AwsPolicyGuide";
 
 type AwsStatus = {
   ready: boolean;
@@ -24,7 +24,7 @@ const input: React.CSSProperties = {
   border: "1px solid var(--vscode-input-border, #3f3f3f)", fontSize: 12,
 };
 
-export const AwsConnection: React.FC = () => {
+export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = ({ ecsPolicyContext }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [accessKeyId, setAccessKeyId] = useState("");
   const [secretAccessKey, setSecretAccessKey] = useState("");
@@ -129,7 +129,7 @@ export const AwsConnection: React.FC = () => {
         연결된 뒤에도 필요하다. 권한 점검에서 빠진 액션이 나왔을 때, 무엇을
         허용해야 하는지 같은 화면에서 바로 볼 수 있어야 한다.
       */}
-      <AwsPolicyGuide region={status.region} />
+      <AwsPolicyGuide region={status.region} ecsContext={ecsPolicyContext} />
     </div>;
   }
 
@@ -156,7 +156,7 @@ export const AwsConnection: React.FC = () => {
       알아야 하는데, 지금까지는 그 답이 제품 안에 있으면서도 화면에 없었다.
       그래서 사용자는 AdministratorAccess 를 붙이는 쪽으로 갔다.
     */}
-    <AwsPolicyGuide region={region.trim() || status?.region} />
+    <AwsPolicyGuide region={region.trim() || status?.region} ecsContext={ecsPolicyContext} />
   </div>;
 };
 

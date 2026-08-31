@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { execFileSync } from 'child_process';
 import {
     SidebarState,
     Mode,
@@ -41,6 +42,31 @@ function _normalizeReadyValue(v: unknown): string {
     const s = v.toLowerCase().trim();
     if (s === 'ready' || s === 'ok') { return 'ready'; }
     return 'not_ready';
+}
+
+/**
+ * S3 재배포용으로 저장소의 이동·재클론에도 변하지 않는 ID를 찾는다.
+ *
+ * Git 원격 주소가 있으면 그것을 쓴다. 원격이 없는 로컬 폴더는 기존처럼 실제
+ * 경로를 마지막 수단으로 쓰되, 그 경우에는 다른 컴퓨터에서 같은 버킷을
+ * 자동으로 찾을 수 없다는 점을 숨기지 않는다.
+ */
+function s3RepositoryIdentity(workspacePath: string): string {
+    try {
+        const remote = execFileSync(
+            'git',
+            ['-C', workspacePath, 'remote', 'get-url', 'origin'],
+            { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        ).trim();
+        if (remote) { return remote; }
+    } catch {
+        // Git 원격이 없는 정적 폴더도 S3 배포는 가능해야 한다.
+    }
+    try {
+        return `local:${fs.realpathSync(workspacePath)}`;
+    } catch {
+        return `local:${workspacePath}`;
+    }
 }
 
 function _normalizeDiagnostics<T extends Record<string, unknown>>(d: T | null | undefined): T | null {
@@ -952,9 +978,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 try {
                     const result = await this._apiClient.deployS3({
-                        // 폴더명만 쓰면 /a/frontend 와 /b/frontend 가 한 버킷을
-                        // 공유한다. 전체 경로는 공개하지 않고 지문만 붙여 구분한다.
-                        project: s3ProjectIdentifier(workspacePath, path.basename(workspacePath)),
+                        // 로컬 폴더 경로가 아닌 Git 원격 주소를 지문으로 쓴다.
+                        // 같은 저장소를 다른 위치에서 열어도 기존 공개 버킷을
+                        // 갱신하고, 이전 배포 버킷을 고아 상태로 남기지 않는다.
+                        project: s3ProjectIdentifier(
+                            s3RepositoryIdentity(workspacePath),
+                            path.basename(workspacePath),
+                        ),
                         files,
                         region: (p.region ?? '').trim() || undefined,
                     });

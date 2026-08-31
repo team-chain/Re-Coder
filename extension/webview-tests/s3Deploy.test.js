@@ -26,6 +26,7 @@ const {
   pickStaticDir,
   collectStaticFiles,
   s3ProjectIdentifier,
+  normalizeRepositoryIdentity,
   StaticAssetReadError,
   StaticAssetTooLargeError,
   StaticAssetSymlinkError,
@@ -182,13 +183,18 @@ test('목록에 없는 바이너리 자산도 base64로 원본 바이트를 보�
   assert.deepStrictEqual(Buffer.from(scene.content, 'base64'), glb);
 });
 
-test('같은 폴더명이라도 서로 다른 워크스페이스는 다른 S3 프로젝트 식별자를 쓴다', () => {
-  const first = s3ProjectIdentifier('/clients/a/frontend', 'frontend');
-  const second = s3ProjectIdentifier('/clients/b/frontend', 'frontend');
-  assert.notStrictEqual(first, second, '다른 사이트가 같은 버킷을 공유한다');
-  assert.strictEqual(first, s3ProjectIdentifier('/clients/a/frontend', 'frontend'), '재배포마다 버킷이 바뀐다');
-  assert.ok(first.startsWith('frontend-'));
-  assert.ok(!first.includes('/clients/'), '로컬 경로가 공개 버킷 이름에 드러난다');
+test('같은 저장소는 다른 클론 경로·SSH/HTTPS 표기에서도 같은 S3 프로젝트 식별자를 쓴다', () => {
+  const https = normalizeRepositoryIdentity('https://github.com/team-chain/Re-Coder.git');
+  const ssh = normalizeRepositoryIdentity('git@github.com:team-chain/Re-Coder.git');
+  assert.strictEqual(https, ssh, '같은 원격 저장소를 서로 다른 프로젝트로 본다');
+
+  const first = s3ProjectIdentifier(https, 'first-local-clone');
+  const second = s3ProjectIdentifier(ssh, 'another-local-clone');
+  const other = s3ProjectIdentifier('https://github.com/team-chain/other-site.git', 'other-site');
+  assert.strictEqual(first, second, '재클론·폴더 이동 뒤 새 버킷을 만든다');
+  assert.notStrictEqual(first, other, '서로 다른 저장소가 같은 버킷을 공유한다');
+  assert.ok(first.startsWith('re-coder-'));
+  assert.ok(!first.includes('local-clone'), '로컬 경로·이름이 공개 버킷 이름에 드러난다');
 });
 
 test('걸러야 할 폴더는 수집하지 않는다', () => {
@@ -338,6 +344,8 @@ test('SidebarProvider 가 파일을 읽어 코어로 넘긴다', () => {
   assert.match(source, /collectStaticFiles/, '파일을 읽는 쪽이 없다');
   assert.match(source, /deployS3/);
   assert.match(source, /s3ProjectIdentifier/, '폴더명만 보내 서로 다른 프로젝트가 같은 버킷을 쓴다');
+  assert.match(source, /remote', 'get-url', 'origin'/,
+    '로컬 절대 경로 대신 Git 원격 주소로 S3 프로젝트를 식별해야 한다');
 });
 
 test('S3 수집 전 선택 루트의 실제 경로가 워크스페이스 안인지 확인한다', () => {

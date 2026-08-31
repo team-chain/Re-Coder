@@ -54,18 +54,36 @@ export function isBinaryAsset(filePath: string): boolean {
 }
 
 /**
- * 공개 버킷 이름에 쓸 워크스페이스 식별자.
+ * 공개 버킷 이름에 쓸 프로젝트 식별자.
  *
- * `frontend`처럼 폴더 이름만 보내면 서로 다른 저장소가 같은 버킷을 재사용한다.
- * 전체 로컬 경로는 URL에 드러나면 안 되므로, 사람이 읽는 폴더명 뒤에 경로의
- * 안정적인 지문만 붙인다. 같은 위치를 다시 배포하면 같은 버킷을 쓴다.
+ * 로컬 절대 경로를 해시하면 다른 사람이 같은 저장소를 클론했을 때, 또는
+ * 사용자가 폴더를 옮겼을 때 새 버킷이 만들어진다. 원격 저장소 주소는 그런
+ * 환경 변화와 무관하므로 이를 지문으로 삼는다. SSH/HTTPS 표기가 달라도 같은
+ * GitHub 저장소면 같은 값이 되도록 먼저 정규화한다.
  */
-export function s3ProjectIdentifier(workspacePath: string, folderName: string): string {
+export function normalizeRepositoryIdentity(repositoryIdentity: string): string {
+    let normalized = (repositoryIdentity || '').replace(/\\/g, '/').trim();
+    if (!normalized) { return ''; }
+
+    // git@github.com:team/repo.git → github.com/team/repo
+    normalized = normalized.replace(/^git@([^:]+):/i, '$1/');
+    // https://user@github.com/team/repo.git → github.com/team/repo
+    normalized = normalized.replace(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?/i, '');
+    return normalized.replace(/\/+$/, '').replace(/\.git$/i, '');
+}
+
+export function s3ProjectIdentifier(repositoryIdentity: string, fallbackName = 'site'): string {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { createHash } = require('crypto') as typeof import('crypto');
-    const normalized = (workspacePath || '').replace(/\\/g, '/').trim();
-    const fingerprint = createHash('sha256').update(normalized || folderName || 'site').digest('hex').slice(0, 12);
-    return `${(folderName || 'site').trim() || 'site'}-${fingerprint}`;
+    const normalized = normalizeRepositoryIdentity(repositoryIdentity);
+    const identity = normalized || fallbackName || 'site';
+    // 원격 주소의 마지막 부분을 읽기 쉬운 이름으로 쓴다. 그러면 로컬 클론
+    // 폴더명이 달라도 같은 저장소는 같은 공개 버킷 이름으로 다시 배포된다.
+    const remoteName = normalized.split('/').filter(Boolean).pop() ?? '';
+    const name = (remoteName || fallbackName || 'site')
+        .trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'site';
+    const fingerprint = createHash('sha256').update(identity).digest('hex').slice(0, 12);
+    return `${name}-${fingerprint}`;
 }
 
 /** 경로의 어느 부분이든 건너뛸 대상이면 true. */
