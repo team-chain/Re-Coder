@@ -57,9 +57,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CORE_DIR = REPO_ROOT / "core"
 
 # core 는 자기 디렉터리를 루트로 임포트한다(schemas, main, code_agent ...).
-# core/tests/conftest.py 와 같은 규칙.
-if str(CORE_DIR) not in sys.path:
-    sys.path.insert(0, str(CORE_DIR))
+# 이미 PYTHONPATH 에 들어 있어도 반드시 첫 번째로 재배치한다. 그렇지 않으면
+# CI 의 site-packages 등에 있는 동명 ``main`` 모듈을 먼저 불러와, 실제
+# core/main.py 의 라우터를 검사하지 않는 환경 의존적인 스모크가 될 수 있다.
+_core_dir_str = str(CORE_DIR)
+if _core_dir_str in sys.path:
+    sys.path.remove(_core_dir_str)
+sys.path.insert(0, _core_dir_str)
 
 
 # ---------------------------------------------------------------------------
