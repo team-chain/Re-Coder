@@ -642,7 +642,12 @@ def step7_verify(body: dict, static_files: list[dict], live: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _cleanup_bucket(bucket: str, region: str) -> None:
+def _cleanup_bucket(bucket: str, region: str) -> str | None:
+    """버킷을 지우고, 실패 원인은 호출자에게 돌려준다.
+
+    라이브 스모크가 성공으로 끝나면 공개 버킷도 반드시 사라져야 한다. 따라서
+    정리 실패를 단순 경고로 숨기지 않고, run()이 실패 코드로 바꾸게 한다.
+    """
     try:
         import boto3  # type: ignore
 
@@ -654,7 +659,7 @@ def _cleanup_bucket(bucket: str, region: str) -> None:
             code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
             status = getattr(exc, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
             if code in {"NoSuchBucket", "NotFound"} or status == 404:
-                return
+                return None
             raise
         while True:
             listed = s3.list_objects_v2(Bucket=bucket)
@@ -666,14 +671,18 @@ def _cleanup_bucket(bucket: str, region: str) -> None:
                 break
         s3.delete_bucket(Bucket=bucket)
         print(f"      정리  버킷 삭제: {bucket}", flush=True)
+        return None
     except Exception as exc:  # noqa: BLE001
-        # 정리 실패가 스모크 결과를 뒤집으면 안 된다. 대신 반드시 알린다.
+        # 자동 정리 약속을 지키지 못했는데 성공으로 끝내면 공개 버킷이 남는다.
+        # 정상 S3 배포 정책에는 DeleteBucket을 넣지 않으므로, 라이브 리허설
+        # 전용 자격증명에는 이 권한을 별도로 추가해야 한다.
         print(
-            f"      경고  버킷 정리 실패: {bucket} ({exc})\n"
+            f"      실패  버킷 정리 실패: {bucket} ({exc})\n"
             f"            공개 버킷이 남았다. 손으로 지울 것: "
             f"aws s3 rb s3://{bucket} --force",
             flush=True,
         )
+        return str(exc)
 
 
 def _live_cleanup_target() -> tuple[str, str]:
@@ -742,6 +751,8 @@ def _isolate_stores() -> Path:
 def run(live: bool) -> int:
     workspace = Path(tempfile.mkdtemp(prefix="recoder-smoke-ws-"))
     cleanup_target: tuple[str, str] | None = None
+    cleanup_error: str | None = None
+    exit_code = 0
 
     print(f"골든패스 스모크 — 모드: {'LIVE (실제 Bedrock + 실제 S3)' if live else '기본 (픽스처 LLM + moto S3)'}")
     print(f"워크스페이스: {workspace}")
@@ -766,7 +777,7 @@ def run(live: bool) -> int:
                 step7_verify(deployed, static_files, live)
     except SmokeFailure as exc:
         _fail(exc)
-        return 1
+        exit_code = 1
     except Exception as exc:  # noqa: BLE001
         print("", flush=True)
         print("=" * 68, flush=True)
@@ -775,11 +786,23 @@ def run(live: bool) -> int:
         traceback.print_exc()
         print("", flush=True)
         print(f"예외: {exc}", flush=True)
-        return 1
+        exit_code = 1
     finally:
         if cleanup_target:
-            _cleanup_bucket(*cleanup_target)
+            cleanup_error = _cleanup_bucket(*cleanup_target)
         shutil.rmtree(workspace, ignore_errors=True)
+
+    if cleanup_error:
+        _fail(SmokeFailure(
+            7,
+            "라이브 스모크 버킷 정리 실패",
+            cleanup_error,
+            "공개 버킷을 남긴 실행은 성공으로 처리하지 않는다. 라이브 리허설용 자격증명에 "
+            "s3:DeleteBucket 권한을 추가한 뒤 남은 버킷을 지우고 다시 실행하세요.",
+        ))
+        return 1
+    if exit_code:
+        return exit_code
 
     print("")
     print("골든패스 통과 — 생성부터 배포까지 배선이 살아 있다.")

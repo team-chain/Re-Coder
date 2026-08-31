@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -35,3 +37,19 @@ def test_라이브_스모크는_응답_공급자가_Bedrock인지_확인한다()
         smoke._require_bedrock_response({"provider": "gemini", "model": "gemini-test"}, 2)
 
     smoke._require_bedrock_response({"provider": "bedrock", "model": "claude-test"}, 2)
+
+
+def test_라이브_버킷_정리_실패는_성공으로_숨기지_않는다(monkeypatch):
+    class FailingS3:
+        def head_bucket(self, **_kwargs):
+            return None
+
+        def list_objects_v2(self, **_kwargs):
+            return {}
+
+        def delete_bucket(self, **_kwargs):
+            raise PermissionError("DeleteBucket denied")
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda *_args, **_kwargs: FailingS3()))
+    error = smoke._cleanup_bucket("recoder-smoke-test", "us-east-1")
+    assert error and "DeleteBucket denied" in error

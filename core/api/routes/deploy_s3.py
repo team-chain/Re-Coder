@@ -186,6 +186,53 @@ def _configure_public_website(client, bucket: str, region: str) -> None:
     )
 
 
+def _prune_obsolete_objects(client, bucket: str, desired_keys: list[str]) -> int:
+    """현재 배포 계획에 없는 이전 객체를 모두 지운다.
+
+    프로젝트 식별자가 안정적이므로 같은 워크스페이스의 재배포는 같은 버킷을
+    사용한다. 덮어쓰기만 하면 지운 번들·옛 HTML 라우트가 공개 상태로 남아
+    새 빌드와 섞인다. 업로드가 모두 성공한 뒤에만 정리해야 실패한 배포가
+    기존 사이트를 먼저 망가뜨리지 않는다.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
+
+    desired = set(desired_keys)
+    stale: list[dict[str, str]] = []
+    token: str | None = None
+    try:
+        while True:
+            request = {"Bucket": bucket}
+            if token:
+                request["ContinuationToken"] = token
+            page = client.list_objects_v2(**request)
+            stale.extend(
+                {"Key": item["Key"]}
+                for item in page.get("Contents", [])
+                if item.get("Key") not in desired
+            )
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+            if not token:
+                raise RuntimeError("S3 목록이 잘렸지만 다음 페이지 토큰이 없습니다.")
+
+        removed = 0
+        # DeleteObjects는 한 요청에 최대 1,000개만 허용한다.
+        for start in range(0, len(stale), 1000):
+            batch = stale[start:start + 1000]
+            response = client.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+            errors = response.get("Errors", [])
+            if errors:
+                failed = ", ".join(str(item.get("Key") or "(알 수 없는 키)") for item in errors[:3])
+                raise RuntimeError(f"이전 파일을 지우지 못했습니다: {failed}")
+            removed += len(batch)
+        return removed
+    except (ClientError, BotoCoreError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=502, detail=_aws_error_detail(exc, "이전 배포 파일 정리"),
+        ) from exc
+
+
 def _deploy_sync(request: S3DeployRequest, session, region: str) -> S3DeployResponse:
     """실제 AWS 호출. 이벤트 루프를 막지 않도록 라우트가 스레드로 넘긴다."""
     from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
@@ -248,10 +295,14 @@ def _deploy_sync(request: S3DeployRequest, session, region: str) -> S3DeployResp
             status_code=502, detail=_aws_error_detail(exc, "파일 업로드"),
         ) from exc
 
+    removed = _prune_obsolete_objects(client, bucket, plan.keys)
+
     url = s3_byo.website_url(bucket, region)
     note = ""
     if plan.index_copied_from:
         note = f" index.html 이 없어 {plan.index_copied_from} 를 진입 문서로 함께 올렸습니다."
+    if removed:
+        note += f" 이전 배포 파일 {removed}개를 정리했습니다."
     return S3DeployResponse(
         status="deployed",
         bucket=bucket,

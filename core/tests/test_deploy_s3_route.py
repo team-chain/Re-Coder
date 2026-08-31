@@ -146,6 +146,22 @@ def test_재배포는_같은_버킷을_다시_쓴다(client):
 
 
 @mock_aws
+def test_재배포는_새_업로드에_없는_옛_자산을_지운다(client):
+    """번들이 바뀌거나 파일을 지워도 이전 공개 객체가 남으면 안 된다."""
+    from botocore.exceptions import ClientError
+
+    first = _deploy(client).json()
+    second = _deploy(client, files=[{"path": "index.html", "content": "<h1>v2</h1>"}]).json()
+    assert first["bucket"] == second["bucket"]
+    assert "이전 배포 파일 1개" in second["message"]
+
+    s3 = boto3.client("s3", region_name=REGION)
+    with pytest.raises(ClientError) as exc:
+        s3.head_object(Bucket=second["bucket"], Key="assets/app.js")
+    assert exc.value.response["Error"]["Code"] in {"404", "NoSuchKey"}
+
+
+@mock_aws
 def test_재배포_직후_옛_화면이_뜨지_않게_캐시를_끈다(client):
     bucket = _deploy(client).json()["bucket"]
     s3 = boto3.client("s3", region_name=REGION)
