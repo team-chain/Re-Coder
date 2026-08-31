@@ -113,6 +113,8 @@ test('복사는 웹뷰가 아니라 확장이 한다', () => {
   const source = read('../src/sidebar/SidebarProvider.ts');
   assert.match(source, /case 'aws\.policy\.copy':/);
   assert.match(source, /vscode\.env\.clipboard\.writeText/);
+  assert.match(source, /catch\s*\{[\s\S]{0,220}aws\.policy\.copied',\s*\{ ok: false \}/,
+    '클립보드 실패를 웹뷰에 회신하지 않아 수동 복사 안내가 뜨지 않는다');
 
   const guide = read('../webview-src/components/AwsPolicyGuide.tsx');
   //: 언급이 아니라 **호출**을 본다. 주석에서 이유를 설명하는 건 정상이다.

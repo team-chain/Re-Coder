@@ -27,9 +27,11 @@ const {
   collectStaticFiles,
   s3ProjectIdentifier,
   StaticAssetReadError,
+  StaticAssetTooLargeError,
   describeTooManyFiles,
   STATIC_DIR_CANDIDATES,
   MAX_FILES,
+  MAX_BYTES_PER_FILE,
 } = require('../out/deploy/staticSite.js');
 
 // ---------------------------------------------------------------------------
@@ -134,6 +136,11 @@ function fakeFs(tree) {
       const value = tree[file];
       if (value === undefined) { throw new Error(`ENOENT ${file}`); }
       return Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf-8');
+    },
+    statSync(file) {
+      const value = tree[file];
+      if (value === undefined) { throw new Error(`ENOENT ${file}`); }
+      return { size: Buffer.isBuffer(value) ? value.length : Buffer.byteLength(value, 'utf-8') };
     },
   };
 }
@@ -266,6 +273,26 @@ test('읽을 수 없는 파일은 경로를 알리고 배포가 중단된다', (
   );
 });
 
+test('상한 초과 자산은 읽기 전에 로컬에서 차단한다', () => {
+  const oversized = fakeFs({
+    'index.html': 'x',
+    'assets/demo.mp4': Buffer.alloc(MAX_BYTES_PER_FILE + 1),
+  });
+  const original = oversized.readFileSync.bind(oversized);
+  let oversizedWasRead = false;
+  oversized.readFileSync = (file) => {
+    if (file === 'assets/demo.mp4') { oversizedWasRead = true; }
+    return original(file);
+  };
+  assert.throws(
+    () => collectStaticFiles('.', oversized, join),
+    (err) => err instanceof StaticAssetTooLargeError
+      && err.relativePath === 'assets/demo.mp4'
+      && /3,000,000/.test(err.message),
+  );
+  assert.strictEqual(oversizedWasRead, false, '큰 파일을 먼저 읽어 확장 호스트 메모리를 소모한다');
+});
+
 // ---------------------------------------------------------------------------
 // 배선 — **이게 없어서 코어의 라우트가 여태 도달 불가능이었다**
 // ---------------------------------------------------------------------------
@@ -276,6 +303,8 @@ test('ApiClient 가 /api/deploy/s3 를 호출한다', () => {
   const source = read('../src/core/ApiClient.ts');
   assert.match(source, /\/api\/deploy\/s3/, '코어 라우트를 부르는 코드가 없다');
   assert.match(source, /deployS3/);
+  assert.match(source, /S3_DEPLOY_TIMEOUT_MS\s*=\s*5\s*\*\s*60\s*\*\s*1000/,
+    'S3 업로드가 기본 30초 제한을 그대로 쓴다');
 });
 
 test('SidebarProvider 가 파일을 읽어 코어로 넘긴다', () => {

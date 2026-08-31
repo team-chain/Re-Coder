@@ -119,6 +119,8 @@ export class StaticAssetReadError extends Error {
 
 /** 코어가 거부하기 전에 확장에서 먼저 잡는 상한. core/s3_byo.py 와 같은 값. */
 export const MAX_FILES = 30;
+/** 파일을 읽기·base64 변환하기 전에 막을 바이트 상한. core/s3_byo.py 와 같다. */
+export const MAX_BYTES_PER_FILE = 3_000_000;
 
 /**
  * 파일 수 상한을 넘었을 때 **무엇을 고치면 되는지** 말해 준다.
@@ -159,8 +161,21 @@ export type FileSystemLike = {
         isDirectory(): boolean;
         isFile(): boolean;
     }>;
+    statSync(file: string): { size: number };
     readFileSync(file: string): Buffer;
 };
+
+/** 큰 자산을 확장 호스트 메모리에 올리기 전에 중단할 때의 오류. */
+export class StaticAssetTooLargeError extends Error {
+    constructor(public readonly relativePath: string, public readonly size: number) {
+        super(
+            `${relativePath}: 파일이 너무 큽니다 (${size.toLocaleString()} 바이트, ` +
+            `상한 ${MAX_BYTES_PER_FILE.toLocaleString()} 바이트). ` +
+            '동영상·압축 파일은 별도 CDN에 올리거나 더 작은 자산으로 바꿔 주세요.',
+        );
+        this.name = 'StaticAssetTooLargeError';
+    }
+}
 
 /**
  * `root` 아래 파일을 코어가 받는 모양으로 모은다.
@@ -210,6 +225,17 @@ export function collectStaticFiles(
 
     const files: StaticFile[] = [];
     for (const { rel, full } of paths) {
+        let size: number;
+        try {
+            // 읽기·base64·JSON 직렬화는 원본보다 훨씬 큰 메모리를 쓴다. 코어가
+            // 결국 거부할 파일이라면 확장 호스트가 먼저 멈춰야 한다.
+            size = fsImpl.statSync(full).size;
+        } catch {
+            throw new StaticAssetReadError(rel, 'file');
+        }
+        if (!Number.isFinite(size) || size < 0 || size > MAX_BYTES_PER_FILE) {
+            throw new StaticAssetTooLargeError(rel, size);
+        }
         let buffer: Buffer;
         try {
             buffer = fsImpl.readFileSync(full);

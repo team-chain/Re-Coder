@@ -992,8 +992,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.postMessage('aws.policy.copied', { ok: false });
                     break;
                 }
-                await vscode.env.clipboard.writeText(text);
-                this.postMessage('aws.policy.copied', { ok: true });
+                try {
+                    await vscode.env.clipboard.writeText(text);
+                    this.postMessage('aws.policy.copied', { ok: true });
+                } catch {
+                    // onDidReceiveMessage는 이 async handler를 기다리지 않는다.
+                    // 실패를 회신하지 않으면 웹뷰 버튼이 아무 반응 없는 것처럼 보인다.
+                    this.postMessage('aws.policy.copied', { ok: false });
+                }
                 break;
             }
             case 'aws.configure': {
