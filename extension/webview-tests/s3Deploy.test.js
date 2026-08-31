@@ -340,6 +340,18 @@ test('SidebarProvider 가 파일을 읽어 코어로 넘긴다', () => {
   assert.match(source, /s3ProjectIdentifier/, '폴더명만 보내 서로 다른 프로젝트가 같은 버킷을 쓴다');
 });
 
+test('S3 수집 전 선택 루트의 실제 경로가 워크스페이스 안인지 확인한다', () => {
+  const source = read('../src/sidebar/SidebarProvider.ts');
+  assert.match(source, /fs\.realpathSync\(workspacePath\)/,
+    '워크스페이스의 실제 경로를 확인하지 않아 상위 심볼릭 링크를 놓친다');
+  assert.match(source, /fs\.realpathSync\(root\)/,
+    '선택한 배포 폴더의 실제 경로를 확인하지 않는다');
+  assert.match(source, /path\.relative\(realWorkspacePath, realRoot\)/,
+    '문자열 접두사 대신 경로 조상 관계로 containment를 확인해야 한다');
+  assert.match(source, /collectStaticFiles\(realRoot,/,
+    '검증한 실제 경로가 아닌 원래 링크 경로를 다시 수집한다');
+});
+
 test('S3 탭에 실제 배포 버튼과 URL 표시가 있다', () => {
   const source = read('../webview-src/components/DeploymentCenter.tsx');
   assert.match(source, /workspace\.deploy\.s3"/, '배포를 요청하는 버튼이 없다');

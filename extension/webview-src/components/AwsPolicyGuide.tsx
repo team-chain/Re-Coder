@@ -127,6 +127,9 @@ export const AwsPolicyGuide: React.FC<{ region?: string }> = ({ region }) => {
   };
 
   const toggleTarget = (target: PolicyTarget) => {
+    // AWS identity 조회가 끝나기 전에 선택을 바꾸면 늦게 도착한 정책이
+    // 이전 선택 기준인데도 새 체크박스 옆에 표시된다. 요청 중에는 고정한다.
+    if (loading) { return; }
     setSelectedTargets(current => current.includes(target)
       ? current.filter(value => value !== target)
       : [...current, target]);
@@ -166,8 +169,8 @@ export const AwsPolicyGuide: React.FC<{ region?: string }> = ({ region }) => {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 9 }}>
         {POLICY_TARGET_OPTIONS.map(option => {
           const checked = selectedTargets.includes(option.value);
-          return <label key={option.value} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, cursor: "pointer" }}>
-            <input type="checkbox" checked={checked} onChange={() => toggleTarget(option.value)} />
+          return <label key={option.value} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, cursor: loading ? "wait" : "pointer", opacity: loading ? .65 : 1 }}>
+            <input type="checkbox" checked={checked} disabled={loading} onChange={() => toggleTarget(option.value)} />
             {option.label}
           </label>;
         })}

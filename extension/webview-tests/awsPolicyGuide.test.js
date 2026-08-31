@@ -108,6 +108,14 @@ test('권한표는 사용자가 고른 배포 대상만 요청한다', () => {
   assert.match(guide, /ECS 배포/);
 });
 
+test('권한표를 가져오는 중에는 대상 변경을 막아 오래된 응답을 표시하지 않는다', () => {
+  const guide = read('../webview-src/components/AwsPolicyGuide.tsx');
+  assert.match(guide, /if \(loading\) \{ return; \}/,
+    '요청 중 target 변경을 함수 수준에서 막지 않는다');
+  assert.match(guide, /disabled=\{loading\}/,
+    '요청 중에도 체크박스를 바꿀 수 있어 오래된 정책 응답이 섞인다');
+});
+
 test('SidebarProvider 가 웹뷰 요청을 받아 넘긴다', () => {
   const source = read('../src/sidebar/SidebarProvider.ts');
   assert.match(source, /case 'aws\.policy':/, '웹뷰가 요청해도 받는 곳이 없다');

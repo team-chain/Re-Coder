@@ -903,9 +903,37 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
+                let realRoot: string;
+                try {
+                    // readdirSync는 루트 자체(예: dist)가 심볼릭 링크면 그 링크를
+                    // 먼저 따라간다. 자식 Dirent 검사만으로는 워크스페이스 밖의
+                    // 파일이 공개되는 것을 막을 수 없으므로, 수집 전에 실경로를
+                    // 비교한다.
+                    const realWorkspacePath = fs.realpathSync(workspacePath);
+                    realRoot = fs.realpathSync(root);
+                    const relativeRoot = path.relative(realWorkspacePath, realRoot);
+                    const outsideWorkspace = relativeRoot === '..'
+                        || relativeRoot.startsWith(`..${path.sep}`)
+                        || path.isAbsolute(relativeRoot);
+                    if (outsideWorkspace) {
+                        this.postMessage('workspace.deploy.s3.result', {
+                            ok: false,
+                            message: `선택한 폴더가 워크스페이스 밖을 가리킵니다: ${dirLabel || '.'}. 실제 배포 산출물 폴더를 워크스페이스 안에 복사한 뒤 다시 시도하세요.`,
+                        });
+                        break;
+                    }
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('workspace.deploy.s3.result', {
+                        ok: false,
+                        message: `선택한 폴더의 실제 경로를 확인하지 못했습니다: ${msg}`,
+                    });
+                    break;
+                }
+
                 let files: StaticFile[];
                 try {
-                    files = collectStaticFiles(root, fs, path.join, dirLabel);
+                    files = collectStaticFiles(realRoot, fs, path.join, dirLabel);
                 } catch (err) {
                     // 상한 초과는 자르지 않고 알린다. 조용히 30개만 올리면
                     // 사이트가 반쯤 올라간 채로 "배포 성공" 이 된다.
