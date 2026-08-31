@@ -57,13 +57,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CORE_DIR = REPO_ROOT / "core"
 
 # core 는 자기 디렉터리를 루트로 임포트한다(schemas, main, code_agent ...).
-# 이미 PYTHONPATH 에 들어 있어도 반드시 첫 번째로 재배치한다. 그렇지 않으면
-# CI 의 site-packages 등에 있는 동명 ``main`` 모듈을 먼저 불러와, 실제
-# core/main.py 의 라우터를 검사하지 않는 환경 의존적인 스모크가 될 수 있다.
-_core_dir_str = str(CORE_DIR)
-if _core_dir_str in sys.path:
-    sys.path.remove(_core_dir_str)
-sys.path.insert(0, _core_dir_str)
+# core/tests/conftest.py 와 같은 규칙.
+if str(CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(CORE_DIR))
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +250,14 @@ def _headers(token: str) -> dict[str, str]:
     return {"X-Session-Token": token}
 
 
+def _route_hint(path: str) -> str:
+    """404 는 '경로가 사라졌다'는 뜻이므로 볼 곳이 다르다."""
+    return (
+        f"404 라면 {path} 가 앱에 등록되지 않은 것이다 —\n"
+        "  core/main.py 의 include_router 목록과 해당 라우트 모듈의 데코레이터 경로"
+    )
+
+
 def step1_boot_core():
     """[1/7] 코어를 띄우고 라우트가 붙어 있는지 본다."""
     _step(1, "코어 기동 및 라우트 등록 확인")
@@ -279,17 +283,19 @@ def step1_boot_core():
     app.state.session_token = token
     client = TestClient(app, raise_server_exceptions=False, client=("127.0.0.1", 5555))
 
-    paths = {getattr(r, "path", "") for r in app.routes}
-    required = {"/api/code/plan", "/api/code/generate", "/api/deploy/s3"}
-    missing = sorted(required - paths)
-    if missing:
+    # 라우트 등록 여부를 `app.routes` 를 뒤져서 확인하지 않는다. 그건 제품이 아니라
+    # 프레임워크 내부 구조를 검사하는 것이라, Starlette/FastAPI 가 올라가면 제품은
+    # 멀쩡한데 스모크만 깨진다. 경로가 사라졌는지는 뒤 단계에서 그 경로를 실제로
+    # 불러 보면 404 로 드러나고, 그쪽이 진짜 증상에 가깝다.
+    resp = client.get("/api/health")
+    if resp.status_code != 200:
         raise SmokeFailure(
-            1, "골든패스 라우트 누락", f"등록되지 않은 경로: {missing}",
-            "core/main.py 의 include_router 목록에 analyze / deploy_s3 라우터가 있는지\n"
-            "해당 라우터 모듈이 임포트 오류로 조용히 빠지지 않았는지",
+            1, "코어가 응답하지 않음", f"GET /api/health → HTTP {resp.status_code} — {resp.text[:200]}",
+            "core/api/routes/health.py 가 앱에 붙어 있는지\n"
+            "create_app 의 미들웨어(SessionTokenMiddleware, CSRF)가 면제 경로까지 막고 있지 않은지",
         )
 
-    _ok(f"라우트 {len(required)}개 등록 확인")
+    _ok("코어 기동 확인 (/api/health 200)")
     return client, token
 
 
@@ -304,6 +310,7 @@ def step2_plan(client, token: str, workspace: Path) -> list[dict]:
     if resp.status_code != 200:
         raise SmokeFailure(
             2, "plan 응답이 200 이 아님", f"HTTP {resp.status_code} — {resp.text[:400]}",
+            f"{_route_hint('/api/code/plan')}\n"
             "core/api/routes/analyze.py 의 code_plan_route\n"
             "--live 라면 Bedrock 모델 접근 권한과 리전 (AccessDeniedException 여부)",
         )
@@ -382,6 +389,7 @@ def step4_generate(client, token: str, workspace: Path, decisions: list[dict]) -
     if resp.status_code != 200:
         raise SmokeFailure(
             4, "generate 응답이 200 이 아님", f"HTTP {resp.status_code} — {resp.text[:400]}",
+            f"{_route_hint('/api/code/generate')}\n"
             "400 이고 '승인 내용이 온전하지 않아' 라면 plan 과 generate 의 decisions 계약이 어긋난 것 —\n"
             "  code_agent._approval_state / _decision_is_valid 를 볼 것 (배선 끊김의 대표 증상)\n"
             "500 이면 code_agent.generate_code 내부 예외",
@@ -465,6 +473,7 @@ def step6_deploy(client, token: str, static_files: list[dict]) -> dict:
     if resp.status_code != 200:
         raise SmokeFailure(
             6, "배포 응답이 200 이 아님", f"HTTP {resp.status_code} — {resp.text[:400]}",
+            f"{_route_hint('/api/deploy/s3')}\n"
             "400 이면 요청(빈 project, 리전 미확정) — core/s3_byo.py 의 검사\n"
             "502 면 AWS 호출 거절 — --live 에서는 IAM 권한(s3:CreateBucket, PutBucketPolicy,\n"
             "  PutPublicAccessBlock, PutObject)과 계정 차원 공개 차단 설정을 볼 것\n"
