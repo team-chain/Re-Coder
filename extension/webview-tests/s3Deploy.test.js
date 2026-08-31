@@ -25,6 +25,7 @@ const {
   shouldSkipPath,
   pickStaticDir,
   collectStaticFiles,
+  StaticAssetReadError,
   describeTooManyFiles,
   STATIC_DIR_CANDIDATES,
   MAX_FILES,
@@ -210,15 +211,36 @@ test('상한 메시지가 어느 폴더를 봤는지 알려준다', () => {
   assert.match(message, /dist/);
 });
 
-test('읽을 수 없는 폴더 때문에 배포 전체가 죽지 않는다', () => {
-  const broken = fakeFs({ 'index.html': 'x' });
+test('읽을 수 없는 폴더는 빠진 자산 없이 배포가 중단된다', () => {
+  const broken = fakeFs({ 'index.html': 'x', 'secret/app.js': 'x' });
   const original = broken.readdirSync.bind(broken);
   broken.readdirSync = (dir, opts) => {
     if (dir === 'secret') { throw new Error('EACCES'); }
     return original(dir, opts);
   };
-  const files = collectStaticFiles('.', broken, join);
-  assert.deepStrictEqual(files.map(f => f.path), ['index.html']);
+  assert.throws(
+    () => collectStaticFiles('.', broken, join),
+    (err) => err instanceof StaticAssetReadError
+      && err.relativePath === 'secret'
+      && /secret/.test(err.message),
+    '폴더를 조용히 건너뛰면 그 안의 JS/CSS가 빠진 성공 배포가 된다'
+  );
+});
+
+test('읽을 수 없는 파일은 경로를 알리고 배포가 중단된다', () => {
+  const broken = fakeFs({ 'index.html': 'x', 'assets/app.js': 'x' });
+  const original = broken.readFileSync.bind(broken);
+  broken.readFileSync = (file) => {
+    if (file === 'assets/app.js') { throw new Error('EACCES'); }
+    return original(file);
+  };
+  assert.throws(
+    () => collectStaticFiles('.', broken, join),
+    (err) => err instanceof StaticAssetReadError
+      && err.relativePath === 'assets/app.js'
+      && /assets\/app\.js/.test(err.message),
+    '읽기 실패한 파일을 누락한 채 성공으로 처리한다'
+  );
 });
 
 // ---------------------------------------------------------------------------

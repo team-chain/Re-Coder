@@ -590,6 +590,10 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         <p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55, fontSize: 12 }}>
           본인 AWS 계정의 버킷에 직접 올립니다. 버킷이 없으면 만들고, 정적 웹사이트 호스팅까지 설정한 뒤 공개 URL을 돌려줍니다.
         </p>
+        <div style={{ margin: "8px 0 12px", padding: "8px 10px", borderRadius: 5, background: "var(--vscode-textBlockQuote-background, rgba(127,127,127,.08))", fontSize: 11, lineHeight: 1.5 }}>
+          배포 리전: <b>{coreRegion || "AWS 연결 후 확인"}</b>
+          <div style={{ marginTop: 2, color: "var(--vscode-descriptionForeground, #999)" }}>S3 배포는 연결된 AWS 리전을 사용합니다.</div>
+        </div>
         <label style={{ display: "block", fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
           올릴 폴더 (비우면 워크스페이스 루트)
           <input
@@ -608,10 +612,11 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
           {s3DirTouched ? "" : " (감지된 폴더를 자동으로 채웠습니다)"}
         </div>
         <button
-          disabled={s3Busy}
-          onClick={() => { setS3Busy(true); setS3Result(null); setMessage("S3에 올리는 중…"); postMessage("workspace.deploy.s3", { dir: s3Dir.trim(), region: ecs.aws_region.trim() }); }}
+          disabled={s3Busy || !awsReady || !coreRegion.trim()}
+          onClick={() => { setS3Busy(true); setS3Result(null); setMessage("S3에 올리는 중…"); postMessage("workspace.deploy.s3", { dir: s3Dir.trim(), region: coreRegion.trim() }); }}
           style={{ ...button, marginTop: 13, opacity: s3Busy ? .7 : 1 }}
         >{s3Busy ? "배포 중…" : "S3에 배포"}</button>
+        {(!awsReady || !coreRegion.trim()) && <div style={{ marginTop: 7, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>AWS 계정을 연결하면 배포 리전이 표시되고 S3 배포를 시작할 수 있습니다.</div>}
 
         {s3Result && (
           <div style={{ marginTop: 13, padding: "10px 12px", borderRadius: 6, background: "rgba(78, 201, 176, .10)", border: "1px solid rgba(78, 201, 176, .32)" }}>

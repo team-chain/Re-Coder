@@ -586,6 +586,15 @@ def _cleanup_bucket(bucket: str, region: str) -> None:
         import boto3  # type: ignore
 
         s3 = boto3.client("s3", region_name=region)
+        try:
+            s3.head_bucket(Bucket=bucket)
+        except Exception as exc:  # noqa: BLE001
+            # 배포 API가 버킷을 만들기 전 실패한 경우에는 정리할 것이 없다.
+            code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+            status = getattr(exc, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if code in {"NoSuchBucket", "NotFound"} or status == 404:
+                return
+            raise
         while True:
             listed = s3.list_objects_v2(Bucket=bucket)
             keys = [{"Key": o["Key"]} for o in listed.get("Contents", [])]
@@ -604,6 +613,50 @@ def _cleanup_bucket(bucket: str, region: str) -> None:
             f"aws s3 rb s3://{bucket} --force",
             flush=True,
         )
+
+
+def _live_cleanup_target() -> tuple[str, str]:
+    """라이브 스모크가 만들 버킷을 배포 **전에** 확정한다.
+
+    /api/deploy/s3는 버킷을 만든 뒤 공개 설정·업로드 중에 실패할 수 있다.
+    성공 응답을 받은 뒤에만 버킷 이름을 저장하면 그 실패 경로에서는 공개
+    버킷이 남는다. 같은 입력으로 정해지는 이름을 먼저 계산하고, 기존 버킷이
+    없다는 것도 확인한 뒤 finally에서 항상 정리한다.
+    """
+    import boto3  # type: ignore
+    from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
+
+    try:
+        session = boto3.session.Session(region_name=REGION)
+        account_id = session.client("sts").get_caller_identity()["Account"]
+        # core와 같은 모듈을 사용해 버킷 이름 규칙이 어긋나지 않게 한다.
+        import s3_byo  # type: ignore
+
+        bucket = s3_byo.bucket_name(PROJECT_NAME, account_id)
+        s3 = session.client("s3", region_name=REGION)
+        try:
+            s3.head_bucket(Bucket=bucket)
+        except ClientError as exc:
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status == 404:
+                return bucket, REGION
+            raise
+    except (ClientError, BotoCoreError, KeyError) as exc:
+        raise SmokeFailure(
+            6,
+            "라이브 스모크 버킷 사전 확인 실패",
+            str(exc),
+            "S3 배포 전에 정리 대상을 확인하지 못해 실행하지 않았다. AWS 자격증명과 s3:ListBucket 권한을 확인하세요.",
+        ) from exc
+
+    # 기존 버킷은 이 실행이 만든 자원이 아니므로 삭제하면 안 된다. 남은 이전
+    # 라이브 스모크 버킷도 여기서 발견되어, 먼저 수동 정리하도록 멈춘다.
+    raise SmokeFailure(
+        6,
+        "기존 라이브 스모크 버킷이 남아 있음",
+        bucket,
+        "이 실행은 기존 버킷을 삭제하지 않는다. 남은 버킷을 확인·정리한 뒤 다시 실행하세요.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +680,7 @@ def _isolate_stores() -> Path:
 
 def run(live: bool) -> int:
     workspace = Path(tempfile.mkdtemp(prefix="recoder-smoke-ws-"))
-    deployed: dict | None = None
+    cleanup_target: tuple[str, str] | None = None
 
     print(f"골든패스 스모크 — 모드: {'LIVE (실제 Bedrock + 실제 S3)' if live else '기본 (픽스처 LLM + moto S3)'}")
     print(f"워크스페이스: {workspace}")
@@ -639,6 +692,9 @@ def run(live: bool) -> int:
         approved = step3_choose(decisions)
         result = step4_generate(client, token, workspace, approved)
         static_files = step5_apply(workspace, result)
+        # 실패 응답에도 cleanup_target은 남아 finally에서 실제 버킷을 지운다.
+        if live:
+            cleanup_target = _live_cleanup_target()
         deployed = step6_deploy(client, token, static_files)
         step7_verify(deployed, static_files, live)
     except SmokeFailure as exc:
@@ -654,8 +710,8 @@ def run(live: bool) -> int:
         print(f"예외: {exc}", flush=True)
         return 1
     finally:
-        if live and deployed:
-            _cleanup_bucket(deployed["bucket"], deployed["region"])
+        if cleanup_target:
+            _cleanup_bucket(*cleanup_target)
         shutil.rmtree(workspace, ignore_errors=True)
 
     print("")

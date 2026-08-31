@@ -90,6 +90,22 @@ export type StaticFile = {
     encoding: 'utf-8' | 'base64';
 };
 
+/**
+ * 선택한 정적 자산을 읽지 못했을 때의 오류.
+ *
+ * 파일 하나를 빼고 계속 올리면 배포 API 는 성공을 돌려주지만, 실제 사이트는
+ * JS/CSS/이미지 누락으로 깨질 수 있다. 어느 경로에서 멈췄는지 함께 보여줘야
+ * 사용자가 권한·삭제·동기화 문제를 바로 고칠 수 있다.
+ */
+export class StaticAssetReadError extends Error {
+    constructor(public readonly relativePath: string, public readonly operation: 'folder' | 'file') {
+        const target = relativePath || '선택한 배포 폴더';
+        const action = operation === 'folder' ? '폴더 목록을 읽을 수 없습니다' : '파일을 읽을 수 없습니다';
+        super(`${target}: ${action}. 권한을 확인하거나 빌드 산출물을 다시 만든 뒤 재시도하세요.`);
+        this.name = 'StaticAssetReadError';
+    }
+}
+
 /** 코어가 거부하기 전에 확장에서 먼저 잡는 상한. core/s3_byo.py 와 같은 값. */
 export const MAX_FILES = 30;
 
@@ -159,7 +175,8 @@ export function collectStaticFiles(
         try {
             entries = fsImpl.readdirSync(dir, { withFileTypes: true });
         } catch {
-            return;   // 읽을 수 없는 폴더는 건너뛴다 — 배포 전체를 막지 않는다
+            // 폴더를 조용히 건너뛰면 그 안의 JS/CSS가 빠져도 성공으로 보인다.
+            throw new StaticAssetReadError(prefix, 'folder');
         }
         for (const entry of entries) {
             const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
@@ -186,7 +203,8 @@ export function collectStaticFiles(
         try {
             buffer = fsImpl.readFileSync(full);
         } catch {
-            continue;
+            // 자산 하나라도 빠진 "성공"은 깨진 사이트를 만들 뿐이다.
+            throw new StaticAssetReadError(rel, 'file');
         }
         const binary = isBinaryAsset(rel);
         files.push({
