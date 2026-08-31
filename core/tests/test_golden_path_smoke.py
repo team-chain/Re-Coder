@@ -28,3 +28,10 @@ def test_형제_폴더로_탈출하는_생성_파일은_기록하지_않는다(t
         )
 
     assert not escaped.exists(), "라이브 스모크가 임시 워크스페이스 밖에 파일을 썼다"
+
+
+def test_라이브_스모크는_응답_공급자가_Bedrock인지_확인한다():
+    with pytest.raises(smoke.SmokeFailure, match="Bedrock 응답"):
+        smoke._require_bedrock_response({"provider": "gemini", "model": "gemini-test"}, 2)
+
+    smoke._require_bedrock_response({"provider": "bedrock", "model": "claude-test"}, 2)

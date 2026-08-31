@@ -74,6 +74,8 @@ test('node_modules 와 .git 은 건너뛴다', () => {
   assert.strictEqual(shouldSkipPath('node_modules/react/index.js'), true);
   assert.strictEqual(shouldSkipPath('.git/config'), true);
   assert.strictEqual(shouldSkipPath('a/node_modules/b.js'), true);
+  assert.strictEqual(shouldSkipPath('.next/cache/webpack/client-production/index.pack'), true);
+  assert.strictEqual(shouldSkipPath('app/.next/cache/images/cache.bin'), true);
   assert.strictEqual(shouldSkipPath('.DS_Store'), true);
 });
 

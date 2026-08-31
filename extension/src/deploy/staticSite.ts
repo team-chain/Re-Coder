@@ -74,7 +74,15 @@ export function shouldSkipPath(relativePath: string): boolean {
     if (!parts.length) { return true; }
     const name = parts[parts.length - 1];
     if (SKIP_FILES.has(name)) { return true; }
-    return parts.some(part => SKIP_DIRS.has(part));
+    return [...SKIP_DIRS].some((skipped) => {
+        // `.next/cache`처럼 여러 경로 조각으로 이뤄진 제외 대상도 있다.
+        // `parts.some(part => ...)`만 쓰면 `.next`와 `cache`를 각각 비교해
+        // 이 항목은 절대 일치하지 않아 대형 캐시를 전부 읽게 된다.
+        const skippedParts = skipped.split('/');
+        return parts.some((_, start) => skippedParts.every(
+            (part, offset) => parts[start + offset] === part,
+        ));
+    });
 }
 
 /**

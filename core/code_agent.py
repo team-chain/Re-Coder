@@ -1443,6 +1443,9 @@ def generate_plan(
     result = {
         "decisions": decisions_out,
         "model": getattr(llm_resp, "model_used", ""),
+        # 라이브 스모크처럼 특정 공급자(Bedrock)를 검증해야 하는 호출자가
+        # 폴백 결과를 성공으로 오인하지 않도록 실제 공급자도 함께 돌려준다.
+        "provider": getattr(llm_resp, "provider", ""),
     }
     print(f"[code_agent] 설계 결정 생성 완료 | 결정 {len(decisions_out)}개 | model={result['model']}")
     return result
@@ -1611,6 +1614,7 @@ def generate_code(
         "summary": data.get("summary", "코드를 생성했습니다.").strip(),
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),
+        "provider": getattr(llm_resp, "provider", ""),
     }
     if adr_ops:
         result["adr"] = [op["file"] for op in adr_ops]

@@ -50,6 +50,7 @@ import sys
 import tempfile
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -259,11 +260,10 @@ def _route_hint(path: str) -> str:
 
 
 def step1_boot_core():
-    """[1/7] 코어를 띄우고 라우트가 붙어 있는지 본다."""
+    """[1/7] 앱을 만들고, 실행부가 lifespan 안에서 실제로 기동하게 한다."""
     _step(1, "코어 기동 및 라우트 등록 확인")
     try:
         import main  # type: ignore
-        from fastapi.testclient import TestClient
     except Exception as exc:  # noqa: BLE001
         raise SmokeFailure(
             1, "코어 임포트 실패", str(exc),
@@ -279,9 +279,17 @@ def step1_boot_core():
             "core/main.py 의 create_app — 라우터 하나가 임포트에 실패하면 여기서 죽는다",
         ) from exc
 
-    token = "s" * 32
-    app.state.session_token = token
-    client = TestClient(app, raise_server_exceptions=False, client=("127.0.0.1", 5555))
+    return app
+
+
+def step1_confirm_core(client) -> str:  # noqa: ANN001
+    """lifespan 실행 뒤 health와 세션 토큰을 확인한다."""
+    token = str(getattr(client.app.state, "session_token", "") or "")
+    if not token:
+        raise SmokeFailure(
+            1, "코어 세션 토큰이 초기화되지 않음", "lifespan 뒤 app.state.session_token 이 비어 있음",
+            "core/main.py 의 lifespan — 런타임 초기화와 세션 토큰 설정을 확인하세요",
+        )
 
     # 라우트 등록 여부를 `app.routes` 를 뒤져서 확인하지 않는다. 그건 제품이 아니라
     # 프레임워크 내부 구조를 검사하는 것이라, Starlette/FastAPI 가 올라가면 제품은
@@ -296,10 +304,53 @@ def step1_boot_core():
         )
 
     _ok("코어 기동 확인 (/api/health 200)")
-    return client, token
+    return token
 
 
-def step2_plan(client, token: str, workspace: Path) -> list[dict]:
+@contextmanager
+def _require_bedrock_in_live_mode(live: bool):
+    """라이브 스모크에서는 Gemini 폴백을 끄고 Bedrock만 검증한다.
+
+    제품의 일반 요청은 Bedrock 장애 시 Gemini로 넘어갈 수 있다. 하지만 이
+    스크립트의 --live 표시는 Bedrock 접근을 검증한다는 약속이므로, 그 순간만
+    Gemini 키를 분리하고 라우터 싱글턴도 다시 만든다.
+    """
+    if not live:
+        yield
+        return
+
+    original_gemini_key = os.environ.pop("GEMINI_API_KEY", None)
+    try:
+        from llm.router import get_router
+        get_router(force_rebuild=True)
+        yield
+    finally:
+        if original_gemini_key is None:
+            os.environ.pop("GEMINI_API_KEY", None)
+        else:
+            os.environ["GEMINI_API_KEY"] = original_gemini_key
+        # 이후 같은 프로세스에서 실행되는 다른 작업이 Gemini 폴백을 잃지 않게 한다.
+        try:
+            from llm.router import get_router
+            get_router(force_rebuild=True)
+        except Exception:
+            pass
+
+
+def _require_bedrock_response(body: dict, step: int) -> None:
+    """응답 메타데이터로도 실제 공급자가 Bedrock인지 명시적으로 확인한다."""
+    provider = str(body.get("provider") or "").lower()
+    if provider != "bedrock":
+        raise SmokeFailure(
+            step,
+            "Bedrock 응답을 확인하지 못함",
+            f"실제 provider={provider or '(없음)'!r}, model={body.get('model') or '(없음)'!r}",
+            "--live 는 Bedrock 모델 접근 검증용이다. Gemini 폴백이나 다른 공급자 응답은 통과가 아니다.\n"
+            "core/llm/router.py 의 provider 체인과 Bedrock 자격증명·모델 권한을 확인하세요.",
+        )
+
+
+def step2_plan(client, token: str, workspace: Path, *, require_bedrock: bool = False) -> list[dict]:
     """[2/7] 코드가 아니라 '설계 결정'이 오는지 본다 — AI-DLC 의 전제."""
     _step(2, "설계 결정 요청 (/api/code/plan)")
     resp = client.post(
@@ -315,7 +366,10 @@ def step2_plan(client, token: str, workspace: Path) -> list[dict]:
             "--live 라면 Bedrock 모델 접근 권한과 리전 (AccessDeniedException 여부)",
         )
 
-    decisions = (resp.json() or {}).get("decisions") or []
+    body = resp.json() or {}
+    if require_bedrock:
+        _require_bedrock_response(body, 2)
+    decisions = body.get("decisions") or []
     if not decisions:
         raise SmokeFailure(
             2, "설계 결정이 비어 있음", "decisions 가 빈 목록",
@@ -374,7 +428,9 @@ def step3_choose(decisions: list[dict]) -> list[dict]:
     return approved
 
 
-def step4_generate(client, token: str, workspace: Path, decisions: list[dict]) -> dict:
+def step4_generate(
+    client, token: str, workspace: Path, decisions: list[dict], *, require_bedrock: bool = False,
+) -> dict:
     """[4/7] 승인된 결정이 실제로 코드와 ADR 로 이어지는지 본다."""
     _step(4, "코드 생성 (/api/code/generate)")
     resp = client.post(
@@ -396,6 +452,8 @@ def step4_generate(client, token: str, workspace: Path, decisions: list[dict]) -
         )
 
     result = resp.json() or {}
+    if require_bedrock:
+        _require_bedrock_response(result, 4)
     ops = result.get("ops") or []
     if not ops:
         raise SmokeFailure(
@@ -690,16 +748,22 @@ def run(live: bool) -> int:
     print("")
 
     try:
-        client, token = step1_boot_core()
-        decisions = step2_plan(client, token, workspace)
-        approved = step3_choose(decisions)
-        result = step4_generate(client, token, workspace, approved)
-        static_files = step5_apply(workspace, result)
-        # 실패 응답에도 cleanup_target은 남아 finally에서 실제 버킷을 지운다.
-        if live:
-            cleanup_target = _live_cleanup_target()
-        deployed = step6_deploy(client, token, static_files)
-        step7_verify(deployed, static_files, live)
+        app = step1_boot_core()
+        # TestClient는 context manager로 써야 FastAPI lifespan을 실행한다.
+        # 그래야 런타임 초기화·싱글턴 획득이 깨져도 [1/7]에서 잡힌다.
+        from fastapi.testclient import TestClient
+        with _require_bedrock_in_live_mode(live):
+            with TestClient(app, raise_server_exceptions=False, client=("127.0.0.1", 5555)) as client:
+                token = step1_confirm_core(client)
+                decisions = step2_plan(client, token, workspace, require_bedrock=live)
+                approved = step3_choose(decisions)
+                result = step4_generate(client, token, workspace, approved, require_bedrock=live)
+                static_files = step5_apply(workspace, result)
+                # 실패 응답에도 cleanup_target은 남아 finally에서 실제 버킷을 지운다.
+                if live:
+                    cleanup_target = _live_cleanup_target()
+                deployed = step6_deploy(client, token, static_files)
+                step7_verify(deployed, static_files, live)
     except SmokeFailure as exc:
         _fail(exc)
         return 1
