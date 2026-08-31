@@ -419,13 +419,16 @@ def step5_apply(workspace: Path, result: dict) -> list[dict]:
     """[5/7] ops 를 실제 파일로 적용한다 — 확장이 하는 일을 대신한다."""
     _step(5, "파일 적용 및 정적 산출물 확인")
     written: list[str] = []
+    workspace_root = workspace.resolve()
     for op in result.get("ops") or []:
         rel = (op.get("file") or "").strip().lstrip("/")
         if not rel:
             continue
-        target = (workspace / rel).resolve()
+        target = (workspace_root / rel).resolve()
         # 워크스페이스 밖으로 쓰려는 op 는 제품 결함이다. 조용히 넘기지 않는다.
-        if not str(target).startswith(str(workspace.resolve())):
+        # 문자열 접두사 비교는 `workspace-escaped` 같은 형제 폴더까지 통과시킨다.
+        # resolve한 경로의 실제 조상 중에 root가 있는지 확인해야 한다.
+        if target != workspace_root and workspace_root not in target.parents:
             raise SmokeFailure(
                 5, "워크스페이스 밖으로 파일을 쓰려 함", rel,
                 "code_agent 의 경로 정규화 — 사용자 프로젝트 밖을 건드리면 안 된다",

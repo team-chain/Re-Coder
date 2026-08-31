@@ -25,6 +25,7 @@ const {
   shouldSkipPath,
   pickStaticDir,
   collectStaticFiles,
+  s3ProjectIdentifier,
   StaticAssetReadError,
   describeTooManyFiles,
   STATIC_DIR_CANDIDATES,
@@ -46,17 +47,19 @@ test('이미지·폰트·wasm 은 바이너리로 판정한다', () => {
   }
 });
 
-test('음성대조 — 텍스트 자산은 텍스트로 읽는다', () => {
+test('음성대조 — 알려진 텍스트 자산은 UTF-8로 읽는다', () => {
   // 전부 base64 로 보내면 정상 동작하지만, 이 테스트가 없으면 위 목록을
   // 무한정 넓혀도 아무도 모른다.
-  for (const p of ['index.html', 'app.js', 'style.css', 'data.json', 'a/b/main.mjs', 'README']) {
+  for (const p of ['index.html', 'app.js', 'style.css', 'data.json', 'a/b/main.mjs']) {
     assert.strictEqual(isBinaryAsset(p), false, `${p} 를 base64 로 보낸다`);
   }
 });
 
-test('확장자 없는 파일과 점으로 시작하는 이름을 오판하지 않는다', () => {
-  assert.strictEqual(isBinaryAsset('LICENSE'), false);
-  assert.strictEqual(isBinaryAsset('.htaccess'), false);
+test('알 수 없는 확장자와 확장자 없는 파일은 바이트 보존을 우선한다', () => {
+  assert.strictEqual(isBinaryAsset('scene.glb'), true);
+  assert.strictEqual(isBinaryAsset('cursor.cur'), true);
+  assert.strictEqual(isBinaryAsset('LICENSE'), true);
+  assert.strictEqual(isBinaryAsset('.htaccess'), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -156,6 +159,26 @@ test('텍스트는 utf-8, 바이너리는 base64 로 담는다', () => {
     png,
     '바이너리가 손상됐다 — 업로드는 성공하고 브라우저에서만 깨진다'
   );
+});
+
+test('목록에 없는 바이너리 자산도 base64로 원본 바이트를 보존한다', () => {
+  const glb = Buffer.from([0x67, 0x6c, 0x54, 0x46, 0x02, 0x00, 0xff, 0xfe]);
+  const files = collectStaticFiles('.', fakeFs({
+    'index.html': '<script src="app.js"></script>',
+    'assets/scene.glb': glb,
+  }), join);
+  const scene = files.find(file => file.path === 'assets/scene.glb');
+  assert.strictEqual(scene.encoding, 'base64');
+  assert.deepStrictEqual(Buffer.from(scene.content, 'base64'), glb);
+});
+
+test('같은 폴더명이라도 서로 다른 워크스페이스는 다른 S3 프로젝트 식별자를 쓴다', () => {
+  const first = s3ProjectIdentifier('/clients/a/frontend', 'frontend');
+  const second = s3ProjectIdentifier('/clients/b/frontend', 'frontend');
+  assert.notStrictEqual(first, second, '다른 사이트가 같은 버킷을 공유한다');
+  assert.strictEqual(first, s3ProjectIdentifier('/clients/a/frontend', 'frontend'), '재배포마다 버킷이 바뀐다');
+  assert.ok(first.startsWith('frontend-'));
+  assert.ok(!first.includes('/clients/'), '로컬 경로가 공개 버킷 이름에 드러난다');
 });
 
 test('걸러야 할 폴더는 수집하지 않는다', () => {
@@ -260,6 +283,7 @@ test('SidebarProvider 가 파일을 읽어 코어로 넘긴다', () => {
   assert.match(source, /case 'workspace\.deploy\.s3':/, '웹뷰가 요청해도 받는 곳이 없다');
   assert.match(source, /collectStaticFiles/, '파일을 읽는 쪽이 없다');
   assert.match(source, /deployS3/);
+  assert.match(source, /s3ProjectIdentifier/, '폴더명만 보내 서로 다른 프로젝트가 같은 버킷을 쓴다');
 });
 
 test('S3 탭에 실제 배포 버튼과 URL 표시가 있다', () => {

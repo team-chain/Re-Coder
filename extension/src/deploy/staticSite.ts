@@ -33,28 +33,39 @@ const SKIP_DIRS = new Set([
 const SKIP_FILES = new Set(['.DS_Store', 'Thumbs.db', '.gitkeep']);
 
 /**
- * 바이너리로 읽어야 하는 확장자.
+ * UTF-8 텍스트임을 확신할 수 있는 확장자.
  *
- * **이걸 틀리면 조용히 깨진다.** 이미지를 utf-8 로 읽으면 잘못된 바이트가
- * U+FFFD 로 치환돼서, 업로드는 성공하고 파일 크기도 그럴듯한데 브라우저에서
- * 열면 깨진 이미지가 나온다. 원인을 배포 쪽에서 찾기 매우 어렵다.
+ * 바이너리 목록을 유지하면 `.glb`, `.cur`처럼 새로 등장한 자산 하나를 빠뜨릴
+ * 때마다 UTF-8 변환으로 원본 바이트가 깨진다. 따라서 반대로 **알려진 텍스트만**
+ * 텍스트로 보내고, 나머지는 base64로 보존한다. base64는 텍스트 자산에도 안전하지만
+ * 알려진 텍스트는 응답 크기를 줄이기 위해 UTF-8을 유지한다.
  */
-const BINARY_EXTENSIONS = new Set([
-    // 이미지
-    'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'bmp', 'tiff',
-    // 폰트
-    'woff', 'woff2', 'ttf', 'otf', 'eot',
-    // 미디어
-    'mp3', 'mp4', 'webm', 'ogg', 'wav', 'mov', 'avi',
-    // 기타
-    'wasm', 'pdf', 'zip', 'gz', 'br', 'jar', 'bin',
+const TEXT_EXTENSIONS = new Set([
+    'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'json', 'map', 'svg', 'txt',
+    'xml', 'webmanifest', 'webapp', 'md', 'csv', 'tsv',
 ]);
 
 export function isBinaryAsset(filePath: string): boolean {
     const name = filePath.split('/').pop() ?? '';
     const dot = name.lastIndexOf('.');
-    if (dot <= 0) { return false; }
-    return BINARY_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
+    // 확장자가 없거나 모르는 확장자는 바이트 손상을 막기 위해 base64로 보낸다.
+    if (dot <= 0) { return true; }
+    return !TEXT_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
+}
+
+/**
+ * 공개 버킷 이름에 쓸 워크스페이스 식별자.
+ *
+ * `frontend`처럼 폴더 이름만 보내면 서로 다른 저장소가 같은 버킷을 재사용한다.
+ * 전체 로컬 경로는 URL에 드러나면 안 되므로, 사람이 읽는 폴더명 뒤에 경로의
+ * 안정적인 지문만 붙인다. 같은 위치를 다시 배포하면 같은 버킷을 쓴다.
+ */
+export function s3ProjectIdentifier(workspacePath: string, folderName: string): string {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { createHash } = require('crypto') as typeof import('crypto');
+    const normalized = (workspacePath || '').replace(/\\/g, '/').trim();
+    const fingerprint = createHash('sha256').update(normalized || folderName || 'site').digest('hex').slice(0, 12);
+    return `${(folderName || 'site').trim() || 'site'}-${fingerprint}`;
 }
 
 /** 경로의 어느 부분이든 건너뛸 대상이면 true. */

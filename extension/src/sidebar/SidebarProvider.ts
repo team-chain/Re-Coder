@@ -17,6 +17,7 @@ import { isCoreConnectionFailure } from '../core/coreReuse';
 import {
     collectStaticFiles,
     pickStaticDir,
+    s3ProjectIdentifier,
     STATIC_DIR_CANDIDATES,
     StaticFile,
 } from '../deploy/staticSite';
@@ -923,7 +924,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 try {
                     const result = await this._apiClient.deployS3({
-                        project: path.basename(workspacePath),
+                        // 폴더명만 쓰면 /a/frontend 와 /b/frontend 가 한 버킷을
+                        // 공유한다. 전체 경로는 공개하지 않고 지문만 붙여 구분한다.
+                        project: s3ProjectIdentifier(workspacePath, path.basename(workspacePath)),
                         files,
                         region: (p.region ?? '').trim() || undefined,
                     });
