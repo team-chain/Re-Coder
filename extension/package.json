@@ -4,6 +4,15 @@
   "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
   "version": "1.0.0",
   "publisher": "recoder-team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/team-chain/Re-Coder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/team-chain/Re-Coder/issues"
+  },
+  "homepage": "https://github.com/team-chain/Re-Coder#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -280,18 +289,20 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run build",
     "compile": "tsc -p tsconfig.json",
     "watch": "tsc -watch -p tsconfig.json",
     "build": "npm run compile && npm run build:webview",
     "build:webview": "cd webview-src && npx webpack --config webpack.config.js --mode production",
     "watch:webview": "cd webview-src && npx webpack --config webpack.config.js --mode development --watch",
-    "package": "npx vsce package",
+    "package": "vsce package",
     "lint": "eslint src --ext ts",
     "pretest": "npm run compile",
     "test": "node ./out/test/runTest.js",
     "smoke": "npm run compile && node --test out/test/coreClient.smoke.js",
-    "test:webview": "npm run compile && npx tsc -p webview-src/tsconfig.test.json && node --test webview-tests/*.test.js"
+    "test:webview": "npm run compile && npx tsc -p webview-src/tsconfig.test.json && node --test webview-tests/*.test.js",
+    "package:all": "bash ../scripts/package-extension.sh",
+    "package:nobinary": "bash ../scripts/package-extension.sh --no-binary"
   },
   "devDependencies": {
     "@types/node": "^20.19.41",
@@ -301,11 +312,14 @@
     "@types/ws": "^8.5.10",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/vsce": "^3.2.0",
     "autoprefixer": "^10.4.20",
     "css-loader": "^7.1.2",
     "eslint": "^8.0.0",
     "postcss": "^8.4.49",
     "postcss-loader": "^8.1.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "style-loader": "^4.0.0",
     "tailwindcss": "^3.4.17",
     "ts-loader": "^9.5.0",
@@ -314,8 +328,6 @@
     "webpack-cli": "^5.1.0"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
     "ws": "^8.18.0"
   }
 }
