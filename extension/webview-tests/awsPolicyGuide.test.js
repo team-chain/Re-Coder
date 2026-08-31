@@ -100,6 +100,14 @@ test('ApiClient 가 /api/aws/policy 를 호출한다', () => {
   assert.match(source, /getAwsPolicy/);
 });
 
+test('권한표는 사용자가 고른 배포 대상만 요청한다', () => {
+  const guide = read('../webview-src/components/AwsPolicyGuide.tsx');
+  assert.match(guide, /selectedTargets/, '대상 선택 상태가 없다');
+  assert.match(guide, /targets:\s*selectedTargets/, '선택한 대상을 API 요청에 담지 않는다');
+  assert.match(guide, /S3 정적 배포/);
+  assert.match(guide, /ECS 배포/);
+});
+
 test('SidebarProvider 가 웹뷰 요청을 받아 넘긴다', () => {
   const source = read('../src/sidebar/SidebarProvider.ts');
   assert.match(source, /case 'aws\.policy':/, '웹뷰가 요청해도 받는 곳이 없다');

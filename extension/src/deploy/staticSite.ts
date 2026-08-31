@@ -168,6 +168,7 @@ export type FileSystemLike = {
         name: string;
         isDirectory(): boolean;
         isFile(): boolean;
+        isSymbolicLink(): boolean;
     }>;
     statSync(file: string): { size: number };
     readFileSync(file: string): Buffer;
@@ -182,6 +183,17 @@ export class StaticAssetTooLargeError extends Error {
             '동영상·압축 파일은 별도 CDN에 올리거나 더 작은 자산으로 바꿔 주세요.',
         );
         this.name = 'StaticAssetTooLargeError';
+    }
+}
+
+/** 심볼릭 링크는 대상이 워크스페이스 밖일 수 있어 조용히 따라가지 않는다. */
+export class StaticAssetSymlinkError extends Error {
+    constructor(public readonly relativePath: string) {
+        super(
+            `${relativePath}: 심볼릭 링크는 S3 정적 배포에 포함할 수 없습니다. ` +
+            '실제 파일이나 폴더를 배포 산출물에 복사한 뒤 다시 시도하세요.',
+        );
+        this.name = 'StaticAssetSymlinkError';
     }
 }
 
@@ -216,7 +228,11 @@ export function collectStaticFiles(
             const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
             if (shouldSkipPath(rel)) { continue; }
             const full = join(dir, entry.name);
-            if (entry.isDirectory()) {
+            if (entry.isSymbolicLink()) {
+                // 링크를 조용히 넘기면 번들·스타일이 빠진 깨진 사이트를
+                // "배포 성공"으로 표시한다. 대상이 워크스페이스 밖일 수도 있다.
+                throw new StaticAssetSymlinkError(rel);
+            } else if (entry.isDirectory()) {
                 walk(full, rel);
             } else if (entry.isFile()) {
                 paths.push({ rel, full });

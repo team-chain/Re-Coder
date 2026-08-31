@@ -28,6 +28,7 @@ const {
   s3ProjectIdentifier,
   StaticAssetReadError,
   StaticAssetTooLargeError,
+  StaticAssetSymlinkError,
   describeTooManyFiles,
   STATIC_DIR_CANDIDATES,
   MAX_FILES,
@@ -131,7 +132,7 @@ function fakeFs(tree) {
       const entries = dirs.get(key);
       if (!entries) { throw new Error(`ENOENT ${dir}`); }
       return [...entries].map(([name, isDir]) => ({
-        name, isDirectory: () => isDir, isFile: () => !isDir,
+        name, isDirectory: () => isDir, isFile: () => !isDir, isSymbolicLink: () => false,
       }));
     },
     readFileSync(file) {
@@ -272,6 +273,28 @@ test('읽을 수 없는 파일은 경로를 알리고 배포가 중단된다', (
       && err.relativePath === 'assets/app.js'
       && /assets\/app\.js/.test(err.message),
     '읽기 실패한 파일을 누락한 채 성공으로 처리한다'
+  );
+});
+
+test('심볼릭 링크 자산은 조용히 누락하지 않고 배포를 중단한다', () => {
+  const linked = fakeFs({ 'index.html': 'x' });
+  const original = linked.readdirSync.bind(linked);
+  linked.readdirSync = (dir, opts) => {
+    const entries = original(dir, opts);
+    if (dir === '.') {
+      entries.push({
+        name: 'assets-link', isDirectory: () => false, isFile: () => false,
+        isSymbolicLink: () => true,
+      });
+    }
+    return entries;
+  };
+  assert.throws(
+    () => collectStaticFiles('.', linked, join),
+    (err) => err instanceof StaticAssetSymlinkError
+      && err.relativePath === 'assets-link'
+      && /심볼릭 링크/.test(err.message),
+    '링크 자산을 건너뛰면 실제 사이트에 필요한 파일이 빠진 성공 배포가 된다',
   );
 });
 

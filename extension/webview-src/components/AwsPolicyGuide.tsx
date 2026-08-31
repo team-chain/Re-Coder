@@ -29,6 +29,14 @@ export type AwsPolicy = {
   steps?: string[];
 };
 
+type PolicyTarget = "ecs" | "s3" | "bedrock";
+
+const POLICY_TARGET_OPTIONS: Array<{ value: PolicyTarget; label: string }> = [
+  { value: "s3", label: "S3 정적 배포" },
+  { value: "ecs", label: "ECS 배포" },
+  { value: "bedrock", label: "Bedrock AI" },
+];
+
 /**
  * 사용자가 이 정책을 **그대로 붙여도 되는지** 한 줄로 말해 준다.
  *
@@ -78,6 +86,9 @@ export function describePolicyScope(policy: AwsPolicy | null): string {
 export const AwsPolicyGuide: React.FC<{ region?: string }> = ({ region }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [policy, setPolicy] = useState<AwsPolicy | null>(null);
+  // 정책은 선택한 기능에만 한정한다. 비우면 API의 전체 기본값(ECS·S3·Bedrock)을
+  // 받아 최소 권한 안내가 오히려 과도해진다.
+  const [selectedTargets, setSelectedTargets] = useState<PolicyTarget[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -105,10 +116,25 @@ export const AwsPolicyGuide: React.FC<{ region?: string }> = ({ region }) => {
   }, []));
 
   const request = () => {
+    if (!selectedTargets.length) {
+      setError("사용할 기능을 하나 이상 고르세요. 고른 기능에 필요한 권한만 만듭니다.");
+      return;
+    }
     setLoading(true);
     setError("");
     setCopied(false);
-    postMessage("aws.policy", region ? { region } : {});
+    postMessage("aws.policy", { targets: selectedTargets, ...(region ? { region } : {}) });
+  };
+
+  const toggleTarget = (target: PolicyTarget) => {
+    setSelectedTargets(current => current.includes(target)
+      ? current.filter(value => value !== target)
+      : [...current, target]);
+    // 선택을 바꾸면 이전 정책은 더 이상 현재 의도와 맞지 않는다.
+    setPolicy(null);
+    setOpen(false);
+    setCopied(false);
+    setError("");
   };
 
   const fill = describePolicyFill(policy);
@@ -134,8 +160,19 @@ export const AwsPolicyGuide: React.FC<{ region?: string }> = ({ region }) => {
       </div>
 
       <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.55, color: "var(--vscode-descriptionForeground, #999)" }}>
-        ReCoder 가 배포에 실제로 쓰는 액션만 담은 정책입니다. AdministratorAccess 를 붙이지 않아도 됩니다.
+        사용할 기능만 고르면 해당 기능에 필요한 액션만 담습니다. AdministratorAccess 를 붙이지 않아도 됩니다.
       </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 9 }}>
+        {POLICY_TARGET_OPTIONS.map(option => {
+          const checked = selectedTargets.includes(option.value);
+          return <label key={option.value} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, cursor: "pointer" }}>
+            <input type="checkbox" checked={checked} onChange={() => toggleTarget(option.value)} />
+            {option.label}
+          </label>;
+        })}
+      </div>
+      {!selectedTargets.length && <div style={{ marginTop: 6, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>권한을 넓히지 않도록 필요한 기능만 선택하세요.</div>}
 
       {error && <div style={{ marginTop: 9, color: "var(--vscode-errorForeground, #f48771)", fontSize: 11, lineHeight: 1.5 }}>{error}</div>}
 
