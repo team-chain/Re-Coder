@@ -1,0 +1,63 @@
+# VSIX 에 무엇을 담지 않을지. vsce 는 여기 적히지 않은 것을 **전부** 담는다.
+#
+# 이 파일이 없던 동안 VSIX 가 35MB 였다. node_modules 의 react-dom 개발 빌드까지
+# 통째로 들어갔기 때문이다. 그래서 빼는 목록보다 **빠뜨리면 확장이 죽는 것**을
+# 먼저 적어 둔다. 아래 항목은 어떤 규칙으로도 제외되면 안 된다.
+#
+#   out/                    컴파일된 확장 + 웹뷰 번들 (main: ./out/extension.js)
+#   media/icon.png          package.json 의 icon
+#   media/recoder-icon.svg  액티비티바 아이콘 (contributes.viewsContainers)
+#   media/sidebar.js        sidebarProvider.ts 가 asWebviewUri 로 로드한다.
+#                           번들이 아니라 런타임 파일이므로 빼면 사이드바가 빈다.
+#   bin/                    번들 Core 바이너리. CoreManager 가 1순위로 찾는다.
+#   node_modules/ws         BridgeClient.ts 가 런타임에 require 한다.
+#                           vsce 가 dependencies 만 담으므로 자동으로 들어간다 —
+#                           node_modules 를 통째로 무시하면 확장이 죽는다.
+
+# ── 소스 ────────────────────────────────────────────────────────────────
+# 번들된 out/ 만 있으면 동작한다. 소스를 같이 실으면 크기만 늘고,
+# 사용자가 고쳐도 반영되지 않아 혼란만 준다.
+src/**
+webview-src/**
+webview-tests/**
+**/*.ts
+**/*.tsx
+**/*.map
+
+# ── 테스트 산출물 ───────────────────────────────────────────────────────
+# out/ 안에는 배포용 코드만 있는 게 아니다. 테스트 빌드도 같은 디렉터리로
+# 나오므로 소스만 막아서는 걸러지지 않는다. 실제로 첫 패키징에서
+# out/webview-test 가 296KB — VSIX 전체의 83% — 를 차지했다.
+#
+#   out/webview-test/  webview-src/tsconfig.test.json 이 node --test 용으로
+#                      같은 컴포넌트를 CommonJS 로 한 번 더 내보낸 것
+#   out/test/          coreClient 스모크 테스트 (npm run smoke)
+out/webview-test/**
+out/test/**
+
+# ── 빌드 · 개발 설정 ────────────────────────────────────────────────────
+tsconfig.json
+.vscode/**
+.pytest_cache/**
+.eslintrc*
+**/.gitignore
+**/.DS_Store
+
+# ── 내부 문서 ───────────────────────────────────────────────────────────
+# 마켓플레이스 상세 페이지는 README.md 로 만들어진다. 빌드 절차 문서는
+# 사용자에게 필요 없다.
+PACKAGING.md
+
+# ── 패키징 산출물 · 바이너리 보관소 ─────────────────────────────────────
+# bin-dist/ 는 플랫폼별 원본 바이너리 보관소다. 패키징 스크립트가 대상
+# 플랫폼의 것만 bin/ 으로 복사하므로, 보관소 자체가 VSIX 에 들어가면
+# 다른 OS 바이너리까지 같이 실려 크기가 몇 배가 된다.
+*.vsix
+bin-dist/**
+dist/**
+
+# ── 대용량 선택 자산 ────────────────────────────────────────────────────
+# 4.4MB. 디스코드 봇 홍보용 이미지다. 패키지에는 넣지 않으며,
+# SidebarProvider 는 파일이 없는 VSIX 에서 빈 avatar URI 를 넘겨 ChatPanel 의
+# 기본 "R" 아바타를 사용한다. 그래서 설치본에서 깨진 img 요청이 생기지 않는다.
+media/recoder-bot.png

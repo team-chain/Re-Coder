@@ -48,3 +48,5 @@ gateway/deploy-token.csv
 *token*.csv
 
 core/.recoder/
+extension/dist/
+extension/bin-dist/
