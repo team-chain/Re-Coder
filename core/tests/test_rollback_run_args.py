@@ -1,0 +1,165 @@
+"""롤백이 배포 당시의 실행 조건을 재현하는가 — 회차4 E2E 통합 검증.
+
+## 왜 이 테스트가 있나
+
+롤백은 이미지 태그만 되돌리고 **포트 매핑을 잃어버리고 있었다.** 그런데 이
+실패는 어디에도 빨간불이 뜨지 않았다:
+
+  · 컨테이너 내부 헬스체크는 `127.0.0.1:8000` 을 보므로 docker 는 healthy 로 표시
+  · 지속 검증(continuous verification)도 정상으로 보고
+  · `/api/deploy/rollback` 도 200 을 반환
+
+**모든 지표가 "복구됨"인데 사용자만 접속하지 못한다.** 장애 대응 중에 이걸
+만나면 "롤백했는데 왜 안 되지" 로 시간을 전부 쓴다. E2E 검증에서 `docker ps`
+출력의 `8000/tcp`(포트 매핑 없음)와 `0.0.0.0:18080->8000/tcp` 차이 하나로
+겨우 드러났다.
+
+그래서 여기서는 **롤백이 실제로 만드는 docker 인자**를 직접 본다. 응답 코드나
+컨테이너 상태로는 이 회귀를 다시 잡을 수 없다.
+"""
+from __future__ import annotations
+
+import asyncio
+import subprocess
+
+import pytest
+
+import api.routes.deploy as deploy_route
+from schemas import DeploymentRecord, DeployMethod, DeployStatus
+
+
+@pytest.fixture(autouse=True)
+def clean_records():
+    deploy_route._deployment_records.clear()
+    yield
+    deploy_route._deployment_records.clear()
+
+
+@pytest.fixture()
+def captured(monkeypatch):
+    """docker 를 실제로 부르지 않고 인자만 모은다."""
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):  # noqa: ANN001
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
+    return calls
+
+
+def _record(**overrides) -> DeploymentRecord:
+    data = {
+        "project_id": "p",
+        "method": DeployMethod.LOCAL_DOCKER,
+        "image": "app:v2",
+        "container_name": "app",
+        "ports": {"18080": "8000"},
+        "env": {"PORT": "8000"},
+        "rollback_target": "app:v1",
+        "status": DeployStatus.SUCCESS,
+    }
+    data.update(overrides)
+    rec = DeploymentRecord(**data)
+    deploy_route._deployment_records[rec.deployment_id] = rec
+    return rec
+
+
+def _rollback(rec: DeploymentRecord) -> dict:
+    return asyncio.run(
+        deploy_route.rollback(deploy_route.RollbackRequest(deployment_id=rec.deployment_id))
+    )
+
+
+def _run_cmd(calls: list[list[str]]) -> list[str]:
+    """stop/rm 을 지나 실제 `docker run` 인자를 고른다."""
+    for args in calls:
+        if len(args) > 1 and args[1] == "run":
+            return args
+    raise AssertionError(f"docker run 이 호출되지 않았다: {calls}")
+
+
+def test_롤백이_포트_매핑을_재현한다(captured):
+    """이 테스트가 이 파일의 존재 이유다."""
+    rec = _record()
+
+    result = _rollback(rec)
+
+    assert result["status"] == "ok"
+    cmd = _run_cmd(captured)
+    assert "-p" in cmd, f"포트 매핑 없이 컨테이너를 띄웠다: {cmd}"
+    assert "18080:8000" in cmd, cmd
+
+
+def test_롤백이_환경변수를_재현한다(captured):
+    rec = _record()
+
+    _rollback(rec)
+
+    cmd = _run_cmd(captured)
+    assert "-e" in cmd
+    assert "PORT=8000" in cmd, cmd
+
+
+def test_롤백이_이전_이미지로_띄운다(captured):
+    rec = _record()
+
+    _rollback(rec)
+
+    cmd = _run_cmd(captured)
+    assert cmd[-1] == "app:v1", f"되돌릴 이미지가 아니라 {cmd[-1]} 로 띄웠다"
+    assert "app:v2" not in cmd
+
+
+def test_포트_기록이_없으면_경고를_돌려준다(captured):
+    """이 필드가 생기기 전의 기록은 롤백해도 밖에서 접속할 수 없다.
+
+    조용히 성공으로 보이면 사용자는 복구됐다고 믿는다.
+    """
+    rec = _record(ports={})
+
+    result = _rollback(rec)
+
+    assert result["status"] == "ok"
+    assert result["warning"], "포트 없이 롤백했는데 경고가 없다"
+    assert "접속" in result["warning"]
+
+
+def test_포트_기록이_있으면_경고가_없다(captured):
+    rec = _record()
+
+    result = _rollback(rec)
+
+    assert result["warning"] is None
+
+
+def test_기록된_포트가_숫자가_아니면_거절한다(captured):
+    from fastapi import HTTPException
+
+    rec = _record(ports={"web": "8000"})
+
+    with pytest.raises(HTTPException) as exc:
+        _rollback(rec)
+    assert exc.value.status_code == 400
+    assert "포트" in str(exc.value.detail)
+
+
+def test_환경변수_이름이_이상하면_거절한다(captured):
+    from fastapi import HTTPException
+
+    rec = _record(env={"BAD NAME": "x"})
+
+    with pytest.raises(HTTPException) as exc:
+        _rollback(rec)
+    assert exc.value.status_code == 400
+    assert "환경변수" in str(exc.value.detail)
+
+
+def test_롤백_대상이_없으면_422(captured):
+    from fastapi import HTTPException
+
+    rec = _record(rollback_target=None)
+
+    with pytest.raises(HTTPException) as exc:
+        _rollback(rec)
+    assert exc.value.status_code == 422

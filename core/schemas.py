@@ -334,6 +334,14 @@ class DeploymentRecord(BaseModel):
     git_commit: Optional[str] = None
     container_name: str
     health_check_path: str = "/health"
+    #: 배포 당시의 포트 매핑 {호스트: 컨테이너}. **롤백이 이 값을 다시 쓴다.**
+    #: 예전에는 기록하지 않아서, 롤백이 포트 없이 컨테이너를 띄웠다 — 컨테이너는
+    #: healthy 로 보이고(내부 헬스체크는 127.0.0.1 을 본다) 롤백 API 도 200 을
+    #: 돌려주는데 정작 밖에서는 접속이 안 됐다. 모든 지표가 "복구됐다"고 말하는
+    #: 가장 위험한 실패 형태였다.
+    ports: dict[str, str] = Field(default_factory=dict)
+    #: 배포 당시의 환경변수. 같은 이유로 롤백이 재현해야 한다.
+    env: dict[str, str] = Field(default_factory=dict)
     deployed_at: datetime = Field(default_factory=datetime.utcnow)
     rollback_target: Optional[str] = None  # Previous image tag for rollback
     status: DeployStatus = DeployStatus.SUCCESS

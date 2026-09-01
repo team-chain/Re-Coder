@@ -45,6 +45,58 @@ router = APIRouter(tags=["deploy"])
 _infra_proposals: dict[str, InfraFileProposal] = {}
 _deployment_plans: dict[str, DeploymentPlan] = {}
 _deployment_records: dict[str, DeploymentRecord] = {}
+
+
+def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[str], str]:
+    """같은 컨테이너에 마지막으로 성공한 배포의 이미지 태그를 찾는다.
+
+    ## 왜 필요한가
+
+    `DeployAgent.create_plan()` 은 `rollback_image=None` 을 하드코딩하고 있었고,
+    저장소 어디에서도 이 값을 채우지 않았다. 그 값은 그대로
+    `DeploymentRecord.rollback_target` 이 되므로, **모든 로컬 Docker 배포가
+    되돌릴 수 없는 상태**였다 — `/api/deploy/rollback` 은 항상 422 를 냈다.
+    단위 테스트는 조각별로만 돌아서 이 구멍이 드러나지 않았다.
+
+    ## 같은 태그는 롤백 대상이 아니다
+
+    이전 배포와 이번 배포가 같은 태그(`app:latest` → `app:latest`)면, 되돌려도
+    docker 는 **같은 태그가 지금 가리키는 이미지**, 즉 방금 배포한 그 이미지를
+    다시 띄운다. 롤백한 것처럼 보이지만 아무것도 되돌아가지 않는다. 그런
+    값을 rollback_target 에 넣으면 "롤백 가능"이라고 표시해 놓고 실제로는
+    사용자를 못 구한다. 그래서 태그가 같으면 대상 없음으로 두고, **왜 없는지**
+    를 사유로 돌려준다. 롤백을 쓰려면 배포마다 다른 태그를 써야 한다.
+
+    반환: (롤백 대상 이미지 태그 또는 None, 사람이 읽을 사유)
+    """
+    if not container_name:
+        return None, "롤백 대상 없음: 컨테이너 이름이 비어 있어 이전 배포를 찾을 수 없습니다."
+
+    same_tag_seen = False
+    for record in sorted(
+        _deployment_records.values(),
+        key=lambda r: r.deployed_at,
+        reverse=True,
+    ):
+        if record.container_name != container_name:
+            continue
+        if record.status != DeployStatus.SUCCESS:
+            continue
+        if not record.image:
+            continue
+        if record.image == next_image:
+            # 더 뒤로 가면 다른 태그가 있을 수 있으므로 계속 본다.
+            same_tag_seen = True
+            continue
+        return record.image, f"롤백 대상: {record.image} (이전 성공 배포)"
+
+    if same_tag_seen:
+        return None, (
+            f"롤백 대상 없음: 이전 배포와 태그가 같습니다({next_image}). "
+            "같은 태그로 되돌리면 방금 올린 이미지가 다시 뜹니다 — "
+            "롤백을 쓰려면 배포마다 다른 태그를 지정하세요."
+        )
+    return None, "롤백 대상 없음: 이 컨테이너의 첫 배포입니다."
 # Static Preflight가 만든 수정안은 사용자가 배포 화면에서 "자동 수정"을 눌렀을
 # 때만 적용한다. 프로세스 메모리에만 두므로 Core 재시작 후에는 다시 검사해야 한다.
 @dataclass(frozen=True)
@@ -2229,6 +2281,19 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
             approval_level=ApprovalLevel.CONFIRM,
         )
 
+    # 롤백 대상을 채운다. DeployAgent 는 이 저장소를 모르므로(라우트 계층의
+    # 상태다) 여기서 붙인다. 이 한 줄이 없어서 그동안 모든 배포가 되돌릴 수
+    # 없는 상태로 나갔다 — _previous_image_for 주석 참고.
+    if not getattr(plan, "rollback_image", None):
+        rollback_target, rollback_reason = _previous_image_for(
+            plan.container_name or "", plan.image or "",
+        )
+        plan.rollback_image = rollback_target
+        # 대상이 없으면 **왜 없는지**를 사용자에게 남긴다. 조용히 비워 두면
+        # 배포 화면에 롤백 버튼이 없는 이유를 아무도 알 수 없다.
+        if rollback_target is None:
+            plan.risk_reasons = list(plan.risk_reasons) + [rollback_reason]
+
     # Apply the security-gate verdict onto the plan.
     extra_reasons: list[str] = []
     extra_reasons.extend(f"BLOCKER: {b}" for b in gate["blockers"])
@@ -2319,6 +2384,9 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         image=plan.image or "",
         container_name=plan.container_name or "",
         health_check_path=plan.health_check_path,
+        # 롤백이 같은 모양으로 다시 띄울 수 있도록 실행 조건을 함께 남긴다.
+        ports={str(k): str(v) for k, v in (plan.ports or {}).items()},
+        env={str(k): str(v) for k, v in (getattr(plan, "env", None) or {}).items()},
         rollback_target=plan.rollback_image,
         status=DeployStatus.SUCCESS if success else DeployStatus.FAILED,
     )
@@ -2396,7 +2464,14 @@ async def list_deployment_records() -> list[DeploymentRecord]:
 
 @router.post("/api/deploy/rollback")
 async def rollback(request: RollbackRequest) -> dict:
-    """Roll back to the previous image tag for a given deployment."""
+    """이전 이미지로 되돌린다. **배포 당시의 실행 조건을 그대로 재현한다.**
+
+    예전에는 이미지 태그만 바꿔 띄워서 포트 매핑이 사라졌다. 그 실패는 어디에도
+    빨간불이 뜨지 않는다 — 컨테이너 내부 헬스체크는 `127.0.0.1` 을 보므로 docker
+    는 healthy 로 표시하고, 지속 검증도 정상으로 보고하고, 이 API 도 200 을
+    돌려준다. 모든 지표가 "복구됨"인데 사용자만 접속하지 못한다. 장애 대응 중에
+    이걸 만나면 원인을 찾는 데 시간을 다 쓴다.
+    """
     record = _deployment_records.get(request.deployment_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Deployment '{request.deployment_id}' not found.")
@@ -2407,15 +2482,39 @@ async def rollback(request: RollbackRequest) -> dict:
             detail=f"Deployment '{request.deployment_id}' has no rollback target.",
         )
 
-    # 보안: container_name / rollback_target 화이트리스트 검증 후 args list 로 호출.
-    # shell=True 가 아니므로 && 체이닝 불가 → 3단계 순차 실행.
+    # 보안: 이름·이미지·포트·환경변수를 화이트리스트로 검증한 뒤 args list 로 호출한다.
+    # shell=True 가 아니므로 && 체이닝 불가 → stop / rm / run 을 3단계 순차 실행.
+    #
+    # **검증은 try 밖에서 한다.** 안에서 HTTPException 을 던지면 아래
+    # `except Exception` 이 그것마저 500 으로 감싸서, 400 이어야 할 입력 오류가
+    # 서버 오류로 둔갑한다(사용자는 자기가 고칠 수 있는 문제인 줄 모른다).
     import re as _re
     _IMG_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/\-@]{0,254}$")
     _NAME_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$")
+    _ENV_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     if not _NAME_RE.match(record.container_name or ""):
         raise HTTPException(status_code=400, detail="Invalid container_name on record.")
     if not _IMG_RE.match(record.rollback_target):
         raise HTTPException(status_code=400, detail="Invalid rollback_target on record.")
+
+    run_args = ["docker", "run", "-d", "--name", record.container_name]
+    for _hp, _cp in (record.ports or {}).items():
+        try:
+            _host, _cont = int(_hp), int(_cp)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"기록된 포트 매핑이 올바르지 않습니다: {_hp}:{_cp}",
+            ) from None
+        run_args.extend(["-p", f"{_host}:{_cont}"])
+    for _k, _v in (record.env or {}).items():
+        if not _ENV_RE.match(str(_k)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"기록된 환경변수 이름이 올바르지 않습니다: {_k!r}",
+            )
+        run_args.extend(["-e", f"{_k}={_v}"])
+    run_args.extend(["--restart", "unless-stopped", record.rollback_target])
 
     try:
         loop = asyncio.get_running_loop()
@@ -2439,9 +2538,7 @@ async def rollback(request: RollbackRequest) -> dict:
         result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(
-                ["docker", "run", "-d", "--name", record.container_name,
-                 "--restart", "unless-stopped", record.rollback_target],
-                shell=False, capture_output=True, text=True, timeout=120,
+                run_args, shell=False, capture_output=True, text=True, timeout=120,
             ),
         )
         success = result.returncode == 0
@@ -2454,6 +2551,13 @@ async def rollback(request: RollbackRequest) -> dict:
         "status": "ok" if success else "failed",
         "deployment_id": request.deployment_id,
         "rolled_back_to": record.rollback_target,
+        "ports": dict(record.ports or {}),
+        # 포트 기록이 없는 배포(이 필드가 생기기 전의 기록)는 롤백해도 밖에서
+        # 접속할 수 없다. 조용히 성공으로 보이지 않게 알린다.
+        "warning": (
+            None if (record.ports or {})
+            else "이 배포에는 포트 기록이 없어 롤백된 컨테이너에 외부 접속이 불가능할 수 있습니다."
+        ),
         "stdout": result.stdout[:2000],
         "stderr": result.stderr[:2000],
     }
