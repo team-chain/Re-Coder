@@ -1584,9 +1584,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const scriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, 'out', 'webview', 'webview.js')
         );
-        const botAvatarUri = webview.asWebviewUri(
-            vscode.Uri.joinPath(this._extensionUri, 'media', 'recoder-bot.png')
+        // `recoder-bot.png`은 4MB가 넘는 홍보용 자산이라 VSIX에서 제외한다.
+        // 없는 파일에도 asWebviewUri를 만들면 ChatPanel은 비어 있지 않은 src를
+        // 보고 <img>를 렌더해 설치본에서 깨진 아바타가 된다. 개발 환경처럼
+        // 실제 파일이 있을 때만 URI를 주고, 패키지에서는 ChatPanel의 "R"
+        // 기본 아바타를 쓰게 한다.
+        const botAvatarPath = vscode.Uri.joinPath(
+            this._extensionUri, 'media', 'recoder-bot.png'
         );
+        const botAvatarUri = fs.existsSync(botAvatarPath.fsPath)
+            ? webview.asWebviewUri(botAvatarPath)
+            : '';
         const cspConnect = Array.from({ length: 17 }, (_, i) => `http://127.0.0.1:${17894 + i}`).join(' ');
 
         return `<!DOCTYPE html>

@@ -63,15 +63,25 @@ npm run build
 if [ "$NO_BINARY" -eq 1 ]; then
   echo "==> 경량 VSIX (Core 바이너리 없음)"
   TMP=""
+  restore_nobinary_bin() {
+    # `set -e` 때문에 vsce가 실패해도 EXIT trap은 실행된다. 복구는 모든 파일을
+    # 옮겼는지와 무관하게 시도해야 개발자의 F5용 Core가 임시 폴더에 갇히지 않는다.
+    if [ -n "${TMP:-}" ] && [ -d "$TMP" ]; then
+      mkdir -p bin
+      find "$TMP" -mindepth 1 -maxdepth 1 -exec mv {} bin/ \;
+      rmdir "$TMP" 2>/dev/null || true
+      TMP=""
+    fi
+  }
+  # 이동하기 **전** 등록한다. vsce 실패·Ctrl+C·예상 밖 오류 모두 bin을 복구한다.
+  trap restore_nobinary_bin EXIT HUP INT TERM
   if [ -d bin ] && [ -n "$(ls -A bin 2>/dev/null || true)" ]; then
     TMP="$(mktemp -d)"
     mv bin/* "$TMP/"
   fi
   npx @vscode/vsce package -o "$OUT_DIR/recoder-$VERSION-nobinary.vsix"
-  if [ -n "$TMP" ]; then
-    mv "$TMP"/* bin/
-    rmdir "$TMP"
-  fi
+  restore_nobinary_bin
+  trap - EXIT HUP INT TERM
   echo
   ls -lh "$OUT_DIR"/recoder-"$VERSION"-nobinary.vsix
   echo
