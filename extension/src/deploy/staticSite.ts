@@ -62,14 +62,21 @@ export function isBinaryAsset(filePath: string): boolean {
  * GitHub 저장소면 같은 값이 되도록 먼저 정규화한다.
  */
 export function normalizeRepositoryIdentity(repositoryIdentity: string): string {
-    let normalized = (repositoryIdentity || '').replace(/\\/g, '/').trim();
-    if (!normalized) { return ''; }
+    const identity = (repositoryIdentity || '').replace(/\\/g, '/').trim();
+    if (!identity) { return ''; }
+
+    // 모노레포 앱은 `원격주소#apps/site-a`처럼 원격과 리포지토리 내부 경로를
+    // 함께 보낸다. `.git` 제거는 원격 부분에만 적용해야 한다.
+    const marker = identity.indexOf('#');
+    const suffix = marker >= 0 ? identity.slice(marker + 1).replace(/^\/+|\/+$/g, '') : '';
+    let normalized = marker >= 0 ? identity.slice(0, marker) : identity;
 
     // git@github.com:team/repo.git → github.com/team/repo
     normalized = normalized.replace(/^git@([^:]+):/i, '$1/');
     // https://user@github.com/team/repo.git → github.com/team/repo
     normalized = normalized.replace(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?/i, '');
-    return normalized.replace(/\/+$/, '').replace(/\.git$/i, '');
+    normalized = normalized.replace(/\/+$/, '').replace(/\.git$/i, '');
+    return suffix ? `${normalized}#${suffix}` : normalized;
 }
 
 export function s3ProjectIdentifier(repositoryIdentity: string, fallbackName = 'site'): string {

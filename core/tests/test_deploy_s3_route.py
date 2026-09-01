@@ -12,6 +12,9 @@ FR-05-03 S3 배포 BYO 전환 — 라우트 통합 (moto)
 moto 가 없으면 스킵하지 않고 **실패**시킨다 — 조용히 건너뛰면 초록으로
 보이지만 아무것도 검사하지 않은 상태가 된다(requirements-dev.txt 참고).
 """
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -159,6 +162,57 @@ def test_재배포는_새_업로드에_없는_옛_자산을_지운다(client):
     with pytest.raises(ClientError) as exc:
         s3.head_object(Bucket=second["bucket"], Key="assets/app.js")
     assert exc.value.response["Error"]["Code"] in {"404", "NoSuchKey"}
+
+
+def test_같은_버킷_동시_배포는_업로드와_정리_단계를_직렬화한다(monkeypatch):
+    """두 배포가 서로의 새 파일을 이전 파일로 보고 지우면 안 된다."""
+    from api.routes import deploy_s3
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+    calls_lock = threading.Lock()
+    errors: list[Exception] = []
+
+    class _Sts:
+        def get_caller_identity(self):
+            return {"Account": "123456789012"}
+
+    class _Session:
+        def client(self, name, **_kwargs):
+            return _Sts() if name == "sts" else object()
+
+    def _fake_deploy_bucket(_request, _session, _client, _bucket, _region, _plan):
+        with calls_lock:
+            calls.append("entered")
+            if len(calls) == 1:
+                entered.set()
+        release.wait(timeout=2)
+        return None
+
+    monkeypatch.setattr(deploy_s3, "_deploy_bucket_sync", _fake_deploy_bucket)
+    request = deploy_s3.S3DeployRequest(
+        project="same-site", files=[{"path": "index.html", "content": "ok"}],
+    )
+
+    def _run():
+        try:
+            deploy_s3._deploy_sync(request, _Session(), REGION)
+        except Exception as exc:  # pragma: no cover - 실패 시 아래에서 보여 준다
+            errors.append(exc)
+
+    first = threading.Thread(target=_run)
+    second = threading.Thread(target=_run)
+    first.start()
+    assert entered.wait(timeout=1), "첫 배포가 잠금 구간에 들어가지 않았다"
+    second.start()
+    time.sleep(0.05)
+    assert len(calls) == 1, "두 번째 배포가 첫 배포의 업로드·정리 사이에 끼어들었다"
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    assert not errors
+    assert len(calls) == 2
 
 
 @mock_aws

@@ -47,9 +47,9 @@ function _normalizeReadyValue(v: unknown): string {
 /**
  * S3 재배포용으로 저장소의 이동·재클론에도 변하지 않는 ID를 찾는다.
  *
- * Git 원격 주소가 있으면 그것을 쓴다. 원격이 없는 로컬 폴더는 기존처럼 실제
- * 경로를 마지막 수단으로 쓰되, 그 경우에는 다른 컴퓨터에서 같은 버킷을
- * 자동으로 찾을 수 없다는 점을 숨기지 않는다.
+ * Git 원격 주소만 쓰면 모노레포의 여러 앱이 같은 버킷을 공유한다. 그래서
+ * 원격 주소와 **저장소 루트 기준 워크스페이스 경로**를 함께 쓴다. 이 조합은
+ * 다른 위치로 재클론해도 유지되면서 `apps/site-a`와 `apps/site-b`를 구분한다.
  */
 function s3RepositoryIdentity(workspacePath: string): string {
     try {
@@ -58,7 +58,23 @@ function s3RepositoryIdentity(workspacePath: string): string {
             ['-C', workspacePath, 'remote', 'get-url', 'origin'],
             { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
         ).trim();
-        if (remote) { return remote; }
+        if (remote) {
+            const repositoryRoot = execFileSync(
+                'git',
+                ['-C', workspacePath, 'rev-parse', '--show-toplevel'],
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+            ).trim();
+            const realRoot = fs.realpathSync(repositoryRoot);
+            const realWorkspace = fs.realpathSync(workspacePath);
+            const relative = path.relative(realRoot, realWorkspace);
+            const outsideRepository = relative === '..'
+                || relative.startsWith(`..${path.sep}`)
+                || path.isAbsolute(relative);
+            if (!outsideRepository && relative) {
+                return `${remote}#${relative.replace(/\\/g, '/')}`;
+            }
+            return remote;
+        }
     } catch {
         // Git 원격이 없는 정적 폴더도 S3 배포는 가능해야 한다.
     }

@@ -197,6 +197,21 @@ test('같은 저장소는 다른 클론 경로·SSH/HTTPS 표기에서도 같은
   assert.ok(!first.includes('local-clone'), '로컬 경로·이름이 공개 버킷 이름에 드러난다');
 });
 
+test('모노레포의 서로 다른 앱은 같은 원격 저장소여도 S3 프로젝트를 구분한다', () => {
+  const siteA = normalizeRepositoryIdentity('git@github.com:team-chain/Re-Coder.git#apps/site-a');
+  const siteB = normalizeRepositoryIdentity('https://github.com/team-chain/Re-Coder.git#apps/site-b');
+  assert.strictEqual(
+    siteA,
+    normalizeRepositoryIdentity('https://github.com/team-chain/Re-Coder.git#apps/site-a'),
+    'SSH/HTTPS 표기 차이로 같은 모노레포 앱을 나눴다',
+  );
+  assert.notStrictEqual(
+    s3ProjectIdentifier(siteA),
+    s3ProjectIdentifier(siteB),
+    '모노레포 앱끼리 같은 버킷을 공유해 재배포 때 서로 파일을 지운다',
+  );
+});
+
 test('걸러야 할 폴더는 수집하지 않는다', () => {
   const files = collectStaticFiles('.', fakeFs({
     'index.html': 'x',
@@ -346,6 +361,10 @@ test('SidebarProvider 가 파일을 읽어 코어로 넘긴다', () => {
   assert.match(source, /s3ProjectIdentifier/, '폴더명만 보내 서로 다른 프로젝트가 같은 버킷을 쓴다');
   assert.match(source, /remote', 'get-url', 'origin'/,
     '로컬 절대 경로 대신 Git 원격 주소로 S3 프로젝트를 식별해야 한다');
+  assert.match(source, /rev-parse', '--show-toplevel'/,
+    '모노레포 앱을 구분할 저장소 루트를 찾지 않는다');
+  assert.match(source, /path\.relative\(realRoot, realWorkspace\)/,
+    '저장소 루트 기준 앱 경로를 S3 프로젝트 ID에 넣지 않는다');
 });
 
 test('S3 수집 전 선택 루트의 실제 경로가 워크스페이스 안인지 확인한다', () => {
