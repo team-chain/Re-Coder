@@ -91,7 +91,8 @@ VSIX 를 열어(`unzip -l`) 아래를 확인한다.
 3. `npx @vscode/vsce login <publisher>` 후 `npx @vscode/vsce publish --target <platform>` 를
    플랫폼마다 실행
 
-게시 전에 확인할 것: `media/icon.png` 는 128×128 이상이어야 한다(현재 894바이트로 너무 작다).
+게시 전에 확인할 것: `media/icon.png` 는 128×128 이상이어야 한다. 현재 파일은
+128×128 PNG이므로 이 조건을 충족한다. 아이콘을 바꾸면 다시 크기를 확인한다.
 
 ## 사용자 설치 경험
 
