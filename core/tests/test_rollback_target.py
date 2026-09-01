@@ -24,7 +24,7 @@ from __future__ import annotations
 import pytest
 
 import api.routes.deploy as deploy_route
-from schemas import DeploymentRecord, DeployMethod, DeployStatus
+from schemas import ActionType, DeploymentPlan, DeploymentRecord, DeployMethod, DeployStatus
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +39,7 @@ def _record(
     container: str,
     image: str,
     status: DeployStatus = DeployStatus.SUCCESS,
+    rollback_eligible: bool = True,
 ) -> DeploymentRecord:
     rec = DeploymentRecord(
         project_id="p",
@@ -46,6 +47,7 @@ def _record(
         image=image,
         container_name=container,
         status=status,
+        rollback_eligible=rollback_eligible,
     )
     deploy_route._deployment_records[rec.deployment_id] = rec
     return rec
@@ -55,7 +57,7 @@ def test_첫_배포는_되돌릴_곳이_없고_이유를_알려준다():
     target, reason = deploy_route._previous_image_for("api", "api:v1")
 
     assert target is None
-    assert "첫 배포" in reason, reason
+    assert "검증 완료" in reason, reason
 
 
 def test_이전_성공_배포의_이미지가_롤백_대상이_된다():
@@ -111,7 +113,35 @@ def test_실패한_배포는_롤백_대상이_아니다():
     target, reason = deploy_route._previous_image_for("api", "api:v2")
 
     assert target is None
-    assert "첫 배포" in reason
+    assert "검증 완료" in reason
+
+
+def test_헬스_검증을_통과하지_못한_배포는_롤백_대상이_아니다():
+    """docker run 이 성공했어도 앱이 응답하지 않으면 복구 버전이 될 수 없다."""
+    _record("api", "api:crashes-after-start", rollback_eligible=False)
+
+    target, reason = deploy_route._previous_image_for("api", "api:v2")
+
+    assert target is None
+    assert "검증 완료" in reason
+
+
+def test_승인_대기_플랜은_실행_직전에_최신_검증_대상으로_갱신된다():
+    """v2/v3 플랜이 동시에 있어도 v3은 v2로 되돌아가야 한다."""
+    _record("api", "api:v1")
+    plan = DeploymentPlan(
+        method=DeployMethod.LOCAL_DOCKER,
+        action=ActionType.DOCKER_RUN,
+        image="api:v3",
+        container_name="api",
+        rollback_image="api:v1",  # v3 플랜을 만들었을 당시의 오래된 스냅샷
+    )
+    _record("api", "api:v2")
+
+    target, _reason = deploy_route._refresh_rollback_target(plan)
+
+    assert target == "api:v2"
+    assert plan.rollback_image == "api:v2"
 
 
 def test_다른_컨테이너의_배포는_섞이지_않는다():

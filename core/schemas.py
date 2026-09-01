@@ -344,6 +344,10 @@ class DeploymentRecord(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     deployed_at: datetime = Field(default_factory=datetime.utcnow)
     rollback_target: Optional[str] = None  # Previous image tag for rollback
+    #: docker run 이 0 으로 끝났다는 사실만으로는 앱이 정상이라는 뜻이 아니다.
+    #: 최초 HTTP 헬스 확인을 통과한 배포만 다음 배포의 롤백 후보가 될 수 있다.
+    #: 지속 검증에서 이상이 감지되면 다시 False 로 바뀐다.
+    rollback_eligible: bool = False
     status: DeployStatus = DeployStatus.SUCCESS
 
 

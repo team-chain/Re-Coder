@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,8 +48,80 @@ _deployment_plans: dict[str, DeploymentPlan] = {}
 _deployment_records: dict[str, DeploymentRecord] = {}
 
 
+_ROLLBACK_HEALTH_TIMEOUT_SECONDS = 15.0
+_ROLLBACK_HEALTH_RETRY_SECONDS = 0.5
+
+
+async def _verify_rollback_candidate_health(plan: DeploymentPlan) -> bool:
+    """실행 직후의 로컬 HTTP 헬스 확인으로 롤백 후보 자격을 결정한다.
+
+    ``docker run -d`` 의 성공은 프로세스가 시작됐다는 뜻일 뿐, 앱이 요청을
+    처리할 수 있다는 뜻은 아니다. 후보를 안전하게 고르기 위해 최초 2xx 응답을
+    기다리되, 이 검증이 실패해도 실행 결과 자체는 그대로 돌려준다. 대신 그
+    배포는 다음 배포의 자동 롤백 대상으로 선택되지 않는다.
+    """
+    if not plan.ports:
+        return False
+
+    try:
+        host_port = int(next(iter(plan.ports.keys())))
+    except (StopIteration, TypeError, ValueError):
+        return False
+
+    health_path = plan.health_check_path or "/health"
+    if not health_path.startswith("/"):
+        health_path = "/" + health_path
+
+    try:
+        try:
+            from preflight.runtime import http_probe  # type: ignore
+        except ImportError:  # pragma: no cover - package 실행 호환
+            from core.preflight.runtime import http_probe  # type: ignore
+
+        deadline = time.monotonic() + _ROLLBACK_HEALTH_TIMEOUT_SECONDS
+        while True:
+            healthy, _status, _body = await asyncio.to_thread(
+                http_probe, "127.0.0.1", host_port, health_path, 2.0,
+            )
+            if healthy:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(_ROLLBACK_HEALTH_RETRY_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - 배포 결과를 헬스 확인 오류가 뒤집지 않는다
+        logger.warning("Rollback candidate health verification failed: %s", exc)
+        return False
+
+
+async def _mark_rollback_candidate_unhealthy(deployment_id: str, _anomaly: dict) -> None:
+    """지속 검증이 이상을 감지하면 해당 배포를 향후 롤백 후보에서 제외한다."""
+    record = _deployment_records.get(deployment_id)
+    if record is not None:
+        record.rollback_eligible = False
+
+
+def _refresh_rollback_target(plan: DeploymentPlan) -> tuple[Optional[str], str]:
+    """현재 배포 기록을 기준으로 플랜의 롤백 대상을 새로 계산한다.
+
+    플랜은 승인 대기 중에도 다른 배포가 실행될 수 있다. 따라서 플랜을 만들 때의
+    스냅샷은 화면 안내용일 뿐이며, 실제 record 에 저장할 대상은 실행 직전에 다시
+    계산해야 한다.
+    """
+    rollback_target, rollback_reason = _previous_image_for(
+        plan.container_name or "", plan.image or "",
+    )
+    plan.rollback_image = rollback_target
+    plan.risk_reasons = [
+        reason for reason in plan.risk_reasons
+        if not reason.startswith("롤백 대상 없음:")
+    ]
+    if rollback_target is None:
+        plan.risk_reasons.append(rollback_reason)
+    return rollback_target, rollback_reason
+
+
 def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[str], str]:
-    """같은 컨테이너에 마지막으로 성공한 배포의 이미지 태그를 찾는다.
+    """같은 컨테이너의 마지막 검증 완료 배포 이미지 태그를 찾는다.
 
     ## 왜 필요한가
 
@@ -82,6 +155,8 @@ def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[
             continue
         if record.status != DeployStatus.SUCCESS:
             continue
+        if not record.rollback_eligible:
+            continue
         if not record.image:
             continue
         if record.image == next_image:
@@ -96,7 +171,7 @@ def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[
             "같은 태그로 되돌리면 방금 올린 이미지가 다시 뜹니다 — "
             "롤백을 쓰려면 배포마다 다른 태그를 지정하세요."
         )
-    return None, "롤백 대상 없음: 이 컨테이너의 첫 배포입니다."
+    return None, "롤백 대상 없음: 이 컨테이너의 검증 완료 배포가 없습니다."
 # Static Preflight가 만든 수정안은 사용자가 배포 화면에서 "자동 수정"을 눌렀을
 # 때만 적용한다. 프로세스 메모리에만 두므로 Core 재시작 후에는 다시 검사해야 한다.
 @dataclass(frozen=True)
@@ -2281,18 +2356,9 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
             approval_level=ApprovalLevel.CONFIRM,
         )
 
-    # 롤백 대상을 채운다. DeployAgent 는 이 저장소를 모르므로(라우트 계층의
-    # 상태다) 여기서 붙인다. 이 한 줄이 없어서 그동안 모든 배포가 되돌릴 수
-    # 없는 상태로 나갔다 — _previous_image_for 주석 참고.
-    if not getattr(plan, "rollback_image", None):
-        rollback_target, rollback_reason = _previous_image_for(
-            plan.container_name or "", plan.image or "",
-        )
-        plan.rollback_image = rollback_target
-        # 대상이 없으면 **왜 없는지**를 사용자에게 남긴다. 조용히 비워 두면
-        # 배포 화면에 롤백 버튼이 없는 이유를 아무도 알 수 없다.
-        if rollback_target is None:
-            plan.risk_reasons = list(plan.risk_reasons) + [rollback_reason]
+    # 화면에 보여 줄 현재 롤백 후보를 계산한다. 이 값은 승인 대기 중 오래될 수
+    # 있으므로 execute_deployment 에서 반드시 한 번 더 새로 계산한다.
+    _refresh_rollback_target(plan)
 
     # Apply the security-gate verdict onto the plan.
     extra_reasons: list[str] = []
@@ -2322,6 +2388,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     if not request.approved:
         del _deployment_plans[request.plan_id]
         return {"status": "cancelled", "plan_id": request.plan_id}
+
+    # 플랜 생성 뒤 다른 배포가 실행될 수 있으므로, record 에 저장할 롤백 대상은
+    # 반드시 실행 시점의 마지막 *검증 완료* 배포로 다시 잡는다.
+    rollback_target, rollback_reason = _refresh_rollback_target(plan)
 
     # ── 보안: image / container_name 화이트리스트 검증 (shell injection 차단) ──
     # docker 이미지 이름 문법: [registry/][namespace/]name[:tag][@digest]
@@ -2376,6 +2446,12 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Deployment execution failed: {exc}") from exc
 
+    # docker run 성공만으로는 앱이 준비됐다고 볼 수 없다. HTTP 헬스 확인을 통과한
+    # 기록만 이후 배포의 롤백 후보가 된다. 이 확인이 실패해도 이번 실행 자체의
+    # 결과는 실패로 바꾸지 않는다. 사용자는 장애 버전에 대해 여전히 롤백을 요청할
+    # 수 있어야 하기 때문이다.
+    rollback_eligible = success and await _verify_rollback_candidate_health(plan)
+
     # Record the deployment
     from schemas import ActionType
     record = DeploymentRecord(
@@ -2387,7 +2463,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         # 롤백이 같은 모양으로 다시 띄울 수 있도록 실행 조건을 함께 남긴다.
         ports={str(k): str(v) for k, v in (plan.ports or {}).items()},
         env={str(k): str(v) for k, v in (getattr(plan, "env", None) or {}).items()},
-        rollback_target=plan.rollback_image,
+        rollback_target=rollback_target,
+        rollback_eligible=rollback_eligible,
         status=DeployStatus.SUCCESS if success else DeployStatus.FAILED,
     )
     _deployment_records[record.deployment_id] = record
@@ -2426,6 +2503,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     health_check_url=health_url,
                     duration_minutes=5,
                     project_id=getattr(plan, "project_id", None),
+                    on_threshold_exceeded=_mark_rollback_candidate_unhealthy,
                 )
                 cv_started = True
             except Exception as _exc:  # noqa: BLE001
@@ -2438,6 +2516,9 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     return {
         "status": "success" if success else "failed",
         "deployment_id": record.deployment_id,
+        "rollback_target": record.rollback_target,
+        "rollback_eligible": record.rollback_eligible,
+        "rollback_reason": rollback_reason,
         "stdout": result.stdout[:2000],
         "stderr": result.stderr[:2000],
         "continuous_verification": {

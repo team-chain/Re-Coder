@@ -732,6 +732,28 @@ def step7_redeploy_broken(client, token: str, ws: Path) -> str:
     if not deployment_id:
         raise StepFailure(7, "배포 기록 id 를 못 받음", "execute 응답에 deployment_id 없음")
 
+    execute = result["execute"]
+    if execute.get("status") != "success":
+        raise StepFailure(
+            7, "깨진 v2 컨테이너를 실제로 시작하지 못함", json.dumps(execute, ensure_ascii=False)[:300],
+            "docker run 이 실패했는데 롤백만 성공하면 E2E 가 거짓 양성이 된다.\n"
+            "  execute 응답 status 와 Docker 실행 로그를 확인하세요.",
+        )
+    running_image = _running_image(CONTAINER)
+    if running_image != IMAGE_V2:
+        raise StepFailure(
+            7, "v2 이미지가 실제로 실행되지 않음", f"현재 이미지: {running_image or '(없음)'}",
+            "재배포가 실제로 일어나야 롤백 검증이 의미가 있습니다.",
+        )
+
+    actual_rollback_target = execute.get("rollback_target")
+    if actual_rollback_target != IMAGE_V1:
+        raise StepFailure(
+            7, "실행 시점의 롤백 대상이 v1 이 아님",
+            f"rollback_target={actual_rollback_target!r}",
+            "승인 대기 플랜의 대상이 오래됐을 수 있으므로 execute 직전에 대상이 다시 계산되어야 합니다.",
+        )
+
     _ok(f"v2 배포됨, 롤백 대상 = {rollback_image}")
 
     status, _ = _http(HEALTH_URL)
