@@ -35,6 +35,22 @@ if str(_CORE_DIR) not in sys.path:
 if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
+# .env 는 **아래 라우트 임포트보다 먼저** 읽어야 한다.
+#
+# `core/llm/bedrock_provider.py` 는 모듈 최상단에서 모델 ID 를 확정한다:
+#     DEFAULT_PRIMARY_MODEL = os.getenv("BEDROCK_PRIMARY_MODEL_IDENTIFIER", ...)
+#     BEDROCK_REGION        = os.getenv("BEDROCK_REGION", "us-east-1")
+# 즉 그 모듈이 임포트되는 순간의 환경으로 값이 굳는다. 예전에는 load_dotenv()
+# 가 main() 안에 있어서 아래 `from api.routes import ...` 가 먼저 실행됐고,
+# 그 결과 **.env 에 무엇을 적든 모델 ID 와 Bedrock 리전이 무시됐다.**
+# 자격증명은 호출 시점에 다시 읽어서 정상이었기 때문에, "키는 먹는데 모델만
+# 안 바뀐다"는 형태로만 드러나 원인을 찾기 어려웠다.
+#
+# 여기서 한 번 읽으면 python main.py 와 임포트 경로(테스트·스크립트) 양쪽이
+# 같은 설정을 본다. 이미 셸에 있는 환경변수는 덮어쓰지 않는다(override=False
+# 가 기본) — 데모용으로 한 번만 다른 모델을 쓰는 실행이 계속 동작해야 한다.
+load_dotenv(_CORE_DIR / ".env")
+
 from singleton import CoreSingleton  # noqa: E402
 from api.middleware.auth import SessionTokenMiddleware  # noqa: E402
 from api.routes import (  # noqa: E402
@@ -278,7 +294,9 @@ def _handle_shutdown(signum, _frame) -> None:
 
 def main() -> None:
     multiprocessing.freeze_support()
-    load_dotenv()
+    # load_dotenv() 는 파일 상단에서 이미 호출했다(임포트 순서 때문). 중복 호출은
+    # 하지 않는다 — override=False 라 무해하지만, 두 군데에 있으면 다음 사람이
+    # 어느 쪽이 실제로 먹는지 헷갈린다.
 
     try:
         from first_run import setup_recoder_home  # noqa: WPS433
