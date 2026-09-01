@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -58,6 +59,22 @@ def _session_and_region(profile: str = "", explicit_region: str = ""):
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["deploy-s3"])
+
+# 같은 버킷으로 들어온 배포는 업로드 후 "없는 파일 정리" 단계까지 하나의
+# 작업으로 취급해야 한다. 그렇지 않으면 두 작업이 서로의 새 번들을 오래된
+# 파일로 보고 삭제할 수 있다. API 라우트는 to_thread()로 실행되므로 threading
+# Lock을 쓴다. 잠금 객체 자체를 만드는 과정도 별도 잠금으로 보호한다.
+_bucket_deploy_locks: dict[str, threading.Lock] = {}
+_bucket_deploy_locks_lock = threading.Lock()
+
+
+def _bucket_deploy_lock(bucket: str) -> threading.Lock:
+    with _bucket_deploy_locks_lock:
+        lock = _bucket_deploy_locks.get(bucket)
+        if lock is None:
+            lock = threading.Lock()
+            _bucket_deploy_locks[bucket] = lock
+        return lock
 
 
 class S3DeployRequest(BaseModel):
@@ -186,25 +203,68 @@ def _configure_public_website(client, bucket: str, region: str) -> None:
     )
 
 
-def _deploy_sync(request: S3DeployRequest, session, region: str) -> S3DeployResponse:
-    """실제 AWS 호출. 이벤트 루프를 막지 않도록 라우트가 스레드로 넘긴다."""
+def _prune_obsolete_objects(client, bucket: str, desired_keys: list[str]) -> int:
+    """현재 배포 계획에 없는 이전 객체를 모두 지운다.
+
+    프로젝트 식별자가 안정적이므로 같은 워크스페이스의 재배포는 같은 버킷을
+    사용한다. 덮어쓰기만 하면 지운 번들·옛 HTML 라우트가 공개 상태로 남아
+    새 빌드와 섞인다. 업로드가 모두 성공한 뒤에만 정리해야 실패한 배포가
+    기존 사이트를 먼저 망가뜨리지 않는다.
+    """
     from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
 
-    plan = s3_byo.plan_upload(request.files)
-
+    desired = set(desired_keys)
+    stale: list[dict[str, str]] = []
+    token: str | None = None
     try:
-        account_id = session.client("sts").get_caller_identity()["Account"]
-    except (ClientError, BotoCoreError) as exc:
-        # 자격증명이 아예 없으면 botocore 는 NoCredentialsError 를 던진다.
-        # 그건 ClientError 가 **아니라** BotoCoreError 라, 예전에는 이 핸들러를
-        # 그냥 지나쳐 바깥 catch-all 의 500 + 원문 예외로 나갔다. 정작 사용자가
-        # 해야 할 일(AWS 연결)은 아무 데도 안 적혀 있었다.
+        while True:
+            request = {"Bucket": bucket}
+            if token:
+                request["ContinuationToken"] = token
+            page = client.list_objects_v2(**request)
+            stale.extend(
+                {"Key": item["Key"]}
+                for item in page.get("Contents", [])
+                if item.get("Key") not in desired
+            )
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+            if not token:
+                raise RuntimeError("S3 목록이 잘렸지만 다음 페이지 토큰이 없습니다.")
+
+        removed = 0
+        # DeleteObjects는 한 요청에 최대 1,000개만 허용한다.
+        for start in range(0, len(stale), 1000):
+            batch = stale[start:start + 1000]
+            response = client.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+            errors = response.get("Errors", [])
+            if errors:
+                failed = ", ".join(str(item.get("Key") or "(알 수 없는 키)") for item in errors[:3])
+                raise RuntimeError(f"이전 파일을 지우지 못했습니다: {failed}")
+            removed += len(batch)
+        return removed
+    except (ClientError, BotoCoreError, RuntimeError) as exc:
         raise HTTPException(
-            status_code=401, detail=_aws_error_detail(exc, "AWS 자격증명 확인"),
+            status_code=502, detail=_aws_error_detail(exc, "이전 배포 파일 정리"),
         ) from exc
 
-    bucket = s3_byo.bucket_name(request.project, account_id)
-    client = session.client("s3", region_name=region)
+
+def _deploy_bucket_sync(
+    request: S3DeployRequest,
+    session,
+    client,
+    bucket: str,
+    region: str,
+    plan,
+) -> S3DeployResponse:
+    """한 버킷의 생성·업로드·정리를 순서대로 실행한다.
+
+    호출자는 `_bucket_deploy_lock`을 이미 잡고 있어야 한다. 이 계약을 별도
+    함수로 두면 버킷 계산 전의 STS 조회는 병렬로 해도 되지만, 서로 영향을
+    주는 S3 변경은 절대 겹치지 않는다는 경계가 분명해진다.
+    """
+    from botocore.exceptions import ClientError  # type: ignore
 
     try:
         created, actual_region = _ensure_bucket(client, bucket, region)
@@ -248,10 +308,14 @@ def _deploy_sync(request: S3DeployRequest, session, region: str) -> S3DeployResp
             status_code=502, detail=_aws_error_detail(exc, "파일 업로드"),
         ) from exc
 
+    removed = _prune_obsolete_objects(client, bucket, plan.keys)
+
     url = s3_byo.website_url(bucket, region)
     note = ""
     if plan.index_copied_from:
         note = f" index.html 이 없어 {plan.index_copied_from} 를 진입 문서로 함께 올렸습니다."
+    if removed:
+        note += f" 이전 배포 파일 {removed}개를 정리했습니다."
     return S3DeployResponse(
         status="deployed",
         bucket=bucket,
@@ -262,6 +326,31 @@ def _deploy_sync(request: S3DeployRequest, session, region: str) -> S3DeployResp
         index_copied_from=plan.index_copied_from,
         message=f"{len(plan.items)}개 파일을 올렸습니다.{note}{region_note}",
     )
+
+
+def _deploy_sync(request: S3DeployRequest, session, region: str) -> S3DeployResponse:
+    """실제 AWS 호출. 이벤트 루프를 막지 않도록 라우트가 스레드로 넘긴다."""
+    from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
+
+    plan = s3_byo.plan_upload(request.files)
+
+    try:
+        account_id = session.client("sts").get_caller_identity()["Account"]
+    except (ClientError, BotoCoreError) as exc:
+        # 자격증명이 아예 없으면 botocore 는 NoCredentialsError 를 던진다.
+        # 그건 ClientError 가 **아니라** BotoCoreError 라, 예전에는 이 핸들러를
+        # 그냥 지나쳐 바깥 catch-all 의 500 + 원문 예외로 나갔다. 정작 사용자가
+        # 해야 할 일(AWS 연결)은 아무 데도 안 적혀 있었다.
+        raise HTTPException(
+            status_code=401, detail=_aws_error_detail(exc, "AWS 자격증명 확인"),
+        ) from exc
+
+    bucket = s3_byo.bucket_name(request.project, account_id)
+    # 업로드와 정리는 한 버킷의 "배포 단위"다. 둘 사이에 다른 배포가 끼면
+    # 해당 배포의 새 파일을 이전 파일로 오인해 삭제할 수 있다.
+    with _bucket_deploy_lock(bucket):
+        client = session.client("s3", region_name=region)
+        return _deploy_bucket_sync(request, session, client, bucket, region, plan)
 
 
 @router.post("/api/deploy/s3", response_model=S3DeployResponse)

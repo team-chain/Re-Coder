@@ -47,6 +47,43 @@ jobs:
         run: |
           pytest tests/ -q
 
+  # ── 골든패스 스모크 ────────────────────────────────────────────────────
+  # 왜 필요한가: 단위 테스트는 조각별 동작만 본다. plan 이 준 결정 카드 모양을
+  # generate 가 더 이상 받아들이지 않는 식으로 **조각 사이의 배선**이 끊기면,
+  # core/tests 는 전부 초록인데 제품의 핵심 흐름은 죽어 있다. 회차1 데모 당일까지
+  # 아무도 몰랐던 버그가 그 종류였다. 생성 → 배포를 한 번 끝까지 통과시켜 본다.
+  #
+  # LLM 은 픽스처, S3 는 moto 라 비용이 들지 않는다. 실제 모델·실제 버킷까지
+  # 보는 --live 는 CI 에 넣지 않는다 — PR 마다 Bedrock 토큰을 태우게 되고,
+  # 자격증명을 CI 시크릿에 넣어야 한다. 그건 하루 1회 수동 실행으로 남긴다.
+  golden-path:
+    name: 골든패스 스모크 (생성 → 배포)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 준비
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            core/requirements.txt
+            core/requirements-dev.txt
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r core/requirements.txt
+          # moto 가 없으면 스모크는 스킵이 아니라 실패한다(스크립트 참고).
+          pip install -r core/requirements-dev.txt
+
+      - name: 골든패스 실행
+        run: python scripts/golden_path_smoke.py
+
   # ── 웹뷰 렌더 테스트 ───────────────────────────────────────────────────
   # 왜 필요한가: Workspace 창에서 결정 카드가 뜨지 않던 버그(showCodeAgent
   # =false)는 파이썬 테스트로는 절대 못 잡는다. UI 가 조용히 사라져도 CI 가

@@ -25,9 +25,15 @@ const {
   shouldSkipPath,
   pickStaticDir,
   collectStaticFiles,
+  s3ProjectIdentifier,
+  normalizeRepositoryIdentity,
+  StaticAssetReadError,
+  StaticAssetTooLargeError,
+  StaticAssetSymlinkError,
   describeTooManyFiles,
   STATIC_DIR_CANDIDATES,
   MAX_FILES,
+  MAX_BYTES_PER_FILE,
 } = require('../out/deploy/staticSite.js');
 
 // ---------------------------------------------------------------------------
@@ -45,17 +51,19 @@ test('이미지·폰트·wasm 은 바이너리로 판정한다', () => {
   }
 });
 
-test('음성대조 — 텍스트 자산은 텍스트로 읽는다', () => {
+test('음성대조 — 알려진 텍스트 자산은 UTF-8로 읽는다', () => {
   // 전부 base64 로 보내면 정상 동작하지만, 이 테스트가 없으면 위 목록을
   // 무한정 넓혀도 아무도 모른다.
-  for (const p of ['index.html', 'app.js', 'style.css', 'data.json', 'a/b/main.mjs', 'README']) {
+  for (const p of ['index.html', 'app.js', 'style.css', 'data.json', 'a/b/main.mjs']) {
     assert.strictEqual(isBinaryAsset(p), false, `${p} 를 base64 로 보낸다`);
   }
 });
 
-test('확장자 없는 파일과 점으로 시작하는 이름을 오판하지 않는다', () => {
-  assert.strictEqual(isBinaryAsset('LICENSE'), false);
-  assert.strictEqual(isBinaryAsset('.htaccess'), false);
+test('알 수 없는 확장자와 확장자 없는 파일은 바이트 보존을 우선한다', () => {
+  assert.strictEqual(isBinaryAsset('scene.glb'), true);
+  assert.strictEqual(isBinaryAsset('cursor.cur'), true);
+  assert.strictEqual(isBinaryAsset('LICENSE'), true);
+  assert.strictEqual(isBinaryAsset('.htaccess'), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -68,6 +76,8 @@ test('node_modules 와 .git 은 건너뛴다', () => {
   assert.strictEqual(shouldSkipPath('node_modules/react/index.js'), true);
   assert.strictEqual(shouldSkipPath('.git/config'), true);
   assert.strictEqual(shouldSkipPath('a/node_modules/b.js'), true);
+  assert.strictEqual(shouldSkipPath('.next/cache/webpack/client-production/index.pack'), true);
+  assert.strictEqual(shouldSkipPath('app/.next/cache/images/cache.bin'), true);
   assert.strictEqual(shouldSkipPath('.DS_Store'), true);
 });
 
@@ -123,13 +133,18 @@ function fakeFs(tree) {
       const entries = dirs.get(key);
       if (!entries) { throw new Error(`ENOENT ${dir}`); }
       return [...entries].map(([name, isDir]) => ({
-        name, isDirectory: () => isDir, isFile: () => !isDir,
+        name, isDirectory: () => isDir, isFile: () => !isDir, isSymbolicLink: () => false,
       }));
     },
     readFileSync(file) {
       const value = tree[file];
       if (value === undefined) { throw new Error(`ENOENT ${file}`); }
       return Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf-8');
+    },
+    statSync(file) {
+      const value = tree[file];
+      if (value === undefined) { throw new Error(`ENOENT ${file}`); }
+      return { size: Buffer.isBuffer(value) ? value.length : Buffer.byteLength(value, 'utf-8') };
     },
   };
 }
@@ -154,6 +169,46 @@ test('텍스트는 utf-8, 바이너리는 base64 로 담는다', () => {
     Buffer.from(byPath['img/logo.png'].content, 'base64'),
     png,
     '바이너리가 손상됐다 — 업로드는 성공하고 브라우저에서만 깨진다'
+  );
+});
+
+test('목록에 없는 바이너리 자산도 base64로 원본 바이트를 보존한다', () => {
+  const glb = Buffer.from([0x67, 0x6c, 0x54, 0x46, 0x02, 0x00, 0xff, 0xfe]);
+  const files = collectStaticFiles('.', fakeFs({
+    'index.html': '<script src="app.js"></script>',
+    'assets/scene.glb': glb,
+  }), join);
+  const scene = files.find(file => file.path === 'assets/scene.glb');
+  assert.strictEqual(scene.encoding, 'base64');
+  assert.deepStrictEqual(Buffer.from(scene.content, 'base64'), glb);
+});
+
+test('같은 저장소는 다른 클론 경로·SSH/HTTPS 표기에서도 같은 S3 프로젝트 식별자를 쓴다', () => {
+  const https = normalizeRepositoryIdentity('https://github.com/team-chain/Re-Coder.git');
+  const ssh = normalizeRepositoryIdentity('git@github.com:team-chain/Re-Coder.git');
+  assert.strictEqual(https, ssh, '같은 원격 저장소를 서로 다른 프로젝트로 본다');
+
+  const first = s3ProjectIdentifier(https, 'first-local-clone');
+  const second = s3ProjectIdentifier(ssh, 'another-local-clone');
+  const other = s3ProjectIdentifier('https://github.com/team-chain/other-site.git', 'other-site');
+  assert.strictEqual(first, second, '재클론·폴더 이동 뒤 새 버킷을 만든다');
+  assert.notStrictEqual(first, other, '서로 다른 저장소가 같은 버킷을 공유한다');
+  assert.ok(first.startsWith('re-coder-'));
+  assert.ok(!first.includes('local-clone'), '로컬 경로·이름이 공개 버킷 이름에 드러난다');
+});
+
+test('모노레포의 서로 다른 앱은 같은 원격 저장소여도 S3 프로젝트를 구분한다', () => {
+  const siteA = normalizeRepositoryIdentity('git@github.com:team-chain/Re-Coder.git#apps/site-a');
+  const siteB = normalizeRepositoryIdentity('https://github.com/team-chain/Re-Coder.git#apps/site-b');
+  assert.strictEqual(
+    siteA,
+    normalizeRepositoryIdentity('https://github.com/team-chain/Re-Coder.git#apps/site-a'),
+    'SSH/HTTPS 표기 차이로 같은 모노레포 앱을 나눴다',
+  );
+  assert.notStrictEqual(
+    s3ProjectIdentifier(siteA),
+    s3ProjectIdentifier(siteB),
+    '모노레포 앱끼리 같은 버킷을 공유해 재배포 때 서로 파일을 지운다',
   );
 });
 
@@ -210,15 +265,78 @@ test('상한 메시지가 어느 폴더를 봤는지 알려준다', () => {
   assert.match(message, /dist/);
 });
 
-test('읽을 수 없는 폴더 때문에 배포 전체가 죽지 않는다', () => {
-  const broken = fakeFs({ 'index.html': 'x' });
+test('읽을 수 없는 폴더는 빠진 자산 없이 배포가 중단된다', () => {
+  const broken = fakeFs({ 'index.html': 'x', 'secret/app.js': 'x' });
   const original = broken.readdirSync.bind(broken);
   broken.readdirSync = (dir, opts) => {
     if (dir === 'secret') { throw new Error('EACCES'); }
     return original(dir, opts);
   };
-  const files = collectStaticFiles('.', broken, join);
-  assert.deepStrictEqual(files.map(f => f.path), ['index.html']);
+  assert.throws(
+    () => collectStaticFiles('.', broken, join),
+    (err) => err instanceof StaticAssetReadError
+      && err.relativePath === 'secret'
+      && /secret/.test(err.message),
+    '폴더를 조용히 건너뛰면 그 안의 JS/CSS가 빠진 성공 배포가 된다'
+  );
+});
+
+test('읽을 수 없는 파일은 경로를 알리고 배포가 중단된다', () => {
+  const broken = fakeFs({ 'index.html': 'x', 'assets/app.js': 'x' });
+  const original = broken.readFileSync.bind(broken);
+  broken.readFileSync = (file) => {
+    if (file === 'assets/app.js') { throw new Error('EACCES'); }
+    return original(file);
+  };
+  assert.throws(
+    () => collectStaticFiles('.', broken, join),
+    (err) => err instanceof StaticAssetReadError
+      && err.relativePath === 'assets/app.js'
+      && /assets\/app\.js/.test(err.message),
+    '읽기 실패한 파일을 누락한 채 성공으로 처리한다'
+  );
+});
+
+test('심볼릭 링크 자산은 조용히 누락하지 않고 배포를 중단한다', () => {
+  const linked = fakeFs({ 'index.html': 'x' });
+  const original = linked.readdirSync.bind(linked);
+  linked.readdirSync = (dir, opts) => {
+    const entries = original(dir, opts);
+    if (dir === '.') {
+      entries.push({
+        name: 'assets-link', isDirectory: () => false, isFile: () => false,
+        isSymbolicLink: () => true,
+      });
+    }
+    return entries;
+  };
+  assert.throws(
+    () => collectStaticFiles('.', linked, join),
+    (err) => err instanceof StaticAssetSymlinkError
+      && err.relativePath === 'assets-link'
+      && /심볼릭 링크/.test(err.message),
+    '링크 자산을 건너뛰면 실제 사이트에 필요한 파일이 빠진 성공 배포가 된다',
+  );
+});
+
+test('상한 초과 자산은 읽기 전에 로컬에서 차단한다', () => {
+  const oversized = fakeFs({
+    'index.html': 'x',
+    'assets/demo.mp4': Buffer.alloc(MAX_BYTES_PER_FILE + 1),
+  });
+  const original = oversized.readFileSync.bind(oversized);
+  let oversizedWasRead = false;
+  oversized.readFileSync = (file) => {
+    if (file === 'assets/demo.mp4') { oversizedWasRead = true; }
+    return original(file);
+  };
+  assert.throws(
+    () => collectStaticFiles('.', oversized, join),
+    (err) => err instanceof StaticAssetTooLargeError
+      && err.relativePath === 'assets/demo.mp4'
+      && /3,000,000/.test(err.message),
+  );
+  assert.strictEqual(oversizedWasRead, false, '큰 파일을 먼저 읽어 확장 호스트 메모리를 소모한다');
 });
 
 // ---------------------------------------------------------------------------
@@ -231,6 +349,8 @@ test('ApiClient 가 /api/deploy/s3 를 호출한다', () => {
   const source = read('../src/core/ApiClient.ts');
   assert.match(source, /\/api\/deploy\/s3/, '코어 라우트를 부르는 코드가 없다');
   assert.match(source, /deployS3/);
+  assert.match(source, /S3_DEPLOY_TIMEOUT_MS\s*=\s*5\s*\*\s*60\s*\*\s*1000/,
+    'S3 업로드가 기본 30초 제한을 그대로 쓴다');
 });
 
 test('SidebarProvider 가 파일을 읽어 코어로 넘긴다', () => {
@@ -238,6 +358,25 @@ test('SidebarProvider 가 파일을 읽어 코어로 넘긴다', () => {
   assert.match(source, /case 'workspace\.deploy\.s3':/, '웹뷰가 요청해도 받는 곳이 없다');
   assert.match(source, /collectStaticFiles/, '파일을 읽는 쪽이 없다');
   assert.match(source, /deployS3/);
+  assert.match(source, /s3ProjectIdentifier/, '폴더명만 보내 서로 다른 프로젝트가 같은 버킷을 쓴다');
+  assert.match(source, /remote', 'get-url', 'origin'/,
+    '로컬 절대 경로 대신 Git 원격 주소로 S3 프로젝트를 식별해야 한다');
+  assert.match(source, /rev-parse', '--show-toplevel'/,
+    '모노레포 앱을 구분할 저장소 루트를 찾지 않는다');
+  assert.match(source, /path\.relative\(realRoot, realWorkspace\)/,
+    '저장소 루트 기준 앱 경로를 S3 프로젝트 ID에 넣지 않는다');
+});
+
+test('S3 수집 전 선택 루트의 실제 경로가 워크스페이스 안인지 확인한다', () => {
+  const source = read('../src/sidebar/SidebarProvider.ts');
+  assert.match(source, /fs\.realpathSync\(workspacePath\)/,
+    '워크스페이스의 실제 경로를 확인하지 않아 상위 심볼릭 링크를 놓친다');
+  assert.match(source, /fs\.realpathSync\(root\)/,
+    '선택한 배포 폴더의 실제 경로를 확인하지 않는다');
+  assert.match(source, /path\.relative\(realWorkspacePath, realRoot\)/,
+    '문자열 접두사 대신 경로 조상 관계로 containment를 확인해야 한다');
+  assert.match(source, /collectStaticFiles\(realRoot,/,
+    '검증한 실제 경로가 아닌 원래 링크 경로를 다시 수집한다');
 });
 
 test('S3 탭에 실제 배포 버튼과 URL 표시가 있다', () => {

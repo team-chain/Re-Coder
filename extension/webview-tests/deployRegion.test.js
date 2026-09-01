@@ -208,6 +208,16 @@ test('컴포넌트가 그 게이트를 실제로 쓴다', () => {
   assert.match(compiled, /regionGate\(/, '순수 함수만 있고 호출하는 데가 없다');
 });
 
+test('S3 배포는 화면에 표시한 코어 리전만 사용한다', () => {
+  // S3 화면에는 ECS 리전 입력이 없다. 그 숨은 값을 전송하면 사용자가 모르는
+  // 리전에 버킷이 만들어질 수 있으므로, 연결 상태에서 받은 리전을 표시·전송한다.
+  assert.match(compiled, /배포 리전/, 'S3 배포 리전이 화면에 표시되지 않는다');
+  assert.match(compiled, /workspace\.deploy\.s3[\s\S]{0,180}region:\s*coreRegion\.trim\(\)/,
+    'S3 요청이 연결된 코어 리전을 보내지 않는다');
+  assert.doesNotMatch(compiled, /workspace\.deploy\.s3[\s\S]{0,180}ecs\.aws_region/,
+    'S3 요청이 숨겨진 ECS 리전을 재사용한다');
+});
+
 test('폼 초기값에 리전이 하드코딩돼 있지 않다', () => {
   // 이게 사고의 근원이었다. 코어 리전을 모르는 동안 그럴듯한 오답이
   // 들어가 있으면, 사용자는 그대로 배포를 누른다.

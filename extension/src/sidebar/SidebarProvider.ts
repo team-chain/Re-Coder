@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { execFileSync } from 'child_process';
 import {
     SidebarState,
     Mode,
@@ -17,6 +18,7 @@ import { isCoreConnectionFailure } from '../core/coreReuse';
 import {
     collectStaticFiles,
     pickStaticDir,
+    s3ProjectIdentifier,
     STATIC_DIR_CANDIDATES,
     StaticFile,
 } from '../deploy/staticSite';
@@ -40,6 +42,47 @@ function _normalizeReadyValue(v: unknown): string {
     const s = v.toLowerCase().trim();
     if (s === 'ready' || s === 'ok') { return 'ready'; }
     return 'not_ready';
+}
+
+/**
+ * S3 재배포용으로 저장소의 이동·재클론에도 변하지 않는 ID를 찾는다.
+ *
+ * Git 원격 주소만 쓰면 모노레포의 여러 앱이 같은 버킷을 공유한다. 그래서
+ * 원격 주소와 **저장소 루트 기준 워크스페이스 경로**를 함께 쓴다. 이 조합은
+ * 다른 위치로 재클론해도 유지되면서 `apps/site-a`와 `apps/site-b`를 구분한다.
+ */
+function s3RepositoryIdentity(workspacePath: string): string {
+    try {
+        const remote = execFileSync(
+            'git',
+            ['-C', workspacePath, 'remote', 'get-url', 'origin'],
+            { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        ).trim();
+        if (remote) {
+            const repositoryRoot = execFileSync(
+                'git',
+                ['-C', workspacePath, 'rev-parse', '--show-toplevel'],
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+            ).trim();
+            const realRoot = fs.realpathSync(repositoryRoot);
+            const realWorkspace = fs.realpathSync(workspacePath);
+            const relative = path.relative(realRoot, realWorkspace);
+            const outsideRepository = relative === '..'
+                || relative.startsWith(`..${path.sep}`)
+                || path.isAbsolute(relative);
+            if (!outsideRepository && relative) {
+                return `${remote}#${relative.replace(/\\/g, '/')}`;
+            }
+            return remote;
+        }
+    } catch {
+        // Git 원격이 없는 정적 폴더도 S3 배포는 가능해야 한다.
+    }
+    try {
+        return `local:${fs.realpathSync(workspacePath)}`;
+    } catch {
+        return `local:${workspacePath}`;
+    }
 }
 
 function _normalizeDiagnostics<T extends Record<string, unknown>>(d: T | null | undefined): T | null {
@@ -902,9 +945,37 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
+                let realRoot: string;
+                try {
+                    // readdirSync는 루트 자체(예: dist)가 심볼릭 링크면 그 링크를
+                    // 먼저 따라간다. 자식 Dirent 검사만으로는 워크스페이스 밖의
+                    // 파일이 공개되는 것을 막을 수 없으므로, 수집 전에 실경로를
+                    // 비교한다.
+                    const realWorkspacePath = fs.realpathSync(workspacePath);
+                    realRoot = fs.realpathSync(root);
+                    const relativeRoot = path.relative(realWorkspacePath, realRoot);
+                    const outsideWorkspace = relativeRoot === '..'
+                        || relativeRoot.startsWith(`..${path.sep}`)
+                        || path.isAbsolute(relativeRoot);
+                    if (outsideWorkspace) {
+                        this.postMessage('workspace.deploy.s3.result', {
+                            ok: false,
+                            message: `선택한 폴더가 워크스페이스 밖을 가리킵니다: ${dirLabel || '.'}. 실제 배포 산출물 폴더를 워크스페이스 안에 복사한 뒤 다시 시도하세요.`,
+                        });
+                        break;
+                    }
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('workspace.deploy.s3.result', {
+                        ok: false,
+                        message: `선택한 폴더의 실제 경로를 확인하지 못했습니다: ${msg}`,
+                    });
+                    break;
+                }
+
                 let files: StaticFile[];
                 try {
-                    files = collectStaticFiles(root, fs, path.join, dirLabel);
+                    files = collectStaticFiles(realRoot, fs, path.join, dirLabel);
                 } catch (err) {
                     // 상한 초과는 자르지 않고 알린다. 조용히 30개만 올리면
                     // 사이트가 반쯤 올라간 채로 "배포 성공" 이 된다.
@@ -923,7 +994,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 try {
                     const result = await this._apiClient.deployS3({
-                        project: path.basename(workspacePath),
+                        // 로컬 폴더 경로가 아닌 Git 원격 주소를 지문으로 쓴다.
+                        // 같은 저장소를 다른 위치에서 열어도 기존 공개 버킷을
+                        // 갱신하고, 이전 배포 버킷을 고아 상태로 남기지 않는다.
+                        project: s3ProjectIdentifier(
+                            s3RepositoryIdentity(workspacePath),
+                            path.basename(workspacePath),
+                        ),
                         files,
                         region: (p.region ?? '').trim() || undefined,
                     });
@@ -989,8 +1066,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.postMessage('aws.policy.copied', { ok: false });
                     break;
                 }
-                await vscode.env.clipboard.writeText(text);
-                this.postMessage('aws.policy.copied', { ok: true });
+                try {
+                    await vscode.env.clipboard.writeText(text);
+                    this.postMessage('aws.policy.copied', { ok: true });
+                } catch {
+                    // onDidReceiveMessage는 이 async handler를 기다리지 않는다.
+                    // 실패를 회신하지 않으면 웹뷰 버튼이 아무 반응 없는 것처럼 보인다.
+                    this.postMessage('aws.policy.copied', { ok: false });
+                }
                 break;
             }
             case 'aws.configure': {

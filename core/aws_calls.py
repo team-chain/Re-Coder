@@ -116,6 +116,10 @@ OPERATION_TO_ACTION: dict[tuple[str, str], str] = {
     ("s3", "list_objects_v2"): "s3:ListBucket",
     ("s3", "head_bucket"):     "s3:ListBucket",
     ("s3", "head_object"):     "s3:GetObject",
+    # DeleteObjects API는 여러 키를 한 번에 지우지만 필요한 IAM 권한은
+    # `s3:DeleteObject`다. 메서드 이름을 기계적으로 CamelCase화하면 존재하지
+    # 않는 s3:DeleteObjects 권한으로 잘못 판정한다.
+    ("s3", "delete_objects"):  "s3:DeleteObject",
     # API 이름은 PutPublicAccessBlock 인데 **IAM 액션은 버킷이 붙는다.**
     # 규칙대로 PutPublicAccessBlock 을 주면 실제로는 인가되지 않는다.
     # https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutPublicAccessBlock.html

@@ -128,6 +128,10 @@ export interface CodeDecisionChoice {
 export class ApiClient {
     constructor(private coreManager: CoreManager) {}
 
+    // S3는 최대 30개 × 3MB 파일을 순차 업로드한다. 기본 30초를 쓰면 화면은
+    // 실패로 보이는데 코어는 공개 버킷 설정·업로드를 계속하는 상태가 된다.
+    private static readonly S3_DEPLOY_TIMEOUT_MS = 5 * 60 * 1000;
+
     private async request<T>(
         method: string,
         path: string,
@@ -886,7 +890,9 @@ export class ApiClient {
         if (input.region) { body.region = input.region; }
         if (input.profile) { body.profile = input.profile; }
 
-        const resp = await this.request<S3DeployResult>('POST', '/api/deploy/s3', body);
+        const resp = await this.request<S3DeployResult>(
+            'POST', '/api/deploy/s3', body, false, ApiClient.S3_DEPLOY_TIMEOUT_MS,
+        );
         if (resp.success && resp.data) {
             return resp.data;
         }

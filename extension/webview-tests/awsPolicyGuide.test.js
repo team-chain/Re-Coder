@@ -100,6 +100,39 @@ test('ApiClient 가 /api/aws/policy 를 호출한다', () => {
   assert.match(source, /getAwsPolicy/);
 });
 
+test('권한표는 사용자가 고른 배포 대상만 요청한다', () => {
+  const guide = read('../webview-src/components/AwsPolicyGuide.tsx');
+  assert.match(guide, /selectedTargets/, '대상 선택 상태가 없다');
+  assert.match(guide, /targets:\s*selectedTargets/, '선택한 대상을 API 요청에 담지 않는다');
+  assert.match(guide, /S3 정적 배포/);
+  assert.match(guide, /ECS 배포/);
+});
+
+test('ECS 권한표는 배포 폼에서 고른 클러스터·서비스·ECR 저장소를 요청한다', () => {
+  const guide = read('../webview-src/components/AwsPolicyGuide.tsx');
+  assert.match(guide, /ecsContext/, 'ECS 배포 대상 정보를 받을 수 없다');
+  assert.match(guide, /cluster:\s*ecsContext\.cluster\.trim\(\)/,
+    '사용자 지정 ECS 클러스터를 정책 요청에 담지 않는다');
+  assert.match(guide, /service:\s*ecsContext\.service\.trim\(\)/,
+    '사용자 지정 ECS 서비스를 정책 요청에 담지 않는다');
+  assert.match(guide, /ecrRepo:\s*ecsContext\.ecrRepo\.trim\(\)/,
+    '실제 ECR 저장소를 정책 요청에 담지 않는다');
+
+  const center = read('../webview-src/components/DeploymentCenter.tsx');
+  assert.match(center, /ecsPolicyContext\(ecs\)/,
+    'AWS 권한표 화면이 현재 ECS 폼 값을 전달받지 못한다');
+  assert.match(center, /ecrRepo:\s*service/,
+    'repo_name 없는 ECS 배포의 ECR 저장소는 서비스명과 같아야 한다');
+});
+
+test('권한표를 가져오는 중에는 대상 변경을 막아 오래된 응답을 표시하지 않는다', () => {
+  const guide = read('../webview-src/components/AwsPolicyGuide.tsx');
+  assert.match(guide, /if \(loading\) \{ return; \}/,
+    '요청 중 target 변경을 함수 수준에서 막지 않는다');
+  assert.match(guide, /disabled=\{loading\}/,
+    '요청 중에도 체크박스를 바꿀 수 있어 오래된 정책 응답이 섞인다');
+});
+
 test('SidebarProvider 가 웹뷰 요청을 받아 넘긴다', () => {
   const source = read('../src/sidebar/SidebarProvider.ts');
   assert.match(source, /case 'aws\.policy':/, '웹뷰가 요청해도 받는 곳이 없다');
@@ -113,6 +146,8 @@ test('복사는 웹뷰가 아니라 확장이 한다', () => {
   const source = read('../src/sidebar/SidebarProvider.ts');
   assert.match(source, /case 'aws\.policy\.copy':/);
   assert.match(source, /vscode\.env\.clipboard\.writeText/);
+  assert.match(source, /catch\s*\{[\s\S]{0,220}aws\.policy\.copied',\s*\{ ok: false \}/,
+    '클립보드 실패를 웹뷰에 회신하지 않아 수동 복사 안내가 뜨지 않는다');
 
   const guide = read('../webview-src/components/AwsPolicyGuide.tsx');
   //: 언급이 아니라 **호출**을 본다. 주석에서 이유를 설명하는 건 정상이다.

@@ -11,6 +11,26 @@ export const FALLBACK_REGION = "ap-northeast-2";
 
 export type AwsStatusMessage = { ready?: boolean; region?: string };
 
+const DEFAULT_ECS_CLUSTER = "recoder-cluster";
+const DEFAULT_ECS_SERVICE = "recoder-app";
+
+/**
+ * 정책 안내도 실제 ECS 배포 어댑터와 같은 기본값·ECR 규칙을 쓴다.
+ * `repo_name`을 별도로 보내지 않는 현재 요청은 ECR 저장소 이름으로 서비스명을
+ * 쓰므로, 여기서 recoder-app을 고정하면 사용자 지정 서비스와 어긋난다.
+ */
+export function ecsPolicyContext(ecs: {
+  ecs_cluster: string;
+  ecs_service: string;
+}): { cluster: string; service: string; ecrRepo: string } {
+  const service = ecs.ecs_service.trim() || DEFAULT_ECS_SERVICE;
+  return {
+    cluster: ecs.ecs_cluster.trim() || DEFAULT_ECS_CLUSTER,
+    service,
+    ecrRepo: service,
+  };
+}
+
 /**
  * `aws.status` 에서 **믿을 수 있는** 리전만 꺼낸다. 없으면 빈 문자열.
  *
@@ -558,7 +578,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         {([ ["decision", "배포 결정"], ["aws", awsReady ? "AWS 연결됨" : "AWS 연결"], ["docker", "Local"], ["actions", "Actions"], ["ec2", "EC2"], ["ecs", "ECS"] ] as [Target, string][]).map(([id, label]) => <button key={id} onClick={() => { setTarget(id); setMessage(""); }} style={{ padding: "9px 6px", borderRadius: 6, border: `1px solid ${target === id ? "var(--vscode-focusBorder, #3794ff)" : "var(--vscode-panel-border, #3f3f3f)"}`, background: target === id ? "var(--vscode-list-activeSelectionBackground, #094771)" : "var(--vscode-editorWidget-background, #252526)", color: id === "aws" && awsReady ? "var(--vscode-charts-green, #4ec9b0)" : "var(--vscode-foreground, #ddd)", cursor: "pointer", fontSize: 11, fontWeight: target === id ? 600 : 400 }}>{label}</button>)}
       </div>
 
-      {target === "aws" && <AwsConnection />}
+      {target === "aws" && <AwsConnection ecsPolicyContext={ecsPolicyContext(ecs)} />}
 
       {target === "decision" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 9, overflow: "hidden", background: "var(--vscode-editorWidget-background, #252526)" }}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--vscode-panel-border, #3f3f3f)", background: "linear-gradient(120deg, rgba(55,148,255,.16), transparent)" }}>
@@ -590,6 +610,10 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         <p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55, fontSize: 12 }}>
           본인 AWS 계정의 버킷에 직접 올립니다. 버킷이 없으면 만들고, 정적 웹사이트 호스팅까지 설정한 뒤 공개 URL을 돌려줍니다.
         </p>
+        <div style={{ margin: "8px 0 12px", padding: "8px 10px", borderRadius: 5, background: "var(--vscode-textBlockQuote-background, rgba(127,127,127,.08))", fontSize: 11, lineHeight: 1.5 }}>
+          배포 리전: <b>{coreRegion || "AWS 연결 후 확인"}</b>
+          <div style={{ marginTop: 2, color: "var(--vscode-descriptionForeground, #999)" }}>S3 배포는 연결된 AWS 리전을 사용합니다.</div>
+        </div>
         <label style={{ display: "block", fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
           올릴 폴더 (비우면 워크스페이스 루트)
           <input
@@ -608,10 +632,11 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
           {s3DirTouched ? "" : " (감지된 폴더를 자동으로 채웠습니다)"}
         </div>
         <button
-          disabled={s3Busy}
-          onClick={() => { setS3Busy(true); setS3Result(null); setMessage("S3에 올리는 중…"); postMessage("workspace.deploy.s3", { dir: s3Dir.trim(), region: ecs.aws_region.trim() }); }}
+          disabled={s3Busy || !awsReady || !coreRegion.trim()}
+          onClick={() => { setS3Busy(true); setS3Result(null); setMessage("S3에 올리는 중…"); postMessage("workspace.deploy.s3", { dir: s3Dir.trim(), region: coreRegion.trim() }); }}
           style={{ ...button, marginTop: 13, opacity: s3Busy ? .7 : 1 }}
         >{s3Busy ? "배포 중…" : "S3에 배포"}</button>
+        {(!awsReady || !coreRegion.trim()) && <div style={{ marginTop: 7, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>AWS 계정을 연결하면 배포 리전이 표시되고 S3 배포를 시작할 수 있습니다.</div>}
 
         {s3Result && (
           <div style={{ marginTop: 13, padding: "10px 12px", borderRadius: 6, background: "rgba(78, 201, 176, .10)", border: "1px solid rgba(78, 201, 176, .32)" }}>

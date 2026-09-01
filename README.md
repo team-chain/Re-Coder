@@ -121,6 +121,30 @@ cd extension && npm install && npm run build
 
 ---
 
+## 골든패스 스모크
+
+핵심 흐름(설계 결정 → 코드 생성 → ADR → S3 배포)이 아직 이어져 있는지 한 번에 확인합니다.
+단위 테스트는 조각별 동작만 보므로, 조각 사이의 **배선**이 끊긴 회귀는 이 스모크가 잡습니다.
+
+```bash
+pip install -r core/requirements.txt -r core/requirements-dev.txt
+
+# 기본 — 픽스처 LLM + moto S3. 비용 0, 수 초. PR 머지 전마다.
+python scripts/golden_path_smoke.py
+
+# 실제 Bedrock + 실제 S3 버킷까지. 하루 1회 또는 발표 리허설 전.
+python scripts/golden_path_smoke.py --live
+```
+
+기본 모드는 CI(`.github/workflows/ci.yml`)에서 develop PR마다 자동으로 돕니다.
+`--live` 는 AWS 자격증명이 필요하고 Bedrock 토큰 비용이 발생하며, 모킹이 못 잡는 것
+(모델 접근 권한, IAM 권한, 버킷 공개 설정, 리전 불일치)을 잡습니다. 실행 후 만들어진
+버킷은 자동으로 지웁니다.
+
+실패하면 7단계 중 어디서 깨졌는지와 어느 파일을 볼지를 함께 출력합니다.
+
+---
+
 ## 문서
 
 - [SETUP.md](SETUP.md) — 설치·실행 가이드
