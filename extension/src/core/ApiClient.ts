@@ -16,6 +16,8 @@ import {
     AwsConfigureInput,
     AwsConnectInput,
     AwsEcrRepo,
+    AwsPolicyResult,
+    S3DeployResult,
 } from '../types';
 import { CoreManager } from './CoreManager';
 import { describeHttpError } from './httpError';
@@ -859,6 +861,74 @@ export class ApiClient {
     async listAwsProfiles(): Promise<string[]> {
         const resp = await this.request<{ profiles: string[] }>('GET', '/api/aws/profiles');
         return resp.success && resp.data ? resp.data.profiles : [];
+    }
+
+    /**
+     * POST /api/deploy/s3 — 정적 사이트를 **사용자 자기 계정** 버킷에 배포.
+     *
+     * 코어에는 이 라우트가 완성돼 있었는데(버킷 생성·공개 설정·업로드·URL
+     * 조립까지) **확장이 한 번도 부르지 않았다.** 파일을 읽어 보내는 쪽이
+     * 없어서 그 경로 전체가 도달 불가능이었다.
+     *
+     * 바이너리는 반드시 `encoding: "base64"` 로 담아야 한다 — utf-8 로 보내면
+     * 업로드는 성공하고 브라우저에서만 깨진다.
+     */
+    async deployS3(input: {
+        project: string;
+        files: Array<{ path: string; content: string; encoding: 'utf-8' | 'base64' }>;
+        region?: string;
+        profile?: string;
+    }): Promise<S3DeployResult> {
+        const body: Record<string, unknown> = {
+            project: input.project,
+            files: input.files,
+        };
+        if (input.region) { body.region = input.region; }
+        if (input.profile) { body.profile = input.profile; }
+
+        const resp = await this.request<S3DeployResult>('POST', '/api/deploy/s3', body);
+        if (resp.success && resp.data) {
+            return resp.data;
+        }
+        //: 여기서 조용히 기본값을 돌려주면 "배포됐다" 로 보인다. 실패는
+        //: 실패로 올린다 — 호출자가 사용자에게 원인을 보여 준다.
+        throw new Error(resp.error ?? 'S3 배포에 실패했습니다.');
+    }
+
+    /**
+     * GET /api/aws/policy — ReCoder 가 요구하는 최소권한 IAM 정책.
+     *
+     * 코어에는 이 엔드포인트가 오래전부터 있었는데 **확장이 한 번도 부르지
+     * 않았다.** 그래서 사용자는 "권한이 없습니다" 라는 배포 실패만 보고,
+     * 무엇을 허용해야 하는지는 알 수 없었다. 필요한 건 정책 JSON 하나인데
+     * 그걸 얻을 방법이 제품 안에 없었던 것이다.
+     *
+     * 실패해도 예외를 던지지 않는다 — 이건 배포를 막는 경로가 아니라
+     * 사용자를 돕는 경로라, 여기서 throw 하면 도움을 주려다 화면을 깨뜨린다.
+     */
+    async getAwsPolicy(opts: {
+        targets?: string[];
+        cluster?: string;
+        service?: string;
+        ecrRepo?: string;
+        region?: string;
+        taskExecutionRole?: string;
+        taskRole?: string;
+    } = {}): Promise<AwsPolicyResult | null> {
+        const qs = new URLSearchParams();
+        if (opts.targets?.length) { qs.set('targets', opts.targets.join(',')); }
+        //: 빈 값은 아예 보내지 않는다. 코어는 빈 문자열을 "기본 규칙을 써라"
+        //: 로 읽지만, 굳이 보내면 의도가 흐려진다.
+        if (opts.cluster) { qs.set('cluster', opts.cluster); }
+        if (opts.service) { qs.set('service', opts.service); }
+        if (opts.ecrRepo) { qs.set('ecr_repo', opts.ecrRepo); }
+        if (opts.region) { qs.set('region', opts.region); }
+        if (opts.taskExecutionRole) { qs.set('task_execution_role', opts.taskExecutionRole); }
+        if (opts.taskRole) { qs.set('task_role', opts.taskRole); }
+
+        const path = qs.toString() ? `/api/aws/policy?${qs.toString()}` : '/api/aws/policy';
+        const resp = await this.request<AwsPolicyResult>('GET', path);
+        return resp.success && resp.data ? resp.data : null;
     }
 
     /**

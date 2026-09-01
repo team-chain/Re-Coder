@@ -1,0 +1,248 @@
+/**
+ * FR-05-03 「S3 배포 BYO 전환」 — 확장 쪽 배선
+ *
+ * 배경
+ *   코어의 `POST /api/deploy/s3` 는 완성돼 있었다. 버킷 생성, 퍼블릭 액세스
+ *   설정, 정적 웹사이트 호스팅, 업로드, URL 조립까지 다 한다. 테스트도 있다.
+ *   그런데 **확장이 그 라우트를 한 번도 부르지 않았다** — 사용자 파일을 읽어
+ *   보내는 쪽이 없어서 그 경로 전체가 도달 불가능이었다.
+ *
+ *   그래서 S3 탭에는 「배포 워크플로우 생성」 버튼만 있었다. 정적 사이트를
+ *   지금 당장 올리는 방법은 제품 안에 없었다.
+ *
+ * 여기서 검사하는 것
+ *   파일 선택은 **틀려도 예외가 안 난다.** node_modules 를 올리거나, 이미지를
+ *   utf-8 로 읽어 깨뜨리거나, 빌드 폴더 대신 소스 폴더를 올려도 업로드는
+ *   "성공" 한다. 사용자는 링크를 열어 본 다음에야 안다.
+ */
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const {
+  isBinaryAsset,
+  shouldSkipPath,
+  pickStaticDir,
+  collectStaticFiles,
+  describeTooManyFiles,
+  STATIC_DIR_CANDIDATES,
+  MAX_FILES,
+} = require('../out/deploy/staticSite.js');
+
+// ---------------------------------------------------------------------------
+// 바이너리를 텍스트로 읽지 않는다
+// ---------------------------------------------------------------------------
+
+test('이미지·폰트·wasm 은 바이너리로 판정한다', () => {
+  // utf-8 로 읽으면 잘못된 바이트가 U+FFFD 로 치환된다. 업로드는 성공하고
+  // 파일 크기도 그럴듯한데, 브라우저에서 열면 깨진 이미지가 나온다.
+  for (const p of [
+    'logo.png', 'a/b/hero.JPG', 'font.woff2', 'app.wasm',
+    'video.mp4', 'icon.ico', 'doc.pdf',
+  ]) {
+    assert.strictEqual(isBinaryAsset(p), true, `${p} 를 텍스트로 읽는다`);
+  }
+});
+
+test('음성대조 — 텍스트 자산은 텍스트로 읽는다', () => {
+  // 전부 base64 로 보내면 정상 동작하지만, 이 테스트가 없으면 위 목록을
+  // 무한정 넓혀도 아무도 모른다.
+  for (const p of ['index.html', 'app.js', 'style.css', 'data.json', 'a/b/main.mjs', 'README']) {
+    assert.strictEqual(isBinaryAsset(p), false, `${p} 를 base64 로 보낸다`);
+  }
+});
+
+test('확장자 없는 파일과 점으로 시작하는 이름을 오판하지 않는다', () => {
+  assert.strictEqual(isBinaryAsset('LICENSE'), false);
+  assert.strictEqual(isBinaryAsset('.htaccess'), false);
+});
+
+// ---------------------------------------------------------------------------
+// 올리면 안 되는 것을 거른다
+// ---------------------------------------------------------------------------
+
+test('node_modules 와 .git 은 건너뛴다', () => {
+  // 안 거르면 파일 수 상한을 즉시 넘겨 "파일이 너무 많습니다" 만 보게 된다.
+  // 진짜 원인은 폴더 선택인데 메시지는 개수 얘기만 한다.
+  assert.strictEqual(shouldSkipPath('node_modules/react/index.js'), true);
+  assert.strictEqual(shouldSkipPath('.git/config'), true);
+  assert.strictEqual(shouldSkipPath('a/node_modules/b.js'), true);
+  assert.strictEqual(shouldSkipPath('.DS_Store'), true);
+});
+
+test('음성대조 — 평범한 산출물은 거르지 않는다', () => {
+  assert.strictEqual(shouldSkipPath('index.html'), false);
+  assert.strictEqual(shouldSkipPath('assets/app.abc123.js'), false);
+  assert.strictEqual(shouldSkipPath('static/media/logo.png'), false);
+});
+
+// ---------------------------------------------------------------------------
+// 빌드 산출물 폴더를 고른다
+// ---------------------------------------------------------------------------
+
+test('빌드 산출물 폴더가 있으면 그걸 고른다', () => {
+  // 소스 폴더를 올리면 브라우저가 .tsx 를 실행할 수 없어 흰 화면이 나온다.
+  // 그 실패는 배포가 아니라 앱 문제처럼 보인다.
+  assert.strictEqual(pickStaticDir(['src', 'dist', 'node_modules']), 'dist');
+  assert.strictEqual(pickStaticDir(['src', 'build']), 'build');
+  assert.strictEqual(pickStaticDir(['out']), 'out');
+});
+
+test('후보 우선순위가 정해져 있다', () => {
+  // 둘 다 있으면 매번 다른 걸 고르면 안 된다.
+  const both = pickStaticDir(['public', 'dist']);
+  assert.strictEqual(both, STATIC_DIR_CANDIDATES.find(c => ['public', 'dist'].includes(c)));
+  assert.strictEqual(both, 'dist');
+});
+
+test('음성대조 — 후보가 없으면 루트를 쓴다', () => {
+  assert.strictEqual(pickStaticDir(['src', 'tests']), '');
+});
+
+// ---------------------------------------------------------------------------
+// 실제 수집
+// ---------------------------------------------------------------------------
+
+function fakeFs(tree) {
+  // tree: { 'index.html': 'text', 'img/logo.png': Buffer }
+  const dirs = new Map();
+  for (const key of Object.keys(tree)) {
+    const parts = key.split('/');
+    for (let i = 0; i < parts.length; i++) {
+      const parent = parts.slice(0, i).join('/');
+      const name = parts[i];
+      const isDir = i < parts.length - 1;
+      if (!dirs.has(parent)) { dirs.set(parent, new Map()); }
+      dirs.get(parent).set(name, isDir);
+    }
+  }
+  return {
+    readdirSync(dir, _opts) {
+      const key = dir === '.' ? '' : dir;
+      const entries = dirs.get(key);
+      if (!entries) { throw new Error(`ENOENT ${dir}`); }
+      return [...entries].map(([name, isDir]) => ({
+        name, isDirectory: () => isDir, isFile: () => !isDir,
+      }));
+    },
+    readFileSync(file) {
+      const value = tree[file];
+      if (value === undefined) { throw new Error(`ENOENT ${file}`); }
+      return Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf-8');
+    },
+  };
+}
+
+const join = (...parts) => parts.filter(p => p && p !== '.').join('/');
+
+test('텍스트는 utf-8, 바이너리는 base64 로 담는다', () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe]);
+  const files = collectStaticFiles('.', fakeFs({
+    'index.html': '<h1>안녕</h1>',
+    'img/logo.png': png,
+  }), join);
+
+  const byPath = Object.fromEntries(files.map(f => [f.path, f]));
+  assert.strictEqual(byPath['index.html'].encoding, 'utf-8');
+  assert.strictEqual(byPath['index.html'].content, '<h1>안녕</h1>');
+
+  assert.strictEqual(byPath['img/logo.png'].encoding, 'base64');
+  // **원본 바이트가 그대로 살아 있어야 한다.** utf-8 로 읽었다면 0xff 0xfe 가
+  // U+FFFD 로 바뀌어 되돌릴 수 없다.
+  assert.deepStrictEqual(
+    Buffer.from(byPath['img/logo.png'].content, 'base64'),
+    png,
+    '바이너리가 손상됐다 — 업로드는 성공하고 브라우저에서만 깨진다'
+  );
+});
+
+test('걸러야 할 폴더는 수집하지 않는다', () => {
+  const files = collectStaticFiles('.', fakeFs({
+    'index.html': 'x',
+    'node_modules/react/index.js': 'y',
+    '.git/config': 'z',
+  }), join);
+  assert.deepStrictEqual(files.map(f => f.path), ['index.html']);
+});
+
+test('상한을 넘으면 자르지 않고 던진다', () => {
+  // 조용히 30개만 올리면 사이트가 반쯤 올라간 채로 "배포 성공" 이 되고,
+  // 사용자는 뭐가 빠졌는지 모른다.
+  const tree = {};
+  for (let i = 0; i < MAX_FILES + 5; i++) { tree[`f${i}.html`] = 'x'; }
+  assert.throws(
+    () => collectStaticFiles('.', fakeFs(tree), join, 'dist'),
+    /30개|최대/,
+    '상한을 넘겼는데 조용히 잘랐다'
+  );
+});
+
+test('상한 초과 메시지가 **진짜 개수**를 말한다', () => {
+  // 읽으면서 상한에서 멈추면 "31개" 라고밖에 못 한다. 그런데 400개가
+  // 나왔다면 폴더를 잘못 고른 것이고 32개라면 몇 개만 빼면 된다 —
+  // 사용자가 할 행동이 완전히 다르다.
+  const tree = {};
+  const total = MAX_FILES + 70;
+  for (let i = 0; i < total; i++) { tree[`f${i}.html`] = 'x'; }
+  try {
+    collectStaticFiles('.', fakeFs(tree), join, 'src');
+    assert.fail('던지지 않았다');
+  } catch (err) {
+    assert.strictEqual(err.count, total, `개수를 ${err.count} 로 잘라서 보고했다`);
+    assert.match(err.message, new RegExp(String(total)));
+  }
+});
+
+test('음성대조 — 상한과 같으면 통과한다', () => {
+  const tree = {};
+  for (let i = 0; i < MAX_FILES; i++) { tree[`f${i}.html`] = 'x'; }
+  const files = collectStaticFiles('.', fakeFs(tree), join, 'dist');
+  assert.strictEqual(files.length, MAX_FILES);
+});
+
+test('상한 메시지가 어느 폴더를 봤는지 알려준다', () => {
+  // 코어도 같은 상한을 걸지만 "30개까지입니다" 라고만 한다. 진짜 원인은
+  // 대개 폴더를 잘못 고른 것이다.
+  const message = describeTooManyFiles(412, 'src');
+  assert.match(message, /'src'/);
+  assert.match(message, /412/);
+  assert.match(message, /dist/);
+});
+
+test('읽을 수 없는 폴더 때문에 배포 전체가 죽지 않는다', () => {
+  const broken = fakeFs({ 'index.html': 'x' });
+  const original = broken.readdirSync.bind(broken);
+  broken.readdirSync = (dir, opts) => {
+    if (dir === 'secret') { throw new Error('EACCES'); }
+    return original(dir, opts);
+  };
+  const files = collectStaticFiles('.', broken, join);
+  assert.deepStrictEqual(files.map(f => f.path), ['index.html']);
+});
+
+// ---------------------------------------------------------------------------
+// 배선 — **이게 없어서 코어의 라우트가 여태 도달 불가능이었다**
+// ---------------------------------------------------------------------------
+
+const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+test('ApiClient 가 /api/deploy/s3 를 호출한다', () => {
+  const source = read('../src/core/ApiClient.ts');
+  assert.match(source, /\/api\/deploy\/s3/, '코어 라우트를 부르는 코드가 없다');
+  assert.match(source, /deployS3/);
+});
+
+test('SidebarProvider 가 파일을 읽어 코어로 넘긴다', () => {
+  const source = read('../src/sidebar/SidebarProvider.ts');
+  assert.match(source, /case 'workspace\.deploy\.s3':/, '웹뷰가 요청해도 받는 곳이 없다');
+  assert.match(source, /collectStaticFiles/, '파일을 읽는 쪽이 없다');
+  assert.match(source, /deployS3/);
+});
+
+test('S3 탭에 실제 배포 버튼과 URL 표시가 있다', () => {
+  const source = read('../webview-src/components/DeploymentCenter.tsx');
+  assert.match(source, /workspace\.deploy\.s3"/, '배포를 요청하는 버튼이 없다');
+  // URL 을 안 보여 주면 사용자는 배포하고도 어디로 가야 할지 모른다.
+  assert.match(source, /s3Result\.url/, '공개 URL 을 화면에 안 보여 준다');
+});
