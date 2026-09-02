@@ -44,6 +44,7 @@ Docker Desktop 이 켜져 있어야 한다.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import re
 import shutil
@@ -307,6 +308,7 @@ def _headers(token: str) -> dict[str, str]:
     return {"X-Session-Token": token}
 
 
+@contextmanager
 def step1_boot():
     _step(1, "코어 기동")
     if shutil.which("docker") is None:
@@ -333,16 +335,17 @@ def step1_boot():
     app = main.create_app()
     token = "e" * 32
     app.state.session_token = token
-    client = TestClient(app, raise_server_exceptions=False, client=("127.0.0.1", 5555))
-
-    resp = client.get("/api/health")
-    if resp.status_code != 200:
-        raise StepFailure(
-            1, "코어가 응답하지 않음", f"GET /api/health → {resp.status_code}",
-            "core/api/routes/health.py 와 create_app 의 미들웨어",
-        )
-    _ok("Docker 연결됨, 코어 /api/health 200")
-    return client, token
+    # with 범위 전체에서 FastAPI lifespan과 async portal을 유지한다. 그래야
+    # /api/deploy/execute가 시작한 지속 감시 task가 다음 요청까지 살아 있다.
+    with TestClient(app, raise_server_exceptions=False, client=("127.0.0.1", 5555)) as client:
+        resp = client.get("/api/health")
+        if resp.status_code != 200:
+            raise StepFailure(
+                1, "코어가 응답하지 않음", f"GET /api/health → {resp.status_code}",
+                "core/api/routes/health.py 와 create_app 의 미들웨어",
+            )
+        _ok("Docker 연결됨, 코어 /api/health 200")
+        yield client, token
 
 
 def step2_develop(client, token: str, ws: Path) -> None:
@@ -694,6 +697,11 @@ def step6_watch(client, token: str, deployment_id: str) -> None:
             "core/preflight/continuous_verification.py",
         )
     snapshot = resp.json() or {}
+    if snapshot.get("status") != "running":
+        raise StepFailure(
+            6, "지속 감시가 실행 중이 아님", f"상태: {snapshot.get('status', snapshot)}",
+            "TestClient의 lifespan을 E2E 전체에서 유지하고, execute가 감시 task를 시작하는지 확인하세요.",
+        )
     _ok(f"감시 동작 중 (상태: {snapshot.get('status', snapshot)})")
 
     client.post(
@@ -837,14 +845,14 @@ def run(keep: bool) -> int:
     code_agent.get_router = lambda: router  # type: ignore[assignment]
 
     try:
-        client, token = step1_boot()
-        step2_develop(client, token, ws)
-        step3_infra(client, token, ws)
-        step4_inspect(client, token, ws)
-        dep_v1 = step5_deploy_v1(client, token, ws)
-        step6_watch(client, token, dep_v1)
-        dep_v2 = step7_redeploy_broken(client, token, ws)
-        step8_rollback(client, token, dep_v2)
+        with step1_boot() as (client, token):
+            step2_develop(client, token, ws)
+            step3_infra(client, token, ws)
+            step4_inspect(client, token, ws)
+            dep_v1 = step5_deploy_v1(client, token, ws)
+            step6_watch(client, token, dep_v1)
+            dep_v2 = step7_redeploy_broken(client, token, ws)
+            step8_rollback(client, token, dep_v2)
     except StepFailure as exc:
         _report(exc)
         return 1

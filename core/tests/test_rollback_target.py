@@ -141,6 +141,24 @@ def test_지속_검증을_끝까지_통과한_느린_시작_배포는_롤백_후
     assert record.rollback_eligible is True
 
 
+def test_재배포_전에_같은_컨테이너의_이전_감시를_중지한다(monkeypatch):
+    prior = _record("api", "api:v1")
+    stopped: list[str] = []
+
+    class _Verifier:
+        def list_active(self):
+            return [prior.deployment_id]
+
+        async def stop(self, deployment_id: str):
+            stopped.append(deployment_id)
+
+    monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: _Verifier())
+
+    asyncio.run(deploy_route._stop_prior_verifications_for_container("api"))
+
+    assert stopped == [prior.deployment_id]
+
+
 def test_승인_대기_플랜은_실행_직전에_최신_검증_대상으로_갱신된다():
     """v2/v3 플랜이 동시에 있어도 v3은 v2로 되돌아가야 한다."""
     _record("api", "api:v1")

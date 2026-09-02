@@ -220,6 +220,43 @@ async def _remove_existing_local_container(container_name: str) -> None:
                 command, shell=False, capture_output=True, text=True, timeout=60,
             ),
         )
+
+
+def _get_continuous_verifier_if_available():
+    """배포 경로에서 감시기를 best-effort로 가져온다."""
+    try:
+        from preflight.continuous_verification import get_continuous_verifier  # type: ignore
+        return get_continuous_verifier()
+    except Exception:  # noqa: BLE001
+        try:
+            from core.preflight.continuous_verification import get_continuous_verifier  # type: ignore
+            return get_continuous_verifier()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Continuous verifier unavailable while replacing container: %s", exc)
+            return None
+
+
+async def _stop_prior_verifications_for_container(container_name: str) -> None:
+    """같은 컨테이너를 교체하기 전, 이전 배포의 감시를 중지한다.
+
+    감시는 컨테이너 이름과 localhost 포트를 관찰한다. v1 감시를 남긴 채 v2로
+    교체하면 v2의 장애를 v1에 귀속해 정상 롤백 후보를 잃을 수 있다.
+    """
+    verifier = _get_continuous_verifier_if_available()
+    if verifier is None:
+        return
+
+    try:
+        active_ids = set(verifier.list_active())
+        prior_ids = [
+            record.deployment_id
+            for record in _deployment_records.values()
+            if record.container_name == container_name and record.deployment_id in active_ids
+        ]
+        for deployment_id in prior_ids:
+            await verifier.stop(deployment_id)
+    except Exception as exc:  # noqa: BLE001 - 기존 컨테이너 교체를 막지는 않는다
+        logger.warning("Could not stop prior continuous verification: %s", exc)
 # Static Preflight가 만든 수정안은 사용자가 배포 화면에서 "자동 수정"을 눌렀을
 # 때만 적용한다. 프로세스 메모리에만 두므로 Core 재시작 후에는 다시 검사해야 한다.
 @dataclass(frozen=True)
@@ -2488,6 +2525,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         # 같은 이름으로 docker run 하면 기존 컨테이너가 남아 있는 정상 재배포는
         # 항상 실패한다. 실제 배포 경로도 롤백과 동일하게 기존 컨테이너를 교체한다.
         if plan.method == DeployMethod.LOCAL_DOCKER:
+            await _stop_prior_verifications_for_container(plan.container_name or "")
             await _remove_existing_local_container(plan.container_name or "")
         result = await asyncio.get_running_loop().run_in_executor(
             None,
