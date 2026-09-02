@@ -765,9 +765,12 @@ def step7_redeploy_broken(client, token: str, ws: Path) -> str:
 
     status, _ = _http(HEALTH_URL)
     if status == 200:
-        _note("경고: 깨진 v2 인데 헬스가 200 이다. 이미지가 실제로 바뀌었는지 확인할 것")
-    else:
-        _note(f"예상대로 v2 는 응답하지 않음 (status={status or '연결 실패'})")
+        raise StepFailure(
+            7, "의도적으로 깨진 v2가 정상 헬스 응답을 반환함", f"{HEALTH_URL} → 200",
+            "깨진 소스가 이미지에 반영되지 않았거나 Dockerfile이 다른 엔트리포인트를 실행했을 수 있습니다.\n"
+            "  v2 실패와 v1 복구를 모두 확인해야 롤백 E2E가 의미가 있습니다.",
+        )
+    _note(f"예상대로 v2 는 응답하지 않음 (status={status or '연결 실패'})")
     return deployment_id
 
 

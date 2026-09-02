@@ -222,8 +222,39 @@ async def _remove_existing_local_container(container_name: str) -> None:
         )
 
 
+async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool, str, str]:
+    """교체 배포가 시작되지 못했을 때 이전 정상 컨테이너를 즉시 다시 띄운다."""
+    run_args = ["docker", "run", "-d", "--name", record.container_name]
+    try:
+        for host_port, container_port in (record.ports or {}).items():
+            run_args.extend(["-p", f"{int(host_port)}:{int(container_port)}"])
+        for key, value in (record.env or {}).items():
+            run_args.extend(["-e", f"{key}={value}"])
+        run_args.extend(["--restart", "unless-stopped", record.image])
+    except (TypeError, ValueError) as exc:
+        logger.error("Cannot restore prior container %s: %s", record.container_name, exc)
+        return False, "", str(exc)
+
+    try:
+        # 실패한 docker run 이 이름만 남긴 경우에도 기존 이름 충돌 없이 복원한다.
+        await _remove_existing_local_container(record.container_name)
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                run_args, shell=False, capture_output=True, text=True, timeout=120,
+            ),
+        )
+        return result.returncode == 0, result.stdout[:2000], result.stderr[:2000]
+    except Exception as exc:  # noqa: BLE001 - 원래 배포 실패 정보를 보존한다
+        logger.exception("Failed to restore prior container %s", record.container_name)
+        return False, "", str(exc)
+
+
 def _get_continuous_verifier_if_available():
     """배포 경로에서 감시기를 best-effort로 가져온다."""
+    restored_previous = False
+    restore_stdout = ""
+    restore_stderr = ""
     try:
         from preflight.continuous_verification import get_continuous_verifier  # type: ignore
         return get_continuous_verifier()
@@ -2534,6 +2565,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             ),
         )
         success = result.returncode == 0
+        if not success and plan.method == DeployMethod.LOCAL_DOCKER and rollback_source is not None:
+            restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(
+                rollback_source
+            )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Deployment execution failed: {exc}") from exc
 
@@ -2619,6 +2654,9 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         "rollback_target": record.rollback_target,
         "rollback_eligible": record.rollback_eligible,
         "rollback_reason": rollback_reason,
+        "restored_previous": restored_previous,
+        "restore_stdout": restore_stdout,
+        "restore_stderr": restore_stderr,
         "stdout": result.stdout[:2000],
         "stderr": result.stderr[:2000],
         "continuous_verification": {

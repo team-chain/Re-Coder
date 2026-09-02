@@ -25,7 +25,7 @@ import subprocess
 import pytest
 
 import api.routes.deploy as deploy_route
-from schemas import DeploymentRecord, DeployMethod, DeployStatus
+from schemas import ActionType, DeploymentPlan, DeploymentRecord, DeployMethod, DeployStatus
 
 
 @pytest.fixture(autouse=True)
@@ -137,6 +137,47 @@ def test_롤백은_이전_이미지의_포트와_환경을_복원한다(captured
     assert "LEGACY_SETTING=yes" in cmd
     assert "NEW_ONLY=1" not in cmd
     assert result["ports"] == {"18080": "8000"}
+
+
+def test_교체_배포가_실패하면_이전_정상_컨테이너를_복원한다(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):  # noqa: ANN001
+        calls.append(list(args))
+        if len(args) > 1 and args[1] == "run" and args[-1] == "app:v2":
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="new image failed")
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
+    previous = _record(
+        image="app:v1",
+        ports={"18080": "8000"},
+        env={"PORT": "8000"},
+        rollback_eligible=True,
+    )
+    plan = DeploymentPlan(
+        method=DeployMethod.LOCAL_DOCKER,
+        action=ActionType.DOCKER_RUN,
+        image="app:v2",
+        container_name="app",
+        ports={"19000": "9000"},
+        env={"PORT": "9000"},
+    )
+    deploy_route._deployment_plans[plan.plan_id] = plan
+    monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: None)
+
+    result = asyncio.run(
+        deploy_route.execute_deployment(
+            deploy_route.ExecuteRequest(plan_id=plan.plan_id, approved=True)
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["restored_previous"] is True
+    restore_run = [args for args in calls if len(args) > 1 and args[1] == "run"][-1]
+    assert restore_run[-1] == previous.image
+    assert "18080:8000" in restore_run
+    assert "PORT=8000" in restore_run
 
 
 def test_포트_기록이_없으면_경고를_돌려준다(captured):
