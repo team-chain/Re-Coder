@@ -708,7 +708,6 @@ def step7_redeploy_broken(client, token: str, ws: Path) -> str:
 
     (ws / "main.py").write_text(_BROKEN_APP_PY, encoding="utf-8")
     _build(ws, IMAGE_V2)
-    _docker("rm", "-f", CONTAINER, timeout=60)
 
     result = _deploy(client, token, ws, IMAGE_V2, step=7)
     plan = result["plan"]

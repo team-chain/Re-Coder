@@ -100,6 +100,21 @@ async def _mark_rollback_candidate_unhealthy(deployment_id: str, _anomaly: dict)
         record.rollback_eligible = False
 
 
+async def _update_rollback_candidate_after_verification(state: object) -> None:
+    """지속 검증 종료 결과로 느린 시작 앱의 롤백 후보 자격을 갱신한다."""
+    deployment_id = str(getattr(state, "deployment_id", ""))
+    record = _deployment_records.get(deployment_id)
+    if record is None:
+        return
+
+    status = str(getattr(state, "status", ""))
+    if status == "stable":
+        # 최초 15초 안에 준비되지 않은 앱도 5분 감시를 통과했다면 안전한 후보다.
+        record.rollback_eligible = True
+    elif status in {"unstable", "error"}:
+        record.rollback_eligible = False
+
+
 def _refresh_rollback_target(plan: DeploymentPlan) -> tuple[Optional[str], str]:
     """현재 배포 기록을 기준으로 플랜의 롤백 대상을 새로 계산한다.
 
@@ -172,6 +187,39 @@ def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[
             "롤백을 쓰려면 배포마다 다른 태그를 지정하세요."
         )
     return None, "롤백 대상 없음: 이 컨테이너의 검증 완료 배포가 없습니다."
+
+
+def _rollback_source_for(container_name: str, next_image: str) -> Optional[DeploymentRecord]:
+    """현재 선택 규칙과 같은 기준으로 실행 설정을 복원할 이전 기록을 찾는다."""
+    for record in sorted(
+        _deployment_records.values(),
+        key=lambda r: r.deployed_at,
+        reverse=True,
+    ):
+        if (
+            record.container_name == container_name
+            and record.status == DeployStatus.SUCCESS
+            and record.rollback_eligible
+            and record.image
+            and record.image != next_image
+        ):
+            return record
+    return None
+
+
+async def _remove_existing_local_container(container_name: str) -> None:
+    """동일 이름 컨테이너를 교체하기 전 stop/rm 한다. 이미 없으면 실패를 무시한다."""
+    loop = asyncio.get_running_loop()
+    for command in (
+        ["docker", "stop", container_name],
+        ["docker", "rm", container_name],
+    ):
+        await loop.run_in_executor(
+            None,
+            lambda command=command: subprocess.run(
+                command, shell=False, capture_output=True, text=True, timeout=60,
+            ),
+        )
 # Static Preflight가 만든 수정안은 사용자가 배포 화면에서 "자동 수정"을 눌렀을
 # 때만 적용한다. 프로세스 메모리에만 두므로 Core 재시작 후에는 다시 검사해야 한다.
 @dataclass(frozen=True)
@@ -2392,6 +2440,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     # 플랜 생성 뒤 다른 배포가 실행될 수 있으므로, record 에 저장할 롤백 대상은
     # 반드시 실행 시점의 마지막 *검증 완료* 배포로 다시 잡는다.
     rollback_target, rollback_reason = _refresh_rollback_target(plan)
+    rollback_source = _rollback_source_for(plan.container_name or "", plan.image or "")
 
     # ── 보안: image / container_name 화이트리스트 검증 (shell injection 차단) ──
     # docker 이미지 이름 문법: [registry/][namespace/]name[:tag][@digest]
@@ -2436,6 +2485,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
     try:
+        # 같은 이름으로 docker run 하면 기존 컨테이너가 남아 있는 정상 재배포는
+        # 항상 실패한다. 실제 배포 경로도 롤백과 동일하게 기존 컨테이너를 교체한다.
+        if plan.method == DeployMethod.LOCAL_DOCKER:
+            await _remove_existing_local_container(plan.container_name or "")
         result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
@@ -2464,6 +2517,14 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         ports={str(k): str(v) for k, v in (plan.ports or {}).items()},
         env={str(k): str(v) for k, v in (getattr(plan, "env", None) or {}).items()},
         rollback_target=rollback_target,
+        rollback_source_deployment_id=(
+            rollback_source.deployment_id if rollback_source is not None else None
+        ),
+        rollback_ports=(dict(rollback_source.ports) if rollback_source is not None else {}),
+        rollback_env=(dict(rollback_source.env) if rollback_source is not None else {}),
+        rollback_health_check_path=(
+            rollback_source.health_check_path if rollback_source is not None else None
+        ),
         rollback_eligible=rollback_eligible,
         status=DeployStatus.SUCCESS if success else DeployStatus.FAILED,
     )
@@ -2504,6 +2565,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     duration_minutes=5,
                     project_id=getattr(plan, "project_id", None),
                     on_threshold_exceeded=_mark_rollback_candidate_unhealthy,
+                    on_complete=_update_rollback_candidate_after_verification,
                 )
                 cv_started = True
             except Exception as _exc:  # noqa: BLE001
@@ -2578,8 +2640,19 @@ async def rollback(request: RollbackRequest) -> dict:
     if not _IMG_RE.match(record.rollback_target):
         raise HTTPException(status_code=400, detail="Invalid rollback_target on record.")
 
+    rollback_ports = (
+        record.rollback_ports
+        if record.rollback_source_deployment_id is not None
+        else record.ports
+    )
+    rollback_env = (
+        record.rollback_env
+        if record.rollback_source_deployment_id is not None
+        else record.env
+    )
+
     run_args = ["docker", "run", "-d", "--name", record.container_name]
-    for _hp, _cp in (record.ports or {}).items():
+    for _hp, _cp in (rollback_ports or {}).items():
         try:
             _host, _cont = int(_hp), int(_cp)
         except (TypeError, ValueError):
@@ -2588,7 +2661,7 @@ async def rollback(request: RollbackRequest) -> dict:
                 detail=f"기록된 포트 매핑이 올바르지 않습니다: {_hp}:{_cp}",
             ) from None
         run_args.extend(["-p", f"{_host}:{_cont}"])
-    for _k, _v in (record.env or {}).items():
+    for _k, _v in (rollback_env or {}).items():
         if not _ENV_RE.match(str(_k)):
             raise HTTPException(
                 status_code=400,
@@ -2632,11 +2705,11 @@ async def rollback(request: RollbackRequest) -> dict:
         "status": "ok" if success else "failed",
         "deployment_id": request.deployment_id,
         "rolled_back_to": record.rollback_target,
-        "ports": dict(record.ports or {}),
+        "ports": dict(rollback_ports or {}),
         # 포트 기록이 없는 배포(이 필드가 생기기 전의 기록)는 롤백해도 밖에서
         # 접속할 수 없다. 조용히 성공으로 보이지 않게 알린다.
         "warning": (
-            None if (record.ports or {})
+            None if (rollback_ports or {})
             else "이 배포에는 포트 기록이 없어 롤백된 컨테이너에 외부 접속이 불가능할 수 있습니다."
         ),
         "stdout": result.stdout[:2000],

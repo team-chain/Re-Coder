@@ -21,6 +21,9 @@
 """
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 import api.routes.deploy as deploy_route
@@ -124,6 +127,18 @@ def test_헬스_검증을_통과하지_못한_배포는_롤백_대상이_아니�
 
     assert target is None
     assert "검증 완료" in reason
+
+
+def test_지속_검증을_끝까지_통과한_느린_시작_배포는_롤백_후보가_된다():
+    record = _record("api", "api:slow-start", rollback_eligible=False)
+
+    asyncio.run(
+        deploy_route._update_rollback_candidate_after_verification(
+            SimpleNamespace(deployment_id=record.deployment_id, status="stable")
+        )
+    )
+
+    assert record.rollback_eligible is True
 
 
 def test_승인_대기_플랜은_실행_직전에_최신_검증_대상으로_갱신된다():

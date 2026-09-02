@@ -79,6 +79,12 @@ def _run_cmd(calls: list[list[str]]) -> list[str]:
     raise AssertionError(f"docker run 이 호출되지 않았다: {calls}")
 
 
+def test_재배포_전에_기존_컨테이너를_교체한다(captured):
+    asyncio.run(deploy_route._remove_existing_local_container("app"))
+
+    assert captured == [["docker", "stop", "app"], ["docker", "rm", "app"]]
+
+
 def test_롤백이_포트_매핑을_재현한다(captured):
     """이 테스트가 이 파일의 존재 이유다."""
     rec = _record()
@@ -109,6 +115,28 @@ def test_롤백이_이전_이미지로_띄운다(captured):
     cmd = _run_cmd(captured)
     assert cmd[-1] == "app:v1", f"되돌릴 이미지가 아니라 {cmd[-1]} 로 띄웠다"
     assert "app:v2" not in cmd
+
+
+def test_롤백은_이전_이미지의_포트와_환경을_복원한다(captured):
+    """새 릴리스의 실행 계약으로 이전 이미지를 띄우면 복구해도 접속할 수 없다."""
+    rec = _record(
+        ports={"19000": "9000"},
+        env={"PORT": "9000", "NEW_ONLY": "1"},
+        rollback_source_deployment_id="previous-v1",
+        rollback_ports={"18080": "8000"},
+        rollback_env={"PORT": "8000", "LEGACY_SETTING": "yes"},
+        rollback_health_check_path="/health",
+    )
+
+    result = _rollback(rec)
+
+    cmd = _run_cmd(captured)
+    assert "18080:8000" in cmd
+    assert "19000:9000" not in cmd
+    assert "PORT=8000" in cmd
+    assert "LEGACY_SETTING=yes" in cmd
+    assert "NEW_ONLY=1" not in cmd
+    assert result["ports"] == {"18080": "8000"}
 
 
 def test_포트_기록이_없으면_경고를_돌려준다(captured):

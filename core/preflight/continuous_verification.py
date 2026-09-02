@@ -173,6 +173,7 @@ class VerificationState:
 # Callback signature: invoked when a threshold is exceeded.
 #   await callback(deployment_id, anomaly_dict)
 ThresholdCallback = Callable[[str, dict], Awaitable[None]]
+VerificationCompleteCallback = Callable[[VerificationState], Awaitable[None]]
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +379,7 @@ class ContinuousVerifier:
         session_id: Optional[str] = None,
         project_id: Optional[str] = None,
         on_threshold_exceeded: Optional[ThresholdCallback] = None,
+        on_complete: Optional[VerificationCompleteCallback] = None,
     ) -> dict[str, Any]:
         """백그라운드 verification 시작. 즉시 반환 (모니터링은 async task).
 
@@ -403,7 +405,7 @@ class ContinuousVerifier:
             self._states[deployment_id] = state
 
             task = asyncio.create_task(
-                self._run(state, on_threshold_exceeded),
+                self._run(state, on_threshold_exceeded, on_complete),
                 name=f"cv-{deployment_id}",
             )
             self._active_verifications[deployment_id] = task
@@ -456,6 +458,7 @@ class ContinuousVerifier:
         self,
         state: VerificationState,
         on_threshold_exceeded: Optional[ThresholdCallback],
+        on_complete: Optional[VerificationCompleteCallback],
     ) -> dict[str, Any]:
         """본 5분 모니터링 루프. 예외는 모두 catch — 배포 성공 처리에 영향 X."""
         jsonl_path = _session_jsonl_path(state.session_id, state.deployment_id)
@@ -550,6 +553,12 @@ class ContinuousVerifier:
             if state.status in ("stable", "unstable"):
                 _try_update_ledger(state)
                 _try_save_incident(state)
+
+            if on_complete is not None:
+                try:
+                    await on_complete(state)
+                except Exception as exc:  # noqa: BLE001 - 콜백 실패가 감시 종료를 깨지 않는다
+                    log.debug("Continuous verification completion callback failed: %s", exc)
 
         return state.snapshot()
 
