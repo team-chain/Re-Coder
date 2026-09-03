@@ -180,6 +180,97 @@ def test_교체_배포가_실패하면_이전_정상_컨테이너를_복원한�
     assert "PORT=8000" in restore_run
 
 
+def test_성공한_배포는_복원_필드를_포함해_응답한다(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):  # noqa: ANN001
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    async def no_health_probe(_plan):  # noqa: ANN001
+        return False
+
+    monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
+    monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: None)
+    monkeypatch.setattr(deploy_route, "_verify_rollback_candidate_health", no_health_probe)
+    plan = DeploymentPlan(
+        method=DeployMethod.LOCAL_DOCKER,
+        action=ActionType.DOCKER_RUN,
+        image="app:v1",
+        container_name="app",
+        ports={"18080": "8000"},
+    )
+    deploy_route._deployment_plans[plan.plan_id] = plan
+
+    result = asyncio.run(
+        deploy_route.execute_deployment(
+            deploy_route.ExecuteRequest(
+                plan_id=plan.plan_id,
+                approved=True,
+                enable_continuous_verification=False,
+            )
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["restored_previous"] is False
+    assert result["restore_stdout"] == ""
+    assert result["restore_stderr"] == ""
+
+
+def test_교체_배포_명령이_예외여도_이전_정상_컨테이너를_복원한다(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):  # noqa: ANN001
+        calls.append(list(args))
+        if len(args) > 1 and args[1] == "run" and args[-1] == "app:v2":
+            raise subprocess.TimeoutExpired(args, timeout=300)
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
+    _record(image="app:v1", rollback_eligible=True)
+    plan = DeploymentPlan(
+        method=DeployMethod.LOCAL_DOCKER,
+        action=ActionType.DOCKER_RUN,
+        image="app:v2",
+        container_name="app",
+        ports={"19000": "9000"},
+    )
+    deploy_route._deployment_plans[plan.plan_id] = plan
+    monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: None)
+
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            deploy_route.execute_deployment(
+                deploy_route.ExecuteRequest(plan_id=plan.plan_id, approved=True)
+            )
+        )
+
+    assert exc.value.status_code == 500
+    assert "previous container restored" in str(exc.value.detail)
+    restore_run = [args for args in calls if len(args) > 1 and args[1] == "run"][-1]
+    assert restore_run[-1] == "app:v1"
+
+
+def test_롤백_전에_실패한_릴리스의_지속_감시를_중지한다(captured, monkeypatch):
+    rec = _record()
+    stopped: list[str] = []
+
+    class _Verifier:
+        def list_active(self):
+            return [rec.deployment_id]
+
+        async def stop(self, deployment_id: str):
+            stopped.append(deployment_id)
+
+    monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: _Verifier())
+
+    _rollback(rec)
+
+    assert stopped == [rec.deployment_id]
+
+
 def test_포트_기록이_없으면_경고를_돌려준다(captured):
     """이 필드가 생기기 전의 기록은 롤백해도 밖에서 접속할 수 없다.
 

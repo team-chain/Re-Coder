@@ -252,9 +252,6 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
 
 def _get_continuous_verifier_if_available():
     """배포 경로에서 감시기를 best-effort로 가져온다."""
-    restored_previous = False
-    restore_stdout = ""
-    restore_stderr = ""
     try:
         from preflight.continuous_verification import get_continuous_verifier  # type: ignore
         return get_continuous_verifier()
@@ -288,6 +285,18 @@ async def _stop_prior_verifications_for_container(container_name: str) -> None:
             await verifier.stop(deployment_id)
     except Exception as exc:  # noqa: BLE001 - 기존 컨테이너 교체를 막지는 않는다
         logger.warning("Could not stop prior continuous verification: %s", exc)
+
+
+async def _stop_verification_for_deployment(deployment_id: str) -> None:
+    """롤백으로 교체될 특정 배포의 감시만 중지한다."""
+    verifier = _get_continuous_verifier_if_available()
+    if verifier is None:
+        return
+    try:
+        if deployment_id in set(verifier.list_active()):
+            await verifier.stop(deployment_id)
+    except Exception as exc:  # noqa: BLE001 - 수동 롤백 자체는 계속 시도한다
+        logger.warning("Could not stop continuous verification for rollback: %s", exc)
 # Static Preflight가 만든 수정안은 사용자가 배포 화면에서 "자동 수정"을 눌렀을
 # 때만 적용한다. 프로세스 메모리에만 두므로 Core 재시작 후에는 다시 검사해야 한다.
 @dataclass(frozen=True)
@@ -2552,12 +2561,17 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             cmd_args.extend(["-p", f"{int(_hp)}:{int(_cp)}"])
         cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
+    restored_previous = False
+    restore_stdout = ""
+    restore_stderr = ""
+    prior_container_removed = False
     try:
         # 같은 이름으로 docker run 하면 기존 컨테이너가 남아 있는 정상 재배포는
         # 항상 실패한다. 실제 배포 경로도 롤백과 동일하게 기존 컨테이너를 교체한다.
         if plan.method == DeployMethod.LOCAL_DOCKER:
             await _stop_prior_verifications_for_container(plan.container_name or "")
             await _remove_existing_local_container(plan.container_name or "")
+            prior_container_removed = True
         result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
@@ -2570,6 +2584,21 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 rollback_source
             )
     except Exception as exc:
+        if (
+            prior_container_removed
+            and plan.method == DeployMethod.LOCAL_DOCKER
+            and rollback_source is not None
+        ):
+            restored_previous, _restore_stdout, restore_stderr = await _restore_prior_local_container(
+                rollback_source
+            )
+            restoration = "previous container restored" if restored_previous else (
+                f"previous container restoration failed: {restore_stderr}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Deployment execution failed: {exc}; {restoration}",
+            ) from exc
         raise HTTPException(status_code=500, detail=f"Deployment execution failed: {exc}") from exc
 
     # docker run 성공만으로는 앱이 준비됐다고 볼 수 없다. HTTP 헬스 확인을 통과한
@@ -2748,6 +2777,9 @@ async def rollback(request: RollbackRequest) -> dict:
 
     try:
         loop = asyncio.get_running_loop()
+        # 롤백 대상(실패한 새 릴리스)의 감시가 복구된 이전 컨테이너를 계속
+        # 관찰하면, 실패 배포를 stable로 잘못 기록할 수 있다.
+        await _stop_verification_for_deployment(record.deployment_id)
         # 1) docker stop (실패 무시 — 이미 중지됐을 수 있음)
         await loop.run_in_executor(
             None,
