@@ -334,8 +334,34 @@ class DeploymentRecord(BaseModel):
     git_commit: Optional[str] = None
     container_name: str
     health_check_path: str = "/health"
+    #: 배포 당시의 포트 매핑 {호스트: 컨테이너}. **롤백이 이 값을 다시 쓴다.**
+    #: 예전에는 기록하지 않아서, 롤백이 포트 없이 컨테이너를 띄웠다 — 컨테이너는
+    #: healthy 로 보이고(내부 헬스체크는 127.0.0.1 을 본다) 롤백 API 도 200 을
+    #: 돌려주는데 정작 밖에서는 접속이 안 됐다. 모든 지표가 "복구됐다"고 말하는
+    #: 가장 위험한 실패 형태였다.
+    ports: dict[str, str] = Field(default_factory=dict)
+    #: 배포 당시의 환경변수. 같은 이유로 롤백이 재현해야 한다.
+    env: dict[str, str] = Field(default_factory=dict)
+    #: 배포 시점 이미지의 **불변 참조**(sha256 이미지 ID).
+    #:
+    #: `image` 는 태그일 뿐이라 같은 이름이 나중에 다시 빌드·푸시되면 다른
+    #: 바이트를 가리킨다. `app:v1` 처럼 버전처럼 보이는 태그도 예외가 아니다.
+    #: 롤백이 태그로 되돌리면 "그때 돌던 그 릴리스" 가 아니라 "지금 그 태그가
+    #: 가리키는 것" 이 뜬다 — 되돌렸다고 믿는 순간 다른 코드가 돌아간다.
+    #: 그래서 실행 직후 docker 에게 물어 이미지 ID 를 남기고, 롤백은 이 값을 쓴다.
+    image_id: Optional[str] = None
     deployed_at: datetime = Field(default_factory=datetime.utcnow)
     rollback_target: Optional[str] = None  # Previous image tag for rollback
+    #: rollback_target 이 가리키는 이전 배포의 실행 조건 스냅샷.
+    #: 현재 배포의 포트/환경값을 쓰면 이전 이미지가 다른 계약으로 시작될 수 있다.
+    rollback_source_deployment_id: Optional[str] = None
+    rollback_ports: dict[str, str] = Field(default_factory=dict)
+    rollback_env: dict[str, str] = Field(default_factory=dict)
+    rollback_health_check_path: Optional[str] = None
+    #: docker run 이 0 으로 끝났다는 사실만으로는 앱이 정상이라는 뜻이 아니다.
+    #: 최초 HTTP 헬스 확인을 통과한 배포만 다음 배포의 롤백 후보가 될 수 있다.
+    #: 지속 검증에서 이상이 감지되면 다시 False 로 바뀐다.
+    rollback_eligible: bool = False
     status: DeployStatus = DeployStatus.SUCCESS
 
 
