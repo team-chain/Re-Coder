@@ -35,6 +35,24 @@ def clean_records():
     deploy_route._deployment_records.clear()
 
 
+def _stub_health(monkeypatch, healthy: bool = True):
+    """로컬 HTTP 헬스 프로브를 대체한다.
+
+    이 파일의 테스트들은 `subprocess.run` 을 가짜로 바꾸므로 **실제로 뜬
+    컨테이너가 없다.** 복구 판정이 헬스 확인을 거치도록 바뀐 뒤로는(리뷰 P1 —
+    `docker run` 성공만으로 "복구됨"을 보고하면 서비스는 죽은 채 사용자가
+    복구됐다고 믿는다) 프로브도 함께 대체해야 한다. 대체하지 않으면 프로브가
+    존재하지 않는 포트를 두드리다 실패해, 검사하려던 복구 경로가 아니라
+    테스트 환경 때문에 실패한다.
+
+    healthy=False 로 주면 "떴지만 서비스는 안 되는" 경우를 만들 수 있다.
+    """
+    async def fake_probe(_ports, _health_path):
+        return healthy
+
+    monkeypatch.setattr(deploy_route, "_probe_local_http_health", fake_probe)
+
+
 @pytest.fixture()
 def captured(monkeypatch):
     """docker 를 실제로 부르지 않고 인자만 모은다."""
@@ -165,6 +183,7 @@ def test_교체_배포가_실패하면_이전_정상_컨테이너를_복원한�
     )
     deploy_route._deployment_plans[plan.plan_id] = plan
     monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: None)
+    _stub_health(monkeypatch)  # 복구된 컨테이너가 서비스되는 상황
 
     result = asyncio.run(
         deploy_route.execute_deployment(
@@ -192,6 +211,7 @@ def test_성공한_배포는_복원_필드를_포함해_응답한다(monkeypatch
 
     monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
     monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: None)
+    _stub_health(monkeypatch)  # 복구된 컨테이너가 서비스되는 상황
     monkeypatch.setattr(deploy_route, "_verify_rollback_candidate_health", no_health_probe)
     plan = DeploymentPlan(
         method=DeployMethod.LOCAL_DOCKER,
@@ -238,6 +258,7 @@ def test_교체_배포_명령이_예외여도_이전_정상_컨테이너를_복�
     )
     deploy_route._deployment_plans[plan.plan_id] = plan
     monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: None)
+    _stub_health(monkeypatch)  # 복구된 컨테이너가 서비스되는 상황
 
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as exc:
@@ -277,6 +298,7 @@ def test_기존_컨테이너_삭제_중_예외여도_이전_정상_컨테이너�
     )
     deploy_route._deployment_plans[plan.plan_id] = plan
     monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: None)
+    _stub_health(monkeypatch)  # 복구된 컨테이너가 서비스되는 상황
 
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as exc:
@@ -290,6 +312,97 @@ def test_기존_컨테이너_삭제_중_예외여도_이전_정상_컨테이너�
     assert "previous container restored" in str(exc.value.detail)
     restore_run = [args for args in calls if len(args) > 1 and args[1] == "run"][-1]
     assert restore_run[-1] == "app:v1"
+
+
+def test_복구된_컨테이너가_서비스되지_않으면_복구로_보고하지_않는다(monkeypatch):
+    """리뷰 P1 — `docker run` 성공만으로 복구를 주장하면 안 된다.
+
+    교체가 실패해 이전 이미지를 다시 띄웠는데 그것도 기동 직후 죽거나 헬스
+    경로가 응답하지 않을 수 있다. 그때 `restored_previous: true` 를 돌려주면
+    사용자는 복구됐다고 믿고 장애를 방치한다. 이 프로젝트에서 반복해서 나온
+    실패 형태다 — 지표는 전부 초록인데 서비스만 죽어 있는 상태.
+    """
+    def fake_run(args, **kwargs):  # noqa: ANN001
+        if len(args) > 1 and args[1] == "run" and args[-1] == "app:v2":
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="new image failed")
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
+    _record(image="app:v1", ports={"18080": "8000"}, rollback_eligible=True)
+    plan = DeploymentPlan(
+        method=DeployMethod.LOCAL_DOCKER,
+        action=ActionType.DOCKER_RUN,
+        image="app:v2",
+        container_name="app",
+        ports={"19000": "9000"},
+    )
+    deploy_route._deployment_plans[plan.plan_id] = plan
+    monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: None)
+    _stub_health(monkeypatch, healthy=False)  # 떴지만 서비스는 안 되는 상황
+
+    result = asyncio.run(
+        deploy_route.execute_deployment(
+            deploy_route.ExecuteRequest(plan_id=plan.plan_id, approved=True)
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["restored_previous"] is False, (
+        "컨테이너는 떴지만 서비스되지 않는데 복구됐다고 보고했다"
+    )
+    assert "헬스" in result["restore_stderr"], result["restore_stderr"]
+
+
+def test_복구에_성공하면_이전_배포의_감시를_다시_시작한다(monkeypatch):
+    """리뷰 P2 — 교체 시작 때 껐던 감시를 복구 후 되살린다.
+
+    되살리지 않으면 되돌아온 배포는 남은 검증 창 없이 **영구히 감시 밖**에
+    놓인다. 이후 헬스나 자원 이상이 생겨도 롤백 자격이 회수되지 않고 기록도
+    남지 않는다.
+    """
+    def fake_run(args, **kwargs):  # noqa: ANN001
+        if len(args) > 1 and args[1] == "run" and args[-1] == "app:v2":
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="new image failed")
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
+    previous = _record(image="app:v1", ports={"18080": "8000"}, rollback_eligible=True)
+    plan = DeploymentPlan(
+        method=DeployMethod.LOCAL_DOCKER,
+        action=ActionType.DOCKER_RUN,
+        image="app:v2",
+        container_name="app",
+        ports={"19000": "9000"},
+    )
+    deploy_route._deployment_plans[plan.plan_id] = plan
+    _stub_health(monkeypatch)
+
+    started: list[str] = []
+
+    class _Verifier:
+        def list_active(self):
+            return []
+
+        async def stop(self, deployment_id: str):
+            pass
+
+        async def start(self, deployment_id: str, **kwargs):
+            started.append(deployment_id)
+            return {"deployment_id": deployment_id, "status": "started"}
+
+    monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: _Verifier())
+
+    result = asyncio.run(
+        deploy_route.execute_deployment(
+            deploy_route.ExecuteRequest(plan_id=plan.plan_id, approved=True)
+        )
+    )
+
+    assert result["restored_previous"] is True
+    assert result["restored_verification_resumed"] is True
+    assert started == [previous.deployment_id], (
+        f"복구된 배포의 감시가 다시 걸리지 않았다: {started}"
+    )
 
 
 def test_롤백_전에_실패한_릴리스의_지속_감시를_중지한다(captured, monkeypatch):

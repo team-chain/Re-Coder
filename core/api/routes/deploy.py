@@ -52,23 +52,29 @@ _ROLLBACK_HEALTH_TIMEOUT_SECONDS = 15.0
 _ROLLBACK_HEALTH_RETRY_SECONDS = 0.5
 
 
-async def _verify_rollback_candidate_health(plan: DeploymentPlan) -> bool:
-    """실행 직후의 로컬 HTTP 헬스 확인으로 롤백 후보 자격을 결정한다.
+async def _probe_local_http_health(
+    ports: dict | None,
+    health_check_path: str | None,
+) -> bool:
+    """로컬 컨테이너가 **실제로 요청을 처리하는지** HTTP 로 확인한다.
 
     ``docker run -d`` 의 성공은 프로세스가 시작됐다는 뜻일 뿐, 앱이 요청을
-    처리할 수 있다는 뜻은 아니다. 후보를 안전하게 고르기 위해 최초 2xx 응답을
-    기다리되, 이 검증이 실패해도 실행 결과 자체는 그대로 돌려준다. 대신 그
-    배포는 다음 배포의 자동 롤백 대상으로 선택되지 않는다.
+    처리할 수 있다는 뜻이 아니다. 기동 직후 크래시하거나 헬스 경로가 응답하지
+    않는 컨테이너도 `docker run` 은 0 을 돌려준다. 그래서 "떴다"와 "서비스된다"
+    를 구분하려면 이 확인이 필요하다.
+
+    plan 과 record 양쪽에서 쓴다 — 새 배포의 롤백 후보 자격 판정과,
+    복구된 이전 컨테이너가 정말 살아났는지 확인이 같은 질문이기 때문이다.
     """
-    if not plan.ports:
+    if not ports:
         return False
 
     try:
-        host_port = int(next(iter(plan.ports.keys())))
+        host_port = int(next(iter(ports.keys())))
     except (StopIteration, TypeError, ValueError):
         return False
 
-    health_path = plan.health_check_path or "/health"
+    health_path = health_check_path or "/health"
     if not health_path.startswith("/"):
         health_path = "/" + health_path
 
@@ -89,8 +95,18 @@ async def _verify_rollback_candidate_health(plan: DeploymentPlan) -> bool:
                 return False
             await asyncio.sleep(_ROLLBACK_HEALTH_RETRY_SECONDS)
     except Exception as exc:  # noqa: BLE001 - 배포 결과를 헬스 확인 오류가 뒤집지 않는다
-        logger.warning("Rollback candidate health verification failed: %s", exc)
+        logger.warning("Local HTTP health probe failed: %s", exc)
         return False
+
+
+async def _verify_rollback_candidate_health(plan: DeploymentPlan) -> bool:
+    """실행 직후의 헬스 확인으로 롤백 후보 자격을 결정한다.
+
+    이 검증이 실패해도 실행 결과 자체는 그대로 돌려준다. 대신 그 배포는 다음
+    배포의 자동 롤백 대상으로 선택되지 않는다 — 돌아가지 않던 버전으로
+    되돌리면 장애가 장애로 이어진다.
+    """
+    return await _probe_local_http_health(plan.ports, plan.health_check_path)
 
 
 async def _mark_rollback_candidate_unhealthy(deployment_id: str, _anomaly: dict) -> None:
@@ -244,10 +260,72 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
                 run_args, shell=False, capture_output=True, text=True, timeout=120,
             ),
         )
-        return result.returncode == 0, result.stdout[:2000], result.stderr[:2000]
+        if result.returncode != 0:
+            return False, result.stdout[:2000], result.stderr[:2000]
+
+        # **띄운 것과 서비스되는 것은 다르다.** `docker run -d` 는 컨테이너가
+        # 기동 직후 크래시하거나 헬스 경로가 죽어 있어도 0 을 돌려준다. 여기서
+        # 확인하지 않으면 응답이 `restored_previous: true` 라고 말하는데 서비스는
+        # 여전히 내려가 있고, 사용자는 복구됐다고 믿은 채 장애를 방치한다.
+        healthy = await _probe_local_http_health(record.ports, record.health_check_path)
+        if not healthy:
+            logger.error(
+                "Prior container %s started but is not serving; not reporting recovery",
+                record.container_name,
+            )
+            return False, result.stdout[:2000], (
+                "이전 컨테이너를 다시 띄웠지만 헬스 확인에 실패했습니다 — "
+                "복구되지 않은 것으로 처리합니다. "
+                f"(컨테이너 {record.container_name}, 이미지 {record.image})"
+            )
+        return True, result.stdout[:2000], result.stderr[:2000]
     except Exception as exc:  # noqa: BLE001 - 원래 배포 실패 정보를 보존한다
         logger.exception("Failed to restore prior container %s", record.container_name)
         return False, "", str(exc)
+
+
+async def _resume_verification_for(record: DeploymentRecord) -> bool:
+    """복구된 이전 배포의 지속 검증을 다시 시작한다.
+
+    교체 배포를 시작할 때 이전 배포의 감시를 중지한다
+    (`_stop_prior_verifications_for_container`). 교체가 실패해 이전 컨테이너를
+    되살렸다면 그 감시도 함께 되살려야 한다. 그러지 않으면 되돌아온 배포는
+    **남은 5분 검증 창 없이 영구히 감시 밖**에 놓인다 — 이후 헬스나 자원
+    이상이 생겨도 롤백 자격이 회수되지 않고 기록도 남지 않는다.
+
+    실패해도 복구 자체를 실패로 만들지 않는다(best-effort). 대신 로그로 남긴다.
+    """
+    verifier = _get_continuous_verifier_if_available()
+    if verifier is None:
+        return False
+
+    if not record.ports:
+        logger.warning(
+            "Cannot resume verification for %s: no port recorded", record.deployment_id,
+        )
+        return False
+
+    try:
+        host_port = next(iter(record.ports.keys()))
+        health_path = record.health_check_path or "/health"
+        if not health_path.startswith("/"):
+            health_path = "/" + health_path
+        await verifier.start(
+            deployment_id=record.deployment_id,
+            container_name=record.container_name,
+            health_check_url=f"http://localhost:{host_port}{health_path}",
+            duration_minutes=5,
+            project_id=record.project_id,
+            on_threshold_exceeded=_mark_rollback_candidate_unhealthy,
+            on_complete=_update_rollback_candidate_after_verification,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to resume verification for restored deployment %s: %s",
+            record.deployment_id, exc,
+        )
+        return False
 
 
 def _get_continuous_verifier_if_available():
@@ -2562,6 +2640,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
     restored_previous = False
+    restored_verification_resumed = False
     restore_stdout = ""
     restore_stderr = ""
     prior_container_replacement_started = False
@@ -2586,6 +2665,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(
                 rollback_source
             )
+            # 교체 시작 시 이전 배포의 감시를 껐다. 되살렸으면 감시도 되살린다 —
+            # 아니면 되돌아온 배포가 감시 밖에 남아 이후 이상을 아무도 못 잡는다.
+            if restored_previous:
+                restored_verification_resumed = await _resume_verification_for(rollback_source)
     except Exception as exc:
         if (
             prior_container_replacement_started
@@ -2595,6 +2678,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             restored_previous, _restore_stdout, restore_stderr = await _restore_prior_local_container(
                 rollback_source
             )
+            if restored_previous:
+                await _resume_verification_for(rollback_source)
             restoration = "previous container restored" if restored_previous else (
                 f"previous container restoration failed: {restore_stderr}"
             )
@@ -2686,7 +2771,11 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         "rollback_target": record.rollback_target,
         "rollback_eligible": record.rollback_eligible,
         "rollback_reason": rollback_reason,
+        # 복구는 컨테이너가 다시 **서비스될 때만** true 다. `docker run` 성공만으로
+        # true 를 주면 사용자는 복구됐다고 믿고 장애를 방치한다.
         "restored_previous": restored_previous,
+        # 되돌아온 배포의 감시가 다시 붙었는지. false 면 그 배포는 감시 밖에 있다.
+        "restored_verification_resumed": restored_verification_resumed,
         "restore_stdout": restore_stdout,
         "restore_stderr": restore_stderr,
         "stdout": result.stdout[:2000],
