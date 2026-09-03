@@ -2564,14 +2564,17 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     restored_previous = False
     restore_stdout = ""
     restore_stderr = ""
-    prior_container_removed = False
+    prior_container_replacement_started = False
     try:
         # 같은 이름으로 docker run 하면 기존 컨테이너가 남아 있는 정상 재배포는
         # 항상 실패한다. 실제 배포 경로도 롤백과 동일하게 기존 컨테이너를 교체한다.
         if plan.method == DeployMethod.LOCAL_DOCKER:
             await _stop_prior_verifications_for_container(plan.container_name or "")
+            # docker stop 이 성공한 뒤 docker rm 이 예외를 내도 이전 서비스는 이미
+            # 내려갔을 수 있다. 따라서 파괴적 교체를 시작하기 *전* 복원이 필요함을
+            # 기록한다.
+            prior_container_replacement_started = True
             await _remove_existing_local_container(plan.container_name or "")
-            prior_container_removed = True
         result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
@@ -2585,7 +2588,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             )
     except Exception as exc:
         if (
-            prior_container_removed
+            prior_container_replacement_started
             and plan.method == DeployMethod.LOCAL_DOCKER
             and rollback_source is not None
         ):
