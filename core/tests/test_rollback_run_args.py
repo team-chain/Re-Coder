@@ -63,6 +63,9 @@ def captured(monkeypatch):
         return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
+    # 롤백도 복구 후 헬스를 확인한다. subprocess 만 가짜로 바꾸면 찔러 볼
+    # 컨테이너가 없어, 검사하려던 롤백 경로가 아니라 환경 때문에 실패한다.
+    _stub_health(monkeypatch)
     return calls
 
 

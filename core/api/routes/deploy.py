@@ -16,6 +16,7 @@ import re
 import subprocess
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
@@ -70,6 +71,22 @@ async def _lock_for_container(container_name: str) -> asyncio.Lock:
         return lock
 
 
+@asynccontextmanager
+async def _container_transaction(plan):
+    """같은 컨테이너를 노리는 배포·롤백을 한 줄로 세운다.
+
+    로컬 Docker 가 아니거나 컨테이너 이름이 없으면 아무것도 잠그지 않는다
+    (원격 배포는 이 임계 구역과 무관하다).
+    """
+    container_name = getattr(plan, "container_name", "") or ""
+    if getattr(plan, "method", None) != DeployMethod.LOCAL_DOCKER or not container_name:
+        yield
+        return
+    lock = await _lock_for_container(container_name)
+    async with lock:
+        yield
+
+
 async def _capture_running_local_container(container_name: str):
     """지금 돌고 있는 컨테이너의 실행 조건을 docker 에서 직접 붙잡는다.
 
@@ -95,6 +112,17 @@ async def _capture_running_local_container(container_name: str):
         if result.returncode != 0:
             return None  # 그런 컨테이너가 없다 — 교체할 것도 없다
         info = json.loads(result.stdout)
+
+        # **존재와 실행은 다르다.** 종료된 컨테이너가 그 이름을 붙잡고 있을 수
+        # 있고, inspect 는 그것도 성공한다. 그걸 "돌고 있던 서비스" 로 오인하면,
+        # 새 배포가 실패했을 때 **사람이 일부러 내려둔 컨테이너를 되살려 놓고**
+        # 이전 서비스를 복구했다고 보고하게 된다.
+        if not ((info.get("State") or {}).get("Running")):
+            logger.info(
+                "Container %s exists but is not running — nothing to preserve",
+                container_name,
+            )
+            return None
     except Exception as exc:  # noqa: BLE001 - 붙잡기 실패가 배포를 막지는 않는다
         logger.warning("Could not inspect container %s: %s", container_name, exc)
         return None
@@ -124,6 +152,7 @@ async def _capture_running_local_container(container_name: str):
         project_id="unmanaged",
         method=DeployMethod.LOCAL_DOCKER,
         image=image,
+        image_id=(info.get("Image") or "").strip() or None,
         container_name=container_name,
         ports=ports,
         env=env,
@@ -278,7 +307,12 @@ def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[
             # 더 뒤로 가면 다른 태그가 있을 수 있으므로 계속 본다.
             same_tag_seen = True
             continue
-        return record.image, f"롤백 대상: {record.image} (이전 성공 배포)"
+        # 태그가 아니라 이미지 ID 를 돌려준다. 태그는 그사이 다시 빌드·푸시돼
+        # 다른 바이트를 가리킬 수 있고, `app:v1` 같은 버전형 이름도 예외가 아니다.
+        # ID 를 못 남긴 기록(옛 배포)은 태그로 폴백한다 — 그건 원래 동작이다.
+        target = record.image_id or record.image
+        suffix = "" if record.image_id else " · 이미지 ID 없음, 태그로 되돌립니다"
+        return target, f"롤백 대상: {record.image} (이전 성공 배포){suffix}"
 
     if same_tag_seen:
         return None, (
@@ -307,6 +341,36 @@ def _rollback_source_for(container_name: str, next_image: str) -> Optional[Deplo
     return None
 
 
+async def _running_image_id(container_name: str) -> Optional[str]:
+    """지금 그 컨테이너가 돌리고 있는 이미지의 **불변 참조**(sha256 ID).
+
+    태그는 움직인다. `app:v1` 을 다시 빌드해 같은 태그로 덮으면 그 이름은 다른
+    바이트를 가리킨다. 롤백이 태그로 되돌리면 "그때 그 릴리스" 가 아니라
+    "지금 그 태그가 가리키는 것" 이 뜬다 — 되돌렸다고 믿는 순간 다른 코드가
+    돌아가고, 장애 원인이 그대로 남는다.
+
+    조회에 실패하면 None. 그 경우 롤백은 태그로 되돌리며(예전 동작),
+    그 사실을 응답에 남긴다.
+    """
+    if not container_name:
+        return None
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["docker", "inspect", "--format", "{{.Image}}", container_name],
+                shell=False, capture_output=True, text=True, timeout=30,
+            ),
+        )
+        if result.returncode != 0:
+            return None
+        image_id = result.stdout.strip()
+        return image_id or None
+    except Exception as exc:  # noqa: BLE001 - 배포 결과를 흔들지 않는다
+        logger.warning("Could not read image id for %s: %s", container_name, exc)
+        return None
+
+
 async def _remove_existing_local_container(container_name: str) -> None:
     """동일 이름 컨테이너를 교체하기 전 stop/rm 한다. 이미 없으면 실패를 무시한다."""
     loop = asyncio.get_running_loop()
@@ -330,7 +394,8 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
             run_args.extend(["-p", f"{int(host_port)}:{int(container_port)}"])
         for key, value in (record.env or {}).items():
             run_args.extend(["-e", f"{key}={value}"])
-        run_args.extend(["--restart", "unless-stopped", record.image])
+        # 태그가 아니라 이미지 ID 로 되돌린다 — 태그는 그사이 움직였을 수 있다.
+        run_args.extend(["--restart", "unless-stopped", record.image_id or record.image])
     except (TypeError, ValueError) as exc:
         logger.error("Cannot restore prior container %s: %s", record.container_name, exc)
         return False, "", str(exc)
@@ -2679,227 +2744,235 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     # 플랜 생성 뒤 다른 배포가 실행될 수 있으므로, record 에 저장할 롤백 대상은
     # 반드시 실행 시점의 마지막 *검증 완료* 배포로 다시 잡는다.
     rollback_target, rollback_reason = _refresh_rollback_target(plan)
-    rollback_source = _rollback_source_for(plan.container_name or "", plan.image or "")
-    # 복구 재료. 기록에 후보가 있으면 그것을, 없으면 아래에서 docker 를
-    # 직접 들여다본 결과를 쓴다.
-    restore_source = rollback_source
+    # ── 여기부터 컨테이너 단위 임계 구역 ────────────────────────────────
+    #
+    # 롤백 대상 **선택**부터 헬스 확인과 **기록 생성**까지 한 덩어리로 잠근다.
+    # 파괴적 구간(stop/rm/run)만 잠그는 것으로는 부족했다:
+    #
+    #   · 대상 선택이 락 밖이면 기다리던 요청이 낡은 대상을 들고 들어온다.
+    #   · 헬스 확인이 락 밖이면, 먼저 끝난 요청이 **두 번째 요청이 방금 올린
+    #     이미지**를 찔러 보고 그 결과를 자기 기록에 적는다.
+    #   · 감시 시작이 락 밖이면 남의 릴리스를 관찰하는 verifier 가 붙는다.
+    #
+    # 즉 락을 일찍 놓으면 응답·기록·실제로 돌고 있는 것이 서로 어긋난다.
+    # 헬스 확인이 최대 15초라 그동안 같은 컨테이너로 오는 요청은 대기하지만,
+    # 그게 맞다 — 같은 컨테이너를 동시에 두 번 바꾸는 것은 원래 순서대로
+    # 처리돼야 하는 일이다. 다른 컨테이너는 서로 막지 않는다.
+    async with _container_transaction(plan):
+        rollback_source = _rollback_source_for(plan.container_name or "", plan.image or "")
+        # 복구 재료. 기록에 후보가 있으면 그것을, 없으면 아래에서 docker 를
+        # 직접 들여다본 결과를 쓴다.
+        restore_source = rollback_source
 
-    # ── 보안: image / container_name 화이트리스트 검증 (shell injection 차단) ──
-    # docker 이미지 이름 문법: [registry/][namespace/]name[:tag][@digest]
-    # 컨테이너 이름: [a-zA-Z0-9][a-zA-Z0-9_.-]+
-    import re as _re
-    _IMG_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/\-@]{0,254}$")
-    _NAME_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$")
-    if plan.image and not _IMG_RE.match(plan.image):
-        raise HTTPException(status_code=400, detail="Invalid image name (forbidden characters).")
-    if plan.container_name and not _NAME_RE.match(plan.container_name):
-        raise HTTPException(status_code=400, detail="Invalid container name (forbidden characters).")
-    for _hp, _cp in plan.ports.items():
-        if not str(_hp).isdigit() or not str(_cp).isdigit():
-            raise HTTPException(status_code=400, detail="Port must be numeric.")
-
-    if plan.command_template_id:
-        # Template-based path: registry 가 list-form 을 반환하도록 요구하고,
-        # str 반환 시 shlex.split 으로 안전하게 토큰화한다 (shell=False 보장).
-        from registry import CommandTemplateRegistry  # type: ignore
-        import shlex as _shlex
-        reg = CommandTemplateRegistry()
-        try:
-            first_hp, first_cp = next(iter(plan.ports.items()), ("8080", "8080"))
-            built = reg.build_command(plan.command_template_id, {
-                "image_name": plan.image or "",
-                "container_name": plan.container_name or "",
-                "host_port": int(first_hp),
-                "container_port": int(first_cp),
-            })
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"Command build failed: {exc}") from exc
-        if isinstance(built, list):
-            cmd_args = [str(x) for x in built]
-        else:
-            # str 반환은 deprecated — 시연 호환을 위해 shlex 로 토큰화 (shell 호출 없음)
-            cmd_args = _shlex.split(str(built))
-    else:
-        # 안전한 args list 직접 조립 (shell=False 강제)
-        cmd_args: list[str] = ["docker", "run", "-d", "--name", str(plan.container_name)]
+        # ── 보안: image / container_name 화이트리스트 검증 (shell injection 차단) ──
+        # docker 이미지 이름 문법: [registry/][namespace/]name[:tag][@digest]
+        # 컨테이너 이름: [a-zA-Z0-9][a-zA-Z0-9_.-]+
+        import re as _re
+        _IMG_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/\-@]{0,254}$")
+        _NAME_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$")
+        if plan.image and not _IMG_RE.match(plan.image):
+            raise HTTPException(status_code=400, detail="Invalid image name (forbidden characters).")
+        if plan.container_name and not _NAME_RE.match(plan.container_name):
+            raise HTTPException(status_code=400, detail="Invalid container name (forbidden characters).")
         for _hp, _cp in plan.ports.items():
-            cmd_args.extend(["-p", f"{int(_hp)}:{int(_cp)}"])
-        cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
+            if not str(_hp).isdigit() or not str(_cp).isdigit():
+                raise HTTPException(status_code=400, detail="Port must be numeric.")
 
-    restored_previous = False
-    restored_verification_resumed = False
-    restore_stdout = ""
-    restore_stderr = ""
-    prior_container_replacement_started = False
+        if plan.command_template_id:
+            # Template-based path: registry 가 list-form 을 반환하도록 요구하고,
+            # str 반환 시 shlex.split 으로 안전하게 토큰화한다 (shell=False 보장).
+            from registry import CommandTemplateRegistry  # type: ignore
+            import shlex as _shlex
+            reg = CommandTemplateRegistry()
+            try:
+                first_hp, first_cp = next(iter(plan.ports.items()), ("8080", "8080"))
+                built = reg.build_command(plan.command_template_id, {
+                    "image_name": plan.image or "",
+                    "container_name": plan.container_name or "",
+                    "host_port": int(first_hp),
+                    "container_port": int(first_cp),
+                })
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=f"Command build failed: {exc}") from exc
+            if isinstance(built, list):
+                cmd_args = [str(x) for x in built]
+            else:
+                # str 반환은 deprecated — 시연 호환을 위해 shlex 로 토큰화 (shell 호출 없음)
+                cmd_args = _shlex.split(str(built))
+        else:
+            # 안전한 args list 직접 조립 (shell=False 강제)
+            cmd_args: list[str] = ["docker", "run", "-d", "--name", str(plan.container_name)]
+            for _hp, _cp in plan.ports.items():
+                cmd_args.extend(["-p", f"{int(_hp)}:{int(_cp)}"])
+            cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
-    # 같은 컨테이너를 노리는 다른 배포·롤백과 순서가 섞이지 않게 잠근다.
-    # 잠그지 않으면 한쪽이 띄운 컨테이너를 다른 쪽의 복구 로직이 지운다.
-    container_lock = (
-        await _lock_for_container(plan.container_name or "")
-        if plan.method == DeployMethod.LOCAL_DOCKER and plan.container_name
-        else None
-    )
-    if container_lock is not None:
-        await container_lock.acquire()
+        restored_previous = False
+        restored_verification_resumed = False
+        restore_stdout = ""
+        restore_stderr = ""
+        prior_container_replacement_started = False
 
-    try:
-        # 같은 이름으로 docker run 하면 기존 컨테이너가 남아 있는 정상 재배포는
-        # 항상 실패한다. 실제 배포 경로도 롤백과 동일하게 기존 컨테이너를 교체한다.
-        if plan.method == DeployMethod.LOCAL_DOCKER:
-            # 기록에 롤백 후보가 없어도(코어 재시작·외부에서 만든 컨테이너)
-            # 지금 돌고 있는 것을 붙잡아 둔다. 붙잡지 않고 지우면 새 run 이
-            # 실패했을 때 되살릴 근거가 없어 서비스가 통째로 사라진다.
-            if restore_source is None:
-                restore_source = await _capture_running_local_container(
-                    plan.container_name or ""
-                )
-                if restore_source is not None:
-                    logger.info(
-                        "Captured unmanaged container %s (%s) before replacement",
-                        restore_source.container_name, restore_source.image,
-                    )
-            await _stop_prior_verifications_for_container(plan.container_name or "")
-            # docker stop 이 성공한 뒤 docker rm 이 예외를 내도 이전 서비스는 이미
-            # 내려갔을 수 있다. 따라서 파괴적 교체를 시작하기 *전* 복원이 필요함을
-            # 기록한다.
-            prior_container_replacement_started = True
-            await _remove_existing_local_container(plan.container_name or "")
-        result = await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(
-                cmd_args, shell=False, capture_output=True, text=True, timeout=300
-            ),
-        )
-        success = result.returncode == 0
-        if not success and plan.method == DeployMethod.LOCAL_DOCKER and restore_source is not None:
-            restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(
-                restore_source
-            )
-            # 교체 시작 시 이전 배포의 감시를 껐다. 되살렸으면 감시도 되살린다 —
-            # 아니면 되돌아온 배포가 감시 밖에 남아 이후 이상을 아무도 못 잡는다.
-            # 미추적 컨테이너를 붙잡은 경우엔 되살릴 감시가 애초에 없다.
-            if restored_previous and rollback_source is not None:
-                restored_verification_resumed = await _resume_verification_for(rollback_source)
-    except Exception as exc:
-        if (
-            prior_container_replacement_started
-            and plan.method == DeployMethod.LOCAL_DOCKER
-            and restore_source is not None
-        ):
-            restored_previous, _restore_stdout, restore_stderr = await _restore_prior_local_container(
-                restore_source
-            )
-            if restored_previous and rollback_source is not None:
-                await _resume_verification_for(rollback_source)
-            restoration = "previous container restored" if restored_previous else (
-                f"previous container restoration failed: {restore_stderr}"
-            )
-            raise HTTPException(
-                status_code=500,
-                detail=f"Deployment execution failed: {exc}; {restoration}",
-            ) from exc
-        raise HTTPException(status_code=500, detail=f"Deployment execution failed: {exc}") from exc
-    finally:
-        # 파괴적 구간(stop/rm/run/복구)이 끝났으면 다음 요청이 들어와도 안전하다.
-        if container_lock is not None:
-            container_lock.release()
-
-    # docker run 성공만으로는 앱이 준비됐다고 볼 수 없다. HTTP 헬스 확인을 통과한
-    # 기록만 이후 배포의 롤백 후보가 된다. 이 확인이 실패해도 이번 실행 자체의
-    # 결과는 실패로 바꾸지 않는다. 사용자는 장애 버전에 대해 여전히 롤백을 요청할
-    # 수 있어야 하기 때문이다.
-    rollback_eligible = success and await _verify_rollback_candidate_health(plan)
-
-    # Record the deployment
-    from schemas import ActionType
-    record = DeploymentRecord(
-        project_id=getattr(plan, "project_id", "unknown"),
-        method=plan.method,
-        image=plan.image or "",
-        container_name=plan.container_name or "",
-        health_check_path=plan.health_check_path,
-        # 롤백이 같은 모양으로 다시 띄울 수 있도록 실행 조건을 함께 남긴다.
-        ports={str(k): str(v) for k, v in (plan.ports or {}).items()},
-        env={str(k): str(v) for k, v in (getattr(plan, "env", None) or {}).items()},
-        rollback_target=rollback_target,
-        rollback_source_deployment_id=(
-            rollback_source.deployment_id if rollback_source is not None else None
-        ),
-        rollback_ports=(dict(rollback_source.ports) if rollback_source is not None else {}),
-        rollback_env=(dict(rollback_source.env) if rollback_source is not None else {}),
-        rollback_health_check_path=(
-            rollback_source.health_check_path if rollback_source is not None else None
-        ),
-        rollback_eligible=rollback_eligible,
-        status=DeployStatus.SUCCESS if success else DeployStatus.FAILED,
-    )
-    _deployment_records[record.deployment_id] = record
-    del _deployment_plans[request.plan_id]
-
-    # 설계 §4.6 / §34 — 배포 성공 직후 Continuous Verification 자동 트리거.
-    # 실패 시에도 verification 자체의 예외가 배포 응답을 흔들지 않도록 모두 catch.
-    cv_started = False
-    cv_enabled = request.enable_continuous_verification
-    if cv_enabled is None:
-        cv_enabled = bool(getattr(plan, "enable_continuous_verification", True))
-    if success and cv_enabled:
-        get_continuous_verifier = None  # type: ignore
         try:
-            from preflight.continuous_verification import get_continuous_verifier  # type: ignore
-        except Exception:  # noqa: BLE001
-            try:
-                from core.preflight.continuous_verification import get_continuous_verifier  # type: ignore
-            except Exception as _exc:  # noqa: BLE001
-                import logging
-                logging.getLogger(__name__).warning(
-                    "ContinuousVerifier unavailable: %s", _exc,
+            # 같은 이름으로 docker run 하면 기존 컨테이너가 남아 있는 정상 재배포는
+            # 항상 실패한다. 실제 배포 경로도 롤백과 동일하게 기존 컨테이너를 교체한다.
+            if plan.method == DeployMethod.LOCAL_DOCKER:
+                # 기록에 롤백 후보가 없어도(코어 재시작·외부에서 만든 컨테이너)
+                # 지금 돌고 있는 것을 붙잡아 둔다. 붙잡지 않고 지우면 새 run 이
+                # 실패했을 때 되살릴 근거가 없어 서비스가 통째로 사라진다.
+                if restore_source is None:
+                    restore_source = await _capture_running_local_container(
+                        plan.container_name or ""
+                    )
+                    if restore_source is not None:
+                        logger.info(
+                            "Captured unmanaged container %s (%s) before replacement",
+                            restore_source.container_name, restore_source.image,
+                        )
+                await _stop_prior_verifications_for_container(plan.container_name or "")
+                # docker stop 이 성공한 뒤 docker rm 이 예외를 내도 이전 서비스는 이미
+                # 내려갔을 수 있다. 따라서 파괴적 교체를 시작하기 *전* 복원이 필요함을
+                # 기록한다.
+                prior_container_replacement_started = True
+                await _remove_existing_local_container(plan.container_name or "")
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd_args, shell=False, capture_output=True, text=True, timeout=300
+                ),
+            )
+            success = result.returncode == 0
+            if not success and plan.method == DeployMethod.LOCAL_DOCKER and restore_source is not None:
+                restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(
+                    restore_source
                 )
+                # 교체 시작 시 이전 배포의 감시를 껐다. 되살렸으면 감시도 되살린다 —
+                # 아니면 되돌아온 배포가 감시 밖에 남아 이후 이상을 아무도 못 잡는다.
+                # 미추적 컨테이너를 붙잡은 경우엔 되살릴 감시가 애초에 없다.
+                if restored_previous and rollback_source is not None:
+                    restored_verification_resumed = await _resume_verification_for(rollback_source)
+        except Exception as exc:
+            if (
+                prior_container_replacement_started
+                and plan.method == DeployMethod.LOCAL_DOCKER
+                and restore_source is not None
+            ):
+                restored_previous, _restore_stdout, restore_stderr = await _restore_prior_local_container(
+                    restore_source
+                )
+                if restored_previous and rollback_source is not None:
+                    await _resume_verification_for(rollback_source)
+                restoration = "previous container restored" if restored_previous else (
+                    f"previous container restoration failed: {restore_stderr}"
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Deployment execution failed: {exc}; {restoration}",
+                ) from exc
+            raise HTTPException(status_code=500, detail=f"Deployment execution failed: {exc}") from exc
 
-        if get_continuous_verifier is not None:
-            try:
-                first_hp = next(iter(plan.ports.items()), ("8080", "8080"))[0]
-                health_path = plan.health_check_path or "/health"
-                if not health_path.startswith("/"):
-                    health_path = "/" + health_path
-                health_url = f"http://localhost:{first_hp}{health_path}"
-                verifier = get_continuous_verifier()
-                await verifier.start(
-                    deployment_id=record.deployment_id,
-                    container_name=record.container_name,
-                    health_check_url=health_url,
-                    duration_minutes=5,
-                    project_id=getattr(plan, "project_id", None),
-                    on_threshold_exceeded=_mark_rollback_candidate_unhealthy,
-                    on_complete=_update_rollback_candidate_after_verification,
-                )
-                cv_started = True
-            except Exception as _exc:  # noqa: BLE001
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Continuous verification start failed (deployment still success): %s",
-                    _exc,
-                )
+        # docker run 성공만으로는 앱이 준비됐다고 볼 수 없다. HTTP 헬스 확인을 통과한
+        # 기록만 이후 배포의 롤백 후보가 된다. 이 확인이 실패해도 이번 실행 자체의
+        # 결과는 실패로 바꾸지 않는다. 사용자는 장애 버전에 대해 여전히 롤백을 요청할
+        # 수 있어야 하기 때문이다.
+        rollback_eligible = success and await _verify_rollback_candidate_health(plan)
 
-    return {
-        "status": "success" if success else "failed",
-        "deployment_id": record.deployment_id,
-        "rollback_target": record.rollback_target,
-        "rollback_eligible": record.rollback_eligible,
-        "rollback_reason": rollback_reason,
-        # 복구는 컨테이너가 다시 **서비스될 때만** true 다. `docker run` 성공만으로
-        # true 를 주면 사용자는 복구됐다고 믿고 장애를 방치한다.
-        "restored_previous": restored_previous,
-        # 되돌아온 배포의 감시가 다시 붙었는지. false 면 그 배포는 감시 밖에 있다.
-        "restored_verification_resumed": restored_verification_resumed,
-        "restore_stdout": restore_stdout,
-        "restore_stderr": restore_stderr,
-        "stdout": result.stdout[:2000],
-        "stderr": result.stderr[:2000],
-        "continuous_verification": {
-            "enabled": bool(cv_enabled),
-            "started": bool(cv_started),
-        },
-    }
+        # 방금 띄운 이미지의 불변 참조를 남긴다. 다음 배포가 이 릴리스로 되돌릴 때
+        # 태그가 아니라 이 값을 쓴다 — 태그는 그때 이미 다른 것을 가리킬 수 있다.
+        deployed_image_id = (
+            await _running_image_id(plan.container_name or "") if success else None
+        )
+
+        # Record the deployment
+        from schemas import ActionType
+        record = DeploymentRecord(
+            project_id=getattr(plan, "project_id", "unknown"),
+            method=plan.method,
+            image=plan.image or "",
+            image_id=deployed_image_id,
+            container_name=plan.container_name or "",
+            health_check_path=plan.health_check_path,
+            # 롤백이 같은 모양으로 다시 띄울 수 있도록 실행 조건을 함께 남긴다.
+            ports={str(k): str(v) for k, v in (plan.ports or {}).items()},
+            env={str(k): str(v) for k, v in (getattr(plan, "env", None) or {}).items()},
+            rollback_target=rollback_target,
+            rollback_source_deployment_id=(
+                rollback_source.deployment_id if rollback_source is not None else None
+            ),
+            rollback_ports=(dict(rollback_source.ports) if rollback_source is not None else {}),
+            rollback_env=(dict(rollback_source.env) if rollback_source is not None else {}),
+            rollback_health_check_path=(
+                rollback_source.health_check_path if rollback_source is not None else None
+            ),
+            rollback_eligible=rollback_eligible,
+            status=DeployStatus.SUCCESS if success else DeployStatus.FAILED,
+        )
+        _deployment_records[record.deployment_id] = record
+        del _deployment_plans[request.plan_id]
+
+        # 설계 §4.6 / §34 — 배포 성공 직후 Continuous Verification 자동 트리거.
+        # 실패 시에도 verification 자체의 예외가 배포 응답을 흔들지 않도록 모두 catch.
+        cv_started = False
+        cv_enabled = request.enable_continuous_verification
+        if cv_enabled is None:
+            cv_enabled = bool(getattr(plan, "enable_continuous_verification", True))
+        if success and cv_enabled:
+            get_continuous_verifier = None  # type: ignore
+            try:
+                from preflight.continuous_verification import get_continuous_verifier  # type: ignore
+            except Exception:  # noqa: BLE001
+                try:
+                    from core.preflight.continuous_verification import get_continuous_verifier  # type: ignore
+                except Exception as _exc:  # noqa: BLE001
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "ContinuousVerifier unavailable: %s", _exc,
+                    )
+
+            if get_continuous_verifier is not None:
+                try:
+                    first_hp = next(iter(plan.ports.items()), ("8080", "8080"))[0]
+                    health_path = plan.health_check_path or "/health"
+                    if not health_path.startswith("/"):
+                        health_path = "/" + health_path
+                    health_url = f"http://localhost:{first_hp}{health_path}"
+                    verifier = get_continuous_verifier()
+                    await verifier.start(
+                        deployment_id=record.deployment_id,
+                        container_name=record.container_name,
+                        health_check_url=health_url,
+                        duration_minutes=5,
+                        project_id=getattr(plan, "project_id", None),
+                        on_threshold_exceeded=_mark_rollback_candidate_unhealthy,
+                        on_complete=_update_rollback_candidate_after_verification,
+                    )
+                    cv_started = True
+                except Exception as _exc:  # noqa: BLE001
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Continuous verification start failed (deployment still success): %s",
+                        _exc,
+                    )
+
+        return {
+            "status": "success" if success else "failed",
+            "deployment_id": record.deployment_id,
+            "rollback_target": record.rollback_target,
+            "rollback_eligible": record.rollback_eligible,
+            "rollback_reason": rollback_reason,
+            # 복구는 컨테이너가 다시 **서비스될 때만** true 다. `docker run` 성공만으로
+            # true 를 주면 사용자는 복구됐다고 믿고 장애를 방치한다.
+            "restored_previous": restored_previous,
+            # 되돌아온 배포의 감시가 다시 붙었는지. false 면 그 배포는 감시 밖에 있다.
+            "restored_verification_resumed": restored_verification_resumed,
+            "restore_stdout": restore_stdout,
+            "restore_stderr": restore_stderr,
+            "stdout": result.stdout[:2000],
+            "stderr": result.stderr[:2000],
+            "continuous_verification": {
+                "enabled": bool(cv_enabled),
+                "started": bool(cv_started),
+            },
+        }
 
 
 @router.post("/api/deploy/local")
@@ -2982,6 +3055,7 @@ async def rollback(request: RollbackRequest) -> dict:
         run_args.extend(["-e", f"{_k}={_v}"])
     run_args.extend(["--restart", "unless-stopped", record.rollback_target])
 
+    health_failed = False
     # 배포와 같은 컨테이너를 건드리므로 같은 락을 쓴다.
     container_lock = await _lock_for_container(record.container_name)
     await container_lock.acquire()
@@ -3014,6 +3088,24 @@ async def rollback(request: RollbackRequest) -> dict:
             ),
         )
         success = result.returncode == 0
+        # 포트 기록이 없으면 찔러 볼 곳이 없다. 그때는 확인을 건너뛰고 아래에서
+        # "외부 접속이 불가능할 수 있다" 고 알린다 — "확인할 수 없음" 과
+        # "죽어 있음" 은 다른 상태이고, 뭉뚱그리면 사용자가 원인을 못 찾는다.
+        if success and (rollback_ports or {}):
+            # `docker run -d` 의 0 은 "떴다" 일 뿐 "서비스된다" 가 아니다.
+            # 되돌린 이미지가 기동 직후 죽거나 헬스 경로가 응답하지 않아도
+            # 여기까지는 성공으로 보인다. 그 상태로 status: "ok" 를 돌려주면
+            # 사용자는 복구됐다고 믿고 장애를 방치한다 — 교체 복구 경로는
+            # 이미 이 확인을 하는데 수동 롤백만 빠져 있었다.
+            #
+            # 감시(verification)를 다시 거는 것으로는 대신할 수 없다. 그건
+            # 백그라운드 작업을 예약할 뿐 응답 시점의 상태를 보장하지 않는다.
+            healthy = await _probe_local_http_health(
+                rollback_ports, record.rollback_health_check_path,
+            )
+            if not healthy:
+                success = False
+                health_failed = True
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
     finally:
@@ -3045,7 +3137,10 @@ async def rollback(request: RollbackRequest) -> dict:
         # 포트 기록이 없는 배포(이 필드가 생기기 전의 기록)는 롤백해도 밖에서
         # 접속할 수 없다. 조용히 성공으로 보이지 않게 알린다.
         "warning": (
-            None if (rollback_ports or {})
+            "이전 이미지를 다시 띄웠지만 헬스 확인에 실패했습니다 — "
+            "서비스가 복구되지 않았습니다. 컨테이너 로그를 확인하세요."
+            if health_failed
+            else None if (rollback_ports or {})
             else "이 배포에는 포트 기록이 없어 롤백된 컨테이너에 외부 접속이 불가능할 수 있습니다."
         ),
         "stdout": result.stdout[:2000],

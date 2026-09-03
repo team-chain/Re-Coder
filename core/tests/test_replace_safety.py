@@ -75,6 +75,8 @@ def _execute(plan: DeploymentPlan) -> dict:
 
 #: `docker inspect --format {{json .}}` 가 돌려주는 모양의 최소 응답.
 _INSPECT_JSON = json.dumps({
+    "State": {"Running": True},
+    "Image": "sha256:legacyid",
     "Config": {"Image": "legacy:v9", "Env": ["PORT=8000", "PATH=/usr/bin", "BAD NAME=x"]},
     "HostConfig": {"PortBindings": {"8000/tcp": [{"HostIp": "", "HostPort": "18080"}]}},
 })
@@ -108,7 +110,7 @@ def test_기록에_없는_컨테이너도_교체_전에_붙잡아_복구한다(m
         "기록이 없다는 이유로 살아 있던 컨테이너를 그냥 잃었다"
     )
     restore_run = [a for a in calls if len(a) > 1 and a[1] == "run"][-1]
-    assert restore_run[-1] == "legacy:v9", restore_run
+    assert restore_run[-1] == "sha256:legacyid", restore_run
     assert "18080:8000" in restore_run, "붙잡은 포트 매핑이 복구에 쓰이지 않았다"
 
 
@@ -132,6 +134,34 @@ def test_붙잡은_환경변수에서_이름이_이상한_항목은_버린다(mo
     joined = " ".join(restore_run)
     assert "PORT=8000" in joined
     assert "BAD NAME" not in joined, f"이름이 이상한 환경변수가 그대로 나갔다: {restore_run}"
+
+
+def test_종료된_컨테이너는_되살리지_않는다(monkeypatch):
+    """이름만 남은 종료 컨테이너를 "돌던 서비스" 로 오인하면 안 된다.
+
+    사람이 일부러 내려둔 것을 새 배포 실패를 계기로 되살려 놓고 복구했다고
+    보고하게 된다.
+    """
+    exited = json.dumps({
+        "State": {"Running": False},
+        "Image": "sha256:oldid",
+        "Config": {"Image": "legacy:v9", "Env": []},
+        "HostConfig": {"PortBindings": {}},
+    })
+
+    def fake_run(args, **kwargs):  # noqa: ANN001
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(args, 0, stdout=exited, stderr="")
+        if len(args) > 1 and args[1] == "run" and args[-1] == "app:v2":
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="fail")
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
+
+    result = _execute(_plan())
+
+    assert result["status"] == "failed"
+    assert result["restored_previous"] is False, "내려가 있던 컨테이너를 되살렸다"
 
 
 def test_그런_컨테이너가_없으면_붙잡지_않는다(monkeypatch):

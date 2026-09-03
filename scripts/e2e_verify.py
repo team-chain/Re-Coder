@@ -720,11 +720,16 @@ def step7_redeploy_broken(client, token: str, ws: Path) -> str:
     result = _deploy(client, token, ws, IMAGE_V2, step=7)
     plan = result["plan"]
 
+    # 롤백 대상은 **태그가 아니라 이미지 ID** 다. 태그는 다시 빌드되면 다른
+    # 바이트를 가리키므로, 되돌릴 때 "그때 그 릴리스" 를 보장하지 못한다.
+    # 그래서 v1 태그가 현재 가리키는 ID 와 같은지로 확인한다.
     rollback_image = plan.get("rollback_image")
-    if rollback_image != IMAGE_V1:
+    v1_id = _docker("inspect", "--format", "{{.Id}}", IMAGE_V1, timeout=30).stdout.strip()
+    if rollback_image not in (v1_id, IMAGE_V1):
         reasons = plan.get("risk_reasons") or []
         raise StepFailure(
-            7, "롤백 대상이 v1 이 아님", f"rollback_image={rollback_image!r}, 사유={reasons}",
+            7, "롤백 대상이 v1 이 아님",
+            f"rollback_image={rollback_image!r} (v1 이미지 ID={v1_id!r}), 사유={reasons}",
             "이 카드가 존재하는 이유가 이 지점이다. 값이 None 이면 되돌릴 곳을\n"
             "  모르는 상태로 배포된 것이고, /api/deploy/rollback 은 422 를 낸다.\n"
             "  api/routes/deploy.py 의 _previous_image_for 와\n"
@@ -753,15 +758,17 @@ def step7_redeploy_broken(client, token: str, ws: Path) -> str:
             "재배포가 실제로 일어나야 롤백 검증이 의미가 있습니다.",
         )
 
+    # 여기도 태그가 아니라 이미지 ID 다(위 rollback_image 와 같은 이유).
     actual_rollback_target = execute.get("rollback_target")
-    if actual_rollback_target != IMAGE_V1:
+    if actual_rollback_target not in (v1_id, IMAGE_V1):
         raise StepFailure(
             7, "실행 시점의 롤백 대상이 v1 이 아님",
-            f"rollback_target={actual_rollback_target!r}",
+            f"rollback_target={actual_rollback_target!r} (v1 이미지 ID={v1_id!r})",
             "승인 대기 플랜의 대상이 오래됐을 수 있으므로 execute 직전에 대상이 다시 계산되어야 합니다.",
         )
 
-    _ok(f"v2 배포됨, 롤백 대상 = {rollback_image}")
+    _ok(f"v2 배포됨, 롤백 대상 = {rollback_image[:24]}… ({IMAGE_V1})"
+        if rollback_image != IMAGE_V1 else f"v2 배포됨, 롤백 대상 = {rollback_image}")
 
     status, _ = _http(HEALTH_URL)
     if status == 200:
@@ -794,10 +801,14 @@ def step8_rollback(client, token: str, deployment_id: str) -> None:
             "core/api/routes/deploy.py 의 rollback",
         )
 
+    # 롤백은 태그가 아니라 이미지 ID 로 실행하므로, docker 가 돌려주는
+    # Config.Image 도 ID 다. 둘 다 v1 을 가리키면 통과.
     running = _running_image(CONTAINER)
-    if running != IMAGE_V1:
+    v1_id = _docker("inspect", "--format", "{{.Id}}", IMAGE_V1, timeout=30).stdout.strip()
+    if running not in (v1_id, IMAGE_V1):
         raise StepFailure(
-            8, "롤백했다는데 컨테이너는 v1 이 아님", f"현재 이미지: {running or '(없음)'}",
+            8, "롤백했다는데 컨테이너는 v1 이 아님",
+            f"현재 이미지: {running or '(없음)'} / v1 이미지 ID: {v1_id or '(조회 실패)'}",
             "응답만 성공이고 docker 에는 반영되지 않았다 — 롤백의 가장 위험한 실패 형태다.\n"
             "  사용자는 복구됐다고 믿고 장애는 계속된다",
         )
@@ -809,7 +820,7 @@ def step8_rollback(client, token: str, deployment_id: str) -> None:
             f"{HEALTH_URL} → {status or '연결 실패'}\n\n{_container_diagnosis()}",
             "롤백은 이미지를 되돌렸지만 컨테이너가 뜨지 않았다",
         )
-    _ok(f"{IMAGE_V1} 로 복귀, HTTP 200 · {body.strip()[:40]!r}")
+    _ok(f"{IMAGE_V1} 로 복귀 ({running[:24]}…), HTTP 200 · {body.strip()[:40]!r}")
 
 
 # ---------------------------------------------------------------------------

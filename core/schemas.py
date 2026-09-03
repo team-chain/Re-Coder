@@ -342,6 +342,14 @@ class DeploymentRecord(BaseModel):
     ports: dict[str, str] = Field(default_factory=dict)
     #: 배포 당시의 환경변수. 같은 이유로 롤백이 재현해야 한다.
     env: dict[str, str] = Field(default_factory=dict)
+    #: 배포 시점 이미지의 **불변 참조**(sha256 이미지 ID).
+    #:
+    #: `image` 는 태그일 뿐이라 같은 이름이 나중에 다시 빌드·푸시되면 다른
+    #: 바이트를 가리킨다. `app:v1` 처럼 버전처럼 보이는 태그도 예외가 아니다.
+    #: 롤백이 태그로 되돌리면 "그때 돌던 그 릴리스" 가 아니라 "지금 그 태그가
+    #: 가리키는 것" 이 뜬다 — 되돌렸다고 믿는 순간 다른 코드가 돌아간다.
+    #: 그래서 실행 직후 docker 에게 물어 이미지 ID 를 남기고, 롤백은 이 값을 쓴다.
+    image_id: Optional[str] = None
     deployed_at: datetime = Field(default_factory=datetime.utcnow)
     rollback_target: Optional[str] = None  # Previous image tag for rollback
     #: rollback_target 이 가리키는 이전 배포의 실행 조건 스냅샷.
