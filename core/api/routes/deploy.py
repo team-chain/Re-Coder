@@ -47,6 +47,90 @@ _infra_proposals: dict[str, InfraFileProposal] = {}
 _deployment_plans: dict[str, DeploymentPlan] = {}
 _deployment_records: dict[str, DeploymentRecord] = {}
 
+# 컨테이너 이름별 직렬화 락.
+#
+# 같은 컨테이너를 노리는 배포·롤백이 동시에 들어오면 stop/rm/run 순서가 서로
+# 끼어든다. 한쪽이 이미지를 성공적으로 띄운 뒤 다른 쪽이 이름 충돌로 실패하면,
+# 그 실패 경로의 복구 로직이 **이긴 쪽의 컨테이너를 지우고 옛 릴리스를 되살린다.**
+# 그러면 성공 응답과 배포 기록이 실제로 돌고 있는 것과 어긋난다.
+# docker 는 이름 유일성만 보장할 뿐 이 순서를 지켜주지 않으므로 여기서 막는다.
+#: 환경변수 이름 화이트리스트. 복구·롤백이 docker run 인자로 내보내기 전에 거른다.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+_container_locks: dict[str, asyncio.Lock] = {}
+_container_locks_guard = asyncio.Lock()
+
+
+async def _lock_for_container(container_name: str) -> asyncio.Lock:
+    async with _container_locks_guard:
+        lock = _container_locks.get(container_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            _container_locks[container_name] = lock
+        return lock
+
+
+async def _capture_running_local_container(container_name: str):
+    """지금 돌고 있는 컨테이너의 실행 조건을 docker 에서 직접 붙잡는다.
+
+    코어가 재시작됐거나 컨테이너가 이 프로세스 밖에서 만들어졌으면
+    `_deployment_records` 에 아무 기록이 없다. 그런데 교체는 기록과 무관하게
+    기존 컨테이너를 멈추고 지운다 — 그 뒤 새 `docker run` 이 실패하면
+    **되살릴 근거가 없어 서비스가 통째로 사라진다.** 기록이 없다는 건
+    "되돌릴 것이 없다"가 아니라 "우리가 모른다"일 뿐이다.
+
+    그래서 파괴 직전에 docker 에게 물어 이미지·포트·환경변수를 확보한다.
+    반환한 레코드는 저장소에 넣지 않는다 — 복구 재료로만 쓴다.
+    """
+    if not container_name:
+        return None
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["docker", "inspect", "--format", "{{json .}}", container_name],
+                shell=False, capture_output=True, text=True, timeout=30,
+            ),
+        )
+        if result.returncode != 0:
+            return None  # 그런 컨테이너가 없다 — 교체할 것도 없다
+        info = json.loads(result.stdout)
+    except Exception as exc:  # noqa: BLE001 - 붙잡기 실패가 배포를 막지는 않는다
+        logger.warning("Could not inspect container %s: %s", container_name, exc)
+        return None
+
+    config = info.get("Config") or {}
+    image = (config.get("Image") or "").strip()
+    if not image:
+        return None
+
+    ports: dict[str, str] = {}
+    for container_port, bindings in ((info.get("HostConfig") or {}).get("PortBindings") or {}).items():
+        for binding in bindings or []:
+            host_port = (binding or {}).get("HostPort") or ""
+            if host_port:
+                ports[str(host_port)] = str(container_port).split("/")[0]
+                break
+
+    env: dict[str, str] = {}
+    for entry in config.get("Env") or []:
+        key, sep, value = str(entry).partition("=")
+        # 이름이 이상한 항목은 버린다. 복구 시 docker run 인자로 나가므로
+        # 여기서 거르지 않으면 복구 자체가 검증에서 막힌다.
+        if sep and _ENV_NAME_RE.match(key):
+            env[key] = value
+
+    return DeploymentRecord(
+        project_id="unmanaged",
+        method=DeployMethod.LOCAL_DOCKER,
+        image=image,
+        container_name=container_name,
+        ports=ports,
+        env=env,
+        status=DeployStatus.SUCCESS,
+    )
+
+
 
 _ROLLBACK_HEALTH_TIMEOUT_SECONDS = 15.0
 _ROLLBACK_HEALTH_RETRY_SECONDS = 0.5
@@ -2596,6 +2680,9 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     # 반드시 실행 시점의 마지막 *검증 완료* 배포로 다시 잡는다.
     rollback_target, rollback_reason = _refresh_rollback_target(plan)
     rollback_source = _rollback_source_for(plan.container_name or "", plan.image or "")
+    # 복구 재료. 기록에 후보가 있으면 그것을, 없으면 아래에서 docker 를
+    # 직접 들여다본 결과를 쓴다.
+    restore_source = rollback_source
 
     # ── 보안: image / container_name 화이트리스트 검증 (shell injection 차단) ──
     # docker 이미지 이름 문법: [registry/][namespace/]name[:tag][@digest]
@@ -2644,10 +2731,33 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     restore_stdout = ""
     restore_stderr = ""
     prior_container_replacement_started = False
+
+    # 같은 컨테이너를 노리는 다른 배포·롤백과 순서가 섞이지 않게 잠근다.
+    # 잠그지 않으면 한쪽이 띄운 컨테이너를 다른 쪽의 복구 로직이 지운다.
+    container_lock = (
+        await _lock_for_container(plan.container_name or "")
+        if plan.method == DeployMethod.LOCAL_DOCKER and plan.container_name
+        else None
+    )
+    if container_lock is not None:
+        await container_lock.acquire()
+
     try:
         # 같은 이름으로 docker run 하면 기존 컨테이너가 남아 있는 정상 재배포는
         # 항상 실패한다. 실제 배포 경로도 롤백과 동일하게 기존 컨테이너를 교체한다.
         if plan.method == DeployMethod.LOCAL_DOCKER:
+            # 기록에 롤백 후보가 없어도(코어 재시작·외부에서 만든 컨테이너)
+            # 지금 돌고 있는 것을 붙잡아 둔다. 붙잡지 않고 지우면 새 run 이
+            # 실패했을 때 되살릴 근거가 없어 서비스가 통째로 사라진다.
+            if restore_source is None:
+                restore_source = await _capture_running_local_container(
+                    plan.container_name or ""
+                )
+                if restore_source is not None:
+                    logger.info(
+                        "Captured unmanaged container %s (%s) before replacement",
+                        restore_source.container_name, restore_source.image,
+                    )
             await _stop_prior_verifications_for_container(plan.container_name or "")
             # docker stop 이 성공한 뒤 docker rm 이 예외를 내도 이전 서비스는 이미
             # 내려갔을 수 있다. 따라서 파괴적 교체를 시작하기 *전* 복원이 필요함을
@@ -2661,24 +2771,25 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             ),
         )
         success = result.returncode == 0
-        if not success and plan.method == DeployMethod.LOCAL_DOCKER and rollback_source is not None:
+        if not success and plan.method == DeployMethod.LOCAL_DOCKER and restore_source is not None:
             restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(
-                rollback_source
+                restore_source
             )
             # 교체 시작 시 이전 배포의 감시를 껐다. 되살렸으면 감시도 되살린다 —
             # 아니면 되돌아온 배포가 감시 밖에 남아 이후 이상을 아무도 못 잡는다.
-            if restored_previous:
+            # 미추적 컨테이너를 붙잡은 경우엔 되살릴 감시가 애초에 없다.
+            if restored_previous and rollback_source is not None:
                 restored_verification_resumed = await _resume_verification_for(rollback_source)
     except Exception as exc:
         if (
             prior_container_replacement_started
             and plan.method == DeployMethod.LOCAL_DOCKER
-            and rollback_source is not None
+            and restore_source is not None
         ):
             restored_previous, _restore_stdout, restore_stderr = await _restore_prior_local_container(
-                rollback_source
+                restore_source
             )
-            if restored_previous:
+            if restored_previous and rollback_source is not None:
                 await _resume_verification_for(rollback_source)
             restoration = "previous container restored" if restored_previous else (
                 f"previous container restoration failed: {restore_stderr}"
@@ -2688,6 +2799,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 detail=f"Deployment execution failed: {exc}; {restoration}",
             ) from exc
         raise HTTPException(status_code=500, detail=f"Deployment execution failed: {exc}") from exc
+    finally:
+        # 파괴적 구간(stop/rm/run/복구)이 끝났으면 다음 요청이 들어와도 안전하다.
+        if container_lock is not None:
+            container_lock.release()
 
     # docker run 성공만으로는 앱이 준비됐다고 볼 수 없다. HTTP 헬스 확인을 통과한
     # 기록만 이후 배포의 롤백 후보가 된다. 이 확인이 실패해도 이번 실행 자체의
@@ -2867,6 +2982,9 @@ async def rollback(request: RollbackRequest) -> dict:
         run_args.extend(["-e", f"{_k}={_v}"])
     run_args.extend(["--restart", "unless-stopped", record.rollback_target])
 
+    # 배포와 같은 컨테이너를 건드리므로 같은 락을 쓴다.
+    container_lock = await _lock_for_container(record.container_name)
+    await container_lock.acquire()
     try:
         loop = asyncio.get_running_loop()
         # 롤백 대상(실패한 새 릴리스)의 감시가 복구된 이전 컨테이너를 계속
@@ -2898,13 +3016,31 @@ async def rollback(request: RollbackRequest) -> dict:
         success = result.returncode == 0
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
+    finally:
+        container_lock.release()
 
     record.status = DeployStatus.ROLLED_BACK if success else DeployStatus.FAILED
+
+    # 되돌아온 릴리스의 감시를 다시 건다.
+    #
+    # 이전 릴리스의 감시는 교체될 때 이미 꺼졌고, 방금 위에서 실패한 릴리스의
+    # 감시까지 껐다. 여기서 아무것도 시작하지 않으면 **롤백이 성공할 때마다
+    # 되살아난 서비스가 감시 밖에 남는다** — 이후 헬스·자원 이상이 생겨도
+    # 롤백 자격이 회수되지 않고 검증 기록도 쌓이지 않는다.
+    verification_resumed = False
+    restored_record = (
+        _deployment_records.get(record.rollback_source_deployment_id or "")
+        if success else None
+    )
+    if restored_record is not None:
+        verification_resumed = await _resume_verification_for(restored_record)
 
     return {
         "status": "ok" if success else "failed",
         "deployment_id": request.deployment_id,
         "rolled_back_to": record.rollback_target,
+        # 되살아난 릴리스에 감시가 다시 걸렸는지. false 면 그 서비스는 감시 밖이다.
+        "verification_resumed": verification_resumed,
         "ports": dict(rollback_ports or {}),
         # 포트 기록이 없는 배포(이 필드가 생기기 전의 기록)는 롤백해도 밖에서
         # 접속할 수 없다. 조용히 성공으로 보이지 않게 알린다.
