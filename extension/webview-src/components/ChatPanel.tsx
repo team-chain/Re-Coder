@@ -13,6 +13,10 @@ type ChatMessage = {
   content: string;
   pending?: boolean;
   error?: boolean;
+  //: 코어가 분류해 내려준 실패 원인("AI 제공자의 요청 한도에 도달했습니다." 등).
+  //: 예전에는 chat.error 의 message 를 여기서 버리고 고정 문구만 보여줘서,
+  //: rate limit 인지 자격증명 문제인지 사용자가 알 길이 없었다.
+  errorReason?: string;
   model?: string;
   sentAt?: string;
 };
@@ -64,8 +68,9 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
     } else if (msg.type === "chat.error") {
       const payload = msg.payload as { id?: string; message?: string };
       const id = payload.id ?? "";
+      const reason = (payload.message ?? "").trim();
       setMessages((current) => current.map((item) => item.id === id
-        ? { ...item, pending: false, error: true }
+        ? { ...item, pending: false, error: true, errorReason: reason || undefined }
         : item));
     }
   }, []));
@@ -208,9 +213,18 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
                   {!mine && <span style={{ flex: "0 0 auto", color: "var(--vscode-descriptionForeground, #888)", fontSize: 9.5, whiteSpace: "nowrap" }}>{message.sentAt}</span>}
                 </div>
                 {message.error && (
-                  <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 4, marginTop: 5, color: "#ff6b6b", fontSize: 10.5, fontWeight: 600 }}>
-                    <span aria-hidden="true" style={{ width: 14, height: 14, borderRadius: "50%", display: "inline-grid", placeItems: "center", background: "#e55353", color: "#fff", fontSize: 10, fontWeight: 800 }}>!</span>
-                    응답을 가져오지 못했어요
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3, marginTop: 5 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, color: "#ff6b6b", fontSize: 10.5, fontWeight: 600 }}>
+                      <span aria-hidden="true" style={{ width: 14, height: 14, borderRadius: "50%", display: "inline-grid", placeItems: "center", background: "#e55353", color: "#fff", fontSize: 10, fontWeight: 800 }}>!</span>
+                      응답을 가져오지 못했어요
+                    </div>
+                    {/* 코어가 내려준 원인이 있으면 그대로 보여준다 — 원인 없는
+                        빨간 줄만으로는 사용자가 재시도 말고 할 수 있는 게 없다. */}
+                    {message.errorReason && (
+                      <div style={{ maxWidth: "100%", textAlign: "right", color: "var(--vscode-descriptionForeground, #c98080)", fontSize: 10, lineHeight: 1.45, overflowWrap: "anywhere" }}>
+                        {message.errorReason}
+                      </div>
+                    )}
                   </div>
                 )}
                 {message.model && <div style={{ margin: "3px 3px 0", color: "var(--vscode-descriptionForeground, #777)", fontSize: 9 }}>{message.model}</div>}
