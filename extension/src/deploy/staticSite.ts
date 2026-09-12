@@ -33,6 +33,65 @@ const SKIP_DIRS = new Set([
 const SKIP_FILES = new Set(['.DS_Store', 'Thumbs.db', '.gitkeep']);
 
 /**
+ * 이름만으로 업로드를 차단하는 민감 파일.
+ *
+ * 이전 필터는 "금지 목록에 없으면 전부 통과" 방식이라, 워크스페이스 루트를
+ * 배포하면 `.env` 의 DB 비밀번호와 `id_rsa` 가 **공개 읽기 버킷**에 그대로
+ * 올라갔다. 공개 버킷을 자동으로 훑는 수집기는 상시 돌고 있으므로, 노출된
+ * 키는 사람이 알아채기 전에 기계가 먼저 수집한다. core/s3_byo.py 도 같은
+ * 규칙으로 한 번 더 거른다(확장을 거치지 않는 직접 호출 대비).
+ */
+const SENSITIVE_NAME_PATTERNS: RegExp[] = [
+    /^\.env(\..+)?$/i,                                  // .env, .env.production …
+    /^\.envrc$/i,                                        // direnv — export 로 비밀을 담는다
+    /\.(pem|key|p12|pfx|jks|keystore)$/i,               // 키·인증서
+    /^id_(rsa|dsa|ecdsa|ed25519)(\..+)?$/i,             // SSH 개인키(공개키 .pub 포함 — 아래 참고)
+    /^credentials$/i,                                    // ~/.aws/credentials 사본
+    /^\.(npmrc|netrc|htpasswd|git-credentials|pgpass)$/i,
+    /^secrets?\.(ya?ml|json|toml|ini|txt)$/i,
+];
+//: .pub(공개키)까지 막는 이유 — 공개키 자체는 비밀이 아니지만, 그 파일이
+//: 있다는 건 옆에 개인키가 있다는 뜻이고, 이름 패턴 하나로 쌍을 함께 걸러야
+//: "id_rsa 만 막고 id_rsa.pub 은 올라가는" 어중간한 상태를 피한다.
+const SENSITIVE_DIRS = new Set(['.aws', '.ssh', '.gnupg']);
+
+/** 이름 규칙만으로 비밀로 판정되는 경로면 true. 내용은 보지 않는다. */
+export function isSensitiveFile(relativePath: string): boolean {
+    const parts = relativePath.split('/').filter(Boolean);
+    if (!parts.length) { return false; }
+    if (parts.some(part => SENSITIVE_DIRS.has(part.toLowerCase()))) { return true; }
+    const name = parts[parts.length - 1];
+    return SENSITIVE_NAME_PATTERNS.some(rx => rx.test(name));
+}
+
+/**
+ * 정적 사이트에 필요한 확장자 **허용 목록**.
+ *
+ * 금지 목록은 새로운 위험 파일이 기본으로 통과하는 구조다. 정적 호스팅에
+ * 필요한 파일 종류는 한정적이므로 방향을 뒤집는다 — 여기 없는 확장자는
+ * 올라가지 않고, 무엇이 제외됐는지는 결과에 담아 사용자에게 보여준다.
+ */
+const ALLOWED_EXTENSIONS = new Set([
+    // 문서·스크립트·데이터
+    'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'json', 'map', 'txt', 'xml',
+    'webmanifest', 'webapp', 'md', 'csv', 'tsv', 'pdf',
+    // 이미지
+    'svg', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'bmp', 'apng',
+    // 폰트
+    'woff', 'woff2', 'ttf', 'otf', 'eot',
+    // 미디어·3D·wasm
+    'mp3', 'mp4', 'webm', 'ogg', 'wav', 'wasm', 'glb', 'gltf',
+]);
+
+/** 허용 목록에 있는 정적 자산이면 true. 확장자 없는 파일은 자산이 아니다. */
+export function isDeployableAsset(relativePath: string): boolean {
+    const name = relativePath.split('/').pop() ?? '';
+    const dot = name.lastIndexOf('.');
+    if (dot <= 0) { return false; }
+    return ALLOWED_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
+}
+
+/**
  * UTF-8 텍스트임을 확신할 수 있는 확장자.
  *
  * 바이너리 목록을 유지하면 `.glb`, `.cur`처럼 새로 등장한 자산 하나를 빠뜨릴
@@ -134,6 +193,42 @@ export type StaticFile = {
     encoding: 'utf-8' | 'base64';
 };
 
+export type CollectedStaticFiles = {
+    files: StaticFile[];
+    /** 이름 규칙으로 차단한 민감 파일 — 결과 화면에 반드시 표시한다. */
+    excludedSensitive: string[];
+    /** 정적 자산이 아니어서 제외한 파일(소스 코드·설정 등). */
+    excludedNonAsset: string[];
+};
+
+/**
+ * 제외 내역을 한 줄로. **조용히 빼면 이 필터는 없는 것과 같다** — 사용자가
+ * "왜 그 파일이 사이트에 없지"를 배포 결과에서 바로 알 수 있어야 한다.
+ */
+export function describeExcludedFiles(collected: {
+    excludedSensitive: string[];
+    excludedNonAsset: string[];
+}): string {
+    const parts: string[] = [];
+    const list = (names: string[], cap: number) => {
+        const head = names.slice(0, cap).join(', ');
+        return names.length > cap ? `${head} 외 ${names.length - cap}개` : head;
+    };
+    if (collected.excludedSensitive.length) {
+        parts.push(
+            `비밀 정보로 보이는 파일 ${collected.excludedSensitive.length}개는 ` +
+            `업로드에서 자동 제외했습니다: ${list(collected.excludedSensitive, 5)}.`,
+        );
+    }
+    if (collected.excludedNonAsset.length) {
+        parts.push(
+            `정적 자산이 아닌 파일 ${collected.excludedNonAsset.length}개는 ` +
+            `올리지 않았습니다 (${list(collected.excludedNonAsset, 3)}).`,
+        );
+    }
+    return parts.join(' ');
+}
+
 /**
  * 선택한 정적 자산을 읽지 못했을 때의 오류.
  *
@@ -233,13 +328,15 @@ export function collectStaticFiles(
     fsImpl: FileSystemLike,
     join: (...parts: string[]) => string,
     dirLabel = '',
-): StaticFile[] {
+): CollectedStaticFiles {
     //: **두 번 훑는다.** 한 번에 읽으면서 상한에서 멈추면 "31개 찾았습니다"
     //: 라고밖에 말할 수 없는데, 사용자가 알아야 할 건 진짜 개수다. 400개가
     //: 나왔다면 폴더를 잘못 고른 것이고, 32개라면 몇 개만 빼면 된다 —
     //: 완전히 다른 행동이다. 게다가 미리 세면 실패할 배포를 위해 수백 개
     //: 파일을 메모리에 읽어들이지도 않는다.
     const paths: Array<{ rel: string; full: string }> = [];
+    const excludedSensitive: string[] = [];
+    const excludedNonAsset: string[] = [];
 
     const walk = (dir: string, prefix: string): void => {
         let entries: ReturnType<FileSystemLike['readdirSync']>;
@@ -260,7 +357,16 @@ export function collectStaticFiles(
             } else if (entry.isDirectory()) {
                 walk(full, rel);
             } else if (entry.isFile()) {
-                paths.push({ rel, full });
+                //: 민감 판정이 허용 목록보다 먼저다. `.env` 를 "자산이 아님"
+                //: 으로 뭉뚱그리면 사용자는 비밀이 걸러졌다는 사실을 모른다 —
+                //: 같은 제외라도 이유가 다르면 메시지도 달라야 한다.
+                if (isSensitiveFile(rel)) {
+                    excludedSensitive.push(rel);
+                } else if (!isDeployableAsset(rel)) {
+                    excludedNonAsset.push(rel);
+                } else {
+                    paths.push({ rel, full });
+                }
             }
         }
     };
@@ -269,6 +375,8 @@ export function collectStaticFiles(
     if (paths.length > MAX_FILES) {
         //: 자르지 않고 던진다. 조용히 30개만 올리면 사이트가 반쯤 올라간
         //: 채로 "배포 성공" 이 되고, 사용자는 뭐가 빠졌는지 모른다.
+        //: 상한은 **실제로 올라갈 파일** 기준이다 — 제외된 소스 파일까지
+        //: 세면, 자산 10개짜리 정상 배포가 소스 폴더라는 이유로 막힌다.
         throw new TooManyFilesError(paths.length, dirLabel);
     }
 
@@ -301,7 +409,7 @@ export function collectStaticFiles(
             encoding: binary ? 'base64' : 'utf-8',
         });
     }
-    return files;
+    return { files, excludedSensitive, excludedNonAsset };
 }
 
 export class TooManyFilesError extends Error {

@@ -16,11 +16,12 @@ import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
 import { CoreManager } from '../core/CoreManager';
 import { isCoreConnectionFailure } from '../core/coreReuse';
 import {
+    CollectedStaticFiles,
     collectStaticFiles,
+    describeExcludedFiles,
     pickStaticDir,
     s3ProjectIdentifier,
     STATIC_DIR_CANDIDATES,
-    StaticFile,
 } from '../deploy/staticSite';
 import { PollingService } from '../core/PollingService';
 import { analyzeProject, analyzeFile } from '../codemap/analyzer';
@@ -973,9 +974,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-                let files: StaticFile[];
+                let collected: CollectedStaticFiles;
                 try {
-                    files = collectStaticFiles(realRoot, fs, path.join, dirLabel);
+                    collected = collectStaticFiles(realRoot, fs, path.join, dirLabel);
                 } catch (err) {
                     // 상한 초과는 자르지 않고 알린다. 조용히 30개만 올리면
                     // 사이트가 반쯤 올라간 채로 "배포 성공" 이 된다.
@@ -983,11 +984,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.postMessage('workspace.deploy.s3.result', { ok: false, message: msg });
                     break;
                 }
+                const files = collected.files;
 
                 if (!files.length) {
+                    //: 전부 필터에 걸러진 경우, "파일이 없습니다"만 보여주면
+                    //: 사용자는 눈앞의 파일들이 왜 안 올라갔는지 알 수 없다.
+                    //: 무엇이 왜 제외됐는지를 같은 메시지에 담는다.
+                    const why = describeExcludedFiles(collected);
                     this.postMessage('workspace.deploy.s3.result', {
                         ok: false,
-                        message: `${dirLabel || '워크스페이스 루트'} 에 올릴 파일이 없습니다. 빌드 산출물 폴더를 지정했는지 확인하세요.`,
+                        message: `${dirLabel || '워크스페이스 루트'} 에 올릴 정적 파일이 없습니다. ` +
+                            `빌드 산출물 폴더(dist·build 등)를 지정했는지 확인하세요.${why ? ` ${why}` : ''}`,
                     });
                     break;
                 }
@@ -1004,7 +1011,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         files,
                         region: (p.region ?? '').trim() || undefined,
                     });
-                    this.postMessage('workspace.deploy.s3.result', { ok: true, result });
+                    this.postMessage('workspace.deploy.s3.result', {
+                        ok: true,
+                        result: {
+                            ...result,
+                            //: 필터가 무엇을 걸렀는지 결과 화면까지 전달한다.
+                            //: 조용히 빼면 이 필터는 없는 것과 같다.
+                            excluded_sensitive: collected.excludedSensitive,
+                            excluded_non_asset: collected.excludedNonAsset,
+                            excluded_note: describeExcludedFiles(collected) || undefined,
+                        },
+                    });
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('workspace.deploy.s3.result', { ok: false, message: msg });
