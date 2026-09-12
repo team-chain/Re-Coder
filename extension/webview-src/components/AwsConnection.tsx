@@ -8,6 +8,8 @@ type AwsStatus = {
   identity?: { account?: string; arn?: string } | null;
   region?: string;
   access_key_last4?: string;
+  profile?: string;
+  storage?: string;
   message?: string;
   permission_check?: {
     inspected: boolean;
@@ -40,8 +42,15 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   const regionTouchedRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  //: AWS CLI 를 이미 쓰는 사용자에게 키 재입력을 강요하지 않기 위한 목록.
+  //: 비어 있으면 이 섹션 자체가 렌더되지 않으므로, CLI 를 안 쓰는 사용자는
+  //: 지금과 완전히 같은 화면을 본다.
+  const [profiles, setProfiles] = useState<string[]>([]);
 
-  useEffect(() => { postMessage("aws.status"); }, [postMessage]);
+  useEffect(() => {
+    postMessage("aws.status");
+    postMessage("aws.listProfiles");
+  }, [postMessage]);
   useMessage(useCallback(({ type, payload }) => {
     if (type === "aws.status") {
       const next = payload as AwsStatus;
@@ -75,7 +84,22 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       if (result.ok) { setStatus(result.status ?? null); setError(""); }
       else { setError(result.message ?? "AWS 권한을 점검하지 못했습니다."); }
     }
+    if (type === "aws.profiles") {
+      const result = payload as { profiles?: string[] };
+      setProfiles(Array.isArray(result?.profiles) ? result.profiles : []);
+    }
   }, []));
+
+  const connectProfile = (profile: string) => {
+    setBusy(true);
+    setError("");
+    //: 리전 칸을 사용자가 만졌으면 그 값을 존중하고, 아니면 비워 보낸다 —
+    //: 비어 있으면 코어가 프로필 자신의 설정에서 리전을 가져온다.
+    postMessage("aws.connect.profile", {
+      profile,
+      region: regionTouchedRef.current ? region.trim() : "",
+    });
+  };
 
   const connect = () => {
     if (!accessKeyId.trim() || !secretAccessKey.trim()) {
@@ -107,7 +131,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       <div style={{ color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 15, fontWeight: 700 }}>✓ AWS 연결됨</div>
       <div style={{ marginTop: 9, fontSize: 12, lineHeight: 1.6 }}>
         <div>계정: <b>{status.identity?.account ?? "확인됨"}</b></div>
-        <div>리전: <b>{status.region || "ap-northeast-2"}</b>{status.access_key_last4 ? ` · 키 끝 ${status.access_key_last4}` : ""}</div>
+        <div>리전: <b>{status.region || "ap-northeast-2"}</b>{status.access_key_last4 ? ` · 키 끝 ${status.access_key_last4}` : ""}{status.storage === "aws_profile" && status.profile ? ` · 프로필 ${status.profile}` : ""}</div>
       </div>
       {permission && (permission.missing_actions.length > 0 || permission.excessive_policies.length > 0 || permission.warnings.length > 0) && (
         <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 5, background: "rgba(245, 180, 0, .12)", border: "1px solid rgba(245, 180, 0, .35)", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.55 }}>
@@ -136,6 +160,26 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   return <div style={card}>
     <div style={{ fontSize: 15, fontWeight: 700 }}>AWS 계정 연결</div>
     <p style={{ margin: "7px 0 14px", color: "var(--vscode-descriptionForeground, #999)", fontSize: 12, lineHeight: 1.5 }}>배포는 본인의 AWS 계정에서 실행됩니다. 입력한 키는 검증 후 VS Code 보안 금고에만 저장합니다.</p>
+    {profiles.length > 0 && <div style={{ marginBottom: 14, padding: "10px 11px", borderRadius: 6, background: "rgba(55,148,255,.08)", border: "1px solid rgba(55,148,255,.25)" }}>
+      {/*
+        **이 컴퓨터에 이미 자격증명이 있으면 키를 다시 입력받지 않는다.**
+        AWS CLI 사용자는 ~/.aws 에 프로필이 있다 — 그걸 두고 콘솔에서 키를
+        다시 찾아 붙여넣게 하는 것은 마찰일 뿐 보안 이득이 없다. 비밀 값은
+        이 화면을 거치지 않고 코어가 파일에서 직접 읽는다.
+      */}
+      <div style={{ fontSize: 12, fontWeight: 650 }}>이 컴퓨터의 AWS 프로필 발견</div>
+      <div style={{ marginTop: 4, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.5 }}>키 입력 없이 클릭 한 번으로 연결합니다.</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 9 }}>
+        {profiles.map(profile => (
+          <button key={profile} disabled={busy} onClick={() => connectProfile(profile)} style={{
+            border: "1px solid rgba(55,148,255,.4)", borderRadius: 5, padding: "6px 11px", fontSize: 12,
+            cursor: busy ? "wait" : "pointer", background: "transparent",
+            color: "var(--vscode-textLink-foreground, #75beff)", opacity: busy ? .6 : 1,
+          }}>{busy ? "연결 중…" : `${profile} 로 연결`}</button>
+        ))}
+      </div>
+      <div style={{ marginTop: 10, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>또는 아래에서 직접 키를 입력하세요.</div>
+    </div>}
     <label style={{ display: "block", fontSize: 12 }}>Access Key ID
       <input autoComplete="off" spellCheck={false} value={accessKeyId} onChange={e => setAccessKeyId(e.target.value)} placeholder="AKIA..." style={input} />
     </label>

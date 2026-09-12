@@ -36,6 +36,12 @@ const AWS_ACCESS_KEY_SECRET = 'recoder.aws.accessKeyId';
 const AWS_SECRET_KEY_SECRET = 'recoder.aws.secretAccessKey';
 const AWS_REGION_SECRET = 'recoder.aws.region';
 const AWS_SESSION_TOKEN_SECRET = 'recoder.aws.sessionToken';
+//: 프로필 이름은 비밀이 아니므로 globalState 에 둔다. 키(SecretStorage)와
+//: **상호 배타**로 관리한다 — 둘 다 남아 있으면 재시작한 코어에서
+//: AWS_ACCESS_KEY_ID 가 AWS_PROFILE 을 이겨서, 화면은 프로필 A 인데
+//: 실제 요청은 옛 키 B 로 나가는 조용한 계정 뒤바뀜이 생긴다.
+const AWS_PROFILE_STATE = 'recoder.aws.profile';
+const AWS_PROFILE_REGION_STATE = 'recoder.aws.profileRegion';
 
 export interface AwsSecretCredentials {
     accessKeyId: string;
@@ -248,7 +254,18 @@ export class CoreManager {
                 this.extensionContext.secrets.get(AWS_REGION_SECRET),
                 this.extensionContext.secrets.get(AWS_SESSION_TOKEN_SECRET),
             ]);
-            if (!accessKeyId || !secretAccessKey) { return {}; }
+            if (!accessKeyId || !secretAccessKey) {
+                //: 키가 없으면 프로필 연결 상태인지 본다. 프로필은 이름만
+                //: 넘기면 코어의 boto3 가 ~/.aws 에서 알아서 해석한다 —
+                //: 비밀 값이 확장을 거치지 않는 것이 이 경로의 장점이다.
+                const profile = this.extensionContext.globalState.get<string>(AWS_PROFILE_STATE, '');
+                if (!profile) { return {}; }
+                const profileRegion = this.extensionContext.globalState.get<string>(AWS_PROFILE_REGION_STATE, '');
+                return {
+                    AWS_PROFILE: profile,
+                    ...(profileRegion ? { AWS_REGION: profileRegion, AWS_DEFAULT_REGION: profileRegion } : {}),
+                };
+            }
             const region = storedRegion || 'ap-northeast-2';
             return {
                 AWS_ACCESS_KEY_ID: accessKeyId,
@@ -272,9 +289,27 @@ export class CoreManager {
         } else {
             await this.extensionContext.secrets.delete(AWS_SESSION_TOKEN_SECRET);
         }
+        //: 키와 프로필은 상호 배타 — 프로필 흔적을 지워야 재시작한 코어가
+        //: 사용자가 마지막으로 고른 쪽(키)으로만 연결된다.
+        await this.extensionContext.globalState.update(AWS_PROFILE_STATE, undefined);
+        await this.extensionContext.globalState.update(AWS_PROFILE_REGION_STATE, undefined);
     }
 
-    /** SecretStorage의 AWS 자격증명을 제거한다. */
+    /** 프로필 연결 상태를 보관한다 — 이름뿐, 비밀 값은 저장하지 않는다. */
+    async storeAwsProfile(profile: string, region: string): Promise<void> {
+        await this.extensionContext.globalState.update(AWS_PROFILE_STATE, profile);
+        await this.extensionContext.globalState.update(AWS_PROFILE_REGION_STATE, region || '');
+        //: 반대 방향도 지운다 — 남은 키가 AWS_PROFILE 을 이기면 화면은
+        //: 프로필인데 요청은 옛 키로 나가는 계정 뒤바뀜이 된다.
+        await Promise.all([
+            this.extensionContext.secrets.delete(AWS_ACCESS_KEY_SECRET),
+            this.extensionContext.secrets.delete(AWS_SECRET_KEY_SECRET),
+            this.extensionContext.secrets.delete(AWS_REGION_SECRET),
+            this.extensionContext.secrets.delete(AWS_SESSION_TOKEN_SECRET),
+        ]);
+    }
+
+    /** SecretStorage의 AWS 자격증명(및 프로필 연결 상태)을 제거한다. */
     async clearAwsCredentials(): Promise<void> {
         await Promise.all([
             this.extensionContext.secrets.delete(AWS_ACCESS_KEY_SECRET),
@@ -282,6 +317,8 @@ export class CoreManager {
             this.extensionContext.secrets.delete(AWS_REGION_SECRET),
             this.extensionContext.secrets.delete(AWS_SESSION_TOKEN_SECRET),
         ]);
+        await this.extensionContext.globalState.update(AWS_PROFILE_STATE, undefined);
+        await this.extensionContext.globalState.update(AWS_PROFILE_REGION_STATE, undefined);
     }
 
     /** 보안 금고의 변경값을 현재 Core에도 반영한다. */
