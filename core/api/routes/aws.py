@@ -129,6 +129,20 @@ class AwsPermissionCheckRequest(BaseModel):
     deployment_context: Optional[AwsDeploymentPermissionContext] = None
 
 
+class AwsProfileConnectRequest(BaseModel):
+    """~/.aws 에 이미 구성된 프로필로 연결하는 요청 — 키를 입력받지 않는다.
+
+    자격증명은 사용자의 ~/.aws 파일(또는 SSO 캐시)에 이미 있다. 여기서는
+    프로필 이름만 받아 STS 로 검증한 뒤 현재 Core 프로세스에 적용한다.
+    이 요청에는 비밀 값이 전혀 실리지 않으므로 화면·로그 어디에도 키가
+    지나가지 않는다.
+    """
+
+    profile: str = Field(..., min_length=1, max_length=128)
+    region: str = ""
+    deployment_context: Optional[AwsDeploymentPermissionContext] = None
+
+
 class AwsIdentity(BaseModel):
     account: str = ""
     arn: str = ""
@@ -933,6 +947,116 @@ async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
     )
 
 
+def _known_profiles() -> list[str]:
+    """~/.aws/credentials 와 ~/.aws/config 의 프로필 이름을 합친다.
+
+    credentials 파일만 보면 SSO 프로필이 빠진다 — SSO 는 `[profile x]` 가
+    config 에만 있고 credentials 에는 아무것도 없다. 프로필 연결의 대상은
+    "boto3 가 해석할 수 있는 모든 프로필"이어야 한다.
+    """
+    names: list[str] = []
+    if AWS_CREDENTIALS_FILE.exists():
+        try:
+            cp = configparser.RawConfigParser()
+            cp.read(AWS_CREDENTIALS_FILE, encoding="utf-8")
+            names.extend(cp.sections())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[aws] credentials parse failed: %s", exc)
+    if AWS_CONFIG_FILE.exists():
+        try:
+            cfg = configparser.RawConfigParser()
+            cfg.read(AWS_CONFIG_FILE, encoding="utf-8")
+            for section in cfg.sections():
+                names.append(section[len("profile "):] if section.startswith("profile ") else section)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[aws] config parse failed: %s", exc)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in names:
+        if name and name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def _apply_profile_to_process_env(profile: str, region: str) -> None:
+    """프로필 연결용 환경 적용 — **키 환경변수를 지우는 것이 핵심이다.**
+
+    boto3 는 AWS_ACCESS_KEY_ID 가 남아 있으면 AWS_PROFILE 보다 그걸
+    우선한다. 이전에 키로 연결했던 흔적을 지우지 않으면, 사용자는 프로필
+    A 를 골랐는데 요청은 옛 키 B 로 나간다 — 화면에는 A 로 연결됐다고
+    뜨는 채로 **다른 계정에 배포되는** 조용한 사고다.
+    """
+    global _active_profile
+    _active_profile = profile
+    os.environ.pop("AWS_ACCESS_KEY_ID", None)
+    os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
+    os.environ.pop("AWS_SESSION_TOKEN", None)
+    os.environ["AWS_PROFILE"] = profile
+    if region:
+        os.environ["AWS_DEFAULT_REGION"] = region
+        os.environ["AWS_REGION"] = region
+
+
+@router.post("/api/aws/connect-profile", response_model=AwsStatus)
+async def connect_aws_profile(req: AwsProfileConnectRequest) -> AwsStatus:
+    """~/.aws 프로필로 연결 — 키를 화면에 다시 입력받지 않는다.
+
+    배경: 연결 수단이 "키 붙여넣기"뿐이라, AWS CLI 를 이미 쓰는 사용자도
+    콘솔에서 키를 다시 찾아 복사해야 했다. 자격증명이 이미 이 컴퓨터에
+    있는데 재입력을 강요하는 것은 마찰일 뿐 보안 이득이 없다.
+    """
+    profile = req.profile.strip()
+    known = _known_profiles()
+    if profile not in known:
+        #: 없는 프로필을 boto3 에 넘기면 ProfileNotFound 가 원인 표시 없이
+        #: 500 으로 떨어진다. 무엇이 가능한지까지 알려주며 400 으로 막는다.
+        available = ", ".join(known) if known else "없음"
+        raise HTTPException(
+            status_code=400,
+            detail=f"프로필 '{profile}' 을 ~/.aws 에서 찾지 못했습니다. 사용 가능한 프로필: {available}",
+        )
+
+    #: 리전이 비어 있으면 프로필 자신의 설정(config)에서 가져온다. 여기서
+    #: 하드코딩 기본값으로 덮으면 키 연결 UI 가 예전에 겪은 리전 불일치
+    #: 사고(사용자가 고른 적 없는 리전이 "현재 리전"이 되는 것)를 반복한다.
+    effective_region = req.region.strip()
+    if not effective_region:
+        try:
+            session = _build_boto3_session(profile=profile)
+            effective_region = (session.region_name or "").strip()
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            effective_region = ""
+    if not effective_region:
+        effective_region = DEFAULT_REGION
+
+    snapshot, prior_profile = _environment_snapshot()
+    try:
+        _apply_profile_to_process_env(profile, effective_region)
+        identity = _call_sts_get_caller_identity(profile=profile, region=effective_region)
+        permission_check = _inspect_deploy_permissions(
+            identity, effective_region, req.deployment_context,
+        )
+    except Exception:
+        _restore_environment(snapshot, prior_profile)
+        raise
+
+    _refresh_diagnostics_cache()
+
+    return AwsStatus(
+        ready=True,
+        identity=AwsIdentity(**identity),
+        region=effective_region,
+        profile=profile,
+        access_key_last4="",
+        storage="aws_profile",
+        message=f"프로필 '{profile}' 로 연결되었습니다. 키는 ~/.aws 에 있는 것을 그대로 씁니다.",
+        permission_check=permission_check,
+    )
+
+
 @router.get("/api/aws/status", response_model=AwsStatus)
 async def get_aws_status() -> AwsStatus:
     """현재 AWS 자격증명 상태.
@@ -1169,17 +1293,13 @@ async def clear_aws() -> dict[str, Any]:
 
 @router.get("/api/aws/profiles")
 async def list_aws_profiles() -> dict[str, list[str]]:
-    """~/.aws/credentials 의 사용 가능한 profile 목록."""
-    profiles: list[str] = []
-    if AWS_CREDENTIALS_FILE.exists():
-        try:
-            cp = configparser.RawConfigParser()
-            cp.read(AWS_CREDENTIALS_FILE, encoding="utf-8")
-            profiles = list(cp.sections())
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[aws] profiles parse failed: %s", exc)
+    """사용 가능한 profile 목록 — credentials 와 config(SSO 포함)를 합친다.
 
-    return {"profiles": profiles}
+    credentials 파일만 읽으면 SSO 프로필이 목록에서 빠져서, 사용자는
+    "aws cli 로는 되는데 여기엔 안 뜨는" 상태를 겪는다. connect-profile
+    이 받아 주는 것과 정확히 같은 집합을 보여줘야 한다.
+    """
+    return {"profiles": _known_profiles()}
 
 
 @router.get("/api/aws/ecr/repos")

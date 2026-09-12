@@ -1153,6 +1153,34 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'aws.connect.profile': {
+                //: 키 입력 없이 ~/.aws 프로필로 연결한다. 비밀 값은 이 확장을
+                //: 한 번도 거치지 않는다 — 코어의 boto3 가 파일에서 직접 읽는다.
+                const p = (payload ?? {}) as { profile?: string; region?: string };
+                const profile = (p.profile ?? '').trim();
+                if (!profile) {
+                    this.postMessage('aws.configure.result', { ok: false, message: '프로필 이름이 비어있습니다.' });
+                    break;
+                }
+                try {
+                    const status = await this._apiClient.connectAwsProfile({
+                        profile,
+                        region: (p.region ?? '').trim(),
+                    });
+                    //: 코어 재시작 후에도 이 선택이 살아남도록 이름만 보관한다.
+                    await this._coreManager.storeAwsProfile(profile, status.region ?? '');
+                    //: 키 연결과 같은 결과 채널을 쓴다 — 화면은 "어떻게 연결됐나"
+                    //: 가 아니라 "연결됐나"에 반응하면 된다.
+                    this.postMessage('aws.configure.result', { ok: true, status });
+                    this.postMessage('aws.status', status);
+                    void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.configure.result', { ok: false, message: msg });
+                    this.postMessage('errorMessage', { message: `AWS 프로필 연결 실패: ${msg}` });
+                }
+                break;
+            }
             case 'aws.clear': {
                 try {
                     await this._coreManager.clearAwsCredentials();

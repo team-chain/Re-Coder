@@ -850,6 +850,23 @@ export class ApiClient {
     }
 
     /**
+     * POST /api/aws/connect-profile — ~/.aws 프로필로 연결.
+     *
+     * 키가 요청에 실리지 않는다. AWS CLI 를 이미 쓰는 사용자는 콘솔에서 키를
+     * 다시 찾아 붙여넣을 필요 없이, 이미 있는 프로필 이름만 고르면 된다.
+     */
+    async connectAwsProfile(input: { profile: string; region?: string }): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/connect-profile', {
+            profile: input.profile,
+            region: input.region ?? '',
+        });
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 프로필 연결 실패');
+        }
+        return resp.data;
+    }
+
+    /**
      * POST /api/aws/clear — 저장된 자격증명 제거.
      */
     async clearAws(): Promise<void> {
