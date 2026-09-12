@@ -1131,12 +1131,41 @@ def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unkno
     }
 
 
+def _adr_essence(text: str) -> str:
+    """ADR 본문에서 **결정 내용과 무관한 부분**(번호·날짜)을 지운 비교용 문자열.
+
+    같은 결정인지 판단할 때 번호와 작성일이 다르다는 이유로 "다른 결정"이
+    되면, 다음 날 같은 대상을 다시 고르기만 해도 중복 ADR 이 또 생긴다.
+    """
+    lines = []
+    for line in (text or "").splitlines():
+        if line.startswith("- 날짜:"):
+            continue
+        if line.startswith("# ADR-"):
+            line = re.sub(r"^# ADR-\d+", "# ADR", line)
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def _build_deployment_decision_adr(workspace_path: str, target: str, evidence: list[str]) -> dict:
-    """배포 대상 선택을 기존 ADR 형식으로 만들고, 확장이 기록할 파일 정보를 반환한다."""
+    """배포 대상 선택을 기존 ADR 형식으로 만들고, 확장이 기록할 파일 정보를 반환한다.
+
+    **중복 방지**: 같은 워크스페이스에서 같은 대상(같은 근거)을 다시 고르면,
+    새 번호를 예약하지 않고 디스크의 최신 배포 ADR 을 그대로 재사용한다.
+    호출마다 번호를 새로 받으면 대상 화면을 오갈 때마다 동일 내용의
+    ADR-001·ADR-002… 가 쌓인다(보드 이슈 카드). 번호 예약 장부는 **덮어쓰기**
+    를 막을 뿐 **내용 중복**은 모른다 — 그 판단은 여기서 해야 한다.
+    """
     try:
-        from adr import build_adr_ops, normalize_decisions
+        from adr import (
+            ADR_DIR, adr_output_dir, build_adr_markdown, build_adr_ops,
+            normalize_decisions, slugify,
+        )
     except ImportError:
-        from core.adr import build_adr_ops, normalize_decisions
+        from core.adr import (  # type: ignore
+            ADR_DIR, adr_output_dir, build_adr_markdown, build_adr_ops,
+            normalize_decisions, slugify,
+        )
 
     options = [
         {
@@ -1168,6 +1197,36 @@ def _build_deployment_decision_adr(workspace_path: str, target: str, evidence: l
         "options": options,
         "impact": "감지 근거: " + (", ".join(str(item) for item in evidence[:5]) or "감지 근거 없음"),
     }])
+    # ── 중복 검사: 디스크의 최신 배포 ADR 과 결정 내용이 같은가 ──────────
+    if decision:
+        d = decision[0]
+        slug = slugify(d.get("id") or d.get("question") or "")
+        adr_dir = adr_output_dir(Path(workspace_path))
+        latest_path, latest_n = None, -1
+        if adr_dir.is_dir():
+            for p in adr_dir.glob(f"ADR-*-{slug}.md"):
+                m = re.match(r"ADR-(\d+)", p.name)
+                if m and int(m.group(1)) > latest_n:
+                    latest_n, latest_path = int(m.group(1)), p
+        if latest_path is not None:
+            try:
+                existing = latest_path.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001 — 읽기 실패는 중복 아님으로 처리
+                existing = ""
+            candidate = build_adr_markdown(latest_n, d, "배포 대상 선택")
+            if existing and _adr_essence(existing) == _adr_essence(candidate):
+                #: 같은 파일에 같은 내용을 다시 쓰는 op — 확장 쪽 계약(action:
+                #: create 를 받아 파일을 기록)은 그대로 두고, 결과만 멱등이 된다.
+                return {
+                    "action": "create",
+                    "file": f"{ADR_DIR}/{latest_path.name}",
+                    "language": "markdown",
+                    "content": existing,
+                    "rationale": "동일한 배포 대상 결정 — 기존 ADR 재사용(중복 생성 방지)",
+                    "is_adr": True,
+                    "reused": True,
+                }
+
     ops = build_adr_ops(decision, "배포 대상 선택", Path(workspace_path))
     if not ops:
         raise RuntimeError("배포 대상 ADR을 만들 수 없습니다.")
@@ -1791,23 +1850,14 @@ def _dockerfile_from_template(
 
 #: 사용자에게 그대로 보여줄 문장. 원인 + **다음에 뭘 하면 되는지**까지 담는다.
 #: "Internal Server Error" 만 보여주면 사용자는 재시도 말고 할 수 있는 게 없다.
+#: 채팅 라우트(/api/chat)도 같은 문장이 필요해져 llm/failure.py 로 승격했다.
 def _public_ai_failure_reason(exc: Exception | None) -> str:
     """Return an actionable reason without exposing provider error details."""
-    if exc is None:
-        return "AI 에이전트를 초기화하지 못했습니다."
-
-    message = str(exc).lower()
-    if any(token in message for token in ("rate limit", "throttl", "quota")):
-        return "AI 제공자의 요청 한도에 도달했습니다."
-    if any(token in message for token in (
-        "credential", "api key", "api_key", "unauthorized", "forbidden", "auth",
-    )):
-        return "AI 인증 정보 또는 자격증명을 확인하지 못했습니다."
-    if any(token in message for token in ("timeout", "timed out")):
-        return "AI 제공자의 응답 시간이 초과됐습니다."
-    if any(token in message for token in ("connection", "network", "dns")):
-        return "AI 제공자와 네트워크 연결에 실패했습니다."
-    return f"AI 제공자 호출에 실패했습니다 ({exc.__class__.__name__})."
+    try:
+        from llm.failure import public_ai_failure_reason
+    except ImportError:  # pragma: no cover - package 실행 호환
+        from core.llm.failure import public_ai_failure_reason
+    return public_ai_failure_reason(exc)
 
 
 def _ai_unavailable_note(exc: Exception | None) -> str:

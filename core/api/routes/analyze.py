@@ -814,10 +814,26 @@ ReCoder:"""
         )
         reply = (response.text or "").strip()
         if not reply:
-            raise RuntimeError("AI가 빈 응답을 반환했습니다.")
+            #: 분류기(public_ai_failure_reason)를 거치면 "(RuntimeError)" 로
+            #: 뭉개진다 — 이 경우는 원인이 명확하므로 문장을 그대로 내린다.
+            raise HTTPException(
+                status_code=500, detail="AI 대화 실패: AI가 빈 응답을 반환했습니다.",
+            )
         return {"reply": reply, "model": getattr(response, "model_used", "")}
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"AI 대화 실패: {exc}") from exc
+        #: provider 원문(429 JSON 덩어리 등)을 그대로 노출하면 사용자는 읽지
+        #: 못하고, 내부 정보까지 샌다. 분류된 원인 문장으로 바꿔 내려보낸다 —
+        #: 웹뷰 채팅 패널이 이 detail 을 말풍선 아래 오류 줄에 그대로 띄운다.
+        try:
+            from llm.failure import public_ai_failure_reason
+        except ImportError:
+            from core.llm.failure import public_ai_failure_reason
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI 대화 실패: {public_ai_failure_reason(exc)}",
+        ) from exc
 
 
 @router.post("/api/code/plan")
