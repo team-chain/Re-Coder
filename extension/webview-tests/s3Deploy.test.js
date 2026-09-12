@@ -22,9 +22,12 @@ const path = require('node:path');
 
 const {
   isBinaryAsset,
+  isSensitiveFile,
+  isDeployableAsset,
   shouldSkipPath,
   pickStaticDir,
   collectStaticFiles,
+  describeExcludedFiles,
   s3ProjectIdentifier,
   normalizeRepositoryIdentity,
   StaticAssetReadError,
@@ -153,7 +156,7 @@ const join = (...parts) => parts.filter(p => p && p !== '.').join('/');
 
 test('텍스트는 utf-8, 바이너리는 base64 로 담는다', () => {
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe]);
-  const files = collectStaticFiles('.', fakeFs({
+  const { files } = collectStaticFiles('.', fakeFs({
     'index.html': '<h1>안녕</h1>',
     'img/logo.png': png,
   }), join);
@@ -174,7 +177,7 @@ test('텍스트는 utf-8, 바이너리는 base64 로 담는다', () => {
 
 test('목록에 없는 바이너리 자산도 base64로 원본 바이트를 보존한다', () => {
   const glb = Buffer.from([0x67, 0x6c, 0x54, 0x46, 0x02, 0x00, 0xff, 0xfe]);
-  const files = collectStaticFiles('.', fakeFs({
+  const { files } = collectStaticFiles('.', fakeFs({
     'index.html': '<script src="app.js"></script>',
     'assets/scene.glb': glb,
   }), join);
@@ -213,7 +216,7 @@ test('모노레포의 서로 다른 앱은 같은 원격 저장소여도 S3 프�
 });
 
 test('걸러야 할 폴더는 수집하지 않는다', () => {
-  const files = collectStaticFiles('.', fakeFs({
+  const { files } = collectStaticFiles('.', fakeFs({
     'index.html': 'x',
     'node_modules/react/index.js': 'y',
     '.git/config': 'z',
@@ -252,7 +255,7 @@ test('상한 초과 메시지가 **진짜 개수**를 말한다', () => {
 test('음성대조 — 상한과 같으면 통과한다', () => {
   const tree = {};
   for (let i = 0; i < MAX_FILES; i++) { tree[`f${i}.html`] = 'x'; }
-  const files = collectStaticFiles('.', fakeFs(tree), join, 'dist');
+  const { files } = collectStaticFiles('.', fakeFs(tree), join, 'dist');
   assert.strictEqual(files.length, MAX_FILES);
 });
 
@@ -337,6 +340,108 @@ test('상한 초과 자산은 읽기 전에 로컬에서 차단한다', () => {
       && /3,000,000/.test(err.message),
   );
   assert.strictEqual(oversizedWasRead, false, '큰 파일을 먼저 읽어 확장 호스트 메모리를 소모한다');
+});
+
+// ---------------------------------------------------------------------------
+// 민감 파일 차단 + 허용 목록 — **이 버킷은 공개 읽기다**
+// ---------------------------------------------------------------------------
+//
+// 예전 필터는 "금지 목록에 없으면 전부 통과"였다. 워크스페이스 루트를
+// 배포하면 `.env` 의 DB 비밀번호와 `id_rsa` 가 공개 버킷에 그대로 올라갔고,
+// 화면에는 "배포 완료"와 URL 만 표시됐다. 노출을 알아챌 단서가 없었다.
+
+test('.env·키·인증서는 이름만으로 차단한다', () => {
+  for (const p of [
+    '.env', '.env.production', '.env.local', '.envrc',
+    'key.pem', 'server.key', 'cert.p12', 'release.keystore',
+    'id_rsa', 'id_rsa.pub', 'id_ed25519',
+    'credentials', '.npmrc', '.netrc', '.htpasswd',
+    'secrets.yaml', 'secret.json', 'secrets.toml',
+    'KEY.PEM', '.ENV',                       // 대소문자 우회
+    'config/.env', 'deep/nested/id_rsa',     // 하위 폴더
+    '.aws/config', '.ssh/known_hosts',       // 민감 폴더는 통째로
+  ]) {
+    assert.strictEqual(isSensitiveFile(p), true, `${p} 가 공개 버킷에 올라간다`);
+  }
+});
+
+test('음성대조 — 이름이 비슷한 정상 자산을 오판하지 않는다', () => {
+  for (const p of [
+    'privacy-policy.html', 'keyboard.css', 'monkey.js',   // key 포함 이름
+    'environment.js', 'env.svg',                          // env 포함 이름
+    'assets/keynote.pdf', 'turkey.png',
+  ]) {
+    assert.strictEqual(isSensitiveFile(p), false, `${p} 를 비밀 파일로 오판해 사이트가 깨진다`);
+  }
+});
+
+test('허용 목록 — 정적 자산만 배포 대상이다', () => {
+  for (const p of ['index.html', 'app.js', 'style.css', 'logo.png', 'font.woff2', 'scene.glb', 'data.json']) {
+    assert.strictEqual(isDeployableAsset(p), true, `${p} 가 배포에서 빠져 사이트가 깨진다`);
+  }
+  for (const p of ['app.py', 'main.tsx', 'Dockerfile', 'run.sh', 'tool.exe', 'LICENSE', 'db.sqlite3']) {
+    assert.strictEqual(isDeployableAsset(p), false, `${p} 처럼 목록에 없는 파일이 통과한다`);
+  }
+});
+
+test('수집 결과 — 민감/비자산 파일은 업로드에서 빠지고, 빠졌다고 보고된다', () => {
+  const { files, excludedSensitive, excludedNonAsset } = collectStaticFiles('.', fakeFs({
+    'index.html': '<h1>hi</h1>',
+    'app.js': 'x',
+    '.env': 'DB_PASSWORD=hunter2',
+    'id_rsa': 'PRIVATE',
+    'secrets.yaml': 'token: abc',
+    'server.py': 'print(1)',
+  }), join);
+
+  assert.deepStrictEqual(files.map(f => f.path).sort(), ['app.js', 'index.html']);
+  assert.deepStrictEqual([...excludedSensitive].sort(), ['.env', 'id_rsa', 'secrets.yaml'],
+    '비밀 파일이 공개 버킷으로 나간다');
+  assert.deepStrictEqual(excludedNonAsset, ['server.py']);
+  //: 내용까지 확인 — 제외 목록에만 있고 files 에도 있으면 의미가 없다.
+  assert.ok(!files.some(f => /hunter2|PRIVATE/.test(f.content)), '비밀 내용이 업로드 본문에 남아 있다');
+});
+
+test('음성대조 — 정상 산출물만 있으면 아무것도 제외되지 않는다', () => {
+  const { files, excludedSensitive, excludedNonAsset } = collectStaticFiles('.', fakeFs({
+    'index.html': 'x', 'assets/app.js': 'x', 'assets/style.css': 'x',
+  }), join);
+  assert.strictEqual(files.length, 3);
+  assert.deepStrictEqual(excludedSensitive, []);
+  assert.deepStrictEqual(excludedNonAsset, []);
+});
+
+test('파일 수 상한은 실제로 올라갈 파일 기준이다', () => {
+  // 소스 파일까지 세면, 자산 5개짜리 정상 배포가 소스 폴더라는 이유로 막힌다.
+  const tree = { 'index.html': 'x' };
+  for (let i = 0; i < MAX_FILES + 10; i++) { tree[`src/mod${i}.py`] = 'x'; }
+  const { files, excludedNonAsset } = collectStaticFiles('.', fakeFs(tree), join, '');
+  assert.strictEqual(files.length, 1);
+  assert.strictEqual(excludedNonAsset.length, MAX_FILES + 10);
+});
+
+test('제외 안내문은 무엇이 왜 빠졌는지 말한다', () => {
+  const note = describeExcludedFiles({
+    excludedSensitive: ['.env', 'id_rsa'],
+    excludedNonAsset: ['a.py', 'b.py', 'c.py', 'd.py'],
+  });
+  assert.match(note, /비밀 정보로 보이는 파일 2개/);
+  assert.match(note, /\.env/);
+  assert.match(note, /id_rsa/);
+  assert.match(note, /정적 자산이 아닌 파일 4개/);
+  assert.match(note, /외 1개/, '개수를 잘라 보여주면서 몇 개가 더 있는지 말하지 않는다');
+  assert.strictEqual(describeExcludedFiles({ excludedSensitive: [], excludedNonAsset: [] }), '');
+});
+
+test('배선 — 제외 내역이 결과 화면까지 전달된다', () => {
+  // 걸러 놓고 화면에 안 보여주면, 사용자는 "왜 그 파일이 사이트에 없지"를
+  // 알 수 없고 필터는 없는 것과 같다.
+  const provider = read('../src/sidebar/SidebarProvider.ts');
+  assert.match(provider, /excluded_sensitive/, '민감 제외 내역을 결과에 담지 않는다');
+  assert.match(provider, /describeExcludedFiles/, '제외 안내문을 만들지 않는다');
+
+  const center = read('../webview-src/components/DeploymentCenter.tsx');
+  assert.match(center, /excluded_note/, '결과 화면이 제외 안내문을 보여주지 않는다');
 });
 
 // ---------------------------------------------------------------------------

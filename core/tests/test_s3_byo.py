@@ -445,3 +445,96 @@ def test_음성대조_같은_계정은_항상_같은_지문():
     assert s3_byo.account_fingerprint("413113423592") == s3_byo.account_fingerprint("413113423592")
     #: 하이픈·공백이 섞여 들어와도 같은 계정으로 본다.
     assert s3_byo.account_fingerprint("4131-1342-3592") == s3_byo.account_fingerprint("413113423592")
+
+
+# ---------------------------------------------------------------------------
+# 민감 파일 차단 — 이 버킷은 공개 읽기다
+# ---------------------------------------------------------------------------
+#
+# 예전 업로드 경로는 이름 검사도 내용 검사도 없었다. 확장이 실수로(또는
+# 확장을 거치지 않고 직접) `.env` 를 보내면 DB 비밀번호가 공개 URL 로
+# 노출됐고, 응답은 "배포 성공"이었다. 여기 도달한 민감 파일은 잘라내고
+# 계속 올리는 게 아니라 **배포 전체를 멈춰야 한다** — 민감 파일이 섞여
+# 있다는 것 자체가 폴더 선택이 잘못됐다는 신호다.
+
+
+@pytest.mark.parametrize("key", [
+    ".env", ".env.production", ".envrc",
+    "key.pem", "server.key", "cert.p12", "release.keystore",
+    "id_rsa", "id_rsa.pub", "id_ed25519",
+    "credentials", ".npmrc", ".netrc", ".htpasswd",
+    "secrets.yaml", "secret.json",
+    "KEY.PEM", ".ENV",              # 대소문자 우회
+    "config/.env", "deep/nested/id_rsa",
+    ".aws/config", ".ssh/known_hosts",
+])
+def test_민감_파일_이름은_배포를_중단시킨다(key):
+    files = [
+        {"path": "index.html", "content": "<h1>hi</h1>"},
+        {"path": key, "content": "TOP-SECRET"},
+    ]
+    with pytest.raises(s3_byo.S3DeployError, match="비밀 정보"):
+        s3_byo.plan_upload(files)
+
+
+@pytest.mark.parametrize("key", [
+    "privacy-policy.html", "keyboard.css", "monkey.js",
+    "environment.js", "env.svg", "assets/keynote.pdf",
+])
+def test_음성대조_이름이_비슷한_정상_자산은_통과한다(key):
+    files = [
+        {"path": "index.html", "content": "<h1>hi</h1>"},
+        {"path": key, "content": "body{}"},
+    ]
+    plan = s3_byo.plan_upload(files)
+    assert any(item.key == s3_byo.safe_key(key) for item in plan.items)
+
+
+def test_내용에_비밀_값이_있으면_배포를_중단시킨다():
+    """이름 검사는 config.js 안에 하드코딩된 액세스 키를 못 잡는다."""
+    files = [{
+        "path": "index.html",
+        "content": '<script>const AWS_KEY = "AKIAIOSFODNN7EXAMPLE";</script>',
+    }]
+    with pytest.raises(s3_byo.S3DeployError) as exc:
+        s3_byo.plan_upload(files)
+    message = str(exc.value)
+    assert "index.html" in message, "어느 파일인지 알려주지 않는다"
+    assert "AKIAIOSFODNN7EXAMPLE" not in message, "오류 메시지가 비밀 값 원문을 다시 노출한다"
+
+
+def test_base64_로_감싼_텍스트도_내용을_검사한다():
+    """인코딩만 바꾸면 검사를 지나칠 수 있으면 검사가 아니다."""
+    import base64
+
+    payload = 'token = "-----BEGIN RSA PRIVATE KEY-----"'
+    files = [{
+        "path": "index.html",
+        "content": base64.b64encode(payload.encode("utf-8")).decode("ascii"),
+        "encoding": "base64",
+    }]
+    with pytest.raises(s3_byo.S3DeployError, match="index.html"):
+        s3_byo.plan_upload(files)
+
+
+def test_음성대조_진짜_바이너리는_내용_검사를_건너뛴다():
+    """PNG 바이트를 억지로 텍스트 취급해 스캔이 죽으면 안 된다."""
+    import base64
+
+    png = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0xFE])
+    files = [
+        {"path": "index.html", "content": "<h1>hi</h1>"},
+        {"path": "logo.png", "content": base64.b64encode(png).decode("ascii"), "encoding": "base64"},
+    ]
+    plan = s3_byo.plan_upload(files)
+    assert "logo.png" in plan.keys
+
+
+def test_음성대조_평범한_사이트는_그대로_배포된다():
+    files = [
+        {"path": "index.html", "content": "<h1>포트폴리오</h1>"},
+        {"path": "assets/app.js", "content": "console.log('hi')"},
+        {"path": "style.css", "content": "body { margin: 0 }"},
+    ]
+    plan = s3_byo.plan_upload(files)
+    assert len(plan.items) == 3

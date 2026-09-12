@@ -201,6 +201,48 @@ def safe_key(path: str) -> str:
     return "/".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# 민감 파일 차단 — 이 버킷은 **공개 읽기**다
+# ---------------------------------------------------------------------------
+#
+# 확장(extension/src/deploy/staticSite.ts)이 같은 규칙으로 먼저 거르지만,
+# 이 API 는 확장 없이도 직접 호출할 수 있다. 확장에만 의존하면 방어선이
+# 클라이언트 한 곳뿐이라, 서버 쪽에서도 같은 이름 규칙으로 거부해 이중
+# 그물을 만든다. 여기 도달한 민감 파일은 실수든 우회든 배포를 멈춰야 한다.
+
+_SENSITIVE_NAME_PATTERNS = [
+    re.compile(r"^\.env(\..+)?$", re.IGNORECASE),                   # .env, .env.production …
+    re.compile(r"^\.envrc$", re.IGNORECASE),                         # direnv
+
+    re.compile(r"\.(pem|key|p12|pfx|jks|keystore)$", re.IGNORECASE),  # 키·인증서
+    re.compile(r"^id_(rsa|dsa|ecdsa|ed25519)(\..+)?$", re.IGNORECASE),
+    re.compile(r"^credentials$", re.IGNORECASE),                     # ~/.aws/credentials 사본
+    re.compile(r"^\.(npmrc|netrc|htpasswd|git-credentials|pgpass)$", re.IGNORECASE),
+    re.compile(r"^secrets?\.(ya?ml|json|toml|ini|txt)$", re.IGNORECASE),
+]
+_SENSITIVE_DIRS = {".aws", ".ssh", ".gnupg"}
+
+
+def is_sensitive_key(key: str) -> bool:
+    """이름 규칙만으로 비밀로 판정되는 업로드 키면 True. 내용은 보지 않는다."""
+    parts = [seg for seg in (key or "").split("/") if seg]
+    if not parts:
+        return False
+    if any(seg.lower() in _SENSITIVE_DIRS for seg in parts):
+        return True
+    name = parts[-1]
+    return any(rx.search(name) for rx in _SENSITIVE_NAME_PATTERNS)
+
+
+def _scan_text_for_secrets(text: str, key: str) -> list[dict]:
+    """security_scan 의 독립 스캐너에 위임. 규칙을 두 벌 두면 반드시 갈라진다."""
+    try:
+        from security_scan import scan_text_for_secrets  # type: ignore
+    except ImportError:  # pragma: no cover - 패키지 경로 폴백
+        from core.security_scan import scan_text_for_secrets  # type: ignore
+    return scan_text_for_secrets(text, key)
+
+
 def content_type(path: str) -> str:
     """확장자 → Content-Type.
 
@@ -272,6 +314,15 @@ def plan_upload(files: list[dict]) -> UploadPlan:
         key = safe_key(str(raw_path))
         if not key:
             raise S3DeployError(f"올릴 수 없는 파일 경로입니다: {raw_path!r}")
+        if is_sensitive_key(key):
+            #: 자르고 계속 올리지 않는다. 민감 파일이 배포 대상에 섞여 있다는
+            #: 것 자체가 폴더 선택이 잘못됐다는 신호이고, 조용히 빼고 "성공"
+            #: 을 돌려주면 사용자는 다음에도 같은 폴더를 올린다.
+            raise S3DeployError(
+                f"{key}: 비밀 정보로 보이는 파일은 공개 버킷에 올릴 수 없습니다. "
+                f"배포 폴더에서 이 파일을 제거하거나, 빌드 산출물 폴더(dist·build 등)만 "
+                f"지정한 뒤 다시 시도하세요."
+            )
         content = (entry or {}).get("content")
         if not isinstance(content, str):
             raise S3DeployError(f"{key}: 파일 내용이 문자열이 아닙니다.")
@@ -298,6 +349,35 @@ def plan_upload(files: list[dict]) -> UploadPlan:
                 f"{key}: 파일이 너무 큽니다 ({len(data):,} 바이트, 상한 "
                 f"{MAX_BYTES_PER_FILE:,})."
             )
+
+        #: 이름 검사는 `config.js` 안에 하드코딩된 액세스 키를 못 잡는다.
+        #: 저장소에 이미 있는 시크릿 스캐너를 **공개 배포 직전**에 돌린다 —
+        #: 여태 이 스캐너는 별도 검사 라우트에만 붙어 있어서, 정작 가장
+        #: 위험한 경로(공개 버킷 업로드)에는 연결되어 있지 않았다.
+        #: base64 항목도 UTF-8 로 온전히 풀리면 텍스트이므로 같이 검사한다.
+        scan_source: str | None
+        if encoding == TEXT_ENCODING:
+            scan_source = content
+        else:
+            try:
+                scan_source = data.decode("utf-8")
+            except UnicodeDecodeError:
+                scan_source = None  # 이미지·폰트 등 진짜 바이너리
+        if scan_source is not None:
+            blocking = [
+                f for f in _scan_text_for_secrets(scan_source, key)
+                if f.get("severity") in ("critical", "high")
+            ]
+            if blocking:
+                first = blocking[0]
+                more = f" (총 {len(blocking)}건)" if len(blocking) > 1 else ""
+                raise S3DeployError(
+                    f"{key}:{first['line']} 에서 비밀 값으로 보이는 내용"
+                    f"({first['rule']}, {first['masked']})이 발견되어 공개 배포를 "
+                    f"중단했습니다{more}. 값을 코드에서 제거하고 환경 변수로 옮긴 뒤 "
+                    f"다시 시도하세요."
+                )
+
         if key in seen:
             raise S3DeployError(f"같은 경로가 두 번 들어왔습니다: {key}")
         seen.add(key)

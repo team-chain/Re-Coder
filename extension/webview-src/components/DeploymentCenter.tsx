@@ -201,6 +201,10 @@ type S3Deployed = {
   bucket_created: boolean;
   index_copied_from?: string | null;
   message: string;
+  //: 업로드 필터가 걸러낸 파일. 특히 민감 파일은 "왜 안 올라갔는지"를
+  //: 결과 화면에서 반드시 보여준다 — 조용히 빼면 필터는 없는 것과 같다.
+  excluded_sensitive?: string[];
+  excluded_note?: string;
 };
 type EcsRollbackProposal = {
   proposal_id: string;
@@ -652,6 +656,14 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
               버킷 {s3Result.bucket} · {s3Result.region}{s3Result.bucket_created ? " (새로 만듦)" : ""} · 파일 {s3Result.uploaded.length}개
               {s3Result.index_copied_from ? ` · index.html 이 없어 ${s3Result.index_copied_from} 를 진입 문서로 함께 올렸습니다` : ""}
             </div>
+            {s3Result.excluded_note && (
+              <div style={{
+                marginTop: 8, padding: "7px 9px", borderRadius: 5, fontSize: 11, lineHeight: 1.55,
+                background: s3Result.excluded_sensitive?.length ? "rgba(245, 180, 0, .12)" : "rgba(255,255,255,.04)",
+                border: `1px solid ${s3Result.excluded_sensitive?.length ? "rgba(245, 180, 0, .35)" : "var(--vscode-panel-border, #3f3f3f)"}`,
+                color: s3Result.excluded_sensitive?.length ? "var(--vscode-editorWarning-foreground, #cca700)" : "var(--vscode-descriptionForeground, #999)",
+              }}>{s3Result.excluded_note}</div>
+            )}
           </div>
         )}
 
