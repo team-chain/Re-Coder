@@ -65,6 +65,10 @@ export interface CodeDecision {
 
 export interface CodePlanResult {
     decisions: CodeDecision[];
+    //: 코어가 형식 문제로 걸러낸 결정의 사유 목록. 비어 있지 않으면 결정
+    //: 모달에 표시한다 — 걸러진 사실이 화면에 안 보이면 사용자에게는
+    //: "AI 가 설계를 안 해준다"로 보인다.
+    dropped?: string[];
     model: string;
 }
 

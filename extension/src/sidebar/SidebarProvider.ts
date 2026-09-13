@@ -1516,6 +1516,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 requestId: opts.requestId,
                 instruction,
                 decisions: plan.decisions ?? [],
+                //: 걸러진 결정의 사유 — 웹뷰가 결정 모달에 표시한다.
+                dropped: plan.dropped ?? [],
             });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
