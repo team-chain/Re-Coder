@@ -65,14 +65,19 @@ DEFAULT_FAST_MODEL = os.getenv(
 )
 BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")
 
-# Sonnet / Haiku 폴백 체인.
+# 품질(PRIMARY) / 속도(FAST) 폴백 체인.
 #
 # Claude 4.x 는 cross-region inference profile 필수 (on-demand throughput 불가).
 # Profile 이 활성화되지 않은 계정에서는 ValidationException 이 발생하므로,
 # **on-demand 가능한 3.x 모델을 우선순위 1에 둔다** — 시연 / 일반 사용자 환경에서
 # 즉시 동작 보장. 명시적으로 cross-region profile 을 쓰려면 환경변수로 지정:
 #   BEDROCK_PRIMARY_MODEL_IDENTIFIER=apac.anthropic.claude-sonnet-4-5-20250929-v1:0
-SONNET_MODELS: list[str] = [
+#
+# ※ 이름 주의 — 예전 이름은 SONNET_MODELS 였지만 **1순위가 Haiku 4.5** 라
+#   이름이 내용을 속였다("Sonnet 으로 바꿨다"고 믿어도 Haiku 가 돌 수 있음).
+#   실체는 모델 등급이 아니라 **역할 티어**이므로 PRIMARY/FAST 로 부른다.
+#   순서는 가용성 검증을 거친 기존 그대로다(동작 변화 없음).
+PRIMARY_MODELS: list[str] = [
     # 패치/분석 1순위 — 검증된 Haiku 4.5 (diff 생성 가능). .env 와 동일 모델.
     "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     # 가장 보장된 on-demand 모델 (ap-northeast-2 / us-east-1 등 거의 모든 리전)
@@ -87,8 +92,8 @@ SONNET_MODELS: list[str] = [
     "us.anthropic.claude-sonnet-4-20250514-v1:0",
 ]
 
-# Haiku 폴백 체인 — on-demand 가능 모델 우선
-HAIKU_MODELS: list[str] = [
+# 속도 티어 폴백 체인 — on-demand 가능 모델 우선
+FAST_MODELS: list[str] = [
     "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "anthropic.claude-3-haiku-20240307-v1:0",
     "anthropic.claude-3-5-haiku-20241022-v1:0",
@@ -96,6 +101,11 @@ HAIKU_MODELS: list[str] = [
     "apac.anthropic.claude-haiku-4-5-20251001-v1:0",
     "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 ]
+
+# 하위 호환 별칭 — provider_router / first_run 이 옛 이름으로 import 한다.
+# 새 코드는 PRIMARY_MODELS / FAST_MODELS 를 쓸 것.
+SONNET_MODELS = PRIMARY_MODELS
+HAIKU_MODELS = FAST_MODELS
 
 COST_PER_1K_TOKENS: dict[str, dict[str, float]] = {
     # Claude 4.x (대략 3.x 와 동등 — 정확한 가격은 AWS 공식 페이지 참조)

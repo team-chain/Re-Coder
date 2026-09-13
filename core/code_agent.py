@@ -951,7 +951,12 @@ def _build_code_prompt(
 #   (2단계 /api/code/generate 의 decisions 반영 + ADR 영속화(docs/adr/)는
 #    별도 담당 범위라 이 파일에서는 다루지 않는다.)
 
-_PLAN_MAX_TOKENS = 2048
+#: 결정 3개 × 선택지 3~4개 × pros/cons 를 **한국어 JSON** 으로 쓰면 2048 에
+#: 닿는다. 상한에 잘리면 JSON 이 중간에 끊겨 파싱이 실패하고, 사용자에게는
+#: "설계 결정 생성 실패"만 남는다 — 보드 이슈 「AI-DLC 설계 결정이 제대로
+#: 나오지 않음」의 원인 중 하나. 프롬프트가 요구하는 최대 분량이 여유 있게
+#: 들어가는 크기로 올린다.
+_PLAN_MAX_TOKENS = 4096
 
 
 def _build_plan_prompt(
@@ -1326,25 +1331,54 @@ def generate_plan(
         target_folder=target_folder,
     )
 
-    try:
-        llm_resp = get_router().call(
-            LLMRequest(prompt=prompt, max_tokens=_PLAN_MAX_TOKENS, temperature=0.2),
-            agent="code_agent",
-            operation="generate_plan",
+    #: 깨진 JSON(응답 잘림·설명 문장 혼입)과 빈 응답은 **재시도로 살릴 수 있는
+    #: 실패**다. 예전에는 한 번 깨지면 그대로 500 이었고 사용자에게는 "설계
+    #: 결정 생성 실패"만 남았다. 한 번은 교정 지시를 붙여 다시 시도한다.
+    llm_resp = None
+    data: dict | None = None
+    last_parse_error: Exception | None = None
+    for attempt in range(2):
+        attempt_prompt = prompt if attempt == 0 else (
+            prompt
+            + "\n\n[재시도] 직전 응답이 올바른 JSON 이 아니었습니다. 설명 문장 없이 "
+              "위 형식의 JSON 객체 하나만 반환하세요. 분량이 길어지면 결정 개수를 "
+              "줄여서라도 JSON 을 완결하세요."
         )
-    except Exception as e:
-        raise RuntimeError(f"LLM 호출 실패: {e}") from e
+        try:
+            llm_resp = get_router().call(
+                LLMRequest(prompt=attempt_prompt, max_tokens=_PLAN_MAX_TOKENS, temperature=0.2),
+                agent="code_agent",
+                operation="generate_plan",
+            )
+        except Exception as e:
+            raise RuntimeError(f"LLM 호출 실패: {e}") from e
 
-    raw = (llm_resp.text or "").strip()
-    if not raw:
-        raise RuntimeError("LLM 이 빈 응답을 반환했습니다. 모델/할당량/필터를 확인하세요.")
+        raw = (llm_resp.text or "").strip()
+        if not raw:
+            last_parse_error = RuntimeError("LLM 이 빈 응답을 반환했습니다.")
+            print(f"[code_agent] plan 응답이 비어 있음 (시도 {attempt + 1}/2)")
+            continue
+        try:
+            data = _extract_json(raw)
+            break
+        except Exception as e:  # noqa: BLE001 — ValueError / JSONDecodeError
+            last_parse_error = e
+            print(f"[code_agent] plan JSON 파싱 실패 (시도 {attempt + 1}/2): {e}")
 
-    data = _extract_json(raw)
+    if data is None:
+        raise RuntimeError(
+            "LLM 응답을 JSON 으로 해석하지 못했습니다(2회 시도). "
+            f"모델/할당량/응답 길이를 확인하세요. 마지막 오류: {last_parse_error}"
+        )
 
     raw_decisions = data.get("decisions") or []
     if not isinstance(raw_decisions, list):
         raw_decisions = []
     decisions_out: list[dict] = []
+    #: 여기서 **버려진 결정**은 지금까지 print 로그로만 남았다. 사용자 눈에는
+    #: "AI 가 설계를 안 해준다"로 보인다 — 버린 이유를 응답에 실어 화면까지
+    #: 보낸다(웹뷰가 결정 모달에 표시).
+    dropped: list[str] = []
     seen_ids: set[str] = set()
     for d in raw_decisions:
         if not isinstance(d, dict):
@@ -1356,6 +1390,7 @@ def generate_plan(
         # 여기서 맞춰두지 않으면 "사용자가 본 질문"과 "ADR 제목"이 달라진다.
         question = canonical_key(d.get("question"))
         if not did or not question:
+            dropped.append("형식이 불완전한 결정 1건 제외 (id 또는 question 누락)")
             continue
         # FR-02-05 — 예약 네임스페이스(`__`)는 내부 확인 카드 전용이다.
         # 모델이(또는 요청문에 유도되어) `__` 로 시작하는 id 를 만들어내면
@@ -1408,6 +1443,9 @@ def generate_plan(
             # 사용자는 유일한 항목을 누를 수밖에 없고, 그건 승인이 아니라
             # 통과 의식이다. 정규형 충돌로 하나만 남은 경우도 여기서 걸린다.
             print(f"[code_agent] 선택지가 {len(options_out)}개뿐이라 결정 제외: {did[:40]!r}")
+            dropped.append(
+                f"「{question[:40]}」 — 유효한 선택지가 {len(options_out)}개뿐이라 제외"
+            )
             continue
         if not has_recommended:
             # 모델이 recommended 를 하나도 표시하지 않았으면 첫 옵션을 기본 추천으로.
@@ -1428,6 +1466,7 @@ def generate_plan(
             over_cap = len(raw_decisions) - seen_so_far
             if over_cap > 0:
                 print(f"[code_agent] 결정 {over_cap}개가 상한({MAX_DECISIONS})을 넘어 제외됨")
+                dropped.append(f"결정 {over_cap}개가 상한({MAX_DECISIONS}개)을 넘어 제외")
             break
 
     # FR-02-05 (ADR-D5 항상 선택지 · D6 사람 승인)
@@ -1442,6 +1481,10 @@ def generate_plan(
 
     result = {
         "decisions": decisions_out,
+        #: 걸러진 결정의 사유 목록. 비어 있지 않으면 웹뷰가 결정 모달에
+        #: 표시한다 — "설계를 안 해준다"가 아니라 "제시됐지만 형식 문제로
+        #: 제외됐다"를 사용자가 알 수 있게.
+        "dropped": dropped,
         "model": getattr(llm_resp, "model_used", ""),
         # 라이브 스모크처럼 특정 공급자(Bedrock)를 검증해야 하는 호출자가
         # 폴백 결과를 성공으로 오인하지 않도록 실제 공급자도 함께 돌려준다.

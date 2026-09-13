@@ -58,7 +58,7 @@ export function buildDecisionChoices(
 interface Turn { id: number; prompt: string; targetFolder: string; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; }
 interface CtxFile { path: string; content: string; }
 interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; }
-interface DecisionModal { requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; }
+interface DecisionModal { requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; dropped: string[]; }
 
 //: 파일 하나의 적용 상태.
 //:
@@ -129,22 +129,32 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
         return copy;
       });
     } else if (type === "code.planResult") {
-      const plan = payload as { requestId?: number; decisions?: Decision[] };
+      const plan = payload as { requestId?: number; decisions?: Decision[]; dropped?: string[] };
       const requestId = plan.requestId;
       if (requestId === undefined) { return; }
       const request = pendingRequestsRef.current[requestId];
       if (!request) { return; }
-      const decisions = plan.decisions ?? [];
+      const dropped = Array.isArray(plan.dropped) ? plan.dropped : [];
+      let decisions = plan.decisions ?? [];
       if (decisions.length === 0) {
-        setTurns((ts) => ts.map((turn) => turn.id === requestId ? { ...turn, status: "generating" } : turn));
-        postMessage("code.generate", { requestId, instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: [] });
-        return;
+        //: [안전장치 이중화] 코어는 결정이 없어도 항상 확인 카드 1장을
+        //: 보장한다(FR-02-05). 그래도 빈 목록이 오면(구버전 코어 등) 예전에는
+        //: 여기서 **사람 승인 없이** 곧장 생성으로 직행했다 — AI-DLC 의 전제
+        //: (항상 사람 승인)가 웹뷰 한 곳의 분기로 깨질 수 있었다. 같은 모양의
+        //: 확인 카드를 만들어 모달을 띄운다. id 가 예약 접두사(__)라 코어
+        //: 확인 카드와 동일하게 ADR 로는 기록되지 않는다.
+        decisions = [{
+          id: "__confirm__",
+          question: `"${request.instruction.replace(/\s+/g, " ").slice(0, 60)}" — 이대로 진행할까요?`,
+          impact: "",
+          options: [{ key: "proceed", label: "진행", summary: "설계상 갈림길이 없어 요청대로 바로 반영합니다.", pros: ["추가 선택 불필요"], cons: [], recommended: true }],
+        }];
       }
       const selections: Record<string, string> = {};
       for (const decision of decisions) {
         selections[decision.id] = decision.options.find((option) => option.recommended)?.key ?? decision.options[0]?.key ?? "";
       }
-      setDecisionModal({ requestId, decisions, selections, step: 0 });
+      setDecisionModal({ requestId, decisions, selections, step: 0, dropped });
     } else if (type === "code.folderPicked" || type === "code.setTargetFolder") {
       setTargetFolder((payload as { folder?: string })?.folder ?? "");
     } else if (type === "code.contextAdded") {
@@ -267,6 +277,14 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
                   <span style={{ marginLeft: "auto", borderRadius: 99, padding: "3px 8px", background: "var(--vscode-badge-background, #4d4d4d)", color: "var(--vscode-badge-foreground, #fff)", fontSize: 11, fontWeight: 600 }}>설계 결정 {decisionModal.step + 1}/{decisionModal.decisions.length}</span>
                 </div>
                 <div style={{ marginTop: 9, color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 11.5, lineHeight: 1.5 }}>코드 생성 전에 프로젝트 구조에 영향을 주는 선택을 확인합니다.</div>
+                {/* 코어가 형식 문제로 걸러낸 결정 — 안 보여주면 사용자에게는
+                    "AI 가 설계를 안 해준다"로 보인다(보드 이슈). */}
+                {decisionModal.dropped.length > 0 && (
+                  <div style={{ marginTop: 8, padding: "7px 9px", borderRadius: 5, background: "rgba(204,167,0,.10)", border: "1px solid rgba(204,167,0,.35)", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 10.5, lineHeight: 1.5 }}>
+                    <div style={{ fontWeight: 650 }}>제시됐지만 제외된 결정 {decisionModal.dropped.length}건</div>
+                    {decisionModal.dropped.map((reason, i) => <div key={i}>· {reason}</div>)}
+                  </div>
+                )}
               </div>
               <div style={{ padding: "18px" }}>
                 <h3 style={{ margin: 0, color: "var(--vscode-foreground, #eee)", fontSize: 18, lineHeight: 1.4 }}>{decision.question}</h3>
