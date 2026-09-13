@@ -322,12 +322,10 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
         >
           지금 분석
         </button>
-        <button
-          onClick={() => postMessage("build.scan", {})}
-          style={{ marginLeft: "auto", background: "#1c1c1c", color: "#ccc", border: "1px solid #3f3f3f", borderRadius: 5, padding: "6px 12px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}
-        >
-          스캔
-        </button>
+        {/* "스캔" 버튼 제거 — `build.scan` 을 받는 핸들러가 확장 호스트에
+            없어 눌러도 아무 일도 일어나지 않았다(보드 이슈 「죽은 버튼 3종」).
+            반응 없는 버튼은 없는 버튼보다 나쁘다: 사용자는 고장으로 기억한다.
+            워크스페이스 스캔 기능이 정의되면 핸들러와 함께 되살릴 것. */}
       </div>
 
       {/* Loading */}
