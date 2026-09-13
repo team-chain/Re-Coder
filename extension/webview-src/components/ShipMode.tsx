@@ -445,22 +445,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
               {activeFileLabel}
             </span>
           </div>
-          {matchesTab && activeFileTab === "dockerfile" && (
-            <button
-              onClick={() => {/* preview action */}}
-              style={{
-                background: "#333",
-                color: "#ccc",
-                border: "1px solid #444",
-                borderRadius: 4,
-                padding: "2px 9px",
-                fontSize: 10,
-                cursor: "pointer",
-              }}
-            >
-              Preview
-            </button>
-          )}
+          {/* "Preview" 버튼 제거 — onClick 이 빈 함수였던 완전한 no-op
+              (보드 이슈 「죽은 버튼 3종」). 초안 내용은 바로 아래 코드 블록에
+              이미 전문이 보이므로 버튼 없이도 잃는 것이 없다. */}
         </div>
 
         {/* Code content */}

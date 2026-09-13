@@ -461,9 +461,10 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
         <ConnRow icon={<Icon.Git size={19} />} label="GitHub" connected={githubReady}
           onConnect={() => postMessage("webview.diagnostics.fix", { key: "github_ready" })} />
         <ConnRow icon={<Icon.Cloud size={19} />} label="AWS" connected={awsReady}
-          onConnect={() => postMessage("webview.diagnostics.fix", { key: "aws_deploy_ready" })} />
-        <ConnRow icon={<Icon.Chat size={19} />} label="Discord" connected={false} actionLabel="봇 초대"
-          onConnect={() => postMessage("workbench.open", {})} last />
+          onConnect={() => postMessage("webview.diagnostics.fix", { key: "aws_deploy_ready" })} last />
+        {/* Discord 행 제거 — "봇 초대" 라벨이 실제로는 workbench.open 을 보내
+            Workspace 창만 다시 열었다(라벨-동작 불일치, 보드 이슈). Discord
+            연동 자체가 요구사항 범위 밖(FR-10)이므로 행을 없애는 것이 정직하다. */}
       </div>
 
       {/* Deploy Replay (보조) */}

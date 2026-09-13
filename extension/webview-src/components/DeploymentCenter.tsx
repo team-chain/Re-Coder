@@ -579,7 +579,10 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       <div style={{ fontSize: 12, color: "var(--vscode-descriptionForeground, #999)", marginBottom: 16 }}>감지 결과를 확인하고, 배포 대상은 직접 선택하세요.</div>
       {rollbackProposal && <EcsRollbackApprovalCard proposal={rollbackProposal} submitting={resolvingRollback} onResolve={resolveRollback} />}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 7, marginBottom: 18 }}>
-        {([ ["decision", "배포 결정"], ["aws", awsReady ? "AWS 연결됨" : "AWS 연결"], ["docker", "Local"], ["actions", "Actions"], ["ec2", "EC2"], ["ecs", "ECS"] ] as [Target, string][]).map(([id, label]) => <button key={id} onClick={() => { setTarget(id); setMessage(""); }} style={{ padding: "9px 6px", borderRadius: 6, border: `1px solid ${target === id ? "var(--vscode-focusBorder, #3794ff)" : "var(--vscode-panel-border, #3f3f3f)"}`, background: target === id ? "var(--vscode-list-activeSelectionBackground, #094771)" : "var(--vscode-editorWidget-background, #252526)", color: id === "aws" && awsReady ? "var(--vscode-charts-green, #4ec9b0)" : "var(--vscode-foreground, #ddd)", cursor: "pointer", fontSize: 11, fontWeight: target === id ? 600 : 400 }}>{label}</button>)}
+        {/* S3 탭은 원래 이 배열에 없었다 — 배포 결정에서 S3 를 고른 순간에만
+            도달 가능했고, 다른 탭으로 한 번 나가면 돌아올 경로가 없었다
+            (보드 이슈). 패널은 이미 완성돼 있으므로 탭 버튼만 추가한다. */}
+        {([ ["decision", "배포 결정"], ["aws", awsReady ? "AWS 연결됨" : "AWS 연결"], ["s3", "S3"], ["docker", "Local"], ["actions", "Actions"], ["ec2", "EC2"], ["ecs", "ECS"] ] as [Target, string][]).map(([id, label]) => <button key={id} onClick={() => { setTarget(id); setMessage(""); }} style={{ padding: "9px 6px", borderRadius: 6, border: `1px solid ${target === id ? "var(--vscode-focusBorder, #3794ff)" : "var(--vscode-panel-border, #3f3f3f)"}`, background: target === id ? "var(--vscode-list-activeSelectionBackground, #094771)" : "var(--vscode-editorWidget-background, #252526)", color: id === "aws" && awsReady ? "var(--vscode-charts-green, #4ec9b0)" : "var(--vscode-foreground, #ddd)", cursor: "pointer", fontSize: 11, fontWeight: target === id ? 600 : 400 }}>{label}</button>)}
       </div>
 
       {target === "aws" && <AwsConnection ecsPolicyContext={ecsPolicyContext(ecs)} />}
