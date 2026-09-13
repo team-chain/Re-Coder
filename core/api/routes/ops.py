@@ -278,7 +278,15 @@ async def analyze_incident(
     if ops_agent is not None:
         proposal = await ops_agent.analyze(alert, extra_context=request.extra_context)
     else:
-        # Placeholder heuristic
+        #: 규칙 기반 **축소 모드(degraded)**. 여기서 503 을 내지 않는 이유는,
+        #: 이 폴백이 실제로 쓸 만한 판단이고 최종 실행은 사람이 DOUBLE_CONFIRM
+        #: 으로 승인하기 때문이다 — 장애 대응 중에 도구가 통째로 막히는 쪽이
+        #: 더 나쁘다.
+        #:
+        #: 다만 **AI 분석인 척하면 안 된다.** 예전 risk_reasons 는
+        #: "[Placeholder] OpsAgent not yet loaded." 였는데, 내부 용어라 사용자는
+        #: 이게 축소 모드인 줄 모르고 HIGH 위험 작업을 그대로 승인하게 됐다.
+        #: 무엇을 근거로 나온 제안인지 화면 문구로 분명히 적는다.
         action = ActionType.DOCKER_RESTART
         risk = RiskLevel.MEDIUM
         if alert.alert_type in (AlertType.CRASH, AlertType.OOM, AlertType.HEALTH_CHECK_FAIL):
@@ -296,7 +304,11 @@ async def analyze_incident(
             action_type=action,
             target_container=alert.container_name,
             risk_level=risk,
-            risk_reasons=["[Placeholder] OpsAgent not yet loaded."],
+            risk_reasons=[
+                "⚠ 축소 모드 — AI 운영 분석기를 불러오지 못해 "
+                f"경보 유형({alert.alert_type.value})만 보고 규칙으로 제안했습니다. "
+                "원인 분석을 거치지 않았으니 승인 전에 직접 확인하세요.",
+            ],
             approval_level=ApprovalLevel.DOUBLE_CONFIRM,
         )
 
