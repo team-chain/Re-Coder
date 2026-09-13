@@ -14,9 +14,10 @@ import asyncio
 import json
 import logging
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 try:  # 코어 단독 실행 / 패키지 실행 양쪽 지원
@@ -25,6 +26,20 @@ try:  # 코어 단독 실행 / 패키지 실행 양쪽 지원
 except ImportError:  # pragma: no cover - 패키지 경로 폴백
     from core import s3_byo  # type: ignore
     from core.api.routes import aws as aws_routes  # type: ignore
+
+
+def _report(progress: Optional[Callable[[dict], None]], event: dict) -> None:
+    """진행 보고. 보고가 실패해도 **배포는 계속된다.**
+
+    스트림이 끊기거나(사용자가 창을 닫음) 큐가 막혀도 이미 시작된 S3 업로드를
+    중단시키면 안 된다 — 절반만 올라간 사이트가 남는 쪽이 더 나쁘다.
+    """
+    if progress is None:
+        return
+    try:
+        progress(event)
+    except Exception:  # noqa: BLE001 — 보고 실패가 배포를 깨뜨리지 않는다
+        logger.debug("진행 보고 실패(무시): %s", event.get("step"))
 
 
 def _session_and_region(profile: str = "", explicit_region: str = ""):
@@ -257,21 +272,31 @@ def _deploy_bucket_sync(
     bucket: str,
     region: str,
     plan,
+    progress: Optional[Callable[[dict], None]] = None,
 ) -> S3DeployResponse:
     """한 버킷의 생성·업로드·정리를 순서대로 실행한다.
 
     호출자는 `_bucket_deploy_lock`을 이미 잡고 있어야 한다. 이 계약을 별도
     함수로 두면 버킷 계산 전의 STS 조회는 병렬로 해도 되지만, 서로 영향을
     주는 S3 변경은 절대 겹치지 않는다는 경계가 분명해진다.
+
+    `progress` 가 주어지면 단계마다 보고한다. 없으면(기존 라우트) 아무
+    일도 하지 않으므로 동작이 완전히 같다 — AWS 호출은 그대로다.
     """
     from botocore.exceptions import ClientError  # type: ignore
 
+    _report(progress, {"step": "bucket", "message": f"버킷 {bucket} 확인 중"})
     try:
         created, actual_region = _ensure_bucket(client, bucket, region)
     except ClientError as exc:
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "S3 버킷 생성"),
         ) from exc
+    _report(progress, {
+        "step": "bucket",
+        "done": True,
+        "message": f"버킷 {'생성' if created else '확인'} 완료",
+    })
 
     region_note = ""
     if actual_region != region:
@@ -285,15 +310,18 @@ def _deploy_bucket_sync(
         region = actual_region
         client = session.client("s3", region_name=region)
 
+    _report(progress, {"step": "website", "message": "정적 호스팅 설정 중"})
     try:
         _configure_public_website(client, bucket, region)
     except ClientError as exc:
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "정적 호스팅 설정"),
         ) from exc
+    _report(progress, {"step": "website", "done": True, "message": "정적 호스팅 설정 완료"})
 
+    total = len(plan.items)
     try:
-        for item in plan.items:
+        for index, item in enumerate(plan.items, start=1):
             client.put_object(
                 Bucket=bucket,
                 Key=item.key,
@@ -303,11 +331,17 @@ def _deploy_bucket_sync(
                 #: "고쳤는데 그대로인데요" 로 시간을 버리는 걸 막는다.
                 CacheControl="no-cache",
             )
+            #: 파일 하나마다 보고한다. 여기가 제일 오래 걸리는 구간이고,
+            #: 예전에는 이 1분 동안 화면이 "배포 중…" 에서 멈춰 있었다.
+            _report(progress, {
+                "step": "upload", "done_count": index, "total": total, "key": item.key,
+            })
     except ClientError as exc:
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "파일 업로드"),
         ) from exc
 
+    _report(progress, {"step": "prune", "message": "이전 배포 파일 정리 중"})
     removed = _prune_obsolete_objects(client, bucket, plan.keys)
 
     url = s3_byo.website_url(bucket, region)
@@ -328,10 +362,16 @@ def _deploy_bucket_sync(
     )
 
 
-def _deploy_sync(request: S3DeployRequest, session, region: str) -> S3DeployResponse:
+def _deploy_sync(
+    request: S3DeployRequest,
+    session,
+    region: str,
+    progress: Optional[Callable[[dict], None]] = None,
+) -> S3DeployResponse:
     """실제 AWS 호출. 이벤트 루프를 막지 않도록 라우트가 스레드로 넘긴다."""
     from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
 
+    _report(progress, {"step": "plan", "message": "올릴 파일을 정리하는 중"})
     plan = s3_byo.plan_upload(request.files)
 
     try:
@@ -350,7 +390,9 @@ def _deploy_sync(request: S3DeployRequest, session, region: str) -> S3DeployResp
     # 해당 배포의 새 파일을 이전 파일로 오인해 삭제할 수 있다.
     with _bucket_deploy_lock(bucket):
         client = session.client("s3", region_name=region)
-        return _deploy_bucket_sync(request, session, client, bucket, region, plan)
+        return _deploy_bucket_sync(
+            request, session, client, bucket, region, plan, progress,
+        )
 
 
 @router.post("/api/deploy/s3", response_model=S3DeployResponse)
@@ -381,3 +423,110 @@ async def deploy_s3(request: S3DeployRequest) -> S3DeployResponse:
         raise HTTPException(
             status_code=500, detail=f"S3 배포 중 예기치 못한 오류: {exc}",
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# 진행 스트리밍 (SSE)
+# ---------------------------------------------------------------------------
+#
+# 왜 필요한가
+#   기존 `/api/deploy/s3` 는 요청 하나에 응답 하나다. 파일 80개를 올리는
+#   1분 동안 화면은 "배포 중…" 에서 멈춰 있고, 실패해도 **어느 단계에서**
+#   죽었는지 응답에 없다. 게다가 확장 타임아웃(5분)이 먼저 끝나면 화면은
+#   실패인데 코어는 계속 올리고 있어 — 절반만 올라간 사이트가 남는다.
+#
+# 왜 SSE 인가
+#   코어 → 확장 **한 방향** 알림이면 충분하고, SSE 는 그냥 HTTP 응답이라
+#   지금 쓰는 세션 토큰 인증·미들웨어가 그대로 적용된다. 웹소켓은 별도
+#   프로토콜이라 인증과 재연결을 새로 만들어야 한다("배포 중단" 같은
+#   역방향 기능이 생기면 그때 검토).
+#
+# 기존 라우트는 **그대로 둔다** — 구버전 확장과의 호환, 그리고 스트리밍에
+# 문제가 생겨도 되돌아갈 경로가 남는다.
+
+
+def _sse(event: dict) -> bytes:
+    """dict → SSE 한 프레임."""
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+@router.post("/api/deploy/s3/stream")
+async def deploy_s3_stream(request: S3DeployRequest) -> StreamingResponse:
+    """`/api/deploy/s3` 와 같은 배포를 하되 진행 상황을 흘려보낸다.
+
+    이벤트 형태:
+      {"step": "plan"|"bucket"|"website"|"upload"|"prune"}  — 진행
+      {"step": "done", "result": {...S3DeployResponse}}      — 성공
+      {"step": "error", "status": <http>, "message": "..."}  — 실패
+
+    **실패는 이벤트로 간다.** 스트림은 이미 200 으로 열린 뒤이므로 HTTP
+    상태코드로는 알릴 수 없다. 확장은 두 경로(요청 자체 실패 / 스트림 내
+    실패)를 모두 다뤄야 한다.
+    """
+    if not (request.project or "").strip():
+        raise HTTPException(status_code=400, detail="project 가 비어 있습니다.")
+
+    session, region = _session_and_region(request.profile or "", request.region or "")
+    if not region:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "AWS 리전을 알 수 없습니다. 배포 폼에서 리전을 지정하거나 "
+                "AWS 연결을 먼저 완료하세요."
+            ),
+        )
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    _SENTINEL = object()
+
+    def _push(event: dict) -> None:
+        #: 배포는 별도 스레드에서 돈다 — 이벤트 루프 객체를 직접 만지면 안 된다.
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    async def _run() -> None:
+        try:
+            result = await asyncio.to_thread(
+                _deploy_sync, request, session, region, _push,
+            )
+            queue.put_nowait({"step": "done", "result": json.loads(result.model_dump_json())})
+        except s3_byo.S3DeployError as exc:
+            queue.put_nowait({"step": "error", "status": 400, "message": str(exc)})
+        except HTTPException as exc:
+            queue.put_nowait({
+                "step": "error", "status": exc.status_code, "message": str(exc.detail),
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("S3 BYO 스트리밍 배포 실패")
+            queue.put_nowait({
+                "step": "error", "status": 500,
+                "message": f"S3 배포 중 예기치 못한 오류: {exc}",
+            })
+        finally:
+            queue.put_nowait(_SENTINEL)
+
+    async def _stream():
+        task = loop.create_task(_run())
+        try:
+            while True:
+                event = await queue.get()
+                if event is _SENTINEL:
+                    break
+                yield _sse(event)
+        finally:
+            #: 사용자가 창을 닫아 스트림이 끊겨도 배포 자체는 끝까지 간다.
+            #: 중간에 죽이면 절반만 올라간 사이트가 남는다 — 완료 여부는
+            #: 스트림이 아니라 실제 S3 상태로 판단해야 한다.
+            if not task.done():
+                logger.info("S3 배포 스트림이 끊겼지만 업로드는 계속 진행합니다.")
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            #: 중간 프록시가 응답을 모아 두면 실시간이 아니게 된다.
+            #: 로컬호스트 직결이라 해당 없지만 안전장치로 둔다.
+            "X-Accel-Buffering": "no",
+        },
+    )

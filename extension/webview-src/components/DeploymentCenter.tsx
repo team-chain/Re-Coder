@@ -206,6 +206,37 @@ type S3Deployed = {
   excluded_sensitive?: string[];
   excluded_note?: string;
 };
+/** `/api/deploy/s3/stream` 진행 이벤트. */
+export type S3Progress = {
+  step: "plan" | "bucket" | "website" | "upload" | "prune" | "done" | "error";
+  message?: string;
+  done_count?: number;
+  total?: number;
+  key?: string;
+  done?: boolean;
+};
+
+/** 진행 이벤트 → 화면 한 줄. 순수 함수라 직접 검사할 수 있다. */
+export function describeS3Progress(p: S3Progress | null): string {
+  if (!p) { return "배포를 준비하는 중…"; }
+  switch (p.step) {
+    case "plan":    return "올릴 파일을 정리하는 중…";
+    case "bucket":  return p.done ? "버킷 확인 완료" : (p.message ?? "버킷 확인 중…");
+    case "website": return p.done ? "정적 호스팅 설정 완료" : "정적 호스팅을 설정하는 중…";
+    case "upload":  return `파일 업로드 ${p.done_count ?? 0}/${p.total ?? 0}`;
+    case "prune":   return "이전 배포 파일을 정리하는 중…";
+    case "done":    return "완료";
+    case "error":   return p.message ?? "배포에 실패했습니다.";
+    default:        return "진행 중…";
+  }
+}
+
+/** 업로드 진행률(0~1). 업로드 단계가 아니면 null — 가짜 진행률을 만들지 않는다. */
+export function s3UploadRatio(p: S3Progress | null): number | null {
+  if (!p || p.step !== "upload" || !p.total) { return null; }
+  return Math.min(1, (p.done_count ?? 0) / p.total);
+}
+
 type EcsRollbackProposal = {
   proposal_id: string;
   deployment_id: string;
@@ -360,6 +391,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const [s3Dir, setS3Dir] = useState("");
   const [s3DirTouched, setS3DirTouched] = useState(false);
   const [s3Busy, setS3Busy] = useState(false);
+  const [s3Progress, setS3Progress] = useState<S3Progress | null>(null);
   const [s3Result, setS3Result] = useState<S3Deployed | null>(null);
   const [rollbackProposal, setRollbackProposal] = useState<EcsRollbackProposal | null>(null);
   const [resolvingRollback, setResolvingRollback] = useState(false);
@@ -434,8 +466,14 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       const suggested = (payload as { suggested?: string })?.suggested ?? "";
       setS3Dir(cur => (s3DirTouchedRef.current ? cur : suggested));
     }
+    if (type === "workspace.deploy.s3.progress") {
+      //: 코어가 단계마다 흘려보내는 진행 이벤트. 예전에는 이 구간이 통째로
+      //: 깜깜해서, 사용자는 진행 중인지 멈춘 건지 알 수 없었다.
+      setS3Progress(payload as S3Progress);
+    }
     if (type === "workspace.deploy.s3.result") {
       setS3Busy(false);
+      setS3Progress(null);
       const r = payload as { ok?: boolean; result?: S3Deployed; message?: string };
       if (r?.ok && r.result) {
         setS3Result(r.result);
@@ -640,9 +678,39 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         </div>
         <button
           disabled={s3Busy || !awsReady || !coreRegion.trim()}
-          onClick={() => { setS3Busy(true); setS3Result(null); setMessage("S3에 올리는 중…"); postMessage("workspace.deploy.s3", { dir: s3Dir.trim(), region: coreRegion.trim() }); }}
+          onClick={() => { setS3Busy(true); setS3Result(null); setS3Progress(null); setMessage("S3에 올리는 중…"); postMessage("workspace.deploy.s3", { dir: s3Dir.trim(), region: coreRegion.trim() }); }}
           style={{ ...button, marginTop: 13, opacity: s3Busy ? .7 : 1 }}
         >{s3Busy ? "배포 중…" : "S3에 배포"}</button>
+        {/*
+          진행 표시. 예전에는 버튼 라벨이 "배포 중…" 으로 바뀌는 게 전부여서,
+          파일 수십 개를 올리는 동안 진행 중인지 멈춘 건지 알 수 없었다.
+          진행률 막대는 **업로드 단계에서만** 그린다 — 다른 단계에 가짜 비율을
+          그리면 화면이 사실과 다른 말을 하게 된다.
+        */}
+        {s3Busy && (() => {
+          const ratio = s3UploadRatio(s3Progress);
+          return (
+            <div style={{ marginTop: 11, padding: "9px 11px", borderRadius: 6, background: "var(--vscode-textBlockQuote-background, rgba(127,127,127,.08))", border: "1px solid var(--vscode-panel-border, #3f3f3f)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11.5 }}>
+                <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--vscode-charts-blue, #3794ff)" }} />
+                <span>{describeS3Progress(s3Progress)}</span>
+                {ratio !== null && (
+                  <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", color: "var(--vscode-descriptionForeground, #999)" }}>
+                    {Math.round(ratio * 100)}%
+                  </span>
+                )}
+              </div>
+              {ratio !== null && (
+                <div style={{ marginTop: 7, height: 4, borderRadius: 2, background: "var(--vscode-panel-border, #3f3f3f)", overflow: "hidden" }}>
+                  <div style={{ width: `${ratio * 100}%`, height: "100%", background: "var(--vscode-charts-blue, #3794ff)", transition: "width .2s" }} />
+                </div>
+              )}
+              {s3Progress?.step === "upload" && s3Progress.key && (
+                <div style={{ marginTop: 5, fontSize: 10, color: "var(--vscode-descriptionForeground, #888)", overflowWrap: "anywhere" }}>{s3Progress.key}</div>
+              )}
+            </div>
+          );
+        })()}
         {(!awsReady || !coreRegion.trim()) && <div style={{ marginTop: 7, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>AWS 계정을 연결하면 배포 리전이 표시되고 S3 배포를 시작할 수 있습니다.</div>}
 
         {s3Result && (

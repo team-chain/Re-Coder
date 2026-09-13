@@ -106,6 +106,22 @@ export interface DeployPreflightIssue {
     proposal_id: string | null;
 }
 
+/** `/api/deploy/s3/stream` 이 흘려보내는 진행 이벤트 한 건. */
+export interface S3DeployStreamEvent {
+    step: 'plan' | 'bucket' | 'website' | 'upload' | 'prune' | 'done' | 'error';
+    message?: string;
+    /** upload 단계 — 지금까지 올린 개수 / 전체 개수. */
+    done_count?: number;
+    total?: number;
+    key?: string;
+    /** 단계 완료 표시(bucket·website). */
+    done?: boolean;
+    /** step === 'done' 일 때만. */
+    result?: S3DeployResult;
+    /** step === 'error' 일 때만 — 스트림은 이미 200 이라 상태코드로 못 알린다. */
+    status?: number;
+}
+
 export interface DeploymentDecisionResult {
     target: 'ecs' | 's3' | 'local';
     next_view: 'ecs' | 's3' | 'docker';
@@ -920,6 +936,103 @@ export class ApiClient {
         //: 여기서 조용히 기본값을 돌려주면 "배포됐다" 로 보인다. 실패는
         //: 실패로 올린다 — 호출자가 사용자에게 원인을 보여 준다.
         throw new Error(resp.error ?? 'S3 배포에 실패했습니다.');
+    }
+
+    /**
+     * POST /api/deploy/s3/stream — 같은 배포를 하되 **진행 상황을 흘려받는다.**
+     *
+     * 왜 EventSource 가 아닌가
+     *   브라우저 EventSource 는 커스텀 헤더를 보낼 수 없는데, 이 확장은 세션
+     *   토큰을 `X-Session-Token` 헤더로 싣는다. 그래서 fetch 의 ReadableStream
+     *   으로 직접 읽는다. (웹뷰는 코어를 직접 못 부르므로 이 수신은 확장
+     *   호스트에서 일어나고, 결과는 postMessage 로 중계된다.)
+     *
+     * 실패 경로가 **둘**이라는 점에 주의한다.
+     *   1. 요청 자체 실패 — HTTP 상태로 온다(여기서 throw).
+     *   2. 스트림 도중 실패 — 이미 200 으로 열린 뒤라 `step:"error"` 이벤트로 온다.
+     */
+    async deployS3Stream(
+        input: {
+            project: string;
+            files: Array<{ path: string; content: string; encoding: 'utf-8' | 'base64' }>;
+            region?: string;
+            profile?: string;
+        },
+        onEvent: (event: S3DeployStreamEvent) => void,
+    ): Promise<S3DeployResult> {
+        let token = this.coreManager.getSessionToken();
+        let port = this.coreManager.getPort();
+        if (!token || !port || port <= 0 || !Number.isFinite(port)) {
+            try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
+            token = this.coreManager.getSessionToken();
+            port = this.coreManager.getPort();
+        }
+        if (!port || port <= 0 || !Number.isFinite(port)) {
+            throw new Error('코어가 아직 준비되지 않았습니다.');
+        }
+
+        const body: Record<string, unknown> = { project: input.project, files: input.files };
+        if (input.region) { body.region = input.region; }
+        if (input.profile) { body.profile = input.profile; }
+
+        const res = await fetch(`http://127.0.0.1:${port}/api/deploy/s3/stream`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Session-Token': token,
+                Accept: 'text/event-stream',
+            },
+            body: JSON.stringify(body),
+        });
+
+        if (!res.ok || !res.body) {
+            let text = '';
+            try { text = await res.text(); } catch { text = `HTTP ${res.status}`; }
+            throw new Error(describeHttpError(res.status, text));
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let result: S3DeployResult | null = null;
+        let streamError: string | null = null;
+
+        //: SSE 프레임은 빈 줄로 끊긴다. 청크 경계가 프레임 중간을 자를 수
+        //: 있으므로 버퍼에 모았다가 완성된 프레임만 꺼낸다.
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) { break; }
+            buffer += decoder.decode(value, { stream: true });
+            let sep = buffer.indexOf('\n\n');
+            while (sep !== -1) {
+                const frame = buffer.slice(0, sep);
+                buffer = buffer.slice(sep + 2);
+                sep = buffer.indexOf('\n\n');
+
+                const line = frame.split('\n').find((l) => l.startsWith('data:'));
+                if (!line) { continue; }
+                let event: S3DeployStreamEvent;
+                try {
+                    event = JSON.parse(line.slice(5).trim()) as S3DeployStreamEvent;
+                } catch { continue; }
+
+                onEvent(event);
+                if (event.step === 'done' && event.result) { result = event.result; }
+                if (event.step === 'error') { streamError = event.message ?? 'S3 배포에 실패했습니다.'; }
+            }
+        }
+
+        if (streamError) { throw new Error(streamError); }
+        if (!result) {
+            //: 완료 이벤트 없이 스트림이 끝났다 — 코어가 죽었거나 연결이 끊겼다.
+            //: **성공으로 처리하면 안 된다.** 다만 업로드는 계속되고 있을 수
+            //: 있으므로, 호출자가 그 사실을 사용자에게 알려야 한다.
+            throw new Error(
+                '배포 진행 연결이 끊겼습니다. 업로드가 계속되고 있을 수 있으니 '
+                + 'S3 버킷 상태를 확인한 뒤 다시 시도하세요.',
+            );
+        }
+        return result;
     }
 
     /**

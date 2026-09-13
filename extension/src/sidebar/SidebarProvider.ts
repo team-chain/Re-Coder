@@ -1000,7 +1000,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
 
                 try {
-                    const result = await this._apiClient.deployS3({
+                    //: 진행 상황을 흘려받아 웹뷰로 중계한다. 예전에는 요청
+                    //: 하나에 응답 하나라, 파일 수십 개를 올리는 동안 화면이
+                    //: "배포 중…" 에서 멈춰 있었고 실패해도 어느 단계인지
+                    //: 알 수 없었다(보드 이슈).
+                    const result = await this._apiClient.deployS3Stream({
                         // 로컬 폴더 경로가 아닌 Git 원격 주소를 지문으로 쓴다.
                         // 같은 저장소를 다른 위치에서 열어도 기존 공개 버킷을
                         // 갱신하고, 이전 배포 버킷을 고아 상태로 남기지 않는다.
@@ -1010,6 +1014,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         ),
                         files,
                         region: (p.region ?? '').trim() || undefined,
+                    }, (event) => {
+                        this.postMessage('workspace.deploy.s3.progress', event);
                     });
                     this.postMessage('workspace.deploy.s3.result', {
                         ok: true,
