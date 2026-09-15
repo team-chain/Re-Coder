@@ -182,7 +182,9 @@ def test_같은_버킷_동시_배포는_업로드와_정리_단계를_직렬화�
         def client(self, name, **_kwargs):
             return _Sts() if name == "sts" else object()
 
-    def _fake_deploy_bucket(_request, _session, _client, _bucket, _region, _plan):
+    #: `progress` 는 스트리밍 라우트가 넘기는 진행 보고 콜백(선택). 이
+    #: 테스트는 직렬화만 검사하므로 받기만 하고 쓰지 않는다.
+    def _fake_deploy_bucket(_request, _session, _client, _bucket, _region, _plan, _progress=None):
         with calls_lock:
             calls.append("entered")
             if len(calls) == 1:
