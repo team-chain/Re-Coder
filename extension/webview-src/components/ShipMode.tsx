@@ -33,6 +33,40 @@ interface ScanResult {
   exit_code: number;
   findings: unknown;
   stderr?: string;
+  //: 코어가 이미 내려주고 있던 필드들. 화면이 이걸 **안 읽어서**, 스캐너가
+  //: 설치돼 있지 않아 검사를 못 한 경우에도 초록색 "취약점 없음 ✓" 이 떴다.
+  //: 검사하지 않은 것과 위반이 없는 것은 다르다.
+  status?: "ok" | "error";
+  summary?: string;
+  message?: string;
+  critical_count?: number;
+  high_count?: number;
+}
+
+export type ScanVerdict = "not_run" | "vulnerable" | "clean";
+
+/**
+ * 스캔 결과를 세 상태로 판정한다. **컴포넌트 밖의 순수 함수**로 둔 이유:
+ * 이 판정이 "검사됨/안 됨"을 가르는데, 예전 로직은 렌더 안에 있어서
+ * 초록 배지가 뜨는 조건을 직접 검사할 방법이 없었다.
+ *
+ *  · not_run   — 스캐너 미설치·Docker 부재·타임아웃. **통과가 아니다.**
+ *  · vulnerable— 취약점이 관측됐다.
+ *  · clean     — 실제로 돌았고 관측된 취약점이 없다.
+ */
+export function scanVerdict(result: ScanResult): ScanVerdict {
+  if (result.status === "error") { return "not_run"; }
+  const findings = result.findings as { Results?: { Vulnerabilities?: unknown[] }[] } | null;
+  //: status 가 없는 구버전 코어 응답 대비 — findings 자체가 없으면
+  //: "검사 결과가 없다"이지 "깨끗하다"가 아니다.
+  if (!findings || !Array.isArray(findings.Results)) { return "not_run"; }
+  let count = 0;
+  for (const r of findings.Results) {
+    for (const v of (r.Vulnerabilities ?? []) as { Severity: string }[]) {
+      if (v.Severity === "CRITICAL" || v.Severity === "HIGH") { count++; }
+    }
+  }
+  return count > 0 ? "vulnerable" : "clean";
 }
 
 interface DeploymentPlan {
@@ -302,19 +336,35 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   // ── Render helpers ────────────────────────────────────────────────────────
 
   const renderScanSummary = (result: ScanResult) => {
-    const findings = result.findings as {
-      Results?: { Vulnerabilities?: unknown[] }[];
-      finding_count?: number;
-    };
+    const verdict = scanVerdict(result);
+
+    //: 검사가 못 돈 경우는 **초록으로 칠하지 않는다.** 예전에는 스캐너가
+    //: 없어도 findings 가 비어서 "취약점 없음 ✓" 이 떴고, 사용자는 검사를
+    //: 통과한 줄 알고 배포로 넘어갔다(보드 이슈 「보안 스캔이 바이너리
+    //: 없으면 조용히 건너뜀」).
+    if (verdict === "not_run") {
+      const reason = (result.summary || result.message || "").trim();
+      return (
+        <div style={{ padding: "8px 10px", borderRadius: 4, border: "1px solid #f59e0b", background: "rgba(245,158,11,0.08)", color: "#f59e0b", fontSize: 11, lineHeight: 1.55, marginBottom: 8 }}>
+          <strong>⚠ 이미지 취약점 검사를 하지 못했습니다</strong>
+          <div style={{ marginTop: 3, color: "#e3b261" }}>
+            {reason || "스캐너를 실행할 수 없었습니다."}
+          </div>
+          <div style={{ marginTop: 4, color: "#c9a35e" }}>
+            취약점이 <strong>없다는 뜻이 아니라 확인하지 못했다</strong>는 뜻입니다.
+            Trivy와 Docker를 설치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요.
+          </div>
+        </div>
+      );
+    }
+
+    const findings = result.findings as { Results?: { Vulnerabilities?: unknown[] }[] };
     let criticalCount = 0;
     let highCount = 0;
-
-    if (findings?.Results) {
-      for (const r of findings.Results) {
-        for (const v of (r.Vulnerabilities ?? []) as { Severity: string }[]) {
-          if (v.Severity === "CRITICAL") { criticalCount++; }
-          if (v.Severity === "HIGH") { highCount++; }
-        }
+    for (const r of findings?.Results ?? []) {
+      for (const v of (r.Vulnerabilities ?? []) as { Severity: string }[]) {
+        if (v.Severity === "CRITICAL") { criticalCount++; }
+        if (v.Severity === "HIGH") { highCount++; }
       }
     }
 
