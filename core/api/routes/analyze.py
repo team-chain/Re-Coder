@@ -265,13 +265,19 @@ async def _delegate_to_orchestrator(
             test_command=None,
         )
 
-    return PatchProposal(
-        summary="[Placeholder] Orchestrator not yet available.",
-        risk_level=RiskLevel.LOW,
-        risk_reasons=["Orchestrator module not loaded — placeholder response."],
-        approval_level=ApprovalLevel.AUTO,
-        patches=[],
-        test_command=None,
+    #: [중요] 여기서 그럴듯한 PatchProposal 을 200 OK 로 돌려주면 안 된다.
+    #:
+    #: 예전에는 `summary="[Placeholder] Orchestrator not yet available."` 를
+    #: 정상 응답으로 내보냈다. 화면에서는 "분석했는데 고칠 게 없다"와 구분이
+    #: 되지 않아서, **핵심 기능이 죽어 있는데 아무도 모르는** 상태가 됐다.
+    #: 의존성 누락은 사용자가 할 수 있는 일이 있는 실패이므로, 실패로 알리고
+    #: 무엇을 하면 되는지까지 말한다.
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "코드 분석 엔진(Orchestrator)을 불러오지 못했습니다. "
+            "코어 로그에서 import 오류를 확인하거나 코어를 다시 시작해 주세요."
+        ),
     )
 
 

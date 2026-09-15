@@ -2267,16 +2267,17 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
     if deploy_agent is not None:
         plan = await deploy_agent.create_plan(request)
     else:
-        # Placeholder plan
-        plan = DeploymentPlan(
-            method=request.method,
-            action=__import__("schemas", fromlist=["ActionType"]).ActionType.DOCKER_RUN,
-            image=request.image or "app:latest",
-            container_name=request.container_name or "app",
-            ports={str(request.host_port or 8080): str(request.container_port or 8080)},
-            health_check_path="/health",
-            risk_level=RiskLevel.MEDIUM,
-            approval_level=ApprovalLevel.CONFIRM,
+        #: [중요] 예전에는 여기서 `app:latest` / 포트 8080 같은 **고정값 플랜**을
+        #: 200 OK 로 돌려줬다. 사용자가 보는 건 정상적인 배포 플랜이라,
+        #: 요청과 무관한 이미지·포트로 승인하고 실행까지 갈 수 있었다.
+        #: 배포는 되돌리기 비싼 작업이라 추측한 플랜을 내밀면 안 된다.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "배포 플랜 생성기(DeployAgent)를 불러오지 못했습니다. "
+                "코어 로그에서 import 오류를 확인하거나 코어를 다시 시작해 주세요. "
+                "플랜 없이 배포를 진행하면 요청과 다른 설정으로 실행될 수 있습니다."
+            ),
         )
 
     # Apply the security-gate verdict onto the plan.
