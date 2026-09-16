@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReCoder Workspace — UI 프로토타입</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: #0d0d0d; font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif; color: #e0e0e0; font-size: 12px; }
+  .app { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(330px, .85fr); height: 100vh; background: #1e1e1e; }
+  @media (max-width: 900px) { .app { grid-template-columns: 1fr; } .chat { display: none; } }
+
+  /* ── 왼쪽 ── */
+  .main { display: flex; flex-direction: column; border-right: 1px solid #333; min-width: 0; }
+  .topbar { display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-bottom: 1px solid #2a2a2a; background: #181818; }
+  .topbar strong { font-size: 15px; } .topbar .ws { color: #8b8b8b; font-size: 12px; }
+  .topbar .st { margin-left: auto; display: flex; align-items: center; gap: 6px; color: #3fb950; font-size: 11.5px; }
+  .topbar .st .dot { width: 7px; height: 7px; border-radius: 50%; background: #3fb950; }
+  .topbar .home { border: 1px solid transparent; border-radius: 4px; padding: 4px 9px; background: #3a3d41; color: #fff; font-size: 11px; cursor: pointer; }
+  .body { flex: 1; padding: 20px 22px; min-height: 0; overflow-y: auto; }
+  .foot { padding: 10px 22px; border-top: 1px solid #2a2a2a; display: flex; gap: 14px; align-items: center; color: #8a8a8a; font-size: 11px; }
+  .foot .ok::before { content: "● "; color: #3fb950; } .foot .no::before { content: "● "; color: #6b6b6b; }
+  .foot .r { margin-left: auto; }
+
+  button { font-family: inherit; }
+  .btn { border: 1px solid transparent; border-radius: 6px; padding: 6px 12px; font-size: 11.5px; font-weight: 600; background: #0e639c; color: #fff; cursor: pointer; }
+  .btn.ghost { background: transparent; border-color: #3a3f47; color: #d0d6dc; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .mono { font-family: "SF Mono", Menlo, monospace; font-size: 11px; }
+
+  /* ── 홈: 허브 카드 ── */
+  .hubs { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+  .hub { text-align: left; border: 1px solid #2e3238; border-radius: 14px; padding: 20px 18px 16px; background: #232629; color: #e0e0e0; display: flex; flex-direction: column; min-height: 250px; cursor: pointer; }
+  .hub:hover { border-color: #4a5560; }
+  .hub .ic { font-size: 26px; margin-bottom: 12px; }
+  .hub h3 { margin: 0 0 4px; font-size: 19px; }
+  .hub .sub { color: #8f98a3; font-size: 12px; margin-bottom: 14px; }
+  .hub ul { list-style: none; margin: 0; padding: 0; font-size: 12.5px; flex: 1; }
+  .hub li { padding: 6px 0; border-top: 1px solid #2c3036; } .hub li:first-child { border-top: none; }
+  .hub .ft { margin-top: 12px; display: flex; justify-content: space-between; align-items: center; }
+  .hub .ft .go { color: #4a9eff; font-weight: 600; }
+  .hub.dev { border-top: 3px solid #4a9eff; } .hub.dep { border-top: 3px solid #f0b35b; } .hub.sec { border-top: 3px solid #ef6b6b; }
+  .pill { font-size: 10.5px; padding: 2px 8px; border-radius: 999px; border: 1px solid #2f6b4a; color: #7ed3a2; }
+  .pill.warn { border-color: #6b4a17; color: #f0b35b; }
+
+  /* ── 브레드크럼 ── */
+  .crumb { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .crumb a { color: #4a9eff; cursor: pointer; font-size: 12.5px; }
+  .crumb .sep { color: #8f98a3; }
+  .crumb .ttl { display: flex; align-items: center; gap: 9px; }
+  .crumb .ttl .ic { font-size: 20px; }
+  .crumb .ttl b { font-size: 18px; } .crumb .ttl .s { color: #8f98a3; font-size: 11.5px; }
+  .crumb .cur { font-size: 15px; font-weight: 700; }
+  .crumb .sw { margin-left: auto; display: flex; gap: 6px; }
+  .crumb .sw button { padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; border: 1px solid #2e3238; background: transparent; color: #9aa3ad; }
+  .crumb .sw button.on { background: #1c2b3d; color: #fff; border-color: #3f7fb5; }
+
+  /* ── 기능 카드 ── */
+  .feats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .fcard { border: 1px solid #2e3238; border-radius: 12px; background: #202326; padding: 18px; display: flex; flex-direction: column; min-height: 150px; }
+  .fcard .t { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 700; }
+  .fcard .d { color: #8f98a3; font-size: 12px; line-height: 1.5; margin-top: 8px; flex: 1; }
+  .fcard .a { margin-top: 14px; display: flex; align-items: center; gap: 8px; }
+  .fcard .a .m { margin-left: auto; color: #6b7480; font-size: 11px; }
+
+  /* ── 기능 화면 공통 ── */
+  .panel { border: 1px solid #2e3238; border-radius: 12px; background: #202326; padding: 16px 18px; }
+  .lbl { font-size: 11.5px; color: #8f98a3; margin-bottom: 6px; }
+  .ta { width: 100%; border: 1px solid #3a3f47; border-radius: 8px; background: #1a1d20; padding: 10px 12px; color: #d0d6dc; font-size: 12px; min-height: 64px; font-family: inherit; resize: vertical; }
+  .toolrow { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .chip { padding: 3px 9px; border-radius: 999px; border: 1px solid #3a3f47; color: #cfd6dc; font-size: 11px; cursor: pointer; background: transparent; }
+  .turn { border: 1px solid #2e3238; border-radius: 10px; background: #1b1e21; padding: 12px 14px; margin-top: 14px; }
+  .turn .q { color: #9aa3ad; font-size: 11.5px; margin-bottom: 8px; }
+  .frow { display: grid; grid-template-columns: 26px 1fr auto; gap: 10px; align-items: center; padding: 7px 0; border-top: 1px solid #2c3036; font-size: 12px; }
+  .frow .tag { font-size: 10px; padding: 1px 6px; border-radius: 4px; border: 1px solid #2f6b4a; color: #7ed3a2; text-align: center; }
+  .frow .ops { display: flex; gap: 6px; }
+  .frow .ops span { padding: 3px 8px; border-radius: 5px; border: 1px solid #3a3f47; font-size: 11px; }
+  .frow .ops span.ok { color: #7ed3a2; border-color: #2f6b4a; }
+  .risk { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700; background: #1f3328; color: #7ed3a2; }
+  .diff { font-family: "SF Mono", Menlo, monospace; font-size: 11px; line-height: 1.55; background: #141618; border: 1px solid #2c3036; border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+  .diff .m { color: #ff8b8b; } .diff .p { color: #7ed3a2; } .diff .c { color: #6b7480; }
+  .adr { display: grid; grid-template-columns: minmax(200px, 240px) 1fr; gap: 14px; }
+  .adrl { border: 1px solid #2e3238; border-radius: 10px; background: #202326; overflow: hidden; align-self: start; }
+  .adrl div { padding: 10px 12px; border-top: 1px solid #2c3036; font-size: 12px; cursor: pointer; } .adrl div:first-child { border-top: none; }
+  .adrl div.on { background: #1c2b3d; } .adrl .id { color: #8fa4b5; font-family: Menlo, monospace; font-size: 10.5px; }
+  .adrd h4 { margin: 0 0 6px; font-size: 15px; } .adrd .meta { color: #8f98a3; font-size: 11px; margin-bottom: 12px; }
+  .adrd h5 { margin: 12px 0 4px; font-size: 12px; color: #9aa3ad; } .adrd p { margin: 0; font-size: 12px; line-height: 1.55; }
+  .srow { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid #2c3036; }
+  .srow:first-of-type { border-top: none; }
+  .srow .v { font-size: 11.5px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: #8f98a3; font-weight: 500; padding: 6px 0; }
+  td { padding: 8px 8px 8px 0; border-top: 1px solid #2c3036; }
+  .legend { display: flex; gap: 14px; font-size: 11px; color: #9aa3ad; margin-top: 8px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+  .banner { border: 1px solid #6b4a17; background: #2a2417; border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; display: flex; gap: 12px; align-items: center; }
+  .banner .s { color: #f0c98a; font-size: 11.5px; margin-top: 3px; }
+
+  /* ── 오른쪽 채팅 (모든 화면 동일) ── */
+  .chat { display: flex; flex-direction: column; background: #1e1e1e; min-width: 0; }
+  .chat .hd { padding: 14px 16px 12px; border-bottom: 1px solid #2a2a2a; }
+  .chat .hd strong { font-size: 15px; }
+  .chat .msgs { flex: 1; padding: 12px 14px; background: linear-gradient(180deg, rgba(80,131,158,.10), transparent 230px); overflow-y: auto; }
+  .b { max-width: 88%; padding: 8px 11px; border-radius: 3px 13px 13px 13px; background: #2d3037; font-size: 12px; line-height: 1.5; margin-bottom: 10px; }
+  .b.me { margin-left: auto; background: #3188ae; color: #fff; border-radius: 13px 3px 13px 13px; }
+  .card { border: 1px solid #3f7fb5; border-radius: 9px; background: #1b2530; font-size: 11.5px; margin: 4px 0 10px; max-width: 92%; overflow: hidden; }
+  .card .ch { padding: 8px 11px; background: #22303d; border-bottom: 1px solid #2f4658; font-weight: 700; color: #e6f0f8; display: flex; gap: 8px; align-items: center; }
+  .card .ch .badge { margin-left: auto; font-size: 10px; padding: 2px 7px; border-radius: 999px; background: #3a2a10; color: #f0b35b; border: 1px solid #6b4a17; }
+  .card .cb { padding: 9px 11px; color: #dfe6ec; }
+  .card .cb code { font-family: Menlo, monospace; font-size: 11px; background: #0f161d; padding: 1px 5px; border-radius: 4px; color: #cfe3f2; }
+  .card .ca { display: flex; gap: 8px; padding: 9px 11px; border-top: 1px solid #2f4658; background: #1a232c; }
+  .card.done { border-color: #2f6b4a; } .card.done .ch { background: #1f3328; border-color: #2f6b4a; }
+  .card .step { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+  .card .step i { width: 14px; height: 14px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 9px; font-style: normal; font-weight: 800; background: #2f6b4a; color: #c9f5da; }
+  .chat .in { border-top: 1px solid #2a2a2a; padding: 10px 12px 12px; }
+  .chat .in .row { display: flex; gap: 7px; align-items: flex-end; }
+  .chat .in textarea { flex: 1; border: 1px solid #3f3f3f; border-radius: 9px; background: #3c3c3c; padding: 9px; color: #fff; font-family: inherit; font-size: 12px; resize: none; height: 46px; }
+  .chat .in .f { margin-top: 6px; color: #777; font-size: 10px; }
+
+
+  /* ── 모달 · 토스트 ── */
+  .ovl { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: grid; place-items: center; z-index: 50; padding: 18px; }
+  .mdl { width: min(560px, 100%); max-height: calc(100vh - 36px); overflow-y: auto; border: 1px solid #454545; border-radius: 10px; background: #252526; box-shadow: 0 18px 48px rgba(0,0,0,.45); }
+  .mdl .mh { padding: 14px 18px 10px; border-bottom: 1px solid #3b3b3b; display: flex; align-items: center; gap: 10px; }
+  .mdl .mh b { font-size: 14px; } .mdl .mh .x { margin-left: auto; color: #999; cursor: pointer; background: none; border: none; font-size: 16px; }
+  .mdl .mb { padding: 14px 18px; font-size: 12px; line-height: 1.55; }
+  .mdl .mf { padding: 10px 18px 14px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid #3b3b3b; }
+  .opt { border: 1px solid #3a3f47; border-radius: 9px; padding: 10px 12px; margin-top: 8px; cursor: pointer; }
+  .opt.on { border-color: #3f7fb5; background: #1c2b3d; }
+  .opt .ot { font-weight: 700; display: flex; gap: 8px; align-items: center; } .opt .rec { font-size: 10px; color: #7ed3a2; border: 1px solid #2f6b4a; border-radius: 4px; padding: 0 5px; }
+  .opt .od { color: #9aa3ad; margin-top: 3px; } .opt .pc { margin-top: 5px; font-size: 11px; color: #8f98a3; }
+  .toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); background: #2d3037; border: 1px solid #454545; color: #e0e0e0; padding: 9px 14px; border-radius: 8px; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.4); z-index: 60; }
+  .dd { position: absolute; top: 34px; left: 0; width: 300px; border: 1px solid #3a3f47; border-radius: 8px; background: #252526; box-shadow: 0 12px 30px rgba(0,0,0,.5); font-size: 12px; z-index: 5; }
+  .dd div { padding: 8px 12px; border-top: 1px solid #2c3036; cursor: pointer; } .dd div:first-child { border-top: none; } .dd div:hover { background: #1c2b3d; }
+  .dd .m2 { font-family: Menlo, monospace; font-size: 11px; color: #8fa4b5; }
+  .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid #4a9eff; border-top-color: transparent; border-radius: 50%; animation: sp .8s linear infinite; vertical-align: -1px; margin-right: 5px; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .fade { animation: fd .25s ease-out; } @keyframes fd { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .gal { position: fixed; inset: 0; background: #0d0d0d; overflow-y: auto; z-index: 40; padding: 24px; }
+  .gal .gh { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .gal .gh b { font-size: 16px; } .gal .gh .s { color: #8f98a3; }
+  .gal .gh button { margin-left: auto; }
+  .gal .gf { border: 1px solid #333; border-radius: 10px; background: #1e1e1e; margin-bottom: 8px; overflow: hidden; }
+  .gal .gf .gt { padding: 8px 14px; background: #181818; border-bottom: 1px solid #2a2a2a; font-size: 12px; display: flex; gap: 10px; align-items: center; }
+  .gal .gf .gt b { font-size: 13px; } .gal .gf .gt .s { color: #8f98a3; }
+  .gal .gf .gb { padding: 18px 20px; pointer-events: none; }
+  .gal .gc { color: #8f98a3; font-size: 11.5px; margin: 0 0 22px 4px; }
+  .hidden { display: none !important; }
+</style></head>
+<body>
+<div class="app">
+  <div class="main">
+    <div class="topbar"><strong>ReCoder</strong><span class="ws">Workspace</span><span class="st"><span class="dot"></span>준비됨</span><button class="home" onclick="go('home')">홈</button><button class="home" style="background:transparent;border-color:#3a3f47;color:#9aa3ad" onclick="toggleGallery()" id="galBtn">모든 화면 보기</button></div>
+    <div class="body" id="body"></div>
+    <div class="foot"><span class="ok">GitHub</span><span class="ok">AWS · ap-northeast-2</span><span class="no">Discord</span><span class="r">Haiku 4.5 · 사용량 0.3%</span></div>
+  </div>
+
+  <div class="chat">
+    <div class="hd"><strong>AI와 대화</strong></div>
+    <div class="msgs" id="msgs">
+      <div class="b">안녕하세요, ReCoder예요. 궁금한 것을 물어보거나, 만들거나 고칠 것을 말해 주세요.</div>
+    </div>
+    <div class="in">
+      <div class="row"><textarea id="chatIn" placeholder="메시지를 입력하세요 (예: ~/Desktop/te2 폴더 만들고 테트리스 사이트 만들어줘)"></textarea><button class="btn" onclick="sendChat()">전송</button></div>
+      <div class="f">Enter로 전송 · Shift + Enter로 줄바꿈 · 파일 변경은 승인 카드에서 승인한 뒤에만 진행됩니다</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const HUBS = {
+  develop: { icon: "⌨️", title: "Develop", sub: "요청부터 코드 적용까지", cls: "dev", pill: "AI 준비됨", feats: ["code","build","map","adr"] },
+  deploy:  { icon: "🚀", title: "Deploy",  sub: "로컬 Docker부터 AWS까지", cls: "dep", pill: "Docker 준비됨", feats: ["ship","center","replay","operate"] },
+  security:{ icon: "🛡️", title: "Security", sub: "배포 전 검사와 정책", cls: "sec", pill: "검사 · 정책", feats: ["scan","secrets","policy"] },
+};
+const FEATS = {
+  code:    { hub:"develop", icon:"✨", title:"코드 생성 · 수정", desc:"자연어로 새 코드를 만들거나 기존 코드를 고칩니다. 설계 결정 카드 → 파일별 diff → 적용 순서로 진행돼요.", action:"시작", primary:true, meta:"최근 · 테트리스 4파일" },
+  build:   { hub:"develop", icon:"🩺", title:"에러 분석", desc:"터미널·로그의 오류를 읽고 원인과 패치를 제안합니다. 승인 전에는 파일을 건드리지 않아요.", action:"분석", primary:true, meta:"마지막 분석 없음" },
+  map:     { hub:"develop", icon:"🗺️", title:"아키텍처", desc:"파일 간 의존 관계와 함수 호출 관계를 그림으로 봅니다. 코드를 실제로 읽어 만든 결과예요.", action:"보기", meta:"파일 42 · 고립 2" },
+  adr:     { hub:"develop", icon:"📝", title:"설계 기록 (ADR)", desc:"결정 카드에서 확정한 내용이 자동으로 쌓입니다. 어떤 선택을 왜 했는지 나중에 찾아볼 수 있어요.", action:"열기", meta:"3건" },
+  ship:    { hub:"deploy", icon:"🐳", title:"로컬 Docker 배포", desc:"Dockerfile 생성 → 검사 → build → run → 헬스체크. 실패하면 이전 이미지로 되돌립니다.", action:"시작", primary:true, meta:"recoder-app:v2 · 실행 중" },
+  center:  { hub:"deploy", icon:"☁️", title:"배포 센터", desc:"ECS · EC2 · S3 정적 사이트. 외부로 나가는 배포는 검사 결과에 따라 승인 강도가 달라져요.", action:"열기", primary:true, meta:"S3 · 어제 배포" },
+  replay:  { hub:"deploy", icon:"↩️", title:"롤백 · Replay", desc:"배포 이력을 타임라인으로 보고 원하는 시점으로 되돌립니다.", action:"이력 보기", meta:"7건" },
+  operate: { hub:"deploy", icon:"📟", title:"운영 대응", desc:"장애 감지 → 원인 분석 → 조치 제안. 실행은 승인 후에만.", action:"열기", meta:"감시 중 · 이상 없음" },
+  scan:    { hub:"security", icon:"🔍", title:"취약점 스캔", desc:"Trivy(이미지·의존성) · Hadolint(Dockerfile). 결과는 배포 승인 카드의 위험도에 반영됩니다.", action:"스캔", primary:true, meta:"미실행" },
+  secrets: { hub:"security", icon:"🔑", title:"시크릿 검사", desc:"gitleaks 규칙으로 저장소에 평문 비밀값이 남았는지 확인합니다. 원문은 표시하지 않아요.", action:"검사", primary:true, meta:"0건 · 09-14" },
+  policy:  { hub:"security", icon:"📜", title:"정책 게이트", desc:"어떤 배포가 자동 통과 · 승인 필요 · 차단인지 규칙(OPA)으로 봅니다.", action:"규칙 보기", meta:"12개" },
+};
+
+const el = (s) => document.querySelector(s);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function crumb(hub, feat) {
+  const h = HUBS[hub];
+  const sw = Object.keys(HUBS).map((k) => `<button class="${k===hub?'on':''}" onclick="go('hub:${k}')">${HUBS[k].title}</button>`).join("");
+  const mid = feat
+    ? `<a onclick="go('hub:${hub}')">${h.title}</a><span class="sep">/</span><span class="cur">${FEATS[feat].title}</span>`
+    : `<span class="ttl"><span class="ic">${h.icon}</span><span><b>${h.title}</b><div class="s">${h.sub}</div></span></span>`;
+  return `<div class="crumb"><a onclick="go('home')">‹ 홈</a><span class="sep">/</span>${mid}<div class="sw">${sw}</div></div>`;
+}
+
+function renderHome() {
+  return `<div class="hubs">` + Object.entries(HUBS).map(([k,h]) => `
+    <button class="hub ${h.cls}" onclick="go('hub:${k}')">
+      <div class="ic">${h.icon}</div><h3>${h.title}</h3><div class="sub">${h.sub}</div>
+      <ul>${h.feats.map((f) => `<li>${FEATS[f].title}</li>`).join("")}</ul>
+      <div class="ft"><span class="pill ${k==='security'?'':''}">${h.pill}</span><span class="go">열기 ›</span></div>
+    </button>`).join("") + `</div>`;
+}
+
+function renderHub(hub) {
+  const banner = hub === "security" ? `<div class="banner"><span style="font-size:18px">⚠️</span><div style="flex:1"><b>마지막 로컬 배포(recoder-app:v2)는 취약점 검사 없이 진행됐어요</b><div class="s">Trivy 미설치. 외부 배포는 검사 전까지 2인 승인.</div></div><button class="btn ghost" onclick="installGuide()">설치 안내</button><button class="btn" onclick="go('scan');setTimeout(()=>{const b=document.querySelector('#v_trivy')&&document.querySelector('#v_trivy').parentNode.parentNode.querySelector('button');b&&b.click()},50)">다시 검사</button></div>` : "";
+  return crumb(hub) + banner + `<div class="feats">` + HUBS[hub].feats.map((f) => { const d = FEATS[f]; return `
+    <div class="fcard"><div class="t"><span>${d.icon}</span>${d.title}</div><div class="d">${d.desc}</div>
+      <div class="a"><button class="btn ${d.primary?'':'ghost'}" onclick="go('${f}')">${d.action}</button><span class="m">${d.meta}</span></div></div>`; }).join("") + `</div>`;
+}
+
+// ── 공용: 모달 / 토스트 ──
+function modal(title, bodyHtml, footHtml) {
+  closeModal();
+  const o = document.createElement("div"); o.className = "ovl"; o.id = "ovl";
+  o.innerHTML = `<div class="mdl"><div class="mh"><b>${title}</b><button class="x" onclick="closeModal()">✕</button></div><div class="mb">${bodyHtml}</div>${footHtml ? `<div class="mf">${footHtml}</div>` : ""}</div>`;
+  o.addEventListener("click", (e) => { if (e.target === o) closeModal(); });
+  document.body.appendChild(o);
+}
+function closeModal() { const o = document.getElementById("ovl"); if (o) o.remove(); }
+function toast(msg) { const d = document.createElement("div"); d.className = "toast"; d.textContent = msg; document.body.appendChild(d); setTimeout(() => d.remove(), 1800); }
+function diffModal(file, lines) {
+  modal(`ReCoder 제안 · ${file}`, `<div class="diff" style="margin:0">${lines}</div><div style="margin-top:8px;color:#8f98a3;font-size:11px">왼쪽: 현재 파일 · 오른쪽: 제안. 실제 확장에서는 VS Code diff 에디터로 열립니다.</div>`, `<button class="btn ghost" onclick="closeModal()">닫기</button>`);
+}
+
+// ── Develop: 코드 생성 ──
+const DECISIONS = [
+  { q: "일시정지는 어떻게 구현할까요?", opts: [["키보드 P + 버튼", "가장 일반적. 모바일은 버튼으로.", true], ["버튼만", "단순하지만 키보드 사용자가 불편"]] },
+  { q: "난이도 5단계의 속도 차이는?", opts: [["1초 → 0.2초 선형", "예측 가능", true], ["지수 감소", "고단계에서 급격히 어려움"]] },
+];
+let decStep = 0, decSel = [];
+function codeGenerate() {
+  const text = el("#codeIn").value.trim() || "테트리스에 일시정지 버튼 추가하고 난이도를 5단계로 늘려줘";
+  el("#codeIn").value = "";
+  decStep = 0; decSel = [0, 0]; showDecision(text);
+}
+function showDecision(text) {
+  const d = DECISIONS[decStep];
+  modal(`설계 결정 ${decStep + 1} / ${DECISIONS.length}`,
+    `<div style="color:#9aa3ad;margin-bottom:6px">요청 · ${esc(text)}</div><div style="font-weight:700;font-size:13px">${d.q}</div>` +
+    d.opts.map((o, i) => `<div class="opt ${decSel[decStep] === i ? "on" : ""}" onclick="decSel[${decStep}]=${i};showDecision('${esc(text).replace(/'/g, "\\'")}')"><div class="ot">${o[0]}${o[2] ? '<span class="rec">추천</span>' : ""}</div><div class="od">${o[1]}</div></div>`).join(""),
+    `<button class="btn ghost" onclick="closeModal();toast('설계 결정을 취소해서 생성을 중단했어요')">취소</button><button class="btn" onclick="${decStep + 1 < DECISIONS.length ? `decStep++;showDecision('${esc(text).replace(/'/g, "\\'")}')` : `closeModal();codeResult('${esc(text).replace(/'/g, "\\'")}')`}">${decStep + 1 < DECISIONS.length ? "다음" : "확정하고 생성"}</button>`);
+}
+function codeResult(text) {
+  const id = "t" + Date.now();
+  const turn = document.createElement("div"); turn.className = "turn fade"; turn.id = id;
+  turn.innerHTML = `<div class="q">요청 · ${esc(text)}</div><div style="font-size:12px"><span class="spin"></span>설계 결정 2개 확정 · 코드 생성 중…</div>`;
+  el("#codeTurns").prepend(turn);
+  setTimeout(() => {
+    turn.innerHTML = `<div class="q">요청 · ${esc(text)}</div><div style="font-size:12px;margin-bottom:10px">2개 파일 수정, ADR 2건 추가. 일시정지는 P 키 + 버튼, 난이도는 1초→0.2초 선형.</div>` +
+      [["MOD", "index.html", "<span class='p'>+ &lt;button id=\"pause\"&gt;일시정지&lt;/button&gt;</span><br><span class='p'>+ &lt;select id=\"level\"&gt;…5단계&lt;/select&gt;</span>"],
+       ["MOD", "script.js", "<span class='m'>- const SPEEDS = [1000, 700, 400];</span><br><span class='p'>+ const SPEEDS = [1000, 800, 600, 400, 200];</span><br><span class='p'>+ document.addEventListener('keydown', e =&gt; e.key === 'p' &amp;&amp; togglePause());</span>"],
+       ["NEW", "docs/adr/ADR-004-pause-control.md", "<span class='p'>+ # ADR-004 일시정지 — 키보드 P + 버튼</span>"],
+       ["NEW", "docs/adr/ADR-005-difficulty-curve.md", "<span class='p'>+ # ADR-005 난이도 — 선형 5단계</span>"]]
+      .map(([tag, f, d], i) => `<div class="frow"><span class="tag" style="${tag === "MOD" ? "border-color:#6b4a17;color:#f0b35b" : ""}">${tag}</span><span class="mono">${f}</span><div class="ops"><span style="cursor:pointer" onclick="diffModal('${f}', &quot;${d.replace(/"/g, "&quot;")}&quot;)">diff</span><span id="${id}a${i}" style="cursor:pointer" onclick="applyOne('${id}a${i}')">적용</span></div></div>`).join("") +
+      `<div class="toolrow"><button class="btn" onclick="applyAll('${id}',4)">모두 적용</button><span style="color:#8f98a3;font-size:11px">적용 전에는 파일이 바뀌지 않아요</span></div>`;
+  }, 1400);
+}
+function applyOne(k) { const s = document.getElementById(k); if (!s) return; s.textContent = "저장 중…"; setTimeout(() => { s.textContent = "✓ 적용됨"; s.className = "ok"; s.onclick = null; }, 500); }
+function applyAll(id, n) { for (let i = 0; i < n; i++) applyOne(id + "a" + i); toast("4개 파일 저장됨 · ~/Desktop/te2"); }
+function pickFolder(e) {
+  e.stopPropagation();
+  const old = document.getElementById("dd"); if (old) { old.remove(); return; }
+  const dd = document.createElement("div"); dd.className = "dd"; dd.id = "dd";
+  dd.innerHTML = [["현재 워크스페이스 루트", "/Users/sebin/Desktop/te2"], ["최근 · Re-Coder-develop", "/Users/sebin/Desktop/Re-Coder-develop"], ["하위 폴더 선택…", ""], ["다른 폴더 찾기…", "워크스페이스 밖이면 추가한 뒤 사용"]]
+    .map(([a, b]) => `<div onclick="setFolder('${b || a}')">${a}${b ? `<br><span class="m2">${b}</span>` : ""}</div>`).join("");
+  e.currentTarget.parentNode.appendChild(dd);
+}
+function setFolder(v) { const d = document.getElementById("dd"); if (d) d.remove(); const c = el("#folderChip"); if (c) c.textContent = "📁 위치: " + v.replace("/Users/sebin", "~") + " ▾"; toast("생성 위치 변경: " + v); }
+function addCtx() { const box = el("#ctxChips"); const n = box.querySelectorAll(".chip.ctx").length + 1; const c = document.createElement("button"); c.className = "chip ctx"; c.textContent = "📎 " + (n === 1 ? "script.js" : n === 2 ? "index.html" : "style.css"); c.onclick = () => { c.remove(); }; box.appendChild(c); }
+document.addEventListener("click", () => { const d = document.getElementById("dd"); if (d) d.remove(); });
+
+// ── Develop: 에러 분석 ──
+function analyze() {
+  const box = el("#anaOut"); box.innerHTML = `<div class="turn fade"><span class="spin"></span>원인 분석 중… 로그와 requirements.txt 를 읽고 있어요</div>`;
+  setTimeout(() => { box.innerHTML = `<div class="turn fade" id="ana"><div class="q">분석 결과 <span class="risk">위험 LOW</span> <span style="margin-left:6px;color:#8fa4b5">승인 1인</span></div><div style="font-size:12px">requirements.txt에 fastapi가 없어요. 코드에서 쓰고 있는 버전(0.115)을 추가합니다. 실행 환경은 바꾸지 않아요.</div>
+    <div class="diff"><span class="c">requirements.txt</span><br><span class="p">+ fastapi==0.115.0</span><br><span class="p">+ uvicorn==0.30.6</span></div>
+    <div class="toolrow" id="anaBtns"><button class="btn" onclick="anaApprove()">승인 · 적용</button><button class="btn ghost" onclick="diffModal('requirements.txt', &quot;<span class='p'>+ fastapi==0.115.0</span><br><span class='p'>+ uvicorn==0.30.6</span></span>&quot;)">diff 보기</button><button class="btn ghost" onclick="anaReject()">거절</button><span style="margin-left:auto;color:#6b7480;font-size:11px">검증: pip install -r requirements.txt</span></div></div>`; }, 1200);
+}
+function anaApprove() { const b = el("#anaBtns"); b.innerHTML = `<span class="spin"></span>적용 후 검증 명령 실행 중…`; setTimeout(() => { b.innerHTML = `<span style="color:#7ed3a2;font-weight:600">✓ 적용됨 · 검증 통과 (import fastapi OK)</span><button class="btn ghost" style="margin-left:auto" onclick="toast('git commit 화면은 프로토타입 범위 밖')">커밋</button>`; }, 1300); }
+function anaReject() { el("#anaOut").innerHTML = `<div class="turn fade" style="color:#9aa3ad">제안을 거절했어요. 파일은 바뀌지 않았습니다. 다른 관점으로 다시 분석하려면 오류를 수정해서 다시 눌러 주세요.</div>`; }
+
+// ── Develop: 아키텍처 ──
+const MAP_PROJECT = `<svg width="100%" viewBox="0 0 700 270" style="display:block;max-height:320px"><defs><marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#5b6672"/></marker></defs>
+<g stroke="#5b6672" stroke-width="1.3" marker-end="url(#ar)" fill="none"><line x1="350" y1="52" x2="200" y2="112"/><line x1="350" y1="52" x2="350" y2="112"/><line x1="350" y1="52" x2="500" y2="112"/><line x1="200" y1="140" x2="270" y2="200"/><line x1="350" y1="140" x2="270" y2="200"/><line x1="350" y1="140" x2="430" y2="200"/><line x1="500" y1="140" x2="430" y2="200"/><line x1="200" y1="140" x2="120" y2="200"/></g>
+<g font-family="Menlo, monospace" font-size="11" text-anchor="middle" style="cursor:pointer">
+<g onclick="mapFile('main.py')"><rect x="290" y="30" width="120" height="30" rx="6" fill="#1c2b3d" stroke="#3f7fb5"/><text x="350" y="49" fill="#cfe3f2">main.py</text></g>
+<g onclick="mapFile('routes/chat.py')"><rect x="140" y="112" width="120" height="30" rx="6" fill="#232629" stroke="#3a3f47"/><text x="200" y="131" fill="#d0d6dc">routes/chat.py</text></g>
+<g onclick="mapFile('routes/code.py')"><rect x="290" y="112" width="120" height="30" rx="6" fill="#232629" stroke="#3a3f47"/><text x="350" y="131" fill="#d0d6dc">routes/code.py</text></g>
+<g onclick="mapFile('routes/deploy.py')"><rect x="440" y="112" width="120" height="30" rx="6" fill="#3a2a10" stroke="#b58b3f"/><text x="500" y="131" fill="#f0c98a">routes/deploy.py</text></g>
+<g onclick="mapFile('llm/router.py')"><rect x="60" y="200" width="120" height="30" rx="6" fill="#232629" stroke="#3a3f47"/><text x="120" y="219" fill="#d0d6dc">llm/router.py</text></g>
+<g onclick="mapFile('code_agent.py')"><rect x="210" y="200" width="120" height="30" rx="6" fill="#232629" stroke="#3a3f47"/><text x="270" y="219" fill="#d0d6dc">code_agent.py</text></g>
+<g onclick="mapFile('local_deploy.py')"><rect x="370" y="200" width="120" height="30" rx="6" fill="#232629" stroke="#3a3f47"/><text x="430" y="219" fill="#d0d6dc">local_deploy.py</text></g>
+<g onclick="mapFile('legacy_ops.py')"><rect x="540" y="200" width="120" height="30" rx="6" fill="#4a1f1f" stroke="#b54f4f"/><text x="600" y="219" fill="#ffb3b3">legacy_ops.py</text></g></g>
+<g font-size="10" fill="#6b7480"><text x="20" y="49">진입</text><text x="20" y="131">라우트</text><text x="20" y="219">서비스</text></g></svg>
+<div class="legend"><span><i style="background:#b54f4f"></i>고립 — 아무 데서도 안 씀</span><span><i style="background:#b58b3f"></i>과부하 — 참조 많음</span><span><i style="background:#3f7fb5"></i>진입점</span><span style="margin-left:auto">노드를 누르면 함수 호출 그래프</span></div>`;
+function mapFile(f) {
+  el("#mapBody").innerHTML = `<div class="toolrow" style="margin:0 0 8px"><a style="color:#4a9eff;cursor:pointer" onclick="el('#mapBody').innerHTML=MAP_PROJECT">‹ 프로젝트</a><b class="mono" style="font-size:12px">${f}</b><span style="margin-left:auto;color:#8f98a3;font-size:11.5px">함수 6 · 호출 9</span></div>
+  <svg width="100%" viewBox="0 0 700 220" style="display:block;max-height:280px"><g stroke="#5b6672" stroke-width="1.3" marker-end="url(#ar)" fill="none"><line x1="140" y1="50" x2="300" y2="110"/><line x1="140" y1="50" x2="140" y2="110"/><line x1="300" y1="140" x2="300" y2="180"/><line x1="300" y1="140" x2="480" y2="180"/><line x1="140" y1="140" x2="300" y2="180"/></g>
+  <g font-family="Menlo, monospace" font-size="11" text-anchor="middle"><rect x="80" y="30" width="120" height="30" rx="6" fill="#1c2b3d" stroke="#3f7fb5"/><text x="140" y="49" fill="#cfe3f2">chat_route()</text><rect x="80" y="110" width="120" height="30" rx="6" fill="#232629" stroke="#3a3f47"/><text x="140" y="129" fill="#d0d6dc">_extract_path()</text><rect x="240" y="110" width="120" height="30" rx="6" fill="#232629" stroke="#3a3f47"/><text x="300" y="129" fill="#d0d6dc">get_router()</text><rect x="240" y="180" width="120" height="30" rx="6" fill="#232629" stroke="#3a3f47"/><text x="300" y="199" fill="#d0d6dc">_parse_json()</text><rect x="420" y="180" width="120" height="30" rx="6" fill="#3a2a10" stroke="#b58b3f"/><text x="480" y="199" fill="#f0c98a">LLMRequest()</text></g></svg>
+  <div class="toolrow"><button class="btn ghost" onclick="toast('에디터에서 ${f} 열림')">에디터에서 열기</button></div>`;
+}
+function mapTab(which) { if (which === "p") el("#mapBody").innerHTML = MAP_PROJECT; else mapFile("routes/chat.py"); ["mp", "mf"].forEach((k) => { const b = el("#" + k); b.style.borderColor = ""; b.style.color = ""; }); const on = el(which === "p" ? "#mp" : "#mf"); on.style.borderColor = "#3f7fb5"; on.style.color = "#fff"; }
+
+// ── Develop: ADR ──
+const ADRS = {
+  "ADR-003": { t: "UI 구조 — 단일 HTML", ctx: "테트리스 사이트 요청. 빌드 도구 없이 바로 열 수 있어야 함.", dec: "index.html 하나에 CSS·JS를 포함. 파일 분리는 하지 않음.", alt: "① 파일 3개 분리 — 관리 쉬움, 로컬 열기 시 경로 문제 가능 ② 번들러 — 과함", imp: "파일이 커지면 분리 필요. 300줄 넘으면 재검토." },
+  "ADR-002": { t: "게임 루프 — requestAnimationFrame", ctx: "낙하 속도를 난이도별로 바꿔야 함.", dec: "setInterval 대신 requestAnimationFrame + 경과 시간 누적.", alt: "① setInterval — 단순하지만 탭 비활성 시 밀림 ② Web Worker — 과함", imp: "일시정지 구현이 쉬움. 프레임 드랍 시 보정 필요." },
+  "ADR-001": { t: "점수 저장 — localStorage", ctx: "최고 점수를 다음 방문에도 보여줘야 함.", dec: "localStorage에 최고 점수만 저장. 서버 없음.", alt: "① 서버 API — 인프라 필요 ② 저장 안 함 — 요구 미충족", imp: "브라우저 바꾸면 초기화. 나중에 계정 연동 시 이관 필요." },
+};
+let adrReviewed = {};
+function adrShow(id) {
+  const a = ADRS[id];
+  document.querySelectorAll("#adrList div").forEach((d) => d.classList.toggle("on", d.dataset.id === id));
+  el("#adrBody").innerHTML = `<h4>${id} · ${a.t}</h4><div class="meta">2026-09-17 · 생성: ReCoder (claude-haiku-4-5) · 검토자: <span id="adrRev" style="color:${adrReviewed[id] ? "#7ed3a2" : "#f0b35b"}">${adrReviewed[id] ? "윤세빈 · 검토됨" : "미검토"}</span> · 상태: 채택</div>
+  <h5>맥락</h5><p>${a.ctx}</p><h5>결정</h5><p>${a.dec}</p><h5>대안</h5><p>${a.alt}</p><h5>영향</h5><p>${a.imp}</p>
+  <div class="toolrow" style="margin-top:14px"><button class="btn ghost" onclick="toast('에디터에서 docs/adr/${id.toLowerCase()}.md 열림')">에디터에서 열기</button><button class="btn ghost" onclick="adrReviewed['${id}']=true;adrShow('${id}');toast('검토자 기록됨')">검토 완료 표시</button></div>`;
+}
+
+// ── Deploy: 로컬 Docker ──
+function shipRun() {
+  const steps = ["docker build recoder-app:v3", "docker run -p 8000:8000", "헬스체크 /health"];
+  const box = el("#shipSteps"); const btn = el("#shipBtn"); btn.disabled = true; btn.textContent = "실행 중…";
+  steps.forEach((s, i) => setTimeout(() => {
+    const row = box.children[2 + i]; row.querySelector(".v").innerHTML = i < 2 ? '<span class="spin"></span>실행 중' : '<span class="spin"></span>응답 대기 (127.0.0.1:8000)'; row.querySelector(".v").style.color = "#4a9eff";
+    setTimeout(() => { row.querySelector(".v").textContent = i === 2 ? "200 OK · 1.2s" : "완료"; row.querySelector(".v").style.color = "#7ed3a2"; if (i === 2) { btn.textContent = "배포 완료"; el("#shipDone").innerHTML = `<div class="turn fade"><b>✓ recoder-app:v3 실행 중</b> · http://localhost:8000<div class="toolrow"><button class="btn ghost" onclick="toast('브라우저에서 열림')">열기</button><button class="btn ghost" onclick="go('replay')">이력 · 롤백</button></div></div>`; } }, 900);
+  }, i * 1300));
+}
+// ── Deploy: 배포 센터 ──
+function centerTarget(t, elBtn) { document.querySelectorAll("#ctChips .chip").forEach((c) => { c.style.borderColor = ""; c.style.color = ""; }); elBtn.style.borderColor = "#3f7fb5"; elBtn.style.color = "#fff";
+  const desc = { s3: "정적 사이트를 S3 버킷에 올리고 웹사이트 호스팅을 켭니다. .env 같은 비밀 파일이 포함되면 차단돼요.", ecs: "컨테이너 이미지를 ECR에 올리고 ECS 서비스를 갱신합니다. 외부 접속 서비스라 미검증 시 2인 승인.", ec2: "EC2 인스턴스에 SSH로 접속해 컨테이너를 교체합니다. 외부 접속 서비스라 미검증 시 2인 승인." }[t];
+  el("#ctDesc").textContent = desc; }
+function centerPlan() { el("#ctPlan").innerHTML = `<div class="turn fade"><div class="q">배포 계획 <span class="risk" style="background:#3a2a10;color:#f0b35b">위험 HIGH · UNVERIFIED</span></div><div style="font-size:12px">Trivy 미설치로 취약점 검사가 실행되지 않았어요. 검사 후 다시 시도하거나, 2인 승인으로 진행할 수 있어요.</div><div class="toolrow" id="ctBtns"><button class="btn" onclick="go('scan')">검사 먼저</button><button class="btn ghost" onclick="el('#ctBtns').innerHTML='<span style=color:#f0b35b>승인 대기 1 / 2 · 이동규에게 요청 보냄</span>'">2인 승인 요청</button></div></div>`; }
+// ── Deploy: Replay ──
+function rollback(v) { modal(`${v}로 롤백`, `recoder-app:<b>${v}</b> 이미지로 컨테이너를 다시 띄웁니다. 포트 매핑(-p 8000:8000)과 환경 변수는 그 배포 당시 값을 그대로 씁니다.<br><br><span style="color:#f0b35b">현재 실행 중인 v3는 중지돼요.</span>`, `<button class="btn ghost" onclick="closeModal()">취소</button><button class="btn" onclick="closeModal();toast('${v}로 롤백 완료 · 헬스체크 OK')">롤백</button>`); }
+// ── Deploy: 운영 ──
+let watching = true;
+function opsToggle() { watching = !watching; el("#opsBtn").textContent = watching ? "감시 중지" : "감시 시작"; el("#opsState").innerHTML = watching ? '<span style="color:#7ed3a2">● 감시 중</span> · 최근 24시간 이상 없음' : '<span style="color:#8f98a3">○ 중지됨</span>'; }
+function opsSim() { el("#opsInc").innerHTML = `<div class="turn fade"><div class="q">장애 감지 · 00:41 <span class="risk" style="background:#4a1f1f;color:#ffb3b3">HIGH</span></div><div style="font-size:12px">/health 응답 없음 3회 연속. 컨테이너 로그에 <span class="mono">OOMKilled</span>. 원인: 메모리 한도 256MB 초과.</div><div style="font-size:12px;margin-top:6px">제안: 메모리 한도 512MB로 재시작. 이전 이미지로 롤백은 불필요.</div><div class="toolrow" id="opsBtns"><button class="btn" onclick="el('#opsBtns').innerHTML='<span style=color:#7ed3a2>✓ 재시작 완료 · 헬스체크 OK</span>'">승인 · 실행</button><button class="btn ghost" onclick="go('replay')">롤백으로</button></div></div>`; }
+
+// ── Security ──
+function runScan(k, btn) {
+  const v = el("#v_" + k); btn.disabled = true; btn.textContent = "검사 중…"; v.innerHTML = '<span class="spin"></span>실행 중'; v.style.color = "#4a9eff";
+  setTimeout(() => { btn.disabled = false; btn.textContent = "다시 검사";
+    if (k === "trivy") { v.textContent = "검사 못 함 · trivy 미설치"; v.style.color = "#f0b35b"; }
+    else if (k === "hadolint") { v.textContent = "발견 1건 (낮음) · DL3008 apt 버전 고정 권장"; v.style.color = "#f0b35b"; }
+    else { v.textContent = "이상 없음 · 방금"; v.style.color = "#7ed3a2"; }
+  }, 1500);
+}
+function installGuide() { modal("Trivy 설치", `<div class="diff" style="margin:0">brew install trivy<br>trivy --version</div><div style="margin-top:8px">설치 후 Security → 취약점 스캔에서 다시 검사하면 배포 승인 카드의 위험도가 갱신돼요.</div>`, `<button class="btn ghost" onclick="closeModal()">닫기</button>`); }
+function showRego() { modal("policies/recoder/deploy.rego", `<div class="diff" style="margin:0"><span class="c">package recoder.deploy</span><br><br>default allow := false<br><br>allow { input.target == "local_docker"; input.approvals >= 1 }<br>allow { input.target == "ecs"; input.scan.verified; input.approvals >= 1 }<br>allow { input.target == "ecs"; not input.scan.verified; input.approvals >= 2 }<br><br>deny[msg] { input.scan.critical > 0; msg := "심각 취약점 발견" }<br>deny[msg] { input.target == "s3"; input.files[_] == ".env"; msg := "비밀 파일 포함" }</div>`, `<button class="btn ghost" onclick="closeModal()">닫기</button>`); }
+
+const SCREENS = {
+  code: `<div class="panel"><div class="lbl">요청</div><textarea class="ta" id="codeIn" placeholder="만들거나 고칠 내용을 입력 (예: 테트리스에 일시정지 버튼 추가하고 난이도를 5단계로 늘려줘)"></textarea>
+    <div class="toolrow" id="ctxChips" style="position:relative"><span style="position:relative"><button class="chip" id="folderChip" onclick="pickFolder(event)">📁 위치: ~/Desktop/te2 ▾</button></span><button class="chip" onclick="addCtx()">📎 참고 파일 추가</button><button class="btn" style="margin-left:auto" onclick="codeGenerate()">생성</button></div></div>
+    <div id="codeTurns"><div class="turn"><div class="q">이전 요청 · 테트리스 사이트 만들어줘 (점수 · 난이도 · 게임오버)</div><div style="font-size:12px;margin-bottom:10px">설계 결정 3개 확정 → 4개 파일 생성. 점수는 localStorage에 저장, 게임 루프는 requestAnimationFrame.</div>
+    ${["index.html","docs/adr/ADR-001-score-persistence.md","docs/adr/ADR-002-game-loop-approach.md","docs/adr/ADR-003-ui-structure.md"].map((f)=>`<div class="frow"><span class="tag">NEW</span><span class="mono">${f}</span><div class="ops"><span style="cursor:pointer" onclick="diffModal('${f}', &quot;<span class='p'>+ (생성된 내용 ${f.endsWith('.html')?'142':'38'}줄)</span>&quot;)">diff</span><span class="ok">✓ 적용됨</span></div></div>`).join("")}</div></div>`,
+  build: `<div class="panel"><div class="lbl">오류 입력 · 터미널에서 자동 수집됨</div><div class="ta mono" style="color:#ff9b9b;min-height:0" contenteditable="true">ModuleNotFoundError: No module named 'fastapi'<br>  File "app/main.py", line 3, in &lt;module&gt;</div>
+    <div class="toolrow"><button class="chip" onclick="toast('app/main.py 첨부됨')">📎 app/main.py</button><button class="chip" onclick="toast('requirements.txt 첨부됨')">📎 requirements.txt</button><button class="btn" style="margin-left:auto" onclick="analyze()">분석</button></div></div><div id="anaOut"></div>`,
+  map: `<div class="panel" style="padding:12px 14px"><div class="toolrow" style="margin:0 0 6px"><button class="chip" id="mp" style="border-color:#3f7fb5;color:#fff" onclick="mapTab('p')">프로젝트</button><button class="chip" id="mf" onclick="mapTab('f')">파일 · 함수 호출</button><span style="margin-left:auto;color:#8f98a3;font-size:11.5px">파일 42 · import 118 · 정적 분석 (AI 아님)</span></div><div id="mapBody">${MAP_PROJECT}</div></div>`,
+  adr: `<div class="adr"><div class="adrl" id="adrList">${Object.entries(ADRS).map(([id,a])=>`<div data-id="${id}" onclick="adrShow('${id}')"><span class="id">${id}</span><br>${a.t}</div>`).join("")}</div><div class="panel adrd" id="adrBody"></div></div>`,
+  ship: `<div class="panel"><div class="lbl">로컬 Docker 배포</div><div style="font-size:12px;color:#8f98a3;margin-bottom:12px">Dockerfile 생성 → 검사 → build → run → 헬스체크</div><div id="shipSteps">
+    ${[["Dockerfile 생성 · 템플릿 폴백 가능","완료","#7ed3a2"],["보안 스캔 (Trivy · Hadolint)","Hadolint 이상 없음 · Trivy 미실행","#f0b35b"],["docker build recoder-app:v3","대기","#8f98a3"],["docker run -p 8000:8000","대기","#8f98a3"],["헬스체크 /health","대기","#8f98a3"]].map((s)=>`<div class="srow"><div><div style="font-weight:600">${s[0]}</div><div class="v" style="color:${s[2]}">${s[1]}</div></div><span></span></div>`).join("")}</div>
+    <div class="toolrow"><button class="btn" id="shipBtn" onclick="shipRun()">실행</button><button class="btn ghost" onclick="diffModal('Dockerfile', &quot;<span class='p'>FROM python:3.12-slim<br>WORKDIR /app<br>COPY requirements.txt .<br>RUN pip install -r requirements.txt<br>COPY . .<br>EXPOSE 8000<br>CMD [\\&quot;uvicorn\\&quot;, \\&quot;app.main:app\\&quot;, \\&quot;--host\\&quot;, \\&quot;0.0.0.0\\&quot;]</span>&quot;)">Dockerfile 보기</button></div></div><div id="shipDone"></div>`,
+  center: `<div class="panel"><div class="lbl">배포 대상</div><div class="toolrow" id="ctChips" style="margin:0 0 12px"><button class="chip" style="border-color:#3f7fb5;color:#fff" onclick="centerTarget('s3',this)">S3 정적</button><button class="chip" onclick="centerTarget('ecs',this)">ECS</button><button class="chip" onclick="centerTarget('ec2',this)">EC2</button></div>
+    <div style="font-size:12px;color:#8f98a3" id="ctDesc">정적 사이트를 S3 버킷에 올리고 웹사이트 호스팅을 켭니다. .env 같은 비밀 파일이 포함되면 차단돼요.</div>
+    <div class="toolrow"><button class="btn" onclick="centerPlan()">배포 계획 만들기</button></div></div><div id="ctPlan"></div>`,
+  replay: `<div class="panel"><div class="lbl">배포 이력</div>${[["v3","09-17 00:12","로컬 Docker","성공","현재"],["v2","09-16 23:40","로컬 Docker","성공 · 미검증",""],["v1","09-14 15:02","S3","성공",""]].map((r)=>`<div class="srow"><div><div style="font-weight:600">recoder-app:${r[0]} <span style="color:#8f98a3;font-weight:400">· ${r[2]}</span></div><div class="v" style="color:#8f98a3">${r[1]} · ${r[3]}</div></div>${r[4]?'<span style="color:#7ed3a2;font-size:11.5px">● 현재</span>':`<button class="btn ghost" onclick="rollback('${r[0]}')">이 시점으로 롤백</button>`}</div>`).join("")}</div>`,
+  operate: `<div class="panel"><div class="lbl">운영 대응</div><div style="font-size:12px" id="opsState"><span style="color:#7ed3a2">● 감시 중</span> · 최근 24시간 이상 없음</div><div class="toolrow"><button class="btn ghost" id="opsBtn" onclick="opsToggle()">감시 중지</button><button class="btn ghost" onclick="opsSim()">장애 상황 재현 (데모)</button></div></div><div id="opsInc"></div>`,
+  scan: `<div class="panel"><div style="font-size:14px;font-weight:700;margin-bottom:4px">취약점 스캔</div><div style="color:#8f98a3;font-size:12px;margin-bottom:14px">이미지·의존성은 Trivy, Dockerfile은 Hadolint로 검사합니다. 결과는 배포 승인 카드의 위험도에 반영돼요.</div>
+    <div class="srow"><div><div style="font-weight:600">Trivy (이미지 · 의존성)</div><div class="v" id="v_trivy" style="color:#8f98a3">미실행</div></div><button class="btn" onclick="runScan('trivy',this)">검사</button></div>
+    <div class="srow"><div><div style="font-weight:600">Hadolint (Dockerfile)</div><div class="v" id="v_hadolint" style="color:#8f98a3">미실행</div></div><button class="btn" onclick="runScan('hadolint',this)">검사</button></div>
+    <div style="margin-top:12px;color:#8f98a3;font-size:11px">검사를 안 한 것과 이상이 없는 것은 다르게 표시됩니다.</div></div>`,
+  secrets: `<div class="panel"><div style="font-size:14px;font-weight:700;margin-bottom:4px">시크릿 검사</div><div style="color:#8f98a3;font-size:12px;margin-bottom:14px">저장소에 API 키·비밀번호 같은 값이 평문으로 남았는지 gitleaks 규칙으로 확인합니다. 찾은 값의 원문은 표시하지 않아요.</div>
+    <div class="srow"><div><div style="font-weight:600">gitleaks (비밀값)</div><div class="v" id="v_gitleaks" style="color:#7ed3a2">이상 없음 · 09-14</div></div><button class="btn" onclick="runScan('gitleaks',this)">검사</button></div></div>`,
+  policy: `<div class="panel"><div style="font-size:14px;font-weight:700;margin-bottom:4px">배포 정책 게이트</div><div style="color:#8f98a3;font-size:12px;margin-bottom:14px">배포 종류별로 어떤 승인이 필요하고 무엇이 차단되는지. 규칙 원문은 policies/recoder/deploy.rego</div>
+    <table><thead><tr><th>대상</th><th>승인</th><th>차단 · 상향 조건</th></tr></thead><tbody>
+    <tr><td><b>로컬 Docker (본인 PC)</b></td><td>1인 승인</td><td style="color:#8f98a3">검사 미실행이면 위험도만 올리고 승인 단계는 유지</td></tr>
+    <tr><td><b>ECS · EC2 (외부 접속)</b></td><td>1인 승인 → 미검증 시 2인</td><td style="color:#8f98a3">심각 취약점 발견 시 차단</td></tr>
+    <tr><td><b>S3 정적 사이트</b></td><td>1인 승인</td><td style="color:#8f98a3">비밀 파일(.env 등) 포함 시 차단</td></tr>
+    <tr><td><b>롤백</b></td><td>1인 승인</td><td style="color:#8f98a3">이전 성공 배포로만</td></tr></tbody></table>
+    <div class="toolrow" style="margin-top:14px"><button class="btn ghost" onclick="showRego()">규칙 원문 열기</button></div></div>`,
+};
+
+function go(view) {
+  closeModal();
+  const body = el("#body");
+  if (view === "home") { body.innerHTML = renderHome(); }
+  else if (view.startsWith("hub:")) { body.innerHTML = renderHub(view.slice(4)); }
+  else if (FEATS[view]) { body.innerHTML = crumb(FEATS[view].hub, view) + (SCREENS[view] || ""); if (view === "adr") adrShow("ADR-003"); }
+  if (location.hash.slice(1) !== view) history.replaceState(null, "", "#" + view);
+  body.scrollTop = 0;
+}
+// ── 모든 화면 한 번에 보기 ──
+const GALLERY = [
+  ["home", "홈", "Develop · Deploy · Security 카드 3장. 카드를 누르면 허브 페이지로."],
+  ["hub:develop", "Develop 허브", "코드 생성 · 에러 분석 · 아키텍처 · ADR 카드"],
+  ["hub:deploy", "Deploy 허브", "로컬 Docker · 배포 센터 · 롤백 · 운영 대응 카드"],
+  ["hub:security", "Security 허브", "맨 위 미검증 경고 + 스캔 · 시크릿 · 정책 카드"],
+  ["code", "코드 생성 · 수정", "생성 → 설계 결정 모달 → 파일별 diff · 적용"],
+  ["build", "에러 분석", "분석 → 원인 · 위험도 · 패치 diff → 승인/거절"],
+  ["map", "아키텍처", "파일 의존 그래프. 노드 클릭 시 함수 호출 뷰"],
+  ["adr", "설계 기록 (ADR)", "목록 + 내용. 검토자 표기"],
+  ["ship", "로컬 Docker 배포", "실행 → build · run · 헬스체크 진행"],
+  ["center", "배포 센터", "대상 선택 → 계획 → 미검증이면 2인 승인"],
+  ["replay", "롤백 · Replay", "이력에서 시점 골라 롤백"],
+  ["operate", "운영 대응", "감시 상태 · 장애 시 조치 제안"],
+  ["scan", "취약점 스캔", "Trivy · Hadolint 검사"],
+  ["secrets", "시크릿 검사", "gitleaks 검사"],
+  ["policy", "정책 게이트", "승인 규칙 표 + rego 원문"],
+];
+function renderView(view) {
+  if (view === "home") return renderHome();
+  if (view.startsWith("hub:")) return renderHub(view.slice(4));
+  return crumb(FEATS[view].hub, view) + (SCREENS[view] || "");
+}
+function toggleGallery() {
+  const old = document.getElementById("gal"); if (old) { old.remove(); el("#galBtn").textContent = "모든 화면 보기"; return; }
+  const g = document.createElement("div"); g.className = "gal"; g.id = "gal";
+  g.innerHTML = `<div class="gh"><b>ReCoder Workspace — 모든 화면</b><span class="s">${GALLERY.length}개 · 오른쪽 채팅은 모든 화면에서 동일해 생략</span><button class="btn ghost" onclick="toggleGallery()">닫고 클릭해 보기</button></div>` +
+    GALLERY.map(([v, title, desc], i) => `<div class="gf"><div class="gt"><b>${i + 1}. ${title}</b><span class="s">#${v}</span><a style="margin-left:auto;color:#4a9eff;cursor:pointer;pointer-events:auto" onclick="toggleGallery();go('${v}')">이 화면에서 눌러보기 ›</a></div><div class="gb">${renderView(v)}</div></div><div class="gc">${desc}</div>`).join("");
+  document.body.appendChild(g);
+  el("#galBtn").textContent = "닫기";
+  setTimeout(() => { const b = g.querySelector('[data-id="ADR-003"]'); const body = g.querySelector("#adrBody"); if (body) { const a = ADRS["ADR-003"]; body.innerHTML = `<h4>ADR-003 · ${a.t}</h4><div class="meta">2026-09-17 · 생성: ReCoder (claude-haiku-4-5) · 검토자: <span style="color:#f0b35b">미검토</span> · 상태: 채택</div><h5>맥락</h5><p>${a.ctx}</p><h5>결정</h5><p>${a.dec}</p><h5>대안</h5><p>${a.alt}</p><h5>영향</h5><p>${a.imp}</p>`; if (b) b.classList.add("on"); } }, 0);
+}
+window.addEventListener("hashchange", () => { const v = location.hash.slice(1) || "home"; if (v !== currentView()) go(v); });
+function currentView() { return document.body.dataset.view || ""; }
+const _go = go; go = function (v) { document.body.dataset.view = v; _go(v); };
+
+// ── 채팅: 승인 카드 데모 ──
+let chatSeq = 0;
+function addMsg(html, me) { const d = document.createElement("div"); d.innerHTML = html; const n = d.firstElementChild; el("#msgs").appendChild(n); el("#msgs").scrollTop = 1e9; return n; }
+function sendChat() {
+  const ta = el("#chatIn"); const text = ta.value.trim(); if (!text) return; ta.value = "";
+  addMsg(`<div class="b me">${esc(text)}</div>`, true);
+  const m = /(~(?:\/[^\s'"]*)?|\/(?:Users|home)\/[^\s'"]+)/.exec(text);
+  const folder = m ? m[1].replace(/(에서|에다|으로|로|에|을|를)$/,"") : "";
+  const isBuild = /만들|생성|작성|구현|추가|고쳐|수정|바꿔|짜/.test(text);
+  setTimeout(() => {
+    if (!isBuild) { addMsg(`<div class="b">${esc(text)} — 이 질문은 프로토타입에서는 답하지 않아요. 만들거나 고칠 것을 말하면 승인 카드가 뜹니다.</div>`); return; }
+    const id = ++chatSeq;
+    addMsg(`<div class="b">바닐라 HTML/CSS/JS로 만들게요. 아래에서 위치와 파일을 확인하고 승인해 주세요.</div>`);
+    addMsg(`<div class="card" id="card${id}"><div class="ch">📁 생성 승인${folder ? '<span class="badge">프로젝트 밖 · 새 폴더</span>' : ''}</div>
+      <div class="cb">위치 &nbsp;<code>${esc(folder || "프로젝트 루트")}</code><br><div style="margin-top:6px">파일 &nbsp;<span class="mono">index.html · style.css · script.js</span></div>${folder ? '<div style="margin-top:8px;padding:6px 8px;border-radius:6px;background:rgba(240,179,91,.08);border:1px solid rgba(240,179,91,.35);color:#f0c98a;font-size:11px">현재 열린 프로젝트 밖이에요. 승인하면 폴더를 만들고 워크스페이스에 추가한 뒤 그 안에만 파일을 씁니다.</div>' : ''}</div>
+      <div class="ca"><button class="btn" onclick="approve(${id}, '${esc(folder || "프로젝트 루트")}')">승인하고 생성</button><button class="btn ghost" onclick="toast('폴더 선택 창이 열려요 (프로토타입에서는 생략)')">위치 변경</button><button class="btn ghost" style="margin-left:auto;border:none" onclick="document.getElementById('card${id}').remove()">취소</button></div></div>`);
+  }, 500);
+}
+function approve(id, folder) {
+  const c = document.getElementById("card" + id); if (!c) return;
+  c.className = "card done";
+  c.innerHTML = `<div class="ch">✅ 승인됨 · 진행 중<span class="badge" style="background:#1f3328;color:#8fd9ad;border-color:#2f6b4a">${folder}</span></div><div class="cb" id="steps${id}"><div class="step"><i>✓</i>폴더 생성 · 워크스페이스에 추가</div></div>`;
+  go("code");
+  const steps = [["설계 결정 — 결정할 항목 없음 (건너뜀)",700],["index.html · 42줄",1400],["style.css",2000],["script.js",2600]];
+  steps.forEach(([s,t]) => setTimeout(() => { const d=document.createElement("div"); d.className="step"; d.innerHTML=`<i>✓</i>${s}`; document.getElementById("steps"+id).appendChild(d); el("#msgs").scrollTop=1e9; }, t));
+  setTimeout(() => { const d=document.createElement("div"); d.className="ca"; d.innerHTML=`<button class="btn" onclick="this.parentNode.innerHTML='<span style=color:#8fd9ad;font-size:11.5px>✓ 3개 파일이 ${folder}에 저장됐어요.</span>'">모두 적용 (3개 파일 저장)</button><span style="color:#8a95a0;font-size:10.5px;align-self:center">파일별 diff·개별 적용은 왼쪽 코드 작성 패널</span>`; c.appendChild(d); el("#msgs").scrollTop=1e9; }, 3200);
+}
+el("#chatIn").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); } });
+
+go(location.hash ? location.hash.slice(1) : "home");
+</script>
+</body></html>
