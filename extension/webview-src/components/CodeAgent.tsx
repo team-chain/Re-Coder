@@ -3,7 +3,7 @@
  *  - 대상 폴더 지정 · 참고 파일 첨부 · 이어서 수정(멀티턴)
  *  - 파일별 적용 / 변경 보기(diff) / 시크릿 경고
  */
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 
@@ -69,7 +69,11 @@ type ApplyStatus = "pending" | "applied" | "failed";
 
 let _turnSeq = 1;
 
-export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
+//: 채팅 승인 카드에서 넘어온 요청. App 이 chat.actionAccepted 를 받아 내려준다.
+//: requestId 는 확장 호스트가 정한 값(Date.now())이라 이 컴포넌트의 턴 번호와 겹치지 않는다.
+export interface ExternalTurn { requestId: number; instruction: string; targetFolder: string; }
+
+export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null }> = ({ isActive, externalTurn }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [input, setInput] = useState("");
@@ -80,6 +84,20 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
   const [applyErrors, setApplyErrors] = useState<Record<string, string>>({});
   const [decisionModal, setDecisionModal] = useState<DecisionModal | null>(null);
   const pendingRequestsRef = React.useRef<Record<number, PendingRequest>>({});
+  const handledExternalRef = React.useRef<number | null>(null);
+
+  //: 채팅에서 승인된 요청을 이 패널의 턴으로 등록하고 곧장 code.plan 을 보낸다.
+  //: 이후 결정 모달 → 생성 → diff → 적용은 직접 입력한 턴과 완전히 같은 경로다.
+  useEffect(() => {
+    if (!externalTurn) { return; }
+    if (handledExternalRef.current === externalTurn.requestId) { return; }
+    handledExternalRef.current = externalTurn.requestId;
+    const { requestId, instruction, targetFolder: folder } = externalTurn;
+    pendingRequestsRef.current[requestId] = { instruction, targetFolder: folder, contextFiles: [] };
+    setTargetFolder(folder);
+    setTurns((ts) => [...ts, { id: requestId, prompt: instruction, targetFolder: folder, status: "planning" }]);
+    postMessage("code.plan", { requestId, instruction, targetFolder: folder, contextFiles: [] });
+  }, [externalTurn, postMessage]);
 
   useMessage(useCallback((msg) => {
     const { type, payload } = msg;

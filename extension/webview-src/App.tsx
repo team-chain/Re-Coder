@@ -28,6 +28,7 @@ import React, { useState, useCallback, useEffect } from "react";
 import { useVSCodeApi } from "./hooks/useVSCodeApi";
 import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
+import type { ExternalTurn } from "./components/CodeAgent";
 import { ShipMode } from "./components/ShipMode";
 import { OperateMode } from "./components/OperateMode";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
@@ -530,6 +531,7 @@ const SubHeader: React.FC<{ title: string; onBack: () => void }> = ({ title, onB
 
 interface WorkspaceLayoutProps {
   view: ViewMode;
+  externalTurn?: ExternalTurn | null;
   diagnostics: DiagnosticsResult | null;
   coreStatus: "ok" | "degraded" | "down" | null;
   showDiagnostics: boolean;
@@ -546,7 +548,7 @@ interface WorkspaceLayoutProps {
 //: 경로(CodeAgent)가 살아있는지가 회귀 대상이다 — 예전에 여기서만 숨겨져서
 //: Workspace 창에서 결정 카드가 뜨지 않는 버그가 있었다.
 export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
-  view, diagnostics, coreStatus, showDiagnostics, isAiReady, isDockerReady, isOpsReady,
+  view, externalTurn, diagnostics, coreStatus, showDiagnostics, isAiReady, isDockerReady, isOpsReady,
   costSummary, onSelectMode, onToggleDiagnostics, postMessage,
 }) => {
   const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "로컬 Docker 배포" : view === "deploy" ? "배포 센터" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : view === "map" ? "구조 지도" : "";
@@ -568,7 +570,7 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
 
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: view === "home" ? "0 14px 16px" : "14px 18px 18px" }}>
           {view === "home" && <Home isAiReady={isAiReady} isDockerReady={isDockerReady} isOpsReady={isOpsReady} onSelectMode={onSelectMode} postMessage={postMessage} awsReady={diagnostics?.aws_deploy_ready === "ready"} githubReady={(diagnostics as unknown as { github_ready?: string })?.github_ready === "ready"} showMap={false} />}
-          {view === "build" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><BuildMode isActive={isAiReady} /></>}
+          {view === "build" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><BuildMode isActive={isAiReady} externalTurn={externalTurn} /></>}
           {view === "ship" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><ShipMode isAiReady={isAiReady} isDockerReady={isDockerReady} /></>}
           {view === "deploy" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><DeploymentCenter onOpenDocker={() => onSelectMode("ship")} /></>}
           {view === "operate" && <><SubHeader title={subTitle} onBack={() => onSelectMode("home")} /><OperateMode isActive={isOpsReady} /></>}
@@ -601,6 +603,8 @@ const App: React.FC = () => {
   const { coreHealth, costSummary } = usePolling(4000);
 
   const [view, setView] = useState<ViewMode>("home");
+  //: 채팅 승인 카드에서 넘어온 코드 생성 요청. Build 화면을 열고 CodeAgent 에 넘긴다.
+  const [externalTurn, setExternalTurn] = useState<ExternalTurn | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
 
@@ -625,6 +629,13 @@ const App: React.FC = () => {
       }
       if (type === "diagnosticsUpdate") {
         setDiagnostics(normDiag(payload as DiagnosticsResult));
+      }
+      if (type === "chat.actionAccepted") {
+        const p = payload as { requestId?: number; instruction?: string; targetFolder?: string };
+        if (typeof p.requestId === "number" && p.instruction) {
+          setExternalTurn({ requestId: p.requestId, instruction: p.instruction, targetFolder: p.targetFolder ?? "" });
+          setView("build");
+        }
       }
     }, [])
   );
@@ -663,6 +674,7 @@ const App: React.FC = () => {
   if (isWorkspacePanel) {
     return <WorkspaceLayout
       view={view}
+      externalTurn={externalTurn}
       diagnostics={diagnostics}
       coreStatus={coreHealth?.status ?? null}
       showDiagnostics={showDiagnostics}
@@ -729,7 +741,7 @@ const App: React.FC = () => {
         )}
         {view === "build" && (
           <div style={{ padding: "10px 10px 8px" }}>
-            <BuildMode isActive={isAiReady} />
+            <BuildMode isActive={isAiReady} externalTurn={externalTurn} />
           </div>
         )}
         {view === "ship" && (

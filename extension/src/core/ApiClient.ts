@@ -76,6 +76,19 @@ export interface CodePlanResult {
 export interface ChatResult {
     reply: string;
     model: string;
+    //: 채팅이 구현 요청을 감지했을 때 함께 오는 제안. 웹뷰가 승인 카드로 그리고,
+    //: 사용자가 승인해야만 /api/code/plan 으로 이어진다. 채팅 자체는 파일을 쓰지 않는다.
+    action?: ChatAction | null;
+}
+
+export interface ChatAction {
+    type: 'code.plan';
+    instruction: string;
+    target_folder: string;
+    target_source: 'message' | 'workspace';
+    stack: string;
+    files: string[];
+    summary: string;
 }
 
 export interface DeployPreflightResult {

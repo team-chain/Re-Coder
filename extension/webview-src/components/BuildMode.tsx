@@ -6,7 +6,7 @@
 import React, { useState, useCallback, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal, { RiskLevel } from "./ApprovalModal";
-import CodeAgent from "./CodeAgent";
+import CodeAgent, { ExternalTurn } from "./CodeAgent";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -179,6 +179,7 @@ const StepBar: React.FC<{ current: BuildStep }> = ({ current }) => {
 
 interface BuildModeProps {
   isActive: boolean;
+  externalTurn?: ExternalTurn | null;
 }
 
 //: CodeAgent(설계 결정 → 코드 생성)는 **어느 레이아웃에서도 숨기지 않는다.**
@@ -189,7 +190,7 @@ interface BuildModeProps {
 //: 타지 않는다. 결과적으로 Workspace 창에서는 **결정 카드가 뜨는 경로가
 //: 아예 사라졌고**, D5(항상 선택지)·D6(사람 승인)가 UI 에서 소실됐다.
 //: 그래서 플래그 자체를 제거한다 — 다시 끄고 싶어도 끌 스위치가 없다.
-export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
+export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -462,7 +463,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive }) => {
         </div>
       )}
 
-      <CodeAgent isActive={isActive} />
+      <CodeAgent isActive={isActive} externalTurn={externalTurn} />
 
 
     </div>

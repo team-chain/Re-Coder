@@ -7,6 +7,8 @@ Handles LLM-powered patch proposal generation, approval, and listing.
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -760,13 +762,101 @@ class ChatRequest(BaseModel):
     workspace_path: str = ""
 
 
+# ---------------------------------------------------------------------------
+# 채팅 → 코드 생성 연결 (승인 카드)
+#
+# 예전 /api/chat 은 "구현은 코드 생성 기능을 쓰라"고 안내만 했다. 그래서 사용자는
+# 채팅으로 방향을 정한 뒤 다른 패널로 옮겨 프롬프트를 다시 적어야 했고, 채팅에서
+# 말한 경로는 어디에도 전달되지 않았다(9/16 테스트: 5턴 질문 반복 → 파일이
+# 워크스페이스 루트에 생김).
+#
+# 이제 채팅은 구현 요청을 감지하면 응답에 ``action`` 을 실어 보낸다. 웹뷰는 이것을
+# **승인 카드**로 그리고, 사용자가 승인하면 기존 /api/code/plan → /api/code/generate
+# 흐름으로 들어간다. 채팅 자체는 여전히 파일을 쓰지 않는다 — 파일이 생기기 전에
+# 사람이 한 번 누르는 원칙은 그대로다.
+# ---------------------------------------------------------------------------
+
+#: 사용자 문장에서 대상 경로를 뽑는다. LLM 에 맡기지 않고 정규식으로 뽑는 이유:
+#: 경로는 한 글자만 틀려도 다른 곳에 파일이 생긴다. 결정적으로 처리해야 한다.
+_CHAT_PATH_RE = re.compile(
+    r"(?<![\w./])"                       # 앞이 단어·경로 문자가 아님
+    r"(~(?:/[^\s'\"`,()\[\]{}<>]*)?"    # ~ 또는 ~/foo/bar
+    r"|/(?:Users|home|Volumes|tmp|opt|srv|var|mnt)/[^\s'\"`,()\[\]{}<>]+"
+    r"|[A-Za-z]:\\[^\s'\"`,()\[\]{}<>]+"  # Windows 절대경로
+    r"|\.{1,2}/[^\s'\"`,()\[\]{}<>]+)"    # ./foo ../foo
+)
+
+#: 조사·문장부호가 경로 끝에 붙어 오는 경우("~/Desktop/te에", "~/te 폴더에,")를 잘라낸다.
+_CHAT_PATH_TRAIL_RE = re.compile(r"(에서|에다|에는|으로|로|에|을|를|은|는|이|가|의|랑|과|와|도)?[.,!?;:]*$")
+
+
+def _extract_target_path(message: str) -> str:
+    """메시지에서 첫 번째 경로 후보를 돌려준다. 없으면 빈 문자열."""
+    for m in _CHAT_PATH_RE.finditer(message or ""):
+        raw = m.group(1)
+        # 한글 조사는 경로 문자가 아니므로 정규식이 이미 끊지만, 붙여 쓴 경우를 위해 한 번 더 정리
+        cleaned = _CHAT_PATH_TRAIL_RE.sub("", raw).rstrip("/")
+        if cleaned in ("~", ".", ".."):
+            return cleaned
+        if len(cleaned) >= 2:
+            return cleaned
+    return ""
+
+
+_CHAT_ACTION_KEYWORDS = (
+    "만들어", "만들고", "생성", "작성", "구현", "추가해", "고쳐", "수정해", "바꿔", "짜줘", "짜 줘",
+    "만들어줘", "만들어 줘", "리팩터", "리팩토링", "붙여줘", "적용해",
+)
+
+
+def _looks_like_build_request(message: str) -> bool:
+    """LLM 판단과 별개로 쓰는 1차 휴리스틱. LLM 이 action 을 빠뜨렸을 때 보조로만 쓴다."""
+    m = (message or "").replace(" ", "")
+    return any(k.replace(" ", "") in m for k in _CHAT_ACTION_KEYWORDS)
+
+
+def _parse_chat_json(text: str) -> Optional[dict]:
+    """LLM 응답에서 {"reply":..., "action":...} JSON 을 뽑는다. 실패하면 None."""
+    if not text:
+        return None
+    s = text.strip()
+    # ```json ... ``` 펜스 제거
+    s = re.sub(r"^```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s)
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+    # 본문 어딘가의 첫 { ... 마지막 } 시도
+    i, j = s.find("{"), s.rfind("}")
+    if i != -1 and j > i:
+        try:
+            obj = json.loads(s[i:j + 1])
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+    return None
+
+
 @router.post("/api/chat")
 async def chat_route(body: ChatRequest) -> dict:
-    """ReCoder 작업 맥락을 아는 일반 대화형 AI 응답을 반환한다.
+    """ReCoder 작업 맥락을 아는 대화형 AI 응답.
 
-    코드 변경이 필요한 경우에도 이 API는 파일을 쓰지 않는다. 사용자가 대화로
-    방향을 정한 뒤 Build의 코드 생성 기능을 사용하도록 안내해, 대화만으로
-    워크스페이스가 변경되는 일을 막는다.
+    이 API 는 파일을 쓰지 않는다. 구현 요청이면 ``action`` 을 함께 돌려주고,
+    실제 생성은 웹뷰의 승인 카드에서 사용자가 누른 뒤 /api/code/plan 으로 이어진다.
+
+    응답:
+      { "reply": str, "model": str,
+        "action": null | {
+            "type": "code.plan",
+            "instruction": str,        # 생성기에 넘길 한 문장 요약(사용자 요청 + 확정된 조건)
+            "target_folder": str,      # 사용자가 말한 경로(정규식 추출). 없으면 ""
+            "target_source": "message" | "workspace",
+            "stack": str,              # 예: "HTML / CSS / Vanilla JS"
+            "files": [str, ...],       # 예상 파일 목록 (표시용)
+            "summary": str             # 카드 제목용 한 줄
+        } }
     """
     import asyncio
 
@@ -774,7 +864,6 @@ async def chat_route(body: ChatRequest) -> dict:
     if not message:
         raise HTTPException(status_code=400, detail="message 가 비어 있습니다.")
 
-    # 대화 기록은 최근 10개만, 각 메시지는 2천 자까지만 넣어 비용과 컨텍스트를 제한한다.
     history_lines: list[str] = []
     for item in (body.history or [])[-10:]:
         role = "사용자" if item.role == "user" else "ReCoder"
@@ -790,18 +879,37 @@ async def chat_route(body: ChatRequest) -> dict:
         except Exception:
             pass
 
-    prompt = f"""당신은 VS Code 확장 ReCoder의 친절한 개발 도우미입니다.
-사용자는 '{workspace_name}' 프로젝트에서 작업 중입니다.
-한국어로 자연스럽고 짧게 답하세요. 질문의 의도를 먼저 파악하고, 필요한 경우
-실행 순서·주의점·예시를 제시하세요. 정보가 부족하면 한 가지 확인 질문을 하세요.
-코드나 파일을 실제로 변경했다고 말하지 마세요. 사용자가 구현을 원하면 대화로
-방향을 정한 뒤 ReCoder의 코드 생성 기능을 사용하도록 안내하세요.
+    target_path = _extract_target_path(message)
+    # 이전 사용자 발화에서 말한 경로도 이어받는다 ("~/te 에 만들어줘" 다음 턴에 "ㅇㅇ 진행")
+    if not target_path:
+        for item in reversed(body.history or []):
+            if item.role == "user":
+                target_path = _extract_target_path(item.content or "")
+                if target_path:
+                    break
+
+    prompt = f"""당신은 VS Code 확장 ReCoder의 개발 도우미입니다. 사용자는 '{workspace_name}' 프로젝트에서 작업 중입니다.
+반드시 아래 JSON 한 개만 출력하세요. 코드 펜스·설명·이모지 없이 JSON 만.
+
+{{"reply": "<사용자에게 보일 한국어 답변. 2~4문장. 마크다운 제목·굵은 글씨·이모지·번호 목록 금지>",
+ "action": null 또는 {{"type": "code.plan", "instruction": "<생성기에 넘길 요청 요약 1~2문장. 사용자가 말한 조건을 모두 포함>", "stack": "<기술 스택 한 줄>", "files": ["<예상 파일 경로>", ...], "summary": "<카드 제목 한 줄, 20자 이내>"}}}}
+
+규칙:
+1. 사용자가 무엇을 만들거나 고치라고 요청했으면 action 을 채우세요. 질문으로 되묻지 마세요.
+   세부 사항(스택·기능 범위)이 비어 있으면 가장 일반적인 선택을 스스로 정해서 instruction 과 reply 에 적으세요.
+   예: 웹 게임·정적 사이트 → HTML/CSS/Vanilla JS, API 서버 → 사용자가 쓰는 언어의 대표 프레임워크.
+2. 되묻는 것은 요청이 진짜로 두 갈래 이상으로 갈릴 때만, 질문 1개만. 그때는 action 을 null 로 두세요.
+3. 설명·오류 원인·사용법 질문이면 action 은 null 이고 reply 만 답하세요.
+4. reply 에서 "코드 생성 버튼을 누르세요" 같은 안내는 하지 마세요. action 이 있으면 웹뷰가 승인 카드를 띄웁니다.
+   reply 는 무엇을 어떻게 만들지 짧게 말하고 "아래에서 위치와 파일을 확인하고 승인해 주세요"로 끝내세요.
+5. 파일 경로는 target 폴더 기준 상대경로로 적으세요. 경로 자체는 시스템이 따로 처리하니 reply 에 절대경로를 반복하지 마세요.
+6. 코드나 파일을 실제로 변경했다고 말하지 마세요.
 
 이전 대화:
 {history_text}
 
 사용자: {message}
-ReCoder:"""
+JSON:"""
 
     try:
         try:
@@ -811,27 +919,45 @@ ReCoder:"""
             from core.llm.base import LLMRequest
             from core.llm.router import get_router
 
-        # 동기 Provider 호출이므로 이벤트 루프를 막지 않도록 별도 스레드에서 실행한다.
         response = await asyncio.to_thread(
             get_router().call,
-            LLMRequest(prompt=prompt, max_tokens=1000, temperature=0.45),
+            LLMRequest(prompt=prompt, max_tokens=1200, temperature=0.3),
             "workspace_chat",
             "chat",
         )
-        reply = (response.text or "").strip()
-        if not reply:
-            #: 분류기(public_ai_failure_reason)를 거치면 "(RuntimeError)" 로
-            #: 뭉개진다 — 이 경우는 원인이 명확하므로 문장을 그대로 내린다.
+        raw = (response.text or "").strip()
+        if not raw:
             raise HTTPException(
                 status_code=500, detail="AI 대화 실패: AI가 빈 응답을 반환했습니다.",
             )
-        return {"reply": reply, "model": getattr(response, "model_used", "")}
+
+        parsed = _parse_chat_json(raw)
+        reply = raw
+        action: Optional[dict] = None
+        if parsed is not None:
+            reply = str(parsed.get("reply") or "").strip() or raw
+            act = parsed.get("action")
+            if isinstance(act, dict) and (act.get("instruction") or "").strip():
+                files = act.get("files")
+                action = {
+                    "type": "code.plan",
+                    "instruction": str(act.get("instruction")).strip(),
+                    "stack": str(act.get("stack") or "").strip(),
+                    "files": [str(f) for f in files if str(f).strip()] if isinstance(files, list) else [],
+                    "summary": str(act.get("summary") or "").strip()[:40],
+                }
+        elif _looks_like_build_request(message):
+            # LLM 이 JSON 형식을 어겼지만 구현 요청이 분명한 경우 — 사용자 문장을 그대로 instruction 으로.
+            action = {"type": "code.plan", "instruction": message, "stack": "", "files": [], "summary": ""}
+
+        if action is not None:
+            action["target_folder"] = target_path
+            action["target_source"] = "message" if target_path else "workspace"
+
+        return {"reply": reply, "model": getattr(response, "model_used", ""), "action": action}
     except HTTPException:
         raise
     except Exception as exc:
-        #: provider 원문(429 JSON 덩어리 등)을 그대로 노출하면 사용자는 읽지
-        #: 못하고, 내부 정보까지 샌다. 분류된 원인 문장으로 바꿔 내려보낸다 —
-        #: 웹뷰 채팅 패널이 이 detail 을 말풍선 아래 오류 줄에 그대로 띄운다.
         try:
             from llm.failure import public_ai_failure_reason
         except ImportError:

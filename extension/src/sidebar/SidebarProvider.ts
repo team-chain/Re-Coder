@@ -1274,7 +1274,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     message?: string;
                     history?: Array<{ role: 'user' | 'assistant'; content: string }>;
                 };
-                await this.handleChat(p.id ?? '', p.message ?? '', p.history ?? []);
+                await this.handleChat(p.id ?? '', p.message ?? '', p.history ?? [], requestWebview);
+                break;
+            }
+            case 'chat.approveAction': {
+                //: 승인 카드의 [승인하고 생성]. 여기서만 채팅이 코드 생성으로 넘어간다.
+                const p = (payload ?? {}) as { id?: string; instruction?: string; targetFolder?: string };
+                await this.handleChatApproveAction(p.id ?? '', p.instruction ?? '', p.targetFolder ?? '', requestWebview);
+                break;
+            }
+            case 'chat.pickActionFolder': {
+                //: 승인 카드의 [위치 변경]. 워크스페이스 밖 폴더도 고를 수 있고, 그 경우
+                //: 절대경로를 그대로 돌려준다 — 예전 code.pickFolder 처럼 조용히 루트('')로
+                //: 바꾸지 않는다.
+                const p = (payload ?? {}) as { id?: string };
+                const picked = await vscode.window.showOpenDialog({
+                    canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
+                    openLabel: '이 폴더에 생성',
+                    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+                });
+                if (picked && picked[0]) {
+                    this.postMessageToWebview(requestWebview, 'chat.actionFolderPicked', { id: p.id ?? '', folder: this._describeTargetFolder(picked[0].fsPath).display });
+                }
                 break;
             }
             case 'code.apply': {
@@ -1296,7 +1317,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'code.diff': {
                 const { file, content, targetFolder } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string };
-                await this.handleCodeDiff(this._joinFolder(targetFolder ?? '', file ?? ''), content ?? '');
+                const resolved = this._resolveWriteRoot(targetFolder ?? '');
+                if (!resolved) { this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' }); break; }
+                await this.handleCodeDiff(this._joinFolder(resolved.relFolder, file ?? ''), content ?? '', resolved.root);
                 break;
             }
             case 'code.pickFolder': {
@@ -1306,8 +1329,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
                 });
                 if (picked && picked[0]) {
-                    const rel = vscode.workspace.asRelativePath(picked[0], false);
-                    this.postMessage('code.folderPicked', { folder: rel === picked[0].fsPath ? '' : rel });
+                    //: 워크스페이스 안이면 상대경로, 밖이면 절대경로. 예전에는 밖을 고르면
+                    //: ''(루트) 로 바꿔 버려서, 사용자는 다른 폴더를 골랐는데 파일은 프로젝트
+                    //: 루트에 생겼다. 밖의 폴더는 사용자가 다이얼로그에서 직접 고른 것이므로
+                    //: 그 자리에서 워크스페이스에 추가한다 — 파일 쓰기는 워크스페이스 안으로만
+                    //: 향한다는 규칙(_resolveWriteRoot)을 그대로 두기 위해서다.
+                    const desc = this._describeTargetFolder(picked[0].fsPath);
+                    if (!desc.insideWorkspace) {
+                        const already = (vscode.workspace.workspaceFolders ?? []).some((f) => f.uri.fsPath === desc.absolute);
+                        if (!already) {
+                            const count = vscode.workspace.workspaceFolders?.length ?? 0;
+                            vscode.workspace.updateWorkspaceFolders(count, 0, { uri: vscode.Uri.file(desc.absolute) });
+                        }
+                    }
+                    this.postMessage('code.folderPicked', { folder: desc.display });
                 }
                 break;
             }
@@ -1374,7 +1409,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     /** EDIT op 의 제안 내용을 현재 파일과 나란히 diff 로 연다(적용 전 검토). */
-    private async handleCodeDiff(file: string, content: string): Promise<void> {
+    private async handleCodeDiff(file: string, content: string, rootOverride?: vscode.Uri): Promise<void> {
         if (!this._codegenProviderRegistered) {
             const docs = this._codegenDocs;
             vscode.workspace.registerTextDocumentContentProvider('recoder-codegen', {
@@ -1384,7 +1419,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             });
             this._codegenProviderRegistered = true;
         }
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const root = rootOverride ?? vscode.workspace.workspaceFolders?.[0]?.uri;
         if (!root) { this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' }); return; }
         const safe = file.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
         if (!safe) { return; }
@@ -1440,7 +1475,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        //: 승인 카드로 들어온 워크스페이스 밖 폴더면 Core 에는 그 폴더를 프로젝트 루트로
+        //: 알려준다. 예전엔 항상 첫 워크스페이스 폴더를 넘겨서, Re-Coder 저장소를 열어둔 채
+        //: 다른 곳에 만들라고 해도 Core 는 Re-Coder 를 스캔하고 거기 기준으로 생성했다.
+        const scope = this._codeScope(opts.targetFolder ?? '');
+        const workspacePath = scope.workspacePath;
         // 인자가 없으면 현재 활성 에디터를 컨텍스트로 자동 첨부.
         let attach = opts.openFile;
         if (!attach) {
@@ -1455,7 +1494,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 openFile: attach,
                 priorFiles: this._lastCodeOps,
                 contextFiles: opts.contextFiles ?? [],
-                targetFolder: opts.targetFolder ?? '',
+                targetFolder: scope.targetFolder,
                 decisions: opts.decisions ?? [],
             });
             // 다음 턴 컨텍스트로 보관
@@ -1478,16 +1517,142 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         id: string,
         message: string,
         history: Array<{ role: 'user' | 'assistant'; content: string }>,
+        requestWebview?: vscode.Webview,
     ): Promise<void> {
         if (!message.trim()) { return; }
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
         try {
             const result = await this._apiClient.chat(message, history, workspacePath);
-            this.postMessage('chat.response', { id, reply: result.reply, model: result.model });
+            let action = result.action ?? null;
+            if (action) {
+                //: 경로를 사람이 읽을 형태로 정리해 카드에 보여준다. 실제 폴더 생성·워크스페이스
+                //: 추가는 승인을 누른 뒤(handleChatApproveAction)에만 한다.
+                const desc = this._describeTargetFolder(action.target_folder || '');
+                action = { ...action, target_folder: desc.display };
+                this.postMessageToWebview(requestWebview, 'chat.response', {
+                    id, reply: result.reply, model: result.model, action,
+                    target: { display: desc.display, absolute: desc.absolute, insideWorkspace: desc.insideWorkspace, exists: desc.exists, workspaceName: desc.workspaceName },
+                });
+                return;
+            }
+            this.postMessageToWebview(requestWebview, 'chat.response', { id, reply: result.reply, model: result.model, action: null });
         } catch (err) {
             const error = err instanceof Error ? err.message : String(err);
-            this.postMessage('chat.error', { id, message: error });
+            this.postMessageToWebview(requestWebview, 'chat.error', { id, message: error });
         }
+    }
+
+    /**
+     * 대상 폴더 문자열을 해석한다.
+     *
+     * - ''            → 워크스페이스 루트
+     * - 상대경로       → 워크스페이스 루트 기준
+     * - ~/..., 절대경로 → 그대로. 워크스페이스 안이면 상대경로로 바꿔 표시한다.
+     *
+     * 반환 display 는 웹뷰·Core 에 넘기는 값이다: 안이면 상대경로(''=루트), 밖이면 절대경로.
+     */
+    private _describeTargetFolder(input: string): { display: string; absolute: string; insideWorkspace: boolean; exists: boolean; workspaceName: string } {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspaceName = root ? path.basename(root) : '';
+        let raw = (input || '').trim().replace(/\\/g, '/');
+        if (raw.startsWith('~')) {
+            raw = path.join(process.env.HOME || process.env.USERPROFILE || '', raw.slice(1));
+        }
+        let absolute: string;
+        if (!raw) {
+            absolute = root;
+        } else if (path.isAbsolute(raw)) {
+            absolute = path.normalize(raw);
+        } else {
+            absolute = root ? path.normalize(path.join(root, raw)) : path.resolve(raw);
+        }
+        const rel = root ? path.relative(root, absolute) : '';
+        const insideWorkspace = !!root && rel !== '' ? !rel.startsWith('..') && !path.isAbsolute(rel) : !!root && absolute === root;
+        const display = insideWorkspace ? rel.replace(/\\/g, '/') : absolute;
+        let exists = false;
+        try { exists = fs.existsSync(absolute); } catch { /* ignore */ }
+        return { display, absolute, insideWorkspace, exists, workspaceName };
+    }
+
+    /**
+     * 승인 카드 [승인하고 생성].
+     *
+     * 1) 대상 폴더가 없으면 만든다.
+     * 2) 워크스페이스 밖이면 워크스페이스 폴더로 추가한다 — 이후 파일 쓰기는 항상
+     *    워크스페이스 안으로만 향한다는 기존 안전장치를 그대로 유지하기 위해서다.
+     * 3) 웹뷰에 chat.actionAccepted 를 보낸다. App 이 Build 화면으로 전환하고 CodeAgent 가
+     *    이 요청을 자기 턴으로 등록해 code.plan 을 보낸다. 결정 카드 → 생성 → diff → 적용은
+     *    전부 기존 흐름이다.
+     */
+    private async handleChatApproveAction(id: string, instruction: string, targetFolder: string, requestWebview?: vscode.Webview): Promise<void> {
+        //: 회신은 **승인을 누른 웹뷰에만** 보낸다. 사이드바와 큰 작업 화면은 같은 React 앱을
+        //: 각각 띄우고 있어서, 전체에 뿌리면 두 CodeAgent 가 저마다 code.plan 을 보내
+        //: 설계 결정이 두 번 만들어지고 모달이 엉뚱한 창에 뜬다.
+        if (!instruction.trim()) {
+            this.postMessageToWebview(requestWebview, 'chat.actionError', { id, message: '생성할 내용이 비어 있습니다.' });
+            return;
+        }
+        const desc = this._describeTargetFolder(targetFolder);
+        let folderCreated = false;
+        let addedToWorkspace = false;
+        try {
+            if (!desc.exists) {
+                await vscode.workspace.fs.createDirectory(vscode.Uri.file(desc.absolute));
+                folderCreated = true;
+            }
+            if (!desc.insideWorkspace) {
+                const already = (vscode.workspace.workspaceFolders ?? []).some((f) => f.uri.fsPath === desc.absolute);
+                if (!already) {
+                    const count = vscode.workspace.workspaceFolders?.length ?? 0;
+                    const ok = vscode.workspace.updateWorkspaceFolders(count, 0, { uri: vscode.Uri.file(desc.absolute) });
+                    if (!ok) { throw new Error('워크스페이스에 폴더를 추가하지 못했습니다.'); }
+                    addedToWorkspace = true;
+                }
+            }
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.postMessageToWebview(requestWebview, 'chat.actionError', { id, message: `폴더 준비 실패: ${msg}` });
+            return;
+        }
+        //: CodeAgent 의 턴 번호(1,2,3…)와 겹치지 않도록 시각 기반 id 를 쓴다.
+        const requestId = Date.now();
+        this.postMessageToWebview(requestWebview, 'chat.actionAccepted', {
+            id, requestId, instruction,
+            targetFolder: desc.display,
+            absolutePath: desc.absolute,
+            folderCreated, addedToWorkspace,
+        });
+    }
+
+    /** targetFolder 가 절대경로(워크스페이스 밖)면 그 폴더를, 아니면 첫 워크스페이스 폴더를 루트로 쓴다. */
+    private _resolveWriteRoot(targetFolder: string): { root: vscode.Uri; relFolder: string } | null {
+        const raw = (targetFolder || '').trim();
+        if (raw && (path.isAbsolute(raw) || raw.startsWith('~'))) {
+            const desc = this._describeTargetFolder(raw);
+            if (desc.insideWorkspace) {
+                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                return root ? { root, relFolder: desc.display } : null;
+            }
+            //: 밖의 절대경로는 워크스페이스에 추가된 폴더여야만 쓴다. 승인 카드를 거치지 않은
+            //: 임의 경로(예: 오래된 웹뷰 상태)로 파일이 새는 것을 막는다.
+            const allowed = (vscode.workspace.workspaceFolders ?? []).some((f) => desc.absolute === f.uri.fsPath || desc.absolute.startsWith(f.uri.fsPath + path.sep));
+            if (!allowed) { return null; }
+            return { root: vscode.Uri.file(desc.absolute), relFolder: '' };
+        }
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        return root ? { root, relFolder: raw } : null;
+    }
+
+    /** Core 에 넘길 (workspacePath, targetFolder). 절대경로 대상이면 그 폴더가 곧 프로젝트 루트다. */
+    private _codeScope(targetFolder: string): { workspacePath: string; targetFolder: string } {
+        const first = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const raw = (targetFolder || '').trim();
+        if (raw && (path.isAbsolute(raw) || raw.startsWith('~'))) {
+            const desc = this._describeTargetFolder(raw);
+            if (desc.insideWorkspace) { return { workspacePath: first, targetFolder: desc.display }; }
+            return { workspacePath: desc.absolute, targetFolder: '' };
+        }
+        return { workspacePath: first, targetFolder: raw };
     }
 
     /** AI-DLC 결정 목록을 Webview 모달로 보내고, 선택·생성은 사용자가 직접 확정한다. */
@@ -1502,7 +1667,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const scope = this._codeScope(opts.targetFolder ?? '');
+        const workspacePath = scope.workspacePath;
         let attach = opts.openFile;
         if (!attach) {
             const ed = vscode.window.activeTextEditor;
@@ -1516,7 +1682,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 workspacePath,
                 openFile: attach,
                 contextFiles: opts.contextFiles ?? [],
-                targetFolder: opts.targetFolder ?? '',
+                targetFolder: scope.targetFolder,
             });
             this.postMessageToWebview(opts.requestWebview, 'code.planResult', {
                 requestId: opts.requestId,
@@ -1542,12 +1708,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      */
     private async handleCodeApply(file: string, content: string, targetFolder: string = '', ackKey: string = ''): Promise<boolean> {
         const ack = ackKey ? { ackKey } : {};
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-        if (!root) {
-            this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.', ...ack });
+        const resolved = this._resolveWriteRoot(targetFolder);
+        if (!resolved) {
+            this.postMessage('code.error', { message: targetFolder && path.isAbsolute(targetFolder)
+                ? `대상 폴더가 워크스페이스에 없습니다: ${targetFolder}. 승인 카드에서 다시 승인해 주세요.`
+                : '워크스페이스가 열려있지 않습니다.', ...ack });
             return false;
         }
-        const combined = this._joinFolder(targetFolder, file);
+        const root = resolved.root;
+        const combined = this._joinFolder(resolved.relFolder, file);
         const safe = combined.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
         if (!safe) {
             this.postMessage('code.error', { message: `잘못된 파일명: ${file}`, ...ack });
