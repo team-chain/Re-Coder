@@ -21,7 +21,7 @@ Parameters:
     Description: 자가발급 정원 (0 = 무제한). 트라이얼이면 30 권장.
   AllowedModels:
     Type: String
-    Default: anthropic.claude-3-haiku-20240307-v1:0
+    Default: global.anthropic.claude-haiku-4-5-20251001-v1:0
     Description: 허용 Bedrock 모델 ID (쉼표 구분). 학생은 이 목록만 사용 가능.
   PoolCapUsd:
     Type: String
@@ -33,10 +33,10 @@ Parameters:
     Description: 게이트웨이 소프트 차단 임계(USD)
   PriceInPer1K:
     Type: String
-    Default: "0.00025"
+    Default: "0.001"
   PriceOutPer1K:
     Type: String
-    Default: "0.00125"
+    Default: "0.005"
   DefaultMaxTotalTokens:
     Type: String
     Default: "500000"

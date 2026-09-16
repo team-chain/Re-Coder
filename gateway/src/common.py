@@ -28,11 +28,11 @@ from botocore.exceptions import ClientError
 TABLE_NAME      = os.environ.get("GW_TABLE", "RecoderGateway")
 REGION          = os.environ.get("GW_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 ALLOWED_MODELS  = [m.strip() for m in os.environ.get(
-    "GW_ALLOWED_MODELS", "anthropic.claude-3-haiku-20240307-v1:0").split(",") if m.strip()]
-DEFAULT_MODEL   = ALLOWED_MODELS[0] if ALLOWED_MODELS else "anthropic.claude-3-haiku-20240307-v1:0"
+    "GW_ALLOWED_MODELS", "global.anthropic.claude-haiku-4-5-20251001-v1:0").split(",") if m.strip()]
+DEFAULT_MODEL   = ALLOWED_MODELS[0] if ALLOWED_MODELS else "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 # Haiku 단가 (USD per 1K tokens) — 콘솔에서 확인 후 조정
-PRICE_IN_PER_1K  = float(os.environ.get("GW_PRICE_IN_PER_1K",  "0.00025"))
-PRICE_OUT_PER_1K = float(os.environ.get("GW_PRICE_OUT_PER_1K", "0.00125"))
+PRICE_IN_PER_1K  = float(os.environ.get("GW_PRICE_IN_PER_1K",  "0.001"))
+PRICE_OUT_PER_1K = float(os.environ.get("GW_PRICE_OUT_PER_1K", "0.005"))
 # 쿼터 기본값
 DEF_MAX_TOTAL   = int(os.environ.get("GW_DEFAULT_MAX_TOTAL_TOKENS", "500000"))   # 1인 7일
 DEF_MAX_DAILY   = int(os.environ.get("GW_DEFAULT_MAX_DAILY_TOKENS", "100000"))   # 1인 1일
