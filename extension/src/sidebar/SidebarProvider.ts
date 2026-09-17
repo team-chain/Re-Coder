@@ -1391,6 +1391,57 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'adr.list': {
+                //: docs/adr/*.md 목록. 제목은 첫 번째 '# ' 줄, 없으면 파일명.
+                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                if (!root) { this.postMessageToWebview(requestWebview, 'adr.listResult', { items: [], error: '워크스페이스가 열려있지 않습니다.' }); break; }
+                try {
+                    const dir = vscode.Uri.joinPath(root, 'docs', 'adr');
+                    let entries: [string, vscode.FileType][] = [];
+                    try { entries = await vscode.workspace.fs.readDirectory(dir); } catch { entries = []; }
+                    const items: Array<{ file: string; title: string; id: string }> = [];
+                    for (const [name, type] of entries) {
+                        if (type !== vscode.FileType.File || !name.toLowerCase().endsWith('.md')) { continue; }
+                        let title = name.replace(/\.md$/i, '');
+                        try {
+                            const buf = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name));
+                            const text = new TextDecoder().decode(buf).slice(0, 4000);
+                            const m = /^#\s+(.+)$/m.exec(text);
+                            if (m) { title = m[1].trim(); }
+                        } catch { /* 제목 없이 진행 */ }
+                        const idm = /^(ADR-[A-Za-z]?\d+)/i.exec(name);
+                        items.push({ file: `docs/adr/${name}`, title, id: idm ? idm[1].toUpperCase() : '' });
+                    }
+                    //: 최신이 위로 — 번호 내림차순, 번호 없는 것은 뒤로.
+                    items.sort((a, b) => (b.id || '').localeCompare(a.id || '', undefined, { numeric: true }));
+                    this.postMessageToWebview(requestWebview, 'adr.listResult', { items });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'adr.listResult', { items: [], error: String(err) });
+                }
+                break;
+            }
+            case 'adr.read': {
+                const { file } = (payload ?? {}) as { file?: string };
+                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const safe = (file ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
+                if (!root || !safe.startsWith('docs/adr/')) { this.postMessageToWebview(requestWebview, 'adr.readResult', { file, error: '읽을 수 없는 경로입니다.' }); break; }
+                try {
+                    const buf = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(root, safe));
+                    this.postMessageToWebview(requestWebview, 'adr.readResult', { file, content: new TextDecoder().decode(buf) });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'adr.readResult', { file, error: String(err) });
+                }
+                break;
+            }
+            case 'adr.open': {
+                const { file } = (payload ?? {}) as { file?: string };
+                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const safe = (file ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
+                if (root && safe) {
+                    try { await vscode.window.showTextDocument(vscode.Uri.joinPath(root, safe), { preview: false }); } catch { /* ignore */ }
+                }
+                break;
+            }
             case 'map.openFile': {
                 const { id } = (payload ?? {}) as { id?: string };
                 try {
