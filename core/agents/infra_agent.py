@@ -215,13 +215,12 @@ class InfraAgent:
         if project.stack == StackType.UNKNOWN:
             project.stack = stack
 
+        #: 스택을 못 정했는데 아무 템플릿이나 잡으면 실행 명령이 어긋난
+        #: 컨테이너가 나온다(순수 파이썬에 CMD uvicorn → 즉사). 템플릿이
+        #: 없으면 여기서 명시적으로 실패하고, 라우트가 템플릿 폴백 경로에서
+        #: 사용자에게 이유를 안내한다.
         template_id = self._pick_dockerfile_template(stack)
-        try:
-            template = self._registry.get(template_id)
-        except Exception:
-            # Fallback to python-fastapi template as a generic base
-            template_id = "Dockerfile.python-fastapi"
-            template = self._registry.get(template_id)
+        template = self._registry.get(template_id)
 
         workspace_summary = self._summarise_workspace(workspace_path)
 
@@ -475,7 +474,14 @@ class InfraAgent:
 
     @staticmethod
     def _pick_dockerfile_template(stack: StackType) -> str:
-        """Map StackType to the corresponding FileTemplate ID."""
+        """Map StackType to the corresponding FileTemplate ID.
+
+        [무엇이 사고였나] 예전에는 모르는 스택이면 python-fastapi 템플릿을
+        기본값으로 돌려줬다. 순수 파이썬·Go·Java 프로젝트가 전부
+        `CMD uvicorn ...` 을 받아, uvicorn 이 없으니 컨테이너가 뜨자마자
+        죽었다(보드 이슈). 분류와 실행 명령이 어긋난 이미지를 만드느니
+        명시적으로 실패하는 쪽이 맞다.
+        """
         mapping = {
             StackType.PYTHON_FASTAPI: "Dockerfile.python-fastapi",
             StackType.PYTHON_FLASK: "Dockerfile.python-flask",
@@ -484,7 +490,14 @@ class InfraAgent:
             StackType.NODE_NEXT: "Dockerfile.node-next",
             StackType.NODE_NEST: "Dockerfile.node-express",
         }
-        return mapping.get(stack, "Dockerfile.python-fastapi")
+        template_id = mapping.get(stack)
+        if template_id is None:
+            raise ValueError(
+                f"'{stack.value}' 스택용 Dockerfile 템플릿이 없습니다. "
+                "requirements.txt/package.json 에 프레임워크를 명시하거나 "
+                "Dockerfile 을 직접 추가하세요."
+            )
+        return template_id
 
     @staticmethod
     def _summarise_workspace(workspace_path: str) -> str:
