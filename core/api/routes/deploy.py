@@ -657,6 +657,18 @@ def _detect_stack(workspace_path: str) -> StackType:
     """Heuristically detect the project stack from workspace files."""
     ws = Path(workspace_path)
     if (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
+        #: 의존성 선언이 1차 근거다 — requirements 에 fastapi 가 적혀 있으면
+        #: 소스에 아직 import 가 없어도 그 스택이 맞다.
+        deps_text = (
+            _read_text_if_exists(ws / "requirements.txt")
+            + _read_text_if_exists(ws / "pyproject.toml")
+        ).lower()
+        if "fastapi" in deps_text or "uvicorn" in deps_text:
+            return StackType.PYTHON_FASTAPI
+        if "flask" in deps_text:
+            return StackType.PYTHON_FLASK
+        if "django" in deps_text:
+            return StackType.PYTHON_DJANGO
         # Limit to 20 files to avoid blocking the async event loop on large projects.
         for f in list(ws.rglob("*.py"))[:20]:
             try:
@@ -669,7 +681,12 @@ def _detect_stack(workspace_path: str) -> StackType:
                     return StackType.PYTHON_DJANGO
             except Exception:
                 continue
-        return StackType.PYTHON_FASTAPI  # Default for Python
+        #: [무엇이 사고였나] 예전에는 여기서 PYTHON_FASTAPI 를 **기본값**으로
+        #: 돌려줬다. 순수 파이썬 프로젝트가 fastapi 템플릿(CMD uvicorn ...)을
+        #: 받았고, uvicorn 이 없으니 컨테이너가 뜨자마자 죽었다(보드 이슈
+        #: 「스택 감지가 순수 파이썬을 python-fastapi 로 분류」). 모르는 것은
+        #: 모른다고 답한다 — UNKNOWN 은 템플릿 선택 단계에서 422 안내로 이어진다.
+        return StackType.UNKNOWN
     if (ws / "package.json").exists():
         try:
             import json
@@ -2303,6 +2320,15 @@ def _dockerfile_from_template(
 
     template_id = _DOCKERFILE_TEMPLATE_BY_STACK.get(stack)
     if template_id is None:
+        if stack == StackType.UNKNOWN:
+            #: 스택을 확정하지 못한 채 아무 템플릿이나 고르면 실행 명령이
+            #: 어긋난 컨테이너(예: uvicorn 없는 프로젝트에 CMD uvicorn)가 나온다.
+            raise _UnsupportedDockerfileFallback(
+                f"프로젝트 스택을 확정하지 못했습니다({stack.value}). "
+                "requirements.txt 에 fastapi/flask/django 중 사용하는 "
+                "프레임워크를 명시하거나, AI Ready 를 복구하거나, 프로젝트에 "
+                "Dockerfile 을 직접 추가한 뒤 다시 시도하세요."
+            )
         raise _UnsupportedDockerfileFallback(
             f"{stack.value} 스택은 AI 없이 검증된 Dockerfile 폴백을 제공하지 "
             "않습니다. AI Ready를 복구하거나 프로젝트에 Dockerfile을 직접 "
