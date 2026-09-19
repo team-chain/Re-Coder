@@ -1,0 +1,355 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "ReCoder 배포용 최소권한 IAM 사용자를 만듭니다. 스택 생성 후 Outputs 탭의 액세스 키를 ReCoder 확장의 AWS 연결 화면에 붙여넣으세요.",
+  "Resources": {
+    "RecoderDeployPolicy": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "ManagedPolicyName": "recoder-deploy-policy",
+        "Description": "ReCoder 가 배포에 요구하는 최소권한",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "WhoAmI",
+              "Effect": "Allow",
+              "Action": [
+                "sts:GetCallerIdentity"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "EcrLogin",
+              "Effect": "Allow",
+              "Action": [
+                "ecr:GetAuthorizationToken"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "EcrPushImage",
+              "Effect": "Allow",
+              "Action": [
+                "ecr:CreateRepository",
+                "ecr:DescribeRepositories",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:InitiateLayerUpload",
+                "ecr:UploadLayerPart",
+                "ecr:CompleteLayerUpload",
+                "ecr:PutImage"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/recoder-*"
+              }
+            },
+            {
+              "Sid": "EcrPullImageForScan",
+              "Effect": "Allow",
+              "Action": [
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/recoder-*"
+              }
+            },
+            {
+              "Sid": "EcsTaskDefinition",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:RegisterTaskDefinition"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "EcsDeployService",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:DescribeClusters",
+                "ecs:DescribeServices",
+                "ecs:UpdateService"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/recoder-*/recoder-*"
+                }
+              ]
+            },
+            {
+              "Sid": "ReadTaskExecutionRole",
+              "Effect": "Allow",
+              "Action": [
+                "iam:GetRole"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/ecsTaskExecutionRole"
+              }
+            },
+            {
+              "Sid": "SimulateDeploymentKeyPermissions",
+              "Effect": "Allow",
+              "Action": [
+                "iam:SimulatePrincipalPolicy"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "ReadDeploymentUserPolicies",
+              "Effect": "Allow",
+              "Action": [
+                "iam:ListAttachedUserPolicies",
+                "iam:ListUserPolicies",
+                "iam:GetUserPolicy"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "ReadDeploymentRolePolicies",
+              "Effect": "Allow",
+              "Action": [
+                "iam:ListAttachedRolePolicies",
+                "iam:ListRolePolicies",
+                "iam:GetRolePolicy"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/ecsTaskExecutionRole"
+              }
+            },
+            {
+              "Sid": "ReadAttachedManagedPolicyDocuments",
+              "Effect": "Allow",
+              "Action": [
+                "iam:GetPolicy",
+                "iam:GetPolicyVersion"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "PassEcsRolesToEcsOnly",
+              "Effect": "Allow",
+              "Action": [
+                "iam:PassRole"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/ecsTaskExecutionRole"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": "ecs-tasks.amazonaws.com"
+                }
+              }
+            },
+            {
+              "Sid": "ReadLogGroups",
+              "Effect": "Allow",
+              "Action": [
+                "logs:DescribeLogGroups"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "EcsCreateCluster",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:CreateCluster"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/recoder-*"
+              }
+            },
+            {
+              "Sid": "EcsCreateService",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:CreateService"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/recoder-*/recoder-*"
+              }
+            },
+            {
+              "Sid": "EcsFindRunningTasks",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:ListTasks"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnEquals": {
+                  "ecs:cluster": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/recoder-*"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "EcsDescribeTasks",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:DescribeTasks"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task/recoder-*/*"
+              }
+            },
+            {
+              "Sid": "CreateEcsServiceLinkedRole",
+              "Effect": "Allow",
+              "Action": [
+                "iam:CreateServiceLinkedRole"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "iam:AWSServiceName": "ecs.amazonaws.com"
+                }
+              }
+            },
+            {
+              "Sid": "EcsLogGroup",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:PutRetentionPolicy"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/*"
+              }
+            },
+            {
+              "Sid": "EcrLifecycle",
+              "Effect": "Allow",
+              "Action": [
+                "ecr:PutLifecyclePolicy"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/recoder-*"
+              }
+            },
+            {
+              "Sid": "DiscoverDefaultNetwork",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:DescribeVpcs",
+                "ec2:DescribeSubnets",
+                "ec2:DescribeRouteTables",
+                "ec2:DescribeSecurityGroups",
+                "ec2:DescribeNetworkInterfaces"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "CreateAppSecurityGroup",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:CreateSecurityGroup",
+                "ec2:AuthorizeSecurityGroupIngress"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*"
+                }
+              ]
+            },
+            {
+              "Sid": "S3StaticSiteBucket",
+              "Effect": "Allow",
+              "Action": [
+                "s3:CreateBucket",
+                "s3:ListBucket",
+                "s3:GetBucketLocation",
+                "s3:PutBucketWebsite",
+                "s3:PutBucketPolicy",
+                "s3:PutBucketPublicAccessBlock"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:s3:::recoder-*"
+              }
+            },
+            {
+              "Sid": "S3StaticSiteObjects",
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:s3:::recoder-*/*"
+              }
+            },
+            {
+              "Sid": "InvokeFoundationModels",
+              "Effect": "Allow",
+              "Action": [
+                "bedrock:InvokeModel"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:bedrock:*::foundation-model/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
+                }
+              ]
+            },
+            {
+              "Sid": "ListModels",
+              "Effect": "Allow",
+              "Action": [
+                "bedrock:ListFoundationModels"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+      }
+    },
+    "RecoderDeployUser": {
+      "Type": "AWS::IAM::User",
+      "Properties": {
+        "UserName": "recoder-deploy",
+        "ManagedPolicyArns": [
+          {
+            "Ref": "RecoderDeployPolicy"
+          }
+        ]
+      }
+    },
+    "RecoderDeployKey": {
+      "Type": "AWS::IAM::AccessKey",
+      "Properties": {
+        "UserName": {
+          "Ref": "RecoderDeployUser"
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "AccessKeyId": {
+      "Description": "ReCoder 에 붙여넣을 Access Key ID",
+      "Value": {
+        "Ref": "RecoderDeployKey"
+      }
+    },
+    "SecretAccessKey": {
+      "Description": "ReCoder 에 붙여넣을 Secret Access Key. 이 값은 스택을 볼 수 있는 사람에게 보입니다 — 개인 계정 전용. 조직 계정이면 키는 콘솔에서 따로 발급하세요.",
+      "Value": {
+        "Fn::GetAtt": [
+          "RecoderDeployKey",
+          "SecretAccessKey"
+        ]
+      }
+    },
+    "GuidanceKo": {
+      "Description": "다음 단계",
+      "Value": "위 두 값을 복사해 VSCode ReCoder 확장 → AWS 연결 화면에 붙여넣으면 온보딩이 끝납니다."
+    }
+  }
+}

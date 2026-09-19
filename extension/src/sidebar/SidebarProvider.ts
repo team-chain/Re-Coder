@@ -904,6 +904,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             // ── AWS Credentials / Status (§S-2 — /api/aws/* 라우트) ────────
+            case 'aws.onboarding': {
+                //: 원클릭 IAM 셋업 — 보드 카드 「AWS 온보딩 마찰 제거」.
+                //: 템플릿이 호스팅돼 있으면 quick-create(클릭 한 번), 아니면
+                //: 템플릿을 클립보드에 복사하고 콘솔 업로드 화면을 연다.
+                try {
+                    const link = await this._apiClient.getAwsOnboardingLink();
+                    if (!link.template_hosted) {
+                        await vscode.env.clipboard.writeText(link.template_body);
+                    }
+                    const url = link.quick_create_url || link.console_upload_url;
+                    await vscode.env.openExternal(vscode.Uri.parse(url));
+                    this.postMessage('aws.onboarding.result', {
+                        hosted: link.template_hosted,
+                        steps: link.steps,
+                        stack_name: link.stack_name,
+                        action_count: link.action_count,
+                    });
+                } catch (err) {
+                    this.postMessage('aws.onboarding.result', { error: String(err) });
+                }
+                break;
+            }
             case 'aws.status': {
                 try {
                     const status = await this._apiClient.getAwsStatus();

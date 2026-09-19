@@ -818,6 +818,24 @@ export class ApiClient {
         };
     }
 
+    /** GET /api/aws/onboarding-link — 원클릭 IAM 셋업 링크 + CloudFormation 템플릿. */
+    async getAwsOnboardingLink(): Promise<{
+        quick_create_url: string;
+        template_hosted: boolean;
+        console_upload_url: string;
+        template_body: string;
+        stack_name: string;
+        action_count: number;
+        steps: string[];
+    }> {
+        const resp = await this.request<{
+            quick_create_url: string; template_hosted: boolean; console_upload_url: string;
+            template_body: string; stack_name: string; action_count: number; steps: string[];
+        }>('GET', '/api/aws/onboarding-link');
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '온보딩 링크 생성 실패'); }
+        return resp.data;
+    }
+
     /** POST /api/aws/permissions/check — 실제 ECS 대상 기준으로 현재 키 권한 점검. */
     async checkAwsPermissions(deploymentContext?: {
         ecrRepo?: string;
