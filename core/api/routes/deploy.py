@@ -48,6 +48,12 @@ _infra_proposals: dict[str, InfraFileProposal] = {}
 _deployment_plans: dict[str, DeploymentPlan] = {}
 _deployment_records: dict[str, DeploymentRecord] = {}
 
+#: 플랜 시점에 이미지가 아직 빌드되지 않아 Trivy 를 못 돌린 플랜의 대기 목록
+#: (plan_id → image). 실행 시점(빌드 후)에 1회 스캔을 보장하는 데 쓴다.
+#: 보드 이슈 「Trivy 가 빌드 전 이미지를 스캔 시도 — 보안 스캔이 한 번도
+#: 안 돈 채 통과」의 두 번째 절반이다.
+_plans_pending_image_scan: dict[str, str] = {}
+
 # 컨테이너 이름별 직렬화 락.
 #
 # 같은 컨테이너를 노리는 배포·롤백이 동시에 들어오면 stop/rm/run 순서가 서로
@@ -2665,6 +2671,39 @@ async def run_scan(request: ScanRequest) -> dict:
     )
 
 
+def _local_image_exists(image: str) -> bool:
+    """로컬 docker 데몬에 이미지가 실제로 존재하는지 확인한다.
+
+    docker 미설치·데몬 중지·이미지 없음 — 어느 경우든 False. 이 함수가
+    False 라고 해서 위험하다는 뜻은 아니고, **검사할 대상이 아직 없다**는
+    뜻이다. 호출자는 이를 '통과'가 아니라 'unverified' 로 다뤄야 한다.
+    """
+    if not image:
+        return False
+    try:
+        proc = subprocess.run(
+            ["docker", "image", "inspect", image],
+            shell=False, capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001 — 존재 확인 실패는 '없음'과 동일하게 취급
+        return False
+
+
+def _unverified_trivy_report(summary: str) -> dict:
+    """스캔을 돌리지 못했을 때의 자리 보고서 — '통과'와 절대 혼동되지 않는 형태."""
+    return {
+        "status": "unverified",
+        "scan_type": "trivy",
+        "target": None,
+        "critical_count": 0,
+        "high_count": 0,
+        "medium_count": 0,
+        "findings": [],
+        "summary": summary,
+    }
+
+
 async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
     """Run Trivy (filesystem/image) + Hadolint (Dockerfile) before planning.
 
@@ -2672,6 +2711,7 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
       - blockers:    list[str]  — human-readable critical findings
       - risk_reasons:list[str]  — additional non-critical reasons
       - elevated:    bool       — True if any critical was found
+      - unverified:  bool       — True if a required scan could not run
       - reports:     dict       — raw normalised scan reports per scanner
     """
     blockers: list[str] = []
@@ -2696,8 +2736,28 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
             if high > 0:
                 risk_reasons.append(f"Hadolint: {high} warning(s)")
 
-    # Trivy — only against an explicitly-provided image name.
-    if request.image:
+    # Trivy — **빌드된 이미지에만** 돌린다.
+    #
+    #: [무엇이 사고였나] 플랜 시점에는 이미지가 아직 빌드되지 않은 경우가
+    #: 대부분이다. 없는 이미지를 Trivy 에 넘기면 "image not found" 로
+    #: status=error 가 되는데, 예전 코드는 error 를 조용히 무시했다. 결과적으로
+    #: **보안 스캔이 한 번도 안 돈 채 게이트를 통과**했다(보드 이슈).
+    #: 이제 못 돈 스캔은 unverified 로 남기고(승인 강도 반영), 실행 시점에
+    #: 빌드 후 1회 스캔을 보장한다(execute_deployment 의 대기 목록 처리).
+    unverified_reasons: list[str] = []
+    if not request.image:
+        reports["trivy"] = _unverified_trivy_report(
+            "스캔할 이미지가 지정되지 않았습니다."
+        )
+        unverified_reasons.append("Trivy: 이미지 미지정 — 취약점 미검증")
+    elif not _local_image_exists(request.image):
+        reports["trivy"] = _unverified_trivy_report(
+            f"이미지 '{request.image}' 가 아직 빌드되지 않아 스캔하지 못했습니다."
+        )
+        unverified_reasons.append(
+            f"Trivy: '{request.image}' 미빌드 — 취약점 미검증 (실행 시 빌드 후 1회 스캔)"
+        )
+    else:
         trivy_report = await _execute_scan("trivy", workspace, request.image)
         reports["trivy"] = trivy_report
         if trivy_report.get("status") == "ok":
@@ -2707,11 +2767,19 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
             high = int(trivy_report.get("high_count", 0))
             if high > 0:
                 risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {request.image}")
+        else:
+            #: 스캔 실패는 통과가 아니다 — 실패 사유를 화면까지 끌고 간다.
+            unverified_reasons.append(
+                "Trivy: 스캔 실패 — "
+                + str(trivy_report.get("summary") or trivy_report.get("message") or "원인 미상")
+            )
 
+    risk_reasons.extend(unverified_reasons)
     return {
         "blockers": blockers,
         "risk_reasons": risk_reasons,
         "elevated": bool(blockers),
+        "unverified": bool(unverified_reasons),
         "reports": reports,
     }
 
@@ -2726,7 +2794,7 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
     ``approval_level=DOUBLE_CONFIRM``, and the blockers are embedded into
     ``risk_reasons`` (prefixed with ``BLOCKER:``).
     """
-    gate: dict = {"blockers": [], "risk_reasons": [], "elevated": False, "reports": {}}
+    gate: dict = {"blockers": [], "risk_reasons": [], "elevated": False, "unverified": False, "reports": {}}
     if not request.skip_security_scan:
         try:
             gate = await _run_pre_deploy_security_gate(request)
@@ -2735,10 +2803,12 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
         except Exception as exc:  # noqa: BLE001
             import logging
             logging.getLogger(__name__).warning("Pre-deploy security gate failed: %s", exc)
+            #: 게이트 자체가 죽었으면 검사 여부를 모른다 — 모르는 것은 통과가 아니다.
             gate = {
                 "blockers": [],
                 "risk_reasons": [f"Security gate did not run: {exc}"],
                 "elevated": False,
+                "unverified": True,
                 "reports": {},
             }
 
@@ -2773,6 +2843,14 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
         plan.risk_level = RiskLevel.HIGH
         plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
 
+    if gate.get("unverified"):
+        #: 검사를 못 한 것은 통과가 아니다. 위험이 확인된 게 아니므로 risk_level 은
+        #: 올리지 않되, **승인 강도**는 이중 확인으로 올린다 — 사용자가 "미검증
+        #: 상태로 실행한다"는 사실을 알고 누르게 하기 위해서다.
+        plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
+        if plan.image:
+            _plans_pending_image_scan[plan.plan_id] = plan.image
+
     _deployment_plans[plan.plan_id] = plan
     return plan
 
@@ -2790,7 +2868,28 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
 
     if not request.approved:
         del _deployment_plans[request.plan_id]
+        _plans_pending_image_scan.pop(request.plan_id, None)
         return {"status": "cancelled", "plan_id": request.plan_id}
+
+    # ── 빌드 후 1회 스캔 보장 ──────────────────────────────────────────────
+    #: 플랜 시점에 이미지가 없어 Trivy 를 못 돌린 플랜이라면, 실행 직전에
+    #: (이미지가 이제 존재할 때) 스캔을 한 번 돌린다. CRITICAL 이 나오면
+    #: 기존 컨테이너를 건드리기 **전에** 여기서 멈춘다 — 임계 구역 밖이라
+    #: 롤백할 것도 없다. 스캐너가 없어 또 못 돌면 기록만 남기고 진행한다
+    #: (승인 화면에 이미 '미검증' 사유가 표시된 상태로 사용자가 승인했다).
+    pending_image = _plans_pending_image_scan.pop(request.plan_id, None)
+    if pending_image and plan.image and _local_image_exists(plan.image):
+        deferred_report = await _execute_scan("trivy", "", plan.image)
+        if deferred_report.get("status") == "ok":
+            deferred_crit = int(deferred_report.get("critical_count", 0))
+            if deferred_crit > 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Trivy: CRITICAL {deferred_crit}건 — 배포를 차단했습니다 "
+                        f"({plan.image}). 취약점을 해결한 뒤 다시 시도하세요."
+                    ),
+                )
 
     # 플랜 생성 뒤 다른 배포가 실행될 수 있으므로, record 에 저장할 롤백 대상은
     # 반드시 실행 시점의 마지막 *검증 완료* 배포로 다시 잡는다.
