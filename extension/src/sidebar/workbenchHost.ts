@@ -22,6 +22,21 @@ import { CoreManager } from '../core/CoreManager';
 import { ApiClient } from '../core/ApiClient';
 import { PollingService } from '../core/PollingService';
 
+/**
+ * 이미지 참조에서 컨테이너 이름을 만든다.
+ *
+ * 무엇이 사고였나 — 로컬 배포가 이미지 입력값을 **그대로 컨테이너 이름으로**
+ * 썼다. `recoder-app:v1` 처럼 태그를 붙이면 이름에 `:` 가 들어가 코어의
+ * 이름 검증(400)에 걸렸다(보드 이슈 「컨테이너 이름 400」). 태그는 이미지에는
+ * 남아야 한다 — v1→v2 롤백이 태그로 구분되기 때문이다. 이름에서만 뗀다.
+ */
+export function containerNameFromImage(image: string): string {
+    const noDigest = String(image).split('@')[0];
+    const lastSegment = noDigest.split('/').pop() || '';
+    const name = lastSegment.split(':')[0];
+    return name || 'recoder-app';
+}
+
 export abstract class WorkbenchHost {
     protected _activity: { dot: string; text: string; time: string }[] = [];
     protected _pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -346,12 +361,16 @@ export abstract class WorkbenchHost {
                 try {
                     this._post({ type: 'wb.local.deployProgress', payload: { stage: 'build', line: '[…] 배포 플랜 생성 중' } });
                     // DeployMethod LOCAL_DOCKER 는 enum 문자열로 보냄
+                    //: 이미지는 태그째(롤백 구분용), 컨테이너 이름은 태그를 뗀 값.
+                    //: 예전처럼 이미지 입력을 이름에 그대로 쓰면 `app:v1` 의
+                    //: `:` 때문에 플랜 검증에서 400 이 났다.
+                    const localImage = String(p.image || 'recoder-app');
                     const plan = await this._apiClient.createDeploymentPlan(
                         ws,
                         'local_docker' as unknown as import('../types').DeployMethod,
                         undefined,
-                        String(p.image || 'recoder-app'),
-                        String(p.image || 'recoder-app'),
+                        localImage,
+                        containerNameFromImage(localImage),
                         Number(p.host_port || 8000),
                         Number(p.container_port || 8000),
                     );
