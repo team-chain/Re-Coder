@@ -81,13 +81,11 @@ function clientBodyKeys(anchor) {
   return keys;
 }
 
-//: ec2 3종은 ApiClient 에 있지만 Core 라우트가 없다 — 이 테스트를 만들며
-//: 발견된 실제 간극. 워크벤치 EC2 배포 버튼은 현재 404 를 부른다.
-const KNOWN_GAPS = new Set([
-  '/api/deploy/ec2',
-  '/api/deploy/ec2/status',
-  '/api/deploy/ec2/ready',
-]);
+//: 한때 /api/deploy/ec2 3종이 여기 있었다 — ApiClient 에는 있는데 Core 에
+//: 라우트가 없어 404 를 부르던 실제 간극. EC2 경로를 UI·클라이언트에서
+//: 통째로 제거하면서 간극도 사라졌다. 새 간극은 여기에 추가하되,
+//: 아래 '해소되면 목록에서 빼도록 강제' 테스트가 청소를 강제한다.
+const KNOWN_GAPS = new Set([]);
 
 // ---------------------------------------------------------------------------
 // 1. 경로 — 확장이 부르는 /api/deploy/* 가 Core 에 있다

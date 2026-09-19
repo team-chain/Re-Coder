@@ -444,41 +444,6 @@ export abstract class WorkbenchHost {
                 }
                 break;
             }
-            case 'wb.deploy.ec2': {
-                const p = msg.payload ?? {};
-                const wsPath = (p.workspace_path as string) || this._getWorkspacePath();
-                this.pushLog('deploy', `[…] EC2 배포 시작 (host=${p.ec2_host || 'env'})`);
-                try {
-                    const ready = await this._apiClient.ec2DeployReady();
-                    if (!ready.ready) {
-                        this.pushLog('deploy', `[BLOCKED] ${ready.issues.join('; ')}`);
-                        this.addActivity('fail', 'EC2 사전 점검 실패');
-                        break;
-                    }
-                    const r = await this._apiClient.deployEc2({
-                        workspace_path: wsPath,
-                        image_name: (p.image_name as string) || 'recoder-app',
-                        repo_name: (p.repo_name as string) || 'recoder-app',
-                        tag: (p.tag as string) || 'latest',
-                        container_name: (p.container_name as string) || 'recoder-app',
-                        host_port: Number(p.host_port ?? 8000),
-                        container_port: Number(p.container_port ?? 8000),
-                        health_check_path: (p.health_check_path as string) || '/health',
-                        ecr_registry: (p.ecr_registry as string) || '',
-                        ec2_host: (p.ec2_host as string) || '',
-                        ec2_ssh_key: (p.ec2_ssh_key as string) || '',
-                        aws_region: (p.aws_region as string) || '',
-                        ec2_user: (p.ec2_user as string) || 'ec2-user',
-                    });
-                    this.pushLog('deploy', `[OK] ${r.message}`);
-                    this.addActivity('info', 'EC2 배포 시작 (백그라운드)');
-                    this._startEc2StatusPolling();
-                } catch (err) {
-                    this.pushLog('deploy', `[ERR] ${err}`);
-                    this.addActivity('fail', `EC2 배포 실패: ${err}`);
-                }
-                break;
-            }
             case 'wb.deploy.ecs': {
                 const p = msg.payload ?? {};
                 const wsPath = (p.workspace_path as string) || this._getWorkspacePath();
@@ -517,12 +482,6 @@ export abstract class WorkbenchHost {
                 }
                 break;
             }
-            case 'wb.deploy.ec2.status':
-                try {
-                    const s = await this._apiClient.getEc2DeployStatus();
-                    this._post({ type: 'wb.deploy.ec2.statusResult', payload: s });
-                } catch { /* ignore */ }
-                break;
             case 'wb.deploy.ecs.status':
                 try {
                     const s = await this._apiClient.getEcsDeployStatus();
@@ -736,7 +695,7 @@ export abstract class WorkbenchHost {
     }
 
     /**
-     * Deploy Center 사전점검 — Core 의 진단/aws/ec2-ready/ecs-ready 결과를 종합해
+     * Deploy Center 사전점검 — Core 의 진단/aws/ecs-ready 결과를 종합해
      * webview 가 표시할 항목 리스트로 반환.
      *
      * 각 항목: { status: 'ok'|'fail'|'warn', name, msg, action?, action_label? }
@@ -807,14 +766,7 @@ export abstract class WorkbenchHost {
             items.push({ status: 'warn', name: 'GitHub 상태 확인 불가' });
         }
 
-        // 5) EC2/ECS 환경변수 (warn — 폼에 직접 입력해도 됨)
-        try {
-            const ec2 = await this._apiClient.ec2DeployReady();
-            items.push(ec2.ready
-                ? { status: 'ok', name: 'EC2 배포 환경 준비됨' }
-                : { status: 'warn', name: 'EC2 환경변수 일부 미설정', msg: ec2.issues.slice(0, 2).join(' · ') }
-            );
-        } catch { /* skip */ }
+        // 5) ECS 환경변수 (warn — 폼에 직접 입력해도 됨)
         try {
             const ecs = await this._apiClient.ecsDeployReady();
             items.push(ecs.ready
@@ -837,35 +789,7 @@ export abstract class WorkbenchHost {
         } catch { /* ignore */ }
     }
 
-    protected _ec2StatusTimer: ReturnType<typeof setInterval> | null = null;
     protected _ecsStatusTimer: ReturnType<typeof setInterval> | null = null;
-
-    protected _startEc2StatusPolling(): void {
-        if (this._ec2StatusTimer) return;
-        const tick = async () => {
-            try {
-                const s = await this._apiClient.getEc2DeployStatus();
-                this._post({ type: 'wb.deploy.ec2.statusResult', payload: s });
-                // log_tail 마지막 줄을 deploy 로그 패널에 출력
-                const tail = s.log_tail || [];
-                if (tail.length) {
-                    this.pushLog('deploy', `[EC2:${s.stage}] ${tail[tail.length - 1]}`);
-                }
-                if (!s.running) {
-                    if (this._ec2StatusTimer) { clearInterval(this._ec2StatusTimer); this._ec2StatusTimer = null; }
-                    if (s.stage === 'done') {
-                        this.pushLog('deploy', `[OK] EC2 배포 완료 (image=${s.image_uri || '?'})`);
-                        this.addActivity('ok', 'EC2 배포 완료');
-                    } else if (s.stage === 'failed') {
-                        this.pushLog('deploy', `[FAIL] EC2 배포 실패: ${s.error || ''}`);
-                        this.addActivity('fail', 'EC2 배포 실패');
-                    }
-                }
-            } catch { /* ignore */ }
-        };
-        this._ec2StatusTimer = setInterval(() => { void tick(); }, 3000);
-        void tick();
-    }
 
     protected _startEcsStatusPolling(): void {
         if (this._ecsStatusTimer) return;

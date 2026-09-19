@@ -1117,61 +1117,6 @@ export class ApiClient {
 
     // ===== Workbench 풀 구현 — Deploy / GitHub 액션 =====
 
-    /** POST /api/deploy/ec2 — EC2 SSH 배포 시작 (백그라운드, status 폴링 필요). */
-    async deployEc2(req: {
-        workspace_path?: string;
-        image_name?: string;
-        repo_name?: string;
-        tag?: string;
-        container_name?: string;
-        host_port?: number;
-        container_port?: number;
-        health_check_path?: string;
-        ecr_registry?: string;
-        ec2_host?: string;
-        ec2_ssh_key?: string;
-        aws_region?: string;
-        ec2_user?: string;
-    }): Promise<{ status: string; message: string }> {
-        const resp = await this.request<{ status: string; message: string }>('POST', '/api/deploy/ec2', req);
-        if (!resp.success || !resp.data) {
-            throw new Error(resp.error ?? 'EC2 배포 요청 실패');
-        }
-        return resp.data;
-    }
-
-    /** GET /api/deploy/ec2/status — EC2 배포 진행상황 폴링. */
-    async getEc2DeployStatus(): Promise<{
-        running: boolean;
-        stage: string;
-        log_tail: string[];
-        image_uri: string;
-        error: string;
-        started_at: string;
-        finished_at: string;
-    }> {
-        const resp = await this.request<{
-            running: boolean;
-            stage: string;
-            log_tail: string[];
-            image_uri: string;
-            error: string;
-            started_at: string;
-            finished_at: string;
-        }>('GET', '/api/deploy/ec2/status');
-        if (!resp.success || !resp.data) {
-            throw new Error(resp.error ?? 'EC2 상태 조회 실패');
-        }
-        return resp.data;
-    }
-
-    /** GET /api/deploy/ec2/ready — EC2 배포 사전 점검. */
-    async ec2DeployReady(): Promise<{ ready: boolean; issues: string[]; warnings?: string[] }> {
-        const resp = await this.request<{ ready: boolean; issues: string[]; warnings?: string[] }>(
-            'GET', '/api/deploy/ec2/ready'
-        );
-        return resp.success && resp.data ? resp.data : { ready: false, issues: ['Core 응답 없음'] };
-    }
 
     /** POST /api/deploy/ecs — ECS Fargate 배포 시작. */
     async deployEcs(req: {

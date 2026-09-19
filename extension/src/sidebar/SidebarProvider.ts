@@ -553,19 +553,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             // ── 큰 ReCoder Workspace 의 배포 센터 ──────────────────────────
-            case 'workspace.deploy.ec2': {
-                const req = (payload ?? {}) as Parameters<ApiClient['deployEc2']>[0];
-                try {
-                    const result = await this._apiClient.deployEc2({
-                        ...req,
-                        workspace_path: req.workspace_path || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
-                    });
-                    this.postMessage('workspace.deploy.result', result);
-                } catch (err) {
-                    this.postMessage('errorMessage', { message: String(err) });
-                }
-                break;
-            }
             case 'workspace.deploy.ecs': {
                 const req = (payload ?? {}) as Parameters<ApiClient['deployEcs']>[0];
                 try {
@@ -577,13 +564,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     this.postMessage('errorMessage', { message: String(err) });
                 }
-                break;
-            }
-            case 'workspace.deploy.ec2.status': {
-                try {
-                    const status = await this._apiClient.getEc2DeployStatus();
-                    this.postMessage('workspace.deploy.result', { message: status.error || `EC2: ${status.stage}` });
-                } catch { /* status polling is best effort */ }
                 break;
             }
             case 'workspace.deploy.ecs.status': {
