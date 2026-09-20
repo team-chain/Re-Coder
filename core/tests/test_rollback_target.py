@@ -192,3 +192,19 @@ def test_컨테이너_이름이_비면_대상을_찾지_않는다():
 
     assert target is None
     assert "컨테이너 이름" in reason
+
+
+def test_기록_시각이_같아도_나중에_기록된_배포가_최신이다():
+    """Windows 시계 해상도 회귀 잠금.
+
+    Windows 에서는 연속 배포 두 건이 같은 deployed_at 을 받을 수 있다.
+    시각만으로 정렬하면 안정 정렬 탓에 먼저 기록된 v1 이 앞에 와서
+    v3 의 롤백 대상이 v2 가 아니라 v1 이 된다. 삽입 순서가 동률을 깬다.
+    """
+    r1 = _record("api", "api:v1")
+    r2 = _record("api", "api:v2")
+    r2.deployed_at = r1.deployed_at  # 같은 틱에 기록된 상황을 강제
+
+    target, _reason = deploy_route._previous_image_for("api", "api:v3")
+
+    assert target == "api:v2", "시각 동률에서 오래된 이미지를 최신으로 골랐다"
