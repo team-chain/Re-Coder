@@ -129,9 +129,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly _coreManager: CoreManager,
         private readonly _pollingService: PollingService,
         private readonly _openWorkspace?: () => void,
+        //: 확장 호스트 재시작을 살아남는 저장소(context.globalState). 채팅 승인이
+        //: 빈 창에 폴더를 추가하면 VSCode 가 확장을 통째로 재시작하는데, 그때
+        //: 아직 발송 못 한 chat.actionAccepted 를 여기 적어 두고 이어서 보낸다.
+        private readonly _globalState?: vscode.Memento,
     ) {
         this._state = { currentMode: Mode.BUILD, proposals: [], isLoading: false };
     }
+
+    /** 재시작을 넘겨야 하는 채팅 승인 요청의 globalState 키. */
+    private static readonly PENDING_CHAT_ACTION_KEY = 'recoder.pendingChatAction';
 
     resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -881,6 +888,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const health = this._pollingService.getLastHealth();
                 if (health) { this.postMessage('healthUpdate', health); }
                 if (this._state.costSummary) { this.postMessage('costUpdate', this._state.costSummary); }
+                //: 채팅 승인 인계 — 승인 카드가 빈 창에 폴더를 추가하면 확장이
+                //: 재시작돼 chat.actionAccepted 가 유실된다(위 handleChatApproveAction
+                //: 주석 참고). 재시작 전에 globalState 에 적어 둔 요청이 있으면
+                //: **먼저 ready 를 보낸 웹뷰 하나가** 이어받아 발송한다. 키를 먼저
+                //: 지워서 사이드바·큰 화면이 둘 다 ready 를 보내도 한 번만 나간다.
+                const pending = this._globalState?.get<{
+                    instruction: string; targetFolder: string; absolutePath: string;
+                    folderCreated: boolean; ts: number;
+                }>(SidebarProvider.PENDING_CHAT_ACTION_KEY);
+                if (pending) {
+                    void this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, undefined);
+                    //: 오래된 메모(10분 초과)는 버린다 — 사용자가 이미 다른 일을
+                    //: 시작한 창에 옛 요청이 불쑥 끼어드는 것을 막는다.
+                    if (Date.now() - pending.ts <= 10 * 60 * 1000 && pending.instruction) {
+                        this.postMessageToWebview(requestWebview, 'chat.actionAccepted', {
+                            id: `restored-${pending.ts}`,
+                            requestId: Date.now(),
+                            instruction: pending.instruction,
+                            targetFolder: pending.targetFolder,
+                            absolutePath: pending.absolutePath,
+                            folderCreated: pending.folderCreated,
+                            addedToWorkspace: true,
+                            restoredAfterReload: true,
+                        });
+                    }
+                }
                 break;
             }
             // ── AWS Credentials / Status (§S-2 — /api/aws/* 라우트) ────────
@@ -1657,8 +1690,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const already = (vscode.workspace.workspaceFolders ?? []).some((f) => f.uri.fsPath === desc.absolute);
                 if (!already) {
                     const count = vscode.workspace.workspaceFolders?.length ?? 0;
+                    //: **여기서 확장이 통째로 재시작될 수 있다.** 빈 창(폴더 0개)에
+                    //: 폴더를 추가하면 VSCode 는 확장 호스트를 재시작하고, 아래의
+                    //: chat.actionAccepted 는 영영 발송되지 못한다 — 화면은 복원된
+                    //: 스피너만 돌리는 "무한 로딩"이 된다 (실기기에서 실제 발생).
+                    //: 그래서 추가 **직전에** 재시작을 살아남는 globalState 에 요청을
+                    //: 적어 두고, 재시작 후 첫 webview.ready 가 이어서 발송한다.
+                    //: 재시작이 없었으면 아래에서 바로 지운다.
+                    await this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, {
+                        instruction,
+                        targetFolder: desc.display,
+                        absolutePath: desc.absolute,
+                        folderCreated,
+                        ts: Date.now(),
+                    });
                     const ok = vscode.workspace.updateWorkspaceFolders(count, 0, { uri: vscode.Uri.file(desc.absolute) });
-                    if (!ok) { throw new Error('워크스페이스에 폴더를 추가하지 못했습니다.'); }
+                    if (!ok) {
+                        await this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, undefined);
+                        throw new Error('워크스페이스에 폴더를 추가하지 못했습니다.');
+                    }
                     addedToWorkspace = true;
                 }
             }
@@ -1675,6 +1725,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             absolutePath: desc.absolute,
             folderCreated, addedToWorkspace,
         });
+        //: 재시작 없이 여기까지 왔으면 인계 메모는 필요 없다 — 지워서
+        //: 다음 webview.ready 가 같은 요청을 중복 발송하지 않게 한다.
+        await this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, undefined);
     }
 
     /** targetFolder 가 절대경로(워크스페이스 밖)면 그 폴더를, 아니면 첫 워크스페이스 폴더를 루트로 쓴다. */

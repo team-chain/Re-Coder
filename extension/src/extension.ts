@@ -75,6 +75,9 @@ export function activate(context: vscode.ExtensionContext): void {
         coreManager,
         pollingService,
         () => { void vscode.commands.executeCommand('recoder.openReCoder'); },
+        //: 채팅 승인이 빈 창에 폴더를 추가하면 확장 호스트가 재시작된다.
+        //: 그 재시작을 넘겨야 하는 요청을 globalState 로 인계한다.
+        context.globalState,
     );
 
     context.subscriptions.push(
