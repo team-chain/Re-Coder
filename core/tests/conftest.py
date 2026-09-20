@@ -55,5 +55,13 @@ os.environ.setdefault("RECODER_INFRA_AI_CUSTOMIZE", "0")
 #
 # `setdefault` 로는 못 막는다 — 이미 설정된 값을 지워야 한다. 이 값이
 # 필요한 테스트는 전부 `monkeypatch.setenv` 로 직접 설정하므로 잃는 것이 없다.
+#
+# **pop 이 아니라 빈 문자열로 덮는다.** 일부 테스트 모듈이 `import main` 을
+# 하고, main.py 는 임포트 시점에 `load_dotenv(core/.env)` 를 부른다.
+# pop 으로 지우면 그 순간 개발자의 `.env` 값(LabRole)이 빈 자리로 다시
+# 들어온다 — pytest 는 **수집 단계에서** 모든 테스트 모듈을 임포트하므로
+# 어떤 테스트가 먼저 돌든 오염된다. `load_dotenv` 는 기본값(override=False)
+# 으로 **이미 있는 키는 건드리지 않으므로**, 빈 문자열을 깔아 두면 .env 가
+# 못 덮어쓰고, `aws_policy.role_from_env` 는 빈 문자열을 미설정으로 본다.
 for _role_var in ("ECS_EXECUTION_ROLE_ARN", "ECS_TASK_ROLE_ARN"):
-    os.environ.pop(_role_var, None)
+    os.environ[_role_var] = ""
