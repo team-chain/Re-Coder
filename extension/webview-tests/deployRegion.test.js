@@ -157,16 +157,17 @@ test('aws.status 핸들러가 실제로 폼 리전을 갱신한다', () => {
 
 test('배포 실행이 리전 검사를 거친다', () => {
   assert.match(compiled, /passesRegionCheck/, '배포 전에 리전을 검사하지 않는다');
-  //: 호출부는 ECS·EC2 둘. 한쪽만 검사하면 나머지가 조용히 예전 동작으로
-  //: 남는다 — 실제로 EC2 가 그런 상태였다.
+  //: 호출부는 ECS 하나다. 예전에는 EC2 도 있었지만 EC2 배포 경로는
+  //: 죽은 엔드포인트(404)여서 통째로 제거됐다 — 존재하지 않는 경로를
+  //: 검사하라고 요구하면 이 테스트가 거꾸로 죽은 코드를 되살리게 만든다.
   const calls = compiled.match(/passesRegionCheck\(/g) || [];
   assert.ok(
-    calls.length >= 2,
-    `ECS·EC2 양쪽에서 검사해야 한다. 호출 발견: ${calls.length}`
+    calls.length >= 1,
+    `배포 실행 전에 리전 검사가 있어야 한다. 호출 발견: ${calls.length}`
   );
-  //: 두 호출이 서로 다른 폼의 리전을 본다는 것까지 확인한다.
+  //: 호출이 ECS 폼의 리전을 본다는 것까지 확인한다.
   assert.match(compiled, /passesRegionCheck\(ecs\.aws_region\)/);
-  assert.match(compiled, /passesRegionCheck\(ec2\.aws_region\)/);
+  assert.doesNotMatch(compiled, /passesRegionCheck\(ec2\.aws_region\)/, 'EC2 경로가 되살아났다');
 });
 
 test('불일치는 한 번 경고하고, 다시 누르면 진행한다 (차단이 아니다)', () => {
