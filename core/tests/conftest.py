@@ -44,3 +44,16 @@ os.environ.setdefault(
 os.environ.setdefault("RECODER_TEST_MODE", "1")
 # infra_agent 의 LLM 커스터마이징도 비활성화 → 템플릿 그대로 반환되도록
 os.environ.setdefault("RECODER_INFRA_AI_CUSTOMIZE", "0")
+
+# **역할 환경변수도 세션 시작 전에 떼어 놓는다.**
+#
+# 개발자 PC 에는 실제 배포용으로 `ECS_EXECUTION_ROLE_ARN=...LabRole`
+# (AWS Academy) 같은 값이 시스템 환경이나 셸 프로필에 남아 있을 수 있다.
+# `aws_policy.build_policy()` 는 이 값을 읽어 PassRole 대상에 그 역할을
+# 추가하므로, 안 막으면 권한표·온보딩 템플릿 드리프트 테스트가
+# **어느 컴퓨터에서 돌리느냐에 따라** 통과/실패가 갈린다.
+#
+# `setdefault` 로는 못 막는다 — 이미 설정된 값을 지워야 한다. 이 값이
+# 필요한 테스트는 전부 `monkeypatch.setenv` 로 직접 설정하므로 잃는 것이 없다.
+for _role_var in ("ECS_EXECUTION_ROLE_ARN", "ECS_TASK_ROLE_ARN"):
+    os.environ.pop(_role_var, None)

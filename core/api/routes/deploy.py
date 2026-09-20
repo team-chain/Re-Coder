@@ -296,11 +296,7 @@ def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[
         return None, "롤백 대상 없음: 컨테이너 이름이 비어 있어 이전 배포를 찾을 수 없습니다."
 
     same_tag_seen = False
-    for record in sorted(
-        _deployment_records.values(),
-        key=lambda r: r.deployed_at,
-        reverse=True,
-    ):
+    for record in _records_newest_first():
         if record.container_name != container_name:
             continue
         if record.status != DeployStatus.SUCCESS:
@@ -329,13 +325,27 @@ def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[
     return None, "롤백 대상 없음: 이 컨테이너의 검증 완료 배포가 없습니다."
 
 
+def _records_newest_first() -> list[DeploymentRecord]:
+    """배포 기록을 최신순으로 — 시각이 같으면 **나중에 기록된 쪽**이 최신.
+
+    Windows 는 시계 해상도가 거칠어 연속 배포 두 건이 같은 `deployed_at` 을
+    받을 수 있다. 시각만으로 정렬하면(파이썬 정렬은 안정 정렬이라 동률은
+    원래 순서 유지) 먼저 기록된 쪽이 앞에 와서 **오래된 이미지로 롤백**한다.
+    dict 는 삽입 순서를 보존하므로 삽입 인덱스가 그 동률을 깬다.
+    """
+    return [
+        record
+        for _, record in sorted(
+            enumerate(_deployment_records.values()),
+            key=lambda pair: (pair[1].deployed_at, pair[0]),
+            reverse=True,
+        )
+    ]
+
+
 def _rollback_source_for(container_name: str, next_image: str) -> Optional[DeploymentRecord]:
     """현재 선택 규칙과 같은 기준으로 실행 설정을 복원할 이전 기록을 찾는다."""
-    for record in sorted(
-        _deployment_records.values(),
-        key=lambda r: r.deployed_at,
-        reverse=True,
-    ):
+    for record in _records_newest_first():
         if (
             record.container_name == container_name
             and record.status == DeployStatus.SUCCESS
