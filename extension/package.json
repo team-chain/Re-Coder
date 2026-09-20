@@ -302,7 +302,8 @@
     "smoke": "npm run compile && node --test out/test/coreClient.smoke.js",
     "test:webview": "npm run compile && npx tsc -p webview-src/tsconfig.test.json && node --test webview-tests/*.test.js",
     "package:all": "bash ../scripts/package-extension.sh",
-    "package:nobinary": "bash ../scripts/package-extension.sh --no-binary"
+    "package:nobinary": "bash ../scripts/package-extension.sh --no-binary",
+    "test:e2e": "node harness/e2e-extension-flow.js"
   },
   "devDependencies": {
     "@types/node": "^20.19.41",
