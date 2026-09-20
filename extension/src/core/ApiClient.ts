@@ -525,9 +525,14 @@ export class ApiClient {
         workspacePath: string,
         targetPath?: string
     ): Promise<object> {
+        //: 기본 30초로는 부족하다 — 코어가 Docker Desktop 자동 시작(최대 75초,
+        //: docker_autostart)을 기다린 뒤 스캔(코어 상한 300초)을 돌리므로,
+        //: 그 합보다 길게 잡는다. 짧으면 코어는 정상 진행 중인데 화면만
+        //: "스캔 실패"로 보이는 거짓 실패가 난다.
         const resp = await this.request<object>(
             'POST', '/api/deploy/scan',
-            { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath }
+            { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath },
+            false, 390000
         );
         if (!resp.success || !resp.data) { throw new Error(`${scanType} 스캔 실패`); }
         return resp.data;

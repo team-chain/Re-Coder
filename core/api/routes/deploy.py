@@ -1958,6 +1958,27 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
                     image = f"{ws.name.lower().replace(' ', '-') or 'app'}:latest"
                 else:
                     image = "app:latest"
+            #: Trivy 이미지 스캔은 Docker 데몬이 전제다. 꺼져 있으면 사용자에게
+            #: 미루지 않고 코어가 자동 시작을 시도한다(백그라운드 실행 + 준비
+            #: 폴링, docker_autostart 참고). 그래도 안 되면 시도 내역을 담아
+            #: 기존 미검증(fail-closed) 경로로 떨어진다 — 통과 위장은 없다.
+            try:
+                from docker_autostart import ensure_docker as _ensure_docker
+            except ImportError:  # pragma: no cover
+                from core.docker_autostart import ensure_docker as _ensure_docker
+            auto = await asyncio.to_thread(_ensure_docker)
+            if not auto.ready:
+                return {
+                    "status": "not_run",
+                    "scan_type": scan_type,
+                    "target": image,
+                    "critical_count": 0,
+                    "high_count": 0,
+                    "medium_count": 0,
+                    "findings": [],
+                    "summary": "Docker 데몬이 없어 스캔을 실행하지 못했습니다 (미검증).",
+                    "message": auto.message,
+                }
             raw = await asyncio.wait_for(agent.run_trivy_scan(image), timeout=300)
             target_for_log = image
         elif scan_type == "hadolint":

@@ -1,0 +1,203 @@
+"""Docker Desktop 자동 기동 — 꺼져 있으면 코어가 직접 백그라운드로 띄운다.
+
+## 왜 있나
+
+로컬 배포·보안 스캔은 Docker 데몬이 전제다. 지금까지는 데몬이 꺼져 있으면
+"Docker Desktop 을 실행한 뒤 다시 시도하세요"라고 사용자에게 미뤘다 —
+사용자는 앱을 찾아 켜고, 엔진이 뜰 때까지 기다렸다가, 하던 일을 처음부터
+다시 눌러야 했다. 이 모듈은 그 대기를 코어가 대신한다: 백그라운드로
+Docker Desktop 을 띄우고, 데몬이 응답할 때까지 폴링한 뒤 원래 작업을
+계속한다.
+
+## 원칙 — 주도적이되 숨기지 않는다
+
+- 자동 시작을 **시도했다는 사실과 결과**는 항상 message 로 호출자에게
+  돌아가고, 호출자는 그것을 화면에 보여준다. 몰래 켜지 않는다.
+- 시간 내에 못 뜨면 **fail-closed 그대로다** — 검사를 통과한 척하지 않고,
+  무엇을 시도했고 왜 안 됐는지를 담아 실패한다.
+- 자동 시작을 원하지 않으면 `RECODER_DOCKER_AUTOSTART=0` 으로 끈다.
+
+## 재시도 폭주 방지
+
+화면 폴링이 스캔·배포 준비 상태를 반복 조회하므로, 실패한 직후에 또
+Docker Desktop 을 실행하면 앱이 여러 번 뜨거나 부팅 중에 재실행된다.
+모듈 전역 쿨다운(기본 120초) 안에서는 재시도하지 않고 직전 결과를
+돌려준다. 같은 이유로 동시 호출은 락으로 직렬화한다.
+"""
+from __future__ import annotations
+
+import os
+import platform
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+
+#: 자동 시작 스위치. "0" 일 때만 꺼진다 — 기본은 켜짐.
+ENV_AUTOSTART = "RECODER_DOCKER_AUTOSTART"
+#: 데몬 준비 대기 상한(초). ECS 경로가 executor 에서 블로킹으로 돌므로 과하게 길게 잡지 않는다.
+ENV_WAIT_SECONDS = "RECODER_DOCKER_AUTOSTART_WAIT"
+DEFAULT_WAIT_SECONDS = 75
+#: 실패 후 재시도 쿨다운(초).
+_RETRY_COOLDOWN_SECONDS = 120
+
+_POLL_INTERVAL_SECONDS = 3.0
+
+_lock = threading.Lock()
+_last_attempt_at: float = 0.0
+_last_result: "AutostartResult | None" = None
+
+
+@dataclass
+class AutostartResult:
+    """자동 기동 시도의 전말 — 화면에 그대로 보여줄 수 있는 형태."""
+
+    attempted: bool   #: 이번(또는 쿨다운 내 직전) 호출에서 실행을 시도했는가
+    launched: bool    #: Docker Desktop 프로세스 실행에 성공했는가
+    ready: bool       #: 데몬이 응답하는 상태로 끝났는가
+    waited_seconds: int
+    message: str
+
+
+def daemon_up(timeout: float = 5.0) -> bool:
+    """`docker info` 가 성공하면 데몬이 살아 있다. CLI 부재·타임아웃은 down 취급."""
+    try:
+        proc = subprocess.run(
+            ["docker", "info"], capture_output=True, timeout=timeout,
+        )
+        return proc.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _windows_candidates() -> list[str]:
+    """Windows 의 Docker Desktop 실행 파일 후보 — 존재하는 것만 돌려준다."""
+    roots = [
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.environ.get("LOCALAPPDATA", ""),
+    ]
+    names = [
+        os.path.join("Docker", "Docker", "Docker Desktop.exe"),
+    ]
+    found = []
+    for root in roots:
+        if not root:
+            continue
+        for name in names:
+            path = os.path.join(root, name)
+            if os.path.exists(path):
+                found.append(path)
+    return found
+
+
+def _launch() -> tuple[bool, str]:
+    """플랫폼별로 Docker Desktop 을 **백그라운드로** 실행한다.
+
+    반환: (실행 시도 성공 여부, 사람이 읽을 설명)
+    코어를 블로킹하지 않도록 어떤 경우에도 프로세스 종료를 기다리지 않는다.
+    """
+    system = platform.system()
+    try:
+        if system == "Windows":
+            candidates = _windows_candidates()
+            if not candidates:
+                return False, (
+                    "Docker Desktop 실행 파일을 찾지 못했습니다 — 설치돼 있다면 "
+                    "직접 실행해 주세요."
+                )
+            # DETACHED_PROCESS: 코어가 죽어도 Docker 는 남는다. 콘솔도 안 띄운다.
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
+            subprocess.Popen(
+                [candidates[0]],
+                creationflags=flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            return True, f"Docker Desktop 실행: {candidates[0]}"
+        if system == "Darwin":
+            subprocess.Popen(
+                ["open", "-a", "Docker"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "Docker Desktop 실행: open -a Docker"
+        # Linux 데몬은 systemd 권한이 얽혀 있어 조용한 자동 시작이 오히려
+        # 실패를 숨긴다. 명시적으로 지원하지 않는다고 말한다.
+        return False, (
+            "Linux 에서는 Docker 데몬 자동 시작을 지원하지 않습니다 — "
+            "`sudo systemctl start docker` 로 직접 시작해 주세요."
+        )
+    except Exception as exc:  # noqa: BLE001 — 실행 실패는 사유와 함께 fail-closed
+        return False, f"Docker Desktop 실행 실패: {exc}"
+
+
+def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
+    """데몬이 꺼져 있으면 자동 시작을 시도하고, 준비될 때까지 기다린다.
+
+    항상 AutostartResult 를 돌려준다 — 예외를 던지지 않으므로 호출자는
+    ready 를 보고 기존 실패 경로(fail-closed)를 그대로 타면 된다.
+    """
+    global _last_attempt_at, _last_result
+
+    if daemon_up():
+        return AutostartResult(False, False, True, 0, "Docker 데몬 실행 중")
+
+    if os.environ.get(ENV_AUTOSTART, "1").strip() == "0":
+        return AutostartResult(
+            False, False, False, 0,
+            "Docker 데몬이 꺼져 있고 자동 시작이 비활성화돼 있습니다"
+            f"({ENV_AUTOSTART}=0). Docker Desktop 을 직접 실행해 주세요.",
+        )
+
+    with _lock:
+        # 락을 기다리는 동안 다른 호출이 이미 띄웠을 수 있다.
+        if daemon_up():
+            return AutostartResult(False, False, True, 0, "Docker 데몬 실행 중")
+
+        now = time.monotonic()
+        if _last_result is not None and (now - _last_attempt_at) < _RETRY_COOLDOWN_SECONDS:
+            return _last_result
+
+        _last_attempt_at = now
+        launched, how = _launch()
+        if not launched:
+            _last_result = AutostartResult(True, False, False, 0, how)
+            return _last_result
+
+        limit = wait_seconds
+        if limit is None:
+            try:
+                limit = int(os.environ.get(ENV_WAIT_SECONDS, str(DEFAULT_WAIT_SECONDS)))
+            except ValueError:
+                limit = DEFAULT_WAIT_SECONDS
+
+        started = time.monotonic()
+        while (time.monotonic() - started) < limit:
+            if daemon_up():
+                waited = int(time.monotonic() - started)
+                _last_result = AutostartResult(
+                    True, True, True, waited,
+                    f"Docker Desktop 을 자동 시작했습니다 (준비까지 {waited}초).",
+                )
+                return _last_result
+            time.sleep(_POLL_INTERVAL_SECONDS)
+
+        _last_result = AutostartResult(
+            True, True, False, int(limit),
+            f"Docker Desktop 자동 시작을 시도했지만 {int(limit)}초 안에 데몬이 "
+            "준비되지 않았습니다. 잠시 후 다시 시도해 주세요.",
+        )
+        return _last_result
+
+
+def reset_for_tests() -> None:
+    """테스트 전용 — 쿨다운·직전 결과 초기화."""
+    global _last_attempt_at, _last_result
+    with _lock:
+        _last_attempt_at = 0.0
+        _last_result = None

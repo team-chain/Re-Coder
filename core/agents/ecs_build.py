@@ -128,10 +128,28 @@ def ensure_docker_available(*, runner: Runner = run_command) -> str:
     rc, out, err = runner(["docker", "info", "--format", "{{.ServerVersion}}"],
                           timeout=DOCKER_QUICK_TIMEOUT)
     if rc != 0:
+        #: 데몬이 꺼져 있으면 사용자에게 미루기 전에 **코어가 직접 띄워 본다**.
+        #: 성공하면 원래 작업을 그대로 계속하고, 실패하면 무엇을 시도했는지까지
+        #: 담아 fail-closed 로 실패한다 — 통과한 척은 하지 않는다.
+        try:
+            from docker_autostart import ensure_docker
+        except ImportError:  # pragma: no cover
+            from core.docker_autostart import ensure_docker
+        auto = ensure_docker()
+        if auto.ready:
+            rc, out, err = runner(["docker", "info", "--format", "{{.ServerVersion}}"],
+                                  timeout=DOCKER_QUICK_TIMEOUT)
+            if rc == 0:
+                return out or "unknown"
         raise BuildError(
             "docker 는 설치돼 있지만 데몬에 연결하지 못했습니다.",
-            detail=err or out,
-            remedy="Docker Desktop 을 실행한 뒤 다시 시도하세요.",
+            detail=(auto.message + ((" | " + (err or out)) if (err or out) else "")),
+            remedy=(
+                "Docker Desktop 자동 시작을 시도했습니다 — 잠시 후 다시 "
+                "시도하거나 직접 실행해 주세요."
+                if auto.attempted else
+                "Docker Desktop 을 실행한 뒤 다시 시도하세요."
+            ),
         )
     return out or "unknown"
 
