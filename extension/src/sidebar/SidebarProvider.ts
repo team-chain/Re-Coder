@@ -553,19 +553,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             // ── 큰 ReCoder Workspace 의 배포 센터 ──────────────────────────
-            case 'workspace.deploy.ec2': {
-                const req = (payload ?? {}) as Parameters<ApiClient['deployEc2']>[0];
-                try {
-                    const result = await this._apiClient.deployEc2({
-                        ...req,
-                        workspace_path: req.workspace_path || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
-                    });
-                    this.postMessage('workspace.deploy.result', result);
-                } catch (err) {
-                    this.postMessage('errorMessage', { message: String(err) });
-                }
-                break;
-            }
             case 'workspace.deploy.ecs': {
                 const req = (payload ?? {}) as Parameters<ApiClient['deployEcs']>[0];
                 try {
@@ -577,13 +564,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     this.postMessage('errorMessage', { message: String(err) });
                 }
-                break;
-            }
-            case 'workspace.deploy.ec2.status': {
-                try {
-                    const status = await this._apiClient.getEc2DeployStatus();
-                    this.postMessage('workspace.deploy.result', { message: status.error || `EC2: ${status.stage}` });
-                } catch { /* status polling is best effort */ }
                 break;
             }
             case 'workspace.deploy.ecs.status': {
@@ -904,6 +884,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             // ── AWS Credentials / Status (§S-2 — /api/aws/* 라우트) ────────
+            case 'aws.onboarding': {
+                //: 원클릭 IAM 셋업 — 보드 카드 「AWS 온보딩 마찰 제거」.
+                //: 템플릿이 호스팅돼 있으면 quick-create(클릭 한 번), 아니면
+                //: 템플릿을 클립보드에 복사하고 콘솔 업로드 화면을 연다.
+                try {
+                    const link = await this._apiClient.getAwsOnboardingLink();
+                    if (!link.template_hosted) {
+                        await vscode.env.clipboard.writeText(link.template_body);
+                    }
+                    const url = link.quick_create_url || link.console_upload_url;
+                    await vscode.env.openExternal(vscode.Uri.parse(url));
+                    this.postMessage('aws.onboarding.result', {
+                        hosted: link.template_hosted,
+                        steps: link.steps,
+                        stack_name: link.stack_name,
+                        action_count: link.action_count,
+                    });
+                } catch (err) {
+                    this.postMessage('aws.onboarding.result', { error: String(err) });
+                }
+                break;
+            }
             case 'aws.status': {
                 try {
                     const status = await this._apiClient.getAwsStatus();

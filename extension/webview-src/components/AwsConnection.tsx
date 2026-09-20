@@ -46,6 +46,8 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   //: 비어 있으면 이 섹션 자체가 렌더되지 않으므로, CLI 를 안 쓰는 사용자는
   //: 지금과 완전히 같은 화면을 본다.
   const [profiles, setProfiles] = useState<string[]>([]);
+  //: 원클릭 IAM 셋업 결과 — 브라우저를 연 뒤 화면에 남길 다음 단계 안내.
+  const [onboarding, setOnboarding] = useState<{ hosted?: boolean; steps?: string[]; error?: string } | null>(null);
 
   useEffect(() => {
     postMessage("aws.status");
@@ -83,6 +85,10 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       setBusy(false);
       if (result.ok) { setStatus(result.status ?? null); setError(""); }
       else { setError(result.message ?? "AWS 권한을 점검하지 못했습니다."); }
+    }
+    if (type === "aws.onboarding.result") {
+      setBusy(false);
+      setOnboarding(payload as { hosted?: boolean; steps?: string[]; error?: string });
     }
     if (type === "aws.profiles") {
       const result = payload as { profiles?: string[] };
@@ -160,6 +166,19 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   return <div style={card}>
     <div style={{ fontSize: 15, fontWeight: 700 }}>AWS 계정 연결</div>
     <p style={{ margin: "7px 0 14px", color: "var(--vscode-descriptionForeground, #999)", fontSize: 12, lineHeight: 1.5 }}>배포는 본인의 AWS 계정에서 실행됩니다. 입력한 키는 검증 후 VS Code 보안 금고에만 저장합니다.</p>
+    <div style={{ marginBottom: 14, padding: "10px 11px", borderRadius: 6, background: "rgba(78,201,176,.07)", border: "1px solid rgba(78,201,176,.28)" }}>
+      {/*
+        원클릭 IAM 셋업 — 보드 카드 「AWS 온보딩 마찰 제거」.
+        키가 아직 없는 사용자용: 버튼을 누르면 최소권한 사용자·정책·키를
+        만드는 CloudFormation 화면이 브라우저에 열린다. 스택 Outputs 의
+        키 두 개를 아래 입력란에 붙여넣으면 온보딩 끝.
+      */}
+      <div style={{ fontSize: 12, fontWeight: 650 }}>아직 액세스 키가 없다면</div>
+      <div style={{ marginTop: 4, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.5 }}>버튼 한 번으로 배포 전용 최소권한 사용자와 키를 만드는 AWS 화면을 엽니다.</div>
+      <button disabled={busy} onClick={() => { setBusy(true); setOnboarding(null); postMessage("aws.onboarding"); }} style={{ marginTop: 9, border: "1px solid rgba(78,201,176,.45)", borderRadius: 5, padding: "6px 11px", fontSize: 12, cursor: busy ? "wait" : "pointer", background: "transparent", color: "var(--vscode-charts-green, #4ec9b0)" }}>{busy ? "여는 중…" : "원클릭 IAM 셋업 (브라우저)"}</button>
+      {onboarding?.error && <div style={{ marginTop: 8, fontSize: 11, color: "var(--vscode-errorForeground, #f48771)" }}>{onboarding.error}</div>}
+      {onboarding?.steps && <div style={{ marginTop: 8, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.6 }}>{onboarding.steps.map(step => <div key={step}>{step}</div>)}</div>}
+    </div>
     {profiles.length > 0 && <div style={{ marginBottom: 14, padding: "10px 11px", borderRadius: 6, background: "rgba(55,148,255,.08)", border: "1px solid rgba(55,148,255,.25)" }}>
       {/*
         **이 컴퓨터에 이미 자격증명이 있으면 키를 다시 입력받지 않는다.**

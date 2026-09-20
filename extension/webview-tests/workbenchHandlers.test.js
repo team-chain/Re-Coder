@@ -54,7 +54,7 @@ test('호스트가 GitHub·배포·Discord 핸들러를 모두 갖는다', () =>
     'wb.gh.createRepo', 'wb.gh.setSecret', 'wb.gh.push', 'wb.gh.listRuns',
     'wb.local.generate', 'wb.local.approve', 'wb.local.scan', 'wb.local.deploy',
     'wb.actions.generate', 'wb.actions.approve',
-    'wb.deploy.ec2', 'wb.deploy.ecs', 'wb.deploy.precheck',
+    'wb.deploy.ecs', 'wb.deploy.precheck',
     'wb.discord.fetchStatus', 'wb.discord.setChannel', 'wb.discord.openInvite',
   ];
   const missing = must.filter((t) => !handled.has(t));

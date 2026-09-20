@@ -1713,3 +1713,91 @@ async def get_minimum_policy(
         + _task_role_note(task)
         + _policy_steps(unknowns, academy),
     )
+
+
+# ---------------------------------------------------------------------------
+# 온보딩 원클릭 IAM 셋업 — 보드 카드 「AWS 온보딩 마찰 제거」
+# ---------------------------------------------------------------------------
+
+class AwsOnboardingResponse(BaseModel):
+    """quick-create 링크 + 템플릿 본문 + 따라 할 순서."""
+    quick_create_url: str        # 템플릿이 호스팅돼 있을 때만 채워진다
+    template_hosted: bool
+    console_upload_url: str      # 폴백 — 콘솔의 템플릿 업로드 화면
+    template_body: str           # CloudFormation 템플릿(JSON) 원문
+    stack_name: str
+    action_count: int            # 정책이 허용하는 액션 수 (최소권한 근거)
+    steps: list[str]
+
+
+@router.get("/api/aws/onboarding-link", response_model=AwsOnboardingResponse)
+async def get_onboarding_link(region: str = "", targets: str = "") -> AwsOnboardingResponse:
+    """원클릭 IAM 셋업 링크를 만든다.
+
+    템플릿은 정적 하나다 — 계정 ID·리전은 CloudFormation 내장 변수가 스택
+    생성 시점에 채우므로 사용자별 생성이 필요 없다. 템플릿이 S3 에 호스팅돼
+    있으면(코어 .env 의 RECODER_IAM_TEMPLATE_URL) quick-create 링크를 주고,
+    아니면 콘솔 업로드 플로우로 폴백한다. 확장은 템플릿 본문을 클립보드에
+    복사해 두므로 폴백에서도 붙여넣기 한 번이면 된다.
+    """
+    try:
+        import aws_onboarding
+    except ImportError:  # 패키지 상대 배치 폴백 (aws_policy 와 동일 패턴)
+        from core import aws_onboarding  # type: ignore
+
+    selected = [t.strip() for t in targets.split(",") if t.strip()] or None
+    explicit_region = (region or "").strip()
+    if explicit_region:
+        try:
+            aws_policy.validate_region(explicit_region)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    else:
+        # 이미 연결돼 있으면 그 리전의 콘솔을 연다. 없으면 리전 없이 —
+        # 콘솔이 사용자의 마지막 리전을 쓴다.
+        _, session_region, _ = _deployment_identity()
+        explicit_region = session_region or ""
+
+    try:
+        template_body = aws_onboarding.template_json(targets=selected)
+        template = aws_onboarding.build_quickcreate_template(selected)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    policy_doc = template["Resources"]["RecoderDeployPolicy"]["Properties"]["PolicyDocument"]
+    hosted = aws_onboarding.hosted_template_url()
+
+    if hosted:
+        steps = [
+            "1. 열린 브라우저에서 스택 이름을 확인하고 「스택 생성」을 누르세요.",
+            "2. 생성이 끝나면 Outputs 탭에서 AccessKeyId / SecretAccessKey 를 복사하세요.",
+            "3. ReCoder 의 AWS 연결 화면에 붙여넣으면 끝입니다.",
+        ]
+    else:
+        steps = [
+            "1. 템플릿이 클립보드에 복사됐습니다. 열린 콘솔에서 「템플릿 파일 업로드」를 고르고, 붙여넣어 저장한 파일을 올리세요.",
+            "2. 스택 이름은 recoder-iam-setup 을 권장합니다. 「스택 생성」을 누르세요.",
+            "3. Outputs 탭에서 AccessKeyId / SecretAccessKey 를 복사해 ReCoder 의 AWS 연결 화면에 붙여넣으세요.",
+            f"(팀 참고: 템플릿을 S3 에 올리고 {aws_onboarding.ENV_TEMPLATE_URL} 을 설정하면 이 과정이 링크 클릭 한 번으로 줄어듭니다 — infra/README.md)",
+        ]
+
+    return AwsOnboardingResponse(
+        quick_create_url=aws_onboarding.quick_create_url(hosted, explicit_region),
+        template_hosted=bool(hosted),
+        console_upload_url=aws_onboarding.console_upload_url(explicit_region),
+        template_body=template_body,
+        stack_name=aws_onboarding.STACK_NAME,
+        action_count=len(aws_policy.used_actions(_strip_cfn_subs(policy_doc))),
+        steps=steps,
+    )
+
+
+def _strip_cfn_subs(value):
+    """Fn::Sub 래핑을 벗겨 일반 정책 문서 모양으로 되돌린다 (액션 계수용)."""
+    if isinstance(value, dict):
+        if set(value.keys()) == {"Fn::Sub"}:
+            return value["Fn::Sub"]
+        return {k: _strip_cfn_subs(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_cfn_subs(v) for v in value]
+    return value
