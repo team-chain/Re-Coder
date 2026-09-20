@@ -58,6 +58,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+# Windows 한국어 콘솔(cp949)은 '—', '✅' 같은 문자를 인코딩하지 못해
+# print 에서 UnicodeEncodeError 로 죽는다. 출력 스트림만 UTF-8 로 강제한다.
+# (표시가 깨질 수는 있어도 검증 스크립트가 문자 하나 때문에 죽지는 않는다.)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORE_DIR = REPO_ROOT / "core"
 
