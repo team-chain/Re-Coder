@@ -42,8 +42,10 @@ from .deploy_ecs import DEFAULT_TASK_FAMILY as ECS_DEFAULT_TASK_FAMILY
 
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     import aws_policy
+    import aws_role
 except ImportError:  # pragma: no cover
     from core import aws_policy
+    from core import aws_role
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,17 @@ DEFAULT_REGION = (
 # subsequent boto3 sessions in this process pick up the right profile even
 # before the diagnostics cache is rebuilt.
 _active_profile: Optional[str] = None
+
+#: 확장이 코어를 띄울 때 넘기는 환경변수 — 값이 있으면 코어는 기반 자격증명
+#: (AWS_PROFILE 또는 키)으로 이 역할을 빌려 그 자격증명만 쓴다. 역할 ARN 은
+#: 비밀이 아니라 globalState 에 둔다 (비밀은 SecretStorage 에만).
+ENV_ASSUME_ROLE_ARN = "RECODER_ASSUME_ROLE_ARN"
+
+#: 역할 모드의 프로세스 내 상태. 비밀은 임시 자격증명(만료됨)뿐이고, 갱신에
+#: 필요한 기반은 프로필 이름 또는 코어 시작 시 받은 키(메모리)다.
+#:   role_arn, base_profile, base_env(dict|None), region, expires_at(datetime),
+#:   principal_arn
+_role_state: Optional[dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -169,9 +182,35 @@ class AwsStatus(BaseModel):
     region: str = ""
     profile: str = ""
     access_key_last4: str = ""
-    storage: str = ""        # "recoder" | "aws_credentials_file" | "env" | ""
+    storage: str = ""        # "recoder" | "aws_credentials_file" | "env" | "assumed_role" | ""
     message: str = ""
     permission_check: Optional[AwsPermissionCheck] = None
+    #: 역할 모드일 때만 채워진다 — 빌린 역할과 임시 자격증명 만료 시각.
+    role_arn: str = ""
+    expires_at: str = ""
+
+
+class AwsRoleSetupRequest(BaseModel):
+    """프로그램 안에서 최소권한 역할을 만들고 빌리는 요청.
+
+    profile 을 주면 그 ~/.aws 프로필이 기반 자격증명이다. 비우면 지금 코어에
+    연결된 자격증명(키 또는 프로필)을 기반으로 쓴다. 비밀 값은 실리지 않는다.
+    """
+
+    profile: str = ""
+    region: str = ""
+    deployment_context: Optional[AwsDeploymentPermissionContext] = None
+
+
+class AwsRoleSetupResponse(BaseModel):
+    """ok=False 여도 200 이다 — 권한 부족은 실패가 아니라 **콘솔 폴백 분기**다."""
+
+    ok: bool
+    mode: str                  # "role" | "console_fallback"
+    message: str
+    denied_action: str = ""    # 폴백일 때 어느 권한이 없었나
+    role: Optional[dict[str, Any]] = None
+    status: Optional[AwsStatus] = None
 
 
 # ECS Fargate 배포를 실제로 시작하기 위한 최소 작업 목록. 이 목록은 배포
@@ -455,8 +494,12 @@ def _detect_credential_source() -> tuple[str, str]:
     """현재 boto3 가 어떤 소스에서 자격증명을 잡고 있는지 추정.
 
     반환: (storage_label, profile_name)
-    storage_label: "recoder" | "aws_credentials_file" | "env" | ""
+    storage_label: "recoder" | "aws_credentials_file" | "env" | "assumed_role" | ""
     """
+    if _role_state is not None:
+        #: 환경변수에 있는 건 빌린 역할의 임시 자격증명이다 — "env" 로 보이면
+        #: 화면이 키 연결로 착각한다.
+        return "assumed_role", str(_role_state.get("base_profile") or "")
     if os.environ.get("AWS_ACCESS_KEY_ID"):
         # 환경변수가 우선이지만 우리가 _apply_to_process_env 로 세팅했을 수도 있음
         # → 저장 파일 존재 여부로 구분
@@ -859,9 +902,11 @@ def _load_into_process_if_needed() -> None:
     한번 더 시도한다.
     """
     if os.environ.get("AWS_ACCESS_KEY_ID"):
+        _enter_role_mode_from_env()
         return
     stored = _load_stored_credentials()
     if not stored:
+        _enter_role_mode_from_env()
         return
     _apply_to_process_env(
         access_key_id=stored.get("access_key_id", ""),
@@ -870,6 +915,7 @@ def _load_into_process_if_needed() -> None:
         profile=stored.get("profile", "recoder"),
         session_token=stored.get("session_token", ""),
     )
+    _enter_role_mode_from_env()
 
 
 def _environment_snapshot() -> tuple[dict[str, Optional[str]], Optional[str]]:
@@ -896,6 +942,140 @@ def _restore_environment(snapshot: dict[str, Optional[str]], profile: Optional[s
         else:
             os.environ[key] = value
     _active_profile = profile
+
+
+# ---------------------------------------------------------------------------
+# 역할 모드 — 프로그램 안에서 만든 최소권한 역할을 빌려 쓴다 (aws_role)
+# ---------------------------------------------------------------------------
+
+
+def _base_credentials_from_env() -> Optional[dict[str, str]]:
+    """지금 환경변수에 있는 키를 갱신용 기반으로 떠 둔다. 역할 모드로 바뀌면
+    환경변수는 임시 자격증명으로 덮이므로, 그 전에 한 번 떠야 한다."""
+    key = os.environ.get("AWS_ACCESS_KEY_ID", "")
+    secret = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+    if not key or not secret:
+        return None
+    base = {"AWS_ACCESS_KEY_ID": key, "AWS_SECRET_ACCESS_KEY": secret}
+    token = os.environ.get("AWS_SESSION_TOKEN", "")
+    if token:
+        base["AWS_SESSION_TOKEN"] = token
+    return base
+
+
+def _base_session(base_profile: str, base_env: Optional[dict[str, str]], region: str):
+    """기반 자격증명으로 boto3 세션을 만든다 — 임시 자격증명이 환경변수에
+    덮여 있어도 영향받지 않게 프로필/키를 **명시**한다."""
+    import boto3  # type: ignore
+
+    kwargs: dict[str, Any] = {}
+    if region:
+        kwargs["region_name"] = region
+    if base_profile:
+        kwargs["profile_name"] = base_profile
+    elif base_env:
+        kwargs["aws_access_key_id"] = base_env["AWS_ACCESS_KEY_ID"]
+        kwargs["aws_secret_access_key"] = base_env["AWS_SECRET_ACCESS_KEY"]
+        if base_env.get("AWS_SESSION_TOKEN"):
+            kwargs["aws_session_token"] = base_env["AWS_SESSION_TOKEN"]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="역할을 만들 기반 자격증명이 없습니다. 프로필을 고르거나 키로 먼저 연결하세요.",
+        )
+    return boto3.Session(**kwargs)
+
+
+def _apply_role_credentials(creds: "aws_role.TemporaryCredentials", region: str) -> None:
+    """빌린 임시 자격증명을 코어 프로세스에 적용한다.
+
+    AWS_PROFILE 은 **지운다** — 남겨두면 boto3 가 어느 쪽을 쓰는지 사람이
+    헷갈린다(실제로는 키가 이기지만, 화면과 로그가 프로필을 가리킨다).
+    """
+    global _active_profile
+    _active_profile = None
+    os.environ.pop("AWS_PROFILE", None)
+    os.environ.update(creds.as_env())
+    if region:
+        os.environ["AWS_DEFAULT_REGION"] = region
+        os.environ["AWS_REGION"] = region
+
+
+def _refresh_role_credentials() -> None:
+    """역할 모드에서 임시 자격증명이 만료에 가까우면 다시 빌린다.
+
+    실패하면 상태를 지우지 않는다 — 다음 status 조회에서 다시 시도하고,
+    만료가 지나면 STS 검증이 ExpiredToken 으로 알려 준다.
+    """
+    global _role_state
+    state = _role_state
+    if state is None:
+        return
+    expires_at = state.get("expires_at")
+    if isinstance(expires_at, datetime):
+        remaining = expires_at - datetime.now(timezone.utc)
+        if remaining > aws_role.REFRESH_MARGIN:
+            return
+    try:
+        session = _base_session(
+            str(state.get("base_profile") or ""), state.get("base_env"), str(state.get("region") or ""),
+        )
+        creds = aws_role.assume_deploy_role(
+            session.client("sts", region_name=str(state.get("region") or "") or None),
+            str(state["role_arn"]), retries=1,
+        )
+        _apply_role_credentials(creds, str(state.get("region") or ""))
+        state["expires_at"] = creds.expiration
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[aws] 역할 자격증명 갱신 실패: %s", exc)
+
+
+def _enter_role_mode_from_env() -> None:
+    """코어 시작 시 RECODER_ASSUME_ROLE_ARN 이 있으면 역할을 빌려 그걸로 바꾼다.
+
+    확장은 재시작마다 기반(프로필 이름 또는 키)과 역할 ARN 만 넘긴다. 실패해도
+    기반 자격증명은 그대로 남으니 배포는 되지만 범위가 좁혀지지 않은 상태다 —
+    status 메시지로 알린다.
+    """
+    global _role_state
+    if _role_state is not None:
+        return
+    role_arn = (os.environ.get(ENV_ASSUME_ROLE_ARN) or "").strip()
+    if not role_arn:
+        return
+    base_profile = (os.environ.get("AWS_PROFILE") or "").strip()
+    base_env = None if base_profile else _base_credentials_from_env()
+    if not base_profile and not base_env:
+        return
+    region = (
+        os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or DEFAULT_REGION
+    )
+    try:
+        session = _base_session(base_profile, base_env, region)
+        creds = aws_role.assume_deploy_role(
+            session.client("sts", region_name=region), role_arn, retries=1,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[aws] 시작 시 역할 빌리기 실패 — 기반 자격증명으로 계속: %s", exc)
+        return
+    _apply_role_credentials(creds, region)
+    _role_state = {
+        "role_arn": role_arn,
+        "base_profile": base_profile,
+        "base_env": base_env,
+        "region": region,
+        "expires_at": creds.expiration,
+        "principal_arn": "",
+    }
+
+
+def _leave_role_mode(clear_env: bool = True) -> None:
+    """역할 모드를 끝낸다. clear_env=False 는 "기반이 바뀌었을 뿐 역할 지시는
+    남긴다"는 뜻 — 코어 시작 시 기반 적용 → 역할 진입 순서에서 쓴다."""
+    global _role_state
+    _role_state = None
+    if clear_env:
+        os.environ.pop(ENV_ASSUME_ROLE_ARN, None)
 
 
 # ---------------------------------------------------------------------------
@@ -929,6 +1109,9 @@ async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
     except Exception:
         _restore_environment(snapshot, prior_profile)
         raise
+
+    #: 새 기반으로 연결됐다 — 이전에 빌린 역할 상태는 이 기반의 것이 아니다.
+    _leave_role_mode()
 
     # SecretStorage 기반 연결도 기존 configure 경로와 똑같이 진단 캐시를
     # 갱신해야 한다. 그렇지 않으면 연결은 성공했는데 AWS Deploy Ready가
@@ -1043,6 +1226,7 @@ async def connect_aws_profile(req: AwsProfileConnectRequest) -> AwsStatus:
         _restore_environment(snapshot, prior_profile)
         raise
 
+    _leave_role_mode()
     _refresh_diagnostics_cache()
 
     return AwsStatus(
@@ -1064,6 +1248,7 @@ async def get_aws_status() -> AwsStatus:
     자격증명이 없으면 ready=False 로 200 응답 (500 안 남).
     """
     _load_into_process_if_needed()
+    _refresh_role_credentials()
 
     access_key = os.environ.get("AWS_ACCESS_KEY_ID", "")
     region = (
@@ -1098,10 +1283,12 @@ async def get_aws_status() -> AwsStatus:
             message="boto3 패키지가 설치되어 있지 않습니다.",
         )
 
-    # STS 호출
+    # STS 호출 — 역할 모드에서는 프로필(기반)이 아니라 환경변수(빌린
+    # 임시 자격증명)를 검증해야 한다. 프로필로 부르면 기반 쪽이 살아 있는지만
+    # 보고 "연결됨"이라 답하게 된다.
     try:
         identity = _call_sts_get_caller_identity(
-            profile=profile or None,
+            profile=None if storage == "assumed_role" else (profile or None),
             region=region,
         )
     except HTTPException as exc:
@@ -1132,8 +1319,181 @@ async def get_aws_status() -> AwsStatus:
         profile=profile,
         access_key_last4=_mask_key(access_key),
         storage=storage,
-        message="AWS 자격증명이 유효합니다.",
+        message=(
+            "배포 전용 역할의 임시 자격증명으로 연결되어 있습니다."
+            if storage == "assumed_role" else "AWS 자격증명이 유효합니다."
+        ),
+        **_role_status_fields(),
     )
+
+
+def _role_status_fields() -> dict[str, str]:
+    """AwsStatus 에 실을 역할 모드 필드 — 역할 모드가 아니면 빈 값."""
+    state = _role_state
+    if state is None:
+        return {"role_arn": "", "expires_at": ""}
+    expires = state.get("expires_at")
+    return {
+        "role_arn": str(state.get("role_arn") or ""),
+        "expires_at": expires.isoformat() if isinstance(expires, datetime) else "",
+    }
+
+
+@router.post("/api/aws/role/setup", response_model=AwsRoleSetupResponse)
+async def setup_aws_role(req: AwsRoleSetupRequest) -> AwsRoleSetupResponse:
+    """프로그램 안에서 최소권한 역할을 만들고(있으면 맞추고) 빌려 연결한다.
+
+    배경: quick-create 온보딩은 사용자를 콘솔로 보내고 키 두 개를 붙여넣게
+    한다. 이 컴퓨터에 자격증명이 이미 있으면 그럴 필요가 없다 — 역할 하나를
+    만들고 그 역할만 빌려 쓰면 콘솔도, 저장할 장기 키도 없다. 관리자급
+    자격증명은 역할을 만드는 이 요청 안에서만 쓰고 저장하지 않는다.
+
+    권한이 모자라면(iam:CreateRole 등) 200 + mode="console_fallback" 이다.
+    호출자는 그때 /api/aws/onboarding-link 로 콘솔 경로를 연다.
+    """
+    global _role_state
+
+    profile = req.profile.strip()
+    if profile:
+        known = _known_profiles()
+        if profile not in known:
+            available = ", ".join(known) if known else "없음"
+            raise HTTPException(
+                status_code=400,
+                detail=f"프로필 '{profile}' 을 ~/.aws 에서 찾지 못했습니다. 사용 가능한 프로필: {available}",
+            )
+        base_profile = profile
+        base_env = None
+    else:
+        #: 지금 연결된 자격증명이 기반이다. 이미 역할 모드면 그 역할의 기반을
+        #: 그대로 쓴다(역할의 임시 자격증명으로는 역할을 못 만든다).
+        if _role_state is not None:
+            base_profile = str(_role_state.get("base_profile") or "")
+            base_env = _role_state.get("base_env")
+        else:
+            base_profile = (os.environ.get("AWS_PROFILE") or _active_profile or "").strip()
+            base_env = None if base_profile else _base_credentials_from_env()
+        if not base_profile and not base_env:
+            raise HTTPException(
+                status_code=400,
+                detail="역할을 만들 기반 자격증명이 없습니다. 프로필을 고르거나 키로 먼저 연결하세요.",
+            )
+
+    region = req.region.strip()
+    if not region and base_profile:
+        try:
+            region = (_build_boto3_session(profile=base_profile).region_name or "").strip()
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            region = ""
+    if not region:
+        region = (
+            os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or DEFAULT_REGION
+        )
+    region = aws_policy.validate_region(region)
+
+    session = _base_session(base_profile, base_env, region)
+
+    # 1) 누가 만드는가 — 이 주체만 역할을 빌릴 수 있게 신뢰 정책을 좁힌다.
+    try:
+        identity = session.client("sts", region_name=region).get_caller_identity()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail=f"기반 자격증명 검증 실패: {exc}") from exc
+    account = str(identity.get("Account", ""))
+    caller_arn = str(identity.get("Arn", ""))
+    partition = _simulation_partition(caller_arn)
+    principal_arn = aws_role.principal_for_trust(caller_arn, account, partition)
+
+    # 2) 역할 만들기/맞추기 + 3) 정책 붙이기 + 4) 빌리기
+    ctx, _ctx_error = _resolved_permission_context(req.deployment_context)
+    snapshot, prior_profile = _environment_snapshot()
+    try:
+        result = aws_role.ensure_deploy_role(
+            session.client("iam", region_name=region),
+            account=account, region=region, principal_arn=principal_arn, partition=partition,
+            task_execution_role=(ctx.task_execution_role if ctx else ""),
+            task_role=(ctx.task_role if ctx else ""),
+            cluster=(ctx.ecs_cluster if ctx else ""),
+            service=(ctx.ecs_service if ctx else ""),
+            ecr_repo=(ctx.ecr_repo if ctx else ""),
+        )
+        creds = aws_role.assume_deploy_role(
+            session.client("sts", region_name=region), result.role_arn,
+        )
+    except aws_role.RoleSetupDenied as denied:
+        _restore_environment(snapshot, prior_profile)
+        return AwsRoleSetupResponse(
+            ok=False,
+            mode="console_fallback",
+            denied_action=denied.action,
+            message=(
+                f"이 자격증명에는 {denied.action} 권한이 없어 프로그램 안에서 역할을 만들 수 없습니다. "
+                "콘솔에서 만드는 경로(원클릭 IAM 셋업)로 안내합니다."
+            ),
+        )
+    except ValueError as exc:
+        _restore_environment(snapshot, prior_profile)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        _restore_environment(snapshot, prior_profile)
+        raise HTTPException(status_code=500, detail=f"역할 설정 실패: {exc}") from exc
+
+    # 5) 코어를 역할의 임시 자격증명으로 바꾼다
+    _apply_role_credentials(creds, region)
+    _role_state = {
+        "role_arn": result.role_arn,
+        "base_profile": base_profile,
+        "base_env": base_env,
+        "region": region,
+        "expires_at": creds.expiration,
+        "principal_arn": principal_arn,
+    }
+    os.environ[ENV_ASSUME_ROLE_ARN] = result.role_arn
+
+    # 6) 빌린 자격증명으로 검증·권한 점검 — 화면은 "무엇으로 연결됐나"를 본다
+    try:
+        role_identity = _call_sts_get_caller_identity(profile=None, region=region)
+        permission_check = _inspect_deploy_permissions(role_identity, region, req.deployment_context)
+    except HTTPException as exc:
+        _leave_role_mode()
+        _restore_environment(snapshot, prior_profile)
+        raise HTTPException(
+            status_code=500,
+            detail=f"역할은 만들었지만 빌린 자격증명 검증에 실패했습니다: {exc.detail}",
+        ) from exc
+
+    _refresh_diagnostics_cache()
+
+    what = "만들었습니다" if result.created else ("신뢰 정책을 갱신했습니다" if result.trust_updated else "확인했습니다")
+    status = AwsStatus(
+        ready=True,
+        identity=AwsIdentity(**role_identity),
+        region=region,
+        profile=base_profile,
+        access_key_last4="",
+        storage="assumed_role",
+        message=f"배포 전용 역할 {result.role_name} 을(를) {what}. 이제 그 역할의 임시 자격증명만 씁니다.",
+        permission_check=permission_check,
+        **_role_status_fields(),
+    )
+    return AwsRoleSetupResponse(
+        ok=True,
+        mode="role",
+        message=status.message,
+        role=aws_role.role_summary(result, creds),
+        status=status,
+    )
+
+
+@router.post("/api/aws/role/refresh", response_model=AwsStatus)
+async def refresh_aws_role() -> AwsStatus:
+    """역할 모드의 임시 자격증명을 지금 다시 빌린다 (만료 임박 여부와 무관)."""
+    if _role_state is None:
+        raise HTTPException(status_code=400, detail="역할 모드가 아닙니다.")
+    _role_state["expires_at"] = datetime.now(timezone.utc)  # 강제로 만료 임박 취급
+    _refresh_role_credentials()
+    return await get_aws_status()
 
 
 @router.post("/api/aws/permissions/check", response_model=AwsStatus)
@@ -1238,6 +1598,7 @@ async def configure_aws(req: AwsConfigureRequest) -> AwsStatus:
         raise HTTPException(status_code=500, detail=f"자격증명 저장 실패: {exc}") from exc
 
     # 4) diagnostics 캐시 무효화/재실행
+    _leave_role_mode()
     _refresh_diagnostics_cache()
 
     return AwsStatus(
@@ -1280,6 +1641,9 @@ async def clear_aws() -> dict[str, Any]:
 
     global _active_profile
     _active_profile = None
+    #: 역할 모드도 끝낸다. IAM 에 만든 역할 자체는 지우지 않는다 — 다음
+    #: 온보딩에서 그대로 다시 쓰고, 지우는 건 사용자가 콘솔에서 판단한다.
+    _leave_role_mode()
 
     _refresh_diagnostics_cache()
 

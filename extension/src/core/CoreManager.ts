@@ -42,6 +42,9 @@ const AWS_SESSION_TOKEN_SECRET = 'recoder.aws.sessionToken';
 //: 실제 요청은 옛 키 B 로 나가는 조용한 계정 뒤바뀜이 생긴다.
 const AWS_PROFILE_STATE = 'recoder.aws.profile';
 const AWS_PROFILE_REGION_STATE = 'recoder.aws.profileRegion';
+//: 프로그램 안에서 만든 배포 전용 역할의 ARN. 비밀이 아니다 — 임시 자격증명은
+//: 코어가 기반(프로필 또는 키)으로 매번 새로 빌리고, 저장하는 건 이 ARN 뿐이다.
+const AWS_ROLE_ARN_STATE = 'recoder.aws.roleArn';
 
 export interface AwsSecretCredentials {
     accessKeyId: string;
@@ -254,6 +257,10 @@ export class CoreManager {
                 this.extensionContext.secrets.get(AWS_REGION_SECRET),
                 this.extensionContext.secrets.get(AWS_SESSION_TOKEN_SECRET),
             ]);
+            //: 역할 모드면 기반(프로필/키) 위에 역할 ARN 을 얹어 넘긴다. 코어는
+            //: 뜨자마자 그 역할을 빌려 기반 자격증명 대신 임시 자격증명을 쓴다.
+            const roleArn = this.extensionContext.globalState.get<string>(AWS_ROLE_ARN_STATE, '');
+            const roleEnv = roleArn ? { RECODER_ASSUME_ROLE_ARN: roleArn } : {};
             if (!accessKeyId || !secretAccessKey) {
                 //: 키가 없으면 프로필 연결 상태인지 본다. 프로필은 이름만
                 //: 넘기면 코어의 boto3 가 ~/.aws 에서 알아서 해석한다 —
@@ -264,6 +271,7 @@ export class CoreManager {
                 return {
                     AWS_PROFILE: profile,
                     ...(profileRegion ? { AWS_REGION: profileRegion, AWS_DEFAULT_REGION: profileRegion } : {}),
+                    ...roleEnv,
                 };
             }
             const region = storedRegion || 'ap-northeast-2';
@@ -273,6 +281,7 @@ export class CoreManager {
                 AWS_REGION: region,
                 AWS_DEFAULT_REGION: region,
                 ...(sessionToken ? { AWS_SESSION_TOKEN: sessionToken } : {}),
+                ...roleEnv,
             };
         } catch {
             return {};
@@ -293,6 +302,9 @@ export class CoreManager {
         //: 사용자가 마지막으로 고른 쪽(키)으로만 연결된다.
         await this.extensionContext.globalState.update(AWS_PROFILE_STATE, undefined);
         await this.extensionContext.globalState.update(AWS_PROFILE_REGION_STATE, undefined);
+        //: 기반이 바뀌면 이전 기반으로 만든 역할 지시도 지운다 — 새 기반이 그
+        //: 역할을 빌릴 권한이 있다는 보장이 없고, 있다면 다시 셋업하면 된다.
+        await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, undefined);
     }
 
     /** 프로필 연결 상태를 보관한다 — 이름뿐, 비밀 값은 저장하지 않는다. */
@@ -307,9 +319,23 @@ export class CoreManager {
             this.extensionContext.secrets.delete(AWS_REGION_SECRET),
             this.extensionContext.secrets.delete(AWS_SESSION_TOKEN_SECRET),
         ]);
+        await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, undefined);
     }
 
-    /** SecretStorage의 AWS 자격증명(및 프로필 연결 상태)을 제거한다. */
+    /**
+     * 배포 전용 역할 ARN 을 보관한다 — 비밀 아님. 기반(프로필/키)은 그대로
+     * 두고 그 위에 얹는다. 다음 코어 시작부터 RECODER_ASSUME_ROLE_ARN 으로 넘어간다.
+     */
+    async storeAwsRole(roleArn: string): Promise<void> {
+        await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, roleArn || undefined);
+    }
+
+    /** 보관된 역할 ARN. 없으면 빈 문자열. */
+    getAwsRoleArn(): string {
+        return this.extensionContext.globalState.get<string>(AWS_ROLE_ARN_STATE, '');
+    }
+
+    /** SecretStorage의 AWS 자격증명(및 프로필·역할 연결 상태)을 제거한다. */
     async clearAwsCredentials(): Promise<void> {
         await Promise.all([
             this.extensionContext.secrets.delete(AWS_ACCESS_KEY_SECRET),
@@ -319,6 +345,7 @@ export class CoreManager {
         ]);
         await this.extensionContext.globalState.update(AWS_PROFILE_STATE, undefined);
         await this.extensionContext.globalState.update(AWS_PROFILE_REGION_STATE, undefined);
+        await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, undefined);
     }
 
     /** 보안 금고의 변경값을 현재 Core에도 반영한다. */

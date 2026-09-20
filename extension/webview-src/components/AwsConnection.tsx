@@ -11,6 +11,8 @@ type AwsStatus = {
   profile?: string;
   storage?: string;
   message?: string;
+  role_arn?: string;
+  expires_at?: string;
   permission_check?: {
     inspected: boolean;
     required_actions: string[];
@@ -48,6 +50,12 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   const [profiles, setProfiles] = useState<string[]>([]);
   //: 원클릭 IAM 셋업 결과 — 브라우저를 연 뒤 화면에 남길 다음 단계 안내.
   const [onboarding, setOnboarding] = useState<{ hosted?: boolean; steps?: string[]; error?: string } | null>(null);
+  //: **프로그램 안에서 끝내는 온보딩** — 프로필로 연결할 때 배포 전용
+  //: 최소권한 역할을 만들어 그 권한만 쓴다. 콘솔에 갈 일도, 저장할 장기
+  //: 키도 없다. 권한이 모자란 계정만 콘솔 경로(원클릭 IAM 셋업)로 간다.
+  const [useRole, setUseRole] = useState(true);
+  const useRoleRef = useRef(true);
+  const [roleNotice, setRoleNotice] = useState<{ ok: boolean; mode?: string; message?: string; denied_action?: string } | null>(null);
 
   useEffect(() => {
     postMessage("aws.status");
@@ -90,6 +98,12 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       setBusy(false);
       setOnboarding(payload as { hosted?: boolean; steps?: string[]; error?: string });
     }
+    if (type === "aws.role.result") {
+      const result = payload as { ok: boolean; mode?: string; message?: string; denied_action?: string };
+      setBusy(false);
+      //: 성공은 상태 표시가 말해 준다. 남길 건 폴백/오류 안내다.
+      setRoleNotice(result.ok && result.mode === "role" ? null : result);
+    }
     if (type === "aws.profiles") {
       const result = payload as { profiles?: string[] };
       setProfiles(Array.isArray(result?.profiles) ? result.profiles : []);
@@ -99,13 +113,38 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   const connectProfile = (profile: string) => {
     setBusy(true);
     setError("");
+    setRoleNotice(null);
     //: 리전 칸을 사용자가 만졌으면 그 값을 존중하고, 아니면 비워 보낸다 —
     //: 비어 있으면 코어가 프로필 자신의 설정에서 리전을 가져온다.
-    postMessage("aws.connect.profile", {
-      profile,
-      region: regionTouchedRef.current ? region.trim() : "",
-    });
+    const regionValue = regionTouchedRef.current ? region.trim() : "";
+    //: 기본은 역할 경로 — 프로필로 역할을 만들고 그 역할만 빌린다. 끄면
+    //: 프로필 자격증명을 그대로 쓰는 예전 연결이다.
+    postMessage(useRoleRef.current ? "aws.role.setup" : "aws.connect.profile", { profile, region: regionValue });
   };
+
+  const setupRoleFromCurrent = () => {
+    //: 이미 연결된 자격증명(키/프로필)을 기반으로 역할을 만들어 전환한다.
+    setBusy(true);
+    setError("");
+    setRoleNotice(null);
+    postMessage("aws.role.setup", {});
+  };
+
+  const roleExpiryLabel = (iso?: string) => {
+    if (!iso) { return ""; }
+    const t = new Date(iso);
+    if (Number.isNaN(t.getTime())) { return ""; }
+    return t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  };
+
+  const roleFallbackBox = roleNotice && !roleNotice.ok ? (
+    <div style={{ marginTop: 10, padding: "9px 10px", borderRadius: 5, background: "rgba(245, 180, 0, .12)", border: "1px solid rgba(245, 180, 0, .35)", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.55 }}>
+      <div>{roleNotice.message ?? "배포 전용 역할을 만들지 못했습니다."}</div>
+      {roleNotice.mode === "console_fallback" && (
+        <button disabled={busy} onClick={() => { setBusy(true); setOnboarding(null); postMessage("aws.onboarding"); }} style={{ marginTop: 7, border: "1px solid rgba(245,180,0,.5)", borderRadius: 5, padding: "5px 10px", fontSize: 11, cursor: busy ? "wait" : "pointer", background: "transparent", color: "inherit" }}>{busy ? "여는 중…" : "콘솔에서 만들기 (원클릭 IAM 셋업)"}</button>
+      )}
+    </div>
+  ) : null;
 
   const connect = () => {
     if (!accessKeyId.trim() || !secretAccessKey.trim()) {
@@ -138,6 +177,9 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       <div style={{ marginTop: 9, fontSize: 12, lineHeight: 1.6 }}>
         <div>계정: <b>{status.identity?.account ?? "확인됨"}</b></div>
         <div>리전: <b>{status.region || "ap-northeast-2"}</b>{status.access_key_last4 ? ` · 키 끝 ${status.access_key_last4}` : ""}{status.storage === "aws_profile" && status.profile ? ` · 프로필 ${status.profile}` : ""}</div>
+        {status.storage === "assumed_role" && (
+          <div>권한: <b>배포 전용 역할</b>{status.profile ? ` (기반 프로필 ${status.profile})` : ""}{status.expires_at ? ` · 임시 자격증명 ${roleExpiryLabel(status.expires_at)} 만료, 자동 갱신` : ""}</div>
+        )}
       </div>
       {permission && (permission.missing_actions.length > 0 || permission.excessive_policies.length > 0 || permission.warnings.length > 0) && (
         <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 5, background: "rgba(245, 180, 0, .12)", border: "1px solid rgba(245, 180, 0, .35)", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.55 }}>
@@ -149,11 +191,19 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       {permission?.inspected && permission.missing_actions.length === 0 && permission.excessive_policies.length === 0 && (
         <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 5, background: "rgba(78, 201, 176, .10)", border: "1px solid rgba(78, 201, 176, .32)", color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 11 }}>✓ 권한 점검 완료: 기본 ECS 배포 권한이 확인되었습니다.</div>
       )}
-      <div style={{ marginTop: 11, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 }}>키는 VS Code의 OS 보안 금고에 암호화되어 저장되며 프로젝트 파일에는 기록되지 않습니다.</div>
-      <div style={{ display: "flex", gap: 8, marginTop: 13 }}>
+      <div style={{ marginTop: 11, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 }}>
+        {status.storage === "assumed_role"
+          ? "장기 키를 저장하지 않습니다. 보관하는 건 역할 ARN 하나이고, 임시 자격증명은 만료 전에 코어가 다시 빌립니다."
+          : "키는 VS Code의 OS 보안 금고에 암호화되어 저장되며 프로젝트 파일에는 기록되지 않습니다."}
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 13, flexWrap: "wrap" }}>
         <button disabled={busy} onClick={() => { setBusy(true); setError(""); postMessage("aws.permissions.check"); }} style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>{busy ? "권한 점검 중…" : "권한 다시 점검"}</button>
+        {status.storage === "assumed_role"
+          ? <button disabled={busy} onClick={() => { setBusy(true); setError(""); postMessage("aws.role.refresh"); }} style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>{busy ? "갱신 중…" : "자격증명 갱신"}</button>
+          : <button disabled={busy} onClick={setupRoleFromCurrent} title="지금 자격증명으로 배포 전용 최소권한 역할을 만들고, 이후 그 역할의 임시 자격증명만 씁니다." style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>{busy ? "역할 설정 중…" : "배포 전용 역할로 전환"}</button>}
         <button disabled={busy} onClick={() => { setBusy(true); setError(""); postMessage("aws.clear"); }} style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>연결 해제</button>
       </div>
+      {roleFallbackBox}
       {error && <div style={{ marginTop: 10, color: "var(--vscode-errorForeground, #f48771)", fontSize: 12 }}>{error}</div>}
       {/*
         연결된 뒤에도 필요하다. 권한 점검에서 빠진 액션이 나왔을 때, 무엇을
@@ -173,8 +223,8 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
         만드는 CloudFormation 화면이 브라우저에 열린다. 스택 Outputs 의
         키 두 개를 아래 입력란에 붙여넣으면 온보딩 끝.
       */}
-      <div style={{ fontSize: 12, fontWeight: 650 }}>아직 액세스 키가 없다면</div>
-      <div style={{ marginTop: 4, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.5 }}>버튼 한 번으로 배포 전용 최소권한 사용자와 키를 만드는 AWS 화면을 엽니다.</div>
+      <div style={{ fontSize: 12, fontWeight: 650 }}>이 컴퓨터에 AWS 프로필도 키도 없다면</div>
+      <div style={{ marginTop: 4, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.5 }}>배포 전용 최소권한 사용자와 키를 만드는 AWS 콘솔 화면을 엽니다. 프로필이 있으면 아래 프로필 연결이 콘솔 없이 끝납니다.</div>
       <button disabled={busy} onClick={() => { setBusy(true); setOnboarding(null); postMessage("aws.onboarding"); }} style={{ marginTop: 9, border: "1px solid rgba(78,201,176,.45)", borderRadius: 5, padding: "6px 11px", fontSize: 12, cursor: busy ? "wait" : "pointer", background: "transparent", color: "var(--vscode-charts-green, #4ec9b0)" }}>{busy ? "여는 중…" : "원클릭 IAM 셋업 (브라우저)"}</button>
       {onboarding?.error && <div style={{ marginTop: 8, fontSize: 11, color: "var(--vscode-errorForeground, #f48771)" }}>{onboarding.error}</div>}
       {onboarding?.steps && <div style={{ marginTop: 8, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.6 }}>{onboarding.steps.map(step => <div key={step}>{step}</div>)}</div>}
@@ -188,6 +238,11 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       */}
       <div style={{ fontSize: 12, fontWeight: 650 }}>이 컴퓨터의 AWS 프로필 발견</div>
       <div style={{ marginTop: 4, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.5 }}>키 입력 없이 클릭 한 번으로 연결합니다.</div>
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 7, marginTop: 8, fontSize: 11, lineHeight: 1.5, cursor: "pointer" }}>
+        <input type="checkbox" checked={useRole} onChange={e => { setUseRole(e.target.checked); useRoleRef.current = e.target.checked; }} style={{ marginTop: 2 }} />
+        <span>배포 전용 최소권한 역할을 만들어 그 권한만 쓰기 <b>(권장)</b><br />
+          <span style={{ color: "var(--vscode-descriptionForeground, #999)" }}>프로필 자격증명은 역할을 만들 때 한 번만 쓰고 저장하지 않습니다. 권한이 모자란 계정은 콘솔 경로로 안내합니다.</span></span>
+      </label>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 9 }}>
         {profiles.map(profile => (
           <button key={profile} disabled={busy} onClick={() => connectProfile(profile)} style={{
@@ -197,6 +252,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
           }}>{busy ? "연결 중…" : `${profile} 로 연결`}</button>
         ))}
       </div>
+      {roleFallbackBox}
       <div style={{ marginTop: 10, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>또는 아래에서 직접 키를 입력하세요.</div>
     </div>}
     <label style={{ display: "block", fontSize: 12 }}>Access Key ID
