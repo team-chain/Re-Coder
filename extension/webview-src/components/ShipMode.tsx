@@ -8,7 +8,7 @@
  *   - docker build/run: Level 2 (명령 미리보기 + 승인)
  */
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal from "./ApprovalModal";
 
@@ -107,6 +107,17 @@ interface DeploymentPlan {
   approval_level: 1 | 2 | 3 | 4;
 }
 
+interface VerificationSnapshot {
+  deployment_id: string;
+  status: string;                 // running | stable | unstable | error | stopped …
+  health_check_url?: string;
+  started_at?: string;
+  finished_at?: string | null;
+  anomalies?: { kind?: string; message?: string }[];
+  counters?: { consecutive_health_failures?: number };
+  health_checks?: unknown[];
+}
+
 export type InfraFileTab = "dockerfile" | "compose" | "actions";
 
 export const INFRA_FILE_TYPE_BY_TAB: Record<InfraFileTab, string> = {
@@ -178,7 +189,12 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
-  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; continuous_verification?: { enabled?: boolean; started?: boolean } } | null>(null);
+  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean } } | null>(null);
+  //: 배포 뒤 감시(연속 검증) 스냅샷과 롤백 결과 — 로컬 Docker 배포의 D1~D4.
+  //: 예전엔 코어가 감시하고 롤백 후보를 관리해도 사이드바 어디에도 표시·승인 UI 가 없었다.
+  const [watch, setWatch] = useState<VerificationSnapshot | null | "none">(null);
+  const [rollbackDecision, setRollbackDecision] = useState<"idle" | "proposed" | "dismissed" | "running" | "done">("idle");
+  const [rollbackResult, setRollbackResult] = useState<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showApproval, setShowApproval] = useState(false);
   const [approvalContext, setApprovalContext] = useState<"infra" | "deploy" | null>(null);
@@ -227,14 +243,28 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         }
       }
 
+      if (type === "deploy.verificationStatus") {
+        const p = payload as { deploymentId?: string; snapshot?: VerificationSnapshot | null };
+        setWatch(p?.snapshot ?? "none");
+        return;
+      }
+
+      if (type === "deploy.rollbackResult") {
+        const r = payload as { status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string };
+        setRollbackResult(r);
+        setRollbackDecision("done");
+        return;
+      }
+
       if (type === "deployResult") {
         const r = payload as {
           status: string; deployment_id?: string; message?: string; error?: string;
           stderr?: string; stdout?: string; restored_previous?: boolean; restore_stderr?: string;
-          health_ok?: boolean; health_check_url?: string;
+          health_ok?: boolean; health_check_url?: string; rollback_target?: string | null;
           continuous_verification?: { enabled?: boolean; started?: boolean };
         };
         setDeployResult(r);
+        setWatch(null); setRollbackDecision("idle"); setRollbackResult(null);
         setStep(r.status === "success" ? "done" : "error");
         if (r.status !== "success") {
           //: 코어가 stderr 를 돌려주는데 "stderr 를 확인하세요" 만 보이면 사용자는
@@ -324,6 +354,29 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       method: "local_docker",
     });
   }, [postMessage]);
+
+  //: 배포가 끝나면 감시 스냅샷을 10초마다 묻는다 — 감시가 끝나거나(stable/unstable) 롤백이 끝나면 멈춘다.
+  const deploymentId = deployResult?.deployment_id;
+  const watchDone = watch !== null && watch !== "none" && watch.status !== "running";
+  useEffect(() => {
+    if (step !== "done" || !deploymentId || rollbackDecision === "done" || watchDone) { return; }
+    postMessage("deploy.verification.status", { deploymentId });
+    const timer = setInterval(() => postMessage("deploy.verification.status", { deploymentId }), 10000);
+    return () => clearInterval(timer);
+  }, [step, deploymentId, rollbackDecision, watchDone, postMessage]);
+
+  //: 이상이 감지되면 롤백을 **제안**만 한다 — 자동 실행 금지(D2). 롤백 대상이 없으면 제안도 없다.
+  const anomalies = watch && watch !== "none" ? (watch.anomalies ?? []) : [];
+  const unhealthy = anomalies.length > 0 || (watch && watch !== "none" && watch.status === "unstable");
+  useEffect(() => {
+    if (unhealthy && rollbackDecision === "idle") { setRollbackDecision("proposed"); }
+  }, [unhealthy, rollbackDecision]);
+
+  const handleRollback = useCallback(() => {
+    if (!deploymentId) { return; }
+    setRollbackDecision("running");
+    postMessage("rollback", { deploymentId });
+  }, [deploymentId, postMessage]);
 
   // ── Styles ────────────────────────────────────────────────────────────────
 
@@ -641,6 +694,57 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           )}
         </div>
       ))}
+
+      {/* ── 배포 후 감시 · 롤백 제안 (D1~D4) ── */}
+      {step === "done" && deploymentId && (
+        <div style={{ background: "#252526", border: "1px solid #333", borderRadius: 5, padding: "8px 10px", marginBottom: 10, fontSize: 11, lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>
+            연속 검증 ·{" "}
+            {watch === null ? "확인 중…"
+              : watch === "none" ? "감시 없음 (코어 재시작 등으로 끊김)"
+              : watch.status === "running" ? "감시 중"
+              : watch.status === "stable" ? "안정 (감시 종료)"
+              : watch.status === "unstable" ? "이상 감지 (감시 종료)"
+              : watch.status}
+          </div>
+          {watch && watch !== "none" && (
+            <div style={{ color: "#aaa" }}>
+              {watch.health_check_url ?? ""}
+              {" · 연속 헬스 실패 "}{watch.counters?.consecutive_health_failures ?? 0}{"회 · 이상 "}{anomalies.length}{"건"}
+            </div>
+          )}
+          {anomalies.slice(0, 3).map((a, i) => (
+            <div key={i} style={{ color: "#f59e0b" }}>· {a.message ?? a.kind ?? "anomaly"}</div>
+          ))}
+
+          {rollbackDecision === "proposed" && (
+            <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 4, border: "1px solid #f59e0b", background: "rgba(245,158,11,0.08)" }}>
+              <div style={{ fontWeight: 600, color: "#f59e0b" }}>롤백 제안 — 자동으로 실행하지 않습니다</div>
+              {deployResult?.rollback_target ? (
+                <>
+                  <div style={{ color: "#e3b261", marginTop: 2 }}>이전 버전 <code>{deployResult.rollback_target}</code> 으로 되돌립니다. 승인해야 실행됩니다.</div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button onClick={handleRollback} style={{ ...btnPrimary, background: "#c58b00" }}>롤백 승인 →</button>
+                    <button onClick={() => setRollbackDecision("dismissed")} style={btnSecondary}>무시하고 현재 버전 유지</button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ color: "#e3b261", marginTop: 2 }}>되돌릴 이전 배포 기록이 없어 롤백을 제안할 수 없습니다 — 첫 배포이거나 이전 배포가 헬스를 통과하지 못했어요.</div>
+              )}
+            </div>
+          )}
+          {rollbackDecision === "dismissed" && <div style={{ marginTop: 6, color: "#aaa" }}>롤백 제안을 무시했습니다 — 현재 버전을 유지합니다.</div>}
+          {rollbackDecision === "running" && <div style={{ marginTop: 6, color: "#aaa" }}>롤백 실행 중… (이전 이미지로 교체 후 헬스 확인)</div>}
+          {rollbackDecision === "done" && rollbackResult && (
+            <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 4, border: `1px solid ${rollbackResult.status === "ok" ? "#22c55e" : "#ef4444"}`, color: rollbackResult.status === "ok" ? "#22c55e" : "#ef4444", whiteSpace: "pre-wrap" }}>
+              {rollbackResult.status === "ok"
+                ? `✓ 롤백 완료 — ${rollbackResult.rolled_back_to ?? "이전 버전"} 으로 되돌렸고 기록에 남았습니다.${rollbackResult.warning ? `
+⚠ ${rollbackResult.warning}` : ""}`
+                : `롤백 실패 — ${(rollbackResult.error || rollbackResult.stderr || "사유 없음").trim()}`}
+            </div>
+          )}
+        </div>
+      )}
 
       {step === "saved" && (
         <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
