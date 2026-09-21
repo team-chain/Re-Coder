@@ -429,8 +429,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    /** 꺼진 Docker 를 코어가 띄우게 한다. 결과를 화면에 "자동 조치함" 으로 남긴다. */
+    private _dockerHealInFlight: Promise<boolean> | null = null;
+
+    /**
+     * 꺼진 Docker 를 코어가 띄우게 한다. 결과를 화면에 "자동 조치함" 으로 남긴다.
+     *
+     * 동시 호출은 **한 번만** 코어에 보낸다. 진단이 자동 조치를 시작한 직후 사용자가
+     * "자동 조치" 를 또 누르면, 예전엔 두 번째 요청이 코어의 락을 기다리다 120초
+     * 제한에 걸려 "This operation was aborted" 로 실패처럼 보였다(2026-09-21
+     * 실기기 — 실제로는 첫 시도가 Docker 를 띄우고 있었다).
+     */
     async healDocker(reason: 'diagnostics' | 'fix'): Promise<boolean> {
+        if (this._dockerHealInFlight) { return this._dockerHealInFlight; }
+        this._dockerHealInFlight = this._healDockerOnce(reason).finally(() => { this._dockerHealInFlight = null; });
+        return this._dockerHealInFlight;
+    }
+
+    private async _healDockerOnce(reason: 'diagnostics' | 'fix'): Promise<boolean> {
         try {
             const r = await this._apiClient.ensureDocker();
             this.postMessage('selfHeal', {
