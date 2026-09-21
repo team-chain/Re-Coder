@@ -59,8 +59,31 @@ test('not_run 일 때 화면이 초록 통과 문구를 쓰지 않는다', () =>
   );
   const start = source.indexOf("if (verdict === \"not_run\")");
   assert.notStrictEqual(start, -1, 'not_run 분기가 없다');
-  const branch = source.slice(start, source.indexOf('const findings =', start));
+  const branch = source.slice(start, source.indexOf('const counts = scanCounts(', start));
   assert.ok(!/취약점 없음/.test(branch), '미실행인데 "취약점 없음" 문구가 들어 있다');
   //: 사용자가 오해하지 않도록 "확인하지 못했다"가 명시돼야 한다.
   assert.match(branch, /확인하지 못했다|하지 못했습니다/);
+});
+
+// ── 코어의 정규화 형태(critical_count/high_count, findings:[{severity}]) — 실기기 B1 회귀 ──
+// 실제로 돈 검사가 "검사를 하지 못했습니다" 헤더 + "no critical … detected" 본문의
+// 모순 박스로 보였다: 화면이 Trivy 원본 형태만 읽었기 때문.
+
+test('코어 정규화 형태 — 돌았고 0건이면 clean', () => {
+  assert.strictEqual(scanVerdict({
+    scan_type: 'trivy', exit_code: 0, status: 'ok', critical_count: 0, high_count: 0, findings: [],
+    summary: 'The Trivy image scan completed with no critical or high-severity vulnerabilities detected.',
+  }), 'clean');
+});
+
+test('코어 정규화 형태 — 카운트가 있으면 vulnerable', () => {
+  assert.strictEqual(scanVerdict({
+    scan_type: 'trivy', exit_code: 0, status: 'ok', critical_count: 1, high_count: 0,
+    findings: [{ severity: 'CRITICAL', id: 'CVE-1' }],
+  }), 'vulnerable');
+});
+
+test('코어 정규화 형태 — 카운트 없이 findings 배열만 있어도 severity 로 센다', () => {
+  assert.strictEqual(scanVerdict({ scan_type: 'trivy', exit_code: 0, status: 'ok', findings: [{ severity: 'HIGH' }] }), 'vulnerable');
+  assert.strictEqual(scanVerdict({ scan_type: 'trivy', exit_code: 0, status: 'ok', findings: [] }), 'clean');
 });

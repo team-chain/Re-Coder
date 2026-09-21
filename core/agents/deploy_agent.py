@@ -361,6 +361,19 @@ class DeployAgent:
         ws = Path(workspace_path) if workspace_path else Path(".")
         default = (8080, 8080)
 
+        # Dockerfile 의 EXPOSE 가 가장 정확하다 — 우리가 방금 생성·저장한 파일이고,
+        # 앱이 실제로 듣는 포트가 적혀 있다. 예전엔 이걸 안 보고 package.json 만
+        # 보다가 3000 으로 추측해 다른 앱(3000 점유)과 충돌했다(실기기 검증 C2).
+        dockerfile = ws / "Dockerfile"
+        if dockerfile.exists():
+            try:
+                m = re.search(r"^\s*EXPOSE\s+(\d{2,5})", dockerfile.read_text(encoding="utf-8"), re.M)
+                if m:
+                    p = int(m.group(1))
+                    return (p, p)
+            except Exception:
+                pass
+
         # requirements.txt / pyproject.toml → FastAPI/Flask default 8000
         if (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
             return (8000, 8000)
@@ -378,6 +391,16 @@ class DeployAgent:
                         return (p, p)
             except Exception:
                 pass
+            # 소스에서 listen(NNNN) 을 찾아본다 — Express 류.
+            for src in list(ws.glob("*.js")) + list(ws.glob("src/*.js")) + list(ws.glob("*.ts")) + list(ws.glob("src/*.ts")):
+                try:
+                    text = src.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                m = re.search(r"\.listen\(\s*(\d{4,5})", text) or re.search(r"PORT\s*(?:\|\||\?\?)\s*(\d{4,5})", text)
+                if m:
+                    p = int(m.group(1))
+                    return (p, p)
             return (3000, 3000)
 
         return default

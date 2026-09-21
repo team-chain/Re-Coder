@@ -8,7 +8,7 @@
  *   - docker build/run: Level 2 (명령 미리보기 + 승인)
  */
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal from "./ApprovalModal";
 
@@ -36,9 +36,13 @@ interface ScanResult {
   //: 코어가 이미 내려주고 있던 필드들. 화면이 이걸 **안 읽어서**, 스캐너가
   //: 설치돼 있지 않아 검사를 못 한 경우에도 초록색 "취약점 없음 ✓" 이 떴다.
   //: 검사하지 않은 것과 위반이 없는 것은 다르다.
-  status?: "ok" | "error";
+  status?: "ok" | "error" | "not_run" | "unverified";
   summary?: string;
   message?: string;
+  //: 코어가 실패 사유를 분류해 내려준다 — 화면은 분기만 한다.
+  reason_code?: string;
+  cause?: string;
+  next_action?: string;
   critical_count?: number;
   high_count?: number;
 }
@@ -54,19 +58,44 @@ export type ScanVerdict = "not_run" | "vulnerable" | "clean";
  *  · vulnerable— 취약점이 관측됐다.
  *  · clean     — 실제로 돌았고 관측된 취약점이 없다.
  */
-export function scanVerdict(result: ScanResult): ScanVerdict {
-  if (result.status === "error") { return "not_run"; }
-  const findings = result.findings as { Results?: { Vulnerabilities?: unknown[] }[] } | null;
-  //: status 가 없는 구버전 코어 응답 대비 — findings 자체가 없으면
-  //: "검사 결과가 없다"이지 "깨끗하다"가 아니다.
-  if (!findings || !Array.isArray(findings.Results)) { return "not_run"; }
-  let count = 0;
-  for (const r of findings.Results) {
-    for (const v of (r.Vulnerabilities ?? []) as { Severity: string }[]) {
-      if (v.Severity === "CRITICAL" || v.Severity === "HIGH") { count++; }
-    }
+/**
+ * CRITICAL/HIGH 개수를 센다 — 코어의 정규화 형태(`critical_count`/`high_count`,
+ * `findings: [{severity}]`)를 먼저, 없으면 Trivy 원본 형태(`Results[].Vulnerabilities`)를.
+ * 두 형태를 모두 읽지 않으면 실제로 돈 검사가 "못 함" 으로 보인다(실기기 B1: 헤더는
+ * "검사를 하지 못했습니다", 본문은 "no critical … detected" 인 모순 박스).
+ */
+export function scanCounts(result: ScanResult): { critical: number; high: number } | null {
+  if (typeof result.critical_count === "number" || typeof result.high_count === "number") {
+    return { critical: result.critical_count ?? 0, high: result.high_count ?? 0 };
   }
-  return count > 0 ? "vulnerable" : "clean";
+  const f = result.findings as unknown;
+  if (Array.isArray(f)) {
+    let critical = 0, high = 0;
+    for (const item of f as { severity?: string; Severity?: string }[]) {
+      const sev = String(item?.severity ?? item?.Severity ?? "").toUpperCase();
+      if (sev === "CRITICAL") { critical++; } else if (sev === "HIGH") { high++; }
+    }
+    return { critical, high };
+  }
+  const raw = f as { Results?: { Vulnerabilities?: unknown[] }[] } | null;
+  if (raw && Array.isArray(raw.Results)) {
+    let critical = 0, high = 0;
+    for (const r of raw.Results) {
+      for (const v of (r.Vulnerabilities ?? []) as { Severity: string }[]) {
+        if (v.Severity === "CRITICAL") { critical++; } else if (v.Severity === "HIGH") { high++; }
+      }
+    }
+    return { critical, high };
+  }
+  return null;
+}
+
+export function scanVerdict(result: ScanResult): ScanVerdict {
+  if (result.status === "error" || (result.status as string) === "not_run" || (result.status as string) === "unverified") { return "not_run"; }
+  //: 결과 형태를 알 수 없으면 "검사 결과가 없다"이지 "깨끗하다"가 아니다.
+  const counts = scanCounts(result);
+  if (counts === null) { return "not_run"; }
+  return counts.critical + counts.high > 0 ? "vulnerable" : "clean";
 }
 
 interface DeploymentPlan {
@@ -80,6 +109,17 @@ interface DeploymentPlan {
   risk_level: "low" | "medium" | "high" | "critical";
   risk_reasons: string[];
   approval_level: 1 | 2 | 3 | 4;
+}
+
+interface VerificationSnapshot {
+  deployment_id: string;
+  status: string;                 // running | stable | unstable | error | stopped …
+  health_check_url?: string;
+  started_at?: string;
+  finished_at?: string | null;
+  anomalies?: { kind?: string; message?: string }[];
+  counters?: { consecutive_health_failures?: number };
+  health_checks?: unknown[];
 }
 
 export type InfraFileTab = "dockerfile" | "compose" | "actions";
@@ -153,7 +193,12 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
-  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string } | null>(null);
+  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean } } | null>(null);
+  //: 배포 뒤 감시(연속 검증) 스냅샷과 롤백 결과 — 로컬 Docker 배포의 D1~D4.
+  //: 예전엔 코어가 감시하고 롤백 후보를 관리해도 사이드바 어디에도 표시·승인 UI 가 없었다.
+  const [watch, setWatch] = useState<VerificationSnapshot | null | "none">(null);
+  const [rollbackDecision, setRollbackDecision] = useState<"idle" | "proposed" | "dismissed" | "running" | "done">("idle");
+  const [rollbackResult, setRollbackResult] = useState<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showApproval, setShowApproval] = useState(false);
   const [approvalContext, setApprovalContext] = useState<"infra" | "deploy" | null>(null);
@@ -167,6 +212,16 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       if (type === "proposalReady" && (payload as { file_type?: string }).file_type) {
         setProposal(payload as InfraFileProposal);
         setStep("preview");
+        setError(null);
+      }
+
+      //: 배포 플랜도 같은 'proposalReady' 채널로 온다(plan_id 있음, file_type 없음).
+      //: 예전엔 이 분기가 없어서 "docker build / run" 을 눌러도 planReady 로 못 갔다 —
+      //: 검사까지 되고 빌드/실행은 영영 안 되는 상태(실기기 검증 C2).
+      if (type === "proposalReady" && (payload as { plan_id?: string }).plan_id
+          && !(payload as { file_type?: string }).file_type) {
+        setPlan(payload as DeploymentPlan);
+        setStep("planReady");
         setError(null);
       }
 
@@ -192,12 +247,36 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         }
       }
 
+      if (type === "deploy.verificationStatus") {
+        const p = payload as { deploymentId?: string; snapshot?: VerificationSnapshot | null };
+        setWatch(p?.snapshot ?? "none");
+        return;
+      }
+
+      if (type === "deploy.rollbackResult") {
+        const r = payload as { status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string };
+        setRollbackResult(r);
+        setRollbackDecision("done");
+        return;
+      }
+
       if (type === "deployResult") {
-        const r = payload as { status: string; deployment_id?: string };
+        const r = payload as {
+          status: string; deployment_id?: string; message?: string; error?: string;
+          stderr?: string; stdout?: string; restored_previous?: boolean; restore_stderr?: string;
+          health_ok?: boolean; health_check_url?: string; rollback_target?: string | null;
+          continuous_verification?: { enabled?: boolean; started?: boolean };
+        };
         setDeployResult(r);
+        setWatch(null); setRollbackDecision("idle"); setRollbackResult(null);
         setStep(r.status === "success" ? "done" : "error");
         if (r.status !== "success") {
-          setError("배포 실패. stderr를 확인하세요.");
+          //: 코어가 stderr 를 돌려주는데 "stderr 를 확인하세요" 만 보이면 사용자는
+          //: 어디서도 확인할 수 없다(실기기 검증 C2). 원문을 그대로 보인다.
+          const detail = (r.stderr || r.error || r.message || r.stdout || "").trim();
+          const tail = detail.split("\n").filter(Boolean).slice(-8).join("\n");
+          const restored = r.restored_previous ? "\n이전 컨테이너는 복원됐습니다." : "";
+          setError(`배포 실패${tail ? ` — ${tail}` : " (코어가 사유를 돌려주지 않았습니다)"}${restored}`);
         }
       }
 
@@ -280,6 +359,29 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     });
   }, [postMessage]);
 
+  //: 배포가 끝나면 감시 스냅샷을 10초마다 묻는다 — 감시가 끝나거나(stable/unstable) 롤백이 끝나면 멈춘다.
+  const deploymentId = deployResult?.deployment_id;
+  const watchDone = watch !== null && watch !== "none" && watch.status !== "running";
+  useEffect(() => {
+    if (step !== "done" || !deploymentId || rollbackDecision === "done" || watchDone) { return; }
+    postMessage("deploy.verification.status", { deploymentId });
+    const timer = setInterval(() => postMessage("deploy.verification.status", { deploymentId }), 10000);
+    return () => clearInterval(timer);
+  }, [step, deploymentId, rollbackDecision, watchDone, postMessage]);
+
+  //: 이상이 감지되면 롤백을 **제안**만 한다 — 자동 실행 금지(D2). 롤백 대상이 없으면 제안도 없다.
+  const anomalies = watch && watch !== "none" ? (watch.anomalies ?? []) : [];
+  const unhealthy = anomalies.length > 0 || (watch && watch !== "none" && watch.status === "unstable");
+  useEffect(() => {
+    if (unhealthy && rollbackDecision === "idle") { setRollbackDecision("proposed"); }
+  }, [unhealthy, rollbackDecision]);
+
+  const handleRollback = useCallback(() => {
+    if (!deploymentId) { return; }
+    setRollbackDecision("running");
+    postMessage("rollback", { deploymentId });
+  }, [deploymentId, postMessage]);
+
   // ── Styles ────────────────────────────────────────────────────────────────
 
   const sectionHeader: React.CSSProperties = {
@@ -343,30 +445,39 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     //: 통과한 줄 알고 배포로 넘어갔다(보드 이슈 「보안 스캔이 바이너리
     //: 없으면 조용히 건너뜀」).
     if (verdict === "not_run") {
-      const reason = (result.summary || result.message || "").trim();
+      //: 코어가 분류한 원인·다음 행동을 먼저 쓴다. 없으면(구버전 코어) summary.
+      //: raw 오류 원문(message)은 접어서 — 숨기진 않되 첫 줄은 사람 말이어야 한다.
+      const cause = (result.cause || result.summary || result.message || "").trim();
+      const nextAction = (result.next_action || "").trim();
+      const raw = (result.message || "").trim();
       return (
         <div style={{ padding: "8px 10px", borderRadius: 4, border: "1px solid #f59e0b", background: "rgba(245,158,11,0.08)", color: "#f59e0b", fontSize: 11, lineHeight: 1.55, marginBottom: 8 }}>
           <strong>⚠ 이미지 취약점 검사를 하지 못했습니다</strong>
           <div style={{ marginTop: 3, color: "#e3b261" }}>
-            {reason || "스캐너를 실행할 수 없었습니다."}
+            {cause || "스캐너를 실행할 수 없었습니다."}
           </div>
+          {nextAction && (
+            <div style={{ marginTop: 3, color: "#f2d38c" }}>
+              <strong>다음 행동 · </strong>{nextAction}
+            </div>
+          )}
           <div style={{ marginTop: 4, color: "#c9a35e" }}>
             취약점이 <strong>없다는 뜻이 아니라 확인하지 못했다</strong>는 뜻입니다.
-            Trivy와 Docker를 설치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요.
+            {nextAction ? " 조치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요." : " Trivy와 Docker를 설치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요."}
           </div>
+          {raw && raw !== cause && (
+            <details style={{ marginTop: 4, color: "#a88a4a" }}>
+              <summary style={{ cursor: "pointer" }}>오류 원문</summary>
+              <pre style={{ margin: "3px 0 0", whiteSpace: "pre-wrap", fontSize: 10 }}>{raw}</pre>
+            </details>
+          )}
         </div>
       );
     }
 
-    const findings = result.findings as { Results?: { Vulnerabilities?: unknown[] }[] };
-    let criticalCount = 0;
-    let highCount = 0;
-    for (const r of findings?.Results ?? []) {
-      for (const v of (r.Vulnerabilities ?? []) as { Severity: string }[]) {
-        if (v.Severity === "CRITICAL") { criticalCount++; }
-        if (v.Severity === "HIGH") { highCount++; }
-      }
-    }
+    const counts = scanCounts(result) ?? { critical: 0, high: 0 };
+    const criticalCount = counts.critical;
+    const highCount = counts.high;
 
     const severity = criticalCount > 0 ? "critical" : highCount > 0 ? "high" : "low";
     const label =
@@ -574,12 +685,81 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       )}
 
       {/* ── Done banner ── */}
-      {step === "done" && (
-        <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
-          ✓ 배포 완료! Health Check 통과
+      {step === "done" && (deployResult?.health_ok === false ? (
+        //: docker run 은 됐지만 헬스 확인은 실패 — "통과" 로 칠하지 않는다.
+        //: 실기기: /health 가 404 인 앱이 초록 "Health Check 통과" 로 보였다.
+        <div style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "10px 12px", color: "#f59e0b", fontWeight: 600, marginBottom: 10 }}>
+          ⚠ 컨테이너는 떴지만 Health Check 는 실패했습니다
+          <div style={{ fontSize: 11, fontWeight: 400, marginTop: 4, color: "#e3b261", lineHeight: 1.5 }}>
+            {deployResult?.health_check_url ?? "헬스 경로"} 가 2xx 로 응답하지 않았습니다 — 앱에 그 경로가 없거나 아직 준비 중일 수 있어요.
+            {deployResult?.continuous_verification?.started ? " 연속 검증이 계속 지켜보고, 이상이면 롤백을 제안합니다." : " 이 배포는 롤백 후보에서 제외됩니다."}
+          </div>
           {deployResult?.deployment_id && (
             <div style={{ fontSize: 10, fontWeight: 400, marginTop: 4, color: "#888" }}>
               deployment_id: {deployResult.deployment_id}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
+          ✓ 배포 완료! Health Check 통과
+          {deployResult?.health_check_url && (
+            <div style={{ fontSize: 10, fontWeight: 400, marginTop: 2, color: "#8fbf9f" }}>{deployResult.health_check_url}</div>
+          )}
+          {deployResult?.deployment_id && (
+            <div style={{ fontSize: 10, fontWeight: 400, marginTop: 4, color: "#888" }}>
+              deployment_id: {deployResult.deployment_id}
+            </div>
+          )}
+        </div>
+      ))}
+
+      {/* ── 배포 후 감시 · 롤백 제안 (D1~D4) ── */}
+      {step === "done" && deploymentId && (
+        <div style={{ background: "#252526", border: "1px solid #333", borderRadius: 5, padding: "8px 10px", marginBottom: 10, fontSize: 11, lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>
+            연속 검증 ·{" "}
+            {watch === null ? "확인 중…"
+              : watch === "none" ? "감시 없음 (코어 재시작 등으로 끊김)"
+              : watch.status === "running" ? "감시 중"
+              : watch.status === "stable" ? "안정 (감시 종료)"
+              : watch.status === "unstable" ? "이상 감지 (감시 종료)"
+              : watch.status}
+          </div>
+          {watch && watch !== "none" && (
+            <div style={{ color: "#aaa" }}>
+              {watch.health_check_url ?? ""}
+              {" · 연속 헬스 실패 "}{watch.counters?.consecutive_health_failures ?? 0}{"회 · 이상 "}{anomalies.length}{"건"}
+            </div>
+          )}
+          {anomalies.slice(0, 3).map((a, i) => (
+            <div key={i} style={{ color: "#f59e0b" }}>· {a.message ?? a.kind ?? "anomaly"}</div>
+          ))}
+
+          {rollbackDecision === "proposed" && (
+            <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 4, border: "1px solid #f59e0b", background: "rgba(245,158,11,0.08)" }}>
+              <div style={{ fontWeight: 600, color: "#f59e0b" }}>롤백 제안 — 자동으로 실행하지 않습니다</div>
+              {deployResult?.rollback_target ? (
+                <>
+                  <div style={{ color: "#e3b261", marginTop: 2 }}>이전 버전 <code>{deployResult.rollback_target}</code> 으로 되돌립니다. 승인해야 실행됩니다.</div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button onClick={handleRollback} style={{ ...btnPrimary, background: "#c58b00" }}>롤백 승인 →</button>
+                    <button onClick={() => setRollbackDecision("dismissed")} style={btnSecondary}>무시하고 현재 버전 유지</button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ color: "#e3b261", marginTop: 2 }}>되돌릴 이전 배포 기록이 없어 롤백을 제안할 수 없습니다 — 첫 배포이거나 이전 배포가 헬스를 통과하지 못했어요.</div>
+              )}
+            </div>
+          )}
+          {rollbackDecision === "dismissed" && <div style={{ marginTop: 6, color: "#aaa" }}>롤백 제안을 무시했습니다 — 현재 버전을 유지합니다.</div>}
+          {rollbackDecision === "running" && <div style={{ marginTop: 6, color: "#aaa" }}>롤백 실행 중… (이전 이미지로 교체 후 헬스 확인)</div>}
+          {rollbackDecision === "done" && rollbackResult && (
+            <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 4, border: `1px solid ${rollbackResult.status === "ok" ? "#22c55e" : "#ef4444"}`, color: rollbackResult.status === "ok" ? "#22c55e" : "#ef4444", whiteSpace: "pre-wrap" }}>
+              {rollbackResult.status === "ok"
+                ? `✓ 롤백 완료 — ${rollbackResult.rolled_back_to ?? "이전 버전"} 으로 되돌렸고 기록에 남았습니다.${rollbackResult.warning ? `
+⚠ ${rollbackResult.warning}` : ""}`
+                : `롤백 실패 — ${(rollbackResult.error || rollbackResult.stderr || "사유 없음").trim()}`}
             </div>
           )}
         </div>
@@ -593,7 +773,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
 
       {/* ── Error ── */}
       {step === "error" && error && (
-        <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444", borderRadius: 5, padding: "8px 10px", color: "#ef4444", marginBottom: 10 }}>
+        <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444", borderRadius: 5, padding: "8px 10px", color: "#ef4444", marginBottom: 10, whiteSpace: "pre-wrap", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 11, lineHeight: 1.5 }}>
           {error}
         </div>
       )}
@@ -612,6 +792,10 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
                 setApprovalContext("infra");
                 setShowApproval(true);
               }
+            } else if (step === "scanDone") {
+              //: 검사 결과(통과/미검증)를 보고 나서 빌드/실행 플랜을 만든다.
+              //: 미검증이면 코어가 승인 강도를 Level 3 으로 올려서 돌려준다.
+              handleCreatePlan();
             } else if (step === "planReady") {
               setApprovalContext("deploy");
               setShowApproval(true);

@@ -97,6 +97,37 @@ async def run_diagnostics() -> DiagnosticsResult:
     return result
 
 
+@router.post("/api/docker/ensure")
+async def ensure_docker_route() -> dict:
+    """Docker 데몬이 꺼져 있으면 코어가 직접 띄우고 준비될 때까지 기다린다.
+
+    자가 조치 레이어(보드 카드 「자가 조치(Self-healing) 레이어」)의 Docker 항목.
+    진단판의 docker_ready X 를 누르면 확장이 이걸 부른다 — 예전엔 "Docker
+    Desktop 을 시작하세요" 안내만 했다. 시작은 가역·로컬·무비용이라 자동 조치
+    등급이고, **무엇을 했는지**(attempted/launched/waited) 를 그대로 돌려줘
+    화면이 "자동 조치함" 을 표시할 수 있게 한다. 예외를 내지 않는다.
+    """
+    try:
+        try:
+            from docker_autostart import ensure_docker
+        except ImportError:  # pragma: no cover
+            from core.docker_autostart import ensure_docker  # type: ignore
+        result = await asyncio.to_thread(ensure_docker)
+        return {
+            "ready": bool(result.ready),
+            "attempted": bool(result.attempted),
+            "launched": bool(result.launched),
+            "waited_seconds": int(result.waited_seconds),
+            "message": result.message,
+            "starting": bool(getattr(result, "starting", False)),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ready": False, "attempted": False, "launched": False, "waited_seconds": 0,
+            "message": f"Docker 자동 시작을 시도하지 못했습니다: {exc}", "starting": False,
+        }
+
+
 @router.get("/api/diagnostics")
 async def get_diagnostics() -> Optional[DiagnosticsResult]:
     """Return the most recently saved diagnostics result, or null if absent.

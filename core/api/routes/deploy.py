@@ -53,6 +53,10 @@ _deployment_records: dict[str, DeploymentRecord] = {}
 #: 보드 이슈 「Trivy 가 빌드 전 이미지를 스캔 시도 — 보안 스캔이 한 번도
 #: 안 돈 채 통과」의 두 번째 절반이다.
 _plans_pending_image_scan: dict[str, str] = {}
+#: plan_id → 플랜을 만든 워크스페이스. 로컬 Docker 배포의 `docker build` 가 여기서 돈다.
+_plan_workspaces: dict[str, str] = {}
+#: `docker build` 상한(초). 의존성 설치가 끼면 몇 분 걸린다.
+LOCAL_BUILD_TIMEOUT_SECONDS = 600
 
 # 컨테이너 이름별 직렬화 락.
 #
@@ -1854,6 +1858,12 @@ def _log_scan_to_session(scan_type: str, target: str, result: dict) -> None:
         logging.getLogger(__name__).debug("session_logger unavailable for scan log: %s", exc)
 
 
+try:
+    import scan_failure as _scan_failure
+except ImportError:  # pragma: no cover
+    from core import scan_failure as _scan_failure  # type: ignore
+
+
 def _normalise_scan_result(scan_type: str, target: str, raw: dict) -> dict:
     """Map an InfraAgent scan output dict into the canonical ScanResult shape.
 
@@ -1861,6 +1871,9 @@ def _normalise_scan_result(scan_type: str, target: str, raw: dict) -> dict:
                   findings[], summary, target}
     """
     if not raw.get("success", False):
+        #: raw 에러를 그대로 내보내지 않는다 — 원인·다음 행동으로 분류한다
+        #: (보드 카드 「스캔 실패 표시가 raw 에러」). 원문은 message 에 남는다.
+        error_text = str(raw.get("error") or raw.get("summary") or "Scan failed.")
         return {
             "status": "error",
             "scan_type": scan_type,
@@ -1869,8 +1882,7 @@ def _normalise_scan_result(scan_type: str, target: str, raw: dict) -> dict:
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": raw.get("error") or raw.get("summary") or "Scan failed.",
-            "message": raw.get("error", "Scan failed."),
+            **_scan_failure.failure_fields(error_text, scan_type=scan_type, target=target),
         }
 
     findings: list[dict] = []
@@ -1944,8 +1956,10 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": "InfraAgent unavailable (dependencies missing).",
-            "message": "InfraAgent unavailable on this host.",
+            **_scan_failure.failure_fields(
+                "InfraAgent unavailable on this host.",
+                scan_type=scan_type, code=_scan_failure.DEPENDENCIES_MISSING,
+            ),
         }
 
     ws = Path(workspace_path) if workspace_path else None
@@ -1968,6 +1982,13 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
                 from core.docker_autostart import ensure_docker as _ensure_docker
             auto = await asyncio.to_thread(_ensure_docker)
             if not auto.ready:
+                #: 자동 시작까지 해 봤는데 안 됐다 — docker 자체가 없는지, 켜지지
+                #: 않는 건지는 자동 시작 결과 문구로 가른다.
+                code = (
+                    _scan_failure.DOCKER_MISSING
+                    if re.search(r"(not installed|command not found|no such file|설치되)", auto.message or "", re.I)
+                    else _scan_failure.DOCKER_NOT_RUNNING
+                )
                 return {
                     "status": "not_run",
                     "scan_type": scan_type,
@@ -1976,8 +1997,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
                     "high_count": 0,
                     "medium_count": 0,
                     "findings": [],
-                    "summary": "Docker 데몬이 없어 스캔을 실행하지 못했습니다 (미검증).",
-                    "message": auto.message,
+                    **_scan_failure.failure_fields(auto.message or "", scan_type=scan_type, target=image, code=code),
                 }
             raw = await asyncio.wait_for(agent.run_trivy_scan(image), timeout=300)
             target_for_log = image
@@ -2010,8 +2030,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": f"Scan '{scan_type}' exceeded 300s timeout.",
-            "message": "timeout",
+            **_scan_failure.failure_fields("timeout", scan_type=scan_type, code=_scan_failure.TIMEOUT),
         }
         _log_scan_to_session(scan_type, target_path or workspace_path or "", result)
         return result
@@ -2024,8 +2043,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": "Docker is not available on this host. Start Docker Desktop and retry.",
-            "message": "docker_not_found",
+            **_scan_failure.failure_fields("docker_not_found", scan_type=scan_type, code=_scan_failure.DOCKER_MISSING),
         }
         _log_scan_to_session(scan_type, target_path or workspace_path or "", result)
         return result
@@ -2040,8 +2058,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": f"Scan failed: {exc}",
-            "message": str(exc),
+            **_scan_failure.failure_fields(str(exc), scan_type=scan_type, target=target_path or ""),
         }
         _log_scan_to_session(scan_type, target_path or workspace_path or "", result)
         return result
@@ -2761,6 +2778,14 @@ def _unverified_trivy_report(summary: str) -> dict:
     }
 
 
+def _default_image_name(workspace_path: str) -> str:
+    """DeployAgent.create_plan 과 같은 규칙 — `<워크스페이스 폴더명>:latest`."""
+    if not workspace_path:
+        return ""
+    name = Path(workspace_path).name.lower().replace(" ", "-")
+    return f"{name}:latest" if name else ""
+
+
 async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
     """Run Trivy (filesystem/image) + Hadolint (Dockerfile) before planning.
 
@@ -2802,33 +2827,39 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
     #: 이제 못 돈 스캔은 unverified 로 남기고(승인 강도 반영), 실행 시점에
     #: 빌드 후 1회 스캔을 보장한다(execute_deployment 의 대기 목록 처리).
     unverified_reasons: list[str] = []
-    if not request.image:
+    #: 화면은 이미지 이름을 안 보낸다 — DeployAgent 가 붙일 기본 이름(<폴더>:latest)과
+    #: 같은 규칙으로 정해서 이미 빌드된 이미지는 여기서 검사한다. 예전엔 "이미지
+    #: 미지정" 으로 미검증 처리돼, 검사가 깨끗해도 승인이 Level 3 로 올라갔다(실기기).
+    image = request.image or _default_image_name(workspace)
+    if not image:
         reports["trivy"] = _unverified_trivy_report(
             "스캔할 이미지가 지정되지 않았습니다."
         )
         unverified_reasons.append("Trivy: 이미지 미지정 — 취약점 미검증")
-    elif not _local_image_exists(request.image):
+    elif not _local_image_exists(image):
         reports["trivy"] = _unverified_trivy_report(
-            f"이미지 '{request.image}' 가 아직 빌드되지 않아 스캔하지 못했습니다."
+            f"이미지 '{image}' 가 아직 빌드되지 않아 스캔하지 못했습니다."
         )
         unverified_reasons.append(
-            f"Trivy: '{request.image}' 미빌드 — 취약점 미검증 (실행 시 빌드 후 1회 스캔)"
+            f"Trivy: '{image}' 미빌드 — 취약점 미검증 (실행 시 빌드 후 1회 스캔)"
         )
     else:
-        trivy_report = await _execute_scan("trivy", workspace, request.image)
+        trivy_report = await _execute_scan("trivy", workspace, image)
         reports["trivy"] = trivy_report
         if trivy_report.get("status") == "ok":
             crit = int(trivy_report.get("critical_count", 0))
             if crit > 0:
-                blockers.append(f"Trivy: {crit} CRITICAL CVE(s) in {request.image}")
+                blockers.append(f"Trivy: {crit} CRITICAL CVE(s) in {image}")
             high = int(trivy_report.get("high_count", 0))
             if high > 0:
-                risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {request.image}")
+                risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {image}")
         else:
             #: 스캔 실패는 통과가 아니다 — 실패 사유를 화면까지 끌고 간다.
+            #: 원인 + 다음 행동을 함께 — 승인 화면에서 raw 에러가 아니라 "왜·뭘" 이 보인다.
+            cause = str(trivy_report.get("cause") or trivy_report.get("summary") or trivy_report.get("message") or "원인 미상")
+            next_action = str(trivy_report.get("next_action") or "")
             unverified_reasons.append(
-                "Trivy: 스캔 실패 — "
-                + str(trivy_report.get("summary") or trivy_report.get("message") or "원인 미상")
+                f"Trivy: 스캔 실패 — {cause}" + (f" → {next_action}" if next_action else "")
             )
 
     risk_reasons.extend(unverified_reasons)
@@ -2909,7 +2940,71 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
             _plans_pending_image_scan[plan.plan_id] = plan.image
 
     _deployment_plans[plan.plan_id] = plan
+    _plan_workspaces[plan.plan_id] = request.workspace_path or ""
     return plan
+
+
+def _dockerfile_in(workspace_path: str) -> Optional[Path]:
+    """워크스페이스 루트의 Dockerfile 경로 — 없으면 None."""
+    if not workspace_path:
+        return None
+    candidate = Path(workspace_path) / "Dockerfile"
+    return candidate if candidate.is_file() else None
+
+
+async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optional[dict]:
+    """로컬 Docker 배포의 **빌드 단계**. 성공이면 None, 실패면 응답 dict.
+
+    예전에는 이 단계가 없었다 — 허브 문구도 승인 화면의 명령 미리보기도
+    `docker build && docker run` 이라고 말했지만 코어는 `docker run` 만 했고,
+    이미지가 없으니 "pull access denied for <이미지>" 로 죽었다(실기기 검증 C2).
+    빌드는 임계 구역 **밖**에서 한다: 빌드가 실패해도 돌고 있던 컨테이너는
+    건드리지 않은 상태라 되돌릴 것이 없다.
+    """
+    if plan.method != DeployMethod.LOCAL_DOCKER or not plan.image:
+        return None
+    dockerfile = _dockerfile_in(workspace_path)
+    if dockerfile is None:
+        if _local_image_exists(plan.image):
+            return None  # 미리 빌드된 이미지를 그대로 쓴다.
+        return {
+            "status": "failed",
+            "stage": "build",
+            "message": (
+                f"이미지 '{plan.image}' 가 로컬에 없고 워크스페이스에 Dockerfile 도 없어 "
+                "빌드할 수 없습니다. 먼저 Dockerfile 을 생성·저장하세요."
+            ),
+            "stderr": "",
+            "stdout": "",
+        }
+    cmd = ["docker", "build", "-f", str(dockerfile), "-t", plan.image, "."]
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                cmd, shell=False, capture_output=True, text=True,
+                cwd=workspace_path, timeout=LOCAL_BUILD_TIMEOUT_SECONDS,
+            ),
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "failed", "stage": "build",
+            "message": f"docker build 가 {LOCAL_BUILD_TIMEOUT_SECONDS}초 안에 끝나지 않았습니다.",
+            "stderr": "", "stdout": "",
+        }
+    except FileNotFoundError:
+        return {
+            "status": "failed", "stage": "build",
+            "message": "docker CLI 를 찾을 수 없습니다. Docker Desktop 이 설치돼 있는지 확인하세요.",
+            "stderr": "", "stdout": "",
+        }
+    if result.returncode != 0:
+        return {
+            "status": "failed", "stage": "build",
+            "message": f"docker build 실패 (exit {result.returncode}) — 이전 컨테이너는 건드리지 않았습니다.",
+            "stderr": result.stderr[-2000:], "stdout": result.stdout[-2000:],
+        }
+    return None
 
 
 @router.post("/api/deploy/execute")
@@ -2926,27 +3021,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     if not request.approved:
         del _deployment_plans[request.plan_id]
         _plans_pending_image_scan.pop(request.plan_id, None)
+        _plan_workspaces.pop(request.plan_id, None)
         return {"status": "cancelled", "plan_id": request.plan_id}
-
-    # ── 빌드 후 1회 스캔 보장 ──────────────────────────────────────────────
-    #: 플랜 시점에 이미지가 없어 Trivy 를 못 돌린 플랜이라면, 실행 직전에
-    #: (이미지가 이제 존재할 때) 스캔을 한 번 돌린다. CRITICAL 이 나오면
-    #: 기존 컨테이너를 건드리기 **전에** 여기서 멈춘다 — 임계 구역 밖이라
-    #: 롤백할 것도 없다. 스캐너가 없어 또 못 돌면 기록만 남기고 진행한다
-    #: (승인 화면에 이미 '미검증' 사유가 표시된 상태로 사용자가 승인했다).
-    pending_image = _plans_pending_image_scan.pop(request.plan_id, None)
-    if pending_image and plan.image and _local_image_exists(plan.image):
-        deferred_report = await _execute_scan("trivy", "", plan.image)
-        if deferred_report.get("status") == "ok":
-            deferred_crit = int(deferred_report.get("critical_count", 0))
-            if deferred_crit > 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Trivy: CRITICAL {deferred_crit}건 — 배포를 차단했습니다 "
-                        f"({plan.image}). 취약점을 해결한 뒤 다시 시도하세요."
-                    ),
-                )
 
     # 플랜 생성 뒤 다른 배포가 실행될 수 있으므로, record 에 저장할 롤백 대상은
     # 반드시 실행 시점의 마지막 *검증 완료* 배포로 다시 잡는다.
@@ -2966,6 +3042,36 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     # 그게 맞다 — 같은 컨테이너를 동시에 두 번 바꾸는 것은 원래 순서대로
     # 처리돼야 하는 일이다. 다른 컨테이너는 서로 막지 않는다.
     async with _container_transaction(plan):
+        # ── 빌드 (로컬 Docker) — 락 안, 파괴적 구간(stop/rm/run) 전 ──────────────
+        #: 같은 컨테이너를 겨냥한 두 요청은 빌드부터 직렬화된다. 락 밖에서 docker 를
+        #: 부르면 "락을 얻기 전에는 docker 를 건드리지 않는다"는 교체 안전 불변식
+        #: (test_replace_safety)이 깨진다. 빌드 실패는 돌고 있던 컨테이너를 건드리기
+        #: 전이라 되돌릴 것이 없다.
+        build_failure = await _build_local_image(plan, _plan_workspaces.get(request.plan_id, ""))
+        if build_failure is not None:
+            build_failure["plan_id"] = request.plan_id
+            return build_failure
+
+        # ── 빌드 후 1회 스캔 보장 ──────────────────────────────────────────
+        #: 플랜 시점에 이미지가 없어 Trivy 를 못 돌린 플랜이라면, 실행 직전에
+        #: (이미지가 이제 존재할 때) 스캔을 한 번 돌린다. CRITICAL 이 나오면
+        #: 기존 컨테이너를 건드리기 **전에** 여기서 멈춘다 — 파괴적 구간 밖이라
+        #: 롤백할 것도 없다. 스캐너가 없어 또 못 돌면 기록만 남기고 진행한다
+        #: (승인 화면에 이미 '미검증' 사유가 표시된 상태로 사용자가 승인했다).
+        pending_image = _plans_pending_image_scan.pop(request.plan_id, None)
+        if pending_image and plan.image and _local_image_exists(plan.image):
+            deferred_report = await _execute_scan("trivy", "", plan.image)
+            if deferred_report.get("status") == "ok":
+                deferred_crit = int(deferred_report.get("critical_count", 0))
+                if deferred_crit > 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Trivy: CRITICAL {deferred_crit}건 — 배포를 차단했습니다 "
+                            f"({plan.image}). 취약점을 해결한 뒤 다시 시도하세요."
+                        ),
+                    )
+
         rollback_source = _rollback_source_for(plan.container_name or "", plan.image or "")
         # 복구 재료. 기록에 후보가 있으면 그것을, 없으면 아래에서 docker 를
         # 직접 들여다본 결과를 쓴다.
@@ -3160,9 +3266,21 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                         _exc,
                     )
 
+        # 헬스 결과를 **명시적으로** 돌려준다. status=success 는 `docker run` 이 됐다는
+        # 뜻일 뿐인데, 화면이 그걸 "Health Check 통과" 로 보여 줬다(실기기: /health 가
+        # 404 인 앱도 초록 배너). 컨테이너는 돌고 감시·롤백은 살아 있으니 실패로
+        # 바꾸진 않되, 화면이 거짓말하지 않도록 사실을 따로 준다.
+        _first_hp = next(iter(plan.ports.keys()), None)
+        _hp = plan.health_check_path or "/health"
+        health_check_url = (
+            f"http://localhost:{_first_hp}{_hp if _hp.startswith('/') else '/' + _hp}"
+            if _first_hp else None
+        )
         return {
             "status": "success" if success else "failed",
             "deployment_id": record.deployment_id,
+            "health_ok": bool(rollback_eligible),
+            "health_check_url": health_check_url,
             "rollback_target": record.rollback_target,
             "rollback_eligible": record.rollback_eligible,
             "rollback_reason": rollback_reason,

@@ -254,6 +254,19 @@ export class ApiClient {
         };
     }
 
+    /**
+     * POST /api/docker/ensure — 꺼진 Docker 데몬을 코어가 직접 띄우고 기다린다.
+     * 코어 대기 75초 + 폴링마다 `docker info` 5초 지연 + 다른 호출의 락 대기까지
+     * 합치면 120초를 넘길 수 있어(실기기에서 abort) 넉넉히 잡는다.
+     */
+    async ensureDocker(): Promise<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string; starting?: boolean }> {
+        const resp = await this.request<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string; starting?: boolean }>(
+            'POST', '/api/docker/ensure', {}, false, 200000,
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Docker 자동 시작 요청 실패'); }
+        return resp.data;
+    }
+
     async runDiagnostics(): Promise<DiagnosticsResult> {
         const resp = await this.request<DiagnosticsResult>('POST', '/api/diagnostics/run');
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Diagnostics 실행 실패'); }
@@ -533,9 +546,9 @@ export class ApiClient {
         const resp = await this.request<object>(
             'POST', '/api/deploy/scan',
             { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath },
-            false, 390000
+            false, 480000  // Docker 자동 시작(정리 45초 + 대기 120초) + 스캔 상한 300초
         );
-        if (!resp.success || !resp.data) { throw new Error(`${scanType} 스캔 실패`); }
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? `${scanType} 스캔 요청 실패`); }
         return resp.data;
     }
 
@@ -552,12 +565,20 @@ export class ApiClient {
         return resp.data;
     }
 
-    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }> {
+    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string; error?: string }> {
         // docker build + run + 헬스체크는 30초를 넘으므로 타임아웃을 길게.
         const resp = await this.request<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }>(
             'POST', '/api/deploy/execute', { plan_id: planId, approved }, false, 600000
         );
-        return resp.success && resp.data ? resp.data : { status: 'error' };
+        //: 코어가 4xx/5xx 로 거절한 사유(예: "Trivy: CRITICAL 3건 — 배포를 차단했습니다")를
+        //: 버리고 { status: 'error' } 만 돌려주면 화면은 "사유 없음" 이 된다(실기기 검증 C2).
+        return resp.success && resp.data ? resp.data : { status: 'error', error: resp.error ?? '코어가 응답하지 않았습니다.' };
+    }
+
+    /** 로컬 배포의 연속 검증 스냅샷. 감시가 없으면(코어 재시작 등) null. */
+    async getVerificationStatus(deploymentId: string): Promise<Record<string, unknown> | null> {
+        const resp = await this.request<Record<string, unknown>>('GET', `/api/deploy/verification/${encodeURIComponent(deploymentId)}/status`);
+        return resp.success && resp.data ? resp.data : null;
     }
 
     async listDeploymentRecords(): Promise<DeploymentRecord[]> {
@@ -565,11 +586,16 @@ export class ApiClient {
         return resp.success && resp.data ? resp.data : [];
     }
 
-    async rollback(deploymentId: string): Promise<{ status: string }> {
-        const resp = await this.request<{ status: string }>(
-            'POST', '/api/deploy/rollback', { deployment_id: deploymentId }
+    async rollback(deploymentId: string): Promise<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string }> {
+        //: 롤백은 stop/rm/run + 헬스 확인(최대 15초)이라 기본 30초로는 모자라다.
+        const resp = await this.request<{ status: string; rolled_back_to?: string; warning?: string | null; stderr?: string }>(
+            'POST', '/api/deploy/rollback', { deployment_id: deploymentId }, false, 120000
         );
-        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
+        if (!resp.success || !resp.data) {
+            //: 422(롤백 대상 없음)·404 등 코어의 사유를 버리지 않는다.
+            return { status: 'error', error: resp.error ?? '코어가 응답하지 않았습니다.' };
+        }
+        return { ...resp.data, status: resp.data.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // -----------------------------------------------------------------------

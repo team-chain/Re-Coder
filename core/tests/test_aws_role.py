@@ -289,3 +289,25 @@ def test_요약에는_비밀_값이_없다() -> None:
     dumped = json.dumps(summary)
     assert "secret" not in dumped and "token" not in dumped
     assert summary["role_arn"] == ROLE_ARN and summary["created"] is True
+
+
+def test_역할_설명은_IAM_이_받는_문자만_쓴다() -> None:
+    """실기기(2026-09-21): 한국어 Description 으로 CreateRole 이 ValidationError.
+    IAM 제약은 Latin-1 범위 — 여기서 고정해 두면 문구를 바꿔도 다시 안 깨진다."""
+    import re
+    assert re.fullmatch(r"[\u0009\u000A\u000D\u0020-\u007E\u00A1-\u00FF]*", aws_role.ROLE_DESCRIPTION)
+    iam = FakeIam()
+    _ensure(iam)
+    assert iam.calls == ["GetRole", "CreateRole", "PutRolePolicy"]
+
+
+def test_create_role_에_넘기는_설명이_상수와_같다() -> None:
+    seen: dict[str, str] = {}
+
+    class Spy(FakeIam):
+        def create_role(self, RoleName, AssumeRolePolicyDocument, **kw):
+            seen["desc"] = kw.get("Description", "")
+            return super().create_role(RoleName, AssumeRolePolicyDocument, **kw)
+
+    _ensure(Spy())
+    assert seen["desc"] == aws_role.ROLE_DESCRIPTION

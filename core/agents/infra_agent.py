@@ -56,6 +56,17 @@ the base Dockerfile template for this specific project.
 ## Files found in workspace
 {workspace_summary}
 
+## Hard rules (the image is vulnerability-scanned before it may run)
+- Runtime version: {runtime_hint}. Never pick an end-of-life runtime (Node.js < 20,
+  Python < 3.10). Prefer the newest LTS the project allows.
+- Keep the base OS patched: keep the template's OS upgrade step (apt-get upgrade /
+  apk upgrade). Known CRITICAL CVEs in an unpatched base image block deployment.
+- Node.js images ship a bundled npm whose vendored `tar` is often vulnerable: in the
+  final (runtime) stage either upgrade it (`RUN npm install -g npm@latest`) or remove
+  npm entirely (`RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm
+  /usr/local/bin/npx`) when the app starts with `node` directly. Keep this step.
+- Keep the port ({port}) and run command ({run_command}) exactly as given above.
+
 ## Output format
 Return ONLY a JSON object with string key-value pairs for template customisation.
 Keys must match the {{PLACEHOLDER}} markers in the template.
@@ -67,6 +78,45 @@ Example:
   "PYTHON_VERSION": "3.11"
 }}
 """
+
+def _runtime_hint(workspace_path: str, stack) -> str:
+    """프로젝트가 고정한 런타임 버전(.nvmrc / engines.node / .python-version)을 읽는다.
+
+    없으면 "최신 LTS" 를 권한다. 예전엔 힌트가 없어 모델이 node 18(EOL) 같은 오래된
+    버전을 골랐고, 그 베이스 이미지의 OS CVE 로 배포가 차단됐다(실기기 검증 C2).
+    """
+    import json as _json
+    import re as _re
+    from pathlib import Path as _Path
+
+    root = _Path(workspace_path)
+    stack_value = getattr(stack, "value", str(stack))
+    if stack_value.startswith("node"):
+        nvmrc = root / ".nvmrc"
+        if nvmrc.is_file():
+            v = nvmrc.read_text(encoding="utf-8", errors="replace").strip().lstrip("v")
+            if v:
+                return f"Node.js {v} (pinned by .nvmrc)"
+        pkg = root / "package.json"
+        if pkg.is_file():
+            try:
+                engines = _json.loads(pkg.read_text(encoding="utf-8", errors="replace")).get("engines", {})
+                node = str(engines.get("node", "")) if isinstance(engines, dict) else ""
+            except Exception:
+                node = ""
+            m = _re.search(r"(\d{2})", node)
+            if m and int(m.group(1)) >= 20:
+                return f"Node.js {m.group(1)} (package.json engines: {node})"
+        return "Node.js 22 (newest LTS; the project does not pin a version)"
+    if stack_value.startswith("python"):
+        pv = root / ".python-version"
+        if pv.is_file():
+            v = pv.read_text(encoding="utf-8", errors="replace").strip()
+            if v:
+                return f"Python {v} (pinned by .python-version)"
+        return "Python 3.12 (newest stable; the project does not pin a version)"
+    return "the newest LTS runtime"
+
 
 _COMPOSE_PROMPT = """\
 You are ReCoder, an infrastructure automation AI.
@@ -232,6 +282,7 @@ class InfraAgent:
             health_check_path=project.health_check_path,
             template_content=template.base_content[:3000],
             workspace_summary=workspace_summary,
+            runtime_hint=_runtime_hint(workspace_path, stack),
         )
 
         raw = await self._provider.complete(
@@ -243,6 +294,7 @@ class InfraAgent:
         )
 
         customisations = self._extract_json_dict(raw)
+        customisations = self._enforce_safe_customisations(customisations, stack, project)
         rendered_content = self._registry.render(template_id, customisations)
 
         required_secrets = self._detect_required_secrets(rendered_content)
@@ -258,6 +310,31 @@ class InfraAgent:
             risk_reasons=[],
             approval_level=ApprovalLevel.CONFIRM,
         )
+
+    @staticmethod
+    def _enforce_safe_customisations(customisations: dict, stack, project) -> dict:
+        """모델이 프롬프트 규칙을 무시해도 지켜야 하는 값을 강제한다.
+
+        - NODE_VERSION: EOL(< 20) 이거나 비어 있으면 22. 실기기에서 모델이 18 을 골라
+          베이스 OS CVE 로 배포가 차단됐다.
+        - PORT / START_SCRIPT: 프로젝트 프로필이 아는 값을 모델 추측보다 우선한다.
+        """
+        out = dict(customisations or {})
+        stack_value = getattr(stack, "value", str(stack))
+        if stack_value.startswith("node"):
+            raw_v = str(out.get("NODE_VERSION", "")).strip()
+            m = re.match(r"(\d{1,2})", raw_v)
+            major = int(m.group(1)) if m else 0
+            if major < 20:
+                out["NODE_VERSION"] = "22"
+        port = getattr(project, "default_port", None)
+        if port:
+            out["PORT"] = str(port)
+        run_cmd = str(getattr(project, "default_run_command", "") or "")
+        m = re.match(r"^node\s+(\S+)$", run_cmd)
+        if m:
+            out["START_SCRIPT"] = m.group(1)
+        return out
 
     # ------------------------------------------------------------------
     # docker-compose generation

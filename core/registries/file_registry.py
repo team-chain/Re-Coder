@@ -40,23 +40,30 @@ CMD ["python", "app.py"]
 """
 
 _DOCKERFILE_NODE_EXPRESS = """\
-FROM node:20-slim
+FROM node:22-slim
+# 베이스 OS 의 알려진 CVE 를 패치한다 — 배포 전 Trivy 검사에서 CRITICAL 이 나오면 실행이 차단된다.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY . .
+# 이미지에 번들된 npm 의 tar 등에 CVE 가 남는다 — 앱은 node 로 직접 뜨므로 npm 을 제거한다.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 USER node
 EXPOSE 3000
 CMD ["node", "index.js"]
 """
 
 _DOCKERFILE_NODE_NEXT = """\
-FROM node:20-slim
+FROM node:22-slim
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
 RUN npm run build
+# npm start 로 뜨므로 npm 은 남기되 번들 tar CVE 를 피해 최신으로 올린다.
+RUN npm install -g npm@latest
 USER node
 EXPOSE 3000
 CMD ["npm", "start"]

@@ -867,6 +867,51 @@ def _inspect_deploy_permissions(
     return report
 
 
+def _invalidate_llm_clients() -> None:
+    """자격증명이 바뀌었으니 **예전 키를 물고 있는 AI 클라이언트를 버린다.**
+
+    보드 이슈 「AWS 연결 후에도 AI 클라이언트가 예전 자격증명을 물고 있음」.
+
+    무엇이 사고였나
+        AWS 연결 전에 채팅을 한 번이라도 시도하면 BedrockProvider 가 그 시점의
+        자격증명(예: 학교 계정)으로 boto3 클라이언트를 만들어 self._client 에
+        캐시한다. 이후 /api/aws/connect 가 환경변수를 바꿔도 캐시된 클라이언트는
+        예전 키로 계속 호출한다 — 사용자에겐 "연결했는데도 AI 가 안 됨".
+        예전 키로 실패해 열린 서킷 브레이커도 새 키로 바로 닫혀야 한다.
+
+    여기서 하는 일
+        1. 라우터 싱글턴 재생성 — 레거시 get_router(force_rebuild) 가
+           provider_router 까지 다시 만든다. 다음 호출부터 새 자격증명.
+        2. 브레이커 전부 초기화.
+    실패해도 연결 자체는 성공이다 (Soft Fail) — 이 함수는 절대 예외를 내지 않는다.
+    """
+    try:
+        try:
+            from llm.router import get_router
+        except ImportError:  # pragma: no cover
+            from core.llm.router import get_router  # type: ignore
+        get_router(force_rebuild=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[aws] LLM 라우터 재생성 실패: %s", exc)
+    try:
+        try:
+            from llm import breaker
+        except ImportError:  # pragma: no cover
+            from core.llm import breaker  # type: ignore
+        breaker.reset_all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[aws] 브레이커 초기화 실패: %s", exc)
+
+
+def _credentials_changed() -> None:
+    """연결·해제·역할 전환 뒤 공통 후처리 — 순서가 중요하다.
+
+    클라이언트를 먼저 버려야 진단(ai_ready 등)이 새 자격증명으로 돈다.
+    """
+    _invalidate_llm_clients()
+    _refresh_diagnostics_cache()
+
+
 def _refresh_diagnostics_cache() -> None:
     """자격증명 저장/삭제 후 first_run 의 aws_deploy_ready 진단을 즉시 재실행.
 
@@ -1026,6 +1071,8 @@ def _refresh_role_credentials() -> None:
         )
         _apply_role_credentials(creds, str(state.get("region") or ""))
         state["expires_at"] = creds.expiration
+        #: 키가 바뀌었다 — 옛 임시 키로 만든 AI 클라이언트는 곧 ExpiredToken.
+        _invalidate_llm_clients()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[aws] 역할 자격증명 갱신 실패: %s", exc)
 
@@ -1067,6 +1114,7 @@ def _enter_role_mode_from_env() -> None:
         "expires_at": creds.expiration,
         "principal_arn": "",
     }
+    _invalidate_llm_clients()
 
 
 def _leave_role_mode(clear_env: bool = True) -> None:
@@ -1116,7 +1164,7 @@ async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
     # SecretStorage 기반 연결도 기존 configure 경로와 똑같이 진단 캐시를
     # 갱신해야 한다. 그렇지 않으면 연결은 성공했는데 AWS Deploy Ready가
     # 연결 전 결과를 계속 표시하는 상태 불일치가 생긴다.
-    _refresh_diagnostics_cache()
+    _credentials_changed()
 
     return AwsStatus(
         ready=True,
@@ -1227,7 +1275,7 @@ async def connect_aws_profile(req: AwsProfileConnectRequest) -> AwsStatus:
         raise
 
     _leave_role_mode()
-    _refresh_diagnostics_cache()
+    _credentials_changed()
 
     return AwsStatus(
         ready=True,
@@ -1373,6 +1421,14 @@ async def setup_aws_role(req: AwsRoleSetupRequest) -> AwsRoleSetupResponse:
         else:
             base_profile = (os.environ.get("AWS_PROFILE") or _active_profile or "").strip()
             base_env = None if base_profile else _base_credentials_from_env()
+            if not base_profile and not base_env:
+                #: 명시적으로 연결한 적이 없어도 ~/.aws 의 기본 프로필로 "연결됨" 상태일 수
+                #: 있다(status 가 그렇게 판정한다). 그 상태에서 "배포 전용 역할로 전환" 을
+                #: 누르면 기반이 없다고 400 이 났다(2026-09-21 실기기). status 와 같은
+                #: 기준으로 기반을 정한다.
+                _storage, detected = _detect_credential_source()
+                if detected and detected in _known_profiles():
+                    base_profile = detected
         if not base_profile and not base_env:
             raise HTTPException(
                 status_code=400,
@@ -1463,7 +1519,7 @@ async def setup_aws_role(req: AwsRoleSetupRequest) -> AwsRoleSetupResponse:
             detail=f"역할은 만들었지만 빌린 자격증명 검증에 실패했습니다: {exc.detail}",
         ) from exc
 
-    _refresh_diagnostics_cache()
+    _credentials_changed()
 
     what = "만들었습니다" if result.created else ("신뢰 정책을 갱신했습니다" if result.trust_updated else "확인했습니다")
     status = AwsStatus(
@@ -1599,7 +1655,7 @@ async def configure_aws(req: AwsConfigureRequest) -> AwsStatus:
 
     # 4) diagnostics 캐시 무효화/재실행
     _leave_role_mode()
-    _refresh_diagnostics_cache()
+    _credentials_changed()
 
     return AwsStatus(
         ready=True,
@@ -1645,7 +1701,7 @@ async def clear_aws() -> dict[str, Any]:
     #: 온보딩에서 그대로 다시 쓰고, 지우는 건 사용자가 콘솔에서 판단한다.
     _leave_role_mode()
 
-    _refresh_diagnostics_cache()
+    _credentials_changed()
 
     return {
         "status": "ok",
