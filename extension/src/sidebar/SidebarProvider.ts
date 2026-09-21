@@ -11,6 +11,7 @@ import {
     ResponseProposal,
     CoreHealth,
     DeployMethod,
+    AwsStatus,
 } from '../types';
 import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
 import { CoreManager } from '../core/CoreManager';
@@ -1219,6 +1220,64 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.configure.result', { ok: false, message: msg });
                     this.postMessage('errorMessage', { message: `AWS 프로필 연결 실패: ${msg}` });
+                }
+                break;
+            }
+            case 'aws.role.setup': {
+                //: 프로그램 안에서 배포 전용 최소권한 역할을 만들고 빌린다 —
+                //: 보드 카드 「AWS 온보딩 마찰 제거」의 콘솔 없는 경로.
+                //: profile 이 있으면 그 프로필이 기반, 없으면 지금 연결된 자격증명.
+                //: 권한이 모자라면(ok=false) 프로필로는 그냥 연결해 두고 화면에
+                //: 콘솔 폴백을 안내한다 — 배포는 되되 권한만 안 좁혀진 상태다.
+                const p = (payload ?? {}) as { profile?: string; region?: string };
+                const profile = (p.profile ?? '').trim();
+                const region = (p.region ?? '').trim();
+                try {
+                    const result = await this._apiClient.setupAwsRole({ profile, region });
+                    if (result.ok && result.status) {
+                        if (profile) {
+                            await this._coreManager.storeAwsProfile(profile, result.status.region ?? '');
+                        }
+                        //: 저장하는 건 역할 ARN 하나 — 비밀이 아니다. 임시 자격증명은
+                        //: 코어가 재시작마다 기반으로 다시 빌린다.
+                        await this._coreManager.storeAwsRole(result.role?.role_arn ?? result.status.role_arn ?? '');
+                        this.postMessage('aws.role.result', {
+                            ok: true, mode: 'role', message: result.message, role: result.role, status: result.status,
+                        });
+                        this.postMessage('aws.configure.result', { ok: true, status: result.status });
+                        this.postMessage('aws.status', result.status);
+                        void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                        break;
+                    }
+                    //: 콘솔 폴백. 프로필이 주어졌으면 최소한 프로필 연결은 해 준다.
+                    let status: AwsStatus | undefined;
+                    if (profile) {
+                        status = await this._apiClient.connectAwsProfile({ profile, region });
+                        await this._coreManager.storeAwsProfile(profile, status.region ?? '');
+                        this.postMessage('aws.configure.result', { ok: true, status });
+                        this.postMessage('aws.status', status);
+                        void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                    }
+                    this.postMessage('aws.role.result', {
+                        ok: false, mode: result.mode, message: result.message,
+                        denied_action: result.denied_action, status,
+                    });
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.role.result', { ok: false, mode: 'error', message: msg });
+                    this.postMessage('aws.configure.result', { ok: false, message: msg });
+                    this.postMessage('errorMessage', { message: `AWS 역할 설정 실패: ${msg}` });
+                }
+                break;
+            }
+            case 'aws.role.refresh': {
+                try {
+                    const status = await this._apiClient.refreshAwsRole();
+                    this.postMessage('aws.role.result', { ok: true, mode: 'refreshed', message: status.message, status });
+                    this.postMessage('aws.status', status);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.postMessage('aws.role.result', { ok: false, mode: 'error', message: msg });
                 }
                 break;
             }

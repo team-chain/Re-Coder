@@ -13,6 +13,7 @@ import {
     CostSummary,
     ProjectProfile,
     AwsStatus,
+    AwsRoleSetupResponse,
     AwsConfigureInput,
     AwsConnectInput,
     AwsEcrRepo,
@@ -918,6 +919,30 @@ export class ApiClient {
         });
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 프로필 연결 실패');
+        }
+        return resp.data;
+    }
+
+    /**
+     * POST /api/aws/role/setup — 프로그램 안에서 최소권한 역할을 만들고 빌린다.
+     * 권한이 모자라면 ok=false + mode="console_fallback" 으로 200 이 온다.
+     */
+    async setupAwsRole(input: { profile?: string; region?: string } = {}): Promise<AwsRoleSetupResponse> {
+        const resp = await this.request<AwsRoleSetupResponse>('POST', '/api/aws/role/setup', {
+            profile: input.profile ?? '',
+            region: input.region ?? '',
+        }, false, 120000);   // CreateRole 직후 AssumeRole 전파 지연 재시도까지 포함
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 역할 설정 실패');
+        }
+        return resp.data;
+    }
+
+    /** POST /api/aws/role/refresh — 역할 모드의 임시 자격증명을 지금 다시 빌린다. */
+    async refreshAwsRole(): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/role/refresh', {});
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 역할 자격증명 갱신 실패');
         }
         return resp.data;
     }

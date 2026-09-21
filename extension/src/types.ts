@@ -347,10 +347,32 @@ export interface AwsStatus {
   region: string;
   profile: string;
   access_key_last4: string;
-  /** "recoder" | "aws_credentials_file" | "env" | "" */
+  /** "recoder" | "aws_credentials_file" | "env" | "aws_profile" | "assumed_role" | "" */
   storage: string;
   message: string;
   permission_check?: AwsPermissionCheck | null;
+  /** 역할 모드(storage === "assumed_role")일 때만 채워진다. */
+  role_arn?: string;
+  expires_at?: string;
+}
+
+/** POST /api/aws/role/setup 응답 — ok=false 는 실패가 아니라 콘솔 폴백 분기다. */
+export interface AwsRoleSetupResponse {
+  ok: boolean;
+  mode: 'role' | 'console_fallback';
+  message: string;
+  denied_action: string;
+  role?: {
+    role_arn: string;
+    role_name: string;
+    created: boolean;
+    trust_updated: boolean;
+    policy_statements: number;
+    principal_arn: string;
+    expires_at: string;
+    warnings: string[];
+  } | null;
+  status?: AwsStatus | null;
 }
 
 export interface AwsConfigureInput {
