@@ -3235,9 +3235,21 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                         _exc,
                     )
 
+        # 헬스 결과를 **명시적으로** 돌려준다. status=success 는 `docker run` 이 됐다는
+        # 뜻일 뿐인데, 화면이 그걸 "Health Check 통과" 로 보여 줬다(실기기: /health 가
+        # 404 인 앱도 초록 배너). 컨테이너는 돌고 감시·롤백은 살아 있으니 실패로
+        # 바꾸진 않되, 화면이 거짓말하지 않도록 사실을 따로 준다.
+        _first_hp = next(iter(plan.ports.keys()), None)
+        _hp = plan.health_check_path or "/health"
+        health_check_url = (
+            f"http://localhost:{_first_hp}{_hp if _hp.startswith('/') else '/' + _hp}"
+            if _first_hp else None
+        )
         return {
             "status": "success" if success else "failed",
             "deployment_id": record.deployment_id,
+            "health_ok": bool(rollback_eligible),
+            "health_check_url": health_check_url,
             "rollback_target": record.rollback_target,
             "rollback_eligible": record.rollback_eligible,
             "rollback_reason": rollback_reason,
