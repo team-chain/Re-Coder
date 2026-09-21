@@ -61,16 +61,22 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = ({
 }) => {
   const [confirmText, setConfirmText] = useState("");
   const [showDiff, setShowDiff] = useState(false);
+  //: Level 3 "Double Confirm" 의 두 번째 단계. 예전엔 라벨만 "Double Confirm" 이고
+  //: 버튼은 한 번에 눌렸다 — 코어가 미검증 배포를 이중 확인으로 올려도 화면에서는
+  //: 아무 차이가 없었다(실기기 검증 B3). 사유를 읽었다는 체크가 있어야 승인이 열린다.
+  const [acknowledged, setAcknowledged] = useState(false);
 
   const riskColor = RISK_COLORS[riskLevel];
   const isLevel4Confirmed =
     level < 4 || confirmText.trim().toUpperCase() === CONFIRM_KEYWORD;
+  const isLevel3Confirmed = level < 3 || level >= 4 || acknowledged;
+  const canApprove = isLevel4Confirmed && isLevel3Confirmed;
 
   const handleApprove = useCallback(() => {
-    if (isLevel4Confirmed) {
+    if (canApprove) {
       onApprove();
     }
-  }, [isLevel4Confirmed, onApprove]);
+  }, [canApprove, onApprove]);
 
   const containerStyle: React.CSSProperties = {
     background: "var(--vscode-editor-background)",
@@ -230,6 +236,29 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = ({
         </div>
       )}
 
+      {/* Level 3: 두 번째 확인 — 사유를 읽었다는 체크 */}
+      {level === 3 && (
+        <div style={{ ...sectionStyle, padding: "8px 10px", borderRadius: 4, border: `1px solid ${riskColor}`, background: "rgba(245,158,11,0.06)" }}>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", lineHeight: 1.5 }}>
+            <input
+              type="checkbox"
+              checked={acknowledged}
+              onChange={(e) => setAcknowledged(e.target.checked)}
+              style={{ marginTop: 2 }}
+              aria-label="위험 사유 확인"
+            />
+            <span>
+              위 위험 사유{riskReasons.length > 0 ? ` ${riskReasons.length}건` : ""}을 읽었고, 이 상태로 실행하는 데 동의합니다.
+              {riskReasons.some((r) => /미검증|unverified|검사 실패|not.?run/i.test(r)) && (
+                <span style={{ display: "block", color: riskColor, marginTop: 2 }}>
+                  검사가 통과된 것이 아니라 확인하지 못한 상태입니다.
+                </span>
+              )}
+            </span>
+          </label>
+        </div>
+      )}
+
       {/* Level 4: Confirmation typing */}
       {level >= 4 && (
         <div style={sectionStyle}>
@@ -272,16 +301,16 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = ({
         <button
           style={{
             ...buttonBase,
-            background: isLevel4Confirmed
+            background: canApprove
               ? "var(--vscode-button-background, #0078d4)"
               : "var(--vscode-button-secondaryBackground, #3a3a3a)",
-            color: isLevel4Confirmed
+            color: canApprove
               ? "var(--vscode-button-foreground, #fff)"
               : "var(--vscode-disabledForeground, #666)",
-            cursor: isLevel4Confirmed ? "pointer" : "not-allowed",
+            cursor: canApprove ? "pointer" : "not-allowed",
           }}
           onClick={handleApprove}
-          disabled={!isLevel4Confirmed}
+          disabled={!canApprove}
         >
           {level >= 4 ? "Override & Approve" : "Approve"}
         </button>
