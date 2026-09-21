@@ -72,3 +72,25 @@ def test_빌드_타임아웃은_예외_없이_실패_응답(monkeypatch, tmp_pat
     monkeypatch.setattr(d.subprocess, "run", boom)
     r = asyncio.run(d._build_local_image(_plan(), str(tmp_path)))
     assert r["status"] == "failed" and "끝나지 않았습니다" in r["message"]
+
+
+# ── 포트 감지: Dockerfile EXPOSE > 소스 listen() > package.json 추측 ──
+from agents.deploy_agent import DeployAgent  # noqa: E402
+
+
+def test_포트는_Dockerfile_EXPOSE_를_최우선으로_본다(tmp_path):
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/app.js"}}')
+    (tmp_path / "Dockerfile").write_text("FROM node:20-alpine\nEXPOSE 3456\nCMD [\"node\",\"src/app.js\"]\n")
+    assert DeployAgent._detect_port(str(tmp_path)) == (3456, 3456)
+
+
+def test_Dockerfile_없으면_소스의_listen_포트를_본다(tmp_path):
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/app.js"}}')
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.js").write_text('app.listen(3456, () => {});\n')
+    assert DeployAgent._detect_port(str(tmp_path)) == (3456, 3456)
+
+
+def test_아무_단서_없는_node_는_예전처럼_3000(tmp_path):
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node index.js"}}')
+    assert DeployAgent._detect_port(str(tmp_path)) == (3000, 3000)
