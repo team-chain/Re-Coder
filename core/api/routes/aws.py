@@ -1421,6 +1421,14 @@ async def setup_aws_role(req: AwsRoleSetupRequest) -> AwsRoleSetupResponse:
         else:
             base_profile = (os.environ.get("AWS_PROFILE") or _active_profile or "").strip()
             base_env = None if base_profile else _base_credentials_from_env()
+            if not base_profile and not base_env:
+                #: 명시적으로 연결한 적이 없어도 ~/.aws 의 기본 프로필로 "연결됨" 상태일 수
+                #: 있다(status 가 그렇게 판정한다). 그 상태에서 "배포 전용 역할로 전환" 을
+                #: 누르면 기반이 없다고 400 이 났다(2026-09-21 실기기). status 와 같은
+                #: 기준으로 기반을 정한다.
+                _storage, detected = _detect_credential_source()
+                if detected and detected in _known_profiles():
+                    base_profile = detected
         if not base_profile and not base_env:
             raise HTTPException(
                 status_code=400,

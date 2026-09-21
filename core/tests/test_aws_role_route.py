@@ -287,3 +287,14 @@ def test_역할_모드가_아니면_refresh_는_400(monkeypatch) -> None:
     with pytest.raises(aws.HTTPException) as info:
         asyncio.run(aws.refresh_aws_role())
     assert info.value.status_code == 400
+
+
+def test_명시_연결_없이_기본_프로필만_있어도_역할_전환이_된다(tmp_path, monkeypatch) -> None:
+    """실기기(2026-09-21): ~/.aws 기본 프로필로 '연결됨' 인데 '배포 전용 역할로 전환' 이 400.
+    status 가 기본 프로필을 연결로 치면 역할 셋업도 같은 기반을 써야 한다."""
+    _profiles(tmp_path, monkeypatch, names=("default",))
+    calls = _wire(monkeypatch)
+    resp = _setup("")            # profile 비움 + env 키 없음 + AWS_PROFILE 없음
+    assert resp.ok is True
+    assert aws._role_state["base_profile"] == "default"
+    assert calls["assume"] == ROLE_ARN
