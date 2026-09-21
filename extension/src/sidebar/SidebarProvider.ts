@@ -933,9 +933,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 try {
                     const result = await this._apiClient.rollback(deploymentId);
                     this.postMessage('stateUpdate', { rollbackResult: result, ...this._state });
+                    //: 로컬 배포 화면(ShipMode)이 직접 받는 채널 — 되돌렸는지·헬스가 살아났는지를 그대로.
+                    this.postMessage('deploy.rollbackResult', { deploymentId, ...(result as object) });
                 } catch (err) {
-                    this.postMessage('errorMessage', { message: String(err) });
+                    const message = err instanceof Error ? err.message : String(err);
+                    this.postMessage('deploy.rollbackResult', { deploymentId, status: 'failed', error: message });
+                    this.postMessage('errorMessage', { message });
                 }
+                break;
+            }
+            case 'deploy.verification.status': {
+                //: ShipMode 의 감시 패널이 10초마다 묻는다. 404(감시 없음)는 null.
+                const { deploymentId } = payload as { deploymentId: string };
+                const snapshot = await this._apiClient.getVerificationStatus(deploymentId);
+                this.postMessage('deploy.verificationStatus', { deploymentId, snapshot });
                 break;
             }
             case 'fetchIncidents': {

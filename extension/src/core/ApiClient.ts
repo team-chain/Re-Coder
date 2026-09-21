@@ -575,16 +575,27 @@ export class ApiClient {
         return resp.success && resp.data ? resp.data : { status: 'error', error: resp.error ?? '코어가 응답하지 않았습니다.' };
     }
 
+    /** 로컬 배포의 연속 검증 스냅샷. 감시가 없으면(코어 재시작 등) null. */
+    async getVerificationStatus(deploymentId: string): Promise<Record<string, unknown> | null> {
+        const resp = await this.request<Record<string, unknown>>('GET', `/api/deploy/verification/${encodeURIComponent(deploymentId)}/status`);
+        return resp.success && resp.data ? resp.data : null;
+    }
+
     async listDeploymentRecords(): Promise<DeploymentRecord[]> {
         const resp = await this.request<DeploymentRecord[]>('GET', '/api/deploy/records');
         return resp.success && resp.data ? resp.data : [];
     }
 
-    async rollback(deploymentId: string): Promise<{ status: string }> {
-        const resp = await this.request<{ status: string }>(
-            'POST', '/api/deploy/rollback', { deployment_id: deploymentId }
+    async rollback(deploymentId: string): Promise<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string }> {
+        //: 롤백은 stop/rm/run + 헬스 확인(최대 15초)이라 기본 30초로는 모자라다.
+        const resp = await this.request<{ status: string; rolled_back_to?: string; warning?: string | null; stderr?: string }>(
+            'POST', '/api/deploy/rollback', { deployment_id: deploymentId }, false, 120000
         );
-        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
+        if (!resp.success || !resp.data) {
+            //: 422(롤백 대상 없음)·404 등 코어의 사유를 버리지 않는다.
+            return { status: 'error', error: resp.error ?? '코어가 응답하지 않았습니다.' };
+        }
+        return { ...resp.data, status: resp.data.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // -----------------------------------------------------------------------
