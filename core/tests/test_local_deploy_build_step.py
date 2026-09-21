@@ -170,3 +170,23 @@ def test_프롬프트와_템플릿이_번들_npm_tar_CVE_를_다룬다():
     assert "npm@latest" in ia._DOCKERFILE_CUSTOMISE_PROMPT and "node_modules/npm" in ia._DOCKERFILE_CUSTOMISE_PROMPT
     assert "rm -rf /usr/local/lib/node_modules/npm" in fr._DOCKERFILE_NODE_EXPRESS
     assert "npm install -g npm@latest" in fr._DOCKERFILE_NODE_NEXT
+
+
+def test_모델이_EOL_node_를_골라도_22_로_강제하고_포트_진입점은_프로필_값(tmp_path):
+    from schemas import ProjectProfile
+    profile = ProjectProfile(workspace_path=str(tmp_path), stack=ProjectStack.NODE_EXPRESS,
+                             default_port=3456, default_run_command="node src/app.js")
+    out = ia.InfraAgent._enforce_safe_customisations(
+        {"NODE_VERSION": "18", "PORT": "3000", "START_SCRIPT": "index.js", "APP_NAME": "x"},
+        ProjectStack.NODE_EXPRESS, profile)
+    assert out["NODE_VERSION"] == "22" and out["PORT"] == "3456" and out["START_SCRIPT"] == "src/app.js"
+    assert out["APP_NAME"] == "x"
+    assert ia.InfraAgent._enforce_safe_customisations({"NODE_VERSION": "20.11"}, ProjectStack.NODE_EXPRESS, profile)["NODE_VERSION"] == "20.11"
+
+
+def test_실제_node_템플릿에_OS_패치와_npm_제거가_있다():
+    from pathlib import Path
+    tpl = (Path(ia.__file__).resolve().parent.parent / "registry" / "file_templates" / "Dockerfile.node-express").read_text(encoding="utf-8")
+    runtime = tpl[tpl.index("AS runtime"):]
+    assert "apk upgrade --no-cache" in runtime
+    assert "rm -rf /usr/local/lib/node_modules/npm" in runtime

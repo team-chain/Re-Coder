@@ -40,6 +40,9 @@ RUN npm run build
 # ---- Runtime stage ----
 FROM node:{{NODE_VERSION}}-alpine AS runtime
 
+# 배포 전 Trivy 검사 대비: 베이스 OS 패치 + 번들 npm(취약한 tar 동봉)을 최신으로.
+RUN apk upgrade --no-cache && npm install -g npm@latest
+
 LABEL org.opencontainers.image.title="{{APP_NAME}}" \
       org.opencontainers.image.description="Next.js application" \
       org.opencontainers.image.version="1.0"

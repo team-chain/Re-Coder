@@ -57,6 +57,11 @@ LABEL org.opencontainers.image.title="{{APP_NAME}}" \
 RUN addgroup -g 1001 appgroup && \
     adduser -u 1001 -G appgroup -s /bin/sh -D appuser
 
+# 배포 전 Trivy 검사에서 CRITICAL 이 나오면 실행이 차단된다 — 베이스 OS 패키지를
+# 패치하고, 이미지에 번들된 npm(취약한 tar 동봉)은 앱이 node 로 직접 뜨므로 제거한다.
+RUN apk upgrade --no-cache && \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+
 # Install curl for health checks
 RUN apk add --no-cache curl dumb-init
 
