@@ -119,11 +119,12 @@ async def ensure_docker_route() -> dict:
             "launched": bool(result.launched),
             "waited_seconds": int(result.waited_seconds),
             "message": result.message,
+            "starting": bool(getattr(result, "starting", False)),
         }
     except Exception as exc:  # noqa: BLE001
         return {
             "ready": False, "attempted": False, "launched": False, "waited_seconds": 0,
-            "message": f"Docker 자동 시작을 시도하지 못했습니다: {exc}",
+            "message": f"Docker 자동 시작을 시도하지 못했습니다: {exc}", "starting": False,
         }
 
 

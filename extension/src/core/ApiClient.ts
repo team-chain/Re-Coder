@@ -259,8 +259,8 @@ export class ApiClient {
      * 코어 대기 75초 + 폴링마다 `docker info` 5초 지연 + 다른 호출의 락 대기까지
      * 합치면 120초를 넘길 수 있어(실기기에서 abort) 넉넉히 잡는다.
      */
-    async ensureDocker(): Promise<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string }> {
-        const resp = await this.request<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string }>(
+    async ensureDocker(): Promise<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string; starting?: boolean }> {
+        const resp = await this.request<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string; starting?: boolean }>(
             'POST', '/api/docker/ensure', {}, false, 200000,
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Docker 자동 시작 요청 실패'); }
