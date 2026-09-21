@@ -137,3 +137,29 @@ def test_project_scanner_는_node_진입점과_포트를_프로젝트에서_읽�
     profile = ProjectScanner().scan(str(tmp_path))
     assert profile.default_port == 3456
     assert profile.default_run_command == "node src/app.js"
+
+
+# ── Dockerfile 생성 프롬프트의 런타임 힌트 (EOL node 18 선택 회귀) ──
+from agents import infra_agent as ia  # noqa: E402
+from schemas import ProjectStack  # noqa: E402
+
+
+def test_런타임_힌트는_nvmrc_engines_를_읽고_없으면_최신_LTS(tmp_path):
+    (tmp_path / "package.json").write_text('{"engines":{"node":">=20"}}')
+    assert "Node.js 20" in ia._runtime_hint(str(tmp_path), ProjectStack.NODE_EXPRESS)
+    (tmp_path / ".nvmrc").write_text("v22.1.0\n")
+    assert "Node.js 22.1.0" in ia._runtime_hint(str(tmp_path), ProjectStack.NODE_EXPRESS)
+    (tmp_path / ".nvmrc").unlink(); (tmp_path / "package.json").write_text('{}')
+    assert "Node.js 22" in ia._runtime_hint(str(tmp_path), ProjectStack.NODE_EXPRESS)
+
+
+def test_프롬프트에_EOL_금지와_OS_패치_규칙이_있다():
+    assert "end-of-life" in ia._DOCKERFILE_CUSTOMISE_PROMPT
+    assert "{runtime_hint}" in ia._DOCKERFILE_CUSTOMISE_PROMPT
+    assert "apk upgrade" in ia._DOCKERFILE_CUSTOMISE_PROMPT
+
+
+def test_node_템플릿은_현재_LTS_와_OS_패치_단계를_쓴다():
+    from registries import file_registry as fr
+    assert "FROM node:22-slim" in fr._DOCKERFILE_NODE_EXPRESS
+    assert "apt-get upgrade -y" in fr._DOCKERFILE_NODE_EXPRESS

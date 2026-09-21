@@ -56,6 +56,13 @@ the base Dockerfile template for this specific project.
 ## Files found in workspace
 {workspace_summary}
 
+## Hard rules (the image is vulnerability-scanned before it may run)
+- Runtime version: {runtime_hint}. Never pick an end-of-life runtime (Node.js < 20,
+  Python < 3.10). Prefer the newest LTS the project allows.
+- Keep the base OS patched: keep the template's OS upgrade step (apt-get upgrade /
+  apk upgrade). Known CRITICAL CVEs in an unpatched base image block deployment.
+- Keep the port ({port}) and run command ({run_command}) exactly as given above.
+
 ## Output format
 Return ONLY a JSON object with string key-value pairs for template customisation.
 Keys must match the {{PLACEHOLDER}} markers in the template.
@@ -67,6 +74,45 @@ Example:
   "PYTHON_VERSION": "3.11"
 }}
 """
+
+def _runtime_hint(workspace_path: str, stack) -> str:
+    """프로젝트가 고정한 런타임 버전(.nvmrc / engines.node / .python-version)을 읽는다.
+
+    없으면 "최신 LTS" 를 권한다. 예전엔 힌트가 없어 모델이 node 18(EOL) 같은 오래된
+    버전을 골랐고, 그 베이스 이미지의 OS CVE 로 배포가 차단됐다(실기기 검증 C2).
+    """
+    import json as _json
+    import re as _re
+    from pathlib import Path as _Path
+
+    root = _Path(workspace_path)
+    stack_value = getattr(stack, "value", str(stack))
+    if stack_value.startswith("node"):
+        nvmrc = root / ".nvmrc"
+        if nvmrc.is_file():
+            v = nvmrc.read_text(encoding="utf-8", errors="replace").strip().lstrip("v")
+            if v:
+                return f"Node.js {v} (pinned by .nvmrc)"
+        pkg = root / "package.json"
+        if pkg.is_file():
+            try:
+                engines = _json.loads(pkg.read_text(encoding="utf-8", errors="replace")).get("engines", {})
+                node = str(engines.get("node", "")) if isinstance(engines, dict) else ""
+            except Exception:
+                node = ""
+            m = _re.search(r"(\d{2})", node)
+            if m and int(m.group(1)) >= 20:
+                return f"Node.js {m.group(1)} (package.json engines: {node})"
+        return "Node.js 22 (newest LTS; the project does not pin a version)"
+    if stack_value.startswith("python"):
+        pv = root / ".python-version"
+        if pv.is_file():
+            v = pv.read_text(encoding="utf-8", errors="replace").strip()
+            if v:
+                return f"Python {v} (pinned by .python-version)"
+        return "Python 3.12 (newest stable; the project does not pin a version)"
+    return "the newest LTS runtime"
+
 
 _COMPOSE_PROMPT = """\
 You are ReCoder, an infrastructure automation AI.
@@ -232,6 +278,7 @@ class InfraAgent:
             health_check_path=project.health_check_path,
             template_content=template.base_content[:3000],
             workspace_summary=workspace_summary,
+            runtime_hint=_runtime_hint(workspace_path, stack),
         )
 
         raw = await self._provider.complete(
