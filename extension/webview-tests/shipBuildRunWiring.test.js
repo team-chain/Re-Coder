@@ -42,3 +42,9 @@ test('executeDeployment 은 코어의 거절 사유(4xx/5xx)를 error 로 넘긴
   assert.doesNotMatch(fn, /: \{ status: 'error' \};/, '거절 사유를 버린다');
   assert.match(fn, /error: resp\.error/);
 });
+
+test('헬스 실패한 배포는 "Health Check 통과" 로 칠하지 않는다', () => {
+  const SHIP2 = read('../webview-src/components/ShipMode.tsx');
+  assert.match(SHIP2, /deployResult\?\.health_ok === false \?/, '헬스 결과로 배너를 가르지 않는다');
+  assert.match(SHIP2, /컨테이너는 떴지만 Health Check 는 실패했습니다/);
+});
