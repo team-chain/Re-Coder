@@ -58,19 +58,44 @@ export type ScanVerdict = "not_run" | "vulnerable" | "clean";
  *  · vulnerable— 취약점이 관측됐다.
  *  · clean     — 실제로 돌았고 관측된 취약점이 없다.
  */
-export function scanVerdict(result: ScanResult): ScanVerdict {
-  if (result.status === "error" || result.status === "not_run" || result.status === "unverified") { return "not_run"; }
-  const findings = result.findings as { Results?: { Vulnerabilities?: unknown[] }[] } | null;
-  //: status 가 없는 구버전 코어 응답 대비 — findings 자체가 없으면
-  //: "검사 결과가 없다"이지 "깨끗하다"가 아니다.
-  if (!findings || !Array.isArray(findings.Results)) { return "not_run"; }
-  let count = 0;
-  for (const r of findings.Results) {
-    for (const v of (r.Vulnerabilities ?? []) as { Severity: string }[]) {
-      if (v.Severity === "CRITICAL" || v.Severity === "HIGH") { count++; }
-    }
+/**
+ * CRITICAL/HIGH 개수를 센다 — 코어의 정규화 형태(`critical_count`/`high_count`,
+ * `findings: [{severity}]`)를 먼저, 없으면 Trivy 원본 형태(`Results[].Vulnerabilities`)를.
+ * 두 형태를 모두 읽지 않으면 실제로 돈 검사가 "못 함" 으로 보인다(실기기 B1: 헤더는
+ * "검사를 하지 못했습니다", 본문은 "no critical … detected" 인 모순 박스).
+ */
+export function scanCounts(result: ScanResult): { critical: number; high: number } | null {
+  if (typeof result.critical_count === "number" || typeof result.high_count === "number") {
+    return { critical: result.critical_count ?? 0, high: result.high_count ?? 0 };
   }
-  return count > 0 ? "vulnerable" : "clean";
+  const f = result.findings as unknown;
+  if (Array.isArray(f)) {
+    let critical = 0, high = 0;
+    for (const item of f as { severity?: string; Severity?: string }[]) {
+      const sev = String(item?.severity ?? item?.Severity ?? "").toUpperCase();
+      if (sev === "CRITICAL") { critical++; } else if (sev === "HIGH") { high++; }
+    }
+    return { critical, high };
+  }
+  const raw = f as { Results?: { Vulnerabilities?: unknown[] }[] } | null;
+  if (raw && Array.isArray(raw.Results)) {
+    let critical = 0, high = 0;
+    for (const r of raw.Results) {
+      for (const v of (r.Vulnerabilities ?? []) as { Severity: string }[]) {
+        if (v.Severity === "CRITICAL") { critical++; } else if (v.Severity === "HIGH") { high++; }
+      }
+    }
+    return { critical, high };
+  }
+  return null;
+}
+
+export function scanVerdict(result: ScanResult): ScanVerdict {
+  if (result.status === "error" || (result.status as string) === "not_run" || (result.status as string) === "unverified") { return "not_run"; }
+  //: 결과 형태를 알 수 없으면 "검사 결과가 없다"이지 "깨끗하다"가 아니다.
+  const counts = scanCounts(result);
+  if (counts === null) { return "not_run"; }
+  return counts.critical + counts.high > 0 ? "vulnerable" : "clean";
 }
 
 interface DeploymentPlan {
@@ -397,15 +422,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       );
     }
 
-    const findings = result.findings as { Results?: { Vulnerabilities?: unknown[] }[] };
-    let criticalCount = 0;
-    let highCount = 0;
-    for (const r of findings?.Results ?? []) {
-      for (const v of (r.Vulnerabilities ?? []) as { Severity: string }[]) {
-        if (v.Severity === "CRITICAL") { criticalCount++; }
-        if (v.Severity === "HIGH") { highCount++; }
-      }
-    }
+    const counts = scanCounts(result) ?? { critical: 0, high: 0 };
+    const criticalCount = counts.critical;
+    const highCount = counts.high;
 
     const severity = criticalCount > 0 ? "critical" : highCount > 0 ? "high" : "low";
     const label =
