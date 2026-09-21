@@ -123,3 +123,17 @@ def test_플랜_포트는_PORT_기본값_패턴도_읽는다(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n')
     assert DeployAgent._detect_port(str(tmp_path)) == (3456, 3456)
+
+
+# ── Dockerfile 생성 경로가 실제로 쓰는 project_scanner 도 같은 값을 내야 한다 ──
+from project_scanner import ProjectScanner  # noqa: E402
+
+
+def test_project_scanner_는_node_진입점과_포트를_프로젝트에서_읽는다(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n')
+    (tmp_path / "package.json").write_text(
+        '{"main":"src/app.js","scripts":{"start":"node src/app.js"},"dependencies":{"express":"^4"}}')
+    profile = ProjectScanner().scan(str(tmp_path))
+    assert profile.default_port == 3456
+    assert profile.default_run_command == "node src/app.js"
