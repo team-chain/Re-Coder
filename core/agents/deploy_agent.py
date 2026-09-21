@@ -394,9 +394,10 @@ class DeployAgent:
             # 소스에서 listen(NNNN) 을 찾아본다 — Express 류.
             for src in list(ws.glob("*.js")) + list(ws.glob("src/*.js")) + list(ws.glob("*.ts")) + list(ws.glob("src/*.ts")):
                 try:
-                    m = re.search(r"\.listen\(\s*(\d{4,5})", src.read_text(encoding="utf-8"))
+                    text = src.read_text(encoding="utf-8")
                 except Exception:
                     continue
+                m = re.search(r"\.listen\(\s*(\d{4,5})", text) or re.search(r"PORT\s*(?:\|\||\?\?)\s*(\d{4,5})", text)
                 if m:
                     p = int(m.group(1))
                     return (p, p)

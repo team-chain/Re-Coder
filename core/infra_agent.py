@@ -86,6 +86,15 @@ def _detect_stack(project_path: str) -> tuple[str, dict]:
             meta["entrypoint"] = "npm start"
             return "node-next", meta
         if "express" in deps:
+            # 진입점·포트를 추측하지 않고 프로젝트에서 읽는다. 예전엔 무조건
+            # index.js / 3000 이라 `main: src/app.js`, `PORT || 3456` 인 앱은
+            # 존재하지 않는 파일을 CMD 로 띄우고 엉뚱한 포트를 EXPOSE 했다
+            # (실기기 검증 C2 — 다른 앱이 3000 을 쓰고 있어 충돌).
+            entry, port = _detect_node_entry_and_port(p, package if isinstance(package, dict) else {})
+            if entry:
+                meta["entrypoint"] = entry
+            if port:
+                meta["port"] = str(port)
             return "node-express", meta
 
         raise StackDetectionError(
@@ -95,6 +104,42 @@ def _detect_stack(project_path: str) -> tuple[str, dict]:
     raise StackDetectionError(
         "스택을 자동 감지하지 못했습니다. requirements.txt 또는 package.json이 필요합니다."
     )
+
+
+def _detect_node_entry_and_port(root: Path, package: dict) -> tuple[Optional[str], Optional[int]]:
+    """Node 프로젝트의 진입점 파일과 듣는 포트를 package.json·소스에서 읽는다.
+
+    진입점: scripts.start 의 `node <파일>` → package.main → 흔한 이름 중 존재하는 것.
+    포트: 진입점 소스의 `listen(NNNN` / `PORT || NNNN` / `PORT ?? NNNN` → 없으면 None.
+    """
+    entry: Optional[str] = None
+    scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
+    start = str(scripts.get("start", "")) if scripts else ""
+    m = re.search(r"\bnode\s+(?:--[\w-]+\s+)*([\w./-]+\.[cm]?js)\b", start)
+    if m and (root / m.group(1)).is_file():
+        entry = m.group(1)
+    if entry is None:
+        main = package.get("main")
+        if isinstance(main, str) and (root / main).is_file():
+            entry = main
+    if entry is None:
+        for cand in ("index.js", "server.js", "app.js", "src/index.js", "src/server.js", "src/app.js"):
+            if (root / cand).is_file():
+                entry = cand
+                break
+
+    port: Optional[int] = None
+    if entry:
+        try:
+            src = (root / entry).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            src = ""
+        for pat in (r"\.listen\(\s*(\d{2,5})\b", r"PORT\s*(?:\|\||\?\?)\s*(\d{2,5})\b"):
+            m = re.search(pat, src)
+            if m:
+                port = int(m.group(1))
+                break
+    return entry, port
 
 
 def _detect_db_driver(project_path: str) -> Optional[str]:
