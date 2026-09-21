@@ -445,21 +445,66 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return this._dockerHealInFlight;
     }
 
+    /** 코어의 대기 상한 뒤에도 확장이 뒤에서 이어서 확인하는 시간(ms)과 간격(ms). */
+    private static readonly DOCKER_FOLLOWUP_MS = 120_000;
+    private static readonly DOCKER_FOLLOWUP_INTERVAL_MS = 10_000;
+
     private async _healDockerOnce(reason: 'diagnostics' | 'fix'): Promise<boolean> {
         try {
             const r = await this._apiClient.ensureDocker();
+            if (r.ready) {
+                this.postMessage('selfHeal', {
+                    key: 'docker_ready', action: 'docker_start', reason, failed: false,
+                    message: r.attempted ? `자동 조치함 · Docker Desktop 을 시작했습니다 (${r.waited_seconds}초 대기).` : 'Docker 데몬이 이미 실행 중입니다.',
+                });
+                return true;
+            }
+            if (!r.launched) {
+                this.postMessage('selfHeal', { key: 'docker_ready', action: 'docker_start', reason, failed: true, message: `자동 조치 실패 · ${r.message}` });
+                return false;
+            }
+            //: 실행은 됐고 준비만 늦다(실기기 콜드 스타트가 코어 대기 상한을 넘김).
+            //: "실패" 로 끝내지 않고 뒤에서 이어서 확인한다 — 사용자가 다시 누를 필요 없게.
             this.postMessage('selfHeal', {
-                key: 'docker_ready', action: 'docker_start', reason, failed: !r.ready,
-                message: r.ready
-                    ? (r.attempted ? `자동 조치함 · Docker Desktop 을 시작했습니다 (${r.waited_seconds}초 대기).` : 'Docker 데몬이 이미 실행 중입니다.')
-                    : `자동 조치 실패 · ${r.message}`,
+                key: 'docker_ready', action: 'docker_start', reason, failed: false, pending: true,
+                message: `자동 조치 중 · Docker Desktop 을 실행했습니다 — 준비될 때까지 기다리는 중 (${r.waited_seconds}초 경과)`,
             });
-            return r.ready;
+            const waited = await this._waitForDocker(r.waited_seconds);
+            const ready = waited !== null;
+            this.postMessage('selfHeal', {
+                key: 'docker_ready', action: 'docker_start', reason, failed: !ready,
+                message: ready
+                    ? `자동 조치함 · Docker Desktop 을 시작했습니다 (${waited}초 대기).`
+                    : `자동 조치 실패 · ${r.message} Docker Desktop 창을 열어 상태를 확인해 주세요.`,
+            });
+            return ready;
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             this.postMessage('selfHeal', { key: 'docker_ready', action: 'docker_start', reason, failed: true, message: `자동 조치 실패 · ${msg}` });
             return false;
         }
+    }
+
+    /**
+     * 코어가 Docker Desktop 을 띄웠지만 대기 상한 안에 데몬이 안 뜬 뒤, 확장이
+     * 뒤에서 이어서 확인한다. 준비되면 총 대기 초를, 포기하면 null 을 돌려준다.
+     * ensureDocker 는 데몬이 떠 있으면 즉시 ready 로 돌아오고, 쿨다운 안에서는
+     * 앱을 다시 띄우지 않으므로 그대로 폴링에 써도 안전하다.
+     */
+    private async _waitForDocker(alreadyWaitedSeconds: number): Promise<number | null> {
+        const started = Date.now();
+        while (Date.now() - started < SidebarProvider.DOCKER_FOLLOWUP_MS) {
+            await new Promise<void>(resolve => setTimeout(resolve, SidebarProvider.DOCKER_FOLLOWUP_INTERVAL_MS));
+            try {
+                const r = await this._apiClient.ensureDocker();
+                if (r.ready) {
+                    return alreadyWaitedSeconds + Math.round((Date.now() - started) / 1000);
+                }
+            } catch {
+                // 일시적 요청 실패는 다음 폴링에서 다시 본다.
+            }
+        }
+        return null;
     }
 
     /**

@@ -116,9 +116,11 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
   const [healing, setHealing] = useState<string | null>(null);
   useMessage(useCallback(({ type, payload }) => {
     if (type === "selfHeal") {
-      const p = payload as { key?: string; message?: string; failed?: boolean };
+      const p = payload as { key?: string; message?: string; failed?: boolean; pending?: boolean };
       if (p?.key) { setHeal(cur => ({ ...cur, [p.key as string]: { message: p.message ?? "", failed: p.failed } })); }
-      setHealing(null);
+      //: pending — 앱은 띄웠고 데몬을 기다리는 중. 버튼은 "조치 중…" 으로 두고
+      //: 최종 결과(자동 조치함/실패)가 올 때 푼다 — 사용자가 또 누르지 않게.
+      if (p?.pending && p?.key) { setHealing(p.key); } else { setHealing(null); }
     }
     if (type === "diagnosticsUpdate") { setHealing(null); }
   }, []));

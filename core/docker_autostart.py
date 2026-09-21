@@ -36,12 +36,18 @@ from dataclasses import dataclass
 #: 자동 시작 스위치. "0" 일 때만 꺼진다 — 기본은 켜짐.
 ENV_AUTOSTART = "RECODER_DOCKER_AUTOSTART"
 #: 데몬 준비 대기 상한(초). ECS 경로가 executor 에서 블로킹으로 돌므로 과하게 길게 잡지 않는다.
+#: 실기기(Apple Silicon, Docker Desktop 콜드 스타트)에서 75초를 넘긴 사례가 있어 120초.
+#: 이 안에 못 뜨면 launched=True/ready=False 로 돌려주고, 확장이 뒤에서 이어서 확인한다.
 ENV_WAIT_SECONDS = "RECODER_DOCKER_AUTOSTART_WAIT"
-DEFAULT_WAIT_SECONDS = 75
+DEFAULT_WAIT_SECONDS = 120
 #: 실패 후 재시도 쿨다운(초).
 _RETRY_COOLDOWN_SECONDS = 120
 
 _POLL_INTERVAL_SECONDS = 3.0
+#: `open -a` 자체가 끝나기를 기다리는 상한(초). 런처라 보통 1초 안이다.
+_OPEN_TIMEOUT_SECONDS = 15
+#: 실행 뒤 이 시간이 지나도 앱 프로세스가 없으면 한 번 다시 띄운다(종료 중 무시된 경우).
+_RELAUNCH_AFTER_SECONDS = 12
 
 _lock = threading.Lock()
 _last_attempt_at: float = 0.0
@@ -68,6 +74,24 @@ def daemon_up(timeout: float = 5.0) -> bool:
         return proc.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
+
+
+def app_running() -> bool:
+    """Docker Desktop **앱 프로세스**가 살아 있는가(데몬 준비와는 별개).
+
+    macOS 만 확인한다 — 다른 플랫폼이나 확인 실패는 True(모른다 → 다시 띄우지
+    않는다) 로 둔다. 재실행은 "확실히 없을 때"만 해야 부팅 중 중복 실행이 없다.
+    """
+    if platform.system() != "Darwin":
+        return True
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", "Docker.app/Contents/MacOS/Docker"],
+            capture_output=True, timeout=5,
+        )
+        return proc.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return True
 
 
 def _windows_candidates() -> list[str]:
@@ -120,11 +144,18 @@ def _launch() -> tuple[bool, str]:
             )
             return True, f"Docker Desktop 실행: {candidates[0]}"
         if system == "Darwin":
-            subprocess.Popen(
+            # `open -a` 는 런처라 금방 끝난다 — 종료 코드를 봐야 "실행했다"고 말할 수
+            # 있다. 실기기에서 조용히 실패한 뒤 데몬만 기다리다 끝난 사례가 있었다.
+            proc = subprocess.run(
                 ["open", "-a", "Docker"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=_OPEN_TIMEOUT_SECONDS,
             )
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip()
+                return False, (
+                    "Docker Desktop 실행 실패(open -a Docker"
+                    f"{': ' + detail if detail else ''}) — 설치돼 있는지 확인해 주세요."
+                )
             return True, "Docker Desktop 실행: open -a Docker"
         # Linux 데몬은 systemd 권한이 얽혀 있어 조용한 자동 시작이 오히려
         # 실패를 숨긴다. 명시적으로 지원하지 않는다고 말한다.
@@ -177,6 +208,7 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
                 limit = DEFAULT_WAIT_SECONDS
 
         started = time.monotonic()
+        relaunched = False
         while (time.monotonic() - started) < limit:
             if daemon_up():
                 waited = int(time.monotonic() - started)
@@ -185,12 +217,22 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
                     f"Docker Desktop 을 자동 시작했습니다 (준비까지 {waited}초).",
                 )
                 return _last_result
+            # 앱이 종료되는 도중에 `open` 을 부르면 무시되고 프로세스가 사라진다
+            # (사용자가 방금 Docker 를 끈 직후 진단을 돌리는 흔한 순서). 한 번만
+            # 다시 띄운다 — 매 폴링마다 띄우면 부팅 중 재실행이 된다.
+            elapsed = time.monotonic() - started
+            if not relaunched and elapsed >= _RELAUNCH_AFTER_SECONDS and not app_running():
+                relaunched = True
+                launched, how = _launch()
+                if not launched:
+                    _last_result = AutostartResult(True, False, False, int(elapsed), how)
+                    return _last_result
             time.sleep(_POLL_INTERVAL_SECONDS)
 
         _last_result = AutostartResult(
             True, True, False, int(limit),
-            f"Docker Desktop 자동 시작을 시도했지만 {int(limit)}초 안에 데몬이 "
-            "준비되지 않았습니다. 잠시 후 다시 시도해 주세요.",
+            f"Docker Desktop 을 실행했지만 {int(limit)}초 안에 데몬이 준비되지 "
+            "않았습니다 — 아직 시작 중일 수 있습니다.",
         )
         return _last_result
 
