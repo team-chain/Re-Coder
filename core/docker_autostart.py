@@ -53,6 +53,12 @@ _RELAUNCH_AFTER_SECONDS = 12
 #: 수 분 지나도 데몬 없음). 백엔드가 내려갈 때까지 최대 이만큼 기다린 뒤 띄운다.
 _BACKEND_DRAIN_SECONDS = 45
 _BACKEND_POLL_SECONDS = 2.0
+#: 프로세스는 있는데 데몬이 죽어 있고, 그 프로세스가 이만큼 오래됐으면 "부팅 중" 이
+#: 아니라 "멈춤/엔진만 꺼짐" 이다(실기기: Quit 뒤 GUI 는 사라지는데 backend·helper 가
+#: 데몬 없이 무기한 남는다 — 그 위에 `open` 하면 꼬인다). 정리한 뒤 새로 띄운다.
+_STALE_PROCESS_SECONDS = 90
+#: 정리: SIGTERM 뒤 이만큼 기다리고, 남으면 SIGKILL.
+_KILL_GRACE_SECONDS = 10
 
 _lock = threading.Lock()
 _last_attempt_at: float = 0.0
@@ -123,29 +129,99 @@ def backend_running() -> bool:
         return False
 
 
+def _docker_pids() -> list[int]:
+    """Docker.app 아래서 돌고 있는 모든 프로세스(GUI·helper·backend·build)."""
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", "Docker.app/Contents/"], capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    return [int(x) for x in proc.stdout.split() if x.strip().isdigit()]
+
+
+def _parse_etime(text: str) -> int:
+    """`ps -o etime=` 형식([[dd-]hh:]mm:ss)을 초로."""
+    text = text.strip()
+    days = 0
+    if "-" in text:
+        d, text = text.split("-", 1)
+        days = int(d)
+    parts = [int(x) for x in text.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, sec = parts
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def _oldest_process_age(pids: list[int]) -> int:
+    """pids 중 가장 오래 산 프로세스의 나이(초). 확인 실패는 0(모른다 → 어리다고 본다)."""
+    if not pids:
+        return 0
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "etime=", "-p", ",".join(str(p) for p in pids)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return 0
+    ages = []
+    for line in proc.stdout.splitlines():
+        try:
+            ages.append(_parse_etime(line))
+        except ValueError:
+            continue
+    return max(ages) if ages else 0
+
+
+def _kill_docker_processes() -> None:
+    """남은 Docker.app 프로세스를 SIGTERM → (유예 뒤) SIGKILL 로 정리한다.
+
+    데몬이 죽어 있을 때만 부른다 — 컨테이너가 도는 상태를 죽이는 일은 없다.
+    """
+    try:
+        subprocess.run(["pkill", "-TERM", "-f", "Docker.app/Contents/"], capture_output=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return
+    started = time.monotonic()
+    while (time.monotonic() - started) < _KILL_GRACE_SECONDS:
+        time.sleep(_BACKEND_POLL_SECONDS)
+        if not _docker_pids():
+            return
+    try:
+        subprocess.run(["pkill", "-KILL", "-f", "Docker.app/Contents/"], capture_output=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return
+
+
 def _drain_shutdown() -> tuple[int, bool]:
-    """Docker Desktop 프로세스(앱·백엔드)가 남아 있으면 사라질 때까지 기다린다.
+    """Docker Desktop 프로세스가 남아 있으면 사라질 때까지 기다린다(필요하면 정리한다).
 
-    데몬이 죽어 있는데 프로세스가 있으면 둘 중 하나다 — **종료 중**(곧 사라진다)
-    이거나 **부팅 중**(남아 있는다). 프로세스 유무만으로는 못 가르므로 잠깐
-    지켜본다: 상한 안에 다 사라지면 종료였다 → 이제 띄워도 된다(True). 상한을
-    넘겨도 남아 있으면 부팅 중(또는 멈춤)이다 → 띄우지 말고 기다려야 한다(False).
-    종료 중에 `open` 하면 Docker Desktop 이 시작 중 상태에서 멈춘다(실기기 재현:
-    quit 5초 뒤 실행 → 소켓은 있는데 /version 500, 수 분 지나도 그대로).
+    데몬이 죽어 있는데 프로세스가 있으면 셋 중 하나다:
+      - **종료 중** — 곧 사라진다 → 사라지면 띄운다.
+      - **부팅 중** — 프로세스가 어리다(< _STALE_PROCESS_SECONDS) → 띄우지 말고 기다린다.
+      - **멈춤 / 엔진만 꺼짐** — 프로세스가 오래됐는데 데몬이 없다 → 정리하고 띄운다.
+        (실기기: Quit 뒤 backend·helper 가 데몬 없이 무기한 남고, 그 위에 `open` 하면
+        소켓은 생기는데 /version 500 으로 수 분간 멈춘다.)
 
-    반환: (기다린 초, 프로세스가 다 사라졌는가). 프로세스를 못 보는 플랫폼은
-    (0, True) — 예전처럼 바로 띄운다.
+    반환: (기다린 초, 프로세스가 다 사라져 띄워도 되는가, 멈춘 프로세스를 정리했는가).
+    프로세스를 못 보는 플랫폼은 (0, True, False) — 예전처럼 바로 띄운다.
     """
     if not _can_detect_processes():
-        return 0, True
-    if not app_running() and not backend_running():
-        return 0, True
+        return 0, True, False
     started = time.monotonic()
-    while (time.monotonic() - started) < _BACKEND_DRAIN_SECONDS:
+    killed = False
+    while True:
+        pids = _docker_pids()
+        if not pids:
+            return int(time.monotonic() - started), True, killed
+        if not killed and _oldest_process_age(pids) >= _STALE_PROCESS_SECONDS:
+            killed = True
+            _kill_docker_processes()
+            continue
+        if (time.monotonic() - started) >= _BACKEND_DRAIN_SECONDS:
+            return int(time.monotonic() - started), False, killed
         time.sleep(_BACKEND_POLL_SECONDS)
-        if not app_running() and not backend_running():
-            return int(time.monotonic() - started), True
-    return int(time.monotonic() - started), False
 
 
 def _windows_candidates() -> list[str]:
@@ -266,7 +342,7 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
             return _last_result
 
         _last_attempt_at = now
-        drained, clear = _drain_shutdown()
+        drained, clear, cleaned = _drain_shutdown()
         if not clear:
             # 프로세스가 계속 남아 있다 — 부팅 중이다. 그 위에 또 띄우지 않는다.
             _last_result = _wait_ready(max(limit - drained, 0), launched_now=False)
@@ -277,9 +353,14 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
             _last_result = AutostartResult(True, False, False, drained, how)
             return _last_result
 
-        _last_result = _wait_ready(limit, launched_now=True)
+        # 정리·종료 대기에 쓴 시간은 상한에서 뺀다(확장 요청 제한 200초 안에 끝나게).
+        # 단 부팅에 최소 60초는 준다.
+        budget = max(limit - drained, min(limit, 60)) if drained else limit
+        _last_result = _wait_ready(budget, launched_now=True)
         if drained:
             _last_result.waited_seconds += drained
+        if cleaned:
+            _last_result.message = "멈춰 있던 Docker Desktop 을 정리하고 " + _last_result.message
         return _last_result
 
 
