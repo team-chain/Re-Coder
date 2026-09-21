@@ -53,6 +53,10 @@ _deployment_records: dict[str, DeploymentRecord] = {}
 #: 보드 이슈 「Trivy 가 빌드 전 이미지를 스캔 시도 — 보안 스캔이 한 번도
 #: 안 돈 채 통과」의 두 번째 절반이다.
 _plans_pending_image_scan: dict[str, str] = {}
+#: plan_id → 플랜을 만든 워크스페이스. 로컬 Docker 배포의 `docker build` 가 여기서 돈다.
+_plan_workspaces: dict[str, str] = {}
+#: `docker build` 상한(초). 의존성 설치가 끼면 몇 분 걸린다.
+LOCAL_BUILD_TIMEOUT_SECONDS = 600
 
 # 컨테이너 이름별 직렬화 락.
 #
@@ -2924,7 +2928,71 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
             _plans_pending_image_scan[plan.plan_id] = plan.image
 
     _deployment_plans[plan.plan_id] = plan
+    _plan_workspaces[plan.plan_id] = request.workspace_path or ""
     return plan
+
+
+def _dockerfile_in(workspace_path: str) -> Optional[Path]:
+    """워크스페이스 루트의 Dockerfile 경로 — 없으면 None."""
+    if not workspace_path:
+        return None
+    candidate = Path(workspace_path) / "Dockerfile"
+    return candidate if candidate.is_file() else None
+
+
+async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optional[dict]:
+    """로컬 Docker 배포의 **빌드 단계**. 성공이면 None, 실패면 응답 dict.
+
+    예전에는 이 단계가 없었다 — 허브 문구도 승인 화면의 명령 미리보기도
+    `docker build && docker run` 이라고 말했지만 코어는 `docker run` 만 했고,
+    이미지가 없으니 "pull access denied for <이미지>" 로 죽었다(실기기 검증 C2).
+    빌드는 임계 구역 **밖**에서 한다: 빌드가 실패해도 돌고 있던 컨테이너는
+    건드리지 않은 상태라 되돌릴 것이 없다.
+    """
+    if plan.method != DeployMethod.LOCAL_DOCKER or not plan.image:
+        return None
+    dockerfile = _dockerfile_in(workspace_path)
+    if dockerfile is None:
+        if _local_image_exists(plan.image):
+            return None  # 미리 빌드된 이미지를 그대로 쓴다.
+        return {
+            "status": "failed",
+            "stage": "build",
+            "message": (
+                f"이미지 '{plan.image}' 가 로컬에 없고 워크스페이스에 Dockerfile 도 없어 "
+                "빌드할 수 없습니다. 먼저 Dockerfile 을 생성·저장하세요."
+            ),
+            "stderr": "",
+            "stdout": "",
+        }
+    cmd = ["docker", "build", "-f", str(dockerfile), "-t", plan.image, "."]
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                cmd, shell=False, capture_output=True, text=True,
+                cwd=workspace_path, timeout=LOCAL_BUILD_TIMEOUT_SECONDS,
+            ),
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "failed", "stage": "build",
+            "message": f"docker build 가 {LOCAL_BUILD_TIMEOUT_SECONDS}초 안에 끝나지 않았습니다.",
+            "stderr": "", "stdout": "",
+        }
+    except FileNotFoundError:
+        return {
+            "status": "failed", "stage": "build",
+            "message": "docker CLI 를 찾을 수 없습니다. Docker Desktop 이 설치돼 있는지 확인하세요.",
+            "stderr": "", "stdout": "",
+        }
+    if result.returncode != 0:
+        return {
+            "status": "failed", "stage": "build",
+            "message": f"docker build 실패 (exit {result.returncode}) — 이전 컨테이너는 건드리지 않았습니다.",
+            "stderr": result.stderr[-2000:], "stdout": result.stdout[-2000:],
+        }
+    return None
 
 
 @router.post("/api/deploy/execute")
@@ -2941,7 +3009,14 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     if not request.approved:
         del _deployment_plans[request.plan_id]
         _plans_pending_image_scan.pop(request.plan_id, None)
+        _plan_workspaces.pop(request.plan_id, None)
         return {"status": "cancelled", "plan_id": request.plan_id}
+
+    # ── 빌드 (로컬 Docker) — 임계 구역 밖, 스캔보다 먼저 ─────────────────────
+    build_failure = await _build_local_image(plan, _plan_workspaces.get(request.plan_id, ""))
+    if build_failure is not None:
+        build_failure["plan_id"] = request.plan_id
+        return build_failure
 
     # ── 빌드 후 1회 스캔 보장 ──────────────────────────────────────────────
     #: 플랜 시점에 이미지가 없어 Trivy 를 못 돌린 플랜이라면, 실행 직전에
