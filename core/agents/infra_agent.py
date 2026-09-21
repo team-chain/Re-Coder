@@ -61,6 +61,10 @@ the base Dockerfile template for this specific project.
   Python < 3.10). Prefer the newest LTS the project allows.
 - Keep the base OS patched: keep the template's OS upgrade step (apt-get upgrade /
   apk upgrade). Known CRITICAL CVEs in an unpatched base image block deployment.
+- Node.js images ship a bundled npm whose vendored `tar` is often vulnerable: in the
+  final (runtime) stage either upgrade it (`RUN npm install -g npm@latest`) or remove
+  npm entirely (`RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm
+  /usr/local/bin/npx`) when the app starts with `node` directly. Keep this step.
 - Keep the port ({port}) and run command ({run_command}) exactly as given above.
 
 ## Output format
