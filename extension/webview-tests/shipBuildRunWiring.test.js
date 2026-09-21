@@ -29,3 +29,9 @@ test('스캔·플랜 요청의 빈 workspacePath 는 호스트가 워크스페�
   assert.match(HOST, /const planRoot = dpWs \|\| \(vscode\.workspace\.workspaceFolders/);
   assert.match(HOST, /createDeploymentPlan\(\s*planRoot,/);
 });
+
+test('배포 실패는 코어 stderr 원문을 보여 준다 ("stderr 를 확인하세요" 금지)', () => {
+  assert.doesNotMatch(SHIP, /배포 실패\. stderr를 확인하세요/);
+  assert.match(SHIP, /const detail = \(r\.stderr \|\| r\.error \|\| r\.message \|\| r\.stdout \|\| ""\)\.trim\(\);/);
+  assert.match(SHIP, /whiteSpace: "pre-wrap"/, '여러 줄 stderr 가 한 줄로 뭉개진다');
+});
