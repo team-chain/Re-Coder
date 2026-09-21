@@ -417,8 +417,12 @@ export class CoreManager {
             // Core 의 provider_router 가 Bedrock 직접호출 대신 운영자 게이트웨이를 사용.
             const [gatewayEnv, awsEnv] = await Promise.all([this._gatewayEnv(), this._awsEnv()]);
 
+            //: 확장 호스트 전용 변수(ELECTRON_RUN_AS_NODE 등)는 코어에 넘기지 않는다 — 코어가
+            //: 띄우는 Docker Desktop(Electron)이 그걸 물려받으면 GUI 없이 즉시 종료한다(실기기).
+            const hostEnv: NodeJS.ProcessEnv = { ...process.env };
+            for (const k of ['ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ATTACH_CONSOLE', 'NODE_OPTIONS']) { delete hostEnv[k]; }
             this.coreProcess = spawn(spec.command, args, {
-                env: { ...process.env, ...gatewayEnv, ...awsEnv },
+                env: { ...hostEnv, ...gatewayEnv, ...awsEnv },
                 detached: false,
                 stdio: ['ignore', 'pipe', 'pipe'],
                 cwd: spec.cwd,
