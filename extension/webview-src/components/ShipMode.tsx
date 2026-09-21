@@ -203,11 +203,19 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       }
 
       if (type === "deployResult") {
-        const r = payload as { status: string; deployment_id?: string };
+        const r = payload as {
+          status: string; deployment_id?: string; message?: string; error?: string;
+          stderr?: string; stdout?: string; restored_previous?: boolean; restore_stderr?: string;
+        };
         setDeployResult(r);
         setStep(r.status === "success" ? "done" : "error");
         if (r.status !== "success") {
-          setError("배포 실패. stderr를 확인하세요.");
+          //: 코어가 stderr 를 돌려주는데 "stderr 를 확인하세요" 만 보이면 사용자는
+          //: 어디서도 확인할 수 없다(실기기 검증 C2). 원문을 그대로 보인다.
+          const detail = (r.stderr || r.error || r.message || r.stdout || "").trim();
+          const tail = detail.split("\n").filter(Boolean).slice(-8).join("\n");
+          const restored = r.restored_previous ? "\n이전 컨테이너는 복원됐습니다." : "";
+          setError(`배포 실패${tail ? ` — ${tail}` : " (코어가 사유를 돌려주지 않았습니다)"}${restored}`);
         }
       }
 
@@ -603,7 +611,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
 
       {/* ── Error ── */}
       {step === "error" && error && (
-        <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444", borderRadius: 5, padding: "8px 10px", color: "#ef4444", marginBottom: 10 }}>
+        <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444", borderRadius: 5, padding: "8px 10px", color: "#ef4444", marginBottom: 10, whiteSpace: "pre-wrap", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 11, lineHeight: 1.5 }}>
           {error}
         </div>
       )}
