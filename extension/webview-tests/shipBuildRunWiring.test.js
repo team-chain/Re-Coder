@@ -35,3 +35,10 @@ test('배포 실패는 코어 stderr 원문을 보여 준다 ("stderr 를 확인
   assert.match(SHIP, /const detail = \(r\.stderr \|\| r\.error \|\| r\.message \|\| r\.stdout \|\| ""\)\.trim\(\);/);
   assert.match(SHIP, /whiteSpace: "pre-wrap"/, '여러 줄 stderr 가 한 줄로 뭉개진다');
 });
+
+test('executeDeployment 은 코어의 거절 사유(4xx/5xx)를 error 로 넘긴다', () => {
+  const API = read('../src/core/ApiClient.ts');
+  const fn = API.slice(API.indexOf('async executeDeployment('), API.indexOf('async listDeploymentRecords('));
+  assert.doesNotMatch(fn, /: \{ status: 'error' \};/, '거절 사유를 버린다');
+  assert.match(fn, /error: resp\.error/);
+});

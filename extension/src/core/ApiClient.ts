@@ -565,12 +565,14 @@ export class ApiClient {
         return resp.data;
     }
 
-    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }> {
+    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string; error?: string }> {
         // docker build + run + 헬스체크는 30초를 넘으므로 타임아웃을 길게.
         const resp = await this.request<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }>(
             'POST', '/api/deploy/execute', { plan_id: planId, approved }, false, 600000
         );
-        return resp.success && resp.data ? resp.data : { status: 'error' };
+        //: 코어가 4xx/5xx 로 거절한 사유(예: "Trivy: CRITICAL 3건 — 배포를 차단했습니다")를
+        //: 버리고 { status: 'error' } 만 돌려주면 화면은 "사유 없음" 이 된다(실기기 검증 C2).
+        return resp.success && resp.data ? resp.data : { status: 'error', error: resp.error ?? '코어가 응답하지 않았습니다.' };
     }
 
     async listDeploymentRecords(): Promise<DeploymentRecord[]> {
