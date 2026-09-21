@@ -2765,6 +2765,14 @@ def _unverified_trivy_report(summary: str) -> dict:
     }
 
 
+def _default_image_name(workspace_path: str) -> str:
+    """DeployAgent.create_plan 과 같은 규칙 — `<워크스페이스 폴더명>:latest`."""
+    if not workspace_path:
+        return ""
+    name = Path(workspace_path).name.lower().replace(" ", "-")
+    return f"{name}:latest" if name else ""
+
+
 async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
     """Run Trivy (filesystem/image) + Hadolint (Dockerfile) before planning.
 
@@ -2806,28 +2814,32 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
     #: 이제 못 돈 스캔은 unverified 로 남기고(승인 강도 반영), 실행 시점에
     #: 빌드 후 1회 스캔을 보장한다(execute_deployment 의 대기 목록 처리).
     unverified_reasons: list[str] = []
-    if not request.image:
+    #: 화면은 이미지 이름을 안 보낸다 — DeployAgent 가 붙일 기본 이름(<폴더>:latest)과
+    #: 같은 규칙으로 정해서 이미 빌드된 이미지는 여기서 검사한다. 예전엔 "이미지
+    #: 미지정" 으로 미검증 처리돼, 검사가 깨끗해도 승인이 Level 3 로 올라갔다(실기기).
+    image = request.image or _default_image_name(workspace)
+    if not image:
         reports["trivy"] = _unverified_trivy_report(
             "스캔할 이미지가 지정되지 않았습니다."
         )
         unverified_reasons.append("Trivy: 이미지 미지정 — 취약점 미검증")
-    elif not _local_image_exists(request.image):
+    elif not _local_image_exists(image):
         reports["trivy"] = _unverified_trivy_report(
-            f"이미지 '{request.image}' 가 아직 빌드되지 않아 스캔하지 못했습니다."
+            f"이미지 '{image}' 가 아직 빌드되지 않아 스캔하지 못했습니다."
         )
         unverified_reasons.append(
-            f"Trivy: '{request.image}' 미빌드 — 취약점 미검증 (실행 시 빌드 후 1회 스캔)"
+            f"Trivy: '{image}' 미빌드 — 취약점 미검증 (실행 시 빌드 후 1회 스캔)"
         )
     else:
-        trivy_report = await _execute_scan("trivy", workspace, request.image)
+        trivy_report = await _execute_scan("trivy", workspace, image)
         reports["trivy"] = trivy_report
         if trivy_report.get("status") == "ok":
             crit = int(trivy_report.get("critical_count", 0))
             if crit > 0:
-                blockers.append(f"Trivy: {crit} CRITICAL CVE(s) in {request.image}")
+                blockers.append(f"Trivy: {crit} CRITICAL CVE(s) in {image}")
             high = int(trivy_report.get("high_count", 0))
             if high > 0:
-                risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {request.image}")
+                risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {image}")
         else:
             #: 스캔 실패는 통과가 아니다 — 실패 사유를 화면까지 끌고 간다.
             unverified_reasons.append(
