@@ -170,6 +170,16 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         setError(null);
       }
 
+      //: 배포 플랜도 같은 'proposalReady' 채널로 온다(plan_id 있음, file_type 없음).
+      //: 예전엔 이 분기가 없어서 "docker build / run" 을 눌러도 planReady 로 못 갔다 —
+      //: 검사까지 되고 빌드/실행은 영영 안 되는 상태(실기기 검증 C2).
+      if (type === "proposalReady" && (payload as { plan_id?: string }).plan_id
+          && !(payload as { file_type?: string }).file_type) {
+        setPlan(payload as DeploymentPlan);
+        setStep("planReady");
+        setError(null);
+      }
+
       if (type === "scanResult") {
         setScanResult(payload as ScanResult);
         setStep("scanDone");
@@ -612,6 +622,10 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
                 setApprovalContext("infra");
                 setShowApproval(true);
               }
+            } else if (step === "scanDone") {
+              //: 검사 결과(통과/미검증)를 보고 나서 빌드/실행 플랜을 만든다.
+              //: 미검증이면 코어가 승인 강도를 Level 3 으로 올려서 돌려준다.
+              handleCreatePlan();
             } else if (step === "planReady") {
               setApprovalContext("deploy");
               setShowApproval(true);

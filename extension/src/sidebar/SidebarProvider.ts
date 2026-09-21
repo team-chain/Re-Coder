@@ -525,7 +525,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     targetPath?: string;
                 };
                 try {
-                    const scanResult = await this._apiClient.runScan(scanType, scanWs, targetPath);
+                    //: 웹뷰는 빈 경로를 보낸다 — 워크스페이스로 채워야 이미지 이름이
+                    //: `<폴더명>:latest` 로 잡힌다(빈 경로면 코어가 `app:latest` 로 추측, 실기기 B2).
+                    const scanRoot = scanWs || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '');
+                    const scanResult = await this._apiClient.runScan(scanType, scanRoot, targetPath);
                     this.postMessage('scanResult', scanResult);
                 } catch (err) {
                     this.postMessage('errorMessage', { message: String(err) });
@@ -541,8 +544,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     image?: string; containerName?: string; hostPort?: number; containerPort?: number;
                 };
                 try {
+                    const planRoot = dpWs || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '');
                     const plan = await this._apiClient.createDeploymentPlan(
-                        dpWs, dpMethod, dpPid, dpImg, dpCn, dpHp, dpCp
+                        planRoot, dpMethod, dpPid, dpImg, dpCn, dpHp, dpCp
                     );
                     this.postMessage('proposalReady', plan);
                 } catch (err) {

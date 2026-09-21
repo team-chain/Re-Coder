@@ -533,7 +533,7 @@ export class ApiClient {
         const resp = await this.request<object>(
             'POST', '/api/deploy/scan',
             { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath },
-            false, 390000
+            false, 480000  // Docker 자동 시작(정리 45초 + 대기 120초) + 스캔 상한 300초
         );
         if (!resp.success || !resp.data) { throw new Error(`${scanType} 스캔 실패`); }
         return resp.data;
