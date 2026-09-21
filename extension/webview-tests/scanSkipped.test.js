@@ -59,7 +59,7 @@ test('not_run 일 때 화면이 초록 통과 문구를 쓰지 않는다', () =>
   );
   const start = source.indexOf("if (verdict === \"not_run\")");
   assert.notStrictEqual(start, -1, 'not_run 분기가 없다');
-  const branch = source.slice(start, source.indexOf('const findings =', start));
+  const branch = source.slice(start, source.indexOf('const counts = scanCounts(', start));
   assert.ok(!/취약점 없음/.test(branch), '미실행인데 "취약점 없음" 문구가 들어 있다');
   //: 사용자가 오해하지 않도록 "확인하지 못했다"가 명시돼야 한다.
   assert.match(branch, /확인하지 못했다|하지 못했습니다/);
