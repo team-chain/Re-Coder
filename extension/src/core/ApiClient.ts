@@ -254,6 +254,18 @@ export class ApiClient {
         };
     }
 
+    /**
+     * POST /api/docker/ensure — 꺼진 Docker 데몬을 코어가 직접 띄우고 기다린다.
+     * 자동 시작 대기(최대 75초)까지 포함하므로 타임아웃을 길게 잡는다.
+     */
+    async ensureDocker(): Promise<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string }> {
+        const resp = await this.request<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string }>(
+            'POST', '/api/docker/ensure', {}, false, 120000,
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Docker 자동 시작 요청 실패'); }
+        return resp.data;
+    }
+
     async runDiagnostics(): Promise<DiagnosticsResult> {
         const resp = await this.request<DiagnosticsResult>('POST', '/api/diagnostics/run');
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Diagnostics 실행 실패'); }
@@ -535,7 +547,7 @@ export class ApiClient {
             { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath },
             false, 390000
         );
-        if (!resp.success || !resp.data) { throw new Error(`${scanType} 스캔 실패`); }
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? `${scanType} 스캔 요청 실패`); }
         return resp.data;
     }
 

@@ -193,6 +193,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             // Core 가 떴으면 진단을 자동으로 1회 돌려준다. (App.tsx 가 mount 시 요청을 보내지만
             // 그 때 토큰이 아직 비어있을 수 있어 401 이 나는 경우가 있어 한 번 더 트리거.)
             if (coreOk) {
+                //: 재사용한 코어에는 보안 금고의 AWS 연결이 들어가 있지 않다 — 먼저 넣고 진단.
+                try { await this.healAwsConnection('startup'); } catch { /* 진단이 알려 준다 */ }
                 void this.handleMessage({ type: 'runDiagnostics', payload: {} });
             }
         })();
@@ -351,6 +353,105 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         void this.handleMessage({ type: 'runDiagnostics', payload: {} });
     }
 
+    // ── 자가 조치(Self-healing) 레이어 ──────────────────────────────────────
+    //
+    // "켜져 있어야 동작하는 것" 을 검사 → 자동 조치 → 재검사 → 보고 로 통일한다
+    // (보드 카드 「자가 조치(Self-healing) 레이어」). 조치 등급:
+    //   · 자동 실행 — 가역·로컬·무비용: 보안 금고의 AWS 연결 재주입, Docker 시작.
+    //     단 **"자동 조치함" 을 항상 화면에 남긴다.**
+    //   · 안내만 — 제품 밖(설치·모델 동의 등): 원인 + 다음 행동.
+    //
+    // 코어 인스턴스당 한 번만 시도한다(_healedFor). 매 진단마다 STS 를 두드리거나
+    // 같은 실패를 반복하지 않게.
+
+    private _awsHealedFor = '';
+
+    /**
+     * 보안 금고의 AWS 연결을 코어에 다시 적용한다.
+     *
+     * 왜 필요한가: 코어를 새로 spawn 할 때만 env 로 자격증명이 들어간다. 다른
+     * 창이 띄운 코어를 **재사용**하거나 사용자가 직접 실행한 코어에 붙으면 아무것도
+     * 주입되지 않아 "재시작하면 연결 풀림" 이 됐다(2026-09-20 실기기 NotFound 삽질).
+     *
+     * 반환: healed(적용함) · not_needed(이미 연결됨) · nothing_stored · failed
+     */
+    async healAwsConnection(reason: 'startup' | 'diagnostics' | 'fix'): Promise<'healed' | 'not_needed' | 'nothing_stored' | 'failed'> {
+        const stored = await this._coreManager.getStoredAwsConnection();
+        if (!stored) { return 'nothing_stored'; }
+        const roleArn = this._coreManager.getAwsRoleArn();
+        try {
+            const status = await this._apiClient.getAwsStatus();
+            //: 역할 모드로 저장돼 있으면 "역할로" 연결돼 있어야 not_needed 다.
+            if (status.ready && (!roleArn || status.storage === 'assumed_role')) { return 'not_needed'; }
+        } catch { /* 상태 조회 실패 → 재주입 시도 */ }
+        try {
+            let status = stored.kind === 'keys'
+                ? await this._apiClient.connectAws({
+                    accessKeyId: stored.accessKeyId, secretAccessKey: stored.secretAccessKey,
+                    region: stored.region, sessionToken: stored.sessionToken,
+                })
+                : await this._apiClient.connectAwsProfile({ profile: stored.profile, region: stored.region });
+            let detail = stored.kind === 'keys' ? '보안 금고의 키' : `프로필 ${stored.profile}`;
+            if (roleArn) {
+                //: 역할 모드였으면 역할까지 다시 빌린다. 실패(폴백)해도 기반 연결은 살아 있다.
+                const role = await this._apiClient.setupAwsRole({
+                    profile: stored.kind === 'profile' ? stored.profile : '', region: stored.region,
+                });
+                if (role.ok && role.status) { status = role.status; detail += ' + 배포 전용 역할'; }
+            }
+            this.postMessage('aws.status', status);
+            this.postMessage('selfHeal', {
+                key: 'aws_deploy_ready', action: 'aws_reinject', reason,
+                message: `자동 조치함 · ${detail}를 코어에 다시 적용했습니다.`,
+            });
+            return 'healed';
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.postMessage('selfHeal', {
+                key: 'aws_deploy_ready', action: 'aws_reinject', reason, failed: true,
+                message: `자동 조치 실패 · 보관된 AWS 연결을 다시 적용하지 못했습니다: ${msg}`,
+            });
+            return 'failed';
+        }
+    }
+
+    /** 꺼진 Docker 를 코어가 띄우게 한다. 결과를 화면에 "자동 조치함" 으로 남긴다. */
+    async healDocker(reason: 'diagnostics' | 'fix'): Promise<boolean> {
+        try {
+            const r = await this._apiClient.ensureDocker();
+            this.postMessage('selfHeal', {
+                key: 'docker_ready', action: 'docker_start', reason, failed: !r.ready,
+                message: r.ready
+                    ? (r.attempted ? `자동 조치함 · Docker Desktop 을 시작했습니다 (${r.waited_seconds}초 대기).` : 'Docker 데몬이 이미 실행 중입니다.')
+                    : `자동 조치 실패 · ${r.message}`,
+            });
+            return r.ready;
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.postMessage('selfHeal', { key: 'docker_ready', action: 'docker_start', reason, failed: true, message: `자동 조치 실패 · ${msg}` });
+            return false;
+        }
+    }
+
+    /**
+     * 진단 결과를 보고 자동 조치 등급의 항목을 고친다. 고친 게 있으면 true —
+     * 호출자는 진단을 한 번 더 돌려 "재검사" 결과를 보여 준다.
+     */
+    private async _selfHealFromDiagnostics(d: Record<string, unknown>): Promise<boolean> {
+        const key = this._coreManager.coreInstanceKey();
+        if (this._awsHealedFor === key) { return false; }
+        this._awsHealedFor = key;
+        let healed = false;
+        const notReady = (k: string) => d[k] !== undefined && d[k] !== 'ready';
+        if (notReady('aws_deploy_ready') || notReady('ai_ready')) {
+            healed = (await this.healAwsConnection('diagnostics')) === 'healed' || healed;
+        }
+        if (notReady('docker_ready')) {
+            healed = (await this.healDocker('diagnostics')) || healed;
+        }
+        return healed;
+    }
+
     private async handleMessage(
         message: { type: string; payload: unknown },
         requestWebview?: vscode.Webview,
@@ -406,22 +507,34 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const { key } = (payload ?? {}) as { key?: string };
                 switch (key) {
                     case 'aws_deploy_ready':
-                    case 'ai_ready':  // Bedrock 도 AWS 자격증명을 사용
+                    case 'ai_ready': {  // Bedrock 도 AWS 자격증명을 사용
+                        //: 자동 조치 먼저 — 보안 금고에 연결이 있으면 다시 넣는다.
+                        //: 없거나 실패했을 때만 사용자에게 입력을 받는다.
+                        const outcome = await this.healAwsConnection('fix');
+                        if (outcome === 'healed' || outcome === 'not_needed') {
+                            void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                            break;
+                        }
                         await vscode.commands.executeCommand('recoder.awsConfigure');
                         break;
+                    }
                     case 'github_ready':
                         await vscode.commands.executeCommand('recoder.githubLogin');
                         break;
                     case 'docker_ready': {
-                        // Docker Desktop 실행 안내만 — 자동 시작은 위험
-                        const selected = await vscode.window.showInformationMessage(
-                            'Docker Desktop 을 시작한 후 진단을 다시 실행해주세요.',
-                            'Docker Desktop 다운로드',
-                        );
-                        if (selected === 'Docker Desktop 다운로드') {
-                            void vscode.env.openExternal(
-                                vscode.Uri.parse('https://www.docker.com/products/docker-desktop'),
+                        //: 자동 조치 — 코어가 Docker Desktop 을 직접 띄운다(가역·로컬·무비용).
+                        //: 그래도 안 되면(미설치 등) 안내 + 다운로드 링크.
+                        const ready = await this.healDocker('fix');
+                        if (!ready) {
+                            const selected = await vscode.window.showInformationMessage(
+                                'Docker 를 자동으로 시작하지 못했습니다. Docker Desktop 이 설치돼 있는지 확인해 주세요.',
+                                'Docker Desktop 다운로드',
                             );
+                            if (selected === 'Docker Desktop 다운로드') {
+                                void vscode.env.openExternal(
+                                    vscode.Uri.parse('https://www.docker.com/products/docker-desktop'),
+                                );
+                            }
                         }
                         void this.handleMessage({ type: 'runDiagnostics', payload: {} });
                         break;
@@ -528,7 +641,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const scanResult = await this._apiClient.runScan(scanType, scanWs, targetPath);
                     this.postMessage('scanResult', scanResult);
                 } catch (err) {
-                    this.postMessage('errorMessage', { message: String(err) });
+                    //: 요청 자체가 실패해도 화면에는 "Error: trivy 스캔 실패" 같은 raw
+                    //: 문자열이 아니라 **미검증 + 원인 + 다음 행동** 이 떠야 한다
+                    //: (보드 카드 「스캔 실패 표시가 raw 에러」). 코어가 분류한 실패와
+                    //: 같은 모양으로 내려보내 화면이 한 경로로 그린다.
+                    const raw = err instanceof Error ? err.message : String(err);
+                    this.postMessage('scanResult', {
+                        status: 'error',
+                        scan_type: scanType,
+                        target: targetPath ?? scanWs,
+                        critical_count: 0, high_count: 0, medium_count: 0, findings: [],
+                        reason_code: 'request_failed',
+                        cause: '코어와의 스캔 요청이 끝나기 전에 끊겼습니다.',
+                        next_action: '코어 상태를 확인하고 다시 검사하세요. 반복되면 코어를 재시작하세요.',
+                        summary: '확인하지 못했습니다 — 코어와의 스캔 요청이 끝나기 전에 끊겼습니다.',
+                        message: raw,
+                    });
                 }
                 break;
             }
@@ -812,6 +940,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (normalized) {
                         this._state.diagnostics = normalized;
                         this.postMessage('diagnosticsUpdate', normalized);
+                        //: 검사 → 자동 조치 → 재검사. 고친 게 있으면 한 번만 다시 돈다
+                        //: (인스턴스당 1회 가드가 _selfHealFromDiagnostics 안에 있다).
+                        const healed = await this._selfHealFromDiagnostics(normalized as unknown as Record<string, unknown>);
+                        if (healed) {
+                            this.postMessage('stateUpdate', this._state);
+                            void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                            break;
+                        }
                     }
                 }
                 // 성공·실패와 무관하게 stateUpdate 을 보내 isLoading 스피너 해제.

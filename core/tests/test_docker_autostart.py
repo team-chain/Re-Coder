@@ -163,3 +163,30 @@ def test_trivy_스캔은_데몬_부재시_자동시작을_시도하고_미검증
     assert result["status"] == "not_run", "데몬이 없는데 통과/실패로 위장했다"
     assert "자동 시작 실패 사유" in result["message"], "무엇을 시도했는지 화면에 전달되지 않는다"
     assert result["findings"] == []
+
+
+# ---------------------------------------------------------------------------
+# 자가 조치 레이어 — /api/docker/ensure (진단판 「자동 조치」 버튼이 부른다)
+# ---------------------------------------------------------------------------
+
+
+def test_docker_ensure_라우트는_결과를_그대로_돌려주고_예외를_내지_않는다(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from api.routes import health
+
+    monkeypatch.setattr(
+        da, "ensure_docker",
+        lambda wait_seconds=None: SimpleNamespace(ready=True, attempted=True, launched=True, waited_seconds=12, message="started"),
+    )
+    r = asyncio.run(health.ensure_docker_route())
+    assert r == {"ready": True, "attempted": True, "launched": True, "waited_seconds": 12, "message": "started"}
+
+    def boom(wait_seconds=None):
+        raise RuntimeError("no docker binary")
+
+    monkeypatch.setattr(da, "ensure_docker", boom)
+    r = asyncio.run(health.ensure_docker_route())
+    assert r["ready"] is False and "no docker binary" in r["message"]
+    assert {"/api/docker/ensure"} <= {route.path for route in health.router.routes}

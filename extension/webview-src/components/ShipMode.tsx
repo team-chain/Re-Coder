@@ -36,9 +36,13 @@ interface ScanResult {
   //: 코어가 이미 내려주고 있던 필드들. 화면이 이걸 **안 읽어서**, 스캐너가
   //: 설치돼 있지 않아 검사를 못 한 경우에도 초록색 "취약점 없음 ✓" 이 떴다.
   //: 검사하지 않은 것과 위반이 없는 것은 다르다.
-  status?: "ok" | "error";
+  status?: "ok" | "error" | "not_run" | "unverified";
   summary?: string;
   message?: string;
+  //: 코어가 실패 사유를 분류해 내려준다 — 화면은 분기만 한다.
+  reason_code?: string;
+  cause?: string;
+  next_action?: string;
   critical_count?: number;
   high_count?: number;
 }
@@ -55,7 +59,7 @@ export type ScanVerdict = "not_run" | "vulnerable" | "clean";
  *  · clean     — 실제로 돌았고 관측된 취약점이 없다.
  */
 export function scanVerdict(result: ScanResult): ScanVerdict {
-  if (result.status === "error") { return "not_run"; }
+  if (result.status === "error" || result.status === "not_run" || result.status === "unverified") { return "not_run"; }
   const findings = result.findings as { Results?: { Vulnerabilities?: unknown[] }[] } | null;
   //: status 가 없는 구버전 코어 응답 대비 — findings 자체가 없으면
   //: "검사 결과가 없다"이지 "깨끗하다"가 아니다.
@@ -343,17 +347,32 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     //: 통과한 줄 알고 배포로 넘어갔다(보드 이슈 「보안 스캔이 바이너리
     //: 없으면 조용히 건너뜀」).
     if (verdict === "not_run") {
-      const reason = (result.summary || result.message || "").trim();
+      //: 코어가 분류한 원인·다음 행동을 먼저 쓴다. 없으면(구버전 코어) summary.
+      //: raw 오류 원문(message)은 접어서 — 숨기진 않되 첫 줄은 사람 말이어야 한다.
+      const cause = (result.cause || result.summary || result.message || "").trim();
+      const nextAction = (result.next_action || "").trim();
+      const raw = (result.message || "").trim();
       return (
         <div style={{ padding: "8px 10px", borderRadius: 4, border: "1px solid #f59e0b", background: "rgba(245,158,11,0.08)", color: "#f59e0b", fontSize: 11, lineHeight: 1.55, marginBottom: 8 }}>
           <strong>⚠ 이미지 취약점 검사를 하지 못했습니다</strong>
           <div style={{ marginTop: 3, color: "#e3b261" }}>
-            {reason || "스캐너를 실행할 수 없었습니다."}
+            {cause || "스캐너를 실행할 수 없었습니다."}
           </div>
+          {nextAction && (
+            <div style={{ marginTop: 3, color: "#f2d38c" }}>
+              <strong>다음 행동 · </strong>{nextAction}
+            </div>
+          )}
           <div style={{ marginTop: 4, color: "#c9a35e" }}>
             취약점이 <strong>없다는 뜻이 아니라 확인하지 못했다</strong>는 뜻입니다.
-            Trivy와 Docker를 설치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요.
+            {nextAction ? " 조치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요." : " Trivy와 Docker를 설치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요."}
           </div>
+          {raw && raw !== cause && (
+            <details style={{ marginTop: 4, color: "#a88a4a" }}>
+              <summary style={{ cursor: "pointer" }}>오류 원문</summary>
+              <pre style={{ margin: "3px 0 0", whiteSpace: "pre-wrap", fontSize: 10 }}>{raw}</pre>
+            </details>
+          )}
         </div>
       );
     }

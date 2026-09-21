@@ -10,6 +10,7 @@
  * "전체 아키텍처 보기"는 같은 화면인데 다른 항목처럼 보였다.
  */
 import React, { useCallback, useEffect, useState } from "react";
+import { HubIcon, HubIconName, HubIconTile } from "./HubIcons";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 
 export type HubId = "develop" | "deploy" | "security";
@@ -23,7 +24,7 @@ export interface ReadyCtx { isAiReady: boolean; isDockerReady: boolean; isOpsRea
 interface FeatureDef {
   id: FeatureId;
   hub: HubId;
-  icon: string;
+  icon: HubIconName;
   title: string;
   desc: string;
   action: string;
@@ -31,26 +32,26 @@ interface FeatureDef {
   gate?: (c: ReadyCtx) => { enabled: boolean; hint?: string };
 }
 
-export const HUBS: Array<{ id: HubId; icon: string; title: string; subtitle: string; accent: string }> = [
-  { id: "develop", icon: "⌨️", title: "Develop", subtitle: "요청부터 코드 적용까지", accent: "#4a9eff" },
-  { id: "deploy", icon: "🚀", title: "Deploy", subtitle: "로컬 Docker부터 AWS까지", accent: "#f0b35b" },
-  { id: "security", icon: "🛡️", title: "Security", subtitle: "배포 전 검사와 정책", accent: "#ef6b6b" },
+export const HUBS: Array<{ id: HubId; icon: HubIconName; title: string; subtitle: string; accent: string }> = [
+  { id: "develop", icon: "code", title: "Develop", subtitle: "요청부터 코드 적용까지", accent: "#4a9eff" },
+  { id: "deploy", icon: "rocket", title: "Deploy", subtitle: "로컬 Docker부터 AWS까지", accent: "#f0b35b" },
+  { id: "security", icon: "shield", title: "Security", subtitle: "배포 전 검사와 정책", accent: "#ef6b6b" },
 ];
 
 export const FEATURES: FeatureDef[] = [
-  { id: "code", hub: "develop", icon: "✨", title: "코드 생성 · 수정", desc: "자연어로 새 코드를 만들거나 기존 코드를 고칩니다. 설계 결정 카드 → 파일별 diff → 적용 순서로 진행돼요.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
-  { id: "build", hub: "develop", icon: "🩺", title: "에러 분석", desc: "터미널·로그의 오류를 읽고 원인과 패치를 제안합니다. 승인 전에는 파일을 건드리지 않아요.", action: "분석", primary: true, gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
-  { id: "map", hub: "develop", icon: "🗺️", title: "아키텍처", desc: "파일 간 의존 관계와 함수 호출 관계를 그림으로 봅니다. 코드를 실제로 읽어 만든 결과예요.", action: "보기" },
-  { id: "adr", hub: "develop", icon: "📝", title: "설계 기록 (ADR)", desc: "결정 카드에서 확정한 내용이 자동으로 쌓입니다. 어떤 선택을 왜 했는지 나중에 찾아볼 수 있어요.", action: "열기" },
+  { id: "code", hub: "develop", icon: "terminal", title: "코드 생성 · 수정", desc: "자연어로 새 코드를 만들거나 기존 코드를 고칩니다. 설계 결정 카드 → 파일별 diff → 적용 순서로 진행돼요.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
+  { id: "build", hub: "develop", icon: "bug", title: "에러 분석", desc: "터미널·로그의 오류를 읽고 원인과 패치를 제안합니다. 승인 전에는 파일을 건드리지 않아요.", action: "분석", primary: true, gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
+  { id: "map", hub: "develop", icon: "network", title: "아키텍처", desc: "파일 간 의존 관계와 함수 호출 관계를 그림으로 봅니다. 코드를 실제로 읽어 만든 결과예요.", action: "보기" },
+  { id: "adr", hub: "develop", icon: "file-text", title: "설계 기록 (ADR)", desc: "결정 카드에서 확정한 내용이 자동으로 쌓입니다. 어떤 선택을 왜 했는지 나중에 찾아볼 수 있어요.", action: "열기" },
 
-  { id: "ship", hub: "deploy", icon: "🐳", title: "로컬 Docker 배포", desc: "Dockerfile 생성 → 검사 → build → run → 헬스체크. 실패하면 이전 이미지로 되돌립니다.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isDockerReady, hint: "Docker 필요" }) },
-  { id: "deploy", hub: "deploy", icon: "☁️", title: "배포 센터", desc: "ECS · EC2 · S3 정적 사이트. 외부로 나가는 배포는 검사 결과에 따라 승인 강도가 달라져요.", action: "열기", primary: true },
-  { id: "replay", hub: "deploy", icon: "↩️", title: "롤백 · Replay", desc: "배포 이력을 타임라인으로 보고 원하는 시점으로 되돌립니다.", action: "이력 보기" },
-  { id: "operate", hub: "deploy", icon: "📟", title: "운영 대응", desc: "장애 감지 → 원인 분석 → 조치 제안. 실행은 승인 후에만.", action: "열기", gate: (c) => ({ enabled: c.isOpsReady, hint: "AI · AWS 연결 필요" }) },
+  { id: "ship", hub: "deploy", icon: "box", title: "로컬 Docker 배포", desc: "Dockerfile 생성 → 검사 → build → run → 헬스체크. 실패하면 이전 이미지로 되돌립니다.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isDockerReady, hint: "Docker 필요" }) },
+  { id: "deploy", hub: "deploy", icon: "cloud-upload", title: "배포 센터", desc: "ECS · EC2 · S3 정적 사이트. 외부로 나가는 배포는 검사 결과에 따라 승인 강도가 달라져요.", action: "열기", primary: true },
+  { id: "replay", hub: "deploy", icon: "history", title: "롤백 · Replay", desc: "배포 이력을 타임라인으로 보고 원하는 시점으로 되돌립니다.", action: "이력 보기" },
+  { id: "operate", hub: "deploy", icon: "activity", title: "운영 대응", desc: "장애 감지 → 원인 분석 → 조치 제안. 실행은 승인 후에만.", action: "열기", gate: (c) => ({ enabled: c.isOpsReady, hint: "AI · AWS 연결 필요" }) },
 
-  { id: "scan", hub: "security", icon: "🔍", title: "취약점 스캔", desc: "Trivy(이미지·의존성) · Hadolint(Dockerfile). 결과는 배포 승인 카드의 위험도에 반영됩니다.", action: "스캔", primary: true },
-  { id: "secrets", hub: "security", icon: "🔑", title: "시크릿 검사", desc: "gitleaks 규칙으로 저장소에 평문 비밀값이 남았는지 확인합니다. 원문은 표시하지 않아요.", action: "검사", primary: true },
-  { id: "policy", hub: "security", icon: "📜", title: "정책 게이트", desc: "어떤 배포가 자동 통과 · 승인 필요 · 차단인지 규칙(OPA)으로 봅니다.", action: "규칙 보기" },
+  { id: "scan", hub: "security", icon: "search", title: "취약점 스캔", desc: "Trivy(이미지·의존성) · Hadolint(Dockerfile). 결과는 배포 승인 카드의 위험도에 반영됩니다.", action: "스캔", primary: true },
+  { id: "secrets", hub: "security", icon: "key", title: "시크릿 검사", desc: "gitleaks 규칙으로 저장소에 평문 비밀값이 남았는지 확인합니다. 원문은 표시하지 않아요.", action: "검사", primary: true },
+  { id: "policy", hub: "security", icon: "clipboard-check", title: "정책 게이트", desc: "어떤 배포가 자동 통과 · 승인 필요 · 차단인지 규칙(OPA)으로 봅니다.", action: "규칙 보기" },
 ];
 
 export const FEATURE_BY_ID: Record<FeatureId, FeatureDef> = FEATURES.reduce((acc, f) => { acc[f.id] = f; return acc; }, {} as Record<FeatureId, FeatureDef>);
@@ -87,7 +88,7 @@ export const HubHome: React.FC<{ onSelect: (hub: HubId) => void; ctx: ReadyCtx }
         const b = badge(h.id);
         return (
           <button key={h.id} onClick={() => onSelect(h.id)} style={{ textAlign: "left", cursor: "pointer", border: `1px solid ${C.line}`, borderTop: `3px solid ${h.accent}`, borderRadius: 14, padding: "20px 18px 16px", background: C.card, color: C.fg, display: "flex", flexDirection: "column", minHeight: 250, fontFamily: "inherit" }}>
-            <div style={{ fontSize: 26, marginBottom: 12 }}>{h.icon}</div>
+            <div style={{ marginBottom: 14 }}><HubIconTile name={h.icon} accent={h.accent} /></div>
             <div style={{ fontSize: 19, fontWeight: 700, letterSpacing: .2 }}>{h.title}</div>
             <div style={{ color: C.muted, fontSize: 12, margin: "4px 0 14px" }}>{h.subtitle}</div>
             <ul style={{ listStyle: "none", margin: 0, padding: 0, fontSize: 12.5, flex: 1 }}>
@@ -120,7 +121,7 @@ export const HubCrumb: React.FC<{ hub: HubId; feature?: FeatureId; onHome: () =>
         <strong style={{ fontSize: 15 }}>{FEATURE_BY_ID[feature].title}</strong>
       </> : (
         <span style={{ display: "flex", alignItems: "center", gap: 9 }}>
-          <span style={{ fontSize: 20 }}>{h.icon}</span>
+          <HubIconTile name={h.icon} accent={h.accent} size={32} />
           <span><strong style={{ fontSize: 18 }}>{h.title}</strong><div style={{ color: C.muted, fontSize: 11.5 }}>{h.subtitle}</div></span>
         </span>
       )}
@@ -144,7 +145,7 @@ export const HubPage: React.FC<{ hub: HubId; ctx: ReadyCtx; onOpen: (f: FeatureI
         const g = f.gate ? f.gate(ctx) : { enabled: true };
         return (
           <div key={f.id} style={{ border: `1px solid ${C.line}`, borderRadius: 12, background: C.card, padding: 18, display: "flex", flexDirection: "column", minHeight: 150 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 15, fontWeight: 700 }}><span style={{ fontSize: 18 }}>{f.icon}</span>{f.title}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 15, fontWeight: 700 }}><span style={{ color: HUBS.find((x) => x.id === f.hub)!.accent, display: "flex" }}><HubIcon name={f.icon} size={18} /></span>{f.title}</div>
             <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.5, marginTop: 8, flex: 1 }}>{f.desc}</div>
             <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 8 }}>
               <button onClick={() => g.enabled && onOpen(f.id)} disabled={!g.enabled} style={btnStyle(!!f.primary, g.enabled)} title={!g.enabled ? g.hint : undefined}>{f.action}</button>
@@ -221,7 +222,7 @@ export const AdrPanel: React.FC = () => {
 };
 
 // ── 보안: 스캔 / 시크릿 / 정책 ────────────────────────────────────────────
-interface ScanResultLite { scan_type: string; status?: "ok" | "error"; summary?: string; message?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
+interface ScanResultLite { scan_type: string; status?: "ok" | "error" | "not_run" | "unverified"; summary?: string; message?: string; cause?: string; next_action?: string; reason_code?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
 type ScanKind = "trivy" | "hadolint" | "gitleaks";
 
 export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; note: string }> = ({ kinds, title, note }) => {
@@ -244,7 +245,11 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
 
   const verdict = (r?: ScanResultLite) => {
     if (!r) return { text: "미실행", color: C.muted };
-    if (r.status === "error") return { text: `검사 못 함 · ${r.message ?? "스캐너 오류"}`, color: "#f0b35b" };
+    if (r.status === "error" || r.status === "not_run" || r.status === "unverified") {
+      //: raw 메시지가 아니라 코어가 분류한 원인 → 다음 행동.
+      const cause = r.cause ?? r.summary ?? r.message ?? "스캐너 오류";
+      return { text: `검사 못 함 · ${cause}${r.next_action ? ` → ${r.next_action}` : ""}`, color: "#f0b35b" };
+    }
     const c = r.critical_count ?? 0, h = r.high_count ?? 0;
     const n = Array.isArray(r.findings) ? r.findings.length : 0;
     if (c || h) return { text: `심각 ${c} · 높음 ${h}`, color: "#ff8b8b" };
