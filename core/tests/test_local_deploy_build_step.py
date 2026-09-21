@@ -190,3 +190,29 @@ def test_실제_node_템플릿에_OS_패치와_npm_제거가_있다():
     runtime = tpl[tpl.index("AS runtime"):]
     assert "apk upgrade --no-cache" in runtime
     assert "rm -rf /usr/local/lib/node_modules/npm" in runtime
+
+
+# ── 플랜 게이트: 이미지 이름이 없어도 기본 이름으로 이미 빌드된 이미지를 검사한다 ──
+
+
+def test_기본_이미지_이름은_워크스페이스_폴더명_latest():
+    assert d._default_image_name("/Users/x/Desktop/recoder-sample") == "recoder-sample:latest"
+    assert d._default_image_name("/tmp/My App") == "my-app:latest"
+    assert d._default_image_name("") == ""
+
+
+def test_게이트는_이미지_미지정이어도_기본_이름으로_스캔한다(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(d, "_local_image_exists", lambda image: seen.setdefault("exists", image) or True)
+
+    async def fake_scan(scan_type, ws, image):
+        seen["scanned"] = image
+        return {"status": "ok", "critical_count": 0, "high_count": 0}
+    monkeypatch.setattr(d, "_execute_scan", fake_scan)
+    req = d.DeployPlanRequest(workspace_path=str(tmp_path / "recoder-sample"))
+
+    gate = asyncio.run(d._run_pre_deploy_security_gate(req))
+
+    assert seen["scanned"] == "recoder-sample:latest"
+    assert gate["unverified"] is False, "깨끗한 검사가 미검증(Level 3)으로 올라갔다"
+    assert not any("미지정" in r for r in gate["risk_reasons"])
