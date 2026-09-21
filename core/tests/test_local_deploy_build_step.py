@@ -163,3 +163,10 @@ def test_node_템플릿은_현재_LTS_와_OS_패치_단계를_쓴다():
     from registries import file_registry as fr
     assert "FROM node:22-slim" in fr._DOCKERFILE_NODE_EXPRESS
     assert "apt-get upgrade -y" in fr._DOCKERFILE_NODE_EXPRESS
+
+
+def test_프롬프트와_템플릿이_번들_npm_tar_CVE_를_다룬다():
+    from registries import file_registry as fr
+    assert "npm@latest" in ia._DOCKERFILE_CUSTOMISE_PROMPT and "node_modules/npm" in ia._DOCKERFILE_CUSTOMISE_PROMPT
+    assert "rm -rf /usr/local/lib/node_modules/npm" in fr._DOCKERFILE_NODE_EXPRESS
+    assert "npm install -g npm@latest" in fr._DOCKERFILE_NODE_NEXT
