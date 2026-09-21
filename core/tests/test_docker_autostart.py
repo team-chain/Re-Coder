@@ -470,3 +470,29 @@ def test_etime_파싱():
     assert da._parse_etime("01:05") == 65
     assert da._parse_etime("02:00:10") == 7210
     assert da._parse_etime("1-00:00:01") == 86401
+
+
+def test_macOS_open_은_확장_호스트_환경변수를_빼고_띄운다(monkeypatch):
+    #: 실기기 원인 — VS Code 가 띄운 코어는 ELECTRON_RUN_AS_NODE=1 을 물려받고, `open` 은
+    #: 그 환경을 Docker Desktop(Electron)에 넘겨 GUI 가 안 뜬 채 즉시 종료됐다(rc=0, pids=[]).
+    monkeypatch.setattr(da.platform, "system", lambda: "Darwin")
+    monkeypatch.setenv("ELECTRON_RUN_AS_NODE", "1")
+    monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=4096")
+    monkeypatch.setenv("HOME", "/Users/x")
+    seen = {}
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        seen["env"] = kw.get("env")
+        return Proc()
+
+    monkeypatch.setattr(da.subprocess, "run", fake_run)
+    assert da._launch()[0] is True
+    assert seen["env"] is not None, "환경을 정리하지 않고 넘겼다"
+    assert "ELECTRON_RUN_AS_NODE" not in seen["env"]
+    assert "NODE_OPTIONS" not in seen["env"]
+    assert seen["env"].get("HOME") == "/Users/x", "필요한 변수까지 지웠다"

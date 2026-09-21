@@ -259,6 +259,26 @@ def _drain_shutdown() -> tuple[int, bool]:
         time.sleep(_BACKEND_POLL_SECONDS)
 
 
+#: 띄우는 앱에 넘기면 안 되는 환경변수 — 부모(VS Code 확장 호스트·디버거)의 흔적.
+_HOST_ONLY_ENV = (
+    "ELECTRON_RUN_AS_NODE",
+    "ELECTRON_NO_ATTACH_CONSOLE",
+    "NODE_OPTIONS",
+    "NODE_ENV",
+    "VSCODE_INSPECTOR_OPTIONS",
+    "VSCODE_NLS_CONFIG",
+    "VSCODE_CWD",
+    "VSCODE_PID",
+    "VSCODE_IPC_HOOK",
+    "VSCODE_HANDLES_UNCAUGHT_ERRORS",
+)
+
+
+def _launch_env() -> dict[str, str]:
+    """Docker Desktop 을 띄울 때 쓸 환경 — 확장 호스트 전용 변수를 뺀 것."""
+    return {k: v for k, v in os.environ.items() if k not in _HOST_ONLY_ENV}
+
+
 def _windows_candidates() -> list[str]:
     """Windows 의 Docker Desktop 실행 파일 후보 — 존재하는 것만 돌려준다."""
     roots = [
@@ -306,17 +326,24 @@ def _launch() -> tuple[bool, str]:
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 close_fds=True,
+                env=_launch_env(),
             )
             return True, f"Docker Desktop 실행: {candidates[0]}"
         if system == "Darwin":
             # `open -a` 는 런처라 금방 끝난다 — 종료 코드를 봐야 "실행했다"고 말할 수
             # 있다. 실기기에서 조용히 실패한 뒤 데몬만 기다리다 끝난 사례가 있었다.
+            # `open` 은 자기 환경변수를 띄우는 앱에 그대로 넘긴다. 코어가 VS Code
+            # 확장 호스트의 자식이면 ELECTRON_RUN_AS_NODE=1 이 실려 있고, 그걸 받은
+            # Docker Desktop(Electron)은 GUI 대신 node 로 돌다 즉시 종료한다 —
+            # rc=0 인데 프로세스가 하나도 안 생기던 실기기 증상. 걷어내고 띄운다.
+            env = _launch_env()
             proc = subprocess.run(
                 ["open", "-a", "Docker"],
-                capture_output=True, text=True, timeout=_OPEN_TIMEOUT_SECONDS,
+                capture_output=True, text=True, timeout=_OPEN_TIMEOUT_SECONDS, env=env,
             )
-            _log.warning("[docker-autostart] open -a Docker → rc=%s stdout=%r stderr=%r",
-                         proc.returncode, proc.stdout.strip(), proc.stderr.strip())
+            _log.warning("[docker-autostart] open -a Docker → rc=%s stdout=%r stderr=%r (제거한 env=%s)",
+                         proc.returncode, proc.stdout.strip(), proc.stderr.strip(),
+                         sorted(set(os.environ) - set(env)))
             if proc.returncode != 0:
                 detail = (proc.stderr or proc.stdout or "").strip()
                 return False, (

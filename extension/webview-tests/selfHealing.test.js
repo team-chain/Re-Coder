@@ -119,3 +119,14 @@ test('③ Docker 를 띄웠지만 준비가 늦으면 실패로 끝내지 않고
   //: 화면은 pending 동안 버튼을 "조치 중…" 으로 잠가 둔다 — 두 번 누르지 않게.
   assert.match(PANEL, /p\?\.pending && p\?\.key\) \{ setHealing\(p\.key\)/, '대기 중 버튼이 풀린다');
 });
+
+test('③ 코어에 확장 호스트 전용 환경변수(ELECTRON_RUN_AS_NODE)를 넘기지 않는다', () => {
+  //: 실기기 원인 — 코어가 물려받은 ELECTRON_RUN_AS_NODE=1 이 `open` 을 타고 Docker Desktop 에
+  //: 전달돼 GUI 가 안 뜨고 즉시 종료됐다. 확장(원천)과 코어(방어) 양쪽에서 걷어낸다.
+  const spawnBlock = MANAGER.slice(MANAGER.indexOf('this.coreProcess = spawn('), MANAGER.indexOf('this.coreProcess = spawn(') + 400);
+  assert.match(MANAGER, /delete hostEnv\[k\]/, '확장이 환경을 정리하지 않는다');
+  assert.match(MANAGER, /'ELECTRON_RUN_AS_NODE'/);
+  assert.match(spawnBlock, /env: \{ \.\.\.hostEnv/, 'spawn 이 정리된 환경을 쓰지 않는다');
+  const core = fs.readFileSync(path.join(__dirname, '../../core/docker_autostart.py'), 'utf8');
+  assert.match(core, /"ELECTRON_RUN_AS_NODE",/, '코어 쪽 방어가 없다');
+});
