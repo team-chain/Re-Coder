@@ -157,7 +157,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
-  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string } | null>(null);
+  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; continuous_verification?: { enabled?: boolean; started?: boolean } } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showApproval, setShowApproval] = useState(false);
   const [approvalContext, setApprovalContext] = useState<"infra" | "deploy" | null>(null);
@@ -210,6 +210,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         const r = payload as {
           status: string; deployment_id?: string; message?: string; error?: string;
           stderr?: string; stdout?: string; restored_previous?: boolean; restore_stderr?: string;
+          health_ok?: boolean; health_check_url?: string;
+          continuous_verification?: { enabled?: boolean; started?: boolean };
         };
         setDeployResult(r);
         setStep(r.status === "success" ? "done" : "error");
@@ -611,16 +613,34 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       )}
 
       {/* ── Done banner ── */}
-      {step === "done" && (
-        <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
-          ✓ 배포 완료! Health Check 통과
+      {step === "done" && (deployResult?.health_ok === false ? (
+        //: docker run 은 됐지만 헬스 확인은 실패 — "통과" 로 칠하지 않는다.
+        //: 실기기: /health 가 404 인 앱이 초록 "Health Check 통과" 로 보였다.
+        <div style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "10px 12px", color: "#f59e0b", fontWeight: 600, marginBottom: 10 }}>
+          ⚠ 컨테이너는 떴지만 Health Check 는 실패했습니다
+          <div style={{ fontSize: 11, fontWeight: 400, marginTop: 4, color: "#e3b261", lineHeight: 1.5 }}>
+            {deployResult?.health_check_url ?? "헬스 경로"} 가 2xx 로 응답하지 않았습니다 — 앱에 그 경로가 없거나 아직 준비 중일 수 있어요.
+            {deployResult?.continuous_verification?.started ? " 연속 검증이 계속 지켜보고, 이상이면 롤백을 제안합니다." : " 이 배포는 롤백 후보에서 제외됩니다."}
+          </div>
           {deployResult?.deployment_id && (
             <div style={{ fontSize: 10, fontWeight: 400, marginTop: 4, color: "#888" }}>
               deployment_id: {deployResult.deployment_id}
             </div>
           )}
         </div>
-      )}
+      ) : (
+        <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
+          ✓ 배포 완료! Health Check 통과
+          {deployResult?.health_check_url && (
+            <div style={{ fontSize: 10, fontWeight: 400, marginTop: 2, color: "#8fbf9f" }}>{deployResult.health_check_url}</div>
+          )}
+          {deployResult?.deployment_id && (
+            <div style={{ fontSize: 10, fontWeight: 400, marginTop: 4, color: "#888" }}>
+              deployment_id: {deployResult.deployment_id}
+            </div>
+          )}
+        </div>
+      ))}
 
       {step === "saved" && (
         <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
