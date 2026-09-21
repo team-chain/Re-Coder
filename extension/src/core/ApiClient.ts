@@ -256,11 +256,12 @@ export class ApiClient {
 
     /**
      * POST /api/docker/ensure — 꺼진 Docker 데몬을 코어가 직접 띄우고 기다린다.
-     * 자동 시작 대기(최대 75초)까지 포함하므로 타임아웃을 길게 잡는다.
+     * 코어 대기 75초 + 폴링마다 `docker info` 5초 지연 + 다른 호출의 락 대기까지
+     * 합치면 120초를 넘길 수 있어(실기기에서 abort) 넉넉히 잡는다.
      */
     async ensureDocker(): Promise<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string }> {
         const resp = await this.request<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string }>(
-            'POST', '/api/docker/ensure', {}, false, 120000,
+            'POST', '/api/docker/ensure', {}, false, 200000,
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Docker 자동 시작 요청 실패'); }
         return resp.data;

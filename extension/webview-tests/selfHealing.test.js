@@ -98,3 +98,10 @@ test('① 기반 프로필이 저장 안 된 역할 모드도 재주입한다 (�
   assert.match(fn, /if \(!stored && !roleArn\) \{ return 'nothing_stored'; \}/, '역할 ARN 만 있어도 시도해야 한다');
   assert.match(fn, /storeAwsProfile\(role\.status\.profile/, '재주입에서 알아낸 기반을 저장하지 않는다');
 });
+
+test('③ Docker 자동 조치는 동시 호출을 하나로 합친다', () => {
+  //: 진단이 시작한 조치 위에 버튼을 또 누르면 두 번째가 락 대기로 abort 되던 문제.
+  const fn = block(HOST, 'async healDocker(', 'private async _healDockerOnce(');
+  assert.match(fn, /if \(this\._dockerHealInFlight\) \{ return this\._dockerHealInFlight; \}/);
+  assert.match(API, /'POST', '\/api\/docker\/ensure', \{\}, false, 200000/, '제한 시간이 코어 대기보다 넉넉해야 한다');
+});
