@@ -528,7 +528,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const scanResult = await this._apiClient.runScan(scanType, scanWs, targetPath);
                     this.postMessage('scanResult', scanResult);
                 } catch (err) {
-                    this.postMessage('errorMessage', { message: String(err) });
+                    //: 요청 자체가 실패해도 화면에는 "Error: trivy 스캔 실패" 같은 raw
+                    //: 문자열이 아니라 **미검증 + 원인 + 다음 행동** 이 떠야 한다
+                    //: (보드 카드 「스캔 실패 표시가 raw 에러」). 코어가 분류한 실패와
+                    //: 같은 모양으로 내려보내 화면이 한 경로로 그린다.
+                    const raw = err instanceof Error ? err.message : String(err);
+                    this.postMessage('scanResult', {
+                        status: 'error',
+                        scan_type: scanType,
+                        target: targetPath ?? scanWs,
+                        critical_count: 0, high_count: 0, medium_count: 0, findings: [],
+                        reason_code: 'request_failed',
+                        cause: '코어와의 스캔 요청이 끝나기 전에 끊겼습니다.',
+                        next_action: '코어 상태를 확인하고 다시 검사하세요. 반복되면 코어를 재시작하세요.',
+                        summary: '확인하지 못했습니다 — 코어와의 스캔 요청이 끝나기 전에 끊겼습니다.',
+                        message: raw,
+                    });
                 }
                 break;
             }

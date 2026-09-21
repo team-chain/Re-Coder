@@ -1854,6 +1854,12 @@ def _log_scan_to_session(scan_type: str, target: str, result: dict) -> None:
         logging.getLogger(__name__).debug("session_logger unavailable for scan log: %s", exc)
 
 
+try:
+    import scan_failure as _scan_failure
+except ImportError:  # pragma: no cover
+    from core import scan_failure as _scan_failure  # type: ignore
+
+
 def _normalise_scan_result(scan_type: str, target: str, raw: dict) -> dict:
     """Map an InfraAgent scan output dict into the canonical ScanResult shape.
 
@@ -1861,6 +1867,9 @@ def _normalise_scan_result(scan_type: str, target: str, raw: dict) -> dict:
                   findings[], summary, target}
     """
     if not raw.get("success", False):
+        #: raw 에러를 그대로 내보내지 않는다 — 원인·다음 행동으로 분류한다
+        #: (보드 카드 「스캔 실패 표시가 raw 에러」). 원문은 message 에 남는다.
+        error_text = str(raw.get("error") or raw.get("summary") or "Scan failed.")
         return {
             "status": "error",
             "scan_type": scan_type,
@@ -1869,8 +1878,7 @@ def _normalise_scan_result(scan_type: str, target: str, raw: dict) -> dict:
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": raw.get("error") or raw.get("summary") or "Scan failed.",
-            "message": raw.get("error", "Scan failed."),
+            **_scan_failure.failure_fields(error_text, scan_type=scan_type, target=target),
         }
 
     findings: list[dict] = []
@@ -1944,8 +1952,10 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": "InfraAgent unavailable (dependencies missing).",
-            "message": "InfraAgent unavailable on this host.",
+            **_scan_failure.failure_fields(
+                "InfraAgent unavailable on this host.",
+                scan_type=scan_type, code=_scan_failure.DEPENDENCIES_MISSING,
+            ),
         }
 
     ws = Path(workspace_path) if workspace_path else None
@@ -1968,6 +1978,13 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
                 from core.docker_autostart import ensure_docker as _ensure_docker
             auto = await asyncio.to_thread(_ensure_docker)
             if not auto.ready:
+                #: 자동 시작까지 해 봤는데 안 됐다 — docker 자체가 없는지, 켜지지
+                #: 않는 건지는 자동 시작 결과 문구로 가른다.
+                code = (
+                    _scan_failure.DOCKER_MISSING
+                    if re.search(r"(not installed|command not found|no such file|설치되)", auto.message or "", re.I)
+                    else _scan_failure.DOCKER_NOT_RUNNING
+                )
                 return {
                     "status": "not_run",
                     "scan_type": scan_type,
@@ -1976,8 +1993,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
                     "high_count": 0,
                     "medium_count": 0,
                     "findings": [],
-                    "summary": "Docker 데몬이 없어 스캔을 실행하지 못했습니다 (미검증).",
-                    "message": auto.message,
+                    **_scan_failure.failure_fields(auto.message or "", scan_type=scan_type, target=image, code=code),
                 }
             raw = await asyncio.wait_for(agent.run_trivy_scan(image), timeout=300)
             target_for_log = image
@@ -2010,8 +2026,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": f"Scan '{scan_type}' exceeded 300s timeout.",
-            "message": "timeout",
+            **_scan_failure.failure_fields("timeout", scan_type=scan_type, code=_scan_failure.TIMEOUT),
         }
         _log_scan_to_session(scan_type, target_path or workspace_path or "", result)
         return result
@@ -2024,8 +2039,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": "Docker is not available on this host. Start Docker Desktop and retry.",
-            "message": "docker_not_found",
+            **_scan_failure.failure_fields("docker_not_found", scan_type=scan_type, code=_scan_failure.DOCKER_MISSING),
         }
         _log_scan_to_session(scan_type, target_path or workspace_path or "", result)
         return result
@@ -2040,8 +2054,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
             "high_count": 0,
             "medium_count": 0,
             "findings": [],
-            "summary": f"Scan failed: {exc}",
-            "message": str(exc),
+            **_scan_failure.failure_fields(str(exc), scan_type=scan_type, target=target_path or ""),
         }
         _log_scan_to_session(scan_type, target_path or workspace_path or "", result)
         return result
@@ -2826,9 +2839,11 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
                 risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {request.image}")
         else:
             #: 스캔 실패는 통과가 아니다 — 실패 사유를 화면까지 끌고 간다.
+            #: 원인 + 다음 행동을 함께 — 승인 화면에서 raw 에러가 아니라 "왜·뭘" 이 보인다.
+            cause = str(trivy_report.get("cause") or trivy_report.get("summary") or trivy_report.get("message") or "원인 미상")
+            next_action = str(trivy_report.get("next_action") or "")
             unverified_reasons.append(
-                "Trivy: 스캔 실패 — "
-                + str(trivy_report.get("summary") or trivy_report.get("message") or "원인 미상")
+                f"Trivy: 스캔 실패 — {cause}" + (f" → {next_action}" if next_action else "")
             )
 
     risk_reasons.extend(unverified_reasons)

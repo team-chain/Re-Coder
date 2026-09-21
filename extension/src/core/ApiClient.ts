@@ -535,7 +535,7 @@ export class ApiClient {
             { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath },
             false, 390000
         );
-        if (!resp.success || !resp.data) { throw new Error(`${scanType} 스캔 실패`); }
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? `${scanType} 스캔 요청 실패`); }
         return resp.data;
     }
 

@@ -221,7 +221,7 @@ export const AdrPanel: React.FC = () => {
 };
 
 // ── 보안: 스캔 / 시크릿 / 정책 ────────────────────────────────────────────
-interface ScanResultLite { scan_type: string; status?: "ok" | "error"; summary?: string; message?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
+interface ScanResultLite { scan_type: string; status?: "ok" | "error" | "not_run" | "unverified"; summary?: string; message?: string; cause?: string; next_action?: string; reason_code?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
 type ScanKind = "trivy" | "hadolint" | "gitleaks";
 
 export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; note: string }> = ({ kinds, title, note }) => {
@@ -244,7 +244,11 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
 
   const verdict = (r?: ScanResultLite) => {
     if (!r) return { text: "미실행", color: C.muted };
-    if (r.status === "error") return { text: `검사 못 함 · ${r.message ?? "스캐너 오류"}`, color: "#f0b35b" };
+    if (r.status === "error" || r.status === "not_run" || r.status === "unverified") {
+      //: raw 메시지가 아니라 코어가 분류한 원인 → 다음 행동.
+      const cause = r.cause ?? r.summary ?? r.message ?? "스캐너 오류";
+      return { text: `검사 못 함 · ${cause}${r.next_action ? ` → ${r.next_action}` : ""}`, color: "#f0b35b" };
+    }
     const c = r.critical_count ?? 0, h = r.high_count ?? 0;
     const n = Array.isArray(r.findings) ? r.findings.length : 0;
     if (c || h) return { text: `심각 ${c} · 높음 ${h}`, color: "#ff8b8b" };
