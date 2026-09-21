@@ -288,6 +288,49 @@ export class CoreManager {
         }
     }
 
+    /**
+     * 보관된 AWS 연결 — 자가 조치(재주입)용.
+     *
+     * 코어를 **재사용**할 때(다른 창이 띄웠거나 사용자가 직접 실행) 는 env 주입이
+     * 일어나지 않아 "재시작하면 연결 풀림" 이 됐다. 그 경우 확장이 이 값을 코어의
+     * connect API 로 다시 밀어넣는다(SidebarProvider.healAwsConnection). 키는
+     * 여기서도 SecretStorage 밖으로 나가지 않는다 — 코어와의 로컬 호출에만 실린다.
+     */
+    async getStoredAwsConnection(): Promise<
+        | { kind: 'keys'; accessKeyId: string; secretAccessKey: string; region: string; sessionToken?: string }
+        | { kind: 'profile'; profile: string; region: string }
+        | null
+    > {
+        try {
+            const [accessKeyId, secretAccessKey, storedRegion, sessionToken] = await Promise.all([
+                this.extensionContext.secrets.get(AWS_ACCESS_KEY_SECRET),
+                this.extensionContext.secrets.get(AWS_SECRET_KEY_SECRET),
+                this.extensionContext.secrets.get(AWS_REGION_SECRET),
+                this.extensionContext.secrets.get(AWS_SESSION_TOKEN_SECRET),
+            ]);
+            if (accessKeyId && secretAccessKey) {
+                return {
+                    kind: 'keys', accessKeyId, secretAccessKey,
+                    region: storedRegion || 'ap-northeast-2',
+                    ...(sessionToken ? { sessionToken } : {}),
+                };
+            }
+            const profile = this.extensionContext.globalState.get<string>(AWS_PROFILE_STATE, '');
+            if (!profile) { return null; }
+            return {
+                kind: 'profile', profile,
+                region: this.extensionContext.globalState.get<string>(AWS_PROFILE_REGION_STATE, '') || '',
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    /** 지금 붙어 있는 코어 인스턴스를 구분하는 키 — 인스턴스당 한 번만 자가 조치한다. */
+    coreInstanceKey(): string {
+        return `${this.port}:${this.sessionToken}`;
+    }
+
     /** STS 검증이 끝난 자격증명만 VS Code SecretStorage에 보관한다. */
     async storeAwsCredentials(credentials: AwsSecretCredentials): Promise<void> {
         await this.extensionContext.secrets.store(AWS_ACCESS_KEY_SECRET, credentials.accessKeyId);
