@@ -1284,6 +1284,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'aws.clear': {
                 try {
                     await this._coreManager.clearAwsCredentials();
+                    //: 코어 프로세스 안의 자격증명도 지운다. 재시작만으로는 부족하다 —
+                    //: 확장이 **남이 띄운 코어를 재사용** 중이면(터미널에서 python main.py,
+                    //: 다른 창이 띄운 코어) restart 는 그 코어를 죽이지 않으므로 env 의
+                    //: 키가 그대로 남아 "연결 해제" 를 눌러도 다시 연결됨으로 뜬다
+                    //: (2026-09-21 실기기). 코어 API 로 지우면 소유와 무관하게 해제된다.
+                    try { await this._apiClient.clearAws(); } catch { /* 코어가 죽어 있으면 재시작이 처리 */ }
                     await this._coreManager.restart();
                     this.postMessage('aws.clear.result', { ok: true });
                     // status / diagnostics 동시 갱신

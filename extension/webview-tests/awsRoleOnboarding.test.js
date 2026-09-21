@@ -83,3 +83,12 @@ test('ApiClient 경로가 Core 에 실제로 있다', () => {
     assert.ok(CORE_AWS.includes(`"${route}"`), `Core 에 ${route} 라우트가 없다 (= 404)`);
   }
 });
+
+test('연결 해제는 보안 금고와 코어 프로세스 양쪽을 지운다 (재사용 코어에서도)', () => {
+  const start = HOST.indexOf("case 'aws.clear'");
+  const block = HOST.slice(start, HOST.indexOf("case '", start + 10));
+  assert.match(block, /clearAwsCredentials\(\)/);
+  //: 재사용 중인 코어는 restart 가 죽이지 않는다 — 코어 API 로도 지워야 해제된다.
+  assert.match(block, /_apiClient\.clearAws\(\)/, '코어의 /api/aws/clear 를 부르지 않는다');
+  assert.ok(block.indexOf('clearAws()') < block.indexOf('restart()'), '코어 해제가 재시작보다 먼저여야 한다');
+});
