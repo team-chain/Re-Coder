@@ -377,28 +377,42 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      */
     async healAwsConnection(reason: 'startup' | 'diagnostics' | 'fix'): Promise<'healed' | 'not_needed' | 'nothing_stored' | 'failed'> {
         const stored = await this._coreManager.getStoredAwsConnection();
-        if (!stored) { return 'nothing_stored'; }
         const roleArn = this._coreManager.getAwsRoleArn();
+        //: 기반이 저장돼 있지 않아도 역할 ARN 이 있으면 시도한다 — 코어가 ~/.aws 기본
+        //: 프로필을 기반으로 역할을 다시 빌릴 수 있다(role/setup 의 폴백).
+        if (!stored && !roleArn) { return 'nothing_stored'; }
         try {
             const status = await this._apiClient.getAwsStatus();
             //: 역할 모드로 저장돼 있으면 "역할로" 연결돼 있어야 not_needed 다.
             if (status.ready && (!roleArn || status.storage === 'assumed_role')) { return 'not_needed'; }
         } catch { /* 상태 조회 실패 → 재주입 시도 */ }
         try {
-            let status = stored.kind === 'keys'
-                ? await this._apiClient.connectAws({
-                    accessKeyId: stored.accessKeyId, secretAccessKey: stored.secretAccessKey,
-                    region: stored.region, sessionToken: stored.sessionToken,
-                })
-                : await this._apiClient.connectAwsProfile({ profile: stored.profile, region: stored.region });
-            let detail = stored.kind === 'keys' ? '보안 금고의 키' : `프로필 ${stored.profile}`;
+            let status: AwsStatus | undefined;
+            let detail = '';
+            if (stored) {
+                status = stored.kind === 'keys'
+                    ? await this._apiClient.connectAws({
+                        accessKeyId: stored.accessKeyId, secretAccessKey: stored.secretAccessKey,
+                        region: stored.region, sessionToken: stored.sessionToken,
+                    })
+                    : await this._apiClient.connectAwsProfile({ profile: stored.profile, region: stored.region });
+                detail = stored.kind === 'keys' ? '보안 금고의 키' : `프로필 ${stored.profile}`;
+            }
             if (roleArn) {
                 //: 역할 모드였으면 역할까지 다시 빌린다. 실패(폴백)해도 기반 연결은 살아 있다.
                 const role = await this._apiClient.setupAwsRole({
-                    profile: stored.kind === 'profile' ? stored.profile : '', region: stored.region,
+                    profile: stored?.kind === 'profile' ? stored.profile : '', region: stored?.region ?? '',
                 });
-                if (role.ok && role.status) { status = role.status; detail += ' + 배포 전용 역할'; }
+                if (role.ok && role.status) {
+                    status = role.status;
+                    detail = detail ? `${detail} + 배포 전용 역할` : `기본 프로필 ${role.status.profile || ''} 기반 배포 전용 역할`.replace(/\s+/g, ' ');
+                    //: 이번에 알아낸 기반 프로필을 저장해 두면 다음 재주입은 곧장 간다.
+                    if (!stored && role.status.profile) {
+                        await this._coreManager.storeAwsProfile(role.status.profile, role.status.region ?? '');
+                    }
+                }
             }
+            if (!status) { return 'failed'; }
             this.postMessage('aws.status', status);
             this.postMessage('selfHeal', {
                 key: 'aws_deploy_ready', action: 'aws_reinject', reason,
@@ -1371,8 +1385,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 try {
                     const result = await this._apiClient.setupAwsRole({ profile, region });
                     if (result.ok && result.status) {
-                        if (profile) {
-                            await this._coreManager.storeAwsProfile(profile, result.status.region ?? '');
+                        //: 기반 프로필을 보관한다. 화면이 프로필을 안 넘긴 경우("배포 전용
+                        //: 역할로 전환" — 지금 연결된 자격증명 기반)에도 코어는 status.profile
+                        //: 로 어떤 프로필을 기반으로 썼는지 알려 준다. 이걸 저장하지 않으면
+                        //: 코어 재시작 후 재주입할 기반이 없어 역할 모드가 조용히 풀린다
+                        //: (2026-09-21 실기기: 재시작 뒤 프로필 연결로 되돌아가 있었다).
+                        const baseProfile = profile || (result.status.profile ?? '').trim();
+                        if (baseProfile) {
+                            await this._coreManager.storeAwsProfile(baseProfile, result.status.region ?? '');
                         }
                         //: 저장하는 건 역할 ARN 하나 — 비밀이 아니다. 임시 자격증명은
                         //: 코어가 재시작마다 기반으로 다시 빌린다.

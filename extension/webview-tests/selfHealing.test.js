@@ -88,3 +88,13 @@ test('⑤ ApiClient 의 docker 경로가 코어에 있다', () => {
   assert.ok(CORE_HEALTH.includes('"/api/docker/ensure"'), 'Core 에 /api/docker/ensure 라우트가 없다 (= 404)');
   assert.match(CORE_HEALTH, /ensure_docker\b/);
 });
+
+test('① 기반 프로필이 저장 안 된 역할 모드도 재주입한다 (전환 버튼 경로)', () => {
+  //: "배포 전용 역할로 전환" 은 프로필 없이 역할을 만든다. 코어가 알려 준 기반
+  //: 프로필(status.profile)을 저장해야 재시작 뒤 재주입할 기반이 생긴다.
+  const setup = block(HOST, "case 'aws.role.setup'", "case 'aws.role.refresh'");
+  assert.match(setup, /profile \|\| \(result\.status\.profile \?\? ''\)\.trim\(\)/, '코어가 알려 준 기반 프로필을 저장하지 않는다');
+  const fn = block(HOST, 'async healAwsConnection(', 'async healDocker(');
+  assert.match(fn, /if \(!stored && !roleArn\) \{ return 'nothing_stored'; \}/, '역할 ARN 만 있어도 시도해야 한다');
+  assert.match(fn, /storeAwsProfile\(role\.status\.profile/, '재주입에서 알아낸 기반을 저장하지 않는다');
+});
