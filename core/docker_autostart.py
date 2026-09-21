@@ -40,12 +40,23 @@ from dataclasses import dataclass
 _logger = logging.getLogger("recoder.docker_autostart")
 
 
+#: 확장이 띄운 코어는 stderr 가 디버그 콘솔로만 가서 보기 어렵다 — 파일에도 남긴다.
+_LOG_FILE = os.path.join(os.path.expanduser("~"), ".recoder", "docker-autostart.log")
+
+
 class _Note:
     def warning(self, msg: str, *args) -> None:
         text = msg % args if args else msg
         _logger.warning(text)
+        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()} {text}"
         try:
-            print(f"{time.strftime('%H:%M:%S')} {text}", file=sys.stderr, flush=True)
+            print(line, file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            os.makedirs(os.path.dirname(_LOG_FILE), exist_ok=True)
+            with open(_LOG_FILE, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
         except Exception:  # noqa: BLE001
             pass
 
@@ -333,6 +344,8 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
 
     if daemon_up():
         return AutostartResult(False, False, True, 0, "Docker 데몬 실행 중")
+    _log.warning("[docker-autostart] ensure 시작 cwd=%s exe=%s PATH=%s",
+                 os.getcwd(), sys.executable, os.environ.get("PATH", "")[:200])
 
     if os.environ.get(ENV_AUTOSTART, "1").strip() == "0":
         return AutostartResult(
