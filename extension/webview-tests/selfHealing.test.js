@@ -105,3 +105,16 @@ test('③ Docker 자동 조치는 동시 호출을 하나로 합친다', () => {
   assert.match(fn, /if \(this\._dockerHealInFlight\) \{ return this\._dockerHealInFlight; \}/);
   assert.match(API, /'POST', '\/api\/docker\/ensure', \{\}, false, 200000/, '제한 시간이 코어 대기보다 넉넉해야 한다');
 });
+
+test('③ Docker 를 띄웠지만 준비가 늦으면 실패로 끝내지 않고 뒤에서 이어 확인한다', () => {
+  const once = block(HOST, 'private async _healDockerOnce(', 'private async _waitForDocker(');
+  //: launched && !ready → pending 알림 → 후속 대기 → 최종 결과. "실패" 는 launched=false 때만 즉시.
+  assert.match(once, /if \(!r\.launched\)/, 'launched 로 즉시 실패/후속 대기를 가르지 않는다');
+  assert.match(once, /pending: true/, '대기 중임을 화면에 알리지 않는다');
+  assert.match(once, /await this\._waitForDocker\(r\.waited_seconds\)/, '후속 대기가 없다');
+  const wait = block(HOST, 'private async _waitForDocker(', 'private async _selfHealFromDiagnostics(');
+  assert.match(wait, /DOCKER_FOLLOWUP_MS/);
+  assert.match(wait, /ensureDocker\(\)/, '후속 확인이 코어 ensure 를 재사용하지 않는다');
+  //: 화면은 pending 동안 버튼을 "조치 중…" 으로 잠가 둔다 — 두 번 누르지 않게.
+  assert.match(PANEL, /p\?\.pending && p\?\.key\) \{ setHealing\(p\.key\)/, '대기 중 버튼이 풀린다');
+});

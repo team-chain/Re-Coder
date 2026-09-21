@@ -190,3 +190,90 @@ def test_docker_ensure_라우트는_결과를_그대로_돌려주고_예외를_�
     r = asyncio.run(health.ensure_docker_route())
     assert r["ready"] is False and "no docker binary" in r["message"]
     assert {"/api/docker/ensure"} <= {route.path for route in health.router.routes}
+
+
+# ── 실기기 회귀: `open -a Docker` 가 조용히 무시된 뒤 데몬만 기다리다 끝났다 ──
+
+
+def _fake_clock(monkeypatch, step: float):
+    """time.monotonic 이 호출마다 step 씩 흐른다 — 재실행 타이밍을 결정적으로."""
+    now = [0.0]
+
+    def mono():
+        now[0] += step
+        return now[0]
+
+    monkeypatch.setattr(da.time, "monotonic", mono)
+    monkeypatch.setattr(da.time, "sleep", lambda _s: None)
+
+
+def test_macOS에서_open_종료코드가_0이_아니면_실행_실패로_돌려준다(monkeypatch):
+    monkeypatch.setattr(da.platform, "system", lambda: "Darwin")
+
+    class Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "Unable to find application named 'Docker'"
+
+    calls = []
+    monkeypatch.setattr(da.subprocess, "run", lambda *a, **k: calls.append(a[0]) or Proc())
+
+    launched, how = da._launch()
+
+    assert launched is False
+    assert calls == [["open", "-a", "Docker"]]
+    assert "Unable to find application" in how and "설치" in how
+
+
+def test_macOS에서_open_이_성공하면_launched_True(monkeypatch):
+    monkeypatch.setattr(da.platform, "system", lambda: "Darwin")
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(da.subprocess, "run", lambda *a, **k: Proc())
+    assert da._launch() == (True, "Docker Desktop 실행: open -a Docker")
+
+
+def test_실행_뒤_앱_프로세스가_사라졌으면_한_번만_다시_띄운다(monkeypatch):
+    _daemon_seq(monkeypatch, [False])
+    _fake_clock(monkeypatch, step=5.0)  # 폴링마다 5초씩 흐름
+    monkeypatch.setattr(da, "app_running", lambda: False)
+    launches = []
+    monkeypatch.setattr(da, "_launch", lambda: launches.append(1) or (True, "open"))
+
+    r = da.ensure_docker(wait_seconds=60)
+
+    assert r.ready is False and r.launched is True
+    assert len(launches) == 2, f"최초 1회 + 재실행 1회여야 하는데 {len(launches)}회 실행"
+
+
+def test_앱_프로세스가_살아있으면_다시_띄우지_않는다(monkeypatch):
+    _daemon_seq(monkeypatch, [False])
+    _fake_clock(monkeypatch, step=5.0)
+    monkeypatch.setattr(da, "app_running", lambda: True)
+    launches = []
+    monkeypatch.setattr(da, "_launch", lambda: launches.append(1) or (True, "open"))
+
+    da.ensure_docker(wait_seconds=60)
+
+    assert len(launches) == 1, "부팅 중인 앱을 또 실행했다"
+
+
+def test_재실행이_준비로_이어지면_ready_True(monkeypatch):
+    # 폴링 5회까지 down → 그 뒤 up. 재실행(12초 이후)이 끼어들어도 결과는 ready.
+    _daemon_seq(monkeypatch, [False] * 6 + [True])
+    _fake_clock(monkeypatch, step=5.0)
+    monkeypatch.setattr(da, "app_running", lambda: False)
+    monkeypatch.setattr(da, "_launch", lambda: (True, "open"))
+
+    r = da.ensure_docker(wait_seconds=120)
+
+    assert r.ready is True and r.launched is True
+    assert "자동 시작했습니다" in r.message
+
+
+def test_기본_대기_상한은_120초(monkeypatch):
+    assert da.DEFAULT_WAIT_SECONDS == 120
