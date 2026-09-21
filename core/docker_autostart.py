@@ -26,12 +26,16 @@ Docker Desktop 을 실행하면 앱이 여러 번 뜨거나 부팅 중에 재실
 """
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
+
+#: 자동 기동은 실기기에서만 재현되는 문제가 많다 — 단계마다 남긴다(코어 stderr).
+_log = logging.getLogger("recoder.docker_autostart")
 
 #: 자동 시작 스위치. "0" 일 때만 꺼진다 — 기본은 켜짐.
 ENV_AUTOSTART = "RECODER_DOCKER_AUTOSTART"
@@ -179,6 +183,7 @@ def _kill_docker_processes() -> None:
 
     데몬이 죽어 있을 때만 부른다 — 컨테이너가 도는 상태를 죽이는 일은 없다.
     """
+    _log.warning("[docker-autostart] 멈춘 프로세스 정리 시작 pids=%s", _docker_pids())
     try:
         subprocess.run(["pkill", "-TERM", "-f", "Docker.app/Contents/"], capture_output=True, timeout=5)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -187,7 +192,9 @@ def _kill_docker_processes() -> None:
     while (time.monotonic() - started) < _KILL_GRACE_SECONDS:
         time.sleep(_BACKEND_POLL_SECONDS)
         if not _docker_pids():
+            _log.warning("[docker-autostart] SIGTERM 뒤 %.0f초 만에 모두 종료", time.monotonic() - started)
             return
+    _log.warning("[docker-autostart] SIGTERM 유예 초과 → SIGKILL pids=%s", _docker_pids())
     try:
         subprocess.run(["pkill", "-KILL", "-f", "Docker.app/Contents/"], capture_output=True, timeout=5)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -215,7 +222,9 @@ def _drain_shutdown() -> tuple[int, bool]:
         pids = _docker_pids()
         if not pids:
             return int(time.monotonic() - started), True, killed
-        if not killed and _oldest_process_age(pids) >= _STALE_PROCESS_SECONDS:
+        age = _oldest_process_age(pids)
+        _log.warning("[docker-autostart] 데몬 없음, 프로세스 %d개 (가장 오래된 %d초)", len(pids), age)
+        if not killed and age >= _STALE_PROCESS_SECONDS:
             killed = True
             _kill_docker_processes()
             continue
@@ -280,6 +289,8 @@ def _launch() -> tuple[bool, str]:
                 ["open", "-a", "Docker"],
                 capture_output=True, text=True, timeout=_OPEN_TIMEOUT_SECONDS,
             )
+            _log.warning("[docker-autostart] open -a Docker → rc=%s stdout=%r stderr=%r",
+                         proc.returncode, proc.stdout.strip(), proc.stderr.strip())
             if proc.returncode != 0:
                 detail = (proc.stderr or proc.stdout or "").strip()
                 return False, (
@@ -372,9 +383,11 @@ def _wait_ready(limit: int, *, launched_now: bool) -> AutostartResult:
     """
     started = time.monotonic()
     relaunched = not launched_now
+    _log.warning("[docker-autostart] 데몬 대기 시작 limit=%ss launched_now=%s", limit, launched_now)
     while (time.monotonic() - started) < limit:
         if daemon_up():
             waited = int(time.monotonic() - started)
+            _log.warning("[docker-autostart] 데몬 준비 (%d초)", waited)
             return AutostartResult(
                 True, launched_now, True, waited,
                 f"Docker Desktop 을 자동 시작했습니다 (준비까지 {waited}초)."
@@ -387,11 +400,13 @@ def _wait_ready(limit: int, *, launched_now: bool) -> AutostartResult:
         elapsed = time.monotonic() - started
         if not relaunched and elapsed >= _RELAUNCH_AFTER_SECONDS and not app_running():
             relaunched = True
+            _log.warning("[docker-autostart] %.0f초 지나도 앱 프로세스 없음 → 다시 실행 (pids=%s)", elapsed, _docker_pids())
             launched, how = _launch()
             if not launched:
                 return AutostartResult(True, False, False, int(elapsed), how)
         time.sleep(_POLL_INTERVAL_SECONDS)
 
+    _log.warning("[docker-autostart] %s초 안에 데몬 미준비 pids=%s", int(limit), _docker_pids())
     return AutostartResult(
         True, launched_now, False, int(limit),
         f"Docker Desktop 을 실행했지만 {int(limit)}초 안에 데몬이 준비되지 "
