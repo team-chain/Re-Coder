@@ -104,7 +104,51 @@ def test_쿨다운_안에서는_재실행하지_않는다(monkeypatch):
     second = da.ensure_docker(wait_seconds=0)
 
     assert len(calls) == 1, "실패 직후 재호출에서 Docker Desktop 을 또 실행했다"
-    assert second is first, "쿨다운 중에는 직전 결과를 그대로 돌려줘야 한다"
+    #: 직전 결과를 그대로 돌려주지는 않는다 — 데몬을 다시 확인한 새 결과다.
+    assert first.launched is True and second.launched is False
+    assert second.ready is False and "시작 중" in second.message
+
+
+def test_쿨다운_안이라도_직전에_성공했으면_다시_띄운다(monkeypatch):
+    #: 실기기 회귀 — 자동 시작 성공 → 사용자가 Docker 를 끔 → 2분 안에 자동 조치.
+    #: 예전엔 직전 "성공" 결과를 그대로 돌려줘 화면은 자동 조치함, 데몬은 죽어 있었다.
+    _daemon_seq(monkeypatch, [False, False, True, False, False, True])
+    calls = []
+    monkeypatch.setattr(da, "_launch", lambda: calls.append(1) or (True, "started"))
+    monkeypatch.setattr(da, "app_running", lambda: True)
+
+    first = da.ensure_docker(wait_seconds=10)
+    assert first.ready is True
+    second = da.ensure_docker(wait_seconds=10)
+
+    assert len(calls) == 2, "성공 뒤 꺼진 Docker 를 다시 띄우지 않았다"
+    assert second.ready is True and second.launched is True
+
+
+def test_쿨다운_안이라도_앱_프로세스가_없으면_다시_띄운다(monkeypatch):
+    _daemon_seq(monkeypatch, [False])
+    calls = []
+    monkeypatch.setattr(da, "_launch", lambda: calls.append(1) or (True, "started"))
+    monkeypatch.setattr(da, "app_running", lambda: False)
+
+    da.ensure_docker(wait_seconds=0)
+    da.ensure_docker(wait_seconds=0)
+
+    assert len(calls) == 2, "앱이 없는데도 쿨다운을 이유로 띄우지 않았다"
+
+
+def test_쿨다운_중_데몬이_준비되면_ready_로_돌아온다(monkeypatch):
+    _daemon_seq(monkeypatch, [False, False, False, False, True])
+    monkeypatch.setattr(da, "_launch", lambda: (True, "started"))
+    monkeypatch.setattr(da, "app_running", lambda: True)
+    monkeypatch.setattr(da.time, "sleep", lambda _s: None)
+
+    first = da.ensure_docker(wait_seconds=0)   # 띄웠지만 0초 → 미준비
+    second = da.ensure_docker(wait_seconds=30)  # 부팅 중 → 기다리기만
+
+    assert first.ready is False
+    assert second.ready is True and second.launched is False
+    assert "준비됐습니다" in second.message
 
 
 # ── ensure_docker_available 통합 ──────────────────────────────────────────
@@ -181,7 +225,7 @@ def test_docker_ensure_라우트는_결과를_그대로_돌려주고_예외를_�
         lambda wait_seconds=None: SimpleNamespace(ready=True, attempted=True, launched=True, waited_seconds=12, message="started"),
     )
     r = asyncio.run(health.ensure_docker_route())
-    assert r == {"ready": True, "attempted": True, "launched": True, "waited_seconds": 12, "message": "started"}
+    assert r == {"ready": True, "attempted": True, "launched": True, "waited_seconds": 12, "message": "started", "starting": False}
 
     def boom(wait_seconds=None):
         raise RuntimeError("no docker binary")

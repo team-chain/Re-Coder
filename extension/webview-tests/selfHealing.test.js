@@ -109,7 +109,8 @@ test('③ Docker 자동 조치는 동시 호출을 하나로 합친다', () => {
 test('③ Docker 를 띄웠지만 준비가 늦으면 실패로 끝내지 않고 뒤에서 이어 확인한다', () => {
   const once = block(HOST, 'private async _healDockerOnce(', 'private async _waitForDocker(');
   //: launched && !ready → pending 알림 → 후속 대기 → 최종 결과. "실패" 는 launched=false 때만 즉시.
-  assert.match(once, /if \(!r\.launched\)/, 'launched 로 즉시 실패/후속 대기를 가르지 않는다');
+  assert.match(once, /const starting = r\.starting \?\? r\.launched;\s*if \(!starting\)/, 'starting 으로 즉시 실패/후속 대기를 가르지 않는다');
+  assert.match(CORE_HEALTH, /"starting": bool\(/, '코어 ensure 응답에 starting 이 없다');
   assert.match(once, /pending: true/, '대기 중임을 화면에 알리지 않는다');
   assert.match(once, /await this\._waitForDocker\(r\.waited_seconds\)/, '후속 대기가 없다');
   const wait = block(HOST, 'private async _waitForDocker(', 'private async _selfHealFromDiagnostics(');

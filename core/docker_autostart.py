@@ -63,6 +63,9 @@ class AutostartResult:
     ready: bool       #: 데몬이 응답하는 상태로 끝났는가
     waited_seconds: int
     message: str
+    #: 앱은 떠 있는데(띄웠거나 부팅 중) 데몬만 아직인 상태 — 호출자는 "실패" 로
+    #: 끝내지 말고 뒤에서 이어 확인해도 된다. 실행 자체가 안 됐으면 False.
+    starting: bool = False
 
 
 def daemon_up(timeout: float = 5.0) -> bool:
@@ -190,8 +193,25 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
         if daemon_up():
             return AutostartResult(False, False, True, 0, "Docker 데몬 실행 중")
 
+        limit = wait_seconds
+        if limit is None:
+            try:
+                limit = int(os.environ.get(ENV_WAIT_SECONDS, str(DEFAULT_WAIT_SECONDS)))
+            except ValueError:
+                limit = DEFAULT_WAIT_SECONDS
+
         now = time.monotonic()
-        if _last_result is not None and (now - _last_attempt_at) < _RETRY_COOLDOWN_SECONDS:
+        in_cooldown = (
+            _last_result is not None
+            and (now - _last_attempt_at) < _RETRY_COOLDOWN_SECONDS
+        )
+        # 쿨다운의 목적은 "부팅 중인 앱을 또 띄우지 않기" 다. 직전 결과를 그대로
+        # 돌려주는 건 틀리다 — 직전엔 성공했는데 사용자가 방금 껐다면 "자동 조치함"
+        # 을 보여 주면서 데몬은 죽어 있는 꼴이 된다(실기기에서 실제로 났다).
+        # 그래서: 앱이 살아 있고 직전에 실패했을 때만 재실행을 막고 기다린다.
+        if in_cooldown and not _last_result.ready and app_running():
+            _last_attempt_at = now
+            _last_result = _wait_ready(limit, launched_now=False)
             return _last_result
 
         _last_attempt_at = now
@@ -200,41 +220,47 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
             _last_result = AutostartResult(True, False, False, 0, how)
             return _last_result
 
-        limit = wait_seconds
-        if limit is None:
-            try:
-                limit = int(os.environ.get(ENV_WAIT_SECONDS, str(DEFAULT_WAIT_SECONDS)))
-            except ValueError:
-                limit = DEFAULT_WAIT_SECONDS
-
-        started = time.monotonic()
-        relaunched = False
-        while (time.monotonic() - started) < limit:
-            if daemon_up():
-                waited = int(time.monotonic() - started)
-                _last_result = AutostartResult(
-                    True, True, True, waited,
-                    f"Docker Desktop 을 자동 시작했습니다 (준비까지 {waited}초).",
-                )
-                return _last_result
-            # 앱이 종료되는 도중에 `open` 을 부르면 무시되고 프로세스가 사라진다
-            # (사용자가 방금 Docker 를 끈 직후 진단을 돌리는 흔한 순서). 한 번만
-            # 다시 띄운다 — 매 폴링마다 띄우면 부팅 중 재실행이 된다.
-            elapsed = time.monotonic() - started
-            if not relaunched and elapsed >= _RELAUNCH_AFTER_SECONDS and not app_running():
-                relaunched = True
-                launched, how = _launch()
-                if not launched:
-                    _last_result = AutostartResult(True, False, False, int(elapsed), how)
-                    return _last_result
-            time.sleep(_POLL_INTERVAL_SECONDS)
-
-        _last_result = AutostartResult(
-            True, True, False, int(limit),
-            f"Docker Desktop 을 실행했지만 {int(limit)}초 안에 데몬이 준비되지 "
-            "않았습니다 — 아직 시작 중일 수 있습니다.",
-        )
+        _last_result = _wait_ready(limit, launched_now=True)
         return _last_result
+
+
+def _wait_ready(limit: int, *, launched_now: bool) -> AutostartResult:
+    """데몬이 응답할 때까지 최대 limit 초 폴링한다.
+
+    launched_now — 이번 호출에서 `_launch()` 를 했는가. False 면 부팅 중인 앱을
+    기다리는 것이라 다시 띄우지 않는다.
+    """
+    started = time.monotonic()
+    relaunched = not launched_now
+    while (time.monotonic() - started) < limit:
+        if daemon_up():
+            waited = int(time.monotonic() - started)
+            return AutostartResult(
+                True, launched_now, True, waited,
+                f"Docker Desktop 을 자동 시작했습니다 (준비까지 {waited}초)."
+                if launched_now else
+                f"시작 중이던 Docker Desktop 이 준비됐습니다 ({waited}초 대기).",
+            )
+        # 앱이 종료되는 도중에 `open` 을 부르면 무시되고 프로세스가 사라진다
+        # (사용자가 방금 Docker 를 끈 직후 진단을 돌리는 흔한 순서). 한 번만
+        # 다시 띄운다 — 매 폴링마다 띄우면 부팅 중 재실행이 된다.
+        elapsed = time.monotonic() - started
+        if not relaunched and elapsed >= _RELAUNCH_AFTER_SECONDS and not app_running():
+            relaunched = True
+            launched, how = _launch()
+            if not launched:
+                return AutostartResult(True, False, False, int(elapsed), how)
+        time.sleep(_POLL_INTERVAL_SECONDS)
+
+    return AutostartResult(
+        True, launched_now, False, int(limit),
+        f"Docker Desktop 을 실행했지만 {int(limit)}초 안에 데몬이 준비되지 "
+        "않았습니다 — 아직 시작 중일 수 있습니다."
+        if launched_now else
+        f"Docker Desktop 이 시작 중이지만 {int(limit)}초 안에 데몬이 준비되지 "
+        "않았습니다 — 아직 시작 중일 수 있습니다.",
+        starting=True,
+    )
 
 
 def reset_for_tests() -> None:

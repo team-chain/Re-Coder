@@ -459,7 +459,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 });
                 return true;
             }
-            if (!r.launched) {
+            //: starting — 앱은 떠 있는데(띄웠거나 부팅 중) 데몬만 아직. 그 외의 미준비는
+            //: 실행 자체가 안 된 것(미설치·open 실패)이라 기다려도 소용없다 → 즉시 실패.
+            const starting = r.starting ?? r.launched;
+            if (!starting) {
                 this.postMessage('selfHeal', { key: 'docker_ready', action: 'docker_start', reason, failed: true, message: `자동 조치 실패 · ${r.message}` });
                 return false;
             }
@@ -467,7 +470,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             //: "실패" 로 끝내지 않고 뒤에서 이어서 확인한다 — 사용자가 다시 누를 필요 없게.
             this.postMessage('selfHeal', {
                 key: 'docker_ready', action: 'docker_start', reason, failed: false, pending: true,
-                message: `자동 조치 중 · Docker Desktop 을 실행했습니다 — 준비될 때까지 기다리는 중 (${r.waited_seconds}초 경과)`,
+                message: `자동 조치 중 · Docker Desktop ${r.launched ? '을 실행했습니다' : '이 시작 중입니다'} — 준비될 때까지 기다리는 중 (${r.waited_seconds}초 경과)`,
             });
             const waited = await this._waitForDocker(r.waited_seconds);
             const ready = waited !== null;
