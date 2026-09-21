@@ -94,3 +94,32 @@ def test_Dockerfile_없으면_소스의_listen_포트를_본다(tmp_path):
 def test_아무_단서_없는_node_는_예전처럼_3000(tmp_path):
     (tmp_path / "package.json").write_text('{"scripts": {"start": "node index.js"}}')
     assert DeployAgent._detect_port(str(tmp_path)) == (3000, 3000)
+
+
+# ── Dockerfile 생성용 Node 진입점·포트 감지 (index.js/3000 고정 추측 회귀) ──
+import infra_agent  # noqa: E402
+
+
+def test_node_진입점은_start_스크립트_main_순으로_읽고_포트는_소스에서_읽는다(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n')
+    (tmp_path / "package.json").write_text(
+        '{"main":"src/app.js","scripts":{"start":"node src/app.js"},"dependencies":{"express":"^4"}}')
+    stack, meta = infra_agent._detect_stack(str(tmp_path))
+    assert stack == "node-express"
+    assert meta["entrypoint"] == "src/app.js"
+    assert meta["port"] == "3456"
+
+
+def test_node_단서_없으면_예전_기본값_index_js_3000(tmp_path):
+    (tmp_path / "index.js").write_text('app.listen(process.env.PORT);\n')
+    (tmp_path / "package.json").write_text('{"dependencies":{"express":"^4"}}')
+    stack, meta = infra_agent._detect_stack(str(tmp_path))
+    assert meta["entrypoint"] == "index.js" and meta["port"] == "3000"
+
+
+def test_플랜_포트는_PORT_기본값_패턴도_읽는다(tmp_path):
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/app.js"}}')
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n')
+    assert DeployAgent._detect_port(str(tmp_path)) == (3456, 3456)
