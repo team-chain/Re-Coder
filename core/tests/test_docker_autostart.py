@@ -20,6 +20,13 @@ from agents.ecs_build import BuildError, ensure_docker_available
 def _clean_state(monkeypatch):
     da.reset_for_tests()
     monkeypatch.setattr(da, "_POLL_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(da, "_BACKEND_POLL_SECONDS", 0.0)
+    #: 기본은 macOS 의미론 + "Docker 프로세스 없음"(완전히 꺼진 상태). 부팅 중·
+    #: 종료 중 시나리오는 테스트가 app_running/backend_running 을 덮어쓴다.
+    monkeypatch.setattr(da, "_can_detect_processes", lambda: True)
+    monkeypatch.setattr(da, "app_running", lambda: False)
+    monkeypatch.setattr(da, "backend_running", lambda: False)
+    monkeypatch.setattr(da, "_BACKEND_DRAIN_SECONDS", 0)
     monkeypatch.delenv(da.ENV_AUTOSTART, raising=False)
     monkeypatch.delenv(da.ENV_WAIT_SECONDS, raising=False)
     yield
@@ -99,6 +106,9 @@ def test_쿨다운_안에서는_재실행하지_않는다(monkeypatch):
     _daemon_seq(monkeypatch, [False])
     calls = []
     monkeypatch.setattr(da, "_launch", lambda: calls.append(1) or (True, "started"))
+    #: 첫 호출 땐 프로세스가 없고(→ 띄움), 그 뒤엔 부팅 중(앱 살아 있음).
+    app = iter([False])
+    monkeypatch.setattr(da, "app_running", lambda: next(app, True))
 
     first = da.ensure_docker(wait_seconds=0)
     second = da.ensure_docker(wait_seconds=0)
@@ -115,7 +125,7 @@ def test_쿨다운_안이라도_직전에_성공했으면_다시_띄운다(monke
     _daemon_seq(monkeypatch, [False, False, True, False, False, True])
     calls = []
     monkeypatch.setattr(da, "_launch", lambda: calls.append(1) or (True, "started"))
-    monkeypatch.setattr(da, "app_running", lambda: True)
+    monkeypatch.setattr(da, "app_running", lambda: False)  # 완전히 꺼진 상태
 
     first = da.ensure_docker(wait_seconds=10)
     assert first.ready is True
@@ -294,16 +304,19 @@ def test_실행_뒤_앱_프로세스가_사라졌으면_한_번만_다시_띄운
     assert len(launches) == 2, f"최초 1회 + 재실행 1회여야 하는데 {len(launches)}회 실행"
 
 
-def test_앱_프로세스가_살아있으면_다시_띄우지_않는다(monkeypatch):
+def test_앱_프로세스가_계속_살아있으면_부팅_중으로_보고_띄우지_않는다(monkeypatch):
     _daemon_seq(monkeypatch, [False])
     _fake_clock(monkeypatch, step=5.0)
+    monkeypatch.setattr(da, "_BACKEND_DRAIN_SECONDS", 45)
     monkeypatch.setattr(da, "app_running", lambda: True)
     launches = []
     monkeypatch.setattr(da, "_launch", lambda: launches.append(1) or (True, "open"))
 
-    da.ensure_docker(wait_seconds=60)
+    r = da.ensure_docker(wait_seconds=60)
 
-    assert len(launches) == 1, "부팅 중인 앱을 또 실행했다"
+    assert launches == [], "부팅 중인 앱 위에 또 실행했다"
+    assert r.ready is False and r.launched is False and r.starting is True
+    assert "Quit" in r.message, "멈춘 Docker 를 사용자가 어떻게 풀지 말하지 않는다"
 
 
 def test_재실행이_준비로_이어지면_ready_True(monkeypatch):
@@ -328,7 +341,7 @@ def test_기본_대기_상한은_120초(monkeypatch):
 
 def test_앱은_없고_백엔드만_남았으면_내려갈_때까지_기다린_뒤_띄운다(monkeypatch):
     _daemon_seq(monkeypatch, [False, False, True])
-    monkeypatch.setattr(da, "_BACKEND_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(da, "_BACKEND_DRAIN_SECONDS", 45)
     monkeypatch.setattr(da, "app_running", lambda: False)
     backend = iter([True, True, True, False])
     monkeypatch.setattr(da, "backend_running", lambda: next(backend, False))
@@ -344,23 +357,56 @@ def test_앱은_없고_백엔드만_남았으면_내려갈_때까지_기다린_�
     assert order.count("launch") == 1
 
 
-def test_앱이_살아있으면_백엔드_대기_없이_바로_진행한다(monkeypatch):
+def test_앱이_살아있고_데몬이_곧_뜨면_띄우지_않고_ready(monkeypatch):
+    #: 부팅 중인 Docker 위에 `open` 을 얹지 않는다 — 기다리기만 해도 준비된다.
     _daemon_seq(monkeypatch, [False, False, True])
+    monkeypatch.setattr(da, "_BACKEND_DRAIN_SECONDS", 0)
     monkeypatch.setattr(da, "app_running", lambda: True)
-    monkeypatch.setattr(da, "backend_running", lambda: (_ for _ in ()).throw(AssertionError("확인 불필요")))
-    monkeypatch.setattr(da, "_launch", lambda: (True, "open"))
+    launches = []
+    monkeypatch.setattr(da, "_launch", lambda: launches.append(1) or (True, "open"))
 
-    assert da.ensure_docker(wait_seconds=10).ready is True
+    r = da.ensure_docker(wait_seconds=10)
+
+    assert r.ready is True and r.launched is False and launches == []
+    assert "준비됐습니다" in r.message
 
 
-def test_백엔드가_상한_안에_안_내려가도_예외_없이_띄운다(monkeypatch):
-    _daemon_seq(monkeypatch, [False, False, True])
+def test_백엔드가_상한_안에_안_내려가면_띄우지_않고_기다린다(monkeypatch):
+    _daemon_seq(monkeypatch, [False])
     monkeypatch.setattr(da, "_BACKEND_DRAIN_SECONDS", 0)
     monkeypatch.setattr(da, "app_running", lambda: False)
     monkeypatch.setattr(da, "backend_running", lambda: True)
     launches = []
     monkeypatch.setattr(da, "_launch", lambda: launches.append(1) or (True, "open"))
 
+    r = da.ensure_docker(wait_seconds=0)
+
+    assert r.ready is False and r.starting is True and launches == []
+
+
+def test_종료_중이면_앱과_백엔드가_다_사라진_뒤에_띄운다(monkeypatch):
+    #: 실기기 재현 순서 — quit 5초 뒤 자동 조치: 앱·백엔드가 아직 있다가 곧 사라진다.
+    _daemon_seq(monkeypatch, [False, False, True])
+    monkeypatch.setattr(da, "_BACKEND_DRAIN_SECONDS", 45)
+    app = iter([True, True, False, False])
+    backend = iter([True, True, True, False])
+    monkeypatch.setattr(da, "app_running", lambda: next(app, False))
+    monkeypatch.setattr(da, "backend_running", lambda: next(backend, False))
+    order = []
+    monkeypatch.setattr(da, "_launch", lambda: order.append("launch") or (True, "open"))
+    monkeypatch.setattr(da.time, "sleep", lambda s: order.append("wait"))
+
     r = da.ensure_docker(wait_seconds=10)
 
-    assert r.ready is True and launches == [1]
+    assert r.ready is True and r.launched is True
+    assert order.count("launch") == 1 and order.index("launch") > order.index("wait")
+
+
+def test_프로세스를_못_보는_플랫폼은_예전처럼_바로_띄운다(monkeypatch):
+    _daemon_seq(monkeypatch, [False, False, True])
+    monkeypatch.setattr(da, "_can_detect_processes", lambda: False)
+    monkeypatch.setattr(da, "app_running", lambda: (_ for _ in ()).throw(AssertionError("호출 금지")))
+    launches = []
+    monkeypatch.setattr(da, "_launch", lambda: launches.append(1) or (True, "open"))
+
+    assert da.ensure_docker(wait_seconds=10).ready is True and launches == [1]
