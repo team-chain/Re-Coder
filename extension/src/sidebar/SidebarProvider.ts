@@ -455,7 +455,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (r.ready) {
                 this.postMessage('selfHeal', {
                     key: 'docker_ready', action: 'docker_start', reason, failed: false,
-                    message: r.attempted ? `자동 조치함 · Docker Desktop 을 시작했습니다 (${r.waited_seconds}초 대기).` : 'Docker 데몬이 이미 실행 중입니다.',
+                    //: 코어 문구를 그대로 — "정리하고 띄웠다" 같은 상세를 잃지 않게.
+                    message: r.attempted ? `자동 조치함 · ${r.message}` : 'Docker 데몬이 이미 실행 중입니다.',
                 });
                 return true;
             }
