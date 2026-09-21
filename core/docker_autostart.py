@@ -87,10 +87,10 @@ def daemon_up(timeout: float = 5.0) -> bool:
 def app_running() -> bool:
     """Docker Desktop **앱 프로세스**가 살아 있는가(데몬 준비와는 별개).
 
-    macOS 만 확인한다 — 다른 플랫폼이나 확인 실패는 True(모른다 → 다시 띄우지
-    않는다) 로 둔다. 재실행은 "확실히 없을 때"만 해야 부팅 중 중복 실행이 없다.
+    macOS 만 확인한다 — 다른 플랫폼·확인 실패는 True(모른다 → 다시 띄우지
+    않는다). 재실행은 "확실히 없을 때"만 해야 부팅 중 중복 실행이 없다.
     """
-    if platform.system() != "Darwin":
+    if not _can_detect_processes():
         return True
     try:
         proc = subprocess.run(
@@ -102,12 +102,17 @@ def app_running() -> bool:
         return True
 
 
+def _can_detect_processes() -> bool:
+    """앱·백엔드 프로세스 유무를 볼 수 있는 플랫폼인가(pgrep, macOS)."""
+    return platform.system() == "Darwin"
+
+
 def backend_running() -> bool:
     """Docker Desktop **백엔드**(com.docker.backend) 프로세스가 살아 있는가.
 
     macOS 만 확인한다 — 다른 플랫폼·확인 실패는 False(모른다 → 기다리지 않는다).
     """
-    if platform.system() != "Darwin":
+    if not _can_detect_processes():
         return False
     try:
         proc = subprocess.run(
@@ -118,20 +123,29 @@ def backend_running() -> bool:
         return False
 
 
-def _drain_shutdown() -> int:
-    """앱은 없고 백엔드만 남은 "종료 중" 이면 백엔드가 내려갈 때까지 기다린다.
+def _drain_shutdown() -> tuple[int, bool]:
+    """Docker Desktop 프로세스(앱·백엔드)가 남아 있으면 사라질 때까지 기다린다.
 
-    기다린 초를 돌려준다(0 = 기다릴 필요 없었다). 상한을 넘겨도 예외 없이 돌아온다 —
-    이후 `open` 은 어차피 시도하고, 결과는 폴링이 말해 준다.
+    데몬이 죽어 있는데 프로세스가 있으면 둘 중 하나다 — **종료 중**(곧 사라진다)
+    이거나 **부팅 중**(남아 있는다). 프로세스 유무만으로는 못 가르므로 잠깐
+    지켜본다: 상한 안에 다 사라지면 종료였다 → 이제 띄워도 된다(True). 상한을
+    넘겨도 남아 있으면 부팅 중(또는 멈춤)이다 → 띄우지 말고 기다려야 한다(False).
+    종료 중에 `open` 하면 Docker Desktop 이 시작 중 상태에서 멈춘다(실기기 재현:
+    quit 5초 뒤 실행 → 소켓은 있는데 /version 500, 수 분 지나도 그대로).
+
+    반환: (기다린 초, 프로세스가 다 사라졌는가). 프로세스를 못 보는 플랫폼은
+    (0, True) — 예전처럼 바로 띄운다.
     """
-    if app_running() or not backend_running():
-        return 0
+    if not _can_detect_processes():
+        return 0, True
+    if not app_running() and not backend_running():
+        return 0, True
     started = time.monotonic()
     while (time.monotonic() - started) < _BACKEND_DRAIN_SECONDS:
         time.sleep(_BACKEND_POLL_SECONDS)
-        if not backend_running():
-            break
-    return int(time.monotonic() - started)
+        if not app_running() and not backend_running():
+            return int(time.monotonic() - started), True
+    return int(time.monotonic() - started), False
 
 
 def _windows_candidates() -> list[str]:
@@ -252,7 +266,12 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
             return _last_result
 
         _last_attempt_at = now
-        drained = _drain_shutdown()
+        drained, clear = _drain_shutdown()
+        if not clear:
+            # 프로세스가 계속 남아 있다 — 부팅 중이다. 그 위에 또 띄우지 않는다.
+            _last_result = _wait_ready(max(limit - drained, 0), launched_now=False)
+            _last_result.waited_seconds += drained
+            return _last_result
         launched, how = _launch()
         if not launched:
             _last_result = AutostartResult(True, False, False, drained, how)
@@ -298,7 +317,8 @@ def _wait_ready(limit: int, *, launched_now: bool) -> AutostartResult:
         "않았습니다 — 아직 시작 중일 수 있습니다."
         if launched_now else
         f"Docker Desktop 이 시작 중이지만 {int(limit)}초 안에 데몬이 준비되지 "
-        "않았습니다 — 아직 시작 중일 수 있습니다.",
+        "않았습니다 — 아직 시작 중일 수 있습니다. 계속 안 되면 메뉴바 고래 아이콘 → "
+        "Quit 한 뒤 다시 자동 조치해 주세요.",
         starting=True,
     )
 
