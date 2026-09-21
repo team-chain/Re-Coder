@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 #: 만드는 역할·정책 이름. quick-create 의 사용자 이름(recoder-deploy)과 구분되게.
 ROLE_NAME = "recoder-deploy-role"
 ROLE_POLICY_NAME = "recoder-deploy-policy"
+#: CreateRole Description — IAM 제약: [\u0009\u000A\u000D\u0020-\u007E\u00A1-\u00FF]* 만 허용.
+ROLE_DESCRIPTION = "Least-privilege deploy role created by the ReCoder VS Code extension."
 #: AssumeRole 세션 이름 — CloudTrail 에 이 이름으로 남는다.
 SESSION_NAME = "recoder"
 #: 기본 세션 길이. 역할의 MaxSessionDuration 기본값(1시간)과 같다.
@@ -297,7 +299,9 @@ def ensure_deploy_role(
             made = iam.create_role(
                 RoleName=role_name,
                 AssumeRolePolicyDocument=json.dumps(trust),
-                Description="ReCoder 가 배포에 쓰는 최소권한 역할. ReCoder 확장이 만들었습니다.",
+                #: IAM 은 Description 에 Latin-1(ASCII 범위) 문자만 허용한다 —
+                #: 한국어를 넣으면 ValidationError. 실기기 검증(2026-09-21)에서 발견.
+                Description=ROLE_DESCRIPTION,
                 MaxSessionDuration=DEFAULT_DURATION_SECONDS,
                 Tags=[{"Key": "ManagedBy", "Value": "recoder"}],
             )
