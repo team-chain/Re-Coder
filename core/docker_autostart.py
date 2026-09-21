@@ -48,6 +48,11 @@ _POLL_INTERVAL_SECONDS = 3.0
 _OPEN_TIMEOUT_SECONDS = 15
 #: 실행 뒤 이 시간이 지나도 앱 프로세스가 없으면 한 번 다시 띄운다(종료 중 무시된 경우).
 _RELAUNCH_AFTER_SECONDS = 12
+#: 앱은 없는데 백엔드(com.docker.backend)가 남아 있으면 "종료 중" 이다. 그 위에 바로
+#: `open` 하면 Docker Desktop 이 시작 중 상태에서 멈춘다(실기기: 끄고 15초 뒤 재실행 →
+#: 수 분 지나도 데몬 없음). 백엔드가 내려갈 때까지 최대 이만큼 기다린 뒤 띄운다.
+_BACKEND_DRAIN_SECONDS = 45
+_BACKEND_POLL_SECONDS = 2.0
 
 _lock = threading.Lock()
 _last_attempt_at: float = 0.0
@@ -95,6 +100,38 @@ def app_running() -> bool:
         return proc.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return True
+
+
+def backend_running() -> bool:
+    """Docker Desktop **백엔드**(com.docker.backend) 프로세스가 살아 있는가.
+
+    macOS 만 확인한다 — 다른 플랫폼·확인 실패는 False(모른다 → 기다리지 않는다).
+    """
+    if platform.system() != "Darwin":
+        return False
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", "com.docker.backend"], capture_output=True, timeout=5,
+        )
+        return proc.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _drain_shutdown() -> int:
+    """앱은 없고 백엔드만 남은 "종료 중" 이면 백엔드가 내려갈 때까지 기다린다.
+
+    기다린 초를 돌려준다(0 = 기다릴 필요 없었다). 상한을 넘겨도 예외 없이 돌아온다 —
+    이후 `open` 은 어차피 시도하고, 결과는 폴링이 말해 준다.
+    """
+    if app_running() or not backend_running():
+        return 0
+    started = time.monotonic()
+    while (time.monotonic() - started) < _BACKEND_DRAIN_SECONDS:
+        time.sleep(_BACKEND_POLL_SECONDS)
+        if not backend_running():
+            break
+    return int(time.monotonic() - started)
 
 
 def _windows_candidates() -> list[str]:
@@ -215,12 +252,15 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
             return _last_result
 
         _last_attempt_at = now
+        drained = _drain_shutdown()
         launched, how = _launch()
         if not launched:
-            _last_result = AutostartResult(True, False, False, 0, how)
+            _last_result = AutostartResult(True, False, False, drained, how)
             return _last_result
 
         _last_result = _wait_ready(limit, launched_now=True)
+        if drained:
+            _last_result.waited_seconds += drained
         return _last_result
 
 

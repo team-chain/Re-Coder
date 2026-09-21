@@ -321,3 +321,46 @@ def test_재실행이_준비로_이어지면_ready_True(monkeypatch):
 
 def test_기본_대기_상한은_120초(monkeypatch):
     assert da.DEFAULT_WAIT_SECONDS == 120
+
+
+# ── 종료 중 재실행 방지: 백엔드가 내려갈 때까지 기다린 뒤 띄운다 ──
+
+
+def test_앱은_없고_백엔드만_남았으면_내려갈_때까지_기다린_뒤_띄운다(monkeypatch):
+    _daemon_seq(monkeypatch, [False, False, True])
+    monkeypatch.setattr(da, "_BACKEND_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(da, "app_running", lambda: False)
+    backend = iter([True, True, True, False])
+    monkeypatch.setattr(da, "backend_running", lambda: next(backend, False))
+    order = []
+    monkeypatch.setattr(da, "_launch", lambda: order.append("launch") or (True, "open"))
+    orig_sleep = da.time.sleep
+    monkeypatch.setattr(da.time, "sleep", lambda s: order.append("wait"))
+
+    r = da.ensure_docker(wait_seconds=10)
+
+    assert r.ready is True
+    assert order.index("launch") > order.index("wait"), "백엔드가 살아 있는데 바로 띄웠다"
+    assert order.count("launch") == 1
+
+
+def test_앱이_살아있으면_백엔드_대기_없이_바로_진행한다(monkeypatch):
+    _daemon_seq(monkeypatch, [False, False, True])
+    monkeypatch.setattr(da, "app_running", lambda: True)
+    monkeypatch.setattr(da, "backend_running", lambda: (_ for _ in ()).throw(AssertionError("확인 불필요")))
+    monkeypatch.setattr(da, "_launch", lambda: (True, "open"))
+
+    assert da.ensure_docker(wait_seconds=10).ready is True
+
+
+def test_백엔드가_상한_안에_안_내려가도_예외_없이_띄운다(monkeypatch):
+    _daemon_seq(monkeypatch, [False, False, True])
+    monkeypatch.setattr(da, "_BACKEND_DRAIN_SECONDS", 0)
+    monkeypatch.setattr(da, "app_running", lambda: False)
+    monkeypatch.setattr(da, "backend_running", lambda: True)
+    launches = []
+    monkeypatch.setattr(da, "_launch", lambda: launches.append(1) or (True, "open"))
+
+    r = da.ensure_docker(wait_seconds=10)
+
+    assert r.ready is True and launches == [1]
