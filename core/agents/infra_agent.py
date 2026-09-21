@@ -294,6 +294,7 @@ class InfraAgent:
         )
 
         customisations = self._extract_json_dict(raw)
+        customisations = self._enforce_safe_customisations(customisations, stack, project)
         rendered_content = self._registry.render(template_id, customisations)
 
         required_secrets = self._detect_required_secrets(rendered_content)
@@ -309,6 +310,31 @@ class InfraAgent:
             risk_reasons=[],
             approval_level=ApprovalLevel.CONFIRM,
         )
+
+    @staticmethod
+    def _enforce_safe_customisations(customisations: dict, stack, project) -> dict:
+        """모델이 프롬프트 규칙을 무시해도 지켜야 하는 값을 강제한다.
+
+        - NODE_VERSION: EOL(< 20) 이거나 비어 있으면 22. 실기기에서 모델이 18 을 골라
+          베이스 OS CVE 로 배포가 차단됐다.
+        - PORT / START_SCRIPT: 프로젝트 프로필이 아는 값을 모델 추측보다 우선한다.
+        """
+        out = dict(customisations or {})
+        stack_value = getattr(stack, "value", str(stack))
+        if stack_value.startswith("node"):
+            raw_v = str(out.get("NODE_VERSION", "")).strip()
+            m = re.match(r"(\d{1,2})", raw_v)
+            major = int(m.group(1)) if m else 0
+            if major < 20:
+                out["NODE_VERSION"] = "22"
+        port = getattr(project, "default_port", None)
+        if port:
+            out["PORT"] = str(port)
+        run_cmd = str(getattr(project, "default_run_command", "") or "")
+        m = re.match(r"^node\s+(\S+)$", run_cmd)
+        if m:
+            out["START_SCRIPT"] = m.group(1)
+        return out
 
     # ------------------------------------------------------------------
     # docker-compose generation
