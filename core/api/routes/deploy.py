@@ -3024,32 +3024,6 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         _plan_workspaces.pop(request.plan_id, None)
         return {"status": "cancelled", "plan_id": request.plan_id}
 
-    # ── 빌드 (로컬 Docker) — 임계 구역 밖, 스캔보다 먼저 ─────────────────────
-    build_failure = await _build_local_image(plan, _plan_workspaces.get(request.plan_id, ""))
-    if build_failure is not None:
-        build_failure["plan_id"] = request.plan_id
-        return build_failure
-
-    # ── 빌드 후 1회 스캔 보장 ──────────────────────────────────────────────
-    #: 플랜 시점에 이미지가 없어 Trivy 를 못 돌린 플랜이라면, 실행 직전에
-    #: (이미지가 이제 존재할 때) 스캔을 한 번 돌린다. CRITICAL 이 나오면
-    #: 기존 컨테이너를 건드리기 **전에** 여기서 멈춘다 — 임계 구역 밖이라
-    #: 롤백할 것도 없다. 스캐너가 없어 또 못 돌면 기록만 남기고 진행한다
-    #: (승인 화면에 이미 '미검증' 사유가 표시된 상태로 사용자가 승인했다).
-    pending_image = _plans_pending_image_scan.pop(request.plan_id, None)
-    if pending_image and plan.image and _local_image_exists(plan.image):
-        deferred_report = await _execute_scan("trivy", "", plan.image)
-        if deferred_report.get("status") == "ok":
-            deferred_crit = int(deferred_report.get("critical_count", 0))
-            if deferred_crit > 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Trivy: CRITICAL {deferred_crit}건 — 배포를 차단했습니다 "
-                        f"({plan.image}). 취약점을 해결한 뒤 다시 시도하세요."
-                    ),
-                )
-
     # 플랜 생성 뒤 다른 배포가 실행될 수 있으므로, record 에 저장할 롤백 대상은
     # 반드시 실행 시점의 마지막 *검증 완료* 배포로 다시 잡는다.
     rollback_target, rollback_reason = _refresh_rollback_target(plan)
@@ -3068,6 +3042,36 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     # 그게 맞다 — 같은 컨테이너를 동시에 두 번 바꾸는 것은 원래 순서대로
     # 처리돼야 하는 일이다. 다른 컨테이너는 서로 막지 않는다.
     async with _container_transaction(plan):
+        # ── 빌드 (로컬 Docker) — 락 안, 파괴적 구간(stop/rm/run) 전 ──────────────
+        #: 같은 컨테이너를 겨냥한 두 요청은 빌드부터 직렬화된다. 락 밖에서 docker 를
+        #: 부르면 "락을 얻기 전에는 docker 를 건드리지 않는다"는 교체 안전 불변식
+        #: (test_replace_safety)이 깨진다. 빌드 실패는 돌고 있던 컨테이너를 건드리기
+        #: 전이라 되돌릴 것이 없다.
+        build_failure = await _build_local_image(plan, _plan_workspaces.get(request.plan_id, ""))
+        if build_failure is not None:
+            build_failure["plan_id"] = request.plan_id
+            return build_failure
+
+        # ── 빌드 후 1회 스캔 보장 ──────────────────────────────────────────
+        #: 플랜 시점에 이미지가 없어 Trivy 를 못 돌린 플랜이라면, 실행 직전에
+        #: (이미지가 이제 존재할 때) 스캔을 한 번 돌린다. CRITICAL 이 나오면
+        #: 기존 컨테이너를 건드리기 **전에** 여기서 멈춘다 — 파괴적 구간 밖이라
+        #: 롤백할 것도 없다. 스캐너가 없어 또 못 돌면 기록만 남기고 진행한다
+        #: (승인 화면에 이미 '미검증' 사유가 표시된 상태로 사용자가 승인했다).
+        pending_image = _plans_pending_image_scan.pop(request.plan_id, None)
+        if pending_image and plan.image and _local_image_exists(plan.image):
+            deferred_report = await _execute_scan("trivy", "", plan.image)
+            if deferred_report.get("status") == "ok":
+                deferred_crit = int(deferred_report.get("critical_count", 0))
+                if deferred_crit > 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Trivy: CRITICAL {deferred_crit}건 — 배포를 차단했습니다 "
+                            f"({plan.image}). 취약점을 해결한 뒤 다시 시도하세요."
+                        ),
+                    )
+
         rollback_source = _rollback_source_for(plan.container_name or "", plan.image or "")
         # 복구 재료. 기록에 후보가 있으면 그것을, 없으면 아래에서 docker 를
         # 직접 들여다본 결과를 쓴다.
