@@ -30,12 +30,27 @@ import logging
 import os
 import platform
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
 
 #: 자동 기동은 실기기에서만 재현되는 문제가 많다 — 단계마다 남긴다(코어 stderr).
-_log = logging.getLogger("recoder.docker_autostart")
+#: logging 설정이 이 모듈을 걸러낼 수 있어 stderr 에도 직접 쓴다(확장 디버그 콘솔에 보임).
+_logger = logging.getLogger("recoder.docker_autostart")
+
+
+class _Note:
+    def warning(self, msg: str, *args) -> None:
+        text = msg % args if args else msg
+        _logger.warning(text)
+        try:
+            print(f"{time.strftime('%H:%M:%S')} {text}", file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_log = _Note()
 
 #: 자동 시작 스위치. "0" 일 때만 꺼진다 — 기본은 켜짐.
 ENV_AUTOSTART = "RECODER_DOCKER_AUTOSTART"
