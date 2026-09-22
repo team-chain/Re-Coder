@@ -6,12 +6,14 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
+import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
 
 interface SecretWarning { rule: string; line: number; masked: string; }
 interface CodeOp {
   action: "create" | "edit";
   file: string; language: string; content: string; rationale: string;
   secret_warnings?: SecretWarning[];
+  removal_check?: RemovalCheck;
 }
 interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
@@ -377,6 +379,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           )}
           {turn.status === "done" && turn.result && (
             <div>
+              <CodeRemovalSummary checks={turn.result.ops.map((op) => op.removal_check)} />
               {turn.result.ops.length > 1 && (() => {
                 const keys = turn.result!.ops.map((op) => `${turn.id}:${op.file}`);
                 const anyPending = keys.some((k) => applyState[k] === "pending");
@@ -405,13 +408,14 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                         </span>
                       </span>
                       <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
-                        {op.action === "edit" && <button onClick={() => showDiff(turn, op)} style={ghostBtn}>변경 보기</button>}
+                        <button onClick={() => showDiff(turn, op)} style={ghostBtn}>변경 보기</button>
                         <button onClick={() => applyOp(turn, op)} disabled={applyState[key] === "pending" || applyState[key] === "applied"}
                           style={{ ...primaryBtn, padding: "3px 11px", fontSize: 11, ...(applyState[key] === "applied" ? { background: "transparent", color: "#6cc070", cursor: "default" } : applyState[key] === "pending" ? { opacity: 0.6, cursor: "default" } : {}) }}>
                           {applyState[key] === "applied" ? "적용됨" : applyState[key] === "pending" ? "적용 중…" : applyState[key] === "failed" ? "다시 적용" : "적용"}
                         </button>
                       </span>
                     </div>
+                    <CodeRemovalWarning check={op.removal_check} />
                     {applyState[key] === "failed" && applyErrors[key] && (
                       <div style={{ background: "var(--vscode-inputValidation-errorBackground, rgba(239,68,68,0.1))", borderTop: "1px solid var(--vscode-inputValidation-errorBorder, #ef4444)", padding: "5px 8px", fontSize: 10.5, color: "var(--vscode-errorForeground, #f48771)" }}>
                         {applyErrors[key]}

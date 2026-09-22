@@ -1653,6 +1653,13 @@ def generate_code(
         for op in ops_out:
             op.setdefault("secret_warnings", [])
 
+    # 생성 모델의 자기 보고 대신, 실제 저장 파일과 전체 교체 내용을 비교한다.
+    try:
+        from code_removals import annotate_removals
+    except ImportError:
+        from core.code_removals import annotate_removals
+    annotate_removals(ops_out, root, target_folder)
+
     result = {
         "summary": data.get("summary", "코드를 생성했습니다.").strip(),
         "ops": ops_out,
