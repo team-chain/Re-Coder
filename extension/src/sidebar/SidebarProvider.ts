@@ -675,8 +675,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'approveDockerfile': {
-                const { proposalId, approved } = payload as { proposalId: string; approved: boolean };
-                const dfResult = await this._apiClient.approveDockerfile(proposalId, approved);
+                const { proposalId, approved, overwrite } = payload as { proposalId: string; approved: boolean; overwrite?: boolean };
+                const dfResult = await this._apiClient.approveDockerfile(proposalId, approved, overwrite === true);
                 this.postMessage('stateUpdate', { ...this._state });
                 if (dfResult.status === 'error') {
                     this.postMessage('errorMessage', { message: '인프라 파일 승인 실패' });

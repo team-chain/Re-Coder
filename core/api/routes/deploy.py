@@ -2228,13 +2228,11 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
     return normalised
 
 
-def _write_proposal_to_workspace(proposal, workspace_override, proposal_id):
-    """Proposal 파일을 워크스페이스 루트 기준으로 디스크에 쓴다.
+#: 덮어쓰기 직전 기존 파일을 남겨 두는 이름. `Dockerfile` → `Dockerfile.recoder-prev`.
+_OVERWRITE_BACKUP_SUFFIX = ".recoder-prev"
 
-    상대 target_path 면 (override -> proposal.workspace_path -> cwd) 순으로 루트 결정.
-    과거 버그: 루트를 항상 Path.cwd()(=Core 실행 디렉토리 core/)로 잡아
-    .github/workflows/deploy.yml 이 사용자 프로젝트가 아니라 core/ 에 써졌다.
-    """
+
+def _resolve_proposal_target(proposal, workspace_override) -> Path:
     target = Path(proposal.target_path)
     if not target.is_absolute():
         root = (
@@ -2243,14 +2241,77 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id):
             or str(Path.cwd())
         )
         target = Path(root).expanduser().resolve() / target
+    return target
+
+
+def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
+    """대상 파일이 이미 있고 **내용이 다르면** 그 사실을 돌려준다. 없거나 같으면 None.
+
+    실기기 검증 D4 에서, 사용자가 손으로 고친 Dockerfile 을 "Dockerfile 생성 → 저장"
+    한 번으로 조용히 되돌려 버렸다. 생성 결과가 예전과 같아 화면상 아무 변화가 없어
+    사용자는 자기 수정이 사라진 줄도 몰랐다. 같은 파일이 있으면 묻지 않고 덮어쓰는
+    것은 "보이기만 하는" 승인이다 — 무엇이 바뀌는지 diff 로 보여주고 다시 묻는다.
+    """
+    if not target.is_file():
+        return None
+    try:
+        existing = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        existing = None
+    if existing is None or existing == proposal.content:
+        return None
+    import difflib
+
+    diff = "".join(
+        difflib.unified_diff(
+            existing.splitlines(keepends=True),
+            proposal.content.splitlines(keepends=True),
+            fromfile=f"{target.name} (현재 파일)",
+            tofile=f"{target.name} (새 초안)",
+            n=2,
+        )
+    )
+    return {"existing_content": existing, "diff": diff[:20000]}
+
+
+def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, overwrite: bool = False):
+    """Proposal 파일을 워크스페이스 루트 기준으로 디스크에 쓴다.
+
+    상대 target_path 면 (override -> proposal.workspace_path -> cwd) 순으로 루트 결정.
+    과거 버그: 루트를 항상 Path.cwd()(=Core 실행 디렉토리 core/)로 잡아
+    .github/workflows/deploy.yml 이 사용자 프로젝트가 아니라 core/ 에 써졌다.
+
+    대상이 이미 있고 내용이 다르면 `overwrite=True` 없이는 쓰지 않고
+    `status: "exists"` 와 diff 를 돌려준다(제안은 그대로 남아 다시 승인할 수 있다).
+    덮어쓸 때는 기존 파일을 `<이름>.recoder-prev` 로 남긴다.
+    """
+    target = _resolve_proposal_target(proposal, workspace_override)
+    file_type = getattr(proposal.file_type, "value", proposal.file_type)
+
+    conflict = _existing_file_conflict(proposal, target)
+    backup_path: Optional[str] = None
+    if conflict is not None:
+        if not overwrite:
+            return {
+                "status": "exists",
+                "proposal_id": proposal_id,
+                "path": str(target),
+                "file_type": file_type,
+                **conflict,
+            }
+        backup = target.with_name(target.name + _OVERWRITE_BACKUP_SUFFIX)
+        backup.write_text(conflict["existing_content"], encoding="utf-8")
+        backup_path = str(backup)
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(proposal.content, encoding="utf-8")
-    file_type = getattr(proposal.file_type, "value", proposal.file_type)
     return {
         "status": "saved",
         "proposal_id": proposal_id,
         "path": str(target),
         "file_type": file_type,
+        "overwritten": conflict is not None,
+        "backup_path": backup_path,
     }
 
 
@@ -2758,10 +2819,16 @@ async def generate_compose_route(request: ComposeRequest) -> InfraFileProposal:
 
 
 @router.post("/api/deploy/dockerfile/approve")
-async def approve_dockerfile(proposal_id: str, approved: bool, workspace_path: str = "") -> dict:
+async def approve_dockerfile(
+    proposal_id: str, approved: bool, workspace_path: str = "", overwrite: bool = False,
+) -> dict:
     """Approve or reject a Dockerfile / infra file proposal.
 
     워크스페이스 루트 기준으로 쓴다 (cwd 폴백 버그 동일 수정).
+
+    같은 경로에 **내용이 다른 파일**이 이미 있으면 `overwrite=true` 없이는 쓰지
+    않고 `status: "exists"` + diff 를 돌려준다. 제안은 메모리에 남겨 두므로
+    사용자가 diff 를 보고 다시 승인(overwrite=true)하거나 거절할 수 있다.
     """
     proposal = _infra_proposals.get(proposal_id)
     if proposal is None:
@@ -2776,8 +2843,9 @@ async def approve_dockerfile(proposal_id: str, approved: bool, workspace_path: s
             "file_type": file_type,
         }
 
-    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id)
-    del _infra_proposals[proposal_id]
+    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id, overwrite=overwrite)
+    if result.get("status") == "saved":
+        del _infra_proposals[proposal_id]
     return result
 
 
@@ -2856,7 +2924,9 @@ async def generate_github_actions_route(request: GithubActionsRequest) -> InfraF
 
 
 @router.post("/api/deploy/github-actions/approve")
-async def approve_github_actions(proposal_id: str, approved: bool, workspace_path: str = "") -> dict:
+async def approve_github_actions(
+    proposal_id: str, approved: bool, workspace_path: str = "", overwrite: bool = False,
+) -> dict:
     """
     Approve or reject a GitHub Actions workflow proposal.
 
@@ -2872,8 +2942,9 @@ async def approve_github_actions(proposal_id: str, approved: bool, workspace_pat
         del _infra_proposals[proposal_id]
         return {"status": "rejected", "proposal_id": proposal_id}
 
-    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id)
-    del _infra_proposals[proposal_id]
+    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id, overwrite=overwrite)
+    if result.get("status") == "saved":
+        del _infra_proposals[proposal_id]
     return result
 
 
