@@ -50,12 +50,18 @@ async function isolatedCore(t) {
   manager._gatewayEnv = async () => ({});
   manager._awsEnv = async () => ({});
   t.after(async () => {
+    const child = manager.coreProcess;
+    const closed = child ? new Promise(resolve => child.once('close', resolve)) : Promise.resolve();
     await manager.shutdown(true);
+    await closed;
     if (original.exitCode === null && original.signalCode === null) { original.kill('SIGKILL'); }
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  await waitFor(() => fs.existsSync(runtimeFile));
-  const before = JSON.parse(fs.readFileSync(runtimeFile, 'utf8'));
+  let before;
+  await waitFor(() => {
+    try { before = JSON.parse(fs.readFileSync(runtimeFile, 'utf8')); return Boolean(before.pid); }
+    catch { return false; }
+  });
   manager._findCoreSpec = () => ({ command: process.execPath, args: [fixture, runtimeFile, String(before.port)] });
   await manager.ensureRunning();
   return { manager, before, dir, records };
@@ -91,6 +97,50 @@ test('owned Core also restarts, while concurrent restart and ensure calls wait f
   assert.equal(first, second);
   assert.equal(first, ensured);
   assert.equal(fs.readFileSync(path.join(dir, 'starts.log'), 'utf8').trim().split('\n').length, 3);
+});
+
+test('Core stdout, stderr and graceful or forced exits persist across restarts', async t => {
+  const { manager, dir } = await isolatedCore(t);
+  await manager.restart();
+  const first = await manager.readRuntime();
+  const file = path.join(dir, 'core.log');
+  let saved = fs.readFileSync(file, 'utf8');
+  assert.match(saved, /\[stdout\] fixture stdout: starting/);
+  assert.match(saved, /\[stderr\] fixture stderr: test diagnostic/);
+  assert.match(saved, /\[lifecycle\] ready port=/);
+
+  await manager.restart();
+  const second = await manager.readRuntime();
+  saved = fs.readFileSync(file, 'utf8');
+  assert.match(saved, new RegExp(`pid=${first.pid}.*restart requested`));
+  assert.match(saved, new RegExp(`pid=${first.pid}.*exited code=0 signal=null`));
+  assert.match(saved, /\[stdout\] fixture partial line/);
+  assert.match(saved, new RegExp(`pid=${second.pid}.*spawned`));
+  const child = manager.coreProcess;
+  const closed = new Promise(resolve => child.once('close', resolve));
+  child.kill('SIGKILL');
+  await closed;
+  saved = fs.readFileSync(file, 'utf8');
+  assert.match(saved, new RegExp(`pid=${second.pid}.*exited code=null signal=SIGKILL`));
+  assert.equal(saved.match(/fixture partial line/g).length, 2);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'records.json'), 'utf8')), [
+    { deployment_id: 'saved-deploy', status: 'rolled_back', rollback_proposal_status: 'completed' },
+  ]);
+});
+
+test('failed process creation records the spawn error and startup failure', async t => {
+  const { manager, dir } = await isolatedCore(t);
+  manager._findCoreSpec = () => ({ command: path.join(dir, 'missing-core-executable'), args: [] });
+  manager.waitForReady = async () => {
+    await waitFor(() => manager.coreProcess === null);
+    throw new Error('test startup failed');
+  };
+  await assert.rejects(manager.spawnCore(), /test startup failed/);
+  const saved = fs.readFileSync(path.join(dir, 'core.log'), 'utf8');
+  assert.match(saved, /spawn requested/);
+  assert.match(saved, /spawn error: .*ENOENT/);
+  assert.match(saved, /startup failed:.*test startup failed/);
+  assert.doesNotMatch(saved, /\[lifecycle\] spawned/);
 });
 
 function simulatedManager(t, { reply = { status: 'shutting_down' }, status = 200, alive = true } = {}) {
