@@ -21,7 +21,7 @@ import {
     S3DeployResult,
 } from '../types';
 import { CoreManager } from './CoreManager';
-import { describeHttpError } from './httpError';
+import { describeHttpError, parseHttpErrorDetail, CoreHttpError } from './httpError';
 
 /** 인프라 파일(Dockerfile 등) 승인 결과. `exists` 는 "안 썼다 — 기존 파일과 다르다" 이다. */
 export interface InfraApprovalResult {
@@ -226,18 +226,27 @@ export class ApiClient {
             const timestamp = new Date().toISOString();
 
             if (!res.ok) {
-                // 401/403 (Invalid session token) 발생 시 한 번은 무조건 토큰 재로드 후 재시도.
+                let errorText = '';
+                try { errorText = await res.text(); } catch { errorText = `HTTP ${res.status}`; }
+                // 401/403 (Invalid session token) 발생 시 한 번은 토큰 재로드 후 재시도.
                 // refreshToken 의 boolean 반환과 무관하게 retry (refresh 가 같은 토큰을
-                // 다시 읽어와도 미들웨어가 다른 이유로 401/403 을 냈을 가능성 차단).
-                if ((res.status === 401 || res.status === 403) && !_retried) {
+                // 다시 읽어와도 미들웨어가 다른 이유로 401 을 냈을 가능성 차단).
+                //
+                // 단, 403 은 **정책 게이트 거절**도 같은 코드를 쓴다
+                // (`/api/deploy/ecs` → `{"detail":{"error":"policy_denied",…}}`).
+                // 그걸 토큰 문제로 보고 재시도하면 같은 배포 요청이 두 번 나가
+                // 실패 기록이 둘씩 쌓인다. 구조화된 detail 이 있으면 재시도하지 않는다.
+                const detail = parseHttpErrorDetail(errorText);
+                const looksLikeAuth = res.status === 401 || (res.status === 403 && !detail);
+                if (looksLikeAuth && !_retried) {
                     try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
                     return this.request<T>(method, path, body, true, timeoutMs, extraHeaders);
                 }
-                let errorText = '';
-                try { errorText = await res.text(); } catch { errorText = `HTTP ${res.status}`; }
                 return {
                     success: false,
                     error: describeHttpError(res.status, errorText),
+                    status: res.status,
+                    detail,
                     timestamp,
                 };
             }
@@ -1214,7 +1223,9 @@ export class ApiClient {
     }): Promise<{ status: string; message: string }> {
         const resp = await this.request<{ status: string; message: string }>('POST', '/api/deploy/ecs', req);
         if (!resp.success || !resp.data) {
-            throw new Error(resp.error ?? 'ECS 배포 요청 실패');
+            // 정책 게이트 거절(403 policy_denied 등)은 detail 을 실어 던진다 —
+            // 호스트가 배너 대신 "차단 + 사유" 카드로 보여 줄 수 있게.
+            throw new CoreHttpError(resp.error ?? 'ECS 배포 요청 실패', resp.status, resp.detail ?? null);
         }
         return resp.data;
     }
