@@ -58,6 +58,7 @@ from api.routes import (  # noqa: E402
     analyze,
     deploy,
     deploy_ecs,
+    deploy_history,
     deploy_s3,
     ops,
     session,
@@ -73,6 +74,19 @@ from api.routes import (  # noqa: E402
 
 _bound_port: int = 0
 VERSION = "1.0.0"
+
+
+def _persist_session_token(path: Path, token: str) -> None:
+    """Save without exposing the token through permissive default file modes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        if os.name == "posix":
+            os.fchmod(stream.fileno(), 0o600)
+        stream.truncate(0)
+        stream.write(token)
+    CoreSingleton.set_file_permissions(path)
 
 
 @asynccontextmanager
@@ -126,8 +140,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.session_token = token
     try:
-        _tok_file.parent.mkdir(parents=True, exist_ok=True)
-        _tok_file.write_text(token, encoding="utf-8")
+        _persist_session_token(_tok_file, token)
     except Exception:
         pass
 
@@ -211,20 +224,9 @@ def create_app() -> FastAPI:
             },
         )
 
-    app.add_middleware(
-        CORSMiddleware,
-        # Strict whitelist — vscode webview + localhost(임의 포트) 만.
-        # 정규식 패턴으로 임의 포트를 허용. allow_credentials=False 로 쿠키 차단.
-        allow_origin_regex=r"^(vscode-webview://[^/]+|http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?)$",
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     # ── CSRF 보호 — Origin / Sec-Fetch-Site 검증 ─────────────────────
-    # localhost 면제와 결합 시 브라우저 CSRF 가능성을 차단한다.
-    # Extension(Node fetch) 은 Origin 헤더 없음 → 허용 (localhost 전제).
-    # 브라우저 mutation 요청은 Origin 헤더 강제 → 화이트리스트만 허용.
+    # 토큰 인증과 별도로 브라우저의 다른 사이트에서 보낸 변경 요청을 차단한다.
+    # Extension(Node fetch) 은 Origin 헤더가 없어도 세션 토큰으로 인증한다.
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
     import re as _re
@@ -258,6 +260,14 @@ def create_app() -> FastAPI:
 
     app.add_middleware(_CSRFOriginMiddleware)
     app.add_middleware(SessionTokenMiddleware)
+    # Last added runs first: preflight has no token, but must never reach a route.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^(vscode-webview://[^/]+|http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?)$",
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.include_router(health.router)
     app.include_router(analyze.router)
@@ -268,6 +278,7 @@ def create_app() -> FastAPI:
     app.include_router(ecs.router)
     # 확장이 부르는 /api/deploy/ecs* 호환 계층 (FR-05-04)
     app.include_router(deploy_ecs.router)
+    app.include_router(deploy_history.router)
     # FR-05-03 사용자 계정 S3 정적 배포(BYO)
     app.include_router(deploy_s3.router)
     app.include_router(gitops.router)

@@ -8,9 +8,10 @@
  *   - docker build/run: Level 2 (명령 미리보기 + 승인)
  */
 
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal from "./ApprovalModal";
+import { LocalRollbackResult, LocalRollbackStatus, rollbackWatchId } from "./LocalRollbackStatus";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -177,6 +178,11 @@ export function canRunSecurityScan(step: Step): boolean {
   return !SECURITY_SCAN_BLOCKING_STEPS.has(step);
 }
 
+export function isMatchingScanResult(requestId: string | null, payload: unknown): boolean {
+  const result = payload as { requestId?: string; scan_type?: string } | null;
+  return !!requestId && result?.requestId === requestId && result.scan_type === "trivy";
+}
+
 // ---------------------------------------------------------------------------
 // ShipMode
 // ---------------------------------------------------------------------------
@@ -198,7 +204,10 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   //: 예전엔 코어가 감시하고 롤백 후보를 관리해도 사이드바 어디에도 표시·승인 UI 가 없었다.
   const [watch, setWatch] = useState<VerificationSnapshot | null | "none">(null);
   const [rollbackDecision, setRollbackDecision] = useState<"idle" | "proposed" | "dismissed" | "running" | "done">("idle");
-  const [rollbackResult, setRollbackResult] = useState<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string } | null>(null);
+  const [rollbackResult, setRollbackResult] = useState<LocalRollbackResult | null>(null);
+  const activeDeploymentRef = useRef<string | undefined>();
+  const watchIdRef = useRef<string | undefined>();
+  const pendingRollbackRef = useRef<string | undefined>();
   const [error, setError] = useState<string | null>(null);
   //: 승인했는데 같은 경로에 **내용이 다른 파일**이 있어 코어가 쓰지 않은 상태.
   //: 예전엔 묻지 않고 덮어써서 손으로 고친 Dockerfile 이 조용히 사라졌다(실기기 D4).
@@ -207,6 +216,18 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const [showApproval, setShowApproval] = useState(false);
   const [approvalContext, setApprovalContext] = useState<"infra" | "deploy" | null>(null);
   const [activeFileTab, setActiveFileTab] = useState<InfraFileTab>("dockerfile");
+  const pendingScanRef = useRef<string | null>(null);
+
+  const startSecurityScan = useCallback(() => {
+    if (pendingScanRef.current) return;
+    const requestId = `scan-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingScanRef.current = requestId;
+    setScanResult(null);
+    setPlan(null);
+    setError(null);
+    setStep("scanning");
+    postMessage("runScan", { scanType: "trivy", workspacePath: "", requestId });
+  }, [postMessage]);
 
   // Message listener
   useMessage(
@@ -230,6 +251,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       }
 
       if (type === "scanResult") {
+        if (!isMatchingScanResult(pendingScanRef.current, payload)) return;
+        pendingScanRef.current = null;
         setScanResult(payload as ScanResult);
         setStep("scanDone");
       }
@@ -257,8 +280,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             setSavedNote(`기존 파일을 덮어썼습니다${result.backup_path ? ` — 이전 내용은 ${result.backup_path} 에 남겨 두었어요` : ""}.`);
           }
           if (shouldRunDockerPipeline(result.file_type ?? "")) {
-            setStep("scanning");
-            postMessage("runScan", { scanType: "trivy", workspacePath: "" });
+            startSecurityScan();
           } else {
             setStep("saved");
           }
@@ -267,12 +289,17 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
 
       if (type === "deploy.verificationStatus") {
         const p = payload as { deploymentId?: string; snapshot?: VerificationSnapshot | null };
+        if (!watchIdRef.current || p?.deploymentId !== watchIdRef.current) return;
         setWatch(p?.snapshot ?? "none");
         return;
       }
 
       if (type === "deploy.rollbackResult") {
-        const r = payload as { status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string };
+        const r = payload as LocalRollbackResult;
+        if (!pendingRollbackRef.current || r.deploymentId !== pendingRollbackRef.current || r.deploymentId !== activeDeploymentRef.current) return;
+        pendingRollbackRef.current = undefined;
+        watchIdRef.current = rollbackWatchId(activeDeploymentRef.current, r);
+        setWatch(null);
         setRollbackResult(r);
         setRollbackDecision("done");
         return;
@@ -285,6 +312,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           health_ok?: boolean; health_check_url?: string; rollback_target?: string | null;
           continuous_verification?: { enabled?: boolean; started?: boolean };
         };
+        activeDeploymentRef.current = r.deployment_id;
+        watchIdRef.current = r.deployment_id;
+        pendingRollbackRef.current = undefined;
         setDeployResult(r);
         setWatch(null); setRollbackDecision("idle"); setRollbackResult(null);
         setStep(r.status === "success" ? "done" : "error");
@@ -307,10 +337,11 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       }
 
       if (type === "errorMessage") {
+        pendingScanRef.current = null;
         setError((payload as { message: string }).message);
         setStep("error");
       }
-    }, [postMessage])
+    }, [postMessage, startSecurityScan])
   );
 
   // ── Handlers ─────────────────────────────────────────────────────────────
@@ -349,12 +380,11 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     setExistingConflict(null);
     setProposal(null);
     if (shouldRunDockerPipeline(proposal.file_type ?? "")) {
-      setStep("scanning");
-      postMessage("runScan", { scanType: "trivy", workspacePath: "" });
+      startSecurityScan();
     } else {
       setStep("saved");
     }
-  }, [proposal, postMessage]);
+  }, [proposal, postMessage, startSecurityScan]);
 
   const handleRejectDockerfile = useCallback(() => {
     if (!proposal) { return; }
@@ -402,15 +432,18 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     });
   }, [postMessage]);
 
-  //: 배포가 끝나면 감시 스냅샷을 10초마다 묻는다 — 감시가 끝나거나(stable/unstable) 롤백이 끝나면 멈춘다.
+  // 롤백 뒤에는 복구된 이전 배포의 감시를 조회한다. 이전 실패 스냅샷은 버린다.
   const deploymentId = deployResult?.deployment_id;
+  const watchedDeploymentId = rollbackWatchId(deploymentId, rollbackResult);
+  watchIdRef.current = watchedDeploymentId;
   const watchDone = watch !== null && watch !== "none" && watch.status !== "running";
   useEffect(() => {
-    if (step !== "done" || !deploymentId || rollbackDecision === "done" || watchDone) { return; }
+    if (step !== "done" || !watchedDeploymentId || rollbackDecision === "running" || watchDone) { return; }
+    const deploymentId = watchedDeploymentId;
     postMessage("deploy.verification.status", { deploymentId });
     const timer = setInterval(() => postMessage("deploy.verification.status", { deploymentId }), 10000);
     return () => clearInterval(timer);
-  }, [step, deploymentId, rollbackDecision, watchDone, postMessage]);
+  }, [step, watchedDeploymentId, rollbackDecision, watchDone, postMessage]);
 
   //: 이상이 감지되면 롤백을 **제안**만 한다 — 자동 실행 금지(D2). 롤백 대상이 없으면 제안도 없다.
   const anomalies = watch && watch !== "none" ? (watch.anomalies ?? []) : [];
@@ -420,7 +453,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   }, [unhealthy, rollbackDecision]);
 
   const handleRollback = useCallback(() => {
-    if (!deploymentId) { return; }
+    if (!deploymentId || pendingRollbackRef.current) { return; }
+    pendingRollbackRef.current = deploymentId;
     setRollbackDecision("running");
     postMessage("rollback", { deploymentId });
   }, [deploymentId, postMessage]);
@@ -561,6 +595,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const activeFileLabel = infraFileLabelForTab(activeFileTab);
   const canSwitchFileTab = ["idle", "preview", "saved", "done", "error"].includes(step);
   const securityScanEnabled = canRunSecurityScan(step);
+  const primaryDisabled = (!canSwitchFileTab && step !== "scanDone" && step !== "planReady")
+    || (existingConflict !== null && step === "preview");
   const activeContent = matchesTab ? proposal!.content : null;
   const stackComment = matchesTab
     ? `# 스택: ${proposal!.base_template ?? "auto-detected"}`
@@ -712,6 +748,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       )}
 
       {/* ── Scan result ── */}
+      {step === "scanning" && <div role="status" style={{ marginBottom: 10, color: "var(--vscode-descriptionForeground)", fontSize: 11 }}>
+        Docker 상태 확인과 취약점 데이터 준비에 시간이 걸릴 수 있습니다. 검사 결과를 기다리고 있습니다.
+      </div>}
       {step === "scanDone" && scanResult && (
         <div style={{ marginBottom: 10 }}>
           {renderScanSummary(scanResult)}
@@ -728,7 +767,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       )}
 
       {/* ── Done banner ── */}
-      {step === "done" && (deployResult?.health_ok === false ? (
+      {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deployResult?.health_ok === false ? (
         //: docker run 은 됐지만 헬스 확인은 실패 — "통과" 로 칠하지 않는다.
         //: 실기기: /health 가 404 인 앱이 초록 "Health Check 통과" 로 보였다.
         <div style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "10px 12px", color: "#f59e0b", fontWeight: 600, marginBottom: 10 }}>
@@ -761,8 +800,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       {step === "done" && deploymentId && (
         <div style={{ background: "#252526", border: "1px solid #333", borderRadius: 5, padding: "8px 10px", marginBottom: 10, fontSize: 11, lineHeight: 1.6 }}>
           <div style={{ fontWeight: 600, marginBottom: 2 }}>
-            연속 검증 ·{" "}
-            {watch === null ? "확인 중…"
+            {rollbackResult?.status === "ok" ? "이전 버전 연속 검증" : "연속 검증"} ·{" "}
+            {!watchedDeploymentId ? "감시 없음" : watch === null ? "확인 중…"
               : watch === "none" ? "감시 없음 (코어 재시작 등으로 끊김)"
               : watch.status === "running" ? "감시 중"
               : watch.status === "stable" ? "안정 (감시 종료)"
@@ -851,6 +890,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         {/* 저장 Level 1 button */}
         <button
           onClick={() => {
+            if (primaryDisabled) return;
             if (step === "idle") {
               handleGenerateInfraFile();
             } else if (step === "preview" && proposal && matchesTab) {
@@ -876,7 +916,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           }}
           //: 기존 파일과 다른 상태에서는 위 카드의 두 선택지가 유일한 다음 단계다 —
           //: 이 버튼으로 다시 "저장" 을 누르면 같은 exists 응답만 반복된다.
-          disabled={existingConflict !== null && step === "preview"}
+          disabled={primaryDisabled}
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -888,8 +928,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             padding: "6px 12px",
             fontSize: 12,
             fontWeight: 600,
-            cursor: existingConflict !== null && step === "preview" ? "not-allowed" : "pointer",
-            opacity: existingConflict !== null && step === "preview" ? 0.5 : 1,
+            cursor: primaryDisabled ? "not-allowed" : "pointer",
+            opacity: primaryDisabled ? 0.5 : 1,
           }}
         >
           <span>✅</span>
@@ -915,7 +955,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             if (step === "preview" && proposal && matchesTab) {
               handleApproveInfraFile(); // saves then triggers scan
             } else {
-              postMessage("runScan", { scanType: "trivy", workspacePath: "" });
+              startSecurityScan();
             }
           }}
           disabled={!securityScanEnabled}
@@ -934,7 +974,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             opacity: securityScanEnabled ? 1 : 0.5,
           }}
         >
-          <span>🔒</span> 보안 스캔
+          <span>🔒</span> {step === "scanning" ? "보안 스캔 중…" : "보안 스캔"}
         </button>}
       </div>
 

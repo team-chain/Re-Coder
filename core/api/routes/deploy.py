@@ -18,11 +18,18 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+from local_deploy_store import (
+    load_records as _load_local_records,
+    save_records as _save_local_records,
+    timestamp as _record_timestamp,
+)
 
 from schemas import (
     ApprovalLevel,
@@ -41,12 +48,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["deploy"])
 
 # ---------------------------------------------------------------------------
-# In-process stores (per server lifetime)
+# Proposal/plan stores and durable deployment records
 # ---------------------------------------------------------------------------
 
 _infra_proposals: dict[str, InfraFileProposal] = {}
 _deployment_plans: dict[str, DeploymentPlan] = {}
-_deployment_records: dict[str, DeploymentRecord] = {}
+_deployment_records: dict[str, DeploymentRecord] = _load_local_records()
+
+
+def _save_records() -> None:
+    _save_local_records(_deployment_records)
+
 
 #: 플랜 시점에 이미지가 아직 빌드되지 않아 Trivy 를 못 돌린 플랜의 대기 목록
 #: (plan_id → image). 실행 시점(빌드 후)에 1회 스캔을 보장하는 데 쓴다.
@@ -237,6 +249,7 @@ async def _mark_rollback_candidate_unhealthy(deployment_id: str, _anomaly: dict)
     record = _deployment_records.get(deployment_id)
     if record is not None:
         record.rollback_eligible = False
+        _save_records()
 
 
 async def _update_rollback_candidate_after_verification(state: object) -> None:
@@ -252,6 +265,7 @@ async def _update_rollback_candidate_after_verification(state: object) -> None:
         record.rollback_eligible = True
     elif status in {"unstable", "error"}:
         record.rollback_eligible = False
+    _save_records()
 
 
 def _refresh_rollback_target(plan: DeploymentPlan) -> tuple[Optional[str], str]:
@@ -498,7 +512,7 @@ def _records_newest_first() -> list[DeploymentRecord]:
         record
         for _, record in sorted(
             enumerate(_deployment_records.values()),
-            key=lambda pair: (pair[1].deployed_at, pair[0]),
+            key=lambda pair: (_record_timestamp(pair[1].deployed_at), pair[0]),
             reverse=True,
         )
     ]
@@ -768,6 +782,7 @@ class ExecuteRequest(BaseModel):
 
 class RollbackRequest(BaseModel):
     deployment_id: str
+    require_current: bool = False
 
 
 class DeployPreflightRequest(BaseModel):
@@ -3452,6 +3467,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             status=DeployStatus.SUCCESS if success else DeployStatus.FAILED,
         )
         _deployment_records[record.deployment_id] = record
+        _save_records()
         del _deployment_plans[request.plan_id]
 
         # 이미지 ID 만 남기면 다음 배포가 태그를 옮기고 이 컨테이너를 지우는 순간
@@ -3465,6 +3481,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             pruned = await _prune_old_rollback_pins(plan.image, protect)
             if pruned:
                 logger.info("Pruned old rollback pins: %s", ", ".join(pruned))
+
+        _save_records()
 
         # 설계 §4.6 / §34 — 배포 성공 직후 Continuous Verification 자동 트리거.
         # 실패 시에도 verification 자체의 예외가 배포 응답을 흔들지 않도록 모두 catch.
@@ -3555,7 +3573,7 @@ async def execute_deployment_local(request: ExecuteRequest) -> dict:
 
 @router.get("/api/deploy/records")
 async def list_deployment_records() -> list[DeploymentRecord]:
-    """Return all deployment records for the current session."""
+    """Return persisted deployment records, including records restored at startup."""
     return list(_deployment_records.values())
 
 
@@ -3649,7 +3667,21 @@ async def rollback(request: RollbackRequest) -> dict:
     # 배포와 같은 컨테이너를 건드리므로 같은 락을 쓴다.
     container_lock = await _lock_for_container(record.container_name)
     await container_lock.acquire()
+    attempted = False
+    outcome_known = False
     try:
+        if request.require_current:
+            latest = next((r for r in _records_newest_first() if r.container_name == record.container_name), None)
+            if latest is not record or record.status == DeployStatus.ROLLED_BACK or record.rollback_status in {"running", "succeeded", "unknown"}:
+                raise HTTPException(status_code=409, detail="배포 상태가 바뀌었습니다. 이력을 새로고침하세요.")
+            current_image = await _running_image_id(record.container_name)
+            if not record.image_id or current_image != record.image_id:
+                raise HTTPException(status_code=409, detail="현재 컨테이너 이미지가 선택한 기록과 다릅니다. 컨테이너를 변경하지 않았습니다.")
+        attempted = True
+        record.rollback_status = "running"
+        record.rollback_error = None
+        record.rollback_completed_at = None
+        _save_records()
         loop = asyncio.get_running_loop()
         # 롤백 대상(실패한 새 릴리스)의 감시가 복구된 이전 컨테이너를 계속
         # 관찰하면, 실패 배포를 stable로 잘못 기록할 수 있다.
@@ -3696,12 +3728,28 @@ async def rollback(request: RollbackRequest) -> dict:
             if not healthy:
                 success = False
                 health_failed = True
+        outcome_known = True
+    except HTTPException:
+        raise
     except Exception as exc:
+        if attempted:
+            record.rollback_status = "failed"
+            record.rollback_error = "롤백 실행 중 오류가 발생했습니다. 컨테이너 상태와 로그를 확인하세요."
+            record.rollback_completed_at = datetime.now(timezone.utc)
+            _save_records()
         raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
     finally:
+        if attempted and record.rollback_status == "running":
+            if outcome_known:
+                record.status = DeployStatus.ROLLED_BACK if success else DeployStatus.FAILED
+                record.rollback_status = "succeeded" if success else "failed"
+                record.rollback_error = None if success else ("이전 이미지의 헬스 확인에 실패했습니다." if health_failed else "이전 컨테이너 실행에 실패했습니다.")
+                record.rollback_completed_at = datetime.now(timezone.utc)
+            else:
+                record.rollback_status = "unknown"
+                record.rollback_error = "롤백이 중단되어 결과를 확인하지 못했습니다. 컨테이너 상태를 확인하세요."
+            _save_records()
         container_lock.release()
-
-    record.status = DeployStatus.ROLLED_BACK if success else DeployStatus.FAILED
 
     # 되돌아온 릴리스의 감시를 다시 건다.
     #
@@ -3723,6 +3771,12 @@ async def rollback(request: RollbackRequest) -> dict:
         "rolled_back_to": record.rollback_target,
         # 되살아난 릴리스에 감시가 다시 걸렸는지. false 면 그 서비스는 감시 밖이다.
         "verification_resumed": verification_resumed,
+        "restored_deployment_id": restored_record.deployment_id if restored_record is not None else None,
+        "health_ok": bool(success) if rollback_ports else None,
+        "health_check_url": (
+            f"http://localhost:{next(iter(rollback_ports))}/{(record.rollback_health_check_path or '/health').lstrip('/')}"
+            if rollback_ports else None
+        ),
         "ports": dict(rollback_ports or {}),
         # 포트 기록이 없는 배포(이 필드가 생기기 전의 기록)는 롤백해도 밖에서
         # 접속할 수 없다. 조용히 성공으로 보이지 않게 알린다.

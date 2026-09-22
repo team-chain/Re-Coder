@@ -111,6 +111,8 @@ def _load_records() -> Dict[str, ECSDeployRecord]:
             record.error_message = (
                 "Core 가 재시작되어 이 배포의 결과를 알 수 없습니다."
             )
+            from core.agents.ecs_progress import finish_progress
+            finish_progress(record)
             record.error_remedy = (
                 f"AWS 콘솔이나 배포 중지로 '{record.cluster}/{record.service}' "
                 "상태를 확인하세요."
@@ -130,7 +132,7 @@ def _load_records() -> Dict[str, ECSDeployRecord]:
 
 # 배포 레코드 저장소. 메모리에 두되 디스크에 백업하고, 기동 때 되읽는다.
 _deploy_records: Dict[str, ECSDeployRecord] = _load_records()
-_ecs_agent = ECSAgent()
+_ecs_agent = ECSAgent(on_progress=_save_records)
 # 같은 ECS 서비스의 배포와 사람 승인 롤백은 서로 다른 요청이어도
 # `describe → update` 사이에 끼어들면 안 된다. 키 단위 잠금으로 다른
 # 서비스의 배포는 막지 않으면서 해당 서비스의 AWS 변경만 직렬화한다.

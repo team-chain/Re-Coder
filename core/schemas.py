@@ -369,6 +369,9 @@ class DeploymentRecord(BaseModel):
     #: 지속 검증에서 이상이 감지되면 다시 False 로 바뀐다.
     rollback_eligible: bool = False
     status: DeployStatus = DeployStatus.SUCCESS
+    rollback_status: Optional[Literal["running", "succeeded", "failed", "unknown"]] = None
+    rollback_completed_at: Optional[datetime] = None
+    rollback_error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1533,6 +1536,14 @@ class ECSDeployRequest(BaseModel):
     approval_level:          int = Field(default=3, ge=1, le=4)
 
 
+class ECSDeployStep(BaseModel):
+    key: str
+    label: str
+    status: Literal["pending", "running", "done", "failed", "cancelled", "skipped", "warning"] = "pending"
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
 class ECSDeployRecord(BaseModel):
     """
     Q3 ECS Rolling Update 결과. ecs_agent 가 단계별로 채워나간다.
@@ -1550,6 +1561,7 @@ class ECSDeployRecord(BaseModel):
     request:                        Optional[ECSDeployRequest] = None
 
     # 단계 결과
+    progress_steps:                 list[ECSDeployStep] = Field(default_factory=list)
     preflight_passed:               bool = False
     scan_result:                    Optional[SecurityScanResult] = None
     sbom:                           Optional[SBOMRecord] = None

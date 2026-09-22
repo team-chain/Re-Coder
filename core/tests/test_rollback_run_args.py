@@ -478,3 +478,27 @@ def test_롤백_대상이_없으면_422(captured):
     with pytest.raises(HTTPException) as exc:
         _rollback(rec)
     assert exc.value.status_code == 422
+
+
+def test_롤백_응답이_복구한_감시_ID와_헬스_결과를_전달한다(captured, monkeypatch):
+    from unittest.mock import AsyncMock
+    previous = _record(image="app:v1")
+    current = _record(rollback_source_deployment_id=previous.deployment_id,
+                      rollback_ports={"18080": "8000"}, rollback_health_check_path="ready")
+    monkeypatch.setattr(deploy_route, "_resume_verification_for", AsyncMock(return_value=True))
+    result = _rollback(current)
+    assert result["health_ok"] is True
+    assert result["restored_deployment_id"] == previous.deployment_id
+    assert result["verification_resumed"] is True
+    assert result["health_check_url"] == "http://localhost:18080/ready"
+
+
+def test_롤백_헬스_미확인과_실패를_통과로_보내지_않는다(captured, monkeypatch):
+    record = _record(ports={})
+    assert _rollback(record)["health_ok"] is None
+    record = _record()
+    _stub_health(monkeypatch, False)
+    result = _rollback(record)
+    assert result["health_ok"] is False
+    assert result["restored_deployment_id"] is None
+    assert result["verification_resumed"] is False

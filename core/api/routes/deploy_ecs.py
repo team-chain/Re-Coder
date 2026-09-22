@@ -14,8 +14,8 @@ FR-05-04. **이 파일은 404 하나를 고치려고 존재한다.**
 섞으면 어느 쪽이 진짜 계약인지 알 수 없게 된다. 여기 몰아넣고 이 파일만
 "확장 호환 계층"으로 읽히게 한다.
 
-**확장 코드는 고치지 않는다.** 이미 배포된 확장이 있을 수 있고, 서버가
-맞춰주는 편이 안전하다.
+이미 배포된 확장도 사용할 수 있도록 기존 요청 필드와 종료 토큰은
+유지한다. 세부 단계와 URL 등 새 정보는 추가 필드로 전달한다.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 # 그러면 **서로 다른 모듈 객체**가 되어 enum 클래스도 갈라진다
 # (isinstance 가 거짓이 된다). 협력 상대인 api/routes/ecs.py 가
 # `core.schemas` 를 쓰므로 여기서도 같은 쪽을 본다.
-from core.schemas import ECSDeployRecord, ECSDeployRequest, ECSDeployStatus
+from core.schemas import ECSDeployRecord, ECSDeployRequest, ECSDeployStatus, ECSDeployStep
 from core import aws_infra
 
 logger = logging.getLogger(__name__)
@@ -93,13 +93,16 @@ class EcsDeployStatusResponse(BaseModel):
     error: str = ""
     started_at: str = ""
     finished_at: str = ""
-    # 확장 타입에는 없지만 추가로 보낸다 — TS 는 여분 필드를 무시한다.
-    # 카드 DoD 1번의 "URL 로 접속됨"을 사이드바가 바로 쓸 수 있게 한다.
+    # 배포 결과 카드의 접속 링크.
     service_url: str = ""
     remedy: str = ""
     deployment_id: str = ""
     #: 사람이 읽을 단계 문구. `stage` 는 기계 토큰이므로 번역하지 않는다.
     stage_text: str = ""
+    steps: list[ECSDeployStep] = Field(default_factory=list)
+    error_detail: str = ""
+    warnings: list[str] = Field(default_factory=list)
+    observed_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     #: Health Check 실패 뒤 사용자 승인을 기다리는 ECS 롤백 제안.
     #: `None` 이면 승인할 롤백이 없다.
     rollback_proposal: Optional["EcsRollbackProposal"] = None
@@ -338,10 +341,18 @@ def to_status_response(record: Optional[ECSDeployRecord]) -> EcsDeployStatusResp
         log_tail.append(f"detail: {record.error_detail}")
     log_tail.extend(f"{k}: {v}" for k, v in warnings.items())
 
+    active_step = next((step for step in record.progress_steps if step.status == "running"), None)
+    stage_text = _STAGE_TEXT.get(record.status, str(record.status))
+    if record.status in _RUNNING_STATES and active_step:
+        stage_text = f"{active_step.label} 중"
+
     return EcsDeployStatusResponse(
         running=record.status in _RUNNING_STATES,
         stage=_STAGE_TOKEN.get(record.status, "failed"),
-        stage_text=_STAGE_TEXT.get(record.status, str(record.status)),
+        stage_text=stage_text,
+        steps=record.progress_steps,
+        error_detail=record.error_detail or "",
+        warnings=list(warnings.values()),
         log_tail=log_tail,
         image_uri=record.image_uri or record.image or "",
         task_def_arn=record.task_definition_arn or "",
@@ -430,14 +441,19 @@ async def deploy_ecs(
 
 
 @router.get("/api/deploy/ecs/status", response_model=EcsDeployStatusResponse)
-async def deploy_ecs_status() -> EcsDeployStatusResponse:
-    """가장 최근 배포의 진행 상황.
+async def deploy_ecs_status(deployment_id: str = "") -> EcsDeployStatusResponse:
+    """지정한 배포, 또는 ID가 없으면 가장 최근에 시작한 배포를 조회한다.
 
-    확장은 배포 id 없이 폴링한다. 그래서 "가장 최근에 시작된 것"을 본다.
-    시작 시각으로 정렬한다 — dict 삽입 순서에 기대면 기록 저장 방식이
-    바뀌는 순간 조용히 엉뚱한 배포를 보게 된다.
+    새 배포를 시작한 창은 그 ID를 유지해 다른 창의 배포와 섞이지 않는다.
+    ID 없는 기존 호출은 시작 시각으로 최신 기록을 찾는다.
     """
     from api.routes import ecs as ecs_routes
+
+    if deployment_id:
+        record = ecs_routes._deploy_records.get(deployment_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="배포 기록을 찾을 수 없습니다.")
+        return to_status_response(record)
 
     records = list(ecs_routes._deploy_records.values())
     if not records:

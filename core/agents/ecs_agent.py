@@ -21,11 +21,12 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from core.agents.preflight_agent import PreflightAgent
 from core.agents import ecs_build
 from core.agents.ecs_health import configure_health_check, python_http_health_check
+from core.agents.ecs_progress import initialize_progress, advance_progress, finish_progress
 from core.sbom import sbom_generator
 from core import aws_infra, aws_policy
 from core.aws_infra import InfraError
@@ -118,8 +119,20 @@ class ECSAgent:
     LLM을 사용하지 않는 결정론적 배포 에이전트.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_progress: Optional[Callable[[], None]] = None) -> None:
         self._preflight = PreflightAgent()
+        self._on_progress = on_progress
+
+    def _save_progress(self) -> None:
+        if self._on_progress:
+            try:
+                self._on_progress()
+            except Exception:
+                logger.warning("ECS 진행 기록 저장 실패", exc_info=True)
+
+    def _advance_progress(self, record: ECSDeployRecord, key: str) -> None:
+        advance_progress(record, key)
+        self._save_progress()
 
     # ------------------------------------------------------------------
     # AWS 클라이언트
@@ -163,6 +176,8 @@ class ECSAgent:
             if result is not None and result.status in _TERMINAL_STATUSES:
                 if result.completed_at is None:
                     result.completed_at = datetime.now(timezone.utc)
+                finish_progress(result)
+                self._save_progress()
 
     class _Cancelled(Exception):
         """사용자가 취소를 요청했다. 파이프라인 내부 전용 신호."""
@@ -223,6 +238,8 @@ class ECSAgent:
         try:
             # 0. 리전을 먼저 검증한다. 틀린 리전으로 가면 이후 모든 호출이
             #    엉뚱한 곳을 향하고, 오류 메시지도 원인을 가리키지 않는다.
+            initialize_progress(record, request)
+            self._advance_progress(record, "preflight")
             aws_policy.validate_region(request.region)
             clients = self._clients(request.region)
 
@@ -242,6 +259,7 @@ class ECSAgent:
             # 2. 인프라 확보 (없으면 생성, 있으면 재사용)
             record.status = ECSDeployStatus.IN_PROGRESS
             self._abort_if_cancelled(record, "preflight")
+            self._advance_progress(record, "provisioning")
             network = await self._step_provision(request, record, clients)
 
             self._abort_if_cancelled(record, "인프라 확보")
@@ -252,6 +270,7 @@ class ECSAgent:
             #      워크스페이스에 테스트용 AWS 키 하나만 있어도 몇 분에 걸쳐
             #      빌드하고 ECR 에 올린 다음에야 막혔다.
             if request.run_security_scan:
+                self._advance_progress(record, "source_scan")
                 record = await self._step_scan_sources(request, record)
                 blocked = self._scan_gate_message(record.scan_result)
                 if blocked:
@@ -260,7 +279,9 @@ class ECSAgent:
                     return record
 
             # 3. 이미지 빌드 + ECR 업로드
+            self._advance_progress(record, "building")
             image_uri = await self._step_build_and_push(request, record, clients)
+            self._advance_progress(record, "ecr_push")
 
             # 여기서 멈추면 ECR 에 이미지만 남는다 — 태스크는 안 떴으므로
             # 과금 0원이고, 리포지토리 수명 정책이 알아서 정리한다.
@@ -268,6 +289,7 @@ class ECSAgent:
 
             # 4. 이미지 취약점 검사 — 이건 이미지가 있어야만 할 수 있다.
             if request.run_security_scan:
+                self._advance_progress(record, "image_scan")
                 record = await self._step_security_scan(request, record, image_uri)
                 blocked = self._scan_gate_message(record.scan_result)
                 if blocked:
@@ -278,10 +300,12 @@ class ECSAgent:
 
             # 5. SBOM 생성
             if request.generate_sbom:
+                self._advance_progress(record, "sbom")
                 record = await self._step_sbom(request, record, image_uri)
 
             # Both extension and direct/Discord requests meet here. Resolve
             # before registration so a UI that omits the command still gets it.
+            self._advance_progress(record, "task_def")
             loop = asyncio.get_running_loop()
             health_gap = await loop.run_in_executor(None, configure_health_check, request)
             if health_gap:
@@ -306,6 +330,7 @@ class ECSAgent:
             self._abort_if_cancelled(record, "태스크 정의 등록")
 
             # 7. 서비스 확보 (없으면 생성, 있으면 새 태스크 정의로 갱신)
+            self._advance_progress(record, "svc_update")
             await self._step_ensure_service(request, record, clients,
                                             task_def_arn, network)
 
@@ -330,6 +355,7 @@ class ECSAgent:
                 return record
 
             # 9. 배포 상태 폴링 + Circuit Breaker
+            self._advance_progress(record, "stabilizing")
             success, failure_count, breaker_triggered = await self._step_poll_deployment(request, record)
 
             if not success:
@@ -402,6 +428,7 @@ class ECSAgent:
                 return record
 
             # 10. 공개 주소 확인 — 카드 DoD 1번 "URL 로 접속됨"
+            self._advance_progress(record, "url_check")
             await self._step_resolve_url(request, record, clients)
 
             # URL 확인은 최대 300초를 기다린다. 그 사이 취소를 눌렀다면
@@ -657,6 +684,7 @@ class ECSAgent:
                 repository_uri=repository_uri,
                 tag=tag,
                 dockerfile=req.dockerfile,
+                on_progress=lambda key: loop.call_soon_threadsafe(self._advance_progress, rec, key),
             )
 
         result = await loop.run_in_executor(None, _work)

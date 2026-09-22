@@ -742,7 +742,7 @@ def _bedrock_statements(ctx: ArnContext) -> list[dict]:
     리소스를 두 개 주는 이유: 교차 리전 추론 프로파일을 쓰면 프로파일 ARN 과
     그 뒤의 파운데이션 모델 ARN **둘 다** 인가가 필요하다.
 
-    `first_run.py` 의 사용 가능 모델 조회에 `ListFoundationModels` 가 필요하다.
+    진단도 설정된 모델을 직접 호출하므로 모델 목록 조회 권한은 필요하지 않다.
     """
     return [
         {
@@ -753,13 +753,6 @@ def _bedrock_statements(ctx: ArnContext) -> list[dict]:
                 f"arn:{ctx.partition}:bedrock:*::foundation-model/*",
                 _arn("bedrock", "inference-profile/*", ctx),
             ],
-        },
-        {
-            # 사용 가능한 모델 목록 조회 — 계정 단위라 리소스를 좁힐 수 없다.
-            "Sid": "ListModels",
-            "Effect": "Allow",
-            "Action": ["bedrock:ListFoundationModels"],
-            "Resource": "*",
         },
     ]
 

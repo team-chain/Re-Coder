@@ -55,7 +55,10 @@ test('웹뷰: exists 응답이면 diff 와 두 선택지를 보이고, 자동으
   //: 기존 파일을 쓰기로 했으면 초안은 거절돼야 서버에 고아로 남지 않는다.
   const keep = SHIP.slice(SHIP.indexOf('const handleKeepExistingFile'), SHIP.indexOf('const handleRejectDockerfile'));
   assert.match(keep, /approved: false/, '기존 파일 유지 시 초안을 거절하지 않는다');
-  assert.match(keep, /postMessage\("runScan"/, '기존 파일로 검사를 이어가지 않는다 — 흐름이 끊긴다');
+  assert.match(keep, /startSecurityScan\(\)/, '기존 파일로 검사를 이어가지 않는다 — 흐름이 끊긴다');
+  const scan = SHIP.slice(SHIP.indexOf('const startSecurityScan'), SHIP.indexOf('// Message listener'));
+  assert.match(scan, /setStep\("scanning"\)/, '검사를 시작할 때 진행 상태를 표시해야 한다');
+  assert.match(scan, /postMessage\("runScan"/, '공통 검사 경로가 요청을 보내야 한다');
 });
 
 test('웹뷰: 덮어썼으면 백업 위치를 알려준다', () => {

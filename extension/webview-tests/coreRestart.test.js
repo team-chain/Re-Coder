@@ -80,8 +80,14 @@ test('attached window shutdown preserves the shared Core; explicit restart repla
   assert.notEqual(after.pid, before.pid, 'reconnecting to the old PID is not a restart');
   assert.notEqual(after.started_at, before.started_at);
   assert.equal(after.port, before.port);
+  assert.notEqual(after.session_token, before.session_token);
   assert.equal(await client.healthCheck(), true);
-  assert.deepEqual(await (await fetch(`http://127.0.0.1:${after.port}/api/ecs/deployments`)).json(), records);
+  assert.equal((await client.getStatus()).status, 'ok');
+  const { ApiClient } = require('../out/core/ApiClient.js');
+  const response = await new ApiClient(manager).request('GET', '/api/ecs/deployments');
+  assert.equal(response.success, true);
+  assert.deepEqual(response.data, records);
+  assert.equal((await fetch(`http://127.0.0.1:${after.port}/api/ecs/deployments`)).status, 401);
 });
 
 test('owned Core also restarts, while concurrent restart and ensure calls wait for one new instance', async t => {

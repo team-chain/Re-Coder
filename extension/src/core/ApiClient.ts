@@ -170,8 +170,49 @@ export interface CodeDecisionChoice {
     impact: string;
 }
 
+export interface EcsDeployStatus {
+    warnings?: string[];
+    running: boolean;
+    stage: string;
+    stage_text?: string;
+    deployment_id?: string;
+    observed_at?: string;
+    steps?: Array<{
+        key: string; label: string;
+        status: 'pending' | 'running' | 'done' | 'failed' | 'cancelled' | 'skipped' | 'warning';
+        started_at?: string | null; finished_at?: string | null;
+    }>;
+    log_tail: string[];
+    image_uri: string;
+    task_def_arn: string;
+    service_url?: string;
+    error: string;
+    error_detail?: string;
+    remedy?: string;
+    started_at: string;
+    finished_at: string;
+    rollback_proposal?: {
+        proposal_id: string; deployment_id: string; cluster: string; service: string;
+        region: string; reason: string; previous_task_definition: string;
+        current_task_definition: string; approval_level: number;
+        status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed' | 'superseded';
+    } | null;
+}
+
 export class ApiClient {
     constructor(private coreManager: CoreManager) {}
+
+    async previewEcsExecutionRole(region: string): Promise<Record<string, unknown>> {
+        const resp = await this.request<Record<string, unknown>>('POST', '/api/aws/ecs-execution-role/preview', { region });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '실행 역할 확인 실패'); }
+        return resp.data;
+    }
+
+    async applyEcsExecutionRole(proposalId: string, approved: boolean): Promise<Record<string, unknown>> {
+        const resp = await this.request<Record<string, unknown>>('POST', '/api/aws/ecs-execution-role/apply', { proposal_id: proposalId, approved });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '실행 역할 생성 실패'); }
+        return resp.data;
+    }
 
     // S3는 최대 30개 × 3MB 파일을 순차 업로드한다. 기본 30초를 쓰면 화면은
     // 실패로 보이는데 코어는 공개 버킷 설정·업로드를 계속하는 상태가 된다.
@@ -419,23 +460,19 @@ export class ApiClient {
         return resp.data;
     }
 
-    /**
-     * §38 Deploy Replay — Core 의 /api/replay/timeline 호출.
-     * webview Replay.tsx 가 'loadReplay' 메시지로 deployId 를 보내면
-     * SidebarProvider 가 이 메서드를 거쳐 결과를 'replayTimeline' 으로 회신.
-     */
-    async loadReplayTimeline(
-        deployId: string,
-        opts: { service?: string; cluster?: string; region?: string; windowHours?: number } = {},
-    ): Promise<object | null> {
-        const resp = await this.request<object>('POST', '/api/replay/timeline', {
-            deploy_id: deployId,
-            service: opts.service ?? '',
-            cluster: opts.cluster ?? '',
-            region: opts.region ?? 'ap-northeast-2',
-            window_hours: opts.windowHours ?? 24,
-        });
-        return resp.success && resp.data ? resp.data : null;
+    async getDeploymentHistory(): Promise<object> {
+        const resp = await this.request<object>('GET', '/api/deploy/history');
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 이력을 불러오지 못했습니다.'); }
+        return resp.data;
+    }
+
+    async rollbackFromHistory(source: 'local' | 'ecs', deploymentId: string): Promise<{ status: string; message: string; warning?: string; adr?: { file: string; content: string } }> {
+        const resp = await this.request<{ status: string; message: string; warning?: string; adr?: { file: string; content: string } }>(
+            'POST', `/api/deploy/history/${source}/${encodeURIComponent(deploymentId)}/rollback`,
+            { approved: true }, false, 300000,
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '롤백 요청에 실패했습니다.'); }
+        return resp.data;
     }
 
     async approvePatch(proposalId: string, approved: boolean): Promise<{ status: string }> {
@@ -613,7 +650,7 @@ export class ApiClient {
         return resp.success && resp.data ? resp.data : [];
     }
 
-    async rollback(deploymentId: string): Promise<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string }> {
+    async rollback(deploymentId: string): Promise<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string; health_ok?: boolean | null; health_check_url?: string | null; verification_resumed?: boolean; container_untouched?: boolean; restored_deployment_id?: string | null }> {
         //: 롤백은 stop/rm/run + 헬스 확인(최대 15초)이라 기본 30초로는 모자라다.
         const resp = await this.request<{ status: string; rolled_back_to?: string; warning?: string | null; stderr?: string }>(
             'POST', '/api/deploy/rollback', { deployment_id: deploymentId }, false, 120000
@@ -1073,6 +1110,7 @@ export class ApiClient {
             profile?: string;
         },
         onEvent: (event: S3DeployStreamEvent) => void,
+        _retried = false,
     ): Promise<S3DeployResult> {
         let token = this.coreManager.getSessionToken();
         let port = this.coreManager.getPort();
@@ -1098,6 +1136,15 @@ export class ApiClient {
             },
             body: JSON.stringify(body),
         });
+
+        // Authentication rejection happens before a deployment starts. Reload
+        // runtime.json once, as for ordinary requests. Never replay an opened
+        // stream, a policy denial or a network failure: it may already have run.
+        if (res.status === 401 && !_retried) {
+            await res.body?.cancel();
+            try { await this.coreManager.refreshToken(); } catch { /* reported by retry */ }
+            return this.deployS3Stream(input, onEvent, true);
+        }
 
         if (!res.ok || !res.body) {
             let text = '';
@@ -1220,8 +1267,8 @@ export class ApiClient {
         branch?: string;
         skip_sbom?: boolean;
         skip_opa?: boolean;
-    }): Promise<{ status: string; message: string }> {
-        const resp = await this.request<{ status: string; message: string }>('POST', '/api/deploy/ecs', req);
+    }): Promise<{ status: string; message: string; deployment_id?: string }> {
+        const resp = await this.request<{ status: string; message: string; deployment_id?: string }>('POST', '/api/deploy/ecs', req);
         if (!resp.success || !resp.data) {
             // 정책 게이트 거절(403 policy_denied 등)은 detail 을 실어 던진다 —
             // 호스트가 배너 대신 "차단 + 사유" 카드로 보여 줄 수 있게.
@@ -1231,56 +1278,9 @@ export class ApiClient {
     }
 
     /** GET /api/deploy/ecs/status — ECS 배포 진행상황 폴링. */
-    async getEcsDeployStatus(): Promise<{
-        running: boolean;
-        stage: string;
-        log_tail: string[];
-        image_uri: string;
-        task_def_arn: string;
-        error: string;
-        //: 코어가 함께 주는 조치 안내와 사람이 읽을 단계명. 버리면 "Preflight 점검 실패" 처럼
-        //: 제목만 남고 무엇이 실패했는지가 사라진다(실기기 C4/C5).
-        remedy?: string;
-        stage_text?: string;
-        started_at: string;
-        finished_at: string;
-        rollback_proposal?: {
-            proposal_id: string;
-            deployment_id: string;
-            cluster: string;
-            service: string;
-            region: string;
-            reason: string;
-            previous_task_definition: string;
-            current_task_definition: string;
-            approval_level: number;
-            status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed' | 'superseded';
-        } | null;
-    }> {
-        const resp = await this.request<{
-            running: boolean;
-            stage: string;
-            log_tail: string[];
-            image_uri: string;
-            task_def_arn: string;
-            error: string;
-            remedy?: string;
-            stage_text?: string;
-            started_at: string;
-            finished_at: string;
-            rollback_proposal?: {
-                proposal_id: string;
-                deployment_id: string;
-                cluster: string;
-                service: string;
-                region: string;
-                reason: string;
-                previous_task_definition: string;
-                current_task_definition: string;
-                approval_level: number;
-                status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed' | 'superseded';
-            } | null;
-        }>('GET', '/api/deploy/ecs/status');
+    async getEcsDeployStatus(deploymentId?: string): Promise<EcsDeployStatus> {
+        const query = deploymentId ? `?deployment_id=${encodeURIComponent(deploymentId)}` : '';
+        const resp = await this.request<EcsDeployStatus>('GET', `/api/deploy/ecs/status${query}`);
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'ECS 상태 조회 실패');
         }

@@ -12,6 +12,14 @@ HTTP 엔드포인트를 정의합니다. 변경 시 본 문서와 `core/schemas.
 모든 엔드포인트는 `X-Session-Token: <token>` 헤더 필수.
 예외: `GET /api/health` (인증 면제).
 
+localhost(IPv4/IPv6)도 같은 인증 규칙을 적용합니다. AWS/GitHub 연결·설정,
+진단, 상태/비용 조회, Workbench 이벤트, 배포 스트림 및 API 문서도 토큰이
+필요합니다. `/api/health` 응답에는 토큰이 포함되지 않습니다.
+확장은 사용자 전용 `~/.recoder/runtime.json`에서 포트와 토큰을 읽고,
+401 응답 시 한 번 갱신하여 재시도합니다. 이미 열린 배포 스트림은 재실행하지
+않습니다. 허용된 Origin의 CORS 사전 요청(OPTIONS)은 실제 라우트를 실행하지
+않으며, 이후 GET/POST 등의 요청에는 여전히 토큰이 필요합니다.
+
 토큰은 `~/.recoder/runtime.json`에서 읽음. Extension/Discord Bot은 같은 PC의
 Local Core에 접근할 때만 이 토큰 사용.
 
