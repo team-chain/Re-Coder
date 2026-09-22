@@ -32,6 +32,7 @@ interface SpawnSpec {
 }
 
 const SHUTDOWN_GRACE_MS = 5000;
+const RESTART_SHUTDOWN_TIMEOUT_MS = 15000;
 const AWS_ACCESS_KEY_SECRET = 'recoder.aws.accessKeyId';
 const AWS_SECRET_KEY_SECRET = 'recoder.aws.secretAccessKey';
 const AWS_REGION_SECRET = 'recoder.aws.region';
@@ -61,6 +62,7 @@ export class CoreManager {
     private isSpawning: boolean = false;
     /** 동시에 열린 Sidebar/Workspace 가 같은 Core를 중복 시작하지 않도록 직렬화. */
     private ensurePromise: Promise<CoreClient> | null = null;
+    private restartPromise: Promise<CoreClient> | null = null;
     private extensionContext: vscode.ExtensionContext;
 
     // CoreClient 인스턴스 (외부에서 사용)
@@ -99,6 +101,8 @@ export class CoreManager {
     }
 
     async ensureRunning(): Promise<CoreClient> {
+        // 재시작 중에는 종료 대기 중인 Core를 다시 연결해 반환하지 않는다.
+        if (this.restartPromise) { return this.restartPromise; }
         if (this.ensurePromise) {
             return this.ensurePromise;
         }
@@ -391,10 +395,74 @@ export class CoreManager {
         await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, undefined);
     }
 
-    /** 보안 금고의 변경값을 현재 Core에도 반영한다. */
+    /** 명시적 재시작은 다른 창이 시작한 공유 Core에도 적용한다. */
     async restart(): Promise<CoreClient> {
-        await this.shutdown(true);
-        return this.ensureRunning();
+        if (this.restartPromise) { return this.restartPromise; }
+        this.restartPromise = this.restartCore(this.ensurePromise);
+        try {
+            return await this.restartPromise;
+        } finally {
+            this.restartPromise = null;
+        }
+    }
+
+    private async restartCore(pendingStart: Promise<CoreClient> | null): Promise<CoreClient> {
+        // 이미 시작 중이면 runtime.json이 준비된 뒤 그 인스턴스를 종료한다.
+        if (pendingStart) { await pendingStart.catch(() => undefined); }
+        const runtime = await this.readRuntime();
+        if (runtime) {
+            const pid = runtime.pid;
+            if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) {
+                throw new Error('Core 실행 정보의 PID가 올바르지 않아 재시작할 수 없습니다.');
+            }
+            if (this.isProcessRunning(pid)) {
+                this.port = runtime.port;
+                this.sessionToken = runtime.session_token;
+                // 공유 runtime의 PID에 신호를 보내지 않는다. 해당 Core가 자신의
+                // 종료와 파일 정리를 수행하게 하고, 실제 종료 전에는 재연결하지 않는다.
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 3000);
+                try {
+                    const response = await fetch(`http://127.0.0.1:${runtime.port}/api/shutdown`, {
+                        method: 'POST',
+                        headers: { 'X-Session-Token': runtime.session_token },
+                        signal: controller.signal,
+                    });
+                    if (!response.ok) {
+                        throw new Error(`Core 종료 요청 실패 (HTTP ${response.status})`);
+                    }
+                    const result = await response.json() as { status?: string };
+                    if (result.status !== 'shutting_down') {
+                        throw new Error('Core가 종료 요청을 확인하지 않았습니다.');
+                    }
+                } finally {
+                    clearTimeout(timer);
+                }
+                const deadline = Date.now() + RESTART_SHUTDOWN_TIMEOUT_MS;
+                while (this.isProcessRunning(pid)) {
+                    if (Date.now() >= deadline) {
+                        throw new Error('Core가 종료되지 않아 재시작을 완료하지 못했습니다. 잠시 후 다시 시도하세요.');
+                    }
+                    await this.sleep(100);
+                }
+                if (this.coreProcess?.pid === pid) { this.coreProcess = null; }
+            }
+        } else if (this.coreProcess || await this.healthCheck()) {
+            throw new Error('실행 중인 Core의 실행 정보를 찾을 수 없어 재시작할 수 없습니다.');
+        }
+        this._client = null;
+        // ensureRunning()은 restartPromise를 기다리므로 내부 시작 경로를 사용한다.
+        return this._ensureRunning();
+    }
+
+    private isProcessRunning(pid: number): boolean {
+        try {
+            process.kill(pid, 0);
+            return true;
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'ESRCH') { return false; }
+            throw err;
+        }
     }
 
     private async spawnCore(): Promise<void> {
@@ -428,6 +496,7 @@ export class CoreManager {
                 cwd: spec.cwd,
                 shell: false,
             });
+            const spawnedProcess = this.coreProcess;
 
             this.coreProcess.stdout?.on('data', (data: Buffer) => {
                 console.log('[ReCoder Core]', data.toString().trim());
@@ -437,12 +506,14 @@ export class CoreManager {
             });
             this.coreProcess.on('exit', (code, signal) => {
                 console.log(`[ReCoder Core] exited code=${code} signal=${signal}`);
-                this.coreProcess = null;
-                this._client = null;
+                if (this.coreProcess === spawnedProcess) {
+                    this.coreProcess = null;
+                    this._client = null;
+                }
             });
             this.coreProcess.on('error', (err) => {
                 console.error('[ReCoder Core] spawn error:', err);
-                this.coreProcess = null;
+                if (this.coreProcess === spawnedProcess) { this.coreProcess = null; }
             });
 
             await this.waitForReady(15000);
