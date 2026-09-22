@@ -194,8 +194,13 @@ class PreflightAgent:
                     name=name, passed=False, severity="error",
                     detail=f"IAM Role '{role_name}'이 없습니다",
                     fix_guide=(
-                        "AWS 콘솔 → IAM → Roles → Create Role → "
-                        "ECS Task Execution 정책을 붙여주세요 (Level 4 권한 필요)"
+                        f"IAM 콘솔에서 역할 '{role_name}' 을 만들고(신뢰 주체 "
+                        "ecs-tasks.amazonaws.com) AmazonECSTaskExecutionRolePolicy 를 붙이세요. "
+                        f"CLI: aws iam create-role --role-name {role_name} "
+                        "--assume-role-policy-document '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        "\"Principal\":{\"Service\":\"ecs-tasks.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}' "
+                        f"&& aws iam attach-role-policy --role-name {role_name} "
+                        "--policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
                     ),
                 )
             return self._boto3_error(name, e)

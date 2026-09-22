@@ -248,8 +248,10 @@ class ECSAgent:
                 if not record.preflight_passed:
                     record.status = ECSDeployStatus.FAILED
                     record.error_message = "Preflight 점검 실패 — 배포를 중단합니다"
-                    record.error_remedy = (
-                        "사이드바의 점검 결과에서 실패한 항목을 확인하세요."
+                    # "사이드바의 점검 결과" 라는 화면은 없다(실기기 C4). 항목별
+                    # 조치는 _step_preflight 가 error_detail/error_remedy 에 담았다.
+                    record.error_remedy = record.error_remedy or (
+                        "실패한 항목을 만들거나 고친 뒤 다시 배포하세요."
                     )
                     return record
 
@@ -489,9 +491,20 @@ class ECSAgent:
             will_provision=req.provision,
         )
         rec.preflight_passed = report.passed
-        failures = [c.name for c in report.checks if not c.passed and c.severity == "error"]
-        if failures:
-            rec.error_detail = "실패 항목: " + ", ".join(failures)
+        failed = [c for c in report.checks if not c.passed and c.severity == "error"]
+        failures = [c.name for c in failed]
+        if failed:
+            # 항목 이름만 남기면 사용자는 "무엇이 없는지·어떻게 만들지" 를 알 수
+            # 없다(실기기 C4: "IAM Role 'ecsTaskExecutionRole' 존재 확인" 한 줄).
+            # 각 점검이 이미 들고 있는 detail·fix_guide 를 그대로 싣는다.
+            lines = []
+            for c in failed:
+                line = c.detail or c.name
+                if getattr(c, "fix_guide", None):
+                    line += f" → {c.fix_guide}"
+                lines.append(line)
+            rec.error_detail = "실패 항목: " + " / ".join(lines)
+            rec.error_remedy = "위 항목을 만들거나 고친 뒤 다시 배포하세요."
         logger.info(
             "Preflight: passed=%s checks=%d 실패=%s",
             report.passed, len(report.checks), failures or "없음",
