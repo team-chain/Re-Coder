@@ -455,7 +455,13 @@ def test_음성대조_정상_요청은_전역_핸들러를_타지_않는다(clie
 
 
 def test_actions_초안이_승인시_워크스페이스에_저장된다(client, workspace):
-    """이미 deploy.yml 이 있어도 덮어쓰기가 성공해야 한다(카드의 가설 검증)."""
+    """**내용이 다른 파일이 이미 있으면 묻지 않고 덮어쓰지 않는다** (실기기 D4).
+
+    예전 계약은 "있어도 덮어쓰기 성공" 이었다. 그 계약 때문에 손으로 고친
+    Dockerfile 이 '저장 Level 1' 한 번에 조용히 되돌아갔다. 이제 첫 승인은
+    `exists` + diff 를 돌려주고 파일을 건드리지 않으며, 제안은 남아 있어
+    `overwrite=true` 로 다시 승인하면 백업을 남기고 덮어쓴다.
+    """
     gh = pathlib.Path(workspace, ".github", "workflows")
     gh.mkdir(parents=True)
     (gh / "deploy.yml").write_text("name: 기존 워크플로\n", encoding="utf-8")
@@ -464,16 +470,27 @@ def test_actions_초안이_승인시_워크스페이스에_저장된다(client, 
         client, "/api/deploy/github-actions", {"workspace_path": workspace},
     ).json()["proposal_id"]
 
-    resp = client.post(
+    first = client.post(
         f"/api/deploy/github-actions/approve?proposal_id={proposal_id}&approved=true",
         headers={"X-Session-Token": TOKEN},
     )
+    assert first.status_code == 200, first.text[:200]
+    assert first.json()["status"] == "exists", first.json()
+    assert "기존 워크플로" in first.json()["diff"], "무엇이 바뀌는지(diff) 가 없다"
+    assert (gh / "deploy.yml").read_text(encoding="utf-8") == "name: 기존 워크플로\n", "묻기 전에 덮어썼다"
 
-    assert resp.status_code == 200, resp.text[:200]
-    assert resp.json()["file_type"] == "github_actions"
+    second = client.post(
+        f"/api/deploy/github-actions/approve?proposal_id={proposal_id}&approved=true&overwrite=true",
+        headers={"X-Session-Token": TOKEN},
+    )
+    assert second.status_code == 200, second.text[:200]
+    body = second.json()
+    assert body["status"] == "saved" and body["file_type"] == "github_actions"
+    assert body["overwritten"] is True
     written = (gh / "deploy.yml").read_text(encoding="utf-8")
     assert "기존 워크플로" not in written, "덮어쓰기가 안 됐다"
     assert "name: CI" in written
+    assert (gh / "deploy.yml.recoder-prev").read_text(encoding="utf-8") == "name: 기존 워크플로\n", "백업이 없다"
 
 
 def test_생성한_초안은_proposal_id로_다시_찾을_수_있다(client, workspace):
