@@ -15,6 +15,7 @@ import { ChildProcess, spawn, execSync } from 'child_process';
 import { CoreHealth } from '../types';
 import { CoreClient } from '../api/coreClient';
 import { shouldReuseRunningCore } from './coreReuse';
+import { CoreProcessLog } from './CoreProcessLog';
 
 export interface RuntimeConfig {
     port: number;
@@ -418,6 +419,9 @@ export class CoreManager {
             if (this.isProcessRunning(pid)) {
                 this.port = runtime.port;
                 this.sessionToken = runtime.session_token;
+                const restartLog = this.createProcessLog();
+                restartLog.setPid(pid);
+                restartLog.event('restart requested');
                 // 공유 runtime의 PID에 신호를 보내지 않는다. 해당 Core가 자신의
                 // 종료와 파일 정리를 수행하게 하고, 실제 종료 전에는 재연결하지 않는다.
                 const controller = new AbortController();
@@ -435,12 +439,16 @@ export class CoreManager {
                     if (result.status !== 'shutting_down') {
                         throw new Error('Core가 종료 요청을 확인하지 않았습니다.');
                     }
+                } catch (error) {
+                    restartLog.event(`shutdown request failed: ${error instanceof Error ? error.message : String(error)}`);
+                    throw error;
                 } finally {
                     clearTimeout(timer);
                 }
                 const deadline = Date.now() + RESTART_SHUTDOWN_TIMEOUT_MS;
                 while (this.isProcessRunning(pid)) {
                     if (Date.now() >= deadline) {
+                        restartLog.event('restart failed: shutdown timeout');
                         throw new Error('Core가 종료되지 않아 재시작을 완료하지 못했습니다. 잠시 후 다시 시도하세요.');
                     }
                     await this.sleep(100);
@@ -465,8 +473,16 @@ export class CoreManager {
         }
     }
 
+    private createProcessLog(secrets: string[] = []): CoreProcessLog {
+        return new CoreProcessLog(path.join(path.dirname(this._runtimePath), 'core.log'), {
+            secrets: [this.sessionToken, ...secrets],
+            onError: () => console.warn('[ReCoder Core] core.log 파일에 로그를 저장하지 못했습니다.'),
+        });
+    }
+
     private async spawnCore(): Promise<void> {
         this.isSpawning = true;
+        let processLog: CoreProcessLog | undefined;
         try {
             const spec = this._findCoreSpec();
             if (!spec) {
@@ -489,6 +505,11 @@ export class CoreManager {
             //: 띄우는 Docker Desktop(Electron)이 그걸 물려받으면 GUI 없이 즉시 종료한다(실기기).
             const hostEnv: NodeJS.ProcessEnv = { ...process.env };
             for (const k of ['ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ATTACH_CONSOLE', 'NODE_OPTIONS']) { delete hostEnv[k]; }
+            const coreEnv = { ...hostEnv, ...gatewayEnv, ...awsEnv };
+            processLog = this.createProcessLog(Object.entries(coreEnv)
+                .filter(([key]) => /TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY/i.test(key))
+                .map(([, value]) => value ?? ''));
+            processLog.event('spawn requested');
             this.coreProcess = spawn(spec.command, args, {
                 env: { ...hostEnv, ...gatewayEnv, ...awsEnv },
                 detached: false,
@@ -497,14 +518,19 @@ export class CoreManager {
                 shell: false,
             });
             const spawnedProcess = this.coreProcess;
+            processLog.setPid(spawnedProcess.pid);
+            this.coreProcess.once('spawn', () => processLog.event('spawned'));
 
             this.coreProcess.stdout?.on('data', (data: Buffer) => {
+                processLog.write('stdout', data);
                 console.log('[ReCoder Core]', data.toString().trim());
             });
             this.coreProcess.stderr?.on('data', (data: Buffer) => {
+                processLog.write('stderr', data);
                 console.error('[ReCoder Core STDERR]', data.toString().trim());
             });
             this.coreProcess.on('exit', (code, signal) => {
+                processLog.event(`exited code=${code} signal=${signal}`);
                 console.log(`[ReCoder Core] exited code=${code} signal=${signal}`);
                 if (this.coreProcess === spawnedProcess) {
                     this.coreProcess = null;
@@ -512,16 +538,23 @@ export class CoreManager {
                 }
             });
             this.coreProcess.on('error', (err) => {
+                processLog.event(`spawn error: ${err.message}`);
                 console.error('[ReCoder Core] spawn error:', err);
                 if (this.coreProcess === spawnedProcess) { this.coreProcess = null; }
             });
+            this.coreProcess.on('close', () => processLog.finish());
 
             await this.waitForReady(15000);
             const runtime = await this.readRuntime();
             if (runtime) {
+                processLog.addSecrets([runtime.session_token]);
                 this.port = runtime.port;
                 this.sessionToken = runtime.session_token;
             }
+            processLog.event(`ready port=${this.port}`);
+        } catch (error) {
+            processLog?.event(`startup failed: ${error instanceof Error ? error.message : String(error)}`);
+            throw error;
         } finally {
             this.isSpawning = false;
         }
@@ -632,6 +665,10 @@ export class CoreManager {
         this._client = null;
 
         if (!proc || !pid) { return; }
+
+        const stopLog = this.createProcessLog();
+        stopLog.setPid(pid);
+        stopLog.event(`stop requested force=${force}`);
 
         if (process.platform === 'win32') {
             if (pid) {

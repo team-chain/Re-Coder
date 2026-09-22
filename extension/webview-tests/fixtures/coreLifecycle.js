@@ -29,6 +29,9 @@ const server = http.createServer((req, res) => {
   }
 });
 server.listen(Number(requestedPort), '127.0.0.1', () => {
+  console.log('fixture stdout: starting');
+  console.error('fixture stderr: test diagnostic');
+  process.stdout.write('fixture partial line');
   fs.writeFileSync(runtimeFile, JSON.stringify({
     pid: process.pid,
     port: server.address().port,
