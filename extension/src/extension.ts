@@ -419,14 +419,20 @@ export function activate(context: vscode.ExtensionContext): void {
     // ── Command: Restart Core ───────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.restartCore', async () => {
-            await vscode.window.withProgress(
-                { location: vscode.ProgressLocation.Notification, title: 'Restarting ReCoder Core…' },
-                async () => {
-                    await coreManager.shutdown(true);
-                    await coreManager.ensureRunning();
-                    sidebarProvider.postMessage('core.restarted', {});
-                }
-            );
+            try {
+                await vscode.window.withProgress(
+                    { location: vscode.ProgressLocation.Notification, title: 'Restarting ReCoder Core…' },
+                    async () => {
+                        await coreManager.restart();
+                        sidebarProvider.postMessage('core.restarted', {});
+                        sidebarProvider.triggerDiagnostics();
+                    }
+                );
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                vscode.window.showErrorMessage(`ReCoder Core 재시작 실패: ${message}`);
+                sidebarProvider.postMessage('core.error', { message });
+            }
         })
     );
 
