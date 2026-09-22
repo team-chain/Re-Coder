@@ -253,3 +253,14 @@ test('ECS 실패 문구에 사유(detail)와 조치(remedy)가 붙는다 — 제
   assert.ok(!/message: status\.error \|\| `ECS: \$\{status\.stage\}`/.test(HOST), 'error 한 줄만 보여주는 옛 코드가 남아 있다');
   assert.match(DC, /whiteSpace: "pre-wrap" \}\}>\{message\}/, '여러 줄 문구가 한 줄로 뭉개진다');
 });
+
+test('리전 경고 확인은 같은 버튼 재클릭이 아니라 별도 버튼으로만 된다 (실기기 C5: 더블클릭에 us-east-1 클러스터 생성)', () => {
+  const SRC = fs.readFileSync(path.join(__dirname, '../webview-src/components/DeploymentCenter.tsx'), 'utf8');
+  //: 첫 클릭에서 ack 를 바로 저장하면 두 번째 클릭(더블클릭)이 곧장 통과한다.
+  assert.doesNotMatch(SRC, /if \(gate\.ack\) \{ setRegionWarningAck\(gate\.ack\); \}/, '첫 클릭이 곧바로 확인으로 저장된다');
+  assert.match(SRC, /setPendingRegionAck\(gate\.ack\)/, '경고 조합을 보류 상태로 두지 않는다');
+  assert.match(SRC, /const confirmRegionAndDeploy = \(\) => \{[\s\S]*?setRegionWarningAck\(pendingRegionAck\)/, '확인 버튼이 ack 를 저장하지 않는다');
+  assert.match(SRC, /다른 리전으로 그대로 진행/, '확인 버튼이 없다');
+  assert.match(SRC, /리전을 \{coreRegion\} 로 되돌리기/, '되돌리기 버튼이 없다');
+  assert.match(SRC, /그대로 진행하려면 아래 \[다른 리전으로 그대로 진행\] 을 누르세요/, '경고 문구가 "한 번 더 누르세요" 라고 잘못 안내한다');
+});
