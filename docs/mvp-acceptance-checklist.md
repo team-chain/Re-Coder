@@ -24,17 +24,17 @@
 | B1 | 스캔 미실행은 "확인 못 함"으로 — 통과 위장 금지 | ✅ scanSkipped | ✅ 09-22 Docker 꺼진 상태→자동 시작→확인 못 함 |
 | B2 | 빌드 전 이미지를 Trivy 에 안 넘김, 실행 시 1회 스캔 | ✅ trivy_prebuild | ✅ 09-22 실행 직전 CRITICAL 차단 확인 |
 | B3 | 미검증 배포는 이중 확인 요구 | ✅ trivy_prebuild | ✅ 09-22 (체크박스 2단계 수정 후) |
-| B4 | 전송 전 민감정보(.env 등) 업로드 제외 + 사유 표시 | ✅ s3Deploy(excluded) | ☐ |
+| B4 | 전송 전 민감정보(.env 등) 업로드 제외 + 사유 표시 | ✅ s3Deploy(excluded) | ✅ 09-22 .env·secrets.json 제외 표시, 실제 404 |
 
 ## C. 배포 (Deploy)
 
 | # | 기준 | 기계 검증 | 실기기 확인 |
 |---|---|---|---|
-| C1 | S3 정적 배포 — 진행률 실시간, URL 반환 | ✅ s3 stream/progress | ☐ 실 AWS 1회 |
+| C1 | S3 정적 배포 — 진행률 실시간, URL 반환 | ✅ s3 stream/progress | ✅ 09-22 버킷 생성·URL 응답 확인 |
 | C2 | 로컬 Docker 배포 — 태그 이미지 입력해도 400 없음 | ✅ containerName | ✅ 09-22 build→재검사→run→Up 3456 |
-| C3 | ECS 배포 시작·상태 폴링 | — | ☐ 실 AWS 1회 |
-| C4 | 배포 정책 게이트(rego) — 조건 미달 차단 + 사유 | ✅ opa 12/12 | ☐ |
-| C5 | 리전 불일치는 1회 경고 후 진행 가능(차단 아님) | ✅ regionGate | ☐ |
+| C3 | ECS 배포 시작·상태 폴링 | — | ☐ 09-22 사전 점검·인프라 생성까지 진행, 소스 스캔 게이트에서 차단(스캐너 미설치) — 실배포는 별도 세션 |
+| C4 | 배포 정책 게이트(rego) — 조건 미달 차단 + 사유 | ✅ opa 12/12 | ◐ 09-22 로컬 규칙 평가·스캔 게이트 차단+사유 확인. rego deny 경로는 폼에 environment/branch 입력이 없어 실기기 불가 |
+| C5 | 리전 불일치는 1회 경고 후 진행 가능(차단 아님) | ✅ regionGate | ☐ 09-22 us-east-1 입력 시 경고 없이 진행된 것으로 보임 — 1회 클릭 재확인 필요 |
 | C6 | 존재하지 않는 API 를 부르는 버튼 없음 | ✅ uiRequestContract | — |
 
 ## D. 감시·롤백 (Operate)
@@ -50,16 +50,16 @@
 
 | # | 기준 | 기계 검증 | 실기기 확인 |
 |---|---|---|---|
-| E1 | AWS 프로필 원클릭 연결 (키 재입력 없음) | ✅ awsProfileConnect | ☐ |
-| E2 | 키 없는 사용자 — 원클릭 IAM 셋업 동작 | ✅ awsOnboarding | ☐ 브라우저 1회 |
+| E1 | AWS 프로필 원클릭 연결 (키 재입력 없음) | ✅ awsProfileConnect | ✅ 09-22 default 프로필로 연결·S3 배포 |
+| E2 | 키 없는 사용자 — 원클릭 IAM 셋업 동작 | ✅ awsOnboarding | ✅ 09-22 프로그램 안 역할 생성→assume→해제 (검증 1) |
 | E3 | 최소권한: 권한표·점검·템플릿이 한 원본 | ✅ aws_onboarding drift | — |
-| E4 | 예산 알람 스크립트 동작 | ✅ budget payload | ☐ 1회 실행 |
+| E4 | 예산 알람 스크립트 동작 | ✅ budget payload | ✅ 09-22 recoder-monthly $15 · 80%/100% 생성 |
 
 ## F. 게시
 
 | # | 기준 | 기계 검증 | 실기기 확인 |
 |---|---|---|---|
-| F1 | VSIX 빌드 (경량) | ✅ dist 산출 확인 | ☐ 설치 스모크 |
+| F1 | VSIX 빌드 (경량) | ✅ dist 산출 확인 | ✅ 09-22 314KB 설치→코어 자동 기동→준비됨 |
 | F2 | 플랫폼별 VSIX (Core 동봉) | — | ☐ OS 별 1회 |
 | F3 | 의존성 취약점 0 (또는 사유 문서) | ✅ security-audit.md | — |
 
