@@ -55,6 +55,17 @@ def _isolate(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(aws, "_inspect_deploy_permissions", lambda *a, **k: None)
     #: 파일 기반 폴백 경로가 개발자 홈을 읽지 않게.
     monkeypatch.setattr(aws, "CREDENTIALS_FILE", Path("/nonexistent/aws_credentials.json"))
+    #: **개발자의 실제 ~/.aws 도 읽으면 안 된다.**
+    #:
+    #: `setup_aws_role` 은 환경변수도 프로필도 없으면 `_detect_credential_source()`
+    #: 로 한 번 더 기반을 찾는데, 그게 `AWS_CREDENTIALS_FILE`(기본값 ~/.aws/
+    #: credentials)을 본다. AWS 를 쓰는 사람 컴퓨터에는 그 파일이 있으니
+    #: `default` 프로필이 잡혀 "기반 없음 → 400" 이 안 났다. 리눅스 CI 에는
+    #: 그 파일이 없어 통과하고 팀원 PC 에서만 깨지는, 환경 의존 테스트였다
+    #: (2026-09-22 실기기 Windows). 프로필이 필요한 테스트는 `_profiles()` 가
+    #: 이 값을 tmp_path 로 다시 덮는다.
+    monkeypatch.setattr(aws, "AWS_CREDENTIALS_FILE", Path("/nonexistent/.aws/credentials"))
+    monkeypatch.setattr(aws, "AWS_CONFIG_FILE", Path("/nonexistent/.aws/config"))
     yield
     for key, value in before.items():
         if value is None:

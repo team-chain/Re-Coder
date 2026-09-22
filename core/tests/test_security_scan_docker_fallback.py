@@ -23,22 +23,33 @@ class _Capture:
         self.calls: list[dict] = []
         self.tmp_path = tmp_path
 
+    @staticmethod
+    def _host_path(cmd, container_path: str) -> str:
+        """컨테이너 안 경로(`/out/…`)를 호스트의 마운트 경로로 되돌린다.
+
+        `-v "<호스트>:/out"` 에서 호스트 쪽을 떼어낼 때 `split(":")[0]` 을 쓰면
+        **Windows 에서 드라이브 문자가 잘린다** — `C:/Temp/x:/out` 이 `"C"` 가
+        되어 존재하지 않는 곳에 결과를 쓰고, 제품 코드는 보고서를 못 찾아
+        `FileNotFoundError` → `<tool>_not_installed` 로 떨어진다. 폴백이 멀쩡히
+        도는데도 "도구 미설치" 로 보였다(2026-09-22 실기기 Windows).
+        드라이브 문자를 건드리지 않게 **마운트 접미사만** 잘라낸다.
+        """
+        if not container_path.startswith("/out/"):
+            return container_path
+        suffix = ":/out"
+        host_dir = next(a[: -len(suffix)] for a in cmd if a.endswith(suffix))
+        return os.path.join(host_dir, os.path.basename(container_path))
+
     async def __call__(self, cmd, allow_nonzero=False, stdin_data=None, timeout=None):
         self.calls.append({"cmd": list(cmd), "stdin": stdin_data, "timeout": timeout})
         joined = " ".join(cmd)
         # trivy: --output 뒤 경로(컨테이너면 /out/trivy.json → 호스트 마운트 경로로 변환)에 빈 결과를 쓴다
         if "--output" in cmd:
-            out = cmd[cmd.index("--output") + 1]
-            if out.startswith("/out/"):
-                host_dir = next(a.split(":")[0] for a in cmd if a.endswith(":/out"))
-                out = os.path.join(host_dir, os.path.basename(out))
+            out = self._host_path(cmd, cmd[cmd.index("--output") + 1])
             Path(out).write_text(json.dumps({"Results": []}))
             return ""
         if "--report-path" in cmd:
-            out = cmd[cmd.index("--report-path") + 1]
-            if out.startswith("/out/"):
-                host_dir = next(a.split(":")[0] for a in cmd if a.endswith(":/out"))
-                out = os.path.join(host_dir, os.path.basename(out))
+            out = self._host_path(cmd, cmd[cmd.index("--report-path") + 1])
             Path(out).write_text("[]")
             return ""
         if "hadolint" in joined:
@@ -52,6 +63,27 @@ def _tools(monkeypatch, *, native: set[str], docker: bool):
             return docker
         return binary in native
     monkeypatch.setattr(ss, "_which", which)
+
+
+def test_컨테이너_출력경로_되돌리기는_Windows_드라이브_문자를_안_자른다():
+    """이 하네스가 `-v "<호스트>:/out"` 에서 호스트 경로를 되찾는 방식 자체를 고정.
+
+    `split(":")[0]` 이던 시절 Windows 에서 `C:\\Temp\\x` 가 `"C"` 로 잘려,
+    폴백이 정상인데도 결과 파일을 못 찾아 `<tool>_not_installed` 가 나왔다.
+    하네스가 틀리면 제품 테스트 전체가 거짓 실패한다 — 여기서 먼저 막는다.
+    """
+    win = ["docker", "run", "--rm", "-v", r"C:\Users\dy981\Temp\recoder-trivy-1:/out",
+           "aquasec/trivy:latest", "--output", "/out/trivy.json", "img"]
+    assert _Capture._host_path(win, "/out/trivy.json") == os.path.join(
+        r"C:\Users\dy981\Temp\recoder-trivy-1", "trivy.json")
+
+    posix = ["docker", "run", "--rm", "-v", "/tmp/recoder-trivy-1:/out",
+             "aquasec/trivy:latest", "--report-path", "/out/gitleaks.json", "img"]
+    assert _Capture._host_path(posix, "/out/gitleaks.json") == os.path.join(
+        "/tmp/recoder-trivy-1", "gitleaks.json")
+
+    #: 네이티브 경로(컨테이너가 아님)는 그대로 둔다.
+    assert _Capture._host_path([], "/home/me/out/trivy.json") == "/home/me/out/trivy.json"
 
 
 def test_바이너리_없고_docker_있으면_trivy_를_컨테이너로_돌린다(monkeypatch, tmp_path):
@@ -111,7 +143,10 @@ def test_hadolint_폴백은_Dockerfile_을_표준입력으로_넘긴다(monkeypa
     assert call["cmd"][:4] == ["docker", "run", "--rm", "-i"]
     assert ss._DOCKER_IMAGES["hadolint"] in call["cmd"]
     assert call["cmd"][-1] == "-", "표준입력을 읽게 해야 한다"
-    assert call["stdin"] == b"FROM alpine\n"
+    #: 줄끝은 플랫폼마다 다르다 — Windows 의 `write_text` 는 CRLF 로 쓴다.
+    #: 제품은 `read_bytes()` 로 **파일을 그대로** 넘기므로, 기대값도 리터럴이
+    #: 아니라 그 파일의 바이트여야 한다(2026-09-22 실기기 Windows).
+    assert call["stdin"] == dockerfile.read_bytes()
     assert findings == []
 
 
