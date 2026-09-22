@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -40,6 +41,39 @@ except ImportError:  # core/ 가 직접 sys.path 에 있는 실행 환경
 logger = logging.getLogger(__name__)
 
 _SCAN_TIMEOUT = 120   # 초
+_TRIVY_TIMEOUT = 600  # 초 — 이미지 스캔은 DB 다운로드·레이어 분석으로 길다
+
+# ---------------------------------------------------------------------------
+# Docker 폴백 — 바이너리가 없으면 같은 도구를 컨테이너로 돌린다
+# ---------------------------------------------------------------------------
+#
+# 실기기(검증 C3)에서 로컬 Docker 배포는 `quality_runner` 가 `docker run` 으로
+# trivy 를 돌려 잘 검사했는데, ECS 경로는 이 모듈이 **네이티브 바이너리만**
+# 찾아서 trivy·gitleaks·hadolint 셋 다 "미설치" 로 차단됐다. 같은 컴퓨터,
+# 같은 Docker 인데 경로에 따라 검사 가능 여부가 갈리는 건 도구 문제가 아니라
+# 우리 문제다. 바이너리가 없고 docker 가 있으면 공식 이미지로 대신 돈다.
+# 둘 다 없으면 예전처럼 `<tool>_not_installed` 로 남겨 게이트가 막는다.
+_DOCKER_IMAGES = {
+    "trivy": "aquasec/trivy:latest",
+    "hadolint": "hadolint/hadolint:latest",
+    "gitleaks": "zricethezav/gitleaks:latest",
+}
+#: trivy 컨테이너에 넘겨 줄 AWS 환경변수 — 값은 argv 에 싣지 않고 `-e NAME` 으로
+#: docker 가 현재 환경에서 읽게 한다(프로세스 목록에 비밀이 안 보인다).
+_AWS_ENV_PASSTHROUGH = (
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE",
+)
+
+
+def _which(binary: str) -> bool:
+    return shutil.which(binary) is not None
+
+
+def _docker_fallback_available(tool: str) -> bool:
+    """도구 바이너리는 없고 docker 는 있는가 — 그때만 컨테이너로 대신 돈다."""
+    return not _which(tool) and _which("docker")
+
 
 
 class SecurityScanner:
@@ -95,20 +129,43 @@ class SecurityScanner:
         trivy image --format json 실행.
         CRITICAL → 차단. HIGH → 경고.
         """
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            output_path = f.name
+        out_dir = tempfile.mkdtemp(prefix="recoder-trivy-")
+        output_path = os.path.join(out_dir, "trivy.json")
 
-        cmd = [
-            "trivy", "image",
+        trivy_args = [
+            "image",
             "--format", "json",
-            "--output", output_path,
             "--exit-code", "0",    # 취약점 있어도 exit 0 (결과는 JSON으로 판단)
             "--quiet",
-            image,
         ]
+        if _docker_fallback_available("trivy"):
+            # 로컬 데몬의 이미지도 보게 소켓을 물리고, 결과 파일은 마운트한
+            # 디렉터리로 받는다. ECR 이미지를 끌어와야 하면 AWS 자격증명이
+            # 필요하므로 환경변수 이름만 넘기고 ~/.aws 는 읽기 전용으로 준다.
+            # 취약점 DB 캐시를 호스트에 두지 않으면 매번 수백 MB 를 다시 받는다.
+            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "recoder-trivy")
+            os.makedirs(cache_dir, exist_ok=True)
+            cmd = [
+                "docker", "run", "--rm",
+                "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                "-v", f"{out_dir}:/out",
+                "-v", f"{cache_dir}:/root/.cache/",
+            ]
+            for name in _AWS_ENV_PASSTHROUGH:
+                if os.environ.get(name):
+                    cmd.extend(["-e", name])
+            aws_dir = os.path.join(os.path.expanduser("~"), ".aws")
+            if os.path.isdir(aws_dir):
+                cmd.extend(["-v", f"{aws_dir}:/root/.aws:ro"])
+            cmd.append(_DOCKER_IMAGES["trivy"])
+            cmd.extend(trivy_args + ["--output", "/out/trivy.json", image])
+            logger.info("trivy 바이너리가 없어 %s 컨테이너로 검사합니다", _DOCKER_IMAGES["trivy"])
+        else:
+            cmd = ["trivy"] + trivy_args + ["--output", output_path, image]
         findings: list[SecurityFinding] = []
         try:
-            await self._run_cmd(cmd)
+            # 첫 실행은 취약점 DB(수백 MB)를 받느라 2분을 넘길 수 있다.
+            await self._run_cmd(cmd, timeout=_TRIVY_TIMEOUT)
             raw = json.loads(Path(output_path).read_text())
             for result in raw.get("Results", []):
                 for vuln in result.get("Vulnerabilities") or []:
@@ -156,10 +213,7 @@ class SecurityScanner:
                 ),
             ))
         finally:
-            try:
-                os.unlink(output_path)
-            except OSError:
-                pass
+            shutil.rmtree(out_dir, ignore_errors=True)
         return findings
 
     # ------------------------------------------------------------------
@@ -171,10 +225,27 @@ class SecurityScanner:
         hadolint --format json 실행.
         error → 차단. warning → 경고.
         """
-        cmd = ["hadolint", "--format", "json", dockerfile_path]
         findings: list[SecurityFinding] = []
+        stdin_data: Optional[bytes] = None
+        if _docker_fallback_available("hadolint"):
+            # 파일을 마운트하지 않고 표준입력으로 넘긴다 — 경로에 공백·한글이
+            # 있어도 안전하고, 컨테이너가 워크스페이스를 볼 필요도 없다.
+            try:
+                stdin_data = Path(dockerfile_path).read_bytes()
+            except OSError as exc:
+                return [SecurityFinding(
+                    tool=SecurityScanTool.HADOLINT,
+                    severity=SecurityScanSeverity.INFO,
+                    title="hadolint_scan_failed",
+                    description=f"Dockerfile 을 읽지 못했습니다: {exc}",
+                )]
+            cmd = ["docker", "run", "--rm", "-i", _DOCKER_IMAGES["hadolint"],
+                   "hadolint", "--format", "json", "-"]
+            logger.info("hadolint 바이너리가 없어 %s 컨테이너로 검사합니다", _DOCKER_IMAGES["hadolint"])
+        else:
+            cmd = ["hadolint", "--format", "json", dockerfile_path]
         try:
-            stdout = await self._run_cmd(cmd, allow_nonzero=True)
+            stdout = await self._run_cmd(cmd, allow_nonzero=True, stdin_data=stdin_data)
             if not stdout.strip():
                 return findings
             issues = json.loads(stdout)
@@ -222,22 +293,27 @@ class SecurityScanner:
         gitleaks detect --report-format json 실행.
         시크릿 발견 → 항상 차단. 원문은 LLM에 미전달 (redacted=True).
         """
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            output_path = f.name
+        out_dir = tempfile.mkdtemp(prefix="recoder-gitleaks-")
+        output_path = os.path.join(out_dir, "gitleaks.json")
 
-        cmd = [
-            "gitleaks", "detect",
-            "--source", repo_path,
-            "--no-git",
-            "--report-format", "json",
-            "--report-path", output_path,
-            "--exit-code", "0",
-            "--quiet",
-        ]
+        gitleaks_args = ["detect", "--no-git", "--report-format", "json", "--exit-code", "0"]
+        if _docker_fallback_available("gitleaks"):
+            cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{os.path.abspath(repo_path)}:/repo:ro",
+                "-v", f"{out_dir}:/out",
+                _DOCKER_IMAGES["gitleaks"],
+            ] + gitleaks_args + ["--source", "/repo", "--report-path", "/out/gitleaks.json"]
+            logger.info("gitleaks 바이너리가 없어 %s 컨테이너로 검사합니다", _DOCKER_IMAGES["gitleaks"])
+        else:
+            cmd = ["gitleaks"] + gitleaks_args + ["--source", repo_path, "--report-path", output_path]
         findings: list[SecurityFinding] = []
         try:
-            await self._run_cmd(cmd, allow_nonzero=True)
-            raw_text = Path(output_path).read_text()
+            # `--exit-code 0` 이라 시크릿이 있어도 0 이다. 그래서 0 이 아니면
+            # 검사 자체가 실패한 것(잘못된 플래그·마운트 실패 등) — 비어 있는
+            # 보고서를 "시크릿 없음" 으로 읽으면 안 된다.
+            await self._run_cmd(cmd)
+            raw_text = Path(output_path).read_text() if os.path.exists(output_path) else ""
             if not raw_text.strip() or raw_text.strip() == "null":
                 return findings
             leaks = json.loads(raw_text)
@@ -271,10 +347,7 @@ class SecurityScanner:
                 ),
             ))
         finally:
-            try:
-                os.unlink(output_path)
-            except OSError:
-                pass
+            shutil.rmtree(out_dir, ignore_errors=True)
         return findings
 
     # ------------------------------------------------------------------
@@ -282,17 +355,23 @@ class SecurityScanner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _run_cmd(cmd: list[str], allow_nonzero: bool = False) -> str:
+    async def _run_cmd(
+        cmd: list[str], allow_nonzero: bool = False, stdin_data: Optional[bytes] = None,
+        timeout: int = _SCAN_TIMEOUT,
+    ) -> str:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_SCAN_TIMEOUT)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(stdin_data), timeout=timeout,
+            )
         except asyncio.TimeoutError:
             proc.kill()
-            raise RuntimeError(f"Command timed out after {_SCAN_TIMEOUT}s: {cmd[0]}")
+            raise RuntimeError(f"Command timed out after {timeout}s: {cmd[0]}")
 
         if proc.returncode != 0 and not allow_nonzero:
             raise RuntimeError(f"{cmd[0]} failed (rc={proc.returncode}): {stderr.decode()[:500]}")

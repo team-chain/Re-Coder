@@ -96,7 +96,7 @@ export function regionMismatchWarning(
   return (
     `배포 리전(${form})이 코어가 사용 중인 리전(${core})과 다릅니다. `
     + `자격증명이 ${form} 에서 유효하지 않으면 인증에 실패합니다. `
-    + `그대로 진행하려면 한 번 더 누르세요.`
+    + `그대로 진행하려면 아래 [다른 리전으로 그대로 진행] 을 누르세요.`
   );
 }
 
@@ -387,6 +387,10 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   //: 불일치 경고를 이미 보여 준 조합("코어리전|폼리전"). 같은 조합으로 한 번
   //: 더 누르면 진행한다 — 경고이지 차단이 아니다.
   const [regionWarningAck, setRegionWarningAck] = useState("");
+  //: 경고를 보여준 조합. **같은 버튼을 한 번 더 누르는 것** 으로는 확인이 되지 않는다 —
+  //: 실기기(C5)에서 더블클릭 한 번에 경고가 스쳐 지나가고 us-east-1 에 클러스터가
+  //: 만들어졌다. 확인은 별도 버튼으로만 한다.
+  const [pendingRegionAck, setPendingRegionAck] = useState<string | null>(null);
   //: S3 정적 배포 — 올릴 폴더와 결과.
   const [s3Dir, setS3Dir] = useState("");
   const [s3DirTouched, setS3DirTouched] = useState(false);
@@ -552,6 +556,9 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     // 리전이 어긋나면 **실행 전에** 멈춘다. 그대로 보내면 인증 실패로 끝나는데,
     // 원인이 리전이라는 걸 알아채는 데 오래 걸린다(데모에서 실제로 그랬다).
     if (!passesRegionCheck(ecs.aws_region)) { return; }
+    startEcsDeploy();
+  };
+  const startEcsDeploy = () => {
     setCheckingEcsPermissions(true);
     setMessage("입력한 ECS 리전과 대상 리소스의 권한을 확인 중…");
     pendingEcsDeploymentRef.current = { ...ecs, container_port: Number(ecs.container_port) };
@@ -584,8 +591,23 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const passesRegionCheck = (formRegion: string): boolean => {
     const gate = regionGate(coreRegion, formRegion, regionWarningAck);
     if (gate.message) { setMessage(gate.message); }
-    if (gate.ack) { setRegionWarningAck(gate.ack); }
+    //: 확인 키는 기억만 해 두고, 사용자가 [그대로 진행] 을 눌러야 ack 가 된다.
+    setPendingRegionAck(gate.ack);
     return gate.ok;
+  };
+  const confirmRegionAndDeploy = () => {
+    if (!pendingRegionAck) return;
+    setRegionWarningAck(pendingRegionAck);
+    setPendingRegionAck(null);
+    setMessage("");
+    //: ack 가 state 라 다음 렌더에서 반영된다 — 게이트를 직접 통과시켜 이어간다.
+    startEcsDeploy();
+  };
+  const revertRegionToCore = () => {
+    setPendingRegionAck(null);
+    setMessage("");
+    regionTouchedRef.current = true;
+    setEcs(cur => ({ ...cur, aws_region: coreRegion }));
   };
 
   const update = <T extends Record<string, string>>(set: React.Dispatch<React.SetStateAction<T>>, key: keyof T, value: string) => {
@@ -730,7 +752,16 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         </div>
       </div>}
       {target === "actions" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>GitHub Actions</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>프로젝트에 맞는 CI/CD 워크플로우를 생성하고, 승인 후 <code>.github/workflows/deploy.yml</code>에 저장합니다.</p><button onClick={generateActions} style={button}>워크플로우 생성</button>{proposal && <><pre style={{ marginTop: 12, maxHeight: 280, overflow: "auto", background: "var(--vscode-textCodeBlock-background, #1e1e1e)", borderRadius: 5, padding: 10, fontSize: 11 }}>{proposal.content}</pre><button onClick={() => postMessage("approveGithubActions", { proposalId: proposal.proposal_id, approved: true })} style={{ ...button, marginTop: 10 }}>승인하고 저장</button></>}</div>}
-      {target === "ecs" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>ECS Fargate 배포</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.45 }}>선택 근거가 ADR에 기록되었습니다. 입력한 리전과 ECS 대상의 권한을 확인한 뒤 배포를 시작합니다.</p><EcsCostNotice /><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ecs_cluster", "ECS Cluster"], ["ecs_service", "ECS Service"], ["task_family", "Task Family"], ["container_port", "컨테이너 포트"], ["cpu", "CPU"], ["memory", "Memory"] ] as [keyof typeof ecs, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ecs[key]} onChange={e => update(setEcs, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}</div><button disabled={checkingEcsPermissions} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : "ECS 배포 실행"}</button></div>}
+      {target === "ecs" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>ECS Fargate 배포</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.45 }}>선택 근거가 ADR에 기록되었습니다. 입력한 리전과 ECS 대상의 권한을 확인한 뒤 배포를 시작합니다.</p><EcsCostNotice /><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ecs_cluster", "ECS Cluster"], ["ecs_service", "ECS Service"], ["task_family", "Task Family"], ["container_port", "컨테이너 포트"], ["cpu", "CPU"], ["memory", "Memory"] ] as [keyof typeof ecs, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ecs[key]} onChange={e => update(setEcs, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}</div><button disabled={checkingEcsPermissions} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : "ECS 배포 실행"}</button>
+        {pendingRegionAck && (
+          <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 6, border: "1px solid var(--vscode-editorWarning-foreground, #cca700)", background: "rgba(245,180,0,.08)", fontSize: 12 }}>
+            <div style={{ color: "var(--vscode-editorWarning-foreground, #cca700)", fontWeight: 600 }}>리전이 코어({coreRegion})와 다릅니다 — {ecs.aws_region} 에 배포할까요?</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={confirmRegionAndDeploy} style={{ ...button, background: "var(--vscode-editorWarning-foreground, #cca700)", color: "#1e1e1e" }}>다른 리전으로 그대로 진행</button>
+              <button onClick={revertRegionToCore} style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3a3a)", color: "var(--vscode-button-secondaryForeground, #ccc)" }}>리전을 {coreRegion} 로 되돌리기</button>
+            </div>
+          </div>
+        )}</div>}
       {message && <div style={{ marginTop: 12, padding: "8px 10px", borderRadius: 5, background: "var(--vscode-editorInfo-background, rgba(55,148,255,.12))", color: "var(--vscode-editorInfo-foreground, #75beff)", fontSize: 12, whiteSpace: "pre-wrap" }}>{message}</div>}
     </div>
   );
