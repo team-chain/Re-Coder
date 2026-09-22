@@ -194,6 +194,7 @@ class PreflightAgent:
                     name=name, passed=False, severity="error",
                     detail=f"IAM Role '{role_name}'이 없습니다",
                     fix_guide=(
+                        "ECS 배포 화면의 '실행 역할 확인'에서 생성 내용을 검토하고 승인할 수 있습니다. "
                         f"IAM 콘솔에서 역할 '{role_name}' 을 만들고(신뢰 주체 "
                         "ecs-tasks.amazonaws.com) AmazonECSTaskExecutionRolePolicy 를 붙이세요. "
                         f"CLI: aws iam create-role --role-name {role_name} "

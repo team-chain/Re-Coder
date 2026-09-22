@@ -246,12 +246,14 @@ test('AWS 연결 폼도 리전을 하드코딩하지 않는다', () => {
 });
 
 test('ECS 실패 문구에 사유(detail)와 조치(remedy)가 붙는다 — 제목 한 줄만 남지 않게 (실기기 C4/C5)', () => {
-  const HOST = fs.readFileSync(path.join(__dirname, '../src/sidebar/SidebarProvider.ts'), 'utf8');
-  const DC = fs.readFileSync(path.join(__dirname, '../webview-src/components/DeploymentCenter.tsx'), 'utf8');
-  assert.match(HOST, /\.filter\(\(line\) => \/\^detail:\/\.test\(line\)\)/, 'log_tail 의 detail: 줄을 읽지 않는다');
-  assert.match(HOST, /status\.remedy/, 'remedy 를 버린다');
-  assert.ok(!/message: status\.error \|\| `ECS: \$\{status\.stage\}`/.test(HOST), 'error 한 줄만 보여주는 옛 코드가 남아 있다');
-  assert.match(DC, /whiteSpace: "pre-wrap" \}\}>\{message\}/, '여러 줄 문구가 한 줄로 뭉개진다');
+  const React = require('react');
+  const { renderToStaticMarkup } = require('react-dom/server');
+  const { EcsDeploymentProgress, initialEcsProgress } = require('../out/webview-test/components/EcsDeploymentProgress.js');
+  const html = renderToStaticMarkup(React.createElement(EcsDeploymentProgress, { state: {
+    ...initialEcsProgress, status: { running: false, stage: 'failed', error: 'Preflight 점검 실패', log_tail: ['detail: 실행 역할 없음'], remedy: '실행 역할 생성 후 재시도' },
+  } }));
+  for (const text of ['Preflight 점검 실패', '실행 역할 없음', '실행 역할 생성 후 재시도']) assert.ok(html.includes(text), `${text} 누락`);
+  assert.ok(html.includes('white-space:pre-wrap'), '여러 줄 문구가 한 줄로 뭉개진다');
 });
 
 test('리전 경고 확인은 같은 버튼 재클릭이 아니라 별도 버튼으로만 된다 (실기기 C5: 더블클릭에 us-east-1 클러스터 생성)', () => {

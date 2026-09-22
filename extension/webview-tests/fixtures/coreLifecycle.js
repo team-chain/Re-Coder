@@ -6,18 +6,18 @@ const http = require('node:http');
 const [runtimeFile, requestedPort = '0'] = process.argv.slice(2);
 const records = JSON.parse(fs.readFileSync(path.join(path.dirname(runtimeFile), 'records.json'), 'utf8'));
 const startedAt = new Date().toISOString();
-const token = 'restart-test-token';
+const token = require('node:crypto').randomBytes(24).toString('hex');
 const server = http.createServer((req, res) => {
   res.setHeader('Content-Type', 'application/json');
   if (req.url === '/api/health') {
     res.end(JSON.stringify({ status: 'ok', port: server.address().port }));
+  } else if (req.headers['x-session-token'] !== token) {
+    res.writeHead(401).end('{"detail":"Invalid session token."}');
+  } else if (req.url === '/api/status') {
+    res.end(JSON.stringify({ status: 'ok' }));
   } else if (req.url === '/api/ecs/deployments') {
     res.end(JSON.stringify(records));
   } else if (req.url === '/api/shutdown' && req.method === 'POST') {
-    if (req.headers['x-session-token'] !== token) {
-      res.writeHead(403).end('{}');
-      return;
-    }
     res.end(JSON.stringify({ status: 'shutting_down' }));
     // Keep the old instance alive briefly to expose premature reconnection.
     setTimeout(() => {

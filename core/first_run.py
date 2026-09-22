@@ -36,25 +36,6 @@ DIAGNOSTICS_PATH = RECODER_HOME / "diagnostics.json"
 _RECODER_DIR = RECODER_HOME
 _DIAGNOSTICS_FILE = DIAGNOSTICS_PATH
 
-# AWS regions that support Bedrock (non-exhaustive allowlist used to flag
-# cross-region inference profiles).
-_BEDROCK_REGIONS = [
-    "us-east-1",
-    "us-west-2",
-    "eu-central-1",
-    "eu-west-1",
-    "ap-northeast-1",
-    "ap-southeast-1",
-    "ap-southeast-2",
-]
-
-# Preferred Bedrock models in priority order — Claude 4.x 우선, 없으면 3.x 폴백.
-_BEDROCK_MODEL_PRIORITY = [
-    "anthropic.claude-haiku-4-5-20251001-v1:0",
-    "anthropic.claude-sonnet-4-5-20250929-v1:0",
-]
-
-
 # ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
@@ -176,10 +157,10 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
     성공해야만 OK. 자격증명만 있고 호출이 실패하면 FAIL.
 
     Bedrock 검증 순서:
-        1) ListFoundationModels + on-demand 매칭 모델 발견 → 그 모델로 converse ping
-        2) .env BEDROCK_PRIMARY_MODEL_IDENTIFIER 직접 converse ping
-        3) Cross-region inference profile 후보 (apac./us./eu. prefix) 순회하며 ping
-        4) 위 SONNET_MODELS/HAIKU_MODELS 체인 순회 ping
+        1) 실제 Provider 기본값 또는 설정된 primary 모델로 converse ping
+        2) Cross-region inference profile 후보 (apac./us./eu. prefix) 순회하며 ping
+        3) Provider의 PRIMARY/FAST 폴백 후보 순회 ping
+        AWS 모델 목록의 임의 모델을 현재 모델로 보고하지 않는다.
         하나라도 성공하면 OK, 모두 실패하면 다음 단계(Gemini)로.
 
     Gemini 검증:
@@ -218,36 +199,12 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
         credentials = session.get_credentials()
 
         if credentials is not None:
-            primary_model = (
-                os.getenv("BEDROCK_PRIMARY_MODEL_IDENTIFIER")
-                or os.getenv("BEDROCK_FAST_MODEL_IDENTIFIER")
-                or os.getenv("BEDROCK_SECONDARY_MODEL_IDENTIFIER")
-                or ""
-            ).strip()
-
-            is_cross_region = region not in _BEDROCK_REGIONS
+            from llm.bedrock_provider import DEFAULT_PRIMARY_MODEL, PRIMARY_MODELS, FAST_MODELS
+            primary_model = (os.getenv("BEDROCK_PRIMARY_MODEL_IDENTIFIER") or DEFAULT_PRIMARY_MODEL).strip()
+            is_cross_region = primary_model.startswith(("us.", "apac.", "eu.", "global."))
             runtime = session.client("bedrock-runtime", region_name=region)
 
-            # ── 1차: ListFoundationModels → on-demand 모델 발견 시 converse ping ──
-            try:
-                bedrock_models_client = session.client("bedrock", region_name=region)
-                response = bedrock_models_client.list_foundation_models(
-                    byOutputModality="TEXT",
-                    byInferenceType="ON_DEMAND",
-                )
-                models = response.get("modelSummaries", []) if response else []
-                available_ids = {m["modelId"] for m in models}
-                for preferred in _BEDROCK_MODEL_PRIORITY:
-                    if preferred in available_ids and _converse_ping(runtime, preferred):
-                        return ReadyStatus.OK, preferred, region, "bedrock", is_cross_region
-                # 사전 우선순위 매칭 안 되면 발견된 모델 중 첫 번째로 ping
-                for mid in sorted(available_ids):
-                    if _converse_ping(runtime, mid):
-                        return ReadyStatus.OK, mid, region, "bedrock", is_cross_region
-            except Exception as list_exc:
-                log.debug("ListFoundationModels 실패: %s — invoke fallback 진행", list_exc)
-
-            # ── 2차: .env primary_model 직접 converse ping ──
+            # 설정된 모델부터 검증한다. 카탈로그의 첫 모델은 실제 라우팅 설정이 아니다.
             if primary_model and _converse_ping(runtime, primary_model):
                 return ReadyStatus.OK, primary_model, region, "bedrock", is_cross_region
 
@@ -273,17 +230,8 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
                     if _converse_ping(runtime, candidate):
                         return ReadyStatus.OK, candidate, region, "bedrock", True
 
-            # ── 4차: BedrockProvider 의 SONNET/HAIKU 체인 순회 ──
-            try:
-                from llm.bedrock_provider import SONNET_MODELS, HAIKU_MODELS  # type: ignore
-                fallback_chain = list(dict.fromkeys(SONNET_MODELS + HAIKU_MODELS))
-            except Exception:
-                fallback_chain = [
-                    "global.anthropic.claude-haiku-4-5-20251001-v1:0",
-                    "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
-                    "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
-                    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-                ]
+            # 실제 Provider와 같은 모델 후보만 검증한다.
+            fallback_chain = list(dict.fromkeys(PRIMARY_MODELS + FAST_MODELS))
             for mid in fallback_chain:
                 if mid == primary_model:
                     continue  # 이미 시도

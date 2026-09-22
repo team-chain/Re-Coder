@@ -3,8 +3,9 @@
  * Displays First Run diagnostic checklist with activation guides.
  */
 
-import React, { useCallback, useState } from "react";
+import React, { useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import { useSelfHeal } from "../hooks/useSelfHeal";
 
 export type ReadyState = string;
 
@@ -107,23 +108,10 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
   diagnostics,
   onRetry,
 }) => {
-  const { postMessage, useMessage } = useVSCodeApi();
+  const { postMessage } = useVSCodeApi();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
-  //: 자가 조치 결과 — 항목별 "자동 조치함 / 자동 조치 실패" 한 줄. 자동으로 뭔가
-  //: 했으면 반드시 보여 준다(보드 카드 「자가 조치 레이어」: "자동 조치함" 표시).
-  const [heal, setHeal] = useState<Record<string, { message: string; failed?: boolean }>>({});
-  const [healing, setHealing] = useState<string | null>(null);
-  useMessage(useCallback(({ type, payload }) => {
-    if (type === "selfHeal") {
-      const p = payload as { key?: string; message?: string; failed?: boolean; pending?: boolean };
-      if (p?.key) { setHeal(cur => ({ ...cur, [p.key as string]: { message: p.message ?? "", failed: p.failed } })); }
-      //: pending — 앱은 띄웠고 데몬을 기다리는 중. 버튼은 "조치 중…" 으로 두고
-      //: 최종 결과(자동 조치함/실패)가 올 때 푼다 — 사용자가 또 누르지 않게.
-      if (p?.pending && p?.key) { setHealing(p.key); } else { setHealing(null); }
-    }
-    if (type === "diagnosticsUpdate") { setHealing(null); }
-  }, []));
+  const { heal, start } = useSelfHeal();
 
   const handleRetry = () => {
     setRetrying(true);
@@ -198,10 +186,11 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
           fontFamily: "var(--vscode-editor-font-family, monospace)",
           color: "var(--vscode-descriptionForeground, #888)",
         }}>
-          Model: <span style={{ color: "var(--vscode-editor-foreground)" }}>{diagnostics.resolved_model_id}</span>
+          연결 검증 모델: <span style={{ color: "var(--vscode-editor-foreground)" }}>{diagnostics.resolved_model_id}</span>
           {diagnostics.resolved_region && (
             <> · Region: <span style={{ color: "var(--vscode-editor-foreground)" }}>{diagnostics.resolved_region}</span></>
           )}
+          <div style={{ fontFamily: "var(--vscode-font-family, sans-serif)", marginTop: 3 }}>진단 시 호출에 성공한 모델입니다. 작업 종류와 폴백에 따라 실제 사용 모델은 달라질 수 있습니다.</div>
           {diagnostics.is_cross_region_profile && (
             <span style={{ color: "var(--vscode-editorWarning-foreground, #fa0)", marginLeft: 6 }}>[cross-region]</span>
           )}
@@ -293,11 +282,10 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
                     )}
                     {!isReady && (
                       <button
-                        disabled={healing === item.key}
+                        disabled={!!heal[item.key]?.pending}
                         onClick={(e) => {
                           e.stopPropagation();
-                          setHealing(item.key);
-                          postMessage("webview.diagnostics.fix", { key: item.key });
+                          start(item.key);
                         }}
                         title={autoFixable(item.key) ? "코어가 직접 고쳐 봅니다 — 안 되면 다음 행동을 안내합니다." : "설정 화면을 엽니다."}
                         style={{
@@ -307,10 +295,10 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
                           borderRadius: 3,
                           padding: "2px 8px",
                           fontSize: 10,
-                          cursor: healing === item.key ? "wait" : "pointer",
+                          cursor: !!heal[item.key]?.pending ? "wait" : "pointer",
                         }}
                       >
-                        {healing === item.key ? "조치 중…" : (autoFixable(item.key) ? "자동 조치" : "설정 열기")}
+                        {!!heal[item.key]?.pending ? "조치 중…" : (autoFixable(item.key) ? "자동 조치" : "설정 열기")}
                       </button>
                     )}
                   </div>

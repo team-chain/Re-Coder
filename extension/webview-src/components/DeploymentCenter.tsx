@@ -1,8 +1,10 @@
 /** ReCoder Workspace 안에서 사용하는 배포 센터와 AI-DLC 배포 결정 카드. */
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState, useReducer } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { AwsConnection } from "./AwsConnection";
+import { EcsExecutionRole } from "./EcsExecutionRole";
+import { EcsDeploymentProgress, EcsProgressStatus, ecsProgressReducer, initialEcsProgress, ecsProgressBusy } from "./EcsDeploymentProgress";
 
 //: 예전에 폼에 박혀 있던 값. **이제 기본값으로 쓰지 않는다.**
 //: 여기 남겨 둔 이유는 회귀 테스트가 "이 값이 다시 기본값이 되지 않았는지"
@@ -418,6 +420,9 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const [checking, setChecking] = useState(true);
   const [savingDecision, setSavingDecision] = useState(false);
   const [checkingEcsPermissions, setCheckingEcsPermissions] = useState(false);
+  const [ecsProgress, dispatchEcsProgress] = useReducer(ecsProgressReducer, initialEcsProgress);
+  const trackedEcsId = useRef<string | undefined>(undefined);
+  const ecsBusy = ecsProgressBusy(ecsProgress);
   const pendingEcsDeploymentRef = useRef<Record<string, unknown> | null>(null);
   const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
   const [awsReady, setAwsReady] = useState(false);
@@ -479,6 +484,8 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         setMessage(permission?.advisory_only
           ? "IAM 역할 경로 때문에 권한 시뮬레이션을 완료하지 못했습니다. 명시적인 부족 권한은 없어 배포를 시작합니다…"
           : "ECS 배포 대상 리전의 권한을 확인했습니다. 배포를 시작합니다…");
+        trackedEcsId.current = undefined;
+        dispatchEcsProgress({ type: "start" });
         postMessage("workspace.deploy.ecs", deploymentRequest);
       } else {
         const detail = permission?.missing_actions?.length
@@ -494,7 +501,8 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     }
     if (type === "workspace.deploy.remediationError") { setApplyingProposalId(null); setMessage((payload as { message?: string })?.message ?? "자동 수정 적용에 실패했습니다."); }
     if (type === "workspace.deploy.ecs.statusResult") {
-      const status = payload as { rollback_proposal?: EcsRollbackProposal | null };
+      const status = payload as EcsProgressStatus & { rollback_proposal?: EcsRollbackProposal | null };
+      dispatchEcsProgress({ type: "status", status });
       const next = status.rollback_proposal;
       if (next?.status === "pending" || next?.status === "failed") setRollbackProposal(next);
       else setRollbackProposal(null);
@@ -509,9 +517,24 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       setResolvingRollback(false);
       setMessage((payload as { message?: string })?.message ?? "롤백 처리에 실패했습니다.");
     }
-    if (type === "workspace.deploy.result") setMessage((payload as { message?: string })?.message ?? "배포 요청을 보냈습니다.");
+    if (type === "workspace.deploy.result") {
+      const result = payload as { message?: string; deployment_id?: string };
+      trackedEcsId.current = result.deployment_id;
+      dispatchEcsProgress({ type: "accepted", deploymentId: result.deployment_id });
+      setMessage(result.message ?? "배포 요청을 보냈습니다.");
+      postMessage("workspace.deploy.ecs.status", { deploymentId: result.deployment_id });
+    }
+    if (type === "workspace.deploy.ecs.error") {
+      dispatchEcsProgress({ type: "rejected", message: (payload as { message?: string })?.message ?? "배포 요청 실패" });
+      setMessage("");
+    }
+    if (type === "workspace.deploy.ecs.statusError") {
+      const error = payload as { message?: string; deploymentId?: string };
+      dispatchEcsProgress({ type: "pollError", message: error.message ?? "Core 연결을 확인하세요.", deploymentId: error.deploymentId });
+    }
     if (type === "workspace.deploy.ecs.policyDenied") {
       //: 브랜치는 코어가 작업 폴더 git 에서 직접 읽는다 — 폼이 보낸 값보다 우선.
+      dispatchEcsProgress({ type: "rejected" });
       setPolicyDenial(payload as PolicyDenial);
       setMessage("");
     }
@@ -579,7 +602,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   useEffect(() => {
     // ECS 이상 감지는 사용자가 다른 배포 탭을 보고 있어도 카드로 보여야 한다.
     // 실제 롤백은 이 폴링이 아니라 아래 승인 버튼으로만 호출된다.
-    const poll = () => postMessage("workspace.deploy.ecs.status", { reportProgress: target === "ecs" });
+    const poll = () => postMessage("workspace.deploy.ecs.status", { deploymentId: trackedEcsId.current });
     poll();
     const timer = window.setInterval(poll, 4000);
     return () => window.clearInterval(timer);
@@ -603,6 +626,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   };
   const generateActions = () => { setMessage("GitHub Actions 워크플로우 생성 중…"); postMessage("generateGithubActions", { workspacePath: "" }); };
   const deployEcs = () => {
+    if (checkingEcsPermissions || ecsBusy) return;
     if (!awsReady) { setTarget("aws"); setMessage("ECS 배포를 시작하려면 AWS 계정을 연결하세요."); return; }
     // 리전이 어긋나면 **실행 전에** 멈춘다. 그대로 보내면 인증 실패로 끝나는데,
     // 원인이 리전이라는 걸 알아채는 데 오래 걸린다(데모에서 실제로 그랬다).
@@ -610,6 +634,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     startEcsDeploy();
   };
   const startEcsDeploy = () => {
+    if (checkingEcsPermissions || ecsBusy) return;
     setPolicyDenial(null);
     setCheckingEcsPermissions(true);
     setMessage("입력한 ECS 리전과 대상 리소스의 권한을 확인 중…");
@@ -810,7 +835,9 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
               {ECS_ENVIRONMENTS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
             </select>
             <div style={{ marginTop: 4, fontSize: 10.5, lineHeight: 1.45, color: "var(--vscode-descriptionForeground, #888)" }}>정책 게이트가 환경·브랜치 규칙을 검사합니다. 브랜치는 열려 있는 작업 폴더의 git 에서 자동 감지합니다.</div>
-          </label></div><button disabled={checkingEcsPermissions} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : "ECS 배포 실행"}</button>
+          </label></div><button disabled={checkingEcsPermissions || ecsBusy} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions || ecsBusy ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : ecsBusy ? "배포 진행 중…" : "ECS 배포 실행"}</button>
+        <EcsExecutionRole key={ecs.aws_region} region={ecs.aws_region} disabled={!awsReady || checkingEcsPermissions || ecsBusy} />
+        <EcsDeploymentProgress state={ecsProgress} />
         {policyDenial && <PolicyDenialCard denial={policyDenial} environment={ecs.environment} onDismiss={() => setPolicyDenial(null)} />}
         {pendingRegionAck && (
           <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 6, border: "1px solid var(--vscode-editorWarning-foreground, #cca700)", background: "rgba(245,180,0,.08)", fontSize: 12 }}>

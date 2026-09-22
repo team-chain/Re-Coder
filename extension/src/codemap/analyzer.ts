@@ -258,6 +258,51 @@ function analyzeJs(src: string): { defs: Map<string, DefMeta>; edges: Array<[str
             if (names.has(callee) && callee !== nm && !JS_KEYWORDS.has(callee)) { edgeSet.add(nm + ' ' + callee); }
         }
     }
+    // Inline route handlers and callbacks have no declared name, but are still functions.
+    // Keep offset IDs separate from human labels (two callbacks may share a line).
+    const strings = stripJs(src, true);
+    const anonymous = /(?:\([^()]*\)|\b[A-Za-z_$][\w$]*)\s*=>|\bfunction\s*\(/g;
+    let match: RegExpExecArray | null;
+    while ((match = anonymous.exec(s))) {
+        const start = anonymous.lastIndex;
+        if (raw.some(([, namedStart]) => namedStart >= match!.index && namedStart <= start)) { continue; }
+        const isArrow = match[0].includes('=>');
+        let bodyStart = start;
+        if (!isArrow) {
+            let depth = 1;
+            while (bodyStart < s.length && depth > 0) {
+                if (s[bodyStart] === '(') { depth++; }
+                if (s[bodyStart] === ')') { depth--; }
+                bodyStart++;
+            }
+        }
+        while (/\s/.test(s[bodyStart] || '') && bodyStart < s.length) { bodyStart++; }
+        let span: [number, number] | null;
+        if (s[bodyStart] === '{') { span = bodySpan(s, bodyStart); }
+        else if (isArrow) {
+            let end = bodyStart, depth = 0;
+            for (; end < s.length; end++) {
+                const char = s[end];
+                if (depth === 0 && /[,;\n)\]}]/.test(char)) { break; }
+                if (/[({\[]/.test(char)) { depth++; }
+                if (/[)}\]]/.test(char)) { depth--; }
+            }
+            span = [bodyStart, end];
+        } else { continue; }
+        if (!span) { continue; }
+        const line = src.slice(0, match.index).split('\n').length;
+        const route = strings.slice(Math.max(0, match.index - 200), match.index)
+            .match(/\b(?:app|router)\s*\.\s*(get|post|put|patch|delete|options|head|all|use)\s*\(\s*(['"])([^'"\n]*)\2\s*,\s*(?:async\s*)?$/i);
+        const id = `anonymous@${match.index}`;
+        const label = route ? `${route[1].toUpperCase()} ${route[3]} · 익명` : `익명 콜백 · ${line}행`;
+        defs.set(id, { name: label, cls: null });
+        const body = s.slice(span[0], span[1]);
+        const calls = /\b([A-Za-z_$][\w$]*)\s*\(/g;
+        let call: RegExpExecArray | null;
+        while ((call = calls.exec(body))) {
+            if (names.has(call[1]) && !JS_KEYWORDS.has(call[1])) { edgeSet.add(id + ' ' + call[1]); }
+        }
+    }
     return { defs, edges: [...edgeSet].map((e) => e.split(' ') as [string, string]) };
 }
 
@@ -301,6 +346,39 @@ function resolveRef(importerId: string, ref: string, idSet: Set<string>): string
         if (idSet.has(cand + ext)) { return cand + ext; }
     }
     return null;
+}
+
+/** Declared Node entrypoints need no incoming import; never execute package scripts. */
+function packageEntrypoints(root: string, idSet: Set<string>): Set<string> {
+    const entries = new Set<string>();
+    const source = readText(path.join(root, 'package.json'));
+    if (!source) { return entries; }
+    try {
+        const pkg = JSON.parse(source);
+        if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) { return entries; }
+        const add = (value: unknown) => {
+            if (typeof value !== 'string' || !value.trim() || path.isAbsolute(value)) { return; }
+            const normalized = path.posix.normalize(value.replace(/\\/g, '/'));
+            if (normalized === '..' || normalized.startsWith('../')) { return; }
+            const id = resolveRef('package.json', normalized, idSet);
+            if (id) { entries.add(id); }
+        };
+        add(pkg.main ?? 'index.js');
+        if (typeof pkg.bin === 'string') { add(pkg.bin); }
+        else if (pkg.bin && typeof pkg.bin === 'object' && !Array.isArray(pkg.bin)) {
+            Object.values(pkg.bin).forEach(add);
+        }
+        if (pkg.scripts && typeof pkg.scripts === 'object' && !Array.isArray(pkg.scripts)) {
+            for (const script of Object.values(pkg.scripts)) {
+                if (typeof script !== 'string') { continue; }
+                // Only an unambiguous direct invocation. Do not guess around shell wrappers/options.
+                const match = script.trim().match(/^(?:node|nodejs|tsx|ts-node)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/);
+                const candidate = match && (match[1] || match[2] || match[3]);
+                if (candidate && !candidate.startsWith('-')) { add(candidate); }
+            }
+        }
+    } catch { /* Missing/malformed package metadata must not hide the rest of the graph. */ }
+    return entries;
 }
 
 function finalizeFile(defs: Map<string, DefMeta>, rawEdges: Array<[string, string]>, p: string, name: string): FileResult {
@@ -427,9 +505,10 @@ export function analyzeProject(root: string): ProjectResult {
     }
 
     const nodes: MapNode[] = [];
+    const packageEntries = packageEntrypoints(root, idSet);
     for (const f of files) {
         const name = path.basename(f.id);
-        const layer = layerOf(name);
+        const layer = packageEntries.has(f.id) ? 'entry' : layerOf(name);
         const flags: string[] = [];
         const ind = inDeg.get(f.id) || 0;
         const isEntry = layer === 'entry';
@@ -445,8 +524,8 @@ export function analyzeProject(root: string): ProjectResult {
             findings.push({
                 severity: 'bad', kind: 'orphan', node: n.id,
                 title: `고립된 파일 — ${n.name}`,
-                detail: '어떤 파일도 이 파일을 import/include 하지 않습니다. 교체 후 연결이 끊긴 잔재이거나, 붙였어야 할 연결이 누락된 것일 수 있습니다.',
-                fix: '삭제 후보 · 또는 연결 누락',
+                detail: '정적 분석에서 이 파일을 참조하는 import/include를 찾지 못했습니다. 별도 실행 파일·테스트·동적 로딩 대상일 수 있으므로 실제 사용 경로를 확인하세요.',
+                fix: '실행·테스트·동적 로딩 경로 확인',
             });
         }
     }

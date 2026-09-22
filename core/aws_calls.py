@@ -77,6 +77,7 @@ logger = logging.getLogger(__name__)
 # `scan_source()` 는 무엇을 건너뛰었는지 함께 돌려준다.
 
 SKIPPED_DIRS: dict[str, str] = {
+    ".venv":      "설치된 Python 의존성 — ReCoder 소스의 AWS 호출이 아니다",
     "tests":       "테스트 코드 — 실제 배포 경로가 아니다",
     "__pycache__": "빌드 산출물",
     "eval":        "평가 스크립트 — 사용자 배포 경로가 아니다",
@@ -86,6 +87,9 @@ SKIPPED_DIRS: dict[str, str] = {
 }
 
 SKIPPED_FILES: dict[str, str] = {
+    "ecs_execution_role.py": "Level 4 사용자 승인 온보딩 전용 — 배포 파이프라인에서 호출하지 않는다. "
+                             "iam:CreateRole/AttachRolePolicy는 일반 배포 권한표에 부여하지 않으며 별도 설정 권한이 필요하다. "
+                             "test_ecs_execution_role_setup.py에서 승인·권한 부족·실제 호출 범위를 검증한다.",
     "server.py":      "죽은 코드 — 라우터가 api/routes/ 로 이관됨 (이슈 카드 등록됨)",
     "test_models.py": "임시 확인용 스크립트",
     "aws_calls.py":   "이 파일 자신 — 예시 문자열이 오탐을 만든다",

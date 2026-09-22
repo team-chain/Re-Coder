@@ -7,7 +7,7 @@
  *   - 파일 뷰: 파일을 누르면 그 안의 함수/메서드 호출 그래프.
  *
  * 관통 원칙: 선은 사실(import/call), 색·위치는 해석(고립/과부하/계층).
- * 데이터는 Core 정적 분석(/api/map/*)에서 옴 — LLM 아님.
+ * 데이터는 확장 내부 정적 분석에서 옴 — Core·LLM 연결 불필요.
  */
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
@@ -60,32 +60,28 @@ const LAYER_LABEL: Record<string, string> = {
 interface Pos { x: number; y: number; }
 
 // ── 레이아웃 계산 ────────────────────────────────────────────────────────────
-function layoutProject(nodes: ProjNode[], width: number): { pos: Map<string, Pos>; height: number; rows: string[] } {
-  const rows = LAYER_ORDER.filter((l) => nodes.some((n) => n.layer === l));
-  const topPad = 34, rowH = 86;
+export function layoutProject(nodes: ProjNode[], width: number): { pos: Map<string, Pos>; height: number; bands: { label: string; y: number }[] } {
   const pos = new Map<string, Pos>();
-  rows.forEach((layer, li) => {
-    const y = topPad + li * rowH;
-    const ns = nodes.filter((n) => n.layer === layer);
-    ns.forEach((n, ni) => {
-      const x = ((ni + 1) / (ns.length + 1)) * width;
-      pos.set(n.id, { x, y });
+  const bands: { label: string; y: number }[] = [];
+  const cols = Math.max(1, Math.floor((width - 24) / 190));
+  let y = 56;
+  for (const layer of LAYER_ORDER) {
+    const members = nodes.filter(n => (LAYER_ORDER.includes(n.layer) ? n.layer : "other") === layer);
+    if (!members.length) continue;
+    bands.push({ label: LAYER_LABEL[layer], y });
+    members.forEach((node, index) => {
+      pos.set(node.id, { x: ((index % cols) + 0.5) * width / cols, y: y + Math.floor(index / cols) * 86 });
     });
-  });
-  return { pos, height: topPad + rows.length * rowH + 16, rows };
+    y += Math.ceil(members.length / cols) * 86 + 30;
+  }
+  return { pos, height: Math.max(180, y), bands };
 }
 
-function layoutGrid(nodes: { id: string }[], width: number, cols: number): { pos: Map<string, Pos>; height: number } {
-  const topPad = 30, cellH = 78;
+export function layoutGrid(nodes: { id: string }[], width: number): { pos: Map<string, Pos>; height: number } {
+  const cols = Math.max(1, Math.floor((width - 24) / 190));
   const pos = new Map<string, Pos>();
-  nodes.forEach((n, i) => {
-    const r = Math.floor(i / cols), c = i % cols;
-    const x = ((c + 1) / (cols + 1)) * width;
-    const y = topPad + r * cellH;
-    pos.set(n.id, { x, y });
-  });
-  const rowCount = Math.ceil(nodes.length / cols) || 1;
-  return { pos, height: topPad + rowCount * cellH + 12 };
+  nodes.forEach((node, index) => pos.set(node.id, { x: ((index % cols) + 0.5) * width / cols, y: 40 + Math.floor(index / cols) * 82 }));
+  return { pos, height: Math.max(180, 40 + Math.ceil(nodes.length / cols) * 82) };
 }
 
 // ── 노드 칩 ──────────────────────────────────────────────────────────────────
@@ -100,7 +96,10 @@ const NodeChip: React.FC<{
   return (
     <div
       onClick={onClick}
-      title={clickable ? "열기" : undefined}
+      title={title + (clickable ? " — 열기" : "")}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={e => { if (clickable && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick?.(); } }}
       style={{
         position: "absolute", left: x, top: y, transform: "translate(-50%,-50%)",
         cursor: clickable ? "pointer" : "default", zIndex: 2,
@@ -154,7 +153,7 @@ const Canvas: React.FC<{
         </marker>
       </defs>
       {bands?.map((b, i) => (
-        <text key={i} x={8} y={b.y - 18} fill={C.dim} fontSize={8.5} style={{ textTransform: "uppercase", letterSpacing: 0.6 }}>{b.label}</text>
+        <text key={i} x={8} y={b.y - 34} fill={C.dim} fontSize={8.5} style={{ textTransform: "uppercase", letterSpacing: 0.6 }}>{b.label}</text>
       ))}
       {edges.map((e, i) => {
         const a = pos.get(e.from), b = pos.get(e.to);
@@ -219,7 +218,7 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 캔버스 폭: 컨테이너 폭과 노드 수 중 큰 값(좁으면 가로 스크롤).
+  // 노드 폭을 확보하고 화면 폭에 맞춰 계층 안에서 줄바꿈한다.
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -253,13 +252,8 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
 
   // ── 프로젝트 뷰 레이아웃 ──
   const projLayout = project ? layoutProject(project.nodes, width) : null;
-  const projBands = project && projLayout
-    ? projLayout.rows.map((layer, li) => ({ label: LAYER_LABEL[layer] ?? layer, y: 34 + li * 86 }))
-    : [];
-
-  // ── 파일 뷰 레이아웃 ──
-  const fileCols = width < 380 ? 2 : 3;
-  const fileLayout = file ? layoutGrid(file.nodes, width, fileCols) : null;
+  const projBands = projLayout?.bands ?? [];
+  const fileLayout = file ? layoutGrid(file.nodes, width) : null;
 
   const headerBtn: React.CSSProperties = {
     background: "none", border: `1px solid ${C.line}`, color: C.dim,
@@ -277,14 +271,14 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
           {view === "file" && (
             <button style={headerBtn} onClick={() => setView("project")}>← 아키텍처</button>
           )}
-          <button style={headerBtn} onClick={loadProject}>다시 스캔</button>
+          <button style={{ ...headerBtn, opacity: loading ? .5 : 1 }} disabled={loading} onClick={loadProject}>새로고침</button>
         </div>
       </div>
 
       <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5, marginBottom: 10 }}>
         {view === "project"
           ? <>선은 실제 <b style={{ color: C.ink }}>import</b>(사실), 위치는 계층(입구→저장). 파일을 누르면 그 안으로 들어갑니다. 정적 분석이라 동적 호출은 표시되지 않습니다.</>
-          : <>파일 안 <b style={{ color: C.ink }}>함수·메서드 호출</b>(사실). 노랑은 호출이 몰린 과부하 지점입니다.</>}
+          : <>파일 안 <b style={{ color: C.ink }}>함수·메서드·콜백 호출</b>의 정적 분석 결과입니다. 노랑은 호출이 몰린 과부하 지점입니다.</>}
       </div>
 
       {loading && (
@@ -307,7 +301,7 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
           <div style={{ fontSize: 10.5, color: C.dim, marginBottom: 6 }}>
             {project.files_scanned}개 파일 · {project.edges.length}개 의존
           </div>
-          <div style={{ overflowX: "auto" }}>
+          <div style={{ overflow: "auto", maxHeight: 560 }}>
             <Canvas pos={projLayout.pos} edges={project.edges} height={projLayout.height} width={width} bands={projBands}>
               {project.nodes.map((n) => {
                 const p = projLayout.pos.get(n.id)!;
@@ -334,14 +328,14 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
       {!loading && view === "file" && file && fileLayout && (
         <>
           <div style={{ fontSize: 10.5, color: C.dim, marginBottom: 6 }}>
-            {file.functions_scanned}개 함수 · {file.edges.length}개 호출
+            {file.functions_scanned}개 함수·콜백 · {file.edges.length}개 호출
             <button onClick={() => postMessage("map.openFile", { id: project?.nodes.find((n) => n.name === file.name)?.id ?? file.name })}
               style={{ ...headerBtn, marginLeft: 8, fontSize: 10, padding: "2px 7px" }}>에디터에서 열기</button>
           </div>
           {file.nodes.length === 0 ? (
-            <div style={{ fontSize: 11.5, color: C.dim, padding: "12px 0" }}>함수/메서드 정의가 없습니다.</div>
+            <div style={{ fontSize: 11.5, color: C.dim, padding: "12px 0" }}>정적 분석으로 식별한 함수·콜백이 없습니다. 동적으로 만들어진 함수는 표시되지 않을 수 있습니다.</div>
           ) : (
-            <div style={{ overflowX: "auto" }}>
+            <div style={{ overflow: "auto", maxHeight: 560 }}>
               <Canvas pos={fileLayout.pos} edges={file.edges} height={fileLayout.height} width={width}>
                 {file.nodes.map((n) => {
                   const p = fileLayout.pos.get(n.id)!;

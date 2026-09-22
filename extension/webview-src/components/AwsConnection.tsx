@@ -176,7 +176,9 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       <div style={{ color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 15, fontWeight: 700 }}>✓ AWS 연결됨</div>
       <div style={{ marginTop: 9, fontSize: 12, lineHeight: 1.6 }}>
         <div>계정: <b>{status.identity?.account ?? "확인됨"}</b></div>
-        <div>리전: <b>{status.region || "ap-northeast-2"}</b>{status.access_key_last4 ? ` · 키 끝 ${status.access_key_last4}` : ""}{status.storage === "aws_profile" && status.profile ? ` · 프로필 ${status.profile}` : ""}</div>
+        <div>리전: <b>{status.region || "ap-northeast-2"}</b>{status.storage !== "assumed_role" && status.access_key_last4 ? ` · 키 끝 ${status.access_key_last4}` : ""}{status.storage === "aws_profile" && status.profile ? ` · 프로필 ${status.profile}` : ""}</div>
+        {status.storage === "aws_credentials_file" && <div>{!status.profile || status.profile === "default" ? "기본 프로필로 연결됨(자동)" : `프로필 ${status.profile}로 연결됨(자동)`}</div>}
+        {status.storage === "env" && <div>환경변수의 자격증명으로 연결됨</div>}
         {status.storage === "assumed_role" && (
           <div>권한: <b>배포 전용 역할</b>{status.profile ? ` (기반 프로필 ${status.profile})` : ""}{status.expires_at ? ` · 임시 자격증명 ${roleExpiryLabel(status.expires_at)} 만료, 자동 갱신` : ""}</div>
         )}
@@ -194,7 +196,10 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       <div style={{ marginTop: 11, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 }}>
         {status.storage === "assumed_role"
           ? "장기 키를 저장하지 않습니다. 보관하는 건 역할 ARN 하나이고, 임시 자격증명은 만료 전에 코어가 다시 빌립니다."
-          : "키는 VS Code의 OS 보안 금고에 암호화되어 저장되며 프로젝트 파일에는 기록되지 않습니다."}
+          : status.storage === "aws_profile" || status.storage === "aws_credentials_file"
+            ? "AWS CLI 프로필의 자격증명을 사용합니다. 키를 다시 입력할 필요가 없습니다."
+            : status.storage === "env" ? "Core 프로세스에 설정된 AWS 환경변수를 사용합니다."
+              : "연결 화면에서 입력한 키는 VS Code의 OS 보안 금고에 저장됩니다."}
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 13, flexWrap: "wrap" }}>
         <button disabled={busy} onClick={() => { setBusy(true); setError(""); postMessage("aws.permissions.check"); }} style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>{busy ? "권한 점검 중…" : "권한 다시 점검"}</button>

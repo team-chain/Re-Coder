@@ -55,6 +55,11 @@ def _isolate(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(aws, "_inspect_deploy_permissions", lambda *a, **k: None)
     #: 파일 기반 폴백 경로가 개발자 홈을 읽지 않게.
     monkeypatch.setattr(aws, "CREDENTIALS_FILE", Path("/nonexistent/aws_credentials.json"))
+    #: ~/.aws 도 마찬가지다 — 개발자 맥에 default 프로필이 있으면 "기본 프로필로
+    #: 연결됨" 폴백이 기반을 찾아내서, 기반 없음(400) 을 기대하는 테스트가 깨진다.
+    #: 프로필이 필요한 테스트는 _profiles() 로 tmp_path 를 직접 가리킨다.
+    monkeypatch.setattr(aws, "AWS_CREDENTIALS_FILE", Path("/nonexistent/aws/credentials"))
+    monkeypatch.setattr(aws, "AWS_CONFIG_FILE", Path("/nonexistent/aws/config"))
     yield
     for key, value in before.items():
         if value is None:

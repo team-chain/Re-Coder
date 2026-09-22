@@ -1,694 +1,129 @@
-/**
- * ReCoder — Replay Component (§38)
- *
- * Deploy Replay: 배포 이벤트 타임라인을 영상처럼 재생하는 UI.
- *
- * 기능:
- *   - 속도 조절: 0.5x / 1x / 2x
- *   - 시점 점프: 타임라인 바 클릭 또는 이벤트 클릭
- *   - 이벤트 종류별 아이콘/색상 구분
- *   - Postmortem 자동 생성 내용 표시 (§38.4)
- */
-
-import React, { useState, useEffect, useRef, useCallback } from "react";
+/** Saved deployment history, with a separate review step before rollback. */
+import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import { serviceLink } from "./EcsDeploymentProgress";
 
-// ---------------------------------------------------------------------------
-// Types (ReplayTimeline과 동일한 구조 — timeline_builder.py 참조)
-// ---------------------------------------------------------------------------
-
-interface ReplayEvent {
-  ts: string;
-  ts_unix: number;
-  kind:
-    | "DEPLOY_START"
-    | "APPROVAL"
-    | "ROLLBACK"
-    | "INCIDENT"
-    | "LLM_CALL"
-    | "GIT_COMMIT"
-    | "METRIC_SPIKE";
-  title: string;
-  detail: string;
-  actor: string;
-  severity: "INFO" | "WARN" | "ERROR" | "CRITICAL";
-  metadata: Record<string, unknown>;
+export interface HistoryEntry {
+  key: string; source: "local" | "ecs"; deployment_id: string; project_id: string;
+  target: string; region: string; status: string; status_text: string; started_at: string;
+  image: string; service_url: string; error: string; remedy: string; warnings: string[];
+  events: Array<{ at: string; title: string; detail: string }>;
+  rollback: { available: boolean; reason: string; target: string; approval_level: number };
 }
-
-interface ReplayTimeline {
-  deploy_id: string;
-  service: string;
-  cluster: string;
-  region: string;
-  start_ts: string;
-  end_ts: string | null;
-  duration_seconds: number;
-  events: ReplayEvent[];
-  otel_available: boolean;
-  root_cause: string;
-  prevention: string;
-  postmortem_md: string;
+export interface HistoryData { entries: HistoryEntry[]; total: number; warnings: string[] }
+export interface HistoryState {
+  data: HistoryData | null; selected: string; loading: boolean; requestId: string; error: string;
+  review: string; rollbackRequestId: string; busyKey: string;
+  result: { key: string; message: string; ok: boolean } | null;
 }
-
-type PlaybackSpeed = 0.5 | 1 | 2;
-type ReplayState = "idle" | "loading" | "ready" | "playing" | "paused" | "done" | "error";
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const KIND_META: Record<
-  ReplayEvent["kind"],
-  { icon: string; color: string; label: string }
-> = {
-  DEPLOY_START:  { icon: "🚀", color: "#3b82f6", label: "배포 시작" },
-  APPROVAL:      { icon: "✅", color: "#22c55e", label: "승인" },
-  ROLLBACK:      { icon: "↩️", color: "#f59e0b", label: "롤백" },
-  INCIDENT:      { icon: "🚨", color: "#ef4444", label: "인시던트" },
-  LLM_CALL:      { icon: "🤖", color: "#a78bfa", label: "AI 호출" },
-  GIT_COMMIT:    { icon: "📝", color: "#64748b", label: "커밋" },
-  METRIC_SPIKE:  { icon: "📈", color: "#fb923c", label: "메트릭 스파이크" },
-};
-
-const SEVERITY_COLOR: Record<ReplayEvent["severity"], string> = {
-  INFO:     "var(--vscode-editor-foreground, #ccc)",
-  WARN:     "#f59e0b",
-  ERROR:    "#ef4444",
-  CRITICAL: "#b91c1c",
-};
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) { return `${Math.round(seconds)}s`; }
-  const m = Math.floor(seconds / 60);
-  const s = Math.round(seconds % 60);
-  return `${m}m ${s}s`;
-}
-
-function formatTs(ts: string): string {
-  try {
-    return new Date(ts).toLocaleTimeString("ko-KR", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return ts.slice(11, 19);
+export const initialHistory: HistoryState = { data: null, selected: "", loading: false, requestId: "", error: "", review: "", rollbackRequestId: "", busyKey: "", result: null };
+type Action =
+  | { type: "load"; requestId: string }
+  | { type: "loaded"; requestId: string; data: HistoryData }
+  | { type: "error"; requestId: string; message: string }
+  | { type: "select"; key: string } | { type: "review"; key: string }
+  | { type: "rollback"; key: string; requestId: string }
+  | { type: "result"; requestId: string; message: string; ok: boolean };
+export function historyReducer(state: HistoryState, action: Action): HistoryState {
+  switch (action.type) {
+    case "load": return { ...state, loading: true, requestId: action.requestId, error: "", review: "" };
+    case "loaded":
+      if (action.requestId !== state.requestId) return state;
+      return { ...state, data: action.data, loading: false, error: "", selected: action.data.entries.some(e => e.key === state.selected) ? state.selected : action.data.entries[0]?.key ?? "" };
+    case "error": return action.requestId === state.requestId ? { ...state, loading: false, error: action.message } : state;
+    case "select": return { ...state, selected: action.key, review: "" };
+    case "review": return state.busyKey ? state : { ...state, review: action.key };
+    case "rollback":
+      if (state.busyKey || state.review !== action.key || !state.data?.entries.find(e => e.key === action.key)?.rollback.available) return state;
+      return { ...state, busyKey: action.key, rollbackRequestId: action.requestId, review: "", result: null };
+    case "result":
+      if (!state.busyKey || action.requestId !== state.rollbackRequestId) return state;
+      return { ...state, busyKey: "", rollbackRequestId: "", result: { key: state.busyKey, message: action.message, ok: action.ok } };
   }
 }
-
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
-
-const EventDot: React.FC<{
-  event: ReplayEvent;
-  position: number; // 0~100%
-  isActive: boolean;
-  onClick: () => void;
-}> = ({ event, position, isActive, onClick }) => {
-  const meta = KIND_META[event.kind] ?? KIND_META.GIT_COMMIT;
-  return (
-    <div
-      title={`${meta.icon} ${event.title}`}
-      onClick={onClick}
-      style={{
-        position: "absolute",
-        left: `${position}%`,
-        top: "50%",
-        transform: "translate(-50%, -50%)",
-        width: isActive ? 14 : 10,
-        height: isActive ? 14 : 10,
-        borderRadius: "50%",
-        background: meta.color,
-        border: `2px solid ${isActive ? "#fff" : "transparent"}`,
-        cursor: "pointer",
-        transition: "all 0.15s",
-        zIndex: isActive ? 10 : 5,
-        boxShadow: isActive ? `0 0 6px ${meta.color}` : "none",
-      }}
-    />
-  );
-};
-
-const EventRow: React.FC<{
-  event: ReplayEvent;
-  isActive: boolean;
-  onClick: () => void;
-}> = ({ event, isActive, onClick }) => {
-  const meta = KIND_META[event.kind] ?? KIND_META.GIT_COMMIT;
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 8,
-        padding: "6px 8px",
-        borderRadius: 5,
-        background: isActive
-          ? `${meta.color}22`
-          : "transparent",
-        border: `1px solid ${isActive ? meta.color : "transparent"}`,
-        cursor: "pointer",
-        marginBottom: 3,
-        transition: "all 0.12s",
-      }}
-    >
-      <span style={{ fontSize: 14, lineHeight: 1.4, flexShrink: 0 }}>{meta.icon}</span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontSize: 11,
-            fontWeight: isActive ? 600 : 400,
-            color: isActive ? meta.color : "var(--vscode-editor-foreground, #ccc)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {event.title}
-        </div>
-        {isActive && (
-          <div
-            style={{
-              fontSize: 10,
-              color: "var(--vscode-descriptionForeground, #888)",
-              marginTop: 2,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-            }}
-          >
-            {event.detail.slice(0, 200)}
-          </div>
-        )}
-      </div>
-      <div
-        style={{
-          fontSize: 10,
-          color: SEVERITY_COLOR[event.severity],
-          flexShrink: 0,
-          fontFamily: "monospace",
-        }}
-      >
-        {formatTs(event.ts)}
-      </div>
+const muted = "var(--vscode-descriptionForeground, #aaa)";
+const border = "1px solid var(--vscode-panel-border, #444)";
+const card: React.CSSProperties = { border, borderRadius: 7, padding: 14, marginTop: 12, overflowWrap: "anywhere" };
+const button: React.CSSProperties = { border, borderRadius: 5, padding: "7px 12px", cursor: "pointer", color: "var(--vscode-button-foreground, white)", background: "var(--vscode-button-background, #0078d4)" };
+function date(value: string): string {
+  const parsed = new Date(value);
+  return value && !Number.isNaN(parsed.valueOf()) ? parsed.toLocaleString("ko-KR") : "시각 미기록";
+}
+export function filterHistory(entries: HistoryEntry[], source: string, search: string): HistoryEntry[] {
+  const term = search.trim().toLocaleLowerCase();
+  return entries.filter(e => (source === "all" || e.source === source) && `${e.target} ${e.image} ${e.project_id} ${e.deployment_id}`.toLocaleLowerCase().includes(term));
+}
+export function ReplayView({ state, source, search, onSource, onSearch, onRefresh, onSelect, onReview, onConfirm }: {
+  state: HistoryState; source: string; search: string;
+  onSource: (source: string) => void; onSearch: (search: string) => void; onRefresh: () => void;
+  onSelect: (key: string) => void; onReview: (key: string) => void; onConfirm: (entry: HistoryEntry) => void;
+}) {
+  const rows = filterHistory(state.data?.entries ?? [], source, search);
+  const selected = rows.find(e => e.key === state.selected);
+  const link = serviceLink(selected?.service_url);
+  const busy = Boolean(state.busyKey);
+  const result = selected && state.result?.key === selected.key ? state.result : null;
+  return <section style={{ fontSize: 13, lineHeight: 1.6 }} aria-label="배포 이력 및 롤백">
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}><h3 style={{ margin: 0 }}>배포 이력 · 롤백</h3><button onClick={onRefresh} disabled={state.loading || busy} style={button}>{state.loading ? "불러오는 중…" : "새로고침"}</button></div>
+    <p style={{ color: muted }}>이 컴퓨터에 저장된 배포 기록입니다. 현재 실행 상태와 과금 여부는 별도로 확인하세요.</p>
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <select aria-label="배포 유형" value={source} onChange={e => onSource(e.target.value)} style={{ padding: 7 }}><option value="all">전체</option><option value="ecs">ECS</option><option value="local">로컬</option></select>
+      <input aria-label="배포 이력 검색" value={search} placeholder="서비스·컨테이너·이미지 검색" onChange={e => onSearch(e.target.value)} style={{ flex: 1, minWidth: 150, padding: 7 }} />
     </div>
-  );
-};
-
-// ---------------------------------------------------------------------------
-// Main Component
-// ---------------------------------------------------------------------------
-
+    {state.error && <p role="alert" style={{ color: "var(--vscode-errorForeground, #f48771)", whiteSpace: "pre-wrap" }}>이력 조회 실패: {state.error}{state.data && " · 마지막 조회 결과를 유지합니다."}</p>}
+    {!!state.data?.warnings.length && <div role="alert" style={{ color: "var(--vscode-editorWarning-foreground, #cca700)" }}>{state.data.warnings.map((warning, i) => <p key={i}>{warning}</p>)}</div>}
+    {!state.data && !state.error && <p role="status">배포 이력을 불러오는 중…</p>}
+    {state.data && <p style={{ color: muted }}>{rows.length}건 표시 · 저장된 기록 {state.data.total}건{state.data.total > state.data.entries.length && ` 중 최근 ${state.data.entries.length}건을 조회했습니다.`}</p>}
+    {state.data && rows.length === 0 && <p>{state.data.total === 0 ? "저장된 배포 기록이 없습니다. 배포 후 이곳에 이력이 표시됩니다." : "조건에 맞는 배포 기록이 없습니다."}</p>}
+    <div style={{ display: "grid", gap: 6, maxHeight: 330, overflowY: "auto", marginTop: 8 }}>
+      {rows.map(row => <button key={row.key} aria-pressed={row.key === state.selected} onClick={() => onSelect(row.key)} style={{ textAlign: "left", padding: "10px 12px", border: row.key === state.selected ? "1px solid var(--vscode-focusBorder, #007fd4)" : border, borderRadius: 6, background: row.key === state.selected ? "var(--vscode-list-activeSelectionBackground, #23435b)" : "var(--vscode-editorWidget-background, #252526)", color: "var(--vscode-editor-foreground, #ddd)", cursor: "pointer", overflowWrap: "anywhere" }}>
+        <b>{row.source === "ecs" ? "ECS" : "로컬"} · {row.target}</b> <span style={{ marginLeft: 8 }}>{row.status_text}</span><div style={{ fontSize: 11 }}>{date(row.started_at)}{row.region && ` · ${row.region}`}</div><div style={{ fontSize: 11, color: muted }}>{row.image}</div>
+      </button>)}
+    </div>
+    {rows.length > 0 && !selected && <p>기록을 선택하면 상세 내용이 표시됩니다.</p>}
+    {selected && <article style={card}>
+      <h4 style={{ margin: "0 0 6px" }}>{selected.target} · {selected.status_text}</h4><div style={{ color: muted, fontSize: 11 }}>배포 ID: {selected.deployment_id}</div>
+      {selected.error && <p style={{ whiteSpace: "pre-wrap" }}>{selected.error}</p>}{selected.remedy && <p>조치: {selected.remedy}</p>}
+      {link && <a href={link} target="_blank" rel="noreferrer">기록된 서비스 URL 열기 ↗</a>}
+      {!!selected.warnings.length && <div style={{ marginTop: 12, color: "var(--vscode-editorWarning-foreground, #cca700)" }}><b>기록 당시의 안내</b><ul style={{ paddingLeft: 20 }}>{selected.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></div>}
+      <ol style={{ paddingLeft: 22 }}>{selected.events.map((event, i) => <li key={i} style={{ marginBottom: 10 }}><b>{event.title}</b><div style={{ color: muted, fontSize: 11 }}>{date(event.at)}</div>{event.detail && <div style={{ whiteSpace: "pre-wrap" }}>{event.detail}</div>}</li>)}</ol>
+      <div style={{ borderTop: border, paddingTop: 10 }}><b>이전 버전으로 복귀</b>
+        {selected.rollback.target && <div style={{ margin: "6px 0", fontFamily: "var(--vscode-editor-font-family, monospace)" }}>{selected.rollback.target}</div>}
+        {!selected.rollback.available && <p style={{ color: muted }}>{selected.rollback.reason}</p>}
+        {selected.rollback.available && state.review !== selected.key && <button onClick={() => onReview(selected.key)} disabled={busy || state.loading} style={button}>{state.busyKey === selected.key ? "롤백 처리 중…" : "롤백 대상 확인"}</button>}
+        {state.review === selected.key && <div role="group" aria-label="롤백 실행 확인" style={card}><b>{selected.source === "ecs" ? "ECS 롤백 승인 · Level 3" : "로컬 롤백 승인"}</b><p><b>{selected.target}</b>를 위의 이전 버전으로 되돌립니다. 실행 중인 서비스에 영향을 줍니다.</p>{selected.source === "ecs" && <p>요청 후 ECS 서비스 안정화 상태를 확인해야 합니다.</p>}<div style={{ display: "flex", gap: 8 }}><button style={button} disabled={busy || state.loading} onClick={() => onConfirm(selected)}>승인하고 롤백</button><button style={button} disabled={busy} onClick={() => onReview("")}>취소</button></div></div>}
+        {result && <p role="status" style={{ whiteSpace: "pre-wrap", color: result.ok ? "var(--vscode-charts-green, #4ec9b0)" : "var(--vscode-errorForeground, #f48771)" }}>{result.message}</p>}
+      </div>
+    </article>}
+  </section>;
+}
 export const Replay: React.FC = () => {
   const { postMessage, useMessage } = useVSCodeApi();
-
-  const [state, setState] = useState<ReplayState>("idle");
-  const [timeline, setTimeline] = useState<ReplayTimeline | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [deployId, setDeployId] = useState("");
-
-  // 재생 상태
-  const [currentIdx, setCurrentIdx] = useState(0);
-  const [speed, setSpeed] = useState<PlaybackSpeed>(1);
-  const [showPostmortem, setShowPostmortem] = useState(false);
-
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-
-  // ── 메시지 수신 ────────────────────────────────────────────────────────
-
-  useMessage(
-    useCallback((msg) => {
-      const { type, payload } = msg as { type: string; payload: unknown };
-      if (type === "replayTimeline") {
-        setTimeline(payload as ReplayTimeline);
-        setState("ready");
-        setCurrentIdx(0);
-        setError(null);
-      }
-      if (type === "errorMessage") {
-        setError((payload as { message: string }).message);
-        setState("error");
-      }
-    }, [])
-  );
-
-  // ── 재생 로직 ──────────────────────────────────────────────────────────
-
-  const stopInterval = useCallback(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
+  const [state, dispatch] = useReducer(historyReducer, initialHistory);
+  const [source, setSource] = useState("all");
+  const [search, setSearch] = useState("");
+  const sequence = useRef(0);
+  const instance = useRef(`history-${Date.now()}-${Math.random()}`);
+  const pendingRollback = useRef("");
+  const load = useCallback(() => {
+    const requestId = `${instance.current}-${++sequence.current}`;
+    dispatch({ type: "load", requestId }); postMessage("replay.history", { requestId });
+  }, [postMessage]);
+  useEffect(() => { load(); }, [load]);
+  useMessage(useCallback(({ type, payload }) => {
+    const p = payload as { requestId: string; history: HistoryData; message?: string; status?: string; warning?: string; auditWarning?: string };
+    if (type === "replay.historyResult") dispatch({ type: "loaded", requestId: p.requestId, data: p.history });
+    if (type === "replay.historyError") dispatch({ type: "error", requestId: p.requestId, message: p.message ?? "조회에 실패했습니다." });
+    if ((type === "replay.rollbackResult" || type === "replay.rollbackError") && pendingRollback.current === p.requestId) {
+      pendingRollback.current = "";
+      dispatch({ type: "result", requestId: p.requestId, message: [p.message, p.warning, p.auditWarning].filter(Boolean).join("\n"), ok: type === "replay.rollbackResult" && ["ok", "completed"].includes(p.status ?? "") }); load();
     }
-  }, []);
-
-  const play = useCallback(() => {
-    if (!timeline || timeline.events.length === 0) { return; }
-    setState("playing");
-
-    // 이벤트 간 실제 시간 간격을 speed 배율로 재생
-    const advance = () => {
-      setCurrentIdx((prev) => {
-        const next = prev + 1;
-        if (next >= timeline.events.length) {
-          stopInterval();
-          setState("done");
-          return prev;
-        }
-        return next;
-      });
-    };
-
-    // 평균 간격 기반 tick (최소 400ms, 최대 3000ms)
-    const avgInterval = timeline.duration_seconds > 0
-      ? Math.min(3000, Math.max(400, (timeline.duration_seconds * 1000) / timeline.events.length / speed))
-      : 800 / speed;
-
-    intervalRef.current = setInterval(advance, avgInterval);
-  }, [timeline, speed, stopInterval]);
-
-  const pause = useCallback(() => {
-    stopInterval();
-    setState("paused");
-  }, [stopInterval]);
-
-  const reset = useCallback(() => {
-    stopInterval();
-    setCurrentIdx(0);
-    setState("ready");
-  }, [stopInterval]);
-
-  // speed 변경 시 재생 중이면 재시작
-  useEffect(() => {
-    if (state === "playing") {
-      stopInterval();
-      play();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speed]);
-
-  // 현재 이벤트로 스크롤
-  useEffect(() => {
-    if (!listRef.current) { return; }
-    const rows = listRef.current.querySelectorAll("[data-event-row]");
-    if (rows[currentIdx]) {
-      (rows[currentIdx] as HTMLElement).scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }
-  }, [currentIdx]);
-
-  // unmount 시 정리
-  useEffect(() => () => stopInterval(), [stopInterval]);
-
-  // ── 핸들러 ────────────────────────────────────────────────────────────
-
-  const handleLoad = () => {
-    if (!deployId.trim()) { return; }
-    setState("loading");
-    setError(null);
-    setTimeline(null);
-    postMessage("loadReplay", { deployId: deployId.trim() });
+  }, [load]));
+  const confirm = (entry: HistoryEntry) => {
+    if (pendingRollback.current || state.loading || state.review !== entry.key || !entry.rollback.available) return;
+    const requestId = `${instance.current}-rollback-${++sequence.current}`; pendingRollback.current = requestId;
+    dispatch({ type: "rollback", key: entry.key, requestId }); postMessage("replay.rollback", { source: entry.source, deploymentId: entry.deployment_id, approved: true, requestId });
   };
-
-  // ── 스타일 상수 ───────────────────────────────────────────────────────
-
-  const card: React.CSSProperties = {
-    background: "var(--vscode-editorWidget-background, #252526)",
-    border: "1px solid var(--vscode-panel-border, #333)",
-    borderRadius: 6,
-    padding: "10px 12px",
-    marginBottom: 10,
-  };
-
-  const btnBase: React.CSSProperties = {
-    border: "none",
-    borderRadius: 4,
-    padding: "5px 12px",
-    fontSize: 11,
-    fontWeight: 600,
-    cursor: "pointer",
-    transition: "opacity 0.1s",
-  };
-
-  // ── 렌더 ─────────────────────────────────────────────────────────────
-
-  const events = timeline?.events ?? [];
-  const progressPct = events.length > 1 ? (currentIdx / (events.length - 1)) * 100 : 0;
-
-  return (
-    <div
-      style={{
-        fontFamily: "var(--vscode-font-family, sans-serif)",
-        fontSize: 12,
-        color: "var(--vscode-editor-foreground, #ccc)",
-        padding: 2,
-      }}
-    >
-      {/* ── 헤더 ── */}
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 700,
-          textTransform: "uppercase",
-          letterSpacing: "0.06em",
-          color: "var(--vscode-descriptionForeground, #888)",
-          marginBottom: 10,
-        }}
-      >
-        🎬 Deploy Replay
-      </div>
-
-      {/* ── Deploy ID 입력 ── */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-        <input
-          value={deployId}
-          onChange={(e) => setDeployId(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleLoad()}
-          placeholder="Deploy ID 입력..."
-          style={{
-            flex: 1,
-            background: "var(--vscode-input-background, #3c3c3c)",
-            border: "1px solid var(--vscode-input-border, #555)",
-            borderRadius: 4,
-            padding: "5px 8px",
-            fontSize: 11,
-            color: "var(--vscode-input-foreground, #ccc)",
-            outline: "none",
-          }}
-        />
-        <button
-          onClick={handleLoad}
-          disabled={state === "loading" || !deployId.trim()}
-          style={{
-            ...btnBase,
-            background: "var(--vscode-button-background, #0078d4)",
-            color: "var(--vscode-button-foreground, #fff)",
-            opacity: state === "loading" || !deployId.trim() ? 0.5 : 1,
-          }}
-        >
-          {state === "loading" ? "로딩 중…" : "불러오기"}
-        </button>
-      </div>
-
-      {/* ── 에러 ── */}
-      {state === "error" && error && (
-        <div
-          style={{
-            background: "rgba(239,68,68,0.1)",
-            border: "1px solid #ef4444",
-            borderRadius: 5,
-            padding: "7px 10px",
-            color: "#ef4444",
-            marginBottom: 10,
-            fontSize: 11,
-          }}
-        >
-          {error}
-        </div>
-      )}
-
-      {/* ── 타임라인 메타 ── */}
-      {timeline && (
-        <div style={card}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: "3px 12px",
-              fontSize: 11,
-              marginBottom: 8,
-            }}
-          >
-            {[
-              ["서비스", timeline.service],
-              ["클러스터", timeline.cluster],
-              ["리전", timeline.region],
-              ["소요 시간", formatDuration(timeline.duration_seconds)],
-              ["이벤트 수", `${events.length}개`],
-              ["OTel", timeline.otel_available ? "✅ 연결됨" : "⚪ 미연결"],
-            ].map(([k, v]) => (
-              <div key={k} style={{ display: "flex", gap: 4 }}>
-                <span style={{ color: "var(--vscode-descriptionForeground, #888)" }}>
-                  {k}:
-                </span>
-                <span style={{ fontWeight: 500 }}>{v}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* ── 진행 바 ── */}
-          <div
-            style={{
-              position: "relative",
-              height: 20,
-              background: "var(--vscode-scrollbarSlider-background, #333)",
-              borderRadius: 10,
-              marginBottom: 8,
-              cursor: "pointer",
-            }}
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              const pct = (e.clientX - rect.left) / rect.width;
-              const idx = Math.round(pct * (events.length - 1));
-              setCurrentIdx(Math.max(0, Math.min(idx, events.length - 1)));
-              if (state === "done") { setState("paused"); }
-            }}
-          >
-            {/* 채워진 바 */}
-            <div
-              style={{
-                position: "absolute",
-                left: 0,
-                top: 0,
-                height: "100%",
-                width: `${progressPct}%`,
-                background: "var(--vscode-progressBar-background, #0078d4)",
-                borderRadius: 10,
-                transition: "width 0.2s",
-              }}
-            />
-            {/* 이벤트 점 */}
-            {events.map((ev, i) => (
-              <EventDot
-                key={i}
-                event={ev}
-                position={(i / Math.max(1, events.length - 1)) * 100}
-                isActive={i === currentIdx}
-                onClick={(e?: React.MouseEvent) => {
-                  e?.stopPropagation?.();
-                  setCurrentIdx(i);
-                  if (state === "done") { setState("paused"); }
-                }}
-              />
-            ))}
-          </div>
-
-          {/* ── 재생 컨트롤 ── */}
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            {/* Play/Pause/Reset */}
-            {state === "playing" ? (
-              <button
-                onClick={pause}
-                style={{ ...btnBase, background: "#374151", color: "#f9fafb" }}
-              >
-                ⏸ 일시정지
-              </button>
-            ) : state === "done" ? (
-              <button
-                onClick={reset}
-                style={{ ...btnBase, background: "#374151", color: "#f9fafb" }}
-              >
-                🔁 다시보기
-              </button>
-            ) : (
-              <button
-                onClick={play}
-                disabled={events.length === 0}
-                style={{
-                  ...btnBase,
-                  background: "var(--vscode-button-background, #0078d4)",
-                  color: "var(--vscode-button-foreground, #fff)",
-                  opacity: events.length === 0 ? 0.4 : 1,
-                }}
-              >
-                ▶ 재생
-              </button>
-            )}
-
-            {/* 속도 버튼 */}
-            <div style={{ display: "flex", gap: 3, marginLeft: 4 }}>
-              {([0.5, 1, 2] as PlaybackSpeed[]).map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setSpeed(s)}
-                  style={{
-                    ...btnBase,
-                    padding: "4px 8px",
-                    background: speed === s ? "#1d4ed8" : "#2d2d2d",
-                    color: speed === s ? "#fff" : "#9ca3af",
-                    border: `1px solid ${speed === s ? "#3b82f6" : "#444"}`,
-                  }}
-                >
-                  {s}x
-                </button>
-              ))}
-            </div>
-
-            {/* 현재 위치 표시 */}
-            <span
-              style={{
-                marginLeft: "auto",
-                fontSize: 10,
-                color: "var(--vscode-descriptionForeground, #888)",
-                fontFamily: "monospace",
-              }}
-            >
-              {events.length > 0
-                ? `${currentIdx + 1} / ${events.length}`
-                : "—"}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* ── 현재 이벤트 상세 ── */}
-      {events[currentIdx] && (
-        <div
-          style={{
-            ...card,
-            borderColor: KIND_META[events[currentIdx].kind]?.color ?? "#333",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-            <span style={{ fontSize: 16 }}>
-              {KIND_META[events[currentIdx].kind]?.icon}
-            </span>
-            <span style={{ fontWeight: 700, fontSize: 12 }}>
-              {events[currentIdx].title}
-            </span>
-            <span
-              style={{
-                marginLeft: "auto",
-                fontSize: 10,
-                color: SEVERITY_COLOR[events[currentIdx].severity],
-                fontWeight: 600,
-              }}
-            >
-              {events[currentIdx].severity}
-            </span>
-          </div>
-          <div
-            style={{
-              fontSize: 11,
-              color: "var(--vscode-descriptionForeground, #888)",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              maxHeight: 80,
-              overflowY: "auto",
-            }}
-          >
-            {events[currentIdx].detail}
-          </div>
-          <div
-            style={{
-              marginTop: 4,
-              fontSize: 10,
-              color: "var(--vscode-descriptionForeground, #666)",
-            }}
-          >
-            {formatTs(events[currentIdx].ts)}
-            {events[currentIdx].actor && ` · ${events[currentIdx].actor}`}
-          </div>
-        </div>
-      )}
-
-      {/* ── 이벤트 목록 ── */}
-      {events.length > 0 && (
-        <div
-          ref={listRef}
-          style={{
-            maxHeight: 240,
-            overflowY: "auto",
-            marginBottom: 10,
-          }}
-        >
-          {events.map((ev, i) => (
-            <div key={i} data-event-row>
-              <EventRow
-                event={ev}
-                isActive={i === currentIdx}
-                onClick={() => {
-                  setCurrentIdx(i);
-                  if (state === "done") { setState("paused"); }
-                }}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* ── Postmortem ── */}
-      {timeline?.postmortem_md && (
-        <div>
-          <button
-            onClick={() => setShowPostmortem((v) => !v)}
-            style={{
-              ...btnBase,
-              background: "transparent",
-              color: "var(--vscode-descriptionForeground, #888)",
-              border: "1px solid var(--vscode-panel-border, #333)",
-              width: "100%",
-              textAlign: "left",
-              padding: "6px 10px",
-            }}
-          >
-            {showPostmortem ? "▾" : "▸"} Postmortem 보기 (§38.4 자동 생성)
-          </button>
-          {showPostmortem && (
-            <div
-              style={{
-                background: "var(--vscode-textCodeBlock-background, #1a1a1a)",
-                border: "1px solid var(--vscode-panel-border, #333)",
-                borderRadius: "0 0 5px 5px",
-                padding: "10px 12px",
-                fontSize: 11,
-                fontFamily: "var(--vscode-editor-font-family, monospace)",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-                maxHeight: 300,
-                overflowY: "auto",
-                color: "var(--vscode-editor-foreground, #ccc)",
-              }}
-            >
-              {timeline.postmortem_md}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── 빈 상태 ── */}
-      {state === "idle" && (
-        <div
-          style={{
-            textAlign: "center",
-            color: "var(--vscode-descriptionForeground, #666)",
-            padding: "24px 0",
-            fontSize: 11,
-          }}
-        >
-          Deploy ID를 입력하고 재생해보세요.
-          <br />
-          <span style={{ fontSize: 10 }}>
-            예: <code>dep_e09cdf77</code>
-          </span>
-        </div>
-      )}
-    </div>
-  );
+  return <ReplayView state={state} source={source} search={search} onSource={setSource} onSearch={setSearch} onRefresh={load} onSelect={key => dispatch({ type: "select", key })} onReview={key => dispatch({ type: "review", key })} onConfirm={confirm} />;
 };
-
 export default Replay;

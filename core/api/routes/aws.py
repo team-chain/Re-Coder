@@ -33,8 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field, StrictBool
 
 from .deploy_ecs import DEFAULT_CLUSTER as ECS_DEFAULT_CLUSTER
 from .deploy_ecs import DEFAULT_SERVICE as ECS_DEFAULT_SERVICE
@@ -1305,6 +1305,7 @@ async def get_aws_status() -> AwsStatus:
         or DEFAULT_REGION
     )
     storage, profile = _detect_credential_source()
+    key_last4 = "" if storage == "assumed_role" else _mask_key(access_key)
 
     if not access_key and not AWS_CREDENTIALS_FILE.exists():
         return AwsStatus(
@@ -1326,7 +1327,7 @@ async def get_aws_status() -> AwsStatus:
             identity=None,
             region=region,
             profile=profile,
-            access_key_last4=_mask_key(access_key),
+            access_key_last4=key_last4,
             storage=storage,
             message="boto3 패키지가 설치되어 있지 않습니다.",
         )
@@ -1345,7 +1346,7 @@ async def get_aws_status() -> AwsStatus:
             identity=None,
             region=region,
             profile=profile,
-            access_key_last4=_mask_key(access_key),
+            access_key_last4=key_last4,
             storage=storage,
             message=exc.detail if isinstance(exc.detail, str) else "AWS 검증 실패",
         )
@@ -1355,7 +1356,7 @@ async def get_aws_status() -> AwsStatus:
             identity=None,
             region=region,
             profile=profile,
-            access_key_last4=_mask_key(access_key),
+            access_key_last4=key_last4,
             storage=storage,
             message=f"AWS 검증 실패: {exc}",
         )
@@ -1365,7 +1366,7 @@ async def get_aws_status() -> AwsStatus:
         identity=AwsIdentity(**identity),
         region=region,
         profile=profile,
-        access_key_last4=_mask_key(access_key),
+        access_key_last4=key_last4,
         storage=storage,
         message=(
             "배포 전용 역할의 임시 자격증명으로 연결되어 있습니다."
@@ -2221,3 +2222,92 @@ def _strip_cfn_subs(value):
     if isinstance(value, list):
         return [_strip_cfn_subs(v) for v in value]
     return value
+
+
+# ECS execution-role setup is separate from the human/extension deploy role.
+# Preview is read-only. Proposals expire, bind the identity, and are consumed once.
+import asyncio as _execution_asyncio
+import hmac as _execution_hmac
+import time as _execution_time
+from uuid import uuid4 as _execution_uuid
+try:
+    import ecs_execution_role
+except ImportError:  # pragma: no cover
+    from core import ecs_execution_role
+
+_execution_role_plans: dict[str, tuple[float, dict]] = {}
+_execution_role_lock = _execution_asyncio.Lock()
+_EXECUTION_PLAN_TTL = 600
+
+
+class ExecutionRolePreviewRequest(BaseModel):
+    region: str = Field(min_length=1, max_length=40)
+
+
+class ExecutionRoleApplyRequest(BaseModel):
+    proposal_id: str = Field(min_length=1, max_length=64)
+    approved: StrictBool
+
+
+def _require_execution_role_token(request: Request) -> None:
+    # Keep IAM writes authenticated even before the separate localhost auth work.
+    expected = getattr(request.app.state, "session_token", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Core 세션이 준비되지 않았습니다.")
+    provided = request.headers.get("X-Session-Token", "")
+    if not provided or not _execution_hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="유효한 Core 세션 토큰이 필요합니다.")
+
+
+def _execution_role_session(region: str):
+    _load_into_process_if_needed()
+    return _build_boto3_session(profile=_effective_profile(), region=region)
+
+
+@router.post("/api/aws/ecs-execution-role/preview")
+async def preview_ecs_execution_role(body: ExecutionRolePreviewRequest, request: Request) -> dict:
+    _require_execution_role_token(request)
+    try:
+        region = aws_policy.validate_region(body.region.strip())
+        role = aws_policy.configured_execution_role()
+        plan = await _execution_asyncio.to_thread(
+            lambda: ecs_execution_role.inspect_role(_execution_role_session(region), region, role)
+        )
+    except ecs_execution_role.ExecutionRoleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if plan["status"] == "missing":
+        now = _execution_time.monotonic()
+        for key, (created, _) in list(_execution_role_plans.items()):
+            if now - created >= _EXECUTION_PLAN_TTL:
+                _execution_role_plans.pop(key, None)
+        while len(_execution_role_plans) >= 100:
+            _execution_role_plans.pop(next(iter(_execution_role_plans)))
+        proposal_id = str(_execution_uuid())
+        _execution_role_plans[proposal_id] = (now, plan)
+        return {**plan, "proposal_id": proposal_id, "expires_in_seconds": _EXECUTION_PLAN_TTL}
+    return plan
+
+
+@router.post("/api/aws/ecs-execution-role/apply")
+async def apply_ecs_execution_role(body: ExecutionRoleApplyRequest, request: Request) -> dict:
+    _require_execution_role_token(request)
+    # Pop before the first await: duplicate approval cannot start another IAM write.
+    stored = _execution_role_plans.pop(body.proposal_id, None)
+    if stored is None or _execution_time.monotonic() - stored[0] >= _EXECUTION_PLAN_TTL:
+        raise HTTPException(status_code=409, detail="생성 제안이 만료됐거나 이미 처리됐습니다. 실행 역할을 다시 확인하세요.")
+    if not body.approved:
+        return {"status": "cancelled", "message": "역할 생성을 취소했습니다. AWS는 변경하지 않았습니다."}
+    plan = stored[1]
+    try:
+        async with _execution_role_lock:
+            return await _execution_asyncio.to_thread(
+                lambda: ecs_execution_role.create_reviewed_role(
+                    _execution_role_session(plan["region"]), plan, aws_policy.configured_execution_role()
+                )
+            )
+    except ecs_execution_role.ExecutionRoleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

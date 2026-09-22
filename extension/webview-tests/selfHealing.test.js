@@ -23,6 +23,7 @@ const HOST = read('../src/sidebar/SidebarProvider.ts');
 const MANAGER = read('../src/core/CoreManager.ts');
 const API = read('../src/core/ApiClient.ts');
 const PANEL = read('../webview-src/components/DiagnosticsPanel.tsx');
+const HEAL_HOOK = read('../webview-src/hooks/useSelfHeal.ts');
 const CORE_HEALTH = fs.readFileSync(path.join(__dirname, '../../core/api/routes/health.py'), 'utf8');
 
 const block = (src, start, end) => {
@@ -67,7 +68,7 @@ test('② 진단 X → 자동 조치 → 재진단, 인스턴스당 한 번', ()
 test('③ 진단판 버튼은 자동 조치이고 결과를 항목 아래 남긴다', () => {
   assert.match(PANEL, /"자동 조치"/);
   assert.doesNotMatch(PANEL, />\s*Retry check\s*</, '예전 Retry check 버튼이 남아 있다');
-  assert.match(PANEL, /type === "selfHeal"/, '자가 조치 결과를 받지 않는다');
+  assert.match(HEAL_HOOK, /type !== "selfHeal"/, '자가 조치 결과를 받지 않는다');
   assert.match(PANEL, /heal\[item\.key\]\.message/, '자동 조치함 문구를 그리지 않는다');
   //: Docker 는 안내가 아니라 코어가 띄운다.
   const fix = block(HOST, "case 'webview.diagnostics.fix'", "case 'webview.open.external'");
@@ -117,7 +118,7 @@ test('③ Docker 를 띄웠지만 준비가 늦으면 실패로 끝내지 않고
   assert.match(wait, /DOCKER_FOLLOWUP_MS/);
   assert.match(wait, /ensureDocker\(\)/, '후속 확인이 코어 ensure 를 재사용하지 않는다');
   //: 화면은 pending 동안 버튼을 "조치 중…" 으로 잠가 둔다 — 두 번 누르지 않게.
-  assert.match(PANEL, /p\?\.pending && p\?\.key\) \{ setHealing\(p\.key\)/, '대기 중 버튼이 풀린다');
+  assert.match(PANEL, /disabled=\{!!heal\[item\.key\]\?\.pending\}/, '대기 중 버튼이 풀린다');
 });
 
 test('③ 코어에 확장 호스트 전용 환경변수(ELECTRON_RUN_AS_NODE)를 넘기지 않는다', () => {

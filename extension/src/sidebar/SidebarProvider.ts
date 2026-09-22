@@ -452,6 +452,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private static readonly DOCKER_FOLLOWUP_INTERVAL_MS = 10_000;
 
     private async _healDockerOnce(reason: 'diagnostics' | 'fix'): Promise<boolean> {
+        this.postMessage('selfHeal', { key: 'docker_ready', pending: true, message: '조치 중 · Docker 준비 상태를 확인합니다.' });
         try {
             const r = await this._apiClient.ensureDocker();
             if (r.ready) {
@@ -585,51 +586,59 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 // DiagnosticsPanel.tsx 의 chip 별 "Retry check" 버튼.
                 // not-ready 인 항목을 누르면 해당 설정 GUI 를 자동으로 띄운다.
                 const { key } = (payload ?? {}) as { key?: string };
-                switch (key) {
-                    case 'aws_deploy_ready':
-                    case 'ai_ready': {  // Bedrock 도 AWS 자격증명을 사용
-                        //: 자동 조치 먼저 — 보안 금고에 연결이 있으면 다시 넣는다.
-                        //: 없거나 실패했을 때만 사용자에게 입력을 받는다.
-                        const outcome = await this.healAwsConnection('fix');
-                        if (outcome === 'healed' || outcome === 'not_needed') {
+                if (!key) { break; }
+                this.postMessage('selfHeal', { key, pending: true, message: '조치 중…' });
+                try {
+                    switch (key) {
+                        case 'aws_deploy_ready':
+                        case 'ai_ready': {  // Bedrock 도 AWS 자격증명을 사용
+                            //: 자동 조치 먼저 — 보안 금고에 연결이 있으면 다시 넣는다.
+                            //: 없거나 실패했을 때만 사용자에게 입력을 받는다.
+                            const outcome = await this.healAwsConnection('fix');
+                            if (outcome === 'healed' || outcome === 'not_needed') {
+                                void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                                break;
+                            }
+                            await vscode.commands.executeCommand('recoder.awsConfigure');
+                            break;
+                        }
+                        case 'github_ready':
+                            await vscode.commands.executeCommand('recoder.githubLogin');
+                            break;
+                        case 'docker_ready': {
+                            //: 자동 조치 — 코어가 Docker Desktop 을 직접 띄운다(가역·로컬·무비용).
+                            //: 그래도 안 되면(미설치 등) 안내 + 다운로드 링크.
+                            const ready = await this.healDocker('fix');
+                            if (!ready) {
+                                const selected = await vscode.window.showInformationMessage(
+                                    'Docker 를 자동으로 시작하지 못했습니다. Docker Desktop 이 설치돼 있는지 확인해 주세요.',
+                                    'Docker Desktop 다운로드',
+                                );
+                                if (selected === 'Docker Desktop 다운로드') {
+                                    void vscode.env.openExternal(
+                                        vscode.Uri.parse('https://www.docker.com/products/docker-desktop'),
+                                    );
+                                }
+                            }
                             void this.handleMessage({ type: 'runDiagnostics', payload: {} });
                             break;
                         }
-                        await vscode.commands.executeCommand('recoder.awsConfigure');
-                        break;
+                        case 'core_ready':
+                            await vscode.commands.executeCommand('recoder.restartCore');
+                            break;
+                        case 'ops_ready':
+                            // Operate 탭에서 EC2 host / SSH key 를 설정 — 모드만 전환
+                            this._state.currentMode = Mode.OPERATE;
+                            this.postMessage('stateUpdate', this._state);
+                            break;
+                        default:
+                            // 알 수 없는 key — 그냥 진단 재실행
+                            void this.handleMessage({ type: 'runDiagnostics', payload: {} });
                     }
-                    case 'github_ready':
-                        await vscode.commands.executeCommand('recoder.githubLogin');
-                        break;
-                    case 'docker_ready': {
-                        //: 자동 조치 — 코어가 Docker Desktop 을 직접 띄운다(가역·로컬·무비용).
-                        //: 그래도 안 되면(미설치 등) 안내 + 다운로드 링크.
-                        const ready = await this.healDocker('fix');
-                        if (!ready) {
-                            const selected = await vscode.window.showInformationMessage(
-                                'Docker 를 자동으로 시작하지 못했습니다. Docker Desktop 이 설치돼 있는지 확인해 주세요.',
-                                'Docker Desktop 다운로드',
-                            );
-                            if (selected === 'Docker Desktop 다운로드') {
-                                void vscode.env.openExternal(
-                                    vscode.Uri.parse('https://www.docker.com/products/docker-desktop'),
-                                );
-                            }
-                        }
-                        void this.handleMessage({ type: 'runDiagnostics', payload: {} });
-                        break;
-                    }
-                    case 'core_ready':
-                        await vscode.commands.executeCommand('recoder.restartCore');
-                        break;
-                    case 'ops_ready':
-                        // Operate 탭에서 EC2 host / SSH key 를 설정 — 모드만 전환
-                        this._state.currentMode = Mode.OPERATE;
-                        this.postMessage('stateUpdate', this._state);
-                        break;
-                    default:
-                        // 알 수 없는 key — 그냥 진단 재실행
-                        void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                } catch (err) {
+                    this.postMessage('selfHeal', { key, failed: true, message: `자동 조치 실패 · ${err instanceof Error ? err.message : String(err)}` });
+                } finally {
+                    this.postMessage('selfHeal.finished', { key });
                 }
                 break;
             }
@@ -712,17 +721,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'runScan': {
-                const { scanType, workspacePath: scanWs, targetPath } = payload as {
+                const { scanType, workspacePath: scanWs, targetPath, requestId } = payload as {
                     scanType: 'trivy' | 'hadolint' | 'gitleaks';
                     workspacePath: string;
                     targetPath?: string;
+                    requestId?: string;
                 };
                 try {
                     //: 웹뷰는 빈 경로를 보낸다 — 워크스페이스로 채워야 이미지 이름이
                     //: `<폴더명>:latest` 로 잡힌다(빈 경로면 코어가 `app:latest` 로 추측, 실기기 B2).
                     const scanRoot = scanWs || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '');
                     const scanResult = await this._apiClient.runScan(scanType, scanRoot, targetPath);
-                    this.postMessage('scanResult', scanResult);
+                    this.postMessage('scanResult', { ...scanResult, requestId });
                 } catch (err) {
                     //: 요청 자체가 실패해도 화면에는 "Error: trivy 스캔 실패" 같은 raw
                     //: 문자열이 아니라 **미검증 + 원인 + 다음 행동** 이 떠야 한다
@@ -731,6 +741,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const raw = err instanceof Error ? err.message : String(err);
                     this.postMessage('scanResult', {
                         status: 'error',
+                        requestId,
                         scan_type: scanType,
                         target: targetPath ?? scanWs,
                         critical_count: 0, high_count: 0, medium_count: 0, findings: [],
@@ -773,6 +784,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             // ── 큰 ReCoder Workspace 의 배포 센터 ──────────────────────────
+            case 'aws.executionRole.preview':
+            case 'aws.executionRole.apply': {
+                const p = (payload ?? {}) as { requestId?: string; region?: string; proposalId?: string; approved?: boolean };
+                try {
+                    if (!p.requestId) { throw new Error('실행 역할 요청 ID가 없습니다.'); }
+                    let result: Record<string, unknown>;
+                    if (type === 'aws.executionRole.preview') {
+                        if (!p.region?.trim()) { throw new Error('먼저 ECS 배포 리전을 입력하세요.'); }
+                        result = await this._apiClient.previewEcsExecutionRole(p.region.trim());
+                    } else {
+                        if (!p.proposalId || typeof p.approved !== 'boolean') { throw new Error('실행 역할 생성 내용을 다시 확인하고 승인하세요.'); }
+                        result = await this._apiClient.applyEcsExecutionRole(p.proposalId, p.approved);
+                    }
+                    this.postMessageToWebview(requestWebview, 'aws.executionRole.result', { requestId: p.requestId, result });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'aws.executionRole.error', { requestId: p.requestId, message: String(err) });
+                }
+                break;
+            }
             case 'workspace.deploy.ecs': {
                 const req = (payload ?? {}) as Parameters<ApiClient['deployEcs']>[0];
                 try {
@@ -780,41 +810,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         ...req,
                         workspace_path: req.workspace_path || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
                     });
-                    this.postMessage('workspace.deploy.result', result);
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.result', result);
                 } catch (err) {
                     // 정책 게이트 거절은 배너가 아니라 "차단 + 사유" 카드로.
                     // 예전에는 여기서 String(err) 로 떨어져 JSON 원문이 배너에 떴다.
                     const denial = err instanceof CoreHttpError ? policyDenialFromDetail(err.detail) : null;
                     if (denial) {
-                        this.postMessage('workspace.deploy.ecs.policyDenied', denial);
+                        this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.policyDenied', denial);
                     } else {
-                        this.postMessage('errorMessage', { message: String(err) });
+                        this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.error', { message: String(err) });
                     }
                 }
                 break;
             }
             case 'workspace.deploy.ecs.status': {
+                const deploymentId = (payload as { deploymentId?: string } | undefined)?.deploymentId;
                 try {
-                    const status = await this._apiClient.getEcsDeployStatus();
-                    // 상태 폴링은 요청한 큰 창에만 돌려준다. 특히 롤백 제안은
-                    // 다른 웹뷰의 배포에 붙으면 안 된다.
+                    const status = await this._apiClient.getEcsDeployStatus(deploymentId);
+                    // Progress has its own card; polling must not overwrite request errors.
                     this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.statusResult', status);
-                    // 배경 감시는 카드 정보만 갱신한다. 현재 ECS 탭에서
-                    // 진행 상황을 보고 있을 때만 일반 상태 문구를 바꾼다.
-                    const reportProgress = Boolean((payload as { reportProgress?: boolean } | undefined)?.reportProgress);
-                    if (reportProgress) {
-                        //: 실패 문구에 사유(detail)와 조치(remedy)를 붙인다. 예전에는 error 한 줄만
-                        //: 보여서 "Preflight 점검 실패 — 배포를 중단합니다" 뒤에 어떤 항목이
-                        //: 실패했는지가 사라졌다 — 코어는 log_tail 의 detail: 로 보내고 있었다.
-                        const details = (status.log_tail ?? [])
-                            .filter((line) => /^detail:/.test(line))
-                            .map((line) => line.replace(/^detail:\s*/, ''));
-                        const message = status.error
-                            ? [status.error, ...details, status.remedy ?? ''].filter(Boolean).join('\n')
-                            : `ECS: ${status.stage_text ?? status.stage}`;
-                        this.postMessageToWebview(requestWebview, 'workspace.deploy.result', { message });
-                    }
-                } catch { /* status polling is best effort */ }
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.statusError', {
+                        message: String(err), deploymentId,
+                    });
+                }
                 break;
             }
             case 'workspace.deploy.ecs.rollback': {
@@ -1069,40 +1088,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.postMessage('stateUpdate', this._state);
                 break;
             }
-            // ── §38 Deploy Replay ──────────────────────────────────────────
-            case 'loadReplay': {
-                // webview Replay.tsx 가 보내는 형태: { deployId: string, service?, cluster?, region?, windowHours? }
-                const p = (payload ?? {}) as {
-                    deployId?: string;
-                    service?: string;
-                    cluster?: string;
-                    region?: string;
-                    windowHours?: number;
-                };
-                const deployId = (p.deployId ?? '').trim();
-                if (!deployId) {
-                    this.postMessage('replayTimeline', {
-                        error: 'deployId 가 비어있습니다.',
-                    });
-                    break;
-                }
+            case 'replay.history': {
+                const { requestId } = (payload ?? {}) as { requestId?: string };
                 try {
-                    const timeline = await this._apiClient.loadReplayTimeline(deployId, {
-                        service: p.service,
-                        cluster: p.cluster,
-                        region: p.region,
-                        windowHours: p.windowHours,
-                    });
-                    if (timeline) {
-                        this.postMessage('replayTimeline', timeline);
-                    } else {
-                        this.postMessage('replayTimeline', {
-                            error: 'Core 가 타임라인을 반환하지 않았습니다.',
-                        });
-                    }
+                    const history = await this._apiClient.getDeploymentHistory();
+                    this.postMessageToWebview(requestWebview, 'replay.historyResult', { requestId, history });
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
-                    this.postMessage('replayTimeline', { error: msg });
+                    this.postMessageToWebview(requestWebview, 'replay.historyError', { requestId, message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'replay.rollback': {
+                const p = (payload ?? {}) as { source?: string; deploymentId?: string; approved?: boolean; requestId?: string };
+                try {
+                    if (!p.approved || !p.deploymentId || !['local', 'ecs'].includes(p.source ?? '')) {
+                        throw new Error('롤백 대상 확인과 승인이 필요합니다.');
+                    }
+                    const result = await this._apiClient.rollbackFromHistory(p.source as 'local' | 'ecs', p.deploymentId);
+                    let auditWarning = '';
+                    if (result.adr) {
+                        try { await this.writeWorkspaceFile(result.adr.file, result.adr.content); }
+                        catch { auditWarning = '롤백 요청은 처리됐지만 워크스페이스 결정 기록을 저장하지 못했습니다.'; }
+                    }
+                    this.postMessageToWebview(requestWebview, 'replay.rollbackResult', { requestId: p.requestId, source: p.source, deploymentId: p.deploymentId, ...result, auditWarning });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'replay.rollbackError', { requestId: p.requestId, source: p.source, deploymentId: p.deploymentId, message: err instanceof Error ? err.message : String(err) });
                 }
                 break;
             }

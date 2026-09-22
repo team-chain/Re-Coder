@@ -334,6 +334,7 @@ def build_and_push(
     dockerfile: str = "Dockerfile",
     platform: str = "linux/amd64",
     runner: Runner = run_command,
+    on_progress: Optional[Callable[[str], None]] = None,
 ) -> PushResult:
     """빌드 → 로그인 → push 를 한 번에. 최종 이미지 주소를 돌려준다.
 
@@ -345,11 +346,15 @@ def build_and_push(
             f"이미지 태그로 쓸 수 없는 값입니다: {tag!r}",
             remedy="태그에는 ':' 나 '/' 를 넣을 수 없습니다.",
         )
+    if on_progress:
+        on_progress("building")
     ensure_docker_available(runner=runner)
     local_tag = f"{repository_uri.rsplit('/', 1)[-1]}:{tag}"
     build_image(
         workspace_path, local_tag, dockerfile=dockerfile,
         platform=platform, runner=runner,
     )
+    if on_progress:
+        on_progress("ecr_push")
     ecr_login(ecr, runner=runner)
     return push_image(local_tag, f"{repository_uri}:{tag}", runner=runner)

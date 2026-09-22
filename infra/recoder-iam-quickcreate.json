@@ -298,14 +298,6 @@
                   "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
                 }
               ]
-            },
-            {
-              "Sid": "ListModels",
-              "Effect": "Allow",
-              "Action": [
-                "bedrock:ListFoundationModels"
-              ],
-              "Resource": "*"
             }
           ]
         }

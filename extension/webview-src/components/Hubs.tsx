@@ -12,6 +12,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { HubIcon, HubIconName, HubIconTile } from "./HubIcons";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import { useSelfHeal } from "../hooks/useSelfHeal";
 
 export type HubId = "develop" | "deploy" | "security";
 export type FeatureId =
@@ -46,7 +47,7 @@ export const FEATURES: FeatureDef[] = [
 
   { id: "ship", hub: "deploy", icon: "box", title: "로컬 Docker 배포", desc: "Dockerfile 생성 → 검사 → build → run → 헬스체크. 실패하면 이전 이미지로 되돌립니다.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isDockerReady, hint: "Docker 필요" }) },
   { id: "deploy", hub: "deploy", icon: "cloud-upload", title: "배포 센터", desc: "ECS · EC2 · S3 정적 사이트. 외부로 나가는 배포는 검사 결과에 따라 승인 강도가 달라져요.", action: "열기", primary: true },
-  { id: "replay", hub: "deploy", icon: "history", title: "롤백 · Replay", desc: "배포 이력을 타임라인으로 보고 원하는 시점으로 되돌립니다.", action: "이력 보기" },
+  { id: "replay", hub: "deploy", icon: "history", title: "롤백 · Replay", desc: "저장된 배포·롤백 이력을 보고 이전 버전 복귀 대상을 확인합니다.", action: "이력 보기" },
   { id: "operate", hub: "deploy", icon: "activity", title: "운영 대응", desc: "장애 감지 → 원인 분석 → 조치 제안. 실행은 승인 후에만.", action: "열기", gate: (c) => ({ enabled: c.isOpsReady, hint: "AI · AWS 연결 필요" }) },
 
   { id: "scan", hub: "security", icon: "search", title: "취약점 스캔", desc: "Trivy(이미지·의존성) · Hadolint(Dockerfile). 결과는 배포 승인 카드의 위험도에 반영됩니다.", action: "스캔", primary: true },
@@ -75,6 +76,18 @@ const btnStyle = (primary: boolean, enabled = true): React.CSSProperties => ({
   background: primary ? C.btn : "transparent", color: primary ? C.btnFg : C.fg, opacity: enabled ? 1 : 0.5,
 });
 
+const DockerFix: React.FC = () => {
+  const { heal, start } = useSelfHeal();
+  const state = heal.docker_ready;
+  return <div style={{ fontSize: 11, color: C.muted }}>
+    <button disabled={!!state?.pending} onClick={() => start("docker_ready")}
+      style={{ ...btnStyle(false, !state?.pending), color: "#f0b35b" }}>
+      {state?.pending ? "조치 중…" : "Docker 필요 · 자동 조치"}
+    </button>
+    {state?.message && <div role="status" style={{ marginTop: 5, maxWidth: 260, lineHeight: 1.5, color: state.failed ? "#f0b35b" : C.muted }}>{state.message}</div>}
+  </div>;
+};
+
 // ── 허브 홈 ─────────────────────────────────────────────────────────────
 export const HubHome: React.FC<{ onSelect: (hub: HubId) => void; ctx: ReadyCtx }> = ({ onSelect, ctx }) => {
   const badge = (hub: HubId): { text: string; ok: boolean } => {
@@ -87,7 +100,8 @@ export const HubHome: React.FC<{ onSelect: (hub: HubId) => void; ctx: ReadyCtx }
       {HUBS.map((h) => {
         const b = badge(h.id);
         return (
-          <button key={h.id} onClick={() => onSelect(h.id)} style={{ textAlign: "left", cursor: "pointer", border: `1px solid ${C.line}`, borderTop: `3px solid ${h.accent}`, borderRadius: 14, padding: "20px 18px 16px", background: C.card, color: C.fg, display: "flex", flexDirection: "column", minHeight: 250, fontFamily: "inherit" }}>
+          <div key={h.id} style={{ border: `1px solid ${C.line}`, borderTop: `3px solid ${h.accent}`, borderRadius: 14, padding: "20px 18px 16px", background: C.card, color: C.fg, display: "flex", flexDirection: "column", minHeight: 250 }}>
+            <button onClick={() => onSelect(h.id)} style={{ textAlign: "left", cursor: "pointer", border: "none", padding: 0, background: "transparent", color: "inherit", display: "flex", flexDirection: "column", flex: 1, fontFamily: "inherit" }}>
             <div style={{ marginBottom: 14 }}><HubIconTile name={h.icon} accent={h.accent} /></div>
             <div style={{ fontSize: 19, fontWeight: 700, letterSpacing: .2 }}>{h.title}</div>
             <div style={{ color: C.muted, fontSize: 12, margin: "4px 0 14px" }}>{h.subtitle}</div>
@@ -96,11 +110,12 @@ export const HubHome: React.FC<{ onSelect: (hub: HubId) => void; ctx: ReadyCtx }
                 <li key={f.id} style={{ padding: "6px 0", borderTop: i === 0 ? "none" : `1px solid ${C.line}` }}>{f.title}</li>
               ))}
             </ul>
-            <div style={{ marginTop: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span style={{ fontSize: 10.5, padding: "2px 8px", borderRadius: 999, border: `1px solid ${b.ok ? "#2f6b4a" : "#6b4a17"}`, color: b.ok ? "#7ed3a2" : "#f0b35b" }}>{b.text}</span>
-              <span style={{ color: C.link, fontSize: 12, fontWeight: 600 }}>열기 ›</span>
+            </button>
+            <div style={{ marginTop: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "wrap" }}>
+              {h.id === "deploy" && !ctx.isDockerReady ? <DockerFix /> : <span style={{ fontSize: 10.5, padding: "2px 8px", borderRadius: 999, border: `1px solid ${b.ok ? "#2f6b4a" : "#6b4a17"}`, color: b.ok ? "#7ed3a2" : "#f0b35b" }}>{b.text}</span>}
+              <button onClick={() => onSelect(h.id)} style={{ border: "none", background: "transparent", color: C.link, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>열기 ›</button>
             </div>
-          </button>
+          </div>
         );
       })}
     </div>
@@ -148,8 +163,10 @@ export const HubPage: React.FC<{ hub: HubId; ctx: ReadyCtx; onOpen: (f: FeatureI
             <div style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 15, fontWeight: 700 }}><span style={{ color: HUBS.find((x) => x.id === f.hub)!.accent, display: "flex" }}><HubIcon name={f.icon} size={18} /></span>{f.title}</div>
             <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.5, marginTop: 8, flex: 1 }}>{f.desc}</div>
             <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 8 }}>
+              {f.id === "ship" && !g.enabled ? <DockerFix /> : <>
               <button onClick={() => g.enabled && onOpen(f.id)} disabled={!g.enabled} style={btnStyle(!!f.primary, g.enabled)} title={!g.enabled ? g.hint : undefined}>{f.action}</button>
               {!g.enabled && g.hint && <span style={{ color: "#f0b35b", fontSize: 11 }}>{g.hint}</span>}
+              </>}
             </div>
           </div>
         );
