@@ -32,6 +32,13 @@ from control_plane.models.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _aware_utc(dt):
+    """SQLite 등은 tzinfo 를 벗겨 돌려준다 — naive 면 저장 규약(UTC)으로 간주."""
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=timezone.utc)
+
+
 class ApprovalService:
 
     def __init__(self, db: AsyncSession) -> None:
@@ -95,14 +102,20 @@ class ApprovalService:
         - 승인(approved): required_approvers 충족 시 approved
         - 거부 사유는 필수 입력 (API 레이어에서도 검증)
         """
-        ar = await self._get_request(approval_request_id, org_id)
+        # **행 잠금 필수.** 잠금 없이 두 승인자가 동시에 투표하면 둘 다 같은
+        # 카운터·PENDING 을 읽어 둘 다 current_approvals=1 을 쓴다 — 2인 승인
+        # 요청이 투표 2건을 갖고도 영원히 PENDING 으로 남는다. 승인과 거부가
+        # 경합하면 종결 상태를 서로 덮어쓸 수도 있다. 중복 확인·카운터·상태
+        # 전환은 전부 이 잠금을 쥔 채로 진행한다. (SQLite 는 FOR UPDATE 를
+        # 무시하지만 단일 라이터라 동시성 자체가 없다.)
+        ar = await self._get_request(approval_request_id, org_id, for_update=True)
 
         # 상태 확인
         if ar.status != ApprovalStatus.PENDING.value:
             raise ValueError(f"ApprovalRequest is already {ar.status}")
 
         # 만료 확인
-        if ar.expires_at < datetime.now(timezone.utc):
+        if _aware_utc(ar.expires_at) < datetime.now(timezone.utc):
             ar.status = ApprovalStatus.EXPIRED.value
             await self._db.flush()
             raise ValueError("ApprovalRequest has expired")
@@ -163,7 +176,7 @@ class ApprovalService:
     ) -> ApprovalRequestResponse:
         ar = await self._get_request(approval_request_id, org_id)
         # 만료 자동 처리
-        if ar.status == ApprovalStatus.PENDING.value and ar.expires_at < datetime.now(timezone.utc):
+        if ar.status == ApprovalStatus.PENDING.value and _aware_utc(ar.expires_at) < datetime.now(timezone.utc):
             ar.status = ApprovalStatus.EXPIRED.value
             await self._db.flush()
         return await self._to_response(ar)
@@ -181,7 +194,7 @@ class ApprovalService:
         now = datetime.now(timezone.utc)
         responses = []
         for ar in result.scalars().all():
-            if ar.expires_at < now:
+            if _aware_utc(ar.expires_at) < now:
                 ar.status = ApprovalStatus.EXPIRED.value
                 await self._db.flush()
                 continue
@@ -192,13 +205,17 @@ class ApprovalService:
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _get_request(self, approval_request_id: str, org_id: str) -> ApprovalRequest:
-        result = await self._db.execute(
-            select(ApprovalRequest).where(
-                ApprovalRequest.approval_request_id == approval_request_id,
-                ApprovalRequest.org_id == org_id,
-            )
+    async def _get_request(
+        self, approval_request_id: str, org_id: str, for_update: bool = False
+    ) -> ApprovalRequest:
+        stmt = select(ApprovalRequest).where(
+            ApprovalRequest.approval_request_id == approval_request_id,
+            ApprovalRequest.org_id == org_id,
         )
+        if for_update:
+            # 읽기-수정-쓰기를 직렬화하는 행 잠금. 트랜잭션 종료 시 해제된다.
+            stmt = stmt.with_for_update()
+        result = await self._db.execute(stmt)
         ar = result.scalar_one_or_none()
         if ar is None:
             raise ValueError(f"ApprovalRequest {approval_request_id} not found")

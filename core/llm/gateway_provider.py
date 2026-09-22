@@ -34,7 +34,7 @@ def gateway_enabled() -> bool:
 
 
 class GatewayProvider(LLMProvider):
-    def __init__(self, model_id: str = "anthropic.claude-3-haiku-20240307-v1:0") -> None:
+    def __init__(self, model_id: str = "global.anthropic.claude-haiku-4-5-20251001-v1:0") -> None:
         base = os.environ.get("RECODER_LLM_GATEWAY_URL", "").rstrip("/")
         self._endpoint = base + "/llm/invoke"
         self._token = os.environ.get("RECODER_STUDENT_TOKEN", "")

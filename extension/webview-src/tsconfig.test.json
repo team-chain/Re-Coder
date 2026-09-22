@@ -1,0 +1,19 @@
+// 웹뷰 컴포넌트를 **Node 에서 렌더**해 검사하기 위한 컴파일 설정.
+//
+// 배포 번들은 webpack(ts-loader)이 ESNext 로 묶지만, node --test 는 CommonJS
+// 로 require 해야 한다. 그래서 같은 소스를 out/webview-test 로 한 번 더
+// 내보낸다. index.tsx 는 tailwind.css 를 import 하므로 제외한다 — 테스트에
+// CSS 로더가 없고, 렌더 검사에 필요하지도 않다.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "../out/webview-test",
+    "rootDir": ".",
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": ["./App.tsx", "./components/**/*", "./hooks/**/*"],
+  "exclude": ["node_modules", "webpack.config.js", "index.tsx", "styles"]
+}

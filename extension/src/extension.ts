@@ -19,7 +19,7 @@ import { ApiClient } from './core/ApiClient';
 import { PollingService } from './core/PollingService';
 import { SidebarProvider } from './sidebar/SidebarProvider';
 import { WorkbenchSidebarProvider } from './sidebar/WorkbenchSidebarProvider';
-import { WorkbenchPanel } from './sidebar/WorkbenchPanel';
+import { ReCoderPanel } from './sidebar/ReCoderPanel';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
 import { BridgeClient } from './bridge/BridgeClient';
@@ -40,16 +40,20 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // ── Discord bridge client (ws://127.0.0.1:7780/ws) ──────────────────────
     // 봇의 /make 채널에서 생성된 코드를 받아 워크스페이스에 자동 저장.
-    const bridgeClient = new BridgeClient(context);
-    context.subscriptions.push(bridgeClient);
-    bridgeClient.connect();
+    // **활성 클라이언트를 가변 홀더로 추적한다.** const 로 잡고 재연결 때마다
+    // 새 인스턴스를 만들면, dispose 는 항상 최초 인스턴스만 정리하고 이전
+    // 클라이언트들이 살아남는다 — 봇 스트림 하나를 여러 클라이언트가 각각
+    // 처리해 같은 문서에 중복 편집·중복 실행이 일어난다.
+    let activeBridge = new BridgeClient(context);
+    context.subscriptions.push(activeBridge);
+    activeBridge.connect();
 
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.bridge.reconnect', () => {
-            bridgeClient.dispose();
-            const newClient = new BridgeClient(context);
-            context.subscriptions.push(newClient);
-            newClient.connect();
+            activeBridge.dispose();
+            activeBridge = new BridgeClient(context);
+            context.subscriptions.push(activeBridge);
+            activeBridge.connect();
             vscode.window.showInformationMessage('ReCoder Bridge 재연결 시도');
         }),
     );
@@ -70,6 +74,10 @@ export function activate(context: vscode.ExtensionContext): void {
         apiClient,
         coreManager,
         pollingService,
+        () => { void vscode.commands.executeCommand('recoder.openReCoder'); },
+        //: 채팅 승인이 빈 창에 폴더를 추가하면 확장 호스트가 재시작된다.
+        //: 그 재시작을 넘겨야 하는 요청을 globalState 로 인계한다.
+        context.globalState,
     );
 
     context.subscriptions.push(
@@ -284,7 +292,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // ── Command: AWS Credentials Configure (native input boxes) ─────────────
     // showInputBox 3단계로 자격증명 수집 → Core 가 STS GetCallerIdentity 로 검증.
-    // 입력 즉시 ~/.recoder/aws_credentials.json (0600) 에 저장 후 진단 자동 갱신.
+    // 검증을 통과한 키만 VS Code SecretStorage(OS 보안 저장소)에 보관한다.
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.awsConfigure', async () => {
             await ensureCoreRunning(coreManager, sidebarProvider);
@@ -320,12 +328,21 @@ export function activate(context: vscode.ExtensionContext): void {
             await vscode.window.withProgress(
                 { location: vscode.ProgressLocation.Notification, title: 'AWS 자격증명 검증 중…' },
                 async () => {
-                    const result = await apiClient.configureAws({
+                    const result = await apiClient.connectAws({
                         accessKeyId: accessKey.trim(),
                         secretAccessKey: secret.trim(),
                         region: region.trim(),
                     });
                     if (result.ready) {
+                        await coreManager.storeAwsCredentials({
+                            accessKeyId: accessKey.trim(),
+                            secretAccessKey: secret.trim(),
+                            region: region.trim(),
+                        });
+                        // connectAws는 검증을 통과한 자격증명을 현재 Core 메모리에
+                        // 적용한다. 성공 알림만 띄우면 배포 진단은 연결 전 캐시를 계속
+                        // 보여줄 수 있으므로, 즉시 다시 실행해 AWS Deploy Ready를 갱신한다.
+                        sidebarProvider.triggerDiagnostics();
                         const acct = result.identity?.account ?? 'unknown';
                         vscode.window.showInformationMessage(
                             `AWS 연결 완료 (account ${acct}, region ${region.trim()})`,
@@ -344,14 +361,14 @@ export function activate(context: vscode.ExtensionContext): void {
     // ── Command: AWS Credentials Clear ──────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.awsClear', async () => {
-            await ensureCoreRunning(coreManager, sidebarProvider);
             const confirm = await vscode.window.showWarningMessage(
-                '저장된 AWS 자격증명을 모두 삭제하시겠습니까?',
+                'VS Code 보안 금고에 저장된 AWS 자격증명을 삭제하시겠습니까?',
                 { modal: true },
                 '삭제',
             );
             if (confirm !== '삭제') { return; }
-            await apiClient.clearAws();
+            await coreManager.clearAwsCredentials();
+            await coreManager.restart();
             vscode.window.showInformationMessage('AWS 자격증명 삭제 완료');
             sidebarProvider.triggerDiagnostics();
         })
@@ -430,22 +447,18 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
-    // ── Command: Open Workbench ─────────────────────────────────────────────
+    // ── Command: Open ReCoder workspace ─────────────────────────────────────
     // 사이드바의 "Workbench 열기" 버튼이나 명령 팔레트에서 호출.
-    // Editor Area 에 풀스크린 탭으로 열린다 — 4탭 펼침, 넓은 작업 공간.
+    // Editor Area 에 왼쪽 작업 영역 + 오른쪽 AI 대화가 한 화면으로 열린다.
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.openWorkbench', async () => {
-            // 패널을 먼저 즉시 연다 — HTML 은 동기 렌더, 데이터는 polling 으로 채워지므로
-            // Core 헬스체크/스폰(ensureCoreRunning)을 기다리지 않아 체감 지연이 사라진다.
-            // Core 가 준비되면 chip·진단·비용이 자동 갱신된다.
-            WorkbenchPanel.createOrShow(
-                context.extensionUri,
-                apiClient,
-                coreManager,
-                pollingService,
-            );
+            ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider);
             void ensureCoreRunning(coreManager, sidebarProvider);
-        })
+        }),
+        vscode.commands.registerCommand('recoder.openReCoder', async () => {
+            ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider);
+            void ensureCoreRunning(coreManager, sidebarProvider);
+        }),
     );
 
     // ── Commands: Sidebar Location (Kiro-style 우측 / 기본 좌측) ─────────────
@@ -563,6 +576,7 @@ async function ensureCoreRunning(
 ): Promise<void> {
     try {
         await coreManager.ensureRunning();
+        sidebarProvider.triggerDiagnostics();
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`ReCoder Core 시작 실패: ${msg}`);

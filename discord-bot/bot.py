@@ -321,19 +321,34 @@ def _register_commands(group: app_commands.Group) -> None:
             await interaction.response.send_message(_get_deny_message(interaction), ephemeral=True)
             return
         import guild_store
-        sid = student_id.strip()
-        # 전체 토큰(rcdr_<sid>_<secret>)을 붙여넣으면 가운데 student_id만 추출
-        if sid.startswith("rcdr_") and sid.count("_") >= 2:
-            sid = sid.split("_", 2)[1]
-        if not sid:
-            await interaction.response.send_message("❌ student_id가 비어 있습니다.", ephemeral=True)
+        from gateway_verify import verify_token, gateway_configured
+        raw = student_id.strip()
+        # **발급처 검증 필수.** 형식(rcdr_<sid>_<secret>)만 확인하면 공격자가
+        # rcdr_<피해자>_<아무거나> 를 넣어 피해자 sid 를 자기 계정에 바인딩하고,
+        # 같은 위조 토큰으로 브리지에 붙어 피해자 스트림을 가로챌 수 있다.
+        # 그래서 바인딩 전에 게이트웨이(권위 발급처)에 토큰이 실제로 발급된
+        # 것인지 확인한다. 게이트웨이가 인정한 sid 로만 바인딩한다.
+        if not (raw.startswith("rcdr_") and raw.count("_") >= 2):
+            await interaction.response.send_message(
+                "❌ 전체 토큰이 필요합니다. `rcdr_<id>_<secret>` 형식의 토큰을 그대로 붙여넣으세요.",
+                ephemeral=True,
+            )
             return
-        guild_store.set_binding(interaction.user.id, sid)
-        await interaction.response.send_message(
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        valid, sid = await verify_token(raw)
+        if not valid or not sid:
+            hint = ("게이트웨이에서 발급된 토큰이 맞는지 확인하세요."
+                    if gateway_configured()
+                    else "게이트웨이가 설정되지 않아 토큰을 검증할 수 없습니다.")
+            await interaction.followup.send(
+                f"❌ 토큰 검증 실패. 연결을 거부합니다. {hint}", ephemeral=True)
+            return
+        guild_store.set_binding(interaction.user.id, sid, guild_store._token_hash(raw))
+        await interaction.followup.send(
             f"✅ 연결 완료. 이제 이 디스코드 계정의 요청은 student_id `{sid}` 로 "
             f"브리지에 붙은 **당신의 VSCode**로만 전달됩니다.\n"
-            f"VSCode 확장 설정 `recoder.bridge.studentId` 에 `{sid}` 를 넣고 다시 연결하세요.\n"
-            f"⚠️ student_id 는 라우팅 식별자이니 타인에게 공개하지 마세요.",
+            f"VSCode 확장이 같은 토큰으로 브리지에 접속하면 본인 연결로 인증됩니다.\n"
+            f"⚠️ 토큰은 비밀번호입니다. 절대 타인에게 공개하지 마세요.",
             ephemeral=True,
         )
 

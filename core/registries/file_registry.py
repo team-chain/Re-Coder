@@ -40,23 +40,30 @@ CMD ["python", "app.py"]
 """
 
 _DOCKERFILE_NODE_EXPRESS = """\
-FROM node:20-slim
+FROM node:22-slim
+# 베이스 OS 의 알려진 CVE 를 패치한다 — 배포 전 Trivy 검사에서 CRITICAL 이 나오면 실행이 차단된다.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY . .
+# 이미지에 번들된 npm 의 tar 등에 CVE 가 남는다 — 앱은 node 로 직접 뜨므로 npm 을 제거한다.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 USER node
 EXPOSE 3000
 CMD ["node", "index.js"]
 """
 
 _DOCKERFILE_NODE_NEXT = """\
-FROM node:20-slim
+FROM node:22-slim
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
 RUN npm run build
+# npm start 로 뜨므로 npm 은 남기되 번들 tar CVE 를 피해 최신으로 올린다.
+RUN npm install -g npm@latest
 USER node
 EXPOSE 3000
 CMD ["npm", "start"]
@@ -66,32 +73,42 @@ CMD ["npm", "start"]
 # ── docker-compose 템플릿 ─────────────────────────────────────────────
 #
 # UX 노트:
-# - healthcheck 는 wget(기본)·curl(폴백) 둘 다 시도하는 sh -c 형태로 작성해
-#   alpine/slim 이미지에서도 동작.
-# - {env_file_block} 자리에는 .env.example 이 있으면 'env_file: [".env"]' 가 들어감.
+# - {env_file_block} 자리에는 실제 .env 가 있으면 'env_file: [".env"]' 가 들어감.
 # - {image} 는 'recoder-app:${{IMAGE_TAG:-latest}}' 형태로 받아 git SHA 태깅 가능.
+#
+# healthcheck 는 **여기 하드코딩하지 않는다.** 예전에는
+#     wget -q --spider ... || curl -fs ...
+# 를 박아 뒀는데, 정작 우리가 만들어 주는 이미지에 그 둘이 **모두 없다.**
+# python:slim 도 node:slim 도 wget/curl 을 담지 않는다(그래서 Dockerfile
+# 템플릿 쪽은 이미 python -c urllib 로 고쳤다). 그 상태로 두면 앱이
+# 정상 기동해도 compose 가 영구히 unhealthy 로 표시하고, depends_on
+# 조건이 걸린 서비스는 아예 못 뜬다. **틀렸는데 예외가 안 나는** 실패라
+# 아무도 모른 채로 남는다.
+# 그래서 스택을 아는 쪽(infra_agent)이 실행 가능한 명령을 만들어
+# {health_check_block} 으로 넣어 준다. 스택을 모르면 블록을 통째로 비운다 —
+# 항상 실패하는 헬스체크보다 없는 편이 낫다.
 
 _DOCKER_COMPOSE_BASE = """\
 version: '3.9'
 services:
   app:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: {image}
     container_name: {container_name}
     ports:
       - "{host_port}:{container_port}"
     restart: unless-stopped
-{env_file_block}    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:{container_port}{health_check_path} || curl -fs http://localhost:{container_port}{health_check_path} || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-"""
+{env_file_block}{health_check_block}"""
 
 _DOCKER_COMPOSE_WITH_DB = """\
 version: '3.9'
 services:
   app:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: {image}
     container_name: {container_name}
     ports:
@@ -102,13 +119,7 @@ services:
         condition: service_healthy
 {env_file_block}    environment:
       DATABASE_URL: postgresql://app:app@db:5432/app
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:{container_port}{health_check_path} || curl -fs http://localhost:{container_port}{health_check_path} || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
+{health_check_block}
   db:
     image: postgres:16-alpine
     container_name: {container_name}-db
@@ -124,6 +135,45 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+volumes:
+  db_data:
+"""
+
+_DOCKER_COMPOSE_WITH_MYSQL = """\
+version: '3.9'
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: {image}
+    container_name: {container_name}
+    ports:
+      - "{host_port}:{container_port}"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+{env_file_block}    environment:
+      DATABASE_URL: mysql://app:app@db:3306/app
+{health_check_block}
+  db:
+    image: mysql:8.4
+    container_name: {container_name}-db
+    restart: unless-stopped
+    environment:
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app
+      MYSQL_DATABASE: app
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uapp -papp --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
 volumes:
   db_data:
@@ -330,7 +380,7 @@ class FileRegistry:
                 base_content=_DOCKER_COMPOSE_BASE,
                 customizable_sections=[
                     "image", "container_name", "host_port", "container_port",
-                    "health_check_path", "env_file_block", "environment",
+                    "health_check_block", "env_file_block", "environment",
                 ],
             ),
             "docker-compose-db": FileTemplate(
@@ -339,7 +389,16 @@ class FileRegistry:
                 base_content=_DOCKER_COMPOSE_WITH_DB,
                 customizable_sections=[
                     "image", "container_name", "host_port", "container_port",
-                    "health_check_path", "env_file_block",
+                    "health_check_block", "env_file_block",
+                ],
+            ),
+            "docker-compose-mysql": FileTemplate(
+                template_id="docker-compose-mysql",
+                file_type="docker-compose",
+                base_content=_DOCKER_COMPOSE_WITH_MYSQL,
+                customizable_sections=[
+                    "image", "container_name", "host_port", "container_port",
+                    "health_check_block", "env_file_block",
                 ],
             ),
             "github-actions-deploy": FileTemplate(

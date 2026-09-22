@@ -21,7 +21,7 @@ Parameters:
     Description: 자가발급 정원 (0 = 무제한). 트라이얼이면 30 권장.
   AllowedModels:
     Type: String
-    Default: anthropic.claude-3-haiku-20240307-v1:0
+    Default: global.anthropic.claude-haiku-4-5-20251001-v1:0
     Description: 허용 Bedrock 모델 ID (쉼표 구분). 학생은 이 목록만 사용 가능.
   PoolCapUsd:
     Type: String
@@ -33,10 +33,10 @@ Parameters:
     Description: 게이트웨이 소프트 차단 임계(USD)
   PriceInPer1K:
     Type: String
-    Default: "0.00025"
+    Default: "0.001"
   PriceOutPer1K:
     Type: String
-    Default: "0.00125"
+    Default: "0.005"
   DefaultMaxTotalTokens:
     Type: String
     Default: "500000"
@@ -126,6 +126,12 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref GatewayTable
+        # SAM's DynamoDBCrudPolicy does not include transactional APIs.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:TransactWriteItems
+              Resource: !GetAtt GatewayTable.Arn
         # ── Bedrock 전용 최소권한: InvokeModel 만, 그 외 0 ──
         - Statement:
             - Effect: Allow
@@ -183,6 +189,23 @@ Resources:
             Path: /enroll
             Method: POST
 
+  VerifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: recoder-gw-verify
+      Handler: verify.handler
+      CodeUri: src/
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref GatewayTable
+      Events:
+        Verify:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /verify
+            Method: POST
+
   DeployFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -221,6 +244,8 @@ Outputs:
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/admin"
   EnrollEndpoint:
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/enroll"
+  VerifyEndpoint:
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/verify"
   TableName:
     Value: !Ref GatewayTable
   DeployEndpoint:

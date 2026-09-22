@@ -87,9 +87,15 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS user_bindings (
             discord_user_id INTEGER PRIMARY KEY,
             student_id      TEXT    NOT NULL,
+            token_sha256    TEXT    NOT NULL DEFAULT '',
             updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
         );
         """)
+        # 구 스키마 마이그레이션 — token_sha256 컬럼이 없으면 추가.
+        try:
+            c.execute("ALTER TABLE user_bindings ADD COLUMN token_sha256 TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -281,18 +287,50 @@ def get_guild_summary(guild_id: int) -> dict:
 
 # ── Phase 2: Discord user ↔ student_id 바인딩 ────────────────────────────────
 
-def set_binding(discord_user_id: int, student_id: str) -> None:
-    """학생 본인 Discord 계정 ↔ student_id 연결(덮어쓰기)."""
+import hashlib as _hashlib
+
+
+def _token_hash(raw_token: str) -> str:
+    return _hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def set_binding(discord_user_id: int, student_id: str, token_sha256: str = "") -> None:
+    """학생 본인 Discord 계정 ↔ student_id 연결(덮어쓰기).
+
+    token_sha256 은 **소유 증명**이다 — 브리지가 이 해시로 "이 student_id 스트림을
+    받을 자격" 을 검증한다. 빈 값이면 소유 증명 없는 레거시 바인딩이며, 브리지는
+    RECODER_BRIDGE_REQUIRE_SECRET=1 일 때 그런 바인딩의 수신을 거부한다.
+    """
     with _lock, _conn() as c:
         c.execute(
             """
-            INSERT INTO user_bindings (discord_user_id, student_id, updated_at)
-            VALUES (?, ?, datetime('now'))
+            INSERT INTO user_bindings (discord_user_id, student_id, token_sha256, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
             ON CONFLICT(discord_user_id)
-            DO UPDATE SET student_id = excluded.student_id, updated_at = datetime('now')
+            DO UPDATE SET student_id = excluded.student_id,
+                          token_sha256 = excluded.token_sha256,
+                          updated_at = datetime('now')
             """,
-            (int(discord_user_id), str(student_id)),
+            (int(discord_user_id), str(student_id), str(token_sha256)),
         )
+
+
+def verify_student_secret(student_id: str, raw_token: str) -> bool:
+    """raw_token(rcdr_<sid>_<secret> 전체)이 이 student_id 의 등록 해시와 일치하는가.
+
+    등록 해시가 없으면(레거시 바인딩) False — 소유를 증명할 수 없으므로.
+    """
+    if not student_id or not raw_token:
+        return False
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT token_sha256 FROM user_bindings WHERE student_id = ? AND token_sha256 != ''",
+            (str(student_id),),
+        ).fetchone()
+    if not row:
+        return False
+    import hmac as _hmac
+    return _hmac.compare_digest(row[0], _token_hash(raw_token))
 
 
 def get_student_id(discord_user_id: int) -> Optional[str]:

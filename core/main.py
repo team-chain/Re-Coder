@@ -7,6 +7,7 @@ Includes Hybrid Cloud Relay (section 6.4.2 flow 1) with DynamoDB queue + RelayPo
 from __future__ import annotations
 
 import atexit
+import logging
 import multiprocessing
 import os
 import secrets
@@ -17,8 +18,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 try:
     from dotenv import load_dotenv
@@ -33,12 +35,30 @@ if str(_CORE_DIR) not in sys.path:
 if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
+# .env 는 **아래 라우트 임포트보다 먼저** 읽어야 한다.
+#
+# `core/llm/bedrock_provider.py` 는 모듈 최상단에서 모델 ID 를 확정한다:
+#     DEFAULT_PRIMARY_MODEL = os.getenv("BEDROCK_PRIMARY_MODEL_IDENTIFIER", ...)
+#     BEDROCK_REGION        = os.getenv("BEDROCK_REGION", "us-east-1")
+# 즉 그 모듈이 임포트되는 순간의 환경으로 값이 굳는다. 예전에는 load_dotenv()
+# 가 main() 안에 있어서 아래 `from api.routes import ...` 가 먼저 실행됐고,
+# 그 결과 **.env 에 무엇을 적든 모델 ID 와 Bedrock 리전이 무시됐다.**
+# 자격증명은 호출 시점에 다시 읽어서 정상이었기 때문에, "키는 먹는데 모델만
+# 안 바뀐다"는 형태로만 드러나 원인을 찾기 어려웠다.
+#
+# 여기서 한 번 읽으면 python main.py 와 임포트 경로(테스트·스크립트) 양쪽이
+# 같은 설정을 본다. 이미 셸에 있는 환경변수는 덮어쓰지 않는다(override=False
+# 가 기본) — 데모용으로 한 번만 다른 모델을 쓰는 실행이 계속 동작해야 한다.
+load_dotenv(_CORE_DIR / ".env")
+
 from singleton import CoreSingleton  # noqa: E402
 from api.middleware.auth import SessionTokenMiddleware  # noqa: E402
 from api.routes import (  # noqa: E402
     health,
     analyze,
     deploy,
+    deploy_ecs,
+    deploy_s3,
     ops,
     session,
     policy,
@@ -161,6 +181,36 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # ── 처리되지 않은 예외를 사람이 읽을 수 있는 JSON 으로 ──────────────
+    #
+    # Starlette 기본 동작은 **평문 `Internal Server Error`** 한 줄이다. 확장은
+    # 응답 본문을 그대로 배너에 띄우므로, 사용자에게는 `Error: Internal Server
+    # Error` 만 보이고 원인도 다음 행동도 없다. 데모에서 인프라 파일 생성이
+    # 정확히 이렇게 막혔다.
+    #
+    # 개별 라우트를 다 감싸는 것으로는 부족하다 — 미들웨어·직렬화·미처 못 본
+    # 경로에서 터지면 또 평문으로 돌아간다. 그래서 마지막 그물을 여기 친다.
+    # 내부 예외 메시지에는 경로·자격증명 등이 포함될 수 있으므로 응답에는
+    # 추적용 오류 ID만 담고, 예외와 스택 트레이스는 서버 로그에만 남긴다.
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception):  # noqa: ANN202
+        error_id = secrets.token_hex(8)
+        logging.getLogger("recoder.core").exception(
+            "처리되지 않은 예외 [%s]: %s %s",
+            error_id,
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": (
+                    "코어에서 처리되지 않은 내부 오류가 발생했습니다. "
+                    f"오류 ID: {error_id} — 코어 로그를 확인한 뒤 다시 시도해 주세요."
+                ),
+            },
+        )
+
     app.add_middleware(
         CORSMiddleware,
         # Strict whitelist — vscode webview + localhost(임의 포트) 만.
@@ -216,6 +266,10 @@ def create_app() -> FastAPI:
     app.include_router(session.router)
     app.include_router(policy.router)
     app.include_router(ecs.router)
+    # 확장이 부르는 /api/deploy/ecs* 호환 계층 (FR-05-04)
+    app.include_router(deploy_ecs.router)
+    # FR-05-03 사용자 계정 S3 정적 배포(BYO)
+    app.include_router(deploy_s3.router)
     app.include_router(gitops.router)
     app.include_router(incident.router)
     app.include_router(workbench.router)
@@ -240,7 +294,9 @@ def _handle_shutdown(signum, _frame) -> None:
 
 def main() -> None:
     multiprocessing.freeze_support()
-    load_dotenv()
+    # load_dotenv() 는 파일 상단에서 이미 호출했다(임포트 순서 때문). 중복 호출은
+    # 하지 않는다 — override=False 라 무해하지만, 두 군데에 있으면 다음 사람이
+    # 어느 쪽이 실제로 먹는지 헷갈린다.
 
     try:
         from first_run import setup_recoder_home  # noqa: WPS433

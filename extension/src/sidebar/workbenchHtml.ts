@@ -793,8 +793,6 @@ html[data-mode="sidebar"] .deploy-grid{ }
       <button class="wb-btn wb-btn-sm" data-preset="AWS_ACCESS_KEY_ID">AWS_KEY_ID</button>
       <button class="wb-btn wb-btn-sm" data-preset="AWS_SECRET_ACCESS_KEY">AWS_SECRET</button>
       <button class="wb-btn wb-btn-sm" data-preset="ECR_REGISTRY">ECR</button>
-      <button class="wb-btn wb-btn-sm" data-preset="EC2_HOST">EC2_HOST</button>
-      <button class="wb-btn wb-btn-sm" data-preset="EC2_SSH_KEY">EC2_KEY</button>
       <button class="wb-btn wb-btn-sm" data-preset="ECS_CLUSTER">ECS_CLUSTER</button>
       <button class="wb-btn wb-btn-sm" data-preset="ECS_SERVICE">ECS_SERVICE</button>
     </div>
@@ -832,7 +830,6 @@ html[data-mode="sidebar"] .deploy-grid{ }
   <!-- 배포 방식 -->
   <div class="deploy-tabs">
     <button class="deploy-tab active" data-deploy="local">Local Docker</button>
-    <button class="deploy-tab" data-deploy="ec2">EC2</button>
     <button class="deploy-tab" data-deploy="ecs">ECS Fargate</button>
     <button class="deploy-tab" data-deploy="actions">GitHub Actions</button>
   </div>
@@ -881,46 +878,6 @@ html[data-mode="sidebar"] .deploy-grid{ }
     </div>
 
     <div class="inline-log collapsed" id="local-inline-log">
-      <div class="inline-log-header"><span class="chev">▼</span> 로그</div>
-      <div class="inline-log-body"><div class="inline-log-empty">결과 없음</div></div>
-    </div>
-  </div>
-
-  <!-- EC2 -->
-  <div class="panel deploy-pane" id="deploy-ec2">
-    <div class="step-desc" style="margin-top:0">이미지를 ECR에 올리고 EC2 서버에 SSH로 접속해 배포합니다. 단일 서버 운영에 적합합니다.</div>
-    <div class="stepper" id="ec2-stepper">
-      <div class="stepper-item" data-step="building"><div class="stepper-dot">1</div><div class="stepper-label">빌드</div></div>
-      <div class="stepper-item" data-step="ecr_login"><div class="stepper-dot">2</div><div class="stepper-label">ECR 로그인</div></div>
-      <div class="stepper-item" data-step="ecr_push"><div class="stepper-dot">3</div><div class="stepper-label">push</div></div>
-      <div class="stepper-item" data-step="ec2_deploy"><div class="stepper-dot">4</div><div class="stepper-label">SSH</div></div>
-      <div class="stepper-item" data-step="done"><div class="stepper-dot">5</div><div class="stepper-label">완료</div></div>
-    </div>
-
-    <div style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:8px; margin-bottom:8px">
-      <input id="ec2-image-name" class="wb-input" value="recoder-app" placeholder="이미지">
-      <input id="ec2-tag" class="wb-input" value="latest" placeholder="태그">
-      <input id="ec2-host-port" class="wb-input" type="number" value="8000" placeholder="호스트 포트">
-      <input id="ec2-container-port" class="wb-input" type="number" value="8000" placeholder="컨테이너 포트">
-    </div>
-    <input id="ec2-health-path" class="wb-input" value="/health" placeholder="헬스체크 경로" style="margin-bottom:8px">
-
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px">
-      <input id="ec2-region" class="wb-input" placeholder="AWS Region (env: AWS_REGION)">
-      <input id="ec2-ecr" class="wb-input" placeholder="ECR Registry (env: ECR_REGISTRY)">
-      <input id="ec2-host" class="wb-input" placeholder="EC2 Host (env: EC2_HOST)">
-      <input id="ec2-ssh-key" class="wb-input" placeholder="SSH 키 (env: EC2_SSH_KEY)">
-      <input id="ec2-user" class="wb-input" value="ec2-user" placeholder="EC2 사용자">
-    </div>
-
-    <div style="display:flex; gap:6px; margin-top:6px; align-items:center">
-      <button class="wb-btn wb-btn-primary" id="ec2-deploy-btn">배포 실행</button>
-      <button class="wb-btn wb-btn-ghost" id="ec2-ready-btn" style="display:none">점검</button>
-      <span style="flex:1"></span>
-      <span id="ec2-status-line" style="font-size:11px; color:var(--t2)"></span>
-    </div>
-
-    <div class="inline-log collapsed" id="ec2-inline-log">
       <div class="inline-log-header"><span class="chev">▼</span> 로그</div>
       <div class="inline-log-body"><div class="inline-log-empty">결과 없음</div></div>
     </div>
@@ -1251,10 +1208,30 @@ html[data-mode="sidebar"] .deploy-grid{ }
     const stepper = $(stepperId);
     if (!stepper) return;
     const items = stepper.querySelectorAll('.stepper-item');
+
+    // 서버가 보내는 stage 가 이 스테퍼의 data-step 에 없을 수 있다
+    // (ECS 는 idle/deploying/done/failed 만 보낸다). 예전에는 그럴 때
+    // 일치하는 항목을 못 찾아 **모든 단계가 done 으로 칠해졌다** —
+    // 배포가 실패했는데 6단계 전부 초록불에 "완료 ✓" 가 떴다.
+    // 먼저 일치 여부부터 확인한다.
+    let matched = false;
+    items.forEach(item => { if (item.dataset.step === currentStage) matched = true; });
+
     let passed = true;
     items.forEach(item => {
       const step = item.dataset.step;
       item.classList.remove('active','done','fail');
+      if (!matched){
+        // 어디까지 왔는지 모른다. 끝난 상태면 마지막 칸에만 결과를 찍고,
+        // 그 외에는 아무것도 칠하지 않는다. 모르는 것을 완료로 칠하는 것이
+        // 최악이다.
+        if (finalStage === 'failed' && item === items[items.length - 1]){
+          item.classList.add('fail');
+        } else if (finalStage === 'done'){
+          item.classList.add('done');
+        }
+        return;
+      }
       if (step === currentStage){
         if (finalStage === 'failed') item.classList.add('fail');
         else if (finalStage === 'done') item.classList.add('done');
@@ -1418,22 +1395,6 @@ html[data-mode="sidebar"] .deploy-grid{ }
             }).join('');
           }
         }
-        break;
-      }
-      case 'wb.deploy.ec2.statusResult': {
-        const s = m.payload || {};
-        const el = $('ec2-status-line');
-        if (el){
-          const tone = s.stage === 'failed' ? 'color:var(--red)' : s.stage === 'done' ? 'color:var(--green)' : 'color:var(--blue)';
-          el.innerHTML = '<span style="' + tone + '">' + s.stage + '</span>'
-            + ' · running=' + s.running
-            + (s.image_uri ? ' · image=' + s.image_uri : '')
-            + (s.error ? ' · error=' + s.error : '');
-        }
-        const finalStage = s.stage === 'done' ? 'done' : s.stage === 'failed' ? 'failed' : '';
-        updateStepper('ec2-stepper', s.stage, finalStage);
-        const tail = (s.log_tail || []).slice(-3);
-        tail.forEach(line => appendInlineLog('ec2-inline-log', line, s.stage === 'failed' ? 'err' : ''));
         break;
       }
       case 'wb.deploy.ecs.statusResult': {
@@ -1910,25 +1871,6 @@ html[data-mode="sidebar"] .deploy-grid{ }
     updateStepper('local-stepper', 'generate', '');
   });
 
-  ghBindClick('ec2-ready-btn', () => {
-    const el = $('ec2-status-line'); if (el) el.textContent = '[…] 사전 점검은 배포 버튼 클릭 시 자동 실행됩니다.';
-  });
-  ghBindClick('ec2-deploy-btn', () => {
-    const p = {
-      image_name: ($('ec2-image-name')||{}).value,
-      tag:        ($('ec2-tag')||{}).value,
-      host_port:  Number(($('ec2-host-port')||{}).value || 8000),
-      container_port: Number(($('ec2-container-port')||{}).value || 8000),
-      health_check_path: ($('ec2-health-path')||{}).value,
-      ecr_registry: ($('ec2-ecr')||{}).value,
-      ec2_host:     ($('ec2-host')||{}).value,
-      ec2_ssh_key:  ($('ec2-ssh-key')||{}).value,
-      aws_region:   ($('ec2-region')||{}).value,
-      ec2_user:     ($('ec2-user')||{}).value || 'ec2-user',
-    };
-    vscode.postMessage({ type:'wb.deploy.ec2', payload:p });
-    const el = $('ec2-status-line'); if (el) el.textContent = '[…] EC2 배포 요청 전송';
-  });
   ghBindClick('ecs-ready-btn', () => {
     const el = $('ecs-status-line'); if (el) el.textContent = '[…] 사전 점검은 배포 버튼 클릭 시 자동 실행됩니다.';
   });

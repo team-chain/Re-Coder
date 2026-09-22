@@ -17,22 +17,21 @@ import { CoreManager } from '../core/CoreManager';
 import { ApiClient } from '../core/ApiClient';
 import { PollingService } from '../core/PollingService';
 import { renderWorkbenchHtml } from './workbenchHtml';
+import { WorkbenchHost } from './workbenchHost';
 
-export class WorkbenchSidebarProvider implements vscode.WebviewViewProvider {
+export class WorkbenchSidebarProvider extends WorkbenchHost implements vscode.WebviewViewProvider {
     public static readonly viewType = 'recoder.workbenchView';
 
     private _view: vscode.WebviewView | undefined;
-    private _activity: { dot: string; text: string; time: string }[] = [];
-    private _pollTimer: ReturnType<typeof setInterval> | null = null;
-    private _diagnosticsInflight: boolean = false;
-    private _diagnosticsLoaded: boolean = false;
 
     constructor(
-        private readonly _extensionUri: vscode.Uri,
-        private readonly _apiClient: ApiClient,
-        private readonly _coreManager: CoreManager,
-        private readonly _polling: PollingService,
-    ) {}
+        extensionUri: vscode.Uri,
+        apiClient: ApiClient,
+        coreManager: CoreManager,
+        polling: PollingService,
+    ) {
+        super(extensionUri, apiClient, coreManager, polling);
+    }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -57,6 +56,12 @@ export class WorkbenchSidebarProvider implements vscode.WebviewViewProvider {
                 clearInterval(this._pollTimer);
                 this._pollTimer = null;
             }
+            //: 양방향 sync 타이머도 함께 정리한다. 안 멈추면 뷰가 사라진 뒤에도
+            //: 코어를 계속 폴링하고, _post 는 버려지므로 순수한 낭비가 된다.
+            if (this._workbenchPollTimer) {
+                clearInterval(this._workbenchPollTimer);
+                this._workbenchPollTimer = null;
+            }
             this._view = undefined;
         });
 
@@ -70,123 +75,28 @@ export class WorkbenchSidebarProvider implements vscode.WebviewViewProvider {
         // 초기 push + 폴링 시작
         setTimeout(() => this._pushHealthAndCost().catch(() => {}), 800);
         this._startPolling();
+
+        //: Workbench 양방향 sync — 패널에만 있고 사이드바에는 없었다. 실제로
+        //: 렌더되는 쪽이 사이드바이므로, 이게 없으면 Core/Discord 에서 올라온
+        //: 이벤트가 화면에 영영 안 뜬다.
+        void this._pushWorkbenchState();
+        this._startWorkbenchPolling();
     }
 
-    public addActivity(dotClass: 'ok' | 'warn' | 'fail' | 'info', text: string): void {
-        const item = { dot: dotClass, text, time: this._now() };
-        this._activity.unshift(item);
-        if (this._activity.length > 30) this._activity.pop();
-        this._post({ type: 'wb.activity', payload: { items: this._activity } });
-    }
-
-    public pushLog(pane: 'ai' | 'docker' | 'github' | 'deploy' | 'health', line: string): void {
-        this._post({ type: 'wb.log', payload: { pane, line } });
-    }
-
-    public pushDiagnostics(diag: import('../types').DiagnosticsResult): void {
-        this._post({ type: 'wb.diagnosticsUpdate', payload: diag });
-    }
-
-    // ──────────────────────────────────────────────────────────────────
-
-    private async _handleMessage(msg: { type: string; payload?: any }): Promise<void> {
-        switch (msg.type) {
-            case 'wb.ready':
-                await this._pushHealthAndCost();
-                this._post({ type: 'wb.activity', payload: { items: this._activity } });
-                break;
-            case 'wb.analyze':
-                await vscode.commands.executeCommand('recoder.analyzeError');
-                this.addActivity('info', '에러 분석 시작');
-                break;
-            case 'wb.openSidebar':
-                await vscode.commands.executeCommand('recoder.sidebarView.focus');
-                break;
-            case 'wb.poll.health':
-                await this._pushHealthAndCost();
-                break;
-            case 'wb.tab':
-                break;
-            case 'wb.generateDockerfile':
-                await vscode.commands.executeCommand('recoder.generateDockerfile');
-                this.addActivity('info', 'Dockerfile 생성 요청');
-                break;
-            case 'wb.generateGithubActions':
-                try {
-                    await vscode.commands.executeCommand('recoder.generateGithubActions');
-                    this.addActivity('info', 'GitHub Actions 워크플로우 생성 요청');
-                } catch (err) {
-                    this.addActivity('fail', `GitHub Actions 생성 실패: ${err}`);
-                }
-                break;
-            case 'wb.runDiagnostics':
-                await vscode.commands.executeCommand('recoder.runDiagnostics');
-                this.addActivity('info', '진단 재실행');
-                break;
-            case 'wb.restartCore':
-                await vscode.commands.executeCommand('recoder.restartCore');
-                this.addActivity('warn', 'Core 재시작');
-                break;
-            default:
-                console.warn('[WorkbenchSidebar] Unknown message:', msg.type);
-        }
-    }
-
-    private async _pushHealthAndCost(): Promise<void> {
-        try {
-            if (!this._coreManager.getSessionToken()) {
-                await this._coreManager.refreshToken();
-            }
-        } catch { /* ignore */ }
-
-        try {
-            const last = this._polling.getLastHealth();
-            if (last) {
-                this._post({ type: 'wb.healthUpdate', payload: last });
-            } else {
-                void this._polling.poll();
-            }
-        } catch { /* ignore */ }
-
-        try {
-            const cost = await this._apiClient.getCostSummary();
-            this._post({ type: 'wb.costUpdate', payload: cost });
-        } catch { /* ignore */ }
-
-        try {
-            let diag = await this._apiClient.getDiagnostics();
-            if (!diag && !this._diagnosticsInflight && !this._diagnosticsLoaded) {
-                this._diagnosticsInflight = true;
-                try {
-                    diag = await this._apiClient.runDiagnostics();
-                    this._diagnosticsLoaded = true;
-                } finally {
-                    this._diagnosticsInflight = false;
-                }
-            }
-            if (diag) {
-                this._post({ type: 'wb.diagnosticsUpdate', payload: diag });
-            }
-        } catch { /* ignore */ }
-    }
-
-    private _startPolling(): void {
-        if (this._pollTimer) return;
-        this._pollTimer = setInterval(() => {
-            // visible 일 때만 폴링 (백그라운드 비용 절감)
-            if (this._view?.visible) {
-                void this._pushHealthAndCost();
-            }
-        }, 5000);
-    }
-
-    private _post(msg: { type: string; payload?: any }): void {
+    /** 사이드바 뷰의 웹뷰로 전송. 뷰가 아직 없으면(접힘/미해결) 버린다. */
+    protected _post(msg: { type: string; payload?: any }): void {
         if (this._view) {
             this._view.webview.postMessage(msg);
         }
     }
 
-    private _now(): string {
-        return new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    /** 보이는 동안만 폴링 — 접혀 있을 때 코어를 두드리지 않는다. */
+    protected _startPolling(): void {
+        if (this._pollTimer) { return; }
+        this._pollTimer = setInterval(() => {
+            if (this._view?.visible) {
+                void this._pushHealthAndCost();
+            }
+        }, 5000);
     }
 }

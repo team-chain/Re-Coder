@@ -43,6 +43,21 @@ ENV_SPAM_WINDOW = ENV_PREFIX + "SPAM_WINDOW_SECONDS"
 ENV_HEALTH_TIMEOUT = ENV_PREFIX + "HEALTH_TIMEOUT"
 ENV_DEPLOYMENT_ID = ENV_PREFIX + "DEPLOYMENT_ID"
 
+# ── ECS/CloudWatch 감시 (FR-06-01/02) ────────────────────────────────
+# 비워 두면 ECS 감시를 하지 않는다. 로컬 도커만 쓰는 설치에서도 그대로 돈다.
+ENV_ECS_CLUSTER = ENV_PREFIX + "ECS_CLUSTER"
+ENV_ECS_SERVICE = ENV_PREFIX + "ECS_SERVICE"
+ENV_AWS_REGION = ENV_PREFIX + "AWS_REGION"
+ENV_ALB_NAME = ENV_PREFIX + "ALB_NAME"
+ENV_TARGET_GROUP = ENV_PREFIX + "TARGET_GROUP"
+ENV_ECS_INTERVAL = ENV_PREFIX + "ECS_INTERVAL"
+ENV_ECS_WINDOW = ENV_PREFIX + "ECS_WINDOW_SECONDS"
+ENV_ERROR_RATE = ENV_PREFIX + "ERROR_RATE_THRESHOLD"
+ENV_MIN_REQUESTS = ENV_PREFIX + "MIN_REQUESTS"
+ENV_P95_SECONDS = ENV_PREFIX + "P95_THRESHOLD_SECONDS"
+ENV_UNHEALTHY_POLLS = ENV_PREFIX + "UNHEALTHY_POLLS"
+ENV_TASK_RESTARTS = ENV_PREFIX + "TASK_RESTARTS"
+
 
 # ---------------------------------------------------------------------------
 # Config dataclass
@@ -65,15 +80,63 @@ class WatchdogConfig:
     spam_window_seconds: float = 60.0
     health_timeout_seconds: float = 5.0
     deployment_id: Optional[str] = None
+    # ── ECS/CloudWatch 감시 (FR-06-01/02) ────────────────────────────
+    #: 클러스터·서비스가 둘 다 있어야 ECS 감시를 켠다. 로컬 도커만 쓰는
+    #: 설치에서는 비어 있고, 그때는 이 경로가 통째로 꺼진다.
+    ecs_cluster: str = ""
+    ecs_service: str = ""
+    aws_region: str = ""
+    alb_name: str = ""
+    target_group: str = ""
+    ecs_interval_seconds: float = 60.0
+    #: 지표 관측 창. 배포 직후 집중 감시도 같은 길이를 쓴다(기본 5분).
+    ecs_window_seconds: int = 300
+    error_rate_threshold: float = 0.05
+    min_requests: int = 20
+    p95_threshold_seconds: float = 3.0
+    unhealthy_polls: int = 3
+    #: 관측 창 안에서 이 횟수 이상 **크래시로** 멈추면 재시작 루프로 본다.
+    #: 예전에는 이것만 환경변수가 없어서, 오탐이 나도 운영자가 조절할 수단이
+    #: 없었다.
+    task_restarts: int = 2
     extra: Dict[str, str] = field(default_factory=dict)
 
+    @property
+    def ecs_enabled(self) -> bool:
+        return bool(self.ecs_cluster and self.ecs_service)
+
+    def ecs_config_problem(self) -> Optional[str]:
+        """ECS 감시를 켰는데 못 도는 설정이면 그 이유. 문제 없으면 None.
+
+        **설정 실수는 조용히 실패한다.** 리전을 빼먹으면 botocore 가
+        `Invalid endpoint: https://ecs..amazonaws.com` 을 낼 뿐이라 로그를
+        봐도 무엇을 고쳐야 하는지 알 수 없고, 그 사이 사람들은 감시가 도는
+        줄 안다.
+        """
+        if not self.ecs_enabled:
+            return None
+        if not self.aws_region.strip():
+            return (
+                "ECS 감시를 켰지만 리전이 없습니다 — RECODER_WATCHDOG_AWS_REGION "
+                "(또는 AWS_REGION) 을 설정하세요."
+            )
+        return None
+
     def summary(self) -> str:
+        #: ECS 감시 여부를 요약에 넣는다. 안 넣으면 `--check` 로도 감시가
+        #: 켜졌는지 알 수 없어, 꺼진 채로 돌아도 아무도 모른다.
+        if self.ecs_enabled:
+            ecs = (f"{self.ecs_cluster}/{self.ecs_service}@"
+                   f"{self.aws_region or '리전없음'} alb={'yes' if self.alb_name else 'no'}")
+        else:
+            ecs = "off"
         return (
             f"project_id={self.project_id} host={self.host} env={self.environment} "
             f"poll={self.poll_interval_seconds}s health={self.health_interval_seconds}s "
             f"incident_path={self.incident_path} "
             f"discord_configured={'yes' if self.discord_webhook_url else 'no'} "
-            f"health_urls={list(self.health_check_urls.keys())}"
+            f"health_urls={list(self.health_check_urls.keys())} "
+            f"ecs={ecs}"
         )
 
 
@@ -188,6 +251,22 @@ def load_config(dotenv_path: Optional[Path] = None) -> WatchdogConfig:
         spam_window_seconds=_to_float(os.environ.get(ENV_SPAM_WINDOW), 60.0),
         health_timeout_seconds=_to_float(os.environ.get(ENV_HEALTH_TIMEOUT), 5.0),
         deployment_id=(os.environ.get(ENV_DEPLOYMENT_ID, "").strip() or None),
+        ecs_cluster=os.environ.get(ENV_ECS_CLUSTER, "").strip(),
+        ecs_service=os.environ.get(ENV_ECS_SERVICE, "").strip(),
+        aws_region=(
+            os.environ.get(ENV_AWS_REGION, "").strip()
+            or os.environ.get("AWS_REGION", "").strip()
+            or os.environ.get("AWS_DEFAULT_REGION", "").strip()
+        ),
+        alb_name=os.environ.get(ENV_ALB_NAME, "").strip(),
+        target_group=os.environ.get(ENV_TARGET_GROUP, "").strip(),
+        ecs_interval_seconds=max(15.0, _to_float(os.environ.get(ENV_ECS_INTERVAL), 60.0)),
+        ecs_window_seconds=max(60, _to_int(os.environ.get(ENV_ECS_WINDOW), 300)),
+        error_rate_threshold=_to_float(os.environ.get(ENV_ERROR_RATE), 0.05),
+        min_requests=_to_int(os.environ.get(ENV_MIN_REQUESTS), 20),
+        p95_threshold_seconds=_to_float(os.environ.get(ENV_P95_SECONDS), 3.0),
+        unhealthy_polls=_to_int(os.environ.get(ENV_UNHEALTHY_POLLS), 3),
+        task_restarts=_to_int(os.environ.get(ENV_TASK_RESTARTS), 2),
     )
     return cfg
 

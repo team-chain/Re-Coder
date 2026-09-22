@@ -9,6 +9,7 @@ import * as vscode from 'vscode';
 import * as https from 'https';
 import * as http from 'http';
 import { URL } from 'url';
+import { buildDiscordLinkCommand } from './discordLink';
 
 export const SECRET_TOKEN = 'recoder.studentToken';
 export const SECRET_STUDENT_ID = 'recoder.studentId';
@@ -73,15 +74,24 @@ export async function enrollWithCode(context: vscode.ExtensionContext, code: str
                 await vscode.workspace
                     .getConfiguration('recoder.bridge')
                     .update('studentId', json.student_id, vscode.ConfigurationTarget.Global);
-                // (2) 연동 단순화: Discord 연동용 /recoder link 명령을 바로 복사하게 안내.
-                const linkCmd = `/recoder link ${json.student_id}`;
+                // 봇은 공개 student_id가 아니라 전체 발급 토큰으로 소유권을
+                // 검증한다. 토큰은 알림 본문에 노출하지 않고 사용자가 명시적으로
+                // 선택했을 때만 클립보드에 복사한다.
+                const linkCmd = buildDiscordLinkCommand(String(json.token));
+                const copyAction = '보안 명령 복사';
                 void vscode.window
                     .showInformationMessage(
-                        `ReCoder 연결 완료 — AWS 키 없이 AI 사용 가능. Discord 연동하려면 채널에 붙여넣기: ${linkCmd}`,
-                        '명령 복사',
+                        'ReCoder 연결 완료 — Discord 연동 명령에는 비밀 토큰이 포함됩니다.',
+                        {
+                            modal: true,
+                            detail: '버튼으로 명령을 복사한 뒤 Discord의 /recoder link 입력란에 붙여넣으세요. 복사한 명령을 다른 사람에게 공개하지 마세요.',
+                        },
+                        copyAction,
                     )
                     .then((sel) => {
-                        if (sel === '명령 복사') { void vscode.env.clipboard.writeText(linkCmd); }
+                        if (sel === copyAction) {
+                            void vscode.env.clipboard.writeText(linkCmd);
+                        }
                     });
             } else {
                 vscode.window.showInformationMessage(

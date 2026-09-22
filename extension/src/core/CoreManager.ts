@@ -14,12 +14,15 @@ import * as cp from 'child_process';
 import { ChildProcess, spawn, execSync } from 'child_process';
 import { CoreHealth } from '../types';
 import { CoreClient } from '../api/coreClient';
+import { shouldReuseRunningCore } from './coreReuse';
 
 export interface RuntimeConfig {
     port: number;
     session_token: string;
     started_at?: string;
     pid?: number;
+    /** 이 Core 를 띄운 실행 파일의 절대경로. 구버전 Core 는 이 값이 없다. */
+    entrypoint?: string;
 }
 
 interface SpawnSpec {
@@ -29,6 +32,26 @@ interface SpawnSpec {
 }
 
 const SHUTDOWN_GRACE_MS = 5000;
+const AWS_ACCESS_KEY_SECRET = 'recoder.aws.accessKeyId';
+const AWS_SECRET_KEY_SECRET = 'recoder.aws.secretAccessKey';
+const AWS_REGION_SECRET = 'recoder.aws.region';
+const AWS_SESSION_TOKEN_SECRET = 'recoder.aws.sessionToken';
+//: 프로필 이름은 비밀이 아니므로 globalState 에 둔다. 키(SecretStorage)와
+//: **상호 배타**로 관리한다 — 둘 다 남아 있으면 재시작한 코어에서
+//: AWS_ACCESS_KEY_ID 가 AWS_PROFILE 을 이겨서, 화면은 프로필 A 인데
+//: 실제 요청은 옛 키 B 로 나가는 조용한 계정 뒤바뀜이 생긴다.
+const AWS_PROFILE_STATE = 'recoder.aws.profile';
+const AWS_PROFILE_REGION_STATE = 'recoder.aws.profileRegion';
+//: 프로그램 안에서 만든 배포 전용 역할의 ARN. 비밀이 아니다 — 임시 자격증명은
+//: 코어가 기반(프로필 또는 키)으로 매번 새로 빌리고, 저장하는 건 이 ARN 뿐이다.
+const AWS_ROLE_ARN_STATE = 'recoder.aws.roleArn';
+
+export interface AwsSecretCredentials {
+    accessKeyId: string;
+    secretAccessKey: string;
+    region: string;
+    sessionToken?: string;
+}
 
 export class CoreManager {
     private static instance: CoreManager;
@@ -36,6 +59,8 @@ export class CoreManager {
     private port: number = 17894;
     private sessionToken: string = '';
     private isSpawning: boolean = false;
+    /** 동시에 열린 Sidebar/Workspace 가 같은 Core를 중복 시작하지 않도록 직렬화. */
+    private ensurePromise: Promise<CoreClient> | null = null;
     private extensionContext: vscode.ExtensionContext;
 
     // CoreClient 인스턴스 (외부에서 사용)
@@ -74,11 +99,23 @@ export class CoreManager {
     }
 
     async ensureRunning(): Promise<CoreClient> {
-        // 1) 정상 경로 — runtime.json + healthCheck.
-        const runtime = await this.readRuntime();
-        if (runtime) {
-            this.port = runtime.port;
-            this.sessionToken = runtime.session_token;
+        if (this.ensurePromise) {
+            return this.ensurePromise;
+        }
+        this.ensurePromise = this._ensureRunning();
+        try {
+            return await this.ensurePromise;
+        } finally {
+            this.ensurePromise = null;
+        }
+    }
+
+    private async _ensureRunning(): Promise<CoreClient> {
+        // ReCoder 저장소를 직접 열어 개발 중인 경우에는, 이전 VSIX가 남겨 둔
+        // 번들 Core를 재사용하지 않는다. 그 프로세스는 최신 API/진단 로직을
+        // 포함하지 않을 수 있으므로 현재 workspace의 Python Core를 새로 시작한다.
+        const workspaceCore = this._findWorkspaceCore();
+        if (workspaceCore && this.coreProcess && !this.coreProcess.killed) {
             const health = await this.healthCheck();
             if (health && health.status !== 'down') {
                 this._client = new CoreClient(this.port, this.sessionToken);
@@ -86,28 +123,57 @@ export class CoreManager {
             }
         }
 
-        // 2) runtime.json 이 없거나 health 가 실패하더라도, 사용자가 `python core/main.py`
-        //    같은 방식으로 수동 실행 중일 수 있다. 기본 포트 범위 (17894~17910) 에서
-        //    /api/health (인증 불요) 가 응답하는지 직접 확인하고, 있다면 runtime.json
-        //    이 곧 쓰여질 때까지 잠시 대기하여 토큰을 회수한다.
-        const detected = await this.probeRunningCore();
-        if (detected) {
-            this.port = detected.port;
-            // runtime.json 이 잠시 늦게 쓰여질 수 있으므로 최대 3초 polling.
-            const deadline = Date.now() + 3000;
-            while (Date.now() < deadline) {
-                const rt = await this.readRuntime();
-                if (rt && rt.port === this.port && rt.session_token) {
-                    this.sessionToken = rt.session_token;
+        // 1) 정상 경로 — runtime.json + healthCheck.
+        //
+        // 예전에는 이 블록 전체를 `if (!workspaceCore)` 로 감쌌다. 즉 ReCoder
+        // 저장소를 연 개발 모드에서는 **떠 있는 Core 를 찾는 시도조차 하지
+        // 않고** 곧장 재spawn 으로 떨어졌다. 그런데 개발 중에는 워크스페이스의
+        // Core 를 직접 띄워 두는 게 정상 사용법이라, 연결이 한 번 끊기면
+        // 창을 리로드하기 전까지 영영 복구되지 않았다(싱글턴 락·포트 충돌로
+        // 17894 ↔ 17895 를 오갔다).
+        //
+        // 이제는 항상 찾아보되, **재사용해도 되는 Core 인지**를 runtime.json 의
+        // entrypoint 로 판단한다(shouldReuseRunningCore). 원래 막으려던 것
+        // — 예전 VSIX 가 남긴 번들 Core 재사용 — 은 그대로 막힌다.
+        const runtime = await this.readRuntime();
+        const mayReuse = shouldReuseRunningCore(
+            workspaceCore ? workspaceCore.mainPy : null,
+            runtime?.entrypoint ?? null,
+        );
+        if (mayReuse) {
+            if (runtime) {
+                this.port = runtime.port;
+                this.sessionToken = runtime.session_token;
+                const health = await this.healthCheck();
+                if (health && health.status !== 'down') {
                     this._client = new CoreClient(this.port, this.sessionToken);
                     return this._client;
                 }
-                await this.sleep(200);
             }
-            // 토큰을 못 받아도 일단 connect 는 가능 — 인증 필요 호출이 401/503 일 뿐.
-            // 호출 측에서 refreshToken 으로 재시도.
-            this._client = new CoreClient(this.port, this.sessionToken);
-            return this._client;
+
+            // 2) runtime.json 이 없거나 health 가 실패하더라도, 사용자가 `python core/main.py`
+            //    같은 방식으로 수동 실행 중일 수 있다. 기본 포트 범위 (17894~17910) 에서
+            //    /api/health (인증 불요) 가 응답하는지 직접 확인하고, 있다면 runtime.json
+            //    이 곧 쓰여질 때까지 잠시 대기하여 토큰을 회수한다.
+            const detected = await this.probeRunningCore();
+            if (detected) {
+                this.port = detected.port;
+                // runtime.json 이 잠시 늦게 쓰여질 수 있으므로 최대 3초 polling.
+                const deadline = Date.now() + 3000;
+                while (Date.now() < deadline) {
+                    const rt = await this.readRuntime();
+                    if (rt && rt.port === this.port && rt.session_token) {
+                        this.sessionToken = rt.session_token;
+                        this._client = new CoreClient(this.port, this.sessionToken);
+                        return this._client;
+                    }
+                    await this.sleep(200);
+                }
+                // 토큰을 못 받아도 일단 connect 는 가능 — 인증 필요 호출이 401/503 일 뿐.
+                // 호출 측에서 refreshToken 으로 재시도.
+                this._client = new CoreClient(this.port, this.sessionToken);
+                return this._client;
+            }
         }
 
         if (this.isSpawning) {
@@ -179,6 +245,158 @@ export class CoreManager {
         return {};
     }
 
+    /**
+     * VS Code OS 보안 저장소에서 읽은 AWS 키만 Core 프로세스에 전달한다.
+     * 파일이나 workspace 설정에는 키를 쓰지 않는다.
+     */
+    private async _awsEnv(): Promise<Record<string, string>> {
+        try {
+            const [accessKeyId, secretAccessKey, storedRegion, sessionToken] = await Promise.all([
+                this.extensionContext.secrets.get(AWS_ACCESS_KEY_SECRET),
+                this.extensionContext.secrets.get(AWS_SECRET_KEY_SECRET),
+                this.extensionContext.secrets.get(AWS_REGION_SECRET),
+                this.extensionContext.secrets.get(AWS_SESSION_TOKEN_SECRET),
+            ]);
+            //: 역할 모드면 기반(프로필/키) 위에 역할 ARN 을 얹어 넘긴다. 코어는
+            //: 뜨자마자 그 역할을 빌려 기반 자격증명 대신 임시 자격증명을 쓴다.
+            const roleArn = this.extensionContext.globalState.get<string>(AWS_ROLE_ARN_STATE, '');
+            const roleEnv = roleArn ? { RECODER_ASSUME_ROLE_ARN: roleArn } : {};
+            if (!accessKeyId || !secretAccessKey) {
+                //: 키가 없으면 프로필 연결 상태인지 본다. 프로필은 이름만
+                //: 넘기면 코어의 boto3 가 ~/.aws 에서 알아서 해석한다 —
+                //: 비밀 값이 확장을 거치지 않는 것이 이 경로의 장점이다.
+                const profile = this.extensionContext.globalState.get<string>(AWS_PROFILE_STATE, '');
+                if (!profile) { return {}; }
+                const profileRegion = this.extensionContext.globalState.get<string>(AWS_PROFILE_REGION_STATE, '');
+                return {
+                    AWS_PROFILE: profile,
+                    ...(profileRegion ? { AWS_REGION: profileRegion, AWS_DEFAULT_REGION: profileRegion } : {}),
+                    ...roleEnv,
+                };
+            }
+            const region = storedRegion || 'ap-northeast-2';
+            return {
+                AWS_ACCESS_KEY_ID: accessKeyId,
+                AWS_SECRET_ACCESS_KEY: secretAccessKey,
+                AWS_REGION: region,
+                AWS_DEFAULT_REGION: region,
+                ...(sessionToken ? { AWS_SESSION_TOKEN: sessionToken } : {}),
+                ...roleEnv,
+            };
+        } catch {
+            return {};
+        }
+    }
+
+    /**
+     * 보관된 AWS 연결 — 자가 조치(재주입)용.
+     *
+     * 코어를 **재사용**할 때(다른 창이 띄웠거나 사용자가 직접 실행) 는 env 주입이
+     * 일어나지 않아 "재시작하면 연결 풀림" 이 됐다. 그 경우 확장이 이 값을 코어의
+     * connect API 로 다시 밀어넣는다(SidebarProvider.healAwsConnection). 키는
+     * 여기서도 SecretStorage 밖으로 나가지 않는다 — 코어와의 로컬 호출에만 실린다.
+     */
+    async getStoredAwsConnection(): Promise<
+        | { kind: 'keys'; accessKeyId: string; secretAccessKey: string; region: string; sessionToken?: string }
+        | { kind: 'profile'; profile: string; region: string }
+        | null
+    > {
+        try {
+            const [accessKeyId, secretAccessKey, storedRegion, sessionToken] = await Promise.all([
+                this.extensionContext.secrets.get(AWS_ACCESS_KEY_SECRET),
+                this.extensionContext.secrets.get(AWS_SECRET_KEY_SECRET),
+                this.extensionContext.secrets.get(AWS_REGION_SECRET),
+                this.extensionContext.secrets.get(AWS_SESSION_TOKEN_SECRET),
+            ]);
+            if (accessKeyId && secretAccessKey) {
+                return {
+                    kind: 'keys', accessKeyId, secretAccessKey,
+                    region: storedRegion || 'ap-northeast-2',
+                    ...(sessionToken ? { sessionToken } : {}),
+                };
+            }
+            const profile = this.extensionContext.globalState.get<string>(AWS_PROFILE_STATE, '');
+            if (!profile) { return null; }
+            return {
+                kind: 'profile', profile,
+                region: this.extensionContext.globalState.get<string>(AWS_PROFILE_REGION_STATE, '') || '',
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    /** 지금 붙어 있는 코어 인스턴스를 구분하는 키 — 인스턴스당 한 번만 자가 조치한다. */
+    coreInstanceKey(): string {
+        return `${this.port}:${this.sessionToken}`;
+    }
+
+    /** STS 검증이 끝난 자격증명만 VS Code SecretStorage에 보관한다. */
+    async storeAwsCredentials(credentials: AwsSecretCredentials): Promise<void> {
+        await this.extensionContext.secrets.store(AWS_ACCESS_KEY_SECRET, credentials.accessKeyId);
+        await this.extensionContext.secrets.store(AWS_SECRET_KEY_SECRET, credentials.secretAccessKey);
+        await this.extensionContext.secrets.store(AWS_REGION_SECRET, credentials.region || 'ap-northeast-2');
+        if (credentials.sessionToken) {
+            await this.extensionContext.secrets.store(AWS_SESSION_TOKEN_SECRET, credentials.sessionToken);
+        } else {
+            await this.extensionContext.secrets.delete(AWS_SESSION_TOKEN_SECRET);
+        }
+        //: 키와 프로필은 상호 배타 — 프로필 흔적을 지워야 재시작한 코어가
+        //: 사용자가 마지막으로 고른 쪽(키)으로만 연결된다.
+        await this.extensionContext.globalState.update(AWS_PROFILE_STATE, undefined);
+        await this.extensionContext.globalState.update(AWS_PROFILE_REGION_STATE, undefined);
+        //: 기반이 바뀌면 이전 기반으로 만든 역할 지시도 지운다 — 새 기반이 그
+        //: 역할을 빌릴 권한이 있다는 보장이 없고, 있다면 다시 셋업하면 된다.
+        await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, undefined);
+    }
+
+    /** 프로필 연결 상태를 보관한다 — 이름뿐, 비밀 값은 저장하지 않는다. */
+    async storeAwsProfile(profile: string, region: string): Promise<void> {
+        await this.extensionContext.globalState.update(AWS_PROFILE_STATE, profile);
+        await this.extensionContext.globalState.update(AWS_PROFILE_REGION_STATE, region || '');
+        //: 반대 방향도 지운다 — 남은 키가 AWS_PROFILE 을 이기면 화면은
+        //: 프로필인데 요청은 옛 키로 나가는 계정 뒤바뀜이 된다.
+        await Promise.all([
+            this.extensionContext.secrets.delete(AWS_ACCESS_KEY_SECRET),
+            this.extensionContext.secrets.delete(AWS_SECRET_KEY_SECRET),
+            this.extensionContext.secrets.delete(AWS_REGION_SECRET),
+            this.extensionContext.secrets.delete(AWS_SESSION_TOKEN_SECRET),
+        ]);
+        await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, undefined);
+    }
+
+    /**
+     * 배포 전용 역할 ARN 을 보관한다 — 비밀 아님. 기반(프로필/키)은 그대로
+     * 두고 그 위에 얹는다. 다음 코어 시작부터 RECODER_ASSUME_ROLE_ARN 으로 넘어간다.
+     */
+    async storeAwsRole(roleArn: string): Promise<void> {
+        await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, roleArn || undefined);
+    }
+
+    /** 보관된 역할 ARN. 없으면 빈 문자열. */
+    getAwsRoleArn(): string {
+        return this.extensionContext.globalState.get<string>(AWS_ROLE_ARN_STATE, '');
+    }
+
+    /** SecretStorage의 AWS 자격증명(및 프로필·역할 연결 상태)을 제거한다. */
+    async clearAwsCredentials(): Promise<void> {
+        await Promise.all([
+            this.extensionContext.secrets.delete(AWS_ACCESS_KEY_SECRET),
+            this.extensionContext.secrets.delete(AWS_SECRET_KEY_SECRET),
+            this.extensionContext.secrets.delete(AWS_REGION_SECRET),
+            this.extensionContext.secrets.delete(AWS_SESSION_TOKEN_SECRET),
+        ]);
+        await this.extensionContext.globalState.update(AWS_PROFILE_STATE, undefined);
+        await this.extensionContext.globalState.update(AWS_PROFILE_REGION_STATE, undefined);
+        await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, undefined);
+    }
+
+    /** 보안 금고의 변경값을 현재 Core에도 반영한다. */
+    async restart(): Promise<CoreClient> {
+        await this.shutdown(true);
+        return this.ensureRunning();
+    }
+
     private async spawnCore(): Promise<void> {
         this.isSpawning = true;
         try {
@@ -197,10 +415,14 @@ export class CoreManager {
 
             // 게이트웨이 모드: 설정 URL + 저장된 학생 토큰이 있으면 Core 에 env 주입 →
             // Core 의 provider_router 가 Bedrock 직접호출 대신 운영자 게이트웨이를 사용.
-            const gatewayEnv = await this._gatewayEnv();
+            const [gatewayEnv, awsEnv] = await Promise.all([this._gatewayEnv(), this._awsEnv()]);
 
+            //: 확장 호스트 전용 변수(ELECTRON_RUN_AS_NODE 등)는 코어에 넘기지 않는다 — 코어가
+            //: 띄우는 Docker Desktop(Electron)이 그걸 물려받으면 GUI 없이 즉시 종료한다(실기기).
+            const hostEnv: NodeJS.ProcessEnv = { ...process.env };
+            for (const k of ['ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ATTACH_CONSOLE', 'NODE_OPTIONS']) { delete hostEnv[k]; }
             this.coreProcess = spawn(spec.command, args, {
-                env: { ...process.env, ...gatewayEnv },
+                env: { ...hostEnv, ...gatewayEnv, ...awsEnv },
                 detached: false,
                 stdio: ['ignore', 'pipe', 'pipe'],
                 cwd: spec.cwd,
@@ -324,12 +546,21 @@ export class CoreManager {
     }
 
     async shutdown(force: boolean = false): Promise<void> {
-        const runtime = await this.readRuntime();
-        const pid = this.coreProcess?.pid ?? runtime?.pid;
+        // **이 매니저가 직접 띄운 프로세스만 죽인다.**
+        //
+        // runtime.json 의 PID 는 공유 자원이다 — 두 번째 VSCode 창은 기존
+        // Core 에 붙기만 하고 coreProcess 가 null 인데, 여기서 runtime PID 로
+        // 폴백해 죽이면 **다른 창이 소유한 Core 를 종료**한다. 아무 보조 창
+        // 하나만 닫아도 열려 있는 모든 창의 연결이 끊기는 형태다.
+        //
+        // 붙기만 한 창의 정리는 연결 해제(_client = null)로 끝난다. Core 는
+        // 소유 창이 닫힐 때 그 창의 shutdown 이 거두고, 소유 창이 비정상
+        // 종료된 경우는 singleton 의 stale-lock 회수 경로가 처리한다.
         const proc = this.coreProcess;
+        const pid = proc?.pid;
         this._client = null;
 
-        if (!pid && !proc) { return; }
+        if (!proc || !pid) { return; }
 
         if (process.platform === 'win32') {
             if (pid) {
@@ -401,10 +632,11 @@ export class CoreManager {
 
     /**
      * Core 실행 명령을 결정한다.
-     *   1) VSIX 번들 바이너리 (`extension/bin/recoder-core[.exe]`)
-     *   2) PATH 상의 `recoder-core`
-     *   3) `~/.recoder/bin/recoder-core[.exe]`
-     *   4) 개발 모드: `extension/../core/main.py` 를 python 으로 실행
+     *   1) ReCoder 소스 저장소를 연 개발 모드: workspace/core/main.py
+     *   2) VSIX 번들 바이너리 (`extension/bin/recoder-core[.exe]`)
+     *   3) PATH 상의 `recoder-core`
+     *   4) `~/.recoder/bin/recoder-core[.exe]`
+     *   5) 개발 모드: `extension/../core/main.py` 를 python 으로 실행
      *
      * 반환값은 spawn(command, args) 에 그대로 넘길 수 있는 형태.
      * 못 찾으면 null 반환.
@@ -414,7 +646,24 @@ export class CoreManager {
         const binaryName = platform === 'win32' ? 'recoder-core.exe' : 'recoder-core';
         const ext = this.extensionContext.extensionPath;
 
-        // 1) VSIX 번들 (Windows: .exe / 그 외: extension)
+        // 개발자가 ReCoder 저장소 자체를 열었을 때는, VSIX 안에 남아 있을 수 있는
+        // 이전 Core 바이너리보다 workspace의 최신 Python Core를 우선 사용한다.
+        // 일반 사용자의 프로젝트는 extension/package.json이 없으므로 이 경로에
+        // 해당하지 않고, 아래 번들 바이너리 경로를 그대로 사용한다.
+        // workspace로 저장소 루트 또는 extension/ 폴더만 열 수 있으므로, 각
+        // workspace의 부모도 함께 확인한다. 그래야 개발 중 최신 소스 Core를
+        // 일관되게 사용하고, 낡은 번들 바이너리로 인한 API 404를 피할 수 있다.
+        const workspaceCore = this._findWorkspaceCore();
+        if (workspaceCore) {
+            const coreDir = path.dirname(workspaceCore.mainPy);
+            return {
+                command: this._findPython(coreDir),
+                args: [workspaceCore.mainPy],
+                cwd: coreDir,
+            };
+        }
+
+        // 2) VSIX 번들 (Windows: .exe / 그 외: extension)
         const bundledPath = path.join(ext, 'bin', binaryName);
         if (fs.existsSync(bundledPath)) { return { command: bundledPath, args: [] }; }
 
@@ -452,6 +701,18 @@ export class CoreManager {
         }
 
         return null;
+    }
+
+    /** 현재 열린 workspace가 ReCoder 소스 저장소이면 최신 Core 진입점을 찾는다. */
+    private _findWorkspaceCore(): { mainPy: string; extensionManifest: string } | null {
+        const workspaceRoots = (vscode.workspace.workspaceFolders ?? [])
+            .flatMap(folder => [folder.uri.fsPath, path.dirname(folder.uri.fsPath)]);
+        return workspaceRoots
+            .map(root => ({
+                mainPy: path.join(root, 'core', 'main.py'),
+                extensionManifest: path.join(root, 'extension', 'package.json'),
+            }))
+            .find(candidate => fs.existsSync(candidate.mainPy) && fs.existsSync(candidate.extensionManifest)) ?? null;
     }
 
     /** 기존 시그니처 호환용 — 바이너리 경로만 반환 */

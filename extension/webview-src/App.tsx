@@ -28,18 +28,27 @@ import React, { useState, useCallback, useEffect } from "react";
 import { useVSCodeApi } from "./hooks/useVSCodeApi";
 import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
+import CodeAgent from "./components/CodeAgent";
+import type { ExternalTurn } from "./components/CodeAgent";
+import { HubHome, HubPage, FeatureFrame, AdrPanel, SecurityScanPanel, PolicyPanel, FEATURE_BY_ID, hubOf, isHubView, isFeatureView } from "./components/Hubs";
+import type { HubId, FeatureId, ReadyCtx } from "./components/Hubs";
 import { ShipMode } from "./components/ShipMode";
 import { OperateMode } from "./components/OperateMode";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
 import { Replay } from "./components/Replay";
 import CodeMap from "./components/CodeMap";
+import ChatPanel from "./components/ChatPanel";
+import DeploymentCenter from "./components/DeploymentCenter";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type ViewMode = "home" | "build" | "ship" | "operate" | "replay" | "map";
+//: 화면 구조 (A안, 2026-09-17): 홈(허브 3장) → 허브 페이지(기능 카드) → 기능 화면.
+//: "build"·"ship"·"deploy"·"operate"·"replay"·"map" 은 예전 이름 그대로 두어
+//: 기존 테스트·핸들러가 깨지지 않게 했다. "code" 는 CodeAgent 단독 화면(코드 생성 · 수정).
+type ViewMode = "home" | `hub:${HubId}` | FeatureId;
 
 interface DiagnosticsResult {
   core_ready: string;
@@ -173,12 +182,20 @@ const Icon = {
 // Hero (로고 + 태그라인)
 // ---------------------------------------------------------------------------
 
-const Hero: React.FC = () => (
+const Hero: React.FC<{ onOpenWorkspace?: () => void }> = ({ onOpenWorkspace }) => (
   <div style={{ padding: "18px 16px 8px", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
     <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
       <span style={{ color: "var(--vscode-foreground, #e0e0e0)", display: "inline-flex" }}><Icon.Logo size={22} /></span>
       <span style={{ fontSize: 20, fontWeight: 600, color: "var(--vscode-foreground, #e0e0e0)", letterSpacing: "-0.01em" }}>ReCoder</span>
     </div>
+    {onOpenWorkspace && (
+      <button
+        onClick={onOpenWorkspace}
+        style={{ width: "100%", marginTop: 12, padding: "8px 10px", border: "none", borderRadius: 5, background: "var(--vscode-button-background, #0e639c)", color: "var(--vscode-button-foreground, #fff)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+      >
+        ReCoder 창 열기
+      </button>
+    )}
   </div>
 );
 
@@ -343,9 +360,10 @@ interface HomeProps {
   postMessage: (type: string, payload?: unknown) => void;
   awsReady: boolean;
   githubReady: boolean;
+  showMap?: boolean;
 }
 
-const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSelectMode, postMessage, awsReady, githubReady }) => {
+const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSelectMode, postMessage, awsReady, githubReady, showMap = false }) => {
   const accent = "var(--vscode-textLink-foreground, #4a9eff)";
   const green = "var(--vscode-charts-green, #3fb950)";
   const muted = "var(--vscode-descriptionForeground, #888)";
@@ -402,10 +420,17 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
     <div style={{ padding: "14px 12px 10px", display: "flex", flexDirection: "column", gap: 16 }}>
 
       {/* 구조 지도 — 홈에서 바로 표시 (정적 분석이라 AI 없이 동작) */}
-      <div>
-        <div style={sectionLabel}>구조 지도</div>
-        <CodeMap isActive={true} />
-      </div>
+      {showMap ? (
+        <div>
+          <div style={sectionLabel}>구조 지도</div>
+          <CodeMap isActive={true} />
+        </div>
+      ) : (
+        <div>
+          <div style={sectionLabel}>구조 지도</div>
+          <StepRow icon={<Icon.Map size={19} />} label="전체 아키텍처 보기" enabled onClick={() => onSelectMode("map")} last />
+        </div>
+      )}
 
       {/* 워크플로 */}
       <div>
@@ -419,8 +444,14 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
         <StepRow
           icon={<Icon.Container size={19} />}
           label="Deploy"
-          enabled={isAiReady} hint="AI 필요"
+          enabled={true}
           onClick={() => onSelectMode("ship")}
+        />
+        <StepRow
+          icon={<Icon.Dashboard size={19} />}
+          label="배포 센터"
+          enabled={true}
+          onClick={() => onSelectMode("deploy")}
         />
         <StepRow
           icon={<Icon.Cloud size={19} />}
@@ -437,9 +468,10 @@ const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSel
         <ConnRow icon={<Icon.Git size={19} />} label="GitHub" connected={githubReady}
           onConnect={() => postMessage("webview.diagnostics.fix", { key: "github_ready" })} />
         <ConnRow icon={<Icon.Cloud size={19} />} label="AWS" connected={awsReady}
-          onConnect={() => postMessage("webview.diagnostics.fix", { key: "aws_deploy_ready" })} />
-        <ConnRow icon={<Icon.Chat size={19} />} label="Discord" connected={false} actionLabel="봇 초대"
-          onConnect={() => postMessage("workbench.open", {})} last />
+          onConnect={() => postMessage("webview.diagnostics.fix", { key: "aws_deploy_ready" })} last />
+        {/* Discord 행 제거 — "봇 초대" 라벨이 실제로는 workbench.open 을 보내
+            Workspace 창만 다시 열었다(라벨-동작 불일치, 보드 이슈). Discord
+            연동 자체가 요구사항 범위 밖(FR-10)이므로 행을 없애는 것이 정직하다. */}
       </div>
 
       {/* Deploy Replay (보조) */}
@@ -500,14 +532,107 @@ const SubHeader: React.FC<{ title: string; onBack: () => void }> = ({ title, onB
 );
 
 // ---------------------------------------------------------------------------
+// ReCoder 작업 화면 — 왼쪽 작업 영역 + 오른쪽 고정 AI 대화
+// ---------------------------------------------------------------------------
+
+interface WorkspaceLayoutProps {
+  view: ViewMode;
+  externalTurn?: ExternalTurn | null;
+  diagnostics: DiagnosticsResult | null;
+  coreStatus: "ok" | "degraded" | "down" | null;
+  showDiagnostics: boolean;
+  isAiReady: boolean;
+  isDockerReady: boolean;
+  isOpsReady: boolean;
+  costSummary: ReturnType<typeof usePolling>["costSummary"];
+  onSelectMode: (mode: ViewMode) => void;
+  onToggleDiagnostics: () => void;
+  postMessage: (type: string, payload?: unknown) => void;
+}
+
+// ---------------------------------------------------------------------------
+// HubRouter — 홈 / 허브 페이지 / 기능 화면을 view 값으로 골라 그린다.
+// 사이드바와 Workspace 창이 같은 라우팅을 쓴다.
+// ---------------------------------------------------------------------------
+const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: ExternalTurn | null; onSelectMode: (m: ViewMode) => void }> = ({ view, ctx, externalTurn, onSelectMode }) => {
+  const goHome = () => onSelectMode("home");
+  const goHub = (h: HubId) => onSelectMode(`hub:${h}`);
+  if (view === "home") {
+    return <HubHome ctx={ctx} onSelect={goHub} />;
+  }
+  if (isHubView(view)) {
+    const hub = view.slice(4) as HubId;
+    return <HubPage hub={hub} ctx={ctx} onOpen={(f) => onSelectMode(f)} onHome={goHome} onHub={goHub} />;
+  }
+  if (!isFeatureView(view)) { return null; }
+  const feature: FeatureId = view;
+  let body: React.ReactNode = null;
+  switch (feature) {
+    case "code": body = <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} />; break;
+    case "build": body = <BuildMode isActive={ctx.isAiReady} externalTurn={externalTurn} />; break;
+    case "map": body = <CodeMap isActive />; break;
+    case "adr": body = <AdrPanel />; break;
+    case "ship": body = <ShipMode isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} />; break;
+    case "deploy": body = <DeploymentCenter onOpenDocker={() => onSelectMode("ship")} />; break;
+    case "replay": body = <Replay />; break;
+    case "operate": body = <OperateMode isActive={ctx.isOpsReady} />; break;
+    case "scan": body = <SecurityScanPanel kinds={["trivy", "hadolint"]} title="취약점 스캔" note="이미지·의존성은 Trivy, Dockerfile 은 Hadolint 로 검사합니다. 결과는 배포 승인 카드의 위험도에 반영돼요." />; break;
+    case "secrets": body = <SecurityScanPanel kinds={["gitleaks"]} title="시크릿 검사" note="저장소에 API 키·비밀번호 같은 값이 평문으로 남았는지 gitleaks 규칙으로 확인합니다. 찾은 값의 원문은 화면에 표시하지 않아요." />; break;
+    case "policy": body = <PolicyPanel />; break;
+  }
+  return <FeatureFrame feature={feature} onHome={goHome} onHub={goHub}>{body}</FeatureFrame>;
+};
+
+//: 테스트에서 직접 렌더할 수 있도록 export 한다. 이 레이아웃에서 설계 결정
+//: 경로(CodeAgent)가 살아있는지가 회귀 대상이다 — 예전에 여기서만 숨겨져서
+//: Workspace 창에서 결정 카드가 뜨지 않는 버그가 있었다.
+export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
+  view, externalTurn, diagnostics, coreStatus, showDiagnostics, isAiReady, isDockerReady, isOpsReady,
+  costSummary, onSelectMode, onToggleDiagnostics, postMessage,
+}) => {
+  return (
+    <div style={{ height: "100vh", display: "grid", gridTemplateColumns: "minmax(0, 1.65fr) minmax(330px, .85fr)", overflow: "hidden", background: "var(--vscode-editor-background, #1e1e1e)", color: "var(--vscode-foreground, #e0e0e0)" }}>
+      <section style={{ minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--vscode-panel-border, #333)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 18px", borderBottom: "1px solid var(--vscode-panel-border, #333)", background: "var(--vscode-sideBar-background, #181818)" }}>
+          <Icon.Logo size={22} />
+          <strong style={{ fontSize: 16 }}>ReCoder</strong>
+          <span style={{ color: "var(--vscode-descriptionForeground, #8b8b8b)", fontSize: 12 }}>Workspace</span>
+          <button onClick={() => onSelectMode("home")} style={{ marginLeft: "auto", border: "1px solid var(--vscode-button-border, transparent)", borderRadius: 4, padding: "4px 9px", background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)", cursor: "pointer", fontSize: 11 }}>홈</button>
+        </div>
+
+        <StatusBadge diagnostics={diagnostics} coreStatus={coreStatus} expanded={showDiagnostics} onToggle={onToggleDiagnostics} />
+        {showDiagnostics && <div style={{ borderBottom: "1px solid var(--vscode-panel-border, #333)", maxHeight: 220, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /></div>}
+
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "18px 22px 20px" }}>
+          <HubRouter view={view} ctx={{ isAiReady, isDockerReady, isOpsReady }} externalTurn={externalTurn} onSelectMode={onSelectMode} />
+        </div>
+        <div style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", padding: "4px 14px", background: "var(--vscode-sideBar-background, #181818)" }}><CostTracker costSummary={costSummary} /></div>
+      </section>
+
+      <aside style={{ minWidth: 0, minHeight: 0, height: "100%", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
+        <div style={{ padding: "14px 16px 12px", borderBottom: "1px solid var(--vscode-panel-border, #333)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon.Chat size={19} /><strong style={{ fontSize: 15 }}>AI와 대화</strong></div>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
+          <ChatPanel isAiReady={isAiReady} />
+        </div>
+      </aside>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
 const App: React.FC = () => {
   const { postMessage, useMessage } = useVSCodeApi();
+  const isWorkspacePanel = typeof document !== "undefined" && document.documentElement.dataset.recoderLayout === "workspace";
   const { coreHealth, costSummary } = usePolling(4000);
 
   const [view, setView] = useState<ViewMode>("home");
+  //: 채팅 승인 카드에서 넘어온 코드 생성 요청. Build 화면을 열고 CodeAgent 에 넘긴다.
+  const [externalTurn, setExternalTurn] = useState<ExternalTurn | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
 
@@ -533,12 +658,34 @@ const App: React.FC = () => {
       if (type === "diagnosticsUpdate") {
         setDiagnostics(normDiag(payload as DiagnosticsResult));
       }
+      if (type === "chat.actionAccepted") {
+        const p = payload as { requestId?: number; instruction?: string; targetFolder?: string };
+        if (typeof p.requestId === "number" && p.instruction) {
+          setExternalTurn({ requestId: p.requestId, instruction: p.instruction, targetFolder: p.targetFolder ?? "" });
+          setView("code");
+        }
+      }
     }, [])
   );
 
   useEffect(() => {
     postMessage("runDiagnostics", {});
   }, [postMessage]);
+
+  // 사이드바는 retainContextWhenHidden 옵션으로 닫혀도 React가 유지된다.
+  // 다시 보이는 순간을 직접 알리면 "큰 창 닫기 → ReCoder 아이콘 클릭"도
+  // 항상 Workspace를 다시 여는 동작으로 연결할 수 있다.
+  useEffect(() => {
+    if (isWorkspacePanel) { return; }
+    const notifyVisible = () => {
+      if (document.visibilityState === "visible") {
+        postMessage("sidebar.visible", {});
+      }
+    };
+    document.addEventListener("visibilitychange", notifyVisible);
+    notifyVisible();
+    return () => document.removeEventListener("visibilitychange", notifyVisible);
+  }, [isWorkspacePanel, postMessage]);
 
   const isAiReady = diagnostics ? diagnostics.ai_ready === "ready" : false;
   const isDockerReady = diagnostics ? diagnostics.docker_ready === "ready" : false;
@@ -548,7 +695,29 @@ const App: React.FC = () => {
       diagnostics.ops_ready === "ready"
     : false;
 
-  const subTitle = view === "build" ? "에러 분석" : view === "ship" ? "Deploy" : view === "operate" ? "운영 대응" : view === "replay" ? "Deploy Replay" : view === "map" ? "구조 지도" : "";
+  const subTitle = isFeatureView(view) ? FEATURE_BY_ID[view].title : isHubView(view) ? view.slice(4).replace(/^./, (c) => c.toUpperCase()) : "";
+
+  // WebviewPanel 로 열리는 ReCoder 작업 화면에서는 현재 사이드바 기능을
+  // 왼쪽에, 대화형 코드 에이전트를 오른쪽에 동시에 표시한다.
+  if (isWorkspacePanel) {
+    return <WorkspaceLayout
+      view={view}
+      externalTurn={externalTurn}
+      diagnostics={diagnostics}
+      coreStatus={coreHealth?.status ?? null}
+      showDiagnostics={showDiagnostics}
+      isAiReady={isAiReady}
+      isDockerReady={isDockerReady}
+      isOpsReady={isOpsReady}
+      costSummary={costSummary}
+      onSelectMode={setView}
+      onToggleDiagnostics={() => {
+        setShowDiagnostics((v) => !v);
+        if (!showDiagnostics) postMessage("runDiagnostics", {});
+      }}
+      postMessage={postMessage}
+    />;
+  }
 
   return (
     <div style={{
@@ -561,8 +730,8 @@ const App: React.FC = () => {
       fontFamily: "var(--vscode-font-family)",
     }}>
       {/* Hero (로고 + 브랜드) */}
-      {view === "home" && <Hero />}
-      {view !== "home" && <SubHeader title={subTitle} onBack={() => setView("home")} />}
+      {view === "home" && <Hero onOpenWorkspace={() => postMessage("workbench.open", {})} />}
+      {view !== "home" && <SubHeader title={subTitle} onBack={() => setView(isFeatureView(view) ? `hub:${hubOf(view)}` : "home")} />}
 
       {/* Status badge (펼치면 진단 상세) */}
       <StatusBadge
@@ -586,43 +755,8 @@ const App: React.FC = () => {
       )}
 
       {/* Main content */}
-      <div style={{ flex: 1, overflowY: "auto" }}>
-        {view === "home" && (
-          <Home
-            isAiReady={isAiReady}
-            isDockerReady={isDockerReady}
-            isOpsReady={isOpsReady}
-            onSelectMode={setView}
-            postMessage={postMessage}
-            awsReady={diagnostics?.aws_deploy_ready === "ready"}
-            githubReady={(diagnostics as unknown as { github_ready?: string })?.github_ready === "ready"}
-          />
-        )}
-        {view === "build" && (
-          <div style={{ padding: "10px 10px 8px" }}>
-            <BuildMode isActive={isAiReady} />
-          </div>
-        )}
-        {view === "ship" && (
-          <div style={{ padding: "10px 10px 8px" }}>
-            <ShipMode isAiReady={isAiReady} isDockerReady={isDockerReady} />
-          </div>
-        )}
-        {view === "operate" && (
-          <div style={{ padding: "10px 10px 8px" }}>
-            <OperateMode isActive={isOpsReady} />
-          </div>
-        )}
-        {view === "replay" && (
-          <div style={{ padding: "10px 10px 8px" }}>
-            <Replay />
-          </div>
-        )}
-        {view === "map" && (
-          <div style={{ padding: "10px 10px 8px" }}>
-            <CodeMap isActive={view === "map"} />
-          </div>
-        )}
+      <div style={{ flex: 1, overflowY: "auto", padding: "10px 12px 8px" }}>
+        <HubRouter view={view} ctx={{ isAiReady, isDockerReady, isOpsReady }} externalTurn={externalTurn} onSelectMode={setView} />
       </div>
 
       {/* Workbench CTA */}

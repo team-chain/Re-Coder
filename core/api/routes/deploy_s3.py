@@ -1,0 +1,532 @@
+"""
+ReCoder Core — S3 정적 배포 (BYO)
+
+FR-05-03 「S3 배포 BYO 전환」. 지금까지는 운영자 계정의 게이트웨이가 팀
+버킷에 대신 올렸다. 확정 D9(전부 BYO)에 맞춰, 사용자 자기 자격증명으로
+**사용자 계정의 버킷**에 직접 올린다.
+
+이 파일은 AWS 호출만 담당한다. 버킷 이름·키 정규화·URL 조립 같은 계산은
+`core/s3_byo.py` 에 있고 그쪽에서 검사한다.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import threading
+from typing import Callable, Optional
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+try:  # 코어 단독 실행 / 패키지 실행 양쪽 지원
+    import s3_byo
+    from api.routes import aws as aws_routes  # type: ignore
+except ImportError:  # pragma: no cover - 패키지 경로 폴백
+    from core import s3_byo  # type: ignore
+    from core.api.routes import aws as aws_routes  # type: ignore
+
+
+def _report(progress: Optional[Callable[[dict], None]], event: dict) -> None:
+    """진행 보고. 보고가 실패해도 **배포는 계속된다.**
+
+    스트림이 끊기거나(사용자가 창을 닫음) 큐가 막혀도 이미 시작된 S3 업로드를
+    중단시키면 안 된다 — 절반만 올라간 사이트가 남는 쪽이 더 나쁘다.
+    """
+    if progress is None:
+        return
+    try:
+        progress(event)
+    except Exception:  # noqa: BLE001 — 보고 실패가 배포를 깨뜨리지 않는다
+        logger.debug("진행 보고 실패(무시): %s", event.get("step"))
+
+
+def _session_and_region(profile: str = "", explicit_region: str = ""):
+    """(boto3 세션, 리전). **둘을 같은 프로필에서 뽑는다.**
+
+    예전에는 리전을 `_deployment_identity()` 에서 가져왔는데, 그건 전역
+    활성 프로필을 본다. 요청이 `profile` 을 지정하면 **자격증명은 그 프로필,
+    리전은 다른 프로필**이 되어, 다른 리전용으로 설정된 프로필이 엉뚱한
+    리전에 조용히 배포한다. 세션을 먼저 만들고 그 세션의 리전을 쓴다.
+
+    우선순위: 요청이 준 리전 > 그 프로필의 리전 > 환경변수 > 기본값.
+    """
+    import os as _os
+
+    resolved_profile = (profile or "").strip() or aws_routes._effective_profile()
+    explicit = (explicit_region or "").strip()
+
+    session = aws_routes._build_boto3_session(
+        profile=resolved_profile, region=explicit or None,
+    )
+    region = explicit or (getattr(session, "region_name", "") or "").strip()
+    if not region:
+        region = (
+            _os.environ.get("AWS_REGION", "")
+            or _os.environ.get("AWS_DEFAULT_REGION", "")
+            or aws_routes.DEFAULT_REGION
+        )
+        # 리전 없이 만든 세션은 클라이언트가 리전을 못 잡는다 — 다시 만든다.
+        session = aws_routes._build_boto3_session(profile=resolved_profile, region=region)
+    return session, region
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["deploy-s3"])
+
+# 같은 버킷으로 들어온 배포는 업로드 후 "없는 파일 정리" 단계까지 하나의
+# 작업으로 취급해야 한다. 그렇지 않으면 두 작업이 서로의 새 번들을 오래된
+# 파일로 보고 삭제할 수 있다. API 라우트는 to_thread()로 실행되므로 threading
+# Lock을 쓴다. 잠금 객체 자체를 만드는 과정도 별도 잠금으로 보호한다.
+_bucket_deploy_locks: dict[str, threading.Lock] = {}
+_bucket_deploy_locks_lock = threading.Lock()
+
+
+def _bucket_deploy_lock(bucket: str) -> threading.Lock:
+    with _bucket_deploy_locks_lock:
+        lock = _bucket_deploy_locks.get(bucket)
+        if lock is None:
+            lock = threading.Lock()
+            _bucket_deploy_locks[bucket] = lock
+        return lock
+
+
+class S3DeployRequest(BaseModel):
+    #: 버킷 이름의 근거. 워크스페이스 폴더 이름을 그대로 보내면 된다.
+    project: str
+    #: [{"path": "index.html", "content": "...", "encoding": "utf-8"|"base64"}]
+    #: 이미지·폰트·wasm 은 encoding="base64" 로 담아야 한다. 텍스트가 기본.
+    files: list[dict]
+    region: Optional[str] = None
+    profile: Optional[str] = None
+
+
+class S3DeployResponse(BaseModel):
+    status: str
+    bucket: str
+    region: str
+    url: str
+    uploaded: list[str]
+    bucket_created: bool
+    #: index.html 이 없어 다른 HTML 을 복제했다면 그 원본 경로.
+    index_copied_from: Optional[str] = None
+    message: str
+
+
+def _aws_error_detail(exc: Exception, action: str) -> str:
+    """AWS 오류를 **다음 행동이 있는** 문장으로.
+
+    botocore 예외를 그대로 노출하면 사용자는 무엇을 해야 할지 모른다.
+    특히 권한 부족은 「권한표」를 다시 적용하면 풀리는 경우가 대부분이다.
+    """
+    code = ""
+    try:
+        code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+    except Exception:  # noqa: BLE001
+        code = ""
+
+    if code in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation"):
+        return (
+            f"{action} 권한이 없습니다. 배포 센터의 「권한표」를 사용자/역할에 "
+            f"다시 적용한 뒤 시도하세요. (AWS: {code})"
+        )
+    if code == "BucketAlreadyExists":
+        return (
+            "같은 이름의 버킷이 다른 AWS 계정에 이미 있습니다. S3 버킷 이름은 "
+            "전 세계에서 유일해야 합니다. 프로젝트 이름을 조금 바꿔 다시 시도하세요."
+        )
+    if code == "InvalidLocationConstraint":
+        return (
+            f"요청한 리전이 올바르지 않습니다. 자격증명이 유효한 리전과 같은지 "
+            f"확인하세요. (AWS: {code})"
+        )
+    return f"{action} 실패: {exc}"
+
+
+def _bucket_region(client, bucket: str, fallback: str) -> str:
+    """이미 있는 버킷이 **실제로 어느 리전에 있는지**.
+
+    GetBucketLocation 은 us-east-1 을 `None`(또는 빈 문자열)로 돌려준다 —
+    이 API 의 오래된 관례다. 그대로 쓰면 리전이 비어 URL 이 깨진다.
+    """
+    try:
+        raw = client.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+    except Exception:  # noqa: BLE001 - 못 읽으면 요청 리전을 그대로 쓴다
+        return fallback
+    return (raw or "us-east-1")
+
+
+def _ensure_bucket(client, bucket: str, region: str) -> tuple[bool, str]:
+    """(새로 만들었나, 이 버킷이 실제로 있는 리전).
+
+    이미 **내 계정에** 있는 버킷이면 그대로 쓴다(재배포). 이때 **그 버킷의
+    실제 리전을 확인한다.** 버킷 이름은 리전과 무관하게 유일하므로, 처음
+    us-east-1 에 만든 뒤 나중에 다른 리전을 골라 배포하면 head_bucket 은
+    그냥 성공한다. 그러면 업로드는 리다이렉트로 되는데 **돌려주는 URL 만
+    엉뚱한 리전을 가리켜** 열리지 않는다.
+
+    남의 계정 버킷과 이름이 겹치면 CreateBucket 이 BucketAlreadyExists 로
+    실패하고, _aws_error_detail 이 그 상황을 설명한다.
+    """
+    from botocore.exceptions import ClientError  # type: ignore
+
+    try:
+        client.head_bucket(Bucket=bucket)
+        return False, _bucket_region(client, bucket, region)
+    except ClientError as exc:
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status not in (403, 404):
+            raise
+        if status == 403:
+            # 존재하지만 내 것이 아니다 — 만들려 하면 더 헷갈리는 오류가 난다.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"버킷 '{bucket}' 이 이미 다른 계정에 있습니다. 프로젝트 이름을 "
+                    f"바꿔 다시 시도하세요."
+                ),
+            ) from exc
+
+    client.create_bucket(**s3_byo.create_bucket_kwargs(bucket, region))
+    return True, region
+
+
+def _configure_public_website(client, bucket: str, region: str) -> None:
+    """정적 호스팅 + 공개 읽기.
+
+    최신 S3 는 계정·버킷 단위로 공개 정책을 **기본 차단**한다. 차단을 풀지
+    않고 PutBucketPolicy 만 하면 성공한 것처럼 보이는데 링크는 403 이 된다.
+    그래서 순서가 중요하다: 차단 해제 → 정책 → 웹사이트 설정.
+    """
+    client.put_public_access_block(
+        Bucket=bucket,
+        PublicAccessBlockConfiguration={
+            "BlockPublicAcls": True,        # ACL 경로는 계속 막는다(정책만 사용)
+            "IgnorePublicAcls": True,
+            "BlockPublicPolicy": False,     # 아래 읽기 전용 정책을 허용
+            "RestrictPublicBuckets": False,
+        },
+    )
+    client.put_bucket_policy(
+        Bucket=bucket,
+        Policy=json.dumps(s3_byo.public_read_policy(bucket, region)),
+    )
+    client.put_bucket_website(
+        Bucket=bucket,
+        WebsiteConfiguration=s3_byo.website_configuration(),
+    )
+
+
+def _prune_obsolete_objects(client, bucket: str, desired_keys: list[str]) -> int:
+    """현재 배포 계획에 없는 이전 객체를 모두 지운다.
+
+    프로젝트 식별자가 안정적이므로 같은 워크스페이스의 재배포는 같은 버킷을
+    사용한다. 덮어쓰기만 하면 지운 번들·옛 HTML 라우트가 공개 상태로 남아
+    새 빌드와 섞인다. 업로드가 모두 성공한 뒤에만 정리해야 실패한 배포가
+    기존 사이트를 먼저 망가뜨리지 않는다.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
+
+    desired = set(desired_keys)
+    stale: list[dict[str, str]] = []
+    token: str | None = None
+    try:
+        while True:
+            request = {"Bucket": bucket}
+            if token:
+                request["ContinuationToken"] = token
+            page = client.list_objects_v2(**request)
+            stale.extend(
+                {"Key": item["Key"]}
+                for item in page.get("Contents", [])
+                if item.get("Key") not in desired
+            )
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+            if not token:
+                raise RuntimeError("S3 목록이 잘렸지만 다음 페이지 토큰이 없습니다.")
+
+        removed = 0
+        # DeleteObjects는 한 요청에 최대 1,000개만 허용한다.
+        for start in range(0, len(stale), 1000):
+            batch = stale[start:start + 1000]
+            response = client.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+            errors = response.get("Errors", [])
+            if errors:
+                failed = ", ".join(str(item.get("Key") or "(알 수 없는 키)") for item in errors[:3])
+                raise RuntimeError(f"이전 파일을 지우지 못했습니다: {failed}")
+            removed += len(batch)
+        return removed
+    except (ClientError, BotoCoreError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=502, detail=_aws_error_detail(exc, "이전 배포 파일 정리"),
+        ) from exc
+
+
+def _deploy_bucket_sync(
+    request: S3DeployRequest,
+    session,
+    client,
+    bucket: str,
+    region: str,
+    plan,
+    progress: Optional[Callable[[dict], None]] = None,
+) -> S3DeployResponse:
+    """한 버킷의 생성·업로드·정리를 순서대로 실행한다.
+
+    호출자는 `_bucket_deploy_lock`을 이미 잡고 있어야 한다. 이 계약을 별도
+    함수로 두면 버킷 계산 전의 STS 조회는 병렬로 해도 되지만, 서로 영향을
+    주는 S3 변경은 절대 겹치지 않는다는 경계가 분명해진다.
+
+    `progress` 가 주어지면 단계마다 보고한다. 없으면(기존 라우트) 아무
+    일도 하지 않으므로 동작이 완전히 같다 — AWS 호출은 그대로다.
+    """
+    from botocore.exceptions import ClientError  # type: ignore
+
+    _report(progress, {"step": "bucket", "message": f"버킷 {bucket} 확인 중"})
+    try:
+        created, actual_region = _ensure_bucket(client, bucket, region)
+    except ClientError as exc:
+        raise HTTPException(
+            status_code=502, detail=_aws_error_detail(exc, "S3 버킷 생성"),
+        ) from exc
+    _report(progress, {
+        "step": "bucket",
+        "done": True,
+        "message": f"버킷 {'생성' if created else '확인'} 완료",
+    })
+
+    region_note = ""
+    if actual_region != region:
+        # 요청한 리전이 아니라 **버킷이 실제로 있는 리전**을 기준으로 삼는다.
+        # 그래야 돌려주는 URL 이 열린다. 사용자에게도 알린다 — 모르면 "왜
+        # 다른 리전이지" 로 헤맨다.
+        region_note = (
+            f" 이 버킷은 이미 {actual_region} 에 있어 그 리전으로 배포했습니다"
+            f"(요청: {region}). 다른 리전에 올리려면 프로젝트 이름을 바꾸세요."
+        )
+        region = actual_region
+        client = session.client("s3", region_name=region)
+
+    _report(progress, {"step": "website", "message": "정적 호스팅 설정 중"})
+    try:
+        _configure_public_website(client, bucket, region)
+    except ClientError as exc:
+        raise HTTPException(
+            status_code=502, detail=_aws_error_detail(exc, "정적 호스팅 설정"),
+        ) from exc
+    _report(progress, {"step": "website", "done": True, "message": "정적 호스팅 설정 완료"})
+
+    total = len(plan.items)
+    try:
+        for index, item in enumerate(plan.items, start=1):
+            client.put_object(
+                Bucket=bucket,
+                Key=item.key,
+                Body=item.data,
+                ContentType=item.content_type,
+                #: 재배포 직후 옛 화면이 뜨지 않게 캐시를 끈다. 데모에서
+                #: "고쳤는데 그대로인데요" 로 시간을 버리는 걸 막는다.
+                CacheControl="no-cache",
+            )
+            #: 파일 하나마다 보고한다. 여기가 제일 오래 걸리는 구간이고,
+            #: 예전에는 이 1분 동안 화면이 "배포 중…" 에서 멈춰 있었다.
+            _report(progress, {
+                "step": "upload", "done_count": index, "total": total, "key": item.key,
+            })
+    except ClientError as exc:
+        raise HTTPException(
+            status_code=502, detail=_aws_error_detail(exc, "파일 업로드"),
+        ) from exc
+
+    _report(progress, {"step": "prune", "message": "이전 배포 파일 정리 중"})
+    removed = _prune_obsolete_objects(client, bucket, plan.keys)
+
+    url = s3_byo.website_url(bucket, region)
+    note = ""
+    if plan.index_copied_from:
+        note = f" index.html 이 없어 {plan.index_copied_from} 를 진입 문서로 함께 올렸습니다."
+    if removed:
+        note += f" 이전 배포 파일 {removed}개를 정리했습니다."
+    return S3DeployResponse(
+        status="deployed",
+        bucket=bucket,
+        region=region,
+        url=url,
+        uploaded=plan.keys,
+        bucket_created=created,
+        index_copied_from=plan.index_copied_from,
+        message=f"{len(plan.items)}개 파일을 올렸습니다.{note}{region_note}",
+    )
+
+
+def _deploy_sync(
+    request: S3DeployRequest,
+    session,
+    region: str,
+    progress: Optional[Callable[[dict], None]] = None,
+) -> S3DeployResponse:
+    """실제 AWS 호출. 이벤트 루프를 막지 않도록 라우트가 스레드로 넘긴다."""
+    from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
+
+    _report(progress, {"step": "plan", "message": "올릴 파일을 정리하는 중"})
+    plan = s3_byo.plan_upload(request.files)
+
+    try:
+        account_id = session.client("sts").get_caller_identity()["Account"]
+    except (ClientError, BotoCoreError) as exc:
+        # 자격증명이 아예 없으면 botocore 는 NoCredentialsError 를 던진다.
+        # 그건 ClientError 가 **아니라** BotoCoreError 라, 예전에는 이 핸들러를
+        # 그냥 지나쳐 바깥 catch-all 의 500 + 원문 예외로 나갔다. 정작 사용자가
+        # 해야 할 일(AWS 연결)은 아무 데도 안 적혀 있었다.
+        raise HTTPException(
+            status_code=401, detail=_aws_error_detail(exc, "AWS 자격증명 확인"),
+        ) from exc
+
+    bucket = s3_byo.bucket_name(request.project, account_id)
+    # 업로드와 정리는 한 버킷의 "배포 단위"다. 둘 사이에 다른 배포가 끼면
+    # 해당 배포의 새 파일을 이전 파일로 오인해 삭제할 수 있다.
+    with _bucket_deploy_lock(bucket):
+        client = session.client("s3", region_name=region)
+        return _deploy_bucket_sync(
+            request, session, client, bucket, region, plan, progress,
+        )
+
+
+@router.post("/api/deploy/s3", response_model=S3DeployResponse)
+async def deploy_s3(request: S3DeployRequest) -> S3DeployResponse:
+    """정적 사이트를 **사용자 자기 계정** S3 버킷에 배포하고 공개 URL 을 준다."""
+    if not (request.project or "").strip():
+        raise HTTPException(status_code=400, detail="project 가 비어 있습니다.")
+
+    session, region = _session_and_region(request.profile or "", request.region or "")
+    if not region:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "AWS 리전을 알 수 없습니다. 배포 폼에서 리전을 지정하거나 "
+                "AWS 연결을 먼저 완료하세요."
+            ),
+        )
+
+    try:
+        return await asyncio.to_thread(_deploy_sync, request, session, region)
+    except s3_byo.S3DeployError as exc:
+        # 사용자 입력 문제 — 그대로 보여 준다.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("S3 BYO 배포 실패")
+        raise HTTPException(
+            status_code=500, detail=f"S3 배포 중 예기치 못한 오류: {exc}",
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# 진행 스트리밍 (SSE)
+# ---------------------------------------------------------------------------
+#
+# 왜 필요한가
+#   기존 `/api/deploy/s3` 는 요청 하나에 응답 하나다. 파일 80개를 올리는
+#   1분 동안 화면은 "배포 중…" 에서 멈춰 있고, 실패해도 **어느 단계에서**
+#   죽었는지 응답에 없다. 게다가 확장 타임아웃(5분)이 먼저 끝나면 화면은
+#   실패인데 코어는 계속 올리고 있어 — 절반만 올라간 사이트가 남는다.
+#
+# 왜 SSE 인가
+#   코어 → 확장 **한 방향** 알림이면 충분하고, SSE 는 그냥 HTTP 응답이라
+#   지금 쓰는 세션 토큰 인증·미들웨어가 그대로 적용된다. 웹소켓은 별도
+#   프로토콜이라 인증과 재연결을 새로 만들어야 한다("배포 중단" 같은
+#   역방향 기능이 생기면 그때 검토).
+#
+# 기존 라우트는 **그대로 둔다** — 구버전 확장과의 호환, 그리고 스트리밍에
+# 문제가 생겨도 되돌아갈 경로가 남는다.
+
+
+def _sse(event: dict) -> bytes:
+    """dict → SSE 한 프레임."""
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+@router.post("/api/deploy/s3/stream")
+async def deploy_s3_stream(request: S3DeployRequest) -> StreamingResponse:
+    """`/api/deploy/s3` 와 같은 배포를 하되 진행 상황을 흘려보낸다.
+
+    이벤트 형태:
+      {"step": "plan"|"bucket"|"website"|"upload"|"prune"}  — 진행
+      {"step": "done", "result": {...S3DeployResponse}}      — 성공
+      {"step": "error", "status": <http>, "message": "..."}  — 실패
+
+    **실패는 이벤트로 간다.** 스트림은 이미 200 으로 열린 뒤이므로 HTTP
+    상태코드로는 알릴 수 없다. 확장은 두 경로(요청 자체 실패 / 스트림 내
+    실패)를 모두 다뤄야 한다.
+    """
+    if not (request.project or "").strip():
+        raise HTTPException(status_code=400, detail="project 가 비어 있습니다.")
+
+    session, region = _session_and_region(request.profile or "", request.region or "")
+    if not region:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "AWS 리전을 알 수 없습니다. 배포 폼에서 리전을 지정하거나 "
+                "AWS 연결을 먼저 완료하세요."
+            ),
+        )
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    _SENTINEL = object()
+
+    def _push(event: dict) -> None:
+        #: 배포는 별도 스레드에서 돈다 — 이벤트 루프 객체를 직접 만지면 안 된다.
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    async def _run() -> None:
+        try:
+            result = await asyncio.to_thread(
+                _deploy_sync, request, session, region, _push,
+            )
+            queue.put_nowait({"step": "done", "result": json.loads(result.model_dump_json())})
+        except s3_byo.S3DeployError as exc:
+            queue.put_nowait({"step": "error", "status": 400, "message": str(exc)})
+        except HTTPException as exc:
+            queue.put_nowait({
+                "step": "error", "status": exc.status_code, "message": str(exc.detail),
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("S3 BYO 스트리밍 배포 실패")
+            queue.put_nowait({
+                "step": "error", "status": 500,
+                "message": f"S3 배포 중 예기치 못한 오류: {exc}",
+            })
+        finally:
+            queue.put_nowait(_SENTINEL)
+
+    async def _stream():
+        task = loop.create_task(_run())
+        try:
+            while True:
+                event = await queue.get()
+                if event is _SENTINEL:
+                    break
+                yield _sse(event)
+        finally:
+            #: 사용자가 창을 닫아 스트림이 끊겨도 배포 자체는 끝까지 간다.
+            #: 중간에 죽이면 절반만 올라간 사이트가 남는다 — 완료 여부는
+            #: 스트림이 아니라 실제 S3 상태로 판단해야 한다.
+            if not task.done():
+                logger.info("S3 배포 스트림이 끊겼지만 업로드는 계속 진행합니다.")
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            #: 중간 프록시가 응답을 모아 두면 실시간이 아니게 된다.
+            #: 로컬호스트 직결이라 해당 없지만 안전장치로 둔다.
+            "X-Accel-Buffering": "no",
+        },
+    )

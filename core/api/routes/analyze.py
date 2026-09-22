@@ -7,6 +7,8 @@ Handles LLM-powered patch proposal generation, approval, and listing.
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -265,13 +267,19 @@ async def _delegate_to_orchestrator(
             test_command=None,
         )
 
-    return PatchProposal(
-        summary="[Placeholder] Orchestrator not yet available.",
-        risk_level=RiskLevel.LOW,
-        risk_reasons=["Orchestrator module not loaded — placeholder response."],
-        approval_level=ApprovalLevel.AUTO,
-        patches=[],
-        test_command=None,
+    #: [중요] 여기서 그럴듯한 PatchProposal 을 200 OK 로 돌려주면 안 된다.
+    #:
+    #: 예전에는 `summary="[Placeholder] Orchestrator not yet available."` 를
+    #: 정상 응답으로 내보냈다. 화면에서는 "분석했는데 고칠 게 없다"와 구분이
+    #: 되지 않아서, **핵심 기능이 죽어 있는데 아무도 모르는** 상태가 됐다.
+    #: 의존성 누락은 사용자가 할 수 있는 일이 있는 실패이므로, 실패로 알리고
+    #: 무엇을 하면 되는지까지 말한다.
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "코드 분석 엔진(Orchestrator)을 불러오지 못했습니다. "
+            "코어 로그에서 import 오류를 확인하거나 코어를 다시 시작해 주세요."
+        ),
     )
 
 
@@ -353,6 +361,17 @@ async def analyze(request: AnalyzeRequest) -> PatchProposal:
     except Exception:
         pass
 
+    # 4.6 승인 시 경계 검사에 쓸 워크스페이스 루트를 제안에 **고정**한다.
+    #     워크스페이스가 없으면 활성 파일의 부모 폴더가 경계다. 둘 다 없으면
+    #     빈 값으로 남고, 승인 핸들러가 fail-closed 로 거부한다.
+    _root = (request.workspace_path or "").strip()
+    if not _root and request.active_file_path:
+        try:
+            _root = str(Path(request.active_file_path).parent)
+        except Exception:  # noqa: BLE001
+            _root = ""
+    proposal.workspace_root = _root
+
     # 5. Store and update both caches
     _proposals[proposal.proposal_id] = proposal
     _fingerprint_to_proposal[fingerprint] = proposal.proposal_id
@@ -386,6 +405,29 @@ async def approve_patch(proposal_id: str, approved: bool) -> dict:
     unchanged: list[str] = []
     backups: dict[str, bytes] = {}
 
+    # ── 워크스페이스 경계 (fail-closed) ──────────────────────────────
+    # LLM 이 돌려준 patch.file 은 **비신뢰 입력**이다. 환각이나 프롬프트
+    # 주입으로 경계 밖 절대경로가 와도, 승인 한 번으로 워크스페이스 밖의
+    # 사용자 파일을 읽거나 덮어쓸 수 있으면 안 된다. 제안 생성 시 고정해 둔
+    # workspace_root 를 기준으로, 해석된(resolve) 경로가 그 안에 있어야만
+    # 진행한다. 루트가 비어 있으면 — 경계를 알 수 없으므로 — 거부한다.
+    root_raw = (getattr(proposal, "workspace_root", "") or "").strip()
+    if not root_raw:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "이 제안에는 워크스페이스 경계 정보가 없어 적용할 수 없습니다. "
+                "워크스페이스를 연 상태에서 다시 분석해 주세요."
+            ),
+        )
+    try:
+        workspace_root = Path(root_raw).resolve()
+    except OSError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"워크스페이스 경계를 해석할 수 없습니다: {exc}",
+        )
+
     try:
         for patch in proposal.patches:
             file_path = Path(patch.file)
@@ -394,6 +436,19 @@ async def approve_patch(proposal_id: str, approved: bool) -> dict:
                     status_code=422,
                     detail=f"Patch file path must be absolute: '{patch.file}'",
                 )
+
+            # resolve() 는 심볼릭 링크와 `..` 를 모두 푼다 — 문자열 비교로는
+            # `/ws/../etc/passwd` 나 링크 우회를 막을 수 없다.
+            resolved = file_path.resolve()
+            if not (resolved == workspace_root or resolved.is_relative_to(workspace_root)):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"패치 대상이 워크스페이스 밖입니다: '{patch.file}' — "
+                        "승인으로 워크스페이스 밖 파일을 수정할 수 없습니다."
+                    ),
+                )
+            file_path = resolved
 
             # Validate base_sha256
             if file_path.exists() and patch.base_sha256:
@@ -461,13 +516,63 @@ async def list_proposals() -> list[PatchProposal]:
 # ---------------------------------------------------------------------------
 
 
-def _norm_line(s: str) -> str:
-    """비교용 정규화: 따옴표 안 문자열은 와일드카드로(마스킹된 시크릿 ↔ 실제 시크릿
-    매칭), 앞뒤 공백 무시. 'KEY = "[REDACTED]"' 와 'KEY = "AKIA..."' 가 같다고 본다."""
+# 게이트가 시크릿을 가릴 때 쓰는 토큰 형태. ContextGate의 세부 토큰
+# ([MASKED], [MASKED_AWS_KEY], …)과 선택적 게이트를 불러오지 못했을 때
+# _mask_request()가 쓰는 [REDACTED]를 모두 같은 마스킹 자리로 취급한다.
+_MASK_TOKEN_RE = __import__("re").compile(r"\[(?:MASKED[A-Z_]*|REDACTED)\]")
+
+#: 마스크 줄 전용 스캐너 — 따옴표 문자열 또는 마스크 토큰.
+_MASK_SCAN_RE = __import__("re").compile(
+    r'"[^"]*"|\'[^\']*\'|\[(?:MASKED[A-Z_]*|REDACTED)\]')
+
+
+def _lines_match(diff_line: str, file_line: str) -> bool:
+    """diff 의 한 줄이 파일의 한 줄과 일치하는가.
+
+    예전 구현은 **모든** 따옴표 문자열을 와일드카드로 바꿨다. 그러면
+    `app.get("/a")` 와 `app.get("/b")` 처럼 문자열로만 구분되는 블록이
+    같아져서, diff 가 지목한 블록이 아니라 **파일에서 먼저 나오는 블록**에
+    패치가 적용됐다 — 승인된 편집이 소리 없이 엉뚱한 곳을 고치는 형태다.
+
+    지금은 두 단계다:
+    1. 공백을 정돈한 정확 비교. 대부분 여기서 끝난다.
+    2. diff 줄에 **마스크 토큰**([MASKED...] 또는 [REDACTED])이 있을 때만 관용 비교 —
+       LLM 은 마스킹된 값을 보고 diff 를 쓰므로 실제 파일의 시크릿과
+       글자가 다를 수밖에 없다. 이때도 와일드카드는 마스크가 있는 자리
+       (마스크 품은 따옴표 문자열, 맨몸 마스크 토큰)에만 적용되고,
+       같은 줄의 다른 문자열 리터럴은 그대로 비교한다.
+    """
+    a, b = diff_line.strip(), file_line.strip()
+    if a == b:
+        return True
+    if not _MASK_TOKEN_RE.search(a):
+        return False
+    return _mask_tolerant_pattern(a).fullmatch(b) is not None
+
+
+def _mask_tolerant_pattern(diff_line: str) -> "__import__('re').Pattern":
+    """마스크 토큰이 든 diff 줄 → 파일 줄과 대조할 정규식.
+
+    - `"…[MASKED]…"`/`"[REDACTED]"` → 같은 따옴표의 아무 내용
+    - 맨몸 마스크 토큰 → 공백 아닌 아무 시퀀스 (`KEY=[MASKED]` ↔ `KEY=abc`)
+    - 마스크 없는 따옴표 문자열·나머지 글자 → **그대로** (구분자 역할 유지)
+    """
     import re as _re
-    out = _re.sub(r'"[^"]*"', '""', s)
-    out = _re.sub(r"'[^']*'", "''", out)
-    return out.strip()
+    pieces: list[str] = []
+    idx = 0
+    for m in _MASK_SCAN_RE.finditer(diff_line):
+        pieces.append(_re.escape(diff_line[idx:m.start()]))
+        tok = m.group(0)
+        if tok.startswith("["):
+            pieces.append(r"\S+")
+        elif _MASK_TOKEN_RE.search(tok):
+            q = tok[0]
+            pieces.append(q + ("[^%s]*" % q) + q)
+        else:
+            pieces.append(_re.escape(tok))
+        idx = m.end()
+    pieces.append(_re.escape(diff_line[idx:]))
+    return _re.compile("".join(pieces) + r"\Z")
 
 
 def _apply_unified_diff(file_path: Path, patch: FilePatch) -> bool:
@@ -526,10 +631,9 @@ def _apply_unified_diff(file_path: Path, patch: FilePatch) -> bool:
             continue  # 변경 없는 훅
         # old_block 을 파일에서 (정규화 기준) 찾는다.
         if old_block:
-            norm_old = [_norm_line(x) for x in old_block]
             found = -1
-            for i in range(0, len(lines) - len(norm_old) + 1):
-                if [_norm_line(lines[i + j]) for j in range(len(norm_old))] == norm_old:
+            for i in range(0, len(lines) - len(old_block) + 1):
+                if all(_lines_match(old_block[j], lines[i + j]) for j in range(len(old_block))):
                     found = i
                     break
             if found < 0:
@@ -567,18 +671,26 @@ class CodeGenerateRequest(BaseModel):
     prior_files: list = []
     context_files: list = []
     target_folder: str = ""
+    # AI-DLC 결정 모달에서 사용자가 확정한 설계 선택. generate_code 프롬프트에 반영한다.
+    decisions: list = []
 
 
 @router.post("/api/code/generate")
 async def generate_code_route(body: CodeGenerateRequest) -> dict:
-    import os as _os
+    import asyncio as _asyncio
     import uuid as _uuid
 
     if not (body.instruction or "").strip():
         raise HTTPException(status_code=400, detail="instruction 이 비어 있습니다.")
 
-    if body.workspace_path and Path(body.workspace_path).exists():
-        _os.environ["RECODER_PROJECT_ROOT"] = body.workspace_path
+    # NOTE: 예전에는 여기서 `RECODER_PROJECT_ROOT` 전역 env 에 워크스페이스
+    # 경로를 심었다. 아래 to_thread 로 넘어가는 지점에서 실행이 양보되므로,
+    # 그 사이 **다른 창의 요청**이 전역을 덮어쓰면 이 요청이 남의 워크스페이스
+    # 를 기준으로 파일을 만든다(회차1 교차 오염 P1, 커밋 489e3be). 그때
+    # `project_root` 인자 전달만 추가하고 전역 쓰기를 지우지 않아 사고 경로가
+    # 남아 있었다 — 경로를 안 보낸 요청이 `_project_root()` 폴백으로 그 전역을
+    # 읽으면 여전히 남의 워크스페이스를 잡는다. 그래서 쓰기 자체를 없앤다.
+    # 요청별 경로는 항상 인자로만 넘긴다(아래 project_root=).
 
     open_file = None
     if body.open_file_path or body.open_file_content:
@@ -589,17 +701,306 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
             from code_agent import generate_code
         except ImportError:
             from core.code_agent import generate_code
-        result = generate_code(
+        # LLM 호출은 수 초~수십 초 걸린다. 동기 함수를 그대로 await 없이 부르면
+        # 이벤트 루프가 묶여 health 폴링·채팅 등 다른 요청이 전부 막히고,
+        # 확장이 Core 를 "응답 없음"으로 판정해 복구 로직을 돌린다.
+        #
+        # 단, 스레드로 넘기면 여기서 실행이 양보되므로 워크스페이스 경로를
+        # 전역 env 로 전달하면 안 된다. 다른 창의 요청이 그 사이 env 를
+        # 덮어쓰면 이 요청이 남의 워크스페이스를 기준으로 동작한다.
+        # → 요청별 경로는 인자로 직접 넘긴다.
+        result = await _asyncio.to_thread(
+            generate_code,
             instruction=body.instruction,
             session_id=_uuid.uuid4().hex[:8],
             open_file=open_file,
             prior_files=body.prior_files or [],
             context_files=body.context_files or [],
             target_folder=body.target_folder or "",
+            decisions=body.decisions or [],
+            project_root=body.workspace_path or "",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"코드 생성 실패: {e}") from e
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# AI-DLC 1단계: 코드 대신 "설계 결정" 제시 (/api/code/plan)
+#   ReCoder_AI-DLC_도입_설계서.md §3.2 — 회차1 범위.
+#   자연어 요청 -> 설계 결정 목록(decisions). 코드는 아직 생성하지 않는다.
+#   확장(webview)이 이 목록을 결정 카드로 렌더 -> 사용자가 옵션 선택·승인 ->
+#   그 결과를 담아 /api/code/generate 를 다시 호출하는 흐름을 전제로 한다.
+# ---------------------------------------------------------------------------
+
+
+class CodePlanRequest(BaseModel):
+    instruction: str = ""
+    workspace_path: str = ""
+    open_file_path: str = ""
+    open_file_content: str = ""
+    context_files: list = []
+    target_folder: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Workspace chat — 오른쪽 "AI와 대화" 패널용
+# ---------------------------------------------------------------------------
+
+
+class ChatHistoryMessage(BaseModel):
+    role: str = "user"
+    content: str = ""
+
+
+class ChatRequest(BaseModel):
+    message: str = ""
+    history: list[ChatHistoryMessage] = []
+    workspace_path: str = ""
+
+
+# ---------------------------------------------------------------------------
+# 채팅 → 코드 생성 연결 (승인 카드)
+#
+# 예전 /api/chat 은 "구현은 코드 생성 기능을 쓰라"고 안내만 했다. 그래서 사용자는
+# 채팅으로 방향을 정한 뒤 다른 패널로 옮겨 프롬프트를 다시 적어야 했고, 채팅에서
+# 말한 경로는 어디에도 전달되지 않았다(9/16 테스트: 5턴 질문 반복 → 파일이
+# 워크스페이스 루트에 생김).
+#
+# 이제 채팅은 구현 요청을 감지하면 응답에 ``action`` 을 실어 보낸다. 웹뷰는 이것을
+# **승인 카드**로 그리고, 사용자가 승인하면 기존 /api/code/plan → /api/code/generate
+# 흐름으로 들어간다. 채팅 자체는 여전히 파일을 쓰지 않는다 — 파일이 생기기 전에
+# 사람이 한 번 누르는 원칙은 그대로다.
+# ---------------------------------------------------------------------------
+
+#: 사용자 문장에서 대상 경로를 뽑는다. LLM 에 맡기지 않고 정규식으로 뽑는 이유:
+#: 경로는 한 글자만 틀려도 다른 곳에 파일이 생긴다. 결정적으로 처리해야 한다.
+_CHAT_PATH_RE = re.compile(
+    r"(?<![\w./])"                       # 앞이 단어·경로 문자가 아님
+    r"(~(?:/[^\s'\"`,()\[\]{}<>]*)?"    # ~ 또는 ~/foo/bar
+    r"|/(?:Users|home|Volumes|tmp|opt|srv|var|mnt)/[^\s'\"`,()\[\]{}<>]+"
+    r"|[A-Za-z]:\\[^\s'\"`,()\[\]{}<>]+"  # Windows 절대경로
+    r"|\.{1,2}/[^\s'\"`,()\[\]{}<>]+)"    # ./foo ../foo
+)
+
+#: 조사·문장부호가 경로 끝에 붙어 오는 경우("~/Desktop/te에", "~/te 폴더에,")를 잘라낸다.
+_CHAT_PATH_TRAIL_RE = re.compile(r"(에서|에다|에는|으로|로|에|을|를|은|는|이|가|의|랑|과|와|도)?[.,!?;:]*$")
+
+
+def _extract_target_path(message: str) -> str:
+    """메시지에서 첫 번째 경로 후보를 돌려준다. 없으면 빈 문자열."""
+    for m in _CHAT_PATH_RE.finditer(message or ""):
+        raw = m.group(1)
+        # 한글 조사는 경로 문자가 아니므로 정규식이 이미 끊지만, 붙여 쓴 경우를 위해 한 번 더 정리
+        cleaned = _CHAT_PATH_TRAIL_RE.sub("", raw).rstrip("/")
+        if cleaned in ("~", ".", ".."):
+            return cleaned
+        if len(cleaned) >= 2:
+            return cleaned
+    return ""
+
+
+_CHAT_ACTION_KEYWORDS = (
+    "만들어", "만들고", "생성", "작성", "구현", "추가해", "고쳐", "수정해", "바꿔", "짜줘", "짜 줘",
+    "만들어줘", "만들어 줘", "리팩터", "리팩토링", "붙여줘", "적용해",
+)
+
+
+def _looks_like_build_request(message: str) -> bool:
+    """LLM 판단과 별개로 쓰는 1차 휴리스틱. LLM 이 action 을 빠뜨렸을 때 보조로만 쓴다."""
+    m = (message or "").replace(" ", "")
+    return any(k.replace(" ", "") in m for k in _CHAT_ACTION_KEYWORDS)
+
+
+def _parse_chat_json(text: str) -> Optional[dict]:
+    """LLM 응답에서 {"reply":..., "action":...} JSON 을 뽑는다. 실패하면 None."""
+    if not text:
+        return None
+    s = text.strip()
+    # ```json ... ``` 펜스 제거
+    s = re.sub(r"^```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s)
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+    # 본문 어딘가의 첫 { ... 마지막 } 시도
+    i, j = s.find("{"), s.rfind("}")
+    if i != -1 and j > i:
+        try:
+            obj = json.loads(s[i:j + 1])
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+@router.post("/api/chat")
+async def chat_route(body: ChatRequest) -> dict:
+    """ReCoder 작업 맥락을 아는 대화형 AI 응답.
+
+    이 API 는 파일을 쓰지 않는다. 구현 요청이면 ``action`` 을 함께 돌려주고,
+    실제 생성은 웹뷰의 승인 카드에서 사용자가 누른 뒤 /api/code/plan 으로 이어진다.
+
+    응답:
+      { "reply": str, "model": str,
+        "action": null | {
+            "type": "code.plan",
+            "instruction": str,        # 생성기에 넘길 한 문장 요약(사용자 요청 + 확정된 조건)
+            "target_folder": str,      # 사용자가 말한 경로(정규식 추출). 없으면 ""
+            "target_source": "message" | "workspace",
+            "stack": str,              # 예: "HTML / CSS / Vanilla JS"
+            "files": [str, ...],       # 예상 파일 목록 (표시용)
+            "summary": str             # 카드 제목용 한 줄
+        } }
+    """
+    import asyncio
+
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message 가 비어 있습니다.")
+
+    history_lines: list[str] = []
+    for item in (body.history or [])[-10:]:
+        role = "사용자" if item.role == "user" else "ReCoder"
+        content = (item.content or "").strip()[:2000]
+        if content:
+            history_lines.append(f"{role}: {content}")
+    history_text = "\n".join(history_lines) or "(이전 대화 없음)"
+
+    workspace_name = "현재 워크스페이스"
+    if body.workspace_path:
+        try:
+            workspace_name = Path(body.workspace_path).name or workspace_name
+        except Exception:
+            pass
+
+    target_path = _extract_target_path(message)
+    # 이전 사용자 발화에서 말한 경로도 이어받는다 ("~/te 에 만들어줘" 다음 턴에 "ㅇㅇ 진행")
+    if not target_path:
+        for item in reversed(body.history or []):
+            if item.role == "user":
+                target_path = _extract_target_path(item.content or "")
+                if target_path:
+                    break
+
+    prompt = f"""당신은 VS Code 확장 ReCoder의 개발 도우미입니다. 사용자는 '{workspace_name}' 프로젝트에서 작업 중입니다.
+반드시 아래 JSON 한 개만 출력하세요. 코드 펜스·설명·이모지 없이 JSON 만.
+
+{{"reply": "<사용자에게 보일 한국어 답변. 2~4문장. 마크다운 제목·굵은 글씨·이모지·번호 목록 금지>",
+ "action": null 또는 {{"type": "code.plan", "instruction": "<생성기에 넘길 요청 요약 1~2문장. 사용자가 말한 조건을 모두 포함>", "stack": "<기술 스택 한 줄>", "files": ["<예상 파일 경로>", ...], "summary": "<카드 제목 한 줄, 20자 이내>"}}}}
+
+규칙:
+1. 사용자가 무엇을 만들거나 고치라고 요청했으면 action 을 채우세요. 질문으로 되묻지 마세요.
+   세부 사항(스택·기능 범위)이 비어 있으면 가장 일반적인 선택을 스스로 정해서 instruction 과 reply 에 적으세요.
+   예: 웹 게임·정적 사이트 → HTML/CSS/Vanilla JS, API 서버 → 사용자가 쓰는 언어의 대표 프레임워크.
+2. 되묻는 것은 요청이 진짜로 두 갈래 이상으로 갈릴 때만, 질문 1개만. 그때는 action 을 null 로 두세요.
+3. 설명·오류 원인·사용법 질문이면 action 은 null 이고 reply 만 답하세요.
+4. reply 에서 "코드 생성 버튼을 누르세요" 같은 안내는 하지 마세요. action 이 있으면 웹뷰가 승인 카드를 띄웁니다.
+   reply 는 무엇을 어떻게 만들지 짧게 말하고 "아래에서 위치와 파일을 확인하고 승인해 주세요"로 끝내세요.
+5. 파일 경로는 target 폴더 기준 상대경로로 적으세요. 경로 자체는 시스템이 따로 처리하니 reply 에 절대경로를 반복하지 마세요.
+6. 코드나 파일을 실제로 변경했다고 말하지 마세요.
+
+이전 대화:
+{history_text}
+
+사용자: {message}
+JSON:"""
+
+    try:
+        try:
+            from llm.base import LLMRequest
+            from llm.router import get_router
+        except ImportError:
+            from core.llm.base import LLMRequest
+            from core.llm.router import get_router
+
+        response = await asyncio.to_thread(
+            get_router().call,
+            LLMRequest(prompt=prompt, max_tokens=1200, temperature=0.3),
+            "workspace_chat",
+            "chat",
+        )
+        raw = (response.text or "").strip()
+        if not raw:
+            raise HTTPException(
+                status_code=500, detail="AI 대화 실패: AI가 빈 응답을 반환했습니다.",
+            )
+
+        parsed = _parse_chat_json(raw)
+        reply = raw
+        action: Optional[dict] = None
+        if parsed is not None:
+            reply = str(parsed.get("reply") or "").strip() or raw
+            act = parsed.get("action")
+            if isinstance(act, dict) and (act.get("instruction") or "").strip():
+                files = act.get("files")
+                action = {
+                    "type": "code.plan",
+                    "instruction": str(act.get("instruction")).strip(),
+                    "stack": str(act.get("stack") or "").strip(),
+                    "files": [str(f) for f in files if str(f).strip()] if isinstance(files, list) else [],
+                    "summary": str(act.get("summary") or "").strip()[:40],
+                }
+        elif _looks_like_build_request(message):
+            # LLM 이 JSON 형식을 어겼지만 구현 요청이 분명한 경우 — 사용자 문장을 그대로 instruction 으로.
+            action = {"type": "code.plan", "instruction": message, "stack": "", "files": [], "summary": ""}
+
+        if action is not None:
+            action["target_folder"] = target_path
+            action["target_source"] = "message" if target_path else "workspace"
+
+        return {"reply": reply, "model": getattr(response, "model_used", ""), "action": action}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        try:
+            from llm.failure import public_ai_failure_reason
+        except ImportError:
+            from core.llm.failure import public_ai_failure_reason
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI 대화 실패: {public_ai_failure_reason(exc)}",
+        ) from exc
+
+
+@router.post("/api/code/plan")
+async def code_plan_route(body: CodePlanRequest) -> dict:
+    import asyncio as _asyncio
+    import uuid as _uuid
+
+    if not (body.instruction or "").strip():
+        raise HTTPException(status_code=400, detail="instruction 이 비어 있습니다.")
+
+    # generate 와 동일 — 전역 env 쓰기 없음. 사유는 generate_code_route 주석 참조.
+
+    open_file = None
+    if body.open_file_path or body.open_file_content:
+        open_file = {"path": body.open_file_path, "content": body.open_file_content}
+
+    try:
+        try:
+            from code_agent import generate_plan
+        except ImportError:
+            from core.code_agent import generate_plan
+        # generate 와 동일 — 동기 LLM 호출을 이벤트 루프 밖으로 빼되,
+        # 워크스페이스 경로는 전역 env 가 아니라 인자로 넘긴다(동시 요청 격리).
+        result = await _asyncio.to_thread(
+            generate_plan,
+            instruction=body.instruction,
+            session_id=_uuid.uuid4().hex[:8],
+            open_file=open_file,
+            context_files=body.context_files or [],
+            target_folder=body.target_folder or "",
+            project_root=body.workspace_path or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"설계 결정 생성 실패: {e}") from e
 
     return result

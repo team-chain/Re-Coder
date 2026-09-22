@@ -285,11 +285,35 @@ class IdentityService:
         API 요청마다 Device Token을 검증한다.
         revoked / expired이면 None 반환.
         """
+        return await self._validate_token_with_statuses(
+            raw_token, (DeviceStatus.ACTIVE,))
+
+    async def validate_token_for_audit_sync(self, raw_token: str) -> Optional[Device]:
+        """감사 큐 동기화 **전용** 검증 — LOST 디바이스도 통과시킨다.
+
+        분실 디바이스가 오프라인 중 쌓은 감사 이벤트를 제출하는 경로다.
+        일반 validate_token 이 LOST 를 거부하므로, 이 완화가 없으면
+        "분실 디바이스 이벤트는 suspicious 로 표시해 동기화"라는 설계
+        (§Q2-A3)가 실행 불가능한 죽은 분기가 된다. REVOKED·만료는 여기서도
+        거부한다 — 완화는 정확히 LOST 하나뿐이고, 이 메서드는 sync 경로의
+        의존성에서만 쓰인다.
+        """
+        return await self._validate_token_with_statuses(
+            raw_token, (DeviceStatus.ACTIVE, DeviceStatus.LOST))
+
+    async def _validate_token_with_statuses(
+        self, raw_token: str, allowed_statuses: tuple
+    ) -> Optional[Device]:
         device = await self._get_device_by_token(raw_token)
         if device is None:
             return None
         now = datetime.now(timezone.utc)
-        if device.status != DeviceStatus.ACTIVE or device.expires_at < now:
+        expires_at = device.expires_at
+        # SQLite 등 일부 백엔드는 tzinfo 를 벗겨 돌려준다 — naive/aware 비교는
+        # TypeError 로 죽으므로, naive 면 저장 규약(UTC)으로 간주한다.
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if device.status not in allowed_statuses or expires_at < now:
             return None
         return device
 
@@ -331,7 +355,47 @@ class IdentityService:
     # ------------------------------------------------------------------
 
     async def _get_device_by_token(self, raw_token: str) -> Optional[Device]:
+        """토큰 해시로 디바이스 조회 — **RLS 밖의 부트스트랩 경로**.
+
+        이 조회는 인증 그 자체라서 org 컨텍스트가 아직 없다. RLS 대상
+        롤에서 devices 를 직접 SELECT 하면 `app.current_org_id` 미설정으로
+        0행이 되어 **모든 유효 토큰이 401** 이 된다. 그래서 PostgreSQL 에선
+        SECURITY DEFINER 함수(auth_device_by_token_hash — migrations.py)를
+        통해 조회한다. 함수는 정확한 해시 일치만 허용하므로 격리를 깨지
+        않는다. 함수가 없거나 다른 백엔드(SQLite 테스트)면 직접 SELECT 로
+        폴백한다 — RLS 가 없는 환경에선 그게 예전과 같은 정상 경로다.
+        """
         token_hash = self._hash_token(raw_token)
+
+        dialect = ""
+        try:
+            dialect = self._db.get_bind().dialect.name
+        except Exception:  # noqa: BLE001
+            pass
+
+        if dialect == "postgresql":
+            from sqlalchemy import text as _text
+            try:
+                # The optional function may be absent on RLS-free deployments.
+                # PostgreSQL marks the transaction failed after UndefinedFunction,
+                # so isolate the probe in a SAVEPOINT before falling back.
+                async with self._db.begin_nested():
+                    stmt = (
+                        select(Device)
+                        .from_statement(_text("SELECT * FROM auth_device_by_token_hash(:h)"))
+                    )
+                    result = await self._db.execute(stmt, {"h": token_hash})
+                    device = result.scalars().first()
+                return device
+            except Exception as exc:  # noqa: BLE001
+                # 함수 미설치(구버전 스키마) — 직접 조회로 폴백. RLS 롤이면
+                # 이 폴백은 0행일 수 있으므로 경고를 남겨 원인을 추적 가능하게.
+                # begin_nested()가 실패한 함수 호출만 롤백했으므로 바깥
+                # 트랜잭션은 아래 SELECT를 계속 실행할 수 있다.
+                logger.warning(
+                    "auth_device_by_token_hash 함수 조회 실패 — 직접 SELECT 로 "
+                    "폴백합니다 (RLS 롤에서는 인증이 실패할 수 있음): %s", exc)
+
         result = await self._db.execute(
             select(Device).where(Device.token_hash == token_hash)
         )

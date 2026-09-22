@@ -13,10 +13,15 @@ import {
     CostSummary,
     ProjectProfile,
     AwsStatus,
+    AwsRoleSetupResponse,
     AwsConfigureInput,
+    AwsConnectInput,
     AwsEcrRepo,
+    AwsPolicyResult,
+    S3DeployResult,
 } from '../types';
 import { CoreManager } from './CoreManager';
+import { describeHttpError } from './httpError';
 
 export interface CodeSecretWarning {
     rule: string;
@@ -42,15 +47,132 @@ export interface CodeAgentResult {
     model: string;
 }
 
+/** /api/code/plan — AI-DLC 1단계: 코드 대신 "설계 결정" 선택지. */
+export interface CodeDecisionOption {
+    key: string;
+    label: string;
+    summary: string;
+    pros: string[];
+    cons: string[];
+    recommended: boolean;
+}
+
+export interface CodeDecision {
+    id: string;
+    question: string;
+    options: CodeDecisionOption[];
+    impact: string;
+}
+
+export interface CodePlanResult {
+    decisions: CodeDecision[];
+    //: 코어가 형식 문제로 걸러낸 결정의 사유 목록. 비어 있지 않으면 결정
+    //: 모달에 표시한다 — 걸러진 사실이 화면에 안 보이면 사용자에게는
+    //: "AI 가 설계를 안 해준다"로 보인다.
+    dropped?: string[];
+    model: string;
+}
+
+/** Workspace 오른쪽 대화 패널의 일반 AI 응답. 파일을 변경하지 않는 상담용 API다. */
+export interface ChatResult {
+    reply: string;
+    model: string;
+    //: 채팅이 구현 요청을 감지했을 때 함께 오는 제안. 웹뷰가 승인 카드로 그리고,
+    //: 사용자가 승인해야만 /api/code/plan 으로 이어진다. 채팅 자체는 파일을 쓰지 않는다.
+    action?: ChatAction | null;
+}
+
+export interface ChatAction {
+    type: 'code.plan';
+    instruction: string;
+    target_folder: string;
+    target_source: 'message' | 'workspace';
+    stack: string;
+    files: string[];
+    summary: string;
+}
+
+export interface DeployPreflightResult {
+    app_kind: 'server' | 'static' | 'unknown';
+    summary: string;
+    evidence: string[];
+    recommended_target: 'ecs' | 's3' | 'local';
+    blocked: boolean;
+    status: string;
+    score: number;
+    reasons: DeployPreflightIssue[];
+    fixes: Array<{
+        code: string;
+        message: string;
+        proposal_id: string | null;
+        auto_apply_available: boolean;
+    }>;
+    warnings: DeployPreflightIssue[];
+}
+
+/** 배포 전에 발견한 문제와 사용자에게 보여 줄 수정 방법. */
+export interface DeployPreflightIssue {
+    code: string;
+    message: string;
+    fix: string;
+    severity: string;
+    remediation_available: boolean;
+    proposal_id: string | null;
+}
+
+/** `/api/deploy/s3/stream` 이 흘려보내는 진행 이벤트 한 건. */
+export interface S3DeployStreamEvent {
+    step: 'plan' | 'bucket' | 'website' | 'upload' | 'prune' | 'done' | 'error';
+    message?: string;
+    /** upload 단계 — 지금까지 올린 개수 / 전체 개수. */
+    done_count?: number;
+    total?: number;
+    key?: string;
+    /** 단계 완료 표시(bucket·website). */
+    done?: boolean;
+    /** step === 'done' 일 때만. */
+    result?: S3DeployResult;
+    /** step === 'error' 일 때만 — 스트림은 이미 200 이라 상태코드로 못 알린다. */
+    status?: number;
+}
+
+export interface DeploymentDecisionResult {
+    target: 'ecs' | 's3' | 'local';
+    next_view: 'ecs' | 's3' | 'docker';
+    adr: { file: string; content: string };
+}
+
+/** 사용자가 결정 카드(QuickPick)에서 고른 결과 — /api/code/generate 로 그대로 전달. */
+export interface CodeDecisionChoice {
+    id: string;
+    question: string;
+    chosen_key: string;
+    options: CodeDecisionOption[];
+    /**
+     * 이 결정이 프로젝트에 주는 영향. ADR 의 「## 영향」이 여기서 나온다.
+     *
+     * 예전에는 이 필드가 없어서 웹뷰가 값을 들고 있어도 전달되지 않았고,
+     * 코어(`adr.normalize_decisions`)가 빈 문자열로 읽어 모든 ADR 의 영향
+     * 항목이 `(영향 미기재)` 로 남았다. 선택(optional)으로 두면 같은 실수가
+     * 조용히 반복되므로 **필수**로 둔다.
+     */
+    impact: string;
+}
+
 export class ApiClient {
     constructor(private coreManager: CoreManager) {}
+
+    // S3는 최대 30개 × 3MB 파일을 순차 업로드한다. 기본 30초를 쓰면 화면은
+    // 실패로 보이는데 코어는 공개 버킷 설정·업로드를 계속하는 상태가 된다.
+    private static readonly S3_DEPLOY_TIMEOUT_MS = 5 * 60 * 1000;
 
     private async request<T>(
         method: string,
         path: string,
         body?: unknown,
         _retried = false,
-        timeoutMs = 30000
+        timeoutMs = 30000,
+        extraHeaders: Record<string, string> = {},
     ): Promise<ApiResponse<T>> {
         // 토큰이 비어있으면 runtime.json 에서 즉시 refresh.
         // ensureRunning() 완료 전 PollingService 가 호출하는 race condition 방지.
@@ -73,6 +195,7 @@ export class ApiClient {
         const url = `http://127.0.0.1:${port}${path}`;
 
         const headers: Record<string, string> = {
+            ...extraHeaders,
             'Content-Type': 'application/json',
             'X-Session-Token': token,
         };
@@ -97,11 +220,15 @@ export class ApiClient {
                 // 다시 읽어와도 미들웨어가 다른 이유로 401/403 을 냈을 가능성 차단).
                 if ((res.status === 401 || res.status === 403) && !_retried) {
                     try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
-                    return this.request<T>(method, path, body, true, timeoutMs);
+                    return this.request<T>(method, path, body, true, timeoutMs, extraHeaders);
                 }
                 let errorText = '';
                 try { errorText = await res.text(); } catch { errorText = `HTTP ${res.status}`; }
-                return { success: false, error: errorText || `HTTP ${res.status}`, timestamp };
+                return {
+                    success: false,
+                    error: describeHttpError(res.status, errorText),
+                    timestamp,
+                };
             }
 
             const json = await res.json();
@@ -125,6 +252,19 @@ export class ApiClient {
             ...raw,
             uptime: raw.uptime ?? (raw as unknown as { uptime_seconds?: number }).uptime_seconds ?? 0,
         };
+    }
+
+    /**
+     * POST /api/docker/ensure — 꺼진 Docker 데몬을 코어가 직접 띄우고 기다린다.
+     * 코어 대기 75초 + 폴링마다 `docker info` 5초 지연 + 다른 호출의 락 대기까지
+     * 합치면 120초를 넘길 수 있어(실기기에서 abort) 넉넉히 잡는다.
+     */
+    async ensureDocker(): Promise<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string; starting?: boolean }> {
+        const resp = await this.request<{ ready: boolean; attempted: boolean; launched: boolean; waited_seconds: number; message: string; starting?: boolean }>(
+            'POST', '/api/docker/ensure', {}, false, 200000,
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Docker 자동 시작 요청 실패'); }
+        return resp.data;
     }
 
     async runDiagnostics(): Promise<DiagnosticsResult> {
@@ -152,6 +292,10 @@ export class ApiClient {
             priorFiles?: Array<{ path: string; content: string }>;
             contextFiles?: Array<{ path: string; content: string }>;
             targetFolder?: string;
+            // AI-DLC 2단계: 결정 카드에서 사용자가 승인한 선택 결과.
+            // (Core 의 /api/code/generate 가 아직 이 필드를 소비하지 않아도 무해하게 무시됨 —
+            //  decisions 반영은 별도 태스크.)
+            decisions?: CodeDecisionChoice[];
         }
     ): Promise<CodeAgentResult> {
         const body = {
@@ -162,10 +306,96 @@ export class ApiClient {
             prior_files: opts?.priorFiles ?? [],
             context_files: opts?.contextFiles ?? [],
             target_folder: opts?.targetFolder ?? '',
+            decisions: opts?.decisions ?? [],
         };
         // 코드 생성은 30s 를 넘길 수 있어 90s 타임아웃.
         const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 90000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '코드 생성 실패'); }
+        return resp.data;
+    }
+
+    /**
+     * AI-DLC 1단계 — 코드 대신 "설계 결정" 목록 요청 (/api/code/plan).
+     * 결과는 SidebarProvider 가 QuickPick(팝업) 으로 렌더해 사용자에게 고르게 한다.
+     */
+    async planCode(
+        instruction: string,
+        opts?: {
+            workspacePath?: string;
+            openFile?: { path: string; content: string };
+            contextFiles?: Array<{ path: string; content: string }>;
+            targetFolder?: string;
+        }
+    ): Promise<CodePlanResult> {
+        const body = {
+            instruction,
+            workspace_path: opts?.workspacePath ?? '',
+            open_file_path: opts?.openFile?.path ?? '',
+            open_file_content: opts?.openFile?.content ?? '',
+            context_files: opts?.contextFiles ?? [],
+            target_folder: opts?.targetFolder ?? '',
+        };
+        const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설계 결정 생성 실패'); }
+        return resp.data;
+    }
+
+    async getDeployPreflight(workspacePath: string): Promise<DeployPreflightResult> {
+        const resp = await this.request<DeployPreflightResult>('POST', '/api/deploy/preflight', {
+            workspace_path: workspacePath,
+        });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
+        return resp.data;
+    }
+
+    async applyDeployRemediation(proposalId: string, workspacePath: string): Promise<{
+        success: boolean;
+        proposal_id: string;
+        applied_files: string[];
+        backup_dir?: string | null;
+        message: string;
+        rerun_required: boolean;
+    }> {
+        const resp = await this.request<{
+            success: boolean;
+            proposal_id: string;
+            applied_files: string[];
+            backup_dir?: string | null;
+            message: string;
+            rerun_required: boolean;
+        }>('POST', `/api/deploy/remediations/${encodeURIComponent(proposalId)}/apply`, {
+            workspace_path: workspacePath,
+        });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '자동 수정 적용 실패'); }
+        return resp.data;
+    }
+
+    async recordDeploymentDecision(
+        workspacePath: string,
+        target: 'ecs' | 's3' | 'local',
+        evidence: string[],
+    ): Promise<DeploymentDecisionResult> {
+        const resp = await this.request<DeploymentDecisionResult>('POST', '/api/deploy/decision', {
+            workspace_path: workspacePath,
+            target,
+            evidence,
+        });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 대상 결정 기록 실패'); }
+        return resp.data;
+    }
+
+    /** 일반 대화형 AI — 코드 생성과 달리 이 호출만으로 파일을 수정하지 않는다. */
+    async chat(
+        message: string,
+        history: Array<{ role: 'user' | 'assistant'; content: string }>,
+        workspacePath = '',
+    ): Promise<ChatResult> {
+        const resp = await this.request<ChatResult>('POST', '/api/chat', {
+            message,
+            history,
+            workspace_path: workspacePath,
+        }, false, 90000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AI 대화 실패'); }
         return resp.data;
     }
 
@@ -193,7 +423,7 @@ export class ApiClient {
             'POST',
             `/api/analyze/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? (resp.success ? 'applied' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     async listProposals(): Promise<PatchProposal[]> {
@@ -210,12 +440,34 @@ export class ApiClient {
         return resp.data;
     }
 
-    async approveDockerfile(proposalId: string, approved: boolean): Promise<{ status: string }> {
-        const resp = await this.request<{ status: string }>(
+    /**
+     * docker-compose.yml 초안 생성.
+     *
+     * 「인프라 파일 생성」의 Compose 탭에 대응하는 호출. 예전에는 이 메서드도
+     * Core 라우트도 없어서 탭이 아무것도 못 했다.
+     */
+    async generateCompose(workspacePath: string, projectId?: string): Promise<InfraFileProposal> {
+        const resp = await this.request<InfraFileProposal>(
+            'POST', '/api/deploy/compose',
+            { workspace_path: workspacePath, project_id: projectId }
+        );
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'docker-compose.yml 생성 실패'); }
+        return resp.data;
+    }
+
+    async approveDockerfile(
+        proposalId: string,
+        approved: boolean,
+    ): Promise<{ status: string; file_type?: string; path?: string }> {
+        const resp = await this.request<{ status: string; file_type?: string; path?: string }>(
             'POST',
             `/api/deploy/dockerfile/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? (resp.success ? 'saved' : 'error') };
+        return {
+            status: resp.data?.status ?? 'error', // 서버 status 없으면 성공을 지어내지 않음
+            file_type: resp.data?.file_type,
+            path: resp.data?.path,
+        };
     }
 
     /**
@@ -242,7 +494,7 @@ export class ApiClient {
             'POST',
             `/api/deploy/github-actions/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
         );
-        return { status: resp.data?.status ?? (resp.success ? 'saved' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // ── GitHub 인증 (VS Code OAuth → Core) ──────────────────────────────
@@ -287,11 +539,16 @@ export class ApiClient {
         workspacePath: string,
         targetPath?: string
     ): Promise<object> {
+        //: 기본 30초로는 부족하다 — 코어가 Docker Desktop 자동 시작(최대 75초,
+        //: docker_autostart)을 기다린 뒤 스캔(코어 상한 300초)을 돌리므로,
+        //: 그 합보다 길게 잡는다. 짧으면 코어는 정상 진행 중인데 화면만
+        //: "스캔 실패"로 보이는 거짓 실패가 난다.
         const resp = await this.request<object>(
             'POST', '/api/deploy/scan',
-            { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath }
+            { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath },
+            false, 480000  // Docker 자동 시작(정리 45초 + 대기 120초) + 스캔 상한 300초
         );
-        if (!resp.success || !resp.data) { throw new Error(`${scanType} 스캔 실패`); }
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? `${scanType} 스캔 요청 실패`); }
         return resp.data;
     }
 
@@ -308,12 +565,20 @@ export class ApiClient {
         return resp.data;
     }
 
-    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }> {
+    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string; error?: string }> {
         // docker build + run + 헬스체크는 30초를 넘으므로 타임아웃을 길게.
         const resp = await this.request<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }>(
             'POST', '/api/deploy/execute', { plan_id: planId, approved }, false, 600000
         );
-        return resp.success && resp.data ? resp.data : { status: 'error' };
+        //: 코어가 4xx/5xx 로 거절한 사유(예: "Trivy: CRITICAL 3건 — 배포를 차단했습니다")를
+        //: 버리고 { status: 'error' } 만 돌려주면 화면은 "사유 없음" 이 된다(실기기 검증 C2).
+        return resp.success && resp.data ? resp.data : { status: 'error', error: resp.error ?? '코어가 응답하지 않았습니다.' };
+    }
+
+    /** 로컬 배포의 연속 검증 스냅샷. 감시가 없으면(코어 재시작 등) null. */
+    async getVerificationStatus(deploymentId: string): Promise<Record<string, unknown> | null> {
+        const resp = await this.request<Record<string, unknown>>('GET', `/api/deploy/verification/${encodeURIComponent(deploymentId)}/status`);
+        return resp.success && resp.data ? resp.data : null;
     }
 
     async listDeploymentRecords(): Promise<DeploymentRecord[]> {
@@ -321,11 +586,16 @@ export class ApiClient {
         return resp.success && resp.data ? resp.data : [];
     }
 
-    async rollback(deploymentId: string): Promise<{ status: string }> {
-        const resp = await this.request<{ status: string }>(
-            'POST', '/api/deploy/rollback', { deployment_id: deploymentId }
+    async rollback(deploymentId: string): Promise<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string }> {
+        //: 롤백은 stop/rm/run + 헬스 확인(최대 15초)이라 기본 30초로는 모자라다.
+        const resp = await this.request<{ status: string; rolled_back_to?: string; warning?: string | null; stderr?: string }>(
+            'POST', '/api/deploy/rollback', { deployment_id: deploymentId }, false, 120000
         );
-        return { status: resp.data?.status ?? (resp.success ? 'rolled_back' : 'error') };
+        if (!resp.success || !resp.data) {
+            //: 422(롤백 대상 없음)·404 등 코어의 사유를 버리지 않는다.
+            return { status: 'error', error: resp.error ?? '코어가 응답하지 않았습니다.' };
+        }
+        return { ...resp.data, status: resp.data.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // -----------------------------------------------------------------------
@@ -341,10 +611,17 @@ export class ApiClient {
         return resp.success && resp.data ? resp.data : [];
     }
 
-    async analyzeIncident(alertId: string, extraContext?: string): Promise<ResponseProposal> {
+    async analyzeIncident(
+        alertId: string,
+        actorToken: string,
+        extraContext?: string,
+    ): Promise<ResponseProposal> {
         const resp = await this.request<ResponseProposal>(
             'POST', '/api/ops/analyze',
-            { alert_id: alertId, extra_context: extraContext }
+            { alert_id: alertId, extra_context: extraContext },
+            false,
+            30000,
+            { 'X-Ops-Actor-Token': actorToken },
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '인시던트 분석 실패'); }
         return resp.data;
@@ -356,12 +633,24 @@ export class ApiClient {
         sshHost?: string,
         sshUser?: string,
         sshKeyPath?: string,
+        actorToken?: string,
+        confirmToken?: string,
     ): Promise<{ status: string }> {
         const resp = await this.request<{ status: string }>(
             'POST', '/api/ops/approve',
-            { proposal_id: proposalId, approved, ssh_host: sshHost, ssh_user: sshUser, ssh_key_path: sshKeyPath }
+            {
+                proposal_id: proposalId,
+                approved,
+                ssh_host: sshHost,
+                ssh_user: sshUser,
+                ssh_key_path: sshKeyPath,
+                confirm_token: confirmToken,
+            },
+            false,
+            30000,
+            actorToken ? { 'X-Ops-Actor-Token': actorToken } : {},
         );
-        return { status: resp.data?.status ?? (resp.success ? 'executed' : 'error') };
+        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
     }
 
     // -----------------------------------------------------------------------
@@ -561,6 +850,51 @@ export class ApiClient {
         };
     }
 
+    /** GET /api/aws/onboarding-link — 원클릭 IAM 셋업 링크 + CloudFormation 템플릿. */
+    async getAwsOnboardingLink(): Promise<{
+        quick_create_url: string;
+        template_hosted: boolean;
+        console_upload_url: string;
+        template_body: string;
+        stack_name: string;
+        action_count: number;
+        steps: string[];
+    }> {
+        const resp = await this.request<{
+            quick_create_url: string; template_hosted: boolean; console_upload_url: string;
+            template_body: string; stack_name: string; action_count: number; steps: string[];
+        }>('GET', '/api/aws/onboarding-link');
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '온보딩 링크 생성 실패'); }
+        return resp.data;
+    }
+
+    /** POST /api/aws/permissions/check — 실제 ECS 대상 기준으로 현재 키 권한 점검. */
+    async checkAwsPermissions(deploymentContext?: {
+        ecrRepo?: string;
+        ecsCluster?: string;
+        ecsService?: string;
+        taskFamily?: string;
+        awsRegion?: string;
+        taskExecutionRole?: string;
+        taskRole?: string;
+    }): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/permissions/check', {
+            deployment_context: deploymentContext ? {
+                ecr_repo: deploymentContext.ecrRepo ?? '',
+                ecs_cluster: deploymentContext.ecsCluster ?? '',
+                ecs_service: deploymentContext.ecsService ?? '',
+                task_family: deploymentContext.taskFamily ?? '',
+                aws_region: deploymentContext.awsRegion ?? '',
+                task_execution_role: deploymentContext.taskExecutionRole ?? '',
+                task_role: deploymentContext.taskRole ?? '',
+            } : undefined,
+        });
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 권한 점검 실패');
+        }
+        return resp.data;
+    }
+
     /**
      * POST /api/aws/configure — 자격증명 저장 + 즉시 STS 검증.
      * Core 가 검증을 통과해야만 디스크에 저장되고, diagnostics 캐시를 갱신한다.
@@ -577,6 +911,64 @@ export class ApiClient {
         const resp = await this.request<AwsStatus>('POST', '/api/aws/configure', body);
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 자격증명 등록 실패');
+        }
+        return resp.data;
+    }
+
+    /**
+     * POST /api/aws/connect — STS 검증만 수행한다.
+     * 키의 영속 보관은 Extension의 SecretStorage가 담당한다.
+     */
+    async connectAws(creds: AwsConnectInput): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/connect', {
+            access_key_id: creds.accessKeyId,
+            secret_access_key: creds.secretAccessKey,
+            region: creds.region ?? '',
+            session_token: creds.sessionToken ?? '',
+        });
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 자격증명 검증 실패');
+        }
+        return resp.data;
+    }
+
+    /**
+     * POST /api/aws/connect-profile — ~/.aws 프로필로 연결.
+     *
+     * 키가 요청에 실리지 않는다. AWS CLI 를 이미 쓰는 사용자는 콘솔에서 키를
+     * 다시 찾아 붙여넣을 필요 없이, 이미 있는 프로필 이름만 고르면 된다.
+     */
+    async connectAwsProfile(input: { profile: string; region?: string }): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/connect-profile', {
+            profile: input.profile,
+            region: input.region ?? '',
+        });
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 프로필 연결 실패');
+        }
+        return resp.data;
+    }
+
+    /**
+     * POST /api/aws/role/setup — 프로그램 안에서 최소권한 역할을 만들고 빌린다.
+     * 권한이 모자라면 ok=false + mode="console_fallback" 으로 200 이 온다.
+     */
+    async setupAwsRole(input: { profile?: string; region?: string } = {}): Promise<AwsRoleSetupResponse> {
+        const resp = await this.request<AwsRoleSetupResponse>('POST', '/api/aws/role/setup', {
+            profile: input.profile ?? '',
+            region: input.region ?? '',
+        }, false, 120000);   // CreateRole 직후 AssumeRole 전파 지연 재시도까지 포함
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 역할 설정 실패');
+        }
+        return resp.data;
+    }
+
+    /** POST /api/aws/role/refresh — 역할 모드의 임시 자격증명을 지금 다시 빌린다. */
+    async refreshAwsRole(): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/role/refresh', {});
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'AWS 역할 자격증명 갱신 실패');
         }
         return resp.data;
     }
@@ -600,6 +992,173 @@ export class ApiClient {
     }
 
     /**
+     * POST /api/deploy/s3 — 정적 사이트를 **사용자 자기 계정** 버킷에 배포.
+     *
+     * 코어에는 이 라우트가 완성돼 있었는데(버킷 생성·공개 설정·업로드·URL
+     * 조립까지) **확장이 한 번도 부르지 않았다.** 파일을 읽어 보내는 쪽이
+     * 없어서 그 경로 전체가 도달 불가능이었다.
+     *
+     * 바이너리는 반드시 `encoding: "base64"` 로 담아야 한다 — utf-8 로 보내면
+     * 업로드는 성공하고 브라우저에서만 깨진다.
+     */
+    async deployS3(input: {
+        project: string;
+        files: Array<{ path: string; content: string; encoding: 'utf-8' | 'base64' }>;
+        region?: string;
+        profile?: string;
+    }): Promise<S3DeployResult> {
+        const body: Record<string, unknown> = {
+            project: input.project,
+            files: input.files,
+        };
+        if (input.region) { body.region = input.region; }
+        if (input.profile) { body.profile = input.profile; }
+
+        const resp = await this.request<S3DeployResult>(
+            'POST', '/api/deploy/s3', body, false, ApiClient.S3_DEPLOY_TIMEOUT_MS,
+        );
+        if (resp.success && resp.data) {
+            return resp.data;
+        }
+        //: 여기서 조용히 기본값을 돌려주면 "배포됐다" 로 보인다. 실패는
+        //: 실패로 올린다 — 호출자가 사용자에게 원인을 보여 준다.
+        throw new Error(resp.error ?? 'S3 배포에 실패했습니다.');
+    }
+
+    /**
+     * POST /api/deploy/s3/stream — 같은 배포를 하되 **진행 상황을 흘려받는다.**
+     *
+     * 왜 EventSource 가 아닌가
+     *   브라우저 EventSource 는 커스텀 헤더를 보낼 수 없는데, 이 확장은 세션
+     *   토큰을 `X-Session-Token` 헤더로 싣는다. 그래서 fetch 의 ReadableStream
+     *   으로 직접 읽는다. (웹뷰는 코어를 직접 못 부르므로 이 수신은 확장
+     *   호스트에서 일어나고, 결과는 postMessage 로 중계된다.)
+     *
+     * 실패 경로가 **둘**이라는 점에 주의한다.
+     *   1. 요청 자체 실패 — HTTP 상태로 온다(여기서 throw).
+     *   2. 스트림 도중 실패 — 이미 200 으로 열린 뒤라 `step:"error"` 이벤트로 온다.
+     */
+    async deployS3Stream(
+        input: {
+            project: string;
+            files: Array<{ path: string; content: string; encoding: 'utf-8' | 'base64' }>;
+            region?: string;
+            profile?: string;
+        },
+        onEvent: (event: S3DeployStreamEvent) => void,
+    ): Promise<S3DeployResult> {
+        let token = this.coreManager.getSessionToken();
+        let port = this.coreManager.getPort();
+        if (!token || !port || port <= 0 || !Number.isFinite(port)) {
+            try { await this.coreManager.refreshToken(); } catch { /* ignore */ }
+            token = this.coreManager.getSessionToken();
+            port = this.coreManager.getPort();
+        }
+        if (!port || port <= 0 || !Number.isFinite(port)) {
+            throw new Error('코어가 아직 준비되지 않았습니다.');
+        }
+
+        const body: Record<string, unknown> = { project: input.project, files: input.files };
+        if (input.region) { body.region = input.region; }
+        if (input.profile) { body.profile = input.profile; }
+
+        const res = await fetch(`http://127.0.0.1:${port}/api/deploy/s3/stream`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Session-Token': token,
+                Accept: 'text/event-stream',
+            },
+            body: JSON.stringify(body),
+        });
+
+        if (!res.ok || !res.body) {
+            let text = '';
+            try { text = await res.text(); } catch { text = `HTTP ${res.status}`; }
+            throw new Error(describeHttpError(res.status, text));
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let result: S3DeployResult | null = null;
+        let streamError: string | null = null;
+
+        //: SSE 프레임은 빈 줄로 끊긴다. 청크 경계가 프레임 중간을 자를 수
+        //: 있으므로 버퍼에 모았다가 완성된 프레임만 꺼낸다.
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) { break; }
+            buffer += decoder.decode(value, { stream: true });
+            let sep = buffer.indexOf('\n\n');
+            while (sep !== -1) {
+                const frame = buffer.slice(0, sep);
+                buffer = buffer.slice(sep + 2);
+                sep = buffer.indexOf('\n\n');
+
+                const line = frame.split('\n').find((l) => l.startsWith('data:'));
+                if (!line) { continue; }
+                let event: S3DeployStreamEvent;
+                try {
+                    event = JSON.parse(line.slice(5).trim()) as S3DeployStreamEvent;
+                } catch { continue; }
+
+                onEvent(event);
+                if (event.step === 'done' && event.result) { result = event.result; }
+                if (event.step === 'error') { streamError = event.message ?? 'S3 배포에 실패했습니다.'; }
+            }
+        }
+
+        if (streamError) { throw new Error(streamError); }
+        if (!result) {
+            //: 완료 이벤트 없이 스트림이 끝났다 — 코어가 죽었거나 연결이 끊겼다.
+            //: **성공으로 처리하면 안 된다.** 다만 업로드는 계속되고 있을 수
+            //: 있으므로, 호출자가 그 사실을 사용자에게 알려야 한다.
+            throw new Error(
+                '배포 진행 연결이 끊겼습니다. 업로드가 계속되고 있을 수 있으니 '
+                + 'S3 버킷 상태를 확인한 뒤 다시 시도하세요.',
+            );
+        }
+        return result;
+    }
+
+    /**
+     * GET /api/aws/policy — ReCoder 가 요구하는 최소권한 IAM 정책.
+     *
+     * 코어에는 이 엔드포인트가 오래전부터 있었는데 **확장이 한 번도 부르지
+     * 않았다.** 그래서 사용자는 "권한이 없습니다" 라는 배포 실패만 보고,
+     * 무엇을 허용해야 하는지는 알 수 없었다. 필요한 건 정책 JSON 하나인데
+     * 그걸 얻을 방법이 제품 안에 없었던 것이다.
+     *
+     * 실패해도 예외를 던지지 않는다 — 이건 배포를 막는 경로가 아니라
+     * 사용자를 돕는 경로라, 여기서 throw 하면 도움을 주려다 화면을 깨뜨린다.
+     */
+    async getAwsPolicy(opts: {
+        targets?: string[];
+        cluster?: string;
+        service?: string;
+        ecrRepo?: string;
+        region?: string;
+        taskExecutionRole?: string;
+        taskRole?: string;
+    } = {}): Promise<AwsPolicyResult | null> {
+        const qs = new URLSearchParams();
+        if (opts.targets?.length) { qs.set('targets', opts.targets.join(',')); }
+        //: 빈 값은 아예 보내지 않는다. 코어는 빈 문자열을 "기본 규칙을 써라"
+        //: 로 읽지만, 굳이 보내면 의도가 흐려진다.
+        if (opts.cluster) { qs.set('cluster', opts.cluster); }
+        if (opts.service) { qs.set('service', opts.service); }
+        if (opts.ecrRepo) { qs.set('ecr_repo', opts.ecrRepo); }
+        if (opts.region) { qs.set('region', opts.region); }
+        if (opts.taskExecutionRole) { qs.set('task_execution_role', opts.taskExecutionRole); }
+        if (opts.taskRole) { qs.set('task_role', opts.taskRole); }
+
+        const path = qs.toString() ? `/api/aws/policy?${qs.toString()}` : '/api/aws/policy';
+        const resp = await this.request<AwsPolicyResult>('GET', path);
+        return resp.success && resp.data ? resp.data : null;
+    }
+
+    /**
      * GET /api/aws/ecr/repos — ECR 레포지토리 목록 (자격증명 sanity check).
      */
     async listEcrRepos(opts: { region?: string; profile?: string; maxResults?: number } = {}): Promise<AwsEcrRepo[]> {
@@ -614,61 +1173,6 @@ export class ApiClient {
 
     // ===== Workbench 풀 구현 — Deploy / GitHub 액션 =====
 
-    /** POST /api/deploy/ec2 — EC2 SSH 배포 시작 (백그라운드, status 폴링 필요). */
-    async deployEc2(req: {
-        workspace_path?: string;
-        image_name?: string;
-        repo_name?: string;
-        tag?: string;
-        container_name?: string;
-        host_port?: number;
-        container_port?: number;
-        health_check_path?: string;
-        ecr_registry?: string;
-        ec2_host?: string;
-        ec2_ssh_key?: string;
-        aws_region?: string;
-        ec2_user?: string;
-    }): Promise<{ status: string; message: string }> {
-        const resp = await this.request<{ status: string; message: string }>('POST', '/api/deploy/ec2', req);
-        if (!resp.success || !resp.data) {
-            throw new Error(resp.error ?? 'EC2 배포 요청 실패');
-        }
-        return resp.data;
-    }
-
-    /** GET /api/deploy/ec2/status — EC2 배포 진행상황 폴링. */
-    async getEc2DeployStatus(): Promise<{
-        running: boolean;
-        stage: string;
-        log_tail: string[];
-        image_uri: string;
-        error: string;
-        started_at: string;
-        finished_at: string;
-    }> {
-        const resp = await this.request<{
-            running: boolean;
-            stage: string;
-            log_tail: string[];
-            image_uri: string;
-            error: string;
-            started_at: string;
-            finished_at: string;
-        }>('GET', '/api/deploy/ec2/status');
-        if (!resp.success || !resp.data) {
-            throw new Error(resp.error ?? 'EC2 상태 조회 실패');
-        }
-        return resp.data;
-    }
-
-    /** GET /api/deploy/ec2/ready — EC2 배포 사전 점검. */
-    async ec2DeployReady(): Promise<{ ready: boolean; issues: string[]; warnings?: string[] }> {
-        const resp = await this.request<{ ready: boolean; issues: string[]; warnings?: string[] }>(
-            'GET', '/api/deploy/ec2/ready'
-        );
-        return resp.success && resp.data ? resp.data : { ready: false, issues: ['Core 응답 없음'] };
-    }
 
     /** POST /api/deploy/ecs — ECS Fargate 배포 시작. */
     async deployEcs(req: {
@@ -707,6 +1211,18 @@ export class ApiClient {
         error: string;
         started_at: string;
         finished_at: string;
+        rollback_proposal?: {
+            proposal_id: string;
+            deployment_id: string;
+            cluster: string;
+            service: string;
+            region: string;
+            reason: string;
+            previous_task_definition: string;
+            current_task_definition: string;
+            approval_level: number;
+            status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed' | 'superseded';
+        } | null;
     }> {
         const resp = await this.request<{
             running: boolean;
@@ -717,9 +1233,42 @@ export class ApiClient {
             error: string;
             started_at: string;
             finished_at: string;
+            rollback_proposal?: {
+                proposal_id: string;
+                deployment_id: string;
+                cluster: string;
+                service: string;
+                region: string;
+                reason: string;
+                previous_task_definition: string;
+                current_task_definition: string;
+                approval_level: number;
+                status: 'pending' | 'approving' | 'completed' | 'ignored' | 'failed' | 'superseded';
+            } | null;
         }>('GET', '/api/deploy/ecs/status');
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'ECS 상태 조회 실패');
+        }
+        return resp.data;
+    }
+
+    /** POST /api/deploy/ecs/rollback — 제안을 승인할 때만 ECS 이전 버전으로 복귀. */
+    async resolveEcsRollback(proposalId: string, approved: boolean): Promise<{
+        status: 'completed' | 'ignored';
+        message: string;
+        deployment_id: string;
+        proposal_id: string;
+        adr: { file: string; content: string };
+    }> {
+        const resp = await this.request<{
+            status: 'completed' | 'ignored';
+            message: string;
+            deployment_id: string;
+            proposal_id: string;
+            adr: { file: string; content: string };
+        }>('POST', '/api/deploy/ecs/rollback', { proposal_id: proposalId, approved });
+        if (!resp.success || !resp.data) {
+            throw new Error(resp.error ?? 'ECS 롤백 처리 실패');
         }
         return resp.data;
     }

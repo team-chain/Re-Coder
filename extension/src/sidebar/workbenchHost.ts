@@ -1,0 +1,960 @@
+/**
+ * Workbench 공통 호스트 — 메시지 처리와 상태 푸시의 **단일 구현**.
+ *
+ * 왜 생겼나
+ *   같은 `workbenchHtml` 을 쓰는 화면이 둘이었다(에디터 영역의 WorkbenchPanel,
+ *   사이드바의 WorkbenchSidebarProvider). 그런데 메시지 핸들러는 Panel 에만
+ *   37종이 구현돼 있었고 Provider 는 9종뿐이었다. 게다가 Panel 은 아무도
+ *   인스턴스화하지 않는 고아여서, **실제로 렌더되는 사이드바에서는 GitHub 탭·
+ *   배포 서브탭·Discord 탭의 버튼이 전부 무반응**이었다(보드 이슈).
+ *
+ *   화면이 둘인 한 핸들러가 갈라지는 사고는 반복된다. 그래서 처리 로직을
+ *   여기 하나로 모으고, 두 화면은 "웹뷰로 어떻게 보내는가"(_post)만 다르게
+ *   구현한다. 새 메시지를 추가해도 양쪽이 자동으로 같이 얻는다.
+ *
+ * 상속하는 쪽이 해야 할 일
+ *   1. `_post()` 구현 — 자기 웹뷰로 메시지를 보낸다.
+ *   2. 웹뷰의 onDidReceiveMessage 를 `_handleMessage` 로 연결한다.
+ *   3. 시작 시 `_pushHealthAndCost` / `_startPolling` 등을 호출한다.
+ */
+import * as vscode from 'vscode';
+import { CoreManager } from '../core/CoreManager';
+import { ApiClient } from '../core/ApiClient';
+import { PollingService } from '../core/PollingService';
+
+/**
+ * 이미지 참조에서 컨테이너 이름을 만든다.
+ *
+ * 무엇이 사고였나 — 로컬 배포가 이미지 입력값을 **그대로 컨테이너 이름으로**
+ * 썼다. `recoder-app:v1` 처럼 태그를 붙이면 이름에 `:` 가 들어가 코어의
+ * 이름 검증(400)에 걸렸다(보드 이슈 「컨테이너 이름 400」). 태그는 이미지에는
+ * 남아야 한다 — v1→v2 롤백이 태그로 구분되기 때문이다. 이름에서만 뗀다.
+ */
+export function containerNameFromImage(image: string): string {
+    const noDigest = String(image).split('@')[0];
+    const lastSegment = noDigest.split('/').pop() || '';
+    const name = lastSegment.split(':')[0];
+    return name || 'recoder-app';
+}
+
+export abstract class WorkbenchHost {
+    protected _activity: { dot: string; text: string; time: string }[] = [];
+    protected _pollTimer: ReturnType<typeof setInterval> | null = null;
+    protected _diagnosticsInflight: boolean = false;
+    protected _diagnosticsLoaded: boolean = false;
+
+    // ── Workbench bidirectional sync (Discord ↔ Core ↔ VSCode) ──────────
+    /** /workbench/events cursor — Core 이벤트 버퍼의 인덱스 오프셋(타임스탬프 아님). */
+    protected _workbenchEventsCursor: number = 0;
+    protected _workbenchPollTimer: ReturnType<typeof setInterval> | null = null;
+    protected _workbenchMode: 'home' | 'build' | 'ship' | 'operate' | 'recover' = 'home';
+
+    constructor(
+        protected readonly _extensionUri: vscode.Uri,
+        protected readonly _apiClient: ApiClient,
+        protected readonly _coreManager: CoreManager,
+        protected readonly _polling: PollingService,
+    ) {}
+
+    /** 자기 웹뷰로 메시지 전송. 웹뷰가 없으면 조용히 버린다. */
+    protected abstract _post(msg: { type: string; payload?: any }): void;
+
+    public addActivity(dotClass: 'ok' | 'warn' | 'fail' | 'info', text: string): void {
+        const item = { dot: dotClass, text, time: this._now() };
+        this._activity.unshift(item);
+        if (this._activity.length > 30) this._activity.pop();
+        this._post({ type: 'wb.activity', payload: { items: this._activity } });
+    }
+
+    public pushLog(pane: 'ai' | 'docker' | 'github' | 'deploy' | 'health', line: string): void {
+        this._post({ type: 'wb.log', payload: { pane, line } });
+    }
+
+    public pushDiagnostics(diag: import('../types').DiagnosticsResult): void {
+        this._post({ type: 'wb.diagnosticsUpdate', payload: diag });
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+
+    protected async _handleMessage(msg: { type: string; payload?: any }): Promise<void> {
+        switch (msg.type) {
+            case 'wb.ready':
+                await this._pushHealthAndCost();
+                this._post({ type: 'wb.activity', payload: { items: this._activity } });
+                break;
+            case 'wb.analyze':
+                await vscode.commands.executeCommand('recoder.analyzeError');
+                this.addActivity('info', '에러 분석 시작');
+                break;
+            case 'wb.openSidebar':
+                await vscode.commands.executeCommand('recoder.sidebarView.focus');
+                break;
+            case 'wb.poll.health':
+                await this._pushHealthAndCost();
+                break;
+            case 'wb.tab':
+                // 클라이언트 측에서 탭 전환만 — 별도 처리 불필요
+                break;
+            case 'wb.generateDockerfile':
+                await vscode.commands.executeCommand('recoder.generateDockerfile');
+                this.addActivity('info', 'Dockerfile 생성 요청');
+                break;
+            case 'wb.generateGithubActions':
+                try {
+                    await vscode.commands.executeCommand('recoder.generateGithubActions');
+                    this.addActivity('info', 'GitHub Actions 워크플로우 생성 요청');
+                } catch (err) {
+                    this.addActivity('fail', `GitHub Actions 생성 실패: ${err}`);
+                }
+                break;
+            case 'wb.runDiagnostics':
+                await vscode.commands.executeCommand('recoder.runDiagnostics');
+                this.addActivity('info', '진단 재실행');
+                break;
+            case 'wb.restartCore':
+                await vscode.commands.executeCommand('recoder.restartCore');
+                this.addActivity('warn', 'Core 재시작');
+                break;
+            // ── Workbench bidirectional sync (VSCode → Core → Discord) ───
+            case 'wb.changeMode': {
+                const mode = (msg.payload?.mode as string) || 'build';
+                try {
+                    await this._apiClient.workbenchChangeMode(
+                        mode as 'build' | 'ship' | 'operate' | 'recover',
+                        'vscode',
+                    );
+                    // 즉시 자기 자신도 갱신 (Core 응답 후 다음 polling tick 까지 안 기다림)
+                    void this._pollWorkbenchEvents();
+                } catch (err) {
+                    this.addActivity('fail', `모드 전환 실패: ${err}`);
+                }
+                break;
+            }
+
+            // ── GitHub Hub ──────────────────────────────────────────────
+            case 'wb.gh.login':
+                try {
+                    await vscode.commands.executeCommand('recoder.githubLogin');
+                    this.addActivity('info', 'GitHub 로그인 시도');
+                    // 로그인 후 상태 갱신을 webview 에 보냄
+                    void this._pushGithubStatus();
+                } catch (err) {
+                    this.addActivity('fail', `GitHub 로그인 실패: ${err}`);
+                }
+                break;
+            case 'wb.gh.logout':
+                try {
+                    await vscode.commands.executeCommand('recoder.githubLogout');
+                    this.addActivity('info', 'GitHub 로그아웃');
+                    void this._pushGithubStatus();
+                } catch (err) {
+                    this.addActivity('fail', `GitHub 로그아웃 실패: ${err}`);
+                }
+                break;
+            case 'wb.gh.status':
+                await this._pushGithubStatus();
+                break;
+            case 'wb.gh.listRepos':
+                try {
+                    const result = await this._apiClient.listGithubRepos();
+                    this._post({
+                        type: 'wb.gh.reposResult',
+                        payload: { repos: result.repos ?? [] },
+                    });
+                    this.addActivity('info', `GitHub 레포 ${(result.repos ?? []).length}개 로드`);
+                } catch (err) {
+                    this.pushLog('github', `[ERR] 레포 목록 조회 실패: ${err}`);
+                    this.addActivity('fail', `GitHub 레포 조회 실패: ${err}`);
+                }
+                break;
+            case 'wb.gh.createRepo': {
+                const p = msg.payload ?? {};
+                const wsPath = (p.workspace_path as string) || this._getWorkspacePath();
+                if (!wsPath) {
+                    this._post({ type: 'wb.gh.createRepoResult', payload: { ok: false, error: '워크스페이스가 열려 있지 않음' } });
+                    break;
+                }
+                if (!p.name) {
+                    this._post({ type: 'wb.gh.createRepoResult', payload: { ok: false, error: '레포 이름이 비어 있음' } });
+                    break;
+                }
+                try {
+                    const result = await this._apiClient.githubCreateRepo({
+                        workspace_path: wsPath,
+                        name: String(p.name),
+                        private: !!p.private,
+                        description: (p.description as string) || '',
+                    });
+                    const url = result.html_url ?? '';
+                    this._post({
+                        type: 'wb.gh.createRepoResult',
+                        payload: { ok: true, url, message: `레포 생성 완료: ${url || result.status}` },
+                    });
+                    this.addActivity('ok', `레포 생성 완료: ${p.name}`);
+                } catch (err) {
+                    this._post({ type: 'wb.gh.createRepoResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `레포 생성 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.gh.setSecret': {
+                const p = msg.payload ?? {};
+                if (!p.repo || !p.name || p.value === undefined) {
+                    this._post({ type: 'wb.gh.secretResult', payload: { ok: false, error: 'repo / name / value 모두 필요' } });
+                    break;
+                }
+                try {
+                    const r = await this._apiClient.githubSetSecret({
+                        repo: String(p.repo),
+                        name: String(p.name),
+                        value: String(p.value),
+                    });
+                    this._post({
+                        type: 'wb.gh.secretResult',
+                        payload: { ok: true, name: p.name, message: r.message ?? `Secret 등록: ${p.repo}/${p.name}` },
+                    });
+                    this.addActivity('ok', `Secret 등록: ${p.repo}/${p.name}`);
+                } catch (err) {
+                    this._post({ type: 'wb.gh.secretResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `Secret 등록 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.gh.push': {
+                const p = msg.payload ?? {};
+                const wsPath = (p.workspace_path as string) || this._getWorkspacePath();
+                if (!wsPath) {
+                    this._post({ type: 'wb.gh.pushResult', payload: { ok: false, error: '워크스페이스가 열려 있지 않음' } });
+                    break;
+                }
+                try {
+                    const r = await this._apiClient.gitPush({
+                        workspace_path: wsPath,
+                        branch: (p.branch as string) || '',
+                        force: !!p.force,
+                    });
+                    this._post({
+                        type: 'wb.gh.pushResult',
+                        payload: { ok: true, branch: r.branch, message: r.message ?? `push 완료 (branch=${r.branch ?? '?'})` },
+                    });
+                    this.addActivity('ok', `git push 완료`);
+                } catch (err) {
+                    this._post({ type: 'wb.gh.pushResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `git push 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.gh.listRuns': {
+                const repo = String(msg.payload?.repo ?? '');
+                if (!repo) {
+                    this.pushLog('github', '[ERR] repo 인자 누락');
+                    break;
+                }
+                try {
+                    const r = await this._apiClient.githubListRuns(repo);
+                    this._post({
+                        type: 'wb.gh.runsResult',
+                        payload: { repo, runs: r.workflow_runs ?? [] },
+                    });
+                    this.pushLog('github', `[OK] ${repo}: ${(r.workflow_runs ?? []).length}개 실행`);
+                } catch (err) {
+                    this.pushLog('github', `[ERR] runs 조회 실패: ${err}`);
+                }
+                break;
+            }
+
+            // ── Deploy Center 사전 점검 (자동 발사) ────────────────────
+            case 'wb.deploy.precheck': {
+                const items = await this._collectDeployPrechecks();
+                this._post({
+                    type: 'wb.deploy.precheckResult',
+                    payload: { items },
+                });
+                break;
+            }
+            // 일반 VS Code command 트리거 (precheck "해결" 버튼용)
+            case 'wb.cmd': {
+                const cmd = String(msg.payload?.cmd ?? '');
+                if (cmd && cmd.startsWith('recoder.')) {
+                    try { await vscode.commands.executeCommand(cmd); } catch (err) {
+                        this.addActivity('fail', `${cmd} 실패: ${err}`);
+                    }
+                }
+                break;
+            }
+
+            // ── Deploy Center ───────────────────────────────────────────
+            case 'wb.deploy.localDocker':
+                // 호환용 (구버전 button id) — 새 wizard 로 위임
+                this._post({
+                    type: 'wb.local.generateResult',
+                    payload: { ok: false, error: '새 wizard 의 1. Dockerfile 생성 버튼을 사용하세요' },
+                });
+                break;
+
+            // ── Local Docker 6단계 wizard (워크벤치 직접 실행) ─────────
+            case 'wb.local.generate': {
+                const ws = this._getWorkspacePath();
+                if (!ws) {
+                    this._post({ type: 'wb.local.generateResult', payload: { ok: false, error: '워크스페이스 없음' } });
+                    break;
+                }
+                try {
+                    const proposal = await this._apiClient.generateDockerfile(ws);
+                    const content = (proposal as unknown as { content?: string }).content ?? '';
+                    const proposalId = (proposal as unknown as { proposal_id?: string }).proposal_id ?? '';
+                    this._post({
+                        type: 'wb.local.generateResult',
+                        payload: { ok: true, proposal_id: proposalId, content },
+                    });
+                    this.addActivity('ok', 'Dockerfile 생성 완료');
+                } catch (err) {
+                    this._post({ type: 'wb.local.generateResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `Dockerfile 생성 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.local.approve': {
+                const proposalId = String(msg.payload?.proposal_id ?? '');
+                if (!proposalId) {
+                    this._post({ type: 'wb.local.approveResult', payload: { ok: false, error: 'proposal_id 누락' } });
+                    break;
+                }
+                try {
+                    await this._apiClient.approveDockerfile(proposalId, true);
+                    this._post({
+                        type: 'wb.local.approveResult',
+                        payload: { ok: true, path: 'Dockerfile' },
+                    });
+                    this.addActivity('ok', 'Dockerfile 승인 + 저장');
+                } catch (err) {
+                    this._post({ type: 'wb.local.approveResult', payload: { ok: false, error: String(err) } });
+                }
+                break;
+            }
+            case 'wb.local.scan': {
+                const ws = this._getWorkspacePath();
+                if (!ws) {
+                    this._post({ type: 'wb.local.scanResult', payload: { ok: false, error: '워크스페이스 없음' } });
+                    break;
+                }
+                try {
+                    // 보안 스캔: gitleaks 로 하드코딩된 시크릿 탐지 (빌드 전에 코드 정적 스캔).
+                    const r = await this._apiClient.runScan('gitleaks', ws);
+                    this._post({
+                        type: 'wb.local.scanResult',
+                        payload: { ok: true, result: r },
+                    });
+                    this.addActivity('ok', '보안 스캔(gitleaks) 완료');
+                } catch (err) {
+                    this._post({ type: 'wb.local.scanResult', payload: { ok: false, error: String(err) } });
+                }
+                break;
+            }
+            case 'wb.local.deploy': {
+                const ws = this._getWorkspacePath();
+                if (!ws) {
+                    this._post({ type: 'wb.local.deployProgress', payload: { stage: 'failed', error: '워크스페이스 없음', finished: true, line: '워크스페이스가 열려있지 않습니다.' } });
+                    break;
+                }
+                const p = msg.payload ?? {};
+                try {
+                    this._post({ type: 'wb.local.deployProgress', payload: { stage: 'build', line: '[…] 배포 플랜 생성 중' } });
+                    // DeployMethod LOCAL_DOCKER 는 enum 문자열로 보냄
+                    //: 이미지는 태그째(롤백 구분용), 컨테이너 이름은 태그를 뗀 값.
+                    //: 예전처럼 이미지 입력을 이름에 그대로 쓰면 `app:v1` 의
+                    //: `:` 때문에 플랜 검증에서 400 이 났다.
+                    const localImage = String(p.image || 'recoder-app');
+                    const plan = await this._apiClient.createDeploymentPlan(
+                        ws,
+                        'local_docker' as unknown as import('../types').DeployMethod,
+                        undefined,
+                        localImage,
+                        containerNameFromImage(localImage),
+                        Number(p.host_port || 8000),
+                        Number(p.container_port || 8000),
+                    );
+                    const planId = (plan as unknown as { plan_id?: string }).plan_id || '';
+                    this._post({ type: 'wb.local.deployProgress', payload: { stage: 'build', line: '[OK] 플랜 생성됨 — 실행 시작' } });
+                    const result = await this._apiClient.executeDeployment(planId, true);
+                    if (result.status === 'ok' || result.deployment_id) {
+                        this._post({
+                            type: 'wb.local.deployProgress',
+                            payload: { stage: 'health', finished: true, line: `[OK] 배포 완료 (id=${result.deployment_id ?? '?'})` },
+                        });
+                        this.addActivity('ok', 'Local Docker 배포 완료');
+                    } else {
+                        // 컨테이너가 시작/헬스에 실패한 경우 — stderr 에서 핵심 사유 한 줄 추출
+                        const errText = (result.stderr || result.stdout || '').trim();
+                        const lines = errText.split('\n').map(s => s.trim()).filter(Boolean);
+                        const summary = lines.reverse().find(l => /error|exception|traceback|keyerror|exited|not running|unhealthy|refused/i.test(l))
+                            || lines[0] || '컨테이너가 시작되지 못했습니다.';
+                        this._post({
+                            type: 'wb.local.deployProgress',
+                            payload: { stage: 'run', error: 'execute 실패', error_summary: summary, finished: true, line: `[FAIL] ${result.status} — ${summary}` },
+                        });
+                    }
+                } catch (err) {
+                    this._post({
+                        type: 'wb.local.deployProgress',
+                        payload: { stage: 'build', error: String(err), finished: true, line: `[ERR] ${err}` },
+                    });
+                    this.addActivity('fail', `Local Docker 배포 실패: ${err}`);
+                }
+                break;
+            }
+
+            // ── GitHub Actions wizard (워크벤치 직접) ─────────────────
+            case 'wb.actions.generate': {
+                const ws = this._getWorkspacePath();
+                if (!ws) {
+                    this._post({ type: 'wb.actions.generateResult', payload: { ok: false, error: '워크스페이스 없음' } });
+                    break;
+                }
+                try {
+                    const proposal = await this._apiClient.generateGithubActions(ws);
+                    const content = (proposal as unknown as { content?: string }).content ?? '';
+                    const proposalId = (proposal as unknown as { proposal_id?: string }).proposal_id ?? '';
+                    this._post({
+                        type: 'wb.actions.generateResult',
+                        payload: { ok: true, proposal_id: proposalId, content },
+                    });
+                    this.addActivity('ok', 'GitHub Actions 워크플로 생성');
+                } catch (err) {
+                    this._post({ type: 'wb.actions.generateResult', payload: { ok: false, error: String(err) } });
+                    this.addActivity('fail', `워크플로 생성 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.actions.approve': {
+                const proposalId = String(msg.payload?.proposal_id ?? '');
+                if (!proposalId) {
+                    this._post({ type: 'wb.actions.approveResult', payload: { ok: false, error: 'proposal_id 누락' } });
+                    break;
+                }
+                try {
+                    await this._apiClient.approveGithubActions(proposalId, true);
+                    this._post({
+                        type: 'wb.actions.approveResult',
+                        payload: { ok: true, path: '.github/workflows/ci-cd.yml' },
+                    });
+                    this.addActivity('ok', '워크플로 저장');
+                } catch (err) {
+                    this._post({ type: 'wb.actions.approveResult', payload: { ok: false, error: String(err) } });
+                }
+                break;
+            }
+            case 'wb.deploy.ecs': {
+                const p = msg.payload ?? {};
+                const wsPath = (p.workspace_path as string) || this._getWorkspacePath();
+                this.pushLog('deploy', `[…] ECS Fargate 배포 시작`);
+                try {
+                    const ready = await this._apiClient.ecsDeployReady();
+                    if (!ready.ready) {
+                        this.pushLog('deploy', `[BLOCKED] ${ready.issues.join('; ')}`);
+                        this.addActivity('fail', 'ECS 사전 점검 실패');
+                        break;
+                    }
+                    const r = await this._apiClient.deployEcs({
+                        workspace_path: wsPath,
+                        image_name: (p.image_name as string) || 'recoder-app',
+                        repo_name: (p.repo_name as string) || 'recoder-app',
+                        tag: (p.tag as string) || 'latest',
+                        ecr_registry: (p.ecr_registry as string) || '',
+                        ecs_cluster: (p.ecs_cluster as string) || '',
+                        ecs_service: (p.ecs_service as string) || '',
+                        aws_region: (p.aws_region as string) || '',
+                        container_port: Number(p.container_port ?? 8000),
+                        cpu: (p.cpu as string) || '256',
+                        memory: (p.memory as string) || '512',
+                        task_family: (p.task_family as string) || 'recoder-task',
+                        environment: (p.environment as string) || 'staging',
+                        branch: (p.branch as string) || '',
+                        skip_sbom: !!p.skip_sbom,
+                        skip_opa: !!p.skip_opa,
+                    });
+                    this.pushLog('deploy', `[OK] ${r.message}`);
+                    this.addActivity('info', 'ECS 배포 시작 (백그라운드)');
+                    this._startEcsStatusPolling();
+                } catch (err) {
+                    this.pushLog('deploy', `[ERR] ${err}`);
+                    this.addActivity('fail', `ECS 배포 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.deploy.ecs.status':
+                try {
+                    const s = await this._apiClient.getEcsDeployStatus();
+                    this._post({ type: 'wb.deploy.ecs.statusResult', payload: s });
+                } catch { /* ignore */ }
+                break;
+
+            // ── Discord Bridge 설정 (Make 채널 / 봇 초대 / 길드 선택) ───────
+            case 'wb.discord.fetchStatus':
+                await this._pushDiscordStatus();
+                break;
+            case 'wb.discord.fetchInviteUrl':
+                await this._pushDiscordInviteUrl();
+                break;
+            case 'wb.discord.fetchGuilds':
+                await this._pushDiscordGuilds();
+                break;
+            case 'wb.discord.fetchChannels': {
+                const gid = String(msg.payload?.guild_id ?? '').trim();
+                if (!gid) {
+                    this._post({
+                        type: 'wb.discord.error',
+                        payload: { context: 'fetchChannels', message: 'guild_id 누락' },
+                    });
+                    break;
+                }
+                await this._pushDiscordChannels(gid);
+                break;
+            }
+            case 'wb.discord.setChannel': {
+                const channelId = String(msg.payload?.channel_id ?? '').trim();
+                try {
+                    const r = await this._botHttpFetch(
+                        '/api/v1/bridge/channel',
+                        { method: 'PUT', body: JSON.stringify({ channel_id: channelId }) },
+                    );
+                    this._post({
+                        type: 'wb.discord.setChannelResult',
+                        payload: { ok: true, ...r },
+                    });
+                    this.addActivity('ok', channelId
+                        ? `Discord Make 채널 저장: ${r.channel_name ?? channelId}`
+                        : 'Discord Make 채널 해제');
+                    // 저장 후 상태도 재푸시
+                    await this._pushDiscordStatus();
+                } catch (err) {
+                    this._post({
+                        type: 'wb.discord.setChannelResult',
+                        payload: { ok: false, error: String(err) },
+                    });
+                    this.addActivity('fail', `Discord 채널 저장 실패: ${err}`);
+                }
+                break;
+            }
+            case 'wb.discord.openInvite': {
+                try {
+                    // 1) 설정된 client_id 로 로컬 생성(봇 실행 불필요) → 2) 없으면 봇 API 폴백
+                    let url = this._buildLocalInviteUrl();
+                    if (!url) {
+                        const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
+                        url = (r?.invite_url as string | undefined) || '';
+                    }
+                    if (url) {
+                        await vscode.env.openExternal(vscode.Uri.parse(url));
+                        this.addActivity('info', '봇 초대 링크 열기');
+                    } else {
+                        this.addActivity('fail', '초대 URL 없음 — 설정 recoder.discord.clientId 를 넣거나 봇을 켜세요');
+                    }
+                } catch (err) {
+                    this.addActivity('fail', `봇 초대 실패: ${err}`);
+                }
+                break;
+            }
+
+            default:
+                console.warn('[WorkbenchPanel] Unknown message:', msg.type);
+        }
+    }
+
+    // ─────────────── Discord Bridge HTTP helpers ──────────────────────
+
+    /** 봇 HTTP 서버(127.0.0.1:8765 기본) 로 fetch.
+     *  recoder.bridge.httpPort / recoder.bridge.host / recoder.bridge.registrationKey 설정 사용.
+     */
+    protected async _botHttpFetch(path: string, init?: { method?: string; body?: string }): Promise<any> {
+        const cfg = vscode.workspace.getConfiguration('recoder.bridge');
+        const host = (cfg.get<string>('host') || '127.0.0.1').trim();
+        const port = cfg.get<number>('httpPort') ?? 8765;
+        const regKey = (cfg.get<string>('registrationKey') || '').trim();
+
+        const url = `http://${host}:${port}${path}`;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (regKey) headers['X-Registration-Key'] = regKey;
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        try {
+            const res = await fetch(url, {
+                method: init?.method ?? 'GET',
+                headers,
+                body: init?.body,
+                signal: controller.signal,
+            });
+            const text = await res.text();
+            let json: any = null;
+            try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
+            if (!res.ok) {
+                const msg = (json && (json.error || json.message)) || `HTTP ${res.status}`;
+                throw new Error(`${msg} (${res.status})`);
+            }
+            return json ?? {};
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    protected async _pushDiscordStatus(): Promise<void> {
+        try {
+            const r = await this._botHttpFetch('/api/v1/bridge/status');
+            this._post({
+                type: 'wb.discord.statusResult',
+                payload: { ok: true, ...r },
+            });
+        } catch (err) {
+            this._post({
+                type: 'wb.discord.statusResult',
+                payload: { ok: false, error: String(err) },
+            });
+        }
+    }
+
+    /** 설정 recoder.discord.clientId 로 봇 초대 URL 을 로컬 생성. 없으면 빈 문자열. */
+    protected _buildLocalInviteUrl(): string {
+        const clientId = vscode.workspace
+            .getConfiguration('recoder.discord')
+            .get<string>('clientId', '')
+            .trim();
+        if (!clientId) { return ''; }
+        const permissions = 2147485696; // 메시지 읽기/쓰기 + 슬래시 커맨드
+        return (
+            'https://discord.com/api/oauth2/authorize'
+            + `?client_id=${encodeURIComponent(clientId)}`
+            + `&permissions=${permissions}`
+            + '&scope=bot%20applications.commands'
+        );
+    }
+
+    protected async _pushDiscordInviteUrl(): Promise<void> {
+        // 설정된 client_id 가 있으면 봇 실행 없이 즉시 초대 URL 표시.
+        const local = this._buildLocalInviteUrl();
+        if (local) {
+            this._post({
+                type: 'wb.discord.inviteUrlResult',
+                payload: { ok: true, invite_url: local, client_id: 'config' },
+            });
+            return;
+        }
+        try {
+            const r = await this._botHttpFetch('/api/v1/bridge/invite-url');
+            this._post({
+                type: 'wb.discord.inviteUrlResult',
+                payload: { ok: true, ...r },
+            });
+        } catch (err) {
+            this._post({
+                type: 'wb.discord.inviteUrlResult',
+                payload: { ok: false, error: String(err) },
+            });
+        }
+    }
+
+    protected async _pushDiscordGuilds(): Promise<void> {
+        try {
+            const r = await this._botHttpFetch('/api/v1/bridge/guilds');
+            this._post({
+                type: 'wb.discord.guildsResult',
+                payload: { ok: true, ...r },
+            });
+        } catch (err) {
+            this._post({
+                type: 'wb.discord.guildsResult',
+                payload: { ok: false, error: String(err), guilds: [] },
+            });
+        }
+    }
+
+    protected async _pushDiscordChannels(guildId: string): Promise<void> {
+        try {
+            const r = await this._botHttpFetch(
+                `/api/v1/bridge/guilds/${encodeURIComponent(guildId)}/channels`,
+            );
+            this._post({
+                type: 'wb.discord.channelsResult',
+                payload: { ok: true, ...r },
+            });
+        } catch (err) {
+            this._post({
+                type: 'wb.discord.channelsResult',
+                payload: { ok: false, error: String(err), guild_id: guildId, channels: [] },
+            });
+        }
+    }
+
+    // ───────── Workbench 풀 구현 헬퍼 ─────────
+
+    /** 현재 열린 첫 워크스페이스 경로. 없으면 빈 문자열. */
+    protected _getWorkspacePath(): string {
+        const folders = vscode.workspace.workspaceFolders;
+        if (!folders || folders.length === 0) return '';
+        return folders[0].uri.fsPath;
+    }
+
+    /**
+     * Deploy Center 사전점검 — Core 의 진단/aws/ecs-ready 결과를 종합해
+     * webview 가 표시할 항목 리스트로 반환.
+     *
+     * 각 항목: { status: 'ok'|'fail'|'warn', name, msg, action?, action_label? }
+     */
+    protected async _collectDeployPrechecks(): Promise<Array<{
+        status: 'ok' | 'fail' | 'warn';
+        name: string;
+        msg?: string;
+        action?: string;
+        action_label?: string;
+    }>> {
+        const items: Array<{
+            status: 'ok' | 'fail' | 'warn';
+            name: string;
+            msg?: string;
+            action?: string;
+            action_label?: string;
+        }> = [];
+
+        // 1) 워크스페이스
+        const ws = this._getWorkspacePath();
+        items.push(ws
+            ? { status: 'ok', name: '워크스페이스 열림', msg: ws }
+            : { status: 'fail', name: '워크스페이스 없음', msg: 'VS Code 에서 프로젝트 폴더를 여세요.' }
+        );
+
+        // 2) Core diagnostics (Docker / AI)
+        try {
+            const diag = await this._apiClient.getDiagnostics();
+            if (diag) {
+                const d = diag as unknown as Record<string, string>;
+                items.push(d.docker_ready === 'ok'
+                    ? { status: 'ok', name: 'Docker daemon 동작' }
+                    : { status: 'fail', name: 'Docker daemon 미동작', msg: 'Docker Desktop 을 실행하세요.', action: 'docker_start', action_label: 'Docker Desktop 안내' }
+                );
+                items.push(d.ai_ready === 'ok'
+                    ? { status: 'ok', name: 'Bedrock AI 가용' }
+                    : { status: 'warn', name: 'Bedrock AI 미점검', msg: 'AI 분석 기능이 동작하지 않을 수 있습니다.', action: 'core_diagnostics', action_label: '진단 재실행' }
+                );
+            } else {
+                items.push({ status: 'warn', name: 'Core 진단 결과 없음', msg: '진단을 한 번 실행하세요.', action: 'core_diagnostics', action_label: '진단 실행' });
+            }
+        } catch {
+            items.push({ status: 'fail', name: 'Core 통신 실패', msg: '/api/diagnostics 응답 없음' });
+        }
+
+        // 3) AWS 자격증명
+        try {
+            const aws = await this._apiClient.getAwsStatus();
+            items.push(aws.ready
+                ? { status: 'ok', name: 'AWS 자격증명 유효', msg: aws.identity?.arn ?? '' }
+                : { status: 'fail', name: 'AWS 자격증명 미설정', msg: aws.message || 'STS 검증 실패', action: 'aws_configure', action_label: 'AWS 설정' }
+            );
+        } catch {
+            items.push({ status: 'warn', name: 'AWS 상태 확인 불가', msg: '/api/aws/status 응답 없음' });
+        }
+
+        // 4) GitHub 연결 (선택 — fail 대신 warn)
+        try {
+            const gh = await this._apiClient.getGithubStatus();
+            const connected = (gh as { status?: string; user?: string }).user
+                || (gh as { status?: string }).status === 'connected';
+            items.push(connected
+                ? { status: 'ok', name: 'GitHub 연결됨', msg: (gh as { user?: string }).user || '' }
+                : { status: 'warn', name: 'GitHub 미연결', msg: 'GitHub Actions/푸시 사용 시 필요', action: 'github_login', action_label: '로그인' }
+            );
+        } catch {
+            items.push({ status: 'warn', name: 'GitHub 상태 확인 불가' });
+        }
+
+        // 5) ECS 환경변수 (warn — 폼에 직접 입력해도 됨)
+        try {
+            const ecs = await this._apiClient.ecsDeployReady();
+            items.push(ecs.ready
+                ? { status: 'ok', name: 'ECS 배포 환경 준비됨' }
+                : { status: 'warn', name: 'ECS 환경변수 일부 미설정', msg: ecs.issues.slice(0, 2).join(' · ') }
+            );
+        } catch { /* skip */ }
+
+        return items;
+    }
+
+    /** GitHub 상태 조회 후 webview 에 push (chip-github 색상 갱신용). */
+    protected async _pushGithubStatus(): Promise<void> {
+        try {
+            const r = await this._apiClient.getGithubStatus(true);
+            this._post({
+                type: 'wb.gh.statusResult',
+                payload: r,
+            });
+        } catch { /* ignore */ }
+    }
+
+    protected _ecsStatusTimer: ReturnType<typeof setInterval> | null = null;
+
+    protected _startEcsStatusPolling(): void {
+        if (this._ecsStatusTimer) return;
+        const tick = async () => {
+            try {
+                const s = await this._apiClient.getEcsDeployStatus();
+                this._post({ type: 'wb.deploy.ecs.statusResult', payload: s });
+                const tail = s.log_tail || [];
+                if (tail.length) {
+                    this.pushLog('deploy', `[ECS:${s.stage}] ${tail[tail.length - 1]}`);
+                }
+                if (!s.running) {
+                    if (this._ecsStatusTimer) { clearInterval(this._ecsStatusTimer); this._ecsStatusTimer = null; }
+                    if (s.stage === 'done') {
+                        this.pushLog('deploy', `[OK] ECS 배포 완료 (image=${s.image_uri || '?'}, task=${s.task_def_arn || '?'})`);
+                        this.addActivity('ok', 'ECS 배포 완료');
+                    } else if (s.stage === 'failed') {
+                        this.pushLog('deploy', `[FAIL] ECS 배포 실패: ${s.error || ''}`);
+                        this.addActivity('fail', 'ECS 배포 실패');
+                    }
+                }
+            } catch { /* ignore */ }
+        };
+        this._ecsStatusTimer = setInterval(() => { void tick(); }, 3000);
+        void tick();
+    }
+
+    protected async _pushHealthAndCost(): Promise<void> {
+        try {
+            if (!this._coreManager.getSessionToken()) {
+                await this._coreManager.refreshToken();
+            }
+        } catch { /* ignore */ }
+        try {
+            const last = this._polling.getLastHealth();
+            if (last) {
+                this._post({ type: 'wb.healthUpdate', payload: last });
+            } else {
+                void this._polling.poll();
+            }
+        } catch { /* ignore */ }
+        try {
+            const cost = await this._apiClient.getCostSummary();
+            this._post({ type: 'wb.costUpdate', payload: cost });
+        } catch { /* ignore */ }
+        try {
+            let diag = await this._apiClient.getDiagnostics();
+            if (!diag && !this._diagnosticsInflight && !this._diagnosticsLoaded) {
+                this._diagnosticsInflight = true;
+                try {
+                    diag = await this._apiClient.runDiagnostics();
+                    this._diagnosticsLoaded = true;
+                } finally {
+                    this._diagnosticsInflight = false;
+                }
+            }
+            if (diag) {
+                this._post({ type: 'wb.diagnosticsUpdate', payload: diag });
+            }
+        } catch { /* ignore */ }
+    }
+
+    protected _startPolling(): void {
+        if (this._pollTimer) return;
+        this._pollTimer = setInterval(() => {
+            void this._pushHealthAndCost();
+        }, 5000);
+    }
+
+    protected _startWorkbenchPolling(): void {
+        if (this._workbenchPollTimer) return;
+        this._workbenchPollTimer = setInterval(() => {
+            void this._pollWorkbenchEvents();
+        }, 3000);
+    }
+
+    protected async _pushWorkbenchState(): Promise<void> {
+        try {
+            const state = await this._apiClient.workbenchState();
+            if (state && state.active_mode) {
+                this._workbenchMode = state.active_mode;
+                this._post({
+                    type: 'wb.workbenchState',
+                    payload: state,
+                });
+            }
+        } catch { /* ignore */ }
+    }
+
+    protected async _pollWorkbenchEvents(): Promise<void> {
+        try {
+            const result = await this._apiClient.workbenchEvents(this._workbenchEventsCursor);
+            const rawEvents = (result && Array.isArray(result.events)) ? result.events : [];
+            const events = rawEvents as unknown as Array<{
+                at: string;
+                kind: string;
+                source: string;
+                payload?: Record<string, unknown>;
+            }>;
+            const nextOffset = result?.next_offset;
+            if (typeof nextOffset === 'number') {
+                this._workbenchEventsCursor = nextOffset;
+            } else {
+                this._workbenchEventsCursor += events.length;
+            }
+            for (const ev of events) {
+                this._renderWorkbenchEvent(ev);
+            }
+        } catch { /* ignore */ }
+    }
+
+    protected _renderWorkbenchEvent(ev: {
+        at: string;
+        kind: string;
+        source: string;
+        payload?: Record<string, unknown>;
+    }): void {
+        const sourceLabel = ev.source === 'discord' ? 'Discord' : ev.source === 'vscode' ? 'VSCode' : ev.source;
+        let dot: 'ok' | 'warn' | 'fail' | 'info' = 'info';
+        let text = '';
+        switch (ev.kind) {
+            case 'mode_change': {
+                const mode = (ev.payload?.mode as string) || 'unknown';
+                this._workbenchMode = mode as typeof this._workbenchMode;
+                text = `${sourceLabel} → Workbench 모드 전환: ${mode.toUpperCase()}`;
+                dot = 'info';
+                break;
+            }
+            case 'preflight': {
+                const status = (ev.payload?.status as string) || '';
+                const ok = status === 'pass' || status === 'PASS' || ev.payload?.ok === true;
+                text = `${sourceLabel} → Preflight 실행 (${ok ? 'PASS' : (status || 'BLOCKED')})`;
+                dot = ok ? 'ok' : 'warn';
+                break;
+            }
+            case 'deploy': {
+                const id = (ev.payload?.deployment_id as string) || '?';
+                text = `${sourceLabel} → 배포 시작 (${id.slice(0, 8)})`;
+                dot = 'info';
+                break;
+            }
+            case 'rollback': {
+                const id = (ev.payload?.deployment_id as string) || '?';
+                text = `${sourceLabel} → Rollback 트리거 (${id.slice(0, 8)})`;
+                dot = 'warn';
+                break;
+            }
+            default:
+                text = `${sourceLabel} → ${ev.kind}`;
+                dot = 'info';
+        }
+        this.addActivity(dot, text);
+        this._post({
+            type: 'wb.workbenchEvent',
+            payload: {
+                at: ev.at,
+                kind: ev.kind,
+                source: ev.source,
+                mode: this._workbenchMode,
+                text,
+            },
+        });
+    }
+
+    protected _now(): string {
+        return new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+}

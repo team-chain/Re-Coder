@@ -3,7 +3,7 @@
  * Displays First Run diagnostic checklist with activation guides.
  */
 
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 
 export type ReadyState = string;
@@ -79,6 +79,10 @@ const CHECK_ITEMS: CheckItem[] = [
   },
 ];
 
+//: 자동 실행 등급(가역·로컬·무비용) — 코어/확장이 직접 고쳐 본다. 나머지는 설정 화면.
+const AUTO_FIXABLE = new Set(["aws_deploy_ready", "ai_ready", "docker_ready", "core_ready"]);
+function autoFixable(key: string): boolean { return AUTO_FIXABLE.has(key); }
+
 function getStateIcon(state: ReadyState): string {
   switch (state) {
     case "ready": return "✓";
@@ -103,9 +107,23 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
   diagnostics,
   onRetry,
 }) => {
-  const { postMessage } = useVSCodeApi();
+  const { postMessage, useMessage } = useVSCodeApi();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  //: 자가 조치 결과 — 항목별 "자동 조치함 / 자동 조치 실패" 한 줄. 자동으로 뭔가
+  //: 했으면 반드시 보여 준다(보드 카드 「자가 조치 레이어」: "자동 조치함" 표시).
+  const [heal, setHeal] = useState<Record<string, { message: string; failed?: boolean }>>({});
+  const [healing, setHealing] = useState<string | null>(null);
+  useMessage(useCallback(({ type, payload }) => {
+    if (type === "selfHeal") {
+      const p = payload as { key?: string; message?: string; failed?: boolean; pending?: boolean };
+      if (p?.key) { setHeal(cur => ({ ...cur, [p.key as string]: { message: p.message ?? "", failed: p.failed } })); }
+      //: pending — 앱은 띄웠고 데몬을 기다리는 중. 버튼은 "조치 중…" 으로 두고
+      //: 최종 결과(자동 조치함/실패)가 올 때 푼다 — 사용자가 또 누르지 않게.
+      if (p?.pending && p?.key) { setHealing(p.key); } else { setHealing(null); }
+    }
+    if (type === "diagnosticsUpdate") { setHealing(null); }
+  }, []));
 
   const handleRetry = () => {
     setRetrying(true);
@@ -275,10 +293,13 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
                     )}
                     {!isReady && (
                       <button
+                        disabled={healing === item.key}
                         onClick={(e) => {
                           e.stopPropagation();
+                          setHealing(item.key);
                           postMessage("webview.diagnostics.fix", { key: item.key });
                         }}
+                        title={autoFixable(item.key) ? "코어가 직접 고쳐 봅니다 — 안 되면 다음 행동을 안내합니다." : "설정 화면을 엽니다."}
                         style={{
                           background: "transparent",
                           border: "1px solid var(--vscode-panel-border, #444)",
@@ -286,13 +307,18 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
                           borderRadius: 3,
                           padding: "2px 8px",
                           fontSize: 10,
-                          cursor: "pointer",
+                          cursor: healing === item.key ? "wait" : "pointer",
                         }}
                       >
-                        Retry check
+                        {healing === item.key ? "조치 중…" : (autoFixable(item.key) ? "자동 조치" : "설정 열기")}
                       </button>
                     )}
                   </div>
+                  {heal[item.key] && (
+                    <div style={{ marginTop: 6, fontSize: 10.5, lineHeight: 1.5, color: heal[item.key].failed ? "var(--vscode-editorWarning-foreground, #ff9800)" : "var(--vscode-testing-iconPassed, #4caf50)" }}>
+                      {heal[item.key].message}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

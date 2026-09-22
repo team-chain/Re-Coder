@@ -34,21 +34,58 @@ def handler(event, context):
         item = common.authenticate(token)               # 인증
         sid = item["pk"].split("#", 1)[1]
         common.check_rate(sid, int(item.get("rpm", common.DEF_RPM)))  # 분당
-        common.check_quota_before(item)                  # 총/일/풀
+        common.check_quota_before(item)                  # 빠른 사전 차단(리셋 포함)
 
         body = json.loads(event.get("body") or "{}")
         messages = body.get("messages")
         if not messages:
             prompt = body.get("prompt", "")
             messages = [{"role": "user", "content": [{"text": prompt}]}]
-        result = common.invoke_bedrock(
-            messages,
-            model=body.get("model"),
-            system=body.get("system", ""),
-            max_tokens=int(body.get("max_tokens", 2048)),
-            output_schema=body.get("output_schema"),
+
+        # max_tokens 는 호출자 입력이다. 음수/0을 예약 계산에 넣으면 학생
+        # 카운터가 감소해 동시 요청이 한도를 우회할 수 있으므로 예약 전에 거부.
+        try:
+            requested_max_tokens = int(body.get("max_tokens", 2048))
+        except (TypeError, ValueError):
+            return common.resp(400, {
+                "error": "invalid_max_tokens",
+                "message": "max_tokens 는 1 이상의 정수여야 합니다.",
+            })
+        if requested_max_tokens < 1:
+            return common.resp(400, {
+                "error": "invalid_max_tokens",
+                "message": "max_tokens 는 1 이상의 정수여야 합니다.",
+            })
+        max_tokens = min(requested_max_tokens, common.MAX_TOKENS_CEILING)
+        system = body.get("system", "")
+
+        # **유료 호출 전에 예산을 원자적으로 선점**한다. 사후 기록만으로는
+        # 한도 직전의 큰 요청과 동시 요청 무리가 전부 통과한다.
+        budget = common.estimate_request_tokens(messages, system, max_tokens)
+        reservation = common.reserve_quota(item, budget)
+        # This durable transition happens immediately before dispatch. After it
+        # succeeds, any timeout/network error is ambiguous and must never be
+        # treated as proof that Bedrock consumed nothing.
+        common.mark_reservation_dispatched(reservation)
+        try:
+            result = common.invoke_bedrock(
+                messages,
+                model=body.get("model"),
+                system=system,
+                max_tokens=max_tokens,
+                output_schema=body.get("output_schema"),
+            )
+        except Exception as exc:
+            common.finalize_ambiguous_reservation(
+                reservation,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        cost = common.reconcile_usage(
+            reservation,
+            result["input_tokens"],
+            result["output_tokens"],
         )
-        cost = common.record_usage(sid, result["input_tokens"], result["output_tokens"])
         result["cost_usd"] = round(cost, 6)
         return common.resp(200, result)
 

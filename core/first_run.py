@@ -50,13 +50,8 @@ _BEDROCK_REGIONS = [
 
 # Preferred Bedrock models in priority order — Claude 4.x 우선, 없으면 3.x 폴백.
 _BEDROCK_MODEL_PRIORITY = [
-    "anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "anthropic.claude-sonnet-4-20250514-v1:0",
     "anthropic.claude-haiku-4-5-20251001-v1:0",
-    "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "anthropic.claude-3-sonnet-20240229-v1:0",
-    "anthropic.claude-3-5-haiku-20241022-v1:0",
-    "anthropic.claude-3-haiku-20240307-v1:0",
+    "anthropic.claude-sonnet-4-5-20250929-v1:0",
 ]
 
 
@@ -258,7 +253,10 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
 
             # ── 3차: cross-region inference profile 후보 (apac./us./eu. prefix) ──
             # primary_model 이 prefix 없는 raw model id 면 region 매핑 prefix 시도.
-            if primary_model and not primary_model.startswith(("us.", "apac.", "eu.")):
+            if primary_model and not primary_model.startswith(("us.", "apac.", "eu.", "global.")):
+                # Haiku 4.5 등 일부 모델은 apac. 없이 global. 프로필만 제공 → 먼저 시도
+                if _converse_ping(runtime, "global." + primary_model):
+                    return ReadyStatus.OK, "global." + primary_model, region, "bedrock", True
                 region_prefix_map = {
                     "ap-northeast-1": "apac.", "ap-northeast-2": "apac.",
                     "ap-northeast-3": "apac.", "ap-southeast-1": "apac.",
@@ -281,10 +279,8 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
                 fallback_chain = list(dict.fromkeys(SONNET_MODELS + HAIKU_MODELS))
             except Exception:
                 fallback_chain = [
-                    "anthropic.claude-3-haiku-20240307-v1:0",
-                    "anthropic.claude-3-sonnet-20240229-v1:0",
-                    "anthropic.claude-3-5-haiku-20241022-v1:0",
-                    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                    "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
                     "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
                     "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
                 ]
@@ -292,7 +288,7 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
                 if mid == primary_model:
                     continue  # 이미 시도
                 if _converse_ping(runtime, mid):
-                    is_xreg = mid.startswith(("us.", "apac.", "eu."))
+                    is_xreg = mid.startswith(("us.", "apac.", "eu.", "global."))
                     return ReadyStatus.OK, mid, region, "bedrock", is_xreg
 
             log.debug("Bedrock 모든 invoke ping 실패 — Gemini fallback 진행")

@@ -112,10 +112,14 @@ async def get_current_device(
     # 않으므로 예외를 삼키고 진행한다 — 이 경우 RLS 는 미적용이며,
     # ORM 레벨 org_id 필터링이 1차 방어선이 된다.
     # ──────────────────────────────────────────────────────────────────
+    # `SET LOCAL x = :param` 은 PostgreSQL 이 **바인드 파라미터를 허용하지
+    # 않아** 항상 문법 오류로 떨어진다 — 예외가 조용히 삼켜져 RLS 컨텍스트가
+    # 한 번도 설정되지 않는 형태였다. set_config(..., true) 가 SET LOCAL 과
+    # 같은 트랜잭션 범위 의미이면서 파라미터를 받는다.
     try:
         await db.execute(
-            text(f"SET LOCAL {_RLS_GUC_KEY} = :org_id"),
-            {"org_id": device.org_id},
+            text("SELECT set_config(:key, :org_id, true)"),
+            {"key": _RLS_GUC_KEY, "org_id": device.org_id},
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("RLS GUC set skipped (non-postgres backend?): %s", exc)
@@ -125,6 +129,47 @@ async def get_current_device(
         user_id=device.user_id,
         org_id=device.org_id,
         role=role,
+    )
+
+
+async def get_audit_sync_device(
+    raw_token: str = Depends(_extract_token),
+    db: AsyncSession = Depends(get_db),
+) -> DeviceContext:
+    """감사 큐 동기화 **전용** 인증 — LOST 디바이스도 식별한다.
+
+    일반 get_current_device 는 LOST 를 401 로 끊는다. 그러면 분실 디바이스의
+    pending 이벤트를 suspicious 로 표시해 받는 sync 분기가 영원히 실행되지
+    않는다. 이 의존성은 sync 라우트 하나에만 걸리므로, LOST 토큰이 얻는 것은
+    "자기 감사 큐 제출" 딱 하나다 — 다른 모든 API 는 여전히 거부한다.
+    """
+    svc = IdentityService(db)
+    device = await svc.validate_token_for_audit_sync(raw_token)
+    if device is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid, expired, or revoked device token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    from control_plane.services.org_service import OrgService
+    role = await OrgService(db).get_member_role(device.org_id, device.user_id)
+    if role is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Device user is not a member of the associated organization",
+        )
+
+    try:
+        await db.execute(
+            text("SELECT set_config(:key, :org_id, true)"),
+            {"key": _RLS_GUC_KEY, "org_id": device.org_id},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("RLS GUC set skipped (non-postgres backend?): %s", exc)
+
+    return DeviceContext(
+        device=device, user_id=device.user_id, org_id=device.org_id, role=role,
     )
 
 

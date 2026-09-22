@@ -245,6 +245,8 @@ export interface ResponseProposal {
   risk_level: RiskLevel;
   risk_reasons: string[];
   approval_level: ApprovalLevel;
+  /** DOUBLE_CONFIRM 서버 발급 일회용 토큰. 두 번째 인증 주체가 승인 시 제시. */
+  confirm_token?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,15 +333,46 @@ export interface AwsIdentity {
   user_id: string;
 }
 
+export interface AwsPermissionCheck {
+  inspected: boolean;
+  required_actions: string[];
+  missing_actions: string[];
+  excessive_policies: string[];
+  warnings: string[];
+}
+
 export interface AwsStatus {
   ready: boolean;
   identity?: AwsIdentity | null;
   region: string;
   profile: string;
   access_key_last4: string;
-  /** "recoder" | "aws_credentials_file" | "env" | "" */
+  /** "recoder" | "aws_credentials_file" | "env" | "aws_profile" | "assumed_role" | "" */
   storage: string;
   message: string;
+  permission_check?: AwsPermissionCheck | null;
+  /** 역할 모드(storage === "assumed_role")일 때만 채워진다. */
+  role_arn?: string;
+  expires_at?: string;
+}
+
+/** POST /api/aws/role/setup 응답 — ok=false 는 실패가 아니라 콘솔 폴백 분기다. */
+export interface AwsRoleSetupResponse {
+  ok: boolean;
+  mode: 'role' | 'console_fallback';
+  message: string;
+  denied_action: string;
+  role?: {
+    role_arn: string;
+    role_name: string;
+    created: boolean;
+    trust_updated: boolean;
+    policy_statements: number;
+    principal_arn: string;
+    expires_at: string;
+    warnings: string[];
+  } | null;
+  status?: AwsStatus | null;
 }
 
 export interface AwsConfigureInput {
@@ -350,6 +383,57 @@ export interface AwsConfigureInput {
   /** "recoder" (default) | "aws_credentials_file" */
   storage?: 'recoder' | 'aws_credentials_file';
   sessionToken?: string;
+}
+
+/** 저장 없이 STS 검증에만 쓰는 AWS 입력값. */
+export interface AwsConnectInput {
+  accessKeyId: string;
+  secretAccessKey: string;
+  region?: string;
+  sessionToken?: string;
+}
+
+/**
+ * GET /api/aws/policy 응답 — 콘솔에 붙여 넣을 최소권한 정책 + 따라 할 순서.
+ *
+ * 필드 이름은 코어 스키마(`AwsPolicyResponse`)와 1:1 로 맞춘다. 여기서
+ * camelCase 로 바꾸면 어느 쪽이 진짜인지 헷갈리고, 코어가 필드를 늘렸을 때
+ * 조용히 누락된다.
+ */
+export interface AwsPolicyResult {
+  policy: Record<string, unknown>;
+  /** 콘솔에 그대로 붙여넣을 문자열. 화면·복사 버튼이 쓰는 값. */
+  policy_json: string;
+  targets: string[];
+  action_count: number;
+  /** 계정/리전 자리표시자가 남아 있는가 — 남아 있으면 사용자가 채워야 한다. */
+  needs_manual_fill: boolean;
+  account_id?: string;
+  region?: string;
+  task_execution_role?: string;
+  task_role?: string;
+  cluster?: string;
+  service?: string;
+  ecr_repo?: string;
+  /** 학교(AWS Academy) 계정이면 IAM 사용자·정책을 만들 수 없어 안내가 갈린다. */
+  is_academy_account?: boolean;
+  steps?: string[];
+}
+
+/**
+ * POST /api/deploy/s3 응답. 필드 이름은 코어 스키마(`S3DeployResponse`)와 1:1.
+ */
+export interface S3DeployResult {
+  status: string;
+  bucket: string;
+  region: string;
+  /** 공개 URL. 이걸 못 보여 주면 사용자는 배포하고도 어디로 가야 할지 모른다. */
+  url: string;
+  uploaded: string[];
+  bucket_created: boolean;
+  /** index.html 이 없어 다른 HTML 을 복제했다면 그 원본 경로. */
+  index_copied_from?: string | null;
+  message: string;
 }
 
 export interface AwsEcrRepo {

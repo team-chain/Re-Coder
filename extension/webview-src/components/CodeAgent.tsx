@@ -3,8 +3,9 @@
  *  - 대상 폴더 지정 · 참고 파일 첨부 · 이어서 수정(멀티턴)
  *  - 파일별 적용 / 변경 보기(diff) / 시크릿 경고
  */
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import { DecisionOptionCards } from "./DecisionOptionCards";
 
 interface SecretWarning { rule: string; line: number; masked: string; }
 interface CodeOp {
@@ -12,41 +13,166 @@ interface CodeOp {
   file: string; language: string; content: string; rationale: string;
   secret_warnings?: SecretWarning[];
 }
-interface CodeResult { summary: string; ops: CodeOp[]; model: string; }
-interface Turn { id: number; prompt: string; status: "loading" | "done" | "error"; result?: CodeResult; error?: string; }
+interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; }
+interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
+interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
+//: 확정된 결정 하나. **`impact` 를 반드시 함께 보낸다.**
+//:
+//: 예전에는 여기서 impact 를 떨어뜨렸다. 화면(결정 모달)에는 영향 설명이
+//: 보이는데 서버로는 안 갔고, 코어의 `adr.normalize_decisions` 가
+//: `d.get("impact")` 로 읽으므로 항상 빈 문자열이 됐다. 그 결과 생성된 모든
+//: ADR 의 「## 영향」이 `(영향 미기재)` 로 남았다.
+export interface DecisionChoice {
+  id: string;
+  question: string;
+  chosen_key: string;
+  options: DecisionOption[];
+  impact: string;
+}
+
+//: 결정 목록 + 사용자의 선택 → 서버로 보낼 확정 결정 목록.
+//:
+//: 컴포넌트 밖의 순수 함수로 둔 이유: 이 변환이 ADR 내용을 결정하는데,
+//: 모달을 클릭해야만 도달하는 코드였어서 필드가 하나 빠져도 아무 테스트가
+//: 깨지지 않았다. 밖으로 꺼내 직접 검사한다.
+export function buildDecisionChoices(
+  decisions: Decision[],
+  selections: Record<string, string>,
+): DecisionChoice[] {
+  return decisions.map((decision) => ({
+    id: decision.id,
+    question: decision.question,
+    chosen_key: selections[decision.id],
+    options: decision.options,
+    //: 미기재를 빈 문자열로 정규화 — 코어가 `_clean` 으로 다시 다듬는다.
+    impact: decision.impact ?? "",
+  }));
+}
+//: 턴은 **요청 시점의 대상 폴더를 함께 기억**한다.
+//:
+//: 사용자가 결과를 받은 뒤 폴더 선택을 바꾸고 나서 "적용"을 누르면, 현재
+//: 선택된 폴더가 아니라 **그 결과를 만들 때 쓴 폴더**에 써야 한다. 코드는
+//: 폴더 A 의 맥락으로 생성됐고 ADR 번호도 A 기준으로 예약됐는데 B 에 쓰면
+//: 같은 이름의 파일·ADR 이 덮어써진다. 적용·모두 적용·diff·경로 표시가
+//: 전부 이 고정값을 쓴다.
+interface Turn { id: number; prompt: string; targetFolder: string; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; }
 interface CtxFile { path: string; content: string; }
+interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; }
+interface DecisionModal { requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; dropped: string[]; }
+
+//: 파일 하나의 적용 상태.
+//:
+//: "적용됨"은 **확장 호스트가 실제로 썼다고 확인해 준 뒤에만** 붙는다.
+//: 클릭 즉시 적용됨으로 바꾸면, 대상이 읽기 전용이라 쓰기가 실패해도
+//: 버튼이 비활성화된 채 "적용됨"으로 남아 재시도가 불가능해진다.
+type ApplyStatus = "pending" | "applied" | "failed";
 
 let _turnSeq = 1;
 
-export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
+//: 채팅 승인 카드에서 넘어온 요청. App 이 chat.actionAccepted 를 받아 내려준다.
+//: requestId 는 확장 호스트가 정한 값(Date.now())이라 이 컴포넌트의 턴 번호와 겹치지 않는다.
+export interface ExternalTurn { requestId: number; instruction: string; targetFolder: string; }
+
+export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null }> = ({ isActive, externalTurn }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [input, setInput] = useState("");
   const [targetFolder, setTargetFolder] = useState("");
   const [contextFiles, setContextFiles] = useState<CtxFile[]>([]);
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [applied, setApplied] = useState<Record<string, boolean>>({});
+  const [applyState, setApplyState] = useState<Record<string, ApplyStatus>>({});
+  const [applyErrors, setApplyErrors] = useState<Record<string, string>>({});
+  const [decisionModal, setDecisionModal] = useState<DecisionModal | null>(null);
+  const pendingRequestsRef = React.useRef<Record<number, PendingRequest>>({});
+  const handledExternalRef = React.useRef<number | null>(null);
+
+  //: 채팅에서 승인된 요청을 이 패널의 턴으로 등록하고 곧장 code.plan 을 보낸다.
+  //: 이후 결정 모달 → 생성 → diff → 적용은 직접 입력한 턴과 완전히 같은 경로다.
+  useEffect(() => {
+    if (!externalTurn) { return; }
+    if (handledExternalRef.current === externalTurn.requestId) { return; }
+    handledExternalRef.current = externalTurn.requestId;
+    const { requestId, instruction, targetFolder: folder } = externalTurn;
+    pendingRequestsRef.current[requestId] = { instruction, targetFolder: folder, contextFiles: [] };
+    setTargetFolder(folder);
+    setTurns((ts) => [...ts, { id: requestId, prompt: instruction, targetFolder: folder, status: "planning" }]);
+    postMessage("code.plan", { requestId, instruction, targetFolder: folder, contextFiles: [] });
+  }, [externalTurn, postMessage]);
 
   useMessage(useCallback((msg) => {
     const { type, payload } = msg;
     if (type === "code.result") {
       const res = payload as CodeResult;
+      const requestId = res.requestId;
       setTurns((ts) => {
         const copy = [...ts];
         for (let i = copy.length - 1; i >= 0; i--) {
-          if (copy[i].status === "loading") { copy[i] = { ...copy[i], status: "done", result: res }; break; }
+          if ((requestId === undefined || copy[i].id === requestId) && copy[i].status === "generating") {
+            copy[i] = { ...copy[i], status: "done", result: res };
+            break;
+          }
         }
         return copy;
       });
+    } else if (type === "code.applied") {
+      // 확장 호스트의 **쓰기 확인**. ackKey 가 있어야 어느 파일의 응답인지
+      // 알 수 있다 — 없는 메시지(모두 적용의 총계 등)는 상태를 바꾸지 않는다.
+      const ack = payload as { ackKey?: string; ok?: boolean };
+      if (ack.ackKey) {
+        const key = ack.ackKey;
+        setApplyState((s) => ({ ...s, [key]: ack.ok === false ? "failed" : "applied" }));
+        if (ack.ok !== false) {
+          setApplyErrors((e) => { const copy = { ...e }; delete copy[key]; return copy; });
+        }
+      }
     } else if (type === "code.error") {
       const m = (payload as { message?: string })?.message ?? String(payload);
+      // 적용 실패(ackKey 있음)는 **그 파일의 상태**만 바꾼다. 턴을 건드리면
+      // 진행 중인 다른 생성 턴이 엉뚱하게 에러로 뒤집힌다.
+      const ackKey = (payload as { ackKey?: string })?.ackKey;
+      if (ackKey) {
+        setApplyState((s) => ({ ...s, [ackKey]: "failed" }));
+        setApplyErrors((e) => ({ ...e, [ackKey]: m }));
+        return;
+      }
       setTurns((ts) => {
         const copy = [...ts];
+        const requestId = (payload as { requestId?: number })?.requestId;
         for (let i = copy.length - 1; i >= 0; i--) {
-          if (copy[i].status === "loading") { copy[i] = { ...copy[i], status: "error", error: m }; break; }
+          if ((requestId === undefined || copy[i].id === requestId) && (copy[i].status === "planning" || copy[i].status === "generating")) {
+            copy[i] = { ...copy[i], status: "error", error: m };
+            break;
+          }
         }
         return copy;
       });
+    } else if (type === "code.planResult") {
+      const plan = payload as { requestId?: number; decisions?: Decision[]; dropped?: string[] };
+      const requestId = plan.requestId;
+      if (requestId === undefined) { return; }
+      const request = pendingRequestsRef.current[requestId];
+      if (!request) { return; }
+      const dropped = Array.isArray(plan.dropped) ? plan.dropped : [];
+      let decisions = plan.decisions ?? [];
+      if (decisions.length === 0) {
+        //: [안전장치 이중화] 코어는 결정이 없어도 항상 확인 카드 1장을
+        //: 보장한다(FR-02-05). 그래도 빈 목록이 오면(구버전 코어 등) 예전에는
+        //: 여기서 **사람 승인 없이** 곧장 생성으로 직행했다 — AI-DLC 의 전제
+        //: (항상 사람 승인)가 웹뷰 한 곳의 분기로 깨질 수 있었다. 같은 모양의
+        //: 확인 카드를 만들어 모달을 띄운다. id 가 예약 접두사(__)라 코어
+        //: 확인 카드와 동일하게 ADR 로는 기록되지 않는다.
+        decisions = [{
+          id: "__confirm__",
+          question: `"${request.instruction.replace(/\s+/g, " ").slice(0, 60)}" — 이대로 진행할까요?`,
+          impact: "",
+          options: [{ key: "proceed", label: "진행", summary: "설계상 갈림길이 없어 요청대로 바로 반영합니다.", pros: ["추가 선택 불필요"], cons: [], recommended: true }],
+        }];
+      }
+      const selections: Record<string, string> = {};
+      for (const decision of decisions) {
+        selections[decision.id] = decision.options.find((option) => option.recommended)?.key ?? decision.options[0]?.key ?? "";
+      }
+      setDecisionModal({ requestId, decisions, selections, step: 0, dropped });
     } else if (type === "code.folderPicked" || type === "code.setTargetFolder") {
       setTargetFolder((payload as { folder?: string })?.folder ?? "");
     } else if (type === "code.contextAdded") {
@@ -62,31 +188,70 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
     const text = input.trim();
     if (!text) { return; }
     const id = _turnSeq++;
-    setTurns((ts) => [...ts, { id, prompt: text, status: "loading" }]);
-    postMessage("code.generate", { instruction: text, targetFolder, contextFiles });
+    pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles };
+    // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
+    // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
+    setTurns((ts) => [...ts, { id, prompt: text, targetFolder, status: "planning" }]);
+    postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
   }, [input, targetFolder, contextFiles, postMessage]);
 
-  const applyOp = useCallback((turnId: number, op: CodeOp) => {
-    postMessage("code.apply", { file: op.file, content: op.content, targetFolder });
-    setApplied((a) => ({ ...a, [`${turnId}:${op.file}`]: true }));
-  }, [postMessage, targetFolder]);
+  const chooseDecision = useCallback((key: string) => {
+    setDecisionModal((current) => current ? {
+      ...current,
+      selections: { ...current.selections, [current.decisions[current.step].id]: key },
+    } : current);
+  }, []);
+
+  const cancelDecision = useCallback(() => {
+    if (!decisionModal) { return; }
+    setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId
+      ? { ...turn, status: "error", error: "설계 결정을 취소해서 생성을 중단했습니다." }
+      : turn));
+    delete pendingRequestsRef.current[decisionModal.requestId];
+    setDecisionModal(null);
+  }, [decisionModal]);
+
+  const confirmDecisions = useCallback(() => {
+    if (!decisionModal) { return; }
+    const request = pendingRequestsRef.current[decisionModal.requestId];
+    if (!request) { setDecisionModal(null); return; }
+    const choices = buildDecisionChoices(decisionModal.decisions, decisionModal.selections);
+    setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId ? { ...turn, status: "generating" } : turn));
+    setDecisionModal(null);
+    postMessage("code.generate", { requestId: decisionModal.requestId, instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices });
+  }, [decisionModal, postMessage]);
+
+  const applyOp = useCallback((turn: Turn, op: CodeOp) => {
+    const key = `${turn.id}:${op.file}`;
+    // "적용 중"까지만 낙관한다. "적용됨"은 호스트의 code.applied 확인이
+    // 와야 붙는다 — 쓰기 실패가 성공으로 굳는 것을 막는다.
+    setApplyState((s) => ({ ...s, [key]: "pending" }));
+    setApplyErrors((e) => { const copy = { ...e }; delete copy[key]; return copy; });
+    postMessage("code.apply", { file: op.file, content: op.content, targetFolder: turn.targetFolder, ackKey: key });
+  }, [postMessage]);
 
   const applyAll = useCallback((turn: Turn) => {
     if (!turn.result) { return; }
-    postMessage("code.applyAll", { ops: turn.result.ops, targetFolder });
-    setApplied((a) => {
-      const copy = { ...a };
-      for (const op of turn.result!.ops) { copy[`${turn.id}:${op.file}`] = true; }
+    const ops = turn.result.ops.map((op) => ({
+      file: op.file, content: op.content, ackKey: `${turn.id}:${op.file}`,
+    }));
+    setApplyState((s) => {
+      const copy = { ...s };
+      for (const op of turn.result!.ops) { copy[`${turn.id}:${op.file}`] = "pending"; }
       return copy;
     });
-  }, [postMessage, targetFolder]);
+    setApplyErrors((e) => {
+      const copy = { ...e };
+      for (const op of turn.result!.ops) { delete copy[`${turn.id}:${op.file}`]; }
+      return copy;
+    });
+    postMessage("code.applyAll", { ops, targetFolder: turn.targetFolder });
+  }, [postMessage]);
 
-  const showDiff = useCallback((op: CodeOp) => {
-    postMessage("code.diff", { file: op.file, content: op.content, targetFolder });
-  }, [postMessage, targetFolder]);
-
-  if (!isActive) { return null; }
+  const showDiff = useCallback((turn: Turn, op: CodeOp) => {
+    postMessage("code.diff", { file: op.file, content: op.content, targetFolder: turn.targetFolder });
+  }, [postMessage]);
 
   const label: React.CSSProperties = {
     fontSize: 12, fontWeight: 600, color: "var(--vscode-foreground, #ddd)", marginBottom: 8,
@@ -104,6 +269,7 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
     border: "1px solid var(--vscode-input-border, #3f3f3f)", borderRadius: 4, padding: "3px 9px",
     fontSize: 11, cursor: "pointer",
   };
+  const isBusy = turns.some((turn) => turn.status === "planning" || turn.status === "generating");
 
   return (
     <div style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", margin: "16px 0 0", paddingTop: 14 }}>
@@ -114,7 +280,46 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
         .rc-cg-send { transition: filter .12s ease, transform .05s ease; }
         .rc-cg-send:hover:not(:disabled) { filter: brightness(1.12); }
         .rc-cg-send:active:not(:disabled) { transform: translateY(1px); }
+        .rc-decision-option:hover { border-color: var(--vscode-focusBorder, #3794ff) !important; }
       `}</style>
+      {decisionModal && (() => {
+        const decision = decisionModal.decisions[decisionModal.step];
+        const isLast = decisionModal.step === decisionModal.decisions.length - 1;
+        return (
+          <div role="dialog" aria-modal="true" aria-label="설계 결정" style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 18, background: "rgba(0,0,0,.58)", backdropFilter: "blur(2px)" }}>
+            <div style={{ width: "min(560px, 100%)", maxHeight: "calc(100vh - 36px)", overflowY: "auto", border: "1px solid var(--vscode-widget-border, #454545)", borderRadius: 10, background: "var(--vscode-editorWidget-background, #252526)", boxShadow: "0 18px 48px rgba(0,0,0,.45)" }}>
+              <div style={{ padding: "15px 18px 12px", borderBottom: "1px solid var(--vscode-panel-border, #3b3b3b)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ width: 4, height: 20, borderRadius: 2, background: "var(--vscode-textLink-foreground, #3794ff)" }} />
+                  <strong style={{ fontSize: 15 }}>설계 결정을 골라주세요</strong>
+                  <span style={{ marginLeft: "auto", borderRadius: 99, padding: "3px 8px", background: "var(--vscode-badge-background, #4d4d4d)", color: "var(--vscode-badge-foreground, #fff)", fontSize: 11, fontWeight: 600 }}>설계 결정 {decisionModal.step + 1}/{decisionModal.decisions.length}</span>
+                </div>
+                <div style={{ marginTop: 9, color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 11.5, lineHeight: 1.5 }}>코드 생성 전에 프로젝트 구조에 영향을 주는 선택을 확인합니다.</div>
+                {/* 코어가 형식 문제로 걸러낸 결정 — 안 보여주면 사용자에게는
+                    "AI 가 설계를 안 해준다"로 보인다(보드 이슈). */}
+                {decisionModal.dropped.length > 0 && (
+                  <div style={{ marginTop: 8, padding: "7px 9px", borderRadius: 5, background: "rgba(204,167,0,.10)", border: "1px solid rgba(204,167,0,.35)", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 10.5, lineHeight: 1.5 }}>
+                    <div style={{ fontWeight: 650 }}>제시됐지만 제외된 결정 {decisionModal.dropped.length}건</div>
+                    {decisionModal.dropped.map((reason, i) => <div key={i}>· {reason}</div>)}
+                  </div>
+                )}
+              </div>
+              <div style={{ padding: "18px" }}>
+                <h3 style={{ margin: 0, color: "var(--vscode-foreground, #eee)", fontSize: 18, lineHeight: 1.4 }}>{decision.question}</h3>
+                {decision.impact && <p style={{ margin: "7px 0 16px", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.5 }}>{decision.impact}</p>}
+                <DecisionOptionCards options={decision.options} selectedKey={decisionModal.selections[decision.id]} onSelect={chooseDecision} radioName={`decision-${decision.id}`} />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 18px 16px", borderTop: "1px solid var(--vscode-panel-border, #3b3b3b)" }}>
+                <button onClick={cancelDecision} style={{ ...ghostBtn, padding: "7px 11px" }}>취소</button>
+                {decisionModal.step > 0 && <button onClick={() => setDecisionModal((current) => current ? { ...current, step: current.step - 1 } : current)} style={{ ...ghostBtn, padding: "7px 11px" }}>이전</button>}
+                <button onClick={() => isLast ? confirmDecisions() : setDecisionModal((current) => current ? { ...current, step: current.step + 1 } : current)} disabled={!decisionModal.selections[decision.id]} style={{ ...primaryBtn, marginLeft: "auto", padding: "8px 13px", opacity: decisionModal.selections[decision.id] ? 1 : .5 }}>
+                  {isLast ? "이 선택으로 생성 →" : "다음 결정 →"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
         <span style={{ width: 3, height: 14, borderRadius: 2, background: "var(--vscode-textLink-foreground, #3794ff)" }} />
         <span style={{ fontSize: 13, fontWeight: 600, color: "var(--vscode-foreground, #eee)", letterSpacing: 0.2 }}>코드 작성 및 수정</span>
@@ -123,6 +328,11 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
       <div style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", marginBottom: 10, lineHeight: 1.5 }}>
         자연어로 새 코드를 만들거나 기존 코드를 고칩니다. 생성 결과는 파일별로 확인 후 적용됩니다.
       </div>
+      {!isActive && (
+        <div style={{ marginBottom: 10, border: "1px solid var(--vscode-inputValidation-warningBorder, #cca700)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", borderRadius: 5, padding: "7px 9px", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.45 }}>
+          AI 연결이 아직 준비되지 않았습니다. 요청은 입력할 수 있지만, 실제 처리는 Core/AI 연결 후에 가능합니다.
+        </div>
+      )}
 
       {/* 대상 폴더 · 참고 파일 */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: contextFiles.length ? 6 : 8, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
@@ -153,23 +363,33 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
             {turn.prompt}
           </div>
 
-          {turn.status === "loading" && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--vscode-descriptionForeground, #888)", fontSize: 11, padding: "2px 0 6px" }}>
-              <div style={{ width: 11, height: 11, border: "2px solid #3f3f3f", borderTopColor: "var(--vscode-progressBar-background, #3794ff)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-              <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-              생성 중…
-            </div>
+          {(turn.status === "planning" || turn.status === "generating") && (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--vscode-descriptionForeground, #888)", fontSize: 11, padding: "2px 0 6px" }}>
+                <div style={{ width: 11, height: 11, border: "2px solid #3f3f3f", borderTopColor: "var(--vscode-progressBar-background, #3794ff)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                {turn.status === "planning" ? "설계 결정을 준비하는 중…" : "코드 생성 중…"}
+              </div>
+            </>
           )}
           {turn.status === "error" && (
             <div style={{ background: "var(--vscode-inputValidation-errorBackground, rgba(239,68,68,0.1))", border: "1px solid var(--vscode-inputValidation-errorBorder, #ef4444)", borderRadius: 4, padding: "7px 10px", color: "var(--vscode-errorForeground, #f48771)", fontSize: 11 }}>{turn.error}</div>
           )}
           {turn.status === "done" && turn.result && (
             <div>
-              {turn.result.ops.length > 1 && (
-                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
-                  <button onClick={() => applyAll(turn)} style={primaryBtn}>모두 적용</button>
-                </div>
-              )}
+              {turn.result.ops.length > 1 && (() => {
+                const keys = turn.result!.ops.map((op) => `${turn.id}:${op.file}`);
+                const anyPending = keys.some((k) => applyState[k] === "pending");
+                const allApplied = keys.every((k) => applyState[k] === "applied");
+                return (
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+                    <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied}
+                      style={{ ...primaryBtn, ...(anyPending || allApplied ? { opacity: 0.55, cursor: "default" } : {}) }}>
+                      {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : "모두 적용"}
+                    </button>
+                  </div>
+                );
+              })()}
               {turn.result.ops.map((op, i) => {
                 const key = `${turn.id}:${op.file}`;
                 const warned = !!(op.secret_warnings && op.secret_warnings.length);
@@ -181,17 +401,22 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
                           {op.action === "create" ? "새 파일" : "수정"}
                         </span>
                         <span style={{ fontSize: 11.5, fontFamily: "var(--vscode-editor-font-family, monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {targetFolder ? `${targetFolder}/${op.file}` : op.file}
+                          {turn.targetFolder ? `${turn.targetFolder}/${op.file}` : op.file}
                         </span>
                       </span>
                       <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
-                        {op.action === "edit" && <button onClick={() => showDiff(op)} style={ghostBtn}>변경 보기</button>}
-                        <button onClick={() => applyOp(turn.id, op)} disabled={applied[key]}
-                          style={{ ...primaryBtn, padding: "3px 11px", fontSize: 11, ...(applied[key] ? { background: "transparent", color: "#6cc070", cursor: "default" } : {}) }}>
-                          {applied[key] ? "적용됨" : "적용"}
+                        {op.action === "edit" && <button onClick={() => showDiff(turn, op)} style={ghostBtn}>변경 보기</button>}
+                        <button onClick={() => applyOp(turn, op)} disabled={applyState[key] === "pending" || applyState[key] === "applied"}
+                          style={{ ...primaryBtn, padding: "3px 11px", fontSize: 11, ...(applyState[key] === "applied" ? { background: "transparent", color: "#6cc070", cursor: "default" } : applyState[key] === "pending" ? { opacity: 0.6, cursor: "default" } : {}) }}>
+                          {applyState[key] === "applied" ? "적용됨" : applyState[key] === "pending" ? "적용 중…" : applyState[key] === "failed" ? "다시 적용" : "적용"}
                         </button>
                       </span>
                     </div>
+                    {applyState[key] === "failed" && applyErrors[key] && (
+                      <div style={{ background: "var(--vscode-inputValidation-errorBackground, rgba(239,68,68,0.1))", borderTop: "1px solid var(--vscode-inputValidation-errorBorder, #ef4444)", padding: "5px 8px", fontSize: 10.5, color: "var(--vscode-errorForeground, #f48771)" }}>
+                        {applyErrors[key]}
+                      </div>
+                    )}
                     <pre style={{ margin: 0, background: "var(--vscode-textCodeBlock-background, #1e1e1e)", color: "var(--vscode-editor-foreground, #ddd)", padding: "6px 8px", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 10.5, maxHeight: 150, overflow: "auto", whiteSpace: "pre", lineHeight: 1.5 }}>
                       {op.content.length > 1000 ? op.content.slice(0, 1000) + "\n…" : op.content}
                     </pre>
@@ -215,10 +440,11 @@ export const CodeAgent: React.FC<{ isActive: boolean }> = ({ isActive }) => {
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { send(); } }}
         placeholder={turns.length ? "이어서 수정 요청 (예: 버튼 색을 파랑으로)" : "만들거나 고칠 내용을 입력 (예: SQLite 게시판 REST API를 FastAPI로 만들어줘)"}
-        style={{ width: "100%", boxSizing: "border-box", minHeight: 130, background: "var(--vscode-input-background, #252526)", color: "var(--vscode-input-foreground, #ccc)", border: "1px solid var(--vscode-input-border, #3f3f3f)", borderRadius: 6, padding: "10px 12px", fontSize: 12.5, fontFamily: "var(--vscode-font-family, sans-serif)", resize: "vertical", outline: "none", lineHeight: 1.6 }}
+        disabled={isBusy}
+        style={{ width: "100%", boxSizing: "border-box", minHeight: 130, background: "var(--vscode-input-background, #252526)", color: "var(--vscode-input-foreground, #ccc)", border: "1px solid var(--vscode-input-border, #3f3f3f)", borderRadius: 6, padding: "10px 12px", fontSize: 12.5, fontFamily: "var(--vscode-font-family, sans-serif)", resize: "vertical", outline: "none", lineHeight: 1.6, opacity: isBusy ? .6 : 1 }}
       />
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
-        <button onClick={send} disabled={!input.trim()} className="rc-cg-send" style={{ ...primaryBtn, padding: "7px 16px", borderRadius: 6, opacity: input.trim() ? 1 : 0.5, cursor: input.trim() ? "pointer" : "not-allowed" }}>
+        <button onClick={send} disabled={!input.trim() || isBusy} className="rc-cg-send" style={{ ...primaryBtn, padding: "7px 16px", borderRadius: 6, opacity: input.trim() && !isBusy ? 1 : 0.5, cursor: input.trim() && !isBusy ? "pointer" : "not-allowed" }}>
           보내기
         </button>
         <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #777)" }}>Ctrl+Enter 로 전송</span>

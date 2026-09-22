@@ -52,6 +52,8 @@ hidden_imports = [
     # ReCoder 모듈 (동적 import 사용)
     "analyzer",
     "code_agent",
+    "adr",           # 설계 결정 정규화 + ADR 영속화 (code_agent 가 최상위에서 import)
+    "aws_policy",    # 최소권한 IAM 권한표 (api/routes/aws.py 가 최상위에서 import)
     "infra_agent",
     "git_agent",
     "local_deploy_agent",
@@ -67,8 +69,8 @@ hidden_imports = [
     "orchestrator",
     "llm.router",
     "llm.base",
-    "llm.bedrock",
-    "llm.gemini",
+    "llm.bedrock_provider",
+    "llm.gemini_provider",
     "registries.command_registry",
     "collectors",
 ]

@@ -12,6 +12,23 @@ from typing import Optional
 
 from schemas import ProjectProfile, ProjectStack
 
+
+def _detect_health_path(workspace: Path, stack: ProjectStack) -> str:
+    """스택 관례 + 실제 라우트 파일로 헬스 경로를 정한다.
+
+    infra_agent 가 유일한 구현이다. import 가 실패해도 스캔 자체가 죽지는
+    않아야 하므로 기본값으로 물러선다.
+    """
+    try:
+        try:
+            from infra_agent import discover_health_path  # type: ignore
+        except ImportError:
+            from core.infra_agent import discover_health_path  # type: ignore
+    except Exception:  # noqa: BLE001 - 스캔이 이것 때문에 실패하면 안 된다
+        return "/health"
+    value = getattr(stack, "value", stack)
+    return discover_health_path(str(workspace), str(value))
+
 RECODER_HOME = Path.home() / ".recoder"
 
 
@@ -52,8 +69,8 @@ class ProjectScanner:
         # Default Run Command 추정
         default_run_command = self._detect_run_command(workspace, stack)
 
-        # Default Port 추정
-        default_port = self._detect_port(stack)
+        # Default Port 추정 — 스택 기본값보다 프로젝트가 실제로 쓰는 값이 우선
+        default_port = self._detect_port(stack, workspace)
 
         # Dockerfile 경로 감지
         dockerfile_path = ""
@@ -78,7 +95,11 @@ class ProjectScanner:
             package_manager=package_manager,
             default_run_command=default_run_command,
             default_port=default_port,
-            health_check_path="/health",
+            #: **하드코딩하지 않는다.** 예전에는 여기가 항상 "/health" 라,
+            #: Next.js 처럼 /api/ 아래에 라우트를 두는 스택에서 생성된
+            #: Dockerfile/compose 가 없는 경로를 찔러 컨테이너가 영원히
+            #: unhealthy 가 됐다. 판단은 infra_agent 한 곳에 모여 있다.
+            health_check_path=_detect_health_path(workspace, stack),
             dockerfile_path=dockerfile_path,
             compose_path=compose_path,
             deployment_target="local_docker",
@@ -195,22 +216,46 @@ class ProjectScanner:
         elif stack == ProjectStack.PYTHON_FLASK:
             return "python app.py"
         elif stack == ProjectStack.NODE_EXPRESS:
-            return "node index.js"
+            # 진입점을 추측하지 않고 package.json(start/main)·존재하는 파일에서 읽는다.
+            # 예전엔 무조건 index.js 라 `main: src/app.js` 앱은 Dockerfile CMD 가
+            # 없는 파일을 가리켰다(실기기 검증 C2).
+            entry, _port = self._node_entry_and_port(workspace)
+            return f"node {entry}" if entry else "node index.js"
         elif stack == ProjectStack.NODE_NEXT:
             return "npm run dev"
         else:
             return ""
 
-    def _detect_port(self, stack: ProjectStack) -> int:
-        """default_port 추정"""
+    def _detect_port(self, stack: ProjectStack, workspace: Optional[Path] = None) -> int:
+        """default_port 추정 — Node 는 소스의 listen(NNNN)/PORT || NNNN 을 먼저 본다."""
         if stack == ProjectStack.PYTHON_FASTAPI:
             return 8000
         elif stack == ProjectStack.PYTHON_FLASK:
             return 5000
         elif stack in [ProjectStack.NODE_EXPRESS, ProjectStack.NODE_NEXT]:
+            if workspace is not None:
+                _entry, port = self._node_entry_and_port(workspace)
+                if port:
+                    return port
             return 3000
         else:
             return 3000
+
+    @staticmethod
+    def _node_entry_and_port(workspace: Path) -> tuple[Optional[str], Optional[int]]:
+        """infra_agent 의 감지 로직을 그대로 쓴다 — Dockerfile·플랜·프로필이 같은 값을 보게."""
+        try:
+            from infra_agent import _detect_node_entry_and_port  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core.infra_agent import _detect_node_entry_and_port  # type: ignore
+        try:
+            package = json.loads((workspace / "package.json").read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            package = {}
+        try:
+            return _detect_node_entry_and_port(workspace, package if isinstance(package, dict) else {})
+        except Exception:
+            return None, None
 
 
 _scanner_instance: Optional[ProjectScanner] = None

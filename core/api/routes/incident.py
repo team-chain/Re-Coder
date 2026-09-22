@@ -194,11 +194,21 @@ async def run_rca(
         )
 
     # LLM 클라이언트 (선택)
+    #
+    # [주의] 예전에는 `from core.llm_router import LLMRouter` 를 했는데 그
+    # 모듈은 **존재한 적이 없다**(실제는 core/llm/provider_router.py). 예외를
+    # 조용히 삼키는 아래 except 때문에 use_llm=true 여도 항상 휴리스틱으로
+    # 빠졌고, 아무도 눈치채지 못했다 — 보드 이슈 「LLM 기반 RCA 가 절대
+    # 실행되지 않음」. run_rca 가 기대하는 인터페이스는 `await complete(prompt)`
+    # 하나이므로 LLMProviderRouter 가 그대로 맞는다.
     llm_client = None
     if request.use_llm:
         try:
-            from core.llm_router import LLMRouter
-            llm_client = LLMRouter()
+            try:
+                from llm.provider_router import LLMProviderRouter
+            except ImportError:
+                from core.llm.provider_router import LLMProviderRouter  # type: ignore
+            llm_client = LLMProviderRouter()
         except Exception as exc:
             logger.warning("LLM 클라이언트 초기화 실패, 휴리스틱으로 대체: %s", exc)
 

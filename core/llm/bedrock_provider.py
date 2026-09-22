@@ -53,49 +53,51 @@ logger = log  # alias for legacy callers
 # 명시 지정: BEDROCK_PRIMARY_MODEL_IDENTIFIER=<model_id> 환경변수.
 DEFAULT_PRIMARY_MODEL = os.getenv(
     "BEDROCK_PRIMARY_MODEL_IDENTIFIER",
-    "anthropic.claude-3-5-sonnet-20241022-v2:0",  # on-demand OK, 시연 안정
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0",  # Claude 3.x Bedrock EOL(2026-09) → Haiku 4.5 global profile
 )
 DEFAULT_SECONDARY_MODEL = os.getenv(
     "BEDROCK_SECONDARY_MODEL_IDENTIFIER",
-    "anthropic.claude-3-sonnet-20240229-v1:0",
+    "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
 )
 DEFAULT_FAST_MODEL = os.getenv(
     "BEDROCK_FAST_MODEL_IDENTIFIER",
-    "anthropic.claude-3-haiku-20240307-v1:0",
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0",
 )
 BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")
 
-# Sonnet / Haiku 폴백 체인.
+# 품질(PRIMARY) / 속도(FAST) 폴백 체인.
 #
 # Claude 4.x 는 cross-region inference profile 필수 (on-demand throughput 불가).
 # Profile 이 활성화되지 않은 계정에서는 ValidationException 이 발생하므로,
 # **on-demand 가능한 3.x 모델을 우선순위 1에 둔다** — 시연 / 일반 사용자 환경에서
 # 즉시 동작 보장. 명시적으로 cross-region profile 을 쓰려면 환경변수로 지정:
 #   BEDROCK_PRIMARY_MODEL_IDENTIFIER=apac.anthropic.claude-sonnet-4-5-20250929-v1:0
-SONNET_MODELS: list[str] = [
-    # 패치/분석 1순위 — 검증된 Haiku 4.5 (diff 생성 가능). .env 와 동일 모델.
+#
+# ※ 이름 주의 — 예전 이름은 SONNET_MODELS 였지만 **1순위가 Haiku 4.5** 라
+#   이름이 내용을 속였다("Sonnet 으로 바꿨다"고 믿어도 Haiku 가 돌 수 있음).
+#   실체는 모델 등급이 아니라 **역할 티어**이므로 PRIMARY/FAST 로 부른다.
+#   순서는 가용성 검증을 거친 기존 그대로다(동작 변화 없음).
+PRIMARY_MODELS: list[str] = [
+    # Claude 3.x 는 Bedrock 에서 EOL(3 Haiku: 2026-09-10, 3.5 Sonnet: 2026-07-30) → 제거.
+    # 서울(ap-northeast-2)은 Haiku 4.5 apac. 프로필이 없음 → global. 사용.
     "global.anthropic.claude-haiku-4-5-20251001-v1:0",
-    # 가장 보장된 on-demand 모델 (ap-northeast-2 / us-east-1 등 거의 모든 리전)
-    "anthropic.claude-3-haiku-20240307-v1:0",   # 폴백 (구형 — diff 생성 약함)
-    "anthropic.claude-3-sonnet-20240229-v1:0",
-    "anthropic.claude-3-5-haiku-20241022-v1:0",
-    "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    # Claude 4.x cross-region profile (계정에 활성화돼있을 때만 동작)
+    # 2순위: APAC 리전(서울 등)에서 호출 가능한 Sonnet 4.5. us. 프로필은 US 리전 전용이라 서울에서는 ValidationException
     "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "apac.anthropic.claude-sonnet-4-20250514-v1:0",
-    "us.anthropic.claude-sonnet-4-20250514-v1:0",
-]
-
-# Haiku 폴백 체인 — on-demand 가능 모델 우선
-HAIKU_MODELS: list[str] = [
-    "global.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "anthropic.claude-3-haiku-20240307-v1:0",
-    "anthropic.claude-3-5-haiku-20241022-v1:0",
-    # Claude 4.x cross-region profile
-    "apac.anthropic.claude-haiku-4-5-20251001-v1:0",
     "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 ]
+
+# 속도 티어 폴백 체인 — on-demand 가능 모델 우선
+FAST_MODELS: list[str] = [
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+]
+
+# 하위 호환 별칭 — provider_router / first_run 이 옛 이름으로 import 한다.
+# 새 코드는 PRIMARY_MODELS / FAST_MODELS 를 쓸 것.
+SONNET_MODELS = PRIMARY_MODELS
+HAIKU_MODELS = FAST_MODELS
 
 COST_PER_1K_TOKENS: dict[str, dict[str, float]] = {
     # Claude 4.x (대략 3.x 와 동등 — 정확한 가격은 AWS 공식 페이지 참조)
@@ -105,7 +107,7 @@ COST_PER_1K_TOKENS: dict[str, dict[str, float]] = {
     "apac.anthropic.claude-sonnet-4-20250514-v1:0":   {"input": 0.003,   "output": 0.015},
     "us.anthropic.claude-sonnet-4-20250514-v1:0":     {"input": 0.003,   "output": 0.015},
     "anthropic.claude-sonnet-4-20250514-v1:0":        {"input": 0.003,   "output": 0.015},
-    "apac.anthropic.claude-haiku-4-5-20251001-v1:0":  {"input": 0.001,   "output": 0.005},
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0": {"input": 0.001,   "output": 0.005},
     "us.anthropic.claude-haiku-4-5-20251001-v1:0":    {"input": 0.001,   "output": 0.005},
     "anthropic.claude-haiku-4-5-20251001-v1:0":       {"input": 0.001,   "output": 0.005},
     # Claude 3.x — 폴백 (on-demand 가능)

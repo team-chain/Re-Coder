@@ -95,7 +95,13 @@ function layerOf(filename: string): string {
     return 'other';
 }
 
-function stripJs(src: string): string {
+/**
+ * 주석을 지운다. keepStrings=false 면 문자열 내용도 공백으로 바꾼다(함수 정의 탐지용 —
+ * 문자열 안의 "function" 이 정의로 잡히지 않게). import 경로를 읽을 때는 반드시
+ * keepStrings=true — 문자열을 지우면 `from "./x"` 가 `from "    "` 가 돼 모든 JS/TS
+ * import 가 사라지고, 파일 전부가 "아무도 import 안 함(고립)" 으로 나온다(실기기 재현).
+ */
+function stripJs(src: string, keepStrings = false): string {
     const out: string[] = []; let i = 0; const n = src.length;
     while (i < n) {
         const two = src.substr(i, 2); const c = src[i];
@@ -104,7 +110,9 @@ function stripJs(src: string): string {
         if (c === '"' || c === "'" || c === '`') {
             const q = c; let j = i + 1;
             while (j < n) { if (src[j] === '\\') { j += 2; continue; } if (src[j] === q) { j++; break; } j++; }
-            for (let k = i; k < j; k++) { out.push(src[k] === '\n' ? '\n' : ' '); } i = j; continue;
+            if (keepStrings) { out.push(src.slice(i, j)); }
+            else { for (let k = i; k < j; k++) { out.push(src[k] === '\n' ? '\n' : ' '); } }
+            i = j; continue;
         }
         out.push(c); i++;
     }
@@ -273,7 +281,7 @@ function htmlRefs(html: string): string[] {
 }
 
 function jsImportRefs(src: string): string[] {
-    const s = stripJs(src); const refs: string[] = []; let m: RegExpExecArray | null;
+    const s = stripJs(src, true); const refs: string[] = []; let m: RegExpExecArray | null;
     let re = /\bimport\b[^;]*?\bfrom\s*["']([^"']+)["']/g;
     while ((m = re.exec(s))) { refs.push(m[1]); }
     re = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;

@@ -1,7 +1,8 @@
 # ==============================================================================
 # ReCoder File Template: Dockerfile.python-fastapi
 # Production-grade Dockerfile for Python / FastAPI applications
-# Placeholders: {{APP_NAME}}, {{PYTHON_VERSION}}, {{PORT}}, {{APP_MODULE}}
+# Placeholders: {{APP_NAME}}, {{PYTHON_VERSION}}, {{PORT}}, {{APP_TARGET}},
+#               {{HEALTH_CHECK_PATH}}
 # ==============================================================================
 
 # ---- Build stage ----
@@ -15,10 +16,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies into a target directory for copying
-COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --prefix=/install --no-cache-dir -r requirements.txt
+# requirements.txt와 pyproject.toml 프로젝트를 모두 지원한다.
+COPY . .
+# mkdir 를 먼저 한다. `pip install --prefix=/install` 은 **설치할 패키지가 있을 때만**
+# 그 디렉터리를 만든다. 의존성이 없는 프로젝트(표준 라이브러리만 쓰는 앱, 주석뿐인
+# requirements.txt, 막 시작한 프로젝트)에서는 /install 이 생기지 않고, 아래
+# `COPY --from=builder /install` 이 "not found" 로 빌드를 통째로 실패시킨다.
+# 빈 디렉터리를 복사하는 것은 무해하다.
+RUN mkdir -p /install && pip install --upgrade pip && \
+    if [ -f requirements.txt ]; then \
+        pip install --prefix=/install --no-cache-dir -r requirements.txt; \
+    elif [ -f pyproject.toml ]; then \
+        pip install --prefix=/install --no-cache-dir .; \
+    fi
 
 # ---- Runtime stage ----
 FROM python:{{PYTHON_VERSION}}-slim AS runtime
@@ -45,8 +55,11 @@ USER appuser
 EXPOSE {{PORT}}
 
 # Health check
+# curl 을 쓰지 않는다 — curl 은 builder 스테이지에만 설치되고 runtime
+# (python:slim) 에는 없다. curl 로 두면 컨테이너가 항상 UNHEALTHY 가 되고
+# ECS 가 태스크를 무한 재시작한다. python 은 이 이미지에 반드시 있다.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:{{PORT}}/health || exit 1
+    CMD python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:{{PORT}}{{HEALTH_CHECK_PATH}}', timeout=5).status == 200 else 1)" || exit 1
 
 # Start application with uvicorn
-CMD ["uvicorn", "{{APP_MODULE}}:app", "--host", "0.0.0.0", "--port", "{{PORT}}", "--workers", "2"]
+CMD ["uvicorn", "{{APP_TARGET}}", "--host", "0.0.0.0", "--port", "{{PORT}}", "--workers", "2"]
