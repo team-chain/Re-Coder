@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import {
     SidebarState,
@@ -1815,8 +1816,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const docs = this._codegenDocs;
             vscode.workspace.registerTextDocumentContentProvider('recoder-codegen', {
                 provideTextDocumentContent(uri: vscode.Uri): string {
-                    return docs.get(uri.path.replace(/^\//, '')) ?? '';
+                    return docs.get(uri.toString()) ?? '';
                 },
+            });
+            vscode.workspace.onDidCloseTextDocument((document) => {
+                if (document.uri.scheme === 'recoder-codegen') {
+                    docs.delete(document.uri.toString());
+                }
             });
             this._codegenProviderRegistered = true;
         }
@@ -1825,12 +1831,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const safe = file.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
         if (!safe) { return; }
         const fileUri = vscode.Uri.joinPath(root, safe);
-        this._codegenDocs.set(safe, content);
-        const proposedUri = vscode.Uri.parse(`recoder-codegen:/${safe}`);
+        // VS Code caches an open virtual document by URI. Reusing a filename
+        // leaves its first proposal visible, even after the backing Map changes.
+        // Immutable snapshots also keep older open proposals stable for review.
+        const revision = createHash('sha256').update(JSON.stringify([fileUri.toString(), content])).digest('hex');
+        const encodedPath = safe.split('/').map(encodeURIComponent).join('/');
+        const proposedUri = vscode.Uri.parse(`recoder-codegen:/${revision}/${encodedPath}`);
+        this._codegenDocs.set(proposedUri.toString(), content);
         try {
             const exists = await this._fileExists(fileUri);
-            const leftUri = exists ? fileUri : vscode.Uri.parse(`recoder-codegen:/(빈 파일)`);
-            if (!exists) { this._codegenDocs.set('(빈 파일)', ''); }
+            const leftUri = exists ? fileUri : vscode.Uri.parse('recoder-codegen:/empty');
             await vscode.commands.executeCommand('vscode.diff', leftUri, proposedUri, `ReCoder 제안: ${safe}`);
         } catch (err) {
             this.postMessage('code.error', { message: `diff 열기 실패: ${err}` });
