@@ -293,7 +293,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           //: 어디서도 확인할 수 없다(실기기 검증 C2). 원문을 그대로 보인다.
           const detail = (r.stderr || r.error || r.message || r.stdout || "").trim();
           const tail = detail.split("\n").filter(Boolean).slice(-8).join("\n");
-          const restored = r.restored_previous ? "\n이전 컨테이너는 복원됐습니다." : "";
+          //: 복원은 셋 중 하나다 — 되살아나 서비스됨 / 떴지만 헬스 실패 / 못 띄움.
+          //: 코어는 뒤의 둘을 restored_previous=false + restore_stderr(사유)로 구분해
+          //: 돌려준다. 사유를 버리면 "떠 있는데 복원 안 됐다는" 화면이 된다(실기기 D4).
+          const restoreDetail = (r.restore_stderr || "").trim().split("\n").filter(Boolean).slice(-3).join("\n");
+          const restored = r.restored_previous
+            ? "\n이전 컨테이너는 복원됐습니다 (헬스 확인 통과)."
+            : restoreDetail
+            ? `\n이전 컨테이너 복원: ${restoreDetail}`
+            : "";
           setError(`배포 실패${tail ? ` — ${tail}` : " (코어가 사유를 돌려주지 않았습니다)"}${restored}`);
         }
       }

@@ -603,8 +603,8 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
                 record.container_name,
             )
             return False, result.stdout[:2000], (
-                "이전 컨테이너를 다시 띄웠지만 헬스 확인에 실패했습니다 — "
-                "복구되지 않은 것으로 처리합니다. "
+                "이전 컨테이너를 다시 띄웠지만(컨테이너는 떠 있음) 헬스 확인에 실패했습니다 — "
+                "서비스는 복구되지 않은 것으로 봅니다. 이전 버전도 헬스가 깨져 있었다면 정상이에요. "
                 f"(컨테이너 {record.container_name}, 이미지 {record.image})"
             )
         return True, result.stdout[:2000], result.stderr[:2000]
