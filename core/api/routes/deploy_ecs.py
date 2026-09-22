@@ -65,6 +65,8 @@ class ExtensionEcsDeployRequest(BaseModel):
     aws_region: Optional[str] = None
     container_name: Optional[str] = None
     container_port: Optional[int] = None
+    health_check_path: Optional[str] = Field(default=None, pattern=r"^/[A-Za-z0-9._~%/@+-]*$")
+    health_check_command: Optional[list[str]] = None
     cpu: Optional[str] = None
     memory: Optional[str] = None
     task_family: Optional[str] = None
@@ -181,6 +183,10 @@ def to_core_request(
         fields["container_name"] = body.container_name.strip()  # type: ignore[union-attr]
     if body.container_port:
         fields["container_port"] = body.container_port
+    if body.health_check_path is not None:
+        fields["health_check_path"] = body.health_check_path
+    if body.health_check_command is not None:
+        fields["health_check_command"] = body.health_check_command
     if (body.cpu or "").strip():
         fields["cpu"] = body.cpu.strip()  # type: ignore[union-attr]
     if (body.memory or "").strip():

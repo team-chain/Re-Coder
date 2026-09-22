@@ -1482,16 +1482,14 @@ class ECSDeployRequest(BaseModel):
     container_name:          str = "app"
     cpu:                     str = "256"        # ECS Fargate vCPU units
     memory:                  str = "512"        # MiB
-    health_check_path:       str = "/health"
+    health_check_path:       str = Field(default="/health", pattern=r"^/[A-Za-z0-9._~%/@+-]*$")
     container_port:          int = Field(default=8000, ge=1, le=65535)
-    #: ECS 컨테이너 헬스체크 명령. **비우면 ECS 가 컨테이너 상태를
-    #: 감시하지 않는다** — 프로세스는 살아 있는데 앱이 죽은 경우를
-    #: 못 잡고, 롤백·서킷 브레이커도 걸리지 않는다.
+    #: ECS 컨테이너 헬스체크 명령. 태스크 정의에 들어가야 ECS가
+    #: 프로세스는 살아 있지만 HTTP 응답이 실패하는 상태를 감지한다.
     #:
-    #: 기본값을 두지 않는 이유: 이미지마다 쓸 수 있는 명령이 다르다.
-    #: curl 을 박아뒀다가 런타임 이미지에 curl 이 없어 컨테이너가 무한
-    #: 재시작한 적이 있다. 이미지에 확실히 있는 명령을 호출자가 정한다.
-    #: 파이썬 이미지는 `python_http_health_check()` 헬퍼를 쓰면 된다.
+    #: 생략하면 배포 파이프라인이 최종 Node/Python 이미지와 소스의 헬스
+    #: 경로를 확인해 명령을 만든다. 추론할 수 없으면 미설정 사유를 알린다.
+    #: 직접 지정한 명령은 자동 감지로 덮어쓰지 않는다.
     health_check_command:    Optional[list[str]] = None
     env_vars:                dict[str, str] = Field(default_factory=dict)
 

@@ -25,6 +25,7 @@ from typing import Optional
 
 from core.agents.preflight_agent import PreflightAgent
 from core.agents import ecs_build
+from core.agents.ecs_health import configure_health_check, python_http_health_check
 from core.sbom import sbom_generator
 from core import aws_infra, aws_policy
 from core.aws_infra import InfraError
@@ -66,23 +67,6 @@ _AUTH_ERROR_CODES = frozenset({
 
 # FileTemplate 경로
 _TEMPLATE_PATH = Path(__file__).parent.parent / "registry" / "file_templates" / "ecs-task-definition.json.template"
-
-
-def python_http_health_check(
-    port: int, path: str = "/health", *, timeout: int = 5
-) -> list[str]:
-    """파이썬 이미지에서 쓸 수 있는 ECS 컨테이너 헬스체크 명령.
-
-    curl 을 쓰지 않는다 — `python:slim` 런타임에 curl 은 없다. 예전에
-    태스크 정의가 curl 을 호출하는 바람에 컨테이너가 항상 UNHEALTHY 로
-    찍혀 ECS 가 무한 재시작했다. python 은 이 이미지에 반드시 있다.
-    """
-    probe = (
-        "import sys,urllib.request; "
-        f"sys.exit(0 if urllib.request.urlopen("
-        f"'http://127.0.0.1:{port}{path}', timeout={timeout}).status == 200 else 1)"
-    )
-    return ["CMD-SHELL", f'python -c "{probe}" || exit 1']
 
 
 def _probe_http(
@@ -296,19 +280,17 @@ class ECSAgent:
             if request.generate_sbom:
                 record = await self._step_sbom(request, record, image_uri)
 
-            # 헬스체크가 없으면 ECS 가 컨테이너 상태를 감시하지 않는다.
-            # 조용히 넘어가면 "배포 성공"이 실제 동작을 보장하지 않는데도
-            # 사용자는 그 사실을 알 수 없다. 기록에 남겨 표면화한다.
-            if not request.health_check_command:
+            # Both extension and direct/Discord requests meet here. Resolve
+            # before registration so a UI that omits the command still gets it.
+            loop = asyncio.get_running_loop()
+            health_gap = await loop.run_in_executor(None, configure_health_check, request)
+            if health_gap:
                 record.provisioned["health_check"] = (
-                    "없음 — ECS 가 컨테이너 상태를 감시하지 않습니다. "
-                    "앱이 응답하지 않아도 롤백·서킷 브레이커가 걸리지 않습니다."
+                    "없음 — ECS 컨테이너 헬스체크를 설정하지 않았습니다. " + health_gap
                 )
-                logger.warning(
-                    "health_check_command 가 없습니다 — ECS 컨테이너 헬스체크 없이 "
-                    "배포합니다. 파이썬 이미지라면 python_http_health_check() 를 "
-                    "쓰세요."
-                )
+                logger.warning("ECS 컨테이너 헬스체크 미설정: %s", health_gap)
+            else:
+                record.provisioned["container_health_check"] = "태스크 정의에 컨테이너 헬스체크를 설정합니다."
 
             self._abort_if_cancelled(record, "보안 스캔")
 
