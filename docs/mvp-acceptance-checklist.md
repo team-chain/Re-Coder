@@ -33,7 +33,7 @@
 | C1 | S3 정적 배포 — 진행률 실시간, URL 반환 | ✅ s3 stream/progress | ✅ 09-22 버킷 생성·URL 응답 확인 |
 | C2 | 로컬 Docker 배포 — 태그 이미지 입력해도 400 없음 | ✅ containerName | ✅ 09-22 build→재검사→run→Up 3456 |
 | C3 | ECS 배포 시작·상태 폴링 | — | ✅ 09-22 Fargate 실배포 → 공개 IP /health v1 응답 (스캐너 Docker 폴백 후) |
-| C4 | 배포 정책 게이트(rego) — 조건 미달 차단 + 사유 | ✅ opa 12/12 | ◐ 09-22 로컬 규칙 평가·스캔 게이트 차단+사유 확인. rego deny 경로는 폼에 environment/branch 입력이 없어 실기기 불가 |
+| C4 | 배포 정책 게이트(rego) — 조건 미달 차단 + 사유 | ✅ opa 12/12 | ✅ 09-22 폼에 배포 환경 선택 추가 후 production × test/policy-deny 브랜치 → 거절 카드(사유·현재 브랜치·수정 방법, AWS 리소스 미생성). main 브랜치는 통과. OPA 없음 → 로컬 내장 규칙 |
 | C5 | 리전 불일치는 1회 경고 후 진행 가능(차단 아님) | ✅ regionGate | ✅ 09-22 확인 카드([그대로 진행]/[되돌리기]) — 같은 버튼 재클릭 확인은 더블클릭에 뚫려 별도 버튼으로 수정 |
 | C6 | 존재하지 않는 API 를 부르는 버튼 없음 | ✅ uiRequestContract | — |
 
