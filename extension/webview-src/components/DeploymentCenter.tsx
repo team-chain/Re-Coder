@@ -322,6 +322,50 @@ const DeploymentBlockers: React.FC<{
   </div>
 );
 
+/** 정책 게이트(OPA · 로컬 규칙)의 거절 — 호스트가 `workspace.deploy.ecs.policyDenied` 로 보낸다. */
+export type PolicyDenial = {
+  code: string;
+  decision: string;
+  message: string;
+  fix: string;
+  deployment_id: string | null;
+};
+
+/** 배포 환경 선택지. production 은 정책상 main 브랜치에서만 나간다(`policies/recoder/deploy.rego`). */
+export const ECS_ENVIRONMENTS: ReadonlyArray<{ value: "staging" | "production"; label: string }> = [
+  { value: "staging", label: "staging — 어느 브랜치든 배포" },
+  { value: "production", label: "production — main 브랜치에서만" },
+];
+
+/** 거절 카드 머리말. 승인·에스컬레이션·OPA 장애는 "규칙 위반"과 다른 말로 시작해야 한다. */
+export function policyDenialTitle(denial: PolicyDenial): string {
+  switch (denial.code) {
+    case "approval_required": return "이 배포는 승인이 필요해요";
+    case "security_escalation_required": return "보안 담당자 확인이 필요해요";
+    case "opa_unavailable": return "정책 서버에 연결할 수 없어 배포를 멈췄어요";
+    case "policy_evaluation_crashed": return "정책 평가 중 오류가 나서 배포를 멈췄어요";
+    default: return "정책 게이트가 배포를 막았어요";
+  }
+}
+
+/**
+ * 정책 거절 카드 — 스캔 게이트의 DeploymentBlockers 와 같은 결(빨간 테두리 ·
+ * 문제 · 수정 방법)로 맞춘다. 배포는 AWS 를 건드리기 **전에** 여기서 멈춘다.
+ */
+const PolicyDenialCard: React.FC<{ denial: PolicyDenial; environment: string; onDismiss: () => void }> = ({ denial, environment, onDismiss }) => (
+  <div style={{ marginTop: 10, border: "1px solid rgba(241, 76, 76, .62)", borderRadius: 7, padding: 13, background: "rgba(241, 76, 76, .08)" }}>
+    <div style={{ fontSize: 13, fontWeight: 700, color: "var(--vscode-editorError-foreground, #f14c4c)" }}>{policyDenialTitle(denial)}</div>
+    <div style={{ marginTop: 5, color: "var(--vscode-descriptionForeground, #bbb)", fontSize: 11, lineHeight: 1.5 }}>
+      환경 <b>{environment || "(미지정)"}</b>{denial.decision ? <> · 결정 <code>{denial.decision}</code></> : null} — AWS 리소스는 만들지 않았습니다.
+    </div>
+    <div style={{ marginTop: 12, padding: "10px 11px", borderRadius: 6, border: "1px solid var(--vscode-panel-border, #3f3f3f)", background: "var(--vscode-editorWidget-background, #252526)" }}>
+      <div style={{ fontSize: 12, fontWeight: 650, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>문제 · {denial.message}</div>
+      <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--vscode-panel-border, #3f3f3f)", fontSize: 11, lineHeight: 1.45, whiteSpace: "pre-wrap" }}><b style={{ color: "var(--vscode-textLink-foreground, #75beff)" }}>수정 방법 · </b>{denial.fix}</div>
+    </div>
+    <button onClick={onDismiss} style={{ ...button, marginTop: 12, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>닫기</button>
+  </div>
+);
+
 /** 기존 결정 카드 UI를 그대로 써서, 롤백도 제안 → 선택 → 실행 순서를 지킨다. */
 const EcsRollbackApprovalCard: React.FC<{
   proposal: EcsRollbackProposal;
@@ -399,7 +443,9 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const [s3Result, setS3Result] = useState<S3Deployed | null>(null);
   const [rollbackProposal, setRollbackProposal] = useState<EcsRollbackProposal | null>(null);
   const [resolvingRollback, setResolvingRollback] = useState(false);
-  const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512" });
+  const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512", environment: "staging" });
+  //: 정책 게이트 거절. 배너(message) 와 따로 두는 이유 — 사유·수정 방법을 카드로 남겨야 한다.
+  const [policyDenial, setPolicyDenial] = useState<PolicyDenial | null>(null);
 
   const runPreflight = useCallback(() => {
     setChecking(true);
@@ -464,6 +510,11 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       setMessage((payload as { message?: string })?.message ?? "롤백 처리에 실패했습니다.");
     }
     if (type === "workspace.deploy.result") setMessage((payload as { message?: string })?.message ?? "배포 요청을 보냈습니다.");
+    if (type === "workspace.deploy.ecs.policyDenied") {
+      //: 브랜치는 코어가 작업 폴더 git 에서 직접 읽는다 — 폼이 보낸 값보다 우선.
+      setPolicyDenial(payload as PolicyDenial);
+      setMessage("");
+    }
     if (type === "workspace.deploy.s3.dirs") {
       //: 사용자가 직접 고른 폴더는 덮어쓰지 않는다.
       const suggested = (payload as { suggested?: string })?.suggested ?? "";
@@ -559,6 +610,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     startEcsDeploy();
   };
   const startEcsDeploy = () => {
+    setPolicyDenial(null);
     setCheckingEcsPermissions(true);
     setMessage("입력한 ECS 리전과 대상 리소스의 권한을 확인 중…");
     pendingEcsDeploymentRef.current = { ...ecs, container_port: Number(ecs.container_port) };
@@ -752,7 +804,14 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         </div>
       </div>}
       {target === "actions" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>GitHub Actions</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>프로젝트에 맞는 CI/CD 워크플로우를 생성하고, 승인 후 <code>.github/workflows/deploy.yml</code>에 저장합니다.</p><button onClick={generateActions} style={button}>워크플로우 생성</button>{proposal && <><pre style={{ marginTop: 12, maxHeight: 280, overflow: "auto", background: "var(--vscode-textCodeBlock-background, #1e1e1e)", borderRadius: 5, padding: 10, fontSize: 11 }}>{proposal.content}</pre><button onClick={() => postMessage("approveGithubActions", { proposalId: proposal.proposal_id, approved: true })} style={{ ...button, marginTop: 10 }}>승인하고 저장</button></>}</div>}
-      {target === "ecs" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>ECS Fargate 배포</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.45 }}>선택 근거가 ADR에 기록되었습니다. 입력한 리전과 ECS 대상의 권한을 확인한 뒤 배포를 시작합니다.</p><EcsCostNotice /><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ecs_cluster", "ECS Cluster"], ["ecs_service", "ECS Service"], ["task_family", "Task Family"], ["container_port", "컨테이너 포트"], ["cpu", "CPU"], ["memory", "Memory"] ] as [keyof typeof ecs, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ecs[key]} onChange={e => update(setEcs, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}</div><button disabled={checkingEcsPermissions} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : "ECS 배포 실행"}</button>
+      {target === "ecs" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>ECS Fargate 배포</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.45 }}>선택 근거가 ADR에 기록되었습니다. 입력한 리전과 ECS 대상의 권한을 확인한 뒤 배포를 시작합니다.</p><EcsCostNotice /><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ecs_cluster", "ECS Cluster"], ["ecs_service", "ECS Service"], ["task_family", "Task Family"], ["container_port", "컨테이너 포트"], ["cpu", "CPU"], ["memory", "Memory"] ] as [keyof typeof ecs, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ecs[key]} onChange={e => update(setEcs, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}
+          <label style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", gridColumn: "1 / -1" }}>배포 환경
+            <select data-testid="ecs-environment" value={ecs.environment} onChange={e => update(setEcs, "environment", e.target.value)} style={{ ...input, marginTop: 4 }}>
+              {ECS_ENVIRONMENTS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+            </select>
+            <div style={{ marginTop: 4, fontSize: 10.5, lineHeight: 1.45, color: "var(--vscode-descriptionForeground, #888)" }}>정책 게이트가 환경·브랜치 규칙을 검사합니다. 브랜치는 열려 있는 작업 폴더의 git 에서 자동 감지합니다.</div>
+          </label></div><button disabled={checkingEcsPermissions} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : "ECS 배포 실행"}</button>
+        {policyDenial && <PolicyDenialCard denial={policyDenial} environment={ecs.environment} onDismiss={() => setPolicyDenial(null)} />}
         {pendingRegionAck && (
           <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 6, border: "1px solid var(--vscode-editorWarning-foreground, #cca700)", background: "rgba(245,180,0,.08)", fontSize: 12 }}>
             <div style={{ color: "var(--vscode-editorWarning-foreground, #cca700)", fontWeight: 600 }}>리전이 코어({coreRegion})와 다릅니다 — {ecs.aws_region} 에 배포할까요?</div>

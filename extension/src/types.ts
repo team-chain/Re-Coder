@@ -452,6 +452,10 @@ export interface ApiResponse<T> {
   success: boolean;
   data?: T;
   error?: string;
+  /** 실패 시 HTTP 상태 코드 (ApiClient.request 가 채움). */
+  status?: number;
+  /** 실패 시 Core 가 detail 을 객체로 준 경우 그 객체 (정책 게이트 결과 등). */
+  detail?: Record<string, unknown> | null;
   request_id?: string;
   timestamp: string; // ISO 8601
 }

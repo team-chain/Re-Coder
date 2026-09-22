@@ -14,6 +14,7 @@ import {
     AwsStatus,
 } from '../types';
 import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
+import { CoreHttpError, policyDenialFromDetail } from '../core/httpError';
 import { CoreManager } from '../core/CoreManager';
 import { isCoreConnectionFailure } from '../core/coreReuse';
 import {
@@ -780,7 +781,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     });
                     this.postMessage('workspace.deploy.result', result);
                 } catch (err) {
-                    this.postMessage('errorMessage', { message: String(err) });
+                    // 정책 게이트 거절은 배너가 아니라 "차단 + 사유" 카드로.
+                    // 예전에는 여기서 String(err) 로 떨어져 JSON 원문이 배너에 떴다.
+                    const denial = err instanceof CoreHttpError ? policyDenialFromDetail(err.detail) : null;
+                    if (denial) {
+                        this.postMessage('workspace.deploy.ecs.policyDenied', denial);
+                    } else {
+                        this.postMessage('errorMessage', { message: String(err) });
+                    }
                 }
                 break;
             }
