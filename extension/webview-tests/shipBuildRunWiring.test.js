@@ -61,3 +61,10 @@ test('배포 뒤 감시 스냅샷을 묻고, 이상이면 롤백을 제안만 �
   assert.match(HOST3, /case 'deploy\.verification\.status'/);
   assert.match(HOST3, /postMessage\('deploy\.rollbackResult'/);
 });
+
+test('교체 실패 뒤 복원 결과는 셋을 구분한다 — 복원됨 / 떴지만 헬스 실패 / 못 띄움 (실기기 D4)', () => {
+  const SHIP = fs.readFileSync(path.join(__dirname, '../webview-src/components/ShipMode.tsx'), 'utf8');
+  assert.match(SHIP, /restore_stderr/, '복원 사유(restore_stderr)를 읽지 않는다');
+  assert.match(SHIP, /이전 컨테이너 복원: \$\{restoreDetail\}/, '복원이 false 일 때 사유를 버린다 — 컨테이너는 떠 있는데 복원 안 됐다는 화면이 된다');
+  assert.match(SHIP, /헬스 확인 통과/, '복원 성공 문구가 "떠 있음" 과 "서비스됨" 을 구분하지 않는다');
+});

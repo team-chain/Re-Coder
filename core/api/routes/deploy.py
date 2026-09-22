@@ -309,15 +309,30 @@ def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[
             continue
         if not record.image:
             continue
+        stable_ref = _stable_image_ref(record)
         if record.image == next_image:
+            if stable_ref:
+                # 같은 태그라도 **불변 참조**(고정 태그 또는 이미지 ID)가 남아 있으면
+                # 되돌릴 수 있다 — 태그가 방금 빌드로 옮겨 갔어도 이전 바이트를
+                # 가리킨다. 로컬 배포는 늘 `<폴더>:latest` 한 태그로 돌기 때문에,
+                # 여기서 건너뛰면 실제 제품 흐름에서는 롤백이 영영 불가능했다(실기기
+                # D2: 이상은 감지했는데 "되돌릴 이전 배포 기록이 없어" 제안 불가).
+                how = (
+                    f"고정 태그 {stable_ref}" if record.pinned_image
+                    else f"이미지 ID {stable_ref[:19]}…"
+                )
+                return stable_ref, (
+                    f"롤백 대상: {record.image} (이전 성공 배포 · 같은 태그라 {how} 로 되돌립니다)"
+                )
+            # 불변 참조를 못 남긴 옛 기록은 같은 태그로 되돌려도 방금 이미지가 다시 뜬다.
             # 더 뒤로 가면 다른 태그가 있을 수 있으므로 계속 본다.
             same_tag_seen = True
             continue
-        # 태그가 아니라 이미지 ID 를 돌려준다. 태그는 그사이 다시 빌드·푸시돼
+        # 태그가 아니라 불변 참조를 돌려준다. 태그는 그사이 다시 빌드·푸시돼
         # 다른 바이트를 가리킬 수 있고, `app:v1` 같은 버전형 이름도 예외가 아니다.
-        # ID 를 못 남긴 기록(옛 배포)은 태그로 폴백한다 — 그건 원래 동작이다.
-        target = record.image_id or record.image
-        suffix = "" if record.image_id else " · 이미지 ID 없음, 태그로 되돌립니다"
+        # 참조를 못 남긴 기록(옛 배포)은 태그로 폴백한다 — 그건 원래 동작이다.
+        target = stable_ref or record.image
+        suffix = "" if stable_ref else " · 이미지 ID 없음, 태그로 되돌립니다"
         return target, f"롤백 대상: {record.image} (이전 성공 배포){suffix}"
 
     if same_tag_seen:
@@ -327,6 +342,148 @@ def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[
             "롤백을 쓰려면 배포마다 다른 태그를 지정하세요."
         )
     return None, "롤백 대상 없음: 이 컨테이너의 검증 완료 배포가 없습니다."
+
+
+def _stable_image_ref(record: DeploymentRecord) -> Optional[str]:
+    """기록이 가리키는 이미지의 **되돌릴 수 있는 참조** — 고정 태그 > 이미지 ID.
+
+    이미지 ID 만으로는 부족하다. containerd 이미지 스토어(Docker Desktop 기본,
+    `driver-type io.containerd.snapshotter.v1`)는 태그가 다음 빌드로 옮겨 간 뒤
+    그 이미지를 쓰던 컨테이너까지 지워지면 옛 이미지를 **바로 GC 한다** — dangling
+    `<none>` 으로도 남지 않는다. 그래서 실기기에서는 ID 로 제안된 롤백이
+    "No such image" 로 실패했다(D3). 배포 직후 붙여 둔 고정 태그가 참조를 붙잡고
+    있으면 GC 되지 않으므로 그것을 먼저 쓴다.
+    """
+    return record.pinned_image or record.image_id or None
+
+
+#: 배포마다 이미지에 붙여 두는 고정 태그의 접두어. `<repo>:recoder-rb-<배포ID 앞 12자>`.
+_ROLLBACK_PIN_PREFIX = "recoder-rb-"
+#: 저장소별로 남겨 두는 고정 태그 수. 그 이상은 오래된 것부터 태그를 지운다
+#: (다른 참조가 없으면 이미지도 그때 사라진다 — 디스크가 무한히 불지 않게).
+_ROLLBACK_PIN_KEEP = 3
+
+
+def _image_repo(image_ref: str) -> str:
+    """`registry:5000/ns/app:v1` → `registry:5000/ns/app`. 태그·다이제스트를 뗀다."""
+    ref = (image_ref or "").strip()
+    if "@" in ref:
+        ref = ref.split("@", 1)[0]
+    last_slash = ref.rfind("/")
+    last_colon = ref.rfind(":")
+    if last_colon > last_slash:
+        ref = ref[:last_colon]
+    return ref
+
+
+def _pin_tag_for(image_ref: str, deployment_id: str) -> Optional[str]:
+    repo = _image_repo(image_ref)
+    if not repo or not deployment_id:
+        return None
+    return f"{repo}:{_ROLLBACK_PIN_PREFIX}{deployment_id[:12]}"
+
+
+async def _rollback_image_available(image_ref: str) -> bool:
+    """그 참조(태그·ID)가 지금 로컬 docker 에 있는가. 조회 실패는 '없음' 으로 본다."""
+    if not image_ref:
+        return False
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
+                shell=False, capture_output=True, text=True, timeout=30,
+            ),
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception as exc:  # noqa: BLE001 - 존재 확인 실패는 '없음' 과 같게 취급
+        logger.warning("Could not inspect image %s: %s", image_ref, exc)
+        return False
+
+
+async def _pin_rollback_image(
+    image_ref: str, image_id: Optional[str], deployment_id: str,
+) -> Optional[str]:
+    """방금 띄운 이미지에 고정 태그를 붙인다. 실패해도 배포 결과는 흔들지 않는다.
+
+    반환: 붙인 태그, 못 붙였으면 None(그때는 image_id 로 폴백 — 예전 동작).
+    """
+    pin = _pin_tag_for(image_ref, deployment_id)
+    source = image_id or image_ref
+    if not pin or not source:
+        return None
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["docker", "tag", source, pin],
+                shell=False, capture_output=True, text=True, timeout=30,
+            ),
+        )
+        if result.returncode != 0:
+            logger.warning("Could not pin %s as %s: %s", source, pin, result.stderr.strip())
+            return None
+        return pin
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not pin %s as %s: %s", source, pin, exc)
+        return None
+
+
+async def _prune_old_rollback_pins(image_ref: str, keep: set[str]) -> list[str]:
+    """저장소의 고정 태그를 최근 `_ROLLBACK_PIN_KEEP` 개만 남기고 지운다.
+
+    `keep` 에 든 태그는 순서와 무관하게 남긴다(지금 돌고 있는 것, 이번 롤백 대상).
+    지운 태그 목록을 돌려준다. 어떤 실패도 배포를 막지 않는다.
+    """
+    repo = _image_repo(image_ref)
+    if not repo:
+        return []
+    loop = asyncio.get_running_loop()
+    try:
+        listed = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                [
+                    "docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}",
+                    "--filter", f"reference={repo}:{_ROLLBACK_PIN_PREFIX}*",
+                ],
+                shell=False, capture_output=True, text=True, timeout=30,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not list rollback pins for %s: %s", repo, exc)
+        return []
+    if listed.returncode != 0:
+        return []
+
+    rows: list[tuple[str, str]] = []
+    for line in listed.stdout.splitlines():
+        tag, _sep, created = line.partition("\t")
+        tag = tag.strip()
+        if tag.startswith(f"{repo}:{_ROLLBACK_PIN_PREFIX}"):
+            rows.append((tag, created.strip()))
+    # CreatedAt 은 이미지 생성 시각 — 배포 순서와 같이 움직인다. 최신이 앞.
+    rows.sort(key=lambda row: row[1], reverse=True)
+
+    removed: list[str] = []
+    survivors = 0
+    for tag, _created in rows:
+        if tag in keep or survivors < _ROLLBACK_PIN_KEEP:
+            survivors += 1
+            continue
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda tag=tag: subprocess.run(
+                    ["docker", "rmi", tag],
+                    shell=False, capture_output=True, text=True, timeout=60,
+                ),
+            )
+            if result.returncode == 0:
+                removed.append(tag)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not remove old rollback pin %s: %s", tag, exc)
+    return removed
 
 
 def _records_newest_first() -> list[DeploymentRecord]:
@@ -355,7 +512,10 @@ def _rollback_source_for(container_name: str, next_image: str) -> Optional[Deplo
             and record.status == DeployStatus.SUCCESS
             and record.rollback_eligible
             and record.image
-            and record.image != next_image
+            # 같은 태그라도 불변 참조가 있으면 되돌릴 수 있다 — `_previous_image_for`
+            # 와 같은 규칙. 여기만 다르면 대상은 있는데 실행 조건(포트·env)·감시
+            # 재개의 근거가 되는 원본 기록이 비어 버린다.
+            and (record.image != next_image or _stable_image_ref(record))
         ):
             return record
     return None
@@ -414,8 +574,8 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
             run_args.extend(["-p", f"{int(host_port)}:{int(container_port)}"])
         for key, value in (record.env or {}).items():
             run_args.extend(["-e", f"{key}={value}"])
-        # 태그가 아니라 이미지 ID 로 되돌린다 — 태그는 그사이 움직였을 수 있다.
-        run_args.extend(["--restart", "unless-stopped", record.image_id or record.image])
+        # 태그가 아니라 고정 태그·이미지 ID 로 되돌린다 — 태그는 그사이 움직였을 수 있다.
+        run_args.extend(["--restart", "unless-stopped", _stable_image_ref(record) or record.image])
     except (TypeError, ValueError) as exc:
         logger.error("Cannot restore prior container %s: %s", record.container_name, exc)
         return False, "", str(exc)
@@ -443,8 +603,8 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
                 record.container_name,
             )
             return False, result.stdout[:2000], (
-                "이전 컨테이너를 다시 띄웠지만 헬스 확인에 실패했습니다 — "
-                "복구되지 않은 것으로 처리합니다. "
+                "이전 컨테이너를 다시 띄웠지만(컨테이너는 떠 있음) 헬스 확인에 실패했습니다 — "
+                "서비스는 복구되지 않은 것으로 봅니다. 이전 버전도 헬스가 깨져 있었다면 정상이에요. "
                 f"(컨테이너 {record.container_name}, 이미지 {record.image})"
             )
         return True, result.stdout[:2000], result.stderr[:2000]
@@ -2068,13 +2228,11 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
     return normalised
 
 
-def _write_proposal_to_workspace(proposal, workspace_override, proposal_id):
-    """Proposal 파일을 워크스페이스 루트 기준으로 디스크에 쓴다.
+#: 덮어쓰기 직전 기존 파일을 남겨 두는 이름. `Dockerfile` → `Dockerfile.recoder-prev`.
+_OVERWRITE_BACKUP_SUFFIX = ".recoder-prev"
 
-    상대 target_path 면 (override -> proposal.workspace_path -> cwd) 순으로 루트 결정.
-    과거 버그: 루트를 항상 Path.cwd()(=Core 실행 디렉토리 core/)로 잡아
-    .github/workflows/deploy.yml 이 사용자 프로젝트가 아니라 core/ 에 써졌다.
-    """
+
+def _resolve_proposal_target(proposal, workspace_override) -> Path:
     target = Path(proposal.target_path)
     if not target.is_absolute():
         root = (
@@ -2083,14 +2241,77 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id):
             or str(Path.cwd())
         )
         target = Path(root).expanduser().resolve() / target
+    return target
+
+
+def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
+    """대상 파일이 이미 있고 **내용이 다르면** 그 사실을 돌려준다. 없거나 같으면 None.
+
+    실기기 검증 D4 에서, 사용자가 손으로 고친 Dockerfile 을 "Dockerfile 생성 → 저장"
+    한 번으로 조용히 되돌려 버렸다. 생성 결과가 예전과 같아 화면상 아무 변화가 없어
+    사용자는 자기 수정이 사라진 줄도 몰랐다. 같은 파일이 있으면 묻지 않고 덮어쓰는
+    것은 "보이기만 하는" 승인이다 — 무엇이 바뀌는지 diff 로 보여주고 다시 묻는다.
+    """
+    if not target.is_file():
+        return None
+    try:
+        existing = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        existing = None
+    if existing is None or existing == proposal.content:
+        return None
+    import difflib
+
+    diff = "".join(
+        difflib.unified_diff(
+            existing.splitlines(keepends=True),
+            proposal.content.splitlines(keepends=True),
+            fromfile=f"{target.name} (현재 파일)",
+            tofile=f"{target.name} (새 초안)",
+            n=2,
+        )
+    )
+    return {"existing_content": existing, "diff": diff[:20000]}
+
+
+def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, overwrite: bool = False):
+    """Proposal 파일을 워크스페이스 루트 기준으로 디스크에 쓴다.
+
+    상대 target_path 면 (override -> proposal.workspace_path -> cwd) 순으로 루트 결정.
+    과거 버그: 루트를 항상 Path.cwd()(=Core 실행 디렉토리 core/)로 잡아
+    .github/workflows/deploy.yml 이 사용자 프로젝트가 아니라 core/ 에 써졌다.
+
+    대상이 이미 있고 내용이 다르면 `overwrite=True` 없이는 쓰지 않고
+    `status: "exists"` 와 diff 를 돌려준다(제안은 그대로 남아 다시 승인할 수 있다).
+    덮어쓸 때는 기존 파일을 `<이름>.recoder-prev` 로 남긴다.
+    """
+    target = _resolve_proposal_target(proposal, workspace_override)
+    file_type = getattr(proposal.file_type, "value", proposal.file_type)
+
+    conflict = _existing_file_conflict(proposal, target)
+    backup_path: Optional[str] = None
+    if conflict is not None:
+        if not overwrite:
+            return {
+                "status": "exists",
+                "proposal_id": proposal_id,
+                "path": str(target),
+                "file_type": file_type,
+                **conflict,
+            }
+        backup = target.with_name(target.name + _OVERWRITE_BACKUP_SUFFIX)
+        backup.write_text(conflict["existing_content"], encoding="utf-8")
+        backup_path = str(backup)
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(proposal.content, encoding="utf-8")
-    file_type = getattr(proposal.file_type, "value", proposal.file_type)
     return {
         "status": "saved",
         "proposal_id": proposal_id,
         "path": str(target),
         "file_type": file_type,
+        "overwritten": conflict is not None,
+        "backup_path": backup_path,
     }
 
 
@@ -2598,10 +2819,16 @@ async def generate_compose_route(request: ComposeRequest) -> InfraFileProposal:
 
 
 @router.post("/api/deploy/dockerfile/approve")
-async def approve_dockerfile(proposal_id: str, approved: bool, workspace_path: str = "") -> dict:
+async def approve_dockerfile(
+    proposal_id: str, approved: bool, workspace_path: str = "", overwrite: bool = False,
+) -> dict:
     """Approve or reject a Dockerfile / infra file proposal.
 
     워크스페이스 루트 기준으로 쓴다 (cwd 폴백 버그 동일 수정).
+
+    같은 경로에 **내용이 다른 파일**이 이미 있으면 `overwrite=true` 없이는 쓰지
+    않고 `status: "exists"` + diff 를 돌려준다. 제안은 메모리에 남겨 두므로
+    사용자가 diff 를 보고 다시 승인(overwrite=true)하거나 거절할 수 있다.
     """
     proposal = _infra_proposals.get(proposal_id)
     if proposal is None:
@@ -2616,8 +2843,9 @@ async def approve_dockerfile(proposal_id: str, approved: bool, workspace_path: s
             "file_type": file_type,
         }
 
-    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id)
-    del _infra_proposals[proposal_id]
+    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id, overwrite=overwrite)
+    if result.get("status") == "saved":
+        del _infra_proposals[proposal_id]
     return result
 
 
@@ -2696,7 +2924,9 @@ async def generate_github_actions_route(request: GithubActionsRequest) -> InfraF
 
 
 @router.post("/api/deploy/github-actions/approve")
-async def approve_github_actions(proposal_id: str, approved: bool, workspace_path: str = "") -> dict:
+async def approve_github_actions(
+    proposal_id: str, approved: bool, workspace_path: str = "", overwrite: bool = False,
+) -> dict:
     """
     Approve or reject a GitHub Actions workflow proposal.
 
@@ -2712,8 +2942,9 @@ async def approve_github_actions(proposal_id: str, approved: bool, workspace_pat
         del _infra_proposals[proposal_id]
         return {"status": "rejected", "proposal_id": proposal_id}
 
-    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id)
-    del _infra_proposals[proposal_id]
+    result = _write_proposal_to_workspace(proposal, workspace_path, proposal_id, overwrite=overwrite)
+    if result.get("status") == "saved":
+        del _infra_proposals[proposal_id]
     return result
 
 
@@ -3202,6 +3433,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             method=plan.method,
             image=plan.image or "",
             image_id=deployed_image_id,
+            pinned_image=None,  # 아래에서 배포 ID 가 정해진 뒤 붙인다
             container_name=plan.container_name or "",
             health_check_path=plan.health_check_path,
             # 롤백이 같은 모양으로 다시 띄울 수 있도록 실행 조건을 함께 남긴다.
@@ -3221,6 +3453,18 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         )
         _deployment_records[record.deployment_id] = record
         del _deployment_plans[request.plan_id]
+
+        # 이미지 ID 만 남기면 다음 배포가 태그를 옮기고 이 컨테이너를 지우는 순간
+        # containerd 스토어가 이미지를 GC 해 롤백이 "No such image" 로 실패한다.
+        # 배포 ID 로 고정 태그를 붙여 참조를 붙잡아 두고, 오래된 고정 태그는 정리한다.
+        if success and plan.method == DeployMethod.LOCAL_DOCKER and plan.image:
+            record.pinned_image = await _pin_rollback_image(
+                plan.image, deployed_image_id, record.deployment_id,
+            )
+            protect = {t for t in (record.pinned_image, rollback_target) if t}
+            pruned = await _prune_old_rollback_pins(plan.image, protect)
+            if pruned:
+                logger.info("Pruned old rollback pins: %s", ", ".join(pruned))
 
         # 설계 §4.6 / §34 — 배포 성공 직후 Continuous Verification 자동 트리거.
         # 실패 시에도 verification 자체의 예외가 배포 응답을 흔들지 않도록 모두 catch.
@@ -3349,6 +3593,27 @@ async def rollback(request: RollbackRequest) -> dict:
         raise HTTPException(status_code=400, detail="Invalid container_name on record.")
     if not _IMG_RE.match(record.rollback_target):
         raise HTTPException(status_code=400, detail="Invalid rollback_target on record.")
+
+    # **파괴 전에 되돌릴 이미지가 있는지 먼저 본다.** 예전에는 stop/rm 을 먼저 하고
+    # docker run 에서 "No such image" 를 만났다 — 장애 버전마저 내려가서 서비스가
+    # 통째로 사라졌다(실기기 D3). 없으면 지금 컨테이너를 건드리지 않고 실패한다.
+    if not await _rollback_image_available(record.rollback_target):
+        return {
+            "status": "failed",
+            "deployment_id": request.deployment_id,
+            "rolled_back_to": record.rollback_target,
+            "verification_resumed": False,
+            "ports": dict(record.rollback_ports or record.ports or {}),
+            "warning": None,
+            "error": (
+                f"되돌릴 이미지 {record.rollback_target} 가 로컬 Docker 에 없습니다 — "
+                "현재 컨테이너는 건드리지 않았습니다. 이전 이미지가 정리(GC)된 상태라 "
+                "이 배포로는 되돌릴 수 없어요. 이전 버전 소스를 다시 빌드해 배포하세요."
+            ),
+            "container_untouched": True,
+            "stdout": "",
+            "stderr": "",
+        }
 
     rollback_ports = (
         record.rollback_ports

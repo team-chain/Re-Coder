@@ -200,6 +200,10 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const [rollbackDecision, setRollbackDecision] = useState<"idle" | "proposed" | "dismissed" | "running" | "done">("idle");
   const [rollbackResult, setRollbackResult] = useState<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  //: 승인했는데 같은 경로에 **내용이 다른 파일**이 있어 코어가 쓰지 않은 상태.
+  //: 예전엔 묻지 않고 덮어써서 손으로 고친 Dockerfile 이 조용히 사라졌다(실기기 D4).
+  const [existingConflict, setExistingConflict] = useState<{ path?: string; diff?: string; file_type?: string } | null>(null);
+  const [savedNote, setSavedNote] = useState<string | null>(null);
   const [showApproval, setShowApproval] = useState(false);
   const [approvalContext, setApprovalContext] = useState<"infra" | "deploy" | null>(null);
   const [activeFileTab, setActiveFileTab] = useState<InfraFileTab>("dockerfile");
@@ -235,9 +239,23 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           status?: string;
           approved?: boolean;
           file_type?: string;
+          path?: string;
+          diff?: string;
+          overwritten?: boolean;
+          backup_path?: string | null;
         };
+        //: 기존 파일과 다르다 — 코어는 쓰지 않았다. diff 를 보이고 사용자가 고른다.
+        if (result.approved === true && result.status === "exists") {
+          setExistingConflict({ path: result.path, diff: result.diff, file_type: result.file_type });
+          setStep("preview");
+          return;
+        }
         // 탭 전환 중 보낸 거절 응답은 새 탭의 상태를 바꾸면 안 된다.
         if (result.approved === true && result.status === "saved") {
+          setExistingConflict(null);
+          if (result.overwritten) {
+            setSavedNote(`기존 파일을 덮어썼습니다${result.backup_path ? ` — 이전 내용은 ${result.backup_path} 에 남겨 두었어요` : ""}.`);
+          }
           if (shouldRunDockerPipeline(result.file_type ?? "")) {
             setStep("scanning");
             postMessage("runScan", { scanType: "trivy", workspacePath: "" });
@@ -275,7 +293,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           //: 어디서도 확인할 수 없다(실기기 검증 C2). 원문을 그대로 보인다.
           const detail = (r.stderr || r.error || r.message || r.stdout || "").trim();
           const tail = detail.split("\n").filter(Boolean).slice(-8).join("\n");
-          const restored = r.restored_previous ? "\n이전 컨테이너는 복원됐습니다." : "";
+          //: 복원은 셋 중 하나다 — 되살아나 서비스됨 / 떴지만 헬스 실패 / 못 띄움.
+          //: 코어는 뒤의 둘을 restored_previous=false + restore_stderr(사유)로 구분해
+          //: 돌려준다. 사유를 버리면 "떠 있는데 복원 안 됐다는" 화면이 된다(실기기 D4).
+          const restoreDetail = (r.restore_stderr || "").trim().split("\n").filter(Boolean).slice(-3).join("\n");
+          const restored = r.restored_previous
+            ? "\n이전 컨테이너는 복원됐습니다 (헬스 확인 통과)."
+            : restoreDetail
+            ? `\n이전 컨테이너 복원: ${restoreDetail}`
+            : "";
           setError(`배포 실패${tail ? ` — ${tail}` : " (코어가 사유를 돌려주지 않았습니다)"}${restored}`);
         }
       }
@@ -298,6 +324,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const handleGenerateInfraFile = useCallback(() => {
     setStep("generating");
     setError(null);
+    setExistingConflict(null);
+    setSavedNote(null);
     setProposal(null);
     setScanResult(null);
     setPlan(null);
@@ -306,11 +334,26 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     postMessage(command, { workspacePath: "" /* extension fills */ });
   }, [postMessage, activeFileTab]);
 
-  const handleApproveInfraFile = useCallback(() => {
+  const handleApproveInfraFile = useCallback((overwrite: boolean = false) => {
     if (!proposal) { return; }
-    postMessage("approveDockerfile", { proposalId: proposal.proposal_id, approved: true });
+    setSavedNote(null);
+    postMessage("approveDockerfile", { proposalId: proposal.proposal_id, approved: true, overwrite });
     setStep("saving");
     setShowApproval(false);
+  }, [proposal, postMessage]);
+
+  //: "기존 파일 그대로 쓰기" — 초안은 거절하고, 워크스페이스에 있는 파일로 바로 검사한다.
+  const handleKeepExistingFile = useCallback(() => {
+    if (!proposal) { return; }
+    postMessage("approveDockerfile", { proposalId: proposal.proposal_id, approved: false });
+    setExistingConflict(null);
+    setProposal(null);
+    if (shouldRunDockerPipeline(proposal.file_type ?? "")) {
+      setStep("scanning");
+      postMessage("runScan", { scanType: "trivy", workspacePath: "" });
+    } else {
+      setStep("saved");
+    }
   }, [proposal, postMessage]);
 
   const handleRejectDockerfile = useCallback(() => {
@@ -765,6 +808,31 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         </div>
       )}
 
+      {/* ── 기존 파일과 다름: 덮어쓰기 전에 묻는다 ── */}
+      {existingConflict && step === "preview" && proposal && matchesTab && (
+        <div style={{ background: "rgba(227,178,97,0.08)", border: "1px solid #e3b261", borderRadius: 5, padding: "10px 12px", marginBottom: 10, fontSize: 11 }}>
+          <div style={{ color: "#e3b261", fontWeight: 700 }}>같은 이름의 파일이 이미 있고 내용이 다릅니다 — 아직 저장하지 않았어요</div>
+          <div style={{ color: "#bbb", marginTop: 4, fontFamily: "var(--vscode-editor-font-family, monospace)" }}>{existingConflict.path ?? proposal.target_path}</div>
+          {existingConflict.diff && (
+            <pre style={{ marginTop: 8, maxHeight: 220, overflow: "auto", background: "var(--vscode-textCodeBlock-background, #1e1e1e)", padding: "6px 8px", borderRadius: 4, whiteSpace: "pre-wrap", fontSize: 10.5, lineHeight: 1.45 }}>
+              {existingConflict.diff.split("\n").map((line, i) => (
+                <div key={i} style={{ color: line.startsWith("+") && !line.startsWith("+++") ? "#22c55e" : line.startsWith("-") && !line.startsWith("---") ? "#ef4444" : line.startsWith("@@") ? "#4a9eff" : "#aaa" }}>{line}</div>
+              ))}
+            </pre>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button onClick={handleKeepExistingFile} style={btnPrimary}>기존 파일 그대로 쓰고 검사 →</button>
+            <button onClick={() => handleApproveInfraFile(true)} style={btnSecondary}>새 초안으로 덮어쓰기 (백업 남김)</button>
+          </div>
+        </div>
+      )}
+
+      {savedNote && (step === "saved" || step === "scanning" || step === "scanDone") && (
+        <div style={{ background: "rgba(227,178,97,0.08)", border: "1px solid #e3b261", borderRadius: 5, padding: "8px 10px", color: "#e3b261", marginBottom: 10, fontSize: 11 }}>
+          {savedNote}
+        </div>
+      )}
+
       {step === "saved" && (
         <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
           ✓ {activeFileLabel} 저장 완료
@@ -806,6 +874,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
               setError(null);
             }
           }}
+          //: 기존 파일과 다른 상태에서는 위 카드의 두 선택지가 유일한 다음 단계다 —
+          //: 이 버튼으로 다시 "저장" 을 누르면 같은 exists 응답만 반복된다.
+          disabled={existingConflict !== null && step === "preview"}
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -817,7 +888,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             padding: "6px 12px",
             fontSize: 12,
             fontWeight: 600,
-            cursor: "pointer",
+            cursor: existingConflict !== null && step === "preview" ? "not-allowed" : "pointer",
+            opacity: existingConflict !== null && step === "preview" ? 0.5 : 1,
           }}
         >
           <span>✅</span>
@@ -875,7 +947,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             summary="생성된 인프라 파일을 워크스페이스에 저장합니다."
             riskLevel={proposal.risk_level}
             riskReasons={proposal.risk_reasons}
-            onApprove={handleApproveInfraFile}
+            onApprove={() => handleApproveInfraFile(false)}
             onReject={handleRejectDockerfile}
           />
         </div>

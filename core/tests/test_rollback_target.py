@@ -43,11 +43,13 @@ def _record(
     image: str,
     status: DeployStatus = DeployStatus.SUCCESS,
     rollback_eligible: bool = True,
+    image_id: str | None = None,
 ) -> DeploymentRecord:
     rec = DeploymentRecord(
         project_id="p",
         method=DeployMethod.LOCAL_DOCKER,
         image=image,
+        image_id=image_id,
         container_name=container,
         status=status,
         rollback_eligible=rollback_eligible,
@@ -86,7 +88,11 @@ def test_가장_최근_성공_배포를_고른다():
 
 
 def test_같은_태그로_재배포하면_대상이_없다():
-    """되돌려도 방금 올린 이미지가 다시 뜬다 — 대상으로 삼으면 거짓말이 된다."""
+    """되돌려도 방금 올린 이미지가 다시 뜬다 — 대상으로 삼으면 거짓말이 된다.
+
+    단, 이건 **이미지 ID 를 남기지 않은 옛 기록** 얘기다. ID 가 있으면 아래
+    테스트처럼 ID 로 되돌린다.
+    """
     _record("api", "api:latest")
 
     target, reason = deploy_route._previous_image_for("api", "api:latest")
@@ -208,3 +214,27 @@ def test_기록_시각이_같아도_나중에_기록된_배포가_최신이다()
     target, _reason = deploy_route._previous_image_for("api", "api:v3")
 
     assert target == "api:v2", "시각 동률에서 오래된 이미지를 최신으로 골랐다"
+
+
+def test_같은_태그라도_이미지_ID_가_있으면_ID_로_되돌린다():
+    """로컬 배포는 늘 `<폴더>:latest` 한 태그로 돈다 — 같은 태그를 무조건 건너뛰면
+    실제 제품 흐름에서 롤백이 영영 불가능하다(실기기 D2: 이상 감지 뒤 "되돌릴
+    기록 없음"). ID 는 불변이라 태그가 옮겨 갔어도 이전 바이트를 가리킨다."""
+    _record("api", "api:latest", image_id="sha256:0123456789abcdef0123456789abcdef")
+
+    target, reason = deploy_route._previous_image_for("api", "api:latest")
+
+    assert target == "sha256:0123456789abcdef0123456789abcdef"
+    assert "이미지 ID" in reason and "같은 태그" in reason
+
+
+def test_같은_태그_ID_있는_최신_기록이_다른_태그_옛_기록보다_먼저다():
+    import time
+
+    _record("api", "api:v1")
+    time.sleep(0.01)
+    _record("api", "api:latest", image_id="sha256:aaaa")
+
+    target, _ = deploy_route._previous_image_for("api", "api:latest")
+
+    assert target == "sha256:aaaa", "가장 최근 성공 배포(ID 있음)를 두고 옛 태그로 갔다"

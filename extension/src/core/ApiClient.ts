@@ -23,6 +23,17 @@ import {
 import { CoreManager } from './CoreManager';
 import { describeHttpError } from './httpError';
 
+/** 인프라 파일(Dockerfile 등) 승인 결과. `exists` 는 "안 썼다 — 기존 파일과 다르다" 이다. */
+export interface InfraApprovalResult {
+    status: string;               // saved | rejected | exists | error
+    file_type?: string;
+    path?: string;
+    diff?: string;                // exists 일 때: 현재 파일 → 새 초안 unified diff
+    existing_content?: string;
+    overwritten?: boolean;        // saved 일 때: 기존 파일을 덮어썼는가
+    backup_path?: string | null;  // 덮어썼으면 기존 파일을 남긴 곳
+}
+
 export interface CodeSecretWarning {
     rule: string;
     severity: string;
@@ -458,15 +469,22 @@ export class ApiClient {
     async approveDockerfile(
         proposalId: string,
         approved: boolean,
-    ): Promise<{ status: string; file_type?: string; path?: string }> {
-        const resp = await this.request<{ status: string; file_type?: string; path?: string }>(
+        overwrite: boolean = false,
+    ): Promise<InfraApprovalResult> {
+        //: 같은 경로에 내용이 다른 파일이 있으면 코어는 `exists` + diff 를 돌려주고
+        //: 쓰지 않는다. overwrite=true 로 다시 부르면 기존 파일을 백업하고 덮어쓴다.
+        const resp = await this.request<InfraApprovalResult>(
             'POST',
-            `/api/deploy/dockerfile/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
+            `/api/deploy/dockerfile/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}&overwrite=${overwrite}`,
         );
         return {
             status: resp.data?.status ?? 'error', // 서버 status 없으면 성공을 지어내지 않음
             file_type: resp.data?.file_type,
             path: resp.data?.path,
+            diff: resp.data?.diff,
+            existing_content: resp.data?.existing_content,
+            overwritten: resp.data?.overwritten,
+            backup_path: resp.data?.backup_path,
         };
     }
 
