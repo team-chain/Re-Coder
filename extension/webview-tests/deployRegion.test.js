@@ -244,3 +244,12 @@ test('AWS 연결 폼도 리전을 하드코딩하지 않는다', () => {
     '빈 리전을 하드코딩 값으로 채워 전송한다'
   );
 });
+
+test('ECS 실패 문구에 사유(detail)와 조치(remedy)가 붙는다 — 제목 한 줄만 남지 않게 (실기기 C4/C5)', () => {
+  const HOST = fs.readFileSync(path.join(__dirname, '../src/sidebar/SidebarProvider.ts'), 'utf8');
+  const DC = fs.readFileSync(path.join(__dirname, '../webview-src/components/DeploymentCenter.tsx'), 'utf8');
+  assert.match(HOST, /\.filter\(\(line\) => \/\^detail:\/\.test\(line\)\)/, 'log_tail 의 detail: 줄을 읽지 않는다');
+  assert.match(HOST, /status\.remedy/, 'remedy 를 버린다');
+  assert.ok(!/message: status\.error \|\| `ECS: \$\{status\.stage\}`/.test(HOST), 'error 한 줄만 보여주는 옛 코드가 남아 있다');
+  assert.match(DC, /whiteSpace: "pre-wrap" \}\}>\{message\}/, '여러 줄 문구가 한 줄로 뭉개진다');
+});

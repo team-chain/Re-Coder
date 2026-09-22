@@ -1227,6 +1227,10 @@ export class ApiClient {
         image_uri: string;
         task_def_arn: string;
         error: string;
+        //: 코어가 함께 주는 조치 안내와 사람이 읽을 단계명. 버리면 "Preflight 점검 실패" 처럼
+        //: 제목만 남고 무엇이 실패했는지가 사라진다(실기기 C4/C5).
+        remedy?: string;
+        stage_text?: string;
         started_at: string;
         finished_at: string;
         rollback_proposal?: {
@@ -1249,6 +1253,8 @@ export class ApiClient {
             image_uri: string;
             task_def_arn: string;
             error: string;
+            remedy?: string;
+            stage_text?: string;
             started_at: string;
             finished_at: string;
             rollback_proposal?: {

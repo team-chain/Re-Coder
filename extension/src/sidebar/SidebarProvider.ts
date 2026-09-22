@@ -794,9 +794,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     // 진행 상황을 보고 있을 때만 일반 상태 문구를 바꾼다.
                     const reportProgress = Boolean((payload as { reportProgress?: boolean } | undefined)?.reportProgress);
                     if (reportProgress) {
-                        this.postMessageToWebview(requestWebview, 'workspace.deploy.result', {
-                            message: status.error || `ECS: ${status.stage}`,
-                        });
+                        //: 실패 문구에 사유(detail)와 조치(remedy)를 붙인다. 예전에는 error 한 줄만
+                        //: 보여서 "Preflight 점검 실패 — 배포를 중단합니다" 뒤에 어떤 항목이
+                        //: 실패했는지가 사라졌다 — 코어는 log_tail 의 detail: 로 보내고 있었다.
+                        const details = (status.log_tail ?? [])
+                            .filter((line) => /^detail:/.test(line))
+                            .map((line) => line.replace(/^detail:\s*/, ''));
+                        const message = status.error
+                            ? [status.error, ...details, status.remedy ?? ''].filter(Boolean).join('\n')
+                            : `ECS: ${status.stage_text ?? status.stage}`;
+                        this.postMessageToWebview(requestWebview, 'workspace.deploy.result', { message });
                     }
                 } catch { /* status polling is best effort */ }
                 break;
