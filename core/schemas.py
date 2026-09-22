@@ -350,6 +350,12 @@ class DeploymentRecord(BaseModel):
     #: 가리키는 것" 이 뜬다 — 되돌렸다고 믿는 순간 다른 코드가 돌아간다.
     #: 그래서 실행 직후 docker 에게 물어 이미지 ID 를 남기고, 롤백은 이 값을 쓴다.
     image_id: Optional[str] = None
+    #: 이 배포의 이미지를 붙잡아 둔 **고정 태그**(`<repo>:recoder-rb-<배포ID>`).
+    #: 이미지 ID 도 영원하지 않다 — containerd 이미지 스토어(Docker Desktop 기본)는
+    #: 태그가 다음 빌드로 옮겨 가고 컨테이너까지 지워지면 옛 이미지를 바로 GC 한다.
+    #: 그러면 롤백 대상 ID 는 "No such image" 가 된다(실기기 D3). 별도 태그가
+    #: 참조를 붙잡고 있으면 GC 되지 않는다. 롤백·복구는 이 값을 최우선으로 쓴다.
+    pinned_image: Optional[str] = None
     deployed_at: datetime = Field(default_factory=datetime.utcnow)
     rollback_target: Optional[str] = None  # Previous image tag for rollback
     #: rollback_target 이 가리키는 이전 배포의 실행 조건 스냅샷.
