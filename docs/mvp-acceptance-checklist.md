@@ -60,7 +60,7 @@
 | # | 기준 | 기계 검증 | 실기기 확인 |
 |---|---|---|---|
 | F1 | VSIX 빌드 (경량) | ✅ dist 산출 확인 | ✅ 09-22 314KB 설치→코어 자동 기동→준비됨 |
-| F2 | 플랫폼별 VSIX (Core 동봉) | — | ☐ OS 별 1회 |
+| F2 | 플랫폼별 VSIX (Core 동봉) | — | ✅ 09-22 darwin-arm64: PyInstaller 65MB → `package-extension.sh darwin-arm64` → 설치 → 샘플 앱에서 동봉 `bin/recoder-core` 로 자동 기동(17894). win32-x64·linux-x64 는 해당 OS 에서 빌드 필요(미실행) |
 | F3 | 의존성 취약점 0 (또는 사유 문서) | ✅ security-audit.md | — |
 
 실기기 확인이 끝나면 이 파일의 ☐ 를 ✅ 로 바꿔 커밋한다 — 그 커밋이
