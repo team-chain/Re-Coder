@@ -350,6 +350,67 @@ def test_extension_field_names_are_translated():
     assert core.generate_sbom is False
 
 
+@pytest.mark.parametrize("endpoint", ["/api/deploy/ecs", "/api/ecs/deploy"])
+@pytest.mark.parametrize("has_health_route", [True, False])
+def test_automatic_health_check_reaches_aws_registration(
+    app_client, monkeypatch, tmp_path, endpoint, has_health_route
+):
+    """Both public requests must carry the resolved check through registration."""
+    client, ecs_routes = app_client
+    (tmp_path / "Dockerfile").write_text("FROM node:22-alpine\n")
+    (tmp_path / "app.js").write_text(
+        "const app=express(); app.get('/health', handler);" if has_health_route else "const app=express(); app.get('/', handler);"
+    )
+    registered = []
+
+    class Ecs:
+        def describe_services(self, **kwargs):
+            return {"services": []}
+
+        def register_task_definition(self, **definition):
+            registered.append(definition)
+            return {"taskDefinition": {"taskDefinitionArn": "arn:aws:ecs:us-east-1:123456789012:task-definition/test:1"}}
+
+    async def provision(self, req, rec, clients):
+        return aws_infra.NetworkTarget(vpc_id="vpc-test", subnet_ids=("subnet-test",))
+
+    async def build(self, req, rec, clients):
+        return "example/app:v1"
+
+    async def ensure(self, *args):
+        pass
+
+    original_deploy = ECSAgent.deploy
+
+    async def deploy(req, record=None):
+        req.run_preflight = req.run_security_scan = req.generate_sbom = False
+        return await original_deploy(ecs_routes._ecs_agent, req, record)
+
+    monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", deploy)
+    monkeypatch.setattr(ECSAgent, "_clients", staticmethod(lambda region: {"ecs": Ecs()}))
+    monkeypatch.setattr(ECSAgent, "_step_provision", provision)
+    monkeypatch.setattr(ECSAgent, "_step_build_and_push", build)
+    monkeypatch.setattr(ECSAgent, "_step_ensure_service", ensure)
+    monkeypatch.setattr(ECSAgent, "_resolve_role_arns", lambda *args: ("arn:aws:iam::123456789012:role/Exec", ""))
+    body = {"workspace_path": str(tmp_path), "container_port": 3456, "desired_count": 0}
+    if endpoint == "/api/ecs/deploy":
+        body.update(project_id="p", cluster="c", service="s")
+    response = client.post(endpoint, json=body)
+    assert response.status_code in {200, 202}, response.text
+    assert len(registered) == 1
+    container = registered[0]["containerDefinitions"][0]
+    status = client.get("/api/deploy/ecs/status").json()
+    if has_health_route:
+        check = container["healthCheck"]
+        assert check["command"][:3] == ["CMD", "node", "-e"]
+        assert "http://127.0.0.1:3456/health" in check["command"][3]
+        assert check["timeout"] == 5 and check["startPeriod"] == 60
+        assert not any(line.startswith("health_check:") for line in status["log_tail"])
+    else:
+        assert "healthCheck" not in container
+        assert any("헬스 경로를 찾지 못했습니다" in line for line in status["log_tail"])
+
+
 def test_blank_region_does_not_override_the_default(monkeypatch):
     """빈 문자열을 그대로 넘기면 기본 리전 계산이 무력화된다."""
     monkeypatch.setenv("AWS_REGION", "ap-northeast-2")
