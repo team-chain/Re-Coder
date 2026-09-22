@@ -310,6 +310,17 @@ def _previous_image_for(container_name: str, next_image: str) -> tuple[Optional[
         if not record.image:
             continue
         if record.image == next_image:
+            if record.image_id:
+                # 같은 태그라도 **이미지 ID** 가 남아 있으면 되돌릴 수 있다 — ID 는
+                # 불변이라 태그가 방금 빌드로 옮겨 갔어도 이전 바이트를 가리킨다.
+                # 로컬 배포는 늘 `<폴더>:latest` 한 태그로 돌기 때문에, 여기서
+                # 건너뛰면 실제 제품 흐름에서는 롤백이 영영 불가능했다(실기기 D2:
+                # 이상은 감지했는데 "되돌릴 이전 배포 기록이 없어" 제안 불가).
+                return record.image_id, (
+                    f"롤백 대상: {record.image} (이전 성공 배포 · 같은 태그라 이미지 ID "
+                    f"{record.image_id[:19]}… 로 되돌립니다)"
+                )
+            # ID 를 못 남긴 옛 기록은 같은 태그로 되돌려도 방금 이미지가 다시 뜬다.
             # 더 뒤로 가면 다른 태그가 있을 수 있으므로 계속 본다.
             same_tag_seen = True
             continue
