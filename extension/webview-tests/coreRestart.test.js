@@ -15,6 +15,7 @@ function loadManager(overrides = {}) {
   const output = { exports: {} };
   const localRequire = createRequire(compiled);
   const vscode = {
+    ExtensionMode: { Production: 1, Development: 2, Test: 3 },
     window: { showInformationMessage() {} },
     workspace: { workspaceFolders: [] },
   };
@@ -24,7 +25,9 @@ function loadManager(overrides = {}) {
     process, console, fetch, AbortController, setTimeout, clearTimeout,
     ...overrides,
   }, { filename: compiled });
-  return new output.exports.CoreManager({});
+  const manager = new output.exports.CoreManager({ extensionMode: 1, extensionPath: path.dirname(compiled) });
+  manager._findCoreSpec = () => ({ command: process.execPath, args: [fixture] });
+  return manager;
 }
 
 async function waitFor(check) {
@@ -45,7 +48,6 @@ async function isolatedCore(t) {
   // Never read or modify the user's Core, credentials or AWS resources.
   manager._runtimePath = runtimeFile;
   manager._lockPath = path.join(dir, 'core.lock');
-  manager._findWorkspaceCore = () => null;
   manager.probeRunningCore = async () => null;
   manager._gatewayEnv = async () => ({});
   manager._awsEnv = async () => ({});
@@ -103,6 +105,22 @@ test('owned Core also restarts, while concurrent restart and ensure calls wait f
   assert.equal(first, second);
   assert.equal(first, ensured);
   assert.equal(fs.readFileSync(path.join(dir, 'starts.log'), 'utf8').trim().split('\n').length, 3);
+});
+
+test('a different running Core is preserved until explicit restart replaces it with the selected entrypoint', async t => {
+  const { manager, before, dir } = await isolatedCore(t);
+  const replacement = path.join(dir, 'installed-core.js');
+  fs.copyFileSync(fixture, replacement);
+  manager._findCoreSpec = () => ({ command: process.execPath, args: [replacement, path.join(dir, 'runtime.json'), String(before.port)] });
+  await assert.rejects(manager.ensureRunning(), /다른 실행 경로/);
+  await assert.rejects(manager.refreshToken(), /다른 실행 경로/);
+  assert.equal((await manager.readRuntime()).pid, before.pid);
+  assert.equal((await manager.healthCheck()).status, 'ok');
+  const client = await manager.restart();
+  const after = await manager.readRuntime();
+  assert.notEqual(after.pid, before.pid);
+  assert.equal(after.entrypoint, fs.realpathSync(replacement));
+  assert.equal((await client.getStatus()).status, 'ok');
 });
 
 test('Core stdout, stderr and graceful or forced exits persist across restarts', async t => {

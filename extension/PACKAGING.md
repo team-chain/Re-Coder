@@ -44,7 +44,7 @@ extension/bin-dist/
 ```
 
 파일 이름은 바꾸지 말 것. `CoreManager.ts` 가 `bin/recoder-core[.exe]` 라는 고정 경로를
-찾는다(탐색 순서 2번). 스크립트가 대상 플랫폼의 것만 그 자리에 복사한다.
+찾는다(설치 실행의 첫 번째 탐색 경로). 스크립트가 대상 플랫폼의 것만 그 자리에 복사한다.
 
 ## 3. 게이트웨이 URL 베이크 (운영자)
 
@@ -101,3 +101,18 @@ VSIX 를 열어(`unzip -l`) 아래를 확인한다.
 3. 끝 — Core 자동 실행 + 게이트웨이로 AI
 
 Ship(컨테이너 배포) 기능은 Docker Desktop 이 필요하다. 정적 사이트 S3 배포는 불필요.
+
+## 설치 실행과 개발 실행의 Core 선택
+
+- 일반 설치(`ExtensionMode.Production`): `extension/bin/recoder-core[.exe]` → PATH → `~/.recoder/bin/` 순으로 바이너리를 찾는다. ReCoder 저장소를 열어도 Python 소스를 자동 실행하지 않는다.
+- F5/확장 테스트(`Development`/`Test`): 활성 확장 경로 바로 옆 `../core/main.py`를 실행한다. 테스트용 앱이나 다른 체크아웃을 열어도 활성 확장의 소스를 쓴다. 이 소스가 없으면 오류를 안내한다.
+- 바이너리 없는 경량 설치본: 사용자가 Core를 수동 실행한 뒤 연결할 수 있다. 재시작할 실행 파일이 없으므로 `Restart Core`는 수동 Core를 종료하지 않고 안내한다.
+
+현재 선택한 실행 경로와 `~/.recoder/runtime.json`의 `entrypoint`가 같아야 재연결한다.
+다른 Core가 이미 실행 중이면 자동 종료하거나 연결하지 않는다. 개발 호스트 등 다른 ReCoder 창을
+닫은 뒤 사용할 창에서 `ReCoder: Restart Core`를 실행하면, 기존 Core의 인증된 종료와 실제 프로세스
+종료를 기다린 다음 선택한 Core를 시작한다. 실행 경로 정보가 없는 구버전도 같은 전환이 필요하다.
+
+Mac 설치 검증에서는 저장소를 열어도 `entrypoint`가 설치 폴더의 `bin/recoder-core`인지,
+F5 개발 호스트에서는 샘플 앱을 열어도 개발 확장 옆 `core/main.py`인지 확인한다.
+`runtime.json` 전체를 공유하면 인증 토큰이 노출되므로 `entrypoint`, `pid`, `port`만 출력한다.
