@@ -4,7 +4,7 @@
  * - runtime.json 으로 포트/토큰 공유
  * - 사용자 수동 실행(python core/main.py) 자동 감지 (probeRunningCore)
  * - graceful shutdown: SIGTERM → 5초 대기 → SIGKILL 폴백
- * - 개발 모드(분기): core/main.py 를 python 으로 실행, Windows python 탐색
+ * - F5/확장 테스트: 해당 확장 소스의 core/main.py, 설치 실행: Core 바이너리
  */
 import * as vscode from 'vscode';
 import * as path from 'path';
@@ -116,83 +116,79 @@ export class CoreManager {
     }
 
     private async _ensureRunning(): Promise<CoreClient> {
-        // ReCoder 저장소를 직접 열어 개발 중인 경우에는, 이전 VSIX가 남겨 둔
-        // 번들 Core를 재사용하지 않는다. 그 프로세스는 최신 API/진단 로직을
-        // 포함하지 않을 수 있으므로 현재 workspace의 Python Core를 새로 시작한다.
-        const workspaceCore = this._findWorkspaceCore();
-        if (workspaceCore && this.coreProcess && !this.coreProcess.killed) {
-            const health = await this.healthCheck();
-            if (health && health.status !== 'down') {
-                this._client = new CoreClient(this.port, this.sessionToken);
-                return this._client;
-            }
-        }
-
-        // 1) 정상 경로 — runtime.json + healthCheck.
-        //
-        // 예전에는 이 블록 전체를 `if (!workspaceCore)` 로 감쌌다. 즉 ReCoder
-        // 저장소를 연 개발 모드에서는 **떠 있는 Core 를 찾는 시도조차 하지
-        // 않고** 곧장 재spawn 으로 떨어졌다. 그런데 개발 중에는 워크스페이스의
-        // Core 를 직접 띄워 두는 게 정상 사용법이라, 연결이 한 번 끊기면
-        // 창을 리로드하기 전까지 영영 복구되지 않았다(싱글턴 락·포트 충돌로
-        // 17894 ↔ 17895 를 오갔다).
-        //
-        // 이제는 항상 찾아보되, **재사용해도 되는 Core 인지**를 runtime.json 의
-        // entrypoint 로 판단한다(shouldReuseRunningCore). 원래 막으려던 것
-        // — 예전 VSIX 가 남긴 번들 Core 재사용 — 은 그대로 막힌다.
+        const spec = this._findCoreSpec();
+        const expected = this.expectedEntrypoint(spec);
         const runtime = await this.readRuntime();
-        const mayReuse = shouldReuseRunningCore(
-            workspaceCore ? workspaceCore.mainPy : null,
-            runtime?.entrypoint ?? null,
-        );
-        if (mayReuse) {
-            if (runtime) {
-                this.port = runtime.port;
-                this.sessionToken = runtime.session_token;
+        if (runtime) {
+            if (shouldReuseRunningCore(expected, runtime.entrypoint)) {
+                this.useRuntime(runtime, expected);
                 const health = await this.healthCheck();
                 if (health && health.status !== 'down') {
                     this._client = new CoreClient(this.port, this.sessionToken);
                     return this._client;
                 }
+            } else if (!Number.isSafeInteger(runtime.pid) || runtime.pid <= 1 || this.isProcessRunning(runtime.pid)) {
+                this.assertCompatibleRuntime(runtime, expected);
             }
+        }
 
-            // 2) runtime.json 이 없거나 health 가 실패하더라도, 사용자가 `python core/main.py`
-            //    같은 방식으로 수동 실행 중일 수 있다. 기본 포트 범위 (17894~17910) 에서
-            //    /api/health (인증 불요) 가 응답하는지 직접 확인하고, 있다면 runtime.json
-            //    이 곧 쓰여질 때까지 잠시 대기하여 토큰을 회수한다.
-            const detected = await this.probeRunningCore();
-            if (detected) {
-                this.port = detected.port;
-                // runtime.json 이 잠시 늦게 쓰여질 수 있으므로 최대 3초 polling.
-                const deadline = Date.now() + 3000;
-                while (Date.now() < deadline) {
-                    const rt = await this.readRuntime();
-                    if (rt && rt.port === this.port && rt.session_token) {
-                        this.sessionToken = rt.session_token;
+        // 수동 실행 또는 runtime 파일 기록이 늦는 경우도 실행 경로와 토큰을 확인한다.
+        const detected = await this.probeRunningCore();
+        if (detected) {
+            const deadline = Date.now() + 3000;
+            while (Date.now() < deadline) {
+                const rt = await this.readRuntime();
+                if (rt && rt.port === detected.port) {
+                    this.assertCompatibleRuntime(rt, expected);
+                    if (rt.session_token) {
+                        this.useRuntime(rt, expected);
                         this._client = new CoreClient(this.port, this.sessionToken);
                         return this._client;
                     }
-                    await this.sleep(200);
                 }
-                // 토큰을 못 받아도 일단 connect 는 가능 — 인증 필요 호출이 401/503 일 뿐.
-                // 호출 측에서 refreshToken 으로 재시도.
-                this._client = new CoreClient(this.port, this.sessionToken);
-                return this._client;
+                await this.sleep(200);
             }
+            throw new Error('실행 중인 Core의 인증 정보를 읽지 못했습니다. Core 실행 상태를 확인한 뒤 다시 연결하세요.');
         }
 
         if (this.isSpawning) {
             await this.waitForReady();
-            this._client = new CoreClient(this.port, this.sessionToken);
-            return this._client;
+        } else {
+            if (!spec) { throw this.missingCoreError(); }
+            await this.cleanupStale();
+            await this.spawnCore(spec);
         }
-
-        // 3) 그래도 못 찾으면 직접 spawn 시도. 번들된 바이너리가 없는 dev 환경에선
-        //    core/main.py 를 python 으로 실행한다.
-        await this.cleanupStale();
-        await this.spawnCore();
         this._client = new CoreClient(this.port, this.sessionToken);
         return this._client;
+    }
+
+    private expectedEntrypoint(spec: SpawnSpec | null = this._findCoreSpec()): string | null {
+        // 개발 소스가 없을 때도 임의의 설치 Core로 연결하지 않는다.
+        if (this.isDevelopment()) { return this.developmentEntrypoint(); }
+        return spec ? spec.args[0] ?? spec.command : null;
+    }
+
+    private assertCompatibleRuntime(runtime: RuntimeConfig, expected: string | null): void {
+        if (!shouldReuseRunningCore(expected, runtime.entrypoint)) {
+            throw new Error(
+                `다른 실행 경로의 Core가 실행 중입니다. 현재: ${runtime.entrypoint || '경로 정보 없음'} / ` +
+                `필요: ${expected}. 다른 ReCoder 창의 자동 재연결을 멈추거나 창을 닫은 뒤 ` +
+                '명령 팔레트에서 ReCoder: Restart Core를 실행해 전환하세요.',
+            );
+        }
+    }
+
+    private useRuntime(runtime: RuntimeConfig, expected: string | null): void {
+        this.assertCompatibleRuntime(runtime, expected);
+        if (!runtime.session_token) { throw new Error('Core 실행 정보에 인증 토큰이 없습니다. Core를 재시작하세요.'); }
+        this.port = runtime.port;
+        this.sessionToken = runtime.session_token;
+    }
+
+    private missingCoreError(): Error {
+        return new Error(this.isDevelopment()
+            ? '개발 Core 소스가 없습니다. 실행 중인 확장 소스 옆의 core/main.py를 확인하세요.'
+            : 'ReCoder Core 바이너리가 없습니다. OS에 맞는 VSIX를 설치하거나 Core를 수동 실행한 뒤 연결하세요.');
     }
 
     /**
@@ -231,12 +227,6 @@ export class CoreManager {
         }
     }
 
-    private _tryLoadRuntime(): RuntimeConfig | null {
-        try {
-            if (!fs.existsSync(this._runtimePath)) return null;
-            return JSON.parse(fs.readFileSync(this._runtimePath, 'utf-8')) as RuntimeConfig;
-        } catch { return null; }
-    }
 
     /** 게이트웨이 모드 env: recoder.gateway.url + 저장된 학생 토큰이 모두 있으면 주입. */
     private async _gatewayEnv(): Promise<Record<string, string>> {
@@ -410,6 +400,8 @@ export class CoreManager {
     private async restartCore(pendingStart: Promise<CoreClient> | null): Promise<CoreClient> {
         // 이미 시작 중이면 runtime.json이 준비된 뒤 그 인스턴스를 종료한다.
         if (pendingStart) { await pendingStart.catch(() => undefined); }
+        // 수동 연결 전용 설치본은 대체 실행 파일 없이 정상 Core부터 종료하면 안 된다.
+        if (!this._findCoreSpec()) { throw this.missingCoreError(); }
         const runtime = await this.readRuntime();
         if (runtime) {
             const pid = runtime.pid;
@@ -480,14 +472,11 @@ export class CoreManager {
         });
     }
 
-    private async spawnCore(): Promise<void> {
+    private async spawnCore(spec: SpawnSpec | null = this._findCoreSpec()): Promise<void> {
         this.isSpawning = true;
         let processLog: CoreProcessLog | undefined;
         try {
-            const spec = this._findCoreSpec();
-            if (!spec) {
-                throw new Error('ReCoder Core 바이너리/소스를 찾을 수 없습니다. (bin/recoder-core 또는 core/main.py)');
-            }
+            if (!spec) { throw this.missingCoreError(); }
 
             vscode.window.showInformationMessage('ReCoder Core를 시작합니다...');
 
@@ -510,6 +499,7 @@ export class CoreManager {
                 .filter(([key]) => /TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY/i.test(key))
                 .map(([, value]) => value ?? ''));
             processLog.event('spawn requested');
+            processLog.event(`selected mode=${this.isDevelopment() ? 'development' : 'installed'} entrypoint=${this.expectedEntrypoint(spec)}`);
             this.coreProcess = spawn(spec.command, args, {
                 env: { ...hostEnv, ...gatewayEnv, ...awsEnv },
                 detached: false,
@@ -548,8 +538,7 @@ export class CoreManager {
             const runtime = await this.readRuntime();
             if (runtime) {
                 processLog.addSecrets([runtime.session_token]);
-                this.port = runtime.port;
-                this.sessionToken = runtime.session_token;
+                this.useRuntime(runtime, this.expectedEntrypoint(spec));
             }
             processLog.event(`ready port=${this.port}`);
         } catch (error) {
@@ -561,64 +550,33 @@ export class CoreManager {
     }
 
     private async waitForReady(timeoutMs: number = 15000): Promise<void> {
+        const expected = this.expectedEntrypoint();
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
             const runtime = await this.readRuntime();
             if (runtime) {
-                this.port = runtime.port;
-                this.sessionToken = runtime.session_token;
-                const health = await this.healthCheck();
-                if (health && health.status !== 'down') { return; }
+                this.assertCompatibleRuntime(runtime, expected);
+                if (runtime.session_token) {
+                    this.useRuntime(runtime, expected);
+                    const health = await this.healthCheck();
+                    if (health && health.status !== 'down') { return; }
+                }
             }
             await this.sleep(500);
         }
         throw new Error('ReCoder Core가 시간 내에 준비되지 않았습니다.');
     }
 
-    private async _waitForRuntime(timeoutMs: number): Promise<CoreClient> {
-        const start = Date.now();
-        while (Date.now() - start < timeoutMs) {
-            await new Promise(r => setTimeout(r, 500));
-            const cfg = this._tryLoadRuntime();
-            if (cfg) {
-                const client = new CoreClient(cfg.port, cfg.session_token);
-                const alive = await client.healthCheck();
-                if (alive) {
-                    this._client = client;
-                    this.port = cfg.port;
-                    this.sessionToken = cfg.session_token;
-                    return client;
-                }
-            }
-        }
-        throw new Error('ReCoder Core 시작 타임아웃 (15초)');
-    }
-
     private async cleanupStale(): Promise<void> {
         const runtime = await this.readRuntime();
         if (!runtime) { return; }
         const pid = runtime.pid;
-        if (!pid) {
-            // pid 없으면 runtime.json 만 제거
-            try { if (fs.existsSync(this.getRuntimeJsonPath())) { fs.unlinkSync(this.getRuntimeJsonPath()); } } catch { /* ignore */ }
-            return;
+        if (!Number.isSafeInteger(pid) || pid <= 1 || this.isProcessRunning(pid)) {
+            throw new Error('기존 Core의 종료를 확인하지 못했습니다. 실행 중인 Core를 확인한 뒤 ReCoder: Restart Core로 다시 시작하세요.');
         }
-        try {
-            if (process.platform === 'win32') {
-                try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }); } catch { /* already gone */ }
-            } else {
-                try {
-                    process.kill(pid, 'SIGTERM');
-                    await this.sleep(2000);
-                    process.kill(pid, 'SIGKILL');
-                } catch { /* already gone */ }
-            }
-        } catch { /* ignore */ }
-        const runtimePath = this.getRuntimeJsonPath();
-        try { if (fs.existsSync(runtimePath)) { fs.unlinkSync(runtimePath); } } catch { /* ignore */ }
-        // 싱글톤 락도 함께 제거 — 스테일 락이 남으면 새 Core 가 옛 Core 에 양보(window 등록)해
-        // 라우트 없는 옛 포트를 가리키는 문제를 막는다.
-        try { if (fs.existsSync(this._lockPath)) { fs.unlinkSync(this._lockPath); } } catch { /* ignore */ }
+        // 죽은 프로세스의 기록만 정리한다. 공유 PID를 SIGTERM/SIGKILL 하지 않는다.
+        // 락은 새 Core의 singleton이 소유 PID를 확인한 뒤 회수한다.
+        try { fs.unlinkSync(this.getRuntimeJsonPath()); } catch { /* already removed */ }
     }
 
     async healthCheck(): Promise<CoreHealth | null> {
@@ -721,11 +679,12 @@ export class CoreManager {
     getSessionToken(): string { return this.sessionToken; }
 
     async refreshToken(): Promise<boolean> {
-        // runtime.json 에서 최신 토큰을 무조건 다시 읽어 in-memory 값과 동기화한다.
+        // 같은 실행 경로의 Core가 발급한 최신 토큰만 동기화한다.
         // - 토큰이 없던 상태(빈 문자열)였더라도 runtime.json 의 값이 있으면 채운다.
         // - 이미 토큰이 있어도 Core 가 재시작되어 새 토큰을 발급했을 수 있으므로 갱신.
         const runtime = await this.readRuntime();
         if (runtime && runtime.session_token) {
+            this.assertCompatibleRuntime(runtime, this.expectedEntrypoint());
             const changed =
                 runtime.session_token !== this.sessionToken || runtime.port !== this.port;
             this.port = runtime.port;
@@ -738,89 +697,39 @@ export class CoreManager {
         return false;
     }
 
-    /**
-     * Core 실행 명령을 결정한다.
-     *   1) ReCoder 소스 저장소를 연 개발 모드: workspace/core/main.py
-     *   2) VSIX 번들 바이너리 (`extension/bin/recoder-core[.exe]`)
-     *   3) PATH 상의 `recoder-core`
-     *   4) `~/.recoder/bin/recoder-core[.exe]`
-     *   5) 개발 모드: `extension/../core/main.py` 를 python 으로 실행
-     *
-     * 반환값은 spawn(command, args) 에 그대로 넘길 수 있는 형태.
-     * 못 찾으면 null 반환.
-     */
-    private _findCoreSpec(): SpawnSpec | null {
-        const platform = process.platform;
-        const binaryName = platform === 'win32' ? 'recoder-core.exe' : 'recoder-core';
-        const ext = this.extensionContext.extensionPath;
-
-        // 개발자가 ReCoder 저장소 자체를 열었을 때는, VSIX 안에 남아 있을 수 있는
-        // 이전 Core 바이너리보다 workspace의 최신 Python Core를 우선 사용한다.
-        // 일반 사용자의 프로젝트는 extension/package.json이 없으므로 이 경로에
-        // 해당하지 않고, 아래 번들 바이너리 경로를 그대로 사용한다.
-        // workspace로 저장소 루트 또는 extension/ 폴더만 열 수 있으므로, 각
-        // workspace의 부모도 함께 확인한다. 그래야 개발 중 최신 소스 Core를
-        // 일관되게 사용하고, 낡은 번들 바이너리로 인한 API 404를 피할 수 있다.
-        const workspaceCore = this._findWorkspaceCore();
-        if (workspaceCore) {
-            const coreDir = path.dirname(workspaceCore.mainPy);
-            return {
-                command: this._findPython(coreDir),
-                args: [workspaceCore.mainPy],
-                cwd: coreDir,
-            };
-        }
-
-        // 2) VSIX 번들 (Windows: .exe / 그 외: extension)
-        const bundledPath = path.join(ext, 'bin', binaryName);
-        if (fs.existsSync(bundledPath)) { return { command: bundledPath, args: [] }; }
-
-        // Windows 가 아닌데 .exe 가 없으면 그냥 'recoder-core' 도 확인
-        const bundledAlt = path.join(ext, 'bin', 'recoder-core');
-        if (fs.existsSync(bundledAlt)) { return { command: bundledAlt, args: [] }; }
-
-        // 2) PATH 상의 바이너리
-        try {
-            const which = platform === 'win32' ? 'where' : 'which';
-            const result = execSync(`${which} recoder-core`, { encoding: 'utf-8' }).trim();
-            if (result && fs.existsSync(result.split('\n')[0])) {
-                return { command: result.split('\n')[0], args: [] };
-            }
-        } catch { /* not in PATH */ }
-
-        // 3) ~/.recoder/bin/...
-        const homePath = path.join(os.homedir(), '.recoder', 'bin', binaryName);
-        if (fs.existsSync(homePath)) { return { command: homePath, args: [] }; }
-
-        // 4) 개발 모드: core/main.py
-        const candidates = [
-            path.join(ext, '..', 'core', 'main.py'),
-            path.join(ext, '..', '..', 'core', 'main.py'),
-        ];
-        const mainPy = candidates.find(p => fs.existsSync(p));
-        if (mainPy) {
-            const coreDir = path.dirname(mainPy);
-            const py = this._findPython(coreDir);
-            return {
-                command: py,
-                args: [mainPy],
-                cwd: coreDir,
-            };
-        }
-
-        return null;
+    /** F5/확장 테스트만 소스를 사용한다. 열린 프로젝트의 이름이나 구조로 추측하지 않는다. */
+    private isDevelopment(): boolean {
+        return this.extensionContext.extensionMode === vscode.ExtensionMode.Development
+            || this.extensionContext.extensionMode === vscode.ExtensionMode.Test;
     }
 
-    /** 현재 열린 workspace가 ReCoder 소스 저장소이면 최신 Core 진입점을 찾는다. */
-    private _findWorkspaceCore(): { mainPy: string; extensionManifest: string } | null {
-        const workspaceRoots = (vscode.workspace.workspaceFolders ?? [])
-            .flatMap(folder => [folder.uri.fsPath, path.dirname(folder.uri.fsPath)]);
-        return workspaceRoots
-            .map(root => ({
-                mainPy: path.join(root, 'core', 'main.py'),
-                extensionManifest: path.join(root, 'extension', 'package.json'),
-            }))
-            .find(candidate => fs.existsSync(candidate.mainPy) && fs.existsSync(candidate.extensionManifest)) ?? null;
+    private developmentEntrypoint(): string {
+        return path.resolve(this.extensionContext.extensionPath, '..', 'core', 'main.py');
+    }
+
+    /** 개발: 해당 확장의 소스. 설치: 번들 → PATH → 사용자 bin. 소스로 자동 폴백하지 않는다. */
+    private _findCoreSpec(): SpawnSpec | null {
+        if (this.isDevelopment()) {
+            const mainPy = this.developmentEntrypoint();
+            if (!fs.existsSync(mainPy)) { return null; }
+            const coreDir = path.dirname(mainPy);
+            return { command: this._findPython(coreDir), args: [mainPy], cwd: coreDir };
+        }
+
+        const binaryName = process.platform === 'win32' ? 'recoder-core.exe' : 'recoder-core';
+        const bundledPath = path.join(this.extensionContext.extensionPath, 'bin', binaryName);
+        if (fs.existsSync(bundledPath)) { return { command: bundledPath, args: [] }; }
+
+        try {
+            const which = process.platform === 'win32' ? 'where' : 'which';
+            const found = execSync(`${which} recoder-core`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+                .split(/\r?\n/)[0].trim();
+            if (found && fs.existsSync(found)) { return { command: found, args: [] }; }
+        } catch { /* not in PATH */ }
+
+        const homePath = path.join(os.homedir(), '.recoder', 'bin', binaryName);
+        if (fs.existsSync(homePath)) { return { command: homePath, args: [] }; }
+        return null;
     }
 
     /** 기존 시그니처 호환용 — 바이너리 경로만 반환 */

@@ -13,6 +13,8 @@ import os
 import platform
 import signal
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -48,36 +50,36 @@ class CoreSingleton:
         Returns True if the lock was successfully acquired (this process is
         the first), False if another live process already holds it.
         """
-        _RECODER_DIR.mkdir(parents=True, exist_ok=True)
-        cls.set_file_permissions(_RECODER_DIR)
-
-        if cls.LOCK_FILE.exists():
-            if cls.check_stale_process():
-                cls.kill_stale_process()
-            else:
-                # A live process already holds the lock — register as window
-                cls.add_window(pid)
+        with cls._state_guard():
+            existing = cls._read_lock()
+            owner = existing.get("pid") if existing else None
+            if isinstance(owner, int) and owner > 0 and cls._pid_alive(owner):
+                return owner == pid
+            # An older Core may have lost its lock file but still own runtime.
+            runtime = cls.read_runtime()
+            if runtime and runtime.pid != pid and runtime.pid > 0 and cls._pid_alive(runtime.pid):
                 return False
-
-        lock_data = {
-            "pid": pid,
-            "started_at": datetime.utcnow().isoformat(),
-            "windows": [pid],
-        }
-        cls.LOCK_FILE.write_text(json.dumps(lock_data), encoding="utf-8")
-        cls.set_file_permissions(cls.LOCK_FILE)
-        return True
+            cls.RUNTIME_FILE.unlink(missing_ok=True)
+            cls._write_json(cls.LOCK_FILE, {
+                "pid": pid,
+                "started_at": datetime.utcnow().isoformat(),
+                "windows": [pid],
+            })
+            return True
 
     @classmethod
     def release_lock(cls, pid: int) -> None:
         """
-        Release the singleton lock unconditionally (called by the owning PID
-        on clean shutdown).
+        Remove only metadata owned by this PID. A losing startup or an old
+        process's repeated finally/atexit must never erase a newer Core.
         """
-        if cls.LOCK_FILE.exists():
-            cls.LOCK_FILE.unlink(missing_ok=True)
-        if cls.RUNTIME_FILE.exists():
-            cls.RUNTIME_FILE.unlink(missing_ok=True)
+        with cls._state_guard():
+            data = cls._read_lock()
+            if data and data.get("pid") == pid:
+                cls.LOCK_FILE.unlink(missing_ok=True)
+            runtime = cls.read_runtime()
+            if runtime and runtime.pid == pid:
+                cls.RUNTIME_FILE.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Window management (multi-window VSCode support)
@@ -176,10 +178,7 @@ class CoreSingleton:
             pid=pid,
             entrypoint=cls.current_entrypoint(),
         )
-        cls.RUNTIME_FILE.write_text(
-            config.model_dump_json(indent=2), encoding="utf-8"
-        )
-        cls.set_file_permissions(cls.RUNTIME_FILE)
+        cls._write_json(cls.RUNTIME_FILE, config.model_dump())
 
     @classmethod
     def read_runtime(cls) -> Optional[RuntimeConfig]:
@@ -213,8 +212,14 @@ class CoreSingleton:
     @classmethod
     def kill_stale_process(cls) -> None:
         """Remove stale lock and runtime files (the process is already gone)."""
-        cls.LOCK_FILE.unlink(missing_ok=True)
-        cls.RUNTIME_FILE.unlink(missing_ok=True)
+        with cls._state_guard():
+            if not cls.check_stale_process():
+                return
+            runtime = cls.read_runtime()
+            if runtime and runtime.pid > 0 and cls._pid_alive(runtime.pid):
+                return
+            cls.LOCK_FILE.unlink(missing_ok=True)
+            cls.RUNTIME_FILE.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # File permission hardening
@@ -242,6 +247,55 @@ class CoreSingleton:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @classmethod
+    @contextmanager
+    def _state_guard(cls):
+        """Serialize metadata ownership changes across Core processes.
+
+        Keep this guard file in place: unlinking a locked file would let another
+        process lock a different inode. The OS releases the lock on process exit.
+        """
+        cls.LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cls.set_file_permissions(cls.LOCK_FILE.parent)
+        guard = cls.LOCK_FILE.with_suffix(".guard")
+        fd = os.open(guard, os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(fd, "r+b") as stream:
+            cls.set_file_permissions(guard)
+            if os.name == "nt":
+                import msvcrt
+                if os.fstat(stream.fileno()).st_size == 0:
+                    stream.write(b"\0")
+                    stream.flush()
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+    @classmethod
+    def _write_json(cls, path: Path, data: dict) -> None:
+        """Publish complete metadata with private permissions from creation."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, default=str)
+                stream.flush()
+                os.fsync(stream.fileno())
+            cls.set_file_permissions(Path(temporary))
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
     @classmethod
     def _read_lock(cls) -> Optional[dict]:

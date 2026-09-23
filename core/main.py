@@ -96,25 +96,10 @@ async def lifespan(app: FastAPI):
 
     lock_acquired = CoreSingleton.acquire_lock(pid)
     if not lock_acquired:
-        existing = CoreSingleton.read_runtime()
-        if existing:
-            app.state.port = existing.port
-            app.state.session_token = existing.session_token
-            app.state.started_at = datetime.now(timezone.utc)
-        else:
-            port = _bound_port if _bound_port else CoreSingleton.find_available_port()
-            token = os.environ.get("SESSION_TOKEN") or secrets.token_urlsafe(32)
-            app.state.port = port
-            app.state.session_token = token
-            CoreSingleton.write_runtime(port=port, token=token, pid=pid)
-            CoreSingleton.set_file_permissions(CoreSingleton.RUNTIME_FILE)
-            app.state.started_at = datetime.now(timezone.utc)
-
-        try:
-            yield
-        finally:
-            CoreSingleton.remove_window(pid)
-        return
+        # A second server cannot "attach" by copying the first server's token.
+        # It would serve on another port without owning runtime.json. The
+        # extension connects to the existing Core instead of starting this one.
+        raise RuntimeError("Another ReCoder Core is already running; reuse the existing Core.")
 
     port = _bound_port if _bound_port else CoreSingleton.find_available_port()
     app.state.port = port
@@ -181,9 +166,7 @@ async def lifespan(app: FastAPI):
                 await relay_poller.stop()
             except Exception:
                 pass
-        is_last = CoreSingleton.remove_window(pid)
-        if is_last:
-            CoreSingleton.release_lock(pid)
+        CoreSingleton.release_lock(pid)
 
 
 def create_app() -> FastAPI:

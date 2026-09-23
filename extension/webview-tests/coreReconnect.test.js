@@ -55,7 +55,7 @@ test('[음성 대조] 개발 모드에서 예전 VSIX 의 번들 코어는 재�
   );
 });
 
-test('개발 모드가 아니면(일반 사용자) 떠 있는 코어를 그대로 쓴다', () => {
+test('선택할 실행 파일이 없는 경량 설치본은 수동 실행 코어를 쓴다', () => {
   assert.strictEqual(shouldReuseRunningCore(null, BUNDLED), true);
   assert.strictEqual(shouldReuseRunningCore(null, null), true);
 });
