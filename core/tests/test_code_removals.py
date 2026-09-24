@@ -152,7 +152,12 @@ def test_new_file_and_external_symlink(tmp_path):
     inside = tmp_path / "inside"
     inside.mkdir()
     (tmp_path / "secret.js").write_text(JS)
-    (inside / "link.js").symlink_to(tmp_path / "secret.js")
+    try:
+        (inside / "link.js").symlink_to(tmp_path / "secret.js")
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            pytest.skip("Windows symbolic links require Developer Mode or link privilege")
+        raise
     ops = [{"file": "new.js", "content": JS}, {"file": "link.js", "content": ""}]
     annotate_removals(ops, inside)
     assert ops[0]["removal_check"] == {"status": "new_file", "removed": []}

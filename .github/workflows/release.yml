@@ -1,0 +1,48 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-vsix:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: core/requirements-release-win32-x64.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - name: Install locked build dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          ./.venv/Scripts/python.exe -m pip install -r core/requirements-release-win32-x64.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci --prefix extension
+      - name: Extension regression checks
+        working-directory: extension
+        run: npm test
+      - name: Build bundled Core and native VSIX
+        shell: pwsh
+        run: ./.venv/Scripts/python.exe scripts/build-release.py
+      - name: Exercise installed package with an isolated user profile
+        shell: pwsh
+        run: node extension/harness/release-smoke.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recoder-win32-x64
+          path: |
+            extension/dist/*-win32-x64.vsix
+            extension/dist/*-win32-x64.vsix.sha256
+            extension/dist/*-win32-x64.release.json
+          if-no-files-found: error

@@ -79,10 +79,10 @@ class GatewayProvider(LLMProvider):
             return ""
 
     # ── BedrockProvider 호환 async converse ─────────────────────────
-    async def converse(self, messages, system=None, output_schema=None) -> dict:
+    async def converse(self, messages, system=None, output_schema=None, *, max_tokens=4096, temperature=0.0) -> dict:
         loop = asyncio.get_running_loop()
         payload = {"messages": messages, "system": system or "",
-                   "output_schema": output_schema, "max_tokens": 2048}
+                   "output_schema": output_schema, "max_tokens": max_tokens, "temperature": temperature}
         result = await loop.run_in_executor(None, self._post, payload)
         if output_schema is not None and isinstance(result.get("parsed"), dict):
             return result["parsed"]

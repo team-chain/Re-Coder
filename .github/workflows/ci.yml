@@ -111,7 +111,13 @@ jobs:
 
       - name: 웹뷰 렌더 테스트
         working-directory: extension
-        run: npm run test:webview
+        run: npm test
+
+      - name: 프로덕션 빌드와 VSIX 구성 검사
+        working-directory: extension
+        run: |
+          npm run build
+          npm run verify:package
 
   # ── Watchdog 감시 로직 ─────────────────────────────────────────────────
   # 왜 필요한가: 이상 판정은 **틀려도 예외가 안 난다.** 너무 민감하면 멀쩡한

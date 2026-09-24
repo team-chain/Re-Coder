@@ -30,14 +30,14 @@ class _Capture:
         if "--output" in cmd:
             out = cmd[cmd.index("--output") + 1]
             if out.startswith("/out/"):
-                host_dir = next(a.split(":")[0] for a in cmd if a.endswith(":/out"))
+                host_dir = next(a.rsplit(":", 1)[0] for a in cmd if a.endswith(":/out"))
                 out = os.path.join(host_dir, os.path.basename(out))
             Path(out).write_text(json.dumps({"Results": []}))
             return ""
         if "--report-path" in cmd:
             out = cmd[cmd.index("--report-path") + 1]
             if out.startswith("/out/"):
-                host_dir = next(a.split(":")[0] for a in cmd if a.endswith(":/out"))
+                host_dir = next(a.rsplit(":", 1)[0] for a in cmd if a.endswith(":/out"))
                 out = os.path.join(host_dir, os.path.basename(out))
             Path(out).write_text("[]")
             return ""
@@ -111,7 +111,7 @@ def test_hadolint_폴백은_Dockerfile_을_표준입력으로_넘긴다(monkeypa
     assert call["cmd"][:4] == ["docker", "run", "--rm", "-i"]
     assert ss._DOCKER_IMAGES["hadolint"] in call["cmd"]
     assert call["cmd"][-1] == "-", "표준입력을 읽게 해야 한다"
-    assert call["stdin"] == b"FROM alpine\n"
+    assert call["stdin"] == dockerfile.read_bytes()
     assert findings == []
 
 

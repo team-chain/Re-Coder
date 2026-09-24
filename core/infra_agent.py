@@ -303,8 +303,18 @@ def generate_dockerfile(
         stack = project_profile.stack.value
     else:
         project_root = _resolve_project_path(workspace_path)
-        stack, _ = _detect_stack(str(project_root))
+        stack = None
 
+    from static_frontend import frontend_dockerfile
+    frontend = frontend_dockerfile(str(project_root), getattr(project_profile, 'default_port', None) or 3000)
+    if frontend:
+        content, template_id = frontend
+        return InfraFileProposal(proposal_id=uuid.uuid4().hex, file_type=FileType.DOCKERFILE,
+            target_path='Dockerfile', content=content, base_template=template_id,
+            risk_level=RiskLevel.LOW, approval_level=1)
+
+    if stack is None:
+        stack, _ = _detect_stack(str(project_root))
     # FileRegistry에서 스택별 기본 템플릿 가져오기
     registry = get_file_registry()
     # stack name (e.g. "python-fastapi") → template_id ("dockerfile-python-fastapi")
@@ -339,13 +349,22 @@ def generate_dockerfile(
 
 
 def _runtime_family(stack: str, workspace_path: str = "") -> str:
-    """"python" | "node" | "" — compose 헬스체크에 쓸 런타임 계열.
+    """"python" | "node" | "static" | "" — compose 헬스체크 런타임.
 
     스택 이름만으로는 부족하다. 스캐너는 requirements.txt / package.json 만
     보므로, **Poetry(pyproject.toml)만 쓰는 FastAPI 프로젝트가 custom 으로
     분류된다.** 그러면 Dockerfile 에는 헬스체크가 들어가는데 compose 에는
     안 들어가서 둘이 어긋난다. 스택을 모르면 파일로 한 번 더 본다.
     """
+    if workspace_path:
+        from static_frontend import static_frontend_output
+        if static_frontend_output(workspace_path):
+            dockerfile = Path(workspace_path) / 'Dockerfile'
+            try:
+                if not dockerfile.exists() or 'ReCoder File Template: Dockerfile.node-static' in dockerfile.read_text(encoding='utf-8', errors='replace'):
+                    return 'static'
+            except OSError:
+                pass
     if stack.startswith("python"):
         return "python"
     if stack.startswith("node"):
@@ -372,14 +391,15 @@ def compose_health_check_block(
 ) -> str:
     """compose 의 app healthcheck 블록. 못 만들면 **빈 문자열**.
 
-    왜 wget/curl 을 안 쓰는가
+    왜 Python/Node 이미지에서 wget/curl 을 안 쓰는가
         예전 템플릿은 `wget --spider || curl -fs` 를 박아 뒀는데, 정작
         우리가 만들어 주는 런타임 이미지에 그 둘이 **모두 없다.**
         python:slim(Debian slim) 도 node:20-slim 도 담지 않는다.
         그래서 앱이 멀쩡히 떠 있어도 compose 는 영구히 unhealthy 로 보고하고,
         `depends_on: condition: service_healthy` 가 걸린 쪽은 아예 못 뜬다.
         Dockerfile 템플릿 쪽은 같은 이유로 이미 python urllib 로 고쳤는데
-        compose 만 남아 있었다.
+        compose 만 남아 있었다. 정적 프론트엔드용 nginx Alpine 이미지는
+        wget 이 포함되어 있으므로 해당 템플릿에서만 wget 을 사용한다.
 
     왜 exec 형식(CMD)인가
         CMD-SHELL 로 두면 YAML 큰따옴표 안에 명령의 따옴표가 또 들어가
@@ -393,7 +413,10 @@ def compose_health_check_block(
     url = f"http://127.0.0.1:{container_port}{health_check_path}"
 
     family = _runtime_family(stack, workspace_path)
-    if family == "python":
+    if family == 'static':
+        import json
+        probe = json.dumps(['CMD', 'wget', '-q', '-O', '/dev/null', url])
+    elif family == "python":
         #: python 은 이 이미지에 반드시 있다. 작은따옴표만 써서 YAML
         #: 큰따옴표 문자열 안에 그대로 들어가게 한다.
         probe = (

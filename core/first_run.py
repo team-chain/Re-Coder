@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
@@ -48,7 +49,7 @@ async def run_diagnostics() -> DiagnosticsResult:
     result = DiagnosticsResult()
 
     # Step 1: Core Ready
-    core_status, core_issues = check_core_ready()
+    core_status, core_issues = await asyncio.to_thread(check_core_ready)
     result.core_ready = core_status
     result.issues.extend(core_issues)
 
@@ -63,19 +64,19 @@ async def run_diagnostics() -> DiagnosticsResult:
         result.issues.append("AI Ready: No provider available (Bedrock or Gemini)")
 
     # Step 3: Docker Ready
-    docker_status, docker_version = check_docker_ready()
+    docker_status, docker_version = await asyncio.to_thread(check_docker_ready)
     result.docker_ready = docker_status
     result.docker_version = docker_version
     if docker_status == ReadyStatus.FAIL:
         result.issues.append("Docker Ready: Docker Engine not found")
 
     # Step 4: AWS Deploy Ready (§S-2)
-    aws_status, aws_issues = check_aws_deploy_ready()
+    aws_status, aws_issues = await asyncio.to_thread(check_aws_deploy_ready)
     result.aws_deploy_ready = aws_status
     result.issues.extend(aws_issues)
 
     # Step 5: Ops Ready (§S-2)
-    ops_status, ops_issues = check_ops_ready()
+    ops_status, ops_issues = await asyncio.to_thread(check_ops_ready)
     result.ops_ready = ops_status
     result.issues.extend(ops_issues)
 
@@ -83,7 +84,7 @@ async def run_diagnostics() -> DiagnosticsResult:
     result.validation_time = datetime.now(timezone.utc).isoformat()
 
     # 결과 저장
-    save_diagnostics(result)
+    await asyncio.to_thread(save_diagnostics, result)
 
     return result
 
@@ -152,6 +153,12 @@ def check_core_ready() -> tuple[ReadyStatus, list[str]]:
 
 
 async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
+    # SDK credentials, model probes and HTTP calls are synchronous. Keep them off
+    # the server loop so startup diagnostics cannot stall health/chat requests.
+    return await asyncio.to_thread(_check_ai_ready_sync)
+
+
+def _check_ai_ready_sync() -> tuple[ReadyStatus, str, str, str, bool]:
     """
     Strict 검증: 실제 invoke (Bedrock converse 또는 Gemini list_models) 가
     성공해야만 OK. 자격증명만 있고 호출이 실패하면 FAIL.
@@ -173,6 +180,20 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
     import logging
     log = logging.getLogger(__name__)
 
+    from llm.gateway_provider import GatewayProvider, gateway_enabled
+    if gateway_enabled():
+        # Match the actual router; a gateway user does not need local AWS keys.
+        try:
+            from llm.base import LLMRequest
+            gateway = GatewayProvider()
+            gateway._timeout = min(gateway._timeout, 10)
+            response = gateway.call(LLMRequest(prompt="ping", max_tokens=1))
+            return ReadyStatus.OK, response.model_used, "", "gateway", False
+        except Exception:
+            return ReadyStatus.FAIL, "", "", "gateway", False
+
+    deadline = time.monotonic() + 25
+
     # 1. Bedrock 시도
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
     detected = _detect_bedrock_region()
@@ -181,6 +202,8 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
 
     def _converse_ping(runtime_client, model_id: str) -> bool:
         """1-token converse ping. 성공 시 True, 실패 시 False."""
+        if time.monotonic() >= deadline:
+            return False
         try:
             runtime_client.converse(
                 modelId=model_id,
@@ -202,7 +225,10 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
             from llm.bedrock_provider import DEFAULT_PRIMARY_MODEL, PRIMARY_MODELS, FAST_MODELS
             primary_model = (os.getenv("BEDROCK_PRIMARY_MODEL_IDENTIFIER") or DEFAULT_PRIMARY_MODEL).strip()
             is_cross_region = primary_model.startswith(("us.", "apac.", "eu.", "global."))
-            runtime = session.client("bedrock-runtime", region_name=region)
+            from botocore.config import Config
+            runtime = session.client("bedrock-runtime", region_name=region,
+                                     config=Config(connect_timeout=3, read_timeout=6,
+                                                   retries={"max_attempts": 0}))
 
             # 설정된 모델부터 검증한다. 카탈로그의 첫 모델은 실제 라우팅 설정이 아니다.
             if primary_model and _converse_ping(runtime, primary_model):

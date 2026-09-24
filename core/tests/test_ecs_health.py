@@ -100,6 +100,17 @@ def test_image_only_deploy_keeps_a_visible_gap():
     assert req.health_check_command is None
 
 
+def test_generated_static_runtime_uses_available_wget_not_builder_node(tmp_path):
+    from registry import FileTemplateRegistry
+    text=FileTemplateRegistry().render('Dockerfile.node-static', {'PORT':'3456','OUTPUT_DIR':'build'})
+    req=request_for(tmp_path,text)
+    assert configure_health_check(req)==''
+    assert req.health_check_command==['CMD','wget','-q','-T','4','-O','/dev/null','http://127.0.0.1:3456/health']
+    changed=request_for(tmp_path,text.replace('nginxinc/nginx-unprivileged:stable-alpine','custom/image:latest'))
+    assert '런타임' in configure_health_check(changed)
+    assert changed.health_check_command is None
+
+
 @pytest.mark.parametrize("path", ["health", "//example.com\n", "/health;echo", "/health$(id)"])
 def test_bad_paths_are_rejected_for_both_api_shapes(path):
     from api.routes.deploy_ecs import ExtensionEcsDeployRequest

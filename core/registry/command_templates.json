@@ -36,11 +36,11 @@
       "allowed_params": {
         "image_name": {
           "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9._/\\-]*(:[a-z0-9._\\-]+)?$"
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:/@\\-]{0,254}$"
         },
         "container_name": {
           "type": "string",
-          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_\\-]+$"
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.\\-]{0,127}$"
         },
         "host_port": {
           "type": "integer",

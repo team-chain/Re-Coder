@@ -57,9 +57,36 @@
               "Sid": "EcsTaskDefinition",
               "Effect": "Allow",
               "Action": [
-                "ecs:RegisterTaskDefinition"
+                "ecs:RegisterTaskDefinition",
+                "ecs:DescribeTaskDefinition"
               ],
               "Resource": "*"
+            },
+            {
+              "Sid": "CanvasLoadBalancerRead",
+              "Effect": "Allow",
+              "Action": [
+                "elasticloadbalancing:DescribeTargetGroups",
+                "elasticloadbalancing:DescribeLoadBalancers"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": {
+                    "Fn::Sub": "${AWS::Region}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "CanvasBudgetRead",
+              "Effect": "Allow",
+              "Action": [
+                "budgets:ViewBudget"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/*"
+              }
             },
             {
               "Sid": "EcsDeployService",

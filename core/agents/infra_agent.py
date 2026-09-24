@@ -260,6 +260,13 @@ class InfraAgent:
         4. Registry assembles the final content.
         5. Return InfraFileProposal.
         """
+        from static_frontend import frontend_dockerfile
+        frontend = frontend_dockerfile(workspace_path, project.default_port or 3000)
+        if frontend:
+            content, template_id = frontend
+            return InfraFileProposal(proposal_id=str(uuid.uuid4()), file_type=FileType.DOCKERFILE,
+                target_path='Dockerfile', content=content, base_template=template_id,
+                required_secrets=[], risk_level=RiskLevel.LOW, risk_reasons=[], approval_level=ApprovalLevel.CONFIRM)
         stack = await self.detect_stack(workspace_path)
         # Update project stack if it was unknown
         if project.stack == StackType.UNKNOWN:
@@ -413,9 +420,13 @@ class InfraAgent:
             }
 
         try:
-            raw_data = json.loads(stdout) if stdout.strip() else {}
+            raw_data = json.loads(stdout)
         except json.JSONDecodeError:
-            raw_data = {}
+            return {"success": False, "error": "Trivy returned an empty or invalid JSON report."}
+        if (not isinstance(raw_data, dict) or not raw_data
+                or ('Results' not in raw_data and 'ArtifactName' not in raw_data)
+                or (raw_data.get('Results') is not None and not isinstance(raw_data['Results'], list))):
+            return {"success": False, "error": "Trivy report has an unsupported structure."}
 
         critical, high = self._filter_trivy_results(raw_data)
 
@@ -458,6 +469,8 @@ class InfraAgent:
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
         violations = self._parse_hadolint_output(stdout + stderr)
+        if proc.returncode not in (0, 1) or (proc.returncode != 0 and not violations):
+            return {"success": False, "error": stderr or "Hadolint did not produce a valid report."}
         summary = await self._summarize_scan_results("hadolint", {"violations": violations})
 
         return {
@@ -480,6 +493,7 @@ class InfraAgent:
         gl_cmd = (
             "gitleaks detect --source /repo --no-git "
             "--report-format json --report-path /tmp/gl.json >/dev/null 2>&1; "
+            'status=$?; if [ "$status" -gt 1 ]; then exit "$status"; fi; '
             "cat /tmp/gl.json 2>/dev/null"
         )
         cmd = [
@@ -491,14 +505,16 @@ class InfraAgent:
         ]
         returncode, stdout, stderr = await self._run_subprocess(cmd, timeout=180)
 
-        # sh+cat 경로: cat 성공 시 0, 파일 없으면 1 — 둘 다 정상 처리.
-        if returncode not in (0, 1):
-            return {"success": False, "error": stderr}
+        # A missing report or scanner crash must never mean 'no secrets'.
+        if returncode != 0:
+            return {"success": False, "error": "Gitleaks failed to produce a complete report."}
 
         try:
-            raw_findings: list[dict] = json.loads(stdout) if stdout.strip() else []
+            raw_findings: list[dict] = json.loads(stdout)
         except json.JSONDecodeError:
-            raw_findings = []
+            return {"success": False, "error": "Gitleaks returned an empty or invalid JSON report."}
+        if not isinstance(raw_findings, list) or not all(isinstance(f, dict) for f in raw_findings):
+            return {"success": False, "error": "Gitleaks report has an unsupported structure."}
 
         # Sanitise: keep only metadata — strip actual secret values
         sanitised: list[dict] = []

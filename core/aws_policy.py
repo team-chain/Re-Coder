@@ -497,8 +497,30 @@ def _ecs_statements(
             "Effect": "Allow",
             "Action": [
                 "ecs:RegisterTaskDefinition",
+                "ecs:DescribeTaskDefinition",
             ],
             "Resource": "*",
+        },
+        {
+            # Canvas reads only the load balancers attached to the chosen service.
+            # These two Describe operations do not support resource-level ARNs.
+            # https://docs.aws.amazon.com/service-authorization/latest/reference/list_elbv2.html
+            "Sid": "CanvasLoadBalancerRead",
+            "Effect": "Allow",
+            "Action": [
+                "elasticloadbalancing:DescribeTargetGroups",
+                "elasticloadbalancing:DescribeLoadBalancers",
+            ],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        {
+            # DescribeBudgets is authorized by ViewBudget, not DescribeBudgets.
+            # Restrict the global budget ARN to this account; no budget writes.
+            "Sid": "CanvasBudgetRead",
+            "Effect": "Allow",
+            "Action": ["budgets:ViewBudget"],
+            "Resource": _arn("budgets", "budget/*", ctx, global_service=True),
         },
         {
             # 클러스터·서비스 조회 및 롤링 업데이트.

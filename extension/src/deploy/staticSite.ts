@@ -401,6 +401,13 @@ export function collectStaticFiles(
             throw new StaticAssetReadError(rel, 'file');
         }
         const binary = isBinaryAsset(rel);
+        if (/\.html?$/i.test(rel)) {
+            const html = buffer.toString('utf-8');
+            if (/\b(?:src|href)\s*=\s*["'][^"']*%PUBLIC_URL%/i.test(html)
+                || /<script\b[^>]*\bsrc\s*=\s*["'][^"']*\.(?:tsx?|jsx)(?:[?#][^"']*)?["']/i.test(html)) {
+                throw new Error(`${rel}은 아직 빌드되지 않은 React/Vite 진입 파일입니다. 프로젝트에서 npm run build를 실행한 뒤 build 또는 dist 폴더를 선택하세요.`);
+            }
+        }
         files.push({
             path: rel,
             //: 바이너리를 utf-8 로 읽으면 잘못된 바이트가 U+FFFD 로 치환돼,

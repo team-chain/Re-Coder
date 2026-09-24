@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from local_deploy_store import (
     load_records as _load_local_records,
@@ -128,7 +128,7 @@ async def _capture_running_local_container(container_name: str):
             None,
             lambda: subprocess.run(
                 ["docker", "inspect", "--format", "{{json .}}", container_name],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
         if result.returncode != 0:
@@ -406,7 +406,7 @@ async def _rollback_image_available(image_ref: str) -> bool:
             None,
             lambda: subprocess.run(
                 ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
         return result.returncode == 0 and bool(result.stdout.strip())
@@ -431,7 +431,7 @@ async def _pin_rollback_image(
             None,
             lambda: subprocess.run(
                 ["docker", "tag", source, pin],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
         if result.returncode != 0:
@@ -461,7 +461,7 @@ async def _prune_old_rollback_pins(image_ref: str, keep: set[str]) -> list[str]:
                     "docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}",
                     "--filter", f"reference={repo}:{_ROLLBACK_PIN_PREFIX}*",
                 ],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -490,7 +490,7 @@ async def _prune_old_rollback_pins(image_ref: str, keep: set[str]) -> list[str]:
                 None,
                 lambda tag=tag: subprocess.run(
                     ["docker", "rmi", tag],
-                    shell=False, capture_output=True, text=True, timeout=60,
+                    shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                 ),
             )
             if result.returncode == 0:
@@ -553,7 +553,7 @@ async def _running_image_id(container_name: str) -> Optional[str]:
             None,
             lambda: subprocess.run(
                 ["docker", "inspect", "--format", "{{.Image}}", container_name],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
         if result.returncode != 0:
@@ -575,7 +575,7 @@ async def _remove_existing_local_container(container_name: str) -> None:
         await loop.run_in_executor(
             None,
             lambda command=command: subprocess.run(
-                command, shell=False, capture_output=True, text=True, timeout=60,
+                command, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
             ),
         )
 
@@ -600,7 +600,7 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
         result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
-                run_args, shell=False, capture_output=True, text=True, timeout=120,
+                run_args, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
             ),
         )
         if result.returncode != 0:
@@ -763,8 +763,10 @@ class DeployPlanRequest(BaseModel):
     method: DeployMethod = DeployMethod.LOCAL_DOCKER
     image: Optional[str] = None
     container_name: Optional[str] = None
-    host_port: Optional[int] = None
-    container_port: Optional[int] = None
+    host_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    container_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    env: dict[str, str] = Field(default_factory=dict)
+    health_check_path: str = Field(default='/health', pattern=r'^/[A-Za-z0-9._~%/@+-]*$')
     extra_context: Optional[str] = None
     # Security gate (Ship Stage). Default False — security scans always run.
     # Set to True to bypass Trivy/Hadolint pre-deployment gating (e.g. CI dry runs).
@@ -2320,6 +2322,18 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(proposal.content, encoding="utf-8")
+    additional_paths = []
+    from static_frontend import STATIC_DOCKERIGNORE, STATIC_IGNORE_NOTICE
+    if (getattr(proposal, 'base_template', '') == 'Dockerfile.node-static'
+            and STATIC_IGNORE_NOTICE in getattr(proposal, 'risk_reasons', [])):
+        ignore = target.parent / '.dockerignore'
+        try:
+            # Exclusive creation also preserves edits made while approval was open.
+            with ignore.open('x', encoding='utf-8') as stream:
+                stream.write(STATIC_DOCKERIGNORE)
+            additional_paths.append(str(ignore))
+        except FileExistsError:
+            pass
     return {
         "status": "saved",
         "proposal_id": proposal_id,
@@ -2327,6 +2341,7 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
         "file_type": file_type,
         "overwritten": conflict is not None,
         "backup_path": backup_path,
+        "additional_paths": additional_paths,
     }
 
 
@@ -2608,6 +2623,11 @@ def _dockerfile_from_template(
     """
     from registry import FileTemplateRegistry  # type: ignore
 
+    from static_frontend import frontend_dockerfile
+    if stack in (StackType.NODE_EXPRESS, StackType.UNKNOWN, StackType.STATIC):
+        frontend = frontend_dockerfile(workspace_path, getattr(project, 'default_port', None) or 3000)
+        if frontend:
+            return frontend
     template_id = _DOCKERFILE_TEMPLATE_BY_STACK.get(stack)
     if template_id is None:
         if stack == StackType.UNKNOWN:
@@ -2771,6 +2791,10 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
         proposal = proposal.model_copy(update={
             "workspace_path": str(Path(request.workspace_path).expanduser().resolve()),
         })
+    if getattr(proposal, 'base_template', '') == 'Dockerfile.node-static':
+        from static_frontend import STATIC_IGNORE_NOTICE
+        if not (Path(request.workspace_path) / '.dockerignore').exists():
+            proposal.risk_reasons.append(STATIC_IGNORE_NOTICE)
     _infra_proposals[proposal.proposal_id] = proposal
     return proposal
 
@@ -3003,7 +3027,7 @@ def _local_image_exists(image: str) -> bool:
     try:
         proc = subprocess.run(
             ["docker", "image", "inspect", image],
-            shell=False, capture_output=True, text=True, timeout=10,
+            shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
         return proc.returncode == 0
     except Exception:  # noqa: BLE001 — 존재 확인 실패는 '없음'과 동일하게 취급
@@ -3028,7 +3052,8 @@ def _default_image_name(workspace_path: str) -> str:
     """DeployAgent.create_plan 과 같은 규칙 — `<워크스페이스 폴더명>:latest`."""
     if not workspace_path:
         return ""
-    name = Path(workspace_path).name.lower().replace(" ", "-")
+    from deployment_inputs import workspace_container_name
+    name = workspace_container_name(workspace_path)
     return f"{name}:latest" if name else ""
 
 
@@ -3182,8 +3207,10 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
         #: 올리지 않되, **승인 강도**는 이중 확인으로 올린다 — 사용자가 "미검증
         #: 상태로 실행한다"는 사실을 알고 누르게 하기 위해서다.
         plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
-        if plan.image:
-            _plans_pending_image_scan[plan.plan_id] = plan.image
+    # A plan-time scan is only a preview: execute may rebuild this tag.
+    # Keep this requirement until execution completes, including failed retries.
+    if not request.skip_security_scan and plan.image:
+        _plans_pending_image_scan[plan.plan_id] = plan.image
 
     _deployment_plans[plan.plan_id] = plan
     _plan_workspaces[plan.plan_id] = request.workspace_path or ""
@@ -3228,7 +3255,7 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
         result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
-                cmd, shell=False, capture_output=True, text=True,
+                cmd, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=workspace_path, timeout=LOCAL_BUILD_TIMEOUT_SECONDS,
             ),
         )
@@ -3244,13 +3271,39 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
             "message": "docker CLI 를 찾을 수 없습니다. Docker Desktop 이 설치돼 있는지 확인하세요.",
             "stderr": "", "stdout": "",
         }
+    except OSError as exc:
+        return {"status": "failed", "stage": "build", "message": f"Docker 빌드를 시작하지 못했습니다: {exc}", "stderr": "", "stdout": ""}
     if result.returncode != 0:
         return {
             "status": "failed", "stage": "build",
             "message": f"docker build 실패 (exit {result.returncode}) — 이전 컨테이너는 건드리지 않았습니다.",
-            "stderr": result.stderr[-2000:], "stdout": result.stdout[-2000:],
+            "stderr": (result.stderr or '')[-8000:], "stdout": (result.stdout or '')[-8000:],
         }
     return None
+
+
+async def _local_image_id(image: str) -> str:
+    """Bind the final scan and run to the same immutable local image."""
+    result = await asyncio.to_thread(subprocess.run,
+        ['docker', 'image', 'inspect', '--format', '{{.Id}}', image],
+        shell=False, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
+    image_id = (result.stdout or '').strip()
+    if result.returncode != 0 or not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id):
+        raise HTTPException(status_code=409, detail='빌드한 이미지 ID를 확인하지 못했습니다. 기존 컨테이너를 유지합니다. Docker 상태를 확인하고 다시 시도하세요.')
+    return image_id
+
+
+def _validate_local_plan(plan: DeploymentPlan) -> None:
+    if not plan.image or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._:/\-@]{0,254}', plan.image):
+        raise HTTPException(status_code=400, detail='Invalid image name (forbidden characters).')
+    if not plan.container_name or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}', plan.container_name):
+        raise HTTPException(status_code=400, detail='Invalid container name (forbidden characters).')
+    for hp, cp in plan.ports.items():
+        if not str(hp).isdigit() or not str(cp).isdigit() or not 1 <= int(hp) <= 65535 or not 1 <= int(cp) <= 65535:
+            raise HTTPException(status_code=400, detail='Port must be numeric and between 1 and 65535.')
+    for key, value in plan.env.items():
+        if not _ENV_NAME_RE.fullmatch(key) or '\x00' in value:
+            raise HTTPException(status_code=400, detail='Invalid environment variable name or value.')
 
 
 @router.post("/api/deploy/execute")
@@ -3272,7 +3325,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
 
     # 플랜 생성 뒤 다른 배포가 실행될 수 있으므로, record 에 저장할 롤백 대상은
     # 반드시 실행 시점의 마지막 *검증 완료* 배포로 다시 잡는다.
-    rollback_target, rollback_reason = _refresh_rollback_target(plan)
+    if plan.method == DeployMethod.LOCAL_DOCKER:
+        _validate_local_plan(plan)
     # ── 여기부터 컨테이너 단위 임계 구역 ────────────────────────────────
     #
     # 롤백 대상 **선택**부터 헬스 확인과 **기록 생성**까지 한 덩어리로 잠근다.
@@ -3288,6 +3342,11 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     # 그게 맞다 — 같은 컨테이너를 동시에 두 번 바꾸는 것은 원래 순서대로
     # 처리돼야 하는 일이다. 다른 컨테이너는 서로 막지 않는다.
     async with _container_transaction(plan):
+        # A concurrent request may have consumed or cancelled this plan while
+        # this request waited for the container lock.
+        if _deployment_plans.get(request.plan_id) is not plan:
+            raise HTTPException(status_code=409, detail='이미 처리되었거나 취소된 배포 계획입니다. 새 계획을 확인하세요.')
+        rollback_target, rollback_reason = _refresh_rollback_target(plan)
         # ── 빌드 (로컬 Docker) — 락 안, 파괴적 구간(stop/rm/run) 전 ──────────────
         #: 같은 컨테이너를 겨냥한 두 요청은 빌드부터 직렬화된다. 락 밖에서 docker 를
         #: 부르면 "락을 얻기 전에는 docker 를 건드리지 않는다"는 교체 안전 불변식
@@ -3304,9 +3363,11 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         #: 기존 컨테이너를 건드리기 **전에** 여기서 멈춘다 — 파괴적 구간 밖이라
         #: 롤백할 것도 없다. 스캐너가 없어 또 못 돌면 기록만 남기고 진행한다
         #: (승인 화면에 이미 '미검증' 사유가 표시된 상태로 사용자가 승인했다).
-        pending_image = _plans_pending_image_scan.pop(request.plan_id, None)
-        if pending_image and plan.image and _local_image_exists(plan.image):
-            deferred_report = await _execute_scan("trivy", "", plan.image)
+        runtime_image = plan.image
+        pending_image = _plans_pending_image_scan.get(request.plan_id)
+        if pending_image and plan.image:
+            runtime_image = await _local_image_id(plan.image)
+            deferred_report = await _execute_scan("trivy", "", runtime_image)
             if deferred_report.get("status") == "ok":
                 deferred_crit = int(deferred_report.get("critical_count", 0))
                 if deferred_crit > 0:
@@ -3317,6 +3378,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                             f"({plan.image}). 취약점을 해결한 뒤 다시 시도하세요."
                         ),
                     )
+            elif plan.approval_level != ApprovalLevel.DOUBLE_CONFIRM:
+                raise HTTPException(status_code=409, detail='빌드 후 이미지 검사를 완료하지 못했습니다. 기존 컨테이너를 유지합니다. 검사 상태를 확인하고 새 배포 계획을 승인하세요.')
 
         rollback_source = _rollback_source_for(plan.container_name or "", plan.image or "")
         # 복구 재료. 기록에 후보가 있으면 그것을, 없으면 아래에서 docker 를
@@ -3365,6 +3428,16 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 cmd_args.extend(["-p", f"{int(_hp)}:{int(_cp)}"])
             cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
+        if plan.method == DeployMethod.LOCAL_DOCKER:
+            # The template supplies the base command; apply all approved run
+            # parameters, not just its first port mapping.
+            cmd_args = ['docker', 'run', '-d', '--name', str(plan.container_name)]
+            for hp, cp in plan.ports.items():
+                cmd_args.extend(['-p', f'{int(hp)}:{int(cp)}'])
+            for key, value in plan.env.items():
+                cmd_args.extend(['-e', f'{key}={value}'])
+            cmd_args.extend(['--restart', 'unless-stopped', str(runtime_image)])
+
         restored_previous = False
         restored_verification_resumed = False
         restore_stdout = ""
@@ -3396,7 +3469,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    cmd_args, shell=False, capture_output=True, text=True, timeout=300
+                    cmd_args, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300
                 ),
             )
             success = result.returncode == 0
@@ -3469,6 +3542,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         _deployment_records[record.deployment_id] = record
         _save_records()
         del _deployment_plans[request.plan_id]
+        _plan_workspaces.pop(request.plan_id, None)
+        _plans_pending_image_scan.pop(request.plan_id, None)
 
         # 이미지 ID 만 남기면 다음 배포가 태그를 옮기고 이 컨테이너를 지우는 순간
         # containerd 스토어가 이미지를 GC 해 롤백이 "No such image" 로 실패한다.
@@ -3691,7 +3766,7 @@ async def rollback(request: RollbackRequest) -> dict:
             None,
             lambda: subprocess.run(
                 ["docker", "stop", record.container_name],
-                shell=False, capture_output=True, text=True, timeout=60,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
             ),
         )
         # 2) docker rm (실패 무시)
@@ -3699,14 +3774,14 @@ async def rollback(request: RollbackRequest) -> dict:
             None,
             lambda: subprocess.run(
                 ["docker", "rm", record.container_name],
-                shell=False, capture_output=True, text=True, timeout=60,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
             ),
         )
         # 3) docker run — 이게 실패하면 rollback 실패
         result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(
-                run_args, shell=False, capture_output=True, text=True, timeout=120,
+                run_args, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
             ),
         )
         success = result.returncode == 0

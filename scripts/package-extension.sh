@@ -153,6 +153,9 @@ for target in "${TARGETS[@]}"; do
   cp "$src_dir/$binary" "bin/$binary"
   chmod +x "bin/$binary"
 
+  # 배포용은 Core 누락·다른 OS 파일 혼입·개발 파일 유출을 먼저 차단한다.
+  node scripts/verify-package.js --require-core --target "$target"
+
   npx @vscode/vsce package \
     --target "$target" \
     -o "$OUT_DIR/recoder-$VERSION-$target.vsix"

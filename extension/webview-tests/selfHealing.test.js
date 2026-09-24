@@ -34,9 +34,9 @@ const block = (src, start, end) => {
 };
 
 test('① 코어가 뜨면 진단보다 먼저 보안 금고의 AWS 연결을 다시 넣는다', () => {
-  const startup = block(HOST, 'if (coreOk) {', '})();');
+  const startup = block(HOST, 'async ensureConnection()', 'private async runDiagnosticsShared');
   const heal = startup.indexOf("healAwsConnection('startup')");
-  const diag = startup.indexOf("type: 'runDiagnostics'");
+  const diag = startup.indexOf('runDiagnosticsShared(false)');
   assert.ok(heal !== -1, '기동 시 재주입이 없다');
   assert.ok(heal < diag, '재주입이 진단보다 뒤에 온다 — 첫 진단이 X 로 뜬다');
 });
@@ -60,9 +60,10 @@ test('② 진단 X → 자동 조치 → 재진단, 인스턴스당 한 번', ()
   assert.match(fn, /this\._awsHealedFor === key\) \{ return false; \}/, '인스턴스당 1회 가드가 없다');
   assert.match(fn, /notReady\('aws_deploy_ready'\) \|\| notReady\('ai_ready'\)/);
   assert.match(fn, /notReady\('docker_ready'\)/);
-  const run = block(HOST, "case 'runDiagnostics'", "case 'switchMode'");
+  const run = block(HOST, 'private async performDiagnostics()', 'triggerDiagnostics()');
   assert.match(run, /_selfHealFromDiagnostics\(/);
-  assert.match(run, /if \(healed\) \{[\s\S]*type: 'runDiagnostics'/, '고친 뒤 재진단이 없다');
+  assert.match(run, /pass < 2/);
+  assert.match(run, /if \(!healed\) break/, '고친 뒤 재진단이 없다');
 });
 
 test('③ 진단판 버튼은 자동 조치이고 결과를 항목 아래 남긴다', () => {

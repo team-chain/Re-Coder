@@ -20,10 +20,11 @@ import { PollingService } from './core/PollingService';
 import { SidebarProvider } from './sidebar/SidebarProvider';
 import { WorkbenchSidebarProvider } from './sidebar/WorkbenchSidebarProvider';
 import { ReCoderPanel } from './sidebar/ReCoderPanel';
+import { migrateActivityBar, restoreRecoderViews, chooseSidebarLocation } from './sidebar/activityBar';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
 import { BridgeClient } from './bridge/BridgeClient';
-import { ensureEnrolled, runEnrollCommand } from './gateway/enroll';
+import { runEnrollCommand } from './gateway/enroll';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -467,34 +468,24 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
     );
 
-    // ── Commands: Sidebar Location (Kiro-style 우측 / 기본 좌측) ─────────────
-    // VSCode 의 view container 위치 이동은 사용자 인터랙션 컨텍스트에서만
-    // 동작하는 비공식 명령 (workbench.action.moveView*) 을 사용한다. 안되면
-    // 사용자에게 수동 가이드 알림을 띄운다.
+    // Keep existing command IDs for shortcuts, using VS Code's actual placement commands.
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.moveToRightSidebar', async () => {
-            await moveRecoderTo('right', context);
+            await chooseSidebarLocation();
         }),
         vscode.commands.registerCommand('recoder.moveToLeftSidebar', async () => {
-            await moveRecoderTo('left', context);
+            try {
+                await restoreRecoderViews();
+            } catch (err) {
+                void vscode.window.showErrorMessage(`ReCoder 위치 복원 실패: ${String(err)}`);
+            }
         })
     );
 
-    // ── First-run: Kiro 스타일로 우측 사이드바 자동 배치 ─────────────────────
-    // 첫 활성화에서만 1회 실행. 사용자가 의도적으로 좌측으로 옮긴 후에는 다시
-    // 강제로 옮기지 않는다.
-    const KEY_LAYOUT_INITIALIZED = 'recoder.layout.initializedV1';
-    if (!context.globalState.get<boolean>(KEY_LAYOUT_INITIALIZED, false)) {
-        setTimeout(async () => {
-            try {
-                await moveRecoderTo('right', context, /*silent=*/ true);
-            } catch {
-                // ignore
-            } finally {
-                await context.globalState.update(KEY_LAYOUT_INITIALIZED, true);
-            }
-        }, 1500);
-    }
+    // Recover only ReCoder's old saved locations once; never auto-move to the right.
+    void migrateActivityBar(context.globalState).catch(err => {
+        console.warn('[ReCoder] Activity Bar migration deferred:', err);
+    });
 
     // ── Terminal data listener ──────────────────────────────────────────────
     // onDidWriteTerminalData is a VSCode proposed API (terminalDataWriteEvent)
@@ -504,58 +495,6 @@ export function activate(context: vscode.ExtensionContext): void {
     // is a 2학기 optional enhancement.
 
     console.log('[ReCoder] Extension activated.');
-}
-
-/**
- * ReCoder view container 를 좌/우 사이드바로 이동.
- *
- * VSCode 의 view 이동 명령들은 활성 view 컨텍스트를 요구하므로,
- *   1) 먼저 ReCoder 사이드바에 포커스를 준 다음
- *   2) workbench.action.moveView* 명령을 실행한다.
- *
- * 명령이 실패하거나 없는 경우 사용자에게 수동 가이드를 표시한다 (silent=false 일 때만).
- */
-async function moveRecoderTo(
-    side: 'left' | 'right',
-    context: vscode.ExtensionContext,
-    silent: boolean = false,
-): Promise<void> {
-    try {
-        // ReCoder view 에 포커스 (이게 있어야 활성 view 컨텍스트 잡힘)
-        await vscode.commands.executeCommand('recoder.sidebarView.focus');
-        await new Promise(r => setTimeout(r, 300));
-
-        if (side === 'right') {
-            // Secondary Side Bar 활성화 (안 보이면 토글로 보이게)
-            try {
-                await vscode.commands.executeCommand('workbench.action.focusAuxiliaryBar');
-            } catch {
-                // best-effort
-            }
-            // 현재 활성 view 를 secondary side bar 로 이동
-            await vscode.commands.executeCommand('workbench.action.moveViewToSecondarySideBar');
-        } else {
-            // 기본 좌측 Activity Bar 로 복귀
-            await vscode.commands.executeCommand('workbench.action.moveViewToActivityBar');
-        }
-
-        if (!silent) {
-            const target = side === 'right' ? '오른쪽' : '왼쪽';
-            vscode.window.showInformationMessage(`ReCoder를 ${target} 사이드바로 이동했습니다.`);
-        }
-    } catch (err) {
-        if (silent) {
-            return; // first-run에는 조용히 실패
-        }
-
-        const sideLabel = side === 'right' ? 'Secondary Side Bar (오른쪽)' : 'Activity Bar (왼쪽)';
-        const choice = await vscode.window.showInformationMessage(
-            `자동 이동이 실패했습니다. Activity Bar 의 ReCoder 아이콘을 우클릭해서 "Move View Container to ${sideLabel}" 를 선택해주세요.`,
-            '알겠음',
-        );
-        void choice; // suppress unused-var lint
-        console.warn('[ReCoder] moveRecoderTo failed:', err);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -581,8 +520,7 @@ async function ensureCoreRunning(
     sidebarProvider: SidebarProvider,
 ): Promise<void> {
     try {
-        await coreManager.ensureRunning();
-        sidebarProvider.triggerDiagnostics();
+        await sidebarProvider.ensureConnection();
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`ReCoder Core 시작 실패: ${msg}`);

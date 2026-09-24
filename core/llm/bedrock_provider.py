@@ -419,6 +419,7 @@ class BedrockProvider(LLMProvider):
         messages: list[dict[str, Any]],
         system: Optional[str] = None,
         output_schema: Optional[dict] = None,
+        *, max_tokens: int = 4096, temperature: float = 0.0,
     ) -> dict[str, Any]:
         """
         Bedrock Converse API 비동기 호출.
@@ -433,15 +434,19 @@ class BedrockProvider(LLMProvider):
         """
         if output_schema:
             try:
-                return await self._converse_structured(messages, system, output_schema)
+                return await self._converse_structured(messages, system, output_schema, max_tokens=max_tokens, temperature=temperature)
             except Exception as exc:
+                if isinstance(exc, LLMError) and exc.error_type == LLMErrorType.STRUCTURED_OUTPUT:
+                    raise
                 log.warning("Structured output failed (%s), trying tool use", exc)
                 try:
-                    return await self._converse_tool_use(messages, system, output_schema)
+                    return await self._converse_tool_use(messages, system, output_schema, max_tokens=max_tokens, temperature=temperature)
                 except Exception as exc2:
+                    if isinstance(exc2, LLMError) and exc2.error_type == LLMErrorType.STRUCTURED_OUTPUT:
+                        raise
                     log.warning("Tool use failed (%s), falling back to text JSON", exc2)
 
-        return await self._converse_plain(messages, system)
+        return await self._converse_plain(messages, system, max_tokens=max_tokens, temperature=temperature)
 
     async def validate_access(self) -> tuple[bool, str, str]:
         """
@@ -471,6 +476,7 @@ class BedrockProvider(LLMProvider):
         messages: list[dict],
         system: Optional[str],
         schema: dict,
+        *, max_tokens: int = 4096, temperature: float = 0.0,
     ) -> dict[str, Any]:
         """Structured output via tool_choice={"type": "tool", "name": "output"}."""
         tool_spec = {
@@ -483,6 +489,7 @@ class BedrockProvider(LLMProvider):
         kwargs: dict[str, Any] = {
             "modelId": self._model_id,
             "messages": messages,
+            "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
             "toolConfig": {
                 "tools": [tool_spec],
                 "toolChoice": {"tool": {"name": "output"}},
@@ -492,6 +499,7 @@ class BedrockProvider(LLMProvider):
             kwargs["system"] = [{"text": system}]
 
         response = await self._invoke_sync(kwargs)
+        self._require_complete_response(response)
         return self._extract_tool_input(response)
 
     async def _converse_tool_use(
@@ -499,6 +507,7 @@ class BedrockProvider(LLMProvider):
         messages: list[dict],
         system: Optional[str],
         schema: dict,
+        *, max_tokens: int = 4096, temperature: float = 0.0,
     ) -> dict[str, Any]:
         """Tool use fallback — let model choose when to call the tool."""
         tool_spec = {
@@ -511,30 +520,43 @@ class BedrockProvider(LLMProvider):
         kwargs: dict[str, Any] = {
             "modelId": self._model_id,
             "messages": messages,
+            "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
             "toolConfig": {"tools": [tool_spec]},
         }
         if system:
             kwargs["system"] = [{"text": system}]
 
         response = await self._invoke_sync(kwargs)
+        self._require_complete_response(response)
         return self._extract_tool_input(response)
 
     async def _converse_plain(
         self,
         messages: list[dict],
         system: Optional[str],
+        *, max_tokens: int = 4096, temperature: float = 0.0,
     ) -> dict[str, Any]:
         """Plain text call — extract any JSON block from the response text."""
         kwargs: dict[str, Any] = {
             "modelId": self._model_id,
             "messages": messages,
+            "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
         }
         if system:
             kwargs["system"] = [{"text": system}]
 
         response = await self._invoke_sync(kwargs)
+        self._require_complete_response(response)
         text = self._extract_text(response)
         return self._parse_json_from_text(text)
+
+    @staticmethod
+    def _require_complete_response(response: dict) -> None:
+        if response.get("stopReason") == "max_tokens":
+            raise LLMError(
+                "모델 출력이 응답 길이 제한에서 잘렸습니다.",
+                LLMErrorType.STRUCTURED_OUTPUT,
+            )
 
     async def _invoke_sync(self, kwargs: dict) -> dict:
         """Run the blocking boto3 call in a thread-pool executor."""

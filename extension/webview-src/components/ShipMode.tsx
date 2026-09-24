@@ -192,7 +192,7 @@ interface ShipModeProps {
   isDockerReady: boolean;
 }
 
-export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) => {
+export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [step, setStep] = useState<Step>("idle");
@@ -459,18 +459,6 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     postMessage("rollback", { deploymentId });
   }, [deploymentId, postMessage]);
 
-  // ── Styles ────────────────────────────────────────────────────────────────
-
-  const sectionHeader: React.CSSProperties = {
-    fontSize: 10,
-    fontWeight: 700,
-    textTransform: "uppercase",
-    letterSpacing: "0.06em",
-    color: "var(--vscode-descriptionForeground, #888)",
-    marginBottom: 6,
-    marginTop: 12,
-  };
-
   const btnPrimary: React.CSSProperties = {
     background: "var(--vscode-button-background, #0078d4)",
     color: "var(--vscode-button-foreground, #fff)",
@@ -490,19 +478,6 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     padding: "6px 14px",
     fontSize: 12,
     cursor: "pointer",
-  };
-
-  const codeBlock: React.CSSProperties = {
-    background: "var(--vscode-textCodeBlock-background, #1e1e1e)",
-    border: "1px solid var(--vscode-panel-border, #333)",
-    borderRadius: 4,
-    padding: "8px 10px",
-    fontFamily: "var(--vscode-editor-font-family, monospace)",
-    fontSize: 11,
-    overflowX: "auto",
-    maxHeight: 250,
-    overflowY: "auto",
-    whiteSpace: "pre",
   };
 
   const riskColors: Record<string, string> = {

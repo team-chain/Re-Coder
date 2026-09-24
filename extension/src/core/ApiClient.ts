@@ -263,7 +263,6 @@ export class ApiClient {
                 signal: controller.signal,
             });
 
-            clearTimeout(timerId);
             const timestamp = new Date().toISOString();
 
             if (!res.ok) {
@@ -298,9 +297,13 @@ export class ApiClient {
             }
             return { success: true, data: json as T, timestamp };
         } catch (err: unknown) {
-            clearTimeout(timerId);
-            const message = err instanceof Error ? err.message : 'Unknown network error';
+            const message = controller.signal.aborted
+                ? `응답 대기 시간이 ${Math.round(timeoutMs / 1000)}초를 초과했습니다. Core 연결과 AI 설정을 확인한 뒤 다시 요청하세요.`
+                : err instanceof Error ? err.message : 'Unknown network error';
             return { success: false, error: message, timestamp: new Date().toISOString() };
+        } finally {
+            // The timeout covers the body as well as the HTTP headers.
+            clearTimeout(timerId);
         }
     }
 
@@ -329,7 +332,7 @@ export class ApiClient {
     }
 
     async runDiagnostics(): Promise<DiagnosticsResult> {
-        const resp = await this.request<DiagnosticsResult>('POST', '/api/diagnostics/run');
+        const resp = await this.request<DiagnosticsResult>('POST', '/api/diagnostics/run', undefined, false, 150000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Diagnostics 실행 실패'); }
         return resp.data;
     }
@@ -369,8 +372,8 @@ export class ApiClient {
             target_folder: opts?.targetFolder ?? '',
             decisions: opts?.decisions ?? [],
         };
-        // 코드 생성은 30s 를 넘길 수 있어 90s 타임아웃.
-        const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 90000);
+        // Full-file output and one schema correction can take two model calls.
+        const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 180000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '코드 생성 실패'); }
         return resp.data;
     }
@@ -450,11 +453,13 @@ export class ApiClient {
         message: string,
         history: Array<{ role: 'user' | 'assistant'; content: string }>,
         workspacePath = '',
+        contextFiles: Array<{path: string; content: string}> = [],
     ): Promise<ChatResult> {
         const resp = await this.request<ChatResult>('POST', '/api/chat', {
             message,
             history,
             workspace_path: workspacePath,
+            context_files: contextFiles,
         }, false, 90000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AI 대화 실패'); }
         return resp.data;
@@ -588,6 +593,11 @@ export class ApiClient {
     }
 
     /** 인증된 사용자의 GitHub 레포 목록. */
+    async githubConnectRepository(req:{repository:string;create:boolean}):Promise<{status:string;message?:string}> {
+        const resp=await this.request<{status:string;message?:string}>('POST','/api/github/repository/connect',req);
+        return resp.success&&resp.data ? resp.data : {status:'error',message:resp.error};
+    }
+
     async listGithubRepos(): Promise<{ status: string; repos: Array<{ name: string; private: boolean; html_url: string }> }> {
         const resp = await this.request<{ status: string; repos: unknown[] }>(
             'GET', '/api/github/repos'
@@ -629,10 +639,10 @@ export class ApiClient {
         return resp.data;
     }
 
-    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string; error?: string }> {
-        // docker build + run + 헬스체크는 30초를 넘으므로 타임아웃을 길게.
+    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string; error?: string; message?: string; health_ok?: boolean }> {
+        // Build (600s), image scan, replacement and health checks must all fit.
         const resp = await this.request<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }>(
-            'POST', '/api/deploy/execute', { plan_id: planId, approved }, false, 600000
+            'POST', '/api/deploy/execute', { plan_id: planId, approved }, false, 1500000
         );
         //: 코어가 4xx/5xx 로 거절한 사유(예: "Trivy: CRITICAL 3건 — 배포를 차단했습니다")를
         //: 버리고 { status: 'error' } 만 돌려주면 화면은 "사유 없음" 이 된다(실기기 검증 C2).
@@ -1278,6 +1288,16 @@ export class ApiClient {
     }
 
     /** GET /api/deploy/ecs/status — ECS 배포 진행상황 폴링. */
+    async getCanvasSnapshot(workspace: string, project: string) {
+        return this.request<Record<string, unknown>>('GET', `/api/deploy/canvas?workspace_path=${encodeURIComponent(workspace)}&project=${encodeURIComponent(project)}`);
+    }
+
+    async getCanvasTarget(region: string, cluster: string, service: string, includeBudget = true) {
+        const response = await this.request<{ exists: boolean | null; task_definition: string; images: Array<{ image: string; digest: string }>; budget: Array<{ name: string; unit: string; limit: string; spent: string; period: string }> | null; warnings: string[] }>('GET', `/api/deploy/canvas/target?region=${encodeURIComponent(region)}&cluster=${encodeURIComponent(cluster)}&service=${encodeURIComponent(service)}&include_budget=${includeBudget}`);
+        if (!response.success || !response.data) throw new Error(response.error || '배포 대상 조회 실패');
+        return response.data;
+    }
+
     async getEcsDeployStatus(deploymentId?: string): Promise<EcsDeployStatus> {
         const query = deploymentId ? `?deployment_id=${encodeURIComponent(deploymentId)}` : '';
         const resp = await this.request<EcsDeployStatus>('GET', `/api/deploy/ecs/status${query}`);
@@ -1317,7 +1337,7 @@ export class ApiClient {
     }
 
     /** POST /api/git/push — 원격 push (upstream 자동 설정). */
-    async gitPush(req: { workspace_path: string; branch?: string; force?: boolean }): Promise<{
+    async gitPush(req: { workspace_path: string; branch?: string; force?: boolean; auto_commit?: boolean }): Promise<{
         status: string;
         message?: string;
         branch?: string;

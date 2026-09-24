@@ -2,7 +2,7 @@
   "name": "recoder",
   "displayName": "ReCoder — AI DevOps Agent",
   "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
-  "version": "1.0.0",
+  "version": "1.1.6",
   "publisher": "recoder-team",
   "license": "MIT",
   "repository": {
@@ -38,23 +38,26 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "recoder",
+          "id": "recoder-activitybar",
           "title": "ReCoder",
           "icon": "media/recoder-icon.svg"
         }
       ]
     },
     "views": {
-      "recoder": [
+      "recoder-activitybar": [
         {
           "type": "webview",
           "id": "recoder.sidebarView",
-          "name": "Re-Coder"
+          "name": "ReCoder",
+          "visibility": "visible",
+          "icon": "media/recoder-icon.svg"
         },
         {
           "type": "webview",
           "id": "recoder.workbenchView",
-          "name": "Workbench"
+          "name": "Workbench",
+          "visibility": "hidden"
         }
       ]
     },
@@ -136,12 +139,12 @@
       },
       {
         "command": "recoder.moveToRightSidebar",
-        "title": "ReCoder: Move to Right Sidebar (Kiro-style)",
+        "title": "ReCoder: Move Sidebar View…",
         "icon": "$(layout-sidebar-right)"
       },
       {
         "command": "recoder.moveToLeftSidebar",
-        "title": "ReCoder: Move to Left Sidebar",
+        "title": "ReCoder: Reset Sidebar Views",
         "icon": "$(layout-sidebar-left)"
       },
       {
@@ -289,16 +292,18 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run build",
-    "compile": "tsc -p tsconfig.json",
+    "vscode:prepublish": "npm run build && npm run verify:package",
+    "compile": "node scripts/prune-host-output.js && tsc -p tsconfig.json",
     "watch": "tsc -watch -p tsconfig.json",
     "build": "npm run compile && npm run build:webview",
     "build:webview": "cd webview-src && npx webpack --config webpack.config.js --mode production",
     "watch:webview": "cd webview-src && npx webpack --config webpack.config.js --mode development --watch",
     "package": "vsce package",
-    "lint": "eslint src --ext ts",
+    "lint": "tsc -p tsconfig.json --noEmit && tsc -p webview-src/tsconfig.json --noEmit",
     "pretest": "npm run compile",
-    "test": "node ./out/test/runTest.js",
+    "test": "tsc -p webview-src/tsconfig.test.json && node --test out/test/coreClient.smoke.js webview-tests/*.test.js",
+    "verify:package": "node scripts/verify-package.js",
+    "verify:release": "node scripts/verify-package.js --require-core",
     "smoke": "npm run compile && node --test out/test/coreClient.smoke.js",
     "test:webview": "npm run compile && npx tsc -p webview-src/tsconfig.test.json && node --test webview-tests/*.test.js",
     "package:all": "bash ../scripts/package-extension.sh",
@@ -309,20 +314,19 @@
     "@types/node": "^20.19.41",
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
+    "@types/three": "^0.160.0",
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.5.10",
-    "@typescript-eslint/eslint-plugin": "^8.0.0",
-    "@typescript-eslint/parser": "^8.0.0",
     "@vscode/vsce": "^3.2.0",
     "autoprefixer": "^10.4.20",
     "css-loader": "^7.1.2",
-    "eslint": "^8.0.0",
     "postcss": "^8.4.49",
     "postcss-loader": "^8.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "style-loader": "^4.0.0",
     "tailwindcss": "^3.4.17",
+    "three": "0.160.0",
     "ts-loader": "^9.5.0",
     "typescript": "^5.9.3",
     "webpack": "^5.89.0",

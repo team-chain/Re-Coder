@@ -316,6 +316,7 @@ class LLMProviderRouter:
         한 벌로 태운다. 보드 이슈 「LLM 라우터가 두 벌」의 본체 수술.
         """
         LLMError, LLMResponse = _get_base_types()
+        from .base import LLMErrorType
         breaker_mod, _ = _get_shared()
 
         provider = self._bedrock_haiku if prefer == "fast" else self._bedrock_sonnet
@@ -337,9 +338,24 @@ class LLMProviderRouter:
         else:
             try:
                 messages = [{"role": "user", "content": [{"text": prompt}]}]
-                result = await provider.converse(messages, output_schema=schema)
+                result = await provider.converse(
+                    messages, output_schema=schema,
+                    max_tokens=request.max_tokens, temperature=request.temperature,
+                )
                 br.record_success()
             except Exception as exc:
+                # A clipped model response is a generation failure, not a provider
+                # outage. Let the caller repair its output without switching models.
+                if isinstance(exc, LLMError) and exc.error_type == LLMErrorType.STRUCTURED_OUTPUT:
+                    br.record_success()
+                    self._record_call(
+                        agent=agent or "router", operation=operation or "call_llm",
+                        provider="bedrock" if used_provider != "gemini" else "gemini", model=used_model,
+                        input_tokens=max(1, len(prompt) // 4), output_tokens=request.max_tokens,
+                        latency_ms=int((time.monotonic() - start) * 1000),
+                        fallback_used=False, retry_count=0,
+                    )
+                    raise
                 br.record_failure()
                 retry = 1
                 log.warning("call_llm %s 실패: %s — Gemini 폴백", used_model, exc)
@@ -348,7 +364,10 @@ class LLMProviderRouter:
             fallback = True
             used_provider, used_model = "gemini", "gemini-2.5-flash"
             try:
-                result = await self._gemini.generate(prompt, schema=schema)
+                result = await self._gemini.generate(
+                    prompt, schema=schema, max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                )
             except Exception as exc:
                 #: 전부 실패 — 레거시 계약대로 LLMError 를 던진다.
                 raise LLMError(f"모든 LLM Provider 실패: {exc}", retryable=True, raw=exc) from exc
@@ -365,8 +384,8 @@ class LLMProviderRouter:
 
         #: 레거시 호출자는 .text 에서 JSON 을 뽑는다. converse 는 파싱된 dict 를
         #: 주므로 되돌려 직렬화한다. {"text": ...} 한 장짜리는 원문 그대로.
-        if isinstance(result, dict) and set(result.keys()) == {"text"}:
-            text = str(result["text"])
+        if isinstance(result, dict) and len(result) == 1 and ("text" in result or "raw_response" in result):
+            text = str(result.get("text", result.get("raw_response", "")))
         else:
             import json as _json
             text = _json.dumps(result, ensure_ascii=False)

@@ -136,22 +136,37 @@ class DeployAgent:
         container_port = getattr(request, 'container_port', 8080)
 
         # Auto-detect image and container name if not provided
-        ws_name = Path(workspace).name.lower().replace(' ', '-') if workspace else 'app'
+        from deployment_inputs import workspace_container_name
+        ws_name = workspace_container_name(workspace)
         image = image or f"{ws_name}:latest"
         container_name = container_name or ws_name
 
         # Determine port from workspace if not given
         if not host_port or not container_port:
-            host_port, container_port = self._detect_port(workspace)
+            detected_host, detected_container = self._detect_port(workspace)
+            host_port = host_port or detected_host
+            container_port = container_port or detected_container
+
+        health_path = getattr(request, 'health_check_path', None) or '/health'
+        if health_path == '/health' and 'health_check_path' not in getattr(request, 'model_fields_set', set()):
+            from agents.ecs_health import _declared_health_path, _runtime_family
+            try:
+                runtime = _runtime_family(Path(workspace) / 'Dockerfile')
+                if runtime:
+                    health_path = _declared_health_path(Path(workspace), runtime, health_path) or health_path
+            except (OSError, UnicodeError):
+                pass
 
         return DeploymentPlan(
+            project_id=getattr(request, 'project_id', None) or ws_name,
+            enable_continuous_verification=getattr(request, 'enable_continuous_verification', True),
             method=method,
             action=ActionType.DOCKER_RUN,
             image=image,
             container_name=container_name,
             ports={str(host_port): str(container_port)},
-            env={},
-            health_check_path="/health",
+            env=getattr(request, 'env', {}) or {},
+            health_check_path=health_path,
             rollback_image=None,
             command_template_id="docker_run",
             risk_level=RiskLevel.MEDIUM,
@@ -364,15 +379,10 @@ class DeployAgent:
         # Dockerfile 의 EXPOSE 가 가장 정확하다 — 우리가 방금 생성·저장한 파일이고,
         # 앱이 실제로 듣는 포트가 적혀 있다. 예전엔 이걸 안 보고 package.json 만
         # 보다가 3000 으로 추측해 다른 앱(3000 점유)과 충돌했다(실기기 검증 C2).
-        dockerfile = ws / "Dockerfile"
-        if dockerfile.exists():
-            try:
-                m = re.search(r"^\s*EXPOSE\s+(\d{2,5})", dockerfile.read_text(encoding="utf-8"), re.M)
-                if m:
-                    p = int(m.group(1))
-                    return (p, p)
-            except Exception:
-                pass
+        from deployment_inputs import dockerfile_runtime_port
+        port = dockerfile_runtime_port(ws / "Dockerfile")
+        if port is not None:
+            return (port, port)
 
         # requirements.txt / pyproject.toml → FastAPI/Flask default 8000
         if (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():

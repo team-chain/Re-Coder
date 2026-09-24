@@ -9,10 +9,12 @@
  * Deploy Replay 가 한 줄씩 나열돼 무엇이 무엇인지 읽기 어려웠다. 특히 "구조 지도"와
  * "전체 아키텍처 보기"는 같은 화면인데 다른 항목처럼 보였다.
  */
-import React, { useCallback, useEffect, useState } from "react";
-import { HubIcon, HubIconName, HubIconTile } from "./HubIcons";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { HubIcon, HubIconName } from "./HubIcons";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { useSelfHeal } from "../hooks/useSelfHeal";
+import { ScanKind, ScanQueue, ScanRequest } from './scanQueue';
+import { scanCounts } from './ShipMode';
 
 export type HubId = "develop" | "deploy" | "security";
 export type FeatureId =
@@ -40,19 +42,19 @@ export const HUBS: Array<{ id: HubId; icon: HubIconName; title: string; subtitle
 ];
 
 export const FEATURES: FeatureDef[] = [
-  { id: "code", hub: "develop", icon: "terminal", title: "코드 생성 · 수정", desc: "자연어로 새 코드를 만들거나 기존 코드를 고칩니다. 설계 결정 카드 → 파일별 diff → 적용 순서로 진행돼요.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
-  { id: "build", hub: "develop", icon: "bug", title: "에러 분석", desc: "터미널·로그의 오류를 읽고 원인과 패치를 제안합니다. 승인 전에는 파일을 건드리지 않아요.", action: "분석", primary: true, gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
-  { id: "map", hub: "develop", icon: "network", title: "아키텍처", desc: "파일 간 의존 관계와 함수 호출 관계를 그림으로 봅니다. 코드를 실제로 읽어 만든 결과예요.", action: "보기" },
-  { id: "adr", hub: "develop", icon: "file-text", title: "설계 기록 (ADR)", desc: "결정 카드에서 확정한 내용이 자동으로 쌓입니다. 어떤 선택을 왜 했는지 나중에 찾아볼 수 있어요.", action: "열기" },
+  { id: "code", hub: "develop", icon: "terminal", title: "코드 생성 · 수정", desc: "요청을 입력하고, 변경 내용을 검토해 적용하세요.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
+  { id: "build", hub: "develop", icon: "bug", title: "에러 분석", desc: "오류의 원인과 수정안을 확인하세요.", action: "분석", gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
+  { id: "map", hub: "develop", icon: "network", title: "아키텍처", desc: "파일과 함수가 어떻게 연결되는지 살펴보세요.", action: "보기" },
+  { id: "adr", hub: "develop", icon: "file-text", title: "설계 기록 (ADR)", desc: "이전에 결정한 설계와 선택 이유를 찾아보세요.", action: "열기" },
 
   { id: "ship", hub: "deploy", icon: "box", title: "로컬 Docker 배포", desc: "Dockerfile 생성 → 검사 → build → run → 헬스체크. 실패하면 이전 이미지로 되돌립니다.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isDockerReady, hint: "Docker 필요" }) },
-  { id: "deploy", hub: "deploy", icon: "cloud-upload", title: "배포 센터", desc: "ECS · EC2 · S3 정적 사이트. 외부로 나가는 배포는 검사 결과에 따라 승인 강도가 달라져요.", action: "열기", primary: true },
+  { id: "deploy", hub: "deploy", icon: "cloud-upload", title: "배포 캔버스", desc: "프로젝트를 Docker · GitHub · ECS · S3로 연결하고, 승인과 보안 검사부터 실행 상태까지 확인합니다.", action: "열기", primary: true },
   { id: "replay", hub: "deploy", icon: "history", title: "롤백 · Replay", desc: "저장된 배포·롤백 이력을 보고 이전 버전 복귀 대상을 확인합니다.", action: "이력 보기" },
   { id: "operate", hub: "deploy", icon: "activity", title: "운영 대응", desc: "장애 감지 → 원인 분석 → 조치 제안. 실행은 승인 후에만.", action: "열기", gate: (c) => ({ enabled: c.isOpsReady, hint: "AI · AWS 연결 필요" }) },
 
-  { id: "scan", hub: "security", icon: "search", title: "취약점 스캔", desc: "Trivy(이미지·의존성) · Hadolint(Dockerfile). 결과는 배포 승인 카드의 위험도에 반영됩니다.", action: "스캔", primary: true },
-  { id: "secrets", hub: "security", icon: "key", title: "시크릿 검사", desc: "gitleaks 규칙으로 저장소에 평문 비밀값이 남았는지 확인합니다. 원문은 표시하지 않아요.", action: "검사", primary: true },
-  { id: "policy", hub: "security", icon: "clipboard-check", title: "정책 게이트", desc: "어떤 배포가 자동 통과 · 승인 필요 · 차단인지 규칙(OPA)으로 봅니다.", action: "규칙 보기" },
+  { id: "scan", hub: "security", icon: "search", title: "취약점 스캔", desc: "이미지·의존성과 Dockerfile의 문제를 확인하세요.", action: "스캔", primary: true },
+  { id: "secrets", hub: "security", icon: "key", title: "시크릿 검사", desc: "소스에 남은 API 키와 비밀번호를 검사하세요.", action: "검사" },
+  { id: "policy", hub: "security", icon: "clipboard-check", title: "정책 게이트", desc: "배포 승인과 차단 기준을 확인하세요.", action: "규칙 보기" },
 ];
 
 export const FEATURE_BY_ID: Record<FeatureId, FeatureDef> = FEATURES.reduce((acc, f) => { acc[f.id] = f; return acc; }, {} as Record<FeatureId, FeatureDef>);
@@ -89,36 +91,27 @@ const DockerFix: React.FC = () => {
 };
 
 // ── 허브 홈 ─────────────────────────────────────────────────────────────
-export const HubHome: React.FC<{ onSelect: (hub: HubId) => void; ctx: ReadyCtx }> = ({ onSelect, ctx }) => {
-  const badge = (hub: HubId): { text: string; ok: boolean } => {
-    if (hub === "develop") return ctx.isAiReady ? { text: "AI 준비됨", ok: true } : { text: "AI 연결 필요", ok: false };
-    if (hub === "deploy") return ctx.isDockerReady ? { text: "Docker 준비됨", ok: true } : { text: "Docker 필요", ok: false };
-    return { text: "검사 · 정책", ok: true };
-  };
+export const HubHome: React.FC<{ onSelect: (hub: HubId) => void; ctx: ReadyCtx }> = ({ onSelect }) => {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14, height: "100%", alignContent: "start" }}>
-      {HUBS.map((h) => {
-        const b = badge(h.id);
-        return (
-          <div key={h.id} style={{ border: `1px solid ${C.line}`, borderTop: `3px solid ${h.accent}`, borderRadius: 14, padding: "20px 18px 16px", background: C.card, color: C.fg, display: "flex", flexDirection: "column", minHeight: 250 }}>
-            <button onClick={() => onSelect(h.id)} style={{ textAlign: "left", cursor: "pointer", border: "none", padding: 0, background: "transparent", color: "inherit", display: "flex", flexDirection: "column", flex: 1, fontFamily: "inherit" }}>
-            <div style={{ marginBottom: 14 }}><HubIconTile name={h.icon} accent={h.accent} /></div>
-            <div style={{ fontSize: 19, fontWeight: 700, letterSpacing: .2 }}>{h.title}</div>
-            <div style={{ color: C.muted, fontSize: 12, margin: "4px 0 14px" }}>{h.subtitle}</div>
-            <ul style={{ listStyle: "none", margin: 0, padding: 0, fontSize: 12.5, flex: 1 }}>
-              {FEATURES.filter((f) => f.hub === h.id).map((f, i) => (
-                <li key={f.id} style={{ padding: "6px 0", borderTop: i === 0 ? "none" : `1px solid ${C.line}` }}>{f.title}</li>
-              ))}
-            </ul>
-            </button>
-            <div style={{ marginTop: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "wrap" }}>
-              {h.id === "deploy" && !ctx.isDockerReady ? <DockerFix /> : <span style={{ fontSize: 10.5, padding: "2px 8px", borderRadius: 999, border: `1px solid ${b.ok ? "#2f6b4a" : "#6b4a17"}`, color: b.ok ? "#7ed3a2" : "#f0b35b" }}>{b.text}</span>}
-              <button onClick={() => onSelect(h.id)} style={{ border: "none", background: "transparent", color: C.link, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>열기 ›</button>
-            </div>
-          </div>
-        );
-      })}
-    </div>
+    <section className="rc-home" aria-label="시작하기">
+      <style>{`
+        .rc-home{max-width:920px;margin:clamp(16px,7vh,72px) auto;container-type:inline-size}
+        .rc-home h1{font-size:24px;font-weight:600;letter-spacing:-.5px;margin:0 0 10px}
+        .rc-home-intro{color:${C.muted};font-size:13px;margin:0 0 30px}
+        .rc-home-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+        @container(max-width:640px){.rc-home-grid{grid-template-columns:1fr}.rc-home-card{min-height:120px!important;padding:20px!important}}
+        .rc-home-card{display:flex;flex-direction:column;align-items:flex-start;gap:10px;text-align:left;border:1px solid ${C.line};border-radius:10px;padding:24px;min-height:170px;background:transparent;color:${C.fg};font:inherit;cursor:pointer}
+        .rc-home-card:hover{background:${C.card};border-color:var(--vscode-focusBorder,#587fa1)}
+        .rc-home-card strong{font-size:17px;font-weight:600;margin-top:9px}.rc-home-card small{font-size:12px;color:${C.muted}}
+        .rc-home-card:focus-visible{outline:2px solid var(--vscode-focusBorder,#75b9ef);outline-offset:3px}
+      `}</style>
+      <h1>무엇을 할까요?</h1>
+      <p className="rc-home-intro">지금 할 작업을 선택하세요.</p>
+      <div className="rc-home-grid">{HUBS.map(h => <button key={h.id} className="rc-home-card" onClick={() => onSelect(h.id)}>
+        <span style={{ color: h.accent }}><HubIcon name={h.icon} size={24} /></span>
+        <strong>{h.title}</strong><small>{h.subtitle}</small>
+      </button>)}</div>
+    </section>
   );
 };
 
@@ -127,7 +120,7 @@ export const HubCrumb: React.FC<{ hub: HubId; feature?: FeatureId; onHome: () =>
   const h = HUBS.find((x) => x.id === hub)!;
   const linkBtn: React.CSSProperties = { border: "none", background: "transparent", color: C.link, cursor: "pointer", fontSize: 12.5, padding: 0, fontFamily: "inherit" };
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+    <div className="rc-hub-crumb" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
       <button onClick={onHome} style={linkBtn}>‹ 홈</button>
       <span style={{ color: C.muted }}>/</span>
       {feature ? <>
@@ -136,11 +129,10 @@ export const HubCrumb: React.FC<{ hub: HubId; feature?: FeatureId; onHome: () =>
         <strong style={{ fontSize: 15 }}>{FEATURE_BY_ID[feature].title}</strong>
       </> : (
         <span style={{ display: "flex", alignItems: "center", gap: 9 }}>
-          <HubIconTile name={h.icon} accent={h.accent} size={32} />
-          <span><strong style={{ fontSize: 18 }}>{h.title}</strong><div style={{ color: C.muted, fontSize: 11.5 }}>{h.subtitle}</div></span>
+          <strong style={{ fontSize: 15 }}>{h.title}</strong>
         </span>
       )}
-      <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+      <div className="rc-local-hub-nav" style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
         {HUBS.map((x) => (
           <button key={x.id} onClick={() => onHub(x.id)} style={{ padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
             border: `1px solid ${x.id === hub ? "#3f7fb5" : C.line}`, background: x.id === hub ? "#1c2b3d" : "transparent", color: x.id === hub ? "#fff" : C.muted }}>{x.title}</button>
@@ -152,24 +144,28 @@ export const HubCrumb: React.FC<{ hub: HubId; feature?: FeatureId; onHome: () =>
 
 // ── 허브 페이지 (기능 카드) ──────────────────────────────────────────────
 export const HubPage: React.FC<{ hub: HubId; ctx: ReadyCtx; onOpen: (f: FeatureId) => void; onHome: () => void; onHub: (h: HubId) => void; banner?: React.ReactNode }> = ({ hub, ctx, onOpen, onHome, onHub, banner }) => (
-  <div>
+  <div className="rc-hub-page">
+    <style>{`
+      .rc-hub-page{max-width:860px;margin:20px auto;container-type:inline-size}
+      .rc-feature-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:32px}
+      .rc-feature-card{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:13px;min-height:158px;padding:24px 46px 24px 24px;border:1px solid ${C.line};border-radius:12px;background:transparent;color:${C.fg};text-align:left;font:inherit;cursor:pointer;transition:border-color .15s,background .15s}
+      .rc-feature-card[data-primary=true]{background:color-mix(in srgb,${C.link} 5%,transparent);border-color:color-mix(in srgb,${C.link} 35%,${C.line})}
+      .rc-feature-card:hover:not(:disabled){border-color:${C.link};background:color-mix(in srgb,${C.link} 8%,transparent)}
+      .rc-feature-card strong{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600}
+      .rc-feature-card small{color:${C.muted};font-size:12px;line-height:1.7}
+      .rc-feature-card .rc-card-arrow{position:absolute;right:23px;top:26px;color:${C.muted};font-size:18px}
+      .rc-feature-card:disabled{cursor:default;opacity:.6}.rc-feature-card:focus-visible{outline:2px solid ${C.link};outline-offset:3px}
+      .rc-feature-hint{color:#f0b35b;font-size:11px}
+      @container(max-width:520px){.rc-feature-grid{grid-template-columns:1fr;gap:12px;margin-top:24px}.rc-feature-card{min-height:130px;padding:20px 42px 20px 20px}}
+    `}</style>
     <HubCrumb hub={hub} onHome={onHome} onHub={onHub} />
     {banner}
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+    <div className="rc-feature-grid">
       {FEATURES.filter((f) => f.hub === hub).map((f) => {
         const g = f.gate ? f.gate(ctx) : { enabled: true };
-        return (
-          <div key={f.id} style={{ border: `1px solid ${C.line}`, borderRadius: 12, background: C.card, padding: 18, display: "flex", flexDirection: "column", minHeight: 150 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 15, fontWeight: 700 }}><span style={{ color: HUBS.find((x) => x.id === f.hub)!.accent, display: "flex" }}><HubIcon name={f.icon} size={18} /></span>{f.title}</div>
-            <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.5, marginTop: 8, flex: 1 }}>{f.desc}</div>
-            <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 8 }}>
-              {f.id === "ship" && !g.enabled ? <DockerFix /> : <>
-              <button onClick={() => g.enabled && onOpen(f.id)} disabled={!g.enabled} style={btnStyle(!!f.primary, g.enabled)} title={!g.enabled ? g.hint : undefined}>{f.action}</button>
-              {!g.enabled && g.hint && <span style={{ color: "#f0b35b", fontSize: 11 }}>{g.hint}</span>}
-              </>}
-            </div>
-          </div>
-        );
+        const content = <><strong><span style={{ color: HUBS.find(x => x.id === f.hub)!.accent }}><HubIcon name={f.icon} size={19} /></span>{f.title}</strong><small>{f.desc}</small><span className="rc-card-arrow" aria-hidden="true">↗</span></>;
+        if (f.id === 'ship' && !g.enabled) return <div key={f.id} className="rc-feature-card">{content}<DockerFix /></div>;
+        return <button key={f.id} className="rc-feature-card" data-primary={Boolean(f.primary)} disabled={!g.enabled} title={g.enabled ? undefined : g.hint} onClick={() => onOpen(f.id)}>{content}{!g.enabled && <span className="rc-feature-hint">{g.hint}</span>}</button>;
       })}
     </div>
   </div>
@@ -239,59 +235,95 @@ export const AdrPanel: React.FC = () => {
 };
 
 // ── 보안: 스캔 / 시크릿 / 정책 ────────────────────────────────────────────
-interface ScanResultLite { scan_type: string; status?: "ok" | "error" | "not_run" | "unverified"; summary?: string; message?: string; cause?: string; next_action?: string; reason_code?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
-type ScanKind = "trivy" | "hadolint" | "gitleaks";
+interface ScanResultLite { requestId?: string; scan_type: string; status?: "ok" | "error" | "not_run" | "unverified"; summary?: string; message?: string; cause?: string; next_action?: string; reason_code?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
+
+export function securityResultDetail(r?: ScanResultLite): string {
+  if (!r) return '아직 검사 결과가 없습니다.';
+  const cause = r.cause ?? r.summary ?? r.message ?? '검사 결과를 확인하지 못했습니다.';
+  return `${cause}${r.next_action ? `\n다음 행동: ${r.next_action}` : ''}`;
+}
 
 export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; note: string }> = ({ kinds, title, note }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [running, setRunning] = useState<ScanKind | null>(null);
   const [results, setResults] = useState<Partial<Record<ScanKind, ScanResultLite>>>({});
+  const queue = useRef(new ScanQueue());
+  const timeout = useRef<ReturnType<typeof setTimeout>>();
+  const send = useCallback((request: ScanRequest | null) => {
+    clearTimeout(timeout.current);
+    setRunning(request?.scanType ?? null);
+    if (!request) return;
+    postMessage('runScan', request);
+    timeout.current = setTimeout(() => {
+      if (queue.current.current?.requestId !== request.requestId) return;
+      queue.current.stop(); setRunning(null);
+      setResults(cur => ({ ...cur, [request.scanType]: { scan_type: request.scanType, status: 'unverified', cause: '검사 응답을 받지 못했습니다.', next_action: '연결 상태를 확인한 뒤 다시 검사하세요.' } }));
+    }, 330000);
+  }, [postMessage]);
+  useEffect(() => () => { clearTimeout(timeout.current); queue.current.stop(); }, []);
 
   useMessage(useCallback((msg) => {
     if (msg.type === "scanResult") {
       const r = msg.payload as ScanResultLite;
       const k = r.scan_type as ScanKind;
-      if (kinds.includes(k)) { setResults((cur) => ({ ...cur, [k]: r })); setRunning(null); }
-    } else if (msg.type === "errorMessage") {
-      setRunning(null);
+      if (queue.current.matches(r)) { setResults((cur) => ({ ...cur, [k]: r })); send(queue.current.complete()); }
     }
-  }, [kinds]));
+  }, [send]));
 
-  const run = (k: ScanKind) => { setRunning(k); postMessage("runScan", { scanType: k, workspacePath: "" }); };
-  const label: Record<ScanKind, string> = { trivy: "Trivy (이미지 · 의존성)", hadolint: "Hadolint (Dockerfile)", gitleaks: "gitleaks (비밀값)" };
+  const run = (selected: ScanKind[]) => {
+    const request = queue.current.start(selected);
+    if (!request) return;
+    setResults(cur => { const next = { ...cur }; selected.forEach(k => { delete next[k]; }); return next; });
+    send(request);
+  };
+  const label: Record<ScanKind, string> = { trivy: '이미지 · 의존성', hadolint: 'Dockerfile', gitleaks: '시크릿' };
 
   const verdict = (r?: ScanResultLite) => {
     if (!r) return { text: "미실행", color: C.muted };
-    if (r.status === "error" || r.status === "not_run" || r.status === "unverified") {
+    if (r.status !== "ok") {
       //: raw 메시지가 아니라 코어가 분류한 원인 → 다음 행동.
-      const cause = r.cause ?? r.summary ?? r.message ?? "스캐너 오류";
-      return { text: `검사 못 함 · ${cause}${r.next_action ? ` → ${r.next_action}` : ""}`, color: "#f0b35b" };
+      return { text: '검사 미확인', color: "#f0b35b" };
     }
-    const c = r.critical_count ?? 0, h = r.high_count ?? 0;
-    const n = Array.isArray(r.findings) ? r.findings.length : 0;
+    const counts = scanCounts({ ...r, exit_code:0, findings:r.findings });
+    if (!counts) return { text:'검사 미확인', color:'#f0b35b' };
+    const c = counts.critical, h = counts.high;
+    const n = Math.max(Array.isArray(r.findings) ? r.findings.length : 0, r.medium_count ?? 0);
     if (c || h) return { text: `심각 ${c} · 높음 ${h}`, color: "#ff8b8b" };
     if (n) return { text: `발견 ${n}건 (낮음·중간)`, color: "#f0b35b" };
     return { text: "이상 없음", color: "#7ed3a2" };
   };
 
   return (
-    <div style={{ border: `1px solid ${C.line}`, borderRadius: 12, background: C.card, padding: "16px 18px" }}>
-      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{title}</div>
-      <div style={{ color: C.muted, fontSize: 12, marginBottom: 14 }}>{note}</div>
-      {kinds.map((k, i) => {
+    <div className="rc-scan-panel" aria-busy={running !== null}>
+      <style>{`
+        .rc-scan-panel{border:1px solid ${C.line};border-radius:12px;padding:24px;background:transparent}
+        .rc-scan-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:24px}
+        .rc-scan-heading h2{font-size:17px;font-weight:600;margin:0 0 8px}.rc-scan-heading p{font-size:12px;color:${C.muted};line-height:1.6;margin:0;max-width:480px}
+        .rc-scan-row{border-top:1px solid ${C.line}}.rc-scan-row summary{cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:20px 0;list-style:none;font-size:13px}.rc-scan-row summary::-webkit-details-marker{display:none}
+        .rc-scan-row summary span{font-size:11px}.rc-scan-row summary span::after{content:' ＋';color:${C.muted}}.rc-scan-row[open] summary span::after{content:' −'}
+        .rc-scan-detail{font-size:12px;line-height:1.7;color:${C.muted};padding:0 0 20px}.rc-scan-detail p{margin:0 0 12px;overflow-wrap:anywhere}
+        .rc-security-page{max-width:860px;margin:20px auto}.rc-security-policy{margin-top:22px}.rc-security-policy>summary{cursor:pointer;color:${C.muted};font-size:12px;padding:12px 0}
+      `}</style>
+      <div className="rc-scan-heading"><div><h2>{title}</h2><p>{note}</p></div><button onClick={() => run(kinds)} disabled={running !== null} style={{ ...btnStyle(true, running === null), padding:'10px 16px' }}>{running ? '검사 중…' : '보안 검사 시작'}</button></div>
+      {kinds.map(k => {
         const v = verdict(results[k]);
         return (
-          <div key={k} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center", padding: "10px 0", borderTop: i === 0 ? "none" : `1px solid ${C.line}` }}>
-            <div><div style={{ fontSize: 13, fontWeight: 600 }}>{label[k]}</div><div style={{ fontSize: 11.5, color: v.color, marginTop: 2 }}>{v.text}</div></div>
-            <div style={{ color: C.muted, fontSize: 11 }}>{results[k]?.summary ?? ""}</div>
-            <button onClick={() => run(k)} disabled={running !== null} style={btnStyle(true, running === null)}>{running === k ? "검사 중…" : "검사"}</button>
-          </div>
+          <details key={k} className="rc-scan-row">
+            <summary><strong>{label[k]}</strong><span style={{ color: running === k ? C.link : v.color }}>{running === k ? '검사 중…' : v.text}</span></summary>
+            <div className="rc-scan-detail"><p style={{ whiteSpace:'pre-line' }}>{k} · {securityResultDetail(results[k])}</p><button onClick={() => run([k])} disabled={running !== null} style={btnStyle(false, running === null)}>{label[k]}만 검사</button></div>
+          </details>
         );
       })}
-      <div style={{ marginTop: 12, color: C.muted, fontSize: 11 }}>검사를 안 한 것과 이상이 없는 것은 다르게 표시됩니다. 스캐너가 없으면 "검사 못 함"으로 남아요.</div>
+      <div role="status" style={{ marginTop: 12, color: C.muted, fontSize: 11 }}>{running ? `${label[running]} 검사 중` : '항목을 누르면 결과와 개별 검사 메뉴가 열립니다.'}</div>
     </div>
   );
 };
+
+export const SecurityHub: React.FC<{ onHome: () => void; onHub: (hub: HubId) => void }> = ({ onHome, onHub }) => <section className="rc-security-page">
+  <HubCrumb hub="security" onHome={onHome} onHub={onHub} />
+  <div style={{ marginTop:32 }}><SecurityScanPanel kinds={['trivy','hadolint','gitleaks']} title="배포 전 확인" note="이미지, Dockerfile, 소스에 남은 비밀값을 한 번에 검사하세요." /></div>
+  <details className="rc-security-policy"><summary>배포 승인 · 차단 기준 보기</summary><PolicyPanel /></details>
+</section>;
 
 export const PolicyPanel: React.FC = () => {
   const { postMessage } = useVSCodeApi();
