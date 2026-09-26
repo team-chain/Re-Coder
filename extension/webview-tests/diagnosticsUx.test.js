@@ -30,14 +30,17 @@ test('finishing setup or error releases only its own button and preserves outcom
  assert.equal(state.docker_ready.message,'ready');
 });
 
-test('both home and deploy hub offer Docker action instead of a dead badge',()=>{
- for(const Component of [HubHome,HubPage]){
+test('Docker auto repair stays reachable in the deployment tools; home keeps mode selection',()=>{
+ for(const Component of [HubPage]){
   const html=renderToStaticMarkup(React.createElement(Component,{hub:'deploy',ctx,onSelect(){},onOpen(){},onHome(){},onHub(){}}));
   assert.match(html,/<button[^>]*>Docker 필요 · 자동 조치<\/button>/);
   assert.ok(!/<button[^>]*>(?:(?!<\/button>)[\s\S])*<button/.test(html),'nested button');
  }
  const html=renderToStaticMarkup(React.createElement(HubHome,{ctx:{...ctx,isDockerReady:true},onSelect(){}}));
  assert.ok(!html.includes('Docker 필요 · 자동 조치'));
+ const disconnected=renderToStaticMarkup(React.createElement(HubHome,{ctx,onSelect(){}}));
+ assert.ok(disconnected.includes('>Deploy<'));
+ assert.ok(!/<button[^>]*disabled/.test(disconnected), 'Docker readiness must not prevent entering Deploy');
 });
 
 test('diagnostics describes probe evidence without claiming every task uses one model',()=>{

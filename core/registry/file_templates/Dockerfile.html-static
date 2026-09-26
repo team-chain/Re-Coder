@@ -1,0 +1,33 @@
+# ReCoder File Template: Dockerfile.html-static
+# Plain HTML/CSS/JS: no package manager or application server required.
+FROM nginxinc/nginx-unprivileged:stable-alpine AS assets
+USER 0
+WORKDIR /source
+COPY . .
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+# Keep this list dynamic: assets added after Dockerfile generation must deploy.
+RUN mkdir -p /site && find . -type f | while IFS= read -r asset; do \
+      case "$asset" in */.*|*/node_modules/*|./docs/*|./test/*|./tests/*|./coverage/*|./venv/*|*/secret.json|*/secrets.json) continue ;; esac; \
+      case "$asset" in *.html|*.htm|*.css|*.js|*.mjs|*.json|*.svg|*.png|*.jpg|*.jpeg|*.gif|*.webp|*.avif|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.wasm|*.webmanifest|*.mp3|*.mp4|*.webm|*.ogg) \
+        mkdir -p "/site/$(dirname "$asset")" && cp "$asset" "/site/$asset" || exit 1 ;; esac; \
+    done && test -s /site/index.html
+USER 101
+
+FROM nginxinc/nginx-unprivileged:stable-alpine AS runtime
+USER 0
+# nginx variables must remain literal in the generated configuration.
+# hadolint ignore=SC2016
+RUN apk upgrade --no-cache && printf '%s\n' \
+    'server {' \
+    '  listen {{PORT}};' \
+    '  root /usr/share/nginx/html;' \
+    '  index index.html;' \
+    '  location / { try_files $uri $uri/ =404; }' \
+    '  location = /health { access_log off; return 200 "ok\n"; }' \
+    '}' > /etc/nginx/conf.d/default.conf
+COPY --from=assets --chown=101:101 /site/ /usr/share/nginx/html/
+USER 101
+EXPOSE {{PORT}}
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:{{PORT}}/health"]
+CMD ["nginx", "-g", "daemon off;"]

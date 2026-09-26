@@ -231,7 +231,7 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
       {incidents.length > 0 && (
         <>
           <div style={sectionHeader}>인시던트 ({incidents.length}건)</div>
-          {incidents.map((alert, i) => (
+          {incidents.map((alert) => (
             <div
               key={alert.alert_id}
               style={{

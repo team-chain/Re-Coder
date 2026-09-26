@@ -52,12 +52,14 @@ if str(_ROOT_DIR) not in sys.path:
 load_dotenv(_CORE_DIR / ".env")
 
 from singleton import CoreSingleton  # noqa: E402
+from version import VERSION  # noqa: E402
 from api.middleware.auth import SessionTokenMiddleware  # noqa: E402
 from api.routes import (  # noqa: E402
     health,
     analyze,
     deploy,
     deploy_ecs,
+    canvas,
     deploy_history,
     deploy_s3,
     ops,
@@ -73,7 +75,6 @@ from api.routes import (  # noqa: E402
 )
 
 _bound_port: int = 0
-VERSION = "1.0.0"
 
 
 def _persist_session_token(path: Path, token: str) -> None:
@@ -261,6 +262,7 @@ def create_app() -> FastAPI:
     app.include_router(ecs.router)
     # 확장이 부르는 /api/deploy/ecs* 호환 계층 (FR-05-04)
     app.include_router(deploy_ecs.router)
+    app.include_router(canvas.router)
     app.include_router(deploy_history.router)
     # FR-05-03 사용자 계정 S3 정적 배포(BYO)
     app.include_router(deploy_s3.router)
@@ -349,4 +351,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--self-check"]:
+        from release_check import run
+        sys.exit(run(app))
+    elif sys.argv[1:] == ["--version"]:
+        print(VERSION)
+    else:
+        main()

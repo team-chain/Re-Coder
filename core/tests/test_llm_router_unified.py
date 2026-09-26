@@ -47,7 +47,7 @@ class _FakeProvider:
     def provider_name(self) -> str:
         return self._name
 
-    async def converse(self, messages, system=None, output_schema=None):
+    async def converse(self, messages, system=None, output_schema=None, *, max_tokens=4096, temperature=0.0):
         self.calls += 1
         if self.fail:
             raise RuntimeError("boom")
@@ -59,7 +59,7 @@ class _FakeGemini:
         self.fail = fail
         self.calls = 0
 
-    async def generate(self, prompt, schema=None):
+    async def generate(self, prompt, schema=None, *, max_tokens=4096, temperature=0.0):
         self.calls += 1
         if self.fail:
             raise RuntimeError("gemini down")

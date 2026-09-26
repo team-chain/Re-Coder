@@ -503,6 +503,7 @@ export class CoreManager {
             this.coreProcess = spawn(spec.command, args, {
                 env: { ...hostEnv, ...gatewayEnv, ...awsEnv },
                 detached: false,
+                windowsHide: true,
                 stdio: ['ignore', 'pipe', 'pipe'],
                 cwd: spec.cwd,
                 shell: false,
@@ -534,7 +535,8 @@ export class CoreManager {
             });
             this.coreProcess.on('close', () => processLog.finish());
 
-            await this.waitForReady(15000);
+            // One-file binaries must extract their runtime on the first launch.
+            await this.waitForReady(this.isDevelopment() ? 15000 : 60000);
             const runtime = await this.readRuntime();
             if (runtime) {
                 processLog.addSecrets([runtime.session_token]);
@@ -630,7 +632,9 @@ export class CoreManager {
 
         if (process.platform === 'win32') {
             if (pid) {
-                try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }); } catch { /* ignore */ }
+                // PyInstaller one-file executables have a bootloader and child.
+                // Only terminate the tree spawned by this manager.
+                try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ }
             } else if (proc) {
                 try { proc.kill('SIGTERM'); } catch { /* ignore */ }
             }

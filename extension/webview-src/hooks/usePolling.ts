@@ -3,7 +3,7 @@
  * Periodically polls Core health and cost summary via postMessage to the extension host.
  */
 
-import { useEffect, useCallback, useRef, useState } from "react";
+import { useEffect, useCallback, useState } from "react";
 import { useVSCodeApi } from "./useVSCodeApi";
 
 export interface CoreHealth {
@@ -75,14 +75,12 @@ export function usePolling(interval: number = 4000): PollingState {
       }));
     }
 
-    // errorMessage from PollingService failure → mark as offline
-    if (type === "errorMessage") {
+    // A failed scan, AI request or diagnostics is not evidence that Core is down.
+    if (type === "core.error" || type === "core.stopped") {
       setState((prev) => ({
         ...prev,
         isConnected: false,
-        coreHealth: prev.coreHealth?.status === "ok"
-          ? { ...prev.coreHealth, status: "down" }
-          : prev.coreHealth,
+        coreHealth: { version: "unknown", uptime: 0, port: 0, ...prev.coreHealth, status: "down" },
       }));
     }
   });

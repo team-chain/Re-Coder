@@ -158,7 +158,6 @@ const Canvas: React.FC<{
       {edges.map((e, i) => {
         const a = pos.get(e.from), b = pos.get(e.to);
         if (!a || !b) return null;
-        const over = false;
         return (
           <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
             stroke={C.edge} strokeOpacity={0.5} strokeWidth={1.5} markerEnd="url(#rcm-arrow)" />

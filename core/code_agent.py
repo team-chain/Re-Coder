@@ -13,6 +13,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import logging
 import os
 import posixpath
 import re
@@ -20,9 +21,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from llm.base import LLMRequest
+from llm.base import LLMRequest, LLMError, LLMErrorType
 from llm.router import get_router
+from code_output import CODE_OUTPUT_SCHEMA, CodeOutputError, parse_code_output
 from schemas import AnalyzeRequest, FilePatch, PatchProposal, RiskLevel
+
+log = logging.getLogger(__name__)
 
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     from adr import (
@@ -812,21 +816,21 @@ _CODE_AGENT_TREE_LIMIT = 80   # 컨텍스트에 넣을 기존 파일 경로 최�
 def _list_project_files(root: Path, limit: int = _CODE_AGENT_TREE_LIMIT) -> list[str]:
     """충돌 회피·맥락용 기존 파일 경로 목록(상대경로). 가벼운 트리."""
     out: list[str] = []
+    if limit <= 0:
+        return out
     try:
-        for p in sorted(root.rglob("*")):
-            if len(out) >= limit:
-                break
-            if p.is_dir():
-                continue
-            if any(part in _SKIP_DIRS for part in p.parts):
-                continue
-            if p.suffix.lower() in _SOURCE_EXTS or p.suffix.lower() in {
-                ".html", ".css", ".json", ".md", ".txt", ".yml", ".yaml", ".toml",
-            }:
-                try:
-                    out.append(str(p.relative_to(root)).replace("\\", "/"))
-                except ValueError:
-                    continue
+        # Prune before descent. Sorting rglob materialized the entire dependency
+        # tree before the 80-file limit could take effect, stalling AI requests.
+        for directory, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = sorted(name for name in dirs if name not in _SKIP_DIRS)
+            for name in sorted(files):
+                p = Path(directory) / name
+                if p.suffix.lower() in _SOURCE_EXTS or p.suffix.lower() in {
+                    ".html", ".css", ".json", ".md", ".txt", ".yml", ".yaml", ".toml",
+                }:
+                    out.append(p.relative_to(root).as_posix())
+                    if len(out) >= limit:
+                        return out
     except Exception:
         pass
     return out
@@ -918,8 +922,9 @@ def _build_code_prompt(
 - 각 파일 작업은 그 파일의 "전체 최종 내용"을 담습니다 (부분 diff 아님).
 - 새 파일이면 action="create", 기존 파일을 바꾸면 action="edit".
 - 가능한 한 적은 수의 파일로, 즉시 실행/렌더 가능한 완결된 코드를 작성합니다.
-- 외부 빌드 도구 없이 동작하도록 합니다(예: 단일 HTML 은 인라인 CSS/JS).
-- 데이터 저장이 필요하면 외부 DB 대신 localStorage 를 사용합니다.
+- 사용자가 지정한 프레임워크와 승인된 설계를 따르고, 실행에 필요한 설정 파일도 포함합니다.
+- 프레임워크 지정이나 기존 프로젝트 제약이 없을 때만 단일 HTML 등 간단한 구성을 선택합니다.
+- TypeScript 코드는 tsconfig와 일치해야 합니다. jsx="react-jsx"에서는 사용하지 않는 React 기본 import를 넣지 마세요.
 - 기존 파일 목록과 겹치지 않게 파일명을 정하되, 사용자가 파일명을 지정하면 그대로 따릅니다.
 - 사용자가 확정한 설계 결정이 있으면 그 선택을 우선하고 임의로 다른 방식을 택하지 않습니다.
 
@@ -1350,6 +1355,14 @@ def generate_plan(
                 agent="code_agent",
                 operation="generate_plan",
             )
+        except LLMError as e:
+            if e.error_type == LLMErrorType.STRUCTURED_OUTPUT:
+                last_parse_error = RuntimeError("모델 출력이 응답 길이 제한에서 잘렸습니다.")
+                continue
+            from llm.failure import public_ai_failure_reason
+            log.warning('Design generation provider failure: %s', e)
+            guidance = ' 잠시 후 같은 요청으로 다시 시도해 주세요.' if e.retryable else ' AI 연결 설정을 확인해 주세요.'
+            raise RuntimeError(f"LLM 호출 실패: {public_ai_failure_reason(e)}{guidance}") from e
         except Exception as e:
             raise RuntimeError(f"LLM 호출 실패: {e}") from e
 
@@ -1559,40 +1572,42 @@ def generate_code(
         target_folder, norm_decisions,
     )
 
-    try:
-        llm_resp = get_router().call(
-            LLMRequest(prompt=prompt, max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
-            agent="code_agent",
-            operation="generate_code",
+    # Request a native schema instead of relying only on prose instructions.
+    # Reject incomplete batches as a whole, then give the model one bounded
+    # correction attempt. Neither attempt writes project files.
+    reason = ""
+    for attempt in range(2):
+        attempt_prompt = prompt
+        if attempt:
+            attempt_prompt += (
+                f"\n\n직전 응답의 문제: {reason}\n"
+                "같은 사용자 요청과 승인된 설계를 유지하여 다시 생성하세요. "
+                "summary와 비어 있지 않은 ops 배열을 포함한 JSON 하나를 완성하세요. "
+                "각 op에 file과 전체 content를 반드시 포함하세요. "
+                "기능이나 기존 코드를 생략하지 말고 장황한 설명과 반복 스타일을 줄여 출력 한도 안에서 완결하세요."
+            )
+        try:
+            llm_resp = get_router().call(
+                LLMRequest(prompt=attempt_prompt, json_schema=CODE_OUTPUT_SCHEMA,
+                           max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+                agent="code_agent", operation="generate_code",
+            )
+            data, ops_out = parse_code_output(llm_resp.text)
+            break
+        except CodeOutputError as exc:
+            reason = str(exc)
+        except LLMError as exc:
+            if exc.error_type != LLMErrorType.STRUCTURED_OUTPUT:
+                raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
+            reason = "모델 출력이 응답 길이 제한에서 잘렸습니다."
+        except Exception as exc:
+            raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
+        print(f"[code_agent] 생성 응답 검증 실패 ({attempt + 1}/2): {reason}", flush=True)
+    else:
+        raise RuntimeError(
+            f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도). {reason} "
+            "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
         )
-    except Exception as e:
-        raise RuntimeError(f"LLM 호출 실패: {e}") from e
-
-    raw = (llm_resp.text or "").strip()
-    if not raw:
-        raise RuntimeError("LLM 이 빈 응답을 반환했습니다. 모델/할당량/필터를 확인하세요.")
-
-    data = _extract_json(raw)
-
-    ops_out: list[dict] = []
-    for op in (data.get("ops") or []):
-        file_path = (op.get("file") or "").strip()
-        content = op.get("content")
-        if not file_path or content is None:
-            continue
-        action = (op.get("action") or "create").strip().lower()
-        if action not in ("create", "edit"):
-            action = "create"
-        ops_out.append({
-            "action": action,
-            "file": file_path.replace("\\", "/"),
-            "language": (op.get("language") or "").strip(),
-            "content": str(content),
-            "rationale": (op.get("rationale") or "").strip(),
-        })
-
-    if not ops_out:
-        raise RuntimeError("LLM 응답에 적용할 ops 가 없습니다.")
 
     # ADR 영속화 — 승인된 결정을 docs/adr 에 구조화 기록으로 남긴다(코드와 동시 산출).
     # 시크릿 검사 '앞'에 넣어야 한다: ADR 본문에도 사용자 요청문이 들어가므로
@@ -1661,7 +1676,7 @@ def generate_code(
     annotate_removals(ops_out, root, target_folder)
 
     result = {
-        "summary": data.get("summary", "코드를 생성했습니다.").strip(),
+        "summary": str(data.get("summary") or "코드를 생성했습니다.").strip(),
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),
         "provider": getattr(llm_resp, "provider", ""),

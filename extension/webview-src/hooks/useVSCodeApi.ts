@@ -3,7 +3,7 @@
  * Provides safe access to acquireVsCodeApi() and message passing utilities.
  */
 
-import { useEffect, useCallback, useRef } from "react";
+import { useEffect, useCallback, useRef, useLayoutEffect } from "react";
 
 declare function acquireVsCodeApi(): {
   postMessage: (message: unknown) => void;
@@ -13,6 +13,7 @@ declare function acquireVsCodeApi(): {
 
 // Singleton VSCode API instance (acquireVsCodeApi can only be called once)
 let vscodeApiInstance: ReturnType<typeof acquireVsCodeApi> | null = null;
+const useMessageEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 function getVSCodeApi(): ReturnType<typeof acquireVsCodeApi> | null {
   if (typeof acquireVsCodeApi !== "undefined") {
@@ -47,12 +48,14 @@ export function useVSCodeApi() {
   const useMessage = (
     handler: (message: { type: string; payload: unknown }) => void
   ) => {
+    const handlerRef = useRef(handler);
+    useMessageEffect(() => { handlerRef.current = handler; });
     // eslint-disable-next-line react-hooks/rules-of-hooks
-    useEffect(() => {
+    useMessageEffect(() => {
       const listener = (event: MessageEvent) => {
         const message = event.data;
         if (message && typeof message === "object" && "type" in message) {
-          handler(message as { type: string; payload: unknown });
+          handlerRef.current(message as { type: string; payload: unknown });
         }
       };
       window.addEventListener("message", listener);

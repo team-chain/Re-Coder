@@ -621,6 +621,11 @@ async def handle_bridge_set_channel(request: web.Request) -> web.Response:
     })
 
 
+async def handle_canvas_event(request: web.Request) -> web.Response:
+    from canvas_events import send_canvas_event
+    return await send_canvas_event(request, authorized=_check_auth(request), bot=_bot, channel_id=get_make_channel_id())
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/api/v1/health",                  handle_health)
@@ -629,6 +634,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/v1/github/webhook",         handle_github_webhook)
     # ReCoder Bridge (Discord → VSCode 실시간 코드 삽입) 설정 API
     app.router.add_get("/api/v1/bridge/status",           handle_bridge_status)
+    app.router.add_post("/api/v1/bridge/events",          handle_canvas_event)
     app.router.add_put("/api/v1/bridge/channel",          handle_bridge_set_channel)
     app.router.add_get("/api/v1/bridge/invite-url",       handle_bridge_invite_url)
     app.router.add_get("/api/v1/bridge/guilds",           handle_bridge_guilds)
