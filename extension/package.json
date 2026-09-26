@@ -276,22 +276,26 @@
         "recoder.bridge.host": {
           "type": "string",
           "default": "127.0.0.1",
-          "description": "Discord 봇 브리지 호스트 (recoder_bridge.py 가 바인딩한 주소)."
+          "description": "Discord 봇 브리지 호스트 (recoder_bridge.py 가 바인딩한 주소).",
+          "scope": "machine"
         },
         "recoder.bridge.port": {
           "type": "number",
           "default": 7780,
-          "description": "Discord 봇 브리지 포트."
+          "description": "Discord 봇 브리지 포트.",
+          "scope": "machine"
         },
         "recoder.bridge.token": {
           "type": "string",
           "default": "",
-          "description": "Discord 봇 브리지 인증 토큰 (.env 의 RECODER_BRIDGE_TOKEN 과 동일해야 함)."
+          "description": "Discord 봇 브리지 인증 토큰 (.env 의 RECODER_BRIDGE_TOKEN 과 동일해야 함).",
+          "scope": "machine"
         },
         "recoder.bridge.studentId": {
           "type": "string",
           "default": "",
-          "description": "Phase 2 per-user 라우팅 식별자. /recoder link 로 받은 student_id 를 넣으면 본인 디스코드 요청이 이 VSCode로만 전달됩니다. 비우면 전체 broadcast(단일 PC)."
+          "description": "Phase 2 per-user 라우팅 식별자. /recoder link 로 받은 student_id 를 넣으면 본인 디스코드 요청이 이 VSCode로만 전달됩니다. 비우면 전체 broadcast(단일 PC).",
+          "scope": "machine"
         },
         "recoder.discord.clientId": {
           "type": "string",
@@ -301,7 +305,8 @@
         "recoder.gateway.url": {
           "type": "string",
           "default": "",
-          "description": "운영자가 제공한 Bedrock 게이트웨이 베이스 URL(수업·팀 사용자용). 설정한 뒤 'ReCoder: Connect to Gateway (Enroll)' 로 등록 코드를 입력하면 AWS 키 없이 AI를 사용합니다. 비워 두면 본인 AWS 계정(BYO)으로 동작합니다."
+          "description": "운영자가 제공한 Bedrock 게이트웨이 베이스 URL(수업·팀 사용자용). 설정한 뒤 'ReCoder: Connect to Gateway (Enroll)' 로 등록 코드를 입력하면 AWS 키 없이 AI를 사용합니다. 비워 두면 본인 AWS 계정(BYO)으로 동작합니다.",
+          "scope": "machine"
         },
         "recoder.ai.anthropicModel": {
           "type": "string",
@@ -316,12 +321,26 @@
         "recoder.bridge.httpPort": {
           "type": "number",
           "default": 8765,
-          "description": "Discord 봇 HTTP API 포트 (api_server.py — Workbench Discord 탭이 사용)."
+          "description": "Discord 봇 HTTP API 포트 (api_server.py — Workbench Discord 탭이 사용).",
+          "scope": "machine"
         },
         "recoder.bridge.registrationKey": {
           "type": "string",
           "default": "",
-          "description": "Discord 봇 HTTP API 인증 키 (.env 의 BOT_REGISTRATION_KEY 와 동일해야 함, 미설정 시 인증 생략)."
+          "description": "Discord 봇 HTTP API 인증 키 (.env 의 BOT_REGISTRATION_KEY 와 동일해야 함, 미설정 시 인증 생략).",
+          "scope": "machine"
+        },
+        "recoder.bridge.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "ReCoder Discord 봇 서버(discord-bot, 고급)와 WebSocket 으로 연결합니다. 봇 서버를 직접 운영할 때만 켜세요. 알림만 받으려면 Deploy 캔버스의 Discord 연결(내 봇 토큰·웹후크)을 쓰세요."
+        },
+        "recoder.bridge.allowAutoRun": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "봇 서버가 보낸 HTML 을 확인 없이 미리보기로 엽니다. 권장하지 않습니다."
         }
       }
     }

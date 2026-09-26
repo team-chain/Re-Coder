@@ -453,6 +453,59 @@ class GitHubAgent:
         branches = [b.strip() for b in out.splitlines() if b.strip()]
         return {"status": "ok", "branches": branches, "current": current}
 
+    #: 스테이징 전 내용 검사를 하는 파일 크기 상한(바이트). 더 큰 파일은 이름 규칙만 본다.
+    _SECRET_SCAN_MAX_BYTES = 512 * 1024
+
+    def _stage_safely(self, ws: Path) -> list[str]:
+        """`git add -A` 대신 — 민감한 이름(.env·키·자격증명)이나 시크릿이 보이는 파일은 빼고 stage.
+
+        예전에는 푸시·저장소 생성이 `git add -A` 로 추적 안 된 파일을 전부 커밋해서,
+        .gitignore 에 없는 `.env.production`·`id_ed25519`·`credentials.json` 까지 올라갔다.
+        제외한 경로 목록을 돌려준다(내용은 돌려주지 않는다).
+        """
+        try:
+            from s3_byo import is_sensitive_key  # type: ignore
+            from security_scan import scan_text_for_secrets  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core.s3_byo import is_sensitive_key  # type: ignore
+            from core.security_scan import scan_text_for_secrets  # type: ignore
+        #: _git 은 출력 앞뒤 공백을 잘라 첫 항목의 상태 열(" D")이 깨진다 — 여기서는 원문을 쓴다.
+        try:
+            proc = subprocess.run(["git", "status", "--porcelain", "-z", "--untracked-files=all"],
+                                  cwd=str(ws), capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=60,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError):
+            return []
+        if proc.returncode != 0:
+            return []
+        entries = proc.stdout.split("\0")
+        to_add: list[str] = []
+        excluded: list[str] = []
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            status, rel = entry[:2], entry[3:]
+            if status[0] in "RC":
+                i += 1  # 이름 변경의 원래 경로
+            deleted = "D" in status
+            unsafe = not deleted and is_sensitive_key(rel)
+            if not unsafe and not deleted:
+                target = ws / rel
+                try:
+                    if target.is_file() and target.stat().st_size <= self._SECRET_SCAN_MAX_BYTES:
+                        text = target.read_text(encoding="utf-8", errors="ignore")
+                        unsafe = bool(scan_text_for_secrets(text, rel))
+                except OSError:
+                    pass
+            (excluded if unsafe else to_add).append(rel)
+        for start in range(0, len(to_add), 100):
+            self._git(ws, ["add", "-A", "--", *to_add[start:start + 100]])
+        return excluded
+
     def repo_create_and_push(
         self,
         workspace_path: str,
@@ -516,10 +569,11 @@ class GitHubAgent:
         self._ensure_git_init(ws)
 
         # 5. 적어도 한 번은 커밋이 있어야 push 가능
+        excluded_initial: list[str] = []
         rc, _, _ = self._git(ws, ["rev-parse", "HEAD"])
         if rc != 0:
-            # add + commit
-            self._git(ws, ["add", "-A"])
+            # add + commit — 민감한 파일은 빼고
+            excluded_initial = self._stage_safely(ws)
             rc2, _, err2 = self._git(ws, ["commit", "-m", "Initial commit by ReCoder"])
             if rc2 != 0 and "nothing to commit" not in err2:
                 return {"status": "error", "message": f"초기 커밋 실패: {err2}"}
@@ -530,20 +584,23 @@ class GitHubAgent:
         if cur and cur != default_branch:
             self._git(ws, ["branch", "-M", default_branch])
 
-        # 7. remote 설정 — 토큰을 URL 에 임베드해서 한 번만 push (보안: 이후 set-url 로 제거)
-        token_url = f"https://x-access-token:{self._token}@github.com/{full}.git"
+        # 7. remote 설정 — 토큰은 .git/config·명령줄에 두지 않는다(push 와 같은 프로세스 전용 헤더).
+        #    예전에는 토큰을 remote URL 에 넣었다가 지웠는데, 도중에 Core 가 죽으면 그대로 남았다.
         clean_url = f"https://github.com/{full}.git"
-
         rc, _, _ = self._git(ws, ["remote", "get-url", "origin"])
         if rc != 0:
-            self._git(ws, ["remote", "add", "origin", token_url])
+            self._git(ws, ["remote", "add", "origin", clean_url])
         else:
-            self._git(ws, ["remote", "set-url", "origin", token_url])
+            self._git(ws, ["remote", "set-url", "origin", clean_url])
 
         # 8. push
-        rc, _, err = self._git(ws, ["push", "-u", "origin", default_branch], timeout=180)
-        # 9. 토큰을 URL 에서 즉시 제거
-        self._git(ws, ["remote", "set-url", "origin", clean_url])
+        import base64
+        env = os.environ.copy()
+        auth = base64.b64encode(f"x-access-token:{self._token}".encode()).decode()
+        env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                    "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {auth}", "GIT_TERMINAL_PROMPT": "0"})
+        rc, _, err = self._git(ws, ["push", "-u", "origin", default_branch], timeout=180, env=env)
+        err = (err or "").replace(self._token, "[redacted]").replace(auth, "[redacted]")
 
         if rc != 0:
             return {
@@ -553,9 +610,12 @@ class GitHubAgent:
                 "repo_name": full,
             }
 
+        note = (f" 민감한 파일 {len(excluded_initial)}개는 올리지 않았습니다: {', '.join(excluded_initial[:5])}"
+                if excluded_initial else "")
         return {
             "status": "ok",
-            "message": f"{full} 생성 및 push 완료",
+            "message": f"{full} 생성 및 push 완료.{note}",
+            "excluded_files": excluded_initial,
             "repo_url": html_url,
             "repo_name": full,
             "default_branch": default_branch,
@@ -592,6 +652,7 @@ class GitHubAgent:
 
         # 미커밋 변경(워크플로 파일 포함)을 stage + commit — 안 하면 push 해도 안 올라감.
         committed = False
+        excluded_files: list[str] = []
         if auto_commit:
             rc, status_out, _ = self._git(ws, ["status", "--porcelain"])
             if rc == 0 and status_out.strip():
@@ -601,7 +662,7 @@ class GitHubAgent:
                 rc_e, email_out, _ = self._git(ws, ["config", "user.email"])
                 if rc_e != 0 or not email_out.strip():
                     self._git(ws, ["config", "user.email", "recoder@local"])
-                self._git(ws, ["add", "-A"])
+                excluded_files = self._stage_safely(ws)
                 msg = commit_message or "chore(recoder): CI/CD workflow & changes"
                 rc_c, _, err_c = self._git(ws, ["commit", "-m", msg])
                 if rc_c == 0:
@@ -638,12 +699,15 @@ class GitHubAgent:
         if rc != 0:
             safe_error = err.replace(self._token, "[redacted]").replace(auth, "[redacted]")
             return {"status": "error", "message": f"push 실패: {safe_error[:300]}"}
+        note = (f" 민감한 파일 {len(excluded_files)}개는 커밋하지 않았습니다: {', '.join(excluded_files[:5])}"
+                if excluded_files else "")
         return {
             "status": "ok",
-            "message": f"push 완료: {full}:{branch}",
+            "message": f"push 완료: {full}:{branch}.{note}",
             "branch": branch,
             "repo": full,
             "committed": committed,
+            "excluded_files": excluded_files,
         }
 
     # ── Actions Secrets ───────────────────────────────────────────────

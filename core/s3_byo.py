@@ -216,7 +216,10 @@ _SENSITIVE_NAME_PATTERNS = [
 
     re.compile(r"\.(pem|key|p12|pfx|jks|keystore)$", re.IGNORECASE),  # 키·인증서
     re.compile(r"^id_(rsa|dsa|ecdsa|ed25519)(\..+)?$", re.IGNORECASE),
-    re.compile(r"^credentials$", re.IGNORECASE),                     # ~/.aws/credentials 사본
+    re.compile(r"^credentials(\.(json|ya?ml|csv|txt))?$", re.IGNORECASE),  # ~/.aws/credentials 사본·JSON
+    re.compile(r"\.tfstate(\.backup)?$", re.IGNORECASE),              # Terraform 상태(비밀 포함)
+    re.compile(r"^service[-_]?account.*\.json$", re.IGNORECASE),       # GCP 서비스 계정 키
+    re.compile(r"\.kdbx$", re.IGNORECASE),                            # 비밀번호 DB
     re.compile(r"^\.(npmrc|netrc|htpasswd|git-credentials|pgpass)$", re.IGNORECASE),
     re.compile(r"^secrets?\.(ya?ml|json|toml|ini|txt)$", re.IGNORECASE),
 ]

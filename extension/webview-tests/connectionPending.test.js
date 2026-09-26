@@ -35,3 +35,12 @@ test('첫 연결이 실패하면 "확인 중"을 풀고 원인을 보여 준 뒤
   assert.equal(messages.find(m => m.type === 'diagnostics.status').payload.pending, false);
   assert.ok(attempts >= 2);
 });
+
+test('대상 폴더를 포함한 경로를 돌려받아도 폴더를 두 번 붙이지 않는다 (web/web 방지)', () => {
+  const p = new SidebarProvider(vscode.Uri.file(path.join(__dirname, '..')), {}, { coreInstanceKey: () => '' }, { start() {}, stop() {}, getLastHealth: () => null, poll: async () => null });
+  assert.equal(p._joinFolder('web', 'web/index.html'), 'web/index.html');
+  assert.equal(p._joinFolder('web', 'index.html'), 'web/index.html');
+  assert.equal(p._joinFolder('web', 'Web/app.js'), 'Web/app.js');
+  assert.equal(p._joinFolder('', 'a/b.js'), 'a/b.js');
+  assert.equal(p._joinFolder('web', 'webapp/x.js'), 'web/webapp/x.js');
+});

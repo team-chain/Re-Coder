@@ -49,9 +49,14 @@ export function activate(context: vscode.ExtensionContext): void {
     // 새 인스턴스를 만들면, dispose 는 항상 최초 인스턴스만 정리하고 이전
     // 클라이언트들이 살아남는다 — 봇 스트림 하나를 여러 클라이언트가 각각
     // 처리해 같은 문서에 중복 편집·중복 실행이 일어난다.
+    //: 봇 서버를 직접 운영하는 사용자만 켠다(recoder.bridge.enabled). 예전에는 모든 사용자가 항상
+    //: 127.0.0.1:7780 에 붙으려 했고, 그 포트를 잡은 아무 프로세스나 학생 토큰을 받고 워크스페이스
+    //: 파일을 쓸 수 있었다(보안 검토).
     let activeBridge = new BridgeClient(context);
     context.subscriptions.push(activeBridge);
-    activeBridge.connect();
+    if (vscode.workspace.getConfiguration('recoder.bridge').get<boolean>('enabled', false)) {
+        activeBridge.connect();
+    }
 
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.bridge.reconnect', () => {

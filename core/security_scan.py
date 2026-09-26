@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -151,12 +152,25 @@ class SecurityScanner:
                 "-v", f"{out_dir}:/out",
                 "-v", f"{cache_dir}:/root/.cache/",
             ]
-            for name in _AWS_ENV_PASSTHROUGH:
-                if os.environ.get(name):
-                    cmd.extend(["-e", name])
-            aws_dir = os.path.join(os.path.expanduser("~"), ".aws")
-            if os.path.isdir(aws_dir):
-                cmd.extend(["-v", f"{aws_dir}:/root/.aws:ro"])
+            #: 이미지가 로컬 데몬에 있으면(방금 빌드·푸시한 경우) **AWS 자격증명을 넘기지 않고**
+            #: 로컬에서만 읽는다. 스캐너 컨테이너(외부 이미지)가 사용자 키를 받을 이유가 없다.
+            #: 로컬에 없을 때(ECR 에만 있는 이미지)만 원격에서 받도록 자격증명을 넘긴다.
+            local_image = False
+            try:
+                local_image = (await asyncio.to_thread(
+                    subprocess.run, ["docker", "image", "inspect", image], capture_output=True, timeout=20,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                local_image = False
+            if local_image:
+                trivy_args = trivy_args + ["--image-src", "docker"]
+            else:
+                for name in _AWS_ENV_PASSTHROUGH:
+                    if os.environ.get(name):
+                        cmd.extend(["-e", name])
+                aws_dir = os.path.join(os.path.expanduser("~"), ".aws")
+                if os.path.isdir(aws_dir):
+                    cmd.extend(["-v", f"{aws_dir}:/root/.aws:ro"])
             cmd.append(_DOCKER_IMAGES["trivy"])
             cmd.extend(trivy_args + ["--output", "/out/trivy.json", image])
             logger.info("trivy 바이너리가 없어 %s 컨테이너로 검사합니다", _DOCKER_IMAGES["trivy"])

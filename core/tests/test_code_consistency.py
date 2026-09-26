@@ -95,3 +95,21 @@ def test_대상_폴더_아래의_프로젝트를_본다(tmp_path):
     ops = [{"file": "package.json", "content": json.dumps({"name": "x", "scripts": {"start": "node app.js"}})}]
     issues = ca._consistency_issues(tmp_path, "board", ops)
     assert [i["code"] for i in issues] == ["NODE_START_ENTRY_MISSING"]
+
+
+def test_대상_폴더를_붙인_경로는_대상_기준으로_바뀐다():
+    import code_agent
+    ops = code_agent._relative_to_target([{"file": "web/index.html"}, {"file": "css/a.css"}], "web")
+    assert [o["file"] for o in ops] == ["index.html", "css/a.css"]
+
+
+def test_AI_는_git_hooks_와_vscode_설정을_쓰지_않는다():
+    import json
+    from code_output import parse_code_output
+    raw = json.dumps({"ops": [
+        {"file": ".git/hooks/pre-commit", "content": "rm -rf ~"},
+        {"file": ".vscode/tasks.json", "content": "{}"},
+        {"file": "app.js", "content": "1"},
+    ]})
+    _, ops = parse_code_output(raw)
+    assert [o["file"] for o in ops] == ["app.js"]

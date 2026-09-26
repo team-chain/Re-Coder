@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { samePath } from '../core/coreReuse';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import {
@@ -1839,7 +1840,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     //: 향한다는 규칙(_resolveWriteRoot)을 그대로 두기 위해서다.
                     const desc = this._describeTargetFolder(picked[0].fsPath);
                     if (!desc.insideWorkspace) {
-                        const already = (vscode.workspace.workspaceFolders ?? []).some((f) => f.uri.fsPath === desc.absolute);
+                        const already = (vscode.workspace.workspaceFolders ?? []).some((f) => samePath(f.uri.fsPath, desc.absolute));
                         if (!already) {
                             const count = vscode.workspace.workspaceFolders?.length ?? 0;
                             await markPendingActiveProject(desc.absolute);
@@ -2008,6 +2009,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _joinFolder(folder: string, file: string): string {
         const f = (folder || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
         const n = (file || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        //: 모델이 대상 폴더를 포함한 경로(web/index.html)를 돌려주면 폴더를 한 번 더 붙이지 않는다
+        //: (예전: web/web/index.html 에 새 파일이 생기고 원래 파일은 수정되지 않았다).
+        if (f && (n === f || n.toLowerCase().startsWith(`${f.toLowerCase()}/`))) { return n; }
         return f ? `${f}/${n}` : n;
     }
 
@@ -2171,7 +2175,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 folderCreated = true;
             }
             if (!desc.insideWorkspace) {
-                const already = (vscode.workspace.workspaceFolders ?? []).some((f) => f.uri.fsPath === desc.absolute);
+                const already = (vscode.workspace.workspaceFolders ?? []).some((f) => samePath(f.uri.fsPath, desc.absolute));
                 if (!already) {
                     const count = vscode.workspace.workspaceFolders?.length ?? 0;
                     //: **여기서 확장이 통째로 재시작될 수 있다.** 빈 창(폴더 0개)에
@@ -2232,7 +2236,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             //: 밖의 절대경로는 워크스페이스에 추가된 폴더여야만 쓴다. 승인 카드를 거치지 않은
             //: 임의 경로(예: 오래된 웹뷰 상태)로 파일이 새는 것을 막는다.
-            const allowed = (vscode.workspace.workspaceFolders ?? []).some((f) => desc.absolute === f.uri.fsPath || desc.absolute.startsWith(f.uri.fsPath + path.sep));
+            const allowed = (vscode.workspace.workspaceFolders ?? []).some((f) => { const rel = path.relative(f.uri.fsPath, desc.absolute); return samePath(f.uri.fsPath, desc.absolute) || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel)); });
             if (!allowed) { return null; }
             return { root: vscode.Uri.file(desc.absolute), relFolder: '' };
         }
@@ -2322,10 +2326,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         const uri = vscode.Uri.joinPath(root, safe);
         try {
+            //: 심볼릭 링크를 따라 워크스페이스 밖(예: ~/.bashrc)을 덮어쓰지 않는다.
+            if (uri.scheme === 'file' && fs.existsSync(uri.fsPath)) {
+                const real = fs.realpathSync(uri.fsPath), realRoot = fs.realpathSync(root.fsPath);
+                const rel = path.relative(realRoot, real);
+                if (rel.startsWith('..') || path.isAbsolute(rel)) {
+                    this.postMessage('code.error', { message: `${safe} 은(는) 프로젝트 밖을 가리키는 링크라 적용하지 않았습니다.`, ...ack });
+                    return false;
+                }
+            }
+            //: 기존 파일은 덮어쓰기 전에 .recoder/backups 에 남긴다 — AI 가 "전체 내용"을 다시 쓰므로
+            //: 잘못된 결과가 원래 코드를 지우면 되돌릴 방법이 없었다.
+            let backup = '';
+            try {
+                const before = await vscode.workspace.fs.readFile(uri);
+                const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const backupUri = vscode.Uri.joinPath(root, '.recoder', 'backups', `${safe.replace(/\//g, '__')}.${stamp}`);
+                await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(backupUri, '..'));
+                await vscode.workspace.fs.writeFile(backupUri, before);
+                backup = vscode.workspace.asRelativePath(backupUri);
+            } catch { /* 새 파일 */ }
             await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
             await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
             await vscode.window.showTextDocument(uri, { preview: false });
-            this.postMessage('code.applied', { file: safe, ok: true, ...ack });
+            this.postMessage('code.applied', { file: safe, ok: true, ...(backup ? { backup } : {}), ...ack });
             return true;
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);

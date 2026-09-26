@@ -78,6 +78,18 @@ _SOURCE_EXTS = {
 _MAX_FILES         = 5
 _MAX_FILE_BYTES    = 50_000
 _MAX_PROMPT_BYTES  = 4_000   # 파일 한 개당 프롬프트에 박을 최대 본문
+#: 지금 편집 중인 파일은 수정 대상일 가능성이 가장 높다 — 잘린 채 "전체 내용"을 다시 쓰면 뒷부분이
+#: 사라진다(검토: 11KB 파일이 4KB 로 덮어써짐). 더 넉넉히 보내고, 잘랐으면 모델에게 알린다.
+_MAX_OPEN_FILE_BYTES = 24_000
+
+
+def _prompt_body(content: str, limit: int) -> str:
+    """프롬프트에 넣을 파일 본문. 잘랐으면 그 사실과 규칙을 붙인다."""
+    text = content or ""
+    if len(text) <= limit:
+        return text
+    return (text[:limit] + f"\n... [ReCoder: 이 파일은 {len(text)}자 중 앞 {limit}자만 보냈습니다. "
+            "이 파일은 전체를 다시 쓰지 말고, 꼭 필요하면 새 파일로 분리하세요.]")
 _MAX_TOTAL_PROMPT  = 18_000  # 전체 프롬프트 상한 (토큰 quota 보호)
 
 
@@ -882,7 +894,7 @@ def _build_code_prompt(
     tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
     prior_block = ""
     for pf in (prior_files or [])[:4]:
-        body = (pf.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(pf.get("content") or "", _MAX_PROMPT_BYTES)
         if body.strip():
             prior_block += f"\n[직전 생성 파일] {pf.get('path','?')}\n```\n{body}\n```\n"
     if prior_block:
@@ -890,7 +902,7 @@ def _build_code_prompt(
 
     ctx_block = ""
     for cf in (context_files or [])[:6]:
-        body = (cf.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(cf.get("content") or "", _MAX_PROMPT_BYTES)
         if body.strip():
             ctx_block += f"\n[참고 파일] {cf.get('path','?')}\n```\n{body}\n```\n"
     if ctx_block:
@@ -899,13 +911,13 @@ def _build_code_prompt(
     folder_block = ""
     if (target_folder or "").strip():
         folder_block = (
-            f"\n[대상 폴더] 생성/수정 파일의 경로는 '{target_folder.strip().rstrip('/')}/' 아래 "
-            f"상대경로로 정하라(예: {target_folder.strip().rstrip('/')}/index.html).\n"
+            f"\n[대상 폴더] 생성/수정 파일은 '{target_folder.strip().rstrip('/')}/' 안에 둔다. 경로는 **대상 폴더 기준** "
+            f"상대경로로 쓴다(예: index.html, src/app.js — 앞에 '{target_folder.strip().rstrip('/')}/' 를 붙이지 않는다).\n"
         )
 
     open_block = ""
     if open_file and (open_file.get("content") or "").strip():
-        body = (open_file.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(open_file.get("content") or "", _MAX_OPEN_FILE_BYTES)
         open_block = (
             f"\n현재 편집 중인 파일: {open_file.get('path', '(unknown)')}\n"
             f"```\n{body}\n```\n"
@@ -984,7 +996,7 @@ def _build_plan_prompt(
 
     open_block = ""
     if open_file and (open_file.get("content") or "").strip():
-        body = (open_file.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(open_file.get("content") or "", _MAX_OPEN_FILE_BYTES)
         open_block = (
             f"\n현재 편집 중인 파일: {open_file.get('path', '(unknown)')}\n"
             f"```\n{body}\n```\n"
@@ -992,7 +1004,7 @@ def _build_plan_prompt(
 
     ctx_block = ""
     for cf in (context_files or [])[:6]:
-        body = (cf.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(cf.get("content") or "", _MAX_PROMPT_BYTES)
         if body.strip():
             ctx_block += f"\n[참고 파일] {cf.get('path', '?')}\n```\n{body}\n```\n"
     if ctx_block:
@@ -1511,6 +1523,20 @@ def generate_plan(
     return result
 
 
+def _relative_to_target(ops: list[dict], target_folder: str) -> list[dict]:
+    """op 경로를 대상 폴더 기준으로 맞춘다. 모델이 'web/index.html' 처럼 대상 폴더를 붙여 돌려주면
+    적용 단계에서 폴더가 한 번 더 붙어 web/web/index.html 이 생겼다(확장·ADR·삭제 경고는 대상 기준)."""
+    folder = (target_folder or "").replace("\\", "/").strip().strip("/")
+    if not folder or Path(folder).is_absolute() or re.match(r"^[A-Za-z]:", folder):
+        return ops
+    prefix = folder.lower() + "/"
+    for op in ops:
+        name = str(op.get("file") or "")
+        if name.lower().startswith(prefix):
+            op["file"] = name[len(prefix):]
+    return ops
+
+
 def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list[dict]:
     """ops 를 적용했을 때 **새로 생기는** 빌드·실행 문제(build_readiness)만 돌려준다.
 
@@ -1647,6 +1673,7 @@ def generate_code(
                 agent="code_agent", operation="generate_code",
             )
             data, ops_out = parse_code_output(llm_resp.text)
+            ops_out = _relative_to_target(ops_out, target_folder)
             break
         except CodeOutputError as exc:
             reason = str(exc)
@@ -1680,6 +1707,7 @@ def generate_code(
                 agent="code_agent", operation="generate_code_consistency",
             )
             data2, ops2 = parse_code_output(retry.text)
+            ops2 = _relative_to_target(ops2, target_folder)
             remaining = _consistency_issues(root, target_folder, ops2)
             if sum(i["severity"] == "error" for i in remaining) < sum(i["severity"] == "error" for i in consistency):
                 data, ops_out, llm_resp, consistency = data2, ops2, retry, remaining

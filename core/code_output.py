@@ -73,6 +73,10 @@ def parse_code_output(raw: str) -> tuple[dict, list[dict]]:
         file = posixpath.normpath(file)
         if file == ".." or file.startswith("../"):
             raise CodeOutputError(f"파일 변경 {index}번의 경로가 프로젝트 밖을 가리킵니다.")
+        #: 저장소 메타데이터·편집기 설정(.git/hooks, .vscode/tasks.json)은 AI 가 쓰지 않는다 —
+        #: 훅·작업은 실행 가능한 코드라 승인 한 번으로 PC 에서 돌 수 있다(보안 검토).
+        if any(seg.casefold() in {".git", ".vscode"} for seg in file.split("/")):
+            continue
         if file == "." or file.casefold() in seen:
             raise CodeOutputError(f"파일 변경 {index}번의 경로가 비어 있거나 중복됩니다.")
         seen.add(file.casefold())
@@ -85,4 +89,6 @@ def parse_code_output(raw: str) -> tuple[dict, list[dict]]:
             "language": op.get("language", "") if isinstance(op.get("language", ""), str) else "",
             "rationale": op.get("rationale", "") if isinstance(op.get("rationale", ""), str) else "",
         })
+    if not ops:
+        raise CodeOutputError("모델이 적용 가능한 파일 변경 목록을 반환하지 않았습니다.")
     return data, ops

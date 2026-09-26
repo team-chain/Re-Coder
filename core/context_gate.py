@@ -47,7 +47,11 @@ except ImportError:  # pragma: no cover — fall back when imported from a packa
 # ---------------------------------------------------------------------------
 
 MASKING_PATTERNS: list[tuple[str, str]] = [
-    ("AWS_ACCESS_KEY",  r"AKIA[0-9A-Z]{16}"),
+    ("PRIVATE_KEY",     r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+    ("AWS_JSON_SECRET", r'"(?:SecretAccessKey|SessionToken|AccessKeyId|aws_secret_access_key|aws_session_token)"\s*:\s*"[^"]*"'),
+    ("AI_API_KEY",      r"sk-(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,}"),
+    ("DISCORD_TOKEN",   r"[MN][A-Za-z\d_-]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}"),
+    ("AWS_ACCESS_KEY",  r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
     ("AWS_SECRET_KEY",  r"(?i)aws[_\-\s]?secret[_\-\s]?(?:access[_\-\s]?)?key[^=\n]*=[^\n]*"),
     ("API_KEY",         r"(?i)api[_\-\s]?key[^=\n]*=[^\s\n]+"),
     ("BEARER_TOKEN",    r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"),
@@ -87,7 +91,13 @@ def strip_terminal_noise(text: str) -> str:
 # 모듈 레벨 mask_secrets_with_stats / mask_secrets 가 사용하는 패턴 테이블.
 # (replacement 가 명시적 라벨이라서 ContextGate 의 [<NAME>] 변환과 다름.)
 _MASK_PATTERNS = [
-    ('AWS_ACCESS_KEY', re.compile(r'AKIA[0-9A-Z]{16}'),                      '[MASKED_AWS_KEY]'),
+    #: 터미널 출력을 자동 분석할 때 새던 형식(보안 검토): 개인키 블록, `aws sts` JSON, 임시 키(ASIA),
+    #: Anthropic·OpenAI 키, Discord 봇 토큰.
+    ('PRIVATE_KEY',    re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----'), '[MASKED_PRIVATE_KEY]'),
+    ('AWS_JSON',       re.compile(r'"(SecretAccessKey|SessionToken|AccessKeyId|aws_secret_access_key|aws_session_token)"\s*:\s*"[^"]*"'), r'"\1": "[MASKED]"'),
+    ('AI_API_KEY',     re.compile(r'\bsk-(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,}'),        '[MASKED_AI_KEY]'),
+    ('DISCORD_TOKEN',  re.compile(r'\b[MN][A-Za-z\d_-]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}\b'), '[MASKED_DISCORD_TOKEN]'),
+    ('AWS_ACCESS_KEY', re.compile(r'(?:AKIA|ASIA)[0-9A-Z]{16}'),               '[MASKED_AWS_KEY]'),
     ('AWS_SECRET',     re.compile(r'(?i)aws_secret_access_key\s*=\s*\S+'),   'aws_secret_access_key=[MASKED]'),
     ('AWS_ACCESS_KEY', re.compile(r'(?i)aws_access_key_id\s*=\s*\S+'),       'aws_access_key_id=[MASKED]'),
     ('API_KEY',        re.compile(r'(?i)(api[_-]?key|apikey)\s*[=:]\s*\S+'), r'\1=[MASKED]'),
