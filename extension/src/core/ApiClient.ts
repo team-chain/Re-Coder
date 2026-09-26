@@ -1343,6 +1343,13 @@ export class ApiClient {
         return response.data;
     }
 
+    /** ECS 서비스의 태스크 수를 0 으로 내려 과금을 멈춘다(서비스는 남는다). */
+    async stopEcsService(req: { ecs_cluster: string; ecs_service: string; aws_region: string }): Promise<{ stopped: boolean; desired_count: number; message: string }> {
+        const resp = await this.request<{ stopped: boolean; desired_count: number; message: string }>('POST', '/api/deploy/ecs/stop', req, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'ECS 서비스 중지 실패'); }
+        return resp.data;
+    }
+
     async getEcsDeployStatus(deploymentId?: string): Promise<EcsDeployStatus> {
         const query = deploymentId ? `?deployment_id=${encodeURIComponent(deploymentId)}` : '';
         const resp = await this.request<EcsDeployStatus>('GET', `/api/deploy/ecs/status${query}`);

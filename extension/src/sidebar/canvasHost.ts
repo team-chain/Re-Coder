@@ -144,6 +144,17 @@ export class CanvasHost {
                 if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('프로젝트 안의 파일만 분석할 수 있습니다.');
                 send('canvas.graphResult', { requestId, file:id, graph:await this.analysis.run(workspace,file) }); return;
             }
+            if (type === 'canvas.ecs.stop') {
+                //: ECS 서비스를 0개로 — 배포 후 켜 둔 Fargate 태스크는 계속 과금된다(검토: 멈출 버튼이 없었다).
+                const cluster = String(p.cluster || ''), service = String(p.service || ''), region = String(p.region || '');
+                if (!/^[A-Za-z0-9_-]{1,255}$/.test(cluster) || !/^[A-Za-z0-9_-]{1,255}$/.test(service)) throw new Error('중지할 ECS 서비스를 확인하지 못했습니다.');
+                const action = '서비스 중지';
+                const choice = await vscode.window.showWarningMessage(`${cluster}/${service} 의 실행 태스크를 0개로 줄입니다. 공개 주소가 멈추고 과금이 멈춥니다. 서비스 설정은 남아 다음 배포 때 다시 뜹니다.`, { modal: true }, action);
+                if (choice !== action) { send('canvas.ecs.stopResult', { requestId, cancelled: true }); return; }
+                const result = await this.api.stopEcsService({ ecs_cluster: cluster, ecs_service: service, aws_region: region });
+                send('canvas.ecs.stopResult', { requestId, ...result });
+                return;
+            }
             if (type === 'canvas.selectProject') {
                 if (this.executing || this.committing || this.connecting) throw new Error('진행 중인 배포·Git 작업이 끝난 뒤 프로젝트를 바꾸세요.');
                 if (!await selectActiveProject(String(p.path || ''))) throw new Error('워크스페이스에 열린 폴더만 선택할 수 있습니다.');

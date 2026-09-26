@@ -401,7 +401,7 @@ class ECSAgent:
                         state = (
                             "다만 되돌린 이전 버전도 아직 떠 있지 않습니다 — "
                             "그 버전에도 문제가 있을 수 있으니 요금이 걱정되면 "
-                            "배포 중지로 태스크 수를 0 으로 내리세요."
+                            "Deploy 캔버스 › 배포 상태의 '서비스 중지'로 태스크 수를 0 으로 내리세요."
                         )
                     record.error_remedy = (
                         f"{state} CloudWatch 로그 그룹 "
@@ -1378,8 +1378,8 @@ class ECSAgent:
             # 경우에만 한다. 그때는 내려도 잃을 게 없다.
             rec.provisioned["cost_warning"] = (
                 f"태스크 {rec.running_task_count}개가 아직 실행 중입니다 — "
-                "요금이 계속 발생합니다. 사이드바의 배포 중지"
-                "(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 내리세요."
+                "요금이 계속 발생합니다. Deploy 캔버스 › 배포 상태의 "
+                "'서비스 중지'(배포 중지)로 태스크 수를 0 으로 내리세요."
                 + ("" if req.health_check_command else
                    " 컨테이너 헬스체크가 없어 앱이 죽어도 ECS 가 알아채지 "
                    "못합니다 — python_http_health_check() 를 쓰면 이런 상태를 "
@@ -1462,7 +1462,7 @@ class ECSAgent:
                 rec.provisioned["cost_warning"] = (
                     "취소했지만 이 배포는 이미 기존 서비스의 롤아웃을 "
                     "시작한 뒤였고, 되돌릴 이전 태스크 정의를 찾지 못했습니다. "
-                    "배포 중지(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 "
+                    "Deploy 캔버스 › 배포 상태의 '서비스 중지'(배포 중지)로 태스크 수를 0 으로 "
                     "내리거나 AWS 콘솔에서 서비스를 직접 되돌리세요."
                 )
             return
@@ -1497,7 +1497,7 @@ class ECSAgent:
         rec.provisioned["cost_warning"] = (
             f"서비스 '{req.service}' 는 이미 만들어졌고 태스크가 떠 있을 수 "
             "있습니다 — 배포는 실패했지만 요금은 계속 발생합니다. "
-            "배포 중지(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 "
+            "Deploy 캔버스 › 배포 상태의 '서비스 중지'(배포 중지)로 태스크 수를 0 으로 "
             "내리거나, 원인을 고친 뒤 다시 배포하세요."
         )
 

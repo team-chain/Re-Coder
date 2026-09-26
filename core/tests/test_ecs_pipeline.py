@@ -1631,7 +1631,7 @@ def test_a_slow_app_that_is_actually_running_is_not_killed():
 
     assert ecs.updated == []
     warning = record.provisioned.get("cost_warning", "")
-    assert "stop" in warning, "끄는 방법을 알려주지 않았다"
+    assert "서비스 중지" in warning, "끄는 방법을 알려주지 않았다"
     assert "헬스체크" in warning, (
         "헬스체크가 없어서 이 상태를 자동으로 못 잡는다는 사실을 안 알렸다"
     )
@@ -2711,7 +2711,7 @@ def test_a_failure_after_the_service_exists_always_warns_about_cost():
     ECSAgent._warn_if_resources_may_be_running(make_request(), record)
 
     warning = record.provisioned.get("cost_warning", "")
-    assert "stop" in warning, "끄는 방법을 안 알려줬다"
+    assert "서비스 중지" in warning, "끄는 방법을 안 알려줬다"
 
 
 def test_no_cost_warning_before_any_service_was_touched():
