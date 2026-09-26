@@ -3302,6 +3302,15 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
     if not request.skip_security_scan and plan.image:
         _plans_pending_image_scan[plan.plan_id] = plan.image
 
+    if plan.method == DeployMethod.LOCAL_DOCKER and plan.ports:
+        try:
+            port_notes = await asyncio.to_thread(_resolve_local_host_ports, plan)
+        except Exception as exc:  # noqa: BLE001 - 포트 확인 실패가 계획을 막지 않는다
+            logger.warning("host port check failed: %s", exc)
+            port_notes = []
+        if port_notes:
+            plan.risk_reasons = list(plan.risk_reasons) + port_notes
+
     # 빌드·실행이 확정적으로 실패할 프로젝트 설정을 승인 전에 보여 준다.
     if plan.method == DeployMethod.LOCAL_DOCKER and request.workspace_path:
         readiness = await asyncio.to_thread(_workspace_readiness, request.workspace_path)
@@ -3316,6 +3325,74 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
     _deployment_plans[plan.plan_id] = plan
     _plan_workspaces[plan.plan_id] = request.workspace_path or ""
     return plan
+
+
+def _docker_port_publishers(port: int) -> Optional[list[str]]:
+    """PC 의 `port` 를 게시(publish) 중인 컨테이너 이름. docker 를 못 부르면 None."""
+    try:
+        out = subprocess.run(
+            ["docker", "ps", "--filter", f"publish={int(port)}", "--format", "{{.Names}}"],
+            shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return [name.strip() for name in (out.stdout or "").splitlines() if name.strip()]
+
+
+def _host_port_listening(port: int) -> bool:
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def _host_port_conflict(port: int, own_container: str) -> Optional[str]:
+    """이 배포가 교체할 컨테이너가 아닌 다른 것이 `port` 를 쓰고 있으면 그 설명, 아니면 None."""
+    publishers = _docker_port_publishers(port)
+    if publishers is None:
+        return None  # docker 상태를 모르면 건드리지 않는다(실행 단계 진단이 알려 준다).
+    others = [name for name in publishers if name != own_container]
+    if others:
+        return "컨테이너 " + ", ".join(f"'{n}'" for n in others[:3])
+    if not publishers and _host_port_listening(port):
+        return "다른 프로그램"
+    return None
+
+
+def _resolve_local_host_ports(plan) -> list[str]:
+    """PC 포트 충돌을 계획 단계에서 피한다 — 비어 있는 다음 포트로 바꾸고 그 사실을 알린다.
+
+    예전에는 다른 프로젝트의 컨테이너가 3000 을 쓰고 있으면 실행 단계에서
+    `port is already allocated` 로 실패했다(실기기: temp 컨테이너 ↔ test-temp 배포).
+    컨테이너 안의 포트는 그대로 두고 PC 쪽 포트만 바꾼다.
+    """
+    notes: list[str] = []
+    resolved: dict[str, str] = {}
+    taken = {int(hp) for hp in plan.ports if str(hp).isdigit()}
+    for hp, cp in plan.ports.items():
+        if not str(hp).isdigit():
+            resolved[hp] = cp
+            continue
+        port = int(hp)
+        holder = _host_port_conflict(port, plan.container_name or "")
+        if not holder:
+            resolved[hp] = cp
+            continue
+        free = next((c for c in range(port + 1, min(port + 50, 65535) + 1)
+                     if c not in taken and not _host_port_conflict(c, plan.container_name or "")), None)
+        if free is None:
+            resolved[hp] = cp
+            notes.append(f"PC 포트 {port} 을(를) {holder} 이(가) 쓰고 있습니다. 실행 전에 멈추거나 다른 포트를 지정하세요.")
+            continue
+        taken.add(free)
+        resolved[str(free)] = cp
+        notes.append(f"PC 포트 {port} 을(를) {holder} 이(가) 쓰고 있어 {free} 로 바꿨습니다 — 접속 주소 http://localhost:{free}")
+    plan.ports = resolved
+    return notes
 
 
 def _workspace_readiness(workspace_path: str):
@@ -3637,6 +3714,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             cmd_args.extend(['--restart', 'unless-stopped', str(runtime_image)])
 
         restored_previous = False
+        run_diagnosis = None
         restored_verification_resumed = False
         restore_stdout = ""
         restore_stderr = ""
@@ -3672,6 +3750,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 ),
             )
             success = result.returncode == 0
+            if not success and plan.method == DeployMethod.LOCAL_DOCKER:
+                #: `docker run` 자체의 실패(포트 충돌 등)도 원인과 해결책을 보여 준다.
+                run_diagnosis = _diagnose_build_failure(
+                    _plan_workspaces.get(request.plan_id, ""), (result.stderr or "") + "\n" + (result.stdout or ""), stage="run")
             if not success and plan.method == DeployMethod.LOCAL_DOCKER and restore_source is not None:
                 restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(
                     restore_source
@@ -3706,7 +3788,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         # 프로세스가 종료·재시작 중이면 failed로 기록하고 이전 서비스를 복구한다.
         if success:
             report_progress('health', '컨테이너 실행 상태와 HTTP 응답을 확인합니다')
-        startup_diagnosis = None
+        startup_diagnosis = run_diagnosis
         rollback_eligible = success and await _verify_rollback_candidate_health(plan)
         if success and not rollback_eligible and plan.method == DeployMethod.LOCAL_DOCKER:
             startup_error = await _local_startup_failure(plan.container_name or '')

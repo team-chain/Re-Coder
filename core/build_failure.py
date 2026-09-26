@@ -100,6 +100,13 @@ _RULES: list[tuple[str, re.Pattern[str], str, str, str]] = [
      "파일 권한 없음",
      "컨테이너 사용자에게 필요한 파일·폴더 권한이 없습니다.",
      "쓰기가 필요한 폴더를 Dockerfile 에서 앱 사용자 소유로 바꾸세요(`RUN chown <사용자> <폴더>`)."),
+    ("HOST_PORT_IN_USE", re.compile(r"Bind for [^\s]*:(\d+) failed: port is already allocated|"
+                                    r"ports are not available: exposing port TCP [^\s]*:(\d+)|"
+                                    r"listen tcp[^\n]*:(\d+): bind: (?:address already in use|Only one usage)", re.I),
+     "PC 포트가 이미 사용 중",
+     "PC 의 {0} 포트를 다른 컨테이너나 프로그램이 쓰고 있어 새 컨테이너를 시작하지 못했습니다.",
+     "'새 배포'로 계획을 다시 만들면 비어 있는 포트로 자동 조정됩니다. {0} 포트를 꼭 써야 하면 "
+     "`docker ps --filter publish={0}` 로 쓰고 있는 컨테이너를 확인해 멈추세요."),
     ("PORT_IN_USE", re.compile(r"EADDRINUSE|Address already in use", re.I),
      "포트 사용 중",
      "앱이 듣는 포트를 다른 프로세스가 이미 쓰고 있습니다.",
