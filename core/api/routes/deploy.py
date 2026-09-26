@@ -2195,10 +2195,10 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
         if scan_type == "trivy":
             image = target_path
             if not image:
-                if ws is not None and ws.exists():
-                    image = f"{ws.name.lower().replace(' ', '-') or 'app'}:latest"
-                else:
-                    image = "app:latest"
+                #: 배포 계획과 **같은 이름 규칙**을 쓴다. 예전에는 폴더 이름을 소문자로만
+                #: 바꿔 써서, 한글·기호가 든 폴더(예: "테스트 앱")는 계획이 만드는 이미지와
+                #: 다른 이름을 검사했다(항상 "이미지 없음").
+                image = (_default_image_name(str(ws)) if ws is not None and ws.exists() else "") or "app:latest"
             #: Trivy 이미지 스캔은 Docker 데몬이 전제다. 꺼져 있으면 사용자에게
             #: 미루지 않고 코어가 자동 시작을 시도한다(백그라운드 실행 + 준비
             #: 폴링, docker_autostart 참고). 그래도 안 되면 시도 내역을 담아

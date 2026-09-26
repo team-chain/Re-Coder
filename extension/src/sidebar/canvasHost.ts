@@ -86,6 +86,9 @@ export function publicGit(git: Awaited<ReturnType<typeof gitContext>>) {
     return state;
 }
 
+/** ECS 이미지 이름 → ECR 저장소 이름(소문자). */
+export function ecrRepoName(imageName: string): string { return imageName.trim().toLowerCase(); }
+
 export function validateConfig(raw: Record<string, unknown>): CanvasConfig {
     if (!['ecs','s3','github'].includes(String(raw.target))) throw new Error('지원하지 않는 배포 대상입니다.');
     const get = (key: string, fallback = '') => String(raw[key] ?? fallback).trim();
@@ -95,6 +98,8 @@ export function validateConfig(raw: Record<string, unknown>): CanvasConfig {
         for (const key of ['ecs_cluster','ecs_service','task_family'] as const) if (!/^[a-zA-Z0-9_-]{1,255}$/.test(config[key])) throw new Error(`${key}: 리소스 이름을 입력하세요.`);
         if (!config.image_name || !/^[\w][\w.-]{0,127}$/.test(config.tag)) throw new Error('이미지 이름과 고정 태그를 입력하세요.');
         if (config.tag.toLowerCase() === 'latest') throw new Error('재현 가능한 배포를 위해 latest 대신 고정 태그를 입력하세요.');
+        //: 승인 카드에 보이는 이미지 이름이 실제 ECR 저장소 이름이 되게 한다(예전엔 서비스 이름으로 올라갔다).
+        if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(ecrRepoName(config.image_name))) throw new Error('이미지 이름은 영문 소문자·숫자와 - _ . 로 입력하세요 (ECR 저장소 이름이 됩니다).');
         if (!Number.isInteger(config.container_port) || config.container_port < 1 || config.container_port > 65535) throw new Error('포트는 1~65535 정수여야 합니다.');
         if (!['staging','production'].includes(config.environment)) throw new Error('배포 환경을 확인하세요.');
         const sizes: Record<string,string[]> = { '256':['512','1024','2048'], '512':['1024','2048','3072','4096'], '1024':['2048','3072','4096','5120','6144','7168','8192'], '2048':Array.from({length:13},(_,i)=>String((i+4)*1024)), '4096':Array.from({length:23},(_,i)=>String((i+8)*1024)) };
@@ -213,7 +218,7 @@ export class CanvasHost {
                         const status=await this.api.checkAwsPermissions({ecsCluster:c.ecs_cluster,ecsService:c.ecs_service,taskFamily:c.task_family,awsRegion:c.aws_region});
                         const permission=status.permission_check as (typeof status.permission_check & { advisory_only?: boolean });
                         if(!status.ready || permission?.missing_actions?.length || !(permission?.inspected || permission?.advisory_only)) throw new Error('ECS 배포 권한을 확인하지 못했습니다. AWS 연결에서 권한을 확인하세요.');
-                        await execute('workspace.deploy.ecs', {...c, workspace_path:workspace});
+                        await execute('workspace.deploy.ecs', {...c, repo_name:ecrRepoName(c.image_name), workspace_path:workspace});
                     } else if(c.target==='s3') {
                         if(staticPreview(workspace,c.dir).digest !== plan.staticDigest) throw new Error('승인 후 정적 파일이 변경되었습니다. 배포 내용을 다시 확인하세요.');
                         // Existing handler owns path confinement, sensitive-file filtering and stream.

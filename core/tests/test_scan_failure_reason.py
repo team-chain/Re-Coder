@@ -205,3 +205,22 @@ def test_게이트_미검증_사유에_원인과_다음_행동이_실린다(monk
     assert gate["unverified"] is True
     reason = next(r for r in gate["risk_reasons"] if r.startswith("Trivy: 스캔 실패"))
     assert "Docker Desktop" in reason and "→" in reason
+
+
+def test_이미지를_지정하지_않은_검사는_배포_계획과_같은_이미지_이름을_쓴다(monkeypatch, tmp_path) -> None:
+    #: 한글·공백 폴더에서 저장 후 검사가 계획과 다른 이미지("테스트-앱:latest")를 찾던 문제.
+    _quiet_log(monkeypatch)
+    ws = tmp_path / "테스트 앱"
+    ws.mkdir()
+    seen = []
+
+    async def trivy(image):
+        seen.append(image)
+        return {"success": True, "critical": [], "high": [], "summary": "ok"}
+
+    monkeypatch.setattr(deploy, "_get_infra_agent", lambda: SimpleNamespace(run_trivy_scan=trivy))
+    import docker_autostart
+    monkeypatch.setattr(docker_autostart, "ensure_docker", lambda wait_seconds=None: SimpleNamespace(ready=True, message=""))
+    r = _run(deploy._execute_scan("trivy", str(ws), None))
+    assert seen == [deploy._default_image_name(str(ws))]
+    assert r["target"] == seen[0] and seen[0].endswith(":latest") and "테스트" not in seen[0]

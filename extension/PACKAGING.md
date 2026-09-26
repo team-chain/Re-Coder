@@ -1,9 +1,9 @@
 # ReCoder 사용자 배포본 빌드
 
-배포 대상은 **Windows x64**와 **Linux x64**다. 최종 산출물은 Python 런타임과 Core가 들어 있는
-플랫폼 지정 VSIX(`dist/recoder-<버전>-win32-x64.vsix`, `dist/recoder-<버전>-linux-x64.vsix`)이며,
+배포 대상은 **Windows x64**, **Linux x64**, **macOS Apple Silicon(arm64)** 이다. 최종 산출물은 Python 런타임과 Core가 들어 있는
+플랫폼 지정 VSIX(`dist/recoder-<버전>-win32-x64.vsix`, `-linux-x64.vsix`, `-darwin-arm64.vsix`)이며,
 사용자 PC에 Python·Node.js를 설치할 필요가 없다. VS Code와 기능별 외부 도구(Docker Desktop, Git),
-사용자 AWS/AI 인증은 별도다. macOS용 Core는 아직 빌드하지 않는다. `nobinary` 파일은 개발용이다.
+사용자 AWS/AI 인증은 별도다. Intel Mac(darwin-x64)은 잠근 의존성(grpcio 등)의 x86_64 휠이 없어 대상에서 뺐다. `nobinary` 파일은 개발용이다.
 
 플랫폼별 Core는 해당 OS에서 빌드한다. Windows 실행 파일을 macOS/Linux용으로 이름만 바꾸어
 배포하지 않는다. 기존 `package-extension.sh`는 준비된 다른 플랫폼 바이너리 패키징용으로 유지한다.
@@ -32,6 +32,17 @@ npm ci --prefix extension
 node extension/harness/release-smoke.js
 ```
 
+macOS (Apple Silicon, bash):
+
+```bash
+python3.12 -m venv .venv
+./.venv/bin/python -m pip install -r core/requirements-release-darwin-arm64.txt
+npm ci --prefix extension
+./.venv/bin/python scripts/build-release.py
+node extension/harness/release-smoke.js
+```
+
+macOS 잠금 파일은 Linux 잠금 파일과 같다(모든 항목에 macOS arm64 휠이 있음을 확인했다).
 Linux 잠금 파일은 Windows 잠금 파일과 같은 버전을 쓰고, Windows 전용 패키지(`colorama`,
 `pefile`, `pywin32-ctypes`)를 빼고 `uvloop`를 더한 것이다. 한쪽 버전을 올리면 다른 쪽도 같이 올린다.
 Linux Core는 오래된 배포판에서도 돌도록 glibc가 낮은 환경(CI는 Ubuntu 22.04)에서 빌드한다.

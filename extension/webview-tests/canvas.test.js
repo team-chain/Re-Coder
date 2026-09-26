@@ -108,6 +108,8 @@ test('prepare never deploys; explicit approval executes once through the existin
  const s=setup();await s.send('canvas.prepare',{config});assert.equal(s.executions.length,0);
  const id=s.plan().id;await s.send('canvas.execute',{planId:id,approved:true});await s.send('canvas.execute',{planId:id,approved:true});
  assert.equal(s.executions.length,1);assert.equal(s.executions[0].type,'workspace.deploy.ecs');assert.equal(s.executions[0].payload.ecs_service,'custom-service');
+ // 승인 카드에 보인 이미지 이름이 ECR 저장소 이름으로 전달된다(서비스 이름이 아니라).
+ assert.equal(s.executions[0].payload.repo_name,'app');
 });
 test('only boolean approval is accepted and concurrent requests consume a plan once',async()=>{
  const s=setup();await s.send('canvas.prepare',{config});const id=s.plan().id;
@@ -141,7 +143,7 @@ test('GitHub push explicitly disables automatic commit and force; scanner failur
  const t=setup();await t.send('canvas.prepare',{config:{...config,target:'github'}});t.api.runScan=async()=>({status:'not_run',exit_code:0});await t.send('canvas.execute',{planId:t.plan().id,approved:true});assert.equal(t.pushes.length,0);
 });
 test('invalid requests cannot silently adopt a region or invalid resource size',()=>{
- assert.throws(()=>validateConfig({...config,aws_region:''}));assert.throws(()=>validateConfig({...config,container_port:0}));assert.throws(()=>validateConfig({...config,cpu:'256',memory:'8192'}));assert.throws(()=>validateConfig({...config,tag:'latest'}));
+ assert.throws(()=>validateConfig({...config,aws_region:''}));assert.throws(()=>validateConfig({...config,container_port:0}));assert.throws(()=>validateConfig({...config,cpu:'256',memory:'8192'}));assert.throws(()=>validateConfig({...config,tag:'latest'}));assert.throws(()=>validateConfig({...config,image_name:'내 앱'}),/ECR/);assert.equal(validateConfig({...config,image_name:'My-App'}).image_name,'My-App');
 });
 test('service revision changes after review require a new approval',async()=>{
  const s=setup();await s.send('canvas.prepare',{config});

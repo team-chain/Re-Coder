@@ -116,6 +116,14 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     if(event.type==='workspace.deploy.s3.result') {finish();setS3Progress(p.ok?{step:'done',result:{status:'success'}}:{step:'error',message:p.message||'S3 배포 실패'});if(p.ok) {setS3Result(p.result);setMessage('');addEvent(`s3-${Date.now()}`,'S3 배포 완료',p.result?.bucket||'');refresh();}else setError(p.message||'S3 배포 실패');}
     if(event.type==='workspace.deploy.remediationResult') {finish();setMessage(p.message||'수정을 적용했습니다. 다시 승인 내용을 확인하세요.');setBlocked([]);refresh();}
     if(event.type==='workspace.deploy.remediationError') {finish();setError(p.message);}
+    if(event.type==='deployResult') {
+      //: 로컬 Docker(Docker 창) 배포 결과도 이벤트로 남긴다 — 알림을 켠 경우에만 Discord 로 간다.
+      //: 원문 로그는 보내지 않고 요약(진단 제목·헬스 주소)만 싣는다.
+      const ok=p.status==='success'||p.status==='pending', blocked=p.stage==='scan';
+      const title=ok?(p.status==='success'?'로컬 Docker 배포 성공':'로컬 Docker 배포 — 헬스 확인 대기'):blocked?'로컬 Docker 배포 차단 (보안 검사)':p.status==='cancelled'?'':'로컬 Docker 배포 실패';
+      if(title){const detail=ok?(p.health_check_url?`확인 주소: ${p.health_check_url}`:'컨테이너가 실행 중입니다.'):String(p.diagnosis?.title||p.message||p.error||'원인은 Docker 창에서 확인하세요.').slice(0,300);
+        addEvent(`local-${p.deployment_id||p.plan_id||Date.now()}`,title,detail);}
+    }
     if(event.type==='workspace.deploy.ecs.rollbackResult'||event.type==='replay.rollbackResult'||event.type==='deploy.rollbackResult') {addEvent(`rollback-${p.deployment_id||p.deploymentId||p.requestId||Date.now()}`,'롤백 결과',p.message||p.status||'결과 확인');refresh();}
     if(event.type==='canvas.discord.statusResult') {setDiscord(p);setDiscordError('');if(!p.active_channel_id){notifyRef.current=false;setNotify(false);}}
     if(event.type==='canvas.discord.guildsResult') setGuilds(p.guilds||[]);
