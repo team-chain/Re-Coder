@@ -578,4 +578,19 @@ if __name__ == "__main__":
     guild_store.init_db()
     log.info("ReCoder Discord Bot 시작 중... (SaaS 멀티 서버 모드)")
     bot = RecoderBot()
-    bot.run(DISCORD_TOKEN, log_handler=None)
+    try:
+        bot.run(DISCORD_TOKEN, log_handler=None)
+    except discord.errors.LoginFailure:
+        # 토큰 원문은 남기지 않는다.
+        log.critical(
+            "Discord 로그인 실패: DISCORD_BOT_TOKEN 이 올바르지 않습니다. "
+            "Developer Portal → Bot → Reset Token 으로 새 토큰을 받아 .env 에 넣으세요."
+        )
+        sys.exit(2)
+    except discord.errors.PrivilegedIntentsRequired:
+        log.critical(
+            "Discord 가 연결을 거부했습니다: 권한 있는 Intent 가 꺼져 있습니다. "
+            "Developer Portal → 앱 선택 → Bot → Privileged Gateway Intents 에서 "
+            "'SERVER MEMBERS INTENT' 와 'MESSAGE CONTENT INTENT' 를 켠 뒤 다시 실행하세요."
+        )
+        sys.exit(3)

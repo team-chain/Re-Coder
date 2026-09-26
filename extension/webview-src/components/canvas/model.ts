@@ -14,6 +14,7 @@ export interface Snapshot {
   resource: null | { cluster: string; service: string; region: string; image: string; image_digest: string; previous_task_definition: string };
   topology: null | { cluster: string; service: string; region: string; desired: number | null; running: number | null; task_definition: string; observed_at: string; truncated: boolean; exposure?: Array<{name:string;dns:string;scheme:string;type:string}>; exposure_warning?:string; tasks: Array<{ id: string; status: string; health: string; launch_type: string; images: Array<{ image: string; digest: string }> }> };
   scan: Scan | null; s3: null | { bucket: string; region: string }; warnings: string[];
+  projects?: Array<{ path: string; name: string; active: boolean }>;
 }
 export interface SceneNode { id: string; name: string; subtitle: string; badge: string; kind: string; color: string; x: number; y: number; locked?: boolean; target?: Target; flags?: string[] }
 export interface SceneEdge { from: string; to: string; color: string; dashed?: boolean }

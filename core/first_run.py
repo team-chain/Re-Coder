@@ -180,6 +180,19 @@ def _check_ai_ready_sync() -> tuple[ReadyStatus, str, str, str, bool]:
     import logging
     log = logging.getLogger(__name__)
 
+    from llm.api_key_provider import ApiKeyProvider, model_for, selected_provider
+    chosen = selected_provider()
+    if chosen:
+        # 사용자가 고른 Claude/OpenAI API 키. 라우터와 같은 모델로 1회 호출해 확인한다.
+        provider = ApiKeyProvider(chosen, model_for(chosen))
+        provider._timeout = min(provider._timeout, 15)
+        try:
+            provider.ping()
+            return ReadyStatus.OK, provider.model_id, "", chosen, False
+        except Exception as exc:
+            log.warning("AI Ready: %s API key check failed: %s", chosen, exc)
+            return ReadyStatus.FAIL, "", "", chosen, False
+
     from llm.gateway_provider import GatewayProvider, gateway_enabled
     if gateway_enabled():
         # Match the actual router; a gateway user does not need local AWS keys.

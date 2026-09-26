@@ -23,10 +23,10 @@ test('배포 플랜 응답(plan_id)을 받아 planReady 로 간다', () => {
   assert.match(branch, /setStep\("planReady"\)/);
 });
 
-test('스캔·플랜 요청의 빈 workspacePath 는 호스트가 워크스페이스로 채운다', () => {
-  assert.match(HOST, /const scanRoot = scanWs \|\| \(vscode\.workspace\.workspaceFolders/);
+test('스캔·플랜 요청의 빈 workspacePath 는 호스트가 현재 배포 프로젝트로 채운다', () => {
+  assert.match(HOST, /const scanRoot = scanWs \|\| activeProjectPath\(\)/);
   assert.match(HOST, /runScan\(scanType, scanRoot, targetPath\)/);
-  assert.match(HOST, /const planRoot = dpWs \|\| \(vscode\.workspace\.workspaceFolders/);
+  assert.match(HOST, /const planRoot = dpWs \|\| activeProjectPath\(\)/);
   assert.match(HOST, /createDeploymentPlan\(\s*planRoot,/);
 });
 

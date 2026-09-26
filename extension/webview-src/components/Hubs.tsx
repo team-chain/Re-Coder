@@ -16,6 +16,7 @@ import { useSelfHeal } from "../hooks/useSelfHeal";
 import { ScanKind, ScanQueue, ScanRequest } from './scanQueue';
 import { scanCounts } from './ShipMode';
 import { adrStatus } from './adrStatus';
+import { isNotApplicable } from './securityGate';
 
 export type HubId = "develop" | "deploy" | "security";
 export type FeatureId =
@@ -144,6 +145,20 @@ export const HubCrumb: React.FC<{ hub: HubId; feature?: FeatureId; onHome: () =>
 };
 
 // ── 허브 페이지 (기능 카드) ──────────────────────────────────────────────
+/** AI 가 연결되지 않은 사용자에게 AWS 없이 쓰는 길을 바로 보여 준다. */
+export const AiConnectBanner: React.FC = () => {
+  const { postMessage } = useVSCodeApi();
+  return <div role="status" className="rc-ai-connect" style={{ border: `1px solid ${C.line}`, borderRadius: 10, padding: "16px 18px", marginTop: 20, fontSize: 12, lineHeight: 1.6 }}>
+    <strong style={{ display: "block", fontSize: 13, marginBottom: 4 }}>AI 연결이 필요합니다</strong>
+    <span style={{ color: C.muted }}>AWS 계정이 없어도 Claude 또는 ChatGPT API 키로 연결할 수 있습니다. 요청은 해당 서비스로 바로 전송되고 요금은 키 계정에 청구됩니다.</span>
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+      <button style={btnStyle(true)} onClick={() => postMessage("ai.connect", { provider: "anthropic" })}>Claude API 키로 연결</button>
+      <button style={btnStyle(false)} onClick={() => postMessage("ai.connect", { provider: "openai" })}>ChatGPT API 키로 연결</button>
+      <button style={btnStyle(false)} onClick={() => postMessage("runDiagnostics")}>연결 다시 확인</button>
+    </div>
+  </div>;
+};
+
 export const HubPage: React.FC<{ hub: HubId; ctx: ReadyCtx; onOpen: (f: FeatureId) => void; onHome: () => void; onHub: (h: HubId) => void; banner?: React.ReactNode }> = ({ hub, ctx, onOpen, onHome, onHub, banner }) => (
   <div className="rc-hub-page">
     <style>{`
@@ -161,6 +176,7 @@ export const HubPage: React.FC<{ hub: HubId; ctx: ReadyCtx; onOpen: (f: FeatureI
     `}</style>
     <HubCrumb hub={hub} onHome={onHome} onHub={onHub} />
     {banner}
+    {hub === "develop" && !ctx.isAiReady && <AiConnectBanner />}
     <div className="rc-feature-grid">
       {FEATURES.filter((f) => f.hub === hub).map((f) => {
         const g = f.gate ? f.gate(ctx) : { enabled: true };
@@ -237,7 +253,7 @@ export const AdrPanel: React.FC = () => {
 };
 
 // ── 보안: 스캔 / 시크릿 / 정책 ────────────────────────────────────────────
-interface ScanResultLite { requestId?: string; scan_type: string; status?: "ok" | "error" | "not_run" | "unverified"; summary?: string; message?: string; cause?: string; next_action?: string; reason_code?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
+export interface ScanResultLite { requestId?: string; scan_type: string; status?: "ok" | "error" | "not_run" | "unverified"; summary?: string; message?: string; cause?: string; next_action?: string; reason_code?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
 
 export function securityResultDetail(r?: ScanResultLite): string {
   if (!r) return '아직 검사 결과가 없습니다.';
@@ -245,7 +261,7 @@ export function securityResultDetail(r?: ScanResultLite): string {
   return `${cause}${r.next_action ? `\n다음 행동: ${r.next_action}` : ''}`;
 }
 
-export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; note: string }> = ({ kinds, title, note }) => {
+export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; note: string; onChange?: (results: Partial<Record<ScanKind, ScanResultLite>>, running: boolean) => void }> = ({ kinds, title, note, onChange }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [running, setRunning] = useState<ScanKind | null>(null);
   const [results, setResults] = useState<Partial<Record<ScanKind, ScanResultLite>>>({});
@@ -263,6 +279,8 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
     }, 330000);
   }, [postMessage]);
   useEffect(() => () => { clearTimeout(timeout.current); queue.current.stop(); }, []);
+  //: 배포 캔버스의 보안 게이트가 이 결과로 초록/빨강을 표시한다.
+  useEffect(() => { onChange?.(results, running !== null); }, [results, running, onChange]);
 
   useMessage(useCallback((msg) => {
     if (msg.type === "scanResult") {
@@ -282,6 +300,7 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
 
   const verdict = (r?: ScanResultLite) => {
     if (!r) return { text: "미실행", color: C.muted };
+    if (r.status !== "ok" && isNotApplicable(r, r.scan_type as ScanKind)) return { text: "해당 없음", color: C.muted };
     if (r.status !== "ok") {
       //: raw 메시지가 아니라 코어가 분류한 원인 → 다음 행동.
       return { text: '검사 미확인', color: "#f0b35b" };

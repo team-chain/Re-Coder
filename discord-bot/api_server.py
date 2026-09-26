@@ -395,12 +395,14 @@ async def handle_bridge_status(request: web.Request) -> web.Response:
     # 봇이 알고 있는 채널 정보로 이름까지 채워준다 (UI 표시용)
     channel_name = None
     channel_guild_name = None
+    channel_guild_id = None
     if _bot is not None and active_channel_id:
         try:
             ch = _bot.get_channel(active_channel_id)
             if ch is not None:
                 channel_name = getattr(ch, "name", None)
                 channel_guild_name = getattr(getattr(ch, "guild", None), "name", None)
+                channel_guild_id = getattr(getattr(ch, "guild", None), "id", None)
         except Exception:
             pass
 
@@ -408,6 +410,8 @@ async def handle_bridge_status(request: web.Request) -> web.Response:
         "active_channel_id": str(active_channel_id) if active_channel_id else "",
         "channel_name": channel_name,
         "guild_name": channel_guild_name,
+        "guild_id": str(channel_guild_id) if channel_guild_id else "",
+        "bot_user": str(_bot.user) if _bot is not None and getattr(_bot, "user", None) else "",
         "connected_clients": bridge_hub.connected_count,
         "settings": snapshot,
     })

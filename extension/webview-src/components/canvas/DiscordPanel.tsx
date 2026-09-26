@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
-export interface DiscordState { mode?: string; active_channel_id?: string; channel_name?: string; guild_name?: string; guild_id?: string; connected_clients?: number }
+export interface DiscordState { mode?: string; active_channel_id?: string; channel_name?: string; guild_name?: string; guild_id?: string; bot_user?: string; connected_clients?: number }
 export interface CanvasEvent { id: string; title: string; detail: string; at: string; delivery?: string }
 export function DiscordPanel({ state, events, enabled, onEnabled, post, guilds, channels, error }: { state: DiscordState | null; events: CanvasEvent[]; enabled:boolean; onEnabled:(value:boolean)=>void; post:(type:string,payload?:unknown)=>void; guilds:Array<{id:string;name:string}>; channels:Array<{id:string;name:string}>; error:string }) {
   const [guild,setGuild]=useState(''),[channel,setChannel]=useState(''),[pending,setPending]=useState(false),[notice,setNotice]=useState('');
@@ -24,6 +24,8 @@ export function DiscordPanel({ state, events, enabled, onEnabled, post, guilds, 
     <details className="rc-details" style={{marginTop:16}} open={bot||undefined}><summary>기존 봇 서버 연결</summary>
       <p className="rc-muted">이미 ReCoder 봇 서버를 운영하는 경우에 사용합니다.</p>
       <div className="rc-actions"><button onClick={()=>{action('canvas.discord.status',{mode:'bot'});post('canvas.discord.guilds');}}>봇 서버 불러오기</button><button onClick={()=>post('canvas.discord.settings')}>서버 설정</button><button onClick={()=>post('canvas.discord.invite')}>봇 초대</button></div>
+      {bot&&<p className="rc-note" role="status">봇 서버 연결됨{state?.bot_user?` · ${state.bot_user}`:''}{connected?` · #${state?.channel_name||state?.active_channel_id}${state?.guild_name?` (${state.guild_name})`:''}`:' · 알림 채널을 선택하세요'}</p>}
+      {!bot&&<p className="rc-muted">봇 서버는 discord-bot 폴더에서 직접 실행합니다 (Windows: run.ps1, macOS·Linux: run.sh). Discord Developer Portal에서 SERVER MEMBERS·MESSAGE CONTENT Intent를 켜야 연결됩니다.</p>}
       {bot&&<><div className="rc-fields"><label>서버<select value={guild} onChange={e=>{setGuild(e.target.value);setChannel('');if(e.target.value)post('canvas.discord.channels',{guildId:e.target.value});}}><option value="">서버 선택</option>{guilds.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}</select></label><label>알림 채널<select value={channel} disabled={!guild} onChange={e=>setChannel(e.target.value)}><option value="">채널 선택</option>{channels.map(c=><option key={c.id} value={c.id}>#{c.name}</option>)}</select></label></div><div className="rc-actions"><button disabled={!channel||pending} onClick={()=>action('canvas.discord.setChannel',{channelId:channel})}>선택한 채널 연결</button><button onClick={()=>{onEnabled(false);action('canvas.discord.setChannel',{channelId:''});}}>봇 채널 연결 해제</button><button onClick={()=>{onEnabled(false);action('canvas.discord.status',{mode:'webhook'});}}>웹후크 방식 사용</button></div></>}
     </details>
     {connected&&<label style={{display:'block',marginTop:16}}><input type="checkbox" checked={enabled} onChange={e=>onEnabled(e.target.checked)}/> 새 배포·검사·롤백 이벤트를 이 채널로 보내기</label>}

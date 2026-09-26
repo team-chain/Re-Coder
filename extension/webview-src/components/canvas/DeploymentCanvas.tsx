@@ -5,7 +5,8 @@ import { AwsConnection } from "../AwsConnection";
 import { ShipMode } from "../ShipMode";
 import { DeploymentActivity, DeploymentActivityEvent } from '../DeploymentActivity';
 import { Replay } from "../Replay";
-import { SecurityScanPanel, PolicyPanel } from "../Hubs";
+import { SecurityScanPanel, PolicyPanel, ScanResultLite } from "../Hubs";
+import { GateVerdict, gateColors, gateVerdict } from "../securityGate";
 import { EcsExecutionRole } from "../EcsExecutionRole";
 import { EcsDeploymentProgress, EcsProgressStatus, initialEcsProgress, serviceLink } from "../EcsDeploymentProgress";
 import { Scene } from "./Scene";
@@ -31,6 +32,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const [expanded,setExpanded]=useState(false),[showNodeDetails,setShowNodeDetails]=useState(false);
   const [graph,setGraph]=useState<AnalysisGraph|null>(null),[level,setLevel]=useState<1|2|3>(1),[file,setFile]=useState(''),[folder,setFolder]=useState<string|null>(null),[search,setSearch]=useState(''),[graphLoading,setGraphLoading]=useState(false);
   const [live,setLive]=useState<EcsProgressStatus|null>(null);
+  const [manualGate,setManualGate]=useState<GateVerdict|null>(null);
   const [s3Progress,setS3Progress]=useState<DeploymentActivityEvent|null>(null);
   const actionTarget=useRef<Target|null>(null);
   const [s3Result,setS3Result]=useState<{url:string;bucket:string;region:string;uploaded:string[];index_copied_from?:string;excluded_note?:string}|null>(null);
@@ -54,13 +56,23 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     if(enabled) postMessage('canvas.discord.event',{requestId:`event:${id}`,enabled:true,eventId:id,title,detail});
   },[postMessage]);
   const finish=()=>{busyRef.current=false;setBusy(false);};
+  const gateRunning=useRef(false);
+  const onScanResults=useCallback((results:Partial<Record<'trivy'|'hadolint'|'gitleaks',ScanResultLite>>,running:boolean)=>{
+    const verdict=gateVerdict(['trivy','hadolint','gitleaks'],results,running);
+    setManualGate(verdict.state==='idle'?null:verdict);
+    if(gateRunning.current&&!running&&(verdict.state==='clean'||verdict.state==='issues')) addEvent(`manual-gate-${Date.now()}`,verdict.state==='clean'?'보안 검사 통과':'보안 검사 이상 발견',verdict.state==='clean'?'이미지·Dockerfile·시크릿 검사에서 이상이 없습니다.':`${verdict.label} · 보안 화면에서 확인하세요.`);
+    gateRunning.current=running;
+  },[addEvent]);
 
   useMessage(useCallback(event=>{
     const p=event.payload as any; // Message contracts are narrowed per discriminant below.
     if (['aws.configure.result','aws.clear.result','aws.role.result'].includes(event.type) && p?.ok) refresh();
     if(event.type==='canvas.snapshotResult'&&snapshotRequests.current.finish(p.requestId)) {
       const next=p.snapshot as Snapshot;
-      if(snapshotRef.current && snapshotRef.current.workspace!==next.workspace) {liveRef.current=null;expectedId.current='';touched.current=false;notifyRef.current=false;setNotify(false);setDiscord(null);setS3Progress(null);setS3Result(null);postMessage('canvas.discord.status');}
+      if(snapshotRef.current && snapshotRef.current.workspace!==next.workspace) {liveRef.current=null;setLive(null);expectedId.current='';touched.current=false;dirTouched.current=false;notifyRef.current=false;setNotify(false);setDiscord(null);setS3Progress(null);setS3Result(null);
+        //: 이전 프로젝트의 소스 분석·승인 카드·검사 결과를 새 프로젝트에 보여 주지 않는다.
+        clearTimeout(graphTimer.current);graphRequest.current='';graphFile.current='';setGraphLoading(false);setGraphError(false);setGraph(null);setLevel(1);setFile('');setFolder(null);setSearch('');
+        setPlan(null);setSelection(null);setBlocked([]);setError('');setMessage('');setManualGate(null);lastEventStatus.current='';postMessage('canvas.discord.status');}
       snapshotRef.current=next;setSnapshot(next);setLoading(false);
       if(!touched.current) setConfig(c=>({...c,container_port:next.container_port||defaultConfig.container_port,aws_region:next.aws.region||c.aws_region,ecs_cluster:next.resource?.cluster||c.ecs_cluster,ecs_service:next.resource?.service||c.ecs_service}));
       if(!expectedId.current || expectedId.current===next.deployment.deployment_id) {
@@ -76,6 +88,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
       lastEventStatus.current=signature;
       return;
     }
+    if(event.type==='canvas.projectChanged') {refresh();return;}
     if(event.type==='canvas.graphResult'&&p.requestId===graphRequest.current) {stopGraph();setGraph(p.graph);setLevel(p.file?3:2);setFile(p.file);return;}
     if(event.type==='canvas.plan'&&p.requestId===actionRequest.current) {setSelection(null);setPlan(p);setConfig(p.config);setMessage('');finish();return;}
     if(event.type==='canvas.blocked'&&p.requestId===actionRequest.current) {if(actionTarget.current==='s3')setS3Progress({step:'error',message:'사전 검사에서 배포를 차단했습니다'});setBlocked(p.preflight?.reasons||[]);setError('보안 게이트가 배포를 차단했습니다.');addEvent(`gate-${p.requestId}`,'보안 게이트 차단','사전 검사에서 배포를 차단했습니다.');finish();return;}
@@ -144,9 +157,12 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const scan=live?.deployment_id&&live.deployment_id!==snapshot?.deployment.deployment_id?null:snapshot?.scan;
   const deployment=useMemo(()=>{
     const result=deploymentScene(snapshot?{...snapshot,deployment:live||snapshot.deployment,scan:scan||null}:null,discord?.channel_name?`#${discord.channel_name}`:'',security,showNodeDetails);
-    if(blocked.length){const gate=result.nodes.find(n=>n.id==='gate');if(gate){gate.color='#ff6a73';gate.badge='요청 차단';}}
+    const gate=result.nodes.find(n=>n.id==='gate');
+    //: 보안 패널에서 직접 돌린 검사가 가장 최근 결과다. 배포 진행·요청 차단이 더 우선한다.
+    if(gate&&manualGate&&manualGate.state!=='idle'&&!live?.running){gate.color=gateColors[manualGate.state];gate.badge=manualGate.label;}
+    if(blocked.length&&gate){gate.color='#ff6a73';gate.badge='요청 차단';}
     return result;
-  },[snapshot,live,scan,blocked,discord?.channel_name,security,showNodeDetails]);
+  },[snapshot,live,scan,blocked,discord?.channel_name,security,showNodeDetails,manualGate]);
   const scene=useMemo(()=>level!==1&&graph?analysisScene(graph,folder,search):deployment,[deployment,level,graph,folder,search]);
   const fitHeight=Math.max(680,...deployment.nodes.map(node=>node.y+100));
   const link=serviceLink(live?.service_url), running=busy||Boolean(live?.running);
@@ -165,7 +181,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     <style>{canvasStyles}</style>
     <div className="rc-canvas-bar">
       <nav className="rc-mode-nav" aria-label="작업 전환">{navigation||<span>Deploy</span>}</nav>
-      <div className="rc-canvas-context"><h1>{snapshot?.projectName || '배포 캔버스'}</h1><span>{snapshot?.git.branch || (snapshot?.workspace ? '프로젝트' : '프로젝트를 열어주세요')}</span></div>
+      <div className="rc-canvas-context"><h1>{snapshot?.projectName || '배포 캔버스'}</h1><span>{snapshot?.git.branch || (snapshot?.workspace ? '프로젝트' : '프로젝트를 열어주세요')}</span>{(snapshot?.projects?.length||0)>1&&<select className="rc-project-select" aria-label="배포할 프로젝트" title="워크스페이스에 열린 폴더 중 배포할 프로젝트" value={snapshot?.workspace} disabled={running} onChange={e=>{const id=requestId();postMessage('canvas.selectProject',{requestId:id,path:e.target.value});}}>{snapshot!.projects!.map(f=><option key={f.path} value={f.path}>{f.name}</option>)}</select>}</div>
       <button className="rc-history-trigger" onClick={()=>openPane('history')}>배포 이력</button>
       <details className="rc-tool-menu rc-more-menu"><summary aria-label="캔버스 메뉴">•••</summary><div className="rc-menu-content">
         <nav aria-label="배포 도구">{panes.map(([id,title])=><button key={id} onClick={e=>{openPane(id);e.currentTarget.closest('details')?.removeAttribute('open');}}>{title}</button>)}{onOpenOperate&&<button onClick={onOpenOperate} disabled={!isOpsReady} title={isOpsReady?undefined:'AI · AWS 연결 필요'}>운영 대응</button>}</nav>
@@ -197,11 +213,11 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
         {selection==='github'&&snapshot&&<GitHubPanel workspace={snapshot.workspace} git={snapshot.git} onChanged={git=>{setSnapshot(s=>s?{...s,git}:s);refresh();}} onReview={()=>prepare()} onWorkflow={()=>openPane('details')} disabled={running}/>}
         {selection!=='github'&&<><button className="rc-primary rc-review-button" onClick={()=>prepare()} disabled={running||!snapshot?.workspace}>{busy?'확인 중…':'배포 내용 확인'}</button><p className="rc-muted rc-approval-hint">다음 단계에서 내용을 검토하고 승인합니다.</p></>}
       </div>}
-      {visited.has('details')&&<div hidden={pane!=='details'}><DeploymentCenter onOpenDocker={onOpenDocker}/></div>}
+      {visited.has('details')&&<div hidden={pane!=='details'}><DeploymentCenter key={snapshot?.workspace||'none'} onOpenDocker={onOpenDocker}/></div>}
       {visited.has('history')&&<div hidden={pane!=='history'}><Replay/></div>}
       {visited.has('aws')&&<div hidden={pane!=='aws'}><AwsConnection ecsPolicyContext={{cluster:config.ecs_cluster,service:config.ecs_service,ecrRepo:config.ecs_service}}/></div>}
-      {visited.has('docker')&&<div hidden={pane!=='docker'}><ShipMode isAiReady={isAiReady} isDockerReady={isDockerReady}/></div>}
-      {visited.has('security')&&<div hidden={pane!=='security'}>{security&&<p className="rc-muted">빨간 점선은 소스의 시크릿이 저장소로 유출될 수 있는 경로입니다. 커밋·이미지 포함 여부는 별도 확인이 필요합니다. 검사 미실행은 안전 판정이 아닙니다.</p>}<SecurityScanPanel kinds={['trivy','hadolint','gitleaks']} title="보안 검사" note="수정한 소스를 다시 검사하세요."/><PolicyPanel/>{scan?.findings.map((f,i)=><div key={i} className="rc-finding"><b>{f.tool} · {f.title}</b><p>{f.fix}</p><small>{f.location}</small></div>)}{Boolean(scan?.findings.length)&&<button disabled={!isAiReady} onClick={()=>postMessage('canvas.fix',{findings:scan?.findings})}>AI 수정안 만들기</button>}</div>}
+      {visited.has('docker')&&<div hidden={pane!=='docker'}><ShipMode key={snapshot?.workspace||'none'} isAiReady={isAiReady} isDockerReady={isDockerReady}/></div>}
+      {visited.has('security')&&<div hidden={pane!=='security'}>{security&&<p className="rc-muted">빨간 점선은 소스의 시크릿이 저장소로 유출될 수 있는 경로입니다. 커밋·이미지 포함 여부는 별도 확인이 필요합니다. 검사 미실행은 안전 판정이 아닙니다.</p>}{manualGate&&manualGate.state!=='running'&&<div className={`rc-note ${manualGate.state==='issues'?'rc-error':''}`} role="status" style={{borderLeft:`3px solid ${gateColors[manualGate.state]}`}}><b>보안 게이트 · {manualGate.label}</b>{manualGate.notApplicable.length>0&&<small style={{display:'block'}}>{manualGate.notApplicable.map(k=>k==='trivy'?'이미지 검사(빌드된 이미지 없음)':'Dockerfile 검사(Dockerfile 없음)').join(', ')}는 대상이 없어 제외했습니다. 배포할 때 다시 검사합니다.</small>}{manualGate.state==='unverified'&&<small style={{display:'block'}}>검사하지 못한 항목은 통과로 보지 않습니다. 항목을 펼쳐 원인을 확인하세요.</small>}</div>}<SecurityScanPanel key={snapshot?.workspace||'none'} kinds={['trivy','hadolint','gitleaks']} title="보안 검사" note="수정한 소스를 다시 검사하세요." onChange={onScanResults}/><PolicyPanel/>{scan?.findings.map((f,i)=><div key={i} className="rc-finding"><b>{f.tool} · {f.title}</b><p>{f.fix}</p><small>{f.location}</small></div>)}{Boolean(scan?.findings.length)&&<button disabled={!isAiReady} onClick={()=>postMessage('canvas.fix',{findings:scan?.findings})}>AI 수정안 만들기</button>}</div>}
       {visited.has('discord')&&<div hidden={pane!=='discord'}><DiscordPanel state={discord} events={events} enabled={notify} onEnabled={value=>{notifyRef.current=value;setNotify(value);}} post={postMessage} guilds={guilds} channels={channels} error={discordError}/></div>}
       {pane==='analysis'&&graph&&<div><header><h3>{level===2?'파일 · import':'함수 · 호출'} {graph.nodes.length}개</h3><button onClick={()=>loadGraph(level===3?file:'')}>다시 분석</button></header>{graph.nodes.length===0&&<p>분석 가능한 항목이 없습니다.</p>}{level===3&&<button onClick={()=>postMessage('map.openFile',{id:file})}>파일을 에디터에서 열기</button>}{graph.findings.map((f,i)=><div className="rc-finding" key={i}><b>{f.title}</b><p>{f.detail}</p><small>{f.fix}</small></div>)}</div>}
       {pane==='status'&&<div>

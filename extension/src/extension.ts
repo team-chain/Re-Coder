@@ -12,6 +12,8 @@
  */
 
 import * as vscode from 'vscode';
+import { initActiveProject } from './activeProject';
+import { isAiKeyProvider, runAiConnectCommand } from './ai/aiKeys';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CoreManager } from './core/CoreManager';
@@ -32,6 +34,8 @@ import { runEnrollCommand } from './gateway/enroll';
 
 export function activate(context: vscode.ExtensionContext): void {
     console.log('[ReCoder] Extension activating…');
+    //: 배포·보안 화면의 대상 폴더(멀티 루트에서 새로 추가한 프로젝트를 따라간다).
+    initActiveProject(context);
 
     // ── Core service instances ──────────────────────────────────────────────
     const coreManager = CoreManager.getInstance(context);
@@ -415,6 +419,15 @@ export function activate(context: vscode.ExtensionContext): void {
             }
 
             vscode.window.showInformationMessage('초기 설정 완료. 사이드바의 ready chip 을 확인하세요.');
+        })
+    );
+
+    // ── Command: AI 연결 (Claude / ChatGPT API 키) ──────────────────────────
+    // AWS 를 쓰지 않는 사용자를 위한 경로. 키를 저장하면 Core 를 재시작해 새 키로 연결을 확인한다.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.ai.connect', async (provider?: unknown) => {
+            const changed = await runAiConnectCommand(context, isAiKeyProvider(provider) ? provider : undefined);
+            if (changed) { await vscode.commands.executeCommand('recoder.restartCore'); }
         })
     );
 

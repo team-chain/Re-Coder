@@ -9,6 +9,7 @@ import { AnalysisJob } from '../codemap/analysisJob';
 import { collectStaticFiles, describeExcludedFiles, pickStaticDir } from '../deploy/staticSite';
 import { CommitPreview, previewCommit, commitSelected } from './githubCommit';
 import { DiscordWebhook } from './discordWebhook';
+import { activeProjectPath, projectFolders, selectActiveProject } from '../activeProject';
 
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
@@ -85,7 +86,7 @@ export class CanvasHost {
     constructor(private api: ApiClient, private readGit = gitContext, private webhook?: DiscordWebhook) {}
     async handle(type: string, raw: unknown, send: Send, project: (workspace: string) => string, execute: (type: string, payload: unknown) => Promise<void>) {
         const p = (raw ?? {}) as Record<string, unknown>, requestId = String(p.requestId || '');
-        const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspace = activeProjectPath();
         try {
             if (type === 'canvas.graph.cancel') { this.analysis.cancel(); return; }
             if (type === 'canvas.fix') {
@@ -107,9 +108,16 @@ export class CanvasHost {
                 if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('프로젝트 안의 파일만 분석할 수 있습니다.');
                 send('canvas.graphResult', { requestId, file:id, graph:await this.analysis.run(workspace,file) }); return;
             }
+            if (type === 'canvas.selectProject') {
+                if (this.executing || this.committing || this.connecting) throw new Error('진행 중인 배포·Git 작업이 끝난 뒤 프로젝트를 바꾸세요.');
+                if (!await selectActiveProject(String(p.path || ''))) throw new Error('워크스페이스에 열린 폴더만 선택할 수 있습니다.');
+                this.plans.clear(); this.commitPreview = undefined; this.analysis.cancel();
+                send('canvas.projectChanged', { requestId, workspace: activeProjectPath(), projects: projectFolders() });
+                return;
+            }
             if (type === 'canvas.snapshot') {
                 const git = workspace ? await this.readGit(workspace) : await this.readGit('');
-                const local = { workspace, projectName: path.basename(workspace), git: publicGit(git) };
+                const local = { workspace, projectName: path.basename(workspace), git: publicGit(git), projects: projectFolders() };
                 const response = await this.api.getCanvasSnapshot(workspace, workspace ? project(workspace) : '');
                 send('canvas.snapshotResult', { requestId, snapshot: { aws: { ready:false,region:'',account:'' }, deployment:{running:false,stage:'idle'}, resource:null,topology:null,scan:null,s3:null, warnings: response.success ? [] : [response.error || 'Core 연결을 확인하세요.'], ...response.data, ...local } });
                 return;
@@ -228,7 +236,7 @@ export class CanvasHost {
             // Creating a private repository never commits or pushes local files.
             const result=await this.api.githubConnectRepository({repository,create:p.create===true});
             if(result.status!=='ok') throw new Error(result.message || '저장소를 확인하지 못했습니다.');
-            if (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath!==workspace || (await this.readGit(workspace)).fingerprint!==current.fingerprint) throw new Error('연결 중 프로젝트 또는 Git 상태가 바뀌었습니다. 상태를 새로고침하세요.');
+            if (activeProjectPath()!==workspace || (await this.readGit(workspace)).fingerprint!==current.fingerprint) throw new Error('연결 중 프로젝트 또는 Git 상태가 바뀌었습니다. 상태를 새로고침하세요.');
             const run=async(args:string[]) => (await exec('git',['-C',workspace,...args],{timeout:10000,windowsHide:true})).stdout.trim();
             if (!current.initialized) await run(['init','--initial-branch=main']);
             const remote=await run(['remote','get-url','origin']).catch(()=>'');
@@ -256,26 +264,33 @@ export class CanvasHost {
             const headers:Record<string,string>={'Content-Type':'application/json'},key=cfg.get<string>('registrationKey') || '';
             if(key) headers['X-Registration-Key']=key;
             const response=await fetch(`http://${host}:${port}/api/v1/bridge/${route}`,{method,headers,body:body===undefined ? undefined : JSON.stringify(body),signal:controller.signal});
-            const data=await response.json() as Record<string,unknown>;
+            let data: Record<string,unknown>;
+            try { data=await response.json() as Record<string,unknown>; }
+            catch { throw new Error(`${host}:${port} 에서 ReCoder Discord 봇이 아닌 다른 프로그램이 응답합니다. 연결 설정의 HTTP 포트(recoder.bridge.httpPort)와 봇의 BOT_HTTP_PORT 를 확인하세요.`); }
             if(!response.ok) throw new Error(response.status===401 ? 'Discord 봇 서버 인증에 실패했습니다. 연결 설정의 Registration Key를 확인하세요.' : String(data.error || `Discord HTTP ${response.status}`));
             return data;
         } catch(err) {
-            if (err instanceof TypeError || (err instanceof Error && err.name==='AbortError')) throw new Error(`Discord 봇 서버에 연결할 수 없습니다 (${host}:${port}). ReCoder Discord 봇을 실행하거나 연결 설정에서 서버 주소를 확인한 뒤 다시 시도하세요.`);
+            if (err instanceof TypeError || (err instanceof Error && err.name==='AbortError')) throw new Error(`Discord 봇 서버에 연결할 수 없습니다 (${host}:${port}). 봇 프로그램이 실행 중인지 확인하세요 — 저장소의 discord-bot 폴더에서 Windows는 run.ps1, macOS·Linux는 run.sh 로 실행합니다. 봇 없이 알림만 받으려면 '웹후크로 연결'을 쓰세요.`);
             throw err;
         } finally {clearTimeout(timer);}
     }
     private async discord(type:string,p:Record<string,unknown>,send:Send) {
         const requestId=String(p.requestId||'');
-        const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        if (p.mode === 'bot' || p.mode === 'webhook') {
-            this.discordMode = String(p.mode);
-            await this.webhook?.setMode(workspace, this.discordMode);
-        } else if (this.webhook) this.discordMode = await this.webhook.mode(workspace);
+        const workspace = activeProjectPath();
+        //: 봇 방식은 봇 서버 응답을 받은 뒤에만 저장한다. 실패한 '봇 서버 불러오기'가
+        //: 모드를 bot 으로 바꿔 두면, 이미 연결된 웹후크 상태 조회·알림까지 꺼진 봇
+        //: 서버로 가서 계속 실패했다.
+        const saved = this.webhook ? await this.webhook.mode(workspace) : this.discordMode;
+        if (p.mode === 'webhook') {
+            this.discordMode = 'webhook';
+            await this.webhook?.setMode(workspace, 'webhook');
+        } else if (p.mode === 'bot') this.discordMode = 'bot';
+        else this.discordMode = saved;
         if (type === 'canvas.discord.connectWebhook') {
             if (!workspace || !this.webhook) throw new Error('먼저 프로젝트 폴더를 여세요.');
             const url = await vscode.window.showInputBox({ password: true, ignoreFocusOut: true, title: 'Discord 알림 연결', prompt: '채널 설정 → 연동 → 웹후크에서 복사한 URL을 붙여넣으세요. 메시지는 아직 보내지 않습니다.', placeHolder: 'https://discord.com/api/webhooks/…' });
             if (url === undefined) { send('canvas.discord.cancelled', {requestId}); return; }
-            if (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath !== workspace) throw new Error('프로젝트가 바뀌었습니다. 새 프로젝트에서 다시 연결하세요.');
+            if (activeProjectPath() !== workspace) throw new Error('프로젝트가 바뀌었습니다. 새 프로젝트에서 다시 연결하세요.');
             const state = await this.webhook.connect(workspace, url);
             this.discordMode = 'webhook';
             send('canvas.discord.statusResult', {requestId, ...state}); return;
@@ -294,7 +309,13 @@ export class CanvasHost {
             }
         }
         if(type==='canvas.discord.settings') { await vscode.commands.executeCommand('workbench.action.openSettings','recoder.bridge'); return; }
-        if(type==='canvas.discord.status') send('canvas.discord.statusResult',{requestId,mode:'bot',...await this.bot('status')});
+        if(type==='canvas.discord.status') {
+            let state: Record<string,unknown>;
+            try { state = await this.bot('status'); }
+            catch (err) { if (p.mode === 'bot') this.discordMode = saved; throw err; }
+            if (p.mode === 'bot') await this.webhook?.setMode(workspace, 'bot');
+            send('canvas.discord.statusResult',{requestId,mode:'bot',...state});
+        }
         if(type==='canvas.discord.guilds') send('canvas.discord.guildsResult',{requestId,...await this.bot('guilds')});
         if(type==='canvas.discord.channels') send('canvas.discord.channelsResult',{requestId,...await this.bot(`guilds/${encodeURIComponent(String(p.guildId))}/channels`)});
         if(type==='canvas.discord.setChannel') { await this.bot('channel','PUT',{channel_id:String(p.channelId||'')}); send('canvas.discord.statusResult',{requestId,mode:'bot',...await this.bot('status')}); }

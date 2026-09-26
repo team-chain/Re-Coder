@@ -8,11 +8,29 @@ SaaS 멀티-서버 모드로 운영되는 단일 봇이 여러 Discord 서버를
 
 ## 빠른 시작
 
+1. [Discord Developer Portal](https://discord.com/developers/applications) → 앱 선택(없으면 New Application)
+2. **Bot → Reset Token** 으로 토큰 발급
+3. 같은 **Bot** 화면의 *Privileged Gateway Intents* 에서 **SERVER MEMBERS INTENT**, **MESSAGE CONTENT INTENT** 를 켭니다.
+   꺼져 있으면 Discord 가 연결을 거부합니다(봇이 원인과 함께 종료합니다).
+4. 아래처럼 실행합니다. 처음 실행하면 `.env` 를 만들어 주므로 `DISCORD_BOT_TOKEN` 을 채우고 다시 실행하세요.
+
+Windows (PowerShell):
+
+```powershell
+cd discord-bot
+powershell -ExecutionPolicy Bypass -File .\run.ps1
+```
+
+macOS · Linux:
+
 ```bash
 cd discord-bot
-cp .env.example .env       # 이미 토큰이 들어있다면 그대로 사용
+cp .env.example .env       # DISCORD_BOT_TOKEN 채우기
 ./run.sh                   # 가상환경 자동 생성 + 의존성 설치 + 봇 실행
 ```
+
+봇이 뜨면 VS Code 의 **Deploy → ••• → Discord → 기존 봇 서버 연결 → 봇 서버 불러오기** 로 서버와 알림 채널을 고릅니다.
+봇 없이 배포 알림만 받으려면 같은 화면의 **웹후크로 연결** 이 더 간단합니다.
 
 내부적으로 `run.sh` 가 수행하는 일:
 1. `.venv/` 가상환경이 없으면 생성

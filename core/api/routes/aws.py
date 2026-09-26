@@ -485,7 +485,7 @@ def _call_sts_get_caller_identity(profile: Optional[str], region: str) -> dict[s
         if "Unable to locate credentials" in msg or "NoCredentialsError" in msg:
             raise HTTPException(
                 status_code=400,
-                detail="AWS 자격증명을 찾을 수 없습니다. /api/aws/configure 로 먼저 등록하세요.",
+                detail="AWS 자격증명을 찾을 수 없습니다. AWS 연결 화면에서 먼저 등록하세요.",
             ) from exc
         raise HTTPException(status_code=500, detail=f"STS 호출 실패: {msg}") from exc
 
@@ -1315,7 +1315,7 @@ async def get_aws_status() -> AwsStatus:
             profile=profile,
             access_key_last4="",
             storage=storage,
-            message="AWS 자격증명이 설정되지 않았습니다. /api/aws/configure 로 등록하세요.",
+            message="AWS 자격증명이 아직 없습니다. AWS 연결 화면에서 계정을 연결하세요.",
         )
 
     # boto3 미설치 → ready=False (500 아님)

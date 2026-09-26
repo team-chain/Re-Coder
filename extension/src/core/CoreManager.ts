@@ -7,6 +7,7 @@
  * - F5/확장 테스트: 해당 확장 소스의 core/main.py, 설치 실행: Core 바이너리
  */
 import * as vscode from 'vscode';
+import { aiKeyEnv } from '../ai/aiKeyEnv';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -488,13 +489,13 @@ export class CoreManager {
 
             // 게이트웨이 모드: 설정 URL + 저장된 학생 토큰이 있으면 Core 에 env 주입 →
             // Core 의 provider_router 가 Bedrock 직접호출 대신 운영자 게이트웨이를 사용.
-            const [gatewayEnv, awsEnv] = await Promise.all([this._gatewayEnv(), this._awsEnv()]);
+            const [gatewayEnv, awsEnv, aiEnv] = await Promise.all([this._gatewayEnv(), this._awsEnv(), aiKeyEnv(this.extensionContext, (p) => vscode.workspace.getConfiguration('recoder.ai').get<string>(`${p}Model`, '') || '')]);
 
             //: 확장 호스트 전용 변수(ELECTRON_RUN_AS_NODE 등)는 코어에 넘기지 않는다 — 코어가
             //: 띄우는 Docker Desktop(Electron)이 그걸 물려받으면 GUI 없이 즉시 종료한다(실기기).
             const hostEnv: NodeJS.ProcessEnv = { ...process.env };
             for (const k of ['ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ATTACH_CONSOLE', 'NODE_OPTIONS']) { delete hostEnv[k]; }
-            const coreEnv = { ...hostEnv, ...gatewayEnv, ...awsEnv };
+            const coreEnv = { ...hostEnv, ...gatewayEnv, ...awsEnv, ...aiEnv };
             processLog = this.createProcessLog(Object.entries(coreEnv)
                 .filter(([key]) => /TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY/i.test(key))
                 .map(([, value]) => value ?? ''));

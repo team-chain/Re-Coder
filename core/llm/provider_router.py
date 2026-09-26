@@ -116,6 +116,21 @@ class LLMProviderRouter:
         except Exception as exc:  # pragma: no cover
             log.debug("gateway provider 비활성: %s", exc)
 
+        # AWS 없이 쓰는 경로: 사용자가 확장에서 Claude/OpenAI API 키를 골라 넣은 경우.
+        # 명시적으로 고른 선택이므로 게이트웨이·Bedrock 보다 우선한다.
+        try:
+            try:
+                from llm.api_key_provider import ApiKeyProvider, model_for, selected_provider
+            except ImportError:
+                from core.llm.api_key_provider import ApiKeyProvider, model_for, selected_provider
+            chosen = selected_provider()
+            if chosen:
+                self._bedrock_sonnet = ApiKeyProvider(chosen, model_for(chosen))
+                self._bedrock_haiku = ApiKeyProvider(chosen, model_for(chosen, fast=True))
+                log.info("LLM API key mode enabled — provider=%s model=%s", chosen, self._bedrock_sonnet.model_id)
+        except Exception as exc:  # pragma: no cover
+            log.warning("API key provider 비활성: %s", exc)
+
         self._call_records: list[Any] = []  # list[LLMCallRecord]
 
     # ------------------------------------------------------------------

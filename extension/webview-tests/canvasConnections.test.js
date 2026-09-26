@@ -90,3 +90,26 @@ test('offline Discord gives an actionable error instead of hiding its entry poin
  try {await s.send('canvas.discord.status');assert.equal(s.output.at(-1).type,'canvas.error');assert.match(s.output.at(-1).payload.message,/봇 서버에 연결할 수 없습니다/);}
  finally {global.fetch=original;}
 });
+
+test('a failed bot lookup keeps an existing webhook connection working',async t=>{
+ const {DiscordWebhook}=require('../out/sidebar/discordWebhook');
+ const store=new Map(),secrets={get:async k=>store.get(k),store:async(k,v)=>{store.set(k,v);},delete:async k=>{store.delete(k);}};
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'recoder-discord-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const calls=[],original=global.fetch,originalInput=vscode.window.showInputBox;
+ const hook='https://discord.com/api/webhooks/123456789012345678/'+'a'.repeat(60);
+ global.fetch=async(url,options={})=>{
+  calls.push({url:String(url),method:options.method||'GET'});
+  if(String(url).startsWith('http://127.0.0.1'))throw new TypeError('fetch failed');
+  return new Response(JSON.stringify(options.method==='POST'?{id:'m1'}:{type:1,channel_id:'234567890123456789',guild_id:'345678901234567890',name:'alerts'}),{status:200});
+ };
+ vscode.window.showInputBox=async()=>hook;
+ const output=[],host=new CanvasHost({},undefined,new DiscordWebhook(secrets));vscode.workspace.workspaceFolders=[{uri:{fsPath:dir}}];
+ const send=(type,p={})=>host.handle(type,{requestId:'fixture',...p},(type,payload)=>output.push({type,payload}),()=>'',async()=>assert.fail('Must not deploy'));
+ try {
+  await send('canvas.discord.connectWebhook');assert.equal(output.at(-1).payload.channel_name,'alerts');
+  await send('canvas.discord.status',{mode:'bot'});assert.equal(output.at(-1).type,'canvas.error');assert.match(output.at(-1).payload.message,/run\.ps1/);
+  await send('canvas.discord.status');assert.equal(output.at(-1).type,'canvas.discord.statusResult');assert.equal(output.at(-1).payload.mode,'webhook');assert.equal(output.at(-1).payload.channel_name,'alerts');
+  await send('canvas.discord.event',{enabled:true,eventId:'e1',title:'배포 완료',detail:'ok'});assert.equal(output.at(-1).type,'canvas.discord.eventResult');
+  assert.ok(calls.some(c=>c.method==='POST'&&c.url.startsWith('https://discord.com/api/webhooks/')));
+ } finally {global.fetch=original;vscode.window.showInputBox=originalInput;}
+});
