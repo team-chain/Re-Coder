@@ -13,6 +13,7 @@ import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal from "./ApprovalModal";
 import { DeploymentActivity, DeploymentActivityEvent } from './DeploymentActivity';
 import { LocalRollbackResult, LocalRollbackStatus, rollbackWatchId } from "./LocalRollbackStatus";
+import { BuildDiagnosis, BuildFailure, ReadinessIssue, ReadinessPanel } from "./ReadinessPanel";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -111,6 +112,8 @@ interface DeploymentPlan {
   risk_level: "low" | "medium" | "high" | "critical";
   risk_reasons: string[];
   approval_level: 1 | 2 | 3 | 4;
+  //: Core 의 빌드 전 정적 점검(build_readiness). 빌드가 확정적으로 실패할 설정을 승인 전에 보인다.
+  readiness?: { issues?: ReadinessIssue[] } | null;
 }
 
 interface VerificationSnapshot {
@@ -222,6 +225,13 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const watchIdRef = useRef<string | undefined>();
   const pendingRollbackRef = useRef<string | undefined>();
   const [error, setError] = useState<string | null>(null);
+  //: 빌드 실패 원인(Core build_failure) · 배포 준비 점검 항목과 자동 수정 상태.
+  const [diagnosis, setDiagnosis] = useState<{ value: BuildDiagnosis; raw: string; restored: string } | null>(null);
+  const [readinessIssues, setReadinessIssues] = useState<ReadinessIssue[]>([]);
+  const [fixing, setFixing] = useState<string | null>(null);
+  const [fixNotice, setFixNotice] = useState("");
+  const replanAfterFix = useRef(false);
+  const fixQueue = useRef<string[]>([]);
   //: 승인했는데 같은 경로에 **내용이 다른 파일**이 있어 코어가 쓰지 않은 상태.
   //: 예전엔 묻지 않고 덮어써서 손으로 고친 Dockerfile 이 조용히 사라졌다(실기기 D4).
   const [existingConflict, setExistingConflict] = useState<{ path?: string; diff?: string; file_type?: string } | null>(null);
@@ -261,6 +271,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         setPlan(payload as DeploymentPlan);
         setStep("planReady");
         setError(null);
+        setDiagnosis(null);
+        setReadinessIssues((payload as DeploymentPlan).readiness?.issues ?? []);
       }
 
       if (type === "scanResult") {
@@ -323,6 +335,30 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         if(event.plan_id===progressPlan.current) setProgress(event);
         return;
       }
+      if (type === "deploy.readiness.result") {
+        const r = payload as { code?: string; message?: string; applied?: boolean; readiness?: { issues?: ReadinessIssue[] } };
+        setFixing(null);
+        setReadinessIssues(r.readiness?.issues ?? []);
+        if (r.code && fixQueue.current.length && r.applied !== undefined) {
+          //: "모두 고치기" — 앞 수정이 끝난 뒤 다음 항목을 고친다(같은 파일을 동시에 고치지 않게).
+          const next = fixQueue.current.shift()!;
+          setFixing(next);
+          postMessage("deploy.readiness.fix", { code: next });
+          return;
+        }
+        if (r.code) {
+          setFixNotice(r.message ?? "");
+          //: 포트·헬스 경로를 고치면 플랜(포트 매핑)도 달라진다 — 승인 전이면 플랜을 다시 만든다.
+          if (r.applied && replanAfterFix.current) { replanAfterFix.current = false; postMessage("createDeployPlan", { workspacePath: "", method: "local_docker" }); setStep("planning"); }
+        }
+        return;
+      }
+      if (type === "deploy.readiness.error") {
+        fixQueue.current = [];
+        setFixing(null);
+        setFixNotice((payload as { message?: string }).message ?? "자동 수정에 실패했습니다.");
+        return;
+      }
       if (type === "deployResult") {
         if ((payload as {plan_id?:string}).plan_id && (payload as {plan_id?:string}).plan_id!==progressPlan.current) return;
         const r = payload as {
@@ -352,6 +388,12 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
             ? `\n이전 컨테이너 복원: ${restoreDetail}`
             : "";
           setError(`배포 실패${tail ? ` — ${tail}` : " (코어가 사유를 돌려주지 않았습니다)"}${restored}`);
+          const d = (r as { diagnosis?: BuildDiagnosis }).diagnosis;
+          //: 마지막 8줄은 대개 Dockerfile 발췌라 원인이 아니다. Core 가 뽑은 원인·해결책을 앞세운다.
+          setDiagnosis(d ? { value: d, raw: detail.split("\n").slice(-60).join("\n"), restored: restored.trim() } : null);
+          if (d) { setFixNotice(""); postMessage("deploy.readiness.check", {}); }
+        } else {
+          setDiagnosis(null);
         }
       }
 
@@ -445,6 +487,19 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
     setStep("deploying");
     setShowApproval(false);
   }, [plan, postMessage]);
+
+  const handleFixReadiness = useCallback((code: string) => {
+    setFixing(code);
+    setFixNotice("");
+    replanAfterFix.current = step === "planReady";
+    postMessage("deploy.readiness.fix", { code });
+  }, [postMessage, step]);
+
+  const handleFixAllReadiness = useCallback((codes: string[]) => {
+    if (!codes.length) return;
+    fixQueue.current = codes.slice(1);
+    handleFixReadiness(codes[0]);
+  }, [handleFixReadiness]);
 
   const handleCreatePlan = useCallback(() => {
     setProgress(null);
@@ -764,6 +819,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           <div><strong>포트:</strong> {Object.entries(plan.ports).map(([h, c]) => `${h}→${c}`).join(", ")}</div>
         </div>
       )}
+      {step === "planReady" && plan && (
+        <ReadinessPanel issues={readinessIssues} onFix={handleFixReadiness} onFixAll={handleFixAllReadiness} fixing={fixing} notice={fixNotice} />
+      )}
 
       {/* ── Done banner ── */}
       {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deploymentHealthVerdict(deployResult, watch) !== "healthy" ? (
@@ -878,7 +936,14 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       )}
 
       {/* ── Error ── */}
-      {step === "error" && error && (
+      {step === "error" && diagnosis && (
+        <>
+          <BuildFailure diagnosis={diagnosis.value} raw={diagnosis.raw} restored={diagnosis.restored} />
+          <ReadinessPanel title="같이 고칠 항목" issues={readinessIssues} onFix={handleFixReadiness} onFixAll={handleFixAllReadiness} fixing={fixing}
+            notice={fixNotice ? `${fixNotice} 고친 뒤 '새 배포'로 다시 진행하세요.` : ""} />
+        </>
+      )}
+      {step === "error" && error && !diagnosis && (
         <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444", borderRadius: 5, padding: "8px 10px", color: "#ef4444", marginBottom: 10, whiteSpace: "pre-wrap", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 11, lineHeight: 1.5 }}>
           {error}
         </div>
@@ -911,6 +976,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
               setProposal(null);
               setDeployResult(null);
               setError(null);
+              setDiagnosis(null);
+              setReadinessIssues([]);
+              setFixNotice("");
             }
           }}
           //: 기존 파일과 다른 상태에서는 위 카드의 두 선택지가 유일한 다음 단계다 —

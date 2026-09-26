@@ -67,6 +67,9 @@ RUN apk add --no-cache curl dumb-init
 
 WORKDIR /app
 
+# 앱이 작업 폴더에 파일(예: SQLite DB·업로드)을 만들 수 있게 한다 — 비root 로 실행하므로 필요하다.
+RUN chown appuser:appgroup /app
+
 # Copy the complete source/build output, then production-only dependencies.
 # Plain Express apps commonly start index.js/server.js without a dist folder.
 COPY --from=builder --chown=appuser:appgroup /app ./

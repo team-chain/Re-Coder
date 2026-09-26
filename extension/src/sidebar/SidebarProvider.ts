@@ -1024,6 +1024,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'deploy.readiness.check':
+            case 'deploy.readiness.fix': {
+                //: 로컬 Docker 배포 화면의 "배포 준비 점검". 자동 수정은 사용자가 누른 한 건만.
+                const p = (payload ?? {}) as { code?: string; requestId?: string };
+                const workspacePath = activeProjectPath();
+                try {
+                    if (!workspacePath) { throw new Error('먼저 프로젝트 폴더를 여세요.'); }
+                    if (type === 'deploy.readiness.fix') {
+                        if (!p.code || !/^[A-Z_]{3,64}$/.test(p.code)) { throw new Error('수정 항목을 확인하세요.'); }
+                        const result = await this._apiClient.fixBuildReadiness(workspacePath, p.code);
+                        this.postMessageToWebview(requestWebview, 'deploy.readiness.result', { requestId: p.requestId, code: p.code, ...result });
+                    } else {
+                        const readiness = await this._apiClient.checkBuildReadiness(workspacePath);
+                        this.postMessageToWebview(requestWebview, 'deploy.readiness.result', { requestId: p.requestId, readiness });
+                    }
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'deploy.readiness.error', {
+                        requestId: p.requestId, code: p.code, message: err instanceof Error ? err.message : String(err),
+                    });
+                }
+                break;
+            }
             case 'workspace.deploy.remediation.apply': {
                 const proposalId = (payload as { proposalId?: string } | undefined)?.proposalId;
                 const workspacePath = activeProjectPath();
@@ -1031,6 +1053,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', {
                         message: '적용할 수정안 정보가 없습니다. 다시 검사해 주세요.',
                     });
+                    break;
+                }
+                if (proposalId.startsWith('readiness:')) {
+                    //: 배포 캔버스의 빌드 점검 항목(포트·.dockerignore·빌드 스크립트)은 같은 카드로 고친다.
+                    try {
+                        const result = await this._apiClient.fixBuildReadiness(workspacePath, proposalId.slice('readiness:'.length));
+                        this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationResult', {
+                            success: result.applied, proposal_id: proposalId, applied_files: result.changed ?? [],
+                            message: result.message, rerun_required: true,
+                        });
+                    } catch (err) {
+                        this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', { message: err instanceof Error ? err.message : String(err) });
+                    }
                     break;
                 }
                 try {

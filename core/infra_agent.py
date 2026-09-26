@@ -134,11 +134,13 @@ def _detect_node_entry_and_port(root: Path, package: dict) -> tuple[Optional[str
             src = (root / entry).read_text(encoding="utf-8", errors="replace")
         except OSError:
             src = ""
-        for pat in (r"\.listen\(\s*(\d{2,5})\b", r"PORT\s*(?:\|\||\?\?)\s*(\d{2,5})\b"):
-            m = re.search(pat, src)
-            if m:
-                port = int(m.group(1))
-                break
+        # `const PORT = 5000; app.listen(PORT)` 형태도 읽는다. 예전엔 못 읽어 기본값
+        # 3000 을 넣었고, 5000 에서 듣는 앱의 헬스 확인이 실패했다(실기기 test temp).
+        try:
+            from build_readiness import _detect_js_port  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import _detect_js_port  # type: ignore
+        port, _uses_env = _detect_js_port(src)
     return entry, port
 
 
@@ -624,8 +626,23 @@ def discover_health_path(
         #: 라우트가 아니라 거의 확실히 404 다.
         return "/api/health"
 
-    if isinstance(configured, str) and _HEALTH_PATH_RE.fullmatch(configured):
+    if isinstance(configured, str) and _HEALTH_PATH_RE.fullmatch(configured) \
+            and configured != SCANNER_DEFAULT_HEALTH_PATH:
         return configured
+
+    # 코드에서 실제로 200 을 줄 경로를 찾는다: 헬스 라우트 → "/" 제공 → FastAPI /docs.
+    # 근거가 없을 때만 관례(/health)로 둔다. 없는 경로를 찌르면 "영원히 unhealthy".
+    if stack.startswith(("node", "python")):
+        try:
+            try:
+                from build_readiness import analyze  # type: ignore
+            except ImportError:  # pragma: no cover
+                from core.build_readiness import analyze  # type: ignore
+            probe = analyze(workspace_path, dockerfile=None).probe_path()
+            if probe and _HEALTH_PATH_RE.fullmatch(probe):
+                return probe
+        except Exception:  # noqa: BLE001 - 판정 실패는 관례로 물러선다
+            pass
     return SCANNER_DEFAULT_HEALTH_PATH
 
 

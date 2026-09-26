@@ -200,6 +200,9 @@ export interface EcsDeployStatus {
     } | null;
 }
 
+export interface BuildReadinessIssue { code: string; severity: 'error' | 'warning'; message: string; fix: string; file?: string; auto_fix: boolean }
+export interface BuildReadiness { runtime: string; app_port: number | null; port_from_env: boolean; health_path: string | null; probe_path: string | null; issues: BuildReadinessIssue[] }
+
 export class ApiClient {
     constructor(private coreManager: CoreManager) {}
 
@@ -411,6 +414,21 @@ export class ApiClient {
             target,
         });
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
+        return resp.data;
+    }
+
+    /** 컨테이너 빌드·실행 가능성 정적 점검(파일만 읽음). */
+    async checkBuildReadiness(workspacePath: string): Promise<BuildReadiness> {
+        const resp = await this.request<BuildReadiness>('POST', '/api/deploy/readiness', { workspace_path: workspacePath });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 준비 점검 실패'); }
+        return resp.data;
+    }
+
+    /** 사용자가 누른 자동 수정 한 건. 원본은 프로젝트의 .recoder/backups 에 남는다. */
+    async fixBuildReadiness(workspacePath: string, code: string): Promise<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }> {
+        const resp = await this.request<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }>(
+            'POST', '/api/deploy/readiness/fix', { workspace_path: workspacePath, code });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '자동 수정 실패'); }
         return resp.data;
     }
 

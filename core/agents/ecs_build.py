@@ -205,12 +205,19 @@ def build_image(
         timeout=DOCKER_BUILD_TIMEOUT,
     )
     if rc != 0:
-        raise BuildError(
-            "컨테이너 이미지 빌드에 실패했습니다.",
-            detail=(err or out)[-4000:],
-            remedy="위 docker 출력의 마지막 오류 줄을 확인하세요. "
-                   "의존성 설치 실패가 가장 흔한 원인입니다.",
-        )
+        title, detail, remedy = "", (err or out)[-4000:], (
+            "위 docker 출력의 마지막 오류 줄을 확인하세요. 의존성 설치 실패가 가장 흔한 원인입니다.")
+        try:
+            # BuildKit 요약이 아니라 실제 원인 줄과 해결책을 보여 준다(로컬 배포와 같은 판정).
+            from build_failure import diagnose
+            from build_readiness import analyze
+            diagnosis = diagnose(f"{out or ''}\n{err or ''}", analyze(workspace_path).issues)
+            title = f": {diagnosis.title}"
+            detail = "\n".join([diagnosis.cause, *diagnosis.lines])[-4000:]
+            remedy = diagnosis.fix
+        except Exception:  # noqa: BLE001 - 진단 실패는 원래 출력으로 물러선다
+            pass
+        raise BuildError(f"컨테이너 이미지 빌드에 실패했습니다{title}.", detail=detail, remedy=remedy)
     logger.info("docker build 완료: %s", local_tag)
     return local_tag
 

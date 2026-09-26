@@ -323,6 +323,8 @@ class DeploymentPlan(BaseModel):
     risk_level: RiskLevel = RiskLevel.MEDIUM
     risk_reasons: list[str] = Field(default_factory=list)
     approval_level: ApprovalLevel = ApprovalLevel.CONFIRM
+    #: 빌드 전 정적 점검 결과(build_readiness.Readiness.to_dict). 화면의 "배포 준비 점검".
+    readiness: Optional[dict] = None
 
 
 class DeploymentRecord(BaseModel):

@@ -1973,6 +1973,23 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
             request.workspace_path,
             'static' if request.target == 's3' else detected["app_kind"],
         )
+        if request.target == 'ecs' or (request.target != 's3' and detected.get('app_kind') != 'static'):
+            # 컨테이너 빌드·실행이 확정적으로 실패할 설정은 배포 전에 막는다.
+            readiness = await asyncio.to_thread(_workspace_readiness, request.workspace_path)
+            for issue in (readiness.issues if readiness else []):
+                item = {
+                    "code": issue.code, "message": issue.message, "fix": issue.fix,
+                    "severity": "high" if issue.severity == "error" else "medium",
+                    "remediation_available": issue.auto_fix,
+                    "proposal_id": f"readiness:{issue.code}" if issue.auto_fix else None,
+                }
+                (safety["reasons"] if issue.severity == "error" else safety["warnings"]).append(item)
+                if issue.severity == "error":
+                    safety["fixes"].append({"code": issue.code, "message": issue.fix,
+                                            "proposal_id": item["proposal_id"],
+                                            "auto_apply_available": issue.auto_fix})
+            if readiness and readiness.errors:
+                safety["blocked"] = True
         return {**detected, **safety}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2357,7 +2374,16 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
     target.write_text(proposal.content, encoding="utf-8")
     additional_paths = []
     from static_frontend import STATIC_DOCKERIGNORE, STATIC_IGNORE_NOTICE
-    if (getattr(proposal, 'base_template', '') in ('Dockerfile.node-static', 'Dockerfile.html-static')
+    if SERVER_IGNORE_NOTICE in getattr(proposal, 'risk_reasons', []):
+        try:
+            from build_readiness import write_dockerignore_if_missing
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import write_dockerignore_if_missing  # type: ignore
+        # Exclusive creation also preserves edits made while approval was open.
+        created = write_dockerignore_if_missing(target.parent)
+        if created:
+            additional_paths.append(created)
+    elif (getattr(proposal, 'base_template', '') in ('Dockerfile.node-static', 'Dockerfile.html-static')
             and STATIC_IGNORE_NOTICE in getattr(proposal, 'risk_reasons', [])):
         ignore = target.parent / '.dockerignore'
         try:
@@ -2731,24 +2757,28 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
     proposal = None
     project = None
     ai_note = ""
+    # 포트·진입점·헬스 경로는 AI 가 없어도(템플릿 폴백) 프로젝트에서 읽어야 한다.
+    # 예전엔 AI 경로에서만 스캔해서, 폴백 초안은 5000 에서 듣는 앱에 3000 을 열었다.
+    try:
+        from project_scanner import get_project_scanner  # type: ignore
+        project = get_project_scanner().scan(request.workspace_path)
+        # 호출자가 스택을 명시했으면 파일 휴리스틱보다 우선한다. 서로
+        # 다른 스택에서 계산된 포트/실행 명령까지 가져오면 FastAPI에
+        # Express의 3000/index.js를 적용하는 식의 교차 오염이 생긴다.
+        if request.stack is not None and project.stack != stack:
+            project = project.model_copy(update={
+                "stack": stack,
+                "default_port": None,
+                "default_run_command": None,
+            })
+    except Exception:
+        project = None
     agent = _get_infra_agent()
     if agent is not None:
         # InfraAgent.generate_dockerfile(workspace_path, project: ProjectProfile)
         # 시그니처에 맞춰 ProjectProfile 을 구성. 사용자가 /api/project/scan 을 안 했어도
         # 최소한의 정보로 호출 가능하도록 inline 구성.
-        try:
-            from project_scanner import get_project_scanner  # type: ignore
-            project = get_project_scanner().scan(request.workspace_path)
-            # 호출자가 스택을 명시했으면 파일 휴리스틱보다 우선한다. 서로
-            # 다른 스택에서 계산된 포트/실행 명령까지 가져오면 FastAPI에
-            # Express의 3000/index.js를 적용하는 식의 교차 오염이 생긴다.
-            if request.stack is not None and project.stack != stack:
-                project = project.model_copy(update={
-                    "stack": stack,
-                    "default_port": None,
-                    "default_run_command": None,
-                })
-        except Exception:
+        if project is None:
             # 폴백 — 빈 ProjectProfile (필수 필드만)
             from schemas import ProjectProfile  # type: ignore
             project = ProjectProfile(
@@ -2828,8 +2858,31 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
         from static_frontend import STATIC_IGNORE_NOTICE
         if not (Path(request.workspace_path) / '.dockerignore').exists():
             proposal.risk_reasons.append(STATIC_IGNORE_NOTICE)
+    elif not (Path(request.workspace_path) / '.dockerignore').exists():
+        #: 서버 스택도 .dockerignore 가 없으면 PC 의 node_modules·.venv·.env 가 빌드에 섞인다.
+        proposal.risk_reasons.append(SERVER_IGNORE_NOTICE)
+    # 이 Dockerfile 로 빌드했을 때 실패가 확정적인 프로젝트 설정을 저장 전에 알린다.
+    proposal.risk_reasons.extend(_readiness_notes(request.workspace_path, proposal.content))
     _infra_proposals[proposal.proposal_id] = proposal
     return proposal
+
+
+SERVER_IGNORE_NOTICE = ('저장 시 .dockerignore도 생성합니다: node_modules·가상환경·Git 기록·.env 자격증명 파일을 '
+                        'Docker 빌드에서 제외합니다. 기존 .dockerignore는 유지합니다.')
+
+
+def _readiness_notes(workspace_path: str, dockerfile_content: str) -> list[str]:
+    try:
+        from build_readiness import analyze, issues_as_risk_reasons
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import analyze, issues_as_risk_reasons  # type: ignore
+    try:
+        readiness = analyze(workspace_path, {"Dockerfile": dockerfile_content})
+    except Exception as exc:  # noqa: BLE001 - 점검 실패가 생성을 막지 않는다
+        logger.warning("build readiness check failed: %s", exc)
+        return []
+    readiness.issues = [i for i in readiness.issues if i.code != "DOCKERIGNORE_MISSING"]
+    return issues_as_risk_reasons(readiness)
 
 
 class ComposeRequest(BaseModel):
@@ -3245,9 +3298,65 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
     if not request.skip_security_scan and plan.image:
         _plans_pending_image_scan[plan.plan_id] = plan.image
 
+    # 빌드·실행이 확정적으로 실패할 프로젝트 설정을 승인 전에 보여 준다.
+    if plan.method == DeployMethod.LOCAL_DOCKER and request.workspace_path:
+        readiness = await asyncio.to_thread(_workspace_readiness, request.workspace_path)
+        if readiness is not None:
+            plan.readiness = readiness.to_dict()
+            if readiness.issues:
+                from build_readiness import issues_as_risk_reasons
+                plan.risk_reasons = list(plan.risk_reasons) + issues_as_risk_reasons(readiness)
+            if readiness.errors:
+                plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
+
     _deployment_plans[plan.plan_id] = plan
     _plan_workspaces[plan.plan_id] = request.workspace_path or ""
     return plan
+
+
+def _workspace_readiness(workspace_path: str):
+    try:
+        from build_readiness import analyze
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import analyze  # type: ignore
+    try:
+        return analyze(workspace_path)
+    except Exception as exc:  # noqa: BLE001 - 점검 실패가 플랜을 막지 않는다
+        logger.warning("build readiness check failed: %s", exc)
+        return None
+
+
+class ReadinessRequest(BaseModel):
+    workspace_path: str
+
+
+class ReadinessFixRequest(BaseModel):
+    workspace_path: str
+    code: str = Field(pattern=r"^[A-Z_]{3,64}$")
+
+
+@router.post("/api/deploy/readiness")
+async def deploy_readiness(request: ReadinessRequest) -> dict:
+    """프로젝트가 컨테이너로 빌드·실행될 수 있는지 정적으로 판정한다(파일만 읽음)."""
+    if not request.workspace_path or not Path(request.workspace_path).is_dir():
+        raise HTTPException(status_code=400, detail="유효한 프로젝트 폴더가 아닙니다.")
+    readiness = await asyncio.to_thread(_workspace_readiness, request.workspace_path)
+    if readiness is None:
+        raise HTTPException(status_code=500, detail="프로젝트 점검에 실패했습니다. Core 로그를 확인하세요.")
+    return readiness.to_dict()
+
+
+@router.post("/api/deploy/readiness/fix")
+async def deploy_readiness_fix(request: ReadinessFixRequest) -> dict:
+    """사용자가 누른 자동 수정 한 건만 적용한다. 원본은 .recoder/backups 에 남는다."""
+    try:
+        from build_readiness import apply_fix
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import apply_fix  # type: ignore
+    try:
+        return await asyncio.to_thread(apply_fix, request.workspace_path, request.code)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _dockerfile_in(workspace_path: str) -> Optional[Path]:
@@ -3307,12 +3416,34 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
     except OSError as exc:
         return {"status": "failed", "stage": "build", "message": f"Docker 빌드를 시작하지 못했습니다: {exc}", "stderr": "", "stdout": ""}
     if result.returncode != 0:
+        diagnosis = _diagnose_build_failure(workspace_path, (result.stdout or "") + "\n" + (result.stderr or ""))
         return {
             "status": "failed", "stage": "build",
-            "message": f"docker build 실패 (exit {result.returncode}) — 이전 컨테이너는 건드리지 않았습니다.",
+            "message": f"이미지 빌드 실패: {diagnosis['title']} — 이전 컨테이너는 건드리지 않았습니다.",
             "stderr": (result.stderr or '')[-8000:], "stdout": (result.stdout or '')[-8000:],
+            "diagnosis": diagnosis,
         }
     return None
+
+
+def _diagnose_build_failure(workspace_path: str, output: str, stage: str = "build") -> dict:
+    """빌드 출력에서 실제 원인 줄과 해결책을 뽑는다. 실패해도 배포 결과는 그대로 둔다."""
+    try:
+        from build_failure import diagnose
+        from build_readiness import analyze
+    except ImportError:  # pragma: no cover
+        from core.build_failure import diagnose  # type: ignore
+        from core.build_readiness import analyze  # type: ignore
+    try:
+        issues = analyze(workspace_path).issues if workspace_path else []
+    except Exception:  # noqa: BLE001
+        issues = []
+    try:
+        from context_gate import mask_secrets
+        output = mask_secrets(output)
+    except Exception:  # noqa: BLE001
+        pass
+    return diagnose(output, issues, stage=stage).to_dict()
 
 
 async def _local_image_id(image: str) -> str:
@@ -3543,12 +3674,15 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         # 프로세스가 종료·재시작 중이면 failed로 기록하고 이전 서비스를 복구한다.
         if success:
             report_progress('health', '컨테이너 실행 상태와 HTTP 응답을 확인합니다')
+        startup_diagnosis = None
         rollback_eligible = success and await _verify_rollback_candidate_health(plan)
         if success and not rollback_eligible and plan.method == DeployMethod.LOCAL_DOCKER:
             startup_error = await _local_startup_failure(plan.container_name or '')
             if startup_error:
                 success = False
                 result.stderr = startup_error
+                startup_diagnosis = _diagnose_build_failure(
+                    _plan_workspaces.get(request.plan_id, ""), startup_error, stage="run")
                 if restore_source is not None:
                     restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(restore_source)
                     if restored_previous and rollback_source is not None:
@@ -3675,6 +3809,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             "restore_stderr": restore_stderr,
             "stdout": result.stdout[:2000],
             "stderr": result.stderr[:2000],
+            **({"diagnosis": startup_diagnosis} if startup_diagnosis else {}),
             "continuous_verification": {
                 "enabled": bool(cv_enabled),
                 "started": bool(cv_started),

@@ -927,6 +927,9 @@ def _build_code_prompt(
 - TypeScript 코드는 tsconfig와 일치해야 합니다. jsx="react-jsx"에서는 사용하지 않는 React 기본 import를 넣지 마세요.
 - 기존 파일 목록과 겹치지 않게 파일명을 정하되, 사용자가 파일명을 지정하면 그대로 따릅니다.
 - 사용자가 확정한 설계 결정이 있으면 그 선택을 우선하고 임의로 다른 방식을 택하지 않습니다.
+- package.json 의 scripts 는 실제로 존재하는 파일과 설치되는 도구만 참조합니다. 쓰지 않는 빌드 스크립트나 의존성(예: src/ 없는 react-scripts)을 넣지 마세요.
+- 코드가 require/import 하는 외부 패키지는 모두 package.json(또는 requirements.txt)에 선언합니다.
+- 서버는 포트를 환경변수로 받게 합니다(예: process.env.PORT || 3000). 가능하면 GET /health 가 200 을 돌려주게 합니다.
 
 기존 파일 목록:
 {tree}
@@ -1507,6 +1510,56 @@ def generate_plan(
     return result
 
 
+def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list[dict]:
+    """ops 를 적용했을 때 **새로 생기는** 빌드·실행 문제(build_readiness)만 돌려준다.
+
+    기존 프로젝트에 원래 있던 문제로 사용자 요청 범위를 넘는 수정을 요구하지 않도록
+    적용 전/후를 비교한다. 매니페스트(package.json·requirements)가 있는 폴더만 본다.
+    """
+    try:
+        from build_readiness import analyze
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import analyze  # type: ignore
+    folder = (target_folder or "").replace("\\", "/").strip("/")
+    base = root.resolve()
+    if folder and not Path(folder).is_absolute():
+        base = (root / folder).resolve()
+    elif folder:
+        base = Path(folder).resolve()
+    written: dict[str, str] = {}
+    for op in ops:
+        name = str(op.get("file") or "").replace("\\", "/").lstrip("/")
+        parts = [p for p in name.split("/") if p and p not in {".", ".."}]
+        if parts:
+            written["/".join(parts)] = str(op.get("content") or "")
+    manifests = ("package.json", "requirements.txt", "pyproject.toml")
+    projects: set[str] = set()
+    for rel in written:
+        path = posixpath.split(rel)
+        if path[1] in manifests:
+            projects.add(path[0])
+    if any((base / m).is_file() for m in manifests):
+        projects.add("")
+    found: list[dict] = []
+    for project in sorted(projects)[:5]:
+        prefix = f"{project}/" if project else ""
+        overlay = {rel[len(prefix):]: content for rel, content in written.items() if rel.startswith(prefix)}
+        try:
+            before = {(i.code, i.message) for i in analyze(base / project, dockerfile=None).issues}
+            after = analyze(base / project, overlay, dockerfile="Dockerfile" if "Dockerfile" in overlay else None)
+        except Exception as exc:  # noqa: BLE001 - 점검 실패가 생성을 막지 않는다
+            print(f"[code_agent] 일관성 점검 생략: {exc}", flush=True)
+            continue
+        for issue in after.issues:
+            if (issue.code, issue.message) in before or issue.code == "DOCKERIGNORE_MISSING":
+                continue
+            item = issue.to_dict()
+            if project:
+                item["message"] = f"[{project}] {item['message']}"
+            found.append(item)
+    return found
+
+
 def generate_code(
     instruction: str,
     session_id: str = "",
@@ -1609,6 +1662,30 @@ def generate_code(
             "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
         )
 
+    # 생성 결과 일관성 — 이 ops 를 적용하면 새로 생기는 빌드·실행 문제(없는 파일을 가리키는
+    # 스크립트, 선언 안 된 패키지 등)를 찾아 한 번 교정을 요청한다. 실기기에서 CRA 설정만 남은
+    # Express 앱이 Docker 빌드에서 막혔다. 교정도 실패하면 결과에 경고로 남긴다.
+    consistency = _consistency_issues(root, target_folder, ops_out)
+    if any(i["severity"] == "error" for i in consistency):
+        fix_prompt = prompt + (
+            "\n\n직전 응답을 그대로 적용하면 다음 문제가 생깁니다:\n"
+            + "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in consistency)
+            + "\n같은 사용자 요청과 승인된 설계를 유지하면서 위 문제만 고친 전체 ops JSON 을 다시 만드세요."
+        )
+        try:
+            retry = get_router().call(
+                LLMRequest(prompt=fix_prompt, json_schema=CODE_OUTPUT_SCHEMA,
+                           max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+                agent="code_agent", operation="generate_code_consistency",
+            )
+            data2, ops2 = parse_code_output(retry.text)
+            remaining = _consistency_issues(root, target_folder, ops2)
+            if sum(i["severity"] == "error" for i in remaining) < sum(i["severity"] == "error" for i in consistency):
+                data, ops_out, llm_resp, consistency = data2, ops2, retry, remaining
+                print(f"[code_agent] 일관성 교정 적용 | 남은 문제 {len(remaining)}개", flush=True)
+        except Exception as exc:  # noqa: BLE001 - 교정 실패는 원래 결과로 물러선다
+            print(f"[code_agent] 일관성 교정 생략: {exc}", flush=True)
+
     # ADR 영속화 — 승인된 결정을 docs/adr 에 구조화 기록으로 남긴다(코드와 동시 산출).
     # 시크릿 검사 '앞'에 넣어야 한다: ADR 본문에도 사용자 요청문이 들어가므로
     # 여기에 키가 섞여 있으면 경고 없이 파일로 굳어버린다.
@@ -1675,8 +1752,12 @@ def generate_code(
         from core.code_removals import annotate_removals
     annotate_removals(ops_out, root, target_folder)
 
+    summary = str(data.get("summary") or "코드를 생성했습니다.").strip()
+    if consistency:
+        summary += "\n\n확인 필요: " + " / ".join(i["message"] for i in consistency[:3])
     result = {
-        "summary": str(data.get("summary") or "코드를 생성했습니다.").strip(),
+        "summary": summary,
+        "consistency_issues": consistency,
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),
         "provider": getattr(llm_resp, "provider", ""),

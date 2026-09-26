@@ -362,7 +362,9 @@ def test_음성대조_AI가_정상이면_폴백_안내가_붙지_않는다(clien
 
     body = _post(client, "/api/deploy/dockerfile", {"workspace_path": workspace}).json()
     assert body["content"] == "FROM node:20-slim\n"
-    assert not (body.get("risk_reasons") or []), "정상인데 폴백 안내가 붙었다"
+    # .dockerignore 생성 안내·빌드 점검 문구는 폴백 안내가 아니다(정상 경로에도 붙을 수 있다).
+    fallback = [r for r in body.get("risk_reasons") or [] if "AI 맞춤" in r or "기본 템플릿" in r]
+    assert not fallback, "정상인데 폴백 안내가 붙었다"
 
 
 # ---------------------------------------------------------------------------

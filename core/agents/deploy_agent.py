@@ -152,9 +152,24 @@ class DeployAgent:
             from agents.ecs_health import _declared_health_path, _runtime_family
             try:
                 runtime = _runtime_family(Path(workspace) / 'Dockerfile')
-                if runtime:
-                    health_path = _declared_health_path(Path(workspace), runtime, health_path) or health_path
-            except (OSError, UnicodeError):
+                declared = _declared_health_path(Path(workspace), runtime, health_path) if runtime else None
+                if declared:
+                    health_path = declared
+                else:
+                    # 헬스 라우트가 없으면 앱이 실제로 200 을 줄 경로("/" 정적 제공, FastAPI /docs)
+                    # 또는 Dockerfile HEALTHCHECK 가 찌르는 경로를 쓴다. 없는 /health 를 찌르면
+                    # 정상 기동한 앱도 "헬스 실패"로 롤백된다(실기기 test temp).
+                    from build_readiness import analyze, _dockerfile_facts
+                    readiness = analyze(workspace)
+                    probe = readiness.probe_path()
+                    dockerfile = Path(workspace) / 'Dockerfile'
+                    checked = _dockerfile_facts(dockerfile.read_text(encoding='utf-8', errors='replace'))['health_path'] \
+                        if dockerfile.is_file() else None
+                    if probe:
+                        health_path = probe
+                    elif checked:
+                        health_path = checked
+            except (OSError, UnicodeError, ImportError):
                 pass
 
         return DeploymentPlan(
