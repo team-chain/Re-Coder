@@ -20,6 +20,7 @@ test('첫 연결이 실패하면 "확인 중"을 풀고 원인을 보여 준 뒤
   const polling = { start() {}, stop() {}, getLastHealth: () => null, poll: async () => null };
   const p = new SidebarProvider(vscode.Uri.file(path.join(__dirname, '..')), {}, core, polling);
   p.postMessage = (type, payload) => messages.push({ type, payload });
+  p._view = { visible: true };
   t.after(() => clearTimeout(p._connectRetryTimer));
   await p.handleMessage({ type: 'webview.ready', payload: { layout: 'workspace' } });
   await delay(50);
@@ -34,6 +35,15 @@ test('첫 연결이 실패하면 "확인 중"을 풀고 원인을 보여 준 뒤
   await delay(20);
   assert.equal(messages.find(m => m.type === 'diagnostics.status').payload.pending, false);
   assert.ok(attempts >= 2);
+});
+
+test('화면이 닫혀 있으면 연결 재시도를 예약하지 않는다', async () => {
+  const core = { ensureRunning: async () => { throw new Error('down'); }, refreshToken: async () => false, coreInstanceKey: () => 'k' };
+  const p = new SidebarProvider(vscode.Uri.file(path.join(__dirname, '..')), {}, core, { start() {}, stop() {}, getLastHealth: () => null, poll: async () => null });
+  p.postMessage = () => {};
+  p.connectAndDiagnose();
+  await delay(30);
+  assert.equal(p._connectRetryTimer, undefined);
 });
 
 test('대상 폴더를 포함한 경로를 돌려받아도 폴더를 두 번 붙이지 않는다 (web/web 방지)', () => {

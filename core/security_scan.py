@@ -39,6 +39,11 @@ except ImportError:  # core/ 가 직접 sys.path 에 있는 실행 환경
         SecurityScanTool,
     )
 
+try:
+    from core.scan_process import named_docker_run, stop_scan_process
+except ImportError:
+    from scan_process import named_docker_run, stop_scan_process
+
 logger = logging.getLogger(__name__)
 
 _SCAN_TIMEOUT = 120   # 초
@@ -373,6 +378,7 @@ class SecurityScanner:
         cmd: list[str], allow_nonzero: bool = False, stdin_data: Optional[bytes] = None,
         timeout: int = _SCAN_TIMEOUT,
     ) -> str:
+        cmd, name = named_docker_run(cmd)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
@@ -384,8 +390,11 @@ class SecurityScanner:
                 proc.communicate(stdin_data), timeout=timeout,
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            await stop_scan_process(proc, name)
             raise RuntimeError(f"Command timed out after {timeout}s: {cmd[0]}")
+        except asyncio.CancelledError:
+            await asyncio.shield(stop_scan_process(proc, name))
+            raise
 
         if proc.returncode != 0 and not allow_nonzero:
             raise RuntimeError(f"{cmd[0]} failed (rc={proc.returncode}): {stderr.decode()[:500]}")

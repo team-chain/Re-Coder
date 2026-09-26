@@ -53,6 +53,12 @@ load_dotenv(_CORE_DIR / ".env")
 
 from singleton import CoreSingleton  # noqa: E402
 from version import VERSION  # noqa: E402
+import aws_client_defaults  # noqa: E402
+
+aws_client_defaults.install()
+import tool_paths  # noqa: E402
+
+tool_paths.augment_path(("docker", "trivy", "hadolint", "gitleaks"))
 from api.middleware.auth import SessionTokenMiddleware  # noqa: E402
 from api.routes import (  # noqa: E402
     health,

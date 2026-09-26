@@ -249,13 +249,20 @@ class BedrockProvider(LLMProvider):
             ) from e
 
         profile = os.getenv("AWS_PROFILE", "").strip()
+        if os.getenv("AWS_ACCESS_KEY_ID", "").strip():
+            # 키(또는 빌린 역할)가 환경에 있으면 그게 현재 연결이다. 프로필을 명시해
+            # 세션을 만들면 키를 무시하고 예전 프로필 계정으로 나간다.
+            profile = ""
         kwargs: dict[str, Any] = {"region_name": self._region}
         if profile:
             kwargs["profile_name"] = profile
 
         try:
             from botocore.config import Config
-            config = Config(connect_timeout=5, read_timeout=45, retries={"mode": "standard", "total_max_attempts": 2})
+            # 코드 생성은 출력이 길어(최대 8K 토큰) 응답 전체가 오기까지 1~2분 걸린다.
+            # 45초면 긴 생성이 매번 읽기 시간 초과로 끊겼다.
+            read_timeout = float(os.getenv("RECODER_AI_TIMEOUT", "") or 150)
+            config = Config(connect_timeout=5, read_timeout=read_timeout, retries={"mode": "standard", "total_max_attempts": 2})
             if profile:
                 # boto3.Session(profile_name=...) 경유가 안전
                 session = boto3.Session(profile_name=profile, region_name=self._region)

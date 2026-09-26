@@ -1,3 +1,4 @@
+import { currentAiProvider } from '../ai/aiKeyEnv';
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -356,6 +357,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.postMessage('core.error', { message });
             this.postMessage('diagnostics.status', { pending: false, error: message });
             this._connectRetryMs = Math.min(this._connectRetryMs ? this._connectRetryMs * 2 : 5000, 60000);
+            //: 화면이 닫혀 있으면 다시 시도하지 않는다 — 보이게 되면 그때 다시 연결한다.
+            if (!this._view?.visible && !this._workspacePanelWebview) { return; }
             this._connectRetryTimer = setTimeout(() => this.connectAndDiagnose(), this._connectRetryMs);
             (this._connectRetryTimer as { unref?: () => void }).unref?.();
         });
@@ -613,7 +616,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._awsHealedFor = key;
         let healed = false;
         const notReady = (k: string) => d[k] !== undefined && d[k] !== 'ready';
-        if (notReady('aws_deploy_ready') || notReady('ai_ready')) {
+        const usesAiKey = this._globalState && this._secrets
+            ? !!(await currentAiProvider({ globalState: this._globalState, secrets: this._secrets }))
+            : false;
+        if (notReady('aws_deploy_ready') || (notReady('ai_ready') && !usesAiKey)) {
             healed = (await this.healAwsConnection('diagnostics')) === 'healed' || healed;
         }
         if (notReady('docker_ready')) {
@@ -714,6 +720,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (!key) { break; }
                 this.postMessage('selfHeal', { key, pending: true, message: '조치 중…' });
                 try {
+                    //: API 키(Claude/ChatGPT)로 AI 를 쓰는 사용자의 AI 문제는 AWS 와 무관하다.
+                    //: 예전에는 AI 자동 조치가 AWS 연결 화면을 띄워 키 문제(크레딧 소진·잘못된 키)를
+                    //: 고칠 길이 없었다.
+                    const aiKeyProvider = key === 'ai_ready' && this._globalState && this._secrets
+                        ? await currentAiProvider({ globalState: this._globalState, secrets: this._secrets })
+                        : '';
+                    if (aiKeyProvider) {
+                        await vscode.commands.executeCommand('recoder.ai.connect', aiKeyProvider);
+                        void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                        break;
+                    }
                     switch (key) {
                         case 'aws_deploy_ready':
                         case 'ai_ready': {  // Bedrock 도 AWS 자격증명을 사용

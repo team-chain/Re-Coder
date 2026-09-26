@@ -24,6 +24,7 @@ import base64
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import time
@@ -456,12 +457,45 @@ class GitHubAgent:
     #: 스테이징 전 내용 검사를 하는 파일 크기 상한(바이트). 더 큰 파일은 이름 규칙만 본다.
     _SECRET_SCAN_MAX_BYTES = 512 * 1024
 
+    #: 저장소에 올리는 게 정상인 설정 견본 — 이름만 보고 빼면 새 저장소의 첫 커밋이 비었다.
+    _GIT_TEMPLATE_NAMES = re.compile(r"^\.env\.(example|sample|template|dist|defaults)$", re.IGNORECASE)
+    #: 내용을 봐야 판단되는 이름 — 비밀이 들어 있을 때만 뺀다.
+    _GIT_CONTENT_RULES = {
+        ".npmrc": re.compile(r"_authToken|_auth\s*=|:_password\s*=", re.IGNORECASE),
+        ".pem": re.compile(r"PRIVATE KEY-----"),
+        ".key": re.compile(r"PRIVATE KEY-----"),
+    }
+
+    def _git_path_is_sensitive(self, ws: Path, rel: str, untracked: bool, is_sensitive_key, scan_text_for_secrets) -> bool:
+        name = rel.rsplit("/", 1)[-1]
+        if self._GIT_TEMPLATE_NAMES.match(name):
+            return False
+        text: Optional[str] = None
+        target = ws / rel
+        try:
+            if target.is_file() and target.stat().st_size <= self._SECRET_SCAN_MAX_BYTES:
+                text = target.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            text = None
+        lowered = name.lower()
+        for suffix, rule in self._GIT_CONTENT_RULES.items():
+            if lowered == suffix or lowered.endswith(suffix):
+                return bool(text and rule.search(text)) if text is not None else untracked
+        #: 이름 규칙은 **새 파일**에만 적용한다. 이미 저장소가 추적하는 파일은 사용자가
+        #: 올리기로 한 것이므로, 내용에 진짜 키가 보일 때만 뺀다(예전 `git add -A` 와 같게).
+        if untracked and is_sensitive_key(rel):
+            return True
+        if text:
+            return any(f.get("severity") in ("critical", "high") for f in scan_text_for_secrets(text, rel))
+        return False
+
     def _stage_safely(self, ws: Path) -> list[str]:
         """`git add -A` 대신 — 민감한 이름(.env·키·자격증명)이나 시크릿이 보이는 파일은 빼고 stage.
 
         예전에는 푸시·저장소 생성이 `git add -A` 로 추적 안 된 파일을 전부 커밋해서,
         .gitignore 에 없는 `.env.production`·`id_ed25519`·`credentials.json` 까지 올라갔다.
-        제외한 경로 목록을 돌려준다(내용은 돌려주지 않는다).
+        제외한 경로 목록을 돌려준다(내용은 돌려주지 않는다). stage 자체가 실패하면
+        RuntimeError — 일부만 올라간 채 "푸시 성공"으로 보이면 안 된다.
         """
         try:
             from s3_byo import is_sensitive_key  # type: ignore
@@ -470,15 +504,15 @@ class GitHubAgent:
             from core.s3_byo import is_sensitive_key  # type: ignore
             from core.security_scan import scan_text_for_secrets  # type: ignore
         #: _git 은 출력 앞뒤 공백을 잘라 첫 항목의 상태 열(" D")이 깨진다 — 여기서는 원문을 쓴다.
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            proc = subprocess.run(["git", "status", "--porcelain", "-z", "--untracked-files=all"],
+            proc = subprocess.run(["git", "-c", "core.quotepath=false", "status", "--porcelain", "-z", "--untracked-files=all"],
                                   cwd=str(ws), capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=60,
-                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except (OSError, subprocess.SubprocessError):
-            return []
+                                  errors="replace", timeout=60, creationflags=flags)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"변경 파일 목록을 읽지 못했습니다: {exc}") from exc
         if proc.returncode != 0:
-            return []
+            raise RuntimeError(f"변경 파일 목록을 읽지 못했습니다: {(proc.stderr or '').strip()[:300]}")
         entries = proc.stdout.split("\0")
         to_add: list[str] = []
         excluded: list[str] = []
@@ -492,19 +526,33 @@ class GitHubAgent:
             if status[0] in "RC":
                 i += 1  # 이름 변경의 원래 경로
             deleted = "D" in status
-            unsafe = not deleted and is_sensitive_key(rel)
-            if not unsafe and not deleted:
-                target = ws / rel
-                try:
-                    if target.is_file() and target.stat().st_size <= self._SECRET_SCAN_MAX_BYTES:
-                        text = target.read_text(encoding="utf-8", errors="ignore")
-                        unsafe = bool(scan_text_for_secrets(text, rel))
-                except OSError:
-                    pass
+            unsafe = not deleted and self._git_path_is_sensitive(
+                ws, rel, status == "??", is_sensitive_key, scan_text_for_secrets)
             (excluded if unsafe else to_add).append(rel)
-        for start in range(0, len(to_add), 100):
-            self._git(ws, ["add", "-A", "--", *to_add[start:start + 100]])
+        if not to_add:
+            return excluded
+        #: 경로는 표준입력(NUL 구분)으로 넘긴다 — 명령줄 길이 제한(Windows)과 `:memo.txt`
+        #: 같은 이름이 pathspec 문법으로 읽혀 한 묶음 전체가 빠지던 문제를 피한다.
+        payload = "\0".join(to_add) + "\0"
+        try:
+            added = subprocess.run(["git", "--literal-pathspecs", "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                                   cwd=str(ws), input=payload, capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=300, creationflags=flags)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"변경 파일을 stage 하지 못했습니다: {exc}") from exc
+        if added.returncode != 0 and "pathspec-from-file" in (added.stderr or ""):
+            # git 2.26 미만 — 묶음으로 나눠 명령줄로 넘긴다.
+            for start in range(0, len(to_add), 100):
+                rc, _, err = self._git(ws, ["--literal-pathspecs", "add", "-A", "--", *to_add[start:start + 100]])
+                if rc != 0:
+                    raise RuntimeError(f"변경 파일을 stage 하지 못했습니다: {err[:300]}")
+        elif added.returncode != 0:
+            raise RuntimeError(f"변경 파일을 stage 하지 못했습니다: {(added.stderr or '').strip()[:300]}")
         return excluded
+
+    def _has_staged_changes(self, ws: Path) -> bool:
+        rc, _, _ = self._git(ws, ["diff", "--cached", "--quiet"])
+        return rc == 1
 
     def repo_create_and_push(
         self,
@@ -573,10 +621,16 @@ class GitHubAgent:
         rc, _, _ = self._git(ws, ["rev-parse", "HEAD"])
         if rc != 0:
             # add + commit — 민감한 파일은 빼고
-            excluded_initial = self._stage_safely(ws)
-            rc2, _, err2 = self._git(ws, ["commit", "-m", "Initial commit by ReCoder"])
-            if rc2 != 0 and "nothing to commit" not in err2:
-                return {"status": "error", "message": f"초기 커밋 실패: {err2}"}
+            try:
+                excluded_initial = self._stage_safely(ws)
+            except RuntimeError as exc:
+                return {"status": "error", "message": str(exc)}
+            if not self._has_staged_changes(ws):
+                note = (f" 비밀값이 보여 제외한 파일: {', '.join(excluded_initial[:10])}" if excluded_initial else "")
+                return {"status": "error", "message": "첫 커밋에 올릴 파일이 없습니다." + note, "excluded_files": excluded_initial}
+            rc2, out2, err2 = self._git(ws, ["commit", "-m", "Initial commit by ReCoder"])
+            if rc2 != 0:
+                return {"status": "error", "message": f"초기 커밋 실패: {(err2 or out2)[:300]}"}
 
         # 6. 현재 브랜치를 default_branch 로 정렬
         rc, cur, _ = self._git(ws, ["branch", "--show-current"])
@@ -662,13 +716,19 @@ class GitHubAgent:
                 rc_e, email_out, _ = self._git(ws, ["config", "user.email"])
                 if rc_e != 0 or not email_out.strip():
                     self._git(ws, ["config", "user.email", "recoder@local"])
-                excluded_files = self._stage_safely(ws)
-                msg = commit_message or "chore(recoder): CI/CD workflow & changes"
-                rc_c, _, err_c = self._git(ws, ["commit", "-m", msg])
-                if rc_c == 0:
-                    committed = True
-                elif "nothing to commit" not in err_c:
-                    return {"status": "error", "message": f"커밋 실패: {err_c[:300]}"}
+                try:
+                    excluded_files = self._stage_safely(ws)
+                except RuntimeError as exc:
+                    return {"status": "error", "message": str(exc)}
+                #: 올릴 변경이 전부 제외됐으면 커밋 없이 기존 커밋만 푸시한다. 예전에는
+                #: git 이 stdout 에만 "nothing added to commit" 을 써서 빈 "커밋 실패:" 로 막혔다.
+                if self._has_staged_changes(ws):
+                    msg = commit_message or "chore(recoder): CI/CD workflow & changes"
+                    rc_c, out_c, err_c = self._git(ws, ["commit", "-m", msg])
+                    if rc_c == 0:
+                        committed = True
+                    elif "nothing to commit" not in f"{out_c}\n{err_c}":
+                        return {"status": "error", "message": f"커밋 실패: {(err_c or out_c)[:300]}"}
 
         # 원래 origin URL 보존
         rc, original_url, _ = self._git(ws, ["remote", "get-url", "origin"])

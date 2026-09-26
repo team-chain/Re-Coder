@@ -85,7 +85,7 @@ class ApiKeyProvider(LLMProvider):
         self._provider = provider
         self._key = os.environ.get(f"RECODER_{provider.upper()}_API_KEY", "").strip()
         self._endpoint = os.environ.get(f"RECODER_{provider.upper()}_BASE_URL", "").strip() or ENDPOINTS[provider]
-        self._timeout = float(os.environ.get("RECODER_AI_TIMEOUT", "120"))
+        self._timeout = float(os.environ.get("RECODER_AI_TIMEOUT", "") or "150")
         self.model_id = model_id or model_for(provider)
         self._model_id = self.model_id
         self._ctx = _ssl_context()
@@ -124,7 +124,14 @@ class ApiKeyProvider(LLMProvider):
         message = message.replace(self._key, "***") if self._key else message
         code = str(err.get("code") or err.get("type") or "")
         label = LABELS[self._provider]
-        if e.code in (401, 403):
+        lowered = f"{message} {code}".lower()
+        # 크레딧 소진은 제공자마다 코드가 다르다 — Anthropic 400 "credit balance is too low",
+        # OpenAI 429 insufficient_quota, 일부 게이트웨이 402. 전부 "결제·한도" 로 모은다.
+        if e.code == 402 or any(t in lowered for t in ("credit balance", "insufficient_quota", "billing", "exceeded your current quota")):
+            return LLMError(f"{label} 크레딧·사용 한도가 부족합니다. {label} 콘솔에서 결제·한도를 확인하세요: {message}",
+                            LLMErrorType.QUOTA_EXCEEDED, False)
+        # Gemini 는 잘못된 키를 400 "API key not valid" 로 돌려준다.
+        if e.code in (401, 403) or (e.code == 400 and ("api key not valid" in lowered or "api_key_invalid" in lowered)):
             return LLMError(f"{label} 키가 거부되었습니다({e.code}). 키를 다시 입력하세요.", LLMErrorType.ACCESS_DENIED, False)
         if e.code == 429:
             if "insufficient_quota" in code or "credit" in message.lower() or "billing" in message.lower():

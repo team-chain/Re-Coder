@@ -87,7 +87,7 @@ def test_모르는_원문은_unknown_이지만_첫_줄을_남긴다() -> None:
 def test_code_를_주면_분류를_건너뛴다() -> None:
     f = scan_failure.classify(NO_SUCH_IMAGE, code=scan_failure.TIMEOUT)
     assert f.reason_code == scan_failure.TIMEOUT
-    assert "300초" in f.cause
+    assert "제한 시간" in f.cause
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +224,22 @@ def test_이미지를_지정하지_않은_검사는_배포_계획과_같은_이�
     r = _run(deploy._execute_scan("trivy", str(ws), None))
     assert seen == [deploy._default_image_name(str(ws))]
     assert r["target"] == seen[0] and seen[0].endswith(":latest") and "테스트" not in seen[0]
+
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("text,expected", [
+    # 스캐너 이미지를 처음 받을 때의 정상 안내 줄 + 네트워크 실패 → 사용자 이미지 문제가 아니다
+    ("Unable to find image 'aquasec/trivy:0.58.1' locally\ndocker: Error response from daemon: Get \"https://registry-1.docker.io/v2/\": "
+     "dial tcp: lookup registry-1.docker.io: Temporary failure in name resolution.", "scanner_pull_failed"),
+    # 스캐너는 잘 받았고 사용자 이미지가 없다
+    ("Unable to find image 'aquasec/trivy:0.58.1' locally\n0.58.1: Pulling from aquasec/trivy\nStatus: Downloaded newer image for aquasec/trivy:0.58.1\n"
+     "FATAL image scan error: unable to find the specified image \"app:latest\": No such image: app:latest", "image_not_found"),
+    # 취약점 DB 다운로드가 프록시에서 거절 — Docker 가 꺼졌다고 안내하면 안 된다
+    ("FATAL init error: DB error: failed to download vulnerability DB: dial tcp 1.2.3.4:443: connect: connection refused", "scanner_pull_failed"),
+    ("docker: Error response from daemon: pull access denied for aquasec/trivy, repository does not exist", "scanner_pull_failed"),
+])
+def test_스캐너_이미지_받기와_사용자_이미지_없음을_구분한다(text, expected):
+    from scan_failure import classify
+    assert classify(text).reason_code == expected

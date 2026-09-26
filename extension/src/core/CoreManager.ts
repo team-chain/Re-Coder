@@ -398,6 +398,7 @@ export class CoreManager {
 
     /** 명시적 재시작은 다른 창이 시작한 공유 Core에도 적용한다. */
     async restart(): Promise<CoreClient> {
+        this._declinedOrphanPid = null;
         if (this.restartPromise) { return this.restartPromise; }
         this.restartPromise = this.restartCore(this.ensurePromise);
         try {
@@ -483,6 +484,8 @@ export class CoreManager {
         }
     }
 
+    private _declinedOrphanPid: number | null = null;
+
     /** core.lock 의 PID 가 살아 있는 ReCoder Core 프로세스면 그 PID. */
     private orphanCorePid(): number | null {
         try {
@@ -492,7 +495,8 @@ export class CoreManager {
             const described = process.platform === 'win32'
                 ? cp.execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: 'utf-8', windowsHide: true, timeout: 5000 })
                 : cp.execSync(`ps -p ${pid} -o args=`, { encoding: 'utf-8', timeout: 5000 });
-            return /recoder-core|core[\\/]main\.py|\bmain\.py\b/i.test(described) ? pid : null;
+            //: 이름이 ReCoder Core 인 프로세스만 — 아무 `python main.py` 나 종료하자고 묻지 않는다.
+            return /recoder-core|core[\\/]main\.py/i.test(described) ? pid : null;
         } catch {
             return null;
         }
@@ -502,11 +506,13 @@ export class CoreManager {
     private async recoverOrphanCore(): Promise<boolean> {
         const pid = this.orphanCorePid();
         if (!pid) { return false; }
+        //: 한 번 거절한 프로세스는 자동 재시도 때마다 다시 묻지 않는다(명시적 재시작은 다시 묻는다).
+        if (this._declinedOrphanPid === pid) { return false; }
         const action = '종료 후 다시 시작';
         const choice = await vscode.window.showWarningMessage?.(
             '이전 ReCoder Core가 연결 정보 없이 실행 중입니다(확장 업데이트나 창 강제 종료 뒤 남은 프로세스). 종료하고 새로 시작할까요?',
             { modal: true }, action);
-        if (choice !== action) { return false; }
+        if (choice !== action) { this._declinedOrphanPid = pid; return false; }
         const log = this.createProcessLog();
         log.setPid(pid);
         log.event('orphan core termination requested by user');

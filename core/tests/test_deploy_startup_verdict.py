@@ -62,3 +62,36 @@ def test_background_verification_updates_pending_record(monkeypatch,verdict,expe
     monkeypatch.setattr(d,'_save_records',lambda:None)
     asyncio.run(d._update_rollback_candidate_after_verification(SimpleNamespace(deployment_id=record.deployment_id,status=verdict)))
     assert record.status==expected and record.rollback_eligible==(verdict=='stable')
+
+
+@pytest.mark.parametrize('scan,expected',[
+    ({'status':'not_run','summary':'확인하지 못했습니다 — 스캐너 이미지 또는 취약점 DB 를 내려받지 못했습니다.'},'unverified'),
+    ({'status':'ok','critical_count':0,'high_count':2},'passed'),
+])
+def test_result_reports_post_build_scan_state(monkeypatch,scan,expected):
+    from schemas import ApprovalLevel
+    plan=DeploymentPlan(method=DeployMethod.LOCAL_DOCKER,action=ActionType.DOCKER_RUN,image='fixture:v2',container_name='fixture',ports={'18118':'3000'},enable_continuous_verification=False,approval_level=ApprovalLevel.DOUBLE_CONFIRM)
+    monkeypatch.setattr(d,'_deployment_plans',{plan.plan_id:plan})
+    monkeypatch.setattr(d,'_deployment_records',{})
+    monkeypatch.setattr(d,'_plans_pending_image_scan',{plan.plan_id:plan.image})
+    monkeypatch.setattr(d,'_plan_workspaces',{})
+    monkeypatch.setattr(d,'_container_locks',{})
+    monkeypatch.setattr(d,'_refresh_rollback_target',lambda _:(None,'none'))
+    monkeypatch.setattr(d,'_rollback_source_for',lambda *args:None)
+    monkeypatch.setattr(d,'_save_records',lambda:None)
+    async def nothing(*args):return None
+    async def healthy(*args):return True
+    async def image_id(image):return image
+    async def run_scan(*args):return scan
+    async def prune(*args):return []
+    for name in ['_build_local_image','_stop_prior_verifications_for_container','_remove_existing_local_container','_pin_rollback_image','_running_image_id','_local_startup_failure']:
+        monkeypatch.setattr(d,name,nothing)
+    monkeypatch.setattr(d,'_verify_rollback_candidate_health',healthy)
+    monkeypatch.setattr(d,'_local_image_id',image_id)
+    monkeypatch.setattr(d,'_execute_scan',run_scan)
+    monkeypatch.setattr(d,'_prune_old_rollback_pins',prune)
+    monkeypatch.setattr(d.subprocess,'run',lambda cmd,**kwargs:subprocess.CompletedProcess(cmd,0,'container-id',''))
+    result=asyncio.run(d.execute_deployment(d.ExecuteRequest(plan_id=plan.plan_id,approved=True)))
+    assert result['security_scan']['status']==expected
+    if expected=='unverified':assert '내려받지' in result['security_scan']['reason']
+    else:assert result['security_scan']['high_count']==2

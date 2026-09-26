@@ -25,6 +25,7 @@ import { ReCoderPanel } from './sidebar/ReCoderPanel';
 import { migrateActivityBar, restoreRecoderViews, chooseSidebarLocation } from './sidebar/activityBar';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
+import { bridgeEnabled } from './bridge/bridgeEnabled';
 import { BridgeClient } from './bridge/BridgeClient';
 import { runEnrollCommand } from './gateway/enroll';
 
@@ -54,7 +55,7 @@ export function activate(context: vscode.ExtensionContext): void {
     //: 파일을 쓸 수 있었다(보안 검토).
     let activeBridge = new BridgeClient(context);
     context.subscriptions.push(activeBridge);
-    if (vscode.workspace.getConfiguration('recoder.bridge').get<boolean>('enabled', false)) {
+    if (bridgeEnabled(vscode.workspace.getConfiguration('recoder.bridge'))) {
         activeBridge.connect();
     }
 
@@ -379,6 +380,8 @@ export function activate(context: vscode.ExtensionContext): void {
             );
             if (confirm !== '삭제') { return; }
             await coreManager.clearAwsCredentials();
+            // 남이 띄운(공유) Core 는 restart 로 죽지 않으니 Core API 로도 해제한다.
+            try { await apiClient.clearAws(); } catch { /* Core 가 없으면 재시작이 처리 */ }
             await coreManager.restart();
             vscode.window.showInformationMessage('AWS 자격증명 삭제 완료');
             sidebarProvider.triggerDiagnostics();

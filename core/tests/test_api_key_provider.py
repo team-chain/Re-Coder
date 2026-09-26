@@ -216,3 +216,24 @@ def test_ai_ready_diagnostics_ping_the_selected_provider(env):
         assert status == first_run.ReadyStatus.FAIL and provider == "anthropic"
     finally:
         bad.close()
+
+
+@pytest.mark.parametrize("provider,status,payload", [
+    ("anthropic", 400, {"type": "error", "error": {"type": "invalid_request_error",
+                                                   "message": "Your credit balance is too low to access the Anthropic API."}}),
+    ("openai", 429, {"error": {"code": "insufficient_quota", "message": "You exceeded your current quota."}}),
+    ("openai", 402, {"error": {"message": "Payment required"}}),
+])
+def test_credit_exhaustion_is_reported_as_quota_not_bad_request(env, provider, status, payload):
+    from llm.failure import public_ai_failure_reason
+    server = _Server(lambda body, n: (status, payload))
+    try:
+        _use(env, provider, server)
+        with pytest.raises(LLMError) as err:
+            akp.ApiKeyProvider(provider).ping()
+        assert err.value.error_type == LLMErrorType.QUOTA_EXCEEDED and not err.value.retryable
+        assert "크레딧" in str(err.value)
+        assert "크레딧" in public_ai_failure_reason(err.value)
+        assert len(server.requests) == 1
+    finally:
+        server.close()

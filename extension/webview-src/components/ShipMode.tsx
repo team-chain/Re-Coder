@@ -215,7 +215,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
-  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean } } | null>(null);
+  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean }; security_scan?: { status?: string; high_count?: number; reason?: string } } | null>(null);
   //: 배포 뒤 감시(연속 검증) 스냅샷과 롤백 결과 — 로컬 Docker 배포의 D1~D4.
   //: 예전엔 코어가 감시하고 롤백 후보를 관리해도 사이드바 어디에도 표시·승인 UI 가 없었다.
   const [watch, setWatch] = useState<VerificationSnapshot | null | "none">(null);
@@ -366,6 +366,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           stderr?: string; stdout?: string; restored_previous?: boolean; restore_stderr?: string;
           health_ok?: boolean; health_check_url?: string; rollback_target?: string | null;
           continuous_verification?: { enabled?: boolean; started?: boolean };
+          security_scan?: { status?: string; high_count?: number; reason?: string };
         };
         activeDeploymentRef.current = r.deployment_id;
         watchIdRef.current = r.deployment_id;
@@ -823,6 +824,18 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         <ReadinessPanel issues={readinessIssues} onFix={handleFixReadiness} onFixAll={handleFixAllReadiness} fixing={fixing} notice={fixNotice} />
       )}
 
+      {/* ── 빌드 후 보안 검사를 못 한 채 진행된 배포 ── */}
+      {step === "done" && deployResult?.security_scan?.status === "unverified" && (
+        <div data-testid="post-build-scan-unverified" style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "8px 10px", color: "#f59e0b", fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
+          빌드된 이미지의 보안 검사(Trivy)를 완료하지 못한 채 배포됐습니다.
+          {deployResult.security_scan.reason ? ` ${deployResult.security_scan.reason}` : ""} 네트워크·Docker 상태를 확인한 뒤 다시 배포해 검사를 통과시키세요.
+        </div>
+      )}
+      {step === "done" && deployResult?.security_scan?.status === "passed" && (deployResult.security_scan.high_count ?? 0) > 0 && (
+        <div style={{ color: "#e3b261", fontSize: 11, marginBottom: 8 }}>
+          보안 검사 통과 — CRITICAL 없음, HIGH {deployResult.security_scan.high_count}건은 경고로 남았습니다.
+        </div>
+      )}
       {/* ── Done banner ── */}
       {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deploymentHealthVerdict(deployResult, watch) !== "healthy" ? (
         //: docker run 은 됐지만 헬스 확인은 실패 — "통과" 로 칠하지 않는다.

@@ -77,3 +77,30 @@ test('연결 정보 없이 남은 이전 Core 는 사용자 확인 후 종료하
   assert.equal(orphan.exitCode !== null || orphan.signalCode !== null, true, 'orphan terminated');
   assert.equal((await m.healthCheck()).status, 'ok');
 });
+
+test('이전 Core 종료를 거절하면 자동 재시도 때 다시 묻지 않고, 명시적 재시작 때는 다시 묻는다', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-orphan-no-'));
+  const orphan = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)', 'recoder-core'], { stdio: 'ignore' });
+  const unrelated = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)', 'main.py'], { stdio: 'ignore' });
+  t.after(() => { for (const p of [orphan, unrelated]) { try { p.kill('SIGKILL'); } catch { /* gone */ } } fs.rmSync(dir, { recursive: true, force: true }); });
+  const output = { exports: {} };
+  const localRequire = createRequire(compiled);
+  const asked = [];
+  const vscode = { ExtensionMode: { Production: 1, Development: 2, Test: 3 },
+    window: { showInformationMessage() {}, showWarningMessage: async (msg) => { asked.push(msg); return undefined; } },
+    workspace: { workspaceFolders: [] } };
+  vm.runInNewContext(fs.readFileSync(compiled, 'utf8'), { module: output, exports: output.exports,
+    require: id => id === 'vscode' ? vscode : localRequire(id), process, console, fetch, AbortController, setTimeout, clearTimeout }, { filename: compiled });
+  const m = new output.exports.CoreManager({ extensionMode: 1, extensionPath: path.dirname(compiled) });
+  m._lockPath = path.join(dir, 'core.lock');
+  fs.writeFileSync(m._lockPath, JSON.stringify({ pid: orphan.pid }));
+  assert.equal(await m.recoverOrphanCore(), false);
+  assert.equal(await m.recoverOrphanCore(), false);
+  assert.equal(asked.length, 1, '거절한 뒤 다시 묻지 않는다');
+  m._declinedOrphanPid = null;   // restart() 가 하는 일
+  assert.equal(await m.recoverOrphanCore(), false);
+  assert.equal(asked.length, 2);
+  //: 이름이 ReCoder Core 가 아닌 `python main.py` 같은 프로세스는 종료하자고 묻지 않는다.
+  fs.writeFileSync(m._lockPath, JSON.stringify({ pid: unrelated.pid }));
+  assert.equal(m.orphanCorePid(), null);
+});

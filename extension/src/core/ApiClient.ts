@@ -23,6 +23,7 @@ import {
 } from '../types';
 import { CoreManager } from './CoreManager';
 import { describeHttpError, parseHttpErrorDetail, CoreHttpError } from './httpError';
+import { FETCH_HEADERS_LIMIT_MS, longHttpFetch } from './longHttp';
 
 /** 인프라 파일(Dockerfile 등) 승인 결과. `exists` 는 "안 썼다 — 기존 파일과 다르다" 이다. */
 export interface InfraApprovalResult {
@@ -260,12 +261,13 @@ export class ApiClient {
         const timerId = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
-            const res = await fetch(url, {
+            const init = {
                 method,
                 headers,
                 body: body !== undefined ? JSON.stringify(body) : undefined,
                 signal: controller.signal,
-            });
+            };
+            const res = timeoutMs > FETCH_HEADERS_LIMIT_MS ? await longHttpFetch(url, init) : await fetch(url, init);
 
             const timestamp = new Date().toISOString();
 
@@ -377,7 +379,7 @@ export class ApiClient {
             decisions: opts?.decisions ?? [],
         };
         // Full-file output and one schema correction can take two model calls.
-        const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 180000);
+        const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 480000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '코드 생성 실패'); }
         return resp.data;
     }
@@ -403,7 +405,7 @@ export class ApiClient {
             context_files: opts?.contextFiles ?? [],
             target_folder: opts?.targetFolder ?? '',
         };
-        const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 120000);
+        const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 240000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설계 결정 생성 실패'); }
         return resp.data;
     }
@@ -412,7 +414,7 @@ export class ApiClient {
         const resp = await this.request<DeployPreflightResult>('POST', '/api/deploy/preflight', {
             workspace_path: workspacePath,
             target,
-        });
+        }, false, 90000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
         return resp.data;
     }
@@ -427,7 +429,7 @@ export class ApiClient {
     /** 사용자가 누른 자동 수정 한 건. 원본은 프로젝트의 .recoder/backups 에 남는다. */
     async fixBuildReadiness(workspacePath: string, code: string): Promise<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }> {
         const resp = await this.request<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }>(
-            'POST', '/api/deploy/readiness/fix', { workspace_path: workspacePath, code });
+            'POST', '/api/deploy/readiness/fix', { workspace_path: workspacePath, code }, false, 120000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '자동 수정 실패'); }
         return resp.data;
     }
@@ -516,7 +518,8 @@ export class ApiClient {
     async generateDockerfile(workspacePath: string, projectId?: string): Promise<InfraFileProposal> {
         const resp = await this.request<InfraFileProposal>(
             'POST', '/api/deploy/dockerfile',
-            { workspace_path: workspacePath, project_id: projectId }
+            { workspace_path: workspacePath, project_id: projectId },
+            false, 180000,  // AI 로 Dockerfile 을 만들 때 30초로는 끊겼다
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Dockerfile 생성 실패'); }
         return resp.data;
@@ -531,7 +534,8 @@ export class ApiClient {
     async generateCompose(workspacePath: string, projectId?: string): Promise<InfraFileProposal> {
         const resp = await this.request<InfraFileProposal>(
             'POST', '/api/deploy/compose',
-            { workspace_path: workspacePath, project_id: projectId }
+            { workspace_path: workspacePath, project_id: projectId },
+            false, 180000,
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'docker-compose.yml 생성 실패'); }
         return resp.data;
@@ -634,13 +638,13 @@ export class ApiClient {
         targetPath?: string
     ): Promise<object> {
         //: 기본 30초로는 부족하다 — 코어가 Docker Desktop 자동 시작(최대 75초,
-        //: docker_autostart)을 기다린 뒤 스캔(코어 상한 300초)을 돌리므로,
+        //: docker_autostart)을 기다린 뒤 스캔(코어 상한 450초)을 돌리므로,
         //: 그 합보다 길게 잡는다. 짧으면 코어는 정상 진행 중인데 화면만
         //: "스캔 실패"로 보이는 거짓 실패가 난다.
         const resp = await this.request<object>(
             'POST', '/api/deploy/scan',
             { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath },
-            false, 480000  // Docker 자동 시작(정리 45초 + 대기 120초) + 스캔 상한 300초
+            false, 660000  // Docker 자동 시작(정리 45초 + 대기 120초) + 스캔 상한 450초
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? `${scanType} 스캔 요청 실패`); }
         return resp.data;
@@ -1007,7 +1011,7 @@ export class ApiClient {
                 task_execution_role: deploymentContext.taskExecutionRole ?? '',
                 task_role: deploymentContext.taskRole ?? '',
             } : undefined,
-        });
+        }, false, 120000);  // IAM 시뮬레이션 여러 건 + AWS 재시도
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 권한 점검 실패');
         }
@@ -1044,7 +1048,7 @@ export class ApiClient {
             secret_access_key: creds.secretAccessKey,
             region: creds.region ?? '',
             session_token: creds.sessionToken ?? '',
-        });
+        }, false, 90000);
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 자격증명 검증 실패');
         }
@@ -1061,7 +1065,7 @@ export class ApiClient {
         const resp = await this.request<AwsStatus>('POST', '/api/aws/connect-profile', {
             profile: input.profile,
             region: input.region ?? '',
-        });
+        }, false, 90000);
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 프로필 연결 실패');
         }
@@ -1395,7 +1399,7 @@ export class ApiClient {
         branch?: string;
     }> {
         const resp = await this.request<{ status: string; message?: string; branch?: string }>(
-            'POST', '/api/git/push', req
+            'POST', '/api/git/push', req, false, 200000  // 큰 저장소·느린 망에서 30초로는 끊겼다
         );
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'git push 실패');
@@ -1425,7 +1429,7 @@ export class ApiClient {
         description?: string;
     }): Promise<{ status: string; html_url?: string; message?: string }> {
         const resp = await this.request<{ status: string; html_url?: string; message?: string }>(
-            'POST', '/api/github/repo', req
+            'POST', '/api/github/repo', req, false, 200000
         );
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? '레포 생성 실패');

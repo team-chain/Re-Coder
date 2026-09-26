@@ -49,8 +49,10 @@ except ImportError:  # pragma: no cover — fall back when imported from a packa
 MASKING_PATTERNS: list[tuple[str, str]] = [
     ("PRIVATE_KEY",     r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
     ("AWS_JSON_SECRET", r'"(?:SecretAccessKey|SessionToken|AccessKeyId|aws_secret_access_key|aws_session_token)"\s*:\s*"[^"]*"'),
-    ("AI_API_KEY",      r"sk-(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,}"),
-    ("DISCORD_TOKEN",   r"[MN][A-Za-z\d_-]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}"),
+    #: 단어 중간의 "sk-"(task-list-…, disk-usage-…)를 키로 가리면 AI 가 받은 코드가 깨진다.
+    #: 앞이 영숫자·-·_ 가 아니고, 뒤에 숫자가 하나는 있어야 키로 본다.
+    ("AI_API_KEY",      r"(?<![A-Za-z0-9_\-])sk-(?=[A-Za-z0-9_\-]*\d)(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,}"),
+    ("DISCORD_TOKEN",   r"\b[MN][A-Za-z\d_-]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}\b"),
     ("AWS_ACCESS_KEY",  r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
     ("AWS_SECRET_KEY",  r"(?i)aws[_\-\s]?secret[_\-\s]?(?:access[_\-\s]?)?key[^=\n]*=[^\n]*"),
     ("API_KEY",         r"(?i)api[_\-\s]?key[^=\n]*=[^\s\n]+"),
@@ -95,7 +97,7 @@ _MASK_PATTERNS = [
     #: Anthropic·OpenAI 키, Discord 봇 토큰.
     ('PRIVATE_KEY',    re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----'), '[MASKED_PRIVATE_KEY]'),
     ('AWS_JSON',       re.compile(r'"(SecretAccessKey|SessionToken|AccessKeyId|aws_secret_access_key|aws_session_token)"\s*:\s*"[^"]*"'), r'"\1": "[MASKED]"'),
-    ('AI_API_KEY',     re.compile(r'\bsk-(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,}'),        '[MASKED_AI_KEY]'),
+    ('AI_API_KEY',     re.compile(r'(?<![A-Za-z0-9_\-])sk-(?=[A-Za-z0-9_\-]*\d)(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,}'), '[MASKED_AI_KEY]'),
     ('DISCORD_TOKEN',  re.compile(r'\b[MN][A-Za-z\d_-]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}\b'), '[MASKED_DISCORD_TOKEN]'),
     ('AWS_ACCESS_KEY', re.compile(r'(?:AKIA|ASIA)[0-9A-Z]{16}'),               '[MASKED_AWS_KEY]'),
     ('AWS_SECRET',     re.compile(r'(?i)aws_secret_access_key\s*=\s*\S+'),   'aws_secret_access_key=[MASKED]'),

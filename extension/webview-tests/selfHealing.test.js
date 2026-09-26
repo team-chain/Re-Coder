@@ -58,7 +58,9 @@ test('② 진단 X → 자동 조치 → 재진단, 인스턴스당 한 번', ()
   const fn = block(HOST, 'private async _selfHealFromDiagnostics(', '    private async handleMessage(');
   assert.match(fn, /coreInstanceKey\(\)/);
   assert.match(fn, /this\._awsHealedFor === key\) \{ return false; \}/, '인스턴스당 1회 가드가 없다');
-  assert.match(fn, /notReady\('aws_deploy_ready'\) \|\| notReady\('ai_ready'\)/);
+  assert.match(fn, /notReady\('aws_deploy_ready'\) \|\| \(notReady\('ai_ready'\) && !usesAiKey\)/);
+  //: API 키로 AI 를 쓰는 사용자의 AI 문제는 AWS 로 고치지 않는다
+  assert.match(fn, /usesAiKey = [\s\S]*currentAiProvider/);
   assert.match(fn, /notReady\('docker_ready'\)/);
   const run = block(HOST, 'private async performDiagnostics()', 'triggerDiagnostics()');
   assert.match(run, /_selfHealFromDiagnostics\(/);
@@ -132,4 +134,11 @@ test('③ 코어에 확장 호스트 전용 환경변수(ELECTRON_RUN_AS_NODE)�
   assert.match(MANAGER, /const coreEnv: NodeJS\.ProcessEnv = \{ \.\.\.hostEnv/, 'coreEnv 가 정리된 hostEnv 에서 시작하지 않는다');
   const core = fs.readFileSync(path.join(__dirname, '../../core/docker_autostart.py'), 'utf8');
   assert.match(core, /"ELECTRON_RUN_AS_NODE",/, '코어 쪽 방어가 없다');
+});
+
+test('AI 자동 조치 — API 키 사용자는 AWS 연결이 아니라 AI 키 연결을 연다', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/sidebar/SidebarProvider.ts'), 'utf8');
+  const fix = src.slice(src.indexOf("case 'webview.diagnostics.fix'"), src.indexOf("case 'webview.open.external'"));
+  assert.match(fix, /key === 'ai_ready'[\s\S]*currentAiProvider[\s\S]*executeCommand\('recoder\.ai\.connect', aiKeyProvider\)/);
+  assert.ok(fix.indexOf("recoder.ai.connect") < fix.indexOf("recoder.awsConfigure"));
 });

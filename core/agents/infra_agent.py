@@ -16,7 +16,7 @@ import logging
 import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from schemas import (
     ApprovalLevel,
@@ -159,6 +159,30 @@ Return ONLY the JSON object, no prose.
 # ---------------------------------------------------------------------------
 # InfraAgent
 # ---------------------------------------------------------------------------
+
+
+
+try:
+    from scan_process import named_docker_run as _named_docker_run, stop_scan_process as _stop_scan_process  # noqa: E402
+except ImportError:  # pragma: no cover - 패키지(core.*)로 임포트될 때
+    from core.scan_process import named_docker_run as _named_docker_run, stop_scan_process as _stop_scan_process  # noqa: E402
+
+
+#: Trivy 는 같은 캐시 볼륨을 쓰는 두 번째 실행을 잠금에서 기다리게 한다.
+#: 계획 검사와 빌드 후 검사가 겹치면 둘 다 제한 시간까지 멈췄다 — 한 번에 하나씩.
+_TRIVY_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _trivy_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _TRIVY_LOCKS.get(id(loop))
+    if lock is None:
+        _TRIVY_LOCKS.clear()  # 이전(닫힌) 루프의 잠금은 버린다
+        lock = _TRIVY_LOCKS[id(loop)] = asyncio.Lock()
+    return lock
+
+#: 첫 실행은 취약점 DB(수백 MB) 내려받기로 5분을 넘기기도 한다.
+TRIVY_TIMEOUT_SECONDS = 420
 
 
 class InfraAgent:
@@ -409,7 +433,8 @@ class InfraAgent:
             "--quiet",
             image_name,
         ]
-        returncode, stdout, stderr = await self._run_subprocess(cmd, timeout=300)
+        async with _trivy_lock():
+            returncode, stdout, stderr = await self._run_subprocess(cmd, timeout=TRIVY_TIMEOUT_SECONDS)
 
         if returncode != 0:
             logger.warning("Trivy scan failed (rc=%d): %s", returncode, stderr)
@@ -458,9 +483,12 @@ class InfraAgent:
         content = df_path.read_bytes()
 
         # Pipe content via stdin
-        proc = await asyncio.create_subprocess_exec(
+        hadolint_cmd, name = _named_docker_run([
             "docker", "run", "--rm", "-i", "hadolint/hadolint",
             "hadolint", "--format", "json", "-",
+        ])
+        proc = await asyncio.create_subprocess_exec(
+            *hadolint_cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -468,9 +496,7 @@ class InfraAgent:
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(input=content), timeout=120)
         except (asyncio.TimeoutError, asyncio.CancelledError):
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
+            await asyncio.shield(_stop_scan_process(proc, name))
             raise
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -728,7 +754,14 @@ class InfraAgent:
     async def _run_subprocess(
         cmd: list[str], timeout: int = 300
     ) -> tuple[int, str, str]:
-        """Run a subprocess asynchronously and return (returncode, stdout, stderr)."""
+        """Run a subprocess asynchronously and return (returncode, stdout, stderr).
+
+        ``docker run`` 은 이름을 붙여 띄우고, 시간 초과·취소 때 컨테이너까지 지운다.
+        docker CLI 만 죽이면 스캐너 컨테이너는 계속 돌며 캐시 잠금을 쥐고 있어서,
+        다음 검사가 "cache may be in use" 로 또 멈췄다.
+        """
+        cmd, name = _named_docker_run(cmd)
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -744,10 +777,10 @@ class InfraAgent:
                 stderr_bytes.decode("utf-8", errors="replace"),
             )
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            await _stop_scan_process(proc, name)
             return -1, "", f"Subprocess timed out after {timeout}s"
+        except asyncio.CancelledError:
+            await asyncio.shield(_stop_scan_process(proc, name))
+            raise
         except Exception as exc:
             return -1, "", str(exc)

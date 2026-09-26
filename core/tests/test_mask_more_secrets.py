@@ -22,3 +22,14 @@ def test_새던_형식이_모두_가려진다():
 def test_평범한_코드는_그대로():
     text = "def task():\n    return 'skip-this-step'\n"
     assert mask_secrets(text) == text.strip() or "skip-this-step" in mask_secrets(text)
+
+
+def test_kebab_case_words_containing_sk_are_not_masked():
+    import asyncio
+    import context_gate as cg
+    text = "class task-list-item-checkbox-wrapper and disk-usage-monitor-service; key sk-ant-api03-AbCdEf1234567890xyzXYZ"
+    for masked in (cg.mask_secrets(text), asyncio.run(cg.ContextGate().mask(text))):
+        masked = masked if isinstance(masked, str) else masked.masked_content
+        assert "task-list-item-checkbox-wrapper" in masked
+        assert "disk-usage-monitor-service" in masked
+        assert "AbCdEf1234567890" not in masked

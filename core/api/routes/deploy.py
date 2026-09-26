@@ -46,6 +46,10 @@ from schemas import (
 
 logger = logging.getLogger(__name__)
 
+#: 바깥 제한은 스캐너 자체 제한보다 길어야 한다. 같으면 바깥이 먼저 끊어 컨테이너 정리를
+#: 못 하고, 사용자는 원인 대신 "시간 초과"만 본다.
+_TRIVY_OUTER_TIMEOUT = 450
+
 router = APIRouter(tags=["deploy"])
 
 # ---------------------------------------------------------------------------
@@ -2226,7 +2230,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
                     "findings": [],
                     **_scan_failure.failure_fields(auto.message or "", scan_type=scan_type, target=image, code=code),
                 }
-            raw = await asyncio.wait_for(agent.run_trivy_scan(image), timeout=300)
+            raw = await asyncio.wait_for(agent.run_trivy_scan(image), timeout=_TRIVY_OUTER_TIMEOUT)
             target_for_log = image
         elif scan_type == "hadolint":
             dockerfile = target_path
@@ -3630,9 +3634,19 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         runtime_image = plan.image
         pending_image = _plans_pending_image_scan.get(request.plan_id)
         report_progress('scan', '빌드한 이미지의 보안 검사 상태를 확인합니다')
+        #: 결과 화면이 "검사 통과"와 "검사 못 함(승인하고 진행)"을 구분하게 남긴다.
+        #: 예전에는 검사가 실패해도 성공 결과에 아무 표시가 없었다.
+        post_build_scan: dict = {"status": "not_needed"}
         if pending_image and plan.image:
             runtime_image = await _local_image_id(plan.image)
             deferred_report = await _execute_scan("trivy", "", runtime_image)
+            post_build_scan = {
+                "status": "passed" if deferred_report.get("status") == "ok" else "unverified",
+                "critical_count": int(deferred_report.get("critical_count", 0) or 0),
+                "high_count": int(deferred_report.get("high_count", 0) or 0),
+                **({"reason": deferred_report.get("summary") or deferred_report.get("cause") or deferred_report.get("message") or ""}
+                   if deferred_report.get("status") != "ok" else {}),
+            }
             if deferred_report.get("status") == "ok":
                 deferred_crit = int(deferred_report.get("critical_count", 0))
                 if deferred_crit > 0:
@@ -3928,6 +3942,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 "enabled": bool(cv_enabled),
                 "started": bool(cv_started),
             },
+            "security_scan": post_build_scan,
         }
 
 
