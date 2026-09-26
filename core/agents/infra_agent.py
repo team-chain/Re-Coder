@@ -401,7 +401,9 @@ class InfraAgent:
         cmd = [
             "docker", "run", "--rm",
             "-v", "/var/run/docker.sock:/var/run/docker.sock",
+            "-v", "recoder-trivy-cache:/root/.cache/trivy",
             "aquasec/trivy", "image",
+            "--scanners", "vuln",
             "--format", "json",
             "--severity", "CRITICAL,HIGH",
             "--quiet",
@@ -458,18 +460,28 @@ class InfraAgent:
         # Pipe content via stdin
         proc = await asyncio.create_subprocess_exec(
             "docker", "run", "--rm", "-i", "hadolint/hadolint",
+            "hadolint", "--format", "json", "-",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=content), timeout=120
-        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(input=content), timeout=120)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-        violations = self._parse_hadolint_output(stdout + stderr)
-        if proc.returncode not in (0, 1) or (proc.returncode != 0 and not violations):
+        try:
+            violations = json.loads(stdout)
+        except json.JSONDecodeError:
+            violations = None
+        if (proc.returncode not in (0, 1) or not isinstance(violations, list)
+                or not all(isinstance(v, dict) and 'code' in v and 'line' in v for v in violations)
+                or (proc.returncode != 0 and not violations)):
             return {"success": False, "error": stderr or "Hadolint did not produce a valid report."}
         summary = await self._summarize_scan_results("hadolint", {"violations": violations})
 
@@ -542,24 +554,29 @@ class InfraAgent:
         self, scan_type: str, results: dict[str, Any]
     ) -> str:
         """Summarise scan results using Haiku (threat summary + recommended actions)."""
+        count = (int(results.get('critical_count', 0)) + int(results.get('high_count', 0))
+                 + int(results.get('finding_count', 0)) + len(results.get('violations', [])))
+        fallback = f"{scan_type}: 발견 항목 {count}개."
+        if count == 0:
+            return fallback
         findings_json = json.dumps(results, ensure_ascii=False)[:3000]
         prompt = _SCAN_SUMMARY_PROMPT.format(
             scan_type=scan_type,
             findings=findings_json,
         )
         try:
-            raw = await self._provider.complete(
+            raw = await asyncio.wait_for(self._provider.complete(
                 prompt=prompt,
                 model_preference="haiku",
                 agent="infra_agent",
                 operation="summarize_scan",
                 max_tokens=512,
-            )
+            ), timeout=12)
             parsed = self._extract_json_dict(raw)
             return parsed.get("threat_summary", raw[:300])
         except Exception as exc:
             logger.warning("Scan summary failed: %s", exc)
-            return f"Scan type: {scan_type}. Findings count: {len(str(results))}"
+            return fallback
 
     # ------------------------------------------------------------------
     # Private helpers

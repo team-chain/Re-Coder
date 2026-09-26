@@ -7,6 +7,8 @@ import { ApiClient } from '../core/ApiClient';
 import * as fs from 'fs';
 import { AnalysisJob } from '../codemap/analysisJob';
 import { collectStaticFiles, describeExcludedFiles, pickStaticDir } from '../deploy/staticSite';
+import { CommitPreview, previewCommit, commitSelected } from './githubCommit';
+import { DiscordWebhook } from './discordWebhook';
 
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
@@ -76,7 +78,11 @@ export class CanvasHost {
     private plans = new Map<string, Plan>();
     private executing = false;
     private prepareGeneration = 0;
-    constructor(private api: ApiClient, private readGit = gitContext) {}
+    private commitPreview?: { id: string; workspace: string; preview: CommitPreview };
+    private committing = false;
+    private connecting = false;
+    private discordMode = 'webhook';
+    constructor(private api: ApiClient, private readGit = gitContext, private webhook?: DiscordWebhook) {}
     async handle(type: string, raw: unknown, send: Send, project: (workspace: string) => string, execute: (type: string, payload: unknown) => Promise<void>) {
         const p = (raw ?? {}) as Record<string, unknown>, requestId = String(p.requestId || '');
         const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
@@ -118,7 +124,7 @@ export class CanvasHost {
                 if (config.target === 's3' && p.autoDir === true) config.dir = pickStaticDir(fs.readdirSync(workspace, {withFileTypes:true}).filter(e=>e.isDirectory()).map(e=>e.name));
                 const staticSite = config.target === 's3' ? staticPreview(workspace,config.dir) : undefined;
                 if (staticSite) config.dir = staticSite.dir;
-                const [git,aws,preflight] = await Promise.all([this.readGit(workspace), config.target === 'github' ? Promise.resolve({ready:false,region:'',identity:{account:''}}) : this.api.getAwsStatus(), config.target === 'github' ? Promise.resolve({blocked:false,summary:'승인한 커밋을 푸시하기 전에 시크릿을 검사합니다.',reasons:[],warnings:[]}) : this.api.getDeployPreflight(workspace)]);
+                const [git,aws,preflight] = await Promise.all([this.readGit(workspace), config.target === 'github' ? Promise.resolve({ready:false,region:'',identity:{account:''}}) : this.api.getAwsStatus(), config.target === 'github' ? Promise.resolve({blocked:false,summary:'승인한 커밋을 푸시하기 전에 시크릿을 검사합니다.',reasons:[],warnings:[]}) : this.api.getDeployPreflight(workspace, config.target)]);
                 if (generation !== this.prepareGeneration) return;
                 if (config.target !== 'github' && !aws.ready) throw new Error('AWS 계정을 먼저 연결하세요.');
                 if (config.target === 'github' && (!git.connected || !git.branch)) throw new Error('GitHub 원격 저장소와 브랜치를 연결하세요.');
@@ -135,7 +141,7 @@ export class CanvasHost {
             if (type === 'canvas.execute') {
                 const plan=this.plans.get(String(p.planId));
                 if (p.approved !== true || !plan) throw new Error('승인 카드에서 배포 내용을 다시 확인하세요.');
-                if (this.executing) throw new Error('이미 배포 요청을 처리하고 있습니다.');
+                if (this.executing || this.committing || this.connecting) throw new Error('진행 중인 배포·Git 작업이 끝난 뒤 다시 시도하세요.');
                 this.plans.delete(plan.id);
                 if (plan.workspace!==workspace || Date.now()-plan.created>10*60*1000) throw new Error('프로젝트 또는 승인 유효 시간이 바뀌었습니다. 다시 확인하세요.');
                 this.executing=true;
@@ -148,7 +154,7 @@ export class CanvasHost {
                         if(!aws.ready || (aws.identity?.account || '')!==plan.account) throw new Error('AWS 연결 계정이 바뀌었습니다. 다시 확인하세요.');
                     }
                     if(c.target!=='github') {
-                        const preflight=await this.api.getDeployPreflight(workspace);
+                        const preflight=await this.api.getDeployPreflight(workspace, c.target);
                         if(preflight.blocked) { send('canvas.blocked',{requestId,preflight}); return; }
                     }
                     if(c.target==='ecs') {
@@ -181,6 +187,7 @@ export class CanvasHost {
 
     private async github(type:string,p:Record<string,unknown>,workspace:string,send:Send) {
         const requestId=String(p.requestId||'');
+        let committed = false;
         if (p.workspace !== workspace) throw new Error('프로젝트가 바뀌었습니다. GitHub 패널을 다시 여세요.');
         if (type==='canvas.github.sourceControl') {
             await vscode.commands.executeCommand('workbench.view.scm');
@@ -188,12 +195,34 @@ export class CanvasHost {
             return;
         }
         if (type==='canvas.github.login') await vscode.commands.executeCommand('recoder.githubLogin');
+        if (type==='canvas.github.changes') {
+            const preview = await previewCommit(workspace);
+            const id = randomUUID();
+            this.commitPreview = { id, workspace, preview };
+            const { fingerprint: _, ...visible } = preview;
+            send('canvas.github.result', { requestId, commitPreview: { id, ...visible } });
+            return;
+        }
+        if (type==='canvas.github.commit') {
+            const review = this.commitPreview;
+            if (!review || review.workspace !== workspace || review.id !== p.previewId || p.approved !== true) throw new Error('변경 파일을 먼저 확인하세요.');
+            if (this.committing || this.connecting || this.executing) throw new Error('진행 중인 배포·Git 작업이 끝난 뒤 다시 시도하세요.');
+            this.committing = true;
+            try {
+                const files = Array.isArray(p.files) ? p.files.map(String) : [];
+                committed = await commitSelected(workspace, review.preview, files, String(p.message || ''), String(p.name || ''), String(p.email || ''));
+                this.commitPreview = undefined;
+                this.plans.clear();
+            } finally { this.committing = false; }
+        }
         if (type==='canvas.github.connect') {
+            if (this.committing || this.connecting || this.executing) throw new Error('진행 중인 배포·Git 작업이 끝난 뒤 다시 시도하세요.');
+            this.connecting = true;
+            try {
             const repository=githubRepository(String(p.repository||''));
             const current=await this.readGit(workspace);
             if (current.error) throw new Error(current.error);
-            if (current.hasOrigin && !current.connected) throw new Error('다른 origin이 이미 설정되어 있습니다. 소스 제어에서 확인하세요.');
-            if (current.connected && current.repository!==repository) throw new Error('이미 연결된 origin은 자동으로 바꾸지 않습니다. 소스 제어에서 원격 저장소를 확인하세요.');
+            if (current.hasOrigin && current.repository!==repository && (p.replace!==true || p.previousRepository!==current.repository)) throw new Error('현재 저장소를 확인하고 저장소 변경을 선택하세요.');
             const auth=await this.api.getGithubStatus();
             if(auth.status!=='authenticated') throw new Error(auth.message || 'GitHub에 먼저 로그인하세요.');
             // Creating a private repository never commits or pushes local files.
@@ -203,14 +232,18 @@ export class CanvasHost {
             const run=async(args:string[]) => (await exec('git',['-C',workspace,...args],{timeout:10000,windowsHide:true})).stdout.trim();
             if (!current.initialized) await run(['init','--initial-branch=main']);
             const remote=await run(['remote','get-url','origin']).catch(()=>'');
-            if(remote && !(await this.readGit(workspace)).connected) throw new Error('다른 origin이 이미 설정되어 있습니다. 소스 제어에서 확인하세요.');
-            if(!remote) await run(['remote','add','origin',`https://github.com/${repository}.git`]);
+            if(remote && current.repository!==repository) await run(['remote','set-url','origin',`https://github.com/${repository}.git`]);
+            else if(!remote) await run(['remote','add','origin',`https://github.com/${repository}.git`]);
+            // Push is always explicitly bound to the selected origin and branch.
+            this.commitPreview = undefined;
             this.plans.clear();
+            } finally { this.connecting = false; }
         }
         const [auth,git]=await Promise.all([this.api.getGithubStatus(type==='canvas.github.login'),this.readGit(workspace)]);
         const repos=auth.status==='authenticated' ? await this.api.listGithubRepos() : {status:'ok',repos:[]};
         send('canvas.github.result',{requestId,workspace,auth,git:publicGit(git),repos:repos.repos,
-            message:type==='canvas.github.connect'?'저장소를 연결했습니다. 소스 제어에서 올릴 파일을 커밋한 뒤 푸시하세요.':
+            message:type==='canvas.github.commit'?(committed?'선택한 파일을 커밋했습니다. 푸시 내용을 확인하면 GitHub에 올릴 수 있습니다.':'추가 후 삭제한 파일을 목록에서 정리했습니다. 새로 커밋할 내용은 없습니다.'):
+                type==='canvas.github.connect'?'저장소를 연결했습니다. 변경 파일을 확인하고 커밋하세요.':
                 type==='canvas.github.login'&&auth.status!=='authenticated'?'GitHub 로그인이 완료되지 않았습니다. VS Code 알림을 확인하고 다시 시도하세요.':
                 repos.status!=='ok'?'저장소 목록을 불러오지 못했습니다. 저장소 주소를 직접 입력하거나 다시 시도하세요.':''});
     }
@@ -233,11 +266,38 @@ export class CanvasHost {
     }
     private async discord(type:string,p:Record<string,unknown>,send:Send) {
         const requestId=String(p.requestId||'');
+        const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        if (p.mode === 'bot' || p.mode === 'webhook') {
+            this.discordMode = String(p.mode);
+            await this.webhook?.setMode(workspace, this.discordMode);
+        } else if (this.webhook) this.discordMode = await this.webhook.mode(workspace);
+        if (type === 'canvas.discord.connectWebhook') {
+            if (!workspace || !this.webhook) throw new Error('먼저 프로젝트 폴더를 여세요.');
+            const url = await vscode.window.showInputBox({ password: true, ignoreFocusOut: true, title: 'Discord 알림 연결', prompt: '채널 설정 → 연동 → 웹후크에서 복사한 URL을 붙여넣으세요. 메시지는 아직 보내지 않습니다.', placeHolder: 'https://discord.com/api/webhooks/…' });
+            if (url === undefined) { send('canvas.discord.cancelled', {requestId}); return; }
+            if (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath !== workspace) throw new Error('프로젝트가 바뀌었습니다. 새 프로젝트에서 다시 연결하세요.');
+            const state = await this.webhook.connect(workspace, url);
+            this.discordMode = 'webhook';
+            send('canvas.discord.statusResult', {requestId, ...state}); return;
+        }
+        if (type === 'canvas.discord.disconnectWebhook') {
+            await this.webhook?.disconnect(workspace);
+            this.discordMode = 'webhook';
+            send('canvas.discord.statusResult', {requestId, mode:'webhook', active_channel_id:''}); return;
+        }
+        if (this.webhook && this.discordMode === 'webhook') {
+            if (type === 'canvas.discord.status') { send('canvas.discord.statusResult', { requestId, ...await this.webhook.status(workspace) }); return; }
+            if (type === 'canvas.discord.event' || type === 'canvas.discord.testWebhook') {
+                if (type === 'canvas.discord.event' && p.enabled !== true) throw new Error('먼저 이벤트 알림을 켜세요.');
+                await this.webhook.send(workspace, type.endsWith('testWebhook') ? 'ReCoder 연결 테스트' : String(p.title || ''), type.endsWith('testWebhook') ? '이 채널로 배포 알림을 받을 수 있습니다.' : String(p.detail || ''));
+                send('canvas.discord.eventResult', {requestId, event_id: p.eventId, message: type.endsWith('testWebhook') ? '테스트 알림을 전송했습니다.' : ''}); return;
+            }
+        }
         if(type==='canvas.discord.settings') { await vscode.commands.executeCommand('workbench.action.openSettings','recoder.bridge'); return; }
-        if(type==='canvas.discord.status') send('canvas.discord.statusResult',{requestId,...await this.bot('status')});
+        if(type==='canvas.discord.status') send('canvas.discord.statusResult',{requestId,mode:'bot',...await this.bot('status')});
         if(type==='canvas.discord.guilds') send('canvas.discord.guildsResult',{requestId,...await this.bot('guilds')});
         if(type==='canvas.discord.channels') send('canvas.discord.channelsResult',{requestId,...await this.bot(`guilds/${encodeURIComponent(String(p.guildId))}/channels`)});
-        if(type==='canvas.discord.setChannel') { await this.bot('channel','PUT',{channel_id:String(p.channelId||'')}); send('canvas.discord.statusResult',{requestId,...await this.bot('status')}); }
+        if(type==='canvas.discord.setChannel') { await this.bot('channel','PUT',{channel_id:String(p.channelId||'')}); send('canvas.discord.statusResult',{requestId,mode:'bot',...await this.bot('status')}); }
         if(type==='canvas.discord.invite') {
             const id=vscode.workspace.getConfiguration('recoder.discord').get<string>('clientId') || '';
             const url=id ? `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(id)}&permissions=2147485696&scope=bot%20applications.commands` : String((await this.bot('invite-url')).invite_url || '');

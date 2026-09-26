@@ -68,13 +68,16 @@ function WebGLGround({ nodes, edges, height, onAvailable }: { nodes: SceneNode[]
   return <canvas ref={ref} aria-hidden="true" className="rc-ground" />;
 }
 
-export function Scene({ nodes, edges, busy, onActivate, onDrop, force2D = false, showDetails = false, dragPrimary = false, idleHint }: { nodes: SceneNode[]; edges: SceneEdge[]; busy: boolean; onActivate: (node: SceneNode) => void; onDrop: (target: Target) => void; force2D?: boolean; showDetails?: boolean; dragPrimary?: boolean; idleHint?: string }) {
+export function Scene({ nodes, edges, busy, onActivate, onDrop, force2D = false, showDetails = false, dragPrimary = false, fitHeight, idleHint }: { nodes: SceneNode[]; edges: SceneEdge[]; busy: boolean; onActivate: (node: SceneNode) => void; onDrop: (target: Target) => void; force2D?: boolean; showDetails?: boolean; dragPrimary?: boolean; fitHeight?: number; idleHint?: string }) {
   const [webgl, setWebgl] = useState(false), [zoom, setZoom] = useState(1);
   const render2D = force2D || nodes.length > 80;
   const [drag, setDrag] = useState<{ x: number; y: number; over: string } | null>(null);
   const gesture = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   const suppress = useRef(false), svg = useRef<SVGSVGElement>(null);
   const id = useId().replace(/:/g, ""), height = Math.max(680, ...nodes.map(n => n.y + 100));
+  // Navigation changes the graph, not its scale. Tall source graphs scroll at the
+  // overview's scale instead of resizing every time a file or folder is opened.
+  const referenceHeight = fitHeight ?? height;
   const source = nodes.find(n => n.id === 'project');
   const overNode = nodes.find(n => n.target && n.target === drag?.over);
   const point = (e: React.PointerEvent) => {
@@ -100,7 +103,7 @@ export function Scene({ nodes, edges, busy, onActivate, onDrop, force2D = false,
   }
   return <div data-renderer={webgl && !render2D ? 'three' : 'svg'} className={`rc-scene-shell ${showDetails ? 'rc-show-details' : ''} ${dragPrimary ? 'rc-drag-primary' : ''} ${drag ? 'rc-dragging' : ''}`} onKeyDown={e=>{if(e.key==='Escape') cancelDrag();}}>
     {(!dragPrimary || showDetails) && <div className="rc-zoom"><button onClick={() => setZoom(z => Math.max(.7,z-.15))} aria-label="축소">−</button><button onClick={() => setZoom(1)}>맞춤</button><button onClick={() => setZoom(z => Math.min(2,z+.15))} aria-label="확대">+</button><span>{render2D || !webgl ? "2D" : "3D"}</span></div>}
-    <div className="rc-scene-scroll"><div className="rc-scene" style={{ width: dragPrimary ? `min(${zoom * 100}%, calc(var(--rc-scene-height) * ${1120/height} * ${zoom}))` : `${zoom * 100}%`, aspectRatio: `1120 / ${height}` }}>
+    <div className="rc-scene-scroll"><div className="rc-scene" style={{ width: `min(${zoom * 100}%, calc(var(--rc-scene-height) * ${1120/referenceHeight} * ${zoom}))`, aspectRatio: `1120 / ${height}` }}>
       {!render2D && <WebGLGround nodes={nodes} edges={edges} height={height} onAvailable={setWebgl} />}
       <svg ref={svg} viewBox={`0 0 1120 ${height}`} className="rc-svg" aria-label="프로젝트 배포 구조" onPointerMove={move} onPointerUp={release} onPointerCancel={cancelDrag} onLostPointerCapture={cancelDrag}>
         <defs><pattern id={`${id}-grid`} width="60" height="30" patternUnits="userSpaceOnUse"><path d="M0 0 60 30M60 0 0 30" stroke="#5b99bf" strokeOpacity=".05" strokeWidth=".6" /></pattern><marker id={`${id}-arrow`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0 0 10 5 0 10" fill="#7db9d4" /></marker></defs>

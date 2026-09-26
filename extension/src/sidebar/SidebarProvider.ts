@@ -28,6 +28,7 @@ import {
 import { PollingService } from '../core/PollingService';
 import { analyzeProject, analyzeFile } from '../codemap/analyzer';
 import { CanvasHost } from './canvasHost';
+import { DiscordWebhook } from './discordWebhook';
 
 /**
  * Core 의 ReadyStatus enum 값("ok" | "partial" | "fail")을 Webview 가 기대하는
@@ -137,6 +138,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         //: 빈 창에 폴더를 추가하면 VSCode 가 확장을 통째로 재시작하는데, 그때
         //: 아직 발송 못 한 chat.actionAccepted 를 여기 적어 두고 이어서 보낸다.
         private readonly _globalState?: vscode.Memento,
+        private readonly _secrets?: vscode.SecretStorage,
     ) {
         this._state = { currentMode: Mode.BUILD, proposals: [], isLoading: false };
     }
@@ -623,7 +625,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         if (type.startsWith('canvas.')) {
             let host = this._canvasHosts.get(requestWebview);
-            if (!host) { host = new CanvasHost(this._apiClient); this._canvasHosts.set(requestWebview, host); }
+            if (!host) { host = new CanvasHost(this._apiClient, undefined, this._secrets ? new DiscordWebhook(this._secrets) : undefined); this._canvasHosts.set(requestWebview, host); }
             await host.handle(type, payload,
                 (reply, data) => this.postMessageToWebview(requestWebview, reply, data),
                 workspace => s3ProjectIdentifier(s3RepositoryIdentity(workspace), path.basename(workspace)),
@@ -868,10 +870,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'executeDeployment': {
                 const { planId, approved } = payload as { planId: string; approved: boolean };
                 try {
-                    const deployResult = await this._apiClient.executeDeployment(planId, approved);
-                    this.postMessage('deployResult', deployResult);
+                    const deployResult = await this._apiClient.executeDeploymentStream(planId, approved, event => {
+                        this.postMessageToWebview(requestWebview, 'deploy.progress', { ...event, plan_id: planId });
+                    });
+                    this.postMessageToWebview(requestWebview, 'deployResult', { ...deployResult, plan_id: planId });
                 } catch (err) {
-                    this.postMessage('errorMessage', { message: String(err) });
+                    this.postMessageToWebview(requestWebview, 'deploy.progress', { step: 'error', plan_id: planId, message: String(err) });
+                    this.postMessageToWebview(requestWebview, 'errorMessage', { message: String(err) });
                 }
                 break;
             }
@@ -2223,7 +2228,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const msg = err instanceof Error ? err.message : String(err);
             this.postMessageToWebview(opts.requestWebview, 'code.error', {
                 requestId: opts.requestId,
-                message: `설계 결정 생성 실패: ${msg}`,
+                message: msg.startsWith('설계 결정 생성 실패:') ? msg : `설계 결정 생성 실패: ${msg}`,
             });
         }
     }

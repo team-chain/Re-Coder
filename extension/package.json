@@ -2,7 +2,7 @@
   "name": "recoder",
   "displayName": "ReCoder — AI DevOps Agent",
   "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
-  "version": "1.1.6",
+  "version": "1.1.10",
   "publisher": "recoder-team",
   "license": "MIT",
   "repository": {

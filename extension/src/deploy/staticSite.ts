@@ -27,7 +27,7 @@ export const STATIC_DIR_CANDIDATES = ['dist', 'build', 'out', 'public', '_site']
  */
 const SKIP_DIRS = new Set([
     'node_modules', '.git', '.svn', '.hg', '.venv', 'venv', '__pycache__',
-    '.next/cache', '.cache', '.idea', '.vscode', 'coverage', '.pytest_cache',
+    '.next/cache', '.cache', '.idea', '.vscode', 'coverage', '.pytest_cache', '.recoder', 'docs/adr',
 ]);
 
 const SKIP_FILES = new Set(['.DS_Store', 'Thumbs.db', '.gitkeep']);

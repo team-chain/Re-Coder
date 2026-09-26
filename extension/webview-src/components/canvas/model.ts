@@ -8,7 +8,7 @@ export interface Scan { blocked: boolean; gaps: string[]; tools: Array<{ tool: s
 export interface Snapshot {
   workspace: string; projectName: string;
   container_port?: number | null;
-  git: { repository: string; branch: string; dirty: boolean; connected: boolean; head?: string; initialized?: boolean; error?: string };
+  git: { repository: string; branch: string; dirty: boolean; connected: boolean; head?: string; initialized?: boolean; hasOrigin?: boolean; error?: string };
   aws: { ready: boolean; region: string; account: string };
   deployment: EcsProgressStatus;
   resource: null | { cluster: string; service: string; region: string; image: string; image_digest: string; previous_task_definition: string };

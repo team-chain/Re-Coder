@@ -11,6 +11,7 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal from "./ApprovalModal";
+import { DeploymentActivity, DeploymentActivityEvent } from './DeploymentActivity';
 import { LocalRollbackResult, LocalRollbackStatus, rollbackWatchId } from "./LocalRollbackStatus";
 
 // ---------------------------------------------------------------------------
@@ -123,6 +124,16 @@ interface VerificationSnapshot {
   health_checks?: unknown[];
 }
 
+export function deploymentHealthVerdict(
+  result: { status: string; health_ok?: boolean } | null,
+  watch: { status: string } | null | "none",
+): "healthy" | "pending" | "failed" {
+  const status = watch && watch !== "none" ? watch.status : undefined;
+  if (result?.status === "failed" || status === "unstable" || status === "error") return "failed";
+  if (status === "stable" || result?.health_ok === true) return "healthy";
+  return "pending";
+}
+
 export type InfraFileTab = "dockerfile" | "compose" | "actions";
 
 export const INFRA_FILE_TYPE_BY_TAB: Record<InfraFileTab, string> = {
@@ -196,6 +207,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [step, setStep] = useState<Step>("idle");
+  const [progress,setProgress]=useState<DeploymentActivityEvent|null>(null);
+  const progressPlan=useRef('');
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
@@ -305,7 +318,13 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         return;
       }
 
+      if (type === 'deploy.progress') {
+        const event=payload as DeploymentActivityEvent;
+        if(event.plan_id===progressPlan.current) setProgress(event);
+        return;
+      }
       if (type === "deployResult") {
+        if ((payload as {plan_id?:string}).plan_id && (payload as {plan_id?:string}).plan_id!==progressPlan.current) return;
         const r = payload as {
           status: string; deployment_id?: string; message?: string; error?: string;
           stderr?: string; stdout?: string; restored_previous?: boolean; restore_stderr?: string;
@@ -317,8 +336,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         pendingRollbackRef.current = undefined;
         setDeployResult(r);
         setWatch(null); setRollbackDecision("idle"); setRollbackResult(null);
-        setStep(r.status === "success" ? "done" : "error");
-        if (r.status !== "success") {
+        setStep(r.status === "success" || r.status === "pending" ? "done" : "error");
+        if (r.status !== "success" && r.status !== "pending") {
           //: 코어가 stderr 를 돌려주는데 "stderr 를 확인하세요" 만 보이면 사용자는
           //: 어디서도 확인할 수 없다(실기기 검증 C2). 원문을 그대로 보인다.
           const detail = (r.stderr || r.error || r.message || r.stdout || "").trim();
@@ -353,6 +372,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   //: 호출되지 않았다. 탭이 셋인데 동작은 하나뿐이라 사용자는 "탭을 골랐는데
   //: 왜 Dockerfile 이 나오지" 상태가 됐다.
   const handleGenerateInfraFile = useCallback(() => {
+    setProgress(null);
     setStep("generating");
     setError(null);
     setExistingConflict(null);
@@ -419,12 +439,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
 
   const handleDeploy = useCallback(() => {
     if (!plan) { return; }
+    progressPlan.current=plan.plan_id;
+    setProgress({step:'queued',message:'승인된 배포를 준비합니다',plan_id:plan.plan_id});
     postMessage("executeDeployment", { planId: plan.plan_id, approved: true });
     setStep("deploying");
     setShowApproval(false);
   }, [plan, postMessage]);
 
   const handleCreatePlan = useCallback(() => {
+    setProgress(null);
     setStep("planning");
     postMessage("createDeployPlan", {
       workspacePath: "",
@@ -700,6 +723,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         </div>
       )}
 
+      <DeploymentActivity target="docker" event={progress}/>
       {/* ── Loading spinner ── */}
       {(step === "generating" || step === "saving" || step === "scanning" || step === "planning" || step === "deploying") && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, color: "#888" }}>
@@ -742,11 +766,11 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       )}
 
       {/* ── Done banner ── */}
-      {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deployResult?.health_ok === false ? (
+      {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deploymentHealthVerdict(deployResult, watch) !== "healthy" ? (
         //: docker run 은 됐지만 헬스 확인은 실패 — "통과" 로 칠하지 않는다.
         //: 실기기: /health 가 404 인 앱이 초록 "Health Check 통과" 로 보였다.
         <div style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "10px 12px", color: "#f59e0b", fontWeight: 600, marginBottom: 10 }}>
-          ⚠ 컨테이너는 떴지만 Health Check 는 실패했습니다
+          {deploymentHealthVerdict(deployResult, watch) === "failed" ? "앱 실행 검증에 실패했습니다" : "앱 응답 확인 중 — 아직 배포 완료가 아닙니다"}
           <div style={{ fontSize: 11, fontWeight: 400, marginTop: 4, color: "#e3b261", lineHeight: 1.5 }}>
             {deployResult?.health_check_url ?? "헬스 경로"} 가 2xx 로 응답하지 않았습니다 — 앱에 그 경로가 없거나 아직 준비 중일 수 있어요.
             {deployResult?.continuous_verification?.started ? " 연속 검증이 계속 지켜보고, 이상이면 롤백을 제안합니다." : " 이 배포는 롤백 후보에서 제외됩니다."}

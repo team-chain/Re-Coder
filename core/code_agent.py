@@ -13,6 +13,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import logging
 import os
 import posixpath
 import re
@@ -24,6 +25,8 @@ from llm.base import LLMRequest, LLMError, LLMErrorType
 from llm.router import get_router
 from code_output import CODE_OUTPUT_SCHEMA, CodeOutputError, parse_code_output
 from schemas import AnalyzeRequest, FilePatch, PatchProposal, RiskLevel
+
+log = logging.getLogger(__name__)
 
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     from adr import (
@@ -1356,7 +1359,10 @@ def generate_plan(
             if e.error_type == LLMErrorType.STRUCTURED_OUTPUT:
                 last_parse_error = RuntimeError("모델 출력이 응답 길이 제한에서 잘렸습니다.")
                 continue
-            raise RuntimeError(f"LLM 호출 실패: {e}") from e
+            from llm.failure import public_ai_failure_reason
+            log.warning('Design generation provider failure: %s', e)
+            guidance = ' 잠시 후 같은 요청으로 다시 시도해 주세요.' if e.retryable else ' AI 연결 설정을 확인해 주세요.'
+            raise RuntimeError(f"LLM 호출 실패: {public_ai_failure_reason(e)}{guidance}") from e
         except Exception as e:
             raise RuntimeError(f"LLM 호출 실패: {e}") from e
 

@@ -3,6 +3,7 @@ import { useVSCodeApi } from "../../hooks/useVSCodeApi";
 import DeploymentCenter from "../DeploymentCenter";
 import { AwsConnection } from "../AwsConnection";
 import { ShipMode } from "../ShipMode";
+import { DeploymentActivity, DeploymentActivityEvent } from '../DeploymentActivity';
 import { Replay } from "../Replay";
 import { SecurityScanPanel, PolicyPanel } from "../Hubs";
 import { EcsExecutionRole } from "../EcsExecutionRole";
@@ -30,6 +31,8 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const [expanded,setExpanded]=useState(false),[showNodeDetails,setShowNodeDetails]=useState(false);
   const [graph,setGraph]=useState<AnalysisGraph|null>(null),[level,setLevel]=useState<1|2|3>(1),[file,setFile]=useState(''),[folder,setFolder]=useState<string|null>(null),[search,setSearch]=useState(''),[graphLoading,setGraphLoading]=useState(false);
   const [live,setLive]=useState<EcsProgressStatus|null>(null);
+  const [s3Progress,setS3Progress]=useState<DeploymentActivityEvent|null>(null);
+  const actionTarget=useRef<Target|null>(null);
   const [s3Result,setS3Result]=useState<{url:string;bucket:string;region:string;uploaded:string[];index_copied_from?:string;excluded_note?:string}|null>(null);
   const [discord,setDiscord]=useState<DiscordState|null>(null),[discordError,setDiscordError]=useState(''),[notify,setNotify]=useState(false);
   const [guilds,setGuilds]=useState<Array<{id:string;name:string}>>([]),[channels,setChannels]=useState<Array<{id:string;name:string}>>([]),[events,setEvents]=useState<CanvasEvent[]>([]);
@@ -57,7 +60,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     if (['aws.configure.result','aws.clear.result','aws.role.result'].includes(event.type) && p?.ok) refresh();
     if(event.type==='canvas.snapshotResult'&&snapshotRequests.current.finish(p.requestId)) {
       const next=p.snapshot as Snapshot;
-      if(snapshotRef.current && snapshotRef.current.workspace!==next.workspace) {liveRef.current=null;expectedId.current='';touched.current=false;}
+      if(snapshotRef.current && snapshotRef.current.workspace!==next.workspace) {liveRef.current=null;expectedId.current='';touched.current=false;notifyRef.current=false;setNotify(false);setDiscord(null);setS3Progress(null);setS3Result(null);postMessage('canvas.discord.status');}
       snapshotRef.current=next;setSnapshot(next);setLoading(false);
       if(!touched.current) setConfig(c=>({...c,container_port:next.container_port||defaultConfig.container_port,aws_region:next.aws.region||c.aws_region,ecs_cluster:next.resource?.cluster||c.ecs_cluster,ecs_service:next.resource?.service||c.ecs_service}));
       if(!expectedId.current || expectedId.current===next.deployment.deployment_id) {
@@ -75,12 +78,12 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     }
     if(event.type==='canvas.graphResult'&&p.requestId===graphRequest.current) {stopGraph();setGraph(p.graph);setLevel(p.file?3:2);setFile(p.file);return;}
     if(event.type==='canvas.plan'&&p.requestId===actionRequest.current) {setSelection(null);setPlan(p);setConfig(p.config);setMessage('');finish();return;}
-    if(event.type==='canvas.blocked'&&p.requestId===actionRequest.current) {setBlocked(p.preflight?.reasons||[]);setError('보안 게이트가 배포를 차단했습니다.');addEvent(`gate-${p.requestId}`,'보안 게이트 차단','사전 검사에서 배포를 차단했습니다.');finish();return;}
+    if(event.type==='canvas.blocked'&&p.requestId===actionRequest.current) {if(actionTarget.current==='s3')setS3Progress({step:'error',message:'사전 검사에서 배포를 차단했습니다'});setBlocked(p.preflight?.reasons||[]);setError('보안 게이트가 배포를 차단했습니다.');addEvent(`gate-${p.requestId}`,'보안 게이트 차단','사전 검사에서 배포를 차단했습니다.');finish();return;}
     if(event.type==='canvas.error') {
       if(String(p.context).startsWith('canvas.discord')) {setDiscordError(p.message);if(String(p.requestId).startsWith('event:')) setEvents(items=>items.map(e=>`event:${e.id}`===p.requestId?{...e,delivery:'전송 실패'}:e));return;}
       if(snapshotRequests.current.finish(p.requestId)) {setLoading(false);setError(p.message);return;}
       if(p.requestId===graphRequest.current) {stopGraph();setGraphError(true);setError(p.message);return;}
-      if(p.requestId===actionRequest.current) {finish();setError(p.message);setMessage('');} return;
+      if(p.requestId===actionRequest.current) {if(actionTarget.current==='s3')setS3Progress({step:'error',message:p.message});finish();setError(p.message);setMessage('');} return;
     }
     if(event.type==='canvas.executing'&&p.requestId===actionRequest.current) setMessage(p.message);
     if(event.type==='canvas.completed'&&p.requestId===actionRequest.current) {finish();setMessage(p.message);addEvent(p.requestId,'GitHub 푸시 완료','승인한 브랜치의 커밋을 푸시했습니다.');refresh();}
@@ -96,8 +99,8 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     if(event.type==='workspace.deploy.ecs.error' || event.type==='workspace.deploy.ecs.policyDenied') {finish();setError(p.message||'정책 게이트가 배포를 차단했습니다.');setMessage('');if(p.fix)setBlocked([{code:p.code,message:p.message,fix:p.fix,remediation_available:false,proposal_id:null}]);addEvent(`gate-${actionRequest.current}`,'배포 요청 차단','보안·정책 검사 결과를 확인하세요.');}
     if(event.type==='workspace.deploy.ecs.statusError'&&p.deploymentId===expectedId.current) setError(p.message||'배포 상태 조회 실패');
     if(event.type==='workspace.deploy.s3.dirs'&&!dirTouched.current) setConfig(c=>({...c,dir:p.suggested||''}));
-    if(event.type==='workspace.deploy.s3.progress') setMessage(p.message||`S3 · ${p.step}${p.total ? ` ${p.done_count||0}/${p.total}`:''}`);
-    if(event.type==='workspace.deploy.s3.result') {finish();if(p.ok) {setS3Result(p.result);setMessage(p.result?.message||'S3 배포 완료');addEvent(`s3-${Date.now()}`,'S3 배포 완료',p.result?.bucket||'');refresh();}else setError(p.message||'S3 배포 실패');}
+    if(event.type==='workspace.deploy.s3.progress') {setS3Progress(p);setMessage('');}
+    if(event.type==='workspace.deploy.s3.result') {finish();setS3Progress(p.ok?{step:'done',result:{status:'success'}}:{step:'error',message:p.message||'S3 배포 실패'});if(p.ok) {setS3Result(p.result);setMessage('');addEvent(`s3-${Date.now()}`,'S3 배포 완료',p.result?.bucket||'');refresh();}else setError(p.message||'S3 배포 실패');}
     if(event.type==='workspace.deploy.remediationResult') {finish();setMessage(p.message||'수정을 적용했습니다. 다시 승인 내용을 확인하세요.');setBlocked([]);refresh();}
     if(event.type==='workspace.deploy.remediationError') {finish();setError(p.message);}
     if(event.type==='workspace.deploy.ecs.rollbackResult'||event.type==='replay.rollbackResult'||event.type==='deploy.rollbackResult') {addEvent(`rollback-${p.deployment_id||p.deploymentId||p.requestId||Date.now()}`,'롤백 결과',p.message||p.status||'결과 확인');refresh();}
@@ -136,15 +139,16 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const cancel=useCallback(()=>{setPlan(p=>{if(p)postMessage('canvas.cancel',{planId:p.id});return null;});},[postMessage]);
   const prepare=(chosen=config)=>{if(busyRef.current||live?.running)return;busyRef.current=true;setBusy(true);setError('');setMessage('배포 대상과 사전 검사 결과를 확인 중…');const id=requestId();actionRequest.current=id;postMessage('canvas.prepare',{requestId:id,config:chosen,autoDir:chosen.target==='s3'&&!dirTouched.current});};
   const drop=(target:Target)=>{choose(target);};
-  const approve=()=>{if(!plan||busyRef.current)return;busyRef.current=true;setBusy(true);setMessage('승인한 요청의 보안·권한 검사를 시작합니다…');setError('');const id=requestId();actionRequest.current=id;postMessage('canvas.execute',{requestId:id,planId:plan.id,approved:true});setPlan(null);};
+  const approve=()=>{if(!plan||busyRef.current)return;actionTarget.current=plan.config.target;busyRef.current=true;setBusy(true);if(plan.config.target==='s3'){setS3Result(null);setS3Progress({step:'plan',message:'승인한 파일을 확인합니다'});}setMessage('승인한 요청의 보안·권한 검사를 시작합니다…');setError('');const id=requestId();actionRequest.current=id;postMessage('canvas.execute',{requestId:id,planId:plan.id,approved:true});setPlan(null);};
   const fix=(id:string)=>{cancel();busyRef.current=true;setBusy(true);postMessage('workspace.deploy.remediation.apply',{proposalId:id});};
   const scan=live?.deployment_id&&live.deployment_id!==snapshot?.deployment.deployment_id?null:snapshot?.scan;
-  const scene=useMemo(()=>{
-    if(level!==1&&graph)return analysisScene(graph,folder,search);
+  const deployment=useMemo(()=>{
     const result=deploymentScene(snapshot?{...snapshot,deployment:live||snapshot.deployment,scan:scan||null}:null,discord?.channel_name?`#${discord.channel_name}`:'',security,showNodeDetails);
     if(blocked.length){const gate=result.nodes.find(n=>n.id==='gate');if(gate){gate.color='#ff6a73';gate.badge='요청 차단';}}
     return result;
-  },[snapshot,live,scan,blocked,discord?.channel_name,security,showNodeDetails,level,graph,folder,search]);
+  },[snapshot,live,scan,blocked,discord?.channel_name,security,showNodeDetails]);
+  const scene=useMemo(()=>level!==1&&graph?analysisScene(graph,folder,search):deployment,[deployment,level,graph,folder,search]);
+  const fitHeight=Math.max(680,...deployment.nodes.map(node=>node.y+100));
   const link=serviceLink(live?.service_url), running=busy||Boolean(live?.running);
   const completed = !running && (Boolean(s3Result) || live?.stage === 'done');
   const completedLink = completed ? serviceLink(s3Result?.url) || link : null;
@@ -174,8 +178,9 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     {level>1&&<div className="rc-breadcrumb"><button onClick={resetGraph}>← 배포</button><button onClick={()=>loadGraph()}>{snapshot?.projectName||'프로젝트'}</button>{folder!==null&&<button onClick={()=>setFolder(null)}>{folder} /</button>}{level===3&&<span>› {file}</span>}<input className="rc-filter" aria-label="파일·함수 검색" placeholder="이름 검색" value={search} onChange={e=>setSearch(e.target.value)}/><button onClick={()=>openPane('analysis')}>분석 상세</button></div>}
     {graphLoading&&<p className="rc-analysis-pending" role="status">소스 분석 중… <button onClick={()=>{stopGraph();postMessage('canvas.graph.cancel');}}>취소</button></p>}
     {graphError&&<button onClick={()=>loadGraph(graphFile.current)}>소스 분석 다시 시도</button>}
+    <DeploymentActivity target="s3" event={s3Progress}/>
     <div className="rc-stage">
-      <Scene nodes={scene.nodes} edges={scene.edges} busy={running||!snapshot?.workspace} onActivate={activate} onDrop={drop} force2D={force2D} showDetails={showNodeDetails} dragPrimary={level===1} idleHint={!snapshot?'프로젝트를 불러오는 중…':!snapshot.workspace?'VS Code에서 프로젝트 폴더를 열어주세요':running?(live?.stage_text||'배포 준비 중…'):undefined}/>
+      <Scene nodes={scene.nodes} edges={scene.edges} fitHeight={fitHeight} busy={running||!snapshot?.workspace} onActivate={activate} onDrop={drop} force2D={force2D} showDetails={showNodeDetails} dragPrimary={level===1} idleHint={!snapshot?'프로젝트를 불러오는 중…':!snapshot.workspace?'VS Code에서 프로젝트 폴더를 열어주세요':running?(live?.stage_text||'배포 준비 중…'):undefined}/>
       {security&&<button className="rc-security-link" onClick={()=>openPane('security')}>보안 경로 상세</button>}
       {level===1&&!completed&&(live?.deployment_id||running||Boolean(snapshot?.warnings.length))&&<button className="rc-activity" onClick={()=>openPane('status')}>{running?(live?.stage_text||'배포 준비 중…'):live?.stage==='failed'?'배포 실패 · 결과 확인':'배포 상태 확인'} →</button>}
     </div>

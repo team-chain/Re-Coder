@@ -22,7 +22,7 @@ AI가 혼자 판단해 코드를 쏟아내지 않습니다. 갈림길이 있으�
 
 ## 설치
 
-1. Windows x64용 `recoder-1.1.6-win32-x64.vsix` 파일을 받습니다.
+1. Windows x64용 `recoder-1.1.10-win32-x64.vsix` 파일을 받습니다.
 2. VS Code → 확장 → `...` → **Install from VSIX...**
 3. **Developer: Reload Window**를 실행한 뒤 왼쪽 Activity Bar의 **테두리 안 R 아이콘**을 누릅니다. ReCoder 작업 화면이 열립니다.
 

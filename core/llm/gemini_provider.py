@@ -129,6 +129,11 @@ class GeminiProvider(LLMProvider):
     def provider_name(self) -> str:
         return "gemini"
 
+    @property
+    def available(self) -> bool:
+        """Only offer the async fallback when its credentials and SDK are ready."""
+        return bool(self._api_key and self._model is not None)
+
     def call(self, request: LLMRequest) -> LLMResponse:
         """동기 호출 경로 — google.genai 신 SDK + 모델 폴백 체인."""
         api_key = (self._api_key or os.getenv("GEMINI_API_KEY", "")).strip()

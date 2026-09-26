@@ -107,6 +107,16 @@ async function installed(ext, home) {
     const withPort = await api(`/api/deploy/canvas?workspace_path=${encodeURIComponent(workspace)}`);
     assert.equal(withPort.container_port, 3000);
     assert.equal((await post('/api/deploy/execute', {plan_id:plan.plan_id,approved:false})).status, 'cancelled');
+    const streamPlan = await post('/api/deploy/plan', {workspace_path:workspace,host_port:41234,skip_security_scan:true,enable_continuous_verification:false});
+    const streamResponse = await fetch(`http://127.0.0.1:${manager.getPort()}/api/deploy/execute/stream`, {
+      method:'POST',signal:AbortSignal.timeout(20000),headers:{'Content-Type':'application/json','X-Session-Token':manager.getSessionToken()},
+      body:JSON.stringify({plan_id:streamPlan.plan_id,approved:false}),
+    });
+    assert.equal(streamResponse.status,200);
+    assert.match(streamResponse.headers.get('content-type'),/text\/event-stream/);
+    const streamText=await streamResponse.text();
+    assert.match(streamText,/"step": "done"/);assert.match(streamText,/"status": "cancelled"/);
+    console.log('PASS: native SSE endpoint emits an explicit cancelled result without deploying');
     console.log('PASS: packaged deployment plan, final-stage port, real health route, environment and cancel');
     console.log(`PASS: installed Core ${version}, session auth, locked AWS canvas, project/file analysis, unauthenticated GitHub connection/push`);
     const previousPid = lastRuntime.pid;

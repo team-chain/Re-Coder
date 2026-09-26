@@ -24,6 +24,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from deployment_progress import report as report_progress, stream as stream_deployment
 
 from local_deploy_store import (
     load_records as _load_local_records,
@@ -234,6 +235,32 @@ async def _probe_local_http_health(
         return False
 
 
+async def _local_startup_failure(container_name: str) -> str | None:
+    """After a failed health probe, distinguish slow startup from a dead process."""
+    def inspect():
+        result = subprocess.run(
+            ['docker', 'inspect', '--format', '{{json .State}}', container_name],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15,
+        )
+        if result.returncode != 0:
+            return '배포한 컨테이너의 상태를 확인하지 못했습니다.'
+        state = json.loads(result.stdout)
+        if state.get('Running') and not state.get('Restarting') and state.get('Status') == 'running':
+            return None
+        from context_gate import mask_secrets
+        logs = subprocess.run(
+            ['docker', 'logs', '--tail', '25', container_name],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15,
+        )
+        detail = mask_secrets((logs.stdout + logs.stderr)[-4000:])
+        return f"컨테이너 실행 실패 ({state.get('Status', 'unknown')}, 종료 코드 {state.get('ExitCode', '?')}).\n{detail}"
+    try:
+        return await asyncio.to_thread(inspect)
+    except Exception as exc:
+        logger.warning('Container startup inspection failed: %s', exc)
+        return '배포한 컨테이너의 실행 상태를 확인하지 못했습니다. Docker 상태를 확인하세요.'
+
+
 async def _verify_rollback_candidate_health(plan: DeploymentPlan) -> bool:
     """실행 직후의 헬스 확인으로 롤백 후보 자격을 결정한다.
 
@@ -263,8 +290,10 @@ async def _update_rollback_candidate_after_verification(state: object) -> None:
     if status == "stable":
         # 최초 15초 안에 준비되지 않은 앱도 5분 감시를 통과했다면 안전한 후보다.
         record.rollback_eligible = True
+        record.status = DeployStatus.SUCCESS
     elif status in {"unstable", "error"}:
         record.rollback_eligible = False
+        record.status = DeployStatus.FAILED
     _save_records()
 
 
@@ -735,7 +764,6 @@ _STATIC_TARGET_INDEPENDENT_CHECK_CODES = {
     "ENV_FILE_NOT_GITIGNORED",
     "INVALID_ENV_FORMAT",
     "UNPINNED_DEPENDENCIES",
-    "CRITICAL_VULNERABILITY",
     "SECRET_LEAK_RISK",
 }
 
@@ -790,6 +818,7 @@ class RollbackRequest(BaseModel):
 class DeployPreflightRequest(BaseModel):
     """배포 대상 선택 카드에 표시할 프로젝트 감지 요청."""
     workspace_path: str
+    target: Optional[Literal['s3', 'ecs', 'local']] = None
 
 
 class DeploymentDecisionRequest(BaseModel):
@@ -1771,6 +1800,10 @@ def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unkno
             code for code, _ in CHECK_REGISTRY
             if code.value in _STATIC_TARGET_INDEPENDENT_CHECK_CODES
         }
+        # A plain website with no environment file does not need a Git setup
+        # before deployment. Actual source-secret checks still run below.
+        if not (root / contract.runtime.env_file).exists():
+            static_check_codes = {code for code in static_check_codes if code.value != 'ENV_FILE_NOT_GITIGNORED'}
     run = StaticPreflightRunner(str(root), contract).run_sync(static_check_codes)
     proposals = generate_proposals(run, contract, root)
     workspace_root = root.resolve()
@@ -1938,7 +1971,7 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
         safety = await asyncio.to_thread(
             _run_deployment_safety_preflight,
             request.workspace_path,
-            detected["app_kind"],
+            'static' if request.target == 's3' else detected["app_kind"],
         )
         return {**detected, **safety}
     except ValueError as exc:
@@ -2324,13 +2357,14 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
     target.write_text(proposal.content, encoding="utf-8")
     additional_paths = []
     from static_frontend import STATIC_DOCKERIGNORE, STATIC_IGNORE_NOTICE
-    if (getattr(proposal, 'base_template', '') == 'Dockerfile.node-static'
+    if (getattr(proposal, 'base_template', '') in ('Dockerfile.node-static', 'Dockerfile.html-static')
             and STATIC_IGNORE_NOTICE in getattr(proposal, 'risk_reasons', [])):
         ignore = target.parent / '.dockerignore'
         try:
             # Exclusive creation also preserves edits made while approval was open.
             with ignore.open('x', encoding='utf-8') as stream:
-                stream.write(STATIC_DOCKERIGNORE)
+                stream.write(STATIC_DOCKERIGNORE.replace('build\n', '').replace('dist\n', '')
+                             if proposal.base_template == 'Dockerfile.html-static' else STATIC_DOCKERIGNORE)
             additional_paths.append(str(ignore))
         except FileExistsError:
             pass
@@ -2635,9 +2669,8 @@ def _dockerfile_from_template(
             #: 어긋난 컨테이너(예: uvicorn 없는 프로젝트에 CMD uvicorn)가 나온다.
             raise _UnsupportedDockerfileFallback(
                 f"프로젝트 스택을 확정하지 못했습니다({stack.value}). "
-                "requirements.txt 에 fastapi/flask/django 중 사용하는 "
-                "프레임워크를 명시하거나, AI Ready 를 복구하거나, 프로젝트에 "
-                "Dockerfile 을 직접 추가한 뒤 다시 시도하세요."
+                "앱의 루트 폴더에 index.html, package.json 또는 Python 의존성 파일이 "
+                "있는지 확인하세요. 사용자 정의 런타임은 Dockerfile을 추가하면 됩니다."
             )
         raise _UnsupportedDockerfileFallback(
             f"{stack.value} 스택은 AI 없이 검증된 Dockerfile 폴백을 제공하지 "
@@ -2784,14 +2817,14 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
             base_template=template_id,
             risk_level=RiskLevel.LOW,
             approval_level=ApprovalLevel.CONFIRM,
-            risk_reasons=[ai_note] if ai_note else [],
+            risk_reasons=[ai_note] if ai_note and template_id not in ('Dockerfile.node-static', 'Dockerfile.html-static') else [],
         )
 
     if not getattr(proposal, "workspace_path", None):
         proposal = proposal.model_copy(update={
             "workspace_path": str(Path(request.workspace_path).expanduser().resolve()),
         })
-    if getattr(proposal, 'base_template', '') == 'Dockerfile.node-static':
+    if getattr(proposal, 'base_template', '') in ('Dockerfile.node-static', 'Dockerfile.html-static'):
         from static_frontend import STATIC_IGNORE_NOTICE
         if not (Path(request.workspace_path) / '.dockerignore').exists():
             proposal.risk_reasons.append(STATIC_IGNORE_NOTICE)
@@ -3352,6 +3385,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         #: 부르면 "락을 얻기 전에는 docker 를 건드리지 않는다"는 교체 안전 불변식
         #: (test_replace_safety)이 깨진다. 빌드 실패는 돌고 있던 컨테이너를 건드리기
         #: 전이라 되돌릴 것이 없다.
+        report_progress('build', 'Docker 이미지를 빌드하고 있습니다')
         build_failure = await _build_local_image(plan, _plan_workspaces.get(request.plan_id, ""))
         if build_failure is not None:
             build_failure["plan_id"] = request.plan_id
@@ -3365,6 +3399,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         #: (승인 화면에 이미 '미검증' 사유가 표시된 상태로 사용자가 승인했다).
         runtime_image = plan.image
         pending_image = _plans_pending_image_scan.get(request.plan_id)
+        report_progress('scan', '빌드한 이미지의 보안 검사 상태를 확인합니다')
         if pending_image and plan.image:
             runtime_image = await _local_image_id(plan.image)
             deferred_report = await _execute_scan("trivy", "", runtime_image)
@@ -3445,6 +3480,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         prior_container_replacement_started = False
 
         try:
+            report_progress('start', '이전 컨테이너 복구 정보를 보존하고 새 컨테이너를 시작합니다')
             # 같은 이름으로 docker run 하면 기존 컨테이너가 남아 있는 정상 재배포는
             # 항상 실패한다. 실제 배포 경로도 롤백과 동일하게 기존 컨테이너를 교체한다.
             if plan.method == DeployMethod.LOCAL_DOCKER:
@@ -3503,10 +3539,20 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             raise HTTPException(status_code=500, detail=f"Deployment execution failed: {exc}") from exc
 
         # docker run 성공만으로는 앱이 준비됐다고 볼 수 없다. HTTP 헬스 확인을 통과한
-        # 기록만 이후 배포의 롤백 후보가 된다. 이 확인이 실패해도 이번 실행 자체의
-        # 결과는 실패로 바꾸지 않는다. 사용자는 장애 버전에 대해 여전히 롤백을 요청할
-        # 수 있어야 하기 때문이다.
+        # 기록만 이후 배포의 롤백 후보가 된다. 아직 응답이 없으면 pending,
+        # 프로세스가 종료·재시작 중이면 failed로 기록하고 이전 서비스를 복구한다.
+        if success:
+            report_progress('health', '컨테이너 실행 상태와 HTTP 응답을 확인합니다')
         rollback_eligible = success and await _verify_rollback_candidate_health(plan)
+        if success and not rollback_eligible and plan.method == DeployMethod.LOCAL_DOCKER:
+            startup_error = await _local_startup_failure(plan.container_name or '')
+            if startup_error:
+                success = False
+                result.stderr = startup_error
+                if restore_source is not None:
+                    restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(restore_source)
+                    if restored_previous and rollback_source is not None:
+                        restored_verification_resumed = await _resume_verification_for(rollback_source)
 
         # 방금 띄운 이미지의 불변 참조를 남긴다. 다음 배포가 이 릴리스로 되돌릴 때
         # 태그가 아니라 이 값을 쓴다 — 태그는 그때 이미 다른 것을 가리킬 수 있다.
@@ -3514,6 +3560,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             await _running_image_id(plan.container_name or "") if success else None
         )
 
+        report_progress('record', '배포 결과와 롤백 정보를 저장합니다')
         # Record the deployment
         from schemas import ActionType
         record = DeploymentRecord(
@@ -3537,7 +3584,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 rollback_source.health_check_path if rollback_source is not None else None
             ),
             rollback_eligible=rollback_eligible,
-            status=DeployStatus.SUCCESS if success else DeployStatus.FAILED,
+            status=(DeployStatus.SUCCESS if rollback_eligible else DeployStatus.PENDING) if success else DeployStatus.FAILED,
         )
         _deployment_records[record.deployment_id] = record
         _save_records()
@@ -3603,10 +3650,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                         _exc,
                     )
 
-        # 헬스 결과를 **명시적으로** 돌려준다. status=success 는 `docker run` 이 됐다는
-        # 뜻일 뿐인데, 화면이 그걸 "Health Check 통과" 로 보여 줬다(실기기: /health 가
-        # 404 인 앱도 초록 배너). 컨테이너는 돌고 감시·롤백은 살아 있으니 실패로
-        # 바꾸진 않되, 화면이 거짓말하지 않도록 사실을 따로 준다.
+        # HTTP 응답까지 확인해야 success다. pending 상태에서도 감시·로그·롤백을
+        # 제공하며, 이후 검증 결과가 기록과 화면의 최종 상태를 갱신한다.
         _first_hp = next(iter(plan.ports.keys()), None)
         _hp = plan.health_check_path or "/health"
         health_check_url = (
@@ -3614,7 +3659,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             if _first_hp else None
         )
         return {
-            "status": "success" if success else "failed",
+            "status": ("success" if rollback_eligible else "pending") if success else "failed",
             "deployment_id": record.deployment_id,
             "health_ok": bool(rollback_eligible),
             "health_check_url": health_check_url,
@@ -3635,6 +3680,15 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 "started": bool(cv_started),
             },
         }
+
+
+@router.post('/api/deploy/execute/stream')
+async def execute_deployment_stream(request: ExecuteRequest):
+    # Same approved execution path, locking, security gates and rollback logic.
+    # Never start a second deployment to recover a disconnected progress viewer.
+    if request.plan_id not in _deployment_plans:
+        raise HTTPException(status_code=404, detail='배포 계획이 없습니다. 새 계획을 확인하세요.')
+    return stream_deployment(lambda: execute_deployment(request), request.plan_id)
 
 
 @router.post("/api/deploy/local")

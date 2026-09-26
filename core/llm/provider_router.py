@@ -122,6 +122,27 @@ class LLMProviderRouter:
     # Public API
     # ------------------------------------------------------------------
 
+    async def _fallback(self, prompt, schema, primary_error, **settings):
+        """Do not replace the actual failure with an unconfigured fallback error."""
+        from .base import LLMError, LLMErrorType
+        error = primary_error or LLMError(
+            "AI 서비스의 반복 오류로 잠시 대기 중입니다. 잠시 후 다시 요청해 주세요.",
+            LLMErrorType.SERVICE_ERROR, True,
+        )
+        if not getattr(self._gemini, "available", True):
+            if isinstance(error, LLMError):
+                raise error
+            raise LLMError(f"Bedrock 호출 실패: {error}", raw=error) from error
+        try:
+            return await self._gemini.generate(prompt, schema=schema, **settings)
+        except Exception as secondary:
+            raise LLMError(
+                f"Bedrock 호출 실패: {error}; 대체 AI 호출 실패: {secondary}",
+                error.error_type if isinstance(error, LLMError) else LLMErrorType.UNKNOWN,
+                error.retryable if isinstance(error, LLMError) else False,
+                raw=error,
+            ) from error
+
     async def call_primary(
         self,
         prompt: str,
@@ -139,6 +160,7 @@ class LLMProviderRouter:
         breaker_mod, _ = _get_shared()
         start = time.monotonic()
         retry_count = 0
+        primary_error = None
 
         br = breaker_mod.breaker_for(
             f"{self._bedrock_sonnet.provider_name}/{self._bedrock_sonnet.model_id}"
@@ -170,6 +192,7 @@ class LLMProviderRouter:
                     return result
 
                 except Exception as exc:
+                    primary_error = exc
                     br.record_failure()
                     log.warning("Bedrock Sonnet failed: %s — trying Gemini fallback", exc)
                     retry_count = 1
@@ -180,7 +203,7 @@ class LLMProviderRouter:
             model="gemini-2.5-flash",
             operation="call_primary_fallback",
         ) as span:
-            result = await self._gemini.generate(prompt, schema=schema)
+            result = await self._fallback(prompt, schema, primary_error)
             input_tok, output_tok = self._estimate_tokens(prompt, result)
             latency = int((time.monotonic() - start) * 1000)
             span.set_attribute("input_tokens", input_tok)
@@ -207,6 +230,7 @@ class LLMProviderRouter:
         breaker_mod, _ = _get_shared()
         start = time.monotonic()
         retry_count = 0
+        primary_error = None
 
         br = breaker_mod.breaker_for(
             f"{self._bedrock_haiku.provider_name}/{self._bedrock_haiku.model_id}"
@@ -230,11 +254,12 @@ class LLMProviderRouter:
                 return result
 
             except Exception as exc:
+                primary_error = exc
                 br.record_failure()
                 log.warning("Bedrock Haiku failed: %s — trying Gemini fallback", exc)
                 retry_count = 1
 
-        result = await self._gemini.generate(prompt, schema=schema)
+        result = await self._fallback(prompt, schema, primary_error)
         input_tok, output_tok = self._estimate_tokens(prompt, result)
         latency = int((time.monotonic() - start) * 1000)
         self._record_call(
@@ -330,6 +355,7 @@ class LLMProviderRouter:
         result: Any = None
         used_provider = provider.provider_name
         used_model = provider.model_id
+        primary_error = None
 
         br = breaker_mod.breaker_for(f"{provider.provider_name}/{provider.model_id}")
         if br.is_open:
@@ -358,19 +384,16 @@ class LLMProviderRouter:
                     raise
                 br.record_failure()
                 retry = 1
+                primary_error = exc
                 log.warning("call_llm %s 실패: %s — Gemini 폴백", used_model, exc)
 
         if result is None:
             fallback = True
             used_provider, used_model = "gemini", "gemini-2.5-flash"
-            try:
-                result = await self._gemini.generate(
-                    prompt, schema=schema, max_tokens=request.max_tokens,
-                    temperature=request.temperature,
-                )
-            except Exception as exc:
-                #: 전부 실패 — 레거시 계약대로 LLMError 를 던진다.
-                raise LLMError(f"모든 LLM Provider 실패: {exc}", retryable=True, raw=exc) from exc
+            result = await self._fallback(
+                prompt, schema, primary_error, max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
 
         latency = int((time.monotonic() - start) * 1000)
         input_tok, output_tok = self._estimate_tokens(prompt, result)

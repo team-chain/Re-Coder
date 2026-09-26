@@ -361,7 +361,7 @@ def _runtime_family(stack: str, workspace_path: str = "") -> str:
         if static_frontend_output(workspace_path):
             dockerfile = Path(workspace_path) / 'Dockerfile'
             try:
-                if not dockerfile.exists() or 'ReCoder File Template: Dockerfile.node-static' in dockerfile.read_text(encoding='utf-8', errors='replace'):
+                if not dockerfile.exists() or any(f'ReCoder File Template: Dockerfile.{kind}-static' in dockerfile.read_text(encoding='utf-8', errors='replace') for kind in ('node', 'html')):
                     return 'static'
             except OSError:
                 pass

@@ -120,7 +120,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     pendingRequestsRef.current[requestId] = { instruction, targetFolder: folder, contextFiles: files };
     setTargetFolder(folder);
     setTurns((ts) => [...ts, { id: requestId, prompt: instruction, targetFolder: folder, status: "planning" }]);
-    waitForResponse(requestId, 75);
+    waitForResponse(requestId, 135);
     postMessage("code.plan", { requestId, instruction, targetFolder: folder, contextFiles: files });
   }, [externalTurn, postMessage]);
 
@@ -228,7 +228,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
     // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
     setTurns((ts) => [...ts, { id, prompt: text, targetFolder, status: "planning" }]);
-    waitForResponse(id, 75);
+    waitForResponse(id, 135);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
   }, [input, targetFolder, contextFiles, postMessage]);

@@ -1,3 +1,4 @@
+import { DeploymentProgressEvent, readDeploymentStream } from './deploymentStream';
 import {
     ApiResponse,
     CoreHealth,
@@ -399,14 +400,15 @@ export class ApiClient {
             context_files: opts?.contextFiles ?? [],
             target_folder: opts?.targetFolder ?? '',
         };
-        const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 60000);
+        const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 120000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설계 결정 생성 실패'); }
         return resp.data;
     }
 
-    async getDeployPreflight(workspacePath: string): Promise<DeployPreflightResult> {
+    async getDeployPreflight(workspacePath: string, target?: 's3' | 'ecs' | 'local'): Promise<DeployPreflightResult> {
         const resp = await this.request<DeployPreflightResult>('POST', '/api/deploy/preflight', {
             workspace_path: workspacePath,
+            target,
         });
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
         return resp.data;
@@ -647,6 +649,31 @@ export class ApiClient {
         //: 코어가 4xx/5xx 로 거절한 사유(예: "Trivy: CRITICAL 3건 — 배포를 차단했습니다")를
         //: 버리고 { status: 'error' } 만 돌려주면 화면은 "사유 없음" 이 된다(실기기 검증 C2).
         return resp.success && resp.data ? resp.data : { status: 'error', error: resp.error ?? '코어가 응답하지 않았습니다.' };
+    }
+
+    async executeDeploymentStream(planId: string, approved: boolean, onEvent: (event: DeploymentProgressEvent) => void, retried = false): Promise<Awaited<ReturnType<ApiClient['executeDeployment']>>> {
+        if (!approved) return this.executeDeployment(planId, false);
+        if (!this.coreManager.getSessionToken()) await this.coreManager.refreshToken();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 1500000);
+        try {
+            const response = await fetch(`http://127.0.0.1:${this.coreManager.getPort()}/api/deploy/execute/stream`, {
+                method: 'POST', signal: controller.signal,
+                headers: { 'Content-Type': 'application/json', 'X-Session-Token': this.coreManager.getSessionToken(), Accept: 'text/event-stream' },
+                body: JSON.stringify({ plan_id: planId, approved }),
+            });
+            // Only an authentication rejection is safe to replay, before work starts.
+            if (response.status === 401 && !retried) {
+                await response.body?.cancel();
+                await this.coreManager.refreshToken();
+                return await this.executeDeploymentStream(planId, approved, onEvent, true);
+            }
+            if (!response.ok) throw new Error(describeHttpError(response.status, await response.text()));
+            return await readDeploymentStream(response, onEvent);
+        } catch (error) {
+            if (error instanceof TypeError || (error instanceof Error && error.name === 'AbortError')) throw new Error('배포 진행 연결이 끊겼습니다. 배포는 계속될 수 있으므로 Docker 실행 상태를 확인하세요.');
+            throw error;
+        } finally { clearTimeout(timer); }
     }
 
     /** 로컬 배포의 연속 검증 스냅샷. 감시가 없으면(코어 재시작 등) null. */
