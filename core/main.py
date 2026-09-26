@@ -90,6 +90,61 @@ def _persist_session_token(path: Path, token: str) -> None:
     CoreSingleton.set_file_permissions(path)
 
 
+#: runtime.json 복구·확장 호스트 생존 확인 주기(초).
+_GUARD_INTERVAL_SECONDS = float(os.environ.get("RECODER_GUARD_INTERVAL", "3"))
+
+
+def _parent_pid() -> int:
+    """Core 를 띄운 VS Code 확장 호스트의 PID. 확장이 넘겨준 경우만(수동 실행은 0)."""
+    try:
+        return int(os.environ.get("RECODER_PARENT_PID", "0") or 0)
+    except ValueError:
+        return 0
+
+
+def _guard_tick(pid: int, port: int, token: str, parent: int, parent_misses: int) -> int:
+    """한 번의 점검. 반환값은 확장 호스트가 연속으로 없던 횟수.
+
+    1) runtime.json 이 사라졌거나 다른 값으로 바뀌었는데 **락은 여전히 이 Core 것**이면
+       다시 쓴다. 확장 창이 재시작 도중 파일만 지우고 프로세스는 남기면, 새 창이 이 Core
+       를 찾고도 인증 정보가 없어 영원히 "연결 중"에 멈췄다(실기기, 1.1.15 업데이트 직후).
+    2) 이 Core 를 띄운 확장 호스트가 사라졌으면 스스로 종료한다. 창을 강제로 닫거나
+       업데이트로 확장이 재시작되면 종료 요청이 도착하지 못하고 Core 만 남던 문제다.
+    """
+    try:
+        runtime = CoreSingleton.read_runtime()
+        if runtime is None or runtime.pid != pid or runtime.port != port or runtime.session_token != token:
+            lock = CoreSingleton._read_lock()
+            if lock and lock.get("pid") == pid:
+                CoreSingleton.write_runtime(port=port, token=token, pid=pid)
+                CoreSingleton.set_file_permissions(CoreSingleton.RUNTIME_FILE)
+                print("[ReCoder Core] runtime.json 을 복구했습니다.", flush=True)
+    except Exception:
+        pass
+    if parent <= 0:
+        return 0
+    try:
+        alive = CoreSingleton._pid_alive(parent)
+    except Exception:
+        alive = True
+    return 0 if alive else parent_misses + 1
+
+
+async def _runtime_guard(pid: int, port: int, token: str) -> None:
+    import asyncio
+    parent = _parent_pid()
+    misses = 0
+    while True:
+        await asyncio.sleep(_GUARD_INTERVAL_SECONDS)
+        misses = _guard_tick(pid, port, token, parent, misses)
+        if misses >= 2:
+            print("[ReCoder Core] VS Code 확장 호스트가 종료되어 Core 를 종료합니다.", flush=True)
+            try:
+                CoreSingleton.release_lock(pid)
+            finally:
+                os._exit(0)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan: singleton lock + optional Hybrid Cloud Relay poller."""
@@ -136,6 +191,9 @@ async def lifespan(app: FastAPI):
 
     app.state.started_at = datetime.now(timezone.utc)
 
+    import asyncio as _asyncio
+    guard_task = _asyncio.create_task(_runtime_guard(pid, port, token))
+
     try:
         from observability import observability  # type: ignore
         observability.initialize()
@@ -162,6 +220,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        guard_task.cancel()
         if relay_poller is not None:
             try:
                 await relay_poller.stop()

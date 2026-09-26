@@ -15,7 +15,7 @@ import signal
 import sys
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -53,11 +53,16 @@ class CoreSingleton:
         with cls._state_guard():
             existing = cls._read_lock()
             owner = existing.get("pid") if existing else None
-            if isinstance(owner, int) and owner > 0 and cls._pid_alive(owner):
+            #: PID 가 살아 있어도 **락을 쓴 뒤에 시작된 프로세스**면 다른 프로그램이 그 PID 를
+            #: 재사용한 것이다(Windows 는 PID 를 금방 재사용한다). 예전에는 그런 남은 락 때문에
+            #: 새 Core 가 영원히 "이미 실행 중"으로 거부됐다.
+            if (isinstance(owner, int) and owner > 0 and cls._pid_alive(owner)
+                    and not cls._pid_reused(owner, existing.get("started_at"))):
                 return owner == pid
             # An older Core may have lost its lock file but still own runtime.
             runtime = cls.read_runtime()
-            if runtime and runtime.pid != pid and runtime.pid > 0 and cls._pid_alive(runtime.pid):
+            if (runtime and runtime.pid != pid and runtime.pid > 0 and cls._pid_alive(runtime.pid)
+                    and not cls._pid_reused(runtime.pid, runtime.started_at)):
                 return False
             cls.RUNTIME_FILE.unlink(missing_ok=True)
             cls._write_json(cls.LOCK_FILE, {
@@ -296,6 +301,64 @@ class CoreSingleton:
             os.replace(temporary, path)
         finally:
             Path(temporary).unlink(missing_ok=True)
+
+    #: 락 기록 시각보다 이만큼 늦게 시작된 프로세스는 PID 재사용으로 본다.
+    PID_REUSE_SLACK_SECONDS: float = 2.0
+
+    @classmethod
+    def _pid_reused(cls, pid: int, recorded) -> bool:
+        """`recorded`(UTC, 락/실행 정보를 쓴 시각) 이후에 시작된 프로세스면 True.
+
+        시작 시각을 알 수 없으면(macOS 등) False — 예전과 같이 살아 있는 것으로 본다.
+        """
+        from datetime import timedelta
+        try:
+            when = recorded if isinstance(recorded, datetime) else datetime.fromisoformat(str(recorded))
+        except Exception:
+            return False
+        if when.tzinfo is not None:
+            when = when.astimezone(timezone.utc).replace(tzinfo=None)
+        started = cls._process_start_utc(pid)
+        if started is None:
+            return False
+        return started > when + timedelta(seconds=cls.PID_REUSE_SLACK_SECONDS)
+
+    @staticmethod
+    def _process_start_utc(pid: int) -> Optional[datetime]:
+        """프로세스 시작 시각(UTC, naive). 알 수 없으면 None."""
+        try:
+            if platform.system() == "Windows":
+                import ctypes
+                from ctypes import wintypes
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+                kernel.OpenProcess.restype = wintypes.HANDLE
+                kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+                kernel.GetProcessTimes.restype = wintypes.BOOL
+                kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+                if not handle:
+                    return None
+                try:
+                    created, exited, kern, user = (wintypes.FILETIME() for _ in range(4))
+                    if not kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                                  ctypes.byref(kern), ctypes.byref(user)):
+                        return None
+                    ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime  # 100ns since 1601 UTC
+                    from datetime import timedelta
+                    return datetime(1601, 1, 1) + timedelta(microseconds=ticks // 10)
+                finally:
+                    kernel.CloseHandle(handle)
+            proc = Path(f"/proc/{pid}/stat")
+            if proc.exists():
+                fields = proc.read_text().rsplit(")", 1)[1].split()
+                start_ticks = int(fields[19])  # field 22 (starttime), after pid and comm
+                btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                             if line.startswith("btime "))
+                return datetime.utcfromtimestamp(btime + start_ticks / os.sysconf("SC_CLK_TCK"))
+        except Exception:
+            return None
+        return None
 
     @classmethod
     def _read_lock(cls) -> Optional[dict]:

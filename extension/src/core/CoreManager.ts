@@ -136,7 +136,8 @@ export class CoreManager {
         // 수동 실행 또는 runtime 파일 기록이 늦는 경우도 실행 경로와 토큰을 확인한다.
         const detected = await this.probeRunningCore();
         if (detected) {
-            const deadline = Date.now() + 3000;
+            //: Core 는 runtime.json 이 지워졌으면 3초 안에 다시 쓴다(runtime guard). 그 한 주기를 기다린다.
+            const deadline = Date.now() + 8000;
             while (Date.now() < deadline) {
                 const rt = await this.readRuntime();
                 if (rt && rt.port === detected.port) {
@@ -502,7 +503,9 @@ export class CoreManager {
             processLog.event('spawn requested');
             processLog.event(`selected mode=${this.isDevelopment() ? 'development' : 'installed'} entrypoint=${this.expectedEntrypoint(spec)}`);
             this.coreProcess = spawn(spec.command, args, {
-                env: { ...hostEnv, ...gatewayEnv, ...awsEnv },
+                //: RECODER_PARENT_PID — 이 확장 호스트가 사라지면 Core 가 스스로 종료한다.
+                //: 창 강제 종료·확장 업데이트로 종료 요청이 못 가도 Core 가 고아로 남지 않게.
+                env: { ...hostEnv, ...gatewayEnv, ...awsEnv, RECODER_PARENT_PID: String(process.pid) },
                 detached: false,
                 windowsHide: true,
                 stdio: ['ignore', 'pipe', 'pipe'],
@@ -676,8 +679,19 @@ export class CoreManager {
         }
 
         this.coreProcess = null;
+        //: 실행 정보는 **Core 가 실제로 끝났을 때만** 지운다. 종료 요청이 도착하지 못한 채
+        //: 파일만 지우면, 살아남은 Core 에 새 창이 붙지 못해 영원히 "연결 중"이 된다
+        //: (1.1.15 업데이트 직후 실기기). 정상 종료한 Core 는 스스로 이 파일을 지운다.
         const runtimePath = this.getRuntimeJsonPath();
-        try { if (fs.existsSync(runtimePath)) { fs.unlinkSync(runtimePath); } } catch { /* ignore */ }
+        try {
+            const runtime = await this.readRuntime();
+            const owner = runtime?.pid;
+            let alive = false;
+            if (owner && Number.isSafeInteger(owner) && owner > 1) {
+                try { alive = this.isProcessRunning(owner); } catch { alive = true; }
+            }
+            if (!alive && fs.existsSync(runtimePath)) { fs.unlinkSync(runtimePath); }
+        } catch { /* ignore */ }
     }
 
     getPort(): number { return this.port; }
