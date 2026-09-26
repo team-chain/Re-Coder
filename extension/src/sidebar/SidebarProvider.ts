@@ -29,6 +29,7 @@ import { PollingService } from '../core/PollingService';
 import { analyzeProject, analyzeFile } from '../codemap/analyzer';
 import { CanvasHost } from './canvasHost';
 import { DiscordWebhook } from './discordWebhook';
+import { DiscordBotToken } from './discordBotToken';
 import { activeProjectPath, activeProjectUri, markPendingActiveProject, onDidChangeActiveProject, projectFolders, selectActiveProject } from '../activeProject';
 
 /**
@@ -630,7 +631,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         if (type.startsWith('canvas.')) {
             let host = this._canvasHosts.get(requestWebview);
-            if (!host) { host = new CanvasHost(this._apiClient, undefined, this._secrets ? new DiscordWebhook(this._secrets) : undefined); this._canvasHosts.set(requestWebview, host); }
+            if (!host) { host = new CanvasHost(this._apiClient, undefined, this._secrets ? new DiscordWebhook(this._secrets) : undefined, this._secrets ? new DiscordBotToken(this._secrets, fetch, String(vscode.extensions?.getExtension?.('recoder-team.recoder')?.packageJSON?.version || '')) : undefined); this._canvasHosts.set(requestWebview, host); }
             await host.handle(type, payload,
                 (reply, data) => this.postMessageToWebview(requestWebview, reply, data),
                 workspace => s3ProjectIdentifier(s3RepositoryIdentity(workspace), path.basename(workspace)),

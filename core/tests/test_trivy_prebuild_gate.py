@@ -144,7 +144,11 @@ def test_실행시_빌드후_스캔이_돌고_CRITICAL_이면_컨테이너를_�
     async def _critical_scan(scan_type, workspace, target):
         scanned.append(target)
         return {"status": "ok", "scan_type": "trivy", "critical_count": 2,
-                "high_count": 0, "findings": [], "summary": "2 critical"}
+                "high_count": 0, "summary": "2 critical", "findings": [
+                    {"severity": "CRITICAL", "id": "GHSA-34x7-hfp2-rc4v", "package": "tar", "installed": "6.2.1",
+                     "fixed": "7.5.21", "class": "lang-pkgs", "pkg_path": "app/node_modules/tar/package.json"},
+                    {"severity": "CRITICAL", "id": "CVE-2026-0001", "package": "libssl3", "installed": "3.3.1-r0",
+                     "fixed": "3.3.2-r0", "class": "os-pkgs"}]}
 
     monkeypatch.setattr(deploy, "_execute_scan", _critical_scan)
 
@@ -153,19 +157,23 @@ def test_실행시_빌드후_스캔이_돌고_CRITICAL_이면_컨테이너를_�
 
     monkeypatch.setattr(deploy.subprocess, "run", _docker_must_not_run)
 
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(deploy.execute_deployment(
-            deploy.ExecuteRequest(plan_id=plan.plan_id, approved=True)
-        ))
+    result = asyncio.run(deploy.execute_deployment(
+        deploy.ExecuteRequest(plan_id=plan.plan_id, approved=True)
+    ))
 
-    assert exc.value.status_code == 400
-    assert "CRITICAL" in str(exc.value.detail)
+    #: 차단은 그대로 — 대신 무엇을 어떻게 고칠지를 함께 돌려준다.
+    assert result["status"] == "failed" and result["stage"] == "scan"
+    assert "CRITICAL" in result["message"]
+    assert result["diagnosis"]["code"] == "IMAGE_CRITICAL_CVE"
+    assert any("tar 6.2.1 → 7.5.21" in line for line in result["diagnosis"]["lines"])
+    origins = {v["package"]: v["origin"] for v in result["vulnerabilities"]}
+    assert origins == {"tar": "app", "libssl3": "base_os"}
     #: 스캔이 실제로 1회 돌았다 — 이게 DoD 다.
     assert scanned == ['sha256:' + 'a' * 64]
     # A rejected request must still require scanning on retry.
     assert plan.plan_id in deploy._plans_pending_image_scan
-    with pytest.raises(HTTPException):
-        asyncio.run(deploy.execute_deployment(deploy.ExecuteRequest(plan_id=plan.plan_id, approved=True)))
+    again = asyncio.run(deploy.execute_deployment(deploy.ExecuteRequest(plan_id=plan.plan_id, approved=True)))
+    assert again["status"] == "failed"
     assert len(scanned) == 2
 
     deploy._deployment_plans.pop(plan.plan_id, None)

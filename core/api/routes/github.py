@@ -52,6 +52,8 @@ class GhSetSecretRequest(BaseModel):
 class GhRepositoryConnectRequest(BaseModel):
     repository: str = Field(..., pattern=r"^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$")
     create: bool = False
+    #: 새로 만들 때만 쓴다. 기본은 예전처럼 비공개.
+    private: bool = True
 
 
 # ── 엔드포인트 ──────────────────────────────────────────────────────────
@@ -125,9 +127,9 @@ async def github_set_secret(body: GhSetSecretRequest) -> dict:
 
 @router.post("/api/github/repository/connect")
 async def github_connect_repository(body: GhRepositoryConnectRequest) -> dict:
-    """Validate access or create an empty private repository; never commit/push."""
+    """Validate access or create an empty (private by default, or public) repository; never commit/push."""
     from github_agent import get_github_agent
-    return await asyncio.to_thread(get_github_agent().connect_repository, body.repository, body.create)
+    return await asyncio.to_thread(get_github_agent().connect_repository, body.repository, body.create, body.private)
 
 
 @router.get("/api/github/runs")

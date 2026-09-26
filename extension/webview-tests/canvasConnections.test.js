@@ -25,7 +25,7 @@ test('first-time connection initializes Git and origin but never commits/uploads
  assert.equal(state.initialized,true);assert.equal(state.repository,'tester/repo');assert.equal(state.branch,'main');assert.equal(state.head,'');assert.equal(state.dirty,true);
  assert.equal(s.git('remote','get-url','origin'),'https://github.com/tester/repo.git');
  assert.throws(()=>s.git('rev-parse','--verify','HEAD'));
- assert.deepEqual(s.connections,[{repository:'tester/repo',create:false}]);
+ assert.deepEqual(s.connections,[{repository:'tester/repo',create:false,private:true}]);
  s.git('add','app.js');s.git('-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-m','Initial');
  await s.send('canvas.github.status');assert.ok(s.output.at(-1).payload.git.head);
 });
@@ -87,7 +87,7 @@ test('Discord loopback bridge supports status, guild/channel selection and opt-i
 test('offline Discord gives an actionable error instead of hiding its entry point',async t=>{
  const s=fixture(t),original=global.fetch;
  global.fetch=async()=>{throw new TypeError('fetch failed');};
- try {await s.send('canvas.discord.status');assert.equal(s.output.at(-1).type,'canvas.error');assert.match(s.output.at(-1).payload.message,/봇 서버에 연결할 수 없습니다/);}
+ try {await s.send('canvas.discord.status');assert.equal(s.output.at(-1).type,'canvas.error');assert.match(s.output.at(-1).payload.message,/봇 서버\(127\.0\.0\.1:8765\)가 실행 중이 아닙니다/);assert.match(s.output.at(-1).payload.message,/내 봇 토큰으로 연결/);}
  finally {global.fetch=original;}
 });
 
@@ -107,7 +107,7 @@ test('a failed bot lookup keeps an existing webhook connection working',async t=
  const send=(type,p={})=>host.handle(type,{requestId:'fixture',...p},(type,payload)=>output.push({type,payload}),()=>'',async()=>assert.fail('Must not deploy'));
  try {
   await send('canvas.discord.connectWebhook');assert.equal(output.at(-1).payload.channel_name,'alerts');
-  await send('canvas.discord.status',{mode:'bot'});assert.equal(output.at(-1).type,'canvas.error');assert.match(output.at(-1).payload.message,/run\.ps1/);
+  await send('canvas.discord.status',{mode:'bot'});assert.equal(output.at(-1).type,'canvas.error');assert.match(output.at(-1).payload.message,/내 봇 토큰으로 연결/);
   await send('canvas.discord.status');assert.equal(output.at(-1).type,'canvas.discord.statusResult');assert.equal(output.at(-1).payload.mode,'webhook');assert.equal(output.at(-1).payload.channel_name,'alerts');
   await send('canvas.discord.event',{enabled:true,eventId:'e1',title:'배포 완료',detail:'ok'});assert.equal(output.at(-1).type,'canvas.discord.eventResult');
   assert.ok(calls.some(c=>c.method==='POST'&&c.url.startsWith('https://discord.com/api/webhooks/')));

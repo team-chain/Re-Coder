@@ -404,7 +404,7 @@ class GitHubAgent:
         self._repos_cached_at = now
         return {"status": "ok", "repos": repos, "cached": False}
 
-    def connect_repository(self, repository: str, create: bool = False) -> dict:
+    def connect_repository(self, repository: str, create: bool = False, private: bool = True) -> dict:
         """Connect without publishing files or modifying a local Git repository."""
         import re
         if not self._token:
@@ -426,9 +426,10 @@ class GitHubAgent:
             return {"status": "error", "message": "사용자 인증을 다시 확인하세요."}
         endpoint = "/user/repos" if owner.lower() == user.lower() else f"/orgs/{owner}/repos"
         code, body = _http("POST", endpoint, token=self._token,
-                           payload={"name": name, "private": True, "auto_init": False})
+                           payload={"name": name, "private": bool(private), "auto_init": False})
         if code != 201:
-            return {"status": "error", "message": f"비공개 저장소 생성 실패 ({code}). 이름과 생성 권한을 확인하세요."}
+            kind = "비공개" if private else "공개"
+            return {"status": "error", "message": f"{kind} 저장소 생성 실패 ({code}). 이름과 생성 권한을 확인하세요."}
         self._repos_cache = []
         return {"status": "ok", "repository": repository}
 

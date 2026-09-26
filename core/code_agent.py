@@ -928,6 +928,7 @@ def _build_code_prompt(
 - 기존 파일 목록과 겹치지 않게 파일명을 정하되, 사용자가 파일명을 지정하면 그대로 따릅니다.
 - 사용자가 확정한 설계 결정이 있으면 그 선택을 우선하고 임의로 다른 방식을 택하지 않습니다.
 - package.json 의 scripts 는 실제로 존재하는 파일과 설치되는 도구만 참조합니다. 쓰지 않는 빌드 스크립트나 의존성(예: src/ 없는 react-scripts)을 넣지 마세요.
+- 의존성은 알려진 치명적 취약점이 없는 최신 major 버전을 씁니다(예: sqlite3 는 ^6.0.1 — 5.x 는 배포 보안 검사에서 차단됩니다).
 - 코드가 require/import 하는 외부 패키지는 모두 package.json(또는 requirements.txt)에 선언합니다.
 - 서버는 포트를 환경변수로 받게 합니다(예: process.env.PORT || 3000). 가능하면 GET /health 가 200 을 돌려주게 합니다.
 

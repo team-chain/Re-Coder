@@ -11,7 +11,7 @@ RUNTIME_IMPORTS = (
     'api.routes.canvas', 'github_agent', 'static_frontend', 'deployment_inputs', 'code_agent', 'adr', 'aws_onboarding',
     'agents.ecs_agent', 's3_byo', 'security_scan', 'local_deploy_agent',
     'llm.bedrock_provider', 'llm.gemini_provider', 'llm.provider_router', 'llm.api_key_provider',
-    'build_readiness', 'build_failure',
+    'build_readiness', 'build_failure', 'vuln_advice',
     'preflight.contract_loader', 'persistence', 'nacl.public', 'paramiko',
     'google.genai', 'google.generativeai',
 )

@@ -12,7 +12,7 @@
  */
 
 import * as vscode from 'vscode';
-import { initActiveProject } from './activeProject';
+import { initActiveProject, pickProjectFolder } from './activeProject';
 import { isAiKeyProvider, runAiConnectCommand } from './ai/aiKeys';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -428,6 +428,14 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('recoder.ai.connect', async (provider?: unknown) => {
             const changed = await runAiConnectCommand(context, isAiKeyProvider(provider) ? provider : undefined);
             if (changed) { await vscode.commands.executeCommand('recoder.restartCore'); }
+        })
+    );
+
+    // ── Command: 배포할 프로젝트 폴더 변경 ─────────────────────────────────────
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.selectProject', async () => {
+            try { await pickProjectFolder(); }
+            catch (err) { vscode.window.showErrorMessage(`ReCoder: ${err instanceof Error ? err.message : String(err)}`); }
         })
     );
 

@@ -39,6 +39,21 @@ def test_new_repo_is_private_empty_and_does_not_run_git(agent, monkeypatch):
     assert calls[1][2]['payload'] == {'name': 'new-repo', 'private': True, 'auto_init': False}
 
 
+def test_new_public_repo_when_chosen(agent, monkeypatch):
+    calls = []
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return (404, {}) if method == 'GET' else (201, {})
+    monkeypatch.setattr(gh, '_http', request)
+    assert agent.connect_repository('tester/demo', True, private=False)['status'] == 'ok'
+    assert calls[1][2]['payload'] == {'name': 'demo', 'private': False, 'auto_init': False}
+
+
+def test_connect_route_defaults_to_private():
+    body = github.GhRepositoryConnectRequest(repository='tester/x', create=True)
+    assert body.private is True
+
+
 @pytest.mark.parametrize('code,body,create', [(403, {}, True), (404, {}, False), (200, {'permissions': {'push': False}}, False), (200, {'permissions': {'push': True}, 'archived': True}, False), (200, {'permissions': {'push': True}}, True)])
 def test_connection_failures_never_create_or_publish(agent, monkeypatch, code, body, create):
     def request(method, *a, **kw):

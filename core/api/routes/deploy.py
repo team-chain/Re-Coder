@@ -3206,7 +3206,11 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
         if trivy_report.get("status") == "ok":
             crit = int(trivy_report.get("critical_count", 0))
             if crit > 0:
-                blockers.append(f"Trivy: {crit} CRITICAL CVE(s) in {image}")
+                advice = _vulnerability_advice(trivy_report, workspace)
+                top = "; ".join(f"{i['package']} {i['installed']}→{i['fixed'] or '수정 없음'}" for i in advice["items"][:3])
+                blockers.append(
+                    f"Trivy: {crit} CRITICAL CVE(s) in {image} (이전에 빌드된 이미지 기준 — 실행 시 새로 빌드해 다시 검사)"
+                    + (f": {top}" if top else ""))
             high = int(trivy_report.get("high_count", 0))
             if high > 0:
                 risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {image}")
@@ -3426,6 +3430,24 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
     return None
 
 
+def _vulnerability_advice(report: dict, workspace_path: str) -> dict:
+    """Trivy 결과 → 항목별 출처·해결책 + 화면용 diagnosis. 실패해도 차단은 유지된다."""
+    try:
+        from vuln_advice import advise
+    except ImportError:  # pragma: no cover
+        from core.vuln_advice import advise  # type: ignore
+    try:
+        return advise(report.get("findings") or [], workspace_path or None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("vulnerability advice failed: %s", exc)
+        n = int(report.get("critical_count", 0))
+        return {"items": [], "diagnosis": {
+            "code": "IMAGE_CRITICAL_CVE", "title": f"보안 검사에서 치명적(CRITICAL) 취약점 {n}건",
+            "cause": "Trivy 가 이미지에서 치명적 취약점을 찾아 배포를 멈췄습니다. 기존 컨테이너는 그대로입니다.",
+            "fix": "Security 탭의 이미지 검사 결과에서 패키지와 수정 버전을 확인해 올린 뒤 다시 배포하세요.",
+            "lines": [], "step": "보안 확인 (Trivy 이미지 검사)"}}
+
+
 def _diagnose_build_failure(workspace_path: str, output: str, stage: str = "build") -> dict:
     """빌드 출력에서 실제 원인 줄과 해결책을 뽑는다. 실패해도 배포 결과는 그대로 둔다."""
     try:
@@ -3537,13 +3559,23 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             if deferred_report.get("status") == "ok":
                 deferred_crit = int(deferred_report.get("critical_count", 0))
                 if deferred_crit > 0:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"Trivy: CRITICAL {deferred_crit}건 — 배포를 차단했습니다 "
-                            f"({plan.image}). 취약점을 해결한 뒤 다시 시도하세요."
+                    #: 예전에는 "CRITICAL 1건" 만 알려 주는 400 이었다 — 무엇을 고칠지 알 수
+                    #: 없었다. 차단은 그대로 두고, 빌드 실패와 같은 모양(diagnosis)으로
+                    #: 어떤 패키지가 어디서 왔고 어떻게 고치는지를 돌려준다.
+                    advice = _vulnerability_advice(deferred_report, _plan_workspaces.get(request.plan_id, ""))
+                    return {
+                        "status": "failed",
+                        "stage": "scan",
+                        "plan_id": request.plan_id,
+                        "message": (
+                            f"Trivy: CRITICAL {deferred_crit}건 — 배포를 차단했습니다 ({plan.image}). "
+                            "기존 컨테이너는 건드리지 않았습니다."
                         ),
-                    )
+                        "stderr": "\n".join(advice["diagnosis"]["lines"]),
+                        "stdout": "",
+                        "diagnosis": advice["diagnosis"],
+                        "vulnerabilities": advice["items"],
+                    }
             elif plan.approval_level != ApprovalLevel.DOUBLE_CONFIRM:
                 raise HTTPException(status_code=409, detail='빌드 후 이미지 검사를 완료하지 못했습니다. 기존 컨테이너를 유지합니다. 검사 상태를 확인하고 새 배포 계획을 승인하세요.')
 

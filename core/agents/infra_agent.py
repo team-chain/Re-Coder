@@ -667,6 +667,11 @@ class InfraAgent:
                     "installed": vuln.get("InstalledVersion"),
                     "fixed": vuln.get("FixedVersion"),
                     "title": vuln.get("Title", ""),
+                    #: 출처를 가르는 데 쓴다(베이스 이미지 OS 패키지 / 번들 npm / 앱 의존성).
+                    "target": result.get("Target", ""),
+                    "class": result.get("Class", ""),
+                    "type": result.get("Type", ""),
+                    "pkg_path": vuln.get("PkgPath", ""),
                 }
                 if severity == "CRITICAL":
                     critical.append(entry)

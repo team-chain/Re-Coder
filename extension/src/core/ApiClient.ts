@@ -613,7 +613,7 @@ export class ApiClient {
     }
 
     /** 인증된 사용자의 GitHub 레포 목록. */
-    async githubConnectRepository(req:{repository:string;create:boolean}):Promise<{status:string;message?:string}> {
+    async githubConnectRepository(req:{repository:string;create:boolean;private?:boolean}):Promise<{status:string;message?:string}> {
         const resp=await this.request<{status:string;message?:string}>('POST','/api/github/repository/connect',req);
         return resp.success&&resp.data ? resp.data : {status:'error',message:resp.error};
     }

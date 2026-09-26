@@ -84,6 +84,8 @@ def test_실기기_게시판의_네_가지_문제를_빌드_전에_짚는다(tmp
     assert r.runtime == "node" and r.app_port == 5000 and r.probe_path() == "/"
     assert _codes(r) == {
         "NODE_UNUSED_BUILD_SCRIPT": "error",
+        #: sqlite3 5.x → tar CRITICAL — 실제 Trivy 게이트에서 막힌 사례(TEMP 쇼핑몰).
+        "NODE_VULNERABLE_DEPENDENCY": "error",
         "DOCKERFILE_PORT_MISMATCH": "error",
         "DOCKERFILE_HEALTH_PATH_UNKNOWN": "warning",
         "DOCKERIGNORE_MISSING": "warning",
@@ -95,7 +97,7 @@ def test_자동_수정은_누른_것만_적용하고_원본을_남긴다(tmp_pat
     root = _board(tmp_path)
     original_package = (root / "package.json").read_text(encoding="utf-8")
     original_dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
-    for code in ("NODE_UNUSED_BUILD_SCRIPT", "DOCKERFILE_PORT_MISMATCH",
+    for code in ("NODE_UNUSED_BUILD_SCRIPT", "NODE_VULNERABLE_DEPENDENCY", "DOCKERFILE_PORT_MISMATCH",
                  "DOCKERFILE_HEALTH_PATH_UNKNOWN", "DOCKERIGNORE_MISSING"):
         out = br.apply_fix(root, code)
         assert out["applied"] is True
@@ -110,7 +112,7 @@ def test_자동_수정은_누른_것만_적용하고_원본을_남긴다(tmp_pat
     backups = sorted((root / ".recoder" / "backups").iterdir())
     contents = [b.read_text(encoding="utf-8") for b in backups]
     assert original_package in contents and original_dockerfile in contents  # 두 번 고쳐도 첫 원본이 남는다
-    assert len(backups) == 3
+    assert len(backups) == 4  # package.json 두 번(스크립트·sqlite3) + Dockerfile 두 번
     # 이미 해결된 항목·자동 수정 대상이 아닌 항목
     assert br.apply_fix(root, "DOCKERIGNORE_MISSING")["applied"] is False
     with pytest.raises(ValueError):
@@ -221,10 +223,12 @@ def test_가상_파일로_생성_결과를_미리_본다(tmp_path):
     root = _board(tmp_path)
     fixed = json.loads((root / "package.json").read_text(encoding="utf-8"))
     del fixed["scripts"]["build"], fixed["scripts"]["client"]
+    fixed["dependencies"]["sqlite3"] = "^6.0.1"
     r = br.analyze(root, {"package.json": json.dumps(fixed), "Dockerfile": None})
     assert _codes(r) == {}
     r = br.analyze(root, {"src/index.js": "import React from 'react';", "Dockerfile": None})
-    assert _codes(r) == {}  # src/index.js 가 생기면 CRA 빌드는 가능하다
+    # src/index.js 가 생기면 CRA 빌드는 가능하다(남는 것은 sqlite3 5.x 취약 의존성뿐)
+    assert _codes(r) == {"NODE_VULNERABLE_DEPENDENCY": "error"}
 
 
 # ---------------------------------------------------------------------------

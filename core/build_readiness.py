@@ -35,7 +35,13 @@ WARNING = "warning"
 
 #: 사용자가 버튼 한 번으로 적용할 수 있는(백업을 남기는) 수정 종류.
 AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_HEALTH_PATH_UNKNOWN",
-                "NODE_UNUSED_BUILD_SCRIPT", "DOCKERFILE_WORKDIR_NOT_WRITABLE"}
+                "NODE_UNUSED_BUILD_SCRIPT", "DOCKERFILE_WORKDIR_NOT_WRITABLE", "NODE_VULNERABLE_DEPENDENCY"}
+
+#: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
+#: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
+KNOWN_VULNERABLE_NODE: dict[str, tuple[int, str, str]] = {
+    "sqlite3": (6, "^6.0.1", "sqlite3 5.x 는 치명적(CRITICAL) 취약점이 있는 tar(7.5.20 이하)를 함께 설치합니다"),
+}
 
 
 @dataclass(frozen=True)
@@ -301,6 +307,14 @@ def _express_routes(text: str) -> tuple[set[str], set[str]]:
     return routes, statics
 
 
+def _spec_major(spec) -> Optional[int]:
+    """"^5.1.6" → 5. 태그·경로·URL·와일드카드는 판단하지 않는다(None)."""
+    if not isinstance(spec, str):
+        return None
+    m = re.match(r"^\s*(?:[\^~]|=)?\s*v?(\d+)(?:\.|\s*$|\.x)", spec)
+    return int(m.group(1)) if m else None
+
+
 def _start_entry(scripts: dict) -> Optional[str]:
     for name in ("start", "start:prod", "serve"):
         for words in _script_commands(str(scripts.get(name, ""))):
@@ -330,6 +344,20 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
             deps.update(package[key])
     scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
     workspaces = bool(package.get("workspaces"))
+
+    # 0) 이미지 보안 검사에서 배포가 막힐 것이 확실한 의존성 버전
+    runtime_deps = package.get("dependencies") if isinstance(package.get("dependencies"), dict) else {}
+    has_lock = any(files.exists(n) for n in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml"))
+    for name, (safe_major, safe_range, why) in KNOWN_VULNERABLE_NODE.items():
+        major = _spec_major(runtime_deps.get(name))
+        if major is not None and major < safe_major:
+            result.issues.append(ReadinessIssue(
+                "NODE_VULNERABLE_DEPENDENCY", ERROR,
+                f"`{name}` {runtime_deps[name]} — {why}. 배포 직전 보안 검사(Trivy)가 배포를 차단합니다.",
+                (f"`npm install {name}@{safe_range.lstrip('^~')}` 로 package.json 과 lock 파일을 함께 올리세요."
+                 if has_lock else
+                 f"package.json 의 {name} 를 {safe_range} 로 올리세요(자동 수정 가능, 원본은 .recoder/backups 에 보관)."),
+                "package.json", not has_lock))
 
     # 1) 빌드 스크립트 — Docker 이미지가 `npm run build` 로 실제 실행한다.
     def check_script(name: str, depth: int = 0) -> None:
@@ -848,6 +876,33 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
             scripts.pop(name, None)
         newline = "\r\n" if "\r\n" in text else "\n"
         _write_raw(manifest, json.dumps(package, ensure_ascii=False, indent=2).replace("\n", newline) + newline)
+        changed += ["package.json", backup]
+    elif code == "NODE_VULNERABLE_DEPENDENCY":
+        if not issue.auto_fix:
+            raise ValueError("lock 파일이 있어 package.json 만 바꾸면 npm ci 가 실패합니다. 안내된 npm install 명령을 실행하세요.")
+        manifest = root / "package.json"
+        text = _read_raw(manifest)
+        package = json.loads(text)
+        deps = package.get("dependencies") or {}
+        bumped = []
+        for name, (safe_major, safe_range, _why) in KNOWN_VULNERABLE_NODE.items():
+            major = _spec_major(deps.get(name))
+            if major is not None and major < safe_major:
+                bumped.append(name)
+        if not bumped:
+            raise ValueError("올릴 의존성을 찾지 못했습니다.")
+        backup = _backup(root, "package.json", text)
+        updated = text
+        for name in bumped:
+            pattern = re.compile(r'("' + re.escape(name) + r'"\s*:\s*")[^"]*(")')
+            # 원래 서식(들여쓰기·줄바꿈)을 지키려고 값만 바꾼다. dependencies 안의 첫 항목이 대상이다.
+            start = updated.find('"dependencies"')
+            m = pattern.search(updated, start if start >= 0 else 0)
+            if not m:
+                raise ValueError(f"package.json 에서 {name} 항목을 찾지 못했습니다.")
+            updated = updated[:m.start()] + m.group(1) + KNOWN_VULNERABLE_NODE[name][1] + m.group(2) + updated[m.end():]
+        json.loads(updated)  # 결과가 여전히 올바른 JSON 인지 확인
+        _write_raw(manifest, updated)
         changed += ["package.json", backup]
     elif code == "DOCKERFILE_HEALTH_PATH_UNKNOWN":
         dockerfile = root / "Dockerfile"

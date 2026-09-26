@@ -108,3 +108,46 @@ export function initActiveProject(context: Pick<vscode.ExtensionContext, 'worksp
         if (activeProjectPath() !== before) { emitter.fire(activeProjectPath()); }
     }));
 }
+
+/**
+ * "폴더 변경" — 워크스페이스의 다른 폴더를 고르거나, 새 폴더를 골라 워크스페이스에 추가한다.
+ *
+ * 예전에는 폴더가 둘 이상일 때만 선택 목록이 보여서, 폴더 하나로 연 창에서는 다른
+ * 프로젝트로 바꿀 방법이 없었다. 새 폴더는 창을 새로 열지 않고 워크스페이스에 추가한다
+ * (지금 열린 파일·터미널을 유지). 추가된 폴더가 곧바로 현재 프로젝트가 된다.
+ * 반환: 'selected' | 'added' | 'unchanged'
+ */
+export async function pickProjectFolder(): Promise<'selected' | 'added' | 'unchanged'> {
+    const active = activeProjectPath();
+    type Item = vscode.QuickPickItem & { value: string };
+    const items: Item[] = (vscode.workspace.workspaceFolders ?? []).map((f) => ({
+        label: `$(folder) ${f.name}`,
+        description: f.uri.fsPath === active ? '현재 프로젝트' : '',
+        detail: f.uri.fsPath,
+        value: f.uri.fsPath,
+    }));
+    items.push({ label: '$(folder-opened) 다른 폴더 선택…', description: '워크스페이스에 추가하고 이 폴더로 바꿉니다', value: '' });
+    const pick = await vscode.window.showQuickPick(items, { title: 'ReCoder: 배포할 프로젝트 폴더', placeHolder: '배포·보안 검사 대상 폴더를 고르세요' });
+    if (!pick) { return 'unchanged'; }
+    if (pick.value) {
+        if (normalize(pick.value) === normalize(active)) { return 'unchanged'; }
+        return (await selectActiveProject(pick.value)) ? 'selected' : 'unchanged';
+    }
+    const chosen = await vscode.window.showOpenDialog({
+        canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
+        openLabel: '이 폴더로 변경', title: 'ReCoder: 배포할 프로젝트 폴더 선택',
+        defaultUri: active ? vscode.Uri.file(path.dirname(active)) : undefined,
+    });
+    const folder = chosen?.[0]?.fsPath;
+    if (!folder) { return 'unchanged'; }
+    if (findFolder(folder)) {
+        return (await selectActiveProject(folder)) ? 'selected' : 'unchanged';
+    }
+    await markPendingActiveProject(folder);
+    const count = vscode.workspace.workspaceFolders?.length ?? 0;
+    if (!vscode.workspace.updateWorkspaceFolders(count, 0, { uri: vscode.Uri.file(folder) })) {
+        void globalState?.update(PENDING_KEY, undefined);
+        throw new Error('워크스페이스에 폴더를 추가하지 못했습니다.');
+    }
+    return 'added';
+}
