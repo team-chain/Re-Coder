@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 import { Snapshot } from './model';
+import { defaultRepoName, previewRepoName } from './githubName';
 
 export function GitHubPanel({ workspace, git, onChanged, onReview, onWorkflow, disabled }: {
   workspace:string; git:Snapshot['git']; onChanged:(git:Snapshot['git'])=>void;
@@ -38,6 +39,10 @@ export function GitHubPanel({ workspace, git, onChanged, onReview, onWorkflow, d
     setMessage(p.message||'');
   });
   const busy=disabled||Boolean(pending), signedIn=auth?.status==='authenticated';
+  //: 새 저장소: "이름", "owner/이름", GitHub 주소 모두 받는다. owner 가 없으면 로그인한 계정.
+  const newName=previewRepoName(repository);
+  const typedOwner=repository.trim().replace(/^(?:https?:\/\/)?(?:www\.)?github\.com\//i,'').split('/').filter(Boolean);
+  const newOwner=typedOwner.length>1?typedOwner[0]:(auth?.user||'');
   return <section aria-label="GitHub 연결">
     <header><h3>{signedIn?`GitHub · ${auth.user}`:'GitHub 연결'}</h3><button disabled={busy} onClick={()=>send('status')}>상태 새로고침</button></header>
     {pending&&<p role="status" className="rc-note">{pending==='login'?'VS Code에서 GitHub 로그인을 완료해 주세요…':pending==='connect'?'저장소 연결 중…':pending==='commit'?'선택한 파일을 커밋하고 있습니다…':'GitHub 상태 확인 중…'}</p>}
@@ -48,11 +53,13 @@ export function GitHubPanel({ workspace, git, onChanged, onReview, onWorkflow, d
     {(!git.connected||changing)&&<>
       <p className="rc-muted">로그인 후 이 프로젝트를 올릴 저장소를 연결하세요.</p>
       <div className="rc-fields">
-        <label>연결 방식<select disabled={busy||!signedIn} value={create?`new-${visibility}`:'existing'} onChange={e=>{const v=e.target.value;setCreate(v!=='existing');if(v!=='existing')setVisibility(v==='new-public'?'public':'private');setRepository('');}}><option value="existing">기존 저장소</option><option value="new-public">새 공개 저장소</option><option value="new-private">새 비공개 저장소</option></select></label>
+        <label>연결 방식<select disabled={busy||!signedIn} value={create?`new-${visibility}`:'existing'} onChange={e=>{const v=e.target.value;setCreate(v!=='existing');if(v!=='existing')setVisibility(v==='new-public'?'public':'private');setRepository(v==='existing'?'':defaultRepoName(workspace));}}><option value="existing">기존 저장소</option><option value="new-public">새 공개 저장소</option><option value="new-private">새 비공개 저장소</option></select></label>
         {!create&&repos.length>0&&<label>내 저장소<select disabled={busy||!signedIn} value={repos.some(r=>r.name===repository)?repository:''} onChange={e=>setRepository(e.target.value)}><option value="">저장소 선택 또는 주소 입력</option>{repos.map(repo=><option key={repo.name} value={repo.name}>{repo.name}{repo.private?' · 비공개':''}</option>)}</select></label>}
-        <label>{create?'저장소 이름':'저장소 주소'}<input disabled={busy||!signedIn} value={repository} onChange={e=>setRepository(e.target.value)} placeholder={create?`${auth?.user||'owner'}/my-project`:'owner/repository 또는 GitHub URL'}/></label>
+        <label>{create?'저장소 이름':'저장소 주소'}<input disabled={busy||!signedIn} value={repository} onChange={e=>setRepository(e.target.value)} placeholder={create?'my-project (영문·숫자)':'owner/repository 또는 GitHub URL'}/></label>
       </div>
-      <button disabled={busy||!signedIn||!repository.trim()} onClick={()=>send('connect',{repository:create&&!repository.includes('/')?`${auth?.user}/${repository}`:repository,create,visibility,replace:Boolean(git.hasOrigin||git.connected),previousRepository:git.repository})}>{create?`${visibility==='public'?'공개':'비공개'} 저장소 만들고 연결`:git.hasOrigin||git.connected?'이 저장소로 변경':'이 저장소 연결'}</button>
+      {create&&newName.error&&<p className="rc-note rc-error" role="alert">{newName.error}</p>}
+      {create&&newName.name&&<p className="rc-muted" role="status">만들 저장소: <b>{newOwner}/{newName.name}</b>{newName.name!==repository.trim().split('/').pop()?' (GitHub 규칙에 맞게 공백·한글을 -로 바꿉니다)':''}</p>}
+      <button disabled={busy||!signedIn||!repository.trim()||(create&&!newName.name)} onClick={()=>send('connect',{repository:create?`${newOwner}/${newName.name}`:repository,create,visibility,replace:Boolean(git.hasOrigin||git.connected),previousRepository:git.repository})}>{create?`${visibility==='public'?'공개':'비공개'} 저장소 만들고 연결`:git.hasOrigin||git.connected?'이 저장소로 변경':'이 저장소 연결'}</button>
       {create&&visibility==='public'&&<p className="rc-note" role="note">공개 저장소는 누구나 코드를 볼 수 있습니다. 푸시 전에 시크릿(키·토큰) 검사를 거치지만, .env 등 민감한 파일이 커밋 목록에 없는지 한 번 더 확인하세요.</p>}
       <p className="rc-muted">{git.hasOrigin||git.connected?'프로젝트의 연결 대상을 바꿉니다. 기존 저장소와 커밋은 보존됩니다. ':''}파일 업로드는 별도의 푸시 승인 후 진행합니다.</p>
     </>}

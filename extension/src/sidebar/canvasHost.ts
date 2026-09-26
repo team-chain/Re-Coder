@@ -45,10 +45,40 @@ export async function gitContext(workspace: string) {
     } catch { return {...empty,error:'Git 상태를 읽지 못했습니다. Git 설치와 프로젝트 폴더 접근 권한을 확인하세요.'}; }
 }
 
-export function githubRepository(value: string): string {
-    const match = /^(?:https:\/\/github\.com\/)?([a-zA-Z0-9-]+\/[a-zA-Z0-9_.-]+?)(?:\.git)?\/?$/.exec(value.trim());
-    if (!match || match[1].split('/').some(part=>part==='.'||part==='..')) throw new Error('GitHub 저장소를 owner/name 또는 https://github.com/owner/name 형식으로 입력하세요.');
-    return match[1];
+const REPO_FORMAT_ERROR = 'GitHub 저장소를 owner/name 또는 https://github.com/owner/name 형식으로 입력하세요.';
+
+/**
+ * 새 저장소 이름을 GitHub 규칙대로 바꾼다 — GitHub 웹에서 만들 때와 같다.
+ * 영문·숫자·`-`·`_`·`.` 외의 글자(공백·한글 등)는 `-` 로 바꾸고, 앞뒤 `-` 와 끝의 `.git` 은 뗀다.
+ * 예전에는 "Recoder Demo" 처럼 공백이 있으면 형식 오류만 내고 만들지 못했다.
+ */
+export function githubRepoName(raw: string): string {
+    const name = raw.trim().replace(/\.git$/i, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '').slice(0, 100);
+    if (!name || /^-+$/.test(name)) throw new Error('저장소 이름은 영문·숫자로 입력하세요. 한글·기호만으로는 만들 수 없습니다 (예: lunch-vote).');
+    if (name === '.' || name === '..') throw new Error('저장소 이름으로 . 이나 .. 은 쓸 수 없습니다.');
+    return name;
+}
+
+/**
+ * 입력값 → `owner/name`. 받는 형식: owner/name, https://github.com/owner/name(.git),
+ * github.com/owner/name, www.github.com/…, git@github.com:owner/name.git.
+ * `create` 이면 이름을 GitHub 규칙대로 바꿔서 만든다.
+ */
+export function githubRepository(value: string, create = false): string {
+    const path = value.trim()
+        .replace(/^git@github\.com:/i, '')
+        .replace(/^(?:https?:\/\/)?(?:www\.)?github\.com\//i, '')
+        .replace(/[?#].*$/, '')
+        .replace(/\/+$/, '');
+    const parts = path.split('/');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error(REPO_FORMAT_ERROR);
+    const [owner, rawName] = parts;
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner)) throw new Error(`계정(owner) '${owner}' 이(가) 올바르지 않습니다. GitHub 사용자·조직 이름은 영문·숫자·하이픈만 씁니다.`);
+    const name = create ? githubRepoName(rawName) : rawName.replace(/\.git$/i, '');
+    if (!/^[A-Za-z0-9_.-]{1,100}$/.test(name) || name === '.' || name === '..') {
+        throw new Error(`저장소 이름 '${rawName}' 을(를) 쓸 수 없습니다. 영문·숫자·-·_·. 만 쓸 수 있습니다 (공백·한글 불가).`);
+    }
+    return `${owner}/${name}`;
 }
 
 export function publicGit(git: Awaited<ReturnType<typeof gitContext>>) {
@@ -236,7 +266,7 @@ export class CanvasHost {
             if (this.committing || this.connecting || this.executing) throw new Error('진행 중인 배포·Git 작업이 끝난 뒤 다시 시도하세요.');
             this.connecting = true;
             try {
-            const repository=githubRepository(String(p.repository||''));
+            const repository=githubRepository(String(p.repository||''),p.create===true);
             const current=await this.readGit(workspace);
             if (current.error) throw new Error(current.error);
             if (current.hasOrigin && current.repository!==repository && (p.replace!==true || p.previousRepository!==current.repository)) throw new Error('현재 저장소를 확인하고 저장소 변경을 선택하세요.');

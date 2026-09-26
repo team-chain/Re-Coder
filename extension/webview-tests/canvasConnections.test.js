@@ -56,6 +56,14 @@ test('GitHub login returns a correlated status even when native authentication i
 test('repository input rejects tokens, other hosts and traversal',()=>{
  for(const value of ['https://evil.test/a/b','https://secret@github.com/a/b','a/../b','a/..'])assert.throws(()=>githubRepository(value));
  assert.equal(githubRepository('org/repo.git'),'org/repo');
+ // 사용자가 흔히 넣는 형식을 모두 받는다.
+ for(const value of ['https://github.com/LDK511/lunch-vote','http://github.com/LDK511/lunch-vote/','github.com/LDK511/lunch-vote.git','www.github.com/LDK511/lunch-vote','git@github.com:LDK511/lunch-vote.git',' LDK511/lunch-vote '])assert.equal(githubRepository(value),'LDK511/lunch-vote',value);
+ // 새 저장소는 GitHub 웹과 같이 공백·한글을 -로 바꿔 만든다(예전엔 형식 오류).
+ assert.equal(githubRepository('LDK511/Recoder Demo',true),'LDK511/Recoder-Demo');
+ assert.equal(githubRepository('LDK511/점심 투표 app',true),'LDK511/app');
+ assert.throws(()=>githubRepository('LDK511/점심투표',true),/영문·숫자/);
+ assert.throws(()=>githubRepository('LDK511/Recoder Demo'),/공백·한글 불가/);
+ assert.throws(()=>githubRepository('/lunch-vote',true),/형식/);
 });
 
 test('Discord loopback bridge supports status, guild/channel selection and opt-in events',async t=>{
