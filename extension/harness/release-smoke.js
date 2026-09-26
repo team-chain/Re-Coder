@@ -23,6 +23,10 @@ async function extract(file, destination) {
           fs.mkdirSync(path.dirname(target), { recursive: true });
           const stream = await new Promise((yes, no) => zip.openReadStream(entry, (error, value) => error ? no(error) : yes(value)));
           await pipeline(stream, fs.createWriteStream(target));
+          //: VS Code 는 설치 시 ZIP 의 유닉스 권한을 복원한다. 스모크도 같게 해야
+          //: 번들 Core 가 EACCES 없이 실행된다(권한을 버리면 설치본과 다른 걸 검사한다).
+          const mode = (entry.externalFileAttributes >>> 16) & 0o777;
+          if (mode && process.platform !== 'win32') fs.chmodSync(target, mode);
         }
         zip.readEntry();
       } catch (error) { zip.close(); reject(error); }
@@ -172,7 +176,11 @@ async function main() {
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.status !== 0) {
       const log = path.join(home, '.recoder', 'core.log');
-      if (fs.existsSync(log)) fs.copyFileSync(log, path.join(ext, '..', '.canvas-qa', `release-smoke-core-${version}.log`));
+      if (fs.existsSync(log)) {
+        const qa = path.join(ext, '..', '.canvas-qa');
+        fs.mkdirSync(qa, { recursive: true });
+        fs.copyFileSync(log, path.join(qa, `release-smoke-core-${version}.log`));
+      }
       throw new Error(result.stderr || String(result.error || `Smoke exited ${result.status}`));
     }
     console.log('PASS: native VSIX contents and checksums; no Python on runtime PATH');

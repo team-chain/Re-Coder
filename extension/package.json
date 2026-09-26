@@ -2,9 +2,11 @@
   "name": "recoder",
   "displayName": "ReCoder — AI DevOps Agent",
   "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
-  "version": "1.1.10",
+  "version": "1.1.11",
   "publisher": "recoder-team",
   "license": "MIT",
+  "preview": true,
+  "pricing": "Free",
   "repository": {
     "type": "git",
     "url": "https://github.com/team-chain/Re-Coder.git"
@@ -34,6 +36,20 @@
   ],
   "main": "./out/extension.js",
   "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#0b0d11",
+    "theme": "dark"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "ReCoder는 로컬 Core 프로세스를 실행하고, 워크스페이스 파일을 수정하며, 클라우드로 배포합니다. 신뢰할 수 있는 워크스페이스에서만 동작합니다."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "로컬 파일 시스템과 Core 프로세스가 필요해 가상 워크스페이스에서는 동작하지 않습니다."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -275,8 +291,8 @@
         },
         "recoder.gateway.url": {
           "type": "string",
-          "default": "https://tfuvwq54xg.execute-api.ap-northeast-2.amazonaws.com",
-          "description": "운영자 Bedrock 게이트웨이 베이스 URL. 설정 시 최초 실행에서 반 코드로 토큰을 발급받아 AWS 키 없이 AI를 사용합니다. 비우면 본인 AWS(BYO) 모드."
+          "default": "",
+          "description": "운영자가 제공한 Bedrock 게이트웨이 베이스 URL(수업·팀 사용자용). 설정한 뒤 'ReCoder: Connect to Gateway (Enroll)' 로 등록 코드를 입력하면 AWS 키 없이 AI를 사용합니다. 비워 두면 본인 AWS 계정(BYO)으로 동작합니다."
         },
         "recoder.bridge.httpPort": {
           "type": "number",
