@@ -1,6 +1,6 @@
 /** ReCoder workspace and sidebar: Develop, Deploy, Security, and shared status. */
 
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "./hooks/useVSCodeApi";
 import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
@@ -338,6 +338,7 @@ const App: React.FC = () => {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [diagnosticsPending, setDiagnosticsPending] = useState(true);
+  const coreErrorShown = useRef(false);
   const [diagnosticsError, setDiagnosticsError] = useState("");
 
   useMessage(
@@ -366,6 +367,17 @@ const App: React.FC = () => {
       if (type === "diagnostics.status") {
         const p = payload as { pending?: boolean; error?: string };
         setDiagnosticsPending(!!p.pending); setDiagnosticsError(p.error ?? "");
+      }
+      if (type === "core.error") {
+        //: Core 연결 실패 — "확인 중"에 멈춰 있지 않게 풀고 원인과 다시 확인 버튼을 보여 준다.
+        coreErrorShown.current = true;
+        setDiagnosticsPending(false);
+        setDiagnosticsError((payload as {message?: string})?.message || "Core에 연결할 수 없습니다.");
+      }
+      if (type === "healthUpdate" && (payload as {status?: string})?.status === "ok" && coreErrorShown.current) {
+        //: 다시 연결되면 연결 오류 문구를 거둔다(진단 오류는 진단 결과가 따로 갱신한다).
+        coreErrorShown.current = false;
+        setDiagnosticsError("");
       }
       if (type === "diagnostics.error") {
         setDiagnosticsPending(false); setDiagnosticsError((payload as {message?: string})?.message || "연결 확인에 실패했습니다.");

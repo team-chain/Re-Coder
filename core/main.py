@@ -102,7 +102,26 @@ def _parent_pid() -> int:
         return 0
 
 
-def _guard_tick(pid: int, port: int, token: str, parent: int, parent_misses: int) -> int:
+def _safe_print(message: str) -> None:
+    """확장 호스트가 죽어 stdout 파이프가 끊겼거나 콘솔 인코딩이 한글을 못 쓰면 print 가
+    예외를 던진다. 감시 루프가 그 예외로 죽으면 종료·복구가 멈추므로 절대 던지지 않는다."""
+    try:
+        print(message, flush=True)
+    except Exception:
+        pass
+
+
+def _parent_alive(parent: int, since) -> bool:
+    """부모(확장 호스트)가 살아 있는가. PID 가 다른 프로세스에 재사용됐으면 죽은 것으로 본다."""
+    try:
+        if not CoreSingleton._pid_alive(parent):
+            return False
+        return not CoreSingleton._pid_reused(parent, since)
+    except Exception:
+        return True
+
+
+def _guard_tick(pid: int, port: int, token: str, parent: int, parent_misses: int, since=None) -> int:
     """한 번의 점검. 반환값은 확장 호스트가 연속으로 없던 횟수.
 
     1) runtime.json 이 사라졌거나 다른 값으로 바뀌었는데 **락은 여전히 이 Core 것**이면
@@ -118,31 +137,35 @@ def _guard_tick(pid: int, port: int, token: str, parent: int, parent_misses: int
             if lock and lock.get("pid") == pid:
                 CoreSingleton.write_runtime(port=port, token=token, pid=pid)
                 CoreSingleton.set_file_permissions(CoreSingleton.RUNTIME_FILE)
-                print("[ReCoder Core] runtime.json 을 복구했습니다.", flush=True)
+                _safe_print("[ReCoder Core] runtime.json restored.")
     except Exception:
         pass
     if parent <= 0:
         return 0
-    try:
-        alive = CoreSingleton._pid_alive(parent)
-    except Exception:
-        alive = True
-    return 0 if alive else parent_misses + 1
+    return 0 if _parent_alive(parent, since if since is not None else datetime.utcnow()) else parent_misses + 1
 
 
 async def _runtime_guard(pid: int, port: int, token: str) -> None:
     import asyncio
     parent = _parent_pid()
+    #: 부모는 Core 보다 먼저 시작했다. Core 시작 뒤에 시작된 같은 PID 는 재사용된 것이다.
+    since = datetime.utcnow()
     misses = 0
     while True:
-        await asyncio.sleep(_GUARD_INTERVAL_SECONDS)
-        misses = _guard_tick(pid, port, token, parent, misses)
+        try:
+            await asyncio.sleep(_GUARD_INTERVAL_SECONDS)
+            misses = _guard_tick(pid, port, token, parent, misses, since)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
         if misses >= 2:
-            print("[ReCoder Core] VS Code 확장 호스트가 종료되어 Core 를 종료합니다.", flush=True)
+            _safe_print("[ReCoder Core] VS Code extension host exited; shutting down Core.")
             try:
                 CoreSingleton.release_lock(pid)
-            finally:
-                os._exit(0)
+            except Exception:
+                pass
+            os._exit(0)
 
 
 @asynccontextmanager
@@ -349,6 +372,12 @@ def _handle_shutdown(signum, _frame) -> None:
 
 def main() -> None:
     multiprocessing.freeze_support()
+    #: 콘솔·파이프 인코딩이 한글을 못 쓰는 Windows 로캘에서도 출력 때문에 죽지 않게 한다.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
     # load_dotenv() 는 파일 상단에서 이미 호출했다(임포트 순서 때문). 중복 호출은
     # 하지 않는다 — override=False 라 무해하지만, 두 군데에 있으면 다음 사람이
     # 어느 쪽이 실제로 먹는지 헷갈린다.

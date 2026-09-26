@@ -65,6 +65,8 @@ export class CoreManager {
     /** 동시에 열린 Sidebar/Workspace 가 같은 Core를 중복 시작하지 않도록 직렬화. */
     private ensurePromise: Promise<CoreClient> | null = null;
     private restartPromise: Promise<CoreClient> | null = null;
+    /** 방금 띄운 Core 가 준비 전에 끝났는지와 마지막 stderr 몇 줄 — 준비 대기가 60초를 헛돌지 않게. */
+    private spawnWatch: { exited: boolean; code: number | null; tail: string[] } | null = null;
     private extensionContext: vscode.ExtensionContext;
 
     // CoreClient 인스턴스 (외부에서 사용)
@@ -128,7 +130,10 @@ export class CoreManager {
                     this._client = new CoreClient(this.port, this.sessionToken);
                     return this._client;
                 }
-            } else if (!Number.isSafeInteger(runtime.pid) || runtime.pid <= 1 || this.isProcessRunning(runtime.pid)) {
+            } else if (Number.isSafeInteger(runtime.pid) && (runtime.pid as number) > 1
+                && this.isProcessRunning(runtime.pid as number) && await this.runtimeAnswers(runtime)) {
+                //: 다른 실행 경로의 Core 가 **실제로 응답할 때만** 막는다. PID 만 살아 있는 남은 기록은
+                //: 아래 cleanupStale 이 정리한다(예전엔 없는 Core 를 이유로 영원히 막았다).
                 this.assertCompatibleRuntime(runtime, expected);
             }
         }
@@ -150,7 +155,10 @@ export class CoreManager {
                 }
                 await this.sleep(200);
             }
-            throw new Error('실행 중인 Core의 인증 정보를 읽지 못했습니다. Core 실행 상태를 확인한 뒤 다시 연결하세요.');
+            //: 연결 정보 없이 남은 이전 Core(업데이트·창 강제 종료 뒤) — 사용자 확인 후 정리하고 새로 띄운다.
+            if (!await this.recoverOrphanCore()) {
+                throw new Error('실행 중인 Core의 인증 정보를 읽지 못했습니다. 이전 버전 Core가 남아 있을 수 있습니다 — VS Code 창을 모두 닫고 작업 관리자에서 recoder-core 를 종료한 뒤 다시 여세요.');
+            }
         }
 
         if (this.isSpawning) {
@@ -435,7 +443,14 @@ export class CoreManager {
                     }
                 } catch (error) {
                     restartLog.event(`shutdown request failed: ${error instanceof Error ? error.message : String(error)}`);
-                    throw error;
+                    clearTimeout(timer);
+                    //: 연결 자체가 안 되면(아무도 그 포트에서 듣지 않음) 남은 기록이다 — PID 는 다른
+                    //: 프로그램이 재사용했을 수 있다. 기록만 지우고 새로 띄운다. HTTP 오류는 그대로 알린다.
+                    const unreachable = error instanceof TypeError || (error instanceof Error && error.name === 'AbortError');
+                    if (!unreachable || await this.runtimeAnswers(runtime)) { throw error; }
+                    try { fs.unlinkSync(this.getRuntimeJsonPath()); } catch { /* already removed */ }
+                    this._client = null;
+                    return this._ensureRunning();
                 } finally {
                     clearTimeout(timer);
                 }
@@ -463,8 +478,65 @@ export class CoreManager {
             return true;
         } catch (err) {
             if ((err as NodeJS.ErrnoException).code === 'ESRCH') { return false; }
-            throw err;
+            //: EPERM(다른 사용자·관리자 프로세스)은 "살아 있음". 예전엔 원문 예외가 화면까지 올라갔다.
+            return true;
         }
+    }
+
+    /** core.lock 의 PID 가 살아 있는 ReCoder Core 프로세스면 그 PID. */
+    private orphanCorePid(): number | null {
+        try {
+            const lock = JSON.parse(fs.readFileSync(this._lockPath, 'utf-8')) as { pid?: number };
+            const pid = Number(lock.pid);
+            if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid || !this.isProcessRunning(pid)) { return null; }
+            const described = process.platform === 'win32'
+                ? cp.execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: 'utf-8', windowsHide: true, timeout: 5000 })
+                : cp.execSync(`ps -p ${pid} -o args=`, { encoding: 'utf-8', timeout: 5000 });
+            return /recoder-core|core[\\/]main\.py|\bmain\.py\b/i.test(described) ? pid : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** 연결 정보 없이 남은 이전 Core 를 사용자 확인 후 종료한다. 종료됐으면 true. */
+    private async recoverOrphanCore(): Promise<boolean> {
+        const pid = this.orphanCorePid();
+        if (!pid) { return false; }
+        const action = '종료 후 다시 시작';
+        const choice = await vscode.window.showWarningMessage?.(
+            '이전 ReCoder Core가 연결 정보 없이 실행 중입니다(확장 업데이트나 창 강제 종료 뒤 남은 프로세스). 종료하고 새로 시작할까요?',
+            { modal: true }, action);
+        if (choice !== action) { return false; }
+        const log = this.createProcessLog();
+        log.setPid(pid);
+        log.event('orphan core termination requested by user');
+        try {
+            if (process.platform === 'win32') {
+                execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true });
+            } else {
+                process.kill(pid, 'SIGTERM');
+            }
+        } catch { /* already gone */ }
+        const deadline = Date.now() + 5000;
+        while (this.isProcessRunning(pid) && Date.now() < deadline) { await this.sleep(200); }
+        if (this.isProcessRunning(pid)) { return false; }
+        try { fs.unlinkSync(this._lockPath); } catch { /* the next Core reclaims a stale lock anyway */ }
+        return true;
+    }
+
+    /** runtime.json 이 가리키는 포트에서 Core 가 실제로 응답하는가(두 번 확인). */
+    private async runtimeAnswers(runtime: RuntimeConfig): Promise<boolean> {
+        for (let i = 0; i < 2; i++) {
+            try {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 3000);
+                const res = await fetch(`http://127.0.0.1:${runtime.port}/api/health`, { signal: controller.signal });
+                clearTimeout(timer);
+                if (res.status > 0) { return true; }
+            } catch { /* not answering */ }
+            if (i === 0) { await this.sleep(1000); }
+        }
+        return false;
     }
 
     private createProcessLog(secrets: string[] = []): CoreProcessLog {
@@ -496,7 +568,12 @@ export class CoreManager {
             //: 띄우는 Docker Desktop(Electron)이 그걸 물려받으면 GUI 없이 즉시 종료한다(실기기).
             const hostEnv: NodeJS.ProcessEnv = { ...process.env };
             for (const k of ['ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ATTACH_CONSOLE', 'NODE_OPTIONS']) { delete hostEnv[k]; }
-            const coreEnv = { ...hostEnv, ...gatewayEnv, ...awsEnv, ...aiEnv };
+            //: 키로 AWS 에 연결했으면 셸에서 물려받은 AWS_PROFILE 을 넘기지 않는다 — 남아 있으면
+            //: Bedrock 요청이 화면에 보이는 계정이 아닌 그 프로필 계정으로 나간다.
+            if (awsEnv.AWS_ACCESS_KEY_ID) { delete hostEnv.AWS_PROFILE; delete hostEnv.AWS_DEFAULT_PROFILE; }
+            //: coreEnv 는 **실제로 Core 에 넘기는 환경**이다. 예전에는 AI API 키(aiEnv)를 로그 가림용으로만
+            //: 쓰고 spawn 에는 빠뜨려서, Claude/ChatGPT 키로 연결해도 Core 가 키를 받지 못했다.
+            const coreEnv: NodeJS.ProcessEnv = { ...hostEnv, ...gatewayEnv, ...awsEnv, ...aiEnv, RECODER_PARENT_PID: String(process.pid) };
             processLog = this.createProcessLog(Object.entries(coreEnv)
                 .filter(([key]) => /TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY/i.test(key))
                 .map(([, value]) => value ?? ''));
@@ -504,8 +581,7 @@ export class CoreManager {
             processLog.event(`selected mode=${this.isDevelopment() ? 'development' : 'installed'} entrypoint=${this.expectedEntrypoint(spec)}`);
             this.coreProcess = spawn(spec.command, args, {
                 //: RECODER_PARENT_PID — 이 확장 호스트가 사라지면 Core 가 스스로 종료한다.
-                //: 창 강제 종료·확장 업데이트로 종료 요청이 못 가도 Core 가 고아로 남지 않게.
-                env: { ...hostEnv, ...gatewayEnv, ...awsEnv, RECODER_PARENT_PID: String(process.pid) },
+                env: coreEnv,
                 detached: false,
                 windowsHide: true,
                 stdio: ['ignore', 'pipe', 'pipe'],
@@ -520,11 +596,15 @@ export class CoreManager {
                 processLog.write('stdout', data);
                 console.log('[ReCoder Core]', data.toString().trim());
             });
+            const watch = { exited: false, code: null as number | null, tail: [] as string[] };
+            this.spawnWatch = watch;
             this.coreProcess.stderr?.on('data', (data: Buffer) => {
+                watch.tail = [...watch.tail, ...data.toString().split(/\r?\n/).filter(l => l.trim())].slice(-6);
                 processLog.write('stderr', data);
                 console.error('[ReCoder Core STDERR]', data.toString().trim());
             });
             this.coreProcess.on('exit', (code, signal) => {
+                watch.exited = true; watch.code = code;
                 processLog.event(`exited code=${code} signal=${signal}`);
                 console.log(`[ReCoder Core] exited code=${code} signal=${signal}`);
                 if (this.coreProcess === spawnedProcess) {
@@ -533,6 +613,7 @@ export class CoreManager {
                 }
             });
             this.coreProcess.on('error', (err) => {
+                watch.exited = true; watch.tail = [...watch.tail, err.message].slice(-6);
                 processLog.event(`spawn error: ${err.message}`);
                 console.error('[ReCoder Core] spawn error:', err);
                 if (this.coreProcess === spawnedProcess) { this.coreProcess = null; }
@@ -552,6 +633,7 @@ export class CoreManager {
             throw error;
         } finally {
             this.isSpawning = false;
+            this.spawnWatch = null;
         }
     }
 
@@ -559,6 +641,13 @@ export class CoreManager {
         const expected = this.expectedEntrypoint();
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
+            const watch = this.spawnWatch;
+            if (watch?.exited) {
+                //: Core 가 준비 전에 끝났다 — 60초를 기다리지 않고 원인을 바로 보여 준다.
+                const reason = watch.tail.map(l => l.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').trim()).filter(Boolean).slice(-3).join(' / ');
+                throw new Error(`ReCoder Core가 시작 직후 종료됐습니다${watch.code !== null ? ` (코드 ${watch.code})` : ''}.`
+                    + (reason ? ` 원인: ${reason}.` : '') + ' 자세한 내용은 ~/.recoder/core.log 에 있습니다.');
+            }
             const runtime = await this.readRuntime();
             if (runtime) {
                 this.assertCompatibleRuntime(runtime, expected);
@@ -577,7 +666,11 @@ export class CoreManager {
         const runtime = await this.readRuntime();
         if (!runtime) { return; }
         const pid = runtime.pid;
-        if (!Number.isSafeInteger(pid) || pid <= 1 || this.isProcessRunning(pid)) {
+        //: PID 가 살아 있어도 그 포트에서 Core 가 응답하지 않으면 남은 기록이다 — Windows 는
+        //: 재부팅·강제 종료 뒤 같은 PID 를 다른 프로그램에 금방 준다. 살아 있는 Core 라면
+        //: runtime guard 가 이 파일을 곧 다시 쓰므로 지워도 안전하다.
+        if (Number.isSafeInteger(pid) && (pid as number) > 1 && this.isProcessRunning(pid as number)
+            && await this.runtimeAnswers(runtime)) {
             throw new Error('기존 Core의 종료를 확인하지 못했습니다. 실행 중인 Core를 확인한 뒤 ReCoder: Restart Core로 다시 시작하세요.');
         }
         // 죽은 프로세스의 기록만 정리한다. 공유 PID를 SIGTERM/SIGKILL 하지 않는다.

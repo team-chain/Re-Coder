@@ -128,7 +128,8 @@ test('③ 코어에 확장 호스트 전용 환경변수(ELECTRON_RUN_AS_NODE)�
   const spawnBlock = MANAGER.slice(MANAGER.indexOf('this.coreProcess = spawn('), MANAGER.indexOf('this.coreProcess = spawn(') + 400);
   assert.match(MANAGER, /delete hostEnv\[k\]/, '확장이 환경을 정리하지 않는다');
   assert.match(MANAGER, /'ELECTRON_RUN_AS_NODE'/);
-  assert.match(spawnBlock, /env: \{ \.\.\.hostEnv/, 'spawn 이 정리된 환경을 쓰지 않는다');
+  assert.match(spawnBlock, /env: coreEnv/, 'spawn 이 정리된 환경을 쓰지 않는다');
+  assert.match(MANAGER, /const coreEnv: NodeJS\.ProcessEnv = \{ \.\.\.hostEnv/, 'coreEnv 가 정리된 hostEnv 에서 시작하지 않는다');
   const core = fs.readFileSync(path.join(__dirname, '../../core/docker_autostart.py'), 'utf8');
   assert.match(core, /"ELECTRON_RUN_AS_NODE",/, '코어 쪽 방어가 없다');
 });

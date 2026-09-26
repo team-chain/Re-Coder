@@ -176,9 +176,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         );
 
-        void this.ensureConnection().then(() => this.runDiagnosticsShared(false)).catch(error => {
-            this.postMessage('core.error', { message: String(error) });
-        });
+        this.connectAndDiagnose();
 
         this.postMessage('stateUpdate', this._state);
 
@@ -188,9 +186,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         webviewView.onDidChangeVisibility(() => {
             if (webviewView.visible) {
                 this._openWorkspaceFromSidebar(true);
-                void this.ensureConnection().then(() => this.runDiagnosticsShared(false)).catch(error => {
-                    this.postMessage('core.error', { message: String(error) });
-                });
+                this.connectAndDiagnose();
             } else if (!this._workspacePanelWebview) {
                 this._pollingService.stop();
                 this._pollingActive = false;
@@ -249,9 +245,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             void this.handleMessage(message, webview);
         });
         this.postMessage('stateUpdate', this._state);
-        void this.ensureConnection().then(() => this.runDiagnosticsShared(false)).catch(error => {
-            this.postMessage('core.error', { message: String(error) });
-        });
+        this.connectAndDiagnose();
     }
 
     detachWorkspacePanel(webview: vscode.Webview): void {
@@ -341,6 +335,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _lastDiagnosticsAttempt = 0;
     private _lastDiagnosticsError = "";
     private _pollingActive = false;
+
+    private _connectRetryMs = 0;
+    private _connectRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    /**
+     * Core 연결 + 진단. 실패하면 **"확인 중" 상태를 풀고** 원인을 보여 준 뒤, 간격을 늘려 가며
+     * 다시 시도한다. 예전에는 첫 연결이 실패하면 pending 이 영원히 남아 "AI 연결을 확인하고
+     * 있습니다"에 멈추고, 폴링도 시작되지 않아 다시 시도하는 주체가 없었다.
+     */
+    private connectAndDiagnose(): void {
+        if (this._connectRetryTimer) { clearTimeout(this._connectRetryTimer); this._connectRetryTimer = undefined; }
+        void this.ensureConnection().then(() => {
+            this._connectRetryMs = 0;
+            return this.runDiagnosticsShared(false);
+        }).catch(error => {
+            const message = error instanceof Error ? error.message : String(error);
+            this._lastDiagnosticsError = message;
+            this.postMessage('core.error', { message });
+            this.postMessage('diagnostics.status', { pending: false, error: message });
+            this._connectRetryMs = Math.min(this._connectRetryMs ? this._connectRetryMs * 2 : 5000, 60000);
+            this._connectRetryTimer = setTimeout(() => this.connectAndDiagnose(), this._connectRetryMs);
+            (this._connectRetryTimer as { unref?: () => void }).unref?.();
+        });
+    }
 
     /** Shared by the launcher, workspace and commands; credentials precede diagnostics. */
     async ensureConnection(): Promise<void> {
@@ -1250,10 +1268,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'webview.ready': {
-                void this.ensureConnection().then(() => this.runDiagnosticsShared(false)).catch(error => {
-                    this.postMessage('core.error', { message: String(error) });
-                });
-                this.postMessage('diagnostics.status', { pending: !!this._diagnosticsInFlight || !this._diagnosticsKey, error: this._lastDiagnosticsError });
+                this.connectAndDiagnose();
+                this.postMessage('diagnostics.status', { pending: !!this._diagnosticsInFlight || (!this._diagnosticsKey && !this._lastDiagnosticsError), error: this._lastDiagnosticsError });
                 // Webview finished loading — send current state immediately
                 this.postMessage('stateUpdate', this._state);
                 const health = this._pollingService.getLastHealth();

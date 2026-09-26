@@ -46,6 +46,8 @@ function setup(t, mode = 1) {
   manager.probeRunningCore = async () => null;
   manager.healthCheck = async () => ({ status: 'ok' });
   manager.spawnCore = async () => assert.fail('Unexpected Core spawn');
+  //: runtime.json 의 Core 는 이 테스트들에서 "실제로 응답하는" Core 다(HTTP 는 막아 두었다).
+  manager.runtimeAnswers = async () => true;
   const runtime = (entrypoint = binary, extra = {}) => {
     const data = { pid: 54321, port: 54321, session_token: 'test-only-token', entrypoint, ...extra };
     write(manager._runtimePath, JSON.stringify(data));
@@ -146,14 +148,20 @@ test('lightweight VSIX can attach to a manually started Core but cannot shut it 
   assert.ok(fs.existsSync(manager._runtimePath));
 });
 
-test('stale cleanup preserves a live unresponsive process and only removes a dead runtime', async t => {
+test('stale cleanup preserves an answering Core, drops records nobody answers for, and never signals', async t => {
   const { manager, runtime, write, signals } = setup(t);
   runtime();
   write(manager._lockPath, '{"pid":54321}');
   await assert.rejects(manager.cleanupStale(), /종료를 확인하지/);
   assert.ok(fs.existsSync(manager._runtimePath));
   assert.ok(fs.existsSync(manager._lockPath));
+  //: PID 는 살아 있지만(재사용) 그 포트에서 아무도 응답하지 않으면 남은 기록 — 파일만 지운다.
+  //: 살아 있는 Core 라면 runtime guard 가 곧 다시 쓴다. 프로세스에는 신호를 보내지 않는다.
+  manager.runtimeAnswers = async () => false;
+  await manager.cleanupStale();
+  assert.equal(fs.existsSync(manager._runtimePath), false);
   assert.ok(signals.every(([, signal]) => signal === 0));
+  runtime();
   manager.isProcessRunning = () => false;
   await manager.cleanupStale();
   assert.equal(fs.existsSync(manager._runtimePath), false);
