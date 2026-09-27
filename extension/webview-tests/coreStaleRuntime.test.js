@@ -116,3 +116,38 @@ test('다른 창이 같은 순간 Core 를 띄우면(잠금 충돌) 실패하지
   await m.ensureRunning();
   assert.equal((await m.healthCheck()).status, 'ok');
 });
+
+test('업데이트 뒤 남은 이전 버전 Core 는 새 버전이 넘겨받는다(반대는 아님)', () => {
+  const { isOlderBundledCore, bundledCoreVersion } = require('../out/core/coreReuse.js');
+  const old = 'C:\\Users\\a\\.vscode\\extensions\\recoder-team.recoder-1.1.18\\bin\\recoder-core.exe';
+  const cur = 'c:\\Users\\a\\.vscode\\extensions\\recoder-team.recoder-1.1.21\\bin\\recoder-core.exe';
+  assert.deepEqual(bundledCoreVersion(cur), [1, 1, 21]);
+  assert.equal(isOlderBundledCore(old, cur), true);
+  assert.equal(isOlderBundledCore(cur, old), false);
+  assert.equal(isOlderBundledCore(cur, cur), false);
+  assert.equal(isOlderBundledCore('/home/dev/core/main.py', cur), false);
+  assert.equal(isOlderBundledCore('/x/recoder-team.recoder-1.1.9-darwin-arm64/bin/recoder-core', '/x/recoder-team.recoder-1.1.10-darwin-arm64/bin/recoder-core'), true);
+});
+
+test('이전 버전 Core 가 응답 중이면 종료를 요청하고 새 Core 를 띄운다', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-upgrade-'));
+  const m = loadManager(dir);
+  const http = require('node:http');
+  let shutdownCalled = false;
+  const oldCore = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/shutdown') { shutdownCalled = true; res.end(JSON.stringify({ status: 'shutting_down' })); setTimeout(() => { oldCore.close(); fs.rmSync(path.join(dir, 'runtime.json'), { force: true }); }, 50); return; }
+    res.end(JSON.stringify({ status: 'ok' }));
+  });
+  await new Promise(r => oldCore.listen(0, '127.0.0.1', r));
+  const holder = spawn(process.execPath, ['-e', 'setTimeout(()=>{},3000)'], { stdio: 'ignore' });
+  t.after(async () => { try { oldCore.close(); } catch { /* closed */ } holder.kill('SIGKILL'); await m.shutdown(true); fs.rmSync(dir, { recursive: true, force: true }); });
+  fs.writeFileSync(path.join(dir, 'runtime.json'), JSON.stringify({ port: oldCore.address().port, session_token: 'old', pid: holder.pid,
+    entrypoint: 'C:\\x\\.vscode\\extensions\\recoder-team.recoder-1.1.18\\bin\\recoder-core.exe' }));
+  m.expectedEntrypoint = () => 'C:\\x\\.vscode\\extensions\\recoder-team.recoder-1.1.21\\bin\\recoder-core.exe';
+  m.isProcessRunningOriginal = m.isProcessRunning;
+  m.restartCore = async function () { shutdownCalled = shutdownCalled || false; await fetch(`http://127.0.0.1:${oldCore.address().port}/api/shutdown`, { method: 'POST' }); return 'restarted'; };
+  const out = await m._ensureRunning();
+  assert.equal(out, 'restarted');
+  assert.equal(shutdownCalled, true);
+});

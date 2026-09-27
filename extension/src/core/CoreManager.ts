@@ -15,7 +15,7 @@ import * as cp from 'child_process';
 import { ChildProcess, spawn, execSync } from 'child_process';
 import { CoreHealth } from '../types';
 import { CoreClient } from '../api/coreClient';
-import { shouldReuseRunningCore } from './coreReuse';
+import { isOlderBundledCore, shouldReuseRunningCore } from './coreReuse';
 import { CoreProcessLog } from './CoreProcessLog';
 
 export interface RuntimeConfig {
@@ -134,6 +134,7 @@ export class CoreManager {
                 && this.isProcessRunning(runtime.pid as number) && await this.runtimeAnswers(runtime)) {
                 //: 다른 실행 경로의 Core 가 **실제로 응답할 때만** 막는다. PID 만 살아 있는 남은 기록은
                 //: 아래 cleanupStale 이 정리한다(예전엔 없는 Core 를 이유로 영원히 막았다).
+                if (isOlderBundledCore(runtime.entrypoint, expected)) { return this.takeOverOlderCore(runtime); }
                 this.assertCompatibleRuntime(runtime, expected);
             }
         }
@@ -146,6 +147,7 @@ export class CoreManager {
             while (Date.now() < deadline) {
                 const rt = await this.readRuntime();
                 if (rt && rt.port === detected.port) {
+                    if (isOlderBundledCore(rt.entrypoint, expected)) { return this.takeOverOlderCore(rt); }
                     this.assertCompatibleRuntime(rt, expected);
                     if (rt.session_token) {
                         this.useRuntime(rt, expected);
@@ -406,6 +408,15 @@ export class CoreManager {
         } finally {
             this.restartPromise = null;
         }
+    }
+
+    /** 확장 업데이트 뒤 남은 이전 버전 Core 를 정상 종료시키고 이 버전 Core 로 바꾼다. */
+    private async takeOverOlderCore(runtime: RuntimeConfig): Promise<CoreClient> {
+        const log = this.createProcessLog();
+        if (runtime.pid) { log.setPid(runtime.pid); }
+        log.event(`older core replaced: ${runtime.entrypoint ?? ''}`);
+        vscode.window.showInformationMessage?.('ReCoder 가 업데이트되어 이전 버전 Core 를 새 버전으로 바꿉니다. 다른 VS Code 창은 다시 불러오기(Reload Window)가 필요할 수 있습니다.');
+        return this.restartCore(null);
     }
 
     private async restartCore(pendingStart: Promise<CoreClient> | null): Promise<CoreClient> {
