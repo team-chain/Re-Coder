@@ -979,6 +979,43 @@ def _build_code_prompt(
 #: 들어가는 크기로 올린다.
 _PLAN_MAX_TOKENS = 4096
 
+#: 설계 결정 응답 스키마 — 모델이 구조화 출력(tool use)으로 답하게 해 **항상 올바른 JSON** 을 받는다.
+#: 자유 텍스트로 받으면 한국어 설명 안의 따옴표("운영" 같은)를 이스케이프하지 않아 JSON 이 깨지고
+#: 두 번 다 "닫히지 않은 JSON 객체"로 실패했다(실기기 쇼핑몰 요청).
+PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decisions": {
+            "type": "array", "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "question": {"type": "string"},
+                    "options": {
+                        "type": "array", "minItems": 2, "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "label": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "pros": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+                                "cons": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+                                "recommended": {"type": "boolean"},
+                            },
+                            "required": ["key", "label"],
+                        },
+                    },
+                    "impact": {"type": "string"},
+                },
+                "required": ["id", "question", "options"],
+            },
+        },
+    },
+    "required": ["decisions"],
+}
+
 
 def _build_plan_prompt(
     instruction: str,
@@ -1363,17 +1400,20 @@ def generate_plan(
             prompt
             + "\n\n[재시도] 직전 응답이 올바른 JSON 이 아니었습니다. 설명 문장 없이 "
               "위 형식의 JSON 객체 하나만 반환하세요. 분량이 길어지면 결정 개수를 "
-              "줄여서라도 JSON 을 완결하세요."
+              "줄여서라도 JSON 을 완결하세요. 문자열 안에서는 큰따옴표(\")를 쓰지 말고 "
+              "pros·cons 는 선택지마다 짧게 2개 이하로 쓰세요."
         )
         try:
             llm_resp = get_router().call(
-                LLMRequest(prompt=attempt_prompt, max_tokens=_PLAN_MAX_TOKENS, temperature=0.2),
+                LLMRequest(prompt=attempt_prompt, json_schema=PLAN_SCHEMA,
+                           max_tokens=_PLAN_MAX_TOKENS, temperature=0.2),
                 agent="code_agent",
                 operation="generate_plan",
             )
         except LLMError as e:
             if e.error_type == LLMErrorType.STRUCTURED_OUTPUT:
-                last_parse_error = RuntimeError("모델 출력이 응답 길이 제한에서 잘렸습니다.")
+                last_parse_error = RuntimeError(str(e) or "모델 출력이 응답 길이 제한에서 잘렸습니다.")
+                print(f"[code_agent] plan 구조화 출력 실패 (시도 {attempt + 1}/2): {e}", flush=True)
                 continue
             from llm.failure import public_ai_failure_reason
             log.warning('Design generation provider failure: %s', e)
