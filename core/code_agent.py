@@ -1590,6 +1590,153 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
     return found
 
 
+# ── 큰 요청: 파일 목록을 먼저 받고 나눠서 생성한다 ─────────────────────────────
+#
+# "운영 가능한 쇼핑몰 사이트 만들어줘" 처럼 파일이 많은 요청은 모든 파일의 전체 내용을
+# JSON 한 번(8K 토큰)에 담지 못해 두 번 다 잘리고 "요청 범위를 나누라"로 끝났다(실기기).
+# 잘리면 같은 요청을 반복하지 않고 (1) 만들 파일 목록과 파일 사이의 약속(API 경로·이름·
+# 패키지)을 받은 뒤 (2) 그 약속을 공유하며 파일 몇 개씩 따로 생성해 합친다.
+_SPLIT_MAX_FILES = 16
+_SPLIT_BATCH = 2
+_SPLIT_PARALLEL = 3
+_MANIFEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "contracts": {"type": "string"},
+        "files": {
+            "type": "array", "minItems": 1, "maxItems": _SPLIT_MAX_FILES,
+            "items": {
+                "type": "object",
+                "properties": {"file": {"type": "string", "minLength": 1}, "purpose": {"type": "string"}},
+                "required": ["file"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["summary", "files"],
+    "additionalProperties": False,
+}
+
+
+def _is_truncation(exc: Exception) -> bool:
+    return isinstance(exc, LLMError) and exc.error_type == LLMErrorType.STRUCTURED_OUTPUT and "잘렸" in str(exc)
+
+
+def _norm_op_path(path: str) -> str:
+    return posixpath.normpath(str(path or "").strip().replace("\\", "/")).lstrip("./").casefold()
+
+
+def _split_manifest(prompt: str) -> tuple[dict, list[dict]]:
+    manifest_prompt = prompt + f"""
+
+[분할 생성 1단계] 이 요청은 모든 파일을 한 번의 응답에 담기에 너무 큽니다. 이번 응답에서는 **파일 내용을 쓰지 말고**
+만들거나 고칠 파일 목록만 아래 JSON 으로 주세요(최대 {_SPLIT_MAX_FILES}개, 실제 실행에 필요한 파일만).
+{{"summary": "무엇을 만드는지 한국어 한 줄",
+  "contracts": "파일들이 서로 맞아야 하는 약속 — API 경로와 요청/응답 모양, 컴포넌트·함수·모듈 이름과 내보내기 방식, 사용할 패키지와 버전, 포트·환경변수(1200자 이내)",
+  "files": [{{"file": "상대경로", "purpose": "이 파일이 하는 일 한 줄"}}]}}"""
+    resp = get_router().call(
+        LLMRequest(prompt=manifest_prompt, json_schema=_MANIFEST_SCHEMA, max_tokens=3000, temperature=0.2),
+        agent="code_agent", operation="generate_code_manifest",
+    )
+    try:
+        data = _extract_json(resp.text)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"파일 목록을 받지 못했습니다: {exc}") from exc
+    files: list[dict] = []
+    seen: set[str] = set()
+    for item in data.get("files") or []:
+        path = str((item or {}).get("file") or "").strip().replace("\\", "/") if isinstance(item, dict) else ""
+        key = _norm_op_path(path)
+        if not path or key in seen or path.startswith("/") or ".." in path.split("/"):
+            continue
+        seen.add(key)
+        files.append({"file": path, "purpose": str(item.get("purpose") or "").strip()})
+    if not files:
+        raise RuntimeError("AI 가 만들 파일 목록을 돌려주지 않았습니다.")
+    return data, files[:_SPLIT_MAX_FILES]
+
+
+def _split_batch(prompt: str, manifest: dict, files: list[dict], batch: list[dict]) -> tuple[list[dict], object]:
+    listing = "\n".join(f"- {f['file']}: {f['purpose']}" for f in files)
+    wanted = "\n".join(f"- {f['file']}" for f in batch)
+    batch_prompt = prompt + f"""
+
+[분할 생성 2단계] 전체 파일 목록과 파일 사이의 약속은 아래와 같습니다. 다른 파일은 다른 응답에서 같은 약속으로 작성됩니다.
+전체 요약: {manifest.get('summary', '')}
+약속(반드시 지킬 것):
+{manifest.get('contracts', '') or '(없음 — 파일 목록과 요청에서 일관되게 정하세요)'}
+전체 파일 목록:
+{listing}
+
+이번 응답의 ops 에는 **아래 파일만** 전체 내용으로 작성하세요(다른 파일은 넣지 마세요):
+{wanted}"""
+    resp = get_router().call(
+        LLMRequest(prompt=batch_prompt, json_schema=CODE_OUTPUT_SCHEMA,
+                   max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+        agent="code_agent", operation="generate_code_part",
+    )
+    _data, ops = parse_code_output(resp.text)
+    keys = {_norm_op_path(f["file"]) for f in batch}
+    return [op for op in ops if _norm_op_path(op["file"]) in keys], resp
+
+
+def _generate_split(prompt: str) -> tuple[dict, list[dict], object]:
+    """큰 요청을 파일 목록 → 묶음별 생성으로 나눠 만든다. 파일 하나도 한도를 넘으면 실패."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    manifest, files = _split_manifest(prompt)
+    print(f"[code_agent] 분할 생성 | 파일 {len(files)}개 | 묶음 {_SPLIT_BATCH}개씩", flush=True)
+    batches = [files[i:i + _SPLIT_BATCH] for i in range(0, len(files), _SPLIT_BATCH)]
+    last_resp = None
+
+    def run(batch: list[dict]) -> tuple[list[dict], object]:
+        try:
+            return _split_batch(prompt, manifest, files, batch)
+        except (LLMError, CodeOutputError) as exc:
+            if len(batch) == 1 or not (_is_truncation(exc) or isinstance(exc, CodeOutputError)):
+                raise
+            # 두 파일이 합쳐 한도를 넘었다 — 하나씩 다시.
+            out, resp = [], None
+            for single in batch:
+                ops, resp = _split_batch(prompt, manifest, files, [single])
+                out.extend(ops)
+            return out, resp
+
+    ops_out: list[dict] = []
+    with ThreadPoolExecutor(max_workers=_SPLIT_PARALLEL) as pool:
+        for ops, resp in pool.map(run, batches):
+            ops_out.extend(ops)
+            last_resp = resp or last_resp
+    got = {_norm_op_path(op["file"]) for op in ops_out}
+    missing = [f for f in files if _norm_op_path(f["file"]) not in got]
+    for single in missing:
+        ops, resp = _split_batch(prompt, manifest, files, [single])
+        ops_out.extend(ops)
+        last_resp = resp or last_resp
+    got = {_norm_op_path(op["file"]) for op in ops_out}
+    still = [f["file"] for f in files if _norm_op_path(f["file"]) not in got]
+    if still:
+        raise CodeOutputError(f"일부 파일을 만들지 못했습니다: {', '.join(still[:5])}")
+    order = {_norm_op_path(f["file"]): i for i, f in enumerate(files)}
+    ops_out.sort(key=lambda op: order.get(_norm_op_path(op["file"]), len(order)))
+    return {"summary": str(manifest.get("summary") or "")}, ops_out, last_resp
+
+
+def _merge_ops(base: list[dict], updates: list[dict]) -> list[dict]:
+    """교정 결과를 파일 경로 기준으로 덮어쓴다. 교정 응답에 없는 파일은 그대로 둔다."""
+    index = {_norm_op_path(op["file"]): i for i, op in enumerate(base)}
+    merged = list(base)
+    for op in updates:
+        key = _norm_op_path(op["file"])
+        if key in index:
+            merged[index[key]] = op
+        else:
+            index[key] = len(merged)
+            merged.append(op)
+    return merged
+
+
 def generate_code(
     instruction: str,
     session_id: str = "",
@@ -1659,6 +1806,8 @@ def generate_code(
     # Reject incomplete batches as a whole, then give the model one bounded
     # correction attempt. Neither attempt writes project files.
     reason = ""
+    split_mode = False
+    split_mode_failed = False
     for attempt in range(2):
         attempt_prompt = prompt
         if attempt:
@@ -1684,6 +1833,18 @@ def generate_code(
             if exc.error_type != LLMErrorType.STRUCTURED_OUTPUT:
                 raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
             reason = "모델 출력이 응답 길이 제한에서 잘렸습니다."
+            if _is_truncation(exc):
+                #: 같은 요청을 다시 보내도 또 잘린다 — 파일 목록을 받아 나눠서 만든다.
+                print("[code_agent] 응답이 길이 한도에서 잘려 분할 생성으로 전환", flush=True)
+                try:
+                    data, ops_out, llm_resp = _generate_split(prompt)
+                except (LLMError, CodeOutputError, RuntimeError) as split_exc:
+                    reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
+                    split_mode_failed = True
+                    break
+                ops_out = _relative_to_target(ops_out, target_folder)
+                split_mode = True
+                break
         except Exception as exc:
             raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
         print(f"[code_agent] 생성 응답 검증 실패 ({attempt + 1}/2): {reason}", flush=True)
@@ -1692,17 +1853,37 @@ def generate_code(
             f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도). {reason} "
             "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
         )
+    if split_mode_failed:
+        raise RuntimeError(
+            f"AI가 완성된 파일 변경을 반환하지 못했습니다. {reason} "
+            "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
+        )
 
     # 생성 결과 일관성 — 이 ops 를 적용하면 새로 생기는 빌드·실행 문제(없는 파일을 가리키는
     # 스크립트, 선언 안 된 패키지 등)를 찾아 한 번 교정을 요청한다. 실기기에서 CRA 설정만 남은
     # Express 앱이 Docker 빌드에서 막혔다. 교정도 실패하면 결과에 경고로 남긴다.
     consistency = _consistency_issues(root, target_folder, ops_out)
     if any(i["severity"] == "error" for i in consistency):
-        fix_prompt = prompt + (
-            "\n\n직전 응답을 그대로 적용하면 다음 문제가 생깁니다:\n"
-            + "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in consistency)
-            + "\n같은 사용자 요청과 승인된 설계를 유지하면서 위 문제만 고친 전체 ops JSON 을 다시 만드세요."
-        )
+        issue_lines = "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in consistency)
+        #: 결과가 크면(분할 생성 등) 전체를 다시 만들게 하면 또 잘린다. 문제 파일과 매니페스트만
+        #: 보여 주고 **고칠 파일만** 받아 경로 기준으로 합친다.
+        targeted = split_mode or sum(len(op.get("content") or "") for op in ops_out) > 12_000
+        if targeted:
+            wanted = {_norm_op_path(i.get("file") or "") for i in consistency if i.get("file")}
+            shown = [op for op in ops_out if _norm_op_path(op["file"]) in wanted
+                     or posixpath.basename(op["file"]) in {"package.json", "requirements.txt", "Dockerfile"}]
+            listing = "\n".join(f"- {op['file']}" for op in ops_out)
+            bodies = "".join(f"\n[현재 파일] {op['file']}\n```\n{_prompt_body(op['content'], 16_000)}\n```\n" for op in shown[:4])
+            fix_prompt = prompt + (
+                "\n\n생성한 파일 목록:\n" + listing + bodies
+                + "\n\n이 결과를 그대로 적용하면 다음 문제가 생깁니다:\n" + issue_lines
+                + "\n위 문제를 고치는 데 **바꿔야 하는 파일만** 전체 내용으로 ops 에 담으세요. 바꿀 필요가 없는 파일은 넣지 마세요."
+            )
+        else:
+            fix_prompt = prompt + (
+                "\n\n직전 응답을 그대로 적용하면 다음 문제가 생깁니다:\n" + issue_lines
+                + "\n같은 사용자 요청과 승인된 설계를 유지하면서 위 문제만 고친 전체 ops JSON 을 다시 만드세요."
+            )
         try:
             retry = get_router().call(
                 LLMRequest(prompt=fix_prompt, json_schema=CODE_OUTPUT_SCHEMA,
@@ -1711,6 +1892,9 @@ def generate_code(
             )
             data2, ops2 = parse_code_output(retry.text)
             ops2 = _relative_to_target(ops2, target_folder)
+            if targeted:
+                ops2 = _merge_ops(ops_out, ops2)
+                data2 = data
             remaining = _consistency_issues(root, target_folder, ops2)
             if sum(i["severity"] == "error" for i in remaining) < sum(i["severity"] == "error" for i in consistency):
                 data, ops_out, llm_resp, consistency = data2, ops2, retry, remaining
