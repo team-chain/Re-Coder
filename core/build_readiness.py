@@ -38,7 +38,8 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_UNUSED_BUILD_SCRIPT", "DOCKERFILE_WORKDIR_NOT_WRITABLE", "NODE_VULNERABLE_DEPENDENCY",
                 "NODE_DEPENDENCY_VERSION_NOT_FOUND", "DOCKERFILE_SUBPROJECT_DEPS_MISSING", "NODE_FRONTEND_NOT_SERVED",
                 "NODE_LOCAL_IMPORT_MISSING", "NODE_VITE_JSX_IN_JS", "NODE_VITE_PROCESS_ENV", "NODE_IMPORT_PACKAGE_TYPO",
-                "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING"}
+                "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING", "NODE_PG_NUMERIC_STRINGS", "NODE_CLIENT_HARDCODED_LOCALHOST",
+                "NODE_ROUTER_ANCHOR_LINK"}
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -517,6 +518,7 @@ def _closest_declared(name: str, declared: set[str], imported: set[str] = frozen
 
 
 def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: dict, owner, undeclared: dict) -> None:
+    deps = manifests.get("", set())
     vite = _vite_projects(files, manifests)
     missing_files: list[tuple[str, str]] = []
     missing_names: list[str] = []
@@ -599,6 +601,97 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             "화면이 \"process is not defined\" 로 멈춥니다(Create React App 방식).",
             "import.meta.env.VITE_… 로 바꾸세요(자동 수정 가능 — REACT_APP_X 는 VITE_X 로 바꿉니다).",
             process_env[0], True))
+    # 4) pg 는 NUMERIC/DECIMAL 을 문자열로 돌려준다 — 화면이 price.toFixed() 를 부르면 "toFixed is not a function"
+    pg_files = [rel for rel in files.files() if rel.endswith(_JS_SUFFIXES) and "/node_modules/" not in f"/{rel}"
+                and re.search(r"""require\(\s*['"]pg['"]\s*\)|from\s+['"]pg['"]""", files.read(rel) or "")]
+    if pg_files:
+        all_js = {rel: (files.read(rel) or "") for rel in files.files()
+                  if rel.endswith(_JS_SUFFIXES) and "/node_modules/" not in f"/{rel}"}
+        declares_numeric = any(re.search(r"\b(?:DECIMAL|NUMERIC)\s*\(", t, re.I) for t in all_js.values()) \
+            or any(re.search(r"\b(?:DECIMAL|NUMERIC)\s*\(", files.read(rel) or "", re.I) for rel in files.files() if rel.endswith(".sql"))
+        uses_number_api = any(re.search(r"\.(?:toFixed|toLocaleString)\(", t) for t in all_js.values())
+        parser_set = any("setTypeParser" in t for t in all_js.values())
+        if declares_numeric and uses_number_api and not parser_set:
+            result.fix_data["pg_numeric_files"] = pg_files
+            result.issues.append(ReadinessIssue(
+                "NODE_PG_NUMERIC_STRINGS", WARNING,
+                f"PostgreSQL(pg)은 DECIMAL/NUMERIC 값을 문자열로 돌려주는데 코드가 숫자 메서드(toFixed 등)를 씁니다"
+                f"({pg_files[0]}). 화면에서 \"toFixed is not a function\" 오류가 납니다.",
+                "pg 의 NUMERIC 타입 파서를 숫자로 설정하세요(자동 수정 가능).", pg_files[0], True))
+
+    # 5) 화면 코드가 http://localhost:포트 를 직접 부른다 — 배포 포트가 다르거나 다른 PC 에서 열면 Network Error
+    hardcoded: list[str] = []
+    for rel in files.files():
+        if not rel.endswith((".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte")) or "/node_modules/" in f"/{rel}":
+            continue
+        project = owner(rel)
+        if not project or not _frontend_out_dir(files, project):
+            continue  # 프런트엔드(빌드 도구가 있는 하위 프로젝트)만 본다
+        if re.search(r"""['"`]https?://(?:localhost|127\.0\.0\.1)(?::\d+)?(?:/[^'"`\s]*)?['"`]""", files.read(rel) or ""):
+            hardcoded.append(rel)
+    if hardcoded:
+        result.fix_data["hardcoded_api"] = hardcoded
+        result.issues.append(ReadinessIssue(
+            "NODE_CLIENT_HARDCODED_LOCALHOST", ERROR,
+            f"화면 코드가 API 를 http://localhost:포트 로 직접 부릅니다: {', '.join(hardcoded[:4])}. 배포 포트가 다르거나 "
+            "다른 PC·서버에서 열면 요청이 실패합니다(Network Error).",
+            "서버가 화면을 함께 제공하므로 상대 경로(/api/…)로 부르게 바꾸세요(자동 수정 가능).", hardcoded[0], True))
+
+    # 6) React Context 의 value 에 없는 이름을 useContext 로 꺼낸다 → "x is not a function"(나눠 만든 파일끼리 어긋남)
+    context_keys: dict[str, set[str]] = {}
+    for rel in files.files():
+        if not rel.endswith((".jsx", ".tsx", ".js", ".ts")) or "/node_modules/" in f"/{rel}":
+            continue
+        text = _strip_js_comments(files.read(rel) or "")
+        for name in re.findall(r"\b(?:export\s+)?(?:const|let)\s+([A-Z][\w$]*)\s*=\s*createContext\(", text):
+            keys: set[str] = set()
+            for body in re.findall(rf"<{re.escape(name)}\.Provider\s+value=\{{\s*\{{([^}}]*)\}}\s*\}}", text):
+                keys |= {k.strip().split(":")[0].strip() for k in body.split(",") if k.strip()}
+            for var in re.findall(rf"<{re.escape(name)}\.Provider\s+value=\{{\s*([\w$]+)\s*\}}", text):
+                m = re.search(rf"\b(?:const|let)\s+{re.escape(var)}\s*=\s*\{{([^}}]*)\}}", text)
+                if m:
+                    keys |= {k.strip().split(":")[0].strip() for k in m.group(1).split(",") if k.strip()}
+            if keys:
+                context_keys[name] = keys
+    missing_members: list[str] = []
+    if context_keys:
+        for rel in files.files():
+            if not rel.endswith((".jsx", ".tsx", ".js", ".ts")) or "/node_modules/" in f"/{rel}":
+                continue
+            text = _strip_js_comments(files.read(rel) or "")
+            for names, ctx in re.findall(r"\b(?:const|let)\s*\{([^}]*)\}\s*=\s*useContext\(\s*([A-Z][\w$]*)\s*\)", text):
+                keys = context_keys.get(ctx)
+                if not keys:
+                    continue
+                for name in (n.strip().split(":")[0].strip() for n in names.split(",") if n.strip()):
+                    if name and name not in keys:
+                        missing_members.append(f"`{name}`({rel} ← {ctx})")
+    if missing_members:
+        result.issues.append(ReadinessIssue(
+            "NODE_CONTEXT_MEMBER_MISSING", ERROR,
+            "useContext 로 꺼내는 이름이 그 Context 의 value 에 없습니다: " + ", ".join(missing_members[:6])
+            + ". 화면이 \"… is not a function\" 으로 멈춥니다.",
+            "Context 의 value 에 그 이름을 추가하거나 쓰는 쪽 이름을 맞추세요.",
+            missing_members[0].split("(")[1].split(" ")[0]))
+
+    # 7) react-router 앱에서 <a href="/..."> 로 이동하면 전체를 다시 불러와 장바구니 같은 상태가 사라진다
+    anchor_files: list[str] = []
+    for rel in files.files():
+        if not rel.endswith((".jsx", ".tsx")) or "/node_modules/" in f"/{rel}":
+            continue
+        declared = manifests.get(owner(rel), set())
+        if "react-router-dom" not in declared and "react-router-dom" not in deps:
+            continue
+        if re.search(r"""<a\s+href=["']/[^"']*["']""", files.read(rel) or ""):
+            anchor_files.append(rel)
+    if anchor_files:
+        result.fix_data["router_anchor_files"] = anchor_files
+        result.issues.append(ReadinessIssue(
+            "NODE_ROUTER_ANCHOR_LINK", WARNING,
+            f"React Router 앱에서 <a href=\"/…\"> 로 이동합니다: {', '.join(anchor_files[:4])}. 페이지 전체가 다시 로드돼 "
+            "장바구니 같은 화면 상태가 사라집니다.",
+            "<Link to=\"/…\"> 로 바꾸세요(자동 수정 가능).", anchor_files[0], True))
+
     typos = {}
     imported_everywhere: set[str] = set()
     for rel in files.files():
@@ -1428,13 +1521,71 @@ def vite_env_rewrite(text: str) -> str:
         .replace("process.env.VITE_", "import.meta.env.VITE_")
 
 
+def pg_numeric_parser_rewrite(text: str) -> str:
+    """`require('pg')` 바로 뒤에 NUMERIC(1700) 을 숫자로 읽는 타입 파서를 넣는다."""
+    if "setTypeParser" in text:
+        return text
+    m = re.search(r"""^([ \t]*)(?:const|let|var)\s+(?:\{[^}]*\}|[\w$]+)\s*=\s*require\(\s*['"]pg['"]\s*\)\s*;?[ \t]*$""", text, re.MULTILINE)
+    if not m:
+        m = re.search(r"""^([ \t]*)import\s+.*?\s+from\s+['"]pg['"]\s*;?[ \t]*$""", text, re.MULTILINE)
+        if not m:
+            return text
+        insert = f"\n{m.group(1)}import pg from 'pg';\n{m.group(1)}// ReCoder: NUMERIC/DECIMAL 을 문자열이 아닌 숫자로 받는다(화면의 toFixed 등).\n{m.group(1)}pg.types.setTypeParser(1700, (value) => parseFloat(value));"
+    else:
+        insert = f"\n{m.group(1)}// ReCoder: NUMERIC/DECIMAL 을 문자열이 아닌 숫자로 받는다(화면의 toFixed 등).\n{m.group(1)}require('pg').types.setTypeParser(1700, (value) => parseFloat(value));"
+    return text[:m.end()] + insert + text[m.end():]
+
+
+def relative_api_rewrite(text: str) -> str:
+    """'http://localhost:3001/api' → '/api', `http://localhost:3001/api/x` → `/api/x`, 'http://localhost:3001' → ''."""
+    return re.sub(r"""(['"`])https?://(?:localhost|127\.0\.0\.1)(?::\d+)?(/[^'"`\s]*)?(?=[^'"`]*\1)""",
+                  lambda m: m.group(1) + (m.group(2) or ""), text)
+
+
+def router_link_rewrite(text: str) -> str:
+    """<a href="/x">…</a> → <Link to="/x">…</Link>, react-router-dom import 에 Link 를 보탠다."""
+    pattern = re.compile(r"""<a\s+href=(["'])(/[^"']*)\1([^>]*)>(.*?)</a>""", re.DOTALL)
+    if not pattern.search(text):
+        return text
+    text = pattern.sub(lambda m: f"<Link to={m.group(1)}{m.group(2)}{m.group(1)}{m.group(3)}>{m.group(4)}</Link>", text)
+    imp = re.search(r"""^(\s*import\s*\{)([^}]*)(\}\s*from\s*['"]react-router-dom['"])""", text, re.MULTILINE)
+    if imp:
+        names = [n.strip() for n in imp.group(2).split(",") if n.strip()]
+        if "Link" not in [n.split(" as ")[-1].strip() for n in names]:
+            names.append("Link")
+            text = text[:imp.start()] + imp.group(1) + " " + ", ".join(names) + " " + imp.group(3) + text[imp.end():]
+    elif not re.search(r"""\bLink\b.*from\s*['"]react-router-dom['"]""", text):
+        text = "import { Link } from 'react-router-dom';\n" + text
+    return text
+
+
 def rename_package_import(text: str, old: str, new: str) -> str:
     return re.sub(r"""(['"])""" + re.escape(old) + r"""(/[^'"]*)?\1""", lambda m: f"{m.group(1)}{new}{m.group(2) or ''}{m.group(1)}", text)
 
 
-def jsx_reference_rewrite(text: str, old_name: str, new_name: str) -> str:
-    """index.html 의 /src/index.js · import './index.js' 처럼 확장자까지 적은 참조를 새 이름으로."""
-    return re.sub(r"""(?<=[/'"])""" + re.escape(old_name) + r"""(?=['"?#])""", new_name, text)
+def jsx_reference_rewrite(text: str, importer_rel: str, old_rel: str, new_rel: str) -> str:
+    """importer 안에서 **그 파일을 가리키는** 참조만 새 이름으로(index.html 의 /src/index.js, import './index.js').
+
+    파일 이름만 보고 바꾸면 다른 폴더의 같은 이름(server/index.js)까지 바꾼다 — package.json 의
+    main 이 server/index.jsx 가 돼 컨테이너가 시작하지 못했다(e2e 검증에서 잡힘).
+    """
+    import posixpath
+    old_base, new_base = posixpath.basename(old_rel), posixpath.basename(new_rel)
+    base_dir = posixpath.dirname(importer_rel)
+
+    def resolve(spec: str) -> str:
+        spec = spec.split("?")[0].split("#")[0]
+        if spec.startswith("/"):
+            return posixpath.normpath(posixpath.join(base_dir, spec.lstrip("/")))
+        return posixpath.normpath(posixpath.join(base_dir, spec))
+
+    def repl(m):
+        quote, spec = m.group(1), m.group(2)
+        if not spec.endswith(old_base) or resolve(spec) != old_rel:
+            return m.group(0)
+        return f"{quote}{spec[:-len(old_base)]}{new_base}{quote}"
+
+    return re.sub(r"""(['"])([^'"\n]*)\1""", repl, text)
 
 
 def serve_frontend(text: str, entry_rel: str, out_dir: str) -> str:
@@ -1585,13 +1736,11 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
             backup = _backup(root, rel, text)
             os.replace(source, root / new_rel)
             changed += [f"{rel} → {new_rel}", backup]
-            old_name, new_name = rel.rsplit("/", 1)[-1], new_rel.rsplit("/", 1)[-1]
-            project = rel.split("/src/")[0] if "/src/" in rel else ""
             for other in ProjectFiles(root).files():
-                if (project and not other.startswith(project + "/")) or not other.endswith((".html",) + _JS_SUFFIXES):
+                if not other.endswith((".html",) + _JS_SUFFIXES):
                     continue
                 body = _read_raw(root / other)
-                updated = jsx_reference_rewrite(body, old_name, new_name)
+                updated = jsx_reference_rewrite(body, other, rel, new_rel)
                 if updated != body:
                     changed.append(_backup(root, other, body))
                     _write_raw(root / other, updated)
@@ -1623,6 +1772,36 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
             if updated != text:
                 changed += [rel, _backup(root, rel, text)]
                 _write_raw(root / rel, updated)
+    elif code == "NODE_CLIENT_HARDCODED_LOCALHOST":
+        for rel in before.fix_data.get("hardcoded_api") or []:
+            text = _read_raw(root / rel)
+            updated = relative_api_rewrite(text)
+            if updated != text:
+                changed += [rel, _backup(root, rel, text)]
+                _write_raw(root / rel, updated)
+        for env_file in (".env.example", ".env.sample"):
+            path = root / env_file
+            if path.is_file():
+                text = _read_raw(path)
+                updated = re.sub(r"(?m)^(VITE_[A-Z0-9_]*(?:API|BASE)[A-Z0-9_]*=)https?://(?:localhost|127\.0\.0\.1)(?::\d+)?(/\S*)?$", lambda m: m.group(1) + (m.group(2) or ""), text)
+                if updated != text:
+                    changed += [env_file, _backup(root, env_file, text)]
+                    _write_raw(path, updated)
+    elif code == "NODE_ROUTER_ANCHOR_LINK":
+        for rel in before.fix_data.get("router_anchor_files") or []:
+            text = _read_raw(root / rel)
+            updated = router_link_rewrite(text)
+            if updated != text:
+                changed += [rel, _backup(root, rel, text)]
+                _write_raw(root / rel, updated)
+    elif code == "NODE_PG_NUMERIC_STRINGS":
+        for rel in before.fix_data.get("pg_numeric_files") or []:
+            text = _read_raw(root / rel)
+            updated = pg_numeric_parser_rewrite(text)
+            if updated != text:
+                changed += [rel, _backup(root, rel, text)]
+                _write_raw(root / rel, updated)
+                break
     elif code == "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING":
         dockerfile = root / "Dockerfile"
         text = _read_raw(dockerfile)

@@ -2482,7 +2482,14 @@ def _entrypoint_from_node_command(command: object) -> str | None:
         r"[\"']?([^\"'\s;&|]+)",
         command,
     )
-    return _safe_node_entrypoint(match.group(1)) if match else None
+    if not match:
+        return None
+    entry = match.group(1)
+    #: `cd server && node index.js` — AI 가 만든 모노레포에서 흔하다. 폴더를 붙여야 컨테이너 CMD 가 맞는다.
+    cd = re.search(r"(?:^|&&|;)\s*cd\s+[\"']?([^\"'\s;&|]+)[\"']?\s*(?:&&|;)", command[:match.start() + 1])
+    if cd and not entry.startswith(("/", "./../")):
+        entry = f"{cd.group(1).strip('/').lstrip('./')}/{entry.lstrip('./')}"
+    return _safe_node_entrypoint(entry)
 
 
 def _discover_node_entrypoint(
@@ -2509,6 +2516,8 @@ def _discover_node_entrypoint(
     # `scripts.start`는 실제 서버 실행 계약이고 `main`은 라이브러리 export일
     # 수도 있으므로 start 명령을 우선한다.
     candidates.append(package.get("main"))
+    if isinstance(scripts, dict):
+        candidates.extend(_entrypoint_from_node_command(scripts.get(name)) for name in ("server", "serve", "dev:server"))
 
     candidates.extend(
         path for path in (

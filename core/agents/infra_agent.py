@@ -244,15 +244,26 @@ class InfraAgent:
             if "django" in deps_text:
                 return StackType.PYTHON_DJANGO
 
-        # Node
+        # Node — 루트 package.json 이 스크립트만 갖고 실제 서버 의존성은 server/ 같은 하위 폴더에
+        # 있는 모노레포(AI 생성 쇼핑몰)도 본다. 예전에는 'unknown' 이 돼 AI 맞춤 생성을 건너뛰었다.
         if package_json.exists():
             pkg = _read_lower(package_json)
+            for sub in ("server", "backend", "api", "app"):
+                sub_pkg = ws / sub / "package.json"
+                if sub_pkg.exists():
+                    pkg += _read_lower(sub_pkg)
             if '"next"' in pkg or "'next'" in pkg:
                 return StackType.NODE_NEXT
             if '"@nestjs' in pkg:
                 return StackType.NODE_NEST
-            if '"express"' in pkg:
+            if '"express"' in pkg or '"fastify"' in pkg or '"koa"' in pkg:
                 return StackType.NODE_EXPRESS
+            try:
+                scripts = json.loads(package_json.read_text(encoding="utf-8", errors="replace")).get("scripts") or {}
+                if any(re.search(r"\bnode\b", str(v)) for v in scripts.values()):
+                    return StackType.NODE_EXPRESS
+            except (OSError, ValueError, AttributeError):
+                pass
 
         if go_mod.exists():
             return StackType.GO

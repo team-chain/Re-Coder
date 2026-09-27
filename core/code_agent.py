@@ -943,6 +943,11 @@ def _build_code_prompt(
 - 의존성은 알려진 치명적 취약점이 없는 최신 major 버전을 씁니다(예: sqlite3 는 ^6.0.1 — 5.x 는 배포 보안 검사에서 차단됩니다).
 - 코드가 require/import 하는 외부 패키지는 모두 package.json(또는 requirements.txt)에 선언합니다.
 - 서버는 포트를 환경변수로 받게 합니다(예: process.env.PORT || 3000). 가능하면 GET /health 가 200 을 돌려주게 합니다.
+- 화면(React·Vue 등)과 API 서버를 함께 만들면 서버가 빌드된 화면 폴더를 정적으로 제공하고, 화면은 API 를 상대 경로(/api/…)로 부릅니다. localhost 주소를 코드에 넣지 마세요.
+- Vite 프로젝트에서는 JSX 가 든 파일을 .jsx/.tsx 로 만들고, 브라우저 코드의 환경변수는 import.meta.env.VITE_* 만 씁니다(process.env 금지).
+- PostgreSQL(pg)의 NUMERIC/DECIMAL 값은 문자열로 옵니다 — 서버에서 숫자로 바꾸거나 pg.types.setTypeParser(1700, parseFloat) 를 설정하세요.
+- 파일을 나눠 만들 때 서로 부르는 함수·컴포넌트 이름과 export 방식을 정확히 맞추고, import 하는 파일(CSS 포함)은 반드시 함께 만듭니다.
+- React Router 를 쓰면 페이지 이동은 <Link>/useNavigate 로 합니다(<a href> 는 상태를 잃습니다).
 
 기존 파일 목록:
 {tree}
@@ -1584,11 +1589,11 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
     import 하지만 만들지 않은 CSS, CRA 식 process.env, 선언과 다른 패키지 이름.
     """
     try:
-        from build_readiness import (analyze, jsx_reference_rewrite, rename_package_import,
-                                     vite_env_rewrite)
+        from build_readiness import (analyze, jsx_reference_rewrite, pg_numeric_parser_rewrite,
+                                     relative_api_rewrite, rename_package_import, router_link_rewrite, vite_env_rewrite)
     except ImportError:  # pragma: no cover
-        from core.build_readiness import (analyze, jsx_reference_rewrite, rename_package_import,  # type: ignore
-                                          vite_env_rewrite)
+        from core.build_readiness import (analyze, jsx_reference_rewrite, pg_numeric_parser_rewrite,  # type: ignore
+                                          relative_api_rewrite, rename_package_import, router_link_rewrite, vite_env_rewrite)
     folder = (target_folder or "").replace("\\", "/").strip("/")
     base = (root / folder).resolve() if folder and not Path(folder).is_absolute() else (Path(folder) if folder else root.resolve())
     by_path = {str(op.get("file") or "").replace("\\", "/").lstrip("/"): op for op in ops}
@@ -1621,10 +1626,32 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
             new_rel = prefix + rel[:-3] + ".jsx"
             op["file"] = new_rel
             by_path[new_rel] = op
-            old_name, new_name = rel.rsplit("/", 1)[-1], new_rel.rsplit("/", 1)[-1]
-            for other in by_path.values():
-                other["content"] = jsx_reference_rewrite(other.get("content") or "", old_name, new_name)
+            for other_path, other in by_path.items():
+                if other_path.endswith((".html", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue")):
+                    other["content"] = jsx_reference_rewrite(other.get("content") or "", other_path, prefix + rel, new_rel)
             notes.append(f"{prefix + rel} → {new_rel}(Vite JSX)")
+        for rel in data.get("router_anchor_files") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = router_link_rewrite(op.get("content") or "")
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: <a href> → <Link>")
+        for rel in data.get("hardcoded_api") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = relative_api_rewrite(op.get("content") or "")
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: localhost API 주소 → 상대 경로")
+        for rel in data.get("pg_numeric_files") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = pg_numeric_parser_rewrite(op.get("content") or "")
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: pg NUMERIC 숫자 파서 추가")
+                    break
         for rel in data.get("process_env") or []:
             op = by_path.get(prefix + rel)
             if op is not None:
@@ -1636,6 +1663,27 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
                 if updated != op.get("content"):
                     op["content"] = updated
                     notes.append(f"{op['file']}: {old_pkg} → {new_pkg}")
+    # AI 가 Dockerfile 도 만들었으면 하위 폴더(client/·server/) 의존성 설치를 채운다.
+    docker_op = by_path.get("Dockerfile")
+    if docker_op is not None:
+        try:
+            from build_readiness import ProjectFiles, add_runtime_subproject_install, add_subproject_installs
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import ProjectFiles, add_runtime_subproject_install, add_subproject_installs  # type: ignore
+        overlay = {p: op.get("content") or "" for p, op in by_path.items()}
+        try:
+            readiness = analyze(base, overlay, dockerfile="Dockerfile")
+            content = docker_op.get("content") or ""
+            codes = {i.code for i in readiness.issues}
+            if "DOCKERFILE_SUBPROJECT_DEPS_MISSING" in codes:
+                content = add_subproject_installs(content, readiness.subprojects, ProjectFiles(base, overlay))
+            if "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING" in codes and readiness.runtime_subproject:
+                content = add_runtime_subproject_install(content, readiness.runtime_subproject)
+            if content != docker_op.get("content"):
+                docker_op["content"] = content
+                notes.append("Dockerfile: 하위 폴더 의존성 설치 추가")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[code_agent] Dockerfile 자동 교정 생략: {exc}", flush=True)
     return list(by_path.values()), notes
 
 
@@ -1698,7 +1746,7 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
 # JSON 한 번(8K 토큰)에 담지 못해 두 번 다 잘리고 "요청 범위를 나누라"로 끝났다(실기기).
 # 잘리면 같은 요청을 반복하지 않고 (1) 만들 파일 목록과 파일 사이의 약속(API 경로·이름·
 # 패키지)을 받은 뒤 (2) 그 약속을 공유하며 파일 몇 개씩 따로 생성해 합친다.
-_SPLIT_MAX_FILES = 16
+_SPLIT_MAX_FILES = 24
 _SPLIT_BATCH = 2
 _SPLIT_PARALLEL = 3
 _MANIFEST_SCHEMA = {
@@ -1931,6 +1979,19 @@ def generate_code(
             break
         except CodeOutputError as exc:
             reason = str(exc)
+            if attempt == 1 and "완성되지 않았거나" in reason:
+                #: 교정 요청까지 완성되지 않은 JSON 이면 거의 언제나 길이 한도에서 잘린 것이다
+                #: (stop_reason 을 안 주는 제공자·게이트웨이 포함). 실패로 끝내지 않고 나눠서 만든다.
+                print("[code_agent] 응답 JSON 이 두 번 다 완성되지 않아 분할 생성으로 전환", flush=True)
+                try:
+                    data, ops_out, llm_resp = _generate_split(prompt)
+                except (LLMError, CodeOutputError, RuntimeError) as split_exc:
+                    reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
+                    split_mode_failed = True
+                    break
+                ops_out = _relative_to_target(ops_out, target_folder)
+                split_mode = True
+                break
         except LLMError as exc:
             if exc.error_type != LLMErrorType.STRUCTURED_OUTPUT:
                 raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
@@ -1957,7 +2018,7 @@ def generate_code(
         )
     if split_mode_failed:
         raise RuntimeError(
-            f"AI가 완성된 파일 변경을 반환하지 못했습니다. {reason} "
+            f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도 뒤 나눠서 만들기도 실패). {reason} "
             "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
         )
 
@@ -1975,6 +2036,10 @@ def generate_code(
         targeted = split_mode or sum(len(op.get("content") or "") for op in ops_out) > 12_000
         if targeted:
             wanted = {_norm_op_path(i.get("file") or "") for i in consistency if i.get("file")}
+            #: 메시지에 언급된 다른 파일(내보내는 쪽·Context 정의 파일)도 같이 보여 줘야 고칠 수 있다.
+            for op in ops_out:
+                if any(op["file"] in (i.get("message") or "") for i in consistency):
+                    wanted.add(_norm_op_path(op["file"]))
             shown = [op for op in ops_out if _norm_op_path(op["file"]) in wanted
                      or posixpath.basename(op["file"]) in {"package.json", "requirements.txt", "Dockerfile"}]
             listing = "\n".join(f"- {op['file']}" for op in ops_out)
@@ -2000,6 +2065,8 @@ def generate_code(
             if targeted:
                 ops2 = _merge_ops(ops_out, ops2)
                 data2 = data
+            #: 교정 응답이 원래 버릇(localhost 주소 등)을 다시 들고 올 수 있다 — 결정적 교정을 한 번 더.
+            ops2, more_notes = _autofix_ops(root, target_folder, ops2)
             remaining = _consistency_issues(root, target_folder, ops2)
             if sum(i["severity"] == "error" for i in remaining) < sum(i["severity"] == "error" for i in consistency):
                 data, ops_out, llm_resp, consistency = data2, ops2, retry, remaining
