@@ -66,7 +66,7 @@ export class CoreManager {
     private ensurePromise: Promise<CoreClient> | null = null;
     private restartPromise: Promise<CoreClient> | null = null;
     /** 방금 띄운 Core 가 준비 전에 끝났는지와 마지막 stderr 몇 줄 — 준비 대기가 60초를 헛돌지 않게. */
-    private spawnWatch: { exited: boolean; code: number | null; tail: string[] } | null = null;
+    private spawnWatch: { exited: boolean; code: number | null; tail: string[]; lockHeld?: boolean } | null = null;
     private extensionContext: vscode.ExtensionContext;
 
     // CoreClient 인스턴스 (외부에서 사용)
@@ -602,10 +602,11 @@ export class CoreManager {
                 processLog.write('stdout', data);
                 console.log('[ReCoder Core]', data.toString().trim());
             });
-            const watch = { exited: false, code: null as number | null, tail: [] as string[] };
+            const watch: { exited: boolean; code: number | null; tail: string[]; lockHeld?: boolean } = { exited: false, code: null, tail: [] };
             this.spawnWatch = watch;
             this.coreProcess.stderr?.on('data', (data: Buffer) => {
                 watch.tail = [...watch.tail, ...data.toString().split(/\r?\n/).filter(l => l.trim())].slice(-6);
+                if (/already running/i.test(data.toString())) { watch.lockHeld = true; }
                 processLog.write('stderr', data);
                 console.error('[ReCoder Core STDERR]', data.toString().trim());
             });
@@ -643,12 +644,20 @@ export class CoreManager {
         }
     }
 
-    private async waitForReady(timeoutMs: number = 15000): Promise<void> {
+    private async waitForReady(timeoutMs: number = 60000): Promise<void> {
+        //: 기본 60초 — Windows 에서 한 파일 Core 는 시작에 12~50초 걸렸다(실기기). 15초로 기다리던
+        //: "다른 호출이 이미 띄우는 중" 경로가 먼저 포기해 연결 실패로 보였다.
         const expected = this.expectedEntrypoint();
         const start = Date.now();
+        let otherOwner = false;
         while (Date.now() - start < timeoutMs) {
             const watch = this.spawnWatch;
-            if (watch?.exited) {
+            if (watch?.exited && !otherOwner && (watch.lockHeld || watch.tail.some(l => /already running/i.test(l)))) {
+                //: 다른 VS Code 창이 같은 순간 Core 를 띄웠다 — 우리 것은 잠금에 막혀 끝났다.
+                //: 실패가 아니다. 그 Core 가 연결 정보를 쓸 때까지 기다렸다가 붙는다.
+                otherOwner = true;
+            }
+            if (watch?.exited && !otherOwner) {
                 //: Core 가 준비 전에 끝났다 — 60초를 기다리지 않고 원인을 바로 보여 준다.
                 const reason = watch.tail.map(l => l.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').trim()).filter(Boolean).slice(-3).join(' / ');
                 throw new Error(`ReCoder Core가 시작 직후 종료됐습니다${watch.code !== null ? ` (코드 ${watch.code})` : ''}.`

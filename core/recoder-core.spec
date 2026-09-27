@@ -65,6 +65,23 @@ a = Analysis(
     excludes=['pytest', 'pytest_asyncio', 'tests', 'moto', 'eval', 'tkinter'],
     noarchive=False,
 )
+# ── 시작 속도: 한 파일 실행 파일은 시작할 때마다 모든 데이터 파일을 임시 폴더에 푼다 ──
+# botocore 서비스 정의 1,900개·googleapiclient 발견 문서 580개를 매번 풀고 Windows 백신이
+# 검사해 Core 시작이 12~50초 걸렸다(실기기 로그). 쓰는 AWS 서비스와 botocore 공용 파일만 남긴다.
+_release = runpy.run_path(str(CORE_DIR / 'release_check.py'))
+_services = set(_release['BUNDLED_AWS_SERVICES'])
+
+
+def _keep_data(dest):
+    parts = dest.replace('\\', '/').split('/')
+    if parts[:2] == ['botocore', 'data'] and len(parts) > 3:
+        return parts[2] in _services
+    if parts[:3] == ['googleapiclient', 'discovery_cache', 'documents']:
+        return parts[-1].startswith('generativelanguage')
+    return True
+
+
+a.datas = [entry for entry in a.datas if _keep_data(entry[0])]
 pyz = PYZ(a.pure)
 
 exe = EXE(

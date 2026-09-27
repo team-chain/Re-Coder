@@ -104,3 +104,15 @@ test('이전 Core 종료를 거절하면 자동 재시도 때 다시 묻지 않�
   fs.writeFileSync(m._lockPath, JSON.stringify({ pid: unrelated.pid }));
   assert.equal(m.orphanCorePid(), null);
 });
+
+test('다른 창이 같은 순간 Core 를 띄우면(잠금 충돌) 실패하지 않고 그 Core 에 붙는다', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-race-'));
+  const m = loadManager(dir);
+  m._findCoreSpec = () => ({ command: process.execPath, args: [fixture, path.join(dir, 'runtime.json'), 'locked'] });
+  let other;
+  t.after(async () => { try { other?.kill('SIGKILL'); } catch { /* gone */ } await m.shutdown(true); fs.rmSync(dir, { recursive: true, force: true }); });
+  //: 다른 창의 Core 가 1.5초 뒤에 준비된다(느린 시작).
+  setTimeout(() => { other = spawn(process.execPath, [fixture, path.join(dir, 'runtime.json')], { stdio: 'ignore' }); }, 1500);
+  await m.ensureRunning();
+  assert.equal((await m.healthCheck()).status, 'ok');
+});

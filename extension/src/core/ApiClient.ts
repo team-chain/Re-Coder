@@ -808,10 +808,24 @@ export class ApiClient {
     // /api/session/cost — also supported by core for backwards compat
     // -----------------------------------------------------------------------
 
+    private costCache: { at: number; value: CostSummary } | null = null;
+    private costInFlight: Promise<CostSummary> | null = null;
+
+    /**
+     * 비용 요약. 사이드바·워크벤치·헬스 폴링이 각자 5초마다 불러 실기기 로그에서 Core 요청의
+     * 70%(이틀에 2만 건)가 이것이었다. 값은 AI 호출 뒤에만 바뀌므로 20초 동안 재사용하고,
+     * 같은 순간의 중복 요청은 하나로 합친다.
+     */
     async getCostSummary(): Promise<CostSummary> {
-        const resp = await this.request<CostSummary>('GET', '/api/cost');
-        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비용 정보 조회 실패'); }
-        return resp.data;
+        if (this.costCache && Date.now() - this.costCache.at < 20_000) { return this.costCache.value; }
+        if (this.costInFlight) { return this.costInFlight; }
+        this.costInFlight = (async () => {
+            const resp = await this.request<CostSummary>('GET', '/api/cost');
+            if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비용 정보 조회 실패'); }
+            this.costCache = { at: Date.now(), value: resp.data };
+            return resp.data;
+        })();
+        try { return await this.costInFlight; } finally { this.costInFlight = null; }
     }
 
     // -----------------------------------------------------------------------

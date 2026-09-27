@@ -16,6 +16,14 @@ RUNTIME_IMPORTS = (
     'google.genai', 'google.generativeai',
 )
 
+#: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
+#: 필요한 것만 담는다 — botocore 전체(1,900개 파일)를 넣으면 한 파일 실행 파일이 시작할
+#: 때마다 임시 폴더에 풀고 백신이 하나하나 검사해 Windows 에서 Core 시작이 12~50초 걸렸다.
+BUNDLED_AWS_SERVICES = (
+    'sts', 'ecs', 'ecr', 's3', 'iam', 'elbv2', 'budgets', 'bedrock-runtime', 'bedrock',
+    'logs', 'ec2', 'dynamodb', 'cloudformation', 'sso', 'sso-oidc', 'signin',
+)
+
 
 def run(app) -> int:
     checks: list[str] = []
@@ -33,7 +41,10 @@ def run(app) -> int:
         checks.append('command and infrastructure templates')
         from botocore.session import Session
         session = Session()
-        for service in ('sts', 'ecs', 'ecr', 's3', 'iam', 'elbv2', 'budgets', 'bedrock-runtime'):
+        available = set(session.get_available_services())
+        for service in BUNDLED_AWS_SERVICES:
+            if service == 'signin' and service not in available:
+                continue  # 오래된 botocore 에는 없다
             assert session.get_service_model(service).operation_names, service
         checks.append('AWS service definitions')
         import certifi
