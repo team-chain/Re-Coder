@@ -1,4 +1,5 @@
 import { currentAiProvider } from '../ai/aiKeyEnv';
+import { detectFrontendProject } from '../deploy/frontendBuild';
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -1489,8 +1490,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             .map(e => e.name);
                     } catch { dirs = []; }
                 }
+                const frontend = workspacePath ? detectFrontendProject(workspacePath) : null;
                 this.postMessage('workspace.deploy.s3.dirs', {
-                    suggested: pickStaticDir(dirs),
+                    //: React·Vite 프로젝트면 빌드 산출물 폴더(client/build 등)를 권한다.
+                    suggested: frontend ? frontend.outDir : pickStaticDir(dirs),
                     candidates: STATIC_DIR_CANDIDATES.filter(c => dirs.includes(c)),
                 });
                 break;

@@ -35,7 +35,8 @@ WARNING = "warning"
 
 #: 사용자가 버튼 한 번으로 적용할 수 있는(백업을 남기는) 수정 종류.
 AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_HEALTH_PATH_UNKNOWN",
-                "NODE_UNUSED_BUILD_SCRIPT", "DOCKERFILE_WORKDIR_NOT_WRITABLE", "NODE_VULNERABLE_DEPENDENCY"}
+                "NODE_UNUSED_BUILD_SCRIPT", "DOCKERFILE_WORKDIR_NOT_WRITABLE", "NODE_VULNERABLE_DEPENDENCY",
+                "NODE_DEPENDENCY_VERSION_NOT_FOUND", "DOCKERFILE_SUBPROJECT_DEPS_MISSING", "NODE_FRONTEND_NOT_SERVED"}
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -66,6 +67,9 @@ class Readiness:
     serves_root: bool = False             # "/" 가 200 을 줄 근거가 있는가
     docs_path: Optional[str] = None       # FastAPI 자동 문서처럼 항상 200 인 경로
     local_data_files: list[str] = field(default_factory=list)  # 작업 폴더에 만드는 SQLite 파일
+    #: 루트 build 스크립트가 들어가서 빌드하는 하위 프로젝트(client/ 등) — 각자 package.json 이 있다.
+    subprojects: list[str] = field(default_factory=list)
+    server_entry: Optional[str] = None     # 서버 진입 파일(정적 제공 자동 수정 대상)
     issues: list[ReadinessIssue] = field(default_factory=list)
 
     @property
@@ -325,6 +329,93 @@ def _start_entry(scripts: dict) -> Optional[str]:
     return None
 
 
+
+_FRONTEND_BUILDS = (
+    (re.compile(r"\breact-scripts\s+build\b"), "build"),
+    (re.compile(r"\bvite(?:\s+build\b|\s*$)"), "dist"),
+    (re.compile(r"\bvue-cli-service\s+build\b"), "dist"),
+    (re.compile(r"\bparcel\s+build\b"), "dist"),
+    (re.compile(r"\bastro\s+build\b"), "dist"),
+)
+_DIR_FLAGS = ("--prefix", "-C", "--cwd", "--dir")
+_EXTERNAL_SERVICES = (
+    ("pg", "PostgreSQL", r"localhost:5432|127\.0\.0\.1:5432|postgres(?:ql)?://[^'\"\s]*@(?:localhost|127\.0\.0\.1)"),
+    ("mysql2", "MySQL", r"localhost:3306|127\.0\.0\.1:3306|host\s*:\s*['\"](?:localhost|127\.0\.0\.1)['\"]"),
+    ("mysql", "MySQL", r"localhost:3306|127\.0\.0\.1:3306|host\s*:\s*['\"](?:localhost|127\.0\.0\.1)['\"]"),
+    ("mongoose", "MongoDB", r"mongodb://(?:[^'\"\s@]*@)?(?:localhost|127\.0\.0\.1)"),
+    ("mongodb", "MongoDB", r"mongodb://(?:[^'\"\s@]*@)?(?:localhost|127\.0\.0\.1)"),
+    ("redis", "Redis", r"redis://(?:localhost|127\.0\.0\.1)|localhost:6379"),
+    ("ioredis", "Redis", r"redis://(?:localhost|127\.0\.0\.1)|localhost:6379"),
+)
+
+
+def _npm_dir_and_args(words: list[str]) -> tuple[str, list[str]]:
+    """``npm --prefix client run build`` → ("client", ["run", "build"])."""
+    target, rest, skip = "", [], False
+    for i, word in enumerate(words[1:], start=1):
+        if skip:
+            skip = False
+            continue
+        if word in _DIR_FLAGS:
+            if i + 1 < len(words):
+                target = _norm(words[i + 1].strip("'\""))
+            skip = True
+            continue
+        m = re.match(r"^(--prefix|--cwd|--dir)=(.+)$", word)
+        if m:
+            target = _norm(m.group(2).strip("'\""))
+            continue
+        if not word.startswith("-"):
+            rest.append(word)
+    return target, rest
+
+
+def _subproject_scripts(scripts: dict, files: "ProjectFiles") -> tuple[list[str], set[str]]:
+    """(루트 build 가 들어가서 실행하는 하위 프로젝트, 스크립트가 스스로 의존성을 설치하는 하위 프로젝트)."""
+    runs: list[str] = []
+    installs: set[str] = set()
+
+    def visit(name: str, depth: int) -> None:
+        cwd = ""
+        for words in _script_commands(str(scripts.get(name, ""))):
+            if words[0] == "cd" and len(words) > 1:
+                cwd = _norm(words[1].strip("'\""))
+                continue
+            if words[0] not in {"npm", "yarn", "pnpm"}:
+                continue
+            flag_dir, rest = _npm_dir_and_args(words)
+            target = flag_dir or cwd
+            installing = (rest[:1] in (["install"], ["i"], ["ci"])) or (words[0] == "yarn" and not rest)
+            if target and target not in {".", ""} and files.exists(f"{target}/package.json"):
+                if installing:
+                    installs.add(target)
+                elif target not in runs:
+                    runs.append(target)
+            elif not target and depth < 3 and not installing:
+                script = rest[1] if rest[:1] == ["run"] and len(rest) > 1 else (rest[0] if rest else "")
+                if script in scripts and script != name:
+                    visit(script, depth + 1)
+
+    for lifecycle in ("preinstall", "install", "postinstall", "prebuild"):
+        if lifecycle in scripts:
+            visit(lifecycle, 0)
+    if "build" in scripts:
+        visit("build", 0)
+    return runs, installs
+
+
+def _frontend_out_dir(files: "ProjectFiles", folder: str) -> Optional[str]:
+    try:
+        sub = json.loads(files.read(f"{folder}/package.json") or "")
+    except ValueError:
+        return None
+    build = str(((sub or {}).get("scripts") or {}).get("build", "")) if isinstance(sub, dict) else ""
+    for pattern, out in _FRONTEND_BUILDS:
+        if pattern.search(build):
+            return f"{folder}/{out}"
+    return None
+
+
 def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
     raw = files.read("package.json")
     try:
@@ -442,7 +533,32 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
     entry_candidates = [e for e in (entry, _norm(main) if isinstance(main, str) else None,
                                     "server.js", "index.js", "app.js", "src/server.js", "src/index.js",
                                     "src/app.js", "src/main.ts", "src/index.ts", "server.ts", "index.ts") if e]
-    undeclared: dict[str, str] = {}
+    #: 하위 폴더에 자기 package.json 이 있으면(client/ 의 React 앱 등) 그 폴더의 코드는 그
+    #: package.json 기준으로 본다. 예전에는 루트 package.json 과 비교해 client 의 react·axios 를
+    #: "선언 안 된 패키지"로 잘못 막았다(실기기).
+    manifests: dict[str, set[str]] = {"": deps}
+    for rel in files.files():
+        if rel.endswith("/package.json") and "/node_modules/" not in f"/{rel}":
+            folder = rel[: -len("/package.json")]
+            try:
+                sub = json.loads(files.read(rel) or "")
+            except ValueError:
+                continue
+            if isinstance(sub, dict):
+                names: set[str] = {str(sub.get("name") or "")}
+                for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                    if isinstance(sub.get(key), dict):
+                        names.update(sub[key])
+                manifests[folder] = names
+
+    def owner(rel: str) -> str:
+        best = ""
+        for folder in manifests:
+            if folder and (rel == folder or rel.startswith(folder + "/")) and len(folder) > len(best):
+                best = folder
+        return best
+
+    undeclared: dict[str, dict[str, str]] = {}
     routes: set[str] = set()
     statics: set[str] = set()
     for rel in files.files():
@@ -453,23 +569,29 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         text = files.read(rel)
         if text is None:
             continue
+        project = owner(rel)
+        declared = manifests[project] | (deps if project else set())  # 하위 폴더는 위쪽 node_modules 도 찾는다
         active = _strip_js_comments(text)
         for pattern in _IMPORT_PATTERNS:
             for spec in pattern.findall(active):
                 pkg = _package_of(spec)
-                if pkg and pkg not in deps and pkg not in _NODE_BUILTINS and pkg != package.get("name"):
-                    undeclared.setdefault(pkg, rel)
+                if pkg and pkg not in declared and pkg not in _NODE_BUILTINS and pkg != package.get("name"):
+                    undeclared.setdefault(project, {}).setdefault(pkg, rel)
         r, s = _express_routes(text)
         routes |= r
         statics |= s
         result.local_data_files += [f for f in _local_sqlite_files(active) if f not in result.local_data_files]
-    if undeclared and not workspaces:
-        names = sorted(undeclared)
-        shown = ", ".join(f"`{n}`({undeclared[n]})" for n in names[:6])
+    for project, missing in sorted(undeclared.items()):
+        if workspaces and not project:
+            continue
+        names = sorted(missing)
+        shown = ", ".join(f"`{n}`({missing[n]})" for n in names[:6])
+        manifest = f"{project}/package.json" if project else "package.json"
+        where = f"`cd {project} && npm install" if project else "`npm install"
         result.issues.append(ReadinessIssue(
             "NODE_UNDECLARED_DEPENDENCY", ERROR,
-            f"코드가 불러오는 패키지가 package.json 에 없습니다: {shown}. 컨테이너에는 선언된 패키지만 설치됩니다.",
-            f"`npm install {' '.join(names[:6])}` 로 의존성에 추가하세요.", undeclared[names[0]]))
+            f"코드가 불러오는 패키지가 {manifest} 에 없습니다: {shown}. 컨테이너에는 선언된 패키지만 설치됩니다.",
+            f"{where} {' '.join(names[:6])}` 로 의존성에 추가하세요.", missing[names[0]]))
 
     for rel in entry_candidates:
         text = files.read(rel)
@@ -489,6 +611,47 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
     result.health_path = next((p for p in _HEALTH_NAMES if p in routes), None)
     result.serves_root = "/" in routes or "*" in routes or any(
         files.exists(f"{folder}/index.html") for folder in statics)
+
+    # 4) 루트 build 가 하위 프로젝트(client/ 등)로 들어가서 빌드한다 — Dockerfile 이 그 폴더의
+    #    의존성도 설치해야 한다(아래 Dockerfile 점검). 빌드한 화면을 서버가 제공하는지도 본다.
+    runs, installs = _subproject_scripts(scripts, files)
+    result.subprojects = [d for d in runs if d not in installs]
+    for rel in entry_candidates:
+        text = files.read(rel)
+        if text and re.search(r"\.listen\s*\(", text) and re.search(r"\bexpress\s*\(", text):
+            result.server_entry = rel
+            break
+    server_texts = [files.read(rel) or "" for rel in files.files()
+                    if rel.endswith(_JS_SUFFIXES) and not any(rel.startswith(d + "/") for d in runs)
+                    and "/node_modules/" not in rel]
+    for folder in runs:
+        out = _frontend_out_dir(files, folder)
+        if not out or not (routes or result.server_entry):
+            continue
+        if any(out in text for text in server_texts):
+            continue
+        commonjs = bool(result.server_entry) and "require(" in (files.read(result.server_entry) or "") \
+            and package.get("type") != "module"
+        result.issues.append(ReadinessIssue(
+            "NODE_FRONTEND_NOT_SERVED", WARNING,
+            f"`build` 가 {folder}/ 의 화면을 {out}/ 로 빌드하지만 서버가 그 폴더를 제공하지 않습니다. "
+            "컨테이너에서는 API 만 응답하고 브라우저로 열면 화면이 나오지 않습니다(Cannot GET /).",
+            (f"서버({result.server_entry})가 {out}/ 를 제공하고 /api 밖의 경로는 index.html 로 보내게 하세요"
+             "(자동 수정 가능, 원본은 .recoder/backups 에 보관)." if commonjs else
+             f"서버에서 express.static 으로 {out}/ 를 제공하도록 추가하세요."),
+            result.server_entry or "", commonjs))
+
+    runtime_names = set(runtime_deps)
+    all_server_text = "\n".join(server_texts)
+    for dep, label, pattern in _EXTERNAL_SERVICES:
+        if dep in runtime_names and re.search(pattern, all_server_text):
+            result.issues.append(ReadinessIssue(
+                "NODE_EXTERNAL_SERVICE", WARNING,
+                f"앱이 {label} 에 localhost 로 연결합니다. 로컬 Docker 배포는 앱 컨테이너 하나만 띄우므로 "
+                f"컨테이너 안의 localhost 에는 {label} 이 없습니다 — DB 를 쓰는 API 는 오류를 돌려줍니다.",
+                f"PC 에 {label} 을 띄웠다면 연결 주소의 localhost 를 host.docker.internal 로 바꿔 환경변수로 넘기거나, "
+                f"docker compose 로 {label} 과 함께 띄우세요. 화면·헬스 확인은 그대로 동작합니다.", ""))
+            break
 
     # CRA 빌드가 깨졌을 때: 서버가 정적 폴더를 그대로 제공하고 src/ 가 없으면
     # 빌드 자체가 필요 없는 구조다(생성 코드가 CRA 설정만 남긴 경우). 그때만
@@ -676,6 +839,67 @@ def _dockerfile_facts(text: str) -> dict:
     return facts
 
 
+def _dockerfile_installs(text: str, folder: str) -> bool:
+    """Dockerfile 이 하위 폴더의 의존성을 설치하는가."""
+    joined = re.sub(r"\\\r?\n", " ", text)
+    d = re.escape(folder.strip("/"))
+    patterns = (
+        rf"cd\s+(?:\./|/app/)?{d}/?\s*&&[^\n]*\b(?:npm|yarn|pnpm)\s+(?:ci|install|i)\b",
+        rf"\b(?:npm|pnpm)\s+(?:ci|install|i)\b[^\n]*--prefix[= ](?:\./)?{d}\b",
+        rf"--prefix[= ](?:\./)?{d}\b[^\n]*\b(?:ci|install)\b",
+        rf"\byarn\s+--cwd\s+(?:\./)?{d}\b",
+    )
+    if any(re.search(p, joined) for p in patterns):
+        return True
+    workdir = None
+    for line in joined.splitlines():
+        words = line.split()
+        if not words:
+            continue
+        if words[0].upper() == "WORKDIR" and len(words) > 1:
+            workdir = words[1].rstrip("/")
+        elif words[0].upper() == "RUN" and workdir and workdir.endswith("/" + folder.strip("/")) \
+                and re.search(r"\b(?:npm|yarn|pnpm)\s+(?:ci|install|i)\b", line):
+            return True
+    return False
+
+
+def _install_line(files: "ProjectFiles", folder: str) -> str:
+    if files.exists(f"{folder}/yarn.lock"):
+        return f"RUN cd {folder} && yarn install --frozen-lockfile"
+    if files.exists(f"{folder}/pnpm-lock.yaml"):
+        return f"RUN cd {folder} && npm install -g pnpm && pnpm install --frozen-lockfile"
+    return (f"RUN cd {folder} && if [ -f package-lock.json ]; then npm ci || npm install; "
+            "else npm install; fi")
+
+
+def add_subproject_installs(text: str, folders: list[str], files: "ProjectFiles") -> str:
+    """빌드 RUN 앞에 하위 폴더 설치, 뒤에 그 폴더의 node_modules 정리를 넣는다.
+
+    정리까지 하는 이유: react-scripts 같은 빌드 도구의 의존성이 실행 이미지에 남으면 이미지가
+    수백 MB 커지고, 보안 검사(Trivy)가 그 안의 취약점으로 배포를 막는다.
+    """
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(newline)
+    index = next((i for i, l in enumerate(lines)
+                  if re.match(r"^\s*RUN\b", l, re.I) and re.search(r"\b(?:npm|yarn|pnpm)\s+(?:run\s+)?build\b", l)), None)
+    if index is None:
+        raise ValueError("Dockerfile 에서 빌드(npm run build) 줄을 찾지 못했습니다. 직접 수정하세요.")
+    end = index
+    while end < len(lines) - 1 and lines[end].rstrip().endswith("\\"):
+        end += 1
+    todo = [f for f in folders if not _dockerfile_installs(text, f)]
+    if not todo:
+        return text
+    after = ["# ReCoder: 빌드에만 쓰는 하위 폴더 의존성은 실행 이미지에 넣지 않는다(크기·보안 검사).",
+             "RUN rm -rf " + " ".join(f"{f}/node_modules" for f in todo)]
+    before = ["# ReCoder: build 스크립트가 " + ", ".join(f"{f}/" for f in todo) + " 에서 빌드하므로 그 의존성도 설치한다."]
+    before += [_install_line(files, f) for f in todo]
+    lines[end + 1:end + 1] = after
+    lines[index:index] = before
+    return newline.join(lines)
+
+
 _DOCKERIGNORE_TRIGGERS = ("node_modules", ".env", ".venv", "venv", ".git")
 
 
@@ -717,6 +941,15 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
             f"(확인된 경로: {probe}). 컨테이너가 unhealthy 로 표시될 수 있습니다.",
             f"HEALTHCHECK 경로를 {probe} 로 바꾸거나(자동 수정 가능) {facts['health_path']} 라우트를 추가하세요.",
             dockerfile, True))
+    missing_sub = [d for d in result.subprojects if facts["runs_build"] and not _dockerfile_installs(text, d)]
+    if missing_sub:
+        shown = ", ".join(f"{d}/" for d in missing_sub)
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_SUBPROJECT_DEPS_MISSING", ERROR,
+            f"`npm run build` 가 {shown} 에서 빌드하지만 Dockerfile 은 그 폴더의 의존성을 설치하지 않습니다. "
+            "빌드 단계에서 react-scripts 같은 도구를 찾지 못해 실패합니다.",
+            f"Dockerfile 의 빌드 전에 {shown} 의존성 설치를 넣으세요(자동 수정 가능 — 설치 후 빌드하고, 실행 이미지에는 "
+            "빌드 결과만 남깁니다).", dockerfile, True))
     if not files.exists(".dockerignore") and any(
             files.has_dir(d) or files.exists(d) for d in _DOCKERIGNORE_TRIGGERS):
         result.issues.append(ReadinessIssue(
@@ -740,13 +973,70 @@ def detect_runtime(files: ProjectFiles) -> str:
     return "unknown"
 
 
+def _missing_versions_in(files: "ProjectFiles", manifest: str) -> list[dict]:
+    try:
+        package = json.loads(files.read(manifest) or "")
+    except ValueError:
+        return []
+    if not isinstance(package, dict):
+        return []
+    try:
+        from npm_registry import missing_versions  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.npm_registry import missing_versions  # type: ignore
+    found = []
+    for section in ("dependencies", "devDependencies"):
+        deps = package.get(section)
+        if isinstance(deps, dict):
+            for item in missing_versions(deps):
+                found.append({**item, "section": section})
+    return found
+
+
+def _check_versions_online(files: "ProjectFiles", result: Readiness) -> None:
+    """레지스트리에 없는 의존성 버전(ETARGET 예정)을 찾는다. 네트워크가 안 되면 조용히 넘어간다."""
+    for folder in [""] + list(result.subprojects):
+        manifest = f"{folder}/package.json" if folder else "package.json"
+        try:
+            missing = _missing_versions_in(files, manifest)
+        except Exception:  # noqa: BLE001 - 점검 실패가 계획을 막지 않는다
+            continue
+        if not missing:
+            continue
+        has_lock = any(files.exists(f"{folder}/{n}" if folder else n)
+                       for n in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml"))
+        fixable = [m for m in missing if m["suggestion"]]
+        parts = []
+        for m in missing[:5]:
+            if not m["exists"]:
+                parts.append(f"`{m['name']}` — npm 에 이런 이름의 패키지가 없습니다")
+            else:
+                parts.append(f"`{m['name']}@{m['spec']}` — 이 범위에 맞는 버전이 없습니다"
+                             + (f"(사용 가능: {m['suggestion']})" if m["suggestion"] else ""))
+        auto = bool(fixable) and len(fixable) == len(missing) and not has_lock
+        fix = ("package.json 의 버전을 " + ", ".join(f"{m['name']} {m['suggestion']}" for m in fixable)
+               + " 로 고치세요(자동 수정 가능, 원본은 .recoder/backups 에 보관).") if auto else (
+            "패키지 이름·버전을 npm 에서 확인해 고치세요"
+            + (" (lock 파일이 있어 `npm install <패키지>@<버전>` 으로 함께 갱신해야 합니다)." if has_lock else "."))
+        result.issues.append(ReadinessIssue(
+            "NODE_DEPENDENCY_VERSION_NOT_FOUND", ERROR,
+            f"{manifest} 의 의존성을 npm 에서 설치할 수 없습니다: " + "; ".join(parts)
+            + ". 컨테이너 빌드가 `npm error ETARGET` 으로 멈춥니다.",
+            fix, manifest, auto))
+
+
 def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]] = None,
-            *, dockerfile: Optional[str] = "Dockerfile") -> Readiness:
-    """프로젝트(와 Dockerfile)를 읽어 빌드·실행 가능성을 판정한다."""
+            *, dockerfile: Optional[str] = "Dockerfile", online: bool = False) -> Readiness:
+    """프로젝트(와 Dockerfile)를 읽어 빌드·실행 가능성을 판정한다.
+
+    online=True 면 npm 레지스트리에 의존성 버전이 실제로 있는지도 본다(배포 계획·실패 진단).
+    """
     files = ProjectFiles(Path(workspace), overlay)
     result = Readiness(runtime=detect_runtime(files))
     if result.runtime == "node":
         _analyze_node(files, result)
+        if online:
+            _check_versions_online(files, result)
     elif result.runtime == "python":
         _analyze_python(files, result)
     if result.local_data_files:
@@ -846,6 +1136,30 @@ def _backup(root: Path, rel: str, text: str) -> str:
     return target.relative_to(root).as_posix()
 
 
+def serve_frontend(text: str, entry_rel: str, out_dir: str) -> str:
+    """Express 서버가 빌드한 화면을 제공하게 한다 — 마지막 listen 호출 바로 앞에 넣는다.
+
+    API·헬스 라우트는 앞에서 이미 정의돼 있으므로 그대로 이긴다. /api 로 시작하지 않는 나머지
+    경로는 index.html 로 보내 React Router 같은 화면 라우팅이 새로고침에도 동작하게 한다.
+    """
+    import posixpath
+    listens = list(re.finditer(r"^([ \t]*)(\w+)\.listen\s*\(", text, re.MULTILINE))
+    if not listens:
+        raise ValueError("서버 파일에서 app.listen(...) 을 찾지 못했습니다.")
+    m = listens[-1]
+    indent, app = m.group(1), m.group(2)
+    rel = posixpath.relpath(out_dir, posixpath.dirname(entry_rel) or ".")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    block = newline.join([
+        f"{indent}// ReCoder: 빌드한 화면({out_dir})을 같은 서버에서 제공한다. API 라우트는 위에서 먼저 처리된다.",
+        f"{indent}const recoderUiDir = require('path').join(__dirname, '{rel}');",
+        f"{indent}{app}.use(require('express').static(recoderUiDir));",
+        f"{indent}{app}.get(/^\\/(?!api(?:\\/|$)).*/, (req, res, next) => res.sendFile(require('path').join(recoderUiDir, 'index.html'), (err) => err && next()));",
+        "",
+    ])
+    return text[:m.start()] + block + newline + text[m.start():]
+
+
 def apply_fix(workspace: str | Path, code: str) -> dict:
     """AUTO_FIXABLE 만 적용한다. 다시 판정한 결과를 돌려준다."""
     root = Path(workspace).expanduser().resolve()
@@ -853,7 +1167,7 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
         raise ValueError("유효한 프로젝트 폴더가 아닙니다.")
     if code not in AUTO_FIXABLE:
         raise ValueError("자동으로 고칠 수 없는 항목입니다. 안내에 따라 직접 수정하세요.")
-    before = analyze(root)
+    before = analyze(root, online=code == "NODE_DEPENDENCY_VERSION_NOT_FOUND")
     issue = next((i for i in before.issues if i.code == code), None)
     if issue is None:
         return {"applied": False, "message": "이미 해결된 항목입니다.", "readiness": before.to_dict()}
@@ -904,6 +1218,49 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
         json.loads(updated)  # 결과가 여전히 올바른 JSON 인지 확인
         _write_raw(manifest, updated)
         changed += ["package.json", backup]
+    elif code == "NODE_DEPENDENCY_VERSION_NOT_FOUND":
+        if not issue.auto_fix:
+            raise ValueError("자동으로 고칠 수 없습니다(없는 패키지이거나 lock 파일이 있음). 안내에 따라 직접 수정하세요.")
+        manifest_rel = issue.file or "package.json"
+        manifest = root / manifest_rel
+        text = _read_raw(manifest)
+        missing = _missing_versions_in(ProjectFiles(root), manifest_rel)
+        if not missing or any(not m["suggestion"] for m in missing):
+            raise ValueError("고칠 버전을 확정하지 못했습니다. npm 에서 버전을 확인해 직접 수정하세요.")
+        backup = _backup(root, manifest_rel, text)
+        updated = text
+        for m in missing:
+            start = updated.find(f'"{m["section"]}"')
+            pattern = re.compile(r'("' + re.escape(m["name"]) + r'"\s*:\s*")[^"]*(")')
+            found = pattern.search(updated, start if start >= 0 else 0)
+            if not found:
+                raise ValueError(f"{manifest_rel} 에서 {m['name']} 항목을 찾지 못했습니다.")
+            updated = updated[:found.start()] + found.group(1) + m["suggestion"] + found.group(2) + updated[found.end():]
+        json.loads(updated)
+        _write_raw(manifest, updated)
+        changed += [manifest_rel, backup]
+    elif code == "DOCKERFILE_SUBPROJECT_DEPS_MISSING":
+        dockerfile = root / "Dockerfile"
+        text = _read_raw(dockerfile)
+        updated = add_subproject_installs(text, before.subprojects, ProjectFiles(root))
+        if updated == text:
+            raise ValueError("이미 하위 폴더 의존성을 설치하고 있습니다.")
+        backup = _backup(root, "Dockerfile", text)
+        _write_raw(dockerfile, updated)
+        changed += ["Dockerfile", backup]
+    elif code == "NODE_FRONTEND_NOT_SERVED":
+        if not issue.auto_fix or not before.server_entry:
+            raise ValueError("서버 파일을 확정하지 못했습니다. express.static 으로 빌드 폴더를 직접 제공하세요.")
+        files = ProjectFiles(root)
+        outs = [o for o in (_frontend_out_dir(files, d) for d in before.subprojects) if o]
+        if not outs:
+            raise ValueError("빌드 결과 폴더를 확정하지 못했습니다.")
+        entry = root / before.server_entry
+        text = _read_raw(entry)
+        updated = serve_frontend(text, before.server_entry, outs[0])
+        backup = _backup(root, before.server_entry, text)
+        _write_raw(entry, updated)
+        changed += [before.server_entry, backup]
     elif code == "DOCKERFILE_HEALTH_PATH_UNKNOWN":
         dockerfile = root / "Dockerfile"
         text = _read_raw(dockerfile)

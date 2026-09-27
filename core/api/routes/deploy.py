@@ -2865,6 +2865,9 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
     elif not (Path(request.workspace_path) / '.dockerignore').exists():
         #: 서버 스택도 .dockerignore 가 없으면 PC 의 node_modules·.venv·.env 가 빌드에 섞인다.
         proposal.risk_reasons.append(SERVER_IGNORE_NOTICE)
+    # 루트 build 가 client/ 같은 하위 프로젝트에서 빌드하면 그 폴더 의존성 설치를 넣는다 —
+    # 없으면 빌드 단계에서 react-scripts 를 못 찾아 실패한다(실기기 쇼핑몰).
+    proposal = _with_subproject_installs(request.workspace_path, proposal)
     # 이 Dockerfile 로 빌드했을 때 실패가 확정적인 프로젝트 설정을 저장 전에 알린다.
     proposal.risk_reasons.extend(_readiness_notes(request.workspace_path, proposal.content))
     _infra_proposals[proposal.proposal_id] = proposal
@@ -2873,6 +2876,22 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
 
 SERVER_IGNORE_NOTICE = ('저장 시 .dockerignore도 생성합니다: node_modules·가상환경·Git 기록·.env 자격증명 파일을 '
                         'Docker 빌드에서 제외합니다. 기존 .dockerignore는 유지합니다.')
+
+
+def _with_subproject_installs(workspace_path: str, proposal):
+    try:
+        from build_readiness import ProjectFiles, add_subproject_installs, analyze
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import ProjectFiles, add_subproject_installs, analyze  # type: ignore
+    try:
+        readiness = analyze(workspace_path, {"Dockerfile": proposal.content})
+        if not any(i.code == "DOCKERFILE_SUBPROJECT_DEPS_MISSING" for i in readiness.issues):
+            return proposal
+        content = add_subproject_installs(proposal.content, readiness.subprojects, ProjectFiles(Path(workspace_path)))
+    except Exception as exc:  # noqa: BLE001 - 보정 실패는 원래 초안으로 둔다(점검이 따로 알린다)
+        logger.warning("subproject install injection skipped: %s", exc)
+        return proposal
+    return proposal.model_copy(update={"content": content})
 
 
 def _readiness_notes(workspace_path: str, dockerfile_content: str) -> list[str]:
@@ -3405,7 +3424,8 @@ def _workspace_readiness(workspace_path: str):
     except ImportError:  # pragma: no cover
         from core.build_readiness import analyze  # type: ignore
     try:
-        return analyze(workspace_path)
+        #: 레지스트리에 없는 의존성 버전도 빌드 전에 잡는다(몇 초, 오프라인이면 건너뜀).
+        return analyze(workspace_path, online=True)
     except Exception as exc:  # noqa: BLE001 - 점검 실패가 플랜을 막지 않는다
         logger.warning("build readiness check failed: %s", exc)
         return None
@@ -3538,7 +3558,7 @@ def _diagnose_build_failure(workspace_path: str, output: str, stage: str = "buil
         from core.build_failure import diagnose  # type: ignore
         from core.build_readiness import analyze  # type: ignore
     try:
-        issues = analyze(workspace_path).issues if workspace_path else []
+        issues = analyze(workspace_path, online=True).issues if workspace_path else []
     except Exception:  # noqa: BLE001
         issues = []
     try:

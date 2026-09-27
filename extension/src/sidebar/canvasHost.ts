@@ -7,6 +7,7 @@ import { ApiClient } from '../core/ApiClient';
 import * as fs from 'fs';
 import { AnalysisJob } from '../codemap/analysisJob';
 import { collectStaticFiles, describeExcludedFiles, pickStaticDir } from '../deploy/staticSite';
+import { buildFailureSummary, buildFrontend, detectFrontendProject, needsBuild } from '../deploy/frontendBuild';
 import { CommitPreview, previewCommit, commitSelected } from './githubCommit';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken, normalizeBotToken as normalizeToken } from './discordBotToken';
@@ -184,7 +185,28 @@ export class CanvasHost {
                 const generation = ++this.prepareGeneration;
                 this.plans.clear();
                 const config = validateConfig(p.config as Record<string,unknown> || {});
-                if (config.target === 's3' && p.autoDir === true) config.dir = pickStaticDir(fs.readdirSync(workspace, {withFileTypes:true}).filter(e=>e.isDirectory()).map(e=>e.name));
+                const staticNotes: string[] = [];
+                if (config.target === 's3' && p.autoDir === true) {
+                    //: React·Vite 같은 프런트엔드는 **빌드 산출물**을 올려야 화면이 나온다. 예전에는 루트를
+                    //: 훑어 빌드 전 템플릿(client/public/index.html)을 올려 흰 화면이 떴다(실기기).
+                    const frontend = detectFrontendProject(workspace);
+                    if (frontend) {
+                        const where = frontend.projectDir || '프로젝트 루트';
+                        if (needsBuild(workspace, frontend)) {
+                            send('canvas.executing', { requestId, message: `${where} 의 ${frontend.label} 화면을 빌드합니다` });
+                            const outcome = await buildFrontend(workspace, frontend, message => send('canvas.executing', { requestId, message }));
+                            if (generation !== this.prepareGeneration) return;
+                            if (!outcome.ok) throw new Error(`${where} 빌드(npm run build)에 실패해 S3 에 올릴 화면을 만들지 못했습니다.\n${buildFailureSummary(outcome.output)}`);
+                            staticNotes.push(`${where} 에서 npm run build 를 실행해 ${frontend.outDir} 를 새로 만들었습니다${outcome.via === 'docker' ? '(Docker)' : ''}.`);
+                        }
+                        config.dir = frontend.outDir;
+                        if (frontend.callsApi) {
+                            staticNotes.push('이 화면은 API 서버(/api 등)를 호출합니다. S3 에는 화면(정적 파일)만 올라가므로 API 가 필요한 기능(목록·주문 등)은 동작하지 않습니다. 서버까지 필요하면 ECS(컨테이너) 배포를 쓰세요.');
+                        }
+                    } else {
+                        config.dir = pickStaticDir(fs.readdirSync(workspace, {withFileTypes:true}).filter(e=>e.isDirectory()).map(e=>e.name));
+                    }
+                }
                 const staticSite = config.target === 's3' ? staticPreview(workspace,config.dir) : undefined;
                 if (staticSite) config.dir = staticSite.dir;
                 const [git,aws,preflight] = await Promise.all([this.readGit(workspace), config.target === 'github' ? Promise.resolve({ready:false,region:'',identity:{account:''}}) : this.api.getAwsStatus(), config.target === 'github' ? Promise.resolve({blocked:false,summary:'승인한 커밋을 푸시하기 전에 시크릿을 검사합니다.',reasons:[],warnings:[]}) : this.api.getDeployPreflight(workspace, config.target)]);
@@ -197,7 +219,7 @@ export class CanvasHost {
                 const id=randomUUID();
                 this.plans.clear(); // Older approvals must not execute after editing a target.
                 this.plans.set(id,{id,config,workspace,git,account:aws.identity?.account || '',created:Date.now(),targetState,staticDigest:staticSite?.digest});
-                send('canvas.plan', { requestId, id, config, projectName:path.basename(workspace), repository:git.repository, branch:git.branch, commit:git.head, dirty:git.dirty, coreRegion:aws.ready ? aws.region : '', account:aws.identity?.account || '', preflight, targetState, staticSite:staticSite ? {files:staticSite.files,excluded:staticSite.excluded} : undefined });
+                send('canvas.plan', { requestId, id, config, projectName:path.basename(workspace), repository:git.repository, branch:git.branch, commit:git.head, dirty:git.dirty, coreRegion:aws.ready ? aws.region : '', account:aws.identity?.account || '', preflight, targetState, staticSite:staticSite ? {files:staticSite.files,excluded:staticSite.excluded,notes:staticNotes} : undefined });
                 return;
             }
             if (type === 'canvas.cancel') { this.prepareGeneration++; this.plans.delete(String(p.planId)); return; }

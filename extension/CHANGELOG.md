@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.19 — 2026-09-27 (Preview)
+
+실기기 쇼핑몰(React client/ + Express server/) 프로젝트의 로컬 Docker·S3 배포 실패를 고쳤습니다.
+
+**로컬 Docker**
+- package.json 의 의존성 버전이 npm 에 실제로 있는지 배포 계획에서 확인합니다. 없는 버전(예: `jsonwebtoken@^9.1.2`)은 빌드 전에 오류로 알리고, 자동 수정이 같은 major 의 최신 버전(`^9.0.3`)으로 고칩니다. 예전에는 몇 분 빌드한 뒤 `npm error ETARGET` 으로 멈췄습니다. 오프라인이면 이 확인은 건너뜁니다.
+- AI 코드 생성도 새 package.json 의 버전을 같은 방식으로 확인해 교정을 요청합니다.
+- `build` 가 `cd client && npm run build` 처럼 하위 폴더에서 빌드하면, Dockerfile 이 그 폴더 의존성을 설치하도록 자동 수정(새로 만드는 Dockerfile 에는 처음부터 포함)합니다. 빌드 도구는 실행 이미지에 남기지 않습니다. 예전에는 버전 문제를 고쳐도 다음 단계에서 `react-scripts: not found` 로 멈췄습니다.
+- 빌드한 화면(client/build)을 서버가 제공하지 않으면 알려 주고, 자동 수정으로 Express 서버가 그 화면을 제공하게 합니다(원본은 .recoder/backups). 예전에는 컨테이너가 떠도 브라우저에서 화면이 나오지 않았습니다.
+- `client/` 코드가 불러오는 react·axios 를 루트 package.json 기준으로 "선언되지 않은 패키지"로 잘못 막던 문제를 고쳤습니다. 각 폴더의 package.json 기준으로 봅니다.
+- 앱이 localhost 의 PostgreSQL·MySQL·MongoDB·Redis 에 연결하면 "컨테이너 안에는 DB 가 없다"는 경고를 보여 줍니다.
+- 빌드 실패 진단: 없는 버전(ETARGET)·없는 패키지(404)와 `sh: line 1: … command not found` 를 원인대로 설명합니다.
+
+**S3 정적 배포**
+- React·Vite·Vue 등 빌드가 필요한 프런트엔드(루트 또는 client/·frontend/ 등)를 찾아 배포 준비 때 `npm install` → `npm run build` 를 실행하고 산출물(client/build 등)을 올립니다. PC 에 npm 이 없으면 Docker 로 빌드합니다. 소스맵은 만들지 않습니다. 예전에는 빌드 전 템플릿(client/public/index.html)을 올려 제목만 있는 흰 화면이 떴습니다.
+- 빈 `<div id="root">` 만 있고 스크립트가 없는 HTML 은 "빌드 전 템플릿"으로 보고 올리지 않습니다.
+- 화면이 API 서버를 호출하면 승인 카드에 "S3 에는 화면만 올라가 API 기능은 동작하지 않는다"고 알려 줍니다.
+
 ## 1.1.18 — 2026-09-26 (Preview)
 
 프로덕션 점검에서 찾은 연결·보안·배포 안정성 문제를 한꺼번에 고쳤습니다.

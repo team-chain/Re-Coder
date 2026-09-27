@@ -48,6 +48,14 @@ _RULES: list[tuple[str, re.Pattern[str], str, str, str]] = [
      "package-lock.json 이 package.json 과 다름",
      "package.json 을 고친 뒤 package-lock.json 을 갱신하지 않아 `npm ci` 가 설치를 거부했습니다.",
      "프로젝트 폴더에서 `npm install` 을 한 번 실행해 package-lock.json 을 갱신한 뒤 다시 배포하세요."),
+    ("NPM_VERSION_NOT_FOUND", re.compile(r"No matching version found for ((?:@[\w.-]+/)?[\w.-]+@[^\s]+?)\.?(?:\s|$)", re.I),
+     "없는 패키지 버전",
+     "npm 레지스트리에 `{0}` 가 없습니다. package.json 의 버전 범위를 만족하는 버전이 배포된 적이 없습니다(AI 가 만든 코드에서 흔합니다).",
+     "package.json 의 해당 의존성을 실제로 있는 버전으로 고치세요. 배포 준비 점검의 자동 수정이 가장 가까운 버전을 넣어 줍니다."),
+    ("NPM_PACKAGE_NOT_FOUND", re.compile(r"npm (?:ERR!|error) 404 Not Found - GET \S+/((?:@[\w.-]+(?:%2f|/))?[\w.-]+)", re.I),
+     "없는 패키지",
+     "npm 레지스트리에 `{0}` 패키지가 없습니다. 이름이 틀렸거나 비공개 패키지입니다.",
+     "package.json 의 패키지 이름을 확인하세요."),
     ("NPM_SCRIPT_MISSING", re.compile(r"Missing script:\s*\"?([\w:-]+)\"?", re.I),
      "npm 스크립트 없음",
      "`{0}` 스크립트가 package.json 에 없습니다.",
@@ -56,7 +64,7 @@ _RULES: list[tuple[str, re.Pattern[str], str, str, str]] = [
      "모듈을 찾을 수 없음",
      "`{0}` 를 불러오지 못했습니다. package.json 에 선언되지 않았거나 경로가 틀렸습니다.",
      "외부 패키지라면 `npm install {0}` 로 의존성에 추가하고, 프로젝트 파일이라면 경로와 파일명 대소문자를 확인하세요(Linux 컨테이너는 대소문자를 구분합니다)."),
-    ("COMMAND_NOT_FOUND", re.compile(r"(?:sh|/bin/sh): (?:\d+: )?([\w.@/-]+): (?:not found|command not found)", re.I),
+    ("COMMAND_NOT_FOUND", re.compile(r"(?:sh|/bin/sh|bash): (?:(?:line )?\d+: )?([\w.@/-]+): (?:not found|command not found)", re.I),
      "명령을 찾을 수 없음",
      "빌드 중 `{0}` 명령이 없었습니다. 해당 도구가 의존성에 없거나 devDependencies 가 설치되지 않은 단계에서 실행됐습니다.",
      "`{0}` 를 제공하는 패키지를 package.json 의존성에 추가하거나, 쓰지 않는 스크립트라면 지우세요."),
@@ -195,7 +203,8 @@ def diagnose(output: str, readiness_issues: Optional[list] = None, stage: str = 
         fix = getattr(issue, "fix", None) or issue.get("fix", "")
         code = getattr(issue, "code", None) or issue.get("code", "")
         related = (diagnosis.code == "CRA_ENTRY_MISSING" and code in {"NODE_UNUSED_BUILD_SCRIPT", "NODE_BUILD_ENTRY_MISSING"}) \
-            or (diagnosis.code in {"NODE_MODULE_NOT_FOUND", "COMMAND_NOT_FOUND"} and code in {"NODE_UNDECLARED_DEPENDENCY", "NODE_BUILD_TOOL_MISSING"}) \
+            or (diagnosis.code in {"NODE_MODULE_NOT_FOUND", "COMMAND_NOT_FOUND"} and code in {"NODE_UNDECLARED_DEPENDENCY", "NODE_BUILD_TOOL_MISSING", "DOCKERFILE_SUBPROJECT_DEPS_MISSING"}) \
+            or (diagnosis.code in {"NPM_VERSION_NOT_FOUND", "NPM_PACKAGE_NOT_FOUND", "NPM_ERROR"} and code == "NODE_DEPENDENCY_VERSION_NOT_FOUND") \
             or (diagnosis.code == "PY_MODULE_NOT_FOUND" and code.startswith("PY_")) \
             or (diagnosis.code in {"SQLITE_CANTOPEN", "PERMISSION_DENIED"} and code == "DOCKERFILE_WORKDIR_NOT_WRITABLE") \
             or (diagnosis.code == "UNKNOWN" and stage == "run" and code in {"DOCKERFILE_PORT_MISMATCH", "NODE_START_ENTRY_MISSING", "DOCKERFILE_ENTRY_MISSING"})

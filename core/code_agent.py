@@ -1573,7 +1573,10 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         overlay = {rel[len(prefix):]: content for rel, content in written.items() if rel.startswith(prefix)}
         try:
             before = {(i.code, i.message) for i in analyze(base / project, dockerfile=None).issues}
-            after = analyze(base / project, overlay, dockerfile="Dockerfile" if "Dockerfile" in overlay else None)
+            #: 새로 쓰는 package.json 은 버전이 npm 에 실제로 있는지도 본다 — AI 가 없는 버전
+            #: (jsonwebtoken@^9.1.2 등)을 적어 Docker 빌드가 ETARGET 으로 멈췄다(실기기).
+            after = analyze(base / project, overlay, dockerfile="Dockerfile" if "Dockerfile" in overlay else None,
+                            online="package.json" in overlay and os.environ.get("RECODER_TEST_MODE") != "1")
         except Exception as exc:  # noqa: BLE001 - 점검 실패가 생성을 막지 않는다
             print(f"[code_agent] 일관성 점검 생략: {exc}", flush=True)
             continue

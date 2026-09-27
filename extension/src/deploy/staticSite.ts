@@ -407,6 +407,11 @@ export function collectStaticFiles(
                 || /<script\b[^>]*\bsrc\s*=\s*["'][^"']*\.(?:tsx?|jsx)(?:[?#][^"']*)?["']/i.test(html)) {
                 throw new Error(`${rel}은 아직 빌드되지 않은 React/Vite 진입 파일입니다. 프로젝트에서 npm run build를 실행한 뒤 build 또는 dist 폴더를 선택하세요.`);
             }
+            //: CRA 템플릿(public/index.html)은 `<div id="root">` 만 있고 스크립트가 없다. 그대로 올리면
+            //: 제목만 있는 흰 화면이 된다(실기기) — 빌드 산출물이 아니라는 뜻이다.
+            if (/<div\b[^>]*\bid\s*=\s*["'](?:root|app)["'][^>]*>\s*<\/div>/i.test(html) && !/<script\b/i.test(html)) {
+                throw new Error(`${rel}은 스크립트 없이 빈 <div id="root"> 만 있는 빌드 전 템플릿입니다. 올리면 흰 화면만 보입니다. 프런트엔드 폴더에서 npm run build 를 실행한 뒤 산출물 폴더(build·dist)를 선택하세요.`);
+            }
         }
         files.push({
             path: rel,
