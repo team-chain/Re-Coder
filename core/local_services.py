@@ -91,19 +91,33 @@ def app_env(container: str, kind: str, password: str, env_names: list[str]) -> d
         url = f"postgresql://recoder:{password}@{host}:5432/app"
         env.update({"DATABASE_URL": url, "PGHOST": host, "PGPORT": "5432", "PGUSER": "recoder",
                     "PGPASSWORD": password, "PGDATABASE": "app"})
-        hints = ("DATABASE", "POSTGRES", "PG_", "DB_URL", "DB_URI")
+        hints = ("DATABASE", "POSTGRES", "PG_", "DB_")
+        foreign = ("MONGO", "REDIS", "MYSQL", "SQLITE")
     elif kind == "mongodb":
         url = f"mongodb://{host}:27017/app"
         env.update({"MONGODB_URI": url, "MONGO_URI": url, "MONGO_URL": url})
-        hints = ("MONGO", "DATABASE_URL", "DB_URL", "DB_URI")
+        hints = ("MONGO", "DATABASE", "DB_")
+        foreign = ("POSTGRES", "PG_", "REDIS", "MYSQL", "SQLITE")
     else:
         url = f"redis://{host}:6379"
         env.update({"REDIS_URL": url})
-        hints = ("REDIS",)
+        hints = ("REDIS",)          # Redis 는 자기 이름이 든 변수만 — DB_HOST 같은 일반 이름은 주 DB 의 것이다
+        foreign = ()
+    parts = {"postgres": {"HOST": host, "PORT": "5432", "USER": "recoder", "PASSWORD": password, "PASS": password,
+                          "NAME": "app", "DATABASE": "app", "DB": "app"},
+             "mongodb": {"HOST": host, "PORT": "27017", "NAME": "app", "DATABASE": "app", "DB": "app"},
+             "redis": {"HOST": host, "PORT": "6379"}}[kind]
     for name in env_names:
         upper = name.upper()
-        if any(h in upper for h in hints) and re.search(r"URL|URI|CONNECTION", upper):
+        if not any(h in upper for h in hints) or any(f in upper for f in foreign):
+            continue
+        if re.search(r"URL|URI|CONNECTION", upper):
             env.setdefault(name, url)
+            continue
+        for suffix, value in parts.items():
+            if re.search(rf"(?:^|_){suffix}$", upper):
+                env.setdefault(name, value)
+                break
     return env
 
 
@@ -120,7 +134,8 @@ def plan(container: str, kinds: list[str], env_names: list[str]) -> tuple[dict[s
             continue
         password = passwords.get(kind) or secrets.token_urlsafe(18)
         passwords[kind] = password
-        env.update(app_env(container, kind, password, env_names))
+        for key, value in app_env(container, kind, password, env_names).items():
+            env.setdefault(key, value)  # 먼저 온 주 DB(postgres → mongodb → redis)가 같은 이름을 가진다
         svc = SERVICES[kind]
         notes.append(
             f"{svc.label} 컨테이너({service_container(container, kind)}, {svc.image})를 함께 띄우고 앱에 접속 정보를 "

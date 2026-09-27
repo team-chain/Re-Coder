@@ -1774,7 +1774,10 @@ def _is_truncation(exc: Exception) -> bool:
 
 
 def _norm_op_path(path: str) -> str:
-    return posixpath.normpath(str(path or "").strip().replace("\\", "/")).lstrip("./").casefold()
+    out = posixpath.normpath(str(path or "").strip().replace("\\", "/"))
+    while out.startswith("./"):
+        out = out[2:]
+    return out.lstrip("/").casefold()
 
 
 def _split_manifest(prompt: str) -> tuple[dict, list[dict]]:
@@ -1807,7 +1810,7 @@ def _split_manifest(prompt: str) -> tuple[dict, list[dict]]:
     return data, files[:_SPLIT_MAX_FILES]
 
 
-def _split_batch(prompt: str, manifest: dict, files: list[dict], batch: list[dict]) -> tuple[list[dict], object]:
+def _split_batch(prompt: str, manifest: dict, files: list[dict], batch: list[dict], target_folder: str = "") -> tuple[list[dict], object]:
     listing = "\n".join(f"- {f['file']}: {f['purpose']}" for f in files)
     wanted = "\n".join(f"- {f['file']}" for f in batch)
     batch_prompt = prompt + f"""
@@ -1827,29 +1830,36 @@ def _split_batch(prompt: str, manifest: dict, files: list[dict], batch: list[dic
         agent="code_agent", operation="generate_code_part",
     )
     _data, ops = parse_code_output(resp.text)
+    ops = _relative_to_target(ops, target_folder)  # 모델이 대상 폴더를 앞에 붙여도 목록과 맞춘다
     keys = {_norm_op_path(f["file"]) for f in batch}
     return [op for op in ops if _norm_op_path(op["file"]) in keys], resp
 
 
-def _generate_split(prompt: str) -> tuple[dict, list[dict], object]:
+def _generate_split(prompt: str, target_folder: str = "") -> tuple[dict, list[dict], object]:
     """큰 요청을 파일 목록 → 묶음별 생성으로 나눠 만든다. 파일 하나도 한도를 넘으면 실패."""
     from concurrent.futures import ThreadPoolExecutor
 
     manifest, files = _split_manifest(prompt)
+    #: 목록에도 대상 폴더가 붙어 올 수 있다(web/index.html). 묶음 응답과 같은 기준으로 맞춰야 걸러지지 않는다.
+    files = _relative_to_target(files, target_folder)
+    dedup: dict[str, dict] = {}
+    for f in files:
+        dedup.setdefault(_norm_op_path(f["file"]), f)
+    files = list(dedup.values())
     print(f"[code_agent] 분할 생성 | 파일 {len(files)}개 | 묶음 {_SPLIT_BATCH}개씩", flush=True)
     batches = [files[i:i + _SPLIT_BATCH] for i in range(0, len(files), _SPLIT_BATCH)]
     last_resp = None
 
     def run(batch: list[dict]) -> tuple[list[dict], object]:
         try:
-            return _split_batch(prompt, manifest, files, batch)
+            return _split_batch(prompt, manifest, files, batch, target_folder)
         except (LLMError, CodeOutputError) as exc:
             if len(batch) == 1 or not (_is_truncation(exc) or isinstance(exc, CodeOutputError)):
                 raise
             # 두 파일이 합쳐 한도를 넘었다 — 하나씩 다시.
             out, resp = [], None
             for single in batch:
-                ops, resp = _split_batch(prompt, manifest, files, [single])
+                ops, resp = _split_batch(prompt, manifest, files, [single], target_folder)
                 out.extend(ops)
             return out, resp
 
@@ -1861,7 +1871,7 @@ def _generate_split(prompt: str) -> tuple[dict, list[dict], object]:
     got = {_norm_op_path(op["file"]) for op in ops_out}
     missing = [f for f in files if _norm_op_path(f["file"]) not in got]
     for single in missing:
-        ops, resp = _split_batch(prompt, manifest, files, [single])
+        ops, resp = _split_batch(prompt, manifest, files, [single], target_folder)
         ops_out.extend(ops)
         last_resp = resp or last_resp
     got = {_norm_op_path(op["file"]) for op in ops_out}
@@ -1984,12 +1994,11 @@ def generate_code(
                 #: (stop_reason 을 안 주는 제공자·게이트웨이 포함). 실패로 끝내지 않고 나눠서 만든다.
                 print("[code_agent] 응답 JSON 이 두 번 다 완성되지 않아 분할 생성으로 전환", flush=True)
                 try:
-                    data, ops_out, llm_resp = _generate_split(prompt)
+                    data, ops_out, llm_resp = _generate_split(prompt, target_folder)
                 except (LLMError, CodeOutputError, RuntimeError) as split_exc:
                     reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
                     split_mode_failed = True
                     break
-                ops_out = _relative_to_target(ops_out, target_folder)
                 split_mode = True
                 break
         except LLMError as exc:
@@ -2000,12 +2009,11 @@ def generate_code(
                 #: 같은 요청을 다시 보내도 또 잘린다 — 파일 목록을 받아 나눠서 만든다.
                 print("[code_agent] 응답이 길이 한도에서 잘려 분할 생성으로 전환", flush=True)
                 try:
-                    data, ops_out, llm_resp = _generate_split(prompt)
+                    data, ops_out, llm_resp = _generate_split(prompt, target_folder)
                 except (LLMError, CodeOutputError, RuntimeError) as split_exc:
                     reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
                     split_mode_failed = True
                     break
-                ops_out = _relative_to_target(ops_out, target_folder)
                 split_mode = True
                 break
         except Exception as exc:

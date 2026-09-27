@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import posixpath
 import re
 import subprocess
 import time
@@ -2486,9 +2487,19 @@ def _entrypoint_from_node_command(command: object) -> str | None:
         return None
     entry = match.group(1)
     #: `cd server && node index.js` — AI 가 만든 모노레포에서 흔하다. 폴더를 붙여야 컨테이너 CMD 가 맞는다.
-    cd = re.search(r"(?:^|&&|;)\s*cd\s+[\"']?([^\"'\s;&|]+)[\"']?\s*(?:&&|;)", command[:match.start() + 1])
-    if cd and not entry.startswith(("/", "./../")):
-        entry = f"{cd.group(1).strip('/').lstrip('./')}/{entry.lstrip('./')}"
+    cds = re.findall(r"(?:^|&&|;)\s*cd\s+[\"']?([^\"'\s;&|]+)[\"']?(?=\s*(?:&&|;))", command[:match.start() + 1])
+    if cds and not entry.startswith("/"):
+        folder = ""
+        for part in cds:
+            part = part.strip().strip("\"'")
+            if part.startswith("/"):
+                return None  # 절대 경로(cd /app)는 컨테이너 WORKDIR 에 따라 다르다 — 판단하지 않는다
+            folder = posixpath.normpath(posixpath.join(folder, part))
+        if folder.startswith(".."):
+            return None  # 프로젝트 밖 — 판단하지 않는다
+        entry = posixpath.normpath(posixpath.join(folder, entry))
+        if entry.startswith(".."):
+            return None
     return _safe_node_entrypoint(entry)
 
 

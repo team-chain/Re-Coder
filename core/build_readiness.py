@@ -432,7 +432,13 @@ def _frontend_out_dir(files: "ProjectFiles", folder: str) -> Optional[str]:
 
 _JS_RESOLVE_EXTS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json", ".vue", ".svelte")
 _STYLE_EXTS = (".css", ".scss", ".sass", ".less")
-_JSX_LINE = re.compile(r"^\s*<(?:[A-Z][\w.]*|[a-z][\w-]*)(?:\s[^'\"`;]*)?/?>\s*$|(?:\(|return)\s*<[A-Z][\w.]*[\s/>]", re.MULTILINE)
+_JSX_LINE = re.compile(r"(?:\(|return|=>)\s*\n?\s*<[A-Z][\w.]*[\s/>]|\breturn\s*\(\s*\n\s*<[a-z][\w-]*[\s>]", re.MULTILINE)
+_SERVER_MARKERS = re.compile(r"""require\(\s*['"](?:express|http|https|fs|path|pg|mongoose|mongodb|redis|ioredis|koa|fastify)['"]\s*\)|"""
+                             r"""from\s+['"](?:express|node:\w+|http|fs|path|pg|mongoose|koa|fastify)['"]|\.listen\s*\(""")
+
+
+def _is_server_file(text: str) -> bool:
+    return bool(_SERVER_MARKERS.search(text))
 _ESM_NAMED_IMPORT = re.compile(r"""\bimport\s+(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*['"](\.{1,2}/[^'"]+)['"]""")
 _CJS_REQUIRE_BIND = re.compile(r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""")
 _CJS_DESTRUCTURE = re.compile(r"""\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""")
@@ -447,9 +453,15 @@ def _resolve_local(files: "ProjectFiles", importer: str, spec: str) -> Optional[
         return base  # 프로젝트 밖 — 판단하지 않는다
     if files.exists(base):
         return base
-    for ext in _JS_RESOLVE_EXTS + _STYLE_EXTS:
+    for ext in _JS_RESOLVE_EXTS + _STYLE_EXTS + (".d.ts",):
         if files.exists(base + ext):
             return base + ext
+    #: TypeScript(NodeNext)는 './x.js' 로 적고 실제 파일은 x.ts 다.
+    stem, dot, ext = base.rpartition(".")
+    if dot and ext in ("js", "mjs", "cjs", "jsx"):
+        for ts_ext in (".ts", ".tsx", ".mts", ".cts", ".d.ts"):
+            if files.exists(stem + ts_ext):
+                return stem + ts_ext
     for ext in _JS_RESOLVE_EXTS:
         if files.exists(f"{base}/index{ext}"):
             return f"{base}/index{ext}"
@@ -457,7 +469,8 @@ def _resolve_local(files: "ProjectFiles", importer: str, spec: str) -> Optional[
 
 
 def _esm_exports(text: str) -> Optional[set[str]]:
-    if re.search(r"\bexport\s*\*", text):
+    #: 판단할 수 없는 형태(재수출·타입 수출·구조 분해 수출)는 None — 잘못 막느니 넘어간다.
+    if re.search(r"\bexport\s*\*|\bexport\s+(?:declare\s+)?(?:interface|type|enum|namespace|abstract)\b|\bexport\s+(?:const|let|var)\s*[\[{]", text):
         return None
     names = set(re.findall(r"\bexport\s+(?:async\s+)?(?:const|let|var|function\*?|class)\s+([\w$]+)", text))
     for group in re.findall(r"\bexport\s*\{([^}]*)\}", text):
@@ -472,7 +485,7 @@ def _esm_exports(text: str) -> Optional[set[str]]:
 
 def _cjs_exports(text: str) -> Optional[set[str]]:
     literal = re.findall(r"\bmodule\.exports\s*=\s*\{([^{}]*)\}", text)
-    if len(literal) != 1 or re.search(r"\bmodule\.exports\s*=\s*(?![\s{])", text):
+    if len(literal) != 1 or re.search(r"\bmodule\.exports\s*=\s*(?![\s{])", text) or "..." in literal[0]:
         return None  # 함수·클래스·다른 값을 내보내거나 여러 번 대입 — 판단하지 않는다
     names: set[str] = set()
     for part in literal[0].split(","):
@@ -500,6 +513,9 @@ def _vite_projects(files: "ProjectFiles", manifests: dict) -> set[str]:
     return out
 
 
+_GENERIC_PACKAGE_WORDS = {"js", "ts", "node", "client", "server", "core", "sdk", "api", "web", "browser", "dom", "lib"}
+
+
 def _closest_declared(name: str, declared: set[str], imported: set[str] = frozenset()) -> Optional[str]:
     """`@stripe/js` → `@stripe/stripe-js` 처럼 같은 범위의 선언된 패키지 중 가장 가까운 것.
 
@@ -509,12 +525,29 @@ def _closest_declared(name: str, declared: set[str], imported: set[str] = frozen
     import difflib
     scope = name.split("/")[0] if name.startswith("@") else ""
     tail = name.split("/")[-1]
-    pool = [d for d in declared if d and d != name and (not scope or d.startswith(scope + "/"))
-            and (tail in d.split("/")[-1] or d.split("/")[-1] in tail
-                 or difflib.SequenceMatcher(None, name, d).ratio() >= 0.75)]
+
+    def close(d: str) -> bool:
+        dtail = d.split("/")[-1]
+        #: 후보가 이 이름을 그대로 품고 앞뒤에 덧붙인 꼴(passport→passport-jwt, redis→ioredis, uuid→uuidv4,
+        #: @mui/material→@mui/icons-material)은 다른 패키지다 — 이름을 바꾸면 없는 내보내기를 부르게 된다.
+        #: (글자 하나가 빠진 expres→express 는 오타로 본다 — 덧붙인 부분이 한 글자이고 구분자가 아닐 때)
+        if dtail.startswith(tail):
+            extra = dtail[len(tail):]
+            if len(extra) > 1 or extra in "-_.":
+                return False
+        elif dtail.endswith(tail):
+            extra = dtail[:-len(tail)]
+            if len(extra) > 1 or extra in "-_.":
+                # 예외: `@stripe/js` → `@stripe/stripe-js` 처럼 범위 안에서 접미 낱말 하나만 적은 경우
+                return bool(scope) and tail in _GENERIC_PACKAGE_WORDS and dtail[-len(tail) - 1] in "-_."
+        # 범위가 있으면 범위 뒤 이름만 비교한다 — `@aws-sdk/` 같은 공통 접두어가 비율을 부풀리지 않도록
+        return difflib.SequenceMatcher(None, tail, dtail).ratio() >= 0.75
+
+    pool = [d for d in declared if d and d != name and d not in imported and (not scope or d.startswith(scope + "/"))
+            and close(d)]
     if not pool:
         return None
-    return max(pool, key=lambda d: (d not in imported, difflib.SequenceMatcher(None, name, d).ratio()))
+    return max(pool, key=lambda d: difflib.SequenceMatcher(None, name, d).ratio())
 
 
 def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: dict, owner, undeclared: dict) -> None:
@@ -544,7 +577,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             exported = _esm_exports(_strip_js_comments(files.read(target) or ""))
             if exported is None:
                 continue
-            for name in (n.strip().split(" as ")[0].strip() for n in names.split(",")):
+            for name in (re.sub(r"^type\s+", "", n.strip()).split(" as ")[0].strip() for n in names.split(",")):
                 if name and name not in exported:
                     missing_names.append(f"`{name}`({rel} → {target})")
         cjs_bindings = []
@@ -563,11 +596,12 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             for name in sorted(set(used)):
                 if name not in exported:
                     missing_names.append(f"`{name}`({rel} → {target})")
-        # 3) Vite 는 .js 안의 JSX 를 해석하지 않는다 · process.env 가 없다
-        if project in vite:
-            if rel.endswith(".js") and _JSX_LINE.search(active):
+        # 3) Vite 는 .js 안의 JSX 를 해석하지 않는다 · 브라우저 코드에 process.env 가 없다
+        #    (서버 파일·설정 파일은 제외 — 단일 패키지 Vite+Express 앱의 server.js 를 건드리면 안 된다)
+        if project in vite and not _is_server_file(active) and not re.search(r"(^|/)(?:vite|vitest|playwright|cypress|jest|tailwind|postcss|eslint)\.config\.|(^|/)(?:cypress|e2e|tests?|__tests__)/", rel):
+            if rel.endswith(".js") and _JSX_LINE.search(active) and re.search(r"""\bfrom\s+['"]react['"]|\bReact\b|\.jsx?['"]""", active):
                 jsx_in_js.append(rel)
-            if re.search(r"\bprocess\.env\.[A-Za-z_]", active) and not rel.split("/")[-1].startswith("vite.config"):
+            if re.search(r"\bprocess\.env\.[A-Za-z_]", active):
                 process_env.append(rel)
     if missing_files:
         shown = ", ".join(f"`{spec}`({rel})" for rel, spec in missing_files[:6])
@@ -627,7 +661,9 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
         project = owner(rel)
         if not project or not _frontend_out_dir(files, project):
             continue  # 프런트엔드(빌드 도구가 있는 하위 프로젝트)만 본다
-        if re.search(r"""['"`]https?://(?:localhost|127\.0\.0\.1)(?::\d+)?(?:/[^'"`\s]*)?['"`]""", files.read(rel) or ""):
+        if re.search(r"(^|/)[\w.-]*\.config\.[cm]?[jt]s$|(^|/)(?:cypress|e2e|tests?|__tests__|mocks?)/|setupProxy\.[jt]s$", rel):
+            continue  # 개발 프록시·테스트 설정의 localhost 는 정상이다
+        if re.search(r"""(['"`])https?://(?:localhost|127\.0\.0\.1)(?::\d+)?(?:/[^'"`\s]*)?\1""", _strip_js_comments(files.read(rel) or "")):
             hardcoded.append(rel)
     if hardcoded:
         result.fix_data["hardcoded_api"] = hardcoded
@@ -645,12 +681,15 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
         text = _strip_js_comments(files.read(rel) or "")
         for name in re.findall(r"\b(?:export\s+)?(?:const|let)\s+([A-Z][\w$]*)\s*=\s*createContext\(", text):
             keys: set[str] = set()
-            for body in re.findall(rf"<{re.escape(name)}\.Provider\s+value=\{{\s*\{{([^}}]*)\}}\s*\}}", text):
-                keys |= {k.strip().split(":")[0].strip() for k in body.split(",") if k.strip()}
+            bodies = list(re.findall(rf"<{re.escape(name)}\.Provider\s+value=\{{\s*\{{([^}}]*)\}}\s*\}}", text))
             for var in re.findall(rf"<{re.escape(name)}\.Provider\s+value=\{{\s*([\w$]+)\s*\}}", text):
                 m = re.search(rf"\b(?:const|let)\s+{re.escape(var)}\s*=\s*\{{([^}}]*)\}}", text)
                 if m:
-                    keys |= {k.strip().split(":")[0].strip() for k in m.group(1).split(",") if k.strip()}
+                    bodies.append(m.group(1))
+            if not bodies or any("..." in b for b in bodies):
+                continue  # 펼침(...state)이 있으면 키를 알 수 없다 — 판단하지 않는다
+            for body in bodies:
+                keys |= {k.strip().split(":")[0].split("=")[0].strip() for k in body.split(",") if k.strip()}
             if keys:
                 context_keys[name] = keys
     missing_members: list[str] = []
@@ -663,8 +702,8 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                 keys = context_keys.get(ctx)
                 if not keys:
                     continue
-                for name in (n.strip().split(":")[0].strip() for n in names.split(",") if n.strip()):
-                    if name and name not in keys:
+                for name in (n.strip().split(":")[0].split("=")[0].strip() for n in names.split(",") if n.strip()):
+                    if name and not name.startswith("...") and name not in keys:
                         missing_members.append(f"`{name}`({rel} ← {ctx})")
     if missing_members:
         result.issues.append(ReadinessIssue(
@@ -682,7 +721,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
         declared = manifests.get(owner(rel), set())
         if "react-router-dom" not in declared and "react-router-dom" not in deps:
             continue
-        if re.search(r"""<a\s+href=["']/[^"']*["']""", files.read(rel) or ""):
+        if router_link_rewrite(files.read(rel) or "") != (files.read(rel) or ""):
             anchor_files.append(rel)
     if anchor_files:
         result.fix_data["router_anchor_files"] = anchor_files
@@ -960,9 +999,10 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         if runtime_names & deps_for:
             result.services.append(kind)
     provisioned = {"PostgreSQL": "postgres", "MongoDB": "mongodb", "Redis": "redis"}
+    reads_db_env = any(re.search(r"(DATABASE|POSTGRES|PG|MONGO|REDIS|DB_)", n.upper()) for n in result.env_names)
     for dep, label, pattern in _EXTERNAL_SERVICES:
-        if provisioned.get(label) in result.services:
-            continue  # 로컬 Docker 배포가 함께 띄운다(배포 계획에 안내)
+        if provisioned.get(label) in result.services and reads_db_env:
+            continue  # 로컬 Docker 배포가 함께 띄우고 접속 정보를 환경변수로 넘긴다(배포 계획에 안내)
         if dep in runtime_names and re.search(pattern, all_server_text):
             result.issues.append(ReadinessIssue(
                 "NODE_EXTERNAL_SERVICE", WARNING,
@@ -1527,10 +1567,12 @@ def pg_numeric_parser_rewrite(text: str) -> str:
         return text
     m = re.search(r"""^([ \t]*)(?:const|let|var)\s+(?:\{[^}]*\}|[\w$]+)\s*=\s*require\(\s*['"]pg['"]\s*\)\s*;?[ \t]*$""", text, re.MULTILINE)
     if not m:
-        m = re.search(r"""^([ \t]*)import\s+.*?\s+from\s+['"]pg['"]\s*;?[ \t]*$""", text, re.MULTILINE)
+        m = re.search(r"""^([ \t]*)import\s+(?!type\b)(?:([\w$]+)\s*,?\s*)?(?:\{[^}]*\})?\s*from\s+['"]pg['"]\s*;?[ \t]*$""", text, re.MULTILINE)
         if not m:
             return text
-        insert = f"\n{m.group(1)}import pg from 'pg';\n{m.group(1)}// ReCoder: NUMERIC/DECIMAL 을 문자열이 아닌 숫자로 받는다(화면의 toFixed 등).\n{m.group(1)}pg.types.setTypeParser(1700, (value) => parseFloat(value));"
+        binding = m.group(2)
+        head = "" if binding else f"\n{m.group(1)}import recoderPg from 'pg';"
+        insert = f"{head}\n{m.group(1)}// ReCoder: NUMERIC/DECIMAL 을 문자열이 아닌 숫자로 받는다(화면의 toFixed 등).\n{m.group(1)}{binding or 'recoderPg'}.types.setTypeParser(1700, (value) => parseFloat(value));"
     else:
         insert = f"\n{m.group(1)}// ReCoder: NUMERIC/DECIMAL 을 문자열이 아닌 숫자로 받는다(화면의 toFixed 등).\n{m.group(1)}require('pg').types.setTypeParser(1700, (value) => parseFloat(value));"
     return text[:m.end()] + insert + text[m.end():]
@@ -1538,16 +1580,29 @@ def pg_numeric_parser_rewrite(text: str) -> str:
 
 def relative_api_rewrite(text: str) -> str:
     """'http://localhost:3001/api' → '/api', `http://localhost:3001/api/x` → `/api/x`, 'http://localhost:3001' → ''."""
-    return re.sub(r"""(['"`])https?://(?:localhost|127\.0\.0\.1)(?::\d+)?(/[^'"`\s]*)?(?=[^'"`]*\1)""",
+    #: 따옴표 바로 뒤에 host(:포트)(/경로) 가 오고 곧바로 닫는 따옴표여야 한다 — `http://localhost:${PORT}` 처럼
+    #: 포트가 변수인 것은 배포 환경에 맞춘 코드이므로 그대로 둔다.
+    return re.sub(r"""(['"`])https?://(?:localhost|127\.0\.0\.1)(?::\d+)?(/[^'"`\s]*)?(?=\1)""",
                   lambda m: m.group(1) + (m.group(2) or ""), text)
 
 
 def router_link_rewrite(text: str) -> str:
     """<a href="/x">…</a> → <Link to="/x">…</Link>, react-router-dom import 에 Link 를 보탠다."""
     pattern = re.compile(r"""<a\s+href=(["'])(/[^"']*)\1([^>]*)>(.*?)</a>""", re.DOTALL)
-    if not pattern.search(text):
+
+    def convertible(m) -> bool:
+        href, attrs = m.group(2), m.group(3)
+        if re.search(r"\b(?:download|target=|rel=)", attrs):
+            return False  # 새 창·파일 다운로드는 그대로 둔다
+        if href.startswith(("/api/", "/uploads/", "/static/", "/assets/", "/files/")) or re.search(r"\.[a-z0-9]{2,5}(?:[?#]|$)", href):
+            return False  # 서버가 주는 파일·API 는 화면 라우트가 아니다
+        return True
+
+    if not any(convertible(m) for m in pattern.finditer(text)):
         return text
-    text = pattern.sub(lambda m: f"<Link to={m.group(1)}{m.group(2)}{m.group(1)}{m.group(3)}>{m.group(4)}</Link>", text)
+    if re.search(r"""\bLink\b[^;\n]*\bfrom\s*['"](?!react-router-dom['"])""", text):
+        return text  # 다른 Link(MUI·next/link)를 쓰는 파일은 건드리지 않는다
+    text = pattern.sub(lambda m: f"<Link to={m.group(1)}{m.group(2)}{m.group(1)}{m.group(3)}>{m.group(4)}</Link>" if convertible(m) else m.group(0), text)
     imp = re.search(r"""^(\s*import\s*\{)([^}]*)(\}\s*from\s*['"]react-router-dom['"])""", text, re.MULTILINE)
     if imp:
         names = [n.strip() for n in imp.group(2).split(",") if n.strip()]
@@ -1600,6 +1655,39 @@ def serve_frontend(text: str, entry_rel: str, out_dir: str) -> str:
         raise ValueError("서버 파일에서 app.listen(...) 을 찾지 못했습니다.")
     m = listens[-1]
     indent, app = m.group(1), m.group(2)
+    #: `server = http.createServer(app); server.listen(...)` 이면 listen 을 부르는 것은 express 앱이 아니다 —
+    #: createServer 에 넘긴 변수를 쓴다. 그 밖에는 listen 을 부른 변수가 곧 앱이다(팩토리 함수가 돌려준 앱 등).
+    wrapped = re.search(rf"\b{re.escape(app)}\s*=\s*(?:new\s+)?(?:(?:[\w$.]+|require\s*\(\s*['\"][^'\"]+['\"]\s*\))\.)?(?:createServer|Server)\s*\(\s*(?:\{{[^}}]*\}}\s*,\s*)?([A-Za-z_$][\w$]*)\s*\)", text)
+    if wrapped:
+        app = wrapped.group(1)
+    #: 404·오류 처리 미들웨어(app.use((req, res) => …), app.use('*', …), app.use(notFound)) 뒤에 넣으면
+    #: 화면 요청이 그 앞에서 404 로 끝난다 — 그런 처리기가 있으면 첫 처리기 앞에 넣는다.
+    catch_all = re.compile(
+        rf"^([ \t]*){re.escape(app)}\.(?:use|all|get)\s*\(\s*(?:"
+        r"(?:async\s*)?\(\s*(?:err|error|req|request)\b[^)]*\)\s*=>|"          # (req, res) => / (err, req, res, next) =>
+        r"(?:async\s+)?function\s*\(\s*(?:err|error|req|request)\b|"          # function (req, res)
+        r"['\"](?:\*|/\*|/\(\.\*\)|/:[\w]+\(\*\))['\"]|/\^?\.\*/|"      # '*', '/*', /.*/ 경로
+        r"[\w$]*(?:[Nn]ot[Ff]ound|404|[Ee]rror)[\w$]*\s*\)"                 # app.use(notFoundHandler)
+        r")", re.MULTILINE)
+    #: 라우트보다 앞에 있는 (req, res, next) => 는 로거 같은 일반 미들웨어다 — 마지막 경로 등록 뒤의 것만 본다.
+    #: 경로 문자열('/api'), 라우터 변수(app.use(routes)), require('./routes') 로 등록한 것을 경로 등록으로 본다.
+    routes = [r for r in re.finditer(
+        rf"\b{re.escape(app)}\.(?:get|post|put|patch|delete|use)\s*\(\s*(?:['\"`]/(?![*(])|require\s*\(|([A-Za-z_$][\w$]*)\s*[,)])", text)
+        if not (r.group(1) and re.search(r"[Nn]ot[Ff]ound|404|[Ee]rror", r.group(1)))]
+    after = routes[-1].end() if routes else 0
+    first = next((c for c in catch_all.finditer(text, 0, m.start()) if c.start() > after), None)
+    insert_at = m.start()
+    if first:
+        indent = first.group(1)
+        insert_at = first.start()
+        # 처리기 바로 위의 주석(// 404 등)은 처리기의 것이다 — 그 주석보다 앞에 넣는다
+        while True:
+            prev_end = text.rfind("\n", 0, insert_at - 1) + 1 if insert_at > 0 else 0
+            line = text[prev_end:insert_at].strip()
+            if insert_at > 0 and line.startswith("//"):
+                insert_at = prev_end
+            else:
+                break
     rel = posixpath.relpath(out_dir, posixpath.dirname(entry_rel) or ".")
     newline = "\r\n" if "\r\n" in text else "\n"
     block = newline.join([
@@ -1609,7 +1697,7 @@ def serve_frontend(text: str, entry_rel: str, out_dir: str) -> str:
         f"{indent}{app}.get(/^\\/(?!api(?:\\/|$)).*/, (req, res, next) => res.sendFile(require('path').join(recoderUiDir, 'index.html'), (err) => err && next()));",
         "",
     ])
-    return text[:m.start()] + block + newline + text[m.start():]
+    return text[:insert_at] + block + newline + text[insert_at:]
 
 
 def apply_fix(workspace: str | Path, code: str) -> dict:

@@ -82,3 +82,27 @@ def test_교정은_바꿀_파일만_받아_합친다():
     base = [{"file": "a.js", "content": "1"}, {"file": "package.json", "content": "{}"}]
     merged = ca._merge_ops(base, [{"file": "package.json", "content": "{\"x\":1}"}, {"file": "b.js", "content": "2"}])
     assert [(o["file"], o["content"]) for o in merged] == [("a.js", "1"), ("package.json", "{\"x\":1}"), ("b.js", "2")]
+
+
+def test_대상_폴더가_목록과_응답에_붙어_와도_걸러지지_않는다(monkeypatch, tmp_path):
+    """모델이 목록·묶음 응답 모두에 대상 폴더(web/)를 앞에 붙여 돌려주는 경우 — 예전엔 전부 걸러져 실패했다."""
+    prefixed = {"summary": "쇼핑몰", "contracts": "", "files": [{"file": f"web/{f['file']}", "purpose": f["purpose"]} for f in MANIFEST["files"]]}
+
+    class Prefixing(Router):
+        def call(self, request, agent=None, operation=None):
+            if operation == "generate_code_manifest":
+                with self.lock:
+                    self.ops.append(operation)
+                return type("R", (), {"text": json.dumps(prefixed), "model_used": "m", "provider": "p"})()
+            resp = super().call(request, agent, operation)
+            if operation == "generate_code_part":
+                data = json.loads(resp.text)
+                for op in data["ops"]:
+                    op["file"] = "web/" + op["file"]
+                resp = type("R", (), {"text": json.dumps(data), "model_used": "m", "provider": "p"})()
+            return resp
+
+    monkeypatch.setattr(ca, "get_router", lambda: Prefixing())
+    result = ca.generate_code("쇼핑몰", decisions=[DECISION], project_root=str(tmp_path), target_folder="web")
+    files = [op["file"] for op in result["ops"] if not op["file"].startswith(("docs/", "web/docs/"))]
+    assert files == ["package.json", "server.js", "public/index.html", "public/app.js", "public/style.css"]
