@@ -613,6 +613,15 @@ async def _remove_existing_local_container(container_name: str) -> None:
         )
 
 
+def _companion_network_args(container_name: str) -> list[str]:
+    """함께 띄운 DB 가 있는 앱이면 같은 Docker 네트워크에 붙이는 인자(복구·롤백 경로)."""
+    try:
+        import local_services
+        return local_services.network_args(container_name)
+    except Exception:  # noqa: BLE001 - 네트워크 확인 실패는 예전처럼 네트워크 없이 띄운다
+        return []
+
+
 async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool, str, str]:
     """교체 배포가 시작되지 못했을 때 이전 정상 컨테이너를 즉시 다시 띄운다."""
     run_args = ["docker", "run", "-d", "--name", record.container_name]
@@ -621,6 +630,7 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
             run_args.extend(["-p", f"{int(host_port)}:{int(container_port)}"])
         for key, value in (record.env or {}).items():
             run_args.extend(["-e", f"{key}={value}"])
+        run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
         # 태그가 아니라 고정 태그·이미지 ID 로 되돌린다 — 태그는 그사이 움직였을 수 있다.
         run_args.extend(["--restart", "unless-stopped", _stable_image_ref(record) or record.image])
     except (TypeError, ValueError) as exc:
@@ -3344,6 +3354,18 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
                 plan.risk_reasons = list(plan.risk_reasons) + issues_as_risk_reasons(readiness)
             if readiness.errors:
                 plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
+            #: 앱이 쓰는 DB 를 함께 띄운다 — 없으면 DB 에 붙지 못한 서버가 시작하자마자 종료했다(실기기 쇼핑몰).
+            if readiness.services and plan.container_name:
+                try:
+                    import local_services
+                    companion_env, notes = await asyncio.to_thread(
+                        local_services.plan, plan.container_name, list(readiness.services), list(readiness.env_names))
+                    if companion_env:
+                        plan.companions = [k for k in readiness.services if k in local_services.SERVICES]
+                        plan.env = {**companion_env, **plan.env}  # 사용자가 준 값이 이긴다
+                        plan.risk_reasons = list(plan.risk_reasons) + notes
+                except Exception as exc:  # noqa: BLE001 - 준비 실패가 계획을 막지 않는다(실행 때 다시 시도)
+                    logger.warning("companion service plan failed: %s", exc)
 
     _deployment_plans[plan.plan_id] = plan
     _plan_workspaces[plan.plan_id] = request.workspace_path or ""
@@ -3745,6 +3767,23 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 cmd_args.extend(['-p', f'{int(hp)}:{int(cp)}'])
             for key, value in plan.env.items():
                 cmd_args.extend(['-e', f'{key}={value}'])
+            if plan.companions:
+                #: 앱보다 먼저 DB 를 띄우고 응답할 때까지 기다린다. 실패하면 기존 컨테이너를 건드리지 않고 멈춘다.
+                import local_services
+                report_progress('services', '앱이 쓰는 DB 를 준비합니다')
+                try:
+                    cmd_args.extend(await asyncio.to_thread(
+                        local_services.ensure, str(plan.container_name), lambda m: report_progress('services', m)))
+                except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                    return {
+                        "status": "failed", "stage": "services", "plan_id": request.plan_id,
+                        "message": f"앱이 쓰는 DB 를 준비하지 못했습니다: {exc}",
+                        "stderr": str(exc), "stdout": "",
+                        "diagnosis": {"code": "COMPANION_SERVICE", "title": "DB 컨테이너 준비 실패",
+                                      "cause": str(exc),
+                                      "fix": "Docker Desktop 이 켜져 있고 인터넷에 연결됐는지 확인한 뒤 다시 배포하세요. 기존 컨테이너는 그대로입니다.",
+                                      "lines": [], "step": "DB 준비"},
+                    }
             cmd_args.extend(['--restart', 'unless-stopped', str(runtime_image)])
 
         restored_previous = False
@@ -4074,6 +4113,7 @@ async def rollback(request: RollbackRequest) -> dict:
                 detail=f"기록된 환경변수 이름이 올바르지 않습니다: {_k!r}",
             )
         run_args.extend(["-e", f"{_k}={_v}"])
+    run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
     run_args.extend(["--restart", "unless-stopped", record.rollback_target])
 
     health_failed = False

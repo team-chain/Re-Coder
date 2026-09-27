@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.1.23 — 2026-09-27 (Preview)
+
+AI 가 나눠서 만든 쇼핑몰(React+Vite client/ · Express server/ · PostgreSQL)이 로컬 Docker 에서 빌드·실행되지 않던 원인들을 잡았습니다.
+
+**코드 생성 결과를 스스로 교정**
+- 생성 직후 AI 를 다시 부르지 않고 확실한 것은 바로 고칩니다: Vite 인데 JSX 가 든 `.js` → `.jsx`(index.html 참조 포함), import 하지만 만들지 않은 CSS 파일 추가, CRA 식 `process.env.REACT_APP_*` → `import.meta.env.VITE_*`, 선언과 다른 패키지 이름(`@stripe/js` → `@stripe/stripe-js`).
+- 파일끼리 어긋난 이름(예: `db.initialize()` 를 부르는데 db.js 는 `initializeDatabase` 를 내보냄)과 없는 파일 import 를 찾아 AI 교정 요청에 넣습니다.
+
+**배포 준비 점검(자동 수정 포함)**
+- 위 항목 모두를 배포 계획에서 오류로 알리고 자동 수정 버튼으로 고칩니다(원본은 .recoder/backups).
+- 서버가 `server/package.json` 의 패키지를 쓰는데 Dockerfile 이 그 폴더를 설치하지 않으면(컨테이너가 "Cannot find module" 로 종료) Dockerfile 을 고칩니다.
+
+**로컬 Docker 배포가 DB 를 함께 띄웁니다**
+- 앱이 PostgreSQL·MongoDB·Redis 패키지를 쓰면 같은 Docker 네트워크에 DB 컨테이너(데이터는 Docker 볼륨에 보관)를 먼저 띄우고, 접속 정보(DATABASE_URL·PG* 등)를 앱에 넘깁니다. 승인 화면에 안내하고, 다시 배포해도 같은 데이터·비밀번호를 씁니다. 예전에는 DB 가 없어 서버가 시작하자마자 종료했습니다.
+
 ## 1.1.22 — 2026-09-27 (Preview)
 
 - 확장을 업데이트해도 창을 다시 불러오기 전까지 **이전 버전 Core 가 계속 요청을 처리**하던 문제를 고쳤습니다(실기기: 1.1.21 을 설치했는데 코드 생성은 1.1.18 Core 가 처리해 이미 고친 "응답 길이 제한" 오류가 그대로 났습니다). 새 확장이 이전 버전 Core 를 발견하면 정상 종료시키고 새 버전 Core 로 바꿉니다. 반대로 옛 창이 새 Core 를 끄지는 않습니다.

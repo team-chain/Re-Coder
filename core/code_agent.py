@@ -1537,6 +1537,68 @@ def _relative_to_target(ops: list[dict], target_folder: str) -> list[dict]:
     return ops
 
 
+def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[dict], list[str]]:
+    """AI 를 다시 부르지 않고 확실히 고칠 수 있는 것만 ops 에서 고친다.
+
+    나눠서 만든 파일끼리 자주 어긋나는 것들(실기기 쇼핑몰): Vite 인데 JSX 가 든 .js,
+    import 하지만 만들지 않은 CSS, CRA 식 process.env, 선언과 다른 패키지 이름.
+    """
+    try:
+        from build_readiness import (analyze, jsx_reference_rewrite, rename_package_import,
+                                     vite_env_rewrite)
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import (analyze, jsx_reference_rewrite, rename_package_import,  # type: ignore
+                                          vite_env_rewrite)
+    folder = (target_folder or "").replace("\\", "/").strip("/")
+    base = (root / folder).resolve() if folder and not Path(folder).is_absolute() else (Path(folder) if folder else root.resolve())
+    by_path = {str(op.get("file") or "").replace("\\", "/").lstrip("/"): op for op in ops}
+    notes: list[str] = []
+    manifests = ("package.json",)
+    projects = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) in manifests})
+    if (base / "package.json").is_file() or "package.json" in by_path:
+        projects = [""]
+    for project in projects[:5]:
+        prefix = f"{project}/" if project else ""
+        overlay = {p[len(prefix):]: op.get("content") or "" for p, op in by_path.items() if p.startswith(prefix)}
+        try:
+            data = analyze(base / project, overlay, dockerfile=None).fix_data
+        except Exception as exc:  # noqa: BLE001 - 교정 실패는 원래 결과로 둔다
+            print(f"[code_agent] 자동 교정 점검 생략: {exc}", flush=True)
+            continue
+        for importer, spec in data.get("missing_styles") or []:
+            if prefix + importer not in by_path:
+                continue
+            rel = prefix + posixpath.normpath(posixpath.join(posixpath.dirname(importer), spec))
+            if rel not in by_path and not (base / rel).exists():
+                by_path[rel] = {"action": "create", "file": rel, "language": "css",
+                                "content": "/* ReCoder: 코드가 불러오지만 AI 가 만들지 않은 스타일 파일 — 필요한 스타일을 채우세요. */\n",
+                                "rationale": "import 하는 스타일 파일이 없어 빌드가 실패하지 않도록 빈 파일을 만들었습니다."}
+                notes.append(f"{rel}: 빈 스타일 파일 추가")
+        for rel in data.get("jsx_in_js") or []:
+            op = by_path.pop(prefix + rel, None)
+            if op is None:
+                continue
+            new_rel = prefix + rel[:-3] + ".jsx"
+            op["file"] = new_rel
+            by_path[new_rel] = op
+            old_name, new_name = rel.rsplit("/", 1)[-1], new_rel.rsplit("/", 1)[-1]
+            for other in by_path.values():
+                other["content"] = jsx_reference_rewrite(other.get("content") or "", old_name, new_name)
+            notes.append(f"{prefix + rel} → {new_rel}(Vite JSX)")
+        for rel in data.get("process_env") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                op["content"] = vite_env_rewrite(op.get("content") or "")
+                notes.append(f"{prefix + rel}: process.env → import.meta.env")
+        for old_pkg, new_pkg in (data.get("package_typos") or {}).items():
+            for op in by_path.values():
+                updated = rename_package_import(op.get("content") or "", old_pkg, new_pkg)
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{op['file']}: {old_pkg} → {new_pkg}")
+    return list(by_path.values()), notes
+
+
 def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list[dict]:
     """ops 를 적용했을 때 **새로 생기는** 빌드·실행 문제(build_readiness)만 돌려준다.
 
@@ -1862,6 +1924,9 @@ def generate_code(
     # 생성 결과 일관성 — 이 ops 를 적용하면 새로 생기는 빌드·실행 문제(없는 파일을 가리키는
     # 스크립트, 선언 안 된 패키지 등)를 찾아 한 번 교정을 요청한다. 실기기에서 CRA 설정만 남은
     # Express 앱이 Docker 빌드에서 막혔다. 교정도 실패하면 결과에 경고로 남긴다.
+    ops_out, autofix_notes = _autofix_ops(root, target_folder, ops_out)
+    if autofix_notes:
+        print(f"[code_agent] 자동 교정 {len(autofix_notes)}건: {autofix_notes[:5]}", flush=True)
     consistency = _consistency_issues(root, target_folder, ops_out)
     if any(i["severity"] == "error" for i in consistency):
         issue_lines = "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in consistency)

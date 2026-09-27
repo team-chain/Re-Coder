@@ -36,7 +36,9 @@ WARNING = "warning"
 #: 사용자가 버튼 한 번으로 적용할 수 있는(백업을 남기는) 수정 종류.
 AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_HEALTH_PATH_UNKNOWN",
                 "NODE_UNUSED_BUILD_SCRIPT", "DOCKERFILE_WORKDIR_NOT_WRITABLE", "NODE_VULNERABLE_DEPENDENCY",
-                "NODE_DEPENDENCY_VERSION_NOT_FOUND", "DOCKERFILE_SUBPROJECT_DEPS_MISSING", "NODE_FRONTEND_NOT_SERVED"}
+                "NODE_DEPENDENCY_VERSION_NOT_FOUND", "DOCKERFILE_SUBPROJECT_DEPS_MISSING", "NODE_FRONTEND_NOT_SERVED",
+                "NODE_LOCAL_IMPORT_MISSING", "NODE_VITE_JSX_IN_JS", "NODE_VITE_PROCESS_ENV", "NODE_IMPORT_PACKAGE_TYPO",
+                "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING"}
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -70,6 +72,13 @@ class Readiness:
     #: 루트 build 스크립트가 들어가서 빌드하는 하위 프로젝트(client/ 등) — 각자 package.json 이 있다.
     subprojects: list[str] = field(default_factory=list)
     server_entry: Optional[str] = None     # 서버 진입 파일(정적 제공 자동 수정 대상)
+    #: 서버 진입 파일이 자기 package.json 을 가진 하위 폴더(server/ 등)에 있으면 그 폴더.
+    runtime_subproject: Optional[str] = None
+    #: 로컬 Docker 배포가 함께 띄울 수 있는 서비스(postgres·mongodb·redis)와 서버 코드가 읽는 환경변수.
+    services: list[str] = field(default_factory=list)
+    env_names: list[str] = field(default_factory=list)
+    #: 자동 수정에 쓰는 세부 정보(JSX 가 든 .js 파일, 오타 패키지 등).
+    fix_data: dict = field(default_factory=dict)
     issues: list[ReadinessIssue] = field(default_factory=list)
 
     @property
@@ -416,6 +425,203 @@ def _frontend_out_dir(files: "ProjectFiles", folder: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# 소스 교차 점검 — AI 가 파일을 나눠 만들 때 흔히 어긋나는 것들
+# ---------------------------------------------------------------------------
+
+_JS_RESOLVE_EXTS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json", ".vue", ".svelte")
+_STYLE_EXTS = (".css", ".scss", ".sass", ".less")
+_JSX_LINE = re.compile(r"^\s*<(?:[A-Z][\w.]*|[a-z][\w-]*)(?:\s[^'\"`;]*)?/?>\s*$|(?:\(|return)\s*<[A-Z][\w.]*[\s/>]", re.MULTILINE)
+_ESM_NAMED_IMPORT = re.compile(r"""\bimport\s+(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*['"](\.{1,2}/[^'"]+)['"]""")
+_CJS_REQUIRE_BIND = re.compile(r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""")
+_CJS_DESTRUCTURE = re.compile(r"""\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""")
+_RELATIVE_SPEC = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\(\s*)['"](\.{1,2}/[^'"]+)['"]""")
+_BARE_IMPORT = re.compile(r"""^\s*import\s+['"](\.{1,2}/[^'"]+)['"]""", re.MULTILINE)
+
+
+def _resolve_local(files: "ProjectFiles", importer: str, spec: str) -> Optional[str]:
+    import posixpath
+    base = posixpath.normpath(posixpath.join(posixpath.dirname(importer), spec.split("?")[0]))
+    if base.startswith(".."):
+        return base  # 프로젝트 밖 — 판단하지 않는다
+    if files.exists(base):
+        return base
+    for ext in _JS_RESOLVE_EXTS + _STYLE_EXTS:
+        if files.exists(base + ext):
+            return base + ext
+    for ext in _JS_RESOLVE_EXTS:
+        if files.exists(f"{base}/index{ext}"):
+            return f"{base}/index{ext}"
+    return None
+
+
+def _esm_exports(text: str) -> Optional[set[str]]:
+    if re.search(r"\bexport\s*\*", text):
+        return None
+    names = set(re.findall(r"\bexport\s+(?:async\s+)?(?:const|let|var|function\*?|class)\s+([\w$]+)", text))
+    for group in re.findall(r"\bexport\s*\{([^}]*)\}", text):
+        for part in group.split(","):
+            part = part.strip()
+            if part:
+                names.add(part.split(" as ")[-1].strip())
+    if re.search(r"\bexport\s+default\b", text):
+        names.add("default")
+    return names if names else None
+
+
+def _cjs_exports(text: str) -> Optional[set[str]]:
+    literal = re.findall(r"\bmodule\.exports\s*=\s*\{([^{}]*)\}", text)
+    if len(literal) != 1 or re.search(r"\bmodule\.exports\s*=\s*(?![\s{])", text):
+        return None  # 함수·클래스·다른 값을 내보내거나 여러 번 대입 — 판단하지 않는다
+    names: set[str] = set()
+    for part in literal[0].split(","):
+        part = part.strip()
+        m = re.match(r"^(?:async\s+)?([\w$]+)", part)
+        if m:
+            names.add(m.group(1))
+    names |= set(re.findall(r"\b(?:module\.)?exports\.([\w$]+)\s*=", text))
+    return names
+
+
+def _vite_projects(files: "ProjectFiles", manifests: dict) -> set[str]:
+    out = set()
+    for folder in manifests:
+        try:
+            pkg = json.loads(files.read(f"{folder}/package.json" if folder else "package.json") or "")
+        except ValueError:
+            continue
+        deps = {}
+        for key in ("dependencies", "devDependencies"):
+            if isinstance(pkg, dict) and isinstance(pkg.get(key), dict):
+                deps.update(pkg[key])
+        if "vite" in deps:
+            out.add(folder)
+    return out
+
+
+def _closest_declared(name: str, declared: set[str], imported: set[str] = frozenset()) -> Optional[str]:
+    """`@stripe/js` → `@stripe/stripe-js` 처럼 같은 범위의 선언된 패키지 중 가장 가까운 것.
+
+    선언만 하고 어디서도 import 하지 않는 패키지를 먼저 본다 — AI 가 선언은 맞게 하고
+    import 에서 이름을 틀리는 경우가 대부분이다.
+    """
+    import difflib
+    scope = name.split("/")[0] if name.startswith("@") else ""
+    tail = name.split("/")[-1]
+    pool = [d for d in declared if d and d != name and (not scope or d.startswith(scope + "/"))
+            and (tail in d.split("/")[-1] or d.split("/")[-1] in tail
+                 or difflib.SequenceMatcher(None, name, d).ratio() >= 0.75)]
+    if not pool:
+        return None
+    return max(pool, key=lambda d: (d not in imported, difflib.SequenceMatcher(None, name, d).ratio()))
+
+
+def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: dict, owner, undeclared: dict) -> None:
+    vite = _vite_projects(files, manifests)
+    missing_files: list[tuple[str, str]] = []
+    missing_names: list[str] = []
+    jsx_in_js: list[str] = []
+    process_env: list[str] = []
+    for rel in files.files():
+        if not rel.endswith(_JS_SUFFIXES) or "/node_modules/" in f"/{rel}":
+            continue
+        text = files.read(rel)
+        if text is None:
+            continue
+        active = _strip_js_comments(text)
+        project = owner(rel)
+        # 1) 없는 파일을 불러온다
+        for spec in set(_RELATIVE_SPEC.findall(active)) | set(_BARE_IMPORT.findall(active)):
+            if _resolve_local(files, rel, spec) is None:
+                missing_files.append((rel, spec))
+        # 2) 가져오는 이름이 그 파일에 없다(나눠 만든 파일끼리 자주 어긋난다)
+        for names, spec in _ESM_NAMED_IMPORT.findall(active):
+            target = _resolve_local(files, rel, spec)
+            if not target or not target.endswith(_JS_SUFFIXES):
+                continue
+            exported = _esm_exports(_strip_js_comments(files.read(target) or ""))
+            if exported is None:
+                continue
+            for name in (n.strip().split(" as ")[0].strip() for n in names.split(",")):
+                if name and name not in exported:
+                    missing_names.append(f"`{name}`({rel} → {target})")
+        cjs_bindings = []
+        for var, spec in _CJS_REQUIRE_BIND.findall(active):
+            cjs_bindings.append((var, spec, None))
+        for names, spec in _CJS_DESTRUCTURE.findall(active):
+            cjs_bindings.append((None, spec, [n.strip().split(":")[0].strip() for n in names.split(",") if n.strip()]))
+        for var, spec, names in cjs_bindings:
+            target = _resolve_local(files, rel, spec)
+            if not target or not target.endswith(_JS_SUFFIXES):
+                continue
+            exported = _cjs_exports(_strip_js_comments(files.read(target) or ""))
+            if exported is None:
+                continue
+            used = names if names is not None else set(re.findall(rf"\b{re.escape(var)}\.([\w$]+)", active))
+            for name in sorted(set(used)):
+                if name not in exported:
+                    missing_names.append(f"`{name}`({rel} → {target})")
+        # 3) Vite 는 .js 안의 JSX 를 해석하지 않는다 · process.env 가 없다
+        if project in vite:
+            if rel.endswith(".js") and _JSX_LINE.search(active):
+                jsx_in_js.append(rel)
+            if re.search(r"\bprocess\.env\.[A-Za-z_]", active) and not rel.split("/")[-1].startswith("vite.config"):
+                process_env.append(rel)
+    if missing_files:
+        shown = ", ".join(f"`{spec}`({rel})" for rel, spec in missing_files[:6])
+        styles_only = all(spec.endswith(_STYLE_EXTS) for _, spec in missing_files)
+        result.fix_data["missing_styles"] = [(rel, spec) for rel, spec in missing_files if spec.endswith(_STYLE_EXTS)]
+        result.issues.append(ReadinessIssue(
+            "NODE_LOCAL_IMPORT_MISSING", ERROR,
+            f"코드가 불러오는 프로젝트 파일이 없습니다: {shown}. 빌드나 실행이 이 import 에서 멈춥니다.",
+            ("없는 스타일 파일을 빈 파일로 만드세요(자동 수정 가능)." if styles_only else
+             "빠진 파일을 만들거나 import 경로를 실제 파일로 고치세요."),
+            missing_files[0][0], styles_only))
+    if missing_names:
+        result.issues.append(ReadinessIssue(
+            "NODE_IMPORT_NAME_MISSING", ERROR,
+            "불러오는 이름을 그 파일이 내보내지 않습니다: " + ", ".join(missing_names[:6])
+            + ". 실행 중 undefined 오류(… is not a function)로 멈춥니다.",
+            "내보내는 쪽 이름과 쓰는 쪽 이름을 맞추세요.", missing_names[0].split("(")[1].split(" ")[0]))
+    if jsx_in_js:
+        result.fix_data["jsx_in_js"] = jsx_in_js
+        result.issues.append(ReadinessIssue(
+            "NODE_VITE_JSX_IN_JS", ERROR,
+            f"Vite 는 .js 파일 안의 JSX 를 해석하지 않습니다: {', '.join(jsx_in_js[:5])}. `vite build` 가 "
+            "\"Failed to parse source for import analysis\" 로 실패합니다.",
+            "파일 확장자를 .jsx 로 바꾸세요(자동 수정 가능 — index.html 과 import 경로도 함께 고칩니다).",
+            jsx_in_js[0], True))
+    if process_env:
+        result.fix_data["process_env"] = process_env
+        result.issues.append(ReadinessIssue(
+            "NODE_VITE_PROCESS_ENV", ERROR,
+            f"Vite 화면 코드가 process.env 를 씁니다: {', '.join(process_env[:5])}. 브라우저에는 process 가 없어 "
+            "화면이 \"process is not defined\" 로 멈춥니다(Create React App 방식).",
+            "import.meta.env.VITE_… 로 바꾸세요(자동 수정 가능 — REACT_APP_X 는 VITE_X 로 바꿉니다).",
+            process_env[0], True))
+    typos = {}
+    imported_everywhere: set[str] = set()
+    for rel in files.files():
+        if rel.endswith(_JS_SUFFIXES) and "/node_modules/" not in f"/{rel}":
+            body = _strip_js_comments(files.read(rel) or "")
+            for pattern in _IMPORT_PATTERNS:
+                imported_everywhere |= {p for p in (_package_of(x) for x in pattern.findall(body)) if p}
+    for project, pkgs in undeclared.items():
+        declared = manifests.get(project, set())
+        for pkg, rel in pkgs.items():
+            guess = _closest_declared(pkg, declared, imported_everywhere)
+            if guess:
+                typos[pkg] = (guess, rel)
+    if typos:
+        result.fix_data["package_typos"] = {k: v[0] for k, v in typos.items()}
+        result.issues.append(ReadinessIssue(
+            "NODE_IMPORT_PACKAGE_TYPO", ERROR,
+            "import 한 패키지 이름이 선언된 패키지와 다릅니다: "
+            + ", ".join(f"`{k}` → `{v[0]}`?({v[1]})" for k, v in list(typos.items())[:5])
+            + ". 선언 안 된 이름은 설치되지 않아 빌드가 실패합니다.",
+            "import 를 package.json 에 선언된 이름으로 고치세요(자동 수정 가능).", next(iter(typos.values()))[1], True))
+
+
 def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
     raw = files.read("package.json")
     try:
@@ -593,6 +799,8 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
             f"코드가 불러오는 패키지가 {manifest} 에 없습니다: {shown}. 컨테이너에는 선언된 패키지만 설치됩니다.",
             f"{where} {' '.join(names[:6])}` 로 의존성에 추가하세요.", missing[names[0]]))
 
+    _analyze_js_sources(files, result, manifests, owner, undeclared)
+
     for rel in entry_candidates:
         text = files.read(rel)
         if text is None:
@@ -642,8 +850,26 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
             result.server_entry or "", commonjs))
 
     runtime_names = set(runtime_deps)
+    if result.server_entry:
+        sub = owner(result.server_entry)
+        if sub:
+            result.runtime_subproject = sub
+            try:
+                sub_pkg = json.loads(files.read(f"{sub}/package.json") or "")
+                if isinstance(sub_pkg, dict) and isinstance(sub_pkg.get("dependencies"), dict):
+                    runtime_names |= set(sub_pkg["dependencies"])
+            except ValueError:
+                pass
     all_server_text = "\n".join(server_texts)
+    result.env_names = sorted(set(re.findall(r"process\.env\.([A-Za-z_][A-Za-z0-9_]*)", all_server_text)))
+    for kind, deps_for in (("postgres", {"pg", "postgres", "pg-promise"}), ("mongodb", {"mongoose", "mongodb"}),
+                           ("redis", {"redis", "ioredis"})):
+        if runtime_names & deps_for:
+            result.services.append(kind)
+    provisioned = {"PostgreSQL": "postgres", "MongoDB": "mongodb", "Redis": "redis"}
     for dep, label, pattern in _EXTERNAL_SERVICES:
+        if provisioned.get(label) in result.services:
+            continue  # 로컬 Docker 배포가 함께 띄운다(배포 계획에 안내)
         if dep in runtime_names and re.search(pattern, all_server_text):
             result.issues.append(ReadinessIssue(
                 "NODE_EXTERNAL_SERVICE", WARNING,
@@ -900,6 +1126,49 @@ def add_subproject_installs(text: str, folders: list[str], files: "ProjectFiles"
     return newline.join(lines)
 
 
+def _runtime_install_anchors(text: str) -> Optional[tuple[int, int]]:
+    """(deps 단계 설치 RUN 의 마지막 줄, 실행 단계의 node_modules 복사 줄). 템플릿 구조가 아니면 None."""
+    lines = text.split("\n")
+    stage = None
+    deps_run_end = None
+    copy_line = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"^\s*FROM\s+\S+(?:\s+AS\s+(\S+))?", line, re.I)
+        if m:
+            stage = (m.group(1) or "").lower()
+        elif stage == "deps" and deps_run_end is None and re.match(r"^\s*RUN\b", line, re.I):
+            end = i
+            while end < len(lines) - 1 and lines[end].rstrip().endswith("\\"):
+                end += 1
+            deps_run_end = end
+            i = end
+        elif re.match(r"^\s*COPY\s+--from=deps\b.*\s/app/node_modules\s", line + " ", re.I):
+            copy_line = i
+        i += 1
+    return (deps_run_end, copy_line) if deps_run_end is not None and copy_line is not None else None
+
+
+def add_runtime_subproject_install(text: str, folder: str) -> str:
+    anchors = _runtime_install_anchors(text.replace("\r\n", "\n"))
+    if anchors is None:
+        raise ValueError("Dockerfile 구조를 확인하지 못했습니다. 서버 폴더 의존성 설치를 직접 추가하세요.")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(newline)
+    deps_end, copy_line = anchors
+    chown = re.search(r"--chown=\S+", lines[copy_line])
+    lines[copy_line + 1:copy_line + 1] = [
+        f"COPY --from=deps {chown.group(0) + ' ' if chown else ''}/app/{folder}/node_modules ./{folder}/node_modules"]
+    lines[deps_end + 1:deps_end + 1] = [
+        f"# ReCoder: 서버가 {folder}/package.json 의 패키지를 쓰므로 그 폴더 의존성도 설치한다.",
+        f"COPY {folder}/package.json {folder}/package-lock.json* ./{folder}/",
+        f"RUN cd {folder} && if [ -f package-lock.json ]; then npm ci --omit=dev || npm install --omit=dev; "
+        "else npm install --omit=dev; fi",
+    ]
+    return newline.join(lines)
+
+
 _DOCKERIGNORE_TRIGGERS = ("node_modules", ".env", ".venv", "venv", ".git")
 
 
@@ -941,6 +1210,17 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
             f"(확인된 경로: {probe}). 컨테이너가 unhealthy 로 표시될 수 있습니다.",
             f"HEALTHCHECK 경로를 {probe} 로 바꾸거나(자동 수정 가능) {facts['health_path']} 라우트를 추가하세요.",
             dockerfile, True))
+    runtime_sub = result.runtime_subproject
+    if runtime_sub and facts["cmd_entry"] and facts["cmd_entry"].startswith(runtime_sub + "/") \
+            and not _dockerfile_installs(text, runtime_sub):
+        anchors = _runtime_install_anchors(text)
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING", ERROR,
+            f"서버({facts['cmd_entry']})가 {runtime_sub}/package.json 의 패키지(express 등)를 쓰는데 Dockerfile 은 "
+            f"그 폴더의 의존성을 설치하지 않습니다. 컨테이너가 \"Cannot find module\" 로 바로 종료됩니다.",
+            (f"Dockerfile 이 {runtime_sub}/ 의존성을 설치해 실행 이미지에 넣게 하세요(자동 수정 가능)." if anchors else
+             f"Dockerfile 에 `RUN cd {runtime_sub} && npm install --omit=dev` 를 추가하세요."),
+            dockerfile, anchors is not None))
     missing_sub = [d for d in result.subprojects if facts["runs_build"] and not _dockerfile_installs(text, d)]
     if missing_sub:
         shown = ", ".join(f"{d}/" for d in missing_sub)
@@ -1136,6 +1416,27 @@ def _backup(root: Path, rel: str, text: str) -> str:
     return target.relative_to(root).as_posix()
 
 
+# ---------------------------------------------------------------------------
+# 텍스트 변환 — 디스크 자동 수정과 코드 생성 결과(ops) 교정이 함께 쓴다
+# ---------------------------------------------------------------------------
+
+def vite_env_rewrite(text: str) -> str:
+    """CRA 식 process.env 를 Vite 의 import.meta.env 로."""
+    text = re.sub(r"\bprocess\.env\.NODE_ENV\b", "import.meta.env.MODE", text)
+    text = re.sub(r"\bprocess\.env\.REACT_APP_([A-Za-z0-9_]+)", r"import.meta.env.VITE_\1", text)
+    return re.sub(r"\bprocess\.env\.(?!VITE_)([A-Za-z_][A-Za-z0-9_]*)", r"import.meta.env.VITE_\1", text) \
+        .replace("process.env.VITE_", "import.meta.env.VITE_")
+
+
+def rename_package_import(text: str, old: str, new: str) -> str:
+    return re.sub(r"""(['"])""" + re.escape(old) + r"""(/[^'"]*)?\1""", lambda m: f"{m.group(1)}{new}{m.group(2) or ''}{m.group(1)}", text)
+
+
+def jsx_reference_rewrite(text: str, old_name: str, new_name: str) -> str:
+    """index.html 의 /src/index.js · import './index.js' 처럼 확장자까지 적은 참조를 새 이름으로."""
+    return re.sub(r"""(?<=[/'"])""" + re.escape(old_name) + r"""(?=['"?#])""", new_name, text)
+
+
 def serve_frontend(text: str, entry_rel: str, out_dir: str) -> str:
     """Express 서버가 빌드한 화면을 제공하게 한다 — 마지막 listen 호출 바로 앞에 넣는다.
 
@@ -1261,6 +1562,73 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
         backup = _backup(root, before.server_entry, text)
         _write_raw(entry, updated)
         changed += [before.server_entry, backup]
+    elif code == "NODE_LOCAL_IMPORT_MISSING":
+        import posixpath
+        styles = before.fix_data.get("missing_styles") or []
+        if not issue.auto_fix or not styles:
+            raise ValueError("스타일 파일이 아닌 파일이 빠져 있어 자동으로 만들 수 없습니다. import 경로를 확인하세요.")
+        for importer, spec in styles:
+            rel = posixpath.normpath(posixpath.join(posixpath.dirname(importer), spec))
+            target = root / rel
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("/* ReCoder: 코드가 불러오지만 없던 스타일 파일 — 필요한 스타일을 채우세요. */\n", encoding="utf-8")
+            changed.append(rel)
+    elif code == "NODE_VITE_JSX_IN_JS":
+        for rel in before.fix_data.get("jsx_in_js") or []:
+            source = root / rel
+            new_rel = rel[:-3] + ".jsx"
+            if not source.is_file() or (root / new_rel).exists():
+                continue
+            text = _read_raw(source)
+            backup = _backup(root, rel, text)
+            os.replace(source, root / new_rel)
+            changed += [f"{rel} → {new_rel}", backup]
+            old_name, new_name = rel.rsplit("/", 1)[-1], new_rel.rsplit("/", 1)[-1]
+            project = rel.split("/src/")[0] if "/src/" in rel else ""
+            for other in ProjectFiles(root).files():
+                if (project and not other.startswith(project + "/")) or not other.endswith((".html",) + _JS_SUFFIXES):
+                    continue
+                body = _read_raw(root / other)
+                updated = jsx_reference_rewrite(body, old_name, new_name)
+                if updated != body:
+                    changed.append(_backup(root, other, body))
+                    _write_raw(root / other, updated)
+                    changed.append(other)
+    elif code == "NODE_VITE_PROCESS_ENV":
+        for rel in before.fix_data.get("process_env") or []:
+            text = _read_raw(root / rel)
+            updated = vite_env_rewrite(text)
+            if updated != text:
+                changed += [rel, _backup(root, rel, text)]
+                _write_raw(root / rel, updated)
+        for env_file in (".env.example", ".env.sample"):
+            path = root / env_file
+            if path.is_file():
+                text = _read_raw(path)
+                updated = re.sub(r"(?m)^REACT_APP_", "VITE_", text)
+                if updated != text:
+                    changed += [env_file, _backup(root, env_file, text)]
+                    _write_raw(path, updated)
+    elif code == "NODE_IMPORT_PACKAGE_TYPO":
+        typos = before.fix_data.get("package_typos") or {}
+        for rel in ProjectFiles(root).files():
+            if not rel.endswith(_JS_SUFFIXES):
+                continue
+            text = _read_raw(root / rel)
+            updated = text
+            for old_pkg, new_pkg in typos.items():
+                updated = rename_package_import(updated, old_pkg, new_pkg)
+            if updated != text:
+                changed += [rel, _backup(root, rel, text)]
+                _write_raw(root / rel, updated)
+    elif code == "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING":
+        dockerfile = root / "Dockerfile"
+        text = _read_raw(dockerfile)
+        updated = add_runtime_subproject_install(text, before.runtime_subproject or "")
+        changed += ["Dockerfile", _backup(root, "Dockerfile", text)]
+        _write_raw(dockerfile, updated)
     elif code == "DOCKERFILE_HEALTH_PATH_UNKNOWN":
         dockerfile = root / "Dockerfile"
         text = _read_raw(dockerfile)

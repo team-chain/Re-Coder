@@ -325,6 +325,8 @@ class DeploymentPlan(BaseModel):
     approval_level: ApprovalLevel = ApprovalLevel.CONFIRM
     #: 빌드 전 정적 점검 결과(build_readiness.Readiness.to_dict). 화면의 "배포 준비 점검".
     readiness: Optional[dict] = None
+    #: 로컬 Docker 배포가 앱과 함께 띄울 서비스(postgres·mongodb·redis).
+    companions: list[str] = Field(default_factory=list)
 
 
 class DeploymentRecord(BaseModel):

@@ -140,9 +140,10 @@ def test_frontend_not_served_is_fixed_by_serving_the_build(mall):
     assert not any(i.code == "NODE_FRONTEND_NOT_SERVED" for i in br.analyze(mall).issues)
 
 
-def test_localhost_database_is_a_warning(mall):
-    issue = next(i for i in br.analyze(mall).issues if i.code == "NODE_EXTERNAL_SERVICE")
-    assert issue.severity == "warning" and "PostgreSQL" in issue.message
+def test_localhost_postgres_is_provisioned_instead_of_warned(mall):
+    readiness = br.analyze(mall)
+    assert readiness.services == ["postgres"]
+    assert not any(i.code == "NODE_EXTERNAL_SERVICE" for i in readiness.issues)
 
 
 def test_build_failure_explains_etarget_and_command_not_found():
