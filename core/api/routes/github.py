@@ -49,6 +49,11 @@ class GhSetSecretRequest(BaseModel):
     value: str
 
 
+class GhRepositoryConnectRequest(BaseModel):
+    repository: str = Field(..., pattern=r"^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$")
+    create: bool = False
+
+
 # ── 엔드포인트 ──────────────────────────────────────────────────────────
 
 
@@ -118,6 +123,13 @@ async def github_set_secret(body: GhSetSecretRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/api/github/repository/connect")
+async def github_connect_repository(body: GhRepositoryConnectRequest) -> dict:
+    """Validate access or create an empty private repository; never commit/push."""
+    from github_agent import get_github_agent
+    return await asyncio.to_thread(get_github_agent().connect_repository, body.repository, body.create)
+
+
 @router.get("/api/github/runs")
 async def github_list_runs(repo: str) -> dict:
     """워크플로 실행 이력 (?repo=owner/name)."""
@@ -156,19 +168,18 @@ async def github_logout() -> dict:
 
 @router.post("/api/git/push")
 async def git_push_route(body: dict) -> dict:
-    """원격 push. github_agent 토큰이 있으면 사용, 없으면 git_agent 폴백."""
+    """원격 push. 로그인 없이 존재하지 않는 GitAgent.push를 호출하지 않는다."""
     workspace_path = str(body.get("workspace_path", ""))
     branch = str(body.get("branch", ""))
     force = bool(body.get("force", False))
+    # Canvas approvals can explicitly push existing commits only. Preserve legacy defaults.
+    auto_commit = body.get("auto_commit", True) is not False
     try:
         from github_agent import get_github_agent  # type: ignore
         gh = get_github_agent()
         if getattr(gh, "_token", None):
-            return await asyncio.to_thread(gh.push, workspace_path, branch, force)
-        from git_agent import get_git_agent  # type: ignore
-        return await asyncio.to_thread(
-            get_git_agent().push, workspace_path, branch, force,
-        )
+            return await asyncio.to_thread(gh.push, workspace_path, branch, force, auto_commit=auto_commit)
+        return {"status": "error", "message": "GitHub 로그인이 필요합니다. GitHub 패널에서 로그인한 뒤 다시 푸시하세요."}
     except Exception as exc:
         logger.exception("[github] git_push failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc

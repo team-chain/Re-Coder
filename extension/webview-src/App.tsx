@@ -1,28 +1,4 @@
-/**
- * ReCoder Webview — Root App (사이드바)
- *
- * 디자인 원칙:
- *   - 로고를 헤더에 두어 전문 서비스 인상 (Kiro 의 유령 같은 브랜드 마크)
- *   - 사용자가 "지금 뭘 할 수 있는지" 카드 하나로 파악 가능
- *   - 이모지 / 유니코드 장식 문자 금지 — 모두 inline SVG
- *
- * 구성:
- *   ┌──────────────────────────┐
- *   │  [Logo] Re-Coder          │  Hero
- *   │  Remember. Return.        │
- *   │  Re-Code.                 │
- *   ├──────────────────────────┤
- *   │  Core / AI / Docker pills │  Status
- *   ├──────────────────────────┤
- *   │  [icon] 에러 분석          │  Action cards (각 카드에 설명)
- *   │  [icon] Dockerfile 생성    │
- *   │  [icon] 배포 + 운영        │
- *   ├──────────────────────────┤
- *   │  [Workbench 열기] (CTA)   │
- *   ├──────────────────────────┤
- *   │  $0.00 / $3.00            │  Cost
- *   └──────────────────────────┘
- */
+/** ReCoder workspace and sidebar: Develop, Deploy, Security, and shared status. */
 
 import React, { useState, useCallback, useEffect } from "react";
 import { useVSCodeApi } from "./hooks/useVSCodeApi";
@@ -30,7 +6,7 @@ import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
 import CodeAgent from "./components/CodeAgent";
 import type { ExternalTurn } from "./components/CodeAgent";
-import { HubHome, HubPage, FeatureFrame, AdrPanel, SecurityScanPanel, PolicyPanel, FEATURE_BY_ID, hubOf, isHubView, isFeatureView } from "./components/Hubs";
+import { HubHome, HubPage, FeatureFrame, AdrPanel, SecurityHub, SecurityScanPanel, PolicyPanel, HUBS, hubOf, isHubView, isFeatureView } from "./components/Hubs";
 import type { HubId, FeatureId, ReadyCtx } from "./components/Hubs";
 import { ShipMode } from "./components/ShipMode";
 import { OperateMode } from "./components/OperateMode";
@@ -38,8 +14,10 @@ import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
 import { Replay } from "./components/Replay";
 import CodeMap from "./components/CodeMap";
-import ChatPanel from "./components/ChatPanel";
-import DeploymentCenter from "./components/DeploymentCenter";
+import DeploymentCanvas from "./components/canvas/DeploymentCanvas";
+import { AwsConnection } from './components/AwsConnection';
+import { CanvasDrawer } from './components/canvas/CanvasDrawer';
+import { canvasStyles } from './components/canvas/styles';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -85,46 +63,10 @@ const Icon = {
       <polyline points="41,26 46,31 41,36" strokeWidth="2.5" />
     </svg>
   ),
-  /** 에러 / 알림 - 삼각형 + 느낌표 */
-  Alert: ({ size = 18 }: { size?: number }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-      <line x1="12" y1="9" x2="12" y2="13" />
-      <line x1="12" y1="17" x2="12.01" y2="17" />
-    </svg>
-  ),
-  /** 코드 / Build - 꺾쇠 */
-  Code: ({ size = 18 }: { size?: number }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="16 18 22 12 16 6" />
-      <polyline points="8 6 2 12 8 18" />
-    </svg>
-  ),
-  /** Git / GitHub */
-  Git: ({ size = 18 }: { size?: number }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="6" cy="6" r="2.2" /><circle cx="6" cy="18" r="2.2" /><circle cx="18" cy="9" r="2.2" />
-      <path d="M6 8.2v7.6M18 11.2a6 6 0 0 1-6 6H8.5" />
-    </svg>
-  ),
   /** 채팅 / Discord */
   Chat: ({ size = 18 }: { size?: number }) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7a8.5 8.5 0 0 1-.9-3.8 8.38 8.38 0 0 1 8.5-8.5 8.5 8.5 0 0 1 8.5 8.5z" />
-    </svg>
-  ),
-  /** 컨테이너 / Ship - 박스 + 화살표 */
-  Container: ({ size = 18 }: { size?: number }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-      <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-      <line x1="12" y1="22.08" x2="12" y2="12" />
-    </svg>
-  ),
-  /** 운영 / 클라우드 - 클라우드 + 게이지 */
-  Cloud: ({ size = 18 }: { size?: number }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
     </svg>
   ),
   /** 대시보드 (Workbench 진입) */
@@ -142,38 +84,11 @@ const Icon = {
       <polyline points="9 18 15 12 9 6" />
     </svg>
   ),
-  /** Check */
-  Check: ({ size = 12 }: { size?: number }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  ),
-  /** Cross */
-  Cross: ({ size = 12 }: { size?: number }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="18" y1="6" x2="6" y2="18" />
-      <line x1="6" y1="6" x2="18" y2="18" />
-    </svg>
-  ),
   /** Back arrow */
   ArrowLeft: ({ size = 14 }: { size?: number }) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <line x1="19" y1="12" x2="5" y2="12" />
       <polyline points="12 19 5 12 12 5" />
-    </svg>
-  ),
-  /** Replay — 재생 버튼 */
-  Replay: ({ size = 18 }: { size?: number }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="5 3 19 12 5 21 5 3" />
-      <line x1="19" y1="20" x2="19" y2="4" />
-    </svg>
-  ),
-  /** Map — 노드 그래프 (구조 지도) */
-  Map: ({ size = 18 }: { size?: number }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="6" cy="5" r="2.2" /><circle cx="18" cy="9" r="2.2" /><circle cx="7" cy="19" r="2.2" />
-      <line x1="7.6" y1="6.6" x2="16.2" y2="7.7" /><line x1="6.4" y1="7.1" x2="6.8" y2="16.8" />
     </svg>
   ),
 };
@@ -208,9 +123,12 @@ interface StatusBadgeProps {
   coreStatus: "ok" | "degraded" | "down" | null;
   expanded: boolean;
   onToggle: () => void;
+  compact?: boolean;
+  pending?: boolean;
+  error?: string;
 }
 
-const StatusBadge: React.FC<StatusBadgeProps> = ({ diagnostics, coreStatus, expanded, onToggle }) => {
+const StatusBadge: React.FC<StatusBadgeProps> = ({ diagnostics, coreStatus, expanded, onToggle, compact, pending, error }) => {
   const green = "var(--vscode-charts-green, #3fb950)";
   const amber = "var(--vscode-editorWarning-foreground, #d7a300)";
   const red = "var(--vscode-editorError-foreground, #e5534b)";
@@ -221,10 +139,17 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ diagnostics, coreStatus, expa
 
   let label: string;
   let color: string;
-  if (coreStatus === null) { label = "확인 중"; color = muted; }
-  else if (!coreOk) { label = "연결 안 됨"; color = red; }
-  else if (aiOk) { label = "준비됨"; color = green; }
-  else { label = "설정 필요"; color = amber; }
+  if (coreStatus === null) { label = "Core 확인 중"; color = muted; }
+  else if (!coreOk) { label = "Core 연결 실패"; color = red; }
+  else if (pending) { label = "AI 확인 중"; color = muted; }
+  else if (error) { label = "AI 확인 실패"; color = amber; }
+  else if (aiOk) { label = "AI 준비됨"; color = green; }
+  else if (!diagnostics) { label = "AI 확인 중"; color = muted; }
+  else { label = "AI 설정 필요"; color = amber; }
+
+  if (compact) return <button className="rc-status-toggle" onClick={onToggle} aria-expanded={expanded} aria-controls="workspace-diagnostics" title="연결 상태와 사용량">
+    <span style={{ width: 6, height: 6, borderRadius: "50%", background: color }} />{label}
+  </button>;
 
   return (
     <div style={{
@@ -259,280 +184,7 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ diagnostics, coreStatus, expa
 };
 
 // ---------------------------------------------------------------------------
-// Action Card (사이드바의 핵심 — 사용자가 한눈에 뭘 할 수 있는지 파악)
-// ---------------------------------------------------------------------------
-
-interface ActionCardProps {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  accent: string; // CSS color
-  enabled: boolean;
-  disabledReason?: string;
-  onClick: () => void;
-}
-
-const ActionCard: React.FC<ActionCardProps> = ({ icon, title, description, accent, enabled, disabledReason, onClick }) => {
-  const [hover, setHover] = useState(false);
-
-  return (
-    <button
-      onClick={enabled ? onClick : undefined}
-      disabled={!enabled}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title={!enabled ? disabledReason : undefined}
-      style={{
-        width: "100%",
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 11,
-        padding: "12px 12px",
-        background: enabled
-          ? hover
-            ? "var(--vscode-list-hoverBackground, rgba(255,255,255,0.05))"
-            : "var(--vscode-input-background, #252526)"
-          : "var(--vscode-input-background, #252526)",
-        border: `1px solid ${enabled && hover ? accent : "var(--vscode-panel-border, #333)"}`,
-        borderLeftWidth: 3,
-        borderLeftColor: accent,
-        borderRadius: 6,
-        cursor: enabled ? "pointer" : "not-allowed",
-        textAlign: "left",
-        opacity: enabled ? 1 : 0.55,
-        transition: "all 0.12s ease-out",
-        outline: "none",
-      }}
-    >
-      <div
-        style={{
-          width: 32,
-          height: 32,
-          borderRadius: 6,
-          background: `${accent}18`,
-          color: accent,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-        }}
-      >
-        {icon}
-      </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{
-          fontSize: 13,
-          fontWeight: 600,
-          color: "var(--vscode-foreground, #e0e0e0)",
-          marginBottom: 2,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}>
-          <span>{title}</span>
-          {enabled && (
-            <span style={{ color: "var(--vscode-descriptionForeground, #888)", opacity: hover ? 1 : 0.45, transition: "opacity 0.12s" }}>
-              <Icon.ChevronRight size={14} />
-            </span>
-          )}
-        </div>
-        <div style={{
-          fontSize: 11,
-          color: "var(--vscode-descriptionForeground, #999)",
-          lineHeight: 1.45,
-        }}>
-          {description}
-        </div>
-      </div>
-    </button>
-  );
-};
-
-// ---------------------------------------------------------------------------
-// Home (3개 카드)
-// ---------------------------------------------------------------------------
-
-interface HomeProps {
-  isAiReady: boolean;
-  isDockerReady: boolean;
-  isOpsReady: boolean;
-  onSelectMode: (mode: ViewMode) => void;
-  postMessage: (type: string, payload?: unknown) => void;
-  awsReady: boolean;
-  githubReady: boolean;
-  showMap?: boolean;
-}
-
-const Home: React.FC<HomeProps> = ({ isAiReady, isDockerReady, isOpsReady, onSelectMode, postMessage, awsReady, githubReady, showMap = false }) => {
-  const accent = "var(--vscode-textLink-foreground, #4a9eff)";
-  const green = "var(--vscode-charts-green, #3fb950)";
-  const muted = "var(--vscode-descriptionForeground, #888)";
-  const fg = "var(--vscode-foreground, #e0e0e0)";
-
-  const sectionLabel: React.CSSProperties = {
-    fontSize: 11, fontWeight: 400, color: muted, marginBottom: 6, marginLeft: 2,
-  };
-
-  const StepRow: React.FC<{
-    icon: React.ReactNode; label: string;
-    enabled: boolean; hint?: string; onClick: () => void; last?: boolean;
-  }> = ({ icon, label, enabled, hint, onClick, last }) => (
-    <button
-      onClick={enabled ? onClick : undefined}
-      disabled={!enabled}
-      style={{
-        width: "100%", display: "flex", alignItems: "center", gap: 12,
-        padding: "11px 2px", background: "none", border: "none",
-        borderBottom: last ? "none" : "0.5px solid var(--vscode-panel-border, #2a2a2a)",
-        textAlign: "left", cursor: enabled ? "pointer" : "default",
-        opacity: enabled ? 1 : 0.55,
-      }}
-    >
-      <span style={{ color: enabled ? fg : muted, display: "inline-flex", flexShrink: 0 }}>{icon}</span>
-      <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: enabled ? fg : muted }}>{label}</span>
-      {enabled
-        ? <span style={{ color: muted, display: "inline-flex", flexShrink: 0 }}><Icon.ChevronRight size={15} /></span>
-        : <span style={{ fontSize: 11, color: muted, flexShrink: 0 }}>{hint}</span>}
-    </button>
-  );
-
-  const ConnRow: React.FC<{
-    icon: React.ReactNode; label: string; connected: boolean; actionLabel?: string; onConnect: () => void; last?: boolean;
-  }> = ({ icon, label, connected, actionLabel, onConnect, last }) => (
-    <button
-      onClick={onConnect}
-      style={{
-        width: "100%", display: "flex", alignItems: "center", gap: 12,
-        padding: "11px 2px", background: "none", border: "none",
-        borderBottom: last ? "none" : "0.5px solid var(--vscode-panel-border, #2a2a2a)",
-        textAlign: "left", cursor: "pointer",
-      }}
-    >
-      <span style={{ color: fg, display: "inline-flex", flexShrink: 0 }}>{icon}</span>
-      <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: fg }}>{label}</span>
-      <span style={{ fontSize: 12, color: connected ? muted : accent, flexShrink: 0 }}>
-        {connected ? "연결됨" : (actionLabel ?? "연결")}
-      </span>
-    </button>
-  );
-
-  return (
-    <div style={{ padding: "14px 12px 10px", display: "flex", flexDirection: "column", gap: 16 }}>
-
-      {/* 구조 지도 — 홈에서 바로 표시 (정적 분석이라 AI 없이 동작) */}
-      {showMap ? (
-        <div>
-          <div style={sectionLabel}>구조 지도</div>
-          <CodeMap isActive={true} />
-        </div>
-      ) : (
-        <div>
-          <div style={sectionLabel}>구조 지도</div>
-          <StepRow icon={<Icon.Map size={19} />} label="전체 아키텍처 보기" enabled onClick={() => onSelectMode("map")} last />
-        </div>
-      )}
-
-      {/* 워크플로 */}
-      <div>
-        <div style={sectionLabel}>워크플로</div>
-        <StepRow
-          icon={<Icon.Code size={19} />}
-          label="Build"
-          enabled={isAiReady} hint="AI 필요"
-          onClick={() => onSelectMode("build")}
-        />
-        <StepRow
-          icon={<Icon.Container size={19} />}
-          label="Deploy"
-          enabled={true}
-          onClick={() => onSelectMode("ship")}
-        />
-        <StepRow
-          icon={<Icon.Dashboard size={19} />}
-          label="배포 센터"
-          enabled={true}
-          onClick={() => onSelectMode("deploy")}
-        />
-        <StepRow
-          icon={<Icon.Cloud size={19} />}
-          label="Operate"
-          enabled={isOpsReady} hint="대기"
-          onClick={() => onSelectMode("operate")}
-          last
-        />
-      </div>
-
-      {/* 연결 */}
-      <div>
-        <div style={sectionLabel}>연결</div>
-        <ConnRow icon={<Icon.Git size={19} />} label="GitHub" connected={githubReady}
-          onConnect={() => postMessage("webview.diagnostics.fix", { key: "github_ready" })} />
-        <ConnRow icon={<Icon.Cloud size={19} />} label="AWS" connected={awsReady}
-          onConnect={() => postMessage("webview.diagnostics.fix", { key: "aws_deploy_ready" })} last />
-        {/* Discord 행 제거 — "봇 초대" 라벨이 실제로는 workbench.open 을 보내
-            Workspace 창만 다시 열었다(라벨-동작 불일치, 보드 이슈). Discord
-            연동 자체가 요구사항 범위 밖(FR-10)이므로 행을 없애는 것이 정직하다. */}
-      </div>
-
-      {/* Deploy Replay (보조) */}
-      <button
-        onClick={() => onSelectMode("replay")}
-        style={{
-          width: "100%", display: "flex", alignItems: "center", gap: 8,
-          padding: "9px 2px", background: "none", border: "none",
-          borderTop: "1px solid var(--vscode-panel-border, #2a2a2a)",
-          color: muted, fontSize: 12, cursor: "pointer", textAlign: "left",
-        }}
-      >
-        <Icon.Replay size={16} />
-        <span style={{ flex: 1 }}>Deploy Replay</span>
-        <Icon.ChevronRight size={14} />
-      </button>
-    </div>
-  );
-};
-
-// ---------------------------------------------------------------------------
 // Sub-page header (뒤로가기)
-// ---------------------------------------------------------------------------
-
-const SubHeader: React.FC<{ title: string; onBack: () => void }> = ({ title, onBack }) => (
-  <div style={{
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "10px 12px",
-    background: "var(--vscode-sideBar-background, #1e1e1e)",
-    borderBottom: "1px solid var(--vscode-panel-border, #2a2a2a)",
-  }}>
-    <button
-      onClick={onBack}
-      style={{
-        background: "none",
-        border: "none",
-        color: "var(--vscode-foreground, #ccc)",
-        cursor: "pointer",
-        display: "flex",
-        alignItems: "center",
-        gap: 4,
-        fontSize: 12,
-        padding: "3px 6px",
-        borderRadius: 4,
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--vscode-list-hoverBackground, rgba(255,255,255,0.05))"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-    >
-      <Icon.ArrowLeft size={14} />
-      뒤로
-    </button>
-    <span style={{ fontSize: 12, fontWeight: 600, color: "var(--vscode-foreground, #e0e0e0)" }}>
-      {title}
-    </span>
-  </div>
-);
-
-// ---------------------------------------------------------------------------
-// ReCoder 작업 화면 — 왼쪽 작업 영역 + 오른쪽 고정 AI 대화
 // ---------------------------------------------------------------------------
 
 interface WorkspaceLayoutProps {
@@ -541,6 +193,8 @@ interface WorkspaceLayoutProps {
   diagnostics: DiagnosticsResult | null;
   coreStatus: "ok" | "degraded" | "down" | null;
   showDiagnostics: boolean;
+  diagnosticsPending?: boolean;
+  diagnosticsError?: string;
   isAiReady: boolean;
   isDockerReady: boolean;
   isOpsReady: boolean;
@@ -554,26 +208,67 @@ interface WorkspaceLayoutProps {
 // HubRouter — 홈 / 허브 페이지 / 기능 화면을 view 값으로 골라 그린다.
 // 사이드바와 Workspace 창이 같은 라우팅을 쓴다.
 // ---------------------------------------------------------------------------
-const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: ExternalTurn | null; onSelectMode: (m: ViewMode) => void }> = ({ view, ctx, externalTurn, onSelectMode }) => {
+const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: ExternalTurn | null; onSelectMode: (m: ViewMode) => void; onReviewRequired: () => void; connectionPending?: boolean; connectionError?: string }> = ({ view, ctx, externalTurn, onSelectMode, onReviewRequired, connectionPending, connectionError }) => {
+  const [codeVisited, setCodeVisited] = useState(view === "code");
+  const deploying = view === 'hub:deploy' || view === 'deploy';
+  const [deployVisited, setDeployVisited] = useState(deploying);
+  const [securityVisited, setSecurityVisited] = useState(view === 'hub:security');
+  useEffect(() => { if (view === "code") setCodeVisited(true); }, [view]);
+  useEffect(() => { if (deploying) setDeployVisited(true); if (view === 'hub:security') setSecurityVisited(true); }, [view, deploying]);
+  return <>
+    <div className="rc-code-page" hidden={view !== "code"}>
+      {(codeVisited || view === "code") && <FeatureFrame feature="code" onHome={() => onSelectMode("home")} onHub={h => onSelectMode(`hub:${h}`)}>
+        <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} onReviewRequired={onReviewRequired} connectionPending={connectionPending} connectionError={connectionError} />
+      </FeatureFrame>}
+    </div>
+    <div hidden={!deploying}>{(deployVisited || deploying) && <FeatureRouter view="hub:deploy" ctx={ctx} onSelectMode={onSelectMode} />}</div>
+    <div hidden={view !== 'hub:security'}>{(securityVisited || view === 'hub:security') && <SecurityHub onHome={() => onSelectMode('home')} onHub={h => onSelectMode(`hub:${h}`)} />}</div>
+    {view !== "code" && !deploying && view !== 'hub:security' && <FeatureRouter view={view} ctx={ctx} externalTurn={externalTurn} onSelectMode={onSelectMode} />}
+  </>;
+};
+
+/** Connection management is reachable in every workspace mode. */
+const WorkspaceConnection: React.FC = () => {
+  const { postMessage, useMessage } = useVSCodeApi();
+  const [open, setOpen] = useState(false), [visited, setVisited] = useState(false);
+  const [ready, setReady] = useState<boolean | null>(null);
+  useEffect(() => { postMessage('aws.status'); }, [postMessage]);
+  useMessage(useCallback(({ type, payload }) => {
+    const p = payload as { ready?: boolean; ok?: boolean; status?: { ready?: boolean }; snapshot?: { aws?: { ready?: boolean } } } | undefined;
+    if (type === 'aws.status') setReady(Boolean(p?.ready));
+    if (type === 'canvas.snapshotResult' && p?.snapshot?.aws) setReady(p.snapshot.aws.ready === true);
+    if (type === 'aws.configure.result' && p?.ok) setReady(p.status?.ready === true);
+    if (type === 'aws.clear.result' && p?.ok) setReady(false);
+  }, []));
+  return <div className="rc-workspace-connection rc-canvas">
+    <style>{canvasStyles}</style>
+    <button className="rc-connection-button" onClick={() => { setVisited(true); setOpen(true); }} aria-haspopup="dialog" title="AWS 계정 연결 관리"><span className="rc-connection-dot" data-ready={ready === true} />{ready === null ? 'AWS 확인 중' : ready ? 'AWS 연결됨' : 'AWS 연결'}</button>
+    <CanvasDrawer open={open} title="AWS 연결" onClose={() => setOpen(false)}>{visited && <AwsConnection />}</CanvasDrawer>
+  </div>;
+};
+
+const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: ExternalTurn | null; onSelectMode: (m: ViewMode) => void }> = ({ view, ctx, externalTurn, onSelectMode }) => {
   const goHome = () => onSelectMode("home");
   const goHub = (h: HubId) => onSelectMode(`hub:${h}`);
   if (view === "home") {
     return <HubHome ctx={ctx} onSelect={goHub} />;
   }
-  if (isHubView(view)) {
+  if (isHubView(view) && view !== "hub:deploy") {
     const hub = view.slice(4) as HubId;
     return <HubPage hub={hub} ctx={ctx} onOpen={(f) => onSelectMode(f)} onHome={goHome} onHub={goHub} />;
   }
-  if (!isFeatureView(view)) { return null; }
-  const feature: FeatureId = view;
+  // Home's Deploy card and the top-level tab both send hub:deploy.
+  // Keep the legacy deploy entry working, but show the canvas immediately on either route.
+  if (view !== "hub:deploy" && !isFeatureView(view)) { return null; }
+  const feature: FeatureId = view === "hub:deploy" ? "deploy" : view;
   let body: React.ReactNode = null;
   switch (feature) {
     case "code": body = <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} />; break;
-    case "build": body = <BuildMode isActive={ctx.isAiReady} externalTurn={externalTurn} />; break;
+    case "build": body = <BuildMode isActive={ctx.isAiReady} onOpenDevelopment={() => onSelectMode("code")} />; break;
     case "map": body = <CodeMap isActive />; break;
     case "adr": body = <AdrPanel />; break;
     case "ship": body = <ShipMode isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} />; break;
-    case "deploy": body = <DeploymentCenter onOpenDocker={() => onSelectMode("ship")} />; break;
+    case "deploy": return <DeploymentCanvas navigation={HUBS.map(h=><button key={h.id} aria-pressed={h.id==='deploy'} onClick={()=>goHub(h.id)}>{h.title}</button>)} onOpenDocker={() => onSelectMode("ship")} onOpenOperate={() => onSelectMode("operate")} isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} isOpsReady={ctx.isOpsReady} />;
     case "replay": body = <Replay />; break;
     case "operate": body = <OperateMode isActive={ctx.isOpsReady} />; break;
     case "scan": body = <SecurityScanPanel kinds={["trivy", "hadolint"]} title="취약점 스캔" note="이미지·의존성은 Trivy, Dockerfile 은 Hadolint 로 검사합니다. 결과는 배포 승인 카드의 위험도에 반영돼요." />; break;
@@ -587,36 +282,43 @@ const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Extern
 //: 경로(CodeAgent)가 살아있는지가 회귀 대상이다 — 예전에 여기서만 숨겨져서
 //: Workspace 창에서 결정 카드가 뜨지 않는 버그가 있었다.
 export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
-  view, externalTurn, diagnostics, coreStatus, showDiagnostics, isAiReady, isDockerReady, isOpsReady,
-  costSummary, onSelectMode, onToggleDiagnostics, postMessage,
+  view, externalTurn, diagnostics, coreStatus, showDiagnostics, diagnosticsPending, diagnosticsError, isAiReady, isDockerReady, isOpsReady,
+  costSummary, onSelectMode, onToggleDiagnostics,
 }) => {
+  const activeHub = isHubView(view) ? view.slice(4) : isFeatureView(view) ? hubOf(view) : '';
+  const showReview = useCallback(() => onSelectMode("code"), [onSelectMode]);
   return (
-    <div style={{ height: "100vh", display: "grid", gridTemplateColumns: "minmax(0, 1.65fr) minmax(330px, .85fr)", overflow: "hidden", background: "var(--vscode-editor-background, #1e1e1e)", color: "var(--vscode-foreground, #e0e0e0)" }}>
+    <div className="rc-workspace">
+      <style>{`
+        .rc-workspace{height:100vh;display:grid;grid-template-columns:minmax(0,1fr);overflow:hidden;position:relative;background:var(--vscode-editor-background,#181818);color:var(--vscode-foreground,#e0e0e0)}
+        .rc-workspace-header{display:flex;align-items:center;gap:12px;min-height:62px;padding:10px 24px;border-bottom:1px solid var(--vscode-panel-border,#2a2a2a);flex-wrap:wrap}
+        .rc-workspace-header button{font:inherit;font-size:12px;cursor:pointer;color:inherit;background:transparent;border:1px solid var(--vscode-panel-border,#333);border-radius:6px;padding:6px 10px}
+        .rc-workspace-header .rc-brand{display:flex;align-items:center;gap:8px;border:0;padding-left:0;font-size:15px;font-weight:600}
+        .rc-workspace-header .rc-status-toggle{display:flex;align-items:center;gap:7px;color:var(--vscode-descriptionForeground,#aaa);border:0;font-size:11px;padding:6px}
+        .rc-global-nav{display:flex;align-items:center;gap:4px;margin-left:24px}.rc-workspace-header .rc-global-nav button{border:0;padding:9px 14px;color:var(--vscode-descriptionForeground,#929ba7)}.rc-workspace-header .rc-global-nav button[aria-current=page]{background:var(--vscode-list-activeSelectionBackground,#263748);color:var(--vscode-list-activeSelectionForeground,#eef5ff)}
+        .rc-workspace-connection{margin-left:auto}.rc-workspace-header .rc-connection-button{display:flex;align-items:center;gap:7px;border:0;background:transparent;font-size:11px;color:var(--vscode-descriptionForeground,#aaa)}.rc-connection-dot{height:6px;width:6px;border-radius:50%;background:#d2a760}.rc-connection-dot[data-ready=true]{background:#56bf91}
+        .rc-workspace .rc-local-hub-nav,.rc-workspace .rc-mode-nav{display:none!important}.rc-workspace [hidden]{display:none!important}
+        .rc-workspace-content{flex:1;min-height:0;overflow:auto;padding:28px 32px}
+        .rc-workspace button:focus-visible{outline:2px solid var(--vscode-focusBorder,#75b9ef);outline-offset:3px}
+        .rc-code-page{width:100%;max-width:1080px;margin:0 auto}
+        @media(max-width:850px){.rc-workspace-content{padding:16px}.rc-workspace-header{padding:10px 16px}}
+        @media(max-width:720px){.rc-global-nav{order:5;width:100%;margin:0;justify-content:center;border-top:1px solid var(--vscode-panel-border,#333);padding-top:8px}.rc-workspace-header{gap:6px}.rc-workspace-header .rc-status-toggle{max-width:18px;overflow:hidden;white-space:nowrap;padding:4px}.rc-status-toggle>span{flex-shrink:0}.rc-workspace-header .rc-brand{font-size:13px}.rc-workspace-header .rc-connection-button{font-size:10px;padding:4px}.rc-workspace-header>button:last-child{font-size:11px}}
+      `}</style>
       <section style={{ minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--vscode-panel-border, #333)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 18px", borderBottom: "1px solid var(--vscode-panel-border, #333)", background: "var(--vscode-sideBar-background, #181818)" }}>
-          <Icon.Logo size={22} />
-          <strong style={{ fontSize: 16 }}>ReCoder</strong>
-          <span style={{ color: "var(--vscode-descriptionForeground, #8b8b8b)", fontSize: 12 }}>Workspace</span>
-          <button onClick={() => onSelectMode("home")} style={{ marginLeft: "auto", border: "1px solid var(--vscode-button-border, transparent)", borderRadius: 4, padding: "4px 9px", background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)", cursor: "pointer", fontSize: 11 }}>홈</button>
+        <div className="rc-workspace-header">
+          <button className="rc-brand" onClick={() => onSelectMode("home")} aria-label="ReCoder 홈"><Icon.Logo size={22} />ReCoder</button>
+          <nav className="rc-global-nav" aria-label="작업 선택">{HUBS.map(h => <button key={h.id} aria-current={activeHub === h.id ? 'page' : undefined} onClick={() => onSelectMode(`hub:${h.id}`)}>{h.title}</button>)}</nav>
+          <WorkspaceConnection />
+          <StatusBadge pending={diagnosticsPending} error={diagnosticsError} compact diagnostics={diagnostics} coreStatus={coreStatus} expanded={showDiagnostics} onToggle={onToggleDiagnostics} />
         </div>
 
-        <StatusBadge diagnostics={diagnostics} coreStatus={coreStatus} expanded={showDiagnostics} onToggle={onToggleDiagnostics} />
-        {showDiagnostics && <div style={{ borderBottom: "1px solid var(--vscode-panel-border, #333)", maxHeight: 220, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /></div>}
+        {showDiagnostics && <div id="workspace-diagnostics" style={{ borderBottom: "1px solid var(--vscode-panel-border, #333)", maxHeight: 260, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /><CostTracker costSummary={costSummary} /></div>}
 
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "18px 22px 20px" }}>
-          <HubRouter view={view} ctx={{ isAiReady, isDockerReady, isOpsReady }} externalTurn={externalTurn} onSelectMode={onSelectMode} />
+        <div className="rc-workspace-content">
+          <HubRouter view={view} ctx={{ isAiReady, isDockerReady, isOpsReady }} externalTurn={externalTurn} onSelectMode={onSelectMode} onReviewRequired={showReview} connectionPending={diagnosticsPending || coreStatus === null} connectionError={diagnosticsError || (coreStatus && coreStatus !== "ok" ? "Core에 연결할 수 없습니다." : "")} />
         </div>
-        <div style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", padding: "4px 14px", background: "var(--vscode-sideBar-background, #181818)" }}><CostTracker costSummary={costSummary} /></div>
       </section>
 
-      <aside style={{ minWidth: 0, minHeight: 0, height: "100%", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
-        <div style={{ padding: "14px 16px 12px", borderBottom: "1px solid var(--vscode-panel-border, #333)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon.Chat size={19} /><strong style={{ fontSize: 15 }}>AI와 대화</strong></div>
-        </div>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
-          <ChatPanel isAiReady={isAiReady} />
-        </div>
-      </aside>
     </div>
   );
 };
@@ -630,11 +332,13 @@ const App: React.FC = () => {
   const isWorkspacePanel = typeof document !== "undefined" && document.documentElement.dataset.recoderLayout === "workspace";
   const { coreHealth, costSummary } = usePolling(4000);
 
-  const [view, setView] = useState<ViewMode>("home");
+  const [view, setView] = useState<ViewMode>(isWorkspacePanel ? "hub:deploy" : "home");
   //: 채팅 승인 카드에서 넘어온 코드 생성 요청. Build 화면을 열고 CodeAgent 에 넘긴다.
   const [externalTurn, setExternalTurn] = useState<ExternalTurn | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [diagnosticsPending, setDiagnosticsPending] = useState(true);
+  const [diagnosticsError, setDiagnosticsError] = useState("");
 
   useMessage(
     useCallback((msg) => {
@@ -653,15 +357,23 @@ const App: React.FC = () => {
       };
       if (type === "stateUpdate") {
         const state = payload as { currentMode?: string; diagnostics?: DiagnosticsResult };
-        if (state.diagnostics) setDiagnostics(normDiag(state.diagnostics));
+        if (state.diagnostics) { setDiagnostics(normDiag(state.diagnostics)); }
       }
       if (type === "diagnosticsUpdate") {
         setDiagnostics(normDiag(payload as DiagnosticsResult));
+        setDiagnosticsPending(false); setDiagnosticsError("");
+      }
+      if (type === "diagnostics.status") {
+        const p = payload as { pending?: boolean; error?: string };
+        setDiagnosticsPending(!!p.pending); setDiagnosticsError(p.error ?? "");
+      }
+      if (type === "diagnostics.error") {
+        setDiagnosticsPending(false); setDiagnosticsError((payload as {message?: string})?.message || "연결 확인에 실패했습니다.");
       }
       if (type === "chat.actionAccepted") {
-        const p = payload as { requestId?: number; instruction?: string; targetFolder?: string };
+        const p = payload as Partial<ExternalTurn>;
         if (typeof p.requestId === "number" && p.instruction) {
-          setExternalTurn({ requestId: p.requestId, instruction: p.instruction, targetFolder: p.targetFolder ?? "" });
+          setExternalTurn({ requestId: p.requestId, instruction: p.instruction, targetFolder: p.targetFolder ?? "", contextFiles: p.contextFiles ?? [] });
           setView("code");
         }
       }
@@ -669,7 +381,7 @@ const App: React.FC = () => {
   );
 
   useEffect(() => {
-    postMessage("runDiagnostics", {});
+    postMessage("webview.ready", { layout: isWorkspacePanel ? "workspace" : "sidebar" });
   }, [postMessage]);
 
   // 사이드바는 retainContextWhenHidden 옵션으로 닫혀도 React가 유지된다.
@@ -695,10 +407,8 @@ const App: React.FC = () => {
       diagnostics.ops_ready === "ready"
     : false;
 
-  const subTitle = isFeatureView(view) ? FEATURE_BY_ID[view].title : isHubView(view) ? view.slice(4).replace(/^./, (c) => c.toUpperCase()) : "";
 
-  // WebviewPanel 로 열리는 ReCoder 작업 화면에서는 현재 사이드바 기능을
-  // 왼쪽에, 대화형 코드 에이전트를 오른쪽에 동시에 표시한다.
+  // 개발 대화와 설계·변경 검토는 코드 생성·수정 화면에서 함께 진행한다.
   if (isWorkspacePanel) {
     return <WorkspaceLayout
       view={view}
@@ -706,6 +416,8 @@ const App: React.FC = () => {
       diagnostics={diagnostics}
       coreStatus={coreHealth?.status ?? null}
       showDiagnostics={showDiagnostics}
+      diagnosticsPending={diagnosticsPending}
+      diagnosticsError={diagnosticsError}
       isAiReady={isAiReady}
       isDockerReady={isDockerReady}
       isOpsReady={isOpsReady}
@@ -713,95 +425,18 @@ const App: React.FC = () => {
       onSelectMode={setView}
       onToggleDiagnostics={() => {
         setShowDiagnostics((v) => !v);
-        if (!showDiagnostics) postMessage("runDiagnostics", {});
+
       }}
       postMessage={postMessage}
     />;
   }
 
-  return (
-    <div style={{
-      display: "flex",
-      flexDirection: "column",
-      height: "100vh",
-      overflow: "hidden",
-      background: "var(--vscode-sideBar-background, #1e1e1e)",
-      color: "var(--vscode-foreground, #e0e0e0)",
-      fontFamily: "var(--vscode-font-family)",
-    }}>
-      {/* Hero (로고 + 브랜드) */}
-      {view === "home" && <Hero onOpenWorkspace={() => postMessage("workbench.open", {})} />}
-      {view !== "home" && <SubHeader title={subTitle} onBack={() => setView(isFeatureView(view) ? `hub:${hubOf(view)}` : "home")} />}
-
-      {/* Status badge (펼치면 진단 상세) */}
-      <StatusBadge
-        diagnostics={diagnostics}
-        coreStatus={coreHealth?.status ?? null}
-        expanded={showDiagnostics}
-        onToggle={() => {
-          setShowDiagnostics((v) => !v);
-          if (!showDiagnostics) postMessage("runDiagnostics", {});
-        }}
-      />
-
-      {showDiagnostics && (
-        <div style={{
-          borderBottom: "1px solid var(--vscode-panel-border, #333)",
-          maxHeight: 220,
-          overflowY: "auto",
-        }}>
-          <DiagnosticsPanel diagnostics={diagnostics} />
-        </div>
-      )}
-
-      {/* Main content */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "10px 12px 8px" }}>
-        <HubRouter view={view} ctx={{ isAiReady, isDockerReady, isOpsReady }} externalTurn={externalTurn} onSelectMode={setView} />
-      </div>
-
-      {/* Workbench CTA */}
-      <div style={{
-        padding: "10px 12px 8px",
-        background: "var(--vscode-sideBar-background, #1e1e1e)",
-        borderTop: "1px solid var(--vscode-panel-border, #2a2a2a)",
-      }}>
-        <button
-          onClick={() => postMessage("workbench.open", {})}
-          style={{
-            width: "100%",
-            padding: "10px 12px",
-            border: "none",
-            borderRadius: 6,
-            background: "var(--vscode-button-background, #0e639c)",
-            color: "var(--vscode-button-foreground, #ffffff)",
-            fontSize: 12.5,
-            fontWeight: 600,
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-            transition: "background-color 0.15s",
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--vscode-button-hoverBackground, #1177bb)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "var(--vscode-button-background, #0e639c)"; }}
-          title="Editor Area에 ReCoder Workbench 풀스크린 탭을 엽니다"
-        >
-          <Icon.Dashboard size={14} />
-          Workbench 열기
-        </button>
-      </div>
-
-      {/* Cost tracker */}
-      <div style={{
-        borderTop: "1px solid var(--vscode-panel-border, #2a2a2a)",
-        padding: "3px 12px",
-        background: "var(--vscode-sideBar-background, #1e1e1e)",
-      }}>
-        <CostTracker costSummary={costSummary} />
-      </div>
-    </div>
-  );
+  return <div style={{ height: "100vh", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
+    <Hero onOpenWorkspace={() => postMessage("openWorkbench")} />
+    <StatusBadge diagnostics={diagnostics} coreStatus={coreHealth?.status ?? null} pending={diagnosticsPending} error={diagnosticsError} expanded={showDiagnostics} onToggle={() => setShowDiagnostics(v => !v)} />
+    {showDiagnostics && <DiagnosticsPanel diagnostics={diagnostics} />}
+    <p style={{ padding: "12px 16px", fontSize: 12, lineHeight: 1.7, color: "var(--vscode-descriptionForeground, #999)" }}>개발, 배포, 보안 작업을 ReCoder 창에서 이어가세요.</p>
+  </div>;
 };
 
 export default App;

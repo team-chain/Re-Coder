@@ -58,7 +58,7 @@ export function buildDecisionChoices(
 //: 같은 이름의 파일·ADR 이 덮어써진다. 적용·모두 적용·diff·경로 표시가
 //: 전부 이 고정값을 쓴다.
 interface Turn { id: number; prompt: string; targetFolder: string; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; }
-interface CtxFile { path: string; content: string; }
+export interface CtxFile { path: string; content: string; }
 interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; }
 interface DecisionModal { requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; dropped: string[]; }
 
@@ -73,9 +73,9 @@ let _turnSeq = 1;
 
 //: 채팅 승인 카드에서 넘어온 요청. App 이 chat.actionAccepted 를 받아 내려준다.
 //: requestId 는 확장 호스트가 정한 값(Date.now())이라 이 컴포넌트의 턴 번호와 겹치지 않는다.
-export interface ExternalTurn { requestId: number; instruction: string; targetFolder: string; }
+export interface ExternalTurn { requestId: number; instruction: string; targetFolder: string; contextFiles?: CtxFile[]; }
 
-export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null }> = ({ isActive, externalTurn }) => {
+export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [input, setInput] = useState("");
@@ -87,6 +87,26 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   const [decisionModal, setDecisionModal] = useState<DecisionModal | null>(null);
   const pendingRequestsRef = React.useRef<Record<number, PendingRequest>>({});
   const handledExternalRef = React.useRef<number | null>(null);
+  const responseTimers = React.useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  const expiredRequests = React.useRef(new Set<number>());
+  // A ref also guards rapid clicks/shortcuts before React commits the busy state.
+  const activeRequest = React.useRef<number | null>(null);
+  const finishWaiting = (id?: number) => {
+    if (id === undefined) return;
+    clearTimeout(responseTimers.current.get(id));
+    responseTimers.current.delete(id);
+  };
+  const waitForResponse = (id: number, seconds: number) => {
+    finishWaiting(id);
+    responseTimers.current.set(id, setTimeout(() => {
+      responseTimers.current.delete(id);
+      expiredRequests.current.add(id);
+      if (activeRequest.current === id) activeRequest.current = null;
+      delete pendingRequestsRef.current[id];
+      setTurns(ts => ts.map(t => t.id === id ? {...t,status:"error",error:"개발 요청 응답이 없습니다. Core 연결을 확인하거나 실행 창을 다시 시작한 뒤 요청해 주세요."} : t));
+    }, seconds * 1000));
+  };
+  useEffect(() => () => { responseTimers.current.forEach(clearTimeout); }, []);
 
   //: 채팅에서 승인된 요청을 이 패널의 턴으로 등록하고 곧장 code.plan 을 보낸다.
   //: 이후 결정 모달 → 생성 → diff → 적용은 직접 입력한 턴과 완전히 같은 경로다.
@@ -95,17 +115,27 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     if (handledExternalRef.current === externalTurn.requestId) { return; }
     handledExternalRef.current = externalTurn.requestId;
     const { requestId, instruction, targetFolder: folder } = externalTurn;
-    pendingRequestsRef.current[requestId] = { instruction, targetFolder: folder, contextFiles: [] };
+    activeRequest.current = requestId;
+    const files = externalTurn.contextFiles ?? [];
+    pendingRequestsRef.current[requestId] = { instruction, targetFolder: folder, contextFiles: files };
     setTargetFolder(folder);
     setTurns((ts) => [...ts, { id: requestId, prompt: instruction, targetFolder: folder, status: "planning" }]);
-    postMessage("code.plan", { requestId, instruction, targetFolder: folder, contextFiles: [] });
+    waitForResponse(requestId, 135);
+    postMessage("code.plan", { requestId, instruction, targetFolder: folder, contextFiles: files });
   }, [externalTurn, postMessage]);
 
   useMessage(useCallback((msg) => {
     const { type, payload } = msg;
+    const responseId = (payload as {requestId?:number})?.requestId;
+    if (["code.result", "code.planResult", "code.error"].includes(type) && !(payload as {ackKey?:string})?.ackKey) {
+      if (responseId !== undefined && expiredRequests.current.has(responseId)) return;
+      finishWaiting(responseId);
+    }
     if (type === "code.result") {
       const res = payload as CodeResult;
       const requestId = res.requestId;
+      if (requestId === undefined || activeRequest.current === requestId) activeRequest.current = null;
+      if (requestId !== undefined) delete pendingRequestsRef.current[requestId];
       setTurns((ts) => {
         const copy = [...ts];
         for (let i = copy.length - 1; i >= 0; i--) {
@@ -137,6 +167,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         setApplyErrors((e) => ({ ...e, [ackKey]: m }));
         return;
       }
+      if (responseId === undefined || activeRequest.current === responseId) activeRequest.current = null;
+      if (responseId !== undefined) delete pendingRequestsRef.current[responseId];
       setTurns((ts) => {
         const copy = [...ts];
         const requestId = (payload as { requestId?: number })?.requestId;
@@ -175,6 +207,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         selections[decision.id] = decision.options.find((option) => option.recommended)?.key ?? decision.options[0]?.key ?? "";
       }
       setDecisionModal({ requestId, decisions, selections, step: 0, dropped });
+      onReviewRequired?.();
     } else if (type === "code.folderPicked" || type === "code.setTargetFolder") {
       setTargetFolder((payload as { folder?: string })?.folder ?? "");
     } else if (type === "code.contextAdded") {
@@ -184,16 +217,18 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         return [...cur, ...files.filter((f) => !seen.has(f.path))];
       });
     }
-  }, []));
+  }, [onReviewRequired]));
 
   const send = useCallback(() => {
     const text = input.trim();
-    if (!text) { return; }
+    if (!text || activeRequest.current !== null) { return; }
     const id = _turnSeq++;
+    activeRequest.current = id;
     pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles };
     // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
     // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
     setTurns((ts) => [...ts, { id, prompt: text, targetFolder, status: "planning" }]);
+    waitForResponse(id, 135);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
   }, [input, targetFolder, contextFiles, postMessage]);
@@ -211,8 +246,10 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       ? { ...turn, status: "error", error: "설계 결정을 취소해서 생성을 중단했습니다." }
       : turn));
     delete pendingRequestsRef.current[decisionModal.requestId];
+    activeRequest.current = null;
+    postMessage("code.cancelPlan", { requestId: decisionModal.requestId });
     setDecisionModal(null);
-  }, [decisionModal]);
+  }, [decisionModal, postMessage]);
 
   const confirmDecisions = useCallback(() => {
     if (!decisionModal) { return; }
@@ -221,6 +258,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     const choices = buildDecisionChoices(decisionModal.decisions, decisionModal.selections);
     setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId ? { ...turn, status: "generating" } : turn));
     setDecisionModal(null);
+    waitForResponse(decisionModal.requestId, 195);
     postMessage("code.generate", { requestId: decisionModal.requestId, instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices });
   }, [decisionModal, postMessage]);
 
@@ -254,10 +292,6 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   const showDiff = useCallback((turn: Turn, op: CodeOp) => {
     postMessage("code.diff", { file: op.file, content: op.content, targetFolder: turn.targetFolder });
   }, [postMessage]);
-
-  const label: React.CSSProperties = {
-    fontSize: 12, fontWeight: 600, color: "var(--vscode-foreground, #ddd)", marginBottom: 8,
-  };
   const linkBtn: React.CSSProperties = {
     fontSize: 11, border: "none", background: "transparent",
     color: "var(--vscode-textLink-foreground, #3794ff)", padding: 0, cursor: "pointer",
@@ -274,7 +308,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   const isBusy = turns.some((turn) => turn.status === "planning" || turn.status === "generating");
 
   return (
-    <div style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", margin: "16px 0 0", paddingTop: 14 }}>
+    <section aria-label="AI와 대화하기" style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", margin: "16px 0 0", paddingTop: 20 }}>
       <style>{`
         .rc-cg-input { transition: border-color .12s ease, box-shadow .12s ease; }
         .rc-cg-input:focus { border-color: var(--vscode-focusBorder, #3794ff) !important; box-shadow: 0 0 0 1px var(--vscode-focusBorder, #3794ff); }
@@ -324,20 +358,21 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       })()}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
         <span style={{ width: 3, height: 14, borderRadius: 2, background: "var(--vscode-textLink-foreground, #3794ff)" }} />
-        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--vscode-foreground, #eee)", letterSpacing: 0.2 }}>코드 작성 및 수정</span>
+        <span style={{ fontSize: 16, fontWeight: 600, color: "var(--vscode-foreground, #eee)", letterSpacing: 0.2 }}>AI와 대화하기</span>
         <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #888)", marginLeft: "auto", border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 10, padding: "1px 8px" }}>AI 코드 생성</span>
       </div>
       <div style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", marginBottom: 10, lineHeight: 1.5 }}>
-        자연어로 새 코드를 만들거나 기존 코드를 고칩니다. 생성 결과는 파일별로 확인 후 적용됩니다.
+        만들거나 고칠 내용을 알려주세요. 설계를 선택한 뒤 생성된 코드를 검토하고 적용합니다.
       </div>
-      {!isActive && (
-        <div style={{ marginBottom: 10, border: "1px solid var(--vscode-inputValidation-warningBorder, #cca700)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", borderRadius: 5, padding: "7px 9px", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.45 }}>
-          AI 연결이 아직 준비되지 않았습니다. 요청은 입력할 수 있지만, 실제 처리는 Core/AI 연결 후에 가능합니다.
+      {(connectionPending || connectionError || !isActive) && (
+        <div role="status" style={{ marginBottom: 14, border: "1px solid var(--vscode-panel-border, #333)", borderRadius: 5, padding: "9px 12px", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.5 }}>
+          {connectionPending ? "AI 연결을 확인하고 있습니다. 요청을 미리 입력할 수 있습니다." : connectionError || "AI 연결 설정을 확인해 주세요. 상단 연결 상태에서 자세한 내용을 볼 수 있습니다."}
+          {!connectionPending && <button onClick={() => postMessage("runDiagnostics")} style={{ ...linkBtn, marginLeft: 10 }}>연결 다시 확인</button>}
         </div>
       )}
 
       {/* 대상 폴더 · 참고 파일 */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: contextFiles.length ? 6 : 8, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: contextFiles.length ? 6 : 12, fontSize: 12, color: "var(--vscode-descriptionForeground, #999)" }}>
         <span>
           위치{" "}
           <button onClick={() => postMessage("code.pickFolder")} style={linkBtn}>{targetFolder || "루트"}</button>
@@ -352,7 +387,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           {contextFiles.map((c) => (
             <span key={c.path} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, background: "var(--vscode-badge-background, #2a2d2e)", color: "var(--vscode-badge-foreground, #ccc)", borderRadius: 4, padding: "2px 7px" }}>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 150 }}>{c.path}</span>
-              <span onClick={() => setContextFiles((cur) => cur.filter((x) => x.path !== c.path))} style={{ cursor: "pointer", opacity: 0.6 }}>×</span>
+              <button aria-label={`${c.path} 참고 파일 제거`} onClick={() => setContextFiles((cur) => cur.filter((x) => x.path !== c.path))} style={{ ...linkBtn, color: "inherit" }}>×</button>
             </span>
           ))}
         </div>
@@ -440,9 +475,10 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       {/* 입력 */}
       <textarea
         className="rc-cg-input"
+        aria-label="AI 개발 요청"
         value={input}
         onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { send(); } }}
+        onKeyDown={(e) => { if (!e.nativeEvent.isComposing && (e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); } }}
         placeholder={turns.length ? "이어서 수정 요청 (예: 버튼 색을 파랑으로)" : "만들거나 고칠 내용을 입력 (예: SQLite 게시판 REST API를 FastAPI로 만들어줘)"}
         disabled={isBusy}
         style={{ width: "100%", boxSizing: "border-box", minHeight: 130, background: "var(--vscode-input-background, #252526)", color: "var(--vscode-input-foreground, #ccc)", border: "1px solid var(--vscode-input-border, #3f3f3f)", borderRadius: 6, padding: "10px 12px", fontSize: 12.5, fontFamily: "var(--vscode-font-family, sans-serif)", resize: "vertical", outline: "none", lineHeight: 1.6, opacity: isBusy ? .6 : 1 }}
@@ -453,7 +489,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         </button>
         <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #777)" }}>Ctrl+Enter 로 전송</span>
       </div>
-    </div>
+    </section>
   );
 };
 

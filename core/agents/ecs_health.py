@@ -8,7 +8,10 @@ import os
 import re
 from pathlib import Path
 
-from core.schemas import ECSDeployRequest
+try:
+    from core.schemas import ECSDeployRequest
+except ModuleNotFoundError:
+    from schemas import ECSDeployRequest
 
 
 def python_http_health_check(
@@ -154,6 +157,16 @@ def configure_health_check(request: ECSDeployRequest) -> str:
     if not request.workspace_path:
         return "작업 폴더가 없어 런타임과 헬스 경로를 확인하지 못했습니다. health_check_command를 지정하세요."
     workspace = Path(request.workspace_path)
+    from static_frontend import generated_static_runtime_port
+    static_port = generated_static_runtime_port(workspace / request.dockerfile)
+    if static_port is not None:
+        if static_port != request.container_port:
+            return f"컨테이너 포트가 Dockerfile의 {static_port}와 다릅니다. 배포 포트를 확인하세요."
+        request.health_check_command = [
+            "CMD", "wget", "-q", "-T", "4", "-O", "/dev/null",
+            f"http://127.0.0.1:{static_port}{request.health_check_path}",
+        ]
+        return ""
     try:
         runtime = _runtime_family(workspace / request.dockerfile)
     except OSError:

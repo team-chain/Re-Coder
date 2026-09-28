@@ -126,12 +126,17 @@ def _secretbox_encrypt(public_key_b64: str, secret_value: str) -> str:
 
 def _parse_owner_repo(repo: str, fallback_owner: str | None = None) -> tuple[str, str]:
     """'owner/repo' 또는 'repo' 형식을 분해. 후자는 fallback_owner 필요."""
+    import re
     repo = repo.strip().rstrip("/")
+    repo = re.sub(r"^(?:https://(?:[^/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)", "", repo)
     if repo.endswith(".git"):
         repo = repo[:-4]
-    if "/" in repo:
-        parts = [p for p in repo.split("/") if p]
-        return parts[-2], parts[-1]
+    if re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repo):
+        owner, name = repo.split("/")
+        if name not in (".", ".."):
+            return owner, name
+    if "/" in repo or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo) or repo in (".", ".."):
+        raise ValueError("유효한 GitHub owner/repository 또는 원격 URL이 필요합니다.")
     if not fallback_owner:
         raise ValueError(f"owner 가 필요합니다 (입력: '{repo}').")
     return fallback_owner, repo
@@ -181,6 +186,7 @@ class GitHubAgent:
         self._token = ""
         self._user_cache = {}
         self._status_cache = {}
+        self._repos_cache = []
         try:
             if _TOKEN_PATH.exists():
                 _TOKEN_PATH.unlink()
@@ -194,6 +200,7 @@ class GitHubAgent:
         cwd: str | Path,
         args: list[str],
         timeout: int = 60,
+        env: dict | None = None,
     ) -> tuple[int, str, str]:
         """git 명령 실행. (rc, stdout, stderr) 반환.
 
@@ -205,7 +212,11 @@ class GitHubAgent:
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
+                env=env,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
         except subprocess.TimeoutExpired:
@@ -286,6 +297,7 @@ class GitHubAgent:
         self._token = token
         self._save_token(token)
         self._user_cache = body if isinstance(body, dict) else {}
+        self._repos_cache = []
         self._status_cached_at = 0.0  # 캐시 무효화
         login = self._user_cache.get("login", "")
         logger.info(f"[github_agent] token authenticated: user={login}")
@@ -391,6 +403,34 @@ class GitHubAgent:
         self._repos_cache = repos
         self._repos_cached_at = now
         return {"status": "ok", "repos": repos, "cached": False}
+
+    def connect_repository(self, repository: str, create: bool = False) -> dict:
+        """Connect without publishing files or modifying a local Git repository."""
+        import re
+        if not self._token:
+            return {"status": "error", "message": "GitHub 인증이 필요합니다."}
+        if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repository) or repository.split("/")[-1] in (".", ".."):
+            return {"status": "error", "message": "owner/name 형식으로 입력하세요."}
+        owner, name = repository.split("/")
+        code, body = _http("GET", f"/repos/{repository}", token=self._token)
+        if code == 200 and isinstance(body, dict):
+            if create:
+                return {"status": "error", "message": "이미 존재하는 저장소입니다. 기존 저장소 연결을 선택하세요."}
+            if not body.get("permissions", {}).get("push") or body.get("archived"):
+                return {"status": "error", "message": "이 저장소에 푸시할 권한이 없거나 보관된 저장소입니다."}
+            return {"status": "ok", "repository": repository}
+        if code != 404 or not create:
+            return {"status": "error", "message": f"저장소를 확인할 수 없습니다 ({code}). 주소와 접근 권한을 확인하세요."}
+        user = self._user_cache.get("login") or self.status(force=True).get("user", "")
+        if not user:
+            return {"status": "error", "message": "사용자 인증을 다시 확인하세요."}
+        endpoint = "/user/repos" if owner.lower() == user.lower() else f"/orgs/{owner}/repos"
+        code, body = _http("POST", endpoint, token=self._token,
+                           payload={"name": name, "private": True, "auto_init": False})
+        if code != 201:
+            return {"status": "error", "message": f"비공개 저장소 생성 실패 ({code}). 이름과 생성 권한을 확인하세요."}
+        self._repos_cache = []
+        return {"status": "ok", "repository": repository}
 
     def list_branches(self, workspace_path: str = "") -> dict:
         """로컬 워크스페이스의 git 브랜치 목록.
@@ -530,7 +570,7 @@ class GitHubAgent:
     ) -> dict:
         """현재 워크스페이스의 origin 으로 push.
 
-        토큰이 있으면 URL 에 임시 임베드 후 푸시 직후 제거.
+        토큰은 자식 프로세스의 인증 헤더에만 전달하고 origin 설정은 보존.
 
         auto_commit=True(기본)면 push 전에 미커밋 변경을 stage+commit 한다.
         과거 버그: push 가 stage/commit 을 안 해서, 새로 생성된
@@ -581,19 +621,22 @@ class GitHubAgent:
         except Exception as e:
             return {"status": "error", "message": f"origin URL 파싱 실패: {e}"}
 
-        token_url = f"https://x-access-token:{self._token}@github.com/{full}.git"
         clean_url = f"https://github.com/{full}.git"
-
-        self._git(ws, ["remote", "set-url", "origin", token_url])
-        args = ["push", "-u", "origin", branch]
+        # The credential is process-local. Never rewrite .git/config with a token,
+        # and preserve SSH/custom origin URLs after both success and failure.
+        import base64
+        env = os.environ.copy()
+        auth = base64.b64encode(f"x-access-token:{self._token}".encode()).decode()
+        env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                    "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {auth}", "GIT_TERMINAL_PROMPT": "0"})
+        args = ["-c", f"remote.origin.url={clean_url}", "-c", f"remote.origin.pushurl={clean_url}", "push", "-u", "origin", branch]
         if force:
-            args.insert(1, "--force-with-lease")
-        rc, out, err = self._git(ws, args, timeout=180)
-        # 즉시 원복 (토큰 제거)
-        self._git(ws, ["remote", "set-url", "origin", clean_url])
+            args.insert(5, "--force-with-lease")
+        rc, out, err = self._git(ws, args, timeout=180, env=env)
 
         if rc != 0:
-            return {"status": "error", "message": f"push 실패: {err[:300]}"}
+            safe_error = err.replace(self._token, "[redacted]").replace(auth, "[redacted]")
+            return {"status": "error", "message": f"push 실패: {safe_error[:300]}"}
         return {
             "status": "ok",
             "message": f"push 완료: {full}:{branch}",

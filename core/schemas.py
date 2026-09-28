@@ -308,6 +308,8 @@ class DeploymentPlan(BaseModel):
     """An executable deployment plan produced by the deploy agent."""
 
     schema_version: str = "1.0"
+    project_id: str = "unknown"
+    enable_continuous_verification: bool = True
     plan_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     method: DeployMethod
     action: ActionType

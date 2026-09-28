@@ -311,20 +311,33 @@ class CoreSingleton:
         """Return True if *pid* corresponds to a running process."""
         if platform.system() == "Windows":
             import ctypes
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = ctypes.windll.kernel32.OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
-            )
-            if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
-                return True
-            return False
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.WaitForSingleObject.restype = wintypes.DWORD
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle.restype = wintypes.BOOL
+            # An exited process can still have an openable handle while another
+            # process retains a reference. Test the signalled state, not existence.
+            # SYNCHRONIZE allows a zero-timeout wait without changing the process.
+            handle = kernel.OpenProcess(0x00100000, False, pid)
+            if not handle:
+                # Invalid/nonexistent PID is dead; access denied is not proof of death.
+                return ctypes.get_last_error() not in (87, 1168)
+            try:
+                return kernel.WaitForSingleObject(handle, 0) != 0  # WAIT_OBJECT_0 = exited
+            finally:
+                kernel.CloseHandle(handle)
         else:
             try:
                 os.kill(pid, 0)
                 return True
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError:
                 return False
+            except PermissionError:
+                return True
 
     @staticmethod
     def _set_windows_permissions(path: Path) -> None:

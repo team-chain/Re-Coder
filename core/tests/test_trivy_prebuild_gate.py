@@ -137,6 +137,9 @@ def test_실행시_빌드후_스캔이_돌고_CRITICAL_이면_컨테이너를_�
     monkeypatch.setattr(deploy, "_local_image_exists", lambda image: True)
 
     scanned: list[str] = []
+    async def image_id(image):
+        return 'sha256:' + 'a' * 64
+    monkeypatch.setattr(deploy, '_local_image_id', image_id)
 
     async def _critical_scan(scan_type, workspace, target):
         scanned.append(target)
@@ -158,11 +161,15 @@ def test_실행시_빌드후_스캔이_돌고_CRITICAL_이면_컨테이너를_�
     assert exc.value.status_code == 400
     assert "CRITICAL" in str(exc.value.detail)
     #: 스캔이 실제로 1회 돌았다 — 이게 DoD 다.
-    assert scanned == [plan.image]
-    #: 대기열은 소진된다 (재시도 시 중복 차단 로직이 꼬이지 않게).
-    assert plan.plan_id not in deploy._plans_pending_image_scan
+    assert scanned == ['sha256:' + 'a' * 64]
+    # A rejected request must still require scanning on retry.
+    assert plan.plan_id in deploy._plans_pending_image_scan
+    with pytest.raises(HTTPException):
+        asyncio.run(deploy.execute_deployment(deploy.ExecuteRequest(plan_id=plan.plan_id, approved=True)))
+    assert len(scanned) == 2
 
     deploy._deployment_plans.pop(plan.plan_id, None)
+    deploy._plans_pending_image_scan.pop(plan.plan_id, None)
 
 
 def test_실행_취소시에도_대기열이_정리된다(monkeypatch) -> None:
@@ -183,7 +190,7 @@ def test_실행_취소시에도_대기열이_정리된다(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_음성대조_스캔이_정상으로_돈_플랜은_승인도_대기열도_그대로(monkeypatch) -> None:
+def test_clean_preview_still_requires_scanning_the_image_built_at_execution(monkeypatch) -> None:
     monkeypatch.setattr(deploy, "_local_image_exists", lambda image: True)
 
     async def _clean_scan(scan_type, workspace, target):
@@ -204,4 +211,4 @@ def test_음성대조_스캔이_정상으로_돈_플랜은_승인도_대기열�
     plan = asyncio.run(deploy.create_deployment_plan(_plan_request()))
 
     assert plan.approval_level == ApprovalLevel.CONFIRM
-    assert deploy._plans_pending_image_scan == {}
+    assert deploy._plans_pending_image_scan == {plan.plan_id: plan.image}

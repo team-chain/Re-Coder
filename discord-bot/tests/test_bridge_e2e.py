@@ -19,6 +19,7 @@ import os
 
 import aiohttp
 import pytest
+import pytest_asyncio
 
 from recoder_bridge import BridgeHub
 
@@ -33,7 +34,7 @@ def free_port() -> int:
     return port
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def hub_running(monkeypatch, free_port):
     """BridgeHub 를 임시 포트에서 띄우고, 종료 시 cleanup."""
     monkeypatch.setattr("recoder_bridge.BRIDGE_BIND", "127.0.0.1")

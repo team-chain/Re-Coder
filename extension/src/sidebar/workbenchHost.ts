@@ -377,7 +377,7 @@ export abstract class WorkbenchHost {
                     const planId = (plan as unknown as { plan_id?: string }).plan_id || '';
                     this._post({ type: 'wb.local.deployProgress', payload: { stage: 'build', line: '[OK] 플랜 생성됨 — 실행 시작' } });
                     const result = await this._apiClient.executeDeployment(planId, true);
-                    if (result.status === 'ok' || result.deployment_id) {
+                    if (['ok', 'success'].includes(result.status) && result.health_ok === true) {
                         this._post({
                             type: 'wb.local.deployProgress',
                             payload: { stage: 'health', finished: true, line: `[OK] 배포 완료 (id=${result.deployment_id ?? '?'})` },
@@ -385,7 +385,7 @@ export abstract class WorkbenchHost {
                         this.addActivity('ok', 'Local Docker 배포 완료');
                     } else {
                         // 컨테이너가 시작/헬스에 실패한 경우 — stderr 에서 핵심 사유 한 줄 추출
-                        const errText = (result.stderr || result.stdout || '').trim();
+                        const errText = (result.error || result.message || result.stderr || (result.health_ok === false ? '컨테이너가 시작됐지만 헬스체크를 통과하지 못했습니다. 배포 기록에서 로그와 롤백을 확인하세요.' : result.stdout) || '').trim();
                         const lines = errText.split('\n').map(s => s.trim()).filter(Boolean);
                         const summary = lines.reverse().find(l => /error|exception|traceback|keyerror|exited|not running|unhealthy|refused/i.test(l))
                             || lines[0] || '컨테이너가 시작되지 못했습니다.';
@@ -557,7 +557,7 @@ export abstract class WorkbenchHost {
             }
 
             default:
-                console.warn('[WorkbenchPanel] Unknown message:', msg.type);
+                console.warn('[WorkbenchHost] Unknown message:', msg.type);
         }
     }
 

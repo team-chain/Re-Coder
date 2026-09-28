@@ -111,6 +111,9 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "sts:GetCallerIdentity":        "계정 단위 조회 — 리소스가 없다",
         "ecr:GetAuthorizationToken":    "계정 단위 토큰 발급",
         "ecs:RegisterTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
+        "ecs:DescribeTaskDefinition":   "AWS 가 리소스 단위 제한 미지원 — 캔버스 승인 대상 조회",
+        "elasticloadbalancing:DescribeTargetGroups": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "elasticloadbalancing:DescribeLoadBalancers": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
         # FR-04-01 — 연결하는 IAM 사용자·정책 이름을 **정책을 만드는 시점에는
         # 알 수 없다.** 읽기 전용 조회라 범위를 좁힐 근거도 없다.
@@ -465,6 +468,9 @@ def test_passrole_present_even_though_no_python_call_shows_it():
     ("sts", "get_caller_identity",       "sts:GetCallerIdentity"),
     ("logs", "describe_log_groups",      "logs:DescribeLogGroups"),
     ("s3", "list_objects_v2",            "s3:ListBucket"),
+    ("elbv2", "describe_target_groups", "elasticloadbalancing:DescribeTargetGroups"),
+    ("elbv2", "describe_load_balancers", "elasticloadbalancing:DescribeLoadBalancers"),
+    ("budgets", "describe_budgets", "budgets:ViewBudget"),
     # 이름에 속으면 안 되는 것 — AWS 문서상 Converse 는 InvokeModel 로 인가된다.
     ("bedrock-runtime", "converse",      "bedrock:InvokeModel"),
     ("bedrock", "list_foundation_models", "bedrock:ListFoundationModels"),

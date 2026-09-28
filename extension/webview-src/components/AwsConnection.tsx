@@ -44,6 +44,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   const regionTouchedRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [manualOpen, setManualOpen] = useState(false);
   //: AWS CLI 를 이미 쓰는 사용자에게 키 재입력을 강요하지 않기 위한 목록.
   //: 비어 있으면 이 섹션 자체가 렌더되지 않으므로, CLI 를 안 쓰는 사용자는
   //: 지금과 완전히 같은 화면을 본다.
@@ -97,6 +98,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
     if (type === "aws.onboarding.result") {
       setBusy(false);
       setOnboarding(payload as { hosted?: boolean; steps?: string[]; error?: string });
+      if ((payload as { steps?: string[] })?.steps?.length) setManualOpen(true);
     }
     if (type === "aws.role.result") {
       const result = payload as { ok: boolean; mode?: string; message?: string; denied_action?: string };
@@ -162,8 +164,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   };
 
   const card: React.CSSProperties = {
-    border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 8, padding: 15,
-    background: "var(--vscode-editorWidget-background, #252526)",
+    border: "none", borderRadius: 8, padding: 0, background: "transparent",
   };
   const button: React.CSSProperties = {
     border: "none", borderRadius: 5, padding: "8px 12px", fontSize: 12, fontWeight: 650, cursor: busy ? "wait" : "pointer",
@@ -176,7 +177,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       <div style={{ color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 15, fontWeight: 700 }}>✓ AWS 연결됨</div>
       <div style={{ marginTop: 9, fontSize: 12, lineHeight: 1.6 }}>
         <div>계정: <b>{status.identity?.account ?? "확인됨"}</b></div>
-        <div>리전: <b>{status.region || "ap-northeast-2"}</b>{status.storage !== "assumed_role" && status.access_key_last4 ? ` · 키 끝 ${status.access_key_last4}` : ""}{status.storage === "aws_profile" && status.profile ? ` · 프로필 ${status.profile}` : ""}</div>
+        <div>리전: <b>{status.region || "미확인"}</b>{status.storage !== "assumed_role" && status.access_key_last4 ? ` · 키 끝 ${status.access_key_last4}` : ""}{status.storage === "aws_profile" && status.profile ? ` · 프로필 ${status.profile}` : ""}</div>
         {status.storage === "aws_credentials_file" && <div>{!status.profile || status.profile === "default" ? "기본 프로필로 연결됨(자동)" : `프로필 ${status.profile}로 연결됨(자동)`}</div>}
         {status.storage === "env" && <div>환경변수의 자격증명으로 연결됨</div>}
         {status.storage === "assumed_role" && (
@@ -193,6 +194,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       {permission?.inspected && permission.missing_actions.length === 0 && permission.excessive_policies.length === 0 && (
         <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 5, background: "rgba(78, 201, 176, .10)", border: "1px solid rgba(78, 201, 176, .32)", color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 11 }}>✓ 권한 점검 완료: 기본 ECS 배포 권한이 확인되었습니다.</div>
       )}
+      <details style={{ marginTop:20 }}><summary style={{ cursor:'pointer',fontSize:12,padding:'10px 0' }}>자격증명 관리</summary>
       <div style={{ marginTop: 11, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 }}>
         {status.storage === "assumed_role"
           ? "장기 키를 저장하지 않습니다. 보관하는 건 역할 ARN 하나이고, 임시 자격증명은 만료 전에 코어가 다시 빌립니다."
@@ -208,32 +210,32 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
           : <button disabled={busy} onClick={setupRoleFromCurrent} title="지금 자격증명으로 배포 전용 최소권한 역할을 만들고, 이후 그 역할의 임시 자격증명만 씁니다." style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>{busy ? "역할 설정 중…" : "배포 전용 역할로 전환"}</button>}
         <button disabled={busy} onClick={() => { setBusy(true); setError(""); postMessage("aws.clear"); }} style={{ ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>연결 해제</button>
       </div>
+      </details>
       {roleFallbackBox}
       {error && <div style={{ marginTop: 10, color: "var(--vscode-errorForeground, #f48771)", fontSize: 12 }}>{error}</div>}
       {/*
         연결된 뒤에도 필요하다. 권한 점검에서 빠진 액션이 나왔을 때, 무엇을
         허용해야 하는지 같은 화면에서 바로 볼 수 있어야 한다.
       */}
-      <AwsPolicyGuide region={status.region} ecsContext={ecsPolicyContext} />
+      <details style={{ marginTop:12 }}><summary style={{ cursor:'pointer',fontSize:12,padding:'10px 0' }}>필요한 권한 · 정책 원문</summary><AwsPolicyGuide region={status.region} ecsContext={ecsPolicyContext} /></details>
     </div>;
   }
 
   return <div style={card}>
-    <div style={{ fontSize: 15, fontWeight: 700 }}>AWS 계정 연결</div>
-    <p style={{ margin: "7px 0 14px", color: "var(--vscode-descriptionForeground, #999)", fontSize: 12, lineHeight: 1.5 }}>배포는 본인의 AWS 계정에서 실행됩니다. 입력한 키는 검증 후 VS Code 보안 금고에만 저장합니다.</p>
-    <div style={{ marginBottom: 14, padding: "10px 11px", borderRadius: 6, background: "rgba(78,201,176,.07)", border: "1px solid rgba(78,201,176,.28)" }}>
+    <p style={{ margin: "0 0 24px", color: "var(--vscode-descriptionForeground, #999)", fontSize: 12, lineHeight: 1.7 }}>본인의 AWS 계정에 연결해 배포합니다. {profiles.length ? '이 컴퓨터에 있는 프로필로 연결할 수 있습니다.' : '브라우저에서 배포 전용 권한을 먼저 만들어 주세요.'}</p>
+    <details open={profiles.length === 0 || Boolean(onboarding)} style={{ marginBottom: 20, padding: "14px 16px", borderRadius: 8, background: "rgba(78,201,176,.05)", border: "1px solid rgba(78,201,176,.22)" }}>
+      <summary style={{ cursor:'pointer',fontSize:13,fontWeight:600 }}>브라우저에서 AWS 연결 준비{!profiles.length && ' · 권장'}</summary>
       {/*
         원클릭 IAM 셋업 — 보드 카드 「AWS 온보딩 마찰 제거」.
         키가 아직 없는 사용자용: 버튼을 누르면 최소권한 사용자·정책·키를
         만드는 CloudFormation 화면이 브라우저에 열린다. 스택 Outputs 의
         키 두 개를 아래 입력란에 붙여넣으면 온보딩 끝.
       */}
-      <div style={{ fontSize: 12, fontWeight: 650 }}>이 컴퓨터에 AWS 프로필도 키도 없다면</div>
-      <div style={{ marginTop: 4, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.5 }}>배포 전용 최소권한 사용자와 키를 만드는 AWS 콘솔 화면을 엽니다. 프로필이 있으면 아래 프로필 연결이 콘솔 없이 끝납니다.</div>
+      <div style={{ marginTop: 12, fontSize: 12, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.7 }}>AWS 콘솔에서 배포 전용 사용자와 키를 만듭니다. 완료 후 발급된 키를 아래에 입력하세요.</div>
       <button disabled={busy} onClick={() => { setBusy(true); setOnboarding(null); postMessage("aws.onboarding"); }} style={{ marginTop: 9, border: "1px solid rgba(78,201,176,.45)", borderRadius: 5, padding: "6px 11px", fontSize: 12, cursor: busy ? "wait" : "pointer", background: "transparent", color: "var(--vscode-charts-green, #4ec9b0)" }}>{busy ? "여는 중…" : "원클릭 IAM 셋업 (브라우저)"}</button>
       {onboarding?.error && <div style={{ marginTop: 8, fontSize: 11, color: "var(--vscode-errorForeground, #f48771)" }}>{onboarding.error}</div>}
       {onboarding?.steps && <div style={{ marginTop: 8, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.6 }}>{onboarding.steps.map(step => <div key={step}>{step}</div>)}</div>}
-    </div>
+    </details>
     {profiles.length > 0 && <div style={{ marginBottom: 14, padding: "10px 11px", borderRadius: 6, background: "rgba(55,148,255,.08)", border: "1px solid rgba(55,148,255,.25)" }}>
       {/*
         **이 컴퓨터에 이미 자격증명이 있으면 키를 다시 입력받지 않는다.**
@@ -258,8 +260,9 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
         ))}
       </div>
       {roleFallbackBox}
-      <div style={{ marginTop: 10, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>또는 아래에서 직접 키를 입력하세요.</div>
     </div>}
+    <details open={manualOpen} onToggle={e => setManualOpen(e.currentTarget.open)} style={{ marginTop:20,borderTop:'1px solid var(--vscode-panel-border,#333)' }}><summary style={{ cursor:'pointer',padding:'16px 0',fontSize:12 }}>발급된 키 직접 입력</summary>
+    <p style={{ fontSize:11,lineHeight:1.6,color:'var(--vscode-descriptionForeground,#999)' }}>입력한 키는 검증 후 VS Code 보안 금고에 저장합니다.</p>
     <label style={{ display: "block", fontSize: 12 }}>Access Key ID
       <input autoComplete="off" spellCheck={false} value={accessKeyId} onChange={e => setAccessKeyId(e.target.value)} placeholder="AKIA..." style={input} />
     </label>
@@ -269,18 +272,19 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
     <label style={{ display: "block", marginTop: 11, fontSize: 12 }}>리전
       <input autoComplete="off" spellCheck={false} value={region} onChange={e => { regionTouchedRef.current = true; setRegion(e.target.value); }} placeholder={status?.region || "예: us-east-1"} style={input} />
     </label>
-    {error && <div role="alert" style={{ marginTop: 10, color: "var(--vscode-errorForeground, #f48771)", fontSize: 12, lineHeight: 1.45 }}>{error}</div>}
-    {status?.message && !error && <div style={{ marginTop: 10, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11 }}>{status.message}</div>}
     <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 15 }}>
       <button disabled={busy} onClick={connect} style={button}>{busy ? "STS로 확인 중…" : "연결"}</button>
       <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html" target="_blank" rel="noreferrer" style={{ color: "var(--vscode-textLink-foreground, #75beff)", fontSize: 11 }}>키 만드는 법 보기</a>
     </div>
+    </details>
+    {error && <div role="alert" style={{ marginTop: 10, color: "var(--vscode-errorForeground, #f48771)", fontSize: 12, lineHeight: 1.45 }}>{error}</div>}
+    {status?.message && !error && <div style={{ marginTop: 10, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11 }}>{status.message}</div>}
     {/*
       **연결 전에 가장 필요하다.** 키를 만들려면 어떤 권한을 붙일지부터
       알아야 하는데, 지금까지는 그 답이 제품 안에 있으면서도 화면에 없었다.
       그래서 사용자는 AdministratorAccess 를 붙이는 쪽으로 갔다.
     */}
-    <AwsPolicyGuide region={region.trim() || status?.region} ecsContext={ecsPolicyContext} />
+    <details style={{ marginTop:12 }}><summary style={{ cursor:'pointer',padding:'12px 0',fontSize:12 }}>필요한 권한 · 정책 원문</summary><AwsPolicyGuide region={region.trim() || status?.region} ecsContext={ecsPolicyContext} /></details>
   </div>;
 };
 

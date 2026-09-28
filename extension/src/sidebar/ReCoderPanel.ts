@@ -22,13 +22,7 @@ export class ReCoderPanel {
         webview.html = this._sidebarProvider.getWorkspacePanelHtml(webview);
         this._sidebarProvider.attachWorkspacePanel(webview);
 
-        // 큰 ReCoder 작업 화면을 단독 창처럼 사용한다. VS Code의 Sidebar는
-        // 하나뿐이므로 ReCoder만 숨길 수는 없고, 설정이 켜져 있을 때 전체를 닫는다.
-        if (vscode.workspace.getConfiguration('recoder.workspace').get<boolean>('hideSidebar', true)) {
-            setTimeout(() => {
-                void vscode.commands.executeCommand('workbench.action.closeSidebar');
-            }, 0);
-        }
+        this._hideSidebar();
 
         this._panel.onDidDispose(() => {
             this._sidebarProvider.detachWorkspacePanel(webview);
@@ -36,10 +30,21 @@ export class ReCoderPanel {
         });
     }
 
+    private _hideSidebar(): void {
+        // Also close it on re-entry, so the next Activity Bar click reveals the view again
+        // instead of merely toggling an already visible sidebar closed.
+        if (vscode.workspace.getConfiguration('recoder.workspace').get<boolean>('hideSidebar', true)) {
+            setTimeout(() => {
+                void vscode.commands.executeCommand('workbench.action.closeSidebar');
+            }, 0);
+        }
+    }
+
     static createOrShow(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider): ReCoderPanel {
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
         if (ReCoderPanel._current) {
-            ReCoderPanel._current._panel.reveal(column, true);
+            ReCoderPanel._current._panel.reveal(column, false);
+            ReCoderPanel._current._hideSidebar();
             return ReCoderPanel._current;
         }
 

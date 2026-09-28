@@ -223,7 +223,8 @@ def test_AI가_없고_검증된_템플릿도_없는_자동감지_스택은_가�
     assert response.status_code == 422
     detail = response.json()["detail"]
     assert expected_stack in detail
-    assert "AI Ready" in detail
+    assert ("index.html" if expected_stack == 'unknown' else "AI Ready") in detail
+    assert "Dockerfile" in detail
     assert "sleep 3600" not in response.text
 
 

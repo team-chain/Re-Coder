@@ -163,6 +163,9 @@ test('stale cleanup preserves a live unresponsive process and only removes a dea
 test('symlinked executable matches the resolved path written by Core', t => {
   const { binary, dir } = setup(t);
   const link = path.join(dir, 'linked-core');
-  fs.symlinkSync(binary, link);
+  try { fs.symlinkSync(binary, link); } catch (error) {
+    if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('Windows requires Developer Mode or symlink privilege');
+    throw error;
+  }
   assert.ok(samePath(link, binary));
 });

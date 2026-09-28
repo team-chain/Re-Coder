@@ -27,7 +27,7 @@ test('ChatPanel 이 chat.error 의 message 를 보관한다', () => {
   const source = read('../webview-src/components/ChatPanel.tsx');
   assert.match(source, /errorReason/, '원인을 담을 자리가 없다 — 받아도 버려진다');
   //: 핸들러가 payload.message 를 실제로 읽어야 한다.
-  const anchor = source.indexOf('msg.type === "chat.error"');
+  const anchor = source.indexOf('} else if (msg.type === "chat.error")');
   assert.notStrictEqual(anchor, -1, 'chat.error 핸들러 자체가 없다');
   const handler = source.slice(anchor, anchor + 600);
   assert.match(handler, /payload\.message/, 'chat.error 핸들러가 message 를 읽지 않는다');

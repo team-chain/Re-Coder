@@ -260,6 +260,13 @@ class InfraAgent:
         4. Registry assembles the final content.
         5. Return InfraFileProposal.
         """
+        from static_frontend import frontend_dockerfile
+        frontend = frontend_dockerfile(workspace_path, project.default_port or 3000)
+        if frontend:
+            content, template_id = frontend
+            return InfraFileProposal(proposal_id=str(uuid.uuid4()), file_type=FileType.DOCKERFILE,
+                target_path='Dockerfile', content=content, base_template=template_id,
+                required_secrets=[], risk_level=RiskLevel.LOW, risk_reasons=[], approval_level=ApprovalLevel.CONFIRM)
         stack = await self.detect_stack(workspace_path)
         # Update project stack if it was unknown
         if project.stack == StackType.UNKNOWN:
@@ -394,7 +401,9 @@ class InfraAgent:
         cmd = [
             "docker", "run", "--rm",
             "-v", "/var/run/docker.sock:/var/run/docker.sock",
+            "-v", "recoder-trivy-cache:/root/.cache/trivy",
             "aquasec/trivy", "image",
+            "--scanners", "vuln",
             "--format", "json",
             "--severity", "CRITICAL,HIGH",
             "--quiet",
@@ -413,9 +422,13 @@ class InfraAgent:
             }
 
         try:
-            raw_data = json.loads(stdout) if stdout.strip() else {}
+            raw_data = json.loads(stdout)
         except json.JSONDecodeError:
-            raw_data = {}
+            return {"success": False, "error": "Trivy returned an empty or invalid JSON report."}
+        if (not isinstance(raw_data, dict) or not raw_data
+                or ('Results' not in raw_data and 'ArtifactName' not in raw_data)
+                or (raw_data.get('Results') is not None and not isinstance(raw_data['Results'], list))):
+            return {"success": False, "error": "Trivy report has an unsupported structure."}
 
         critical, high = self._filter_trivy_results(raw_data)
 
@@ -447,17 +460,29 @@ class InfraAgent:
         # Pipe content via stdin
         proc = await asyncio.create_subprocess_exec(
             "docker", "run", "--rm", "-i", "hadolint/hadolint",
+            "hadolint", "--format", "json", "-",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=content), timeout=120
-        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(input=content), timeout=120)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-        violations = self._parse_hadolint_output(stdout + stderr)
+        try:
+            violations = json.loads(stdout)
+        except json.JSONDecodeError:
+            violations = None
+        if (proc.returncode not in (0, 1) or not isinstance(violations, list)
+                or not all(isinstance(v, dict) and 'code' in v and 'line' in v for v in violations)
+                or (proc.returncode != 0 and not violations)):
+            return {"success": False, "error": stderr or "Hadolint did not produce a valid report."}
         summary = await self._summarize_scan_results("hadolint", {"violations": violations})
 
         return {
@@ -480,6 +505,7 @@ class InfraAgent:
         gl_cmd = (
             "gitleaks detect --source /repo --no-git "
             "--report-format json --report-path /tmp/gl.json >/dev/null 2>&1; "
+            'status=$?; if [ "$status" -gt 1 ]; then exit "$status"; fi; '
             "cat /tmp/gl.json 2>/dev/null"
         )
         cmd = [
@@ -491,14 +517,16 @@ class InfraAgent:
         ]
         returncode, stdout, stderr = await self._run_subprocess(cmd, timeout=180)
 
-        # sh+cat 경로: cat 성공 시 0, 파일 없으면 1 — 둘 다 정상 처리.
-        if returncode not in (0, 1):
-            return {"success": False, "error": stderr}
+        # A missing report or scanner crash must never mean 'no secrets'.
+        if returncode != 0:
+            return {"success": False, "error": "Gitleaks failed to produce a complete report."}
 
         try:
-            raw_findings: list[dict] = json.loads(stdout) if stdout.strip() else []
+            raw_findings: list[dict] = json.loads(stdout)
         except json.JSONDecodeError:
-            raw_findings = []
+            return {"success": False, "error": "Gitleaks returned an empty or invalid JSON report."}
+        if not isinstance(raw_findings, list) or not all(isinstance(f, dict) for f in raw_findings):
+            return {"success": False, "error": "Gitleaks report has an unsupported structure."}
 
         # Sanitise: keep only metadata — strip actual secret values
         sanitised: list[dict] = []
@@ -526,24 +554,29 @@ class InfraAgent:
         self, scan_type: str, results: dict[str, Any]
     ) -> str:
         """Summarise scan results using Haiku (threat summary + recommended actions)."""
+        count = (int(results.get('critical_count', 0)) + int(results.get('high_count', 0))
+                 + int(results.get('finding_count', 0)) + len(results.get('violations', [])))
+        fallback = f"{scan_type}: 발견 항목 {count}개."
+        if count == 0:
+            return fallback
         findings_json = json.dumps(results, ensure_ascii=False)[:3000]
         prompt = _SCAN_SUMMARY_PROMPT.format(
             scan_type=scan_type,
             findings=findings_json,
         )
         try:
-            raw = await self._provider.complete(
+            raw = await asyncio.wait_for(self._provider.complete(
                 prompt=prompt,
                 model_preference="haiku",
                 agent="infra_agent",
                 operation="summarize_scan",
                 max_tokens=512,
-            )
+            ), timeout=12)
             parsed = self._extract_json_dict(raw)
             return parsed.get("threat_summary", raw[:300])
         except Exception as exc:
             logger.warning("Scan summary failed: %s", exc)
-            return f"Scan type: {scan_type}. Findings count: {len(str(results))}"
+            return fallback
 
     # ------------------------------------------------------------------
     # Private helpers

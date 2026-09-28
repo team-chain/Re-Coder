@@ -8,7 +8,11 @@
 # FastAPI + uvicorn + boto3 는 동적 import/데이터 파일이 많아, 첫 실행에서
 # "ModuleNotFoundError" 가 나면 그 모듈명을 아래 hidden 리스트에 추가하면 됩니다.
 
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_all
+from pathlib import Path
+import runpy
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, copy_metadata
+
+CORE_DIR = Path(SPECPATH)
 
 hidden = []
 datas = []
@@ -35,25 +39,30 @@ for pkg in [
         pass
 
 # ── 데이터·바이너리·hidden 가 많은 패키지는 collect_all ─────────────────
-for pkg in ['botocore', 'boto3', 'pydantic', 'pydantic_core']:
-    try:
-        d, b, h = collect_all(pkg)
-        datas += d; binaries += b; hidden += h
-    except Exception:
-        pass
+for pkg in ['botocore', 'boto3']:
+    datas += collect_data_files(pkg)
+
+# APScheduler resolves plugins through package metadata, not static imports.
+hidden += collect_submodules('apscheduler')
+datas += copy_metadata('APScheduler')
+hidden += list(runpy.run_path(str(CORE_DIR / 'release_check.py'))['RUNTIME_IMPORTS'])
+hidden += ['release_check']
 
 # ── FileTemplate 데이터(Dockerfile.* 등) ───────────────────────────────
-datas += [('registry/file_templates', 'registry/file_templates')]
+datas += [(str(file), 'registry/file_templates')
+          for file in (CORE_DIR / 'registry' / 'file_templates').iterdir()
+          if file.is_file() and file.suffix not in ('.py', '.pyc')]
+datas += [(str(CORE_DIR / 'registry' / 'command_templates.json'), 'registry')]
 
 a = Analysis(
-    ['main.py'],
-    pathex=['.'],
+    [str(CORE_DIR / 'main.py')],
+    pathex=[str(CORE_DIR)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=['pytest', 'tests'],
+    excludes=['pytest', 'pytest_asyncio', 'tests', 'moto', 'eval', 'tkinter'],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

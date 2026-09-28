@@ -5,6 +5,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import type { CtxFile } from "./CodeAgent";
 
 type Role = "user" | "assistant";
 
@@ -50,12 +51,13 @@ type ChatMessage = {
   action?: ChatAction | null;
   target?: ChatTarget;
   actionState?: ActionState;
+  contextFiles?: CtxFile[];
 };
 
 const initialMessages: ChatMessage[] = [{
   id: "welcome",
   role: "assistant",
-  content: "안녕하세요, ReCoder예요. 프로젝트 구조, 오류, 배포 방법처럼 궁금한 것을 편하게 물어보세요.\n\n만들거나 고칠 것을 말하면 위치와 파일을 정리한 승인 카드를 띄울게요. 승인한 뒤에만 코드 생성으로 이어집니다.",
+  content: "프로젝트에 대해 질문하거나, 만들고 싶은 내용을 알려주세요. 코드 변경은 승인 후 진행합니다.",
   sentAt: "지금",
 }];
 
@@ -69,10 +71,14 @@ const currentTime = () => new Intl.DateTimeFormat("ko-KR", {
   hour: "numeric", minute: "2-digit",
 }).format(new Date());
 
-export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
+export const ChatPanel: React.FC<{ isAiReady: boolean; connectionPending?: boolean; connectionError?: string; onShowReview?: () => void; developmentBusy?: boolean }> = ({ isAiReady, connectionPending, connectionError, onShowReview, developmentBusy }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
+  const [targetFolder, setTargetFolder] = useState("");
+  const [contextFiles, setContextFiles] = useState<CtxFile[]>([]);
+  const responseTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => () => responseTimers.current.forEach(clearTimeout), []);
   const [deleteDialog, setDeleteDialog] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedDeleteIds, setSelectedDeleteIds] = useState<Set<string>>(() => new Set());
@@ -80,6 +86,17 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useMessage(useCallback((msg) => {
+    const responseId = (msg.payload as { id?: string })?.id;
+    if ((msg.type === "chat.response" || msg.type === "chat.error") && responseId) {
+      clearTimeout(responseTimers.current.get(responseId)); responseTimers.current.delete(responseId);
+    }
+    if (msg.type === "code.folderPicked" || msg.type === "code.setTargetFolder") {
+      setTargetFolder((msg.payload as { folder?: string; targetFolder?: string })?.folder ?? (msg.payload as {targetFolder?: string})?.targetFolder ?? "");
+    }
+    if (msg.type === "code.contextAdded") {
+      const files = (msg.payload as {files?: CtxFile[]})?.files ?? [];
+      setContextFiles(current => Array.from(new Map([...current, ...files].map(file => [file.path, file])).values()));
+    }
     if (msg.type === "chat.response") {
       const payload = msg.payload as { id?: string; reply?: string; model?: string; action?: ChatAction | null; target?: ChatTarget };
       const id = payload.id ?? "";
@@ -95,6 +112,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
             sentAt: currentTime(),
             action: payload.action ?? null,
             target: payload.target,
+            contextFiles: item.contextFiles,
             actionState: payload.action ? { status: "proposed", steps: [], filesDone: [] } : undefined,
           },
         ];
@@ -124,7 +142,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
       setMessages((current) => current.map((item) => item.id === id && item.actionState
         ? { ...item, actionState: { ...item.actionState, status: "error", error: payload.message ?? "" } }
         : item));
-    } else if (msg.type === "code.planResult" || msg.type === "code.result" || msg.type === "code.applied" || msg.type === "code.error") {
+    } else if (msg.type === "code.generating" || msg.type === "code.planResult" || msg.type === "code.result" || msg.type === "code.applied" || msg.type === "code.error") {
       //: CodeAgent 가 처리하는 같은 이벤트를 여기서도 듣고 카드의 진행 단계만 갱신한다.
       //: 결정 모달·diff·적용 버튼은 CodeAgent 가 그대로 담당한다.
       const payload = (msg.payload ?? {}) as { requestId?: number; ackKey?: string; ok?: boolean; message?: string; decisions?: unknown[]; ops?: Array<{ file: string; content: string; action?: string }> };
@@ -137,12 +155,15 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
         const set = (key: string, state: ActionStep["state"], note?: string) => { const s = steps.find((x) => x.key === key); if (s) { s.state = state; if (note !== undefined) s.note = note; } };
         if (msg.type === "code.planResult") {
           const n = Array.isArray(payload.decisions) ? payload.decisions.length : 0;
-          set("plan", "ok", n === 0 ? "결정할 항목 없음" : `${n}개 확인 중`);
-          set("gen", "run");
+          set("plan", "run", n === 0 ? "진행 승인 대기" : `${n}개 선택 대기`);
+          set("gen", "wait");
+        } else if (msg.type === "code.generating") {
+          set("plan", "ok", "선택 완료"); set("gen", "run");
         } else if (msg.type === "code.result") {
           const ops = (payload.ops ?? []).map((op) => ({ file: op.file, content: op.content, action: op.action }));
           const files = ops.map((op) => op.file);
-          set("gen", "ok", `${files.length}개 파일 생성됨 · 아직 저장 전`);
+          set("plan", "ok", "선택 완료");
+          set("gen", "ok", `${files.length}개 파일 생성됨`);
           return { ...item, actionState: { ...st, steps, filesDone: files, ops } };
         } else if (msg.type === "code.applied" && payload.ackKey) {
           const file = String(payload.ackKey).split(":").slice(1).join(":");
@@ -179,12 +200,12 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
   }, [messages]);
 
   const approveAction = useCallback((message: ChatMessage) => {
-    if (!message.action) return;
+    if (!message.action || developmentBusy) return;
     const id = message.id.replace(/^assistant-/, "");
     setMessages((current) => current.map((item) => item.id === message.id && item.actionState
       ? { ...item, actionState: { ...item.actionState, status: "approving" } } : item));
-    postMessage("chat.approveAction", { id, instruction: message.action.instruction, targetFolder: message.action.target_folder });
-  }, [postMessage]);
+    postMessage("chat.approveAction", { id, instruction: message.action.instruction, targetFolder: message.action.target_folder, contextFiles: message.contextFiles ?? [] });
+  }, [postMessage, developmentBusy]);
 
   const cancelAction = useCallback((message: ChatMessage) => {
     setMessages((current) => current.map((item) => item.id === message.id && item.actionState
@@ -211,7 +232,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
 
   const send = useCallback(() => {
     const content = input.trim();
-    if (!content || messages.some((message) => message.pending)) return;
+    if (!content || developmentBusy || messages.some((message) => message.pending)) return;
 
     const id = `user-${Date.now()}-${nextMessageId++}`;
     const history = messages
@@ -219,11 +240,15 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
       .slice(-10)
       .map((message) => ({ role: message.role, content: message.content }));
 
-    setMessages((current) => [...current, { id, role: "user", content, pending: true, sentAt: currentTime() }]);
+    setMessages((current) => [...current, { id, role: "user", content, contextFiles: [...contextFiles], pending: true, sentAt: currentTime() }]);
     setInput("");
-    postMessage("chat.send", { id, message: content, history });
+    postMessage("chat.send", { id, message: content, history, targetFolder, contextFiles });
+    responseTimers.current.set(id, setTimeout(() => {
+      responseTimers.current.delete(id);
+      setMessages(current => current.map(item => item.id === id && item.pending ? { ...item, pending: false, error: true, errorReason: "응답 시간이 초과되었습니다. 연결 상태를 확인한 뒤 다시 요청해 주세요." } : item));
+    }, 150000));
     requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [input, messages, postMessage]);
+  }, [input, messages, postMessage, targetFolder, contextFiles, developmentBusy]);
 
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // 카카오톡처럼 Enter는 전송, Shift+Enter만 줄바꿈으로 쓴다.
@@ -233,7 +258,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
     }
   }, [send]);
 
-  const busy = messages.some((message) => message.pending);
+  const busy = developmentBusy || messages.some((message) => message.pending);
 
   const deleteAllConversations = useCallback(() => {
     setMessages(initialMessages);
@@ -306,9 +331,10 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
             <button onClick={deleteSelectedConversations} disabled={selectedDeleteIds.size === 0} style={{ border: "none", borderRadius: 5, padding: "4px 7px", background: "#d94e4e", color: "#fff", cursor: selectedDeleteIds.size ? "pointer" : "default", opacity: selectedDeleteIds.size ? 1 : .45, fontSize: 10.5, fontWeight: 650 }}>선택 삭제</button>
           </> : <button onClick={() => setDeleteDialog(true)} title="현재 대화 내용 삭제" style={{ border: "1px solid var(--vscode-panel-border, #444)", borderRadius: 5, padding: "4px 7px", background: "transparent", color: "var(--vscode-descriptionForeground, #aaa)", cursor: "pointer", fontSize: 10.5 }}>대화 삭제</button>}
         </div>
-        {!isAiReady && (
+        {(!isAiReady || connectionPending || connectionError) && (
           <div style={{ margin: "0 0 14px", padding: "9px 10px", border: "1px solid var(--vscode-editorWarning-foreground, #cca700)", borderRadius: 7, color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.45 }}>
-            AI 연결을 확인하는 중입니다. 메시지는 보낼 수 있지만, 설정이 완료되어야 답변을 받을 수 있어요.
+            {connectionPending ? "AI 연결을 확인하고 있습니다…" : connectionError || "AI 설정을 확인해 주세요."}
+            {!connectionPending && <button onClick={() => postMessage("runDiagnostics")} style={{ marginLeft: 8, background: "transparent", border: 0, color: "var(--vscode-textLink-foreground, #3794ff)", cursor: "pointer" }}>연결 다시 확인</button>}
           </div>
         )}
         {messages.map((message) => {
@@ -325,7 +351,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
                   {botAvatar ? <img src={botAvatar} alt="ReCoder 봇" style={{ width: "100%", height: "100%", display: "block", objectFit: "cover", objectPosition: "50% 43%" }} /> : "R"}
                 </div>
               )}
-              <div style={{ maxWidth: "calc(88% - 36px)" }}>
+              <div style={{ minWidth: 0, maxWidth: mine ? "88%" : "calc(100% - 44px)" }}>
                 {!mine && <div style={{ margin: "0 0 4px 2px", color: "var(--vscode-foreground, #d7d7d7)", fontSize: 10.5, fontWeight: 650 }}>ReCoder</div>}
                 <div style={{ display: "flex", alignItems: "flex-end", gap: 5, flexDirection: mine ? "row" : "row" }}>
                   {mine && <span style={{ flex: "0 0 auto", color: "var(--vscode-descriptionForeground, #888)", fontSize: 9.5, whiteSpace: "nowrap" }}>{message.sentAt}</span>}
@@ -343,7 +369,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
                   {!mine && <span style={{ flex: "0 0 auto", color: "var(--vscode-descriptionForeground, #888)", fontSize: 9.5, whiteSpace: "nowrap" }}>{message.sentAt}</span>}
                 </div>
                 {!mine && message.action && message.actionState && message.actionState.status !== "cancelled" && (
-                  <ActionCard message={message} onApprove={() => approveAction(message)} onCancel={() => cancelAction(message)} onPickFolder={() => pickActionFolder(message)} onApplyAll={() => applyAllFromCard(message)} />
+                  <ActionCard message={message} onApprove={() => approveAction(message)} onCancel={() => cancelAction(message)} onPickFolder={() => pickActionFolder(message)} onApplyAll={() => applyAllFromCard(message)} onShowReview={onShowReview} developmentBusy={developmentBusy} />
                 )}
                 {message.error && (
                   <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3, marginTop: 5 }}>
@@ -369,6 +395,13 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
       </div>
 
       <div style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", padding: "10px 12px 12px", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, fontSize: 11, flexWrap: "wrap" }}>
+          <button className="rc-chat-context" onClick={() => postMessage("code.pickFolder")} title={targetFolder || "프로젝트 루트"}>위치 · {targetFolder || "프로젝트 루트"}</button>
+          {targetFolder && <button className="rc-chat-context" onClick={() => setTargetFolder("")}>초기화</button>}
+          <button className="rc-chat-context" onClick={() => postMessage("code.pickContext")}>참고 파일 +</button>
+        </div>
+        <style>{`.rc-chat-context{font:inherit;color:var(--vscode-textLink-foreground,#3794ff);border:0;background:transparent;cursor:pointer;padding:2px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}`}</style>
+        {contextFiles.length > 0 && <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>{contextFiles.map(file => <button className="rc-chat-context" key={file.path} title={`${file.path} 제거`} onClick={() => setContextFiles(files => files.filter(item => item.path !== file.path))}>{file.path} ×</button>)}</div>}
         <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
           <textarea
             ref={textareaRef}
@@ -376,7 +409,8 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
             value={input}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="메시지를 입력하세요"
+            aria-label="AI에게 요청"
+            placeholder={developmentBusy ? "현재 작업을 완료하거나 취소한 뒤 이어서 요청하세요" : "질문하거나, 만들고 고칠 내용을 알려주세요"}
             rows={2}
             disabled={busy}
             style={{ flex: 1, minWidth: 0, resize: "none", border: "1px solid var(--vscode-input-border, #3f3f3f)", borderRadius: 9, background: "var(--vscode-input-background, #3c3c3c)", color: "var(--vscode-input-foreground, #fff)", padding: "8px 9px", fontFamily: "inherit", fontSize: 12, lineHeight: 1.4, outline: "none" }}
@@ -396,7 +430,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean }> = ({ isAiReady }) => {
 // 파일이 생기기 전에 사람이 한 번 누르는 지점이 여기다. 위치·파일 목록·워크스페이스
 // 밖 여부를 승인 전에 보여준다 — 9/16 테스트에서 "어디에 생겼는지 모르는" 문제의 대책.
 // ---------------------------------------------------------------------------
-const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCancel: () => void; onPickFolder: () => void; onApplyAll: () => void }> = ({ message, onApprove, onCancel, onPickFolder, onApplyAll }) => {
+const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCancel: () => void; onPickFolder: () => void; onApplyAll: () => void; onShowReview?: () => void; developmentBusy?: boolean }> = ({ message, onApprove, onCancel, onPickFolder, onApplyAll, onShowReview, developmentBusy }) => {
   const action = message.action!;
   const st = message.actionState!;
   const target = message.target;
@@ -405,6 +439,7 @@ const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCanc
   const isNew = target ? !target.exists : false;
   const badge = outside ? (isNew ? "프로젝트 밖 · 새 폴더" : "프로젝트 밖") : (isNew ? "새 폴더" : "");
   const accepted = st.status === "accepted";
+  const complete = !!st.ops?.length && st.ops.every(op => st.steps.some(step => step.key === `apply:${op.file}` && step.state === "ok"));
   const border = accepted ? "#2f6b4a" : st.status === "error" ? "#8b3a3a" : "#3f7fb5";
   const head = accepted ? "#1f3328" : st.status === "error" ? "#3a2222" : "#22303d";
   const mono: React.CSSProperties = { fontFamily: "var(--vscode-editor-font-family, Menlo, monospace)", fontSize: 11 };
@@ -412,7 +447,7 @@ const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCanc
   return (
     <div style={{ marginTop: 8, border: `1px solid ${border}`, borderRadius: 9, background: "#1b2530", overflow: "hidden", boxShadow: "0 6px 18px rgba(0,0,0,.3)", maxWidth: 420 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", background: head, borderBottom: `1px solid ${border}`, fontWeight: 700, fontSize: 12, color: "#e6f0f8" }}>
-        <span>{accepted ? "✅ 승인됨 · 진행 중" : st.status === "error" ? "⚠️ 진행 실패" : st.status === "approving" ? "⏳ 준비 중" : "📁 생성 승인"}</span>
+        <span>{accepted ? (complete ? "✓ 적용 완료" : st.steps.some(step => step.state === "fail") ? "작업 중단 · 내용 확인" : "승인됨 · 변경 검토") : st.status === "error" ? "⚠️ 진행 실패" : st.status === "approving" ? "⏳ 준비 중" : "📁 생성 승인"}</span>
         {!accepted && badge && <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 999, background: "#3a2a10", color: "#f0b35b", border: "1px solid #6b4a17" }}>{badge}</span>}
         {accepted && <span style={{ marginLeft: "auto", ...mono, fontSize: 10, color: "#8fd9ad", padding: "2px 7px", borderRadius: 999, background: "#1f3328", border: "1px solid #2f6b4a", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{folderLabel}</span>}
       </div>
@@ -460,6 +495,7 @@ const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCanc
             ))}
           </ul>
           {(() => {
+            if (onShowReview) return <button onClick={onShowReview} style={{ marginTop: 10, border: 0, borderRadius: 5, padding: "7px 10px", background: "#0e639c", color: "#fff", cursor: "pointer" }}>설계·변경 내용 보기</button>;
             const ops = st.ops ?? [];
             const applied = st.steps.filter((s) => s.key.startsWith("apply:") && s.state === "ok").length;
             const allApplied = ops.length > 0 && applied === ops.length;
@@ -481,7 +517,7 @@ const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCanc
 
       {!accepted && (
         <div style={{ display: "flex", gap: 8, padding: "9px 11px 11px", borderTop: `1px solid ${border}`, background: "#1a232c" }}>
-          <button onClick={onApprove} disabled={st.status === "approving"} style={{ border: "1px solid transparent", borderRadius: 6, padding: "6px 11px", fontSize: 11.5, fontWeight: 650, cursor: "pointer", background: "#3794ff", color: "#fff", opacity: st.status === "approving" ? .6 : 1 }}>{st.status === "error" ? "다시 시도" : "승인하고 생성"}</button>
+          <button onClick={onApprove} disabled={st.status === "approving" || developmentBusy} style={{ border: "1px solid transparent", borderRadius: 6, padding: "6px 11px", fontSize: 11.5, fontWeight: 650, cursor: "pointer", background: "#3794ff", color: "#fff", opacity: st.status === "approving" ? .6 : 1 }}>{st.status === "error" ? "다시 시도" : "승인하고 생성"}</button>
           <button onClick={onPickFolder} disabled={st.status === "approving"} style={{ border: "1px solid #4a5560", borderRadius: 6, padding: "6px 11px", fontSize: 11.5, fontWeight: 650, cursor: "pointer", background: "transparent", color: "#cfd8e0" }}>위치 변경</button>
           <button onClick={onCancel} style={{ marginLeft: "auto", border: "none", background: "transparent", color: "#9aa6b1", fontSize: 11.5, cursor: "pointer" }}>취소</button>
         </div>

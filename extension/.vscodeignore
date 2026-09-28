@@ -7,8 +7,8 @@
 #   out/                    컴파일된 확장 + 웹뷰 번들 (main: ./out/extension.js)
 #   media/icon.png          package.json 의 icon
 #   media/recoder-icon.svg  액티비티바 아이콘 (contributes.viewsContainers)
-#   media/sidebar.js        sidebarProvider.ts 가 asWebviewUri 로 로드한다.
-#                           번들이 아니라 런타임 파일이므로 빼면 사이드바가 빈다.
+#   out/webview/            현재 React/Three.js 화면 번들
+#   out/codemap/analysisWorker.js   소스 분석 worker 진입점
 #   bin/                    번들 Core 바이너리. CoreManager 가 1순위로 찾는다.
 #   node_modules/ws         BridgeClient.ts 가 런타임에 require 한다.
 #                           vsce 가 dependencies 만 담으므로 자동으로 들어간다 —
@@ -34,12 +34,20 @@ webview-tests/**
 #   out/test/          coreClient 스모크 테스트 (npm run smoke)
 out/webview-test/**
 out/test/**
+harness/**
+scripts/**
 
 # ── 빌드 · 개발 설정 ────────────────────────────────────────────────────
 tsconfig.json
 .vscode/**
 .pytest_cache/**
 .eslintrc*
+**/.env
+**/.env.*
+**/*.log
+**/*.bundle
+**/__pycache__/**
+**/*.pyc
 **/.gitignore
 **/.DS_Store
 

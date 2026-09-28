@@ -241,6 +241,17 @@ class ECSAgent:
             initialize_progress(record, request)
             self._advance_progress(record, "preflight")
             aws_policy.validate_region(request.region)
+            # Generated static clients have a fixed listen port. Reject a stale
+            # UI/default before any AWS resource is created or changed.
+            if request.workspace_path:
+                from pathlib import Path
+                from static_frontend import generated_static_runtime_port
+                static_port = generated_static_runtime_port(Path(request.workspace_path) / request.dockerfile)
+                if static_port is not None and static_port != request.container_port:
+                    raise InfraError(
+                        f"컨테이너 포트 {request.container_port}와 앱의 포트 {static_port}가 다릅니다.",
+                        remedy=f"배포 설정의 컨테이너 포트를 {static_port}로 수정하세요.",
+                    )
             clients = self._clients(request.region)
 
             # 1. Preflight

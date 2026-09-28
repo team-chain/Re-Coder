@@ -7,15 +7,31 @@
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 CORE_DIR = str(Path(__file__).resolve().parents[1].parent / "core")
 sys.path.insert(0, CORE_DIR)
 os.environ["SESSION_TOKEN"] = "harness-token-123"
 os.environ["RECODER_TEST_MODE"] = "1"
 os.environ.pop("AWS_PROFILE", None)
+_fixture_home = tempfile.TemporaryDirectory(prefix="recoder-fixture-core-")
+os.environ["RECODER_HOME"] = _fixture_home.name
 
 import main  # noqa: E402
+
+
+@asynccontextmanager
+async def fixture_lifespan(app):
+    # Never replace the user's running Core lock, runtime or session token.
+    app.state.session_token = os.environ["SESSION_TOKEN"]
+    app.state.started_at = datetime.now(timezone.utc)
+    yield
+
+
+main.app.router.lifespan_context = fixture_lifespan
 
 PLAN = {"decisions": [{
     "id": "storage", "question": "게시글 저장 방식은?",

@@ -41,7 +41,7 @@ test('승인 핸들러는 워크스페이스 추가 직전에 요청을 globalSt
 test('webview.ready 가 인계 메모를 한 번만 이어받아 발송한다', () => {
     const start = provider.indexOf("case 'webview.ready'");
     assert.ok(start > 0);
-    const end = provider.indexOf('break;', start);
+    const end = provider.indexOf("case 'aws.onboarding'", start);
     const body = provider.slice(start, end);
 
     assert.match(body, /PENDING_CHAT_ACTION_KEY/, 'ready 가 인계 메모를 확인하지 않는다');

@@ -209,13 +209,11 @@ def test_성공한_배포는_복원_필드를_포함해_응답한다(monkeypatch
         calls.append(list(args))
         return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
 
-    async def no_health_probe(_plan):  # noqa: ANN001
-        return False
-
     monkeypatch.setattr(deploy_route.subprocess, "run", fake_run)
     monkeypatch.setattr(deploy_route, "_get_continuous_verifier_if_available", lambda: None)
-    _stub_health(monkeypatch)  # 복구된 컨테이너가 서비스되는 상황
-    monkeypatch.setattr(deploy_route, "_verify_rollback_candidate_health", no_health_probe)
+    # 성공 응답은 실제 헬스 확인이 통과한 경우다. 헬스 실패의 pending/failed
+    # 판정은 test_deploy_startup_verdict.py에서 별도로 검증한다.
+    _stub_health(monkeypatch)
     plan = DeploymentPlan(
         method=DeployMethod.LOCAL_DOCKER,
         action=ActionType.DOCKER_RUN,
@@ -236,6 +234,7 @@ def test_성공한_배포는_복원_필드를_포함해_응답한다(monkeypatch
     )
 
     assert result["status"] == "success"
+    assert result["health_ok"] is True
     assert result["restored_previous"] is False
     assert result["restore_stdout"] == ""
     assert result["restore_stderr"] == ""

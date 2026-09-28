@@ -30,7 +30,7 @@ const { BuildMode } = require('../out/webview-test/components/BuildMode.js');
 
 //: CodeAgent 안에만 있는 문구. 이게 렌더 결과에 있으면 설계 결정 →
 //: 코드 생성 경로가 화면에 붙어 있다는 뜻이다.
-const CODE_AGENT_MARKER = '코드 작성 및 수정';
+const CODE_AGENT_MARKER = 'aria-label="AI와 대화하기"';
 
 function renderWorkspace(view, isAiReady = true) {
   return renderToStaticMarkup(
@@ -50,12 +50,24 @@ function renderWorkspace(view, isAiReady = true) {
   );
 }
 
-test('Workspace 창의 build 화면에 CodeAgent(설계 결정 경로)가 렌더된다', () => {
+test('Workspace build links to code generation without a second composer', () => {
   const html = renderWorkspace('build');
   assert.ok(
-    html.includes(CODE_AGENT_MARKER),
-    'Workspace build 화면에 CodeAgent 가 없다 — 결정 카드가 뜰 경로가 사라졌다'
+    html.includes('코드 생성·수정에서 이어가기'),
+    '공유 개발 화면으로 진입할 수 없다'
   );
+  assert.equal((html.match(/<textarea/g) || []).length, 0);
+});
+
+test('Workspace code retains review engine and exactly one conversation input', () => {
+  const html = renderWorkspace('code');
+  assert.ok(html.includes(CODE_AGENT_MARKER));
+  assert.ok(html.includes('참고 파일 추가'));
+  assert.equal((html.match(/<textarea/g) || []).length, 1);
+  assert.ok(html.includes('class="rc-cg-input"'));
+  assert.ok(html.includes('aria-label="AI 개발 요청"'));
+  assert.ok(!html.includes('workspace-chat'));
+  assert.ok(!html.includes('승인하고 생성'));
 });
 
 test('[음성 대조] CodeAgent 가 없어야 하는 화면에서는 렌더되지 않는다', () => {
@@ -106,4 +118,33 @@ test('AI가 준비되지 않아도 Ship Mode가 템플릿 폴백 UI를 렌더한
     !html.includes('Ship Mode는 AI Ready가 필요합니다'),
     'AI Ready 전체 차단 화면이 되살아났다'
   );
+});
+
+for (const view of ['hub:deploy', 'deploy']) {
+  test(`${view}: Deploy 진입 즉시 캔버스와 기존 배포 도구가 보인다`, () => {
+    const html = renderWorkspace(view, false);
+    assert.ok(html.includes('aria-label="배포 캔버스"'), 'Deploy 탭에 캔버스 대신 기존 메뉴가 표시된다');
+    assert.ok(html.includes('aria-label="프로젝트 배포 구조"'));
+    for (const label of ['상세 배포', '이력·롤백', 'AWS 연결', 'Docker', '운영 대응']) {
+      assert.ok(html.includes(`>${label}</button>`), `${label} 진입점이 사라졌다`);
+    }
+    assert.ok(!html.includes('외부로 나가는 배포는 검사 결과에 따라'), '예전 배포 메뉴가 캔버스 앞에 남아 있다');
+    assert.ok(!html.includes('workspace-chat'), '오른쪽 대화 패널이 되살아났다');
+    assert.equal((html.match(/<textarea/g) || []).length, 0);
+  });
+}
+
+test('Develop와 Security 허브는 기존 기능 메뉴를 유지한다', () => {
+  for (const view of ['hub:develop', 'hub:security']) {
+    const html = renderWorkspace(view);
+    assert.ok(!html.includes('aria-label="배포 캔버스"'));
+    assert.ok(!html.includes('workspace-chat'));
+  }
+});
+
+test('central development composer remains reachable before AI diagnosis succeeds', () => {
+  const html = renderWorkspace('code', false);
+  assert.ok(html.includes('aria-label="AI 개발 요청"'));
+  assert.ok(html.includes('연결 다시 확인'));
+  assert.ok(!/<textarea[^>]*disabled/.test(html));
 });

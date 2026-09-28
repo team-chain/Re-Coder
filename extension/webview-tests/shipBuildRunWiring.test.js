@@ -44,9 +44,13 @@ test('executeDeployment 은 코어의 거절 사유(4xx/5xx)를 error 로 넘긴
 });
 
 test('헬스 실패한 배포는 "Health Check 통과" 로 칠하지 않는다', () => {
-  const SHIP2 = read('../webview-src/components/ShipMode.tsx');
-  assert.match(SHIP2, /deployResult\?\.health_ok === false \?/, '헬스 결과로 배너를 가르지 않는다');
-  assert.match(SHIP2, /컨테이너는 떴지만 Health Check 는 실패했습니다/);
+  const { deploymentHealthVerdict } = require('../out/webview-test/components/ShipMode');
+  assert.strictEqual(deploymentHealthVerdict({ status: 'pending', health_ok: false }, null), 'pending');
+  assert.strictEqual(deploymentHealthVerdict({ status: 'success' }, null), 'pending');
+  assert.strictEqual(deploymentHealthVerdict({ status: 'success', health_ok: true }, null), 'healthy');
+  assert.strictEqual(deploymentHealthVerdict({ status: 'pending', health_ok: false }, { status: 'stable' }), 'healthy');
+  assert.strictEqual(deploymentHealthVerdict({ status: 'success', health_ok: true }, { status: 'unstable' }), 'failed');
+  assert.strictEqual(deploymentHealthVerdict({ status: 'pending', health_ok: false }, { status: 'error' }), 'failed');
 });
 
 test('배포 뒤 감시 스냅샷을 묻고, 이상이면 롤백을 제안만 한다(자동 실행 금지)', () => {

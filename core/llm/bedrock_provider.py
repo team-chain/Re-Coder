@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import re
+import random
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -145,8 +146,12 @@ def _classify_boto_error(exc: Exception) -> tuple[LLMErrorType, bool]:
         return LLMErrorType.VALIDATION_ERROR, False
     if "too many tokens" in msg or "too long" in msg or ("context" in msg and "length" in msg):
         return LLMErrorType.CONTEXT_TOO_LONG, False
-    if code and code.startswith("5"):
+    if code in ("ServiceUnavailableException", "InternalServerException", "ModelTimeoutException", "ModelErrorException") or (code and code.startswith("5")):
         return LLMErrorType.SERVICE_ERROR, True
+    if type(exc).__name__ in ("EndpointConnectionError", "ConnectionClosedError", "ConnectTimeoutError", "ReadTimeoutError"):
+        return LLMErrorType.SERVICE_ERROR, True
+    if code in ("ExpiredTokenException", "UnrecognizedClientException", "InvalidSignatureException") or type(exc).__name__ in ("NoCredentialsError", "PartialCredentialsError"):
+        return LLMErrorType.ACCESS_DENIED, False
     return LLMErrorType.UNKNOWN, False
 
 
@@ -249,12 +254,14 @@ class BedrockProvider(LLMProvider):
             kwargs["profile_name"] = profile
 
         try:
+            from botocore.config import Config
+            config = Config(connect_timeout=5, read_timeout=45, retries={"mode": "standard", "total_max_attempts": 2})
             if profile:
                 # boto3.Session(profile_name=...) 경유가 안전
                 session = boto3.Session(profile_name=profile, region_name=self._region)
-                self._client = session.client("bedrock-runtime")
+                self._client = session.client("bedrock-runtime", config=config)
             else:
-                self._client = boto3.client("bedrock-runtime", region_name=self._region)
+                self._client = boto3.client("bedrock-runtime", region_name=self._region, config=config)
         except Exception as exc:  # pragma: no cover
             log.warning("boto3 unavailable: %s", exc)
             self._client = None
@@ -419,6 +426,7 @@ class BedrockProvider(LLMProvider):
         messages: list[dict[str, Any]],
         system: Optional[str] = None,
         output_schema: Optional[dict] = None,
+        *, max_tokens: int = 4096, temperature: float = 0.0,
     ) -> dict[str, Any]:
         """
         Bedrock Converse API 비동기 호출.
@@ -433,15 +441,19 @@ class BedrockProvider(LLMProvider):
         """
         if output_schema:
             try:
-                return await self._converse_structured(messages, system, output_schema)
+                return await self._converse_structured(messages, system, output_schema, max_tokens=max_tokens, temperature=temperature)
             except Exception as exc:
+                if isinstance(exc, LLMError) and exc.error_type != LLMErrorType.VALIDATION_ERROR:
+                    raise
                 log.warning("Structured output failed (%s), trying tool use", exc)
                 try:
-                    return await self._converse_tool_use(messages, system, output_schema)
+                    return await self._converse_tool_use(messages, system, output_schema, max_tokens=max_tokens, temperature=temperature)
                 except Exception as exc2:
+                    if isinstance(exc2, LLMError) and exc2.error_type != LLMErrorType.VALIDATION_ERROR:
+                        raise
                     log.warning("Tool use failed (%s), falling back to text JSON", exc2)
 
-        return await self._converse_plain(messages, system)
+        return await self._converse_plain(messages, system, max_tokens=max_tokens, temperature=temperature)
 
     async def validate_access(self) -> tuple[bool, str, str]:
         """
@@ -471,6 +483,7 @@ class BedrockProvider(LLMProvider):
         messages: list[dict],
         system: Optional[str],
         schema: dict,
+        *, max_tokens: int = 4096, temperature: float = 0.0,
     ) -> dict[str, Any]:
         """Structured output via tool_choice={"type": "tool", "name": "output"}."""
         tool_spec = {
@@ -483,6 +496,7 @@ class BedrockProvider(LLMProvider):
         kwargs: dict[str, Any] = {
             "modelId": self._model_id,
             "messages": messages,
+            "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
             "toolConfig": {
                 "tools": [tool_spec],
                 "toolChoice": {"tool": {"name": "output"}},
@@ -492,6 +506,7 @@ class BedrockProvider(LLMProvider):
             kwargs["system"] = [{"text": system}]
 
         response = await self._invoke_sync(kwargs)
+        self._require_complete_response(response)
         return self._extract_tool_input(response)
 
     async def _converse_tool_use(
@@ -499,6 +514,7 @@ class BedrockProvider(LLMProvider):
         messages: list[dict],
         system: Optional[str],
         schema: dict,
+        *, max_tokens: int = 4096, temperature: float = 0.0,
     ) -> dict[str, Any]:
         """Tool use fallback — let model choose when to call the tool."""
         tool_spec = {
@@ -511,45 +527,62 @@ class BedrockProvider(LLMProvider):
         kwargs: dict[str, Any] = {
             "modelId": self._model_id,
             "messages": messages,
+            "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
             "toolConfig": {"tools": [tool_spec]},
         }
         if system:
             kwargs["system"] = [{"text": system}]
 
         response = await self._invoke_sync(kwargs)
+        self._require_complete_response(response)
         return self._extract_tool_input(response)
 
     async def _converse_plain(
         self,
         messages: list[dict],
         system: Optional[str],
+        *, max_tokens: int = 4096, temperature: float = 0.0,
     ) -> dict[str, Any]:
         """Plain text call — extract any JSON block from the response text."""
         kwargs: dict[str, Any] = {
             "modelId": self._model_id,
             "messages": messages,
+            "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
         }
         if system:
             kwargs["system"] = [{"text": system}]
 
         response = await self._invoke_sync(kwargs)
+        self._require_complete_response(response)
         text = self._extract_text(response)
         return self._parse_json_from_text(text)
 
+    @staticmethod
+    def _require_complete_response(response: dict) -> None:
+        if response.get("stopReason") == "max_tokens":
+            raise LLMError(
+                "모델 출력이 응답 길이 제한에서 잘렸습니다.",
+                LLMErrorType.STRUCTURED_OUTPUT,
+            )
+
     async def _invoke_sync(self, kwargs: dict) -> dict:
         """Run the blocking boto3 call in a thread-pool executor."""
-        client = self._client
-        if client is None:
-            try:
-                client = self._get_client()
-            except Exception:
-                client = None
-        if client is None:
-            raise RuntimeError("boto3 client not initialised")
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, lambda: client.converse(**kwargs)
-        )
+        for attempt in range(2):
+            try:
+                # Credential refresh and SDK initialization can block as well.
+                def invoke():
+                    return (self._client or self._get_client()).converse(**kwargs)
+                return await loop.run_in_executor(None, invoke)
+            except LLMError:
+                raise
+            except Exception as exc:
+                kind, retryable = _classify_boto_error(exc)
+                if attempt == 0 and kind in (LLMErrorType.SERVICE_ERROR, LLMErrorType.THROTTLING):
+                    log.warning("Bedrock temporary failure (%s); retrying once", kind.value)
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
+                    continue
+                raise LLMError(str(exc), kind, retryable, raw=exc) from exc
 
     # ------------------------------------------------------------------
     # 정적 유틸리티
