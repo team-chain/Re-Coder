@@ -25,6 +25,7 @@ import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
 import { BridgeClient } from './bridge/BridgeClient';
 import { runEnrollCommand } from './gateway/enroll';
+import { DiscordController } from './discord/DiscordController';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -47,7 +48,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // 처리해 같은 문서에 중복 편집·중복 실행이 일어난다.
     let activeBridge = new BridgeClient(context);
     context.subscriptions.push(activeBridge);
-    activeBridge.connect();
+    if (vscode.workspace.getConfiguration('recoder.bridge').get<boolean>('legacyEnabled', false)) activeBridge.connect();
 
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.bridge.reconnect', () => {
@@ -58,6 +59,17 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.window.showInformationMessage('ReCoder Bridge 재연결 시도');
         }),
     );
+
+    const discordConnections = new DiscordController(context);
+    context.subscriptions.push(discordConnections,
+        vscode.commands.registerCommand('recoder.discord.action', (type, payload) => discordConnections.action(type, payload)),
+        vscode.workspace.onDidChangeWorkspaceFolders(() => void discordConnections.restore().catch(console.error)),
+        vscode.workspace.onDidGrantWorkspaceTrust(() => void discordConnections.restore().catch(console.error)),
+        vscode.workspace.onDidChangeConfiguration(event => {
+            if (event.affectsConfiguration('recoder.discord.serverUrl')) void discordConnections.restore().catch(console.error);
+        }),
+    );
+    void discordConnections.restore().catch(console.error);
 
     // ── 게이트웨이 자가발급(enroll) ───────────────────────────────────────────
     // recoder.gateway.url 이 설정돼 있고 아직 토큰이 없으면 최초 실행 시 반 코드를

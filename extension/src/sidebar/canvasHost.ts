@@ -81,8 +81,8 @@ export class CanvasHost {
     private commitPreview?: { id: string; workspace: string; preview: CommitPreview };
     private committing = false;
     private connecting = false;
-    private discordMode = 'webhook';
-    constructor(private api: ApiClient, private readGit = gitContext, private webhook?: DiscordWebhook) {}
+    private discordMode = 'oauth';
+    constructor(private api: ApiClient, private readGit = gitContext, private webhook?: DiscordWebhook, private preferences?: vscode.Memento) {}
     async handle(type: string, raw: unknown, send: Send, project: (workspace: string) => string, execute: (type: string, payload: unknown) => Promise<void>) {
         const p = (raw ?? {}) as Record<string, unknown>, requestId = String(p.requestId || '');
         const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
@@ -267,10 +267,32 @@ export class CanvasHost {
     private async discord(type:string,p:Record<string,unknown>,send:Send) {
         const requestId=String(p.requestId||'');
         const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        if (p.mode === 'bot' || p.mode === 'webhook') {
+        if (type === 'canvas.discord.notifications') {
+            if (!workspace || p.workspace !== workspace) throw new Error('프로젝트가 바뀌었습니다. 배포 화면을 다시 여세요.');
+            const key = 'recoder.discord.notifications.' + createHash('sha256').update(workspace).digest('hex');
+            if (typeof p.enabled === 'boolean') {
+                if (!this.preferences) throw new Error('알림 설정을 저장할 수 없습니다. VS Code를 다시 여세요.');
+                await this.preferences.update(key, p.enabled);
+            }
+            send('canvas.discord.notificationsResult', { requestId, workspace, enabled: this.preferences?.get<boolean>(key, false) === true });
+            return;
+        }
+        if (p.mode === 'bot' || p.mode === 'webhook' || p.mode === 'oauth') {
             this.discordMode = String(p.mode);
             await this.webhook?.setMode(workspace, this.discordMode);
         } else if (this.webhook) this.discordMode = await this.webhook.mode(workspace);
+        if (type === 'canvas.discord.connect') {
+            this.discordMode = 'oauth';
+            await this.webhook?.setMode(workspace, 'oauth');
+        }
+        if (this.discordMode === 'oauth' && !type.endsWith('connectWebhook')) {
+            const action = type.slice('canvas.discord.'.length);
+            const result = await vscode.commands.executeCommand<any>('recoder.discord.action', action, { ...p, workspace });
+            const kind = action === 'guilds' ? 'guildsResult' : action === 'channels' ? 'channelsResult'
+                : ['event','test'].includes(action) ? 'eventResult' : ['invite','settings'].includes(action) ? 'notice' : 'statusResult';
+            send(`canvas.discord.${kind}`, { requestId, ...result });
+            return;
+        }
         if (type === 'canvas.discord.connectWebhook') {
             if (!workspace || !this.webhook) throw new Error('먼저 프로젝트 폴더를 여세요.');
             const url = await vscode.window.showInputBox({ password: true, ignoreFocusOut: true, title: 'Discord 알림 연결', prompt: '채널 설정 → 연동 → 웹후크에서 복사한 URL을 붙여넣으세요. 메시지는 아직 보내지 않습니다.', placeHolder: 'https://discord.com/api/webhooks/…' });
