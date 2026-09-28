@@ -13,7 +13,7 @@ export class DiscordWebhook {
   constructor(private secrets: Pick<SecretStorage, 'get' | 'store' | 'delete'>, private request: typeof fetch = fetch) {}
   private key(workspace: string) { return 'recoder.discord.webhook.' + createHash('sha256').update(process.platform === 'win32' ? workspace.toLowerCase() : workspace).digest('hex'); }
   async configured(workspace: string) { return Boolean(await this.secrets.get(this.key(workspace))); }
-  async mode(workspace: string) { return (await this.secrets.get(this.key(workspace) + '.mode')) || 'webhook'; }
+  async mode(workspace: string) { return (await this.secrets.get(this.key(workspace) + '.mode')) || (await this.configured(workspace) ? 'webhook' : 'oauth'); }
   async setMode(workspace: string, mode: string) { await this.secrets.store(this.key(workspace) + '.mode', mode); }
   private async call(url: string, body?: unknown): Promise<any> {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);

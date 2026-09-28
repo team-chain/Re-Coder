@@ -287,6 +287,17 @@
           "type": "string",
           "default": "",
           "description": "Discord 봇 HTTP API 인증 키 (.env 의 BOT_REGISTRATION_KEY 와 동일해야 함, 미설정 시 인증 생략)."
+        },
+        "recoder.discord.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8765",
+          "scope": "application",
+          "description": "운영자가 제공한 ReCoder Discord 연결 서버 HTTPS 주소. 같은 컴퓨터의 개발용 봇은 http://127.0.0.1:8765."
+        },
+        "recoder.bridge.legacyEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "기존 학생 토큰 기반 브리지를 시작합니다. 새 Discord 로그인 연결에는 필요하지 않습니다."
         }
       }
     }

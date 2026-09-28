@@ -16,6 +16,7 @@ import { CanvasEvent, DiscordPanel, DiscordState } from "./DiscordPanel";
 import { GitHubPanel } from "./GitHubPanel";
 import { canvasStyles } from "./styles";
 import { mergeDeployment, SnapshotRequests } from "./state";
+import { DockerNotifications } from './dockerNotifications';
 
 type Pane = "canvas" | "details" | "history" | "aws" | "docker" | "security" | "discord" | "status" | "analysis";
 const defaultConfig: Config = { target:"ecs",image_name:"recoder-app",tag:"v1",aws_region:"",ecs_cluster:"recoder-cluster",ecs_service:"recoder-app",task_family:"recoder-task",container_port:8000,cpu:"256",memory:"512",environment:"staging",dir:"" };
@@ -39,6 +40,8 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const snapshotRef=useRef<Snapshot|null>(null), busyRef=useRef(false),touched=useRef(false),dirTouched=useRef(false),notifyRef=useRef(false);
   const snapshotRequests=useRef(new SnapshotRequests()),graphRequest=useRef(''),actionRequest=useRef(''),expectedId=useRef(''),ids=useRef(0),observed=useRef(new Set<string>());
   const liveRef=useRef<EcsProgressStatus|null>(null);
+  const dockerNotifications=useRef(new DockerNotifications());
+  const discordRef=useRef<DiscordState|null>(null), notificationPreference=useRef(false), notificationRequest=useRef('');
   const graphTimer=useRef<ReturnType<typeof setTimeout>>(),graphFile=useRef('');
   const [graphError,setGraphError]=useState(false);
   const stopGraph=()=>{clearTimeout(graphTimer.current);graphRequest.current='';setGraphLoading(false);};
@@ -46,6 +49,18 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const requestId=()=>`canvas-${Date.now()}-${++ids.current}`;
   const refresh=useCallback(()=> { const id=`snapshot-${Date.now()}-${++ids.current}`; if(!snapshotRequests.current.begin(id))return; setLoading(true);postMessage('canvas.snapshot',{requestId:id}); },[postMessage]);
   const openPane=(next:Pane)=>{setSelection(null);setPane(next);setVisited(v=>new Set([...v,next]));};
+  const applyNotificationPreference=()=>{
+    const state=discordRef.current;
+    const enabled=notificationPreference.current && Boolean(state?.active_channel_id) && (state?.mode!=='oauth' || state.project_id===state.canvas_project_id);
+    notifyRef.current=enabled;setNotify(enabled);
+  };
+  const notificationSettings=(enabled?:boolean)=>{
+    const workspace=snapshotRef.current?.workspace;
+    if(!workspace)return;
+    const id=requestId();notificationRequest.current=id;
+    if(enabled!==undefined){notificationPreference.current=enabled;applyNotificationPreference();}
+    postMessage('canvas.discord.notifications',{requestId:id,workspace,...(enabled===undefined?{}:{enabled})});
+  };
   const addEvent=useCallback((id:string,title:string,detail:string)=>{
     if(observed.current.has(id)) return;
     observed.current.add(id);
@@ -57,11 +72,15 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
 
   useMessage(useCallback(event=>{
     const p=event.payload as any; // Message contracts are narrowed per discriminant below.
+    const dockerEvent=dockerNotifications.current.consume(event.type,p);
+    if(dockerEvent)addEvent(dockerEvent.id,dockerEvent.title,dockerEvent.detail);
     if (['aws.configure.result','aws.clear.result','aws.role.result'].includes(event.type) && p?.ok) refresh();
     if(event.type==='canvas.snapshotResult'&&snapshotRequests.current.finish(p.requestId)) {
       const next=p.snapshot as Snapshot;
-      if(snapshotRef.current && snapshotRef.current.workspace!==next.workspace) {liveRef.current=null;expectedId.current='';touched.current=false;notifyRef.current=false;setNotify(false);setDiscord(null);setS3Progress(null);setS3Result(null);postMessage('canvas.discord.status');}
+      const workspaceChanged=snapshotRef.current?.workspace!==next.workspace;
+      if(snapshotRef.current && workspaceChanged) {liveRef.current=null;expectedId.current='';touched.current=false;notificationPreference.current=false;notifyRef.current=false;setNotify(false);discordRef.current=null;setDiscord(null);dockerNotifications.current=new DockerNotifications();observed.current.clear();setEvents([]);lastEventStatus.current='';setS3Progress(null);setS3Result(null);postMessage('canvas.discord.status');}
       snapshotRef.current=next;setSnapshot(next);setLoading(false);
+      if(workspaceChanged)notificationSettings();
       if(!touched.current) setConfig(c=>({...c,container_port:next.container_port||defaultConfig.container_port,aws_region:next.aws.region||c.aws_region,ecs_cluster:next.resource?.cluster||c.ecs_cluster,ecs_service:next.resource?.service||c.ecs_service}));
       if(!expectedId.current || expectedId.current===next.deployment.deployment_id) {
         if(liveRef.current?.running && !next.deployment.running && ['done','failed'].includes(next.deployment.stage)) setMessage('');
@@ -80,7 +99,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     if(event.type==='canvas.plan'&&p.requestId===actionRequest.current) {setSelection(null);setPlan(p);setConfig(p.config);setMessage('');finish();return;}
     if(event.type==='canvas.blocked'&&p.requestId===actionRequest.current) {if(actionTarget.current==='s3')setS3Progress({step:'error',message:'사전 검사에서 배포를 차단했습니다'});setBlocked(p.preflight?.reasons||[]);setError('보안 게이트가 배포를 차단했습니다.');addEvent(`gate-${p.requestId}`,'보안 게이트 차단','사전 검사에서 배포를 차단했습니다.');finish();return;}
     if(event.type==='canvas.error') {
-      if(String(p.context).startsWith('canvas.discord')) {setDiscordError(p.message);if(String(p.requestId).startsWith('event:')) setEvents(items=>items.map(e=>`event:${e.id}`===p.requestId?{...e,delivery:'전송 실패'}:e));return;}
+      if(String(p.context).startsWith('canvas.discord')) {setDiscordError(p.message);if(p.requestId===notificationRequest.current){notificationPreference.current=false;applyNotificationPreference();}if(String(p.requestId).startsWith('event:')) setEvents(items=>items.map(e=>`event:${e.id}`===p.requestId?{...e,delivery:'전송 실패'}:e));return;}
       if(snapshotRequests.current.finish(p.requestId)) {setLoading(false);setError(p.message);return;}
       if(p.requestId===graphRequest.current) {stopGraph();setGraphError(true);setError(p.message);return;}
       if(p.requestId===actionRequest.current) {if(actionTarget.current==='s3')setS3Progress({step:'error',message:p.message});finish();setError(p.message);setMessage('');} return;
@@ -104,7 +123,8 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     if(event.type==='workspace.deploy.remediationResult') {finish();setMessage(p.message||'수정을 적용했습니다. 다시 승인 내용을 확인하세요.');setBlocked([]);refresh();}
     if(event.type==='workspace.deploy.remediationError') {finish();setError(p.message);}
     if(event.type==='workspace.deploy.ecs.rollbackResult'||event.type==='replay.rollbackResult'||event.type==='deploy.rollbackResult') {addEvent(`rollback-${p.deployment_id||p.deploymentId||p.requestId||Date.now()}`,'롤백 결과',p.message||p.status||'결과 확인');refresh();}
-    if(event.type==='canvas.discord.statusResult') {setDiscord(p);setDiscordError('');if(!p.active_channel_id){notifyRef.current=false;setNotify(false);}}
+    if(event.type==='canvas.discord.statusResult') {discordRef.current=p;setDiscord(p);setDiscordError('');applyNotificationPreference();}
+    if(event.type==='canvas.discord.notificationsResult'&&p.requestId===notificationRequest.current&&p.workspace===snapshotRef.current?.workspace) {notificationPreference.current=p.enabled===true;applyNotificationPreference();setDiscordError('');}
     if(event.type==='canvas.discord.guildsResult') setGuilds(p.guilds||[]);
     if(event.type==='canvas.discord.channelsResult') setChannels(p.channels||[]);
     if(event.type==='canvas.discord.eventResult') {setEvents(items=>items.map(e=>e.id===p.event_id?{...e,delivery:'채널 전송 완료'}:e));setDiscordError('');}
@@ -202,7 +222,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
       {visited.has('aws')&&<div hidden={pane!=='aws'}><AwsConnection ecsPolicyContext={{cluster:config.ecs_cluster,service:config.ecs_service,ecrRepo:config.ecs_service}}/></div>}
       {visited.has('docker')&&<div hidden={pane!=='docker'}><ShipMode isAiReady={isAiReady} isDockerReady={isDockerReady}/></div>}
       {visited.has('security')&&<div hidden={pane!=='security'}>{security&&<p className="rc-muted">빨간 점선은 소스의 시크릿이 저장소로 유출될 수 있는 경로입니다. 커밋·이미지 포함 여부는 별도 확인이 필요합니다. 검사 미실행은 안전 판정이 아닙니다.</p>}<SecurityScanPanel kinds={['trivy','hadolint','gitleaks']} title="보안 검사" note="수정한 소스를 다시 검사하세요."/><PolicyPanel/>{scan?.findings.map((f,i)=><div key={i} className="rc-finding"><b>{f.tool} · {f.title}</b><p>{f.fix}</p><small>{f.location}</small></div>)}{Boolean(scan?.findings.length)&&<button disabled={!isAiReady} onClick={()=>postMessage('canvas.fix',{findings:scan?.findings})}>AI 수정안 만들기</button>}</div>}
-      {visited.has('discord')&&<div hidden={pane!=='discord'}><DiscordPanel state={discord} events={events} enabled={notify} onEnabled={value=>{notifyRef.current=value;setNotify(value);}} post={postMessage} guilds={guilds} channels={channels} error={discordError}/></div>}
+      {visited.has('discord')&&<div hidden={pane!=='discord'}><DiscordPanel state={discord} events={events} enabled={notify} onEnabled={value=>notificationSettings(value)} post={postMessage} guilds={guilds} channels={channels} error={discordError}/></div>}
       {pane==='analysis'&&graph&&<div><header><h3>{level===2?'파일 · import':'함수 · 호출'} {graph.nodes.length}개</h3><button onClick={()=>loadGraph(level===3?file:'')}>다시 분석</button></header>{graph.nodes.length===0&&<p>분석 가능한 항목이 없습니다.</p>}{level===3&&<button onClick={()=>postMessage('map.openFile',{id:file})}>파일을 에디터에서 열기</button>}{graph.findings.map((f,i)=><div className="rc-finding" key={i}><b>{f.title}</b><p>{f.detail}</p><small>{f.fix}</small></div>)}</div>}
       {pane==='status'&&<div>
         <h3>보안 검사</h3><div className="rc-gates" aria-label="보안 게이트 검사 단계">{(scan?.tools||['hadolint','gitleaks','trivy','OPA'].map(tool=>({tool,state:'pending',detail:''}))).map(t=><span key={t.tool} data-state={t.state} title={t.detail}>{t.tool} · {toolLabels[t.state]||t.state}</span>)}</div>

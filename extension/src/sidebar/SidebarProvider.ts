@@ -625,7 +625,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         if (type.startsWith('canvas.')) {
             let host = this._canvasHosts.get(requestWebview);
-            if (!host) { host = new CanvasHost(this._apiClient, undefined, this._secrets ? new DiscordWebhook(this._secrets) : undefined); this._canvasHosts.set(requestWebview, host); }
+            if (!host) { host = new CanvasHost(this._apiClient, undefined, this._secrets ? new DiscordWebhook(this._secrets) : undefined, this._globalState); this._canvasHosts.set(requestWebview, host); }
             await host.handle(type, payload,
                 (reply, data) => this.postMessageToWebview(requestWebview, reply, data),
                 workspace => s3ProjectIdentifier(s3RepositoryIdentity(workspace), path.basename(workspace)),

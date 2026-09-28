@@ -31,6 +31,7 @@ import { buildBridgeWebSocketUrl } from './bridgeEndpoint';
 
 interface BridgeMessage {
     type: string;
+    project_id?: string;
     filename?: string;
     language?: string;
     prompt?: string;
@@ -48,6 +49,7 @@ interface Session {
     uri: vscode.Uri;
     editor?: vscode.TextEditor;
     pendingFlush?: NodeJS.Timeout;
+    flushing?: Promise<void>;
     statusBar: vscode.StatusBarItem;
 }
 
@@ -64,9 +66,10 @@ export class BridgeClient implements vscode.Disposable {
     private disposed = false;
 
     private session: Session | null = null;
+    private messageQueue: Promise<void> = Promise.resolve();
     private readonly output: vscode.OutputChannel;
 
-    constructor(private readonly context: vscode.ExtensionContext) {
+    constructor(private readonly context: vscode.ExtensionContext, private readonly connection?: { root: vscode.Uri; url: string; token: string; projectId: string }) {
         this.output = vscode.window.createOutputChannel('ReCoder Bridge');
         context.subscriptions.push(this.output);
     }
@@ -130,13 +133,13 @@ export class BridgeClient implements vscode.Disposable {
 
         const studentToken = await this._getStudentToken();
         if (this.disposed) return;
-        const { url, token } = this._resolveEndpoint(studentToken);
+        const { url, token } = this.connection || this._resolveEndpoint(studentToken);
         this.output.appendLine(`[bridge] connecting to ${token ? url.replace(token, '***') : url}`);
 
         // secret 은 헤더로만 — 쿼리스트링에 실으면 액세스 로그에 평문으로 남는다.
         const headers: Record<string, string> = {};
         if (token) headers['Authorization'] = `Bearer ${token}`;
-        if (studentToken) headers['X-Student-Token'] = studentToken;
+        if (studentToken && !this.connection) headers['X-Student-Token'] = studentToken;
 
         try {
             this.ws = new WebSocket(url, {
@@ -159,7 +162,9 @@ export class BridgeClient implements vscode.Disposable {
         this.ws.on('message', (data: WebSocket.RawData) => {
             try {
                 const msg = JSON.parse(data.toString()) as BridgeMessage;
-                void this._handleMessage(msg);
+                this.messageQueue = this.messageQueue.then(() => {
+                    if (!this.disposed) return this._handleMessage(msg);
+                }).catch(err => this.output.appendLine(`[bridge] message processing failed: ${err}`));
             } catch (err) {
                 this.output.appendLine(`[bridge] bad message: ${err}`);
             }
@@ -171,7 +176,7 @@ export class BridgeClient implements vscode.Disposable {
             );
             this._stopPing();
             this.ws = null;
-            this._scheduleReconnect();
+            if (code !== 4001) this._scheduleReconnect();
         });
 
         this.ws.on('error', (err) => {
@@ -212,6 +217,8 @@ export class BridgeClient implements vscode.Disposable {
 
     /** 봇이 보낸 메시지 → 세션 상태 업데이트 + 파일 작성 */
     private async _handleMessage(msg: BridgeMessage): Promise<void> {
+        if (this.connection && msg.project_id && msg.project_id !== this.connection.projectId) return;
+        if (this.connection && !vscode.workspace.workspaceFolders?.some(f => f.uri.toString() === this.connection.root.toString())) return;
         switch (msg.type) {
             case 'hello':
                 this.output.appendLine(`[bridge] ${msg.msg ?? 'hello'}`);
@@ -345,6 +352,7 @@ export class BridgeClient implements vscode.Disposable {
     }
 
     private async _flushBuffer(session: Session): Promise<void> {
+        session.flushing = (session.flushing || Promise.resolve()).then(async () => {
         if (!session.editor) return;
         const doc = session.editor.document;
         const fullRange = new vscode.Range(
@@ -361,6 +369,8 @@ export class BridgeClient implements vscode.Disposable {
         } catch (err) {
             this.output.appendLine(`[bridge] flush failed: ${err}`);
         }
+        });
+        return session.flushing;
     }
 
     /** 세션 완료 — 디스크 저장 + 선택 자동 실행 */
@@ -473,7 +483,7 @@ export class BridgeClient implements vscode.Disposable {
         // 쓰지 않는 경로는 아래에서 계속 진행하고, 셸 실행은 여기서 막는다.
         const EXECUTES_IN_SHELL = new Set(['.py', '.js', '.mjs', '.ts', '.sh', '.go']);
         if (EXECUTES_IN_SHELL.has(ext)) {
-            const allowAuto = vscode.workspace
+            const allowAuto = !this.connection && vscode.workspace
                 .getConfiguration('recoder.bridge')
                 .get<boolean>('allowAutoRun', false);
             if (!allowAuto) {
@@ -617,6 +627,7 @@ export class BridgeClient implements vscode.Disposable {
 
     /** 워크스페이스 첫 번째 폴더의 Uri (없으면 undefined) */
     private _getWorkspaceRoot(): vscode.Uri | undefined {
+        if (this.connection) return this.connection.root;
         const folders = vscode.workspace.workspaceFolders;
         return folders && folders.length > 0 ? folders[0].uri : undefined;
     }
