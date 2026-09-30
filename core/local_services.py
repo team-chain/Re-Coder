@@ -197,6 +197,16 @@ def ensure(container: str, progress: Optional[Callable[[str], None]] = None, run
                 raise RuntimeError(f"{svc.label} 이 {wait_seconds}초 안에 준비되지 않았습니다. "
                                    f"`docker logs {name}` 로 원인을 확인하세요.")
             time.sleep(2)
+        if kind == "postgres" and passwords.get(kind):
+            #: 데이터 볼륨은 남았는데 보관한 비밀번호가 바뀌었을 수 있다(~/.recoder 초기화·재설치·다른 PC 에서 복사).
+            #: 그러면 앱이 "password authentication failed" 로 죽는다(실제 재현). 컨테이너 안 로컬 소켓(신뢰 인증)으로
+            #: 비밀번호를 지금 값으로 맞춘다. 실패해도 배포는 계속하고, 앱 로그 진단이 원인을 알린다.
+            password = str(passwords[kind])
+            if re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", password):
+                synced = run(["docker", "exec", name, "psql", "-U", "recoder", "-d", "app", "-v", "ON_ERROR_STOP=1",
+                              "-c", f"ALTER USER recoder WITH PASSWORD '{password}'"], 30)
+                if synced.returncode != 0 and progress:
+                    progress(f"{svc.label} 비밀번호를 맞추지 못했습니다 — 앱이 접속하지 못하면 볼륨 {name}-data 를 확인하세요")
     return ["--network", net]
 
 
