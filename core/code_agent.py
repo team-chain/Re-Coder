@@ -1780,6 +1780,7 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
 _SPLIT_MAX_FILES = 24
 #: 생성 결과의 빌드·실행 문제를 AI 에게 고치게 하는 최대 횟수(결정적 자동 교정은 매번 먼저 한다).
 _CONSISTENCY_ROUNDS = 3
+_GENERATION_BUDGET_SECONDS = int(os.environ.get("RECODER_GENERATION_BUDGET_SECONDS", "540"))
 _SPLIT_BATCH = 2
 _SPLIT_PARALLEL = 3
 _MANIFEST_SCHEMA = {
@@ -1957,6 +1958,10 @@ def generate_code(
         {"summary": str, "ops": [{action, file, language, content, rationale}],
          "model": str, "adr"?: [파일경로]}
     """
+    import time as _time
+    #: 전체 생성 시간 예산 — 확장은 15분까지 기다린다. 예산을 넘기면 AI 교정을 더 하지 않고 결과를 돌려준다
+    #: (남은 문제는 결과에 "확인 필요"로 남고 배포 준비 점검이 다시 잡는다).
+    started_at = _time.monotonic()
     instruction = (instruction or "").strip()
     if not instruction:
         raise ValueError("instruction 이 비어 있습니다.")
@@ -2074,6 +2079,9 @@ def generate_code(
     #: (라우트를 고치면 모델 export 가 어긋나는 식). 오류가 줄지 않으면 멈춘다.
     for _round in range(_CONSISTENCY_ROUNDS):
         if not any(i["severity"] == "error" for i in consistency):
+            break
+        if _round and _time.monotonic() - started_at > _GENERATION_BUDGET_SECONDS:
+            print(f"[code_agent] 생성 시간 예산({_GENERATION_BUDGET_SECONDS}s) 초과 — AI 교정을 멈추고 결과를 돌려줍니다", flush=True)
             break
         improved = False
         issue_lines = "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in consistency)

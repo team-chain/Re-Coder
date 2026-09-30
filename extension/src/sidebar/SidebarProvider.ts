@@ -1,4 +1,5 @@
 import { currentAiProvider } from '../ai/aiKeyEnv';
+import { withTimeout } from '../core/timeouts';
 import { detectFrontendProject } from '../deploy/frontendBuild';
 import * as vscode from 'vscode';
 import * as path from 'path';
@@ -368,12 +369,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** Shared by the launcher, workspace and commands; credentials precede diagnostics. */
     async ensureConnection(): Promise<void> {
         if (this._connectionInFlight) return this._connectionInFlight;
-        const attempt = (async () => {
+        const attempt = withTimeout((async () => {
             await this._coreManager.ensureRunning();
             await this._coreManager.refreshToken();
             const key = this._coreManager.coreInstanceKey();
             if (key !== this._connectionKey) {
-                try { await this.healAwsConnection('startup'); } catch { /* diagnostics supplies details */ }
+                //: AWS 연결 복구는 없어도 되는 단계다 — 끝나지 않아도 개발·배포 요청을 막지 않는다.
+                try { await withTimeout(this.healAwsConnection('startup'), 20_000, 'AWS 연결 복구 시간 초과'); } catch { /* diagnostics supplies details */ }
                 this._connectionKey = key;
             }
             if (!this._pollingActive) {
@@ -392,7 +394,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     error => this.postMessage('core.error', { message: error.message }),
                 );
             }
-        })();
+        })(), 150_000, 'ReCoder Core 연결이 150초 안에 끝나지 않았습니다. 명령 팔레트에서 "ReCoder: Restart Core" 를 실행하거나 창을 다시 불러오세요.');
         this._connectionInFlight = attempt;
         try { await attempt; } finally {
             if (this._connectionInFlight === attempt) this._connectionInFlight = null;
@@ -2086,9 +2088,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 attach = { path: vscode.workspace.asRelativePath(ed.document.uri), content: ed.document.getText() };
             }
         }
+        const status = (stage: string, message: string, waitSeconds: number) =>
+            this.postMessageToWebview(opts.requestWebview, 'code.status', { requestId: opts.requestId, stage, message, waitSeconds });
         try {
+            status('connecting', 'Core 연결을 확인하는 중…', 170);
             await this.ensureConnection();
             this.postMessageToWebview(opts.requestWebview, 'code.generating', { requestId: opts.requestId });
+            //: 큰 요청(쇼핑몰 등)은 파일 목록 → 나눠 생성 → 자동 교정까지 수 분 걸린다. Core 호출 상한(15분)보다 길게 기다린다.
+            status('generating', 'AI 가 코드를 만드는 중… 큰 요청은 파일을 나눠 만들고 빌드·실행 문제를 고치느라 몇 분 걸릴 수 있습니다.', 960);
             const result = await this._apiClient.generateCode(instruction, {
                 workspacePath,
                 openFile: attach,
@@ -2308,8 +2315,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         }
 
+        //: 웹뷰에 단계마다 알린다 — 웹뷰는 이 알림으로 "응답 없음" 판정 시간을 단계에 맞게 늘린다.
+        //: 알림이 한 번도 오지 않으면 요청이 확장에 닿지 않은 것이다(웹뷰가 그렇게 안내한다).
+        const status = (stage: string, message: string, waitSeconds: number) =>
+            this.postMessageToWebview(opts.requestWebview, 'code.status', { requestId: opts.requestId, stage, message, waitSeconds });
         try {
+            status('connecting', 'Core 연결을 확인하는 중…', 170);
             await this.ensureConnection();
+            status('planning', 'AI 가 설계 결정을 준비하는 중…', 270);
             const plan = await this._apiClient.planCode(instruction, {
                 workspacePath,
                 openFile: attach,

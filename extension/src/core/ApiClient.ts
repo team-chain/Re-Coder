@@ -379,7 +379,8 @@ export class ApiClient {
             decisions: opts?.decisions ?? [],
         };
         // Full-file output and one schema correction can take two model calls.
-        const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 480000);
+        //: 분할 생성 + 자동 교정(최대 3회)까지 끝날 시간. Core 는 10분 예산 안에서 교정을 멈춘다.
+        const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 900000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '코드 생성 실패'); }
         return resp.data;
     }

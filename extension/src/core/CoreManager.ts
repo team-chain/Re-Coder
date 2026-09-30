@@ -17,6 +17,7 @@ import { CoreHealth } from '../types';
 import { CoreClient } from '../api/coreClient';
 import { isOlderBundledCore, shouldReuseRunningCore } from './coreReuse';
 import { CoreProcessLog } from './CoreProcessLog';
+import { TimeoutError, withFallback, withTimeout } from './timeouts';
 
 export interface RuntimeConfig {
     port: number;
@@ -34,6 +35,10 @@ interface SpawnSpec {
 }
 
 const SHUTDOWN_GRACE_MS = 5000;
+//: Core 준비 전체 상한 — 한 파일 실행 파일의 첫 시작(최대 60초) + 정리·탐색 여유.
+const ENSURE_RUNNING_TIMEOUT_MS = 120_000;
+//: 보안 저장소 읽기 상한. 확장 호스트가 막 다시 뜬 직후 끝나지 않는 경우가 있었다(실기기).
+const SECRET_READ_TIMEOUT_MS = 5_000;
 const RESTART_SHUTDOWN_TIMEOUT_MS = 15000;
 const AWS_ACCESS_KEY_SECRET = 'recoder.aws.accessKeyId';
 const AWS_SECRET_KEY_SECRET = 'recoder.aws.secretAccessKey';
@@ -110,15 +115,31 @@ export class CoreManager {
         if (this.ensurePromise) {
             return this.ensurePromise;
         }
-        this.ensurePromise = this._ensureRunning();
+        const attempt = withTimeout(this._ensureRunning(), ENSURE_RUNNING_TIMEOUT_MS,
+            `ReCoder Core 를 ${ENSURE_RUNNING_TIMEOUT_MS / 1000}초 안에 준비하지 못했습니다. `
+            + '명령 팔레트에서 "ReCoder: Restart Core" 를 실행하거나 창을 다시 불러오세요. 자세한 내용은 ~/.recoder/core.log 에 있습니다.');
+        this.ensurePromise = attempt;
         try {
-            return await this.ensurePromise;
+            return await attempt;
+        } catch (error) {
+            if (error instanceof TimeoutError) {
+                //: 멈춘 시도를 붙잡고 있으면 다음 요청도 같은 자리에서 멈춘다 — 상태를 풀고 기록을 남긴다.
+                this.isSpawning = false;
+                const log = this.createProcessLog();
+                log.event(`ensure timed out after ${ENSURE_RUNNING_TIMEOUT_MS}ms (stage=${this._ensureStage})`);
+                log.finish();
+            }
+            throw error;
         } finally {
-            this.ensurePromise = null;
+            if (this.ensurePromise === attempt) { this.ensurePromise = null; }
         }
     }
 
+    /** 지금 Core 준비가 어느 단계에서 기다리는지(멈췄을 때 core.log 에 남긴다). */
+    private _ensureStage = 'idle';
+
     private async _ensureRunning(): Promise<CoreClient> {
+        this._ensureStage = 'read-runtime';
         const spec = this._findCoreSpec();
         const expected = this.expectedEntrypoint(spec);
         const runtime = await this.readRuntime();
@@ -140,6 +161,7 @@ export class CoreManager {
         }
 
         // 수동 실행 또는 runtime 파일 기록이 늦는 경우도 실행 경로와 토큰을 확인한다.
+        this._ensureStage = 'probe';
         const detected = await this.probeRunningCore();
         if (detected) {
             //: Core 는 runtime.json 이 지워졌으면 3초 안에 다시 쓴다(runtime guard). 그 한 주기를 기다린다.
@@ -164,12 +186,16 @@ export class CoreManager {
         }
 
         if (this.isSpawning) {
+            this._ensureStage = 'wait-other-spawn';
             await this.waitForReady();
         } else {
             if (!spec) { throw this.missingCoreError(); }
+            this._ensureStage = 'cleanup';
             await this.cleanupStale();
+            this._ensureStage = 'spawn';
             await this.spawnCore(spec);
         }
+        this._ensureStage = 'ready';
         this._client = new CoreClient(this.port, this.sessionToken);
         return this._client;
     }
@@ -241,10 +267,19 @@ export class CoreManager {
 
 
     /** 게이트웨이 모드 env: recoder.gateway.url + 저장된 학생 토큰이 모두 있으면 주입. */
+    /** 보안 저장소 읽기 — 끝나지 않으면 없는 값으로 보고 Core 시작을 계속한다(core.log 에 기록). */
+    private secret(key: string): Promise<string | undefined> {
+        return withFallback(Promise.resolve(this.extensionContext.secrets.get(key)), SECRET_READ_TIMEOUT_MS, undefined, (reason) => {
+            const log = this.createProcessLog();
+            log.event(`secret read skipped key=${key} reason=${reason}`);
+            log.finish();
+        });
+    }
+
     private async _gatewayEnv(): Promise<Record<string, string>> {
         try {
             const url = (vscode.workspace.getConfiguration('recoder.gateway').get<string>('url', '') || '').trim();
-            const token = (await this.extensionContext.secrets.get('recoder.studentToken')) || '';
+            const token = (await this.secret('recoder.studentToken')) || '';
             if (url && token) {
                 return { RECODER_LLM_GATEWAY_URL: url, RECODER_STUDENT_TOKEN: token };
             }
@@ -259,10 +294,10 @@ export class CoreManager {
     private async _awsEnv(): Promise<Record<string, string>> {
         try {
             const [accessKeyId, secretAccessKey, storedRegion, sessionToken] = await Promise.all([
-                this.extensionContext.secrets.get(AWS_ACCESS_KEY_SECRET),
-                this.extensionContext.secrets.get(AWS_SECRET_KEY_SECRET),
-                this.extensionContext.secrets.get(AWS_REGION_SECRET),
-                this.extensionContext.secrets.get(AWS_SESSION_TOKEN_SECRET),
+                this.secret(AWS_ACCESS_KEY_SECRET),
+                this.secret(AWS_SECRET_KEY_SECRET),
+                this.secret(AWS_REGION_SECRET),
+                this.secret(AWS_SESSION_TOKEN_SECRET),
             ]);
             //: 역할 모드면 기반(프로필/키) 위에 역할 ARN 을 얹어 넘긴다. 코어는
             //: 뜨자마자 그 역할을 빌려 기반 자격증명 대신 임시 자격증명을 쓴다.
@@ -310,10 +345,10 @@ export class CoreManager {
     > {
         try {
             const [accessKeyId, secretAccessKey, storedRegion, sessionToken] = await Promise.all([
-                this.extensionContext.secrets.get(AWS_ACCESS_KEY_SECRET),
-                this.extensionContext.secrets.get(AWS_SECRET_KEY_SECRET),
-                this.extensionContext.secrets.get(AWS_REGION_SECRET),
-                this.extensionContext.secrets.get(AWS_SESSION_TOKEN_SECRET),
+                this.secret(AWS_ACCESS_KEY_SECRET),
+                this.secret(AWS_SECRET_KEY_SECRET),
+                this.secret(AWS_REGION_SECRET),
+                this.secret(AWS_SESSION_TOKEN_SECRET),
             ]);
             if (accessKeyId && secretAccessKey) {
                 return {
@@ -579,7 +614,13 @@ export class CoreManager {
 
             // 게이트웨이 모드: 설정 URL + 저장된 학생 토큰이 있으면 Core 에 env 주입 →
             // Core 의 provider_router 가 Bedrock 직접호출 대신 운영자 게이트웨이를 사용.
-            const [gatewayEnv, awsEnv, aiEnv] = await Promise.all([this._gatewayEnv(), this._awsEnv(), aiKeyEnv(this.extensionContext, (p) => vscode.workspace.getConfiguration('recoder.ai').get<string>(`${p}Model`, '') || '')]);
+            const ctx = this.extensionContext;
+            const secretsWithLimit = {
+                secrets: { get: (key: string) => this.secret(key), store: (key: string, value: string) => ctx.secrets.store(key, value), delete: (key: string) => ctx.secrets.delete(key) },
+                globalState: ctx.globalState,
+            };
+            const [gatewayEnv, awsEnv, aiEnv] = await Promise.all([this._gatewayEnv(), this._awsEnv(),
+                withFallback(aiKeyEnv(secretsWithLimit, (p) => vscode.workspace.getConfiguration('recoder.ai').get<string>(`${p}Model`, '') || ''), SECRET_READ_TIMEOUT_MS * 2, {})]);
 
             //: 확장 호스트 전용 변수(ELECTRON_RUN_AS_NODE 등)는 코어에 넘기지 않는다 — 코어가
             //: 띄우는 Docker Desktop(Electron)이 그걸 물려받으면 GUI 없이 즉시 종료한다(실기기).

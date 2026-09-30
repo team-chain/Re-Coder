@@ -83,7 +83,9 @@ test('③ 진단판 버튼은 자동 조치이고 결과를 항목 아래 남긴
 
 test('④ 보관된 연결은 SecretStorage 에서만 읽고 파일로 내보내지 않는다', () => {
   const fn = block(MANAGER, 'async getStoredAwsConnection(', 'coreInstanceKey()');
-  assert.match(fn, /secrets\.get\(AWS_ACCESS_KEY_SECRET\)/);
+  //: 보안 저장소 읽기는 상한이 있는 this.secret() 을 거친다(끝나지 않는 읽기가 Core 시작을 막았다 — 실기기).
+  assert.match(fn, /(?:secrets\.get|this\.secret)\(AWS_ACCESS_KEY_SECRET\)/);
+  assert.match(MANAGER, /private secret\(key: string\)[\s\S]{0,200}extensionContext\.secrets\.get\(key\)/, 'secret() 이 SecretStorage 를 읽지 않는다');
   assert.doesNotMatch(fn, /writeFile|fs\./, '키를 파일에 쓴다');
 });
 

@@ -131,6 +131,9 @@ step('3-B. 재시작 후 새 프로바이더의 ready 가 요청을 이어받고
 step('4. code.plan → 실 코어에서 설계 결정 수신', async () => {
     acceptedPayload = last(captured, 'chat.actionAccepted').payload;
     await sp.handleMessage({ type: 'code.plan', payload: { requestId: 777, instruction: acceptedPayload.instruction, targetFolder: acceptedPayload.targetFolder, contextFiles: [] } }, wv);
+    //: 확장이 요청을 받았다는 단계 알림이 먼저 가야 웹뷰가 "요청을 받지 못함"으로 끊지 않는다.
+    const stages = captured.filter((x) => x.type === 'code.status' && x.payload.requestId === 777).map((x) => x.payload.stage);
+    assert.deepStrictEqual(stages.slice(0, 2), ['connecting', 'planning'], `plan 단계 알림: ${JSON.stringify(stages)}`);
     const m = last(captured, 'code.planResult') || last(captured, 'code.error');
     assert.ok(m, 'planResult/error 모두 없음');
     assert.strictEqual(m.type, 'code.planResult', `설계 결정 실패: ${JSON.stringify(m.payload).slice(0, 300)}`);

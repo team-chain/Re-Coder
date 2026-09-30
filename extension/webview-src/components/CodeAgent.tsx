@@ -57,7 +57,7 @@ export function buildDecisionChoices(
 //: 폴더 A 의 맥락으로 생성됐고 ADR 번호도 A 기준으로 예약됐는데 B 에 쓰면
 //: 같은 이름의 파일·ADR 이 덮어써진다. 적용·모두 적용·diff·경로 표시가
 //: 전부 이 고정값을 쓴다.
-interface Turn { id: number; prompt: string; targetFolder: string; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; }
+interface Turn { id: number; prompt: string; targetFolder: string; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string; }
 export interface CtxFile { path: string; content: string; }
 interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; }
 interface DecisionModal { requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; dropped: string[]; }
@@ -103,9 +103,14 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       expiredRequests.current.add(id);
       if (activeRequest.current === id) activeRequest.current = null;
       delete pendingRequestsRef.current[id];
-      setTurns(ts => ts.map(t => t.id === id ? {...t,status:"error",error:"개발 요청 응답이 없습니다. Core 연결을 확인하거나 실행 창을 다시 시작한 뒤 요청해 주세요."} : t));
+      const acknowledged = acknowledgedRequests.current.has(id);
+      setTurns(ts => ts.map(t => t.id === id ? {...t,status:"error",error: acknowledged
+        ? `${t.progress ? `"${t.progress.replace(/…$/, "")}" 단계에서 ` : ""}응답이 너무 오래 없습니다. 명령 팔레트에서 "ReCoder: Restart Core" 를 실행하거나 창을 다시 불러온 뒤 다시 요청해 주세요.`
+        : "확장이 요청을 받지 못했습니다(작업 폴더를 바꾼 직후 등 확장이 다시 시작되는 중일 수 있습니다). 창을 다시 불러온 뒤(Ctrl+Shift+P → Developer: Reload Window) 다시 요청해 주세요."} : t));
     }, seconds * 1000));
   };
+  //: 확장 호스트가 한 번이라도 "받았다(code.status)"고 알려 온 요청.
+  const acknowledgedRequests = React.useRef(new Set<number>());
   useEffect(() => () => { responseTimers.current.forEach(clearTimeout); }, []);
 
   //: 채팅에서 승인된 요청을 이 패널의 턴으로 등록하고 곧장 code.plan 을 보낸다.
@@ -120,7 +125,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     pendingRequestsRef.current[requestId] = { instruction, targetFolder: folder, contextFiles: files };
     setTargetFolder(folder);
     setTurns((ts) => [...ts, { id: requestId, prompt: instruction, targetFolder: folder, status: "planning" }]);
-    waitForResponse(requestId, 135);
+    waitForResponse(requestId, 30);
     postMessage("code.plan", { requestId, instruction, targetFolder: folder, contextFiles: files });
   }, [externalTurn, postMessage]);
 
@@ -130,6 +135,17 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     if (["code.result", "code.planResult", "code.error"].includes(type) && !(payload as {ackKey?:string})?.ackKey) {
       if (responseId !== undefined && expiredRequests.current.has(responseId)) return;
       finishWaiting(responseId);
+    }
+    if (type === "code.status" || type === "code.generating") {
+      //: 확장이 요청을 받아 다음 단계로 넘어갔다 — 그 단계에 맞는 시간만큼 다시 기다린다.
+      const st = payload as { requestId?: number; message?: string; waitSeconds?: number };
+      if (st.requestId === undefined || expiredRequests.current.has(st.requestId)) return;
+      acknowledgedRequests.current.add(st.requestId);
+      if (type === "code.status") {
+        waitForResponse(st.requestId, Math.max(30, Number(st.waitSeconds) || 180));
+        if (st.message) setTurns(ts => ts.map(t => t.id === st.requestId ? { ...t, progress: st.message } : t));
+      }
+      return;
     }
     if (type === "code.result") {
       const res = payload as CodeResult;
@@ -228,7 +244,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
     // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
     setTurns((ts) => [...ts, { id, prompt: text, targetFolder, status: "planning" }]);
-    waitForResponse(id, 135);
+    waitForResponse(id, 30);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
   }, [input, targetFolder, contextFiles, postMessage]);
@@ -258,7 +274,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     const choices = buildDecisionChoices(decisionModal.decisions, decisionModal.selections);
     setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId ? { ...turn, status: "generating" } : turn));
     setDecisionModal(null);
-    waitForResponse(decisionModal.requestId, 195);
+    waitForResponse(decisionModal.requestId, 30);
     postMessage("code.generate", { requestId: decisionModal.requestId, instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices });
   }, [decisionModal, postMessage]);
 
@@ -406,7 +422,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--vscode-descriptionForeground, #888)", fontSize: 11, padding: "2px 0 6px" }}>
                 <div style={{ width: 11, height: 11, border: "2px solid #3f3f3f", borderTopColor: "var(--vscode-progressBar-background, #3794ff)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
                 <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-                {turn.status === "planning" ? "설계 결정을 준비하는 중…" : "코드 생성 중…"}
+                {turn.progress || (turn.status === "planning" ? "설계 결정을 준비하는 중…" : "코드 생성 중…")}
               </div>
             </>
           )}
