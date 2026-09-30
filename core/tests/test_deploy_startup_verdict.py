@@ -95,3 +95,54 @@ def test_result_reports_post_build_scan_state(monkeypatch,scan,expected):
     assert result['security_scan']['status']==expected
     if expected=='unverified':assert '내려받지' in result['security_scan']['reason']
     else:assert result['security_scan']['high_count']==2
+
+
+@pytest.mark.parametrize('screen,status,restored',[
+    ({'ok':False,'problems':['첫 화면이 HTTP 404 입니다: ENOENT client/dist/index.html'],'diagnosis':{'code':'SCREEN_NOT_HTML','title':'배포 주소는 열리지만 화면이 표시되지 않습니다'}},'failed',True),
+    ({'ok':True,'problems':[]},'success',False),
+    (None,'success',False),
+])
+def test_health_ok_but_blank_screen_is_not_success(monkeypatch,screen,status,restored):
+    """실기기: /health 는 200 인데 화면이 없는 배포가 성공으로 끝났다. 화면 확인이 실패하면 failed 다."""
+    plan=DeploymentPlan(method=DeployMethod.LOCAL_DOCKER,action=ActionType.DOCKER_RUN,image='fixture:v2',container_name='fixture',ports={'18119':'3000'},enable_continuous_verification=False)
+    previous=DeploymentRecord(method=DeployMethod.LOCAL_DOCKER,project_id='fixture',image='fixture:v1',container_name='fixture',ports=plan.ports,status=DeployStatus.SUCCESS,rollback_eligible=True)
+    monkeypatch.setattr(d,'_deployment_plans',{plan.plan_id:plan})
+    monkeypatch.setattr(d,'_deployment_records',{})
+    monkeypatch.setattr(d,'_plans_pending_image_scan',{})
+    monkeypatch.setattr(d,'_plan_workspaces',{})
+    monkeypatch.setattr(d,'_container_locks',{})
+    monkeypatch.setattr(d,'_refresh_rollback_target',lambda _:('fixture:v1','previous'))
+    monkeypatch.setattr(d,'_rollback_source_for',lambda *args:previous)
+    monkeypatch.setattr(d,'_save_records',lambda:None)
+    async def nothing(*args):return None
+    async def healthy(*args):return True
+    async def restore(*args):return True,'restored',''
+    async def resumed(*args):return True
+    async def prune(*args):return []
+    async def screen_check(*args):return screen
+    for name in ['_build_local_image','_stop_prior_verifications_for_container','_remove_existing_local_container','_pin_rollback_image','_running_image_id','_local_startup_failure']:
+        monkeypatch.setattr(d,name,nothing)
+    monkeypatch.setattr(d,'_verify_rollback_candidate_health',healthy)
+    monkeypatch.setattr(d,'_verify_local_screen',screen_check)
+    monkeypatch.setattr(d,'_restore_prior_local_container',restore)
+    monkeypatch.setattr(d,'_resume_verification_for',resumed)
+    monkeypatch.setattr(d,'_prune_old_rollback_pins',prune)
+    monkeypatch.setattr(d.subprocess,'run',lambda cmd,**kwargs:subprocess.CompletedProcess(cmd,0,'container-id',''))
+    result=asyncio.run(d.execute_deployment(d.ExecuteRequest(plan_id=plan.plan_id,approved=True)))
+    assert result['status']==status and result['restored_previous'] is restored
+    assert d._deployment_records[result['deployment_id']].status.value==status
+    if screen and not screen['ok']:
+        assert result['diagnosis']['code']=='SCREEN_NOT_HTML' and result['health_ok'] is False and 'ENOENT' in result['stderr']
+    if screen is None:
+        assert 'screen' not in result
+
+
+def test_api_only_server_is_not_judged_by_screen(monkeypatch,tmp_path):
+    """화면이 없는 API 서버는 '/' 가 JSON·404 여도 정상 — 화면 확인이 배포를 막지 않는다."""
+    import screen_check
+    (tmp_path/'package.json').write_text('{"name":"api","scripts":{"start":"node s.js"}}',encoding='utf-8')
+    (tmp_path/'s.js').write_text("require('express')().listen(3000)",encoding='utf-8')
+    monkeypatch.setenv('RECODER_SCREEN_CHECK','1')
+    monkeypatch.setattr(screen_check,'check_screen',lambda url,**kw:screen_check.ScreenResult(ok=False,url=url,code='SCREEN_NOT_HTML',problems=['404']))
+    plan=DeploymentPlan(method=DeployMethod.LOCAL_DOCKER,action=ActionType.DOCKER_RUN,image='x:1',container_name='x',ports={'18120':'3000'})
+    assert asyncio.run(d._verify_local_screen(plan,str(tmp_path))) is None

@@ -39,7 +39,7 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_DEPENDENCY_VERSION_NOT_FOUND", "DOCKERFILE_SUBPROJECT_DEPS_MISSING", "NODE_FRONTEND_NOT_SERVED",
                 "NODE_LOCAL_IMPORT_MISSING", "NODE_VITE_JSX_IN_JS", "NODE_VITE_PROCESS_ENV", "NODE_IMPORT_PACKAGE_TYPO",
                 "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING", "NODE_PG_NUMERIC_STRINGS", "NODE_CLIENT_HARDCODED_LOCALHOST",
-                "NODE_ROUTER_ANCHOR_LINK"}
+                "NODE_ROUTER_ANCHOR_LINK", "NODE_MODULE_FORMAT_MISMATCH", "NODE_FRONTEND_NOT_BUILT"}
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -592,7 +592,9 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             exported = _cjs_exports(_strip_js_comments(files.read(target) or ""))
             if exported is None:
                 continue
-            used = names if names is not None else set(re.findall(rf"\b{re.escape(var)}\.([\w$]+)", active))
+            #: 문자열 안('./cfg.cjs')의 "cfg.cjs" 를 속성 접근으로 보지 않는다
+            code_only = _QUOTED_STRING.sub("''", active)
+            used = names if names is not None else set(re.findall(rf"\b{re.escape(var)}\.([\w$]+)", code_only))
             for name in sorted(set(used)):
                 if name not in exported:
                     missing_names.append(f"`{name}`({rel} → {target})")
@@ -752,6 +754,729 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             + ", ".join(f"`{k}` → `{v[0]}`?({v[1]})" for k, v in list(typos.items())[:5])
             + ". 선언 안 된 이름은 설치되지 않아 빌드가 실패합니다.",
             "import 를 package.json 에 선언된 이름으로 고치세요(자동 수정 가능).", next(iter(typos.values()))[1], True))
+
+
+# ---------------------------------------------------------------------------
+# Node 모듈 형식(ESM·CommonJS) — AI 가 파일을 나눠 만들면 서로 다른 형식이 섞인다
+# ---------------------------------------------------------------------------
+#
+# 실기기(TEMP 쇼핑몰): package.json 이 "type": "module" 이고 server.js 는 import 로 쓰였는데
+# src/ 의 라우트·모델은 require/module.exports 로 만들어져 컨테이너가
+# "does not provide an export named 'default'" 로 시작 직후 죽었다. develop·1.1.25 모두 같았다.
+# 서버 진입 파일에서 실제로 불러오는 파일만 따라가 판정하므로 화면 코드(Vite)는 건드리지 않는다.
+
+_ESM_STATEMENT = re.compile(
+    r"""^[ \t]*(?:import\s+(?:[\w$*{][^;'"]*?\s+from\s+)?['"][^'"]+['"]|import\s*\{[^}]*\}\s*from\s*['"]|export\s+(?:default\b|async\s+function\b|function\b|class\b|const\b|let\b|var\b|\{|\*))""",
+    re.MULTILINE)
+_CJS_MARKER = re.compile(r"""\brequire\s*\(\s*['"][^'"]+['"]\s*\)|\bmodule\.exports\b|^[ \t]*exports\.[\w$]+\s*=""", re.MULTILINE)
+_QUOTED_STRING = re.compile(r"'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"")
+_CREATE_REQUIRE = re.compile(r"[cC]reateRequire\s*\(")
+_REL_SPEC_ANY = re.compile(
+    r"""(\bfrom\s*|^[ \t]*import\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)(['"])(\.{1,2}/[^'"\n]*)\2""", re.MULTILINE)
+#: require() 로 부를 수 없는 ESM 전용 패키지(이 major 이상). CommonJS 로 바꾸면 안 된다.
+_ESM_ONLY_PACKAGES = {"node-fetch": 3, "chalk": 5, "nanoid": 4, "got": 12, "p-limit": 4, "ora": 6,
+                      "execa": 6, "boxen": 6, "inquirer": 9, "log-symbols": 5, "strip-ansi": 7,
+                      "string-width": 6, "camelcase": 7, "globby": 12, "del": 7, "open": 9, "lowdb": 2,
+                      "query-string": 8, "file-type": 17, "pretty-bytes": 6, "mime": 4}
+
+
+def _js_syntax(text: str) -> str:
+    """'esm' | 'cjs' | 'mixed'(import 와 require 를 함께, createRequire 없이) | 'none'."""
+    active = _strip_js_comments(text)
+    active = re.sub(r"`(?:\\.|[^`\\])*`", "``", active)  # 템플릿 문자열 안의 코드 예시는 보지 않는다
+    esm = bool(_ESM_STATEMENT.search(active))
+    cjs = bool(_CJS_MARKER.search(active))
+    if esm and cjs:
+        return "esm" if _CREATE_REQUIRE.search(active) else "mixed"
+    return "esm" if esm else ("cjs" if cjs else "none")
+
+
+def _package_type_raw(files: "ProjectFiles", folder: str) -> str:
+    """package.json 의 type 그대로("module" | "commonjs" | "" = 적지 않음)."""
+    try:
+        pkg = json.loads(files.read(f"{folder}/package.json" if folder else "package.json") or "")
+    except ValueError:
+        return ""
+    value = pkg.get("type") if isinstance(pkg, dict) else None
+    return value if value in ("module", "commonjs") else ""
+
+
+def _dockerfile_node_is_old(files: "ProjectFiles") -> bool:
+    """루트 Dockerfile 이 Node 22 미만 이미지를 쓰는가(없으면 ReCoder 기본 node:22 → False)."""
+    text = files.read("Dockerfile") or ""
+    majors = [int(m) for m in re.findall(r"(?im)^\s*FROM\s+(?:--platform=\S+\s+)?(?:docker\.io/)?(?:library/)?node:(\d+)", text)]
+    return bool(majors) and majors[-1] < 22
+
+
+def _package_type(files: "ProjectFiles", folder: str) -> str:
+    try:
+        pkg = json.loads(files.read(f"{folder}/package.json" if folder else "package.json") or "")
+    except ValueError:
+        return "commonjs"
+    return "module" if isinstance(pkg, dict) and pkg.get("type") == "module" else "commonjs"
+
+
+def _module_graph(files: "ProjectFiles", entry: str) -> list[str]:
+    """진입 파일에서 상대 경로 import/require 로 닿는 JS 파일(진입 포함, 방문 순서)."""
+    seen: list[str] = []
+    queue = [entry]
+    while queue and len(seen) < 400:
+        rel = queue.pop(0)
+        if rel in seen or not rel.endswith((".js", ".cjs", ".mjs")):
+            continue
+        text = files.read(rel)
+        if text is None:
+            continue
+        seen.append(rel)
+        for _kw, _q, spec in _REL_SPEC_ANY.findall(_strip_js_comments(text)):
+            target = _resolve_local(files, rel, spec)
+            if target and not target.startswith("..") and target not in seen:
+                queue.append(target)
+    return seen
+
+
+def _relative_spec(importer: str, target: str) -> str:
+    import posixpath
+    spec = posixpath.relpath(target, posixpath.dirname(importer) or ".")
+    return spec if spec.startswith("../") else "./" + spec
+
+
+def module_spec_rewrite(text: str, importer: str, mapping: Mapping[str, str], files: "ProjectFiles",
+                        esm_importer: bool) -> str:
+    """importer 안의 상대 경로 import/require 중 mapping(옛 경로→새 경로)에 걸리는 것을 새 경로로.
+
+    esm_importer=True 면 확장자 없는 경로(ESM 에서 ERR_MODULE_NOT_FOUND)도 실제 파일 이름으로 채운다.
+    """
+    def repl(m):
+        kw, quote, spec = m.group(1), m.group(2), m.group(3)
+        target = _resolve_local(files, importer, spec)
+        if not target or target.startswith(".."):
+            return m.group(0)
+        new_target = mapping.get(target)
+        if new_target is None:
+            if not esm_importer or not target.endswith((".js", ".mjs", ".cjs", ".json")):
+                return m.group(0)
+            import posixpath
+            if posixpath.normpath(posixpath.join(posixpath.dirname(importer), spec)) == target:
+                return m.group(0)  # 이미 정확한 파일 이름
+            new_target = target
+        return f"{kw}{quote}{_relative_spec(importer, new_target)}{quote}"
+
+    return _REL_SPEC_ANY.sub(repl, text)
+
+
+def esm_named_cjs_rewrite(text: str, cjs_targets: set[str], importer: str, files: "ProjectFiles") -> str:
+    """ESM 이 CommonJS(.cjs) 파일에서 이름을 골라 가져오면 Node 가 이름을 못 찾을 수 있다 —
+    기본 가져오기 + 구조 분해로 바꾼다(항상 module.exports 를 그대로 받는다)."""
+    pattern = re.compile(r"""^([ \t]*)import\s+(?:([\w$]+)\s*,\s*)?\{([^}]*)\}\s*from\s*(['"])(\.{1,2}/[^'"]+)\4\s*;?""", re.MULTILINE)
+
+    def repl(m):
+        indent, default, names, quote, spec = m.groups()
+        if _resolve_local(files, importer, spec) not in cjs_targets:
+            return m.group(0)
+        parts = []
+        for raw in names.split(","):
+            raw = raw.strip()
+            if not raw or raw.startswith("type "):
+                continue
+            src, _, alias = raw.partition(" as ")
+            parts.append(f"{src.strip()}: {alias.strip()}" if alias.strip() else src.strip())
+        base = default or "__recoder_" + re.sub(r"\W", "_", spec.rsplit("/", 1)[-1].split(".")[0])
+        line = f"{indent}import {base} from {quote}{spec}{quote};"
+        if parts:
+            line += f"\n{indent}const {{ {', '.join(parts)} }} = {base};"
+        return line
+
+    return pattern.sub(repl, text)
+
+
+def esm_to_cjs(text: str) -> Optional[str]:
+    """단순한 ESM 파일을 CommonJS 로 바꾼다. 확실히 바꿀 수 없는 형태면 None.
+
+    바꾸는 것: import(기본·이름·네임스페이스·부수효과), export default/const/function/class/{…},
+    import.meta.url·dirname·filename. 못 바꾸는 것: 최상위 await, export * / export … from.
+    """
+    if re.search(r"^export\s*\*|^export\s*\{[^}]*\}\s*from\b|^await\s|^(?:const|let|var)\s[^\n]*=\s*await\s", text, re.MULTILINE):
+        return None
+    for pkg, major in _ESM_ONLY_PACKAGES.items():
+        if re.search(rf"""from\s*['"]{re.escape(pkg)}['"]""", text):
+            return None  # ESM 전용 패키지 — require 로 부를 수 없다
+    newline = "\r\n" if "\r\n" in text else "\n"
+    exported: list[tuple[str, str]] = []  # (지역 이름, 내보내는 이름)
+    default_tail: list[str] = []
+
+    def imp(m):
+        indent, clause, quote, spec = m.group(1), m.group(2).strip(), m.group(3), m.group(4)
+        req = f"require({quote}{spec}{quote})"
+        default, named, ns = None, None, None
+        mm = re.match(r"^([\w$]+)?\s*,?\s*(?:\{([^}]*)\}|\*\s+as\s+([\w$]+))?$", clause, re.DOTALL)
+        if not mm:
+            raise ValueError(clause)
+        default, named, ns = mm.group(1), mm.group(2), mm.group(3)
+        out = []
+        if default:
+            out.append(f"{indent}const {default} = {req};")
+        if ns:
+            out.append(f"{indent}const {ns} = {req};")
+        if named is not None:
+            parts = []
+            for raw in named.split(","):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                if raw.startswith("type "):
+                    continue
+                src, _, alias = raw.partition(" as ")
+                parts.append(f"{src.strip()}: {alias.strip()}" if alias.strip() else src.strip())
+            if parts:
+                out.append(f"{indent}const {{ {', '.join(parts)} }} = {default or req};")
+        return newline.join(out)
+
+    try:
+        text = re.sub(r"""^([ \t]*)import\s+((?:[\w$]+\s*,?\s*)?(?:\{[^}]*\}|\*\s+as\s+[\w$]+)?)\s*from\s*(['"])([^'"]+)\3\s*;?""",
+                      imp, text, flags=re.MULTILINE)
+    except ValueError:
+        return None
+    text = re.sub(r"""^([ \t]*)import\s*(['"])([^'"]+)\2\s*;?""", r"\1require(\2\3\2);", text, flags=re.MULTILINE)
+    if re.search(r"^[ \t]*import\s+[\w${*]", text, re.MULTILINE):
+        return None  # 해석하지 못한 import 가 남았다
+
+    def named_decl(m):
+        kind, name = m.group(2), m.group(3)
+        exported.append((name, name))
+        return f"{m.group(1)}{kind} {name}"
+
+    text = re.sub(r"^([ \t]*)export\s+(const|let|var)\s+([\w$]+)", named_decl, text, flags=re.MULTILINE)
+    text = re.sub(r"^([ \t]*)export\s+(async\s+function\*?|function\*?|class)\s+([\w$]+)", named_decl, text, flags=re.MULTILINE)
+
+    def export_list(m):
+        for raw in m.group(2).split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            local, _, alias = raw.partition(" as ")
+            local, alias = local.strip(), (alias.strip() or local.strip())
+            if alias == "default":
+                default_tail.append(f"module.exports = {local};")
+            else:
+                exported.append((local, alias))
+        return m.group(1).rstrip()
+
+    text = re.sub(r"^([ \t]*)export\s*\{([^}]*)\}\s*;?", export_list, text, flags=re.MULTILINE)
+
+    def default_decl(m):
+        kind, name = m.group(2), m.group(3)
+        default_tail.append(f"module.exports = {name};")
+        return f"{m.group(1)}{kind} {name}"
+
+    text = re.sub(r"^([ \t]*)export\s+default\s+(async\s+function\*?|function\*?|class)\s+([\w$]+)", default_decl, text, flags=re.MULTILINE)
+    text = re.sub(r"^([ \t]*)export\s+default\s+", r"\1module.exports = ", text, flags=re.MULTILINE)
+    if re.search(r"^[ \t]*export\b", text, re.MULTILINE):
+        return None
+    # import.meta — CommonJS 에는 __filename·__dirname 이 이미 있다(다시 선언하면 SyntaxError)
+    text = re.sub(r"\b(?:url\.)?fileURLToPath\(\s*import\.meta\.url\s*\)", "__filename", text)
+    text = text.replace("import.meta.dirname", "__dirname").replace("import.meta.filename", "__filename")
+    text = text.replace("import.meta.url", "require('url').pathToFileURL(__filename).href")
+    if "import.meta" in text:
+        return None
+    text = re.sub(r"^[ \t]*(?:const|let|var)\s+__filename\s*=\s*__filename\s*;?[ \t]*(?:\r?\n)", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[ \t]*(?:const|let|var)\s+__dirname\s*=\s*(?:path\.)?dirname\(\s*__filename\s*\)\s*;?[ \t]*(?:\r?\n)", "", text, flags=re.MULTILINE)
+    if re.search(r"^[ \t]*(?:const|let|var)\s+__(?:filename|dirname)\b", text, re.MULTILINE):
+        return None
+    tail = list(default_tail)
+    if exported:
+        target = "module.exports" if default_tail else "module.exports"
+        tail += [f"{target}.{alias} = {local};" for local, alias in exported]
+    if tail:
+        text = text.rstrip() + newline + newline + newline.join(tail) + newline
+    return text
+
+
+_ESM_DIRNAME_SHIM = ("import { fileURLToPath as __recoderFileURLToPath } from 'url';{nl}"
+                     "import {{ dirname as __recoderDirname }} from 'path';{nl}"
+                     "const __filename = __recoderFileURLToPath(import.meta.url);{nl}"
+                     "const __dirname = __recoderDirname(__filename);{nl}")
+
+
+def esm_dirname_shim(text: str) -> str:
+    """ESM 파일이 선언 없이 __dirname/__filename 을 쓰면 ReferenceError — 마지막 import 뒤에 정의를 넣는다."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    shim = (f"import {{ fileURLToPath as __recoderFileURLToPath }} from 'url';{newline}"
+            f"import {{ dirname as __recoderDirname }} from 'path';{newline}"
+            f"const __filename = __recoderFileURLToPath(import.meta.url);{newline}"
+            f"const __dirname = __recoderDirname(__filename);{newline}")
+    imports = list(re.finditer(r"""^[ \t]*import\b[^;]*?['"][^'"]+['"]\s*;?[ \t]*$""", text, re.MULTILINE | re.DOTALL))
+    at = imports[-1].end() + 1 if imports else 0
+    at = min(at, len(text))
+    return text[:at] + ("" if at == 0 or text[at - 1] == "\n" else newline) + shim + text[at:]
+
+
+def esm_require_shim(text: str) -> str:
+    """ESM 파일이 require 를 쓰면 ReferenceError — createRequire 로 require 를 정의한다(마지막 import 뒤)."""
+    if re.search(r"\bconst\s+require\s*=", text):
+        return text
+    newline = "\r\n" if "\r\n" in text else "\n"
+    shim = (f"import {{ createRequire as __recoderCreateRequire }} from 'module';{newline}"
+            f"const require = __recoderCreateRequire(import.meta.url);{newline}")
+    #: import 는 끌어올려지므로 맨 위에 둬도 된다 — require 를 import 보다 먼저 쓰는 파일도 동작한다.
+    at = text.index("\n") + 1 if text.startswith("#!") and "\n" in text else 0
+    return text[:at] + shim + text[at:]
+
+
+def _lexer_exports(text: str) -> set[str]:
+    """Node(cjs-module-lexer)가 ESM 이름 가져오기로 내줄 수 있는 CommonJS 이름 — 보수적으로 좁게 본다."""
+    active = _strip_js_comments(text)
+    names = set(re.findall(r"\b(?:module\.)?exports\.([\w$]+)\s*=", active))
+    for body in re.findall(r"\bmodule\.exports\s*=\s*\{([^{}]*)\}", active):
+        for part in body.split(","):
+            part = part.strip()
+            m = re.fullmatch(r"""([\w$]+)|['"]?([\w$]+)['"]?\s*:\s*[\w$]+""", part)
+            if not part:
+                continue
+            if not m:
+                break  # 식별자가 아닌 값이 나오면 lexer 가 거기서 멈춘다
+            names.add(m.group(1) or m.group(2))
+    names.add("default")
+    return names
+
+
+def _uses_undeclared_dirname(text: str) -> bool:
+    active = _strip_js_comments(text)
+    uses = re.search(r"\b__(?:dirname|filename)\b", active)
+    declared = re.search(r"\b(?:const|let|var)\s+__(?:dirname|filename)\b|\bfunction\s+__dirname\b", active)
+    return bool(uses and not declared)
+
+
+def _node_entry(files: "ProjectFiles", scripts: dict, main) -> Optional[str]:
+    entry = _start_entry(scripts)
+    if entry and files.exists(entry):
+        return entry
+    if isinstance(main, str) and files.exists(_norm(main)) and _norm(main).endswith((".js", ".mjs", ".cjs")):
+        return _norm(main)
+    for rel in ("server.js", "index.js", "app.js", "src/server.js", "src/index.js", "src/app.js",
+                "server/index.js", "server/server.js", "backend/server.js", "backend/index.js"):
+        text = files.read(rel)
+        if text and _is_server_file(text):
+            return rel
+    return None
+
+
+def module_format_plan(files: "ProjectFiles", entry: Optional[str], owner) -> Optional[dict]:
+    """서버 진입 파일부터 불러오는 파일들의 모듈 형식이 어긋나면 고칠 계획을 돌려준다(없으면 None).
+
+    반환: {"problems": [문장], "auto": bool, "why_not": str, "writes": {경로: 내용}, "renames": [(옛, 새)],
+           "files": [관련 파일]}. writes 는 새 경로 기준 최종 내용이다(renames 의 옛 경로는 지운다).
+    """
+    if not entry or not entry.endswith((".js", ".mjs", ".cjs")):
+        return None
+    graph = _module_graph(files, entry)
+    if not graph:
+        return None
+    scope = owner(entry)
+    pkg_type = _package_type(files, scope)
+    #: package.json 에 type 이 없으면 Node 22(ReCoder Dockerfile 기본)는 파일마다 문법을 보고 ESM·CommonJS 를
+    #: 정한다(module syntax detection). 그때는 import 를 쓴 .js 도 정상이다 — 예전 Node(22 미만) 이미지만 아니면.
+    detect = _package_type_raw(files, scope) == "" and not _dockerfile_node_is_old(files)
+    syntax: dict[str, str] = {}
+
+    def mode(rel: str) -> str:
+        if rel.endswith(".mjs"):
+            return "esm"
+        if rel.endswith(".cjs"):
+            return "cjs"
+        raw = _package_type_raw(files, owner(rel))
+        if raw == "module":
+            return "esm"
+        if raw == "" and detect:
+            kind = syntax.get(rel) or _js_syntax(files.read(rel) or "")
+            return "esm" if kind in ("esm", "mixed") else "cjs"
+        return "cjs"
+
+    syntax.update({rel: _js_syntax(files.read(rel) or "") for rel in graph})
+    #: import 와 require 를 함께 쓰는 파일은 ESM 으로 본다 — ESM 이면 createRequire 로 require 를 만들어 주고,
+    #: CommonJS 로 가면 import 를 require 로 바꾼다. 어느 쪽이든 확실히 고칠 수 있다.
+    mixed_files = {rel for rel, kind in syntax.items() if kind == "mixed"}
+    mixed = sorted(mixed_files)
+    for rel in mixed:
+        syntax[rel] = "esm"
+    wrong = [rel for rel in graph if syntax[rel] in ("esm", "cjs") and syntax[rel] != mode(rel)]
+    esm_files = [rel for rel in graph if mode(rel) == "esm" and syntax[rel] == "esm"] + \
+                [rel for rel in wrong if syntax[rel] == "esm"]
+    # ESM 으로 실행될 파일의 확장자 없는 상대 경로(ERR_MODULE_NOT_FOUND)와 선언 없는 __dirname
+    problems: list[str] = []
+    if wrong:
+        shown = ", ".join(f"{r}({'import/export' if syntax[r] == 'esm' else 'require/module.exports'})" for r in wrong[:5])
+        declared = 'ESM("type": "module")' if pkg_type == "module" else "CommonJS"
+        problems.append(f"package.json 은 {declared} 인데 서버가 불러오는 파일의 형식이 다릅니다: {shown}")
+    if mixed:
+        problems.append(f"한 파일에 import 와 require 가 섞여 있습니다: {', '.join(mixed[:5])}")
+    #: CommonJS 파일이 ESM 파일을 require 하면 Node 22 는 모듈 객체({ default })를 돌려줘 값이 undefined 가 되고,
+    #: 예전 Node 는 ERR_REQUIRE_ESM 으로 멈춘다.
+    required_esm: list[str] = []
+    for rel in graph:
+        if mode(rel) != "cjs":
+            continue
+        for spec in re.findall(r"""\brequire\s*\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""", _strip_js_comments(files.read(rel) or "")):
+            tgt = _resolve_local(files, rel, spec)
+            if tgt in syntax and tgt.endswith(".js") and mode(tgt) == "esm" and tgt not in required_esm:
+                required_esm.append(tgt)
+    if detect and required_esm:
+        problems.append("CommonJS 파일이 ESM 파일을 require 합니다(값이 undefined 가 됨): " + ", ".join(required_esm[:5]))
+
+    # 목표 형식: 진입 파일이 쓴 형식을 따른다(package.json 의 type 보다 코드가 사용자의 의도에 가깝다).
+    entry_syntax = syntax.get(entry, "none")
+    target = "esm" if (entry_syntax == "esm" or entry.endswith(".mjs")) else \
+        ("cjs" if entry_syntax == "cjs" or entry.endswith(".cjs") else ("esm" if pkg_type == "module" else "cjs"))
+
+    after_mode = {rel: mode(rel) for rel in graph}
+    writes: dict[str, str] = {}
+    renames: list[tuple[str, str]] = []
+    why_not = ""
+    manifest = f"{scope}/package.json" if scope else "package.json"
+    foreign = [r for r in wrong + mixed if owner(r) != scope]
+    if foreign:
+        why_not = f"다른 package.json 아래 파일({foreign[0]})이라 자동으로 고치지 않습니다."
+    elif detect:
+        #: type 을 건드리지 않는다 — require 로 불리는 ESM 파일만 CommonJS 로 바꾼다.
+        for rel in required_esm:
+            converted = esm_to_cjs(files.read(rel) or "")
+            if converted is None:
+                why_not = f"{rel} 을(를) CommonJS 로 확실히 바꿀 수 없습니다(최상위 await·재수출·ESM 전용 패키지)."
+                break
+            writes[rel] = converted
+        after_mode = {rel: ("cjs" if rel in writes else after_mode[rel]) for rel in graph}
+    elif wrong and target == "esm":
+        if pkg_type != "module":
+            #: type 을 module 로 바꾸면 지금은 맞던 CommonJS .js 파일도 ESM 으로 해석된다 — 함께 .cjs 로.
+            wrong += [r for r in graph if r.endswith(".js") and syntax[r] == "cjs" and r not in wrong]
+            raw = files.read(manifest) or ""
+            try:
+                pkg = json.loads(raw)
+                pkg["type"] = "module"
+                newline = "\r\n" if "\r\n" in raw else "\n"
+                writes[manifest] = json.dumps(pkg, ensure_ascii=False, indent=2).replace("\n", newline) + newline
+            except (ValueError, TypeError):
+                why_not = "package.json 을 읽지 못했습니다."
+            #: type 을 바꾸면 그래프 밖의 CommonJS 설정 파일(tailwind.config.js 등)도 ESM 으로 해석된다 — 같이 .cjs 로.
+            for rel in files.files():
+                if owner(rel) == scope and rel.endswith(".js") and rel not in graph and "/node_modules/" not in f"/{rel}" \
+                        and not rel.startswith(_BROWSER_DIRS) and _js_syntax(files.read(rel) or "") == "cjs":
+                    wrong.append(rel)
+            after_mode = {rel: ("esm" if rel.endswith(".js") else after_mode[rel]) for rel in graph}
+        cjs_wrong = [r for r in wrong if (syntax.get(r) or _js_syntax(files.read(r) or "")) == "cjs"]
+        esm_needed_by_cjs = []
+        for rel in cjs_wrong:
+            for _kw, _q, spec in _REL_SPEC_ANY.findall(_strip_js_comments(files.read(rel) or "")):
+                tgt = _resolve_local(files, rel, spec)
+                if tgt in graph and tgt not in cjs_wrong and syntax.get(tgt) == "esm":
+                    esm_needed_by_cjs.append(tgt)
+        if esm_needed_by_cjs:
+            why_not = f"CommonJS 파일이 ESM 파일({esm_needed_by_cjs[0]})을 require 합니다 — 자동으로 고치지 않습니다."
+        else:
+            renames = [(r, r[:-3] + ".cjs") for r in cjs_wrong if not files.exists(r[:-3] + ".cjs")]
+    elif wrong and target == "cjs":
+        #: type 을 빼면 지금은 맞던 ESM .js 파일도 CommonJS 로 해석된다 — 함께 require 로 바꾼다.
+        esm_wrong = [r for r in graph if syntax[r] == "esm" and (r in wrong or (pkg_type == "module" and r.endswith(".js")))]
+        for rel in esm_wrong:
+            converted = esm_to_cjs(files.read(rel) or "")
+            if converted is None:
+                why_not = f"{rel} 을(를) CommonJS 로 확실히 바꿀 수 없습니다(최상위 await·재수출·ESM 전용 패키지)."
+                break
+            writes[rel] = converted
+        if not why_not and pkg_type == "module":
+            raw = files.read(manifest) or ""
+            try:
+                pkg = json.loads(raw)
+                pkg.pop("type", None)
+                newline = "\r\n" if "\r\n" in raw else "\n"
+                writes[manifest] = json.dumps(pkg, ensure_ascii=False, indent=2).replace("\n", newline) + newline
+            except (ValueError, TypeError):
+                why_not = "package.json 을 읽지 못했습니다."
+            # type 을 빼면 그래프 밖의 ESM .js(설정·스크립트)가 CommonJS 로 해석된다 — .mjs 로.
+            for rel in files.files():
+                if owner(rel) == scope and rel.endswith(".js") and rel not in graph and "/node_modules/" not in f"/{rel}" \
+                        and not rel.startswith(_BROWSER_DIRS) and _js_syntax(files.read(rel) or "") == "esm" \
+                        and not files.exists(rel[:-3] + ".mjs"):
+                    renames.append((rel, rel[:-3] + ".mjs"))
+        after_mode = {rel: ("cjs" if rel.endswith(".js") else after_mode[rel]) for rel in graph}
+
+    # 새 형식에서 ESM 으로 실행되는 파일: 확장자 없는 상대 경로 · 선언 없는 __dirname
+    rename_map = dict(renames)
+    ext_missing: list[str] = []
+    dirname_files: list[str] = []
+    named_from_cjs: list[str] = []
+    final_modes: dict[str, str] = {}
+    for rel in graph:
+        new_rel = rename_map.get(rel, rel)
+        final_modes[rel] = "cjs" if new_rel.endswith(".cjs") else ("esm" if new_rel.endswith(".mjs") else
+                                                                     ("cjs" if rel in writes else after_mode.get(rel, mode(rel))))
+    for rel in graph:
+        if final_modes[rel] != "esm":
+            continue
+        text = writes.get(rel, files.read(rel) or "")
+        for _kw, _q, spec in _REL_SPEC_ANY.findall(_strip_js_comments(text)):
+            import posixpath
+            tgt = _resolve_local(files, rel, spec)
+            if tgt and not tgt.startswith("..") and posixpath.normpath(posixpath.join(posixpath.dirname(rel), spec)) != tgt:
+                ext_missing.append(f"{rel} → '{spec}'")
+        if _uses_undeclared_dirname(text):
+            dirname_files.append(rel)
+        #: ESM 이 CommonJS 파일에서 이름으로 가져오면 Node 는 정적으로 찾을 수 있는 이름만 준다
+        #: (module.exports = { greet: () => … } 는 못 찾는다 → "Named export not found").
+        for names, spec in _ESM_NAMED_IMPORT.findall(_strip_js_comments(text)):
+            tgt = _resolve_local(files, rel, spec)
+            if tgt in final_modes and final_modes[tgt] == "cjs":
+                wanted = {n.strip().split(" as ")[0].strip() for n in names.split(",") if n.strip() and not n.strip().startswith("type ")}
+                if not wanted <= _lexer_exports(files.read(tgt) or ""):
+                    named_from_cjs.append(f"{rel} ← {tgt}")
+    if named_from_cjs:
+        problems.append("ESM 이 CommonJS 파일에서 Node 가 찾지 못하는 이름을 가져옵니다(Named export not found): "
+                        + ", ".join(named_from_cjs[:4]))
+    if ext_missing:
+        problems.append("ESM 은 상대 경로에 파일 확장자가 있어야 합니다(ERR_MODULE_NOT_FOUND): " + ", ".join(ext_missing[:4]))
+    if dirname_files:
+        problems.append("ESM 파일에는 __dirname·__filename 이 없습니다(ReferenceError): " + ", ".join(dirname_files[:4]))
+    if not problems:
+        return None
+    if why_not:
+        return {"problems": problems, "auto": False, "why_not": why_not, "writes": {}, "renames": [],
+                "files": (wrong + mixed)[:1] or [entry]}
+
+    # 내용 계산: 모든 스코프 파일에서 경로를 새 이름으로, ESM 파일은 확장자를 채우고 .cjs 의 이름 가져오기를 구조 분해로
+    cjs_old = {rel for rel, kind in final_modes.items() if kind == "cjs"}
+    touched = set(graph) | {old for old, _new in renames}
+    for rel in files.files():
+        if owner(rel) == scope and rel.endswith(_JS_SUFFIXES) and "/node_modules/" not in f"/{rel}" and rel not in touched:
+            body = files.read(rel) or ""
+            if any(old.rsplit("/", 1)[-1][:-3] in body for old, _new in renames):
+                touched.add(rel)
+    for rel in sorted(touched):
+        original = files.read(rel)
+        if original is None:
+            continue
+        text = writes.get(rel, original)
+        new_rel = rename_map.get(rel, rel)
+        esm = new_rel.endswith(".mjs") or (new_rel.endswith(".js") and rel not in writes and
+                                          after_mode.get(rel, mode(rel)) == "esm")
+        if esm:
+            #: 원래 경로로 판정해야 하므로 경로를 바꾸기 전에 한다
+            text = esm_named_cjs_rewrite(text, cjs_old, rel, files)
+        text = module_spec_rewrite(text, rel, rename_map, files, esm_importer=esm)
+        if esm:
+            if rel in mixed_files:
+                text = esm_require_shim(text)
+            if rel in dirname_files:
+                text = esm_dirname_shim(text)
+        if new_rel != rel:
+            writes.pop(rel, None)
+            writes[new_rel] = text
+        elif text != original:
+            writes[rel] = text
+    # package.json scripts 가 이름이 바뀐 파일을 직접 실행하면 함께 바꾼다
+    if renames:
+        raw = writes.get(manifest, files.read(manifest) or "")
+        updated = raw
+        for old, new in renames:
+            local_old, local_new = (old[len(scope) + 1:], new[len(scope) + 1:]) if scope else (old, new)
+            updated = re.sub(rf"(?<![\w./-]){re.escape(local_old)}(?![\w.-])", local_new, updated)
+        if updated != raw:
+            writes[manifest] = updated
+    return {"problems": problems, "auto": True, "why_not": "", "writes": writes, "renames": renames,
+            "files": [entry]}
+
+
+# ---------------------------------------------------------------------------
+# 서버가 제공하는 화면 폴더가 Docker 빌드에서 만들어지는가
+# ---------------------------------------------------------------------------
+#
+# 실기기(TEMP 쇼핑몰): 루트 package.json 에 `build:client` 만 있고 `build` 가 없어 Dockerfile 의
+# `npm run build --if-present` 가 화면을 빌드하지 않았다. 서버는 client/dist 를 제공하도록 돼
+# 있어 주소는 열리지만 화면이 나오지 않았다(ENOENT index.html).
+
+def _join_args(args: str, base_dir: str) -> Optional[str]:
+    """`__dirname, '..', 'client', 'dist'` → 파일 기준으로 푼 프로젝트 상대 경로."""
+    import posixpath
+    parts = [a.strip() for a in args.split(",")]
+    if not parts:
+        return None
+    start = base_dir
+    if parts[0] in ("__dirname", "import.meta.dirname"):
+        parts = parts[1:]
+    elif parts[0] in ("process.cwd()",):
+        start, parts = "", parts[1:]
+    else:
+        start = ""  # 상대 문자열은 작업 폴더(= 프로젝트 루트) 기준
+    pieces = []
+    for part in parts:
+        m = re.fullmatch(r"""(['"`])([^'"`$]*)\1""", part)
+        if not m:
+            return None
+        pieces.append(m.group(2))
+    joined = posixpath.normpath(posixpath.join(start or ".", *pieces)) if pieces else (start or ".")
+    return None if joined.startswith("..") else ("" if joined == "." else joined)
+
+
+def _served_dirs(files: "ProjectFiles", server_files: Iterable[str]) -> dict[str, str]:
+    """서버 코드가 제공하는 정적 폴더 → 그 코드가 있는 파일."""
+    import posixpath
+    out: dict[str, str] = {}
+    for rel in server_files:
+        text = _strip_js_comments(files.read(rel) or "")
+        base = posixpath.dirname(rel)
+        #: const clientDist = path.join(__dirname, 'client/dist') 처럼 변수에 담아 쓰는 경우
+        variables = {}
+        for name, args in re.findall(r"\b(?:const|let|var)\s+([\w$]+)\s*=\s*path\.(?:join|resolve)\(\s*([^()]*)\)", text):
+            got = _join_args(args, base)
+            if got is not None:
+                variables[name] = got
+        for m in re.finditer(r"(?:express|serveStatic|static)\.?\w*\(\s*(?:path\.(?:join|resolve)\(\s*([^()]*)\)|(['\"])([^'\"]+)\2|([\w$]+)\s*[,)])", text):
+            if not re.match(r"express\.static|serveStatic|static\(", m.group(0)) and "static" not in m.group(0):
+                continue
+            got = _join_args(m.group(1), base) if m.group(1) else (
+                _norm(m.group(3)) if m.group(3) else variables.get(m.group(4) or ""))
+            if got:
+                out.setdefault(got, rel)
+        for m in re.finditer(r"sendFile\(\s*path\.(?:join|resolve)\(\s*([^()]*)\)", text):
+            got = _join_args(m.group(1), base)
+            if got and got.endswith(".html"):
+                out.setdefault(posixpath.dirname(got), rel)
+        for m in re.finditer(r"sendFile\(\s*path\.(?:join|resolve)\(\s*([\w$]+)\s*,\s*['\"]index\.html['\"]\s*\)", text):
+            if m.group(1) in variables:
+                out.setdefault(variables[m.group(1)], rel)
+    return {k: v for k, v in out.items() if k}
+
+
+def _vite_out_dir(files: "ProjectFiles", folder: str) -> Optional[str]:
+    import posixpath
+    for name in ("vite.config.js", "vite.config.ts", "vite.config.mjs", "vite.config.cjs", "vite.config.mts"):
+        text = files.read(f"{folder}/{name}" if folder else name)
+        if text:
+            m = re.search(r"""\boutDir\s*:\s*['"]([^'"]+)['"]""", _strip_js_comments(text))
+            if m:
+                joined = posixpath.normpath(posixpath.join(folder or ".", m.group(1)))
+                return None if joined.startswith("..") else joined
+            root = re.search(r"""\broot\s*:\s*['"]([^'"]+)['"]""", _strip_js_comments(text))
+            if root:
+                return posixpath.normpath(posixpath.join(folder or ".", root.group(1), "dist"))
+    return None
+
+
+def _is_frontend_build(command: str) -> bool:
+    for pattern, _out in _FRONTEND_BUILDS:
+        if pattern.search(command) and ("vite" not in pattern.pattern or re.search(r"\bvite\s+build\b", command)):
+            return True
+    return False
+
+
+def _frontend_projects(files: "ProjectFiles") -> dict[str, tuple[str, str]]:
+    """프런트엔드 프로젝트 폴더("" = 루트) → (빌드 결과 폴더, 빌드를 실행하는 스크립트 이름)."""
+    out: dict[str, tuple[str, str]] = {}
+    for rel in ["package.json"] + [r for r in files.files() if r.endswith("/package.json") and "/node_modules/" not in f"/{r}"]:
+        folder = "" if rel == "package.json" else rel[: -len("/package.json")]
+        try:
+            pkg = json.loads(files.read(rel) or "")
+        except ValueError:
+            continue
+        scripts = pkg.get("scripts") if isinstance(pkg, dict) and isinstance(pkg.get("scripts"), dict) else {}
+        order = ["build"] + sorted(n for n in scripts if n != "build")
+        for name in order:
+            if name.startswith(("dev", "start", "serve", "preview", "test", "watch", "lint")):
+                continue
+            command = str(scripts.get(name, ""))
+            if not _is_frontend_build(command):
+                continue
+            pattern_out = next(o for p, o in _FRONTEND_BUILDS if p.search(command))
+            out_dir = (_vite_out_dir(files, folder) if re.search(r"\bvite\b", command) else None) or \
+                (f"{folder}/{pattern_out}" if folder else pattern_out)
+            out[folder] = (out_dir, name)
+            break
+    return out
+
+
+def _script_runs(scripts: dict, files: "ProjectFiles", name: str) -> tuple[set[str], bool]:
+    """(이 스크립트가 들어가 빌드하는 하위 폴더, 루트에서 프런트엔드 빌드 도구를 직접 실행하는가)."""
+    runs: set[str] = set()
+    direct = False
+
+    def visit(script: str, depth: int) -> None:
+        nonlocal direct
+        cwd = ""
+        for words in _script_commands(str(scripts.get(script, ""))):
+            if words[0] == "cd" and len(words) > 1:
+                cwd = _norm(words[1].strip("'\""))
+                continue
+            if words[0] in {"npm", "yarn", "pnpm"}:
+                flag_dir, rest = _npm_dir_and_args(words)
+                target = flag_dir or cwd
+                installing = rest[:1] in (["install"], ["i"], ["ci"]) or (words[0] == "yarn" and not rest)
+                if target and target not in {".", ""}:
+                    if not installing:
+                        runs.add(target)
+                elif not installing and depth < 3:
+                    sub = rest[1] if rest[:1] == ["run"] and len(rest) > 1 else (rest[0] if rest else "")
+                    if sub in scripts and sub != script:
+                        visit(sub, depth + 1)
+            elif not cwd and _is_frontend_build(" ".join(words)):
+                direct = True
+
+    if name in scripts:
+        visit(name, 0)
+    return runs, direct
+
+
+def frontend_build_plan(files: "ProjectFiles", scripts: dict, server_files: list[str]) -> Optional[dict]:
+    """서버가 제공하는 화면 폴더를 루트 `build`(= Dockerfile 의 npm run build)가 만들지 않으면 계획을 돌려준다."""
+    served = _served_dirs(files, server_files)
+    if not served:
+        return None
+    projects = _frontend_projects(files)
+    build_runs, build_direct = _script_runs(scripts, files, "build")
+    for folder, (out_dir, script_name) in projects.items():
+        if out_dir not in served:
+            continue
+        if files.exists(f"{out_dir}/index.html"):
+            continue  # 빌드 결과를 저장소에 함께 둔 프로젝트
+        if (folder and folder in build_runs) or (not folder and (build_direct or (script_name == "build"))):
+            continue
+        # 루트에서 그 화면을 빌드하는 스크립트를 찾는다(build:client 등)
+        runner = None
+        for name in sorted(scripts):
+            if name == "build" or name.startswith(("pre", "post", "dev", "start", "test", "watch")):
+                continue
+            runs, direct = _script_runs(scripts, files, name)
+            if (folder and folder in runs) or (not folder and direct):
+                runner = name
+                break
+        if runner:
+            command = f"npm run {runner}"
+        elif folder:
+            command = f"npm --prefix {folder} run {script_name}"
+        else:
+            command = f"npm run {script_name}"
+        existing = str(scripts.get("build") or "").strip()
+        new_build = f"{command} && {existing}" if existing else command
+        return {"folder": folder, "out_dir": out_dir, "server_file": served[out_dir], "runner": runner,
+                "build": new_build}
+    return None
+
+
+def set_build_script(raw: str, value: str) -> str:
+    package = json.loads(raw)
+    scripts = package.setdefault("scripts", {})
+    ordered = {}
+    placed = False
+    for key, val in scripts.items():
+        if key == "build":
+            continue
+        if not placed and key.startswith("build:"):
+            ordered["build"] = value
+            placed = True
+        ordered[key] = val
+    if not placed:
+        ordered["build"] = value
+    package["scripts"] = ordered
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    return json.dumps(package, ensure_ascii=False, indent=2).replace("\n", newline) + newline
 
 
 def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
@@ -1011,6 +1736,57 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 f"PC 에 {label} 을 띄웠다면 연결 주소의 localhost 를 host.docker.internal 로 바꿔 환경변수로 넘기거나, "
                 f"docker compose 로 {label} 과 함께 띄우세요. 화면·헬스 확인은 그대로 동작합니다.", ""))
             break
+
+    # 5) 서버 진입 파일에서 불러오는 파일의 모듈 형식(ESM·CommonJS)이 어긋나는가 — 컨테이너가 시작 직후 죽는다
+    node_entry = _node_entry(files, scripts, main)
+    try:
+        fmt = module_format_plan(files, node_entry, owner)
+    except Exception as exc:  # noqa: BLE001 - 점검 실패가 다른 판정을 막지 않는다
+        print(f"[build_readiness] 모듈 형식 점검 생략: {exc}", file=sys.stderr)
+        fmt = None
+    if fmt:
+        result.fix_data["module_format"] = fmt
+        result.issues.append(ReadinessIssue(
+            "NODE_MODULE_FORMAT_MISMATCH", ERROR,
+            " / ".join(fmt["problems"]) + ". 컨테이너에서 서버가 시작하자마자 종료됩니다(SyntaxError·ERR_MODULE_NOT_FOUND).",
+            ("모듈 형식을 서버 진입 파일에 맞춰 통일하세요(자동 수정 가능 — CommonJS 파일은 .cjs 로 바꾸거나 "
+             "ESM 문법을 require 로 바꾸고, 원본은 .recoder/backups 에 보관)." if fmt["auto"] else
+             f"모듈 형식을 하나로 통일하세요. {fmt['why_not']}"),
+            (fmt.get("files") or [node_entry or ""])[0], bool(fmt["auto"])))
+
+    # 6) 서버가 제공하는 화면 폴더를 Docker 빌드(npm run build)가 만들지 않는다 — 주소만 열리고 화면이 없다
+    server_graph = _module_graph(files, node_entry) if node_entry else []
+    if not server_graph:
+        server_graph = [rel for rel in files.files() if rel.endswith(_JS_SUFFIXES) and "/node_modules/" not in f"/{rel}"
+                        and not any(rel.startswith(d + "/") for d in runs) and _is_server_file(files.read(rel) or "")][:50]
+    try:
+        ui = frontend_build_plan(files, scripts, server_graph)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[build_readiness] 화면 빌드 점검 생략: {exc}", file=sys.stderr)
+        ui = None
+    try:
+        build_runs, build_direct = _script_runs(scripts, files, "build")
+        built = {out for folder, (out, name) in _frontend_projects(files).items()
+                 if (folder and folder in build_runs) or (not folder and (build_direct or name == "build"))}
+    except Exception:  # noqa: BLE001
+        built = set()
+    #: 루트 build 가 만드는 화면 폴더는 소스에 없는 게 정상이다 — "정적 폴더 없음" 경고를 내지 않는다
+    result.issues = [i for i in result.issues
+                     if not (i.code == "NODE_STATIC_DIR_MISSING" and any(f"`{out}`" in i.message for out in built))]
+    if ui:
+        result.fix_data["frontend_build"] = ui
+        where = f"{ui['folder']}/ 의 화면" if ui["folder"] else "화면"
+        result.issues.append(ReadinessIssue(
+            "NODE_FRONTEND_NOT_BUILT", ERROR,
+            f"서버({ui['server_file']})가 {ui['out_dir']}/ 를 화면으로 제공하지만 루트 `build` 스크립트가 {where}을 빌드하지 않습니다"
+            f"{'(`' + ui['runner'] + '` 는 Docker 빌드에서 실행되지 않음)' if ui['runner'] else ''}. "
+            "배포 주소는 열리지만 화면이 나오지 않습니다(index.html 없음).",
+            f"package.json 의 build 를 `{ui['build']}` 로 설정하세요(자동 수정 가능, 원본은 .recoder/backups 에 보관).",
+            "package.json", True))
+
+        #: 같은 폴더의 "정적 폴더 없음" 경고는 이 항목이 원인과 해결을 대신한다
+        result.issues = [i for i in result.issues
+                         if not (i.code == "NODE_STATIC_DIR_MISSING" and f"`{ui['out_dir']}`" in i.message)]
 
     # CRA 빌드가 깨졌을 때: 서버가 정적 폴더를 그대로 제공하고 src/ 가 없으면
     # 빌드 자체가 필요 없는 구조다(생성 코드가 CRA 설정만 남긴 경우). 그때만
@@ -1532,7 +2308,14 @@ def _read_raw(path: Path) -> str:
 
 
 def _write_raw(path: Path, text: str) -> None:
-    with path.open("w", encoding="utf-8", newline="") as stream:
+    try:
+        stream = path.open("w", encoding="utf-8", newline="")
+    except PermissionError:
+        if not path.exists():
+            raise
+        _make_writable(path)  # 읽기 전용 특성이 붙은 파일(Windows)
+        stream = path.open("w", encoding="utf-8", newline="")
+    with stream:
         stream.write(text)
 
 
@@ -1698,6 +2481,77 @@ def serve_frontend(text: str, entry_rel: str, out_dir: str) -> str:
         "",
     ])
     return text[:insert_at] + block + newline + text[insert_at:]
+
+
+def _make_writable(path: Path) -> None:
+    """읽기 전용 파일(Windows 읽기 전용 특성·압축 해제본)도 고칠 수 있게 쓰기 권한을 준다."""
+    import stat
+    try:
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
+
+
+def apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> list[str]:
+    """계획(새 경로 기준 내용 + 이름 바꾸기)을 디스크에 쓴다. 바뀌는 원본은 모두 백업한다.
+
+    **전부 되거나 전부 안 된다.** 중간에 실패하면(Windows 의 읽기 전용 파일·잠긴 파일 등) 쓴 파일을
+    원래대로 돌리고 오류를 낸다 — 옛 .js 와 새 .cjs 가 함께 남으면 앱이 반쯤 바뀐 채로 남는다.
+    """
+    rename_map = {old: new for old, new in renames if (root / old).is_file() and not (root / new).exists()}
+    skipped = [old for old, new in renames if old not in rename_map]
+    if skipped:
+        raise ValueError(f"이름을 바꿀 파일이 없거나 새 이름({skipped[0]})이 이미 있습니다. 배포 준비 점검을 다시 실행하세요.")
+    renamed_to = set(rename_map.values())
+    originals: dict[str, Optional[str]] = {}   # 복구용: 경로 → 원래 내용(None = 원래 없던 파일)
+    changed: list[str] = []
+    try:
+        for old, new in rename_map.items():
+            text = _read_raw(root / old)
+            originals[old] = text
+            originals[new] = None
+            changed.append(_backup(root, old, text))
+            _write_raw(root / new, writes.get(new, text))
+        for rel, content in writes.items():
+            if rel in renamed_to:
+                continue
+            path = root / rel
+            if path.is_file():
+                original = _read_raw(path)
+                if original == content:
+                    continue
+                originals.setdefault(rel, original)
+                changed.append(_backup(root, rel, original))
+                _make_writable(path)
+            else:
+                originals.setdefault(rel, None)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_raw(path, content)
+            changed.append(rel)
+        for old, new in rename_map.items():
+            try:
+                (root / old).unlink()
+            except PermissionError:
+                _make_writable(root / old)
+                (root / old).unlink()
+            changed.append(f"{old} → {new}")
+    except OSError as exc:
+        for rel, text in originals.items():
+            path = root / rel
+            try:
+                if text is None:
+                    if path.exists():
+                        _make_writable(path)
+                        path.unlink()
+                elif not path.exists() or _read_raw(path) != text:
+                    if path.exists():
+                        _make_writable(path)
+                    _write_raw(path, text)
+            except OSError:
+                pass
+        raise ValueError(f"파일을 바꾸지 못해 원래대로 되돌렸습니다: {exc}. 파일이 다른 프로그램에서 열려 있거나 "
+                         "읽기 전용인지 확인하세요.") from exc
+    return changed
 
 
 def apply_fix(workspace: str | Path, code: str) -> dict:
@@ -1937,7 +2791,44 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
         updated = re.sub(rf"((?:localhost|127\.0\.0\.1):){old}\b", rf"\g<1>{new}", updated)
         _write_raw(dockerfile, updated)
         changed += ["Dockerfile", backup]
+    elif code == "NODE_MODULE_FORMAT_MISMATCH":
+        plan = before.fix_data.get("module_format") or {}
+        if not issue.auto_fix or not plan.get("auto"):
+            raise ValueError(plan.get("why_not") or "모듈 형식을 자동으로 통일할 수 없습니다. 안내에 따라 직접 수정하세요.")
+        changed += apply_file_plan(root, plan.get("writes") or {}, plan.get("renames") or [])
+    elif code == "NODE_FRONTEND_NOT_BUILT":
+        plan = before.fix_data.get("frontend_build") or {}
+        if not plan.get("build"):
+            raise ValueError("화면을 빌드할 명령을 확정하지 못했습니다.")
+        manifest = root / "package.json"
+        text = _read_raw(manifest)
+        backup = _backup(root, "package.json", text)
+        _write_raw(manifest, set_build_script(text, plan["build"]))
+        changed += ["package.json", backup]
     after = analyze(root)
     return {"applied": bool(changed), "changed": changed,
             "message": "수정했습니다. 배포 내용을 다시 확인하세요." if changed else "변경할 내용이 없었습니다.",
             "readiness": after.to_dict()}
+
+
+def expects_screen(workspace: str | Path) -> bool:
+    """이 프로젝트가 브라우저 화면을 제공해야 하는가(배포 후 화면 확인 여부).
+
+    화면 빌드 도구가 있는 package.json, 저장소에 있는 index.html, 서버 템플릿(templates/)이 근거다.
+    API 만 있는 서버는 False — "/" 가 JSON·404 여도 정상이다.
+    """
+    files = ProjectFiles(Path(workspace))
+    try:
+        if _frontend_projects(files):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    for rel in files.files():
+        name = rel.rsplit("/", 1)[-1]
+        if "/node_modules/" in f"/{rel}" or rel.startswith(".recoder/"):
+            continue
+        if name == "index.html" and rel.count("/") <= 2:
+            return True
+        if rel.startswith(("templates/", "app/templates/", "src/templates/", "views/")) and name.endswith((".html", ".ejs", ".hbs", ".pug", ".njk", ".jinja", ".jinja2")):
+            return True
+    return False

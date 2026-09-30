@@ -1589,11 +1589,13 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
     import 하지만 만들지 않은 CSS, CRA 식 process.env, 선언과 다른 패키지 이름.
     """
     try:
-        from build_readiness import (analyze, jsx_reference_rewrite, pg_numeric_parser_rewrite,
-                                     relative_api_rewrite, rename_package_import, router_link_rewrite, vite_env_rewrite)
+        from build_readiness import (analyze, jsx_reference_rewrite, pg_numeric_parser_rewrite, relative_api_rewrite,
+                                     rename_package_import, router_link_rewrite, set_build_script, vite_env_rewrite)
     except ImportError:  # pragma: no cover
         from core.build_readiness import (analyze, jsx_reference_rewrite, pg_numeric_parser_rewrite,  # type: ignore
-                                          relative_api_rewrite, rename_package_import, router_link_rewrite, vite_env_rewrite)
+                                          relative_api_rewrite, rename_package_import, router_link_rewrite,
+                                          set_build_script, vite_env_rewrite)
+    _JS_EXTS = (".js", ".cjs", ".mjs")
     folder = (target_folder or "").replace("\\", "/").strip("/")
     base = (root / folder).resolve() if folder and not Path(folder).is_absolute() else (Path(folder) if folder else root.resolve())
     by_path = {str(op.get("file") or "").replace("\\", "/").lstrip("/"): op for op in ops}
@@ -1663,6 +1665,35 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
                 if updated != op.get("content"):
                     op["content"] = updated
                     notes.append(f"{op['file']}: {old_pkg} → {new_pkg}")
+        #: 나눠 만든 서버 파일끼리 ESM(import)·CommonJS(require)가 섞이면 컨테이너가 시작 직후 죽는다(실기기 TEMP).
+        #: 진입 파일 형식으로 통일한다. 이름을 바꿀 파일이 이번 결과에 없으면(디스크에만 있음) AI 교정에 맡긴다.
+        fmt = data.get("module_format") or {}
+        if fmt.get("auto") and all(prefix + old in by_path for old, _new in fmt.get("renames") or []):
+            for old, new in fmt.get("renames") or []:
+                op = by_path.pop(prefix + old)
+                op["file"] = prefix + new
+                by_path[prefix + new] = op
+                notes.append(f"{prefix + old} → {prefix + new}(모듈 형식)")
+            for rel, content in (fmt.get("writes") or {}).items():
+                op = by_path.get(prefix + rel)
+                if op is None:
+                    op = {"action": "edit", "file": prefix + rel, "language": "javascript" if rel.endswith(_JS_EXTS) else "json",
+                          "content": content, "rationale": "서버 파일들의 모듈 형식(ESM·CommonJS)을 하나로 맞췄습니다."}
+                    by_path[prefix + rel] = op
+                if op.get("content") != content:
+                    op["content"] = content
+                    notes.append(f"{prefix + rel}: 모듈 형식 통일")
+        #: 서버가 제공하는 화면 폴더를 Docker 빌드(npm run build)가 만들도록 루트 build 를 잇는다.
+        ui = data.get("frontend_build") or {}
+        manifest_op = by_path.get(prefix + "package.json")
+        if ui.get("build") and manifest_op is not None:
+            try:
+                updated = set_build_script(manifest_op.get("content") or "", ui["build"])
+            except (ValueError, TypeError, AttributeError):
+                updated = manifest_op.get("content")
+            if updated != manifest_op.get("content"):
+                manifest_op["content"] = updated
+                notes.append(f"{prefix}package.json: build = {ui['build']}(화면 빌드 연결)")
     # AI 가 Dockerfile 도 만들었으면 하위 폴더(client/·server/) 의존성 설치를 채운다.
     docker_op = by_path.get("Dockerfile")
     if docker_op is not None:
@@ -1747,6 +1778,8 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
 # 잘리면 같은 요청을 반복하지 않고 (1) 만들 파일 목록과 파일 사이의 약속(API 경로·이름·
 # 패키지)을 받은 뒤 (2) 그 약속을 공유하며 파일 몇 개씩 따로 생성해 합친다.
 _SPLIT_MAX_FILES = 24
+#: 생성 결과의 빌드·실행 문제를 AI 에게 고치게 하는 최대 횟수(결정적 자동 교정은 매번 먼저 한다).
+_CONSISTENCY_ROUNDS = 3
 _SPLIT_BATCH = 2
 _SPLIT_PARALLEL = 3
 _MANIFEST_SCHEMA = {
@@ -2037,7 +2070,12 @@ def generate_code(
     if autofix_notes:
         print(f"[code_agent] 자동 교정 {len(autofix_notes)}건: {autofix_notes[:5]}", flush=True)
     consistency = _consistency_issues(root, target_folder, ops_out)
-    if any(i["severity"] == "error" for i in consistency):
+    #: 교정은 최대 _CONSISTENCY_ROUNDS 번 — 한 번 고치면 다른 파일에서 새 어긋남이 드러나는 경우가 많다
+    #: (라우트를 고치면 모델 export 가 어긋나는 식). 오류가 줄지 않으면 멈춘다.
+    for _round in range(_CONSISTENCY_ROUNDS):
+        if not any(i["severity"] == "error" for i in consistency):
+            break
+        improved = False
         issue_lines = "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in consistency)
         #: 결과가 크면(분할 생성 등) 전체를 다시 만들게 하면 또 잘린다. 문제 파일과 매니페스트만
         #: 보여 주고 **고칠 파일만** 받아 경로 기준으로 합친다.
@@ -2078,9 +2116,12 @@ def generate_code(
             remaining = _consistency_issues(root, target_folder, ops2)
             if sum(i["severity"] == "error" for i in remaining) < sum(i["severity"] == "error" for i in consistency):
                 data, ops_out, llm_resp, consistency = data2, ops2, retry, remaining
-                print(f"[code_agent] 일관성 교정 적용 | 남은 문제 {len(remaining)}개", flush=True)
+                improved = True
+                print(f"[code_agent] 일관성 교정 적용({_round + 1}회) | 남은 문제 {len(remaining)}개", flush=True)
         except Exception as exc:  # noqa: BLE001 - 교정 실패는 원래 결과로 물러선다
             print(f"[code_agent] 일관성 교정 생략: {exc}", flush=True)
+        if not improved:
+            break
 
     # ADR 영속화 — 승인된 결정을 docs/adr 에 구조화 기록으로 남긴다(코드와 동시 산출).
     # 시크릿 검사 '앞'에 넣어야 한다: ADR 본문에도 사용자 요청문이 들어가므로

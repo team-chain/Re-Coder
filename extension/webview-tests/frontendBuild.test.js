@@ -66,3 +66,24 @@ test('정적 사이트(빌드 도구 없음)는 감지하지 않는다', t => {
   fs.writeFileSync(path.join(ws, 'index.html'), '<h1>hi</h1>');
   assert.equal(fb.detectFrontendProject(ws), null);
 });
+
+test('build 가 없고 build:web 만 화면을 빌드하면 그 스크립트로 빌드한다 — 빌드되지 않은 흰 화면 방지', async t => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-fe-'));
+  t.after(() => fs.rmSync(ws, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(ws, 'package.json'), JSON.stringify({ scripts: { dev: 'vite', 'build:web': 'vite build' }, devDependencies: { vite: '^5' } }));
+  const found = fb.detectFrontendProject(ws);
+  assert.equal(found.script, 'build:web');
+  assert.equal(found.outDir, 'dist');
+  const commands = [];
+  const runner = async (command) => { commands.push(command); return { code: 0, output: '' }; };
+  const outcome = await fb.buildFrontend(ws, found, () => {}, runner);
+  assert.equal(outcome.ok, true);
+  assert.ok(commands.includes('npm run build:web'), commands.join(' | '));
+});
+
+test('build: 로 시작해도 개발 서버(vite)만 띄우는 스크립트는 빌드로 보지 않는다', t => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-fe-'));
+  t.after(() => fs.rmSync(ws, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(ws, 'package.json'), JSON.stringify({ scripts: { 'build:watch': 'vite' } }));
+  assert.equal(fb.detectFrontendProject(ws), null);
+});

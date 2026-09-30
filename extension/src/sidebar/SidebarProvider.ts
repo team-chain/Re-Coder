@@ -1462,6 +1462,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }, (event) => {
                         this.postMessage('workspace.deploy.s3.progress', event);
                     });
+                    //: 파일은 올라갔지만 브라우저로 연 첫 화면이 비어 있으면 "배포 완료"로 보이지 않는다
+                    //: (실기기: 주소만 뜨고 화면이 표시되지 않았다). 원인·해결과 주소를 함께 알린다.
+                    if (result.status === 'screen_failed' || result.screen?.ok === false) {
+                        this.postMessage('workspace.deploy.s3.result', {
+                            ok: false,
+                            message: `${result.message} (주소: ${result.url})`,
+                            result,
+                        });
+                        break;
+                    }
                     this.postMessage('workspace.deploy.s3.result', {
                         ok: true,
                         result: {

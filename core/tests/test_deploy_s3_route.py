@@ -365,3 +365,34 @@ def test_음성대조_같은_리전_재배포는_안내를_덧붙이지_않는�
     again = _deploy(client).json()
     assert again["region"] == REGION
     assert "이미" not in again["message"], again["message"]
+
+
+@mock_aws
+def test_올린_뒤_화면이_비면_배포_완료로_표시하지_않는다(client, monkeypatch):
+    """실기기: S3 주소는 열리는데 화면이 비었다. 화면 확인이 실패하면 status 가 screen_failed 다."""
+    import screen_check
+    monkeypatch.setenv("RECODER_SCREEN_CHECK", "1")
+    seen = []
+
+    def fake_check(url, **kw):
+        seen.append(url)
+        result = screen_check.ScreenResult(ok=False, url=url, checked="browser", code="SCREEN_SCRIPT_ERROR",
+                                           problems=["화면 스크립트가 오류로 멈춰 아무것도 그리지 못했습니다: process is not defined"])
+        return result
+
+    monkeypatch.setattr(screen_check, "check_screen", fake_check)
+    body = _deploy(client).json()
+    assert seen and seen[0] == body["url"]
+    assert body["status"] == "screen_failed"
+    assert body["screen"]["ok"] is False and body["screen"]["diagnosis"]["title"].startswith("배포 주소는 열리지만")
+    assert "화면이 표시되지 않습니다" in body["message"]
+
+
+@mock_aws
+def test_S3_주소에_닿지_못하면_실패로_단정하지_않는다(client, monkeypatch):
+    import screen_check
+    monkeypatch.setenv("RECODER_SCREEN_CHECK", "1")
+    monkeypatch.setattr(screen_check, "check_screen", lambda url, **kw: screen_check.ScreenResult(
+        ok=False, url=url, code="SCREEN_HTTP_ERROR", problems=[f"{url} 에 연결하지 못했습니다(timed out)."]))
+    body = _deploy(client).json()
+    assert body["status"] == "deployed" and body["screen"]["ok"] is None

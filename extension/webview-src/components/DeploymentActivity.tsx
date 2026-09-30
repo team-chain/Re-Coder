@@ -6,13 +6,13 @@ export interface DeploymentActivityEvent {
   result?: { status?: string; message?: string };
 }
 const stages = {
-  docker: [['queued','준비'],['build','이미지 빌드'],['scan','보안 확인'],['start','컨테이너 시작'],['health','헬스 확인'],['record','결과 저장']],
-  s3: [['plan','준비'],['bucket','버킷 확인'],['website','호스팅 설정'],['upload','파일 업로드'],['prune','마무리']],
+  docker: [['queued','준비'],['build','이미지 빌드'],['scan','보안 확인'],['start','컨테이너 시작'],['health','헬스 확인'],['screen','화면 확인'],['record','결과 저장']],
+  s3: [['plan','준비'],['bucket','버킷 확인'],['website','호스팅 설정'],['upload','파일 업로드'],['prune','마무리'],['screen','화면 확인']],
 };
 
 export function DeploymentActivity({ target, event }: { target: 'docker'|'s3'; event: DeploymentActivityEvent | null }) {
   if (!event) return null;
-  const failed = event.step==='error' || ['failed','error'].includes(event.result?.status || '');
+  const failed = event.step==='error' || ['failed','error','screen_failed'].includes(event.result?.status || '');
   const pending = event.result?.status==='pending';
   const complete = event.step==='done' && !failed && !pending && event.result?.status!=='cancelled';
   const items=stages[target], index=complete?items.length:items.findIndex(([key])=>key===event.step);

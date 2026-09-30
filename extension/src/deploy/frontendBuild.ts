@@ -26,6 +26,8 @@ export interface FrontendProject {
     label: string;
     /** 화면이 API 서버를 부르는 흔적 — S3 에서는 그 기능이 동작하지 않는다. */
     callsApi: boolean;
+    /** 화면을 빌드하는 npm 스크립트 이름(보통 build, 없으면 build:client 같은 이름). */
+    script?: string;
 }
 
 const TOOLS: Array<{ pattern: RegExp; tool: string; label: string; out: string }> = [
@@ -90,9 +92,19 @@ function inspect(workspace: string, rel: string): FrontendProject | null {
     const projectAbs = path.join(workspace, rel);
     const pkg = readJson(path.join(projectAbs, 'package.json'));
     const scripts = pkg && typeof pkg.scripts === 'object' && pkg.scripts ? pkg.scripts as Record<string, unknown> : null;
-    const build = scripts && typeof scripts.build === 'string' ? scripts.build : '';
-    if (!pkg || !build) { return null; }
-    const found = TOOLS.find(t => t.pattern.test(build));
+    if (!pkg || !scripts) { return null; }
+    //: build 가 먼저다. 없거나 화면 빌드가 아니면 build:client·build:web 처럼 화면을 직접 빌드하는
+    //: 스크립트를 쓴다(실기기: build:client 만 있는 프로젝트가 빌드되지 않아 화면이 비었다).
+    //: vite 는 `vite build` 일 때만 — 이름이 build: 로 시작해도 `vite`(개발 서버)는 빌드가 아니다.
+    const names = ['build', ...Object.keys(scripts).filter(n => n.startsWith('build:')).sort()];
+    let script = '';
+    let found: typeof TOOLS[number] | undefined;
+    for (const name of names) {
+        const command = typeof scripts[name] === 'string' ? scripts[name] as string : '';
+        if (!command) { continue; }
+        const tool = TOOLS.find(t => t.pattern.test(command) && (t.tool !== 'vite' || name === 'build' || /\bvite\s+build\b/.test(command)));
+        if (tool) { script = name; found = tool; break; }
+    }
     if (!found) { return null; }
     const out = (found.tool === 'vite' ? viteOutDir(projectAbs) : null) || found.out;
     return {
@@ -101,6 +113,7 @@ function inspect(workspace: string, rel: string): FrontendProject | null {
         tool: found.tool,
         label: found.label,
         callsApi: callsApi(projectAbs, pkg),
+        script,
     };
 }
 
@@ -189,7 +202,7 @@ export async function buildFrontend(
         }
         if (install.code !== 0) { return { ok: false, via: 'npm', output: install.output }; }
         onProgress(`${where} 빌드 중 (${project.label})`);
-        const build = await runner('npm run build', cwd, env, 15 * 60_000);
+        const build = await runner(`npm run ${buildScript(project)}`, cwd, env, 15 * 60_000);
         return { ok: build.code === 0, via: 'npm', output: build.output };
     }
     const docker = await runner('docker info --format "{{.ServerVersion}}"', cwd, env, 30_000);
@@ -203,11 +216,16 @@ export async function buildFrontend(
     //: node_modules 는 컨테이너 안에만 둔다(익명 볼륨). 리눅스용 바이너리가 사용자 폴더에 섞이면
     //: PC 에서 개발 서버를 띄울 때 깨진다.
     const mount = cwd.replace(/"/g, '');
-    const script = 'if [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; else npm install --no-audit --no-fund; fi && npm run build';
+    const script = `if [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; else npm install --no-audit --no-fund; fi && npm run ${buildScript(project)}`;
     const result = await runner(
         `docker run --rm -v "${mount}:/app" -v /app/node_modules -w /app -e GENERATE_SOURCEMAP=false -e CI=false node:22-alpine sh -c "${script}"`,
         cwd, env, 25 * 60_000);
     return { ok: result.code === 0, via: 'docker', output: result.output };
+}
+
+/** 실행할 빌드 스크립트 이름. 셸에 그대로 들어가므로 안전한 글자만 허용한다. */
+function buildScript(project: FrontendProject): string {
+    return project.script && /^[\w:.-]+$/.test(project.script) ? project.script : 'build';
 }
 
 /** 빌드 실패 출력에서 사람이 볼 줄만 추린다. */

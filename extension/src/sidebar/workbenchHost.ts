@@ -387,7 +387,10 @@ export abstract class WorkbenchHost {
                         // 컨테이너가 시작/헬스에 실패한 경우 — stderr 에서 핵심 사유 한 줄 추출
                         const errText = (result.error || result.message || result.stderr || (result.health_ok === false ? '컨테이너가 시작됐지만 헬스체크를 통과하지 못했습니다. 배포 기록에서 로그와 롤백을 확인하세요.' : result.stdout) || '').trim();
                         const lines = errText.split('\n').map(s => s.trim()).filter(Boolean);
-                        const summary = lines.reverse().find(l => /error|exception|traceback|keyerror|exited|not running|unhealthy|refused/i.test(l))
+                        //: 코어가 원인을 진단했으면(화면 확인 실패·시작 직후 종료 등) 그 문장을 먼저 보여 준다.
+                        const diagnosis = (result as { diagnosis?: { title?: string; cause?: string } }).diagnosis;
+                        const summary = (diagnosis?.title ? `${diagnosis.title}${diagnosis.cause ? ` — ${diagnosis.cause}` : ''}` : '')
+                            || lines.reverse().find(l => /error|exception|traceback|keyerror|exited|not running|unhealthy|refused/i.test(l))
                             || lines[0] || '컨테이너가 시작되지 못했습니다.';
                         this._post({
                             type: 'wb.local.deployProgress',

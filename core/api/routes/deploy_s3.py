@@ -112,6 +112,8 @@ class S3DeployResponse(BaseModel):
     #: index.html 이 없어 다른 HTML 을 복제했다면 그 원본 경로.
     index_copied_from: Optional[str] = None
     message: str
+    #: 배포 직후 브라우저로 첫 화면을 열어 본 결과(screen_check.ScreenResult). 확인하지 못했으면 None.
+    screen: Optional[dict] = None
 
 
 def _aws_error_detail(exc: Exception, action: str) -> str:
@@ -345,13 +347,19 @@ def _deploy_bucket_sync(
     removed = _prune_obsolete_objects(client, bucket, plan.keys)
 
     url = s3_byo.website_url(bucket, region)
+    screen = _check_website_screen(url, progress)
     note = ""
     if plan.index_copied_from:
         note = f" index.html 이 없어 {plan.index_copied_from} 를 진입 문서로 함께 올렸습니다."
     if removed:
         note += f" 이전 배포 파일 {removed}개를 정리했습니다."
+    screen_failed = bool(screen) and screen.get("ok") is False
+    if screen_failed:
+        diag = screen.get("diagnosis") or {}
+        note += f" 하지만 화면이 표시되지 않습니다: {diag.get('cause') or ''} 해결: {diag.get('fix') or ''}"
     return S3DeployResponse(
-        status="deployed",
+        #: 파일은 올라갔지만 화면이 안 나오면 "배포 완료"라고 하지 않는다(주소만 뜨는 배포 방지).
+        status="screen_failed" if screen_failed else "deployed",
         bucket=bucket,
         region=region,
         url=url,
@@ -359,7 +367,32 @@ def _deploy_bucket_sync(
         bucket_created=created,
         index_copied_from=plan.index_copied_from,
         message=f"{len(plan.items)}개 파일을 올렸습니다.{note}{region_note}",
+        screen=screen,
     )
+
+
+def _check_website_screen(url: str, progress) -> Optional[dict]:
+    """S3 웹사이트 주소의 첫 화면 확인. 네트워크 사정으로 확인하지 못하면 None(판정 보류)."""
+    try:
+        import screen_check
+    except ImportError:  # pragma: no cover
+        from core import screen_check  # type: ignore
+    if not screen_check.enabled():
+        return None
+    _report(progress, {"step": "screen", "message": "브라우저로 첫 화면이 실제로 표시되는지 확인합니다"})
+    try:
+        result = screen_check.check_screen(url, wait_seconds=15.0)
+    except Exception as exc:  # noqa: BLE001 - 확인 도구 문제로 배포 결과를 흔들지 않는다
+        logger.warning("S3 screen check failed to run: %s", exc)
+        return None
+    data = result.to_dict()
+    if not result.ok and result.code == "SCREEN_HTTP_ERROR" and "연결하지 못했습니다" in " ".join(result.problems):
+        data["ok"] = None  # 이 PC 에서 S3 주소에 닿지 못함(사내망 등) — 실패로 단정하지 않는다
+        data["warnings"] = data.get("warnings", []) + ["이 PC 에서 S3 주소에 연결하지 못해 화면을 확인하지 못했습니다."]
+        return data
+    if not result.ok:
+        data["diagnosis"] = result.diagnosis()
+    return data
 
 
 def _deploy_sync(

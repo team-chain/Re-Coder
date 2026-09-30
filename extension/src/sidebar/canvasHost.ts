@@ -192,16 +192,26 @@ export class CanvasHost {
                     const frontend = detectFrontendProject(workspace);
                     if (frontend) {
                         const where = frontend.projectDir || '프로젝트 루트';
+                        //: 화면 코드가 브라우저에서 멈추는 문제(process.env·.js 안의 JSX·없는 import 등)는 빌드 전에
+                        //: 알린다 — 올린 뒤 흰 화면을 보고서야 알게 되면 늦다. 점검 실패는 배포를 막지 않는다.
+                        try {
+                            const readiness = await this.api.checkBuildReadiness(workspace);
+                            const screenBreakers = new Set(['NODE_VITE_PROCESS_ENV','NODE_VITE_JSX_IN_JS','NODE_LOCAL_IMPORT_MISSING','NODE_IMPORT_NAME_MISSING','NODE_CONTEXT_MEMBER_MISSING','NODE_IMPORT_PACKAGE_TYPO','NODE_UNDECLARED_DEPENDENCY','NODE_BUILD_ENTRY_MISSING','NODE_BUILD_TOOL_MISSING']);
+                            for (const issue of (readiness.issues || []).filter(i => i.severity === 'error' && screenBreakers.has(i.code)).slice(0, 4)) {
+                                staticNotes.push(`배포 전 고칠 것: ${issue.message} 해결: ${issue.fix}`);
+                            }
+                        } catch { /* 점검을 못 해도 배포 준비는 계속한다 */ }
                         if (needsBuild(workspace, frontend)) {
                             send('canvas.executing', { requestId, message: `${where} 의 ${frontend.label} 화면을 빌드합니다` });
                             const outcome = await buildFrontend(workspace, frontend, message => send('canvas.executing', { requestId, message }));
                             if (generation !== this.prepareGeneration) return;
-                            if (!outcome.ok) throw new Error(`${where} 빌드(npm run build)에 실패해 S3 에 올릴 화면을 만들지 못했습니다.\n${buildFailureSummary(outcome.output)}`);
-                            staticNotes.push(`${where} 에서 npm run build 를 실행해 ${frontend.outDir} 를 새로 만들었습니다${outcome.via === 'docker' ? '(Docker)' : ''}.`);
+                            const script = frontend.script || 'build';
+                            if (!outcome.ok) throw new Error(`${where} 빌드(npm run ${script})에 실패해 S3 에 올릴 화면을 만들지 못했습니다.\n${buildFailureSummary(outcome.output)}`);
+                            staticNotes.push(`${where} 에서 npm run ${script} 를 실행해 ${frontend.outDir} 를 새로 만들었습니다${outcome.via === 'docker' ? '(Docker)' : ''}.`);
                         }
                         config.dir = frontend.outDir;
                         if (frontend.callsApi) {
-                            staticNotes.push('이 화면은 API 서버(/api 등)를 호출합니다. S3 에는 화면(정적 파일)만 올라가므로 API 가 필요한 기능(목록·주문 등)은 동작하지 않습니다. 서버까지 필요하면 ECS(컨테이너) 배포를 쓰세요.');
+                            staticNotes.push('주의: 이 화면은 API 서버(/api 등)를 호출합니다. S3 에는 화면(정적 파일)만 올라가므로 화면 틀은 보이지만 서버 데이터가 필요한 기능(상품 목록·주문·로그인 등)은 비어 있거나 오류로 표시됩니다. 서버까지 함께 동작해야 하면 로컬 Docker 또는 ECS(컨테이너) 배포를 쓰세요.');
                         }
                     } else {
                         config.dir = pickStaticDir(fs.readdirSync(workspace, {withFileTypes:true}).filter(e=>e.isDirectory()).map(e=>e.name));

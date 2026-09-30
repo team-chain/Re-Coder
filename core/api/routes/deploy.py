@@ -3895,6 +3895,22 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     if restored_previous and rollback_source is not None:
                         restored_verification_resumed = await _resume_verification_for(rollback_source)
 
+        # 헬스 경로가 200 이어도 화면은 비어 있을 수 있다(실기기: 주소만 열리고 화면이 없음).
+        # 화면이 있어야 하는 앱이면 브라우저로 첫 화면을 열어 실제로 그려지는지 확인한다.
+        screen_result = None
+        if success and plan.method == DeployMethod.LOCAL_DOCKER and plan.ports:
+            report_progress('screen', '브라우저로 첫 화면이 실제로 표시되는지 확인합니다')
+            screen_result = await _verify_local_screen(plan, _plan_workspaces.get(request.plan_id, ""))
+            if screen_result is not None and not screen_result.get("ok"):
+                success = False
+                rollback_eligible = False
+                startup_diagnosis = screen_result.get("diagnosis")
+                result.stderr = (result.stderr or "") + "\n" + " / ".join(screen_result.get("problems") or [])
+                if restore_source is not None:
+                    restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(restore_source)
+                    if restored_previous and rollback_source is not None:
+                        restored_verification_resumed = await _resume_verification_for(rollback_source)
+
         # 방금 띄운 이미지의 불변 참조를 남긴다. 다음 배포가 이 릴리스로 되돌릴 때
         # 태그가 아니라 이 값을 쓴다 — 태그는 그때 이미 다른 것을 가리킬 수 있다.
         deployed_image_id = (
@@ -4022,7 +4038,44 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 "started": bool(cv_started),
             },
             "security_scan": post_build_scan,
+            **({"screen": screen_result} if screen_result is not None else {}),
         }
+
+
+async def _verify_local_screen(plan, workspace_path: str) -> Optional[dict]:
+    """로컬 컨테이너의 첫 화면 확인. 화면이 없는 API 서버면 None(판정하지 않음)."""
+    try:
+        from screen_check import check_screen
+        from build_readiness import expects_screen
+    except ImportError:  # pragma: no cover
+        from core.screen_check import check_screen  # type: ignore
+        from core.build_readiness import expects_screen  # type: ignore
+    try:
+        from screen_check import enabled as screen_check_enabled
+    except ImportError:  # pragma: no cover
+        from core.screen_check import enabled as screen_check_enabled  # type: ignore
+    if not screen_check_enabled():
+        return None
+    host_port = next(iter(plan.ports.keys()), None)
+    if not host_port or not str(host_port).isdigit():
+        return None
+    try:
+        wants_screen = bool(workspace_path) and await asyncio.to_thread(expects_screen, workspace_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screen expectation check failed: %s", exc)
+        wants_screen = False
+    url = f"http://localhost:{host_port}/"
+    try:
+        checked = await asyncio.to_thread(check_screen, url, wait_seconds=25.0)
+    except Exception as exc:  # noqa: BLE001 - 확인 도구 문제로 배포 결과를 흔들지 않는다
+        logger.warning("screen check failed to run: %s", exc)
+        return None
+    data = checked.to_dict()
+    if not checked.ok and not wants_screen and checked.code in ("SCREEN_NOT_HTML", "SCREEN_HTTP_ERROR"):
+        return None  # 화면 없이 API 만 제공하는 서버 — "/" 가 JSON·404 인 것이 정상이다
+    if not checked.ok:
+        data["diagnosis"] = checked.diagnosis()
+    return data
 
 
 @router.post('/api/deploy/execute/stream')
