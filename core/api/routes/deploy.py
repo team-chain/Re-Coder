@@ -2865,7 +2865,8 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
                 request.workspace_path, stack, project,
             )
         except _UnsupportedDockerfileFallback as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            detail = _no_project_message(request.workspace_path) if _nested_project_dir(request.workspace_path) else str(exc)
+            raise HTTPException(status_code=422, detail=detail) from exc
         except _DockerfileTemplateRenderError as exc:
             raise HTTPException(
                 status_code=503,
@@ -3366,13 +3367,28 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
 
     # 빌드·실행이 확정적으로 실패할 프로젝트 설정을 승인 전에 보여 준다.
     if plan.method == DeployMethod.LOCAL_DOCKER and request.workspace_path:
+        workspace_dir = Path(request.workspace_path)
+        if workspace_dir.is_dir() and _dockerfile_in(request.workspace_path) is None:
+            if _nested_project_dir(request.workspace_path):
+                #: 프로젝트가 하위 폴더에 있는데 루트를 승인하게 두면 예전 이미지가 돌거나 빌드가 실패한다 — 승인 전에 알린다.
+                raise HTTPException(status_code=409, detail=_no_project_message(request.workspace_path))
+            if any((workspace_dir / name).is_file() for name in _PROJECT_MANIFESTS):
+                plan.risk_reasons = list(plan.risk_reasons) + [
+                    "Dockerfile 이 없어 실행할 때 검증된 기본 템플릿으로 만들어 저장합니다(.dockerignore 포함)."]
         readiness = await asyncio.to_thread(_workspace_readiness, request.workspace_path)
         if readiness is not None:
             plan.readiness = readiness.to_dict()
-            if readiness.issues:
+            auto = [i for i in readiness.issues if i.auto_fix and (i.severity == "error" or i.code in _PRE_DEPLOY_WARNING_FIXES)]
+            manual = [i for i in readiness.issues if i not in auto]
+            if auto:
+                #: 실행 직전에 자동으로 고친다(원본은 .recoder/backups) — 사용자가 버튼을 따로 누르지 않아도 된다.
+                plan.risk_reasons = list(plan.risk_reasons) + [
+                    f"배포 전 자동 수정 — {i.message} (수정: {i.fix})" for i in auto]
+            if manual:
                 from build_readiness import issues_as_risk_reasons
-                plan.risk_reasons = list(plan.risk_reasons) + issues_as_risk_reasons(readiness)
-            if readiness.errors:
+                readiness_manual = type(readiness)(issues=manual)
+                plan.risk_reasons = list(plan.risk_reasons) + issues_as_risk_reasons(readiness_manual)
+            if any(i.severity == "error" for i in manual):
                 plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
             #: 앱이 쓰는 DB 를 함께 띄운다 — 없으면 DB 에 붙지 못한 서버가 시작하자마자 종료했다(실기기 쇼핑몰).
             if readiness.services and plan.container_name:
@@ -3514,6 +3530,108 @@ def _dockerfile_in(workspace_path: str) -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
+_PROJECT_MANIFESTS = ("package.json", "requirements.txt", "pyproject.toml", "Dockerfile", "index.html", "go.mod", "pom.xml")
+_NOT_PROJECT_DIRS = {"node_modules", ".git", ".recoder", ".vscode", ".idea", "__pycache__", ".venv", "venv", "dist", "build"}
+
+
+def _nested_project_dir(workspace_path: str) -> Optional[str]:
+    """루트에는 프로젝트 파일이 없고 바로 아래 폴더 **하나**에만 있으면 그 폴더 이름.
+
+    실기기(2026-09-30): 생성한 쇼핑몰이 TEMP/docs/ 에 들어갔는데 배포는 TEMP 를 가리켜
+    스택을 'unknown' 으로 보고, 예전 이미지를 그대로 띄워 옛 코드의 오류가 났다.
+    """
+    root = Path(workspace_path or "")
+    try:
+        if not root.is_dir() or any((root / name).is_file() for name in _PROJECT_MANIFESTS):
+            return None
+        found = [child.name for child in sorted(root.iterdir())
+                 if child.is_dir() and child.name not in _NOT_PROJECT_DIRS and not child.name.startswith(".")
+                 and any((child / name).is_file() for name in _PROJECT_MANIFESTS)]
+    except OSError:
+        return None
+    return found[0] if len(found) == 1 else None
+
+
+def _no_project_message(workspace_path: str) -> str:
+    nested = _nested_project_dir(workspace_path)
+    if nested:
+        return (f"배포할 폴더({Path(workspace_path).name})에는 프로젝트 파일이 없고 {nested}/ 폴더에 있습니다. "
+                f"Deploy 화면 위쪽의 폴더를 '{nested}' 로 바꾼 뒤 다시 배포하세요.")
+    return ("배포할 폴더에서 프로젝트 파일(package.json·requirements.txt·index.html·Dockerfile)을 찾지 못했습니다. "
+            "Deploy 화면 위쪽의 폴더가 앱의 루트 폴더인지 확인하세요.")
+
+
+def _write_template_dockerfile(workspace_path: str) -> tuple[Optional[str], str]:
+    """Dockerfile 이 없는 워크스페이스에 검증된 기본 템플릿을 만든다(AI 없이). (템플릿 이름, 오류 문장)."""
+    stack = _detect_stack(workspace_path)
+    try:
+        from project_scanner import get_project_scanner  # type: ignore
+        project = get_project_scanner().scan(workspace_path)
+    except Exception:  # noqa: BLE001
+        project = None
+    try:
+        content, template_id = _dockerfile_from_template(workspace_path, stack, project)
+    except (_UnsupportedDockerfileFallback, _DockerfileTemplateRenderError) as exc:
+        return None, (_no_project_message(workspace_path) if _nested_project_dir(workspace_path) or stack == StackType.UNKNOWN
+                      else str(exc))
+    try:
+        from build_readiness import ProjectFiles, add_subproject_installs, analyze, write_dockerignore_if_missing
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import ProjectFiles, add_subproject_installs, analyze, write_dockerignore_if_missing  # type: ignore
+    try:
+        readiness = analyze(workspace_path, {"Dockerfile": content})
+        if any(i.code == "DOCKERFILE_SUBPROJECT_DEPS_MISSING" for i in readiness.issues):
+            content = add_subproject_installs(content, readiness.subprojects, ProjectFiles(Path(workspace_path)))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("subproject install injection skipped: %s", exc)
+    target = Path(workspace_path) / "Dockerfile"
+    try:
+        with target.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+        write_dockerignore_if_missing(workspace_path)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        return None, f"Dockerfile 을 저장하지 못했습니다: {exc}"
+    return template_id, ""
+
+
+#: 배포 직전에 확인 없이 적용해도 되는 자동 수정 — 적용하지 않으면 빌드·실행이 확실히 실패하는 것(error)과
+#: 화면이 나오지 않는 것만. 원본은 .recoder/backups 에 남는다. 화면 동작을 바꾸는 권장 수정은 넣지 않는다.
+_PRE_DEPLOY_WARNING_FIXES = {"NODE_FRONTEND_NOT_SERVED", "DOCKERFILE_HEALTH_PATH_UNKNOWN", "DOCKERIGNORE_MISSING"}
+
+
+def _auto_fix_before_build(workspace_path: str) -> list[dict]:
+    """빌드 전에 확실히 고칠 수 있는 문제를 고친다. 적용한 항목 목록(코드·메시지·바뀐 파일)."""
+    try:
+        from build_readiness import analyze, apply_fix
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import analyze, apply_fix  # type: ignore
+    applied: list[dict] = []
+    tried: set[str] = set()
+    for _ in range(8):
+        try:
+            readiness = analyze(workspace_path, online=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pre-deploy readiness failed: %s", exc)
+            break
+        todo = [i for i in readiness.issues if i.auto_fix and i.code not in tried
+                and (i.severity == "error" or i.code in _PRE_DEPLOY_WARNING_FIXES)]
+        if not todo:
+            break
+        issue = todo[0]
+        tried.add(issue.code)
+        try:
+            result = apply_fix(workspace_path, issue.code)
+        except Exception as exc:  # noqa: BLE001 - 자동 수정 실패는 빌드 진단이 원인을 알린다
+            logger.warning("pre-deploy auto-fix %s failed: %s", issue.code, exc)
+            continue
+        if result.get("applied"):
+            applied.append({"code": issue.code, "message": issue.message[:300],
+                            "changed": [c for c in result.get("changed", []) if not str(c).startswith(".recoder/")][:12]})
+    return applied
+
+
 async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optional[dict]:
     """로컬 Docker 배포의 **빌드 단계**. 성공이면 None, 실패면 응답 dict.
 
@@ -3526,9 +3644,23 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
     if plan.method != DeployMethod.LOCAL_DOCKER or not plan.image:
         return None
     dockerfile = _dockerfile_in(workspace_path)
+    workspace_has_project = bool(workspace_path) and Path(workspace_path).is_dir() and (
+        any((Path(workspace_path) / name).is_file() for name in _PROJECT_MANIFESTS) or _nested_project_dir(workspace_path) is not None)
+    if dockerfile is None and workspace_has_project:
+        #: 프로젝트 폴더를 배포하는데 Dockerfile 이 없다 — 예전 이미지를 그대로 띄우면 **지금 코드가 아닌**
+        #: 옛 코드가 돈다(실기기: 이미 고친 오류가 다시 났다). 기본 템플릿으로 만들어 지금 코드를 빌드한다.
+        #: (프로젝트 파일이 전혀 없는 폴더는 예전처럼 미리 빌드한 이미지를 쓴다.)
+        template_id, problem = await asyncio.to_thread(_write_template_dockerfile, workspace_path)
+        if template_id is None:
+            return {"status": "failed", "stage": "build", "message": problem, "stderr": "", "stdout": "",
+                    "diagnosis": {"code": "NO_PROJECT_FILES" if "프로젝트 파일" in problem else "DOCKERFILE_MISSING",
+                                  "title": "배포할 프로젝트를 찾지 못했습니다" if "프로젝트 파일" in problem else "Dockerfile 을 만들지 못했습니다",
+                                  "cause": problem, "fix": problem, "lines": [], "step": "이미지 빌드"}}
+        report_progress('build', f'Dockerfile 이 없어 기본 템플릿({template_id})으로 만들었습니다 — 이미지를 빌드합니다')
+        dockerfile = _dockerfile_in(workspace_path)
     if dockerfile is None:
         if _local_image_exists(plan.image):
-            return None  # 미리 빌드된 이미지를 그대로 쓴다.
+            return None  # 워크스페이스 없이 이미지만 지정한 배포 — 미리 빌드된 이미지를 그대로 쓴다.
         return {
             "status": "failed",
             "stage": "build",
@@ -3681,10 +3813,21 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         #: 부르면 "락을 얻기 전에는 docker 를 건드리지 않는다"는 교체 안전 불변식
         #: (test_replace_safety)이 깨진다. 빌드 실패는 돌고 있던 컨테이너를 건드리기
         #: 전이라 되돌릴 것이 없다.
+        workspace_for_build = _plan_workspaces.get(request.plan_id, "")
+        pre_deploy_fixes: list[dict] = []
+        if plan.method == DeployMethod.LOCAL_DOCKER and workspace_for_build and Path(workspace_for_build).is_dir():
+            #: 점검이 "이대로면 빌드·실행이 실패한다"고 확정한 것 중 확실히 고칠 수 있는 것은 빌드 전에 고친다
+            #: (실기기: ESM/CommonJS 혼용을 점검이 잡았는데 배포가 그대로 진행돼 컨테이너가 죽었다).
+            report_progress('build', '배포 전 점검 — 빌드·실행을 막는 문제를 자동으로 고칩니다')
+            pre_deploy_fixes = await asyncio.to_thread(_auto_fix_before_build, workspace_for_build)
+            if pre_deploy_fixes:
+                report_progress('build', f"자동 수정 {len(pre_deploy_fixes)}건 적용: {', '.join(f['code'] for f in pre_deploy_fixes)}")
         report_progress('build', 'Docker 이미지를 빌드하고 있습니다')
-        build_failure = await _build_local_image(plan, _plan_workspaces.get(request.plan_id, ""))
+        build_failure = await _build_local_image(plan, workspace_for_build)
         if build_failure is not None:
             build_failure["plan_id"] = request.plan_id
+            if pre_deploy_fixes:
+                build_failure["auto_fixed"] = pre_deploy_fixes
             return build_failure
 
         # ── 빌드 후 1회 스캔 보장 ──────────────────────────────────────────
@@ -4039,6 +4182,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             },
             "security_scan": post_build_scan,
             **({"screen": screen_result} if screen_result is not None else {}),
+            **({"auto_fixed": pre_deploy_fixes} if pre_deploy_fixes else {}),
         }
 
 

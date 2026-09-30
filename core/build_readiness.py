@@ -39,7 +39,8 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_DEPENDENCY_VERSION_NOT_FOUND", "DOCKERFILE_SUBPROJECT_DEPS_MISSING", "NODE_FRONTEND_NOT_SERVED",
                 "NODE_LOCAL_IMPORT_MISSING", "NODE_VITE_JSX_IN_JS", "NODE_VITE_PROCESS_ENV", "NODE_IMPORT_PACKAGE_TYPO",
                 "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING", "NODE_PG_NUMERIC_STRINGS", "NODE_CLIENT_HARDCODED_LOCALHOST",
-                "NODE_ROUTER_ANCHOR_LINK", "NODE_MODULE_FORMAT_MISMATCH", "NODE_FRONTEND_NOT_BUILT"}
+                "NODE_ROUTER_ANCHOR_LINK", "NODE_MODULE_FORMAT_MISMATCH", "NODE_FRONTEND_NOT_BUILT",
+                "NODE_IMPORT_NAME_MISSING", "NODE_CLIENT_API_DOUBLE_PREFIX"}
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -550,11 +551,69 @@ def _closest_declared(name: str, declared: set[str], imported: set[str] = frozen
     return max(pool, key=lambda d: difflib.SequenceMatcher(None, name, d).ratio())
 
 
+def api_prefix_rewrite(text: str, names) -> str:
+    """names(baseURL 이 /api 인 axios 인스턴스)의 호출 경로에서 앞의 /api 를 뺀다: client.get('/api/x') → client.get('/x')."""
+    for name in names:
+        text = re.sub(rf"""(\b{re.escape(name)}\.(?:get|post|put|patch|delete|head|options|request)\s*\(\s*)(['"`])/api(/[^'"`]*)?\2""",
+                      lambda m: f"{m.group(1)}{m.group(2)}{m.group(3) or '/'}{m.group(2)}", text)
+        text = re.sub(rf"""(\b{re.escape(name)}\.(?:get|post|put|patch|delete|head|options|request)\s*\(\s*`)/api(/)""",
+                      lambda m: f"{m.group(1)}{m.group(2)}", text)
+    return text
+
+
+def add_missing_export(text: str, name: str, kind: str) -> Optional[str]:
+    """파일 최상위에 선언된 name 을 내보낸다. 선언이 없거나 확실하지 않으면 None."""
+    newline_ = "\r\n" if "\r\n" in text else "\n"
+    if kind == "esm" and name.startswith("default:"):
+        #: `import Header from './Header'` 인데 파일은 `export function Header` 만 있다 — 기본 내보내기를 보탠다.
+        local = name.split(":", 1)[1]
+        declared = re.search(rf"^(?:export\s+)?(?:(?:async\s+)?function\*?|class|const|let|var)\s+{re.escape(local)}\b", text, re.MULTILINE)
+        if not declared:
+            components = re.findall(r"^export\s+(?:(?:async\s+)?function|class|const|let)\s+([A-Z][\w$]*)", text, re.MULTILINE)
+            if len(components) != 1:
+                return None
+            local = components[0]
+        return text.rstrip() + newline_ + newline_ + f"export default {local};" + newline_
+    decl = re.compile(rf"^(?:(?:async\s+)?function\*?|class|const|let|var)\s+{re.escape(name)}\b", re.MULTILINE)
+    if kind == "esm":
+        m = decl.search(text)
+        if m:
+            return text[:m.start()] + "export " + text[m.start():]
+        if re.search(rf"^export\s+default\s+(?:(?:async\s+)?function\*?|class)\s+{re.escape(name)}\b", text, re.MULTILINE):
+            #: `export default function Header` 인데 쓰는 쪽은 `import { Header }` — 이름으로도 내보낸다.
+            return text.rstrip() + newline_ + newline_ + f"export {{ {name} }};" + newline_
+        #: `export const api = { getProducts: () => client.get(...) }` 인데 쓰는 쪽은 `import { getProducts }` —
+        #: 그 객체의 함수를 이름으로 내보낸다. axios 응답이면 쓰는 쪽이 기대하는 데이터(res.data)를 돌려준다.
+        owners = [obj for obj, body in re.findall(r"^export\s+const\s+([\w$]+)\s*=\s*\{(.*?)^\};?", text, re.MULTILINE | re.DOTALL)
+                  if re.search(rf"^\s*{re.escape(name)}\s*[:(]", body, re.MULTILINE)]
+        if len(owners) != 1:
+            return None
+        newline = "\r\n" if "\r\n" in text else "\n"
+        axios_like = bool(re.search(r"""from\s+['"]axios['"]|require\(\s*['"]axios['"]\s*\)""", text))
+        call = f"{owners[0]}.{name}(...args)"
+        body = (f"Promise.resolve({call}).then((res) => (res && typeof res === 'object' && 'data' in res && 'status' in res ? res.data : res))"
+                if axios_like else call)
+        return (text.rstrip() + newline + newline + "// ReCoder: 다른 파일이 이 이름으로 불러와 함께 내보낸다." + newline
+                + f"export const {name} = (...args) => {body};" + newline)
+    #: CommonJS: module.exports = { … } 한 곳에 이름을 보탠다
+    if not decl.search(text):
+        return None
+    literal = list(re.finditer(r"\bmodule\.exports\s*=\s*\{([^{}]*)\}", text))
+    if len(literal) != 1 or re.search(r"\bmodule\.exports\s*=\s*(?![\s{])", text):
+        return None
+    m = literal[0]
+    body = m.group(1).rstrip()
+    sep = "" if not body.strip() else ("" if body.endswith(",") else ",")
+    inner = f"{body}{sep} {name} " if "\n" not in body else f"{body}{sep}\n  {name}\n"
+    return text[:m.start(1)] + inner + text[m.end(1):]
+
+
 def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: dict, owner, undeclared: dict) -> None:
     deps = manifests.get("", set())
     vite = _vite_projects(files, manifests)
     missing_files: list[tuple[str, str]] = []
     missing_names: list[str] = []
+    missing_exports: list[tuple[str, str, str]] = []  # (내보내야 할 파일, 이름, esm|cjs)
     jsx_in_js: list[str] = []
     process_env: list[str] = []
     for rel in files.files():
@@ -580,6 +639,20 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             for name in (re.sub(r"^type\s+", "", n.strip()).split(" as ")[0].strip() for n in names.split(",")):
                 if name and name not in exported:
                     missing_names.append(f"`{name}`({rel} → {target})")
+                    missing_exports.append((target, name, "esm"))
+        #: 기본 가져오기(import Header from './Header')인데 그 파일에 기본 내보내기가 없다 — Vite 빌드가 멈춘다.
+        for local, spec in re.findall(r"""^\s*import\s+([\w$]+)\s*(?:,\s*\{[^}]*\})?\s*from\s*['"](\.{1,2}/[^'"]+)['"]""", active, re.MULTILINE):
+            target = _resolve_local(files, rel, spec)
+            if not target or not target.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs")):
+                continue
+            target_text = _strip_js_comments(files.read(target) or "")
+            if re.search(r"\bmodule\.exports\b|\bexports\.[\w$]+\s*=", target_text):
+                continue  # CommonJS 파일의 기본 가져오기는 module.exports 다
+            exported = _esm_exports(target_text)
+            if exported is None or "default" in exported:
+                continue
+            missing_names.append(f"`default`({rel} → {target})")
+            missing_exports.append((target, f"default:{local}", "esm"))
         cjs_bindings = []
         for var, spec in _CJS_REQUIRE_BIND.findall(active):
             cjs_bindings.append((var, spec, None))
@@ -598,6 +671,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             for name in sorted(set(used)):
                 if name not in exported:
                     missing_names.append(f"`{name}`({rel} → {target})")
+                    missing_exports.append((target, name, "cjs"))
         # 3) Vite 는 .js 안의 JSX 를 해석하지 않는다 · 브라우저 코드에 process.env 가 없다
         #    (서버 파일·설정 파일은 제외 — 단일 패키지 Vite+Express 앱의 server.js 를 건드리면 안 된다)
         if project in vite and not _is_server_file(active) and not re.search(r"(^|/)(?:vite|vitest|playwright|cypress|jest|tailwind|postcss|eslint)\.config\.|(^|/)(?:cypress|e2e|tests?|__tests__)/", rel):
@@ -616,11 +690,20 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
              "빠진 파일을 만들거나 import 경로를 실제 파일로 고치세요."),
             missing_files[0][0], styles_only))
     if missing_names:
+        #: 그 파일 안에 같은 이름이 선언만 되고 내보내지지 않았으면(const CartContext = createContext()) 내보내기만
+        #: 붙이면 된다 — 나눠 만든 파일끼리 가장 흔한 어긋남(실기기 생성 쇼핑몰). 모두 그런 경우에만 자동 수정.
+        export_fixes = sorted({(t, n, k) for t, n, k in missing_exports})
+        fixable = bool(export_fixes) and len(export_fixes) == len({(t, n) for t, n, _ in missing_exports}) and all(
+            add_missing_export(files.read(t) or "", n, k) is not None for t, n, k in export_fixes)
+        if fixable:
+            result.fix_data["missing_exports"] = export_fixes
         result.issues.append(ReadinessIssue(
             "NODE_IMPORT_NAME_MISSING", ERROR,
-            "불러오는 이름을 그 파일이 내보내지 않습니다: " + ", ".join(missing_names[:6])
-            + ". 실행 중 undefined 오류(… is not a function)로 멈춥니다.",
-            "내보내는 쪽 이름과 쓰는 쪽 이름을 맞추세요.", missing_names[0].split("(")[1].split(" ")[0]))
+            "불러오는 이름을 그 파일이 내보내지 않습니다: " + ", ".join(list(dict.fromkeys(missing_names))[:6])
+            + ". 빌드가 실패하거나 실행 중 undefined 오류(… is not a function)로 멈춥니다.",
+            ("그 파일에 선언된 이름에 내보내기(export)를 붙이세요(자동 수정 가능)." if fixable
+             else "내보내는 쪽 이름과 쓰는 쪽 이름을 맞추세요."),
+            missing_names[0].split("(")[1].split(" ")[0], fixable))
     if jsx_in_js:
         result.fix_data["jsx_in_js"] = jsx_in_js
         result.issues.append(ReadinessIssue(
@@ -674,6 +757,45 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             f"화면 코드가 API 를 http://localhost:포트 로 직접 부릅니다: {', '.join(hardcoded[:4])}. 배포 포트가 다르거나 "
             "다른 PC·서버에서 열면 요청이 실패합니다(Network Error).",
             "서버가 화면을 함께 제공하므로 상대 경로(/api/…)로 부르게 바꾸세요(자동 수정 가능).", hardcoded[0], True))
+
+    # 5-2) axios 인스턴스의 baseURL 이 이미 /api 인데 쓰는 쪽이 '/api/…' 를 또 붙인다 → /api/api/… 404
+    double: dict[str, list[str]] = {}
+    for rel in files.files():
+        if not rel.endswith((".js", ".jsx", ".ts", ".tsx")) or "/node_modules/" in f"/{rel}":
+            continue
+        text = _strip_js_comments(files.read(rel) or "")
+        instances = []
+        for var, value in re.findall(r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*axios\.create\(\s*\{[^}]*?\bbaseURL\s*:\s*([^,\n}]+)""", text, re.DOTALL):
+            value = value.strip()
+            ident = re.fullmatch(r"[\w$]+", value)
+            if ident:  # baseURL: API_BASE_URL — 같은 파일의 상수를 따라간다
+                m = re.search(rf"""\b(?:const|let|var)\s+{re.escape(value)}\s*=\s*([^;\n]+)""", text)
+                value = m.group(1) if m else ""
+            if re.search(r"""['"`][^'"`]*?/api/?['"`]\s*$""", value.strip()):
+                instances.append(var)
+        for var in instances:
+            names_by_file: dict[str, set[str]] = {rel: {var}}
+            default_export = re.search(rf"\bexport\s+default\s+{re.escape(var)}\b", text)
+            for other in files.files():
+                if other == rel or not other.endswith((".js", ".jsx", ".ts", ".tsx")) or "/node_modules/" in f"/{other}":
+                    continue
+                body = _strip_js_comments(files.read(other) or "")
+                for local, spec in re.findall(r"""\bimport\s+([\w$]+)\s*(?:,\s*\{[^}]*\})?\s*from\s*['"](\.{1,2}/[^'"]+)['"]""", body):
+                    if default_export and _resolve_local(files, other, spec) == rel:
+                        names_by_file.setdefault(other, set()).add(local)
+            for target, names in names_by_file.items():
+                body = files.read(target) or ""
+                if api_prefix_rewrite(body, names) != body:
+                    double.setdefault(target, [])
+                    double[target] = sorted(set(double[target]) | names)
+    if double:
+        result.fix_data["api_double_prefix"] = double
+        first = next(iter(double))
+        result.issues.append(ReadinessIssue(
+            "NODE_CLIENT_API_DOUBLE_PREFIX", ERROR,
+            f"axios 인스턴스의 baseURL 이 이미 /api 인데 화면 코드가 '/api/…' 를 한 번 더 붙입니다: {', '.join(list(double)[:4])}. "
+            "요청이 /api/api/… 로 가서 404 가 나고 화면에 데이터가 나오지 않습니다.",
+            "그 호출들의 경로에서 앞의 /api 를 빼세요(자동 수정 가능).", first, True))
 
     # 6) React Context 의 value 에 없는 이름을 useContext 로 꺼낸다 → "x is not a function"(나눠 만든 파일끼리 어긋남)
     context_keys: dict[str, set[str]] = {}
@@ -1424,39 +1546,91 @@ def _script_runs(scripts: dict, files: "ProjectFiles", name: str) -> tuple[set[s
     return runs, direct
 
 
+def _vite_config_file(files: "ProjectFiles", folder: str) -> Optional[str]:
+    for name in ("vite.config.js", "vite.config.ts", "vite.config.mjs", "vite.config.cjs", "vite.config.mts"):
+        rel = f"{folder}/{name}" if folder else name
+        if files.exists(rel):
+            return rel
+    return None
+
+
+def vite_out_dir_rewrite(text: str, new_out: str) -> Optional[str]:
+    """vite.config 의 build.outDir 를 new_out 으로. outDir 가 없으면 build 블록에 넣는다. 확실하지 않으면 None."""
+    if re.search(r"""\boutDir\s*:\s*['"][^'"]*['"]""", text):
+        return re.sub(r"""(\boutDir\s*:\s*)(['"])[^'"]*\2""", lambda m: f"{m.group(1)}{m.group(2)}{new_out}{m.group(2)}", text, count=1)
+    if re.search(r"\boutDir\s*:", text):
+        return None  # 변수·식으로 정한 outDir 는 건드리지 않는다
+    if re.search(r"\bbuild\s*:\s*\{", text):
+        return re.sub(r"(\bbuild\s*:\s*\{)", lambda m: f"{m.group(1)} outDir: '{new_out}',", text, count=1)
+    m = re.search(r"defineConfig\(\s*\{", text) or re.search(r"export\s+default\s+\{", text)
+    if not m:
+        return None
+    return text[:m.end()] + f"\n  build: {{ outDir: '{new_out}' }}," + text[m.end():]
+
+
 def frontend_build_plan(files: "ProjectFiles", scripts: dict, server_files: list[str]) -> Optional[dict]:
-    """서버가 제공하는 화면 폴더를 루트 `build`(= Dockerfile 의 npm run build)가 만들지 않으면 계획을 돌려준다."""
+    """서버가 제공하는 화면 폴더를 Docker 빌드(npm run build)가 만들지 않으면 고칠 계획을 돌려준다.
+
+    두 가지를 본다. (1) 루트 build 가 화면을 빌드하지 않는다(build:client 만 있음 — 실기기 TEMP).
+    (2) 화면 빌드 결과 폴더와 서버가 제공하는 폴더가 다르다(vite outDir '../dist' 인데 서버는
+    frontend/dist 를 제공 — 실기기 생성 쇼핑몰). 둘 다 주소는 열리는데 화면이 없다.
+    """
+    import posixpath
     served = _served_dirs(files, server_files)
     if not served:
         return None
     projects = _frontend_projects(files)
     build_runs, build_direct = _script_runs(scripts, files, "build")
+    candidates = []
     for folder, (out_dir, script_name) in projects.items():
-        if out_dir not in served:
-            continue
+        if out_dir in served:
+            candidates.append((folder, out_dir, script_name, None))
+    if not candidates:
+        #: 서버가 제공하는 폴더가 저장소에 없고(빌드 결과), 그 폴더를 만드는 프런트엔드가 없다 —
+        #: 프런트엔드가 하나뿐이면 그 빌드 결과 폴더를 서버가 제공하는 폴더로 맞춘다(Vite 만).
+        missing = [d for d in served if not files.has_dir(d)]
+        if len(projects) == 1 and len(missing) == 1:
+            folder, (out_dir, script_name) = next(iter(projects.items()))
+            config = _vite_config_file(files, folder) if re.search(r"\bvite\s+build\b", str(
+                ((json.loads(files.read(f"{folder}/package.json" if folder else "package.json") or "{}").get("scripts") or {})
+                 .get(script_name, "")))) else None
+            if config:
+                target = missing[0]
+                rel = posixpath.relpath(target, folder or ".")
+                new_text = vite_out_dir_rewrite(files.read(config) or "", rel)
+                if new_text is not None:
+                    candidates.append((folder, target, script_name, (config, out_dir, rel, new_text)))
+    for folder, out_dir, script_name, vite_fix in candidates:
         if files.exists(f"{out_dir}/index.html"):
             continue  # 빌드 결과를 저장소에 함께 둔 프로젝트
-        if (folder and folder in build_runs) or (not folder and (build_direct or (script_name == "build"))):
+        built = (folder and folder in build_runs) or (not folder and (build_direct or (script_name == "build")))
+        if built and not vite_fix:
             continue
-        # 루트에서 그 화면을 빌드하는 스크립트를 찾는다(build:client 등)
+        new_build = None
         runner = None
-        for name in sorted(scripts):
-            if name == "build" or name.startswith(("pre", "post", "dev", "start", "test", "watch")):
-                continue
-            runs, direct = _script_runs(scripts, files, name)
-            if (folder and folder in runs) or (not folder and direct):
-                runner = name
-                break
-        if runner:
-            command = f"npm run {runner}"
-        elif folder:
-            command = f"npm --prefix {folder} run {script_name}"
-        else:
-            command = f"npm run {script_name}"
-        existing = str(scripts.get("build") or "").strip()
-        new_build = f"{command} && {existing}" if existing else command
-        return {"folder": folder, "out_dir": out_dir, "server_file": served[out_dir], "runner": runner,
+        if not built:
+            # 루트에서 그 화면을 빌드하는 스크립트를 찾는다(build:client 등)
+            for name in sorted(scripts):
+                if name == "build" or name.startswith(("pre", "post", "dev", "start", "test", "watch")):
+                    continue
+                runs, direct = _script_runs(scripts, files, name)
+                if (folder and folder in runs) or (not folder and direct):
+                    runner = name
+                    break
+            if runner:
+                command = f"npm run {runner}"
+            elif folder:
+                command = f"npm --prefix {folder} run {script_name}"
+            else:
+                command = f"npm run {script_name}"
+            existing = str(scripts.get("build") or "").strip()
+            new_build = f"{command} && {existing}" if existing else command
+        plan = {"folder": folder, "out_dir": out_dir, "server_file": served[out_dir], "runner": runner,
                 "build": new_build}
+        if vite_fix:
+            config, old_out, rel, new_text = vite_fix
+            plan.update({"vite_config": config, "vite_out_from": old_out, "vite_out_to": rel, "vite_config_text": new_text})
+        return plan
     return None
 
 
@@ -1689,11 +1863,17 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
     server_texts = [files.read(rel) or "" for rel in files.files()
                     if rel.endswith(_JS_SUFFIXES) and not any(rel.startswith(d + "/") for d in runs)
                     and "/node_modules/" not in rel]
+    try:
+        served_now = set(_served_dirs(files, [rel for rel in files.files() if rel.endswith(_JS_SUFFIXES)
+                                             and not any(rel.startswith(d + "/") for d in runs) and "/node_modules/" not in rel]))
+    except Exception:  # noqa: BLE001
+        served_now = set()
     for folder in runs:
-        out = _frontend_out_dir(files, folder)
+        out = _vite_out_dir(files, folder) or _frontend_out_dir(files, folder)
         if not out or not (routes or result.server_entry):
             continue
-        if any(out in text for text in server_texts):
+        #: path.join(__dirname, 'client', 'dist') 처럼 나눠 적은 경로도 제공하는 것으로 본다(글자 비교만 하면 오탐).
+        if out in served_now or any(out in text for text in server_texts):
             continue
         commonjs = bool(result.server_entry) and "require(" in (files.read(result.server_entry) or "") \
             and package.get("type") != "module"
@@ -1776,13 +1956,19 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
     if ui:
         result.fix_data["frontend_build"] = ui
         where = f"{ui['folder']}/ 의 화면" if ui["folder"] else "화면"
+        problems, fixes = [], []
+        if ui.get("vite_config"):
+            problems.append(f"화면은 {ui['vite_out_from']}/ 로 빌드되는데(vite outDir) 서버({ui['server_file']})는 {ui['out_dir']}/ 를 제공합니다")
+            fixes.append(f"{ui['vite_config']} 의 outDir 를 '{ui['vite_out_to']}' 로")
+        if ui.get("build"):
+            problems.append(f"서버({ui['server_file']})가 {ui['out_dir']}/ 를 화면으로 제공하지만 루트 `build` 스크립트가 {where}을 빌드하지 않습니다"
+                            f"{'(`' + ui['runner'] + '` 는 Docker 빌드에서 실행되지 않음)' if ui['runner'] else ''}")
+            fixes.append(f"package.json 의 build 를 `{ui['build']}` 로")
         result.issues.append(ReadinessIssue(
             "NODE_FRONTEND_NOT_BUILT", ERROR,
-            f"서버({ui['server_file']})가 {ui['out_dir']}/ 를 화면으로 제공하지만 루트 `build` 스크립트가 {where}을 빌드하지 않습니다"
-            f"{'(`' + ui['runner'] + '` 는 Docker 빌드에서 실행되지 않음)' if ui['runner'] else ''}. "
-            "배포 주소는 열리지만 화면이 나오지 않습니다(index.html 없음).",
-            f"package.json 의 build 를 `{ui['build']}` 로 설정하세요(자동 수정 가능, 원본은 .recoder/backups 에 보관).",
-            "package.json", True))
+            " / ".join(problems) + ". 배포 주소는 열리지만 화면이 나오지 않습니다(index.html 없음).",
+            " · ".join(fixes) + " 맞추세요(자동 수정 가능, 원본은 .recoder/backups 에 보관).",
+            ui.get("vite_config") or "package.json", True))
 
         #: 같은 폴더의 "정적 폴더 없음" 경고는 이 항목이 원인과 해결을 대신한다
         result.issues = [i for i in result.issues
@@ -2796,15 +2982,44 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
         if not issue.auto_fix or not plan.get("auto"):
             raise ValueError(plan.get("why_not") or "모듈 형식을 자동으로 통일할 수 없습니다. 안내에 따라 직접 수정하세요.")
         changed += apply_file_plan(root, plan.get("writes") or {}, plan.get("renames") or [])
+    elif code == "NODE_CLIENT_API_DOUBLE_PREFIX":
+        writes = {}
+        for rel, names in (before.fix_data.get("api_double_prefix") or {}).items():
+            text = _read_raw(root / rel)
+            updated = api_prefix_rewrite(text, names)
+            if updated != text:
+                writes[rel] = updated
+        changed += apply_file_plan(root, writes, [])
+    elif code == "NODE_IMPORT_NAME_MISSING":
+        fixes = before.fix_data.get("missing_exports") or []
+        if not issue.auto_fix or not fixes:
+            raise ValueError("그 파일에 선언되지 않은 이름이라 자동으로 고칠 수 없습니다. 이름을 맞추세요.")
+        writes: dict[str, str] = {}
+        for target, name, kind in fixes:
+            current = writes.get(target, _read_raw(root / target))
+            updated = add_missing_export(current, name, kind)
+            if updated is None:
+                raise ValueError(f"{target} 에서 {name} 선언을 찾지 못했습니다.")
+            writes[target] = updated
+        changed += apply_file_plan(root, writes, [])
     elif code == "NODE_FRONTEND_NOT_BUILT":
         plan = before.fix_data.get("frontend_build") or {}
-        if not plan.get("build"):
+        if not plan.get("build") and not plan.get("vite_config"):
             raise ValueError("화면을 빌드할 명령을 확정하지 못했습니다.")
-        manifest = root / "package.json"
-        text = _read_raw(manifest)
-        backup = _backup(root, "package.json", text)
-        _write_raw(manifest, set_build_script(text, plan["build"]))
-        changed += ["package.json", backup]
+        if plan.get("vite_config"):
+            config = root / plan["vite_config"]
+            text = _read_raw(config)
+            updated = vite_out_dir_rewrite(text, plan["vite_out_to"])
+            if updated is None:
+                raise ValueError("vite.config 의 outDir 를 바꾸지 못했습니다. 직접 맞추세요.")
+            changed += [plan["vite_config"], _backup(root, plan["vite_config"], text)]
+            _write_raw(config, updated)
+        if plan.get("build"):
+            manifest = root / "package.json"
+            text = _read_raw(manifest)
+            backup = _backup(root, "package.json", text)
+            _write_raw(manifest, set_build_script(text, plan["build"]))
+            changed += ["package.json", backup]
     after = analyze(root)
     return {"applied": bool(changed), "changed": changed,
             "message": "수정했습니다. 배포 내용을 다시 확인하세요." if changed else "변경할 내용이 없었습니다.",

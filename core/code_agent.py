@@ -1589,12 +1589,14 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
     import 하지만 만들지 않은 CSS, CRA 식 process.env, 선언과 다른 패키지 이름.
     """
     try:
-        from build_readiness import (analyze, jsx_reference_rewrite, pg_numeric_parser_rewrite, relative_api_rewrite,
-                                     rename_package_import, router_link_rewrite, set_build_script, vite_env_rewrite)
+        from build_readiness import (add_missing_export, analyze, api_prefix_rewrite, jsx_reference_rewrite,
+                                     pg_numeric_parser_rewrite, relative_api_rewrite, rename_package_import,
+                                     router_link_rewrite, set_build_script, vite_env_rewrite, vite_out_dir_rewrite)
     except ImportError:  # pragma: no cover
-        from core.build_readiness import (analyze, jsx_reference_rewrite, pg_numeric_parser_rewrite,  # type: ignore
-                                          relative_api_rewrite, rename_package_import, router_link_rewrite,
-                                          set_build_script, vite_env_rewrite)
+        from core.build_readiness import (add_missing_export, analyze, api_prefix_rewrite,  # type: ignore
+                                          jsx_reference_rewrite, pg_numeric_parser_rewrite, relative_api_rewrite,
+                                          rename_package_import, router_link_rewrite, set_build_script,
+                                          vite_env_rewrite, vite_out_dir_rewrite)
     _JS_EXTS = (".js", ".cjs", ".mjs")
     folder = (target_folder or "").replace("\\", "/").strip("/")
     base = (root / folder).resolve() if folder and not Path(folder).is_absolute() else (Path(folder) if folder else root.resolve())
@@ -1683,8 +1685,31 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
                 if op.get("content") != content:
                     op["content"] = content
                     notes.append(f"{prefix + rel}: 모듈 형식 통일")
+        #: 나눠 만든 파일끼리 내보내기가 어긋남(선언만 하고 export 안 함, 기본 내보내기 없음, 객체 안의 함수를 이름으로 가져옴).
+        for target, name, kind in data.get("missing_exports") or []:
+            op = by_path.get(prefix + target)
+            if op is None:
+                continue
+            updated = add_missing_export(op.get("content") or "", name, kind)
+            if updated is not None and updated != op.get("content"):
+                op["content"] = updated
+                notes.append(f"{prefix + target}: {name.replace('default:', '기본 내보내기 ')} 내보내기")
+        #: baseURL 이 /api 인 axios 인스턴스로 '/api/…' 를 또 부르면 /api/api/… 404
+        for rel, names in (data.get("api_double_prefix") or {}).items():
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = api_prefix_rewrite(op.get("content") or "", names)
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: /api 중복 제거")
         #: 서버가 제공하는 화면 폴더를 Docker 빌드(npm run build)가 만들도록 루트 build 를 잇는다.
         ui = data.get("frontend_build") or {}
+        if ui.get("vite_config") and by_path.get(prefix + ui["vite_config"]) is not None:
+            vite_op = by_path[prefix + ui["vite_config"]]
+            updated = vite_out_dir_rewrite(vite_op.get("content") or "", ui["vite_out_to"])
+            if updated is not None and updated != vite_op.get("content"):
+                vite_op["content"] = updated
+                notes.append(f"{prefix + ui['vite_config']}: outDir → {ui['vite_out_to']}(서버가 제공하는 폴더)")
         manifest_op = by_path.get(prefix + "package.json")
         if ui.get("build") and manifest_op is not None:
             try:

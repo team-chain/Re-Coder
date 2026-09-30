@@ -215,7 +215,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
-  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean }; security_scan?: { status?: string; high_count?: number; reason?: string } } | null>(null);
+  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean }; security_scan?: { status?: string; high_count?: number; reason?: string }; auto_fixed?: Array<{ code: string; message: string; changed?: string[] }>; screen?: { ok?: boolean | null; checked?: string; warnings?: string[] } } | null>(null);
   //: 배포 뒤 감시(연속 검증) 스냅샷과 롤백 결과 — 로컬 Docker 배포의 D1~D4.
   //: 예전엔 코어가 감시하고 롤백 후보를 관리해도 사이드바 어디에도 표시·승인 UI 가 없었다.
   const [watch, setWatch] = useState<VerificationSnapshot | null | "none">(null);
@@ -824,6 +824,18 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         <ReadinessPanel issues={readinessIssues} onFix={handleFixReadiness} onFixAll={handleFixAllReadiness} fixing={fixing} notice={fixNotice} />
       )}
 
+      {/* ── 배포 전에 자동으로 고친 것 — 사용자 파일이 바뀌었으니 무엇을 바꿨는지 알린다 ── */}
+      {(step === "done" || step === "error") && (deployResult?.auto_fixed?.length ?? 0) > 0 && (
+        <div data-testid="pre-deploy-autofix" style={{ background: "rgba(59,130,246,0.08)", border: "1px solid #3b82f6", borderRadius: 5, padding: "8px 10px", fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
+          배포 전에 빌드·실행을 막는 문제 {deployResult!.auto_fixed!.length}건을 자동으로 고쳤습니다(원본은 프로젝트의 .recoder/backups 에 있습니다).
+          <ul style={{ margin: "4px 0 0", paddingLeft: 16 }}>{deployResult!.auto_fixed!.map((f) => <li key={f.code}>{f.message.slice(0, 140)}{f.changed?.length ? ` — ${f.changed.slice(0, 4).join(", ")}${f.changed.length > 4 ? " 외" : ""}` : ""}</li>)}</ul>
+        </div>
+      )}
+      {step === "done" && deployResult?.screen?.ok === true && (
+        <div data-testid="screen-verified" style={{ fontSize: 11, color: "#22c55e", marginBottom: 8 }}>
+          화면 확인 완료 — 브라우저로 첫 화면을 열어 내용이 표시되는 것을 확인했습니다{deployResult.screen.checked === "http" ? "(HTTP 응답 기준)" : ""}.
+        </div>
+      )}
       {/* ── 빌드 후 보안 검사를 못 한 채 진행된 배포 ── */}
       {step === "done" && deployResult?.security_scan?.status === "unverified" && (
         <div data-testid="post-build-scan-unverified" style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "8px 10px", color: "#f59e0b", fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
