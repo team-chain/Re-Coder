@@ -483,7 +483,7 @@ def _find_composer_bin_entrypoint(workspace: Path) -> Optional[str]:
     if not manifest.is_file():
         return None
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
 

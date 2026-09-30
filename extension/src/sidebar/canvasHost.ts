@@ -259,7 +259,7 @@ export class CanvasHost {
                             if(current.exists!==plan.targetState.exists || current.task_definition!==plan.targetState.task_definition) throw new Error('승인 후 대상 서비스의 태스크 정의가 바뀌었거나 재확인할 수 없습니다. 다시 확인하세요.');
                         }
                         send('canvas.executing',{requestId,message:'대상 리전·권한 확인 중'});
-                        const status=await this.api.checkAwsPermissions({ecsCluster:c.ecs_cluster,ecsService:c.ecs_service,taskFamily:c.task_family,awsRegion:c.aws_region});
+                        const status=await this.api.checkAwsPermissions({ecrRepo:ecrRepoName(c.image_name),ecsCluster:c.ecs_cluster,ecsService:c.ecs_service,taskFamily:c.task_family,awsRegion:c.aws_region});
                         const permission=status.permission_check as (typeof status.permission_check & { advisory_only?: boolean });
                         if(!status.ready || permission?.missing_actions?.length || !(permission?.inspected || permission?.advisory_only)) throw new Error('ECS 배포 권한을 확인하지 못했습니다. AWS 연결에서 권한을 확인하세요.');
                         await execute('workspace.deploy.ecs', {...c, repo_name:ecrRepoName(c.image_name), workspace_path:workspace});

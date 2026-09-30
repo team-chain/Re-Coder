@@ -931,7 +931,7 @@ def _detect_stack(workspace_path: str) -> StackType:
     if (ws / "package.json").exists():
         try:
             import json
-            pkg = json.loads((ws / "package.json").read_text(encoding="utf-8"))
+            pkg = json.loads((ws / "package.json").read_text(encoding="utf-8-sig"))
             deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
             if "next" in deps:
                 return StackType.NODE_NEXT
@@ -953,7 +953,7 @@ def _detect_stack(workspace_path: str) -> StackType:
 
 def _read_text_if_exists(path: Path, limit: int = 100_000) -> str:
     try:
-        return path.read_text(encoding="utf-8", errors="ignore")[:limit]
+        return path.read_text(encoding="utf-8-sig", errors="ignore")[:limit]
     except OSError:
         return ""
 
@@ -2337,10 +2337,21 @@ def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
     if not target.is_file():
         return None
     try:
-        existing = target.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        existing = None
-    if existing is None or existing == proposal.content:
+        raw = target.read_bytes()
+    except OSError:
+        return None
+    if raw == proposal.content.encode("utf-8"):
+        return None
+    #: UTF-8 이 아닌 파일(메모장 ANSI=CP949, PowerShell 5 의 UTF-16)도 **다른 파일**이다 — 읽을 수 없다고
+    #: 충돌이 아닌 것으로 보면 사용자 파일을 백업 없이 덮어쓴다. 보여 줄 수 있게 최대한 디코드하고 원본 바이트를 보관한다.
+    existing = None
+    for encoding in ("utf-8-sig", "utf-16", "cp949", "latin-1"):
+        try:
+            existing = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if existing == proposal.content:
         return None
     import difflib
 
@@ -2353,7 +2364,7 @@ def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
             n=2,
         )
     )
-    return {"existing_content": existing, "diff": diff[:20000]}
+    return {"existing_content": existing, "diff": diff[:20000], "_existing_bytes": raw}
 
 
 def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, overwrite: bool = False):
@@ -2373,6 +2384,7 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
     conflict = _existing_file_conflict(proposal, target)
     backup_path: Optional[str] = None
     if conflict is not None:
+        original_bytes = conflict.pop("_existing_bytes")
         if not overwrite:
             return {
                 "status": "exists",
@@ -2382,11 +2394,20 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
                 **conflict,
             }
         backup = target.with_name(target.name + _OVERWRITE_BACKUP_SUFFIX)
-        backup.write_text(conflict["existing_content"], encoding="utf-8")
+        backup.write_bytes(original_bytes)  # 원래 인코딩 그대로 보관
         backup_path = str(backup)
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(proposal.content, encoding="utf-8")
+    try:
+        target.write_text(proposal.content, encoding="utf-8")
+    except PermissionError:
+        #: Windows 읽기 전용 특성이 붙은 파일 — 쓰기 권한을 주고 한 번 더. 그래도 안 되면 알아듣는 오류로.
+        import stat
+        try:
+            os.chmod(target, os.stat(target).st_mode | stat.S_IWRITE)
+            target.write_text(proposal.content, encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(status_code=409, detail=f"{target.name} 을(를) 저장하지 못했습니다(읽기 전용이거나 다른 프로그램이 열고 있음): {exc}") from exc
     additional_paths = []
     from static_frontend import STATIC_DOCKERIGNORE, STATIC_IGNORE_NOTICE
     if SERVER_IGNORE_NOTICE in getattr(proposal, 'risk_reasons', []):
@@ -2511,7 +2532,7 @@ def _discover_node_entrypoint(
     root = Path(workspace_path).expanduser().resolve()
     package: dict = {}
     try:
-        loaded = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        loaded = json.loads((root / "package.json").read_text(encoding="utf-8-sig"))
         if isinstance(loaded, dict):
             package = loaded
     except (OSError, ValueError):
@@ -3411,15 +3432,23 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
 def _docker_port_publishers(port: int) -> Optional[list[str]]:
     """PC 의 `port` 를 게시(publish) 중인 컨테이너 이름. docker 를 못 부르면 None."""
     try:
+        #: `--filter publish=` 가 PC 포트와 컨테이너 포트 중 무엇을 보는지는 Docker 버전마다 달랐다 —
+        #: 게시 목록(0.0.0.0:3131->3001/tcp)에서 PC 쪽 포트를 직접 읽는다.
         out = subprocess.run(
-            ["docker", "ps", "--filter", f"publish={int(port)}", "--format", "{{.Names}}"],
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
             shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0:
         return None
-    return [name.strip() for name in (out.stdout or "").splitlines() if name.strip()]
+    names = []
+    pattern = re.compile(rf"(?:^|[\s,])(?:[\d.]+|\[[0-9a-fA-F:]*\]|::):{int(port)}->")
+    for line in (out.stdout or "").splitlines():
+        name, _, ports = line.partition("\t")
+        if name.strip() and pattern.search(" " + ports):
+            names.append(name.strip())
+    return names
 
 
 def _host_port_listening(port: int) -> bool:
@@ -4356,6 +4385,13 @@ async def rollback(request: RollbackRequest) -> dict:
         # 롤백 대상(실패한 새 릴리스)의 감시가 복구된 이전 컨테이너를 계속
         # 관찰하면, 실패 배포를 stable로 잘못 기록할 수 있다.
         await _stop_verification_for_deployment(record.deployment_id)
+        #: 되돌린 이미지가 뜨지 못하면(포트가 그새 다른 프로그램에 잡힘 등) 아무것도 돌지 않게 된다 —
+        #: 지우기 전에 지금 컨테이너의 실행 조건을 붙잡아 두고, 실패하면 다시 띄운다.
+        try:
+            current_container = await _capture_running_local_container(record.container_name)
+        except Exception as exc:  # noqa: BLE001 - 붙잡지 못해도 롤백은 진행한다(기존 동작)
+            logger.warning("capture before rollback failed: %s", exc)
+            current_container = None
         # 1) docker stop (실패 무시 — 이미 중지됐을 수 있음)
         await loop.run_in_executor(
             None,
@@ -4380,6 +4416,13 @@ async def rollback(request: RollbackRequest) -> dict:
             ),
         )
         success = result.returncode == 0
+        if not success and current_container is not None:
+            await loop.run_in_executor(None, lambda: subprocess.run(
+                ["docker", "rm", "-f", record.container_name], shell=False, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=60))
+            restored_current, _out, restore_err = await _restore_prior_local_container(current_container)
+            logger.warning("rollback run failed (%s); previous container restored=%s %s",
+                           (result.stderr or "")[-300:], restored_current, restore_err)
         # 포트 기록이 없으면 찔러 볼 곳이 없다. 그때는 확인을 건너뛰고 아래에서
         # "외부 접속이 불가능할 수 있다" 고 알린다 — "확인할 수 없음" 과
         # "죽어 있음" 은 다른 상태이고, 뭉뚱그리면 사용자가 원인을 못 찾는다.

@@ -143,6 +143,12 @@ def _aws_error_detail(exc: Exception, action: str) -> str:
             f"요청한 리전이 올바르지 않습니다. 자격증명이 유효한 리전과 같은지 "
             f"확인하세요. (AWS: {code})"
         )
+    #: 네트워크 계열(BotoCoreError: 연결 실패·시간 초과·연결 끊김)은 원문 대신 할 일을 알린다.
+    name = type(exc).__name__
+    if name in ("EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError", "ConnectionClosedError",
+                "ProxyConnectionError", "SSLError", "HTTPClientError"):
+        return (f"{action} 중 AWS 에 연결하지 못했습니다({name}). 인터넷·사내 프록시·방화벽을 확인한 뒤 "
+                "다시 배포하세요. 이미 올라간 파일은 다음 배포에서 그대로 덮어씁니다.")
     return f"{action} 실패: {exc}"
 
 
@@ -285,12 +291,12 @@ def _deploy_bucket_sync(
     `progress` 가 주어지면 단계마다 보고한다. 없으면(기존 라우트) 아무
     일도 하지 않으므로 동작이 완전히 같다 — AWS 호출은 그대로다.
     """
-    from botocore.exceptions import ClientError  # type: ignore
+    from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
 
     _report(progress, {"step": "bucket", "message": f"버킷 {bucket} 확인 중"})
     try:
         created, actual_region = _ensure_bucket(client, bucket, region)
-    except ClientError as exc:
+    except (ClientError, BotoCoreError) as exc:
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "S3 버킷 생성"),
         ) from exc
@@ -315,7 +321,7 @@ def _deploy_bucket_sync(
     _report(progress, {"step": "website", "message": "정적 호스팅 설정 중"})
     try:
         _configure_public_website(client, bucket, region)
-    except ClientError as exc:
+    except (ClientError, BotoCoreError) as exc:
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "정적 호스팅 설정"),
         ) from exc
@@ -338,7 +344,7 @@ def _deploy_bucket_sync(
             _report(progress, {
                 "step": "upload", "done_count": index, "total": total, "key": item.key,
             })
-    except ClientError as exc:
+    except (ClientError, BotoCoreError) as exc:
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "파일 업로드"),
         ) from exc

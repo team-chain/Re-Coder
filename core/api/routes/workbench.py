@@ -228,7 +228,7 @@ def _detect_contract_stack(ws):
         if pkg.exists():
             try:
                 import json as _json
-                data = _json.loads(pkg.read_text(encoding="utf-8"))
+                data = _json.loads(pkg.read_text(encoding="utf-8-sig"))
                 deps = {**(data.get("dependencies") or {}), **(data.get("devDependencies") or {})}
                 if "next" in deps:
                     return ContractStack.NODE_NEXT

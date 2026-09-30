@@ -40,7 +40,7 @@ class Service:
 
 SERVICES: dict[str, Service] = {
     "postgres": Service("postgres", "PostgreSQL", "postgres:16-alpine", 5432, "/var/lib/postgresql/data",
-                        ("pg_isready", "-U", "recoder", "-d", "app")),
+                        ("pg_isready", "-h", "127.0.0.1", "-U", "recoder", "-d", "app")),
     "mongodb": Service("mongodb", "MongoDB", "mongo:7", 27017, "/data/db",
                        ("mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok")),
     "redis": Service("redis", "Redis", "redis:7-alpine", 6379, "/data", ("redis-cli", "ping")),

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { activeProjectPath } from '../activeProject';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { TerminalOutput } from '../types';
@@ -172,7 +173,7 @@ export class TerminalCollector {
      * The caller (extension.ts runWithRecoder) passes output to the sidebar.
      */
     async createReCoderTerminal(command: string): Promise<TerminalOutput> {
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspacePath = activeProjectPath();
         return this.runWithFallback(command, workspacePath);
     }
 

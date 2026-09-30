@@ -246,7 +246,8 @@ export const ChatPanel: React.FC<{ isAiReady: boolean; connectionPending?: boole
     responseTimers.current.set(id, setTimeout(() => {
       responseTimers.current.delete(id);
       setMessages(current => current.map(item => item.id === id && item.pending ? { ...item, pending: false, error: true, errorReason: "응답 시간이 초과되었습니다. 연결 상태를 확인한 뒤 다시 요청해 주세요." } : item));
-    }, 150000));
+    //: 확장이 Core 연결(최대 150초) + 대화 요청(최대 90초)까지 기다리므로 그보다 조금 길게 기다린다.
+    }, 250000));
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, [input, messages, postMessage, targetFolder, contextFiles, developmentBusy]);
 

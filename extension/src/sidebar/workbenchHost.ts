@@ -18,6 +18,7 @@
  *   3. 시작 시 `_pushHealthAndCost` / `_startPolling` 등을 호출한다.
  */
 import * as vscode from 'vscode';
+import { activeProjectPath } from '../activeProject';
 import { CoreManager } from '../core/CoreManager';
 import { ApiClient } from '../core/ApiClient';
 import { PollingService } from '../core/PollingService';
@@ -186,6 +187,8 @@ export abstract class WorkbenchHost {
                         description: (p.description as string) || '',
                     });
                     const url = result.html_url ?? '';
+                    const failed = workbenchFailure(result);
+                    if (failed) { throw new Error(failed); }
                     this._post({
                         type: 'wb.gh.createRepoResult',
                         payload: { ok: true, url, message: `레포 생성 완료: ${url || result.status}` },
@@ -209,6 +212,8 @@ export abstract class WorkbenchHost {
                         name: String(p.name),
                         value: String(p.value),
                     });
+                    const failed = workbenchFailure(r);
+                    if (failed) { throw new Error(failed); }
                     this._post({
                         type: 'wb.gh.secretResult',
                         payload: { ok: true, name: p.name, message: r.message ?? `Secret 등록: ${p.repo}/${p.name}` },
@@ -233,6 +238,8 @@ export abstract class WorkbenchHost {
                         branch: (p.branch as string) || '',
                         force: !!p.force,
                     });
+                    const failed = workbenchFailure(r);
+                    if (failed) { throw new Error(failed); }
                     this._post({
                         type: 'wb.gh.pushResult',
                         payload: { ok: true, branch: r.branch, message: r.message ?? `push 완료 (branch=${r.branch ?? '?'})` },
@@ -321,7 +328,22 @@ export abstract class WorkbenchHost {
                     break;
                 }
                 try {
-                    await this._apiClient.approveDockerfile(proposalId, true);
+                    let r = await this._apiClient.approveDockerfile(proposalId, true);
+                    if (r.status === 'exists') {
+                        //: 내용이 다른 Dockerfile 이 이미 있다 — 묻지 않고 "저장됨"으로 보이면 옛 파일로 배포된다.
+                        const choice = await vscode.window.showWarningMessage(
+                            '프로젝트에 내용이 다른 Dockerfile 이 이미 있습니다. 새 초안으로 바꿀까요? (기존 파일은 Dockerfile.recoder-prev 로 보관)',
+                            { modal: true }, '바꾸기');
+                        if (choice !== '바꾸기') {
+                            this._post({ type: 'wb.local.approveResult', payload: { ok: false, error: '기존 Dockerfile 을 유지했습니다. 저장하지 않았습니다.' } });
+                            break;
+                        }
+                        r = await this._apiClient.approveDockerfile(proposalId, true, true);
+                    }
+                    if (r.status !== 'saved') {
+                        throw new Error(r.status === 'error' ? 'Dockerfile 을 저장하지 못했습니다. 초안을 다시 생성하세요(Core 가 다시 시작됐을 수 있습니다).' : `Dockerfile 저장 실패 (${r.status})`);
+                    }
+                    await this._writeEditedContent(r.path, msg.payload?.content);
                     this._post({
                         type: 'wb.local.approveResult',
                         payload: { ok: true, path: 'Dockerfile' },
@@ -436,7 +458,10 @@ export abstract class WorkbenchHost {
                     break;
                 }
                 try {
-                    await this._apiClient.approveGithubActions(proposalId, true);
+                    const r = await this._apiClient.approveGithubActions(proposalId, true);
+                    if (!['saved', 'ok', 'success'].includes(r.status)) {
+                        throw new Error(r.status === 'exists' ? '같은 이름의 워크플로 파일이 이미 있어 저장하지 않았습니다.' : `워크플로 저장 실패 (${r.status})`);
+                    }
                     this._post({
                         type: 'wb.actions.approveResult',
                         payload: { ok: true, path: '.github/workflows/ci-cd.yml' },
@@ -456,6 +481,8 @@ export abstract class WorkbenchHost {
                     if (!ready.ready) {
                         this.pushLog('deploy', `[BLOCKED] ${ready.issues.join('; ')}`);
                         this.addActivity('fail', 'ECS 사전 점검 실패');
+                        //: 화면의 상태 줄이 "요청 전송"에 멈추지 않게 결과를 보낸다.
+                        this._post({ type: 'wb.deploy.ecs.statusResult', payload: { stage: 'failed', running: false, error: `사전 점검 실패 — ${ready.issues.join('; ')}` } });
                         break;
                     }
                     const r = await this._apiClient.deployEcs({
@@ -482,6 +509,7 @@ export abstract class WorkbenchHost {
                 } catch (err) {
                     this.pushLog('deploy', `[ERR] ${err}`);
                     this.addActivity('fail', `ECS 배포 실패: ${err}`);
+                    this._post({ type: 'wb.deploy.ecs.statusResult', payload: { stage: 'failed', running: false, error: err instanceof Error ? err.message : String(err) } });
                 }
                 break;
             }
@@ -690,11 +718,20 @@ export abstract class WorkbenchHost {
 
     // ───────── Workbench 풀 구현 헬퍼 ─────────
 
-    /** 현재 열린 첫 워크스페이스 경로. 없으면 빈 문자열. */
+    /** 사용자가 미리보기에서 고친 내용이 있으면 저장한 파일에 반영한다(예전엔 조용히 버려졌다). */
+    private async _writeEditedContent(savedPath: string | undefined, content: unknown): Promise<void> {
+        if (!savedPath || typeof content !== 'string' || !content.trim()) { return; }
+        const uri = vscode.Uri.file(savedPath);
+        let current = '';
+        try { current = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf-8'); } catch { /* 새 파일 */ }
+        if (current.replace(/\r\n/g, '\n') === content.replace(/\r\n/g, '\n')) { return; }
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
+    }
+
+    /** 현재 프로젝트 경로(코드 생성·Deploy 캔버스와 같은 대상). 없으면 빈 문자열. */
     protected _getWorkspacePath(): string {
-        const folders = vscode.workspace.workspaceFolders;
-        if (!folders || folders.length === 0) return '';
-        return folders[0].uri.fsPath;
+        //: 코드 생성·Deploy 캔버스와 같은 "현재 프로젝트"(여러 폴더를 연 창에서 첫 폴더가 아닐 수 있다).
+        return activeProjectPath();
     }
 
     /**
@@ -960,4 +997,14 @@ export abstract class WorkbenchHost {
     protected _now(): string {
         return new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     }
+}
+
+/** Core 가 HTTP 200 으로 돌려준 실패(status: error 등)를 실패로 읽는다. 성공이면 ''. */
+export function workbenchFailure(result: unknown): string {
+    const r = (result ?? {}) as { status?: string; message?: string; error?: string; detail?: string };
+    const status = String(r.status ?? '').toLowerCase();
+    if (['error', 'failed', 'failure', 'denied', 'unauthenticated', 'exists', 'conflict'].includes(status)) {
+        return r.message || r.error || r.detail || `요청이 실패했습니다 (${status})`;
+    }
+    return '';
 }

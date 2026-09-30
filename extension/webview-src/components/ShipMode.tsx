@@ -210,6 +210,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [step, setStep] = useState<Step>("idle");
+  const stepRef = useRef<Step>("idle");
+  stepRef.current = step;
   const [progress,setProgress]=useState<DeploymentActivityEvent|null>(null);
   const progressPlan=useRef('');
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
@@ -399,8 +401,14 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       }
 
       if (type === "errorMessage") {
+        //: 같은 화면의 AWS 연결 등 다른 기능의 오류도 이 이름으로 온다 — 이 화면이 기다리던 요청이 있을 때만
+        //: 실패로 바꾼다(예전엔 AWS 키 입력 실패가 진행 중인 보안 검사까지 실패로 만들었다).
+        const p = payload as { message?: string; context?: string };
+        const waiting = stepRef.current === "generating" || stepRef.current === "saving" || stepRef.current === "planning"
+          || stepRef.current === "deploying" || (stepRef.current === "scanning" && !pendingScanRef.current);
+        if (p?.context === "aws" || !waiting) return;
         pendingScanRef.current = null;
-        setError((payload as { message: string }).message);
+        setError(p?.message ?? "요청 처리에 실패했습니다.");
         setStep("error");
       }
     }, [postMessage, startSecurityScan])

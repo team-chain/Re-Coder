@@ -12,7 +12,7 @@
  */
 
 import * as vscode from 'vscode';
-import { initActiveProject, pickProjectFolder } from './activeProject';
+import { activeProjectPath, initActiveProject, pickProjectFolder } from './activeProject';
 import { isAiKeyProvider, runAiConnectCommand } from './ai/aiKeys';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -152,7 +152,7 @@ export function activate(context: vscode.ExtensionContext): void {
             // Auto-analysis: only trigger when an error pattern is detected.
             // This is the §8.1 "passive monitoring" path.
             if (!terminalCollector.detectError(output.output)) { return; }
-            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const workspacePath = activeProjectPath();
             const request: AnalyzeRequest = {
                 workspace_path: workspacePath,
                 terminal_output: output.output,
@@ -190,7 +190,7 @@ export function activate(context: vscode.ExtensionContext): void {
             await ensureCoreRunning(coreManager, sidebarProvider);
 
             const editor = vscode.window.activeTextEditor;
-            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const workspacePath = activeProjectPath();
 
             const request: AnalyzeRequest = {
                 workspace_path: workspacePath,
@@ -213,7 +213,7 @@ export function activate(context: vscode.ExtensionContext): void {
             const command = await vscode.window.showInputBox({
                 prompt: 'Enter command to run with ReCoder monitoring',
                 placeHolder: 'e.g. python main.py',
-                value: getDefaultRunCommand(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath),
+                value: getDefaultRunCommand(activeProjectPath() || undefined),
             });
 
             if (!command) {
@@ -222,7 +222,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
             terminalCollector.createReCoderTerminal(command).then((output) => {
                 if (output.output) {
-                    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                    const workspacePath = activeProjectPath();
                     const request: AnalyzeRequest = {
                         workspace_path: workspacePath,
                         active_file_path: vscode.window.activeTextEditor?.document.uri.fsPath,

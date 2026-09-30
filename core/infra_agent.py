@@ -70,7 +70,7 @@ def _detect_stack(project_path: str) -> tuple[str, dict]:
         try:
             import json
             package = json.loads(
-                (p / "package.json").read_text(encoding="utf-8", errors="replace")
+                (p / "package.json").read_text(encoding="utf-8-sig", errors="replace")
             )
         except Exception:
             package = {}

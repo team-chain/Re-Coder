@@ -407,7 +407,7 @@ class DeployAgent:
         pkg = ws / "package.json"
         if pkg.exists():
             try:
-                data = json.loads(pkg.read_text(encoding="utf-8"))
+                data = json.loads(pkg.read_text(encoding="utf-8-sig"))
                 scripts = data.get("scripts", {})
                 for v in scripts.values():
                     m = re.search(r"-p(?:ort)?\s+(\d{4,5})", str(v))

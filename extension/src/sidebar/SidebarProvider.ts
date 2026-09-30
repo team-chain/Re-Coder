@@ -149,6 +149,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._state = { currentMode: Mode.BUILD, proposals: [], isLoading: false };
         //: 배포 화면이 보는 프로젝트가 바뀌면 열린 캔버스가 이전 프로젝트 상태를 버리고 다시 읽는다.
         onDidChangeActiveProject((workspace) => {
+            if (this._mapWatcher) { this._mapWatcher.dispose(); this._mapWatcher = undefined; this._setupMapWatcher(); }
             this.postMessage('canvas.projectChanged', { workspace, projects: projectFolders() });
         });
     }
@@ -274,7 +275,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** 워크스페이스 파일 변경을 감시해 구조 지도를 자동 갱신한다(생성/삭제/수정). */
     private _setupMapWatcher(): void {
         if (this._mapWatcher) { return; }
-        const folder = vscode.workspace.workspaceFolders?.[0];
+        //: 코드 생성·배포와 같은 "현재 프로젝트"를 본다(첫 폴더만 보면 다른 프로젝트 지도가 갱신되지 않았다).
+        const folder = activeProjectUri();
         if (!folder) { return; }
         const pattern = new vscode.RelativePattern(folder, '**/*.{py,js,mjs,jsx,ts,tsx,html,htm,css}');
         const watcher = vscode.workspace.createFileSystemWatcher(pattern);
@@ -1366,7 +1368,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         storage: '',
                         message: msg,
                     });
-                    this.postMessage('errorMessage', { message: `AWS 상태 조회 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 상태 조회 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1600,7 +1602,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.configure.result', { ok: false, message: msg });
-                    this.postMessage('errorMessage', { message: `AWS 자격증명 등록 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 자격증명 등록 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1642,7 +1644,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.configure.result', { ok: false, message: msg });
-                    this.postMessage('errorMessage', { message: `AWS 프로필 연결 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 프로필 연결 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1695,7 +1697,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.role.result', { ok: false, mode: 'error', message: msg });
                     this.postMessage('aws.configure.result', { ok: false, message: msg });
-                    this.postMessage('errorMessage', { message: `AWS 역할 설정 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 역할 설정 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1730,7 +1732,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.clear.result', { ok: false, message: msg });
-                    this.postMessage('errorMessage', { message: `AWS 자격증명 제거 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 자격증명 제거 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1854,7 +1856,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'code.diff': {
                 const { file, content, targetFolder } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string };
                 const resolved = this._resolveWriteRoot(targetFolder ?? '');
-                if (!resolved) { this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' }); break; }
+                //: diff 실패는 생성 턴의 실패가 아니다 — code.error 로 보내면 진행 중인 다른 생성 턴이 실패로 뒤집혔다.
+                if (!resolved) { void vscode.window.showErrorMessage('변경 비교를 열 수 없습니다: 대상 폴더가 워크스페이스에 없습니다.'); break; }
                 await this.handleCodeDiff(this._joinFolder(resolved.relFolder, file ?? ''), content ?? '', resolved.root);
                 break;
             }
@@ -2013,7 +2016,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this._codegenProviderRegistered = true;
         }
         const root = rootOverride ?? activeProjectUri();
-        if (!root) { this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' }); return; }
+        if (!root) { void vscode.window.showErrorMessage('변경 비교를 열 수 없습니다: 워크스페이스가 열려 있지 않습니다.'); return; }
         const safe = file.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
         if (!safe) { return; }
         const fileUri = vscode.Uri.joinPath(root, safe);
@@ -2029,7 +2032,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const leftUri = exists ? fileUri : vscode.Uri.parse('recoder-codegen:/empty');
             await vscode.commands.executeCommand('vscode.diff', leftUri, proposedUri, `ReCoder 제안: ${safe}`);
         } catch (err) {
-            this.postMessage('code.error', { message: `diff 열기 실패: ${err}` });
+            void vscode.window.showErrorMessage(`변경 비교(diff)를 열지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
 

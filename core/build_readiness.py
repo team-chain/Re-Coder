@@ -2534,16 +2534,17 @@ def pg_numeric_parser_rewrite(text: str) -> str:
     """`require('pg')` 바로 뒤에 NUMERIC(1700) 을 숫자로 읽는 타입 파서를 넣는다."""
     if "setTypeParser" in text:
         return text
-    m = re.search(r"""^([ \t]*)(?:const|let|var)\s+(?:\{[^}]*\}|[\w$]+)\s*=\s*require\(\s*['"]pg['"]\s*\)\s*;?[ \t]*$""", text, re.MULTILINE)
+    nl = "\r\n" if "\r\n" in text else "\n"
+    m = re.search(r"""^([ \t]*)(?:const|let|var)\s+(?:\{[^}]*\}|[\w$]+)\s*=\s*require\(\s*['"]pg['"]\s*\)\s*;?[ \t]*(?=\r?$)""", text, re.MULTILINE)
     if not m:
-        m = re.search(r"""^([ \t]*)import\s+(?!type\b)(?:([\w$]+)\s*,?\s*)?(?:\{[^}]*\})?\s*from\s+['"]pg['"]\s*;?[ \t]*$""", text, re.MULTILINE)
+        m = re.search(r"""^([ \t]*)import\s+(?!type\b)(?:([\w$]+)\s*,?\s*)?(?:\{[^}]*\})?\s*from\s+['"]pg['"]\s*;?[ \t]*(?=\r?$)""", text, re.MULTILINE)
         if not m:
             return text
         binding = m.group(2)
-        head = "" if binding else f"\n{m.group(1)}import recoderPg from 'pg';"
-        insert = f"{head}\n{m.group(1)}// ReCoder: NUMERIC/DECIMAL 을 문자열이 아닌 숫자로 받는다(화면의 toFixed 등).\n{m.group(1)}{binding or 'recoderPg'}.types.setTypeParser(1700, (value) => parseFloat(value));"
+        head = "" if binding else f"{nl}{m.group(1)}import recoderPg from 'pg';"
+        insert = f"{head}{nl}{m.group(1)}// ReCoder: NUMERIC/DECIMAL 을 문자열이 아닌 숫자로 받는다(화면의 toFixed 등).{nl}{m.group(1)}{binding or 'recoderPg'}.types.setTypeParser(1700, (value) => parseFloat(value));"
     else:
-        insert = f"\n{m.group(1)}// ReCoder: NUMERIC/DECIMAL 을 문자열이 아닌 숫자로 받는다(화면의 toFixed 등).\n{m.group(1)}require('pg').types.setTypeParser(1700, (value) => parseFloat(value));"
+        insert = f"{nl}{m.group(1)}// ReCoder: NUMERIC/DECIMAL 을 문자열이 아닌 숫자로 받는다(화면의 toFixed 등).{nl}{m.group(1)}require('pg').types.setTypeParser(1700, (value) => parseFloat(value));"
     return text[:m.end()] + insert + text[m.end():]
 
 
@@ -3038,11 +3039,15 @@ def expects_screen(workspace: str | Path) -> bool:
             return True
     except Exception:  # noqa: BLE001
         pass
+    not_app = ("htmlcov", "coverage", "docs", "doc", "test", "tests", "__tests__", "examples", "example", "e2e",
+               "node_modules", ".recoder", "site-packages", "reports", "report")
     for rel in files.files():
         name = rel.rsplit("/", 1)[-1]
-        if "/node_modules/" in f"/{rel}" or rel.startswith(".recoder/"):
-            continue
-        if name == "index.html" and rel.count("/") <= 2:
+        parts = rel.split("/")[:-1]
+        if any(p in not_app or p.startswith(".") for p in parts):
+            continue  # 커버리지 리포트·문서 사이트의 index.html 은 앱 화면이 아니다
+        if name == "index.html" and len(parts) <= 2 and (not parts or parts[0] in (
+                "public", "static", "src", "client", "frontend", "web", "www", "ui", "app", "site", "dist", "build")):
             return True
         if rel.startswith(("templates/", "app/templates/", "src/templates/", "views/")) and name.endswith((".html", ".ejs", ".hbs", ".pug", ".njk", ".jinja", ".jinja2")):
             return True
