@@ -300,7 +300,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _doMapRefresh(): void {
         try {
             if (!this._view?.visible) { return; }
-            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const root = activeProjectPath();
             if (!root) { return; }
             const data = analyzeProject(root);
             this.postMessage('map.projectResult', data);
@@ -1827,7 +1827,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const picked = await vscode.window.showOpenDialog({
                     canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
                     openLabel: '이 폴더에 생성',
-                    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+                    defaultUri: activeProjectUri(),
                 });
                 if (picked && picked[0]) {
                     this.postMessageToWebview(requestWebview, 'chat.actionFolderPicked', { id: p.id ?? '', folder: this._describeTargetFolder(picked[0].fsPath).display });
@@ -1862,7 +1862,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const picked = await vscode.window.showOpenDialog({
                     canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
                     openLabel: '이 폴더에 생성',
-                    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+                    defaultUri: activeProjectUri(),
                 });
                 if (picked && picked[0]) {
                     //: 워크스페이스 안이면 상대경로, 밖이면 절대경로. 예전에는 밖을 고르면
@@ -1887,7 +1887,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const picked = await vscode.window.showOpenDialog({
                     canSelectFolders: false, canSelectFiles: true, canSelectMany: true,
                     openLabel: '컨텍스트로 첨부',
-                    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+                    defaultUri: activeProjectUri(),
                 });
                 const files: Array<{ path: string; content: string }> = [];
                 for (const uri of picked ?? []) {
@@ -1903,7 +1903,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'map.project': {
                 try {
-                    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                    const root = activeProjectPath();
                     if (!root) { this.postMessage('map.error', { message: '분석할 폴더가 열려있지 않습니다.' }); break; }
                     // 서버 불필요 — 확장 내부에서 정적 분석.
                     const data = analyzeProject(root);
@@ -1916,7 +1916,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'map.file': {
                 const { id } = (payload ?? {}) as { id?: string };
                 try {
-                    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                    const root = activeProjectUri();
                     if (!root) { this.postMessage('map.error', { message: '워크스페이스가 열려있지 않습니다.' }); break; }
                     const safe = (id ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                     if (!safe) { this.postMessage('map.error', { message: '대상 파일이 없습니다.' }); break; }
@@ -1930,7 +1930,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'adr.list': {
                 //: docs/adr/*.md 목록. 제목은 첫 번째 '# ' 줄, 없으면 파일명.
-                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const root = activeProjectUri();
                 if (!root) { this.postMessageToWebview(requestWebview, 'adr.listResult', { items: [], error: '워크스페이스가 열려있지 않습니다.' }); break; }
                 try {
                     const dir = vscode.Uri.joinPath(root, 'docs', 'adr');
@@ -1959,7 +1959,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'adr.read': {
                 const { file } = (payload ?? {}) as { file?: string };
-                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const root = activeProjectUri();
                 const safe = (file ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                 if (!root || !safe.startsWith('docs/adr/')) { this.postMessageToWebview(requestWebview, 'adr.readResult', { file, error: '읽을 수 없는 경로입니다.' }); break; }
                 try {
@@ -1972,7 +1972,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'adr.open': {
                 const { file } = (payload ?? {}) as { file?: string };
-                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const root = activeProjectUri();
                 const safe = (file ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                 if (root && safe) {
                     try { await vscode.window.showTextDocument(vscode.Uri.joinPath(root, safe), { preview: false }); } catch { /* ignore */ }
@@ -1982,7 +1982,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'map.openFile': {
                 const { id } = (payload ?? {}) as { id?: string };
                 try {
-                    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                    const root = activeProjectUri();
                     if (!root || !id) { break; }
                     const safe = id.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                     await vscode.window.showTextDocument(vscode.Uri.joinPath(root, safe));
@@ -2012,7 +2012,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             });
             this._codegenProviderRegistered = true;
         }
-        const root = rootOverride ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+        const root = rootOverride ?? activeProjectUri();
         if (!root) { this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' }); return; }
         const safe = file.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
         if (!safe) { return; }
@@ -2129,7 +2129,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         contextFiles: Array<{path: string; content: string}> = [],
     ): Promise<void> {
         if (!message.trim()) { return; }
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspacePath = activeProjectPath();
         try {
             await this.ensureConnection();
             const result = await this._apiClient.chat(message, history, workspacePath, contextFiles);
@@ -2163,7 +2163,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      * 반환 display 는 웹뷰·Core 에 넘기는 값이다: 안이면 상대경로(''=루트), 밖이면 절대경로.
      */
     private _describeTargetFolder(input: string): { display: string; absolute: string; insideWorkspace: boolean; exists: boolean; workspaceName: string } {
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const root = activeProjectPath();
         const workspaceName = root ? path.basename(root) : '';
         let raw = (input || '').trim().replace(/\\/g, '/');
         if (raw.startsWith('~')) {
@@ -2268,7 +2268,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (raw && (path.isAbsolute(raw) || raw.startsWith('~'))) {
             const desc = this._describeTargetFolder(raw);
             if (desc.insideWorkspace) {
-                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const root = activeProjectUri();
                 return root ? { root, relFolder: desc.display } : null;
             }
             //: 밖의 절대경로는 워크스페이스에 추가된 폴더여야만 쓴다. 승인 카드를 거치지 않은
@@ -2277,13 +2277,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (!allowed) { return null; }
             return { root: vscode.Uri.file(desc.absolute), relFolder: '' };
         }
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const root = activeProjectUri();
         return root ? { root, relFolder: raw } : null;
     }
 
     /** Core 에 넘길 (workspacePath, targetFolder). 절대경로 대상이면 그 폴더가 곧 프로젝트 루트다. */
     private _codeScope(targetFolder: string): { workspacePath: string; targetFolder: string } {
-        const first = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const first = activeProjectPath();
         const raw = (targetFolder || '').trim();
         if (raw && (path.isAbsolute(raw) || raw.startsWith('~'))) {
             const desc = this._describeTargetFolder(raw);
@@ -2460,7 +2460,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handlePasteErrorLog(errorLog: string): Promise<void> {
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspacePath = activeProjectPath();
         await this.handleAnalyze({ workspace_path: workspacePath, terminal_output: errorLog });
     }
 
@@ -2520,7 +2520,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private async collectContext(): Promise<Partial<AnalyzeRequest>> {
         const editor = vscode.window.activeTextEditor;
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspacePath = activeProjectPath();
         const result: Partial<AnalyzeRequest> = { workspace_path: workspacePath };
         if (editor) {
             result.active_file_path = editor.document.uri.fsPath;
