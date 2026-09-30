@@ -84,7 +84,7 @@ test('캔버스: 토큰 방식은 8765 봇 서버를 부르지 않고 채널로 
  const origFetch=global.fetch;global.fetch=async()=>assert.fail('ReCoder 봇 서버(8765)를 부르면 안 된다');
  t.after(()=>{global.fetch=origFetch;});
  const origInput=vscode.window.showInputBox;vscode.window.showInputBox=async()=>TOKEN;t.after(()=>{vscode.window.showInputBox=origInput;});
- const host=new CanvasHost({},undefined,new DiscordWebhook(d.secrets,async()=>assert.fail('webhook 호출 없음')),d.service);
+ const host=new CanvasHost({},undefined,new DiscordWebhook(d.secrets,async()=>assert.fail('webhook 호출 없음')),undefined,d.service);
  const out=[];const send=(type,p={})=>host.handle(type,{requestId:'r',...p},(type,payload)=>out.push({type,payload}),()=>'',async()=>assert.fail('no deploy'));
  await send('canvas.discord.connectToken',{mode:'token'});
  assert.equal(out.find(o=>o.type==='canvas.discord.statusResult').payload.bot_user,'my-deploy-bot');

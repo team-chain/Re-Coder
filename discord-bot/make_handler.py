@@ -575,43 +575,32 @@ async def _stream_template(code: str, emit, chunk_size: int = 90) -> int:
 
 # ── 메시지 핸들러 (진입점) ────────────────────────────────────────────────────
 
-async def handle_make_message(bot: discord.Client, message: discord.Message) -> None:
+async def handle_make_message(bot: discord.Client, message: discord.Message, *, route=None) -> None:
     """지정 채널의 메시지를 처리하고 Bedrock 응답을 브리지로 스트리밍한다."""
 
     # 봇 자신 / 다른 봇 무시
     if message.author.bot:
         return
 
-    # 채널 ID 동적 조회 (Workbench UI 변경 즉시 반영)
-    make_channel_id = get_make_channel_id()
-    if make_channel_id == 0:
-        return
-    if message.channel.id != make_channel_id:
-        return
-
     content = (message.content or "").strip()
     if not content:
         return
-
-    # **인가 게이트.** make 채널의 메시지는 슬래시 커맨드와 달리 자동
-    # 처리되므로, 여기서 막지 않으면 서버의 누구든 "run.sh 만들어서 실행해줘"
-    # 한 줄로 브리지에 붙은 VSCode 에서 코드를 실행시킬 수 있다.
-    try:
-        from middleware.auth import is_user_allowed_in_guild
-        gid = message.guild.id if message.guild else 0
-        if not is_user_allowed_in_guild(gid, message.author.id):
-            return
-    except Exception:
-        # 인가 모듈을 못 불러오면 안전한 쪽 — 처리하지 않는다.
-        return
-
-    # Phase 2 per-user 라우팅: 이 Discord 사용자에 바인딩된 student_id 해석.
     target = ""
-    if guild_store is not None:
+    if route is not None:
+        # OAuth route is verified by ConnectionService: owner + guild + channel + project.
+        target = route.target
+    else:
+        make_channel_id = get_make_channel_id()
+        if not make_channel_id or message.channel.id != make_channel_id:
+            return
         try:
-            target = guild_store.get_student_id(message.author.id) or ""
+            from middleware.auth import is_user_allowed_in_guild
+            gid = message.guild.id if message.guild else 0
+            if not is_user_allowed_in_guild(gid, message.author.id):
+                return
+            target = guild_store.get_student_id(message.author.id) or "" if guild_store else ""
         except Exception:
-            target = ""
+            return
 
     # **broadcast 금지.** target 이 없으면(미바인딩) 브리지에 붙은 전원에게
     # 코드를 뿌리게 된다 — 원격 코드 실행 증폭기다. 바인딩된 본인 연결로만
@@ -655,11 +644,11 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
             else:
                 collected.append(_text)
         # target 은 위에서 보장됨 — 본인 연결로만.
-        return await hub.send_to_student(target, event)
+        return await route.send(event) if route is not None else await hub.send_to_student(target, event)
 
     # VSCode 브리지 연결 확인 (per-user면 본인 연결만 확인)
     if target:
-        if not hub.student_connected(target):
+        if not (route.connected() if route is not None else hub.student_connected(target)):
             await message.reply(
                 f"❗ 연결된 VSCode(student_id `{target}`)를 찾을 수 없습니다.\n"
                 "VSCode 확장 설정 `recoder.bridge.studentId` 에 student_id 를 넣고 연결하세요.",
@@ -675,8 +664,10 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
         )
         return
 
+    session_key = (message.author.id, message.channel.id, target)
+
     # ── 의도 분기 (create / run / modify / delete) ──────────────────────────
-    session = _SESSIONS.get(message.channel.id)
+    session = _SESSIONS.get(session_key)
     intent = _classify_intent(content, session is not None)
 
     if intent == "delete":
@@ -687,7 +678,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
             return
         await emit({"type": "delete", "filename": del_target})
         if session and session.get("filename") == del_target:
-            _SESSIONS.pop(message.channel.id, None)
+            _SESSIONS.pop(session_key, None)
         await message.reply(f"🗑️ `{del_target}` 삭제 요청을 보냈습니다.", mention_author=False)
         return
 
@@ -782,7 +773,7 @@ async def handle_make_message(bot: discord.Client, message: discord.Message) -> 
             "auto_run": auto_run,
         })
         end_sent = True
-        _SESSIONS[message.channel.id] = {
+        _SESSIONS[session_key] = {
             "filename": filename, "language": language, "code": _finalize_code("".join(collected), filename),
         }
         await _update_status(

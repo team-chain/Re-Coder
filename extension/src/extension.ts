@@ -28,6 +28,7 @@ import { AnalyzeRequest } from './types';
 import { bridgeEnabled } from './bridge/bridgeEnabled';
 import { BridgeClient } from './bridge/BridgeClient';
 import { runEnrollCommand } from './gateway/enroll';
+import { DiscordController } from './discord/DiscordController';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -55,7 +56,10 @@ export function activate(context: vscode.ExtensionContext): void {
     //: 파일을 쓸 수 있었다(보안 검토).
     let activeBridge = new BridgeClient(context);
     context.subscriptions.push(activeBridge);
-    if (bridgeEnabled(vscode.workspace.getConfiguration('recoder.bridge'))) {
+    //: 봇 서버 브리지는 명시적으로 켠 경우만 — 이 저장소 설정(recoder.bridge.enabled·토큰)과
+    //: develop 의 recoder.bridge.legacyEnabled 둘 다 존중한다.
+    const bridgeConfig = vscode.workspace.getConfiguration('recoder.bridge');
+    if (bridgeEnabled(bridgeConfig) || bridgeConfig.get<boolean>('legacyEnabled', false)) {
         activeBridge.connect();
     }
 
@@ -68,6 +72,17 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.window.showInformationMessage('ReCoder Bridge 재연결 시도');
         }),
     );
+
+    const discordConnections = new DiscordController(context);
+    context.subscriptions.push(discordConnections,
+        vscode.commands.registerCommand('recoder.discord.action', (type, payload) => discordConnections.action(type, payload)),
+        vscode.workspace.onDidChangeWorkspaceFolders(() => void discordConnections.restore().catch(console.error)),
+        vscode.workspace.onDidGrantWorkspaceTrust(() => void discordConnections.restore().catch(console.error)),
+        vscode.workspace.onDidChangeConfiguration(event => {
+            if (event.affectsConfiguration('recoder.discord.serverUrl')) void discordConnections.restore().catch(console.error);
+        }),
+    );
+    void discordConnections.restore().catch(console.error);
 
     // ── 게이트웨이 자가발급(enroll) ───────────────────────────────────────────
     // recoder.gateway.url 이 설정돼 있고 아직 토큰이 없으면 최초 실행 시 반 코드를

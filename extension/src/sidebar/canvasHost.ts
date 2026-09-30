@@ -119,8 +119,9 @@ export class CanvasHost {
     private commitPreview?: { id: string; workspace: string; preview: CommitPreview };
     private committing = false;
     private connecting = false;
-    private discordMode = 'webhook';
-    constructor(private api: ApiClient, private readGit = gitContext, private webhook?: DiscordWebhook, private botToken?: DiscordBotToken) {}
+    //: 기본은 develop 의 Discord 로그인(oauth). 저장된 방식이 있으면 그것을 따른다(웹후크·내 봇 토큰·봇 서버).
+    private discordMode = 'oauth';
+    constructor(private api: ApiClient, private readGit = gitContext, private webhook?: DiscordWebhook, private preferences?: vscode.Memento, private botToken?: DiscordBotToken) {}
     async handle(type: string, raw: unknown, send: Send, project: (workspace: string) => string, execute: (type: string, payload: unknown) => Promise<void>) {
         const p = (raw ?? {}) as Record<string, unknown>, requestId = String(p.requestId || '');
         const workspace = activeProjectPath();
@@ -409,17 +410,39 @@ export class CanvasHost {
     private async discord(type:string,p:Record<string,unknown>,send:Send) {
         const requestId=String(p.requestId||'');
         const workspace = activeProjectPath();
-        //: 봇 방식은 봇 서버 응답을 받은 뒤에만 저장한다. 실패한 '봇 서버 불러오기'가
+        if (type === 'canvas.discord.notifications') {
+            if (!workspace || p.workspace !== workspace) throw new Error('프로젝트가 바뀌었습니다. 배포 화면을 다시 여세요.');
+            const key = 'recoder.discord.notifications.' + createHash('sha256').update(workspace).digest('hex');
+            if (typeof p.enabled === 'boolean') {
+                if (!this.preferences) throw new Error('알림 설정을 저장할 수 없습니다. VS Code를 다시 여세요.');
+                await this.preferences.update(key, p.enabled);
+            }
+            send('canvas.discord.notificationsResult', { requestId, workspace, enabled: this.preferences?.get<boolean>(key, false) === true });
+            return;
+        }
+        //: 봇 서버 방식은 봇 서버 응답을 받은 뒤에만 저장한다. 실패한 '봇 서버 불러오기'가
         //: 모드를 bot 으로 바꿔 두면, 이미 연결된 웹후크 상태 조회·알림까지 꺼진 봇
-        //: 서버로 가서 계속 실패했다.
+        //: 서버로 가서 계속 실패했다. 로그인(oauth)·웹후크는 고르는 즉시 저장한다.
         const saved = this.webhook ? await this.webhook.mode(workspace) : this.discordMode;
-        if (p.mode === 'webhook') {
-            this.discordMode = 'webhook';
-            await this.webhook?.setMode(workspace, 'webhook');
+        if (p.mode === 'webhook' || p.mode === 'oauth') {
+            this.discordMode = String(p.mode);
+            await this.webhook?.setMode(workspace, this.discordMode);
         } else if (p.mode === 'bot') this.discordMode = 'bot';
         else if (p.mode === 'token') this.discordMode = 'token';
         else this.discordMode = saved;
+        if (type === 'canvas.discord.connect') {
+            this.discordMode = 'oauth';
+            await this.webhook?.setMode(workspace, 'oauth');
+        }
         if (await this.discordToken(type, p, workspace, requestId, send)) return;
+        if (this.discordMode === 'oauth' && !type.endsWith('connectWebhook') && !type.endsWith('Token')) {
+            const action = type.slice('canvas.discord.'.length);
+            const result = await vscode.commands.executeCommand<any>('recoder.discord.action', action, { ...p, workspace });
+            const kind = action === 'guilds' ? 'guildsResult' : action === 'channels' ? 'channelsResult'
+                : ['event','test'].includes(action) ? 'eventResult' : ['invite','settings'].includes(action) ? 'notice' : 'statusResult';
+            send(`canvas.discord.${kind}`, { requestId, ...result });
+            return;
+        }
         if (type === 'canvas.discord.connectWebhook') {
             if (!workspace || !this.webhook) throw new Error('먼저 프로젝트 폴더를 여세요.');
             const url = await vscode.window.showInputBox({ password: true, ignoreFocusOut: true, title: 'Discord 알림 연결', prompt: '채널 설정 → 연동 → 웹후크에서 복사한 URL을 붙여넣으세요. 메시지는 아직 보내지 않습니다.', placeHolder: 'https://discord.com/api/webhooks/…' });

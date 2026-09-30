@@ -82,7 +82,7 @@ test('Discord loopback bridge supports status, guild/channel selection and opt-i
  const original=vscode.workspace.getConfiguration;
  vscode.workspace.getConfiguration=()=>({get:key=>({host:'127.0.0.1',httpPort:server.address().port,registrationKey:'fixture-key'})[key]});
  try {
-  await s.send('canvas.discord.status');assert.equal(s.output.at(-1).payload.channel_name,'alerts');
+  await s.send('canvas.discord.status',{mode:'bot'});assert.equal(s.output.at(-1).payload.channel_name,'alerts');
   await s.send('canvas.discord.guilds');assert.equal(s.output.at(-1).payload.guilds[0].id,'456');
   await s.send('canvas.discord.channels',{guildId:'456'});assert.equal(s.output.at(-1).payload.channels[0].id,'123');
   await s.send('canvas.discord.setChannel',{channelId:'123'});assert.equal(requests.find(r=>r.method==='PUT').body.channel_id,'123');
@@ -95,7 +95,7 @@ test('Discord loopback bridge supports status, guild/channel selection and opt-i
 test('offline Discord gives an actionable error instead of hiding its entry point',async t=>{
  const s=fixture(t),original=global.fetch;
  global.fetch=async()=>{throw new TypeError('fetch failed');};
- try {await s.send('canvas.discord.status');assert.equal(s.output.at(-1).type,'canvas.error');assert.match(s.output.at(-1).payload.message,/봇 서버\(127\.0\.0\.1:8765\)가 실행 중이 아닙니다/);assert.match(s.output.at(-1).payload.message,/내 봇 토큰으로 연결/);}
+ try {await s.send('canvas.discord.status',{mode:'bot'});assert.equal(s.output.at(-1).type,'canvas.error');assert.match(s.output.at(-1).payload.message,/봇 서버\(127\.0\.0\.1:8765\)가 실행 중이 아닙니다/);assert.match(s.output.at(-1).payload.message,/내 봇 토큰으로 연결/);}
  finally {global.fetch=original;}
 });
 

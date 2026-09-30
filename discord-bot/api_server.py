@@ -38,6 +38,7 @@ from bridge_settings import (
     get_settings_snapshot,
 )
 from recoder_bridge import hub as bridge_hub
+from connection_api import ConnectionService, connection_errors
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 
 # bot 인스턴스 — start_api_server() 호출 시 주입
 _bot = None
+connections = ConnectionService(lambda: _bot)
 
 
 def set_bot(bot) -> None:
@@ -631,7 +633,8 @@ async def handle_canvas_event(request: web.Request) -> web.Response:
 
 
 def create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[connection_errors], client_max_size=64 * 1024)
+    connections.install(app)
     app.router.add_get("/api/v1/health",                  handle_health)
     app.router.add_post("/api/v1/register",               handle_register)
     app.router.add_delete("/api/v1/register/{guild_id}",  handle_unregister)

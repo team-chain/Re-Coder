@@ -6,6 +6,12 @@ SaaS 멀티-서버 모드로 운영되는 단일 봇이 여러 Discord 서버를
 
 ---
 
+## Discord 로그인으로 연결
+
+새 사용자 연결은 **Discord 연결 → 브라우저 승인 → 서버/채널 선택**으로 진행합니다.
+운영자 설정과 로컬 실행, 팀 서버 배포 방법은 [CONNECT.md](CONNECT.md)를 참고하세요.
+웹후크 URL이나 기존 학생 토큰을 복사할 필요가 없습니다.
+
 ## 빠른 시작
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) → 앱 선택(없으면 New Application)
