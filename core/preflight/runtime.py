@@ -180,8 +180,12 @@ def http_probe(
     expected_status 미지정 시 200~299 모두 OK.
     """
     url = f"http://{host}:{port}{path}"
+    #: 로컬 컨테이너를 찌르는 요청은 시스템 프록시(HTTP_PROXY·회사 PC 의 Windows 프록시)를 거치면
+    #: 살아 있는 앱도 "응답 없음"이 된다 — 로컬 주소는 프록시 없이 직접 연결한다.
+    opener = (urllib_request.build_opener(urllib_request.ProxyHandler({}))
+              if host in ("127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0") else urllib_request.build_opener())
     try:
-        with urllib_request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — localhost only
+        with opener.open(url, timeout=timeout) as resp:  # noqa: S310 — localhost only
             status = resp.getcode() or 0
             body = resp.read(128).decode("utf-8", errors="ignore")
             if expected_status:

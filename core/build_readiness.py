@@ -334,10 +334,26 @@ def _start_entry(scripts: dict) -> Optional[str]:
     for name in ("start", "start:prod", "serve"):
         for words in _script_commands(str(scripts.get(name, ""))):
             if words[0] in {"node", "nodemon"}:
-                args = [w for w in words[1:] if not w.startswith("-")]
+                #: `node -r dotenv/config server.js` — -r·--require·--import·--loader 다음 값은 진입 파일이 아니다.
+                args, skip = [], False
+                for w in words[1:]:
+                    if skip:
+                        skip = False
+                        continue
+                    if w in (_NODE_VALUE_FLAGS if words[0] == "node" else _NODEMON_VALUE_FLAGS):
+                        skip = True
+                        continue
+                    if not w.startswith("-"):
+                        args.append(w)
                 if args:
                     return _norm(args[0].strip("'\""))
     return None
+
+
+_NODE_VALUE_FLAGS = {"-r", "--require", "--import", "--loader", "--experimental-loader", "-e", "--eval", "-p", "--print",
+                     "--env-file", "--watch-path", "--inspect-port"}
+_NODEMON_VALUE_FLAGS = {"-w", "--watch", "-e", "--ext", "-x", "--exec", "--signal", "-d", "--delay", "-i", "--ignore", "--config",
+                        "-r", "--require"}
 
 
 
@@ -771,7 +787,9 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             if ident:  # baseURL: API_BASE_URL — 같은 파일의 상수를 따라간다
                 m = re.search(rf"""\b(?:const|let|var)\s+{re.escape(value)}\s*=\s*([^;\n]+)""", text)
                 value = m.group(1) if m else ""
-            if re.search(r"""['"`][^'"`]*?/api/?['"`]\s*$""", value.strip()):
+            #: 문자열 그대로인 baseURL 만 본다 — `import.meta.env.VITE_API || '/api'` 처럼 배포에서 다른 주소가 될 수
+            #: 있는 값은 '/api/…' 호출이 맞는 코드일 수 있다.
+            if re.fullmatch(r"""(['"`])(?:https?://[^'"`$\s/]+)?[^'"`$]*?/api/?\1\s*;?""", value.strip()):
                 instances.append(var)
         for var in instances:
             names_by_file: dict[str, set[str]] = {rel: {var}}
@@ -991,25 +1009,120 @@ def esm_named_cjs_rewrite(text: str, cjs_targets: set[str], importer: str, files
     """ESM 이 CommonJS(.cjs) 파일에서 이름을 골라 가져오면 Node 가 이름을 못 찾을 수 있다 —
     기본 가져오기 + 구조 분해로 바꾼다(항상 module.exports 를 그대로 받는다)."""
     pattern = re.compile(r"""^([ \t]*)import\s+(?:([\w$]+)\s*,\s*)?\{([^}]*)\}\s*from\s*(['"])(\.{1,2}/[^'"]+)\4\s*;?""", re.MULTILINE)
+    used: set[str] = set(re.findall(r"\b__recoder_[\w$]*", text))
 
     def repl(m):
         indent, default, names, quote, spec = m.groups()
-        if _resolve_local(files, importer, spec) not in cjs_targets:
+        target = _resolve_local(files, importer, spec)
+        if target not in cjs_targets:
             return m.group(0)
         parts = []
+        sources = []
         for raw in names.split(","):
             raw = raw.strip()
             if not raw or raw.startswith("type "):
                 continue
             src, _, alias = raw.partition(" as ")
+            sources.append(src.strip())
             parts.append(f"{src.strip()}: {alias.strip()}" if alias.strip() else src.strip())
-        base = default or "__recoder_" + re.sub(r"\W", "_", spec.rsplit("/", 1)[-1].split(".")[0])
+        try:
+            target_text = files.read(target) or ""
+        except Exception:  # noqa: BLE001
+            target_text = ""
+        if target_text and sources and set(sources) <= _lexer_exports(target_text):
+            return m.group(0)  # Node 가 이름을 찾을 수 있다 — 그대로 둔다
+        stem = "__recoder_" + re.sub(r"\W", "_", spec.rsplit("/", 1)[-1].split(".")[0])
+        base, n = default or stem, 2
+        while not default and base in used:
+            base, n = f"{stem}_{n}", n + 1
+        used.add(base)
         line = f"{indent}import {base} from {quote}{spec}{quote};"
         if parts:
             line += f"\n{indent}const {{ {', '.join(parts)} }} = {base};"
         return line
 
     return pattern.sub(repl, text)
+
+
+def _js_code_mask(text: str) -> str:
+    """주석·문자열·템플릿 리터럴을 공백으로 바꾼 같은 길이의 텍스트(구문 위치 판정용, 보수적)."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        two = text[i:i + 2]
+        if two == "//":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+        elif two == "/*":
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+        elif c in "'\"`":
+            j = i + 1
+            while j < n and text[j] != c:
+                if text[j] == "\\":
+                    j += 1
+                elif c != "`" and text[j] == "\n":
+                    break
+                j += 1
+            j = min(j + 1, n)
+        else:
+            i += 1
+            continue
+        for k in range(i, j):
+            if out[k] != "\n":
+                out[k] = " "
+        i = j
+    return "".join(out)
+
+
+def _has_top_level_await(code: str) -> bool:
+    """마스크된 코드에서 함수 밖 await(최상위 await)가 있는지. 확실하지 않으면 True 쪽으로 본다."""
+    stack: list[bool] = []  # True = 함수 본문
+    last_boundary = 0
+    for m in re.finditer(r"[{};]|\bawait\b", code):
+        tok = m.group(0)
+        if tok == "{":
+            prefix = code[last_boundary:m.start()]
+            stack.append(bool(re.search(r"\bfunction\b|=>\s*$|\)\s*$", prefix)))
+            last_boundary = m.end()
+        elif tok == "}":
+            if stack:
+                stack.pop()
+            last_boundary = m.end()
+        elif tok == ";":
+            last_boundary = m.end()
+        else:
+            if any(stack):
+                continue
+            prefix = code[last_boundary:m.start()]
+            if re.search(r"\basync\b[^;]*=>", prefix):
+                continue  # async () => await x (중괄호 없는 화살표 함수)
+            return True
+    return False
+
+
+def _unsafe_for_cjs(text: str) -> bool:
+    """esm_to_cjs 가 확실히 바꿀 수 없는 형태 — 최상위 await, import 속성, 여러 이름 export, 템플릿 속 import 줄."""
+    code = _js_code_mask(text)
+    if _has_top_level_await(code):
+        return True
+    if re.search(r"""\bfrom\s*['"][^'"]+['"]\s*(?:with|assert)\s*\{""", text):
+        return True
+    for m in re.finditer(r"^[ \t]*export\s+(?:const|let|var)\s+[^\n]*", code, re.MULTILINE):
+        depth = 0
+        for ch in m.group(0):
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                return True
+    #: import/export 로 시작하는 줄이 템플릿·문자열 안에 있으면(마스크에서 사라짐) 정규식 변환이 그 줄을 바꾼다
+    for m in re.finditer(r"^[ \t]*(?:import|export)\b", text, re.MULTILINE):
+        if not code[m.start():m.end()].strip():
+            return True
+    return False
 
 
 def esm_to_cjs(text: str) -> Optional[str]:
@@ -1019,6 +1132,8 @@ def esm_to_cjs(text: str) -> Optional[str]:
     import.meta.url·dirname·filename. 못 바꾸는 것: 최상위 await, export * / export … from.
     """
     if re.search(r"^export\s*\*|^export\s*\{[^}]*\}\s*from\b|^await\s|^(?:const|let|var)\s[^\n]*=\s*await\s", text, re.MULTILINE):
+        return None
+    if _unsafe_for_cjs(text):
         return None
     for pkg, major in _ESM_ONLY_PACKAGES.items():
         if re.search(rf"""from\s*['"]{re.escape(pkg)}['"]""", text):
@@ -1127,10 +1242,10 @@ def esm_dirname_shim(text: str) -> str:
             f"import {{ dirname as __recoderDirname }} from 'path';{newline}"
             f"const __filename = __recoderFileURLToPath(import.meta.url);{newline}"
             f"const __dirname = __recoderDirname(__filename);{newline}")
-    imports = list(re.finditer(r"""^[ \t]*import\b[^;]*?['"][^'"]+['"]\s*;?[ \t]*$""", text, re.MULTILINE | re.DOTALL))
-    at = imports[-1].end() + 1 if imports else 0
-    at = min(at, len(text))
-    return text[:at] + ("" if at == 0 or text[at - 1] == "\n" else newline) + shim + text[at:]
+    #: 맨 위(셔뱅 다음)에 둔다 — import 는 끌어올려지고 import.meta.url 은 처음부터 쓸 수 있다. 예전엔 "마지막 import
+    #: 뒤"를 정규식으로 찾다가 줄 끝 주석이 붙은 import 에서 함수 본문 안에 끼워 넣어 SyntaxError 가 났다.
+    at = text.index("\n") + 1 if text.startswith("#!") and "\n" in text else 0
+    return text[:at] + shim + text[at:]
 
 
 def esm_require_shim(text: str) -> str:
@@ -1315,9 +1430,14 @@ def module_format_plan(files: "ProjectFiles", entry: Optional[str], owner) -> Op
             except (ValueError, TypeError):
                 why_not = "package.json 을 읽지 못했습니다."
             # type 을 빼면 그래프 밖의 ESM .js(설정·스크립트)가 CommonJS 로 해석된다 — .mjs 로.
+            #: 번들러(Vite 등)가 읽는 화면 소스·설정은 package type 과 무관하다 — 이름을 바꾸면 index.html 의
+            #: <script src="/src/main.js"> 가 깨진다.
+            bundled_roots = tuple((f"{folder}/src/" if folder else "src/") for folder in _frontend_projects(files))
             for rel in files.files():
                 if owner(rel) == scope and rel.endswith(".js") and rel not in graph and "/node_modules/" not in f"/{rel}" \
                         and not rel.startswith(_BROWSER_DIRS) and _js_syntax(files.read(rel) or "") == "esm" \
+                        and not (bundled_roots and rel.startswith(bundled_roots)) \
+                        and not re.search(r"(?:^|/)vite\.config\.js$", rel) \
                         and not files.exists(rel[:-3] + ".mjs"):
                     renames.append((rel, rel[:-3] + ".mjs"))
         after_mode = {rel: ("cjs" if rel.endswith(".js") else after_mode[rel]) for rel in graph}
@@ -1360,6 +1480,13 @@ def module_format_plan(files: "ProjectFiles", entry: Optional[str], owner) -> Op
         problems.append("ESM 파일에는 __dirname·__filename 이 없습니다(ReferenceError): " + ", ".join(dirname_files[:4]))
     if not problems:
         return None
+    #: import 와 module.exports/exports.x 를 함께 쓰는 파일은 require 만 만들어 줘도 ESM 에서 module 이 없어 죽는다
+    #: (예전: createRequire 만 넣고 "고쳤다"고 보고). 어느 형식으로 정리할지 정해야 하므로 자동으로 고치지 않는다.
+    mixed_exports = [rel for rel in mixed if re.search(r"\bmodule\.exports\b|(?<![\w$.])exports\.[\w$]+\s*=|\brequire\.main\b",
+                                                       _strip_js_comments(files.read(rel) or ""))]
+    if mixed_exports and not why_not:
+        why_not = (f"{mixed_exports[0]} 이(가) import 와 module.exports 를 함께 씁니다 — 한 형식(import/export 또는 "
+                   "require/module.exports)으로 정리해야 해서 자동으로 고치지 않습니다.")
     if why_not:
         return {"problems": problems, "auto": False, "why_not": why_not, "writes": {}, "renames": [],
                 "files": (wrong + mixed)[:1] or [entry]}
@@ -1588,7 +1715,11 @@ def frontend_build_plan(files: "ProjectFiles", scripts: dict, server_files: list
     if not candidates:
         #: 서버가 제공하는 폴더가 저장소에 없고(빌드 결과), 그 폴더를 만드는 프런트엔드가 없다 —
         #: 프런트엔드가 하나뿐이면 그 빌드 결과 폴더를 서버가 제공하는 폴더로 맞춘다(Vite 만).
-        missing = [d for d in served if not files.has_dir(d)]
+        #: 빌드 결과 폴더처럼 보이는 것만(dist·build·public 등) — uploads·data 같은 실행 중 파일 폴더로
+        #: outDir 를 돌리면 빌드가 그 폴더를 비운다.
+        missing = [d for d in served if not files.has_dir(d)
+                   and re.fullmatch(r"(?:[\w.-]*[-_])?(?:dist|build|public|out|www|static|client|frontend|web)",
+                                    posixpath.basename(d.rstrip("/")) or "", re.I)]
         if len(projects) == 1 and len(missing) == 1:
             folder, (out_dir, script_name) = next(iter(projects.items()))
             config = _vite_config_file(files, folder) if re.search(r"\bvite\s+build\b", str(
@@ -1808,7 +1939,8 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
             continue
         project = owner(rel)
         declared = manifests[project] | (deps if project else set())  # 하위 폴더는 위쪽 node_modules 도 찾는다
-        active = _strip_js_comments(text)
+        #: 템플릿 문자열 안의 글자(코드 생성기·문서 예시의 `import x from 'y'`)는 의존성이 아니다.
+        active = re.sub(r"`(?:\\.|[^`\\])*`", "``", _strip_js_comments(text))
         for pattern in _IMPORT_PATTERNS:
             for spec in pattern.findall(active):
                 pkg = _package_of(spec)
@@ -1875,7 +2007,8 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         #: path.join(__dirname, 'client', 'dist') 처럼 나눠 적은 경로도 제공하는 것으로 본다(글자 비교만 하면 오탐).
         if out in served_now or any(out in text for text in server_texts):
             continue
-        commonjs = bool(result.server_entry) and "require(" in (files.read(result.server_entry) or "") \
+        #: 글자 "require(" 만 보면 createRequire 를 쓰는 ESM 서버도 CommonJS 로 보고 __dirname 을 넣어 죽인다.
+        commonjs = bool(result.server_entry) and _js_syntax(files.read(result.server_entry) or "") == "cjs" \
             and package.get("type") != "module"
         result.issues.append(ReadinessIssue(
             "NODE_FRONTEND_NOT_SERVED", WARNING,
@@ -2340,6 +2473,20 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
 
 def detect_runtime(files: ProjectFiles) -> str:
     if files.exists("package.json"):
+        #: Django·Flask 프로젝트가 Tailwind 빌드용 package.json 만 둔 경우는 Python 앱이다.
+        if any(files.exists(f) for f in ("manage.py", "requirements.txt", "pyproject.toml")):
+            try:
+                pkg = json.loads(files.read("package.json") or "{}")
+            except ValueError:
+                pkg = {}
+            if isinstance(pkg, dict):
+                scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+                deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})} \
+                    if isinstance(pkg.get("dependencies") or {}, dict) and isinstance(pkg.get("devDependencies") or {}, dict) else {}
+                node_server = any(k in scripts for k in ("start", "serve", "start:prod")) or pkg.get("main") or any(
+                    d in deps for d in ("express", "next", "@nestjs/core", "koa", "fastify", "@hapi/hapi", "nuxt", "react-scripts", "vite"))
+                if not node_server:
+                    return "python"
         return "node"
     if any(files.exists(f) for f in ("requirements.txt", "pyproject.toml", "main.py", "app.py", "manage.py")):
         return "python"
@@ -2690,6 +2837,19 @@ def apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> lis
     if skipped:
         raise ValueError(f"이름을 바꿀 파일이 없거나 새 이름({skipped[0]})이 이미 있습니다. 배포 준비 점검을 다시 실행하세요.")
     renamed_to = set(rename_map.values())
+    #: 쓰기 전에 바꿀 파일을 모두 읽어 본다 — UTF-8 이 아닌 파일(메모장 ANSI=CP949)을 읽다가 중간에 멈추면
+    #: 반쯤 바뀐 채로 남고, 다시 쓰면 한글 주석이 깨진다. 하나라도 못 읽으면 아무것도 바꾸지 않는다.
+    for rel in list(rename_map) + [r for r in writes if r not in renamed_to]:
+        path = root / rel
+        if not path.is_file():
+            continue
+        try:
+            _read_raw(path)
+        except UnicodeError as exc:
+            raise ValueError(f"{rel} 이(가) UTF-8 이 아니라(예: 메모장 ANSI) 자동 수정하지 않았습니다. "
+                             "편집기에서 UTF-8 로 저장한 뒤 다시 시도하세요.") from exc
+        except OSError as exc:
+            raise ValueError(f"{rel} 을(를) 읽지 못해 자동 수정하지 않았습니다: {exc}") from exc
     originals: dict[str, Optional[str]] = {}   # 복구용: 경로 → 원래 내용(None = 원래 없던 파일)
     changed: list[str] = []
     try:
@@ -2722,7 +2882,7 @@ def apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> lis
                 _make_writable(root / old)
                 (root / old).unlink()
             changed.append(f"{old} → {new}")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         for rel, text in originals.items():
             path = root / rel
             try:
@@ -2734,7 +2894,7 @@ def apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> lis
                     if path.exists():
                         _make_writable(path)
                     _write_raw(path, text)
-            except OSError:
+            except (OSError, UnicodeError):
                 pass
         raise ValueError(f"파일을 바꾸지 못해 원래대로 되돌렸습니다: {exc}. 파일이 다른 프로그램에서 열려 있거나 "
                          "읽기 전용인지 확인하세요.") from exc
@@ -2928,9 +3088,10 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
             text = _read_raw(root / rel)
             updated = pg_numeric_parser_rewrite(text)
             if updated != text:
+                #: pg 를 쓰는 파일마다 넣는다(타입 파서는 전역이라 여러 번 넣어도 같다) — 첫 파일만 고치면
+                #: 시드 스크립트만 고쳐지고 서버는 그대로 문자열을 돌려준다.
                 changed += [rel, _backup(root, rel, text)]
                 _write_raw(root / rel, updated)
-                break
     elif code == "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING":
         dockerfile = root / "Dockerfile"
         text = _read_raw(dockerfile)

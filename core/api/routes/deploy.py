@@ -2345,7 +2345,9 @@ def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
     #: UTF-8 이 아닌 파일(메모장 ANSI=CP949, PowerShell 5 의 UTF-16)도 **다른 파일**이다 — 읽을 수 없다고
     #: 충돌이 아닌 것으로 보면 사용자 파일을 백업 없이 덮어쓴다. 보여 줄 수 있게 최대한 디코드하고 원본 바이트를 보관한다.
     existing = None
-    for encoding in ("utf-8-sig", "utf-16", "cp949", "latin-1"):
+    #: UTF-16 은 BOM 이 있을 때만 시도한다 — 짝수 바이트 CP949 파일도 UTF-16 으로 "디코드"돼 diff 가 깨진다.
+    encodings = ("utf-16", "cp949", "latin-1") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else ("utf-8-sig", "cp949", "latin-1")
+    for encoding in encodings:
         try:
             existing = raw.decode(encoding)
             break
@@ -2394,6 +2396,13 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
                 **conflict,
             }
         backup = target.with_name(target.name + _OVERWRITE_BACKUP_SUFFIX)
+        try:
+            if backup.is_file() and backup.read_bytes() != original_bytes:
+                #: 이전 백업(사용자가 손으로 고친 원본일 수 있다)을 덮어쓰지 않고 시각을 붙여 옮겨 둔다.
+                import time as _time
+                backup.replace(backup.with_name(f"{backup.name}.{_time.strftime('%Y%m%d-%H%M%S')}"))
+        except OSError as exc:
+            logger.warning("previous backup rotation skipped: %s", exc)
         backup.write_bytes(original_bytes)  # 원래 인코딩 그대로 보관
         backup_path = str(backup)
 
@@ -3213,8 +3222,8 @@ def _default_image_name(workspace_path: str) -> str:
     """DeployAgent.create_plan 과 같은 규칙 — `<워크스페이스 폴더명>:latest`."""
     if not workspace_path:
         return ""
-    from deployment_inputs import workspace_container_name
-    name = workspace_container_name(workspace_path)
+    from deployment_inputs import workspace_deploy_name
+    name = workspace_deploy_name(workspace_path)
     return f"{name}:latest" if name else ""
 
 
@@ -3590,6 +3599,46 @@ def _no_project_message(workspace_path: str) -> str:
             "Deploy 화면 위쪽의 폴더가 앱의 루트 폴더인지 확인하세요.")
 
 
+def _template_runtime_port(workspace_path: str) -> Optional[int]:
+    """Dockerfile 이 없을 때 배포가 만들 기본 템플릿이 쓰는 포트. 모르면 None.
+
+    계획 단계의 포트가 템플릿과 어긋나면(Flask 템플릿은 5000 인데 계획은 8000 등) 컨테이너가
+    떠도 헬스 체크가 닿지 않는다 — 계획과 빌드가 같은 값을 쓰게 한다.
+    """
+    try:
+        if not workspace_path or _dockerfile_in(workspace_path) is not None:
+            return None
+        stack = _detect_stack(workspace_path)
+        try:
+            from project_scanner import get_project_scanner  # type: ignore
+            project = get_project_scanner().scan(workspace_path)
+        except Exception:  # noqa: BLE001
+            project = None
+        content, _template_id = _dockerfile_from_template(workspace_path, stack, project)
+        from deployment_inputs import dockerfile_text_runtime_port
+        return dockerfile_text_runtime_port(content)
+    except Exception:  # noqa: BLE001 - 추정 실패는 기존 포트 추정으로 돌아간다
+        return None
+
+
+def _align_ports_with_dockerfile(plan: DeploymentPlan, dockerfile: Path) -> Optional[str]:
+    """방금 만든 Dockerfile 이 다른 포트를 열면 계획의 컨테이너 쪽 포트를 맞춘다. 바꿨으면 안내 문장."""
+    try:
+        from deployment_inputs import dockerfile_runtime_port
+    except ImportError:  # pragma: no cover
+        from core.deployment_inputs import dockerfile_runtime_port  # type: ignore
+    port = dockerfile_runtime_port(dockerfile)
+    if port is None or not plan.ports or len(plan.ports) != 1:
+        return None
+    host_port, container_port = next(iter(plan.ports.items()))
+    if str(container_port) == str(port):
+        return None
+    plan.ports = {str(host_port): str(port)}
+    if plan.env and str(plan.env.get("PORT", "")) == str(container_port):
+        plan.env = {**plan.env, "PORT": str(port)}
+    return f"컨테이너 포트를 Dockerfile 에 맞춰 {container_port} → {port} 로 바꿨습니다(PC 포트 {host_port} 그대로)."
+
+
 def _write_template_dockerfile(workspace_path: str) -> tuple[Optional[str], str]:
     """Dockerfile 이 없는 워크스페이스에 검증된 기본 템플릿을 만든다(AI 없이). (템플릿 이름, 오류 문장)."""
     stack = _detect_stack(workspace_path)
@@ -3687,6 +3736,10 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
                                   "cause": problem, "fix": problem, "lines": [], "step": "이미지 빌드"}}
         report_progress('build', f'Dockerfile 이 없어 기본 템플릿({template_id})으로 만들었습니다 — 이미지를 빌드합니다')
         dockerfile = _dockerfile_in(workspace_path)
+        if dockerfile is not None:
+            note = _align_ports_with_dockerfile(plan, dockerfile)
+            if note:
+                report_progress('build', note)
     if dockerfile is None:
         if _local_image_exists(plan.image):
             return None  # 워크스페이스 없이 이미지만 지정한 배포 — 미리 빌드된 이미지를 그대로 쓴다.
@@ -3955,6 +4008,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             # The template supplies the base command; apply all approved run
             # parameters, not just its first port mapping.
             cmd_args = ['docker', 'run', '-d', '--name', str(plan.container_name)]
+            _ws_for_label = _plan_workspaces.get(request.plan_id, "")
+            if _ws_for_label:
+                from deployment_inputs import WORKSPACE_LABEL, workspace_fingerprint
+                cmd_args.extend(['--label', f'{WORKSPACE_LABEL}={workspace_fingerprint(_ws_for_label)}'])
             for hp, cp in plan.ports.items():
                 cmd_args.extend(['-p', f'{int(hp)}:{int(cp)}'])
             for key, value in plan.env.items():
@@ -3964,8 +4021,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 import local_services
                 report_progress('services', '앱이 쓰는 DB 를 준비합니다')
                 try:
+                    init_sql = local_services.find_init_sql(_plan_workspaces.get(request.plan_id, ""))
                     cmd_args.extend(await asyncio.to_thread(
-                        local_services.ensure, str(plan.container_name), lambda m: report_progress('services', m)))
+                        local_services.ensure, str(plan.container_name), lambda m: report_progress('services', m),
+                        init_sql=init_sql))
                 except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                     return {
                         "status": "failed", "stage": "services", "plan_id": request.plan_id,
@@ -4073,7 +4132,15 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         if success and plan.method == DeployMethod.LOCAL_DOCKER and plan.ports:
             report_progress('screen', '브라우저로 첫 화면이 실제로 표시되는지 확인합니다')
             screen_result = await _verify_local_screen(plan, _plan_workspaces.get(request.plan_id, ""))
-            if screen_result is not None and not screen_result.get("ok"):
+            if (screen_result is not None and not screen_result.get("ok") and not rollback_eligible
+                    and screen_result.get("code") == "SCREEN_HTTP_ERROR"):
+                #: 헬스 확인도 아직 통과하지 못한 느린 시작(빌드·마이그레이션 중) — 화면이 "없는" 것이 아니라
+                #: 아직 응답이 없는 것이다. 실패로 판정해 새 릴리스를 되돌리지 않고 "확인 중(pending)"으로 둔다.
+                screen_result = {**screen_result, "ok": None,
+                                 "warnings": list(screen_result.get("warnings") or []) + [
+                                     "앱이 아직 응답하지 않아 화면 확인을 끝내지 못했습니다 — 잠시 후 주소를 열어 확인하세요."]}
+                screen_result.pop("diagnosis", None)
+            if screen_result is not None and screen_result.get("ok") is False:
                 success = False
                 rollback_eligible = False
                 startup_diagnosis = screen_result.get("diagnosis")

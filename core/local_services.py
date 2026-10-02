@@ -153,8 +153,66 @@ def _run(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
+#: 프로젝트가 함께 둔 DB 초기화 SQL — docker-compose 라면 /docker-entrypoint-initdb.d 로 넣는 파일이다.
+_INIT_SQL_CANDIDATES = (
+    "init.sql", "schema.sql", "db/init.sql", "db/schema.sql", "database/init.sql", "database/schema.sql",
+    "sql/init.sql", "sql/schema.sql", "server/init.sql", "server/schema.sql", "server/db/init.sql", "server/db/schema.sql",
+    "backend/init.sql", "backend/schema.sql", "backend/db/init.sql", "backend/db/schema.sql",
+)
+_INIT_SQL_MAX_BYTES = 2_000_000
+
+
+def find_init_sql(workspace: str) -> Optional[Path]:
+    """앱이 기대하는 테이블을 만드는 SQL 파일(있을 때만). CREATE TABLE 이 없으면 초기화 파일로 보지 않는다."""
+    if not workspace:
+        return None
+    root = Path(workspace)
+    for rel in _INIT_SQL_CANDIDATES:
+        path = root / rel
+        try:
+            if path.is_file() and path.stat().st_size <= _INIT_SQL_MAX_BYTES:
+                text = path.read_text(encoding="utf-8-sig", errors="replace")
+                if re.search(r"\bcreate\s+table\b", text, re.I):
+                    return path
+        except OSError:
+            continue
+    return None
+
+
+def _exec_sql(name: str, sql: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    """서비스 컨테이너 안 psql 로 SQL 을 한 트랜잭션으로 실행한다(표준 입력으로 전달)."""
+    return subprocess.run(["docker", "exec", "-i", name, "psql", "-U", "recoder", "-d", "app", "-v", "ON_ERROR_STOP=1",
+                           "--single-transaction", "-q"],
+                          shell=False, input=sql, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def _initialize_postgres(name: str, init_sql: Path, progress, run: Runner) -> None:
+    """DB 에 테이블이 하나도 없을 때만(처음 만든 볼륨) 프로젝트의 초기화 SQL 을 실행한다.
+
+    docker-compose 의 initdb 처럼 한 번만 — 이미 테이블이 있으면(재배포) 손대지 않아 데이터가 그대로다.
+    실패해도 배포는 계속하고(트랜잭션이라 반쯤 적용되지 않는다), 앱 로그·화면 확인이 원인을 알린다.
+    """
+    count = run(["docker", "exec", name, "psql", "-U", "recoder", "-d", "app", "-tAc",
+                 "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"], 30)
+    if count.returncode != 0 or (count.stdout or "").strip() != "0":
+        return
+    try:
+        sql = init_sql.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return
+    if progress:
+        progress(f"빈 DB 에 {init_sql.name} 로 테이블을 만듭니다")
+    try:
+        done = _exec_sql(name, sql)
+    except (OSError, subprocess.SubprocessError) as exc:
+        done = subprocess.CompletedProcess([], 1, "", str(exc))
+    if done.returncode != 0 and progress:
+        progress(f"{init_sql.name} 실행이 실패해 되돌렸습니다: {(done.stderr or '').strip()[:200]}")
+
+
 def ensure(container: str, progress: Optional[Callable[[str], None]] = None, run: Runner = _run,
-           wait_seconds: int = 90) -> list[str]:
+           wait_seconds: int = 90, init_sql: Optional[Path] = None) -> list[str]:
     """네트워크와 서비스 컨테이너를 준비하고 응답할 때까지 기다린다. 앱 docker run 에 붙일 인자를 돌려준다.
 
     실패하면 RuntimeError(사람이 읽을 원인).
@@ -207,6 +265,8 @@ def ensure(container: str, progress: Optional[Callable[[str], None]] = None, run
                               "-c", f"ALTER USER recoder WITH PASSWORD '{password}'"], 30)
                 if synced.returncode != 0 and progress:
                     progress(f"{svc.label} 비밀번호를 맞추지 못했습니다 — 앱이 접속하지 못하면 볼륨 {name}-data 를 확인하세요")
+        if kind == "postgres" and init_sql is not None:
+            _initialize_postgres(name, init_sql, progress, run)
     return ["--network", net]
 
 
