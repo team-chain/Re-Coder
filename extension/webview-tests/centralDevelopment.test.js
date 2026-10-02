@@ -140,3 +140,20 @@ test('Korean composition does not submit until Ctrl+Enter is pressed after compo
   input.props.onKeyDown({...event,nativeEvent:{isComposing:false}});
   assert.equal(ui.messages[0].type, 'code.plan');
 });
+
+test('생성 결과가 여러 파일이면 목록만 먼저 보이고, 이름을 눌러야 내용이 펼쳐진다', () => {
+  const ui = mount();
+  ui.input('게시판'); ui.button('보내기').props.onClick();
+  const request = ui.messages[0].payload;
+  ui.emit('code.planResult', {...plan, requestId:request.requestId});
+  ui.button('이 선택으로 생성 →').props.onClick(); ui.render();
+  ui.emit('code.result', {requestId:request.requestId, summary:'게시판', model:'fixture', ops:[
+    {file:'a.js',content:'AAA-CONTENT',action:'create',language:'js',rationale:''},
+    {file:'b.js',content:'BBB-CONTENT',action:'edit',language:'js',rationale:''}]});
+  const texts = () => JSON.stringify(ui.nodes().map(n => typeof n.props.children === 'string' ? n.props.children : ''));
+  assert.ok(!texts().includes('AAA-CONTENT'), '내용이 처음부터 펼쳐져 있다');
+  assert.ok(ui.find(n => n.props['data-testid'] === 'code-result-summary'));
+  ui.find(n => n.type === 'button' && n.props['aria-expanded'] === false).props.onClick(); ui.render();
+  assert.ok(texts().includes('AAA-CONTENT'));
+  assert.ok(!texts().includes('BBB-CONTENT'));
+});

@@ -2115,7 +2115,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             await this.ensureConnection();
             this.postMessageToWebview(opts.requestWebview, 'code.generating', { requestId: opts.requestId });
             //: 큰 요청(쇼핑몰 등)은 파일 목록 → 나눠 생성 → 자동 교정까지 수 분 걸린다. Core 호출 상한(15분)보다 길게 기다린다.
-            status('generating', 'AI 가 코드를 만드는 중… 큰 요청은 파일을 나눠 만들고 빌드·실행 문제를 고치느라 몇 분 걸릴 수 있습니다.', 960);
+            status('generating', 'AI 가 코드를 만드는 중… (큰 요청은 몇 분 걸려요)', 960);
             const result = await this._apiClient.generateCode(instruction, {
                 workspacePath,
                 openFile: attach,

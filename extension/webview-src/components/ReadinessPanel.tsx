@@ -5,6 +5,7 @@
  * 보여 준다. 판정은 Core 가 하고, 화면은 표시와 "자동 수정" 요청만 한다.
  */
 import React from "react";
+import { shortIssue } from "./issueText";
 
 export interface ReadinessIssue { code: string; severity: "error" | "warning"; message: string; fix: string; file?: string; auto_fix: boolean }
 export interface BuildDiagnosis { code: string; title: string; cause: string; fix: string; lines: string[]; step?: string }
@@ -41,10 +42,13 @@ export const ReadinessPanel: React.FC<{
       <ul style={{ listStyle: "none", padding: 0, margin: "6px 0 0" }}>
         {sortIssues(issues).map(issue => (
           <li key={issue.code} data-code={issue.code} style={{ borderTop: "1px solid #333", padding: "6px 0" }}>
-            <div style={{ color: issue.severity === "error" ? "#f87171" : "#f5b454" }}>
-              {issue.severity === "error" ? "✗ " : "! "}{issue.message}
+            {/* 문제는 첫 문장만. 자동 수정이 되는 항목은 버튼이 곧 해결이라 해결 문장을 접어 둔다. */}
+            <div style={{ color: issue.severity === "error" ? "#f87171" : "#f5b454" }} title={issue.message}>
+              {issue.severity === "error" ? "✗ " : "! "}{shortIssue(issue.message)}
             </div>
-            <div style={{ color: "#bbb", marginTop: 2 }}>해결: {issue.fix}</div>
+            {issue.auto_fix
+              ? <details style={{ color: "#999", marginTop: 2 }}><summary style={{ cursor: "pointer" }}>자세히</summary><div>{issue.message}</div><div>해결: {issue.fix}</div></details>
+              : <div style={{ color: "#bbb", marginTop: 2 }}>해결: {issue.fix}</div>}
             {issue.auto_fix && (
               <button onClick={() => onFix(issue.code)} disabled={fixing !== null}
                 style={{ marginTop: 4, background: "transparent", color: "#4a9eff", border: "1px solid #3f5f84", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: fixing ? "wait" : "pointer" }}>

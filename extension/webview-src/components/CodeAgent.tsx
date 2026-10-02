@@ -89,6 +89,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   const [turns, setTurns] = useState<Turn[]>([]);
   const [applyState, setApplyState] = useState<Record<string, ApplyStatus>>({});
   const [applyErrors, setApplyErrors] = useState<Record<string, string>>({});
+  //: 생성 결과는 파일 목록만 먼저 보여 준다(파일이 수십 개면 내용이 화면을 덮었다). 이름을 누르면 내용을 펼친다.
+  const [openPreview, setOpenPreview] = useState<Record<string, boolean>>({});
   const [decisionModal, setDecisionModal] = useState<DecisionModal | null>(null);
   const pendingRequestsRef = React.useRef<Record<number, PendingRequest>>({});
   const handledExternalRef = React.useRef<number | null>(null);
@@ -352,7 +354,6 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                   <strong style={{ fontSize: 15 }}>설계 결정을 골라주세요</strong>
                   <span style={{ marginLeft: "auto", borderRadius: 99, padding: "3px 8px", background: "var(--vscode-badge-background, #4d4d4d)", color: "var(--vscode-badge-foreground, #fff)", fontSize: 11, fontWeight: 600 }}>설계 결정 {decisionModal.step + 1}/{decisionModal.decisions.length}</span>
                 </div>
-                <div style={{ marginTop: 9, color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 11.5, lineHeight: 1.5 }}>코드 생성 전에 프로젝트 구조에 영향을 주는 선택을 확인합니다.</div>
                 {/* 코어가 형식 문제로 걸러낸 결정 — 안 보여주면 사용자에게는
                     "AI 가 설계를 안 해준다"로 보인다(보드 이슈). */}
                 {decisionModal.dropped.length > 0 && (
@@ -438,22 +439,30 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           {turn.status === "done" && turn.result && (
             <div>
               <CodeRemovalSummary checks={turn.result.ops.map((op) => op.removal_check)} />
-              {turn.result.ops.length > 1 && (() => {
-                const keys = turn.result!.ops.map((op) => `${turn.id}:${op.file}`);
+              {(() => {
+                const ops = turn.result!.ops;
+                const keys = ops.map((op) => `${turn.id}:${op.file}`);
                 const anyPending = keys.some((k) => applyState[k] === "pending");
                 const allApplied = keys.every((k) => applyState[k] === "applied");
+                const created = ops.filter((op) => op.action === "create").length;
                 return (
-                  <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
-                    <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied}
-                      style={{ ...primaryBtn, ...(anyPending || allApplied ? { opacity: 0.55, cursor: "default" } : {}) }}>
-                      {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : "모두 적용"}
-                    </button>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <span data-testid="code-result-summary" style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
+                      파일 {ops.length}개{created ? ` · 새 파일 ${created}` : ""}{ops.length - created ? ` · 수정 ${ops.length - created}` : ""}
+                    </span>
+                    {ops.length > 1 && (
+                      <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied}
+                        style={{ ...primaryBtn, ...(anyPending || allApplied ? { opacity: 0.55, cursor: "default" } : {}) }}>
+                        {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : "모두 적용"}
+                      </button>
+                    )}
                   </div>
                 );
               })()}
               {turn.result.ops.map((op, i) => {
                 const key = `${turn.id}:${op.file}`;
                 const warned = !!(op.secret_warnings && op.secret_warnings.length);
+                const previewOpen = turn.result!.ops.length === 1 || !!openPreview[key];
                 return (
                   <div key={i} style={{ marginBottom: 7, border: "1px solid var(--vscode-panel-border, #333)", borderRadius: 4, overflow: "hidden" }}>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, background: "var(--vscode-editorGroupHeader-tabsBackground, #2d2d2d)", padding: "5px 8px" }}>
@@ -461,9 +470,11 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                         <span style={{ fontSize: 9, fontWeight: 600, color: op.action === "create" ? "#6cc070" : "#d6a55c" }}>
                           {op.action === "create" ? "새 파일" : "수정"}
                         </span>
-                        <span style={{ fontSize: 11.5, fontFamily: "var(--vscode-editor-font-family, monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {turn.targetFolder ? `${turn.targetFolder}/${op.file}` : op.file}
-                        </span>
+                        <button type="button" aria-expanded={previewOpen} title={previewOpen ? "내용 접기" : "내용 보기"}
+                          onClick={() => setOpenPreview((cur) => ({ ...cur, [key]: !previewOpen }))}
+                          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, cursor: "pointer", fontSize: 11.5, fontFamily: "var(--vscode-editor-font-family, monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textAlign: "left", minWidth: 0 }}>
+                          <span aria-hidden="true" style={{ display: "inline-block", width: 10, color: "var(--vscode-descriptionForeground, #888)" }}>{previewOpen ? "▾" : "▸"}</span>{turn.targetFolder ? `${turn.targetFolder}/${op.file}` : op.file}
+                        </button>
                       </span>
                       <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
                         <button onClick={() => showDiff(turn, op)} style={ghostBtn}>변경 보기</button>
@@ -479,9 +490,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                         {applyErrors[key]}
                       </div>
                     )}
-                    <pre style={{ margin: 0, background: "var(--vscode-textCodeBlock-background, #1e1e1e)", color: "var(--vscode-editor-foreground, #ddd)", padding: "6px 8px", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 10.5, maxHeight: 150, overflow: "auto", whiteSpace: "pre", lineHeight: 1.5 }}>
+                    {previewOpen && <pre style={{ margin: 0, background: "var(--vscode-textCodeBlock-background, #1e1e1e)", color: "var(--vscode-editor-foreground, #ddd)", padding: "6px 8px", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 10.5, maxHeight: 150, overflow: "auto", whiteSpace: "pre", lineHeight: 1.5 }}>
                       {op.content.length > 1000 ? op.content.slice(0, 1000) + "\n…" : op.content}
-                    </pre>
+                    </pre>}
                     {warned && (
                       <div style={{ background: "rgba(216,165,92,0.12)", borderTop: "1px solid rgba(216,165,92,0.3)", padding: "5px 8px", fontSize: 10.5, color: "#d6a55c" }}>
                         키가 코드에 포함된 것 같습니다 ({op.secret_warnings!.length}건). .env로 옮기세요.
