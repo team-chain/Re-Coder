@@ -345,6 +345,12 @@
           "type": "boolean",
           "default": false,
           "description": "기존 학생 토큰 기반 브리지를 시작합니다. 새 Discord 로그인 연결에는 필요하지 않습니다."
+        },
+        "recoder.repair.configPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "문서 근거 수정의 로컬 임베딩·문서 설정 JSON 경로. scripts/setup_repair.py로 생성한 뒤 Core를 다시 시작하세요."
         }
       }
     }

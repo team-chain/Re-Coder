@@ -82,3 +82,10 @@ def _reset_aws_disconnect_guard():
     mod = sys.modules.get("api.routes.aws")
     if mod is not None and hasattr(mod, "_guard_saved"):
         mod._guard_saved.clear()
+
+
+@_pytest_guard.fixture(autouse=True)
+def _isolate_project_scanner_profiles(tmp_path, monkeypatch):
+    """Scanner tests must not write profiles into the developer's real home."""
+    import project_scanner
+    monkeypatch.setattr(project_scanner, 'RECODER_HOME', tmp_path / 'recoder-profiles')

@@ -424,6 +424,32 @@ class BedrockProvider(LLMProvider):
             token_source  = token_source,
         )
 
+    def call_measured(self, request: LLMRequest) -> LLMResponse:
+        """One Converse request with native usage, for bounded repair experiments."""
+        import boto3
+        from botocore.config import Config
+        kwargs = {"region_name": self._region}
+        if os.getenv("AWS_PROFILE") and not os.getenv("AWS_ACCESS_KEY_ID"):
+            kwargs["profile_name"] = os.environ["AWS_PROFILE"]
+        client = boto3.Session(**kwargs).client("bedrock-runtime", config=Config(
+            connect_timeout=5, read_timeout=150, retries={"total_max_attempts": 1}))
+        body = {"modelId": self.model_id,
+                "messages": [{"role":"user", "content":[{"text":request.prompt}]}],
+                "inferenceConfig": {"maxTokens":request.max_tokens,"temperature":request.temperature}}
+        if request.system:
+            body["system"] = [{"text":request.system}]
+        try:
+            raw = client.converse(**body)
+        except Exception as exc:
+            kind, retryable = _classify_boto_error(exc)
+            raise LLMError(str(exc), kind, retryable, raw=exc) from exc
+        text = "".join(block.get("text", "") for block in raw["output"]["message"]["content"])
+        usage = raw["usage"]
+        return LLMResponse(text=text, parsed=_extract_json(text), model_used=self.model_id,
+            provider="bedrock", region=self._region, input_tokens=usage["inputTokens"],
+            output_tokens=usage["outputTokens"], token_source="api",
+            metadata={"stop_reason":raw.get("stopReason"),"transport_retries":raw.get("ResponseMetadata",{}).get("RetryAttempts",0)})
+
     # ------------------------------------------------------------------
     # 비동기 진입점 (legacy / asyncio 호출자용)
     # ------------------------------------------------------------------

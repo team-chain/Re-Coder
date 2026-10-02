@@ -9,11 +9,12 @@ from build_failure import diagnose
 from context_gate import mask_secrets
 
 SIGNAL = re.compile(
-    r"ETARGET|E[A-Z][A-Z_0-9]{3,}|AccessDenied\w*|CannotPullContainerError|"
+    r"\b(?-i:E(?:[A-Z][A-Z_0-9]{2,}|[0-9]{3}))\b|AccessDenied\w*|CannotPullContainerError|"
     r"ResourceInitializationError|stoppedReason|stopCode|health.?check|"
     r"not authorized|essential container|error|failed|exception|denied", re.I
 )
-CODE = re.compile(r"\b(?:E[A-Z][A-Z_0-9]{3,}|AccessDenied\w*|CannotPullContainerError|ResourceInitializationError)\b")
+CODE = re.compile(r"\b(?:E(?:[A-Z][A-Z_0-9]{2,}|[0-9]{3})|AccessDenied\w*|CannotPullContainerError|ResourceInitializationError)\b")
+GENERIC = {"ERROR", "ENV", "ENTRYPOINT", "EXPOSE"}
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -37,24 +38,24 @@ def summarize(log: str, stage: str = "build", limit: int = 4000) -> Evidence:
     # Scan the entire bounded request, so an early root cause survives long tails.
     clean = mask_secrets(ANSI.sub("", log))
     diagnosis = diagnose(clean, stage=stage)
-    lines = clean.splitlines()
+    lines = [re.sub(r"^(?:#\d+\s+)?\d+\.\d+\s*|^#\d+\s*", "", s).strip() for s in clean.splitlines()]
     selected = list(diagnosis.lines)
     for i, line in enumerate(lines):
         if SIGNAL.search(line):
             selected.extend(lines[max(0, i - 1):i + 2])
     # Specific codes and ECS reasons outrank generic BuildKit wrapper failures.
     selected = sorted(dict.fromkeys(selected), key=lambda s: not (
-        CODE.search(s) or re.search(r"stoppedReason|stopCode|not authorized", s, re.I)))
+        set(CODE.findall(s)) - GENERIC or re.search(r"stoppedReason|stopCode|not authorized", s, re.I)))
     picked, size = [], 0
     for line in selected:
         line = re.sub(r"^#\d+\s+\d+\.\d+\s*", "", line).strip()[:600]
-        if not line or line in picked:
+        if not line or line in picked or re.match(r"^(?:(?:DONE|CACHED|transferring|building with)\b|\[internal\])", line):
             continue
         if size + len(line) + 1 > limit or len(picked) >= 16:
             break
         picked.append(line)
         size += len(line) + 1
     text = "\n".join(picked)
-    keywords = sorted(set(CODE.findall(text)))[:16]
+    keywords = sorted(set(CODE.findall(text)) - GENERIC)[:16]
     digest = hashlib.sha256((stage + "\n" + text).encode()).hexdigest()
     return Evidence(diagnosis.code, picked, keywords, len(log), digest)

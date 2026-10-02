@@ -38,7 +38,7 @@ class RepairStore:
                 return r
         return None
 
-    def approve(self, run_id: str):
+    def approve(self, run_id: str, workspace: str | None = None):
         from grounded_repair.workspace import apply_exact
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -46,6 +46,8 @@ class RepairStore:
             if not row:
                 raise ValueError("Unknown repair run")
             r = json.loads(row[0])
+            if workspace is not None and Path(workspace).resolve() != Path(r["workspace"]).resolve():
+                raise ValueError("Repair belongs to a different workspace")
             if r["status"] != "ready_for_approval" or time.time() - row[1] > 3600:
                 raise ValueError("Repair is not verified, already applied, or expired")
             apply_exact(Path(r["workspace"]), r["manifest"], r["edits"])

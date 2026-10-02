@@ -1,160 +1,141 @@
-# 문서 근거 기반 배포 오류 수정 — 1차 구현
+# 문서 근거 기반 배포 오류 수정
 
-기준: `develop`의 `4b2a51d`, 작업 브랜치 `feat/document-grounded-repair`.
+작업 브랜치: `feat/document-grounded-repair`, 시작 commit `66887b2`.
+확장과 Core의 표시 버전은 **1.1.27**이며 이번 작업에서 릴리스 버전을 올리지 않았다.
 
-이번 변경은 코어 API와 검증 파이프라인을 구현한다. VS Code 전용 버튼, 실제 모델 비교 실험,
-ECS/IAM 환경 재현까지 완료한 제품 릴리스는 아니다. 실험 결과나 비용 절감률을 임의로 채우지 않는다.
+## 사용 흐름
 
-## 처리 흐름
+빌드 실패 카드와 ECS 배포 실패 상세에 **문서 근거로 오류 수정** 패널이 있다.
+버튼을 누르면 기존 31종 배포 준비 점검을 먼저 실행한다. 규칙 오류는 LLM 없이 기존 수정 흐름을 사용한다.
+그 밖의 오류는 로그 핵심, 프로젝트 파일 일부, 공식 문서 근거로 수정안을 만들고 복사본에서 검증한다.
+화면에서 설명·파일 diff·근거 단락·출처 날짜·호출 수·추정 비용을 확인할 수 있다.
 
-1. 기존 `build_readiness.analyze()`로 검사한다. 오류가 있으면 기존 규칙을 사용하고 LLM·문서 검색을 호출하지 않는다.
-   자동 수정 가능한 규칙은 복사본에 적용한 뒤 빌드한다. 수동 수정·새 파일 생성이 필요한 규칙은 기존 readiness API로 안내한다.
-2. 원본 로그 최대 100만 자에서 비밀을 가리고, 오류 코드·npm 버전·ECS 중지 사유 등을 최대 4,000자/16줄로 추린다.
-3. BM25 키워드 검색과 선택적 로컬 임베딩 검색을 reciprocal rank fusion으로 합쳐 문서 4개를 선택한다.
-4. 로그 핵심, 관련 파일 최대 24,000자/12개, 문서 몇 단락으로 JSON 수정안을 생성한다.
-   D 조건은 소형 모델 우선이며 실패하면 대형 모델을 한 번 호출한다. 전체 생성 예산은 두 번이다.
-5. 각 시도는 원본에서 새 복사본을 만든다. 문서 ID·파일 경로·스키마·정적 검사와 실제 Docker 빌드를 검증한다.
-6. 빌드 오류는 원래 실패가 재현되고 수정 후 빌드가 성공해야 `ready_for_approval`이 된다.
-   승인 시 검증에 사용한 파일 목록 전체의 SHA-256을 다시 비교한다. 변경됐거나 한 시간이 지나면 재검증이 필요하다.
-7. 승인된 내용만 원본에 쓴다. 배포를 실행하지 않는다. 실패·미검증 수정안은 승인 API가 거부한다.
+빌드 실패가 재현되고 수정 후 빌드가 통과한 경우에만 **검증된 수정 승인·적용** 버튼이 나온다.
+승인 시 프로젝트 경로와 전체 파일 해시를 다시 검사한다. 파일이 달라졌거나 1시간이 지나면 다시 검증해야 한다.
+UI 요청 ID와 활성 프로젝트 확인으로 늦게 도착한 다른 프로젝트의 결과가 적용되지 않게 한다.
+승인은 파일 수정이며 자동 재배포를 실행하지 않는다.
 
-ECS·IAM·S3·런타임 오류는 로컬 빌드만으로 검증할 수 없다. 해당 단계는 `environment_verification_required`
-또는 `manual_action_required`를 반환하며 승인 가능한 상태가 되지 않는다.
+ECS/IAM/S3/런타임의 제품 API는 빌드 통과만으로 승인하지 않는다. 해당 환경의 검증이 없으면
+`environment_verification_required` 또는 수동 확인 상태를 표시한다. 연구용 로컬 계약 검사와
+IAM 시뮬레이션은 이 승인 조건을 우회하지 않는다.
 
-## API 사용
+## 실제 의미 검색 설정
 
-기존 코어 서버의 세션 토큰 인증을 사용한다. 별도 공개 서버를 추가하지 않는다.
-
-| API | 용도 |
-|---|---|
-| `POST /api/repair/prepare` | 오류 분석, 수정안 작성, 복사본에서 검증 |
-| `GET /api/repair/{id}` | 기록·문서 출처·diff·비용·검증 결과 확인 |
-| `POST /api/repair/{id}/approve` | 검증된 수정안만 원본에 적용 |
-| 기존 `POST /api/deploy/readiness/fix` | 기존 규칙 수정 흐름 |
-
-`prepare` 요청 예시:
-
-```json
-{
-  "workspace_path": "/absolute/path/to/project",
-  "log": "Missing parameter name ... Express 5",
-  "stage": "build",
-  "strategy": "D",
-  "use_cache": true
-}
-```
-
-배포 실패 진단 응답의 `repair` 필드에 API 주소, 규칙/문서 분기, 오류 단계를 붙였다.
-자동으로 유료 모델을 호출하지 않는다. 클라이언트가 `prepare`를 호출해야 시작한다.
-
-## 문서와 의미 검색
-
-`core/grounded_repair/sources.json`에는 Docker, npm, Node, Vite, Express, AWS ECS/ECR/IAM/S3를 다루는
-공식 문서 링크와 직접 작성한 요약 10개가 들어 있다. **공식 원문을 복제한 색인으로 표시하지 않는다.**
-각 출처의 원문 수집 상태는 아직 `pending_review`다. 문서 라이선스 후보 링크는 검토 완료를 뜻하지 않는다.
-
-기본 설치는 `keyword_only`로 동작한다. 의미 검색은 다음과 같이 로컬 모델을 명시적으로 설정한다.
+Python 개발 Core에 다음을 설치한다. 모델 다운로드는 이 명시적 설치 단계에서만 일어난다.
 
 ```sh
-python -m pip install -r core/requirements-repair.txt
-export RECODER_REPAIR_EMBEDDING_MODEL=/absolute/path/to/local/sentence-transformers-model
+python -m pip install -r core/requirements.txt -r core/requirements-repair.txt
+python scripts/setup_repair.py --assets work/repair-assets --config core/grounded_repair/runtime.json
+python scripts/evaluate_repair_retrieval.py --output work/retrieval-check.json
 ```
 
-모델은 별도로 내려받아 준비한다. 요청 처리 중 다운로드하거나 유료 임베딩 API를 호출하지 않는다.
-한국어 증상도 검색하려면 다국어 모델을 선택해야 한다. 설정한 모델을 읽지 못하면 오류를 반환하며
-의미 검색이 된 것처럼 숨기지 않는다. 반환값의 `retrieval_mode`로 실제 검색 방식을 확인한다.
-현재 테스트는 주입한 벡터를 이용해 의미가 같지만 단어가 다른 검색을 검증한다. 실제 임베딩 모델 품질 실험은 남아 있다.
+모델은 MIT `intfloat/multilingual-e5-small`의 고정 revision을 사용한다. CPU 로컬 임베딩이며 유료 임베딩
+API를 호출하지 않는다. E5의 `query: `와 `passage: ` 접두사를 구분한다. 모델/색인은 메모리에 재사용한다.
+다른 위치에 설정을 만들었다면 VS Code의 `recoder.repair.configPath`에 JSON 절대 경로를 넣고 Core를 재시작한다.
+PyInstaller 기본 바이너리는 PyTorch를 포함하지 않으므로 이 선택 기능은 위 의존성을 설치한 Python Core에서 실행한다.
 
-원문 수집 시에는 별도 manifest에 다음 항목을 기록해야 한다.
+`RECODER_REPAIR_CONFIG` 또는 환경변수 `RECODER_REPAIR_CORPUS`, `RECODER_REPAIR_EMBEDDING_MODEL`로도 지정할 수 있다.
+기본 모델 경로가 없으면 `keyword_only`, 설정이 정상일 때 `hybrid`를 표시한다. 설정한 모델을 못 읽으면 오류를 반환한다.
 
-- `fulltext_status: "approved"`
-- `license_status: "reviewed"`, `license_url`, `attribution`, `reviewed_at`
-- 허용된 공식 HTTPS `url`, `id`, `title`
+BM25와 cosine 검색을 RRF로 합치며 정확한 오류 코드를 먼저 보장한다. 코드 예시가 긴 원문이 짧은 증상 설명을
+밀어내지 않도록 가장 관련 있는 직접 작성 요약 1개를 의미 검색의 기준으로 함께 선택한다. 원문 발췌와 요약 표시는
+구분된다. 입력은 로그 최대 4,000자/16줄, 파일 최대 24,000자/12개, 근거 단락 최대 4개다.
 
-```sh
-PYTHONPATH=core python -m grounded_repair.refresh reviewed-sources.json work/corpus.json
-export RECODER_REPAIR_CORPUS=/absolute/path/to/work/corpus.json
-```
+최종 색인은 **158개 단락**(직접 작성 요약 10개 + 라이선스 검토 원문 148개)이다.
+한국어 증상 4개 개발 점검에서 관련 문서 Top-1 4/4를 확인했다. 이는 작은 개발 점검이며 독립적인 검색 성능 수치가 아니다.
+원문 이용 조건과 오래된 AWS snapshot의 제한은 [라이선스 기록](../benchmarks/repair/LICENSES.md)을 참고한다.
 
-원문은 문단으로 나누고 출처·라이선스·내용 해시·수집 시각을 남긴다. 리다이렉트, 허용 도메인 밖 URL,
-2 MB 초과 문서는 거부한다. 소스 manifest와 생성 색인은 서로 다른 파일이어야 한다.
-검색 결과에 인용한 문서 ID가 존재하는지는 자동 검사하지만, 문서가 수정 논리를 실제로 뒷받침하는지는 별도 검토한다.
-`citation_review`의 기본값은 `not_reviewed`다.
+## 모델·비용·예산
 
-## 비용 측정과 캐시
+문서 수정 전용 Bedrock 기본 등급은 서로 다르다.
 
-기존 코드 조사 결과, 일반 라우터의 일부 경로는 토큰을 글자 수로 추정하고 Gemini/API 키 공급자 비용을
-정확히 반영하지 못한다. 새 `LLMProviderRouter.call_repair()`는 공급자의 `call()`이 반환하는 사용량과
-`token_source`를 보존하고 통합 `cost_ledger`에도 기록한다. API 키 공급자는 실제 사용량을 반환할 수 있지만,
-현재 Bedrock 동기 공급자는 추정 토큰을 반환한다. SDK 내부 전송 재시도 횟수는 측정하지 않는다.
+- fast: `global.anthropic.claude-haiku-4-5-20251001-v1:0`
+- primary: `global.anthropic.claude-sonnet-4-5-20250929-v1:0`
 
-실험에 사용할 **실제 모델 ID별** 단가(USD/백만 토큰)를 환경변수에 JSON으로 입력한다.
-아래의 모델 이름과 숫자는 형식 예시이며 실제 가격표가 아니다.
+기존의 일반 AI 라우팅 기본값은 바꾸지 않는다. `RECODER_REPAIR_FAST_MODEL`, `RECODER_REPAIR_PRIMARY_MODEL`로
+수정 전용 모델을 설정할 수 있다. 명시적으로 선택한 API 키/게이트웨이 인증 경로는 유지한다.
+이 실험은 Bedrock만 사용했다. SDK 재시도를 1회 요청으로 제한하고 Converse 응답의 실제 입출력 토큰을 기록한다.
+모델·사용량 출처·재시도 수·가격 출처를 각 시도에 남긴다. 가격이 없는 호출은 비용 미확인으로 표시한다.
+단가와 검토일은 `benchmarks/repair/prices.json`에 있다. 계산값은 세전 공개 단가 추정이며 청구서가 아니다.
 
-```sh
-export RECODER_REPAIR_PRICES='{"your-small-model-id":{"input":1.0,"output":5.0},"your-large-model-id":{"input":3.0,"output":15.0}}'
-```
+실험은 호출 전에 UTF-8 입력 바이트, 메시지 여유분, 최대 출력 토큰으로 최악 비용을 예약한다.
+SQLite 트랜잭션으로 동시 호출을 합산하고, 타임아웃/중단으로 사용량을 모르더라도 예약을 유지한다.
+사용자가 승인한 총 **$30**을 모든 예비·최종 실험이 하나의 장부로 공유한다.
+제품의 개별 UI 호출까지 이 연구 예산으로 제한하는 것은 아니며, 실험 실행기에 적용된다.
 
-단가가 없거나 실패한 호출의 사용량을 확인하지 못하면 비용은 `null`이다. 무료로 계산하지 않는다.
-모델 호출 실패 시 Gemini 등 다른 공급자로 몰래 바꾸지 않는다. 다음 모델 선택은 파이프라인이 담당한다.
+## 36개 실행 과제와 비교
 
-성공한 답은 SQLite에 저장하고 동일 워크스페이스·파일 해시·오류·문서 버전·모델/단가·전략·검증기 조건에서만
-24시간 이내 재사용한다. 캐시 결과도 다시 빌드한다. API에서 A/B/C 실험의 캐시는 강제로 끄며,
-실험 실행기는 D도 끈다. 저장 위치는 `RECODER_REPAIR_DB`로 지정할 수 있다.
+`benchmarks/repair/fixtures/`의 36개 프로젝트는 npm 6, Node/프레임워크 6, Docker 6,
+ECS/ECR 6, IAM/S3 6, 로직 대조군 6이다. 각 프로젝트의 고장 상태 실패와 별도 정답 수정 통과를 확인했다.
+정답 파일과 검증 oracle은 모델이 보는 프로젝트 밖의 `references/`, `oracles/`에 둔다.
+수정된 Dockerfile에서 검사를 지워도 외부 oracle을 통과해야 한다.
 
-## A/B/C/D 비교
+24개는 실제 Docker 빌드와 격리된 Node/C/Express/Vite 실행을 검증한다. AWS 관련 12개 중 8개는
+실제 AWS `SimulateCustomPolicy`, 나머지 4개는 Docker HTTP/시작 시간/이미지 태그 계약을 검사한다.
+SCP, endpoint 정책, KMS grant, 실제 cross-account 승인 전체나 Fargate 배포를 검증한 것은 아니다.
+각 과제와 결과의 `verification_kind`, `note`에 이 범위를 기록한다.
 
-| 조건 | 모델 | 문서 | 최대 생성 횟수 |
+| 조건 | 모델 | 문서 | 최대 생성 |
 |---|---|---|---|
 | A | 대형 → 대형 | 없음 | 2 |
 | B | 대형 → 대형 | 있음 | 2 |
 | C | 소형 → 소형 | 있음 | 2 |
 | D | 소형 → 대형 | 있음 | 2 |
 
-모든 조건은 같은 로그 요약·관련 파일·정적 검사·검증기를 사용한다. 순서는 시드로 무작위화한다.
-모델 효과를 비교하는 본 실험과 원본 로그 대비 입력 축소 실험은 구분한다.
-
-`benchmarks/repair/cases.json`에는 36개 **과제 초안**이 있다. npm 6, Node/프레임워크 6, Docker 6,
-ECS/ECR 6, IAM/S3 6, 코드 로직 대조군 6이다. 아직 실패 프로젝트 36개를 구현한 것은 아니다.
-실행할 프로젝트를 만들고 실제 실패를 확인한 후에만 `status: "ready"`, `workspace`, `log_file`을 지정한다.
-코드 로직 과제는 오류를 검출하는 테스트를 이미지 빌드 단계에 포함해야 한다.
+모든 조건에서 같은 요약·파일·규칙·검증기를 쓰고 캐시를 끈다. 조건 순서는 seed 42로 섞는다.
+실행 중 원본 프로젝트를 바꾸지 않으며, 각 시도는 새로운 복사본으로 시작한다.
+규칙 처리 과제는 모델 해결률 분모에서 제외한다. 클라우드 시뮬레이션 결과는 실제 배포 성공과 분리한다.
 
 ```sh
-python scripts/benchmark_repair.py --cases benchmarks/repair/cases.json
-# 준비된 과제와 단가를 검토한 다음 유료 호출을 실행할 때만:
-python scripts/benchmark_repair.py --cases prepared-cases.json --output work/experiment --live
+python scripts/validate_repair_cases.py --jobs 3
+python scripts/benchmark_repair.py  # 준비 상태만 확인, 과금 없음
+# 실제 유료 실험:
+python scripts/benchmark_repair.py --live --output work/experiment/final \
+  --budget-ledger work/experiment/budget.db --budget 30 --jobs 3
 ```
 
-실행기는 원본에 수정안을 적용하지 않는다. `runs.json`과 `report.json`을 기록한다. 해결률, 첫 시도 해결 수,
-생성 호출 수, 해결까지 호출 수, 전체 실패 비용을 포함한 해결당 비용, 중앙 소요 시간, 인용 검토 정확도를 집계한다.
-규칙으로 해결한 과제는 별도 집계하며 모델의 성과로 더하지 않는다. 재현 실패·검증 환경 실패는 무효 과제로 분리한다.
-인용의 실제 정확도는 사람이 `citation_review`를 `correct`/`incorrect`로 평가해야 계산된다.
+Docker, AWS 자격증명과 `iam:SimulateCustomPolicy`, 위 두 Bedrock 모델 사용 권한이 필요하다.
+AWS 자원을 만들거나 바꾸지 않는다. macOS에서 Buildx 설정을 별도 폴더로 두려면
+`BUILDX_CONFIG="$PWD/work/buildx"`를 설정한다. 작업 완료마다 결과·예산을 저장하며 같은 조건으로 재개할 수 있다.
 
-## 고객 AWS 계정에서 문서 갱신
+실험 수치는 [실험 보고서](../benchmarks/repair/RESULTS.md)에 있다. 36개 개발 과제에 조건별 1회씩 실행한
+탐색 실험이다. 같은 과제에서 검색기를 개선한 이력이 있어 독립 검증이나 통계적 우월성으로 해석하지 않는다.
+실패 비용도 해결당 비용에 포함한다. 인용 검토자는 코드 작성 AI이며 사람의 독립적인 검토를 대신하지 않는다.
 
-`infra/repair-documents.yaml`은 SAM 템플릿이다. 고객 계정에 private/versioned S3 버킷과 갱신 Lambda를 만들 수 있다.
-일일 스케줄은 기본 비활성이다. `sam build -t infra/repair-documents.yaml`로 패키징한 후 배포할 수 있으며,
-라이선스를 검토한 manifest를 `sources/manifest.json`에 올린 뒤 스케줄을 활성화한다.
-실제 AWS 배포는 이번 작업에서 수행하지 않았다. SAM CLI가 없는 환경이므로 배포 검증도 남아 있다.
+## 고객 계정의 문서 갱신
 
-Lambda는 manifest 읽기와 `index/corpus.json` 쓰기만 허용된다. 수집 중 오류가 나면 기존 색인을 유지한다.
-새 색인을 고객 측에서 내려받고 `RECODER_REPAIR_CORPUS`로 연결한다. 클라이언트의 자동 S3 동기화는 후속 작업이다.
-
-## 검증 및 남은 작업
+`infra/repair-documents.yaml`은 private/versioned S3와 Lambda를 구성한다. 일일 스케줄은 기본 비활성이다.
+`source-manifest.json`은 승인된 저장소·원문 경로·ref·LICENSE SHA-256을 명시한다. 추적 ref의 새 commit에서
+이용 조건이 같을 때만 갱신하고, 이용 조건이 바뀌거나 다운로드가 실패하면 기존 색인을 유지한다.
+AWS의 보관된 공개 문서는 고정 snapshot으로 남는다. 라이선스 전문도 S3에 함께 보존한다.
 
 ```sh
-python -m pytest core/tests/test_grounded_repair.py core/tests/test_repair_metrics.py core/tests/test_repair_api_refresh.py -q
+PYTHONPATH=core python -m grounded_repair.refresh benchmarks/repair/source-manifest.json work/corpus.json --update
+sam build -t infra/repair-documents.yaml
+sam deploy --guided
+# 생성된 버킷에 sources/manifest.json으로 source-manifest.json 업로드 후 일정 활성화
+```
+
+이번 검증에서는 클라우드 자원을 배포하지 않았다. Lambda 패키징·소스 갱신·실패 시 이전 색인 보존을 검증했다.
+S3의 새 색인은 내려받은 뒤 설정의 corpus 경로에 연결한다. 문서 갱신 비용은 모델 비교 비용과 별개다.
+
+## API와 검증
+
+기존 세션 토큰으로 보호된 `POST /api/repair/prepare`, `GET /api/repair/{id}`,
+`POST /api/repair/{id}/approve`를 사용한다. 승인 본문은 `workspace_path`를 받는다.
+승인 API는 미검증·만료·다른 프로젝트·파일이 변경된 요청을 거부한다.
+캐시는 동일 프로젝트/파일/오류/문서/모델/가격/검증기에서만 24시간 재사용하며 다시 빌드한다.
+
+검증 명령:
+
+```sh
+python -m pytest core/tests -q
+npm --prefix extension test
+npm --prefix extension run lint
+npm --prefix extension run build
+npm --prefix extension run verify:package
 python scripts/smoke_grounded_repair.py
 ```
 
-신규 테스트 38개 통과. 실제 Docker 스모크에서 COPY 경로 오타로 빌드 실패 → 수정 복사본 빌드 성공 →
-승인 전 원본 유지 → 승인 후 빌드 성공을 확인했다. 스모크의 모델 응답은 고정 픽스처이며 유료 AI 성능을 측정한 것은 아니다.
-
-전체 코어 테스트 첫 실행: 2,209개 통과, 1개 스킵, 7개 실패(당시 신규 테스트 29개 포함).
-실패 7개는 수정 전 `develop`에서도 재현했다. 프로젝트 프로필을 홈 디렉터리에 쓰려는 테스트 5개,
-Dockerfile 포트 기대값 1개, 브라우저 검사 환경 1개다. 이후 추가된 비용/API 테스트를 포함한 관련 테스트 65개도 통과했다.
-
-후속 작업은 실제 다국어 임베딩 모델 선정·검증, 공식 원문 이용 조건 검토, 실패 프로젝트 36개 구현,
-ECS/IAM 환경 검증기, VS Code 실패 카드와 승인 UI 연결, 유료 모델 비교 실험이다.
-현재 수정기는 기존 텍스트 파일 편집만 지원하며, 복사본은 32 MB/4,000파일로 제한한다.
-빌드에 필요한 비밀·사용자 환경 파일은 복사하지 않으므로 해당 프로젝트에는 별도의 검증 환경이 필요하다.
+파일 편집 범위는 기존 텍스트 파일이며 복사본은 32 MB/4,000파일로 제한한다.
+비밀 설정 파일, 심볼릭 링크와 워크스페이스 밖의 경로는 제외한다. 해당 환경이 필요한 프로젝트는 별도 검증 환경이 필요하다.

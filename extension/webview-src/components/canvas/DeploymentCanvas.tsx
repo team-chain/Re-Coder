@@ -18,6 +18,7 @@ import { GitHubPanel } from "./GitHubPanel";
 import { canvasStyles } from "./styles";
 import { mergeDeployment, SnapshotRequests } from "./state";
 import { DockerNotifications } from './dockerNotifications';
+import {GroundedRepairPanel} from '../GroundedRepairPanel';
 
 type Pane = "canvas" | "details" | "history" | "aws" | "docker" | "security" | "discord" | "status" | "analysis";
 const defaultConfig: Config = { target:"ecs",image_name:"recoder-app",tag:"v1",aws_region:"",ecs_cluster:"recoder-cluster",ecs_service:"recoder-app",task_family:"recoder-task",container_port:8000,cpu:"256",memory:"512",environment:"staging",dir:"" };
@@ -247,6 +248,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
         {!scan&&<p className="rc-muted">배포를 승인하면 검사를 진행합니다.</p>}{scan&&!live?.running&&<p className="rc-muted">마지막 배포의 검사 기록입니다. 현재 소스는 다음 배포에서 다시 검사합니다.</p>}
         {snapshot?.warnings.map((warning,i)=><div key={i} className="rc-note">{warning}</div>)}
         {(live?.deployment_id||running)&&<EcsDeploymentProgress state={{...initialEcsProgress,status:live,submitting:busy}}/>}
+        {live?.stage==='failed'&&<GroundedRepairPanel key={`${snapshot?.workspace}:${live.deployment_id}`} stage="ecs" log={[live.error,live.error_detail,...(live.log_tail||[])].filter(Boolean).join('\n')}/>}
         {snapshot?.topology&&<section className="rc-panel" aria-label="ECS 실시간 계층"><h3>{snapshot.topology.cluster} › {snapshot.topology.service}</h3><p>실행 {snapshot.topology.running??'미확인'} / 희망 {snapshot.topology.desired??'미확인'} · {snapshot.topology.region}</p><small>{new Date(snapshot.topology.observed_at).toLocaleTimeString()} 조회</small><div className="rc-tree">{snapshot.topology.tasks.map(task=><div key={task.id}><b>{task.id}</b><small>{task.launch_type} · {task.status} · Health {task.health}</small>{task.images.map((image,i)=><small key={i}>{image.image}<br/>{image.digest||'이미지 digest 미확인'}</small>)}</div>)}</div>{!snapshot.topology.tasks.length&&<p>조회된 실행 태스크가 없습니다.</p>}{(snapshot.topology.desired??0)>0&&<div className="rc-actions"><button disabled={running||busy} title="태스크 수를 0으로 줄여 과금을 멈춥니다. 서비스 설정은 남습니다." onClick={()=>postMessage('canvas.ecs.stop',{requestId:requestId(),cluster:snapshot.topology!.cluster,service:snapshot.topology!.service,region:snapshot.topology!.region})}>서비스 중지 (과금 멈춤)</button></div>}{snapshot.topology.truncated&&<p>첫 100개 태스크를 표시합니다.</p>}</section>}
         {s3Result&&<section className="rc-panel" aria-label="S3 배포 결과"><h3>S3 배포 완료</h3>{serviceLink(s3Result.url)&&<a href={serviceLink(s3Result.url)!} target="_blank" rel="noreferrer">정적 사이트 열기 ↗</a>}<p>{s3Result.bucket} · {s3Result.region} · 파일 {s3Result.uploaded.length}개</p>{s3Result.index_copied_from&&<p>{s3Result.index_copied_from}를 index.html로 함께 올렸습니다.</p>}{s3Result.excluded_note&&<div className="rc-note">{s3Result.excluded_note}</div>}</section>}
       </div>}

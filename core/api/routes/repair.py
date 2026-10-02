@@ -24,9 +24,8 @@ def _store():
 
 
 def _pipeline():
-    from llm.provider_router import get_provider_router
-    source = os.getenv("RECODER_REPAIR_CORPUS")
-    return RepairPipeline(get_provider_router(), KnowledgeIndex.load(Path(source) if source else None), _store())
+    from grounded_repair.config import load_index, repair_router
+    return RepairPipeline(repair_router(), load_index(), _store())
 
 
 class PrepareRequest(BaseModel):
@@ -37,9 +36,18 @@ class PrepareRequest(BaseModel):
     use_cache: bool = True
 
 
+class ApproveRequest(BaseModel):
+    workspace_path: str
+
+
 def public_result(result):
     # Hashes and full replacement files stay server-side until explicit approval.
-    return {k: v for k, v in result.items() if k not in {"manifest", "edits"}}
+    public = {k: v for k, v in result.items() if k not in {"manifest", "edits"}}
+    if "attempts" in public:
+        public["attempts"] = [{k: v for k, v in a.items() if k != "proposal"} for a in public["attempts"]]
+    if "suggestion" in public:
+        public["suggestion"] = {k: v for k, v in public["suggestion"].items() if k != "edits"}
+    return public
 
 
 @router.post("/prepare")
@@ -66,9 +74,9 @@ async def get_run(run_id: str):
 
 
 @router.post("/{run_id}/approve")
-async def approve(run_id: str):
+async def approve(run_id: str, request: ApproveRequest | None = None):
     async with _lock:
         try:
-            return public_result(await asyncio.to_thread(_store().approve, run_id))
+            return public_result(await asyncio.to_thread(_store().approve, run_id, request.workspace_path if request else None))
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc

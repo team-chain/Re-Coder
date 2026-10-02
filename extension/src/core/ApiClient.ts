@@ -427,6 +427,26 @@ export class ApiClient {
         return resp.data;
     }
 
+    async prepareRepair(workspacePath:string, log:string, stage:string):Promise<Record<string,unknown>> {
+        const r=await this.request<Record<string,unknown>>('POST','/api/repair/prepare',
+            {workspace_path:workspacePath,log,stage,strategy:'D',use_cache:true},false,1200000);
+        if(!r.success||!r.data)throw new Error(r.error||'수정안 검증 실패');
+        return r.data;
+    }
+
+    async getRepair(runId:string):Promise<Record<string,unknown>> {
+        const r=await this.request<Record<string,unknown>>('GET',`/api/repair/${encodeURIComponent(runId)}`);
+        if(!r.success||!r.data)throw new Error(r.error||'수정 기록 조회 실패');
+        return r.data;
+    }
+
+    async approveRepair(runId:string, workspacePath:string):Promise<Record<string,unknown>> {
+        const r=await this.request<Record<string,unknown>>('POST',`/api/repair/${encodeURIComponent(runId)}/approve`,
+            {workspace_path:workspacePath},false,30000);
+        if(!r.success||!r.data)throw new Error(r.error||'수정안 적용 실패');
+        return r.data;
+    }
+
     /** 사용자가 누른 자동 수정 한 건. 원본은 프로젝트의 .recoder/backups 에 남는다. */
     async fixBuildReadiness(workspacePath: string, code: string): Promise<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }> {
         const resp = await this.request<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }>(

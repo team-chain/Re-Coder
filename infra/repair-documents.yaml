@@ -37,6 +37,9 @@ Resources:
             - Effect: Allow
               Action: s3:PutObject
               Resource: !Sub '${DocumentBucket.Arn}/index/corpus.json'
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub '${DocumentBucket.Arn}/index/licenses/*'
       Events:
         Daily:
           Type: Schedule

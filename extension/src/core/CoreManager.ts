@@ -632,6 +632,8 @@ export class CoreManager {
             //: coreEnv 는 **실제로 Core 에 넘기는 환경**이다. 예전에는 AI API 키(aiEnv)를 로그 가림용으로만
             //: 쓰고 spawn 에는 빠뜨려서, Claude/ChatGPT 키로 연결해도 Core 가 키를 받지 못했다.
             const coreEnv: NodeJS.ProcessEnv = { ...hostEnv, ...gatewayEnv, ...awsEnv, ...aiEnv, RECODER_PARENT_PID: String(process.pid) };
+            const repairConfig = vscode.workspace.getConfiguration('recoder.repair').get<string>('configPath', '').trim();
+            if (repairConfig) { coreEnv.RECODER_REPAIR_CONFIG = repairConfig; }
             processLog = this.createProcessLog(Object.entries(coreEnv)
                 .filter(([key]) => /TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY/i.test(key))
                 .map(([, value]) => value ?? ''));

@@ -130,7 +130,7 @@ class RepairPipeline:
             if not context:
                 return finish("insufficient_context")
             # Avoid counting an already working build as an AI repair success.
-            if stage == "build":
+            if stage == "build" or stage in getattr(self.verifier, "supported_stages", set()):
                 result["baseline"] = await asyncio.to_thread(self.verifier, base)
                 if result["baseline"].get("available") is False:
                     return finish("verification_unavailable")
@@ -168,10 +168,15 @@ class RepairPipeline:
                             raw = _extract_json(response.text)
                         suggestion = Suggestion.model_validate(raw)
                     cited = set(suggestion.evidence_ids) | {x for e in suggestion.edits for x in e.evidence_ids}
-                    if not cited <= allowed or (strategy != "A" and (not suggestion.evidence_ids or any(not e.evidence_ids for e in suggestion.edits))):
-                        raise ValueError("Missing or fabricated document citation")
+                    attempt["proposal"] = masked_values(suggestion.model_dump())
+                    if not cited <= allowed or (strategy != "A" and suggestion.edits and (not suggestion.evidence_ids or any(not e.evidence_ids for e in suggestion.edits))):
+                        raise ValueError("Missing or fabricated document citation. Use exact allowed IDs: "
+                                         + ", ".join(sorted(allowed)) + ". Unknown IDs: " + ", ".join(sorted(cited - allowed)))
                     if not suggestion.edits:
                         result["suggestion"] = suggestion.model_dump()
+                        if strategy == "D" and tier == "fast":
+                            previous = suggestion.explanation + "\n" + "\n".join(suggestion.guidance)
+                            continue
                         return finish("manual_action_required")
                     edits = {}
                     for edit in suggestion.edits:
@@ -201,6 +206,9 @@ class RepairPipeline:
                         return finish("workspace_changed")
                     return finish("ready_for_approval" if stage == "build" else "environment_verification_required")
                 except Exception as exc:
+                    from grounded_repair.budget import BudgetExceeded
+                    if isinstance(exc, BudgetExceeded):
+                        return finish("budget_exhausted")
                     # Provider failures carry their own record; never fabricate zero cost.
                     if getattr(exc, "llm_call_record", None):
                         attempt["usage"] = exc.llm_call_record
@@ -212,3 +220,14 @@ class RepairPipeline:
 def re_masked(text: str) -> bool:
     import re
     return bool(re.search(r"\[(?:MASKED[A-Z_]*|REDACTED)\]", text))
+
+
+def masked_values(value):
+    """Redact string values without running regular expressions over JSON syntax."""
+    if isinstance(value, str):
+        return mask_secrets(value)
+    if isinstance(value, list):
+        return [masked_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: masked_values(item) for key, item in value.items()}
+    return value

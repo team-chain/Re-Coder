@@ -68,11 +68,11 @@ def select_context(root: Path, files: dict[str, str], evidence: str) -> dict[str
     def priority(name):
         return (0 if name in evidence else 1 if Path(name).name in {
             "Dockerfile", "package.json", "docker-compose.yml", "vite.config.js",
-            "vite.config.ts", "tsconfig.json", "requirements.txt", "task-definition.json"
+            "vite.config.ts", "tsconfig.json", "requirements.txt", "requirements.md", ".dockerignore", "task-definition.json"
         } else 2, name)
     chosen, remaining = {}, 24000
     for name in sorted(files, key=priority):
-        if priority(name)[0] == 2 and Path(name).suffix not in {".js", ".ts", ".py", ".json", ".yaml", ".yml"}:
+        if priority(name)[0] == 2 and Path(name).suffix not in {".js", ".cjs", ".mjs", ".ts", ".py", ".json", ".yaml", ".yml", ".c", ".txt"}:
             continue
         p = safe_path(root, name)
         if p.stat().st_size > min(12000, remaining):

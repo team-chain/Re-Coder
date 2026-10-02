@@ -13,7 +13,7 @@ def report(runs: list[dict]) -> dict:
         # Rules are a separate stratum, not evidence for a model's solve rate.
         invalid = {"failure_not_reproduced", "verification_unavailable", "workspace_changed"}
         ai = [r for r in group if r.get("route") != "rules" and r["status"] not in invalid]
-        solved = [r for r in ai if r["status"] in {"ready_for_approval", "applied"}]
+        solved = [r for r in ai if r.get("benchmark_solved", r["status"] in {"ready_for_approval", "applied"})]
         known_cost = all(r.get("cost_complete", False) for r in ai)
         total = sum(r.get("estimated_cost_usd") or 0 for r in ai) if known_cost else None
         reviewed = [r for r in ai if r.get("citation_review") in {"correct", "incorrect"}]
@@ -30,6 +30,7 @@ def report(runs: list[dict]) -> dict:
             "median_elapsed_ms": statistics.median(r["elapsed_ms"] for r in ai) if ai else None,
             "citation_accuracy": sum(r["citation_review"] == "correct" for r in reviewed) / len(reviewed) if reviewed else None,
             "citations_reviewed": len(reviewed),
+            "verification_kinds": sorted({r.get("verification_kind", "docker-build") for r in ai}),
             "retrieval_modes": sorted({r.get("retrieval_mode", "unknown") for r in ai}),
             "limitations": "Model generation calls exclude SDK transport retries; costs retain provider token_source.",
         }

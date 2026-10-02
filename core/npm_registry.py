@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import threading
 import urllib.parse
 import urllib.request
@@ -143,7 +144,13 @@ def fetch_versions(name: str, timeout: float = _TIMEOUT) -> Optional[list[str]]:
     req = urllib.request.Request(url, headers={"Accept": "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8"})
     result: Optional[list[str]]
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        context = ssl.create_default_context()
+        try:
+            import certifi
+            context.load_verify_locations(certifi.where())
+        except ImportError:
+            pass
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         versions = data.get("versions") if isinstance(data, dict) else None
         result = sorted(versions) if isinstance(versions, dict) else None

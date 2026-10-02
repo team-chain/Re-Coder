@@ -497,10 +497,11 @@ class LLMProviderRouter:
                  "fallback_used": False, "transport_retries": "not_measured"}
         started = time.monotonic()
         try:
-            response = await asyncio.to_thread(provider.call, plain)
+            response = await asyncio.to_thread(getattr(provider, "call_measured", provider.call), plain)
             br.record_success()
             entry.update(input_tokens=response.input_tokens, output_tokens=response.output_tokens,
                          token_source=response.token_source, model=response.model_used, status="succeeded")
+            entry["transport_retries"] = response.metadata.get("transport_retries", "not_measured")
             rate = prices.get(response.model_used)
             if rate is not None:
                 incoming, outgoing = float(rate["input"]), float(rate["output"])

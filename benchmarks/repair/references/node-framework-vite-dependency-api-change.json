@@ -1,0 +1,3 @@
+{
+  "vite.config.js": "import {defineConfig} from 'vite';\nexport default defineConfig({build:{lib:{entry:'app.js',formats:['cjs'],fileName:()=> 'client.cjs'}}});\n"
+}
