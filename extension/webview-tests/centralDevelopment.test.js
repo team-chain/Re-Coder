@@ -157,3 +157,31 @@ test('생성 결과가 여러 파일이면 목록만 먼저 보이고, 이름을
   assert.ok(texts().includes('AAA-CONTENT'));
   assert.ok(!texts().includes('BBB-CONTENT'));
 });
+
+test('요청 입력창: 위치·참고 파일·보내기가 한 덩어리 안에 있고, 보낸 요청은 말풍선과 위치·참고 파일로 남는다', () => {
+  const ui = mount();
+  const cls = name => ui.find(n => n.props.className === name);
+  assert.ok(cls('rc-cg-hero'), '첫 화면 질문이 없다');
+  // 예시는 입력창에 채우기만 하고 보내지 않는다.
+  ui.button('게시판 API').props.onClick(); ui.render();
+  assert.match(ui.find(n => n.type === 'textarea').props.value, /게시판 REST API/);
+  assert.equal(ui.messages.length, 0);
+  ui.emit('code.folderPicked', {folder:'shop'});
+  ui.emit('code.contextAdded', {files:[{path:'server/db.js', content:'x'}]});
+  const box = cls('rc-cg-box');
+  const inBox = predicate => ui.nodes(box).some(predicate);
+  assert.ok(inBox(n => n.type === 'textarea'));
+  assert.ok(inBox(n => n.props['aria-label'] === '참고 파일 추가'));
+  assert.ok(inBox(n => n.props['aria-label'] === 'server/db.js 참고 파일 제거'));
+  assert.ok(inBox(n => n.props['aria-label'] === '위치 지우기'));
+  assert.ok(inBox(n => n.props.className === 'rc-cg-send'));
+  ui.input('쇼핑몰 만들어줘'); ui.button('보내기').props.onClick(); ui.render();
+  assert.equal(ui.messages[0].payload.targetFolder, 'shop');
+  assert.equal(cls('rc-cg-hero'), undefined, '보낸 뒤에도 첫 화면 질문이 남아 있다');
+  assert.equal(cls('rc-cg-examples'), undefined);
+  assert.equal(cls('rc-cg-me').props.children, '쇼핑몰 만들어줘');
+  assert.equal(cls('rc-cg-meta').props.children, 'shop · server/db.js');
+  assert.ok(cls('rc-cg-dock'), '이어서 수정 입력창이 아래에 고정되지 않았다');
+  ui.find(n => n.props['aria-label'] === '위치 지우기').props.onClick(); ui.render();
+  assert.equal(cls('rc-cg-meta').props.children, 'shop · server/db.js', '요청 시점의 위치가 바뀌었다');
+});
