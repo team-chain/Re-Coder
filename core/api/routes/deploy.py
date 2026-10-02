@@ -3769,7 +3769,14 @@ def _diagnose_build_failure(workspace_path: str, output: str, stage: str = "buil
         output = mask_secrets(output)
     except Exception:  # noqa: BLE001
         pass
-    return diagnose(output, issues, stage=stage).to_dict()
+    result = diagnose(output, issues, stage=stage).to_dict()
+    result["repair"] = {
+        "endpoint": "/api/repair/prepare",
+        "route": "rules" if any(i.severity == "error" for i in issues) else "documents",
+        "stage": stage,
+        "approval_after_verification": True,
+    }
+    return result
 
 
 async def _local_image_id(image: str) -> str:

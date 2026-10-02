@@ -16,6 +16,7 @@ CORE_DIR = Path(SPECPATH)
 
 hidden = []
 datas = []
+datas += [(str(CORE_DIR / 'grounded_repair' / 'sources.json'), 'grounded_repair')]
 binaries = []
 
 # ── uvicorn 런타임(동적 로딩) ─────────────────────────────────────────

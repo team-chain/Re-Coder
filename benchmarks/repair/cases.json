@@ -1,0 +1,290 @@
+[
+  {
+    "id": "npm-unpublished-version",
+    "category": "npm",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "npm-scoped-package-typo",
+    "category": "npm",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "npm-lockfile-out-of-sync",
+    "category": "npm",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "npm-peer-dependency-conflict",
+    "category": "npm",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "npm-unsupported-node-engine",
+    "category": "npm",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "npm-private-registry-auth",
+    "category": "npm",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "node-framework-express5-unnamed-wildcard",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "node-framework-express5-optional-route",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "node-framework-esm-commonjs-mismatch",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "node-framework-top-level-await-require",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "node-framework-vite-build-time-env",
+    "category": "node-framework",
+    "stage": "run",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "node-framework-vite-dependency-api-change",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "docker-copy-outside-context",
+    "category": "docker",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "docker-dockerignore-required-file",
+    "category": "docker",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "docker-wrong-multistage-source",
+    "category": "docker",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "docker-native-addon-toolchain",
+    "category": "docker",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "docker-runtime-user-permission",
+    "category": "docker",
+    "stage": "run",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "docker-probe-tool-missing",
+    "category": "docker",
+    "stage": "run",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "ecs-ecr-container-port-mismatch",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "ecs-ecr-health-path-mismatch",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "ecs-ecr-startup-grace-period",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "ecs-ecr-execution-role-image-pull",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "ecs-ecr-image-tag-missing",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "ecs-ecr-secrets-initialization",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "iam-s3-task-role-s3-read",
+    "category": "iam-s3",
+    "stage": "iam",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "iam-s3-bucket-explicit-deny",
+    "category": "iam-s3",
+    "stage": "s3",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "iam-s3-kms-decrypt-permission",
+    "category": "iam-s3",
+    "stage": "iam",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "iam-s3-ecr-resource-scope",
+    "category": "iam-s3",
+    "stage": "iam",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "iam-s3-s3-endpoint-policy",
+    "category": "iam-s3",
+    "stage": "s3",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "iam-s3-cross-account-bucket",
+    "category": "iam-s3",
+    "stage": "s3",
+    "status": "planned",
+    "expected_validation": "isolated environment replay",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "logic-control-off-by-one-pagination",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild + failing regression test",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "logic-control-async-race",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild + failing regression test",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "logic-control-wrong-tax-rounding",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild + failing regression test",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "logic-control-invalid-state-transition",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild + failing regression test",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "logic-control-timezone-boundary",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild + failing regression test",
+    "note": "Fixture not yet materialized; not an experiment result."
+  },
+  {
+    "id": "logic-control-missing-null-branch",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "planned",
+    "expected_validation": "rebuild + failing regression test",
+    "note": "Fixture not yet materialized; not an experiment result."
+  }
+]

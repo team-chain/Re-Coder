@@ -450,6 +450,79 @@ class LLMProviderRouter:
         """Return a copy of all recorded LLMCallRecord entries."""
         return list(self._call_records)
 
+    def repair_profile(self) -> dict:
+        """Include actual tier identities and configured prices in repair cache keys."""
+        import os
+        return {"fast": self._bedrock_haiku.model_id,
+                "primary": self._bedrock_sonnet.model_id,
+                "provider": self._bedrock_sonnet.provider_name,
+                "prices": os.getenv("RECODER_REPAIR_PRICES", "{}")}
+
+    async def call_repair(self, request: Any, *, tier: str, run_id: str) -> Any:
+        """Measured single-tier call. Never silently switch experimental conditions.
+
+        Providers return their native usage when available. Unknown prices/failed
+        usage remain null; they must not become zero-dollar experimental results.
+        Generation calls are measured here; SDK transport retries are not counted.
+        """
+        import json
+        import math
+        import os
+        from dataclasses import replace
+        from .base import LLMError, LLMErrorType
+
+        if tier not in {"fast", "primary"}:
+            raise ValueError("Unknown repair tier")
+        provider = self._bedrock_haiku if tier == "fast" else self._bedrock_sonnet
+        prices = json.loads(os.getenv("RECODER_REPAIR_PRICES", "{}"))
+        if not isinstance(prices, dict):
+            raise ValueError("Repair prices must be a model-to-rates object")
+        for rate in prices.values():
+            for direction in ("input", "output"):
+                price = float(rate[direction])
+                if not math.isfinite(price) or price < 0:
+                    raise ValueError("Repair model prices must be finite and non-negative")
+        breaker_mod, ledger = _get_shared()
+        br = breaker_mod.breaker_for(f"{provider.provider_name}/{provider.model_id}")
+        if br.is_open:
+            raise LLMError("Model circuit breaker is open", LLMErrorType.SERVICE_ERROR)
+        # A schema-capability fallback can make multiple model calls. Use one
+        # JSON text generation and let the pipeline validate its schema instead.
+        prompt = request.prompt + "\nReturn JSON matching this schema:\n" + json.dumps(request.json_schema)
+        plain = replace(request, prompt=prompt, json_schema=None)
+        entry = {"call_id": str(uuid.uuid4()), "run_id": run_id, "agent": "grounded_repair",
+                 "operation": "repair_" + tier, "provider": provider.provider_name,
+                 "model": provider.model_id, "input_tokens": None, "output_tokens": None,
+                 "token_source": "unknown", "estimated_cost_usd": None,
+                 "fallback_used": False, "transport_retries": "not_measured"}
+        started = time.monotonic()
+        try:
+            response = await asyncio.to_thread(provider.call, plain)
+            br.record_success()
+            entry.update(input_tokens=response.input_tokens, output_tokens=response.output_tokens,
+                         token_source=response.token_source, model=response.model_used, status="succeeded")
+            rate = prices.get(response.model_used)
+            if rate is not None:
+                incoming, outgoing = float(rate["input"]), float(rate["output"])
+                if incoming < 0 or outgoing < 0:
+                    raise ValueError("Repair model prices cannot be negative")
+                entry["estimated_cost_usd"] = (response.input_tokens * incoming + response.output_tokens * outgoing) / 1_000_000
+                entry["pricing_source"] = "configured_usd_per_million"
+            else:
+                entry["pricing_source"] = "unconfigured"
+            return response
+        except Exception as exc:
+            br.record_failure()
+            error = exc if isinstance(exc, LLMError) else LLMError(str(exc), raw=exc)
+            entry["status"] = "failed"
+            error.llm_call_record = entry
+            raise error
+        finally:
+            entry["latency_ms"] = round((time.monotonic() - started) * 1000)
+            ledger.record(entry)
+            if "response" in locals():
+                response.metadata["llm_call_record"] = entry
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
