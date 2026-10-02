@@ -1777,6 +1777,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'host.ping': {
+                //: 웹뷰가 "이 창이 확장과 이어져 있는지" 확인한다. 바로 답한다 — 늦게 답하면 끊긴 것으로 본다.
+                this.postMessageToWebview(requestWebview, 'host.pong', { nonce: (payload as { nonce?: unknown })?.nonce });
+                break;
+            }
             case 'code.cancelPlan': {
                 const p = payload as { requestId?: number };
                 this.postMessageToWebview(requestWebview, 'code.error', { requestId: p?.requestId, message: '설계 결정을 취소해서 생성을 중단했습니다.' });

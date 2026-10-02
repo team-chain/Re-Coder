@@ -32,7 +32,8 @@
     "claude"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:recoder.workspace"
   ],
   "main": "./out/extension.js",
   "icon": "media/icon.png",

@@ -61,6 +61,7 @@ const window = {
     withProgress: async (_o, task) => task({ report() {} }, { isCancellationRequested: false }),
     createWebviewPanel: () => { throw new Error('harness: createWebviewPanel unused'); },
     registerWebviewViewProvider: () => ({ dispose() {} }),
+    registerWebviewPanelSerializer: () => ({ dispose() {} }),
     onDidChangeActiveTextEditor: () => ({ dispose() {} }),
     activeColorTheme: { kind: 2 }, tabGroups: { all: [], close: async () => true },
 };

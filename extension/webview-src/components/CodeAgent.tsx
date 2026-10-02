@@ -5,6 +5,7 @@
  */
 import React, { useCallback, useEffect, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import { isHostLinkLost } from "../hooks/useHostLink";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
 
@@ -71,6 +72,11 @@ type ApplyStatus = "pending" | "applied" | "failed";
 
 let _turnSeq = 1;
 
+//: 확장이 요청을 받았다는 첫 답(code.status)을 기다리는 시간.
+export const FIRST_ACK_SECONDS = 15;
+//: 확장이 요청을 받지 못했을 때. 거의 늘 "확장이 다시 시작돼 이 창이 옛 확장에 붙어 있는" 경우다.
+export const NOT_RECEIVED = "ReCoder 확장이 이 요청을 받지 못했습니다. 확장이 다시 시작되면서 이 창과 연결이 끊긴 것 같습니다. Ctrl+Shift+P → Developer: Reload Window 로 창을 다시 불러온 뒤 다시 보내 주세요. 보낸 내용은 입력창에 다시 넣어 두었습니다.";
+
 //: 첫 화면 예시 — 누르면 입력창에 채워지기만 한다(보내지는 않는다).
 const EXAMPLES: { label: string; text: string }[] = [
   { label: "게시판 API", text: "게시판 REST API를 만들어줘 — 글 작성·목록·수정·삭제" },
@@ -117,11 +123,14 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       responseTimers.current.delete(id);
       expiredRequests.current.add(id);
       if (activeRequest.current === id) activeRequest.current = null;
+      const unsent = pendingRequestsRef.current[id]?.instruction ?? "";
       delete pendingRequestsRef.current[id];
       const acknowledged = acknowledgedRequests.current.has(id);
+      //: 확장에 닿지 않은 요청은 다시 쓰지 않게 입력창에 되돌려 둔다(이미 새로 쓰고 있으면 건드리지 않는다).
+      if (!acknowledged && unsent) { setInput((cur) => cur.trim() ? cur : unsent); }
       setTurns(ts => ts.map(t => t.id === id ? {...t,status:"error",error: acknowledged
         ? `${t.progress ? `"${t.progress.replace(/…$/, "")}" 단계에서 ` : ""}응답이 너무 오래 없습니다. 명령 팔레트에서 "ReCoder: Restart Core" 를 실행하거나 창을 다시 불러온 뒤 다시 요청해 주세요.`
-        : "확장이 요청을 받지 못했습니다(작업 폴더를 바꾼 직후 등 확장이 다시 시작되는 중일 수 있습니다). 창을 다시 불러온 뒤(Ctrl+Shift+P → Developer: Reload Window) 다시 요청해 주세요."} : t));
+        : NOT_RECEIVED} : t));
     }, seconds * 1000));
   };
   //: 확장 호스트가 한 번이라도 "받았다(code.status)"고 알려 온 요청.
@@ -260,7 +269,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
     // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
     setTurns((ts) => [...ts, { id, prompt: text, targetFolder, contextNames: contextFiles.map((f) => f.path), status: "planning" }]);
-    waitForResponse(id, 30);
+    //: 확장은 받자마자 code.status 로 답한다 — 15초 안에 답이 없으면 끊긴 것이다(예전 30초).
+    waitForResponse(id, isHostLinkLost() ? 5 : FIRST_ACK_SECONDS);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
   }, [input, targetFolder, contextFiles, postMessage]);

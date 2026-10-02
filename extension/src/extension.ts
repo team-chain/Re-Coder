@@ -115,6 +115,16 @@ export function activate(context: vscode.ExtensionContext): void {
         )
     );
 
+    //: 확장이 다시 시작돼도 열려 있던 ReCoder 탭을 새 확장에 다시 연결한다(ReCoderPanel.revive).
+    context.subscriptions.push(
+        vscode.window.registerWebviewPanelSerializer(ReCoderPanel.viewType, {
+            async deserializeWebviewPanel(panel: vscode.WebviewPanel) {
+                ReCoderPanel.revive(panel, context.extensionUri, sidebarProvider);
+                void ensureCoreRunning(coreManager, sidebarProvider);
+            },
+        }),
+    );
+
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.generateInFolder', async (uri?: vscode.Uri) => {
             //: 코드 화면은 ReCoder 창에 있다(사이드바는 시작 화면). 창을 열고, 우클릭한 폴더의 **절대 경로**를 넘긴다 —

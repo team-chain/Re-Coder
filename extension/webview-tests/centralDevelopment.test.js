@@ -185,3 +185,23 @@ test('요청 입력창: 위치·참고 파일·보내기가 한 덩어리 안에
   ui.find(n => n.props['aria-label'] === '위치 지우기').props.onClick(); ui.render();
   assert.equal(cls('rc-cg-meta').props.children, 'shop · server/db.js', '요청 시점의 위치가 바뀌었다');
 });
+
+test('확장이 요청을 받지 못하면 15초 뒤 원인·해결을 알리고, 보낸 내용을 입력창에 되돌려 둔다', () => {
+  const ui = mount();
+  ui.input('쇼핑몰 만들어줘'); ui.button('보내기').props.onClick(); ui.render();
+  assert.equal(ui.find(n => n.type === 'textarea').props.value, '');
+  ui.expire();
+  assert.equal(ui.find(n => n.type === 'textarea').props.value, '쇼핑몰 만들어줘', '보낸 내용을 다시 써야 한다');
+  const html = JSON.stringify(ui.nodes().map(n => typeof n.props.children === 'string' ? n.props.children : ''));
+  assert.match(html, /Developer: Reload Window/);
+  assert.match(html, /입력창에 다시 넣어 두었습니다/);
+});
+
+test('확장이 받았다고 답한 요청은 입력창에 되돌리지 않는다(응답이 늦은 경우)', () => {
+  const ui = mount();
+  ui.input('쇼핑몰'); ui.button('보내기').props.onClick(); ui.render();
+  const id = ui.messages[0].payload.requestId;
+  ui.emit('code.status', {requestId:id, stage:'planning', message:'AI 가 설계 결정을 준비하는 중…', waitSeconds:270});
+  ui.expire();
+  assert.equal(ui.find(n => n.type === 'textarea').props.value, '');
+});
