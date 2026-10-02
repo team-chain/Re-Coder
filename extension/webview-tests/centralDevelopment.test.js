@@ -89,15 +89,17 @@ test('central request opens design directly, then generates and applies only aft
   assert.equal(generate.payload.targetFolder, 'src');
   assert.equal(generate.payload.decisions[0].impact, '데이터 보존');
   assert.equal(generate.payload.contextFiles[0].path, 'README.md');
-  ui.emit('code.result', {requestId:request.requestId, summary:'게시판', model:'fixture', ops:[{file:'app.js',content:'new code',action:'create',language:'js',rationale:'entry'}]});
+  ui.emit('code.result', {requestId:request.requestId, summary:'게시판', model:'fixture', projectRoot:'/work/shop', ops:[{file:'app.js',content:'new code',action:'create',language:'js',rationale:'entry'}]});
   assert.equal(ui.messages.length, 2, 'generation never auto-applies');
   ui.button('변경 보기').props.onClick();
   assert.equal(ui.messages.at(-1).type, 'code.diff');
   assert.equal(ui.messages.at(-1).payload.targetFolder, 'src');
+  assert.equal(ui.messages.at(-1).payload.projectRoot, '/work/shop');
   ui.button('적용').props.onClick(); ui.render();
   const apply = ui.messages.at(-1);
   assert.equal(apply.type, 'code.apply');
   assert.equal(apply.payload.targetFolder, 'src');
+  assert.equal(apply.payload.projectRoot, '/work/shop', '생성한 프로젝트에만 적용되도록 루트를 함께 보낸다');
   ui.emit('code.applied', {ackKey:apply.payload.ackKey, ok:true});
   assert.ok(ui.button('적용됨').props.disabled);
   assert.ok(!ui.messages.some(m => m.type.startsWith('chat.')));

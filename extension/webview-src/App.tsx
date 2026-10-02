@@ -4,7 +4,7 @@ import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "./hooks/useVSCodeApi";
 import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
-import CodeAgent from "./components/CodeAgent";
+import CodeAgent, { setPendingTargetFolder } from "./components/CodeAgent";
 import type { ExternalTurn } from "./components/CodeAgent";
 import { HubHome, HubPage, FeatureFrame, AdrPanel, SecurityHub, SecurityScanPanel, PolicyPanel, HUBS, hubOf, isHubView, isFeatureView } from "./components/Hubs";
 import type { HubId, FeatureId, ReadyCtx } from "./components/Hubs";
@@ -381,6 +381,11 @@ const App: React.FC = () => {
       }
       if (type === "diagnostics.error") {
         setDiagnosticsPending(false); setDiagnosticsError((payload as {message?: string})?.message || "연결 확인에 실패했습니다.");
+      }
+      if (type === "code.setTargetFolder" && isWorkspacePanel) {
+        //: 탐색기 "여기에 코드 생성" — 코드 화면으로 옮기고 그 폴더를 대상으로 둔다.
+        setPendingTargetFolder((payload as { folder?: string })?.folder ?? "");
+        setView("code");
       }
       if (type === "chat.actionAccepted") {
         const p = payload as Partial<ExternalTurn>;

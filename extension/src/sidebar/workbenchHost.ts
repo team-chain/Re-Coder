@@ -833,9 +833,11 @@ export abstract class WorkbenchHost {
 
     protected _startEcsStatusPolling(): void {
         if (this._ecsStatusTimer) return;
+        let failures = 0;
         const tick = async () => {
             try {
                 const s = await this._apiClient.getEcsDeployStatus();
+                failures = 0;
                 this._post({ type: 'wb.deploy.ecs.statusResult', payload: s });
                 const tail = s.log_tail || [];
                 if (tail.length) {
@@ -851,7 +853,10 @@ export abstract class WorkbenchHost {
                         this.addActivity('fail', 'ECS 배포 실패');
                     }
                 }
-            } catch { /* ignore */ }
+            } catch {
+                //: Core 가 내려가 상태를 계속 못 읽으면 3초마다 영원히 부르지 않는다(약 5분 뒤 멈춤).
+                if (++failures >= 100 && this._ecsStatusTimer) { clearInterval(this._ecsStatusTimer); this._ecsStatusTimer = null; }
+            }
         };
         this._ecsStatusTimer = setInterval(() => { void tick(); }, 3000);
         void tick();

@@ -15,7 +15,7 @@ interface CodeOp {
   secret_warnings?: SecretWarning[];
   removal_check?: RemovalCheck;
 }
-interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; }
+interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; projectRoot?: string; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
 //: 확정된 결정 하나. **`impact` 를 반드시 함께 보낸다.**
@@ -75,11 +75,16 @@ let _turnSeq = 1;
 //: requestId 는 확장 호스트가 정한 값(Date.now())이라 이 컴포넌트의 턴 번호와 겹치지 않는다.
 export interface ExternalTurn { requestId: number; instruction: string; targetFolder: string; contextFiles?: CtxFile[]; }
 
+//: 탐색기 "여기에 코드 생성" 으로 들어온 대상 폴더 — 코드 화면이 아직 없을 때 App 이 받아 두고,
+//: 코드 화면이 처음 그려질 때 꺼내 쓴다(메시지가 화면보다 먼저 와서 사라지던 문제).
+let pendingTargetFolder: string | null = null;
+export function setPendingTargetFolder(folder: string): void { pendingTargetFolder = folder; }
+
 export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [input, setInput] = useState("");
-  const [targetFolder, setTargetFolder] = useState("");
+  const [targetFolder, setTargetFolder] = useState(() => { const f = pendingTargetFolder ?? ""; pendingTargetFolder = null; return f; });
   const [contextFiles, setContextFiles] = useState<CtxFile[]>([]);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [applyState, setApplyState] = useState<Record<string, ApplyStatus>>({});
@@ -225,6 +230,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       setDecisionModal({ requestId, decisions, selections, step: 0, dropped });
       onReviewRequired?.();
     } else if (type === "code.folderPicked" || type === "code.setTargetFolder") {
+      pendingTargetFolder = null;
       setTargetFolder((payload as { folder?: string })?.folder ?? "");
     } else if (type === "code.contextAdded") {
       const files = (payload as { files?: CtxFile[] })?.files ?? [];
@@ -284,7 +290,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     // 와야 붙는다 — 쓰기 실패가 성공으로 굳는 것을 막는다.
     setApplyState((s) => ({ ...s, [key]: "pending" }));
     setApplyErrors((e) => { const copy = { ...e }; delete copy[key]; return copy; });
-    postMessage("code.apply", { file: op.file, content: op.content, targetFolder: turn.targetFolder, ackKey: key });
+    postMessage("code.apply", { file: op.file, content: op.content, targetFolder: turn.targetFolder, projectRoot: turn.result?.projectRoot, ackKey: key });
   }, [postMessage]);
 
   const applyAll = useCallback((turn: Turn) => {
@@ -302,11 +308,11 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       for (const op of turn.result!.ops) { delete copy[`${turn.id}:${op.file}`]; }
       return copy;
     });
-    postMessage("code.applyAll", { ops, targetFolder: turn.targetFolder });
+    postMessage("code.applyAll", { ops, targetFolder: turn.targetFolder, projectRoot: turn.result?.projectRoot });
   }, [postMessage]);
 
   const showDiff = useCallback((turn: Turn, op: CodeOp) => {
-    postMessage("code.diff", { file: op.file, content: op.content, targetFolder: turn.targetFolder });
+    postMessage("code.diff", { file: op.file, content: op.content, targetFolder: turn.targetFolder, projectRoot: turn.result?.projectRoot });
   }, [postMessage]);
   const linkBtn: React.CSSProperties = {
     fontSize: 11, border: "none", background: "transparent",

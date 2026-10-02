@@ -309,10 +309,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } catch { /* 무해하게 무시 */ }
     }
 
-    /** 탐색기에서 폴더 우클릭 → '여기에 코드 생성' 시 webview 에 대상 폴더 주입. */
+    /** 탐색기에서 폴더 우클릭 → '여기에 코드 생성' 시 webview 에 대상 폴더 주입.
+     *  절대 경로를 받으면 폴더 선택기와 같은 표기(활성 프로젝트 기준 상대 경로, 밖이면 절대 경로)로 바꾼다.
+     *  ReCoder 창이 막 열리는 중이면 준비 신호(webview.ready)를 받은 뒤 한 번 더 보낸다. */
     setCodeTargetFolder(folder: string): void {
-        this.postMessage('code.setTargetFolder', { folder });
+        const display = folder && path.isAbsolute(folder) ? this._describeTargetFolder(folder).display : folder;
+        this._pendingCodeTarget = display;
+        this.postMessage('code.setTargetFolder', { folder: display });
     }
+    private _pendingCodeTarget: string | null = null;
 
     triggerAnalysis(request: Partial<AnalyzeRequest>): void {
         this.postMessage('core.analyzeStarted', {});
@@ -1291,6 +1296,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'webview.ready': {
+                if (this._pendingCodeTarget !== null && requestWebview && requestWebview === this._workspacePanelWebview) {
+                    this.postMessageToWebview(requestWebview, 'code.setTargetFolder', { folder: this._pendingCodeTarget });
+                    this._pendingCodeTarget = null;
+                }
                 this.connectAndDiagnose();
                 this.postMessage('diagnostics.status', { pending: !!this._diagnosticsInFlight || (!this._diagnosticsKey && !this._lastDiagnosticsError), error: this._lastDiagnosticsError });
                 // Webview finished loading — send current state immediately
@@ -1376,8 +1385,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 // **코어에는 이 라우트가 완성돼 있었고 확장이 부르지 않았다.**
                 // 버킷 생성·공개 설정·업로드·URL 조립까지 다 되어 있는데,
                 // 사용자 파일을 읽어 보내는 쪽이 없어서 통째로 도달 불가능이었다.
-                const p = (payload ?? {}) as { dir?: string; region?: string };
+                const p = (payload ?? {}) as { dir?: string; region?: string; workspace_path?: string };
+                //: 배포 캔버스는 승인한 프로젝트 경로를 함께 보낸다 — 승인 뒤 활성 프로젝트가 바뀌었으면 멈춘다.
                 const workspacePath = activeProjectPath();
+                if (p.workspace_path && workspacePath && !samePath(p.workspace_path, workspacePath)) {
+                    this.postMessage('workspace.deploy.s3.result', {
+                        ok: false, message: '승인한 뒤 현재 프로젝트가 바뀌어 배포를 멈췄습니다. 배포할 프로젝트를 다시 고르고 확인하세요.',
+                    });
+                    break;
+                }
                 if (!workspacePath) {
                     this.postMessage('workspace.deploy.s3.result', {
                         ok: false, message: '열린 워크스페이스가 없습니다.',
@@ -1837,25 +1853,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'code.apply': {
-                const { file, content, targetFolder, ackKey } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; ackKey?: string };
-                await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '', ackKey ?? '');
+                const { file, content, targetFolder, ackKey, projectRoot } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; ackKey?: string; projectRoot?: string };
+                await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '', ackKey ?? '', projectRoot ?? '');
                 break;
             }
             case 'code.applyAll': {
-                const { ops, targetFolder } = (payload ?? {}) as { ops?: Array<{ file: string; content: string; ackKey?: string }>; targetFolder?: string };
+                const { ops, targetFolder, projectRoot } = (payload ?? {}) as { ops?: Array<{ file: string; content: string; ackKey?: string }>; targetFolder?: string; projectRoot?: string };
                 let okCount = 0;
                 for (const op of ops ?? []) {
                     // 파일마다 ackKey 를 되돌려 준다 — 웹뷰가 파일 단위로
                     // 성공/실패를 구분해야 실패한 파일만 재시도할 수 있다.
-                    const ok = await this.handleCodeApply(op.file, op.content, targetFolder ?? '', op.ackKey ?? '');
+                    const ok = await this.handleCodeApply(op.file, op.content, targetFolder ?? '', op.ackKey ?? '', projectRoot ?? '');
                     if (ok) { okCount++; }
                 }
                 this.postMessage('code.applied', { file: `전체 ${okCount}개`, ok: okCount > 0 });
                 break;
             }
             case 'code.diff': {
-                const { file, content, targetFolder } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string };
-                const resolved = this._resolveWriteRoot(targetFolder ?? '');
+                const { file, content, targetFolder, projectRoot } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; projectRoot?: string };
+                const resolved = this._resolveWriteRoot(targetFolder ?? '', projectRoot ?? '');
                 //: diff 실패는 생성 턴의 실패가 아니다 — code.error 로 보내면 진행 중인 다른 생성 턴이 실패로 뒤집혔다.
                 if (!resolved) { void vscode.window.showErrorMessage('변경 비교를 열 수 없습니다: 대상 폴더가 워크스페이스에 없습니다.'); break; }
                 await this.handleCodeDiff(this._joinFolder(resolved.relFolder, file ?? ''), content ?? '', resolved.root);
@@ -2083,6 +2099,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         //: 다른 곳에 만들라고 해도 Core 는 Re-Coder 를 스캔하고 거기 기준으로 생성했다.
         const scope = this._codeScope(opts.targetFolder ?? '');
         const workspacePath = scope.workspacePath;
+        const generatedRoot = this._resolveWriteRoot(opts.targetFolder ?? '')?.root.fsPath ?? '';
         // 인자가 없으면 현재 활성 에디터를 컨텍스트로 자동 첨부.
         let attach = opts.openFile;
         if (!attach) {
@@ -2112,6 +2129,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.postMessageToWebview(opts.requestWebview, 'code.result', {
                 ...result,
                 requestId: opts.requestId,
+                //: 생성할 때의 프로젝트 — 적용 전에 활성 프로젝트가 바뀌어도 이 결과는 이 폴더에만 쓴다.
+                projectRoot: generatedRoot,
             });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -2266,8 +2285,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     /** targetFolder 가 절대경로(워크스페이스 밖)면 그 폴더를, 아니면 첫 워크스페이스 폴더를 루트로 쓴다. */
-    private _resolveWriteRoot(targetFolder: string): { root: vscode.Uri; relFolder: string } | null {
+    private _resolveWriteRoot(targetFolder: string, projectRoot: string = ''): { root: vscode.Uri; relFolder: string } | null {
         const raw = (targetFolder || '').trim();
+        //: 생성 결과에 붙은 프로젝트 루트 — 그 사이 활성 프로젝트가 바뀌어도 다른 프로젝트에 쓰지 않는다.
+        //: 그 폴더가 더는 워크스페이스에 없으면 쓰지 않는다(다시 생성해야 한다).
+        if (projectRoot && !(raw && (path.isAbsolute(raw) || raw.startsWith('~')))) {
+            const inWorkspace = (vscode.workspace.workspaceFolders ?? []).some((f) => {
+                const rel = path.relative(f.uri.fsPath, projectRoot);
+                return samePath(f.uri.fsPath, projectRoot) || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+            });
+            return inWorkspace ? { root: vscode.Uri.file(projectRoot), relFolder: raw } : null;
+        }
         if (raw && (path.isAbsolute(raw) || raw.startsWith('~'))) {
             const desc = this._describeTargetFolder(raw);
             if (desc.insideWorkspace) {
@@ -2354,13 +2382,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      * 어느 쪽이든 그대로 되돌려 준다 — 웹뷰는 이 확인을 받아야만 "적용됨"을
      * 표시한다. 확인 없이 표시하면 쓰기 실패가 성공으로 굳는다.
      */
-    private async handleCodeApply(file: string, content: string, targetFolder: string = '', ackKey: string = ''): Promise<boolean> {
+    private async handleCodeApply(file: string, content: string, targetFolder: string = '', ackKey: string = '', projectRoot: string = ''): Promise<boolean> {
         const ack = ackKey ? { ackKey } : {};
-        const resolved = this._resolveWriteRoot(targetFolder);
+        const resolved = this._resolveWriteRoot(targetFolder, projectRoot);
         if (!resolved) {
             this.postMessage('code.error', { message: targetFolder && path.isAbsolute(targetFolder)
                 ? `대상 폴더가 워크스페이스에 없습니다: ${targetFolder}. 승인 카드에서 다시 승인해 주세요.`
-                : '워크스페이스가 열려있지 않습니다.', ...ack });
+                : projectRoot
+                    ? `이 코드를 만든 프로젝트(${path.basename(projectRoot)})가 더는 워크스페이스에 없어 적용하지 않았습니다. 다시 생성해 주세요.`
+                    : '워크스페이스가 열려있지 않습니다.', ...ack });
             return false;
         }
         const root = resolved.root;
@@ -2373,8 +2403,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const uri = vscode.Uri.joinPath(root, safe);
         try {
             //: 심볼릭 링크를 따라 워크스페이스 밖(예: ~/.bashrc)을 덮어쓰지 않는다.
-            if (uri.scheme === 'file' && fs.existsSync(uri.fsPath)) {
-                const real = fs.realpathSync(uri.fsPath), realRoot = fs.realpathSync(root.fsPath);
+            if (uri.scheme === 'file' && fs.existsSync(root.fsPath)) {
+                //: 아직 없는 파일이면 가장 가까운 기존 상위 폴더를 본다 — 폴더 링크(cfg → ~/.config) 아래 새 파일도 막는다.
+                let probe = uri.fsPath;
+                while (!fs.existsSync(probe) && path.dirname(probe) !== probe) { probe = path.dirname(probe); }
+                const real = fs.realpathSync(probe), realRoot = fs.realpathSync(root.fsPath);
                 const rel = path.relative(realRoot, real);
                 if (rel.startsWith('..') || path.isAbsolute(rel)) {
                     this.postMessage('code.error', { message: `${safe} 은(는) 프로젝트 밖을 가리키는 링크라 적용하지 않았습니다.`, ...ack });

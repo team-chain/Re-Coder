@@ -117,13 +117,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.generateInFolder', async (uri?: vscode.Uri) => {
-            let folder = '';
-            if (uri) {
-                const rel = vscode.workspace.asRelativePath(uri, false);
-                folder = rel === uri.fsPath ? '' : rel;
-            }
-            await vscode.commands.executeCommand('recoder.sidebarView.focus');
-            sidebarProvider.setCodeTargetFolder(folder);
+            //: 코드 화면은 ReCoder 창에 있다(사이드바는 시작 화면). 창을 열고, 우클릭한 폴더의 **절대 경로**를 넘긴다 —
+            //: 상대 경로로 넘기면 여러 폴더 워크스페이스에서 다른 프로젝트의 같은 이름 폴더로 갔다.
+            ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider);
+            void ensureCoreRunning(coreManager, sidebarProvider);
+            sidebarProvider.setCodeTargetFolder(uri && uri.scheme === 'file' ? uri.fsPath : '');
         }),
     );
 
@@ -355,11 +353,18 @@ export function activate(context: vscode.ExtensionContext): void {
             await vscode.window.withProgress(
                 { location: vscode.ProgressLocation.Notification, title: 'AWS 자격증명 검증 중…' },
                 async () => {
-                    const result = await apiClient.connectAws({
-                        accessKeyId: accessKey.trim(),
-                        secretAccessKey: secret.trim(),
-                        region: region.trim(),
-                    });
+                    let result: Awaited<ReturnType<typeof apiClient.connectAws>>;
+                    try {
+                        result = await apiClient.connectAws({
+                            accessKeyId: accessKey.trim(),
+                            secretAccessKey: secret.trim(),
+                            region: region.trim(),
+                        });
+                    } catch (err) {
+                        //: 잘못된 키는 Core 가 4xx 로 거절한다 — VS Code 의 "명령 실패" 대신 이유를 보여 준다.
+                        vscode.window.showErrorMessage(`AWS 자격증명 검증 실패: ${err instanceof Error ? err.message : String(err)}`);
+                        return;
+                    }
                     if (result.ready) {
                         await coreManager.storeAwsCredentials({
                             accessKeyId: accessKey.trim(),
@@ -493,6 +498,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // ── Command: Stop Core ──────────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.stopCore', async () => {
+            pollingService.suspendAutoRecovery();
             await coreManager.shutdown();
             sidebarProvider.postMessage('core.stopped', {});
             vscode.window.showInformationMessage('ReCoder Core stopped.');
