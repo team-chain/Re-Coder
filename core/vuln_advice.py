@@ -140,3 +140,63 @@ def advise(findings: list[dict], workspace: Optional[str] = None, *, severity: s
         "step": "보안 확인 (Trivy 이미지 검사)",
     }
     return {"items": items, "diagnosis": diagnosis}
+
+
+def _brought_by(pkg_path: str, package: str) -> str:
+    """`app/node_modules/foo/node_modules/axios/package.json` → "foo" (그 하위 패키지를 함께 설치한 패키지)."""
+    parts = [p for p in re.split(r"/+", str(pkg_path or "").replace("\\", "/")) if p]
+    names: list[str] = []
+    i = 0
+    while i < len(parts):
+        if parts[i] == "node_modules" and i + 1 < len(parts):
+            name = parts[i + 1]
+            if name.startswith("@") and i + 2 < len(parts):
+                name = f"{name}/{parts[i + 2]}"
+                i += 1
+            names.append(name)
+            i += 2
+            continue
+        i += 1
+    if len(names) >= 2 and names[-1] == package:
+        return names[-2]
+    return ""
+
+
+def trivy_headline(target: str, created: str, findings: list[dict], workspace: Optional[str] = None) -> str:
+    """Trivy 결과 한 줄 요약 — **어느 이미지를**, 무엇이(패키지·버전·위치) 문제인지 그대로 적는다.
+
+    예전에는 AI 요약 문장을 보여 줬다. 표본 5건만 보고 쓴 영어 문장이라 "어느 이미지인지"가 없었고
+    (실기기: 지금 프로젝트에 없는 axios 를 이 프로젝트 문제로 읽었다), 위치도 알 수 없었다.
+    """
+    deps, _reqs, _lock = _manifest(workspace)
+    crit = sum(1 for f in findings if str(f.get("severity") or "").upper() == "CRITICAL")
+    high = sum(1 for f in findings if str(f.get("severity") or "").upper() == "HIGH")
+    when = f" · {created} 빌드" if created else ""
+    head = f"검사한 이미지 {target}{when} — " + ", ".join(
+        part for part in (f"CRITICAL {crit}건" if crit else "", f"HIGH {high}건" if high else "") if part)
+    groups: dict[tuple, dict] = {}
+    for f in findings:
+        key = (str(f.get("package") or "?"), str(f.get("installed") or ""), str(f.get("pkg_path") or ""))
+        g = groups.setdefault(key, {"count": 0, "fixed": set(), "entry": f})
+        g["count"] += 1
+        for v in str(f.get("fixed") or "").split(","):
+            if v.strip():
+                g["fixed"].add(v.strip())
+    lines = []
+    for (pkg, installed, pkg_path), g in sorted(groups.items(), key=lambda kv: -kv[1]["count"])[:3]:
+        where = _where(g["entry"])
+        fixed = max(g["fixed"], key=lambda v: [int(x) if x.isdigit() else 0 for x in re.split(r"[.\-]", v)]) if g["fixed"] else ""
+        if where == "base_os":
+            origin = "베이스 이미지 OS 패키지"
+        elif where == "base_npm":
+            origin = "베이스 이미지에 든 npm"
+        elif pkg in deps:
+            origin = "package.json 의 직접 의존성"
+        else:
+            parent = _brought_by(pkg_path, pkg)
+            origin = f"{parent} 이(가) 함께 설치한 하위 패키지" if parent else "다른 패키지가 함께 설치한 하위 패키지"
+        loc = f", {pkg_path}" if pkg_path else ""
+        lines.append(f"{pkg} {installed}{' → ' + fixed if fixed else ''} ({g['count']}건 · {origin}{loc})")
+    if len(groups) > 3:
+        lines.append(f"외 {len(groups) - 3}개 패키지")
+    return head + (". " + "; ".join(lines) if lines else "")

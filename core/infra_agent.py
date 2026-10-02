@@ -118,6 +118,15 @@ def _detect_node_entry_and_port(root: Path, package: dict) -> tuple[Optional[str
     m = re.search(r"\bnode\s+(?:--[\w-]+\s+)*([\w./-]+\.[cm]?js)\b", start)
     if m and (root / m.group(1)).is_file():
         entry = m.group(1)
+    if entry is None and scripts:
+        #: 모노레포 — `npm start --workspace=backend` 처럼 다른 패키지로 넘기는 start 를 따라간다.
+        try:
+            from build_readiness import ProjectFiles, _start_entry  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import ProjectFiles, _start_entry  # type: ignore
+        delegated = _start_entry(scripts, ProjectFiles(root))
+        if delegated and (root / delegated).is_file():
+            entry = delegated
     if entry is None:
         main = package.get("main")
         if isinstance(main, str) and (root / main).is_file():

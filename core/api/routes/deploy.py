@@ -2306,8 +2306,44 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
         return result
 
     normalised = _normalise_scan_result(scan_type, target_for_log, raw)
+    if scan_type == "trivy" and normalised.get("status") == "ok":
+        normalised = await _with_trivy_headline(normalised, workspace_path)
     _log_scan_to_session(scan_type, target_for_log, normalised)
     return normalised
+
+
+async def _image_created(image: str) -> str:
+    """이미지가 언제 빌드됐는지(로컬 시각, 분 단위). 모르면 빈 문자열."""
+    try:
+        result = await asyncio.to_thread(subprocess.run,
+            ["docker", "image", "inspect", "--format", "{{.Created}}", image],
+            shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
+        raw = (result.stdout or "").strip()
+        if result.returncode != 0 or not raw:
+            return ""
+        from datetime import datetime
+        stamp = datetime.fromisoformat(re.sub(r"(\.\d{6})\d*", r"\1", raw.replace("Z", "+00:00")))
+        return stamp.astimezone().strftime("%Y-%m-%d %H:%M")
+    except Exception:  # noqa: BLE001 - 빌드 시각은 안내용이다
+        return ""
+
+
+async def _with_trivy_headline(report: dict, workspace_path: str) -> dict:
+    """요약을 "어느 이미지의 무엇이" 로 바꾼다. AI 요약은 ai_summary 로 남긴다."""
+    try:
+        from vuln_advice import trivy_headline
+    except ImportError:  # pragma: no cover
+        from core.vuln_advice import trivy_headline  # type: ignore
+    target = str(report.get("target") or "")
+    created = await _image_created(target) if target else ""
+    findings = report.get("findings") or []
+    try:
+        headline = (trivy_headline(target, created, findings, workspace_path or None) if findings else
+                    f"검사한 이미지 {target}{' · ' + created + ' 빌드' if created else ''} — CRITICAL·HIGH 취약점 없음")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("trivy headline failed: %s", exc)
+        return report
+    return {**report, "summary": headline, "ai_summary": report.get("summary") or "", "image_created": created}
 
 
 #: 덮어쓰기 직전 기존 파일을 남겨 두는 이름. `Dockerfile` → `Dockerfile.recoder-prev`.
@@ -2554,6 +2590,14 @@ def _discover_node_entrypoint(
             _entrypoint_from_node_command(scripts.get(name))
             for name in ("start:prod", "start")
         )
+        #: 모노레포 — `npm start --workspace=backend`·`npm --prefix server start` 를 따라가 그 패키지의 서버 파일.
+        try:
+            from build_readiness import ProjectFiles, _start_entry
+            delegated = _start_entry(scripts, ProjectFiles(root))
+        except Exception:  # noqa: BLE001 - 진입점 추정 실패가 생성을 막지 않는다
+            delegated = None
+        if delegated and (root / delegated).is_file():
+            candidates.append(delegated)
     # `scripts.start`는 실제 서버 실행 계약이고 `main`은 라이브러리 export일
     # 수도 있으므로 start 명령을 우선한다.
     candidates.append(package.get("main"))
@@ -3297,7 +3341,7 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
                     + (f": {top}" if top else ""))
             high = int(trivy_report.get("high_count", 0))
             if high > 0:
-                risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {image}")
+                risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {image} (이전에 빌드된 이미지 기준 — 실행 시 새로 빌드해 다시 검사)")
         else:
             #: 스캔 실패는 통과가 아니다 — 실패 사유를 화면까지 끌고 간다.
             #: 원인 + 다음 행동을 함께 — 승인 화면에서 raw 에러가 아니라 "왜·뭘" 이 보인다.
@@ -3904,6 +3948,13 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             pre_deploy_fixes = await asyncio.to_thread(_auto_fix_before_build, workspace_for_build)
             if pre_deploy_fixes:
                 report_progress('build', f"자동 수정 {len(pre_deploy_fixes)}건 적용: {', '.join(f['code'] for f in pre_deploy_fixes)}")
+                #: 자동 수정이 Dockerfile 포트를 바꿨으면(EXPOSE 3000 → 앱이 듣는 5000) 계획의 컨테이너 포트도 맞춘다.
+                #: 예전에는 계획이 옛 포트로 연결해 컨테이너가 떠도 헬스 확인이 실패했다.
+                fixed_dockerfile = _dockerfile_in(workspace_for_build)
+                if fixed_dockerfile is not None:
+                    note = _align_ports_with_dockerfile(plan, fixed_dockerfile)
+                    if note:
+                        report_progress('build', note)
         report_progress('build', 'Docker 이미지를 빌드하고 있습니다')
         build_failure = await _build_local_image(plan, workspace_for_build)
         if build_failure is not None:

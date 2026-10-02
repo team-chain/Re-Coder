@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import posixpath
 import re
 import sys
 from dataclasses import asdict, dataclass, field
@@ -40,7 +41,7 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_LOCAL_IMPORT_MISSING", "NODE_VITE_JSX_IN_JS", "NODE_VITE_PROCESS_ENV", "NODE_IMPORT_PACKAGE_TYPO",
                 "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING", "NODE_PG_NUMERIC_STRINGS", "NODE_CLIENT_HARDCODED_LOCALHOST",
                 "NODE_ROUTER_ANCHOR_LINK", "NODE_MODULE_FORMAT_MISMATCH", "NODE_FRONTEND_NOT_BUILT",
-                "NODE_IMPORT_NAME_MISSING", "NODE_CLIENT_API_DOUBLE_PREFIX"}
+                "NODE_IMPORT_NAME_MISSING", "NODE_CLIENT_API_DOUBLE_PREFIX", "DOCKERFILE_ENTRY_MISSING"}
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -330,9 +331,20 @@ def _spec_major(spec) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def _start_entry(scripts: dict) -> Optional[str]:
+def _start_entry(scripts: dict, files: "Optional[ProjectFiles]" = None, _base: str = "", _depth: int = 0) -> Optional[str]:
+    """start 스크립트가 실제로 띄우는 서버 파일(프로젝트 루트 기준).
+
+    `node server.js` 뿐 아니라 다른 패키지로 넘기는 start 도 따라간다(files 가 있을 때):
+    `npm start --workspace=backend`, `npm --prefix server start`, `cd api && npm start`,
+    `yarn workspace api start`, `pnpm --filter api start`, `npm run serve`. 예전에는 이런 모노레포
+    start 를 못 읽어 Dockerfile CMD 가 없는 index.js 를 실행했다(실기기 TEMP 쇼핑몰).
+    """
     for name in ("start", "start:prod", "serve"):
+        cwd = ""
         for words in _script_commands(str(scripts.get(name, ""))):
+            if words[0] == "cd" and len(words) > 1:
+                cwd = _pjoin((cwd, words[1].strip("'\"")))
+                continue
             if words[0] in {"node", "nodemon"}:
                 #: `node -r dotenv/config server.js` — -r·--require·--import·--loader 다음 값은 진입 파일이 아니다.
                 args, skip = [], False
@@ -346,7 +358,83 @@ def _start_entry(scripts: dict) -> Optional[str]:
                     if not w.startswith("-"):
                         args.append(w)
                 if args:
-                    return _norm(args[0].strip("'\""))
+                    entry = _pjoin((_base, cwd, args[0].strip("'\"")))
+                    return None if entry.startswith("..") else entry
+                continue
+            if files is None or _depth >= 3 or words[0] not in {"npm", "yarn", "pnpm"}:
+                continue
+            delegated = _delegated_start(words, scripts, name, files, _pjoin((_base, cwd)), _depth)
+            if delegated:
+                return delegated
+    return None
+
+
+def _pjoin(parts: tuple) -> str:
+    """루트 기준 경로 합치기 — `a/../b` 를 접고, 루트 밖이면 `..` 로 시작한다."""
+    joined = posixpath.normpath(posixpath.join(*[p for p in parts if p] or [""]))
+    return "" if joined in (".", "") else _norm(joined) if not joined.startswith("..") else joined
+
+
+def _workspace_folder(files: "ProjectFiles", base: str, ref: str) -> Optional[str]:
+    """`--workspace=<폴더 또는 패키지 이름>` → 그 패키지 폴더(루트 기준)."""
+    ref = ref.strip("'\"")
+    folder = _pjoin((base, ref))
+    if folder and not folder.startswith("..") and files.exists(f"{folder}/package.json"):
+        return folder
+    for rel in files.files():
+        if rel.endswith("/package.json") and "/node_modules/" not in f"/{rel}":
+            try:
+                pkg = json.loads(files.read(rel) or "")
+            except ValueError:
+                continue
+            if isinstance(pkg, dict) and pkg.get("name") == ref:
+                return rel[: -len("/package.json")]
+    return None
+
+
+def _delegated_start(words: list[str], scripts: dict, current: str, files: "ProjectFiles",
+                     base: str, depth: int) -> Optional[str]:
+    tool = words[0]
+    target, rest = _npm_dir_and_args(words)
+    workspace = None
+    for i, w in enumerate(words[1:], start=1):
+        m = re.match(r"^(?:--workspace|-w|--filter|-F)=(.+)$", w)
+        if m:
+            workspace = m.group(1)
+        elif w in {"--workspace", "-w", "--filter", "-F"} and i + 1 < len(words):
+            workspace = words[i + 1]
+    if workspace and workspace in rest:
+        rest = [w for w in rest if w != workspace]
+    if tool == "yarn" and rest[:1] == ["workspace"] and len(rest) >= 3:
+        workspace, rest = rest[1], rest[2:]
+    script = rest[1] if rest[:1] == ["run"] and len(rest) > 1 else (rest[0] if rest else "")
+    if script not in {"start", "start:prod", "serve"}:
+        return None
+    folder: Optional[str] = None
+    if workspace:
+        folder = _workspace_folder(files, base, workspace)
+    elif target:
+        folder = _pjoin((base, target))
+    elif base:
+        folder = base
+    if folder is None:
+        if script in scripts and script != current:
+            #: `"start": "npm run serve"` — 같은 package.json 의 다른 스크립트.
+            return _start_entry({"start": scripts[script]}, files, base, depth + 1)
+        return None
+    if folder.startswith("..") or not files.exists(f"{folder}/package.json"):
+        return None
+    try:
+        sub = json.loads(files.read(f"{folder}/package.json") or "")
+    except ValueError:
+        return None
+    sub_scripts = sub.get("scripts") if isinstance(sub, dict) and isinstance(sub.get("scripts"), dict) else {}
+    entry = _start_entry({"start": sub_scripts.get(script, "")}, files, folder, depth + 1)
+    if entry:
+        return entry
+    main = sub.get("main") if isinstance(sub, dict) else None
+    if isinstance(main, str) and main.endswith((".js", ".cjs", ".mjs")):
+        return _pjoin((folder, main))
     return None
 
 
@@ -1285,7 +1373,7 @@ def _uses_undeclared_dirname(text: str) -> bool:
 
 
 def _node_entry(files: "ProjectFiles", scripts: dict, main) -> Optional[str]:
-    entry = _start_entry(scripts)
+    entry = _start_entry(scripts, files)
     if entry and files.exists(entry):
         return entry
     if isinstance(main, str) and files.exists(_norm(main)) and _norm(main).endswith((".js", ".mjs", ".cjs")):
@@ -1883,7 +1971,9 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         check_script("build")
 
     # 2) 시작 진입점 — 컨테이너 CMD 가 이 파일을 실행한다.
-    entry = _start_entry(scripts)
+    entry = _start_entry(scripts, files)
+    if entry and files.exists(entry):
+        result.fix_data["start_entry"] = entry
     if entry and not files.exists(entry) and not re.match(r"^(dist|build|out|lib)/", entry):
         result.issues.append(ReadinessIssue(
             "NODE_START_ENTRY_MISSING", ERROR,
@@ -2378,10 +2468,17 @@ def _runtime_install_anchors(text: str) -> Optional[tuple[int, int]]:
     return (deps_run_end, copy_line) if deps_run_end is not None and copy_line is not None else None
 
 
-def add_runtime_subproject_install(text: str, folder: str) -> str:
+def add_runtime_subproject_install(text: str, folder: str, npm_workspace: bool = False) -> str:
+    """deps 단계에서 서버 폴더 의존성을 설치하고 실행 이미지로 복사한다.
+
+    npm_workspace: 루트 package.json 이 workspaces 를 쓰면 `cd backend && npm install` 은 루트
+    node_modules 에 설치하고 backend/node_modules 는 만들지 않는다 — 다음 COPY 가 "not found" 로
+    빌드를 깨뜨렸다. `--workspaces=false` 로 그 폴더에 설치한다.
+    """
     anchors = _runtime_install_anchors(text.replace("\r\n", "\n"))
     if anchors is None:
         raise ValueError("Dockerfile 구조를 확인하지 못했습니다. 서버 폴더 의존성 설치를 직접 추가하세요.")
+    ws = " --workspaces=false" if npm_workspace else ""
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.split(newline)
     deps_end, copy_line = anchors
@@ -2391,8 +2488,8 @@ def add_runtime_subproject_install(text: str, folder: str) -> str:
     lines[deps_end + 1:deps_end + 1] = [
         f"# ReCoder: 서버가 {folder}/package.json 의 패키지를 쓰므로 그 폴더 의존성도 설치한다.",
         f"COPY {folder}/package.json {folder}/package-lock.json* ./{folder}/",
-        f"RUN cd {folder} && if [ -f package-lock.json ]; then npm ci --omit=dev || npm install --omit=dev; "
-        "else npm install --omit=dev; fi",
+        f"RUN cd {folder} && if [ -f package-lock.json ]; then npm ci --omit=dev{ws} || npm install --omit=dev{ws}; "
+        f"else npm install --omit=dev{ws}; fi",
     ]
     return newline.join(lines)
 
@@ -2417,10 +2514,17 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
             f"Dockerfile 의 {expose} 를 {effective} 로 맞추세요(자동 수정 가능).", dockerfile, True))
     if facts["cmd_entry"] and not files.exists(facts["cmd_entry"]) \
             and not re.match(r"^(dist|build|out|lib)/", facts["cmd_entry"]):
+        #: start 스크립트(모노레포면 넘겨받은 패키지의 start)가 띄우는 파일, 없으면 찾은 서버 파일로 바꾼다.
+        actual = next((e for e in (result.fix_data.get("start_entry"), result.server_entry)
+                       if e and files.exists(e) and e != facts["cmd_entry"]), None)
+        if actual:
+            result.fix_data["cmd_entry"] = actual
         result.issues.append(ReadinessIssue(
             "DOCKERFILE_ENTRY_MISSING", ERROR,
-            f"Dockerfile 의 CMD 가 실행하는 {facts['cmd_entry']} 가 프로젝트에 없습니다.",
-            "CMD 를 실제 서버 파일로 고치거나 Dockerfile 을 다시 생성하세요.", dockerfile))
+            f"Dockerfile 의 CMD 가 실행하는 {facts['cmd_entry']} 가 프로젝트에 없습니다."
+            + (f" 실제 서버는 {actual} 입니다." if actual else ""),
+            (f"CMD 를 {actual} 로 고치세요(자동 수정 가능)." if actual else
+             "CMD 를 실제 서버 파일로 고치거나 Dockerfile 을 다시 생성하세요."), dockerfile, bool(actual)))
     non_root = facts["user"] and facts["user"].split(":")[0] not in {"root", "0"}
     if result.local_data_files and non_root and facts["workdir"] and not facts["workdir_owned"]:
         result.issues.append(ReadinessIssue(
@@ -3095,9 +3199,33 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
     elif code == "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING":
         dockerfile = root / "Dockerfile"
         text = _read_raw(dockerfile)
-        updated = add_runtime_subproject_install(text, before.runtime_subproject or "")
+        try:
+            root_pkg = json.loads(_read_raw(root / "package.json"))
+        except (OSError, ValueError):
+            root_pkg = {}
+        updated = add_runtime_subproject_install(text, before.runtime_subproject or "",
+                                                 npm_workspace=isinstance(root_pkg, dict) and bool(root_pkg.get("workspaces")))
         changed += ["Dockerfile", _backup(root, "Dockerfile", text)]
         _write_raw(dockerfile, updated)
+    elif code == "DOCKERFILE_ENTRY_MISSING":
+        actual = before.fix_data.get("cmd_entry")
+        if not issue.auto_fix or not actual:
+            raise ValueError("실제 서버 파일을 확정하지 못했습니다. Dockerfile 의 CMD 를 직접 고치세요.")
+        dockerfile = root / "Dockerfile"
+        text = _read_raw(dockerfile)
+        old_entry = _dockerfile_facts(text)["cmd_entry"]
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = text.split(newline)
+        cmd_line = max((i for i, l in enumerate(lines) if re.match(r"^\s*CMD\b", l, re.I)), default=None)
+        if cmd_line is None or not old_entry:
+            raise ValueError("CMD 를 찾지 못했습니다. Dockerfile 을 직접 고치세요.")
+        updated_line = re.sub(r"(?<![\w./-])(?:\./)?" + re.escape(old_entry) + r"(?![\w./-])", actual, lines[cmd_line], count=1)
+        if updated_line == lines[cmd_line]:
+            raise ValueError("CMD 의 실행 파일을 바꾸지 못했습니다. Dockerfile 을 직접 고치세요.")
+        backup = _backup(root, "Dockerfile", text)
+        lines[cmd_line] = updated_line
+        _write_raw(dockerfile, newline.join(lines))
+        changed += ["Dockerfile", backup]
     elif code == "DOCKERFILE_HEALTH_PATH_UNKNOWN":
         dockerfile = root / "Dockerfile"
         text = _read_raw(dockerfile)
