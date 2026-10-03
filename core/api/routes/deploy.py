@@ -642,6 +642,37 @@ def _companion_network_args(container_name: str) -> list[str]:
         return []
 
 
+def _resolved_env_files(workspace: str, rels: list[str]) -> list[str]:
+    """계획에 적힌 .env 파일을 워크스페이스 안의 실제 경로로(밖을 가리키면 버린다)."""
+    if not workspace:
+        return []
+    root = Path(workspace).resolve()
+    out: list[str] = []
+    for rel in rels or []:
+        try:
+            path = (root / rel).resolve()
+            path.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if path.is_file():
+            out.append(str(path))
+    return out
+
+
+def _env_file_args(paths: list[str], skip: "set[str] | dict") -> list[str]:
+    """PC 의 .env 값을 `-e` 로 넘긴다(이미 정한 값·컨테이너가 정하는 PORT 등은 건드리지 않는다). 값은 기록하지 않는다."""
+    from deployment_inputs import read_env_file
+    args: list[str] = []
+    seen = set(skip)
+    for path in paths:
+        for key, value in read_env_file(path).items():
+            if key in seen or not _ENV_NAME_RE.fullmatch(key):
+                continue
+            seen.add(key)
+            args.extend(["-e", f"{key}={value}"])
+    return args
+
+
 async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool, str, str]:
     """교체 배포가 시작되지 못했을 때 이전 정상 컨테이너를 즉시 다시 띄운다."""
     run_args = ["docker", "run", "-d", "--name", record.container_name]
@@ -650,6 +681,7 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
             run_args.extend(["-p", f"{int(host_port)}:{int(container_port)}"])
         for key, value in (record.env or {}).items():
             run_args.extend(["-e", f"{key}={value}"])
+        run_args.extend(_env_file_args(list(record.env_file_paths or []), set((record.env or {}).keys())))
         run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
         # 태그가 아니라 고정 태그·이미지 ID 로 되돌린다 — 태그는 그사이 움직였을 수 있다.
         run_args.extend(["--restart", "unless-stopped", _stable_image_ref(record) or record.image])
@@ -3483,6 +3515,19 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
                 plan.risk_reasons = list(plan.risk_reasons) + issues_as_risk_reasons(readiness_manual)
             if any(i.severity == "error" for i in manual):
                 plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
+            #: PC 의 .env(키·결제 설정 등)를 컨테이너 환경변수로 넘긴다 — .dockerignore 가 이미지에서 빼므로 예전에는
+            #: 컨테이너 안의 앱이 키를 못 읽었다. 값은 계획·기록에 남기지 않고 실행할 때 파일에서 읽는다.
+            try:
+                from deployment_inputs import read_env_file, workspace_env_files
+                env_files = workspace_env_files(request.workspace_path, [readiness.runtime_subproject or ""])
+                if env_files:
+                    plan.env_files = env_files
+                    names = sorted({k for f in env_files for k in read_env_file(Path(request.workspace_path) / f)})
+                    plan.risk_reasons = list(plan.risk_reasons) + [
+                        f"PC 의 {', '.join(env_files)} 값({len(names)}개: {', '.join(names[:6])}{' …' if len(names) > 6 else ''})을 "
+                        "컨테이너 환경변수로 넘깁니다. 이미지에는 넣지 않습니다."]
+            except Exception as exc:  # noqa: BLE001 - .env 를 못 읽어도 배포는 계속한다
+                logger.warning("env file detection failed: %s", exc)
             #: 앱이 쓰는 DB 를 함께 띄운다 — 없으면 DB 에 붙지 못한 서버가 시작하자마자 종료했다(실기기 쇼핑몰).
             if readiness.services and plan.container_name:
                 try:
@@ -4086,6 +4131,9 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 cmd_args.extend(['-p', f'{int(hp)}:{int(cp)}'])
             for key, value in plan.env.items():
                 cmd_args.extend(['-e', f'{key}={value}'])
+            #: PC 의 .env 값 — 이미지에는 넣지 않고(.dockerignore) 실행할 때만 넘긴다. 키·결제 연동이 컨테이너에서도 동작한다.
+            env_file_paths = _resolved_env_files(_ws_for_label, plan.env_files)
+            cmd_args.extend(_env_file_args(env_file_paths, set(plan.env.keys())))
             if plan.companions:
                 #: 앱보다 먼저 DB 를 띄우고 응답할 때까지 기다린다. 실패하면 기존 컨테이너를 건드리지 않고 멈춘다.
                 import local_services
@@ -4240,6 +4288,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             # 롤백이 같은 모양으로 다시 띄울 수 있도록 실행 조건을 함께 남긴다.
             ports={str(k): str(v) for k, v in (plan.ports or {}).items()},
             env={str(k): str(v) for k, v in (getattr(plan, "env", None) or {}).items()},
+            env_file_paths=(_resolved_env_files(_plan_workspaces.get(request.plan_id, ""), list(getattr(plan, "env_files", None) or []))
+                            if plan.method == DeployMethod.LOCAL_DOCKER else []),
             rollback_target=rollback_target,
             rollback_source_deployment_id=(
                 rollback_source.deployment_id if rollback_source is not None else None

@@ -327,6 +327,8 @@ class DeploymentPlan(BaseModel):
     readiness: Optional[dict] = None
     #: 로컬 Docker 배포가 앱과 함께 띄울 서비스(postgres·mongodb·redis).
     companions: list[str] = Field(default_factory=list)
+    #: 실행할 때 컨테이너 환경변수로 넘길 PC 의 .env 파일(워크스페이스 기준 경로). 값은 계획·기록에 남기지 않는다.
+    env_files: list[str] = Field(default_factory=list)
 
 
 class DeploymentRecord(BaseModel):
@@ -348,6 +350,8 @@ class DeploymentRecord(BaseModel):
     ports: dict[str, str] = Field(default_factory=dict)
     #: 배포 당시의 환경변수. 같은 이유로 롤백이 재현해야 한다.
     env: dict[str, str] = Field(default_factory=dict)
+    #: 컨테이너에 넘긴 PC 의 .env 파일(절대 경로) — 값은 남기지 않고 복구·롤백 때 다시 읽는다.
+    env_file_paths: list[str] = Field(default_factory=list)
     #: 배포 시점 이미지의 **불변 참조**(sha256 이미지 ID).
     #:
     #: `image` 는 태그일 뿐이라 같은 이름이 나중에 다시 빌드·푸시되면 다른

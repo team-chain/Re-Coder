@@ -90,3 +90,49 @@ def workspace_deploy_name(workspace: str) -> str:
     if label and label != fingerprint:
         return f'{base[:111]}-{fingerprint}'
     return base
+
+
+#: 컨테이너가 정하는 값 — .env 에 있어도 넘기지 않는다(PC 에서 쓰던 PORT·HOST 가 컨테이너 포트를 어긋나게 했다).
+_CONTAINER_OWNED_ENV = {"PORT", "HOST", "HOSTNAME", "NODE_ENV_FILE", "PATH", "HOME"}
+
+
+def workspace_env_files(workspace: str, subprojects: "list[str] | tuple[str, ...]" = ()) -> list[str]:
+    """로컬 배포에서 컨테이너로 넘길 .env 파일들(워크스페이스 기준). .env.example 등은 넣지 않는다."""
+    root = Path(workspace)
+    found: list[str] = []
+    for folder in ["", *[s for s in subprojects if s]]:
+        rel = f"{folder}/.env" if folder else ".env"
+        try:
+            if (root / rel).is_file() and (root / rel).stat().st_size < 256 * 1024:
+                found.append(rel)
+        except OSError:
+            continue
+    return found
+
+
+def read_env_file(path: "str | Path") -> dict[str, str]:
+    """`.env` 를 읽는다(KEY=VALUE, export·따옴표·주석 처리). 컨테이너가 정하는 키는 뺀다."""
+    out: dict[str, str] = {}
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or key.upper() in _CONTAINER_OWNED_ENV:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+        if "\x00" in value or "\n" in value:
+            continue
+        out[key] = value
+    return out
