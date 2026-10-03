@@ -34,7 +34,7 @@ import { analyzeProject, analyzeFile } from '../codemap/analyzer';
 import { CanvasHost } from './canvasHost';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken } from './discordBotToken';
-import { activeProjectPath, activeProjectUri, markPendingActiveProject, onDidChangeActiveProject, projectFolders, selectActiveProject } from '../activeProject';
+import { activeProjectPath, activeProjectUri, isInsideProjectRoot, onDidChangeActiveProject, projectFolders, selectActiveProject, useExternalProject } from '../activeProject';
 
 /**
  * Core 의 ReadyStatus enum 값("ok" | "partial" | "fail")을 Webview 가 기대하는
@@ -152,6 +152,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (this._mapWatcher) { this._mapWatcher.dispose(); this._mapWatcher = undefined; this._setupMapWatcher(); }
             this.postMessage('canvas.projectChanged', { workspace, projects: projectFolders() });
         });
+    }
+
+    /** 되살린 ReCoder 탭이 남긴 화면 상태 — 새 화면이 처음 ready 를 보낼 때 한 번 돌려준다. */
+    private _restoredUiState: Record<string, unknown> | null = null;
+    private _workspacePanelRevived = false;
+    setRestoredUiState(state: unknown): void {
+        //: 확장이 따로 적어 둔 최신 상태가 있으면 그것을 쓴다(웹뷰 상태는 늦게 저장될 수 있다).
+        const saved = this._savedUiState();
+        this._restoredUiState = saved ?? (state && typeof state === 'object' ? { ...(state as Record<string, unknown>) } : null);
+        this._workspacePanelRevived = true;
+    }
+    private static readonly UI_STATE_KEY = 'recoder.workspaceUiState';
+    private _uiStateScope(): string {
+        return vscode.workspace.workspaceFile?.toString() || vscode.workspace.workspaceFolders?.[0]?.uri.toString() || 'empty';
+    }
+    private _savedUiState(): Record<string, unknown> | null {
+        const saved = this._globalState?.get<{ scope?: string; ts?: number; state?: Record<string, unknown> }>(SidebarProvider.UI_STATE_KEY);
+        if (!saved?.state || saved.scope !== this._uiStateScope() || typeof saved.ts !== 'number' || Date.now() - saved.ts > 30 * 60 * 1000) { return null; }
+        return saved.state;
     }
 
     /** 재시작을 넘겨야 하는 채팅 승인 요청의 globalState 키. */
@@ -1295,7 +1314,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 void this._pollingService.poll();
                 break;
             }
+            case 'ui.state': {
+                //: 큰 작업 화면의 상태(보던 화면·쓰던 요청)만 기억한다. 작은 값만 받는다.
+                if (requestWebview && requestWebview === this._workspacePanelWebview && payload && typeof payload === 'object') {
+                    const state: Record<string, unknown> = {};
+                    const p = payload as Record<string, unknown>;
+                    if (typeof p.view === 'string' && p.view.length < 40) { state.view = p.view; }
+                    if (typeof p.codeDraft === 'string') { state.codeDraft = p.codeDraft.slice(0, 8000); }
+                    void this._globalState?.update(SidebarProvider.UI_STATE_KEY, { scope: this._uiStateScope(), ts: Date.now(), state });
+                }
+                break;
+            }
             case 'webview.ready': {
+                if (!this._restoredUiState && requestWebview && requestWebview === this._workspacePanelWebview && this._workspacePanelRevived) {
+                    this._restoredUiState = this._savedUiState();
+                }
+                this._workspacePanelRevived = false;
+                if (this._restoredUiState && requestWebview && requestWebview === this._workspacePanelWebview) {
+                    this.postMessageToWebview(requestWebview, 'ui.restore', this._restoredUiState);
+                    this._restoredUiState = null;
+                }
                 if (this._pendingCodeTarget !== null && requestWebview && requestWebview === this._workspacePanelWebview) {
                     this.postMessageToWebview(requestWebview, 'code.setTargetFolder', { folder: this._pendingCodeTarget });
                     this._pendingCodeTarget = null;
@@ -1894,16 +1932,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     //: 루트에 생겼다. 밖의 폴더는 사용자가 다이얼로그에서 직접 고른 것이므로
                     //: 그 자리에서 워크스페이스에 추가한다 — 파일 쓰기는 워크스페이스 안으로만
                     //: 향한다는 규칙(_resolveWriteRoot)을 그대로 두기 위해서다.
-                    const desc = this._describeTargetFolder(picked[0].fsPath);
-                    if (!desc.insideWorkspace) {
-                        const already = (vscode.workspace.workspaceFolders ?? []).some((f) => samePath(f.uri.fsPath, desc.absolute));
-                        if (!already) {
-                            const count = vscode.workspace.workspaceFolders?.length ?? 0;
-                            await markPendingActiveProject(desc.absolute);
-                            vscode.workspace.updateWorkspaceFolders(count, 0, { uri: vscode.Uri.file(desc.absolute) });
+                    const previousProject = activeProjectPath();
+                    let desc = this._describeTargetFolder(picked[0].fsPath);
+                    if (!desc.insideWorkspace && !isInsideProjectRoot(desc.absolute)) {
+                        //: 워크스페이스에 넣지 않는다 — 단일 폴더 창에 폴더를 추가하면 VS Code 가 확장을
+                        //: 재시작해 이 화면이 끊기고 보낸 요청이 사라졌다(실기기 영상). 사용자가 대화상자에서
+                        //: 직접 고른 폴더라 외부 프로젝트로 기억해 그 폴더를 현재 프로젝트로 쓴다.
+                        try {
+                            await useExternalProject(desc.absolute);
+                        } catch (err) {
+                            this.postMessageToWebview(requestWebview, 'code.error', { message: `폴더를 쓸 수 없습니다: ${err instanceof Error ? err.message : String(err)}` });
+                            break;
                         }
+                        desc = this._describeTargetFolder(desc.absolute);
                     }
-                    this.postMessage('code.folderPicked', { folder: desc.display });
+                    //: 다른 프로젝트로 바꿨으면 그 폴더 경로를 보여 준다("루트"만 보이면 바뀐 줄 모른다).
+                    const switched = !samePath(activeProjectPath(), previousProject);
+                    this.postMessage('code.folderPicked', { folder: switched ? desc.absolute : (desc.insideWorkspace ? desc.display : desc.absolute) });
                 }
                 break;
             }
@@ -2238,38 +2283,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 await vscode.workspace.fs.createDirectory(vscode.Uri.file(desc.absolute));
                 folderCreated = true;
             }
-            if (!desc.insideWorkspace) {
-                const already = (vscode.workspace.workspaceFolders ?? []).some((f) => samePath(f.uri.fsPath, desc.absolute));
-                if (!already) {
-                    const count = vscode.workspace.workspaceFolders?.length ?? 0;
-                    //: **여기서 확장이 통째로 재시작될 수 있다.** 빈 창(폴더 0개)에
-                    //: 폴더를 추가하면 VSCode 는 확장 호스트를 재시작하고, 아래의
-                    //: chat.actionAccepted 는 영영 발송되지 못한다 — 화면은 복원된
-                    //: 스피너만 돌리는 "무한 로딩"이 된다 (실기기에서 실제 발생).
-                    //: 그래서 추가 **직전에** 재시작을 살아남는 globalState 에 요청을
-                    //: 적어 두고, 재시작 후 첫 webview.ready 가 이어서 발송한다.
-                    //: 재시작이 없었으면 아래에서 바로 지운다.
-                    await this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, {
-                        instruction,
-                        contextFiles,
-                        targetFolder: desc.display,
-                        absolutePath: desc.absolute,
-                        folderCreated,
-                        ts: Date.now(),
-                        surface: requestWebview === this._workspacePanelWebview ? 'workspace' : 'sidebar',
-                    });
-                    await markPendingActiveProject(desc.absolute);
-                    const ok = vscode.workspace.updateWorkspaceFolders(count, 0, { uri: vscode.Uri.file(desc.absolute) });
-                    if (!ok) {
-                        await this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, undefined);
-                        throw new Error('워크스페이스에 폴더를 추가하지 못했습니다.');
-                    }
-                    addedToWorkspace = true;
-                    // Adding the first folder restarts the extension host. Keep the
-                    // handoff until the new webview is ready instead of clearing it
-                    // while the old host is still on its way out.
-                    if (count === 0 && this._globalState) { return; }
-                }
+            if (!desc.insideWorkspace && !isInsideProjectRoot(desc.absolute)) {
+                //: 예전에는 여기서 폴더를 워크스페이스에 추가했고, 빈 창·단일 폴더 창에서는 VS Code 가
+                //: 확장을 재시작해 요청이 유실됐다(인계 메모로 버텼다). 이제 워크스페이스는 건드리지 않고
+                //: 승인한 폴더를 외부 프로젝트로 쓴다 — 재시작이 없으니 요청이 그대로 이어진다.
+                await useExternalProject(desc.absolute);
+                addedToWorkspace = true;
             }
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -2295,10 +2314,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         //: 생성 결과에 붙은 프로젝트 루트 — 그 사이 활성 프로젝트가 바뀌어도 다른 프로젝트에 쓰지 않는다.
         //: 그 폴더가 더는 워크스페이스에 없으면 쓰지 않는다(다시 생성해야 한다).
         if (projectRoot && !(raw && (path.isAbsolute(raw) || raw.startsWith('~')))) {
-            const inWorkspace = (vscode.workspace.workspaceFolders ?? []).some((f) => {
-                const rel = path.relative(f.uri.fsPath, projectRoot);
-                return samePath(f.uri.fsPath, projectRoot) || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
-            });
+            const inWorkspace = isInsideProjectRoot(projectRoot);
             return inWorkspace ? { root: vscode.Uri.file(projectRoot), relFolder: raw } : null;
         }
         if (raw && (path.isAbsolute(raw) || raw.startsWith('~'))) {
@@ -2307,9 +2323,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const root = activeProjectUri();
                 return root ? { root, relFolder: desc.display } : null;
             }
-            //: 밖의 절대경로는 워크스페이스에 추가된 폴더여야만 쓴다. 승인 카드를 거치지 않은
-            //: 임의 경로(예: 오래된 웹뷰 상태)로 파일이 새는 것을 막는다.
-            const allowed = (vscode.workspace.workspaceFolders ?? []).some((f) => { const rel = path.relative(f.uri.fsPath, desc.absolute); return samePath(f.uri.fsPath, desc.absolute) || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel)); });
+            //: 밖의 절대경로는 워크스페이스 폴더나 사용자가 고른 외부 프로젝트 안이어야만 쓴다. 승인 카드·
+            //: 폴더 선택을 거치지 않은 임의 경로(예: 오래된 웹뷰 상태)로 파일이 새는 것을 막는다.
+            const allowed = isInsideProjectRoot(desc.absolute);
             if (!allowed) { return null; }
             return { root: vscode.Uri.file(desc.absolute), relFolder: '' };
         }

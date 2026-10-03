@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { isHostLinkLost } from "../hooks/useHostLink";
+import { loadUiState, saveUiState } from "../hooks/uiState";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
 
@@ -77,6 +78,13 @@ export const FIRST_ACK_SECONDS = 15;
 //: 확장이 요청을 받지 못했을 때. 거의 늘 "확장이 다시 시작돼 이 창이 옛 확장에 붙어 있는" 경우다.
 export const NOT_RECEIVED = "ReCoder 확장이 이 요청을 받지 못했습니다. 확장이 다시 시작되면서 이 창과 연결이 끊긴 것 같습니다. Ctrl+Shift+P → Developer: Reload Window 로 창을 다시 불러온 뒤 다시 보내 주세요. 보낸 내용은 입력창에 다시 넣어 두었습니다.";
 
+//: 위치 칩 글자 — 절대 경로(다른 프로젝트 폴더)는 폴더 이름만, 전체 경로는 마우스를 올리면 보인다.
+export function folderLabel(folder: string): string {
+  if (!folder) return "루트";
+  const parts = folder.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return /^([A-Za-z]:|\/|\\\\|~)/.test(folder) ? (parts[parts.length - 1] || folder) : folder;
+}
+
 //: 첫 화면 예시 — 누르면 입력창에 채워지기만 한다(보내지는 않는다).
 const EXAMPLES: { label: string; text: string }[] = [
   { label: "게시판 API", text: "게시판 REST API를 만들어줘 — 글 작성·목록·수정·삭제" },
@@ -96,7 +104,9 @@ export function setPendingTargetFolder(folder: string): void { pendingTargetFold
 export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
-  const [input, setInput] = useState("");
+  //: 쓰던 요청은 화면이 다시 그려져도(창 다시 불러오기·확장 재시작) 남는다.
+  const [input, setInput] = useState(() => { const d = loadUiState().codeDraft; return typeof d === "string" ? d : ""; });
+  useEffect(() => { saveUiState({ codeDraft: input }); }, [input]);
   const [targetFolder, setTargetFolder] = useState(() => { const f = pendingTargetFolder ?? ""; pendingTargetFolder = null; return f; });
   const [contextFiles, setContextFiles] = useState<CtxFile[]>([]);
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -543,9 +553,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           />
           <div className="rc-cg-tools">
             <div className="rc-cg-ctx">
-            <button type="button" className="rc-cg-chip" onClick={() => postMessage("code.pickFolder")} title="코드를 만들 위치">
+            <button type="button" className="rc-cg-chip" onClick={() => postMessage("code.pickFolder")} title={targetFolder ? `코드를 만들 위치: ${targetFolder}` : "코드를 만들 위치: 현재 프로젝트 루트"}>
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d="M1.5 4.5h4l1.5 1.5h7.5v7h-13z" /></svg>
-              <span>{targetFolder || "루트"}</span>
+              <span>{folderLabel(targetFolder)}</span>
             </button>
             {targetFolder && <button type="button" className="rc-cg-x" aria-label="위치 지우기" title="루트로" onClick={() => setTargetFolder("")} style={{ marginLeft: -4 }}>×</button>}
             {contextFiles.map((c) => (

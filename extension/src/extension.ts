@@ -118,8 +118,8 @@ export function activate(context: vscode.ExtensionContext): void {
     //: 확장이 다시 시작돼도 열려 있던 ReCoder 탭을 새 확장에 다시 연결한다(ReCoderPanel.revive).
     context.subscriptions.push(
         vscode.window.registerWebviewPanelSerializer(ReCoderPanel.viewType, {
-            async deserializeWebviewPanel(panel: vscode.WebviewPanel) {
-                ReCoderPanel.revive(panel, context.extensionUri, sidebarProvider);
+            async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown) {
+                ReCoderPanel.revive(panel, context.extensionUri, sidebarProvider, state);
                 void ensureCoreRunning(coreManager, sidebarProvider);
             },
         }),

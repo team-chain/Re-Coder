@@ -29,6 +29,35 @@ function getVSCodeApi(): ReturnType<typeof acquireVsCodeApi> | null {
   return null;
 }
 
+/**
+ * 화면 상태를 VS Code 웹뷰 상태에 남긴다 — 창을 다시 불러오거나 확장이 다시 시작돼 화면이
+ * 새로 그려져도 보던 화면(예: 코드 생성)과 쓰던 요청으로 돌아온다. 값은 작은 것만 둔다.
+ */
+export function loadUiState(): Record<string, unknown> {
+  try {
+    const raw = getVSCodeApi()?.getState();
+    return raw && typeof raw === "object" ? { ...(raw as Record<string, unknown>) } : {};
+  } catch {
+    return {};
+  }
+}
+
+let uiStateTimer: ReturnType<typeof setTimeout> | undefined;
+export function saveUiState(patch: Record<string, unknown>): void {
+  try {
+    const api = getVSCodeApi();
+    if (!api) return;
+    const next = { ...loadUiState(), ...patch };
+    api.setState(next);
+    //: 확장에도 알려 둔다 — 웹뷰 상태 저장은 창이 닫힐 때만 디스크에 남는 경우가 있어(웹 버전 실측),
+    //: 확장이 재시작되거나 창을 다시 불러온 직후 화면을 되돌릴 때 확장 쪽 사본을 쓴다.
+    clearTimeout(uiStateTimer);
+    uiStateTimer = setTimeout(() => { try { api.postMessage({ type: "ui.state", payload: next }); } catch { /* ignore */ } }, 300);
+  } catch {
+    /* 상태 저장 실패는 화면 동작에 영향이 없다 */
+  }
+}
+
 export function useVSCodeApi() {
   const apiRef = useRef(getVSCodeApi());
 

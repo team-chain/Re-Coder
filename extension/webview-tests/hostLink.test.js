@@ -28,8 +28,9 @@ test('ReCoderPanel.revive: 되살린 탭을 새 확장에 붙이고, 이미 창�
   try {
     const vscode = require('vscode');
     const { ReCoderPanel } = require('../out/sidebar/ReCoderPanel.js');
-    const attached = [], detached = [];
+    const attached = [], detached = [], restored = [];
     const provider = {
+      setRestoredUiState: s => restored.push(s),
       getWorkspacePanelHtml: () => '<html>recoder</html>',
       attachWorkspacePanel: w => attached.push(w),
       detachWorkspacePanel: w => detached.push(w),
@@ -43,8 +44,9 @@ test('ReCoderPanel.revive: 되살린 탭을 새 확장에 붙이고, 이미 창�
     };
     const uri = vscode.Uri.file('/ext');
     const first = fakePanel();
-    ReCoderPanel.revive(first, uri, provider);
+    ReCoderPanel.revive(first, uri, provider, { view: 'code' });
     assert.equal(attached.length, 1, '되살린 탭이 새 확장에 붙지 않았다');
+    assert.deepEqual(restored, [{ view: 'code' }], '되살린 화면 상태를 넘기지 않는다');
     assert.equal(attached[0], first.webview);
     assert.equal(first.webview.html, '<html>recoder</html>', '화면을 새로 그리지 않았다');
     assert.equal(first.webview.options.enableScripts, true);
@@ -122,4 +124,24 @@ test('끊기면 ReCoder 창 맨 위에 다시 불러오기 안내가 뜬다', ()
   const html = render(true);
   assert.ok(html.includes('확장과 연결이 끊겼습니다'));
   assert.ok(html.includes('Developer: Reload Window'));
+});
+
+test('되살린 ReCoder 탭은 보던 화면·쓰던 요청으로 돌아온다(실제 VS Code 웹 버전에서 확인한 경로)', () => {
+  const provider = read('src/sidebar/SidebarProvider.ts');
+  const panel = read('src/sidebar/ReCoderPanel.ts');
+  const ext = read('src/extension.ts');
+  const app = read('webview-src/App.tsx');
+  const api = read('webview-src/hooks/useVSCodeApi.ts');
+  // 웹뷰 → 확장: 화면 상태 사본(웹뷰 상태 저장은 늦게 디스크에 남을 수 있다)
+  assert.match(api, /type: "ui\.state"/);
+  assert.match(provider, /case 'ui\.state'[\s\S]*?UI_STATE_KEY/);
+  // 되살림 → ready → ui.restore
+  assert.match(ext, /deserializeWebviewPanel\(panel: vscode\.WebviewPanel, state: unknown\)[\s\S]*?revive\(panel, context\.extensionUri, sidebarProvider, state\)/);
+  assert.match(panel, /setRestoredUiState\(state\)/);
+  assert.match(provider, /case 'webview\.ready'[\s\S]*?'ui\.restore'/);
+  // 화면: 저장한 보던 화면으로 시작하고, ui.restore 를 받으면 그 화면으로
+  assert.match(app, /loadUiState\(\)\.view/);
+  assert.match(app, /type === "ui\.restore"[\s\S]*?setView/);
+  // 쓰던 요청
+  assert.match(read('webview-src/components/CodeAgent.tsx'), /loadUiState\(\)\.codeDraft/);
 });

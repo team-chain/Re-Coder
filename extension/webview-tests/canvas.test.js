@@ -19,6 +19,17 @@ test('slow AWS snapshots survive multiple polling intervals and retry after erro
  assert.equal(requests.finish('first'),false);
  assert.equal(requests.finish('retry'),true);
 });
+test('a project change replaces an in-flight snapshot — the old project answer is dropped',()=>{
+ const requests=new SnapshotRequests();
+ assert.equal(requests.begin('old-project'),true);
+ assert.equal(requests.begin('poll'),false);
+ assert.equal(requests.begin('project-changed',true),true);
+ assert.equal(requests.finish('old-project'),false,'옛 프로젝트 스냅샷이 화면을 덮는다');
+ assert.equal(requests.finish('project-changed'),true);
+ const src=require('node:fs').readFileSync(require('node:path').join(__dirname,'../webview-src/components/canvas/DeploymentCanvas.tsx'),'utf8');
+ assert.match(src,/canvas\.projectChanged'\) \{refresh\(true\)/);
+ assert.ok(!/onClick=\{refresh\}/.test(src),'클릭 이벤트가 force 로 넘어간다');
+});
 test('late snapshots cannot resurrect completed deployments or overwrite newer deployment status',()=>{
  const done={deployment_id:'new',running:false,stage:'done',observed_at:'2026-09-23T01:10:00Z',started_at:'2026-09-23T01:00:00Z'};
  assert.equal(mergeDeployment(done,{...done,running:true,stage:'in_progress',observed_at:'2026-09-23T01:09:00Z'}),done);

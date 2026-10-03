@@ -4,6 +4,7 @@ import * as path from 'path';
 import { samePath } from '../core/coreReuse';
 import { BridgeClient } from '../bridge/BridgeClient';
 import { DiscordConnectionClient, loginProof, projectId } from './connectionClient';
+import { projectRoots } from '../activeProject';
 
 /** Owns project-scoped secrets and sockets independently of the webview lifecycle. */
 export class DiscordController implements vscode.Disposable {
@@ -16,7 +17,13 @@ export class DiscordController implements vscode.Disposable {
     }
     private id(folder: vscode.WorkspaceFolder) { return projectId(vscode.env.machineId, folder.uri.fsPath); }
     private key(client: DiscordConnectionClient, folder: vscode.WorkspaceFolder) { return `recoder.discord.session.${client.base}.${this.id(folder)}`; }
-    private folders() { return vscode.workspace.workspaceFolders || []; }
+    /** 워크스페이스 폴더 + 사용자가 고른 외부 프로젝트(워크스페이스에 넣지 않은 폴더). */
+    private folders(): vscode.WorkspaceFolder[] {
+        const ws = vscode.workspace.workspaceFolders || [];
+        const extra = projectRoots().filter(p => !ws.some(f => samePath(f.uri.fsPath, p)))
+            .map((p, i) => ({ uri: vscode.Uri.file(p), name: path.basename(p), index: ws.length + i }));
+        return [...ws, ...extra];
+    }
     /** 활성 프로젝트(배포 캔버스가 다루는 폴더)가 속한 워크스페이스 폴더. 없으면 첫 폴더. */
     private canvasFolder(workspace?: string): vscode.WorkspaceFolder | undefined {
         if (workspace) {
@@ -28,7 +35,8 @@ export class DiscordController implements vscode.Disposable {
         return this.folders()[0];
     }
     private folder(p: any): vscode.WorkspaceFolder {
-        const folder = this.folders().find(f => p.project_id ? this.id(f) === p.project_id : p.workspace ? f === this.canvasFolder(p.workspace) : f === this.folders()[0]);
+        const folders = this.folders(), canvas = this.canvasFolder(p.workspace)?.uri.fsPath, first = folders[0]?.uri.fsPath;
+        const folder = folders.find(f => p.project_id ? this.id(f) === p.project_id : p.workspace ? samePath(f.uri.fsPath, canvas || '') : samePath(f.uri.fsPath, first || ''));
         if (!folder) throw new Error('연결할 프로젝트 폴더를 VS Code에서 먼저 여세요.');
         return folder;
     }

@@ -74,3 +74,26 @@ test('a project added before an extension restart is picked up once, and removal
  vscode.workspace.workspaceFolders=vscode.workspace.workspaceFolders.slice(0,1);
  assert.equal(active.activeProjectPath(),w.first);
 });
+
+test('워크스페이스 밖 폴더는 워크스페이스에 넣지 않고 외부 프로젝트로 쓴다(확장 재시작 없음)',async t=>{
+ const w=workspaceFixture(t),changes=[];active.onDidChangeActiveProject(p=>changes.push(p));
+ const before=vscode.workspace.workspaceFolders;
+ const outside=fs.mkdtempSync(path.join(os.tmpdir(),'recoder-external-'));t.after(()=>fs.rmSync(outside,{recursive:true,force:true}));
+ await active.useExternalProject(outside);
+ assert.equal(vscode.workspace.workspaceFolders,before,'워크스페이스 폴더가 바뀌었다');
+ assert.equal(active.activeProjectPath(),outside);assert.deepEqual(changes.slice(-1),[outside]);
+ assert.ok(active.isInsideProjectRoot(path.join(outside,'src','a.js')));
+ assert.ok(!active.isInsideProjectRoot(path.join(os.tmpdir(),'elsewhere')));
+ const listed=active.projectFolders();
+ assert.deepEqual(listed.map(p=>[p.name,p.active,!!p.external]),[['test temp',false,false],[path.basename(outside),true,true]]);
+ // 다시 시작해도(같은 워크스페이스 상태) 그 선택이 남는다.
+ active.initActiveProject({workspaceState:w.memento,globalState:w.memento,subscriptions:[]});
+ assert.equal(active.activeProjectPath(),outside);
+ // 워크스페이스 폴더로 돌아갈 수 있고, 외부 폴더도 목록에서 다시 고를 수 있다.
+ assert.equal(await active.selectActiveProject(w.first),true);assert.equal(active.activeProjectPath(),w.first);
+ assert.equal(await active.selectActiveProject(outside),true);assert.equal(active.activeProjectPath(),outside);
+ // 폴더가 지워지면 첫 워크스페이스 폴더로 돌아간다.
+ fs.rmSync(outside,{recursive:true,force:true});
+ assert.equal(active.activeProjectPath(),w.first);
+ await assert.rejects(active.useExternalProject(outside));
+});

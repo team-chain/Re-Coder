@@ -59,7 +59,7 @@ export class ReCoderPanel {
      * 없다. 사용자가 그 탭에서 요청을 보내면 30초 뒤 "확장이 요청을 받지 못했습니다"가
      * 떴다. 이제는 그 탭을 새 확장에 연결하고 화면을 새로 그린다.
      */
-    static revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, sidebarProvider: SidebarProvider): ReCoderPanel {
+    static revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, sidebarProvider: SidebarProvider, state?: unknown): ReCoderPanel {
         if (ReCoderPanel._current) {
             //: 새 확장이 이미 ReCoder 창을 열었다 — 되살린 탭은 중복이라 닫는다.
             panel.dispose();
@@ -67,6 +67,8 @@ export class ReCoderPanel {
             return ReCoderPanel._current;
         }
         panel.webview.options = ReCoderPanel.webviewOptions(extensionUri);
+        //: 웹뷰가 남긴 화면 상태(보던 화면·쓰던 요청) — 새로 그린 화면이 ready 를 보내면 돌려준다.
+        sidebarProvider.setRestoredUiState(state);
         ReCoderPanel._current = new ReCoderPanel(panel, sidebarProvider);
         return ReCoderPanel._current;
     }

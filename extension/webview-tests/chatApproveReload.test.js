@@ -18,24 +18,28 @@ const provider = fs.readFileSync(
 const extension = fs.readFileSync(
     path.join(__dirname, '../src/extension.ts'), 'utf8');
 
-test('승인 핸들러는 워크스페이스 추가 직전에 요청을 globalState 에 적는다', () => {
+test('승인 핸들러는 워크스페이스를 바꾸지 않는다 — 확장 재시작 없이 바로 이어간다', () => {
+    //: 예전에는 밖의 폴더를 워크스페이스에 추가했고, 빈 창·단일 폴더 창에서는 VS Code 가 확장을
+    //: 재시작해 요청이 유실됐다(인계 메모로 버텼다). 이제 외부 프로젝트로 쓰므로 재시작이 없다.
     const start = provider.indexOf('private async handleChatApproveAction(');
     assert.ok(start > 0, 'handleChatApproveAction 정의가 없다');
     const end = provider.indexOf('\n    }', provider.indexOf('chat.actionAccepted', start));
     const body = provider.slice(start, end);
-
-    const persistAt = body.indexOf('PENDING_CHAT_ACTION_KEY');
-    const mutateAt = body.indexOf('updateWorkspaceFolders(');
-    assert.ok(persistAt > 0, '승인 핸들러가 재시작 인계 메모를 남기지 않는다');
-    assert.ok(mutateAt > 0, '워크스페이스 추가 호출이 없다');
-    assert.ok(
-        persistAt < mutateAt,
-        '인계 메모가 워크스페이스 추가 **뒤에** 있다 — 재시작이 먼저 오면 유실된다'
-    );
-    //: 재시작이 없었던 경로에서는 메모를 지워 중복 발송을 막는다.
+    assert.ok(!body.includes('updateWorkspaceFolders('), '승인이 워크스페이스를 바꾼다 — 확장이 재시작된다');
+    assert.ok(body.indexOf('useExternalProject(') > 0, '밖의 폴더를 프로젝트로 쓰지 않는다');
+    assert.ok(body.indexOf('useExternalProject(') < body.indexOf('chat.actionAccepted'), '프로젝트 전환 전에 요청을 넘긴다');
+    //: 정상 발송 후 (예전 버전이 남긴) 인계 메모를 지워 중복 발송을 막는다.
     const clearAt = body.lastIndexOf('PENDING_CHAT_ACTION_KEY');
     const acceptAt = body.indexOf('chat.actionAccepted');
     assert.ok(clearAt > acceptAt, '정상 발송 후 인계 메모를 지우지 않는다');
+});
+
+test('어떤 ReCoder 동작도 워크스페이스 폴더를 바꾸지 않는다(확장 재시작 금지)', () => {
+    const files = ['../src/sidebar/SidebarProvider.ts', '../src/activeProject.ts', '../src/extension.ts', '../src/sidebar/canvasHost.ts']
+        .map((rel) => [rel, fs.readFileSync(path.join(__dirname, rel), 'utf8')]);
+    for (const [rel, src] of files) {
+        assert.ok(!/updateWorkspaceFolders\(/.test(src), `${rel} 가 워크스페이스 폴더를 바꾼다`);
+    }
 });
 
 test('webview.ready 가 인계 메모를 한 번만 이어받아 발송한다', () => {

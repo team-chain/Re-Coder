@@ -3,6 +3,7 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "./hooks/useVSCodeApi";
 import { useHostLink } from "./hooks/useHostLink";
+import { loadUiState, saveUiState } from "./hooks/useVSCodeApi";
 import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
 import CodeAgent, { setPendingTargetFolder } from "./components/CodeAgent";
@@ -340,7 +341,13 @@ const App: React.FC = () => {
   const { coreHealth, costSummary } = usePolling(4000);
   const hostLost = useHostLink(postMessage, useMessage);
 
-  const [view, setView] = useState<ViewMode>(isWorkspacePanel ? "hub:deploy" : "home");
+  //: 다시 그려져도(창 다시 불러오기·확장 재시작) 보던 화면으로 돌아온다.
+  const [view, setView] = useState<ViewMode>(() => {
+    const saved = isWorkspacePanel ? loadUiState().view : undefined;
+    return typeof saved === "string" && (saved === "home" || isHubView(saved) || isFeatureView(saved)) ? saved as ViewMode
+      : isWorkspacePanel ? "hub:deploy" : "home";
+  });
+  useEffect(() => { if (isWorkspacePanel) saveUiState({ view }); }, [view, isWorkspacePanel]);
   //: 채팅 승인 카드에서 넘어온 코드 생성 요청. Build 화면을 열고 CodeAgent 에 넘긴다.
   const [externalTurn, setExternalTurn] = useState<ExternalTurn | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
@@ -389,6 +396,13 @@ const App: React.FC = () => {
       }
       if (type === "diagnostics.error") {
         setDiagnosticsPending(false); setDiagnosticsError((payload as {message?: string})?.message || "연결 확인에 실패했습니다.");
+      }
+      if (type === "ui.restore" && isWorkspacePanel) {
+        //: 확장이 다시 시작되거나 창을 다시 불러와 화면이 새로 그려졌다 — 보던 화면·쓰던 요청으로 돌아간다.
+        const saved = (payload ?? {}) as Record<string, unknown>;
+        saveUiState(saved);
+        const v = saved.view;
+        if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
       }
       if (type === "code.setTargetFolder" && isWorkspacePanel) {
         //: 탐색기 "여기에 코드 생성" — 코드 화면으로 옮기고 그 폴더를 대상으로 둔다.
