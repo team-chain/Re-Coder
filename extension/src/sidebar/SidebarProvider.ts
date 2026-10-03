@@ -903,7 +903,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     //: `<폴더명>:latest` 로 잡힌다(빈 경로면 코어가 `app:latest` 로 추측, 실기기 B2).
                     const scanRoot = scanWs || activeProjectPath();
                     const scanResult = await this._apiClient.runScan(scanType, scanRoot, targetPath);
-                    this.postMessage('scanResult', { ...scanResult, requestId });
+                    //: workspace — 수정안은 검사한 그 프로젝트에만 적용한다(그 사이 프로젝트를 바꿨으면 막는다).
+                    this.postMessage('scanResult', { ...scanResult, requestId, workspace: scanRoot });
                 } catch (err) {
                     //: 요청 자체가 실패해도 화면에는 "Error: trivy 스캔 실패" 같은 raw
                     //: 문자열이 아니라 **미검증 + 원인 + 다음 행동** 이 떠야 한다
@@ -922,6 +923,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         summary: '확인하지 못했습니다 — 코어와의 스캔 요청이 끝나기 전에 끊겼습니다.',
                         message: raw,
                     });
+                }
+                break;
+            }
+            case 'security.fixPlan':
+            case 'security.fixApply':
+            case 'security.rebuild': {
+                const p = payload as { requestId?: string; workspace?: string; reports?: Record<string, unknown>; ids?: string[] };
+                const requestId = p.requestId ?? '';
+                const workspace = activeProjectPath();
+                try {
+                    if (!workspace) { throw new Error('열린 프로젝트가 없습니다.'); }
+                    if (p.workspace && !samePath(p.workspace, workspace)) {
+                        throw new Error('검사한 뒤 프로젝트가 바뀌었습니다. 이 프로젝트를 다시 검사하세요.');
+                    }
+                    if (type === 'security.fixPlan') {
+                        const result = await this._apiClient.securityFixPlan(workspace, p.reports ?? {});
+                        this.postMessage('security.fixPlanResult', { requestId, workspace, proposals: result.proposals ?? [] });
+                    } else if (type === 'security.fixApply') {
+                        const result = await this._apiClient.securityFixApply(workspace, p.reports ?? {}, p.ids ?? []);
+                        this.postMessage('security.fixApplyResult', { requestId, workspace, ...result });
+                    } else {
+                        const result = await this._apiClient.securityRebuild(workspace);
+                        this.postMessage('security.rebuildResult', { requestId, workspace, ...result });
+                    }
+                } catch (err) {
+                    this.postMessage('security.fixError', { requestId, context: type, message: err instanceof Error ? err.message : String(err) });
                 }
                 break;
             }

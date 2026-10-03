@@ -2357,10 +2357,39 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
         return result
 
     normalised = _normalise_scan_result(scan_type, target_for_log, raw)
+    if scan_type == "gitleaks" and normalised.get("status") == "ok":
+        normalised = _without_local_env_keys(normalised, target_for_log)
     if scan_type == "trivy" and normalised.get("status") == "ok":
         normalised = await _with_trivy_headline(normalised, workspace_path)
     _log_scan_to_session(scan_type, target_for_log, normalised)
     return normalised
+
+
+def _without_local_env_keys(report: dict, workspace: str) -> dict:
+    """커밋(.gitignore)과 이미지(.dockerignore) 양쪽에서 빠지는 .env 의 키는 유출이 아니다.
+
+    키는 어딘가에 있어야 한다 — PC 의 .env 가 그 자리다. 예전에는 이것까지 CRITICAL 로 세서
+    게이트가 영영 빨간색이었다(사용자가 할 수 있는 일이 없다). 목록은 local_env 로 따로 남긴다.
+    """
+    try:
+        from security_fix import gitleaks_rel, local_env_only
+    except ImportError:  # pragma: no cover
+        from core.security_fix import gitleaks_rel, local_env_only  # type: ignore
+    if not workspace:
+        return report
+    root = Path(workspace)
+    kept: list[dict] = []
+    local: list[dict] = []
+    for f in report.get("findings") or []:
+        rel = gitleaks_rel(str(f.get("file") or ""))
+        (local if rel and local_env_only(root, rel) else kept).append(f)
+    if not local:
+        return report
+    files = sorted({gitleaks_rel(str(f.get("file") or "")) for f in local})
+    note = f"PC 에만 있는 키 {len(local)}개({', '.join(files[:3])})는 커밋·이미지에서 빠져 유출로 세지 않았습니다."
+    summary = f"시크릿 {len(kept)}건 발견 — {note}" if kept else f"코드에 남은 시크릿 없음 — {note}"
+    return {**report, "findings": kept, "critical_count": len(kept), "local_env": local, "summary": summary,
+            "ai_summary": report.get("summary") or ""}
 
 
 async def _image_created(image: str) -> str:
@@ -3666,6 +3695,90 @@ async def deploy_readiness_fix(request: ReadinessFixRequest) -> dict:
         return await asyncio.to_thread(apply_fix, request.workspace_path, request.code)
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class SecurityFixRequest(BaseModel):
+    workspace_path: str
+    #: 보안 검사 화면이 받은 결과 그대로 {trivy: {...}, hadolint: {...}, gitleaks: {...}}
+    reports: dict = Field(default_factory=dict)
+    ids: list[str] = Field(default_factory=list)
+
+
+def _security_fix_module():
+    try:
+        import security_fix
+    except ImportError:  # pragma: no cover
+        from core import security_fix  # type: ignore
+    return security_fix
+
+
+@router.post("/api/deploy/security/fixes")
+async def security_fix_plan(request: SecurityFixRequest) -> dict:
+    """보안 검사 결과로 바로 적용할 수 있는 수정안을 만든다(AI 없이, 같은 입력이면 같은 결과)."""
+    sf = _security_fix_module()
+    try:
+        proposals = await asyncio.to_thread(sf.plan, request.workspace_path, request.reports)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"workspace_path": request.workspace_path, "proposals": [p.public() for p in proposals]}
+
+
+@router.post("/api/deploy/security/fixes/apply")
+async def security_fix_apply(request: SecurityFixRequest) -> dict:
+    """고른 수정안만 적용한다. 원본은 .recoder/backups 에 남는다(.env 제외 — 키를 복사하지 않는다)."""
+    sf = _security_fix_module()
+    if not request.ids:
+        raise HTTPException(status_code=400, detail="적용할 수정안을 고르세요.")
+    try:
+        return await asyncio.to_thread(sf.apply, request.workspace_path, request.reports, request.ids)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class SecurityRebuildRequest(BaseModel):
+    workspace_path: str
+    image: Optional[str] = None
+
+
+@router.post("/api/deploy/security/rebuild")
+async def security_rebuild(request: SecurityRebuildRequest) -> dict:
+    """수정한 Dockerfile·의존성으로 이미지를 다시 빌드한다 — 그래야 Trivy 를 다시 돌렸을 때 결과가 바뀐다.
+
+    실행 중인 컨테이너는 건드리지 않는다(이미 띄운 컨테이너는 옛 이미지를 계속 쓴다).
+    """
+    workspace = request.workspace_path
+    dockerfile = _dockerfile_in(workspace)
+    image = request.image or _default_image_name(workspace)
+    if dockerfile is None or not image:
+        return {"status": "failed", "image": image, "message": "Dockerfile 이 없어 이미지를 빌드할 수 없습니다."}
+    try:
+        from docker_autostart import ensure_docker as _ensure_docker
+    except ImportError:  # pragma: no cover
+        from core.docker_autostart import ensure_docker as _ensure_docker
+    auto = await asyncio.to_thread(_ensure_docker)
+    if not auto.ready:
+        return {"status": "failed", "image": image, "message": auto.message or "Docker 가 실행 중이 아닙니다."}
+    cmd = ["docker", "build", "-f", str(dockerfile), "-t", image, "."]
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run, cmd, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=workspace, timeout=LOCAL_BUILD_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return {"status": "failed", "image": image, "message": f"docker build 가 {LOCAL_BUILD_TIMEOUT_SECONDS}초 안에 끝나지 않았습니다."}
+    except OSError as exc:
+        return {"status": "failed", "image": image, "message": f"docker build 를 시작하지 못했습니다: {exc}"}
+    if result.returncode != 0:
+        log = (result.stderr or "") + (result.stdout or "")
+        message = "이미지 빌드에 실패했습니다."
+        try:
+            from build_failure import diagnose
+            d = diagnose(log, stage="build")
+            if d is not None and getattr(d, "title", ""):
+                message = f"{d.title} — {d.fix}" if getattr(d, "fix", "") else d.title
+        except Exception:  # noqa: BLE001 - 진단은 안내용이다
+            pass
+        return {"status": "failed", "image": image, "message": message, "log_tail": log.strip()[-1500:]}
+    return {"status": "ok", "image": image, "message": f"{image} 를 다시 빌드했습니다."}
 
 
 def _dockerfile_in(workspace_path: str) -> Optional[Path]:
