@@ -1840,8 +1840,40 @@ def _detect_preflight_contract_stack(root: Path):
     return ContractStack.CUSTOM
 
 
-def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unknown") -> dict:
-    """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다."""
+def _env_excluded_from_image(root: Path, env_file: str) -> bool:
+    """.dockerignore 가 env 파일을 빌드 컨텍스트에서 빼는지(흔한 패턴만)."""
+    try:
+        rules = [l.strip().lstrip("/") for l in (root / ".dockerignore").read_text(encoding="utf-8", errors="replace").splitlines()
+                 if l.strip() and not l.lstrip().startswith(("#", "!"))]
+    except OSError:
+        return False
+    name = env_file.rsplit("/", 1)[-1]
+    return any(r in (env_file, name, ".env*", "*.env", "**/.env", "**/.env*") or (r.endswith("*") and name.startswith(r[:-1])) for r in rules)
+
+
+def _inferred_app_port(root: Path) -> Optional[int]:
+    """recoder.yml 이 없을 때 앱 포트 — Dockerfile EXPOSE, 없으면 소스에서 읽은 포트."""
+    dockerfile = root / "Dockerfile"
+    try:
+        if dockerfile.is_file():
+            m = re.search(r"^\s*EXPOSE\s+(\d+)", dockerfile.read_text(encoding="utf-8", errors="replace"), re.I | re.M)
+            if m:
+                return int(m.group(1))
+        from build_readiness import analyze
+        port = analyze(root).app_port
+        return int(port) if port else None
+    except Exception:  # noqa: BLE001 - 포트 추정 실패는 기본값으로
+        return None
+
+
+def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unknown", target: Optional[str] = None) -> dict:
+    """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다.
+
+    recoder.yml 이 없는 프로젝트(대부분)는 **추정 계약**으로 검사한다. 예전에는 기본 계약 값을
+    사용자가 정한 것처럼 강요해서 ECS 배포가 거의 모든 서버 앱에서 막혔다(2026-10-03 실측):
+    .env 에 PORT 필수, 포트 3000 가정(EXPOSE 8080 과 "불일치"), PC 의 3000 포트가 쓰이면 "충돌"
+    (ECS 는 PC 포트를 쓰지 않는다), .env 가 없어도 ".gitignore 없음 → env 추적 위험".
+    """
     root = Path(workspace_path)
     if not root.is_dir():
         raise ValueError("유효한 워크스페이스 경로가 아닙니다.")
@@ -1858,18 +1890,28 @@ def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unkno
         from core.remediation import generate_proposals  # type: ignore
 
     contract = load_contract(root)
+    inferred = contract is None
     if contract is None:
         contract = build_default_contract(_detect_preflight_contract_stack(root))
-    static_check_codes = None
+        #: 사용자가 정한 필수 환경변수가 없다 — 기본 계약의 PORT 필수를 강요하지 않는다(PORT 는 배포가 정한다).
+        contract.preflight.required_env = []
+        port = _inferred_app_port(root)
+        if port:
+            contract.runtime.app_port = contract.runtime.host_port = port
+    skipped: set[str] = set()
+    if inferred or target in ("ecs", "s3"):
+        #: 로컬 배포는 빈 PC 포트를 스스로 고르고, ECS·S3 는 PC 포트를 쓰지 않는다.
+        skipped.add("HOST_PORT_CONFLICT")
+    if not (root / contract.runtime.env_file).exists():
+        # A project with no environment file has nothing for Git to track.
+        # Actual source-secret checks still run below.
+        skipped.add("ENV_FILE_NOT_GITIGNORED")
+    static_check_codes = {code for code, _ in CHECK_REGISTRY if code.value not in skipped}
     if app_kind == "static":
         static_check_codes = {
-            code for code, _ in CHECK_REGISTRY
+            code for code in static_check_codes
             if code.value in _STATIC_TARGET_INDEPENDENT_CHECK_CODES
         }
-        # A plain website with no environment file does not need a Git setup
-        # before deployment. Actual source-secret checks still run below.
-        if not (root / contract.runtime.env_file).exists():
-            static_check_codes = {code for code in static_check_codes if code.value != 'ENV_FILE_NOT_GITIGNORED'}
     run = StaticPreflightRunner(str(root), contract).run_sync(static_check_codes)
     proposals = generate_proposals(run, contract, root)
     workspace_root = root.resolve()
@@ -1908,8 +1950,17 @@ def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unkno
 
     reasons = [issue_payload(blocker) for blocker in run.blockers]
     warnings = [issue_payload(warning) for warning in run.warnings]
+    if inferred:
+        #: 배포가 스스로 다루는 것은 막지 않고 알린다.
+        #: - 헬스 경로가 없으면 로컬·ECS 배포는 컨테이너 헬스체크 없이 "/" 응답으로 확인한다.
+        #: - .env 가 .dockerignore 로 이미지에서 빠지면 배포에는 위험이 없다(커밋 위험은 경고로 남긴다).
+        demote = {"MISSING_HEALTH_ENDPOINT"}
+        if _env_excluded_from_image(root, contract.runtime.env_file):
+            demote.add("ENV_FILE_NOT_GITIGNORED")
+        warnings += [r for r in reasons if r["code"] in demote]
+        reasons = [r for r in reasons if r["code"] not in demote]
     return {
-        "blocked": bool(run.blockers),
+        "blocked": bool(reasons),
         "status": run.status.value if hasattr(run.status, "value") else str(run.status),
         "score": run.score,
         "reasons": reasons,
@@ -2038,6 +2089,7 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
             _run_deployment_safety_preflight,
             request.workspace_path,
             'static' if request.target == 's3' else detected["app_kind"],
+            request.target,
         )
         if request.target == 'ecs' or (request.target != 's3' and detected.get('app_kind') != 'static'):
             # 컨테이너 빌드·실행이 확정적으로 실패할 설정은 배포 전에 막는다.

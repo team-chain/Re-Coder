@@ -1550,7 +1550,10 @@ class ECSAgent:
                     remedy="AWS 자격증명이 연결돼 있는지 확인하세요.",
                 )
 
-        env_vars_list = [{"name": k, "value": v} for k, v in req.env_vars.items()]
+        #: 앱이 process.env.PORT / os.environ["PORT"] 로 포트를 정하면 ECS 가 여는 포트와 맞춰야 한다.
+        #: 로컬 Docker 배포는 이미 PORT 를 넘긴다 — ECS 만 빠져 있었다. 사용자가 정한 값이 우선.
+        env_vars = {"PORT": str(req.container_port), **dict(req.env_vars or {})}
+        env_vars_list = [{"name": k, "value": v} for k, v in env_vars.items()]
         template_str = _TEMPLATE_PATH.read_text(encoding="utf-8")
         replacements = {
             "{{task_definition_family}}": req.task_definition_family,
