@@ -23,6 +23,9 @@ RUN if [ -f yarn.lock ]; then \
     else \
         npm install --omit=dev; \
     fi
+# 의존성이 없는 package.json(스크립트만 있는 모노레포 루트 등)이면 npm 이 node_modules 를 만들지 않는다 —
+# 실행 단계의 COPY 가 "not found" 로 빌드를 깨뜨리지 않게 폴더를 둔다.
+RUN mkdir -p node_modules
 
 # ---- Build stage (for TypeScript / transpiled projects) ----
 FROM node:{{NODE_VERSION}}-alpine AS builder

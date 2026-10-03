@@ -40,8 +40,10 @@ RUN npm run build
 # ---- Runtime stage ----
 FROM node:{{NODE_VERSION}}-alpine AS runtime
 
-# 배포 전 Trivy 검사 대비: 베이스 OS 패치 + 번들 npm(취약한 tar 동봉)을 최신으로.
-RUN apk upgrade --no-cache && npm install -g npm@latest
+# 배포 전 Trivy 검사 대비: 베이스 OS 를 패치하고, 이미지에 번들된 npm(취약한 tar 동봉)은 지운다 — 앱은 node 로 직접 뜬다.
+# (npm 을 이미지 안에서 최신으로 올리는 단계는 npm 12 가 나온 뒤 "Cannot find module 'promise-retry'" 로 빌드를 깨뜨렸다.)
+RUN apk upgrade --no-cache && \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 LABEL org.opencontainers.image.title="{{APP_NAME}}" \
       org.opencontainers.image.description="Next.js application" \
@@ -63,7 +65,7 @@ WORKDIR /app
 # 앱이 작업 폴더에 파일(예: SQLite DB·업로드)을 만들 수 있게 한다 — 비root 로 실행하므로 필요하다.
 RUN chown appuser:appgroup /app
 
-# standalone 출력 설정 유무와 관계없이 `npm start`가 사용할 전체 빌드
+# standalone 출력 설정 유무와 관계없이 `next start` 가 사용할 전체 빌드
 # 산출물과 의존성을 복사한다. public/이 없는 앱도 COPY 실패하지 않는다.
 COPY --from=builder --chown=appuser:appgroup /app ./
 
@@ -76,4 +78,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:{{PORT}}{{HEALTH_CHECK_PATH}} || exit 1
 
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["npm", "start"]
+# `npm start`(= next start) 와 같다. npm 없이 node 로 바로 띄운다.
+CMD ["node", "node_modules/next/dist/bin/next", "start", "-H", "0.0.0.0", "-p", "{{PORT}}"]

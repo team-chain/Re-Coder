@@ -41,7 +41,8 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_LOCAL_IMPORT_MISSING", "NODE_VITE_JSX_IN_JS", "NODE_VITE_PROCESS_ENV", "NODE_IMPORT_PACKAGE_TYPO",
                 "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING", "NODE_PG_NUMERIC_STRINGS", "NODE_CLIENT_HARDCODED_LOCALHOST",
                 "NODE_ROUTER_ANCHOR_LINK", "NODE_MODULE_FORMAT_MISMATCH", "NODE_FRONTEND_NOT_BUILT",
-                "NODE_IMPORT_NAME_MISSING", "NODE_CLIENT_API_DOUBLE_PREFIX", "DOCKERFILE_ENTRY_MISSING"}
+                "NODE_IMPORT_NAME_MISSING", "NODE_CLIENT_API_DOUBLE_PREFIX", "DOCKERFILE_ENTRY_MISSING",
+                "DOCKERFILE_DEPS_DIR_MISSING", "DOCKERFILE_NPM_SELF_UPGRADE"}
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -276,6 +277,8 @@ def _detect_js_port(text: str) -> tuple[Optional[int], bool]:
     uses_env = bool(re.search(r"process\.env\.PORT\b|process\.env\[['\"]PORT['\"]\]", active))
     patterns = (
         r"process\.env\.PORT\s*(?:\|\||\?\?)\s*['\"]?(\d{2,5})\b",
+        #: `Number(process.env.PORT) || 8080`·`parseInt(process.env.PORT, 10) ?? 8080` — 감싼 괄호 뒤의 기본값.
+        r"process\.env\.PORT\s*(?:,\s*\d+\s*)?\)\s*(?:\|\||\?\?)\s*['\"]?(\d{2,5})\b",
         r"\.listen\(\s*(\d{2,5})\b",
         r"\b(?:const|let|var)\s+(?:PORT|port|APP_PORT|SERVER_PORT)\s*=\s*(?:Number\(|parseInt\()?\s*['\"]?(\d{2,5})\b",
         r"\bPORT\s*(?:\|\||\?\?)\s*['\"]?(\d{2,5})\b",
@@ -2038,7 +2041,8 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                     undeclared.setdefault(project, {}).setdefault(pkg, rel)
         r, s = _express_routes(text)
         routes |= r
-        statics |= s
+        #: `path.join(__dirname, '../client/dist')` 처럼 파일 위치 기준(../)으로 적은 폴더는 프로젝트 루트 기준으로 바꾼다.
+        statics |= {(_pjoin((posixpath.dirname(rel), d)) if d.startswith("../") else d) for d in s}
         result.local_data_files += [f for f in _local_sqlite_files(active) if f not in result.local_data_files]
     for project, missing in sorted(undeclared.items()):
         if workspaces and not project:
@@ -2063,7 +2067,18 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
             result.app_port, result.port_from_env = port, uses_env
             break
 
+    #: 빌드가 만드는 폴더(client/dist 등)는 지금 없어도 이미지 빌드 때 생긴다 — 없다고 경고하지 않는다.
+    try:
+        _runs_for_out, _ = _subproject_scripts(scripts, files)
+        build_outs = {o for o in ((_vite_out_dir(files, d) or _frontend_out_dir(files, d)) for d in _runs_for_out) if o}
+        root_out = _vite_out_dir(files, "") if "build" in scripts else None
+        if root_out:
+            build_outs.add(root_out)
+    except Exception:  # noqa: BLE001
+        build_outs = set()
     for folder in sorted(statics):
+        if folder in build_outs:
+            continue
         if not files.has_dir(folder):
             result.issues.append(ReadinessIssue(
                 "NODE_STATIC_DIR_MISSING", WARNING,
@@ -2468,6 +2483,71 @@ def _runtime_install_anchors(text: str) -> Optional[tuple[int, int]]:
     return (deps_run_end, copy_line) if deps_run_end is not None and copy_line is not None else None
 
 
+_NPM_SELF_UPGRADE = re.compile(r"\bnpm\s+(?:install|i)\s+(?:-g|--global)\s+npm(?:@[^\s&;]+)?")
+_NPM_REMOVAL = "RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx"
+
+
+def drop_npm_self_upgrade(text: str, next_app: bool = False) -> str:
+    """`npm install -g npm@latest` 를 없앤다. 실행 명령이 npm 을 안 쓰면(또는 Next.js 를 node 로 바꿀 수 있으면) 번들 npm 을 지운다."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(newline)
+    out: list[str] = []
+    for line in lines:
+        if line.lstrip().startswith("#") or not _NPM_SELF_UPGRADE.search(line):
+            out.append(line)
+            continue
+        cleaned = re.sub(r"\s*&&\s*npm\s+(?:install|i)\s+(?:-g|--global)\s+npm(?:@[^\s&;]+)?", "", line)
+        cleaned = re.sub(r"npm\s+(?:install|i)\s+(?:-g|--global)\s+npm(?:@[^\s&;]+)?\s*&&\s*", "", cleaned)
+        if _NPM_SELF_UPGRADE.search(cleaned) or re.fullmatch(r"\s*RUN\s*\\?\s*", cleaned):
+            continue  # 그 단계만 하던 RUN 줄 — 지운다
+        out.append(cleaned)
+    #: HEALTHCHECK 의 이어진 줄(`\` 다음의 `CMD curl …`)은 실행 명령이 아니다.
+    cmd_idx = max((i for i, l in enumerate(out) if re.match(r"^\s*CMD\b", l, re.I)
+                   and not (i > 0 and out[i - 1].rstrip().endswith("\\"))), default=None)
+    cmd = out[cmd_idx] if cmd_idx is not None else ""
+    if next_app and cmd_idx is not None and re.search(r"""["']?npm["']?\s*,?\s*["']?(?:run\s*["']?\s*,?\s*["']?)?start""", cmd):
+        port = None
+        for l in out:
+            m = re.match(r"^\s*EXPOSE\s+(\d{2,5})", l, re.I)
+            if m:
+                port = m.group(1)
+        out[cmd_idx] = ('CMD ["node", "node_modules/next/dist/bin/next", "start", "-H", "0.0.0.0"'
+                        + (f', "-p", "{port}"' if port else "") + "]")
+        cmd = out[cmd_idx]
+    uses_npm = bool(re.search(r"\b(?:npm|npx|yarn|pnpm)\b", cmd))
+    if not uses_npm and not any("node_modules/npm" in l for l in out):
+        user_idx = max((i for i, l in enumerate(out) if re.match(r"^\s*USER\b", l, re.I)), default=None)
+        at = user_idx if user_idx is not None else (cmd_idx if cmd_idx is not None else len(out))
+        out[at:at] = ["# ReCoder: 이미지에 번들된 npm(취약한 tar 동봉)은 쓰지 않으므로 지운다(npm 스스로 올리기는 빌드를 깨뜨린다).", _NPM_REMOVAL]
+    return newline.join(out)
+
+
+def _deps_stage_makes_node_modules(text: str) -> bool:
+    stage = None
+    for line in text.replace("\r\n", "\n").split("\n"):
+        m = re.match(r"^\s*FROM\s+\S+(?:\s+AS\s+(\S+))?", line, re.I)
+        if m:
+            stage = (m.group(1) or "").lower()
+        elif stage == "deps" and re.search(r"mkdir\s+(?:-p\s+)?(?:\./|/app/)?node_modules\b", line):
+            return True
+    return False
+
+
+def add_deps_dir(text: str) -> str:
+    """deps 단계 설치 RUN 바로 뒤에 `RUN mkdir -p node_modules` 를 넣는다."""
+    anchors = _runtime_install_anchors(text.replace("\r\n", "\n"))
+    if anchors is None:
+        raise ValueError("Dockerfile 구조를 확인하지 못했습니다. 의존성 설치 뒤에 `RUN mkdir -p node_modules` 를 직접 넣으세요.")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(newline)
+    deps_end, _copy = anchors
+    lines[deps_end + 1:deps_end + 1] = [
+        "# ReCoder: 실행 의존성이 없으면 npm 이 node_modules 를 만들지 않는다 — 실행 단계 COPY 가 깨지지 않게 둔다.",
+        "RUN mkdir -p node_modules",
+    ]
+    return newline.join(lines)
+
+
 def add_runtime_subproject_install(text: str, folder: str, npm_workspace: bool = False) -> str:
     """deps 단계에서 서버 폴더 의존성을 설치하고 실행 이미지로 복사한다.
 
@@ -2512,6 +2592,28 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
             f"앱은 {effective} 포트에서 요청을 받는데 Dockerfile 은 {expose} 포트를 엽니다(EXPOSE"
             f"{'·HEALTHCHECK' if facts['health_port'] == expose else ''}). 컨테이너가 떠도 접속·헬스 확인이 실패합니다.",
             f"Dockerfile 의 {expose} 를 {effective} 로 맞추세요(자동 수정 가능).", dockerfile, True))
+    if any(_NPM_SELF_UPGRADE.search(l) for l in text.splitlines() if not l.lstrip().startswith("#")):
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_NPM_SELF_UPGRADE", ERROR,
+            "Dockerfile 이 이미지 안에서 `npm install -g npm@…` 로 npm 을 스스로 올립니다. npm 12 가 나온 뒤로 이 단계가 "
+            "\"Cannot find module 'promise-retry'\" 로 실패해 이미지 빌드가 멈춥니다.",
+            "그 단계를 지우고, 앱이 node 로 뜨면 번들 npm 을 지우세요(자동 수정 가능 — Next.js 는 node 로 바로 띄웁니다).",
+            dockerfile, True))
+    root_pkg: dict = {}
+    try:
+        loaded = json.loads(files.read("package.json") or "")
+        root_pkg = loaded if isinstance(loaded, dict) else {}
+    except ValueError:
+        pass
+    anchors_now = _runtime_install_anchors(text.replace("\r\n", "\n"))
+    #: 설치할 패키지가 하나도 없을 때만 npm 이 node_modules 를 만들지 않는다(devDependencies·workspaces 가 있으면 만든다 — 실측).
+    installs_nothing = root_pkg and not any(root_pkg.get(k) for k in ("dependencies", "devDependencies", "optionalDependencies", "workspaces"))
+    if anchors_now is not None and installs_nothing and not _deps_stage_makes_node_modules(text):
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_DEPS_DIR_MISSING", ERROR,
+            "루트 package.json 에 설치할 패키지가 없어 npm 이 node_modules 를 만들지 않는데, Dockerfile 은 "
+            "실행 단계에서 /app/node_modules 를 복사합니다. 빌드가 \"복사할 파일 없음\" 으로 실패합니다.",
+            "Dockerfile 의 의존성 설치 뒤에 `RUN mkdir -p node_modules` 를 넣으세요(자동 수정 가능).", dockerfile, True))
     if facts["cmd_entry"] and not files.exists(facts["cmd_entry"]) \
             and not re.match(r"^(dist|build|out|lib)/", facts["cmd_entry"]):
         #: start 스크립트(모노레포면 넘겨받은 패키지의 start)가 띄우는 파일, 없으면 찾은 서버 파일로 바꾼다.
@@ -3205,6 +3307,25 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
             root_pkg = {}
         updated = add_runtime_subproject_install(text, before.runtime_subproject or "",
                                                  npm_workspace=isinstance(root_pkg, dict) and bool(root_pkg.get("workspaces")))
+        changed += ["Dockerfile", _backup(root, "Dockerfile", text)]
+        _write_raw(dockerfile, updated)
+    elif code == "DOCKERFILE_NPM_SELF_UPGRADE":
+        dockerfile = root / "Dockerfile"
+        text = _read_raw(dockerfile)
+        try:
+            pkg = json.loads(_read_raw(root / "package.json"))
+        except (OSError, ValueError):
+            pkg = {}
+        next_app = isinstance(pkg, dict) and "next" in {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        updated = drop_npm_self_upgrade(text, next_app=next_app)
+        if updated == text:
+            raise ValueError("npm 올리기 단계를 찾지 못했습니다. Dockerfile 을 직접 고치세요.")
+        changed += ["Dockerfile", _backup(root, "Dockerfile", text)]
+        _write_raw(dockerfile, updated)
+    elif code == "DOCKERFILE_DEPS_DIR_MISSING":
+        dockerfile = root / "Dockerfile"
+        text = _read_raw(dockerfile)
+        updated = add_deps_dir(text)
         changed += ["Dockerfile", _backup(root, "Dockerfile", text)]
         _write_raw(dockerfile, updated)
     elif code == "DOCKERFILE_ENTRY_MISSING":

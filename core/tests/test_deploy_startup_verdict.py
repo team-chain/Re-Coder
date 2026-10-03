@@ -146,3 +146,29 @@ def test_api_only_server_is_not_judged_by_screen(monkeypatch,tmp_path):
     monkeypatch.setattr(screen_check,'check_screen',lambda url,**kw:screen_check.ScreenResult(ok=False,url=url,code='SCREEN_NOT_HTML',problems=['404']))
     plan=DeploymentPlan(method=DeployMethod.LOCAL_DOCKER,action=ActionType.DOCKER_RUN,image='x:1',container_name='x',ports={'18120':'3000'})
     assert asyncio.run(d._verify_local_screen(plan,str(tmp_path))) is None
+
+
+def test_crash_loop_that_looks_running_is_a_failure(monkeypatch):
+    """시작하자마자 죽고 재시작 정책으로 다시 뜨는 서버는 확인하는 순간 running 으로 보인다(실측).
+    재시작 횟수와 잠깐 뒤 상태로 가른다 — 느린 시작으로 두면 이전 버전이 복구되지 않는다."""
+    seen = {'n': 0}
+    def run(cmd, **kwargs):
+        if cmd[1] == 'inspect':
+            seen['n'] += 1
+            count = 0 if seen['n'] == 1 else 2
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({'State': {'Status': 'running', 'Running': True, 'Restarting': False, 'ExitCode': 0}, 'RestartCount': count}), '')
+        return subprocess.CompletedProcess(cmd, 0, '', 'Error: boom at start\n    at Object.<anonymous> (/app/index.js:6:7)')
+    monkeypatch.setattr(d.subprocess, 'run', run)
+    import time
+    monkeypatch.setattr(time, 'sleep', lambda s: None)
+    error = asyncio.run(d._local_startup_failure('fixture'))
+    assert error and 'boom at start' in error and '2번 다시 시작됨' in error
+
+
+def test_steady_slow_start_stays_pending(monkeypatch):
+    def run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({'State': {'Status': 'running', 'Running': True, 'Restarting': False}, 'RestartCount': 0}), '')
+    monkeypatch.setattr(d.subprocess, 'run', run)
+    import time
+    monkeypatch.setattr(time, 'sleep', lambda s: None)
+    assert asyncio.run(d._local_startup_failure('fixture')) is None

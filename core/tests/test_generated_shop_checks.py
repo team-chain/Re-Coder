@@ -85,7 +85,9 @@ def test_catches_what_broke_the_real_build(shop):
 
 def test_auto_fixes_leave_only_the_code_mismatch(shop):
     for code in ("NODE_LOCAL_IMPORT_MISSING", "NODE_VITE_JSX_IN_JS", "NODE_VITE_PROCESS_ENV",
-                 "NODE_IMPORT_PACKAGE_TYPO", "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING"):
+                 "NODE_IMPORT_PACKAGE_TYPO", "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING",
+                 #: 루트 package.json 에 설치할 패키지가 없어 node_modules 가 안 생긴다(실측 빌드 실패) — 함께 고친다.
+                 "DOCKERFILE_DEPS_DIR_MISSING"):
         assert br.apply_fix(shop, code)["applied"], code
     assert (shop / "client/src/index.jsx").is_file() and not (shop / "client/src/index.js").exists()
     assert '/src/index.jsx' in (shop / "client/index.html").read_text()

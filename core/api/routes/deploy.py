@@ -242,23 +242,42 @@ async def _probe_local_http_health(
 
 async def _local_startup_failure(container_name: str) -> str | None:
     """After a failed health probe, distinguish slow startup from a dead process."""
-    def inspect():
+    def read_state():
         result = subprocess.run(
-            ['docker', 'inspect', '--format', '{{json .State}}', container_name],
+            ['docker', 'inspect', '--format', '{"State": {{json .State}}, "RestartCount": {{json .RestartCount}}}', container_name],
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15,
         )
         if result.returncode != 0:
-            return '배포한 컨테이너의 상태를 확인하지 못했습니다.'
-        state = json.loads(result.stdout)
-        if state.get('Running') and not state.get('Restarting') and state.get('Status') == 'running':
             return None
+        return json.loads(result.stdout)
+
+    def inspect():
+        info = read_state()
+        if info is None:
+            return '배포한 컨테이너의 상태를 확인하지 못했습니다.'
+        state = info.get('State') or {}
+        healthy_now = lambda st, inf: (st.get('Running') and not st.get('Restarting') and st.get('Status') == 'running'
+                                       and not inf.get('RestartCount'))
+        if healthy_now(state, info):
+            #: 시작하자마자 죽고 재시작 정책으로 다시 뜨는 앱은 확인하는 순간 "running" 으로 보인다
+            #: (실측: 시작 시 throw 하는 서버가 느린 시작으로 판정돼 이전 버전이 복구되지 않았다).
+            #: 잠깐 뒤 다시 보고, 그사이 재시작했으면 실패다.
+            import time as _time
+            _time.sleep(4)
+            again = read_state()
+            if again is not None:
+                info, state = again, again.get('State') or {}
+            if healthy_now(state, info):
+                return None
         from context_gate import mask_secrets
         logs = subprocess.run(
             ['docker', 'logs', '--tail', '25', container_name],
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15,
         )
         detail = mask_secrets((logs.stdout + logs.stderr)[-4000:])
-        return f"컨테이너 실행 실패 ({state.get('Status', 'unknown')}, 종료 코드 {state.get('ExitCode', '?')}).\n{detail}"
+        restarts = info.get('RestartCount') or 0
+        return (f"컨테이너 실행 실패 ({state.get('Status', 'unknown')}, 종료 코드 {state.get('ExitCode', '?')}"
+                + (f", 시작 후 {restarts}번 다시 시작됨" if restarts else "") + f").\n{detail}")
     try:
         return await asyncio.to_thread(inspect)
     except Exception as exc:
@@ -2765,7 +2784,7 @@ def _dockerfile_template_defaults(
     return {
         "APP_NAME": app_name,
         "PYTHON_VERSION": "3.11",
-        "NODE_VERSION": "20",
+        "NODE_VERSION": "22",  # Node 20 은 2026-04 지원 종료 — Trivy 가 막는다
         "PORT": str(port),
         "HEALTH_CHECK_PATH": str(health_path),
         "APP_TARGET": (
