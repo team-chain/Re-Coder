@@ -18,7 +18,7 @@ export interface Snapshot {
 }
 export interface SceneNode { id: string; name: string; subtitle: string; badge: string; kind: string; color: string; x: number; y: number; locked?: boolean; target?: Target; flags?: string[] }
 export interface SceneEdge { from: string; to: string; color: string; dashed?: boolean }
-export const colors = { project: "#3b9ff5", gate: "#36c77a", docker: "#14b6ec", github: "#bda3c6", ecs: "#30d669", s3: "#e3b550", discord: "#8182ff", bad: "#ff6a73", warn: "#f4cd65", file: "#79b8ef", fn: "#4bcaba", locked: "#75808f" };
+export const colors = { project: "#3b9ff5", gate: "#36c77a", docker: "#14b6ec", github: "#bda3c6", ecs: "#f28b2c", s3: "#8cbf2f", discord: "#8182ff", bad: "#ff6a73", warn: "#f4cd65", file: "#79b8ef", fn: "#4bcaba", locked: "#75808f" };
 export function available(target: Target, snapshot: Snapshot | null): boolean {
   if (!snapshot?.workspace) return false;
   return (target !== "ecs" && target !== "s3") || snapshot.aws.ready;
