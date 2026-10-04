@@ -283,3 +283,56 @@ def test_advisory_lint_rules_do_not_turn_the_gate_red(tmp_path):
     assert rep["summary"].startswith("Dockerfile 검사 — 고칠 것 2건") and "apk 버전 미고정(3번째 줄)" in rep["summary"]
     assert rep["ai_summary"] == "AI text"
     assert d._hadolint_headline({"findings": []})["summary"] == "Dockerfile 검사 — 규칙 위반 없음"
+
+
+def _apply_lint(root: Path, findings: list[dict]) -> tuple[list, str]:
+    reports = {"hadolint": {"findings": findings}}
+    props = sf.plan(str(root), reports)
+    auto = [p.id for p in props if p.auto]
+    if auto:
+        sf.apply(str(root), reports, auto)
+    return props, (root / "Dockerfile").read_bytes().decode("utf-8")
+
+
+def test_named_user_becomes_the_same_numeric_id(tmp_path):
+    """DL3066: USER appuser → USER 1001 (같은 단계에서 만든 ID). Windows 줄바꿈은 그대로 둔다."""
+    text = ("FROM node:22-alpine AS runtime\r\n"
+            "RUN addgroup -g 1001 appgroup && \\\r\n"
+            "    adduser -u 1001 -G appgroup -s /bin/sh -D appuser\r\n"
+            "USER appuser\r\n"
+            "CMD [\"node\", \"server.js\"]\r\n")
+    root = _write(tmp_path, {"Dockerfile": text})
+    props, out = _apply_lint(root, [{"code": "DL3066", "line": 4, "message": "Non-numeric user-id"}])
+    assert [p.title for p in props] == ["USER 를 숫자 ID 로(같은 사용자) (DL3066)"]
+    assert out == text.replace("USER appuser\r\n", "USER 1001\r\n")
+
+
+def test_numeric_id_fix_covers_useradd_and_root(tmp_path):
+    text = ("FROM python:3.11-slim\n"
+            "RUN groupadd --gid 1001 appgroup && \\\n"
+            "    useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser\n"
+            "USER root\n"
+            "RUN chown appuser /app\n"
+            "USER appuser\n")
+    root = _write(tmp_path, {"Dockerfile": text})
+    _, out = _apply_lint(root, [{"code": "DL3066", "line": 4}, {"code": "DL3066", "line": 6}])
+    assert out.splitlines()[3] == "USER 0" and out.splitlines()[5] == "USER 1001"
+
+
+def test_numeric_id_is_left_to_the_user_when_unknown(tmp_path):
+    # 베이스 이미지에 있던 사용자(ID 를 Dockerfile 이 모름), 다른 단계에서 만든 사용자, 나중에 ID 를 바꾸는 경우.
+    for text, line in (
+        ("FROM node:22-alpine\nUSER node\n", 2),
+        ("FROM node:22-alpine AS a\nRUN adduser -u 1001 -D appuser\nFROM node:22-alpine\nUSER appuser\n", 4),
+        ("FROM node:22-alpine\nRUN adduser -u 1001 -D appuser && usermod -u 2000 appuser\nUSER appuser\n", 3),
+        ("FROM node:22-alpine\nRUN adduser -D appuser\nUSER appuser\n", 3),
+    ):
+        root = _write(tmp_path / str(line) / str(abs(hash(text))), {"Dockerfile": text})
+        props, out = _apply_lint(root, [{"code": "DL3066", "line": line, "message": "Non-numeric user-id"}])
+        assert out == text
+        assert [p.auto for p in props] == [False] and "권고, 배포에 영향 없음" in props[0].title
+
+
+def test_advisory_lists_match_the_gate():
+    from api.routes.deploy import _HADOLINT_ADVISORY
+    assert sf._ADVISORY_LINT == frozenset(_HADOLINT_ADVISORY)

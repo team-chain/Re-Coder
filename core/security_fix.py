@@ -19,6 +19,7 @@ import difflib
 import hashlib
 import json
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -448,8 +449,53 @@ def _shell_to_exec(prefix: str, command: str) -> str:
     return prefix + json.dumps(["/bin/sh", "-c", command], ensure_ascii=False).replace('","', '", "')
 
 
+def _created_uid(lines: list[str], n: int, name: str) -> Optional[str]:
+    """n 번째 줄(USER) 과 같은 단계에서 adduser/useradd 로 만든 `name` 의 숫자 ID. 모르면 None."""
+    start = max((i for i in range(n + 1) if re.match(r"^\s*FROM\s", lines[i], re.I)), default=0)
+    text = re.sub(r"\\\r?\n", " ", "\n".join(lines[start:n]))
+    uid: Optional[str] = None
+    for logical in text.split("\n"):
+        m = re.match(r"^\s*RUN\s+(.*)$", logical, re.I)
+        if not m:
+            continue
+        for cmd in re.split(r"&&|\|\||;|\|", m.group(1)):
+            try:
+                tokens = shlex.split(cmd)
+            except ValueError:
+                return None
+            if not tokens or tokens[0].rsplit("/", 1)[-1] not in ("adduser", "useradd", "usermod"):
+                continue
+            if tokens[-1] != name:
+                continue
+            found = None
+            for i, t in enumerate(tokens[1:-1], start=1):
+                if t in ("-u", "--uid") and i + 1 < len(tokens) - 1:
+                    found = tokens[i + 1]
+                elif t.startswith("--uid="):
+                    found = t.split("=", 1)[1]
+                elif re.fullmatch(r"-u\d+", t):
+                    found = t[2:]
+            if tokens[0].rsplit("/", 1)[-1] == "usermod":
+                if found is not None:
+                    return None  # ID 를 나중에 바꾸는 Dockerfile 은 직접 확인한다
+                continue
+            uid = found if found and found.isdigit() else None
+    return uid
+
+
 def _hadolint_block_fix(code: str, lines: list[str], n: int) -> Optional[tuple[list[str], str]]:
     """여러 줄을 바꾸는 수정. (새 줄 목록, 제목) 또는 None."""
+    if code == "DL3066":
+        # USER <이름> → 같은 사용자의 숫자 ID. 그룹·HOME 은 /etc/passwd 에서 그대로 정해진다.
+        m = re.match(r"^(\s*USER\s+)([A-Za-z_][\w.-]*)(\s*)$", lines[n], re.I)
+        if not m:
+            return None
+        uid = "0" if m.group(2) == "root" else _created_uid(lines, n, m.group(2))
+        if uid is None:
+            return None
+        new = list(lines)
+        new[n] = f"{m.group(1)}{uid}{m.group(3)}"
+        return new, "USER 를 숫자 ID 로(같은 사용자)"
     if code == "DL3003":
         m = re.match(r"^(\s*)RUN\s+cd\s+([\w.\-/]+)\s*&&\s*(.+?)\s*$", lines[n])
         if not m or lines[n].rstrip().endswith("\\") or ".." in m.group(2).split("/") or re.search(r"\bcd\s", m.group(3)):
@@ -519,6 +565,12 @@ def _hadolint_maker(code: str, original: str, hint: int) -> Maker:
     return make
 
 
+#: 패키지 버전 고정 권고. 저장소가 옛 버전을 지우면 고정한 버전 때문에 빌드가 깨지므로 자동으로 고치지 않는다.
+_PIN_LINT = ("DL3008", "DL3013", "DL3016", "DL3018", "DL3028")
+#: 보안 게이트가 "중간" 으로 세는 권고(api/routes/deploy.py 의 _HADOLINT_ADVISORY 와 같은 목록).
+_ADVISORY_LINT = frozenset(_PIN_LINT + ("DL3003", "DL3059", "DL3066"))
+
+
 def _hadolint_fixes(root: Path, violations: list[dict]) -> list[FixProposal]:
     text = _read(root, "Dockerfile")
     if text is None:
@@ -554,10 +606,12 @@ def _hadolint_fixes(root: Path, violations: list[dict]) -> list[FixProposal]:
                                    files=["Dockerfile"], diff=_preview(root, writes), make=make))
     for code, hits in sorted(manual_lint.items()):
         where = ", ".join(str(n + 1) for n, _ in hits[:6])
+        advisory = code in _ADVISORY_LINT
         out.append(FixProposal(id=_pid("hadolint", "manual", code, where), tool="hadolint", auto=False,
-                               title=f"{code} — 직접 확인 ({len(hits)}곳)",
+                               title=f"{code} — {'권고, 배포에 영향 없음' if advisory else '직접 확인'} ({len(hits)}곳)",
                                detail=f"Dockerfile {where}번째 줄: {hits[0][1] or code}"
-                                      + (" 버전 고정은 재현 가능한 빌드를 위한 권고이며, 그 자체로 취약점은 아닙니다." if code in ("DL3008", "DL3018", "DL3013", "DL3016") else ""),
+                                      + (" 버전 고정은 재현 가능한 빌드를 위한 권고이며, 그 자체로 취약점은 아닙니다." if code in _PIN_LINT else "")
+                                      + (" 보안 게이트를 빨간색으로 만들지 않습니다." if advisory else ""),
                                files=["Dockerfile"]))
     return out
 
