@@ -13,7 +13,9 @@ COPY . .
 RUN npm run build
 
 FROM nginxinc/nginx-unprivileged:stable-alpine AS runtime
-USER root
+USER 0
+# nginx variables must remain literal in the generated configuration.
+# hadolint ignore=SC2016
 RUN apk upgrade --no-cache && printf '%s\n' \
     'server {' \
     '  listen {{PORT}};' \
@@ -26,5 +28,5 @@ COPY --from=builder --chown=101:101 /app/{{OUTPUT_DIR}}/ /usr/share/nginx/html/
 USER 101
 EXPOSE {{PORT}}
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:{{PORT}}/health || exit 1
+    CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:{{PORT}}/health"]
 CMD ["nginx", "-g", "daemon off;"]

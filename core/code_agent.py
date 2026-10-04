@@ -972,6 +972,7 @@ def _build_code_prompt(
 - PostgreSQL(pg)의 NUMERIC/DECIMAL 값은 문자열로 옵니다 — 서버에서 숫자로 바꾸거나 pg.types.setTypeParser(1700, parseFloat) 를 설정하세요.
 - 파일을 나눠 만들 때 서로 부르는 함수·컴포넌트 이름과 export 방식을 정확히 맞추고, import 하는 파일(CSS 포함)은 반드시 함께 만듭니다.
 - React Router 를 쓰면 페이지 이동은 <Link>/useNavigate 로 합니다(<a href> 는 상태를 잃습니다).
+- 자리표시 이미지는 https://placehold.co/300x200?text=이름 형식을 씁니다(via.placeholder.com·placeimg.com 은 문을 닫아 이미지가 깨집니다).
 
 기존 파일 목록:
 {tree}
@@ -1614,11 +1615,11 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
     import 하지만 만들지 않은 CSS, CRA 식 process.env, 선언과 다른 패키지 이름.
     """
     try:
-        from build_readiness import (add_missing_export, analyze, api_prefix_rewrite, jsx_reference_rewrite,
+        from build_readiness import (add_missing_export, analyze, api_prefix_rewrite, dead_image_rewrite, jsx_reference_rewrite,
                                      pg_numeric_parser_rewrite, relative_api_rewrite, rename_package_import,
                                      router_link_rewrite, set_build_script, vite_env_rewrite, vite_out_dir_rewrite)
     except ImportError:  # pragma: no cover
-        from core.build_readiness import (add_missing_export, analyze, api_prefix_rewrite,  # type: ignore
+        from core.build_readiness import (add_missing_export, analyze, api_prefix_rewrite, dead_image_rewrite,  # type: ignore
                                           jsx_reference_rewrite, pg_numeric_parser_rewrite, relative_api_rewrite,
                                           rename_package_import, router_link_rewrite, set_build_script,
                                           vite_env_rewrite, vite_out_dir_rewrite)
@@ -1684,6 +1685,13 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
                 if updated != op.get("content"):
                     op["content"] = updated
                     notes.append(f"{prefix + rel}: localhost API 주소 → 상대 경로")
+        for rel in data.get("dead_images") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = dead_image_rewrite(op.get("content") or "")
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: 닫힌 이미지 서비스 주소 → placehold.co")
         for rel in data.get("pg_numeric_files") or []:
             op = by_path.get(prefix + rel)
             if op is not None:

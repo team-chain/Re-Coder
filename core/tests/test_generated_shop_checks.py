@@ -95,8 +95,11 @@ def test_auto_fixes_leave_only_the_code_mismatch(shop):
     assert "import.meta.env.VITE_STRIPE_KEY" in app and "'@stripe/stripe-js'" in app
     assert "VITE_STRIPE_KEY" in (shop / ".env.example").read_text()
     docker = (shop / "Dockerfile").read_text()
-    assert "RUN cd server && " in docker and "/app/server/node_modules ./server/node_modules" in docker
-    assert docker.index("RUN cd server") < docker.index("FROM node:20-alpine AS builder")
+    #: `RUN cd server` 대신 WORKDIR 로 들어갔다 나온다(같은 동작, Dockerfile 검사 DL3003 없음).
+    assert "WORKDIR /app/server\nRUN if [ -f package-lock.json ]; then npm ci --omit=dev" in docker
+    assert "/app/server/node_modules ./server/node_modules" in docker and "RUN cd server" not in docker
+    assert docker.index("WORKDIR /app/server") < docker.index("WORKDIR /app\n", docker.index("WORKDIR /app/server")) \
+        < docker.index("FROM node:20-alpine AS builder")
     errors = {i.code for i in br.analyze(shop).issues if i.severity == "error"}
     assert errors == {"NODE_IMPORT_NAME_MISSING"}
 

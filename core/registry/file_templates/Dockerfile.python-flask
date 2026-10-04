@@ -25,7 +25,8 @@ RUN if [ -f requirements.txt ]; then \
 RUN groupadd --gid 1001 appgroup && \
     useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser && \
     chown -R appuser:appgroup /app
-USER appuser
+# appuser(UID 1001). 숫자로 적어야 호스트·오케스트레이터가 비root 실행을 확인할 수 있다(Hadolint DL3066).
+USER 1001
 
 EXPOSE {{PORT}}
 

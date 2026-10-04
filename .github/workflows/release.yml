@@ -11,13 +11,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: core/requirements-release-win32-x64.txt
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: npm
@@ -38,7 +38,7 @@ jobs:
       - name: Exercise installed package with an isolated user profile
         shell: pwsh
         run: node extension/harness/release-smoke.js
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: recoder-win32-x64
           path: |
@@ -52,13 +52,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: core/requirements-release-linux-x64.txt
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: npm
@@ -75,7 +75,7 @@ jobs:
         run: ./.venv/bin/python scripts/build-release.py
       - name: Exercise installed package with an isolated user profile
         run: node extension/harness/release-smoke.js
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: recoder-linux-x64
           path: |
@@ -89,13 +89,13 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: core/requirements-release-darwin-arm64.txt
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: npm
@@ -112,7 +112,7 @@ jobs:
         run: ./.venv/bin/python scripts/build-release.py
       - name: Exercise installed package with an isolated user profile
         run: node extension/harness/release-smoke.js
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: recoder-darwin-arm64
           path: |

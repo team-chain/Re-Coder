@@ -70,6 +70,18 @@ def frontend_dockerfile(workspace: str, port: int = 3000) -> tuple[str, str] | N
     return content, template
 
 
+def _before_1_1_29(content: str, port: int) -> str:
+    """The node-static runtime as 1.1.7–1.1.28 wrote it (same behaviour, older Dockerfile syntax)."""
+    return content.replace(
+        'AS runtime\nUSER 0\n# nginx variables must remain literal in the generated configuration.\n'
+        '# hadolint ignore=SC2016\nRUN apk upgrade',
+        'AS runtime\nUSER root\nRUN apk upgrade',
+    ).replace(
+        f'    CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:{port}/health"]\n',
+        f'    CMD wget -q -O /dev/null http://127.0.0.1:{port}/health || exit 1\n',
+    )
+
+
 def generated_static_runtime_port(dockerfile: Path) -> int | None:
     """Recognize our runtime exactly; custom nginx images need an explicit check."""
     from deployment_inputs import dockerfile_runtime_port
@@ -91,6 +103,8 @@ def generated_static_runtime_port(dockerfile: Path) -> int | None:
             if output == 'dist' else 'RUN npm run build\nRUN test -s /app/build/index.html\n'
         ))
         variants = (expected, checked)
+        # Keep recognizing runtimes generated before 1.1.29 (USER root, shell-form HEALTHCHECK).
+        variants += tuple(_before_1_1_29(value, port) for value in variants)
         # Keep recognizing already generated 1.1.2–1.1.6 nginx runtimes.
         variants += tuple(value.replace('RUN apk upgrade --no-cache && printf', 'RUN printf') for value in variants)
         if content in (value.strip() for value in variants):
