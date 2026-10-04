@@ -191,7 +191,7 @@ def test_pre_deploy_fix_chain_makes_monorepo_runnable(tmp_path):
     assert 'CMD ["node", "backend/server.js"]' in text
     assert "EXPOSE 5000" in text and "localhost:5000/api/health" in text
     #: 워크스페이스는 루트에 설치된다 — 그 폴더에 설치해야 다음 COPY 가 깨지지 않는다.
-    assert "cd backend && " in text and "--workspaces=false" in text
+    assert "WORKDIR /app/backend\nRUN if [ -f package-lock.json ]" in text and "--workspaces=false" in text
     assert "COPY --from=deps --chown=appuser:appgroup /app/backend/node_modules ./backend/node_modules" in text
     left = [i.code for i in br.analyze(root).issues if i.severity == "error"]
     assert left == []

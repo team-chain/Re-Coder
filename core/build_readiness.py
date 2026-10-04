@@ -42,7 +42,7 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING", "NODE_PG_NUMERIC_STRINGS", "NODE_CLIENT_HARDCODED_LOCALHOST",
                 "NODE_ROUTER_ANCHOR_LINK", "NODE_MODULE_FORMAT_MISMATCH", "NODE_FRONTEND_NOT_BUILT",
                 "NODE_IMPORT_NAME_MISSING", "NODE_CLIENT_API_DOUBLE_PREFIX", "DOCKERFILE_ENTRY_MISSING",
-                "DOCKERFILE_DEPS_DIR_MISSING", "DOCKERFILE_NPM_SELF_UPGRADE"}
+                "DOCKERFILE_DEPS_DIR_MISSING", "DOCKERFILE_NPM_SELF_UPGRADE", "APP_DEAD_IMAGE_HOST"}
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -2423,13 +2423,43 @@ def _dockerfile_installs(text: str, folder: str) -> bool:
     return False
 
 
-def _install_line(files: "ProjectFiles", folder: str) -> str:
+def _stage_workdir(lines: list[str], index: int) -> Optional[str]:
+    """index 줄이 속한 빌드 단계의 현재 WORKDIR(절대 경로일 때만). 모르면 None."""
+    workdir = None
+    for line in lines[:index]:
+        words = line.split()
+        if not words:
+            continue
+        op = words[0].upper()
+        if op == "FROM":
+            workdir = None
+        elif op == "WORKDIR" and len(words) > 1:
+            target = words[1]
+            workdir = (target.rstrip("/") or "/") if target.startswith("/") and "$" not in target else None
+    return workdir
+
+
+def _in_folder(folder: str, commands: str, workdir: Optional[str], *, pragma: str = "") -> list[str]:
+    """하위 폴더에서 명령을 실행하는 줄들.
+
+    단계의 WORKDIR 를 알면 `WORKDIR <폴더>` → `RUN …` → `WORKDIR <원래>` 로 쓴다(`RUN cd` 와 같은 동작,
+    Dockerfile 검사 DL3003 을 만들지 않는다). 모르면 예전처럼 `RUN cd <폴더> && …`.
+    """
+    head = [pragma] if pragma else []
+    if workdir:
+        target = f"{workdir.rstrip('/')}/{folder.strip('/')}" if workdir != "/" else f"/{folder.strip('/')}"
+        return [f"WORKDIR {target}", *head, f"RUN {commands}", f"WORKDIR {workdir}"]
+    return [*head, f"RUN cd {folder} && {commands}"]
+
+
+def _install_line(files: "ProjectFiles", folder: str, workdir: Optional[str] = None) -> list[str]:
     if files.exists(f"{folder}/yarn.lock"):
-        return f"RUN cd {folder} && yarn install --frozen-lockfile"
+        return _in_folder(folder, "yarn install --frozen-lockfile", workdir)
     if files.exists(f"{folder}/pnpm-lock.yaml"):
-        return f"RUN cd {folder} && npm install -g pnpm && pnpm install --frozen-lockfile"
-    return (f"RUN cd {folder} && if [ -f package-lock.json ]; then npm ci || npm install; "
-            "else npm install; fi")
+        #: pnpm 버전은 그 폴더의 lock 파일을 따른다(고정하지 않음).
+        return _in_folder(folder, "npm install -g pnpm && pnpm install --frozen-lockfile", workdir,
+                          pragma="# hadolint ignore=DL3016")
+    return _in_folder(folder, "if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi", workdir)
 
 
 def add_subproject_installs(text: str, folders: list[str], files: "ProjectFiles") -> str:
@@ -2453,7 +2483,9 @@ def add_subproject_installs(text: str, folders: list[str], files: "ProjectFiles"
     after = ["# ReCoder: 빌드에만 쓰는 하위 폴더 의존성은 실행 이미지에 넣지 않는다(크기·보안 검사).",
              "RUN rm -rf " + " ".join(f"{f}/node_modules" for f in todo)]
     before = ["# ReCoder: build 스크립트가 " + ", ".join(f"{f}/" for f in todo) + " 에서 빌드하므로 그 의존성도 설치한다."]
-    before += [_install_line(files, f) for f in todo]
+    workdir = _stage_workdir(lines, index)
+    for f in todo:
+        before += _install_line(files, f, workdir)
     lines[end + 1:end + 1] = after
     lines[index:index] = before
     return newline.join(lines)
@@ -2568,8 +2600,8 @@ def add_runtime_subproject_install(text: str, folder: str, npm_workspace: bool =
     lines[deps_end + 1:deps_end + 1] = [
         f"# ReCoder: 서버가 {folder}/package.json 의 패키지를 쓰므로 그 폴더 의존성도 설치한다.",
         f"COPY {folder}/package.json {folder}/package-lock.json* ./{folder}/",
-        f"RUN cd {folder} && if [ -f package-lock.json ]; then npm ci --omit=dev{ws} || npm install --omit=dev{ws}; "
-        f"else npm install --omit=dev{ws}; fi",
+        *_in_folder(folder, f"if [ -f package-lock.json ]; then npm ci --omit=dev{ws} || npm install --omit=dev{ws}; "
+                            f"else npm install --omit=dev{ws}; fi", _stage_workdir(lines, deps_end + 1)),
     ]
     return newline.join(lines)
 
@@ -2753,6 +2785,40 @@ def _check_versions_online(files: "ProjectFiles", result: Readiness) -> None:
             fix, manifest, auto))
 
 
+#: 문을 닫은 이미지 자리표시 서비스. AI 가 만든 코드·초기 데이터에 자주 들어가 화면의 이미지가 전부 깨진다
+#: (2026-10-04 실기기 쇼핑몰: via.placeholder.com). 같은 주소 형식을 받는 서비스로 바꾼다.
+_DEAD_IMAGE_HOST = re.compile(r"https?://(?:via\.placeholder\.com|placeholder\.com(?=/\d)|placeimg\.com)/", re.I)
+_DEAD_IMAGE_SOURCES = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte", ".html", ".css",
+                       ".sql", ".py", ".json", ".yml", ".yaml")
+
+
+def dead_image_rewrite(text: str) -> str:
+    """via.placeholder.com → placehold.co(크기·색·?text= 형식이 같다), placeimg.com/W/H/… → picsum.photos/W/H."""
+    text = re.sub(r"https?://via\.placeholder\.com/", "https://placehold.co/", text, flags=re.I)
+    text = re.sub(r"https?://placeholder\.com/(?=\d)", "https://placehold.co/", text, flags=re.I)
+    return re.sub(r"https?://placeimg\.com/(\d+)/(\d+)(?:/[A-Za-z]+)*", r"https://picsum.photos/\1/\2", text, flags=re.I)
+
+
+def _check_dead_image_hosts(files: "ProjectFiles", result: "Readiness") -> None:
+    hits: list[str] = []
+    for rel in files.files():
+        if not rel.lower().endswith(_DEAD_IMAGE_SOURCES) or "/node_modules/" in f"/{rel}" or rel.endswith("package-lock.json"):
+            continue
+        text = files.read(rel)
+        if text and _DEAD_IMAGE_HOST.search(text):
+            hits.append(rel)
+    if not hits:
+        return
+    result.fix_data["dead_images"] = hits
+    seeded = any(rel.endswith(".sql") or re.search(r"\bINSERT\s+INTO\b", files.read(rel) or "", re.I) for rel in hits)
+    result.issues.append(ReadinessIssue(
+        "APP_DEAD_IMAGE_HOST", WARNING,
+        f"코드가 문을 닫은 이미지 서비스(via.placeholder.com 등)를 씁니다: {', '.join(hits[:4])}. 화면의 이미지가 깨져 보입니다.",
+        "지금 동작하는 같은 형식의 주소(placehold.co)로 바꾸세요(자동 수정 가능)."
+        + (" 이미 만든 DB 에 들어간 초기 데이터는 그대로입니다 — 상품 데이터를 다시 넣거나 DB 볼륨을 지운 뒤 다시 배포하세요." if seeded else ""),
+        hits[0], True))
+
+
 def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]] = None,
             *, dockerfile: Optional[str] = "Dockerfile", online: bool = False) -> Readiness:
     """프로젝트(와 Dockerfile)를 읽어 빌드·실행 가능성을 판정한다.
@@ -2767,6 +2833,7 @@ def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]
             _check_versions_online(files, result)
     elif result.runtime == "python":
         _analyze_python(files, result)
+    _check_dead_image_hosts(files, result)
     if result.local_data_files:
         shown = ", ".join(result.local_data_files[:3])
         result.issues.append(ReadinessIssue(
@@ -3264,6 +3331,13 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
             updated = text
             for old_pkg, new_pkg in typos.items():
                 updated = rename_package_import(updated, old_pkg, new_pkg)
+            if updated != text:
+                changed += [rel, _backup(root, rel, text)]
+                _write_raw(root / rel, updated)
+    elif code == "APP_DEAD_IMAGE_HOST":
+        for rel in before.fix_data.get("dead_images") or []:
+            text = _read_raw(root / rel)
+            updated = dead_image_rewrite(text)
             if updated != text:
                 changed += [rel, _backup(root, rel, text)]
                 _write_raw(root / rel, updated)

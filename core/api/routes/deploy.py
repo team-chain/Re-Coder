@@ -2250,10 +2250,11 @@ def _normalise_scan_result(scan_type: str, target: str, raw: dict) -> dict:
             if level == "error":
                 critical_count += 1
                 severity = "CRITICAL"
-            elif level == "warning":
+            elif level == "warning" and str(v.get("code") or "") not in _HADOLINT_ADVISORY:
                 high_count += 1
                 severity = "HIGH"
             else:
+                #: 버전 고정·RUN 합치기 같은 권고는 "중간" 으로 센다 — 보안 게이트를 빨갛게 만들지 않는다.
                 medium_count += 1
                 severity = "MEDIUM"
             findings.append({"severity": severity, **v})
@@ -2411,10 +2412,55 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
     normalised = _normalise_scan_result(scan_type, target_for_log, raw)
     if scan_type == "gitleaks" and normalised.get("status") == "ok":
         normalised = _without_local_env_keys(normalised, target_for_log)
+    if scan_type == "hadolint" and normalised.get("status") == "ok":
+        normalised = _hadolint_headline(normalised)
     if scan_type == "trivy" and normalised.get("status") == "ok":
         normalised = await _with_trivy_headline(normalised, workspace_path)
     _log_scan_to_session(scan_type, target_for_log, normalised)
     return normalised
+
+
+#: Hadolint 가 "warning" 으로 내지만 보안·동작 문제가 아닌 권고. 예전에는 전부 "높음" 으로 세서
+#: ReCoder 가 만든 Dockerfile 도 보안 게이트가 빨간색이었다(2026-10-04 실기기, 7건).
+_HADOLINT_ADVISORY = {
+    "DL3003",  # RUN 안의 cd 대신 WORKDIR
+    "DL3008", "DL3013", "DL3016", "DL3018", "DL3028",  # 패키지 버전 고정
+    "DL3059",  # 연속된 RUN 합치기
+    "DL3066",  # 숫자 사용자 ID
+}
+
+_HADOLINT_KO = {
+    "DL3000": "WORKDIR 상대 경로", "DL3002": "root 로 실행", "DL3003": "RUN 안의 cd",
+    "DL3006": "베이스 이미지 태그 없음", "DL3007": "latest 태그", "DL3008": "apt 버전 미고정",
+    "DL3009": "apt 목록 캐시", "DL3013": "pip 버전 미고정", "DL3015": "apt 추천 패키지",
+    "DL3016": "npm 버전 미고정", "DL3018": "apk 버전 미고정", "DL3019": "apk 캐시",
+    "DL3020": "ADD 대신 COPY", "DL3025": "실행 명령 셸 형식", "DL3028": "gem 버전 미고정",
+    "DL3042": "pip 캐시", "DL3059": "RUN 여러 개", "DL3066": "사용자 이름(숫자 ID 권장)",
+    "DL4006": "파이프 실패 무시",
+}
+
+
+def _hadolint_headline(report: dict) -> dict:
+    """요약을 AI 영어 문장 대신 "무엇이 몇 줄에" 로. AI 요약은 ai_summary 로 남긴다."""
+    findings = report.get("findings") or []
+    if not findings:
+        summary = "Dockerfile 검사 — 규칙 위반 없음"
+    else:
+        must = [f for f in findings if f.get("severity") in ("CRITICAL", "HIGH")]
+        advisory = [f for f in findings if f not in must]
+
+        def label(items: list[dict]) -> str:
+            parts = []
+            for f in items[:4]:
+                code = str(f.get("code") or "")
+                parts.append(f"{_HADOLINT_KO.get(code, code)}({f.get('line')}번째 줄)")
+            return ", ".join(parts) + (f" 외 {len(items) - 4}건" if len(items) > 4 else "")
+
+        summary = "Dockerfile 검사 — " + " · ".join(filter(None, [
+            f"고칠 것 {len(must)}건: {label(must)}" if must else "",
+            f"권고 {len(advisory)}건: {label(advisory)}" if advisory else "",
+        ]))
+    return {**report, "summary": summary, "ai_summary": report.get("summary") or ""}
 
 
 def _without_local_env_keys(report: dict, workspace: str) -> dict:

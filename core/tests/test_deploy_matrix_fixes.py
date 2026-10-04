@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 import build_readiness as br
+from api.routes import deploy as d
 from build_failure import diagnose
 
 TEMPLATE = (Path(__file__).resolve().parents[1] / "registry" / "file_templates" / "Dockerfile.node-express").read_text(encoding="utf-8")
@@ -128,3 +129,53 @@ def test_run_failures_name_the_real_error():
     assert py.code == "APP_START_ERROR" and "main.py:3" in py.cause
     #: 이미 아는 원인(모듈 없음)은 그 규칙이 먼저다.
     assert diagnose("Error: Cannot find module '/app/index.js'", stage="run").code == "NODE_MODULE_NOT_FOUND"
+
+
+def test_subfolder_install_falls_back_to_cd_when_the_workdir_is_unknown():
+    """WORKDIR 를 모르는 Dockerfile(변수·상대 경로)에서는 예전처럼 `RUN cd` 로 넣는다."""
+    lines = ["FROM node:22-alpine AS deps", "WORKDIR $APP_HOME", "RUN npm ci"]
+    assert br._stage_workdir(lines, 3) is None
+    assert br._in_folder("api", "npm ci", None) == ["RUN cd api && npm ci"]
+    assert br._stage_workdir(["FROM a", "WORKDIR /srv/", "FROM b AS c", "RUN x"], 4) is None, "단계가 바뀌면 WORKDIR 도 새로"
+    assert br._in_folder("api", "npm ci", "/srv") == ["WORKDIR /srv/api", "RUN npm ci", "WORKDIR /srv"]
+
+
+SEED = """await pool.query(`INSERT INTO products (name, image) VALUES
+  ('Headphones', 'https://via.placeholder.com/300?text=Headphones'),
+  ('Lamp', 'http://via.placeholder.com/150x150/09f/fff.png')`);
+"""
+
+
+def test_dead_placeholder_images_are_flagged_and_rewritten(tmp_path):
+    """2026-10-04 실기기: 생성한 쇼핑몰 상품 이미지가 전부 깨졌다(via.placeholder.com 은 서비스 종료)."""
+    assert br.dead_image_rewrite("src='https://via.placeholder.com/400'") == "src='https://placehold.co/400'"
+    assert br.dead_image_rewrite("https://placeimg.com/640/480/tech") == "https://picsum.photos/640/480"
+    assert br.dead_image_rewrite("https://placehold.co/400 https://example.com/placeholder.com/x") == \
+        "https://placehold.co/400 https://example.com/placeholder.com/x", "살아 있는 주소·다른 도메인은 그대로"
+    root = _write(tmp_path / "shop", {
+        "package.json": json.dumps({"scripts": {"start": "node server.js"}, "dependencies": {"express": "^4"}}),
+        "server.js": "require('express')().listen(process.env.PORT || 3000);",
+        "db.js": SEED,
+        "src/Card.jsx": "export default () => <img src={p.image || 'https://via.placeholder.com/400'} />;\n",
+        "node_modules/x/index.js": "'https://via.placeholder.com/1'",
+    })
+    issue = next(i for i in br.analyze(root).issues if i.code == "APP_DEAD_IMAGE_HOST")
+    assert issue.severity == "warning" and issue.auto_fix and "DB" in issue.fix
+    assert "node_modules" not in issue.message
+    br.apply_fix(root, "APP_DEAD_IMAGE_HOST")
+    assert "https://placehold.co/300?text=Headphones" in (root / "db.js").read_text(encoding="utf-8")
+    assert "https://placehold.co/150x150/09f/fff.png" in (root / "db.js").read_text(encoding="utf-8")
+    assert "https://placehold.co/400" in (root / "src/Card.jsx").read_text(encoding="utf-8")
+    assert "APP_DEAD_IMAGE_HOST" not in {i.code for i in br.analyze(root).issues}
+    #: 배포 직전 자동 수정 대상이 아니다(경고) — 사용자가 누를 때만 바꾼다.
+    assert "APP_DEAD_IMAGE_HOST" not in d._PRE_DEPLOY_WARNING_FIXES
+
+
+def test_generated_code_gets_live_placeholder_images(tmp_path):
+    import code_agent as ca
+    ops = [{"action": "create", "file": "package.json", "content": json.dumps({"dependencies": {"express": "^4"}}), "language": "", "rationale": ""},
+           {"action": "create", "file": "db.js", "content": SEED, "language": "", "rationale": ""}]
+    fixed, notes = ca._autofix_ops(tmp_path, "", ops)
+    db = next(o for o in fixed if o["file"] == "db.js")["content"]
+    assert "via.placeholder.com" not in db and "placehold.co/300?text=Headphones" in db
+    assert any("placehold.co" in n for n in notes)

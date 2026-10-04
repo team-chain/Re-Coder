@@ -240,3 +240,46 @@ def test_recoder_backups_are_local_when_ignored(tmp_path):
     assert not sf.local_env_only(root, "server.js")
     (root / ".gitignore").write_text(".env\n", encoding="utf-8")
     assert not sf.local_env_only(root, ".recoder/backups/server.js.1"), "커밋될 수 있으면 유출로 센다"
+
+
+def test_cd_and_shell_form_fixes_keep_the_same_behaviour(tmp_path):
+    """2026-10-04 실기기: ReCoder 가 넣은 `RUN cd frontend && …` 와 HEALTHCHECK 셸 형식이 "직접 확인" 으로만 떴다."""
+    text = ("FROM node:22-alpine AS builder\nWORKDIR /app\nCOPY . .\n"
+            "RUN cd frontend && if [ -f package-lock.json ]; then npm ci; else npm install; fi\n"
+            "FROM node:22-alpine\nWORKDIR /srv\n"
+            "HEALTHCHECK --interval=30s \\\n    CMD curl -f http://localhost:5000/api/health || exit 1\n"
+            "CMD node server.js && echo done\n")
+    root = _write(tmp_path, {"Dockerfile": text})
+    reports = {"hadolint": {"findings": [{"line": 4, "code": "DL3003", "message": "Use WORKDIR"},
+                                         {"line": 7, "code": "DL3025", "message": "JSON"},
+                                         {"line": 9, "code": "DL3025", "message": "JSON"}]}}
+    props = sf.plan(str(root), reports)
+    assert all(p.auto for p in props), [p.title for p in props]
+    sf.apply(str(root), reports, [p.id for p in props])
+    out = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert "WORKDIR /app/frontend\nRUN if [ -f package-lock.json ]; then npm ci; else npm install; fi\nWORKDIR /app\n" in out
+    assert '    CMD ["/bin/sh", "-c", "curl -f http://localhost:5000/api/health || exit 1"]' in out
+    assert 'CMD ["/bin/sh", "-c", "node server.js && echo done"]' in out
+    #: 헬스 경로·포트는 그대로 읽힌다(배포 점검이 같은 값을 본다).
+    import build_readiness as br
+    facts = br._dockerfile_facts(out)
+    assert facts["health_port"] == 5000 and facts["health_path"] == "/api/health"
+
+
+def test_shell_form_is_left_alone_when_the_dockerfile_changes_the_shell(tmp_path):
+    root = _write(tmp_path, {"Dockerfile": 'FROM mcr.microsoft.com/powershell\nSHELL ["pwsh", "-c"]\nCMD Write-Host $env:X\n'})
+    reports = {"hadolint": {"findings": [{"line": 3, "code": "DL3025", "message": "JSON"}]}}
+    (p,) = sf.plan(str(root), reports)
+    assert not p.auto
+
+
+def test_advisory_lint_rules_do_not_turn_the_gate_red(tmp_path):
+    from api.routes import deploy as d
+    raw = {"violations": [{"line": 3, "code": "DL3018", "level": "warning", "message": "pin"},
+                          {"line": 9, "code": "DL3025", "level": "warning", "message": "json"},
+                          {"line": 2, "code": "DL3000", "level": "error", "message": "abs"}]}
+    rep = d._hadolint_headline(d._normalise_scan_result("hadolint", "Dockerfile", {**raw, "success": True, "summary": "AI text"}))
+    assert (rep["critical_count"], rep["high_count"], rep["medium_count"]) == (1, 1, 1)
+    assert rep["summary"].startswith("Dockerfile 검사 — 고칠 것 2건") and "apk 버전 미고정(3번째 줄)" in rep["summary"]
+    assert rep["ai_summary"] == "AI text"
+    assert d._hadolint_headline({"findings": []})["summary"] == "Dockerfile 검사 — 규칙 위반 없음"
