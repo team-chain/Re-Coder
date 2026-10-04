@@ -3,7 +3,8 @@
 ## 1.1.29 — 2026-10-04 (Preview)
 
 **보안 게이트**
-- ReCoder 가 만든 Dockerfile 이 보안 게이트를 빨간색으로 만들던 문제를 고쳤습니다. 템플릿은 Dockerfile 검사(Hadolint)를 통과하고, 버전 고정 권고처럼 보안·동작 문제가 아닌 항목은 "중간"으로 셉니다.
+- ReCoder 가 만든 Dockerfile 이 보안 게이트를 빨간색으로 만들던 문제를 고쳤습니다. 템플릿은 Dockerfile 검사(Hadolint 2.15)를 통과하고, 버전 고정 권고처럼 보안·동작 문제가 아닌 항목은 "중간"으로 셉니다.
+- React·Vite 정적 프론트엔드 템플릿도 HEALTHCHECK 를 JSON 형식으로 씁니다(같은 동작). 이미 만들어 둔 정적 프론트엔드 Dockerfile 은 예전처럼 ReCoder 것으로 인식합니다.
 - 하위 폴더 의존성을 설치하는 자동 수정이 `RUN cd` 대신 `WORKDIR` 를 씁니다(같은 동작).
 - 보안 검사 수정안이 `RUN cd …` 를 WORKDIR 로, 셸 형식 CMD·ENTRYPOINT·HEALTHCHECK 를 같은 동작의 JSON 형식으로 고칩니다.
 - Dockerfile 검사 결과를 AI 영어 요약 대신 "무엇이 몇 번째 줄에" 로 보여 줍니다.
