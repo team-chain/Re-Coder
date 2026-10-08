@@ -111,6 +111,9 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "sts:GetCallerIdentity":        "계정 단위 조회 — 리소스가 없다",
         "ecr:GetAuthorizationToken":    "계정 단위 토큰 발급",
         "ecs:RegisterTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
+        "ecs:DescribeTaskDefinition":   "AWS 가 리소스 단위 제한 미지원 — 캔버스 승인 대상 조회",
+        "elasticloadbalancing:DescribeTargetGroups": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "elasticloadbalancing:DescribeLoadBalancers": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
         # FR-04-01 — 연결하는 IAM 사용자·정책 이름을 **정책을 만드는 시점에는
         # 알 수 없다.** 읽기 전용 조회라 범위를 좁힐 근거도 없다.
@@ -261,13 +264,8 @@ PINNED_ACTIONS: dict[str, str] = {
 #: 아직 코드가 안 쓰지만 미리 발급하는 권한. **카드 번호를 반드시 적는다.**
 #: 그 카드가 끝나면 코드에서 호출이 발견되고, 아래 자기청소 테스트가
 #: "이제 여기서 빼라"고 알려준다.
-PLANNED_ACTIONS: dict[str, str] = {
-    # FR-05-03 S3 배포 BYO 전환으로 대부분은 코드가 실제로 쓰게 됐다
-    # (core/api/routes/deploy_s3.py). 아래 셋만 아직 호출이 없다.
-    "s3:GetObject":
-        "FR-05-03 — 배포된 사이트를 코어가 되읽는 경로(배포 검증)가 아직 없다. "
-        "공개 읽기는 버킷 정책이 익명에게 주는 것이라 사용자 IAM 과 무관하다",
-}
+# s3:GetObject is now exercised by grounded_repair.refresh_lambda.
+PLANNED_ACTIONS: dict[str, str] = {}
 
 
 @pytest.fixture(scope="module")
@@ -465,6 +463,9 @@ def test_passrole_present_even_though_no_python_call_shows_it():
     ("sts", "get_caller_identity",       "sts:GetCallerIdentity"),
     ("logs", "describe_log_groups",      "logs:DescribeLogGroups"),
     ("s3", "list_objects_v2",            "s3:ListBucket"),
+    ("elbv2", "describe_target_groups", "elasticloadbalancing:DescribeTargetGroups"),
+    ("elbv2", "describe_load_balancers", "elasticloadbalancing:DescribeLoadBalancers"),
+    ("budgets", "describe_budgets", "budgets:ViewBudget"),
     # 이름에 속으면 안 되는 것 — AWS 문서상 Converse 는 InvokeModel 로 인가된다.
     ("bedrock-runtime", "converse",      "bedrock:InvokeModel"),
     ("bedrock", "list_foundation_models", "bedrock:ListFoundationModels"),

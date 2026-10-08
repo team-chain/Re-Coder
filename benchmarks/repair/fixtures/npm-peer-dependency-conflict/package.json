@@ -1,0 +1,12 @@
+{
+  "name": "repair-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node app.cjs"
+  },
+  "dependencies": {
+    "react": "18.2.0",
+    "react-dom": "17.0.2"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "iam": {
+    "action": "ecr:BatchGetImage",
+    "resource": "arn:aws:ecr:ap-northeast-2:111122223333:repository/repair-fixture"
+  }
+}

@@ -216,7 +216,10 @@ _SENSITIVE_NAME_PATTERNS = [
 
     re.compile(r"\.(pem|key|p12|pfx|jks|keystore)$", re.IGNORECASE),  # 키·인증서
     re.compile(r"^id_(rsa|dsa|ecdsa|ed25519)(\..+)?$", re.IGNORECASE),
-    re.compile(r"^credentials$", re.IGNORECASE),                     # ~/.aws/credentials 사본
+    re.compile(r"^credentials(\.(json|ya?ml|csv|txt))?$", re.IGNORECASE),  # ~/.aws/credentials 사본·JSON
+    re.compile(r"\.tfstate(\.backup)?$", re.IGNORECASE),              # Terraform 상태(비밀 포함)
+    re.compile(r"^service[-_]?account.*\.json$", re.IGNORECASE),       # GCP 서비스 계정 키
+    re.compile(r"\.kdbx$", re.IGNORECASE),                            # 비밀번호 DB
     re.compile(r"^\.(npmrc|netrc|htpasswd|git-credentials|pgpass)$", re.IGNORECASE),
     re.compile(r"^secrets?\.(ya?ml|json|toml|ini|txt)$", re.IGNORECASE),
 ]
@@ -251,7 +254,20 @@ def content_type(path: str) -> str:
     흔한 원인이다.
     """
     ext = os.path.splitext(path)[1].lower()
-    return _CONTENT_TYPES.get(ext, "application/octet-stream")
+    if ext in _CONTENT_TYPES:
+        return _CONTENT_TYPES[ext]
+    return _MORE_CONTENT_TYPES.get(ext, "application/octet-stream")
+
+
+#: 확장 쪽 업로드 허용 목록에 있는 나머지 형식 — 예전엔 전부 octet-stream 이라 PDF·CSV 링크가 다운로드됐다.
+_MORE_CONTENT_TYPES = {
+    ".xml": "application/xml", ".webmanifest": "application/manifest+json", ".avif": "image/avif",
+    ".pdf": "application/pdf", ".mp4": "video/mp4", ".mp3": "audio/mpeg", ".webm": "video/webm",
+    ".ogg": "audio/ogg", ".wav": "audio/wav", ".glb": "model/gltf-binary", ".gltf": "model/gltf+json",
+    ".ttf": "font/ttf", ".otf": "font/otf", ".eot": "application/vnd.ms-fontobject", ".bmp": "image/bmp",
+    ".apng": "image/apng", ".cjs": "application/javascript; charset=utf-8", ".md": "text/markdown; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8", ".tsv": "text/tab-separated-values; charset=utf-8",
+}
 
 
 # ---------------------------------------------------------------------------

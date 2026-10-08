@@ -158,7 +158,7 @@ class ProjectScanner:
         if has_requirements:
             # requirements.txt 내용 확인
             try:
-                content = (workspace / "requirements.txt").read_text(encoding="utf-8")
+                content = (workspace / "requirements.txt").read_text(encoding="utf-8-sig")
                 if "fastapi" in content.lower():
                     return ProjectStack.PYTHON_FASTAPI
                 elif "flask" in content.lower():
@@ -173,7 +173,7 @@ class ProjectScanner:
         if has_package_json:
             # package.json 내용 확인
             try:
-                content = (workspace / "package.json").read_text(encoding="utf-8")
+                content = (workspace / "package.json").read_text(encoding="utf-8-sig")
                 if "next" in content.lower():
                     return ProjectStack.NODE_NEXT
                 else:
@@ -249,7 +249,7 @@ class ProjectScanner:
         except ImportError:  # pragma: no cover
             from core.infra_agent import _detect_node_entry_and_port  # type: ignore
         try:
-            package = json.loads((workspace / "package.json").read_text(encoding="utf-8", errors="replace"))
+            package = json.loads((workspace / "package.json").read_text(encoding="utf-8-sig", errors="replace"))
         except Exception:
             package = {}
         try:

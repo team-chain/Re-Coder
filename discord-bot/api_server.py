@@ -38,6 +38,7 @@ from bridge_settings import (
     get_settings_snapshot,
 )
 from recoder_bridge import hub as bridge_hub
+from connection_api import ConnectionService, connection_errors
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 
 # bot 인스턴스 — start_api_server() 호출 시 주입
 _bot = None
+connections = ConnectionService(lambda: _bot)
 
 
 def set_bot(bot) -> None:
@@ -129,7 +131,10 @@ async def handle_register(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         return web.json_response({"ok": False, "error": "guild_id는 정수여야 합니다."}, status=400)
 
-    set_api(guild_id, api_base.rstrip("/"), api_token)
+    try:
+        set_api(guild_id, api_base.rstrip("/"), api_token)
+    except ValueError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
     log.info("Guild %d API 자동 등록 완료: %s", guild_id, api_base)
 
     channels = body.get("channels") or {}
@@ -395,12 +400,14 @@ async def handle_bridge_status(request: web.Request) -> web.Response:
     # 봇이 알고 있는 채널 정보로 이름까지 채워준다 (UI 표시용)
     channel_name = None
     channel_guild_name = None
+    channel_guild_id = None
     if _bot is not None and active_channel_id:
         try:
             ch = _bot.get_channel(active_channel_id)
             if ch is not None:
                 channel_name = getattr(ch, "name", None)
                 channel_guild_name = getattr(getattr(ch, "guild", None), "name", None)
+                channel_guild_id = getattr(getattr(ch, "guild", None), "id", None)
         except Exception:
             pass
 
@@ -408,6 +415,8 @@ async def handle_bridge_status(request: web.Request) -> web.Response:
         "active_channel_id": str(active_channel_id) if active_channel_id else "",
         "channel_name": channel_name,
         "guild_name": channel_guild_name,
+        "guild_id": str(channel_guild_id) if channel_guild_id else "",
+        "bot_user": str(_bot.user) if _bot is not None and getattr(_bot, "user", None) else "",
         "connected_clients": bridge_hub.connected_count,
         "settings": snapshot,
     })
@@ -621,14 +630,21 @@ async def handle_bridge_set_channel(request: web.Request) -> web.Response:
     })
 
 
+async def handle_canvas_event(request: web.Request) -> web.Response:
+    from canvas_events import send_canvas_event
+    return await send_canvas_event(request, authorized=_check_auth(request), bot=_bot, channel_id=get_make_channel_id())
+
+
 def create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[connection_errors], client_max_size=64 * 1024)
+    connections.install(app)
     app.router.add_get("/api/v1/health",                  handle_health)
     app.router.add_post("/api/v1/register",               handle_register)
     app.router.add_delete("/api/v1/register/{guild_id}",  handle_unregister)
     app.router.add_post("/api/v1/github/webhook",         handle_github_webhook)
     # ReCoder Bridge (Discord → VSCode 실시간 코드 삽입) 설정 API
     app.router.add_get("/api/v1/bridge/status",           handle_bridge_status)
+    app.router.add_post("/api/v1/bridge/events",          handle_canvas_event)
     app.router.add_put("/api/v1/bridge/channel",          handle_bridge_set_channel)
     app.router.add_get("/api/v1/bridge/invite-url",       handle_bridge_invite_url)
     app.router.add_get("/api/v1/bridge/guilds",           handle_bridge_guilds)

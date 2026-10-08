@@ -16,7 +16,7 @@ import logging
 import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from schemas import (
     ApprovalLevel,
@@ -62,9 +62,11 @@ the base Dockerfile template for this specific project.
 - Keep the base OS patched: keep the template's OS upgrade step (apt-get upgrade /
   apk upgrade). Known CRITICAL CVEs in an unpatched base image block deployment.
 - Node.js images ship a bundled npm whose vendored `tar` is often vulnerable: in the
-  final (runtime) stage either upgrade it (`RUN npm install -g npm@latest`) or remove
-  npm entirely (`RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm
-  /usr/local/bin/npx`) when the app starts with `node` directly. Keep this step.
+  final (runtime) stage remove npm (`RUN rm -rf /usr/local/lib/node_modules/npm
+  /usr/local/bin/npm /usr/local/bin/npx`) and start the app with `node` directly
+  (for Next.js: `node node_modules/next/dist/bin/next start -H 0.0.0.0 -p <port>`).
+  NEVER run `npm install -g npm@latest` — upgrading npm in place breaks the build
+  ("Cannot find module 'promise-retry'"). Keep this step.
 - Keep the port ({port}) and run command ({run_command}) exactly as given above.
 
 ## Output format
@@ -161,6 +163,30 @@ Return ONLY the JSON object, no prose.
 # ---------------------------------------------------------------------------
 
 
+
+try:
+    from scan_process import named_docker_run as _named_docker_run, stop_scan_process as _stop_scan_process  # noqa: E402
+except ImportError:  # pragma: no cover - 패키지(core.*)로 임포트될 때
+    from core.scan_process import named_docker_run as _named_docker_run, stop_scan_process as _stop_scan_process  # noqa: E402
+
+
+#: Trivy 는 같은 캐시 볼륨을 쓰는 두 번째 실행을 잠금에서 기다리게 한다.
+#: 계획 검사와 빌드 후 검사가 겹치면 둘 다 제한 시간까지 멈췄다 — 한 번에 하나씩.
+_TRIVY_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _trivy_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _TRIVY_LOCKS.get(id(loop))
+    if lock is None:
+        _TRIVY_LOCKS.clear()  # 이전(닫힌) 루프의 잠금은 버린다
+        lock = _TRIVY_LOCKS[id(loop)] = asyncio.Lock()
+    return lock
+
+#: 첫 실행은 취약점 DB(수백 MB) 내려받기로 5분을 넘기기도 한다.
+TRIVY_TIMEOUT_SECONDS = 420
+
+
 class InfraAgent:
     """
     Containerisation support agent.
@@ -220,15 +246,26 @@ class InfraAgent:
             if "django" in deps_text:
                 return StackType.PYTHON_DJANGO
 
-        # Node
+        # Node — 루트 package.json 이 스크립트만 갖고 실제 서버 의존성은 server/ 같은 하위 폴더에
+        # 있는 모노레포(AI 생성 쇼핑몰)도 본다. 예전에는 'unknown' 이 돼 AI 맞춤 생성을 건너뛰었다.
         if package_json.exists():
             pkg = _read_lower(package_json)
+            for sub in ("server", "backend", "api", "app"):
+                sub_pkg = ws / sub / "package.json"
+                if sub_pkg.exists():
+                    pkg += _read_lower(sub_pkg)
             if '"next"' in pkg or "'next'" in pkg:
                 return StackType.NODE_NEXT
             if '"@nestjs' in pkg:
                 return StackType.NODE_NEST
-            if '"express"' in pkg:
+            if '"express"' in pkg or '"fastify"' in pkg or '"koa"' in pkg:
                 return StackType.NODE_EXPRESS
+            try:
+                scripts = json.loads(package_json.read_text(encoding="utf-8", errors="replace")).get("scripts") or {}
+                if any(re.search(r"\bnode\b", str(v)) for v in scripts.values()):
+                    return StackType.NODE_EXPRESS
+            except (OSError, ValueError, AttributeError):
+                pass
 
         if go_mod.exists():
             return StackType.GO
@@ -260,6 +297,13 @@ class InfraAgent:
         4. Registry assembles the final content.
         5. Return InfraFileProposal.
         """
+        from static_frontend import frontend_dockerfile
+        frontend = frontend_dockerfile(workspace_path, project.default_port or 3000)
+        if frontend:
+            content, template_id = frontend
+            return InfraFileProposal(proposal_id=str(uuid.uuid4()), file_type=FileType.DOCKERFILE,
+                target_path='Dockerfile', content=content, base_template=template_id,
+                required_secrets=[], risk_level=RiskLevel.LOW, risk_reasons=[], approval_level=ApprovalLevel.CONFIRM)
         stack = await self.detect_stack(workspace_path)
         # Update project stack if it was unknown
         if project.stack == StackType.UNKNOWN:
@@ -315,7 +359,7 @@ class InfraAgent:
     def _enforce_safe_customisations(customisations: dict, stack, project) -> dict:
         """모델이 프롬프트 규칙을 무시해도 지켜야 하는 값을 강제한다.
 
-        - NODE_VERSION: EOL(< 20) 이거나 비어 있으면 22. 실기기에서 모델이 18 을 골라
+        - NODE_VERSION: EOL(< 22 — Node 20 은 2026-04 지원 종료) 이거나 비어 있으면 22. 실기기에서 모델이 18 을 골라
           베이스 OS CVE 로 배포가 차단됐다.
         - PORT / START_SCRIPT: 프로젝트 프로필이 아는 값을 모델 추측보다 우선한다.
         """
@@ -325,7 +369,7 @@ class InfraAgent:
             raw_v = str(out.get("NODE_VERSION", "")).strip()
             m = re.match(r"(\d{1,2})", raw_v)
             major = int(m.group(1)) if m else 0
-            if major < 20:
+            if major < 22:
                 out["NODE_VERSION"] = "22"
         port = getattr(project, "default_port", None)
         if port:
@@ -394,13 +438,16 @@ class InfraAgent:
         cmd = [
             "docker", "run", "--rm",
             "-v", "/var/run/docker.sock:/var/run/docker.sock",
+            "-v", "recoder-trivy-cache:/root/.cache/trivy",
             "aquasec/trivy", "image",
+            "--scanners", "vuln",
             "--format", "json",
             "--severity", "CRITICAL,HIGH",
             "--quiet",
             image_name,
         ]
-        returncode, stdout, stderr = await self._run_subprocess(cmd, timeout=300)
+        async with _trivy_lock():
+            returncode, stdout, stderr = await self._run_subprocess(cmd, timeout=TRIVY_TIMEOUT_SECONDS)
 
         if returncode != 0:
             logger.warning("Trivy scan failed (rc=%d): %s", returncode, stderr)
@@ -413,9 +460,13 @@ class InfraAgent:
             }
 
         try:
-            raw_data = json.loads(stdout) if stdout.strip() else {}
+            raw_data = json.loads(stdout)
         except json.JSONDecodeError:
-            raw_data = {}
+            return {"success": False, "error": "Trivy returned an empty or invalid JSON report."}
+        if (not isinstance(raw_data, dict) or not raw_data
+                or ('Results' not in raw_data and 'ArtifactName' not in raw_data)
+                or (raw_data.get('Results') is not None and not isinstance(raw_data['Results'], list))):
+            return {"success": False, "error": "Trivy report has an unsupported structure."}
 
         critical, high = self._filter_trivy_results(raw_data)
 
@@ -445,19 +496,32 @@ class InfraAgent:
         content = df_path.read_bytes()
 
         # Pipe content via stdin
-        proc = await asyncio.create_subprocess_exec(
+        hadolint_cmd, name = _named_docker_run([
             "docker", "run", "--rm", "-i", "hadolint/hadolint",
+            "hadolint", "--format", "json", "-",
+        ])
+        proc = await asyncio.create_subprocess_exec(
+            *hadolint_cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=content), timeout=120
-        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(input=content), timeout=120)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            await asyncio.shield(_stop_scan_process(proc, name))
+            raise
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-        violations = self._parse_hadolint_output(stdout + stderr)
+        try:
+            violations = json.loads(stdout)
+        except json.JSONDecodeError:
+            violations = None
+        if (proc.returncode not in (0, 1) or not isinstance(violations, list)
+                or not all(isinstance(v, dict) and 'code' in v and 'line' in v for v in violations)
+                or (proc.returncode != 0 and not violations)):
+            return {"success": False, "error": stderr or "Hadolint did not produce a valid report."}
         summary = await self._summarize_scan_results("hadolint", {"violations": violations})
 
         return {
@@ -480,6 +544,7 @@ class InfraAgent:
         gl_cmd = (
             "gitleaks detect --source /repo --no-git "
             "--report-format json --report-path /tmp/gl.json >/dev/null 2>&1; "
+            'status=$?; if [ "$status" -gt 1 ]; then exit "$status"; fi; '
             "cat /tmp/gl.json 2>/dev/null"
         )
         cmd = [
@@ -491,14 +556,16 @@ class InfraAgent:
         ]
         returncode, stdout, stderr = await self._run_subprocess(cmd, timeout=180)
 
-        # sh+cat 경로: cat 성공 시 0, 파일 없으면 1 — 둘 다 정상 처리.
-        if returncode not in (0, 1):
-            return {"success": False, "error": stderr}
+        # A missing report or scanner crash must never mean 'no secrets'.
+        if returncode != 0:
+            return {"success": False, "error": "Gitleaks failed to produce a complete report."}
 
         try:
-            raw_findings: list[dict] = json.loads(stdout) if stdout.strip() else []
+            raw_findings: list[dict] = json.loads(stdout)
         except json.JSONDecodeError:
-            raw_findings = []
+            return {"success": False, "error": "Gitleaks returned an empty or invalid JSON report."}
+        if not isinstance(raw_findings, list) or not all(isinstance(f, dict) for f in raw_findings):
+            return {"success": False, "error": "Gitleaks report has an unsupported structure."}
 
         # Sanitise: keep only metadata — strip actual secret values
         sanitised: list[dict] = []
@@ -526,24 +593,29 @@ class InfraAgent:
         self, scan_type: str, results: dict[str, Any]
     ) -> str:
         """Summarise scan results using Haiku (threat summary + recommended actions)."""
+        count = (int(results.get('critical_count', 0)) + int(results.get('high_count', 0))
+                 + int(results.get('finding_count', 0)) + len(results.get('violations', [])))
+        fallback = f"{scan_type}: 발견 항목 {count}개."
+        if count == 0:
+            return fallback
         findings_json = json.dumps(results, ensure_ascii=False)[:3000]
         prompt = _SCAN_SUMMARY_PROMPT.format(
             scan_type=scan_type,
             findings=findings_json,
         )
         try:
-            raw = await self._provider.complete(
+            raw = await asyncio.wait_for(self._provider.complete(
                 prompt=prompt,
                 model_preference="haiku",
                 agent="infra_agent",
                 operation="summarize_scan",
                 max_tokens=512,
-            )
+            ), timeout=12)
             parsed = self._extract_json_dict(raw)
             return parsed.get("threat_summary", raw[:300])
         except Exception as exc:
             logger.warning("Scan summary failed: %s", exc)
-            return f"Scan type: {scan_type}. Findings count: {len(str(results))}"
+            return fallback
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -634,6 +706,11 @@ class InfraAgent:
                     "installed": vuln.get("InstalledVersion"),
                     "fixed": vuln.get("FixedVersion"),
                     "title": vuln.get("Title", ""),
+                    #: 출처를 가르는 데 쓴다(베이스 이미지 OS 패키지 / 번들 npm / 앱 의존성).
+                    "target": result.get("Target", ""),
+                    "class": result.get("Class", ""),
+                    "type": result.get("Type", ""),
+                    "pkg_path": vuln.get("PkgPath", ""),
                 }
                 if severity == "CRITICAL":
                     critical.append(entry)
@@ -690,7 +767,14 @@ class InfraAgent:
     async def _run_subprocess(
         cmd: list[str], timeout: int = 300
     ) -> tuple[int, str, str]:
-        """Run a subprocess asynchronously and return (returncode, stdout, stderr)."""
+        """Run a subprocess asynchronously and return (returncode, stdout, stderr).
+
+        ``docker run`` 은 이름을 붙여 띄우고, 시간 초과·취소 때 컨테이너까지 지운다.
+        docker CLI 만 죽이면 스캐너 컨테이너는 계속 돌며 캐시 잠금을 쥐고 있어서,
+        다음 검사가 "cache may be in use" 로 또 멈췄다.
+        """
+        cmd, name = _named_docker_run(cmd)
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -706,10 +790,10 @@ class InfraAgent:
                 stderr_bytes.decode("utf-8", errors="replace"),
             )
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            await _stop_scan_process(proc, name)
             return -1, "", f"Subprocess timed out after {timeout}s"
+        except asyncio.CancelledError:
+            await asyncio.shield(_stop_scan_process(proc, name))
+            raise
         except Exception as exc:
             return -1, "", str(exc)

@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useCallback } from "react";
+import { issueKind, shortIssue } from "./issueText";
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
@@ -158,11 +159,21 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = ({
       {riskReasons.length > 0 && (
         <div style={sectionStyle}>
           <div style={labelStyle}>Risk Reasons</div>
+          {/* 사유마다 첫 문장만 한 줄로 — 같은 사유가 앞 화면에도 나온다. 원문은 접어 둔다. */}
           <ul style={{ margin: 0, paddingLeft: 16, lineHeight: 1.6 }}>
-            {riskReasons.map((r, i) => (
-              <li key={i} style={{ color: riskColor }}>{r}</li>
+            {riskReasons.filter((r) => issueKind(r) !== "autofix").map((r, i) => (
+              <li key={i} style={{ color: riskColor }} title={r}>{shortIssue(r)}</li>
             ))}
+            {riskReasons.some((r) => issueKind(r) === "autofix") && (
+              <li style={{ color: riskColor }}>배포 전 자동 수정 {riskReasons.filter((r) => issueKind(r) === "autofix").length}건 — 배포할 때 고치고 원본은 .recoder/backups 에 남깁니다.</li>
+            )}
           </ul>
+          {riskReasons.some((r) => shortIssue(r) !== r.trim()) && (
+            <details style={{ marginTop: 4, color: "var(--vscode-descriptionForeground, #999)" }}>
+              <summary style={{ cursor: "pointer" }}>원문 보기</summary>
+              <ul style={{ margin: "4px 0 0", paddingLeft: 16, lineHeight: 1.5 }}>{riskReasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
+            </details>
+          )}
         </div>
       )}
 

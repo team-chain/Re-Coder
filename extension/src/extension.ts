@@ -12,6 +12,8 @@
  */
 
 import * as vscode from 'vscode';
+import { activeProjectPath, initActiveProject, pickProjectFolder } from './activeProject';
+import { isAiKeyProvider, runAiConnectCommand } from './ai/aiKeys';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CoreManager } from './core/CoreManager';
@@ -20,10 +22,13 @@ import { PollingService } from './core/PollingService';
 import { SidebarProvider } from './sidebar/SidebarProvider';
 import { WorkbenchSidebarProvider } from './sidebar/WorkbenchSidebarProvider';
 import { ReCoderPanel } from './sidebar/ReCoderPanel';
+import { migrateActivityBar, restoreRecoderViews, chooseSidebarLocation } from './sidebar/activityBar';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
+import { bridgeEnabled } from './bridge/bridgeEnabled';
 import { BridgeClient } from './bridge/BridgeClient';
-import { ensureEnrolled, runEnrollCommand } from './gateway/enroll';
+import { runEnrollCommand } from './gateway/enroll';
+import { DiscordController } from './discord/DiscordController';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -31,6 +36,8 @@ import { ensureEnrolled, runEnrollCommand } from './gateway/enroll';
 
 export function activate(context: vscode.ExtensionContext): void {
     console.log('[ReCoder] Extension activating…');
+    //: 배포·보안 화면의 대상 폴더(멀티 루트에서 새로 추가한 프로젝트를 따라간다).
+    initActiveProject(context);
 
     // ── Core service instances ──────────────────────────────────────────────
     const coreManager = CoreManager.getInstance(context);
@@ -44,9 +51,17 @@ export function activate(context: vscode.ExtensionContext): void {
     // 새 인스턴스를 만들면, dispose 는 항상 최초 인스턴스만 정리하고 이전
     // 클라이언트들이 살아남는다 — 봇 스트림 하나를 여러 클라이언트가 각각
     // 처리해 같은 문서에 중복 편집·중복 실행이 일어난다.
+    //: 봇 서버를 직접 운영하는 사용자만 켠다(recoder.bridge.enabled). 예전에는 모든 사용자가 항상
+    //: 127.0.0.1:7780 에 붙으려 했고, 그 포트를 잡은 아무 프로세스나 학생 토큰을 받고 워크스페이스
+    //: 파일을 쓸 수 있었다(보안 검토).
     let activeBridge = new BridgeClient(context);
     context.subscriptions.push(activeBridge);
-    activeBridge.connect();
+    //: 봇 서버 브리지는 명시적으로 켠 경우만 — 이 저장소 설정(recoder.bridge.enabled·토큰)과
+    //: develop 의 recoder.bridge.legacyEnabled 둘 다 존중한다.
+    const bridgeConfig = vscode.workspace.getConfiguration('recoder.bridge');
+    if (bridgeEnabled(bridgeConfig) || bridgeConfig.get<boolean>('legacyEnabled', false)) {
+        activeBridge.connect();
+    }
 
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.bridge.reconnect', () => {
@@ -57,6 +72,17 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.window.showInformationMessage('ReCoder Bridge 재연결 시도');
         }),
     );
+
+    const discordConnections = new DiscordController(context);
+    context.subscriptions.push(discordConnections,
+        vscode.commands.registerCommand('recoder.discord.action', (type, payload) => discordConnections.action(type, payload)),
+        vscode.workspace.onDidChangeWorkspaceFolders(() => void discordConnections.restore().catch(console.error)),
+        vscode.workspace.onDidGrantWorkspaceTrust(() => void discordConnections.restore().catch(console.error)),
+        vscode.workspace.onDidChangeConfiguration(event => {
+            if (event.affectsConfiguration('recoder.discord.serverUrl')) void discordConnections.restore().catch(console.error);
+        }),
+    );
+    void discordConnections.restore().catch(console.error);
 
     // ── 게이트웨이 자가발급(enroll) ───────────────────────────────────────────
     // recoder.gateway.url 이 설정돼 있고 아직 토큰이 없으면 최초 실행 시 반 코드를
@@ -78,6 +104,7 @@ export function activate(context: vscode.ExtensionContext): void {
         //: 채팅 승인이 빈 창에 폴더를 추가하면 확장 호스트가 재시작된다.
         //: 그 재시작을 넘겨야 하는 요청을 globalState 로 인계한다.
         context.globalState,
+        context.secrets,
     );
 
     context.subscriptions.push(
@@ -88,15 +115,23 @@ export function activate(context: vscode.ExtensionContext): void {
         )
     );
 
+    //: 확장이 다시 시작돼도 열려 있던 ReCoder 탭을 새 확장에 다시 연결한다(ReCoderPanel.revive).
+    context.subscriptions.push(
+        vscode.window.registerWebviewPanelSerializer(ReCoderPanel.viewType, {
+            async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown) {
+                ReCoderPanel.revive(panel, context.extensionUri, sidebarProvider, state);
+                void ensureCoreRunning(coreManager, sidebarProvider);
+            },
+        }),
+    );
+
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.generateInFolder', async (uri?: vscode.Uri) => {
-            let folder = '';
-            if (uri) {
-                const rel = vscode.workspace.asRelativePath(uri, false);
-                folder = rel === uri.fsPath ? '' : rel;
-            }
-            await vscode.commands.executeCommand('recoder.sidebarView.focus');
-            sidebarProvider.setCodeTargetFolder(folder);
+            //: 코드 화면은 ReCoder 창에 있다(사이드바는 시작 화면). 창을 열고, 우클릭한 폴더의 **절대 경로**를 넘긴다 —
+            //: 상대 경로로 넘기면 여러 폴더 워크스페이스에서 다른 프로젝트의 같은 이름 폴더로 갔다.
+            ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider);
+            void ensureCoreRunning(coreManager, sidebarProvider);
+            sidebarProvider.setCodeTargetFolder(uri && uri.scheme === 'file' ? uri.fsPath : '');
         }),
     );
 
@@ -125,7 +160,7 @@ export function activate(context: vscode.ExtensionContext): void {
             // Auto-analysis: only trigger when an error pattern is detected.
             // This is the §8.1 "passive monitoring" path.
             if (!terminalCollector.detectError(output.output)) { return; }
-            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const workspacePath = activeProjectPath();
             const request: AnalyzeRequest = {
                 workspace_path: workspacePath,
                 terminal_output: output.output,
@@ -163,7 +198,7 @@ export function activate(context: vscode.ExtensionContext): void {
             await ensureCoreRunning(coreManager, sidebarProvider);
 
             const editor = vscode.window.activeTextEditor;
-            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const workspacePath = activeProjectPath();
 
             const request: AnalyzeRequest = {
                 workspace_path: workspacePath,
@@ -186,7 +221,7 @@ export function activate(context: vscode.ExtensionContext): void {
             const command = await vscode.window.showInputBox({
                 prompt: 'Enter command to run with ReCoder monitoring',
                 placeHolder: 'e.g. python main.py',
-                value: getDefaultRunCommand(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath),
+                value: getDefaultRunCommand(activeProjectPath() || undefined),
             });
 
             if (!command) {
@@ -195,7 +230,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
             terminalCollector.createReCoderTerminal(command).then((output) => {
                 if (output.output) {
-                    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                    const workspacePath = activeProjectPath();
                     const request: AnalyzeRequest = {
                         workspace_path: workspacePath,
                         active_file_path: vscode.window.activeTextEditor?.document.uri.fsPath,
@@ -328,11 +363,18 @@ export function activate(context: vscode.ExtensionContext): void {
             await vscode.window.withProgress(
                 { location: vscode.ProgressLocation.Notification, title: 'AWS 자격증명 검증 중…' },
                 async () => {
-                    const result = await apiClient.connectAws({
-                        accessKeyId: accessKey.trim(),
-                        secretAccessKey: secret.trim(),
-                        region: region.trim(),
-                    });
+                    let result: Awaited<ReturnType<typeof apiClient.connectAws>>;
+                    try {
+                        result = await apiClient.connectAws({
+                            accessKeyId: accessKey.trim(),
+                            secretAccessKey: secret.trim(),
+                            region: region.trim(),
+                        });
+                    } catch (err) {
+                        //: 잘못된 키는 Core 가 4xx 로 거절한다 — VS Code 의 "명령 실패" 대신 이유를 보여 준다.
+                        vscode.window.showErrorMessage(`AWS 자격증명 검증 실패: ${err instanceof Error ? err.message : String(err)}`);
+                        return;
+                    }
                     if (result.ready) {
                         await coreManager.storeAwsCredentials({
                             accessKeyId: accessKey.trim(),
@@ -368,6 +410,8 @@ export function activate(context: vscode.ExtensionContext): void {
             );
             if (confirm !== '삭제') { return; }
             await coreManager.clearAwsCredentials();
+            // 남이 띄운(공유) Core 는 restart 로 죽지 않으니 Core API 로도 해제한다.
+            try { await apiClient.clearAws(); } catch { /* Core 가 없으면 재시작이 처리 */ }
             await coreManager.restart();
             vscode.window.showInformationMessage('AWS 자격증명 삭제 완료');
             sidebarProvider.triggerDiagnostics();
@@ -416,6 +460,23 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
+    // ── Command: AI 연결 (Claude / ChatGPT API 키) ──────────────────────────
+    // AWS 를 쓰지 않는 사용자를 위한 경로. 키를 저장하면 Core 를 재시작해 새 키로 연결을 확인한다.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.ai.connect', async (provider?: unknown) => {
+            const changed = await runAiConnectCommand(context, isAiKeyProvider(provider) ? provider : undefined);
+            if (changed) { await vscode.commands.executeCommand('recoder.restartCore'); }
+        })
+    );
+
+    // ── Command: 배포할 프로젝트 폴더 변경 ─────────────────────────────────────
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.selectProject', async () => {
+            try { await pickProjectFolder(); }
+            catch (err) { vscode.window.showErrorMessage(`ReCoder: ${err instanceof Error ? err.message : String(err)}`); }
+        })
+    );
+
     // ── Command: Restart Core ───────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.restartCore', async () => {
@@ -447,6 +508,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // ── Command: Stop Core ──────────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.stopCore', async () => {
+            pollingService.suspendAutoRecovery();
             await coreManager.shutdown();
             sidebarProvider.postMessage('core.stopped', {});
             vscode.window.showInformationMessage('ReCoder Core stopped.');
@@ -467,34 +529,24 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
     );
 
-    // ── Commands: Sidebar Location (Kiro-style 우측 / 기본 좌측) ─────────────
-    // VSCode 의 view container 위치 이동은 사용자 인터랙션 컨텍스트에서만
-    // 동작하는 비공식 명령 (workbench.action.moveView*) 을 사용한다. 안되면
-    // 사용자에게 수동 가이드 알림을 띄운다.
+    // Keep existing command IDs for shortcuts, using VS Code's actual placement commands.
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.moveToRightSidebar', async () => {
-            await moveRecoderTo('right', context);
+            await chooseSidebarLocation();
         }),
         vscode.commands.registerCommand('recoder.moveToLeftSidebar', async () => {
-            await moveRecoderTo('left', context);
+            try {
+                await restoreRecoderViews();
+            } catch (err) {
+                void vscode.window.showErrorMessage(`ReCoder 위치 복원 실패: ${String(err)}`);
+            }
         })
     );
 
-    // ── First-run: Kiro 스타일로 우측 사이드바 자동 배치 ─────────────────────
-    // 첫 활성화에서만 1회 실행. 사용자가 의도적으로 좌측으로 옮긴 후에는 다시
-    // 강제로 옮기지 않는다.
-    const KEY_LAYOUT_INITIALIZED = 'recoder.layout.initializedV1';
-    if (!context.globalState.get<boolean>(KEY_LAYOUT_INITIALIZED, false)) {
-        setTimeout(async () => {
-            try {
-                await moveRecoderTo('right', context, /*silent=*/ true);
-            } catch {
-                // ignore
-            } finally {
-                await context.globalState.update(KEY_LAYOUT_INITIALIZED, true);
-            }
-        }, 1500);
-    }
+    // Recover only ReCoder's old saved locations once; never auto-move to the right.
+    void migrateActivityBar(context.globalState).catch(err => {
+        console.warn('[ReCoder] Activity Bar migration deferred:', err);
+    });
 
     // ── Terminal data listener ──────────────────────────────────────────────
     // onDidWriteTerminalData is a VSCode proposed API (terminalDataWriteEvent)
@@ -504,58 +556,6 @@ export function activate(context: vscode.ExtensionContext): void {
     // is a 2학기 optional enhancement.
 
     console.log('[ReCoder] Extension activated.');
-}
-
-/**
- * ReCoder view container 를 좌/우 사이드바로 이동.
- *
- * VSCode 의 view 이동 명령들은 활성 view 컨텍스트를 요구하므로,
- *   1) 먼저 ReCoder 사이드바에 포커스를 준 다음
- *   2) workbench.action.moveView* 명령을 실행한다.
- *
- * 명령이 실패하거나 없는 경우 사용자에게 수동 가이드를 표시한다 (silent=false 일 때만).
- */
-async function moveRecoderTo(
-    side: 'left' | 'right',
-    context: vscode.ExtensionContext,
-    silent: boolean = false,
-): Promise<void> {
-    try {
-        // ReCoder view 에 포커스 (이게 있어야 활성 view 컨텍스트 잡힘)
-        await vscode.commands.executeCommand('recoder.sidebarView.focus');
-        await new Promise(r => setTimeout(r, 300));
-
-        if (side === 'right') {
-            // Secondary Side Bar 활성화 (안 보이면 토글로 보이게)
-            try {
-                await vscode.commands.executeCommand('workbench.action.focusAuxiliaryBar');
-            } catch {
-                // best-effort
-            }
-            // 현재 활성 view 를 secondary side bar 로 이동
-            await vscode.commands.executeCommand('workbench.action.moveViewToSecondarySideBar');
-        } else {
-            // 기본 좌측 Activity Bar 로 복귀
-            await vscode.commands.executeCommand('workbench.action.moveViewToActivityBar');
-        }
-
-        if (!silent) {
-            const target = side === 'right' ? '오른쪽' : '왼쪽';
-            vscode.window.showInformationMessage(`ReCoder를 ${target} 사이드바로 이동했습니다.`);
-        }
-    } catch (err) {
-        if (silent) {
-            return; // first-run에는 조용히 실패
-        }
-
-        const sideLabel = side === 'right' ? 'Secondary Side Bar (오른쪽)' : 'Activity Bar (왼쪽)';
-        const choice = await vscode.window.showInformationMessage(
-            `자동 이동이 실패했습니다. Activity Bar 의 ReCoder 아이콘을 우클릭해서 "Move View Container to ${sideLabel}" 를 선택해주세요.`,
-            '알겠음',
-        );
-        void choice; // suppress unused-var lint
-        console.warn('[ReCoder] moveRecoderTo failed:', err);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -581,8 +581,7 @@ async function ensureCoreRunning(
     sidebarProvider: SidebarProvider,
 ): Promise<void> {
     try {
-        await coreManager.ensureRunning();
-        sidebarProvider.triggerDiagnostics();
+        await sidebarProvider.ensureConnection();
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`ReCoder Core 시작 실패: ${msg}`);

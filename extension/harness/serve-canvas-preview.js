@@ -1,0 +1,4 @@
+const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
+const dir=path.resolve(__dirname,'../../.canvas-qa/preview');
+const html='<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ReCoder canvas isolated preview</title><style>body{margin:0;background:#141920;color:#e3e9ef;font-family:Segoe UI,Arial,sans-serif}button{background:#202b37;color:white;border:1px solid #465161;border-radius:5px;padding:5px 9px;cursor:pointer}</style><div id="root"></div><script src="/preview.js"></script></html>';
+http.createServer((req,res)=>{if(req.url==='/preview.js'){res.setHeader('Content-Type','text/javascript');fs.createReadStream(path.join(dir,'preview.js')).pipe(res);}else{res.setHeader('Content-Type','text/html; charset=utf-8');res.end(html);}}).listen(4179,'127.0.0.1',()=>console.log('Isolated canvas preview: http://127.0.0.1:4179'));

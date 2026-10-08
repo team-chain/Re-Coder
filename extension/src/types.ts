@@ -434,6 +434,9 @@ export interface S3DeployResult {
   /** index.html 이 없어 다른 HTML 을 복제했다면 그 원본 경로. */
   index_copied_from?: string | null;
   message: string;
+  /** 배포 직후 첫 화면 확인 결과. ok=false 면 주소는 열리지만 화면이 표시되지 않는다(null=확인 못 함). */
+  screen?: { ok?: boolean | null; problems?: string[]; warnings?: string[]; console_errors?: string[];
+    diagnosis?: { title?: string; cause?: string; fix?: string } } | null;
 }
 
 export interface AwsEcrRepo {

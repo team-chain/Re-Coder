@@ -110,12 +110,15 @@ class AutostartResult:
 
 
 def daemon_up(timeout: float = 5.0) -> bool:
-    """`docker info` 가 성공하면 데몬이 살아 있다. CLI 부재·타임아웃은 down 취급."""
+    """서버 버전 응답으로 준비 여부를 확인한다. CLI 설치만으로는 통과하지 않는다."""
     try:
+        # docker info also enumerates client plugins. A stalled Desktop plugin
+        # can hang it while containers and the daemon are perfectly healthy.
         proc = subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=timeout,
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True, timeout=timeout,
         )
-        return proc.returncode == 0
+        return proc.returncode == 0 and bool((proc.stdout or b'').strip())
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
 

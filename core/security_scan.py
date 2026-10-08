@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -37,6 +38,11 @@ except ImportError:  # core/ 가 직접 sys.path 에 있는 실행 환경
         SecurityScanSeverity,
         SecurityScanTool,
     )
+
+try:
+    from core.scan_process import named_docker_run, stop_scan_process
+except ImportError:
+    from scan_process import named_docker_run, stop_scan_process
 
 logger = logging.getLogger(__name__)
 
@@ -94,21 +100,34 @@ class SecurityScanner:
         findings: list[SecurityFinding] = []
 
         tasks = []
+        tools = []
         if image:
             tasks.append(self._run_trivy(image))
+            tools.append(SecurityScanTool.TRIVY)
         if dockerfile_path:
             tasks.append(self._run_hadolint(dockerfile_path))
+            tools.append(SecurityScanTool.HADOLINT)
         if repo_path:
             tasks.append(self._run_gitleaks(repo_path))
             tasks.append(self._run_builtin_secrets(repo_path))
+            tools.extend([SecurityScanTool.GITLEAKS, SecurityScanTool.GITLEAKS])
 
         scan_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for scan in scan_results:
-            if isinstance(scan, Exception):
-                logger.warning("Security scan error: %s", scan)
-            elif isinstance(scan, list):
-                findings.extend(scan)
+        for tool, scan in zip(tools, scan_results):
+            if isinstance(scan, asyncio.CancelledError):
+                raise scan
+            if not isinstance(scan, list) or any(not isinstance(f, SecurityFinding) for f in scan):
+                # An unexpected worker failure must retain the tool identity.
+                # Otherwise an empty findings list turns an unscanned image green.
+                logger.warning("%s scan returned %s", tool.value, type(scan).__name__)
+                findings.append(SecurityFinding(
+                    tool=tool, severity=SecurityScanSeverity.HIGH,
+                    title=f"{tool.value}_scan_failed",
+                    description=f"{tool.value} 검사 결과를 확인하지 못했습니다 ({type(scan).__name__}). 다시 검사하세요.",
+                ))
+                continue
+            findings.extend(scan)
 
         findings = self._dedupe_secret_findings(findings)
         result.findings = findings
@@ -143,7 +162,7 @@ class SecurityScanner:
             # 디렉터리로 받는다. ECR 이미지를 끌어와야 하면 AWS 자격증명이
             # 필요하므로 환경변수 이름만 넘기고 ~/.aws 는 읽기 전용으로 준다.
             # 취약점 DB 캐시를 호스트에 두지 않으면 매번 수백 MB 를 다시 받는다.
-            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "recoder-trivy")
+            cache_dir = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "recoder-trivy")
             os.makedirs(cache_dir, exist_ok=True)
             cmd = [
                 "docker", "run", "--rm",
@@ -151,12 +170,25 @@ class SecurityScanner:
                 "-v", f"{out_dir}:/out",
                 "-v", f"{cache_dir}:/root/.cache/",
             ]
-            for name in _AWS_ENV_PASSTHROUGH:
-                if os.environ.get(name):
-                    cmd.extend(["-e", name])
-            aws_dir = os.path.join(os.path.expanduser("~"), ".aws")
-            if os.path.isdir(aws_dir):
-                cmd.extend(["-v", f"{aws_dir}:/root/.aws:ro"])
+            #: 이미지가 로컬 데몬에 있으면(방금 빌드·푸시한 경우) **AWS 자격증명을 넘기지 않고**
+            #: 로컬에서만 읽는다. 스캐너 컨테이너(외부 이미지)가 사용자 키를 받을 이유가 없다.
+            #: 로컬에 없을 때(ECR 에만 있는 이미지)만 원격에서 받도록 자격증명을 넘긴다.
+            local_image = False
+            try:
+                local_image = (await asyncio.to_thread(
+                    subprocess.run, ["docker", "image", "inspect", image], capture_output=True, timeout=20,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                local_image = False
+            if local_image:
+                trivy_args = trivy_args + ["--image-src", "docker"]
+            else:
+                for name in _AWS_ENV_PASSTHROUGH:
+                    if os.environ.get(name):
+                        cmd.extend(["-e", name])
+                aws_dir = os.path.join(os.path.expanduser("~"), ".aws")
+                if os.path.isdir(aws_dir):
+                    cmd.extend(["-v", f"{aws_dir}:/root/.aws:ro"])
             cmd.append(_DOCKER_IMAGES["trivy"])
             cmd.extend(trivy_args + ["--output", "/out/trivy.json", image])
             logger.info("trivy 바이너리가 없어 %s 컨테이너로 검사합니다", _DOCKER_IMAGES["trivy"])
@@ -167,6 +199,10 @@ class SecurityScanner:
             # 첫 실행은 취약점 DB(수백 MB)를 받느라 2분을 넘길 수 있다.
             await self._run_cmd(cmd, timeout=_TRIVY_TIMEOUT)
             raw = json.loads(Path(output_path).read_text())
+            if not isinstance(raw, dict) or (
+                "Results" not in raw and not (raw.get("SchemaVersion") == 2 and isinstance(raw.get("Metadata"), dict))
+            ) or ("Results" in raw and not isinstance(raw["Results"], list)):
+                raise ValueError("Trivy returned an invalid report")
             for result in raw.get("Results", []):
                 for vuln in result.get("Vulnerabilities") or []:
                     sev_str = vuln.get("Severity", "UNKNOWN").upper()
@@ -247,8 +283,10 @@ class SecurityScanner:
         try:
             stdout = await self._run_cmd(cmd, allow_nonzero=True, stdin_data=stdin_data)
             if not stdout.strip():
-                return findings
+                raise ValueError("Hadolint returned no report")
             issues = json.loads(stdout)
+            if not isinstance(issues, list):
+                raise ValueError("Hadolint returned an invalid report")
             for issue in issues:
                 level = issue.get("level", "warning").lower()
                 sev = SecurityScanSeverity.CRITICAL if level == "error" else SecurityScanSeverity.MEDIUM
@@ -313,10 +351,12 @@ class SecurityScanner:
             # 검사 자체가 실패한 것(잘못된 플래그·마운트 실패 등) — 비어 있는
             # 보고서를 "시크릿 없음" 으로 읽으면 안 된다.
             await self._run_cmd(cmd)
-            raw_text = Path(output_path).read_text() if os.path.exists(output_path) else ""
-            if not raw_text.strip() or raw_text.strip() == "null":
-                return findings
+            if not os.path.isfile(output_path):
+                raise ValueError("Gitleaks did not create its report")
+            raw_text = Path(output_path).read_text()
             leaks = json.loads(raw_text)
+            if leaks is not None and not isinstance(leaks, list):
+                raise ValueError("Gitleaks returned an invalid report")
             for leak in (leaks or []):
                 findings.append(SecurityFinding(
                     tool=SecurityScanTool.GITLEAKS,
@@ -359,6 +399,7 @@ class SecurityScanner:
         cmd: list[str], allow_nonzero: bool = False, stdin_data: Optional[bytes] = None,
         timeout: int = _SCAN_TIMEOUT,
     ) -> str:
+        cmd, name = named_docker_run(cmd)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
@@ -370,8 +411,11 @@ class SecurityScanner:
                 proc.communicate(stdin_data), timeout=timeout,
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            await stop_scan_process(proc, name)
             raise RuntimeError(f"Command timed out after {timeout}s: {cmd[0]}")
+        except asyncio.CancelledError:
+            await asyncio.shield(stop_scan_process(proc, name))
+            raise
 
         if proc.returncode != 0 and not allow_nonzero:
             raise RuntimeError(f"{cmd[0]} failed (rc={proc.returncode}): {stderr.decode()[:500]}")

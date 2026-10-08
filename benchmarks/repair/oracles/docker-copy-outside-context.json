@@ -1,0 +1,3 @@
+{
+  "node": "require('node:assert').equal(require('node:fs').readFileSync('/app/payload.txt','utf8'),'required artifact\\n')"
+}

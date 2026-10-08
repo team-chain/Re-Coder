@@ -11,7 +11,10 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal from "./ApprovalModal";
+import { DeploymentActivity, DeploymentActivityEvent } from './DeploymentActivity';
 import { LocalRollbackResult, LocalRollbackStatus, rollbackWatchId } from "./LocalRollbackStatus";
+import { BuildDiagnosis, BuildFailure, ReadinessIssue, ReadinessPanel } from "./ReadinessPanel";
+import { issueKind, shortIssue } from "./issueText";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -110,6 +113,8 @@ interface DeploymentPlan {
   risk_level: "low" | "medium" | "high" | "critical";
   risk_reasons: string[];
   approval_level: 1 | 2 | 3 | 4;
+  //: Core 의 빌드 전 정적 점검(build_readiness). 빌드가 확정적으로 실패할 설정을 승인 전에 보인다.
+  readiness?: { issues?: ReadinessIssue[] } | null;
 }
 
 interface VerificationSnapshot {
@@ -121,6 +126,16 @@ interface VerificationSnapshot {
   anomalies?: { kind?: string; message?: string }[];
   counters?: { consecutive_health_failures?: number };
   health_checks?: unknown[];
+}
+
+export function deploymentHealthVerdict(
+  result: { status: string; health_ok?: boolean } | null,
+  watch: { status: string } | null | "none",
+): "healthy" | "pending" | "failed" {
+  const status = watch && watch !== "none" ? watch.status : undefined;
+  if (result?.status === "failed" || status === "unstable" || status === "error") return "failed";
+  if (status === "stable" || result?.health_ok === true) return "healthy";
+  return "pending";
 }
 
 export type InfraFileTab = "dockerfile" | "compose" | "actions";
@@ -192,14 +207,18 @@ interface ShipModeProps {
   isDockerReady: boolean;
 }
 
-export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) => {
+export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [step, setStep] = useState<Step>("idle");
+  const stepRef = useRef<Step>("idle");
+  stepRef.current = step;
+  const [progress,setProgress]=useState<DeploymentActivityEvent|null>(null);
+  const progressPlan=useRef('');
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
-  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean } } | null>(null);
+  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean }; security_scan?: { status?: string; high_count?: number; reason?: string }; auto_fixed?: Array<{ code: string; message: string; changed?: string[] }>; screen?: { ok?: boolean | null; checked?: string; warnings?: string[] } } | null>(null);
   //: 배포 뒤 감시(연속 검증) 스냅샷과 롤백 결과 — 로컬 Docker 배포의 D1~D4.
   //: 예전엔 코어가 감시하고 롤백 후보를 관리해도 사이드바 어디에도 표시·승인 UI 가 없었다.
   const [watch, setWatch] = useState<VerificationSnapshot | null | "none">(null);
@@ -209,6 +228,13 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   const watchIdRef = useRef<string | undefined>();
   const pendingRollbackRef = useRef<string | undefined>();
   const [error, setError] = useState<string | null>(null);
+  //: 빌드 실패 원인(Core build_failure) · 배포 준비 점검 항목과 자동 수정 상태.
+  const [diagnosis, setDiagnosis] = useState<{ value: BuildDiagnosis; raw: string; restored: string } | null>(null);
+  const [readinessIssues, setReadinessIssues] = useState<ReadinessIssue[]>([]);
+  const [fixing, setFixing] = useState<string | null>(null);
+  const [fixNotice, setFixNotice] = useState("");
+  const replanAfterFix = useRef(false);
+  const fixQueue = useRef<string[]>([]);
   //: 승인했는데 같은 경로에 **내용이 다른 파일**이 있어 코어가 쓰지 않은 상태.
   //: 예전엔 묻지 않고 덮어써서 손으로 고친 Dockerfile 이 조용히 사라졌다(실기기 D4).
   const [existingConflict, setExistingConflict] = useState<{ path?: string; diff?: string; file_type?: string } | null>(null);
@@ -248,6 +274,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         setPlan(payload as DeploymentPlan);
         setStep("planReady");
         setError(null);
+        setDiagnosis(null);
+        setReadinessIssues((payload as DeploymentPlan).readiness?.issues ?? []);
       }
 
       if (type === "scanResult") {
@@ -305,20 +333,51 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         return;
       }
 
+      if (type === 'deploy.progress') {
+        const event=payload as DeploymentActivityEvent;
+        if(event.plan_id===progressPlan.current) setProgress(event);
+        return;
+      }
+      if (type === "deploy.readiness.result") {
+        const r = payload as { code?: string; message?: string; applied?: boolean; readiness?: { issues?: ReadinessIssue[] } };
+        setFixing(null);
+        setReadinessIssues(r.readiness?.issues ?? []);
+        if (r.code && fixQueue.current.length && r.applied !== undefined) {
+          //: "모두 고치기" — 앞 수정이 끝난 뒤 다음 항목을 고친다(같은 파일을 동시에 고치지 않게).
+          const next = fixQueue.current.shift()!;
+          setFixing(next);
+          postMessage("deploy.readiness.fix", { code: next });
+          return;
+        }
+        if (r.code) {
+          setFixNotice(r.message ?? "");
+          //: 포트·헬스 경로를 고치면 플랜(포트 매핑)도 달라진다 — 승인 전이면 플랜을 다시 만든다.
+          if (r.applied && replanAfterFix.current) { replanAfterFix.current = false; postMessage("createDeployPlan", { workspacePath: "", method: "local_docker" }); setStep("planning"); }
+        }
+        return;
+      }
+      if (type === "deploy.readiness.error") {
+        fixQueue.current = [];
+        setFixing(null);
+        setFixNotice((payload as { message?: string }).message ?? "자동 수정에 실패했습니다.");
+        return;
+      }
       if (type === "deployResult") {
+        if ((payload as {plan_id?:string}).plan_id && (payload as {plan_id?:string}).plan_id!==progressPlan.current) return;
         const r = payload as {
           status: string; deployment_id?: string; message?: string; error?: string;
           stderr?: string; stdout?: string; restored_previous?: boolean; restore_stderr?: string;
           health_ok?: boolean; health_check_url?: string; rollback_target?: string | null;
           continuous_verification?: { enabled?: boolean; started?: boolean };
+          security_scan?: { status?: string; high_count?: number; reason?: string };
         };
         activeDeploymentRef.current = r.deployment_id;
         watchIdRef.current = r.deployment_id;
         pendingRollbackRef.current = undefined;
         setDeployResult(r);
         setWatch(null); setRollbackDecision("idle"); setRollbackResult(null);
-        setStep(r.status === "success" ? "done" : "error");
-        if (r.status !== "success") {
+        setStep(r.status === "success" || r.status === "pending" ? "done" : "error");
+        if (r.status !== "success" && r.status !== "pending") {
           //: 코어가 stderr 를 돌려주는데 "stderr 를 확인하세요" 만 보이면 사용자는
           //: 어디서도 확인할 수 없다(실기기 검증 C2). 원문을 그대로 보인다.
           const detail = (r.stderr || r.error || r.message || r.stdout || "").trim();
@@ -333,12 +392,24 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
             ? `\n이전 컨테이너 복원: ${restoreDetail}`
             : "";
           setError(`배포 실패${tail ? ` — ${tail}` : " (코어가 사유를 돌려주지 않았습니다)"}${restored}`);
+          const d = (r as { diagnosis?: BuildDiagnosis }).diagnosis;
+          //: 마지막 8줄은 대개 Dockerfile 발췌라 원인이 아니다. Core 가 뽑은 원인·해결책을 앞세운다.
+          setDiagnosis(d ? { value: d, raw: detail.split("\n").slice(-60).join("\n"), restored: restored.trim() } : null);
+          if (d) { setFixNotice(""); postMessage("deploy.readiness.check", {}); }
+        } else {
+          setDiagnosis(null);
         }
       }
 
       if (type === "errorMessage") {
+        //: 같은 화면의 AWS 연결 등 다른 기능의 오류도 이 이름으로 온다 — 이 화면이 기다리던 요청이 있을 때만
+        //: 실패로 바꾼다(예전엔 AWS 키 입력 실패가 진행 중인 보안 검사까지 실패로 만들었다).
+        const p = payload as { message?: string; context?: string };
+        const waiting = stepRef.current === "generating" || stepRef.current === "saving" || stepRef.current === "planning"
+          || stepRef.current === "deploying" || (stepRef.current === "scanning" && !pendingScanRef.current);
+        if (p?.context === "aws" || !waiting) return;
         pendingScanRef.current = null;
-        setError((payload as { message: string }).message);
+        setError(p?.message ?? "요청 처리에 실패했습니다.");
         setStep("error");
       }
     }, [postMessage, startSecurityScan])
@@ -353,6 +424,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
   //: 호출되지 않았다. 탭이 셋인데 동작은 하나뿐이라 사용자는 "탭을 골랐는데
   //: 왜 Dockerfile 이 나오지" 상태가 됐다.
   const handleGenerateInfraFile = useCallback(() => {
+    setProgress(null);
     setStep("generating");
     setError(null);
     setExistingConflict(null);
@@ -419,12 +491,28 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
 
   const handleDeploy = useCallback(() => {
     if (!plan) { return; }
+    progressPlan.current=plan.plan_id;
+    setProgress({step:'queued',message:'승인된 배포를 준비합니다',plan_id:plan.plan_id});
     postMessage("executeDeployment", { planId: plan.plan_id, approved: true });
     setStep("deploying");
     setShowApproval(false);
   }, [plan, postMessage]);
 
+  const handleFixReadiness = useCallback((code: string) => {
+    setFixing(code);
+    setFixNotice("");
+    replanAfterFix.current = step === "planReady";
+    postMessage("deploy.readiness.fix", { code });
+  }, [postMessage, step]);
+
+  const handleFixAllReadiness = useCallback((codes: string[]) => {
+    if (!codes.length) return;
+    fixQueue.current = codes.slice(1);
+    handleFixReadiness(codes[0]);
+  }, [handleFixReadiness]);
+
   const handleCreatePlan = useCallback(() => {
+    setProgress(null);
     setStep("planning");
     postMessage("createDeployPlan", {
       workspacePath: "",
@@ -459,18 +547,6 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     postMessage("rollback", { deploymentId });
   }, [deploymentId, postMessage]);
 
-  // ── Styles ────────────────────────────────────────────────────────────────
-
-  const sectionHeader: React.CSSProperties = {
-    fontSize: 10,
-    fontWeight: 700,
-    textTransform: "uppercase",
-    letterSpacing: "0.06em",
-    color: "var(--vscode-descriptionForeground, #888)",
-    marginBottom: 6,
-    marginTop: 12,
-  };
-
   const btnPrimary: React.CSSProperties = {
     background: "var(--vscode-button-background, #0078d4)",
     color: "var(--vscode-button-foreground, #fff)",
@@ -490,19 +566,6 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
     padding: "6px 14px",
     fontSize: 12,
     cursor: "pointer",
-  };
-
-  const codeBlock: React.CSSProperties = {
-    background: "var(--vscode-textCodeBlock-background, #1e1e1e)",
-    border: "1px solid var(--vscode-panel-border, #333)",
-    borderRadius: 4,
-    padding: "8px 10px",
-    fontFamily: "var(--vscode-editor-font-family, monospace)",
-    fontSize: 11,
-    overflowX: "auto",
-    maxHeight: 250,
-    overflowY: "auto",
-    whiteSpace: "pre",
   };
 
   const riskColors: Record<string, string> = {
@@ -531,23 +594,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
         <div style={{ padding: "8px 10px", borderRadius: 4, border: "1px solid #f59e0b", background: "rgba(245,158,11,0.08)", color: "#f59e0b", fontSize: 11, lineHeight: 1.55, marginBottom: 8 }}>
           <strong>⚠ 이미지 취약점 검사를 하지 못했습니다</strong>
           <div style={{ marginTop: 3, color: "#e3b261" }}>
-            {cause || "스캐너를 실행할 수 없었습니다."}
+            {shortIssue(cause || "스캐너를 실행할 수 없었습니다.")} 취약점이 없다는 뜻이 아니라 확인하지 못했다는 뜻입니다.
           </div>
-          {nextAction && (
-            <div style={{ marginTop: 3, color: "#f2d38c" }}>
-              <strong>다음 행동 · </strong>{nextAction}
+          <details style={{ marginTop: 4, color: "#c9a35e" }}>
+            <summary style={{ cursor: "pointer" }}>다음 행동{raw && raw !== cause ? " · 오류 원문" : ""}</summary>
+            <div style={{ marginTop: 3 }}>
+              {nextAction || "Trivy와 Docker를 설치한 뒤 다시 검사하세요."} 확인되지 않은 상태로 진행할지는 직접 판단하세요.
             </div>
-          )}
-          <div style={{ marginTop: 4, color: "#c9a35e" }}>
-            취약점이 <strong>없다는 뜻이 아니라 확인하지 못했다</strong>는 뜻입니다.
-            {nextAction ? " 조치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요." : " Trivy와 Docker를 설치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요."}
-          </div>
-          {raw && raw !== cause && (
-            <details style={{ marginTop: 4, color: "#a88a4a" }}>
-              <summary style={{ cursor: "pointer" }}>오류 원문</summary>
-              <pre style={{ margin: "3px 0 0", whiteSpace: "pre-wrap", fontSize: 10 }}>{raw}</pre>
-            </details>
-          )}
+            {raw && raw !== cause && <pre style={{ margin: "3px 0 0", whiteSpace: "pre-wrap", fontSize: 10, color: "#a88a4a" }}>{raw}</pre>}
+          </details>
         </div>
       );
     }
@@ -719,12 +774,25 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       </div>
 
       {/* AI 를 못 써서 템플릿으로 만든 경우의 안내 — 초안은 이미 위에 있다. */}
-      {fallbackNotes.length > 0 && (
-        <div style={{ marginBottom: 10, border: "1px solid var(--vscode-inputValidation-warningBorder, #cca700)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", borderRadius: 5, padding: "7px 9px", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.5 }}>
-          {fallbackNotes.map((note, i) => <div key={i}>{note}</div>)}
-        </div>
-      )}
+      {/* 점검 문장은 배포 계획 단계(배포 준비 점검)에서 자세히 보여 준다 — 여기서는 몇 건인지만. */}
+      {fallbackNotes.length > 0 && (() => {
+        const checks = fallbackNotes.filter((note) => issueKind(note) !== "other");
+        const others = fallbackNotes.filter((note) => issueKind(note) === "other");
+        return (
+          <div data-testid="draft-notes" style={{ marginBottom: 10, border: "1px solid var(--vscode-inputValidation-warningBorder, #cca700)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", borderRadius: 5, padding: "7px 9px", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.5 }}>
+            {others.map((note, i) => <div key={i} title={note}>{shortIssue(note)}</div>)}
+            {checks.length > 0 && <div>배포 준비 점검 {checks.length}건 — 배포 계획에서 확인하고, 고칠 수 있는 것은 배포할 때 자동으로 고칩니다.</div>}
+            {checks.length > 0 && (
+              <details style={{ marginTop: 3 }}>
+                <summary style={{ cursor: "pointer", opacity: 0.85 }}>원문 보기</summary>
+                {fallbackNotes.map((note, i) => <div key={i} style={{ marginTop: 3, opacity: 0.9 }}>{note}</div>)}
+              </details>
+            )}
+          </div>
+        );
+      })()}
 
+      <DeploymentActivity target="docker" event={progress}/>
       {/* ── Loading spinner ── */}
       {(step === "generating" || step === "saving" || step === "scanning" || step === "planning" || step === "deploying") && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, color: "#888" }}>
@@ -765,13 +833,41 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
           <div><strong>포트:</strong> {Object.entries(plan.ports).map(([h, c]) => `${h}→${c}`).join(", ")}</div>
         </div>
       )}
+      {step === "planReady" && plan && (
+        <ReadinessPanel issues={readinessIssues} onFix={handleFixReadiness} onFixAll={handleFixAllReadiness} fixing={fixing} notice={fixNotice} />
+      )}
 
+      {/* ── 배포 전에 자동으로 고친 것 — 사용자 파일이 바뀌었으니 무엇을 바꿨는지 알린다 ── */}
+      {(step === "done" || step === "error") && (deployResult?.auto_fixed?.length ?? 0) > 0 && (
+        <div data-testid="pre-deploy-autofix" style={{ background: "rgba(59,130,246,0.08)", border: "1px solid #3b82f6", borderRadius: 5, padding: "8px 10px", fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
+          <details>
+            <summary style={{ cursor: "pointer" }}>배포 전에 빌드·실행을 막는 문제 {deployResult!.auto_fixed!.length}건을 자동으로 고쳤습니다 (원본은 .recoder/backups)</summary>
+            <ul style={{ margin: "4px 0 0", paddingLeft: 16 }}>{deployResult!.auto_fixed!.map((f) => <li key={f.code} title={f.message}>{shortIssue(f.message)}{f.changed?.length ? ` — ${f.changed.slice(0, 4).join(", ")}${f.changed.length > 4 ? " 외" : ""}` : ""}</li>)}</ul>
+          </details>
+        </div>
+      )}
+      {step === "done" && deployResult?.screen?.ok === true && (
+        <div data-testid="screen-verified" style={{ fontSize: 11, color: "#22c55e", marginBottom: 8 }}>
+          ✓ 화면 확인 완료{deployResult.screen.checked === "http" ? " (HTTP 응답 기준)" : ""}
+        </div>
+      )}
+      {/* ── 빌드 후 보안 검사를 못 한 채 진행된 배포 ── */}
+      {step === "done" && deployResult?.security_scan?.status === "unverified" && (
+        <div data-testid="post-build-scan-unverified" style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "8px 10px", color: "#f59e0b", fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
+          <span title={deployResult.security_scan.reason || undefined}>이미지 보안 검사(Trivy)를 하지 못한 채 배포됐습니다 — 네트워크·Docker 를 확인한 뒤 다시 배포하면 검사합니다.</span>
+        </div>
+      )}
+      {step === "done" && deployResult?.security_scan?.status === "passed" && (deployResult.security_scan.high_count ?? 0) > 0 && (
+        <div style={{ color: "#e3b261", fontSize: 11, marginBottom: 8 }}>
+          보안 검사 통과 — CRITICAL 없음, HIGH {deployResult.security_scan.high_count}건은 경고로 남았습니다.
+        </div>
+      )}
       {/* ── Done banner ── */}
-      {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deployResult?.health_ok === false ? (
+      {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deploymentHealthVerdict(deployResult, watch) !== "healthy" ? (
         //: docker run 은 됐지만 헬스 확인은 실패 — "통과" 로 칠하지 않는다.
         //: 실기기: /health 가 404 인 앱이 초록 "Health Check 통과" 로 보였다.
         <div style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "10px 12px", color: "#f59e0b", fontWeight: 600, marginBottom: 10 }}>
-          ⚠ 컨테이너는 떴지만 Health Check 는 실패했습니다
+          {deploymentHealthVerdict(deployResult, watch) === "failed" ? "앱 실행 검증에 실패했습니다" : "앱 응답 확인 중 — 아직 배포 완료가 아닙니다"}
           <div style={{ fontSize: 11, fontWeight: 400, marginTop: 4, color: "#e3b261", lineHeight: 1.5 }}>
             {deployResult?.health_check_url ?? "헬스 경로"} 가 2xx 로 응답하지 않았습니다 — 앱에 그 경로가 없거나 아직 준비 중일 수 있어요.
             {deployResult?.continuous_verification?.started ? " 연속 검증이 계속 지켜보고, 이상이면 롤백을 제안합니다." : " 이 배포는 롤백 후보에서 제외됩니다."}
@@ -879,7 +975,14 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
       )}
 
       {/* ── Error ── */}
-      {step === "error" && error && (
+      {step === "error" && diagnosis && (
+        <>
+          <BuildFailure diagnosis={diagnosis.value} raw={diagnosis.raw} restored={diagnosis.restored} />
+          <ReadinessPanel title="같이 고칠 항목" issues={readinessIssues} onFix={handleFixReadiness} onFixAll={handleFixAllReadiness} fixing={fixing}
+            notice={fixNotice ? `${fixNotice} 고친 뒤 '새 배포'로 다시 진행하세요.` : ""} />
+        </>
+      )}
+      {step === "error" && error && !diagnosis && (
         <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444", borderRadius: 5, padding: "8px 10px", color: "#ef4444", marginBottom: 10, whiteSpace: "pre-wrap", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 11, lineHeight: 1.5 }}>
           {error}
         </div>
@@ -912,6 +1015,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady, isDockerReady }) 
               setProposal(null);
               setDeployResult(null);
               setError(null);
+              setDiagnosis(null);
+              setReadinessIssues([]);
+              setFixNotice("");
             }
           }}
           //: 기존 파일과 다른 상태에서는 위 카드의 두 선택지가 유일한 다음 단계다 —

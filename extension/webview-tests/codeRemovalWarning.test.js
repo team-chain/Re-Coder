@@ -69,6 +69,7 @@ test('SidebarProvider forwards real generation metadata to the requesting webvie
     const api = { generateCode: async () => ({ summary: '', model: 'fixture', ops: [op] }) };
     const core = { onCoreRestart: () => ({ dispose() {} }) };
     const provider = new SidebarProvider(vscode.Uri.file('/tmp/extension'), api, core, {});
+    provider.ensureConnection = async () => {}; // Connection lifecycle has its own behavioral tests.
     const messages = [];
     const webview = { postMessage: (message) => { messages.push(message); return true; } };
     await provider.handleMessage({ type: 'code.generate', payload: { instruction: 'fixture', requestId: 9, decisions: [] } }, webview);

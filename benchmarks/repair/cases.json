@@ -1,0 +1,1122 @@
+[
+  {
+    "id": "npm-unpublished-version",
+    "category": "npm",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/npm-unpublished-version",
+    "reference": "references/npm-unpublished-version.json",
+    "oracle": "oracles/npm-unpublished-version.json",
+    "log_file": "logs/npm-unpublished-version.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "npm error code ETARGET\nERROR: process \"/bin/sh -c npm install --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\n#8 ERROR: process \"/bin/sh -c npm install --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\n0.474 npm error code ETARGET\nERROR: failed to build: failed to solve: process \"/bin/sh -c npm install --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\nDONE 0.0s\n[4/5] RUN npm install --ignore-scripts --no-audit --no-fund\nnpm error notarget No matching version found for is-number@99.0.0.\nnpm error notarget In most cases you or one of your dependencies are requesting\nnpm error notarget a package version that doesn't exist.\nnpm error A complete log of this run can be found in: /root/.npm/_logs/2026-10-02T17_05_38_394Z-debug-0.log\n> [4/5] RUN npm install --ignore-scripts --no-audit --no-fund:\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 260B done\n#1 DONE 0.0s",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "npm-scoped-package-typo",
+    "category": "npm",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/npm-scoped-package-typo",
+    "reference": "references/npm-scoped-package-typo.json",
+    "oracle": "oracles/npm-scoped-package-typo.json",
+    "log_file": "logs/npm-scoped-package-typo.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "#8 ERROR: process \"/bin/sh -c npm install --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\nERROR: failed to build: failed to solve: process \"/bin/sh -c npm install --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\nDONE 0.0s\n[4/5] RUN npm install --ignore-scripts --no-audit --no-fund\nnpm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/@types%2fnodex - Not found\nnpm error 404\nnpm error 404  '@types/nodex@22.0.0' is not in this registry.\nnpm error 404 Note that you can also install from a\nnpm error 404 tarball, folder, http url, or git url.\nnpm notice\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 260B done\n#1 DONE 0.0s\n#2 [internal] load metadata for docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "npm-lockfile-out-of-sync",
+    "category": "npm",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/npm-lockfile-out-of-sync",
+    "reference": "references/npm-lockfile-out-of-sync.json",
+    "oracle": "oracles/npm-lockfile-out-of-sync.json",
+    "log_file": "logs/npm-lockfile-out-of-sync.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "npm error code EUSAGE\n#8 ERROR: process \"/bin/sh -c npm ci --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\nERROR: failed to build: failed to solve: process \"/bin/sh -c npm ci --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\n[4/5] RUN npm ci --ignore-scripts --no-audit --no-fund\nnpm error\nnpm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync. Please update your lock file with `npm install` before continuing.\nnpm error Invalid: lock file's is-number@7.0.0 does not satisfy is-number@6.0.0\nnpm error Clean install a project\nnpm error Usage:\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 255B done\n#1 DONE 0.0s\n#2 [internal] load metadata for docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#2 DONE 0.0s\n#3 [internal] load .dockerignore",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "npm-peer-dependency-conflict",
+    "category": "npm",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/npm-peer-dependency-conflict",
+    "reference": "references/npm-peer-dependency-conflict.json",
+    "oracle": "oracles/npm-peer-dependency-conflict.json",
+    "log_file": "logs/npm-peer-dependency-conflict.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "npm error code ERESOLVE\nnpm error ERESOLVE unable to resolve dependency tree\n#8 ERROR: process \"/bin/sh -c npm install --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\nERROR: failed to build: failed to solve: process \"/bin/sh -c npm install --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\n[3/5] COPY package*.json ./\nDONE 0.0s\n[4/5] RUN npm install --ignore-scripts --no-audit --no-fund\nnpm error\nnpm error While resolving: repair-fixture@1.0.0\nnpm error Found: react@18.2.0\nnpm error node_modules/react\nnpm error   react@\"18.2.0\" from the root project\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#1 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done\n#1 DONE 0.0s",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "npm-unsupported-node-engine",
+    "category": "npm",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/npm-unsupported-node-engine",
+    "reference": "references/npm-unsupported-node-engine.json",
+    "oracle": "oracles/npm-unsupported-node-engine.json",
+    "log_file": "logs/npm-unsupported-node-engine.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "npm error code EBADENGINE\n#8 ERROR: process \"/bin/sh -c npm install --engine-strict --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\n0.315 npm error code EBADENGINE\nERROR: failed to build: failed to solve: process \"/bin/sh -c npm install --engine-strict --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\n[3/5] COPY package*.json ./\nDONE 0.0s\n[4/5] RUN npm install --engine-strict --ignore-scripts --no-audit --no-fund\nnpm error engine Unsupported engine\nnpm error engine Not compatible with your version of node/npm: repair-fixture@1.0.0\nnpm error notsup Not compatible with your version of node/npm: repair-fixture@1.0.0\nnpm error notsup Required: {\"node\":\">=99\"}\nnpm error notsup Actual:   {\"npm\":\"10.9.9\",\"node\":\"v22.23.3\"}\nnpm error A complete log of this run can be found in: /root/.npm/_logs/2026-10-02T17_05_40_676Z-debug-0.log\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#1 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "npm-private-registry-auth",
+    "category": "npm",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/npm-private-registry-auth",
+    "reference": "references/npm-private-registry-auth.json",
+    "oracle": "oracles/npm-private-registry-auth.json",
+    "log_file": "logs/npm-private-registry-auth.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "ERROR: process \"/bin/sh -c node registry.cjs & sleep 1; npm install --registry=http://127.0.0.1:4873 --fetch-retries=0 --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\n#9 ERROR: process \"/bin/sh -c node registry.cjs & sleep 1; npm install --registry=http://127.0.0.1:4873 --fetch-retries=0 --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\nERROR: failed to build: failed to solve: process \"/bin/sh -c node registry.cjs & sleep 1; npm install --registry=http://127.0.0.1:4873 --fetch-retries=0 --ignore-scripts --no-audit --no-fund\" did not complete successfully: exit code: 1\n[4/6] COPY registry.cjs ./\nDONE 0.0s\n[5/6] RUN node registry.cjs & sleep 1; npm install --registry=http://127.0.0.1:4873 --fetch-retries=0 --ignore-scripts --no-audit --no-fund\nnpm error code E401\nnpm error 401 Unauthorized - GET http://127.0.0.1:4873/is-number\nnpm error A complete log of this run can be found in: /root/.npm/_logs/2026-10-02T17_05_42_750Z-debug-0.log\n> [5/6] RUN node registry.cjs & sleep 1; npm install --registry=http://127.0.0.1:4873 --fetch-retries=0 --ignore-scripts --no-audit --no-fund:\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#1 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done\n#1 DONE 0.0s\n#3 [internal] load build definition from Dockerfile\n#3 transferring dockerfile: 361B done",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "node-framework-express5-unnamed-wildcard",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/node-framework-express5-unnamed-wildcard",
+    "reference": "references/node-framework-express5-unnamed-wildcard.json",
+    "oracle": "oracles/node-framework-express5-unnamed-wildcard.json",
+    "log_file": "logs/node-framework-express5-unnamed-wildcard.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "throw new PathError(`Missing parameter name at index ${index}`, str);\nTypeError: Missing parameter name at index 2: /*; visit https://git.new/pathToRegexpError for info\n/app/node_modules/path-to-regexp/dist/index.js:108\n^\nat consumeUntil (/app/node_modules/path-to-regexp/dist/index.js:108:27)\nat parse (/app/node_modules/path-to-regexp/dist/index.js:140:26)\nat process (/app/node_modules/path-to-regexp/dist/index.js:263:56)\nat pathToRegexp (/app/node_modules/path-to-regexp/dist/index.js:274:5)\nat Object.match (/app/node_modules/path-to-regexp/dist/index.js:225:30)\nat matcher (/app/node_modules/router/lib/layer.js:86:23)\nat Function.route (/app/node_modules/router/index.js:428:17)\nat Function.route (/app/node_modules/express/lib/application.js:257:22)\nat app.<computed> [as get] (/app/node_modules/express/lib/application.js:478:22) {\noriginalPath: '/*'",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "node-framework-express5-optional-route",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/node-framework-express5-optional-route",
+    "reference": "references/node-framework-express5-optional-route.json",
+    "oracle": "oracles/node-framework-express5-optional-route.json",
+    "log_file": "logs/node-framework-express5-optional-route.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "throw new PathError(`Unexpected ${value} at index ${index - 1}`, str);\nTypeError: Unexpected ? at index 11: /:file.:ext?; visit https://git.new/pathToRegexpError for info\n/app/node_modules/path-to-regexp/dist/index.js:130\n^\nat consumeUntil (/app/node_modules/path-to-regexp/dist/index.js:130:23)\nat parse (/app/node_modules/path-to-regexp/dist/index.js:140:26)\nat process (/app/node_modules/path-to-regexp/dist/index.js:263:56)\nat pathToRegexp (/app/node_modules/path-to-regexp/dist/index.js:274:5)\nat Object.match (/app/node_modules/path-to-regexp/dist/index.js:225:30)\nat matcher (/app/node_modules/router/lib/layer.js:86:23)\nat Function.route (/app/node_modules/router/index.js:428:17)\nat Function.route (/app/node_modules/express/lib/application.js:257:22)\nat app.<computed> [as get] (/app/node_modules/express/lib/application.js:478:22) {\noriginalPath: '/:file.:ext?'",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "node-framework-esm-commonjs-mismatch",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/node-framework-esm-commonjs-mismatch",
+    "reference": "references/node-framework-esm-commonjs-mismatch.json",
+    "oracle": "oracles/node-framework-esm-commonjs-mismatch.json",
+    "log_file": "logs/node-framework-esm-commonjs-mismatch.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "ReferenceError: require is not defined in ES module scope, you can use import instead\nfile:///app/app.js:1\nconst fs = require('node:fs'); console.log('module loaded');\n^\nThis file is being treated as an ES module because it has a '.js' file extension and '/app/package.json' contains \"type\": \"module\". To treat it as a CommonJS script, rename it to use the '.cjs' file extension.\nat file:///app/app.js:1:12\nat ModuleJob.run (node:internal/modules/esm/module_job:343:25)\nat async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:681:26)\nat async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "module loaded",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "node-framework-top-level-await-require",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/node-framework-top-level-await-require",
+    "reference": "references/node-framework-top-level-await-require.json",
+    "oracle": "oracles/node-framework-top-level-await-require.json",
+    "log_file": "logs/node-framework-top-level-await-require.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "Error [ERR_REQUIRE_ASYNC_MODULE]: require() cannot be used on an ESM graph with top-level await. Use import() instead. To see where the top-level await comes from, use --experimental-print-required-tla.\nthrow new ERR_REQUIRE_ASYNC_MODULE(filename, parentFilename);\ncode: 'ERR_REQUIRE_ASYNC_MODULE'\nnode:internal/modules/esm/module_job:450\n^\nFrom /app/app.cjs\nRequiring /app/value.mjs\nat ModuleJobSync.runSync (node:internal/modules/esm/module_job:450:13)\nat ModuleLoader.importSyncForRequire (node:internal/modules/esm/loader:445:47)\nat loadESMFromCJS (node:internal/modules/cjs/loader:1600:24)\nat Module._compile (node:internal/modules/cjs/loader:1763:5)\nat Object..js (node:internal/modules/cjs/loader:1913:10)\nat Module.load (node:internal/modules/cjs/loader:1505:32)\nat Function._load (node:internal/modules/cjs/loader:1309:12)\nat wrapModuleLoad (node:internal/modules/cjs/loader:254:19)\nat Module.require (node:internal/modules/cjs/loader:1527:12)",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "42",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "node-framework-vite-build-time-env",
+    "category": "node-framework",
+    "stage": "run",
+    "status": "ready",
+    "workspace": "fixtures/node-framework-vite-build-time-env",
+    "reference": "references/node-framework-vite-build-time-env.json",
+    "oracle": "oracles/node-framework-vite-build-time-env.json",
+    "log_file": "logs/node-framework-vite-build-time-env.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AssertionError [ERR_ASSERTION]: undefined == 'https://api.example.test'\ncode: 'ERR_ASSERTION',\nthrow new AssertionError(obj);\nnode:assert:150\n^\nat [eval]:1:24\nat runScriptInThisContext (node:internal/vm:209:10)\nat node:internal/process/execution:446:12\nat [eval]-wrapper:6:24\nat runScriptInContext (node:internal/process/execution:444:60)\nat evalFunction (node:internal/process/execution:279:30)\nat evalTypeScript (node:internal/process/execution:291:3)\nat node:internal/main/eval_string:74:3 {\ngeneratedMessage: true,\nactual: undefined,\nexpected: 'https://api.example.test',",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": [
+      "NODE_BUILD_ENTRY_MISSING"
+    ]
+  },
+  {
+    "id": "node-framework-vite-dependency-api-change",
+    "category": "node-framework",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/node-framework-vite-dependency-api-change",
+    "reference": "references/node-framework-vite-dependency-api-change.json",
+    "oracle": "oracles/node-framework-vite-dependency-api-change.json",
+    "log_file": "logs/node-framework-vite-dependency-api-change.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "✘ [ERROR] Missing \"./dist/node\" specifier in \"vite\" package [plugin externalize-deps]\nnode_modules/esbuild/lib/main.js:1226:27: ERROR: [plugin: externalize-deps] Missing \"./dist/node\" specifier in \"vite\" package\nERROR: process \"/bin/sh -c npm run build\" did not complete successfully: exit code: 1\nERROR: failed to build: failed to solve: process \"/bin/sh -c npm run build\" did not complete successfully: exit code: 1\n#12 ERROR: process \"/bin/sh -c npm run build\" did not complete successfully: exit code: 1\nThis error came from the \"onResolve\" callback registered here:\nfailed to load config from /app/vite.config.js\nerror during build:\nError: Build failed with 1 error:\nat failureErrorWithLog (/app/node_modules/esbuild/lib/main.js:1476:15)\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#1 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done\n#1 DONE 0.0s\n#4 [internal] load build definition from Dockerfile\n#4 transferring dockerfile: 320B done",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": [
+      "NODE_BUILD_ENTRY_MISSING"
+    ]
+  },
+  {
+    "id": "docker-copy-outside-context",
+    "category": "docker",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/docker-copy-outside-context",
+    "reference": "references/docker-copy-outside-context.json",
+    "oracle": "oracles/docker-copy-outside-context.json",
+    "log_file": "logs/docker-copy-outside-context.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::qkfya49zwkuu9y9gzigpw8bpv: \"/outside/payload.txt\": not found\n#9 ERROR: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::qkfya49zwkuu9y9gzigpw8bpv: \"/outside/payload.txt\": not found\n7 |\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#1 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done\n#1 DONE 0.0s\n#3 [internal] load build definition from Dockerfile\n#3 transferring dockerfile: 296B done\n#3 DONE 0.0s\n#4 [internal] load metadata for docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#4 DONE 0.0s\n#5 [internal] load .dockerignore\n#5 transferring context: 67B done\n#5 DONE 0.0s\n#6 [internal] load build context",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "docker-dockerignore-required-file",
+    "category": "docker",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/docker-dockerignore-required-file",
+    "reference": "references/docker-dockerignore-required-file.json",
+    "oracle": "oracles/docker-dockerignore-required-file.json",
+    "log_file": "logs/docker-dockerignore-required-file.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::e8o94ryzr8vklekd0jhb89uqz: \"/payload.txt\": not found\n#9 ERROR: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::e8o94ryzr8vklekd0jhb89uqz: \"/payload.txt\": not found\n7 |\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#1 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done\n#1 DONE 0.0s\n#3 [internal] load build definition from Dockerfile\n#3 transferring dockerfile: 285B done\n#3 DONE 0.0s\n#4 [internal] load metadata for docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#4 DONE 0.0s\n#5 [internal] load .dockerignore\n#5 transferring context: 79B done\n#5 DONE 0.0s\n#6 [internal] load build context",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "docker-wrong-multistage-source",
+    "category": "docker",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/docker-wrong-multistage-source",
+    "reference": "references/docker-wrong-multistage-source.json",
+    "oracle": "oracles/docker-wrong-multistage-source.json",
+    "log_file": "logs/docker-wrong-multistage-source.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::nhrkxovsau3iid71t638yc1c3: \"/build/dist/result.txt\": not found\n#7 ERROR: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::nhrkxovsau3iid71t638yc1c3: \"/build/dist/result.txt\": not found\n7 |\n#0 building with \"desktop-linux\" instance using docker driver\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 383B done\n#1 DONE 0.0s\n#2 [internal] load metadata for docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#2 DONE 0.0s\n#3 [internal] load .dockerignore\n#3 transferring context: 67B done\n#3 DONE 0.0s\n#4 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#4 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done\n#4 CACHED\n#6 [builder 3/3] RUN mkdir out && echo artifact > out/result.txt",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "docker-native-addon-toolchain",
+    "category": "docker",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/docker-native-addon-toolchain",
+    "reference": "references/docker-native-addon-toolchain.json",
+    "oracle": "oracles/docker-native-addon-toolchain.json",
+    "log_file": "logs/docker-native-addon-toolchain.log",
+    "verification_kind": "docker-runtime",
+    "note": "Real C compiler dependency failure; no native npm addon ABI claim.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "ERROR: process \"/bin/sh -c cc native.c -o /app/native\" did not complete successfully: exit code: 127\n#10 ERROR: process \"/bin/sh -c cc native.c -o /app/native\" did not complete successfully: exit code: 127\nERROR: failed to build: failed to solve: process \"/bin/sh -c cc native.c -o /app/native\" did not complete successfully: exit code: 127\n[5/6] COPY . .\nDONE 0.0s\n[6/6] RUN cc native.c -o /app/native\n/bin/sh: 1: cc: not found\n> [6/6] RUN cc native.c -o /app/native:\n#0 building with \"desktop-linux\" instance using docker driver\n#2 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c\n#2 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done\n#2 CACHED\n#3 [internal] load build definition from Dockerfile\n#3 transferring dockerfile: 291B done\n#3 DONE 0.0s\n#4 [internal] load metadata for docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "native ready",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "docker-runtime-user-permission",
+    "category": "docker",
+    "stage": "run",
+    "status": "ready",
+    "workspace": "fixtures/docker-runtime-user-permission",
+    "reference": "references/docker-runtime-user-permission.json",
+    "oracle": "oracles/docker-runtime-user-permission.json",
+    "log_file": "logs/docker-runtime-user-permission.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "Error: EACCES: permission denied, open '/app/private.txt'\ncode: 'EACCES',\nnode:fs:560\nreturn binding.open(\n^\nat Object.openSync (node:fs:560:18)\nat Object.readFileSync (node:fs:444:35)\nat Object.<anonymous> (/app/app.cjs:1:20)\nat Module._compile (node:internal/modules/cjs/loader:1781:14)\nat Object..js (node:internal/modules/cjs/loader:1913:10)\nat Module.load (node:internal/modules/cjs/loader:1505:32)\nat Function._load (node:internal/modules/cjs/loader:1309:12)\nat wrapModuleLoad (node:internal/modules/cjs/loader:254:19)\nat Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)\nat node:internal/main/run_main_module:36:49 {\nerrno: -13,",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "readable",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "docker-probe-tool-missing",
+    "category": "docker",
+    "stage": "run",
+    "status": "ready",
+    "workspace": "fixtures/docker-probe-tool-missing",
+    "reference": "references/docker-probe-tool-missing.json",
+    "oracle": "oracles/docker-probe-tool-missing.json",
+    "log_file": "logs/docker-probe-tool-missing.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "/bin/sh: 1: curl: not found\nhealth while running=1, after stop=1",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "health while running=0, after stop=1",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "ecs-ecr-container-port-mismatch",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "ready",
+    "workspace": "fixtures/ecs-ecr-container-port-mismatch",
+    "reference": "references/ecs-ecr-container-port-mismatch.json",
+    "oracle": "oracles/ecs-ecr-container-port-mismatch.json",
+    "log_file": "logs/ecs-ecr-container-port-mismatch.log",
+    "verification_kind": "ecs-local-contract",
+    "note": "Docker HTTP replay + ECS configuration contract; not a live Fargate deployment.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "ECS health check failed fetch failed",
+        "exit_code": 1,
+        "available": true,
+        "kind": "ecs-local-contract",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "ecs-local-contract",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "ecs-ecr-health-path-mismatch",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "ready",
+    "workspace": "fixtures/ecs-ecr-health-path-mismatch",
+    "reference": "references/ecs-ecr-health-path-mismatch.json",
+    "oracle": "oracles/ecs-ecr-health-path-mismatch.json",
+    "log_file": "logs/ecs-ecr-health-path-mismatch.log",
+    "verification_kind": "ecs-local-contract",
+    "note": "Docker HTTP replay + ECS configuration contract; not a live Fargate deployment.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "ECS health check failed health status 404",
+        "exit_code": 1,
+        "available": true,
+        "kind": "ecs-local-contract",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "ecs-local-contract",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "ecs-ecr-startup-grace-period",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "ready",
+    "workspace": "fixtures/ecs-ecr-startup-grace-period",
+    "reference": "references/ecs-ecr-startup-grace-period.json",
+    "oracle": "oracles/ecs-ecr-startup-grace-period.json",
+    "log_file": "logs/ecs-ecr-startup-grace-period.log",
+    "verification_kind": "ecs-local-contract",
+    "note": "Docker HTTP replay + ECS configuration contract; not a live Fargate deployment.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "ECS health check failed during initialization: startPeriod below required startupSeconds 12",
+        "exit_code": null,
+        "available": true,
+        "kind": "ecs-local-contract",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "ecs-local-contract",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "ecs-ecr-execution-role-image-pull",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "ready",
+    "workspace": "fixtures/ecs-ecr-execution-role-image-pull",
+    "reference": "references/ecs-ecr-execution-role-image-pull.json",
+    "oracle": "oracles/ecs-ecr-execution-role-image-pull.json",
+    "log_file": "logs/ecs-ecr-execution-role-image-pull.log",
+    "verification_kind": "aws-iam-simulation",
+    "note": "Live AWS SimulateCustomPolicy; no resource created. Does not prove SCP, KMS grant, VPC endpoint, or cross-account authorization.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AccessDenied ecr:BatchGetImage on arn:aws:ecr:ap-northeast-2:111122223333:repository/repair-fixture: implicitDeny",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Allowed ecr:BatchGetImage on arn:aws:ecr:ap-northeast-2:111122223333:repository/repair-fixture: allowed",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "ecs-ecr-image-tag-missing",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "ready",
+    "workspace": "fixtures/ecs-ecr-image-tag-missing",
+    "reference": "references/ecs-ecr-image-tag-missing.json",
+    "oracle": "oracles/ecs-ecr-image-tag-missing.json",
+    "log_file": "logs/ecs-ecr-image-tag-missing.log",
+    "verification_kind": "ecr-local-contract",
+    "note": "Offline registry manifest contract; does not claim a real ECR pull.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "CannotPullContainerError: image tag missing; registry availableImages=[repair-fixture:v1]",
+        "exit_code": null,
+        "available": true,
+        "kind": "ecr-local-contract",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Local registry contract passed",
+        "exit_code": null,
+        "available": true,
+        "kind": "ecr-local-contract",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "ecs-ecr-secrets-initialization",
+    "category": "ecs-ecr",
+    "stage": "ecs",
+    "status": "ready",
+    "workspace": "fixtures/ecs-ecr-secrets-initialization",
+    "reference": "references/ecs-ecr-secrets-initialization.json",
+    "oracle": "oracles/ecs-ecr-secrets-initialization.json",
+    "log_file": "logs/ecs-ecr-secrets-initialization.log",
+    "verification_kind": "aws-iam-simulation",
+    "note": "Live AWS SimulateCustomPolicy; no resource created. Does not prove SCP, KMS grant, VPC endpoint, or cross-account authorization.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AccessDenied secretsmanager:GetSecretValue on arn:aws:secretsmanager:ap-northeast-2:111122223333:secret=[MASKED] implicitDeny",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Allowed secretsmanager:GetSecretValue on arn:aws:secretsmanager:ap-northeast-2:111122223333:secret=[MASKED] allowed",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "iam-s3-task-role-s3-read",
+    "category": "iam-s3",
+    "stage": "iam",
+    "status": "ready",
+    "workspace": "fixtures/iam-s3-task-role-s3-read",
+    "reference": "references/iam-s3-task-role-s3-read.json",
+    "oracle": "oracles/iam-s3-task-role-s3-read.json",
+    "log_file": "logs/iam-s3-task-role-s3-read.log",
+    "verification_kind": "aws-iam-simulation",
+    "note": "Live AWS SimulateCustomPolicy; no resource created. Does not prove SCP, KMS grant, VPC endpoint, or cross-account authorization.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AccessDenied s3:GetObject on arn:aws:s3:::repair-fixture/assets/config.json: implicitDeny",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Allowed s3:GetObject on arn:aws:s3:::repair-fixture/assets/config.json: allowed",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "iam-s3-bucket-explicit-deny",
+    "category": "iam-s3",
+    "stage": "s3",
+    "status": "ready",
+    "workspace": "fixtures/iam-s3-bucket-explicit-deny",
+    "reference": "references/iam-s3-bucket-explicit-deny.json",
+    "oracle": "oracles/iam-s3-bucket-explicit-deny.json",
+    "log_file": "logs/iam-s3-bucket-explicit-deny.log",
+    "verification_kind": "aws-iam-simulation",
+    "note": "Live AWS SimulateCustomPolicy; no resource created. Does not prove SCP, KMS grant, VPC endpoint, or cross-account authorization.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AccessDenied s3:GetObject on arn:aws:s3:::repair-fixture/assets/config.json: explicitDeny",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Allowed s3:GetObject on arn:aws:s3:::repair-fixture/assets/config.json: allowed",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "iam-s3-kms-decrypt-permission",
+    "category": "iam-s3",
+    "stage": "iam",
+    "status": "ready",
+    "workspace": "fixtures/iam-s3-kms-decrypt-permission",
+    "reference": "references/iam-s3-kms-decrypt-permission.json",
+    "oracle": "oracles/iam-s3-kms-decrypt-permission.json",
+    "log_file": "logs/iam-s3-kms-decrypt-permission.log",
+    "verification_kind": "aws-iam-simulation",
+    "note": "Live AWS SimulateCustomPolicy; no resource created. Does not prove SCP, KMS grant, VPC endpoint, or cross-account authorization.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AccessDenied kms:Decrypt on arn:aws:kms:ap-northeast-2:111122223333:key/12345678-1234-1234-1234-123456789012: implicitDeny",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Allowed kms:Decrypt on arn:aws:kms:ap-northeast-2:111122223333:key/12345678-1234-1234-1234-123456789012: allowed",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "iam-s3-ecr-resource-scope",
+    "category": "iam-s3",
+    "stage": "iam",
+    "status": "ready",
+    "workspace": "fixtures/iam-s3-ecr-resource-scope",
+    "reference": "references/iam-s3-ecr-resource-scope.json",
+    "oracle": "oracles/iam-s3-ecr-resource-scope.json",
+    "log_file": "logs/iam-s3-ecr-resource-scope.log",
+    "verification_kind": "aws-iam-simulation",
+    "note": "Live AWS SimulateCustomPolicy; no resource created. Does not prove SCP, KMS grant, VPC endpoint, or cross-account authorization.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AccessDenied ecr:GetAuthorizationToken on *: implicitDeny",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Allowed ecr:GetAuthorizationToken on *: allowed",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "iam-s3-s3-endpoint-policy",
+    "category": "iam-s3",
+    "stage": "s3",
+    "status": "ready",
+    "workspace": "fixtures/iam-s3-s3-endpoint-policy",
+    "reference": "references/iam-s3-s3-endpoint-policy.json",
+    "oracle": "oracles/iam-s3-s3-endpoint-policy.json",
+    "log_file": "logs/iam-s3-s3-endpoint-policy.log",
+    "verification_kind": "aws-iam-simulation",
+    "note": "Live AWS SimulateCustomPolicy; no resource created. Does not prove SCP, KMS grant, VPC endpoint, or cross-account authorization.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AccessDenied s3:GetObject on arn:aws:s3:::repair-fixture/assets/config.json: implicitDeny",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Allowed s3:GetObject on arn:aws:s3:::repair-fixture/assets/config.json: allowed",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "iam-s3-cross-account-bucket",
+    "category": "iam-s3",
+    "stage": "s3",
+    "status": "ready",
+    "workspace": "fixtures/iam-s3-cross-account-bucket",
+    "reference": "references/iam-s3-cross-account-bucket.json",
+    "oracle": "oracles/iam-s3-cross-account-bucket.json",
+    "log_file": "logs/iam-s3-cross-account-bucket.log",
+    "verification_kind": "aws-iam-simulation",
+    "note": "Live AWS SimulateCustomPolicy; no resource created. Does not prove SCP, KMS grant, VPC endpoint, or cross-account authorization.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AccessDenied s3:GetObject on arn:aws:s3:::repair-fixture/assets/config.json: implicitDeny",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Allowed s3:GetObject on arn:aws:s3:::repair-fixture/assets/config.json: allowed",
+        "exit_code": null,
+        "available": true,
+        "kind": "aws-iam-simulation",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "logic-control-off-by-one-pagination",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/logic-control-off-by-one-pagination",
+    "reference": "references/logic-control-off-by-one-pagination.json",
+    "oracle": "oracles/logic-control-off-by-one-pagination.json",
+    "log_file": "logs/logic-control-off-by-one-pagination.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\ncode: 'ERR_ASSERTION',\n+ actual - expected\nat [eval]:1:180\nat runScriptInThisContext (node:internal/vm:209:10)\nat node:internal/process/execution:446:12\nat [eval]-wrapper:6:24\nat runScriptInContext (node:internal/process/execution:444:60)\nat evalFunction (node:internal/process/execution:279:30)\nat evalTypeScript (node:internal/process/execution:291:3)\nat node:internal/main/eval_string:74:3 {\ngeneratedMessage: true,\nactual: [Array],\nexpected: [Array],\noperator: 'deepStrictEqual',\ndiff: 'simple'",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "logic-control-async-race",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/logic-control-async-race",
+    "reference": "references/logic-control-async-race.json",
+    "oracle": "oracles/logic-control-async-race.json",
+    "log_file": "logs/logic-control-async-race.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\ncode: 'ERR_ASSERTION',\nat [eval]:1:91 {\ngeneratedMessage: true,\nactual: 0,\nexpected: 5,\noperator: 'strictEqual',\ndiff: 'simple'",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "logic-control-wrong-tax-rounding",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/logic-control-wrong-tax-rounding",
+    "reference": "references/logic-control-wrong-tax-rounding.json",
+    "oracle": "oracles/logic-control-wrong-tax-rounding.json",
+    "log_file": "logs/logic-control-wrong-tax-rounding.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\ncode: 'ERR_ASSERTION',\nat [eval]:1:166\nat runScriptInThisContext (node:internal/vm:209:10)\nat node:internal/process/execution:446:12\nat [eval]-wrapper:6:24\nat runScriptInContext (node:internal/process/execution:444:60)\nat evalFunction (node:internal/process/execution:279:30)\nat evalTypeScript (node:internal/process/execution:291:3)\nat node:internal/main/eval_string:74:3 {\ngeneratedMessage: true,\nactual: 10,\nexpected: 11,\noperator: 'strictEqual',\ndiff: 'simple'",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "logic-control-invalid-state-transition",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/logic-control-invalid-state-transition",
+    "reference": "references/logic-control-invalid-state-transition.json",
+    "oracle": "oracles/logic-control-invalid-state-transition.json",
+    "log_file": "logs/logic-control-invalid-state-transition.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\ncode: 'ERR_ASSERTION',\nat [eval]:1:220\nat runScriptInThisContext (node:internal/vm:209:10)\nat node:internal/process/execution:446:12\nat [eval]-wrapper:6:24\nat runScriptInContext (node:internal/process/execution:444:60)\nat evalFunction (node:internal/process/execution:279:30)\nat evalTypeScript (node:internal/process/execution:291:3)\nat node:internal/main/eval_string:74:3 {\ngeneratedMessage: true,\nactual: true,\nexpected: false,\noperator: 'strictEqual',\ndiff: 'simple'",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "logic-control-timezone-boundary",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/logic-control-timezone-boundary",
+    "reference": "references/logic-control-timezone-boundary.json",
+    "oracle": "oracles/logic-control-timezone-boundary.json",
+    "log_file": "logs/logic-control-timezone-boundary.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\ncode: 'ERR_ASSERTION',\n+ actual - expected\nat [eval]:1:205\nat runScriptInThisContext (node:internal/vm:209:10)\nat node:internal/process/execution:446:12\nat [eval]-wrapper:6:24\nat runScriptInContext (node:internal/process/execution:444:60)\nat evalFunction (node:internal/process/execution:279:30)\nat evalTypeScript (node:internal/process/execution:291:3)\nat node:internal/main/eval_string:74:3 {\ngeneratedMessage: true,\nactual: '2026-01-02',\nexpected: '2026-01-01',\noperator: 'strictEqual',\ndiff: 'simple'",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  },
+  {
+    "id": "logic-control-missing-null-branch",
+    "category": "logic-control",
+    "stage": "build",
+    "status": "ready",
+    "workspace": "fixtures/logic-control-missing-null-branch",
+    "reference": "references/logic-control-missing-null-branch.json",
+    "oracle": "oracles/logic-control-missing-null-branch.json",
+    "log_file": "logs/logic-control-missing-null-branch.log",
+    "verification_kind": "docker-runtime",
+    "note": "Synthetic injected fault; independent oracle kept outside model workspace.",
+    "validation": {
+      "broken": {
+        "passed": false,
+        "output": "TypeError: Cannot read properties of null (reading 'name')\nat exports.label (/app/app.cjs:1:20)\nat [eval]:1:99\nat [eval]:1:206\nat runScriptInThisContext (node:internal/vm:209:10)\nat node:internal/process/execution:446:12\nat [eval]-wrapper:6:24\nat runScriptInContext (node:internal/process/execution:444:60)\nat evalFunction (node:internal/process/execution:279:30)\nat evalTypeScript (node:internal/process/execution:291:3)\nat node:internal/main/eval_string:74:3",
+        "exit_code": 1,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      },
+      "reference": {
+        "passed": true,
+        "output": "Independent runtime assertions passed",
+        "exit_code": 0,
+        "available": true,
+        "kind": "docker-runtime",
+        "production_verified": false
+      }
+    },
+    "readiness_codes": []
+  }
+]

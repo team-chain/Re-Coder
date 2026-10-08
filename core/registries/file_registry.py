@@ -62,11 +62,11 @@ COPY package*.json ./
 RUN npm ci
 COPY . .
 RUN npm run build
-# npm start 로 뜨므로 npm 은 남기되 번들 tar CVE 를 피해 최신으로 올린다.
-RUN npm install -g npm@latest
+# 번들 npm(취약한 tar 동봉)은 지우고 next 를 node 로 바로 띄운다 — npm 을 이미지 안에서 올리면 npm 12 이후 빌드가 깨진다.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 USER node
 EXPOSE 3000
-CMD ["npm", "start"]
+CMD ["node", "node_modules/next/dist/bin/next", "start", "-H", "0.0.0.0", "-p", "3000"]
 """
 
 

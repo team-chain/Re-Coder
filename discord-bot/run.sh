@@ -50,6 +50,10 @@ case "$CMD" in
         exec python bot.py
         ;;
 
+    doctor)
+        exec python doctor.py
+        ;;
+
     test)
         pip install -q pytest pytest-asyncio
         exec python -m pytest tests/ -v
@@ -71,7 +75,7 @@ print('  ✅ bot.py 로딩 성공:', mod.RecoderBot.__name__)
         ;;
 
     *)
-        echo "사용법: $0 [run|test|check]" >&2
+        echo "사용법: $0 [run|doctor|test|check]" >&2
         exit 1
         ;;
 esac

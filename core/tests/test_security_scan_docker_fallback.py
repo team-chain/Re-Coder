@@ -16,6 +16,43 @@ import pytest
 import security_scan as ss
 
 
+@pytest.mark.parametrize("outcome", [RuntimeError("scanner crashed"), None, {"Results": []}])
+def test_unexpected_image_scanner_failure_cannot_pass(monkeypatch, outcome):
+    async def fail(*args):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+    monkeypatch.setattr(ss.SecurityScanner, "_run_trivy", fail)
+    result = asyncio.run(ss.SecurityScanner().scan_all(image="validation:latest"))
+    assert not result.scan_passed and result.blocked
+    assert "trivy_scan_failed" in result.tool_errors
+
+
+def test_cancelled_image_scan_never_returns_a_clean_result(monkeypatch):
+    async def cancel(*args):
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(ss.SecurityScanner, "_run_trivy", cancel)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ss.SecurityScanner().scan_all(image="validation:latest"))
+
+
+@pytest.mark.parametrize("tool,report", [
+    ("trivy", "{}"), ("trivy", '{"Results":null}'),
+    ("hadolint", ""), ("hadolint", "{}"),
+    ("gitleaks", ""), ("gitleaks", "{}"), ("gitleaks", None),
+])
+def test_malformed_or_missing_reports_are_not_clean_scans(monkeypatch, tmp_path, tool, report):
+    _tools(monkeypatch, native={tool}, docker=False)
+    async def command(cmd, **kwargs):
+        flag = "--output" if tool == "trivy" else "--report-path"
+        if flag in cmd and report is not None:
+            Path(cmd[cmd.index(flag) + 1]).write_text(report)
+        return report or ""
+    monkeypatch.setattr(ss.SecurityScanner, "_run_cmd", staticmethod(command))
+    findings = asyncio.run(getattr(ss.SecurityScanner(), "_run_" + tool)(str(tmp_path)))
+    assert any(f.title == tool + "_scan_failed" for f in findings)
+
+
 class _Capture:
     """`_run_cmd` 를 가로채 명령을 기록하고, 도구별 가짜 출력을 만든다."""
 
@@ -30,14 +67,14 @@ class _Capture:
         if "--output" in cmd:
             out = cmd[cmd.index("--output") + 1]
             if out.startswith("/out/"):
-                host_dir = next(a.split(":")[0] for a in cmd if a.endswith(":/out"))
+                host_dir = next(a.rsplit(":", 1)[0] for a in cmd if a.endswith(":/out"))
                 out = os.path.join(host_dir, os.path.basename(out))
             Path(out).write_text(json.dumps({"Results": []}))
             return ""
         if "--report-path" in cmd:
             out = cmd[cmd.index("--report-path") + 1]
             if out.startswith("/out/"):
-                host_dir = next(a.split(":")[0] for a in cmd if a.endswith(":/out"))
+                host_dir = next(a.rsplit(":", 1)[0] for a in cmd if a.endswith(":/out"))
                 out = os.path.join(host_dir, os.path.basename(out))
             Path(out).write_text("[]")
             return ""
@@ -111,7 +148,7 @@ def test_hadolint_폴백은_Dockerfile_을_표준입력으로_넘긴다(monkeypa
     assert call["cmd"][:4] == ["docker", "run", "--rm", "-i"]
     assert ss._DOCKER_IMAGES["hadolint"] in call["cmd"]
     assert call["cmd"][-1] == "-", "표준입력을 읽게 해야 한다"
-    assert call["stdin"] == b"FROM alpine\n"
+    assert call["stdin"] == dockerfile.read_bytes()
     assert findings == []
 
 

@@ -1,0 +1,6 @@
+{
+  "command": [
+    "/app/native"
+  ],
+  "stdout": "native ready"
+}

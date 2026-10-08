@@ -142,9 +142,9 @@ def test_agent_내부_TypeError가_유료호출을_두번_실행하지_않는다
         ("python-fastapi", ("FROM python:3.11-slim", '"main:app"', "EXPOSE 8000")),
         ("python-flask", ("FROM python:3.11-slim", "gunicorn", "EXPOSE 5000")),
         ("python-django", ("FROM python:3.11-slim", '"config.wsgi:application"', "EXPOSE 8000")),
-        ("node-express", ("FROM node:20-alpine", '"index.js"', "EXPOSE 3000")),
-        ("node-next", ("FROM node:20-alpine", "ENV PORT=3000", "EXPOSE 3000")),
-        ("node-nest", ("FROM node:20-alpine", '"dist/main.js"', "EXPOSE 3000")),
+        ("node-express", ("FROM node:22-alpine", '"index.js"', "EXPOSE 3000")),
+        ("node-next", ("FROM node:22-alpine", "ENV PORT=3000", "EXPOSE 3000")),
+        ("node-nest", ("FROM node:22-alpine", '"dist/main.js"', "EXPOSE 3000")),
     ],
 )
 def test_AI_실패_폴백은_필수값이_채워진_빌드가능한_초안이다(
@@ -223,7 +223,8 @@ def test_AI가_없고_검증된_템플릿도_없는_자동감지_스택은_가�
     assert response.status_code == 422
     detail = response.json()["detail"]
     assert expected_stack in detail
-    assert "AI Ready" in detail
+    assert ("index.html" if expected_stack == 'unknown' else "AI Ready") in detail
+    assert "Dockerfile" in detail
     assert "sleep 3600" not in response.text
 
 
@@ -270,7 +271,7 @@ def test_AI가_미치환_토큰을_돌려줘도_승인가능한_초안으로_폴
     ).json()
 
     assert "{{" not in body["content"] and "}}" not in body["content"]
-    assert "FROM node:20-alpine" in body["content"]
+    assert "FROM node:22-alpine" in body["content"]
     assert any("채워지지 않은 템플릿 값" in note for note in body["risk_reasons"])
 
 
@@ -361,7 +362,9 @@ def test_음성대조_AI가_정상이면_폴백_안내가_붙지_않는다(clien
 
     body = _post(client, "/api/deploy/dockerfile", {"workspace_path": workspace}).json()
     assert body["content"] == "FROM node:20-slim\n"
-    assert not (body.get("risk_reasons") or []), "정상인데 폴백 안내가 붙었다"
+    # .dockerignore 생성 안내·빌드 점검 문구는 폴백 안내가 아니다(정상 경로에도 붙을 수 있다).
+    fallback = [r for r in body.get("risk_reasons") or [] if "AI 맞춤" in r or "기본 템플릿" in r]
+    assert not fallback, "정상인데 폴백 안내가 붙었다"
 
 
 # ---------------------------------------------------------------------------

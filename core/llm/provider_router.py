@@ -116,11 +116,47 @@ class LLMProviderRouter:
         except Exception as exc:  # pragma: no cover
             log.debug("gateway provider 비활성: %s", exc)
 
+        # AWS 없이 쓰는 경로: 사용자가 확장에서 Claude/OpenAI API 키를 골라 넣은 경우.
+        # 명시적으로 고른 선택이므로 게이트웨이·Bedrock 보다 우선한다.
+        try:
+            try:
+                from llm.api_key_provider import ApiKeyProvider, model_for, selected_provider
+            except ImportError:
+                from core.llm.api_key_provider import ApiKeyProvider, model_for, selected_provider
+            chosen = selected_provider()
+            if chosen:
+                self._bedrock_sonnet = ApiKeyProvider(chosen, model_for(chosen))
+                self._bedrock_haiku = ApiKeyProvider(chosen, model_for(chosen, fast=True))
+                log.info("LLM API key mode enabled — provider=%s model=%s", chosen, self._bedrock_sonnet.model_id)
+        except Exception as exc:  # pragma: no cover
+            log.warning("API key provider 비활성: %s", exc)
+
         self._call_records: list[Any] = []  # list[LLMCallRecord]
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    async def _fallback(self, prompt, schema, primary_error, **settings):
+        """Do not replace the actual failure with an unconfigured fallback error."""
+        from .base import LLMError, LLMErrorType
+        error = primary_error or LLMError(
+            "AI 서비스의 반복 오류로 잠시 대기 중입니다. 잠시 후 다시 요청해 주세요.",
+            LLMErrorType.SERVICE_ERROR, True,
+        )
+        if not getattr(self._gemini, "available", True):
+            if isinstance(error, LLMError):
+                raise error
+            raise LLMError(f"Bedrock 호출 실패: {error}", raw=error) from error
+        try:
+            return await self._gemini.generate(prompt, schema=schema, **settings)
+        except Exception as secondary:
+            raise LLMError(
+                f"Bedrock 호출 실패: {error}; 대체 AI 호출 실패: {secondary}",
+                error.error_type if isinstance(error, LLMError) else LLMErrorType.UNKNOWN,
+                error.retryable if isinstance(error, LLMError) else False,
+                raw=error,
+            ) from error
 
     async def call_primary(
         self,
@@ -139,6 +175,7 @@ class LLMProviderRouter:
         breaker_mod, _ = _get_shared()
         start = time.monotonic()
         retry_count = 0
+        primary_error = None
 
         br = breaker_mod.breaker_for(
             f"{self._bedrock_sonnet.provider_name}/{self._bedrock_sonnet.model_id}"
@@ -170,6 +207,7 @@ class LLMProviderRouter:
                     return result
 
                 except Exception as exc:
+                    primary_error = exc
                     br.record_failure()
                     log.warning("Bedrock Sonnet failed: %s — trying Gemini fallback", exc)
                     retry_count = 1
@@ -180,7 +218,7 @@ class LLMProviderRouter:
             model="gemini-2.5-flash",
             operation="call_primary_fallback",
         ) as span:
-            result = await self._gemini.generate(prompt, schema=schema)
+            result = await self._fallback(prompt, schema, primary_error)
             input_tok, output_tok = self._estimate_tokens(prompt, result)
             latency = int((time.monotonic() - start) * 1000)
             span.set_attribute("input_tokens", input_tok)
@@ -207,6 +245,7 @@ class LLMProviderRouter:
         breaker_mod, _ = _get_shared()
         start = time.monotonic()
         retry_count = 0
+        primary_error = None
 
         br = breaker_mod.breaker_for(
             f"{self._bedrock_haiku.provider_name}/{self._bedrock_haiku.model_id}"
@@ -230,11 +269,12 @@ class LLMProviderRouter:
                 return result
 
             except Exception as exc:
+                primary_error = exc
                 br.record_failure()
                 log.warning("Bedrock Haiku failed: %s — trying Gemini fallback", exc)
                 retry_count = 1
 
-        result = await self._gemini.generate(prompt, schema=schema)
+        result = await self._fallback(prompt, schema, primary_error)
         input_tok, output_tok = self._estimate_tokens(prompt, result)
         latency = int((time.monotonic() - start) * 1000)
         self._record_call(
@@ -316,6 +356,7 @@ class LLMProviderRouter:
         한 벌로 태운다. 보드 이슈 「LLM 라우터가 두 벌」의 본체 수술.
         """
         LLMError, LLMResponse = _get_base_types()
+        from .base import LLMErrorType
         breaker_mod, _ = _get_shared()
 
         provider = self._bedrock_haiku if prefer == "fast" else self._bedrock_sonnet
@@ -329,6 +370,7 @@ class LLMProviderRouter:
         result: Any = None
         used_provider = provider.provider_name
         used_model = provider.model_id
+        primary_error = None
 
         br = breaker_mod.breaker_for(f"{provider.provider_name}/{provider.model_id}")
         if br.is_open:
@@ -337,21 +379,36 @@ class LLMProviderRouter:
         else:
             try:
                 messages = [{"role": "user", "content": [{"text": prompt}]}]
-                result = await provider.converse(messages, output_schema=schema)
+                result = await provider.converse(
+                    messages, output_schema=schema,
+                    max_tokens=request.max_tokens, temperature=request.temperature,
+                )
                 br.record_success()
             except Exception as exc:
+                # A clipped model response is a generation failure, not a provider
+                # outage. Let the caller repair its output without switching models.
+                if isinstance(exc, LLMError) and exc.error_type == LLMErrorType.STRUCTURED_OUTPUT:
+                    br.record_success()
+                    self._record_call(
+                        agent=agent or "router", operation=operation or "call_llm",
+                        provider="bedrock" if used_provider != "gemini" else "gemini", model=used_model,
+                        input_tokens=max(1, len(prompt) // 4), output_tokens=request.max_tokens,
+                        latency_ms=int((time.monotonic() - start) * 1000),
+                        fallback_used=False, retry_count=0,
+                    )
+                    raise
                 br.record_failure()
                 retry = 1
+                primary_error = exc
                 log.warning("call_llm %s 실패: %s — Gemini 폴백", used_model, exc)
 
         if result is None:
             fallback = True
             used_provider, used_model = "gemini", "gemini-2.5-flash"
-            try:
-                result = await self._gemini.generate(prompt, schema=schema)
-            except Exception as exc:
-                #: 전부 실패 — 레거시 계약대로 LLMError 를 던진다.
-                raise LLMError(f"모든 LLM Provider 실패: {exc}", retryable=True, raw=exc) from exc
+            result = await self._fallback(
+                prompt, schema, primary_error, max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
 
         latency = int((time.monotonic() - start) * 1000)
         input_tok, output_tok = self._estimate_tokens(prompt, result)
@@ -365,8 +422,8 @@ class LLMProviderRouter:
 
         #: 레거시 호출자는 .text 에서 JSON 을 뽑는다. converse 는 파싱된 dict 를
         #: 주므로 되돌려 직렬화한다. {"text": ...} 한 장짜리는 원문 그대로.
-        if isinstance(result, dict) and set(result.keys()) == {"text"}:
-            text = str(result["text"])
+        if isinstance(result, dict) and len(result) == 1 and ("text" in result or "raw_response" in result):
+            text = str(result.get("text", result.get("raw_response", "")))
         else:
             import json as _json
             text = _json.dumps(result, ensure_ascii=False)
@@ -392,6 +449,80 @@ class LLMProviderRouter:
     def call_records(self) -> list[Any]:
         """Return a copy of all recorded LLMCallRecord entries."""
         return list(self._call_records)
+
+    def repair_profile(self) -> dict:
+        """Include actual tier identities and configured prices in repair cache keys."""
+        import os
+        return {"fast": self._bedrock_haiku.model_id,
+                "primary": self._bedrock_sonnet.model_id,
+                "provider": self._bedrock_sonnet.provider_name,
+                "prices": os.getenv("RECODER_REPAIR_PRICES", "{}")}
+
+    async def call_repair(self, request: Any, *, tier: str, run_id: str) -> Any:
+        """Measured single-tier call. Never silently switch experimental conditions.
+
+        Providers return their native usage when available. Unknown prices/failed
+        usage remain null; they must not become zero-dollar experimental results.
+        Generation calls are measured here; SDK transport retries are not counted.
+        """
+        import json
+        import math
+        import os
+        from dataclasses import replace
+        from .base import LLMError, LLMErrorType
+
+        if tier not in {"fast", "primary"}:
+            raise ValueError("Unknown repair tier")
+        provider = self._bedrock_haiku if tier == "fast" else self._bedrock_sonnet
+        prices = json.loads(os.getenv("RECODER_REPAIR_PRICES", "{}"))
+        if not isinstance(prices, dict):
+            raise ValueError("Repair prices must be a model-to-rates object")
+        for rate in prices.values():
+            for direction in ("input", "output"):
+                price = float(rate[direction])
+                if not math.isfinite(price) or price < 0:
+                    raise ValueError("Repair model prices must be finite and non-negative")
+        breaker_mod, ledger = _get_shared()
+        br = breaker_mod.breaker_for(f"{provider.provider_name}/{provider.model_id}")
+        if br.is_open:
+            raise LLMError("Model circuit breaker is open", LLMErrorType.SERVICE_ERROR)
+        # A schema-capability fallback can make multiple model calls. Use one
+        # JSON text generation and let the pipeline validate its schema instead.
+        prompt = request.prompt + "\nReturn JSON matching this schema:\n" + json.dumps(request.json_schema)
+        plain = replace(request, prompt=prompt, json_schema=None)
+        entry = {"call_id": str(uuid.uuid4()), "run_id": run_id, "agent": "grounded_repair",
+                 "operation": "repair_" + tier, "provider": provider.provider_name,
+                 "model": provider.model_id, "input_tokens": None, "output_tokens": None,
+                 "token_source": "unknown", "estimated_cost_usd": None,
+                 "fallback_used": False, "transport_retries": "not_measured"}
+        started = time.monotonic()
+        try:
+            response = await asyncio.to_thread(getattr(provider, "call_measured", provider.call), plain)
+            br.record_success()
+            entry.update(input_tokens=response.input_tokens, output_tokens=response.output_tokens,
+                         token_source=response.token_source, model=response.model_used, status="succeeded")
+            entry["transport_retries"] = response.metadata.get("transport_retries", "not_measured")
+            rate = prices.get(response.model_used)
+            if rate is not None:
+                incoming, outgoing = float(rate["input"]), float(rate["output"])
+                if incoming < 0 or outgoing < 0:
+                    raise ValueError("Repair model prices cannot be negative")
+                entry["estimated_cost_usd"] = (response.input_tokens * incoming + response.output_tokens * outgoing) / 1_000_000
+                entry["pricing_source"] = "configured_usd_per_million"
+            else:
+                entry["pricing_source"] = "unconfigured"
+            return response
+        except Exception as exc:
+            br.record_failure()
+            error = exc if isinstance(exc, LLMError) else LLMError(str(exc), raw=exc)
+            entry["status"] = "failed"
+            error.llm_call_record = entry
+            raise error
+        finally:
+            entry["latency_ms"] = round((time.monotonic() - started) * 1000)
+            ledger.record(entry)
+            if "response" in locals():
+                response.metadata["llm_call_record"] = entry
 
     # ------------------------------------------------------------------
     # Private helpers

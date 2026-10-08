@@ -67,9 +67,7 @@ log = logging.getLogger("recoder-bot")
 
 # ── 필수 설정 ────────────────────────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
-if not DISCORD_TOKEN:
-    log.critical("DISCORD_BOT_TOKEN이 설정되지 않았습니다. .env 파일을 확인하세요.")
-    sys.exit(1)
+
 
 # 개발용: 특정 서버에만 커맨드를 즉시 동기화할 때 설정 (선택)
 DEV_GUILD_ID = int(os.getenv("DEV_GUILD_ID", "0") or 0)
@@ -79,8 +77,9 @@ BOT_HTTP_PORT = int(os.getenv("BOT_HTTP_PORT", "8765"))  # VSCode 자동 등록 
 
 # ── Intents ──────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
+# Ordinary chat needs Message Content enabled here and in the Discord Developer Portal.
+intents.message_content = os.getenv("DISCORD_MESSAGE_CONTENT", "0") == "1"
+intents.members = False
 
 _scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
 
@@ -136,6 +135,10 @@ class RecoderBot(discord.Client):
 
         self.tree.add_command(recoder_group)
 
+        # Expose diagnostics even if slash-command synchronization fails.
+        from api_server import start_api_server
+        self._api_runner = await start_api_server(BOT_HTTP_PORT, bot=self)
+
         # 커맨드 동기화
         # DEV_GUILD_ID 설정 시 해당 서버에만 즉시 동기화 (개발 편의)
         # 운영 환경에서는 전역 동기화 (최대 1시간 소요)
@@ -154,16 +157,26 @@ class RecoderBot(discord.Client):
         log.info("Standup 스케줄러 시작: %s (Asia/Seoul)", STANDUP_CRON)
 
         # VSCode 자동 등록 API 서버 시작 (bot 인스턴스 주입 — GitHub Webhook 전송용)
-        from api_server import start_api_server
-        await start_api_server(BOT_HTTP_PORT, bot=self)
 
         # ReCoder Bridge (모바일 → 노트북 VSCode 실시간 코드 스트리밍) 시작
         from recoder_bridge import hub as bridge_hub
         await bridge_hub.start()
 
+    async def close(self) -> None:
+        if _scheduler.running:
+            _scheduler.shutdown(wait=False)
+        from recoder_bridge import hub
+        await hub.stop()
+        if getattr(self, "_api_runner", None):
+            await self._api_runner.cleanup()
+        await super().close()
+
     async def on_message(self, message: discord.Message) -> None:
         """지정 채널 메시지를 받으면 Bedrock 스트리밍 → VSCode 확장에 실시간 삽입."""
         try:
+            from api_server import connections
+            if await connections.develop_message(message):
+                return
             from make_handler import handle_make_message
             await handle_make_message(self, message)
         except Exception as exc:
@@ -248,6 +261,13 @@ class RecoderBot(discord.Client):
 
 def _register_commands(group: app_commands.Group) -> None:
     """§37.3 슬래시 커맨드 5종을 recoder 그룹에 등록한다."""
+
+    @group.command(name="develop", description="연결된 내 VS Code 프로젝트에 개발을 요청합니다")
+    @app_commands.describe(prompt="만들거나 수정할 내용")
+    @app_commands.guild_only()
+    async def develop_cmd(interaction: discord.Interaction, prompt: str) -> None:
+        from api_server import connections
+        await connections.develop(interaction, prompt)
 
     @group.command(name="panel", description="ReCoder 작업 패널 — 버튼으로 개발/배포/전체 실행")
     async def panel_cmd(interaction: discord.Interaction) -> None:
@@ -574,8 +594,26 @@ def _build_standup_embed(report, forecast_line: str = "") -> discord.Embed:
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    if not DISCORD_TOKEN:
+        log.critical("DISCORD_BOT_TOKEN이 설정되지 않았습니다. .env 파일을 확인하세요.")
+        sys.exit(1)
     # DB 초기화 (테이블 없으면 생성)
     guild_store.init_db()
     log.info("ReCoder Discord Bot 시작 중... (SaaS 멀티 서버 모드)")
     bot = RecoderBot()
-    bot.run(DISCORD_TOKEN, log_handler=None)
+    try:
+        bot.run(DISCORD_TOKEN, log_handler=None)
+    except discord.errors.LoginFailure:
+        # 토큰 원문은 남기지 않는다.
+        log.critical(
+            "Discord 로그인 실패: DISCORD_BOT_TOKEN 이 올바르지 않습니다. "
+            "Developer Portal → Bot → Reset Token 으로 새 토큰을 받아 .env 에 넣으세요."
+        )
+        sys.exit(2)
+    except discord.errors.PrivilegedIntentsRequired:
+        log.critical(
+            "Discord 가 연결을 거부했습니다: 권한 있는 Intent 가 꺼져 있습니다. "
+            "Developer Portal → 앱 선택 → Bot → Privileged Gateway Intents 에서 "
+            "'SERVER MEMBERS INTENT' 와 'MESSAGE CONTENT INTENT' 를 켠 뒤 다시 실행하세요."
+        )
+        sys.exit(3)

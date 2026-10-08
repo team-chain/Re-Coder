@@ -65,3 +65,27 @@ os.environ.setdefault("RECODER_INFRA_AI_CUSTOMIZE", "0")
 # 못 덮어쓰고, `aws_policy.role_from_env` 는 빈 문자열을 미설정으로 본다.
 for _role_var in ("ECS_EXECUTION_ROLE_ARN", "ECS_TASK_ROLE_ARN"):
     os.environ[_role_var] = ""
+
+
+import pytest as _pytest_guard
+
+
+@_pytest_guard.fixture(autouse=True)
+def _reset_aws_disconnect_guard():
+    """clear_aws 가 건 '해제 상태' 막음(환경변수)이 다음 테스트로 새지 않게 한다."""
+    yield
+    for key in ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"):
+        if "aws-disconnected-no-file" in os.environ.get(key, ""):
+            os.environ.pop(key, None)
+    if os.environ.get("AWS_EC2_METADATA_DISABLED") == "true":
+        os.environ.pop("AWS_EC2_METADATA_DISABLED", None)
+    mod = sys.modules.get("api.routes.aws")
+    if mod is not None and hasattr(mod, "_guard_saved"):
+        mod._guard_saved.clear()
+
+
+@_pytest_guard.fixture(autouse=True)
+def _isolate_project_scanner_profiles(tmp_path, monkeypatch):
+    """Scanner tests must not write profiles into the developer's real home."""
+    import project_scanner
+    monkeypatch.setattr(project_scanner, 'RECODER_HOME', tmp_path / 'recoder-profiles')

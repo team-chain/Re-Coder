@@ -136,22 +136,54 @@ class DeployAgent:
         container_port = getattr(request, 'container_port', 8080)
 
         # Auto-detect image and container name if not provided
-        ws_name = Path(workspace).name.lower().replace(' ', '-') if workspace else 'app'
+        from deployment_inputs import workspace_container_name, workspace_deploy_name
+        ws_name = (workspace_deploy_name(workspace)
+                   if workspace and method == DeployMethod.LOCAL_DOCKER and not (image or container_name)
+                   else workspace_container_name(workspace))
         image = image or f"{ws_name}:latest"
         container_name = container_name or ws_name
 
         # Determine port from workspace if not given
         if not host_port or not container_port:
-            host_port, container_port = self._detect_port(workspace)
+            detected_host, detected_container = self._detect_port(workspace)
+            host_port = host_port or detected_host
+            container_port = container_port or detected_container
+
+        health_path = getattr(request, 'health_check_path', None) or '/health'
+        if health_path == '/health' and 'health_check_path' not in getattr(request, 'model_fields_set', set()):
+            from agents.ecs_health import _declared_health_path, _runtime_family
+            try:
+                runtime = _runtime_family(Path(workspace) / 'Dockerfile')
+                declared = _declared_health_path(Path(workspace), runtime, health_path) if runtime else None
+                if declared:
+                    health_path = declared
+                else:
+                    # 헬스 라우트가 없으면 앱이 실제로 200 을 줄 경로("/" 정적 제공, FastAPI /docs)
+                    # 또는 Dockerfile HEALTHCHECK 가 찌르는 경로를 쓴다. 없는 /health 를 찌르면
+                    # 정상 기동한 앱도 "헬스 실패"로 롤백된다(실기기 test temp).
+                    from build_readiness import analyze, _dockerfile_facts
+                    readiness = analyze(workspace)
+                    probe = readiness.probe_path()
+                    dockerfile = Path(workspace) / 'Dockerfile'
+                    checked = _dockerfile_facts(dockerfile.read_text(encoding='utf-8', errors='replace'))['health_path'] \
+                        if dockerfile.is_file() else None
+                    if probe:
+                        health_path = probe
+                    elif checked:
+                        health_path = checked
+            except (OSError, UnicodeError, ImportError):
+                pass
 
         return DeploymentPlan(
+            project_id=getattr(request, 'project_id', None) or ws_name,
+            enable_continuous_verification=getattr(request, 'enable_continuous_verification', True),
             method=method,
             action=ActionType.DOCKER_RUN,
             image=image,
             container_name=container_name,
             ports={str(host_port): str(container_port)},
-            env={},
-            health_check_path="/health",
+            env=getattr(request, 'env', {}) or {},
+            health_check_path=health_path,
             rollback_image=None,
             command_template_id="docker_run",
             risk_level=RiskLevel.MEDIUM,
@@ -364,25 +396,24 @@ class DeployAgent:
         # Dockerfile 의 EXPOSE 가 가장 정확하다 — 우리가 방금 생성·저장한 파일이고,
         # 앱이 실제로 듣는 포트가 적혀 있다. 예전엔 이걸 안 보고 package.json 만
         # 보다가 3000 으로 추측해 다른 앱(3000 점유)과 충돌했다(실기기 검증 C2).
-        dockerfile = ws / "Dockerfile"
-        if dockerfile.exists():
-            try:
-                m = re.search(r"^\s*EXPOSE\s+(\d{2,5})", dockerfile.read_text(encoding="utf-8"), re.M)
-                if m:
-                    p = int(m.group(1))
-                    return (p, p)
-            except Exception:
-                pass
+        from deployment_inputs import dockerfile_runtime_port
+        port = dockerfile_runtime_port(ws / "Dockerfile")
+        if port is not None:
+            return (port, port)
+
+        # Dockerfile 이 없으면 배포가 기본 템플릿을 만든다 — 그 템플릿이 여는 포트를 쓴다
+        # (예전: Flask 템플릿은 5000 으로 뜨는데 계획은 8000 이라 헬스 체크가 닿지 않았다).
+        template_port = DeployAgent._template_port(workspace_path)
 
         # requirements.txt / pyproject.toml → FastAPI/Flask default 8000
         if (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
-            return (8000, 8000)
+            return (template_port, template_port) if template_port else (8000, 8000)
 
         # package.json → check scripts
         pkg = ws / "package.json"
         if pkg.exists():
             try:
-                data = json.loads(pkg.read_text(encoding="utf-8"))
+                data = json.loads(pkg.read_text(encoding="utf-8-sig"))
                 scripts = data.get("scripts", {})
                 for v in scripts.values():
                     m = re.search(r"-p(?:ort)?\s+(\d{4,5})", str(v))
@@ -401,9 +432,21 @@ class DeployAgent:
                 if m:
                     p = int(m.group(1))
                     return (p, p)
-            return (3000, 3000)
+            return (template_port, template_port) if template_port else (3000, 3000)
 
+        if template_port:
+            return (template_port, template_port)
         return default
+
+    @staticmethod
+    def _template_port(workspace_path: str) -> int | None:
+        if not workspace_path:
+            return None
+        try:
+            from api.routes.deploy import _template_runtime_port
+        except Exception:  # noqa: BLE001 - 라우트 모듈 없이 쓰는 환경(테스트)에서는 예전 추정
+            return None
+        return _template_runtime_port(workspace_path)
 
     @staticmethod
     async def _stop_remove_container(name: str) -> None:

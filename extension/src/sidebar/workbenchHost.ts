@@ -18,6 +18,7 @@
  *   3. 시작 시 `_pushHealthAndCost` / `_startPolling` 등을 호출한다.
  */
 import * as vscode from 'vscode';
+import { activeProjectPath } from '../activeProject';
 import { CoreManager } from '../core/CoreManager';
 import { ApiClient } from '../core/ApiClient';
 import { PollingService } from '../core/PollingService';
@@ -186,6 +187,8 @@ export abstract class WorkbenchHost {
                         description: (p.description as string) || '',
                     });
                     const url = result.html_url ?? '';
+                    const failed = workbenchFailure(result);
+                    if (failed) { throw new Error(failed); }
                     this._post({
                         type: 'wb.gh.createRepoResult',
                         payload: { ok: true, url, message: `레포 생성 완료: ${url || result.status}` },
@@ -209,6 +212,8 @@ export abstract class WorkbenchHost {
                         name: String(p.name),
                         value: String(p.value),
                     });
+                    const failed = workbenchFailure(r);
+                    if (failed) { throw new Error(failed); }
                     this._post({
                         type: 'wb.gh.secretResult',
                         payload: { ok: true, name: p.name, message: r.message ?? `Secret 등록: ${p.repo}/${p.name}` },
@@ -233,6 +238,8 @@ export abstract class WorkbenchHost {
                         branch: (p.branch as string) || '',
                         force: !!p.force,
                     });
+                    const failed = workbenchFailure(r);
+                    if (failed) { throw new Error(failed); }
                     this._post({
                         type: 'wb.gh.pushResult',
                         payload: { ok: true, branch: r.branch, message: r.message ?? `push 완료 (branch=${r.branch ?? '?'})` },
@@ -321,7 +328,22 @@ export abstract class WorkbenchHost {
                     break;
                 }
                 try {
-                    await this._apiClient.approveDockerfile(proposalId, true);
+                    let r = await this._apiClient.approveDockerfile(proposalId, true);
+                    if (r.status === 'exists') {
+                        //: 내용이 다른 Dockerfile 이 이미 있다 — 묻지 않고 "저장됨"으로 보이면 옛 파일로 배포된다.
+                        const choice = await vscode.window.showWarningMessage(
+                            '프로젝트에 내용이 다른 Dockerfile 이 이미 있습니다. 새 초안으로 바꿀까요? (기존 파일은 Dockerfile.recoder-prev 로 보관)',
+                            { modal: true }, '바꾸기');
+                        if (choice !== '바꾸기') {
+                            this._post({ type: 'wb.local.approveResult', payload: { ok: false, error: '기존 Dockerfile 을 유지했습니다. 저장하지 않았습니다.' } });
+                            break;
+                        }
+                        r = await this._apiClient.approveDockerfile(proposalId, true, true);
+                    }
+                    if (r.status !== 'saved') {
+                        throw new Error(r.status === 'error' ? 'Dockerfile 을 저장하지 못했습니다. 초안을 다시 생성하세요(Core 가 다시 시작됐을 수 있습니다).' : `Dockerfile 저장 실패 (${r.status})`);
+                    }
+                    await this._writeEditedContent(r.path, msg.payload?.content);
                     this._post({
                         type: 'wb.local.approveResult',
                         payload: { ok: true, path: 'Dockerfile' },
@@ -377,7 +399,7 @@ export abstract class WorkbenchHost {
                     const planId = (plan as unknown as { plan_id?: string }).plan_id || '';
                     this._post({ type: 'wb.local.deployProgress', payload: { stage: 'build', line: '[OK] 플랜 생성됨 — 실행 시작' } });
                     const result = await this._apiClient.executeDeployment(planId, true);
-                    if (result.status === 'ok' || result.deployment_id) {
+                    if (['ok', 'success'].includes(result.status) && result.health_ok === true) {
                         this._post({
                             type: 'wb.local.deployProgress',
                             payload: { stage: 'health', finished: true, line: `[OK] 배포 완료 (id=${result.deployment_id ?? '?'})` },
@@ -385,9 +407,12 @@ export abstract class WorkbenchHost {
                         this.addActivity('ok', 'Local Docker 배포 완료');
                     } else {
                         // 컨테이너가 시작/헬스에 실패한 경우 — stderr 에서 핵심 사유 한 줄 추출
-                        const errText = (result.stderr || result.stdout || '').trim();
+                        const errText = (result.error || result.message || result.stderr || (result.health_ok === false ? '컨테이너가 시작됐지만 헬스체크를 통과하지 못했습니다. 배포 기록에서 로그와 롤백을 확인하세요.' : result.stdout) || '').trim();
                         const lines = errText.split('\n').map(s => s.trim()).filter(Boolean);
-                        const summary = lines.reverse().find(l => /error|exception|traceback|keyerror|exited|not running|unhealthy|refused/i.test(l))
+                        //: 코어가 원인을 진단했으면(화면 확인 실패·시작 직후 종료 등) 그 문장을 먼저 보여 준다.
+                        const diagnosis = (result as { diagnosis?: { title?: string; cause?: string } }).diagnosis;
+                        const summary = (diagnosis?.title ? `${diagnosis.title}${diagnosis.cause ? ` — ${diagnosis.cause}` : ''}` : '')
+                            || lines.reverse().find(l => /error|exception|traceback|keyerror|exited|not running|unhealthy|refused/i.test(l))
                             || lines[0] || '컨테이너가 시작되지 못했습니다.';
                         this._post({
                             type: 'wb.local.deployProgress',
@@ -433,7 +458,10 @@ export abstract class WorkbenchHost {
                     break;
                 }
                 try {
-                    await this._apiClient.approveGithubActions(proposalId, true);
+                    const r = await this._apiClient.approveGithubActions(proposalId, true);
+                    if (!['saved', 'ok', 'success'].includes(r.status)) {
+                        throw new Error(r.status === 'exists' ? '같은 이름의 워크플로 파일이 이미 있어 저장하지 않았습니다.' : `워크플로 저장 실패 (${r.status})`);
+                    }
                     this._post({
                         type: 'wb.actions.approveResult',
                         payload: { ok: true, path: '.github/workflows/ci-cd.yml' },
@@ -453,6 +481,8 @@ export abstract class WorkbenchHost {
                     if (!ready.ready) {
                         this.pushLog('deploy', `[BLOCKED] ${ready.issues.join('; ')}`);
                         this.addActivity('fail', 'ECS 사전 점검 실패');
+                        //: 화면의 상태 줄이 "요청 전송"에 멈추지 않게 결과를 보낸다.
+                        this._post({ type: 'wb.deploy.ecs.statusResult', payload: { stage: 'failed', running: false, error: `사전 점검 실패 — ${ready.issues.join('; ')}` } });
                         break;
                     }
                     const r = await this._apiClient.deployEcs({
@@ -479,6 +509,7 @@ export abstract class WorkbenchHost {
                 } catch (err) {
                     this.pushLog('deploy', `[ERR] ${err}`);
                     this.addActivity('fail', `ECS 배포 실패: ${err}`);
+                    this._post({ type: 'wb.deploy.ecs.statusResult', payload: { stage: 'failed', running: false, error: err instanceof Error ? err.message : String(err) } });
                 }
                 break;
             }
@@ -557,7 +588,7 @@ export abstract class WorkbenchHost {
             }
 
             default:
-                console.warn('[WorkbenchPanel] Unknown message:', msg.type);
+                console.warn('[WorkbenchHost] Unknown message:', msg.type);
         }
     }
 
@@ -687,11 +718,20 @@ export abstract class WorkbenchHost {
 
     // ───────── Workbench 풀 구현 헬퍼 ─────────
 
-    /** 현재 열린 첫 워크스페이스 경로. 없으면 빈 문자열. */
+    /** 사용자가 미리보기에서 고친 내용이 있으면 저장한 파일에 반영한다(예전엔 조용히 버려졌다). */
+    private async _writeEditedContent(savedPath: string | undefined, content: unknown): Promise<void> {
+        if (!savedPath || typeof content !== 'string' || !content.trim()) { return; }
+        const uri = vscode.Uri.file(savedPath);
+        let current = '';
+        try { current = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf-8'); } catch { /* 새 파일 */ }
+        if (current.replace(/\r\n/g, '\n') === content.replace(/\r\n/g, '\n')) { return; }
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
+    }
+
+    /** 현재 프로젝트 경로(코드 생성·Deploy 캔버스와 같은 대상). 없으면 빈 문자열. */
     protected _getWorkspacePath(): string {
-        const folders = vscode.workspace.workspaceFolders;
-        if (!folders || folders.length === 0) return '';
-        return folders[0].uri.fsPath;
+        //: 코드 생성·Deploy 캔버스와 같은 "현재 프로젝트"(여러 폴더를 연 창에서 첫 폴더가 아닐 수 있다).
+        return activeProjectPath();
     }
 
     /**
@@ -793,9 +833,11 @@ export abstract class WorkbenchHost {
 
     protected _startEcsStatusPolling(): void {
         if (this._ecsStatusTimer) return;
+        let failures = 0;
         const tick = async () => {
             try {
                 const s = await this._apiClient.getEcsDeployStatus();
+                failures = 0;
                 this._post({ type: 'wb.deploy.ecs.statusResult', payload: s });
                 const tail = s.log_tail || [];
                 if (tail.length) {
@@ -811,7 +853,10 @@ export abstract class WorkbenchHost {
                         this.addActivity('fail', 'ECS 배포 실패');
                     }
                 }
-            } catch { /* ignore */ }
+            } catch {
+                //: Core 가 내려가 상태를 계속 못 읽으면 3초마다 영원히 부르지 않는다(약 5분 뒤 멈춤).
+                if (++failures >= 100 && this._ecsStatusTimer) { clearInterval(this._ecsStatusTimer); this._ecsStatusTimer = null; }
+            }
         };
         this._ecsStatusTimer = setInterval(() => { void tick(); }, 3000);
         void tick();
@@ -957,4 +1002,14 @@ export abstract class WorkbenchHost {
     protected _now(): string {
         return new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     }
+}
+
+/** Core 가 HTTP 200 으로 돌려준 실패(status: error 등)를 실패로 읽는다. 성공이면 ''. */
+export function workbenchFailure(result: unknown): string {
+    const r = (result ?? {}) as { status?: string; message?: string; error?: string; detail?: string };
+    const status = String(r.status ?? '').toLowerCase();
+    if (['error', 'failed', 'failure', 'denied', 'unauthenticated', 'exists', 'conflict'].includes(status)) {
+        return r.message || r.error || r.detail || `요청이 실패했습니다 (${status})`;
+    }
+    return '';
 }

@@ -47,10 +47,20 @@ except ImportError:  # pragma: no cover — fall back when imported from a packa
 # ---------------------------------------------------------------------------
 
 MASKING_PATTERNS: list[tuple[str, str]] = [
-    ("AWS_ACCESS_KEY",  r"AKIA[0-9A-Z]{16}"),
+    ("PRIVATE_KEY",     r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+    ("AWS_JSON_SECRET", r'"(?:SecretAccessKey|SessionToken|AccessKeyId|aws_secret_access_key|aws_session_token)"\s*:\s*"[^"]*"'),
+    #: 단어 중간의 "sk-"(task-list-…, disk-usage-…)를 키로 가리면 AI 가 받은 코드가 깨진다.
+    #: 앞이 영숫자·-·_ 가 아니고, 뒤에 숫자가 하나는 있어야 키로 본다.
+    ("AI_API_KEY",      r"(?<![A-Za-z0-9_\-])sk-(?=[A-Za-z0-9_\-]*\d)(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,}"),
+    ("DISCORD_TOKEN",   r"\b[MN][A-Za-z\d_-]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}\b"),
+    ("AWS_ACCESS_KEY",  r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
     ("AWS_SECRET_KEY",  r"(?i)aws[_\-\s]?secret[_\-\s]?(?:access[_\-\s]?)?key[^=\n]*=[^\n]*"),
     ("API_KEY",         r"(?i)api[_\-\s]?key[^=\n]*=[^\s\n]+"),
     ("BEARER_TOKEN",    r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"),
+    #: 대문자 환경변수 형식의 비밀(SECRET_KEY=…, DB_PASS="a b") — 따옴표 값은 통째로. 코드 변수(소문자)는 건드리지 않는다.
+    ("ENV_SECRET",      r"\b[A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|PASS|PWD|TOKEN|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*\s*=\s*(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s\n]+)"),
+    ("URL_CREDENTIAL",  r"\b[a-z][a-z0-9+.\-]*://[^:/@\s'\"`]+:[^@/\s'\"`]+@"),
+    ("GITHUB_PAT",      r"github_pat_[A-Za-z0-9_]{22,}"),
     ("PASSWORD_VAR",    r"(?i)(?:password|secret|token|private_key)\s*=\s*[^\s\n]+"),
     ("DATABASE_URL",    r"(?i)(?:database_url|redis_url|mongo_uri)\s*=\s*[^\s\n]+"),
     ("JWT",             r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
@@ -87,12 +97,21 @@ def strip_terminal_noise(text: str) -> str:
 # 모듈 레벨 mask_secrets_with_stats / mask_secrets 가 사용하는 패턴 테이블.
 # (replacement 가 명시적 라벨이라서 ContextGate 의 [<NAME>] 변환과 다름.)
 _MASK_PATTERNS = [
-    ('AWS_ACCESS_KEY', re.compile(r'AKIA[0-9A-Z]{16}'),                      '[MASKED_AWS_KEY]'),
+    #: 터미널 출력을 자동 분석할 때 새던 형식(보안 검토): 개인키 블록, `aws sts` JSON, 임시 키(ASIA),
+    #: Anthropic·OpenAI 키, Discord 봇 토큰.
+    ('PRIVATE_KEY',    re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----'), '[MASKED_PRIVATE_KEY]'),
+    ('AWS_JSON',       re.compile(r'"(SecretAccessKey|SessionToken|AccessKeyId|aws_secret_access_key|aws_session_token)"\s*:\s*"[^"]*"'), r'"\1": "[MASKED]"'),
+    ('AI_API_KEY',     re.compile(r'(?<![A-Za-z0-9_\-])sk-(?=[A-Za-z0-9_\-]*\d)(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,}'), '[MASKED_AI_KEY]'),
+    ('DISCORD_TOKEN',  re.compile(r'\b[MN][A-Za-z\d_-]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}\b'), '[MASKED_DISCORD_TOKEN]'),
+    ('AWS_ACCESS_KEY', re.compile(r'(?:AKIA|ASIA)[0-9A-Z]{16}'),               '[MASKED_AWS_KEY]'),
     ('AWS_SECRET',     re.compile(r'(?i)aws_secret_access_key\s*=\s*\S+'),   'aws_secret_access_key=[MASKED]'),
     ('AWS_ACCESS_KEY', re.compile(r'(?i)aws_access_key_id\s*=\s*\S+'),       'aws_access_key_id=[MASKED]'),
     ('API_KEY',        re.compile(r'(?i)(api[_-]?key|apikey)\s*[=:]\s*\S+'), r'\1=[MASKED]'),
     ('BEARER',         re.compile(r'(?i)Bearer\s+[A-Za-z0-9\-._~+/]+=*'),    'Bearer [MASKED]'),
     ('JWT',            re.compile(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'), '[MASKED_JWT]'),
+    ('ENV_SECRET',     re.compile(r'\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|PASS|PWD|TOKEN|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*)\s*=\s*(?:"[^"\n]*"|\'[^\'\n]*\'|\S+)'), r'\1=[MASKED]'),
+    ('URL_CREDENTIAL', re.compile(r'\b([a-z][a-z0-9+.\-]*://[^:/@\s\'"`]+:)[^@/\s\'"`]+@'), r'\1[MASKED]@'),
+    ('GITHUB_PAT',     re.compile(r'github_pat_[A-Za-z0-9_]{22,}'), '[MASKED_GITHUB_TOKEN]'),
     ('CREDENTIAL',     re.compile(r'(?i)(password|passwd|secret|token|private_key|access_key)\s*[=:]\s*\S+'), r'\1=[MASKED]'),
     ('DB_URL',         re.compile(r'(?i)(DATABASE_URL|REDIS_URL|MONGO_URI|DB_PASSWORD)\s*=\s*\S+'), r'\1=[MASKED]'),
     ('GCP_KEY',        re.compile(r'\b(AIza[0-9A-Za-z\-_]{35})\b'),                              '[MASKED_GCP_KEY]'),
@@ -157,7 +176,19 @@ def mask_secrets_with_stats(text: str):
     matched = []
     seen = set()
     for name, pattern, replacement in _MASK_PATTERNS:
-        new_text, count = pattern.subn(replacement, text)
+        if name == 'CREDENTIAL':
+            def credential(match):
+                # Only a structurally valid Secrets Manager ARN is exempt.
+                # A generic prefix such as config:password=... must still mask.
+                if match.group(1).lower() == 'secret' and re.search(
+                    r'\barn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:\d{12}:$', text[:match.start()]
+                ):
+                    return match.group(0)
+                return match.expand(replacement)
+            new_text = pattern.sub(credential, text)
+            count = int(new_text != text)
+        else:
+            new_text, count = pattern.subn(replacement, text)
         if count > 0 and name not in seen:
             seen.add(name)
             matched.append(name)
@@ -515,3 +546,94 @@ class ContextGate:
             total_masks += count
 
         return result, total_masks
+
+
+
+# ---------------------------------------------------------------------------
+# 코드 생성 컨텍스트(열린 파일·참고 파일)를 AI 로 보내기 전 정리
+# ---------------------------------------------------------------------------
+
+#: 내용 자체가 비밀인 파일 — 코드 생성 프롬프트에 본문을 넣지 않는다(열려 있기만 해도 예전엔 통째로 보냈다).
+_SENSITIVE_FILE = re.compile(
+    r"(?:^|[\\/])(?:\.env(?:\.[\w.-]+)?|[\w.-]*\.(?:pem|key|p12|pfx|jks|keystore|ppk|kdbx)|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?"
+    r"|credentials(?:\.json|\.csv)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.htpasswd|service-account[\w.-]*\.json"
+    r"|secrets?\.(?:json|ya?ml|toml|env))$",
+    re.IGNORECASE,
+)
+_ENV_EXAMPLE = re.compile(r"(?:^|[\\/])\.env\.(?:example|sample|template|dist)$", re.IGNORECASE)
+
+#: 코드 의미를 바꾸지 않고 가릴 수 있는 **확실한 비밀 값**만 — `password = req.body.password` 같은 코드는 그대로 둔다.
+_CODE_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"), "[MASKED_PRIVATE_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9_\-])sk-(?=[A-Za-z0-9_\-]*\d)(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,}"), "[MASKED_AI_KEY]"),
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[MASKED_AWS_KEY]"),
+    (re.compile(r"(?i)(aws_secret_access_key\s*[=:]\s*['\"]?)[A-Za-z0-9/+]{40}"), r"\1[MASKED]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b"), "[MASKED_GITHUB_TOKEN]"),
+    (re.compile(r"\b[MN][A-Za-z\d_-]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}\b"), "[MASKED_DISCORD_TOKEN]"),
+    (re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{20,}\b"), "[MASKED_STRIPE_KEY]"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "[MASKED_SLACK_TOKEN]"),
+    (re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b"), "[MASKED_GCP_KEY]"),
+    #: 접속 문자열 안의 비밀번호(postgres://user:pass@host) — 사용자·호스트는 남긴다.
+    (re.compile(r"\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?)://[^:/@\s'\"`]+:)([^@/\s'\"`]+)(@)"), r"\1[MASKED]\3"),
+]
+
+
+def scrub_code_context(path: str, content: str, secrets: dict | None = None) -> str:
+    """코드 생성 프롬프트로 보낼 파일 내용. 비밀 파일이면 본문을 빼고, 아니면 확실한 비밀 값만 가린다.
+
+    `secrets` 를 주면 값마다 번호 붙은 자리표시(`[MASKED_AWS_KEY_1]`)를 쓰고 {자리표시: 원래 값} 을 채운다 —
+    AI 가 그 파일을 다시 써도 `restore_code_secrets` 로 원래 값을 되돌려 앱이 그대로 동작한다.
+    """
+    if not content:
+        return content
+    name = str(path or "")
+    if _SENSITIVE_FILE.search(name) and not _ENV_EXAMPLE.search(name):
+        return "(비밀 값이 들어 있을 수 있는 파일이라 내용을 보내지 않았습니다. 필요한 변수 이름만 질문에 적어 주세요.)"
+    for pattern, replacement in _CODE_SECRET_PATTERNS:
+        if secrets is None:
+            content = pattern.sub(replacement, content)
+            continue
+
+        def numbered(m, replacement=replacement, pattern=pattern):
+            original = m.group(0)
+            masked = m.expand(replacement)
+            label = re.search(r"\[(MASKED[A-Z_]*)\]", masked)
+            if not label:
+                return masked
+            for placeholder, value in secrets.items():
+                if value == original:
+                    return masked.replace(label.group(0), placeholder) if placeholder.startswith("[" + label.group(1)) \
+                        else masked
+            placeholder = f"[{label.group(1)}_{len(secrets) + 1}]"
+            #: 접속 문자열처럼 일부만 가린 경우 — 자리표시는 가린 부분(비밀번호)만 대신한다.
+            secret_part = original if masked == label.group(0) else _diff_secret(original, masked, label.group(0))
+            if secret_part is None:
+                return masked
+            secrets[placeholder] = secret_part
+            return masked.replace(label.group(0), placeholder)
+
+        content = pattern.sub(numbered, content)
+    return content
+
+
+def _diff_secret(original: str, masked: str, label: str) -> str | None:
+    head, _, tail = masked.partition(label)
+    if original.startswith(head) and original.endswith(tail) and len(original) > len(head) + len(tail):
+        return original[len(head):len(original) - len(tail)]
+    return None
+
+
+def restore_code_secrets(text: str, secrets: dict) -> str:
+    """scrub_code_context 가 넣은 번호 붙은 자리표시를 원래 값으로 되돌린다."""
+    if not text or not secrets:
+        return text
+    for placeholder, value in secrets.items():
+        text = text.replace(placeholder, value)
+    return text
+
+
+def scrub_file_entry(entry, secrets: dict | None = None):
+    """{path, content} 항목을 정리한 복사본(형식이 다르면 그대로)."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("content"), str):
+        return entry
+    return {**entry, "content": scrub_code_context(entry.get("path") or entry.get("file") or "", entry["content"], secrets)}

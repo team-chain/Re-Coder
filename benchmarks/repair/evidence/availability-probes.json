@@ -1,0 +1,36 @@
+[
+  {
+    "call_id": "a982e960-46c0-40b6-ac83-2483041b5a1f",
+    "run_id": "availability-probe",
+    "agent": "grounded_repair",
+    "operation": "repair_fast",
+    "provider": "bedrock",
+    "model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "input_tokens": 44,
+    "output_tokens": 13,
+    "token_source": "api",
+    "estimated_cost_usd": 0.000109,
+    "fallback_used": false,
+    "transport_retries": 0,
+    "status": "succeeded",
+    "pricing_source": "configured_usd_per_million",
+    "latency_ms": 972
+  },
+  {
+    "call_id": "982d416d-03bd-4e66-bba0-3e00ac8238ab",
+    "run_id": "availability-probe",
+    "agent": "grounded_repair",
+    "operation": "repair_primary",
+    "provider": "bedrock",
+    "model": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "input_tokens": 44,
+    "output_tokens": 13,
+    "token_source": "api",
+    "estimated_cost_usd": 0.000327,
+    "fallback_used": false,
+    "transport_retries": 0,
+    "status": "succeeded",
+    "pricing_source": "configured_usd_per_million",
+    "latency_ms": 2615
+  }
+]

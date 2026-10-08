@@ -241,6 +241,17 @@ class ECSAgent:
             initialize_progress(record, request)
             self._advance_progress(record, "preflight")
             aws_policy.validate_region(request.region)
+            # Generated static clients have a fixed listen port. Reject a stale
+            # UI/default before any AWS resource is created or changed.
+            if request.workspace_path:
+                from pathlib import Path
+                from static_frontend import generated_static_runtime_port
+                static_port = generated_static_runtime_port(Path(request.workspace_path) / request.dockerfile)
+                if static_port is not None and static_port != request.container_port:
+                    raise InfraError(
+                        f"컨테이너 포트 {request.container_port}와 앱의 포트 {static_port}가 다릅니다.",
+                        remedy=f"배포 설정의 컨테이너 포트를 {static_port}로 수정하세요.",
+                    )
             clients = self._clients(request.region)
 
             # 1. Preflight
@@ -390,7 +401,7 @@ class ECSAgent:
                         state = (
                             "다만 되돌린 이전 버전도 아직 떠 있지 않습니다 — "
                             "그 버전에도 문제가 있을 수 있으니 요금이 걱정되면 "
-                            "배포 중지로 태스크 수를 0 으로 내리세요."
+                            "Deploy 캔버스 › 배포 상태의 '서비스 중지'로 태스크 수를 0 으로 내리세요."
                         )
                     record.error_remedy = (
                         f"{state} CloudWatch 로그 그룹 "
@@ -1367,8 +1378,8 @@ class ECSAgent:
             # 경우에만 한다. 그때는 내려도 잃을 게 없다.
             rec.provisioned["cost_warning"] = (
                 f"태스크 {rec.running_task_count}개가 아직 실행 중입니다 — "
-                "요금이 계속 발생합니다. 사이드바의 배포 중지"
-                "(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 내리세요."
+                "요금이 계속 발생합니다. Deploy 캔버스 › 배포 상태의 "
+                "'서비스 중지'(배포 중지)로 태스크 수를 0 으로 내리세요."
                 + ("" if req.health_check_command else
                    " 컨테이너 헬스체크가 없어 앱이 죽어도 ECS 가 알아채지 "
                    "못합니다 — python_http_health_check() 를 쓰면 이런 상태를 "
@@ -1451,7 +1462,7 @@ class ECSAgent:
                 rec.provisioned["cost_warning"] = (
                     "취소했지만 이 배포는 이미 기존 서비스의 롤아웃을 "
                     "시작한 뒤였고, 되돌릴 이전 태스크 정의를 찾지 못했습니다. "
-                    "배포 중지(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 "
+                    "Deploy 캔버스 › 배포 상태의 '서비스 중지'(배포 중지)로 태스크 수를 0 으로 "
                     "내리거나 AWS 콘솔에서 서비스를 직접 되돌리세요."
                 )
             return
@@ -1486,7 +1497,7 @@ class ECSAgent:
         rec.provisioned["cost_warning"] = (
             f"서비스 '{req.service}' 는 이미 만들어졌고 태스크가 떠 있을 수 "
             "있습니다 — 배포는 실패했지만 요금은 계속 발생합니다. "
-            "배포 중지(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 "
+            "Deploy 캔버스 › 배포 상태의 '서비스 중지'(배포 중지)로 태스크 수를 0 으로 "
             "내리거나, 원인을 고친 뒤 다시 배포하세요."
         )
 
@@ -1539,7 +1550,10 @@ class ECSAgent:
                     remedy="AWS 자격증명이 연결돼 있는지 확인하세요.",
                 )
 
-        env_vars_list = [{"name": k, "value": v} for k, v in req.env_vars.items()]
+        #: 앱이 process.env.PORT / os.environ["PORT"] 로 포트를 정하면 ECS 가 여는 포트와 맞춰야 한다.
+        #: 로컬 Docker 배포는 이미 PORT 를 넘긴다 — ECS 만 빠져 있었다. 사용자가 정한 값이 우선.
+        env_vars = {"PORT": str(req.container_port), **dict(req.env_vars or {})}
+        env_vars_list = [{"name": k, "value": v} for k, v in env_vars.items()]
         template_str = _TEMPLATE_PATH.read_text(encoding="utf-8")
         replacements = {
             "{{task_definition_family}}": req.task_definition_family,
@@ -1582,6 +1596,10 @@ class ECSAgent:
         # 컨테이너가 로그를 못 남기고 태스크 시작 자체가 실패한다.
         # 파생값을 원본과 같은 곳에서 계산해 어긋날 여지를 없앤다.
         for container in rendered.get("containerDefinitions", []):
+            if container.get("name") == req.container_name and req.secret_refs:
+                container["secrets"] = [
+                    {"name": name, "valueFrom": arn} for name, arn in req.secret_refs.items()
+                ]
             options = container.get("logConfiguration", {}).get("options")
             if isinstance(options, dict):
                 options["awslogs-group"] = self.log_group_name(req)

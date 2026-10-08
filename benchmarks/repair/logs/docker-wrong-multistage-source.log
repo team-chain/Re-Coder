@@ -1,0 +1,16 @@
+ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::nhrkxovsau3iid71t638yc1c3: "/build/dist/result.txt": not found
+#7 ERROR: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::nhrkxovsau3iid71t638yc1c3: "/build/dist/result.txt": not found
+7 |
+#0 building with "desktop-linux" instance using docker driver
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 383B done
+#1 DONE 0.0s
+#2 [internal] load metadata for docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+#2 DONE 0.0s
+#3 [internal] load .dockerignore
+#3 transferring context: 67B done
+#3 DONE 0.0s
+#4 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+#4 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done
+#4 CACHED
+#6 [builder 3/3] RUN mkdir out && echo artifact > out/result.txt

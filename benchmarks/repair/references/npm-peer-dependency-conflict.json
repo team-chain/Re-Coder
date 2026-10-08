@@ -1,0 +1,3 @@
+{
+  "package.json": "{\n  \"name\": \"repair-fixture\",\n  \"version\": \"1.0.0\",\n  \"private\": true,\n  \"scripts\": {\n    \"start\": \"node app.cjs\"\n  },\n  \"dependencies\": {\n    \"react\": \"18.2.0\",\n    \"react-dom\": \"18.2.0\"\n  }\n}\n"
+}

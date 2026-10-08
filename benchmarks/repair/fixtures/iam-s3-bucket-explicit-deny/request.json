@@ -1,0 +1,4 @@
+{
+  "action": "s3:GetObject",
+  "resource": "arn:aws:s3:::repair-fixture/assets/config.json"
+}

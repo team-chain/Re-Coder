@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # `core.schemas` 로 맞춘다. 같은 파일을 `schemas` 로도 import 할 수 있는데
 # 그러면 **서로 다른 모듈 객체**가 되어 enum 클래스도 갈라진다
@@ -72,6 +72,29 @@ class ExtensionEcsDeployRequest(BaseModel):
     task_family: Optional[str] = None
     environment: Optional[str] = None
     branch: Optional[str] = None
+    env_vars: dict[str, str] = Field(default_factory=dict)
+    secret_refs: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("env_vars", mode="before")
+    @classmethod
+    def legacy_environment_rows(cls, value):
+        if not isinstance(value, list):
+            return value
+        result = {}
+        for item in value:
+            if (not isinstance(item, dict) or not isinstance(item.get("name"), str)
+                    or not isinstance(item.get("value"), str) or item["name"] in result):
+                raise ValueError("env_vars rows require unique names and string values")
+            result[item["name"]] = item["value"]
+        return result
+
+    @model_validator(mode="after")
+    def validate_runtime(self):
+        ECSDeployRequest.validate_secret_refs(self)
+        if self.environment and "ENVIRONMENT" in self.secret_refs:
+            raise ValueError("ENVIRONMENT is already supplied by the deployment environment")
+        return self
+
     skip_sbom: bool = False
     skip_opa: bool = False
     #: 0 으로 주면 서비스만 만들고 태스크는 안 띄운다(과금 0원).
@@ -179,6 +202,8 @@ def to_core_request(
         "ecr_repo": (body.repo_name or "").strip() or None,
         "image_tag": (body.tag or "").strip() or None,
         "generate_sbom": not body.skip_sbom,
+        "env_vars": dict(body.env_vars),
+        "secret_refs": dict(body.secret_refs),
     }
     if (body.aws_region or "").strip():
         fields["region"] = body.aws_region.strip()  # type: ignore[union-attr]
@@ -209,7 +234,7 @@ def to_core_request(
         # 두 군데 있으면 한쪽만 바뀔 때 조용히 갈라진다. 컨테이너에 넣는
         # 환경변수는 사용자가 쓴 그대로 둔다(그건 앱이 읽는 값이다).
         fields["environment"] = body.environment.strip()
-        fields["env_vars"] = {"ENVIRONMENT": body.environment}
+        fields["env_vars"] = {"ENVIRONMENT": body.environment, **body.env_vars}
     # **브랜치는 여기서 정하지 않는다.**
     #
     # 두 라우트의 합류점인 `ecs.start_deployment` 이 정책 평가 직전에

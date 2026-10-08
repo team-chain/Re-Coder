@@ -60,7 +60,7 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"docker daemon is not running|error during connect|"
         r"npipe|pipe/docker_engine|docker_engine|"
         r"/var/run/docker\.sock.*(no such file|connection refused|permission denied)|"
-        r"connect: connection refused|dial unix|docker desktop.*(not running|starting)|"
+        r"docker[^\n]*connect: connection refused|dial unix|docker desktop.*(not running|starting)|"
         r"데몬이 없어|docker 데몬",
         re.IGNORECASE)),
     # 이미지가 아직 없다
@@ -74,7 +74,7 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # 스캐너 이미지(aquasec/trivy)를 못 받아옴 — 네트워크
     (SCANNER_PULL_FAILED, re.compile(
         r"unable to find image 'aquasec/trivy|pull.*aquasec/trivy|"
-        r"failed to download|dial tcp.*i/o timeout|TLS handshake timeout|"
+        r"failed to download|dial tcp.*(i/o timeout|connection refused|connection reset)|TLS handshake timeout|"
         r"temporary failure in name resolution|no route to host|"
         r"db download error|failed to update (the )?vulnerability database",
         re.IGNORECASE)),
@@ -112,7 +112,7 @@ _TEXT = {
         "네트워크 연결을 확인하고 다시 검사하세요. 사내망이면 프록시 설정이 필요할 수 있습니다.",
     ),
     TIMEOUT: (
-        "스캔이 제한 시간(300초) 안에 끝나지 않았습니다.",
+        "스캔이 제한 시간 안에 끝나지 않았습니다.",
         "첫 실행은 취약점 DB 다운로드로 오래 걸립니다. 잠시 뒤 다시 검사하세요.",
     ),
     DEPENDENCIES_MISSING: (
@@ -138,6 +138,35 @@ def _first_line(text: str) -> str:
     return ""
 
 
+#: 스캐너를 컨테이너로 돌릴 때 쓰는 이미지. docker 는 이 이미지를 처음 받을 때도
+#: "Unable to find image 'aquasec/trivy:…' locally" 를 찍는다 — 이건 **정상 진행**
+#: 이지 사용자 이미지가 없다는 뜻이 아니다. 예전에는 이 줄 때문에 "이미지가 아직
+#: 빌드되지 않았습니다" 로 잘못 안내했다.
+_SCANNER_IMAGE = re.compile(r"aquasec/trivy|hadolint/hadolint|zricethezav/gitleaks|gitleaks/gitleaks", re.IGNORECASE)
+_SCANNER_PULL_ERROR = re.compile(
+    r"error|denied|timeout|timed out|refused|reset|not found|unknown|failed|resolution|unreachable",
+    re.IGNORECASE)
+_BENIGN_SCANNER_LINE = re.compile(r"unable to find image '[^']*' locally|pulling from|pulling fs layer|"
+                                  r"download complete|pull complete|digest: sha256|status: downloaded|"
+                                  r"waiting|verifying checksum|already exists", re.IGNORECASE)
+
+
+def _scanner_pull_failed(text: str) -> bool:
+    for line in (text or "").splitlines():
+        if _SCANNER_IMAGE.search(line) and not _BENIGN_SCANNER_LINE.search(line) and _SCANNER_PULL_ERROR.search(line):
+            return True
+    return False
+
+
+def _without_scanner_progress(text: str) -> str:
+    return "\n".join(
+        line for line in (text or "").splitlines()
+        if not (_BENIGN_SCANNER_LINE.search(line)
+                and (_SCANNER_IMAGE.search(line) or "unable to find image" not in line.lower())
+                and not line.strip().lower().startswith("error"))
+    )
+
+
 def classify(text: str, *, scan_type: str = "", target: str = "",
              code: Optional[str] = None) -> ScanFailure:
     """stderr/메시지에서 실패 사유를 분류한다. code 를 주면 분류를 건너뛴다.
@@ -145,13 +174,18 @@ def classify(text: str, *, scan_type: str = "", target: str = "",
     target(이미지 이름)이 있으면 IMAGE_NOT_FOUND 원인 문장에 넣는다 —
     "app:latest 가 아직 빌드되지 않아" 가 "이미지가" 보다 다음 행동을 만든다.
     """
-    raw = _first_line(text)
+    cleaned = _without_scanner_progress(text)
+    raw = _first_line(cleaned) or _first_line(text)
     reason = code or UNKNOWN
     if code is None:
-        for candidate, pattern in _PATTERNS:
-            if pattern.search(text or ""):
-                reason = candidate
-                break
+        docker_down = _PATTERNS[0][1].search(cleaned)
+        if not docker_down and _scanner_pull_failed(text):
+            reason = SCANNER_PULL_FAILED
+        else:
+            for candidate, pattern in _PATTERNS:
+                if pattern.search(cleaned):
+                    reason = candidate
+                    break
     cause, next_action = _TEXT.get(reason, _TEXT[UNKNOWN])
     if reason == IMAGE_NOT_FOUND and target:
         cause = f"이미지 '{target}' 가 아직 빌드되지 않아 검사할 대상이 없습니다."

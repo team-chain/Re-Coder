@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from schemas import DiagnosticsResult
+from version import VERSION
 
 try:
     from first_run import FirstRunDiagnostics  # type: ignore
@@ -24,6 +25,7 @@ except ImportError:  # pragma: no cover
 router = APIRouter(tags=["health"])
 
 _START_TIME: datetime = datetime.now(timezone.utc)
+_diagnostics_task: asyncio.Task | None = None
 
 
 @router.get("/api/health")
@@ -39,7 +41,7 @@ async def health(request: Request) -> dict:
     port: int = getattr(request.app.state, "port", 0)
     return {
         "status": "ok",
-        "version": "1.0.0",
+        "version": VERSION,
         "uptime_seconds": round(uptime_seconds, 2),
         "port": port,
     }
@@ -71,7 +73,7 @@ async def get_status(request: Request) -> dict:
 
     return {
         "status": "ok",
-        "version": "1.0.0",
+        "version": VERSION,
         "uptime_seconds": round(uptime_seconds, 2),
         "port": port,
         "orchestrator_state": orchestrator_state,
@@ -92,9 +94,18 @@ async def run_diagnostics() -> DiagnosticsResult:
             status_code=503,
             detail="FirstRunDiagnostics module not available in this build.",
         )
-    diag = FirstRunDiagnostics()  # type: ignore[name-defined]
-    result = await diag.run_all()
-    return result
+    global _diagnostics_task
+    if _diagnostics_task is None or _diagnostics_task.done():
+        diag = FirstRunDiagnostics()  # type: ignore[name-defined]
+        _diagnostics_task = asyncio.create_task(diag.run_all())
+    # Sidebar, workspace and retries share a probe. One disconnected client must
+    # not cancel the result awaited by the other clients.
+    task = _diagnostics_task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and _diagnostics_task is task:
+            _diagnostics_task = None
 
 
 @router.post("/api/docker/ensure")

@@ -1,0 +1,3 @@
+{
+  "node": "require('node:assert').equal(require('is-number')(3),true)"
+}

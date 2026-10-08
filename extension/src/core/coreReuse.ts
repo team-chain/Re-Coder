@@ -75,3 +75,27 @@ export function isCoreConnectionFailure(message: string): boolean {
         'timeout',
     ].some(marker => text.includes(marker));
 }
+
+/** 확장에 들어 있는 Core 실행 파일 경로면 그 확장 버전(`recoder-team.recoder-1.1.21/bin/…` → [1,1,21]). */
+export function bundledCoreVersion(entrypoint: string | null | undefined): number[] | null {
+    const m = /recoder-team\.recoder-(\d+)\.(\d+)\.(\d+)[^\\/]*[\\/]bin[\\/]recoder-core/i.exec(entrypoint || '');
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/**
+ * 실행 중인 Core 가 **같은 확장의 이전 버전**이 띄운 것인가.
+ *
+ * 확장을 업데이트하면 창을 다시 불러오기 전까지 이전 버전 Core 가 남는다. 예전에는 새 확장이
+ * "다른 실행 경로의 Core 가 실행 중" 으로 막히거나, 사용자는 모르고 이전 Core 의 동작(이미 고친
+ * 오류)을 계속 봤다(실기기: 1.1.21 을 설치했는데 1.1.18 Core 가 코드 생성을 처리). 이전 버전이면
+ * 새 확장이 넘겨받는다. 반대 방향(새 Core 를 옛 창이 끄는 것)은 하지 않는다.
+ */
+export function isOlderBundledCore(runtimeEntrypoint: string | null | undefined, expectedEntrypoint: string | null | undefined): boolean {
+    const running = bundledCoreVersion(runtimeEntrypoint);
+    const wanted = bundledCoreVersion(expectedEntrypoint);
+    if (!running || !wanted) { return false; }
+    for (let i = 0; i < 3; i++) {
+        if (running[i] !== wanted[i]) { return running[i] < wanted[i]; }
+    }
+    return false;
+}

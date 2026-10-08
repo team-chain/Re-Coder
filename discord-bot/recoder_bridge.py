@@ -17,6 +17,7 @@ discord-bot/recoder_bridge.py — VSCode 확장 ↔ Discord 봇 WebSocket 브리
 
 from __future__ import annotations
 
+import hmac
 import asyncio
 import json
 import logging
@@ -87,7 +88,7 @@ class BridgeHub:
             auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
         ) or request.query.get("token", "")
 
-        if BRIDGE_TOKEN and token != BRIDGE_TOKEN:
+        if BRIDGE_TOKEN and not hmac.compare_digest(token.encode("utf-8"), BRIDGE_TOKEN.encode("utf-8")):
             log.warning("브리지 인증 실패 — IP=%s", request.remote)
             return web.Response(status=401, text="unauthorized")
 

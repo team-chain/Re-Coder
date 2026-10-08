@@ -1,0 +1,16 @@
+ERROR: process "/bin/sh -c cc native.c -o /app/native" did not complete successfully: exit code: 127
+#10 ERROR: process "/bin/sh -c cc native.c -o /app/native" did not complete successfully: exit code: 127
+ERROR: failed to build: failed to solve: process "/bin/sh -c cc native.c -o /app/native" did not complete successfully: exit code: 127
+[5/6] COPY . .
+DONE 0.0s
+[6/6] RUN cc native.c -o /app/native
+/bin/sh: 1: cc: not found
+> [6/6] RUN cc native.c -o /app/native:
+#0 building with "desktop-linux" instance using docker driver
+#2 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+#2 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done
+#2 CACHED
+#3 [internal] load build definition from Dockerfile
+#3 transferring dockerfile: 291B done
+#3 DONE 0.0s
+#4 [internal] load metadata for docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c

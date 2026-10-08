@@ -44,7 +44,7 @@ def test_every_client_requires_token_before_handler(host, method, provided):
     ("GET", "/api/cost"), ("GET", "/api/project"),
     ("GET", "/workbench/events"), ("GET", "/workbench/state"),
     ("GET", "/api/deploy/history"), ("POST", "/api/deploy/ecs"),
-    ("POST", "/api/deploy/s3/stream"), ("POST", "/api/shutdown"),
+    ("POST", "/api/deploy/s3/stream"), ("POST", "/api/deploy/execute/stream"), ("POST", "/api/shutdown"),
     ("GET", "/docs"), ("GET", "/openapi.json"),
     ("POST", "/api/health"), ("GET", "/api/health/"),
     ("GET", "/api/health/anything"), ("GET", "/api/token"),

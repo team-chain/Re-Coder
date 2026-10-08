@@ -4,7 +4,6 @@
  * 같은 UI를 두 곳에서 띄울 수 있게 HTML을 공유 함수로 추출.
  *
  * 사용처:
- *   - WorkbenchPanel        — Editor Area의 WebviewPanel (큰 화면)
  *   - WorkbenchSidebarProvider — Primary/Secondary Sidebar의 WebviewView (좁은 화면, Kiro 스타일)
  *
  * 두 위치 모두 같은 메시지 프로토콜(wb.*)을 사용한다. mode 인자로 narrow
@@ -25,9 +24,6 @@ export function renderWorkbenchHtml(webview: vscode.Webview, mode: WorkbenchMode
         'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 62)],
     ).join('');
     const cspConnect = Array.from({ length: 17 }, (_, i) => `http://127.0.0.1:${17894 + i}`).join(' ');
-
-    // sidebar 모드는 폭이 좁으므로 단일 컬럼 + 카드 세로 배치로 자동 전환
-    const isSidebar = mode === 'sidebar';
 
     return `<!DOCTYPE html>
 <html lang="ko" data-mode="${mode}">

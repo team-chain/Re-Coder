@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import posixpath
 import re
 import subprocess
 import time
@@ -23,7 +24,8 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from deployment_progress import report as report_progress, stream as stream_deployment
 
 from local_deploy_store import (
     load_records as _load_local_records,
@@ -44,6 +46,10 @@ from schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: 바깥 제한은 스캐너 자체 제한보다 길어야 한다. 같으면 바깥이 먼저 끊어 컨테이너 정리를
+#: 못 하고, 사용자는 원인 대신 "시간 초과"만 본다.
+_TRIVY_OUTER_TIMEOUT = 450
 
 router = APIRouter(tags=["deploy"])
 
@@ -128,7 +134,7 @@ async def _capture_running_local_container(container_name: str):
             None,
             lambda: subprocess.run(
                 ["docker", "inspect", "--format", "{{json .}}", container_name],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
         if result.returncode != 0:
@@ -234,6 +240,51 @@ async def _probe_local_http_health(
         return False
 
 
+async def _local_startup_failure(container_name: str) -> str | None:
+    """After a failed health probe, distinguish slow startup from a dead process."""
+    def read_state():
+        result = subprocess.run(
+            ['docker', 'inspect', '--format', '{"State": {{json .State}}, "RestartCount": {{json .RestartCount}}}', container_name],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15,
+        )
+        if result.returncode != 0:
+            return None
+        return json.loads(result.stdout)
+
+    def inspect():
+        info = read_state()
+        if info is None:
+            return '배포한 컨테이너의 상태를 확인하지 못했습니다.'
+        state = info.get('State') or {}
+        healthy_now = lambda st, inf: (st.get('Running') and not st.get('Restarting') and st.get('Status') == 'running'
+                                       and not inf.get('RestartCount'))
+        if healthy_now(state, info):
+            #: 시작하자마자 죽고 재시작 정책으로 다시 뜨는 앱은 확인하는 순간 "running" 으로 보인다
+            #: (실측: 시작 시 throw 하는 서버가 느린 시작으로 판정돼 이전 버전이 복구되지 않았다).
+            #: 잠깐 뒤 다시 보고, 그사이 재시작했으면 실패다.
+            import time as _time
+            _time.sleep(4)
+            again = read_state()
+            if again is not None:
+                info, state = again, again.get('State') or {}
+            if healthy_now(state, info):
+                return None
+        from context_gate import mask_secrets
+        logs = subprocess.run(
+            ['docker', 'logs', '--tail', '25', container_name],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15,
+        )
+        detail = mask_secrets((logs.stdout + logs.stderr)[-4000:])
+        restarts = info.get('RestartCount') or 0
+        return (f"컨테이너 실행 실패 ({state.get('Status', 'unknown')}, 종료 코드 {state.get('ExitCode', '?')}"
+                + (f", 시작 후 {restarts}번 다시 시작됨" if restarts else "") + f").\n{detail}")
+    try:
+        return await asyncio.to_thread(inspect)
+    except Exception as exc:
+        logger.warning('Container startup inspection failed: %s', exc)
+        return '배포한 컨테이너의 실행 상태를 확인하지 못했습니다. Docker 상태를 확인하세요.'
+
+
 async def _verify_rollback_candidate_health(plan: DeploymentPlan) -> bool:
     """실행 직후의 헬스 확인으로 롤백 후보 자격을 결정한다.
 
@@ -263,8 +314,10 @@ async def _update_rollback_candidate_after_verification(state: object) -> None:
     if status == "stable":
         # 최초 15초 안에 준비되지 않은 앱도 5분 감시를 통과했다면 안전한 후보다.
         record.rollback_eligible = True
+        record.status = DeployStatus.SUCCESS
     elif status in {"unstable", "error"}:
         record.rollback_eligible = False
+        record.status = DeployStatus.FAILED
     _save_records()
 
 
@@ -406,7 +459,7 @@ async def _rollback_image_available(image_ref: str) -> bool:
             None,
             lambda: subprocess.run(
                 ["docker", "image", "inspect", "--format", "{{.Id}}", image_ref],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
         return result.returncode == 0 and bool(result.stdout.strip())
@@ -431,7 +484,7 @@ async def _pin_rollback_image(
             None,
             lambda: subprocess.run(
                 ["docker", "tag", source, pin],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
         if result.returncode != 0:
@@ -461,7 +514,7 @@ async def _prune_old_rollback_pins(image_ref: str, keep: set[str]) -> list[str]:
                     "docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}",
                     "--filter", f"reference={repo}:{_ROLLBACK_PIN_PREFIX}*",
                 ],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -490,7 +543,7 @@ async def _prune_old_rollback_pins(image_ref: str, keep: set[str]) -> list[str]:
                 None,
                 lambda tag=tag: subprocess.run(
                     ["docker", "rmi", tag],
-                    shell=False, capture_output=True, text=True, timeout=60,
+                    shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                 ),
             )
             if result.returncode == 0:
@@ -553,7 +606,7 @@ async def _running_image_id(container_name: str) -> Optional[str]:
             None,
             lambda: subprocess.run(
                 ["docker", "inspect", "--format", "{{.Image}}", container_name],
-                shell=False, capture_output=True, text=True, timeout=30,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             ),
         )
         if result.returncode != 0:
@@ -575,9 +628,49 @@ async def _remove_existing_local_container(container_name: str) -> None:
         await loop.run_in_executor(
             None,
             lambda command=command: subprocess.run(
-                command, shell=False, capture_output=True, text=True, timeout=60,
+                command, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
             ),
         )
+
+
+def _companion_network_args(container_name: str) -> list[str]:
+    """함께 띄운 DB 가 있는 앱이면 같은 Docker 네트워크에 붙이는 인자(복구·롤백 경로)."""
+    try:
+        import local_services
+        return local_services.network_args(container_name)
+    except Exception:  # noqa: BLE001 - 네트워크 확인 실패는 예전처럼 네트워크 없이 띄운다
+        return []
+
+
+def _resolved_env_files(workspace: str, rels: list[str]) -> list[str]:
+    """계획에 적힌 .env 파일을 워크스페이스 안의 실제 경로로(밖을 가리키면 버린다)."""
+    if not workspace:
+        return []
+    root = Path(workspace).resolve()
+    out: list[str] = []
+    for rel in rels or []:
+        try:
+            path = (root / rel).resolve()
+            path.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if path.is_file():
+            out.append(str(path))
+    return out
+
+
+def _env_file_args(paths: list[str], skip: "set[str] | dict") -> list[str]:
+    """PC 의 .env 값을 `-e` 로 넘긴다(이미 정한 값·컨테이너가 정하는 PORT 등은 건드리지 않는다). 값은 기록하지 않는다."""
+    from deployment_inputs import read_env_file
+    args: list[str] = []
+    seen = set(skip)
+    for path in paths:
+        for key, value in read_env_file(path).items():
+            if key in seen or not _ENV_NAME_RE.fullmatch(key):
+                continue
+            seen.add(key)
+            args.extend(["-e", f"{key}={value}"])
+    return args
 
 
 async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool, str, str]:
@@ -588,6 +681,8 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
             run_args.extend(["-p", f"{int(host_port)}:{int(container_port)}"])
         for key, value in (record.env or {}).items():
             run_args.extend(["-e", f"{key}={value}"])
+        run_args.extend(_env_file_args(list(record.env_file_paths or []), set((record.env or {}).keys())))
+        run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
         # 태그가 아니라 고정 태그·이미지 ID 로 되돌린다 — 태그는 그사이 움직였을 수 있다.
         run_args.extend(["--restart", "unless-stopped", _stable_image_ref(record) or record.image])
     except (TypeError, ValueError) as exc:
@@ -600,7 +695,7 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
         result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
-                run_args, shell=False, capture_output=True, text=True, timeout=120,
+                run_args, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
             ),
         )
         if result.returncode != 0:
@@ -735,7 +830,6 @@ _STATIC_TARGET_INDEPENDENT_CHECK_CODES = {
     "ENV_FILE_NOT_GITIGNORED",
     "INVALID_ENV_FORMAT",
     "UNPINNED_DEPENDENCIES",
-    "CRITICAL_VULNERABILITY",
     "SECRET_LEAK_RISK",
 }
 
@@ -763,8 +857,10 @@ class DeployPlanRequest(BaseModel):
     method: DeployMethod = DeployMethod.LOCAL_DOCKER
     image: Optional[str] = None
     container_name: Optional[str] = None
-    host_port: Optional[int] = None
-    container_port: Optional[int] = None
+    host_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    container_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    env: dict[str, str] = Field(default_factory=dict)
+    health_check_path: str = Field(default='/health', pattern=r'^/[A-Za-z0-9._~%/@+-]*$')
     extra_context: Optional[str] = None
     # Security gate (Ship Stage). Default False — security scans always run.
     # Set to True to bypass Trivy/Hadolint pre-deployment gating (e.g. CI dry runs).
@@ -788,6 +884,7 @@ class RollbackRequest(BaseModel):
 class DeployPreflightRequest(BaseModel):
     """배포 대상 선택 카드에 표시할 프로젝트 감지 요청."""
     workspace_path: str
+    target: Optional[Literal['s3', 'ecs', 'local']] = None
 
 
 class DeploymentDecisionRequest(BaseModel):
@@ -885,7 +982,7 @@ def _detect_stack(workspace_path: str) -> StackType:
     if (ws / "package.json").exists():
         try:
             import json
-            pkg = json.loads((ws / "package.json").read_text(encoding="utf-8"))
+            pkg = json.loads((ws / "package.json").read_text(encoding="utf-8-sig"))
             deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
             if "next" in deps:
                 return StackType.NODE_NEXT
@@ -907,7 +1004,7 @@ def _detect_stack(workspace_path: str) -> StackType:
 
 def _read_text_if_exists(path: Path, limit: int = 100_000) -> str:
     try:
-        return path.read_text(encoding="utf-8", errors="ignore")[:limit]
+        return path.read_text(encoding="utf-8-sig", errors="ignore")[:limit]
     except OSError:
         return ""
 
@@ -1743,8 +1840,40 @@ def _detect_preflight_contract_stack(root: Path):
     return ContractStack.CUSTOM
 
 
-def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unknown") -> dict:
-    """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다."""
+def _env_excluded_from_image(root: Path, env_file: str) -> bool:
+    """.dockerignore 가 env 파일을 빌드 컨텍스트에서 빼는지(흔한 패턴만)."""
+    try:
+        rules = [l.strip().lstrip("/") for l in (root / ".dockerignore").read_text(encoding="utf-8", errors="replace").splitlines()
+                 if l.strip() and not l.lstrip().startswith(("#", "!"))]
+    except OSError:
+        return False
+    name = env_file.rsplit("/", 1)[-1]
+    return any(r in (env_file, name, ".env*", "*.env", "**/.env", "**/.env*") or (r.endswith("*") and name.startswith(r[:-1])) for r in rules)
+
+
+def _inferred_app_port(root: Path) -> Optional[int]:
+    """recoder.yml 이 없을 때 앱 포트 — Dockerfile EXPOSE, 없으면 소스에서 읽은 포트."""
+    dockerfile = root / "Dockerfile"
+    try:
+        if dockerfile.is_file():
+            m = re.search(r"^\s*EXPOSE\s+(\d+)", dockerfile.read_text(encoding="utf-8", errors="replace"), re.I | re.M)
+            if m:
+                return int(m.group(1))
+        from build_readiness import analyze
+        port = analyze(root).app_port
+        return int(port) if port else None
+    except Exception:  # noqa: BLE001 - 포트 추정 실패는 기본값으로
+        return None
+
+
+def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unknown", target: Optional[str] = None) -> dict:
+    """정적 Preflight와 기존 remediation 엔진을 배포 카드용 결과로 변환한다.
+
+    recoder.yml 이 없는 프로젝트(대부분)는 **추정 계약**으로 검사한다. 예전에는 기본 계약 값을
+    사용자가 정한 것처럼 강요해서 ECS 배포가 거의 모든 서버 앱에서 막혔다(2026-10-03 실측):
+    .env 에 PORT 필수, 포트 3000 가정(EXPOSE 8080 과 "불일치"), PC 의 3000 포트가 쓰이면 "충돌"
+    (ECS 는 PC 포트를 쓰지 않는다), .env 가 없어도 ".gitignore 없음 → env 추적 위험".
+    """
     root = Path(workspace_path)
     if not root.is_dir():
         raise ValueError("유효한 워크스페이스 경로가 아닙니다.")
@@ -1761,12 +1890,26 @@ def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unkno
         from core.remediation import generate_proposals  # type: ignore
 
     contract = load_contract(root)
+    inferred = contract is None
     if contract is None:
         contract = build_default_contract(_detect_preflight_contract_stack(root))
-    static_check_codes = None
+        #: 사용자가 정한 필수 환경변수가 없다 — 기본 계약의 PORT 필수를 강요하지 않는다(PORT 는 배포가 정한다).
+        contract.preflight.required_env = []
+        port = _inferred_app_port(root)
+        if port:
+            contract.runtime.app_port = contract.runtime.host_port = port
+    skipped: set[str] = set()
+    if inferred or target in ("ecs", "s3"):
+        #: 로컬 배포는 빈 PC 포트를 스스로 고르고, ECS·S3 는 PC 포트를 쓰지 않는다.
+        skipped.add("HOST_PORT_CONFLICT")
+    if not (root / contract.runtime.env_file).exists():
+        # A project with no environment file has nothing for Git to track.
+        # Actual source-secret checks still run below.
+        skipped.add("ENV_FILE_NOT_GITIGNORED")
+    static_check_codes = {code for code, _ in CHECK_REGISTRY if code.value not in skipped}
     if app_kind == "static":
         static_check_codes = {
-            code for code, _ in CHECK_REGISTRY
+            code for code in static_check_codes
             if code.value in _STATIC_TARGET_INDEPENDENT_CHECK_CODES
         }
     run = StaticPreflightRunner(str(root), contract).run_sync(static_check_codes)
@@ -1807,8 +1950,17 @@ def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unkno
 
     reasons = [issue_payload(blocker) for blocker in run.blockers]
     warnings = [issue_payload(warning) for warning in run.warnings]
+    if inferred:
+        #: 배포가 스스로 다루는 것은 막지 않고 알린다.
+        #: - 헬스 경로가 없으면 로컬·ECS 배포는 컨테이너 헬스체크 없이 "/" 응답으로 확인한다.
+        #: - .env 가 .dockerignore 로 이미지에서 빠지면 배포에는 위험이 없다(커밋 위험은 경고로 남긴다).
+        demote = {"MISSING_HEALTH_ENDPOINT"}
+        if _env_excluded_from_image(root, contract.runtime.env_file):
+            demote.add("ENV_FILE_NOT_GITIGNORED")
+        warnings += [r for r in reasons if r["code"] in demote]
+        reasons = [r for r in reasons if r["code"] not in demote]
     return {
-        "blocked": bool(run.blockers),
+        "blocked": bool(reasons),
         "status": run.status.value if hasattr(run.status, "value") else str(run.status),
         "score": run.score,
         "reasons": reasons,
@@ -1936,8 +2088,26 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
         safety = await asyncio.to_thread(
             _run_deployment_safety_preflight,
             request.workspace_path,
-            detected["app_kind"],
+            'static' if request.target == 's3' else detected["app_kind"],
+            request.target,
         )
+        if request.target == 'ecs' or (request.target != 's3' and detected.get('app_kind') != 'static'):
+            # 컨테이너 빌드·실행이 확정적으로 실패할 설정은 배포 전에 막는다.
+            readiness = await asyncio.to_thread(_workspace_readiness, request.workspace_path)
+            for issue in (readiness.issues if readiness else []):
+                item = {
+                    "code": issue.code, "message": issue.message, "fix": issue.fix,
+                    "severity": "high" if issue.severity == "error" else "medium",
+                    "remediation_available": issue.auto_fix,
+                    "proposal_id": f"readiness:{issue.code}" if issue.auto_fix else None,
+                }
+                (safety["reasons"] if issue.severity == "error" else safety["warnings"]).append(item)
+                if issue.severity == "error":
+                    safety["fixes"].append({"code": issue.code, "message": issue.fix,
+                                            "proposal_id": item["proposal_id"],
+                                            "auto_apply_available": issue.auto_fix})
+            if readiness and readiness.errors:
+                safety["blocked"] = True
         return {**detected, **safety}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2080,10 +2250,11 @@ def _normalise_scan_result(scan_type: str, target: str, raw: dict) -> dict:
             if level == "error":
                 critical_count += 1
                 severity = "CRITICAL"
-            elif level == "warning":
+            elif level == "warning" and str(v.get("code") or "") not in _HADOLINT_ADVISORY:
                 high_count += 1
                 severity = "HIGH"
             else:
+                #: 버전 고정·RUN 합치기 같은 권고는 "중간" 으로 센다 — 보안 게이트를 빨갛게 만들지 않는다.
                 medium_count += 1
                 severity = "MEDIUM"
             findings.append({"severity": severity, **v})
@@ -2143,10 +2314,10 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
         if scan_type == "trivy":
             image = target_path
             if not image:
-                if ws is not None and ws.exists():
-                    image = f"{ws.name.lower().replace(' ', '-') or 'app'}:latest"
-                else:
-                    image = "app:latest"
+                #: 배포 계획과 **같은 이름 규칙**을 쓴다. 예전에는 폴더 이름을 소문자로만
+                #: 바꿔 써서, 한글·기호가 든 폴더(예: "테스트 앱")는 계획이 만드는 이미지와
+                #: 다른 이름을 검사했다(항상 "이미지 없음").
+                image = (_default_image_name(str(ws)) if ws is not None and ws.exists() else "") or "app:latest"
             #: Trivy 이미지 스캔은 Docker 데몬이 전제다. 꺼져 있으면 사용자에게
             #: 미루지 않고 코어가 자동 시작을 시도한다(백그라운드 실행 + 준비
             #: 폴링, docker_autostart 참고). 그래도 안 되면 시도 내역을 담아
@@ -2174,7 +2345,7 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
                     "findings": [],
                     **_scan_failure.failure_fields(auto.message or "", scan_type=scan_type, target=image, code=code),
                 }
-            raw = await asyncio.wait_for(agent.run_trivy_scan(image), timeout=300)
+            raw = await asyncio.wait_for(agent.run_trivy_scan(image), timeout=_TRIVY_OUTER_TIMEOUT)
             target_for_log = image
         elif scan_type == "hadolint":
             dockerfile = target_path
@@ -2239,8 +2410,118 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
         return result
 
     normalised = _normalise_scan_result(scan_type, target_for_log, raw)
+    if scan_type == "gitleaks" and normalised.get("status") == "ok":
+        normalised = _without_local_env_keys(normalised, target_for_log)
+    if scan_type == "hadolint" and normalised.get("status") == "ok":
+        normalised = _hadolint_headline(normalised)
+    if scan_type == "trivy" and normalised.get("status") == "ok":
+        normalised = await _with_trivy_headline(normalised, workspace_path)
     _log_scan_to_session(scan_type, target_for_log, normalised)
     return normalised
+
+
+#: Hadolint 가 "warning" 으로 내지만 보안·동작 문제가 아닌 권고. 예전에는 전부 "높음" 으로 세서
+#: ReCoder 가 만든 Dockerfile 도 보안 게이트가 빨간색이었다(2026-10-04 실기기, 7건).
+_HADOLINT_ADVISORY = {
+    "DL3003",  # RUN 안의 cd 대신 WORKDIR
+    "DL3008", "DL3013", "DL3016", "DL3018", "DL3028",  # 패키지 버전 고정
+    "DL3059",  # 연속된 RUN 합치기
+    "DL3066",  # 숫자 사용자 ID
+}
+
+_HADOLINT_KO = {
+    "DL3000": "WORKDIR 상대 경로", "DL3002": "root 로 실행", "DL3003": "RUN 안의 cd",
+    "DL3006": "베이스 이미지 태그 없음", "DL3007": "latest 태그", "DL3008": "apt 버전 미고정",
+    "DL3009": "apt 목록 캐시", "DL3013": "pip 버전 미고정", "DL3015": "apt 추천 패키지",
+    "DL3016": "npm 버전 미고정", "DL3018": "apk 버전 미고정", "DL3019": "apk 캐시",
+    "DL3020": "ADD 대신 COPY", "DL3025": "실행 명령 셸 형식", "DL3028": "gem 버전 미고정",
+    "DL3042": "pip 캐시", "DL3059": "RUN 여러 개", "DL3066": "사용자 이름(숫자 ID 권장)",
+    "DL4006": "파이프 실패 무시",
+}
+
+
+def _hadolint_headline(report: dict) -> dict:
+    """요약을 AI 영어 문장 대신 "무엇이 몇 줄에" 로. AI 요약은 ai_summary 로 남긴다."""
+    findings = report.get("findings") or []
+    if not findings:
+        summary = "Dockerfile 검사 — 규칙 위반 없음"
+    else:
+        must = [f for f in findings if f.get("severity") in ("CRITICAL", "HIGH")]
+        advisory = [f for f in findings if f not in must]
+
+        def label(items: list[dict]) -> str:
+            parts = []
+            for f in items[:4]:
+                code = str(f.get("code") or "")
+                parts.append(f"{_HADOLINT_KO.get(code, code)}({f.get('line')}번째 줄)")
+            return ", ".join(parts) + (f" 외 {len(items) - 4}건" if len(items) > 4 else "")
+
+        summary = "Dockerfile 검사 — " + " · ".join(filter(None, [
+            f"고칠 것 {len(must)}건: {label(must)}" if must else "",
+            f"권고 {len(advisory)}건: {label(advisory)}" if advisory else "",
+        ]))
+    return {**report, "summary": summary, "ai_summary": report.get("summary") or ""}
+
+
+def _without_local_env_keys(report: dict, workspace: str) -> dict:
+    """커밋(.gitignore)과 이미지(.dockerignore) 양쪽에서 빠지는 .env 의 키는 유출이 아니다.
+
+    키는 어딘가에 있어야 한다 — PC 의 .env 가 그 자리다. 예전에는 이것까지 CRITICAL 로 세서
+    게이트가 영영 빨간색이었다(사용자가 할 수 있는 일이 없다). 목록은 local_env 로 따로 남긴다.
+    """
+    try:
+        from security_fix import gitleaks_rel, local_env_only
+    except ImportError:  # pragma: no cover
+        from core.security_fix import gitleaks_rel, local_env_only  # type: ignore
+    if not workspace:
+        return report
+    root = Path(workspace)
+    kept: list[dict] = []
+    local: list[dict] = []
+    for f in report.get("findings") or []:
+        rel = gitleaks_rel(str(f.get("file") or ""))
+        (local if rel and local_env_only(root, rel) else kept).append(f)
+    if not local:
+        return report
+    files = sorted({gitleaks_rel(str(f.get("file") or "")) for f in local})
+    note = f"PC 에만 있는 키 {len(local)}개({', '.join(files[:3])})는 커밋·이미지에서 빠져 유출로 세지 않았습니다."
+    summary = f"시크릿 {len(kept)}건 발견 — {note}" if kept else f"코드에 남은 시크릿 없음 — {note}"
+    return {**report, "findings": kept, "critical_count": len(kept), "local_env": local, "summary": summary,
+            "ai_summary": report.get("summary") or ""}
+
+
+async def _image_created(image: str) -> str:
+    """이미지가 언제 빌드됐는지(로컬 시각, 분 단위). 모르면 빈 문자열."""
+    try:
+        result = await asyncio.to_thread(subprocess.run,
+            ["docker", "image", "inspect", "--format", "{{.Created}}", image],
+            shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
+        raw = (result.stdout or "").strip()
+        if result.returncode != 0 or not raw:
+            return ""
+        from datetime import datetime
+        stamp = datetime.fromisoformat(re.sub(r"(\.\d{6})\d*", r"\1", raw.replace("Z", "+00:00")))
+        return stamp.astimezone().strftime("%Y-%m-%d %H:%M")
+    except Exception:  # noqa: BLE001 - 빌드 시각은 안내용이다
+        return ""
+
+
+async def _with_trivy_headline(report: dict, workspace_path: str) -> dict:
+    """요약을 "어느 이미지의 무엇이" 로 바꾼다. AI 요약은 ai_summary 로 남긴다."""
+    try:
+        from vuln_advice import trivy_headline
+    except ImportError:  # pragma: no cover
+        from core.vuln_advice import trivy_headline  # type: ignore
+    target = str(report.get("target") or "")
+    created = await _image_created(target) if target else ""
+    findings = report.get("findings") or []
+    try:
+        headline = (trivy_headline(target, created, findings, workspace_path or None) if findings else
+                    f"검사한 이미지 {target}{' · ' + created + ' 빌드' if created else ''} — CRITICAL·HIGH 취약점 없음")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("trivy headline failed: %s", exc)
+        return report
+    return {**report, "summary": headline, "ai_summary": report.get("summary") or "", "image_created": created}
 
 
 #: 덮어쓰기 직전 기존 파일을 남겨 두는 이름. `Dockerfile` → `Dockerfile.recoder-prev`.
@@ -2270,10 +2551,23 @@ def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
     if not target.is_file():
         return None
     try:
-        existing = target.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        existing = None
-    if existing is None or existing == proposal.content:
+        raw = target.read_bytes()
+    except OSError:
+        return None
+    if raw == proposal.content.encode("utf-8"):
+        return None
+    #: UTF-8 이 아닌 파일(메모장 ANSI=CP949, PowerShell 5 의 UTF-16)도 **다른 파일**이다 — 읽을 수 없다고
+    #: 충돌이 아닌 것으로 보면 사용자 파일을 백업 없이 덮어쓴다. 보여 줄 수 있게 최대한 디코드하고 원본 바이트를 보관한다.
+    existing = None
+    #: UTF-16 은 BOM 이 있을 때만 시도한다 — 짝수 바이트 CP949 파일도 UTF-16 으로 "디코드"돼 diff 가 깨진다.
+    encodings = ("utf-16", "cp949", "latin-1") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else ("utf-8-sig", "cp949", "latin-1")
+    for encoding in encodings:
+        try:
+            existing = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if existing == proposal.content:
         return None
     import difflib
 
@@ -2286,7 +2580,7 @@ def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
             n=2,
         )
     )
-    return {"existing_content": existing, "diff": diff[:20000]}
+    return {"existing_content": existing, "diff": diff[:20000], "_existing_bytes": raw}
 
 
 def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, overwrite: bool = False):
@@ -2306,6 +2600,7 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
     conflict = _existing_file_conflict(proposal, target)
     backup_path: Optional[str] = None
     if conflict is not None:
+        original_bytes = conflict.pop("_existing_bytes")
         if not overwrite:
             return {
                 "status": "exists",
@@ -2315,11 +2610,49 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
                 **conflict,
             }
         backup = target.with_name(target.name + _OVERWRITE_BACKUP_SUFFIX)
-        backup.write_text(conflict["existing_content"], encoding="utf-8")
+        try:
+            if backup.is_file() and backup.read_bytes() != original_bytes:
+                #: 이전 백업(사용자가 손으로 고친 원본일 수 있다)을 덮어쓰지 않고 시각을 붙여 옮겨 둔다.
+                import time as _time
+                backup.replace(backup.with_name(f"{backup.name}.{_time.strftime('%Y%m%d-%H%M%S')}"))
+        except OSError as exc:
+            logger.warning("previous backup rotation skipped: %s", exc)
+        backup.write_bytes(original_bytes)  # 원래 인코딩 그대로 보관
         backup_path = str(backup)
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(proposal.content, encoding="utf-8")
+    try:
+        target.write_text(proposal.content, encoding="utf-8")
+    except PermissionError:
+        #: Windows 읽기 전용 특성이 붙은 파일 — 쓰기 권한을 주고 한 번 더. 그래도 안 되면 알아듣는 오류로.
+        import stat
+        try:
+            os.chmod(target, os.stat(target).st_mode | stat.S_IWRITE)
+            target.write_text(proposal.content, encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(status_code=409, detail=f"{target.name} 을(를) 저장하지 못했습니다(읽기 전용이거나 다른 프로그램이 열고 있음): {exc}") from exc
+    additional_paths = []
+    from static_frontend import STATIC_DOCKERIGNORE, STATIC_IGNORE_NOTICE
+    if SERVER_IGNORE_NOTICE in getattr(proposal, 'risk_reasons', []):
+        try:
+            from build_readiness import write_dockerignore_if_missing
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import write_dockerignore_if_missing  # type: ignore
+        # Exclusive creation also preserves edits made while approval was open.
+        created = write_dockerignore_if_missing(target.parent)
+        if created:
+            additional_paths.append(created)
+    elif (getattr(proposal, 'base_template', '') in ('Dockerfile.node-static', 'Dockerfile.html-static')
+            and STATIC_IGNORE_NOTICE in getattr(proposal, 'risk_reasons', [])):
+        ignore = target.parent / '.dockerignore'
+        try:
+            # Exclusive creation also preserves edits made while approval was open.
+            with ignore.open('x', encoding='utf-8') as stream:
+                stream.write(STATIC_DOCKERIGNORE.replace('build\n', '').replace('dist\n', '')
+                             if proposal.base_template == 'Dockerfile.html-static' else STATIC_DOCKERIGNORE)
+            additional_paths.append(str(ignore))
+        except FileExistsError:
+            pass
     return {
         "status": "saved",
         "proposal_id": proposal_id,
@@ -2327,6 +2660,7 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
         "file_type": file_type,
         "overwritten": conflict is not None,
         "backup_path": backup_path,
+        "additional_paths": additional_paths,
     }
 
 
@@ -2393,7 +2727,24 @@ def _entrypoint_from_node_command(command: object) -> str | None:
         r"[\"']?([^\"'\s;&|]+)",
         command,
     )
-    return _safe_node_entrypoint(match.group(1)) if match else None
+    if not match:
+        return None
+    entry = match.group(1)
+    #: `cd server && node index.js` — AI 가 만든 모노레포에서 흔하다. 폴더를 붙여야 컨테이너 CMD 가 맞는다.
+    cds = re.findall(r"(?:^|&&|;)\s*cd\s+[\"']?([^\"'\s;&|]+)[\"']?(?=\s*(?:&&|;))", command[:match.start() + 1])
+    if cds and not entry.startswith("/"):
+        folder = ""
+        for part in cds:
+            part = part.strip().strip("\"'")
+            if part.startswith("/"):
+                return None  # 절대 경로(cd /app)는 컨테이너 WORKDIR 에 따라 다르다 — 판단하지 않는다
+            folder = posixpath.normpath(posixpath.join(folder, part))
+        if folder.startswith(".."):
+            return None  # 프로젝트 밖 — 판단하지 않는다
+        entry = posixpath.normpath(posixpath.join(folder, entry))
+        if entry.startswith(".."):
+            return None
+    return _safe_node_entrypoint(entry)
 
 
 def _discover_node_entrypoint(
@@ -2404,7 +2755,7 @@ def _discover_node_entrypoint(
     root = Path(workspace_path).expanduser().resolve()
     package: dict = {}
     try:
-        loaded = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        loaded = json.loads((root / "package.json").read_text(encoding="utf-8-sig"))
         if isinstance(loaded, dict):
             package = loaded
     except (OSError, ValueError):
@@ -2417,9 +2768,19 @@ def _discover_node_entrypoint(
             _entrypoint_from_node_command(scripts.get(name))
             for name in ("start:prod", "start")
         )
+        #: 모노레포 — `npm start --workspace=backend`·`npm --prefix server start` 를 따라가 그 패키지의 서버 파일.
+        try:
+            from build_readiness import ProjectFiles, _start_entry
+            delegated = _start_entry(scripts, ProjectFiles(root))
+        except Exception:  # noqa: BLE001 - 진입점 추정 실패가 생성을 막지 않는다
+            delegated = None
+        if delegated and (root / delegated).is_file():
+            candidates.append(delegated)
     # `scripts.start`는 실제 서버 실행 계약이고 `main`은 라이브러리 export일
     # 수도 있으므로 start 명령을 우선한다.
     candidates.append(package.get("main"))
+    if isinstance(scripts, dict):
+        candidates.extend(_entrypoint_from_node_command(scripts.get(name)) for name in ("server", "serve", "dev:server"))
 
     candidates.extend(
         path for path in (
@@ -2582,7 +2943,7 @@ def _dockerfile_template_defaults(
     return {
         "APP_NAME": app_name,
         "PYTHON_VERSION": "3.11",
-        "NODE_VERSION": "20",
+        "NODE_VERSION": "22",  # Node 20 은 2026-04 지원 종료 — Trivy 가 막는다
         "PORT": str(port),
         "HEALTH_CHECK_PATH": str(health_path),
         "APP_TARGET": (
@@ -2608,6 +2969,11 @@ def _dockerfile_from_template(
     """
     from registry import FileTemplateRegistry  # type: ignore
 
+    from static_frontend import frontend_dockerfile
+    if stack in (StackType.NODE_EXPRESS, StackType.UNKNOWN, StackType.STATIC):
+        frontend = frontend_dockerfile(workspace_path, getattr(project, 'default_port', None) or 3000)
+        if frontend:
+            return frontend
     template_id = _DOCKERFILE_TEMPLATE_BY_STACK.get(stack)
     if template_id is None:
         if stack == StackType.UNKNOWN:
@@ -2615,9 +2981,8 @@ def _dockerfile_from_template(
             #: 어긋난 컨테이너(예: uvicorn 없는 프로젝트에 CMD uvicorn)가 나온다.
             raise _UnsupportedDockerfileFallback(
                 f"프로젝트 스택을 확정하지 못했습니다({stack.value}). "
-                "requirements.txt 에 fastapi/flask/django 중 사용하는 "
-                "프레임워크를 명시하거나, AI Ready 를 복구하거나, 프로젝트에 "
-                "Dockerfile 을 직접 추가한 뒤 다시 시도하세요."
+                "앱의 루트 폴더에 index.html, package.json 또는 Python 의존성 파일이 "
+                "있는지 확인하세요. 사용자 정의 런타임은 Dockerfile을 추가하면 됩니다."
             )
         raise _UnsupportedDockerfileFallback(
             f"{stack.value} 스택은 AI 없이 검증된 Dockerfile 폴백을 제공하지 "
@@ -2678,24 +3043,28 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
     proposal = None
     project = None
     ai_note = ""
+    # 포트·진입점·헬스 경로는 AI 가 없어도(템플릿 폴백) 프로젝트에서 읽어야 한다.
+    # 예전엔 AI 경로에서만 스캔해서, 폴백 초안은 5000 에서 듣는 앱에 3000 을 열었다.
+    try:
+        from project_scanner import get_project_scanner  # type: ignore
+        project = get_project_scanner().scan(request.workspace_path)
+        # 호출자가 스택을 명시했으면 파일 휴리스틱보다 우선한다. 서로
+        # 다른 스택에서 계산된 포트/실행 명령까지 가져오면 FastAPI에
+        # Express의 3000/index.js를 적용하는 식의 교차 오염이 생긴다.
+        if request.stack is not None and project.stack != stack:
+            project = project.model_copy(update={
+                "stack": stack,
+                "default_port": None,
+                "default_run_command": None,
+            })
+    except Exception:
+        project = None
     agent = _get_infra_agent()
     if agent is not None:
         # InfraAgent.generate_dockerfile(workspace_path, project: ProjectProfile)
         # 시그니처에 맞춰 ProjectProfile 을 구성. 사용자가 /api/project/scan 을 안 했어도
         # 최소한의 정보로 호출 가능하도록 inline 구성.
-        try:
-            from project_scanner import get_project_scanner  # type: ignore
-            project = get_project_scanner().scan(request.workspace_path)
-            # 호출자가 스택을 명시했으면 파일 휴리스틱보다 우선한다. 서로
-            # 다른 스택에서 계산된 포트/실행 명령까지 가져오면 FastAPI에
-            # Express의 3000/index.js를 적용하는 식의 교차 오염이 생긴다.
-            if request.stack is not None and project.stack != stack:
-                project = project.model_copy(update={
-                    "stack": stack,
-                    "default_port": None,
-                    "default_run_command": None,
-                })
-        except Exception:
+        if project is None:
             # 폴백 — 빈 ProjectProfile (필수 필드만)
             from schemas import ProjectProfile  # type: ignore
             project = ProjectProfile(
@@ -2748,7 +3117,8 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
                 request.workspace_path, stack, project,
             )
         except _UnsupportedDockerfileFallback as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            detail = _no_project_message(request.workspace_path) if _nested_project_dir(request.workspace_path) else str(exc)
+            raise HTTPException(status_code=422, detail=detail) from exc
         except _DockerfileTemplateRenderError as exc:
             raise HTTPException(
                 status_code=503,
@@ -2764,15 +3134,61 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
             base_template=template_id,
             risk_level=RiskLevel.LOW,
             approval_level=ApprovalLevel.CONFIRM,
-            risk_reasons=[ai_note] if ai_note else [],
+            risk_reasons=[ai_note] if ai_note and template_id not in ('Dockerfile.node-static', 'Dockerfile.html-static') else [],
         )
 
     if not getattr(proposal, "workspace_path", None):
         proposal = proposal.model_copy(update={
             "workspace_path": str(Path(request.workspace_path).expanduser().resolve()),
         })
+    if getattr(proposal, 'base_template', '') in ('Dockerfile.node-static', 'Dockerfile.html-static'):
+        from static_frontend import STATIC_IGNORE_NOTICE
+        if not (Path(request.workspace_path) / '.dockerignore').exists():
+            proposal.risk_reasons.append(STATIC_IGNORE_NOTICE)
+    elif not (Path(request.workspace_path) / '.dockerignore').exists():
+        #: 서버 스택도 .dockerignore 가 없으면 PC 의 node_modules·.venv·.env 가 빌드에 섞인다.
+        proposal.risk_reasons.append(SERVER_IGNORE_NOTICE)
+    # 루트 build 가 client/ 같은 하위 프로젝트에서 빌드하면 그 폴더 의존성 설치를 넣는다 —
+    # 없으면 빌드 단계에서 react-scripts 를 못 찾아 실패한다(실기기 쇼핑몰).
+    proposal = _with_subproject_installs(request.workspace_path, proposal)
+    # 이 Dockerfile 로 빌드했을 때 실패가 확정적인 프로젝트 설정을 저장 전에 알린다.
+    proposal.risk_reasons.extend(_readiness_notes(request.workspace_path, proposal.content))
     _infra_proposals[proposal.proposal_id] = proposal
     return proposal
+
+
+SERVER_IGNORE_NOTICE = ('저장 시 .dockerignore도 생성합니다: node_modules·가상환경·Git 기록·.env 자격증명 파일을 '
+                        'Docker 빌드에서 제외합니다. 기존 .dockerignore는 유지합니다.')
+
+
+def _with_subproject_installs(workspace_path: str, proposal):
+    try:
+        from build_readiness import ProjectFiles, add_subproject_installs, analyze
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import ProjectFiles, add_subproject_installs, analyze  # type: ignore
+    try:
+        readiness = analyze(workspace_path, {"Dockerfile": proposal.content})
+        if not any(i.code == "DOCKERFILE_SUBPROJECT_DEPS_MISSING" for i in readiness.issues):
+            return proposal
+        content = add_subproject_installs(proposal.content, readiness.subprojects, ProjectFiles(Path(workspace_path)))
+    except Exception as exc:  # noqa: BLE001 - 보정 실패는 원래 초안으로 둔다(점검이 따로 알린다)
+        logger.warning("subproject install injection skipped: %s", exc)
+        return proposal
+    return proposal.model_copy(update={"content": content})
+
+
+def _readiness_notes(workspace_path: str, dockerfile_content: str) -> list[str]:
+    try:
+        from build_readiness import analyze, issues_as_risk_reasons
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import analyze, issues_as_risk_reasons  # type: ignore
+    try:
+        readiness = analyze(workspace_path, {"Dockerfile": dockerfile_content})
+    except Exception as exc:  # noqa: BLE001 - 점검 실패가 생성을 막지 않는다
+        logger.warning("build readiness check failed: %s", exc)
+        return []
+    readiness.issues = [i for i in readiness.issues if i.code != "DOCKERIGNORE_MISSING"]
+    return issues_as_risk_reasons(readiness)
 
 
 class ComposeRequest(BaseModel):
@@ -3003,7 +3419,7 @@ def _local_image_exists(image: str) -> bool:
     try:
         proc = subprocess.run(
             ["docker", "image", "inspect", image],
-            shell=False, capture_output=True, text=True, timeout=10,
+            shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
         return proc.returncode == 0
     except Exception:  # noqa: BLE001 — 존재 확인 실패는 '없음'과 동일하게 취급
@@ -3028,7 +3444,8 @@ def _default_image_name(workspace_path: str) -> str:
     """DeployAgent.create_plan 과 같은 규칙 — `<워크스페이스 폴더명>:latest`."""
     if not workspace_path:
         return ""
-    name = Path(workspace_path).name.lower().replace(" ", "-")
+    from deployment_inputs import workspace_deploy_name
+    name = workspace_deploy_name(workspace_path)
     return f"{name}:latest" if name else ""
 
 
@@ -3095,10 +3512,14 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
         if trivy_report.get("status") == "ok":
             crit = int(trivy_report.get("critical_count", 0))
             if crit > 0:
-                blockers.append(f"Trivy: {crit} CRITICAL CVE(s) in {image}")
+                advice = _vulnerability_advice(trivy_report, workspace)
+                top = "; ".join(f"{i['package']} {i['installed']}→{i['fixed'] or '수정 없음'}" for i in advice["items"][:3])
+                blockers.append(
+                    f"Trivy: {crit} CRITICAL CVE(s) in {image} (이전에 빌드된 이미지 기준 — 실행 시 새로 빌드해 다시 검사)"
+                    + (f": {top}" if top else ""))
             high = int(trivy_report.get("high_count", 0))
             if high > 0:
-                risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {image}")
+                risk_reasons.append(f"Trivy: {high} HIGH CVE(s) in {image} (이전에 빌드된 이미지 기준 — 실행 시 새로 빌드해 다시 검사)")
         else:
             #: 스캔 실패는 통과가 아니다 — 실패 사유를 화면까지 끌고 간다.
             #: 원인 + 다음 행동을 함께 — 승인 화면에서 raw 에러가 아니라 "왜·뭘" 이 보인다.
@@ -3182,12 +3603,280 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
         #: 올리지 않되, **승인 강도**는 이중 확인으로 올린다 — 사용자가 "미검증
         #: 상태로 실행한다"는 사실을 알고 누르게 하기 위해서다.
         plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
-        if plan.image:
-            _plans_pending_image_scan[plan.plan_id] = plan.image
+    # A plan-time scan is only a preview: execute may rebuild this tag.
+    # Keep this requirement until execution completes, including failed retries.
+    if not request.skip_security_scan and plan.image:
+        _plans_pending_image_scan[plan.plan_id] = plan.image
+
+    if plan.method == DeployMethod.LOCAL_DOCKER and plan.ports:
+        try:
+            port_notes = await asyncio.to_thread(_resolve_local_host_ports, plan)
+        except Exception as exc:  # noqa: BLE001 - 포트 확인 실패가 계획을 막지 않는다
+            logger.warning("host port check failed: %s", exc)
+            port_notes = []
+        if port_notes:
+            plan.risk_reasons = list(plan.risk_reasons) + port_notes
+
+    # 빌드·실행이 확정적으로 실패할 프로젝트 설정을 승인 전에 보여 준다.
+    if plan.method == DeployMethod.LOCAL_DOCKER and request.workspace_path:
+        workspace_dir = Path(request.workspace_path)
+        if workspace_dir.is_dir() and _dockerfile_in(request.workspace_path) is None:
+            if _nested_project_dir(request.workspace_path):
+                #: 프로젝트가 하위 폴더에 있는데 루트를 승인하게 두면 예전 이미지가 돌거나 빌드가 실패한다 — 승인 전에 알린다.
+                raise HTTPException(status_code=409, detail=_no_project_message(request.workspace_path))
+            if any((workspace_dir / name).is_file() for name in _PROJECT_MANIFESTS):
+                plan.risk_reasons = list(plan.risk_reasons) + [
+                    "Dockerfile 이 없어 실행할 때 검증된 기본 템플릿으로 만들어 저장합니다(.dockerignore 포함)."]
+        readiness = await asyncio.to_thread(_workspace_readiness, request.workspace_path)
+        if readiness is not None:
+            plan.readiness = readiness.to_dict()
+            auto = [i for i in readiness.issues if i.auto_fix and (i.severity == "error" or i.code in _PRE_DEPLOY_WARNING_FIXES)]
+            manual = [i for i in readiness.issues if i not in auto]
+            if auto:
+                #: 실행 직전에 자동으로 고친다(원본은 .recoder/backups) — 사용자가 버튼을 따로 누르지 않아도 된다.
+                plan.risk_reasons = list(plan.risk_reasons) + [
+                    f"배포 전 자동 수정 — {i.message} (수정: {i.fix})" for i in auto]
+            if manual:
+                from build_readiness import issues_as_risk_reasons
+                readiness_manual = type(readiness)(issues=manual)
+                plan.risk_reasons = list(plan.risk_reasons) + issues_as_risk_reasons(readiness_manual)
+            if any(i.severity == "error" for i in manual):
+                plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
+            #: PC 의 .env(키·결제 설정 등)를 컨테이너 환경변수로 넘긴다 — .dockerignore 가 이미지에서 빼므로 예전에는
+            #: 컨테이너 안의 앱이 키를 못 읽었다. 값은 계획·기록에 남기지 않고 실행할 때 파일에서 읽는다.
+            try:
+                from deployment_inputs import read_env_file, workspace_env_files
+                env_files = workspace_env_files(request.workspace_path, [readiness.runtime_subproject or ""])
+                if env_files:
+                    plan.env_files = env_files
+                    names = sorted({k for f in env_files for k in read_env_file(Path(request.workspace_path) / f)})
+                    plan.risk_reasons = list(plan.risk_reasons) + [
+                        f"PC 의 {', '.join(env_files)} 값({len(names)}개: {', '.join(names[:6])}{' …' if len(names) > 6 else ''})을 "
+                        "컨테이너 환경변수로 넘깁니다. 이미지에는 넣지 않습니다."]
+            except Exception as exc:  # noqa: BLE001 - .env 를 못 읽어도 배포는 계속한다
+                logger.warning("env file detection failed: %s", exc)
+            #: 앱이 쓰는 DB 를 함께 띄운다 — 없으면 DB 에 붙지 못한 서버가 시작하자마자 종료했다(실기기 쇼핑몰).
+            if readiness.services and plan.container_name:
+                try:
+                    import local_services
+                    companion_env, notes = await asyncio.to_thread(
+                        local_services.plan, plan.container_name, list(readiness.services), list(readiness.env_names))
+                    if companion_env:
+                        plan.companions = [k for k in readiness.services if k in local_services.SERVICES]
+                        plan.env = {**companion_env, **plan.env}  # 사용자가 준 값이 이긴다
+                        plan.risk_reasons = list(plan.risk_reasons) + notes
+                except Exception as exc:  # noqa: BLE001 - 준비 실패가 계획을 막지 않는다(실행 때 다시 시도)
+                    logger.warning("companion service plan failed: %s", exc)
 
     _deployment_plans[plan.plan_id] = plan
     _plan_workspaces[plan.plan_id] = request.workspace_path or ""
     return plan
+
+
+def _docker_port_publishers(port: int) -> Optional[list[str]]:
+    """PC 의 `port` 를 게시(publish) 중인 컨테이너 이름. docker 를 못 부르면 None."""
+    try:
+        #: `--filter publish=` 가 PC 포트와 컨테이너 포트 중 무엇을 보는지는 Docker 버전마다 달랐다 —
+        #: 게시 목록(0.0.0.0:3131->3001/tcp)에서 PC 쪽 포트를 직접 읽는다.
+        out = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
+            shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    names = []
+    pattern = re.compile(rf"(?:^|[\s,])(?:[\d.]+|\[[0-9a-fA-F:]*\]|::):{int(port)}->")
+    for line in (out.stdout or "").splitlines():
+        name, _, ports = line.partition("\t")
+        if name.strip() and pattern.search(" " + ports):
+            names.append(name.strip())
+    return names
+
+
+def _host_port_listening(port: int) -> bool:
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def _host_port_conflict(port: int, own_container: str) -> Optional[str]:
+    """이 배포가 교체할 컨테이너가 아닌 다른 것이 `port` 를 쓰고 있으면 그 설명, 아니면 None."""
+    publishers = _docker_port_publishers(port)
+    if publishers is None:
+        return None  # docker 상태를 모르면 건드리지 않는다(실행 단계 진단이 알려 준다).
+    others = [name for name in publishers if name != own_container]
+    if others:
+        return "컨테이너 " + ", ".join(f"'{n}'" for n in others[:3])
+    if not publishers and _host_port_listening(port):
+        return "다른 프로그램"
+    return None
+
+
+def _resolve_local_host_ports(plan) -> list[str]:
+    """PC 포트 충돌을 계획 단계에서 피한다 — 비어 있는 다음 포트로 바꾸고 그 사실을 알린다.
+
+    예전에는 다른 프로젝트의 컨테이너가 3000 을 쓰고 있으면 실행 단계에서
+    `port is already allocated` 로 실패했다(실기기: temp 컨테이너 ↔ test-temp 배포).
+    컨테이너 안의 포트는 그대로 두고 PC 쪽 포트만 바꾼다.
+    """
+    notes: list[str] = []
+    resolved: dict[str, str] = {}
+    taken = {int(hp) for hp in plan.ports if str(hp).isdigit()}
+    for hp, cp in plan.ports.items():
+        if not str(hp).isdigit():
+            resolved[hp] = cp
+            continue
+        port = int(hp)
+        holder = _host_port_conflict(port, plan.container_name or "")
+        if not holder:
+            resolved[hp] = cp
+            continue
+        free = next((c for c in range(port + 1, min(port + 50, 65535) + 1)
+                     if c not in taken and not _host_port_conflict(c, plan.container_name or "")), None)
+        if free is None:
+            resolved[hp] = cp
+            notes.append(f"PC 포트 {port} 을(를) {holder} 이(가) 쓰고 있습니다. 실행 전에 멈추거나 다른 포트를 지정하세요.")
+            continue
+        taken.add(free)
+        resolved[str(free)] = cp
+        notes.append(f"PC 포트 {port} 을(를) {holder} 이(가) 쓰고 있어 {free} 로 바꿨습니다 — 접속 주소 http://localhost:{free}")
+    plan.ports = resolved
+    return notes
+
+
+def _workspace_readiness(workspace_path: str):
+    try:
+        from build_readiness import analyze
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import analyze  # type: ignore
+    try:
+        #: 레지스트리에 없는 의존성 버전도 빌드 전에 잡는다(몇 초, 오프라인이면 건너뜀).
+        return analyze(workspace_path, online=True)
+    except Exception as exc:  # noqa: BLE001 - 점검 실패가 플랜을 막지 않는다
+        logger.warning("build readiness check failed: %s", exc)
+        return None
+
+
+class ReadinessRequest(BaseModel):
+    workspace_path: str
+
+
+class ReadinessFixRequest(BaseModel):
+    workspace_path: str
+    code: str = Field(pattern=r"^[A-Z_]{3,64}$")
+
+
+@router.post("/api/deploy/readiness")
+async def deploy_readiness(request: ReadinessRequest) -> dict:
+    """프로젝트가 컨테이너로 빌드·실행될 수 있는지 정적으로 판정한다(파일만 읽음)."""
+    if not request.workspace_path or not Path(request.workspace_path).is_dir():
+        raise HTTPException(status_code=400, detail="유효한 프로젝트 폴더가 아닙니다.")
+    readiness = await asyncio.to_thread(_workspace_readiness, request.workspace_path)
+    if readiness is None:
+        raise HTTPException(status_code=500, detail="프로젝트 점검에 실패했습니다. Core 로그를 확인하세요.")
+    return readiness.to_dict()
+
+
+@router.post("/api/deploy/readiness/fix")
+async def deploy_readiness_fix(request: ReadinessFixRequest) -> dict:
+    """사용자가 누른 자동 수정 한 건만 적용한다. 원본은 .recoder/backups 에 남는다."""
+    try:
+        from build_readiness import apply_fix
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import apply_fix  # type: ignore
+    try:
+        return await asyncio.to_thread(apply_fix, request.workspace_path, request.code)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class SecurityFixRequest(BaseModel):
+    workspace_path: str
+    #: 보안 검사 화면이 받은 결과 그대로 {trivy: {...}, hadolint: {...}, gitleaks: {...}}
+    reports: dict = Field(default_factory=dict)
+    ids: list[str] = Field(default_factory=list)
+
+
+def _security_fix_module():
+    try:
+        import security_fix
+    except ImportError:  # pragma: no cover
+        from core import security_fix  # type: ignore
+    return security_fix
+
+
+@router.post("/api/deploy/security/fixes")
+async def security_fix_plan(request: SecurityFixRequest) -> dict:
+    """보안 검사 결과로 바로 적용할 수 있는 수정안을 만든다(AI 없이, 같은 입력이면 같은 결과)."""
+    sf = _security_fix_module()
+    try:
+        proposals = await asyncio.to_thread(sf.plan, request.workspace_path, request.reports)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"workspace_path": request.workspace_path, "proposals": [p.public() for p in proposals]}
+
+
+@router.post("/api/deploy/security/fixes/apply")
+async def security_fix_apply(request: SecurityFixRequest) -> dict:
+    """고른 수정안만 적용한다. 원본은 .recoder/backups 에 남는다(.env 제외 — 키를 복사하지 않는다)."""
+    sf = _security_fix_module()
+    if not request.ids:
+        raise HTTPException(status_code=400, detail="적용할 수정안을 고르세요.")
+    try:
+        return await asyncio.to_thread(sf.apply, request.workspace_path, request.reports, request.ids)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class SecurityRebuildRequest(BaseModel):
+    workspace_path: str
+    image: Optional[str] = None
+
+
+@router.post("/api/deploy/security/rebuild")
+async def security_rebuild(request: SecurityRebuildRequest) -> dict:
+    """수정한 Dockerfile·의존성으로 이미지를 다시 빌드한다 — 그래야 Trivy 를 다시 돌렸을 때 결과가 바뀐다.
+
+    실행 중인 컨테이너는 건드리지 않는다(이미 띄운 컨테이너는 옛 이미지를 계속 쓴다).
+    """
+    workspace = request.workspace_path
+    dockerfile = _dockerfile_in(workspace)
+    image = request.image or _default_image_name(workspace)
+    if dockerfile is None or not image:
+        return {"status": "failed", "image": image, "message": "Dockerfile 이 없어 이미지를 빌드할 수 없습니다."}
+    try:
+        from docker_autostart import ensure_docker as _ensure_docker
+    except ImportError:  # pragma: no cover
+        from core.docker_autostart import ensure_docker as _ensure_docker
+    auto = await asyncio.to_thread(_ensure_docker)
+    if not auto.ready:
+        return {"status": "failed", "image": image, "message": auto.message or "Docker 가 실행 중이 아닙니다."}
+    cmd = ["docker", "build", "-f", str(dockerfile), "-t", image, "."]
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run, cmd, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=workspace, timeout=LOCAL_BUILD_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return {"status": "failed", "image": image, "message": f"docker build 가 {LOCAL_BUILD_TIMEOUT_SECONDS}초 안에 끝나지 않았습니다."}
+    except OSError as exc:
+        return {"status": "failed", "image": image, "message": f"docker build 를 시작하지 못했습니다: {exc}"}
+    if result.returncode != 0:
+        log = (result.stderr or "") + (result.stdout or "")
+        message = "이미지 빌드에 실패했습니다."
+        try:
+            from build_failure import diagnose
+            d = diagnose(log, stage="build")
+            if d is not None and getattr(d, "title", ""):
+                message = f"{d.title} — {d.fix}" if getattr(d, "fix", "") else d.title
+        except Exception:  # noqa: BLE001 - 진단은 안내용이다
+            pass
+        return {"status": "failed", "image": image, "message": message, "log_tail": log.strip()[-1500:]}
+    return {"status": "ok", "image": image, "message": f"{image} 를 다시 빌드했습니다."}
 
 
 def _dockerfile_in(workspace_path: str) -> Optional[Path]:
@@ -3196,6 +3885,148 @@ def _dockerfile_in(workspace_path: str) -> Optional[Path]:
         return None
     candidate = Path(workspace_path) / "Dockerfile"
     return candidate if candidate.is_file() else None
+
+
+_PROJECT_MANIFESTS = ("package.json", "requirements.txt", "pyproject.toml", "Dockerfile", "index.html", "go.mod", "pom.xml")
+_NOT_PROJECT_DIRS = {"node_modules", ".git", ".recoder", ".vscode", ".idea", "__pycache__", ".venv", "venv", "dist", "build"}
+
+
+def _nested_project_dir(workspace_path: str) -> Optional[str]:
+    """루트에는 프로젝트 파일이 없고 바로 아래 폴더 **하나**에만 있으면 그 폴더 이름.
+
+    실기기(2026-09-30): 생성한 쇼핑몰이 TEMP/docs/ 에 들어갔는데 배포는 TEMP 를 가리켜
+    스택을 'unknown' 으로 보고, 예전 이미지를 그대로 띄워 옛 코드의 오류가 났다.
+    """
+    root = Path(workspace_path or "")
+    try:
+        if not root.is_dir() or any((root / name).is_file() for name in _PROJECT_MANIFESTS):
+            return None
+        found = [child.name for child in sorted(root.iterdir())
+                 if child.is_dir() and child.name not in _NOT_PROJECT_DIRS and not child.name.startswith(".")
+                 and any((child / name).is_file() for name in _PROJECT_MANIFESTS)]
+    except OSError:
+        return None
+    return found[0] if len(found) == 1 else None
+
+
+def _no_project_message(workspace_path: str) -> str:
+    nested = _nested_project_dir(workspace_path)
+    if nested:
+        return (f"배포할 폴더({Path(workspace_path).name})에는 프로젝트 파일이 없고 {nested}/ 폴더에 있습니다. "
+                f"Deploy 화면 위쪽의 폴더를 '{nested}' 로 바꾼 뒤 다시 배포하세요.")
+    return ("배포할 폴더에서 프로젝트 파일(package.json·requirements.txt·index.html·Dockerfile)을 찾지 못했습니다. "
+            "Deploy 화면 위쪽의 폴더가 앱의 루트 폴더인지 확인하세요.")
+
+
+def _template_runtime_port(workspace_path: str) -> Optional[int]:
+    """Dockerfile 이 없을 때 배포가 만들 기본 템플릿이 쓰는 포트. 모르면 None.
+
+    계획 단계의 포트가 템플릿과 어긋나면(Flask 템플릿은 5000 인데 계획은 8000 등) 컨테이너가
+    떠도 헬스 체크가 닿지 않는다 — 계획과 빌드가 같은 값을 쓰게 한다.
+    """
+    try:
+        if not workspace_path or _dockerfile_in(workspace_path) is not None:
+            return None
+        stack = _detect_stack(workspace_path)
+        try:
+            from project_scanner import get_project_scanner  # type: ignore
+            project = get_project_scanner().scan(workspace_path)
+        except Exception:  # noqa: BLE001
+            project = None
+        content, _template_id = _dockerfile_from_template(workspace_path, stack, project)
+        from deployment_inputs import dockerfile_text_runtime_port
+        return dockerfile_text_runtime_port(content)
+    except Exception:  # noqa: BLE001 - 추정 실패는 기존 포트 추정으로 돌아간다
+        return None
+
+
+def _align_ports_with_dockerfile(plan: DeploymentPlan, dockerfile: Path) -> Optional[str]:
+    """방금 만든 Dockerfile 이 다른 포트를 열면 계획의 컨테이너 쪽 포트를 맞춘다. 바꿨으면 안내 문장."""
+    try:
+        from deployment_inputs import dockerfile_runtime_port
+    except ImportError:  # pragma: no cover
+        from core.deployment_inputs import dockerfile_runtime_port  # type: ignore
+    port = dockerfile_runtime_port(dockerfile)
+    if port is None or not plan.ports or len(plan.ports) != 1:
+        return None
+    host_port, container_port = next(iter(plan.ports.items()))
+    if str(container_port) == str(port):
+        return None
+    plan.ports = {str(host_port): str(port)}
+    if plan.env and str(plan.env.get("PORT", "")) == str(container_port):
+        plan.env = {**plan.env, "PORT": str(port)}
+    return f"컨테이너 포트를 Dockerfile 에 맞춰 {container_port} → {port} 로 바꿨습니다(PC 포트 {host_port} 그대로)."
+
+
+def _write_template_dockerfile(workspace_path: str) -> tuple[Optional[str], str]:
+    """Dockerfile 이 없는 워크스페이스에 검증된 기본 템플릿을 만든다(AI 없이). (템플릿 이름, 오류 문장)."""
+    stack = _detect_stack(workspace_path)
+    try:
+        from project_scanner import get_project_scanner  # type: ignore
+        project = get_project_scanner().scan(workspace_path)
+    except Exception:  # noqa: BLE001
+        project = None
+    try:
+        content, template_id = _dockerfile_from_template(workspace_path, stack, project)
+    except (_UnsupportedDockerfileFallback, _DockerfileTemplateRenderError) as exc:
+        return None, (_no_project_message(workspace_path) if _nested_project_dir(workspace_path) or stack == StackType.UNKNOWN
+                      else str(exc))
+    try:
+        from build_readiness import ProjectFiles, add_subproject_installs, analyze, write_dockerignore_if_missing
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import ProjectFiles, add_subproject_installs, analyze, write_dockerignore_if_missing  # type: ignore
+    try:
+        readiness = analyze(workspace_path, {"Dockerfile": content})
+        if any(i.code == "DOCKERFILE_SUBPROJECT_DEPS_MISSING" for i in readiness.issues):
+            content = add_subproject_installs(content, readiness.subprojects, ProjectFiles(Path(workspace_path)))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("subproject install injection skipped: %s", exc)
+    target = Path(workspace_path) / "Dockerfile"
+    try:
+        with target.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+        write_dockerignore_if_missing(workspace_path)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        return None, f"Dockerfile 을 저장하지 못했습니다: {exc}"
+    return template_id, ""
+
+
+#: 배포 직전에 확인 없이 적용해도 되는 자동 수정 — 적용하지 않으면 빌드·실행이 확실히 실패하는 것(error)과
+#: 화면이 나오지 않는 것만. 원본은 .recoder/backups 에 남는다. 화면 동작을 바꾸는 권장 수정은 넣지 않는다.
+_PRE_DEPLOY_WARNING_FIXES = {"NODE_FRONTEND_NOT_SERVED", "DOCKERFILE_HEALTH_PATH_UNKNOWN", "DOCKERIGNORE_MISSING"}
+
+
+def _auto_fix_before_build(workspace_path: str) -> list[dict]:
+    """빌드 전에 확실히 고칠 수 있는 문제를 고친다. 적용한 항목 목록(코드·메시지·바뀐 파일)."""
+    try:
+        from build_readiness import analyze, apply_fix
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import analyze, apply_fix  # type: ignore
+    applied: list[dict] = []
+    tried: set[str] = set()
+    for _ in range(8):
+        try:
+            readiness = analyze(workspace_path, online=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pre-deploy readiness failed: %s", exc)
+            break
+        todo = [i for i in readiness.issues if i.auto_fix and i.code not in tried
+                and (i.severity == "error" or i.code in _PRE_DEPLOY_WARNING_FIXES)]
+        if not todo:
+            break
+        issue = todo[0]
+        tried.add(issue.code)
+        try:
+            result = apply_fix(workspace_path, issue.code)
+        except Exception as exc:  # noqa: BLE001 - 자동 수정 실패는 빌드 진단이 원인을 알린다
+            logger.warning("pre-deploy auto-fix %s failed: %s", issue.code, exc)
+            continue
+        if result.get("applied"):
+            applied.append({"code": issue.code, "message": issue.message[:300],
+                            "changed": [c for c in result.get("changed", []) if not str(c).startswith(".recoder/")][:12]})
+    return applied
 
 
 async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optional[dict]:
@@ -3210,9 +4041,27 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
     if plan.method != DeployMethod.LOCAL_DOCKER or not plan.image:
         return None
     dockerfile = _dockerfile_in(workspace_path)
+    workspace_has_project = bool(workspace_path) and Path(workspace_path).is_dir() and (
+        any((Path(workspace_path) / name).is_file() for name in _PROJECT_MANIFESTS) or _nested_project_dir(workspace_path) is not None)
+    if dockerfile is None and workspace_has_project:
+        #: 프로젝트 폴더를 배포하는데 Dockerfile 이 없다 — 예전 이미지를 그대로 띄우면 **지금 코드가 아닌**
+        #: 옛 코드가 돈다(실기기: 이미 고친 오류가 다시 났다). 기본 템플릿으로 만들어 지금 코드를 빌드한다.
+        #: (프로젝트 파일이 전혀 없는 폴더는 예전처럼 미리 빌드한 이미지를 쓴다.)
+        template_id, problem = await asyncio.to_thread(_write_template_dockerfile, workspace_path)
+        if template_id is None:
+            return {"status": "failed", "stage": "build", "message": problem, "stderr": "", "stdout": "",
+                    "diagnosis": {"code": "NO_PROJECT_FILES" if "프로젝트 파일" in problem else "DOCKERFILE_MISSING",
+                                  "title": "배포할 프로젝트를 찾지 못했습니다" if "프로젝트 파일" in problem else "Dockerfile 을 만들지 못했습니다",
+                                  "cause": problem, "fix": problem, "lines": [], "step": "이미지 빌드"}}
+        report_progress('build', f'Dockerfile 이 없어 기본 템플릿({template_id})으로 만들었습니다 — 이미지를 빌드합니다')
+        dockerfile = _dockerfile_in(workspace_path)
+        if dockerfile is not None:
+            note = _align_ports_with_dockerfile(plan, dockerfile)
+            if note:
+                report_progress('build', note)
     if dockerfile is None:
         if _local_image_exists(plan.image):
-            return None  # 미리 빌드된 이미지를 그대로 쓴다.
+            return None  # 워크스페이스 없이 이미지만 지정한 배포 — 미리 빌드된 이미지를 그대로 쓴다.
         return {
             "status": "failed",
             "stage": "build",
@@ -3228,7 +4077,7 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
         result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
-                cmd, shell=False, capture_output=True, text=True,
+                cmd, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=workspace_path, timeout=LOCAL_BUILD_TIMEOUT_SECONDS,
             ),
         )
@@ -3244,13 +4093,86 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
             "message": "docker CLI 를 찾을 수 없습니다. Docker Desktop 이 설치돼 있는지 확인하세요.",
             "stderr": "", "stdout": "",
         }
+    except OSError as exc:
+        return {"status": "failed", "stage": "build", "message": f"Docker 빌드를 시작하지 못했습니다: {exc}", "stderr": "", "stdout": ""}
     if result.returncode != 0:
+        diagnosis = _diagnose_build_failure(workspace_path, (result.stdout or "") + "\n" + (result.stderr or ""))
         return {
             "status": "failed", "stage": "build",
-            "message": f"docker build 실패 (exit {result.returncode}) — 이전 컨테이너는 건드리지 않았습니다.",
-            "stderr": result.stderr[-2000:], "stdout": result.stdout[-2000:],
+            "message": f"이미지 빌드 실패: {diagnosis['title']} — 이전 컨테이너는 건드리지 않았습니다.",
+            "stderr": (result.stderr or '')[-8000:], "stdout": (result.stdout or '')[-8000:],
+            "diagnosis": diagnosis,
         }
     return None
+
+
+def _vulnerability_advice(report: dict, workspace_path: str) -> dict:
+    """Trivy 결과 → 항목별 출처·해결책 + 화면용 diagnosis. 실패해도 차단은 유지된다."""
+    try:
+        from vuln_advice import advise
+    except ImportError:  # pragma: no cover
+        from core.vuln_advice import advise  # type: ignore
+    try:
+        return advise(report.get("findings") or [], workspace_path or None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("vulnerability advice failed: %s", exc)
+        n = int(report.get("critical_count", 0))
+        return {"items": [], "diagnosis": {
+            "code": "IMAGE_CRITICAL_CVE", "title": f"보안 검사에서 치명적(CRITICAL) 취약점 {n}건",
+            "cause": "Trivy 가 이미지에서 치명적 취약점을 찾아 배포를 멈췄습니다. 기존 컨테이너는 그대로입니다.",
+            "fix": "Security 탭의 이미지 검사 결과에서 패키지와 수정 버전을 확인해 올린 뒤 다시 배포하세요.",
+            "lines": [], "step": "보안 확인 (Trivy 이미지 검사)"}}
+
+
+def _diagnose_build_failure(workspace_path: str, output: str, stage: str = "build") -> dict:
+    """빌드 출력에서 실제 원인 줄과 해결책을 뽑는다. 실패해도 배포 결과는 그대로 둔다."""
+    try:
+        from build_failure import diagnose
+        from build_readiness import analyze
+    except ImportError:  # pragma: no cover
+        from core.build_failure import diagnose  # type: ignore
+        from core.build_readiness import analyze  # type: ignore
+    try:
+        issues = analyze(workspace_path, online=True).issues if workspace_path else []
+    except Exception:  # noqa: BLE001
+        issues = []
+    try:
+        from context_gate import mask_secrets
+        output = mask_secrets(output)
+    except Exception:  # noqa: BLE001
+        pass
+    result = diagnose(output, issues, stage=stage).to_dict()
+    result["repair"] = {
+        "endpoint": "/api/repair/prepare",
+        "route": "rules" if any(i.severity == "error" for i in issues) else "documents",
+        "stage": stage,
+        "approval_after_verification": True,
+    }
+    return result
+
+
+async def _local_image_id(image: str) -> str:
+    """Bind the final scan and run to the same immutable local image."""
+    result = await asyncio.to_thread(subprocess.run,
+        ['docker', 'image', 'inspect', '--format', '{{.Id}}', image],
+        shell=False, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
+    image_id = (result.stdout or '').strip()
+    if result.returncode != 0 or not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id):
+        raise HTTPException(status_code=409, detail='빌드한 이미지 ID를 확인하지 못했습니다. 기존 컨테이너를 유지합니다. Docker 상태를 확인하고 다시 시도하세요.')
+    return image_id
+
+
+def _validate_local_plan(plan: DeploymentPlan) -> None:
+    if not plan.image or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._:/\-@]{0,254}', plan.image):
+        raise HTTPException(status_code=400, detail='Invalid image name (forbidden characters).')
+    if not plan.container_name or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}', plan.container_name):
+        raise HTTPException(status_code=400, detail='Invalid container name (forbidden characters).')
+    for hp, cp in plan.ports.items():
+        if not str(hp).isdigit() or not str(cp).isdigit() or not 1 <= int(hp) <= 65535 or not 1 <= int(cp) <= 65535:
+            raise HTTPException(status_code=400, detail='Port must be numeric and between 1 and 65535.')
+    for key, value in plan.env.items():
+        if not _ENV_NAME_RE.fullmatch(key) or '\x00' in value:
+            raise HTTPException(status_code=400, detail='Invalid environment variable name or value.')
 
 
 @router.post("/api/deploy/execute")
@@ -3272,7 +4194,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
 
     # 플랜 생성 뒤 다른 배포가 실행될 수 있으므로, record 에 저장할 롤백 대상은
     # 반드시 실행 시점의 마지막 *검증 완료* 배포로 다시 잡는다.
-    rollback_target, rollback_reason = _refresh_rollback_target(plan)
+    if plan.method == DeployMethod.LOCAL_DOCKER:
+        _validate_local_plan(plan)
     # ── 여기부터 컨테이너 단위 임계 구역 ────────────────────────────────
     #
     # 롤백 대상 **선택**부터 헬스 확인과 **기록 생성**까지 한 덩어리로 잠근다.
@@ -3288,14 +4211,38 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
     # 그게 맞다 — 같은 컨테이너를 동시에 두 번 바꾸는 것은 원래 순서대로
     # 처리돼야 하는 일이다. 다른 컨테이너는 서로 막지 않는다.
     async with _container_transaction(plan):
+        # A concurrent request may have consumed or cancelled this plan while
+        # this request waited for the container lock.
+        if _deployment_plans.get(request.plan_id) is not plan:
+            raise HTTPException(status_code=409, detail='이미 처리되었거나 취소된 배포 계획입니다. 새 계획을 확인하세요.')
+        rollback_target, rollback_reason = _refresh_rollback_target(plan)
         # ── 빌드 (로컬 Docker) — 락 안, 파괴적 구간(stop/rm/run) 전 ──────────────
         #: 같은 컨테이너를 겨냥한 두 요청은 빌드부터 직렬화된다. 락 밖에서 docker 를
         #: 부르면 "락을 얻기 전에는 docker 를 건드리지 않는다"는 교체 안전 불변식
         #: (test_replace_safety)이 깨진다. 빌드 실패는 돌고 있던 컨테이너를 건드리기
         #: 전이라 되돌릴 것이 없다.
-        build_failure = await _build_local_image(plan, _plan_workspaces.get(request.plan_id, ""))
+        workspace_for_build = _plan_workspaces.get(request.plan_id, "")
+        pre_deploy_fixes: list[dict] = []
+        if plan.method == DeployMethod.LOCAL_DOCKER and workspace_for_build and Path(workspace_for_build).is_dir():
+            #: 점검이 "이대로면 빌드·실행이 실패한다"고 확정한 것 중 확실히 고칠 수 있는 것은 빌드 전에 고친다
+            #: (실기기: ESM/CommonJS 혼용을 점검이 잡았는데 배포가 그대로 진행돼 컨테이너가 죽었다).
+            report_progress('build', '배포 전 점검 — 빌드·실행을 막는 문제를 자동으로 고칩니다')
+            pre_deploy_fixes = await asyncio.to_thread(_auto_fix_before_build, workspace_for_build)
+            if pre_deploy_fixes:
+                report_progress('build', f"자동 수정 {len(pre_deploy_fixes)}건 적용: {', '.join(f['code'] for f in pre_deploy_fixes)}")
+                #: 자동 수정이 Dockerfile 포트를 바꿨으면(EXPOSE 3000 → 앱이 듣는 5000) 계획의 컨테이너 포트도 맞춘다.
+                #: 예전에는 계획이 옛 포트로 연결해 컨테이너가 떠도 헬스 확인이 실패했다.
+                fixed_dockerfile = _dockerfile_in(workspace_for_build)
+                if fixed_dockerfile is not None:
+                    note = _align_ports_with_dockerfile(plan, fixed_dockerfile)
+                    if note:
+                        report_progress('build', note)
+        report_progress('build', 'Docker 이미지를 빌드하고 있습니다')
+        build_failure = await _build_local_image(plan, workspace_for_build)
         if build_failure is not None:
             build_failure["plan_id"] = request.plan_id
+            if pre_deploy_fixes:
+                build_failure["auto_fixed"] = pre_deploy_fixes
             return build_failure
 
         # ── 빌드 후 1회 스캔 보장 ──────────────────────────────────────────
@@ -3304,19 +4251,44 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         #: 기존 컨테이너를 건드리기 **전에** 여기서 멈춘다 — 파괴적 구간 밖이라
         #: 롤백할 것도 없다. 스캐너가 없어 또 못 돌면 기록만 남기고 진행한다
         #: (승인 화면에 이미 '미검증' 사유가 표시된 상태로 사용자가 승인했다).
-        pending_image = _plans_pending_image_scan.pop(request.plan_id, None)
-        if pending_image and plan.image and _local_image_exists(plan.image):
-            deferred_report = await _execute_scan("trivy", "", plan.image)
+        runtime_image = plan.image
+        pending_image = _plans_pending_image_scan.get(request.plan_id)
+        report_progress('scan', '빌드한 이미지의 보안 검사 상태를 확인합니다')
+        #: 결과 화면이 "검사 통과"와 "검사 못 함(승인하고 진행)"을 구분하게 남긴다.
+        #: 예전에는 검사가 실패해도 성공 결과에 아무 표시가 없었다.
+        post_build_scan: dict = {"status": "not_needed"}
+        if pending_image and plan.image:
+            runtime_image = await _local_image_id(plan.image)
+            deferred_report = await _execute_scan("trivy", "", runtime_image)
+            post_build_scan = {
+                "status": "passed" if deferred_report.get("status") == "ok" else "unverified",
+                "critical_count": int(deferred_report.get("critical_count", 0) or 0),
+                "high_count": int(deferred_report.get("high_count", 0) or 0),
+                **({"reason": deferred_report.get("summary") or deferred_report.get("cause") or deferred_report.get("message") or ""}
+                   if deferred_report.get("status") != "ok" else {}),
+            }
             if deferred_report.get("status") == "ok":
                 deferred_crit = int(deferred_report.get("critical_count", 0))
                 if deferred_crit > 0:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"Trivy: CRITICAL {deferred_crit}건 — 배포를 차단했습니다 "
-                            f"({plan.image}). 취약점을 해결한 뒤 다시 시도하세요."
+                    #: 예전에는 "CRITICAL 1건" 만 알려 주는 400 이었다 — 무엇을 고칠지 알 수
+                    #: 없었다. 차단은 그대로 두고, 빌드 실패와 같은 모양(diagnosis)으로
+                    #: 어떤 패키지가 어디서 왔고 어떻게 고치는지를 돌려준다.
+                    advice = _vulnerability_advice(deferred_report, _plan_workspaces.get(request.plan_id, ""))
+                    return {
+                        "status": "failed",
+                        "stage": "scan",
+                        "plan_id": request.plan_id,
+                        "message": (
+                            f"Trivy: CRITICAL {deferred_crit}건 — 배포를 차단했습니다 ({plan.image}). "
+                            "기존 컨테이너는 건드리지 않았습니다."
                         ),
-                    )
+                        "stderr": "\n".join(advice["diagnosis"]["lines"]),
+                        "stdout": "",
+                        "diagnosis": advice["diagnosis"],
+                        "vulnerabilities": advice["items"],
+                    }
+            elif plan.approval_level != ApprovalLevel.DOUBLE_CONFIRM:
+                raise HTTPException(status_code=409, detail='빌드 후 이미지 검사를 완료하지 못했습니다. 기존 컨테이너를 유지합니다. 검사 상태를 확인하고 새 배포 계획을 승인하세요.')
 
         rollback_source = _rollback_source_for(plan.container_name or "", plan.image or "")
         # 복구 재료. 기록에 후보가 있으면 그것을, 없으면 아래에서 docker 를
@@ -3365,13 +4337,51 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 cmd_args.extend(["-p", f"{int(_hp)}:{int(_cp)}"])
             cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
+        if plan.method == DeployMethod.LOCAL_DOCKER:
+            # The template supplies the base command; apply all approved run
+            # parameters, not just its first port mapping.
+            cmd_args = ['docker', 'run', '-d', '--name', str(plan.container_name)]
+            _ws_for_label = _plan_workspaces.get(request.plan_id, "")
+            if _ws_for_label:
+                from deployment_inputs import WORKSPACE_LABEL, workspace_fingerprint
+                cmd_args.extend(['--label', f'{WORKSPACE_LABEL}={workspace_fingerprint(_ws_for_label)}'])
+            for hp, cp in plan.ports.items():
+                cmd_args.extend(['-p', f'{int(hp)}:{int(cp)}'])
+            for key, value in plan.env.items():
+                cmd_args.extend(['-e', f'{key}={value}'])
+            #: PC 의 .env 값 — 이미지에는 넣지 않고(.dockerignore) 실행할 때만 넘긴다. 키·결제 연동이 컨테이너에서도 동작한다.
+            env_file_paths = _resolved_env_files(_ws_for_label, plan.env_files)
+            cmd_args.extend(_env_file_args(env_file_paths, set(plan.env.keys())))
+            if plan.companions:
+                #: 앱보다 먼저 DB 를 띄우고 응답할 때까지 기다린다. 실패하면 기존 컨테이너를 건드리지 않고 멈춘다.
+                import local_services
+                report_progress('services', '앱이 쓰는 DB 를 준비합니다')
+                try:
+                    init_sql = local_services.find_init_sql(_plan_workspaces.get(request.plan_id, ""))
+                    cmd_args.extend(await asyncio.to_thread(
+                        local_services.ensure, str(plan.container_name), lambda m: report_progress('services', m),
+                        init_sql=init_sql))
+                except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                    return {
+                        "status": "failed", "stage": "services", "plan_id": request.plan_id,
+                        "message": f"앱이 쓰는 DB 를 준비하지 못했습니다: {exc}",
+                        "stderr": str(exc), "stdout": "",
+                        "diagnosis": {"code": "COMPANION_SERVICE", "title": "DB 컨테이너 준비 실패",
+                                      "cause": str(exc),
+                                      "fix": "Docker Desktop 이 켜져 있고 인터넷에 연결됐는지 확인한 뒤 다시 배포하세요. 기존 컨테이너는 그대로입니다.",
+                                      "lines": [], "step": "DB 준비"},
+                    }
+            cmd_args.extend(['--restart', 'unless-stopped', str(runtime_image)])
+
         restored_previous = False
+        run_diagnosis = None
         restored_verification_resumed = False
         restore_stdout = ""
         restore_stderr = ""
         prior_container_replacement_started = False
 
         try:
+            report_progress('start', '이전 컨테이너 복구 정보를 보존하고 새 컨테이너를 시작합니다')
             # 같은 이름으로 docker run 하면 기존 컨테이너가 남아 있는 정상 재배포는
             # 항상 실패한다. 실제 배포 경로도 롤백과 동일하게 기존 컨테이너를 교체한다.
             if plan.method == DeployMethod.LOCAL_DOCKER:
@@ -3396,10 +4406,14 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    cmd_args, shell=False, capture_output=True, text=True, timeout=300
+                    cmd_args, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300
                 ),
             )
             success = result.returncode == 0
+            if not success and plan.method == DeployMethod.LOCAL_DOCKER:
+                #: `docker run` 자체의 실패(포트 충돌 등)도 원인과 해결책을 보여 준다.
+                run_diagnosis = _diagnose_build_failure(
+                    _plan_workspaces.get(request.plan_id, ""), (result.stderr or "") + "\n" + (result.stdout or ""), stage="run")
             if not success and plan.method == DeployMethod.LOCAL_DOCKER and restore_source is not None:
                 restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(
                     restore_source
@@ -3430,10 +4444,47 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             raise HTTPException(status_code=500, detail=f"Deployment execution failed: {exc}") from exc
 
         # docker run 성공만으로는 앱이 준비됐다고 볼 수 없다. HTTP 헬스 확인을 통과한
-        # 기록만 이후 배포의 롤백 후보가 된다. 이 확인이 실패해도 이번 실행 자체의
-        # 결과는 실패로 바꾸지 않는다. 사용자는 장애 버전에 대해 여전히 롤백을 요청할
-        # 수 있어야 하기 때문이다.
+        # 기록만 이후 배포의 롤백 후보가 된다. 아직 응답이 없으면 pending,
+        # 프로세스가 종료·재시작 중이면 failed로 기록하고 이전 서비스를 복구한다.
+        if success:
+            report_progress('health', '컨테이너 실행 상태와 HTTP 응답을 확인합니다')
+        startup_diagnosis = run_diagnosis
         rollback_eligible = success and await _verify_rollback_candidate_health(plan)
+        if success and not rollback_eligible and plan.method == DeployMethod.LOCAL_DOCKER:
+            startup_error = await _local_startup_failure(plan.container_name or '')
+            if startup_error:
+                success = False
+                result.stderr = startup_error
+                startup_diagnosis = _diagnose_build_failure(
+                    _plan_workspaces.get(request.plan_id, ""), startup_error, stage="run")
+                if restore_source is not None:
+                    restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(restore_source)
+                    if restored_previous and rollback_source is not None:
+                        restored_verification_resumed = await _resume_verification_for(rollback_source)
+
+        # 헬스 경로가 200 이어도 화면은 비어 있을 수 있다(실기기: 주소만 열리고 화면이 없음).
+        # 화면이 있어야 하는 앱이면 브라우저로 첫 화면을 열어 실제로 그려지는지 확인한다.
+        screen_result = None
+        if success and plan.method == DeployMethod.LOCAL_DOCKER and plan.ports:
+            report_progress('screen', '브라우저로 첫 화면이 실제로 표시되는지 확인합니다')
+            screen_result = await _verify_local_screen(plan, _plan_workspaces.get(request.plan_id, ""))
+            if (screen_result is not None and not screen_result.get("ok") and not rollback_eligible
+                    and screen_result.get("code") == "SCREEN_HTTP_ERROR"):
+                #: 헬스 확인도 아직 통과하지 못한 느린 시작(빌드·마이그레이션 중) — 화면이 "없는" 것이 아니라
+                #: 아직 응답이 없는 것이다. 실패로 판정해 새 릴리스를 되돌리지 않고 "확인 중(pending)"으로 둔다.
+                screen_result = {**screen_result, "ok": None,
+                                 "warnings": list(screen_result.get("warnings") or []) + [
+                                     "앱이 아직 응답하지 않아 화면 확인을 끝내지 못했습니다 — 잠시 후 주소를 열어 확인하세요."]}
+                screen_result.pop("diagnosis", None)
+            if screen_result is not None and screen_result.get("ok") is False:
+                success = False
+                rollback_eligible = False
+                startup_diagnosis = screen_result.get("diagnosis")
+                result.stderr = (result.stderr or "") + "\n" + " / ".join(screen_result.get("problems") or [])
+                if restore_source is not None:
+                    restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(restore_source)
+                    if restored_previous and rollback_source is not None:
+                        restored_verification_resumed = await _resume_verification_for(rollback_source)
 
         # 방금 띄운 이미지의 불변 참조를 남긴다. 다음 배포가 이 릴리스로 되돌릴 때
         # 태그가 아니라 이 값을 쓴다 — 태그는 그때 이미 다른 것을 가리킬 수 있다.
@@ -3441,6 +4492,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             await _running_image_id(plan.container_name or "") if success else None
         )
 
+        report_progress('record', '배포 결과와 롤백 정보를 저장합니다')
         # Record the deployment
         from schemas import ActionType
         record = DeploymentRecord(
@@ -3454,6 +4506,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             # 롤백이 같은 모양으로 다시 띄울 수 있도록 실행 조건을 함께 남긴다.
             ports={str(k): str(v) for k, v in (plan.ports or {}).items()},
             env={str(k): str(v) for k, v in (getattr(plan, "env", None) or {}).items()},
+            env_file_paths=(_resolved_env_files(_plan_workspaces.get(request.plan_id, ""), list(getattr(plan, "env_files", None) or []))
+                            if plan.method == DeployMethod.LOCAL_DOCKER else []),
             rollback_target=rollback_target,
             rollback_source_deployment_id=(
                 rollback_source.deployment_id if rollback_source is not None else None
@@ -3464,11 +4518,13 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 rollback_source.health_check_path if rollback_source is not None else None
             ),
             rollback_eligible=rollback_eligible,
-            status=DeployStatus.SUCCESS if success else DeployStatus.FAILED,
+            status=(DeployStatus.SUCCESS if rollback_eligible else DeployStatus.PENDING) if success else DeployStatus.FAILED,
         )
         _deployment_records[record.deployment_id] = record
         _save_records()
         del _deployment_plans[request.plan_id]
+        _plan_workspaces.pop(request.plan_id, None)
+        _plans_pending_image_scan.pop(request.plan_id, None)
 
         # 이미지 ID 만 남기면 다음 배포가 태그를 옮기고 이 컨테이너를 지우는 순간
         # containerd 스토어가 이미지를 GC 해 롤백이 "No such image" 로 실패한다.
@@ -3528,10 +4584,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                         _exc,
                     )
 
-        # 헬스 결과를 **명시적으로** 돌려준다. status=success 는 `docker run` 이 됐다는
-        # 뜻일 뿐인데, 화면이 그걸 "Health Check 통과" 로 보여 줬다(실기기: /health 가
-        # 404 인 앱도 초록 배너). 컨테이너는 돌고 감시·롤백은 살아 있으니 실패로
-        # 바꾸진 않되, 화면이 거짓말하지 않도록 사실을 따로 준다.
+        # HTTP 응답까지 확인해야 success다. pending 상태에서도 감시·로그·롤백을
+        # 제공하며, 이후 검증 결과가 기록과 화면의 최종 상태를 갱신한다.
         _first_hp = next(iter(plan.ports.keys()), None)
         _hp = plan.health_check_path or "/health"
         health_check_url = (
@@ -3539,7 +4593,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             if _first_hp else None
         )
         return {
-            "status": "success" if success else "failed",
+            "status": ("success" if rollback_eligible else "pending") if success else "failed",
             "deployment_id": record.deployment_id,
             "health_ok": bool(rollback_eligible),
             "health_check_url": health_check_url,
@@ -3555,11 +4609,60 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             "restore_stderr": restore_stderr,
             "stdout": result.stdout[:2000],
             "stderr": result.stderr[:2000],
+            **({"diagnosis": startup_diagnosis} if startup_diagnosis else {}),
             "continuous_verification": {
                 "enabled": bool(cv_enabled),
                 "started": bool(cv_started),
             },
+            "security_scan": post_build_scan,
+            **({"screen": screen_result} if screen_result is not None else {}),
+            **({"auto_fixed": pre_deploy_fixes} if pre_deploy_fixes else {}),
         }
+
+
+async def _verify_local_screen(plan, workspace_path: str) -> Optional[dict]:
+    """로컬 컨테이너의 첫 화면 확인. 화면이 없는 API 서버면 None(판정하지 않음)."""
+    try:
+        from screen_check import check_screen
+        from build_readiness import expects_screen
+    except ImportError:  # pragma: no cover
+        from core.screen_check import check_screen  # type: ignore
+        from core.build_readiness import expects_screen  # type: ignore
+    try:
+        from screen_check import enabled as screen_check_enabled
+    except ImportError:  # pragma: no cover
+        from core.screen_check import enabled as screen_check_enabled  # type: ignore
+    if not screen_check_enabled():
+        return None
+    host_port = next(iter(plan.ports.keys()), None)
+    if not host_port or not str(host_port).isdigit():
+        return None
+    try:
+        wants_screen = bool(workspace_path) and await asyncio.to_thread(expects_screen, workspace_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screen expectation check failed: %s", exc)
+        wants_screen = False
+    url = f"http://localhost:{host_port}/"
+    try:
+        checked = await asyncio.to_thread(check_screen, url, wait_seconds=25.0)
+    except Exception as exc:  # noqa: BLE001 - 확인 도구 문제로 배포 결과를 흔들지 않는다
+        logger.warning("screen check failed to run: %s", exc)
+        return None
+    data = checked.to_dict()
+    if not checked.ok and not wants_screen and checked.code in ("SCREEN_NOT_HTML", "SCREEN_HTTP_ERROR"):
+        return None  # 화면 없이 API 만 제공하는 서버 — "/" 가 JSON·404 인 것이 정상이다
+    if not checked.ok:
+        data["diagnosis"] = checked.diagnosis()
+    return data
+
+
+@router.post('/api/deploy/execute/stream')
+async def execute_deployment_stream(request: ExecuteRequest):
+    # Same approved execution path, locking, security gates and rollback logic.
+    # Never start a second deployment to recover a disconnected progress viewer.
+    if request.plan_id not in _deployment_plans:
+        raise HTTPException(status_code=404, detail='배포 계획이 없습니다. 새 계획을 확인하세요.')
+    return stream_deployment(lambda: execute_deployment(request), request.plan_id)
 
 
 @router.post("/api/deploy/local")
@@ -3661,6 +4764,7 @@ async def rollback(request: RollbackRequest) -> dict:
                 detail=f"기록된 환경변수 이름이 올바르지 않습니다: {_k!r}",
             )
         run_args.extend(["-e", f"{_k}={_v}"])
+    run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
     run_args.extend(["--restart", "unless-stopped", record.rollback_target])
 
     health_failed = False
@@ -3686,12 +4790,19 @@ async def rollback(request: RollbackRequest) -> dict:
         # 롤백 대상(실패한 새 릴리스)의 감시가 복구된 이전 컨테이너를 계속
         # 관찰하면, 실패 배포를 stable로 잘못 기록할 수 있다.
         await _stop_verification_for_deployment(record.deployment_id)
+        #: 되돌린 이미지가 뜨지 못하면(포트가 그새 다른 프로그램에 잡힘 등) 아무것도 돌지 않게 된다 —
+        #: 지우기 전에 지금 컨테이너의 실행 조건을 붙잡아 두고, 실패하면 다시 띄운다.
+        try:
+            current_container = await _capture_running_local_container(record.container_name)
+        except Exception as exc:  # noqa: BLE001 - 붙잡지 못해도 롤백은 진행한다(기존 동작)
+            logger.warning("capture before rollback failed: %s", exc)
+            current_container = None
         # 1) docker stop (실패 무시 — 이미 중지됐을 수 있음)
         await loop.run_in_executor(
             None,
             lambda: subprocess.run(
                 ["docker", "stop", record.container_name],
-                shell=False, capture_output=True, text=True, timeout=60,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
             ),
         )
         # 2) docker rm (실패 무시)
@@ -3699,17 +4810,24 @@ async def rollback(request: RollbackRequest) -> dict:
             None,
             lambda: subprocess.run(
                 ["docker", "rm", record.container_name],
-                shell=False, capture_output=True, text=True, timeout=60,
+                shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
             ),
         )
         # 3) docker run — 이게 실패하면 rollback 실패
         result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(
-                run_args, shell=False, capture_output=True, text=True, timeout=120,
+                run_args, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
             ),
         )
         success = result.returncode == 0
+        if not success and current_container is not None:
+            await loop.run_in_executor(None, lambda: subprocess.run(
+                ["docker", "rm", "-f", record.container_name], shell=False, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=60))
+            restored_current, _out, restore_err = await _restore_prior_local_container(current_container)
+            logger.warning("rollback run failed (%s); previous container restored=%s %s",
+                           (result.stderr or "")[-300:], restored_current, restore_err)
         # 포트 기록이 없으면 찔러 볼 곳이 없다. 그때는 확인을 건너뛰고 아래에서
         # "외부 접속이 불가능할 수 있다" 고 알린다 — "확인할 수 없음" 과
         # "죽어 있음" 은 다른 상태이고, 뭉뚱그리면 사용자가 원인을 못 찾는다.

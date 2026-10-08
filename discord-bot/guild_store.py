@@ -110,8 +110,52 @@ def _get_conn() -> sqlite3.Connection:
 
 # ── API 설정 ────────────────────────────────────────────────────────────────
 
+def api_base_problem(api_base: str) -> Optional[str]:
+    """저장하면 안 되는 API 주소면 그 이유, 괜찮으면 None.
+
+    봇은 이 주소로 세션 토큰을 붙여 요청을 보낸다 — 클라우드 메타데이터 주소(169.254.169.254 등)나
+    http(s) 가 아닌 주소를 받으면 봇이 도는 서버 내부를 찌르는 통로가 된다(SSRF).
+    같은 PC·사내망에서 직접 운영하는 봇이 localhost·사설 IP 의 Core 를 쓰는 것은 그대로 허용한다
+    (공개 호스팅이면 RECODER_BLOCK_PRIVATE_API_BASE=1 로 사설·루프백 주소도 막는다).
+    """
+    import ipaddress
+    import os
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse((api_base or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return "API 주소는 http:// 또는 https:// 로 시작하는 주소여야 합니다."
+    host = parsed.hostname.lower().rstrip(".")
+    if host in ("metadata.google.internal", "metadata", "instance-data", "instance-data.ec2.internal"):
+        return "클라우드 메타데이터 주소는 API 주소로 쓸 수 없습니다."
+    block_private = os.getenv("RECODER_BLOCK_PRIVATE_API_BASE", "0") == "1"
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+        addresses = {info[4][0] for info in infos}
+    except (OSError, UnicodeError, ValueError):
+        addresses = set()
+        try:
+            addresses = {str(ipaddress.ip_address(host))}
+        except ValueError:
+            pass
+    for raw in addresses:
+        try:
+            ip = ipaddress.ip_address(raw.split("%")[0])
+        except ValueError:
+            continue
+        if ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+            return "링크 로컬·메타데이터 대역(169.254.x.x 등) 주소는 API 주소로 쓸 수 없습니다."
+        if block_private and (ip.is_private or ip.is_loopback):
+            return "이 봇은 공개 호스팅 모드라 사설·루프백 주소를 API 주소로 쓸 수 없습니다."
+    return None
+
+
 def set_api(guild_id: int, api_base: str, api_token: str) -> None:
     """서버의 ReCoder API URL 및 토큰을 저장(Upsert)한다."""
+    problem = api_base_problem(api_base)
+    if problem:
+        raise ValueError(problem)
     with _lock, _conn() as c:
         c.execute(
             """

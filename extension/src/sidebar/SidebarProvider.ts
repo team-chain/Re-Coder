@@ -1,6 +1,10 @@
+import { currentAiProvider } from '../ai/aiKeyEnv';
+import { withTimeout } from '../core/timeouts';
+import { detectFrontendProject } from '../deploy/frontendBuild';
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { samePath } from '../core/coreReuse';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import {
@@ -8,7 +12,6 @@ import {
     Mode,
     AnalyzeRequest,
     PatchProposal,
-    InfraFileProposal,
     ResponseProposal,
     CoreHealth,
     DeployMethod,
@@ -28,6 +31,10 @@ import {
 } from '../deploy/staticSite';
 import { PollingService } from '../core/PollingService';
 import { analyzeProject, analyzeFile } from '../codemap/analyzer';
+import { CanvasHost } from './canvasHost';
+import { DiscordWebhook } from './discordWebhook';
+import { DiscordBotToken } from './discordBotToken';
+import { activeProjectPath, activeProjectUri, isInsideProjectRoot, onDidChangeActiveProject, projectFolders, selectActiveProject, useExternalProject } from '../activeProject';
 
 /**
  * Core 의 ReadyStatus enum 값("ok" | "partial" | "fail")을 Webview 가 기대하는
@@ -125,6 +132,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _mapWatcher?: vscode.FileSystemWatcher;
     private _mapRefreshTimer?: ReturnType<typeof setTimeout>;
     private _state: SidebarState;
+    private _canvasHosts = new Map<vscode.Webview | undefined, CanvasHost>();
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -136,8 +144,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         //: 빈 창에 폴더를 추가하면 VSCode 가 확장을 통째로 재시작하는데, 그때
         //: 아직 발송 못 한 chat.actionAccepted 를 여기 적어 두고 이어서 보낸다.
         private readonly _globalState?: vscode.Memento,
+        private readonly _secrets?: vscode.SecretStorage,
     ) {
         this._state = { currentMode: Mode.BUILD, proposals: [], isLoading: false };
+        //: 배포 화면이 보는 프로젝트가 바뀌면 열린 캔버스가 이전 프로젝트 상태를 버리고 다시 읽는다.
+        onDidChangeActiveProject((workspace) => {
+            if (this._mapWatcher) { this._mapWatcher.dispose(); this._mapWatcher = undefined; this._setupMapWatcher(); }
+            this.postMessage('canvas.projectChanged', { workspace, projects: projectFolders() });
+        });
+    }
+
+    /** 되살린 ReCoder 탭이 남긴 화면 상태 — 새 화면이 처음 ready 를 보낼 때 한 번 돌려준다. */
+    private _restoredUiState: Record<string, unknown> | null = null;
+    private _workspacePanelRevived = false;
+    setRestoredUiState(state: unknown): void {
+        //: 확장이 따로 적어 둔 최신 상태가 있으면 그것을 쓴다(웹뷰 상태는 늦게 저장될 수 있다).
+        const saved = this._savedUiState();
+        this._restoredUiState = saved ?? (state && typeof state === 'object' ? { ...(state as Record<string, unknown>) } : null);
+        this._workspacePanelRevived = true;
+    }
+    private static readonly UI_STATE_KEY = 'recoder.workspaceUiState';
+    private _uiStateScope(): string {
+        return vscode.workspace.workspaceFile?.toString() || vscode.workspace.workspaceFolders?.[0]?.uri.toString() || 'empty';
+    }
+    private _savedUiState(): Record<string, unknown> | null {
+        const saved = this._globalState?.get<{ scope?: string; ts?: number; state?: Record<string, unknown> }>(SidebarProvider.UI_STATE_KEY);
+        if (!saved?.state || saved.scope !== this._uiStateScope() || typeof saved.ts !== 'number' || Date.now() - saved.ts > 30 * 60 * 1000) { return null; }
+        return saved.state;
     }
 
     /** 재시작을 넘겨야 하는 채팅 승인 요청의 globalState 키. */
@@ -167,39 +200,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         );
 
-        // ensureRunning을 먼저 끝낸 뒤 polling 을 시작한다.
-        // 그렇지 않으면 첫 polling 호출이 세션 토큰 채워지기 전에 발생해 401 이 나고
-        // 사이드바가 "연결 중…" 상태로 멈춘다.
-        void (async () => {
-            let coreOk = false;
-            try {
-                await this._coreManager.ensureRunning();
-                // ensureRunning 이후에도 토큰이 비어있을 수 있으니 강제 refresh.
-                await this._coreManager.refreshToken();
-                coreOk = true;
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                this.postMessage('errorMessage', { message: `Core 시작 실패: ${message}` });
-            } finally {
-                // ensureRunning 성공/실패와 무관하게 polling 시작 (실패 시에도 down 상태 표시)
-                this._pollingService.start(
-                    (health: CoreHealth) => {
-                        this.postMessage('healthUpdate', health);
-                        if (health.status === 'ok') { void this.refreshCost(); }
-                    },
-                    (err: Error) => {
-                        this.postMessage('errorMessage', { message: err.message });
-                    }
-                );
-            }
-            // Core 가 떴으면 진단을 자동으로 1회 돌려준다. (App.tsx 가 mount 시 요청을 보내지만
-            // 그 때 토큰이 아직 비어있을 수 있어 401 이 나는 경우가 있어 한 번 더 트리거.)
-            if (coreOk) {
-                //: 재사용한 코어에는 보안 금고의 AWS 연결이 들어가 있지 않다 — 먼저 넣고 진단.
-                try { await this.healAwsConnection('startup'); } catch { /* 진단이 알려 준다 */ }
-                void this.handleMessage({ type: 'runDiagnostics', payload: {} });
-            }
-        })();
+        this.connectAndDiagnose();
 
         this.postMessage('stateUpdate', this._state);
 
@@ -208,13 +209,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.onDidChangeVisibility(() => {
             if (webviewView.visible) {
-                this._openWorkspaceFromSidebar();
-                this._pollingService.start(
-                    (h) => this.postMessage('healthUpdate', h),
-                    (e) => this.postMessage('errorMessage', { message: e.message })
-                );
+                this._openWorkspaceFromSidebar(true);
+                this.connectAndDiagnose();
             } else if (!this._workspacePanelWebview) {
                 this._pollingService.stop();
+                this._pollingActive = false;
             }
         });
 
@@ -224,11 +223,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         setTimeout(() => this._openWorkspaceFromSidebar(), 100);
 
         webviewView.onDidDispose(() => {
+            this._canvasHosts.get(webviewView.webview)?.dispose();
+            this._canvasHosts.delete(webviewView.webview);
             if (this._view === webviewView) {
                 this._view = undefined;
             }
             if (!this._workspacePanelWebview) {
                 this._pollingService.stop();
+                this._pollingActive = false;
             }
             this._mapWatcher?.dispose();
             this._mapWatcher = undefined;
@@ -245,6 +247,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     /** 요청-응답 메시지는 요청을 보낸 Webview로만 돌려보낸다. */
     private postMessageToWebview(webview: vscode.Webview | undefined, type: string, payload: unknown): void {
+        if (/^(canvas\.graph|canvas\.error|code\.|chat\.)/.test(type)) {
+            const id = (payload as { requestId?: unknown; id?: unknown })?.requestId ?? (payload as { id?: unknown })?.id ?? '';
+            console.info(`[ReCoder] reply ${type} id=${String(id)}`);
+        }
         if (webview) {
             void webview.postMessage({ type, payload });
             return;
@@ -263,29 +269,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             void this.handleMessage(message, webview);
         });
         this.postMessage('stateUpdate', this._state);
-        // Core 시작은 명령 진입점에서 한 번만 수행한다. 여기서도 시작하면
-        // Activity Bar 클릭 시 Sidebar/Panel 이 동시에 spawn 하며 로딩이 길어진다.
-        this._pollingService.start(
-            (health: CoreHealth) => {
-                this.postMessage('healthUpdate', health);
-                if (health.status === 'ok') { void this.refreshCost(); }
-            },
-            (err: Error) => this.postMessage('errorMessage', { message: err.message }),
-        );
+        this.connectAndDiagnose();
     }
 
     detachWorkspacePanel(webview: vscode.Webview): void {
+        this._canvasHosts.get(webview)?.dispose();
+        this._canvasHosts.delete(webview);
         if (this._workspacePanelWebview === webview) {
             this._workspacePanelWebview = undefined;
             this._workspaceAutoOpenRequested = false;
             if (!this._view?.visible) {
                 this._pollingService.stop();
+                this._pollingActive = false;
             }
         }
     }
 
-    private _openWorkspaceFromSidebar(): void {
-        if (this._workspaceAutoOpenRequested || !this._openWorkspace) { return; }
+    private _openWorkspaceFromSidebar(revealExisting = false): void {
+        if ((!revealExisting && this._workspaceAutoOpenRequested) || !this._openWorkspace) { return; }
         this._workspaceAutoOpenRequested = true;
         this._openWorkspace();
     }
@@ -293,7 +294,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** 워크스페이스 파일 변경을 감시해 구조 지도를 자동 갱신한다(생성/삭제/수정). */
     private _setupMapWatcher(): void {
         if (this._mapWatcher) { return; }
-        const folder = vscode.workspace.workspaceFolders?.[0];
+        //: 코드 생성·배포와 같은 "현재 프로젝트"를 본다(첫 폴더만 보면 다른 프로젝트 지도가 갱신되지 않았다).
+        const folder = activeProjectUri();
         if (!folder) { return; }
         const pattern = new vscode.RelativePattern(folder, '**/*.{py,js,mjs,jsx,ts,tsx,html,htm,css}');
         const watcher = vscode.workspace.createFileSystemWatcher(pattern);
@@ -319,17 +321,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _doMapRefresh(): void {
         try {
             if (!this._view?.visible) { return; }
-            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const root = activeProjectPath();
             if (!root) { return; }
             const data = analyzeProject(root);
             this.postMessage('map.projectResult', data);
         } catch { /* 무해하게 무시 */ }
     }
 
-    /** 탐색기에서 폴더 우클릭 → '여기에 코드 생성' 시 webview 에 대상 폴더 주입. */
+    /** 탐색기에서 폴더 우클릭 → '여기에 코드 생성' 시 webview 에 대상 폴더 주입.
+     *  절대 경로를 받으면 폴더 선택기와 같은 표기(활성 프로젝트 기준 상대 경로, 밖이면 절대 경로)로 바꾼다.
+     *  ReCoder 창이 막 열리는 중이면 준비 신호(webview.ready)를 받은 뒤 한 번 더 보낸다. */
     setCodeTargetFolder(folder: string): void {
-        this.postMessage('code.setTargetFolder', { folder });
+        const display = folder && path.isAbsolute(folder) ? this._describeTargetFolder(folder).display : folder;
+        this._pendingCodeTarget = display;
+        this.postMessage('code.setTargetFolder', { folder: display });
     }
+    private _pendingCodeTarget: string | null = null;
 
     triggerAnalysis(request: Partial<AnalyzeRequest>): void {
         this.postMessage('core.analyzeStarted', {});
@@ -342,13 +349,127 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     triggerDockerfileGeneration(): void {
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspacePath = activeProjectPath();
         void this.handleGenerateDockerfile(workspacePath, undefined);
     }
 
     triggerGithubActionsGeneration(): void {
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspacePath = activeProjectPath();
         void this.handleGenerateGithubActions(workspacePath, undefined);
+    }
+
+    private _connectionInFlight: Promise<void> | null = null;
+    private _connectionKey = '';
+    private _diagnosticsInFlight: Promise<void> | null = null;
+    private _diagnosticsKey = '';
+    private _lastDiagnosticsAttempt = 0;
+    private _lastDiagnosticsError = "";
+    private _pollingActive = false;
+
+    private _connectRetryMs = 0;
+    private _connectRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    /**
+     * Core 연결 + 진단. 실패하면 **"확인 중" 상태를 풀고** 원인을 보여 준 뒤, 간격을 늘려 가며
+     * 다시 시도한다. 예전에는 첫 연결이 실패하면 pending 이 영원히 남아 "AI 연결을 확인하고
+     * 있습니다"에 멈추고, 폴링도 시작되지 않아 다시 시도하는 주체가 없었다.
+     */
+    private connectAndDiagnose(): void {
+        if (this._connectRetryTimer) { clearTimeout(this._connectRetryTimer); this._connectRetryTimer = undefined; }
+        void this.ensureConnection().then(() => {
+            this._connectRetryMs = 0;
+            return this.runDiagnosticsShared(false);
+        }).catch(error => {
+            const message = error instanceof Error ? error.message : String(error);
+            this._lastDiagnosticsError = message;
+            this.postMessage('core.error', { message });
+            this.postMessage('diagnostics.status', { pending: false, error: message });
+            this._connectRetryMs = Math.min(this._connectRetryMs ? this._connectRetryMs * 2 : 5000, 60000);
+            //: 화면이 닫혀 있으면 다시 시도하지 않는다 — 보이게 되면 그때 다시 연결한다.
+            if (!this._view?.visible && !this._workspacePanelWebview) { return; }
+            this._connectRetryTimer = setTimeout(() => this.connectAndDiagnose(), this._connectRetryMs);
+            (this._connectRetryTimer as { unref?: () => void }).unref?.();
+        });
+    }
+
+    /** Shared by the launcher, workspace and commands; credentials precede diagnostics. */
+    async ensureConnection(): Promise<void> {
+        if (this._connectionInFlight) return this._connectionInFlight;
+        const attempt = withTimeout((async () => {
+            await this._coreManager.ensureRunning();
+            await this._coreManager.refreshToken();
+            const key = this._coreManager.coreInstanceKey();
+            if (key !== this._connectionKey) {
+                //: AWS 연결 복구는 없어도 되는 단계다 — 끝나지 않아도 개발·배포 요청을 막지 않는다.
+                try { await withTimeout(this.healAwsConnection('startup'), 20_000, 'AWS 연결 복구 시간 초과'); } catch { /* diagnostics supplies details */ }
+                this._connectionKey = key;
+            }
+            if (!this._pollingActive) {
+                this._pollingActive = true;
+                this._pollingService.start(
+                    health => {
+                        this.postMessage('healthUpdate', health);
+                        if (health.status === 'ok') {
+                            void this.refreshCost();
+                            if (this._diagnosticsKey !== this._coreManager.coreInstanceKey()
+                                && Date.now() - this._lastDiagnosticsAttempt > 15000) {
+                                void this.runDiagnosticsShared(false);
+                            }
+                        }
+                    },
+                    error => this.postMessage('core.error', { message: error.message }),
+                );
+            }
+        })(), 150_000, 'ReCoder Core 연결이 150초 안에 끝나지 않았습니다. 명령 팔레트에서 "ReCoder: Restart Core" 를 실행하거나 창을 다시 불러오세요.');
+        this._connectionInFlight = attempt;
+        try { await attempt; } finally {
+            if (this._connectionInFlight === attempt) this._connectionInFlight = null;
+        }
+    }
+
+    private async runDiagnosticsShared(force: boolean): Promise<void> {
+        if (this._diagnosticsInFlight) return this._diagnosticsInFlight;
+        if (!force && (this._state.diagnostics || this._lastDiagnosticsError) && this._diagnosticsKey === this._coreManager.coreInstanceKey()) return;
+        const attempt = this.performDiagnostics();
+        this._diagnosticsInFlight = attempt;
+        try { await attempt; } finally {
+            if (this._diagnosticsInFlight === attempt) this._diagnosticsInFlight = null;
+        }
+    }
+
+    private async performDiagnostics(): Promise<void> {
+        this._lastDiagnosticsAttempt = Date.now();
+        this._state.isLoading = true;
+        this.postMessage('diagnostics.status', { pending: true });
+        this.postMessage('stateUpdate', this._state);
+        let errorMessage = '';
+        this._lastDiagnosticsError = '';
+        try {
+            await this.ensureConnection();
+            // An automatic repair gets one follow-up probe; no recursive overlapping runs.
+            for (let pass = 0; pass < 2; pass++) {
+                const instanceKey = this._coreManager.coreInstanceKey();
+                const diagnostics = await this._apiClient.runDiagnostics();
+                if (instanceKey !== this._coreManager.coreInstanceKey()) { throw new Error('Core가 재시작되었습니다. 연결을 다시 확인해 주세요.'); }
+                const normalized = _normalizeDiagnostics(diagnostics as unknown as Record<string, unknown>) as unknown as typeof diagnostics;
+                this._state.diagnostics = normalized;
+                this._diagnosticsKey = this._coreManager.coreInstanceKey();
+                this.postMessage('diagnosticsUpdate', normalized);
+                this.postMessage('diagnostics.status', { pending: false });
+                const healed = pass === 0 && await this._selfHealFromDiagnostics(normalized as unknown as Record<string, unknown>);
+                if (!healed) break;
+            }
+        } catch (error) {
+            errorMessage = error instanceof Error ? error.message : String(error);
+            this._lastDiagnosticsError = errorMessage;
+            this._diagnosticsKey = this._coreManager.coreInstanceKey();
+            // Leave live health untouched; a diagnostic timeout is not a disconnected Core.
+            this.postMessage('diagnostics.error', { message: errorMessage });
+        } finally {
+            this._state.isLoading = false;
+            this.postMessage('stateUpdate', this._state);
+            this.postMessage('diagnostics.status', { pending: false, error: errorMessage });
+        }
     }
 
     triggerDiagnostics(): void {
@@ -524,7 +645,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._awsHealedFor = key;
         let healed = false;
         const notReady = (k: string) => d[k] !== undefined && d[k] !== 'ready';
-        if (notReady('aws_deploy_ready') || notReady('ai_ready')) {
+        const usesAiKey = this._globalState && this._secrets
+            ? !!(await currentAiProvider({ globalState: this._globalState, secrets: this._secrets }))
+            : false;
+        if (notReady('aws_deploy_ready') || (notReady('ai_ready') && !usesAiKey)) {
             healed = (await this.healAwsConnection('diagnostics')) === 'healed' || healed;
         }
         if (notReady('docker_ready')) {
@@ -537,9 +661,63 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         message: { type: string; payload: unknown },
         requestWebview?: vscode.Webview,
     ): Promise<void> {
+        const p = (message.payload ?? {}) as { requestId?: unknown; id?: unknown };
+        if (/^(canvas\.graph|code\.|chat\.)/.test(message.type)) {
+            console.info(`[ReCoder] request ${message.type} id=${String(p.requestId ?? p.id ?? '')}`);
+        }
+        try {
+            await this.dispatchMessage(message, requestWebview);
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            console.error(`[ReCoder] failed ${message.type}: ${detail}`);
+            const reply = message.type.startsWith('canvas.') ? 'canvas.error'
+                : message.type.startsWith('code.') ? 'code.error'
+                : message.type.startsWith('chat.') ? 'chat.error' : 'errorMessage';
+            this.postMessageToWebview(requestWebview, reply, { ...p, context: message.type, message: detail });
+        }
+    }
+
+    private async dispatchMessage(
+        message: { type: string; payload: unknown },
+        requestWebview?: vscode.Webview,
+    ): Promise<void> {
         const { type, payload } = message;
 
+        if (type.startsWith('canvas.')) {
+            let host = this._canvasHosts.get(requestWebview);
+            if (!host) { host = new CanvasHost(this._apiClient, undefined, this._secrets ? new DiscordWebhook(this._secrets) : undefined, this._globalState, this._secrets ? new DiscordBotToken(this._secrets, fetch, String(vscode.extensions?.getExtension?.('recoder-team.recoder')?.packageJSON?.version || '')) : undefined); this._canvasHosts.set(requestWebview, host); }
+            await host.handle(type, payload,
+                (reply, data) => this.postMessageToWebview(requestWebview, reply, data),
+                workspace => s3ProjectIdentifier(s3RepositoryIdentity(workspace), path.basename(workspace)),
+                (action, data) => this.handleMessage({ type: action, payload: data }, requestWebview));
+            return;
+        }
+
         switch (type) {
+            case 'repair.prepare':
+            case 'repair.approve': {
+                const p=(payload||{}) as {requestId?:string;log?:string;stage?:string;runId?:string;approved?:boolean};
+                const workspace=activeProjectPath();
+                try {
+                    if(!workspace)throw new Error('먼저 프로젝트를 선택하세요.');
+                    let result:Record<string,unknown>;
+                    if(type==='repair.prepare') {
+                        if(!p.log?.trim())throw new Error('분석할 오류 로그가 없습니다.');
+                        result=await this._apiClient.prepareRepair(workspace,p.log,p.stage||'build');
+                    } else {
+                        if(p.approved!==true||!p.runId)throw new Error('수정안 승인이 필요합니다.');
+                        const run=await this._apiClient.getRepair(p.runId);
+                        if(typeof run.workspace!=='string'||!samePath(run.workspace,workspace))throw new Error('다른 프로젝트의 수정안입니다. 다시 검증하세요.');
+                        if(!samePath(activeProjectPath(),workspace))throw new Error('프로젝트가 바뀌었습니다. 현재 프로젝트에서 다시 검증하세요.');
+                        result=await this._apiClient.approveRepair(p.runId,workspace);
+                    }
+                    if(!samePath(activeProjectPath(),workspace))throw new Error('프로젝트가 바뀌었습니다. 현재 프로젝트에서 다시 검증하세요.');
+                    this.postMessageToWebview(requestWebview,'repair.result',{requestId:p.requestId,result});
+                } catch(err) {
+                    this.postMessageToWebview(requestWebview,'repair.error',{requestId:p.requestId,message:err instanceof Error?err.message:String(err)});
+                }
+                break;
+            }
             // ── Build mode (webview-src/components/BuildMode.tsx) ─────────────
             case 'build.analyzeActive': {
                 // 자동 감지와 동일 경로: 최근 터미널 출력 + 에디터 선택을 모아 분석.
@@ -577,6 +755,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'ai.connect': {
+                //: AWS 없이 AI — Claude/ChatGPT API 키 입력. 키는 명령이 보안 저장소에 둔다.
+                const provider = (payload as { provider?: string } | undefined)?.provider;
+                await vscode.commands.executeCommand('recoder.ai.connect', provider === 'anthropic' || provider === 'openai' ? provider : undefined);
+                break;
+            }
             case 'webview.diagnostics.rerun': {
                 // DiagnosticsPanel.tsx 의 "다시 진단" 버튼.
                 void this.handleMessage({ type: 'runDiagnostics', payload: {} });
@@ -589,6 +773,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (!key) { break; }
                 this.postMessage('selfHeal', { key, pending: true, message: '조치 중…' });
                 try {
+                    //: API 키(Claude/ChatGPT)로 AI 를 쓰는 사용자의 AI 문제는 AWS 와 무관하다.
+                    //: 예전에는 AI 자동 조치가 AWS 연결 화면을 띄워 키 문제(크레딧 소진·잘못된 키)를
+                    //: 고칠 길이 없었다.
+                    const aiKeyProvider = key === 'ai_ready' && this._globalState && this._secrets
+                        ? await currentAiProvider({ globalState: this._globalState, secrets: this._secrets })
+                        : '';
+                    if (aiKeyProvider) {
+                        await vscode.commands.executeCommand('recoder.ai.connect', aiKeyProvider);
+                        void this.handleMessage({ type: 'runDiagnostics', payload: {} });
+                        break;
+                    }
                     switch (key) {
                         case 'aws_deploy_ready':
                         case 'ai_ready': {  // Bedrock 도 AWS 자격증명을 사용
@@ -672,7 +867,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'generateDockerfile': {
                 const { workspacePath, projectId } = payload as { workspacePath: string; projectId: string };
                 await this.handleGenerateDockerfile(
-                    workspacePath || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                    workspacePath || activeProjectPath(),
                     projectId,
                 );
                 break;
@@ -680,7 +875,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'generateCompose': {
                 const p = (payload ?? {}) as { workspacePath?: string; projectId?: string };
                 await this.handleGenerateCompose(
-                    p.workspacePath || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                    p.workspacePath || activeProjectPath(),
                     p.projectId,
                 );
                 break;
@@ -706,7 +901,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'generateGithubActions': {
                 const { workspacePath: ghWs, projectId: ghPid } = payload as { workspacePath: string; projectId?: string };
                 await this.handleGenerateGithubActions(
-                    ghWs || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                    ghWs || activeProjectPath(),
                     ghPid,
                 );
                 break;
@@ -730,9 +925,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 try {
                     //: 웹뷰는 빈 경로를 보낸다 — 워크스페이스로 채워야 이미지 이름이
                     //: `<폴더명>:latest` 로 잡힌다(빈 경로면 코어가 `app:latest` 로 추측, 실기기 B2).
-                    const scanRoot = scanWs || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '');
+                    const scanRoot = scanWs || activeProjectPath();
                     const scanResult = await this._apiClient.runScan(scanType, scanRoot, targetPath);
-                    this.postMessage('scanResult', { ...scanResult, requestId });
+                    //: workspace — 수정안은 검사한 그 프로젝트에만 적용한다(그 사이 프로젝트를 바꿨으면 막는다).
+                    this.postMessage('scanResult', { ...scanResult, requestId, workspace: scanRoot });
                 } catch (err) {
                     //: 요청 자체가 실패해도 화면에는 "Error: trivy 스캔 실패" 같은 raw
                     //: 문자열이 아니라 **미검증 + 원인 + 다음 행동** 이 떠야 한다
@@ -754,6 +950,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'security.fixPlan':
+            case 'security.fixApply':
+            case 'security.rebuild': {
+                const p = payload as { requestId?: string; workspace?: string; reports?: Record<string, unknown>; ids?: string[] };
+                const requestId = p.requestId ?? '';
+                const workspace = activeProjectPath();
+                try {
+                    if (!workspace) { throw new Error('열린 프로젝트가 없습니다.'); }
+                    if (p.workspace && !samePath(p.workspace, workspace)) {
+                        throw new Error('검사한 뒤 프로젝트가 바뀌었습니다. 이 프로젝트를 다시 검사하세요.');
+                    }
+                    if (type === 'security.fixPlan') {
+                        const result = await this._apiClient.securityFixPlan(workspace, p.reports ?? {});
+                        this.postMessage('security.fixPlanResult', { requestId, workspace, proposals: result.proposals ?? [] });
+                    } else if (type === 'security.fixApply') {
+                        const result = await this._apiClient.securityFixApply(workspace, p.reports ?? {}, p.ids ?? []);
+                        this.postMessage('security.fixApplyResult', { requestId, workspace, ...result });
+                    } else {
+                        const result = await this._apiClient.securityRebuild(workspace);
+                        this.postMessage('security.rebuildResult', { requestId, workspace, ...result });
+                    }
+                } catch (err) {
+                    this.postMessage('security.fixError', { requestId, context: type, message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
             case 'createDeployPlan': {
                 const {
                     workspacePath: dpWs, method: dpMethod, projectId: dpPid,
@@ -763,7 +985,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     image?: string; containerName?: string; hostPort?: number; containerPort?: number;
                 };
                 try {
-                    const planRoot = dpWs || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '');
+                    const planRoot = dpWs || activeProjectPath();
                     const plan = await this._apiClient.createDeploymentPlan(
                         planRoot, dpMethod, dpPid, dpImg, dpCn, dpHp, dpCp
                     );
@@ -776,10 +998,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'executeDeployment': {
                 const { planId, approved } = payload as { planId: string; approved: boolean };
                 try {
-                    const deployResult = await this._apiClient.executeDeployment(planId, approved);
-                    this.postMessage('deployResult', deployResult);
+                    const deployResult = await this._apiClient.executeDeploymentStream(planId, approved, event => {
+                        this.postMessageToWebview(requestWebview, 'deploy.progress', { ...event, plan_id: planId });
+                    });
+                    this.postMessageToWebview(requestWebview, 'deployResult', { ...deployResult, plan_id: planId });
                 } catch (err) {
-                    this.postMessage('errorMessage', { message: String(err) });
+                    this.postMessageToWebview(requestWebview, 'deploy.progress', { step: 'error', plan_id: planId, message: String(err) });
+                    this.postMessageToWebview(requestWebview, 'errorMessage', { message: String(err) });
                 }
                 break;
             }
@@ -808,7 +1033,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 try {
                     const result = await this._apiClient.deployEcs({
                         ...req,
-                        workspace_path: req.workspace_path || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''),
+                        workspace_path: req.workspace_path || activeProjectPath(),
                     });
                     this.postMessageToWebview(requestWebview, 'workspace.deploy.result', result);
                 } catch (err) {
@@ -868,7 +1093,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'workspace.deploy.preflight': {
-                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                const workspacePath = activeProjectPath();
                 try {
                     const result = await this._apiClient.getDeployPreflight(workspacePath);
                     this.postMessageToWebview(requestWebview, 'workspace.deploy.preflightResult', result);
@@ -916,13 +1141,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'deploy.readiness.check':
+            case 'deploy.readiness.fix': {
+                //: 로컬 Docker 배포 화면의 "배포 준비 점검". 자동 수정은 사용자가 누른 한 건만.
+                const p = (payload ?? {}) as { code?: string; requestId?: string };
+                const workspacePath = activeProjectPath();
+                try {
+                    if (!workspacePath) { throw new Error('먼저 프로젝트 폴더를 여세요.'); }
+                    if (type === 'deploy.readiness.fix') {
+                        if (!p.code || !/^[A-Z_]{3,64}$/.test(p.code)) { throw new Error('수정 항목을 확인하세요.'); }
+                        const result = await this._apiClient.fixBuildReadiness(workspacePath, p.code);
+                        this.postMessageToWebview(requestWebview, 'deploy.readiness.result', { requestId: p.requestId, code: p.code, ...result });
+                    } else {
+                        const readiness = await this._apiClient.checkBuildReadiness(workspacePath);
+                        this.postMessageToWebview(requestWebview, 'deploy.readiness.result', { requestId: p.requestId, readiness });
+                    }
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'deploy.readiness.error', {
+                        requestId: p.requestId, code: p.code, message: err instanceof Error ? err.message : String(err),
+                    });
+                }
+                break;
+            }
             case 'workspace.deploy.remediation.apply': {
                 const proposalId = (payload as { proposalId?: string } | undefined)?.proposalId;
-                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                const workspacePath = activeProjectPath();
                 if (!proposalId) {
                     this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', {
                         message: '적용할 수정안 정보가 없습니다. 다시 검사해 주세요.',
                     });
+                    break;
+                }
+                if (proposalId.startsWith('readiness:')) {
+                    //: 배포 캔버스의 빌드 점검 항목(포트·.dockerignore·빌드 스크립트)은 같은 카드로 고친다.
+                    try {
+                        const result = await this._apiClient.fixBuildReadiness(workspacePath, proposalId.slice('readiness:'.length));
+                        this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationResult', {
+                            success: result.applied, proposal_id: proposalId, applied_files: result.changed ?? [],
+                            message: result.message, rerun_required: true,
+                        });
+                    } catch (err) {
+                        this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', { message: err instanceof Error ? err.message : String(err) });
+                    }
                     break;
                 }
                 try {
@@ -945,7 +1205,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     });
                     break;
                 }
-                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                const workspacePath = activeProjectPath();
                 try {
                     const result = await this._apiClient.recordDeploymentDecision(
                         workspacePath,
@@ -1046,40 +1306,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'runDiagnostics': {
-                this._state.isLoading = true;
-                this.postMessage('stateUpdate', this._state);
-                let diagnostics: import('../types').DiagnosticsResult | null = null;
-                try {
-                    diagnostics = await this._apiClient.runDiagnostics();
-                } catch (err) {
-                    // POST /api/diagnostics/run 실패 — 캐시된 결과(GET) 로 fallback.
-                    try { diagnostics = await this._apiClient.getDiagnostics(); } catch { /* ignore */ }
-                    if (!diagnostics) {
-                        this.postMessage('errorMessage', { message: `진단 실행 실패: ${String(err)}` });
-                    }
-                }
-                this._state.isLoading = false;
-                if (diagnostics) {
-                    // Core 가 ReadyStatus enum 값("ok"/"partial"/"fail") 으로 보내는데
-                    // webview 는 "ready" 문자열로 비교. 여기서 변환.
-                    const normalized = _normalizeDiagnostics(
-                        diagnostics as unknown as Record<string, unknown>
-                    ) as unknown as typeof diagnostics;
-                    if (normalized) {
-                        this._state.diagnostics = normalized;
-                        this.postMessage('diagnosticsUpdate', normalized);
-                        //: 검사 → 자동 조치 → 재검사. 고친 게 있으면 한 번만 다시 돈다
-                        //: (인스턴스당 1회 가드가 _selfHealFromDiagnostics 안에 있다).
-                        const healed = await this._selfHealFromDiagnostics(normalized as unknown as Record<string, unknown>);
-                        if (healed) {
-                            this.postMessage('stateUpdate', this._state);
-                            void this.handleMessage({ type: 'runDiagnostics', payload: {} });
-                            break;
-                        }
-                    }
-                }
-                // 성공·실패와 무관하게 stateUpdate 을 보내 isLoading 스피너 해제.
-                this.postMessage('stateUpdate', this._state);
+                await this.runDiagnosticsShared(true);
                 break;
             }
             case 'switchMode': {
@@ -1138,7 +1365,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 void this._pollingService.poll();
                 break;
             }
+            case 'ui.state': {
+                //: 큰 작업 화면의 상태(보던 화면·쓰던 요청)만 기억한다. 작은 값만 받는다.
+                if (requestWebview && requestWebview === this._workspacePanelWebview && payload && typeof payload === 'object') {
+                    const state: Record<string, unknown> = {};
+                    const p = payload as Record<string, unknown>;
+                    if (typeof p.view === 'string' && p.view.length < 40) { state.view = p.view; }
+                    if (typeof p.codeDraft === 'string') { state.codeDraft = p.codeDraft.slice(0, 8000); }
+                    void this._globalState?.update(SidebarProvider.UI_STATE_KEY, { scope: this._uiStateScope(), ts: Date.now(), state });
+                }
+                break;
+            }
             case 'webview.ready': {
+                if (!this._restoredUiState && requestWebview && requestWebview === this._workspacePanelWebview && this._workspacePanelRevived) {
+                    this._restoredUiState = this._savedUiState();
+                }
+                this._workspacePanelRevived = false;
+                if (this._restoredUiState && requestWebview && requestWebview === this._workspacePanelWebview) {
+                    this.postMessageToWebview(requestWebview, 'ui.restore', this._restoredUiState);
+                    this._restoredUiState = null;
+                }
+                if (this._pendingCodeTarget !== null && requestWebview && requestWebview === this._workspacePanelWebview) {
+                    this.postMessageToWebview(requestWebview, 'code.setTargetFolder', { folder: this._pendingCodeTarget });
+                    this._pendingCodeTarget = null;
+                }
+                this.connectAndDiagnose();
+                this.postMessage('diagnostics.status', { pending: !!this._diagnosticsInFlight || (!this._diagnosticsKey && !this._lastDiagnosticsError), error: this._lastDiagnosticsError });
                 // Webview finished loading — send current state immediately
                 this.postMessage('stateUpdate', this._state);
                 const health = this._pollingService.getLastHealth();
@@ -1151,9 +1403,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 //: 지워서 사이드바·큰 화면이 둘 다 ready 를 보내도 한 번만 나간다.
                 const pending = this._globalState?.get<{
                     instruction: string; targetFolder: string; absolutePath: string;
-                    folderCreated: boolean; ts: number;
+                    folderCreated: boolean; ts: number; surface?: string; contextFiles?: Array<{path: string; content: string}>;
                 }>(SidebarProvider.PENDING_CHAT_ACTION_KEY);
                 if (pending) {
+                    const layout = (payload as {layout?:string})?.layout;
+                    // A hidden sidebar must not consume the workspace's approval.
+                    if (layout && pending.surface && layout !== pending.surface) { break; }
                     void this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, undefined);
                     //: 오래된 메모(10분 초과)는 버린다 — 사용자가 이미 다른 일을
                     //: 시작한 창에 옛 요청이 불쑥 끼어드는 것을 막는다.
@@ -1162,6 +1417,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             id: `restored-${pending.ts}`,
                             requestId: Date.now(),
                             instruction: pending.instruction,
+                            contextFiles: pending.contextFiles ?? [],
                             targetFolder: pending.targetFolder,
                             absolutePath: pending.absolutePath,
                             folderCreated: pending.folderCreated,
@@ -1210,7 +1466,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         storage: '',
                         message: msg,
                     });
-                    this.postMessage('errorMessage', { message: `AWS 상태 조회 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 상태 조회 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1218,8 +1474,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 // **코어에는 이 라우트가 완성돼 있었고 확장이 부르지 않았다.**
                 // 버킷 생성·공개 설정·업로드·URL 조립까지 다 되어 있는데,
                 // 사용자 파일을 읽어 보내는 쪽이 없어서 통째로 도달 불가능이었다.
-                const p = (payload ?? {}) as { dir?: string; region?: string };
-                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                const p = (payload ?? {}) as { dir?: string; region?: string; workspace_path?: string };
+                //: 배포 캔버스는 승인한 프로젝트 경로를 함께 보낸다 — 승인 뒤 활성 프로젝트가 바뀌었으면 멈춘다.
+                const workspacePath = activeProjectPath();
+                if (p.workspace_path && workspacePath && !samePath(p.workspace_path, workspacePath)) {
+                    this.postMessage('workspace.deploy.s3.result', {
+                        ok: false, message: '승인한 뒤 현재 프로젝트가 바뀌어 배포를 멈췄습니다. 배포할 프로젝트를 다시 고르고 확인하세요.',
+                    });
+                    break;
+                }
                 if (!workspacePath) {
                     this.postMessage('workspace.deploy.s3.result', {
                         ok: false, message: '열린 워크스페이스가 없습니다.',
@@ -1308,6 +1571,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }, (event) => {
                         this.postMessage('workspace.deploy.s3.progress', event);
                     });
+                    //: 파일은 올라갔지만 브라우저로 연 첫 화면이 비어 있으면 "배포 완료"로 보이지 않는다
+                    //: (실기기: 주소만 뜨고 화면이 표시되지 않았다). 원인·해결과 주소를 함께 알린다.
+                    if (result.status === 'screen_failed' || result.screen?.ok === false) {
+                        this.postMessage('workspace.deploy.s3.result', {
+                            ok: false,
+                            message: `${result.message} (주소: ${result.url})`,
+                            result,
+                        });
+                        break;
+                    }
                     this.postMessage('workspace.deploy.s3.result', {
                         ok: true,
                         result: {
@@ -1327,7 +1600,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'workspace.deploy.s3.dirs': {
                 // 어떤 폴더가 있는지 웹뷰가 알 방법이 없다. 후보를 골라 준다.
-                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                const workspacePath = activeProjectPath();
                 let dirs: string[] = [];
                 if (workspacePath) {
                     try {
@@ -1336,8 +1609,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             .map(e => e.name);
                     } catch { dirs = []; }
                 }
+                const frontend = workspacePath ? detectFrontendProject(workspacePath) : null;
                 this.postMessage('workspace.deploy.s3.dirs', {
-                    suggested: pickStaticDir(dirs),
+                    //: React·Vite 프로젝트면 빌드 산출물 폴더(client/build 등)를 권한다.
+                    suggested: frontend ? frontend.outDir : pickStaticDir(dirs),
                     candidates: STATIC_DIR_CANDIDATES.filter(c => dirs.includes(c)),
                 });
                 break;
@@ -1432,7 +1707,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.configure.result', { ok: false, message: msg });
-                    this.postMessage('errorMessage', { message: `AWS 자격증명 등록 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 자격증명 등록 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1474,7 +1749,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.configure.result', { ok: false, message: msg });
-                    this.postMessage('errorMessage', { message: `AWS 프로필 연결 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 프로필 연결 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1527,7 +1802,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.role.result', { ok: false, mode: 'error', message: msg });
                     this.postMessage('aws.configure.result', { ok: false, message: msg });
-                    this.postMessage('errorMessage', { message: `AWS 역할 설정 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 역할 설정 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1562,7 +1837,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.clear.result', { ok: false, message: msg });
-                    this.postMessage('errorMessage', { message: `AWS 자격증명 제거 실패: ${msg}` });
+                    this.postMessage('errorMessage', { message: `AWS 자격증명 제거 실패: ${msg}`, context: 'aws' });
                 }
                 break;
             }
@@ -1589,6 +1864,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const msg = err instanceof Error ? err.message : String(err);
                     this.postMessage('aws.ecrRepos', { repositories: [], error: msg });
                 }
+                break;
+            }
+            case 'host.ping': {
+                //: 웹뷰가 "이 창이 확장과 이어져 있는지" 확인한다. 바로 답한다 — 늦게 답하면 끊긴 것으로 본다.
+                this.postMessageToWebview(requestWebview, 'host.pong', { nonce: (payload as { nonce?: unknown })?.nonce });
+                break;
+            }
+            case 'code.cancelPlan': {
+                const p = payload as { requestId?: number };
+                this.postMessageToWebview(requestWebview, 'code.error', { requestId: p?.requestId, message: '설계 결정을 취소해서 생성을 중단했습니다.' });
                 break;
             }
             case 'code.generate': {
@@ -1634,14 +1919,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     id?: string;
                     message?: string;
                     history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+                    targetFolder?: string;
+                    contextFiles?: Array<{path: string; content: string}>;
                 };
-                await this.handleChat(p.id ?? '', p.message ?? '', p.history ?? [], requestWebview);
+                await this.handleChat(p.id ?? '', p.message ?? '', p.history ?? [], requestWebview, p.targetFolder, p.contextFiles);
                 break;
             }
             case 'chat.approveAction': {
                 //: 승인 카드의 [승인하고 생성]. 여기서만 채팅이 코드 생성으로 넘어간다.
-                const p = (payload ?? {}) as { id?: string; instruction?: string; targetFolder?: string };
-                await this.handleChatApproveAction(p.id ?? '', p.instruction ?? '', p.targetFolder ?? '', requestWebview);
+                const p = (payload ?? {}) as { id?: string; instruction?: string; targetFolder?: string; contextFiles?: Array<{path: string; content: string}> };
+                await this.handleChatApproveAction(p.id ?? '', p.instruction ?? '', p.targetFolder ?? '', requestWebview, p.contextFiles);
                 break;
             }
             case 'chat.pickActionFolder': {
@@ -1652,7 +1939,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const picked = await vscode.window.showOpenDialog({
                     canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
                     openLabel: '이 폴더에 생성',
-                    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+                    defaultUri: activeProjectUri(),
                 });
                 if (picked && picked[0]) {
                     this.postMessageToWebview(requestWebview, 'chat.actionFolderPicked', { id: p.id ?? '', folder: this._describeTargetFolder(picked[0].fsPath).display });
@@ -1660,26 +1947,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'code.apply': {
-                const { file, content, targetFolder, ackKey } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; ackKey?: string };
-                await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '', ackKey ?? '');
+                const { file, content, targetFolder, ackKey, projectRoot } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; ackKey?: string; projectRoot?: string };
+                await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '', ackKey ?? '', projectRoot ?? '');
                 break;
             }
             case 'code.applyAll': {
-                const { ops, targetFolder } = (payload ?? {}) as { ops?: Array<{ file: string; content: string; ackKey?: string }>; targetFolder?: string };
+                const { ops, targetFolder, projectRoot } = (payload ?? {}) as { ops?: Array<{ file: string; content: string; ackKey?: string }>; targetFolder?: string; projectRoot?: string };
                 let okCount = 0;
                 for (const op of ops ?? []) {
                     // 파일마다 ackKey 를 되돌려 준다 — 웹뷰가 파일 단위로
                     // 성공/실패를 구분해야 실패한 파일만 재시도할 수 있다.
-                    const ok = await this.handleCodeApply(op.file, op.content, targetFolder ?? '', op.ackKey ?? '');
+                    const ok = await this.handleCodeApply(op.file, op.content, targetFolder ?? '', op.ackKey ?? '', projectRoot ?? '');
                     if (ok) { okCount++; }
                 }
                 this.postMessage('code.applied', { file: `전체 ${okCount}개`, ok: okCount > 0 });
                 break;
             }
             case 'code.diff': {
-                const { file, content, targetFolder } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string };
-                const resolved = this._resolveWriteRoot(targetFolder ?? '');
-                if (!resolved) { this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' }); break; }
+                const { file, content, targetFolder, projectRoot } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; projectRoot?: string };
+                const resolved = this._resolveWriteRoot(targetFolder ?? '', projectRoot ?? '');
+                //: diff 실패는 생성 턴의 실패가 아니다 — code.error 로 보내면 진행 중인 다른 생성 턴이 실패로 뒤집혔다.
+                if (!resolved) { void vscode.window.showErrorMessage('변경 비교를 열 수 없습니다: 대상 폴더가 워크스페이스에 없습니다.'); break; }
                 await this.handleCodeDiff(this._joinFolder(resolved.relFolder, file ?? ''), content ?? '', resolved.root);
                 break;
             }
@@ -1687,7 +1975,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const picked = await vscode.window.showOpenDialog({
                     canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
                     openLabel: '이 폴더에 생성',
-                    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+                    defaultUri: activeProjectUri(),
                 });
                 if (picked && picked[0]) {
                     //: 워크스페이스 안이면 상대경로, 밖이면 절대경로. 예전에는 밖을 고르면
@@ -1695,15 +1983,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     //: 루트에 생겼다. 밖의 폴더는 사용자가 다이얼로그에서 직접 고른 것이므로
                     //: 그 자리에서 워크스페이스에 추가한다 — 파일 쓰기는 워크스페이스 안으로만
                     //: 향한다는 규칙(_resolveWriteRoot)을 그대로 두기 위해서다.
-                    const desc = this._describeTargetFolder(picked[0].fsPath);
-                    if (!desc.insideWorkspace) {
-                        const already = (vscode.workspace.workspaceFolders ?? []).some((f) => f.uri.fsPath === desc.absolute);
-                        if (!already) {
-                            const count = vscode.workspace.workspaceFolders?.length ?? 0;
-                            vscode.workspace.updateWorkspaceFolders(count, 0, { uri: vscode.Uri.file(desc.absolute) });
+                    const previousProject = activeProjectPath();
+                    let desc = this._describeTargetFolder(picked[0].fsPath);
+                    if (!desc.insideWorkspace && !isInsideProjectRoot(desc.absolute)) {
+                        //: 워크스페이스에 넣지 않는다 — 단일 폴더 창에 폴더를 추가하면 VS Code 가 확장을
+                        //: 재시작해 이 화면이 끊기고 보낸 요청이 사라졌다(실기기 영상). 사용자가 대화상자에서
+                        //: 직접 고른 폴더라 외부 프로젝트로 기억해 그 폴더를 현재 프로젝트로 쓴다.
+                        try {
+                            await useExternalProject(desc.absolute);
+                        } catch (err) {
+                            this.postMessageToWebview(requestWebview, 'code.error', { message: `폴더를 쓸 수 없습니다: ${err instanceof Error ? err.message : String(err)}` });
+                            break;
                         }
+                        desc = this._describeTargetFolder(desc.absolute);
                     }
-                    this.postMessage('code.folderPicked', { folder: desc.display });
+                    //: 다른 프로젝트로 바꿨으면 그 폴더 경로를 보여 준다("루트"만 보이면 바뀐 줄 모른다).
+                    const switched = !samePath(activeProjectPath(), previousProject);
+                    this.postMessage('code.folderPicked', { folder: switched ? desc.absolute : (desc.insideWorkspace ? desc.display : desc.absolute) });
                 }
                 break;
             }
@@ -1711,7 +2007,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const picked = await vscode.window.showOpenDialog({
                     canSelectFolders: false, canSelectFiles: true, canSelectMany: true,
                     openLabel: '컨텍스트로 첨부',
-                    defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+                    defaultUri: activeProjectUri(),
                 });
                 const files: Array<{ path: string; content: string }> = [];
                 for (const uri of picked ?? []) {
@@ -1727,7 +2023,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'map.project': {
                 try {
-                    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                    const root = activeProjectPath();
                     if (!root) { this.postMessage('map.error', { message: '분석할 폴더가 열려있지 않습니다.' }); break; }
                     // 서버 불필요 — 확장 내부에서 정적 분석.
                     const data = analyzeProject(root);
@@ -1740,7 +2036,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'map.file': {
                 const { id } = (payload ?? {}) as { id?: string };
                 try {
-                    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                    const root = activeProjectUri();
                     if (!root) { this.postMessage('map.error', { message: '워크스페이스가 열려있지 않습니다.' }); break; }
                     const safe = (id ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                     if (!safe) { this.postMessage('map.error', { message: '대상 파일이 없습니다.' }); break; }
@@ -1754,7 +2050,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'adr.list': {
                 //: docs/adr/*.md 목록. 제목은 첫 번째 '# ' 줄, 없으면 파일명.
-                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const root = activeProjectUri();
                 if (!root) { this.postMessageToWebview(requestWebview, 'adr.listResult', { items: [], error: '워크스페이스가 열려있지 않습니다.' }); break; }
                 try {
                     const dir = vscode.Uri.joinPath(root, 'docs', 'adr');
@@ -1783,7 +2079,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'adr.read': {
                 const { file } = (payload ?? {}) as { file?: string };
-                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const root = activeProjectUri();
                 const safe = (file ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                 if (!root || !safe.startsWith('docs/adr/')) { this.postMessageToWebview(requestWebview, 'adr.readResult', { file, error: '읽을 수 없는 경로입니다.' }); break; }
                 try {
@@ -1796,7 +2092,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'adr.open': {
                 const { file } = (payload ?? {}) as { file?: string };
-                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const root = activeProjectUri();
                 const safe = (file ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                 if (root && safe) {
                     try { await vscode.window.showTextDocument(vscode.Uri.joinPath(root, safe), { preview: false }); } catch { /* ignore */ }
@@ -1806,7 +2102,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'map.openFile': {
                 const { id } = (payload ?? {}) as { id?: string };
                 try {
-                    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                    const root = activeProjectUri();
                     if (!root || !id) { break; }
                     const safe = id.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                     await vscode.window.showTextDocument(vscode.Uri.joinPath(root, safe));
@@ -1836,8 +2132,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             });
             this._codegenProviderRegistered = true;
         }
-        const root = rootOverride ?? vscode.workspace.workspaceFolders?.[0]?.uri;
-        if (!root) { this.postMessage('code.error', { message: '워크스페이스가 열려있지 않습니다.' }); return; }
+        const root = rootOverride ?? activeProjectUri();
+        if (!root) { void vscode.window.showErrorMessage('변경 비교를 열 수 없습니다: 워크스페이스가 열려 있지 않습니다.'); return; }
         const safe = file.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
         if (!safe) { return; }
         const fileUri = vscode.Uri.joinPath(root, safe);
@@ -1853,7 +2149,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const leftUri = exists ? fileUri : vscode.Uri.parse('recoder-codegen:/empty');
             await vscode.commands.executeCommand('vscode.diff', leftUri, proposedUri, `ReCoder 제안: ${safe}`);
         } catch (err) {
-            this.postMessage('code.error', { message: `diff 열기 실패: ${err}` });
+            void vscode.window.showErrorMessage(`변경 비교(diff)를 열지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
 
@@ -1865,12 +2161,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _joinFolder(folder: string, file: string): string {
         const f = (folder || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
         const n = (file || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        //: 모델이 대상 폴더를 포함한 경로(web/index.html)를 돌려주면 폴더를 한 번 더 붙이지 않는다
+        //: (예전: web/web/index.html 에 새 파일이 생기고 원래 파일은 수정되지 않았다).
+        if (f && (n === f || n.toLowerCase().startsWith(`${f.toLowerCase()}/`))) { return n; }
         return f ? `${f}/${n}` : n;
     }
 
     /** Core가 제안한 ADR 등 승인된 산출물을 워크스페이스에 안전하게 기록한다. */
     private async writeWorkspaceFile(file: string, content: string): Promise<string> {
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const root = activeProjectUri();
         if (!root) { throw new Error('워크스페이스가 열려있지 않습니다.'); }
         const safe = (file || '').replace(/\\/g, '/').replace(/^\/+/, '')
             .split('/').filter((segment) => segment && segment !== '..').join('/');
@@ -1901,6 +2200,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         //: 다른 곳에 만들라고 해도 Core 는 Re-Coder 를 스캔하고 거기 기준으로 생성했다.
         const scope = this._codeScope(opts.targetFolder ?? '');
         const workspacePath = scope.workspacePath;
+        const generatedRoot = this._resolveWriteRoot(opts.targetFolder ?? '')?.root.fsPath ?? '';
         // 인자가 없으면 현재 활성 에디터를 컨텍스트로 자동 첨부.
         let attach = opts.openFile;
         if (!attach) {
@@ -1909,7 +2209,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 attach = { path: vscode.workspace.asRelativePath(ed.document.uri), content: ed.document.getText() };
             }
         }
+        const status = (stage: string, message: string, waitSeconds: number) =>
+            this.postMessageToWebview(opts.requestWebview, 'code.status', { requestId: opts.requestId, stage, message, waitSeconds });
         try {
+            status('connecting', 'Core 연결을 확인하는 중…', 170);
+            await this.ensureConnection();
+            this.postMessageToWebview(opts.requestWebview, 'code.generating', { requestId: opts.requestId });
+            //: 큰 요청(쇼핑몰 등)은 파일 목록 → 나눠 생성 → 자동 교정까지 수 분 걸린다. Core 호출 상한(15분)보다 길게 기다린다.
+            status('generating', 'AI 가 코드를 만드는 중… (큰 요청은 몇 분 걸려요)', 960);
             const result = await this._apiClient.generateCode(instruction, {
                 workspacePath,
                 openFile: attach,
@@ -1923,6 +2230,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.postMessageToWebview(opts.requestWebview, 'code.result', {
                 ...result,
                 requestId: opts.requestId,
+                //: 생성할 때의 프로젝트 — 적용 전에 활성 프로젝트가 바뀌어도 이 결과는 이 폴더에만 쓴다.
+                projectRoot: generatedRoot,
             });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -1939,13 +2248,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         message: string,
         history: Array<{ role: 'user' | 'assistant'; content: string }>,
         requestWebview?: vscode.Webview,
+        targetFolder = '',
+        contextFiles: Array<{path: string; content: string}> = [],
     ): Promise<void> {
         if (!message.trim()) { return; }
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspacePath = activeProjectPath();
         try {
-            const result = await this._apiClient.chat(message, history, workspacePath);
+            await this.ensureConnection();
+            const result = await this._apiClient.chat(message, history, workspacePath, contextFiles);
             let action = result.action ?? null;
             if (action) {
+                if (targetFolder && action.target_source !== 'message') { action = { ...action, target_folder: targetFolder }; }
                 //: 경로를 사람이 읽을 형태로 정리해 카드에 보여준다. 실제 폴더 생성·워크스페이스
                 //: 추가는 승인을 누른 뒤(handleChatApproveAction)에만 한다.
                 const desc = this._describeTargetFolder(action.target_folder || '');
@@ -1973,7 +2286,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      * 반환 display 는 웹뷰·Core 에 넘기는 값이다: 안이면 상대경로(''=루트), 밖이면 절대경로.
      */
     private _describeTargetFolder(input: string): { display: string; absolute: string; insideWorkspace: boolean; exists: boolean; workspaceName: string } {
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const root = activeProjectPath();
         const workspaceName = root ? path.basename(root) : '';
         let raw = (input || '').trim().replace(/\\/g, '/');
         if (raw.startsWith('~')) {
@@ -2005,7 +2318,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      *    이 요청을 자기 턴으로 등록해 code.plan 을 보낸다. 결정 카드 → 생성 → diff → 적용은
      *    전부 기존 흐름이다.
      */
-    private async handleChatApproveAction(id: string, instruction: string, targetFolder: string, requestWebview?: vscode.Webview): Promise<void> {
+    private async handleChatApproveAction(id: string, instruction: string, targetFolder: string, requestWebview?: vscode.Webview, contextFiles: Array<{path: string; content: string}> = []): Promise<void> {
         //: 회신은 **승인을 누른 웹뷰에만** 보낸다. 사이드바와 큰 작업 화면은 같은 React 앱을
         //: 각각 띄우고 있어서, 전체에 뿌리면 두 CodeAgent 가 저마다 code.plan 을 보내
         //: 설계 결정이 두 번 만들어지고 모달이 엉뚱한 창에 뜬다.
@@ -2021,31 +2334,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 await vscode.workspace.fs.createDirectory(vscode.Uri.file(desc.absolute));
                 folderCreated = true;
             }
-            if (!desc.insideWorkspace) {
-                const already = (vscode.workspace.workspaceFolders ?? []).some((f) => f.uri.fsPath === desc.absolute);
-                if (!already) {
-                    const count = vscode.workspace.workspaceFolders?.length ?? 0;
-                    //: **여기서 확장이 통째로 재시작될 수 있다.** 빈 창(폴더 0개)에
-                    //: 폴더를 추가하면 VSCode 는 확장 호스트를 재시작하고, 아래의
-                    //: chat.actionAccepted 는 영영 발송되지 못한다 — 화면은 복원된
-                    //: 스피너만 돌리는 "무한 로딩"이 된다 (실기기에서 실제 발생).
-                    //: 그래서 추가 **직전에** 재시작을 살아남는 globalState 에 요청을
-                    //: 적어 두고, 재시작 후 첫 webview.ready 가 이어서 발송한다.
-                    //: 재시작이 없었으면 아래에서 바로 지운다.
-                    await this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, {
-                        instruction,
-                        targetFolder: desc.display,
-                        absolutePath: desc.absolute,
-                        folderCreated,
-                        ts: Date.now(),
-                    });
-                    const ok = vscode.workspace.updateWorkspaceFolders(count, 0, { uri: vscode.Uri.file(desc.absolute) });
-                    if (!ok) {
-                        await this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, undefined);
-                        throw new Error('워크스페이스에 폴더를 추가하지 못했습니다.');
-                    }
-                    addedToWorkspace = true;
-                }
+            if (!desc.insideWorkspace && !isInsideProjectRoot(desc.absolute)) {
+                //: 예전에는 여기서 폴더를 워크스페이스에 추가했고, 빈 창·단일 폴더 창에서는 VS Code 가
+                //: 확장을 재시작해 요청이 유실됐다(인계 메모로 버텼다). 이제 워크스페이스는 건드리지 않고
+                //: 승인한 폴더를 외부 프로젝트로 쓴다 — 재시작이 없으니 요청이 그대로 이어진다.
+                await useExternalProject(desc.absolute);
+                addedToWorkspace = true;
             }
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -2055,7 +2349,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         //: CodeAgent 의 턴 번호(1,2,3…)와 겹치지 않도록 시각 기반 id 를 쓴다.
         const requestId = Date.now();
         this.postMessageToWebview(requestWebview, 'chat.actionAccepted', {
-            id, requestId, instruction,
+            id, requestId, instruction, contextFiles,
             targetFolder: desc.display,
             absolutePath: desc.absolute,
             folderCreated, addedToWorkspace,
@@ -2066,27 +2360,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     /** targetFolder 가 절대경로(워크스페이스 밖)면 그 폴더를, 아니면 첫 워크스페이스 폴더를 루트로 쓴다. */
-    private _resolveWriteRoot(targetFolder: string): { root: vscode.Uri; relFolder: string } | null {
+    private _resolveWriteRoot(targetFolder: string, projectRoot: string = ''): { root: vscode.Uri; relFolder: string } | null {
         const raw = (targetFolder || '').trim();
+        //: 생성 결과에 붙은 프로젝트 루트 — 그 사이 활성 프로젝트가 바뀌어도 다른 프로젝트에 쓰지 않는다.
+        //: 그 폴더가 더는 워크스페이스에 없으면 쓰지 않는다(다시 생성해야 한다).
+        if (projectRoot && !(raw && (path.isAbsolute(raw) || raw.startsWith('~')))) {
+            const inWorkspace = isInsideProjectRoot(projectRoot);
+            return inWorkspace ? { root: vscode.Uri.file(projectRoot), relFolder: raw } : null;
+        }
         if (raw && (path.isAbsolute(raw) || raw.startsWith('~'))) {
             const desc = this._describeTargetFolder(raw);
             if (desc.insideWorkspace) {
-                const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+                const root = activeProjectUri();
                 return root ? { root, relFolder: desc.display } : null;
             }
-            //: 밖의 절대경로는 워크스페이스에 추가된 폴더여야만 쓴다. 승인 카드를 거치지 않은
-            //: 임의 경로(예: 오래된 웹뷰 상태)로 파일이 새는 것을 막는다.
-            const allowed = (vscode.workspace.workspaceFolders ?? []).some((f) => desc.absolute === f.uri.fsPath || desc.absolute.startsWith(f.uri.fsPath + path.sep));
+            //: 밖의 절대경로는 워크스페이스 폴더나 사용자가 고른 외부 프로젝트 안이어야만 쓴다. 승인 카드·
+            //: 폴더 선택을 거치지 않은 임의 경로(예: 오래된 웹뷰 상태)로 파일이 새는 것을 막는다.
+            const allowed = isInsideProjectRoot(desc.absolute);
             if (!allowed) { return null; }
             return { root: vscode.Uri.file(desc.absolute), relFolder: '' };
         }
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const root = activeProjectUri();
         return root ? { root, relFolder: raw } : null;
     }
 
     /** Core 에 넘길 (workspacePath, targetFolder). 절대경로 대상이면 그 폴더가 곧 프로젝트 루트다. */
     private _codeScope(targetFolder: string): { workspacePath: string; targetFolder: string } {
-        const first = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const first = activeProjectPath();
         const raw = (targetFolder || '').trim();
         if (raw && (path.isAbsolute(raw) || raw.startsWith('~'))) {
             const desc = this._describeTargetFolder(raw);
@@ -2118,7 +2418,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         }
 
+        //: 웹뷰에 단계마다 알린다 — 웹뷰는 이 알림으로 "응답 없음" 판정 시간을 단계에 맞게 늘린다.
+        //: 알림이 한 번도 오지 않으면 요청이 확장에 닿지 않은 것이다(웹뷰가 그렇게 안내한다).
+        const status = (stage: string, message: string, waitSeconds: number) =>
+            this.postMessageToWebview(opts.requestWebview, 'code.status', { requestId: opts.requestId, stage, message, waitSeconds });
         try {
+            status('connecting', 'Core 연결을 확인하는 중…', 170);
+            await this.ensureConnection();
+            status('planning', 'AI 가 설계 결정을 준비하는 중…', 270);
             const plan = await this._apiClient.planCode(instruction, {
                 workspacePath,
                 openFile: attach,
@@ -2136,7 +2443,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const msg = err instanceof Error ? err.message : String(err);
             this.postMessageToWebview(opts.requestWebview, 'code.error', {
                 requestId: opts.requestId,
-                message: `설계 결정 생성 실패: ${msg}`,
+                message: msg.startsWith('설계 결정 생성 실패:') ? msg : `설계 결정 생성 실패: ${msg}`,
             });
         }
     }
@@ -2147,13 +2454,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      * 어느 쪽이든 그대로 되돌려 준다 — 웹뷰는 이 확인을 받아야만 "적용됨"을
      * 표시한다. 확인 없이 표시하면 쓰기 실패가 성공으로 굳는다.
      */
-    private async handleCodeApply(file: string, content: string, targetFolder: string = '', ackKey: string = ''): Promise<boolean> {
+    private async handleCodeApply(file: string, content: string, targetFolder: string = '', ackKey: string = '', projectRoot: string = ''): Promise<boolean> {
         const ack = ackKey ? { ackKey } : {};
-        const resolved = this._resolveWriteRoot(targetFolder);
+        const resolved = this._resolveWriteRoot(targetFolder, projectRoot);
         if (!resolved) {
             this.postMessage('code.error', { message: targetFolder && path.isAbsolute(targetFolder)
                 ? `대상 폴더가 워크스페이스에 없습니다: ${targetFolder}. 승인 카드에서 다시 승인해 주세요.`
-                : '워크스페이스가 열려있지 않습니다.', ...ack });
+                : projectRoot
+                    ? `이 코드를 만든 프로젝트(${path.basename(projectRoot)})가 더는 워크스페이스에 없어 적용하지 않았습니다. 다시 생성해 주세요.`
+                    : '워크스페이스가 열려있지 않습니다.', ...ack });
             return false;
         }
         const root = resolved.root;
@@ -2165,10 +2474,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         const uri = vscode.Uri.joinPath(root, safe);
         try {
+            //: 심볼릭 링크를 따라 워크스페이스 밖(예: ~/.bashrc)을 덮어쓰지 않는다.
+            if (uri.scheme === 'file' && fs.existsSync(root.fsPath)) {
+                //: 아직 없는 파일이면 가장 가까운 기존 상위 폴더를 본다 — 폴더 링크(cfg → ~/.config) 아래 새 파일도 막는다.
+                let probe = uri.fsPath;
+                while (!fs.existsSync(probe) && path.dirname(probe) !== probe) { probe = path.dirname(probe); }
+                const real = fs.realpathSync(probe), realRoot = fs.realpathSync(root.fsPath);
+                const rel = path.relative(realRoot, real);
+                if (rel.startsWith('..') || path.isAbsolute(rel)) {
+                    this.postMessage('code.error', { message: `${safe} 은(는) 프로젝트 밖을 가리키는 링크라 적용하지 않았습니다.`, ...ack });
+                    return false;
+                }
+            }
+            //: 기존 파일은 덮어쓰기 전에 .recoder/backups 에 남긴다 — AI 가 "전체 내용"을 다시 쓰므로
+            //: 잘못된 결과가 원래 코드를 지우면 되돌릴 방법이 없었다.
+            let backup = '';
+            try {
+                const before = await vscode.workspace.fs.readFile(uri);
+                const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const backupUri = vscode.Uri.joinPath(root, '.recoder', 'backups', `${safe.replace(/\//g, '__')}.${stamp}`);
+                await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(backupUri, '..'));
+                await vscode.workspace.fs.writeFile(backupUri, before);
+                backup = vscode.workspace.asRelativePath(backupUri);
+            } catch { /* 새 파일 */ }
             await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
             await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
             await vscode.window.showTextDocument(uri, { preview: false });
-            this.postMessage('code.applied', { file: safe, ok: true, ...ack });
+            this.postMessage('code.applied', { file: safe, ok: true, ...(backup ? { backup } : {}), ...ack });
             return true;
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -2236,7 +2568,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handlePasteErrorLog(errorLog: string): Promise<void> {
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspacePath = activeProjectPath();
         await this.handleAnalyze({ workspace_path: workspacePath, terminal_output: errorLog });
     }
 
@@ -2296,7 +2628,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private async collectContext(): Promise<Partial<AnalyzeRequest>> {
         const editor = vscode.window.activeTextEditor;
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspacePath = activeProjectPath();
         const result: Partial<AnalyzeRequest> = { workspace_path: workspacePath };
         if (editor) {
             result.active_file_path = editor.document.uri.fsPath;

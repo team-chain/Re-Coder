@@ -13,6 +13,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import logging
 import os
 import posixpath
 import re
@@ -20,9 +21,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from llm.base import LLMRequest
+from llm.base import LLMRequest, LLMError, LLMErrorType
 from llm.router import get_router
+from code_output import CODE_OUTPUT_SCHEMA, CodeOutputError, parse_code_output
 from schemas import AnalyzeRequest, FilePatch, PatchProposal, RiskLevel
+
+log = logging.getLogger(__name__)
 
 try:  # main.py 스택(core 를 sys.path 로) / 패키지 실행 양쪽 지원
     from adr import (
@@ -74,6 +78,18 @@ _SOURCE_EXTS = {
 _MAX_FILES         = 5
 _MAX_FILE_BYTES    = 50_000
 _MAX_PROMPT_BYTES  = 4_000   # 파일 한 개당 프롬프트에 박을 최대 본문
+#: 지금 편집 중인 파일은 수정 대상일 가능성이 가장 높다 — 잘린 채 "전체 내용"을 다시 쓰면 뒷부분이
+#: 사라진다(검토: 11KB 파일이 4KB 로 덮어써짐). 더 넉넉히 보내고, 잘랐으면 모델에게 알린다.
+_MAX_OPEN_FILE_BYTES = 24_000
+
+
+def _prompt_body(content: str, limit: int) -> str:
+    """프롬프트에 넣을 파일 본문. 잘랐으면 그 사실과 규칙을 붙인다."""
+    text = content or ""
+    if len(text) <= limit:
+        return text
+    return (text[:limit] + f"\n... [ReCoder: 이 파일은 {len(text)}자 중 앞 {limit}자만 보냈습니다. "
+            "이 파일은 전체를 다시 쓰지 말고, 꼭 필요하면 새 파일로 분리하세요.]")
 _MAX_TOTAL_PROMPT  = 18_000  # 전체 프롬프트 상한 (토큰 quota 보호)
 
 
@@ -812,21 +828,21 @@ _CODE_AGENT_TREE_LIMIT = 80   # 컨텍스트에 넣을 기존 파일 경로 최�
 def _list_project_files(root: Path, limit: int = _CODE_AGENT_TREE_LIMIT) -> list[str]:
     """충돌 회피·맥락용 기존 파일 경로 목록(상대경로). 가벼운 트리."""
     out: list[str] = []
+    if limit <= 0:
+        return out
     try:
-        for p in sorted(root.rglob("*")):
-            if len(out) >= limit:
-                break
-            if p.is_dir():
-                continue
-            if any(part in _SKIP_DIRS for part in p.parts):
-                continue
-            if p.suffix.lower() in _SOURCE_EXTS or p.suffix.lower() in {
-                ".html", ".css", ".json", ".md", ".txt", ".yml", ".yaml", ".toml",
-            }:
-                try:
-                    out.append(str(p.relative_to(root)).replace("\\", "/"))
-                except ValueError:
-                    continue
+        # Prune before descent. Sorting rglob materialized the entire dependency
+        # tree before the 80-file limit could take effect, stalling AI requests.
+        for directory, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = sorted(name for name in dirs if name not in _SKIP_DIRS)
+            for name in sorted(files):
+                p = Path(directory) / name
+                if p.suffix.lower() in _SOURCE_EXTS or p.suffix.lower() in {
+                    ".html", ".css", ".json", ".md", ".txt", ".yml", ".yaml", ".toml",
+                }:
+                    out.append(p.relative_to(root).as_posix())
+                    if len(out) >= limit:
+                        return out
     except Exception:
         pass
     return out
@@ -862,6 +878,29 @@ def _decisions_prompt_block(decisions: list[NormalizedDecision]) -> str:
     )
 
 
+def _scrub_context(open_file, prior_files, context_files, secrets: dict | None = None):
+    """열린 파일·참고 파일의 비밀(.env 본문, 키 문자열)을 AI 로 보내지 않는다."""
+    try:
+        from context_gate import scrub_file_entry
+    except ImportError:  # pragma: no cover
+        from core.context_gate import scrub_file_entry  # type: ignore
+    return (scrub_file_entry(open_file, secrets) if open_file else open_file,
+            [scrub_file_entry(f, secrets) for f in prior_files] if prior_files else prior_files,
+            [scrub_file_entry(f, secrets) for f in context_files] if context_files else context_files)
+
+
+def _restore_secrets_in_ops(ops: list[dict], secrets: dict) -> None:
+    if not secrets:
+        return
+    try:
+        from context_gate import restore_code_secrets
+    except ImportError:  # pragma: no cover
+        from core.context_gate import restore_code_secrets  # type: ignore
+    for op in ops:
+        if isinstance(op.get("content"), str):
+            op["content"] = restore_code_secrets(op["content"], secrets)
+
+
 def _build_code_prompt(
     instruction: str,
     existing_files: list[str],
@@ -875,10 +914,11 @@ def _build_code_prompt(
 
     `decisions` 는 `adr.normalize_decisions` 를 거친 목록이어야 한다.
     """
+    open_file, prior_files, context_files = _scrub_context(open_file, prior_files, context_files)
     tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
     prior_block = ""
     for pf in (prior_files or [])[:4]:
-        body = (pf.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(pf.get("content") or "", _MAX_PROMPT_BYTES)
         if body.strip():
             prior_block += f"\n[직전 생성 파일] {pf.get('path','?')}\n```\n{body}\n```\n"
     if prior_block:
@@ -886,7 +926,7 @@ def _build_code_prompt(
 
     ctx_block = ""
     for cf in (context_files or [])[:6]:
-        body = (cf.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(cf.get("content") or "", _MAX_PROMPT_BYTES)
         if body.strip():
             ctx_block += f"\n[참고 파일] {cf.get('path','?')}\n```\n{body}\n```\n"
     if ctx_block:
@@ -895,13 +935,13 @@ def _build_code_prompt(
     folder_block = ""
     if (target_folder or "").strip():
         folder_block = (
-            f"\n[대상 폴더] 생성/수정 파일의 경로는 '{target_folder.strip().rstrip('/')}/' 아래 "
-            f"상대경로로 정하라(예: {target_folder.strip().rstrip('/')}/index.html).\n"
+            f"\n[대상 폴더] 생성/수정 파일은 '{target_folder.strip().rstrip('/')}/' 안에 둔다. 경로는 **대상 폴더 기준** "
+            f"상대경로로 쓴다(예: index.html, src/app.js — 앞에 '{target_folder.strip().rstrip('/')}/' 를 붙이지 않는다).\n"
         )
 
     open_block = ""
     if open_file and (open_file.get("content") or "").strip():
-        body = (open_file.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(open_file.get("content") or "", _MAX_OPEN_FILE_BYTES)
         open_block = (
             f"\n현재 편집 중인 파일: {open_file.get('path', '(unknown)')}\n"
             f"```\n{body}\n```\n"
@@ -918,10 +958,26 @@ def _build_code_prompt(
 - 각 파일 작업은 그 파일의 "전체 최종 내용"을 담습니다 (부분 diff 아님).
 - 새 파일이면 action="create", 기존 파일을 바꾸면 action="edit".
 - 가능한 한 적은 수의 파일로, 즉시 실행/렌더 가능한 완결된 코드를 작성합니다.
-- 외부 빌드 도구 없이 동작하도록 합니다(예: 단일 HTML 은 인라인 CSS/JS).
-- 데이터 저장이 필요하면 외부 DB 대신 localStorage 를 사용합니다.
+- 사용자가 지정한 프레임워크와 승인된 설계를 따르고, 실행에 필요한 설정 파일도 포함합니다.
+- 프레임워크 지정이나 기존 프로젝트 제약이 없을 때만 단일 HTML 등 간단한 구성을 선택합니다.
+- TypeScript 코드는 tsconfig와 일치해야 합니다. jsx="react-jsx"에서는 사용하지 않는 React 기본 import를 넣지 마세요.
 - 기존 파일 목록과 겹치지 않게 파일명을 정하되, 사용자가 파일명을 지정하면 그대로 따릅니다.
 - 사용자가 확정한 설계 결정이 있으면 그 선택을 우선하고 임의로 다른 방식을 택하지 않습니다.
+- package.json 의 scripts 는 실제로 존재하는 파일과 설치되는 도구만 참조합니다. 쓰지 않는 빌드 스크립트나 의존성(예: src/ 없는 react-scripts)을 넣지 마세요.
+- 의존성은 알려진 치명적 취약점이 없는 최신 major 버전을 씁니다(예: sqlite3 는 ^6.0.1 — 5.x 는 배포 보안 검사에서 차단됩니다).
+- 코드가 require/import 하는 외부 패키지는 모두 package.json(또는 requirements.txt)에 선언합니다.
+- 서버는 포트를 환경변수로 받게 합니다(예: process.env.PORT || 3000). 가능하면 GET /health 가 200 을 돌려주게 합니다.
+- 화면(React·Vue 등)과 API 서버를 함께 만들면 서버가 빌드된 화면 폴더를 정적으로 제공하고, 화면은 API 를 상대 경로(/api/…)로 부릅니다. localhost 주소를 코드에 넣지 마세요.
+- Vite 프로젝트에서는 JSX 가 든 파일을 .jsx/.tsx 로 만들고, 브라우저 코드의 환경변수는 import.meta.env.VITE_* 만 씁니다(process.env 금지).
+- PostgreSQL(pg)의 NUMERIC/DECIMAL 값은 문자열로 옵니다 — 서버에서 숫자로 바꾸거나 pg.types.setTypeParser(1700, parseFloat) 를 설정하세요.
+- 파일을 나눠 만들 때 서로 부르는 함수·컴포넌트 이름과 export 방식을 정확히 맞추고, import 하는 파일(CSS 포함)은 반드시 함께 만듭니다.
+- 회원가입/로그인이 있으면 실제 입력 화면·라우트·인증 상태 공급자·로그아웃까지 연결합니다. 권한은 서버에서 확인하고 관리자 기본 계정/비밀번호를 만들지 않습니다. 비밀 환경변수가 없으면 시작을 거절하며 기본 JWT 비밀값을 두지 않습니다. 로그인 시도 횟수 제한, 비밀번호 길이 검증, 일반화된 오류 응답을 구현합니다.
+- 쇼핑몰/결제에서는 가격·합계·사용자 ID·권한을 클라이언트 입력으로 신뢰하지 않습니다. 서버 DB 가격으로 최소 화폐 단위 정수 금액을 계산하고, 수량은 양의 정수로 검증합니다. 주문과 재고 예약은 DB 트랜잭션/행 잠금으로 묶어 동시 주문의 초과 판매를 막고, 주문 재시도에는 사용자별 idempotency key를 사용합니다.
+- 결제 완료는 서명 검증된 웹훅에서만 처리합니다. raw body 라우트를 JSON 파서보다 먼저 등록하고, 주문 소유자·저장된 payment ID·통화·금액을 대조하며 이벤트 ID를 DB에 UNIQUE로 저장해 중복 처리를 막습니다. 사용자가 paid/completed 상태를 직접 지정하는 API는 금지합니다. 실패/취소 시 재고는 정확히 한 번 복원합니다. 미결제 주문의 만료·취소 경로도 만듭니다.
+- 결제 테스트는 명시적 테스트 환경에서만 별도 API 호스트/포트를 주입할 수 있게 합니다. 브라우저에서 테스트 성공을 누르는 것만으로 결제를 확정하거나 운영 환경에서 모의 결제를 허용하면 안 됩니다. 실제 결제사 설정이 필요한 부분은 README에 명시합니다.
+- DB 스키마·초기화 명령·필요 환경변수 예시·root 실행/빌드 스크립트·Dockerfile·.dockerignore·README를 포함합니다. 빈 CSS나 가짜 성공 동작으로 기능을 대신하지 않습니다. DB TLS 인증서 검증을 끄지 않습니다. 인증 토큰 저장과 CORS/CSRF 정책을 일관되게 설계합니다.
+- React Router 를 쓰면 페이지 이동은 <Link>/useNavigate 로 합니다(<a href> 는 상태를 잃습니다).
+- 자리표시 이미지는 https://placehold.co/300x200?text=이름 형식을 씁니다(via.placeholder.com·placeimg.com 은 문을 닫아 이미지가 깨집니다).
 
 기존 파일 목록:
 {tree}
@@ -958,6 +1014,43 @@ def _build_code_prompt(
 #: 들어가는 크기로 올린다.
 _PLAN_MAX_TOKENS = 4096
 
+#: 설계 결정 응답 스키마 — 모델이 구조화 출력(tool use)으로 답하게 해 **항상 올바른 JSON** 을 받는다.
+#: 자유 텍스트로 받으면 한국어 설명 안의 따옴표("운영" 같은)를 이스케이프하지 않아 JSON 이 깨지고
+#: 두 번 다 "닫히지 않은 JSON 객체"로 실패했다(실기기 쇼핑몰 요청).
+PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decisions": {
+            "type": "array", "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "question": {"type": "string"},
+                    "options": {
+                        "type": "array", "minItems": 2, "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "label": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "pros": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+                                "cons": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+                                "recommended": {"type": "boolean"},
+                            },
+                            "required": ["key", "label"],
+                        },
+                    },
+                    "impact": {"type": "string"},
+                },
+                "required": ["id", "question", "options"],
+            },
+        },
+    },
+    "required": ["decisions"],
+}
+
 
 def _build_plan_prompt(
     instruction: str,
@@ -967,6 +1060,7 @@ def _build_plan_prompt(
     context_files: list[dict] | None = None,
 ) -> str:
     """/api/code/plan 용 프롬프트 — 코드가 아니라 '설계 결정 선택지'를 요구한다."""
+    open_file, _prior, context_files = _scrub_context(open_file, None, context_files)
     tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
 
     folder_block = ""
@@ -975,7 +1069,7 @@ def _build_plan_prompt(
 
     open_block = ""
     if open_file and (open_file.get("content") or "").strip():
-        body = (open_file.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(open_file.get("content") or "", _MAX_OPEN_FILE_BYTES)
         open_block = (
             f"\n현재 편집 중인 파일: {open_file.get('path', '(unknown)')}\n"
             f"```\n{body}\n```\n"
@@ -983,7 +1077,7 @@ def _build_plan_prompt(
 
     ctx_block = ""
     for cf in (context_files or [])[:6]:
-        body = (cf.get("content") or "")[:_MAX_PROMPT_BYTES]
+        body = _prompt_body(cf.get("content") or "", _MAX_PROMPT_BYTES)
         if body.strip():
             ctx_block += f"\n[참고 파일] {cf.get('path', '?')}\n```\n{body}\n```\n"
     if ctx_block:
@@ -1342,14 +1436,25 @@ def generate_plan(
             prompt
             + "\n\n[재시도] 직전 응답이 올바른 JSON 이 아니었습니다. 설명 문장 없이 "
               "위 형식의 JSON 객체 하나만 반환하세요. 분량이 길어지면 결정 개수를 "
-              "줄여서라도 JSON 을 완결하세요."
+              "줄여서라도 JSON 을 완결하세요. 문자열 안에서는 큰따옴표(\")를 쓰지 말고 "
+              "pros·cons 는 선택지마다 짧게 2개 이하로 쓰세요."
         )
         try:
             llm_resp = get_router().call(
-                LLMRequest(prompt=attempt_prompt, max_tokens=_PLAN_MAX_TOKENS, temperature=0.2),
+                LLMRequest(prompt=attempt_prompt, json_schema=PLAN_SCHEMA,
+                           max_tokens=_PLAN_MAX_TOKENS, temperature=0.2),
                 agent="code_agent",
                 operation="generate_plan",
             )
+        except LLMError as e:
+            if e.error_type == LLMErrorType.STRUCTURED_OUTPUT:
+                last_parse_error = RuntimeError(str(e) or "모델 출력이 응답 길이 제한에서 잘렸습니다.")
+                print(f"[code_agent] plan 구조화 출력 실패 (시도 {attempt + 1}/2): {e}", flush=True)
+                continue
+            from llm.failure import public_ai_failure_reason
+            log.warning('Design generation provider failure: %s', e)
+            guidance = ' 잠시 후 같은 요청으로 다시 시도해 주세요.' if e.retryable else ' AI 연결 설정을 확인해 주세요.'
+            raise RuntimeError(f"LLM 호출 실패: {public_ai_failure_reason(e)}{guidance}") from e
         except Exception as e:
             raise RuntimeError(f"LLM 호출 실패: {e}") from e
 
@@ -1494,6 +1599,447 @@ def generate_plan(
     return result
 
 
+def _relative_to_target(ops: list[dict], target_folder: str) -> list[dict]:
+    """op 경로를 대상 폴더 기준으로 맞춘다. 모델이 'web/index.html' 처럼 대상 폴더를 붙여 돌려주면
+    적용 단계에서 폴더가 한 번 더 붙어 web/web/index.html 이 생겼다(확장·ADR·삭제 경고는 대상 기준)."""
+    folder = (target_folder or "").replace("\\", "/").strip().strip("/")
+    if not folder or Path(folder).is_absolute() or re.match(r"^[A-Za-z]:", folder):
+        return ops
+    prefix = folder.lower() + "/"
+    for op in ops:
+        name = str(op.get("file") or "")
+        if name.lower().startswith(prefix):
+            op["file"] = name[len(prefix):]
+    return ops
+
+
+def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[dict], list[str]]:
+    """AI 를 다시 부르지 않고 확실히 고칠 수 있는 것만 ops 에서 고친다.
+
+    나눠서 만든 파일끼리 자주 어긋나는 것들(실기기 쇼핑몰): Vite 인데 JSX 가 든 .js,
+    import 하지만 만들지 않은 CSS, CRA 식 process.env, 선언과 다른 패키지 이름.
+    """
+    try:
+        from build_readiness import (add_missing_export, analyze, api_prefix_rewrite, dead_image_rewrite, jsx_reference_rewrite,
+                                     pg_numeric_parser_rewrite, relative_api_rewrite, rename_package_import,
+                                     router_link_rewrite, set_build_script, vite_env_rewrite, vite_out_dir_rewrite)
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import (add_missing_export, analyze, api_prefix_rewrite, dead_image_rewrite,  # type: ignore
+                                          jsx_reference_rewrite, pg_numeric_parser_rewrite, relative_api_rewrite,
+                                          rename_package_import, router_link_rewrite, set_build_script,
+                                          vite_env_rewrite, vite_out_dir_rewrite)
+    _JS_EXTS = (".js", ".cjs", ".mjs")
+    folder = (target_folder or "").replace("\\", "/").strip("/")
+    base = (root / folder).resolve() if folder and not Path(folder).is_absolute() else (Path(folder) if folder else root.resolve())
+    by_path = {str(op.get("file") or "").replace("\\", "/").lstrip("/"): op for op in ops}
+    notes: list[str] = []
+    manifests = ("package.json",)
+    projects = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) in manifests})
+    if (base / "package.json").is_file() or "package.json" in by_path:
+        projects = [""]
+    for project in projects[:5]:
+        prefix = f"{project}/" if project else ""
+        overlay = {p[len(prefix):]: op.get("content") or "" for p, op in by_path.items() if p.startswith(prefix)}
+        try:
+            data = analyze(base / project, overlay, dockerfile=None).fix_data
+        except Exception as exc:  # noqa: BLE001 - 교정 실패는 원래 결과로 둔다
+            print(f"[code_agent] 자동 교정 점검 생략: {exc}", flush=True)
+            continue
+        for importer, spec in data.get("missing_styles") or []:
+            if prefix + importer not in by_path:
+                continue
+            rel = prefix + posixpath.normpath(posixpath.join(posixpath.dirname(importer), spec))
+            if rel not in by_path and not (base / rel).exists():
+                by_path[rel] = {"action": "create", "file": rel, "language": "css",
+                                "content": "/* ReCoder: 코드가 불러오지만 AI 가 만들지 않은 스타일 파일 — 필요한 스타일을 채우세요. */\n",
+                                "rationale": "import 하는 스타일 파일이 없어 빌드가 실패하지 않도록 빈 파일을 만들었습니다."}
+                notes.append(f"{rel}: 빈 스타일 파일 추가")
+        for rel in data.get("jsx_in_js") or []:
+            op = by_path.pop(prefix + rel, None)
+            if op is None:
+                continue
+            new_rel = prefix + rel[:-3] + ".jsx"
+            op["file"] = new_rel
+            by_path[new_rel] = op
+            if (base / (prefix + rel)).exists():
+                #: 디스크에 옛 .js 가 남는다(확장은 파일을 지우지 않는다). 이번 결과에 없는 파일이 './App' 처럼
+                #: 확장자 없이 가져오면 Vite 는 .js 를 먼저 찾아 옛 코드를 쓴다 — 옛 파일을 새 .jsx 로 넘겨주는 파일로 바꾼다.
+                content = op.get("content") or ""
+                target = "./" + posixpath.basename(new_rel)
+                stub = f"// ReCoder: {posixpath.basename(new_rel)} 로 옮겼습니다(JSX 는 .jsx 여야 Vite 가 읽습니다).\n"
+                stub += f"export * from '{target}';\n"
+                if re.search(r"\bexport\s+default\b|\bexport\s*\{[^}]*\bas\s+default\b", content):
+                    stub += f"export {{ default }} from '{target}';\n"
+                by_path[prefix + rel] = {"action": "edit", "file": prefix + rel, "language": "javascript", "content": stub,
+                                         "rationale": f"내용을 {posixpath.basename(new_rel)} 로 옮기고 예전 경로는 그 파일을 다시 내보냅니다."}
+            for other_path, other in by_path.items():
+                if other_path.endswith((".html", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue")):
+                    other["content"] = jsx_reference_rewrite(other.get("content") or "", other_path, prefix + rel, new_rel)
+            notes.append(f"{prefix + rel} → {new_rel}(Vite JSX)")
+        for rel in data.get("router_anchor_files") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = router_link_rewrite(op.get("content") or "")
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: <a href> → <Link>")
+        for rel in data.get("hardcoded_api") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = relative_api_rewrite(op.get("content") or "")
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: localhost API 주소 → 상대 경로")
+        for rel in data.get("dead_images") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = dead_image_rewrite(op.get("content") or "")
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: 닫힌 이미지 서비스 주소 → placehold.co")
+        for rel in data.get("pg_numeric_files") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = pg_numeric_parser_rewrite(op.get("content") or "")
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: pg NUMERIC 숫자 파서 추가")
+        for rel in data.get("process_env") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                op["content"] = vite_env_rewrite(op.get("content") or "")
+                notes.append(f"{prefix + rel}: process.env → import.meta.env")
+        for old_pkg, new_pkg in (data.get("package_typos") or {}).items():
+            for op in by_path.values():
+                updated = rename_package_import(op.get("content") or "", old_pkg, new_pkg)
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{op['file']}: {old_pkg} → {new_pkg}")
+        #: 나눠 만든 서버 파일끼리 ESM(import)·CommonJS(require)가 섞이면 컨테이너가 시작 직후 죽는다(실기기 TEMP).
+        #: 진입 파일 형식으로 통일한다. 이름을 바꿀 파일이 이번 결과에 없으면(디스크에만 있음) AI 교정에 맡긴다.
+        fmt = data.get("module_format") or {}
+        if fmt.get("auto") and all(prefix + old in by_path for old, _new in fmt.get("renames") or []):
+            for old, new in fmt.get("renames") or []:
+                op = by_path.pop(prefix + old)
+                op["file"] = prefix + new
+                by_path[prefix + new] = op
+                notes.append(f"{prefix + old} → {prefix + new}(모듈 형식)")
+            for rel, content in (fmt.get("writes") or {}).items():
+                op = by_path.get(prefix + rel)
+                if op is None:
+                    op = {"action": "edit", "file": prefix + rel, "language": "javascript" if rel.endswith(_JS_EXTS) else "json",
+                          "content": content, "rationale": "서버 파일들의 모듈 형식(ESM·CommonJS)을 하나로 맞췄습니다."}
+                    by_path[prefix + rel] = op
+                if op.get("content") != content:
+                    op["content"] = content
+                    notes.append(f"{prefix + rel}: 모듈 형식 통일")
+        #: 나눠 만든 파일끼리 내보내기가 어긋남(선언만 하고 export 안 함, 기본 내보내기 없음, 객체 안의 함수를 이름으로 가져옴).
+        for target, name, kind in data.get("missing_exports") or []:
+            op = by_path.get(prefix + target)
+            if op is None:
+                continue
+            updated = add_missing_export(op.get("content") or "", name, kind)
+            if updated is not None and updated != op.get("content"):
+                op["content"] = updated
+                notes.append(f"{prefix + target}: {name.replace('default:', '기본 내보내기 ')} 내보내기")
+        #: baseURL 이 /api 인 axios 인스턴스로 '/api/…' 를 또 부르면 /api/api/… 404
+        for rel, names in (data.get("api_double_prefix") or {}).items():
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = api_prefix_rewrite(op.get("content") or "", names)
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: /api 중복 제거")
+        #: 서버가 제공하는 화면 폴더를 Docker 빌드(npm run build)가 만들도록 루트 build 를 잇는다.
+        ui = data.get("frontend_build") or {}
+        if ui.get("vite_config") and by_path.get(prefix + ui["vite_config"]) is not None:
+            vite_op = by_path[prefix + ui["vite_config"]]
+            updated = vite_out_dir_rewrite(vite_op.get("content") or "", ui["vite_out_to"])
+            if updated is not None and updated != vite_op.get("content"):
+                vite_op["content"] = updated
+                notes.append(f"{prefix + ui['vite_config']}: outDir → {ui['vite_out_to']}(서버가 제공하는 폴더)")
+        manifest_op = by_path.get(prefix + "package.json")
+        if ui.get("build") and manifest_op is not None:
+            try:
+                updated = set_build_script(manifest_op.get("content") or "", ui["build"])
+            except (ValueError, TypeError, AttributeError):
+                updated = manifest_op.get("content")
+            if updated != manifest_op.get("content"):
+                manifest_op["content"] = updated
+                notes.append(f"{prefix}package.json: build = {ui['build']}(화면 빌드 연결)")
+    # AI 가 Dockerfile 도 만들었으면 하위 폴더(client/·server/) 의존성 설치를 채운다.
+    docker_op = by_path.get("Dockerfile")
+    if docker_op is not None:
+        try:
+            from build_readiness import ProjectFiles, add_runtime_subproject_install, add_subproject_installs
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import ProjectFiles, add_runtime_subproject_install, add_subproject_installs  # type: ignore
+        overlay = {p: op.get("content") or "" for p, op in by_path.items()}
+        try:
+            readiness = analyze(base, overlay, dockerfile="Dockerfile")
+            content = docker_op.get("content") or ""
+            codes = {i.code for i in readiness.issues}
+            if "DOCKERFILE_SUBPROJECT_DEPS_MISSING" in codes:
+                content = add_subproject_installs(content, readiness.subprojects, ProjectFiles(base, overlay))
+            if "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING" in codes and readiness.runtime_subproject:
+                content = add_runtime_subproject_install(content, readiness.runtime_subproject)
+            if content != docker_op.get("content"):
+                docker_op["content"] = content
+                notes.append("Dockerfile: 하위 폴더 의존성 설치 추가")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[code_agent] Dockerfile 자동 교정 생략: {exc}", flush=True)
+    return list(by_path.values()), notes
+
+
+def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list[dict]:
+    """ops 를 적용했을 때 **새로 생기는** 빌드·실행 문제(build_readiness)만 돌려준다.
+
+    기존 프로젝트에 원래 있던 문제로 사용자 요청 범위를 넘는 수정을 요구하지 않도록
+    적용 전/후를 비교한다. 매니페스트(package.json·requirements)가 있는 폴더만 본다.
+    """
+    try:
+        from build_readiness import analyze
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import analyze  # type: ignore
+    folder = (target_folder or "").replace("\\", "/").strip("/")
+    base = root.resolve()
+    if folder and not Path(folder).is_absolute():
+        base = (root / folder).resolve()
+    elif folder:
+        base = Path(folder).resolve()
+    written: dict[str, str] = {}
+    for op in ops:
+        name = str(op.get("file") or "").replace("\\", "/").lstrip("/")
+        parts = [p for p in name.split("/") if p and p not in {".", ".."}]
+        if parts:
+            written["/".join(parts)] = str(op.get("content") or "")
+    manifests = ("package.json", "requirements.txt", "pyproject.toml")
+    projects: set[str] = set()
+    for rel in written:
+        path = posixpath.split(rel)
+        if path[1] in manifests:
+            projects.add(path[0])
+    if any((base / m).is_file() for m in manifests):
+        projects.add("")
+    found: list[dict] = []
+    for project in sorted(projects)[:5]:
+        prefix = f"{project}/" if project else ""
+        overlay = {rel[len(prefix):]: content for rel, content in written.items() if rel.startswith(prefix)}
+        try:
+            before = {(i.code, i.message) for i in analyze(base / project, dockerfile=None).issues}
+            #: 새로 쓰는 package.json 은 버전이 npm 에 실제로 있는지도 본다 — AI 가 없는 버전
+            #: (jsonwebtoken@^9.1.2 등)을 적어 Docker 빌드가 ETARGET 으로 멈췄다(실기기).
+            after = analyze(base / project, overlay, dockerfile="Dockerfile" if "Dockerfile" in overlay else None,
+                            online="package.json" in overlay and os.environ.get("RECODER_TEST_MODE") != "1")
+        except Exception as exc:  # noqa: BLE001 - 점검 실패가 생성을 막지 않는다
+            print(f"[code_agent] 일관성 점검 생략: {exc}", flush=True)
+            continue
+        for issue in after.issues:
+            if (issue.code, issue.message) in before or issue.code == "DOCKERIGNORE_MISSING":
+                continue
+            item = issue.to_dict()
+            if project:
+                item["message"] = f"[{project}] {item['message']}"
+                if item.get("file"):
+                    item["file"] = prefix + item["file"]
+            found.append(item)
+    return found
+
+
+# ── 큰 요청: 파일 목록을 먼저 받고 나눠서 생성한다 ─────────────────────────────
+#
+# "운영 가능한 쇼핑몰 사이트 만들어줘" 처럼 파일이 많은 요청은 모든 파일의 전체 내용을
+# JSON 한 번(8K 토큰)에 담지 못해 두 번 다 잘리고 "요청 범위를 나누라"로 끝났다(실기기).
+# 잘리면 같은 요청을 반복하지 않고 (1) 만들 파일 목록과 파일 사이의 약속(API 경로·이름·
+# 패키지)을 받은 뒤 (2) 그 약속을 공유하며 파일 몇 개씩 따로 생성해 합친다.
+_SPLIT_MAX_FILES = 36
+#: 생성 결과의 빌드·실행 문제를 AI 에게 고치게 하는 최대 횟수(결정적 자동 교정은 매번 먼저 한다).
+_CONSISTENCY_ROUNDS = 3
+_GENERATION_BUDGET_SECONDS = int(os.environ.get("RECODER_GENERATION_BUDGET_SECONDS", "540"))
+_SPLIT_BATCH = 2
+_MANIFEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "contracts": {"type": "string"},
+        "files": {
+            "type": "array", "minItems": 1, "maxItems": _SPLIT_MAX_FILES,
+            "items": {
+                "type": "object",
+                "properties": {"file": {"type": "string", "minLength": 1}, "purpose": {"type": "string"}},
+                "required": ["file"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["summary", "contracts", "files"],
+    "additionalProperties": False,
+}
+
+
+def _is_truncation(exc: Exception) -> bool:
+    return isinstance(exc, LLMError) and exc.error_type == LLMErrorType.STRUCTURED_OUTPUT and "잘렸" in str(exc)
+
+
+def _norm_op_path(path: str) -> str:
+    out = posixpath.normpath(str(path or "").strip().replace("\\", "/"))
+    while out.startswith("./"):
+        out = out[2:]
+    return out.lstrip("/").casefold()
+
+
+def _split_manifest(prompt: str) -> tuple[dict, list[dict]]:
+    manifest_prompt = prompt + f"""
+
+[분할 생성 1단계] 이 요청은 모든 파일을 한 번의 응답에 담기에 너무 큽니다. 이번 응답에서는 **파일 내용을 쓰지 말고**
+만들거나 고칠 파일 목록만 아래 JSON 으로 주세요(최대 {_SPLIT_MAX_FILES}개, 실제 실행에 필요한 파일만).
+{{"summary": "무엇을 만드는지 한국어 한 줄",
+  "contracts": "API 경로/요청/응답/인증 필드, DB 테이블/열/타입, export 이름, 페이지 경로, 통화/금액 단위/주문 상태 전이, 패키지/환경변수 등 파일간 정확한 약속(6000자 이내)",
+  "files": [{{"file": "상대경로", "purpose": "이 파일이 하는 일 한 줄"}}]}}
+파일은 의존성 순서로 나열하세요: root package.json/Dockerfile/.dockerignore/README → 하위 패키지/설정 → DB 스키마/연결/인증 → API → 화면 → 서버 진입점.
+파일 수 상한 때문에 root 실행/배포 파일이나 인증 화면을 누락하지 마세요. 필요하면 페이지를 한 파일에 합치고 CSS는 공통 파일 하나로 만드세요.
+불필요한 파일 분할을 줄이되 로그인·회원가입 화면, DB 초기화, root 빌드/실행, Dockerfile 등 실행에 필요한 파일은 생략하지 마세요."""
+    resp = get_router().call(
+        LLMRequest(prompt=manifest_prompt, json_schema=_MANIFEST_SCHEMA, max_tokens=6000, temperature=0.2),
+        agent="code_agent", operation="generate_code_manifest",
+    )
+    try:
+        data = _extract_json(resp.text)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"파일 목록을 받지 못했습니다: {exc}") from exc
+    files: list[dict] = []
+    seen: set[str] = set()
+    for item in data.get("files") or []:
+        path = str((item or {}).get("file") or "").strip().replace("\\", "/") if isinstance(item, dict) else ""
+        key = _norm_op_path(path)
+        if not path or key in seen or path.startswith("/") or ".." in path.split("/"):
+            continue
+        seen.add(key)
+        files.append({"file": path, "purpose": str(item.get("purpose") or "").strip()})
+    if not files:
+        raise RuntimeError("AI 가 만들 파일 목록을 돌려주지 않았습니다.")
+    return data, files[:_SPLIT_MAX_FILES]
+
+
+def _split_batch(prompt: str, manifest: dict, files: list[dict], batch: list[dict], target_folder: str = "") -> tuple[list[dict], object]:
+    listing = "\n".join(f"- {f['file']}: {f['purpose']}" for f in files)
+    wanted = "\n".join(f"- {f['file']}" for f in batch)
+    batch_prompt = prompt + f"""
+
+[분할 생성 2단계] 전체 파일 목록과 파일 사이의 약속은 아래와 같습니다. 다른 파일은 다른 응답에서 같은 약속으로 작성됩니다.
+전체 요약: {manifest.get('summary', '')}
+약속(반드시 지킬 것):
+{manifest.get('contracts', '') or '(없음 — 파일 목록과 요청에서 일관되게 정하세요)'}
+전체 파일 목록:
+{listing}
+
+이번 응답의 ops 에는 **아래 파일만** 전체 내용으로 작성하세요(다른 파일은 넣지 마세요):
+{wanted}"""
+    resp = get_router().call(
+        LLMRequest(prompt=batch_prompt, json_schema=CODE_OUTPUT_SCHEMA,
+                   max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+        agent="code_agent", operation="generate_code_part",
+    )
+    _data, ops = parse_code_output(resp.text)
+    ops = _relative_to_target(ops, target_folder)  # 모델이 대상 폴더를 앞에 붙여도 목록과 맞춘다
+    keys = {_norm_op_path(f["file"]) for f in batch}
+    return [op for op in ops if _norm_op_path(op["file"]) in keys], resp
+
+
+def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
+    """A fresh frontend/backend project needs a runnable deployment root."""
+    paths = {f["file"] for f in files}
+    client = next((p for p in ("frontend", "client", "web") if p + "/package.json" in paths), None)
+    server = next((p for p in ("backend", "server", "api") if p + "/package.json" in paths), None)
+    if not client or not server:
+        return files
+    required = {
+        "package.json": f"root build/start/init-db scripts that invoke {client} and {server}; install both projects",
+        "Dockerfile": f"multi-stage build of {client}; non-root {server} runtime serving the built frontend on one port",
+        ".dockerignore": "exclude .env, credentials, node_modules, .git, tests, local artifacts",
+        "README.md": "exact installation, environment, migration, startup, container and payment provider setup instructions",
+    }
+    return files + [{"file": p, "purpose": purpose} for p, purpose in required.items() if p not in paths]
+
+
+def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool = False) -> tuple[dict, list[dict], object]:
+    """큰 요청을 파일 목록 → 묶음별 생성으로 나눠 만든다. 파일 하나도 한도를 넘으면 실패."""
+    manifest, files = _split_manifest(prompt)
+    #: 목록에도 대상 폴더가 붙어 올 수 있다(web/index.html). 묶음 응답과 같은 기준으로 맞춰야 걸러지지 않는다.
+    files = _relative_to_target(files, target_folder)
+    dedup: dict[str, dict] = {}
+    for f in files:
+        dedup.setdefault(_norm_op_path(f["file"]), f)
+    files = list(dedup.values())
+    if new_project:
+        files = _complete_fullstack_manifest(files)
+    print(f"[code_agent] 분할 생성 | 파일 {len(files)}개 | 묶음 {_SPLIT_BATCH}개씩", flush=True)
+    batches = [files[i:i + _SPLIT_BATCH] for i in range(0, len(files), _SPLIT_BATCH)]
+    last_resp = None
+
+    def run(batch_prompt: str, batch: list[dict]) -> tuple[list[dict], object]:
+        try:
+            return _split_batch(batch_prompt, manifest, files, batch, target_folder)
+        except (LLMError, CodeOutputError) as exc:
+            if len(batch) == 1 or not (_is_truncation(exc) or isinstance(exc, CodeOutputError)):
+                raise
+            # 두 파일이 합쳐 한도를 넘었다 — 하나씩 다시.
+            out, resp = [], None
+            for single in batch:
+                ops, resp = _split_batch(batch_prompt, manifest, files, [single], target_folder)
+                out.extend(ops)
+            return out, resp
+
+    ops_out: list[dict] = []
+    for batch in batches:
+        # Parallel batches invented incompatible middleware exports and DB fields.
+        # Later batches must see the actual earlier implementation, not only prose.
+        batch_prompt = prompt + _completed_files_context(ops_out)
+        ops, resp = run(batch_prompt, batch)
+        ops_out.extend(ops)
+        last_resp = resp or last_resp
+    got = {_norm_op_path(op["file"]) for op in ops_out}
+    missing = [f for f in files if _norm_op_path(f["file"]) not in got]
+    for single in missing:
+        ops, resp = _split_batch(prompt + _completed_files_context(ops_out), manifest, files, [single], target_folder)
+        ops_out.extend(ops)
+        last_resp = resp or last_resp
+    got = {_norm_op_path(op["file"]) for op in ops_out}
+    still = [f["file"] for f in files if _norm_op_path(f["file"]) not in got]
+    if still:
+        raise CodeOutputError(f"일부 파일을 만들지 못했습니다: {', '.join(still[:5])}")
+    order = {_norm_op_path(f["file"]): i for i, f in enumerate(files)}
+    ops_out.sort(key=lambda op: order.get(_norm_op_path(op["file"]), len(order)))
+    return {"summary": str(manifest.get("summary") or "")}, ops_out, last_resp
+
+
+def _completed_files_context(ops: list[dict], limit: int = 64_000) -> str:
+    """Bound source context; omit whole files instead of presenting truncated code."""
+    blocks, used = [], 0
+    for op in ops:
+        if not op.get("content") or str(op.get("file", "")).endswith((".css", ".md")):
+            continue
+        block = f"\n[이미 생성한 파일 — 이 API/스키마/export를 그대로 사용] {op['file']}\n```\n{op['content']}\n```\n"
+        if used + len(block) <= limit:
+            blocks.append(block)
+            used += len(block)
+    return "".join(blocks)
+
+
+def _merge_ops(base: list[dict], updates: list[dict]) -> list[dict]:
+    """교정 결과를 파일 경로 기준으로 덮어쓴다. 교정 응답에 없는 파일은 그대로 둔다."""
+    index = {_norm_op_path(op["file"]): i for i, op in enumerate(base)}
+    merged = list(base)
+    for op in updates:
+        key = _norm_op_path(op["file"])
+        if key in index:
+            merged[index[key]] = op
+        else:
+            index[key] = len(merged)
+            merged.append(op)
+    return merged
+
+
 def generate_code(
     instruction: str,
     session_id: str = "",
@@ -1521,6 +2067,10 @@ def generate_code(
         {"summary": str, "ops": [{action, file, language, content, rationale}],
          "model": str, "adr"?: [파일경로]}
     """
+    import time as _time
+    #: 전체 생성 시간 예산 — 확장은 15분까지 기다린다. 예산을 넘기면 AI 교정을 더 하지 않고 결과를 돌려준다
+    #: (남은 문제는 결과에 "확인 필요"로 남고 배포 준비 점검이 다시 잡는다).
+    started_at = _time.monotonic()
     instruction = (instruction or "").strip()
     if not instruction:
         raise ValueError("instruction 이 비어 있습니다.")
@@ -1528,6 +2078,9 @@ def generate_code(
     root = _resolve_root(project_root)
     existing = _list_project_files(root)
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
+    #: 열린 파일·참고 파일의 비밀은 AI 로 보내지 않는다. 자리표시로 보낸 값은 결과에서 원래 값으로 되돌린다.
+    context_secrets: dict = {}
+    open_file, prior_files, context_files = _scrub_context(open_file, prior_files, context_files, context_secrets)
 
     # FR-02-05 — 승인 게이트. 라우트가 아니라 여기(생성 함수)에서 막는다.
     # 라우트에서만 막으면 server.py 의 구(舊) /api/code/generate 처럼 decisions 를
@@ -1559,40 +2112,136 @@ def generate_code(
         target_folder, norm_decisions,
     )
 
-    try:
-        llm_resp = get_router().call(
-            LLMRequest(prompt=prompt, max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
-            agent="code_agent",
-            operation="generate_code",
+    # Request a native schema instead of relying only on prose instructions.
+    # Reject incomplete batches as a whole, then give the model one bounded
+    # correction attempt. Neither attempt writes project files.
+    reason = ""
+    split_mode = False
+    split_mode_failed = False
+    for attempt in range(2):
+        attempt_prompt = prompt
+        if attempt:
+            attempt_prompt += (
+                f"\n\n직전 응답의 문제: {reason}\n"
+                "같은 사용자 요청과 승인된 설계를 유지하여 다시 생성하세요. "
+                "summary와 비어 있지 않은 ops 배열을 포함한 JSON 하나를 완성하세요. "
+                "각 op에 file과 전체 content를 반드시 포함하세요. "
+                "기능이나 기존 코드를 생략하지 말고 장황한 설명과 반복 스타일을 줄여 출력 한도 안에서 완결하세요."
+            )
+        try:
+            llm_resp = get_router().call(
+                LLMRequest(prompt=attempt_prompt, json_schema=CODE_OUTPUT_SCHEMA,
+                           max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+                agent="code_agent", operation="generate_code",
+            )
+            data, ops_out = parse_code_output(llm_resp.text)
+            ops_out = _relative_to_target(ops_out, target_folder)
+            break
+        except CodeOutputError as exc:
+            reason = str(exc)
+            if attempt == 1 and "완성되지 않았거나" in reason:
+                #: 교정 요청까지 완성되지 않은 JSON 이면 거의 언제나 길이 한도에서 잘린 것이다
+                #: (stop_reason 을 안 주는 제공자·게이트웨이 포함). 실패로 끝내지 않고 나눠서 만든다.
+                print("[code_agent] 응답 JSON 이 두 번 다 완성되지 않아 분할 생성으로 전환", flush=True)
+                try:
+                    data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
+                except (LLMError, CodeOutputError, RuntimeError) as split_exc:
+                    reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
+                    split_mode_failed = True
+                    break
+                split_mode = True
+                break
+        except LLMError as exc:
+            if exc.error_type != LLMErrorType.STRUCTURED_OUTPUT:
+                raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
+            reason = "모델 출력이 응답 길이 제한에서 잘렸습니다."
+            if _is_truncation(exc):
+                #: 같은 요청을 다시 보내도 또 잘린다 — 파일 목록을 받아 나눠서 만든다.
+                print("[code_agent] 응답이 길이 한도에서 잘려 분할 생성으로 전환", flush=True)
+                try:
+                    data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
+                except (LLMError, CodeOutputError, RuntimeError) as split_exc:
+                    reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
+                    split_mode_failed = True
+                    break
+                split_mode = True
+                break
+        except Exception as exc:
+            raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
+        print(f"[code_agent] 생성 응답 검증 실패 ({attempt + 1}/2): {reason}", flush=True)
+    else:
+        raise RuntimeError(
+            f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도). {reason} "
+            "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
         )
-    except Exception as e:
-        raise RuntimeError(f"LLM 호출 실패: {e}") from e
+    if split_mode_failed:
+        raise RuntimeError(
+            f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도 뒤 나눠서 만들기도 실패). {reason} "
+            "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
+        )
 
-    raw = (llm_resp.text or "").strip()
-    if not raw:
-        raise RuntimeError("LLM 이 빈 응답을 반환했습니다. 모델/할당량/필터를 확인하세요.")
-
-    data = _extract_json(raw)
-
-    ops_out: list[dict] = []
-    for op in (data.get("ops") or []):
-        file_path = (op.get("file") or "").strip()
-        content = op.get("content")
-        if not file_path or content is None:
-            continue
-        action = (op.get("action") or "create").strip().lower()
-        if action not in ("create", "edit"):
-            action = "create"
-        ops_out.append({
-            "action": action,
-            "file": file_path.replace("\\", "/"),
-            "language": (op.get("language") or "").strip(),
-            "content": str(content),
-            "rationale": (op.get("rationale") or "").strip(),
-        })
-
-    if not ops_out:
-        raise RuntimeError("LLM 응답에 적용할 ops 가 없습니다.")
+    # 생성 결과 일관성 — 이 ops 를 적용하면 새로 생기는 빌드·실행 문제(없는 파일을 가리키는
+    # 스크립트, 선언 안 된 패키지 등)를 찾아 한 번 교정을 요청한다. 실기기에서 CRA 설정만 남은
+    # Express 앱이 Docker 빌드에서 막혔다. 교정도 실패하면 결과에 경고로 남긴다.
+    ops_out, autofix_notes = _autofix_ops(root, target_folder, ops_out)
+    if autofix_notes:
+        print(f"[code_agent] 자동 교정 {len(autofix_notes)}건: {autofix_notes[:5]}", flush=True)
+    consistency = _consistency_issues(root, target_folder, ops_out)
+    #: 교정은 최대 _CONSISTENCY_ROUNDS 번 — 한 번 고치면 다른 파일에서 새 어긋남이 드러나는 경우가 많다
+    #: (라우트를 고치면 모델 export 가 어긋나는 식). 오류가 줄지 않으면 멈춘다.
+    for _round in range(_CONSISTENCY_ROUNDS):
+        if not any(i["severity"] == "error" for i in consistency):
+            break
+        if _round and _time.monotonic() - started_at > _GENERATION_BUDGET_SECONDS:
+            print(f"[code_agent] 생성 시간 예산({_GENERATION_BUDGET_SECONDS}s) 초과 — AI 교정을 멈추고 결과를 돌려줍니다", flush=True)
+            break
+        improved = False
+        issue_lines = "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in consistency)
+        #: 결과가 크면(분할 생성 등) 전체를 다시 만들게 하면 또 잘린다. 문제 파일과 매니페스트만
+        #: 보여 주고 **고칠 파일만** 받아 경로 기준으로 합친다.
+        targeted = split_mode or sum(len(op.get("content") or "") for op in ops_out) > 12_000
+        if targeted:
+            wanted = {_norm_op_path(i.get("file") or "") for i in consistency if i.get("file")}
+            #: 메시지에 언급된 다른 파일(내보내는 쪽·Context 정의 파일)도 같이 보여 줘야 고칠 수 있다.
+            for op in ops_out:
+                if any(op["file"] in (i.get("message") or "") for i in consistency):
+                    wanted.add(_norm_op_path(op["file"]))
+            shown = [op for op in ops_out if _norm_op_path(op["file"]) in wanted
+                     or posixpath.basename(op["file"]) in {"package.json", "requirements.txt", "Dockerfile"}]
+            listing = "\n".join(f"- {op['file']}" for op in ops_out)
+            bodies = "".join(f"\n[현재 파일] {op['file']}\n```\n{_prompt_body(op['content'], 16_000)}\n```\n" for op in shown[:4])
+            fix_prompt = prompt + (
+                "\n\n생성한 파일 목록:\n" + listing + bodies
+                + "\n\n이 결과를 그대로 적용하면 다음 문제가 생깁니다:\n" + issue_lines
+                + "\n위 문제를 고치는 데 **바꿔야 하는 파일만** 전체 내용으로 ops 에 담으세요. 바꿀 필요가 없는 파일은 넣지 마세요."
+            )
+        else:
+            fix_prompt = prompt + (
+                "\n\n직전 응답을 그대로 적용하면 다음 문제가 생깁니다:\n" + issue_lines
+                + "\n같은 사용자 요청과 승인된 설계를 유지하면서 위 문제만 고친 전체 ops JSON 을 다시 만드세요."
+            )
+        try:
+            retry = get_router().call(
+                LLMRequest(prompt=fix_prompt, json_schema=CODE_OUTPUT_SCHEMA,
+                           max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+                agent="code_agent", operation="generate_code_consistency",
+            )
+            data2, ops2 = parse_code_output(retry.text)
+            ops2 = _relative_to_target(ops2, target_folder)
+            if targeted:
+                ops2 = _merge_ops(ops_out, ops2)
+                data2 = data
+            #: 교정 응답이 원래 버릇(localhost 주소 등)을 다시 들고 올 수 있다 — 결정적 교정을 한 번 더.
+            ops2, more_notes = _autofix_ops(root, target_folder, ops2)
+            remaining = _consistency_issues(root, target_folder, ops2)
+            if sum(i["severity"] == "error" for i in remaining) < sum(i["severity"] == "error" for i in consistency):
+                data, ops_out, llm_resp, consistency = data2, ops2, retry, remaining
+                improved = True
+                print(f"[code_agent] 일관성 교정 적용({_round + 1}회) | 남은 문제 {len(remaining)}개", flush=True)
+        except Exception as exc:  # noqa: BLE001 - 교정 실패는 원래 결과로 물러선다
+            print(f"[code_agent] 일관성 교정 생략: {exc}", flush=True)
+        if not improved:
+            break
 
     # ADR 영속화 — 승인된 결정을 docs/adr 에 구조화 기록으로 남긴다(코드와 동시 산출).
     # 시크릿 검사 '앞'에 넣어야 한다: ADR 본문에도 사용자 요청문이 들어가므로
@@ -1658,10 +2307,15 @@ def generate_code(
         from code_removals import annotate_removals
     except ImportError:
         from core.code_removals import annotate_removals
+    _restore_secrets_in_ops(ops_out, context_secrets)
     annotate_removals(ops_out, root, target_folder)
 
+    summary = str(data.get("summary") or "코드를 생성했습니다.").strip()
+    if consistency:
+        summary += "\n\n확인 필요: " + " / ".join(i["message"] for i in consistency[:3])
     result = {
-        "summary": data.get("summary", "코드를 생성했습니다.").strip(),
+        "summary": summary,
+        "consistency_issues": consistency,
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),
         "provider": getattr(llm_resp, "provider", ""),

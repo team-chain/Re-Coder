@@ -13,6 +13,7 @@ LLM은 커스터마이징할 섹션만 제안. 실제 파일 조립은 Registry�
 from __future__ import annotations
 
 import os
+import json
 import re
 import uuid
 from pathlib import Path
@@ -70,7 +71,7 @@ def _detect_stack(project_path: str) -> tuple[str, dict]:
         try:
             import json
             package = json.loads(
-                (p / "package.json").read_text(encoding="utf-8", errors="replace")
+                (p / "package.json").read_text(encoding="utf-8-sig", errors="replace")
             )
         except Exception:
             package = {}
@@ -106,6 +107,28 @@ def _detect_stack(project_path: str) -> tuple[str, dict]:
     )
 
 
+def _source_for_built(root: Path, entry: str) -> Optional[Path]:
+    """`dist/index.js` → 그 파일을 만드는 소스(`src/index.ts`). tsconfig 의 outDir·rootDir 를 따른다."""
+    out_dir, root_dir = "dist", "src"
+    try:
+        raw = (root / "tsconfig.json").read_text(encoding="utf-8-sig", errors="replace")
+        raw = re.sub(r"//[^\n]*|/\*.*?\*/", "", raw, flags=re.S)
+        opts = (json.loads(re.sub(r",\s*([}\]])", r"\1", raw)) or {}).get("compilerOptions") or {}
+        out_dir = str(opts.get("outDir") or out_dir).strip("./") or out_dir
+        root_dir = str(opts.get("rootDir") or root_dir).strip("./") or root_dir
+    except (OSError, ValueError, AttributeError):
+        pass
+    parts = entry.split("/")
+    if parts[0] != out_dir:
+        return None
+    stem = "/".join([root_dir, *parts[1:]]).rsplit(".", 1)[0]
+    for ext in (".ts", ".mts", ".cts", ".js", ".mjs"):
+        candidate = root / f"{stem}{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _detect_node_entry_and_port(root: Path, package: dict) -> tuple[Optional[str], Optional[int]]:
     """Node 프로젝트의 진입점 파일과 듣는 포트를 package.json·소스에서 읽는다.
 
@@ -116,8 +139,18 @@ def _detect_node_entry_and_port(root: Path, package: dict) -> tuple[Optional[str
     scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
     start = str(scripts.get("start", "")) if scripts else ""
     m = re.search(r"\bnode\s+(?:--[\w-]+\s+)*([\w./-]+\.[cm]?js)\b", start)
-    if m and (root / m.group(1)).is_file():
-        entry = m.group(1)
+    #: `node dist/index.js` — 빌드(tsc 등)가 만드는 파일은 지금 없어도 이미지 빌드 단계에서 생긴다.
+    if m and ((root / m.group(1)).is_file() or re.match(r"^(?:\./)?(?:dist|build|out|lib)/", m.group(1))):
+        entry = m.group(1).lstrip("./") if m.group(1).startswith("./") else m.group(1)
+    if entry is None and scripts:
+        #: 모노레포 — `npm start --workspace=backend` 처럼 다른 패키지로 넘기는 start 를 따라간다.
+        try:
+            from build_readiness import ProjectFiles, _start_entry  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import ProjectFiles, _start_entry  # type: ignore
+        delegated = _start_entry(scripts, ProjectFiles(root))
+        if delegated and (root / delegated).is_file():
+            entry = delegated
     if entry is None:
         main = package.get("main")
         if isinstance(main, str) and (root / main).is_file():
@@ -130,15 +163,18 @@ def _detect_node_entry_and_port(root: Path, package: dict) -> tuple[Optional[str
 
     port: Optional[int] = None
     if entry:
+        source = root / entry if (root / entry).is_file() else _source_for_built(root, entry)
         try:
-            src = (root / entry).read_text(encoding="utf-8", errors="replace")
+            src = source.read_text(encoding="utf-8", errors="replace") if source else ""
         except OSError:
             src = ""
-        for pat in (r"\.listen\(\s*(\d{2,5})\b", r"PORT\s*(?:\|\||\?\?)\s*(\d{2,5})\b"):
-            m = re.search(pat, src)
-            if m:
-                port = int(m.group(1))
-                break
+        # `const PORT = 5000; app.listen(PORT)` 형태도 읽는다. 예전엔 못 읽어 기본값
+        # 3000 을 넣었고, 5000 에서 듣는 앱의 헬스 확인이 실패했다(실기기 test temp).
+        try:
+            from build_readiness import _detect_js_port  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import _detect_js_port  # type: ignore
+        port, _uses_env = _detect_js_port(src)
     return entry, port
 
 
@@ -303,8 +339,18 @@ def generate_dockerfile(
         stack = project_profile.stack.value
     else:
         project_root = _resolve_project_path(workspace_path)
-        stack, _ = _detect_stack(str(project_root))
+        stack = None
 
+    from static_frontend import frontend_dockerfile
+    frontend = frontend_dockerfile(str(project_root), getattr(project_profile, 'default_port', None) or 3000)
+    if frontend:
+        content, template_id = frontend
+        return InfraFileProposal(proposal_id=uuid.uuid4().hex, file_type=FileType.DOCKERFILE,
+            target_path='Dockerfile', content=content, base_template=template_id,
+            risk_level=RiskLevel.LOW, approval_level=1)
+
+    if stack is None:
+        stack, _ = _detect_stack(str(project_root))
     # FileRegistry에서 스택별 기본 템플릿 가져오기
     registry = get_file_registry()
     # stack name (e.g. "python-fastapi") → template_id ("dockerfile-python-fastapi")
@@ -339,13 +385,22 @@ def generate_dockerfile(
 
 
 def _runtime_family(stack: str, workspace_path: str = "") -> str:
-    """"python" | "node" | "" — compose 헬스체크에 쓸 런타임 계열.
+    """"python" | "node" | "static" | "" — compose 헬스체크 런타임.
 
     스택 이름만으로는 부족하다. 스캐너는 requirements.txt / package.json 만
     보므로, **Poetry(pyproject.toml)만 쓰는 FastAPI 프로젝트가 custom 으로
     분류된다.** 그러면 Dockerfile 에는 헬스체크가 들어가는데 compose 에는
     안 들어가서 둘이 어긋난다. 스택을 모르면 파일로 한 번 더 본다.
     """
+    if workspace_path:
+        from static_frontend import static_frontend_output
+        if static_frontend_output(workspace_path):
+            dockerfile = Path(workspace_path) / 'Dockerfile'
+            try:
+                if not dockerfile.exists() or any(f'ReCoder File Template: Dockerfile.{kind}-static' in dockerfile.read_text(encoding='utf-8', errors='replace') for kind in ('node', 'html')):
+                    return 'static'
+            except OSError:
+                pass
     if stack.startswith("python"):
         return "python"
     if stack.startswith("node"):
@@ -372,14 +427,15 @@ def compose_health_check_block(
 ) -> str:
     """compose 의 app healthcheck 블록. 못 만들면 **빈 문자열**.
 
-    왜 wget/curl 을 안 쓰는가
+    왜 Python/Node 이미지에서 wget/curl 을 안 쓰는가
         예전 템플릿은 `wget --spider || curl -fs` 를 박아 뒀는데, 정작
         우리가 만들어 주는 런타임 이미지에 그 둘이 **모두 없다.**
         python:slim(Debian slim) 도 node:20-slim 도 담지 않는다.
         그래서 앱이 멀쩡히 떠 있어도 compose 는 영구히 unhealthy 로 보고하고,
         `depends_on: condition: service_healthy` 가 걸린 쪽은 아예 못 뜬다.
         Dockerfile 템플릿 쪽은 같은 이유로 이미 python urllib 로 고쳤는데
-        compose 만 남아 있었다.
+        compose 만 남아 있었다. 정적 프론트엔드용 nginx Alpine 이미지는
+        wget 이 포함되어 있으므로 해당 템플릿에서만 wget 을 사용한다.
 
     왜 exec 형식(CMD)인가
         CMD-SHELL 로 두면 YAML 큰따옴표 안에 명령의 따옴표가 또 들어가
@@ -393,7 +449,10 @@ def compose_health_check_block(
     url = f"http://127.0.0.1:{container_port}{health_check_path}"
 
     family = _runtime_family(stack, workspace_path)
-    if family == "python":
+    if family == 'static':
+        import json
+        probe = json.dumps(['CMD', 'wget', '-q', '-O', '/dev/null', url])
+    elif family == "python":
         #: python 은 이 이미지에 반드시 있다. 작은따옴표만 써서 YAML
         #: 큰따옴표 문자열 안에 그대로 들어가게 한다.
         probe = (
@@ -601,8 +660,23 @@ def discover_health_path(
         #: 라우트가 아니라 거의 확실히 404 다.
         return "/api/health"
 
-    if isinstance(configured, str) and _HEALTH_PATH_RE.fullmatch(configured):
+    if isinstance(configured, str) and _HEALTH_PATH_RE.fullmatch(configured) \
+            and configured != SCANNER_DEFAULT_HEALTH_PATH:
         return configured
+
+    # 코드에서 실제로 200 을 줄 경로를 찾는다: 헬스 라우트 → "/" 제공 → FastAPI /docs.
+    # 근거가 없을 때만 관례(/health)로 둔다. 없는 경로를 찌르면 "영원히 unhealthy".
+    if stack.startswith(("node", "python")):
+        try:
+            try:
+                from build_readiness import analyze  # type: ignore
+            except ImportError:  # pragma: no cover
+                from core.build_readiness import analyze  # type: ignore
+            probe = analyze(workspace_path, dockerfile=None).probe_path()
+            if probe and _HEALTH_PATH_RE.fullmatch(probe):
+                return probe
+        except Exception:  # noqa: BLE001 - 판정 실패는 관례로 물러선다
+            pass
     return SCANNER_DEFAULT_HEALTH_PATH
 
 

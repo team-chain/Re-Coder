@@ -52,12 +52,20 @@ if str(_ROOT_DIR) not in sys.path:
 load_dotenv(_CORE_DIR / ".env")
 
 from singleton import CoreSingleton  # noqa: E402
+from version import VERSION  # noqa: E402
+import aws_client_defaults  # noqa: E402
+
+aws_client_defaults.install()
+import tool_paths  # noqa: E402
+
+tool_paths.augment_path(("docker", "trivy", "hadolint", "gitleaks"))
 from api.middleware.auth import SessionTokenMiddleware  # noqa: E402
 from api.routes import (  # noqa: E402
     health,
     analyze,
     deploy,
     deploy_ecs,
+    canvas,
     deploy_history,
     deploy_s3,
     ops,
@@ -70,10 +78,10 @@ from api.routes import (  # noqa: E402
     relay,
     aws,
     github,
+    repair,
 )
 
 _bound_port: int = 0
-VERSION = "1.0.0"
 
 
 def _persist_session_token(path: Path, token: str) -> None:
@@ -87,6 +95,84 @@ def _persist_session_token(path: Path, token: str) -> None:
         stream.truncate(0)
         stream.write(token)
     CoreSingleton.set_file_permissions(path)
+
+
+#: runtime.json 복구·확장 호스트 생존 확인 주기(초).
+_GUARD_INTERVAL_SECONDS = float(os.environ.get("RECODER_GUARD_INTERVAL", "3"))
+
+
+def _parent_pid() -> int:
+    """Core 를 띄운 VS Code 확장 호스트의 PID. 확장이 넘겨준 경우만(수동 실행은 0)."""
+    try:
+        return int(os.environ.get("RECODER_PARENT_PID", "0") or 0)
+    except ValueError:
+        return 0
+
+
+def _safe_print(message: str) -> None:
+    """확장 호스트가 죽어 stdout 파이프가 끊겼거나 콘솔 인코딩이 한글을 못 쓰면 print 가
+    예외를 던진다. 감시 루프가 그 예외로 죽으면 종료·복구가 멈추므로 절대 던지지 않는다."""
+    try:
+        print(message, flush=True)
+    except Exception:
+        pass
+
+
+def _parent_alive(parent: int, since) -> bool:
+    """부모(확장 호스트)가 살아 있는가. PID 가 다른 프로세스에 재사용됐으면 죽은 것으로 본다."""
+    try:
+        if not CoreSingleton._pid_alive(parent):
+            return False
+        return not CoreSingleton._pid_reused(parent, since)
+    except Exception:
+        return True
+
+
+def _guard_tick(pid: int, port: int, token: str, parent: int, parent_misses: int, since=None) -> int:
+    """한 번의 점검. 반환값은 확장 호스트가 연속으로 없던 횟수.
+
+    1) runtime.json 이 사라졌거나 다른 값으로 바뀌었는데 **락은 여전히 이 Core 것**이면
+       다시 쓴다. 확장 창이 재시작 도중 파일만 지우고 프로세스는 남기면, 새 창이 이 Core
+       를 찾고도 인증 정보가 없어 영원히 "연결 중"에 멈췄다(실기기, 1.1.15 업데이트 직후).
+    2) 이 Core 를 띄운 확장 호스트가 사라졌으면 스스로 종료한다. 창을 강제로 닫거나
+       업데이트로 확장이 재시작되면 종료 요청이 도착하지 못하고 Core 만 남던 문제다.
+    """
+    try:
+        runtime = CoreSingleton.read_runtime()
+        if runtime is None or runtime.pid != pid or runtime.port != port or runtime.session_token != token:
+            lock = CoreSingleton._read_lock()
+            if lock and lock.get("pid") == pid:
+                CoreSingleton.write_runtime(port=port, token=token, pid=pid)
+                CoreSingleton.set_file_permissions(CoreSingleton.RUNTIME_FILE)
+                _safe_print("[ReCoder Core] runtime.json restored.")
+    except Exception:
+        pass
+    if parent <= 0:
+        return 0
+    return 0 if _parent_alive(parent, since if since is not None else datetime.utcnow()) else parent_misses + 1
+
+
+async def _runtime_guard(pid: int, port: int, token: str) -> None:
+    import asyncio
+    parent = _parent_pid()
+    #: 부모는 Core 보다 먼저 시작했다. Core 시작 뒤에 시작된 같은 PID 는 재사용된 것이다.
+    since = datetime.utcnow()
+    misses = 0
+    while True:
+        try:
+            await asyncio.sleep(_GUARD_INTERVAL_SECONDS)
+            misses = _guard_tick(pid, port, token, parent, misses, since)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
+        if misses >= 2:
+            _safe_print("[ReCoder Core] VS Code extension host exited; shutting down Core.")
+            try:
+                CoreSingleton.release_lock(pid)
+            except Exception:
+                pass
+            os._exit(0)
 
 
 @asynccontextmanager
@@ -135,6 +221,9 @@ async def lifespan(app: FastAPI):
 
     app.state.started_at = datetime.now(timezone.utc)
 
+    import asyncio as _asyncio
+    guard_task = _asyncio.create_task(_runtime_guard(pid, port, token))
+
     try:
         from observability import observability  # type: ignore
         observability.initialize()
@@ -161,6 +250,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        guard_task.cancel()
         if relay_poller is not None:
             try:
                 await relay_poller.stop()
@@ -261,6 +351,7 @@ def create_app() -> FastAPI:
     app.include_router(ecs.router)
     # 확장이 부르는 /api/deploy/ecs* 호환 계층 (FR-05-04)
     app.include_router(deploy_ecs.router)
+    app.include_router(canvas.router)
     app.include_router(deploy_history.router)
     # FR-05-03 사용자 계정 S3 정적 배포(BYO)
     app.include_router(deploy_s3.router)
@@ -270,6 +361,7 @@ def create_app() -> FastAPI:
     app.include_router(relay.router)
     app.include_router(aws.router)
     app.include_router(github.router)
+    app.include_router(repair.router)
 
     return app
 
@@ -288,6 +380,12 @@ def _handle_shutdown(signum, _frame) -> None:
 
 def main() -> None:
     multiprocessing.freeze_support()
+    #: 콘솔·파이프 인코딩이 한글을 못 쓰는 Windows 로캘에서도 출력 때문에 죽지 않게 한다.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
     # load_dotenv() 는 파일 상단에서 이미 호출했다(임포트 순서 때문). 중복 호출은
     # 하지 않는다 — override=False 라 무해하지만, 두 군데에 있으면 다음 사람이
     # 어느 쪽이 실제로 먹는지 헷갈린다.
@@ -349,4 +447,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--self-check"]:
+        from release_check import run
+        sys.exit(run(app))
+    elif sys.argv[1:] == ["--version"]:
+        print(VERSION)
+    else:
+        main()

@@ -463,6 +463,36 @@ def test_task_definition_log_group_matches_the_one_we_create():
     assert container["portMappings"][0]["containerPort"] == 9000
 
 
+def test_task_definition_tells_the_app_its_port():
+    """process.env.PORT 로 포트를 정하는 앱이 ECS 가 여는 포트에서 뜨게 한다(사용자 값이 우선)."""
+    agent = ECSAgent()
+    arn = "arn:aws:iam::123456789012:role/LabRole"
+    env = lambda req: {e["name"]: e["value"] for e in agent._render_task_definition(
+        req, image="img", execution_role_arn=arn, task_role_arn=arn)["containerDefinitions"][0]["environment"]}
+    assert env(make_request(container_port=9000))["PORT"] == "9000"
+    assert env(make_request(container_port=9000, env_vars={"PORT": "7000", "A": "1"})) == {"PORT": "7000", "A": "1"}
+
+
+def test_task_secrets_are_references_and_not_plaintext():
+    ref = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:shop-AbCdEf"
+    req = make_request(secret_refs={"DATABASE_URL": ref})
+    rendered = ECSAgent()._render_task_definition(
+        req, image="img", execution_role_arn="arn:aws:iam::123456789012:role/exec", task_role_arn="")
+    container = rendered["containerDefinitions"][0]
+    assert container["secrets"] == [{"name": "DATABASE_URL", "valueFrom": ref}]
+    assert "DATABASE_URL" not in {e["name"] for e in container["environment"]}
+
+
+@pytest.mark.parametrize("refs,env", [
+    ({"DATABASE_URL": "postgres://password@db/shop"}, {}),
+    ({"DATABASE_URL": "arn:aws:ssm:us-east-1:123456789012:parameter/db"}, {"DATABASE_URL": "plain"}),
+    ({"bad name": "arn:aws:ssm:us-east-1:123456789012:parameter/db"}, {}),
+])
+def test_task_secrets_reject_plain_values_and_conflicts(refs, env):
+    with pytest.raises(ValueError):
+        make_request(secret_refs=refs, env_vars=env)
+
+
 def test_task_definition_has_no_curl_health_check():
     """부정 통제: curl 은 런타임 이미지(python:slim)에 없다. 넣어두면
     컨테이너가 항상 UNHEALTHY 가 되어 ECS 가 무한 재시작한다."""
@@ -1398,20 +1428,37 @@ def test_the_gate_message_names_the_scanner_that_could_not_run():
     assert "ecr:BatchGetImage" in fix or "설치" in fix, fix
 
 
-def test_a_missing_source_scanner_does_not_block_the_deploy():
-    """[부정 통제] 소스 검사(hadolint·gitleaks)는 자문이다 — 없다고 막지 않는다.
+@pytest.mark.parametrize("tool", ["hadolint", "gitleaks"])
+@pytest.mark.parametrize("reason", ["not_installed", "scan_failed"])
+def test_source_scanner_failure_blocks_the_deploy(tool, reason):
+    result = _scan_result(_finding(tool, "info", f"{tool}_{reason}"))
+    assert result.blocked and not result.scan_passed
+    assert f"{tool}_{reason}" in result.tool_errors
+    message = ECSAgent._scan_gate_message(result)
+    assert message and f"{tool}_{reason}" in message[0]
 
-    개발 PC 에 그 도구가 없어도 배포는 되게 하고, 못 돌린 것은 경고로만
-    표면화한다. 여기까지 막으면 도구 없는 PC 에서는 아무도 배포를 못 한다.
-    이미지 스캔(trivy)이 못 돈 경우만 막는다(위 테스트).
-    """
-    result = _scan_result(
-        _finding("hadolint", "info", "hadolint_not_installed"),
-        _finding("gitleaks", "info", "gitleaks_not_installed"),
-    )
-    assert result.passed, "소스 검사 도구가 없다고 배포를 막았다"
-    assert "hadolint_not_installed" in result.tool_errors
-    assert "gitleaks_not_installed" in result.tool_errors
+
+def test_extension_runtime_settings_reach_ecs_without_plaintext_secrets():
+    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
+    arn = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:shop/database-ABCDEF"
+    request = to_core_request(ExtensionEcsDeployRequest(
+        environment="staging", env_vars={"NODE_ENV": "production"},
+        secret_refs={"DATABASE_URL": arn},
+    ))
+    assert request.env_vars == {"ENVIRONMENT": "staging", "NODE_ENV": "production"}
+    assert request.secret_refs == {"DATABASE_URL": arn}
+    assert "DATABASE_URL" not in request.env_vars
+
+
+@pytest.mark.parametrize("env,refs", [
+    ({}, {"DATABASE_URL": "postgres://user:password@db/shop"}),
+    ({"DATABASE_URL": "plain"}, {"DATABASE_URL": "arn:aws:ssm:ap-northeast-2:123456789012:parameter/shop/db"}),
+    ({}, {"ENVIRONMENT": "arn:aws:ssm:ap-northeast-2:123456789012:parameter/shop/env"}),
+])
+def test_extension_runtime_settings_reject_plaintext_and_collisions(env, refs):
+    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest
+    with pytest.raises(ValueError):
+        ExtensionEcsDeployRequest(environment="staging", env_vars=env, secret_refs=refs)
 
 
 def test_the_counts_survive_serialisation():
@@ -1631,7 +1678,7 @@ def test_a_slow_app_that_is_actually_running_is_not_killed():
 
     assert ecs.updated == []
     warning = record.provisioned.get("cost_warning", "")
-    assert "stop" in warning, "끄는 방법을 알려주지 않았다"
+    assert "서비스 중지" in warning, "끄는 방법을 알려주지 않았다"
     assert "헬스체크" in warning, (
         "헬스체크가 없어서 이 상태를 자동으로 못 잡는다는 사실을 안 알렸다"
     )
@@ -2711,7 +2758,7 @@ def test_a_failure_after_the_service_exists_always_warns_about_cost():
     ECSAgent._warn_if_resources_may_be_running(make_request(), record)
 
     warning = record.provisioned.get("cost_warning", "")
-    assert "stop" in warning, "끄는 방법을 안 알려줬다"
+    assert "서비스 중지" in warning, "끄는 방법을 안 알려줬다"
 
 
 def test_no_cost_warning_before_any_service_was_touched():
@@ -3152,8 +3199,16 @@ def test_a_secret_in_the_workspace_blocks_before_anything_is_built(tmp_path, mon
     assert "시크릿" in (record.error_message or ""), record.error_message
 
 
-def test_a_clean_workspace_is_not_blocked(tmp_path, monkeypatch):
-    """[부정 통제] 깨끗한 워크스페이스까지 막으면 아무도 배포를 못 한다."""
+@pytest.mark.parametrize("failed_tool", [None, "gitleaks", "hadolint"])
+def test_source_scan_must_finish_before_build(tmp_path, monkeypatch, failed_tool):
+    """완료된 검사만 빌드로 진행한다. CI에 도구가 없음을 통과로 쓰지 않는다."""
+    from core.security_scan import security_scanner
+
+    async def source_scan(**kwargs):
+        return (_scan_result(_finding(failed_tool, "info", f"{failed_tool}_scan_failed"))
+                if failed_tool else _scan_result())
+
+    monkeypatch.setattr(security_scanner, "scan_all", source_scan)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
@@ -3177,7 +3232,7 @@ def test_a_clean_workspace_is_not_blocked(tmp_path, monkeypatch):
         workspace_path=str(workspace), run_security_scan=True, provision=True
     )
     asyncio.run(agent._deploy_pipeline(request, ECSDeployRecord()))
-    assert built == ["built"], "깨끗한 워크스페이스인데 빌드까지 못 갔다"
+    assert built == ([] if failed_tool else ["built"])
 
 
 def test_the_image_scan_keeps_the_findings_the_source_scan_already_made():
@@ -5087,3 +5142,11 @@ def test_a_transient_ecs_rollback_failure_can_be_approved_again(app_client, monk
     )
     assert retried.status_code == 200, retried.text
     assert retried.json()["status"] == "completed"
+
+
+def test_legacy_extension_environment_rows_are_preserved():
+    from core.api.routes.deploy_ecs import ExtensionEcsDeployRequest, to_core_request
+    request = to_core_request(ExtensionEcsDeployRequest(env_vars=[{"name": "NODE_ENV", "value": "production"}]))
+    assert request.env_vars == {"NODE_ENV": "production"}
+    with pytest.raises(ValueError):
+        ExtensionEcsDeployRequest(env_vars=[{"name": "A", "value": "1"}, {"name": "A", "value": "2"}])

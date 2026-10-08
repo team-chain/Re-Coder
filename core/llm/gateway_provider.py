@@ -79,11 +79,12 @@ class GatewayProvider(LLMProvider):
             return ""
 
     # ── BedrockProvider 호환 async converse ─────────────────────────
-    async def converse(self, messages, system=None, output_schema=None) -> dict:
+    async def converse(self, messages, system=None, output_schema=None, *, max_tokens=4096, temperature=0.0) -> dict:
         loop = asyncio.get_running_loop()
         payload = {"messages": messages, "system": system or "",
-                   "output_schema": output_schema, "max_tokens": 2048}
+                   "output_schema": output_schema, "max_tokens": max_tokens, "temperature": temperature}
         result = await loop.run_in_executor(None, self._post, payload)
+        self._require_complete(result)
         if output_schema is not None and isinstance(result.get("parsed"), dict):
             return result["parsed"]
         if isinstance(result.get("parsed"), dict):
@@ -96,6 +97,7 @@ class GatewayProvider(LLMProvider):
         payload = {"messages": messages, "system": request.system or "",
                    "output_schema": request.json_schema, "max_tokens": request.max_tokens}
         result = self._post(payload)
+        self._require_complete(result)
         return LLMResponse(
             text=result.get("text", ""),
             parsed=result.get("parsed"),
@@ -105,6 +107,12 @@ class GatewayProvider(LLMProvider):
             output_tokens=int(result.get("output_tokens", 0)),
             token_source="gateway",
         )
+
+    @staticmethod
+    def _require_complete(result: dict) -> None:
+        """게이트웨이가 넘겨준 stop_reason 이 길이 한도면 잘린 응답이다 — 호출자가 나눠서 다시 만들게 한다."""
+        if str(result.get("stop_reason") or result.get("stopReason") or "").lower() in {"max_tokens", "length"}:
+            raise LLMError("모델 출력이 응답 길이 제한에서 잘렸습니다.", LLMErrorType.STRUCTURED_OUTPUT)
 
     # bedrock 호환용 보조 (router 가 estimate_cost 를 부를 수 있어 방어적으로 제공)
     def estimate_cost(self, input_tokens: int, output_tokens: int) -> float:

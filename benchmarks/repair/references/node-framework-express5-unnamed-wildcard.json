@@ -1,0 +1,3 @@
+{
+  "app.cjs": "const app=require('express')();\napp.get(\"/{*splat}\",(req,res)=>res.send('ok'));\nmodule.exports=app;\n"
+}

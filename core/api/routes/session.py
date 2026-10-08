@@ -357,7 +357,7 @@ def _detect_stack_for_scan(ws) -> "StackType":
     if (ws / "package.json").exists():
         try:
             import json as _json
-            pkg = _json.loads((ws / "package.json").read_text(encoding="utf-8"))
+            pkg = _json.loads((ws / "package.json").read_text(encoding="utf-8-sig"))
             deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
             if "next" in deps:
                 return StackType.NODE_NEXT
