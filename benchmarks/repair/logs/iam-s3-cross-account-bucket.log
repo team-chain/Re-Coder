@@ -1,0 +1,1 @@
+AccessDenied s3:GetObject on arn:aws:s3:::repair-fixture/assets/config.json: implicitDeny

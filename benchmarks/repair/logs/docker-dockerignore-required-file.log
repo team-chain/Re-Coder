@@ -1,0 +1,16 @@
+ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::e8o94ryzr8vklekd0jhb89uqz: "/payload.txt": not found
+#9 ERROR: failed to calculate checksum of ref le2jhh0ouhm5ezqj28ng8ebl0::e8o94ryzr8vklekd0jhb89uqz: "/payload.txt": not found
+7 |
+#0 building with "desktop-linux" instance using docker driver
+#1 [1/5] FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+#1 resolve docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c 0.0s done
+#1 DONE 0.0s
+#3 [internal] load build definition from Dockerfile
+#3 transferring dockerfile: 285B done
+#3 DONE 0.0s
+#4 [internal] load metadata for docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+#4 DONE 0.0s
+#5 [internal] load .dockerignore
+#5 transferring context: 79B done
+#5 DONE 0.0s
+#6 [internal] load build context

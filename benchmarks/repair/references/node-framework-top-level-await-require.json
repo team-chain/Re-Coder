@@ -1,0 +1,3 @@
+{
+  "app.cjs": "import('./value.mjs').then(value=>console.log(value.default));\n"
+}

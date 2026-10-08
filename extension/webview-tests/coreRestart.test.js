@@ -17,7 +17,7 @@ function loadManager(overrides = {}) {
   const vscode = {
     ExtensionMode: { Production: 1, Development: 2, Test: 3 },
     window: { showInformationMessage() {} },
-    workspace: { workspaceFolders: [] },
+    workspace: { workspaceFolders: [], getConfiguration: () => ({ get: (_key, fallback) => fallback }) },
   };
   vm.runInNewContext(fs.readFileSync(compiled, 'utf8'), {
     module: output, exports: output.exports,

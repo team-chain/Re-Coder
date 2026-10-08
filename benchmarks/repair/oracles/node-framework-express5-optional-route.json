@@ -1,0 +1,3 @@
+{
+  "node": "const a=require('node:assert');const app=require('./app.cjs');const s=app.listen(0,'0.0.0.0',async()=>{try{let r=await fetch('http://127.0.0.1:'+s.address().port+\"/readme\");a.equal(r.status,200);a.equal(await r.text(),'ok')}finally{s.close()}})"
+}

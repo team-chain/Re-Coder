@@ -1310,12 +1310,6 @@ _SCAN_NOT_PERFORMED_TITLES = frozenset({
     "gitleaks_not_installed", "gitleaks_scan_failed",
 })
 
-#: 이 중 하나라도 못 돌면 **배포를 막는다.** 배포를 게이트하는 이미지
-#: 취약점 검사가 실행되지 못한 경우다. 소스 검사(hadolint·gitleaks)는
-#: 자문이라 여기 넣지 않는다 (`compute_pass` 주석 참고).
-_IMAGE_SCAN_REQUIRED_TITLES = frozenset({
-    "trivy_not_installed", "trivy_scan_failed",
-})
 
 
 class SecurityScanResult(BaseModel):
@@ -1387,36 +1381,17 @@ class SecurityScanResult(BaseModel):
         return self.passed
 
     def compute_pass(self) -> bool:
-        """findings 로부터 차단 여부를 확정한다.
+        """요청된 검사가 실패하거나 차단 항목을 찾으면 배포를 막는다.
 
-        **이미지 취약점 검사가 실행되지 못했으면 통과가 아니다.** trivy 가
-        없거나, 시간이 초과되거나, ECR 이미지를 못 받아오면 스캐너는
-        `trivy_*` 흔적만 남긴다. 취약점이 **관측되지 않은** 것이지 **없는**
-        것이 아니다. 그런데 예전 계산은 그 경우에도 `passed=True` 를 줬다 —
-        한 번도 들여다보지 않은 이미지가 게이트를 통과했다.
-
-        배포 계약은 "이미지 스캔이 배포를 막는다"이다. 스캔이 못 돌았으면
-        막을 근거를 못 만든 것이므로, **fail-closed** 로 막는다.
-        `run_security_scan=False` 를 폴백에서 막은 것과 같은 규칙 — 검사하지
-        않은 것을 "위반 없음"으로 바꾸지 않는다.
-
-        ## 왜 trivy 만인가
-
-        빌드 **전** 소스 검사(hadolint·gitleaks)는 의도적으로 **자문(advisory)**
-        이다 — 개발 PC 에 그 도구가 없어도 배포는 되게 하고, 못 돌린 것은
-        `scan_warning` 으로 표면화한다. 여기서 그것까지 막으면 도구 없는
-        PC 에서는 아무도 배포를 못 한다. 그래서 **배포를 게이트하는 이미지
-        스캔(trivy)** 이 못 돈 경우만 막는다. 이미지 스캐너를 더 추가하면
-        그 미실행 표식도 아래 목록에 넣어야 한다.
+        바이너리가 없으면 Docker 폴백을 사용한다. 두 경로 모두 실패하거나
+        보고서가 손상되면 비밀값·Dockerfile·이미지를 검사했다고 볼 수 없다.
+        실행하지 않도록 요청한 검사는 scan_all이 작업으로 만들지 않는다.
         """
         self.tool_errors = sorted({
             f.title for f in self.findings if f.title in _SCAN_NOT_PERFORMED_TITLES
         })
-        image_scan_failed = any(
-            t in _IMAGE_SCAN_REQUIRED_TITLES for t in self.tool_errors
-        )
         self.passed = (
-            not image_scan_failed
+            not self.tool_errors
             and self.critical_count == 0
             and self.hadolint_error_count == 0
             and self.secret_count == 0
@@ -1505,6 +1480,20 @@ class ECSDeployRequest(BaseModel):
     #: 직접 지정한 명령은 자동 감지로 덮어쓰지 않는다.
     health_check_command:    Optional[list[str]] = None
     env_vars:                dict[str, str] = Field(default_factory=dict)
+    #: AWS Secrets Manager / SSM ARN references only; values never enter the API record.
+    secret_refs:             dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_secret_refs(self):
+        import re
+        for name, arn in self.secret_refs.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError("secret_refs keys must be environment variable names")
+            if not re.fullmatch(r"arn:(aws|aws-us-gov|aws-cn):(secretsmanager|ssm):[a-z0-9-]+:[0-9]{12}:(secret:|parameter/)[^\s]+", arn):
+                raise ValueError("secret_refs requires a Secrets Manager or SSM parameter ARN")
+            if name in self.env_vars or name == "PORT":
+                raise ValueError("secret_refs cannot overlap plain environment variables or PORT")
+        return self
 
     # ── 빌드 · 업로드 (FR-05-04) ────────────────────────────────────────
     #: 이미지를 빌드할 로컬 작업 폴더. 비우면 빌드를 건너뛰고 `image` 를 쓴다.

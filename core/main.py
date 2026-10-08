@@ -78,6 +78,7 @@ from api.routes import (  # noqa: E402
     relay,
     aws,
     github,
+    repair,
 )
 
 _bound_port: int = 0
@@ -360,6 +361,7 @@ def create_app() -> FastAPI:
     app.include_router(relay.router)
     app.include_router(aws.router)
     app.include_router(github.router)
+    app.include_router(repair.router)
 
     return app
 

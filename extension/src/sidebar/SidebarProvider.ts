@@ -694,6 +694,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         switch (type) {
+            case 'repair.prepare':
+            case 'repair.approve': {
+                const p=(payload||{}) as {requestId?:string;log?:string;stage?:string;runId?:string;approved?:boolean};
+                const workspace=activeProjectPath();
+                try {
+                    if(!workspace)throw new Error('먼저 프로젝트를 선택하세요.');
+                    let result:Record<string,unknown>;
+                    if(type==='repair.prepare') {
+                        if(!p.log?.trim())throw new Error('분석할 오류 로그가 없습니다.');
+                        result=await this._apiClient.prepareRepair(workspace,p.log,p.stage||'build');
+                    } else {
+                        if(p.approved!==true||!p.runId)throw new Error('수정안 승인이 필요합니다.');
+                        const run=await this._apiClient.getRepair(p.runId);
+                        if(typeof run.workspace!=='string'||!samePath(run.workspace,workspace))throw new Error('다른 프로젝트의 수정안입니다. 다시 검증하세요.');
+                        if(!samePath(activeProjectPath(),workspace))throw new Error('프로젝트가 바뀌었습니다. 현재 프로젝트에서 다시 검증하세요.');
+                        result=await this._apiClient.approveRepair(p.runId,workspace);
+                    }
+                    if(!samePath(activeProjectPath(),workspace))throw new Error('프로젝트가 바뀌었습니다. 현재 프로젝트에서 다시 검증하세요.');
+                    this.postMessageToWebview(requestWebview,'repair.result',{requestId:p.requestId,result});
+                } catch(err) {
+                    this.postMessageToWebview(requestWebview,'repair.error',{requestId:p.requestId,message:err instanceof Error?err.message:String(err)});
+                }
+                break;
+            }
             // ── Build mode (webview-src/components/BuildMode.tsx) ─────────────
             case 'build.analyzeActive': {
                 // 자동 감지와 동일 경로: 최근 터미널 출력 + 에디터 선택을 모아 분석.

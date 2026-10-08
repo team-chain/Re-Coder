@@ -176,7 +176,19 @@ def mask_secrets_with_stats(text: str):
     matched = []
     seen = set()
     for name, pattern, replacement in _MASK_PATTERNS:
-        new_text, count = pattern.subn(replacement, text)
+        if name == 'CREDENTIAL':
+            def credential(match):
+                # Only a structurally valid Secrets Manager ARN is exempt.
+                # A generic prefix such as config:password=... must still mask.
+                if match.group(1).lower() == 'secret' and re.search(
+                    r'\barn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:\d{12}:$', text[:match.start()]
+                ):
+                    return match.group(0)
+                return match.expand(replacement)
+            new_text = pattern.sub(credential, text)
+            count = int(new_text != text)
+        else:
+            new_text, count = pattern.subn(replacement, text)
         if count > 0 and name not in seen:
             seen.add(name)
             matched.append(name)

@@ -9,7 +9,7 @@ const fixture = path.join(__dirname, 'fixtures/coreEnvFixture.js');
 function loadManager(dir) {
   const output = { exports: {} };
   const localRequire = createRequire(compiled);
-  const vscode = { ExtensionMode: { Production: 1, Development: 2, Test: 3 }, window: { showInformationMessage() {} }, workspace: { workspaceFolders: [] } };
+  const vscode = { ExtensionMode: { Production: 1, Development: 2, Test: 3 }, window: { showInformationMessage() {} }, workspace: { workspaceFolders: [], getConfiguration: () => ({ get: (_key, fallback) => fallback }) } };
   vm.runInNewContext(fs.readFileSync(compiled, 'utf8'), { module: output, exports: output.exports,
     require: id => id === 'vscode' ? vscode : localRequire(id), process, console, fetch, AbortController, setTimeout, clearTimeout }, { filename: compiled });
   const m = new output.exports.CoreManager({ extensionMode: 1, extensionPath: path.dirname(compiled) });
@@ -62,7 +62,7 @@ test('연결 정보 없이 남은 이전 Core 는 사용자 확인 후 종료하
   const asked = [];
   const vscode = { ExtensionMode: { Production: 1, Development: 2, Test: 3 },
     window: { showInformationMessage() {}, showWarningMessage: async (msg, _o, action) => { asked.push(msg); return action; } },
-    workspace: { workspaceFolders: [] } };
+    workspace: { workspaceFolders: [], getConfiguration: () => ({ get: (_key, fallback) => fallback }) } };
   vm.runInNewContext(fs.readFileSync(compiled, 'utf8'), { module: output, exports: output.exports,
     require: id => id === 'vscode' ? vscode : localRequire(id), process, console, fetch, AbortController, setTimeout, clearTimeout }, { filename: compiled });
   const m = new output.exports.CoreManager({ extensionMode: 1, extensionPath: path.dirname(compiled) });
@@ -88,7 +88,7 @@ test('이전 Core 종료를 거절하면 자동 재시도 때 다시 묻지 않�
   const asked = [];
   const vscode = { ExtensionMode: { Production: 1, Development: 2, Test: 3 },
     window: { showInformationMessage() {}, showWarningMessage: async (msg) => { asked.push(msg); return undefined; } },
-    workspace: { workspaceFolders: [] } };
+    workspace: { workspaceFolders: [], getConfiguration: () => ({ get: (_key, fallback) => fallback }) } };
   vm.runInNewContext(fs.readFileSync(compiled, 'utf8'), { module: output, exports: output.exports,
     require: id => id === 'vscode' ? vscode : localRequire(id), process, console, fetch, AbortController, setTimeout, clearTimeout }, { filename: compiled });
   const m = new output.exports.CoreManager({ extensionMode: 1, extensionPath: path.dirname(compiled) });

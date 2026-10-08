@@ -1,0 +1,4 @@
+{
+  "action": "ecr:GetAuthorizationToken",
+  "resource": "*"
+}

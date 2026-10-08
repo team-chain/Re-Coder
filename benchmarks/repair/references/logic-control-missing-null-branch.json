@@ -1,0 +1,3 @@
+{
+  "app.cjs": "exports.label=u=>u?.name ? u.name.toUpperCase() : 'ANONYMOUS';\n"
+}

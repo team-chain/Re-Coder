@@ -1,0 +1,18 @@
+{
+  "broken": {
+    "passed": false,
+    "output": "/bin/sh: 1: curl: not found\nhealth while running=1, after stop=1",
+    "exit_code": 1,
+    "available": true,
+    "kind": "docker-runtime",
+    "production_verified": false
+  },
+  "unconditional_success": {
+    "passed": false,
+    "output": "health while running=0, after stop=0",
+    "exit_code": 1,
+    "available": true,
+    "kind": "docker-runtime",
+    "production_verified": false
+  }
+}

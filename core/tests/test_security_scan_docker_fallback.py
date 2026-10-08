@@ -16,6 +16,43 @@ import pytest
 import security_scan as ss
 
 
+@pytest.mark.parametrize("outcome", [RuntimeError("scanner crashed"), None, {"Results": []}])
+def test_unexpected_image_scanner_failure_cannot_pass(monkeypatch, outcome):
+    async def fail(*args):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+    monkeypatch.setattr(ss.SecurityScanner, "_run_trivy", fail)
+    result = asyncio.run(ss.SecurityScanner().scan_all(image="validation:latest"))
+    assert not result.scan_passed and result.blocked
+    assert "trivy_scan_failed" in result.tool_errors
+
+
+def test_cancelled_image_scan_never_returns_a_clean_result(monkeypatch):
+    async def cancel(*args):
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(ss.SecurityScanner, "_run_trivy", cancel)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ss.SecurityScanner().scan_all(image="validation:latest"))
+
+
+@pytest.mark.parametrize("tool,report", [
+    ("trivy", "{}"), ("trivy", '{"Results":null}'),
+    ("hadolint", ""), ("hadolint", "{}"),
+    ("gitleaks", ""), ("gitleaks", "{}"), ("gitleaks", None),
+])
+def test_malformed_or_missing_reports_are_not_clean_scans(monkeypatch, tmp_path, tool, report):
+    _tools(monkeypatch, native={tool}, docker=False)
+    async def command(cmd, **kwargs):
+        flag = "--output" if tool == "trivy" else "--report-path"
+        if flag in cmd and report is not None:
+            Path(cmd[cmd.index(flag) + 1]).write_text(report)
+        return report or ""
+    monkeypatch.setattr(ss.SecurityScanner, "_run_cmd", staticmethod(command))
+    findings = asyncio.run(getattr(ss.SecurityScanner(), "_run_" + tool)(str(tmp_path)))
+    assert any(f.title == tool + "_scan_failed" for f in findings)
+
+
 class _Capture:
     """`_run_cmd` 를 가로채 명령을 기록하고, 도구별 가짜 출력을 만든다."""
 

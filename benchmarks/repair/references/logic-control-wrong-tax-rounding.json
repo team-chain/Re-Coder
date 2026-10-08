@@ -1,0 +1,3 @@
+{
+  "app.cjs": "exports.tax=cents=>Math.round(cents*7/100);\n"
+}

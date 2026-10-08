@@ -5,10 +5,11 @@
  * 보여 준다. 판정은 Core 가 하고, 화면은 표시와 "자동 수정" 요청만 한다.
  */
 import React from "react";
+import {GroundedRepairPanel, RepairStage} from './GroundedRepairPanel';
 import { shortIssue } from "./issueText";
 
 export interface ReadinessIssue { code: string; severity: "error" | "warning"; message: string; fix: string; file?: string; auto_fix: boolean }
-export interface BuildDiagnosis { code: string; title: string; cause: string; fix: string; lines: string[]; step?: string }
+export interface BuildDiagnosis { code: string; title: string; cause: string; fix: string; lines: string[]; step?: string; repair?: {stage:RepairStage} }
 
 const box: React.CSSProperties = { borderRadius: 5, padding: "8px 10px", marginBottom: 10, fontSize: 11, lineHeight: 1.6 };
 
@@ -80,5 +81,6 @@ export const BuildFailure: React.FC<{ diagnosis: BuildDiagnosis; raw?: string; r
         <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 240, overflow: "auto", color: "#ccc", fontFamily: "var(--vscode-editor-font-family, monospace)" }}>{raw}</pre>
       </details>
     )}
+    <GroundedRepairPanel log={[diagnosis.cause,...diagnosis.lines,raw||''].join('\n')} stage={diagnosis.repair?.stage||'run'}/>
   </section>
 );

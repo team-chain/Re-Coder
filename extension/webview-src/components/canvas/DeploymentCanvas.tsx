@@ -7,6 +7,7 @@ import { DeploymentActivity, DeploymentActivityEvent } from '../DeploymentActivi
 import { Replay } from "../Replay";
 import { SecurityScanPanel, PolicyPanel, ScanResultLite } from "../Hubs";
 import { GateVerdict, gateColors, gateVerdict } from "../securityGate";
+import { EcsRuntimeEnvironment, parseRuntimeEnvironment } from "../EcsRuntimeEnvironment";
 import { EcsExecutionRole } from "../EcsExecutionRole";
 import { EcsDeploymentProgress, EcsProgressStatus, initialEcsProgress, serviceLink } from "../EcsDeploymentProgress";
 import { Scene } from "./Scene";
@@ -18,6 +19,7 @@ import { GitHubPanel } from "./GitHubPanel";
 import { canvasStyles } from "./styles";
 import { mergeDeployment, SnapshotRequests } from "./state";
 import { DockerNotifications } from './dockerNotifications';
+import {GroundedRepairPanel} from '../GroundedRepairPanel';
 
 type Pane = "canvas" | "details" | "history" | "aws" | "docker" | "security" | "discord" | "status" | "analysis";
 const defaultConfig: Config = { target:"ecs",image_name:"recoder-app",tag:"v1",aws_region:"",ecs_cluster:"recoder-cluster",ecs_service:"recoder-app",task_family:"recoder-task",container_port:8000,cpu:"256",memory:"512",environment:"staging",dir:"" };
@@ -29,6 +31,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const [pane,setPane]=useState<Pane>('canvas'), [visited,setVisited]=useState<Set<Pane>>(new Set(['canvas']));
   const [selection,setSelection]=useState<Target|null>(null),[config,setConfig]=useState<Config>(defaultConfig),[plan,setPlan]=useState<Plan|null>(null);
   const [busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState('');
+  const [runtimeDraft,setRuntimeDraft]=useState({environment:'',secrets:''});
   const [blocked,setBlocked]=useState<Issue[]>([]),[security,setSecurity]=useState(false),[force2D,setForce2D]=useState(false);
   const [expanded,setExpanded]=useState(false),[showNodeDetails,setShowNodeDetails]=useState(false);
   const [graph,setGraph]=useState<AnalysisGraph|null>(null),[level,setLevel]=useState<1|2|3>(1),[file,setFile]=useState(''),[folder,setFolder]=useState<string|null>(null),[search,setSearch]=useState(''),[graphLoading,setGraphLoading]=useState(false);
@@ -90,7 +93,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
       if(snapshotRef.current && workspaceChanged) {liveRef.current=null;setLive(null);expectedId.current='';touched.current=false;dirTouched.current=false;notificationPreference.current=false;notifyRef.current=false;setNotify(false);discordRef.current=null;setDiscord(null);dockerNotifications.current=new DockerNotifications();observed.current.clear();setEvents([]);setS3Progress(null);setS3Result(null);
         //: 이전 프로젝트의 소스 분석·승인 카드·검사 결과를 새 프로젝트에 보여 주지 않는다.
         clearTimeout(graphTimer.current);graphRequest.current='';graphFile.current='';setGraphLoading(false);setGraphError(false);setGraph(null);setLevel(1);setFile('');setFolder(null);setSearch('');
-        setPlan(null);setSelection(null);setBlocked([]);setError('');setMessage('');setManualGate(null);lastEventStatus.current='';postMessage('canvas.discord.status');}
+        setRuntimeDraft({environment:'',secrets:''});setPlan(null);setSelection(null);setBlocked([]);setError('');setMessage('');setManualGate(null);lastEventStatus.current='';postMessage('canvas.discord.status');}
       snapshotRef.current=next;setSnapshot(next);setLoading(false);
       if(workspaceChanged)notificationSettings();
       if(!touched.current) setConfig(c=>({...c,container_port:next.container_port||defaultConfig.container_port,aws_region:next.aws.region||c.aws_region,ecs_cluster:next.resource?.cluster||c.ecs_cluster,ecs_service:next.resource?.service||c.ecs_service}));
@@ -172,7 +175,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     if(node.target)choose(node.target);
   };
   const cancel=useCallback(()=>{setPlan(p=>{if(p)postMessage('canvas.cancel',{planId:p.id});return null;});},[postMessage]);
-  const prepare=(chosen=config)=>{if(busyRef.current||live?.running)return;busyRef.current=true;setBusy(true);setError('');setMessage('배포 대상과 사전 검사 결과를 확인 중…');const id=requestId();actionRequest.current=id;postMessage('canvas.prepare',{requestId:id,config:chosen,autoDir:chosen.target==='s3'&&!dirTouched.current});};
+  const prepare=(chosen=config)=>{if(busyRef.current||live?.running)return;try { if(chosen.target==='ecs')chosen={...chosen,...parseRuntimeEnvironment(runtimeDraft)}; } catch(err) {setError(String(err));return;}busyRef.current=true;setBusy(true);setError('');setMessage('배포 대상과 사전 검사 결과를 확인 중…');const id=requestId();actionRequest.current=id;postMessage('canvas.prepare',{requestId:id,config:chosen,autoDir:chosen.target==='s3'&&!dirTouched.current});};
   const drop=(target:Target)=>{choose(target);};
   const approve=()=>{if(!plan||busyRef.current)return;actionTarget.current=plan.config.target;busyRef.current=true;setBusy(true);if(plan.config.target==='s3'){setS3Result(null);setS3Progress({step:'plan',message:'승인한 파일을 확인합니다'});}setMessage('승인한 요청의 보안·권한 검사를 시작합니다…');setError('');const id=requestId();actionRequest.current=id;postMessage('canvas.execute',{requestId:id,planId:plan.id,approved:true});setPlan(null);};
   const fix=(id:string)=>{cancel();busyRef.current=true;setBusy(true);postMessage('workspace.deploy.remediation.apply',{proposalId:id});};
@@ -197,7 +200,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const targetTitle=selection==='ecs'?'ECS로 배포':selection==='s3'?'S3로 배포':'GitHub로 푸시';
   const closeDrawer=()=>{setSelection(null);setPane('canvas');};
   const resetGraph=()=>{stopGraph();postMessage('canvas.graph.cancel');setLevel(1);setFolder(null);setSearch('');};
-  const configField=(key:keyof Config,label:string)=><label key={key}>{label}<input value={config[key]} disabled={running} onChange={e=>update(key,key==='container_port'?Number(e.target.value):e.target.value)}/></label>;
+  const configField=(key:Exclude<keyof Config,"env_vars"|"secret_refs">,label:string)=><label key={key}>{label}<input value={config[key]} disabled={running} onChange={e=>update(key,key==='container_port'?Number(e.target.value):e.target.value)}/></label>;
   const notice=<>{error&&<div className="rc-note rc-error" role="alert">{error}</div>}{message&&<div className="rc-note" role="status">{message}</div>}{blocked.map((issue,i)=><div className="rc-finding" key={i}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button disabled={busy} onClick={()=>fix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}</>;
   return <section className={`rc-canvas rc-canvas-focused ${completed?'rc-canvas-completed':''}`} aria-label="배포 캔버스" style={expanded?{position:'fixed',inset:0,zIndex:40,padding:20,overflow:'auto',background:'var(--vscode-editor-background,#141920)'}:undefined}>
     <style>{canvasStyles}</style>
@@ -229,7 +232,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
         <p className="rc-target-summary">{snapshot?.projectName||'프로젝트'} → {selection==='ecs'?config.ecs_cluster:selection==='s3'?'S3':snapshot?.git.repository||'GitHub'}</p>
         {selection==='ecs'&&<>
           <div className="rc-fields">{configField('ecs_service','서비스')}{configField('tag','이미지 태그')}{configField('aws_region','AWS 리전')}</div>
-          <details className="rc-details rc-advanced"><summary>고급 설정</summary><div className="rc-fields">{([['image_name','이미지 이름'],['ecs_cluster','Cluster'],['task_family','Task family'],['container_port','컨테이너 포트'],['cpu','CPU 단위'],['memory','메모리 MB']] as Array<[keyof Config,string]>).map(([key,label])=>configField(key,label))}<label>배포 환경<select disabled={running} value={config.environment} onChange={e=>update('environment',e.target.value)}><option value="staging">staging</option><option value="production">production</option></select></label></div><EcsExecutionRole region={config.aws_region} disabled={!snapshot?.aws.ready||running}/></details>
+          <details className="rc-details rc-advanced"><summary>고급 설정</summary><div className="rc-fields">{([['image_name','이미지 이름'],['ecs_cluster','Cluster'],['task_family','Task family'],['container_port','컨테이너 포트'],['cpu','CPU 단위'],['memory','메모리 MB']] as Array<[Exclude<keyof Config,"env_vars"|"secret_refs">,string]>).map(([key,label])=>configField(key,label))}<label>배포 환경<select disabled={running} value={config.environment} onChange={e=>update('environment',e.target.value)}><option value="staging">staging</option><option value="production">production</option></select></label></div><EcsRuntimeEnvironment value={runtimeDraft} onChange={draft=>{setRuntimeDraft(draft);setPlan(null);}} disabled={running}/><EcsExecutionRole region={config.aws_region} disabled={!snapshot?.aws.ready||running}/></details>
         </>}
         {selection==='s3'&&<div className="rc-fields"><label>빌드 산출물 폴더<input value={config.dir} disabled={running} onChange={e=>update('dir',e.target.value)} placeholder="자동 감지"/></label>{configField('aws_region','AWS 리전')}</div>}
         {selection==='github'&&snapshot&&<GitHubPanel workspace={snapshot.workspace} git={snapshot.git} onChanged={git=>{setSnapshot(s=>s?{...s,git}:s);refresh();}} onReview={()=>prepare()} onWorkflow={()=>openPane('details')} disabled={running}/>}
@@ -247,6 +250,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
         {!scan&&<p className="rc-muted">배포를 승인하면 검사를 진행합니다.</p>}{scan&&!live?.running&&<p className="rc-muted">마지막 배포의 검사 기록입니다. 현재 소스는 다음 배포에서 다시 검사합니다.</p>}
         {snapshot?.warnings.map((warning,i)=><div key={i} className="rc-note">{warning}</div>)}
         {(live?.deployment_id||running)&&<EcsDeploymentProgress state={{...initialEcsProgress,status:live,submitting:busy}}/>}
+        {live?.stage==='failed'&&<GroundedRepairPanel key={`${snapshot?.workspace}:${live.deployment_id}`} stage="ecs" log={[live.error,live.error_detail,...(live.log_tail||[])].filter(Boolean).join('\n')}/>}
         {snapshot?.topology&&<section className="rc-panel" aria-label="ECS 실시간 계층"><h3>{snapshot.topology.cluster} › {snapshot.topology.service}</h3><p>실행 {snapshot.topology.running??'미확인'} / 희망 {snapshot.topology.desired??'미확인'} · {snapshot.topology.region}</p><small>{new Date(snapshot.topology.observed_at).toLocaleTimeString()} 조회</small><div className="rc-tree">{snapshot.topology.tasks.map(task=><div key={task.id}><b>{task.id}</b><small>{task.launch_type} · {task.status} · Health {task.health}</small>{task.images.map((image,i)=><small key={i}>{image.image}<br/>{image.digest||'이미지 digest 미확인'}</small>)}</div>)}</div>{!snapshot.topology.tasks.length&&<p>조회된 실행 태스크가 없습니다.</p>}{(snapshot.topology.desired??0)>0&&<div className="rc-actions"><button disabled={running||busy} title="태스크 수를 0으로 줄여 과금을 멈춥니다. 서비스 설정은 남습니다." onClick={()=>postMessage('canvas.ecs.stop',{requestId:requestId(),cluster:snapshot.topology!.cluster,service:snapshot.topology!.service,region:snapshot.topology!.region})}>서비스 중지 (과금 멈춤)</button></div>}{snapshot.topology.truncated&&<p>첫 100개 태스크를 표시합니다.</p>}</section>}
         {s3Result&&<section className="rc-panel" aria-label="S3 배포 결과"><h3>S3 배포 완료</h3>{serviceLink(s3Result.url)&&<a href={serviceLink(s3Result.url)!} target="_blank" rel="noreferrer">정적 사이트 열기 ↗</a>}<p>{s3Result.bucket} · {s3Result.region} · 파일 {s3Result.uploaded.length}개</p>{s3Result.index_copied_from&&<p>{s3Result.index_copied_from}를 index.html로 함께 올렸습니다.</p>}{s3Result.excluded_note&&<div className="rc-note">{s3Result.excluded_note}</div>}</section>}
       </div>}
