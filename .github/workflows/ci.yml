@@ -194,3 +194,28 @@ jobs:
       - name: 검증 자원 정리
         if: always()
         run: docker compose -f benchmarks/commerce/compose.yml -p recoder-commerce-check down -v
+
+  dependency-audit:
+    name: 배포 의존성 보안 검사
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: npm 잠금 파일 검사 (개발 의존성 포함)
+        run: |
+          npm audit --audit-level=moderate
+          npm audit --prefix extension --audit-level=moderate
+          npm audit --prefix core/starter_templates/commerce/backend --audit-level=moderate
+          npm audit --prefix core/starter_templates/commerce/frontend --audit-level=moderate
+      - name: 플랫폼별 Python 배포 잠금 파일 검사
+        run: |
+          python -m pip install --upgrade 'pip>=26.2' pip-audit
+          for lock in core/requirements-release-*.txt; do
+            python -m pip_audit --no-deps --disable-pip -r "$lock"
+          done
