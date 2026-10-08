@@ -2,6 +2,19 @@ name: Build release
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [develop]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'core/recoder-core.spec'
+      - 'core/release_check.py'
+      - 'core/commerce_starter.py'
+      - 'core/starter_templates/**'
+      - 'core/requirements-release-*.txt'
+      - 'scripts/build-release.py'
+      - 'extension/scripts/package-release.js'
+      - 'extension/harness/release-smoke.js'
+      - 'extension/package-lock.json'
 
 permissions:
   contents: read

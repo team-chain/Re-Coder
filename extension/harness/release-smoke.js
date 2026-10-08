@@ -99,6 +99,12 @@ async function installed(ext, home) {
     const push = await api('/api/git/push', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_path:workspace,branch:'main',auto_commit:false})});
     assert.equal(push.status,'error');assert.match(push.message,/GitHub 로그인/);
     const post = (route, body) => api(route, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const commerceRoot = path.join(home, 'empty commerce project');
+    fs.mkdirSync(commerceRoot);
+    const commercePlan = await post('/api/code/plan', {workspace_path:commerceRoot,instruction:'실제 운영 가능한 쇼핑몰을 만들어줘'});
+    assert.equal(commercePlan.provider, 'starter');
+    assert.ok(commercePlan.decisions.some(decision => decision.id === 'commerce-foundation'));
+    console.log('PASS: packaged commerce foundation plan without model credentials');
     fs.writeFileSync(path.join(workspace, 'Dockerfile'), 'FROM node:22 AS builder\nEXPOSE 8000\nFROM node:22-alpine\nEXPOSE 3000\n');
     const healthDir = path.join(workspace, 'app', 'api', 'health');
     fs.mkdirSync(healthDir, {recursive:true});
