@@ -399,7 +399,7 @@ def test_비root_컨테이너가_작업_폴더에_DB_를_못_만드는_것을_�
     assert codes["DOCKERFILE_WORKDIR_NOT_WRITABLE"] == "error" and codes["DATA_IN_CONTAINER"] == "warning"
     br.apply_fix(root, "DOCKERFILE_WORKDIR_NOT_WRITABLE")
     text = (root / "Dockerfile").read_text(encoding="utf-8")
-    assert text.index("RUN chown appuser /app") < text.index("USER appuser")
+    assert text.index("RUN chown 1001 /app") < text.index("USER 1001")
     assert "DOCKERFILE_WORKDIR_NOT_WRITABLE" not in _codes(br.analyze(root))
 
 

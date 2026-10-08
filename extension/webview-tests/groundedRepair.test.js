@@ -20,3 +20,32 @@ test('review contains diff, official link and measured cost',()=>{
  assert.equal(documentLink('javascript:alert(1)'),undefined);
  assert.equal(documentLink('https://docs.docker.com.evil.test/'),undefined);
 });
+
+test('project change clears a proposal and ignores its late response',()=>{
+ const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+ const states=[],effects=[],sent=[];
+ let cursor=0,receive,tree;
+ const hooks={...React,
+  useState(initial){const i=cursor++;if(!(i in states))states[i]=initial;return [states[i],value=>{states[i]=value;}];},
+  useRef(initial){const i=cursor++;return states[i]??(states[i]={current:initial});},
+  useCallback:fn=>fn,
+  useEffect(fn,deps){const i=cursor++,old=states[i];if(!old||deps.some((v,j)=>v!==old[j])){states[i]=deps;effects.push(fn);}},
+ };
+ const exports={};
+ vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../out/webview-test/components/GroundedRepairPanel.js'),'utf8'),{
+  exports,URL,require:id=>id==='react'?hooks:{useVSCodeApi:()=>({postMessage:(type,payload)=>sent.push({type,payload}),useMessage:fn=>{receive=fn;}})},
+ });
+ const render=()=>{cursor=0;tree=exports.GroundedRepairPanel({log:'ETARGET',stage:'build'});effects.splice(0).forEach(fn=>fn());};
+ const nodes=(node=tree)=>React.isValidElement(node)?[node,...React.Children.toArray(node.props.children).flatMap(n=>nodes(n))]:[];
+ const detail=()=>nodes().find(n=>n.type===exports.RepairDetails);
+ const send=()=>{nodes().find(n=>n.type==='button').props.onClick();render();return sent.at(-1).payload.requestId;};
+ render();
+ const first=send();receive({type:'repair.result',payload:{requestId:first,result:base}});render();
+ assert.ok(detail());
+ receive({type:'canvas.projectChanged',payload:{workspace:'/new'}});render();
+ assert.equal(detail(),undefined);
+ const pending=send();receive({type:'canvas.projectChanged',payload:{workspace:'/third'}});render();
+ receive({type:'repair.result',payload:{requestId:pending,result:base}});render();
+ assert.equal(detail(),undefined);
+ assert.equal(nodes().find(n=>n.type==='button').props.disabled,false);
+});

@@ -107,6 +107,27 @@ def test_older_static_images_keep_their_compose_probe_after_template_update(tmp_
     assert generated_static_runtime_port(path) == 8081
 
 
+def test_static_runtimes_from_1_1_28_are_still_recognized(tmp_path):
+    """1.1.29 moved HEALTHCHECK to JSON form (Hadolint DL3025); Dockerfiles already in projects keep working."""
+    from static_frontend import generated_static_runtime_port
+    for output, build in (('build', {'dependencies': {'react': '18.2.0', 'react-scripts': '5.0.1'}, 'scripts': {'build': 'react-scripts build'}}),
+                          ('dist', {'devDependencies': {'vite': '5.0.0'}, 'scripts': {'build': 'vite build'}})):
+        root = tmp_path / output
+        root.mkdir()
+        (root / 'package.json').write_text(json.dumps(build), encoding='utf-8')
+        content, _ = frontend_dockerfile(str(root), 8081)
+        assert 'CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/health"]' in content
+        assert 'USER root' not in content and '# hadolint ignore=SC2016' in content
+        old = content.replace('USER 0\n# nginx variables must remain literal in the generated configuration.\n# hadolint ignore=SC2016\n', 'USER root\n')
+        old = old.replace('CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/health"]', 'CMD wget -q -O /dev/null http://127.0.0.1:8081/health || exit 1')
+        assert old != content
+        for text in (content, old, old.replace('RUN apk upgrade --no-cache && printf', 'RUN printf')):
+            (root / 'Dockerfile').write_text(text)
+            assert generated_static_runtime_port(root / 'Dockerfile') == 8081
+        (root / 'Dockerfile').write_text(old.replace('|| exit 1', '|| exit 2'))
+        assert generated_static_runtime_port(root / 'Dockerfile') is None
+
+
 @pytest.mark.parametrize('port',[0,65536,'3000; injected',True])
 def test_invalid_ports_cannot_enter_nginx_config(tmp_path,port):
     package(tmp_path)

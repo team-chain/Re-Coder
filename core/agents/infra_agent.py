@@ -62,9 +62,11 @@ the base Dockerfile template for this specific project.
 - Keep the base OS patched: keep the template's OS upgrade step (apt-get upgrade /
   apk upgrade). Known CRITICAL CVEs in an unpatched base image block deployment.
 - Node.js images ship a bundled npm whose vendored `tar` is often vulnerable: in the
-  final (runtime) stage either upgrade it (`RUN npm install -g npm@latest`) or remove
-  npm entirely (`RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm
-  /usr/local/bin/npx`) when the app starts with `node` directly. Keep this step.
+  final (runtime) stage remove npm (`RUN rm -rf /usr/local/lib/node_modules/npm
+  /usr/local/bin/npm /usr/local/bin/npx`) and start the app with `node` directly
+  (for Next.js: `node node_modules/next/dist/bin/next start -H 0.0.0.0 -p <port>`).
+  NEVER run `npm install -g npm@latest` — upgrading npm in place breaks the build
+  ("Cannot find module 'promise-retry'"). Keep this step.
 - Keep the port ({port}) and run command ({run_command}) exactly as given above.
 
 ## Output format
@@ -357,7 +359,7 @@ class InfraAgent:
     def _enforce_safe_customisations(customisations: dict, stack, project) -> dict:
         """모델이 프롬프트 규칙을 무시해도 지켜야 하는 값을 강제한다.
 
-        - NODE_VERSION: EOL(< 20) 이거나 비어 있으면 22. 실기기에서 모델이 18 을 골라
+        - NODE_VERSION: EOL(< 22 — Node 20 은 2026-04 지원 종료) 이거나 비어 있으면 22. 실기기에서 모델이 18 을 골라
           베이스 OS CVE 로 배포가 차단됐다.
         - PORT / START_SCRIPT: 프로젝트 프로필이 아는 값을 모델 추측보다 우선한다.
         """
@@ -367,7 +369,7 @@ class InfraAgent:
             raw_v = str(out.get("NODE_VERSION", "")).strip()
             m = re.match(r"(\d{1,2})", raw_v)
             major = int(m.group(1)) if m else 0
-            if major < 20:
+            if major < 22:
                 out["NODE_VERSION"] = "22"
         port = getattr(project, "default_port", None)
         if port:

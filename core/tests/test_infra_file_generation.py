@@ -142,9 +142,9 @@ def test_agent_내부_TypeError가_유료호출을_두번_실행하지_않는다
         ("python-fastapi", ("FROM python:3.11-slim", '"main:app"', "EXPOSE 8000")),
         ("python-flask", ("FROM python:3.11-slim", "gunicorn", "EXPOSE 5000")),
         ("python-django", ("FROM python:3.11-slim", '"config.wsgi:application"', "EXPOSE 8000")),
-        ("node-express", ("FROM node:20-alpine", '"index.js"', "EXPOSE 3000")),
-        ("node-next", ("FROM node:20-alpine", "ENV PORT=3000", "EXPOSE 3000")),
-        ("node-nest", ("FROM node:20-alpine", '"dist/main.js"', "EXPOSE 3000")),
+        ("node-express", ("FROM node:22-alpine", '"index.js"', "EXPOSE 3000")),
+        ("node-next", ("FROM node:22-alpine", "ENV PORT=3000", "EXPOSE 3000")),
+        ("node-nest", ("FROM node:22-alpine", '"dist/main.js"', "EXPOSE 3000")),
     ],
 )
 def test_AI_실패_폴백은_필수값이_채워진_빌드가능한_초안이다(
@@ -271,7 +271,7 @@ def test_AI가_미치환_토큰을_돌려줘도_승인가능한_초안으로_폴
     ).json()
 
     assert "{{" not in body["content"] and "}}" not in body["content"]
-    assert "FROM node:20-alpine" in body["content"]
+    assert "FROM node:22-alpine" in body["content"]
     assert any("채워지지 않은 템플릿 값" in note for note in body["risk_reasons"])
 
 

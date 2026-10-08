@@ -50,7 +50,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const stopGraph=()=>{clearTimeout(graphTimer.current);graphRequest.current='';setGraphLoading(false);};
   const lastEventStatus=useRef(''),lastEventDeployment=useRef('');
   const requestId=()=>`canvas-${Date.now()}-${++ids.current}`;
-  const refresh=useCallback(()=> { const id=`snapshot-${Date.now()}-${++ids.current}`; if(!snapshotRequests.current.begin(id))return; setLoading(true);postMessage('canvas.snapshot',{requestId:id}); },[postMessage]);
+  const refresh=useCallback((force=false)=> { const id=`snapshot-${Date.now()}-${++ids.current}`; if(!snapshotRequests.current.begin(id,force))return; setLoading(true);postMessage('canvas.snapshot',{requestId:id}); },[postMessage]);
   const openPane=(next:Pane)=>{setSelection(null);setPane(next);setVisited(v=>new Set([...v,next]));};
   const applyNotificationPreference=()=>{
     const state=discordRef.current;
@@ -76,7 +76,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const onScanResults=useCallback((results:Partial<Record<'trivy'|'hadolint'|'gitleaks',ScanResultLite>>,running:boolean)=>{
     const verdict=gateVerdict(['trivy','hadolint','gitleaks'],results,running);
     setManualGate(verdict.state==='idle'?null:verdict);
-    if(gateRunning.current&&!running&&(verdict.state==='clean'||verdict.state==='issues')) addEvent(`manual-gate-${Date.now()}`,verdict.state==='clean'?'보안 검사 통과':'보안 검사 이상 발견',verdict.state==='clean'?'이미지·Dockerfile·시크릿 검사에서 이상이 없습니다.':`${verdict.label} · 보안 화면에서 확인하세요.`);
+    if(gateRunning.current&&!running&&(verdict.state==='clean'||verdict.state==='issues')) addEvent(`manual-gate-${Date.now()}`,verdict.state==='clean'?'보안 검사 통과':'보안 검사 이상 발견',verdict.state==='clean'?(verdict.advisories?`이미지·Dockerfile·시크릿 검사에서 막을 문제가 없습니다. 권고 ${verdict.advisories}건은 보안 화면에서 볼 수 있습니다.`:'이미지·Dockerfile·시크릿 검사에서 이상이 없습니다.'):`${verdict.label} · 보안 화면에서 확인하세요.`);
     gateRunning.current=running;
   },[addEvent]);
 
@@ -108,7 +108,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
       lastEventStatus.current=signature;
       return;
     }
-    if(event.type==='canvas.projectChanged') {refresh();return;}
+    if(event.type==='canvas.projectChanged') {refresh(true);return;}
     if(event.type==='canvas.graphResult'&&p.requestId===graphRequest.current) {stopGraph();setGraph(p.graph);setLevel(p.file?3:2);setFile(p.file);return;}
     if(event.type==='canvas.plan'&&p.requestId===actionRequest.current) {setSelection(null);setPlan(p);setConfig(p.config);setMessage('');finish();return;}
     if(event.type==='canvas.blocked'&&p.requestId===actionRequest.current) {if(actionTarget.current==='s3')setS3Progress({step:'error',message:'사전 검사에서 배포를 차단했습니다'});setBlocked(p.preflight?.reasons||[]);setError('보안 게이트가 배포를 차단했습니다.');addEvent(`gate-${p.requestId}`,'보안 게이트 차단','사전 검사에서 배포를 차단했습니다.');finish();return;}
@@ -208,7 +208,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
       <button className="rc-history-trigger" onClick={()=>openPane('history')}>배포 이력</button>
       <details className="rc-tool-menu rc-more-menu"><summary aria-label="캔버스 메뉴">•••</summary><div className="rc-menu-content">
         <nav aria-label="배포 도구">{panes.map(([id,title])=><button key={id} onClick={e=>{openPane(id);e.currentTarget.closest('details')?.removeAttribute('open');}}>{title}</button>)}{onOpenOperate&&<button onClick={onOpenOperate} disabled={!isOpsReady} title={isOpsReady?undefined:'AI · AWS 연결 필요'}>운영 대응</button>}</nav>
-        <div className="rc-menu-options"><label><input type="checkbox" checked={security} onChange={e=>setSecurity(e.target.checked)}/> 보안 레이어</label><label><input type="checkbox" checked={showNodeDetails} onChange={e=>setShowNodeDetails(e.target.checked)}/> 상세 구조 표시</label><label><input type="checkbox" checked={force2D} onChange={e=>setForce2D(e.target.checked)}/> 2D 보기</label><button onClick={()=>setExpanded(v=>!v)}>{expanded?'원래 크기':'캔버스 넓게'}</button><button onClick={refresh} disabled={loading}>{loading?'조회 중…':'새로고침'}</button></div>
+        <div className="rc-menu-options"><label><input type="checkbox" checked={security} onChange={e=>setSecurity(e.target.checked)}/> 보안 레이어</label><label><input type="checkbox" checked={showNodeDetails} onChange={e=>setShowNodeDetails(e.target.checked)}/> 상세 구조 표시</label><label><input type="checkbox" checked={force2D} onChange={e=>setForce2D(e.target.checked)}/> 2D 보기</label><button onClick={()=>setExpanded(v=>!v)}>{expanded?'원래 크기':'캔버스 넓게'}</button><button onClick={()=>refresh()} disabled={loading}>{loading?'조회 중…':'새로고침'}</button></div>
       </div></details>
     </div>
     {!drawerOpen&&notice}

@@ -19,6 +19,17 @@ test('slow AWS snapshots survive multiple polling intervals and retry after erro
  assert.equal(requests.finish('first'),false);
  assert.equal(requests.finish('retry'),true);
 });
+test('a project change replaces an in-flight snapshot — the old project answer is dropped',()=>{
+ const requests=new SnapshotRequests();
+ assert.equal(requests.begin('old-project'),true);
+ assert.equal(requests.begin('poll'),false);
+ assert.equal(requests.begin('project-changed',true),true);
+ assert.equal(requests.finish('old-project'),false,'옛 프로젝트 스냅샷이 화면을 덮는다');
+ assert.equal(requests.finish('project-changed'),true);
+ const src=require('node:fs').readFileSync(require('node:path').join(__dirname,'../webview-src/components/canvas/DeploymentCanvas.tsx'),'utf8');
+ assert.match(src,/canvas\.projectChanged'\) \{refresh\(true\)/);
+ assert.ok(!/onClick=\{refresh\}/.test(src),'클릭 이벤트가 force 로 넘어간다');
+});
 test('late snapshots cannot resurrect completed deployments or overwrite newer deployment status',()=>{
  const done={deployment_id:'new',running:false,stage:'done',observed_at:'2026-09-23T01:10:00Z',started_at:'2026-09-23T01:00:00Z'};
  assert.equal(mergeDeployment(done,{...done,running:true,stage:'in_progress',observed_at:'2026-09-23T01:09:00Z'}),done);
@@ -183,4 +194,15 @@ test('S3 approval selects the build directory and binds the actual filtered file
   assert.equal(s.plan().config.dir,'dist');
   await s.send('canvas.execute',{planId:s.plan().id,approved:true});assert.equal(s.executions[1].payload.dir,'dist');
  } finally {fs.unlinkSync(path.join(workspace,'dist/.env'));fs.unlinkSync(path.join(workspace,'dist/index.html'));fs.rmdirSync(path.join(workspace,'dist'));fs.rmdirSync(workspace);}
+});
+
+test('S3·ECS 노드는 AWS 공식 아키텍처 아이콘, Docker·GitHub·Discord 는 상표 모양을 쓴다',()=>{
+ const React=require('react');const {renderToStaticMarkup}=require('react-dom/server');
+ const {Logo}=require('../out/webview-test/components/canvas/Scene.js');
+ const s3=renderToStaticMarkup(React.createElement(Logo,{kind:'s3'})),ecs=renderToStaticMarkup(React.createElement(Logo,{kind:'ecs'}));
+ assert.match(s3,/aria-label="Amazon S3"/);assert.match(s3,/fill="#7aa116"/);assert.match(s3,/viewBox="0 0 64 64"/);
+ assert.match(ecs,/aria-label="Amazon ECS"/);assert.match(ecs,/fill="#ed7100"/);
+ for(const kind of ['docker','github','discord']){const svg=renderToStaticMarkup(React.createElement(Logo,{kind}));assert.match(svg,/role="img"/);assert.ok(!/<text/.test(svg),kind+' 이 글자로 그려진다');}
+ // 이름 글자(ECS·S3)로 대신 그리지 않는다
+ assert.ok(!/<text/.test(s3)&&!/<text/.test(ecs));
 });

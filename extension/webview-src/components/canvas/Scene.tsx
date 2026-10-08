@@ -2,18 +2,24 @@ import React, { useEffect, useId, useRef, useState } from "react";
 import * as THREE from "three";
 import { colors, dropTargetAt, SceneEdge, SceneNode, Target } from "./model";
 import { createArchitectureScene } from './threeScene';
+import { BRAND_GLYPHS } from './brandIcons';
 
 // Inline paths: never load textures, fonts, or logos from the network in a webview.
 const icons: Record<string, string> = {
   project: "M9 4H7a2 2 0 0 0-2 2v3l-2 3 2 3v3a2 2 0 0 0 2 2h2M15 4h2a2 2 0 0 1 2 2v3l2 3-2 3v3a2 2 0 0 1-2 2h-2",
-  github: "M12 2a10 10 0 0 0-3.2 19.5v-2.7c-2.7.6-3.3-1.1-3.3-1.1-.5-1.3-1.2-1.6-1.2-1.6 1-.7 1.9 1 1.9 1 .9 1.5 2.5 1.1 3 .8.1-.7.4-1.2.7-1.5-2.2-.3-4.5-1.1-4.5-4.9 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .9-.3 2.8 1a9.8 9.8 0 0 1 5.1 0c1.9-1.3 2.8-1 2.8-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.8-2.3 4.6-4.5 4.9.4.4.7 1 .7 2v3.1A10 10 0 0 0 12 2Z",
-  docker: "M2 12h17c2 0 3-1 3-3-1 0-2 0-3 1-1-1-1-2-1-3-2 1-2 3-1 4H2v3c0 5 5 6 8 5 5-1 7-4 8-7M4 10V7h3v3M8 10V7h3v3M12 10V7h3v3M8 6V3h3v3",
-  discord: "M7 4 3 6 1 18l5 3 2-3h8l2 3 5-3-2-12-4-2-1 2H8L7 4ZM7 11v3M17 11v3M7 17c3 2 7 2 10 0",
   folder: "M2 6h8l2 3h10v11H2V6Z", file: "M6 2h8l5 5v15H6V2Zm8 0v6h5M9 12h7M9 16h7",
   fn: "M16 3h-3c-3 0-3 3-3 6l-2 10c0 2-1 3-4 2M6 9h11",
 };
 export function Logo({ kind }: { kind: string }) {
-  return <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true">{icons[kind] ? <path d={icons[kind]} fill={kind === "github" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" /> : <text x="12" y="16" fontSize={kind === "ecs" ? 10 : 13} fontWeight="800" fill="currentColor" textAnchor="middle">{kind === "gate" ? "◇" : kind.toUpperCase()}</text>}</svg>;
+  //: 실제 기술 로고 — S3·ECS 는 AWS 공식 아키텍처 아이콘(색 그대로), Docker·GitHub·Discord 는 상표 모양(노드 색).
+  const brand = BRAND_GLYPHS[kind];
+  if (brand) {
+    const aws = brand.viewBox === "0 0 64 64";
+    return <svg className={aws ? "rc-logo rc-logo-aws" : "rc-logo"} viewBox={brand.viewBox} width={aws ? 34 : 28} height={aws ? 34 : 28} role="img" aria-label={brand.title}>
+      {brand.paths.map((p, i) => <path key={i} d={p.d} fill={p.fill || "currentColor"} fillRule={aws ? "evenodd" : undefined} />)}
+    </svg>;
+  }
+  return <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true">{icons[kind] ? <path d={icons[kind]} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" /> : <text x="12" y="16" fontSize={13} fontWeight="800" fill="currentColor" textAnchor="middle">{kind === "gate" ? "◇" : kind.toUpperCase()}</text>}</svg>;
 }
 export const slabPoints = (n: SceneNode, bottom = false): Array<[number, number]> => {
   const y = n.y + (bottom ? 29 : 0);

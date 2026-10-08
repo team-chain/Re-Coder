@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import posixpath
 import re
 import sys
 from dataclasses import asdict, dataclass, field
@@ -40,7 +41,8 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_LOCAL_IMPORT_MISSING", "NODE_VITE_JSX_IN_JS", "NODE_VITE_PROCESS_ENV", "NODE_IMPORT_PACKAGE_TYPO",
                 "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING", "NODE_PG_NUMERIC_STRINGS", "NODE_CLIENT_HARDCODED_LOCALHOST",
                 "NODE_ROUTER_ANCHOR_LINK", "NODE_MODULE_FORMAT_MISMATCH", "NODE_FRONTEND_NOT_BUILT",
-                "NODE_IMPORT_NAME_MISSING", "NODE_CLIENT_API_DOUBLE_PREFIX"}
+                "NODE_IMPORT_NAME_MISSING", "NODE_CLIENT_API_DOUBLE_PREFIX", "DOCKERFILE_ENTRY_MISSING",
+                "DOCKERFILE_DEPS_DIR_MISSING", "DOCKERFILE_NPM_SELF_UPGRADE", "APP_DEAD_IMAGE_HOST"}
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -275,6 +277,8 @@ def _detect_js_port(text: str) -> tuple[Optional[int], bool]:
     uses_env = bool(re.search(r"process\.env\.PORT\b|process\.env\[['\"]PORT['\"]\]", active))
     patterns = (
         r"process\.env\.PORT\s*(?:\|\||\?\?)\s*['\"]?(\d{2,5})\b",
+        #: `Number(process.env.PORT) || 8080`·`parseInt(process.env.PORT, 10) ?? 8080` — 감싼 괄호 뒤의 기본값.
+        r"process\.env\.PORT\s*(?:,\s*\d+\s*)?\)\s*(?:\|\||\?\?)\s*['\"]?(\d{2,5})\b",
         r"\.listen\(\s*(\d{2,5})\b",
         r"\b(?:const|let|var)\s+(?:PORT|port|APP_PORT|SERVER_PORT)\s*=\s*(?:Number\(|parseInt\()?\s*['\"]?(\d{2,5})\b",
         r"\bPORT\s*(?:\|\||\?\?)\s*['\"]?(\d{2,5})\b",
@@ -330,14 +334,117 @@ def _spec_major(spec) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def _start_entry(scripts: dict) -> Optional[str]:
+def _start_entry(scripts: dict, files: "Optional[ProjectFiles]" = None, _base: str = "", _depth: int = 0) -> Optional[str]:
+    """start 스크립트가 실제로 띄우는 서버 파일(프로젝트 루트 기준).
+
+    `node server.js` 뿐 아니라 다른 패키지로 넘기는 start 도 따라간다(files 가 있을 때):
+    `npm start --workspace=backend`, `npm --prefix server start`, `cd api && npm start`,
+    `yarn workspace api start`, `pnpm --filter api start`, `npm run serve`. 예전에는 이런 모노레포
+    start 를 못 읽어 Dockerfile CMD 가 없는 index.js 를 실행했다(실기기 TEMP 쇼핑몰).
+    """
     for name in ("start", "start:prod", "serve"):
+        cwd = ""
         for words in _script_commands(str(scripts.get(name, ""))):
+            if words[0] == "cd" and len(words) > 1:
+                cwd = _pjoin((cwd, words[1].strip("'\"")))
+                continue
             if words[0] in {"node", "nodemon"}:
-                args = [w for w in words[1:] if not w.startswith("-")]
+                #: `node -r dotenv/config server.js` — -r·--require·--import·--loader 다음 값은 진입 파일이 아니다.
+                args, skip = [], False
+                for w in words[1:]:
+                    if skip:
+                        skip = False
+                        continue
+                    if w in (_NODE_VALUE_FLAGS if words[0] == "node" else _NODEMON_VALUE_FLAGS):
+                        skip = True
+                        continue
+                    if not w.startswith("-"):
+                        args.append(w)
                 if args:
-                    return _norm(args[0].strip("'\""))
+                    entry = _pjoin((_base, cwd, args[0].strip("'\"")))
+                    return None if entry.startswith("..") else entry
+                continue
+            if files is None or _depth >= 3 or words[0] not in {"npm", "yarn", "pnpm"}:
+                continue
+            delegated = _delegated_start(words, scripts, name, files, _pjoin((_base, cwd)), _depth)
+            if delegated:
+                return delegated
     return None
+
+
+def _pjoin(parts: tuple) -> str:
+    """루트 기준 경로 합치기 — `a/../b` 를 접고, 루트 밖이면 `..` 로 시작한다."""
+    joined = posixpath.normpath(posixpath.join(*[p for p in parts if p] or [""]))
+    return "" if joined in (".", "") else _norm(joined) if not joined.startswith("..") else joined
+
+
+def _workspace_folder(files: "ProjectFiles", base: str, ref: str) -> Optional[str]:
+    """`--workspace=<폴더 또는 패키지 이름>` → 그 패키지 폴더(루트 기준)."""
+    ref = ref.strip("'\"")
+    folder = _pjoin((base, ref))
+    if folder and not folder.startswith("..") and files.exists(f"{folder}/package.json"):
+        return folder
+    for rel in files.files():
+        if rel.endswith("/package.json") and "/node_modules/" not in f"/{rel}":
+            try:
+                pkg = json.loads(files.read(rel) or "")
+            except ValueError:
+                continue
+            if isinstance(pkg, dict) and pkg.get("name") == ref:
+                return rel[: -len("/package.json")]
+    return None
+
+
+def _delegated_start(words: list[str], scripts: dict, current: str, files: "ProjectFiles",
+                     base: str, depth: int) -> Optional[str]:
+    tool = words[0]
+    target, rest = _npm_dir_and_args(words)
+    workspace = None
+    for i, w in enumerate(words[1:], start=1):
+        m = re.match(r"^(?:--workspace|-w|--filter|-F)=(.+)$", w)
+        if m:
+            workspace = m.group(1)
+        elif w in {"--workspace", "-w", "--filter", "-F"} and i + 1 < len(words):
+            workspace = words[i + 1]
+    if workspace and workspace in rest:
+        rest = [w for w in rest if w != workspace]
+    if tool == "yarn" and rest[:1] == ["workspace"] and len(rest) >= 3:
+        workspace, rest = rest[1], rest[2:]
+    script = rest[1] if rest[:1] == ["run"] and len(rest) > 1 else (rest[0] if rest else "")
+    if script not in {"start", "start:prod", "serve"}:
+        return None
+    folder: Optional[str] = None
+    if workspace:
+        folder = _workspace_folder(files, base, workspace)
+    elif target:
+        folder = _pjoin((base, target))
+    elif base:
+        folder = base
+    if folder is None:
+        if script in scripts and script != current:
+            #: `"start": "npm run serve"` — 같은 package.json 의 다른 스크립트.
+            return _start_entry({"start": scripts[script]}, files, base, depth + 1)
+        return None
+    if folder.startswith("..") or not files.exists(f"{folder}/package.json"):
+        return None
+    try:
+        sub = json.loads(files.read(f"{folder}/package.json") or "")
+    except ValueError:
+        return None
+    sub_scripts = sub.get("scripts") if isinstance(sub, dict) and isinstance(sub.get("scripts"), dict) else {}
+    entry = _start_entry({"start": sub_scripts.get(script, "")}, files, folder, depth + 1)
+    if entry:
+        return entry
+    main = sub.get("main") if isinstance(sub, dict) else None
+    if isinstance(main, str) and main.endswith((".js", ".cjs", ".mjs")):
+        return _pjoin((folder, main))
+    return None
+
+
+_NODE_VALUE_FLAGS = {"-r", "--require", "--import", "--loader", "--experimental-loader", "-e", "--eval", "-p", "--print",
+                     "--env-file", "--watch-path", "--inspect-port"}
+_NODEMON_VALUE_FLAGS = {"-w", "--watch", "-e", "--ext", "-x", "--exec", "--signal", "-d", "--delay", "-i", "--ignore", "--config",
+                        "-r", "--require"}
 
 
 
@@ -771,7 +878,9 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             if ident:  # baseURL: API_BASE_URL — 같은 파일의 상수를 따라간다
                 m = re.search(rf"""\b(?:const|let|var)\s+{re.escape(value)}\s*=\s*([^;\n]+)""", text)
                 value = m.group(1) if m else ""
-            if re.search(r"""['"`][^'"`]*?/api/?['"`]\s*$""", value.strip()):
+            #: 문자열 그대로인 baseURL 만 본다 — `import.meta.env.VITE_API || '/api'` 처럼 배포에서 다른 주소가 될 수
+            #: 있는 값은 '/api/…' 호출이 맞는 코드일 수 있다.
+            if re.fullmatch(r"""(['"`])(?:https?://[^'"`$\s/]+)?[^'"`$]*?/api/?\1\s*;?""", value.strip()):
                 instances.append(var)
         for var in instances:
             names_by_file: dict[str, set[str]] = {rel: {var}}
@@ -991,25 +1100,120 @@ def esm_named_cjs_rewrite(text: str, cjs_targets: set[str], importer: str, files
     """ESM 이 CommonJS(.cjs) 파일에서 이름을 골라 가져오면 Node 가 이름을 못 찾을 수 있다 —
     기본 가져오기 + 구조 분해로 바꾼다(항상 module.exports 를 그대로 받는다)."""
     pattern = re.compile(r"""^([ \t]*)import\s+(?:([\w$]+)\s*,\s*)?\{([^}]*)\}\s*from\s*(['"])(\.{1,2}/[^'"]+)\4\s*;?""", re.MULTILINE)
+    used: set[str] = set(re.findall(r"\b__recoder_[\w$]*", text))
 
     def repl(m):
         indent, default, names, quote, spec = m.groups()
-        if _resolve_local(files, importer, spec) not in cjs_targets:
+        target = _resolve_local(files, importer, spec)
+        if target not in cjs_targets:
             return m.group(0)
         parts = []
+        sources = []
         for raw in names.split(","):
             raw = raw.strip()
             if not raw or raw.startswith("type "):
                 continue
             src, _, alias = raw.partition(" as ")
+            sources.append(src.strip())
             parts.append(f"{src.strip()}: {alias.strip()}" if alias.strip() else src.strip())
-        base = default or "__recoder_" + re.sub(r"\W", "_", spec.rsplit("/", 1)[-1].split(".")[0])
+        try:
+            target_text = files.read(target) or ""
+        except Exception:  # noqa: BLE001
+            target_text = ""
+        if target_text and sources and set(sources) <= _lexer_exports(target_text):
+            return m.group(0)  # Node 가 이름을 찾을 수 있다 — 그대로 둔다
+        stem = "__recoder_" + re.sub(r"\W", "_", spec.rsplit("/", 1)[-1].split(".")[0])
+        base, n = default or stem, 2
+        while not default and base in used:
+            base, n = f"{stem}_{n}", n + 1
+        used.add(base)
         line = f"{indent}import {base} from {quote}{spec}{quote};"
         if parts:
             line += f"\n{indent}const {{ {', '.join(parts)} }} = {base};"
         return line
 
     return pattern.sub(repl, text)
+
+
+def _js_code_mask(text: str) -> str:
+    """주석·문자열·템플릿 리터럴을 공백으로 바꾼 같은 길이의 텍스트(구문 위치 판정용, 보수적)."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        two = text[i:i + 2]
+        if two == "//":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+        elif two == "/*":
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+        elif c in "'\"`":
+            j = i + 1
+            while j < n and text[j] != c:
+                if text[j] == "\\":
+                    j += 1
+                elif c != "`" and text[j] == "\n":
+                    break
+                j += 1
+            j = min(j + 1, n)
+        else:
+            i += 1
+            continue
+        for k in range(i, j):
+            if out[k] != "\n":
+                out[k] = " "
+        i = j
+    return "".join(out)
+
+
+def _has_top_level_await(code: str) -> bool:
+    """마스크된 코드에서 함수 밖 await(최상위 await)가 있는지. 확실하지 않으면 True 쪽으로 본다."""
+    stack: list[bool] = []  # True = 함수 본문
+    last_boundary = 0
+    for m in re.finditer(r"[{};]|\bawait\b", code):
+        tok = m.group(0)
+        if tok == "{":
+            prefix = code[last_boundary:m.start()]
+            stack.append(bool(re.search(r"\bfunction\b|=>\s*$|\)\s*$", prefix)))
+            last_boundary = m.end()
+        elif tok == "}":
+            if stack:
+                stack.pop()
+            last_boundary = m.end()
+        elif tok == ";":
+            last_boundary = m.end()
+        else:
+            if any(stack):
+                continue
+            prefix = code[last_boundary:m.start()]
+            if re.search(r"\basync\b[^;]*=>", prefix):
+                continue  # async () => await x (중괄호 없는 화살표 함수)
+            return True
+    return False
+
+
+def _unsafe_for_cjs(text: str) -> bool:
+    """esm_to_cjs 가 확실히 바꿀 수 없는 형태 — 최상위 await, import 속성, 여러 이름 export, 템플릿 속 import 줄."""
+    code = _js_code_mask(text)
+    if _has_top_level_await(code):
+        return True
+    if re.search(r"""\bfrom\s*['"][^'"]+['"]\s*(?:with|assert)\s*\{""", text):
+        return True
+    for m in re.finditer(r"^[ \t]*export\s+(?:const|let|var)\s+[^\n]*", code, re.MULTILINE):
+        depth = 0
+        for ch in m.group(0):
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                return True
+    #: import/export 로 시작하는 줄이 템플릿·문자열 안에 있으면(마스크에서 사라짐) 정규식 변환이 그 줄을 바꾼다
+    for m in re.finditer(r"^[ \t]*(?:import|export)\b", text, re.MULTILINE):
+        if not code[m.start():m.end()].strip():
+            return True
+    return False
 
 
 def esm_to_cjs(text: str) -> Optional[str]:
@@ -1019,6 +1223,8 @@ def esm_to_cjs(text: str) -> Optional[str]:
     import.meta.url·dirname·filename. 못 바꾸는 것: 최상위 await, export * / export … from.
     """
     if re.search(r"^export\s*\*|^export\s*\{[^}]*\}\s*from\b|^await\s|^(?:const|let|var)\s[^\n]*=\s*await\s", text, re.MULTILINE):
+        return None
+    if _unsafe_for_cjs(text):
         return None
     for pkg, major in _ESM_ONLY_PACKAGES.items():
         if re.search(rf"""from\s*['"]{re.escape(pkg)}['"]""", text):
@@ -1127,10 +1333,10 @@ def esm_dirname_shim(text: str) -> str:
             f"import {{ dirname as __recoderDirname }} from 'path';{newline}"
             f"const __filename = __recoderFileURLToPath(import.meta.url);{newline}"
             f"const __dirname = __recoderDirname(__filename);{newline}")
-    imports = list(re.finditer(r"""^[ \t]*import\b[^;]*?['"][^'"]+['"]\s*;?[ \t]*$""", text, re.MULTILINE | re.DOTALL))
-    at = imports[-1].end() + 1 if imports else 0
-    at = min(at, len(text))
-    return text[:at] + ("" if at == 0 or text[at - 1] == "\n" else newline) + shim + text[at:]
+    #: 맨 위(셔뱅 다음)에 둔다 — import 는 끌어올려지고 import.meta.url 은 처음부터 쓸 수 있다. 예전엔 "마지막 import
+    #: 뒤"를 정규식으로 찾다가 줄 끝 주석이 붙은 import 에서 함수 본문 안에 끼워 넣어 SyntaxError 가 났다.
+    at = text.index("\n") + 1 if text.startswith("#!") and "\n" in text else 0
+    return text[:at] + shim + text[at:]
 
 
 def esm_require_shim(text: str) -> str:
@@ -1170,7 +1376,7 @@ def _uses_undeclared_dirname(text: str) -> bool:
 
 
 def _node_entry(files: "ProjectFiles", scripts: dict, main) -> Optional[str]:
-    entry = _start_entry(scripts)
+    entry = _start_entry(scripts, files)
     if entry and files.exists(entry):
         return entry
     if isinstance(main, str) and files.exists(_norm(main)) and _norm(main).endswith((".js", ".mjs", ".cjs")):
@@ -1315,9 +1521,14 @@ def module_format_plan(files: "ProjectFiles", entry: Optional[str], owner) -> Op
             except (ValueError, TypeError):
                 why_not = "package.json 을 읽지 못했습니다."
             # type 을 빼면 그래프 밖의 ESM .js(설정·스크립트)가 CommonJS 로 해석된다 — .mjs 로.
+            #: 번들러(Vite 등)가 읽는 화면 소스·설정은 package type 과 무관하다 — 이름을 바꾸면 index.html 의
+            #: <script src="/src/main.js"> 가 깨진다.
+            bundled_roots = tuple((f"{folder}/src/" if folder else "src/") for folder in _frontend_projects(files))
             for rel in files.files():
                 if owner(rel) == scope and rel.endswith(".js") and rel not in graph and "/node_modules/" not in f"/{rel}" \
                         and not rel.startswith(_BROWSER_DIRS) and _js_syntax(files.read(rel) or "") == "esm" \
+                        and not (bundled_roots and rel.startswith(bundled_roots)) \
+                        and not re.search(r"(?:^|/)vite\.config\.js$", rel) \
                         and not files.exists(rel[:-3] + ".mjs"):
                     renames.append((rel, rel[:-3] + ".mjs"))
         after_mode = {rel: ("cjs" if rel.endswith(".js") else after_mode[rel]) for rel in graph}
@@ -1360,6 +1571,13 @@ def module_format_plan(files: "ProjectFiles", entry: Optional[str], owner) -> Op
         problems.append("ESM 파일에는 __dirname·__filename 이 없습니다(ReferenceError): " + ", ".join(dirname_files[:4]))
     if not problems:
         return None
+    #: import 와 module.exports/exports.x 를 함께 쓰는 파일은 require 만 만들어 줘도 ESM 에서 module 이 없어 죽는다
+    #: (예전: createRequire 만 넣고 "고쳤다"고 보고). 어느 형식으로 정리할지 정해야 하므로 자동으로 고치지 않는다.
+    mixed_exports = [rel for rel in mixed if re.search(r"\bmodule\.exports\b|(?<![\w$.])exports\.[\w$]+\s*=|\brequire\.main\b",
+                                                       _strip_js_comments(files.read(rel) or ""))]
+    if mixed_exports and not why_not:
+        why_not = (f"{mixed_exports[0]} 이(가) import 와 module.exports 를 함께 씁니다 — 한 형식(import/export 또는 "
+                   "require/module.exports)으로 정리해야 해서 자동으로 고치지 않습니다.")
     if why_not:
         return {"problems": problems, "auto": False, "why_not": why_not, "writes": {}, "renames": [],
                 "files": (wrong + mixed)[:1] or [entry]}
@@ -1588,7 +1806,11 @@ def frontend_build_plan(files: "ProjectFiles", scripts: dict, server_files: list
     if not candidates:
         #: 서버가 제공하는 폴더가 저장소에 없고(빌드 결과), 그 폴더를 만드는 프런트엔드가 없다 —
         #: 프런트엔드가 하나뿐이면 그 빌드 결과 폴더를 서버가 제공하는 폴더로 맞춘다(Vite 만).
-        missing = [d for d in served if not files.has_dir(d)]
+        #: 빌드 결과 폴더처럼 보이는 것만(dist·build·public 등) — uploads·data 같은 실행 중 파일 폴더로
+        #: outDir 를 돌리면 빌드가 그 폴더를 비운다.
+        missing = [d for d in served if not files.has_dir(d)
+                   and re.fullmatch(r"(?:[\w.-]*[-_])?(?:dist|build|public|out|www|static|client|frontend|web)",
+                                    posixpath.basename(d.rstrip("/")) or "", re.I)]
         if len(projects) == 1 and len(missing) == 1:
             folder, (out_dir, script_name) = next(iter(projects.items()))
             config = _vite_config_file(files, folder) if re.search(r"\bvite\s+build\b", str(
@@ -1752,7 +1974,9 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         check_script("build")
 
     # 2) 시작 진입점 — 컨테이너 CMD 가 이 파일을 실행한다.
-    entry = _start_entry(scripts)
+    entry = _start_entry(scripts, files)
+    if entry and files.exists(entry):
+        result.fix_data["start_entry"] = entry
     if entry and not files.exists(entry) and not re.match(r"^(dist|build|out|lib)/", entry):
         result.issues.append(ReadinessIssue(
             "NODE_START_ENTRY_MISSING", ERROR,
@@ -1808,7 +2032,8 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
             continue
         project = owner(rel)
         declared = manifests[project] | (deps if project else set())  # 하위 폴더는 위쪽 node_modules 도 찾는다
-        active = _strip_js_comments(text)
+        #: 템플릿 문자열 안의 글자(코드 생성기·문서 예시의 `import x from 'y'`)는 의존성이 아니다.
+        active = re.sub(r"`(?:\\.|[^`\\])*`", "``", _strip_js_comments(text))
         for pattern in _IMPORT_PATTERNS:
             for spec in pattern.findall(active):
                 pkg = _package_of(spec)
@@ -1816,7 +2041,8 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                     undeclared.setdefault(project, {}).setdefault(pkg, rel)
         r, s = _express_routes(text)
         routes |= r
-        statics |= s
+        #: `path.join(__dirname, '../client/dist')` 처럼 파일 위치 기준(../)으로 적은 폴더는 프로젝트 루트 기준으로 바꾼다.
+        statics |= {(_pjoin((posixpath.dirname(rel), d)) if d.startswith("../") else d) for d in s}
         result.local_data_files += [f for f in _local_sqlite_files(active) if f not in result.local_data_files]
     for project, missing in sorted(undeclared.items()):
         if workspaces and not project:
@@ -1841,7 +2067,18 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
             result.app_port, result.port_from_env = port, uses_env
             break
 
+    #: 빌드가 만드는 폴더(client/dist 등)는 지금 없어도 이미지 빌드 때 생긴다 — 없다고 경고하지 않는다.
+    try:
+        _runs_for_out, _ = _subproject_scripts(scripts, files)
+        build_outs = {o for o in ((_vite_out_dir(files, d) or _frontend_out_dir(files, d)) for d in _runs_for_out) if o}
+        root_out = _vite_out_dir(files, "") if "build" in scripts else None
+        if root_out:
+            build_outs.add(root_out)
+    except Exception:  # noqa: BLE001
+        build_outs = set()
     for folder in sorted(statics):
+        if folder in build_outs:
+            continue
         if not files.has_dir(folder):
             result.issues.append(ReadinessIssue(
                 "NODE_STATIC_DIR_MISSING", WARNING,
@@ -1875,7 +2112,8 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         #: path.join(__dirname, 'client', 'dist') 처럼 나눠 적은 경로도 제공하는 것으로 본다(글자 비교만 하면 오탐).
         if out in served_now or any(out in text for text in server_texts):
             continue
-        commonjs = bool(result.server_entry) and "require(" in (files.read(result.server_entry) or "") \
+        #: 글자 "require(" 만 보면 createRequire 를 쓰는 ESM 서버도 CommonJS 로 보고 __dirname 을 넣어 죽인다.
+        commonjs = bool(result.server_entry) and _js_syntax(files.read(result.server_entry) or "") == "cjs" \
             and package.get("type") != "module"
         result.issues.append(ReadinessIssue(
             "NODE_FRONTEND_NOT_SERVED", WARNING,
@@ -2185,13 +2423,43 @@ def _dockerfile_installs(text: str, folder: str) -> bool:
     return False
 
 
-def _install_line(files: "ProjectFiles", folder: str) -> str:
+def _stage_workdir(lines: list[str], index: int) -> Optional[str]:
+    """index 줄이 속한 빌드 단계의 현재 WORKDIR(절대 경로일 때만). 모르면 None."""
+    workdir = None
+    for line in lines[:index]:
+        words = line.split()
+        if not words:
+            continue
+        op = words[0].upper()
+        if op == "FROM":
+            workdir = None
+        elif op == "WORKDIR" and len(words) > 1:
+            target = words[1]
+            workdir = (target.rstrip("/") or "/") if target.startswith("/") and "$" not in target else None
+    return workdir
+
+
+def _in_folder(folder: str, commands: str, workdir: Optional[str], *, pragma: str = "") -> list[str]:
+    """하위 폴더에서 명령을 실행하는 줄들.
+
+    단계의 WORKDIR 를 알면 `WORKDIR <폴더>` → `RUN …` → `WORKDIR <원래>` 로 쓴다(`RUN cd` 와 같은 동작,
+    Dockerfile 검사 DL3003 을 만들지 않는다). 모르면 예전처럼 `RUN cd <폴더> && …`.
+    """
+    head = [pragma] if pragma else []
+    if workdir:
+        target = f"{workdir.rstrip('/')}/{folder.strip('/')}" if workdir != "/" else f"/{folder.strip('/')}"
+        return [f"WORKDIR {target}", *head, f"RUN {commands}", f"WORKDIR {workdir}"]
+    return [*head, f"RUN cd {folder} && {commands}"]
+
+
+def _install_line(files: "ProjectFiles", folder: str, workdir: Optional[str] = None) -> list[str]:
     if files.exists(f"{folder}/yarn.lock"):
-        return f"RUN cd {folder} && yarn install --frozen-lockfile"
+        return _in_folder(folder, "yarn install --frozen-lockfile", workdir)
     if files.exists(f"{folder}/pnpm-lock.yaml"):
-        return f"RUN cd {folder} && npm install -g pnpm && pnpm install --frozen-lockfile"
-    return (f"RUN cd {folder} && if [ -f package-lock.json ]; then npm ci || npm install; "
-            "else npm install; fi")
+        #: pnpm 버전은 그 폴더의 lock 파일을 따른다(고정하지 않음).
+        return _in_folder(folder, "npm install -g pnpm && pnpm install --frozen-lockfile", workdir,
+                          pragma="# hadolint ignore=DL3016")
+    return _in_folder(folder, "if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi", workdir)
 
 
 def add_subproject_installs(text: str, folders: list[str], files: "ProjectFiles") -> str:
@@ -2215,7 +2483,9 @@ def add_subproject_installs(text: str, folders: list[str], files: "ProjectFiles"
     after = ["# ReCoder: 빌드에만 쓰는 하위 폴더 의존성은 실행 이미지에 넣지 않는다(크기·보안 검사).",
              "RUN rm -rf " + " ".join(f"{f}/node_modules" for f in todo)]
     before = ["# ReCoder: build 스크립트가 " + ", ".join(f"{f}/" for f in todo) + " 에서 빌드하므로 그 의존성도 설치한다."]
-    before += [_install_line(files, f) for f in todo]
+    workdir = _stage_workdir(lines, index)
+    for f in todo:
+        before += _install_line(files, f, workdir)
     lines[end + 1:end + 1] = after
     lines[index:index] = before
     return newline.join(lines)
@@ -2245,10 +2515,82 @@ def _runtime_install_anchors(text: str) -> Optional[tuple[int, int]]:
     return (deps_run_end, copy_line) if deps_run_end is not None and copy_line is not None else None
 
 
-def add_runtime_subproject_install(text: str, folder: str) -> str:
+_NPM_SELF_UPGRADE = re.compile(r"\bnpm\s+(?:install|i)\s+(?:-g|--global)\s+npm(?:@[^\s&;]+)?")
+_NPM_REMOVAL = "RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx"
+
+
+def drop_npm_self_upgrade(text: str, next_app: bool = False) -> str:
+    """`npm install -g npm@latest` 를 없앤다. 실행 명령이 npm 을 안 쓰면(또는 Next.js 를 node 로 바꿀 수 있으면) 번들 npm 을 지운다."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(newline)
+    out: list[str] = []
+    for line in lines:
+        if line.lstrip().startswith("#") or not _NPM_SELF_UPGRADE.search(line):
+            out.append(line)
+            continue
+        cleaned = re.sub(r"\s*&&\s*npm\s+(?:install|i)\s+(?:-g|--global)\s+npm(?:@[^\s&;]+)?", "", line)
+        cleaned = re.sub(r"npm\s+(?:install|i)\s+(?:-g|--global)\s+npm(?:@[^\s&;]+)?\s*&&\s*", "", cleaned)
+        if _NPM_SELF_UPGRADE.search(cleaned) or re.fullmatch(r"\s*RUN\s*\\?\s*", cleaned):
+            continue  # 그 단계만 하던 RUN 줄 — 지운다
+        out.append(cleaned)
+    #: HEALTHCHECK 의 이어진 줄(`\` 다음의 `CMD curl …`)은 실행 명령이 아니다.
+    cmd_idx = max((i for i, l in enumerate(out) if re.match(r"^\s*CMD\b", l, re.I)
+                   and not (i > 0 and out[i - 1].rstrip().endswith("\\"))), default=None)
+    cmd = out[cmd_idx] if cmd_idx is not None else ""
+    if next_app and cmd_idx is not None and re.search(r"""["']?npm["']?\s*,?\s*["']?(?:run\s*["']?\s*,?\s*["']?)?start""", cmd):
+        port = None
+        for l in out:
+            m = re.match(r"^\s*EXPOSE\s+(\d{2,5})", l, re.I)
+            if m:
+                port = m.group(1)
+        out[cmd_idx] = ('CMD ["node", "node_modules/next/dist/bin/next", "start", "-H", "0.0.0.0"'
+                        + (f', "-p", "{port}"' if port else "") + "]")
+        cmd = out[cmd_idx]
+    uses_npm = bool(re.search(r"\b(?:npm|npx|yarn|pnpm)\b", cmd))
+    if not uses_npm and not any("node_modules/npm" in l for l in out):
+        user_idx = max((i for i, l in enumerate(out) if re.match(r"^\s*USER\b", l, re.I)), default=None)
+        at = user_idx if user_idx is not None else (cmd_idx if cmd_idx is not None else len(out))
+        out[at:at] = ["# ReCoder: 이미지에 번들된 npm(취약한 tar 동봉)은 쓰지 않으므로 지운다(npm 스스로 올리기는 빌드를 깨뜨린다).", _NPM_REMOVAL]
+    return newline.join(out)
+
+
+def _deps_stage_makes_node_modules(text: str) -> bool:
+    stage = None
+    for line in text.replace("\r\n", "\n").split("\n"):
+        m = re.match(r"^\s*FROM\s+\S+(?:\s+AS\s+(\S+))?", line, re.I)
+        if m:
+            stage = (m.group(1) or "").lower()
+        elif stage == "deps" and re.search(r"mkdir\s+(?:-p\s+)?(?:\./|/app/)?node_modules\b", line):
+            return True
+    return False
+
+
+def add_deps_dir(text: str) -> str:
+    """deps 단계 설치 RUN 바로 뒤에 `RUN mkdir -p node_modules` 를 넣는다."""
+    anchors = _runtime_install_anchors(text.replace("\r\n", "\n"))
+    if anchors is None:
+        raise ValueError("Dockerfile 구조를 확인하지 못했습니다. 의존성 설치 뒤에 `RUN mkdir -p node_modules` 를 직접 넣으세요.")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(newline)
+    deps_end, _copy = anchors
+    lines[deps_end + 1:deps_end + 1] = [
+        "# ReCoder: 실행 의존성이 없으면 npm 이 node_modules 를 만들지 않는다 — 실행 단계 COPY 가 깨지지 않게 둔다.",
+        "RUN mkdir -p node_modules",
+    ]
+    return newline.join(lines)
+
+
+def add_runtime_subproject_install(text: str, folder: str, npm_workspace: bool = False) -> str:
+    """deps 단계에서 서버 폴더 의존성을 설치하고 실행 이미지로 복사한다.
+
+    npm_workspace: 루트 package.json 이 workspaces 를 쓰면 `cd backend && npm install` 은 루트
+    node_modules 에 설치하고 backend/node_modules 는 만들지 않는다 — 다음 COPY 가 "not found" 로
+    빌드를 깨뜨렸다. `--workspaces=false` 로 그 폴더에 설치한다.
+    """
     anchors = _runtime_install_anchors(text.replace("\r\n", "\n"))
     if anchors is None:
         raise ValueError("Dockerfile 구조를 확인하지 못했습니다. 서버 폴더 의존성 설치를 직접 추가하세요.")
+    ws = " --workspaces=false" if npm_workspace else ""
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.split(newline)
     deps_end, copy_line = anchors
@@ -2258,8 +2600,8 @@ def add_runtime_subproject_install(text: str, folder: str) -> str:
     lines[deps_end + 1:deps_end + 1] = [
         f"# ReCoder: 서버가 {folder}/package.json 의 패키지를 쓰므로 그 폴더 의존성도 설치한다.",
         f"COPY {folder}/package.json {folder}/package-lock.json* ./{folder}/",
-        f"RUN cd {folder} && if [ -f package-lock.json ]; then npm ci --omit=dev || npm install --omit=dev; "
-        "else npm install --omit=dev; fi",
+        *_in_folder(folder, f"if [ -f package-lock.json ]; then npm ci --omit=dev{ws} || npm install --omit=dev{ws}; "
+                            f"else npm install --omit=dev{ws}; fi", _stage_workdir(lines, deps_end + 1)),
     ]
     return newline.join(lines)
 
@@ -2282,12 +2624,41 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
             f"앱은 {effective} 포트에서 요청을 받는데 Dockerfile 은 {expose} 포트를 엽니다(EXPOSE"
             f"{'·HEALTHCHECK' if facts['health_port'] == expose else ''}). 컨테이너가 떠도 접속·헬스 확인이 실패합니다.",
             f"Dockerfile 의 {expose} 를 {effective} 로 맞추세요(자동 수정 가능).", dockerfile, True))
+    if any(_NPM_SELF_UPGRADE.search(l) for l in text.splitlines() if not l.lstrip().startswith("#")):
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_NPM_SELF_UPGRADE", ERROR,
+            "Dockerfile 이 이미지 안에서 `npm install -g npm@…` 로 npm 을 스스로 올립니다. npm 12 가 나온 뒤로 이 단계가 "
+            "\"Cannot find module 'promise-retry'\" 로 실패해 이미지 빌드가 멈춥니다.",
+            "그 단계를 지우고, 앱이 node 로 뜨면 번들 npm 을 지우세요(자동 수정 가능 — Next.js 는 node 로 바로 띄웁니다).",
+            dockerfile, True))
+    root_pkg: dict = {}
+    try:
+        loaded = json.loads(files.read("package.json") or "")
+        root_pkg = loaded if isinstance(loaded, dict) else {}
+    except ValueError:
+        pass
+    anchors_now = _runtime_install_anchors(text.replace("\r\n", "\n"))
+    #: 설치할 패키지가 하나도 없을 때만 npm 이 node_modules 를 만들지 않는다(devDependencies·workspaces 가 있으면 만든다 — 실측).
+    installs_nothing = root_pkg and not any(root_pkg.get(k) for k in ("dependencies", "devDependencies", "optionalDependencies", "workspaces"))
+    if anchors_now is not None and installs_nothing and not _deps_stage_makes_node_modules(text):
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_DEPS_DIR_MISSING", ERROR,
+            "루트 package.json 에 설치할 패키지가 없어 npm 이 node_modules 를 만들지 않는데, Dockerfile 은 "
+            "실행 단계에서 /app/node_modules 를 복사합니다. 빌드가 \"복사할 파일 없음\" 으로 실패합니다.",
+            "Dockerfile 의 의존성 설치 뒤에 `RUN mkdir -p node_modules` 를 넣으세요(자동 수정 가능).", dockerfile, True))
     if facts["cmd_entry"] and not files.exists(facts["cmd_entry"]) \
             and not re.match(r"^(dist|build|out|lib)/", facts["cmd_entry"]):
+        #: start 스크립트(모노레포면 넘겨받은 패키지의 start)가 띄우는 파일, 없으면 찾은 서버 파일로 바꾼다.
+        actual = next((e for e in (result.fix_data.get("start_entry"), result.server_entry)
+                       if e and files.exists(e) and e != facts["cmd_entry"]), None)
+        if actual:
+            result.fix_data["cmd_entry"] = actual
         result.issues.append(ReadinessIssue(
             "DOCKERFILE_ENTRY_MISSING", ERROR,
-            f"Dockerfile 의 CMD 가 실행하는 {facts['cmd_entry']} 가 프로젝트에 없습니다.",
-            "CMD 를 실제 서버 파일로 고치거나 Dockerfile 을 다시 생성하세요.", dockerfile))
+            f"Dockerfile 의 CMD 가 실행하는 {facts['cmd_entry']} 가 프로젝트에 없습니다."
+            + (f" 실제 서버는 {actual} 입니다." if actual else ""),
+            (f"CMD 를 {actual} 로 고치세요(자동 수정 가능)." if actual else
+             "CMD 를 실제 서버 파일로 고치거나 Dockerfile 을 다시 생성하세요."), dockerfile, bool(actual)))
     non_root = facts["user"] and facts["user"].split(":")[0] not in {"root", "0"}
     if result.local_data_files and non_root and facts["workdir"] and not facts["workdir_owned"]:
         result.issues.append(ReadinessIssue(
@@ -2340,6 +2711,20 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
 
 def detect_runtime(files: ProjectFiles) -> str:
     if files.exists("package.json"):
+        #: Django·Flask 프로젝트가 Tailwind 빌드용 package.json 만 둔 경우는 Python 앱이다.
+        if any(files.exists(f) for f in ("manage.py", "requirements.txt", "pyproject.toml")):
+            try:
+                pkg = json.loads(files.read("package.json") or "{}")
+            except ValueError:
+                pkg = {}
+            if isinstance(pkg, dict):
+                scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+                deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})} \
+                    if isinstance(pkg.get("dependencies") or {}, dict) and isinstance(pkg.get("devDependencies") or {}, dict) else {}
+                node_server = any(k in scripts for k in ("start", "serve", "start:prod")) or pkg.get("main") or any(
+                    d in deps for d in ("express", "next", "@nestjs/core", "koa", "fastify", "@hapi/hapi", "nuxt", "react-scripts", "vite"))
+                if not node_server:
+                    return "python"
         return "node"
     if any(files.exists(f) for f in ("requirements.txt", "pyproject.toml", "main.py", "app.py", "manage.py")):
         return "python"
@@ -2400,6 +2785,40 @@ def _check_versions_online(files: "ProjectFiles", result: Readiness) -> None:
             fix, manifest, auto))
 
 
+#: 문을 닫은 이미지 자리표시 서비스. AI 가 만든 코드·초기 데이터에 자주 들어가 화면의 이미지가 전부 깨진다
+#: (2026-10-04 실기기 쇼핑몰: via.placeholder.com). 같은 주소 형식을 받는 서비스로 바꾼다.
+_DEAD_IMAGE_HOST = re.compile(r"https?://(?:via\.placeholder\.com|placeholder\.com(?=/\d)|placeimg\.com)/", re.I)
+_DEAD_IMAGE_SOURCES = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte", ".html", ".css",
+                       ".sql", ".py", ".json", ".yml", ".yaml")
+
+
+def dead_image_rewrite(text: str) -> str:
+    """via.placeholder.com → placehold.co(크기·색·?text= 형식이 같다), placeimg.com/W/H/… → picsum.photos/W/H."""
+    text = re.sub(r"https?://via\.placeholder\.com/", "https://placehold.co/", text, flags=re.I)
+    text = re.sub(r"https?://placeholder\.com/(?=\d)", "https://placehold.co/", text, flags=re.I)
+    return re.sub(r"https?://placeimg\.com/(\d+)/(\d+)(?:/[A-Za-z]+)*", r"https://picsum.photos/\1/\2", text, flags=re.I)
+
+
+def _check_dead_image_hosts(files: "ProjectFiles", result: "Readiness") -> None:
+    hits: list[str] = []
+    for rel in files.files():
+        if not rel.lower().endswith(_DEAD_IMAGE_SOURCES) or "/node_modules/" in f"/{rel}" or rel.endswith("package-lock.json"):
+            continue
+        text = files.read(rel)
+        if text and _DEAD_IMAGE_HOST.search(text):
+            hits.append(rel)
+    if not hits:
+        return
+    result.fix_data["dead_images"] = hits
+    seeded = any(rel.endswith(".sql") or re.search(r"\bINSERT\s+INTO\b", files.read(rel) or "", re.I) for rel in hits)
+    result.issues.append(ReadinessIssue(
+        "APP_DEAD_IMAGE_HOST", WARNING,
+        f"코드가 문을 닫은 이미지 서비스(via.placeholder.com 등)를 씁니다: {', '.join(hits[:4])}. 화면의 이미지가 깨져 보입니다.",
+        "지금 동작하는 같은 형식의 주소(placehold.co)로 바꾸세요(자동 수정 가능)."
+        + (" 이미 만든 DB 에 들어간 초기 데이터는 그대로입니다 — 상품 데이터를 다시 넣거나 DB 볼륨을 지운 뒤 다시 배포하세요." if seeded else ""),
+        hits[0], True))
+
+
 def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]] = None,
             *, dockerfile: Optional[str] = "Dockerfile", online: bool = False) -> Readiness:
     """프로젝트(와 Dockerfile)를 읽어 빌드·실행 가능성을 판정한다.
@@ -2414,6 +2833,7 @@ def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]
             _check_versions_online(files, result)
     elif result.runtime == "python":
         _analyze_python(files, result)
+    _check_dead_image_hosts(files, result)
     if result.local_data_files:
         shown = ", ".join(result.local_data_files[:3])
         result.issues.append(ReadinessIssue(
@@ -2690,6 +3110,19 @@ def apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> lis
     if skipped:
         raise ValueError(f"이름을 바꿀 파일이 없거나 새 이름({skipped[0]})이 이미 있습니다. 배포 준비 점검을 다시 실행하세요.")
     renamed_to = set(rename_map.values())
+    #: 쓰기 전에 바꿀 파일을 모두 읽어 본다 — UTF-8 이 아닌 파일(메모장 ANSI=CP949)을 읽다가 중간에 멈추면
+    #: 반쯤 바뀐 채로 남고, 다시 쓰면 한글 주석이 깨진다. 하나라도 못 읽으면 아무것도 바꾸지 않는다.
+    for rel in list(rename_map) + [r for r in writes if r not in renamed_to]:
+        path = root / rel
+        if not path.is_file():
+            continue
+        try:
+            _read_raw(path)
+        except UnicodeError as exc:
+            raise ValueError(f"{rel} 이(가) UTF-8 이 아니라(예: 메모장 ANSI) 자동 수정하지 않았습니다. "
+                             "편집기에서 UTF-8 로 저장한 뒤 다시 시도하세요.") from exc
+        except OSError as exc:
+            raise ValueError(f"{rel} 을(를) 읽지 못해 자동 수정하지 않았습니다: {exc}") from exc
     originals: dict[str, Optional[str]] = {}   # 복구용: 경로 → 원래 내용(None = 원래 없던 파일)
     changed: list[str] = []
     try:
@@ -2722,7 +3155,7 @@ def apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> lis
                 _make_writable(root / old)
                 (root / old).unlink()
             changed.append(f"{old} → {new}")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         for rel, text in originals.items():
             path = root / rel
             try:
@@ -2734,7 +3167,7 @@ def apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> lis
                     if path.exists():
                         _make_writable(path)
                     _write_raw(path, text)
-            except OSError:
+            except (OSError, UnicodeError):
                 pass
         raise ValueError(f"파일을 바꾸지 못해 원래대로 되돌렸습니다: {exc}. 파일이 다른 프로그램에서 열려 있거나 "
                          "읽기 전용인지 확인하세요.") from exc
@@ -2901,6 +3334,13 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
             if updated != text:
                 changed += [rel, _backup(root, rel, text)]
                 _write_raw(root / rel, updated)
+    elif code == "APP_DEAD_IMAGE_HOST":
+        for rel in before.fix_data.get("dead_images") or []:
+            text = _read_raw(root / rel)
+            updated = dead_image_rewrite(text)
+            if updated != text:
+                changed += [rel, _backup(root, rel, text)]
+                _write_raw(root / rel, updated)
     elif code == "NODE_CLIENT_HARDCODED_LOCALHOST":
         for rel in before.fix_data.get("hardcoded_api") or []:
             text = _read_raw(root / rel)
@@ -2928,15 +3368,59 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
             text = _read_raw(root / rel)
             updated = pg_numeric_parser_rewrite(text)
             if updated != text:
+                #: pg 를 쓰는 파일마다 넣는다(타입 파서는 전역이라 여러 번 넣어도 같다) — 첫 파일만 고치면
+                #: 시드 스크립트만 고쳐지고 서버는 그대로 문자열을 돌려준다.
                 changed += [rel, _backup(root, rel, text)]
                 _write_raw(root / rel, updated)
-                break
     elif code == "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING":
         dockerfile = root / "Dockerfile"
         text = _read_raw(dockerfile)
-        updated = add_runtime_subproject_install(text, before.runtime_subproject or "")
+        try:
+            root_pkg = json.loads(_read_raw(root / "package.json"))
+        except (OSError, ValueError):
+            root_pkg = {}
+        updated = add_runtime_subproject_install(text, before.runtime_subproject or "",
+                                                 npm_workspace=isinstance(root_pkg, dict) and bool(root_pkg.get("workspaces")))
         changed += ["Dockerfile", _backup(root, "Dockerfile", text)]
         _write_raw(dockerfile, updated)
+    elif code == "DOCKERFILE_NPM_SELF_UPGRADE":
+        dockerfile = root / "Dockerfile"
+        text = _read_raw(dockerfile)
+        try:
+            pkg = json.loads(_read_raw(root / "package.json"))
+        except (OSError, ValueError):
+            pkg = {}
+        next_app = isinstance(pkg, dict) and "next" in {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        updated = drop_npm_self_upgrade(text, next_app=next_app)
+        if updated == text:
+            raise ValueError("npm 올리기 단계를 찾지 못했습니다. Dockerfile 을 직접 고치세요.")
+        changed += ["Dockerfile", _backup(root, "Dockerfile", text)]
+        _write_raw(dockerfile, updated)
+    elif code == "DOCKERFILE_DEPS_DIR_MISSING":
+        dockerfile = root / "Dockerfile"
+        text = _read_raw(dockerfile)
+        updated = add_deps_dir(text)
+        changed += ["Dockerfile", _backup(root, "Dockerfile", text)]
+        _write_raw(dockerfile, updated)
+    elif code == "DOCKERFILE_ENTRY_MISSING":
+        actual = before.fix_data.get("cmd_entry")
+        if not issue.auto_fix or not actual:
+            raise ValueError("실제 서버 파일을 확정하지 못했습니다. Dockerfile 의 CMD 를 직접 고치세요.")
+        dockerfile = root / "Dockerfile"
+        text = _read_raw(dockerfile)
+        old_entry = _dockerfile_facts(text)["cmd_entry"]
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = text.split(newline)
+        cmd_line = max((i for i, l in enumerate(lines) if re.match(r"^\s*CMD\b", l, re.I)), default=None)
+        if cmd_line is None or not old_entry:
+            raise ValueError("CMD 를 찾지 못했습니다. Dockerfile 을 직접 고치세요.")
+        updated_line = re.sub(r"(?<![\w./-])(?:\./)?" + re.escape(old_entry) + r"(?![\w./-])", actual, lines[cmd_line], count=1)
+        if updated_line == lines[cmd_line]:
+            raise ValueError("CMD 의 실행 파일을 바꾸지 못했습니다. Dockerfile 을 직접 고치세요.")
+        backup = _backup(root, "Dockerfile", text)
+        lines[cmd_line] = updated_line
+        _write_raw(dockerfile, newline.join(lines))
+        changed += ["Dockerfile", backup]
     elif code == "DOCKERFILE_HEALTH_PATH_UNKNOWN":
         dockerfile = root / "Dockerfile"
         text = _read_raw(dockerfile)

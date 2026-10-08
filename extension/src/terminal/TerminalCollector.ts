@@ -37,6 +37,8 @@ const ERROR_PATTERNS: RegExp[] = [
 export class TerminalCollector {
     /** Per-terminal output buffer — keyed by stable WeakMap-assigned ID */
     private outputBuffer: Map<string, string[]> = new Map();
+    /** 실행 중인 명령의 출력 — 시작 이벤트에서 읽기 시작해 끝 이벤트에서 꺼낸다. */
+    private pendingReads: Map<object, { chunks: string[]; done: Promise<void> }> = new Map();
 
     /**
      * WeakMap assigns a stable string ID to each Terminal instance.
@@ -84,7 +86,7 @@ export class TerminalCollector {
                     onDidStartTerminalShellExecution: (
                         listener: (e: {
                             terminal: vscode.Terminal;
-                            execution: { commandLine: { value: string } };
+                            execution: { commandLine: { value: string }; read?: () => AsyncIterable<string> };
                         }) => void
                     ) => vscode.Disposable;
                 }
@@ -92,6 +94,21 @@ export class TerminalCollector {
                 const id = this.getTerminalId(e.terminal);
                 if (!this.outputBuffer.has(id)) {
                     this.outputBuffer.set(id, []);
+                }
+                // read() 는 **처음 부른 뒤에** 쓰인 출력만 준다(VS Code API). 명령이 끝난 뒤에 부르면 항상 비어
+                // 오류 자동 분석이 한 번도 동작하지 않았다 — 시작하자마자 읽기 시작해 모아 둔다.
+                if (typeof e.execution.read === 'function') {
+                    const stream = e.execution.read();
+                    const chunks: string[] = [];
+                    const done = (async () => {
+                        try {
+                            for await (const chunk of stream) {
+                                chunks.push(chunk);
+                                if (chunks.length > 5000) { chunks.splice(0, chunks.length - 5000); }
+                            }
+                        } catch { /* ignore read errors */ }
+                    })();
+                    this.pendingReads.set(e.execution, { chunks, done });
                 }
             });
             context.subscriptions.push(startDisposable);
@@ -115,10 +132,23 @@ export class TerminalCollector {
                     ) => vscode.Disposable;
                 }
             ).onDidEndTerminalShellExecution(async (e) => {
-                const lines: string[] = [];
-                try {
-                    for await (const chunk of e.execution.read()) { lines.push(chunk); }
-                } catch { /* ignore read errors */ }
+                let lines: string[] = [];
+                const pending = this.pendingReads.get(e.execution);
+                this.pendingReads.delete(e.execution);
+                if (pending) {
+                    // 스트림은 명령이 끝나면 닫힌다. 혹시 닫히지 않아도 3초 안에 모인 만큼으로 진행한다.
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    await Promise.race([
+                        pending.done,
+                        new Promise<void>(resolve => { timer = setTimeout(resolve, 3000); }),
+                    ]);
+                    if (timer) { clearTimeout(timer); }
+                    lines = pending.chunks.slice();
+                } else {
+                    try {
+                        for await (const chunk of e.execution.read()) { lines.push(chunk); }
+                    } catch { /* ignore read errors */ }
+                }
 
                 const id = this.getTerminalId(e.terminal);
                 this.outputBuffer.set(id, lines);

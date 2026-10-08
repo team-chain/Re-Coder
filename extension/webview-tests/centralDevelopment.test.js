@@ -89,15 +89,17 @@ test('central request opens design directly, then generates and applies only aft
   assert.equal(generate.payload.targetFolder, 'src');
   assert.equal(generate.payload.decisions[0].impact, '데이터 보존');
   assert.equal(generate.payload.contextFiles[0].path, 'README.md');
-  ui.emit('code.result', {requestId:request.requestId, summary:'게시판', model:'fixture', ops:[{file:'app.js',content:'new code',action:'create',language:'js',rationale:'entry'}]});
+  ui.emit('code.result', {requestId:request.requestId, summary:'게시판', model:'fixture', projectRoot:'/work/shop', ops:[{file:'app.js',content:'new code',action:'create',language:'js',rationale:'entry'}]});
   assert.equal(ui.messages.length, 2, 'generation never auto-applies');
   ui.button('변경 보기').props.onClick();
   assert.equal(ui.messages.at(-1).type, 'code.diff');
   assert.equal(ui.messages.at(-1).payload.targetFolder, 'src');
+  assert.equal(ui.messages.at(-1).payload.projectRoot, '/work/shop');
   ui.button('적용').props.onClick(); ui.render();
   const apply = ui.messages.at(-1);
   assert.equal(apply.type, 'code.apply');
   assert.equal(apply.payload.targetFolder, 'src');
+  assert.equal(apply.payload.projectRoot, '/work/shop', '생성한 프로젝트에만 적용되도록 루트를 함께 보낸다');
   ui.emit('code.applied', {ackKey:apply.payload.ackKey, ok:true});
   assert.ok(ui.button('적용됨').props.disabled);
   assert.ok(!ui.messages.some(m => m.type.startsWith('chat.')));
@@ -137,4 +139,69 @@ test('Korean composition does not submit until Ctrl+Enter is pressed after compo
   input.props.onKeyDown(event); assert.equal(ui.messages.length, 0);
   input.props.onKeyDown({...event,nativeEvent:{isComposing:false}});
   assert.equal(ui.messages[0].type, 'code.plan');
+});
+
+test('생성 결과가 여러 파일이면 목록만 먼저 보이고, 이름을 눌러야 내용이 펼쳐진다', () => {
+  const ui = mount();
+  ui.input('게시판'); ui.button('보내기').props.onClick();
+  const request = ui.messages[0].payload;
+  ui.emit('code.planResult', {...plan, requestId:request.requestId});
+  ui.button('이 선택으로 생성 →').props.onClick(); ui.render();
+  ui.emit('code.result', {requestId:request.requestId, summary:'게시판', model:'fixture', ops:[
+    {file:'a.js',content:'AAA-CONTENT',action:'create',language:'js',rationale:''},
+    {file:'b.js',content:'BBB-CONTENT',action:'edit',language:'js',rationale:''}]});
+  const texts = () => JSON.stringify(ui.nodes().map(n => typeof n.props.children === 'string' ? n.props.children : ''));
+  assert.ok(!texts().includes('AAA-CONTENT'), '내용이 처음부터 펼쳐져 있다');
+  assert.ok(ui.find(n => n.props['data-testid'] === 'code-result-summary'));
+  ui.find(n => n.type === 'button' && n.props['aria-expanded'] === false).props.onClick(); ui.render();
+  assert.ok(texts().includes('AAA-CONTENT'));
+  assert.ok(!texts().includes('BBB-CONTENT'));
+});
+
+test('요청 입력창: 위치·참고 파일·보내기가 한 덩어리 안에 있고, 보낸 요청은 말풍선과 위치·참고 파일로 남는다', () => {
+  const ui = mount();
+  const cls = name => ui.find(n => n.props.className === name);
+  assert.ok(cls('rc-cg-hero'), '첫 화면 질문이 없다');
+  // 예시는 입력창에 채우기만 하고 보내지 않는다.
+  ui.button('게시판 API').props.onClick(); ui.render();
+  assert.match(ui.find(n => n.type === 'textarea').props.value, /게시판 REST API/);
+  assert.equal(ui.messages.length, 0);
+  ui.emit('code.folderPicked', {folder:'shop'});
+  ui.emit('code.contextAdded', {files:[{path:'server/db.js', content:'x'}]});
+  const box = cls('rc-cg-box');
+  const inBox = predicate => ui.nodes(box).some(predicate);
+  assert.ok(inBox(n => n.type === 'textarea'));
+  assert.ok(inBox(n => n.props['aria-label'] === '참고 파일 추가'));
+  assert.ok(inBox(n => n.props['aria-label'] === 'server/db.js 참고 파일 제거'));
+  assert.ok(inBox(n => n.props['aria-label'] === '위치 지우기'));
+  assert.ok(inBox(n => n.props.className === 'rc-cg-send'));
+  ui.input('쇼핑몰 만들어줘'); ui.button('보내기').props.onClick(); ui.render();
+  assert.equal(ui.messages[0].payload.targetFolder, 'shop');
+  assert.equal(cls('rc-cg-hero'), undefined, '보낸 뒤에도 첫 화면 질문이 남아 있다');
+  assert.equal(cls('rc-cg-examples'), undefined);
+  assert.equal(cls('rc-cg-me').props.children, '쇼핑몰 만들어줘');
+  assert.equal(cls('rc-cg-meta').props.children, 'shop · server/db.js');
+  assert.ok(cls('rc-cg-dock'), '이어서 수정 입력창이 아래에 고정되지 않았다');
+  ui.find(n => n.props['aria-label'] === '위치 지우기').props.onClick(); ui.render();
+  assert.equal(cls('rc-cg-meta').props.children, 'shop · server/db.js', '요청 시점의 위치가 바뀌었다');
+});
+
+test('확장이 요청을 받지 못하면 15초 뒤 원인·해결을 알리고, 보낸 내용을 입력창에 되돌려 둔다', () => {
+  const ui = mount();
+  ui.input('쇼핑몰 만들어줘'); ui.button('보내기').props.onClick(); ui.render();
+  assert.equal(ui.find(n => n.type === 'textarea').props.value, '');
+  ui.expire();
+  assert.equal(ui.find(n => n.type === 'textarea').props.value, '쇼핑몰 만들어줘', '보낸 내용을 다시 써야 한다');
+  const html = JSON.stringify(ui.nodes().map(n => typeof n.props.children === 'string' ? n.props.children : ''));
+  assert.match(html, /Developer: Reload Window/);
+  assert.match(html, /입력창에 다시 넣어 두었습니다/);
+});
+
+test('확장이 받았다고 답한 요청은 입력창에 되돌리지 않는다(응답이 늦은 경우)', () => {
+  const ui = mount();
+  ui.input('쇼핑몰'); ui.button('보내기').props.onClick(); ui.render();
+  const id = ui.messages[0].payload.requestId;
+  ui.emit('code.status', {requestId:id, stage:'planning', message:'AI 가 설계 결정을 준비하는 중…', waitSeconds:270});
+  ui.expire();
+  assert.equal(ui.find(n => n.type === 'textarea').props.value, '');
 });

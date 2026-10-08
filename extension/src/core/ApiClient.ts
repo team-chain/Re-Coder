@@ -25,6 +25,17 @@ import { CoreManager } from './CoreManager';
 import { describeHttpError, parseHttpErrorDetail, CoreHttpError } from './httpError';
 import { FETCH_HEADERS_LIMIT_MS, longHttpFetch } from './longHttp';
 
+/** 보안 검사 결과로 만든 수정안. auto=false 는 안내만, risk 가 있으면 기본으로 고르지 않는다. */
+export interface SecurityFixProposal {
+    id: string; tool: string; title: string; detail: string; files: string[]; diff: string;
+    auto: boolean; risk: string; note: string; rebuild: boolean;
+}
+
+export interface SecurityFixResult {
+    applied: string[]; skipped: { id: string; reason: string }[]; changed: string[];
+    backups: string[]; notes: string[]; rebuild: boolean;
+}
+
 /** 인프라 파일(Dockerfile 등) 승인 결과. `exists` 는 "안 썼다 — 기존 파일과 다르다" 이다. */
 export interface InfraApprovalResult {
     status: string;               // saved | rejected | exists | error
@@ -668,6 +679,30 @@ export class ApiClient {
             false, 660000  // Docker 자동 시작(정리 45초 + 대기 120초) + 스캔 상한 450초
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? `${scanType} 스캔 요청 실패`); }
+        return resp.data;
+    }
+
+    /** 보안 검사 결과 → 바로 적용할 수 있는 수정안(코어가 결정론적으로 만든다). */
+    async securityFixPlan(workspacePath: string, reports: Record<string, unknown>): Promise<{ proposals: SecurityFixProposal[] }> {
+        const resp = await this.request<{ proposals: SecurityFixProposal[] }>(
+            'POST', '/api/deploy/security/fixes', { workspace_path: workspacePath, reports }, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '수정안을 만들지 못했습니다.'); }
+        return resp.data;
+    }
+
+    /** 고른 수정안만 적용한다. package-lock 갱신·베이스 이미지 받기까지 기다린다. */
+    async securityFixApply(workspacePath: string, reports: Record<string, unknown>, ids: string[]): Promise<SecurityFixResult> {
+        const resp = await this.request<SecurityFixResult>(
+            'POST', '/api/deploy/security/fixes/apply', { workspace_path: workspacePath, reports, ids }, false, 900000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '수정을 적용하지 못했습니다.'); }
+        return resp.data;
+    }
+
+    /** 수정 뒤 이미지를 다시 빌드한다(Trivy 재검사용). 실행 중인 컨테이너는 그대로 둔다. */
+    async securityRebuild(workspacePath: string): Promise<{ status: string; image?: string; message: string; log_tail?: string }> {
+        const resp = await this.request<{ status: string; image?: string; message: string; log_tail?: string }>(
+            'POST', '/api/deploy/security/rebuild', { workspace_path: workspacePath }, false, 780000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '이미지를 다시 빌드하지 못했습니다.'); }
         return resp.data;
     }
 

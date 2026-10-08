@@ -43,6 +43,10 @@ export function GroundedRepairPanel({log,stage='build'}:{log:string;stage?:Repai
   const request=useRef('');
   useEffect(()=>{request.current='';setResult(null);setBusy(false);setError('');},[log,stage]);
   useMessage(useCallback(message=>{
+    if(message.type==='canvas.projectChanged') {
+      request.current='';setResult(null);setBusy(false);setError('');
+      return;
+    }
     const p=message.payload as {requestId?:string;result?:RepairResult;message?:string};
     if(!request.current||p?.requestId!==request.current)return;
     if(message.type==='repair.result'&&p.result){setResult(p.result);setBusy(false);request.current='';}

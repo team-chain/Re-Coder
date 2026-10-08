@@ -136,8 +136,10 @@ class DeployAgent:
         container_port = getattr(request, 'container_port', 8080)
 
         # Auto-detect image and container name if not provided
-        from deployment_inputs import workspace_container_name
-        ws_name = workspace_container_name(workspace)
+        from deployment_inputs import workspace_container_name, workspace_deploy_name
+        ws_name = (workspace_deploy_name(workspace)
+                   if workspace and method == DeployMethod.LOCAL_DOCKER and not (image or container_name)
+                   else workspace_container_name(workspace))
         image = image or f"{ws_name}:latest"
         container_name = container_name or ws_name
 
@@ -399,9 +401,13 @@ class DeployAgent:
         if port is not None:
             return (port, port)
 
+        # Dockerfile 이 없으면 배포가 기본 템플릿을 만든다 — 그 템플릿이 여는 포트를 쓴다
+        # (예전: Flask 템플릿은 5000 으로 뜨는데 계획은 8000 이라 헬스 체크가 닿지 않았다).
+        template_port = DeployAgent._template_port(workspace_path)
+
         # requirements.txt / pyproject.toml → FastAPI/Flask default 8000
         if (ws / "requirements.txt").exists() or (ws / "pyproject.toml").exists():
-            return (8000, 8000)
+            return (template_port, template_port) if template_port else (8000, 8000)
 
         # package.json → check scripts
         pkg = ws / "package.json"
@@ -426,9 +432,21 @@ class DeployAgent:
                 if m:
                     p = int(m.group(1))
                     return (p, p)
-            return (3000, 3000)
+            return (template_port, template_port) if template_port else (3000, 3000)
 
+        if template_port:
+            return (template_port, template_port)
         return default
+
+    @staticmethod
+    def _template_port(workspace_path: str) -> int | None:
+        if not workspace_path:
+            return None
+        try:
+            from api.routes.deploy import _template_runtime_port
+        except Exception:  # noqa: BLE001 - 라우트 모듈 없이 쓰는 환경(테스트)에서는 예전 추정
+            return None
+        return _template_runtime_port(workspace_path)
 
     @staticmethod
     async def _stop_remove_container(name: str) -> None:

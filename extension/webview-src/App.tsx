@@ -2,9 +2,11 @@
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "./hooks/useVSCodeApi";
+import { useHostLink } from "./hooks/useHostLink";
+import { loadUiState, saveUiState } from "./hooks/useVSCodeApi";
 import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
-import CodeAgent from "./components/CodeAgent";
+import CodeAgent, { setPendingTargetFolder } from "./components/CodeAgent";
 import type { ExternalTurn } from "./components/CodeAgent";
 import { HubHome, HubPage, FeatureFrame, AdrPanel, SecurityHub, SecurityScanPanel, PolicyPanel, HUBS, hubOf, isHubView, isFeatureView } from "./components/Hubs";
 import type { HubId, FeatureId, ReadyCtx } from "./components/Hubs";
@@ -189,6 +191,8 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ diagnostics, coreStatus, expa
 
 interface WorkspaceLayoutProps {
   view: ViewMode;
+  //: 이 화면이 확장과 끊겼는지(useHostLink). 끊기면 맨 위에 다시 불러오기 안내를 띄운다.
+  hostLost?: boolean;
   externalTurn?: ExternalTurn | null;
   diagnostics: DiagnosticsResult | null;
   coreStatus: "ok" | "degraded" | "down" | null;
@@ -283,7 +287,7 @@ const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Ex
 //: Workspace 창에서 결정 카드가 뜨지 않는 버그가 있었다.
 export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
   view, externalTurn, diagnostics, coreStatus, showDiagnostics, diagnosticsPending, diagnosticsError, isAiReady, isDockerReady, isOpsReady,
-  costSummary, onSelectMode, onToggleDiagnostics,
+  costSummary, onSelectMode, onToggleDiagnostics, hostLost,
 }) => {
   const activeHub = isHubView(view) ? view.slice(4) : isFeatureView(view) ? hubOf(view) : '';
   const showReview = useCallback(() => onSelectMode("code"), [onSelectMode]);
@@ -312,6 +316,10 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
           <StatusBadge pending={diagnosticsPending} error={diagnosticsError} compact diagnostics={diagnostics} coreStatus={coreStatus} expanded={showDiagnostics} onToggle={onToggleDiagnostics} />
         </div>
 
+        {hostLost && <div role="alert" data-testid="host-link-lost" style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 24px", borderBottom: "1px solid var(--vscode-inputValidation-warningBorder, #b89500)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", color: "var(--vscode-foreground, #ddd)", fontSize: 12.5, lineHeight: 1.5 }}>
+          <strong style={{ flex: "none" }}>확장과 연결이 끊겼습니다</strong>
+          <span style={{ color: "var(--vscode-descriptionForeground, #aaa)" }}>이 창에서 보낸 요청은 처리되지 않습니다. Ctrl+Shift+P → <b>Developer: Reload Window</b> 로 창을 다시 불러오세요.</span>
+        </div>}
         {showDiagnostics && <div id="workspace-diagnostics" style={{ borderBottom: "1px solid var(--vscode-panel-border, #333)", maxHeight: 260, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /><CostTracker costSummary={costSummary} /></div>}
 
         <div className="rc-workspace-content">
@@ -331,8 +339,15 @@ const App: React.FC = () => {
   const { postMessage, useMessage } = useVSCodeApi();
   const isWorkspacePanel = typeof document !== "undefined" && document.documentElement.dataset.recoderLayout === "workspace";
   const { coreHealth, costSummary } = usePolling(4000);
+  const hostLost = useHostLink(postMessage, useMessage);
 
-  const [view, setView] = useState<ViewMode>(isWorkspacePanel ? "hub:deploy" : "home");
+  //: 다시 그려져도(창 다시 불러오기·확장 재시작) 보던 화면으로 돌아온다.
+  const [view, setView] = useState<ViewMode>(() => {
+    const saved = isWorkspacePanel ? loadUiState().view : undefined;
+    return typeof saved === "string" && (saved === "home" || isHubView(saved) || isFeatureView(saved)) ? saved as ViewMode
+      : isWorkspacePanel ? "hub:deploy" : "home";
+  });
+  useEffect(() => { if (isWorkspacePanel) saveUiState({ view }); }, [view, isWorkspacePanel]);
   //: 채팅 승인 카드에서 넘어온 코드 생성 요청. Build 화면을 열고 CodeAgent 에 넘긴다.
   const [externalTurn, setExternalTurn] = useState<ExternalTurn | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
@@ -381,6 +396,18 @@ const App: React.FC = () => {
       }
       if (type === "diagnostics.error") {
         setDiagnosticsPending(false); setDiagnosticsError((payload as {message?: string})?.message || "연결 확인에 실패했습니다.");
+      }
+      if (type === "ui.restore" && isWorkspacePanel) {
+        //: 확장이 다시 시작되거나 창을 다시 불러와 화면이 새로 그려졌다 — 보던 화면·쓰던 요청으로 돌아간다.
+        const saved = (payload ?? {}) as Record<string, unknown>;
+        saveUiState(saved);
+        const v = saved.view;
+        if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
+      }
+      if (type === "code.setTargetFolder" && isWorkspacePanel) {
+        //: 탐색기 "여기에 코드 생성" — 코드 화면으로 옮기고 그 폴더를 대상으로 둔다.
+        setPendingTargetFolder((payload as { folder?: string })?.folder ?? "");
+        setView("code");
       }
       if (type === "chat.actionAccepted") {
         const p = payload as Partial<ExternalTurn>;
@@ -440,6 +467,7 @@ const App: React.FC = () => {
 
       }}
       postMessage={postMessage}
+      hostLost={hostLost}
     />;
   }
 

@@ -131,7 +131,10 @@ async def handle_register(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         return web.json_response({"ok": False, "error": "guild_id는 정수여야 합니다."}, status=400)
 
-    set_api(guild_id, api_base.rstrip("/"), api_token)
+    try:
+        set_api(guild_id, api_base.rstrip("/"), api_token)
+    except ValueError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
     log.info("Guild %d API 자동 등록 완료: %s", guild_id, api_base)
 
     channels = body.get("channels") or {}

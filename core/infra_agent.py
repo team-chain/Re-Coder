@@ -13,6 +13,7 @@ LLM은 커스터마이징할 섹션만 제안. 실제 파일 조립은 Registry�
 from __future__ import annotations
 
 import os
+import json
 import re
 import uuid
 from pathlib import Path
@@ -106,6 +107,28 @@ def _detect_stack(project_path: str) -> tuple[str, dict]:
     )
 
 
+def _source_for_built(root: Path, entry: str) -> Optional[Path]:
+    """`dist/index.js` → 그 파일을 만드는 소스(`src/index.ts`). tsconfig 의 outDir·rootDir 를 따른다."""
+    out_dir, root_dir = "dist", "src"
+    try:
+        raw = (root / "tsconfig.json").read_text(encoding="utf-8-sig", errors="replace")
+        raw = re.sub(r"//[^\n]*|/\*.*?\*/", "", raw, flags=re.S)
+        opts = (json.loads(re.sub(r",\s*([}\]])", r"\1", raw)) or {}).get("compilerOptions") or {}
+        out_dir = str(opts.get("outDir") or out_dir).strip("./") or out_dir
+        root_dir = str(opts.get("rootDir") or root_dir).strip("./") or root_dir
+    except (OSError, ValueError, AttributeError):
+        pass
+    parts = entry.split("/")
+    if parts[0] != out_dir:
+        return None
+    stem = "/".join([root_dir, *parts[1:]]).rsplit(".", 1)[0]
+    for ext in (".ts", ".mts", ".cts", ".js", ".mjs"):
+        candidate = root / f"{stem}{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _detect_node_entry_and_port(root: Path, package: dict) -> tuple[Optional[str], Optional[int]]:
     """Node 프로젝트의 진입점 파일과 듣는 포트를 package.json·소스에서 읽는다.
 
@@ -116,8 +139,18 @@ def _detect_node_entry_and_port(root: Path, package: dict) -> tuple[Optional[str
     scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
     start = str(scripts.get("start", "")) if scripts else ""
     m = re.search(r"\bnode\s+(?:--[\w-]+\s+)*([\w./-]+\.[cm]?js)\b", start)
-    if m and (root / m.group(1)).is_file():
-        entry = m.group(1)
+    #: `node dist/index.js` — 빌드(tsc 등)가 만드는 파일은 지금 없어도 이미지 빌드 단계에서 생긴다.
+    if m and ((root / m.group(1)).is_file() or re.match(r"^(?:\./)?(?:dist|build|out|lib)/", m.group(1))):
+        entry = m.group(1).lstrip("./") if m.group(1).startswith("./") else m.group(1)
+    if entry is None and scripts:
+        #: 모노레포 — `npm start --workspace=backend` 처럼 다른 패키지로 넘기는 start 를 따라간다.
+        try:
+            from build_readiness import ProjectFiles, _start_entry  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import ProjectFiles, _start_entry  # type: ignore
+        delegated = _start_entry(scripts, ProjectFiles(root))
+        if delegated and (root / delegated).is_file():
+            entry = delegated
     if entry is None:
         main = package.get("main")
         if isinstance(main, str) and (root / main).is_file():
@@ -130,8 +163,9 @@ def _detect_node_entry_and_port(root: Path, package: dict) -> tuple[Optional[str
 
     port: Optional[int] = None
     if entry:
+        source = root / entry if (root / entry).is_file() else _source_for_built(root, entry)
         try:
-            src = (root / entry).read_text(encoding="utf-8", errors="replace")
+            src = source.read_text(encoding="utf-8", errors="replace") if source else ""
         except OSError:
             src = ""
         # `const PORT = 5000; app.listen(PORT)` 형태도 읽는다. 예전엔 못 읽어 기본값

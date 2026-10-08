@@ -115,7 +115,8 @@ def test_subproject_build_requires_installing_client_deps_and_fix_inserts_it(mal
     br.apply_fix(mall, "DOCKERFILE_SUBPROJECT_DEPS_MISSING")
     text = (mall / "Dockerfile").read_text()
     lines = text.splitlines()
-    install = next(i for i, l in enumerate(lines) if l.startswith("RUN cd client &&"))
+    install = next(i for i, l in enumerate(lines) if l == "WORKDIR /app/client")
+    assert lines[install + 1].startswith("RUN if [ -f package-lock.json ]") and lines[install + 2] == "WORKDIR /app"
     build = next(i for i, l in enumerate(lines) if "npm run build" in l)
     cleanup = next(i for i, l in enumerate(lines) if l == "RUN rm -rf client/node_modules")
     assert install < build < cleanup
@@ -160,4 +161,5 @@ def test_generated_dockerfile_gets_client_install(mall):
     proposal = InfraFileProposal(file_type=FileType.DOCKERFILE, target_path="Dockerfile", content=DOCKERFILE,
                                  risk_level=RiskLevel.LOW, approval_level=ApprovalLevel.CONFIRM)
     updated = deploy._with_subproject_installs(str(mall), proposal)
-    assert "RUN cd client &&" in updated.content and "RUN rm -rf client/node_modules" in updated.content
+    assert "WORKDIR /app/client\nRUN if [ -f package-lock.json ]" in updated.content
+    assert "RUN rm -rf client/node_modules" in updated.content

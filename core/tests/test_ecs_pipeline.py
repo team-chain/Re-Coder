@@ -463,6 +463,16 @@ def test_task_definition_log_group_matches_the_one_we_create():
     assert container["portMappings"][0]["containerPort"] == 9000
 
 
+def test_task_definition_tells_the_app_its_port():
+    """process.env.PORT 로 포트를 정하는 앱이 ECS 가 여는 포트에서 뜨게 한다(사용자 값이 우선)."""
+    agent = ECSAgent()
+    arn = "arn:aws:iam::123456789012:role/LabRole"
+    env = lambda req: {e["name"]: e["value"] for e in agent._render_task_definition(
+        req, image="img", execution_role_arn=arn, task_role_arn=arn)["containerDefinitions"][0]["environment"]}
+    assert env(make_request(container_port=9000))["PORT"] == "9000"
+    assert env(make_request(container_port=9000, env_vars={"PORT": "7000", "A": "1"})) == {"PORT": "7000", "A": "1"}
+
+
 def test_task_definition_has_no_curl_health_check():
     """부정 통제: curl 은 런타임 이미지(python:slim)에 없다. 넣어두면
     컨테이너가 항상 UNHEALTHY 가 되어 ECS 가 무한 재시작한다."""

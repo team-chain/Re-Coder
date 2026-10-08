@@ -123,8 +123,16 @@ def test_remediation_cannot_be_applied_to_a_different_workspace(tmp_path):
 
 
 def test_env_example_is_guidance_not_an_automatic_unblocker(tmp_path):
-    """.env.example 생성은 실제 .env required_env 검사를 통과시키지 않는다."""
+    """.env.example 생성은 실제 .env required_env 검사를 통과시키지 않는다.
+
+    필수 환경변수는 사용자가 recoder.yml 에 적은 것만 따진다(추정 계약은 강요하지 않는다).
+    """
     (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    from preflight.contract_loader import build_default_contract, save_contract
+    from schemas import ContractStack
+    contract = build_default_contract(ContractStack.CUSTOM)
+    contract.preflight.required_env = ["API_KEY"]
+    save_contract(contract, tmp_path)
 
     result = asyncio.run(deploy.deploy_preflight(
         deploy.DeployPreflightRequest(workspace_path=str(tmp_path))
@@ -616,7 +624,8 @@ def test_safety_preflight_takes_no_app_root_argument():
     import inspect
 
     params = list(inspect.signature(deploy._run_deployment_safety_preflight).parameters)
-    assert params == ["workspace_path", "app_kind"], params
+    #: 배포 대상(target)은 받는다 — ECS·S3 는 PC 포트 검사가 의미 없다.
+    assert params == ["workspace_path", "app_kind", "target"], params
 
 
 #: **감지기가 "서버형"이라고 말할 수 있는 모든 경로**의 최소 픽스처.
@@ -910,3 +919,37 @@ def test_next_static_export_via_identifier_is_still_static(tmp_path):
         "next.config.js": "const nextConfig = { output: 'export' };\nmodule.exports = nextConfig;\n",
     })
     assert deploy._deployment_preflight(str(tmp_path))["app_kind"] == "static"
+
+
+
+def test_ecs_preflight_does_not_invent_requirements_without_recoder_yml(tmp_path):
+    """[실측 2026-10-03] recoder.yml 이 없는 Express 앱이 ECS 배포에서 전부 막혔다.
+
+    .env 에 PORT 필수 · 포트 3000 가정(EXPOSE 8080 과 불일치) · PC 3000 포트 사용 중 ·
+    .env 가 없는데 ".gitignore 없음" — 모두 사용자가 고칠 것이 없는 차단이었다.
+    """
+    import socket
+    _write(tmp_path, {
+        "package.json": '{"dependencies":{"express":"^4"}}',
+        "index.js": "const express=require('express');const app=express();app.get('/',(q,r)=>r.send('ok'));app.listen(8080);",
+        "Dockerfile": "FROM node:22-alpine\nWORKDIR /app\nCOPY . .\nEXPOSE 8080\nCMD [\"node\", \"index.js\"]\n",
+    })
+    busy = socket.socket(); busy.bind(("127.0.0.1", 0)); busy.listen(1)
+    try:
+        for target in ("ecs", "local", None):
+            result = asyncio.run(deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path), target=target)))
+            codes = {r["code"] for r in result["reasons"]}
+            assert not codes & {"MISSING_REQUIRED_ENV", "HOST_PORT_CONFLICT", "APP_PORT_MISMATCH", "ENV_FILE_NOT_GITIGNORED", "MISSING_HEALTH_ENDPOINT"}, (target, codes)
+            #: 헬스 경로가 없다는 사실은 경고로 남는다(배포가 "/" 로 확인한다).
+            assert "MISSING_HEALTH_ENDPOINT" in {w["code"] for w in result["warnings"]}
+            health = next(w for w in result["warnings"] if w["code"] == "MISSING_HEALTH_ENDPOINT")
+            assert "app.get(" in health["fix"] and "def health" not in health["fix"], "Express 앱에 Python 예시를 보였다"
+    finally:
+        busy.close()
+    #: .env 가 있는데 .gitignore 도 .dockerignore 도 없으면 이미지에 키가 들어간다 — 여전히 막는다.
+    (tmp_path / ".env").write_text("SECRET=x\n", encoding="utf-8")
+    result = asyncio.run(deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path), target="ecs")))
+    assert "ENV_FILE_NOT_GITIGNORED" in {r["code"] for r in result["reasons"]}
+    (tmp_path / ".dockerignore").write_text(".env\n", encoding="utf-8")
+    result = asyncio.run(deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path), target="ecs")))
+    assert "ENV_FILE_NOT_GITIGNORED" in {w["code"] for w in result["warnings"]} and not result["blocked"], result["reasons"]

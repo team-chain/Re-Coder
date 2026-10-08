@@ -14,6 +14,7 @@ import ApprovalModal from "./ApprovalModal";
 import { DeploymentActivity, DeploymentActivityEvent } from './DeploymentActivity';
 import { LocalRollbackResult, LocalRollbackStatus, rollbackWatchId } from "./LocalRollbackStatus";
 import { BuildDiagnosis, BuildFailure, ReadinessIssue, ReadinessPanel } from "./ReadinessPanel";
+import { issueKind, shortIssue } from "./issueText";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -593,23 +594,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         <div style={{ padding: "8px 10px", borderRadius: 4, border: "1px solid #f59e0b", background: "rgba(245,158,11,0.08)", color: "#f59e0b", fontSize: 11, lineHeight: 1.55, marginBottom: 8 }}>
           <strong>⚠ 이미지 취약점 검사를 하지 못했습니다</strong>
           <div style={{ marginTop: 3, color: "#e3b261" }}>
-            {cause || "스캐너를 실행할 수 없었습니다."}
+            {shortIssue(cause || "스캐너를 실행할 수 없었습니다.")} 취약점이 없다는 뜻이 아니라 확인하지 못했다는 뜻입니다.
           </div>
-          {nextAction && (
-            <div style={{ marginTop: 3, color: "#f2d38c" }}>
-              <strong>다음 행동 · </strong>{nextAction}
+          <details style={{ marginTop: 4, color: "#c9a35e" }}>
+            <summary style={{ cursor: "pointer" }}>다음 행동{raw && raw !== cause ? " · 오류 원문" : ""}</summary>
+            <div style={{ marginTop: 3 }}>
+              {nextAction || "Trivy와 Docker를 설치한 뒤 다시 검사하세요."} 확인되지 않은 상태로 진행할지는 직접 판단하세요.
             </div>
-          )}
-          <div style={{ marginTop: 4, color: "#c9a35e" }}>
-            취약점이 <strong>없다는 뜻이 아니라 확인하지 못했다</strong>는 뜻입니다.
-            {nextAction ? " 조치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요." : " Trivy와 Docker를 설치한 뒤 다시 검사하거나, 확인되지 않은 상태로 진행할지 직접 판단하세요."}
-          </div>
-          {raw && raw !== cause && (
-            <details style={{ marginTop: 4, color: "#a88a4a" }}>
-              <summary style={{ cursor: "pointer" }}>오류 원문</summary>
-              <pre style={{ margin: "3px 0 0", whiteSpace: "pre-wrap", fontSize: 10 }}>{raw}</pre>
-            </details>
-          )}
+            {raw && raw !== cause && <pre style={{ margin: "3px 0 0", whiteSpace: "pre-wrap", fontSize: 10, color: "#a88a4a" }}>{raw}</pre>}
+          </details>
         </div>
       );
     }
@@ -781,11 +774,23 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       </div>
 
       {/* AI 를 못 써서 템플릿으로 만든 경우의 안내 — 초안은 이미 위에 있다. */}
-      {fallbackNotes.length > 0 && (
-        <div style={{ marginBottom: 10, border: "1px solid var(--vscode-inputValidation-warningBorder, #cca700)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", borderRadius: 5, padding: "7px 9px", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.5 }}>
-          {fallbackNotes.map((note, i) => <div key={i}>{note}</div>)}
-        </div>
-      )}
+      {/* 점검 문장은 배포 계획 단계(배포 준비 점검)에서 자세히 보여 준다 — 여기서는 몇 건인지만. */}
+      {fallbackNotes.length > 0 && (() => {
+        const checks = fallbackNotes.filter((note) => issueKind(note) !== "other");
+        const others = fallbackNotes.filter((note) => issueKind(note) === "other");
+        return (
+          <div data-testid="draft-notes" style={{ marginBottom: 10, border: "1px solid var(--vscode-inputValidation-warningBorder, #cca700)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", borderRadius: 5, padding: "7px 9px", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.5 }}>
+            {others.map((note, i) => <div key={i} title={note}>{shortIssue(note)}</div>)}
+            {checks.length > 0 && <div>배포 준비 점검 {checks.length}건 — 배포 계획에서 확인하고, 고칠 수 있는 것은 배포할 때 자동으로 고칩니다.</div>}
+            {checks.length > 0 && (
+              <details style={{ marginTop: 3 }}>
+                <summary style={{ cursor: "pointer", opacity: 0.85 }}>원문 보기</summary>
+                {fallbackNotes.map((note, i) => <div key={i} style={{ marginTop: 3, opacity: 0.9 }}>{note}</div>)}
+              </details>
+            )}
+          </div>
+        );
+      })()}
 
       <DeploymentActivity target="docker" event={progress}/>
       {/* ── Loading spinner ── */}
@@ -835,20 +840,21 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       {/* ── 배포 전에 자동으로 고친 것 — 사용자 파일이 바뀌었으니 무엇을 바꿨는지 알린다 ── */}
       {(step === "done" || step === "error") && (deployResult?.auto_fixed?.length ?? 0) > 0 && (
         <div data-testid="pre-deploy-autofix" style={{ background: "rgba(59,130,246,0.08)", border: "1px solid #3b82f6", borderRadius: 5, padding: "8px 10px", fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
-          배포 전에 빌드·실행을 막는 문제 {deployResult!.auto_fixed!.length}건을 자동으로 고쳤습니다(원본은 프로젝트의 .recoder/backups 에 있습니다).
-          <ul style={{ margin: "4px 0 0", paddingLeft: 16 }}>{deployResult!.auto_fixed!.map((f) => <li key={f.code}>{f.message.slice(0, 140)}{f.changed?.length ? ` — ${f.changed.slice(0, 4).join(", ")}${f.changed.length > 4 ? " 외" : ""}` : ""}</li>)}</ul>
+          <details>
+            <summary style={{ cursor: "pointer" }}>배포 전에 빌드·실행을 막는 문제 {deployResult!.auto_fixed!.length}건을 자동으로 고쳤습니다 (원본은 .recoder/backups)</summary>
+            <ul style={{ margin: "4px 0 0", paddingLeft: 16 }}>{deployResult!.auto_fixed!.map((f) => <li key={f.code} title={f.message}>{shortIssue(f.message)}{f.changed?.length ? ` — ${f.changed.slice(0, 4).join(", ")}${f.changed.length > 4 ? " 외" : ""}` : ""}</li>)}</ul>
+          </details>
         </div>
       )}
       {step === "done" && deployResult?.screen?.ok === true && (
         <div data-testid="screen-verified" style={{ fontSize: 11, color: "#22c55e", marginBottom: 8 }}>
-          화면 확인 완료 — 브라우저로 첫 화면을 열어 내용이 표시되는 것을 확인했습니다{deployResult.screen.checked === "http" ? "(HTTP 응답 기준)" : ""}.
+          ✓ 화면 확인 완료{deployResult.screen.checked === "http" ? " (HTTP 응답 기준)" : ""}
         </div>
       )}
       {/* ── 빌드 후 보안 검사를 못 한 채 진행된 배포 ── */}
       {step === "done" && deployResult?.security_scan?.status === "unverified" && (
         <div data-testid="post-build-scan-unverified" style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "8px 10px", color: "#f59e0b", fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
-          빌드된 이미지의 보안 검사(Trivy)를 완료하지 못한 채 배포됐습니다.
-          {deployResult.security_scan.reason ? ` ${deployResult.security_scan.reason}` : ""} 네트워크·Docker 상태를 확인한 뒤 다시 배포해 검사를 통과시키세요.
+          <span title={deployResult.security_scan.reason || undefined}>이미지 보안 검사(Trivy)를 하지 못한 채 배포됐습니다 — 네트워크·Docker 를 확인한 뒤 다시 배포하면 검사합니다.</span>
         </div>
       )}
       {step === "done" && deployResult?.security_scan?.status === "passed" && (deployResult.security_scan.high_count ?? 0) > 0 && (

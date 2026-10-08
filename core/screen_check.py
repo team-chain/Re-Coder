@@ -158,7 +158,9 @@ def _http_stage(url: str, result: ScreenResult, wait_seconds: float) -> Optional
     while True:
         try:
             status, ctype, body = _get(url)
-            if status < 500 or time.monotonic() >= deadline:
+            #: 새 S3 버킷의 웹사이트 설정·공개 정책은 적용까지 몇 초 걸린다 — 그동안의 403/404 는 기다려 다시 본다.
+            settling = status in (403, 404) and _is_s3_website(url)
+            if (status < 500 and not settling) or time.monotonic() >= deadline:
                 break
         except Exception as exc:  # noqa: BLE001 - 연결 거부·시간 초과는 잠시 기다려 다시 본다
             last_error = str(exc)
@@ -288,6 +290,19 @@ def _render(browser: str, url: str, budget_ms: int, timeout: float) -> tuple[str
     return dom, errors
 
 
+_CUSTOM_ELEMENT = re.compile(r"<[a-z][a-z0-9]*-[a-z0-9-]*[\s>/]", re.I)
+
+
+def _body_markup(dom: str) -> str:
+    m = re.search(r"<body\b[^>]*>(.*)</body>", dom, re.S | re.I)
+    return m.group(1) if m else dom
+
+
+def _is_s3_website(url: str) -> bool:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return ".s3-website" in host and host.endswith((".amazonaws.com", ".amazonaws.com.cn"))
+
+
 def _browser_stage(url: str, result: ScreenResult, browser: str, markup: str) -> None:
     try:
         dom, errors = _render(browser, url, budget_ms=8000, timeout=45)
@@ -309,6 +324,11 @@ def _browser_stage(url: str, result: ScreenResult, browser: str, markup: str) ->
     if text or _has_visual(dom):
         if errors:
             result.warnings.append("화면은 표시되지만 브라우저 콘솔에 오류가 있습니다: " + errors[0][:200])
+        return
+    if not errors and _CUSTOM_ELEMENT.search(_body_markup(dom)):
+        #: 웹 컴포넌트(Lit·Stencil·Flutter web)는 shadow DOM 안에 그려서 --dump-dom 에 내용이 나오지 않는다.
+        #: 빈 화면이라고 단정하지 않고 경고로 남긴다.
+        result.warnings.append("화면이 웹 컴포넌트(shadow DOM)로 그려져 내용까지는 확인하지 못했습니다 — 주소를 열어 확인하세요.")
         return
     result.ok = False
     if errors:

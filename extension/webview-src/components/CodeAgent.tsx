@@ -5,6 +5,8 @@
  */
 import React, { useCallback, useEffect, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import { isHostLinkLost } from "../hooks/useHostLink";
+import { loadUiState, saveUiState } from "../hooks/uiState";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
 
@@ -15,7 +17,7 @@ interface CodeOp {
   secret_warnings?: SecretWarning[];
   removal_check?: RemovalCheck;
 }
-interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; }
+interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; projectRoot?: string; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
 //: 확정된 결정 하나. **`impact` 를 반드시 함께 보낸다.**
@@ -57,7 +59,7 @@ export function buildDecisionChoices(
 //: 폴더 A 의 맥락으로 생성됐고 ADR 번호도 A 기준으로 예약됐는데 B 에 쓰면
 //: 같은 이름의 파일·ADR 이 덮어써진다. 적용·모두 적용·diff·경로 표시가
 //: 전부 이 고정값을 쓴다.
-interface Turn { id: number; prompt: string; targetFolder: string; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string; }
+interface Turn { id: number; prompt: string; targetFolder: string; contextNames?: string[]; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string; }
 export interface CtxFile { path: string; content: string; }
 interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; }
 interface DecisionModal { requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; dropped: string[]; }
@@ -71,20 +73,49 @@ type ApplyStatus = "pending" | "applied" | "failed";
 
 let _turnSeq = 1;
 
+//: 확장이 요청을 받았다는 첫 답(code.status)을 기다리는 시간.
+export const FIRST_ACK_SECONDS = 15;
+//: 확장이 요청을 받지 못했을 때. 거의 늘 "확장이 다시 시작돼 이 창이 옛 확장에 붙어 있는" 경우다.
+export const NOT_RECEIVED = "ReCoder 확장이 이 요청을 받지 못했습니다. 확장이 다시 시작되면서 이 창과 연결이 끊긴 것 같습니다. Ctrl+Shift+P → Developer: Reload Window 로 창을 다시 불러온 뒤 다시 보내 주세요. 보낸 내용은 입력창에 다시 넣어 두었습니다.";
+
+//: 위치 칩 글자 — 절대 경로(다른 프로젝트 폴더)는 폴더 이름만, 전체 경로는 마우스를 올리면 보인다.
+export function folderLabel(folder: string): string {
+  if (!folder) return "루트";
+  const parts = folder.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return /^([A-Za-z]:|\/|\\\\|~)/.test(folder) ? (parts[parts.length - 1] || folder) : folder;
+}
+
+//: 첫 화면 예시 — 누르면 입력창에 채워지기만 한다(보내지는 않는다).
+const EXAMPLES: { label: string; text: string }[] = [
+  { label: "게시판 API", text: "게시판 REST API를 만들어줘 — 글 작성·목록·수정·삭제" },
+  { label: "로그인 추가", text: "회원가입과 로그인 기능을 추가해줘" },
+  { label: "에러 고치기", text: "이 에러를 고쳐줘: " },
+];
+
 //: 채팅 승인 카드에서 넘어온 요청. App 이 chat.actionAccepted 를 받아 내려준다.
 //: requestId 는 확장 호스트가 정한 값(Date.now())이라 이 컴포넌트의 턴 번호와 겹치지 않는다.
 export interface ExternalTurn { requestId: number; instruction: string; targetFolder: string; contextFiles?: CtxFile[]; }
 
+//: 탐색기 "여기에 코드 생성" 으로 들어온 대상 폴더 — 코드 화면이 아직 없을 때 App 이 받아 두고,
+//: 코드 화면이 처음 그려질 때 꺼내 쓴다(메시지가 화면보다 먼저 와서 사라지던 문제).
+let pendingTargetFolder: string | null = null;
+export function setPendingTargetFolder(folder: string): void { pendingTargetFolder = folder; }
+
 export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
-  const [input, setInput] = useState("");
-  const [targetFolder, setTargetFolder] = useState("");
+  //: 쓰던 요청은 화면이 다시 그려져도(창 다시 불러오기·확장 재시작) 남는다.
+  const [input, setInput] = useState(() => { const d = loadUiState().codeDraft; return typeof d === "string" ? d : ""; });
+  useEffect(() => { saveUiState({ codeDraft: input }); }, [input]);
+  const [targetFolder, setTargetFolder] = useState(() => { const f = pendingTargetFolder ?? ""; pendingTargetFolder = null; return f; });
   const [contextFiles, setContextFiles] = useState<CtxFile[]>([]);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [applyState, setApplyState] = useState<Record<string, ApplyStatus>>({});
   const [applyErrors, setApplyErrors] = useState<Record<string, string>>({});
+  //: 생성 결과는 파일 목록만 먼저 보여 준다(파일이 수십 개면 내용이 화면을 덮었다). 이름을 누르면 내용을 펼친다.
+  const [openPreview, setOpenPreview] = useState<Record<string, boolean>>({});
   const [decisionModal, setDecisionModal] = useState<DecisionModal | null>(null);
+  const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const pendingRequestsRef = React.useRef<Record<number, PendingRequest>>({});
   const handledExternalRef = React.useRef<number | null>(null);
   const responseTimers = React.useRef(new Map<number, ReturnType<typeof setTimeout>>());
@@ -102,11 +133,14 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       responseTimers.current.delete(id);
       expiredRequests.current.add(id);
       if (activeRequest.current === id) activeRequest.current = null;
+      const unsent = pendingRequestsRef.current[id]?.instruction ?? "";
       delete pendingRequestsRef.current[id];
       const acknowledged = acknowledgedRequests.current.has(id);
+      //: 확장에 닿지 않은 요청은 다시 쓰지 않게 입력창에 되돌려 둔다(이미 새로 쓰고 있으면 건드리지 않는다).
+      if (!acknowledged && unsent) { setInput((cur) => cur.trim() ? cur : unsent); }
       setTurns(ts => ts.map(t => t.id === id ? {...t,status:"error",error: acknowledged
         ? `${t.progress ? `"${t.progress.replace(/…$/, "")}" 단계에서 ` : ""}응답이 너무 오래 없습니다. 명령 팔레트에서 "ReCoder: Restart Core" 를 실행하거나 창을 다시 불러온 뒤 다시 요청해 주세요.`
-        : "확장이 요청을 받지 못했습니다(작업 폴더를 바꾼 직후 등 확장이 다시 시작되는 중일 수 있습니다). 창을 다시 불러온 뒤(Ctrl+Shift+P → Developer: Reload Window) 다시 요청해 주세요."} : t));
+        : NOT_RECEIVED} : t));
     }, seconds * 1000));
   };
   //: 확장 호스트가 한 번이라도 "받았다(code.status)"고 알려 온 요청.
@@ -124,7 +158,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     const files = externalTurn.contextFiles ?? [];
     pendingRequestsRef.current[requestId] = { instruction, targetFolder: folder, contextFiles: files };
     setTargetFolder(folder);
-    setTurns((ts) => [...ts, { id: requestId, prompt: instruction, targetFolder: folder, status: "planning" }]);
+    setTurns((ts) => [...ts, { id: requestId, prompt: instruction, targetFolder: folder, contextNames: files.map((f) => f.path), status: "planning" }]);
     waitForResponse(requestId, 30);
     postMessage("code.plan", { requestId, instruction, targetFolder: folder, contextFiles: files });
   }, [externalTurn, postMessage]);
@@ -225,6 +259,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       setDecisionModal({ requestId, decisions, selections, step: 0, dropped });
       onReviewRequired?.();
     } else if (type === "code.folderPicked" || type === "code.setTargetFolder") {
+      pendingTargetFolder = null;
       setTargetFolder((payload as { folder?: string })?.folder ?? "");
     } else if (type === "code.contextAdded") {
       const files = (payload as { files?: CtxFile[] })?.files ?? [];
@@ -243,8 +278,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles };
     // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
     // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
-    setTurns((ts) => [...ts, { id, prompt: text, targetFolder, status: "planning" }]);
-    waitForResponse(id, 30);
+    setTurns((ts) => [...ts, { id, prompt: text, targetFolder, contextNames: contextFiles.map((f) => f.path), status: "planning" }]);
+    //: 확장은 받자마자 code.status 로 답한다 — 15초 안에 답이 없으면 끊긴 것이다(예전 30초).
+    waitForResponse(id, isHostLinkLost() ? 5 : FIRST_ACK_SECONDS);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
   }, [input, targetFolder, contextFiles, postMessage]);
@@ -284,7 +320,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     // 와야 붙는다 — 쓰기 실패가 성공으로 굳는 것을 막는다.
     setApplyState((s) => ({ ...s, [key]: "pending" }));
     setApplyErrors((e) => { const copy = { ...e }; delete copy[key]; return copy; });
-    postMessage("code.apply", { file: op.file, content: op.content, targetFolder: turn.targetFolder, ackKey: key });
+    postMessage("code.apply", { file: op.file, content: op.content, targetFolder: turn.targetFolder, projectRoot: turn.result?.projectRoot, ackKey: key });
   }, [postMessage]);
 
   const applyAll = useCallback((turn: Turn) => {
@@ -302,11 +338,11 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       for (const op of turn.result!.ops) { delete copy[`${turn.id}:${op.file}`]; }
       return copy;
     });
-    postMessage("code.applyAll", { ops, targetFolder: turn.targetFolder });
+    postMessage("code.applyAll", { ops, targetFolder: turn.targetFolder, projectRoot: turn.result?.projectRoot });
   }, [postMessage]);
 
   const showDiff = useCallback((turn: Turn, op: CodeOp) => {
-    postMessage("code.diff", { file: op.file, content: op.content, targetFolder: turn.targetFolder });
+    postMessage("code.diff", { file: op.file, content: op.content, targetFolder: turn.targetFolder, projectRoot: turn.result?.projectRoot });
   }, [postMessage]);
   const linkBtn: React.CSSProperties = {
     fontSize: 11, border: "none", background: "transparent",
@@ -322,16 +358,47 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     fontSize: 11, cursor: "pointer",
   };
   const isBusy = turns.some((turn) => turn.status === "planning" || turn.status === "generating");
+  const hasTurns = turns.length > 0;
 
   return (
-    <section aria-label="AI와 대화하기" style={{ borderTop: "1px solid var(--vscode-panel-border, #333)", margin: "16px 0 0", paddingTop: 20 }}>
+    <section aria-label="AI와 대화하기" className="rc-cg" data-has-turns={hasTurns ? "true" : "false"}>
       <style>{`
-        .rc-cg-input { transition: border-color .12s ease, box-shadow .12s ease; }
-        .rc-cg-input:focus { border-color: var(--vscode-focusBorder, #3794ff) !important; box-shadow: 0 0 0 1px var(--vscode-focusBorder, #3794ff); }
+        .rc-cg { max-width: 860px; margin: 8px auto 0; display: flex; flex-direction: column; }
+        .rc-cg-hero { margin: clamp(12px, 13vh, 132px) 0 18px; text-align: center; font-size: 22px; font-weight: 600; letter-spacing: -.2px; color: var(--vscode-foreground, #eee); }
+        .rc-cg-notice { margin: 0 0 10px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, #333)); border-radius: 8px; padding: 8px 12px; color: var(--vscode-descriptionForeground, #aaa); font-size: 12px; line-height: 1.5; }
+        .rc-cg-box { background: var(--vscode-input-background, #252526); border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, #3f3f3f)); border-radius: 12px; padding: 10px 10px 8px 12px; transition: border-color .12s ease; }
+        .rc-cg-box:focus-within { border-color: var(--vscode-focusBorder, #3794ff); }
+        .rc-cg-input { display: block; width: 100%; box-sizing: border-box; border: 0; outline: none; background: transparent; color: var(--vscode-input-foreground, #ccc); font-family: var(--vscode-font-family, sans-serif); font-size: 13.5px; line-height: 1.6; padding: 2px 2px 0; resize: none; field-sizing: content; max-height: 260px; overflow-y: auto; }
         .rc-cg-input::placeholder { color: var(--vscode-input-placeholderForeground, #6b6b6b); }
-        .rc-cg-send { transition: filter .12s ease, transform .05s ease; }
+        .rc-cg-input:disabled { opacity: .6; }
+        .rc-cg-tools { display: flex; align-items: flex-end; gap: 8px; margin-top: 6px; }
+        .rc-cg-ctx { flex: 1; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+        .rc-cg-actions { flex: none; display: flex; align-items: center; gap: 8px; }
+        @media (max-width: 520px) { .rc-cg-kbd { display: none; } }
+        .rc-cg-chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; max-width: 240px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, #3f3f3f)); background: transparent; color: var(--vscode-foreground, #ccc); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+        .rc-cg-chip:hover { background: var(--vscode-toolbar-hoverBackground, rgba(90,93,94,.31)); }
+        .rc-cg-chip.quiet { border-color: transparent; color: var(--vscode-descriptionForeground, #999); }
+        .rc-cg-chip > span { overflow: hidden; text-overflow: ellipsis; }
+        .rc-cg-file { display: inline-flex; align-items: center; height: 24px; max-width: 220px; padding: 0 2px 0 8px; border-radius: 6px; background: var(--vscode-badge-background, #2b2b2c); color: var(--vscode-badge-foreground, #ccc); font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; }
+        .rc-cg-file > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .rc-cg-x { border: 0; background: transparent; color: inherit; opacity: .7; cursor: pointer; padding: 0 5px; font-size: 13px; line-height: 1; }
+        .rc-cg-x:hover { opacity: 1; }
+        .rc-cg-kbd { font-size: 11px; color: var(--vscode-descriptionForeground, #777); opacity: .8; }
+        .rc-cg-send { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border: 0; border-radius: 8px; padding: 0; background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); cursor: pointer; transition: filter .12s ease, transform .05s ease; }
         .rc-cg-send:hover:not(:disabled) { filter: brightness(1.12); }
         .rc-cg-send:active:not(:disabled) { transform: translateY(1px); }
+        .rc-cg-send:disabled { background: var(--vscode-button-secondaryBackground, #3a3a3a); color: var(--vscode-disabledForeground, #8b8b8b); cursor: not-allowed; }
+        .rc-cg-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+        .rc-cg-examples { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 14px; }
+        .rc-cg-examples button { border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, #3f3f3f)); border-radius: 999px; padding: 3px 11px; background: transparent; color: var(--vscode-descriptionForeground, #999); font: inherit; font-size: 12px; cursor: pointer; }
+        .rc-cg-examples button:hover { color: var(--vscode-foreground, #ddd); border-color: var(--vscode-focusBorder, #3794ff); }
+        .rc-cg-turn { margin-bottom: 16px; }
+        .rc-cg-me { width: fit-content; max-width: 82%; margin-left: auto; padding: 8px 13px; border-radius: 14px; background: var(--vscode-list-inactiveSelectionBackground, #2b2b2c); color: var(--vscode-foreground, #eee); font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .rc-cg-meta { margin: 4px 2px 8px; text-align: right; font-size: 11px; color: var(--vscode-descriptionForeground, #888); }
+        .rc-cg[data-has-turns="true"] { min-height: calc(100vh - 200px); }
+        .rc-cg-dock { position: sticky; bottom: 0; z-index: 2; margin-top: auto; padding: 14px 0 6px; background: linear-gradient(to bottom, transparent, var(--rc-cg-bg, var(--vscode-editor-background, #1e1e1e)) 18px); box-shadow: 0 32px 0 0 var(--rc-cg-bg, var(--vscode-editor-background, #1e1e1e)); }
+        body:not(:has(.rc-workspace)) .rc-cg-dock { --rc-cg-bg: var(--vscode-sideBar-background, #181818); }
+        .rc-cg[data-has-turns="false"] .rc-cg-input { min-height: 64px; }
         .rc-decision-option:hover { border-color: var(--vscode-focusBorder, #3794ff) !important; }
       `}</style>
       {decisionModal && (() => {
@@ -346,7 +413,6 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                   <strong style={{ fontSize: 15 }}>설계 결정을 골라주세요</strong>
                   <span style={{ marginLeft: "auto", borderRadius: 99, padding: "3px 8px", background: "var(--vscode-badge-background, #4d4d4d)", color: "var(--vscode-badge-foreground, #fff)", fontSize: 11, fontWeight: 600 }}>설계 결정 {decisionModal.step + 1}/{decisionModal.decisions.length}</span>
                 </div>
-                <div style={{ marginTop: 9, color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 11.5, lineHeight: 1.5 }}>코드 생성 전에 프로젝트 구조에 영향을 주는 선택을 확인합니다.</div>
                 {/* 코어가 형식 문제로 걸러낸 결정 — 안 보여주면 사용자에게는
                     "AI 가 설계를 안 해준다"로 보인다(보드 이슈). */}
                 {decisionModal.dropped.length > 0 && (
@@ -372,50 +438,15 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           </div>
         );
       })()}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-        <span style={{ width: 3, height: 14, borderRadius: 2, background: "var(--vscode-textLink-foreground, #3794ff)" }} />
-        <span style={{ fontSize: 16, fontWeight: 600, color: "var(--vscode-foreground, #eee)", letterSpacing: 0.2 }}>AI와 대화하기</span>
-        <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #888)", marginLeft: "auto", border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 10, padding: "1px 8px" }}>AI 코드 생성</span>
-      </div>
-      <div style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", marginBottom: 10, lineHeight: 1.5 }}>
-        만들거나 고칠 내용을 알려주세요. 설계를 선택한 뒤 생성된 코드를 검토하고 적용합니다.
-      </div>
-      {(connectionPending || connectionError || !isActive) && (
-        <div role="status" style={{ marginBottom: 14, border: "1px solid var(--vscode-panel-border, #333)", borderRadius: 5, padding: "9px 12px", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.5 }}>
-          {connectionPending ? "AI 연결을 확인하고 있습니다. 요청을 미리 입력할 수 있습니다." : connectionError || "AI 연결 설정을 확인해 주세요. 상단 연결 상태에서 자세한 내용을 볼 수 있습니다."}
-          {!connectionPending && <button onClick={() => postMessage("runDiagnostics")} style={{ ...linkBtn, marginLeft: 10 }}>연결 다시 확인</button>}
-          {!connectionPending && !isActive && <button onClick={() => postMessage("ai.connect")} style={{ ...linkBtn, marginLeft: 10 }}>AWS 없이 API 키로 연결</button>}
-        </div>
-      )}
-
-      {/* 대상 폴더 · 참고 파일 */}
-      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: contextFiles.length ? 6 : 12, fontSize: 12, color: "var(--vscode-descriptionForeground, #999)" }}>
-        <span>
-          위치{" "}
-          <button onClick={() => postMessage("code.pickFolder")} style={linkBtn}>{targetFolder || "루트"}</button>
-          {targetFolder && (
-            <button onClick={() => setTargetFolder("")} style={{ ...linkBtn, marginLeft: 6, opacity: 0.7 }}>지우기</button>
-          )}
-        </span>
-        <button onClick={() => postMessage("code.pickContext")} style={linkBtn}>참고 파일 추가</button>
-      </div>
-      {contextFiles.length > 0 && (
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
-          {contextFiles.map((c) => (
-            <span key={c.path} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, background: "var(--vscode-badge-background, #2a2d2e)", color: "var(--vscode-badge-foreground, #ccc)", borderRadius: 4, padding: "2px 7px" }}>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 150 }}>{c.path}</span>
-              <button aria-label={`${c.path} 참고 파일 제거`} onClick={() => setContextFiles((cur) => cur.filter((x) => x.path !== c.path))} style={{ ...linkBtn, color: "inherit" }}>×</button>
-            </span>
-          ))}
-        </div>
-      )}
+      {!hasTurns && <h2 className="rc-cg-hero">무엇을 만들까요?</h2>}
 
       {/* 히스토리 */}
       {turns.map((turn) => (
-        <div key={turn.id} style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #888)", marginBottom: 6, paddingLeft: 8, borderLeft: "2px solid var(--vscode-panel-border, #3f3f3f)" }}>
-            {turn.prompt}
-          </div>
+        <div key={turn.id} className="rc-cg-turn">
+          <div className="rc-cg-me">{turn.prompt}</div>
+          {(turn.targetFolder || (turn.contextNames && turn.contextNames.length > 0)) ? (
+            <div className="rc-cg-meta">{[turn.targetFolder || "", ...(turn.contextNames ?? [])].filter(Boolean).join(" · ")}</div>
+          ) : <div style={{ height: 8 }} />}
 
           {(turn.status === "planning" || turn.status === "generating") && (
             <>
@@ -432,22 +463,30 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           {turn.status === "done" && turn.result && (
             <div>
               <CodeRemovalSummary checks={turn.result.ops.map((op) => op.removal_check)} />
-              {turn.result.ops.length > 1 && (() => {
-                const keys = turn.result!.ops.map((op) => `${turn.id}:${op.file}`);
+              {(() => {
+                const ops = turn.result!.ops;
+                const keys = ops.map((op) => `${turn.id}:${op.file}`);
                 const anyPending = keys.some((k) => applyState[k] === "pending");
                 const allApplied = keys.every((k) => applyState[k] === "applied");
+                const created = ops.filter((op) => op.action === "create").length;
                 return (
-                  <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
-                    <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied}
-                      style={{ ...primaryBtn, ...(anyPending || allApplied ? { opacity: 0.55, cursor: "default" } : {}) }}>
-                      {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : "모두 적용"}
-                    </button>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <span data-testid="code-result-summary" style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
+                      파일 {ops.length}개{created ? ` · 새 파일 ${created}` : ""}{ops.length - created ? ` · 수정 ${ops.length - created}` : ""}
+                    </span>
+                    {ops.length > 1 && (
+                      <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied}
+                        style={{ ...primaryBtn, ...(anyPending || allApplied ? { opacity: 0.55, cursor: "default" } : {}) }}>
+                        {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : "모두 적용"}
+                      </button>
+                    )}
                   </div>
                 );
               })()}
               {turn.result.ops.map((op, i) => {
                 const key = `${turn.id}:${op.file}`;
                 const warned = !!(op.secret_warnings && op.secret_warnings.length);
+                const previewOpen = turn.result!.ops.length === 1 || !!openPreview[key];
                 return (
                   <div key={i} style={{ marginBottom: 7, border: "1px solid var(--vscode-panel-border, #333)", borderRadius: 4, overflow: "hidden" }}>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, background: "var(--vscode-editorGroupHeader-tabsBackground, #2d2d2d)", padding: "5px 8px" }}>
@@ -455,9 +494,11 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                         <span style={{ fontSize: 9, fontWeight: 600, color: op.action === "create" ? "#6cc070" : "#d6a55c" }}>
                           {op.action === "create" ? "새 파일" : "수정"}
                         </span>
-                        <span style={{ fontSize: 11.5, fontFamily: "var(--vscode-editor-font-family, monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {turn.targetFolder ? `${turn.targetFolder}/${op.file}` : op.file}
-                        </span>
+                        <button type="button" aria-expanded={previewOpen} title={previewOpen ? "내용 접기" : "내용 보기"}
+                          onClick={() => setOpenPreview((cur) => ({ ...cur, [key]: !previewOpen }))}
+                          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, cursor: "pointer", fontSize: 11.5, fontFamily: "var(--vscode-editor-font-family, monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textAlign: "left", minWidth: 0 }}>
+                          <span aria-hidden="true" style={{ display: "inline-block", width: 10, color: "var(--vscode-descriptionForeground, #888)" }}>{previewOpen ? "▾" : "▸"}</span>{turn.targetFolder ? `${turn.targetFolder}/${op.file}` : op.file}
+                        </button>
                       </span>
                       <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
                         <button onClick={() => showDiff(turn, op)} style={ghostBtn}>변경 보기</button>
@@ -473,9 +514,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                         {applyErrors[key]}
                       </div>
                     )}
-                    <pre style={{ margin: 0, background: "var(--vscode-textCodeBlock-background, #1e1e1e)", color: "var(--vscode-editor-foreground, #ddd)", padding: "6px 8px", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 10.5, maxHeight: 150, overflow: "auto", whiteSpace: "pre", lineHeight: 1.5 }}>
+                    {previewOpen && <pre style={{ margin: 0, background: "var(--vscode-textCodeBlock-background, #1e1e1e)", color: "var(--vscode-editor-foreground, #ddd)", padding: "6px 8px", fontFamily: "var(--vscode-editor-font-family, monospace)", fontSize: 10.5, maxHeight: 150, overflow: "auto", whiteSpace: "pre", lineHeight: 1.5 }}>
                       {op.content.length > 1000 ? op.content.slice(0, 1000) + "\n…" : op.content}
-                    </pre>
+                    </pre>}
                     {warned && (
                       <div style={{ background: "rgba(216,165,92,0.12)", borderTop: "1px solid rgba(216,165,92,0.3)", padding: "5px 8px", fontSize: 10.5, color: "#d6a55c" }}>
                         키가 코드에 포함된 것 같습니다 ({op.secret_warnings!.length}건). .env로 옮기세요.
@@ -489,22 +530,61 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         </div>
       ))}
 
-      {/* 입력 */}
-      <textarea
-        className="rc-cg-input"
-        aria-label="AI 개발 요청"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => { if (!e.nativeEvent.isComposing && (e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); } }}
-        placeholder={turns.length ? "이어서 수정 요청 (예: 버튼 색을 파랑으로)" : "만들거나 고칠 내용을 입력 (예: SQLite 게시판 REST API를 FastAPI로 만들어줘)"}
-        disabled={isBusy}
-        style={{ width: "100%", boxSizing: "border-box", minHeight: 130, background: "var(--vscode-input-background, #252526)", color: "var(--vscode-input-foreground, #ccc)", border: "1px solid var(--vscode-input-border, #3f3f3f)", borderRadius: 6, padding: "10px 12px", fontSize: 12.5, fontFamily: "var(--vscode-font-family, sans-serif)", resize: "vertical", outline: "none", lineHeight: 1.6, opacity: isBusy ? .6 : 1 }}
-      />
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
-        <button onClick={send} disabled={!input.trim() || isBusy} className="rc-cg-send" style={{ ...primaryBtn, padding: "7px 16px", borderRadius: 6, opacity: input.trim() && !isBusy ? 1 : 0.5, cursor: input.trim() && !isBusy ? "pointer" : "not-allowed" }}>
-          보내기
-        </button>
-        <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #777)" }}>Ctrl+Enter 로 전송</span>
+      {/* 입력 — 위치 · 참고 파일 · 보내기를 입력창 한 덩어리 안에 둔다 */}
+      <div className={hasTurns ? "rc-cg-dock" : undefined}>
+        {(connectionPending || connectionError || !isActive) && (
+          <div role="status" className="rc-cg-notice">
+            {connectionPending ? "AI 연결을 확인하고 있습니다. 요청을 미리 입력할 수 있습니다." : connectionError || "AI 연결 설정을 확인해 주세요. 상단 연결 상태에서 자세한 내용을 볼 수 있습니다."}
+            {!connectionPending && <button onClick={() => postMessage("runDiagnostics")} style={{ ...linkBtn, marginLeft: 10 }}>연결 다시 확인</button>}
+            {!connectionPending && !isActive && <button onClick={() => postMessage("ai.connect")} style={{ ...linkBtn, marginLeft: 10 }}>AWS 없이 API 키로 연결</button>}
+          </div>
+        )}
+        <div className="rc-cg-box">
+          <textarea
+            ref={inputRef}
+            className="rc-cg-input"
+            aria-label="AI 개발 요청"
+            value={input}
+            rows={hasTurns ? 1 : 3}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (!e.nativeEvent.isComposing && (e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); } }}
+            placeholder={hasTurns ? "이어서 수정할 점 (예: 버튼 색을 파랑으로)" : "만들거나 고칠 내용 (예: SQLite 게시판 REST API를 FastAPI로)"}
+            disabled={isBusy}
+          />
+          <div className="rc-cg-tools">
+            <div className="rc-cg-ctx">
+            <button type="button" className="rc-cg-chip" onClick={() => postMessage("code.pickFolder")} title={targetFolder ? `코드를 만들 위치: ${targetFolder}` : "코드를 만들 위치: 현재 프로젝트 루트"}>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d="M1.5 4.5h4l1.5 1.5h7.5v7h-13z" /></svg>
+              <span>{folderLabel(targetFolder)}</span>
+            </button>
+            {targetFolder && <button type="button" className="rc-cg-x" aria-label="위치 지우기" title="루트로" onClick={() => setTargetFolder("")} style={{ marginLeft: -4 }}>×</button>}
+            {contextFiles.map((c) => (
+              <span key={c.path} className="rc-cg-file" title={c.path}>
+                <span>{c.path}</span>
+                <button type="button" className="rc-cg-x" aria-label={`${c.path} 참고 파일 제거`} onClick={() => setContextFiles((cur) => cur.filter((x) => x.path !== c.path))}>×</button>
+              </span>
+            ))}
+            <button type="button" className="rc-cg-chip quiet" aria-label="참고 파일 추가" onClick={() => postMessage("code.pickContext")}>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d="M10.5 4.5 5 10a1.8 1.8 0 0 0 2.5 2.5L13 7a3.2 3.2 0 0 0-4.5-4.5L3 8" /></svg>
+              <span>참고 파일</span>
+            </button>
+            </div>
+            <div className="rc-cg-actions">
+            <span className="rc-cg-kbd">Ctrl+Enter</span>
+            <button type="button" onClick={send} disabled={!input.trim() || isBusy} className="rc-cg-send" title="보내기 (Ctrl+Enter)">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" /></svg>
+              <span className="rc-cg-sr">보내기</span>
+            </button>
+            </div>
+          </div>
+        </div>
+        {!hasTurns && (
+          <div className="rc-cg-examples">
+            {EXAMPLES.map((ex) => (
+              <button type="button" key={ex.label} onClick={() => { setInput(ex.text); inputRef.current?.focus(); }}>{ex.label}</button>
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );

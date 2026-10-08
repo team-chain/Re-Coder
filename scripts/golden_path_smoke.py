@@ -861,6 +861,10 @@ def main() -> int:
     }.items():
         os.environ[key] = value
     os.environ.pop("AWS_PROFILE", None)
+    #: 배포 직후 화면 확인은 **실제** S3 웹사이트 주소를 연다. moto 버킷은 이 프로세스 메모리에만
+    #: 있어 그 주소는 실제 AWS 에서 404 다 — 확인하면 제품 결함이 아니라 모킹 탓으로 깨진다
+    #: (1.1.26 부터 CI 실패). 모킹 모드에서만 끄고, --live 는 그대로 화면까지 본다.
+    os.environ.setdefault("RECODER_SCREEN_CHECK", "0")
 
     try:
         from moto import mock_aws  # type: ignore

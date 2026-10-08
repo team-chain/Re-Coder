@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 from typing import Callable, Optional
 
@@ -128,6 +129,18 @@ def _aws_error_detail(exc: Exception, action: str) -> str:
     except Exception:  # noqa: BLE001
         code = ""
 
+    message = ""
+    try:
+        message = str(getattr(exc, "response", {}).get("Error", {}).get("Message", "") or exc)
+    except Exception:  # noqa: BLE001
+        message = ""
+    if code in ("AccessDenied", "AccessDeniedException") and re.search(r"BlockPublic|public access", message, re.I):
+        return (
+            f"{action} 실패: 이 AWS 계정에 '퍼블릭 액세스 차단'이 켜져 있어 웹사이트 공개 정책을 넣을 수 없습니다. "
+            "S3 콘솔 → 왼쪽 메뉴 '이 계정에 대한 퍼블릭 액세스 차단 설정'에서 '새 버킷 정책을 통해 부여된 퍼블릭 액세스 차단'을 "
+            "끈 뒤 다시 시도하세요(조직 정책이면 관리자에게 요청). 권한표를 다시 적용해도 해결되지 않습니다. "
+            f"(AWS: {code})"
+        )
     if code in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation"):
         return (
             f"{action} 권한이 없습니다. 배포 센터의 「권한표」를 사용자/역할에 "
@@ -187,12 +200,14 @@ def _ensure_bucket(client, bucket: str, region: str) -> tuple[bool, str]:
         if status not in (403, 404):
             raise
         if status == 403:
-            # 존재하지만 내 것이 아니다 — 만들려 하면 더 헷갈리는 오류가 난다.
+            # 버킷 이름에 계정 지문이 들어가 다른 계정과 겹칠 일은 거의 없다 — 403 은 대개 내 권한(s3:ListBucket)
+            # 부족이다. 이름을 바꾸라고 하면 해결되지 않으니 권한표를 먼저 안내한다.
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"버킷 '{bucket}' 이 이미 다른 계정에 있습니다. 프로젝트 이름을 "
-                    f"바꿔 다시 시도하세요."
+                    f"버킷 '{bucket}' 을(를) 확인할 권한이 없습니다(HTTP 403). 배포 센터의 「권한표」를 "
+                    f"사용자/역할에 다시 적용한 뒤 시도하세요. 그래도 같으면 이 이름의 버킷이 다른 계정에 "
+                    f"있는 것이니 프로젝트 이름을 바꿔 다시 시도하세요."
                 ),
             ) from exc
 
@@ -398,6 +413,14 @@ def _check_website_screen(url: str, progress) -> Optional[dict]:
         return data
     if not result.ok:
         data["diagnosis"] = result.diagnosis()
+        #: 서버(컨테이너)용 안내 대신 S3 에서 할 일을 알려 준다.
+        s3_fix = {
+            "SCREEN_NOT_HTML": "S3 웹사이트 주소가 403/404 를 돌려줍니다. 업로드한 폴더에 index.html 이 있는지, 버킷의 공개 "
+                               "정책·웹사이트 설정이 적용됐는지 확인하고 1~2분 뒤 주소를 다시 열어 보세요. 계속되면 다시 배포하세요.",
+            "SCREEN_HTTP_ERROR": "S3 웹사이트 주소가 오류를 돌려줍니다. 잠시 뒤 주소를 다시 열어 보고, 계속되면 다시 배포하세요.",
+        }.get(result.code or "")
+        if s3_fix:
+            data["diagnosis"]["fix"] = s3_fix
     return data
 
 

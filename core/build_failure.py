@@ -163,6 +163,61 @@ def _key_lines(lines: list[str], anchor: Optional[int]) -> list[str]:
     return (picked or unique([l for _, l in useful]))[-12:]
 
 
+_DB_REFUSED = re.compile(r"ECONNREFUSED\s+(?:127\.0\.0\.1|::1|localhost|\[::1\]):(\d{2,5})|connect ECONNREFUSED [^\n]*:(5432|3306|27017|6379)\b|"
+                         r"Connection refused[^\n]*(?:localhost|127\.0\.0\.1)[^\n]*?(\d{4,5})", re.I)
+_DB_NAMES = {"5432": "PostgreSQL", "3306": "MySQL", "27017": "MongoDB", "6379": "Redis"}
+_NODE_THROW_AT = re.compile(r"^(/(?:app|usr/src/app|srv)/[^\s:]+):(\d+)$")
+_NODE_ERROR = re.compile(r"^(?:Uncaught\s+)?((?:[A-Z]\w*)?Error|SyntaxError|TypeError|ReferenceError)(?: \[[A-Z_]+\])?: (.+)$")
+_PY_ERROR = re.compile(r"^((?:[A-Z]\w*)?(?:Error|Exception)): (.+)$")
+_PY_AT = re.compile(r'File "/(?:app|usr/src/app|srv)/([^"]+)", line (\d+)')
+
+
+def _run_failure(lines: list[str], text: str) -> Optional[BuildDiagnosis]:
+    """컨테이너가 시작하자마자 죽었을 때 — 앱 로그에서 실제 예외와 위치를 뽑는다."""
+    m = _DB_REFUSED.search(text)
+    if m:
+        port = next((g for g in m.groups() if g), "")
+        db = _DB_NAMES.get(port, "데이터베이스")
+        anchor = text[:m.start()].count("\n")
+        return BuildDiagnosis(
+            "APP_DB_LOCALHOST", f"앱이 {db} 에 접속하지 못함",
+            f"앱이 localhost:{port} 로 {db} 에 접속하려다 거절됐습니다. 컨테이너 안의 localhost 는 앱 자신이라 PC 나 다른 컨테이너의 DB 가 아닙니다.",
+            f"접속 주소를 환경변수(DATABASE_URL·MONGODB_URI 등)로 읽게 하세요. ReCoder 는 {db} 컨테이너를 함께 띄우고 그 주소를 환경변수로 넘깁니다.",
+            _key_lines(lines, anchor), "")
+    python = "Traceback (most recent call last)" in text
+    for i, line in enumerate(lines if not python else []):
+        nm = _NODE_ERROR.match(line.strip())
+        if nm and not line.startswith(" "):
+            where = ""
+            for back in range(i - 1, max(-1, i - 8), -1):
+                at = _NODE_THROW_AT.match(lines[back].strip())
+                if at:
+                    where = f"{re.sub(r'^/(?:app|usr/src/app|srv)/', '', at.group(1))}:{at.group(2)}"
+                    break
+            if not where:
+                for nxt in lines[i + 1:i + 4]:
+                    at = re.search(r"\(?/(?:app|usr/src/app|srv)/([^\s:()]+):(\d+):\d+\)?", nxt)
+                    if at:
+                        where = f"{at.group(1)}:{at.group(2)}"
+                        break
+            return BuildDiagnosis(
+                "APP_START_ERROR", "앱이 시작하자마자 오류로 종료됨",
+                f"{nm.group(1)}: {nm.group(2)}" + (f" ({where})" if where else ""),
+                (f"{where} 의 코드를 고친 뒤 다시 배포하세요. " if where else "") + "PC 에서 같은 시작 명령(npm start 등)으로 실행하면 같은 오류를 볼 수 있습니다. 이전 버전은 다시 띄워 두었습니다.",
+                _key_lines(lines, i), "")
+    for i, line in enumerate(lines):
+        pm = _PY_ERROR.match(line.strip())
+        if pm and "Traceback" in text[:text.find(line)]:
+            ats = _PY_AT.findall(text[:text.find(line)])
+            where = f"{ats[-1][0]}:{ats[-1][1]}" if ats else ""
+            return BuildDiagnosis(
+                "APP_START_ERROR", "앱이 시작하자마자 오류로 종료됨",
+                f"{pm.group(1)}: {pm.group(2)}" + (f" ({where})" if where else ""),
+                (f"{where} 의 코드를 고친 뒤 다시 배포하세요. " if where else "") + "이전 버전은 다시 띄워 두었습니다.",
+                _key_lines(lines, i), "")
+    return None
+
+
 def diagnose(output: str, readiness_issues: Optional[list] = None, stage: str = "build") -> BuildDiagnosis:
     """stage="run" 이면 컨테이너 로그(시작 직후 종료)를 진단한다."""
     lines = _clean(output)
@@ -183,7 +238,10 @@ def diagnose(output: str, readiness_issues: Optional[list] = None, stage: str = 
                                    _key_lines(lines, anchor), step)
         break
     else:
-        if stage == "run":
+        run_specific = _run_failure(lines, text) if stage == "run" else None
+        if run_specific is not None:
+            diagnosis = run_specific
+        elif stage == "run":
             diagnosis = BuildDiagnosis(
                 "UNKNOWN", "컨테이너 실행 실패", "컨테이너가 시작 직후 종료됐거나 요청에 응답하지 않습니다.",
                 "아래 앱 로그에서 원인을 확인하세요. PC 에서 같은 시작 명령(npm start 등)으로 재현할 수 있습니다.",

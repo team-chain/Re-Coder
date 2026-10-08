@@ -266,7 +266,8 @@ export class CanvasHost {
                     } else if(c.target==='s3') {
                         if(staticPreview(workspace,c.dir).digest !== plan.staticDigest) throw new Error('승인 후 정적 파일이 변경되었습니다. 배포 내용을 다시 확인하세요.');
                         // Existing handler owns path confinement, sensitive-file filtering and stream.
-                        await execute('workspace.deploy.s3',{dir:c.dir,region:c.aws_region});
+                        // 승인한 프로젝트를 함께 넘긴다 — 그 사이 활성 프로젝트가 바뀌어도 승인하지 않은 파일을 올리지 않는다.
+                        await execute('workspace.deploy.s3',{dir:c.dir,region:c.aws_region,workspace_path:workspace});
                     } else {
                         send('canvas.executing',{requestId,message:'gitleaks 검사 중'});
                         const scan=await this.api.runScan('gitleaks',workspace) as {status?:string;critical_count?:number;findings?:unknown;message?:string};

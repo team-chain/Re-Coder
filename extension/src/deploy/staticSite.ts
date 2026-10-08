@@ -71,9 +71,11 @@ export function isSensitiveFile(relativePath: string): boolean {
  * 필요한 파일 종류는 한정적이므로 방향을 뒤집는다 — 여기 없는 확장자는
  * 올라가지 않고, 무엇이 제외됐는지는 결과에 담아 사용자에게 보여준다.
  */
+// 소스맵(.map)은 올리지 않는다 — sourcesContent 에 원본 소스 전체가 들어 있어 공개 버킷에 올리면 코드가 그대로
+// 공개된다(CRA 는 기본으로 만든다). 사이트 동작에는 필요 없다.
 const ALLOWED_EXTENSIONS = new Set([
     // 문서·스크립트·데이터
-    'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'json', 'map', 'txt', 'xml',
+    'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'json', 'txt', 'xml',
     'webmanifest', 'webapp', 'md', 'csv', 'tsv', 'pdf',
     // 이미지
     'svg', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'bmp', 'apng',

@@ -17,6 +17,7 @@ import { ScanKind, ScanQueue, ScanRequest } from './scanQueue';
 import { scanCounts } from './ShipMode';
 import { adrStatus } from './adrStatus';
 import { isNotApplicable } from './securityGate';
+import { SecurityFixList } from './SecurityFixList';
 
 export type HubId = "develop" | "deploy" | "security";
 export type FeatureId =
@@ -253,7 +254,7 @@ export const AdrPanel: React.FC = () => {
 };
 
 // ── 보안: 스캔 / 시크릿 / 정책 ────────────────────────────────────────────
-export interface ScanResultLite { requestId?: string; scan_type: string; status?: "ok" | "error" | "not_run" | "unverified"; summary?: string; message?: string; cause?: string; next_action?: string; reason_code?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
+export interface ScanResultLite { requestId?: string; workspace?: string; scan_type: string; status?: "ok" | "error" | "not_run" | "unverified"; summary?: string; message?: string; cause?: string; next_action?: string; reason_code?: string; critical_count?: number; high_count?: number; medium_count?: number; findings?: unknown; }
 
 export function securityResultDetail(r?: ScanResultLite): string {
   if (!r) return '아직 검사 결과가 없습니다.';
@@ -290,12 +291,12 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
     }
   }, [send]));
 
-  const run = (selected: ScanKind[]) => {
+  const run = useCallback((selected: ScanKind[]) => {
     const request = queue.current.start(selected);
     if (!request) return;
     setResults(cur => { const next = { ...cur }; selected.forEach(k => { delete next[k]; }); return next; });
     send(request);
-  };
+  }, [send]);
   const label: Record<ScanKind, string> = { trivy: '이미지 · 의존성', hadolint: 'Dockerfile', gitleaks: '시크릿' };
 
   const verdict = (r?: ScanResultLite) => {
@@ -336,6 +337,7 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
         );
       })}
       <div role="status" style={{ marginTop: 12, color: C.muted, fontSize: 11 }}>{running ? `${label[running]} 검사 중` : '항목을 누르면 결과와 개별 검사 메뉴가 열립니다.'}</div>
+      <SecurityFixList results={results} running={running !== null} onRescan={run} />
     </div>
   );
 };

@@ -878,6 +878,29 @@ def _decisions_prompt_block(decisions: list[NormalizedDecision]) -> str:
     )
 
 
+def _scrub_context(open_file, prior_files, context_files, secrets: dict | None = None):
+    """열린 파일·참고 파일의 비밀(.env 본문, 키 문자열)을 AI 로 보내지 않는다."""
+    try:
+        from context_gate import scrub_file_entry
+    except ImportError:  # pragma: no cover
+        from core.context_gate import scrub_file_entry  # type: ignore
+    return (scrub_file_entry(open_file, secrets) if open_file else open_file,
+            [scrub_file_entry(f, secrets) for f in prior_files] if prior_files else prior_files,
+            [scrub_file_entry(f, secrets) for f in context_files] if context_files else context_files)
+
+
+def _restore_secrets_in_ops(ops: list[dict], secrets: dict) -> None:
+    if not secrets:
+        return
+    try:
+        from context_gate import restore_code_secrets
+    except ImportError:  # pragma: no cover
+        from core.context_gate import restore_code_secrets  # type: ignore
+    for op in ops:
+        if isinstance(op.get("content"), str):
+            op["content"] = restore_code_secrets(op["content"], secrets)
+
+
 def _build_code_prompt(
     instruction: str,
     existing_files: list[str],
@@ -891,6 +914,7 @@ def _build_code_prompt(
 
     `decisions` 는 `adr.normalize_decisions` 를 거친 목록이어야 한다.
     """
+    open_file, prior_files, context_files = _scrub_context(open_file, prior_files, context_files)
     tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
     prior_block = ""
     for pf in (prior_files or [])[:4]:
@@ -948,6 +972,7 @@ def _build_code_prompt(
 - PostgreSQL(pg)의 NUMERIC/DECIMAL 값은 문자열로 옵니다 — 서버에서 숫자로 바꾸거나 pg.types.setTypeParser(1700, parseFloat) 를 설정하세요.
 - 파일을 나눠 만들 때 서로 부르는 함수·컴포넌트 이름과 export 방식을 정확히 맞추고, import 하는 파일(CSS 포함)은 반드시 함께 만듭니다.
 - React Router 를 쓰면 페이지 이동은 <Link>/useNavigate 로 합니다(<a href> 는 상태를 잃습니다).
+- 자리표시 이미지는 https://placehold.co/300x200?text=이름 형식을 씁니다(via.placeholder.com·placeimg.com 은 문을 닫아 이미지가 깨집니다).
 
 기존 파일 목록:
 {tree}
@@ -1030,6 +1055,7 @@ def _build_plan_prompt(
     context_files: list[dict] | None = None,
 ) -> str:
     """/api/code/plan 용 프롬프트 — 코드가 아니라 '설계 결정 선택지'를 요구한다."""
+    open_file, _prior, context_files = _scrub_context(open_file, None, context_files)
     tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
 
     folder_block = ""
@@ -1589,11 +1615,11 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
     import 하지만 만들지 않은 CSS, CRA 식 process.env, 선언과 다른 패키지 이름.
     """
     try:
-        from build_readiness import (add_missing_export, analyze, api_prefix_rewrite, jsx_reference_rewrite,
+        from build_readiness import (add_missing_export, analyze, api_prefix_rewrite, dead_image_rewrite, jsx_reference_rewrite,
                                      pg_numeric_parser_rewrite, relative_api_rewrite, rename_package_import,
                                      router_link_rewrite, set_build_script, vite_env_rewrite, vite_out_dir_rewrite)
     except ImportError:  # pragma: no cover
-        from core.build_readiness import (add_missing_export, analyze, api_prefix_rewrite,  # type: ignore
+        from core.build_readiness import (add_missing_export, analyze, api_prefix_rewrite, dead_image_rewrite,  # type: ignore
                                           jsx_reference_rewrite, pg_numeric_parser_rewrite, relative_api_rewrite,
                                           rename_package_import, router_link_rewrite, set_build_script,
                                           vite_env_rewrite, vite_out_dir_rewrite)
@@ -1630,6 +1656,17 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
             new_rel = prefix + rel[:-3] + ".jsx"
             op["file"] = new_rel
             by_path[new_rel] = op
+            if (base / (prefix + rel)).exists():
+                #: 디스크에 옛 .js 가 남는다(확장은 파일을 지우지 않는다). 이번 결과에 없는 파일이 './App' 처럼
+                #: 확장자 없이 가져오면 Vite 는 .js 를 먼저 찾아 옛 코드를 쓴다 — 옛 파일을 새 .jsx 로 넘겨주는 파일로 바꾼다.
+                content = op.get("content") or ""
+                target = "./" + posixpath.basename(new_rel)
+                stub = f"// ReCoder: {posixpath.basename(new_rel)} 로 옮겼습니다(JSX 는 .jsx 여야 Vite 가 읽습니다).\n"
+                stub += f"export * from '{target}';\n"
+                if re.search(r"\bexport\s+default\b|\bexport\s*\{[^}]*\bas\s+default\b", content):
+                    stub += f"export {{ default }} from '{target}';\n"
+                by_path[prefix + rel] = {"action": "edit", "file": prefix + rel, "language": "javascript", "content": stub,
+                                         "rationale": f"내용을 {posixpath.basename(new_rel)} 로 옮기고 예전 경로는 그 파일을 다시 내보냅니다."}
             for other_path, other in by_path.items():
                 if other_path.endswith((".html", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue")):
                     other["content"] = jsx_reference_rewrite(other.get("content") or "", other_path, prefix + rel, new_rel)
@@ -1648,6 +1685,13 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
                 if updated != op.get("content"):
                     op["content"] = updated
                     notes.append(f"{prefix + rel}: localhost API 주소 → 상대 경로")
+        for rel in data.get("dead_images") or []:
+            op = by_path.get(prefix + rel)
+            if op is not None:
+                updated = dead_image_rewrite(op.get("content") or "")
+                if updated != op.get("content"):
+                    op["content"] = updated
+                    notes.append(f"{prefix + rel}: 닫힌 이미지 서비스 주소 → placehold.co")
         for rel in data.get("pg_numeric_files") or []:
             op = by_path.get(prefix + rel)
             if op is not None:
@@ -1655,7 +1699,6 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
                 if updated != op.get("content"):
                     op["content"] = updated
                     notes.append(f"{prefix + rel}: pg NUMERIC 숫자 파서 추가")
-                    break
         for rel in data.get("process_env") or []:
             op = by_path.get(prefix + rel)
             if op is not None:
@@ -1994,6 +2037,9 @@ def generate_code(
     root = _resolve_root(project_root)
     existing = _list_project_files(root)
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
+    #: 열린 파일·참고 파일의 비밀은 AI 로 보내지 않는다. 자리표시로 보낸 값은 결과에서 원래 값으로 되돌린다.
+    context_secrets: dict = {}
+    open_file, prior_files, context_files = _scrub_context(open_file, prior_files, context_files, context_secrets)
 
     # FR-02-05 — 승인 게이트. 라우트가 아니라 여기(생성 함수)에서 막는다.
     # 라우트에서만 막으면 server.py 의 구(舊) /api/code/generate 처럼 decisions 를
@@ -2220,6 +2266,7 @@ def generate_code(
         from code_removals import annotate_removals
     except ImportError:
         from core.code_removals import annotate_removals
+    _restore_secrets_in_ops(ops_out, context_secrets)
     annotate_removals(ops_out, root, target_folder)
 
     summary = str(data.get("summary") or "코드를 생성했습니다.").strip()
