@@ -139,6 +139,53 @@ def run_tests():
     for _ in range(6):
         bad = public.post("/api/auth/login", json={"email": lockemail, "password": "wrong"})
     check("login rate limit", bad.status_code == 429)
+    burst, burst_user, burst_email = account("burst")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as workers:
+        attempts = list(
+            workers.map(
+                lambda _: public.post(
+                    "/api/auth/login", json={"email": burst_email, "password": "incorrect"}
+                ).status_code,
+                range(12),
+            )
+        )
+    check(
+        "parallel login cannot bypass failure limit",
+        attempts.count(401) == 5 and attempts.count(429) == 7,
+        attempts,
+    )
+    sql(
+        f"UPDATE users SET last_failed_login=NOW()-INTERVAL '16 minutes' WHERE id={int(burst_user['id'])}"
+    )
+    failed_again = public.post(
+        "/api/auth/login", json={"email": burst_email, "password": "incorrect"}
+    )
+    recovered = public.post(
+        "/api/auth/login", json={"email": burst_email, "password": "Validation-password-8!"}
+    )
+    check(
+        "login cooldown starts a fresh failure window",
+        failed_again.status_code == 401 and recovered.status_code == 200,
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as workers:
+        registrations = list(
+            workers.map(
+                lambda _: public.post(
+                    "/api/auth/register",
+                    json={
+                        "email": run + "-duplicate@example.invalid",
+                        "name": "Concurrent registration",
+                        "password": "Validation-password-8!",
+                    },
+                ).status_code,
+                range(4),
+            )
+        )
+    check(
+        "concurrent duplicate registration returns conflict",
+        sorted(registrations) == [201, 409, 409, 409],
+        registrations,
+    )
     for q in [0, -1, 1.5, "1"]:
         check(
             "invalid cart quantity " + str(q),

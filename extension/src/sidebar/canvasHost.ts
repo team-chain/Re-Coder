@@ -35,7 +35,12 @@ export async function gitContext(workspace: string) {
     try {
         const root = await run(['rev-parse','--show-toplevel']).catch(err=>{if(err.code==='ENOENT')throw err;return '';});
         // A folder inside another repository must not publish the parent's source.
-        const canonical = (value:string) => process.platform==='win32' ? fs.realpathSync(value).toLowerCase() : fs.realpathSync(value);
+        // Native realpath expands Windows 8.3 names (RUNNER~1) as well as junctions.
+        // Git can return the long spelling even when VS Code opened the short one.
+        const canonical = (value:string) => {
+            const resolved = path.normalize(fs.realpathSync.native(value));
+            return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+        };
         if (!root || canonical(root) !== canonical(workspace)) return empty;
         const [remote, branch, head, changes] = await Promise.all([run(['remote', 'get-url', 'origin']).catch(() => ''), run(['branch', '--show-current']), run(['rev-parse', '--verify', 'HEAD']).catch(()=>''), run(['status', '--porcelain'])]);
         let repository = '';

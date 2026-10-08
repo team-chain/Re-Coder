@@ -24,21 +24,22 @@ Module._resolveFilename=function(name,...args){return name==='vscode'?path.join(
 const vscode=require('vscode');vscode.StatusBarAlignment={Right:2};const {DiscordController}=require('../out/discord/DiscordController'),{BridgeClient}=require('../out/bridge/BridgeClient');
 Module._resolveFilename=resolve;
 test('login secrets are scoped to server and selected project; expired sessions stay reconnectable',async t=>{
+ const projectA=path.resolve('/tmp/project-a'),projectB=path.resolve('/tmp/project-b');
  const prior={fetch:global.fetch,folders:vscode.workspace.workspaceFolders,config:vscode.workspace.getConfiguration,progress:vscode.window.withProgress,trust:vscode.workspace.isTrusted};
  t.after(()=>{global.fetch=prior.fetch;vscode.workspace.workspaceFolders=prior.folders;vscode.workspace.getConfiguration=prior.config;vscode.window.withProgress=prior.progress;vscode.workspace.isTrusted=prior.trust;});
- vscode.workspace.workspaceFolders=[{uri:vscode.Uri.file('/tmp/project-a'),name:'A'},{uri:vscode.Uri.file('/tmp/project-b'),name:'B'}];vscode.workspace.isTrusted=true;vscode.env.machineId='test-machine';
+ vscode.workspace.workspaceFolders=[{uri:vscode.Uri.file(projectA),name:'A'},{uri:vscode.Uri.file(projectB),name:'B'}];vscode.workspace.isTrusted=true;vscode.env.machineId='test-machine';
  let base='https://bot.example',expired=false;vscode.workspace.getConfiguration=()=>({get:()=>base});vscode.window.withProgress=async(opts,run)=>run({report(){}},{onCancellationRequested:()=>({dispose(){}})});
  const saved=new Map(),requests=[],context={subscriptions:[],secrets:{get:async k=>saved.get(k),store:async(k,v)=>saved.set(k,v),delete:async k=>saved.delete(k)}};
  global.fetch=async(url,opts)=>{requests.push({url,opts});const route=new URL(url).pathname.split('/').at(-1);let result={},status=200;
  if(route==='start')result={authorize_url:base+'/api/v1/connect/authorize/fixture',attempt:'fixture',confirmation_code:'ABCDEF'};
  if(route==='poll')result={status:'connected',token:'session-secret'};
- if(route==='status'){result=expired?{error:'다시 로그인하세요.'}:{authenticated:true,project_id:projectId('test-machine','/tmp/project-a'),username:'alice'};status=expired?401:200;}
+ if(route==='status'){result=expired?{error:'다시 로그인하세요.'}:{authenticated:true,project_id:projectId('test-machine',projectA),username:'alice'};status=expired?401:200;}
  if(route==='info')result={bot_ready:true,oauth_ready:true};return new Response(JSON.stringify(result),{status});};
  const controller=new DiscordController(context);t.after(()=>controller.dispose());const bridges=[];controller.bridge=async(client,folder,token)=>bridges.push({root:folder.uri.fsPath,token});
- const state=await controller.action('connect',{workspace:'/tmp/project-a'});assert.equal(state.authenticated,true);assert.ok(!JSON.stringify(state).includes('session-secret'));assert.equal(saved.size,1);assert.equal(bridges[0].root,'/tmp/project-a');
- assert.equal((await controller.action('status',{workspace:'/tmp/project-b'})).authenticated,false);expired=true;
- const retry=await controller.action('status',{workspace:'/tmp/project-a'});assert.equal(retry.authenticated,false);assert.equal(retry.projects.length,2);assert.match(retry.connection_error,/다시 로그인/);
- base='https://different.example';assert.equal((await controller.action('status',{workspace:'/tmp/project-a'})).authenticated,false);assert.ok(!requests.filter(r=>r.url.startsWith(base)).some(r=>r.opts.headers.Authorization));
+ const state=await controller.action('connect',{workspace:projectA});assert.equal(state.authenticated,true);assert.ok(!JSON.stringify(state).includes('session-secret'));assert.equal(saved.size,1);assert.equal(bridges[0].root,projectA);
+ assert.equal((await controller.action('status',{workspace:projectB})).authenticated,false);expired=true;
+ const retry=await controller.action('status',{workspace:projectA});assert.equal(retry.authenticated,false);assert.equal(retry.projects.length,2);assert.match(retry.connection_error,/다시 로그인/);
+ base='https://different.example';assert.equal((await controller.action('status',{workspace:projectA})).authenticated,false);assert.ok(!requests.filter(r=>r.url.startsWith(base)).some(r=>r.opts.headers.Authorization));
 });
 test('OAuth bridge keeps burst chunks ordered and writes only the selected project',async t=>{
  const {WebSocketServer}=require('ws');const dir=fs.mkdtempSync(path.join(os.tmpdir(),'recoder-oauth-')),first=path.join(dir,'first'),second=path.join(dir,'second');fs.mkdirSync(first);fs.mkdirSync(second);

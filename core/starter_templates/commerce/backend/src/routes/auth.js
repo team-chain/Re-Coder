@@ -4,9 +4,6 @@ import { hashPassword, comparePassword, generateToken } from '../auth.js';
 
 const router = express.Router();
 
-const FAILED_LOGIN_LIMIT = 5;
-const FAILED_LOGIN_WINDOW_MINUTES = 15;
-
 /**
  * POST /api/auth/register
  * Register a new user
@@ -53,6 +50,7 @@ router.post('/register', async (req, res) => {
       token
     });
   } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Email already registered' });
     console.error('Register error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -63,6 +61,7 @@ router.post('/register', async (req, res) => {
  * Login user
  */
 router.post('/login', async (req, res) => {
+  let client;
   try {
     const { email, password } = req.body;
 
@@ -73,13 +72,16 @@ router.post('/login', async (req, res) => {
 
     const emailLower = email.toLowerCase();
 
-    // Check failed login attempts
-    const userResult = await pool.query(
-      `SELECT id, password_hash, name, role, failed_login_attempts, last_failed_login, (failed_login_attempts >= 5 AND last_failed_login > NOW() - INTERVAL '15 minutes') AS login_locked FROM users WHERE email = $1`,
+    // Serialize attempts per account across all server instances.
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const userResult = await client.query(
+      `SELECT id, password_hash, name, role, failed_login_attempts, last_failed_login, (failed_login_attempts >= 5 AND last_failed_login > NOW() - INTERVAL '15 minutes') AS login_locked FROM users WHERE email = $1 FOR UPDATE`,
       [emailLower]
     );
 
     if (userResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       // User not found - return generic error
       return res.status(401).json({ error: 'Email or password is incorrect' });
     }
@@ -87,26 +89,33 @@ router.post('/login', async (req, res) => {
     const user = userResult.rows[0];
 
     // Compare in the DB timezone; timestamp without timezone must not use the host clock.
-    if (user.login_locked) return res.status(429).json({ error: 'Too many failed login attempts' });
+    if (user.login_locked) {
+      await client.query('ROLLBACK');
+      return res.status(429).json({ error: 'Too many failed login attempts' });
+    }
 
     // Compare password
     const passwordMatch = await comparePassword(password, user.password_hash);
 
     if (!passwordMatch) {
       // Increment failed login attempts
-      await pool.query(
-        'UPDATE users SET failed_login_attempts = failed_login_attempts + 1, last_failed_login = NOW() WHERE id = $1',
+      await client.query(
+        `UPDATE users SET failed_login_attempts = CASE
+           WHEN last_failed_login > NOW() - INTERVAL '15 minutes' THEN failed_login_attempts + 1
+           ELSE 1 END, last_failed_login = NOW() WHERE id = $1`,
         [user.id]
       );
+      await client.query('COMMIT');
       return res.status(401).json({ error: 'Email or password is incorrect' });
     }
 
     // Reset failed login attempts on successful login
-    await pool.query(
+    await client.query(
       'UPDATE users SET failed_login_attempts = 0, last_failed_login = NULL WHERE id = $1',
       [user.id]
     );
 
+    await client.query('COMMIT');
     const token = generateToken(user.id, emailLower, user.role);
 
     res.json({
@@ -117,9 +126,10 @@ router.post('/login', async (req, res) => {
       token
     });
   } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Login error:', err);
     res.status(500).json({ error: 'Internal server error' });
-  }
+  } finally { client?.release(); }
 });
 
 export default router;

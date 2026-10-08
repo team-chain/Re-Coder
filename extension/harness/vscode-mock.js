@@ -35,7 +35,7 @@ const workspace = {
         const rel = nodePath.relative(root.uri.fsPath, p);
         return rel.startsWith('..') ? p : rel;
     },
-    getConfiguration: () => ({ get: () => undefined, update: async () => {} }),
+    getConfiguration: () => ({ get: (_key, fallback) => fallback, update: async () => {} }),
     createFileSystemWatcher: _watcher,
     onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
     onDidChangeConfiguration: () => ({ dispose() {} }),
