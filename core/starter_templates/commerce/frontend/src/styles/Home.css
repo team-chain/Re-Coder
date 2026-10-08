@@ -1,1 +1,22 @@
-/* ReCoder: 코드가 불러오지만 AI 가 만들지 않은 스타일 파일 — 필요한 스타일을 채우세요. */
+.home-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:24px; margin:16px 0 32px; }
+.home-header h1 { margin:0; letter-spacing:-.04em; }
+.home .search-form { display:flex; gap:8px; width:min(100%,460px); }
+.home .search-input { min-width:0; background:white; border-radius:10px; }
+.home .search-button, .home .add-to-cart-button { background:#243d61; color:white; border-radius:9px; font-weight:600; }
+.home .search-button:hover, .home .add-to-cart-button:hover { background:#172b46; }
+.home .products-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:24px; }
+.home .product-card { display:flex; flex-direction:column; border:1px solid #e0e5eb; box-shadow:0 3px 14px #243d6108; border-radius:14px; cursor:default; }
+.home .product-link { color:inherit; text-decoration:none; flex:1; }
+.home .product-image { display:block; height:auto; aspect-ratio:4/3; object-fit:cover; }
+.home .product-name { font-size:1rem; margin:20px 18px 8px; line-height:1.4; }
+.home .product-description { margin:0 18px 16px; min-height:40px; color:#536174; }
+.home .product-footer { margin:0 18px; }
+.home .product-price { color:#243d61; font-size:1.35rem; }
+.home .product-stock { margin-bottom:16px; }
+.home .add-to-cart-button { margin:0 18px 18px; padding:12px 8px; }
+.home button:disabled { opacity:.55; cursor:not-allowed; }
+.home .load-more-container { text-align:center; margin:32px 0; }
+.home .no-products { padding:64px 20px; text-align:center; }
+@media(max-width:1000px) { .home .products-grid { grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; } }
+@media(max-width:700px) { .home-header { align-items:stretch; gap:16px; } .home .search-form { width:100%; } .home .products-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; } .home .product-name { margin:14px 12px 8px; } .home .product-description { margin:0 12px 14px; } .home .product-footer { margin:0 12px; } .home .add-to-cart-button { margin:0 12px 12px; font-size:.875rem; } }
+@media(max-width:340px) { .home .products-grid { grid-template-columns:1fr; } }

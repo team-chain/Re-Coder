@@ -77,6 +77,7 @@ function Home() {
           <input
             type="text"
             placeholder="Search products..."
+            aria-label="Search products"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="search-input"

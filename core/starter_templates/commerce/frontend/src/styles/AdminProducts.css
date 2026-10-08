@@ -1,1 +1,8 @@
-/* ReCoder: 코드가 불러오지만 AI 가 만들지 않은 스타일 파일 — 필요한 스타일을 채우세요. */
+.admin-products .admin-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:24px; }
+.admin-products .product-form-container { background:white; padding:24px; margin:24px 0; border:1px solid #e0e5eb; border-radius:12px; }
+.admin-products .form-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px; }
+.admin-products .form-actions, .admin-products .action-buttons { display:flex; flex-wrap:wrap; gap:8px; }
+.admin-products .product-thumbnail { width:64px; height:64px; object-fit:cover; border-radius:8px; }
+.admin-products .products-table-container { background:white; border:1px solid #e0e5eb; border-radius:12px; }
+.admin-products .product-desc { max-width:300px; color:#536174; }
+@media(max-width:600px) { .admin-products .form-row { grid-template-columns:1fr; gap:0; } }

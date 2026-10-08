@@ -532,3 +532,9 @@ tbody tr:hover {
   .order-items table, .cart-table { min-width: 450px; }
   .main-content { padding: 16px; }
 }
+
+button:focus-visible, a:focus-visible { outline:3px solid #4485ce; outline-offset:3px; }
+.error-message, .error-box, .alert-danger { color:#a32323; }
+.success-message { color:#176837; margin:12px 0; }
+.btn-sm { padding:8px 12px; font-size:.875rem; }
+.empty-state { padding:32px 16px; }

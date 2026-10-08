@@ -1,1 +1,7 @@
-/* ReCoder: 코드가 불러오지만 AI 가 만들지 않은 스타일 파일 — 필요한 스타일을 채우세요. */
+.order-detail-container { max-width:1000px; margin:auto; }
+.order-detail-header { display:flex; align-items:start; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:24px; }
+.order-detail-page .product-cell { display:flex; align-items:center; gap:12px; }
+.order-detail-page .product-cell .product-image { width:64px; height:64px; border-radius:8px; }
+.order-detail-page .order-items-section { background:white; border-radius:12px; padding:16px; border:1px solid #e0e5eb; }
+.order-detail-page .order-actions { display:flex; gap:12px; flex-wrap:wrap; margin:20px 0; }
+.order-detail-page .summary-row.total { padding-top:12px; border-top:1px solid #e0e5eb; font-weight:700; }

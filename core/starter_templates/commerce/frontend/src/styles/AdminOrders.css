@@ -1,1 +1,7 @@
-/* ReCoder: 코드가 불러오지만 AI 가 만들지 않은 스타일 파일 — 필요한 스타일을 채우세요. */
+.admin-orders .admin-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:24px; }
+.admin-orders .orders-table-container, .admin-orders .order-details-container { max-width:100%; overflow-x:auto; padding:16px; background:white; border:1px solid #e0e5eb; border-radius:12px; margin-bottom:24px; }
+.admin-orders .order-details-header { display:flex; justify-content:space-between; flex-wrap:wrap; gap:16px; }
+.admin-orders .details-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin:20px 0; }
+.admin-orders .orders-table { min-width:620px; }
+.admin-orders .page-info { align-self:center; }
+@media(max-width:600px) { .admin-orders .details-grid { grid-template-columns:1fr; } }

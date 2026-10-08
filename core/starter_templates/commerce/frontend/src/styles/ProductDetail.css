@@ -1,1 +1,13 @@
-/* ReCoder: 코드가 불러오지만 AI 가 만들지 않은 스타일 파일 — 필요한 스타일을 채우세요. */
+.product-detail .back-button { background:transparent; padding-left:0; color:#243d61; margin-bottom:24px; }
+.product-detail-container { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:40px; }
+.product-detail .product-image-section { overflow:hidden; border-radius:16px; background:#e8edf3; }
+.product-detail .product-image { display:block; width:100%; height:auto; aspect-ratio:1; object-fit:cover; }
+.product-detail .product-name { font-size:2rem; }
+.product-detail .product-price { color:#243d61; font-size:1.75rem; }
+.product-detail .product-description { margin:24px 0; font-size:1rem; }
+.product-detail .product-actions { display:flex; align-items:end; gap:16px; }
+.product-detail .quantity-selector { width:110px; }
+.product-detail .add-to-cart-button { background:#243d61; color:white; flex:1; }
+.product-detail .login-prompt { margin-top:20px; }
+.product-detail button:disabled { opacity:.5; cursor:not-allowed; }
+@media(max-width:700px) { .product-detail-container { grid-template-columns:1fr; gap:24px; } }
