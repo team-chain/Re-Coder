@@ -155,6 +155,7 @@ class ECSAgent:
             "ec2": session.client("ec2"),
             "logs": session.client("logs"),
             "sts": session.client("sts"),
+            "elbv2": session.client("elbv2"),
         }
 
     async def deploy(
@@ -571,6 +572,10 @@ class ECSAgent:
             loop = asyncio.get_running_loop()
 
             def _verify() -> None:
+                if req.target_group_arn:
+                    aws_infra.validate_target_group_network(
+                        clients["ec2"], clients["elbv2"], req.target_group_arn, req.subnet_ids
+                    )
                 aws_infra.require_cluster(clients["ecs"], req.cluster)
                 aws_infra.require_service(
                     clients["ecs"], cluster=req.cluster, service=req.service
@@ -607,6 +612,10 @@ class ECSAgent:
                 )
             else:
                 target = aws_infra.discover_default_network(clients["ec2"])
+            if req.target_group_arn:
+                aws_infra.validate_target_group_network(
+                    clients["ec2"], clients["elbv2"], req.target_group_arn, target.subnet_ids
+                )
             rec.provisioned["vpc"] = target.vpc_id
             rec.provisioned["subnets"] = ",".join(target.subnet_ids)
             # 라우팅을 확인하지 못했다는 사실을 **기록에 남긴다.** 값만

@@ -80,3 +80,85 @@ def test_health_path_404_is_not_a_success(monkeypatch):
         "https://d123.cloudfront.net/health", require_success=True, attempts=1
     )
     assert not passed and "404" in detail
+
+
+def target_network():
+    ec2, alb = MagicMock(), MagicMock()
+    ec2.describe_subnets.return_value = {
+        "Subnets": [{"SubnetId": "subnet-a", "VpcId": "vpc-a", "AvailabilityZone": "region-a"}]
+    }
+    alb.describe_target_groups.return_value = {
+        "TargetGroups": [{"TargetType": "ip", "VpcId": "vpc-a", "LoadBalancerArns": ["lb"]}]
+    }
+    alb.describe_load_balancers.return_value = {
+        "LoadBalancers": [
+            {"AvailabilityZones": [{"ZoneName": "region-a"}, {"ZoneName": "region-b"}]}
+        ]
+    }
+    return ec2, alb
+
+
+def test_alb_accepts_only_compatible_subnet_zones():
+    from aws_infra import InfraError, validate_target_group_network
+
+    ec2, alb = target_network()
+    validate_target_group_network(ec2, alb, ARN, ["subnet-a"])
+    ec2.describe_subnets.return_value["Subnets"][0]["AvailabilityZone"] = "region-c"
+    with pytest.raises(InfraError, match="subnet-a"):
+        validate_target_group_network(ec2, alb, ARN, ["subnet-a"])
+
+
+@pytest.mark.parametrize("change", ["vpc", "missing", "unattached", "instance", "permission"])
+def test_alb_network_validation_fails_closed(change):
+    from aws_infra import InfraError, validate_target_group_network
+
+    ec2, alb = target_network()
+    if change == "vpc":
+        ec2.describe_subnets.return_value["Subnets"][0]["VpcId"] = "vpc-other"
+    elif change == "missing":
+        ec2.describe_subnets.return_value["Subnets"] = []
+    elif change == "unattached":
+        alb.describe_target_groups.return_value["TargetGroups"][0]["LoadBalancerArns"] = []
+    elif change == "instance":
+        alb.describe_target_groups.return_value["TargetGroups"][0]["TargetType"] = "instance"
+    else:
+        alb.describe_load_balancers.side_effect = RuntimeError("AccessDenied")
+    with pytest.raises(InfraError):
+        validate_target_group_network(ec2, alb, ARN, ["subnet-a"])
+
+
+@pytest.mark.parametrize("provision", [False, True])
+def test_provision_rejects_incompatible_alb_before_build(monkeypatch, provision):
+    import asyncio
+
+    from agents.ecs_agent import ECSAgent, aws_infra
+    from schemas import ECSDeployRecord, ECSDeployRequest
+
+    ec2, alb = target_network()
+    ec2.describe_subnets.return_value["Subnets"][0]["AvailabilityZone"] = "region-c"
+    clients = {"ec2": ec2, "elbv2": alb, "ecs": MagicMock(), "logs": MagicMock()}
+    for name in ["ensure_cluster", "ensure_log_group"]:
+        monkeypatch.setattr(aws_infra, name, lambda *a: None)
+    monkeypatch.setattr(
+        aws_infra,
+        "resolve_subnet_network",
+        lambda *a: aws_infra.NetworkTarget(
+            vpc_id="vpc-a", subnet_ids=("subnet-a",), internet_routable=True
+        ),
+    )
+    req = ECSDeployRequest(
+        project_id="p",
+        cluster="c",
+        service="s",
+        task_definition_family="t",
+        ecr_repo="r",
+        region="ap-northeast-2",
+        target_group_arn=ARN,
+        subnet_ids=["subnet-a"],
+        security_group_ids=["sg-a"],
+        provision=provision,
+    )
+    with pytest.raises(aws_infra.InfraError, match="subnet-a"):
+        asyncio.run(ECSAgent()._step_provision(req, ECSDeployRecord(project_id="p"), clients))
+    clients["ecs"].create_service.assert_not_called()
+    clients["ecs"].update_service.assert_not_called()

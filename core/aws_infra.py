@@ -918,6 +918,45 @@ def _describe_service(ecs: Any, cluster: str, service: str) -> dict | None:
     return None
 
 
+def validate_target_group_network(
+    ec2: Any, elbv2: Any, target_group_arn: str, subnet_ids: Iterable[str]
+) -> None:
+    """Reject ALB targets that ECS could schedule outside the ALB's enabled zones."""
+    wanted = list(subnet_ids)
+    try:
+        targets = elbv2.describe_target_groups(TargetGroupArns=[target_group_arn])["TargetGroups"]
+        target = targets[0]
+        load_balancers = target.get("LoadBalancerArns", [])
+        if target.get("TargetType") != "ip" or not load_balancers:
+            raise InfraError("ECS 대상 그룹은 로드밸런서에 연결된 IP 대상 그룹이어야 합니다.")
+        lbs = elbv2.describe_load_balancers(LoadBalancerArns=load_balancers)["LoadBalancers"]
+        subnets = ec2.describe_subnets(SubnetIds=wanted)["Subnets"]
+        if not lbs or {s["SubnetId"] for s in subnets} != set(wanted):
+            raise InfraError("로드밸런서와 ECS 서브넷 정보를 모두 확인하지 못했습니다.")
+        for lb in lbs:
+            zones = {z["ZoneName"] for z in lb.get("AvailabilityZones", [])}
+            invalid = [
+                s["SubnetId"]
+                for s in subnets
+                if s.get("VpcId") != target.get("VpcId") or s.get("AvailabilityZone") not in zones
+            ]
+            if invalid:
+                raise InfraError(
+                    "ECS 서브넷이 로드밸런서의 VPC 또는 활성 가용 영역과 맞지 않습니다: "
+                    + ", ".join(invalid),
+                    remedy="로드밸런서가 활성화된 가용 영역의 같은 VPC 서브넷만 지정하세요. "
+                    "현재 활성 영역: " + ", ".join(sorted(zones)),
+                )
+    except InfraError:
+        raise
+    except Exception as exc:
+        raise InfraError(
+            "로드밸런서와 ECS 서브넷의 호환성을 확인하지 못했습니다.",
+            detail=error_message(exc),
+            remedy="대상 그룹 ARN과 ec2:DescribeSubnets, "
+            "elasticloadbalancing:DescribeTargetGroups/DescribeLoadBalancers 권한을 확인하세요.",
+        ) from exc
+
 def ensure_service(
     ecs: Any,
     *,

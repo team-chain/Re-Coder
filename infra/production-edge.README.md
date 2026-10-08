@@ -18,6 +18,8 @@ CloudFormation 출력 `TargetGroupArn`, `Domain`을 배포 화면의 **앱 실�
 
 위 ID와 도메인은 실제 출력으로 바꿉니다. 예시의 대문자 자리표시는 유효한 요청이 아닙니다. 공인 IP 없는 ECS 태스크에는 ECR·로그·Secrets Manager 접근용 NAT 또는 VPC 엔드포인트가 필요합니다. 저비용 검증에서는 태스크 공인 IP를 켜고 인바운드를 ALB 보안 그룹으로 제한할 수 있습니다.
 
+ECS 서브넷은 ALB와 같은 VPC이며 템플릿에서 선택한 두 가용 영역 안에 있어야 합니다. 다른 영역의 서브넷을 섞으면 태스크 자체가 정상이어도 ALB가 사용하지 못해 ECS가 계속 교체합니다. 배포기는 빌드 전에 이 조합과 조회 권한을 확인하며, 맞지 않으면 해당 서브넷을 표시하고 중단합니다. [AWS의 가용 영역 오류 설명](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/troubleshoot-service-load-balancers.html)
+
 앱 환경의 `FRONTEND_URL`은 `https://<Domain>`으로 설정합니다. CloudFront는 인증·주문 응답을 캐시하지 않고 쿠키·Authorization·쿼리를 원본으로 전달합니다. HSTS, nosniff, frame DENY를 설정합니다. ECS 서비스 갱신은 대상 그룹을 지정하지 않았을 때 기존 ALB 연결을 제거하지 않습니다.
 
 이 템플릿은 유료 AWS 자원을 만듭니다. 삭제 시 ECS 서비스를 중지한 다음 CloudFormation 스택을 삭제하고 완료 상태를 확인합니다. 사용자 도메인은 별도 ACM 인증서와 DNS 설정이 필요합니다. 데이터베이스의 백업·복구는 별도 운영 정책으로 관리하며 복구 시 새 DB 인스턴스가 생성됩니다. [RDS 복구 설명](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html)
