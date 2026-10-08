@@ -84,6 +84,35 @@ def test_교정은_바꿀_파일만_받아_합친다():
     assert [(o["file"], o["content"]) for o in merged] == [("a.js", "1"), ("package.json", "{\"x\":1}"), ("b.js", "2")]
 
 
+def test_later_batches_use_actual_generated_source(monkeypatch):
+    class Checking(Router):
+        def call(self, request, agent=None, operation=None):
+            if operation == "generate_code_part" and "- public/index.html\n" in request.prompt.rsplit("**아래 파일만**", 1)[1]:
+                assert CONTENT["server.js"] in request.prompt
+                assert "[이미 생성한 파일" in request.prompt
+            return super().call(request, agent, operation)
+    monkeypatch.setattr(ca, "get_router", lambda: Checking())
+    _, ops, _ = ca._generate_split("build a shop")
+    assert {o["file"] for o in ops} == set(CONTENT)
+
+
+def test_completed_context_does_not_pass_partial_source():
+    text = ca._completed_files_context([
+        {"file": "large.js", "content": "a" * 500},
+        {"file": "small.js", "content": "module.exports = { auth };"},
+    ], limit=200)
+    assert "large.js" not in text
+    assert "module.exports = { auth };" in text
+
+
+def test_fresh_fullstack_manifest_cannot_omit_the_deployment_root():
+    files = [{"file": p, "purpose": ""} for p in ("backend/package.json", "frontend/package.json", "README.md")]
+    completed = ca._complete_fullstack_manifest(files)
+    assert {f["file"] for f in completed} >= {"package.json", "Dockerfile", ".dockerignore", "README.md"}
+    assert len([f for f in completed if f["file"] == "README.md"]) == 1
+    assert ca._complete_fullstack_manifest([files[0]]) == [files[0]]
+
+
 def test_대상_폴더가_목록과_응답에_붙어_와도_걸러지지_않는다(monkeypatch, tmp_path):
     """모델이 목록·묶음 응답 모두에 대상 폴더(web/)를 앞에 붙여 돌려주는 경우 — 예전엔 전부 걸러져 실패했다."""
     prefixed = {"summary": "쇼핑몰", "contracts": "", "files": [{"file": f"web/{f['file']}", "purpose": f["purpose"]} for f in MANIFEST["files"]]}

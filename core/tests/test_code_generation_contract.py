@@ -16,6 +16,16 @@ from llm import breaker
 VALID = {"summary":"완료", "ops":[{"action":"create","file":"app.js","content":"console.log('ok')"}]}
 
 
+def test_bedrock_literal_parameter_envelope_still_validates_the_entire_proposal():
+    _, ops = parse_code_output(json.dumps({"$PARAMETER_NAME": VALID}))
+    assert ops[0]["file"] == "app.js"
+    bad = {"summary": "x", "ops": [{"action": "edit", "file": "../outside.js", "content": "x"}]}
+    with pytest.raises(CodeOutputError):
+        parse_code_output(json.dumps({"$PARAMETER_NAME": bad}))
+    with pytest.raises(CodeOutputError):
+        parse_code_output(json.dumps({"$PARAMETER_NAME": {"$PARAMETER_NAME": VALID}}))
+
+
 def generate(monkeypatch, tmp_path, responses):
     calls = []
     def call(request, **kwargs):

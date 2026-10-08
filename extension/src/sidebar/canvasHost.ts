@@ -16,7 +16,7 @@ import { activeProjectPath, pickProjectFolder, projectFolders, selectActiveProje
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
 type Target = 'ecs' | 's3' | 'github';
-export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string }
+export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string> }
 interface Plan { id: string; config: CanvasConfig; workspace: string; git: Awaited<ReturnType<typeof gitContext>>; account: string; created: number; targetState: Awaited<ReturnType<ApiClient['getCanvasTarget']>> | null; staticDigest?: string }
 
 export function staticPreview(workspace: string, dir: string) {
@@ -96,6 +96,11 @@ export function validateConfig(raw: Record<string, unknown>): CanvasConfig {
     const config: CanvasConfig = { target: raw.target as Target, image_name: get('image_name'), tag: get('tag'), aws_region: get('aws_region'), ecs_cluster: get('ecs_cluster'), ecs_service: get('ecs_service'), task_family: get('task_family'), container_port: Number(raw.container_port ?? 8000), cpu: get('cpu','256'), memory: get('memory','512'), environment: get('environment','staging'), dir: get('dir') };
     if (config.target !== 'github' && !/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(config.aws_region)) throw new Error('유효한 AWS 리전을 입력하세요.');
     if (config.target === 'ecs') {
+        for (const key of ['env_vars', 'secret_refs'] as const) {
+            const value = raw[key] ?? {};
+            if (!value || typeof value !== 'object' || Array.isArray(value) || Object.values(value).some(item => typeof item !== 'string')) throw new Error('앱 실행 설정은 문자열 JSON 객체여야 합니다.');
+            config[key] = { ...value as Record<string,string> };
+        }
         for (const key of ['ecs_cluster','ecs_service','task_family'] as const) if (!/^[a-zA-Z0-9_-]{1,255}$/.test(config[key])) throw new Error(`${key}: 리소스 이름을 입력하세요.`);
         if (!config.image_name || !/^[\w][\w.-]{0,127}$/.test(config.tag)) throw new Error('이미지 이름과 고정 태그를 입력하세요.');
         if (config.tag.toLowerCase() === 'latest') throw new Error('재현 가능한 배포를 위해 latest 대신 고정 태그를 입력하세요.');

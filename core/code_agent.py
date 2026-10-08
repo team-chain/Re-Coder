@@ -971,6 +971,11 @@ def _build_code_prompt(
 - Vite 프로젝트에서는 JSX 가 든 파일을 .jsx/.tsx 로 만들고, 브라우저 코드의 환경변수는 import.meta.env.VITE_* 만 씁니다(process.env 금지).
 - PostgreSQL(pg)의 NUMERIC/DECIMAL 값은 문자열로 옵니다 — 서버에서 숫자로 바꾸거나 pg.types.setTypeParser(1700, parseFloat) 를 설정하세요.
 - 파일을 나눠 만들 때 서로 부르는 함수·컴포넌트 이름과 export 방식을 정확히 맞추고, import 하는 파일(CSS 포함)은 반드시 함께 만듭니다.
+- 회원가입/로그인이 있으면 실제 입력 화면·라우트·인증 상태 공급자·로그아웃까지 연결합니다. 권한은 서버에서 확인하고 관리자 기본 계정/비밀번호를 만들지 않습니다. 비밀 환경변수가 없으면 시작을 거절하며 기본 JWT 비밀값을 두지 않습니다. 로그인 시도 횟수 제한, 비밀번호 길이 검증, 일반화된 오류 응답을 구현합니다.
+- 쇼핑몰/결제에서는 가격·합계·사용자 ID·권한을 클라이언트 입력으로 신뢰하지 않습니다. 서버 DB 가격으로 최소 화폐 단위 정수 금액을 계산하고, 수량은 양의 정수로 검증합니다. 주문과 재고 예약은 DB 트랜잭션/행 잠금으로 묶어 동시 주문의 초과 판매를 막고, 주문 재시도에는 사용자별 idempotency key를 사용합니다.
+- 결제 완료는 서명 검증된 웹훅에서만 처리합니다. raw body 라우트를 JSON 파서보다 먼저 등록하고, 주문 소유자·저장된 payment ID·통화·금액을 대조하며 이벤트 ID를 DB에 UNIQUE로 저장해 중복 처리를 막습니다. 사용자가 paid/completed 상태를 직접 지정하는 API는 금지합니다. 실패/취소 시 재고는 정확히 한 번 복원합니다. 미결제 주문의 만료·취소 경로도 만듭니다.
+- 결제 테스트는 명시적 테스트 환경에서만 별도 API 호스트/포트를 주입할 수 있게 합니다. 브라우저에서 테스트 성공을 누르는 것만으로 결제를 확정하거나 운영 환경에서 모의 결제를 허용하면 안 됩니다. 실제 결제사 설정이 필요한 부분은 README에 명시합니다.
+- DB 스키마·초기화 명령·필요 환경변수 예시·root 실행/빌드 스크립트·Dockerfile·.dockerignore·README를 포함합니다. 빈 CSS나 가짜 성공 동작으로 기능을 대신하지 않습니다. DB TLS 인증서 검증을 끄지 않습니다. 인증 토큰 저장과 CORS/CSRF 정책을 일관되게 설계합니다.
 - React Router 를 쓰면 페이지 이동은 <Link>/useNavigate 로 합니다(<a href> 는 상태를 잃습니다).
 - 자리표시 이미지는 https://placehold.co/300x200?text=이름 형식을 씁니다(via.placeholder.com·placeimg.com 은 문을 닫아 이미지가 깨집니다).
 
@@ -1835,6 +1840,8 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
             item = issue.to_dict()
             if project:
                 item["message"] = f"[{project}] {item['message']}"
+                if item.get("file"):
+                    item["file"] = prefix + item["file"]
             found.append(item)
     return found
 
@@ -1845,12 +1852,11 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
 # JSON 한 번(8K 토큰)에 담지 못해 두 번 다 잘리고 "요청 범위를 나누라"로 끝났다(실기기).
 # 잘리면 같은 요청을 반복하지 않고 (1) 만들 파일 목록과 파일 사이의 약속(API 경로·이름·
 # 패키지)을 받은 뒤 (2) 그 약속을 공유하며 파일 몇 개씩 따로 생성해 합친다.
-_SPLIT_MAX_FILES = 24
+_SPLIT_MAX_FILES = 36
 #: 생성 결과의 빌드·실행 문제를 AI 에게 고치게 하는 최대 횟수(결정적 자동 교정은 매번 먼저 한다).
 _CONSISTENCY_ROUNDS = 3
 _GENERATION_BUDGET_SECONDS = int(os.environ.get("RECODER_GENERATION_BUDGET_SECONDS", "540"))
 _SPLIT_BATCH = 2
-_SPLIT_PARALLEL = 3
 _MANIFEST_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1866,7 +1872,7 @@ _MANIFEST_SCHEMA = {
             },
         },
     },
-    "required": ["summary", "files"],
+    "required": ["summary", "contracts", "files"],
     "additionalProperties": False,
 }
 
@@ -1888,10 +1894,13 @@ def _split_manifest(prompt: str) -> tuple[dict, list[dict]]:
 [분할 생성 1단계] 이 요청은 모든 파일을 한 번의 응답에 담기에 너무 큽니다. 이번 응답에서는 **파일 내용을 쓰지 말고**
 만들거나 고칠 파일 목록만 아래 JSON 으로 주세요(최대 {_SPLIT_MAX_FILES}개, 실제 실행에 필요한 파일만).
 {{"summary": "무엇을 만드는지 한국어 한 줄",
-  "contracts": "파일들이 서로 맞아야 하는 약속 — API 경로와 요청/응답 모양, 컴포넌트·함수·모듈 이름과 내보내기 방식, 사용할 패키지와 버전, 포트·환경변수(1200자 이내)",
-  "files": [{{"file": "상대경로", "purpose": "이 파일이 하는 일 한 줄"}}]}}"""
+  "contracts": "API 경로/요청/응답/인증 필드, DB 테이블/열/타입, export 이름, 페이지 경로, 통화/금액 단위/주문 상태 전이, 패키지/환경변수 등 파일간 정확한 약속(6000자 이내)",
+  "files": [{{"file": "상대경로", "purpose": "이 파일이 하는 일 한 줄"}}]}}
+파일은 의존성 순서로 나열하세요: root package.json/Dockerfile/.dockerignore/README → 하위 패키지/설정 → DB 스키마/연결/인증 → API → 화면 → 서버 진입점.
+파일 수 상한 때문에 root 실행/배포 파일이나 인증 화면을 누락하지 마세요. 필요하면 페이지를 한 파일에 합치고 CSS는 공통 파일 하나로 만드세요.
+불필요한 파일 분할을 줄이되 로그인·회원가입 화면, DB 초기화, root 빌드/실행, Dockerfile 등 실행에 필요한 파일은 생략하지 마세요."""
     resp = get_router().call(
-        LLMRequest(prompt=manifest_prompt, json_schema=_MANIFEST_SCHEMA, max_tokens=3000, temperature=0.2),
+        LLMRequest(prompt=manifest_prompt, json_schema=_MANIFEST_SCHEMA, max_tokens=6000, temperature=0.2),
         agent="code_agent", operation="generate_code_manifest",
     )
     try:
@@ -1937,10 +1946,24 @@ def _split_batch(prompt: str, manifest: dict, files: list[dict], batch: list[dic
     return [op for op in ops if _norm_op_path(op["file"]) in keys], resp
 
 
-def _generate_split(prompt: str, target_folder: str = "") -> tuple[dict, list[dict], object]:
-    """큰 요청을 파일 목록 → 묶음별 생성으로 나눠 만든다. 파일 하나도 한도를 넘으면 실패."""
-    from concurrent.futures import ThreadPoolExecutor
+def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
+    """A fresh frontend/backend project needs a runnable deployment root."""
+    paths = {f["file"] for f in files}
+    client = next((p for p in ("frontend", "client", "web") if p + "/package.json" in paths), None)
+    server = next((p for p in ("backend", "server", "api") if p + "/package.json" in paths), None)
+    if not client or not server:
+        return files
+    required = {
+        "package.json": f"root build/start/init-db scripts that invoke {client} and {server}; install both projects",
+        "Dockerfile": f"multi-stage build of {client}; non-root {server} runtime serving the built frontend on one port",
+        ".dockerignore": "exclude .env, credentials, node_modules, .git, tests, local artifacts",
+        "README.md": "exact installation, environment, migration, startup, container and payment provider setup instructions",
+    }
+    return files + [{"file": p, "purpose": purpose} for p, purpose in required.items() if p not in paths]
 
+
+def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool = False) -> tuple[dict, list[dict], object]:
+    """큰 요청을 파일 목록 → 묶음별 생성으로 나눠 만든다. 파일 하나도 한도를 넘으면 실패."""
     manifest, files = _split_manifest(prompt)
     #: 목록에도 대상 폴더가 붙어 올 수 있다(web/index.html). 묶음 응답과 같은 기준으로 맞춰야 걸러지지 않는다.
     files = _relative_to_target(files, target_folder)
@@ -1948,32 +1971,37 @@ def _generate_split(prompt: str, target_folder: str = "") -> tuple[dict, list[di
     for f in files:
         dedup.setdefault(_norm_op_path(f["file"]), f)
     files = list(dedup.values())
+    if new_project:
+        files = _complete_fullstack_manifest(files)
     print(f"[code_agent] 분할 생성 | 파일 {len(files)}개 | 묶음 {_SPLIT_BATCH}개씩", flush=True)
     batches = [files[i:i + _SPLIT_BATCH] for i in range(0, len(files), _SPLIT_BATCH)]
     last_resp = None
 
-    def run(batch: list[dict]) -> tuple[list[dict], object]:
+    def run(batch_prompt: str, batch: list[dict]) -> tuple[list[dict], object]:
         try:
-            return _split_batch(prompt, manifest, files, batch, target_folder)
+            return _split_batch(batch_prompt, manifest, files, batch, target_folder)
         except (LLMError, CodeOutputError) as exc:
             if len(batch) == 1 or not (_is_truncation(exc) or isinstance(exc, CodeOutputError)):
                 raise
             # 두 파일이 합쳐 한도를 넘었다 — 하나씩 다시.
             out, resp = [], None
             for single in batch:
-                ops, resp = _split_batch(prompt, manifest, files, [single], target_folder)
+                ops, resp = _split_batch(batch_prompt, manifest, files, [single], target_folder)
                 out.extend(ops)
             return out, resp
 
     ops_out: list[dict] = []
-    with ThreadPoolExecutor(max_workers=_SPLIT_PARALLEL) as pool:
-        for ops, resp in pool.map(run, batches):
-            ops_out.extend(ops)
-            last_resp = resp or last_resp
+    for batch in batches:
+        # Parallel batches invented incompatible middleware exports and DB fields.
+        # Later batches must see the actual earlier implementation, not only prose.
+        batch_prompt = prompt + _completed_files_context(ops_out)
+        ops, resp = run(batch_prompt, batch)
+        ops_out.extend(ops)
+        last_resp = resp or last_resp
     got = {_norm_op_path(op["file"]) for op in ops_out}
     missing = [f for f in files if _norm_op_path(f["file"]) not in got]
     for single in missing:
-        ops, resp = _split_batch(prompt, manifest, files, [single], target_folder)
+        ops, resp = _split_batch(prompt + _completed_files_context(ops_out), manifest, files, [single], target_folder)
         ops_out.extend(ops)
         last_resp = resp or last_resp
     got = {_norm_op_path(op["file"]) for op in ops_out}
@@ -1983,6 +2011,19 @@ def _generate_split(prompt: str, target_folder: str = "") -> tuple[dict, list[di
     order = {_norm_op_path(f["file"]): i for i, f in enumerate(files)}
     ops_out.sort(key=lambda op: order.get(_norm_op_path(op["file"]), len(order)))
     return {"summary": str(manifest.get("summary") or "")}, ops_out, last_resp
+
+
+def _completed_files_context(ops: list[dict], limit: int = 64_000) -> str:
+    """Bound source context; omit whole files instead of presenting truncated code."""
+    blocks, used = [], 0
+    for op in ops:
+        if not op.get("content") or str(op.get("file", "")).endswith((".css", ".md")):
+            continue
+        block = f"\n[이미 생성한 파일 — 이 API/스키마/export를 그대로 사용] {op['file']}\n```\n{op['content']}\n```\n"
+        if used + len(block) <= limit:
+            blocks.append(block)
+            used += len(block)
+    return "".join(blocks)
 
 
 def _merge_ops(base: list[dict], updates: list[dict]) -> list[dict]:
@@ -2103,7 +2144,7 @@ def generate_code(
                 #: (stop_reason 을 안 주는 제공자·게이트웨이 포함). 실패로 끝내지 않고 나눠서 만든다.
                 print("[code_agent] 응답 JSON 이 두 번 다 완성되지 않아 분할 생성으로 전환", flush=True)
                 try:
-                    data, ops_out, llm_resp = _generate_split(prompt, target_folder)
+                    data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
                 except (LLMError, CodeOutputError, RuntimeError) as split_exc:
                     reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
                     split_mode_failed = True
@@ -2118,7 +2159,7 @@ def generate_code(
                 #: 같은 요청을 다시 보내도 또 잘린다 — 파일 목록을 받아 나눠서 만든다.
                 print("[code_agent] 응답이 길이 한도에서 잘려 분할 생성으로 전환", flush=True)
                 try:
-                    data, ops_out, llm_resp = _generate_split(prompt, target_folder)
+                    data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
                 except (LLMError, CodeOutputError, RuntimeError) as split_exc:
                     reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
                     split_mode_failed = True

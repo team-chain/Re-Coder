@@ -52,6 +52,10 @@ def parse_code_output(raw: str) -> tuple[dict, list[dict]]:
             data, _ = json.JSONDecoder().raw_decode(text[start:]) if start >= 0 else (None, 0)
         except json.JSONDecodeError:
             raise CodeOutputError("파일 변경 JSON이 완성되지 않았거나 형식이 올바르지 않습니다.") from None
+    # Some Bedrock tool-use responses wrap the complete object in this literal
+    # parameter key. Unwrap exactly once, then apply every ordinary validation.
+    if isinstance(data, dict) and set(data) == {"$PARAMETER_NAME"} and isinstance(data["$PARAMETER_NAME"], dict):
+        data = data["$PARAMETER_NAME"]
     # Older providers wrapped unparsed text in a successful-looking object.
     if isinstance(data, dict) and len(data) == 1 and ("raw_response" in data or "text" in data):
         wrapped = data.get("raw_response", data.get("text"))

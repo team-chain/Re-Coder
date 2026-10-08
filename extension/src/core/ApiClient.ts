@@ -1392,6 +1392,8 @@ export class ApiClient {
         cpu?: string;
         memory?: string;
         task_family?: string;
+        env_vars?: Record<string, string>;
+        secret_refs?: Record<string, string>;
         environment?: string;
         branch?: string;
         skip_sbom?: boolean;

@@ -155,3 +155,37 @@ def test_no_services_means_no_change(tmp_path, monkeypatch):
     monkeypatch.setattr(local_services, "_HOME", tmp_path)
     assert local_services.ensure("plain", run=FakeDocker()) == []
     assert local_services.network_args("plain", run=FakeDocker()) == []
+
+
+def test_root_vite_api_helper_is_checked_and_fixed(tmp_path):
+    files = {
+        "package.json": json.dumps({"scripts": {"build": "vite build"}, "devDependencies": {"vite": "^6"}}),
+        "src/api/client.js": "export const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';",
+    }
+    _write(tmp_path, files)
+    assert "NODE_CLIENT_HARDCODED_LOCALHOST" in codes(tmp_path)
+    assert br.apply_fix(tmp_path, "NODE_CLIENT_HARDCODED_LOCALHOST")["applied"]
+    assert "localhost" not in (tmp_path / "src/api/client.js").read_text()
+
+
+def test_consistency_issue_paths_include_subproject(tmp_path):
+    ops = [{"action": "create", "file": "frontend/" + rel, "content": content} for rel, content in {
+        "package.json": json.dumps({"scripts": {"build": "vite build"}, "devDependencies": {"vite": "^6"}}),
+        "src/api/client.js": "export const API = 'http://localhost:3001';",
+    }.items()]
+    issue = next(i for i in ca._consistency_issues(tmp_path, "", ops) if i["code"] == "NODE_CLIENT_HARDCODED_LOCALHOST")
+    assert issue["file"] == "frontend/src/api/client.js"
+
+
+def test_signed_webhook_must_mount_before_global_json_parser(tmp_path):
+    header = "import express from 'express';\nimport hooks from './hooks.js';\nconst app = express();\n"
+    parser = "app.use(express.json({ limit: '100kb' }));\n"
+    mount = "app.use('/api/webhooks', hooks);\n"
+    _write(tmp_path, {
+        "package.json": json.dumps({"type": "module", "main": "server.js", "dependencies": {"express": "^4"}}),
+        "server.js": header + parser + mount,
+        "hooks.js": "import express from 'express';\nconst router=express.Router();\nrouter.post('/',express.raw({type:'application/json'}),(q,s)=>stripe.webhooks.constructEvent(q.body,q.headers['stripe-signature'],'secret'));\nexport default router;",
+    })
+    assert "NODE_WEBHOOK_RAW_BODY_ORDER" in codes(tmp_path)
+    (tmp_path / "server.js").write_text(header + mount + parser)
+    assert "NODE_WEBHOOK_RAW_BODY_ORDER" not in codes(tmp_path)

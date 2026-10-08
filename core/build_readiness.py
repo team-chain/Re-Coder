@@ -523,14 +523,15 @@ def _subproject_scripts(scripts: dict, files: "ProjectFiles") -> tuple[list[str]
 
 
 def _frontend_out_dir(files: "ProjectFiles", folder: str) -> Optional[str]:
+    prefix = f"{folder}/" if folder else ""
     try:
-        sub = json.loads(files.read(f"{folder}/package.json") or "")
+        sub = json.loads(files.read(f"{prefix}package.json") or "")
     except ValueError:
         return None
     build = str(((sub or {}).get("scripts") or {}).get("build", "")) if isinstance(sub, dict) else ""
     for pattern, out in _FRONTEND_BUILDS:
         if pattern.search(build):
-            return f"{folder}/{out}"
+            return f"{prefix}{out}"
     return None
 
 
@@ -731,6 +732,24 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             continue
         active = _strip_js_comments(text)
         project = owner(rel)
+        # A mounted raw-body webhook cannot recover bytes consumed by a global
+        # JSON parser. Follow the local import before flagging the route.
+        for parser in re.finditer(r"\b([\w$]+)\.use\(\s*express\.json\(\s*(?:\)|\{[^}]*\})", active):
+            if "verify" in parser.group(0):
+                continue
+            app_name = re.escape(parser.group(1))
+            mounts = re.finditer(rf"\b{app_name}\.use\(\s*['\"][^'\"]+['\"]\s*,\s*([\w$]+)\s*\)", active[parser.end():])
+            for mount in mounts:
+                name = re.escape(mount.group(1))
+                imported = re.search(rf"\bimport\s+{name}\s+from\s*['\"](\.[^'\"]+)['\"]", active)
+                target = _resolve_local(files, rel, imported.group(1)) if imported else None
+                body = _strip_js_comments(files.read(target) or "") if target else ""
+                if "express.raw(" in body and "constructEvent(" in body:
+                    result.issues.append(ReadinessIssue(
+                        "NODE_WEBHOOK_RAW_BODY_ORDER", ERROR,
+                        f"{rel}: JSON 파서 뒤에 서명 웹훅을 등록해 원본 body가 사라집니다.",
+                        "웹훅 라우트를 express.json()보다 먼저 등록하세요.", rel, False))
+                    break
         # 1) 없는 파일을 불러온다
         for spec in set(_RELATIVE_SPEC.findall(active)) | set(_BARE_IMPORT.findall(active)):
             if _resolve_local(files, rel, spec) is None:
@@ -851,7 +870,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
         if not rel.endswith((".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte")) or "/node_modules/" in f"/{rel}":
             continue
         project = owner(rel)
-        if not project or not _frontend_out_dir(files, project):
+        if not _frontend_out_dir(files, project) or _is_server_file(files.read(rel) or ""):
             continue  # 프런트엔드(빌드 도구가 있는 하위 프로젝트)만 본다
         if re.search(r"(^|/)[\w.-]*\.config\.[cm]?[jt]s$|(^|/)(?:cypress|e2e|tests?|__tests__|mocks?)/|setupProxy\.[jt]s$", rel):
             continue  # 개발 프록시·테스트 설정의 localhost 는 정상이다

@@ -1,0 +1,393 @@
+{
+  "date": "2026-10-08",
+  "version": "1.1.30",
+  "base_develop": "6699ccf",
+  "branch": "feat/document-grounded-repair",
+  "production_ready": false,
+  "verdict": "Reviewed fixture and deployment engine pass the recorded checks. Fresh one-request generation is not production ready.",
+  "product_regression": {
+    "core_linux": {
+      "passed": 2382,
+      "skipped": 3
+    },
+    "extension_linux": {
+      "passed": 504,
+      "failed": 0
+    },
+    "lint": "passed",
+    "webview_production_build": "passed",
+    "package_runtime_files": 66,
+    "skipped_test_followups": {
+      "opa_real_rego": "12/12",
+      "hadolint_rendered_templates": "passed",
+      "monorepo_real_docker": "passed"
+    }
+  },
+  "reviewed_fixture": {
+    "provenance": "Actual generated app, then model repair and manual corrections; NOT untouched generator output.",
+    "local_acceptance": {
+      "passed": 36,
+      "failed": 0
+    },
+    "fresh_disposable_compose_acceptance": {
+      "passed": 36,
+      "failed": 0
+    },
+    "browser": {
+      "browser": "Chrome via CUA",
+      "base": "http://127.0.0.1:14300",
+      "fixture": "generated + model repair + reviewed corrections",
+      "observed_passes": [
+        "registration and logged-in header",
+        "login",
+        "product search (after fix)",
+        "add to cart",
+        "quantity 1 -> 2 and 99.99 -> 199.98",
+        "missing provider configuration shows safe notice",
+        "paid order list after mock HTTP + signed webhook",
+        "paid order detail and item prices",
+        "admin product creation",
+        "admin stock 7 -> 12",
+        "390px mobile admin view: document width 390, table scroll contained"
+      ],
+      "fixed_failures": [
+        "same-origin module fetch blocked by CORS",
+        "Search submit erased fetched results",
+        "mobile admin document overflow 709px at 390px viewport"
+      ],
+      "not_verified": [
+        "Stripe hosted card widget and actual provider API",
+        "refund and fulfillment UI",
+        "full device/browser accessibility matrix"
+      ],
+      "screenshots": "Captured during CUA verification; no persistent screenshot file exported"
+    },
+    "payment_provider": "mock HTTP server; real Stripe SDK request and HMAC verification code"
+  },
+  "real_aws": {
+    "deployment_endpoint": "/api/ecs/deploy",
+    "pipeline_status": "succeeded",
+    "pipeline_steps": [
+      {
+        "key": "preflight",
+        "label": "사전 점검",
+        "status": "done",
+        "started_at": "2026-10-08T08:35:40.378228Z",
+        "finished_at": "2026-10-08T08:35:41.783320Z"
+      },
+      {
+        "key": "provisioning",
+        "label": "인프라 확인·준비",
+        "status": "done",
+        "started_at": "2026-10-08T08:35:41.783320Z",
+        "finished_at": "2026-10-08T08:35:42.613825Z"
+      },
+      {
+        "key": "source_scan",
+        "label": "소스·Dockerfile 검사",
+        "status": "done",
+        "started_at": "2026-10-08T08:35:42.613825Z",
+        "finished_at": "2026-10-08T08:35:43.322779Z"
+      },
+      {
+        "key": "building",
+        "label": "이미지 빌드",
+        "status": "done",
+        "started_at": "2026-10-08T08:35:43.322779Z",
+        "finished_at": "2026-10-08T08:36:05.166439Z"
+      },
+      {
+        "key": "ecr_push",
+        "label": "ECR 업로드",
+        "status": "done",
+        "started_at": "2026-10-08T08:36:05.166439Z",
+        "finished_at": "2026-10-08T08:36:07.276174Z"
+      },
+      {
+        "key": "image_scan",
+        "label": "이미지 취약점 검사",
+        "status": "done",
+        "started_at": "2026-10-08T08:36:07.276174Z",
+        "finished_at": "2026-10-08T08:36:08.490806Z"
+      },
+      {
+        "key": "sbom",
+        "label": "SBOM 생성",
+        "status": "done",
+        "started_at": "2026-10-08T08:36:08.490806Z",
+        "finished_at": "2026-10-08T08:36:12.536633Z"
+      },
+      {
+        "key": "task_def",
+        "label": "태스크 정의 등록",
+        "status": "done",
+        "started_at": "2026-10-08T08:36:12.536633Z",
+        "finished_at": "2026-10-08T08:36:12.822170Z"
+      },
+      {
+        "key": "svc_update",
+        "label": "서비스 갱신",
+        "status": "done",
+        "started_at": "2026-10-08T08:36:12.822170Z",
+        "finished_at": "2026-10-08T08:36:13.593790Z"
+      },
+      {
+        "key": "stabilizing",
+        "label": "서비스 안정화·헬스체크",
+        "status": "done",
+        "started_at": "2026-10-08T08:36:13.593790Z",
+        "finished_at": "2026-10-08T08:39:00.838371Z"
+      },
+      {
+        "key": "url_check",
+        "label": "공개 주소 확인",
+        "status": "done",
+        "started_at": "2026-10-08T08:39:00.838371Z",
+        "finished_at": "2026-10-08T08:39:01.451141Z"
+      }
+    ],
+    "sbom_package_count": 310,
+    "commerce": {
+      "real_aws": true,
+      "mock_payment_provider": true,
+      "transport": "HTTP restricted to runner IP; RDS TLS verified",
+      "results": [
+        {
+          "name": "real public HTTP health and RDS connectivity",
+          "passed": true
+        },
+        {
+          "name": "SPA route",
+          "passed": true
+        },
+        {
+          "name": "same-origin module request allowed",
+          "passed": true
+        },
+        {
+          "name": "untrusted CORS origin denied",
+          "passed": true
+        },
+        {
+          "name": "anonymous orders denied",
+          "passed": true
+        },
+        {
+          "name": "registration",
+          "passed": true
+        },
+        {
+          "name": "registration cannot grant admin",
+          "passed": true
+        },
+        {
+          "name": "login",
+          "passed": true
+        },
+        {
+          "name": "search",
+          "passed": true
+        },
+        {
+          "name": "cart add",
+          "passed": true
+        },
+        {
+          "name": "order creation through Stripe mock HTTP",
+          "passed": true
+        },
+        {
+          "name": "server price enforcement",
+          "passed": true
+        },
+        {
+          "name": "stock reserved in RDS",
+          "passed": true
+        },
+        {
+          "name": "idempotent order replay",
+          "passed": true
+        },
+        {
+          "name": "unsigned payment event rejected",
+          "passed": true
+        },
+        {
+          "name": "incorrect payment amount rejected",
+          "passed": true
+        },
+        {
+          "name": "concurrent duplicate signed webhook",
+          "passed": true
+        },
+        {
+          "name": "paid state persisted",
+          "passed": true
+        },
+        {
+          "name": "late cancel cannot change paid",
+          "passed": true
+        },
+        {
+          "name": "secrets provided as ARN references",
+          "passed": true
+        },
+        {
+          "name": "no plaintext secrets in task definition",
+          "passed": true
+        },
+        {
+          "name": "application has no AWS task role",
+          "passed": true
+        },
+        {
+          "name": "Fargate health check configured",
+          "passed": true
+        },
+        {
+          "name": "database encrypted and private",
+          "passed": true
+        },
+        {
+          "name": "verified TLS to RDS configured",
+          "passed": true
+        },
+        {
+          "name": "scan and SBOM required and completed",
+          "passed": true
+        }
+      ],
+      "passed": 26,
+      "failed": 0
+    },
+    "redeploy_persistence": {
+      "checks": {
+        "new task definition": true,
+        "task replaced": true,
+        "login persisted": true,
+        "paid order persisted": true,
+        "stock persisted": true,
+        "seed not duplicated": true
+      },
+      "passed": 6,
+      "failed": 0
+    },
+    "injected_failure_and_rollback": {
+      "injected_failure_detected": true,
+      "failed_health_checks": 3,
+      "proposal_created": true,
+      "previous_service_preserved": true,
+      "rollback_http_status": 200,
+      "rollback_request_accepted": true,
+      "previous_revision_healthy": true,
+      "health_ok": true,
+      "paid_order_preserved": true,
+      "rollout_state": "COMPLETED"
+    },
+    "cleanup": {
+      "all_owned_resources_removed": true,
+      "checks": {
+        "rds_deleted": true,
+        "db_subnet_group_deleted": true,
+        "ecs_cluster_inactive": true,
+        "ecs_no_running_tasks": true,
+        "ecs_no_active_task_definitions": true,
+        "ecr_repository_deleted": true,
+        "log_group_deleted": true,
+        "iam_role_deleted": true,
+        "app_sg_deleted": true,
+        "db_sg_deleted": true,
+        "secret_1_deleted": true,
+        "secret_2_deleted": true,
+        "secret_3_deleted": true,
+        "secret_4_deleted": true
+      },
+      "inactive_task_definition_metadata_retained": true,
+      "actual_aws_invoice_usd": null
+    },
+    "budget_usd": 10,
+    "planned_upper_usd": 4,
+    "actual_invoice_usd": null,
+    "limits": [
+      "Temporary staging, restricted HTTP ingress",
+      "No production domain/HTTPS, load test or disaster recovery",
+      "RDS backups disabled only for disposable test"
+    ]
+  },
+  "fresh_generation": {
+    "model": "Amazon Bedrock Claude Haiku 4.5",
+    "file_operations_applied": 46,
+    "passed": false,
+    "preflight_blocked": true,
+    "reproduced_failures": [
+      "server/package.json: npm EJSONPARSE",
+      "client/package.json: nonexistent @stripe/js, npm 404",
+      "Dockerfile: COPY client/public references missing directory"
+    ],
+    "other_detected_issues": "Missing local imports and static frontend path inconsistency",
+    "interpretation": "One fresh final run is a counterexample to reliable one-request operation, not a statistical success-rate estimate."
+  },
+  "security": {
+    "reviewed_app_image": {
+      "critical": 0,
+      "high": 0,
+      "secrets": 0,
+      "scanner_errors": [],
+      "hadolint_medium_advisories": 2
+    },
+    "negative_fixture": {
+      "blocked": true,
+      "secret_count": 1,
+      "hadolint_error_count": 1,
+      "tool_errors": [],
+      "titles": [
+        "DL1000",
+        "secret_leak:aws_access_key_id"
+      ]
+    },
+    "extension_runtime_dependencies": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "extension_including_dev_dependencies": {
+      "info": 0,
+      "low": 0,
+      "moderate": 2,
+      "high": 8,
+      "critical": 0,
+      "total": 10
+    },
+    "python_environment": "No known vulnerabilities in audited validation venv after pip update; not a locked production-environment audit.",
+    "coverage_limits": "Known dependency vulnerabilities and specified adversarial cases; not a complete penetration-test certification."
+  },
+  "model_budget": {
+    "provider": "Amazon Bedrock / Anthropic Claude",
+    "limit_usd": 30,
+    "reserved_calls_total": 622,
+    "estimated_from_measured_tokens_usd": 8.286219,
+    "worst_case_reserved_usd": 8.286219,
+    "historical_experiments_usd": 5.491284,
+    "this_validation_usd": 2.794935,
+    "actual_invoice": "Not reconciled with provider invoice; not a ChatGPT subscription charge."
+  },
+  "not_verified": [
+    "Actual payment provider API/card widget/refunds/settlement",
+    "Shipping and real order notification integration",
+    "Production HTTPS/load/backup recovery",
+    "Full browser/device/accessibility matrix"
+  ],
+  "local_cleanup": {
+    "docker_test_containers_and_networks_removed": true,
+    "remaining_server_ports": [
+      13002,
+      13003,
+      13004,
+      14173
+    ],
+    "reason": "Automatic approval review rejected Ctrl-C; required sandbox_approval is disabled."
+  }
+}

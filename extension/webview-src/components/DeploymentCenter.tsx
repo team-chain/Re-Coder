@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState, useReducer } from "rea
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { AwsConnection } from "./AwsConnection";
+import { EcsRuntimeEnvironment, parseRuntimeEnvironment } from "./EcsRuntimeEnvironment";
 import { EcsExecutionRole } from "./EcsExecutionRole";
 import { EcsDeploymentProgress, EcsProgressStatus, ecsProgressReducer, initialEcsProgress, ecsProgressBusy } from "./EcsDeploymentProgress";
 
@@ -450,6 +451,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   const [resolvingRollback, setResolvingRollback] = useState(false);
   const [ecs, setEcs] = useState({ image_name: "recoder-app", tag: "latest", aws_region: "", ecr_registry: "", ecs_cluster: "", ecs_service: "", task_family: "recoder-task", container_port: "8000", cpu: "256", memory: "512", environment: "staging" });
   //: 정책 게이트 거절. 배너(message) 와 따로 두는 이유 — 사유·수정 방법을 카드로 남겨야 한다.
+  const [runtimeDraft, setRuntimeDraft] = useState({ environment: "", secrets: "" });
   const [policyDenial, setPolicyDenial] = useState<PolicyDenial | null>(null);
 
   const runPreflight = useCallback(() => {
@@ -635,10 +637,13 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   };
   const startEcsDeploy = () => {
     if (checkingEcsPermissions || ecsBusy) return;
+    let runtime;
+    try { runtime = parseRuntimeEnvironment(runtimeDraft); }
+    catch (err) { setMessage(String(err)); return; }
     setPolicyDenial(null);
     setCheckingEcsPermissions(true);
     setMessage("입력한 ECS 리전과 대상 리소스의 권한을 확인 중…");
-    pendingEcsDeploymentRef.current = { ...ecs, container_port: Number(ecs.container_port) };
+    pendingEcsDeploymentRef.current = { ...ecs, ...runtime, container_port: Number(ecs.container_port) };
     postMessage("aws.permissions.check", {
       deploymentContext: {
         // repo는 서버가 ECSAgent.ecr_repo_name()과 같은 규칙(빈 값이면
@@ -835,7 +840,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
               {ECS_ENVIRONMENTS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
             </select>
             <div style={{ marginTop: 4, fontSize: 10.5, lineHeight: 1.45, color: "var(--vscode-descriptionForeground, #888)" }}>정책 게이트가 환경·브랜치 규칙을 검사합니다. 브랜치는 열려 있는 작업 폴더의 git 에서 자동 감지합니다.</div>
-          </label></div><button disabled={checkingEcsPermissions || ecsBusy} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions || ecsBusy ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : ecsBusy ? "배포 진행 중…" : "ECS 배포 실행"}</button>
+          </label></div><EcsRuntimeEnvironment value={runtimeDraft} onChange={setRuntimeDraft} disabled={checkingEcsPermissions || ecsBusy} /><button disabled={checkingEcsPermissions || ecsBusy} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions || ecsBusy ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : ecsBusy ? "배포 진행 중…" : "ECS 배포 실행"}</button>
         <EcsExecutionRole key={ecs.aws_region} region={ecs.aws_region} disabled={!awsReady || checkingEcsPermissions || ecsBusy} />
         <EcsDeploymentProgress state={ecsProgress} />
         {policyDenial && <PolicyDenialCard denial={policyDenial} environment={ecs.environment} onDismiss={() => setPolicyDenial(null)} />}

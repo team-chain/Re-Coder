@@ -122,6 +122,18 @@ test('prepare never deploys; explicit approval executes once through the existin
  // 승인 카드에 보인 이미지 이름이 ECR 저장소 이름으로 전달된다(서비스 이름이 아니라).
  assert.equal(s.executions[0].payload.repo_name,'app');
 });
+test('runtime secret references are reviewed and frozen through approval to execution',async()=>{
+ const s=setup(),arn='arn:aws:secretsmanager:us-east-1:123456789012:secret:shop-db-ABCDEF';
+ const input={...config,env_vars:{NODE_ENV:'production'},secret_refs:{DATABASE_URL:arn}};
+ await s.send('canvas.prepare',{config:input});
+ const plan=s.plan();assert.equal(plan.config.secret_refs.DATABASE_URL,arn);
+ const html=renderToStaticMarkup(React.createElement(ApprovalCard,{plan,onApprove(){},onCancel(){},onFix(){}}));
+ assert.ok(html.includes(arn));assert.ok(html.includes('NODE_ENV'));
+ input.secret_refs.DATABASE_URL='changed-after-preview';input.env_vars.NODE_ENV='changed';
+ await s.send('canvas.execute',{planId:plan.id,approved:true});
+ assert.equal(s.executions[0].payload.secret_refs.DATABASE_URL,arn);
+ assert.equal(s.executions[0].payload.env_vars.NODE_ENV,'production');
+});
 test('only boolean approval is accepted and concurrent requests consume a plan once',async()=>{
  const s=setup();await s.send('canvas.prepare',{config});const id=s.plan().id;
  for(const approved of [undefined,false,'false','true',1,{}])await s.send('canvas.execute',{planId:id,approved});

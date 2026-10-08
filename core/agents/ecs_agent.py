@@ -1596,6 +1596,10 @@ class ECSAgent:
         # 컨테이너가 로그를 못 남기고 태스크 시작 자체가 실패한다.
         # 파생값을 원본과 같은 곳에서 계산해 어긋날 여지를 없앤다.
         for container in rendered.get("containerDefinitions", []):
+            if container.get("name") == req.container_name and req.secret_refs:
+                container["secrets"] = [
+                    {"name": name, "valueFrom": arn} for name, arn in req.secret_refs.items()
+                ]
             options = container.get("logConfiguration", {}).get("options")
             if isinstance(options, dict):
                 options["awslogs-group"] = self.log_group_name(req)
