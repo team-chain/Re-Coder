@@ -16,7 +16,7 @@ import { activeProjectPath, pickProjectFolder, projectFolders, selectActiveProje
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
 type Target = 'ecs' | 's3' | 'github';
-export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string> }
+export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[] }
 interface Plan { id: string; config: CanvasConfig; workspace: string; git: Awaited<ReturnType<typeof gitContext>>; account: string; created: number; targetState: Awaited<ReturnType<ApiClient['getCanvasTarget']>> | null; staticDigest?: string }
 
 export function staticPreview(workspace: string, dir: string) {
@@ -96,6 +96,19 @@ export function validateConfig(raw: Record<string, unknown>): CanvasConfig {
     const config: CanvasConfig = { target: raw.target as Target, image_name: get('image_name'), tag: get('tag'), aws_region: get('aws_region'), ecs_cluster: get('ecs_cluster'), ecs_service: get('ecs_service'), task_family: get('task_family'), container_port: Number(raw.container_port ?? 8000), cpu: get('cpu','256'), memory: get('memory','512'), environment: get('environment','staging'), dir: get('dir') };
     if (config.target !== 'github' && !/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(config.aws_region)) throw new Error('유효한 AWS 리전을 입력하세요.');
     if (config.target === 'ecs') {
+        for (const key of ['target_group_arn', 'cloudfront_domain'] as const) {
+            if (raw[key]) config[key] = String(raw[key]).trim();
+        }
+        for (const key of ['subnet_ids', 'security_group_ids'] as const) {
+            if (raw[key] !== undefined) {
+                if (!Array.isArray(raw[key]) || !(raw[key] as unknown[]).every(v => typeof v === 'string')) throw new Error('네트워크 ID는 문자열 배열이어야 합니다.');
+                config[key] = [...raw[key] as string[]];
+            }
+        }
+        if (raw.assign_public_ip !== undefined) {
+            if (typeof raw.assign_public_ip !== 'boolean') throw new Error('공인 IP 설정은 true/false여야 합니다.');
+            config.assign_public_ip = raw.assign_public_ip;
+        }
         for (const key of ['env_vars', 'secret_refs'] as const) {
             const value = raw[key] ?? {};
             if (!value || typeof value !== 'object' || Array.isArray(value) || Object.values(value).some(item => typeof item !== 'string')) throw new Error('앱 실행 설정은 문자열 JSON 객체여야 합니다.');

@@ -17,7 +17,8 @@ interface CodeOp {
   secret_warnings?: SecretWarning[];
   removal_check?: RemovalCheck;
 }
-interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; projectRoot?: string; }
+interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; projectRoot?: string;
+  verification?: {status: string; passed: boolean; output?: string}; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
 //: 확정된 결정 하나. **`impact` 를 반드시 함께 보낸다.**
@@ -462,6 +463,13 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           )}
           {turn.status === "done" && turn.result && (
             <div>
+              <div role="status" data-testid="code-build-verification" style={{fontSize: 11, marginBottom: 8,
+                color: turn.result.verification?.status === "passed" ? "var(--vscode-testing-iconPassed)" : "var(--vscode-editorWarning-foreground)"}}>
+                {turn.result.verification?.status === "passed" ? "컨테이너 빌드 통과 · 실행 환경과 업무 기능 검증은 별도입니다."
+                  : turn.result.verification?.status === "failed" || turn.result.verification?.status === "blocked"
+                    ? "빌드 검증 미통과 · 오류를 해결한 뒤 배포하세요."
+                    : "빌드 미검증 · Docker와 실행 설정을 확인한 뒤 검증하세요."}
+              </div>
               <CodeRemovalSummary checks={turn.result.ops.map((op) => op.removal_check)} />
               {(() => {
                 const ops = turn.result!.ops;

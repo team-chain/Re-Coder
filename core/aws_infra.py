@@ -928,6 +928,9 @@ def ensure_service(
     security_group_ids: Iterable[str],
     desired_count: int = 1,
     assign_public_ip: bool = True,
+    target_group_arn: str = "",
+    container_name: str = "app",
+    container_port: int = 8000,
     circuit_breaker: bool = True,
     circuit_breaker_rollback: bool = False,
     sleep: Callable[[float], None] = time.sleep,
@@ -983,6 +986,14 @@ def ensure_service(
         }
     }
 
+    load_balancer = {}
+    if target_group_arn:
+        load_balancer = {
+            "loadBalancers": [{"targetGroupArn": target_group_arn,
+                               "containerName": container_name, "containerPort": container_port}],
+            "healthCheckGracePeriodSeconds": 60,
+        }
+    # Omit the field when no target is supplied; never detach an existing ALB.
     existing = _describe_service(ecs, cluster, service)
     status = str(existing.get("status") or "") if existing else ""
 
@@ -996,6 +1007,7 @@ def ensure_service(
                 networkConfiguration=network_configuration,
                 deploymentConfiguration=deployment_configuration,
                 forceNewDeployment=True,
+                **load_balancer,
             )
         except Exception as exc:  # noqa: BLE001
             raise InfraError(
@@ -1026,6 +1038,7 @@ def ensure_service(
             launchType="FARGATE",
             networkConfiguration=network_configuration,
             deploymentConfiguration=deployment_configuration,
+            **load_balancer,
         )
 
     try:

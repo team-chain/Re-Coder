@@ -578,6 +578,18 @@ _CODE_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+def scrub_build_source(content: str) -> str:
+    """Redact known credential literals while preserving source syntax and public CAs.
+
+    Log redaction also matches expressions such as `token = response.token` and
+    validation strings. Applying it to executable code corrupts the build.
+    Secret files must be excluded separately by the build-context caller.
+    """
+    for pattern, replacement in _CODE_SECRET_PATTERNS:
+        content = pattern.sub(replacement, content)
+    return content
+
+
 def scrub_code_context(path: str, content: str, secrets: dict | None = None) -> str:
     """코드 생성 프롬프트로 보낼 파일 내용. 비밀 파일이면 본문을 빼고, 아니면 확실한 비밀 값만 가린다.
 

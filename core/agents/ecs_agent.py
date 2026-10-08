@@ -76,6 +76,7 @@ def _probe_http(
     attempts: int = 6,
     interval: float = 5.0,
     timeout: float = 5.0,
+    require_success: bool = False,
     sleep=None,
 ) -> tuple[bool, str]:
     """URL 에 실제로 접속되는지 확인한다. (성공 여부, 설명).
@@ -100,7 +101,7 @@ def _probe_http(
             # 열려 있다. 경로를 잘못 짚었을 뿐이다.
             # 그러나 **5xx 는 앱이 망가진 것**이다. 이걸 성공으로 세면
             # 500 만 뱉는 서비스를 "배포 성공"으로 보고하게 된다.
-            if 500 <= exc.code < 600:
+            if require_success or 500 <= exc.code < 600:
                 last = f"HTTP {exc.code} (서버 오류)"
                 if i < attempts - 1:
                     sleeper(interval)
@@ -1036,6 +1037,10 @@ class ECSAgent:
                 subnet_ids=network.subnet_ids,
                 security_group_ids=req.security_group_ids,
                 desired_count=req.desired_count,
+                assign_public_ip=req.assign_public_ip,
+                target_group_arn=req.target_group_arn,
+                container_name=req.container_name,
+                container_port=req.container_port,
             )
 
         result = await loop.run_in_executor(None, _work)
@@ -1067,6 +1072,8 @@ class ECSAgent:
         loop = asyncio.get_running_loop()
 
         def _work() -> str:
+            if req.cloudfront_domain:
+                return "https://" + req.cloudfront_domain
             return aws_infra.wait_for_public_url(
                 clients["ecs"],
                 clients["ec2"],
@@ -1085,7 +1092,7 @@ class ECSAgent:
             reachable, detail = await loop.run_in_executor(
                 None,
                 lambda: _probe_http(
-                    (rec.service_url or "") + req.health_check_path
+                    (rec.service_url or "") + req.health_check_path, require_success=True
                 ),
             )
             if not reachable:

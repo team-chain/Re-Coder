@@ -1415,6 +1415,9 @@ def generate_plan(
 
     root = _resolve_root(project_root)
     existing = _list_project_files(root)
+    from commerce_starter import matches as commerce_matches, decision as commerce_decision
+    if not existing and commerce_matches(instruction):
+        return {"decisions": [commerce_decision()], "model": "reviewed-commerce-v1", "provider": "starter"}
     print(f"[code_agent] 설계 결정 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
     prompt = _build_plan_prompt(
@@ -1852,9 +1855,9 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
 # JSON 한 번(8K 토큰)에 담지 못해 두 번 다 잘리고 "요청 범위를 나누라"로 끝났다(실기기).
 # 잘리면 같은 요청을 반복하지 않고 (1) 만들 파일 목록과 파일 사이의 약속(API 경로·이름·
 # 패키지)을 받은 뒤 (2) 그 약속을 공유하며 파일 몇 개씩 따로 생성해 합친다.
-_SPLIT_MAX_FILES = 36
+_SPLIT_MAX_FILES = 64
 #: 생성 결과의 빌드·실행 문제를 AI 에게 고치게 하는 최대 횟수(결정적 자동 교정은 매번 먼저 한다).
-_CONSISTENCY_ROUNDS = 3
+_CONSISTENCY_ROUNDS = 6
 _GENERATION_BUDGET_SECONDS = int(os.environ.get("RECODER_GENERATION_BUDGET_SECONDS", "540"))
 _SPLIT_BATCH = 2
 _MANIFEST_SCHEMA = {
@@ -1892,7 +1895,7 @@ def _split_manifest(prompt: str) -> tuple[dict, list[dict]]:
     manifest_prompt = prompt + f"""
 
 [분할 생성 1단계] 이 요청은 모든 파일을 한 번의 응답에 담기에 너무 큽니다. 이번 응답에서는 **파일 내용을 쓰지 말고**
-만들거나 고칠 파일 목록만 아래 JSON 으로 주세요(최대 {_SPLIT_MAX_FILES}개, 실제 실행에 필요한 파일만).
+만들거나 고칠 파일 목록만 아래 JSON 으로 주세요(권장 32개 이내, 최대 {_SPLIT_MAX_FILES}개, 실제 실행에 필요한 파일만).
 {{"summary": "무엇을 만드는지 한국어 한 줄",
   "contracts": "API 경로/요청/응답/인증 필드, DB 테이블/열/타입, export 이름, 페이지 경로, 통화/금액 단위/주문 상태 전이, 패키지/환경변수 등 파일간 정확한 약속(6000자 이내)",
   "files": [{{"file": "상대경로", "purpose": "이 파일이 하는 일 한 줄"}}]}}
@@ -1918,7 +1921,9 @@ def _split_manifest(prompt: str) -> tuple[dict, list[dict]]:
         files.append({"file": path, "purpose": str(item.get("purpose") or "").strip()})
     if not files:
         raise RuntimeError("AI 가 만들 파일 목록을 돌려주지 않았습니다.")
-    return data, files[:_SPLIT_MAX_FILES]
+    if len(files) > _SPLIT_MAX_FILES:
+        raise CodeOutputError("파일 목록이 생성 상한을 넘었습니다. 파일을 임의로 잘라내지 않습니다.")
+    return data, files
 
 
 def _split_batch(prompt: str, manifest: dict, files: list[dict], batch: list[dict], target_folder: str = "") -> tuple[list[dict], object]:
@@ -1937,7 +1942,7 @@ def _split_batch(prompt: str, manifest: dict, files: list[dict], batch: list[dic
 {wanted}"""
     resp = get_router().call(
         LLMRequest(prompt=batch_prompt, json_schema=CODE_OUTPUT_SCHEMA,
-                   max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+                   max_tokens=16384 if len(batch) == 1 else _CODE_AGENT_MAX_TOKENS, temperature=0.2),
         agent="code_agent", operation="generate_code_part",
     )
     _data, ops = parse_code_output(resp.text)
@@ -2040,6 +2045,37 @@ def _merge_ops(base: list[dict], updates: list[dict]) -> list[dict]:
     return merged
 
 
+def _repair_context(ops: list[dict], issues: list[dict], limit: int = 80_000) -> str:
+    """Issue files first, then manifests and dependencies; never cut a file body."""
+    wanted = {_norm_op_path(i.get("file") or "") for i in issues if i.get("file")}
+    messages = "\n".join(i.get("message", "") for i in issues)
+    def priority(op):
+        path = _norm_op_path(op["file"])
+        return (0 if path in wanted or op["file"] in messages else
+                1 if posixpath.basename(path) in {"package.json", "dockerfile", "tsconfig.json", "schema.sql"} else
+                3 if path.endswith((".css", ".md")) else 2)
+    blocks, used = [], 0
+    for op in sorted(ops, key=priority):
+        block = f"\n[현재 파일] {op['file']}\n```\n{op['content']}\n```\n"
+        if used + len(block) <= limit:
+            blocks.append(block)
+            used += len(block)
+    return "".join(blocks)
+
+
+def _issue_weight(issues: list[dict]) -> int:
+    # A broken manifest hides many downstream errors. Repairing it is progress
+    # even when reading the now-valid manifest reveals more missing dependencies.
+    keys = {(i['code'], i.get('file', '')) for i in issues if i['severity'] == 'error'}
+    return sum(100 if code == 'NODE_PACKAGE_JSON_INVALID' else 1 for code, _ in keys)
+
+
+def _verify_generated_build(root: Path, target_folder: str, ops: list[dict]) -> dict:
+    from generated_validation import verify_proposal
+    base = (root / target_folder).resolve() if target_folder else root.resolve()
+    return verify_proposal(base, ops)
+
+
 def generate_code(
     instruction: str,
     session_id: str = "",
@@ -2115,70 +2151,81 @@ def generate_code(
     # Request a native schema instead of relying only on prose instructions.
     # Reject incomplete batches as a whole, then give the model one bounded
     # correction attempt. Neither attempt writes project files.
-    reason = ""
-    split_mode = False
-    split_mode_failed = False
-    for attempt in range(2):
-        attempt_prompt = prompt
-        if attempt:
-            attempt_prompt += (
-                f"\n\n직전 응답의 문제: {reason}\n"
-                "같은 사용자 요청과 승인된 설계를 유지하여 다시 생성하세요. "
-                "summary와 비어 있지 않은 ops 배열을 포함한 JSON 하나를 완성하세요. "
-                "각 op에 file과 전체 content를 반드시 포함하세요. "
-                "기능이나 기존 코드를 생략하지 말고 장황한 설명과 반복 스타일을 줄여 출력 한도 안에서 완결하세요."
-            )
-        try:
-            llm_resp = get_router().call(
-                LLMRequest(prompt=attempt_prompt, json_schema=CODE_OUTPUT_SCHEMA,
-                           max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
-                agent="code_agent", operation="generate_code",
-            )
-            data, ops_out = parse_code_output(llm_resp.text)
-            ops_out = _relative_to_target(ops_out, target_folder)
-            break
-        except CodeOutputError as exc:
-            reason = str(exc)
-            if attempt == 1 and "완성되지 않았거나" in reason:
-                #: 교정 요청까지 완성되지 않은 JSON 이면 거의 언제나 길이 한도에서 잘린 것이다
-                #: (stop_reason 을 안 주는 제공자·게이트웨이 포함). 실패로 끝내지 않고 나눠서 만든다.
-                print("[code_agent] 응답 JSON 이 두 번 다 완성되지 않아 분할 생성으로 전환", flush=True)
-                try:
-                    data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
-                except (LLMError, CodeOutputError, RuntimeError) as split_exc:
-                    reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
-                    split_mode_failed = True
-                    break
-                split_mode = True
-                break
-        except LLMError as exc:
-            if exc.error_type != LLMErrorType.STRUCTURED_OUTPUT:
-                raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
-            reason = "모델 출력이 응답 길이 제한에서 잘렸습니다."
-            if _is_truncation(exc):
-                #: 같은 요청을 다시 보내도 또 잘린다 — 파일 목록을 받아 나눠서 만든다.
-                print("[code_agent] 응답이 길이 한도에서 잘려 분할 생성으로 전환", flush=True)
-                try:
-                    data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
-                except (LLMError, CodeOutputError, RuntimeError) as split_exc:
-                    reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
-                    split_mode_failed = True
-                    break
-                split_mode = True
-                break
-        except Exception as exc:
-            raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
-        print(f"[code_agent] 생성 응답 검증 실패 ({attempt + 1}/2): {reason}", flush=True)
+    from commerce_starter import selected as commerce_selected, operations as commerce_operations
+    foundation = ""
+    if commerce_selected(norm_decisions):
+        if existing or prior_files or context_files:
+            raise ValueError("검증된 쇼핑몰 기반은 빈 프로젝트에서 시작하세요. 기존 파일은 변경하지 않았습니다.")
+        from types import SimpleNamespace
+        foundation = "commerce-v1"
+        ops_out = commerce_operations()
+        data = {"summary": "검증된 쇼핑몰 기반을 준비했습니다. React·Express·PostgreSQL·Stripe 구성의 상품·가입·장바구니·주문·재고·관리자 화면을 포함합니다. 실제 결제 키·상품·HTTPS·사업 정책을 설정한 뒤 업무 검증을 진행하세요."}
+        llm_resp = SimpleNamespace(model_used="reviewed-commerce-v1", provider="starter")
     else:
-        raise RuntimeError(
-            f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도). {reason} "
-            "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
-        )
-    if split_mode_failed:
-        raise RuntimeError(
-            f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도 뒤 나눠서 만들기도 실패). {reason} "
-            "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
-        )
+        reason = ""
+        split_mode = False
+        split_mode_failed = False
+        for attempt in range(2):
+            attempt_prompt = prompt
+            if attempt:
+                attempt_prompt += (
+                    f"\n\n직전 응답의 문제: {reason}\n"
+                    "같은 사용자 요청과 승인된 설계를 유지하여 다시 생성하세요. "
+                    "summary와 비어 있지 않은 ops 배열을 포함한 JSON 하나를 완성하세요. "
+                    "각 op에 file과 전체 content를 반드시 포함하세요. "
+                    "기능이나 기존 코드를 생략하지 말고 장황한 설명과 반복 스타일을 줄여 출력 한도 안에서 완결하세요."
+                )
+            try:
+                llm_resp = get_router().call(
+                    LLMRequest(prompt=attempt_prompt, json_schema=CODE_OUTPUT_SCHEMA,
+                               max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+                    agent="code_agent", operation="generate_code",
+                )
+                data, ops_out = parse_code_output(llm_resp.text)
+                ops_out = _relative_to_target(ops_out, target_folder)
+                break
+            except CodeOutputError as exc:
+                reason = str(exc)
+                if attempt == 1 and "완성되지 않았거나" in reason:
+                    #: 교정 요청까지 완성되지 않은 JSON 이면 거의 언제나 길이 한도에서 잘린 것이다
+                    #: (stop_reason 을 안 주는 제공자·게이트웨이 포함). 실패로 끝내지 않고 나눠서 만든다.
+                    print("[code_agent] 응답 JSON 이 두 번 다 완성되지 않아 분할 생성으로 전환", flush=True)
+                    try:
+                        data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
+                    except (LLMError, CodeOutputError, RuntimeError) as split_exc:
+                        reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
+                        split_mode_failed = True
+                        break
+                    split_mode = True
+                    break
+            except LLMError as exc:
+                if exc.error_type != LLMErrorType.STRUCTURED_OUTPUT:
+                    raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
+                reason = "모델 출력이 응답 길이 제한에서 잘렸습니다."
+                if _is_truncation(exc):
+                    #: 같은 요청을 다시 보내도 또 잘린다 — 파일 목록을 받아 나눠서 만든다.
+                    print("[code_agent] 응답이 길이 한도에서 잘려 분할 생성으로 전환", flush=True)
+                    try:
+                        data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
+                    except (LLMError, CodeOutputError, RuntimeError) as split_exc:
+                        reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
+                        split_mode_failed = True
+                        break
+                    split_mode = True
+                    break
+            except Exception as exc:
+                raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
+            print(f"[code_agent] 생성 응답 검증 실패 ({attempt + 1}/2): {reason}", flush=True)
+        else:
+            raise RuntimeError(
+                f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도). {reason} "
+                "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
+            )
+        if split_mode_failed:
+            raise RuntimeError(
+                f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도 뒤 나눠서 만들기도 실패). {reason} "
+                "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
+            )
 
     # 생성 결과 일관성 — 이 ops 를 적용하면 새로 생기는 빌드·실행 문제(없는 파일을 가리키는
     # 스크립트, 선언 안 된 패키지 등)를 찾아 한 번 교정을 요청한다. 실기기에서 CRA 설정만 남은
@@ -2187,61 +2234,60 @@ def generate_code(
     if autofix_notes:
         print(f"[code_agent] 자동 교정 {len(autofix_notes)}건: {autofix_notes[:5]}", flush=True)
     consistency = _consistency_issues(root, target_folder, ops_out)
-    #: 교정은 최대 _CONSISTENCY_ROUNDS 번 — 한 번 고치면 다른 파일에서 새 어긋남이 드러나는 경우가 많다
-    #: (라우트를 고치면 모델 export 가 어긋나는 식). 오류가 줄지 않으면 멈춘다.
+    verification = {"kind": "docker-build", "status": "blocked", "passed": False,
+                    "output": "Static consistency errors must be repaired before building."}
+    visited = set()
     for _round in range(_CONSISTENCY_ROUNDS):
-        if not any(i["severity"] == "error" for i in consistency):
-            break
         if _round and _time.monotonic() - started_at > _GENERATION_BUDGET_SECONDS:
-            print(f"[code_agent] 생성 시간 예산({_GENERATION_BUDGET_SECONDS}s) 초과 — AI 교정을 멈추고 결과를 돌려줍니다", flush=True)
             break
-        improved = False
-        issue_lines = "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in consistency)
-        #: 결과가 크면(분할 생성 등) 전체를 다시 만들게 하면 또 잘린다. 문제 파일과 매니페스트만
-        #: 보여 주고 **고칠 파일만** 받아 경로 기준으로 합친다.
-        targeted = split_mode or sum(len(op.get("content") or "") for op in ops_out) > 12_000
-        if targeted:
-            wanted = {_norm_op_path(i.get("file") or "") for i in consistency if i.get("file")}
-            #: 메시지에 언급된 다른 파일(내보내는 쪽·Context 정의 파일)도 같이 보여 줘야 고칠 수 있다.
-            for op in ops_out:
-                if any(op["file"] in (i.get("message") or "") for i in consistency):
-                    wanted.add(_norm_op_path(op["file"]))
-            shown = [op for op in ops_out if _norm_op_path(op["file"]) in wanted
-                     or posixpath.basename(op["file"]) in {"package.json", "requirements.txt", "Dockerfile"}]
-            listing = "\n".join(f"- {op['file']}" for op in ops_out)
-            bodies = "".join(f"\n[현재 파일] {op['file']}\n```\n{_prompt_body(op['content'], 16_000)}\n```\n" for op in shown[:4])
-            fix_prompt = prompt + (
-                "\n\n생성한 파일 목록:\n" + listing + bodies
-                + "\n\n이 결과를 그대로 적용하면 다음 문제가 생깁니다:\n" + issue_lines
-                + "\n위 문제를 고치는 데 **바꿔야 하는 파일만** 전체 내용으로 ops 에 담으세요. 바꿀 필요가 없는 파일은 넣지 마세요."
-            )
-        else:
-            fix_prompt = prompt + (
-                "\n\n직전 응답을 그대로 적용하면 다음 문제가 생깁니다:\n" + issue_lines
-                + "\n같은 사용자 요청과 승인된 설계를 유지하면서 위 문제만 고친 전체 ops JSON 을 다시 만드세요."
-            )
+        errors = [i for i in consistency if i["severity"] == "error"]
+        if not errors:
+            verification = _verify_generated_build(root, target_folder, ops_out)
+            if verification["status"] != "failed":
+                break
+            errors = [{"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
+                       "message": verification["output"],
+                       "fix": "실제 빌드 로그의 원인을 고치세요. 검사를 제거하거나 기능을 생략하지 마세요."}]
+        if foundation:
+            break  # A reviewed foundation is never silently rewritten by a model.
+        signature = hashlib.sha256(json.dumps(ops_out, sort_keys=True).encode()).hexdigest()
+        if signature in visited:
+            break
+        visited.add(signature)
+        issue_lines = "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in errors)
+        listing = "\n".join(f"- {op['file']}" for op in ops_out)
+        fix_prompt = prompt + (
+            "\n\n생성한 파일 목록:\n" + listing + _repair_context(ops_out, errors)
+            + "\n\n다음 문제를 고치세요:\n" + issue_lines
+            + "\n바꿔야 하는 파일만 전체 내용으로 ops에 담으세요. 필요한 누락 파일은 추가하세요. "
+              "정상 파일은 보존합니다. package.json은 유효한 JSON이어야 합니다. "
+              "빌드 명령을 지우거나 타입 검사·인증·결제 검증을 비활성화해 통과시키지 마세요."
+        )
         try:
             retry = get_router().call(
                 LLMRequest(prompt=fix_prompt, json_schema=CODE_OUTPUT_SCHEMA,
                            max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
                 agent="code_agent", operation="generate_code_consistency",
             )
-            data2, ops2 = parse_code_output(retry.text)
-            ops2 = _relative_to_target(ops2, target_folder)
-            if targeted:
-                ops2 = _merge_ops(ops_out, ops2)
-                data2 = data
-            #: 교정 응답이 원래 버릇(localhost 주소 등)을 다시 들고 올 수 있다 — 결정적 교정을 한 번 더.
-            ops2, more_notes = _autofix_ops(root, target_folder, ops2)
-            remaining = _consistency_issues(root, target_folder, ops2)
-            if sum(i["severity"] == "error" for i in remaining) < sum(i["severity"] == "error" for i in consistency):
-                data, ops_out, llm_resp, consistency = data2, ops2, retry, remaining
-                improved = True
-                print(f"[code_agent] 일관성 교정 적용({_round + 1}회) | 남은 문제 {len(remaining)}개", flush=True)
-        except Exception as exc:  # noqa: BLE001 - 교정 실패는 원래 결과로 물러선다
-            print(f"[code_agent] 일관성 교정 생략: {exc}", flush=True)
-        if not improved:
+            _data2, updates = parse_code_output(retry.text)
+            updates = _relative_to_target(updates, target_folder)
+            candidate = _merge_ops(ops_out, updates)
+            candidate, more_notes = _autofix_ops(root, target_folder, candidate)
+            remaining = _consistency_issues(root, target_folder, candidate)
+            if _issue_weight(remaining) > _issue_weight(consistency):
+                break
+            ops_out, llm_resp, consistency = candidate, retry, remaining
+            verification = {"kind": "docker-build", "status": "blocked", "passed": False,
+                            "output": "Updated proposal still requires verification."}
+            print(f"[code_agent] 일관성 교정 적용({_round + 1}회) | 남은 문제 {len(remaining)}개", flush=True)
+        except Exception as exc:
+            print(f"[code_agent] 일관성 교정 실패: {exc}", flush=True)
             break
+    if not any(i["severity"] == "error" for i in consistency) and verification["status"] == "blocked":
+        verification = _verify_generated_build(root, target_folder, ops_out)
+    if verification["status"] == "failed":
+        consistency.append({"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
+                            "message": verification["output"], "fix": "실제 빌드 오류를 해결한 뒤 다시 검증하세요."})
 
     # ADR 영속화 — 승인된 결정을 docs/adr 에 구조화 기록으로 남긴다(코드와 동시 산출).
     # 시크릿 검사 '앞'에 넣어야 한다: ADR 본문에도 사용자 요청문이 들어가므로
@@ -2316,6 +2362,8 @@ def generate_code(
     result = {
         "summary": summary,
         "consistency_issues": consistency,
+        "verification": verification,
+        "foundation": foundation or None,
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),
         "provider": getattr(llm_resp, "provider", ""),

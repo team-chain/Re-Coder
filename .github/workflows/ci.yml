@@ -98,10 +98,10 @@ jobs:
       - name: 소스 체크아웃
         uses: actions/checkout@v5
 
-      - name: Node 20 준비
+      - name: Node 22 준비
         uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: extension/package-lock.json
 
@@ -174,3 +174,23 @@ jobs:
           AWS_EC2_METADATA_DISABLED: 'true'
           AWS_DEFAULT_REGION: us-east-1
         run: python -m pytest tests/ -q
+
+  commerce:
+    name: 쇼핑몰 주문·보안 통합 검증
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: pip install httpx
+      - name: 새 DB와 모의 결제 서버에서 실행
+        run: docker compose -f benchmarks/commerce/compose.yml -p recoder-commerce-check up --build -d --wait
+      - name: 가격·권한·재고 경쟁·웹훅 재시도 검증
+        env:
+          SHOP_ALLOW_DISPOSABLE_TESTS: '1'
+        run: python benchmarks/commerce/acceptance.py
+      - name: 검증 자원 정리
+        if: always()
+        run: docker compose -f benchmarks/commerce/compose.yml -p recoder-commerce-check down -v

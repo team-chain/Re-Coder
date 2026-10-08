@@ -132,6 +132,9 @@ def test_build_pins_the_platform_to_amd64(workspace):
     runner = FakeRunner()
     ecs_build.build_image(workspace, "app:1", runner=runner)
     args = runner.command("docker build")["args"]
+    assert args[:3] == ["docker", "buildx", "build"]
+    assert "--load" in args
+    assert "--pull" in args  # Cached arm64 base must not defeat the Fargate platform.
     assert "--platform" in args
     assert args[args.index("--platform") + 1] == "linux/amd64"
 
@@ -281,7 +284,7 @@ def test_build_and_push_runs_the_steps_in_order(workspace):
     order = [
         " ".join(c["args"][:2]) for c in runner.calls if c["args"][0] == "docker"
     ]
-    assert order == ["docker info", "docker build", "docker login", "docker tag",
+    assert order == ["docker info", "docker buildx", "docker login", "docker tag",
                      "docker push"]
     assert result.image_uri == "123.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1"
     # 로컬 태그는 리포지토리 이름만 쓴다 — 레지스트리 호스트가 붙으면

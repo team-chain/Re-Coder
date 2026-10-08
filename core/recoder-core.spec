@@ -55,6 +55,11 @@ datas += [(str(file), 'registry/file_templates')
           if file.is_file() and file.suffix not in ('.py', '.pyc')]
 datas += [(str(CORE_DIR / 'registry' / 'command_templates.json'), 'registry')]
 
+# Versioned commerce source, including lockfiles and public CA certificates.
+datas += [(str(file), str(file.parent.relative_to(CORE_DIR)))
+          for file in (CORE_DIR / 'starter_templates').rglob('*')
+          if file.is_file() and not any(part in {'node_modules', '__pycache__', 'dist'} for part in file.parts)]
+
 a = Analysis(
     [str(CORE_DIR / 'main.py')],
     pathex=[str(CORE_DIR)],
