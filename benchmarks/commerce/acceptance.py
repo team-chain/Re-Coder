@@ -131,6 +131,24 @@ def run_tests():
         ).status_code
         == 400,
     )
+    unicode_email = "unicode-" + email
+    unicode_password = "é" * 36
+    registered = public.post(
+        "/api/auth/register",
+        json={"name": "Unicode", "email": unicode_email, "password": unicode_password},
+    )
+    valid_unicode = public.post(
+        "/api/auth/login", json={"email": unicode_email, "password": unicode_password}
+    )
+    truncated_unicode = public.post(
+        "/api/auth/login", json={"email": unicode_email, "password": unicode_password + "x"}
+    )
+    check(
+        "UTF-8 password byte limit prevents bcrypt truncation",
+        registered.status_code == 201
+        and valid_unicode.status_code == 200
+        and truncated_unicode.status_code == 400,
+    )
     check(
         "SQL injection does not log in",
         public.post("/api/auth/login", json={"email": "' OR 1=1 --", "password": "x"}).status_code

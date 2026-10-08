@@ -72,7 +72,11 @@ async function installed(ext, home) {
     await manager.ensureRunning();
     lastRuntime = JSON.parse(fs.readFileSync(runtimeFile, 'utf8'));
     const expected = path.join(ext, 'bin', process.platform === 'win32' ? 'recoder-core.exe' : 'recoder-core');
-    assert.equal(path.resolve(lastRuntime.entrypoint).toLowerCase(), expected.toLowerCase());
+    const canonical = value => {
+      const resolved = fs.realpathSync.native(value);
+      return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    };
+    assert.equal(canonical(lastRuntime.entrypoint), canonical(expected));
     const { version } = require(path.join(ext, 'package.json'));
     assert.equal((await api('/api/health')).version, version);
     assert.equal((await api('/api/status')).status, 'ok');

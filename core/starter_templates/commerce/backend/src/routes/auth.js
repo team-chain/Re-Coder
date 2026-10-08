@@ -66,7 +66,7 @@ router.post('/login', async (req, res) => {
     const { email, password } = req.body;
 
     // Validation
-    if (typeof email !== 'string' || typeof password !== 'string' || !email || !password || email.length > 254 || password.length > 72) {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email || !password || email.length > 254 || Buffer.byteLength(password) > 72) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 

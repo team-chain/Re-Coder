@@ -105,6 +105,15 @@ test('same installed Core is reused with no spawn or termination', async t => {
   assert.equal(signals.length, 0);
 });
 
+test('native long path and temporary-directory alias reuse the same Core', async t => {
+  const { manager, binary, runtime, signals } = setup(t);
+  const canonical = fs.realpathSync.native(binary);
+  assert.equal(samePath(binary, canonical), true);
+  runtime(canonical);
+  assert.ok(await manager.ensureRunning());
+  assert.equal(signals.length, 0);
+});
+
 for (const mode of [1, 2]) {
   test(`mode ${mode} rejects the other Core and token refresh leaves its connection unchanged`, async t => {
     const { manager, source, binary, runtime, signals } = setup(t, mode);
