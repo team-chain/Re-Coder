@@ -98,6 +98,17 @@ def target_network():
     return ec2, alb
 
 
+def test_alb_requires_explicit_security_group_before_any_provisioning():
+    import asyncio
+
+    from agents.ecs_agent import ECSAgent, aws_infra
+    from schemas import ECSDeployRecord, ECSDeployRequest
+
+    req = ECSDeployRequest(project_id="p", cluster="c", service="s", target_group_arn=ARN)
+    with pytest.raises(aws_infra.InfraError, match="보안 그룹"):
+        asyncio.run(ECSAgent()._step_provision(req, ECSDeployRecord(project_id="p"), {}))
+
+
 def test_alb_accepts_only_compatible_subnet_zones():
     from aws_infra import InfraError, validate_target_group_network
 

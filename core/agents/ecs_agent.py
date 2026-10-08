@@ -554,6 +554,12 @@ class ECSAgent:
         `provision=False` 면 아무것도 만들지 않고, 요청에 담긴 서브넷·보안
         그룹만 쓴다. 이미 인프라를 손으로 관리하는 사용자를 위한 탈출구다.
         """
+        if req.target_group_arn and not req.security_group_ids:
+            raise InfraError(
+                "ALB 배포에는 앱 보안 그룹을 명시해야 합니다.",
+                remedy="ALB 보안 그룹에서 앱 포트로 들어오는 연결만 허용한 "
+                       "security_group_ids를 지정하세요. 공개 인바운드 그룹을 자동 생성하지 않습니다.",
+            )
         if not req.provision:
             if not req.subnet_ids or not req.security_group_ids:
                 raise InfraError(
