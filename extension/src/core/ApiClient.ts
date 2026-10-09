@@ -66,6 +66,15 @@ export interface CodeAgentOp {
     secret_warnings?: CodeSecretWarning[];
 }
 
+/** /api/deploy/settings — 이름·상태만(값 없음). */
+export interface DeploySettingsState {
+    plan_id: string;
+    settings: Array<{ name: string; label: string; hint: string; status: 'ready' | 'missing'; source: string; secret: boolean; min_length?: number }>;
+    settings_missing: string[];
+    demo: { available: boolean; enabled: boolean; label: string; note: string } | null;
+    risk_reasons: string[];
+}
+
 export interface CodeAgentResult {
     summary: string;
     ops: CodeAgentOp[];
@@ -514,6 +523,18 @@ export class ApiClient {
             {workspace_path:workspacePath},false,30000);
         if(!r.success||!r.data)throw new Error(r.error||'수정안 적용 실패');
         return r.data;
+    }
+
+    /**
+     * 로컬 Docker 배포의 '필요한 설정' 저장 또는 결제를 끈 로컬 데모 전환.
+     * 값은 코어가 사용자 홈(~/.recoder)에만 보관하고, 응답에는 이름·상태만 온다.
+     */
+    async saveDeploySettings(planId: string, values: Record<string, string>, demo?: boolean): Promise<DeploySettingsState> {
+        const body: Record<string, unknown> = { plan_id: planId, values };
+        if (typeof demo === 'boolean') { body.demo = demo; }
+        const resp = await this.request<DeploySettingsState>('POST', '/api/deploy/settings', body, false, 30000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설정을 저장하지 못했습니다.'); }
+        return resp.data;
     }
 
     /** 사용자가 누른 자동 수정 한 건. 원본은 프로젝트의 .recoder/backups 에 남는다. */

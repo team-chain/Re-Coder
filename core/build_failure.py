@@ -33,6 +33,8 @@ class BuildDiagnosis:
     fix: str
     lines: list[str] = field(default_factory=list)
     step: str = ""
+    #: 설정값이 없어 종료한 경우 그 이름들 — 화면이 "코드 수정" 대신 "설정 입력" 을 안내한다.
+    missing_env: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -172,8 +174,37 @@ _PY_ERROR = re.compile(r"^((?:[A-Z]\w*)?(?:Error|Exception)): (.+)$")
 _PY_AT = re.compile(r'File "/(?:app|usr/src/app|srv)/([^"]+)", line (\d+)')
 
 
+_MISSING_ENV = re.compile(
+    r"\b([A-Z][A-Z0-9_]{2,63})\b(?: environment variable)? (?:must be set|is required|is not set|is missing|not set|must be defined)"
+    r"|Missing (?:required )?env(?:ironment)?(?: variables?)?:?\s+([A-Z][A-Z0-9_]{2,63})")
+
+
+def _missing_settings(lines: list[str], text: str) -> Optional[BuildDiagnosis]:
+    """필수 환경변수가 없어 종료 — 코드 문제가 아니라 설정값 문제다(실기기: JWT_SECRET)."""
+    names: list[str] = []
+    anchor = None
+    for i, line in enumerate(lines):
+        for groups in _MISSING_ENV.findall(line):
+            name = next((g for g in groups if g), "")
+            if name and name not in names and name not in {"ERROR", "WARNING", "NODE", "PORT"}:
+                names.append(name)
+                anchor = i if anchor is None else anchor
+    if not names:
+        return None
+    joined = ", ".join(names)
+    return BuildDiagnosis(
+        "APP_MISSING_SETTING", "앱에 필요한 설정값이 비어 있음",
+        f"앱이 시작할 때 {joined} 값을 요구하는데 컨테이너에 전달되지 않아 종료했습니다. 코드 오류가 아닙니다.",
+        "배포를 다시 시작하면 '필요한 설정' 에서 값을 넣을 수 있습니다(앱 내부 서명 키는 자동으로 만듭니다). "
+        "지원하는 앱이면 '결제를 끈 로컬 데모' 로도 실행할 수 있습니다. 이전 버전은 다시 띄워 두었습니다.",
+        _key_lines(lines, anchor), "", names)
+
+
 def _run_failure(lines: list[str], text: str) -> Optional[BuildDiagnosis]:
     """컨테이너가 시작하자마자 죽었을 때 — 앱 로그에서 실제 예외와 위치를 뽑는다."""
+    settings = _missing_settings(lines, text)
+    if settings is not None:
+        return settings
     m = _DB_REFUSED.search(text)
     if m:
         port = next((g for g in m.groups() if g), "")

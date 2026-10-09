@@ -9,7 +9,12 @@ import {GroundedRepairPanel, RepairStage} from './GroundedRepairPanel';
 import { shortIssue } from "./issueText";
 
 export interface ReadinessIssue { code: string; severity: "error" | "warning"; message: string; fix: string; file?: string; auto_fix: boolean }
-export interface BuildDiagnosis { code: string; title: string; cause: string; fix: string; lines: string[]; step?: string; repair?: {stage:RepairStage} }
+export interface BuildDiagnosis { code: string; title: string; cause: string; fix: string; lines: string[]; step?: string; repair?: {stage:RepairStage}; missing_env?: string[] }
+
+/** 설정값이 없어 멈춘 실패 — 코드를 고치면 안 된다(AI 가 안전장치를 지울 수 있다). 설정 입력으로 안내한다. */
+export function isSettingsFailure(d: Pick<BuildDiagnosis, "code">): boolean {
+  return d.code === "APP_MISSING_SETTING";
+}
 
 const box: React.CSSProperties = { borderRadius: 5, padding: "8px 10px", marginBottom: 10, fontSize: 11, lineHeight: 1.6 };
 
@@ -63,7 +68,7 @@ export const ReadinessPanel: React.FC<{
   );
 };
 
-export const BuildFailure: React.FC<{ diagnosis: BuildDiagnosis; raw?: string; restored?: string }> = ({ diagnosis, raw, restored }) => (
+export const BuildFailure: React.FC<{ diagnosis: BuildDiagnosis; raw?: string; restored?: string; onSettings?: () => void }> = ({ diagnosis, raw, restored, onSettings }) => (
   <section role="alert" aria-label="빌드 실패 원인" style={{ ...box, background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444", color: "#f3b1b1" }}>
     <strong style={{ color: "#ef4444", fontSize: 12 }}>배포 실패 — {diagnosis.title}</strong>
     <div style={{ marginTop: 4 }}>{diagnosis.cause}</div>
@@ -81,6 +86,11 @@ export const BuildFailure: React.FC<{ diagnosis: BuildDiagnosis; raw?: string; r
         <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 240, overflow: "auto", color: "#ccc", fontFamily: "var(--vscode-editor-font-family, monospace)" }}>{raw}</pre>
       </details>
     )}
-    <GroundedRepairPanel log={[diagnosis.cause,...diagnosis.lines,raw||''].join('\n')} stage={diagnosis.repair?.stage||'run'}/>
+    {isSettingsFailure(diagnosis)
+      ? onSettings && <button type="button" data-testid="settings-retry" onClick={onSettings}
+          style={{ marginTop: 8, background: "var(--vscode-button-background,#0e639c)", color: "var(--vscode-button-foreground,#fff)", border: 0, borderRadius: 4, padding: "5px 11px", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
+          필요한 설정 입력하고 다시 배포 →
+        </button>
+      : <GroundedRepairPanel log={[diagnosis.cause,...diagnosis.lines,raw||''].join('\n')} stage={diagnosis.repair?.stage||'run'}/>}
   </section>
 );

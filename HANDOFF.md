@@ -1,3 +1,15 @@
+# 로컬 Docker 배포 — 필요한 설정 · 결제를 끈 로컬 데모 (2026-10-09, 1.1.32)
+
+- 실기기: 검증된 쇼핑몰 기반(develop #83)을 로컬 Docker 로 배포하면 `JWT_SECRET`·`STRIPE_SECRET_KEY`·`STRIPE_WEBHOOK_SECRET` 이 없어 빌드 뒤 즉시 종료, 안내는 "auth.js 코드를 고치라" 였다.
+- `core/deploy_settings.py`: 코드에서 "없으면 throw/exit/raise" 하는 환경변수를 찾는다(다른 if 안의 조건부 검사·프론트엔드 폴더는 제외, `.length < N` 로 최소 길이). 앱 내부 서명 키는 자동 생성, 외부 키는 입력, `PAYMENT_MODE`·`STRIPE_MOCK_HOST`·`STRIPE_MOCK_PORT` 를 읽는 Node 앱은 로컬 데모 지원.
+- 값 보관: `~/.recoder/deploy_settings/<컨테이너>.json`(0600, 테스트는 `RECODER_DEPLOY_SETTINGS_DIR`). 계획·응답·배포 기록에는 이름·상태만. 실행·복구·롤백 때 `-e` 로만 넘긴다. 우선순위: 계획(DB 등) > 저장한 설정(데모 값은 항상) > PC `.env`(이미 정한 이름은 건너뜀). 저장한 값은 PC `.env` 에 같은 이름이 있으면 쓰지 않는다.
+- 계획(`/api/deploy/plan`): `settings`·`settings_missing`·`demo`. 비어 있으면 실행(`/api/deploy/execute`)이 빌드 전에 `stage: "settings"`, `diagnosis.code = APP_MISSING_SETTING` 으로 멈춘다.
+- 입력·데모 전환: `POST /api/deploy/settings {plan_id, values, demo}` — 계획에 없는 이름·최소 길이 미만·줄바꿈은 거절.
+- 데모: 모의 결제 서버를 **앱 이미지의 node** 로 `<컨테이너>-payment-mock` 에 띄운다(외부 이미지 없음, `--no-healthcheck`). 결제 의도 2.5초 뒤 서명한 `payment_intent.succeeded` 웹훅을 앱에 보내 주문이 결제 완료(테스트)가 된다. `backend/init-db.js` 가 있으면 데모 상품을 한 번 넣는다. 데모를 끄면 모의 서버를 내린다.
+- `build_failure`: "X must be set / is required / is not set / Missing env X" → `APP_MISSING_SETTING`(+`missing_env`). 화면은 [문서 근거로 오류 수정] 대신 [필요한 설정 입력하고 다시 배포].
+- UI: `DeploySettingsPanel`(planReady), 설정이 비면 승인 잠금. `DeliveryTrack` 동물 배달 애니메이션(Docker·S3·ECS).
+- 검증: 이 저장소 클라우드에서 실제 Docker 로(베이스 이미지는 Docker Hub 차단 때문에 로컬 대체 이미지) 쇼핑몰 기반을 code-server UI 로 개발→적용→Docker 패널→데모 실행→헬스 통과, 브라우저로 회원가입·장바구니·테스트 주문→결제 완료 확인. 키 입력 경로, 실패 시 이전 컨테이너 복구(데모 설정 유지)도 확인.
+
 # 대규모 코드 생성 · 팀 모드 (2026-10-08, 1.1.31)
 
 - **원인(실기기 "긴 요청이 잘린다")**: 학생용 게이트웨이는 HTTP API(통합 제한 30초, 늘릴 수 없음) 뒤 Lambda 라 호출당 출력을 4096 토큰(`GW_MAX_TOKENS_CEILING`)으로 깎고 `stop_reason` 을 주지 않았다. 코어는 잘림을 형식 오류로 착각해 같은 큰 요청을 한 번 더 보냈고, 분할 생성은 파일 목록을 36개에서 자르고(`files[:36]`), 파일 하나가 한도를 넘으면 실패했다. 확장은 응답 하나를 15분까지만 기다렸다.

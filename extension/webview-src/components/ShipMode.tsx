@@ -15,6 +15,7 @@ import { DeploymentActivity, DeploymentActivityEvent } from './DeploymentActivit
 import { LocalRollbackResult, LocalRollbackStatus, rollbackWatchId } from "./LocalRollbackStatus";
 import { BuildDiagnosis, BuildFailure, ReadinessIssue, ReadinessPanel } from "./ReadinessPanel";
 import { issueKind, shortIssue } from "./issueText";
+import { DeployDemo, DeploySetting, DeploySettingsPanel } from "./DeploySettingsPanel";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -115,6 +116,15 @@ interface DeploymentPlan {
   approval_level: 1 | 2 | 3 | 4;
   //: Core 의 빌드 전 정적 점검(build_readiness). 빌드가 확정적으로 실패할 설정을 승인 전에 보인다.
   readiness?: { issues?: ReadinessIssue[] } | null;
+  //: 앱이 시작할 때 요구하는 설정값(이름·상태만). 비어 있으면 승인할 수 없다.
+  settings?: DeploySetting[];
+  settings_missing?: string[];
+  demo?: DeployDemo | null;
+}
+
+/** 승인 버튼을 막는 조건 — 필요한 설정이 비어 있으면 빌드해도 앱이 바로 종료한다. */
+export function planBlockedBySettings(plan: { settings_missing?: string[] } | null | undefined): boolean {
+  return !!plan && (plan.settings_missing?.length ?? 0) > 0;
 }
 
 interface VerificationSnapshot {
@@ -242,6 +252,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const [showApproval, setShowApproval] = useState(false);
   const [approvalContext, setApprovalContext] = useState<"infra" | "deploy" | null>(null);
   const [activeFileTab, setActiveFileTab] = useState<InfraFileTab>("dockerfile");
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
   const pendingScanRef = useRef<string | null>(null);
 
   const startSecurityScan = useCallback(() => {
@@ -333,6 +345,20 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         return;
       }
 
+      if (type === "deploy.settings.result") {
+        const r = payload as { plan_id?: string; settings?: DeploySetting[]; settings_missing?: string[]; demo?: DeployDemo | null; risk_reasons?: string[] };
+        setSettingsBusy(false);
+        setSettingsError("");
+        setPlan(cur => cur && cur.plan_id === r.plan_id
+          ? { ...cur, settings: r.settings ?? cur.settings, settings_missing: r.settings_missing ?? [], demo: r.demo ?? null, risk_reasons: r.risk_reasons ?? cur.risk_reasons }
+          : cur);
+        return;
+      }
+      if (type === "deploy.settings.error") {
+        setSettingsBusy(false);
+        setSettingsError((payload as { message?: string }).message ?? "설정을 저장하지 못했습니다.");
+        return;
+      }
       if (type === 'deploy.progress') {
         const event=payload as DeploymentActivityEvent;
         if(event.plan_id===progressPlan.current) setProgress(event);
@@ -371,6 +397,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           continuous_verification?: { enabled?: boolean; started?: boolean };
           security_scan?: { status?: string; high_count?: number; reason?: string };
         };
+        //: 빌드 전에 "필요한 설정이 비어 있음" 으로 멈췄다 — 같은 계획에서 바로 채우고 다시 승인하게 한다.
+        const pre = payload as { stage?: string; settings?: DeploySetting[]; settings_missing?: string[]; demo?: DeployDemo | null };
+        if (pre.stage === "settings" && pre.settings_missing?.length) {
+          setPlan(cur => cur ? { ...cur, settings: pre.settings ?? cur.settings, settings_missing: pre.settings_missing, demo: pre.demo ?? cur.demo } : cur);
+          setProgress(null);
+          setStep("planReady");
+          setSettingsError(`필요한 설정이 비어 있어 배포하지 않았습니다: ${pre.settings_missing.join(", ")}`);
+          return;
+        }
         activeDeploymentRef.current = r.deployment_id;
         watchIdRef.current = r.deployment_id;
         pendingRollbackRef.current = undefined;
@@ -496,6 +531,18 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
     postMessage("executeDeployment", { planId: plan.plan_id, approved: true });
     setStep("deploying");
     setShowApproval(false);
+  }, [plan, postMessage]);
+
+  const handleSaveSettings = useCallback((values: Record<string, string>) => {
+    if (!plan) { return; }
+    setSettingsBusy(true); setSettingsError("");
+    postMessage("deploy.settings.save", { planId: plan.plan_id, values });
+  }, [plan, postMessage]);
+
+  const handleDemo = useCallback((enabled: boolean) => {
+    if (!plan) { return; }
+    setSettingsBusy(true); setSettingsError("");
+    postMessage("deploy.settings.save", { planId: plan.plan_id, values: {}, demo: enabled });
   }, [plan, postMessage]);
 
   const handleFixReadiness = useCallback((code: string) => {
@@ -650,8 +697,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const activeFileLabel = infraFileLabelForTab(activeFileTab);
   const canSwitchFileTab = ["idle", "preview", "saved", "done", "error"].includes(step);
   const securityScanEnabled = canRunSecurityScan(step);
+  const settingsBlocked = step === "planReady" && planBlockedBySettings(plan);
   const primaryDisabled = (!canSwitchFileTab && step !== "scanDone" && step !== "planReady")
-    || (existingConflict !== null && step === "preview");
+    || (existingConflict !== null && step === "preview") || settingsBlocked || (step === "planReady" && settingsBusy);
   const activeContent = matchesTab ? proposal!.content : null;
   const stackComment = matchesTab
     ? `# 스택: ${proposal!.base_template ?? "auto-detected"}`
@@ -833,6 +881,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           <div><strong>포트:</strong> {Object.entries(plan.ports).map(([h, c]) => `${h}→${c}`).join(", ")}</div>
         </div>
       )}
+      {step === "planReady" && plan && (plan.settings?.length ?? 0) > 0 && (
+        <DeploySettingsPanel settings={plan.settings ?? []} missing={plan.settings_missing ?? []} demo={plan.demo}
+          busy={settingsBusy} error={settingsError} onSave={handleSaveSettings} onDemo={handleDemo} />
+      )}
+      {settingsBlocked && (
+        <div role="status" style={{ fontSize: 11, color: "var(--vscode-editorWarning-foreground,#cca700)", marginBottom: 8 }}>
+          필요한 설정을 채우면 승인할 수 있어요{plan?.demo?.available ? " — 키가 없으면 '결제를 끈 로컬 데모'로 바로 실행할 수 있습니다" : ""}.
+        </div>
+      )}
       {step === "planReady" && plan && (
         <ReadinessPanel issues={readinessIssues} onFix={handleFixReadiness} onFixAll={handleFixAllReadiness} fixing={fixing} notice={fixNotice} />
       )}
@@ -977,7 +1034,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       {/* ── Error ── */}
       {step === "error" && diagnosis && (
         <>
-          <BuildFailure diagnosis={diagnosis.value} raw={diagnosis.raw} restored={diagnosis.restored} />
+          <BuildFailure diagnosis={diagnosis.value} raw={diagnosis.raw} restored={diagnosis.restored}
+            onSettings={() => { setDiagnosis(null); setError(null); setDeployResult(null); handleCreatePlan(); }} />
           <ReadinessPanel title="같이 고칠 항목" issues={readinessIssues} onFix={handleFixReadiness} onFixAll={handleFixAllReadiness} fixing={fixing}
             notice={fixNotice ? `${fixNotice} 고친 뒤 '새 배포'로 다시 진행하세요.` : ""} />
         </>

@@ -1,5 +1,6 @@
 import React from 'react';
 import { describeS3Progress, s3UploadRatio, S3Progress } from './DeploymentCenter';
+import { DeliveryTrack } from './DeliveryTrack';
 
 export interface DeploymentActivityEvent {
   step: string; message?: string; plan_id?: string; done_count?: number; total?: number; key?: string;
@@ -10,18 +11,22 @@ const stages = {
   s3: [['plan','준비'],['bucket','버킷 확인'],['website','호스팅 설정'],['upload','파일 업로드'],['prune','마무리'],['screen','화면 확인']],
 };
 
+//: 목록에 없는 세부 단계 — DB·모의 결제 준비는 컨테이너 시작 직전 단계로 보인다.
+const STEP_ALIAS: Record<string,string> = { services: 'start' };
+
 export function DeploymentActivity({ target, event }: { target: 'docker'|'s3'; event: DeploymentActivityEvent | null }) {
   if (!event) return null;
   const failed = event.step==='error' || ['failed','error','screen_failed'].includes(event.result?.status || '');
   const pending = event.result?.status==='pending';
   const complete = event.step==='done' && !failed && !pending && event.result?.status!=='cancelled';
-  const items=stages[target], index=complete?items.length:items.findIndex(([key])=>key===event.step);
+  const items=stages[target], step=STEP_ALIAS[event.step]??event.step, index=complete?items.length:items.findIndex(([key])=>key===step);
   const ratio=target==='s3'?s3UploadRatio(event as S3Progress):null;
   const text=failed?event.message||event.result?.message||'배포 실패':pending?'컨테이너 실행됨 · HTTP 헬스 확인 대기':complete?'배포 완료':target==='s3'?describeS3Progress(event as S3Progress):event.message||'배포를 준비합니다';
   return <section aria-label={`${target==='docker'?'Docker':'S3'} 배포 진행`} style={{padding:'14px 16px',margin:'12px 0',border:'1px solid var(--vscode-panel-border,#323b47)',borderRadius:8,background:'var(--vscode-editorWidget-background,#181e27)'}}>
     <div style={{display:'flex',justifyContent:'space-between',gap:12,marginBottom:8}}><strong>{target==='docker'?'Docker':'S3'} 배포</strong><span role="status" style={{color:failed?'#f38a91':complete?'#73d39b':'var(--vscode-foreground)'}}>{text}{ratio!==null?` · ${Math.round(ratio*100)}%`:''}</span></div>
-    <progress aria-label={target==='s3'&&ratio!==null?'파일 업로드 진행률':'배포 단계 진행'} max={ratio!==null?1:items.length} value={failed||pending?undefined:ratio!==null?ratio:Math.max(0,index)} style={{width:'100%',height:6,accentColor:failed?'#f38a91':'#4faff0'}} />
-    <ol style={{display:'flex',gap:'8px 16px',flexWrap:'wrap',listStyle:'none',padding:0,margin:'8px 0 0',fontSize:11,color:'var(--vscode-descriptionForeground,#99a9b9)'}}>{items.map(([key,label],i)=><li key={key} aria-current={key===event.step?'step':undefined} style={{color:key===event.step?'#8dceff':undefined}}>{i<index?'✓':`${i+1}.`} {label}</li>)}</ol>
+    <DeliveryTrack stages={items.map(([,label])=>label)} index={complete?items.length:Math.max(0,index)} state={failed?'failed':complete?'done':pending?'pending':'running'} destination={target==='docker'?'Docker':'S3'}/>
+    {ratio!==null&&<progress aria-label="파일 업로드 진행률" max={1} value={failed||pending?undefined:ratio} style={{width:'100%',height:6,accentColor:failed?'#f38a91':'#4faff0'}} />}
+    <ol style={{display:'flex',gap:'8px 16px',flexWrap:'wrap',listStyle:'none',padding:0,margin:'8px 0 0',fontSize:11,color:'var(--vscode-descriptionForeground,#99a9b9)'}}>{items.map(([key,label],i)=><li key={key} aria-current={key===step?'step':undefined} style={{color:key===step?'#8dceff':undefined}}>{i<index?'✓':`${i+1}.`} {label}</li>)}</ol>
     {event.key&&<div style={{fontSize:11,marginTop:6,overflowWrap:'anywhere',color:'var(--vscode-descriptionForeground)'}}>{event.key}</div>}
   </section>;
 }

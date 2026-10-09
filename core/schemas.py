@@ -329,6 +329,12 @@ class DeploymentPlan(BaseModel):
     companions: list[str] = Field(default_factory=list)
     #: 실행할 때 컨테이너 환경변수로 넘길 PC 의 .env 파일(워크스페이스 기준 경로). 값은 계획·기록에 남기지 않는다.
     env_files: list[str] = Field(default_factory=list)
+    #: 앱이 시작할 때 요구하는 설정값의 상태(deploy_settings.evaluate) — 이름·상태만, 값은 없다.
+    settings: list[dict] = Field(default_factory=list)
+    #: 아직 비어 있어 배포를 막는 설정 이름.
+    settings_missing: list[str] = Field(default_factory=list)
+    #: 결제를 끈 로컬 데모 실행 지원 여부·사용 여부.
+    demo: Optional[dict] = None
 
 
 class DeploymentRecord(BaseModel):

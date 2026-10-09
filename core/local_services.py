@@ -158,6 +158,8 @@ _INIT_SQL_CANDIDATES = (
     "init.sql", "schema.sql", "db/init.sql", "db/schema.sql", "database/init.sql", "database/schema.sql",
     "sql/init.sql", "sql/schema.sql", "server/init.sql", "server/schema.sql", "server/db/init.sql", "server/db/schema.sql",
     "backend/init.sql", "backend/schema.sql", "backend/db/init.sql", "backend/db/schema.sql",
+    "backend/src/schema.sql", "backend/src/init.sql", "backend/src/db/schema.sql", "src/schema.sql", "src/init.sql",
+    "src/db/schema.sql", "server/src/schema.sql",
 )
 _INIT_SQL_MAX_BYTES = 2_000_000
 
@@ -272,7 +274,13 @@ def ensure(container: str, progress: Optional[Callable[[str], None]] = None, run
 
 def network_args(container: str, run: Runner = _run) -> list[str]:
     """복구·롤백처럼 서비스가 이미 떠 있는 경로에서 앱을 같은 네트워크에 붙인다."""
-    if not configured(container):
+    demo = False
+    try:
+        import deploy_settings
+        demo = bool(deploy_settings.load(container).get("demo"))
+    except Exception:  # noqa: BLE001
+        demo = False
+    if not configured(container) and not demo:
         return []
     net = network_name(container)
     return ["--network", net] if run(["docker", "network", "inspect", net], 30).returncode == 0 else []

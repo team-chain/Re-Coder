@@ -20,6 +20,8 @@ export interface TeamAgentView { id: string; state: AgentState; file?: string; p
 
 export interface TeamView {
   jobId: string;
+  /** 대규모 생성 엔진(설계·파일 작업)이 실제로 돌았는지 — 검증된 기반처럼 생성하지 않는 경로는 false. */
+  engaged?: boolean;
   phase: "planning" | "building" | "checking" | "done";
   summary: string;
   files: Array<{ file: string; layer: number; state: FileState }>;
@@ -39,8 +41,13 @@ export const MAX_DEV_AGENTS = 6;
 export const DEFAULT_DEV_AGENTS = 3;
 
 export function emptyTeamView(): TeamView {
-  return { jobId: "", phase: "planning", summary: "", files: [], total: 0, done: 0, layer: null, agents: {},
+  return { jobId: "", engaged: false, phase: "planning", summary: "", files: [], total: 0, done: 0, layer: null, agents: {},
     fixes: 0, secretFixes: 0, issues: 0, retries: 0, elapsed: 0, log: [] };
+}
+
+/** 에이전트들이 실제로 일하고 있는지 — 검증된 기반(쇼핑몰 등)처럼 AI 가 생성하지 않는 경로에서는 보드를 띄우지 않는다. */
+export function teamWorking(view: TeamView | null | undefined): boolean {
+  return !!view && (!!view.engaged || view.total > 0 || Object.keys(view.agents).length > 0);
 }
 
 /** 팀 구성: 설계 1 + 개발 N + 검토(보안·문법) 1. 동물은 겹치지 않게 무작위. */
@@ -63,9 +70,13 @@ const STATE_OF_STEP: Record<string, AgentState | undefined> = {
   file_start: "writing", file_split: "parts", file_part: "parts", fixing: "fixing", retry: "waiting", waiting: "waiting",
 };
 
+const ENGINE_STEPS = new Set(["planning", "planned", "wave", "file_start", "file_split", "file_part", "file_done",
+  "fixing", "verified", "verify_failed", "split", "resumed", "generated"]);
+
 export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
   const next: TeamView = { ...view, agents: { ...view.agents }, files: view.files, log: view.log };
   if (event.job_id) next.jobId = event.job_id;
+  if (ENGINE_STEPS.has(event.step)) next.engaged = true;
   if (typeof event.total === "number" && event.total > 0) next.total = event.total;
   if (typeof event.done_count === "number") next.done = Math.max(next.done, event.done_count);
   if (typeof event.elapsed === "number") next.elapsed = event.elapsed;

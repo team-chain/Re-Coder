@@ -11,7 +11,7 @@ import { DecisionOptionCards } from "./DecisionOptionCards";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
 import { TeamBoard, TeamComposer } from "./TeamBoard";
 import { ANIMAL_KINDS } from "./teamAnimals";
-import { DEFAULT_DEV_AGENTS, MAX_DEV_AGENTS, TeamEvent, TeamMember, TeamView, buildRoster, emptyTeamView, reduceTeam } from "./teamState";
+import { DEFAULT_DEV_AGENTS, MAX_DEV_AGENTS, TeamEvent, TeamMember, TeamView, buildRoster, emptyTeamView, reduceTeam, teamWorking } from "./teamState";
 
 interface SecretWarning { rule: string; line: number; masked: string; }
 interface CodeOp {
@@ -496,7 +496,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
             <div className="rc-cg-meta">{[turn.targetFolder || "", ...(turn.contextNames ?? [])].filter(Boolean).join(" · ")}</div>
           ) : <div style={{ height: 8 }} />}
 
-          {turn.team && (turn.status === "generating" || turn.paused) && (
+          {turn.team && teamWorking(turn.team) && (turn.status === "generating" || turn.paused) && (
             <TeamBoard roster={turn.roster ?? roster} view={turn.team} paused={turn.paused ? { message: turn.paused.message, done: turn.paused.done, total: turn.paused.total } : null}
               onResume={turn.paused && !isBusy ? () => resumeTurn(turn) : undefined} />
           )}
@@ -520,7 +520,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           )}
           {turn.status === "done" && turn.result && (
             <div>
-              {turn.team && turn.team.total > 0 && (
+              {turn.team && turn.team.total > 0 && !(turn.result as { foundation?: string | null } | undefined)?.foundation && (
                 <div data-testid="team-done" style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", margin: "0 0 6px" }}>
                   팀 작업 완료 · 파일 {turn.team.total}개 · 에이전트 {Object.keys(turn.team.agents).filter(a => a.startsWith("agent-")).length || 1}명이 동시에 작업
                   {turn.team.fixes ? ` · 만들면서 고친 문제 ${turn.team.fixes}건` : ""}

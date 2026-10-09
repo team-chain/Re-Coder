@@ -1143,6 +1143,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'deploy.readiness.check':
+            case 'deploy.settings.save': {
+                //: 로컬 Docker 배포의 '필요한 설정' 입력 · 결제를 끈 로컬 데모 전환. 값은 화면에 되돌려 보내지 않는다.
+                const p = (payload ?? {}) as { planId?: string; values?: Record<string, string>; demo?: boolean };
+                try {
+                    if (!p.planId) { throw new Error('배포 계획이 없습니다. 새 배포를 시작하세요.'); }
+                    const values: Record<string, string> = {};
+                    for (const [k, v] of Object.entries(p.values ?? {})) {
+                        if (/^[A-Z_][A-Z0-9_]{1,63}$/.test(k) && typeof v === 'string') { values[k] = v; }
+                    }
+                    const state = await this._apiClient.saveDeploySettings(p.planId, values, p.demo);
+                    this.postMessageToWebview(requestWebview, 'deploy.settings.result', state);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'deploy.settings.error', {
+                        planId: p.planId, message: err instanceof Error ? err.message : String(err),
+                    });
+                }
+                break;
+            }
             case 'deploy.readiness.fix': {
                 //: 로컬 Docker 배포 화면의 "배포 준비 점검". 자동 수정은 사용자가 누른 한 건만.
                 const p = (payload ?? {}) as { code?: string; requestId?: string };

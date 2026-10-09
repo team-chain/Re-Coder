@@ -15,7 +15,7 @@ RUNTIME_IMPORTS = (
     'preflight.contract_loader', 'persistence', 'nacl.public', 'paramiko',
     'google.genai', 'google.generativeai',
     #: 대규모 코드 생성(팀 모드) — code_agent 가 필요할 때 불러오므로 번들 분석이 놓치지 않게 명시한다.
-    'gen_engine', 'generation_jobs', 'generation_progress',
+    'gen_engine', 'deploy_settings', 'generation_jobs', 'generation_progress',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
@@ -66,7 +66,7 @@ def run(app) -> int:
         checks.append('scheduler plugins')
         paths = app.openapi()['paths']
         for endpoint in ('/api/health', '/api/status', '/api/chat', '/api/code/plan',
-                         '/api/code/generate', '/api/code/generate/stream', '/api/deploy/dockerfile', '/api/deploy/execute',
+                         '/api/code/generate', '/api/code/generate/stream', '/api/deploy/dockerfile', '/api/deploy/execute', '/api/deploy/settings',
                          '/api/deploy/canvas', '/api/github/repository/connect', '/api/git/push'):
             assert endpoint in paths, f'route missing: {endpoint}'
         checks.append('application routes')

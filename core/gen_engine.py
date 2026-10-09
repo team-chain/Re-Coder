@@ -195,7 +195,7 @@ class LargeGeneration:
     def _event(self, step: str, **data: Any) -> None:
         total = len(self.state.get("files") or [])
         done = len(self.state.get("ops") or {})
-        self.emit({"step": step, "done_count": done, "total": total,
+        self.emit({"step": step, "done_count": done, "total": total, "job_id": self.job_id,
                    "elapsed": round(time.monotonic() - self._started, 1), **data})
 
     def resume_from(self, saved: dict | None) -> bool:

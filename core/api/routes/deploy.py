@@ -673,6 +673,46 @@ def _env_file_args(paths: list[str], skip: "set[str] | dict") -> list[str]:
     return args
 
 
+def _provided_env_names(plan_env: dict, env_file_paths: list[str]) -> set[str]:
+    """이미 값이 정해진 이름 — 계획(사용자·DB)과 PC 의 .env."""
+    from deployment_inputs import read_env_file
+    names = set(plan_env or {})
+    for path in env_file_paths or []:
+        names.update(read_env_file(path).keys())
+    return names
+
+
+def _apply_settings_to_plan(plan: DeploymentPlan, workspace: str) -> None:
+    """계획에 '필요한 설정' 상태를 채운다(값은 넣지 않는다)."""
+    import deploy_settings
+    if not plan.container_name or not workspace:
+        return
+    provided = _provided_env_names(plan.env, _resolved_env_files(workspace, plan.env_files))
+    state = deploy_settings.evaluate(plan.container_name, workspace, provided)
+    plan.settings = state["settings"]
+    plan.settings_missing = state["missing"]
+    plan.demo = state["demo"] if state["demo"].get("available") else None
+    plan.risk_reasons = [r for r in plan.risk_reasons if not r.startswith(("필요한 설정", "로컬 데모 모드", "앱 내부 서명 키"))]
+    generated = [s["name"] for s in plan.settings if s.get("source") == "generated"]
+    if generated:
+        plan.risk_reasons.append(f"앱 내부 서명 키({', '.join(generated)})는 이 PC 의 로컬 배포용으로 무작위로 만들어 ~/.recoder 에만 보관합니다.")
+    if plan.settings_missing:
+        plan.risk_reasons.append(
+            f"필요한 설정 {len(plan.settings_missing)}개가 비어 있습니다({', '.join(plan.settings_missing)}) — "
+            "배포 화면에서 값을 넣어야 실행할 수 있습니다.")
+    if plan.demo and plan.demo.get("enabled"):
+        plan.risk_reasons.append("로컬 데모 모드 — 모의 결제 서버로 실행합니다. 실제 결제는 일어나지 않습니다.")
+
+
+def _settings_env(container: str, workspace: str, provided: set[str], app_port: int) -> dict[str, str]:
+    try:
+        import deploy_settings
+        return deploy_settings.runtime_env(container, workspace, provided, app_port)
+    except Exception as exc:  # noqa: BLE001 - 설정 파일을 못 읽으면 예전처럼 넘기지 않는다
+        logger.warning("deploy settings env failed: %s", exc)
+        return {}
+
+
 async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool, str, str]:
     """교체 배포가 시작되지 못했을 때 이전 정상 컨테이너를 즉시 다시 띄운다."""
     run_args = ["docker", "run", "-d", "--name", record.container_name]
@@ -681,7 +721,11 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
             run_args.extend(["-p", f"{int(host_port)}:{int(container_port)}"])
         for key, value in (record.env or {}).items():
             run_args.extend(["-e", f"{key}={value}"])
-        run_args.extend(_env_file_args(list(record.env_file_paths or []), set((record.env or {}).keys())))
+        _settings = _settings_env(record.container_name, "", _provided_env_names(record.env or {}, list(record.env_file_paths or [])),
+                                  int(next(iter((record.ports or {}).values()), 3001)))
+        for key, value in _settings.items():
+            run_args.extend(["-e", f"{key}={value}"])
+        run_args.extend(_env_file_args(list(record.env_file_paths or []), set((record.env or {}).keys()) | set(_settings)))
         run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
         # 태그가 아니라 고정 태그·이미지 ID 로 되돌린다 — 태그는 그사이 움직였을 수 있다.
         run_args.extend(["--restart", "unless-stopped", _stable_image_ref(record) or record.image])
@@ -3667,6 +3711,11 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
                         plan.risk_reasons = list(plan.risk_reasons) + notes
                 except Exception as exc:  # noqa: BLE001 - 준비 실패가 계획을 막지 않는다(실행 때 다시 시도)
                     logger.warning("companion service plan failed: %s", exc)
+            #: 앱이 시작할 때 요구하는 설정값 — 빌드하기 **전에** 비어 있는 값을 알린다(실기기: JWT_SECRET 없이 빌드 뒤 종료).
+            try:
+                await asyncio.to_thread(_apply_settings_to_plan, plan, request.workspace_path)
+            except Exception as exc:  # noqa: BLE001 - 점검 실패가 계획을 막지 않는다
+                logger.warning("deploy settings check failed: %s", exc)
 
     _deployment_plans[plan.plan_id] = plan
     _plan_workspaces[plan.plan_id] = request.workspace_path or ""
@@ -3769,6 +3818,45 @@ class ReadinessRequest(BaseModel):
 class ReadinessFixRequest(BaseModel):
     workspace_path: str
     code: str = Field(pattern=r"^[A-Z_]{3,64}$")
+
+
+class DeploySettingsRequest(BaseModel):
+    """배포 화면에서 넣은 설정값 또는 로컬 데모 전환. 값은 ~/.recoder 에만 보관하고 응답에 싣지 않는다."""
+    plan_id: str
+    values: dict[str, str] = Field(default_factory=dict)
+    demo: Optional[bool] = None
+
+
+@router.post("/api/deploy/settings")
+async def save_deploy_settings(request: DeploySettingsRequest) -> dict:
+    import deploy_settings
+    plan = _deployment_plans.get(request.plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="배포 계획을 찾지 못했습니다. 새 배포 계획을 만드세요.")
+    workspace = _plan_workspaces.get(request.plan_id, "")
+    if plan.method != DeployMethod.LOCAL_DOCKER or not plan.container_name or not workspace:
+        raise HTTPException(status_code=400, detail="로컬 Docker 배포 계획에서만 설정할 수 있습니다.")
+    known = {s.get("name") for s in plan.settings or []}
+    unknown = [k for k in request.values if k not in known]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"이 앱이 요구하지 않는 설정입니다: {', '.join(unknown)}")
+    too_short = [s["name"] for s in plan.settings or []
+                 if s.get("name") in request.values and (request.values[s["name"]] or "").strip()
+                 and len(request.values[s["name"]].strip()) < int(s.get("min_length") or 0)]
+    if too_short:
+        raise HTTPException(status_code=400, detail=f"{', '.join(too_short)} 값이 너무 짧습니다(앱이 요구하는 최소 길이 미만).")
+    try:
+        if request.values:
+            await asyncio.to_thread(deploy_settings.save_values, plan.container_name, request.values)
+        if request.demo is not None:
+            if request.demo and not (plan.demo or {}).get("available"):
+                raise HTTPException(status_code=400, detail="이 앱은 결제를 끈 로컬 데모 실행을 지원하지 않습니다.")
+            await asyncio.to_thread(deploy_settings.set_demo, plan.container_name, request.demo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await asyncio.to_thread(_apply_settings_to_plan, plan, workspace)
+    return {"plan_id": plan.plan_id, "settings": plan.settings, "settings_missing": plan.settings_missing,
+            "demo": plan.demo, "risk_reasons": plan.risk_reasons}
 
 
 @router.post("/api/deploy/readiness")
@@ -4222,6 +4310,24 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         #: (test_replace_safety)이 깨진다. 빌드 실패는 돌고 있던 컨테이너를 건드리기
         #: 전이라 되돌릴 것이 없다.
         workspace_for_build = _plan_workspaces.get(request.plan_id, "")
+        if plan.method == DeployMethod.LOCAL_DOCKER and workspace_for_build and plan.container_name:
+            #: 승인 뒤에 .env 를 고쳤거나 값을 넣었을 수 있다 — 지금 상태로 다시 본다. 비어 있으면 빌드하지 않는다.
+            try:
+                await asyncio.to_thread(_apply_settings_to_plan, plan, workspace_for_build)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("deploy settings check failed: %s", exc)
+            if plan.settings_missing:
+                names = ", ".join(plan.settings_missing)
+                return {
+                    "status": "failed", "stage": "settings", "plan_id": request.plan_id,
+                    "message": f"앱에 필요한 설정이 비어 있어 배포하지 않았습니다: {names}",
+                    "stderr": "", "stdout": "",
+                    "settings": plan.settings, "settings_missing": plan.settings_missing, "demo": plan.demo,
+                    "diagnosis": {"code": "APP_MISSING_SETTING", "title": "앱에 필요한 설정값이 비어 있음",
+                                  "cause": f"이 앱은 시작할 때 {names} 값을 요구합니다. 비어 있으면 시작하자마자 종료합니다.",
+                                  "fix": "배포 화면의 '필요한 설정'에 값을 넣거나, 지원하는 앱이면 '결제를 끈 로컬 데모'로 실행하세요. 코드를 고칠 필요는 없습니다. 기존 컨테이너는 그대로입니다.",
+                                  "lines": [], "step": "설정 확인", "missing_env": plan.settings_missing},
+                }
         pre_deploy_fixes: list[dict] = []
         if plan.method == DeployMethod.LOCAL_DOCKER and workspace_for_build and Path(workspace_for_build).is_dir():
             #: 점검이 "이대로면 빌드·실행이 실패한다"고 확정한 것 중 확실히 고칠 수 있는 것은 빌드 전에 고친다
@@ -4351,7 +4457,13 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 cmd_args.extend(['-e', f'{key}={value}'])
             #: PC 의 .env 값 — 이미지에는 넣지 않고(.dockerignore) 실행할 때만 넘긴다. 키·결제 연동이 컨테이너에서도 동작한다.
             env_file_paths = _resolved_env_files(_ws_for_label, plan.env_files)
-            cmd_args.extend(_env_file_args(env_file_paths, set(plan.env.keys())))
+            _app_port = int(next(iter(plan.ports.values()), 3001))
+            #: 필요한 설정(자동 생성한 서명 키·입력한 키·로컬 데모 값) — 기록·계획에 남기지 않고 실행할 때만 넘긴다.
+            settings_env = _settings_env(str(plan.container_name), _ws_for_label,
+                                         _provided_env_names(plan.env, env_file_paths), _app_port)
+            for key, value in settings_env.items():
+                cmd_args.extend(['-e', f'{key}={value}'])
+            cmd_args.extend(_env_file_args(env_file_paths, set(plan.env.keys()) | set(settings_env)))
             if plan.companions:
                 #: 앱보다 먼저 DB 를 띄우고 응답할 때까지 기다린다. 실패하면 기존 컨테이너를 건드리지 않고 멈춘다.
                 import local_services
@@ -4371,6 +4483,36 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                                       "fix": "Docker Desktop 이 켜져 있고 인터넷에 연결됐는지 확인한 뒤 다시 배포하세요. 기존 컨테이너는 그대로입니다.",
                                       "lines": [], "step": "DB 준비"},
                     }
+            if plan.demo and plan.demo.get("available") and not plan.demo.get("enabled"):
+                import deploy_settings
+                await asyncio.to_thread(deploy_settings.remove_demo, str(plan.container_name))
+            if plan.demo and plan.demo.get("enabled"):
+                #: 결제를 끈 로컬 데모 — 모의 결제 서버를 같은 네트워크에 띄우고, 데모 상품을 한 번 넣는다.
+                import deploy_settings
+                try:
+                    demo_net = await asyncio.to_thread(
+                        deploy_settings.ensure_demo, str(plan.container_name), str(runtime_image), _app_port,
+                        lambda m: report_progress('services', m))
+                except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                    return {
+                        "status": "failed", "stage": "services", "plan_id": request.plan_id,
+                        "message": f"로컬 데모용 모의 결제 서버를 준비하지 못했습니다: {exc}",
+                        "stderr": str(exc), "stdout": "",
+                        "diagnosis": {"code": "COMPANION_SERVICE", "title": "모의 결제 서버 준비 실패", "cause": str(exc),
+                                      "fix": "Docker Desktop 이 켜져 있는지 확인한 뒤 다시 배포하세요. 기존 컨테이너는 그대로입니다.",
+                                      "lines": [], "step": "데모 준비"},
+                    }
+                if "--network" not in cmd_args:
+                    cmd_args.extend(demo_net)
+                init_script = deploy_settings.demo_init_script(_ws_for_label)
+                if init_script:
+                    report_progress('services', '데모 상품을 넣습니다')
+                    env_only = [a for i, a in enumerate(cmd_args) if a == '-e' or (i and cmd_args[i - 1] == '-e')]
+                    net_only = ['--network', cmd_args[cmd_args.index('--network') + 1]] if '--network' in cmd_args else []
+                    ok, out = await asyncio.to_thread(deploy_settings.run_demo_init, str(runtime_image), init_script,
+                                                      [*net_only, *env_only])
+                    if not ok:
+                        report_progress('services', f"데모 상품을 넣지 못했습니다(배포는 계속합니다): {out[-160:]}")
             cmd_args.extend(['--restart', 'unless-stopped', str(runtime_image)])
 
         restored_previous = False
@@ -4763,6 +4905,10 @@ async def rollback(request: RollbackRequest) -> dict:
                 status_code=400,
                 detail=f"기록된 환경변수 이름이 올바르지 않습니다: {_k!r}",
             )
+        run_args.extend(["-e", f"{_k}={_v}"])
+    _rb_settings = _settings_env(record.container_name, "", set(rollback_env or {}),
+                                 int(next(iter((rollback_ports or {}).values()), 3001)))
+    for _k, _v in _rb_settings.items():
         run_args.extend(["-e", f"{_k}={_v}"])
     run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
     run_args.extend(["--restart", "unless-stopped", record.rollback_target])
