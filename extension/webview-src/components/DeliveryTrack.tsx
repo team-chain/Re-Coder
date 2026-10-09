@@ -1,13 +1,13 @@
 /**
- * 배포 진행 애니메이션 — 동물 팀원이 박스(빌드한 앱)를 들고 배포 단계를 따라 옮긴다.
+ * 배포 진행 애니메이션 — 리코더(Recoder Character)가 박스(빌드한 앱)를 들고 배포 단계를 따라 옮긴다.
  *
  * 위치는 **실제 진행 단계**(코어의 SSE 진행 이벤트)로만 정한다. 한 단계 안에서는 다음 단계 직전까지
  * 천천히 다가가기만 하고(가짜로 다음 단계에 도착하지 않는다), 이벤트가 오면 그 단계로 이동한다.
  * 걷는 빠르기는 최근 단계가 얼마나 빨리 끝났는지에 맞춘다 — 빨리 진행되면 빨리, 오래 걸리면 천천히.
  * 실패하면 박스를 내려놓고 멈추며, 완료되면 목적지에 박스를 넣는다.
  */
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ANIMAL_NAMES, AnimalKind, bodySvg, pickAnimal } from "./teamAnimals";
+import React, { useEffect, useRef, useState } from "react";
+import { characterImg, CHARACTER_NAME } from "./recoderCharacter";
 
 export type DeliveryState = "running" | "pending" | "done" | "failed";
 
@@ -18,8 +18,8 @@ export interface DeliveryTrackProps {
   state: DeliveryState;
   /** 목적지 이름(예: "Docker", "S3", "ECS"). */
   destination: string;
-  /** 테스트용 고정 동물. 없으면 화면마다 무작위. */
-  animal?: AnimalKind;
+  /** 예전 호출 호환용(무시). 배달은 항상 리코더가 한다. */
+  animal?: string;
 }
 
 const css = `
@@ -73,8 +73,7 @@ export function stepSeconds(lastSegmentMs: number | null): number {
   return Math.min(0.9, Math.max(0.22, lastSegmentMs / 12000));
 }
 
-export function DeliveryTrack({ index, stages, state, destination, animal }: DeliveryTrackProps) {
-  const kind = useMemo<AnimalKind>(() => animal ?? pickAnimal([]), [animal]);
+export function DeliveryTrack({ index, stages, state, destination }: DeliveryTrackProps) {
   const n = Math.max(1, stages.length);
   const clamped = Math.max(0, Math.min(index, n));
   const enteredAt = useRef<number>(Date.now());
@@ -108,7 +107,7 @@ export function DeliveryTrack({ index, stages, state, destination, animal }: Del
 
   return (
     <div className={`rc-dt ${state}`} data-testid="delivery-track" data-state={state} data-ratio={ratio.toFixed(3)}
-      role="img" aria-label={`${ANIMAL_NAMES[kind]}가 배포 박스를 옮기는 중 — ${label}`}
+      role="img" aria-label={`${CHARACTER_NAME}가 배포 박스를 옮기는 중 — ${label}`}
       style={{ ["--rc-dt-step" as string]: `${stepSeconds(segmentMs)}s` } as React.CSSProperties}>
       <style>{css}</style>
       <div className="rc-dt-line"><div className="rc-dt-fill" style={{ width: `${ratio * 100}%` }} /></div>
@@ -116,8 +115,8 @@ export function DeliveryTrack({ index, stages, state, destination, animal }: Del
         <span key={name} title={name} className={`rc-dt-cp${i < clamped || state === "done" ? " ok" : i === clamped ? " now" : ""}`}
           style={{ left: `calc(14px + (100% - 66px) * ${i / n})` }} />
       ))}
-      <div className="rc-dt-walker" style={{ left: `calc(14px + (100% - 66px) * ${ratio})` }} title={`${ANIMAL_NAMES[kind]} · ${label}`}>
-        <span className="body" dangerouslySetInnerHTML={{ __html: bodySvg(kind, 40) }} />
+      <div className="rc-dt-walker" style={{ left: `calc(14px + (100% - 66px) * ${ratio})` }} title={`${CHARACTER_NAME} · ${label}`}>
+        <span className="body" dangerouslySetInnerHTML={{ __html: characterImg(40) }} />
         <span className="box" dangerouslySetInnerHTML={{ __html: BOX }} />
       </div>
       <div className="rc-dt-dest"><DestIcon done={state === "done"} />{destination}</div>

@@ -88,3 +88,34 @@ app.get('/b', x => two());`);
  assert.deepEqual(graph.edges.filter(e=>e.from===a.id).map(e=>e.to),['one']);
  assert.deepEqual(graph.edges.filter(e=>e.from===b.id).map(e=>e.to),['two']);
 });
+test('스타일 파일은 고립으로 표시하지 않는다 — import/link/@import 로 연결하고, 못 찾아도 중립 표시',()=>{
+ const graph=project({main:'src/main.js'},{
+  'src/main.js':"import './app.css';\nimport { x } from './util';\nimport '@/theme.scss';",
+  'src/util.js':'export const x=1;',
+  'src/app.css':"@import url('./base.css');\nbody{color:red}",
+  'src/base.css':'*{margin:0}',
+  'src/theme.scss':"@use 'vars';",
+  'src/_vars.scss':'$c: red;',
+  'public/index.html':'<link rel="stylesheet" href="/site.css"><script src="/app.js"></script>',
+  'public/site.css':'h1{}','public/app.js':'',
+  'legacy/unused.css':'p{}','legacy/dead.js':'',
+  'vite.config.js':'export default {}','tailwind.config.js':'module.exports={}',
+ });
+ const n=id=>graph.nodes.find(x=>x.id===id);
+ const has=(a,b)=>graph.edges.some(e=>e.from===a&&e.to===b);
+ assert.ok(has('src/main.js','src/app.css'));assert.ok(has('src/app.css','src/base.css'));
+ assert.ok(has('src/main.js','src/theme.scss'));assert.ok(has('src/theme.scss','src/_vars.scss'));
+ assert.ok(has('public/index.html','public/site.css'));assert.ok(has('public/index.html','public/app.js'));
+ for(const id of ['src/app.css','src/base.css','src/theme.scss','src/_vars.scss','public/site.css','legacy/unused.css']){
+  assert.ok(!n(id).flags.includes('orphan'),id);assert.ok(n(id).flags.includes('style'),id);assert.equal(n(id).layer,'style');
+ }
+ assert.ok(!n('public/app.js').flags.includes('orphan'));
+ assert.ok(n('legacy/unused.css').flags.includes('style_unlinked'));
+ assert.ok(!graph.findings.some(f=>f.node.endsWith('.css')||f.node.endsWith('.scss')));
+ assert.ok(n('legacy/dead.js').flags.includes('orphan'));
+ for(const id of ['vite.config.js','tailwind.config.js']){assert.ok(!n(id).flags.includes('orphan'),id);assert.ok(n(id).flags.includes('config'),id);}
+ const {projSub}=require('../out/webview-test/components/CodeMap.js');
+ assert.equal(projSub(n('legacy/unused.css')),'스타일 파일');assert.equal(projSub(n('src/app.css')),'1곳에서 사용하는 스타일');
+ const {flagText}=require('../out/webview-test/components/canvas/model.js');
+ assert.equal(flagText(n('legacy/unused.css').flags),'스타일');assert.equal(flagText(['orphan']),'고립');
+});

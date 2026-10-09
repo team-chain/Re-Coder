@@ -35,6 +35,13 @@ os.environ.setdefault(
 # 개발자의 진짜 장부에 번호를 적는다. 그러면 `build_adr_ops` 를 부르는
 # 테스트가 실행될 때마다 번호가 올라가고, 번호를 단언하는 테스트는
 # **몇 번째로 돌리느냐에 따라 결과가 달라진다.**
+# **동반 DB 상태(새 DB 세대·데모 여부·허용한 구조)도 개발자 홈에서 떼어 놓는다.**
+# 컨테이너 이름이 그 상태에 따라 shop-postgres-2 처럼 바뀌므로, 남은 상태가 결과를 바꾸면 안 된다.
+os.environ.setdefault(
+    "RECODER_LOCAL_SERVICES_DIR",
+    str(Path(tempfile.mkdtemp(prefix="recoder-test-services-"))),
+)
+
 os.environ.setdefault(
     "RECODER_ADR_STORE",
     str(Path(tempfile.mkdtemp(prefix="recoder-test-adr-")) / "adr_reservations.json"),

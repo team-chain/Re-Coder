@@ -1,3 +1,14 @@
+# DB 구조 확인 · 데모 전용 DB · 배포 후 확인 · 리코더 캐릭터 · 지도 스타일 표시 (2026-10-09, 1.1.33)
+
+- 실기기(세 번째 영상): 컨테이너 이름 `temp` 를 12개 앱이 같이 써서 `temp-postgres` 에 다른 앱의 테이블이 남아 있었고, `/health` 는 통과했지만 `/api/products` 가 500(`errorMissingColumn`). 재현 확인.
+- `local_services`: `db_suffix`(실제 "", "-2"…, 데모 "-demo", "-demo-2"…), `start_new_db`(번호 증가, 같은 이름의 컨테이너·`-data` 볼륨이 있으면 건너뜀, 예전 볼륨 유지), `accept_schema`/`schema_accepted`(DB 이름+초기화 SQL 지문), `expected_schema`(CREATE TABLE 파싱), `schema_status`(information_schema 와 비교, 확인 못 하면 막지 않음). 상태 폴더는 `RECODER_LOCAL_SERVICES_DIR`(테스트 격리).
+- `/api/deploy/execute`: 동반 DB 준비 직후 구조가 다르고 허용하지 않았으면 `stage: "db_schema"`, `diagnosis.code = DB_SCHEMA_MISMATCH`, `db_choice{db, missing_tables, missing_columns, other_tables}` 로 멈춘다(앱 컨테이너는 건드리지 않음). `POST /api/deploy/db-choice {plan_id|container_name, choice: "new"|"keep"}`.
+- 배포 후: `app_check` — 코드에서 찾은 조회 API(Express `app.use('/api/..')`·`app.get`, FastAPI/Flask, 최대 3개, webhooks·auth 등 제외)를 GET. 5xx 면 `docker logs` 로 `DB_SCHEMA_MISMATCH`/`APP_RUNTIME_ERROR` 진단. `demo_seed{ok, script, message}`.
+- 웹뷰: `DbChoiceCard.tsx`(DbSchemaChoice·AppCheckWarning·DemoSeedWarning), ShipMode 는 선택 뒤 같은 계획으로 다시 실행. 앱 확인 오류면 초록 배너를 숨긴다.
+- 캐릭터: `recoderCharacter.ts`(Recoder Character.png 배경 제거 96px data URI, 워터마크 제외). `teamAnimals.ts` 의 `AnimalKind` 는 저장된 팀 구성 호환용 내부 번호로만 남고 그림은 모두 리코더. 팀원 이름은 `memberLabel`(설계·개발 N·검토). `DeliveryTrack` aria "리코더가 배포 박스를 옮기는 중". 캔버스 드래그 배달은 사용자 요청으로 뺐다.
+- 지도(`src/codemap/analyzer.ts`): 스타일 확장자 `.css/.scss/.sass/.less` → 층 `style`, 플래그 `style`(+연결 못 찾으면 `style_unlinked`), 과부하·고립 대상 아님. 도구 설정 파일 → 플래그 `config`. 부수 효과 import·CSS `@import`/`@use`/`@forward`·루트 기준(`/x`, `public/`, `static/`, `src/`)·`@/` 별칭·SCSS partial 해석. UI(`CodeMap.tsx` `projSub`, 캔버스 `flagText`)는 중립 표시.
+- 검증: Core 2,455개·확장 530개 통과. code-server UI 로 (1) 다른 앱 테이블이 있는 DB → 선택 카드 → [새 DB로 시작] → 남아 있던 `-3` 볼륨 건너뛰고 `shop-postgres-4` → 배포 완료·`/api/products` 200, 배달 트랙은 리코더 이미지, (2) 팀 모드 구성·보드에 리코더 6명(설계·개발 1~4·검토), (3) 아키텍처 지도에서 CSS 16개가 모두 "스타일"(고립 0), `vite.config.js` 는 "도구 설정". 클라우드 샌드박스의 git URL 재작성 환경변수 때문에 `canvasConnections` 1건이 실패하는 것은 환경 문제(변수를 빼면 통과).
+
 # 로컬 Docker 배포 — 필요한 설정 · 결제를 끈 로컬 데모 (2026-10-09, 1.1.32)
 
 - 실기기: 검증된 쇼핑몰 기반(develop #83)을 로컬 Docker 로 배포하면 `JWT_SECRET`·`STRIPE_SECRET_KEY`·`STRIPE_WEBHOOK_SECRET` 이 없어 빌드 뒤 즉시 종료, 안내는 "auth.js 코드를 고치라" 였다.

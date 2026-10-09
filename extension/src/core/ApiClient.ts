@@ -537,6 +537,14 @@ export class ApiClient {
         return resp.data;
     }
 
+    /** DB 테이블 구조가 앱과 다를 때의 선택 — new: 새 DB 로 시작(기존 DB 는 남김), keep: 그대로 사용. */
+    async chooseDeployDb(choice: 'new' | 'keep', planId?: string, containerName?: string): Promise<{ container_name: string; choice: string; db: string; message: string }> {
+        const resp = await this.request<{ container_name: string; choice: string; db: string; message: string }>(
+            'POST', '/api/deploy/db-choice', { plan_id: planId ?? null, container_name: containerName ?? null, choice }, false, 30000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'DB 선택을 저장하지 못했습니다.'); }
+        return resp.data;
+    }
+
     /** 사용자가 누른 자동 수정 한 건. 원본은 프로젝트의 .recoder/backups 에 남는다. */
     async fixBuildReadiness(workspacePath: string, code: string): Promise<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }> {
         const resp = await this.request<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }>(

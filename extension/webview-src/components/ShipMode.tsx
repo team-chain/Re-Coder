@@ -16,6 +16,7 @@ import { LocalRollbackResult, LocalRollbackStatus, rollbackWatchId } from "./Loc
 import { BuildDiagnosis, BuildFailure, ReadinessIssue, ReadinessPanel } from "./ReadinessPanel";
 import { issueKind, shortIssue } from "./issueText";
 import { DeployDemo, DeploySetting, DeploySettingsPanel } from "./DeploySettingsPanel";
+import { AppCheckWarning, DbDiagnosis, DbSchemaChoice, DemoSeedWarning } from "./DbChoiceCard";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -228,7 +229,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
-  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean }; security_scan?: { status?: string; high_count?: number; reason?: string }; auto_fixed?: Array<{ code: string; message: string; changed?: string[] }>; screen?: { ok?: boolean | null; checked?: string; warnings?: string[] } } | null>(null);
+  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean }; security_scan?: { status?: string; high_count?: number; reason?: string }; auto_fixed?: Array<{ code: string; message: string; changed?: string[] }>; screen?: { ok?: boolean | null; checked?: string; warnings?: string[] }; app_check?: { status?: string; path?: string; http_status?: number; diagnosis?: DbDiagnosis }; demo_seed?: { ok: boolean; script?: string; message?: string } } | null>(null);
   //: 배포 뒤 감시(연속 검증) 스냅샷과 롤백 결과 — 로컬 Docker 배포의 D1~D4.
   //: 예전엔 코어가 감시하고 롤백 후보를 관리해도 사이드바 어디에도 표시·승인 UI 가 없었다.
   const [watch, setWatch] = useState<VerificationSnapshot | null | "none">(null);
@@ -253,6 +254,11 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const [approvalContext, setApprovalContext] = useState<"infra" | "deploy" | null>(null);
   const [activeFileTab, setActiveFileTab] = useState<InfraFileTab>("dockerfile");
   const [settingsBusy, setSettingsBusy] = useState(false);
+  //: DB 테이블 구조가 앱과 다를 때 — 배포 전 선택(dbChoice) · 배포 후 "새 DB로 시작"(dbBusy).
+  const [dbChoice, setDbChoice] = useState<DbDiagnosis | null>(null);
+  const [dbBusy, setDbBusy] = useState(false);
+  const [dbError, setDbError] = useState("");
+  const rerunAfterDbChoice = useRef(false);
   const [settingsError, setSettingsError] = useState("");
   const pendingScanRef = useRef<string | null>(null);
 
@@ -354,6 +360,25 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           : cur);
         return;
       }
+      if (type === "deploy.db.result") {
+        setDbBusy(false);
+        setDbChoice(null);
+        if (rerunAfterDbChoice.current) {
+          //: 배포 전 선택 — 사용자가 이미 승인한 같은 계획으로 다시 실행한다.
+          rerunAfterDbChoice.current = false;
+          rerunRef.current?.();
+        } else {
+          //: 배포 후 "새 DB로 시작" — 계획을 다시 만들어 승인을 받는다.
+          createPlanRef.current?.();
+        }
+        return;
+      }
+      if (type === "deploy.db.error") {
+        setDbBusy(false);
+        rerunAfterDbChoice.current = false;
+        setDbError((payload as { message?: string }).message ?? "DB 선택을 저장하지 못했습니다.");
+        return;
+      }
       if (type === "deploy.settings.error") {
         setSettingsBusy(false);
         setSettingsError((payload as { message?: string }).message ?? "설정을 저장하지 못했습니다.");
@@ -397,6 +422,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           continuous_verification?: { enabled?: boolean; started?: boolean };
           security_scan?: { status?: string; high_count?: number; reason?: string };
         };
+        //: DB 테이블 구조가 앱과 다르다 — 조용히 쓰지 않고 묻는다(기존 컨테이너는 그대로).
+        const schemaStop = payload as { stage?: string; diagnosis?: DbDiagnosis };
+        if (schemaStop.stage === "db_schema" && schemaStop.diagnosis) {
+          setProgress(null);
+          setDbChoice(schemaStop.diagnosis);
+          setDbError("");
+          setStep("planReady");
+          return;
+        }
         //: 빌드 전에 "필요한 설정이 비어 있음" 으로 멈췄다 — 같은 계획에서 바로 채우고 다시 승인하게 한다.
         const pre = payload as { stage?: string; settings?: DeploySetting[]; settings_missing?: string[]; demo?: DeployDemo | null };
         if (pre.stage === "settings" && pre.settings_missing?.length) {
@@ -526,6 +560,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
 
   const handleDeploy = useCallback(() => {
     if (!plan) { return; }
+    setDbChoice(null);
     progressPlan.current=plan.plan_id;
     setProgress({step:'queued',message:'승인된 배포를 준비합니다',plan_id:plan.plan_id});
     postMessage("executeDeployment", { planId: plan.plan_id, approved: true });
@@ -543,6 +578,20 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
     if (!plan) { return; }
     setSettingsBusy(true); setSettingsError("");
     postMessage("deploy.settings.save", { planId: plan.plan_id, values: {}, demo: enabled });
+  }, [plan, postMessage]);
+
+  const handleDbChoice = useCallback((choice: "new" | "keep") => {
+    if (!plan) { return; }
+    setDbBusy(true); setDbError("");
+    rerunAfterDbChoice.current = true;
+    postMessage("deploy.db.choice", { planId: plan.plan_id, choice });
+  }, [plan, postMessage]);
+
+  const handleNewDbAfterDeploy = useCallback(() => {
+    if (!plan?.container_name) { return; }
+    setDbBusy(true); setDbError("");
+    rerunAfterDbChoice.current = false;
+    postMessage("deploy.db.choice", { containerName: plan.container_name, choice: "new" });
   }, [plan, postMessage]);
 
   const handleFixReadiness = useCallback((code: string) => {
@@ -566,6 +615,11 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       method: "local_docker",
     });
   }, [postMessage]);
+
+  const rerunRef = useRef<() => void>();
+  const createPlanRef = useRef<() => void>();
+  rerunRef.current = handleDeploy;
+  createPlanRef.current = () => { setDeployResult(null); setWatch(null); handleCreatePlan(); };
 
   // 롤백 뒤에는 복구된 이전 배포의 감시를 조회한다. 이전 실패 스냅샷은 버린다.
   const deploymentId = deployResult?.deployment_id;
@@ -881,6 +935,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           <div><strong>포트:</strong> {Object.entries(plan.ports).map(([h, c]) => `${h}→${c}`).join(", ")}</div>
         </div>
       )}
+      {step === "planReady" && plan && dbChoice && (
+        <DbSchemaChoice diagnosis={dbChoice} busy={dbBusy} error={dbError} onChoose={handleDbChoice} />
+      )}
       {step === "planReady" && plan && (plan.settings?.length ?? 0) > 0 && (
         <DeploySettingsPanel settings={plan.settings ?? []} missing={plan.settings_missing ?? []} demo={plan.demo}
           busy={settingsBusy} error={settingsError} onSave={handleSaveSettings} onDemo={handleDemo} />
@@ -919,6 +976,11 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           보안 검사 통과 — CRITICAL 없음, HIGH {deployResult.security_scan.high_count}건은 경고로 남았습니다.
         </div>
       )}
+      {step === "done" && deployResult?.app_check?.status === "error" && (
+        <AppCheckWarning check={deployResult.app_check} busy={dbBusy} onNewDb={plan?.container_name ? handleNewDbAfterDeploy : undefined} />
+      )}
+      {(step === "done" || step === "error") && deployResult?.demo_seed && <DemoSeedWarning seed={deployResult.demo_seed} />}
+      {dbError && step === "done" && <div role="alert" style={{ color: "var(--vscode-errorForeground,#f48771)", fontSize: 11, marginBottom: 8 }}>{dbError}</div>}
       {/* ── Done banner ── */}
       {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deploymentHealthVerdict(deployResult, watch) !== "healthy" ? (
         //: docker run 은 됐지만 헬스 확인은 실패 — "통과" 로 칠하지 않는다.
@@ -935,7 +997,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
             </div>
           )}
         </div>
-      ) : (
+      ) : deployResult?.app_check?.status === "error" ? null : (
         <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
           ✓ 배포 완료! Health Check 통과
           {deployResult?.health_check_url && (

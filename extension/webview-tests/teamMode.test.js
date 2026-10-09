@@ -40,14 +40,15 @@ test('진행 이벤트를 화면 상태로: 설계 → 동시 작업 → 이어 
  assert.equal(formatElapsed(125.4),'2:05');
 });
 
-test('보드: 에이전트별 동물·역할·하고 있는 일, 일시 정지면 [이어서 만들기]',()=>{
+test('보드: 에이전트마다 리코더 캐릭터·역할 번호·하고 있는 일, 일시 정지면 [이어서 만들기]',()=>{
  const roster=buildRoster(2,seq(0,0.2,0.4,0.6));
  let v=emptyTeamView();
  for(const e of [{step:'planned',total:4,files:[{file:'a.js',layer:0},{file:'b.js',layer:1},{file:'c.js',layer:1},{file:'d.html',layer:2}]},
    {step:'file_start',agent:'agent-1',file:'b.js'},{step:'file_part',agent:'agent-2',file:'c.js',part:2},{step:'file_done',agent:'agent-1',file:'a.js',done_count:1,total:4}])v=reduceTeam(v,e);
  const html=renderToStaticMarkup(React.createElement(TeamBoard,{roster,view:v}));
  assert.match(html,/팀 작업/);assert.match(html,/파일 1\/4/);assert.match(html,/c\.js · 2조각/);assert.match(html,/설계/);assert.match(html,/검토/);
- assert.match(html,/<svg/);assert.doesNotMatch(html,/이어서 만들기/);
+ assert.match(html,/<img src="data:image\/png;base64,/);assert.match(html,/개발 1/);assert.match(html,/개발 2/);
+ assert.doesNotMatch(html,/강아지|고양이|토끼|다람쥐|펭귄|판다/);assert.doesNotMatch(html,/이어서 만들기/);
  const paused=renderToStaticMarkup(React.createElement(TeamBoard,{roster,view:v,paused:{message:'AI 사용 한도',done:1,total:4},onResume:()=>{}}));
  assert.match(paused,/일시 정지/);assert.match(paused,/이어서 만들기 \(1\/4\)/);
 });
@@ -58,4 +59,5 @@ test('구성 막대: 팀 모드 켜면 팀원과 [＋ 개발 에이전트], 최�
  const full=renderToStaticMarkup(React.createElement(TeamComposer,{enabled:true,roster:buildRoster(MAX_DEV_AGENTS),onToggle(){},onAdd(){},onRemove(){}}));
  assert.match(full,/＋ 개발 에이전트/);assert.match(full,/<button type="button" disabled="" aria-label="개발 에이전트 추가">/);
  assert.match(full,/효과가 작을 수 있어요/);
+ assert.equal((full.match(/<img src="data:image\/png/g)||[]).length,MAX_DEV_AGENTS+2);assert.match(full,/리코더 · 개발 1/);
 });

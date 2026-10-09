@@ -73,6 +73,8 @@ def _save_records() -> None:
 _plans_pending_image_scan: dict[str, str] = {}
 #: plan_id → 플랜을 만든 워크스페이스. 로컬 Docker 배포의 `docker build` 가 여기서 돈다.
 _plan_workspaces: dict[str, str] = {}
+#: 함께 띄울 DB 접속 정보를 실행 때 다시 계산하기 위한 재료(앱이 읽는 환경변수 이름). 데모 전환·새 DB 로 DB 이름이 바뀐다.
+_plan_env_names: dict[str, list[str]] = {}
 #: `docker build` 상한(초). 의존성 설치가 끼면 몇 분 걸린다.
 LOCAL_BUILD_TIMEOUT_SECONDS = 600
 
@@ -3708,6 +3710,7 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
                     if companion_env:
                         plan.companions = [k for k in readiness.services if k in local_services.SERVICES]
                         plan.env = {**companion_env, **plan.env}  # 사용자가 준 값이 이긴다
+                        _plan_env_names[plan.plan_id] = list(readiness.env_names)
                         plan.risk_reasons = list(plan.risk_reasons) + notes
                 except Exception as exc:  # noqa: BLE001 - 준비 실패가 계획을 막지 않는다(실행 때 다시 시도)
                     logger.warning("companion service plan failed: %s", exc)
@@ -3818,6 +3821,112 @@ class ReadinessRequest(BaseModel):
 class ReadinessFixRequest(BaseModel):
     workspace_path: str
     code: str = Field(pattern=r"^[A-Z_]{3,64}$")
+
+
+_PROBE_SKIP = re.compile(r"auth|login|logout|signup|register|webhook|admin|payment|checkout|session|token|me$|upload", re.I)
+
+
+def _api_probe_paths(workspace: str, limit: int = 3) -> list[str]:
+    """서버 코드에서 매개변수 없는 읽기 API 경로를 찾는다(Express app.use/app.get, FastAPI·Flask GET)."""
+    import deploy_settings
+    found: list[str] = []
+    patterns = (
+        re.compile(r"""app\.use\(\s*['"](/api/[A-Za-z0-9_\-/]+)['"]"""),
+        re.compile(r"""(?:app|router)\.get\(\s*['"](/api/[A-Za-z0-9_\-/]+)['"]"""),
+        re.compile(r"""@(?:app|router)\.get\(\s*['"](/api/[A-Za-z0-9_\-/]+)['"]"""),
+        re.compile(r"""@app\.route\(\s*['"](/api/[A-Za-z0-9_\-/]+)['"]"""),
+    )
+    for path in deploy_settings._code_files(workspace) if workspace and Path(workspace).is_dir() else []:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for pattern in patterns:
+            for route in pattern.findall(text):
+                route = route.rstrip("/")
+                if route and not _PROBE_SKIP.search(route) and route not in found:
+                    found.append(route)
+    return found[:limit]
+
+
+_DB_SCHEMA_LOG = re.compile(r"""column "?([\w.]+)"? does not exist|relation "?([\w.]+)"? does not exist|errorMissingColumn|undefined_table|undefined_column|\b42703\b|\b42P01\b|no such (?:table|column)""", re.I)
+
+
+def _probe_app_api(plan, workspace: str) -> Optional[dict]:
+    """조회 API 를 한 번씩 불러 5xx 인지 본다. 5xx 면 컨테이너 로그에서 원인을 뽑는다."""
+    import urllib.error
+    import urllib.request
+    paths = _api_probe_paths(workspace)
+    if not paths:
+        return None
+    host_port = int(next(iter(plan.ports.keys())))
+    checked: list[dict] = []
+    failed = None
+    for route in paths:
+        url = f"http://127.0.0.1:{host_port}{route}"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=6) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        except Exception as exc:  # noqa: BLE001 - 연결 실패는 헬스 확인이 다룬다
+            checked.append({"path": route, "status": None, "error": str(exc)[:120]})
+            continue
+        checked.append({"path": route, "status": status})
+        if status >= 500 and failed is None:
+            failed = {"path": route, "http_status": status}
+    if failed is None:
+        return {"status": "ok", "checked": checked}
+    try:
+        done = subprocess.run(["docker", "logs", "--tail", "120", str(plan.container_name)], shell=False, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=30,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        logs = (done.stdout or "") + "\n" + (done.stderr or "")
+    except (OSError, subprocess.SubprocessError):
+        logs = ""
+    lines = [l for l in logs.splitlines() if l.strip()][-40:]
+    m = _DB_SCHEMA_LOG.search(logs)
+    if m:
+        what = next((g for g in m.groups() if g), "")
+        diagnosis = {"code": "DB_SCHEMA_MISMATCH", "title": "DB 테이블 구조가 앱과 다름",
+                     "cause": f"{failed['path']} 가 {failed['http_status']} 를 냈습니다. 앱이 찾는 {('`' + what + '`(테이블 또는 열)') if what else '테이블·열'}이 DB 에 없습니다 — 예전에 같은 이름으로 배포한 앱의 DB 를 쓰고 있을 가능성이 큽니다.",
+                     "fix": "[새 DB로 시작] 을 누르면 빈 DB 에 이 앱의 테이블을 만들어 다시 배포합니다(기존 DB 는 남겨 둡니다).",
+                     "lines": [l for l in lines if _DB_SCHEMA_LOG.search(l)][-6:] or lines[-6:], "step": "앱 응답 확인"}
+    else:
+        key = [l for l in lines if re.search(r"error|exception|fail", l, re.I)][-8:]
+        diagnosis = {"code": "APP_RUNTIME_ERROR", "title": "앱이 요청을 처리하다 오류를 냄",
+                     "cause": f"{failed['path']} 가 {failed['http_status']} 를 냈습니다. 컨테이너는 떠 있지만 이 요청을 처리하지 못합니다.",
+                     "fix": "아래 앱 로그의 오류를 확인하세요. PC 에서 같은 요청을 보내면 재현할 수 있습니다.",
+                     "lines": key or lines[-8:], "step": "앱 응답 확인"}
+    return {"status": "error", "checked": checked, **failed, "diagnosis": diagnosis}
+
+
+class DeployDbChoiceRequest(BaseModel):
+    plan_id: Optional[str] = None
+    container_name: Optional[str] = None
+    choice: Literal["new", "keep"]
+
+
+@router.post("/api/deploy/db-choice")
+async def choose_deploy_db(request: DeployDbChoiceRequest) -> dict:
+    """DB 테이블 구조가 앱과 다를 때 사용자의 선택 — 새 DB 로 시작(기존 DB 는 남김) 또는 그대로 사용."""
+    import local_services
+    plan = _deployment_plans.get(request.plan_id or "") if request.plan_id else None
+    container = (plan.container_name if plan else None) or request.container_name or ""
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,100}", container):
+        raise HTTPException(status_code=400, detail="컨테이너를 확인할 수 없습니다. 새 배포를 시작하세요.")
+    if request.choice == "new":
+        name = await asyncio.to_thread(local_services.start_new_db, container)
+        return {"container_name": container, "choice": "new", "db": name,
+                "message": f"다음 배포부터 새 DB({name})를 씁니다. 기존 DB 는 지우지 않았습니다."}
+    workspace = _plan_workspaces.get(request.plan_id or "", "") if request.plan_id else ""
+    init_sql = local_services.find_init_sql(workspace) if workspace else None
+    if init_sql is None:
+        raise HTTPException(status_code=400, detail="비교할 DB 초기화 파일을 찾지 못했습니다.")
+    fingerprint = local_services.schema_fingerprint(init_sql.read_text(encoding="utf-8-sig", errors="replace"))
+    await asyncio.to_thread(local_services.accept_schema, container, fingerprint)
+    return {"container_name": container, "choice": "keep", "db": local_services.service_container(container, "postgres"),
+            "message": "지금 DB 를 그대로 씁니다. 같은 구조로 다시 묻지 않습니다."}
 
 
 class DeploySettingsRequest(BaseModel):
@@ -4443,6 +4552,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 cmd_args.extend(["-p", f"{int(_hp)}:{int(_cp)}"])
             cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
+        demo_seed: Optional[dict] = None
         if plan.method == DeployMethod.LOCAL_DOCKER:
             # The template supplies the base command; apply all approved run
             # parameters, not just its first port mapping.
@@ -4453,6 +4563,16 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 cmd_args.extend(['--label', f'{WORKSPACE_LABEL}={workspace_fingerprint(_ws_for_label)}'])
             for hp, cp in plan.ports.items():
                 cmd_args.extend(['-p', f'{int(hp)}:{int(cp)}'])
+            if plan.companions and plan.container_name:
+                #: 승인 뒤 데모 전환·"새 DB로 시작" 으로 쓸 DB 가 바뀌었을 수 있다 — 접속 정보를 지금 기준으로 다시 만든다.
+                try:
+                    import local_services
+                    fresh_env, _notes = await asyncio.to_thread(
+                        local_services.plan, str(plan.container_name), list(plan.companions),
+                        _plan_env_names.get(request.plan_id, []))
+                    plan.env = {**plan.env, **fresh_env}
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("companion env refresh failed: %s", exc)
             for key, value in plan.env.items():
                 cmd_args.extend(['-e', f'{key}={value}'])
             #: PC 의 .env 값 — 이미지에는 넣지 않고(.dockerignore) 실행할 때만 넘긴다. 키·결제 연동이 컨테이너에서도 동작한다.
@@ -4483,6 +4603,28 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                                       "fix": "Docker Desktop 이 켜져 있고 인터넷에 연결됐는지 확인한 뒤 다시 배포하세요. 기존 컨테이너는 그대로입니다.",
                                       "lines": [], "step": "DB 준비"},
                     }
+                if "postgres" in plan.companions and init_sql is not None:
+                    #: 같은 컨테이너 이름으로 다른 앱을 배포했던 DB 를 조용히 쓰면 테이블 구조가 달라 앱이 500 을 낸다
+                    #: (실기기: TEMP 폴더에 앱 12개를 번갈아 배포 → 쇼핑몰 상품 조회 실패). 띄우기 전에 묻는다.
+                    schema = await asyncio.to_thread(local_services.schema_status, str(plan.container_name), init_sql)
+                    if not schema.get("ok") and not local_services.schema_accepted(str(plan.container_name), schema.get("fingerprint", "")):
+                        lines = ([f"없는 테이블: {', '.join(schema.get('missing_tables') or [])}"] if schema.get("missing_tables") else []) + [
+                            f"{t} 에 없는 열: {', '.join(cols)}" for t, cols in (schema.get("missing_columns") or {}).items()]
+                        if schema.get("other_tables"):
+                            lines.append(f"DB 에 있는 다른 테이블: {', '.join(schema['other_tables'][:8])}")
+                        return {
+                            "status": "failed", "stage": "db_schema", "plan_id": request.plan_id,
+                            "message": "DB 테이블 구조가 이 앱과 달라 배포를 멈췄습니다. 기존 컨테이너는 그대로입니다.",
+                            "stderr": "\n".join(lines), "stdout": "",
+                            "db_choice": {"db": schema.get("db"), "missing_tables": schema.get("missing_tables") or [],
+                                          "missing_columns": schema.get("missing_columns") or {},
+                                          "other_tables": schema.get("other_tables") or []},
+                            "diagnosis": {"code": "DB_SCHEMA_MISMATCH",
+                                          "title": "이 DB에는 다른 앱의 테이블이 있습니다",
+                                          "cause": f"{schema.get('db')} 에는 예전에 같은 이름으로 배포한 앱의 데이터가 남아 있어, 이 앱이 쓰는 테이블·열이 없습니다. 그대로 띄우면 화면은 열려도 조회가 실패합니다.",
+                                          "fix": "[새 DB로 시작] 을 누르면 빈 DB 에 이 앱의 테이블을 만들어 다시 배포합니다(기존 DB 는 지우지 않고 남겨 둡니다).",
+                                          "lines": lines, "step": "DB 구조 확인"},
+                        }
             if plan.demo and plan.demo.get("available") and not plan.demo.get("enabled"):
                 import deploy_settings
                 await asyncio.to_thread(deploy_settings.remove_demo, str(plan.container_name))
@@ -4511,6 +4653,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     net_only = ['--network', cmd_args[cmd_args.index('--network') + 1]] if '--network' in cmd_args else []
                     ok, out = await asyncio.to_thread(deploy_settings.run_demo_init, str(runtime_image), init_script,
                                                       [*net_only, *env_only])
+                    demo_seed = {"ok": ok, "script": init_script, **({} if ok else {"message": out[-600:]})}
                     if not ok:
                         report_progress('services', f"데모 상품을 넣지 못했습니다(배포는 계속합니다): {out[-160:]}")
             cmd_args.extend(['--restart', 'unless-stopped', str(runtime_image)])
@@ -4627,6 +4770,15 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(restore_source)
                     if restored_previous and rollback_source is not None:
                         restored_verification_resumed = await _resume_verification_for(rollback_source)
+
+        #: 헬스(/health)·첫 화면이 통과해도 조회 API 가 500 일 수 있다(실기기: DB 테이블 구조가 달라 상품 조회 실패).
+        #: 읽기 전용 API 를 한 번 불러 보고, 5xx 면 "배포는 됐지만 앱이 오류를 냄" 으로 알린다(되돌리지는 않는다).
+        app_check: Optional[dict] = None
+        if success and plan.method == DeployMethod.LOCAL_DOCKER and plan.ports:
+            try:
+                app_check = await asyncio.to_thread(_probe_app_api, plan, _plan_workspaces.get(request.plan_id, ""))
+            except Exception as exc:  # noqa: BLE001 - 확인 실패가 배포 결과를 바꾸지 않는다
+                logger.warning("app api probe failed: %s", exc)
 
         # 방금 띄운 이미지의 불변 참조를 남긴다. 다음 배포가 이 릴리스로 되돌릴 때
         # 태그가 아니라 이 값을 쓴다 — 태그는 그때 이미 다른 것을 가리킬 수 있다.
@@ -4759,6 +4911,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             "security_scan": post_build_scan,
             **({"screen": screen_result} if screen_result is not None else {}),
             **({"auto_fixed": pre_deploy_fixes} if pre_deploy_fixes else {}),
+            **({"demo_seed": demo_seed} if demo_seed is not None else {}),
+            **({"app_check": app_check} if app_check is not None else {}),
         }
 
 

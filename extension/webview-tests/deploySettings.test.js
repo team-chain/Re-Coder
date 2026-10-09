@@ -58,14 +58,14 @@ test('배달 애니메이션: 실제 단계로만 이동, 단계 안에서는 �
  assert.ok(creepFor(10**9,8000)<0.81 && creepFor(0,8000)===0);
  assert.ok(stepSeconds(500)<stepSeconds(60000));
  const done=renderToStaticMarkup(React.createElement(DeliveryTrack,{stages,index:4,state:'done',destination:'Docker',animal:'cat'}));
- assert.match(done,/data-ratio="1.000"/);assert.match(done,/고양이가 배포 박스를 옮기는 중 — Docker에 배달 완료/);
+ assert.match(done,/data-ratio="1.000"/);assert.match(done,/리코더가 배포 박스를 옮기는 중 — Docker에 배달 완료/);assert.match(done,/<img src="data:image\/png;base64,/);assert.doesNotMatch(done,/고양이|강아지|판다/);
  const failed=renderToStaticMarkup(React.createElement(DeliveryTrack,{stages,index:1,state:'failed',destination:'Docker',animal:'panda'}));
  assert.match(failed,/이미지 빌드 단계에서 멈췄어요/);assert.match(failed,/data-state="failed"/);
 });
 
-test('Docker 배포 진행 화면에 동물 배달이 붙는다',()=>{
+test('Docker 배포 진행 화면에 리코더 배달이 붙는다',()=>{
  const html=renderToStaticMarkup(React.createElement(DeploymentActivity,{target:'docker',event:{step:'build',message:'빌드 중'}}));
- assert.match(html,/delivery-track/);assert.match(html,/<svg/);
+ assert.match(html,/delivery-track/);assert.match(html,/리코더가 배포 박스를 옮기는 중/);assert.match(html,/<img src="data:image\/png/);
 });
 
 test('검증된 기반처럼 에이전트가 일하지 않으면 팀 보드를 띄우지 않는다',()=>{

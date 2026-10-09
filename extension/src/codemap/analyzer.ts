@@ -6,6 +6,10 @@
  *   - JS/TS/HTML/CSS: 정규식 + 중괄호 매칭.
  *
  * 선은 사실(import/호출/include), 색·위치는 해석(고립/과부하/계층).
+ *
+ * 스타일 파일(CSS·SCSS·LESS)은 코드가 아니라 화면에 입혀지는 자원이라 '고립'(안 쓰는 코드)으로
+ * 표시하지 않는다. JS 의 `import './x.css'`·HTML `<link>`·CSS `@import` 로 연결을 찾고, 못 찾아도
+ * 빌드 도구·프레임워크가 자동으로 넣는 경우가 많아 중립 표시('스타일')만 한다.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -22,7 +26,8 @@ const SKIP_DIRS = new Set([
     'out', '.next', 'target', 'coverage', 'vendor', '.tox', '__pypackages__',
 ]);
 const PY_EXT = ['.py'];
-const WEB_EXT = ['.js', '.mjs', '.jsx', '.ts', '.tsx', '.html', '.htm', '.css'];
+const STYLE_EXT = ['.css', '.scss', '.sass', '.less'];
+const WEB_EXT = ['.js', '.mjs', '.jsx', '.ts', '.tsx', '.html', '.htm', ...STYLE_EXT];
 const ALL_EXT = [...PY_EXT, ...WEB_EXT];
 
 const ENTRY_NAMES = new Set([
@@ -83,11 +88,20 @@ function moduleName(relPosix: string): string {
     return parts.join('.');
 }
 
+/** 빌드·테스트 도구가 이름으로 직접 읽는 설정 파일 — 아무도 import 하지 않는 게 정상이다. */
+const TOOL_CONFIG_RE = /^(?:vite|vitest|webpack|rollup|tailwind|postcss|jest|babel|next|nuxt|svelte|astro|playwright|eslint|prettier|tsup|esbuild|karma|cypress|metro|remix|drizzle|knexfile|gulpfile|gruntfile)(?:\.config)?\.(?:js|cjs|mjs|ts|cts|mts)$|^\.eslintrc\.(?:js|cjs)$|^(?:knexfile|gulpfile|gruntfile)\.(?:js|ts)$/i;
+export function isToolConfig(filename: string): boolean { return TOOL_CONFIG_RE.test(filename); }
+
+export function isStyleFile(filename: string): boolean {
+    const low = filename.toLowerCase();
+    return STYLE_EXT.some((x) => low.endsWith(x));
+}
+
 function layerOf(filename: string): string {
     const low = filename.toLowerCase();
     if (low.endsWith('.html') || low.endsWith('.htm')) { return 'entry'; }
     if (/\.(js|mjs|jsx|ts|tsx)$/.test(low)) { return 'service'; }
-    if (low.endsWith('.css')) { return 'data'; }
+    if (isStyleFile(low)) { return 'style'; }
     if (ENTRY_NAMES.has(filename)) { return 'entry'; }
     const stem = low.endsWith('.py') ? low.slice(0, -3) : low;
     if (DATA_HINTS.some((h) => stem.includes(h))) { return 'data'; }
@@ -333,6 +347,18 @@ function jsImportRefs(src: string): string[] {
     while ((m = re.exec(s))) { refs.push(m[1]); }
     re = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
     while ((m = re.exec(s))) { refs.push(m[1]); }
+    // 부수 효과 import — `import './styles.css'` (from 없이). 스타일 연결의 대부분이 이 형태다.
+    re = /(^|[;\n}])\s*import\s*["']([^"']+)["']/g;
+    while ((m = re.exec(s))) { refs.push(m[2]); }
+    return refs;
+}
+
+/** CSS/SCSS/LESS 안의 다른 스타일 연결 — `@import "x.css"`, `@import url(x.css)`, SCSS `@use`/`@forward`. */
+function cssRefs(src: string): string[] {
+    const s = src.replace(/\/\*[\s\S]*?\*\//g, ' ');
+    const refs: string[] = []; let m: RegExpExecArray | null;
+    const re = /@(?:import|use|forward)\s+(?:url\(\s*)?["']?([^"')\s;]+)["']?/g;
+    while ((m = re.exec(s))) { refs.push(m[1]); }
     return refs;
 }
 
@@ -340,10 +366,29 @@ function resolveRef(importerId: string, ref: string, idSet: Set<string>): string
     ref = ref.split('?')[0].split('#')[0].trim();
     if (!ref || /^(https?:)?\/\//.test(ref) || ref.startsWith('data:')) { return null; }
     const base = importerId.includes('/') ? importerId.slice(0, importerId.lastIndexOf('/')) : '';
-    const cand = toPosix(path.posix.normalize(path.posix.join(base, ref)));
-    if (idSet.has(cand)) { return cand; }
-    for (const ext of ['.js', '.mjs', '.jsx', '.ts', '.tsx', '/index.js']) {
-        if (idSet.has(cand + ext)) { return cand + ext; }
+    const bases: string[] = [];
+    if (ref.startsWith('/')) {
+        // 사이트 루트 기준(`<link href="/styles.css">`) — 정적 폴더(public 등)나 HTML 옆, 프로젝트 루트에서 찾는다.
+        const top = importerId.includes('/') ? importerId.split('/')[0] : '';
+        for (const b of [base, top, '', 'public', 'static', 'src']) { bases.push(path.posix.join(b, ref.slice(1))); }
+    } else if (ref.startsWith('@/') || ref.startsWith('~/')) {
+        bases.push(path.posix.join('src', ref.slice(2)));
+    } else if (ref.startsWith('~')) {
+        return null; // node_modules 패키지 스타일
+    } else {
+        bases.push(path.posix.join(base, ref));
+    }
+    for (const raw of bases) {
+        const cand = toPosix(path.posix.normalize(raw));
+        if (cand.startsWith('../')) { continue; }
+        if (idSet.has(cand)) { return cand; }
+        for (const ext of ['.js', '.mjs', '.jsx', '.ts', '.tsx', '/index.js', '/index.ts', ...STYLE_EXT]) {
+            if (idSet.has(cand + ext)) { return cand + ext; }
+        }
+        // SCSS partial — `@use 'vars'` → `_vars.scss`
+        const slash = cand.lastIndexOf('/');
+        const partial = slash < 0 ? `_${cand}` : `${cand.slice(0, slash)}/_${cand.slice(slash + 1)}`;
+        for (const ext of ['', '.scss', '.sass']) { if (idSet.has(partial + ext)) { return partial + ext; } }
     }
     return null;
 }
@@ -501,6 +546,8 @@ export function analyzeProject(root: string): ProjectResult {
             for (const ref of htmlRefs(src)) { const dst = resolveRef(f.id, ref, idSet); if (dst) { addEdge(f.id, dst); } }
         } else if (['.js', '.mjs', '.jsx', '.ts', '.tsx'].includes(f.ext)) {
             for (const ref of jsImportRefs(src)) { const dst = resolveRef(f.id, ref, idSet); if (dst) { addEdge(f.id, dst); } }
+        } else if (STYLE_EXT.includes(f.ext)) {
+            for (const ref of cssRefs(src)) { const dst = resolveRef(f.id, ref, idSet); if (dst) { addEdge(f.id, dst); } }
         }
     }
 
@@ -513,8 +560,12 @@ export function analyzeProject(root: string): ProjectResult {
         const ind = inDeg.get(f.id) || 0;
         const isEntry = layer === 'entry';
         const isPkgInit = name === '__init__.py';
-        if (ind === 0 && !isEntry && !isPkgInit && files.length > 1) { flags.push('orphan'); }
-        if (ind >= OVERLOAD_IMPORTS) { flags.push('overloaded'); }
+        const isStyle = STYLE_EXT.includes(f.ext);
+        //: 스타일 파일은 '고립(안 쓰는 코드)' 이 아니라 중립 표시. 연결을 못 찾았을 때만 style_unlinked 를 덧붙인다.
+        if (isStyle) { flags.push('style'); if (ind === 0) { flags.push('style_unlinked'); } }
+        else if (isToolConfig(name)) { flags.push('config'); }
+        else if (ind === 0 && !isEntry && !isPkgInit && files.length > 1) { flags.push('orphan'); }
+        if (ind >= OVERLOAD_IMPORTS && !isStyle) { flags.push('overloaded'); }
         nodes.push({ id: f.id, name, module: f.mod, layer, in_degree: ind, out_degree: outDeg.get(f.id) || 0, flags });
     }
 

@@ -3,7 +3,7 @@
  *
  * 2단계 줌:
  *   - 프로젝트(폴더) 뷰: 파일 노드 + 내부 import 엣지. 계층(entry→service→data→other)
- *     으로 위에서 아래로 배치. 고립(빨강)·과부하(노랑)를 색으로.
+ *     으로 위에서 아래로 배치. 고립(빨강)·과부하(노랑)를 색으로. 스타일 파일은 중립(스타일).
  *   - 파일 뷰: 파일을 누르면 그 안의 함수/메서드 호출 그래프.
  *
  * 관통 원칙: 선은 사실(import/call), 색·위치는 해석(고립/과부하/계층).
@@ -52,9 +52,9 @@ const C = {
   edge: "var(--vscode-charts-blue, #5b95ff)",
 };
 
-const LAYER_ORDER = ["entry", "service", "data", "other"];
+const LAYER_ORDER = ["entry", "service", "data", "style", "other"];
 const LAYER_LABEL: Record<string, string> = {
-  entry: "entry · 입구", service: "service · 처리", data: "data · 저장", other: "기타",
+  entry: "entry · 입구", service: "service · 처리", data: "data · 저장", style: "style · 스타일", other: "기타",
 };
 
 interface Pos { x: number; y: number; }
@@ -84,6 +84,15 @@ export function layoutGrid(nodes: { id: string }[], width: number): { pos: Map<s
   return { pos, height: Math.max(180, 40 + Math.ceil(nodes.length / cols) * 82) };
 }
 
+/** 프로젝트 노드 아래 한 줄 설명. 스타일 파일은 '아무도 import 안 함' 같은 실패 느낌의 문구를 쓰지 않는다. */
+export function projSub(n: ProjNode): string {
+  if (n.layer === "entry") return "진입점";
+  if (n.flags.includes("style")) return n.in_degree > 0 ? `${n.in_degree}곳에서 사용하는 스타일` : "스타일 파일";
+  if (n.flags.includes("config")) return "빌드·테스트 도구가 읽음";
+  if (n.flags.includes("orphan")) return "아무도 import 안 함";
+  return `${n.in_degree}곳서 의존`;
+}
+
 // ── 노드 칩 ──────────────────────────────────────────────────────────────────
 const NodeChip: React.FC<{
   x: number; y: number; title: string; sub?: string;
@@ -91,8 +100,11 @@ const NodeChip: React.FC<{
 }> = ({ x, y, title, sub, flags, degree, onClick, clickable }) => {
   const orphan = flags.includes("orphan");
   const over = flags.includes("overloaded");
+  const style = flags.includes("style");
+  const config = flags.includes("config");
   const accent = orphan ? C.red : over ? C.amber : C.line;
-  const flagLabel = orphan ? "고립" : over ? "과부하" : "";
+  //: 스타일 파일은 코드가 아니라 화면에 입혀지는 자원 — 빨간 '고립' 대신 중립 표시.
+  const flagLabel = orphan ? "고립" : over ? "과부하" : style ? "스타일" : config ? "도구 설정" : "";
   return (
     <div
       onClick={onClick}
@@ -109,7 +121,8 @@ const NodeChip: React.FC<{
         <div style={{
           position: "absolute", top: -9, left: 8, fontSize: 8.5, fontWeight: 700,
           padding: "1px 6px", borderRadius: 10, whiteSpace: "nowrap",
-          background: orphan ? C.red : C.amber, color: "#10141a",
+          background: orphan ? C.red : over ? C.amber : C.panel, color: orphan || over ? "#10141a" : C.dim,
+          border: orphan || over ? "none" : `1px solid ${C.line}`,
         }}>{flagLabel}</div>
       )}
       <div style={{
@@ -306,7 +319,7 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
                 const p = projLayout.pos.get(n.id)!;
                 return (
                   <NodeChip key={n.id} x={p.x} y={p.y} title={n.name}
-                    sub={n.layer === "entry" ? "진입점" : n.flags.includes("orphan") ? "아무도 import 안 함" : `${n.in_degree}곳서 의존`}
+                    sub={projSub(n)}
                     flags={n.flags} degree={n.in_degree}
                     clickable onClick={() => openFileMap(n.id)} />
                 );
@@ -317,6 +330,7 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
             <span style={{ display: "flex", alignItems: "center", gap: 5 }}><i style={{ width: 14, height: 2, background: C.edge, display: "inline-block" }} />import</span>
             <span style={{ display: "flex", alignItems: "center", gap: 5 }}><i style={{ width: 9, height: 9, border: `1px dashed ${C.red}`, display: "inline-block" }} />고립</span>
             <span style={{ display: "flex", alignItems: "center", gap: 5 }}><i style={{ width: 9, height: 9, background: C.amber, display: "inline-block", borderRadius: 2 }} />과부하</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }} title="CSS·SCSS 같은 스타일 파일과 빌드·테스트 도구 설정 파일 — 코드가 import 하지 않아도 정상입니다"><i style={{ width: 9, height: 9, border: `1px solid ${C.line}`, background: C.panel, display: "inline-block", borderRadius: 2 }} />스타일 · 도구 설정 (정상)</span>
             <span>파일 클릭 → 내부 지도</span>
           </div>
           <FindingsList findings={project.findings} onOpen={openFileMap} openLabel="열어보기" />

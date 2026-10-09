@@ -18,7 +18,7 @@ export interface Snapshot {
 }
 export interface SceneNode { id: string; name: string; subtitle: string; badge: string; kind: string; color: string; x: number; y: number; locked?: boolean; target?: Target; flags?: string[] }
 export interface SceneEdge { from: string; to: string; color: string; dashed?: boolean }
-export const colors = { project: "#3b9ff5", gate: "#36c77a", docker: "#14b6ec", github: "#bda3c6", ecs: "#f28b2c", s3: "#8cbf2f", discord: "#8182ff", bad: "#ff6a73", warn: "#f4cd65", file: "#79b8ef", fn: "#4bcaba", locked: "#75808f" };
+export const colors = { project: "#3b9ff5", gate: "#36c77a", docker: "#14b6ec", github: "#bda3c6", ecs: "#f28b2c", s3: "#8cbf2f", discord: "#8182ff", bad: "#ff6a73", warn: "#f4cd65", file: "#79b8ef", fn: "#4bcaba", style: "#b48ee0", locked: "#75808f" };
 export function available(target: Target, snapshot: Snapshot | null): boolean {
   if (!snapshot?.workspace) return false;
   return (target !== "ecs" && target !== "s3") || snapshot.aws.ready;
@@ -83,6 +83,12 @@ export function dropTargetAt(nodes: SceneNode[], x: number, y: number): SceneNod
     .sort((a,b) => Math.hypot(x-a.x,y-a.y+35) - Math.hypot(x-b.x,y-b.y+35))[0];
 }
 
+/** 분석 표시 — 스타일 파일은 '고립' 대신 중립 '스타일'(연결을 못 찾은 표시는 따로 붙이지 않는다). */
+export function flagText(flags: string[]): string {
+  return flags.filter(f => f !== "style_unlinked")
+    .map(f => f === "orphan" ? "고립" : f === "overloaded" ? "과부하" : f === "style" ? "스타일" : f === "config" ? "도구 설정" : f).join(" · ");
+}
+
 /** Folder aggregation is lossless: every node remains reachable through a folder or search. */
 export function analysisScene(graph: AnalysisGraph, folder: string | null, search: string): { nodes: SceneNode[]; edges: SceneEdge[]; grouped: boolean } {
   const term = search.trim().toLocaleLowerCase();
@@ -96,7 +102,7 @@ export function analysisScene(graph: AnalysisGraph, folder: string | null, searc
     items = [...groups].map(([id, members]) => ({ id, name: `${id} /`, module: `${members.length}개 파일`, flags: [...new Set(members.flatMap(n => n.flags))], in_degree: 0, out_degree: 0 }));
   }
   const cols = Math.min(5, Math.max(2, Math.ceil(Math.sqrt(items.length))));
-  const nodes = items.map((n, i): SceneNode => ({ id: n.id, name: n.name, subtitle: n.module || (graph.kind === "file" ? "함수" : n.id), badge: grouped ? n.module || "" : `참조 ${n.in_degree} · ${n.flags.map(f=>f==='orphan'?'고립':f==='overloaded'?'과부하':f).join(" · ") || "분석됨"}`, flags: n.flags, kind: grouped ? "folder" : graph.kind === "file" ? "fn" : "file", color: n.flags.includes("orphan") ? colors.bad : n.flags.includes("overloaded") ? colors.warn : graph.kind === "file" ? colors.fn : colors.file, x: 130 + (i % cols) * (940 / cols), y: 180 + Math.floor(i / cols) * 195 + (i % 2) * 22 }));
+  const nodes = items.map((n, i): SceneNode => ({ id: n.id, name: n.name, subtitle: n.module || (graph.kind === "file" ? "함수" : n.id), badge: grouped ? n.module || "" : `참조 ${n.in_degree} · ${flagText(n.flags) || "분석됨"}`, flags: n.flags, kind: grouped ? "folder" : graph.kind === "file" ? "fn" : "file", color: n.flags.includes("orphan") ? colors.bad : n.flags.includes("overloaded") ? colors.warn : n.flags.includes("style") || n.flags.includes("config") ? colors.style : graph.kind === "file" ? colors.fn : colors.file, x: 130 + (i % cols) * (940 / cols), y: 180 + Math.floor(i / cols) * 195 + (i % 2) * 22 }));
   const ids = new Set(nodes.map(n => n.id));
   const seen = new Set<string>();
   const edges = graph.edges.flatMap(e => {

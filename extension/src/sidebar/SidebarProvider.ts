@@ -1143,6 +1143,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'deploy.readiness.check':
+            case 'deploy.db.choice': {
+                //: DB 테이블 구조가 앱과 다를 때 — 새 DB 로 시작(기존 DB 는 남김) 또는 그대로 사용.
+                const p = (payload ?? {}) as { planId?: string; containerName?: string; choice?: string };
+                try {
+                    if (p.choice !== 'new' && p.choice !== 'keep') { throw new Error('선택을 확인하세요.'); }
+                    const result = await this._apiClient.chooseDeployDb(p.choice, p.planId, p.containerName);
+                    this.postMessageToWebview(requestWebview, 'deploy.db.result', { planId: p.planId, ...result });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'deploy.db.error', {
+                        planId: p.planId, message: err instanceof Error ? err.message : String(err),
+                    });
+                }
+                break;
+            }
             case 'deploy.settings.save': {
                 //: 로컬 Docker 배포의 '필요한 설정' 입력 · 결제를 끈 로컬 데모 전환. 값은 화면에 되돌려 보내지 않는다.
                 const p = (payload ?? {}) as { planId?: string; values?: Record<string, string>; demo?: boolean };

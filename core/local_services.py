@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-_HOME = Path.home() / ".recoder" / "local_services"
+_HOME = Path(os.environ.get("RECODER_LOCAL_SERVICES_DIR") or (Path.home() / ".recoder" / "local_services"))
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,100}$")
 
 
@@ -51,8 +51,73 @@ def network_name(container: str) -> str:
     return f"recoder-{container}"
 
 
+def _demo(container: str) -> bool:
+    try:
+        import deploy_settings
+        return bool(deploy_settings.load(container).get("demo"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def db_suffix(container: str) -> str:
+    """지금 쓰는 DB 세대. 결제를 끈 로컬 데모는 데모 전용 DB 를 쓰고, "새 DB로 시작" 하면 번호가 하나 늘어난다.
+
+    예전 DB(볼륨)는 지우지 않는다 — 이름이 달라 그대로 남는다.
+    """
+    variants = _load(container).get("variants")
+    variants = variants if isinstance(variants, dict) else {}
+    if _demo(container):
+        n = int(variants.get("demo") or 0)
+        return "-demo" if n == 0 else f"-demo-{n + 1}"
+    n = int(variants.get("real") or 0)
+    return "" if n == 0 else f"-{n + 1}"
+
+
 def service_container(container: str, kind: str) -> str:
-    return f"{container}-{kind}"
+    return f"{container}-{kind}{db_suffix(container)}"
+
+
+def start_new_db(container: str) -> str:
+    """다음 배포부터 새 DB(새 볼륨)를 쓴다. 지금 DB 는 그대로 남긴다. 새 컨테이너 이름을 돌려준다."""
+    data = _load(container)
+    variants = data.get("variants") if isinstance(data.get("variants"), dict) else {}
+    key = "demo" if _demo(container) else "real"
+    kinds = [k for k in (data.get("services") or []) if isinstance(k, str)] or ["postgres"]
+    n = int(variants.get(key) or 0)
+    #: "새 DB" 는 정말 비어 있어야 한다 — 예전에 같은 이름으로 남은 컨테이너·볼륨이 있으면 그 번호는 건너뛴다.
+    for _ in range(50):
+        n += 1
+        variants[key] = n
+        data["variants"] = variants
+        _save(container, data)
+        if not any(_docker_name_exists(service_container(container, k)) for k in kinds):
+            break
+    return service_container(container, kinds[0] if "postgres" not in kinds else "postgres")
+
+
+def _docker_name_exists(name: str) -> bool:
+    """같은 이름의 컨테이너나 데이터 볼륨(<이름>-data)이 이미 있는지. Docker 를 못 부르면 없다고 본다."""
+    for args in (["docker", "container", "inspect", name], ["docker", "volume", "inspect", f"{name}-data"]):
+        try:
+            if subprocess.run(args, capture_output=True, timeout=15).returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return False
+
+
+def accept_schema(container: str, fingerprint: str) -> None:
+    """사용자가 "그대로 사용" 을 골랐다 — 같은 DB·같은 스키마에 대해 다시 묻지 않는다."""
+    data = _load(container)
+    accepted = data.get("accepted_schema") if isinstance(data.get("accepted_schema"), dict) else {}
+    accepted[service_container(container, "postgres")] = fingerprint
+    data["accepted_schema"] = accepted
+    _save(container, data)
+
+
+def schema_accepted(container: str, fingerprint: str) -> bool:
+    accepted = _load(container).get("accepted_schema")
+    return isinstance(accepted, dict) and accepted.get(service_container(container, "postgres")) == fingerprint
 
 
 def _secret_file(container: str) -> Path:
@@ -140,7 +205,8 @@ def plan(container: str, kinds: list[str], env_names: list[str]) -> tuple[dict[s
         notes.append(
             f"{svc.label} 컨테이너({service_container(container, kind)}, {svc.image})를 함께 띄우고 앱에 접속 정보를 "
             f"환경변수로 넘깁니다. 데이터는 Docker 볼륨 {service_container(container, kind)}-data 에 남습니다.")
-    _save(container, {"services": [k for k in kinds if k in SERVICES], "passwords": passwords})
+    data.update({"services": [k for k in kinds if k in SERVICES], "passwords": passwords})
+    _save(container, data)
     return env, notes
 
 
@@ -211,6 +277,77 @@ def _initialize_postgres(name: str, init_sql: Path, progress, run: Runner) -> No
         done = subprocess.CompletedProcess([], 1, "", str(exc))
     if done.returncode != 0 and progress:
         progress(f"{init_sql.name} 실행이 실패해 되돌렸습니다: {(done.stderr or '').strip()[:200]}")
+
+
+_CREATE_TABLE = re.compile(r"create\s+table\s+(?:if\s+not\s+exists\s+)?(?:\"?public\"?\.)?\"?([A-Za-z_][\w]*)\"?\s*\(", re.I)
+_NOT_COLUMN = re.compile(r"^(?:constraint|primary|foreign|unique|check|exclude|like)\b", re.I)
+
+
+def expected_schema(sql: str) -> dict[str, set[str]]:
+    """초기화 SQL 이 만드는 테이블 → 열 이름. 괄호 깊이를 따라 최상위 항목만 본다."""
+    out: dict[str, set[str]] = {}
+    for m in _CREATE_TABLE.finditer(sql):
+        depth, i, start = 1, m.end(), m.end()
+        items: list[str] = []
+        while i < len(sql) and depth:
+            ch = sql[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    items.append(sql[start:i])
+            elif ch == "," and depth == 1:
+                items.append(sql[start:i])
+                start = i + 1
+            i += 1
+        cols = set()
+        for item in items:
+            item = re.sub(r"--[^\n]*", "", item).strip()
+            if not item or _NOT_COLUMN.match(item):
+                continue
+            name = item.split()[0].strip('"')
+            if re.fullmatch(r"[A-Za-z_]\w*", name):
+                cols.add(name.lower())
+        out[m.group(1).lower()] = cols
+    return out
+
+
+def schema_fingerprint(sql: str) -> str:
+    import hashlib
+    schema = expected_schema(sql)
+    return hashlib.sha256(json.dumps({t: sorted(c) for t, c in sorted(schema.items())}).encode()).hexdigest()[:16]
+
+
+def schema_status(container: str, init_sql: Path, run: Runner = _run) -> dict:
+    """DB 에 있는 테이블·열이 앱의 초기화 SQL 과 맞는지. DB 가 비어 있으면 맞는 것으로 본다.
+
+    반환: {"ok", "missing_tables", "missing_columns": {table: [cols]}, "other_tables", "fingerprint", "db"}
+    """
+    try:
+        sql = init_sql.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return {"ok": True}
+    expected = expected_schema(sql)
+    name = service_container(container, "postgres")
+    if not expected:
+        return {"ok": True, "db": name}
+    done = run(["docker", "exec", name, "psql", "-U", "recoder", "-d", "app", "-tA", "-F", "|", "-c",
+                "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'"], 30)
+    if done.returncode != 0:
+        return {"ok": True, "db": name, "unknown": (done.stderr or "").strip()[:200]}
+    actual: dict[str, set[str]] = {}
+    for line in (done.stdout or "").splitlines():
+        if "|" in line:
+            table, column = line.split("|", 1)
+            actual.setdefault(table.strip().lower(), set()).add(column.strip().lower())
+    if not actual:
+        return {"ok": True, "db": name}
+    missing_tables = sorted(t for t in expected if t not in actual)
+    missing_columns = {t: sorted(cols - actual[t]) for t, cols in expected.items() if t in actual and cols - actual[t]}
+    other = sorted(t for t in actual if t not in expected)
+    return {"ok": not missing_tables and not missing_columns, "db": name, "missing_tables": missing_tables,
+            "missing_columns": missing_columns, "other_tables": other[:20], "fingerprint": schema_fingerprint(sql)}
 
 
 def ensure(container: str, progress: Optional[Callable[[str], None]] = None, run: Runner = _run,

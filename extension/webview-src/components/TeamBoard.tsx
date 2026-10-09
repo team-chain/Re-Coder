@@ -3,7 +3,8 @@
  * 모든 숫자는 코어의 실제 진행 이벤트(teamState.reduceTeam)에서 나온다.
  */
 import React from "react";
-import { ANIMAL_NAMES, bodySvg, faceSvg } from "./teamAnimals";
+import { bodySvg, faceSvg } from "./teamAnimals";
+import { CHARACTER_NAME } from "./recoderCharacter";
 import { MAX_DEV_AGENTS, TeamMember, TeamView, formatElapsed } from "./teamState";
 
 const ROLE_LABEL: Record<TeamMember["role"], string> = { planner: "설계", dev: "개발", review: "검토" };
@@ -13,6 +14,13 @@ const ROLE_HINT: Record<TeamMember["role"], string> = {
   review: "파일마다 문법·하드코딩된 비밀값을 바로 검사하고 바뀔 부분만 고칩니다",
 };
 const LAYER = ["공통 기반", "기능", "화면"];
+
+/** 화면에 보이는 팀원 이름 — 모두 리코더라서 역할과 번호로 구분한다(개발 1, 개발 2 …). */
+export function memberLabel(roster: TeamMember[], m: TeamMember): string {
+  if (m.role !== "dev") return ROLE_LABEL[m.role];
+  const n = roster.filter(x => x.role === "dev").findIndex(x => x.id === m.id) + 1;
+  return `${ROLE_LABEL.dev} ${n || ""}`.trim();
+}
 
 const css = `
 .rc-team{border:1px solid var(--vscode-panel-border,#333);border-radius:8px;background:var(--vscode-editorWidget-background,#202020);margin:2px 0 8px;overflow:hidden}
@@ -27,7 +35,7 @@ const css = `
 .rc-team-waves span.ok{color:#6cc070;border-color:#6cc07055}
 .rc-team-ag{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;padding:8px 10px}
 .rc-team-a{display:flex;align-items:center;gap:7px;border:1px solid var(--vscode-panel-border,#333);border-radius:7px;padding:5px 7px;min-width:0;background:var(--vscode-editor-background,#1e1e1e)}
-.rc-team-a .av{flex:none;width:34px;height:34px;display:flex;align-items:flex-end;justify-content:center;filter:drop-shadow(0 0 .6px #fff8)}
+.rc-team-a .av{flex:none;width:34px;height:34px;display:flex;align-items:flex-end;justify-content:center;}
 .rc-team-a.busy .av{animation:rcTeamBob .55s ease-in-out infinite alternate}
 .rc-team-a.wait .av{opacity:.65}
 .rc-team-a .t{min-width:0;font-size:11px;line-height:1.35}
@@ -46,7 +54,7 @@ const css = `
 `;
 
 function Svg({ html, className }: { html: string; className?: string }) {
-  //: 고정된 자체 SVG 문자열만 넣는다(teamAnimals.ts) — 외부 입력 없음.
+  //: 고정된 리코더 이미지 태그만 넣는다(recoderCharacter.ts) — 외부 입력 없음.
   return <span className={className} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
@@ -66,8 +74,8 @@ export const TeamComposer: React.FC<{
       </label>
       {enabled && <>
         {roster.map(m => (
-          <span key={m.id} className="m" title={`${ANIMAL_NAMES[m.animal]} · ${ROLE_LABEL[m.role]} — ${ROLE_HINT[m.role]}`}>
-            <Svg html={faceSvg(m.animal, 18)} />{ROLE_LABEL[m.role]}
+          <span key={m.id} className="m" title={`${CHARACTER_NAME} · ${memberLabel(roster, m)} — ${ROLE_HINT[m.role]}`}>
+            <Svg html={faceSvg(m.animal, 18)} />{memberLabel(roster, m)}
           </span>
         ))}
         <button type="button" onClick={onAdd} disabled={disabled || devs >= MAX_DEV_AGENTS} aria-label="개발 에이전트 추가">＋ 개발 에이전트</button>
@@ -130,7 +138,7 @@ export const TeamBoard: React.FC<{
           return (
             <div key={m.id} className={`rc-team-a${busy ? " busy" : ""}${state === "잠시 대기" ? " wait" : ""}`} title={ROLE_HINT[m.role]}>
               <Svg className="av" html={bodySvg(m.animal, 34)} />
-              <div className="t"><b>{ANIMAL_NAMES[m.animal]}</b> · {ROLE_LABEL[m.role]} <span style={{ color: "var(--vscode-descriptionForeground,#999)" }}>{state}</span>
+              <div className="t"><b>{memberLabel(members, m)}</b> <span style={{ color: "var(--vscode-descriptionForeground,#999)" }}>{state}</span>
                 <small>{detail}</small></div>
             </div>
           );
