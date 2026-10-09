@@ -1953,6 +1953,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 });
                 break;
             }
+            case 'code.planFollowup': {
+                //: 앞 결정의 선택에 따라 이어서 물을 결정을 AI 에게 받는다(쇼핑몰 → AI 자유 생성).
+                //: 일반 plan 과 메시지를 나눈다 — 실패해도 턴을 오류로 바꾸지 않고 결정 창 안에서 다시 시도하게 한다.
+                const p = (payload ?? {}) as { requestId?: number; instruction?: string; afterStarter?: string; parentId?: string; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }> };
+                try {
+                    const scope = this._codeScope(p.targetFolder ?? '');
+                    await this.ensureConnection();
+                    const plan = await this._apiClient.planCode(p.instruction ?? '', {
+                        workspacePath: scope.workspacePath, contextFiles: p.contextFiles ?? [], targetFolder: scope.targetFolder,
+                        afterStarter: p.afterStarter === 'custom' ? 'custom' : '',
+                    });
+                    this.postMessageToWebview(requestWebview, 'code.followupResult', {
+                        requestId: p.requestId, parentId: p.parentId, decisions: plan.decisions ?? [], dropped: plan.dropped ?? [],
+                    });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'code.followupError', {
+                        requestId: p.requestId, parentId: p.parentId, message: err instanceof Error ? err.message : String(err),
+                    });
+                }
+                break;
+            }
             case 'chat.send': {
                 const p = (payload ?? {}) as {
                     id?: string;
@@ -2521,6 +2542,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 decisions: plan.decisions ?? [],
                 //: 걸러진 결정의 사유 — 웹뷰가 결정 모달에 표시한다.
                 dropped: plan.dropped ?? [],
+                //: 고른 선택에 따라 이어서 물을 결정(없으면 빈 객체).
+                followups: plan.followups ?? {},
             });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);

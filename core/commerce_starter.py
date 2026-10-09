@@ -47,6 +47,49 @@ def decision() -> dict:
     }
 
 
+PAYMENT_ID = "commerce-payment"
+
+
+def payment_decision() -> dict:
+    """기반을 고른 뒤 묻는 두 번째 결정 — 고른 값이 첫 로컬 배포의 결제 모드를 실제로 정한다."""
+    return {
+        "id": PAYMENT_ID,
+        "question": "결제는 어떻게 시작할까요?",
+        "options": [
+            {
+                "key": "mock",
+                "label": "키 없이 모의 결제로 바로 실행",
+                "recommended": True,
+                "summary": "첫 로컬 배포를 결제를 끈 데모로 띄웁니다. 모의 결제 서버가 함께 뜨고 주문은 '결제 완료(테스트)' 가 됩니다.",
+                "pros": ["Stripe 계정 없이 바로 써 볼 수 있음"],
+                "cons": ["실제 카드 결제는 일어나지 않음", "운영 전에 실제 키로 바꿔야 함"],
+            },
+            {
+                "key": "keys",
+                "label": "Stripe 테스트 키를 넣고 실행",
+                "recommended": False,
+                "summary": "첫 로컬 배포 때 Stripe 비밀 키·웹훅 서명 키를 입력받아 실제 Stripe 테스트 모드로 연결합니다.",
+                "pros": ["실제 결제사 흐름으로 확인"],
+                "cons": ["Stripe 계정과 키가 필요함"],
+            },
+        ],
+        "impact": "첫 로컬 Docker 배포의 결제 모드를 정합니다. 배포 화면에서 언제든 바꿀 수 있습니다.",
+    }
+
+
+def followups() -> dict:
+    """시작 방식 선택에 따라 이어서 물을 결정. "ai" 는 AI 가 이 요청에 맞는 기술 결정을 만들어 묻는다."""
+    return {STARTER_ID: {"reviewed": [payment_decision()], "custom": "ai"}}
+
+
+def payment_choice(decisions: list[dict]) -> str:
+    """사용자가 고른 결제 시작 방식("mock" / "keys"), 없으면 ""."""
+    for d in decisions or []:
+        if d.get("id") == PAYMENT_ID and d.get("chosen_key") in ("mock", "keys"):
+            return str(d["chosen_key"])
+    return ""
+
+
 def selected(decisions: list[dict]) -> bool:
     return any(d.get("id") == STARTER_ID and d.get("chosen_key") == "reviewed" for d in decisions)
 

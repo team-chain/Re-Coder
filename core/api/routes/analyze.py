@@ -801,6 +801,8 @@ async def generate_code_stream_route(body: CodeGenerateRequest):
 
 class CodePlanRequest(BaseModel):
     instruction: str = ""
+    #: "custom" — 쇼핑몰 시작 방식에서 AI 자유 생성을 고른 뒤 이어서 묻는 결정을 요청한다.
+    after_starter: str = ""
     workspace_path: str = ""
     open_file_path: str = ""
     open_file_content: str = ""
@@ -1069,6 +1071,7 @@ async def code_plan_route(body: CodePlanRequest) -> dict:
             context_files=body.context_files or [],
             target_folder=body.target_folder or "",
             project_root=body.workspace_path or "",
+            after_starter="custom" if body.after_starter == "custom" else "",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

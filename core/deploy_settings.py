@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -268,8 +269,16 @@ def evaluate(container: str, workspace: str, provided: Iterable[str], *, create:
     required = required_env(workspace)
     names = all_env_names(workspace)
     demo_ok = demo_supported(workspace, names)
-    demo_on = bool(data.get("demo")) and demo_ok
     changed = False
+    #: 코드를 만들 때 고른 결제 시작 방식 — 그 뒤로 배포 화면에서 직접 바꾸지 않았으면 그 선택을 따른다.
+    pref = payment_choice_for(workspace) if (create and demo_ok and workspace) else None
+    if pref and float(pref.get("at", 0)) > float(data.get("demo_at", 0) or 0):
+        data["demo"] = pref.get("payment") == "mock"
+        data["demo_at"] = float(pref.get("at", 0))
+        if data["demo"]:
+            _demo_secret(data)
+        changed = True
+    demo_on = bool(data.get("demo")) and demo_ok
     settings: list[dict] = []
     missing: list[str] = []
     for name in sorted(required):
@@ -332,11 +341,57 @@ def save_values(container: str, values: dict[str, str]) -> None:
     _save(container, data)
 
 
+def _prefs_file() -> Path:
+    return _home() / "_workspace_prefs.json"
+
+
+def _norm_ws(workspace: str) -> str:
+    try:
+        return str(Path(workspace).resolve()).lower() if os.name == "nt" else str(Path(workspace).resolve())
+    except (OSError, ValueError):
+        return ""
+
+
+def remember_payment_choice(workspace: str, mode: str) -> None:
+    """코드 생성 때 고른 결제 시작 방식("mock"/"keys")을 그 폴더에 대해 기억한다. 첫 로컬 배포가 이 값으로 뜬다."""
+    if mode not in ("mock", "keys") or not workspace:
+        return
+    key = _norm_ws(workspace)
+    if not key:
+        return
+    path = _prefs_file()
+    try:
+        prefs = json.loads(path.read_text(encoding="utf-8"))
+        prefs = prefs if isinstance(prefs, dict) else {}
+    except (OSError, ValueError):
+        prefs = {}
+    prefs[key] = {"payment": mode, "at": time.time()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def payment_choice_for(workspace: str) -> Optional[dict]:
+    """이 폴더(또는 이 폴더 안의 대상 폴더)에 대해 기억한 결제 시작 방식 — {"payment", "at"} 또는 None."""
+    key = _norm_ws(workspace)
+    if not key:
+        return None
+    try:
+        prefs = json.loads(_prefs_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(prefs, dict):
+        return None
+    hits = [v for k, v in prefs.items() if isinstance(v, dict)
+            and (k == key or k.startswith(key.rstrip("/\\") + os.sep))]
+    return max(hits, key=lambda v: v.get("at", 0)) if hits else None
+
+
 def set_demo(container: str, enabled: bool) -> None:
     if not _NAME_RE.match(container or ""):
         raise ValueError("컨테이너 이름이 올바르지 않습니다.")
     data = load(container)
     data["demo"] = bool(enabled)
+    data["demo_at"] = time.time()
     if enabled:
         _demo_secret(data)
     _save(container, data)

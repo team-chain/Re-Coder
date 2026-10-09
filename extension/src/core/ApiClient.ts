@@ -109,6 +109,8 @@ export interface CodePlanResult {
     //: "AI 가 설계를 안 해준다"로 보인다.
     dropped?: string[];
     model: string;
+    //: 결정 id → 고른 선택지 key → 이어서 물을 결정(목록) 또는 "ai"(AI 에게 이어서 받음).
+    followups?: Record<string, Record<string, CodeDecision[] | 'ai'>>;
 }
 
 /** Workspace 오른쪽 대화 패널의 일반 AI 응답. 파일을 변경하지 않는 상담용 API다. */
@@ -475,9 +477,12 @@ export class ApiClient {
             openFile?: { path: string; content: string };
             contextFiles?: Array<{ path: string; content: string }>;
             targetFolder?: string;
+            /** "custom" — 쇼핑몰 시작 방식에서 AI 자유 생성을 고른 뒤 이어서 묻는 결정. */
+            afterStarter?: string;
         }
     ): Promise<CodePlanResult> {
         const body = {
+            after_starter: opts?.afterStarter ?? '',
             instruction,
             workspace_path: opts?.workspacePath ?? '',
             open_file_path: opts?.openFile?.path ?? '',

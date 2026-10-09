@@ -1,3 +1,10 @@
+# 설계 결정 이어서 묻기 · 진행 확인 창 (2026-10-10, 2.0.2)
+
+- 실기기 지적: 쇼핑몰 요청은 `/api/code/plan` 이 AI 를 부르지 않고 시작 방식 카드 1장만 냈고(0.05초), AI 자유 생성을 골라도 추가 결정 없이 생성했다.
+- 코어: plan 응답에 `followups = {결정 id: {선택 key: [결정…] | "ai"}}`(commerce_starter.followups). `POST /api/code/plan {after_starter: "custom"}` 은 기반 카드를 건너뛰고 기술 결정 2~3개를 AI 에게 받는다. 기반 + `commerce-payment`(mock/keys) 선택은 `deploy_settings.remember_payment_choice(폴더)` 로 기억 → `evaluate` 가 그 폴더 첫 배포의 데모 여부로 쓴다(`demo_at` 보다 새 선택일 때만 — 배포 화면에서 직접 바꾸면 그쪽이 이김). 저장 위치 `~/.recoder/deploy_settings/_workspace_prefs.json`.
+- 확장: `decisionFlow.ts`(collapseChanged·pendingFollowup·insertFollowups·isConfirmOnly — 순수 함수), `CodeAgent` 결정 창이 [다음] 때 이어 붙이고, "ai" 면 `code.planFollowup` → 호스트가 `code.followupResult/Error` 로 답한다(일반 plan 오류처럼 턴을 실패로 바꾸지 않음). `__` 예약 id 확인 카드 하나뿐이면 진행 확인 창.
+- 검증: Core 2,461개·확장 541개 통과(RAG 포함). code-server 에서 쇼핑몰 요청 → AI 자유 생성 → AI 결정 이어짐 → [이전] → 기반 → 결제 시작 결정 → 생성(파일 61개, ADR 2건) → 폴더 기억 mock → 배포 설정이 데모로 시작(키 입력 없음) 확인.
+
 # 팀 작업 화면 · 승인 카드 실행 순서 · Dockerfile 미리보기 · 공통 체크박스 (2026-10-10, 2.0.1)
 
 - 실기기 영상(2026-10-10 02-34-18.mkv): 기존 Dockerfile 로 배포를 고르면 미리보기가 "생성 버튼을 누르면…" 으로 비었고, 승인 카드 첫 사유가 영어, 명령 미리보기가 실제(DB·모의 결제·설정값)와 달랐다.

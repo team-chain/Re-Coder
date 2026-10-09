@@ -33,8 +33,8 @@ test('ApiClient 플랜 결과 타입에 dropped 가 있다', () => {
 
 test('결정 모달이 dropped 를 실제로 렌더한다', () => {
   const source = read('../webview-src/components/CodeAgent.tsx');
-  assert.match(source, /decisionModal\.dropped\.length > 0/, '걸러진 결정이 화면에 안 보인다');
-  assert.match(source, /decisionModal\.dropped\.map/, '개수만 있고 사유가 없다');
+  assert.match(source, /(decisionModal|view)\.dropped\.length > 0/, '걸러진 결정이 화면에 안 보인다');
+  assert.match(source, /(decisionModal|view)\.dropped\.map/, '개수만 있고 사유가 없다');
 });
 
 test('결정 0개여도 사람 승인 없이 생성으로 직행하지 않는다', () => {

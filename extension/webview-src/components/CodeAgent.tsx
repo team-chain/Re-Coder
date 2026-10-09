@@ -8,6 +8,7 @@ import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { isHostLinkLost } from "../hooks/useHostLink";
 import { loadUiState, saveUiState } from "../hooks/uiState";
 import { DecisionOptionCards } from "./DecisionOptionCards";
+import { Followups, collapseChanged, insertFollowups, isConfirmOnly, pendingFollowup } from "./decisionFlow";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
 import { TeamBoard, TeamComposer } from "./TeamBoard";
 import { ANIMAL_KINDS } from "./teamAnimals";
@@ -70,7 +71,12 @@ interface Turn { id: number; prompt: string; targetFolder: string; contextNames?
   roster?: TeamMember[]; team?: TeamView; request?: GenerateRequest; paused?: PausedInfo | null; }
 export interface CtxFile { path: string; content: string; }
 interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; team?: boolean; roster?: TeamMember[]; }
-interface DecisionModal { requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; dropped: string[]; }
+interface DecisionModal {
+  requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; dropped: string[];
+  /** 고른 선택에 따라 이어서 물을 결정(코어가 알려 줌) · 이미 끼워 넣은 것 · AI 에게 받는 중 · 실패/안내. */
+  followups?: Followups; expanded?: Record<string, { key: string; ids: string[] }>;
+  loading?: boolean; followupError?: string; followupNote?: string;
+}
 
 //: 파일 하나의 적용 상태.
 //:
@@ -135,6 +141,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   //: 생성 결과는 파일 목록만 먼저 보여 준다(파일이 수십 개면 내용이 화면을 덮었다). 이름을 누르면 내용을 펼친다.
   const [openPreview, setOpenPreview] = useState<Record<string, boolean>>({});
   const [decisionModal, setDecisionModal] = useState<DecisionModal | null>(null);
+  const decisionModalRef = React.useRef<DecisionModal | null>(null);
+  decisionModalRef.current = decisionModal;
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const pendingRequestsRef = React.useRef<Record<number, PendingRequest>>({});
   const handledExternalRef = React.useRef<number | null>(null);
@@ -263,7 +271,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         return copy;
       });
     } else if (type === "code.planResult") {
-      const plan = payload as { requestId?: number; decisions?: Decision[]; dropped?: string[] };
+      const plan = payload as { requestId?: number; decisions?: Decision[]; dropped?: string[]; followups?: Followups };
       const requestId = plan.requestId;
       if (requestId === undefined) { return; }
       const request = pendingRequestsRef.current[requestId];
@@ -288,8 +296,21 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       for (const decision of decisions) {
         selections[decision.id] = decision.options.find((option) => option.recommended)?.key ?? decision.options[0]?.key ?? "";
       }
-      setDecisionModal({ requestId, decisions, selections, step: 0, dropped });
+      setDecisionModal({ requestId, decisions, selections, step: 0, dropped, followups: plan.followups ?? {}, expanded: {} });
       onReviewRequired?.();
+    } else if (type === "code.followupResult" || type === "code.followupError") {
+      //: 앞 선택에 따라 AI 에게 이어서 받은 결정. 결정 창 안에서만 반영한다(턴 상태는 건드리지 않는다).
+      const r = payload as { requestId?: number; parentId?: string; decisions?: Decision[]; dropped?: string[]; message?: string };
+      setDecisionModal((cur) => {
+        if (!cur || cur.requestId !== r.requestId || !cur.loading || !r.parentId) { return cur; }
+        if (type === "code.followupError") {
+          return { ...cur, loading: false, followupError: `이어서 물을 결정을 받지 못했습니다: ${r.message ?? "알 수 없는 오류"}` };
+        }
+        const list = (r.decisions ?? []).filter((d) => !d.id.startsWith("__"));
+        const next = insertFollowups(cur, r.parentId, list);
+        return { ...next, loading: false, followupError: "", dropped: [...cur.dropped, ...(r.dropped ?? [])],
+          followupNote: list.length ? "" : "AI 가 더 물을 설계 결정을 찾지 못했습니다. 이 선택으로 생성할 수 있습니다." };
+      });
     } else if (type === "code.folderPicked" || type === "code.setTargetFolder") {
       pendingTargetFolder = null;
       setTargetFolder((payload as { folder?: string })?.folder ?? "");
@@ -335,7 +356,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     setDecisionModal(null);
   }, [decisionModal, postMessage]);
 
-  const confirmDecisions = useCallback(() => {
+  const confirmDecisions = useCallback((modalArg?: DecisionModal) => {
+    const decisionModal = modalArg ?? decisionModalRef.current;
     if (!decisionModal) { return; }
     const request = pendingRequestsRef.current[decisionModal.requestId];
     if (!request) { setDecisionModal(null); return; }
@@ -350,7 +372,26 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     setDecisionModal(null);
     waitForResponse(decisionModal.requestId, 30);
     postMessage("code.generate", { requestId: decisionModal.requestId, ...generate });
-  }, [decisionModal, postMessage, roster]);
+  }, [postMessage, roster]);
+
+  //: [다음]/[생성] — 고른 선택이 이어서 물을 결정을 갖고 있으면 먼저 끼워 넣거나 AI 에게 받는다.
+  const advanceDecision = useCallback(() => {
+    const cur = decisionModalRef.current;
+    if (!cur || cur.loading) { return; }
+    const st = collapseChanged(cur);
+    const pending = pendingFollowup(st);
+    const d = st.decisions[st.step];
+    if (pending === "ai") {
+      const request = pendingRequestsRef.current[st.requestId];
+      setDecisionModal({ ...st, loading: true, followupError: "", followupNote: "" });
+      postMessage("code.planFollowup", { requestId: st.requestId, parentId: d.id, afterStarter: st.selections[d.id],
+        instruction: request?.instruction ?? "", targetFolder: request?.targetFolder ?? "", contextFiles: request?.contextFiles ?? [] });
+      return;
+    }
+    if (Array.isArray(pending)) { setDecisionModal({ ...insertFollowups(st, d.id, pending), followupNote: "" }); return; }
+    if (st.step >= st.decisions.length - 1) { confirmDecisions(st); return; }
+    setDecisionModal({ ...st, step: st.step + 1, followupNote: "" });
+  }, [confirmDecisions, postMessage]);
 
   //: 멈춘 대규모 생성을 같은 요청·같은 작업 ID 로 다시 보낸다 — 코어가 멈춘 지점부터 이어 만든다.
   const resumeTurn = useCallback((turn: Turn) => {
@@ -450,37 +491,60 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         .rc-decision-option:hover { border-color: var(--vscode-focusBorder, #3794ff) !important; }
       `}</style>
       {decisionModal && (() => {
-        const decision = decisionModal.decisions[decisionModal.step];
-        const isLast = decisionModal.step === decisionModal.decisions.length - 1;
+        const view = collapseChanged(decisionModal);
+        const decision = view.decisions[view.step];
+        const pending = pendingFollowup(view);
+        const isLast = view.step === view.decisions.length - 1 && !pending;
+        const confirmOnly = isConfirmOnly(view.decisions);
+        const selected = view.selections[decision.id];
         return (
           <div role="dialog" aria-modal="true" aria-label="설계 결정" style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 18, background: "rgba(0,0,0,.58)", backdropFilter: "blur(2px)" }}>
             <div style={{ width: "min(560px, 100%)", maxHeight: "calc(100vh - 36px)", overflowY: "auto", border: "1px solid var(--vscode-widget-border, #454545)", borderRadius: 10, background: "var(--vscode-editorWidget-background, #252526)", boxShadow: "0 18px 48px rgba(0,0,0,.45)" }}>
               <div style={{ padding: "15px 18px 12px", borderBottom: "1px solid var(--vscode-panel-border, #3b3b3b)" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ width: 4, height: 20, borderRadius: 2, background: "var(--vscode-textLink-foreground, #3794ff)" }} />
-                  <strong style={{ fontSize: 15 }}>설계 결정을 골라주세요</strong>
-                  <span style={{ marginLeft: "auto", borderRadius: 99, padding: "3px 8px", background: "var(--vscode-badge-background, #4d4d4d)", color: "var(--vscode-badge-foreground, #fff)", fontSize: 11, fontWeight: 600 }}>설계 결정 {decisionModal.step + 1}/{decisionModal.decisions.length}</span>
+                  <strong style={{ fontSize: 15 }}>{confirmOnly ? "진행 확인" : "설계 결정을 골라주세요"}</strong>
+                  {!confirmOnly && <span style={{ marginLeft: "auto", borderRadius: 99, padding: "3px 8px", background: "var(--vscode-badge-background, #4d4d4d)", color: "var(--vscode-badge-foreground, #fff)", fontSize: 11, fontWeight: 600 }}>설계 결정 {view.step + 1}/{view.decisions.length}{pending ? "+" : ""}</span>}
                 </div>
                 {/* 코어가 형식 문제로 걸러낸 결정 — 안 보여주면 사용자에게는
                     "AI 가 설계를 안 해준다"로 보인다(보드 이슈). */}
-                {decisionModal.dropped.length > 0 && (
+                {view.dropped.length > 0 && (
                   <div style={{ marginTop: 8, padding: "7px 9px", borderRadius: 5, background: "rgba(204,167,0,.10)", border: "1px solid rgba(204,167,0,.35)", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 10.5, lineHeight: 1.5 }}>
-                    <div style={{ fontWeight: 650 }}>제시됐지만 제외된 결정 {decisionModal.dropped.length}건</div>
-                    {decisionModal.dropped.map((reason, i) => <div key={i}>· {reason}</div>)}
+                    <div style={{ fontWeight: 650 }}>제시됐지만 제외된 결정 {view.dropped.length}건</div>
+                    {view.dropped.map((reason, i) => <div key={i}>· {reason}</div>)}
                   </div>
                 )}
               </div>
-              <div style={{ padding: "18px" }}>
-                <h3 style={{ margin: 0, color: "var(--vscode-foreground, #eee)", fontSize: 18, lineHeight: 1.4 }}>{decision.question}</h3>
-                {decision.impact && <p style={{ margin: "7px 0 16px", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.5 }}>{decision.impact}</p>}
-                <DecisionOptionCards options={decision.options} selectedKey={decisionModal.selections[decision.id]} onSelect={chooseDecision} radioName={`decision-${decision.id}`} />
-              </div>
+              {confirmOnly ? (
+                //: 고를 설계 갈림길이 없는 요청 — 선택지처럼 보이지 않게 확인만 받는다(사람 승인은 그대로).
+                <div style={{ padding: "18px" }} data-testid="decision-confirm">
+                  <h3 style={{ margin: 0, color: "var(--vscode-foreground, #eee)", fontSize: 17, lineHeight: 1.4 }}>{decision.question}</h3>
+                  <p style={{ margin: "8px 0 0", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.55 }}>
+                    고를 설계 갈림길이 없는 요청이라 확인만 받습니다. [진행] 을 누르면 요청대로 코드를 만듭니다.
+                  </p>
+                </div>
+              ) : (
+                <div style={{ padding: "18px" }}>
+                  <h3 style={{ margin: 0, color: "var(--vscode-foreground, #eee)", fontSize: 18, lineHeight: 1.4 }}>{decision.question}</h3>
+                  {decision.impact && <p style={{ margin: "7px 0 16px", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.5 }}>{decision.impact}</p>}
+                  <DecisionOptionCards options={decision.options} selectedKey={selected} onSelect={chooseDecision} radioName={`decision-${decision.id}`} disabled={!!view.loading} />
+                  {pending === "ai" && !view.loading && <p style={{ margin: "10px 0 0", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 11.5 }}>다음으로 넘어가면 AI 가 이 요청에 맞는 기술 결정(데이터 저장·로그인·결제 등)을 이어서 묻습니다.</p>}
+                  {view.loading && <p role="status" style={{ margin: "10px 0 0", color: "var(--vscode-textLink-foreground, #4daafc)", fontSize: 12 }}>AI 가 이어서 물을 설계 결정을 만드는 중…</p>}
+                  {view.followupError && <p role="alert" style={{ margin: "10px 0 0", color: "var(--vscode-errorForeground, #f48771)", fontSize: 12 }}>{view.followupError} [다음 결정 →] 을 다시 누르면 다시 시도합니다.</p>}
+                  {view.followupNote && <p role="status" style={{ margin: "10px 0 0", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12 }}>{view.followupNote}</p>}
+                </div>
+              )}
               <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 18px 16px", borderTop: "1px solid var(--vscode-panel-border, #3b3b3b)" }}>
                 <button onClick={cancelDecision} style={{ ...ghostBtn, padding: "7px 11px" }}>취소</button>
-                {decisionModal.step > 0 && <button onClick={() => setDecisionModal((current) => current ? { ...current, step: current.step - 1 } : current)} style={{ ...ghostBtn, padding: "7px 11px" }}>이전</button>}
-                <button onClick={() => isLast ? confirmDecisions() : setDecisionModal((current) => current ? { ...current, step: current.step + 1 } : current)} disabled={!decisionModal.selections[decision.id]} style={{ ...primaryBtn, marginLeft: "auto", padding: "8px 13px", opacity: decisionModal.selections[decision.id] ? 1 : .5 }}>
-                  {isLast ? "이 선택으로 생성 →" : "다음 결정 →"}
-                </button>
+                {!confirmOnly && view.step > 0 && <button disabled={!!view.loading} onClick={() => setDecisionModal((current) => current ? { ...current, step: Math.max(0, current.step - 1), followupNote: "", followupError: "" } : current)} style={{ ...ghostBtn, padding: "7px 11px" }}>이전</button>}
+                {confirmOnly ? (
+                  <button onClick={() => confirmDecisions({ ...view, selections: { ...view.selections, [decision.id]: decision.options.find((o) => o.key === "proceed")?.key ?? decision.options[0]?.key ?? "proceed" } })}
+                    style={{ ...primaryBtn, marginLeft: "auto", padding: "8px 13px" }}>진행 →</button>
+                ) : (
+                  <button onClick={advanceDecision} disabled={!selected || !!view.loading} style={{ ...primaryBtn, marginLeft: "auto", padding: "8px 13px", opacity: selected && !view.loading ? 1 : .5 }}>
+                    {view.loading ? "질문 만드는 중…" : isLast ? "이 선택으로 생성 →" : "다음 결정 →"}
+                  </button>
+                )}
               </div>
             </div>
           </div>

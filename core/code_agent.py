@@ -1394,9 +1394,13 @@ def generate_plan(
     target_folder: str = "",
     context_files: list[dict] | None = None,
     project_root: str = "",
+    after_starter: str = "",
 ) -> dict:
     """
     자연어 instruction → "설계 결정" 목록 (코드 아님).
+
+    after_starter="custom": 쇼핑몰 시작 방식에서 "AI 자유 생성" 을 고른 뒤 이어서 묻는 결정을 만든다.
+        고정 기반 카드는 건너뛰고, 이 앱의 기술 구성(데이터 저장·로그인·결제 등) 결정을 AI 에게 받는다.
 
     AI-DLC 1단계: 에이전트가 코드를 바로 뱉지 않고, 사람이 선택·승인할
     결정 카드 목록을 반환한다. 확장(webview)이 이를 팝업 카드로 렌더하고,
@@ -1416,8 +1420,15 @@ def generate_plan(
     root = _resolve_root(project_root)
     existing = _list_project_files(root)
     from commerce_starter import matches as commerce_matches, decision as commerce_decision
-    if not existing and commerce_matches(instruction):
-        return {"decisions": [commerce_decision()], "model": "reviewed-commerce-v1", "provider": "starter"}
+    from commerce_starter import followups as commerce_followups
+    if not existing and commerce_matches(instruction) and after_starter != "custom":
+        #: 시작 방식 하나만 묻고 끝나면 고를 이유가 없다 — 고른 쪽에 따라 이어서 물을 결정을 함께 알려 준다.
+        return {"decisions": [commerce_decision()], "followups": commerce_followups(),
+                "model": "reviewed-commerce-v1", "provider": "starter"}
+    if after_starter == "custom":
+        instruction = (instruction + "\n\n[이어서 묻는 결정] 사용자는 ReCoder 제공 쇼핑몰 기반 대신 AI 자유 생성을 골랐습니다. "
+                       "이 앱의 기술 구성 중 사용자가 직접 골라야 할 결정(데이터 저장 방식, 로그인·인증 방식, 결제 연동 방식 등)을 "
+                       "2~3개 제시하세요. 각 결정의 선택지는 실제로 서로 다른 구현이어야 합니다.")
     print(f"[code_agent] 설계 결정 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
     prompt = _build_plan_prompt(
@@ -2081,6 +2092,15 @@ def generate_code(
         ops_out = commerce_operations()
         data = {"summary": "검증된 쇼핑몰 기반을 준비했습니다. React·Express·PostgreSQL·Stripe 구성의 상품·가입·장바구니·주문·재고·관리자 화면을 포함합니다. 실제 결제 키·상품·HTTPS·사업 정책을 설정한 뒤 업무 검증을 진행하세요."}
         llm_resp = SimpleNamespace(model_used="reviewed-commerce-v1", provider="starter")
+        #: 이어서 고른 결제 시작 방식 — 이 폴더의 첫 로컬 배포가 데모(모의 결제)로 뜰지 정한다(배포 화면에서 바꿀 수 있음).
+        from commerce_starter import payment_choice as commerce_payment_choice
+        _payment = commerce_payment_choice(norm_decisions)
+        if _payment:
+            try:
+                import deploy_settings
+                deploy_settings.remember_payment_choice(str(root), _payment)
+            except Exception as exc:  # noqa: BLE001 - 기록 실패가 생성을 막지 않는다(배포 화면에서 직접 고를 수 있음)
+                print(f"[code_agent] 결제 시작 방식 기록 실패: {exc}")
     else:
         reason = ""
         split_mode = False
