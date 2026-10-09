@@ -18,6 +18,7 @@ import {
     AwsStatus,
 } from '../types';
 import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
+import { GenerationPausedError, compactCodeEvent } from '../core/codeStream';
 import { CoreHttpError, policyDenialFromDetail } from '../core/httpError';
 import { CoreManager } from '../core/CoreManager';
 import { isCoreConnectionFailure } from '../core/coreReuse';
@@ -1884,6 +1885,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     targetFolder?: string;
                     contextFiles?: Array<{ path: string; content: string }>;
                     decisions?: CodeDecisionChoice[];
+                    mode?: string;
+                    resumeJob?: string;
+                    agents?: number;
                 };
                 await this.handleCodeGenerate(p.instruction ?? '', {
                     requestId: p.requestId,
@@ -1892,6 +1896,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     targetFolder: p.targetFolder ?? '',
                     contextFiles: p.contextFiles ?? [],
                     decisions: p.decisions ?? [],
+                    mode: p.mode === 'team' ? 'team' : 'auto',
+                    resumeJob: typeof p.resumeJob === 'string' ? p.resumeJob : '',
+                    agents: Number.isInteger(p.agents) && (p.agents as number) > 0 && (p.agents as number) <= 8 ? p.agents : 0,
                 });
                 break;
             }
@@ -2192,6 +2199,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             targetFolder?: string;
             contextFiles?: Array<{ path: string; content: string }>;
             decisions?: CodeDecisionChoice[];
+            mode?: 'auto' | 'team';
+            resumeJob?: string;
+            agents?: number;
         } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
@@ -2215,15 +2225,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             status('connecting', 'Core 연결을 확인하는 중…', 170);
             await this.ensureConnection();
             this.postMessageToWebview(opts.requestWebview, 'code.generating', { requestId: opts.requestId });
-            //: 큰 요청(쇼핑몰 등)은 파일 목록 → 나눠 생성 → 자동 교정까지 수 분 걸린다. Core 호출 상한(15분)보다 길게 기다린다.
-            status('generating', 'AI 가 코드를 만드는 중… (큰 요청은 몇 분 걸려요)', 960);
-            const result = await this._apiClient.generateCode(instruction, {
+            //: 큰 요청은 여러 에이전트가 나눠 수십 분까지 만든다 — 응답 하나를 기다리지 않고 진행 이벤트를 받는다.
+            //: 이벤트가 올 때마다 웹뷰의 대기 시간을 다시 잡으므로 전체 시간 상한은 없다.
+            status('generating', opts.resumeJob ? '멈춘 지점부터 이어서 만드는 중…' : 'AI 가 코드를 만드는 중… (큰 요청은 여러 에이전트가 나눠 만들어요)', 300);
+            const streaming = typeof (this._apiClient as Partial<ApiClient>).generateCodeStream === 'function';
+            const result = !streaming ? await this._apiClient.generateCode(instruction, {
+                workspacePath, openFile: attach, priorFiles: this._lastCodeOps, contextFiles: opts.contextFiles ?? [],
+                targetFolder: scope.targetFolder, decisions: opts.decisions ?? [],
+            }) : await this._apiClient.generateCodeStream(instruction, {
                 workspacePath,
                 openFile: attach,
                 priorFiles: this._lastCodeOps,
                 contextFiles: opts.contextFiles ?? [],
                 targetFolder: scope.targetFolder,
                 decisions: opts.decisions ?? [],
+                mode: opts.mode ?? 'auto',
+                resumeJob: opts.resumeJob ?? '',
+                agents: opts.agents ?? 0,
+            }, (event) => {
+                if (event.message) status('generating', event.message, 300);
+                this.postMessageToWebview(opts.requestWebview, 'code.team', { requestId: opts.requestId, event: compactCodeEvent(event) });
             });
             // 다음 턴 컨텍스트로 보관
             this._lastCodeOps = (result.ops ?? []).map((op) => ({ path: op.file, content: op.content }));
@@ -2235,9 +2256,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
+            const paused = err instanceof GenerationPausedError && err.jobId
+                ? { resumable: true, resumeJob: err.jobId, done: err.done, total: err.total } : {};
             this.postMessageToWebview(opts.requestWebview, 'code.error', {
                 requestId: opts.requestId,
                 message: msg,
+                ...paused,
             });
         }
     }

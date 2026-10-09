@@ -1849,35 +1849,17 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
     return found
 
 
-# ── 큰 요청: 파일 목록을 먼저 받고 나눠서 생성한다 ─────────────────────────────
+# ── 큰 요청: 대규모 생성 엔진(gen_engine)으로 나눠서 끝까지 만든다 ─────────────────
 #
-# "운영 가능한 쇼핑몰 사이트 만들어줘" 처럼 파일이 많은 요청은 모든 파일의 전체 내용을
-# JSON 한 번(8K 토큰)에 담지 못해 두 번 다 잘리고 "요청 범위를 나누라"로 끝났다(실기기).
-# 잘리면 같은 요청을 반복하지 않고 (1) 만들 파일 목록과 파일 사이의 약속(API 경로·이름·
-# 패키지)을 받은 뒤 (2) 그 약속을 공유하며 파일 몇 개씩 따로 생성해 합친다.
-_SPLIT_MAX_FILES = 64
+# "결제까지 되는 쇼핑몰 만들어줘" 처럼 큰 요청은 응답 한 번(게이트웨이 30초·4096 토큰)에 담기지
+# 않는다. 예전에는 파일 36개에서 목록을 조용히 자르고, 파일 하나가 한도를 넘으면 실패했다.
+# 지금은 gen_engine 이 설계(약속·목록, 상한 없이 이어 받기) → 기반 파일 순서대로 → 기능·화면 동시에
+# → 큰 파일 이어 쓰기 → 파일마다 즉시 확인·교정 → 체크포인트(이어서 만들기) 로 끝까지 만든다.
 #: 생성 결과의 빌드·실행 문제를 AI 에게 고치게 하는 최대 횟수(결정적 자동 교정은 매번 먼저 한다).
 _CONSISTENCY_ROUNDS = 6
+#: 확장이 응답 하나를 기다리는 예전 경로(/api/code/generate)용 교정 시간 예산.
+#: 스트림 경로는 확장이 진행 이벤트를 받으므로 이 예산을 넉넉히 준다(generate_code(budget_seconds=)).
 _GENERATION_BUDGET_SECONDS = int(os.environ.get("RECODER_GENERATION_BUDGET_SECONDS", "540"))
-_SPLIT_BATCH = 2
-_MANIFEST_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string"},
-        "contracts": {"type": "string"},
-        "files": {
-            "type": "array", "minItems": 1, "maxItems": _SPLIT_MAX_FILES,
-            "items": {
-                "type": "object",
-                "properties": {"file": {"type": "string", "minLength": 1}, "purpose": {"type": "string"}},
-                "required": ["file"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["summary", "contracts", "files"],
-    "additionalProperties": False,
-}
 
 
 def _is_truncation(exc: Exception) -> bool:
@@ -1889,66 +1871,6 @@ def _norm_op_path(path: str) -> str:
     while out.startswith("./"):
         out = out[2:]
     return out.lstrip("/").casefold()
-
-
-def _split_manifest(prompt: str) -> tuple[dict, list[dict]]:
-    manifest_prompt = prompt + f"""
-
-[분할 생성 1단계] 이 요청은 모든 파일을 한 번의 응답에 담기에 너무 큽니다. 이번 응답에서는 **파일 내용을 쓰지 말고**
-만들거나 고칠 파일 목록만 아래 JSON 으로 주세요(권장 32개 이내, 최대 {_SPLIT_MAX_FILES}개, 실제 실행에 필요한 파일만).
-{{"summary": "무엇을 만드는지 한국어 한 줄",
-  "contracts": "API 경로/요청/응답/인증 필드, DB 테이블/열/타입, export 이름, 페이지 경로, 통화/금액 단위/주문 상태 전이, 패키지/환경변수 등 파일간 정확한 약속(6000자 이내)",
-  "files": [{{"file": "상대경로", "purpose": "이 파일이 하는 일 한 줄"}}]}}
-파일은 의존성 순서로 나열하세요: root package.json/Dockerfile/.dockerignore/README → 하위 패키지/설정 → DB 스키마/연결/인증 → API → 화면 → 서버 진입점.
-파일 수 상한 때문에 root 실행/배포 파일이나 인증 화면을 누락하지 마세요. 필요하면 페이지를 한 파일에 합치고 CSS는 공통 파일 하나로 만드세요.
-불필요한 파일 분할을 줄이되 로그인·회원가입 화면, DB 초기화, root 빌드/실행, Dockerfile 등 실행에 필요한 파일은 생략하지 마세요."""
-    resp = get_router().call(
-        LLMRequest(prompt=manifest_prompt, json_schema=_MANIFEST_SCHEMA, max_tokens=6000, temperature=0.2),
-        agent="code_agent", operation="generate_code_manifest",
-    )
-    try:
-        data = _extract_json(resp.text)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"파일 목록을 받지 못했습니다: {exc}") from exc
-    files: list[dict] = []
-    seen: set[str] = set()
-    for item in data.get("files") or []:
-        path = str((item or {}).get("file") or "").strip().replace("\\", "/") if isinstance(item, dict) else ""
-        key = _norm_op_path(path)
-        if not path or key in seen or path.startswith("/") or ".." in path.split("/"):
-            continue
-        seen.add(key)
-        files.append({"file": path, "purpose": str(item.get("purpose") or "").strip()})
-    if not files:
-        raise RuntimeError("AI 가 만들 파일 목록을 돌려주지 않았습니다.")
-    if len(files) > _SPLIT_MAX_FILES:
-        raise CodeOutputError("파일 목록이 생성 상한을 넘었습니다. 파일을 임의로 잘라내지 않습니다.")
-    return data, files
-
-
-def _split_batch(prompt: str, manifest: dict, files: list[dict], batch: list[dict], target_folder: str = "") -> tuple[list[dict], object]:
-    listing = "\n".join(f"- {f['file']}: {f['purpose']}" for f in files)
-    wanted = "\n".join(f"- {f['file']}" for f in batch)
-    batch_prompt = prompt + f"""
-
-[분할 생성 2단계] 전체 파일 목록과 파일 사이의 약속은 아래와 같습니다. 다른 파일은 다른 응답에서 같은 약속으로 작성됩니다.
-전체 요약: {manifest.get('summary', '')}
-약속(반드시 지킬 것):
-{manifest.get('contracts', '') or '(없음 — 파일 목록과 요청에서 일관되게 정하세요)'}
-전체 파일 목록:
-{listing}
-
-이번 응답의 ops 에는 **아래 파일만** 전체 내용으로 작성하세요(다른 파일은 넣지 마세요):
-{wanted}"""
-    resp = get_router().call(
-        LLMRequest(prompt=batch_prompt, json_schema=CODE_OUTPUT_SCHEMA,
-                   max_tokens=16384 if len(batch) == 1 else _CODE_AGENT_MAX_TOKENS, temperature=0.2),
-        agent="code_agent", operation="generate_code_part",
-    )
-    _data, ops = parse_code_output(resp.text)
-    ops = _relative_to_target(ops, target_folder)  # 모델이 대상 폴더를 앞에 붙여도 목록과 맞춘다
-    keys = {_norm_op_path(f["file"]) for f in batch}
-    return [op for op in ops if _norm_op_path(op["file"]) in keys], resp
 
 
 def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
@@ -1967,55 +1889,22 @@ def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
     return files + [{"file": p, "purpose": purpose} for p, purpose in required.items() if p not in paths]
 
 
-def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool = False) -> tuple[dict, list[dict], object]:
-    """큰 요청을 파일 목록 → 묶음별 생성으로 나눠 만든다. 파일 하나도 한도를 넘으면 실패."""
-    manifest, files = _split_manifest(prompt)
-    #: 목록에도 대상 폴더가 붙어 올 수 있다(web/index.html). 묶음 응답과 같은 기준으로 맞춰야 걸러지지 않는다.
-    files = _relative_to_target(files, target_folder)
-    dedup: dict[str, dict] = {}
-    for f in files:
-        dedup.setdefault(_norm_op_path(f["file"]), f)
-    files = list(dedup.values())
-    if new_project:
-        files = _complete_fullstack_manifest(files)
-    print(f"[code_agent] 분할 생성 | 파일 {len(files)}개 | 묶음 {_SPLIT_BATCH}개씩", flush=True)
-    batches = [files[i:i + _SPLIT_BATCH] for i in range(0, len(files), _SPLIT_BATCH)]
-    last_resp = None
-
-    def run(batch_prompt: str, batch: list[dict]) -> tuple[list[dict], object]:
-        try:
-            return _split_batch(batch_prompt, manifest, files, batch, target_folder)
-        except (LLMError, CodeOutputError) as exc:
-            if len(batch) == 1 or not (_is_truncation(exc) or isinstance(exc, CodeOutputError)):
-                raise
-            # 두 파일이 합쳐 한도를 넘었다 — 하나씩 다시.
-            out, resp = [], None
-            for single in batch:
-                ops, resp = _split_batch(batch_prompt, manifest, files, [single], target_folder)
-                out.extend(ops)
-            return out, resp
-
-    ops_out: list[dict] = []
-    for batch in batches:
-        # Parallel batches invented incompatible middleware exports and DB fields.
-        # Later batches must see the actual earlier implementation, not only prose.
-        batch_prompt = prompt + _completed_files_context(ops_out)
-        ops, resp = run(batch_prompt, batch)
-        ops_out.extend(ops)
-        last_resp = resp or last_resp
-    got = {_norm_op_path(op["file"]) for op in ops_out}
-    missing = [f for f in files if _norm_op_path(f["file"]) not in got]
-    for single in missing:
-        ops, resp = _split_batch(prompt + _completed_files_context(ops_out), manifest, files, [single], target_folder)
-        ops_out.extend(ops)
-        last_resp = resp or last_resp
-    got = {_norm_op_path(op["file"]) for op in ops_out}
-    still = [f["file"] for f in files if _norm_op_path(f["file"]) not in got]
-    if still:
-        raise CodeOutputError(f"일부 파일을 만들지 못했습니다: {', '.join(still[:5])}")
-    order = {_norm_op_path(f["file"]): i for i, f in enumerate(files)}
-    ops_out.sort(key=lambda op: order.get(_norm_op_path(op["file"]), len(order)))
-    return {"summary": str(manifest.get("summary") or "")}, ops_out, last_resp
+def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool = False,
+                    job_id: str = "", fingerprint: str = "", resume: dict | None = None,
+                    concurrency: int | None = None) -> tuple[dict, list[dict], object]:
+    """큰 요청을 대규모 생성 엔진으로 만든다. 멈추면 GenerationPaused(이어서 만들기 가능)."""
+    try:
+        import gen_engine
+        import generation_progress
+    except ImportError:  # pragma: no cover - 패키지 실행
+        from core import gen_engine  # type: ignore
+        from core import generation_progress  # type: ignore
+    engine = gen_engine.LargeGeneration(
+        prompt, target_folder=target_folder, new_project=new_project, job_id=job_id,
+        fingerprint=fingerprint, concurrency=concurrency, emit=generation_progress.current(),
+    )
+    engine.resume_from(resume)
+    return engine.run()
 
 
 def _completed_files_context(ops: list[dict], limit: int = 64_000) -> str:
@@ -2085,9 +1974,17 @@ def generate_code(
     target_folder: str = "",
     decisions: list | None = None,
     project_root: str = "",
+    mode: str = "auto",
+    job_id: str = "",
+    budget_seconds: int | None = None,
+    agents: int | None = None,
 ) -> dict:
     """
     자연어 instruction → 파일 작업(ops) 목록.
+
+    mode: "auto"(작은 요청은 한 번에, 잘리면 대규모 엔진) | "team"(처음부터 대규모 엔진 — 여러 에이전트).
+    job_id: 대규모 생성의 체크포인트 ID. 같은 요청을 같은 job_id 로 다시 보내면 멈춘 지점부터 이어 만든다.
+    budget_seconds: 자동 교정 시간 예산(스트림 경로는 넉넉히).
 
     project_root: 이 요청의 워크스페이스 루트. 비우면 전역 설정을 따른다.
         전역 env 는 동시 요청 시 서로 덮어써 다른 워크스페이스를 가리킬 수
@@ -2148,11 +2045,34 @@ def generate_code(
         target_folder, norm_decisions,
     )
 
+    try:
+        import generation_jobs as _jobs
+        from generation_progress import report as _report
+    except ImportError:  # pragma: no cover
+        from core import generation_jobs as _jobs  # type: ignore
+        from core.generation_progress import report as _report  # type: ignore
+    budget = _GENERATION_BUDGET_SECONDS if budget_seconds is None else budget_seconds
+    job_id = job_id if _jobs.valid_job_id(job_id) else _jobs.new_job_id()
+    #: 같은 요청인지 — 요청문·승인한 결정·대상 폴더·프로젝트가 같아야 체크포인트를 이어 쓴다.
+    fp = _jobs.fingerprint(instruction=instruction, decisions=norm_decisions, target=target_folder, root=str(root),
+                           context=[f.get("path") for f in (context_files or []) if isinstance(f, dict)])
+    saved = _jobs.load(job_id, fp)
+    _jobs.prune()
+    if saved and isinstance(saved.get("result"), dict):
+        #: 이미 끝난 작업 — 확장이 결과를 받기 전에 연결이 끊겼던 경우. 다시 만들지 않고 결과를 돌려준다.
+        _report({"step": "resumed", "message": "이미 끝난 작업입니다 — 저장된 결과를 불러옵니다"})
+        return saved["result"]
+
+    def _split() -> tuple:
+        return _generate_split(prompt, target_folder, new_project=not existing,
+                               job_id=job_id, fingerprint=fp, resume=saved, concurrency=agents)
+
     # Request a native schema instead of relying only on prose instructions.
     # Reject incomplete batches as a whole, then give the model one bounded
     # correction attempt. Neither attempt writes project files.
     from commerce_starter import selected as commerce_selected, operations as commerce_operations
     foundation = ""
+    split_mode = False
     if commerce_selected(norm_decisions):
         if existing or prior_files or context_files:
             raise ValueError("검증된 쇼핑몰 기반은 빈 프로젝트에서 시작하세요. 기존 파일은 변경하지 않았습니다.")
@@ -2165,62 +2085,80 @@ def generate_code(
         reason = ""
         split_mode = False
         split_mode_failed = False
-        for attempt in range(2):
-            attempt_prompt = prompt
-            if attempt:
-                attempt_prompt += (
-                    f"\n\n직전 응답의 문제: {reason}\n"
-                    "같은 사용자 요청과 승인된 설계를 유지하여 다시 생성하세요. "
-                    "summary와 비어 있지 않은 ops 배열을 포함한 JSON 하나를 완성하세요. "
-                    "각 op에 file과 전체 content를 반드시 포함하세요. "
-                    "기능이나 기존 코드를 생략하지 말고 장황한 설명과 반복 스타일을 줄여 출력 한도 안에서 완결하세요."
-                )
+        direct_split = bool(saved and saved.get("manifest")) or mode == "team"
+        if direct_split:
+            #: 팀 모드이거나 멈춘 작업을 이어 만드는 중 — 한 번에 만들어 보는 호출을 건너뛴다(잘릴 게 뻔한 30초 절약).
             try:
-                llm_resp = get_router().call(
-                    LLMRequest(prompt=attempt_prompt, json_schema=CODE_OUTPUT_SCHEMA,
-                               max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
-                    agent="code_agent", operation="generate_code",
-                )
-                data, ops_out = parse_code_output(llm_resp.text)
-                ops_out = _relative_to_target(ops_out, target_folder)
-                break
-            except CodeOutputError as exc:
-                reason = str(exc)
-                if attempt == 1 and "완성되지 않았거나" in reason:
-                    #: 교정 요청까지 완성되지 않은 JSON 이면 거의 언제나 길이 한도에서 잘린 것이다
-                    #: (stop_reason 을 안 주는 제공자·게이트웨이 포함). 실패로 끝내지 않고 나눠서 만든다.
-                    print("[code_agent] 응답 JSON 이 두 번 다 완성되지 않아 분할 생성으로 전환", flush=True)
-                    try:
-                        data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
-                    except (LLMError, CodeOutputError, RuntimeError) as split_exc:
-                        reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
-                        split_mode_failed = True
-                        break
-                    split_mode = True
-                    break
-            except LLMError as exc:
-                if exc.error_type != LLMErrorType.STRUCTURED_OUTPUT:
-                    raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
-                reason = "모델 출력이 응답 길이 제한에서 잘렸습니다."
-                if _is_truncation(exc):
-                    #: 같은 요청을 다시 보내도 또 잘린다 — 파일 목록을 받아 나눠서 만든다.
-                    print("[code_agent] 응답이 길이 한도에서 잘려 분할 생성으로 전환", flush=True)
-                    try:
-                        data, ops_out, llm_resp = _generate_split(prompt, target_folder, new_project=not existing)
-                    except (LLMError, CodeOutputError, RuntimeError) as split_exc:
-                        reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
-                        split_mode_failed = True
-                        break
-                    split_mode = True
-                    break
-            except Exception as exc:
-                raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
-            print(f"[code_agent] 생성 응답 검증 실패 ({attempt + 1}/2): {reason}", flush=True)
+                data, ops_out, llm_resp = _split()
+            except _jobs.GenerationPaused:
+                raise
+            except (LLMError, CodeOutputError, RuntimeError) as split_exc:
+                raise RuntimeError(f"대규모 생성에 실패했습니다: {split_exc} 파일은 변경하지 않았습니다.") from split_exc
+            split_mode = True
         else:
-            raise RuntimeError(
-                f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도). {reason} "
-                "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
-            )
+            _report({"step": "generating", "message": "AI 가 코드를 만드는 중…"})
+            for attempt in range(2):
+                attempt_prompt = prompt
+                if attempt:
+                    attempt_prompt += (
+                        f"\n\n직전 응답의 문제: {reason}\n"
+                        "같은 사용자 요청과 승인된 설계를 유지하여 다시 생성하세요. "
+                        "summary와 비어 있지 않은 ops 배열을 포함한 JSON 하나를 완성하세요. "
+                        "각 op에 file과 전체 content를 반드시 포함하세요. "
+                        "기능이나 기존 코드를 생략하지 말고 장황한 설명과 반복 스타일을 줄여 출력 한도 안에서 완결하세요."
+                    )
+                try:
+                    llm_resp = get_router().call(
+                        LLMRequest(prompt=attempt_prompt, json_schema=CODE_OUTPUT_SCHEMA,
+                                   max_tokens=_CODE_AGENT_MAX_TOKENS, temperature=0.2),
+                        agent="code_agent", operation="generate_code",
+                    )
+                    data, ops_out = parse_code_output(llm_resp.text)
+                    ops_out = _relative_to_target(ops_out, target_folder)
+                    break
+                except CodeOutputError as exc:
+                    reason = str(exc)
+                    if attempt == 1 and "완성되지 않았거나" in reason:
+                        #: 교정 요청까지 완성되지 않은 JSON 이면 거의 언제나 길이 한도에서 잘린 것이다
+                        #: (stop_reason 을 안 주는 제공자·게이트웨이 포함). 실패로 끝내지 않고 나눠서 만든다.
+                        print("[code_agent] 응답 JSON 이 두 번 다 완성되지 않아 분할 생성으로 전환", flush=True)
+                        _report({"step": "split", "message": "요청이 커서 여러 에이전트가 나눠 만드는 방식으로 전환합니다"})
+                        try:
+                            data, ops_out, llm_resp = _split()
+                        except _jobs.GenerationPaused:
+                            raise
+                        except (LLMError, CodeOutputError, RuntimeError) as split_exc:
+                            reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
+                            split_mode_failed = True
+                            break
+                        split_mode = True
+                        break
+                except LLMError as exc:
+                    if exc.error_type != LLMErrorType.STRUCTURED_OUTPUT:
+                        raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
+                    reason = "모델 출력이 응답 길이 제한에서 잘렸습니다."
+                    if _is_truncation(exc):
+                        #: 같은 요청을 다시 보내도 또 잘린다 — 파일 목록을 받아 나눠서 만든다.
+                        print("[code_agent] 응답이 길이 한도에서 잘려 분할 생성으로 전환", flush=True)
+                        _report({"step": "split", "message": "요청이 커서 여러 에이전트가 나눠 만드는 방식으로 전환합니다"})
+                        try:
+                            data, ops_out, llm_resp = _split()
+                        except _jobs.GenerationPaused:
+                            raise
+                        except (LLMError, CodeOutputError, RuntimeError) as split_exc:
+                            reason = f"나눠서 만들기도 실패했습니다: {split_exc}"
+                            split_mode_failed = True
+                            break
+                        split_mode = True
+                        break
+                except Exception as exc:
+                    raise RuntimeError(f"LLM 호출 실패: {exc}") from exc
+                print(f"[code_agent] 생성 응답 검증 실패 ({attempt + 1}/2): {reason}", flush=True)
+            else:
+                raise RuntimeError(
+                    f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도). {reason} "
+                    "파일은 변경하지 않았습니다. 요청 범위를 나누어 다시 시도해 주세요."
+                )
         if split_mode_failed:
             raise RuntimeError(
                 f"AI가 완성된 파일 변경을 반환하지 못했습니다(2회 시도 뒤 나눠서 만들기도 실패). {reason} "
@@ -2238,10 +2176,12 @@ def generate_code(
                     "output": "Static consistency errors must be repaired before building."}
     visited = set()
     for _round in range(_CONSISTENCY_ROUNDS):
-        if _round and _time.monotonic() - started_at > _GENERATION_BUDGET_SECONDS:
+        if _round and _time.monotonic() - started_at > budget:
+            print(f"[code_agent] 생성 시간 예산({budget}s) 초과 — AI 교정을 멈추고 결과를 돌려줍니다", flush=True)
             break
         errors = [i for i in consistency if i["severity"] == "error"]
         if not errors:
+            _report({"step": "consistency", "round": _round + 1, "message": "컨테이너 빌드로 실제 동작을 확인하는 중"})
             verification = _verify_generated_build(root, target_folder, ops_out)
             if verification["status"] != "failed":
                 break
@@ -2254,6 +2194,30 @@ def generate_code(
         if signature in visited:
             break
         visited.add(signature)
+        _report({"step": "consistency", "round": _round + 1,
+                 "message": f"전체 점검 — 파일끼리 안 맞는 부분 {len(errors)}건 고치는 중"})
+        if split_mode:
+            #: 대규모 생성 결과는 바뀔 부분만 고친다(파일 전체를 다시 쓰면 응답 한도에서 잘려 교정이 생략됐다).
+            try:
+                try:
+                    import gen_engine as _ge
+                    import generation_progress as _gp
+                except ImportError:  # pragma: no cover
+                    from core import gen_engine as _ge  # type: ignore
+                    from core import generation_progress as _gp  # type: ignore
+                edited = _ge.edit_fix_round(prompt, ops_out, errors, emit=_gp.current())
+            except Exception as exc:  # noqa: BLE001 — 교정 실패는 아래 파일 단위 교정으로 넘어간다
+                print(f"[code_agent] 부분 교정 생략: {exc}", flush=True)
+                edited = None
+            if edited is not None:
+                ops_e, _notes = _autofix_ops(root, target_folder, edited)
+                remaining = _consistency_issues(root, target_folder, ops_e)
+                if _issue_weight(remaining) < _issue_weight(errors):
+                    ops_out, consistency = ops_e, remaining
+                    verification = {"kind": "docker-build", "status": "blocked", "passed": False,
+                                    "output": "Updated proposal still requires verification."}
+                    print(f"[code_agent] 부분 교정 적용({_round + 1}회) | 남은 문제 {len(remaining)}개", flush=True)
+                    continue
         issue_lines = "\n".join(f"- {i['message']} (해결: {i['fix']})" for i in errors)
         listing = "\n".join(f"- {op['file']}" for op in ops_out)
         fix_prompt = prompt + (
@@ -2371,5 +2335,9 @@ def generate_code(
     if adr_ops:
         result["adr"] = [op["file"] for op in adr_ops]
         print(f"[code_agent] ADR {len(adr_ops)}건 영속화 예정: {result['adr']}")
+    if split_mode:
+        result["job_id"] = job_id
+        #: 결과를 체크포인트 자리에 남겨 둔다 — 확장이 받기 전에 연결이 끊겨도 같은 작업 ID 로 바로 받는다.
+        _jobs.save(job_id, {"fingerprint": fp, "result": result})
     print(f"[code_agent] 코드 생성 완료 | ops {len(ops_out)}개 | model={result['model']}")
     return result

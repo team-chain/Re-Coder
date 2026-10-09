@@ -56,7 +56,8 @@ def test_잘리면_파일목록을_받고_나눠서_만든다(monkeypatch, tmp_p
     assert files == ["package.json", "server.js", "public/index.html", "public/app.js", "public/style.css"]
     assert router.ops.count("generate_code") == 1  # 같은 요청을 다시 보내지 않는다
     assert router.ops.count("generate_code_manifest") == 1
-    assert router.ops.count("generate_code_part") == 3  # 2개씩 5개 → 3묶음
+    # 기반(package.json) → 기능(server.js) → 화면 3개(2개씩) = 4묶음
+    assert router.ops.count("generate_code_part") == 4
     assert result["summary"].startswith("쇼핑몰")
 
 
@@ -71,7 +72,8 @@ def test_분할도_실패하면_파일을_바꾸지_않고_알린다(monkeypatch
     class Broken(Router):
         def call(self, request, agent=None, operation=None):
             if operation == "generate_code_manifest":
-                return type("R", (), {"text": "{}", "model_used": "m", "provider": "p"})()
+                return type("R", (), {"text": json.dumps({"summary": "x", "contracts": "", "files": [], "more": False}),
+                                      "model_used": "m", "provider": "p"})()
             return super().call(request, agent, operation)
     monkeypatch.setattr(ca, "get_router", lambda: Broken())
     with pytest.raises(RuntimeError, match="나눠서 만들기도 실패"):
@@ -135,3 +137,69 @@ def test_대상_폴더가_목록과_응답에_붙어_와도_걸러지지_않는�
     result = ca.generate_code("쇼핑몰", decisions=[DECISION], project_root=str(tmp_path), target_folder="web")
     files = [op["file"] for op in result["ops"] if not op["file"].startswith(("docs/", "web/docs/"))]
     assert files == ["package.json", "server.js", "public/index.html", "public/app.js", "public/style.css"]
+
+
+class BigFile(Router):
+    """결제 로직이 든 server.js 는 혼자서도 출력 한도를 넘는다(게이트웨이 4096 토큰)."""
+    def __init__(self, parts, **kw):
+        super().__init__(**kw)
+        self.parts, self.part_prompts = list(parts), []
+
+    def call(self, request, agent=None, operation=None):
+        if operation == "generate_code_file_part":
+            with self.lock:
+                self.ops.append(operation)
+            self.part_prompts.append(request.prompt)
+            content, done = self.parts.pop(0)
+            return type("R", (), {"text": json.dumps({"content": content, "done": done}), "model_used": "m", "provider": "p"})()
+        if operation == "generate_code_part":
+            wanted = request.prompt.rsplit("**아래 파일만**", 1)[1]
+            if "- server.js\n" in wanted + "\n":
+                with self.lock:
+                    self.ops.append(operation)
+                raise CUT
+        return super().call(request, agent, operation)
+
+
+def test_파일_하나가_한도를_넘으면_나눠서_이어_쓴다(monkeypatch, tmp_path):
+    router = BigFile([("const a = 1;\nconst b = 2;", False),
+                      ("const b = 2;\nfunction pay() {\n  return a + b;\n}", False),  # 직전 줄 반복은 걷어낸다
+                      ("module.exports = { pay };", True)])
+    monkeypatch.setattr(ca, "get_router", lambda: router)
+    result = ca.generate_code("결제까지 되는 쇼핑몰 만들어줘", decisions=[DECISION], project_root=str(tmp_path))
+    by_file = {op["file"]: op["content"] for op in result["ops"]}
+    assert by_file["server.js"] == "const a = 1;\nconst b = 2;\nfunction pay() {\n  return a + b;\n}\nmodule.exports = { pay };\n"
+    assert set(CONTENT) <= set(by_file)
+    assert router.ops.count("generate_code_file_part") == 3
+    # 이어 쓸 때는 지금까지 쓴 내용과 파일 사이의 약속을 함께 보낸다.
+    assert "const b = 2;" in router.part_prompts[1] and MANIFEST["contracts"] in router.part_prompts[1]
+    assert "const a = 1;" not in router.part_prompts[0].split("**최대")[1]
+
+
+def test_이어_쓰기가_진행되지_않으면_멈추고_이어서_만들_수_있게_남긴다(monkeypatch, tmp_path):
+    router = BigFile([("", False)] * 5)
+    monkeypatch.setattr(ca, "get_router", lambda: router)
+    with pytest.raises(RuntimeError) as err:
+        ca.generate_code("쇼핑몰", decisions=[DECISION], project_root=str(tmp_path))
+    assert getattr(err.value, "job_id", "")  # GenerationPaused — 다 만든 파일은 체크포인트에
+    assert "이어서 만들기" in str(err.value)
+
+
+def test_파일_목록이_잘리면_약속은_조각으로_목록은_페이지로_받는다(monkeypatch, tmp_path):
+    class CutManifest(Router):
+        calls = []
+        def call(self, request, agent=None, operation=None):
+            if operation == "generate_code_manifest":
+                CutManifest.calls.append(request.prompt)
+                if len(CutManifest.calls) == 1:
+                    raise CUT
+                if len(CutManifest.calls) == 2:  # 요약 한 줄
+                    return type("R", (), {"text": json.dumps({"summary": "쇼핑몰"}), "model_used": "m", "provider": "p"})()
+                return type("R", (), {"text": json.dumps({"files": MANIFEST["files"], "more": False}), "model_used": "m", "provider": "p"})()
+            if operation == "generate_code_contracts":
+                return type("R", (), {"text": json.dumps({"content": "GET /api/products", "done": True}), "model_used": "m", "provider": "p"})()
+            return super().call(request, agent, operation)
+    monkeypatch.setattr(ca, "get_router", lambda r=CutManifest(): r)
+    result = ca.generate_code("쇼핑몰", decisions=[DECISION], project_root=str(tmp_path))
+    assert set(CONTENT) <= {op["file"] for op in result["ops"]}
+    assert "GET /api/products" in CutManifest.calls[-1]  # 이어 받은 약속을 목록 요청에 넣었다

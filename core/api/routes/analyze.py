@@ -673,6 +673,12 @@ class CodeGenerateRequest(BaseModel):
     target_folder: str = ""
     # AI-DLC 결정 모달에서 사용자가 확정한 설계 선택. generate_code 프롬프트에 반영한다.
     decisions: list = []
+    #: "auto"(작은 요청은 한 번에) | "team"(처음부터 여러 에이전트가 나눠 만든다)
+    mode: str = "auto"
+    #: 멈춘 대규모 생성을 이어 만들 작업 ID(일시 정지 응답의 resume_job).
+    resume_job: str = ""
+    #: 팀 모드 동시 작업 에이전트 수(1~8). 0 이면 기본값.
+    agents: int = 0
 
 
 @router.post("/api/code/generate")
@@ -699,8 +705,10 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
     try:
         try:
             from code_agent import generate_code
+            from generation_jobs import GenerationPaused
         except ImportError:
             from core.code_agent import generate_code
+            from core.generation_jobs import GenerationPaused
         # LLM 호출은 수 초~수십 초 걸린다. 동기 함수를 그대로 await 없이 부르면
         # 이벤트 루프가 묶여 health 폴링·채팅 등 다른 요청이 전부 막히고,
         # 확장이 Core 를 "응답 없음"으로 판정해 복구 로직을 돌린다.
@@ -719,13 +727,67 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
             target_folder=body.target_folder or "",
             decisions=body.decisions or [],
             project_root=body.workspace_path or "",
+            mode=_code_mode(body.mode),
+            job_id=body.resume_job or "",
         )
+    except GenerationPaused as e:
+        #: 다 만든 파일은 저장됐다 — 같은 요청을 resume_job 과 함께 다시 보내면 이어 만든다.
+        raise HTTPException(status_code=409, detail={"message": str(e), **e.progress_payload()}) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"코드 생성 실패: {e}") from e
 
     return result
+
+
+def _code_mode(mode: str) -> str:
+    return "team" if str(mode or "").strip().lower() == "team" else "auto"
+
+
+@router.post("/api/code/generate/stream")
+async def generate_code_stream_route(body: CodeGenerateRequest):
+    """대규모 생성 — 시간 상한 없이 진행 이벤트(SSE)를 흘린다. 보는 쪽이 끊겨도 작업은 끝까지 간다.
+
+    이벤트: planning·planned·wave·file_start·file_part·file_done·fixing·retry·waiting·consistency·done·error.
+    error 에 resumable=true 면 resume_job 으로 같은 요청을 다시 보내 멈춘 지점부터 이어 만든다.
+    """
+    import uuid as _uuid
+    try:
+        from code_agent import generate_code
+        import generation_jobs as _jobs
+        import generation_progress as _progress
+    except ImportError:
+        from core.code_agent import generate_code
+        from core import generation_jobs as _jobs  # type: ignore
+        from core import generation_progress as _progress  # type: ignore
+
+    if not (body.instruction or "").strip():
+        raise HTTPException(status_code=400, detail="instruction 이 비어 있습니다.")
+    open_file = None
+    if body.open_file_path or body.open_file_content:
+        open_file = {"path": body.open_file_path, "content": body.open_file_content}
+    job_id = body.resume_job if _jobs.valid_job_id(body.resume_job) else _jobs.new_job_id()
+    agents = body.agents if 0 < int(body.agents or 0) <= 8 else None
+
+    def operation():
+        return generate_code(
+            instruction=body.instruction,
+            session_id=_uuid.uuid4().hex[:8],
+            open_file=open_file,
+            prior_files=body.prior_files or [],
+            context_files=body.context_files or [],
+            target_folder=body.target_folder or "",
+            decisions=body.decisions or [],
+            project_root=body.workspace_path or "",
+            mode=_code_mode(body.mode),
+            job_id=job_id,
+            agents=agents,
+            #: 확장은 진행 이벤트를 받으며 기다리므로 자동 교정 시간을 넉넉히 준다.
+            budget_seconds=3600,
+        )
+
+    return _progress.stream(operation, job_id)
 
 
 # ---------------------------------------------------------------------------

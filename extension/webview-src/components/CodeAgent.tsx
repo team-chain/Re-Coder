@@ -9,6 +9,9 @@ import { isHostLinkLost } from "../hooks/useHostLink";
 import { loadUiState, saveUiState } from "../hooks/uiState";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
+import { TeamBoard, TeamComposer } from "./TeamBoard";
+import { ANIMAL_KINDS } from "./teamAnimals";
+import { DEFAULT_DEV_AGENTS, MAX_DEV_AGENTS, TeamEvent, TeamMember, TeamView, buildRoster, emptyTeamView, reduceTeam } from "./teamState";
 
 interface SecretWarning { rule: string; line: number; masked: string; }
 interface CodeOp {
@@ -60,9 +63,13 @@ export function buildDecisionChoices(
 //: 폴더 A 의 맥락으로 생성됐고 ADR 번호도 A 기준으로 예약됐는데 B 에 쓰면
 //: 같은 이름의 파일·ADR 이 덮어써진다. 적용·모두 적용·diff·경로 표시가
 //: 전부 이 고정값을 쓴다.
-interface Turn { id: number; prompt: string; targetFolder: string; contextNames?: string[]; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string; }
+//: 팀 모드: team 은 코어 진행 이벤트를 접은 화면 상태, request 는 [이어서 만들기]에 그대로 다시 보낼 생성 요청.
+interface GenerateRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; decisions: DecisionChoice[]; mode: "auto" | "team"; agents: number; }
+interface PausedInfo { message: string; jobId: string; done: number; total: number; }
+interface Turn { id: number; prompt: string; targetFolder: string; contextNames?: string[]; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string;
+  roster?: TeamMember[]; team?: TeamView; request?: GenerateRequest; paused?: PausedInfo | null; }
 export interface CtxFile { path: string; content: string; }
-interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; }
+interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; team?: boolean; roster?: TeamMember[]; }
 interface DecisionModal { requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; dropped: string[]; }
 
 //: 파일 하나의 적용 상태.
@@ -102,7 +109,7 @@ export interface ExternalTurn { requestId: number; instruction: string; targetFo
 let pendingTargetFolder: string | null = null;
 export function setPendingTargetFolder(folder: string): void { pendingTargetFolder = folder; }
 
-export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError }) => {
+export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string; onOpenHub?: (hub: "deploy" | "security") => void }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError, onOpenHub }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   //: 쓰던 요청은 화면이 다시 그려져도(창 다시 불러오기·확장 재시작) 남는다.
@@ -110,6 +117,18 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   useEffect(() => { saveUiState({ codeDraft: input }); }, [input]);
   const [targetFolder, setTargetFolder] = useState(() => { const f = pendingTargetFolder ?? ""; pendingTargetFolder = null; return f; });
   const [contextFiles, setContextFiles] = useState<CtxFile[]>([]);
+  //: 팀 모드 구성 — 창을 다시 불러와도 유지한다(동물 배정도 그대로).
+  const [teamMode, setTeamMode] = useState<boolean>(() => loadUiState().codeTeamMode === true);
+  const [roster, setRoster] = useState<TeamMember[]>(() => {
+    const saved = loadUiState().codeTeamRoster;
+    const valid = Array.isArray(saved) && saved.length >= 3 && saved.every((m) => m && typeof m === "object"
+      && typeof (m as TeamMember).id === "string" && ["planner", "dev", "review"].includes((m as TeamMember).role)
+      && (ANIMAL_KINDS as string[]).includes((m as TeamMember).animal));
+    return valid ? saved as TeamMember[] : buildRoster(DEFAULT_DEV_AGENTS);
+  });
+  useEffect(() => { saveUiState({ codeTeamMode: teamMode, codeTeamRoster: roster }); }, [teamMode, roster]);
+  const addDevAgent = useCallback(() => setRoster(r => buildRoster(Math.min(MAX_DEV_AGENTS, r.filter(m => m.role === "dev").length + 1), Math.random, r)), []);
+  const removeDevAgent = useCallback(() => setRoster(r => buildRoster(Math.max(1, r.filter(m => m.role === "dev").length - 1), Math.random, r)), []);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [applyState, setApplyState] = useState<Record<string, ApplyStatus>>({});
   const [applyErrors, setApplyErrors] = useState<Record<string, string>>({});
@@ -182,6 +201,13 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       }
       return;
     }
+    if (type === "code.team") {
+      const p = payload as { requestId?: number; event?: TeamEvent };
+      if (p.requestId === undefined || !p.event || expiredRequests.current.has(p.requestId)) return;
+      const event = p.event;
+      setTurns(ts => ts.map(t => t.id === p.requestId ? { ...t, team: reduceTeam(t.team ?? emptyTeamView(), event) } : t));
+      return;
+    }
     if (type === "code.result") {
       const res = payload as CodeResult;
       const requestId = res.requestId;
@@ -220,12 +246,17 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       }
       if (responseId === undefined || activeRequest.current === responseId) activeRequest.current = null;
       if (responseId !== undefined) delete pendingRequestsRef.current[responseId];
+      const pause = payload as { resumable?: boolean; resumeJob?: string; done?: number; total?: number };
       setTurns((ts) => {
         const copy = [...ts];
         const requestId = (payload as { requestId?: number })?.requestId;
         for (let i = copy.length - 1; i >= 0; i--) {
           if ((requestId === undefined || copy[i].id === requestId) && (copy[i].status === "planning" || copy[i].status === "generating")) {
-            copy[i] = { ...copy[i], status: "error", error: m };
+            //: 다 만든 파일은 코어에 저장돼 있다 — 실패가 아니라 일시 정지로 보여 주고 [이어서 만들기]를 준다.
+            const paused = pause.resumable && pause.resumeJob && copy[i].request
+              ? { message: m, jobId: pause.resumeJob, done: Number(pause.done) || copy[i].team?.done || 0, total: Number(pause.total) || copy[i].team?.total || 0 }
+              : null;
+            copy[i] = { ...copy[i], status: "error", error: m, paused };
             break;
           }
         }
@@ -276,15 +307,15 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     if (!text || activeRequest.current !== null) { return; }
     const id = _turnSeq++;
     activeRequest.current = id;
-    pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles };
+    pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles, team: teamMode, roster };
     // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
     // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
-    setTurns((ts) => [...ts, { id, prompt: text, targetFolder, contextNames: contextFiles.map((f) => f.path), status: "planning" }]);
+    setTurns((ts) => [...ts, { id, prompt: text, targetFolder, contextNames: contextFiles.map((f) => f.path), status: "planning", roster }]);
     //: 확장은 받자마자 code.status 로 답한다 — 15초 안에 답이 없으면 끊긴 것이다(예전 30초).
     waitForResponse(id, isHostLinkLost() ? 5 : FIRST_ACK_SECONDS);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
-  }, [input, targetFolder, contextFiles, postMessage]);
+  }, [input, targetFolder, contextFiles, postMessage, teamMode, roster]);
 
   const chooseDecision = useCallback((key: string) => {
     setDecisionModal((current) => current ? {
@@ -309,11 +340,27 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     const request = pendingRequestsRef.current[decisionModal.requestId];
     if (!request) { setDecisionModal(null); return; }
     const choices = buildDecisionChoices(decisionModal.decisions, decisionModal.selections);
-    setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId ? { ...turn, status: "generating" } : turn));
+    const team = request.roster ?? roster;
+    const generate: GenerateRequest = {
+      instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices,
+      //: 팀 모드가 꺼져 있어도 요청이 크면 코어가 자동으로 나눠 만든다(같은 에이전트 수로).
+      mode: request.team ? "team" : "auto", agents: team.filter(m => m.role === "dev").length,
+    };
+    setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId ? { ...turn, status: "generating", request: generate, roster: team } : turn));
     setDecisionModal(null);
     waitForResponse(decisionModal.requestId, 30);
-    postMessage("code.generate", { requestId: decisionModal.requestId, instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices });
-  }, [decisionModal, postMessage]);
+    postMessage("code.generate", { requestId: decisionModal.requestId, ...generate });
+  }, [decisionModal, postMessage, roster]);
+
+  //: 멈춘 대규모 생성을 같은 요청·같은 작업 ID 로 다시 보낸다 — 코어가 멈춘 지점부터 이어 만든다.
+  const resumeTurn = useCallback((turn: Turn) => {
+    if (!turn.request || !turn.paused || activeRequest.current !== null) return;
+    activeRequest.current = turn.id;
+    expiredRequests.current.delete(turn.id);
+    setTurns(ts => ts.map(t => t.id === turn.id ? { ...t, status: "generating", error: undefined, paused: null, progress: "멈춘 지점부터 이어서 만드는 중…" } : t));
+    waitForResponse(turn.id, 60);
+    postMessage("code.generate", { requestId: turn.id, ...turn.request, resumeJob: turn.paused.jobId });
+  }, [postMessage]);
 
   const applyOp = useCallback((turn: Turn, op: CodeOp) => {
     const key = `${turn.id}:${op.file}`;
@@ -449,6 +496,10 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
             <div className="rc-cg-meta">{[turn.targetFolder || "", ...(turn.contextNames ?? [])].filter(Boolean).join(" · ")}</div>
           ) : <div style={{ height: 8 }} />}
 
+          {turn.team && (turn.status === "generating" || turn.paused) && (
+            <TeamBoard roster={turn.roster ?? roster} view={turn.team} paused={turn.paused ? { message: turn.paused.message, done: turn.paused.done, total: turn.paused.total } : null}
+              onResume={turn.paused && !isBusy ? () => resumeTurn(turn) : undefined} />
+          )}
           {(turn.status === "planning" || turn.status === "generating") && (
             <>
               <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--vscode-descriptionForeground, #888)", fontSize: 11, padding: "2px 0 6px" }}>
@@ -458,11 +509,23 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               </div>
             </>
           )}
-          {turn.status === "error" && (
+          {turn.status === "error" && turn.paused && !turn.team && (
+            <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(204,167,0,.08)", border: "1px solid rgba(204,167,0,.35)", borderRadius: 4, padding: "7px 10px", fontSize: 11 }}>
+              <span style={{ flex: 1 }}>⏸ {turn.error}</span>
+              <button onClick={() => resumeTurn(turn)} disabled={isBusy} style={{ ...primaryBtn, padding: "4px 10px", fontSize: 11 }}>이어서 만들기{turn.paused.total ? ` (${turn.paused.done}/${turn.paused.total})` : ""}</button>
+            </div>
+          )}
+          {turn.status === "error" && !turn.paused && (
             <div style={{ background: "var(--vscode-inputValidation-errorBackground, rgba(239,68,68,0.1))", border: "1px solid var(--vscode-inputValidation-errorBorder, #ef4444)", borderRadius: 4, padding: "7px 10px", color: "var(--vscode-errorForeground, #f48771)", fontSize: 11 }}>{turn.error}</div>
           )}
           {turn.status === "done" && turn.result && (
             <div>
+              {turn.team && turn.team.total > 0 && (
+                <div data-testid="team-done" style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", margin: "0 0 6px" }}>
+                  팀 작업 완료 · 파일 {turn.team.total}개 · 에이전트 {Object.keys(turn.team.agents).filter(a => a.startsWith("agent-")).length || 1}명이 동시에 작업
+                  {turn.team.fixes ? ` · 만들면서 고친 문제 ${turn.team.fixes}건` : ""}
+                </div>
+              )}
               <div role="status" data-testid="code-build-verification" style={{fontSize: 11, marginBottom: 8,
                 color: turn.result.verification?.status === "passed" ? "var(--vscode-testing-iconPassed)" : "var(--vscode-editorWarning-foreground)"}}>
                 {turn.result.verification?.status === "passed" ? "컨테이너 빌드 통과 · 실행 환경과 업무 기능 검증은 별도입니다."
@@ -482,6 +545,12 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                     <span data-testid="code-result-summary" style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>
                       파일 {ops.length}개{created ? ` · 새 파일 ${created}` : ""}{ops.length - created ? ` · 수정 ${ops.length - created}` : ""}
                     </span>
+                    {allApplied && onOpenHub && (
+                      <span data-testid="code-next-steps" style={{ display: "inline-flex", gap: 6, marginLeft: "auto" }}>
+                        <button onClick={() => onOpenHub("security")} style={ghostBtn} title="적용한 코드를 보안 검사합니다">보안 검사 →</button>
+                        <button onClick={() => onOpenHub("deploy")} style={ghostBtn} title="배포 캔버스에서 바로 배포합니다">배포하기 →</button>
+                      </span>
+                    )}
                     {ops.length > 1 && (
                       <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied}
                         style={{ ...primaryBtn, ...(anyPending || allApplied ? { opacity: 0.55, cursor: "default" } : {}) }}>
@@ -586,6 +655,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
             </div>
           </div>
         </div>
+        <TeamComposer enabled={teamMode} roster={roster} disabled={isBusy} onToggle={setTeamMode} onAdd={addDevAgent} onRemove={removeDevAgent} />
         {!hasTurns && (
           <div className="rc-cg-examples">
             {EXAMPLES.map((ex) => (

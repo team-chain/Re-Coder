@@ -89,3 +89,12 @@ def _isolate_project_scanner_profiles(tmp_path, monkeypatch):
     """Scanner tests must not write profiles into the developer's real home."""
     import project_scanner
     monkeypatch.setattr(project_scanner, 'RECODER_HOME', tmp_path / 'recoder-profiles')
+
+
+@_pytest_guard.fixture(autouse=True)
+def _isolate_generation_checkpoints(tmp_path_factory, monkeypatch):
+    """대규모 생성 체크포인트가 개발자 홈(~/.recoder/generation)에 쌓이지 않게 한다.
+    테스트의 tmp_path(프로젝트 폴더 역할)와도 분리한다 — '생성은 파일을 쓰지 않는다' 검사가 있다."""
+    monkeypatch.setenv("RECODER_GENERATION_DIR", str(tmp_path_factory.mktemp("generation-jobs")))
+    #: 테스트는 가짜 라우터를 쓰므로 호출 속도 제한·재시도 대기를 끈다.
+    monkeypatch.setenv("RECODER_LLM_RPM", "0")

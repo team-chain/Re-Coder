@@ -1,4 +1,5 @@
 import { DeploymentProgressEvent, readDeploymentStream } from './deploymentStream';
+import { CodeProgressEvent, readCodeStream } from './codeStream';
 import {
     ApiResponse,
     CoreHealth,
@@ -69,6 +70,8 @@ export interface CodeAgentResult {
     summary: string;
     ops: CodeAgentOp[];
     model: string;
+    /** 대규모 생성 작업 ID — 같은 ID 로 다시 요청하면 저장된 결과를 바로 받는다. */
+    job_id?: string;
     verification?: {kind: string; status: string; passed: boolean; output?: string};
 }
 
@@ -395,6 +398,60 @@ export class ApiClient {
         const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 900000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '코드 생성 실패'); }
         return resp.data;
+    }
+
+    /**
+     * 대규모 생성 — 진행 이벤트를 받으며 기다린다(전체 시간 상한 없음).
+     * mode='team' 이면 처음부터 여러 에이전트가 나눠 만든다. resumeJob 으로 멈춘 작업을 이어 만든다.
+     * 코어가 이 경로를 모르면(구버전) 예전 /api/code/generate 로 물러선다.
+     */
+    async generateCodeStream(
+        instruction: string,
+        opts: {
+            workspacePath?: string;
+            openFile?: { path: string; content: string };
+            priorFiles?: Array<{ path: string; content: string }>;
+            contextFiles?: Array<{ path: string; content: string }>;
+            targetFolder?: string;
+            decisions?: CodeDecisionChoice[];
+            mode?: 'auto' | 'team';
+            resumeJob?: string;
+            agents?: number;
+        },
+        onEvent: (event: CodeProgressEvent) => void,
+        retried = false,
+    ): Promise<CodeAgentResult> {
+        if (!this.coreManager.getSessionToken()) await this.coreManager.refreshToken();
+        const body = {
+            instruction,
+            workspace_path: opts.workspacePath ?? '',
+            open_file_path: opts.openFile?.path ?? '',
+            open_file_content: opts.openFile?.content ?? '',
+            prior_files: opts.priorFiles ?? [],
+            context_files: opts.contextFiles ?? [],
+            target_folder: opts.targetFolder ?? '',
+            decisions: opts.decisions ?? [],
+            mode: opts.mode ?? 'auto',
+            resume_job: opts.resumeJob ?? '',
+            agents: opts.agents ?? 0,
+        };
+        const controller = new AbortController();
+        const response = await fetch(`http://127.0.0.1:${this.coreManager.getPort()}/api/code/generate/stream`, {
+            method: 'POST', signal: controller.signal,
+            headers: { 'Content-Type': 'application/json', 'X-Session-Token': this.coreManager.getSessionToken(), Accept: 'text/event-stream' },
+            body: JSON.stringify(body),
+        });
+        if (response.status === 401 && !retried) {
+            await response.body?.cancel();
+            await this.coreManager.refreshToken();
+            return this.generateCodeStream(instruction, opts, onEvent, true);
+        }
+        if (response.status === 404 || response.status === 405) {
+            await response.body?.cancel();
+            return this.generateCode(instruction, opts);
+        }
+        if (!response.ok) throw new Error(describeHttpError(response.status, await response.text()));
+        return await readCodeStream<CodeAgentResult>(response, onEvent, () => controller.abort());
     }
 
     /**

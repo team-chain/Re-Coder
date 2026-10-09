@@ -1,3 +1,14 @@
+# 대규모 코드 생성 · 팀 모드 (2026-10-08, 1.1.31)
+
+- **원인(실기기 "긴 요청이 잘린다")**: 학생용 게이트웨이는 HTTP API(통합 제한 30초, 늘릴 수 없음) 뒤 Lambda 라 호출당 출력을 4096 토큰(`GW_MAX_TOKENS_CEILING`)으로 깎고 `stop_reason` 을 주지 않았다. 코어는 잘림을 형식 오류로 착각해 같은 큰 요청을 한 번 더 보냈고, 분할 생성은 파일 목록을 36개에서 자르고(`files[:36]`), 파일 하나가 한도를 넘으면 실패했다. 확장은 응답 하나를 15분까지만 기다렸다.
+- **엔진** `core/gen_engine.py`: 설계(요약·약속·목록 — 목록은 25개씩 `more` 가 끝날 때까지, 약속이 길면 조각으로) → layer 0(공통 기반) 순서대로 → layer 1·2 를 에이전트 N명이 동시에(기반 코드를 그대로 보며) → 한도를 넘는 파일은 150줄씩 이어 쓰기(상한 없음, 진행이 없을 때만 멈춤) → 파일마다 문법(JSON·Python·`node --check`)·비밀값 검사 후 edits(find→replace)로 부분 교정 → 전체 점검(build_readiness) 교정도 부분 교정.
+- **속도·안정**: 게이트웨이 모드면 분당 9회로 미리 제한(`RECODER_LLM_RPM`), 동시 에이전트 `agents`(1~8, 기본 3, `RECODER_GEN_CONCURRENCY`). 일시적 오류는 3·8·20·45·60초 재시도, 분당 한도는 61초 대기, 일일·총량 한도는 일시 정지.
+- **체크포인트** `core/generation_jobs.py`: `~/.recoder/generation/<job_id>.json`(`RECODER_GENERATION_DIR`). 요청 지문(요청문·결정·대상 폴더·프로젝트)이 같을 때만 이어 쓴다. 끝난 결과도 남겨 연결이 끊긴 확장이 같은 작업 ID 로 바로 받는다. 7일 지나면 정리.
+- **API**: `POST /api/code/generate/stream`(SSE, 10초 심장박동, 이벤트 planning·planned·wave·file_start·file_split·file_part·fixing·verify_failed·file_done·retry·waiting·consistency·generated·resumed·done·error). `error.resumable=true` 면 `resume_job` 으로 같은 요청을 다시 보낸다. 예전 `/api/code/generate` 는 그대로이고 일시 정지는 409 + 같은 정보. 요청에 `mode`("auto"|"team"), `resume_job`, `agents` 추가.
+- **게이트웨이 잘림 추정**(`llm/gateway_provider.py`): JSON 구조를 요구한 호출에서만, 요청 상한 1024 이상이고 쓴 토큰이 상한(min(요청, `RECODER_GATEWAY_MAX_OUTPUT`=4096))에 닿으면 잘림으로 본다. 64 미만(연결 확인 ping)과 평문 응답(배포·운영 요약)은 예전처럼 잘림 오류를 내지 않는다. 게이트웨이(`gateway/src/common.py`)는 이제 `stop_reason` 을 돌려준다 — 다시 배포하면 추정 대신 그 값을 쓴다(배포하지 않아도 동작).
+- **확장**: `ApiClient.generateCodeStream`(404면 예전 경로), `codeStream.ts`(유휴 120초만 제한, 끊기면 일시 정지로), 웹뷰 `TeamBoard`·`teamState`·`teamAnimals`(오리지널 SVG 6종 — 강아지·고양이·토끼·다람쥐·펭귄·판다, 겹치지 않게 무작위). 팀 모드를 꺼도 요청이 크면 코어가 자동으로 같은 엔진으로 전환한다.
+- **검증**: 가짜 게이트웨이(4096 자르기·stop_reason 없음)로 실제 code-server UI 에서 파일 24개 쇼핑몰 생성 → 840줄 결제 파일 원본과 동일, 하드코딩 JWT 키 자동 교정, 모두 적용; 일일 한도 일시 정지 → [이어서 만들기] → 완료. Core 2,407개·확장 516개 통과. **실제 Haiku 생성 품질은 아직 측정하지 않았다**(테스트 키 필요).
+
 # ECS 배포 진행 계약 (A3)
 
 2026-09-23 기준. `core/schemas.py`의 추가 계약:

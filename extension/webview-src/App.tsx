@@ -222,7 +222,7 @@ const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Extern
   return <>
     <div className="rc-code-page" hidden={view !== "code"}>
       {(codeVisited || view === "code") && <FeatureFrame feature="code" onHome={() => onSelectMode("home")} onHub={h => onSelectMode(`hub:${h}`)}>
-        <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} onReviewRequired={onReviewRequired} connectionPending={connectionPending} connectionError={connectionError} />
+        <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} onReviewRequired={onReviewRequired} connectionPending={connectionPending} connectionError={connectionError} onOpenHub={h => onSelectMode(`hub:${h}`)} />
       </FeatureFrame>}
     </div>
     <div hidden={!deploying}>{(deployVisited || deploying) && <FeatureRouter view="hub:deploy" ctx={ctx} onSelectMode={onSelectMode} />}</div>
@@ -267,7 +267,7 @@ const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Ex
   const feature: FeatureId = view === "hub:deploy" ? "deploy" : view;
   let body: React.ReactNode = null;
   switch (feature) {
-    case "code": body = <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} />; break;
+    case "code": body = <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} onOpenHub={h => onSelectMode(`hub:${h}`)} />; break;
     case "build": body = <BuildMode isActive={ctx.isAiReady} onOpenDevelopment={() => onSelectMode("code")} />; break;
     case "map": body = <CodeMap isActive />; break;
     case "adr": body = <AdrPanel />; break;
