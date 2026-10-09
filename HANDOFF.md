@@ -1,4 +1,4 @@
-# DB 구조 확인 · 데모 전용 DB · 배포 후 확인 · 리코더 캐릭터 · 지도 스타일 표시 (2026-10-09, 1.1.33)
+# DB 구조 확인 · 데모 전용 DB · 배포 후 확인 · 리코더 캐릭터 · 지도 스타일 표시 (2026-10-09, 2.0.0 — 메이저 버전 2 시작, 예전 1.1.33)
 
 - 실기기(세 번째 영상): 컨테이너 이름 `temp` 를 12개 앱이 같이 써서 `temp-postgres` 에 다른 앱의 테이블이 남아 있었고, `/health` 는 통과했지만 `/api/products` 가 500(`errorMissingColumn`). 재현 확인.
 - `local_services`: `db_suffix`(실제 "", "-2"…, 데모 "-demo", "-demo-2"…), `start_new_db`(번호 증가, 같은 이름의 컨테이너·`-data` 볼륨이 있으면 건너뜀, 예전 볼륨 유지), `accept_schema`/`schema_accepted`(DB 이름+초기화 SQL 지문), `expected_schema`(CREATE TABLE 파싱), `schema_status`(information_schema 와 비교, 확인 못 하면 막지 않음). 상태 폴더는 `RECODER_LOCAL_SERVICES_DIR`(테스트 격리).
