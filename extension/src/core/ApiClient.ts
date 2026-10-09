@@ -73,6 +73,7 @@ export interface DeploySettingsState {
     settings_missing: string[];
     demo: { available: boolean; enabled: boolean; label: string; note: string } | null;
     risk_reasons: string[];
+    command_steps?: Array<{ command: string; note?: string }>;
 }
 
 export interface CodeAgentResult {

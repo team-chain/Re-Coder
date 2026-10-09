@@ -372,13 +372,7 @@ def ensure(container: str, progress: Optional[Callable[[str], None]] = None, run
         if state.returncode != 0:
             if progress:
                 progress(f"{svc.label} 컨테이너를 준비합니다(처음에는 이미지를 내려받습니다)")
-            args = ["docker", "run", "-d", "--name", name, "--network", net, "--network-alias", name,
-                    "--restart", "unless-stopped", "-v", f"{name}-data:{svc.data_path}"]
-            if kind == "postgres":
-                args += ["-e", "POSTGRES_USER=recoder", "-e", f"POSTGRES_PASSWORD={passwords.get(kind, '')}",
-                         "-e", "POSTGRES_DB=app"]
-            args.append(svc.image)
-            started = run(args, 600)
+            started = run(service_run_args(container, kind, str(passwords.get(kind, ''))), 600)
             if started.returncode != 0:
                 raise RuntimeError(f"{svc.label} 컨테이너를 시작하지 못했습니다: {(started.stderr or '').strip()[:300]}")
         elif (state.stdout or "").strip() != "true":
@@ -407,6 +401,34 @@ def ensure(container: str, progress: Optional[Callable[[str], None]] = None, run
         if kind == "postgres" and init_sql is not None:
             _initialize_postgres(name, init_sql, progress, run)
     return ["--network", net]
+
+
+def service_run_args(container: str, kind: str, password: str) -> list[str]:
+    """동반 서비스 컨테이너를 처음 띄우는 docker run 인자(실행·승인 화면 미리보기가 같은 것을 쓴다)."""
+    svc = SERVICES[kind]
+    name = service_container(container, kind)
+    net = network_name(container)
+    args = ["docker", "run", "-d", "--name", name, "--network", net, "--network-alias", name,
+            "--restart", "unless-stopped", "-v", f"{name}-data:{svc.data_path}"]
+    if kind == "postgres":
+        args += ["-e", "POSTGRES_USER=recoder", "-e", f"POSTGRES_PASSWORD={password}", "-e", "POSTGRES_DB=app"]
+    args.append(svc.image)
+    return args
+
+
+def preview_steps(container: str, kinds: list[str]) -> list[dict]:
+    """승인 화면의 '실행할 명령' — 네트워크와 동반 서비스(비밀번호는 가림)."""
+    kinds = [k for k in kinds if k in SERVICES]
+    if not kinds:
+        return []
+    net = network_name(container)
+    steps = [{"args": ["docker", "network", "create", net],
+              "note": "앱과 DB 가 서로 찾을 수 있는 네트워크 (이미 있으면 그대로 씁니다)"}]
+    for kind in kinds:
+        name = service_container(container, kind)
+        steps.append({"args": service_run_args(container, kind, "***"),
+                      "note": f"{SERVICES[kind].label} — 이미 있으면 새로 만들지 않고 그대로 씁니다. 데이터는 볼륨 {name}-data 에 남습니다."})
+    return steps
 
 
 def network_args(container: str, run: Runner = _run) -> list[str]:

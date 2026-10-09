@@ -3,6 +3,7 @@
  * 고른 것만 적용 → 바뀐 부분 다시 검사(이미지 취약점은 이미지를 다시 빌드한 뒤 검사).
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Checkbox } from "./Check";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import type { ScanKind } from "./scanQueue";
 import { FixApplyResult, FixProposal, defaultSelection, diffLineKind, fixReports, followUp } from "./securityFixes";
@@ -138,7 +139,7 @@ export const SecurityFixList: React.FC<{
       {phase === "ready" && !autos.length && !manual.length && <p style={{ fontSize: 11.5, color: C.muted }}>자동으로 고칠 수 있는 항목이 없습니다.</p>}
       {autos.map(p => (
         <div key={p.id} className="rc-fix">
-          <input type="checkbox" checked={selected.has(p.id)} disabled={busy} onChange={() => toggle(p.id)} aria-label={p.title} />
+          <Checkbox checked={selected.has(p.id)} disabled={busy} onChange={() => toggle(p.id)} ariaLabel={p.title} compact />
           <div>
             <b>{p.title}</b><small>{TOOL[p.tool] ?? p.tool}</small>
             <p>{p.detail}</p>

@@ -13,6 +13,7 @@
  *   AdministratorAccess 를 붙이는 쪽으로 간다. 후자가 훨씬 흔하다.
  */
 import React, { useCallback, useState } from "react";
+import { Checkbox } from "./Check";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 
 export type AwsPolicy = {
@@ -187,10 +188,8 @@ export const AwsPolicyGuide: React.FC<{ region?: string; ecsContext?: EcsPolicyC
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 9 }}>
         {POLICY_TARGET_OPTIONS.map(option => {
           const checked = selectedTargets.includes(option.value);
-          return <label key={option.value} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, cursor: loading ? "wait" : "pointer", opacity: loading ? .65 : 1 }}>
-            <input type="checkbox" checked={checked} disabled={loading} onChange={() => toggleTarget(option.value)} />
-            {option.label}
-          </label>;
+          return <Checkbox key={option.value} checked={checked} disabled={loading} onChange={() => toggleTarget(option.value)}
+            label={option.label} compact inline style={{ fontSize: 11, border: "1px solid var(--vscode-panel-border,#3b3b3b)", borderRadius: 99, padding: "2px 9px 2px 6px" }} />;
         })}
       </div>
       {!selectedTargets.length && <div style={{ marginTop: 6, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>권한을 넓히지 않도록 필요한 기능만 선택하세요.</div>}

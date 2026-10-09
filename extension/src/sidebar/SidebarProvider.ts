@@ -2138,6 +2138,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'infra.readWorkspaceFile':
+            case 'infra.openWorkspaceFile': {
+                //: 배포에 실제로 쓰는 인프라 파일(기존 Dockerfile 등)을 미리보기에 보여 주거나 에디터로 연다.
+                //: 프로젝트 폴더 안의 파일만 — 밖을 가리키면 거절한다.
+                const p = (payload ?? {}) as { path?: string; fileType?: string };
+                const reply = type === 'infra.readWorkspaceFile' ? 'infra.workspaceFile' : 'infra.workspaceFileOpened';
+                try {
+                    const root = activeProjectUri();
+                    if (!root || !p.path) { throw new Error('프로젝트 폴더를 찾지 못했습니다.'); }
+                    const rootPath = path.resolve(root.fsPath);
+                    const target = path.resolve(path.isAbsolute(p.path) ? p.path : path.join(rootPath, p.path));
+                    const rel = path.relative(rootPath, target);
+                    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { throw new Error('프로젝트 폴더 밖의 파일은 열 수 없습니다.'); }
+                    const uri = vscode.Uri.file(target);
+                    if (type === 'infra.openWorkspaceFile') {
+                        await vscode.window.showTextDocument(uri);
+                        break;
+                    }
+                    const stat = await vscode.workspace.fs.stat(uri);
+                    if (stat.size > 300_000) { throw new Error('파일이 너무 커서 미리보기에 보여 줄 수 없습니다. 에디터에서 여세요.'); }
+                    const content = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+                    this.postMessageToWebview(requestWebview, reply, { path: rel.split(path.sep).join('/'), fileType: p.fileType, content, mtime: stat.mtime });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, reply, { path: p.path, fileType: p.fileType, error: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
             case 'map.openFile': {
                 const { id } = (payload ?? {}) as { id?: string };
                 try {

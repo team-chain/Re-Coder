@@ -2,9 +2,11 @@
  * 팀 모드 UI — 구성(누구를 몇 명) · 진행(누가 무엇을) · 일시 정지/이어서 만들기.
  * 모든 숫자는 코어의 실제 진행 이벤트(teamState.reduceTeam)에서 나온다.
  */
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { bodySvg, faceSvg } from "./teamAnimals";
 import { CHARACTER_NAME } from "./recoderCharacter";
+import { Switch } from "./Check";
+import { TeamVillage } from "./TeamVillage";
 import { MAX_DEV_AGENTS, TeamMember, TeamView, formatElapsed } from "./teamState";
 
 const ROLE_LABEL: Record<TeamMember["role"], string> = { planner: "설계", dev: "개발", review: "검토" };
@@ -67,11 +69,8 @@ export const TeamComposer: React.FC<{
   return (
     <div className="rc-team-comp" data-testid="team-composer">
       <style>{css}</style>
-      <label style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, cursor: disabled ? "default" : "pointer" }}
-        title="큰 요청을 여러 에이전트가 나눠 동시에 만듭니다. 꺼 두어도 요청이 크면 자동으로 나눠 만듭니다.">
-        <input type="checkbox" checked={enabled} disabled={disabled} onChange={e => onToggle(e.target.checked)} />
-        <b>팀 모드</b>
-      </label>
+      <Switch checked={enabled} disabled={disabled} onChange={onToggle} ariaLabel="팀 모드" style={{ fontSize: 11.5 }}
+        title="큰 요청을 여러 에이전트가 나눠 동시에 만듭니다. 꺼 두어도 요청이 크면 자동으로 나눠 만듭니다." label={<b>팀 모드</b>} />
       {enabled && <>
         {roster.map(m => (
           <span key={m.id} className="m" title={`${CHARACTER_NAME} · ${memberLabel(roster, m)} — ${ROLE_HINT[m.role]}`}>
@@ -88,6 +87,25 @@ export const TeamComposer: React.FC<{
   );
 };
 
+/** 진행 기록 — 실제 이벤트를 누가 무엇을 했는지로 적은 줄. 에이전트끼리 나눈 대화가 아니다. */
+function TeamRecords({ records, side }: { records: NonNullable<TeamView["records"]>; side: boolean }) {
+  const list = records.slice(side ? -12 : -5);
+  return (
+    <aside aria-label="진행 기록" aria-live="polite" data-testid="team-records"
+      style={{ borderLeft: side ? "1px solid var(--vscode-panel-border,#333)" : undefined, borderTop: side ? undefined : "1px solid var(--vscode-panel-border,#333)",
+        padding: "8px 10px", display: "flex", flexDirection: "column", gap: 5, justifyContent: "flex-end", minHeight: 0, maxHeight: side ? 390 : 150, overflow: "hidden" }}>
+      <div style={{ fontSize: 10.5, color: "var(--vscode-descriptionForeground,#999)", display: "flex", justifyContent: "space-between" }}><span>진행 기록</span><span>실제 이벤트</span></div>
+      {list.map((r, i) => (
+        <div key={records.length - list.length + i} style={{ fontSize: 11, lineHeight: 1.45, display: "flex", gap: 6, alignItems: "flex-start" }}>
+          {r.who ? <span style={{ flex: "none", fontWeight: 700, fontSize: 10.5, color: r.role === "review" ? "#e3c96b" : r.role === "planner" ? "#a9c6ff" : "#9fe3d4" }}>{r.who}</span>
+            : <span style={{ flex: "none", color: "var(--vscode-descriptionForeground,#999)" }}>·</span>}
+          <span style={{ minWidth: 0, overflowWrap: "anywhere", color: r.tone === "warn" ? "var(--vscode-editorWarning-foreground,#cca700)" : r.tone === "ok" ? "var(--vscode-charts-green,#73d39b)" : "var(--vscode-foreground,#ddd)" }}>{r.text}</span>
+        </div>
+      ))}
+    </aside>
+  );
+}
+
 const AGENT_STATE_TEXT: Record<string, string> = {
   idle: "대기", writing: "작성 중", parts: "이어 쓰는 중", fixing: "고치는 중", waiting: "잠시 대기", done: "완료",
 };
@@ -102,12 +120,25 @@ export const TeamBoard: React.FC<{
   const status = paused ? "일시 정지" : view.phase === "planning" ? "설계 중" : view.phase === "checking" ? "전체 점검 중" : view.phase === "done" ? "완료" : "만드는 중";
   const layersDone = [0, 1, 2].map(l => view.files.length > 0 && view.files.filter(f => f.layer === l).every(f => f.state === "done" || f.state === "issue"));
   const members = roster.length ? roster : [];
+  //: 폭이 넓으면 작업 마을, 좁으면 팀원별 한 줄(같은 상태). 서버 렌더(테스트)에서는 폭을 몰라 한 줄 보기.
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || typeof ResizeObserver === "undefined") { return; }
+    const ro = new ResizeObserver(entries => setWidth(Math.round(entries[0]?.contentRect.width ?? 0)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const wide = width >= 520;
+  const side = width >= 820;
+  const records = view.records ?? [];
   return (
-    <div className="rc-team" data-testid="team-board">
+    <div className="rc-team" data-testid="team-board" ref={boxRef}>
       <style>{css}</style>
       <div className="rc-team-h">
         <b>팀 작업</b><span>{status}</span>
-        <span className="sp">파일 {view.done}/{view.total || "?"} · {formatElapsed(view.elapsed)}</span>
+        <span className="sp">{view.fixes ? `자동 검사로 고친 문제 ${view.fixes} · ` : ""}파일 {view.done}/{view.total || "?"} · {formatElapsed(view.elapsed)}</span>
       </div>
       <div className="rc-team-bar"><i style={{ width: `${pct}%` }} /></div>
       {view.files.length > 0 && (
@@ -118,6 +149,14 @@ export const TeamBoard: React.FC<{
           })}
         </div>
       )}
+      {wide ? (
+        <div className="rc-team-main" style={{ display: "grid", gridTemplateColumns: side ? "minmax(0,1fr) 250px" : "1fr" }}>
+          <div style={{ padding: "8px 10px" }}>
+            <TeamVillage roster={members} view={view} width={Math.max(300, (side ? width - 250 : width) - 22)} paused={!!paused} />
+          </div>
+          <TeamRecords records={records} side={side} />
+        </div>
+      ) : <>
       <div className="rc-team-ag">
         {members.map(m => {
           let state: string, detail: string;
@@ -125,10 +164,11 @@ export const TeamBoard: React.FC<{
             state = view.phase === "planning" ? "작성 중" : "완료";
             detail = view.phase === "planning" ? "약속·작업 목록 정리" : `작업 ${view.total}개로 나눔`;
           } else if (m.role === "review") {
-            state = view.phase === "checking" ? "전체 점검" : view.fixes ? "검사 중" : "대기";
-            detail = view.fixes || view.issues
-              ? `고친 문제 ${view.fixes}${view.secretFixes ? ` (비밀값 ${view.secretFixes})` : ""}${view.issues ? ` · 확인 필요 ${view.issues}` : ""}`
-              : "파일마다 문법·비밀값 검사";
+            state = view.phase === "checking" ? "전체 점검" : view.phase === "done" ? "완료" : "대기";
+            detail = view.phase === "checking" ? "컨테이너 빌드로 전체 확인"
+              : view.fixes || view.issues
+                ? `자동 검사로 고친 문제 ${view.fixes}${view.secretFixes ? ` (비밀값 ${view.secretFixes})` : ""}${view.issues ? ` · 확인 필요 ${view.issues}` : ""}`
+                : "마지막에 전체 점검";
           } else {
             const a = view.agents[m.id];
             state = AGENT_STATE_TEXT[a?.state ?? "idle"];
@@ -144,7 +184,10 @@ export const TeamBoard: React.FC<{
           );
         })}
       </div>
-      {view.log.length > 0 && <div className="rc-team-log" aria-live="polite">{view.log.slice(-3).map((l, i) => <div key={i}>{l}</div>)}</div>}
+      {records.length > 0
+        ? <div className="rc-team-log" aria-live="polite">{records.slice(-3).map((r, i) => <div key={i}>{r.who ? `${r.who} · ` : ""}{r.text}</div>)}</div>
+        : view.log.length > 0 && <div className="rc-team-log" aria-live="polite">{view.log.slice(-3).map((l, i) => <div key={i}>{l}</div>)}</div>}
+      </>}
       {paused && (
         <div className="rc-team-pause" role="status">
           <span style={{ flex: 1 }}>⏸ {paused.message}</span>

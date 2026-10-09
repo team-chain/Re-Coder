@@ -335,6 +335,8 @@ class DeploymentPlan(BaseModel):
     settings_missing: list[str] = Field(default_factory=list)
     #: 결제를 끈 로컬 데모 실행 지원 여부·사용 여부.
     demo: Optional[dict] = None
+    #: 승인 화면의 '실행할 명령' — 실행 경로와 같은 인자 조립 함수로 만든 순서 목록. 설정값은 *** 로 가린다.
+    command_steps: list[dict] = Field(default_factory=list)
 
 
 class DeploymentRecord(BaseModel):

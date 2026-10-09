@@ -97,6 +97,15 @@ Return ONLY a JSON object with:
 """
 
 
+
+PORT_REASON_PREFIX = "이 PC 의 포트 "
+
+
+def local_port_reason(host_port) -> str:
+    """로컬 Docker 실행의 첫 위험 사유 — 어디로 열리는지 사실대로(docker -p 는 모든 네트워크 주소에 연다)."""
+    return (f"{PORT_REASON_PREFIX}{host_port} 로 열립니다 — http://localhost:{host_port} "
+            "(PC 방화벽 설정에 따라 같은 네트워크의 다른 기기에서도 접속될 수 있습니다)")
+
 class DeployAgent:
     """
     Handles local Docker-based deployment.
@@ -187,7 +196,7 @@ class DeployAgent:
             rollback_image=None,
             command_template_id="docker_run",
             risk_level=RiskLevel.MEDIUM,
-            risk_reasons=["Local Docker run — container will be exposed on localhost"],
+            risk_reasons=[local_port_reason(host_port)],
             approval_level=ApprovalLevel.CONFIRM,
         )
 

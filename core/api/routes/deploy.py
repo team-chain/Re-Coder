@@ -704,6 +704,87 @@ def _apply_settings_to_plan(plan: DeploymentPlan, workspace: str) -> None:
             "배포 화면에서 값을 넣어야 실행할 수 있습니다.")
     if plan.demo and plan.demo.get("enabled"):
         plan.risk_reasons.append("로컬 데모 모드 — 모의 결제 서버로 실행합니다. 실제 결제는 일어나지 않습니다.")
+    #: 포트가 계획 중에 바뀌었을 수 있다(PC 포트 충돌) — 첫 위험 사유를 지금 포트로 다시 쓴다.
+    from agents.deploy_agent import PORT_REASON_PREFIX, local_port_reason
+    host_port = next(iter(plan.ports), None)
+    plan.risk_reasons = [r for r in plan.risk_reasons
+                         if not r.startswith((PORT_REASON_PREFIX, "Local Docker run"))]
+    if host_port:
+        plan.risk_reasons.insert(0, local_port_reason(host_port))
+    try:
+        plan.command_steps = _command_steps(plan, workspace)
+    except Exception as exc:  # noqa: BLE001 - 미리보기 실패가 계획을 막지 않는다(화면은 예전 한 줄로)
+        logger.warning("command preview failed: %s", exc)
+        plan.command_steps = []
+
+
+_PREVIEW_PLAIN_ENV = {"PAYMENT_MODE", "NODE_ENV", "STRIPE_MOCK_HOST", "STRIPE_MOCK_PORT", "POSTGRES_USER", "POSTGRES_DB", "MOCK_PORT"}
+
+
+def _mask_args(args: list[str]) -> list[str]:
+    """`-e NAME=값` 의 값을 가린다(이름만 보인다). 비밀이 아닌 고정값 몇 개만 그대로 둔다."""
+    out: list[str] = []
+    for i, arg in enumerate(args):
+        if i and args[i - 1] == "-e" and "=" in arg and not arg.startswith("…"):
+            key, _, value = arg.partition("=")
+            out.append(arg if key in _PREVIEW_PLAIN_ENV or value == "***" else f"{key}=***")
+        else:
+            out.append(arg)
+    return out
+
+
+def _command_steps(plan: DeploymentPlan, workspace: str) -> list[dict]:
+    """승인 화면의 '실행할 명령' — 실행 경로(execute)와 **같은 순서·같은 인자 조립 함수**로 만든다.
+
+    예전에는 화면이 `docker build && docker run` 한 줄을 직접 지어 보여 줘서, DB·모의 결제 서버를 함께
+    띄우고 설정값을 넘기는 실제 실행과 달랐다(실기기 영상). 값은 가리고 이름만 보인다.
+    """
+    if plan.method != DeployMethod.LOCAL_DOCKER or not plan.container_name or not plan.image:
+        return []
+    import local_services
+    import deploy_settings
+    c = str(plan.container_name)
+    steps: list[dict] = []
+    dockerfile = _dockerfile_in(workspace) if workspace else None
+    if workspace:
+        rel = os.path.relpath(str(dockerfile), workspace).replace(os.sep, "/") if dockerfile else "Dockerfile"
+        steps.append({"args": ["docker", "build", "-f", rel, "-t", str(plan.image), "."],
+                      "note": "지금 코드로 이미지를 빌드합니다" + ("" if dockerfile else " (Dockerfile 이 없으면 기본 템플릿을 만들어 빌드합니다)")})
+    net: list[str] = []
+    if plan.companions:
+        steps += local_services.preview_steps(c, list(plan.companions))
+        net = ["--network", local_services.network_name(c)]
+    app_port = int(next(iter(plan.ports.values()), 3001))
+    demo_on = bool(plan.demo and plan.demo.get("enabled"))
+    if demo_on:
+        steps += deploy_settings.preview_steps(c, str(plan.image), app_port, workspace, with_network=not plan.companions)
+        net = ["--network", local_services.network_name(c)]
+    steps.append({"args": ["docker", "stop", c, "&&", "docker", "rm", c],
+                  "note": "같은 이름의 컨테이너가 있으면 복구 정보를 먼저 보관한 뒤 교체합니다(새 컨테이너가 실패하면 되살립니다)"})
+    run = ["docker", "run", "-d", "--name", c]
+    if workspace:
+        from deployment_inputs import WORKSPACE_LABEL, workspace_fingerprint
+        run += ["--label", f"{WORKSPACE_LABEL}={workspace_fingerprint(workspace)}"]
+    for hp, cp in plan.ports.items():
+        run += ["-p", f"{int(hp)}:{int(cp)}"]
+    env_files = _resolved_env_files(workspace, plan.env_files)
+    names = list(plan.env)
+    settings_env = _settings_env(c, workspace, _provided_env_names(plan.env, env_files), app_port) if workspace else {}
+    env_args: list[str] = []
+    for key in names:
+        env_args += ["-e", f"{key}=***"]
+    for key, value in settings_env.items():
+        env_args += ["-e", f"{key}={value}"]
+    from deployment_inputs import read_env_file
+    seen = set(names) | set(settings_env)
+    for path in env_files:
+        for key in read_env_file(path):
+            if key not in seen and _ENV_NAME_RE.fullmatch(key):
+                seen.add(key)
+                env_args += ["-e", f"{key}=***"]
+    run += env_args + net + ["--restart", "unless-stopped", str(plan.image)]
+    steps.append({"args": run, "note": "앱 컨테이너를 실행합니다. 설정값은 실행할 때만 넘기고 이미지·기록에는 남기지 않습니다."})
+    return [{"command": " ".join(_mask_args(step["args"])), "note": step["note"]} for step in steps]
 
 
 def _settings_env(container: str, workspace: str, provided: set[str], app_port: int) -> dict[str, str]:
@@ -3965,7 +4046,7 @@ async def save_deploy_settings(request: DeploySettingsRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await asyncio.to_thread(_apply_settings_to_plan, plan, workspace)
     return {"plan_id": plan.plan_id, "settings": plan.settings, "settings_missing": plan.settings_missing,
-            "demo": plan.demo, "risk_reasons": plan.risk_reasons}
+            "demo": plan.demo, "risk_reasons": plan.risk_reasons, "command_steps": plan.command_steps}
 
 
 @router.post("/api/deploy/readiness")

@@ -1,3 +1,12 @@
+# 팀 작업 화면 · 승인 카드 실행 순서 · Dockerfile 미리보기 · 공통 체크박스 (2026-10-10, 2.0.1)
+
+- 실기기 영상(2026-10-10 02-34-18.mkv): 기존 Dockerfile 로 배포를 고르면 미리보기가 "생성 버튼을 누르면…" 으로 비었고, 승인 카드 첫 사유가 영어, 명령 미리보기가 실제(DB·모의 결제·설정값)와 달랐다.
+- 코어: `local_services.service_run_args`·`deploy_settings.mock_run_args` 로 docker run 인자 조립을 한 곳으로 모으고 실행과 미리보기가 같이 쓴다. `deploy._command_steps(plan, workspace)` → `DeploymentPlan.command_steps=[{command, note}]`(값 `***`, 비밀 아닌 고정값만 노출). `_apply_settings_to_plan` 끝에서 첫 위험 사유를 지금 포트로 다시 쓴다(`deploy_agent.local_port_reason`). `/api/deploy/settings` 응답에도 `command_steps`.
+- 확장: `ApprovalModal` 한글 + `commandSteps`. `ShipMode` 는 초안이 없으면 `infra.readWorkspaceFile`(프로젝트 폴더 안만, 300KB 이하)로 루트 Dockerfile·docker-compose.yml 을 읽어 보여 주고 `infra.openWorkspaceFile` 로 연다.
+- `Check.tsx`(Checkbox·Switch, 스타일은 head 에 한 번, 캔버스 입력창 CSS 보다 우선). Discord 패널은 기존 스위치 유지.
+- 팀 작업: `teamState.recordOf/agentName` → `TeamView.records`(최근 30). `TeamVillage.tsx`(`villageLayout` 순수 함수, 폭 520px 이상, 820px 이상이면 옆에 진행 기록). **엔진 사실**: 개발 슬롯은 같은 프롬프트의 동시 호출 자리이고, 파일별 교정은 작성한 슬롯이 하며, 검토(review) 에이전트는 마지막 전체 점검(edit_fix_round)에만 있다 — 화면도 그대로 보여 준다. "AI Village" 수준의 에이전트 간 상호작용(공용 게시판 메모·약속 문의·단계별 검토 회신·역할 기억)은 아직 없다(제안만, 승인 전).
+- 검증: Core 2,458개·확장 537개 통과(RAG 문서 근거 수정 29+3 포함, 변경 없음). code-server 에서 가짜 게이트웨이로 팀 생성(개발 4명) 마을·진행 기록, 기존 Dockerfile 유지 → 미리보기 "워크스페이스 파일 사용 중", 승인 카드 5단계 명령·한글 확인.
+
 # DB 구조 확인 · 데모 전용 DB · 배포 후 확인 · 리코더 캐릭터 · 지도 스타일 표시 (2026-10-09, 2.0.0 — 메이저 버전 2 시작, 예전 1.1.33)
 
 - 실기기(세 번째 영상): 컨테이너 이름 `temp` 를 12개 앱이 같이 써서 `temp-postgres` 에 다른 앱의 테이블이 남아 있었고, `/health` 는 통과했지만 `/api/products` 가 500(`errorMissingColumn`). 재현 확인.

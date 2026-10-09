@@ -1,4 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Checkbox } from "../Check";
+
+/** `git status --porcelain` 두 글자 → 사람이 읽는 말. */
+export function gitStatusText(status: string): string {
+  const s = (status || "").trim();
+  if (s === "??" || s.includes("A")) { return "새 파일"; }
+  if (s.includes("D")) { return "삭제"; }
+  if (s.includes("R")) { return "이름 변경"; }
+  if (s.includes("M")) { return "수정"; }
+  return s || "변경";
+}
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 import { Snapshot } from './model';
 import { defaultRepoName, previewRepoName } from './githubName';
@@ -66,7 +77,8 @@ export function GitHubPanel({ workspace, git, onChanged, onReview, onWorkflow, d
     {git.connected&&(!git.head||git.dirty)&&<div className="rc-note"><p>{!git.head?'올릴 파일을 확인하고 첫 커밋을 만드세요.':'새 변경 사항이 있습니다.'}</p><button disabled={busy} onClick={()=>send('changes')}>변경 파일 확인</button></div>}
     {review&&<div className="rc-fields" aria-label="커밋할 파일">
       <b>커밋할 파일 · {selected.length}개 선택</b>
-      <div style={{maxHeight:240,overflow:'auto'}}>{review.files.map(file=><label key={file.path} style={{display:'flex',alignItems:'start',gap:6,marginBottom:6}}><input type="checkbox" disabled={busy||Boolean(file.blocked)} checked={selected.includes(file.path)} onChange={e=>setSelected(items=>e.target.checked?[...items,file.path]:items.filter(p=>p!==file.path))}/><span><code>{file.status.trim()}</code> {file.path}{file.blocked&&<small> · 제외: {file.blocked}</small>}</span></label>)}</div>
+      <div style={{maxHeight:240,overflow:'auto'}}>{review.files.map(file=><Checkbox key={file.path} compact disabled={busy||Boolean(file.blocked)} checked={selected.includes(file.path)} onChange={on=>setSelected(items=>on?[...items,file.path]:items.filter(p=>p!==file.path))} style={{marginBottom:3}}
+        label={<span><code>{file.path}</code></span>} description={file.blocked?`제외: ${file.blocked}`:gitStatusText(file.status)}/>)}</div>
       <label>커밋 메시지<input value={commitMessage} disabled={busy} onChange={e=>setCommitMessage(e.target.value)}/></label>
       <details><summary>커밋 작성자 · {author||'입력 필요'}</summary><label>이름<input value={author} onChange={e=>setAuthor(e.target.value)}/></label><label>이메일<input value={email} onChange={e=>setEmail(e.target.value)}/></label></details>
       <button disabled={busy||!selected.length||!commitMessage.trim()||!author||!email} onClick={()=>send('commit',{previewId:review.id,files:selected,message:commitMessage,name:author,email,approved:true})}>선택한 파일 커밋</button>

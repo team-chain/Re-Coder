@@ -10,7 +10,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
-import ApprovalModal from "./ApprovalModal";
+import ApprovalModal, { CommandStep } from "./ApprovalModal";
 import { DeploymentActivity, DeploymentActivityEvent } from './DeploymentActivity';
 import { LocalRollbackResult, LocalRollbackStatus, rollbackWatchId } from "./LocalRollbackStatus";
 import { BuildDiagnosis, BuildFailure, ReadinessIssue, ReadinessPanel } from "./ReadinessPanel";
@@ -121,6 +121,8 @@ interface DeploymentPlan {
   settings?: DeploySetting[];
   settings_missing?: string[];
   demo?: DeployDemo | null;
+  /** 실제 실행 순서대로의 명령(코어가 실행 경로와 같은 함수로 만든 것, 값은 가림). */
+  command_steps?: CommandStep[];
 }
 
 /** 승인 버튼을 막는 조건 — 필요한 설정이 비어 있으면 빌드해도 앱이 바로 종료한다. */
@@ -155,6 +157,13 @@ export const INFRA_FILE_TYPE_BY_TAB: Record<InfraFileTab, string> = {
   dockerfile: "dockerfile",
   compose: "docker_compose",
   actions: "github_actions",
+};
+
+/** 코어가 배포에 쓰는 기본 위치(Dockerfile 은 프로젝트 루트 — core `_dockerfile_in`). Actions 는 정해진 파일이 없어 읽지 않는다. */
+export const WORKSPACE_INFRA_PATH: Record<InfraFileTab, string | null> = {
+  dockerfile: "Dockerfile",
+  compose: "docker-compose.yml",
+  actions: null,
 };
 
 export function generationCommandForTab(
@@ -227,6 +236,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const [progress,setProgress]=useState<DeploymentActivityEvent|null>(null);
   const progressPlan=useRef('');
   const [proposal, setProposal] = useState<InfraFileProposal | null>(null);
+  const proposalIdRef = useRef<string | null>(null);
+  proposalIdRef.current = proposal?.proposal_id ?? null;
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
   const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean }; security_scan?: { status?: string; high_count?: number; reason?: string }; auto_fixed?: Array<{ code: string; message: string; changed?: string[] }>; screen?: { ok?: boolean | null; checked?: string; warnings?: string[] }; app_check?: { status?: string; path?: string; http_status?: number; diagnosis?: DbDiagnosis }; demo_seed?: { ok: boolean; script?: string; message?: string } } | null>(null);
@@ -250,6 +261,10 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   //: 예전엔 묻지 않고 덮어써서 손으로 고친 Dockerfile 이 조용히 사라졌다(실기기 D4).
   const [existingConflict, setExistingConflict] = useState<{ path?: string; diff?: string; file_type?: string } | null>(null);
   const [savedNote, setSavedNote] = useState<string | null>(null);
+  //: 배포에 **실제로 쓰는** 인프라 파일 — 새 초안이 없을 때(기존 파일로 배포를 골랐거나 처음부터 파일이 있을 때)
+  //: 미리보기가 "생성 버튼을 누르면…" 으로 비어 저장이 안 된 것처럼 보였다(실기기 영상). 폴더의 파일을 읽어 보여 준다.
+  const [workspaceFile, setWorkspaceFile] = useState<{ fileType: string; path: string; content: string } | null>(null);
+  const [savedProposalId, setSavedProposalId] = useState<string | null>(null);
   const [showApproval, setShowApproval] = useState(false);
   const [approvalContext, setApprovalContext] = useState<"infra" | "deploy" | null>(null);
   const [activeFileTab, setActiveFileTab] = useState<InfraFileTab>("dockerfile");
@@ -277,6 +292,13 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   useMessage(
     useCallback((msg) => {
       const { type, payload } = msg;
+
+      if (type === "infra.workspaceFile") {
+        const f = payload as { fileType?: string; path?: string; content?: string; error?: string };
+        setWorkspaceFile(f.error || typeof f.content !== "string" || !f.fileType || !f.path
+          ? null : { fileType: f.fileType, path: f.path, content: f.content });
+        return;
+      }
 
       if (type === "proposalReady" && (payload as { file_type?: string }).file_type) {
         setProposal(payload as InfraFileProposal);
@@ -322,6 +344,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         // 탭 전환 중 보낸 거절 응답은 새 탭의 상태를 바꾸면 안 된다.
         if (result.approved === true && result.status === "saved") {
           setExistingConflict(null);
+          setSavedProposalId(cur => proposalIdRef.current ?? cur);
           if (result.overwritten) {
             setSavedNote(`기존 파일을 덮어썼습니다${result.backup_path ? ` — 이전 내용은 ${result.backup_path} 에 남겨 두었어요` : ""}.`);
           }
@@ -352,11 +375,11 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       }
 
       if (type === "deploy.settings.result") {
-        const r = payload as { plan_id?: string; settings?: DeploySetting[]; settings_missing?: string[]; demo?: DeployDemo | null; risk_reasons?: string[] };
+        const r = payload as { plan_id?: string; settings?: DeploySetting[]; settings_missing?: string[]; demo?: DeployDemo | null; risk_reasons?: string[]; command_steps?: CommandStep[] };
         setSettingsBusy(false);
         setSettingsError("");
         setPlan(cur => cur && cur.plan_id === r.plan_id
-          ? { ...cur, settings: r.settings ?? cur.settings, settings_missing: r.settings_missing ?? [], demo: r.demo ?? null, risk_reasons: r.risk_reasons ?? cur.risk_reasons }
+          ? { ...cur, settings: r.settings ?? cur.settings, settings_missing: r.settings_missing ?? [], demo: r.demo ?? null, risk_reasons: r.risk_reasons ?? cur.risk_reasons, command_steps: r.command_steps ?? cur.command_steps }
           : cur);
         return;
       }
@@ -755,6 +778,15 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const primaryDisabled = (!canSwitchFileTab && step !== "scanDone" && step !== "planReady")
     || (existingConflict !== null && step === "preview") || settingsBlocked || (step === "planReady" && settingsBusy);
   const activeContent = matchesTab ? proposal!.content : null;
+  const tabFileType = INFRA_FILE_TYPE_BY_TAB[activeFileTab];
+  const defaultInfraPath = WORKSPACE_INFRA_PATH[activeFileTab];
+  const shownWorkspaceFile = !matchesTab && workspaceFile && workspaceFile.fileType === tabFileType ? workspaceFile : null;
+  const proposalSaved = matchesTab && !!savedProposalId && savedProposalId === proposal!.proposal_id;
+  //: 새 초안이 없으면 폴더의 실제 파일을 읽는다 — 기존 파일로 배포를 골랐을 때, 배포 단계로 넘어갔을 때, 배포가 끝났을 때.
+  useEffect(() => {
+    if (matchesTab || !defaultInfraPath || step === "generating" || step === "saving") { return; }
+    postMessage("infra.readWorkspaceFile", { path: defaultInfraPath, fileType: tabFileType });
+  }, [matchesTab, defaultInfraPath, tabFileType, step, postMessage]);
   const stackComment = matchesTab
     ? `# 스택: ${proposal!.base_template ?? "auto-detected"}`
     : null;
@@ -837,11 +869,25 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           background: "#252526",
           borderBottom: "1px solid #2a2a2a",
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#aaa" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#aaa", minWidth: 0 }}>
             <span style={{ fontWeight: 500 }}>
               {activeFileLabel}
             </span>
+            {(shownWorkspaceFile || proposalSaved) && (
+              <span data-testid="infra-file-source" style={{ fontSize: 10, padding: "0 7px", borderRadius: 99, border: "1px solid rgba(115,211,155,.45)", color: "var(--vscode-charts-green,#73d39b)", whiteSpace: "nowrap" }}>
+                {proposalSaved ? "저장됨 · 배포에 이 파일을 씀" : "워크스페이스 파일 사용 중"}
+              </span>
+            )}
+            {matchesTab && !proposalSaved && step === "preview" && (
+              <span style={{ fontSize: 10, padding: "0 7px", borderRadius: 99, border: "1px solid rgba(204,167,0,.5)", color: "var(--vscode-editorWarning-foreground,#cca700)", whiteSpace: "nowrap" }}>초안 · 아직 저장 안 됨</span>
+            )}
           </div>
+          {(shownWorkspaceFile || proposalSaved) && (
+            <button type="button" onClick={() => postMessage("infra.openWorkspaceFile", { path: shownWorkspaceFile?.path ?? proposal?.target_path })}
+              style={{ background: "transparent", border: 0, color: "var(--vscode-textLink-foreground,#4daafc)", cursor: "pointer", fontSize: 11, padding: 0, whiteSpace: "nowrap" }}>
+              에디터에서 열기 ↗
+            </button>
+          )}
           {/* "Preview" 버튼 제거 — onClick 이 빈 함수였던 완전한 no-op
               (보드 이슈 「죽은 버튼 3종」). 초안 내용은 바로 아래 코드 블록에
               이미 전문이 보이므로 버튼 없이도 잃는 것이 없다. */}
@@ -864,6 +910,11 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
             <>
               {stackComment && <span style={{ color: "#6a9955" }}>{stackComment}{"\n"}</span>}
               {activeContent.replace(/^#[^\n]*\n?/, "")}
+            </>
+          ) : shownWorkspaceFile ? (
+            <>
+              <span style={{ color: "#6a9955" }}>{`# 배포에 쓰는 파일: ${shownWorkspaceFile.path} (프로젝트 폴더)`}{"\n"}</span>
+              {shownWorkspaceFile.content}
             </>
           ) : (
             <span style={{ color: "#555", fontStyle: "italic" }}>
@@ -1227,6 +1278,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
             summary={`이미지 ${plan.image}를 빌드하고 컨테이너 ${plan.container_name}을 실행합니다.`}
             riskLevel={plan.risk_level}
             riskReasons={plan.risk_reasons}
+            commandSteps={plan.command_steps}
             commandPreview={`docker build -t ${plan.image} . && docker run -d --name ${plan.container_name} ${Object.entries(plan.ports).map(([h, c]) => `-p ${h}:${c}`).join(" ")} ${plan.image}`}
             onApprove={handleDeploy}
             onReject={() => { setShowApproval(false); }}

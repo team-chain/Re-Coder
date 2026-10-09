@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Switch } from "../Check";
 import { useVSCodeApi } from "../../hooks/useVSCodeApi";
 import DeploymentCenter from "../DeploymentCenter";
 import { AwsConnection } from "../AwsConnection";
@@ -210,7 +211,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
       <button className="rc-history-trigger" onClick={()=>openPane('history')}>배포 이력</button>
       <details className="rc-tool-menu rc-more-menu"><summary aria-label="캔버스 메뉴">•••</summary><div className="rc-menu-content">
         <nav aria-label="배포 도구">{panes.map(([id,title])=><button key={id} onClick={e=>{openPane(id);e.currentTarget.closest('details')?.removeAttribute('open');}}>{title}</button>)}{onOpenOperate&&<button onClick={onOpenOperate} disabled={!isOpsReady} title={isOpsReady?undefined:'AI · AWS 연결 필요'}>운영 대응</button>}</nav>
-        <div className="rc-menu-options"><label><input type="checkbox" checked={security} onChange={e=>setSecurity(e.target.checked)}/> 보안 레이어</label><label><input type="checkbox" checked={showNodeDetails} onChange={e=>setShowNodeDetails(e.target.checked)}/> 상세 구조 표시</label><label><input type="checkbox" checked={force2D} onChange={e=>setForce2D(e.target.checked)}/> 2D 보기</label><button onClick={()=>setExpanded(v=>!v)}>{expanded?'원래 크기':'캔버스 넓게'}</button><button onClick={()=>refresh()} disabled={loading}>{loading?'조회 중…':'새로고침'}</button></div>
+        <div className="rc-menu-options"><Switch checked={security} onChange={setSecurity} label="보안 레이어"/><Switch checked={showNodeDetails} onChange={setShowNodeDetails} label="상세 구조 표시"/><Switch checked={force2D} onChange={setForce2D} label="2D 보기"/><button onClick={()=>setExpanded(v=>!v)}>{expanded?'원래 크기':'캔버스 넓게'}</button><button onClick={()=>refresh()} disabled={loading}>{loading?'조회 중…':'새로고침'}</button></div>
       </div></details>
     </div>
     {!drawerOpen&&notice}

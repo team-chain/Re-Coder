@@ -1,5 +1,6 @@
 /** AWS BYO 계정 연결 — 키는 검증 뒤 VS Code SecretStorage에만 저장된다. */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Checkbox } from "./Check";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { AwsPolicyGuide, EcsPolicyContext } from "./AwsPolicyGuide";
 
@@ -245,11 +246,9 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       */}
       <div style={{ fontSize: 12, fontWeight: 650 }}>이 컴퓨터의 AWS 프로필 발견</div>
       <div style={{ marginTop: 4, fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.5 }}>키 입력 없이 클릭 한 번으로 연결합니다.</div>
-      <label style={{ display: "flex", alignItems: "flex-start", gap: 7, marginTop: 8, fontSize: 11, lineHeight: 1.5, cursor: "pointer" }}>
-        <input type="checkbox" checked={useRole} onChange={e => { setUseRole(e.target.checked); useRoleRef.current = e.target.checked; }} style={{ marginTop: 2 }} />
-        <span>배포 전용 최소권한 역할을 만들어 그 권한만 쓰기 <b>(권장)</b><br />
-          <span style={{ color: "var(--vscode-descriptionForeground, #999)" }}>프로필 자격증명은 역할을 만들 때 한 번만 쓰고 저장하지 않습니다. 권한이 모자란 계정은 콘솔 경로로 안내합니다.</span></span>
-      </label>
+      <Checkbox checked={useRole} onChange={v => { setUseRole(v); useRoleRef.current = v; }} style={{ marginTop: 8, fontSize: 11 }}
+        label={<>배포 전용 최소권한 역할을 만들어 그 권한만 쓰기 <b>(권장)</b></>}
+        description="프로필 자격증명은 역할을 만들 때 한 번만 쓰고 저장하지 않습니다. 권한이 모자란 계정은 콘솔 경로로 안내합니다." />
       <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 9 }}>
         {profiles.map(profile => (
           <button key={profile} disabled={busy} onClick={() => connectProfile(profile)} style={{

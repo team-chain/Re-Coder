@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { Checkbox } from "../Check";
 import { regionMismatchWarning } from "../DeploymentCenter";
 export interface Config { target: "ecs" | "s3" | "github"; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[] }
 export interface Issue { code: string; message: string; fix: string; remediation_available: boolean; proposal_id: string | null }
@@ -31,7 +32,7 @@ export function ApprovalCard({ plan, onApprove, onCancel, onFix }: { plan: Plan;
     {plan.preflight.summary && <p className="rc-muted">{plan.preflight.summary}</p>}
     {plan.targetState?.warnings.map((warning,i)=><p className="rc-note" key={i}>{warning}</p>)}
     {[...(plan.preflight.reasons||[]),...(plan.preflight.warnings||[])].map((issue,i)=><div className="rc-finding" key={`${issue.code}-${i}`}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button onClick={()=>onFix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}
-    {warning&&<div className="rc-note"><p>현재 연결 리전({plan.coreRegion})과 배포 리전({c.aws_region})이 다릅니다. 선택한 배포 리전을 확인하고 아래 항목을 체크하세요.</p><label><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/> 이 리전으로 배포하는 것을 확인했습니다.</label></div>}
+    {warning&&<div className="rc-note"><p>현재 연결 리전({plan.coreRegion})과 배포 리전({c.aws_region})이 다릅니다. 선택한 배포 리전을 확인하고 아래 항목을 체크하세요.</p><Checkbox tone="warn" checked={ack} onChange={setAck} label="이 리전으로 배포하는 것을 확인했습니다."/></div>}
     <p className="rc-muted">승인 후 기존 보안·정책 검사를 거칩니다. 검사 미실행과 통과는 구분되며 서버의 차단 판정을 우회하지 않습니다.</p>
     <div className="rc-actions"><button className="rc-primary" disabled={plan.preflight.blocked || Boolean(warning&&!ack)} onClick={onApprove}>{c.target==='github' ? '승인하고 푸시' : '승인하고 배포'}</button><button onClick={onCancel}>취소</button></div>
   </div></div>;

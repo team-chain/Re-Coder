@@ -35,14 +35,18 @@ export interface TeamView {
   retries: number;
   elapsed: number;
   log: string[];
+  /** 진행 기록 — 실제 이벤트를 "누가 무엇을 했는지" 한 줄로(최근 30개). 에이전트끼리의 대화가 아니다. */
+  records: TeamRecord[];
 }
+
+export interface TeamRecord { who: string; role: TeamRole | "system"; text: string; tone?: "ok" | "warn" }
 
 export const MAX_DEV_AGENTS = 6;
 export const DEFAULT_DEV_AGENTS = 3;
 
 export function emptyTeamView(): TeamView {
   return { jobId: "", engaged: false, phase: "planning", summary: "", files: [], total: 0, done: 0, layer: null, agents: {},
-    fixes: 0, secretFixes: 0, issues: 0, retries: 0, elapsed: 0, log: [] };
+    fixes: 0, secretFixes: 0, issues: 0, retries: 0, elapsed: 0, log: [], records: [] };
 }
 
 /** 에이전트들이 실제로 일하고 있는지 — 검증된 기반(쇼핑몰 등)처럼 AI 가 생성하지 않는 경로에서는 보드를 띄우지 않는다. */
@@ -73,8 +77,54 @@ const STATE_OF_STEP: Record<string, AgentState | undefined> = {
 const ENGINE_STEPS = new Set(["planning", "planned", "wave", "file_start", "file_split", "file_part", "file_done",
   "fixing", "verified", "verify_failed", "split", "resumed", "generated"]);
 
+/** 이벤트의 agent 값 → 화면 이름(개발 N · 검토 · 설계). 슬롯 이름은 코어의 agent-1, agent-2 … */
+export function agentName(id: string | undefined): { who: string; role: TeamRole | "system" } {
+  if (!id) return { who: "", role: "system" };
+  if (id === "review") return { who: "검토", role: "review" };
+  if (id === "planner") return { who: "설계", role: "planner" };
+  const m = /^agent-(\d+)$/.exec(id);
+  return m ? { who: `개발 ${m[1]}`, role: "dev" } : { who: id, role: "dev" };
+}
+
+const base = (path?: string) => (path ?? "").split("/").pop() || path || "";
+const LAYER_TEXT = ["공통 기반", "기능", "화면"];
+
+/** 진행 이벤트 하나 → 기록 한 줄. 에이전트가 한 말처럼 지어내지 않고 일어난 일을 그대로 적는다. */
+export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord | null {
+  const { who, role } = agentName(event.agent);
+  const msg = (event.message ?? "").trim();
+  switch (event.step) {
+    case "planning": return { who: "설계", role: "planner", text: msg || "요청을 파일 사이의 약속과 작업 목록으로 나누는 중" };
+    case "planned": {
+      const list = event.files ?? [];
+      const n = [0, 1, 2].map(l => list.filter(f => (typeof f.layer === "number" ? f.layer : 1) === l).length);
+      return { who: "설계", role: "planner", tone: "ok",
+        text: `작업 ${event.total ?? list.length}개로 나눔 — 공통 기반 ${n[0]} → 기능 ${n[1]} → 화면 ${n[2]}` };
+    }
+    case "wave": {
+      const l = typeof event.layer === "number" ? event.layer : 1;
+      const count = files.filter(f => f.layer === l && f.state !== "done" && f.state !== "issue").length;
+      return { who: "", role: "system", text: l === 0
+        ? `${LAYER_TEXT[0]} ${count}개 — 다른 파일이 기대므로 한 명이 순서대로 만듭니다`
+        : `${LAYER_TEXT[l] ?? "다음 단계"} ${count}개 — ${event.agents ?? "여러"}명이 동시에 만듭니다` };
+    }
+    case "file_start": return event.file ? { who, role, text: `${event.file} 작성 시작` } : null;
+    case "file_split": return event.file ? { who, role, text: `${base(event.file)} 가 커서 ${150}줄씩 이어 씁니다` } : null;
+    case "fixing": return { who, role, tone: "warn", text: `자동 검사에서 문제 발견 → 고치는 중${msg.includes("—") ? ` (${msg.split("—").slice(1).join("—").trim().slice(0, 60)})` : ""}` };
+    case "verified": return event.file ? { who, role, tone: "ok", text: `${base(event.file)} 고친 뒤 확인 통과` } : null;
+    case "verify_failed": return { who, role, tone: "warn", text: msg ? `확인 필요 — ${msg.slice(0, 80)}` : "확인 필요" };
+    case "file_done": return event.file ? { who, role, tone: "ok", text: `${event.file} 완료${event.lines ? ` (${event.lines}줄)` : ""}` } : null;
+    case "retry": return { who, role, tone: "warn", text: msg || `일시적 오류 — ${event.seconds ?? "잠시"}초 뒤 다시 시도` };
+    case "waiting": return { who, role, tone: "warn", text: msg || `분당 호출 한도 — ${event.seconds ?? "잠시"}초 대기` };
+    case "generated": case "consistency": return { who: "검토", role: "review", text: msg || "전체 점검 — 컨테이너 빌드로 확인" };
+    case "resumed": return { who: "", role: "system", text: msg || "멈춘 지점부터 이어서 만듭니다" };
+    case "done": return { who: "", role: "system", tone: "ok", text: msg || "완료" };
+    default: return null;
+  }
+}
+
 export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
-  const next: TeamView = { ...view, agents: { ...view.agents }, files: view.files, log: view.log };
+  const next: TeamView = { ...view, agents: { ...view.agents }, files: view.files, log: view.log, records: view.records ?? [] };
   if (event.job_id) next.jobId = event.job_id;
   if (ENGINE_STEPS.has(event.step)) next.engaged = true;
   if (typeof event.total === "number" && event.total > 0) next.total = event.total;
@@ -112,6 +162,8 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
     case "generated": case "consistency": next.phase = "checking"; break;
     case "done": next.phase = "done"; next.done = Math.max(next.done, next.total); break;
   }
+  const record = recordOf(event, next.files);
+  if (record) next.records = [...next.records, record].slice(-30);
   if (agent) {
     const state = STATE_OF_STEP[event.step];
     if (event.step === "file_done") {

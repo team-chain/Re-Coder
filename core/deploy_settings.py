@@ -400,15 +400,41 @@ def ensure_demo(container: str, image: str, app_port: int, progress: Optional[Ca
     if progress:
         progress("결제 없이 쓰는 모의 결제 서버를 준비합니다")
     run(["docker", "rm", "-f", name], 60)
-    started = run(["docker", "run", "-d", "--name", name, "--network", net, "--network-alias", name,
-                   "--restart", "unless-stopped", "--no-healthcheck",
-                   "-e", f"MOCK_PORT={_MOCK_PORT}",
-                   "-e", f"MOCK_WEBHOOK_URL=http://{container}:{int(app_port)}/api/webhooks/stripe",
-                   "-e", f"MOCK_WEBHOOK_SECRET={secret}",
-                   "--entrypoint", "node", image, "-e", MOCK_PAYMENT_JS], 120)
+    started = run(mock_run_args(container, image, app_port, secret), 120)
     if started.returncode != 0:
         raise RuntimeError(f"모의 결제 서버를 시작하지 못했습니다: {(started.stderr or '').strip()[:300]}")
     return ["--network", net]
+
+
+def mock_run_args(container: str, image: str, app_port: int, secret: str, script: str = "") -> list[str]:
+    """모의 결제 서버 docker run 인자(실행·승인 화면 미리보기가 같은 것을 쓴다)."""
+    import local_services
+    name = mock_container(container)
+    net = local_services.network_name(container)
+    return ["docker", "run", "-d", "--name", name, "--network", net, "--network-alias", name,
+            "--restart", "unless-stopped", "--no-healthcheck",
+            "-e", f"MOCK_PORT={_MOCK_PORT}",
+            "-e", f"MOCK_WEBHOOK_URL=http://{container}:{int(app_port)}/api/webhooks/stripe",
+            "-e", f"MOCK_WEBHOOK_SECRET={secret}",
+            "--entrypoint", "node", image, "-e", script or MOCK_PAYMENT_JS]
+
+
+def preview_steps(container: str, image: str, app_port: int, workspace: str, with_network: bool) -> list[dict]:
+    """승인 화면의 '실행할 명령' — 로컬 데모의 모의 결제 서버와 데모 상품 넣기."""
+    import local_services
+    net = local_services.network_name(container)
+    steps: list[dict] = []
+    if with_network:
+        steps.append({"args": ["docker", "network", "create", net],
+                      "note": "앱과 모의 결제 서버가 서로 찾을 수 있는 네트워크 (이미 있으면 그대로 씁니다)"})
+    steps.append({"args": mock_run_args(container, image, app_port, "***", script="<모의 결제 서버 코드>"),
+                  "note": "결제를 끈 모의 결제 서버 — 앱 이미지의 node 로 띄웁니다(외부 이미지 없음). 같은 이름이 있으면 지우고 새로 띄웁니다."})
+    script = demo_init_script(workspace) if workspace else None
+    if script:
+        steps.append({"args": ["docker", "run", "--rm", "--network", net, "-e", "…(앱과 같은 설정)",
+                               "--entrypoint", "node", image, script],
+                      "note": "데모 상품을 넣습니다. 실패해도 배포는 계속하고 결과에 남깁니다."})
+    return steps
 
 
 def remove_demo(container: str, run: Runner = _run) -> None:
