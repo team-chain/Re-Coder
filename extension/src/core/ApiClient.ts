@@ -69,6 +69,7 @@ export interface CodeAgentResult {
     summary: string;
     ops: CodeAgentOp[];
     model: string;
+    verification?: {kind: string; status: string; passed: boolean; output?: string};
 }
 
 /** /api/code/plan — AI-DLC 1단계: 코드 대신 "설계 결정" 선택지. */
@@ -1394,6 +1395,12 @@ export class ApiClient {
         task_family?: string;
         env_vars?: Record<string, string>;
         secret_refs?: Record<string, string>;
+        target_group_arn?: string;
+        cloudfront_domain?: string;
+        assign_public_ip?: boolean;
+        subnet_ids?: string[];
+        security_group_ids?: string[];
+
         environment?: string;
         branch?: string;
         skip_sbom?: boolean;

@@ -22,7 +22,7 @@ class Router:
 def test_plan_requests_a_schema_and_parses_quotes_in_korean(monkeypatch, tmp_path):
     router = Router()
     monkeypatch.setattr(ca, "get_router", lambda: router)
-    result = ca.generate_plan("운영 가능한 쇼핑몰 사이트 하나 만들어줘", project_root=str(tmp_path))
+    result = ca.generate_plan("쇼핑몰 사이트 하나 만들어줘", project_root=str(tmp_path))
     assert router.requests[0].json_schema is ca.PLAN_SCHEMA
     assert router.requests[0].json_schema["properties"]["decisions"]["maxItems"] == 3
     keys = [d["id"] for d in result["decisions"]]

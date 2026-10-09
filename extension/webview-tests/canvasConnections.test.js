@@ -37,6 +37,16 @@ test('unborn repositories preserve branch/origin and never expose remote credent
  assert.equal(JSON.stringify(publicGit(git)).includes('fixture-secret'),false);
 });
 
+test('Git root canonicalization accepts a directory alias but rejects a nested project',async t=>{
+ const s=fixture(t);s.git('init','--initial-branch=main');
+ const alias=s.dir+'-alias';
+ fs.symlinkSync(s.dir,alias,process.platform==='win32'?'junction':'dir');
+ t.after(()=>fs.unlinkSync(alias));
+ assert.equal((await gitContext(alias)).initialized,true);
+ const nested=path.join(s.dir,'nested');fs.mkdirSync(nested);
+ assert.equal((await gitContext(nested)).initialized,false);
+});
+
 test('existing origin and changed workspace cannot be overwritten by connection requests',async t=>{
  const s=fixture(t);s.git('init','--initial-branch=main');s.git('remote','add','origin','git@github.com:tester/keep.git');
  await s.send('canvas.github.connect',{repository:'tester/other',create:true});

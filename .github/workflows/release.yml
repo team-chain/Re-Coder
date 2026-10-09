@@ -2,6 +2,19 @@ name: Build release
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [develop]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'core/recoder-core.spec'
+      - 'core/release_check.py'
+      - 'core/commerce_starter.py'
+      - 'core/starter_templates/**'
+      - 'core/requirements-release-*.txt'
+      - 'scripts/build-release.py'
+      - 'extension/scripts/package-release.js'
+      - 'extension/harness/release-smoke.js'
+      - 'extension/package-lock.json'
 
 permissions:
   contents: read
@@ -19,13 +32,15 @@ jobs:
           cache-dependency-path: core/requirements-release-win32-x64.txt
       - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: extension/package-lock.json
       - name: Install locked build dependencies
         shell: pwsh
         run: |
           python -m venv .venv
+          ./.venv/Scripts/python.exe -m pip install --upgrade "pip>=26.2"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./.venv/Scripts/python.exe -m pip install -r core/requirements-release-win32-x64.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm ci --prefix extension
@@ -60,12 +75,13 @@ jobs:
           cache-dependency-path: core/requirements-release-linux-x64.txt
       - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: extension/package-lock.json
       - name: Install locked build dependencies
         run: |
           python -m venv .venv
+          ./.venv/bin/python -m pip install --upgrade "pip>=26.2"
           ./.venv/bin/python -m pip install -r core/requirements-release-linux-x64.txt
           npm ci --prefix extension
       - name: Extension regression checks
@@ -97,12 +113,13 @@ jobs:
           cache-dependency-path: core/requirements-release-darwin-arm64.txt
       - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: extension/package-lock.json
       - name: Install locked build dependencies
         run: |
           python -m venv .venv
+          ./.venv/bin/python -m pip install --upgrade "pip>=26.2"
           ./.venv/bin/python -m pip install -r core/requirements-release-darwin-arm64.txt
           npm ci --prefix extension
       - name: Extension regression checks

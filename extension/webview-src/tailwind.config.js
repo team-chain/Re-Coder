@@ -65,10 +65,6 @@ module.exports = {
       },
     },
   },
-  // VSCode 의 inline CSSProperties 와 공존해야 하므로 preflight(베이스 reset)는 비활성.
-  // 기존 인라인 스타일에 영향을 주지 않으면서 utility class 만 사용한다.
-  corePlugins: {
-    preflight: false,
-  },
+  // v4: styles/tailwind.css imports only theme/utilities; Preflight stays disabled.
   plugins: [],
 };

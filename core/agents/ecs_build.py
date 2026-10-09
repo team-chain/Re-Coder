@@ -195,7 +195,7 @@ def build_image(
     logger.info("docker build 시작: %s (platform=%s)", local_tag, platform)
     rc, out, err = runner(
         [
-            "docker", "build",
+            "docker", "buildx", "build", "--load", "--pull",
             "--platform", platform,
             "-f", dockerfile,
             "-t", local_tag,

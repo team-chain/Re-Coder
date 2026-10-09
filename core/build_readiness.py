@@ -2632,6 +2632,34 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
     text = files.read(dockerfile)
     if text is None:
         return
+    # COPY sources are relative to the build context, including JSON form and
+    # multi-source COPY. Stage copies and dynamic paths need the actual builder.
+    import shlex
+    for line in re.sub(r"\\\r?\n", " ", text).splitlines():
+        match = re.match(r"\s*COPY\s+(.+)", line, re.I)
+        if not match or re.search(r"--from(?:=|\s)", match.group(1)):
+            continue
+        args = re.sub(r"^(?:--[\w-]+(?:=[^\s]+)?\s+)+", "", match.group(1)).strip()
+        if "<<" in args:
+            continue
+        try:
+            paths = json.loads(args) if args.startswith("[") else shlex.split(args)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(paths, list) or len(paths) < 2:
+            continue
+        for source in paths[:-1]:
+            if not isinstance(source, str) or "$" in source:
+                continue
+            source = posixpath.normpath(source.lstrip("/"))
+            if any(char in source for char in "*?["):
+                continue  # Optional glob operands (e.g. package-lock.json*) are resolved by Docker.
+            if source == "." or files.exists(source) or files.has_dir(source):
+                continue
+            result.issues.append(ReadinessIssue(
+                "DOCKERFILE_COPY_SOURCE_MISSING", ERROR,
+                f"Dockerfile COPY 원본 `{source}`가 빌드 폴더에 없습니다.",
+                "필요한 파일을 생성하거나 실제 파일 경로로 COPY를 고치세요.", dockerfile))
     facts = _dockerfile_facts(text)
     expose = facts["expose"][0] if len(facts["expose"]) == 1 else None
     effective = facts["env_port"] if (result.port_from_env and facts["env_port"]) else result.app_port
@@ -2666,7 +2694,7 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
             "실행 단계에서 /app/node_modules 를 복사합니다. 빌드가 \"복사할 파일 없음\" 으로 실패합니다.",
             "Dockerfile 의 의존성 설치 뒤에 `RUN mkdir -p node_modules` 를 넣으세요(자동 수정 가능).", dockerfile, True))
     if facts["cmd_entry"] and not files.exists(facts["cmd_entry"]) \
-            and not re.match(r"^(dist|build|out|lib)/", facts["cmd_entry"]):
+            and not re.search(r"(?:^|/)(dist|build|out|lib)/", facts["cmd_entry"]):
         #: start 스크립트(모노레포면 넘겨받은 패키지의 start)가 띄우는 파일, 없으면 찾은 서버 파일로 바꾼다.
         actual = next((e for e in (result.fix_data.get("start_entry"), result.server_entry)
                        if e and files.exists(e) and e != facts["cmd_entry"]), None)

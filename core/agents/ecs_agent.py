@@ -76,6 +76,7 @@ def _probe_http(
     attempts: int = 6,
     interval: float = 5.0,
     timeout: float = 5.0,
+    require_success: bool = False,
     sleep=None,
 ) -> tuple[bool, str]:
     """URL 에 실제로 접속되는지 확인한다. (성공 여부, 설명).
@@ -100,7 +101,7 @@ def _probe_http(
             # 열려 있다. 경로를 잘못 짚었을 뿐이다.
             # 그러나 **5xx 는 앱이 망가진 것**이다. 이걸 성공으로 세면
             # 500 만 뱉는 서비스를 "배포 성공"으로 보고하게 된다.
-            if 500 <= exc.code < 600:
+            if require_success or 500 <= exc.code < 600:
                 last = f"HTTP {exc.code} (서버 오류)"
                 if i < attempts - 1:
                     sleeper(interval)
@@ -154,6 +155,7 @@ class ECSAgent:
             "ec2": session.client("ec2"),
             "logs": session.client("logs"),
             "sts": session.client("sts"),
+            "elbv2": session.client("elbv2"),
         }
 
     async def deploy(
@@ -552,6 +554,12 @@ class ECSAgent:
         `provision=False` 면 아무것도 만들지 않고, 요청에 담긴 서브넷·보안
         그룹만 쓴다. 이미 인프라를 손으로 관리하는 사용자를 위한 탈출구다.
         """
+        if req.target_group_arn and not req.security_group_ids:
+            raise InfraError(
+                "ALB 배포에는 앱 보안 그룹을 명시해야 합니다.",
+                remedy="ALB 보안 그룹에서 앱 포트로 들어오는 연결만 허용한 "
+                       "security_group_ids를 지정하세요. 공개 인바운드 그룹을 자동 생성하지 않습니다.",
+            )
         if not req.provision:
             if not req.subnet_ids or not req.security_group_ids:
                 raise InfraError(
@@ -570,6 +578,10 @@ class ECSAgent:
             loop = asyncio.get_running_loop()
 
             def _verify() -> None:
+                if req.target_group_arn:
+                    aws_infra.validate_target_group_network(
+                        clients["ec2"], clients["elbv2"], req.target_group_arn, req.subnet_ids
+                    )
                 aws_infra.require_cluster(clients["ecs"], req.cluster)
                 aws_infra.require_service(
                     clients["ecs"], cluster=req.cluster, service=req.service
@@ -606,6 +618,10 @@ class ECSAgent:
                 )
             else:
                 target = aws_infra.discover_default_network(clients["ec2"])
+            if req.target_group_arn:
+                aws_infra.validate_target_group_network(
+                    clients["ec2"], clients["elbv2"], req.target_group_arn, target.subnet_ids
+                )
             rec.provisioned["vpc"] = target.vpc_id
             rec.provisioned["subnets"] = ",".join(target.subnet_ids)
             # 라우팅을 확인하지 못했다는 사실을 **기록에 남긴다.** 값만
@@ -1036,6 +1052,10 @@ class ECSAgent:
                 subnet_ids=network.subnet_ids,
                 security_group_ids=req.security_group_ids,
                 desired_count=req.desired_count,
+                assign_public_ip=req.assign_public_ip,
+                target_group_arn=req.target_group_arn,
+                container_name=req.container_name,
+                container_port=req.container_port,
             )
 
         result = await loop.run_in_executor(None, _work)
@@ -1067,6 +1087,8 @@ class ECSAgent:
         loop = asyncio.get_running_loop()
 
         def _work() -> str:
+            if req.cloudfront_domain:
+                return "https://" + req.cloudfront_domain
             return aws_infra.wait_for_public_url(
                 clients["ecs"],
                 clients["ec2"],
@@ -1085,7 +1107,7 @@ class ECSAgent:
             reachable, detail = await loop.run_in_executor(
                 None,
                 lambda: _probe_http(
-                    (rec.service_url or "") + req.health_check_path
+                    (rec.service_url or "") + req.health_check_path, require_success=True
                 ),
             )
             if not reachable:

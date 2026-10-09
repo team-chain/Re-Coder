@@ -1482,6 +1482,9 @@ class ECSDeployRequest(BaseModel):
     env_vars:                dict[str, str] = Field(default_factory=dict)
     #: AWS Secrets Manager / SSM ARN references only; values never enter the API record.
     secret_refs:             dict[str, str] = Field(default_factory=dict)
+    target_group_arn: str = Field(default="", pattern=r"^$|^arn:(aws|aws-us-gov|aws-cn):elasticloadbalancing:[a-z0-9-]+:[0-9]{12}:targetgroup/[A-Za-z0-9-]+/[a-f0-9]+$")
+    cloudfront_domain: str = Field(default="", pattern=r"^$|^[a-z0-9-]+\.cloudfront\.net$")
+    assign_public_ip: bool = True
 
     @model_validator(mode="after")
     def validate_secret_refs(self):

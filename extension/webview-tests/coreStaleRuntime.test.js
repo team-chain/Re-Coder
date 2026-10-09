@@ -6,6 +6,22 @@ const { spawn } = require('node:child_process');
 const compiled = path.join(__dirname, '../out/core/CoreManager.js');
 const fixture = path.join(__dirname, 'fixtures/coreEnvFixture.js');
 
+// tasklist identifies the image name, unlike POSIX ps which includes arguments.
+function spawnOrphan(dir) {
+  let command = process.execPath;
+  if (process.platform === 'win32') {
+    command = path.join(dir, 'recoder-core.exe');
+    fs.copyFileSync(process.execPath, command);
+  }
+  return spawn(command, ['-e', 'setTimeout(()=>{},30000)', 'recoder-core'], { stdio: 'ignore' });
+}
+async function stopChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  child.kill('SIGKILL');
+  await exited;
+}
+
 function loadManager(dir) {
   const output = { exports: {} };
   const localRequire = createRequire(compiled);
@@ -54,8 +70,8 @@ test('시작 직후 죽는 Core 는 60초를 기다리지 않고 원인과 함�
 
 test('연결 정보 없이 남은 이전 Core 는 사용자 확인 후 종료하고 새로 띄운다', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-orphan-'));
-  const orphan = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)', 'recoder-core'], { stdio: 'ignore' });
-  t.after(() => { try { orphan.kill('SIGKILL'); } catch { /* gone */ } fs.rmSync(dir, { recursive: true, force: true }); });
+  const orphan = spawnOrphan(dir);
+  t.after(async () => { await stopChild(orphan); fs.rmSync(dir, { recursive: true, force: true }); });
   fs.writeFileSync(path.join(dir, 'core.lock'), JSON.stringify({ pid: orphan.pid, windows: [orphan.pid] }));
   const output = { exports: {} };
   const localRequire = createRequire(compiled);
@@ -80,9 +96,9 @@ test('연결 정보 없이 남은 이전 Core 는 사용자 확인 후 종료하
 
 test('이전 Core 종료를 거절하면 자동 재시도 때 다시 묻지 않고, 명시적 재시작 때는 다시 묻는다', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-orphan-no-'));
-  const orphan = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)', 'recoder-core'], { stdio: 'ignore' });
+  const orphan = spawnOrphan(dir);
   const unrelated = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)', 'main.py'], { stdio: 'ignore' });
-  t.after(() => { for (const p of [orphan, unrelated]) { try { p.kill('SIGKILL'); } catch { /* gone */ } } fs.rmSync(dir, { recursive: true, force: true }); });
+  t.after(async () => { await Promise.all([orphan, unrelated].map(stopChild)); fs.rmSync(dir, { recursive: true, force: true }); });
   const output = { exports: {} };
   const localRequire = createRequire(compiled);
   const asked = [];

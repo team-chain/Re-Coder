@@ -11,7 +11,7 @@ RUNTIME_IMPORTS = (
     'api.routes.canvas', 'github_agent', 'static_frontend', 'deployment_inputs', 'code_agent', 'adr', 'aws_onboarding',
     'agents.ecs_agent', 's3_byo', 'security_scan', 'local_deploy_agent',
     'llm.bedrock_provider', 'llm.gemini_provider', 'llm.provider_router', 'llm.api_key_provider',
-    'build_readiness', 'screen_check', 'build_failure', 'vuln_advice', 'npm_registry', 'local_services', 'scan_process',
+    'commerce_starter', 'generated_validation', 'build_readiness', 'screen_check', 'build_failure', 'vuln_advice', 'npm_registry', 'local_services', 'scan_process',
     'preflight.contract_loader', 'persistence', 'nacl.public', 'paramiko',
     'google.genai', 'google.generativeai',
 )
@@ -39,6 +39,11 @@ def run(app) -> int:
         assert files._templates, 'file templates are empty'
         assert 'Dockerfile.node-static' in files._templates, 'frontend Dockerfile template missing'
         checks.append('command and infrastructure templates')
+        from commerce_starter import operations
+        starter = {op['file'] for op in operations()}
+        assert {'Dockerfile', 'backend/src/server.js', 'frontend/src/pages/Checkout.jsx',
+                'backend/package-lock.json', 'frontend/package-lock.json', 'backend/src/order_expiry.js'} <= starter, 'commerce foundation data missing'
+        checks.append('reviewed commerce foundation')
         from botocore.session import Session
         session = Session()
         available = set(session.get_available_services())

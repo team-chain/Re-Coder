@@ -74,6 +74,11 @@ class ExtensionEcsDeployRequest(BaseModel):
     branch: Optional[str] = None
     env_vars: dict[str, str] = Field(default_factory=dict)
     secret_refs: dict[str, str] = Field(default_factory=dict)
+    target_group_arn: str = Field(default="", pattern=r"^$|^arn:(aws|aws-us-gov|aws-cn):elasticloadbalancing:[a-z0-9-]+:[0-9]{12}:targetgroup/[A-Za-z0-9-]+/[a-f0-9]+$")
+    cloudfront_domain: str = Field(default="", pattern=r"^$|^[a-z0-9-]+\.cloudfront\.net$")
+    assign_public_ip: bool = True
+    subnet_ids: list[str] = Field(default_factory=list)
+    security_group_ids: list[str] = Field(default_factory=list)
 
     @field_validator("env_vars", mode="before")
     @classmethod
@@ -204,6 +209,11 @@ def to_core_request(
         "generate_sbom": not body.skip_sbom,
         "env_vars": dict(body.env_vars),
         "secret_refs": dict(body.secret_refs),
+        "target_group_arn": body.target_group_arn,
+        "cloudfront_domain": body.cloudfront_domain,
+        "assign_public_ip": body.assign_public_ip,
+        "subnet_ids": list(body.subnet_ids),
+        "security_group_ids": list(body.security_group_ids),
     }
     if (body.aws_region or "").strip():
         fields["region"] = body.aws_region.strip()  # type: ignore[union-attr]

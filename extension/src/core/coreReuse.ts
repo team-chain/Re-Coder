@@ -32,7 +32,7 @@ export function shouldReuseRunningCore(
 export function samePath(a: string, b: string): boolean {
     const norm = (p: string): string => {
         // Core는 symlink를 해석한 경로를 기록한다. PATH/설치 경로에도 동일 적용.
-        const canonical = fs.existsSync(p) ? fs.realpathSync(p) : path.resolve(p);
+        const canonical = fs.existsSync(p) ? fs.realpathSync.native(p) : path.resolve(p);
         const resolved = canonical.replace(/[\\/]+$/, '');
         return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
     };
