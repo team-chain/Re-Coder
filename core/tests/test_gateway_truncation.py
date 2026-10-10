@@ -63,3 +63,16 @@ def test_평문_응답은_예전처럼_잘려도_돌려준다(monkeypatch):
     GatewayProvider._require_complete({"output_tokens": 1024, "stop_reason": "max_tokens"}, 1024, structured=False)
     with pytest.raises(LLMError):
         GatewayProvider._require_complete({"output_tokens": 4096}, 8192, structured=True)
+
+
+def test_글자_그대로_받기는_잘려도_오류가_아니라_받은_만큼과_끊김_여부(monkeypatch):
+    import asyncio
+    monkeypatch.delenv("RECODER_GATEWAY_MAX_OUTPUT", raising=False)
+    gp = GatewayProvider.__new__(GatewayProvider)
+    sent = []
+    gp._post = lambda payload: (sent.append(payload), {"text": "a{}\nb{", "output_tokens": 4096})[1]
+    out = asyncio.run(gp.converse([{"role": "user", "content": [{"text": "x"}]}], output_schema={"type": "object"},
+                                  max_tokens=8192, raw=True))
+    assert out == {"text": "a{}\nb{", "truncated": True} and sent[0]["output_schema"] is None
+    gp._post = lambda payload: {"text": "a{}\n", "output_tokens": 30}
+    assert asyncio.run(gp.converse([], max_tokens=8192, raw=True)) == {"text": "a{}\n", "truncated": False}

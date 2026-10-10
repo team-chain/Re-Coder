@@ -38,9 +38,15 @@ import generation_jobs as jobs
 PAGE_FILES = 25          # 파일 목록 한 번에 받는 개수(응답 한도 안에 확실히 들어가는 크기)
 BATCH = 2                # 작은 파일은 두 개씩 묶어 호출 수를 줄인다(넘치면 하나씩 → 이어 쓰기)
 PART_LINES = 150         # 이어 쓰기 한 조각의 줄 수
-#: 같은 파일이 실패할 때마다 쓰는 조각 크기(처음 → 두 번째 → 세 번째 시도). 응답이 잘리면 한 시도 안에서도 줄인다.
-PART_LINES_STEPS = (150, 80, 40)
 MAX_FILE_TRIES = 3       # 한 파일을 이번 실행에서 시도하는 횟수 — 넘으면 그 파일만 실패로 두고 나머지를 계속 만든다
+#: 파일 내용을 글자 그대로 받을 때 "다 썼다" 표시(파일에는 넣지 않는다).
+END_MARKER = "<<<RECODER_END_OF_FILE>>>"
+#: 글자 그대로 받는 한 번의 응답 상한 — 게이트웨이는 4096 으로 깎지만 끊겨도 받은 만큼 쓰므로 상관없다.
+STREAM_MAX_TOKENS = 8192
+#: 공급자가 끊김 여부를 모를 때 이 길이 이상이면 끊긴 것으로 본다(짧은 응답은 끝 표시만 빠뜨린 것).
+STREAM_CUT_GUESS = 3000
+#: 시도마다 쓰는 방법 — 같은 방법을 되풀이하지 않는다.
+STRATEGY_TEXT = ("한 번에 받기", "글자 그대로 이어 받기", "맥락을 줄여 처음부터 이어 받기")
 PART_SAFETY = 400        # 무한 반복 방지용(약 6만 줄). 진행이 없을 때만 실제로 멈춘다
 FILES_SAFETY = 600       # 무한 목록 방지용. 진행이 없을 때만 실제로 멈춘다
 FIX_ROUNDS = 2           # 파일별 즉시 교정 횟수
@@ -55,7 +61,9 @@ PLAN_SCHEMA = {
         "files": {"type": "array", "items": {
             "type": "object",
             "properties": {"file": {"type": "string", "minLength": 1}, "purpose": {"type": "string"},
-                           "layer": {"type": "integer"}},
+                           "layer": {"type": "integer"},
+                           #: 예상 크기 — large 는 처음부터 글자 그대로 이어 받는다(한 번에 받다 잘려 버리는 호출을 아낀다)
+                           "size": {"type": "string", "enum": ["small", "medium", "large"]}},
             "required": ["file"], "additionalProperties": False}},
         "more": {"type": "boolean"},
     },
@@ -323,6 +331,8 @@ class LargeGeneration:
         #: 이어 만들 때 실패한 파일을 빼고 결과를 받는다(사용자가 고른 경우만).
         self.skip_failed = skip_failed
         self.skipped: list[dict] = []
+        #: AI 가 끝내 못 써서 설계로 자동 작성한 문서 [{file, reason}]
+        self.fallback_docs: list[dict] = []
         self.target_folder = target_folder
         self.new_project = new_project
         self.job_id = job_id or jobs.new_job_id()
@@ -371,11 +381,31 @@ class LargeGeneration:
         tries = info["tries"]
         self._log(path, kind, f"{tries}번째 실패 — {exc}")
         if tries < MAX_FILE_TRIES:
-            lines = PART_LINES_STEPS[min(tries, len(PART_LINES_STEPS) - 1)]
+            how = STRATEGY_TEXT[min(tries, len(STRATEGY_TEXT) - 1)]
             self._event("file_retry", agent=agent, file=path, kind=kind, attempt=tries + 1,
-                        message=f"{path} — {ERROR_TEXT[kind]} → 처음부터 {lines}줄씩 다시 씁니다 ({tries + 1}/{MAX_FILE_TRIES})")
+                        message=f"{path} — {ERROR_TEXT[kind]} → {how}로 다시 씁니다 ({tries + 1}/{MAX_FILE_TRIES})")
         self._save()
         return tries
+
+    def _finish_fallback_doc(self, target: dict, agent: str) -> None:
+        """문서를 끝내 못 받았다 — 설계에서 기본 문서를 만들어 둔다(앱 동작과 무관, "자동 작성" 으로 표시)."""
+        path = target["file"]
+        with self._lock:
+            ops = [dict(op) for op in self.state["ops"].values()]
+        content = fallback_doc(path, self.state.get("manifest") or {}, ops)
+        info = self.state["attempts"].get(_norm(path)) or {}
+        kind = info.get("last", "other")
+        self._log(path, kind, f"{MAX_FILE_TRIES}번 시도해도 실패 — 설계에서 기본 문서를 자동 작성")
+        self.fallback_docs.append({"file": path, "reason": ERROR_TEXT.get(kind, kind)})
+        op = {"action": "create", "file": path, "content": content, "language": "markdown",
+              "rationale": f"AI 작성이 {ERROR_TEXT.get(kind, kind)}(으)로 실패해 설계에서 자동 작성", "fallback": True}
+        with self._lock:
+            self.state["ops"][_norm(path)] = op
+            self.state["failed"].pop(_norm(path), None)
+        self._save()
+        self._event("file_fallback", agent=agent, file=path, kind=kind,
+                    message=f"{path} — AI 가 끝내 못 써서 설계로 기본 문서를 자동 작성했습니다")
+        self._event("file_done", agent=agent, file=path, lines=content.count("\n") + 1, message=f"{path} 완료(자동 작성)")
 
     def _fail(self, target: dict, agent: str) -> None:
         key, path = _norm(target["file"]), target["file"]
@@ -440,7 +470,7 @@ class LargeGeneration:
         return fixed
 
     # ── AI 호출(속도 제한 + 재시도) ──
-    def call(self, prompt: str, schema: dict, operation: str, max_tokens: int, agent: str = "") -> Any:
+    def call(self, prompt: str, schema: dict | None, operation: str, max_tokens: int, agent: str = "", raw: bool = False) -> Any:
         ca = _ca()
         attempt, waits = 0, (3, 8, 20, 45, 60)
         while True:
@@ -448,7 +478,8 @@ class LargeGeneration:
                                                        message=f"AI 호출 한도 때문에 {round(s)}초 기다리는 중"))
             try:
                 resp = ca.get_router().call(
-                    LLMRequest(prompt=prompt, json_schema=schema, max_tokens=max_tokens, temperature=0.2),
+                    LLMRequest(prompt=prompt, json_schema=None if raw else schema, max_tokens=max_tokens,
+                               temperature=0.2, raw_text=raw),
                     agent="code_agent", operation=operation)
                 self.last_resp = resp
                 return resp
@@ -483,6 +514,7 @@ class LargeGeneration:
   페이지 경로, 환경 변수 이름, 통화·금액 단위, 주문/결제 상태 전이, 패키지 이름·버전. 다른 에이전트가 이것만 보고 맞춰 씁니다.
 - files: 만들거나 고칠 파일. 이번 응답에는 최대 {PAGE_FILES}개만 넣고, 더 있으면 more=true(다음 응답에서 이어서 받습니다).
   각 파일의 layer: 0=공통 기반(설정·패키지·DB 스키마/연결·인증·공용 타입/유틸), 1=기능(API·서비스·모델), 2=화면·진입점·문서.
+  각 파일의 size: 예상 길이 small(~80줄)·medium(~250줄)·large(그보다 김).
   의존성 순서로 나열하세요. root package.json/Dockerfile/.dockerignore/README, 로그인·회원가입, DB 초기화 등 실행에 필요한 파일을
   빠뜨리지 마세요. 파일 수는 줄이지 말고 실제로 필요한 만큼 모두 적으세요."""
         files: list[dict] = []
@@ -563,7 +595,8 @@ class LargeGeneration:
                 continue
             seen.add(key)
             out.append({"file": path, "purpose": str(item.get("purpose") or "").strip(),
-                        "layer": item.get("layer") if isinstance(item.get("layer"), int) else None})
+                        "layer": item.get("layer") if isinstance(item.get("layer"), int) else None,
+                        **({"size": item["size"]} if item.get("size") in ("small", "medium", "large") else {})})
         return out
 
     def _rel(self, path: str) -> str:
@@ -584,80 +617,75 @@ class LargeGeneration:
 
     # ── 3. 이어 쓰기 ──
     def write_in_parts(self, base_prompt: str, label: str, *, agent: str = "", operation: str = "generate_code_file_part",
-                       path: str = "", lines: int = PART_LINES) -> str:
-        """한 응답에 다 들어가지 않는 내용을 조각으로 이어 쓴다.
+                       path: str = "", lean: bool = False) -> str:
+        """한 응답에 다 들어가지 않는 내용을 **글자 그대로** 이어 받는다(AI 가 지시를 지킨다고 기대하지 않는다).
 
-        · 조각은 저장 전에 검사한다(clean_content) — 응답 형식이 섞이면 실제 내용만, 꺼낼 수 없으면 버리고 다시 받는다.
-        · 조각 응답이 길이 한도에서 잘리면 조각 크기를 줄여(150→80→40줄) 같은 조각을 다시 받는다.
-        · 진행이 없거나 형식이 계속 틀리면 CodeOutputError — 부르는 쪽이 방법을 바꿔 다시 시도한다.
+        · 내용은 JSON 이 아니라 그대로 받는다 — 이스케이프로 길이가 늘지 않고, 응답 길이 한도에서 끊겨도 받은 만큼 쓴다.
+          끝은 END_MARKER 로 안다. 끊겼으면 마지막 불완전한 줄만 버리고 "그 다음 줄부터" 이어 받는다.
+          (AI 가 "최대 N줄" 같은 지시를 무시하고 한 번에 다 쓰려 해도 매번 진행이 생긴다 — 실기기 README.)
+        · AI 가 그래도 JSON({"content", "done"} 이나 ops)으로 싸 보내면 실제 내용만 꺼낸다(clean_content).
+        · 이미 쓴 줄을 다시 쓰면 걷어 낸다. 새 내용이 3번 연속 없으면 CodeOutputError — 부르는 쪽이 방법을 바꾼다.
         """
         with self._lock:
             partial = self.state["partial"].get(path) if path else None
         written = (partial or {}).get("written", "")
         part = int((partial or {}).get("parts", 0))
-        lines = int((partial or {}).get("lines", lines) or lines)
-        bad = 0      # 형식이 맞지 않은 응답 연속 횟수
-        empty = 0    # 빈 조각 연속 횟수
+        stalls = 0
         name = path or label
         while part < PART_SAFETY:
-            p = base_prompt + f"""
+            if not written:
+                p = base_prompt + f"""
 
-[이어 쓰기 — 응답 형식] {label} 은(는) 한 응답에 다 들어가지 않아 여러 번에 나눠 이어 씁니다. 지금은 {part + 1}번째 조각입니다.
-이번 응답은 JSON {{"content": "...", "done": true|false}} 하나입니다.
-- content 에는 {label} 의 {'처음' if not written else '바로 다음'} 부분을 **최대 {lines}줄** 파일에 들어갈 글자 그대로 쓰세요.
-  content 안에 다시 JSON(summary·ops·file·rationale 등)으로 감싸지 마세요. 설명이나 마크다운 코드펜스도 넣지 마세요.
-- 줄 중간에서 끊지 말고 함수·블록·규칙·문단 경계에서 끊으세요. 다음 응답에서 정확히 이어 씁니다.
-- 이미 쓴 줄을 다시 쓰지 마세요.
-- 이번 조각으로 끝나면 done 을 true, 아직 남았으면 false 로 주세요."""
-            if written:
-                p += f"\n\n지금까지 쓴 {label} (이 바로 뒤부터 이어서 쓰세요):\n```\n{_part_context(written)}\n```"
-            try:
-                resp = self.call(p, PART_SCHEMA, operation, 4096, agent=agent)
-            except LLMError as exc:
-                if not _is_truncation(exc):
-                    raise
-                smaller = next((n for n in PART_LINES_STEPS if n < lines), None)
-                if smaller is None:
-                    raise
-                lines = smaller
-                self._log(name, "truncation", f"{part + 1}번째 조각 응답이 잘려 {lines}줄씩으로 줄여 다시 받음")
-                self._event("part_retry", agent=agent, file=path, kind="truncation", lines=lines,
-                            message=f"{posixpath.basename(name)} — 응답이 잘려 {lines}줄씩으로 줄여 다시 씁니다")
-                continue
-            try:
-                data = _ca()._extract_json(resp.text)
-            except ValueError:
-                data = None
-            piece = data.get("content") if isinstance(data, dict) else None
-            done = data.get("done") if isinstance(data, dict) else None
-            cleaned = clean_content(name, piece) if isinstance(piece, str) else None
-            if cleaned is None:
-                bad += 1
-                self._log(name, "format", f"{part + 1}번째 조각 응답 형식이 맞지 않아 버림({bad}/3)")
-                if bad >= 3:
-                    raise CodeOutputError(f"{label} 을(를) 이어 쓰는 응답이 계속 형식에 맞지 않습니다.")
-                continue
-            bad = 0
-            if cleaned != piece and is_wrapped(name, piece):
-                self._log(name, "format", f"{part + 1}번째 조각에 응답 형식이 섞여 실제 내용만 꺼냄")
-            piece = _strip_overlap(written, cleaned)
+[파일 작성 — 응답 형식] {label} 의 내용만 **글자 그대로** 쓰세요.
+- 설명 문장·마크다운 코드펜스(```)·JSON 으로 감싸지 마세요. 첫 글자부터 파일 내용입니다.
+- 다 쓰면 마지막에 새 줄로 정확히 {END_MARKER} 한 줄을 쓰세요. 이 줄은 파일에 들어가지 않습니다.
+- 응답 길이 한도 때문에 중간에 끊겨도 괜찮습니다. 끊기면 다음 요청에서 이어 쓰게 합니다."""
+            else:
+                p = base_prompt + f"""
+
+[파일 작성 — 이어 쓰기] {label} 을(를) 쓰던 중 응답 길이 한도에서 끊겼습니다. 아래는 지금까지 쓴 내용입니다.
+```
+{_part_context(written)}
+```
+- 이 내용 **바로 다음 줄부터** 이어서 글자 그대로 쓰세요. 이미 쓴 줄을 다시 쓰지 마세요.
+- 설명 문장·코드펜스·JSON 으로 감싸지 마세요.
+- 다 쓰면 마지막에 새 줄로 정확히 {END_MARKER} 한 줄을 쓰세요. 또 끊겨도 괜찮습니다."""
+            resp = self.call(p, None, operation, STREAM_MAX_TOKENS, agent=agent, raw=True)
+            text = str(getattr(resp, "text", "") or "")
+            meta = getattr(resp, "metadata", None) or {}
+            piece, done, intact = _stream_piece(name, text)
+            #: 끊겼는가 — 공급자가 알려 주면 그대로, 모르면 응답이 길면 끊긴 것으로 본다.
+            known = meta.get("truncated")
+            cut = (not done) and not intact and (known is True or (known is None and len(text) >= STREAM_CUT_GUESS))
+            if cut and piece and not piece.endswith("\n") and "\n" in piece:
+                #: 마지막 불완전한 줄은 버린다 — 다음 요청이 그 줄부터 다시 쓴다.
+                piece = piece[: piece.rfind("\n") + 1]
+            before = len(written)
+            piece = _strip_overlap(written, piece)
             if written and piece and not written.endswith("\n"):
                 written += "\n"
             written += piece
+            grew = len(written) - before
             part += 1
+            if not done and not cut and grew <= 0 and written.strip():
+                #: 끊기지 않은 응답이 더 쓸 게 없다 — 끝 표시만 빠뜨린 것이다(다 쓴 것으로 본다).
+                done = True
+            self._log(name, "stream", f"{part}번째 응답 · 받은 {len(text)}자 · 늘어난 {max(0, grew)}자 · "
+                                      f"{'끝' if done else ('끊김' if cut else '끝 표시 없음')}")
             if path:
                 with self._lock:
-                    self.state["partial"][path] = {"written": written, "parts": part, "lines": lines}
+                    self.state["partial"][path] = {"written": written, "parts": part, "mode": "stream"}
                 self._save()
-                self._event("file_part", agent=agent, file=path, part=part, lines=written.count("\n") + 1,
-                            message=f"{path} 이어 쓰는 중 · {part}번째 조각 · {written.count(chr(10)) + 1}줄")
-            if done is True:
+                if not done:
+                    self._event("file_part", agent=agent, file=path, part=part, lines=written.count("\n") + 1,
+                                message=f"{path} 이어 쓰는 중 · {part}번째 응답 · {written.count(chr(10)) + 1}줄")
+            if done:
                 break
-            empty = empty + 1 if not piece.strip() else 0
-            if empty >= 3:
+            stalls = stalls + 1 if grew <= 0 or not piece.strip() else 0
+            if stalls >= 3:
                 raise CodeOutputError(f"{label} 을(를) 이어 쓰는 중 더 진행되지 않았습니다.")
         else:
-            raise CodeOutputError(f"{label} 이(가) 비정상적으로 길어 멈췄습니다({PART_SAFETY}조각).")
+            raise CodeOutputError(f"{label} 이(가) 비정상적으로 길어 멈췄습니다({PART_SAFETY}번).")
         if not written.strip():
             #: 내용 없이 "끝"이라고 하면 빈 파일이 된다 — 조용히 넘기지 않는다(방법을 바꿔 다시 시도).
             raise CodeOutputError(f"{label} 의 내용을 받지 못했습니다.")
@@ -698,27 +726,30 @@ class LargeGeneration:
             out.append(dict(op, file=target["file"], content=cleaned))
         return out
 
-    def _gen_parts(self, target: dict, files_done: list[dict], agent: str, lines: int) -> dict:
+    def _gen_parts(self, target: dict, files_done: list[dict], agent: str, lean: bool = False) -> dict:
         path = target["file"]
         resuming = path in self.state["partial"]
-        self._event("file_split", agent=agent, file=path, lines=lines,
-                    message=(f"{path} 이어 쓰기를 이어서 합니다" if resuming else f"{path} 이(가) 커서 {lines}줄씩 나눠 씁니다"))
-        base = self.context_prompt + self._context(files_done) + f"\n\n지금은 {path} 파일 하나만 작성합니다."
-        content = self.write_in_parts(base, f"{path} 파일", agent=agent, path=path, lines=lines)
+        self._event("file_split", agent=agent, file=path, lean=lean,
+                    message=(f"{path} 쓰던 내용에 이어서 씁니다" if resuming else
+                             f"{path} 을(를) 글자 그대로 이어 받습니다" + (" (맥락을 줄여서)" if lean else "")))
+        #: lean — 이미 만든 파일 본문을 빼고 약속·목록만 보낸다(입력이 커서 생기는 실패를 피한다).
+        context = self._context([] if lean else files_done)
+        base = self.context_prompt + context + f"\n\n지금은 {path} 파일 하나만 작성합니다." + _doc_hint(path)
+        content = self.write_in_parts(base, f"{path} 파일", agent=agent, path=path)
         return {"action": "create", "file": path, "content": content, "language": "",
-                "rationale": "출력 한도 때문에 나눠서 작성"}
+                "rationale": "응답 길이 한도 때문에 이어 받아 작성"}
 
     def _produce(self, target: dict, files_done: list[dict], agent: str) -> dict:
-        """파일 하나를 지금 시도 횟수에 맞는 방법으로 만든다.
-        첫 시도: 한 번에 → 넘치면 150줄 조각. 두 번째: 처음부터 80줄 조각. 세 번째: 처음부터 40줄 조각."""
+        """파일 하나를 지금 시도 횟수에 맞는 방법으로 만든다 — 같은 방법을 되풀이하지 않는다.
+        첫 시도: 한 번에(크다고 예상한 파일은 바로 이어 받기) → 넘치면 글자 그대로 이어 받기.
+        두 번째: 처음부터 글자 그대로 이어 받기. 세 번째: 맥락을 줄여 처음부터 이어 받기."""
         key = _norm(target["file"])
         tries = int((self.state["attempts"].get(key) or {}).get("tries", 0))
-        lines = PART_LINES_STEPS[min(tries, len(PART_LINES_STEPS) - 1)]
-        if tries == 0 and target["file"] not in self.state["partial"]:
+        if tries == 0 and target["file"] not in self.state["partial"] and target.get("size") != "large":
             got = self._ask_files([target], files_done, agent)
             if got:
                 return got[0]
-        return self._gen_parts(target, files_done, agent, lines)
+        return self._gen_parts(target, files_done, agent, lean=tries >= 2)
 
     def _run_single(self, target: dict, files_done: list[dict], agent: str) -> None:
         """파일 하나 — 실패하면 방법을 바꿔 다시, 정해진 횟수를 넘으면 그 파일만 실패로 두고 돌아간다."""
@@ -728,10 +759,17 @@ class LargeGeneration:
                 return
             tries = int((self.state["attempts"].get(key) or {}).get("tries", 0))
             if tries >= MAX_FILE_TRIES:
-                self._fail(target, agent)
+                if _is_doc(target["file"]):
+                    #: 문서는 앱 동작을 막지 않는다 — 설계(요약·약속·실행 명령·환경 변수)로 기본 문서를 만들어 둔다.
+                    self._finish_fallback_doc(target, agent)
+                else:
+                    self._fail(target, agent)
                 return
             try:
                 op = self._produce(target, files_done, agent)
+                problem = implausible(op["file"], op.get("content", ""))
+                if problem:
+                    raise CodeOutputError(f"{op['file']} 의 받은 내용이 {problem} — 다른 방법으로 다시 받습니다.")
                 self._finish(op, files_done, agent)
                 return
             except Paused:
@@ -886,12 +924,14 @@ replace 는 바꿀 내용입니다.
         ops = [self.state["ops"][_norm(f["file"])] for f in files if _norm(f["file"]) in self.state["ops"]]
         self._event("generated", message=f"파일 {len(ops)}개 작성 완료 — 전체 점검 중"
                     + (f" (만들지 못한 {len(self.skipped)}개는 뺌)" if self.skipped else ""))
-        return {"summary": str(self.state["manifest"].get("summary") or ""), "skipped": self.skipped}, ops, self.last_resp
+        return ({"summary": str(self.state["manifest"].get("summary") or ""), "skipped": self.skipped,
+                 "fallback_docs": self.fallback_docs or [{"file": op["file"], "reason": "자동 작성"} for op in ops if op.get("fallback")]},
+                ops, self.last_resp)
 
     def _run_batch(self, batch: list[dict], context: list[dict], agent: str) -> None:
         """작은 파일은 두 개씩 한 번에 받고, 받은 것은 하나씩 바로 저장한다. 빠진 파일·이어 쓰던 파일은 하나씩."""
         todo = [f for f in batch if _norm(f["file"]) not in self.state["ops"]]
-        fresh = [f for f in todo if f["file"] not in self.state["partial"]
+        fresh = [f for f in todo if f["file"] not in self.state["partial"] and f.get("size") != "large"
                  and not int((self.state["attempts"].get(_norm(f["file"])) or {}).get("tries", 0))]
         if len(fresh) > 1:
             for op in self._ask_files(fresh, context, agent):
@@ -924,6 +964,134 @@ def _guess_layer(path: str) -> int:
     return 1
 
 
+_PROSE_PREFIX = re.compile(r"\s*((?:[^\n`;{}()<>=]{1,200}\n){1,3})\s*```[\w.+-]*[ \t]*\n")
+
+
+def _stream_piece(path: str, text: str) -> tuple[str, bool, bool]:
+    """글자 그대로 받은 응답 → (파일에 넣을 내용, 다 썼는가, 온전한가).
+
+    온전한가: JSON 으로 싸여 와서 끝까지 해석됐다(응답이 끊기지 않았다) — 마지막 줄을 버리지 않는다.
+
+    끝 표시가 있으면 다 쓴 것. AI 가 지시를 어기고 JSON({"content", "done"} 이나 ops)으로 싸 보내면 실제 내용과
+    done 을 꺼낸다. 코드펜스는 벗긴다. 끝 표시 뒤의 말(설명 등)은 버린다.
+    """
+    raw = text or ""
+    done = False
+    intact = False
+    #: "파일 내용입니다:" 같은 말 한두 줄 뒤에 코드펜스로 시작하면 말은 버린다(코드처럼 보이는 줄은 건드리지 않는다)
+    prose = _PROSE_PREFIX.match(raw)
+    if prose and not path.lower().endswith(_DOC_SUFFIXES):
+        raw = raw[len(prose.group(1)):].lstrip(" \t") if raw[len(prose.group(1)):].lstrip().startswith("```") else raw
+    at = raw.find(END_MARKER)
+    if at >= 0:
+        raw, done = raw[:at], True
+    stripped = raw.strip()
+    if stripped.startswith("{") and is_wrapped(path, stripped):
+        try:
+            data = json.loads(stripped)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            intact = True
+            done = done or data.get("done") is True
+        inner = clean_content(path, stripped)
+        raw = inner if inner is not None else ""
+        if END_MARKER in raw:
+            raw, done = raw[: raw.find(END_MARKER)], True
+    else:
+        #: AI 가 습관적으로 감싼 코드펜스 — 여는 펜스를 벗겼을 때만 끝의 닫는 펜스도 벗긴다(문서 안의 펜스는 내용이다).
+        fenced = bool(re.match(r"\s*```[\w.+-]*[ \t]*\n", raw))
+        if fenced:
+            raw = re.sub(r"^\s*```[\w.+-]*[ \t]*\n", "", raw, count=1)
+            if done:
+                raw = re.sub(r"\n?```[ \t]*\s*$", "\n", raw)
+    if done and raw and not raw.endswith("\n"):
+        raw += "\n"
+    if done and raw.endswith("\n\n"):
+        raw = raw.rstrip("\n") + "\n"
+    return raw, done, intact
+
+
+_DOC_SUFFIXES = (".md", ".mdx", ".markdown", ".rst", ".txt", ".adoc")
+_CODE_SIGN = re.compile(r"\b(?:import|export|function|const|let|var|class|interface|type|enum|require\(|module\.exports)\b|=>|<[A-Za-z]")
+
+
+def implausible(path: str, content: str) -> str:
+    """받은 내용이 그 파일 종류로 보기 어려우면 이유(글자 그대로 받을 때 AI 의 말이 파일에 들어가는 것을 막는다)."""
+    low = str(path or "").lower()
+    body = (content or "").strip()
+    if not body:
+        return "내용이 비어 있음"
+    if low.endswith(".json"):
+        #: 문법 오류는 즉시 교정(바뀔 부분만)이 고친다 — 여기서는 JSON 으로 시작조차 안 하는 말만 걸러 낸다
+        return "" if body[:1] in "{[" else "JSON 으로 보이지 않음"
+    if low.endswith((".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte")) and not _CODE_SIGN.search(body):
+        return "코드로 보이지 않음"
+    if low.endswith((".css", ".scss", ".less")) and ("{" not in body or body.count("{") != body.count("}")):
+        return "스타일 규칙으로 보이지 않음"
+    if low.endswith((".html", ".htm")) and not re.search(r"<[A-Za-z!]", body):
+        return "HTML 로 보이지 않음"
+    return ""
+
+
+def fallback_doc(path: str, manifest: dict, ops: list[dict]) -> str:
+    """AI 가 끝내 못 쓴 문서를 설계와 이미 만든 파일에서 만든다 — 지어내지 않고 아는 사실만 적는다."""
+    summary = str(manifest.get("summary") or "").strip()
+    files = {str(op.get("file") or ""): str(op.get("content") or "") for op in ops}
+    env: list[str] = []
+    for name, text in files.items():
+        if name.lower().endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py")):
+            env += re.findall(r"process\.env\.([A-Z_][A-Z0-9_]*)", text)
+            env += re.findall(r"os\.(?:environ\.get|getenv)\(\s*['\"]([A-Z_][A-Z0-9_]*)['\"]", text)
+            env += re.findall(r"os\.environ\[\s*['\"]([A-Z_][A-Z0-9_]*)['\"]\s*\]", text)
+    env = sorted(set(env) - {"NODE_ENV", "PORT"}) + (["PORT"] if "PORT" in env else [])
+    scripts: dict[str, str] = {}
+    try:
+        pkg = json.loads(files.get("package.json") or "{}")
+        scripts = {k: str(v) for k, v in (pkg.get("scripts") or {}).items()} if isinstance(pkg, dict) else {}
+    except ValueError:
+        pass
+    title = summary or posixpath.basename(path)
+    out = [f"# {title}", "",
+           "> 이 문서는 AI 작성이 실패해 ReCoder 가 설계와 만들어진 파일에서 자동으로 만든 기본 문서입니다. 필요하면 내용을 보태세요.", ""]
+    if posixpath.basename(path).lower() not in ("readme.md", "readme.markdown", "readme.rst", "readme.txt"):
+        return "\n".join(out).rstrip() + "\n"
+    out += ["## 실행", ""]
+    if "package.json" in files:
+        out += ["```bash", "npm install"]
+        for k in ("build", "start"):
+            if k in scripts:
+                out.append(f"npm run {k}" if k != "start" else "npm start")
+        out += ["```", ""]
+    elif "requirements.txt" in files:
+        out += ["```bash", "pip install -r requirements.txt", "```", ""]
+    dockerfile = next((t for f, t in files.items() if posixpath.basename(f) == "Dockerfile"), None)
+    if dockerfile is not None:
+        port = re.search(r"^\s*EXPOSE\s+(\d+)", dockerfile, re.M | re.I)
+        publish = f" -p {port.group(1)}:{port.group(1)}" if port else ""
+        out += ["Docker 로 실행:", "", "```bash", "docker build -t app .", f"docker run --env-file .env{publish} app", "```", ""]
+    if env:
+        out += ["## 환경 변수", "", "실제 값은 `.env` 에만 두고 저장소에 올리지 마세요.", "", "```"]
+        out += [f"{name}=<{name}>" for name in env[:40]]
+        out += ["```", ""]
+    if scripts:
+        out += ["## 스크립트", ""] + [f"- `npm run {k}` — `{v}`" for k, v in list(scripts.items())[:12]] + [""]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _is_doc(path: str) -> bool:
+    """앱 동작에 필요 없는 문서인가 — 끝내 못 쓰면 설계로 기본 문서를 만든다(앱을 막지 않는다)."""
+    low = str(path or "").replace("\\", "/").lower()
+    return low.endswith(_DOC_SUFFIXES) and not low.startswith(("docs/adr/",)) and "/adr/" not in low
+
+
+def _doc_hint(path: str) -> str:
+    if not _is_doc(path):
+        return ""
+    return ("\n문서는 실행에 꼭 필요한 것만 짧게 씁니다: 무엇인지 한두 줄, 준비물, 설치·환경 변수 이름(값은 <자리표시>)·"
+            "DB 초기화·실행·Docker 명령. 각 항목은 몇 줄로, 긴 설명·예시 응답·전체 API 목록은 넣지 마세요.")
+
+
 #: code_agent._build_code_prompt 끝의 응답 형식 지시(ops JSON) 시작 문구. 설계·조각·교정 호출에서는 뺀다.
 OUTPUT_FORMAT_MARKER = "아래 JSON 형식으로만 응답하세요"
 
@@ -940,13 +1108,27 @@ def _part_context(written: str, limit: int = 40_000) -> str:
 
 
 def _strip_overlap(written: str, piece: str) -> str:
+    """이어 받은 조각에서 이미 쓴 줄을 걷어 낸다.
+
+    · 끝부분을 다시 쓴 경우(가장 흔함): 이미 쓴 마지막 줄들과 조각의 첫 줄들이 같으면 뺀다(최대 60줄).
+    · 처음부터 다시 쓴 경우: 조각이 이미 쓴 내용의 첫 줄들과 같게 시작하면, 이미 쓴 만큼을 줄 단위로 건너뛴다.
+    """
     if not written or not piece:
         return piece
-    tail = written.rstrip("\n").split("\n")[-8:]
     lines = piece.split("\n")
+    done_lines = written.rstrip("\n").split("\n")
+    norm = lambda xs: [x.rstrip() for x in xs]  # noqa: E731
+    #: 처음부터 다시 쓰기 — 첫 3줄(내용 있는 것)이 같으면 같은 만큼 건너뛴다
+    head = [x for x in norm(done_lines[:3])]
+    if len(done_lines) >= 3 and norm(lines[:3]) == head and any(h.strip() for h in head):
+        k = 0
+        while k < len(lines) and k < len(done_lines) and lines[k].rstrip() == done_lines[k].rstrip():
+            k += 1
+        return "\n".join(lines[k:])
+    tail = done_lines[-60:]
     for n in range(min(len(tail), len(lines)), 0, -1):
-        head = [line.rstrip() for line in lines[:n]]
-        if head == [line.rstrip() for line in tail[-n:]] and any(h.strip() for h in head):
+        h = norm(lines[:n])
+        if h == norm(tail[-n:]) and any(x.strip() for x in h):
             return "\n".join(lines[n:])
     return piece
 

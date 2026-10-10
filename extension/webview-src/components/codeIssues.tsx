@@ -101,3 +101,15 @@ export const UnusedFilesNote: React.FC<{
     </section>
   );
 };
+
+/** AI 가 끝내 못 써서 설계로 자동 작성한 문서 — 앱 동작과 무관, 내용을 보태면 된다. */
+export const FallbackDocsNote: React.FC<{ files?: string[] | null }> = ({ files }) => {
+  if (!files?.length) return null;
+  return (
+    <div role="status" data-testid="code-fallback-docs"
+      style={{ border: "1px solid rgba(204,167,0,.4)", background: "rgba(204,167,0,.06)", borderRadius: 6, padding: "6px 10px", margin: "0 0 8px", fontSize: 11, lineHeight: 1.5 }}>
+      자동 작성한 문서 {files.length}개 — AI 가 끝내 못 써서 설계·만든 파일로 기본 내용을 채웠습니다(앱 동작과 무관):{" "}
+      {files.map((f, i) => <code key={f} style={{ fontSize: 10.5 }}>{i ? ", " : ""}{f}</code>)}
+    </div>
+  );
+};

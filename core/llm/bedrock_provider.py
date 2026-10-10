@@ -460,9 +460,12 @@ class BedrockProvider(LLMProvider):
         system: Optional[str] = None,
         output_schema: Optional[dict] = None,
         *, max_tokens: int = 4096, temperature: float = 0.0,
+        raw: bool = False,
     ) -> dict[str, Any]:
         """
         Bedrock Converse API 비동기 호출.
+
+        raw=True: 글자 그대로 {"text", "truncated"} — 길이 한도에서 끊겨도 받은 만큼 돌려준다.
 
         Strategy
         --------
@@ -472,6 +475,13 @@ class BedrockProvider(LLMProvider):
 
         Returns parsed dict.
         """
+        if raw:
+            kwargs: dict[str, Any] = {"modelId": self._model_id, "messages": messages,
+                                      "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature}}
+            if system:
+                kwargs["system"] = [{"text": system}]
+            response = await self._invoke_sync(kwargs)
+            return {"text": self._extract_text(response), "truncated": response.get("stopReason") == "max_tokens"}
         if output_schema:
             try:
                 return await self._converse_structured(messages, system, output_schema, max_tokens=max_tokens, temperature=temperature)

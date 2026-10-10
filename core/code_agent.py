@@ -1920,7 +1920,8 @@ def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
         "package.json": f"root build/start/init-db scripts that invoke {client} and {server}; install both projects",
         "Dockerfile": f"multi-stage build of {client}; non-root {server} runtime serving the built frontend on one port",
         ".dockerignore": "exclude .env, credentials, node_modules, .git, tests, local artifacts",
-        "README.md": "exact installation, environment, migration, startup, container and payment provider setup instructions",
+        #: 짧게 — 길게 쓰라고 하면 응답 길이 한도를 매번 넘겨 생성이 README 에서 멈췄다(실기기 2026-10-10).
+        "README.md": "concise run guide: install, env var names with <placeholders>, DB init, start, Docker commands, payment mode note (a few lines each)",
     }
     return files + [{"file": p, "purpose": purpose} for p, purpose in required.items() if p not in paths]
 
@@ -2219,6 +2220,8 @@ def generate_code(
         print(f"[code_agent] 자동 교정 {len(autofix_notes)}건: {autofix_notes[:5]}", flush=True)
     #: 사용자가 [이 파일 빼고 결과 받기]를 고른 파일 — 빠진 채로 적용하면 그 파일을 쓰는 곳이 동작하지 않으므로 남은 문제로 보인다.
     skipped_files = [f for f in ((data or {}).get("skipped") or []) if isinstance(f, dict)] if isinstance(data, dict) else []
+    #: AI 가 끝내 못 써서 설계로 자동 작성한 문서 — 앱 동작과 무관하므로 경고로만 알린다.
+    fallback_docs = [f for f in ((data or {}).get("fallback_docs") or []) if isinstance(f, dict)] if isinstance(data, dict) else []
 
     def _issues_for(candidate_ops: list[dict]) -> list[dict]:
         found = _consistency_issues(root, target_folder, candidate_ops)
@@ -2439,6 +2442,8 @@ def generate_code(
     annotate_removals(ops_out, root, target_folder)
 
     summary = str(data.get("summary") or "코드를 생성했습니다.").strip()
+    if fallback_docs:
+        summary += "\n\n자동 작성한 문서: " + ", ".join(f.get("file", "") for f in fallback_docs) + " — AI 가 끝내 못 써서 설계에서 기본 내용으로 만들었습니다."
     if consistency:
         summary += "\n\n확인 필요: " + " / ".join(i["message"] for i in consistency[:3])
     result = {
@@ -2446,6 +2451,7 @@ def generate_code(
         "consistency_issues": consistency,
         #: 아무도 쓰지 않는 생성 파일 — 확장이 "모두 적용" 에서 기본으로 뺀다(사용자가 포함할 수 있음).
         "skipped_files": [f.get("file") for f in skipped_files],
+        "fallback_docs": [f.get("file") for f in fallback_docs],
         "unused_files": [{"file": u["file"], "consumers": u.get("consumers", [])} for u in unused
                          if any(op.get("file") == u["file"] for op in ops_out)],
         "verification": verification,

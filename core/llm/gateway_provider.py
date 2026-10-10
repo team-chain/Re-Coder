@@ -93,11 +93,15 @@ class GatewayProvider(LLMProvider):
             return ""
 
     # ── BedrockProvider 호환 async converse ─────────────────────────
-    async def converse(self, messages, system=None, output_schema=None, *, max_tokens=4096, temperature=0.0) -> dict:
+    async def converse(self, messages, system=None, output_schema=None, *, max_tokens=4096, temperature=0.0,
+                       raw: bool = False) -> dict:
         loop = asyncio.get_running_loop()
         payload = {"messages": messages, "system": system or "",
-                   "output_schema": output_schema, "max_tokens": max_tokens, "temperature": temperature}
+                   "output_schema": None if raw else output_schema, "max_tokens": max_tokens, "temperature": temperature}
         result = await loop.run_in_executor(None, self._post, payload)
+        if raw:
+            #: 글자 그대로 — 끊겨도 받은 만큼 돌려준다(이어 쓰기는 호출자가 한다).
+            return {"text": str(result.get("text") or ""), "truncated": self._looks_truncated(result, max_tokens)}
         self._require_complete(result, max_tokens, structured=output_schema is not None)
         if output_schema is not None and isinstance(result.get("parsed"), dict):
             return result["parsed"]
@@ -121,6 +125,18 @@ class GatewayProvider(LLMProvider):
             output_tokens=int(result.get("output_tokens", 0)),
             token_source="gateway",
         )
+
+    @staticmethod
+    def _looks_truncated(result: dict, max_tokens: int | None) -> bool:
+        """응답이 길이 한도에서 끊겼는가(stop_reason 이 없으면 쓴 토큰이 상한에 닿았는지로 추정)."""
+        reason = str(result.get("stop_reason") or result.get("stopReason") or "").lower()
+        if reason:
+            return reason in {"max_tokens", "length"}
+        try:
+            cap = min(int(max_tokens or 0), gateway_output_cap())
+            return cap > 0 and int(result.get("output_tokens") or 0) >= cap - 8
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     def _require_complete(result: dict, max_tokens: int | None = None, structured: bool = True) -> None:

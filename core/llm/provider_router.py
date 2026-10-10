@@ -361,6 +361,9 @@ class LLMProviderRouter:
 
         provider = self._bedrock_haiku if prefer == "fast" else self._bedrock_sonnet
         schema = getattr(request, "json_schema", None)
+        raw = bool(getattr(request, "raw_text", False))
+        if raw:
+            schema = None
         system = (getattr(request, "system", "") or "").strip()
         prompt = f"{system}\n\n{request.prompt}" if system else request.prompt
 
@@ -382,6 +385,7 @@ class LLMProviderRouter:
                 result = await provider.converse(
                     messages, output_schema=schema,
                     max_tokens=request.max_tokens, temperature=request.temperature,
+                    **({"raw": True} if raw else {}),
                 )
                 br.record_success()
             except Exception as exc:
@@ -407,7 +411,7 @@ class LLMProviderRouter:
             used_provider, used_model = "gemini", "gemini-2.5-flash"
             result = await self._fallback(
                 prompt, schema, primary_error, max_tokens=request.max_tokens,
-                temperature=request.temperature,
+                temperature=request.temperature, **({"raw": True} if raw else {}),
             )
 
         latency = int((time.monotonic() - start) * 1000)
@@ -422,7 +426,11 @@ class LLMProviderRouter:
 
         #: 레거시 호출자는 .text 에서 JSON 을 뽑는다. converse 는 파싱된 dict 를
         #: 주므로 되돌려 직렬화한다. {"text": ...} 한 장짜리는 원문 그대로.
-        if isinstance(result, dict) and len(result) == 1 and ("text" in result or "raw_response" in result):
+        truncated = None
+        if raw and isinstance(result, dict):
+            text = str(result.get("text") or "")
+            truncated = result.get("truncated")
+        elif isinstance(result, dict) and len(result) == 1 and ("text" in result or "raw_response" in result):
             text = str(result.get("text", result.get("raw_response", "")))
         else:
             import json as _json
@@ -437,6 +445,8 @@ class LLMProviderRouter:
             fallback_used=fallback,
             retry_count=retry,
         )
+        if truncated is not None:
+            resp.metadata["truncated"] = bool(truncated)
         resp.metadata["llm_call_record"] = {
             "call_id": record.call_id,
             "estimated_cost_usd": record.estimated_cost_usd,

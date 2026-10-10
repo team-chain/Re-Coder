@@ -113,9 +113,9 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
         : `${LAYER_TEXT[l] ?? "다음 단계"} ${count}개 — ${event.agents ?? "여러"}명이 동시에 만듭니다` };
     }
     case "file_start": return event.file ? { who, role, text: `${event.file} 작성 시작` } : null;
-    case "file_split": return event.file ? { who, role, text: msg.includes("이어 쓰기를 이어서")
-      ? `${base(event.file)} 쓰던 조각에 이어서 씁니다`
-      : `${base(event.file)} 가 커서 ${event.lines || 150}줄씩 이어 씁니다` } : null;
+    case "file_split": return event.file ? { who, role, text: /쓰던 (내용|조각)에 이어서|이어 쓰기를 이어서/.test(msg)
+      ? `${base(event.file)} 쓰던 내용에 이어서 씁니다`
+      : `${base(event.file)} 이(가) 길어 끊기는 만큼 이어 받습니다${/맥락을 줄여/.test(msg) ? " (맥락을 줄여서)" : ""}` } : null;
     case "fixing": return { who, role, tone: "warn", text: `자동 검사에서 문제 발견 → 고치는 중${msg.includes("—") ? ` (${msg.split("—").slice(1).join("—").trim().slice(0, 60)})` : ""}` };
     case "verified": return event.file ? { who, role, tone: "ok", text: `${base(event.file)} 고친 뒤 확인 통과` } : null;
     case "verify_failed": return { who, role, tone: "warn", text: msg ? `확인 필요 — ${msg.slice(0, 80)}` : "확인 필요" };
@@ -123,6 +123,7 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
     case "retry": return { who, role, tone: "warn", text: msg || `일시적 오류 — ${event.seconds ?? "잠시"}초 뒤 다시 시도` };
     case "part_retry": case "file_retry": return { who, role, tone: "warn", text: msg || `${base(event.file)} — 방법을 바꿔 다시 씁니다` };
     case "file_failed": return { who, role, tone: "warn", text: msg || `${base(event.file)} — 만들지 못함` };
+    case "file_fallback": return { who, role, tone: "warn", text: msg || `${base(event.file)} — 설계로 기본 문서를 자동 작성` };
     case "paused": return { who: "", role: "system", tone: "warn", text: msg || "멈춤" };
     case "waiting": return { who, role, tone: "warn", text: msg || `분당 호출 한도 — ${event.seconds ?? "잠시"}초 대기` };
     case "generated": case "consistency": return { who: "검토", role: "review", text: msg || "전체 점검 — 컨테이너 빌드로 확인" };

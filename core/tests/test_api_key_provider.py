@@ -237,3 +237,36 @@ def test_credit_exhaustion_is_reported_as_quota_not_bad_request(env, provider, s
         assert len(server.requests) == 1
     finally:
         server.close()
+
+
+def test_글자_그대로_받기는_JSON_을_뽑지_않고_끊겨도_받은_만큼_돌려준다(env):
+    """긴 파일을 이어 받는 생성 엔진용 — package.json 내용이 dict 로 바뀌거나 끊김이 오류가 되면 안 된다."""
+    pkg = '{"name": "shop",\n  "scripts": {"start": "node s.js"}}'
+    server = _Server(lambda body, n: (200, {"content": [{"type": "text", "text": pkg}], "stop_reason": "max_tokens"}))
+    try:
+        _use(env, "anthropic", server)
+        out = asyncio.run(akp.ApiKeyProvider("anthropic").converse([{"role": "user", "content": [{"text": "x"}]}], raw=True))
+        assert out == {"text": pkg, "truncated": True}
+        assert "tools" not in server.requests[0]["body"]
+    finally:
+        server.close()
+    server = _Server(lambda body, n: (200, {"choices": [{"finish_reason": "stop", "message": {"content": "a{}\n"}}]}))
+    try:
+        _use(env, "openai", server)
+        env.setenv("RECODER_OPENAI_MODEL", "gpt-4.1")
+        out = asyncio.run(akp.ApiKeyProvider("openai", akp.model_for("openai")).converse([{"role": "user", "content": [{"text": "x"}]}], raw=True))
+        assert out == {"text": "a{}\n", "truncated": False}
+    finally:
+        server.close()
+
+
+def test_라우터는_글자_그대로_요청이면_원문과_끊김_여부를_돌려준다(env):
+    pkg = '{"name": "shop"}'
+    server = _Server(lambda body, n: (200, {"content": [{"type": "text", "text": pkg}], "stop_reason": "max_tokens"}))
+    try:
+        _use(env, "anthropic", server)
+        router = pr_mod.LLMProviderRouter()
+        resp = asyncio.run(router.call_llm(LLMRequest(prompt="x", max_tokens=8192, raw_text=True), agent="t", operation="o"))
+        assert resp.text == pkg and resp.metadata["truncated"] is True
+    finally:
+        server.close()

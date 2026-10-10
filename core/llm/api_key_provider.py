@@ -226,12 +226,25 @@ class ApiKeyProvider(LLMProvider):
         return _parse_json_text(text), text, *tokens
 
     # ── BedrockProvider 호환 async converse ──────────────────────────
-    async def converse(self, messages, system=None, output_schema=None, *, max_tokens=4096, temperature=0.0) -> dict:
-        payload = self._payload(messages, system, output_schema, max_tokens)
+    async def converse(self, messages, system=None, output_schema=None, *, max_tokens=4096, temperature=0.0,
+                       raw: bool = False) -> dict:
+        payload = self._payload(messages, system, None if raw else output_schema, max_tokens)
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, self._post, payload)
+        if raw:
+            return self._raw_text(result)
         parsed, _text, _i, _o = self._parse(result, output_schema)
         return parsed
+
+    def _raw_text(self, result: dict) -> dict:
+        """글자 그대로 + 끊김 여부(JSON 추출·잘림 오류 없음)."""
+        if self._provider == "anthropic":
+            blocks = result.get("content") or []
+            text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+            return {"text": text, "truncated": result.get("stop_reason") == "max_tokens"}
+        choice = (result.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        return {"text": message.get("content") or "", "truncated": choice.get("finish_reason") == "length"}
 
     def call(self, request: LLMRequest) -> LLMResponse:
         messages = [{"role": "user", "content": [{"text": request.prompt}]}]

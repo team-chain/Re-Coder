@@ -230,6 +230,7 @@ class GeminiProvider(LLMProvider):
         prompt: str,
         schema: Optional[dict] = None,
         *, max_tokens: int = 4096, temperature: float = 0.0,
+        raw: bool = False,
     ) -> dict[str, Any]:
         """
         Gemini Flash 비동기 호출 (legacy google-generativeai SDK).
@@ -246,7 +247,7 @@ class GeminiProvider(LLMProvider):
                 "google-generativeai."
             )
 
-        full_prompt = self._build_prompt(prompt, schema)
+        full_prompt = prompt if raw else self._build_prompt(prompt, schema)
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None, lambda: self._model.generate_content(full_prompt, generation_config={
@@ -254,6 +255,8 @@ class GeminiProvider(LLMProvider):
             })
         )
         text = response.text if hasattr(response, "text") else str(response)
+        if raw:
+            return {"text": text, "truncated": False}
         return self._parse_json(text)
 
     async def validate_access(self) -> bool:

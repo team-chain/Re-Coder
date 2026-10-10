@@ -1,3 +1,12 @@
+# 대규모 생성 — 글자 그대로 이어 받기(응답 길이 한도에 막히지 않게) (2026-10-10, 2.0.5)
+
+- 실기기: README.md 가 150→80→40줄 지시에도 매번 4096 토큰 한도에서 잘림(호출마다 ~22초 = 한도까지 씀) → 3번 실패 → [다시 쓰기]는 같은 40줄 방법을 반복해 바로 다시 실패. 잘린 JSON 응답은 통째로 버려 진행 0.
+- `LLMRequest.raw_text` — gateway·api_key(anthropic/openai)·bedrock·gemini `converse(raw=True)` 가 JSON 추출·잘림 오류 없이 `{"text", "truncated"}`, `provider_router` 가 `resp.metadata["truncated"]`.
+- `gen_engine.write_in_parts` 를 글자 그대로 이어 받기로 바꿈: 첫 요청/이어 쓰기 프롬프트(`END_MARKER`), `_stream_piece`(끝 표시·JSON 감싸기{content,done}/ops·말머리·코드펜스), 끊김(공급자 표시, 모르면 `STREAM_CUT_GUESS`자 이상)이면 마지막 불완전한 줄만 버림, `_strip_overlap`(끝 60줄 겹침 + 처음부터 다시 쓰기), 끊기지 않았는데 늘어난 게 없으면 다 쓴 것으로 봄, 진행 없음 3번이면 CodeOutputError. 로그 `kind=stream` 한 줄씩(받은·늘어난 글자·끝/끊김).
+- 방법 단계(`STRATEGY_TEXT`): 한 번에(size=large 면 건너뜀) → 글자 그대로 이어 받기 → 맥락을 줄여(완성 파일 본문 없이) 처음부터. 받은 내용 `implausible()`(코드·CSS·HTML·JSON 으로 보이지 않으면) → 실패로 세고 다음 방법.
+- 문서(`_is_doc`, ADR 제외)는 끝내 실패하면 `fallback_doc()`(요약·npm 스크립트·Dockerfile EXPOSE·process.env 이름, 지어내지 않음)로 완료, `fallback_docs` → 결과 `FallbackDocsNote`. 설계 스키마 files[].size, README 목적 문구 축소, 문서는 `_doc_hint` 로 짧게.
+- 검증: Core 2,510개·확장 554개(RAG 포함). 가짜 게이트웨이를 "줄 수 무시·매번 한도까지·끝 줄 중간 끊김·앞 5줄 다시 쓰기"로 바꿔 code-server 팀 생성 — service.js(840줄)·README(520줄)가 원본과 글자까지 같게 완성. 응답이 AI 의 말뿐이면 3가지 방법 뒤 실패 패널 → [다시 쓰기](맥락 줄여서) 완료.
+
 # 대규모 생성 — 망가진 조각·무한 이어 만들기 방지 (2026-10-10, 2.0.4)
 
 - 실기기(사용자 체크포인트 3f89c434c07345af): 45/51 에서 [이어서 만들기] 가 매번 약 80초 뒤 같은 자리로 멈췄다. `partial["client/src/styles/pages.css"].written` 이 CSS 가 아니라 ops JSON 전체(1조각), 이어 만들 때마다 2번째 조각이 실패했고, 같은 묶음의 App.css 는 `_gen_batch` 가 한꺼번에 돌려주는 구조라 매번 버려졌다. 로그에는 원인이 남지 않았다.

@@ -145,7 +145,10 @@ test('재시도·실패·멈춤은 진행 기록에 이유와 함께 남고, 실
  assert.match(src,/skipFailed: true/);assert.match(src,/<PausePanel standalone/);
 });
 
-test('나눠 쓰기 기록은 실제 조각 크기를 쓴다(다시 쓰기는 40줄)',()=>{
- assert.equal(recordOf({step:'file_split',agent:'agent-1',file:'src/a.js',lines:40,message:'src/a.js 이(가) 커서 40줄씩 나눠 씁니다'},[]).text,'a.js 가 커서 40줄씩 이어 씁니다');
- assert.equal(recordOf({step:'file_split',agent:'agent-1',file:'src/a.js',lines:150,message:'src/a.js 이어 쓰기를 이어서 합니다'},[]).text,'a.js 쓰던 조각에 이어서 씁니다');
+test('이어 받기 기록 — 새로 받기·이어서·맥락 줄이기·자동 작성 문서',()=>{
+ assert.equal(recordOf({step:'file_split',agent:'agent-1',file:'src/a.js',message:'src/a.js 을(를) 글자 그대로 이어 받습니다'},[]).text,'a.js 이(가) 길어 끊기는 만큼 이어 받습니다');
+ assert.equal(recordOf({step:'file_split',agent:'agent-1',file:'src/a.js',message:'src/a.js 을(를) 글자 그대로 이어 받습니다 (맥락을 줄여서)'},[]).text,'a.js 이(가) 길어 끊기는 만큼 이어 받습니다 (맥락을 줄여서)');
+ assert.equal(recordOf({step:'file_split',agent:'agent-1',file:'src/a.js',message:'src/a.js 쓰던 내용에 이어서 씁니다'},[]).text,'a.js 쓰던 내용에 이어서 씁니다');
+ const r=recordOf({step:'file_fallback',agent:'agent-4',file:'README.md',message:'README.md — AI 가 끝내 못 써서 설계로 기본 문서를 자동 작성했습니다'},[]);
+ assert.equal(r.tone,'warn');assert.match(r.text,/자동 작성/);
 });

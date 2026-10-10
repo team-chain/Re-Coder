@@ -30,3 +30,10 @@ test('데모를 못 쓰는 앱은 왜 못 쓰는지와 방법을 보여 준다',
   demo:{available:false,enabled:false,label:'',note:'',unavailable_reason:'이 앱 코드에는 모의 결제 모드가 없어 Stripe 키 없이는 시작할 수 없습니다.'},onSave(){},onDemo(){}}));
  assert.match(html,/data-testid="demo-unavailable"/);assert.match(html,/모의 결제 모드가 없어/);assert.doesNotMatch(html,/demo-button/);
 });
+
+test('자동 작성한 문서는 결과에 알린다',()=>{
+ const {FallbackDocsNote}=require('../out/webview-test/components/codeIssues');
+ const html=renderToStaticMarkup(React.createElement(FallbackDocsNote,{files:['README.md']}));
+ assert.match(html,/자동 작성한 문서 1개/);assert.match(html,/README\.md/);
+ assert.equal(renderToStaticMarkup(React.createElement(FallbackDocsNote,{files:[]})),'');
+});

@@ -173,7 +173,7 @@ def test_파일_하나가_한도를_넘으면_나눠서_이어_쓴다(monkeypatc
     assert router.ops.count("generate_code_file_part") == 3
     # 이어 쓸 때는 지금까지 쓴 내용과 파일 사이의 약속을 함께 보낸다.
     assert "const b = 2;" in router.part_prompts[1] and MANIFEST["contracts"] in router.part_prompts[1]
-    assert "const a = 1;" not in router.part_prompts[0].split("**최대")[1]
+    assert "지금까지 쓴 내용" not in router.part_prompts[0] and "const a = 1;" not in router.part_prompts[0]  # 첫 요청에는 쓴 내용이 없다
 
 
 def test_이어_쓰기가_진행되지_않으면_멈추고_이어서_만들_수_있게_남긴다(monkeypatch, tmp_path):
