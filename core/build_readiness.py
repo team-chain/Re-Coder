@@ -49,7 +49,7 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER", "DOCKERFILE_RUNTIME_BROKEN",
                 "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING", "NODE_PRISMA_CLI_MISSING",
                 "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
-                "NODE_TAILWIND_SELF_APPLY"}
+                "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
 FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
@@ -58,7 +58,7 @@ FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_
                     "DOCKERFILE_RUNTIME_BROKEN", "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER",
                     "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING", "NODE_PRISMA_CLI_MISSING",
                     "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
-                    "NODE_TAILWIND_SELF_APPLY")
+                    "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -389,7 +389,8 @@ def _start_entry(scripts: dict, files: "Optional[ProjectFiles]" = None, _base: s
 
 
 def _declare_known(files: "ProjectFiles", manifest: str, names: list[str]) -> Optional[str]:
-    """선언 안 된 패키지를 package.json 에 넣은 내용 — 모두 검증된 버전을 알고 lock 파일이 없을 때만(아니면 None)."""
+    """선언 안 된 패키지를 package.json 에 넣은 내용 — 버전을 확인한 것(검증된 표·레지스트리)만, lock 파일이 없을 때.
+    하나도 확인하지 못하면 None. 일부만 넣었으면 나머지는 다시 점검할 때 그대로 문제로 남는다."""
     try:
         import node_manifests
     except ImportError:  # pragma: no cover
@@ -397,7 +398,7 @@ def _declare_known(files: "ProjectFiles", manifest: str, names: list[str]) -> Op
     folder = posixpath.dirname(manifest)
     if any(files.exists(posixpath.join(folder, n)) for n in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml")):
         return None
-    if not names or any(n not in node_manifests.KNOWN_VERSIONS for n in names):
+    if not names:
         return None
     raw = files.read(manifest)
     try:
@@ -409,8 +410,14 @@ def _declare_known(files: "ProjectFiles", manifest: str, names: list[str]) -> Op
     deps = dict(pkg.get("dependencies") or {}) if isinstance(pkg.get("dependencies") or {}, dict) else None
     if deps is None:
         return None
+    added = 0
     for n in names:
-        deps.setdefault(n, node_manifests.KNOWN_VERSIONS[n])
+        version = None if n in deps else node_manifests.version_for(n)
+        if version:
+            deps[n] = version
+            added += 1
+    if not added:
+        return None  # 버전을 하나도 확인하지 못했다 — 지어내지 않는다
     pkg["dependencies"] = dict(sorted(deps.items()))
     newline = "\r\n" if "\r\n" in (raw or "") else "\n"
     return json.dumps(pkg, ensure_ascii=False, indent=2).replace("\n", newline) + newline
@@ -2290,7 +2297,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         result.issues.append(ReadinessIssue(
             "NODE_UNDECLARED_DEPENDENCY", ERROR,
             f"코드가 불러오는 패키지가 {manifest} 에 없습니다: {shown}. 컨테이너에는 선언된 패키지만 설치됩니다.",
-            (f"{manifest} 의 dependencies 에 추가하세요(자동 수정 가능 — 검증된 버전)." if added else
+            (f"{manifest} 의 dependencies 에 추가하세요(자동 수정 가능 — 검증된 버전 또는 레지스트리 최신 정식 버전)." if added else
              f"{where} {' '.join(names[:6])}` 로 의존성에 추가하세요."), missing[names[0]], bool(added)))
 
     _analyze_js_sources(files, result, manifests, owner, undeclared)
@@ -2410,6 +2417,14 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "; ".join(self_apply[:2]) + ". Tailwind 가 \"circular dependency\" 로 화면 빌드를 멈춥니다.",
                 "같은 이름의 유틸리티는 Tailwind 가 이미 만들어 주므로 그 규칙을 지우세요(자동 수정 가능 — 화면 모양은 같음).",
                 sorted(self_apply_writes)[0], True))
+        esm_notes, esm_writes = node_fixups.esm_import_extensions(files)
+        if esm_writes:
+            writes["NODE_ESM_IMPORT_EXTENSION"] = esm_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_ESM_IMPORT_EXTENSION", ERROR,
+                f"ESM(NodeNext) 서버의 상대 import 에 확장자가 없습니다({len(esm_writes)}개 파일). tsc 가 TS2834/TS2835 로 멈추고, "
+                "빌드되더라도 Node 가 ERR_MODULE_NOT_FOUND 로 시작하지 못합니다.",
+                "원본 파일에 맞게 '.js'(폴더면 '/index.js')를 붙이세요(자동 수정 가능 — 동작은 같음).", sorted(esm_writes)[0], True))
         safe_notes, safe_writes = node_fixups.ts_safe_rewrites(files)
         if safe_writes:
             #: 문제로 띄우지 않는다(실행 동작은 그대로, tsc 만 막히는 모양) — 생성 직후·배포 직전 자동 수정이 조용히 고친다.

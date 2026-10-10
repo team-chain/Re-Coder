@@ -31,7 +31,16 @@ export function ApprovalCard({ plan, onApprove, onCancel, onFix }: { plan: Plan;
     </dl>
     {plan.preflight.summary && <p className="rc-muted">{plan.preflight.summary}</p>}
     {plan.targetState?.warnings.map((warning,i)=><p className="rc-note" key={i}>{warning}</p>)}
-    {[...(plan.preflight.reasons||[]),...(plan.preflight.warnings||[])].map((issue,i)=><div className="rc-finding" key={`${issue.code}-${i}`}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button onClick={()=>onFix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}
+    {/* 막는 문제와 참고 경고를 나눠 보여 준다 — 예전엔 한 목록이라 무엇 때문에 승인 버튼이 꺼졌는지 알 수 없었다(실기기 ECS). */}
+    {plan.preflight.blocked && (plan.preflight.reasons||[]).length > 0 && <section className="rc-blockers" aria-label="배포를 막는 문제">
+      <h4>배포를 막는 문제 {(plan.preflight.reasons||[]).length}건 — 해결해야 승인할 수 있습니다</h4>
+      {(plan.preflight.reasons||[]).map((issue,i)=><div className="rc-finding rc-finding-block" key={`b-${issue.code}-${i}`}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button onClick={()=>onFix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}
+      <p className="rc-muted">개발 화면의 [배포 준비 점검]에서 자동 수정할 수 있는 항목은 한 번에 고칠 수 있습니다.</p>
+    </section>}
+    {(plan.preflight.warnings||[]).length > 0 && <details className="rc-warnings" open={!plan.preflight.blocked}><summary>참고 {(plan.preflight.warnings||[]).length}건 — 배포를 막지 않습니다</summary>
+      {(plan.preflight.warnings||[]).map((issue,i)=><div className="rc-finding" key={`w-${issue.code}-${i}`}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button onClick={()=>onFix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}
+    </details>}
+    {!plan.preflight.blocked && (plan.preflight.reasons||[]).map((issue,i)=><div className="rc-finding" key={`r-${issue.code}-${i}`}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button onClick={()=>onFix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}
     {warning&&<div className="rc-note"><p>현재 연결 리전({plan.coreRegion})과 배포 리전({c.aws_region})이 다릅니다. 선택한 배포 리전을 확인하고 아래 항목을 체크하세요.</p><Checkbox tone="warn" checked={ack} onChange={setAck} label="이 리전으로 배포하는 것을 확인했습니다."/></div>}
     <p className="rc-muted">승인 후 기존 보안·정책 검사를 거칩니다. 검사 미실행과 통과는 구분되며 서버의 차단 판정을 우회하지 않습니다.</p>
     <div className="rc-actions"><button className="rc-primary" disabled={plan.preflight.blocked || Boolean(warning&&!ack)} onClick={onApprove}>{c.target==='github' ? '승인하고 푸시' : '승인하고 배포'}</button><button onClick={onCancel}>취소</button></div>

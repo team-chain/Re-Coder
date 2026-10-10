@@ -1219,3 +1219,60 @@ def tailwind_self_apply(files) -> tuple[list[str], dict[str, str]]:
             writes[rel] = new
             notes.append(f"{rel}: Tailwind 유틸리티를 자기 자신으로 다시 정의({', '.join(names[:4])})")
     return notes, writes
+
+
+# ── 20) ESM(NodeNext) 서버의 확장자 없는 상대 import ───────────────────────────────
+
+_REL_SPEC = re.compile(r"""(\bfrom\s*|\bimport\s*\(\s*|^\s*import\s*)(['"])(\.{1,2}/[^'"]+)\2""", re.MULTILINE)
+_HAS_EXT = re.compile(r"\.(m?js|cjs|jsx|json|css|scss|svg|png|jpe?g|gif|webp|wasm|node|txt|html)$", re.I)
+
+
+def esm_import_extensions(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — package.json 이 "type": "module" 이고 tsconfig 가 module/moduleResolution
+    NodeNext·Node16 인 TypeScript 서버에서 `import { x } from '../db/client'` 처럼 확장자가 없으면 tsc 가
+    TS2834/TS2835 로 멈추고, 빌드가 되더라도 Node 가 ERR_MODULE_NOT_FOUND 로 시작하지 못한다.
+    원본이 x.ts 면 './x.js', 폴더(x/index.ts)면 './x/index.js' 로 적는다(컴파일된 결과가 실제로 그 이름이다).
+    실기기(2.0.9 쇼핑몰 Haiku): 서버 빌드 오류의 절반이 이것이었다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    all_files = list(files.files())
+    for cfg_path in all_files:
+        if posixpath.basename(cfg_path) != "tsconfig.json" or "/node_modules/" in f"/{cfg_path}":
+            continue
+        folder = posixpath.dirname(cfg_path)
+        cfg = load_jsonc(files.read(cfg_path)) or {}
+        opts = cfg.get("compilerOptions") if isinstance(cfg.get("compilerOptions"), dict) else {}
+        mode = {str(opts.get("module") or "").lower(), str(opts.get("moduleResolution") or "").lower()}
+        if not mode & {"nodenext", "node16"}:
+            continue
+        pkg = load_jsonc(files.read(posixpath.join(folder, "package.json") if folder else "package.json")) or {}
+        if pkg.get("type") != "module":
+            continue
+        prefix = f"{folder}/" if folder else ""
+        for rel in all_files:
+            if not rel.startswith(prefix) or not rel.endswith((".ts", ".tsx", ".mts")) or rel.endswith(".d.ts") \
+                    or "/node_modules/" in f"/{rel}" or "/dist/" in f"/{rel}":
+                continue
+            text = files.read(rel) or ""
+            here = posixpath.dirname(rel)
+
+            def fix(m: re.Match) -> str:
+                spec = m.group(3)
+                if _HAS_EXT.search(spec.split("?")[0]):
+                    return m.group(0)
+                base = posixpath.normpath(posixpath.join(here, spec))
+                if any(files.exists(base + e) for e in (".ts", ".tsx")):
+                    new = spec + ".js"
+                elif files.exists(base + ".mts"):
+                    new = spec + ".mjs"
+                elif any(files.exists(f"{base}/index{e}") for e in (".ts", ".tsx")):
+                    new = spec.rstrip("/") + "/index.js"
+                else:
+                    return m.group(0)  # 없는 파일 — 다른 점검(NODE_LOCAL_IMPORT_MISSING)이 다룬다
+                return f"{m.group(1)}{m.group(2)}{new}{m.group(2)}"
+
+            new_text = _REL_SPEC.sub(fix, text)
+            if new_text != text:
+                writes[rel] = new_text
+                notes.append(f"{rel}: 상대 import 에 .js 확장자(ESM NodeNext)")
+    return notes, writes

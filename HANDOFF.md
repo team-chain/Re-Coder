@@ -1,3 +1,12 @@
+# 설계 빠진 파일 → 빌드 실패 — 설계 검토·빠진 파일 마저 만들기 (2026-10-10, 2.0.10)
+
+- 실기기 2.0.9 쇼핑몰(job c356ecab736c46e7, Haiku 4.5, 빈 TEMP): 설계 65개 중 서버 10개(유틸·헬스·업로드·재고·결제 모듈)뿐 — server.ts·db/client·middleware/auth·utils/errors·상품/주문/인증/장바구니 라우트·schema.prisma 없음. 약속이 길어(22.8k) 목록을 페이지로 받다 AI 가 more=false 로 일찍 끝낸 것으로 보임. 남은 문제: 없는 import 3파일, 미선언 패키지(@aws-sdk/client-s3·presigner·multer — 표에 없는 게 섞여 전부 안 넣음), NodeNext 확장자(TS2834/2835), 결제 웹훅·결제 시작 미연결(진입점 없음), validation.ts unknown 타입. ECS 승인 버튼은 이 오류들 때문에 막힘(정상) — 단 막는 이유가 경고와 섞여 보였음.
+- `gen_engine`: `plan_gaps`(uses 닫힘·서버 진입점·약속 /api/<묶음> 라우트·Prisma 스키마/클라이언트·화면 진입점, 디스크에 있으면 안 더함) + `_review_plan`(검토 에이전트 `review_code_manifest`, agent=review, 새 앱이거나 12파일 이상, 최대 2회, 실패는 건너뜀 — 한도·인증 오류만 올림) → `plan_added` 이벤트. `missing_local_imports`(상대 import 해석: `./x.js`→x.ts, 폴더 index, 자원 제외, 이름·기본 내보내기·네임스페이스 멤버) + `_fill_missing_imports`(run 끝, 최대 3회, 새 파일 entry.importers → `_dependency_context` 가 불러오는 쪽 전체 코드를 보여 줌). `fill_missing_files`: 전체 점검 중 NODE_LOCAL_IMPORT_MISSING 이면 edit 교정 대신 만들기(code_agent). run 결과 data 에 contracts.
+- 결정적: `node_fixups.esm_import_extensions`(NODE_ESM_IMPORT_EXTENSION, type module + NodeNext/Node16), `_declare_known` 일부만이라도·`node_manifests.version_for`(표 → 레지스트리 ^최신 정식, 없으면 넣지 않음). 테스트는 conftest 가 레지스트리 조회를 끔.
+- 배포: ApprovalCard 막는 문제/참고 분리, canvas.read_target ClusterNotFoundException → exists False.
+- 검증(sandbox): 실기기 결과물에 새 교정 → 확장자 3파일·패키지 3개 자동 수정, 빠진 3파일을 넣으면 tsc 남은 오류는 Prisma generate 전 타입(검증 빌드가 generate)·validation unknown(AI 교정 대상)뿐. 엔진 흉내 테스트: 검토가 라우트 추가·진입점 결정적 추가·없는 오류 유틸을 불러오는 코드를 보며 생성. Core 2,577.
+- 못 한 것: 실제 AI 로 새로 생성(이 환경에 모델 없음) — 실기기에서 같은 요청으로 확인 필요.
+
 # 개발 단계 어긋남·공통 기반 1명 — 생성 순서 재설계 (2026-10-10, 2.0.9)
 
 - 실기기 2.0.8 카페(job c395e3a96baa4573): 빌드 오류 "2 → 36" 으로 교정 멈춤 — 화면 빌드가 먼저 실패해 서버 오류가 숨어 있었다. 남은 16건 대부분이 화면이 컴포넌트·훅과 다르게 씀(ErrorAlert onClose 필수 10곳, UseCartReturn total, CartContextType setItems). 원인: 계층(layer) 단위로 화면·컴포넌트를 동시에 쓰고, 맥락은 목록 앞 파일 64k(서버 파일)라 화면이 컴포넌트를 못 봄. 공통 기반은 1명 순차.

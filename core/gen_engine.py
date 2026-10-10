@@ -326,8 +326,11 @@ class LargeGeneration:
                  job_id: str = "", fingerprint: str = "", concurrency: int | None = None,
                  emit: Callable[[dict], None] | None = None, limiter: RateLimiter | None = None,
                  security_review: bool = True, skip_failed: bool = False,
-                 plan_hook: Callable[[list[dict]], tuple[list[dict], list[dict], str]] | None = None) -> None:
+                 plan_hook: Callable[[list[dict]], tuple[list[dict], list[dict], str]] | None = None,
+                 root: str = "") -> None:
         self.prompt = prompt
+        #: 프로젝트 루트(디스크) — 기존 프로젝트에 더할 때 이미 있는 파일을 "없는 파일"로 보지 않게.
+        self.root = root
         #: 설계 직후 목록을 고치고 고정 파일을 미리 넣는다(결제 모듈 등) → (새 목록, 미리 만든 ops, 약속에 붙일 글).
         self.plan_hook = plan_hook
         #: 응답 형식(ops JSON) 지시를 뺀 맥락 — 설계·조각·교정 호출은 각자 다른 형식으로 답해야 하므로
@@ -586,6 +589,7 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         for f in files:
             if not isinstance(f.get("layer"), int) or f["layer"] not in (0, 1, 2):
                 f["layer"] = _guess_layer(f["file"])
+        files = self._complete_plan(files, manifest)
         fixed_ops: list[dict] = []
         if self.plan_hook:
             try:
@@ -607,6 +611,119 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
             #: ReCoder 가 넣은 고정 파일(결제 모듈) — AI 가 쓰지 않으므로 바로 완료로 알린다(목록에 대기로 남지 않게).
             self._event("file_done", agent="planner", file=op["file"], lines=op["content"].count("\n") + 1,
                         message=f"{op['file']} — ReCoder 결제 모듈(검증된 고정 파일)을 넣었습니다")
+
+    def _complete_plan(self, files: list[dict], manifest: dict) -> list[dict]:
+        """설계 목록의 빈 곳을 메운다 — 결정적으로 알 수 있는 것(진입점·DB 스키마·uses) + 검토 에이전트가 약속과 대조."""
+        for f in files:
+            f["uses"] = [self._rel(u) for u in (f.get("uses") or []) if isinstance(u, str) and u.strip()]
+        files = list(files)
+        added: list[dict] = []
+        gaps = plan_gaps(files, manifest, self._exists_on_disk)
+        files += gaps
+        added += gaps
+        #: 기존 프로젝트의 작은 수정(파일 몇 개)에는 검토 호출을 쓰지 않는다 — 새 앱이거나 목록이 클 때만.
+        rounds = 2 if (self.new_project or len(files) >= 12) else 0
+        for _round in range(rounds):
+            more = self._review_plan(files, manifest)
+            if not more:
+                break
+            files += more
+            added += more
+            gaps = plan_gaps(files, manifest, self._exists_on_disk)
+            files += gaps
+            added += gaps
+        if added:
+            names = ", ".join(f["file"] for f in added[:6]) + (f" 외 {len(added) - 6}개" if len(added) > 6 else "")
+            self._event("plan_added", agent="review", files=[{"file": f["file"], "layer": f["layer"]} for f in added],
+                        message=f"설계 검토 — 실행에 필요한데 목록에 없던 파일 {len(added)}개 추가: {names}")
+        return files
+
+    def _review_plan(self, files: list[dict], manifest: dict) -> list[dict]:
+        """검토 에이전트 — 약속(contracts)과 파일 목록을 대조해 앱이 빌드·실행되는 데 빠진 파일만 받는다."""
+        ca = _ca()
+        listed = "\n".join(f"- {f['file']}: {str(f.get('purpose') or '')[:140]}" for f in files)
+        contracts = str(manifest.get("contracts") or "")
+        if len(contracts) > 24_000:
+            contracts = contracts[:24_000] + "\n…(약속 문서 뒷부분 생략)"
+        prompt = self.context_prompt + f"""
+
+[대규모 생성 1단계 — 설계 검토] 당신은 검토 에이전트입니다. 아래 파일 목록대로 만들면 앱이 **빌드되고 실제로 실행되는지**
+점검하고, 빠진 파일만 주세요(이미 목록에 있는 파일은 다시 쓰지 마세요. 파일 내용도 쓰지 마세요).
+반드시 확인할 것:
+- 서버: 진입점이 약속의 모든 API 를 라우터로 연결하는가 · API 경로 묶음(/api/auth, /api/products, /api/orders, /api/cart, /api/admin …)마다
+  라우트(또는 컨트롤러) 파일과 그 서비스가 있는가 · DB 스키마(Prisma 면 schema.prisma)·DB 연결 파일·초기화/시드 ·
+  인증 미들웨어·토큰 유틸 · 공용 오류/응답 유틸 · 공용 타입
+- 화면: 진입점(index.html·main·App) · 약속의 모든 화면 경로마다 페이지 · API 호출 모듈 · 로그인 상태 관리
+- 설정: 폴더마다 package.json·tsconfig·빌드 설정, 루트 package.json·Dockerfile·.dockerignore
+- 각 파일의 uses 에 적은 파일이 목록에 있는가
+요약: {manifest.get('summary', '')}
+약속:
+{contracts or '(없음)'}
+현재 파일 목록:
+{listed}
+빠진 파일이 없으면 files=[] 와 more=false. 있으면 빠진 파일마다 layer(0/1/2)·uses·purpose(무엇을 내보내고 무엇을 하는지)를 붙이고 more=false."""
+        try:
+            resp = self.call(prompt, PAGE_SCHEMA, "review_code_manifest", 4096, agent="review")
+            page = ca._extract_json(resp.text)
+            if not isinstance(page, dict):
+                return []
+        except Paused:
+            raise
+        except LLMError as exc:
+            if not (_is_truncation(exc) or exc.error_type == LLMErrorType.STRUCTURED_OUTPUT):
+                raise  # 한도·인증 등 — 생성 자체를 멈추고 이어 만들기로
+            self._log("", "other", f"설계 검토 생략: {exc}")
+            return []
+        except Exception as exc:  # noqa: BLE001 — 검토는 보강이다. 응답이 이상해도 생성은 계속한다(결정적 빈 곳 메우기·마저 만들기가 남는다)
+            self._log("", "other", f"설계 검토 생략: {exc}")
+            return []
+        merged = self._merge_files(files, page.get("files") or [])
+        out = []
+        for f in merged[len(files):]:
+            f = dict(f, file=self._rel(f["file"]))
+            if not isinstance(f.get("layer"), int) or f["layer"] not in (0, 1, 2):
+                f["layer"] = _guess_layer(f["file"])
+            f["uses"] = [self._rel(u) for u in f.get("uses") or []]
+            f["planned_by"] = "review"
+            out.append(f)
+        return out
+
+    def _fill_missing_imports(self) -> None:
+        """다 만든 뒤 — 코드가 불러오는데 아무 데도 없는 프로젝트 파일을 마저 만든다(불러오는 쪽 코드를 보여 주며).
+        설계 검토로도 빠진 파일이 남는 경우의 안전망. 새 파일이 또 다른 없는 파일을 부르면 최대 3번까지 되풀이한다."""
+        for _round in range(3):
+            with self._lock:
+                contents = {op["file"]: op.get("content") or "" for op in self.state["ops"].values()}
+            planned = {_norm(f["file"]) for f in self.state["files"]}
+            missing = missing_local_imports(contents, self._exists_on_disk)
+            new = []
+            for path, info in missing.items():
+                if _norm(path) in planned:
+                    continue
+                names = ", ".join(info["names"][:20]) or "(가져오기만 함)"
+                importers = info["importers"][:8]
+                new.append({"file": path, "layer": _guess_layer(path), "uses": [], "importers": importers,
+                            "planned_by": "import",
+                            "purpose": (f"설계에서 빠졌지만 {', '.join(importers)} 가 불러오는 파일. 이 이름을 그 형태 그대로 내보내세요"
+                                        f"(default(X)=기본 내보내기): {names}. 불러오는 쪽 코드가 쓰는 인자·반환 모양에 맞게, "
+                                        "약속(contracts)대로 실제 동작을 구현하세요(빈 껍데기·TODO 금지).")})
+            if not new:
+                return
+            with self._lock:
+                self.state["files"] = self.state["files"] + new
+            self._save()
+            names = ", ".join(f["file"] for f in new[:6]) + (f" 외 {len(new) - 6}개" if len(new) > 6 else "")
+            self._event("plan_added", agent="review", files=[{"file": f["file"], "layer": f["layer"]} for f in new],
+                        message=f"전체 점검 — 코드가 불러오는데 없는 파일 {len(new)}개를 마저 만듭니다: {names}")
+            self._schedule()
+
+    def _exists_on_disk(self, path: str) -> bool:
+        if not self.root:
+            return False
+        try:
+            return os.path.isfile(os.path.join(self.root, *path.replace("\\", "/").split("/")))
+        except (OSError, ValueError):
+            return False
 
     def _merge_files(self, files: list[dict], items: list) -> list[dict]:
         seen = {_norm(f["file"]) for f in files}
@@ -651,8 +768,13 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         ErrorAlert 의 onClose 가 필수인 줄 모르고 10개 화면이 빼먹거나, useCart 에 없는 total 을 꺼냈다(실기기 카페 2.0.8)."""
         by_key = {_norm(op["file"]): op for op in files_done if op.get("content")}
         wanted: list[str] = []
+        callers: list[str] = []
         for t in targets:
             entry = next((f for f in self.state["files"] if _norm(f["file"]) == _norm(t)), None)
+            for imp in (entry or {}).get("importers") or []:
+                k = _norm(imp)
+                if k in by_key and k not in callers:
+                    callers.append(k)
             for u in (entry or {}).get("uses") or []:
                 k = self._resolve_use(u)
                 if k and k in by_key and k not in wanted and k not in {_norm(x) for x in targets}:
@@ -668,6 +790,14 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
             wanted = near
         blocks, used = [], 0
         full = set()
+        for k in callers:
+            op = by_key[k]
+            block = (f"\n[이 파일을 불러오는 파일 — 여기서 import 하는 이름·함수 인자·반환 모양·타입을 그대로 내보내세요] {op['file']}\n"
+                     f"```\n{op['content']}\n```\n")
+            if used + len(block) <= 48_000:
+                blocks.append(block)
+                used += len(block)
+                full.add(k)
         for k in wanted:
             op = by_key[k]
             block = f"\n[이미 생성한 파일 — 이 파일이 기대는 코드: 이름·props·반환 필드·함수 인자·API 경로를 이 내용과 글자 그대로 맞추세요] {op['file']}\n```\n{op['content']}\n```\n"
@@ -937,6 +1067,7 @@ replace 는 바꿀 내용입니다.
         try:
             self.plan()
             self._schedule()
+            self._fill_missing_imports()
         except Paused as exc:
             self._save()
             self._log("", error_kind(exc), f"멈춤 — {exc}")
@@ -976,6 +1107,8 @@ replace 는 바꿀 내용입니다.
         self._event("generated", message=f"파일 {len(ops)}개 작성 완료 — 전체 점검 중"
                     + (f" (만들지 못한 {len(self.skipped)}개는 뺌)" if self.skipped else ""))
         return ({"summary": str(self.state["manifest"].get("summary") or ""), "skipped": self.skipped,
+                 #: 전체 점검 단계가 빠진 파일을 마저 만들 때 같은 약속을 지키게 넘긴다(결과 화면에는 쓰지 않는다)
+                 "contracts": str(self.state["manifest"].get("contracts") or ""),
                  "fallback_docs": self.fallback_docs or [{"file": op["file"], "reason": "자동 작성"} for op in ops if op.get("fallback")]},
                 ops, self.last_resp)
 
@@ -1621,3 +1754,243 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
                 out[target_idx] = dict(out[target_idx], content=content.replace(edit["find"], edit["replace"], 1))
                 changed = True
     return out if changed else None
+
+
+# ── 설계·결과의 빈 곳 메우기 ─────────────────────────────────────────────
+#: 실기기(2026-10-10 2.0.9 쇼핑몰, Haiku): 약속 문서가 길어 파일 목록을 나눠 받다가 AI 가 more=false 로 일찍 끝냈다.
+#: 화면 30개는 다 있는데 서버는 유틸·헬스 등 10개뿐 — server.ts·DB 연결·인증·상품/주문 라우트·Prisma 스키마가
+#: 목록에 없어서 아무도 만들지 않았고, 만든 파일은 없는 `../db/client`·`../middleware/auth` 를 불러 빌드가 실패했다.
+#: 그래서 (1) 설계 직후 결정적으로 빈 곳을 채우고, (2) 검토 에이전트가 약속 대비 빠진 파일을 한 번 더 찾고,
+#: (3) 다 만든 뒤에도 불러오는데 없는 파일이 있으면 그 파일을 마저 만든다.
+
+_CODE_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+_LOCAL_IMPORT = (
+    re.compile(r"""^\s*import\s+(?:type\s+)?([\w$*{}\s,]+?)\s+from\s*['"](\.{1,2}/[^'"]+)['"]""", re.MULTILINE),
+    re.compile(r"""^\s*import\s*['"](\.{1,2}/[^'"]+)['"]""", re.MULTILINE),
+    re.compile(r"""^\s*export\s+(?:type\s+)?([\w$*{}\s,]+?)\s+from\s*['"](\.{1,2}/[^'"]+)['"]""", re.MULTILINE),
+    re.compile(r"""\b(?:const|let|var)\s+([\w$]+|\{[^}]*\})\s*=\s*require\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)"""),
+    re.compile(r"""\bimport\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)"""),
+)
+#: 코드가 아닌 자원(스타일·그림·JSON)은 여기서 만들지 않는다 — 빈 스타일 파일 만들기는 배포 준비 점검이 따로 한다.
+_ASSET_EXT = re.compile(r"\.(css|scss|sass|less|svg|png|jpe?g|gif|webp|ico|json|html|md|txt|woff2?|ttf|wasm)$", re.I)
+
+
+def _strip_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"(^|[^:\\'\"`])//[^\n]*", r"\1", text)
+
+
+def _spec_candidates(base: str) -> list[str]:
+    """`./x`·`./x.js`(NodeNext 식) 가 가리킬 수 있는 원본 파일들."""
+    stem = re.sub(r"\.(js|jsx|mjs|cjs|ts|tsx)$", "", base)
+    exts = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".d.ts")
+    return [base] + [stem + e for e in exts] + [f"{base}/index{e}" for e in exts[:4]]
+
+
+def _imported_names(clause: str, text: str) -> list[str]:
+    """`X, { a, b as c }` / `* as ns` → 그 파일이 내보내야 할 이름들(default 포함)."""
+    clause = (clause or "").strip()
+    names: list[str] = []
+    m = re.match(r"\*\s+as\s+([\w$]+)", clause)
+    if m:
+        used = sorted(set(re.findall(rf"\b{re.escape(m.group(1))}\.([\w$]+)", text)))
+        return used or ["(네임스페이스로 불러옴)"]
+    head, _, rest = clause.partition("{")
+    head = head.strip().rstrip(",").strip()
+    if head and re.fullmatch(r"[\w$]+", head):
+        names.append(f"default({head})")
+    if rest:
+        for part in rest.split("}")[0].split(","):
+            part = re.sub(r"^type\s+", "", part.strip())
+            name = part.split(" as ")[0].strip()
+            if name:
+                names.append(name)
+    if clause.startswith("{") is False and not names and re.fullmatch(r"[\w$]+", clause):
+        names.append(f"default({clause})")
+    return names
+
+
+def _target_for(importer: str, base: str) -> str:
+    """없는 파일을 어떤 확장자로 만들지 — 불러오는 파일의 언어를 따른다(`./x.js` 를 TS 가 부르면 x.ts)."""
+    m = re.search(r"\.(js|jsx|mjs|cjs|ts|tsx)$", base)
+    ts = importer.endswith((".ts", ".tsx"))
+    if m:
+        if ts and m.group(1) in ("js", "mjs", "cjs"):
+            return base[: m.start()] + ".ts"
+        if ts and m.group(1) == "jsx":
+            return base[: m.start()] + ".tsx"
+        return base
+    last = posixpath.basename(base)
+    component = bool(re.match(r"[A-Z]", last)) or bool(re.search(r"/(components?|pages?|views?|layouts?)/", "/" + base))
+    if importer.endswith(".tsx"):
+        return base + (".tsx" if component else ".ts")
+    if ts:
+        return base + ".ts"
+    if importer.endswith(".jsx"):
+        return base + (".jsx" if component else ".js")
+    return base + (".cjs" if importer.endswith(".cjs") else ".mjs" if importer.endswith(".mjs") else ".js")
+
+
+def missing_local_imports(files: dict[str, str], exists: Callable[[str], bool] | None = None) -> dict[str, dict]:
+    """생성한 코드가 불러오는데 어디에도 없는 프로젝트 파일 → {만들 경로: {"importers": [...], "names": [...]}}.
+
+    files: {경로: 내용}(프로젝트 루트 기준). exists: 디스크에 이미 있는 파일인지(기존 프로젝트에 더할 때)."""
+    norm = {_norm(p): p for p in files}
+    have = lambda p: _norm(p) in norm or bool(exists and exists(p))  # noqa: E731
+    out: dict[str, dict] = {}
+    for path, text in files.items():
+        if not path.endswith(_CODE_EXTS) or not isinstance(text, str):
+            continue
+        active = _strip_comments(text)
+        found: list[tuple[str, str]] = []
+        for i, pattern in enumerate(_LOCAL_IMPORT):
+            for m in pattern.finditer(active):
+                if i in (1, 4):
+                    found.append(("", m.group(1)))
+                else:
+                    found.append((m.group(1), m.group(2)))
+        for clause, spec in found:
+            spec = spec.split("?")[0]
+            if _ASSET_EXT.search(spec):
+                continue
+            base = posixpath.normpath(posixpath.join(posixpath.dirname(path), spec))
+            if base.startswith("..") or base.startswith("/"):
+                continue
+            if any(have(c) for c in _spec_candidates(base)):
+                continue
+            target = _target_for(path, base)
+            entry = out.setdefault(target, {"importers": [], "names": []})
+            if path not in entry["importers"]:
+                entry["importers"].append(path)
+            for n in _imported_names(clause, active):
+                if n not in entry["names"]:
+                    entry["names"].append(n)
+    return out
+
+
+_SERVER_DIRS = ("backend", "server", "api")
+
+
+def _pattern_examples(pattern: str) -> list[str]:
+    """plan_gaps 의 진입점 정규식이 뜻하는 실제 경로들(디스크 확인용) — `a/(src/)?(x|y)\\.(ts|js)` 를 펼친다."""
+    out = [""]
+    for token in re.findall(r"\((?:[^()]|\([^()]*\))*\)\??|\\.|[^()\\]", pattern):
+        if token.startswith("("):
+            optional = token.endswith("?")
+            body = token[1:-2] if optional else token[1:-1]
+            alts = body.split("|") + ([""] if optional else [])
+            out = [o + a for o in out for a in alts][:200]
+        else:
+            out = [o + (token[1] if token.startswith("\\") else token) for o in out]
+    return out
+_CLIENT_DIRS = ("frontend", "client", "web")
+_ENTRY_STEMS = ("server", "index", "app", "main")
+
+
+def plan_gaps(files: list[dict], manifest: dict, exists: Callable[[str], bool] | None = None) -> list[dict]:
+    """설계 목록에서 결정적으로 알 수 있는 빈 곳 — 실행에 꼭 필요한데 목록에 없는 파일.
+
+    · uses 에 적었는데 목록에 없는 프로젝트 파일
+    · 서버 폴더에 코드가 있는데 진입 파일(src/server.ts 등)이 없음
+    · 약속·요약에 Prisma 가 있는데 schema.prisma / Prisma 클라이언트 파일이 없음
+    · 화면 폴더(React)에 진입 파일(index.html·src/main.tsx·src/App.tsx)이 없음"""
+    paths = [str(f.get("file") or "") for f in files]
+    keys = {_norm(p) for p in paths}
+    add: list[dict] = []
+
+    def have(p: str) -> bool:
+        return any(_norm(c) in keys or bool(exists and exists(c)) for c in _spec_candidates(p))
+
+    def present(pattern: str) -> bool:
+        """목록이나 디스크(기존 프로젝트)에 이 정규식에 맞는 파일이 있는가."""
+        return any(re.fullmatch(pattern, p) for p in paths) or bool(exists and any(
+            exists(c) for c in _pattern_examples(pattern)))
+
+    def push(path: str, purpose: str, layer: int, uses: list[str] | None = None) -> None:
+        if _norm(path) in keys:
+            return
+        keys.add(_norm(path))
+        add.append({"file": path, "purpose": purpose, "layer": layer, "uses": uses or [], "planned_by": "recoder"})
+
+    for f in files:
+        src = str(f.get("file") or "")
+        for u in f.get("uses") or []:
+            u = str(u).strip().replace("\\", "/")
+            if u.startswith("./"):
+                u = u[2:]
+            if (not u or u.startswith(("..", "@", "~")) or "/" not in u or _ASSET_EXT.search(u) or have(u)
+                    or not re.match(r"[\w.-]+/", u)):
+                continue
+            if not re.search(r"\.(ts|tsx|js|jsx|mjs|cjs|py|vue|prisma)$", u):
+                u = _target_for(src, u) if src.endswith(_CODE_EXTS) else u
+            push(u, f"{src} 가 불러오는 파일 — 설계 목록에서 빠져 추가함. {src} 가 쓰는 이름을 그대로 내보내세요.", _guess_layer(u))
+    text = f"{manifest.get('summary') or ''}\n{manifest.get('contracts') or ''}".lower()
+    for side in _SERVER_DIRS:
+        code = [p for p in paths if p.startswith(side + "/") and p.endswith(_CODE_EXTS)]
+        if not code:
+            continue
+        ts = any(p.endswith((".ts", ".tsx")) for p in code)
+        ext = ".ts" if ts else ".js"
+        routes = [p for p in code if re.search(r"/(routes?|routers?|controllers?)/", p)]
+        #: 약속에 적힌 API 묶음(/api/products …)마다 그 묶음을 다루는 서버 파일이 있어야 한다 — 없으면 라우트 파일을 더한다.
+        lower_code = [p.lower() for p in code]
+        for seg in sorted(set(re.findall(r"/api/([a-z][a-z0-9_-]{1,30})", text))):
+            stem = seg[:-1] if seg.endswith("s") and len(seg) > 3 else seg
+            handlers = [p for p in lower_code if not re.search(r"/(middlewares?|utils?|types?|lib|config|db|models?|schemas?|validators?)/", p)]
+            if seg in ("v1", "v2", "health") or any(re.search(rf"/{re.escape(stem)}", p) for p in handlers):
+                continue
+            if any(have(f"{side}/src/{d}/{seg}") for d in ("routes", "routers", "controllers")):
+                continue
+            route = f"{side}/src/routes/{seg}{ext}"
+            push(route, f"약속(contracts)의 /api/{seg} 경로 전부(메서드·요청·응답·인증·오류 형식 그대로)를 구현하는 라우터 — 기본 내보내기 router", 1)
+            routes.append(route)
+            code.append(route)
+            lower_code.append(route.lower())
+        if not present(rf"{side}/(src/)?({'|'.join(_ENTRY_STEMS)})\.(ts|js|mjs|cjs)"):
+            #: uses 를 비워 둔다 — 같은 쪽의 모든 파일(나중에 더해지는 라우트 포함)이 끝난 뒤에 쓰게.
+            push(f"{side}/src/server{ext}",
+                 "서버 진입점: 환경 변수 읽기, express.json 등 미들웨어, 약속(contracts)의 모든 API 라우터를 그 경로에 연결"
+                 f"({', '.join(routes[:20]) or '라우트 파일'}), /health, 오류 처리 미들웨어, 운영 모드에서 화면 빌드 결과(frontend/dist) 제공, PORT 로 listen",
+                 2)
+        if "prisma" in text:
+            if not any(p.endswith(".prisma") for p in paths) and not have(f"{side}/prisma/schema.prisma"):
+                push(f"{side}/prisma/schema.prisma",
+                     "Prisma 스키마: 약속(contracts)의 모든 테이블·열·관계·enum, datasource postgresql(env DATABASE_URL), generator client", 0)
+            if not any(re.search(r"/(db|lib|database|prisma)(/|\.)", p) and p.endswith(_CODE_EXTS) for p in code) and not any(
+                    have(f"{side}/src/{c}") for c in ("db/client", "db/index", "db/prisma", "lib/prisma", "lib/db", "db", "prisma")):
+                push(f"{side}/src/db/client{ext}",
+                     "Prisma 클라이언트 하나를 만들어 `export const prisma` 로 내보냄(개발 중 재시작에도 하나만 쓰도록)", 0)
+    for side in _CLIENT_DIRS:
+        code = [p for p in paths if p.startswith(side + "/") and p.endswith(_CODE_EXTS)]
+        if not any(p.endswith(".tsx") or p.endswith(".jsx") for p in code):
+            continue
+        x = "tsx" if any(p.endswith(".tsx") for p in code) else "jsx"
+        if not have(f"{side}/index.html"):
+            push(f"{side}/index.html", f"Vite 진입 HTML — <div id=\"root\"> 와 /src/main.{x} 스크립트", 0)
+        if not present(rf"{side}/src/(main|index)\.(tsx|jsx|ts|js)"):
+            push(f"{side}/src/main.{x}", "React 진입점 — App 을 #root 에 렌더(Router·Provider 감싸기 포함)", 2, [f"{side}/src/App.{x}"])
+        if not present(rf"{side}/src/App\.(tsx|jsx)"):
+            pages = [p for p in code if re.search(r"/pages?/", p)]
+            push(f"{side}/src/App.{x}", "앱 셸 — 라우트 정의(모든 화면 연결)·공용 레이아웃", 2, pages[:30])
+    return add
+
+
+def fill_missing_files(prompt: str, ops: list[dict], *, summary: str = "", contracts: str = "", root: str = "",
+                       target_folder: str = "", emit: Callable[[dict], None] | None = None,
+                       workers: int | None = None) -> list[dict]:
+    """전체 점검 중 — 코드가 불러오는데 없는 프로젝트 파일을 만들어 넣은 ops(없으면 그대로).
+
+    부분 교정(edit_fix_round)은 있는 파일을 고칠 뿐 새 파일을 만들지 못해, 없는 `../db/client` 같은 문제가 몇 번을
+    돌아도 그대로 남았다(실기기 2.0.9 쇼핑몰: "자동 교정으로 고치지 못했습니다")."""
+    eng = LargeGeneration(prompt, target_folder=target_folder, concurrency=workers, emit=emit, root=root,
+                          security_review=True)
+    eng.state["manifest"] = {"summary": summary, "contracts": contracts}
+    eng.state["files"] = [{"file": op["file"], "layer": _guess_layer(op["file"]), "uses": []}
+                          for op in ops if op.get("action") != "delete"]
+    eng.state["ops"] = {_norm(op["file"]): dict(op) for op in ops if op.get("action") != "delete"}
+    before = len(eng.state["files"])
+    eng._fill_missing_imports()
+    if len(eng.state["files"]) == before:
+        return ops
+    made = [eng.state["ops"][_norm(f["file"])] for f in eng.state["files"][before:] if _norm(f["file"]) in eng.state["ops"]]
+    return list(ops) + made

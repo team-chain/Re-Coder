@@ -38,6 +38,8 @@ class Router:
             raise CUT
         if operation == "generate_code_manifest":
             return type("R", (), {"text": json.dumps(MANIFEST), "model_used": "m", "provider": "p"})()
+        if operation == "review_code_manifest":  # 설계 검토 — 빠진 파일 없음
+            return type("R", (), {"text": json.dumps({"files": [], "more": False}), "model_used": "m", "provider": "p"})()
         wanted = request.prompt.rsplit("**아래 파일만**", 1)[1]
         files = [f for f in CONTENT if f"- {f}\n" in wanted + "\n"]
         if len(files) > 1 and self.cut_files & set(files):

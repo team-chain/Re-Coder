@@ -22,8 +22,10 @@ KNOWN_VERSIONS: dict[str, str] = {
     "jsonwebtoken": "^9.0.2", "bcryptjs": "^2.4.3", "bcrypt": "^5.1.1", "uuid": "^9.0.1", "zod": "^3.23.8",
     "pg": "^8.13.0", "mysql2": "^3.11.3", "mongoose": "^8.7.0", "mongodb": "^6.9.0", "redis": "^4.7.0", "ioredis": "^5.4.1",
     "better-sqlite3": "^11.3.0", "sqlite3": "^5.1.7", "knex": "^3.1.0", "sequelize": "^6.37.3", "@prisma/client": "^5.20.0",
-    "stripe": "^14.25.0", "multer": "^1.4.5-lts.1", "nodemailer": "^6.9.15", "axios": "^1.7.7", "joi": "^17.13.3",
+    "stripe": "^14.25.0", "multer": "^2.0.2", "nodemailer": "^6.9.15", "axios": "^1.7.7", "joi": "^17.13.3",
     "express-session": "^1.18.1", "connect-pg-simple": "^10.0.0", "winston": "^3.15.0", "pino": "^9.4.0",
+    "@aws-sdk/client-s3": "^3.700.0", "@aws-sdk/s3-request-presigner": "^3.700.0", "@aws-sdk/lib-storage": "^3.700.0",
+    "sharp": "^0.33.5", "nanoid": "^3.3.7", "date-fns": "^3.6.0", "slugify": "^1.6.6", "decimal.js": "^10.4.3",
     # 화면
     "react": "^18.3.1", "react-dom": "^18.3.1", "react-router-dom": "^6.27.0", "react-router": "^6.27.0",
     "zustand": "^4.5.5", "@tanstack/react-query": "^5.59.0", "react-hook-form": "^7.53.0", "clsx": "^2.1.1",
@@ -43,7 +45,8 @@ DEV_VERSIONS: dict[str, str] = {
 _TYPED = {"express-rate-limit", "helmet", "zod", "axios", "stripe", "mysql2", "mongoose", "mongodb", "redis", "ioredis",
           "zustand", "@tanstack/react-query", "react-hook-form", "clsx", "react-router-dom", "react-router", "vue",
           "vue-router", "pinia", "@stripe/stripe-js", "@stripe/react-stripe-js", "dotenv", "knex", "sequelize",
-          "@prisma/client", "winston", "pino", "express-validator", "joi"}
+          "@prisma/client", "winston", "pino", "express-validator", "joi", "@aws-sdk/client-s3",
+          "@aws-sdk/s3-request-presigner", "@aws-sdk/lib-storage", "sharp", "nanoid", "date-fns", "decimal.js"}
 _NODE_BUILTINS = {
     "assert", "async_hooks", "buffer", "child_process", "cluster", "console", "constants", "crypto", "dgram", "dns",
     "domain", "events", "fs", "http", "http2", "https", "inspector", "module", "net", "os", "path", "perf_hooks",
@@ -57,6 +60,31 @@ _IMPORTS = (
     re.compile(r"""\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)"""),
 )
 _CODE = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue")
+
+
+def version_for(name: str) -> str | None:
+    """선언할 버전 범위 — 검증된 표 → 레지스트리의 최신 정식 버전(^x.y.z). 레지스트리에 없거나 확인할 수 없으면 None
+    (지어내지 않는다 — AI 가 없는 패키지 이름을 쓴 경우일 수 있다).
+
+    예전엔 표에 없는 패키지가 하나라도 섞이면 아무것도 넣지 않아(@aws-sdk/client-s3 + multer) 빌드가 그대로 깨졌다."""
+    if name in KNOWN_VERSIONS:
+        return KNOWN_VERSIONS[name]
+    if name in DEV_VERSIONS:
+        return DEV_VERSIONS[name]
+    return _registry_version(name)
+
+
+def _registry_version(name: str) -> str | None:
+    """npm 레지스트리의 최신 정식 버전 범위(^x.y.z). 오프라인·프록시 차단이면 None."""
+    try:
+        import npm_registry
+    except ImportError:  # pragma: no cover
+        try:
+            from core import npm_registry  # type: ignore
+        except ImportError:
+            return None
+    versions = npm_registry.fetch_versions(name)
+    return npm_registry.suggest("", versions) if versions else None
 
 
 def package_of(spec: str) -> str | None:

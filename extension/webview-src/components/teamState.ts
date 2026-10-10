@@ -78,7 +78,7 @@ const STATE_OF_STEP: Record<string, AgentState | undefined> = {
   file_retry: "writing", part_retry: "parts",
 };
 
-const ENGINE_STEPS = new Set(["planning", "planned", "wave", "file_start", "file_split", "file_part", "file_done",
+const ENGINE_STEPS = new Set(["planning", "planned", "plan_added", "wave", "file_start", "file_split", "file_part", "file_done",
   "fixing", "verified", "verify_failed", "split", "resumed", "generated"]);
 
 /** 이벤트의 agent 값 → 화면 이름(개발 N · 검토 · 설계). 슬롯 이름은 코어의 agent-1, agent-2 … */
@@ -128,6 +128,7 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
     case "paused": return { who: "", role: "system", tone: "warn", text: msg || "멈춤" };
     case "waiting": return { who, role, tone: "warn", text: msg || `분당 호출 한도 — ${event.seconds ?? "잠시"}초 대기` };
     case "generated": case "consistency": return { who: "검토", role: "review", text: msg || "전체 점검 — 컨테이너 빌드로 확인" };
+    case "plan_added": return { who: "검토", role: "review", tone: "warn", text: msg || `빠진 파일 ${(event.files ?? []).length}개를 목록에 더함` };
     case "resumed": return { who: "", role: "system", text: msg || "멈춘 지점부터 이어서 만듭니다" };
     case "done": return { who: "", role: "system", tone: "ok", text: msg || "완료" };
     default: return null;
@@ -160,6 +161,18 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
       if (event.files) next.files = event.files.map(f => ({ file: f.file, layer: typeof f.layer === "number" ? f.layer : 1, state: "waiting" as FileState }));
       next.total = Math.max(next.total, next.files.length);
       break;
+    case "plan_added": {
+      //: 검토가 찾은 빠진 파일 — 설계 뒤(전체 점검 중)에 더해지면 대기 칸에 붙이고 다시 만드는 단계로 돌아간다.
+      const known = new Set(next.files.map(f => f.file));
+      const extra = (event.files ?? []).filter(f => !known.has(f.file))
+        .map(f => ({ file: f.file, layer: typeof f.layer === "number" ? f.layer : 1, state: "waiting" as FileState }));
+      if (extra.length) {
+        next.files = [...next.files, ...extra];
+        next.total = Math.max(next.total, next.files.length);
+        if (next.phase === "checking") next.phase = "building";
+      }
+      break;
+    }
     case "resumed": next.phase = "building"; break;
     //: layer -1 — 의존 순서대로 모든 단계를 동시에 만든다(공통 기반도 여러 명). 모든 칸을 연다.
     case "wave": next.phase = "building"; next.layer = event.layer === -1 ? 2 : typeof event.layer === "number" ? event.layer : next.layer; break;

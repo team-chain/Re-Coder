@@ -61,3 +61,18 @@ test('구성 막대: 팀 모드 켜면 팀원과 [＋ 개발 에이전트], 최�
  assert.match(full,/효과가 작을 수 있어요/);
  assert.equal((full.match(/<img src="data:image\/png/g)||[]).length,MAX_DEV_AGENTS+2);assert.match(full,/리코더 · 개발 1/);
 });
+
+test('2.0.10 검토가 빠진 파일을 더하면 작업 목록에 붙고 검토 말풍선으로 알린다',()=>{
+ let v=emptyTeamView();
+ v=reduceTeam(v,{step:'planned',files:[{file:'a.ts',layer:0},{file:'b.tsx',layer:2}]});
+ v=reduceTeam(v,{step:'file_done',file:'a.ts',agent:'agent-1'});
+ v=reduceTeam(v,{step:'file_done',file:'b.tsx',agent:'agent-2'});
+ v=reduceTeam(v,{step:'generated',message:'파일 2개 작성 완료 — 전체 점검 중'});
+ assert.equal(v.phase,'checking');
+ v=reduceTeam(v,{step:'plan_added',agent:'review',files:[{file:'src/db/client.ts',layer:0},{file:'a.ts',layer:0}],message:'전체 점검 — 코드가 불러오는데 없는 파일 1개를 마저 만듭니다: src/db/client.ts'});
+ assert.equal(v.phase,'building');
+ assert.deepEqual(v.files.map(f=>[f.file,f.state]),[['a.ts','done'],['b.tsx','done'],['src/db/client.ts','waiting']]);
+ assert.equal(v.total,3);
+ const last=v.records[v.records.length-1];
+ assert.equal(last.who,'검토'); assert.match(last.text,/마저 만듭니다/);
+});

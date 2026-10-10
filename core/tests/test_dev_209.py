@@ -55,6 +55,7 @@ def _engine(files, contents, concurrency=4, delay=0.02):
 
     eng = ge.LargeGeneration("요청", concurrency=concurrency, security_review=False)
     eng.call = call.__get__(eng)
+    eng._complete_plan = lambda fs, m: fs  # 일부만 적은 설계 — 순서·동시성만 본다(빈 곳 메우기는 test_dev_2010)
     return eng, log, prompts
 
 

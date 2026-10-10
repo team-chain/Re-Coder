@@ -107,3 +107,10 @@ def _isolate_generation_checkpoints(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("RECODER_DEPLOY_SETTINGS_DIR", str(tmp_path_factory.mktemp("deploy-settings")))
     #: 테스트는 가짜 라우터를 쓰므로 호출 속도 제한·재시도 대기를 끈다.
     monkeypatch.setenv("RECODER_LLM_RPM", "0")
+
+
+@_pytest_guard.fixture(autouse=True)
+def _offline_npm_versions(monkeypatch):
+    """선언 안 된 패키지의 버전을 레지스트리에서 찾는 경로가 테스트 중 실제 네트워크로 나가지 않게 한다."""
+    import node_manifests
+    monkeypatch.setattr(node_manifests, "_registry_version", lambda name: None)

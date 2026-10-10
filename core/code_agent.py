@@ -2191,7 +2191,7 @@ def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
 def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool = False,
                     job_id: str = "", fingerprint: str = "", resume: dict | None = None,
                     concurrency: int | None = None, skip_failed: bool = False,
-                    plan_hook=None) -> tuple[dict, list[dict], object]:
+                    plan_hook=None, root: str = "") -> tuple[dict, list[dict], object]:
     """큰 요청을 대규모 생성 엔진으로 만든다. 멈추면 GenerationPaused(이어서 만들기 가능)."""
     try:
         import gen_engine
@@ -2202,7 +2202,7 @@ def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool =
     engine = gen_engine.LargeGeneration(
         prompt, target_folder=target_folder, new_project=new_project, job_id=job_id,
         fingerprint=fingerprint, concurrency=concurrency, emit=generation_progress.current(),
-        skip_failed=skip_failed, plan_hook=plan_hook,
+        skip_failed=skip_failed, plan_hook=plan_hook, root=root,
     )
     engine.resume_from(resume)
     return engine.run()
@@ -2469,7 +2469,7 @@ def generate_code(
     def _split() -> tuple:
         return _generate_split(prompt, target_folder, new_project=not existing,
                                job_id=job_id, fingerprint=fp, resume=saved, concurrency=agents,
-                               skip_failed=skip_failed, plan_hook=kit_hook)
+                               skip_failed=skip_failed, plan_hook=kit_hook, root=str(root))
 
     # Request a native schema instead of relying only on prose instructions.
     # Reject incomplete batches as a whole, then give the model one bounded
@@ -2668,6 +2668,27 @@ def generate_code(
             prev_state = (ops_out, errors, verification)
         if foundation:
             break  # A reviewed foundation is never silently rewritten by a model.
+        if split_mode and any(e.get("code") == "NODE_LOCAL_IMPORT_MISSING" for e in errors):
+            #: 불러오는데 없는 프로젝트 파일 — 고칠 대상이 아니라 만들 대상이다. 그 파일을 쓰는 코드를 보여 주며 만든다.
+            try:
+                try:
+                    import gen_engine as _ge
+                    import generation_progress as _gp
+                except ImportError:  # pragma: no cover
+                    from core import gen_engine as _ge  # type: ignore
+                    from core import generation_progress as _gp  # type: ignore
+                filled = _ge.fill_missing_files(prompt, ops_out, summary=str((data or {}).get("summary") or ""),
+                                                contracts=str((data or {}).get("contracts") or ""), root=str(root),
+                                                target_folder=target_folder, emit=_gp.current(), workers=agents)
+            except Exception as exc:  # noqa: BLE001 — 만들지 못하면 아래 교정으로 넘어간다
+                print(f"[code_agent] 빠진 파일 만들기 생략: {exc}", flush=True)
+                filled = ops_out
+            if len(filled) > len(ops_out):
+                added = len(filled) - len(ops_out)
+                ops_out, _notes = _autofix_ops(root, target_folder, filled, new_app=not existing)
+                consistency = _issues_for(ops_out)
+                print(f"[code_agent] 빠진 파일 {added}개를 만들고 다시 점검 | 남은 문제 {len(consistency)}개", flush=True)
+                continue
         signature = hashlib.sha256(json.dumps(ops_out, sort_keys=True).encode()).hexdigest()
         if signature in visited:
             break

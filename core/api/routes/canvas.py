@@ -97,7 +97,14 @@ def read_target(session, region: str, cluster: str, service: str) -> dict:
     """Approval must refer to the chosen service's CURRENT revision, not an older rollback."""
     from botocore.config import Config
     client = session.client("ecs", region_name=region, config=Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 0}))
-    response = client.describe_services(cluster=cluster, services=[service])
+    try:
+        response = client.describe_services(cluster=cluster, services=[service])
+    except Exception as exc:  # noqa: BLE001
+        #: 첫 배포 — 클러스터가 아직 없으면 "조회 실패"가 아니라 새 서비스다(실기기: 첫 ECS 배포에 실패 경고가 떴다).
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "") if hasattr(exc, "response") else ""
+        if code == "ClusterNotFoundException" or type(exc).__name__ == "ClusterNotFoundException":
+            return {"exists": False, "task_definition": "", "images": []}
+        raise
     services = response.get("services", [])
     if not services:
         if any(f.get("reason") not in ("MISSING",) for f in response.get("failures", [])):
