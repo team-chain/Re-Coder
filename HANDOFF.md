@@ -1,3 +1,11 @@
+# 실제 Haiku 결과로 검증 — 빈 파일 멈춤·두 겹 중괄호·Prisma 어긋남 (2026-10-11, 2.0.11)
+
+- 실기기 2.0.10 쇼핑몰(job 0d40eae842e74e6d, Haiku, 빈 TEMP): 설계 46개 + ReCoder 결정적 7 + 검토 9 = 62개(서버 진입점·라우트·서비스·미들웨어 모두 생김, 없는 import 0). `prisma/migrations/.gitkeep` 를 AI 가 빈 내용(25자 중 0자)으로 줬는데 implausible "내용이 비어 있음" 으로 3회 거절 → 멈춤, [이어서] 도 같은 방법 1회라 다시 멈춤.
+- 체크포인트 61개를 sandbox 에서 생성 직후 자동 교정 → 실제 도구로 빌드: 서버 `npm install` ETARGET(jsonwebtoken@^9.1.2) · prisma generate P1012(@@validate) · tsc 78건(enum PAID vs 'paid', BigInt vs number, AuthenticatedRequest 가 Request 미확장, 관계 items vs order_items, { expiresIn }) / 화면 tsc 9건(결제 화면 3개 중괄호 두 겹).
+- 고침: `placeholder_file`(빈 파일은 AI 없이), `undouble_braces`(clean_content·_autofix_ops), `prisma_schema_alignment`(NODE_PRISMA_SCHEMA_ALIGN), `express_request_interfaces`(NODE_EXPRESS_REQUEST_TYPE), NODE_DEPENDENCY_VERSION_NOT_FOUND 를 FILE_WRITE_FIXES 로(생성 직후 첫 회차 online), ts_safe `{ expiresIn }`, `prisma_relation_renames`(검증 빌드 로그 TS2353 *Include → 스키마 관계 필드 이름), `_file_hint`(Prisma 규칙), 서버 파일 생성·교정 맥락에 schema.prisma.
+- 결과(같은 실기기 출력): 서버 tsc 3건(CreateOrderRequest 미선언, startMockPaymentServer 미선언, mock 결제 status 문자열 — AI 교정 대상), 화면 vite 빌드 통과. Prisma generate 는 엔진 차단이라 더미 엔진 경로로 클라이언트 타입만 생성해 확인.
+- 못 한 것: 실제 AI 교정 회차(이 환경에 모델·사용자 키 없음), Docker 이미지 빌드·로컬 배포(Docker Hub·Prisma 엔진 차단).
+
 # 설계 빠진 파일 → 빌드 실패 — 설계 검토·빠진 파일 마저 만들기 (2026-10-10, 2.0.10)
 
 - 실기기 2.0.9 쇼핑몰(job c356ecab736c46e7, Haiku 4.5, 빈 TEMP): 설계 65개 중 서버 10개(유틸·헬스·업로드·재고·결제 모듈)뿐 — server.ts·db/client·middleware/auth·utils/errors·상품/주문/인증/장바구니 라우트·schema.prisma 없음. 약속이 길어(22.8k) 목록을 페이지로 받다 AI 가 more=false 로 일찍 끝낸 것으로 보임. 남은 문제: 없는 import 3파일, 미선언 패키지(@aws-sdk/client-s3·presigner·multer — 표에 없는 게 섞여 전부 안 넣음), NodeNext 확장자(TS2834/2835), 결제 웹훅·결제 시작 미연결(진입점 없음), validation.ts unknown 타입. ECS 승인 버튼은 이 오류들 때문에 막힘(정상) — 단 막는 이유가 경고와 섞여 보였음.

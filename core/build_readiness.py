@@ -49,7 +49,8 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER", "DOCKERFILE_RUNTIME_BROKEN",
                 "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING", "NODE_PRISMA_CLI_MISSING",
                 "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
-                "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION"}
+                "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION", "NODE_PRISMA_SCHEMA_ALIGN",
+                "NODE_EXPRESS_REQUEST_TYPE"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
 FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
@@ -58,7 +59,8 @@ FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_
                     "DOCKERFILE_RUNTIME_BROKEN", "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER",
                     "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING", "NODE_PRISMA_CLI_MISSING",
                     "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
-                    "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION")
+                    "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION", "NODE_DEPENDENCY_VERSION_NOT_FOUND",
+                    "NODE_PRISMA_SCHEMA_ALIGN", "NODE_EXPRESS_REQUEST_TYPE")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -2425,6 +2427,21 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 f"ESM(NodeNext) 서버의 상대 import 에 확장자가 없습니다({len(esm_writes)}개 파일). tsc 가 TS2834/TS2835 로 멈추고, "
                 "빌드되더라도 Node 가 ERR_MODULE_NOT_FOUND 로 시작하지 못합니다.",
                 "원본 파일에 맞게 '.js'(폴더면 '/index.js')를 붙이세요(자동 수정 가능 — 동작은 같음).", sorted(esm_writes)[0], True))
+        prisma_notes, prisma_writes = node_fixups.prisma_schema_alignment(files)
+        if prisma_writes:
+            writes["NODE_PRISMA_SCHEMA_ALIGN"] = prisma_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_PRISMA_SCHEMA_ALIGN", ERROR,
+                "Prisma 스키마가 코드와 다른 모양입니다: " + "; ".join(prisma_notes[:3])
+                + ". prisma generate 가 멈추거나 tsc 가 enum·숫자 타입 오류를 냅니다.",
+                "스키마를 코드가 쓰는 모양에 맞추세요(자동 수정 가능 — 저장되는 값은 같음).", sorted(prisma_writes)[0], True))
+        req_notes, req_writes = node_fixups.express_request_interfaces(files)
+        if req_writes:
+            writes["NODE_EXPRESS_REQUEST_TYPE"] = req_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_EXPRESS_REQUEST_TYPE", ERROR,
+                "; ".join(req_notes[:2]) + " — 지금은 핸들러의 req 에 body·params·query 가 없어 tsc 가 TS2769/TS2339 로 멈춥니다.",
+                "요청 타입이 express 의 Request 를 넓히게 하세요(자동 수정 가능).", sorted(req_writes)[0], True))
         safe_notes, safe_writes = node_fixups.ts_safe_rewrites(files)
         if safe_writes:
             #: 문제로 띄우지 않는다(실행 동작은 그대로, tsc 만 막히는 모양) — 생성 직후·배포 직전 자동 수정이 조용히 고친다.
@@ -3261,6 +3278,25 @@ def _check_versions_online(files: "ProjectFiles", result: Readiness) -> None:
                 parts.append(f"`{m['name']}@{m['spec']}` — 이 범위에 맞는 버전이 없습니다"
                              + (f"(사용 가능: {m['suggestion']})" if m["suggestion"] else ""))
         auto = bool(fixable) and len(fixable) == len(missing) and not has_lock
+        if auto:
+            #: 고칠 내용을 미리 만들어 둔다 — 생성 직후 자동 교정이 AI 없이 바로 고친다(실기기 2.0.10: AI 가 없는
+            #: jsonwebtoken@^9.1.2 를 적어 npm install 이 ETARGET 으로 멈췄다).
+            text = files.read(manifest) or ""
+            updated = text
+            for m in fixable:
+                start = updated.find(f'"{m["section"]}"')
+                pattern = re.compile(r'("' + re.escape(m["name"]) + r'"\s*:\s*")[^"]*(")')
+                found = pattern.search(updated, start if start >= 0 else 0)
+                if not found:
+                    updated = ""
+                    break
+                updated = updated[:found.start()] + found.group(1) + m["suggestion"] + found.group(2) + updated[found.end():]
+            try:
+                if updated and json.loads(updated):
+                    result.fix_data.setdefault("file_writes", {}).setdefault(
+                        "NODE_DEPENDENCY_VERSION_NOT_FOUND", {})[manifest] = updated
+            except ValueError:
+                pass
         fix = ("package.json 의 버전을 " + ", ".join(f"{m['name']} {m['suggestion']}" for m in fixable)
                + " 로 고치세요(자동 수정 가능, 원본은 .recoder/backups 에 보관).") if auto else (
             "패키지 이름·버전을 npm 에서 확인해 고치세요"

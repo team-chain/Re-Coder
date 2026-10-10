@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.11 — 2026-10-11 (Preview)
+
+**개발 — 실제 Haiku 결과(2.0.10 실기기)로 확인한 문제를 고침**
+- 생성이 `prisma/migrations/.gitkeep` 에서 멈추던 문제: AI 가 맞게 빈 내용으로 줬는데 "내용이 비어 있음" 으로 거절했습니다. 원래 비어 있는 파일(.gitkeep·__init__.py 등)은 AI 에게 묻지 않고 바로 만듭니다. 멈춘 작업은 [이어서 만들기]로 그대로 이어집니다.
+- AI 가 코드의 중괄호를 두 겹(`=> {{`, `${{id}}`)으로 쓴 파일을 한 겹으로 바로잡습니다(결제 화면 3개 — 화면 빌드 오류 9건 → 0).
+- Prisma 스키마를 코드가 쓰는 모양에 맞춥니다: enum 값(PAID @map("paid") → paid, 기본값 포함), 코드가 number 로 다루는 BigInt → Int, Prisma 에 없는 @@validate 제거, 빌드 로그로 확인한 관계 이름(items → order_items). 스키마를 쓸 때 이 규칙을 지시하고, 서버 코드를 쓰거나 고칠 때 스키마를 함께 보여 줍니다.
+- `interface AuthenticatedRequest { user }` 처럼 express Request 를 넓히지 않은 요청 타입에 `extends Request`.
+- 없는 버전(jsonwebtoken@^9.1.2)은 생성 직후 레지스트리의 실제 버전으로 바로 고칩니다. `{ expiresIn }` 줄임 표기 타입도.
+- 실기기 결과에 적용: 서버 tsc 오류 78건 + 스키마 오류 → 3건(이름 어긋남, AI 교정 대상), 화면 빌드 통과.
+
 ## 2.0.10 — 2026-10-10 (Preview)
 
 **개발 — 설계에서 빠진 파일 때문에 결과가 빌드되지 않던 문제**

@@ -297,6 +297,79 @@ def _unescape_flat(text: str) -> str:
     return re.sub(r'\\(["\\/nrt])', lambda m: _ESC.get(m.group(1), m.group(1)), text)
 
 
+_DOUBLED_SIGN = re.compile(r"\$\{\{|(?:\)|=>|\belse)[ \t]*\{\{[ \t]*$", re.MULTILINE)
+
+
+def undouble_braces(path: str, text: str) -> str:
+    """AI 가 코드의 중괄호를 두 겹({{ … }})으로 쓴 경우 한 겹으로(실기기 2.0.10 Haiku: 결제 화면 3개가
+    `=> {{`·`${{orderId}}`·`toLocaleString('en-US', {{ … }})` 로 와서 tsc 가 TS1005 로 멈췄다).
+    JSX 속성 객체(style={{ … }})는 원래 두 겹이라 그대로 둔다. 따옴표 문자열·주석은 건드리지 않는다.
+    징후(`${{`, 줄 끝의 `) {{`·`=> {{`)가 없으면 그대로, 고친 결과의 괄호 수가 맞지 않으면 그대로 돌려준다."""
+    if not str(path).lower().endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")) or "{{" not in text:
+        return text
+    if len(_DOUBLED_SIGN.findall(text)) < 2:
+        return text
+    out: list[str] = []
+    stack: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "'\"" :
+            j = i + 1
+            while j < n and text[j] != ch and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(text[i:j])
+            i = j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append(text[i:j])
+            i = j
+            continue
+        if text.startswith("{{", i):
+            k = len(out) - 1
+            prev = ""
+            joined = "".join(out[-3:]).rstrip()
+            prev = joined[-1:] if joined else ""
+            if prev == "=":
+                out.append("{{")
+                stack += ["L", "L"]
+            else:
+                out.append("{")
+                stack.append("D")
+            i += 2
+            continue
+        if ch == "{":
+            out.append("{")
+            stack.append("L")
+            i += 1
+            continue
+        if text.startswith("}}", i) and stack and stack[-1] == "D":
+            out.append("}")
+            stack.pop()
+            i += 2
+            continue
+        if ch == "}":
+            out.append("}")
+            if stack:
+                stack.pop()
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    fixed = "".join(out)
+    if stack or fixed.count("{") != fixed.count("}") or len(_DOUBLED_SIGN.findall(fixed)) > 0:
+        return text
+    return fixed
+
+
 def clean_content(path: str, text: str) -> str | None:
     """저장해도 되는 파일 내용으로 다듬는다 — 코드펜스·응답 형식·이중 이스케이프를 벗긴다. 못 쓰는 내용이면 None."""
     if not isinstance(text, str):
@@ -316,7 +389,7 @@ def clean_content(path: str, text: str) -> str | None:
         out = _unescape_flat(out)
     if is_wrapped(path, out):
         return None
-    return out
+    return undouble_braces(path, out)
 
 
 # ── 엔진 ───────────────────────────────────────────────────────────────
@@ -781,6 +854,12 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
                     wanted.append(k)
         sides_all = _sides_of(self.state["files"])
         sides = {_side(t, sides_all) for t in targets}
+        if any(t.endswith((".ts", ".js", ".mjs", ".cjs")) for t in targets):
+            #: 서버 코드는 DB 모델·관계 이름·enum 값을 스키마 그대로 써야 한다 — 같은 쪽의 Prisma 스키마를 함께 보여 준다
+            #: (실기기 2.0.10: 스키마는 PAID·BigInt·items, 코드는 'paid'·number·order_items 로 따로 써서 tsc 오류 수십 건).
+            for k, op in by_key.items():
+                if op["file"].endswith(".prisma") and _side(op["file"], sides_all) in sides and k not in wanted:
+                    wanted.insert(0, k)
         if not wanted:
             #: 설계가 uses 를 적지 않았다 — 같은 쪽의 더 아래 단계 파일(가까운 단계 먼저)을 전체 내용으로 보여 준다.
             top = max(_rank(t) for t in targets)
@@ -921,7 +1000,8 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         ca = _ca()
         base = self.prompt + self._context(files_done, [f["file"] for f in batch])
         wanted = "\n".join(f"- {f['file']}" for f in batch)
-        p = base + f"\n\n이번 응답의 ops 에는 **아래 파일만** 전체 내용으로 작성하세요(다른 파일은 넣지 마세요):\n{wanted}"
+        p = base + "".join(_file_hint(f["file"]) for f in batch if _file_hint(f["file"])) \
+            + f"\n\n이번 응답의 ops 에는 **아래 파일만** 전체 내용으로 작성하세요(다른 파일은 넣지 마세요):\n{wanted}"
         for f in batch:
             self._event("file_start", agent=agent, file=f["file"], message=f"{f['file']} 작성 중")
         try:
@@ -940,6 +1020,9 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
             if target is None:
                 continue
             cleaned = clean_content(op["file"], op.get("content"))
+            if placeholder_file(target["file"]) and not (cleaned or "").strip():
+                out.append(dict(op, file=target["file"], content=""))
+                continue
             if cleaned is None or not cleaned.strip():
                 self._log(op["file"], "format", "받은 파일 내용에 응답 형식이 섞여 버리고 다시 받음")
                 continue
@@ -954,7 +1037,7 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
                              f"{path} 을(를) 글자 그대로 이어 받습니다" + (" (맥락을 줄여서)" if lean else "")))
         #: lean — 이미 만든 파일 본문을 빼고 약속·목록만 보낸다(입력이 커서 생기는 실패를 피한다).
         context = self._context([] if lean else files_done, None if lean else [path])
-        base = self.context_prompt + context + f"\n\n지금은 {path} 파일 하나만 작성합니다." + _doc_hint(path)
+        base = self.context_prompt + context + f"\n\n지금은 {path} 파일 하나만 작성합니다." + _file_hint(path)
         content = self.write_in_parts(base, f"{path} 파일", agent=agent, path=path)
         return {"action": "create", "file": path, "content": content, "language": "",
                 "rationale": "응답 길이 한도 때문에 이어 받아 작성"}
@@ -974,6 +1057,10 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
     def _run_single(self, target: dict, files_done: list[dict], agent: str) -> None:
         """파일 하나 — 실패하면 방법을 바꿔 다시, 정해진 횟수를 넘으면 그 파일만 실패로 두고 돌아간다."""
         key = _norm(target["file"])
+        if placeholder_file(target["file"]) and key not in self.state["ops"]:
+            self._finish({"action": "create", "file": target["file"], "content": "", "language": "",
+                          "rationale": "빈 자리표시 파일(폴더를 남기기 위함) — ReCoder 가 바로 만듦"}, files_done, agent)
+            return
         while True:
             if key in self.state["ops"]:
                 return
@@ -1216,6 +1303,10 @@ replace 는 바꿀 내용입니다.
     def _run_batch(self, batch: list[dict], context: list[dict], agent: str) -> None:
         """작은 파일은 두 개씩 한 번에 받고, 받은 것은 하나씩 바로 저장한다. 빠진 파일·이어 쓰던 파일은 하나씩."""
         todo = [f for f in batch if _norm(f["file"]) not in self.state["ops"]]
+        for f in [f for f in todo if placeholder_file(f["file"])]:
+            self._finish({"action": "create", "file": f["file"], "content": "", "language": "",
+                          "rationale": "빈 자리표시 파일(폴더를 남기기 위함) — ReCoder 가 바로 만듦"}, context, agent)
+        todo = [f for f in todo if _norm(f["file"]) not in self.state["ops"]]
         fresh = [f for f in todo if f["file"] not in self.state["partial"] and f.get("size") != "large"
                  and not int((self.state["attempts"].get(_norm(f["file"])) or {}).get("tries", 0))]
         if len(fresh) > 1:
@@ -1408,12 +1499,22 @@ _DOC_SUFFIXES = (".md", ".mdx", ".markdown", ".rst", ".txt", ".adoc")
 _CODE_SIGN = re.compile(r"\b(?:import|export|function|const|let|var|class|interface|type|enum|require\(|module\.exports)\b|=>|<[A-Za-z]")
 
 
+#: 원래 비어 있는 파일 — AI 에게 맡기지 않고 빈 파일로 만든다(실기기 2.0.10: prisma/migrations/.gitkeep 을 AI 가 맞게
+#: 빈 내용으로 돌려줬는데 "내용이 비어 있음" 으로 3번 거절해 생성 전체가 멈췄다).
+_EMPTY_FILES = {".gitkeep", ".keep", ".npmkeep", ".gitkeep.txt", "py.typed", ".nojekyll", "__init__.py"}
+
+
+def placeholder_file(path: str) -> bool:
+    """내용이 없어도 정상인 자리표시 파일인가."""
+    return posixpath.basename(str(path or "").replace("\\", "/")).lower() in _EMPTY_FILES
+
+
 def implausible(path: str, content: str) -> str:
     """받은 내용이 그 파일 종류로 보기 어려우면 이유(글자 그대로 받을 때 AI 의 말이 파일에 들어가는 것을 막는다)."""
     low = str(path or "").lower()
     body = (content or "").strip()
     if not body:
-        return "내용이 비어 있음"
+        return "" if placeholder_file(path) else "내용이 비어 있음"
     if low.endswith(".json"):
         #: 문법 오류는 즉시 교정(바뀔 부분만)이 고친다 — 여기서는 JSON 으로 시작조차 안 하는 말만 걸러 낸다
         return "" if body[:1] in "{[" else "JSON 으로 보이지 않음"
@@ -1475,6 +1576,17 @@ def _is_doc(path: str) -> bool:
     """앱 동작에 필요 없는 문서인가 — 끝내 못 쓰면 설계로 기본 문서를 만든다(앱을 막지 않는다)."""
     low = str(path or "").replace("\\", "/").lower()
     return low.endswith(_DOC_SUFFIXES) and not low.startswith(("docs/adr/",)) and "/adr/" not in low
+
+
+def _file_hint(path: str) -> str:
+    """파일 종류별로 꼭 지킬 것 — 문서 길이, Prisma 스키마를 코드와 같은 모양으로."""
+    hint = _doc_hint(path)
+    if str(path).endswith(".prisma"):
+        #: 실기기 2.0.10(Haiku): 스키마만 Prisma 관례(PAID @map, BigInt, @@validate)로 써서 코드와 어긋났다.
+        hint += ("\nPrisma 스키마 규칙: enum 값은 약속·코드가 쓰는 글자 그대로 쓰세요('paid' 를 쓰면 값도 paid — 대문자 이름+@map 금지). "
+                 "금액·수량·재고는 Int(BigInt 금지 — 코드가 number 로 다룸). 관계 필드 이름은 약속에 적힌 이름 그대로(예: order_items). "
+                 "@default 는 그 enum 값 그대로. Prisma 에 없는 속성(@@validate, @@check, @check)은 쓰지 마세요(값 검사는 코드에서).")
+    return hint
 
 
 def _doc_hint(path: str) -> str:
@@ -1608,6 +1720,13 @@ def _related(ops: list[dict], index: int, limit: int = 36_000, hint: str = "") -
                 if j not in found:
                     found.append(j)
                 break
+    if re.search(r"""@prisma/client|\bprisma\.\w+\.(?:find|create|update|delete|upsert|count|aggregate)""", str(me.get("content") or "")) \
+            or re.search(r"\b\w+(?:Include|WhereInput|Select|CreateInput|UpdateInput|OrderByWithRelationInput)\b", hint or ""):
+        #: Prisma 를 쓰는 파일 — 모델 이름·관계 필드·enum 값은 schema.prisma 가 정한다(실기기: include: { order_items } 인데
+        #: 스키마의 관계 이름은 items). 스키마를 함께 보여 줘야 어느 쪽을 맞출지 안다.
+        for j, op in enumerate(ops):
+            if j != index and str(op.get("file") or "").endswith(".prisma") and j not in found:
+                found.insert(0, j)
     words = {w for w in re.findall(r"[A-Za-z_$][\w$]{3,}", hint or "")
              if not w.startswith("TS") and w not in {"Type", "type", "Property", "does", "exist", "Argument", "assignable",
                                                      "parameter", "Cannot", "find", "name", "Expected", "arguments", "only",

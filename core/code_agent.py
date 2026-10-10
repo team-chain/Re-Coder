@@ -1766,6 +1766,20 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
     base = (root / folder).resolve() if folder and not Path(folder).is_absolute() else (Path(folder) if folder else root.resolve())
     by_path = {str(op.get("file") or "").replace("\\", "/").lstrip("/"): op for op in ops}
     notes: list[str] = []
+    try:
+        try:
+            from gen_engine import undouble_braces
+        except ImportError:  # pragma: no cover
+            from core.gen_engine import undouble_braces  # type: ignore
+        for rel, op in list(by_path.items()):
+            content = op.get("content")
+            if isinstance(content, str) and "{{" in content:
+                fixed = undouble_braces(rel, content)
+                if fixed != content:
+                    op["content"] = fixed
+                    notes.append(f"{rel}: 두 겹으로 쓴 중괄호({{{{ }}}})를 한 겹으로")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[code_agent] 중괄호 점검 생략: {exc}", flush=True)
     manifests = ("package.json",)
     projects = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) in manifests})
     if (base / "package.json").is_file() or "package.json" in by_path:
@@ -1917,8 +1931,10 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
             prefix = f"{project}/" if project else ""
             sub_overlay = {p[len(prefix):]: c for p, c in overlay.items() if p.startswith(prefix)}
             try:
+                #: 레지스트리에 없는 버전(AI 가 지어낸 ^9.1.2 등)도 여기서 바로 고친다 — 첫 회차에만 조회(결과는 캐시).
                 fixes = (analyze(base / project if project else base, sub_overlay,
-                                 dockerfile="Dockerfile" if "Dockerfile" in sub_overlay else None)
+                                 dockerfile="Dockerfile" if "Dockerfile" in sub_overlay else None,
+                                 online=_pass == 0 and os.environ.get("RECODER_TEST_MODE") != "1")
                          .fix_data.get("file_writes") or {})
             except Exception as exc:  # noqa: BLE001
                 print(f"[code_agent] 빌드 설정 자동 교정 생략({project or '루트'}): {exc}", flush=True)
@@ -2644,6 +2660,23 @@ def generate_code(
             verification = _verify_generated_build(root, target_folder, ops_out)
             if verification["status"] != "failed":
                 break
+            try:
+                import node_fixups as _nf
+                rename_notes, renamed = _nf.prisma_relation_renames(
+                    str(verification.get("output") or ""), {op["file"]: op.get("content") or "" for op in ops_out})
+            except Exception as exc:  # noqa: BLE001 — 결정적 교정 실패는 AI 교정으로 넘어간다
+                print(f"[code_agent] Prisma 관계 이름 점검 생략: {exc}", flush=True)
+                renamed = {}
+            if renamed:
+                #: 코드가 쓰는 관계 이름과 스키마가 다르다 — 스키마의 관계 필드 이름만 바꾸고 다시 빌드한다(AI 없이).
+                for op in ops_out:
+                    if op["file"] in renamed:
+                        op["content"] = renamed[op["file"]]
+                print(f"[code_agent] {rename_notes}", flush=True)
+                _report({"step": "consistency", "round": _round + 1,
+                         "message": "Prisma 관계 이름을 코드에 맞춤 — " + "; ".join(n.split(": ", 1)[-1] for n in rename_notes[:3])})
+                consistency = _issues_for(ops_out)
+                continue
             #: 빌드 로그의 오류를 파일별 문제로 — 부분 교정이 그 소스 파일을 고친다(예전엔 Dockerfile 만 지목해 못 고쳤다).
             errors = _build_failure_issues(verification, ops_out) or [
                 {"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",

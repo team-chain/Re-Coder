@@ -227,3 +227,130 @@ def test_fill_missing_files_creates_files_the_fix_round_cannot(monkeypatch):
     assert [o["file"] for o in out] == ["api/src/routes/a.ts", "api/src/db/client.ts"]
     assert "prisma.user.findMany()" in prompts[0] and "User 테이블" in prompts[0]
     assert ge.fill_missing_files("요청", out, workers=1) == out  # 더 만들 것이 없으면 그대로
+
+
+# ── 2.0.11 빈 자리표시 파일 ─────────────────────────────────────────────────
+
+def test_placeholder_files_are_written_empty_without_ai(monkeypatch):
+    """실기기 2.0.10: AI 가 prisma/migrations/.gitkeep 을 맞게 빈 내용으로 줬는데 "내용이 비어 있음" 으로 3번 거절해 멈췄다."""
+    monkeypatch.setattr(ge, "_check_file", lambda p, c: [])
+    asked = []
+
+    def call(self, prompt, schema, operation, max_tokens, agent="", raw=False):
+        if operation == "generate_code_manifest":
+            return SimpleNamespace(text=json.dumps({"summary": "s", "contracts": "", "more": False, "files": [
+                {"file": "backend/prisma/migrations/.gitkeep", "layer": 0}, {"file": "pkg/__init__.py", "layer": 0},
+                {"file": "src/a.ts", "layer": 1}]}))
+        wanted = prompt.rsplit("**아래 파일만**", 1)[1]
+        asked.append(wanted)
+        return SimpleNamespace(text=json.dumps({"summary": "", "ops": [
+            {"action": "create", "file": "src/a.ts", "content": "export const a = 1;\n"}]}))
+    eng = ge.LargeGeneration("요청", concurrency=2, security_review=False)
+    eng.call = call.__get__(eng)
+    eng._complete_plan = lambda fs, m: fs
+    _data, ops, _ = eng.run()
+    by = {o["file"]: o["content"] for o in ops}
+    assert by["backend/prisma/migrations/.gitkeep"] == "" and by["pkg/__init__.py"] == ""
+    assert not any(".gitkeep" in w or "__init__" in w for w in asked)  # AI 에게 묻지 않는다
+
+
+def test_resume_finishes_a_placeholder_that_failed_before(monkeypatch):
+    monkeypatch.setattr(ge, "_check_file", lambda p, c: [])
+    saved = {"manifest": {"summary": "s", "contracts": ""},
+             "files": [{"file": "a.ts", "layer": 1}, {"file": "db/migrations/.gitkeep", "layer": 0}],
+             "ops": {"a.ts": {"action": "create", "file": "a.ts", "content": "export const a = 1;\n"}},
+             "partial": {}, "attempts": {"db/migrations/.gitkeep": {"tries": 3}},
+             "failed": {"db/migrations/.gitkeep": {"file": "db/migrations/.gitkeep", "reason": "응답 형식이 맞지 않음", "kind": "format"}}}
+    eng = ge.LargeGeneration("요청", concurrency=1, security_review=False)
+    eng.call = lambda *a, **k: (_ for _ in ()).throw(AssertionError("AI 를 부르면 안 된다"))
+    assert eng.resume_from(saved)
+    _data, ops, _ = eng.run()
+    assert [o["file"] for o in ops] == ["a.ts", "db/migrations/.gitkeep"]
+    assert ge.implausible("x/.gitkeep", "") == "" and ge.implausible("x/a.ts", "") != ""
+
+
+# ── 2.0.11 실기기 Haiku 결과(체크포인트 0d40)에서 나온 모양 ────────────────────────────
+
+def test_prisma_schema_alignment_matches_code(tmp_path):
+    files = _files(tmp_path, {
+        "backend/prisma/schema.prisma": ("model User {\n  id String @id\n  role Role @default(CUSTOMER)\n}\n"
+                                         "enum Role {\n  CUSTOMER @map(\"customer\")\n  ADMIN    @map(\"admin\")\n}\n"
+                                         "model Order {\n  id String @id\n  total_amount BigInt // 최소 단위\n  status OrderStatus\n\n"
+                                         "  @@validate(total_amount > 0)\n  @@index([id])\n}\n"
+                                         "enum OrderStatus {\n  PENDING @map(\"pending\")\n  PAID    @map(\"paid\")\n}\n"),
+        "backend/src/services/order.ts": "await prisma.order.update({ where: { id }, data: { status: 'paid' } });\nif (u.role === 'admin') {}\n",
+    })
+    notes, writes = nf.prisma_schema_alignment(files)
+    out = writes["backend/prisma/schema.prisma"]
+    assert "@@validate" not in out and "@@index([id])" in out
+    assert "  paid" in out and "PAID" not in out and "@default(customer)" in out and "  admin" in out
+    assert "total_amount Int // 최소 단위" in out
+    assert len(notes) == 4
+
+
+def test_prisma_schema_alignment_keeps_uppercase_when_code_uses_it(tmp_path):
+    files = _files(tmp_path, {
+        "prisma/schema.prisma": "enum S {\n  PAID @map(\"paid\")\n}\nmodel A {\n  n BigInt\n}\n",
+        "src/a.ts": "import { S } from '@prisma/client';\nx = S.PAID;\nconst big = BigInt(1);\n",
+    })
+    assert nf.prisma_schema_alignment(files) == ([], {})
+
+
+def test_express_request_interface_extends_request(tmp_path):
+    files = _files(tmp_path, {
+        "src/types/index.ts": "export interface AuthenticatedRequest {\n  user?: { id: string };\n}\nexport interface ListRequest { page: number }\n",
+        "src/routes/a.ts": "import { Router, Response } from 'express';\nimport { AuthenticatedRequest } from '../types/index.js';\n"
+                           "const r = Router();\nr.get('/', (req: AuthenticatedRequest, res: Response) => res.json(req.query));\n",
+    })
+    notes, writes = nf.express_request_interfaces(files)
+    out = writes["src/types/index.ts"]
+    assert out.startswith("import type { Request } from 'express';\n")
+    assert "interface AuthenticatedRequest extends Request {" in out and "interface ListRequest { page" in out
+
+
+def test_undouble_braces_repairs_doubled_code_but_keeps_jsx_objects():
+    doubled = ("export function P() {\n  const f = (p: number) => {{\n    return p.toLocaleString('en-US', {{\n      minimumFractionDigits: 2,\n"
+               "    }});\n  }};\n  if (ok) {{\n    go(`/o?id=${{orderId}}`);\n  }} else {{\n    stop('{{x}}');\n  }}\n"
+               "  return <div style={{ color: 'red' }}>{f(1)}</div>;\n}\n")
+    out = ge.undouble_braces("src/P.tsx", doubled)
+    assert "=> {\n" in out and "toLocaleString('en-US', {\n" in out and "});\n  };" in out
+    assert "`/o?id=${orderId}`" in out and "} else {" in out
+    assert "style={{ color: 'red' }}" in out and "'{{x}}'" in out  # JSX 속성 객체·문자열은 그대로
+    normal = "const a = () => { return { b: 1 }; };\nconst el = <div style={{ a: 1 }} />;\n"
+    assert ge.undouble_braces("a.tsx", normal) == normal
+
+
+def test_short_expires_in_is_cast(tmp_path):
+    files = _files(tmp_path, {"src/jwt.ts": "import jwt from 'jsonwebtoken';\nconst expiresIn = process.env.E || '7d';\n"
+                                            "export const s = (p: object) => jwt.sign(p, 'k', { expiresIn });\n"})
+    _notes, writes = nf.ts_safe_rewrites(files)
+    assert "{ expiresIn: expiresIn as jwt.SignOptions['expiresIn'] }" in writes["src/jwt.ts"]
+
+
+def test_nonexistent_version_is_rewritten_by_the_generation_autofix(tmp_path, monkeypatch):
+    import npm_registry
+    monkeypatch.setenv("RECODER_NPM_REGISTRY", "1")
+    monkeypatch.setattr(npm_registry, "fetch_versions",
+                        lambda name, timeout=6.0: {"jsonwebtoken": ["9.0.0", "9.0.2", "9.0.3"], "express": ["4.21.2"]}.get(name))
+    _files(tmp_path, {"package.json": json.dumps({"name": "b", "scripts": {"start": "node s.js"},
+                                                  "dependencies": {"express": "^4.21.2", "jsonwebtoken": "^9.1.2"}}),
+                      "s.js": "require('express');require('jsonwebtoken');\n"})
+    r = analyze(tmp_path, online=True)
+    pkg = json.loads(r.fix_data["file_writes"]["NODE_DEPENDENCY_VERSION_NOT_FOUND"]["package.json"])
+    assert pkg["dependencies"]["jsonwebtoken"] == "^9.0.3"
+
+
+def test_prisma_relation_rename_from_build_log():
+    contents = {
+        "backend/prisma/schema.prisma": ("model Order {\n  id String @id\n  items OrderItem[]\n  reservations Reservation[]\n}\n"
+                                         "model OrderItem {\n  id String @id\n  order Order @relation(fields: [order_id], references: [id])\n  order_id String\n}\n"
+                                         "model Reservation {\n  id String @id\n}\n"),
+        "backend/src/services/o.ts": "await prisma.order.findMany({ include: { order_items: true } });\n",
+    }
+    log = ("src/services/o.ts(1,40): error TS2353: Object literal may only specify known properties, and 'order_items' does not "
+           "exist in type 'OrderInclude<DefaultArgs>'.")
+    notes, writes = nf.prisma_relation_renames(log, contents)
+    assert "  order_items OrderItem[]" in writes["backend/prisma/schema.prisma"]
+    assert notes == ["backend/prisma/schema.prisma: Order.items → order_items(코드가 쓰는 관계 이름)"]
+    contents["backend/src/services/p.ts"] = "await prisma.order.findMany({ include: { items: true } });\n"
+    assert nf.prisma_relation_renames(log, contents) == ([], {})  # 옛 이름도 쓰면 손대지 않는다

@@ -1176,6 +1176,9 @@ def ts_safe_rewrites(files) -> tuple[list[str], dict[str, str]]:
             fixed_exp = re.sub(r"(\bexpiresIn\s*:\s*)([A-Za-z_$][\w$.]*)(\s*[,}\n])",
                                lambda m: m.group(0) if m.group(2) in ("undefined", "null") or " as " in m.group(0)
                                else f"{m.group(1)}{m.group(2)} as {j}.SignOptions['expiresIn']{m.group(3)}", new)
+            #: 줄임 표기 `{ expiresIn }` 도 같은 문제(실기기 2.0.10 Haiku)
+            fixed_exp = re.sub(r"([{,]\s*)expiresIn(\s*(?:[,}]))",
+                               lambda m: f"{m.group(1)}expiresIn: expiresIn as {j}.SignOptions['expiresIn']{m.group(2)}", fixed_exp)
             if fixed_exp != new:
                 notes.append(f"{rel}: 토큰 만료 시간(expiresIn)의 타입을 jsonwebtoken 에 맞게")
                 new = fixed_exp
@@ -1276,3 +1279,143 @@ def esm_import_extensions(files) -> tuple[list[str], dict[str, str]]:
                 writes[rel] = new_text
                 notes.append(f"{rel}: 상대 import 에 .js 확장자(ESM NodeNext)")
     return notes, writes
+
+
+# ── 21) Prisma 스키마가 코드와 다른 관례로 써진 경우 ─────────────────────────────────
+
+_PRISMA_ENUM = re.compile(r"(?ms)^(enum\s+\w+\s*\{)(.*?)^\}")
+_ENUM_VALUE = re.compile(r"(?m)^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s+)@map\(\s*\"([a-z][a-z0-9_]*)\"\s*\)([ \t]*(?://[^\n]*)?)$")
+_UNSUPPORTED_PRISMA = re.compile(r"(?m)^[ \t]*@@(?:validate|check)\s*\(.*\)[ \t]*\n?")
+
+
+def prisma_schema_alignment(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {schema.prisma: 내용}) — 스키마를 코드가 실제로 쓰는 모양에 맞춘다(동작은 같다).
+
+    실기기(2.0.10 쇼핑몰, Haiku): 스키마는 `PAID @map("paid")`·금액 BigInt 로, 코드는 'paid' 문자열·number 로 써서
+    서버 tsc 오류 78건 중 40여 건이 이것이었고, 없는 속성 `@@validate(…)` 때문에 prisma generate 부터 멈췄다.
+    · enum 값: 코드가 대문자 이름(OrderStatus.PAID·'PAID')을 쓰지 않고 @map 의 소문자 값을 쓰면 값 이름을 그 소문자로
+      (DB 에 저장되는 값은 @map 과 같아 그대로다).
+    · BigInt: 코드에 bigint 를 다루는 흔적(BigInt(…)·123n·bigint)이 없으면 Int 로(금액 최소 단위는 Int 범위).
+    · Prisma 에 없는 @@validate / @@check 줄은 지운다(값 검사는 코드가 한다)."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    all_files = list(files.files())
+    for schema in all_files:
+        if not schema.endswith(".prisma") or "/node_modules/" in f"/{schema}":
+            continue
+        text = files.read(schema) or ""
+        side = schema.split("/", 1)[0] + "/" if "/" in schema and not schema.startswith("prisma/") else ""
+        code = "\n".join(files.read(p) or "" for p in all_files
+                         if p.startswith(side) and p.endswith((".ts", ".tsx", ".js", ".mjs", ".cjs"))
+                         and "/node_modules/" not in f"/{p}" and not p.endswith(".d.ts"))
+        new = _UNSUPPORTED_PRISMA.sub("", text)
+        if new != text:
+            notes.append(f"{schema}: Prisma 에 없는 @@validate/@@check 제거")
+
+        renamed: dict[str, str] = {}
+
+        def fix_enum(m: re.Match) -> str:
+            head, body = m.group(1), m.group(2)
+            name = re.search(r"enum\s+(\w+)", head).group(1)
+            values = _ENUM_VALUE.findall(body)
+            if not values:
+                return m.group(0)
+            upper_used = any(re.search(rf"\b{re.escape(name)}\.{re.escape(v[1])}\b|['\"]{re.escape(v[1])}['\"]", code)
+                             for v in values if v[1] != v[3])
+            lower_used = any(re.search(rf"['\"]{re.escape(v[3])}['\"]", code) for v in values)
+            if upper_used or not lower_used:
+                return m.group(0)
+            notes.append(f"{schema}: enum {name} 값을 코드가 쓰는 소문자({', '.join(v[3] for v in values[:4])}…)로")
+            renamed.update({v[1]: v[3] for v in values})
+            return head + _ENUM_VALUE.sub(lambda v: f"{v.group(1)}{v.group(4)}{v.group(5)}", body) + "}"
+
+        new = _PRISMA_ENUM.sub(fix_enum, new)
+        for before, after in renamed.items():
+            #: 기본값(@default(CUSTOMER))도 바뀐 이름으로 — 안 바꾸면 prisma generate 가 P1012 로 멈춘다
+            new = re.sub(rf"@default\(\s*{re.escape(before)}\s*\)", f"@default({after})", new)
+        if re.search(r"\bBigInt\b", new) and not re.search(r"\bBigInt\s*\(|\b\d+n\b|\bbigint\b", code):
+            replaced = re.sub(r"(?m)^(\s*\w+\s+)BigInt(\??)(?=[\s\[]|$)", r"\1Int\2", new)
+            if replaced != new:
+                notes.append(f"{schema}: 코드가 number 로 다루는 BigInt 열을 Int 로")
+                new = replaced
+        if new != text:
+            writes[schema] = new
+    return notes, writes
+
+
+# ── 22) express Request 를 넓히지 않은 요청 타입 ──────────────────────────────────
+
+_REQ_IFACE = re.compile(r"(?m)^(export\s+)?interface\s+(\w*Request)\s*(<[^>{]*>)?\s*\{")
+
+
+def express_request_interfaces(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — `interface AuthenticatedRequest { user?: … }` 처럼 express 의 Request 를 넓히지 않은
+    요청 타입을 라우터 핸들러 인자로 쓰면 tsc 가 TS2769(No overload)·TS2339(req.body/params/query 없음)를 줄줄이 낸다
+    (실기기 2.0.10: 한 정의 때문에 서버 오류 25건). 그 타입을 express 핸들러에서 req 로 쓰는 곳이 있으면 `extends Request`."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    all_files = [p for p in files.files() if p.endswith((".ts", ".tsx")) and "/node_modules/" not in f"/{p}"]
+    texts = {p: files.read(p) or "" for p in all_files}
+    for rel, text in texts.items():
+        new = text
+        for m in list(_REQ_IFACE.finditer(text)):
+            name = m.group(2)
+            used = any(re.search(rf"\(\s*req\s*:\s*{re.escape(name)}\b", t) and re.search(r"from\s+['\"]express['\"]", t)
+                       for t in texts.values())
+            if not used:
+                continue
+            new = new.replace(m.group(0), m.group(0)[:-1].rstrip() + " extends Request {", 1)
+            notes.append(f"{rel}: {name} 가 express Request 를 넓히게(extends Request)")
+        if new != text:
+            imp = re.search(r"""(?m)^import\s+(type\s+)?\{([^}]*)\}\s+from\s+['"]express['"];?""", new)
+            if imp and re.search(r"\bRequest\b", imp.group(2)):
+                pass
+            elif imp:
+                new = new.replace(imp.group(0), imp.group(0).replace("{", "{ Request,", 1), 1)
+            else:
+                new = "import type { Request } from 'express';\n" + new
+            writes[rel] = new
+    return notes, writes
+
+
+# ── 23) Prisma 관계 필드 이름이 코드와 다름(빌드 로그로 확인) ──────────────────────────
+
+_INCLUDE_MISS = re.compile(r"'(\w+)' does not exist in type '(\w+?)(?:Include|Select)(?:<|')")
+
+
+def _flat(name: str) -> str:
+    return re.sub(r"[_\-]", "", name).lower()
+
+
+def prisma_relation_renames(log: str, contents: Mapping[str, str]) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {schema.prisma: 내용}) — tsc 가 `'order_items' does not exist in type 'OrderInclude'` 라고 하는데
+    스키마의 Order 에는 같은 모델(OrderItem[])을 가리키는 관계가 다른 이름(items)으로 하나뿐이면, 스키마의 관계 필드
+    이름을 코드가 쓰는 이름으로 바꾼다(관계 필드 이름은 DB 열이 아니라 Prisma 클라이언트의 이름 — DB 는 그대로).
+    실기기(2.0.10 Haiku): 서버 tsc 남은 오류 9건 중 6건이 이것. 옛 이름을 include/select 에 쓰는 코드가 있으면 손대지 않는다."""
+    misses = sorted(set(_INCLUDE_MISS.findall(log or "")))
+    schemas = [p for p in contents if p.endswith(".prisma")]
+    if not misses or len(schemas) != 1:
+        return [], {}
+    schema = schemas[0]
+    text = contents[schema] or ""
+    models = set(re.findall(r"(?m)^model\s+(\w+)\s*\{", text))
+    side = schema.split("/", 1)[0] + "/" if "/" in schema and not schema.startswith("prisma/") else ""
+    code = "\n".join(c or "" for p, c in contents.items() if p.startswith(side) and p.endswith((".ts", ".js", ".mjs", ".cjs")))
+    notes: list[str] = []
+    new = text
+    for key, model in misses:
+        block = re.search(rf"(?ms)^model\s+{re.escape(model)}\s*\{{(.*?)^\}}", new)
+        if not block or model not in models:
+            continue
+        fields = re.findall(r"(?m)^[ \t]*(\w+)[ \t]+(\w+)(\[\])?\??", block.group(1))
+        cands = [f for f, t, _l in fields if t in models and _flat(key) in {
+            _flat(t), _flat(t) + "s", _flat(re.sub(r"(?<!^)(?=[A-Z])", "_", t)) + "s"}]
+        if len(cands) != 1 or cands[0] == key or any(f == key for f, _t, _l in fields):
+            continue
+        old = cands[0]
+        if re.search(rf"(?:include|select)\s*:\s*\{{[^}}]*\b{re.escape(old)}\s*:", code):
+            continue  # 옛 이름도 쓰는 코드가 있다 — 어느 쪽이 맞는지 모른다
+        body = re.sub(rf"(?m)^([ \t]*){re.escape(old)}(?=[ \t]+\w)", rf"\g<1>{key}", block.group(1), count=1)
+        new = new[:block.start(1)] + body + new[block.end(1):]
+        notes.append(f"{schema}: {model}.{old} → {key}(코드가 쓰는 관계 이름)")
+    return notes, ({schema: new} if new != text else {})
