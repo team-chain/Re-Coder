@@ -28,9 +28,11 @@ from typing import Any, Callable, Optional
 
 try:  # 패키지(core.*)·단독 실행 모두
     import build_readiness as br
+    from security_scan import is_doc_like, redact_doc_secrets
     from vuln_advice import _where
 except ImportError:  # pragma: no cover
     from core import build_readiness as br  # type: ignore
+    from core.security_scan import is_doc_like, redact_doc_secrets  # type: ignore
     from core.vuln_advice import _where  # type: ignore
 
 Writes = dict[str, str]
@@ -569,6 +571,17 @@ def _hadolint_maker(code: str, original: str, hint: int) -> Maker:
 _PIN_LINT = ("DL3008", "DL3013", "DL3016", "DL3018", "DL3028")
 #: 보안 게이트가 "중간" 으로 세는 권고(api/routes/deploy.py 의 _HADOLINT_ADVISORY 와 같은 목록).
 _ADVISORY_LINT = frozenset(_PIN_LINT + ("DL3003", "DL3059", "DL3066"))
+#: 권고 항목의 한국어 설명(hadolint 원문은 영어).
+_LINT_KO = {
+    "DL3008": "apt-get install 패키지 버전을 고정하라는 권고입니다.",
+    "DL3013": "pip install 패키지 버전을 고정하라는 권고입니다.",
+    "DL3016": "npm install 패키지 버전을 고정하라는 권고입니다.",
+    "DL3018": "apk add 패키지 버전을 고정하라는 권고입니다.",
+    "DL3028": "gem install 버전을 고정하라는 권고입니다.",
+    "DL3003": "RUN 안에서 cd 대신 WORKDIR 를 쓰라는 권고입니다.",
+    "DL3059": "이어진 RUN 여러 개를 하나로 합치라는 권고입니다(이미지 층 수).",
+    "DL3066": "USER 에 이름 대신 숫자 ID 를 쓰라는 권고입니다(실행 환경이 root 가 아님을 확인하기 쉽게).",
+}
 
 
 def _hadolint_fixes(root: Path, violations: list[dict]) -> list[FixProposal]:
@@ -609,7 +622,7 @@ def _hadolint_fixes(root: Path, violations: list[dict]) -> list[FixProposal]:
         advisory = code in _ADVISORY_LINT
         out.append(FixProposal(id=_pid("hadolint", "manual", code, where), tool="hadolint", auto=False,
                                title=f"{code} — {'권고, 배포에 영향 없음' if advisory else '직접 확인'} ({len(hits)}곳)",
-                               detail=f"Dockerfile {where}번째 줄: {hits[0][1] or code}"
+                               detail=f"Dockerfile {where}번째 줄: {_LINT_KO.get(code) or hits[0][1] or code}"
                                       + (" 버전 고정은 재현 가능한 빌드를 위한 권고이며, 그 자체로 취약점은 아닙니다." if code in _PIN_LINT else "")
                                       + (" 보안 게이트를 빨간색으로 만들지 않습니다." if advisory else ""),
                                files=["Dockerfile"]))
@@ -701,6 +714,39 @@ def _append(text: str, block: str) -> str:
 
 def _env_value(value: str) -> str:
     return f'"{value}"' if re.search(r"[\s#'\"]", value) else value
+
+
+def _doc_redact_line(line: str) -> str:
+    """문서 한 줄의 키 모양 값을 자리표시로. 알려진 모양이 아니면(gitleaks 의 다른 규칙) 그 줄에서 가장 키 같은 값을 바꾼다."""
+    new, _ = redact_doc_secrets(line)
+    if new != line:
+        return new
+    best = max(re.findall(r"[A-Za-z0-9_.=+/-]{16,}", line), key=lambda t: (len(set(t)), len(t)), default="")
+    if not best or best.startswith(("http", "/", "./")):
+        return line
+    m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*[\"'`]?" + re.escape(best), line)
+    label = re.sub(r"[^A-Za-z0-9]+", "_", m.group(1)).strip("_").upper() if m else "SECRET"
+    return line.replace(best, f"<{label or 'SECRET'}>")
+
+
+def _doc_redact_maker(rel: str, numbers: list[int]) -> Maker:
+    def make(root: Path) -> Optional[Writes]:
+        text = _read(root, rel)
+        if text is None:
+            return None
+        lines = text.split("\n")
+        for n in numbers:
+            if 1 <= n <= len(lines):
+                lines[n - 1] = _doc_redact_line(lines[n - 1])
+        after = "\n".join(lines)
+        return {rel: after} if after != text else None
+    return make
+
+
+def _removed_tokens(before: str, after: str) -> tuple[str, ...]:
+    """바꾸면서 사라진 값 — 미리보기에서 가린다(원문을 화면으로 보내지 않는다)."""
+    gone = set(re.findall(r"[^\s\"'`<>,;]{8,}", before)) - set(re.findall(r"[^\s\"'`<>,;]{8,}", after))
+    return tuple(sorted(gone, key=len, reverse=True))
 
 
 def _move_secret_maker(rel: str, literals: list[tuple[str, str, str]], is_py: bool) -> Maker:
@@ -801,6 +847,21 @@ def _gitleaks_fixes(root: Path, findings: list[dict]) -> list[FixProposal]:
         text = _read(root, rel)
         if text is None:
             continue
+        if is_doc_like(rel):
+            #: README·.env.example 같은 문서의 예시 키 — 문서에는 실제 키가 필요 없으니 자리표시로 바꾼다(코드 동작과 무관).
+            numbers = sorted({int(f.get("line") or 0) for f in items if str(f.get("line") or "").isdigit()})
+            make = _doc_redact_maker(rel, numbers)
+            writes = make(root)
+            if writes:
+                removed = _removed_tokens(text, writes[rel])
+                out.append(FixProposal(
+                    id=_pid("gitleaks", "doc", rel, [str(n) for n in numbers]), tool="gitleaks",
+                    title=f"{rel} 의 예시 키 {len(numbers)}곳을 자리표시로 바꾸기",
+                    detail="문서(README·예시 설정)에 진짜처럼 생긴 키가 적혀 있습니다. 문서에는 실제 키가 필요 없으므로 "
+                           "<STRIPE_SECRET_KEY> 같은 자리표시로 바꿉니다. 앱 코드는 바뀌지 않습니다.",
+                    files=[rel], diff=_preview(root, writes, removed), make=make, secrets=removed,
+                    note="실제로 쓰던 키였다면 발급처에서 키를 교체(rotate)하세요 — 이미 커밋된 기록에 남아 있습니다."))
+                continue
         lines = text.split("\n")
         is_js, is_py = rel.endswith(_JS), rel.endswith(".py")
         literals: list[tuple[str, str, str]] = []
@@ -962,8 +1023,9 @@ def apply(workspace: str, reports: dict[str, Any], ids: list[str]) -> dict:
                 #: 파일마다 이번 적용 전 원본 한 번만. 키 값은 백업에도 남기지 않는다(.env 는 통째로 제외).
                 if rel != ".env" and rel not in backed_up:
                     backed_up.add(rel)
+                    marker = "[자리표시로 바꿈]" if is_doc_like(rel) else "[.env 로 옮김]"
                     for secret in p.secrets:
-                        raw = raw.replace(secret, "[.env 로 옮김]")
+                        raw = raw.replace(secret, marker)
                     backups.append(br._backup(root, rel, raw))
             target.parent.mkdir(parents=True, exist_ok=True)
             br._write_raw(target, content.replace("\n", newline) if newline != "\n" else content)

@@ -896,8 +896,13 @@ def _restore_secrets_in_ops(ops: list[dict], secrets: dict) -> None:
         from context_gate import restore_code_secrets
     except ImportError:  # pragma: no cover
         from core.context_gate import restore_code_secrets  # type: ignore
+    try:
+        from security_scan import is_doc_like
+    except ImportError:  # pragma: no cover
+        from core.security_scan import is_doc_like  # type: ignore
     for op in ops:
-        if isinstance(op.get("content"), str):
+        #: 문서(README·.env.example)에는 원래 값을 되돌려 넣지 않는다 — 자리표시가 맞다(키가 문서로 새지 않게).
+        if isinstance(op.get("content"), str) and not is_doc_like(str(op.get("file") or "")):
             op["content"] = restore_code_secrets(op["content"], secrets)
 
 
@@ -1347,6 +1352,14 @@ def _approval_state(decisions: list | None) -> str:
     return APPROVAL_APPROVED
 
 
+def _is_payment_mode_decision(d: dict) -> bool:
+    """AI 가 만든 '결제를 키 없이/모의로 시작할지' 결정인가(ReCoder 가 따로 묻는 결정과 겹친다)."""
+    if d.get("id") == "commerce-payment":
+        return True
+    text = " ".join([str(d.get("question") or "")] + [str(o.get("label") or "") for o in d.get("options") or []])
+    return bool(re.search(r"결제|payment|stripe", text, re.I) and re.search(r"모의|mock|테스트\s*키|test\s*key|키\s*없이|샌드박스|sandbox", text, re.I))
+
+
 def _build_confirm_decision(instruction: str) -> dict:
     """설계 결정이 없는 요청용 최소 확인 카드.
 
@@ -1425,10 +1438,16 @@ def generate_plan(
         #: 시작 방식 하나만 묻고 끝나면 고를 이유가 없다 — 고른 쪽에 따라 이어서 물을 결정을 함께 알려 준다.
         return {"decisions": [commerce_decision()], "followups": commerce_followups(),
                 "model": "reviewed-commerce-v1", "provider": "starter"}
+    import payment_contract
+    #: 결제가 들어가는 새 앱이면 "결제 시작 방식(모의 결제 / 실제 키)" 을 함께 묻는다 — 고른 값이 첫 로컬 배포를 정한다.
+    #: AI 가 처음부터 만드는 앱도 쇼핑몰 기반과 같은 모의 결제 약속을 지키게 해, 키가 없어도 배포까지 이어진다.
+    ask_payment = not existing and (after_starter == "custom" or payment_contract.applies(instruction))
     if after_starter == "custom":
         instruction = (instruction + "\n\n[이어서 묻는 결정] 사용자는 ReCoder 제공 쇼핑몰 기반 대신 AI 자유 생성을 골랐습니다. "
-                       "이 앱의 기술 구성 중 사용자가 직접 골라야 할 결정(데이터 저장 방식, 로그인·인증 방식, 결제 연동 방식 등)을 "
+                       "이 앱의 기술 구성 중 사용자가 직접 골라야 할 결정(데이터 저장 방식, 로그인·인증 방식 등)을 "
                        "2~3개 제시하세요. 각 결정의 선택지는 실제로 서로 다른 구현이어야 합니다.")
+    if ask_payment:
+        instruction += payment_contract.PLAN_NOTE
     print(f"[code_agent] 설계 결정 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
 
     prompt = _build_plan_prompt(
@@ -1594,6 +1613,12 @@ def generate_plan(
     # 승인하지 않은 코드가 만들어진다(= AI 가 혼자 판단). 그래서 최소 한 장의
     # 확인 카드를 항상 보장한다. 이 카드는 설계 결정이 아니므로 예약 id 를
     # 사용해 ADR 로는 기록하지 않는다(adr.RESERVED_ID_PREFIX).
+    if ask_payment:
+        #: AI 가 결제 시작 방식을 스스로 물었으면(지시를 어김) 그 카드는 빼고 ReCoder 의 카드 하나만 남긴다.
+        decisions_out = [d for d in decisions_out if not _is_payment_mode_decision(d)]
+        if len(decisions_out) >= MAX_DECISIONS:
+            decisions_out = decisions_out[:MAX_DECISIONS - 1]
+        decisions_out.append(payment_contract.payment_decision())
     if not decisions_out:
         decisions_out.append(_build_confirm_decision(instruction))
         print("[code_agent] 설계 결정 없음 → 확인 카드로 대체 (항상 사람 승인)")
@@ -2055,6 +2080,13 @@ def generate_code(
         instruction, existing, open_file, prior_files or [], context_files or [],
         target_folder, norm_decisions,
     )
+    #: 고른 결제 시작 방식 — AI 가 만드는 앱도 로컬 배포의 모의 결제 서버와 맞는 약속을 지키게 한다.
+    import payment_contract
+    from commerce_starter import selected as _commerce_selected
+    payment_mode = payment_contract.payment_choice(norm_decisions)
+    payment_ai = bool(payment_mode) and not _commerce_selected(norm_decisions)
+    if payment_ai:
+        prompt += payment_contract.code_contract(payment_mode)
 
     try:
         import generation_jobs as _jobs
@@ -2092,15 +2124,6 @@ def generate_code(
         ops_out = commerce_operations()
         data = {"summary": "검증된 쇼핑몰 기반을 준비했습니다. React·Express·PostgreSQL·Stripe 구성의 상품·가입·장바구니·주문·재고·관리자 화면을 포함합니다. 실제 결제 키·상품·HTTPS·사업 정책을 설정한 뒤 업무 검증을 진행하세요."}
         llm_resp = SimpleNamespace(model_used="reviewed-commerce-v1", provider="starter")
-        #: 이어서 고른 결제 시작 방식 — 이 폴더의 첫 로컬 배포가 데모(모의 결제)로 뜰지 정한다(배포 화면에서 바꿀 수 있음).
-        from commerce_starter import payment_choice as commerce_payment_choice
-        _payment = commerce_payment_choice(norm_decisions)
-        if _payment:
-            try:
-                import deploy_settings
-                deploy_settings.remember_payment_choice(str(root), _payment)
-            except Exception as exc:  # noqa: BLE001 - 기록 실패가 생성을 막지 않는다(배포 화면에서 직접 고를 수 있음)
-                print(f"[code_agent] 결제 시작 방식 기록 실패: {exc}")
     else:
         reason = ""
         split_mode = False
@@ -2191,7 +2214,21 @@ def generate_code(
     ops_out, autofix_notes = _autofix_ops(root, target_folder, ops_out)
     if autofix_notes:
         print(f"[code_agent] 자동 교정 {len(autofix_notes)}건: {autofix_notes[:5]}", flush=True)
-    consistency = _consistency_issues(root, target_folder, ops_out)
+    def _issues_for(candidate_ops: list[dict]) -> list[dict]:
+        found = _consistency_issues(root, target_folder, candidate_ops)
+        if payment_ai:
+            #: 결제 약속(모의 결제 모드·서명 웹훅)이 빠졌으면 일관성 점검이 고칠 오류로 넣는다 — 빠진 채로 두면 키 없이 배포할 수 없다.
+            found = found + payment_contract.issues(candidate_ops)
+        if not existing and not foundation:
+            #: 만들어 놓고 서버가 등록하지 않은 API 파일 — 그 기능이 동작하지 않으므로 서버 진입 파일을 고칠 오류로 넣는다.
+            try:
+                import unused_files
+                found = found + unused_files.route_issues(unused_files.find(candidate_ops))
+            except Exception as exc:  # noqa: BLE001 — 점검 실패가 생성을 막지 않는다
+                print(f"[code_agent] 미등록 API 점검 생략: {exc}", flush=True)
+        return found
+
+    consistency = _issues_for(ops_out)
     verification = {"kind": "docker-build", "status": "blocked", "passed": False,
                     "output": "Static consistency errors must be repaired before building."}
     visited = set()
@@ -2231,7 +2268,7 @@ def generate_code(
                 edited = None
             if edited is not None:
                 ops_e, _notes = _autofix_ops(root, target_folder, edited)
-                remaining = _consistency_issues(root, target_folder, ops_e)
+                remaining = _issues_for(ops_e)
                 if _issue_weight(remaining) < _issue_weight(errors):
                     ops_out, consistency = ops_e, remaining
                     verification = {"kind": "docker-build", "status": "blocked", "passed": False,
@@ -2257,7 +2294,7 @@ def generate_code(
             updates = _relative_to_target(updates, target_folder)
             candidate = _merge_ops(ops_out, updates)
             candidate, more_notes = _autofix_ops(root, target_folder, candidate)
-            remaining = _consistency_issues(root, target_folder, candidate)
+            remaining = _issues_for(candidate)
             if _issue_weight(remaining) > _issue_weight(consistency):
                 break
             ops_out, llm_resp, consistency = candidate, retry, remaining
@@ -2267,11 +2304,47 @@ def generate_code(
         except Exception as exc:
             print(f"[code_agent] 일관성 교정 실패: {exc}", flush=True)
             break
+    #: 만들어 놓고 아무도 쓰지 않는 파일(아키텍처 맵의 "참조 0 · 고립"). 같은 API 를 직접 부르는 파일이 있으면
+    #: 그 파일이 만들어 둔 모듈을 쓰게 한 번 고쳐 본다 — 새 오류가 생기면 고친 것을 버린다(동작이 먼저).
+    unused: list[dict] = []
+    if not existing and not foundation:
+        try:
+            import unused_files
+            unused = [u for u in unused_files.find(ops_out) if u["kind"] == "module"]
+            wiring = unused_files.wiring_issues(unused)
+            in_budget = _time.monotonic() - started_at < budget
+            if wiring and split_mode and in_budget and not any(i["severity"] == "error" for i in consistency):
+                import gen_engine as _ge
+                import generation_progress as _gp
+                _report({"step": "consistency", "round": _CONSISTENCY_ROUNDS + 1,
+                         "message": f"전체 점검 — 아무도 쓰지 않는 파일 {len(wiring)}개를 실제 화면에 연결하는 중"})
+                edited = _ge.edit_fix_round(prompt, ops_out, wiring, emit=_gp.current())
+                if edited is not None:
+                    ops_w, _notes = _autofix_ops(root, target_folder, edited)
+                    after = _issues_for(ops_w)
+                    if _issue_weight(after) <= _issue_weight(consistency):
+                        ops_out, consistency = ops_w, after
+                        verification = {"kind": "docker-build", "status": "blocked", "passed": False,
+                                        "output": "Updated proposal still requires verification."}
+                        unused = [u for u in unused_files.find(ops_out) if u["kind"] == "module"]
+                        print(f"[code_agent] 미사용 파일 연결 적용 | 남은 미사용 {len(unused)}개", flush=True)
+                    else:
+                        print("[code_agent] 미사용 파일 연결이 새 오류를 만들어 되돌림", flush=True)
+        except Exception as exc:  # noqa: BLE001 — 미사용 파일 점검 실패가 생성을 막지 않는다
+            print(f"[code_agent] 미사용 파일 점검 생략: {exc}", flush=True)
+            unused = []
     if not any(i["severity"] == "error" for i in consistency) and verification["status"] == "blocked":
         verification = _verify_generated_build(root, target_folder, ops_out)
     if verification["status"] == "failed":
         consistency.append({"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
                             "message": verification["output"], "fix": "실제 빌드 오류를 해결한 뒤 다시 검증하세요."})
+    if payment_mode:
+        #: 고른 결제 시작 방식 — 이 폴더의 첫 로컬 배포가 데모(모의 결제)로 뜰지 정한다(배포 화면에서 바꿀 수 있음).
+        try:
+            import deploy_settings
+            deploy_settings.remember_payment_choice(str((root / target_folder).resolve() if target_folder and not Path(target_folder).is_absolute() else root), payment_mode)
+        except Exception as exc:  # noqa: BLE001 - 기록 실패가 생성을 막지 않는다(배포 화면에서 직접 고를 수 있음)
+            print(f"[code_agent] 결제 시작 방식 기록 실패: {exc}")
 
     # ADR 영속화 — 승인된 결정을 docs/adr 에 구조화 기록으로 남긴다(코드와 동시 산출).
     # 시크릿 검사 '앞'에 넣어야 한다: ADR 본문에도 사용자 요청문이 들어가므로
@@ -2319,14 +2392,27 @@ def generate_code(
         ops_out.extend(adr_ops)
 
     # 적용 전 안전 검사 — 생성된 코드/ADR 에 시크릿이 박혀있으면 op 에 경고를 단다.
+    # README·.env.example 같은 문서의 키 모양 예시 값은 자리표시(<STRIPE_SECRET_KEY>)로 바꾼다 — 배포 보안 검사(gitleaks)와
+    # 같은 기준으로 잡으므로, 생성 때 통과한 문서가 배포 단계에서 "키 유출" 로 막히지 않는다.
     try:
         try:
-            from security_scan import scan_text_for_secrets
+            from security_scan import is_doc_like, redact_doc_secrets, scan_text_for_secrets
         except ImportError:
-            from core.security_scan import scan_text_for_secrets
+            from core.security_scan import is_doc_like, redact_doc_secrets, scan_text_for_secrets
         for op in ops_out:
+            if is_doc_like(op["file"]) and isinstance(op.get("content"), str):
+                op["content"], redacted = redact_doc_secrets(op["content"])
+                if redacted:
+                    print(f"[code_agent] {op['file']}: 문서의 예시 키 {redacted}줄을 자리표시로 바꿈")
             warns = scan_text_for_secrets(op["content"], op["file"])
             op["secret_warnings"] = warns
+            if any(w.get("severity") in ("critical", "high") for w in warns):
+                lines = ", ".join(str(w.get("line")) for w in warns[:5])
+                consistency.append({
+                    "code": "GENERATED_SECRET_IN_FILE", "severity": "error", "file": op["file"],
+                    "message": f"{op['file']} {lines}번째 줄에 키처럼 보이는 값이 있습니다. 이대로 적용하면 배포 보안 검사가 막습니다.",
+                    "fix": "값을 .env 로 옮기고 process.env 로 읽게 하세요(보안 탭의 자동 수정으로도 옮길 수 있습니다).",
+                })
     except Exception as exc:
         print(f"[code_agent] 시크릿 사전검사 생략: {exc}")
         for op in ops_out:
@@ -2346,6 +2432,9 @@ def generate_code(
     result = {
         "summary": summary,
         "consistency_issues": consistency,
+        #: 아무도 쓰지 않는 생성 파일 — 확장이 "모두 적용" 에서 기본으로 뺀다(사용자가 포함할 수 있음).
+        "unused_files": [{"file": u["file"], "consumers": u.get("consumers", [])} for u in unused
+                         if any(op.get("file") == u["file"] for op in ops_out)],
         "verification": verification,
         "foundation": foundation or None,
         "ops": ops_out,

@@ -642,10 +642,12 @@ def _check_file(path: str, content: str) -> list[str]:
 
 def _secret_problems(path: str, content: str) -> list[str]:
     try:
-        from security_scan import scan_text_for_secrets
+        from security_scan import is_doc_like, scan_text_for_secrets
     except ImportError:  # pragma: no cover
         return []
-    if path.lower().endswith((".md", ".example", ".sample")) or posixpath.basename(path).startswith(".env."):
+    #: 문서·예시 파일(README·.env.example)은 AI 에게 다시 쓰게 하지 않는다 — 생성이 끝날 때 키 모양 값을
+    #: 자리표시로 바꾼다(code_agent · security_scan.redact_doc_secrets, 배포 보안 검사와 같은 기준).
+    if is_doc_like(path) or posixpath.basename(path).startswith(".env."):
         return []
     out = []
     for hit in scan_text_for_secrets(content, path) or []:

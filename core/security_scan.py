@@ -82,6 +82,18 @@ def _docker_fallback_available(tool: str) -> bool:
 
 
 
+#: 결제·AI·메일·패키지 서비스 키 — gitleaks 기본 규칙과 같은 모양. 생성 직후 검사와 배포 보안 검사가 같은 것을 잡게 한다.
+#: (예전에는 이 모양이 없어서 README 의 sk_test_… 를 생성 검사는 놓치고 배포 보안 검사(gitleaks)만 잡았다.)
+PROVIDER_SECRET_PATTERNS = [
+    ("stripe_secret_key", re.compile(r"\b(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}\b"), "critical"),
+    ("stripe_webhook_secret", re.compile(r"\bwhsec_[A-Za-z0-9]{24,}\b"), "high"),
+    ("anthropic_api_key", re.compile(r"\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{40,}"), "critical"),
+    ("openai_api_key", re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}\b"), "critical"),
+    ("sendgrid_api_key", re.compile(r"\bSG\.[A-Za-z0-9_-]{16,32}\.[A-Za-z0-9_-]{16,64}\b"), "critical"),
+    ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"), "critical"),
+]
+
+
 class SecurityScanner:
     """Trivy / Hadolint / gitleaks 통합 보안 스캐너"""
 
@@ -443,6 +455,7 @@ class SecurityScanner:
         ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), "high"),
         ("slack_webhook", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+"), "high"),
         ("private_key_block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"), "critical"),
+        *PROVIDER_SECRET_PATTERNS,
         ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), "medium"),
         ("generic_secret_assignment", re.compile(
             r"(?i)(?:api[_-]?key|secret(?:[_-]?key)?|access[_-]?key|auth[_-]?token|password|passwd|client[_-]?secret)"
@@ -547,6 +560,7 @@ _STANDALONE_SECRET_PATTERNS = [
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), "high"),
     ("slack_webhook", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+"), "high"),
     ("private_key_block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"), "critical"),
+    *PROVIDER_SECRET_PATTERNS,
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), "medium"),
     ("generic_secret_assignment", re.compile(
         r"(?i)(?:api[_-]?key|secret(?:[_-]?key)?|access[_-]?key|auth[_-]?token|password|passwd|client[_-]?secret)"
@@ -613,3 +627,63 @@ def scan_project_for_secrets(repo_path: str, max_files: int = 2000, max_bytes: i
             rel = str(fp)
         out.extend(scan_text_for_secrets(text, rel))
     return out
+
+
+# ── 문서의 예시 키 → 자리표시 ────────────────────────────────────────────────────
+#: README·.env.example 같은 문서는 실제 키가 필요 없다. AI 가 진짜처럼 생긴 예시 키(sk_test_51H…)를 쓰면
+#: 배포 보안 검사(gitleaks)가 "키 유출" 로 막는다. 문서 안의 키 모양 값은 <이름> 자리표시로 바꾼다.
+_DOC_SUFFIXES = (".md", ".mdx", ".markdown", ".txt", ".rst", ".adoc", ".example", ".sample", ".template", ".dist")
+_ENV_DOC_NAMES = (".env.example", ".env.sample", ".env.template", ".env.dist", "env.example", "example.env")
+_PLACEHOLDER_NAMES = {
+    "aws_access_key_id": "AWS_ACCESS_KEY_ID", "github_token": "GITHUB_TOKEN", "slack_token": "SLACK_TOKEN",
+    "google_api_key": "GOOGLE_API_KEY", "slack_webhook": "SLACK_WEBHOOK_URL", "jwt": "JWT",
+    "stripe_secret_key": "STRIPE_SECRET_KEY", "stripe_webhook_secret": "STRIPE_WEBHOOK_SECRET",
+    "anthropic_api_key": "ANTHROPIC_API_KEY", "openai_api_key": "OPENAI_API_KEY",
+    "sendgrid_api_key": "SENDGRID_API_KEY", "npm_token": "NPM_TOKEN",
+}
+_SECRET_NAME = re.compile(r"(?i)secret|token|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|credential|signing[_-]?key")
+_DOC_ASSIGN = re.compile(r"""(?P<pre>(?<![\w.-])(?P<name>[A-Za-z_][A-Za-z0-9_.-]{1,60})["']?\s*(?:=|:)\s*["'`]?)(?P<val>[^\s"'`<>,;)\]]{8,})""")
+_NOT_A_SECRET = re.compile(r"(?i)^(?:true|false|null|none|undefined|required|optional|string|number|\$\{.*|\$\(.*|process\.env.*|os\.environ.*|https?://.*|\d+[smhd]?)$")
+
+
+def _entropy(value: str) -> float:
+    import math
+    from collections import Counter
+    n = len(value)
+    return -sum(c / n * math.log2(c / n) for c in Counter(value).values()) if n else 0.0
+
+
+def is_doc_like(path: str) -> bool:
+    """키가 필요 없는 문서·예시 파일인가(.env.local 같은 실제 설정 파일은 아니다)."""
+    low = str(path or "").replace("\\", "/").lower()
+    base = low.rsplit("/", 1)[-1]
+    return base in _ENV_DOC_NAMES or low.endswith(_DOC_SUFFIXES)
+
+
+def redact_doc_secrets(text: str) -> tuple[str, int]:
+    """문서 안의 키 모양 값을 <이름> 자리표시로 바꾼다 → (바뀐 내용, 바꾼 줄 수). 값 원문은 남기지 않는다."""
+    if not text:
+        return text, 0
+    lines = text.split("\n")
+    changed = 0
+    patterns = [(n, rx) for n, rx, _ in _STANDALONE_SECRET_PATTERNS if n in _PLACEHOLDER_NAMES]
+    for i, line in enumerate(lines):
+        new = line
+        for name, rx in patterns:
+            new = rx.sub(f"<{_PLACEHOLDER_NAMES[name]}>", new)
+
+        def assign(m: "re.Match[str]") -> str:
+            name, val = m.group("name"), m.group("val")
+            if not _SECRET_NAME.search(name) or _NOT_A_SECRET.match(val) or _STANDALONE_PLACEHOLDER.search(val):
+                return m.group(0)
+            token = re.match(r"[\w.=+/-]*", val).group(0)
+            if len(token) < 10 or _entropy(token) < 3.5:
+                return m.group(0)  # 짧거나 평범한 값(예: password: required, Admin1234!)은 그대로 — gitleaks 일반 규칙과 같은 기준
+            label = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper() or "SECRET"
+            return m.group("pre") + f"<{label}>"
+
+        new = _DOC_ASSIGN.sub(assign, new)
+        if new != line:
+            lines[i] = new
+            changed += 1
+    return "\n".join(lines), changed

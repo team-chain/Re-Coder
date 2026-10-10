@@ -11,7 +11,7 @@ import React, { useEffect, useState } from "react";
 export interface DeploySetting {
   name: string; label: string; hint: string; status: "ready" | "missing"; source: string; secret: boolean; min_length?: number;
 }
-export interface DeployDemo { available: boolean; enabled: boolean; label: string; note: string }
+export interface DeployDemo { available: boolean; enabled: boolean; label: string; note: string; unavailable_reason?: string }
 
 const SOURCE_TEXT: Record<string, string> = {
   provided: "PC 의 .env · DB 자동", generated: "자동 생성", saved: "입력함", demo: "데모 값",
@@ -96,6 +96,11 @@ export const DeploySettingsPanel: React.FC<{
           </button>
         )}
       </div>
+      {demo && !demo.available && !ready && demo.unavailable_reason && (
+        <div data-testid="demo-unavailable" style={{ marginTop: 6, color: "var(--vscode-descriptionForeground,#999)", fontSize: 10.5 }}>
+          {demo.unavailable_reason}
+        </div>
+      )}
       {demo?.available && (!ready || demo.enabled) && demo.note && (
         <div style={{ marginTop: 6, color: "var(--vscode-descriptionForeground,#999)", fontSize: 10.5 }}>{demo.note}</div>
       )}

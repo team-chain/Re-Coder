@@ -224,9 +224,31 @@ def kind_of(name: str) -> str:
     return "input"
 
 
+def _has_node_manifest(workspace: str) -> bool:
+    """Node 앱인가 — 루트 또는 한 단계 아래(server/·backend/ 등)에 package.json 이 있으면 Node 앱으로 본다.
+    모의 결제 서버는 앱 이미지의 node 로 뜨므로 Node 앱이어야 한다(AI 가 만든 앱은 루트에 package.json 이 없을 수 있다)."""
+    root = Path(workspace)
+    if (root / "package.json").is_file():
+        return True
+    try:
+        return any((d / "package.json").is_file() for d in root.iterdir()
+                   if d.is_dir() and d.name not in _SKIP_DIRS and not d.name.startswith("."))
+    except OSError:
+        return False
+
+
 def demo_supported(workspace: str, names: Optional[set[str]] = None) -> bool:
     names = names if names is not None else all_env_names(workspace)
-    return all(m in names for m in _DEMO_MARKERS) and (Path(workspace) / "package.json").is_file()
+    return all(m in names for m in _DEMO_MARKERS) and _has_node_manifest(workspace)
+
+
+def demo_unavailable_reason(names: set[str], required: Iterable[str]) -> str:
+    """데모를 못 쓰는데 결제 키를 요구하면, 왜 키 없이 못 띄우는지와 무엇을 하면 되는지 알려 준다."""
+    if not any("STRIPE" in n for n in required):
+        return ""
+    return ("이 앱 코드에는 모의 결제 모드가 없어 Stripe 키 없이는 시작할 수 없습니다. "
+            "Stripe 테스트 키(무료 계정 · sk_test_…)를 넣어 실행하거나, 코드 생성 때 결제 시작 방식에서 "
+            "'키 없이 모의 결제로 바로 실행' 을 고르면 키 없이 띄울 수 있습니다.")
 
 
 def _demo_secret(data: dict) -> str:
@@ -317,6 +339,7 @@ def evaluate(container: str, workspace: str, provided: Iterable[str], *, create:
         "label": "키 없이 결제를 끈 로컬 데모로 실행",
         "note": ("모의 결제 서버를 함께 띄웁니다. 상품·장바구니·주문을 써 볼 수 있고 주문은 잠시 뒤 '결제 완료(테스트)' 가 됩니다. "
                  "실제 카드 결제·정산은 일어나지 않으며, 운영 배포에는 쓰지 않습니다.") if demo_ok else "",
+        "unavailable_reason": "" if demo_ok else demo_unavailable_reason(names, missing),
     }
     return {"settings": settings, "missing": missing, "demo": demo}
 

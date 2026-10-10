@@ -71,7 +71,7 @@ export interface DeploySettingsState {
     plan_id: string;
     settings: Array<{ name: string; label: string; hint: string; status: 'ready' | 'missing'; source: string; secret: boolean; min_length?: number }>;
     settings_missing: string[];
-    demo: { available: boolean; enabled: boolean; label: string; note: string } | null;
+    demo: { available: boolean; enabled: boolean; label: string; note: string; unavailable_reason?: string } | null;
     risk_reasons: string[];
     command_steps?: Array<{ command: string; note?: string }>;
 }

@@ -10,6 +10,7 @@ import { loadUiState, saveUiState } from "../hooks/uiState";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { Followups, collapseChanged, insertFollowups, isConfirmOnly, pendingFollowup } from "./decisionFlow";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
+import { ConsistencyIssue, RemainingIssues, UnusedFile, UnusedFilesNote, applyLocked, filesToApply } from "./codeIssues";
 import { TeamBoard, TeamComposer } from "./TeamBoard";
 import { ANIMAL_KINDS } from "./teamAnimals";
 import { DEFAULT_DEV_AGENTS, MAX_DEV_AGENTS, TeamEvent, TeamMember, TeamView, buildRoster, emptyTeamView, reduceTeam, teamWorking } from "./teamState";
@@ -22,7 +23,11 @@ interface CodeOp {
   removal_check?: RemovalCheck;
 }
 interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; projectRoot?: string;
-  verification?: {status: string; passed: boolean; output?: string}; }
+  verification?: {status: string; passed: boolean; output?: string};
+  /** 일관성 점검·빌드 검증이 끝까지 고치지 못한 문제. 오류가 남으면 확인 전까지 적용을 잠근다. */
+  consistency_issues?: ConsistencyIssue[];
+  /** 아무도 쓰지 않는 생성 파일 — "모두 적용" 에서 기본으로 뺀다. */
+  unused_files?: UnusedFile[]; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
 //: 확정된 결정 하나. **`impact` 를 반드시 함께 보낸다.**
@@ -140,6 +145,10 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   const [applyErrors, setApplyErrors] = useState<Record<string, string>>({});
   //: 생성 결과는 파일 목록만 먼저 보여 준다(파일이 수십 개면 내용이 화면을 덮었다). 이름을 누르면 내용을 펼친다.
   const [openPreview, setOpenPreview] = useState<Record<string, boolean>>({});
+  //: 남은 오류를 확인했다고 표시한 결과(턴 id) — 확인 전에는 적용 버튼이 잠긴다.
+  const [ackIssues, setAckIssues] = useState<Record<number, boolean>>({});
+  //: 아무도 쓰지 않는 파일도 "모두 적용" 에 넣기로 한 결과(턴 id).
+  const [includeUnused, setIncludeUnused] = useState<Record<number, boolean>>({});
   const [decisionModal, setDecisionModal] = useState<DecisionModal | null>(null);
   const decisionModalRef = React.useRef<DecisionModal | null>(null);
   decisionModalRef.current = decisionModal;
@@ -404,31 +413,34 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   }, [postMessage]);
 
   const applyOp = useCallback((turn: Turn, op: CodeOp) => {
+    if (applyLocked(turn.result?.consistency_issues, !!ackIssues[turn.id])) { return; }
     const key = `${turn.id}:${op.file}`;
     // "적용 중"까지만 낙관한다. "적용됨"은 호스트의 code.applied 확인이
     // 와야 붙는다 — 쓰기 실패가 성공으로 굳는 것을 막는다.
     setApplyState((s) => ({ ...s, [key]: "pending" }));
     setApplyErrors((e) => { const copy = { ...e }; delete copy[key]; return copy; });
     postMessage("code.apply", { file: op.file, content: op.content, targetFolder: turn.targetFolder, projectRoot: turn.result?.projectRoot, ackKey: key });
-  }, [postMessage]);
+  }, [postMessage, ackIssues]);
 
   const applyAll = useCallback((turn: Turn) => {
     if (!turn.result) { return; }
-    const ops = turn.result.ops.map((op) => ({
+    if (applyLocked(turn.result.consistency_issues, !!ackIssues[turn.id])) { return; }
+    const chosen = filesToApply(turn.result.ops, turn.result.unused_files, !!includeUnused[turn.id]);
+    const ops = chosen.map((op) => ({
       file: op.file, content: op.content, ackKey: `${turn.id}:${op.file}`,
     }));
     setApplyState((s) => {
       const copy = { ...s };
-      for (const op of turn.result!.ops) { copy[`${turn.id}:${op.file}`] = "pending"; }
+      for (const op of chosen) { copy[`${turn.id}:${op.file}`] = "pending"; }
       return copy;
     });
     setApplyErrors((e) => {
       const copy = { ...e };
-      for (const op of turn.result!.ops) { delete copy[`${turn.id}:${op.file}`]; }
+      for (const op of chosen) { delete copy[`${turn.id}:${op.file}`]; }
       return copy;
     });
     postMessage("code.applyAll", { ops, targetFolder: turn.targetFolder, projectRoot: turn.result?.projectRoot });
-  }, [postMessage]);
+  }, [postMessage, ackIssues, includeUnused]);
 
   const showDiff = useCallback((turn: Turn, op: CodeOp) => {
     postMessage("code.diff", { file: op.file, content: op.content, targetFolder: turn.targetFolder, projectRoot: turn.result?.projectRoot });
@@ -597,9 +609,14 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                     ? "빌드 검증 미통과 · 오류를 해결한 뒤 배포하세요."
                     : "빌드 미검증 · Docker와 실행 설정을 확인한 뒤 검증하세요."}
               </div>
+              <RemainingIssues issues={turn.result.consistency_issues} acknowledged={!!ackIssues[turn.id]}
+                onAcknowledge={(v) => setAckIssues((cur) => ({ ...cur, [turn.id]: v }))} />
+              <UnusedFilesNote unused={turn.result.unused_files} include={!!includeUnused[turn.id]}
+                onInclude={(v) => setIncludeUnused((cur) => ({ ...cur, [turn.id]: v }))} />
               <CodeRemovalSummary checks={turn.result.ops.map((op) => op.removal_check)} />
               {(() => {
-                const ops = turn.result!.ops;
+                const ops = filesToApply(turn.result!.ops, turn.result!.unused_files, !!includeUnused[turn.id]);
+                const locked = applyLocked(turn.result!.consistency_issues, !!ackIssues[turn.id]);
                 const keys = ops.map((op) => `${turn.id}:${op.file}`);
                 const anyPending = keys.some((k) => applyState[k] === "pending");
                 const allApplied = keys.every((k) => applyState[k] === "applied");
@@ -616,9 +633,10 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                       </span>
                     )}
                     {ops.length > 1 && (
-                      <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied}
-                        style={{ ...primaryBtn, ...(anyPending || allApplied ? { opacity: 0.55, cursor: "default" } : {}) }}>
-                        {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : "모두 적용"}
+                      <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied || locked}
+                        title={locked ? "위의 남은 문제를 확인한 뒤 적용할 수 있습니다" : undefined}
+                        style={{ ...primaryBtn, ...(anyPending || allApplied || locked ? { opacity: 0.55, cursor: "default" } : {}) }}>
+                        {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : locked ? "🔒 확인 후 적용" : "모두 적용"}
                       </button>
                     )}
                   </div>
@@ -626,6 +644,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               })()}
               {turn.result.ops.map((op, i) => {
                 const key = `${turn.id}:${op.file}`;
+                const opLocked = applyLocked(turn.result!.consistency_issues, !!ackIssues[turn.id]) && applyState[key] !== "applied";
                 const warned = !!(op.secret_warnings && op.secret_warnings.length);
                 const previewOpen = turn.result!.ops.length === 1 || !!openPreview[key];
                 return (
@@ -635,6 +654,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                         <span style={{ fontSize: 9, fontWeight: 600, color: op.action === "create" ? "#6cc070" : "#d6a55c" }}>
                           {op.action === "create" ? "새 파일" : "수정"}
                         </span>
+                        {turn.result!.unused_files?.some((u) => u.file === op.file) && (
+                          <span title="어느 파일도 불러오지 않는 파일입니다" style={{ fontSize: 9, padding: "0 5px", borderRadius: 99, border: "1px solid var(--vscode-panel-border,#555)", color: "var(--vscode-descriptionForeground,#999)", whiteSpace: "nowrap" }}>아무도 안 씀</span>
+                        )}
                         <button type="button" aria-expanded={previewOpen} title={previewOpen ? "내용 접기" : "내용 보기"}
                           onClick={() => setOpenPreview((cur) => ({ ...cur, [key]: !previewOpen }))}
                           style={{ border: "none", background: "transparent", color: "inherit", padding: 0, cursor: "pointer", fontSize: 11.5, fontFamily: "var(--vscode-editor-font-family, monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textAlign: "left", minWidth: 0 }}>
@@ -643,8 +665,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                       </span>
                       <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
                         <button onClick={() => showDiff(turn, op)} style={ghostBtn}>변경 보기</button>
-                        <button onClick={() => applyOp(turn, op)} disabled={applyState[key] === "pending" || applyState[key] === "applied"}
-                          style={{ ...primaryBtn, padding: "3px 11px", fontSize: 11, ...(applyState[key] === "applied" ? { background: "transparent", color: "#6cc070", cursor: "default" } : applyState[key] === "pending" ? { opacity: 0.6, cursor: "default" } : {}) }}>
+                        <button onClick={() => applyOp(turn, op)} disabled={applyState[key] === "pending" || applyState[key] === "applied" || opLocked}
+                          title={opLocked ? "위의 남은 문제를 확인한 뒤 적용할 수 있습니다" : undefined}
+                          style={{ ...primaryBtn, padding: "3px 11px", fontSize: 11, ...(applyState[key] === "applied" ? { background: "transparent", color: "#6cc070", cursor: "default" } : applyState[key] === "pending" || opLocked ? { opacity: 0.6, cursor: "default" } : {}) }}>
                           {applyState[key] === "applied" ? "적용됨" : applyState[key] === "pending" ? "적용 중…" : applyState[key] === "failed" ? "다시 적용" : "적용"}
                         </button>
                       </span>

@@ -24,7 +24,8 @@ export interface TeamView {
   engaged?: boolean;
   phase: "planning" | "building" | "checking" | "done";
   summary: string;
-  files: Array<{ file: string; layer: number; state: FileState }>;
+  /** polish: 이미 완성된 파일을 마지막 전체 점검이 다듬는 중 — 완료로 센 채 표시만 붙인다(완료 수가 줄지 않게). */
+  files: Array<{ file: string; layer: number; state: FileState; polish?: boolean; by?: string }>;
   total: number;
   done: number;
   layer: number | null;
@@ -131,12 +132,14 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
   if (typeof event.done_count === "number") next.done = Math.max(next.done, event.done_count);
   if (typeof event.elapsed === "number") next.elapsed = event.elapsed;
   if (event.message) next.log = [...view.log, event.message].slice(-5);
+  //: by: 그 파일을 맡은 개발 슬롯(agent-N) — 화면이 완성 카드를 "누구의 작업대에서" 날려 보낼지 안다.
+  const by = event.agent && /^agent-\d+$/.test(event.agent) ? event.agent : undefined;
   const setFile = (file: string | undefined, state: FileState) => {
     if (!file) return;
     const idx = next.files.findIndex(f => f.file === file);
-    if (idx < 0) { next.files = [...next.files, { file, layer: event.layer ?? 1, state }]; return; }
-    if (next.files[idx].state === state) return;
-    next.files = next.files.map((f, i) => i === idx ? { ...f, state } : f);
+    if (idx < 0) { next.files = [...next.files, { file, layer: event.layer ?? 1, state, ...(by ? { by } : {}) }]; return; }
+    if (next.files[idx].state === state && (!by || next.files[idx].by === by)) return;
+    next.files = next.files.map((f, i) => i === idx ? { ...f, state, ...(by ? { by } : {}) } : f);
   };
   const agent = event.agent ? { ...(next.agents[event.agent] ?? { id: event.agent, state: "idle" as AgentState, done: 0 }) } : null;
   switch (event.step) {
@@ -151,16 +154,26 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
     case "wave": next.phase = "building"; next.layer = typeof event.layer === "number" ? event.layer : next.layer; break;
     case "file_start": setFile(event.file, "writing"); break;
     case "file_split": case "file_part": setFile(event.file, "parts"); break;
-    case "fixing":
-      setFile(event.file, "fixing");
+    case "fixing": {
+      const cur = event.file ? next.files.find(f => f.file === event.file) : undefined;
+      if (cur && (cur.state === "done" || cur.state === "issue")) {
+        //: 완성된 파일을 전체 점검이 다듬는다 — 완료 수·단계 ✓ 는 그대로 두고 "다듬는 중" 표시만 붙인다.
+        if (!cur.polish) next.files = next.files.map(f => f === cur ? { ...f, polish: true } : f);
+      } else {
+        setFile(event.file, "fixing");
+      }
       next.fixes += 1;
       if (/비밀/.test(event.message ?? "")) next.secretFixes += 1;
       break;
+    }
     case "verify_failed": setFile(event.file, "issue"); next.issues += 1; break;
     case "file_done": setFile(event.file, view.files.find(f => f.file === event.file)?.state === "issue" ? "issue" : "done"); break;
     case "retry": next.retries += 1; break;
     case "generated": case "consistency": next.phase = "checking"; break;
-    case "done": next.phase = "done"; next.done = Math.max(next.done, next.total); break;
+    case "done":
+      next.phase = "done"; next.done = Math.max(next.done, next.total);
+      if (next.files.some(f => f.polish)) next.files = next.files.map(f => f.polish ? { ...f, polish: false } : f);
+      break;
   }
   const record = recordOf(event, next.files);
   if (record) next.records = [...next.records, record].slice(-30);
@@ -177,6 +190,11 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
     next.agents[agent.id] = agent;
   }
   return next;
+}
+
+/** 전체 점검이 다듬고 있는 완성 파일 수(단계별 또는 전체). */
+export function polishingCount(view: TeamView, layer?: number): number {
+  return view.files.filter(f => f.polish && (layer === undefined || f.layer === layer)).length;
 }
 
 export function formatElapsed(seconds: number): string {

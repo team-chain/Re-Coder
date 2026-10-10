@@ -65,7 +65,7 @@ def test_AI_자유_생성을_고르면_AI_에게_기술_결정을_받는다(tmp_
     with pytest.raises(Exception):
         ca.generate_plan("실제 운영 가능한 쇼핑몰을 만들어줘", project_root=str(tmp_path), after_starter="custom")
     # 고정 기반 카드로 바로 돌아가지 않고 모델에 기술 결정을 묻는다
-    assert "AI 자유 생성을 골랐습니다" in seen["prompt"] and "결제 연동" in seen["prompt"]
+    assert "AI 자유 생성을 골랐습니다" in seen["prompt"] and "[결제]" in seen["prompt"]
 
 
 def test_고른_결제_시작_방식이_첫_로컬_배포의_데모_여부를_정한다(tmp_path, monkeypatch):

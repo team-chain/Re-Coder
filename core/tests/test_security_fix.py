@@ -336,3 +336,26 @@ def test_numeric_id_is_left_to_the_user_when_unknown(tmp_path):
 def test_advisory_lists_match_the_gate():
     from api.routes.deploy import _HADOLINT_ADVISORY
     assert sf._ADVISORY_LINT == frozenset(_HADOLINT_ADVISORY)
+
+
+def test_문서의_예시_키는_자리표시로_바꾸는_자동_수정을_낸다(tmp_path):
+    key = "sk_test_51HxYzAbCdEfGhIjKlMnOpQrSt"
+    readme = "# 쇼핑몰\n\n## 설정\n\n```\nSTRIPE_SECRET_KEY=" + key + "\nPORT=3001\n```\n"
+    root = _write(tmp_path, {"README.md": readme, "server.js": "console.log(1)\n"})
+    reports = {"gitleaks": {"findings": [{"rule_id": "stripe-access-token", "file": "/repo/README.md", "line": 6}]}}
+    p = next(p for p in sf.plan(str(root), reports) if p.tool == "gitleaks")
+    assert p.auto and "자리표시" in p.title and key not in p.diff
+    assert key not in json.dumps(p.public(), ensure_ascii=False)
+    sf.apply(str(root), reports, [p.id])
+    text = (root / "README.md").read_text(encoding="utf-8")
+    assert "STRIPE_SECRET_KEY=<STRIPE_SECRET_KEY>" in text and "PORT=3001" in text and key not in text
+    backups = list((root / ".recoder" / "backups").iterdir())
+    assert all(key not in b.read_text(encoding="utf-8") for b in backups)
+
+
+def test_모르는_규칙의_문서_키도_그_줄에서만_바꾼다(tmp_path):
+    root = _write(tmp_path, {"docs/setup.md": "토큰: abcDEF123ghiJKL456mnoPQR789\n다른 줄 그대로\n"})
+    reports = {"gitleaks": {"findings": [{"rule_id": "generic-api-key", "file": "/repo/docs/setup.md", "line": 1}]}}
+    p = next(p for p in sf.plan(str(root), reports) if p.tool == "gitleaks")
+    sf.apply(str(root), reports, [p.id])
+    assert (root / "docs/setup.md").read_text(encoding="utf-8") == "토큰: <SECRET>\n다른 줄 그대로\n"

@@ -577,6 +577,33 @@ def _resolve_local(files: "ProjectFiles", importer: str, spec: str) -> Optional[
     return None
 
 
+#: 같은 것을 가리키는 이름 꼬리 — `useCart` ↔ `useCartStore`, `cartApi` ↔ `cart`, `fetchProducts` ↔ `fetchproducts`.
+#: Context·Provider 처럼 다른 것을 가리키는 꼬리는 넣지 않는다(useCart 와 CartContext 는 다른 값이다).
+_ALIAS_SUFFIXES = ("Store", "State", "Slice", "Service", "Api", "API")
+
+
+def _alias_twin(text: str, name: str) -> Optional[str]:
+    """name 대신 쓸 수 있는 이 파일의 최상위 이름이 **딱 하나**면 그 이름. 아니면 None(추측하지 않는다)."""
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", name or "") or name == "default":
+        return None
+    body = _strip_js_comments(text)
+    declared = set(re.findall(r"^(?:export\s+)?(?:(?:async\s+)?function\*?|class|const|let|var)\s+([A-Za-z_$][\w$]*)", body, re.MULTILINE))
+    for group in re.findall(r"\bexport\s*\{([^}]*)\}", body):
+        for part in group.split(","):
+            if part.strip():
+                declared.add(part.split(" as ")[-1].strip())
+    declared.discard(name)
+
+    def twins(a: str, b: str) -> bool:
+        if a.lower() == b.lower():
+            return True
+        long_, short = (a, b) if len(a) > len(b) else (b, a)
+        return long_.startswith(short) and long_[len(short):] in _ALIAS_SUFFIXES
+
+    found = [d for d in declared if twins(d, name)]
+    return found[0] if len(found) == 1 else None
+
+
 def _esm_exports(text: str) -> Optional[set[str]]:
     #: 판단할 수 없는 형태(재수출·타입 수출·구조 분해 수출)는 None — 잘못 막느니 넘어간다.
     if re.search(r"\bexport\s*\*|\bexport\s+(?:declare\s+)?(?:interface|type|enum|namespace|abstract)\b|\bexport\s+(?:const|let|var)\s*[\[{]", text):
@@ -695,7 +722,12 @@ def add_missing_export(text: str, name: str, kind: str) -> Optional[str]:
         owners = [obj for obj, body in re.findall(r"^export\s+const\s+([\w$]+)\s*=\s*\{(.*?)^\};?", text, re.MULTILINE | re.DOTALL)
                   if re.search(rf"^\s*{re.escape(name)}\s*[:(]", body, re.MULTILINE)]
         if len(owners) != 1:
-            return None
+            #: 이름만 살짝 다르다(`import { useCart }` 인데 파일은 `useCartStore`) — 확실한 짝이 하나뿐이면 별칭으로 내보낸다.
+            twin = _alias_twin(text, name)
+            if twin is None:
+                return None
+            return (text.rstrip() + newline_ + newline_ + "// ReCoder: 다른 파일이 이 이름으로 불러와 별칭으로 함께 내보낸다." + newline_
+                    + f"export {{ {twin} as {name} }};" + newline_)
         newline = "\r\n" if "\r\n" in text else "\n"
         axios_like = bool(re.search(r"""from\s+['"]axios['"]|require\(\s*['"]axios['"]\s*\)""", text))
         call = f"{owners[0]}.{name}(...args)"
@@ -819,10 +851,12 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
         #: 그 파일 안에 같은 이름이 선언만 되고 내보내지지 않았으면(const CartContext = createContext()) 내보내기만
         #: 붙이면 된다 — 나눠 만든 파일끼리 가장 흔한 어긋남(실기기 생성 쇼핑몰). 모두 그런 경우에만 자동 수정.
         export_fixes = sorted({(t, n, k) for t, n, k in missing_exports})
-        fixable = bool(export_fixes) and len(export_fixes) == len({(t, n) for t, n, _ in missing_exports}) and all(
-            add_missing_export(files.read(t) or "", n, k) is not None for t, n, k in export_fixes)
-        if fixable:
-            result.fix_data["missing_exports"] = export_fixes
+        one_kind = len(export_fixes) == len({(t, n) for t, n, _ in missing_exports})
+        sure = [(t, n, k) for t, n, k in export_fixes if one_kind and add_missing_export(files.read(t) or "", n, k) is not None]
+        fixable = bool(export_fixes) and len(sure) == len(export_fixes)
+        if sure:
+            #: 확실한 것만이라도 고친다(생성 직후 자동 교정). 남은 것은 다시 점검할 때 그대로 문제로 남는다.
+            result.fix_data["missing_exports"] = sure
         result.issues.append(ReadinessIssue(
             "NODE_IMPORT_NAME_MISSING", ERROR,
             "불러오는 이름을 그 파일이 내보내지 않습니다: " + ", ".join(list(dict.fromkeys(missing_names))[:6])

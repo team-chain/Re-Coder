@@ -1,3 +1,14 @@
+# AI 앱 데모 결제 · 남은 문제 표시 · 문서 키 자리표시 · 미사용 파일 · 팀 화면 정리 (2026-10-10, 2.0.3)
+
+- 실기기 영상(2026-10-10 11-07-37.mkv): AI 자유 생성 쇼핑몰이 Stripe 키 2개를 요구하는데 데모 버튼이 없었고(모의 결제는 기반만 지원), `CartPage.jsx` 의 `useCart` 를 `cartStore` 가 내보내지 않는 채로 적용됐고, README 397줄의 예시 키를 생성 검사는 놓치고 보안 게이트(gitleaks)가 잡았다. orderApi·paymentApi 는 참조 0. 팀 화면은 대기 말풍선 겹침·점검 중 완료 수 감소·이름표 붙음·카드 덩어리.
+- 코어 `payment_contract.py`: `applies(요청)`(결제 의도 + 다른 결제사 미지정), `PLAN_NOTE`, `code_contract(mock|keys)`, `issues(ops)`(PAYMENT_MOCK_CONTRACT_MISSING · PAYMENT_WEBHOOK_MISSING · PAYMENT_DEMO_NO_LISTEN — 고칠 파일을 꼭 지목). `generate_plan` 은 새 프로젝트+결제 요청(또는 after_starter=custom)이면 AI 결정 뒤에 `commerce-payment` 를 붙이고 AI 가 만든 결제-모드 결정은 뺀다(상한이면 자리 확보). `generate_code` 는 AI 경로에서 계약을 프롬프트에 붙이고 `_issues_for` 로 일관성 점검에 넣는다. 결제 선택 기억은 두 경로 공통(대상 폴더 기준). 계약대로 만든 서버를 실제 모의 결제 서버(MOCK_PAYMENT_JS)와 붙여 주문→서명 웹훅→결제 완료를 확인했다.
+- `deploy_settings`: `demo_supported` 는 루트 또는 한 단계 아래 package.json, `evaluate().demo.unavailable_reason`(Stripe 키를 요구하는데 데모 불가일 때).
+- `build_readiness._alias_twin` + `add_missing_export` 별칭(꼬리 Store·State·Slice·Service·Api, 대소문자) — 짝이 딱 하나일 때만. 내보내기 누락은 확실한 것만이라도 `fix_data` 에 담는다(전부 확실할 때만 `auto_fix`).
+- `security_scan.PROVIDER_SECRET_PATTERNS`(두 스캐너 공통), `is_doc_like`·`redact_doc_secrets`(엔트로피 3.5·10자 이상 — gitleaks 일반 규칙 기준). 생성 결과의 문서는 자리표시로 바꾸고, 문서에는 컨텍스트 비밀을 되돌려 넣지 않는다. 코드에 남은 critical/high 키 → `GENERATED_SECRET_IN_FILE` 오류. `security_fix` 는 문서 gitleaks 결과에 `doc` 자동 수정(백업 표시 "[자리표시로 바꿈]"), 권고 Dockerfile 항목 한국어 설명.
+- `unused_files.py`: route(서버 미등록 API → `SERVER_ROUTE_NOT_MOUNTED` 오류, 서버 진입 파일 지목) / module(같은 API 를 부르는 화면에 `edit_fix_round` 로 한 번 연결, 새 오류면 되돌림). 파일 기반 주소 프레임워크(next 등)의 pages·app·routes·api, readdirSync 로 불러오는 쪽은 판단하지 않는다. 결과 `unused_files`.
+- 확장: `codeIssues.tsx`(RemainingIssues·applyLocked·UnusedFilesNote·filesToApply), `CodeAgent` 적용 잠금·미사용 제외·배지, `DeploySettingsPanel` 데모 불가 이유. `teamState` 파일 `polish`·`by`, `polishingCount`. `TeamVillage`: 높이 392, 말풍선 두 줄 엇갈림(`bubbleMax`=2×간격−10, 가장자리 `bubbleShift`), `WAIT_TEXT`, 카드 집기 차례(420ms 간격·두 자리), 돌아오는 동안 말풍선 숨김, 완성 카드는 파일 상태 전이로 맡은 작업대에서 출발해 `shelfSlot` 으로(최대 4장, 같은 작업대 180ms 간격), 선반 숫자 = 완료 − 날아가는 카드, 잠긴 칸 표시는 칩.
+- 검증: Core 2,489개·확장 550개 통과(RAG 포함). code-server 에서 개발 6명 팀 생성을 폭 1440·640 으로 0.5초마다 말풍선 겹침·잘림 측정 0, 점검 중 "5/5 1개 다듬는 중", 남은 결제 계약 오류 2건 상자·적용 잠금, 미사용 파일 제외 확인.
+
 # 설계 결정 이어서 묻기 · 진행 확인 창 (2026-10-10, 2.0.2)
 
 - 실기기 지적: 쇼핑몰 요청은 `/api/code/plan` 이 AI 를 부르지 않고 시작 방식 카드 1장만 냈고(0.05초), AI 자유 생성을 골라도 추가 결정 없이 생성했다.

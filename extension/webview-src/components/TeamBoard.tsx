@@ -7,7 +7,7 @@ import { bodySvg, faceSvg } from "./teamAnimals";
 import { CHARACTER_NAME } from "./recoderCharacter";
 import { Switch } from "./Check";
 import { TeamVillage } from "./TeamVillage";
-import { MAX_DEV_AGENTS, TeamMember, TeamView, formatElapsed } from "./teamState";
+import { MAX_DEV_AGENTS, TeamMember, TeamView, formatElapsed, polishingCount } from "./teamState";
 
 const ROLE_LABEL: Record<TeamMember["role"], string> = { planner: "설계", dev: "개발", review: "검토" };
 const ROLE_HINT: Record<TeamMember["role"], string> = {
@@ -120,6 +120,7 @@ export const TeamBoard: React.FC<{
   const status = paused ? "일시 정지" : view.phase === "planning" ? "설계 중" : view.phase === "checking" ? "전체 점검 중" : view.phase === "done" ? "완료" : "만드는 중";
   const layersDone = [0, 1, 2].map(l => view.files.length > 0 && view.files.filter(f => f.layer === l).every(f => f.state === "done" || f.state === "issue"));
   const members = roster.length ? roster : [];
+  const polishing = polishingCount(view);
   //: 폭이 넓으면 작업 마을, 좁으면 팀원별 한 줄(같은 상태). 서버 렌더(테스트)에서는 폭을 몰라 한 줄 보기.
   const boxRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(0);
@@ -138,7 +139,7 @@ export const TeamBoard: React.FC<{
       <style>{css}</style>
       <div className="rc-team-h">
         <b>팀 작업</b><span>{status}</span>
-        <span className="sp">{view.fixes ? `자동 검사로 고친 문제 ${view.fixes} · ` : ""}파일 {view.done}/{view.total || "?"} · {formatElapsed(view.elapsed)}</span>
+        <span className="sp">{view.fixes ? `자동 검사로 고친 문제 ${view.fixes} · ` : ""}파일 {view.done}/{view.total || "?"}{polishing ? ` · ${polishing}개 다듬는 중` : ""} · {formatElapsed(view.elapsed)}</span>
       </div>
       <div className="rc-team-bar"><i style={{ width: `${pct}%` }} /></div>
       {view.files.length > 0 && (

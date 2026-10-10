@@ -43,8 +43,8 @@ test('마을: 남은 카드·잠긴 단계·작업 중 말풍선·자동 검사 
  const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
  assert.match(html,/data-testid="team-village"/);
  assert.equal((html.match(/<img src="data:image\/png/g)||[]).length,roster.length);
- assert.equal((html.match(/class="cd"/g)||[]).length,5,'대기 카드 = 아직 시작 안 한 파일 수');
- assert.equal((html.match(/class="qc locked"/g)||[]).length,2,'공통 기반 중에는 기능·화면 칸이 잠김');
+ assert.equal((html.match(/class="cd( dim)?"/g)||[]).length,5,'대기 카드 = 아직 시작 안 한 파일 수');
+ assert.equal((html.match(/class="qc locked"/g)||[]).length,2,'공통 기반 중에는 기능·화면 칸이 잠김');assert.equal((html.match(/class="lk"/g)||[]).length,2);
  assert.match(html,/class="dk fix"/);assert.match(html,/자동 검사 → 고치는 중/);
  assert.match(html,/공통 기반 먼저 — 대기/,'다른 개발 리코더는 공통 기반을 기다린다');
  assert.doesNotMatch(html,/전체 점검 — 빌드로 확인/);
@@ -58,4 +58,68 @@ test('보드: 폭을 모르는 첫 렌더(서버)는 한 줄 보기, 진행 기�
  const html=renderToStaticMarkup(React.createElement(TeamBoard,{roster:buildRoster(2),view:v}));
  assert.doesNotMatch(html,/team-village/);assert.match(html,/개발 2 · src\/routes\/a\.js 작성 시작/);
  assert.match(html,/마지막에 전체 점검/);
+});
+
+test('전체 점검이 완성 파일을 고쳐도 완료 수·단계 ✓ 는 줄지 않고 "다듬는 중" 만 붙는다',()=>{
+ const {polishingCount}=require('../out/webview-test/components/teamState');
+ const built=[{step:'planned',total:7,files:FILES},...FILES.map((f,i)=>({step:'file_done',agent:'agent-1',file:f.file,done_count:i+1}))];
+ let v=run([...built,{step:'consistency',message:'전체 점검'},{step:'fixing',agent:'review',file:'src/db.js',message:'전체 점검 — src/db.js 고치는 중'},
+  {step:'fixing',agent:'review',file:'public/app.js',message:'전체 점검 — public/app.js 고치는 중'}]);
+ assert.equal(v.files.filter(f=>f.state==='done').length,7,'완료로 센다');
+ assert.equal(polishingCount(v),2);assert.equal(polishingCount(v,0),1);
+ const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster:buildRoster(2),view:v,width:900}));
+ assert.match(html,/<b>2\/2<\/b>/);assert.match(html,/1개 다듬는 중/);
+ const board=renderToStaticMarkup(React.createElement(TeamBoard,{roster:buildRoster(2),view:v}));
+ assert.match(board,/✓ 공통 기반 2/);assert.match(board,/2개 다듬는 중/);
+ v=reduceTeam(v,{step:'done'});assert.equal(polishingCount(v),0,'끝나면 표시를 지운다');
+ //: 아직 쓰는 중인 파일의 교정은 예전처럼 "고치는 중"
+ const w=run([{step:'planned',total:7,files:FILES},{step:'file_start',agent:'agent-1',file:'package.json'},{step:'fixing',agent:'agent-1',file:'package.json'}]);
+ assert.equal(w.files.find(f=>f.file==='package.json').state,'fixing');
+});
+
+test('마을: 말풍선은 사람마다 따로 — 이웃은 높이를 엇갈리고 폭은 작업대 간격 안, 이름표와 완료 수는 두 줄',()=>{
+ const {WAIT_TEXT}=require('../out/webview-test/components/TeamVillage');
+ const roster=buildRoster(6);
+ const v=run([{step:'planned',total:7,files:FILES},{step:'wave',layer:0,agents:1},{step:'file_start',agent:'agent-1',file:'package.json'},
+  {step:'file_done',agent:'agent-1',file:'package.json',done_count:1},{step:'file_start',agent:'agent-1',file:'src/db.js'}]);
+ for(const W of [520,760,1200]){
+  const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:W}));
+  const bubbles=html.match(/class="bb[^"]*"[^>]*>[^<]*/g)||[];
+  assert.equal(bubbles.length,6,'작성 중 1 + 기다리는 5명 각자');
+  for(const t of WAIT_TEXT.slice(0,5))assert.ok(html.includes(`>${t}<`),t);
+  assert.equal(bubbles.filter(b=>/class="bb[^"]* up"/.test(b)).length,3,'이웃끼리 높이를 엇갈린다');
+  const L=villageLayout(W,6);const pitch=L.desks[1].x-L.desks[0].x;
+  assert.ok(L.bubbleMax<=2*pitch-10,'엇갈린 두 줄이면 이웃과 겹치지 않는 폭');
+  assert.match(html,/<div class="lb"><span>개발 1 작업대<\/span><b>완료 1<\/b><\/div>/);
+  for(let i=1;i<6;i++)assert.ok(L.desks[i].x-L.desks[i-1].x>=L.desks[i-1].w);
+  const agentTop=L.desks[0].y-58,agentH=55;
+  assert.ok(agentTop+agentH-(58+26)-18>=L.queue.y+L.queue.h-4,'윗줄 말풍선도 대기열을 가리지 않는다');
+  assert.ok(L.desks[0].y+L.desks[0].h+30<=L.shelf.y,'이름표 두 줄이 선반과 겹치지 않는다');
+ }
+});
+
+test('마을: 선반 칸 위치 — 넘치면 숫자만 올라간다',()=>{
+ const {shelfSlot}=require('../out/webview-test/components/TeamVillage');
+ const seg={x:0,y:0,w:200,h:58};
+ assert.deepEqual(shelfSlot(seg,0),{x:8,y:20});assert.deepEqual(shelfSlot(seg,9),{x:8,y:29});
+ assert.equal(shelfSlot(seg,36),null);assert.equal(shelfSlot(seg,-1),null);
+});
+
+test('마을: 가장자리 말풍선은 안쪽으로 밀어 잘리지 않는다',()=>{
+ const {bubbleShift,bubbleWidth}=require('../out/webview-test/components/TeamVillage');
+ assert.equal(bubbleShift(400,100,800),0);
+ assert.equal(bubbleShift(30,100,800),24);assert.equal(bubbleShift(790,100,800),-44);
+ assert.ok(bubbleWidth('공통 기반 먼저 — 대기',300)<150);assert.equal(bubbleWidth('아주 긴 말풍선 문구가 여기에 들어갑니다 아주 길게',80),80);
+});
+
+test('파일마다 맡은 개발 슬롯을 기억한다(완성 카드를 맡은 작업대에서 날린다)',()=>{
+ const v=run([{step:'planned',total:7,files:FILES},{step:'file_start',agent:'agent-2',file:'src/routes/a.js'},{step:'file_start',agent:'agent-2',file:'src/routes/b.js'},
+  {step:'file_done',agent:'agent-2',file:'src/routes/a.js'},{step:'fixing',agent:'review',file:'src/routes/a.js'}]);
+ assert.equal(v.files.find(f=>f.file==='src/routes/a.js').by,'agent-2','검토의 다듬기가 맡은 사람을 바꾸지 않는다');
+ assert.equal(v.files.find(f=>f.file==='src/routes/b.js').by,'agent-2');
+});
+
+test('마을: 카드를 집으러 선 자리는 작업대 앞 리코더와 겹치지 않는다',()=>{
+ for(const W of [520,760,1200]){const L=villageLayout(W,6);const standTop=L.queue.y+L.queue.h-8,agentH=55,deskAgentTop=L.desks[0].y-58;
+  assert.ok(standTop+agentH<=deskAgentTop+2,`${W}`);}
 });
