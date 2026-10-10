@@ -23,8 +23,9 @@ def test_plan_requests_a_schema_and_parses_quotes_in_korean(monkeypatch, tmp_pat
     router = Router()
     monkeypatch.setattr(ca, "get_router", lambda: router)
     result = ca.generate_plan("쇼핑몰 사이트 하나 만들어줘", project_root=str(tmp_path))
-    assert router.requests[0].json_schema is ca.PLAN_SCHEMA
-    assert router.requests[0].json_schema["properties"]["decisions"]["maxItems"] == 3
+    #: 새 앱은 주제(topics)를 먼저 받고, 카드는 같은 PLAN_SCHEMA 로 3개씩 받는다
+    plan_requests = [r for r in router.requests if r.json_schema is ca.PLAN_SCHEMA]
+    assert plan_requests and plan_requests[0].json_schema["properties"]["decisions"]["maxItems"] == 3
     keys = [d["id"] for d in result["decisions"]]
     assert "architecture" in keys
     assert any('"기술"' in d["question"] or "기술" in d["question"] for d in result["decisions"])
@@ -41,6 +42,7 @@ def test_truncated_structured_plan_retries_with_shorter_instruction(monkeypatch,
             return super().call(request, agent, operation, prefer)
 
     monkeypatch.setattr(ca, "get_router", lambda: Cut())
+    (tmp_path / "index.js").write_text("x")  # 기존 프로젝트 — 한 번에 받는 경로
     result = ca.generate_plan("쇼핑몰", project_root=str(tmp_path))
     assert len(calls) == 2 and "재시도" in calls[1] and "2개 이하" in calls[1]
     assert result["decisions"]

@@ -1067,6 +1067,7 @@ def _build_plan_prompt(
     open_file: dict | None,
     target_folder: str = "",
     context_files: list[dict] | None = None,
+    count_rule: str = "- 결정 개수는 보통 1~3개로 제한합니다 (과도하게 쪼개지 마세요).",
 ) -> str:
     """/api/code/plan 용 프롬프트 — 코드가 아니라 '설계 결정 선택지'를 요구한다."""
     open_file, _prior, context_files = _scrub_context(open_file, None, context_files)
@@ -1104,7 +1105,7 @@ def _build_plan_prompt(
 - 각 결정은 서로 다른 2~4개의 선택지를 제공합니다.
 - 프로젝트 성격과 기존 파일을 근거로 가장 적합한 선택지 하나를 recommended: true 로 표시하세요.
 - 각 선택지의 장단점(pros/cons)을 1~3개씩 간결하게 답니다.
-- 결정 개수는 보통 1~3개로 제한합니다 (과도하게 쪼개지 마세요).
+{count_rule}
 
 기존 파일 목록:
 {tree}
@@ -1404,6 +1405,87 @@ def _build_confirm_decision(instruction: str) -> dict:
     }
 
 
+#: 새 앱을 만들 때 묻는 설계 결정 수 — 사용자가 하나하나 골라 적용하는 것이 AI-DLC 의 장점이다(사용자 지적 2.0.6:
+#: "설계가 왜 이렇게 적게 나와"). 결제 카드·시작 방식 카드와 합쳐 MAX_DECISIONS 를 넘지 않게 한다.
+FULL_DESIGN_MIN = 5
+FULL_DESIGN_MAX = 8
+_TOPIC_SCHEMA = {
+    "type": "object",
+    "properties": {"topics": {"type": "array", "maxItems": FULL_DESIGN_MAX, "items": {
+        "type": "object",
+        "properties": {"id": {"type": "string"}, "question": {"type": "string"}, "impact": {"type": "string"}},
+        "required": ["id", "question"]}}},
+    "required": ["topics"],
+}
+#: 새 앱에서 사람이 고를 만한 설계 영역(AI 가 이 앱에 필요한 것만 고른다)
+_DESIGN_AREAS = ("화면 기술(프레임워크·스타일링)", "서버 기술(프레임워크·언어)", "데이터 저장(DB 종류)", "DB 접근 방식(ORM·쿼리 빌더·SQL)",
+                 "로그인·인증 방식(세션·JWT·소셜)", "권한·관리자 구분", "API 형태(REST·GraphQL·페이지 수)", "상태 관리(화면)",
+                 "이미지·파일 저장 위치", "검색·목록(페이지 나누기·필터)", "알림(메일·문자)", "주문·재고 처리 규칙", "다국어·통화")
+
+
+def _full_design_decisions(instruction: str, existing: list[str], open_file, context_files, target_folder: str,
+                           want: int) -> list[dict] | None:
+    """새 앱의 설계 결정을 **주제 → 카드** 두 단계로 받는다(응답 길이 한도에 걸리지 않게 카드는 3개씩 나눠, 동시에).
+
+    한 번에 받으면 학생용 게이트웨이(출력 4096 토큰)에서 3개 넘게 받기 어려웠고, 스키마도 3개로 막혀 있었다.
+    주제를 못 받으면 None — 부르는 쪽이 예전 방식(한 번에)으로 받는다.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    want = max(FULL_DESIGN_MIN, min(FULL_DESIGN_MAX, want))
+    areas = ", ".join(_DESIGN_AREAS)
+    topic_prompt = _build_plan_prompt(
+        instruction, existing, open_file, target_folder=target_folder, context_files=context_files,
+        count_rule=f"- 지금은 선택지 없이 **결정 주제만** {FULL_DESIGN_MIN}~{want}개 고르세요. 이 앱을 실제로 만들 때 사용자가 직접 골라야 "
+                   f"결과가 달라지는 것만(참고 영역: {areas}). 서로 겹치지 않게, 의존 순서대로(기술 → 데이터 → 인증 → 기능 규칙).")
+    topic_prompt = topic_prompt.split("아래 JSON 형식으로만 응답하세요", 1)[0] + (
+        '아래 JSON 형식으로만 응답하세요(설명 문장 금지):\n{"topics": [{"id": "storage", "question": "데이터를 어디에 저장할까요?", '
+        '"impact": "DB 연결·배포 구성"}]}')
+    try:
+        resp = get_router().call(LLMRequest(prompt=topic_prompt, json_schema=_TOPIC_SCHEMA, max_tokens=1500, temperature=0.2),
+                                 agent="code_agent", operation="generate_plan_topics")
+        topics = [t for t in (_extract_json(resp.text or "").get("topics") or []) if isinstance(t, dict)
+                  and str(t.get("id") or "").strip() and str(t.get("question") or "").strip()]
+    except Exception as exc:  # noqa: BLE001 — 예전 방식으로 받는다
+        print(f"[code_agent] 설계 주제 받기 실패 → 한 번에 받기: {exc}", flush=True)
+        return None
+    topics = topics[:want]
+    if len(topics) < 2:
+        return None
+    print(f"[code_agent] 설계 주제 {len(topics)}개: {[t.get('id') for t in topics]}", flush=True)
+
+    def cards(chunk: list[dict]) -> list[dict]:
+        listing = "\n".join(f"- id={t['id']}: {t['question']}" + (f" (영향: {t.get('impact')})" if t.get("impact") else "")
+                            for t in chunk)
+        others = ", ".join(str(t["question"]) for t in topics if t not in chunk)
+        p = _build_plan_prompt(
+            instruction, existing, open_file, target_folder=target_folder, context_files=context_files,
+            count_rule=f"- 아래 주제마다 결정 카드를 **하나씩, 주제의 id 그대로** 만드세요(다른 주제는 다른 에이전트가 만듭니다: {others}).\n"
+                       f"{listing}\n- 선택지 summary 는 한 줄, pros·cons 는 각 1~2개로 짧게.")
+        for attempt in range(2):
+            try:
+                r = get_router().call(LLMRequest(prompt=p, json_schema=PLAN_SCHEMA, max_tokens=_PLAN_MAX_TOKENS, temperature=0.2),
+                                      agent="code_agent", operation="generate_plan")
+                got = _extract_json(r.text or "").get("decisions") or []
+                by_id = {canonical_key(d.get("id")): d for d in got if isinstance(d, dict)}
+                out = []
+                for i, t in enumerate(chunk):
+                    d = by_id.get(canonical_key(t["id"])) or (got[i] if i < len(got) and isinstance(got[i], dict) else None)
+                    if d:
+                        out.append(dict(d, id=t["id"], question=d.get("question") or t["question"],
+                                        impact=d.get("impact") or t.get("impact") or ""))
+                return out
+            except Exception as exc:  # noqa: BLE001
+                print(f"[code_agent] 설계 카드 받기 실패({attempt + 1}/2): {exc}", flush=True)
+                p += "\n\n[재시도] JSON 하나만, 문자열 안 큰따옴표 없이, 선택지는 주제마다 2~3개로 짧게."
+        return []
+
+    chunks = [topics[i:i + 3] for i in range(0, len(topics), 3)]
+    with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as pool:
+        results = list(pool.map(cards, chunks))
+    decisions = [d for part in results for d in part]
+    return decisions or None
+
+
 def generate_plan(
     instruction: str,
     session_id: str = "",
@@ -1448,8 +1530,8 @@ def generate_plan(
     ask_payment = not existing and (after_starter == "custom" or payment_contract.applies(instruction))
     if after_starter == "custom":
         instruction = (instruction + "\n\n[이어서 묻는 결정] 사용자는 ReCoder 제공 쇼핑몰 기반 대신 AI 자유 생성을 골랐습니다. "
-                       "이 앱의 기술 구성 중 사용자가 직접 골라야 할 결정(데이터 저장 방식, 로그인·인증 방식 등)을 "
-                       "2~3개 제시하세요. 각 결정의 선택지는 실제로 서로 다른 구현이어야 합니다.")
+                       "이 앱의 기술 구성·기능 규칙 중 사용자가 직접 골라야 할 결정을 제시하세요. "
+                       "각 결정의 선택지는 실제로 서로 다른 구현이어야 합니다.")
     if ask_payment:
         instruction += payment_contract.PLAN_NOTE
     print(f"[code_agent] 설계 결정 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
@@ -1468,7 +1550,14 @@ def generate_plan(
     llm_resp = None
     data: dict | None = None
     last_parse_error: Exception | None = None
-    for attempt in range(2):
+    #: 새 앱(빈 프로젝트)은 설계를 넉넉히 — 주제를 먼저 받고 카드를 나눠 받는다. 기존 프로젝트 수정은 예전처럼 1~3개.
+    if not existing:
+        room = MAX_DECISIONS - (1 if ask_payment else 0)
+        full = _full_design_decisions(instruction, existing, open_file, context_files, target_folder, min(FULL_DESIGN_MAX, room))
+        if full:
+            data = {"decisions": full}
+            llm_resp = type("Planned", (), {"model_used": "design-topics", "provider": ""})()
+    for attempt in range(0 if data is not None else 2):
         attempt_prompt = prompt if attempt == 0 else (
             prompt
             + "\n\n[재시도] 직전 응답이 올바른 JSON 이 아니었습니다. 설명 문장 없이 "
@@ -1656,7 +1745,7 @@ def _relative_to_target(ops: list[dict], target_folder: str) -> list[dict]:
     return ops
 
 
-def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[dict], list[str]]:
+def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool = True) -> tuple[list[dict], list[str]]:
     """AI 를 다시 부르지 않고 확실히 고칠 수 있는 것만 ops 에서 고친다.
 
     나눠서 만든 파일끼리 자주 어긋나는 것들(실기기 쇼핑몰): Vite 인데 JSX 가 든 .js,
@@ -1680,7 +1769,8 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
     projects = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) in manifests})
     if (base / "package.json").is_file() or "package.json" in by_path:
         projects = [""]
-    for project in projects[:5]:
+    #: 한 번 고치면 다음 것이 보인다(내보내기를 붙여야 /api 중복 호출이 보인다) — 두 번 돈다.
+    for project in [p for _ in range(2) for p in projects[:5]]:
         prefix = f"{project}/" if project else ""
         overlay = {p[len(prefix):]: op.get("content") or "" for p, op in by_path.items() if p.startswith(prefix)}
         try:
@@ -1816,7 +1906,8 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
         from build_readiness import FILE_WRITE_FIXES
     except ImportError:  # pragma: no cover
         from core.build_readiness import FILE_WRITE_FIXES  # type: ignore
-    for _pass in range(4):
+    wrote_any = False
+    for _pass in range(8):
         overlay = {p: op.get("content") or "" for p, op in by_path.items()}
         #: 루트와 하위 package.json 폴더를 각각 본다(루트 build 에 안 들어가는 하위 서버의 tsconfig 등).
         subs = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) == "package.json" and "/" in p})
@@ -1837,18 +1928,23 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
                 for rel, content in (fixes.get(code) or {}).items():
                     found_writes.append((code, prefix + rel.replace("\\", "/").lstrip("/"), content))
         applied = 0
+        touched: set[str] = set()
         for code, rel, content in found_writes:
+            if rel in touched:
+                continue  # 같은 파일의 다른 고침은 다음 점검에서(같은 원본에서 만든 두 고침이 서로 덮지 않게)
             op = by_path.get(rel)
-            if op is not None and op.get("content") == content:
-                continue
+            if op is not None and (op.get("content") == content or op.get("fixed")):
+                continue  # 같거나, ReCoder 고정 파일(검증 Dockerfile·결제 모듈)
             if op is None and (base / rel).exists():
                 continue  # 이번 결과에 없는 디스크 파일은 바꾸지 않는다(배포 준비 점검이 백업과 함께 고친다)
             by_path[rel] = dict(op or {"action": "create", "file": rel, "language": "json" if rel.endswith(".json") else ""},
                                 content=content, rationale=(op or {}).get("rationale") or f"ReCoder 자동 교정({code})")
             notes.append(f"{rel}: {code}")
+            touched.add(rel)
             applied += 1
         if not applied:
             break
+        wrote_any = True
     #: 새로 만든 tsconfig — strict 는 두고, 동작과 무관한 린트성 검사(미사용 변수·인덱스 접근 undefined)만 끈다.
     #: AI 코드의 tsc 빌드 실패 대부분이 이것이었다(실기기 TEMP: 40건 중 30건).
     try:
@@ -1882,7 +1978,60 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
                 notes.append("Dockerfile: 하위 폴더 의존성 설치 추가")
         except Exception as exc:  # noqa: BLE001
             print(f"[code_agent] Dockerfile 자동 교정 생략: {exc}", flush=True)
+    if wrote_any and _again:
+        #: 새 파일·import 를 넣으면 앞 단계가 고칠 것(내보내기·/api 중복 등)이 새로 보인다 — 한 번 더 돈다.
+        more_ops, more_notes = _autofix_ops(root, target_folder, list(by_path.values()), _again=False)
+        return more_ops, notes + [n for n in more_notes if n not in notes]
     return list(by_path.values()), notes
+
+
+def _export_names(text: str) -> list[str]:
+    names = re.findall(r"\bexport\s+(?:declare\s+)?(?:default\s+)?(?:async\s+)?(?:abstract\s+)?(?:const\s+enum|const|let|var|function\*?|class|interface|type|enum)\s+([\w$]+)", text)
+    for group in re.findall(r"\bexport\s*\{([^}]*)\}", text):
+        names += [p.split(" as ")[-1].strip() for p in group.split(",") if p.strip()]
+    if re.search(r"\bexport\s+default\b", text):
+        names.append("default")
+    names += re.findall(r"\b(?:module\.)?exports\.([\w$]+)\s*=", text)
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def _name_tokens(name: str) -> set[str]:
+    return {t.lower() for t in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name or "") if len(t) > 2}
+
+
+def _name_mismatch_issues(files, details: list, prefix: str = "") -> list[dict]:
+    """(불러오는 파일, 이름, 내보내는 파일) → 고칠 파일마다 한 건. 내보내는 쪽에 비슷한 이름이 있으면 쓰는 쪽을, 없으면
+    내보내는 쪽(선언·export)을 지목하고, 판단에 필요한 사실(실제 export 목록·쓰는 줄)을 함께 담는다."""
+    by_target: dict[str, list[tuple[str, str]]] = {}
+    for importer, name, target in details:
+        by_target.setdefault(target, []).append((importer, name))
+    out: list[dict] = []
+    per_file: dict[str, list[str]] = {}
+    for target, uses in by_target.items():
+        text = files.read(target) or ""
+        exported = _export_names(text)
+        shown = ", ".join(exported[:30]) or "(없음)"
+        for importer, name in uses:
+            similar = [e for e in exported if e != "default" and _name_tokens(e) & _name_tokens(name)] if name != "default" else \
+                [e for e in exported if e != "default"]
+            if similar:
+                per_file.setdefault(importer, []).append(
+                    f"{target} 에서 불러오는 `{name}` 이(가) 그 파일에 없습니다. {target} 가 실제로 내보내는 이름: {shown}. "
+                    f"같은 일을 하는 이름({', '.join(similar[:4])})으로 바꿔 쓰세요(인자·반환 모양을 그 함수에 맞게)."
+                    if name != "default" else
+                    f"{target} 에는 기본 내보내기(default)가 없습니다. 실제로 내보내는 이름: {shown}. "
+                    f"`import {{ {similar[0]} }} from …` 처럼 이름으로 불러오세요.")
+            else:
+                usage = [l.strip() for l in (files.read(importer) or "").splitlines()
+                         if re.search(rf"\b{re.escape(name)}\b", l) and not l.lstrip().startswith("import")][:4]
+                per_file.setdefault(target, []).append(
+                    f"{importer} 가 이 파일에서 `{name}` 을(를) 불러오는데 없습니다(이 파일이 내보내는 이름: {shown}). "
+                    f"쓰는 쪽에 맞게 선언하고 export 하세요." + (f" 쓰는 곳: {' / '.join(usage)}" if usage else ""))
+    for rel, problems in per_file.items():
+        out.append({"code": "NODE_IMPORT_NAME_MISSING", "severity": "error", "file": prefix + rel,
+                    "message": " ".join(problems)[:1800],
+                    "fix": "실제로 있는 이름으로 맞추거나 빠진 것을 구현해 export 하세요. 다른 파일을 지우거나 기능을 빼지 마세요."})
+    return out
 
 
 #: 프로젝트 전체를 봐야 판단할 수 있는 문제 — 루트를 점검할 때 하위 폴더 단독 점검의 같은 문제는 버린다.
@@ -1921,6 +2070,7 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         projects.add("")
     found: list[dict] = []
     root_seen: set[tuple[str, str]] = set()
+    name_seen: set[tuple[str, str]] = set()
     for project in sorted(projects)[:5]:
         prefix = f"{project}/" if project else ""
         overlay = {rel[len(prefix):]: content for rel, content in written.items() if rel.startswith(prefix)}
@@ -1933,9 +2083,28 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         except Exception as exc:  # noqa: BLE001 - 점검 실패가 생성을 막지 않는다
             print(f"[code_agent] 일관성 점검 생략: {exc}", flush=True)
             continue
+        details = after.fix_data.get("missing_names_detail") or []
+        if details and project and "" in projects:
+            details_shown = True  # 루트 점검이 같은 파일들을 이미 파일별로 냈다
+        else:
+            details_shown = False
+        if details and not details_shown:
+            #: 이름이 어긋난 문제는 묶음 한 건이 아니라 **고칠 파일마다** 한 건씩, 그 파일이 실제로 내보내는 이름을 함께 —
+            #: 묶음 한 건은 첫 파일만 지목해 나머지가 끝까지 남았다(실기기 TEMP 2.0.6: getOrdersByAdmin·apiClient).
+            try:
+                from build_readiness import ProjectFiles as _PF
+            except ImportError:  # pragma: no cover
+                from core.build_readiness import ProjectFiles as _PF  # type: ignore
+            for item in _name_mismatch_issues(_PF(base / project if project else base, overlay), details, prefix):
+                key = (item["file"], item["message"])
+                if key not in name_seen:
+                    name_seen.add(key)
+                    found.append(item)
         for issue in after.issues:
             if (issue.code, issue.message) in before or issue.code == "DOCKERIGNORE_MISSING":
                 continue
+            if details and issue.code in ("NODE_IMPORT_NAME_MISSING", "NODE_IMPORT_NAME_UNDEFINED"):
+                continue  # 위에서 파일별로 냈다
             if project and "" in projects and (issue.code in _ROOT_SCOPED or (issue.code, prefix + (issue.file or "")) in root_seen):
                 #: 루트 프로젝트가 함께 점검한다 — 하위 폴더만 따로 보면 폴더 밖(../frontend/dist)을 잘못 문제 삼고, 같은 문제가 두 번 나온다.
                 continue
@@ -2089,6 +2258,45 @@ def _issue_weight(issues: list[dict]) -> int:
     # even when reading the now-valid manifest reveals more missing dependencies.
     keys = {(i['code'], i.get('file', '')) for i in issues if i['severity'] == 'error'}
     return sum(100 if code == 'NODE_PACKAGE_JSON_INVALID' else 1 for code, _ in keys)
+
+
+def _apply_docker_kit(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[dict], bool]:
+    """새로 만든 화면·서버 폴더형 Node 앱이면 Dockerfile 을 ReCoder 검증본(고정 파일)으로 쓴다.
+
+    AI 가 쓴 Dockerfile 이 매번 다른 방식으로 깨졌다(실기기 TEMP 2.0.6: 빌드 단계 --omit=dev → tsc 없음, 실행 단계에
+    backend/package.json 없음 → No workspaces found). 구조를 확신할 수 없으면 AI 것을 그대로 둔다(정적 점검이 고친다).
+    """
+    try:
+        import docker_kit
+        from build_readiness import ProjectFiles
+    except ImportError:  # pragma: no cover
+        from core import docker_kit  # type: ignore
+        from core.build_readiness import ProjectFiles  # type: ignore
+    folder = (target_folder or "").replace("\\", "/").strip("/")
+    base = (root / folder).resolve() if folder and not Path(folder).is_absolute() else (Path(folder) if folder else root.resolve())
+    overlay = {str(op.get("file") or "").replace("\\", "/").lstrip("/"): op.get("content") or "" for op in ops if op.get("action") != "delete"}
+    try:
+        info = docker_kit.layout(ProjectFiles(base, overlay))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[code_agent] Dockerfile 검증본 판단 생략: {exc}", flush=True)
+        return ops, False
+    if not info:
+        return ops, False
+    content = docker_kit.render(info)
+    out = [op for op in ops if str(op.get("file") or "").replace("\\", "/").lstrip("/") not in ("Dockerfile",)]
+    current = next((op for op in ops if str(op.get("file") or "").replace("\\", "/").lstrip("/") == "Dockerfile"), None)
+    if current is not None and current.get("content") == content:
+        current["fixed"] = True  # 점검의 자동 수정이 이미 검증본으로 바꿨다 — AI 교정이 덮지 않게
+        return ops, False
+    out.append({"action": "edit" if (base / "Dockerfile").exists() else "create", "file": "Dockerfile", "language": "dockerfile",
+                "content": content, "fixed": True,
+                "rationale": "ReCoder 검증 Dockerfile — 화면·서버 폴더를 각각 설치·빌드하고 실행 이미지에는 운영 의존성과 빌드 결과만"})
+    ignore = next((op for op in out if str(op.get("file") or "").lstrip("/") == ".dockerignore"), None)
+    if ignore is None or "node_modules" not in (ignore.get("content") or ""):
+        out = [op for op in out if str(op.get("file") or "").lstrip("/") != ".dockerignore"]
+        out.append({"action": "create", "file": ".dockerignore", "language": "", "content": docker_kit.DOCKERIGNORE,
+                    "fixed": True, "rationale": "ReCoder: Docker 빌드에서 제외할 파일"})
+    return out, True
 
 
 def _build_failure_issues(verification: dict, ops: list[dict]) -> list[dict]:
@@ -2337,6 +2545,10 @@ def generate_code(
             ops_out = [op for op in ops_out if not payment_kit.is_ai_mock(op.get("file", ""))] + kit_ops
             prompt += _extra
     ops_out, autofix_notes = _autofix_ops(root, target_folder, ops_out)
+    if not existing and not foundation:
+        ops_out, kit_docker = _apply_docker_kit(root, target_folder, ops_out)
+        if kit_docker:
+            autofix_notes.append("Dockerfile: ReCoder 검증본")
     if autofix_notes:
         print(f"[code_agent] 자동 교정 {len(autofix_notes)}건: {autofix_notes[:5]}", flush=True)
     #: 사용자가 [이 파일 빼고 결과 받기]를 고른 파일 — 빠진 채로 적용하면 그 파일을 쓰는 곳이 동작하지 않으므로 남은 문제로 보인다.
@@ -2373,6 +2585,17 @@ def generate_code(
             print(f"[code_agent] 생성 시간 예산({budget}s) 초과 — AI 교정을 멈추고 결과를 돌려줍니다", flush=True)
             break
         errors = [i for i in consistency if i["severity"] == "error"]
+        if not existing and not foundation:
+            #: 교정이 package.json·시작 스크립트를 바꿨을 수 있다 — 검증본 Dockerfile 을 지금 구조로 다시 쓴다.
+            ops_out, _changed = _apply_docker_kit(root, target_folder, ops_out)
+        if errors and _round >= 2 and split_mode:
+            #: 정적 문제가 두 번 고쳐도 남으면 빌드도 함께 돌려 소스 오류(tsc·vite)를 한꺼번에 받는다 —
+            #: 정적 문제만 고치다 빌드 검증을 한 번도 못 해 "빌드 검증 미통과" 로 끝났다(실기기 TEMP 2.0.6).
+            _report({"step": "consistency", "round": _round + 1, "message": "남은 문제와 함께 컨테이너 빌드 오류도 확인하는 중"})
+            built = _verify_generated_build(root, target_folder, ops_out)
+            if built["status"] == "failed":
+                seen = {(e.get("file"), e.get("code")) for e in errors}
+                errors = errors + [e for e in _build_failure_issues(built, ops_out) if (e.get("file"), e.get("code")) not in seen]
         if not errors:
             _report({"step": "consistency", "round": _round + 1, "message": "컨테이너 빌드로 실제 동작을 확인하는 중"})
             verification = _verify_generated_build(root, target_folder, ops_out)
@@ -2400,7 +2623,7 @@ def generate_code(
                 except ImportError:  # pragma: no cover
                     from core import gen_engine as _ge  # type: ignore
                     from core import generation_progress as _gp  # type: ignore
-                edited = _ge.edit_fix_round(prompt, ops_out, errors, emit=_gp.current())
+                edited = _ge.edit_fix_round(prompt, ops_out, errors, max_files=12, emit=_gp.current())
             except Exception as exc:  # noqa: BLE001 — 교정 실패는 아래 파일 단위 교정으로 넘어간다
                 print(f"[code_agent] 부분 교정 생략: {exc}", flush=True)
                 edited = None
@@ -2471,11 +2694,15 @@ def generate_code(
         except Exception as exc:  # noqa: BLE001 — 미사용 파일 점검 실패가 생성을 막지 않는다
             print(f"[code_agent] 미사용 파일 점검 생략: {exc}", flush=True)
             unused = []
-    if not any(i["severity"] == "error" for i in consistency) and verification["status"] == "blocked":
+    if verification["status"] == "blocked":
+        #: 정적 문제가 남아도 실제 빌드는 확인한다 — 결과에 "빌드 검증 미통과" 만 남고 무엇이 깨지는지 몰랐다(실기기 2.0.6).
         verification = _verify_generated_build(root, target_folder, ops_out)
     if verification["status"] == "failed":
-        consistency.append({"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
-                            "message": verification["output"], "fix": "실제 빌드 오류를 해결한 뒤 다시 검증하세요."})
+        per_file = _build_failure_issues(verification, ops_out)
+        seen = {(i.get("file"), i.get("code")) for i in consistency}
+        consistency += [i for i in per_file if (i.get("file"), i.get("code")) not in seen] or [
+            {"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
+             "message": verification["output"], "fix": "실제 빌드 오류를 해결한 뒤 다시 검증하세요."}]
     if payment_mode:
         #: 고른 결제 시작 방식 — 이 폴더의 첫 로컬 배포가 데모(모의 결제)로 뜰지 정한다(배포 화면에서 바꿀 수 있음).
         try:

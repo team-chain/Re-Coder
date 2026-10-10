@@ -3168,6 +3168,26 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
     """
     stack = request.stack or _detect_stack(request.workspace_path)
 
+    #: 화면·서버 폴더형 Node 앱은 ReCoder 검증 Dockerfile 을 바로 쓴다(AI·범용 템플릿보다 확실하다 — 실기기 TEMP 2.0.6).
+    if request.stack is None:
+        try:
+            import docker_kit
+            kit_content = await asyncio.to_thread(docker_kit.for_workspace, request.workspace_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("verified Dockerfile skipped: %s", exc)
+            kit_content = None
+        if kit_content:
+            proposal = InfraFileProposal(
+                file_type=FileType.DOCKERFILE, target_path="Dockerfile", content=kit_content,
+                base_template="recoder-node-workspace", risk_level=RiskLevel.LOW,
+                approval_level=ApprovalLevel.CONFIRM, risk_reasons=[],
+                workspace_path=str(Path(request.workspace_path).expanduser().resolve()))
+            if not (Path(request.workspace_path) / '.dockerignore').exists():
+                proposal.risk_reasons.append(SERVER_IGNORE_NOTICE)
+            proposal.risk_reasons.extend(_readiness_notes(request.workspace_path, proposal.content))
+            _infra_proposals[proposal.proposal_id] = proposal
+            return proposal
+
     proposal = None
     project = None
     ai_note = ""
@@ -4316,6 +4336,18 @@ def _auto_fix_before_build(workspace_path: str) -> list[dict]:
         if result.get("applied"):
             applied.append({"code": issue.code, "message": issue.message[:300],
                             "changed": [c for c in result.get("changed", []) if not str(c).startswith(".recoder/")][:12]})
+    #: 보안 게이트에 '권고' 로 남을 Dockerfile 항목을 같은 동작으로 정리한다(문제로 띄우지 않던 항목 — 사용자 지적 2.0.6).
+    try:
+        readiness = analyze(workspace_path)
+        titles = readiness.fix_data.get("lint_titles") or []
+        if (readiness.fix_data.get("file_writes") or {}).get("DOCKERFILE_LINT_ADVISORY"):
+            result = apply_fix(workspace_path, "DOCKERFILE_LINT_ADVISORY")
+            if result.get("applied"):
+                applied.append({"code": "DOCKERFILE_LINT_ADVISORY",
+                                "message": "보안 검사 권고를 같은 동작으로 정리: " + ", ".join(titles)[:280],
+                                "changed": [c for c in result.get("changed", []) if not str(c).startswith(".recoder/")][:12]})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pre-deploy lint cleanup failed: %s", exc)
     return applied
 
 

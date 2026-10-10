@@ -1,3 +1,15 @@
+# 개발·배포·보안·설계 — 영상 18-09-09 대응 (2026-10-10, 2.0.7)
+
+- 실기기: 결과 화면 "불러오는 이름 없음 2건"(getOrdersByAdmin·default×2·apiClient×5·OrderDetail), Docker "tsc: not found"(빌드 단계 `npm install --omit=dev`), 보안 게이트 "이상 없음 · 권고 2건"(DL3059), 설계 카드 2장(시작 방식·결제)뿐.
+- 원인 추적(sandbox Docker 로 사용자 TEMP 재현): ① 실행 단계에 backend/package.json 없이 `npm start --workspace=backend` → No workspaces found ② express.static('frontend/dist') 작업 폴더 기준 ③ 테이블은 scripts/init-db.ts(tsx)로만 생성 → relation does not exist ④ main.tsx·App.tsx 이중 BrowserRouter → 빈 화면 ⑤ 제네릭 `apiClient.get<T>('/api/…')` /api 중복 ⑥ PLAN_SCHEMA maxItems 3 + 프롬프트 "1~3개".
+- `docker_kit.py`: layout(서버 backend|server|api + start `node x.js`, 화면 frontend|client|web + vite/CRA outDir, cwd_root=작업 폴더 기준 화면 경로), render(빌드: 폴더별 `--workspaces=false` 설치·빌드·prune / 실행: apk upgrade·npm 제거·COPY --from·USER 1000·JSON HEALTHCHECK/CMD, hadolint 0건), runtime_breaks. 생성(`_apply_docker_kit`, fixed op), 배포 Dockerfile 생성 라우트(먼저), readiness DOCKERFILE_RUNTIME_BROKEN(자동 수정).
+- `node_fixups`: build_stage_omits_dev, missing_imports(한 파일만 내보내는 이름, 지역 선언·인자·다시 내보내기 제외), missing_type_packages, nested_routers(+App 이 다시 감싸는 공급자). build_readiness: add_missing_export 에 라우터 기본 내보내기·axios 별칭, api_prefix_rewrite 제네릭·여러 줄, 이름 내보내기 따라가기, `missing_names_detail`.
+- code_agent: `_name_mismatch_issues`(파일별·export 목록·쓰는 줄), `_autofix_ops` 재실행(새 파일·import 뒤), 같은 파일 한 패스에 한 번, fixed op 보호, round≥2 빌드 병행, 마지막 빌드 항상, edit_fix_round max_files 12.
+- 배포: `local_services.ddl_from_code`(코드 문자열의 CREATE TABLE/INDEX/EXTENSION → IF NOT EXISTS, 런타임 코드가 IF NOT EXISTS 없이 만들면 None) → find_init_sql 폴백(~/.recoder/schema/<hash>.sql).
+- 보안: `security_fix.lint_clean`(DL3019·DL3018·DL3008·DL3066·DL3059 `_merge_runs`·DL3025), DL3018 고칠 때 떨어진 예외 표시 제거, readiness 는 문제로 띄우지 않고 fix_data 만(생성 file_writes·배포 전 자동 정리), 게이트 라벨 "이상 없음", 남는 항목 제목 "참고".
+- 설계: `_full_design_decisions` — 빈 프로젝트면 topics(5~8, `_TOPIC_SCHEMA`) → 3개씩 PLAN_SCHEMA 동시 3개 → id 맞춤, 실패 시 예전 한 번에.
+- 검증: Core 2,547개·확장 555개(1건 sandbox git insteadOf). TEMP 원본을 API 배포: 배포 전 자동 수정 17건(이름·import·라우터·/api·@types·검증 Dockerfile) 뒤 남은 것은 AI 타입 오류 8건(빌드 진단). 타입 검사만 끈 사본으로 실행 확인: 검증 Dockerfile 빌드·데모 배포·DB 테이블 자동 생성·첫 화면 상품 5개·가입→장바구니→주문→결제 모듈→모의 결제 웹훅→paid. 가짜 게이트웨이 팀 생성 API: 설계 8장(주제 7+결제), 마지막 빌드 검증 통과.
+
 # AI 앱 개발·배포·보안 — 실제 Docker 빌드 기준으로 고침 (2026-10-10, 2.0.6)
 
 - 실기기 영상 16-48-26 + TEMP 쇼핑몰(AI 자유 생성)을 sandbox Docker 로 실제 빌드·배포해 원인을 순서대로 찾음: backend/·frontend/ package.json 없음 → lock 없는 npm ci → strict tsconfig 의 린트성 오류 30건·실제 타입 오류 ~10건 → frontend tsconfig references(tsconfig.node.json 없음) → 기본 내보내기 없음(.tsx 에 export interface 가 있어 `_esm_exports` 가 판단 포기) → `new URL('../../../frontend/dist')`(컨테이너에서 / 밖) → useApi 훅 무한 요청(6초 2,258번 → express-rate-limit 429) → AI 자체 결제(HMAC·mock-payment-server, 배포 모의 결제와 불일치).

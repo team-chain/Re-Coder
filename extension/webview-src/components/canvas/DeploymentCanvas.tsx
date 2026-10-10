@@ -79,7 +79,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const onScanResults=useCallback((results:Partial<Record<'trivy'|'hadolint'|'gitleaks',ScanResultLite>>,running:boolean)=>{
     const verdict=gateVerdict(['trivy','hadolint','gitleaks'],results,running);
     setManualGate(verdict.state==='idle'?null:verdict);
-    if(gateRunning.current&&!running&&(verdict.state==='clean'||verdict.state==='issues')) addEvent(`manual-gate-${Date.now()}`,verdict.state==='clean'?'보안 검사 통과':'보안 검사 이상 발견',verdict.state==='clean'?(verdict.advisories?`이미지·Dockerfile·시크릿 검사에서 막을 문제가 없습니다. 권고 ${verdict.advisories}건은 보안 화면에서 볼 수 있습니다.`:'이미지·Dockerfile·시크릿 검사에서 이상이 없습니다.'):`${verdict.label} · 보안 화면에서 확인하세요.`);
+    if(gateRunning.current&&!running&&(verdict.state==='clean'||verdict.state==='issues')) addEvent(`manual-gate-${Date.now()}`,verdict.state==='clean'?'보안 검사 통과':'보안 검사 이상 발견',verdict.state==='clean'?'이미지·Dockerfile·시크릿 검사에서 이상이 없습니다.':`${verdict.label} · 보안 화면에서 확인하세요.`);
     gateRunning.current=running;
   },[addEvent]);
 

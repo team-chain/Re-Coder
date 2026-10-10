@@ -330,7 +330,7 @@ def test_numeric_id_is_left_to_the_user_when_unknown(tmp_path):
         root = _write(tmp_path / str(line) / str(abs(hash(text))), {"Dockerfile": text})
         props, out = _apply_lint(root, [{"code": "DL3066", "line": line, "message": "Non-numeric user-id"}])
         assert out == text
-        assert [p.auto for p in props] == [False] and "권고, 배포에 영향 없음" in props[0].title
+        assert [p.auto for p in props] == [False] and "참고, 배포에 영향 없음" in props[0].title
 
 
 def test_advisory_lists_match_the_gate():

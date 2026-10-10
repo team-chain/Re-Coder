@@ -30,7 +30,7 @@ test('Dockerfile advisories alone keep the gate green; blocking findings still t
  const advisory=f=>({code:f,severity:'MEDIUM',level:'warning'});
  const hadolint=ok('hadolint',{medium_count:4,findings:['DL3016','DL3016','DL3018','DL3066'].map(advisory)});
  const v=gateVerdict(kinds,{trivy:ok('trivy'),hadolint,gitleaks:ok('gitleaks')},false);
- assert.equal(v.state,'clean');assert.equal(v.issues,0);assert.equal(v.advisories,4);assert.match(v.label,/권고 4건/);
+ assert.equal(v.state,'clean');assert.equal(v.issues,0);assert.equal(v.advisories,4);assert.equal(v.label,'이상 없음');
  const red=gateVerdict(kinds,{trivy:ok('trivy'),hadolint:ok('hadolint',{high_count:1,medium_count:1,findings:[{code:'DL3025',severity:'HIGH'},advisory('DL3016')]}),gitleaks:ok('gitleaks')},false);
  assert.equal(red.state,'issues');assert.equal(red.issues,1);assert.equal(red.advisories,1);
  // 심각도 표시가 없는 항목은 막는 쪽으로 센다.

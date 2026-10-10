@@ -45,12 +45,16 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "DOCKERFILE_DEPS_DIR_MISSING", "DOCKERFILE_NPM_SELF_UPGRADE", "APP_DEAD_IMAGE_HOST",
                 "NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
                 "NODE_STATIC_PATH_OUTSIDE_PROJECT", "DOCKERFILE_NPM_CI_WITHOUT_LOCK", "NODE_UNDECLARED_DEPENDENCY",
-                "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP"}
+                "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP", "DOCKERFILE_BUILD_STAGE_OMITS_DEV",
+                "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER", "DOCKERFILE_RUNTIME_BROKEN",
+                "DOCKERFILE_LINT_ADVISORY"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
 FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
                     "NODE_STATIC_PATH_OUTSIDE_PROJECT", "DOCKERFILE_NPM_CI_WITHOUT_LOCK", "NODE_UNDECLARED_DEPENDENCY",
-                    "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP")
+                    "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP", "DOCKERFILE_BUILD_STAGE_OMITS_DEV",
+                    "DOCKERFILE_RUNTIME_BROKEN", "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER",
+                    "DOCKERFILE_LINT_ADVISORY")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -750,10 +754,11 @@ def _closest_declared(name: str, declared: set[str], imported: set[str] = frozen
 def api_prefix_rewrite(text: str, names) -> str:
     """names(baseURL 이 /api 인 axios 인스턴스)의 호출 경로에서 앞의 /api 를 뺀다: client.get('/api/x') → client.get('/x')."""
     for name in names:
-        text = re.sub(rf"""(\b{re.escape(name)}\.(?:get|post|put|patch|delete|head|options|request)\s*\(\s*)(['"`])/api(/[^'"`]*)?\2""",
+        #: 제네릭(`client.get<Product[]>('/api/x')`)·여러 줄로 나눈 호출도 같은 호출이다
+        call = rf"""\b{re.escape(name)}\.(?:get|post|put|patch|delete|head|options|request)\s*(?:<[^()]*?>)?\s*\(\s*"""
+        text = re.sub(rf"""({call})(['"`])/api(/[^'"`]*)?\2""",
                       lambda m: f"{m.group(1)}{m.group(2)}{m.group(3) or '/'}{m.group(2)}", text)
-        text = re.sub(rf"""(\b{re.escape(name)}\.(?:get|post|put|patch|delete|head|options|request)\s*\(\s*`)/api(/)""",
-                      lambda m: f"{m.group(1)}{m.group(2)}", text)
+        text = re.sub(rf"""({call}`)/api(/)""", lambda m: f"{m.group(1)}{m.group(2)}", text)
     return text
 
 
@@ -766,9 +771,15 @@ def add_missing_export(text: str, name: str, kind: str) -> Optional[str]:
         declared = re.search(rf"^(?:export\s+)?(?:(?:async\s+)?function\*?|class|const|let|var)\s+{re.escape(local)}\b", text, re.MULTILINE)
         if not declared:
             components = re.findall(r"^export\s+(?:(?:async\s+)?function|class|const|let)\s+([A-Z][\w$]*)", text, re.MULTILINE)
-            if len(components) != 1:
+            #: 라우터 파일 — `import paymentRoutes from './routes/payment.js'` 인데 파일은 `export { router as paymentRouter }` 만
+            #: 있다(실기기 TEMP 2.0.6). 이 파일의 Express 라우터가 하나뿐이면 그것을 기본으로 내보낸다.
+            routers = re.findall(r"^(?:export\s+)?(?:const|let|var)\s+([\w$]+)\s*(?::\s*[\w.<>]+)?\s*=\s*(?:express\.)?Router\(\s*\)", text, re.MULTILINE)
+            if len(components) == 1:
+                local = components[0]
+            elif not components and len(routers) == 1:
+                local = routers[0]
+            else:
                 return None
-            local = components[0]
         return text.rstrip() + newline_ + newline_ + f"export default {local};" + newline_
     decl = re.compile(rf"^(?:(?:async\s+)?function\*?|class|const|let|var)\s+{re.escape(name)}\b", re.MULTILINE)
     if kind == "esm":
@@ -783,6 +794,12 @@ def add_missing_export(text: str, name: str, kind: str) -> Optional[str]:
         owners = [obj for obj, body in re.findall(r"^export\s+const\s+([\w$]+)\s*=\s*\{(.*?)^\};?", text, re.MULTILINE | re.DOTALL)
                   if re.search(rf"^\s*{re.escape(name)}\s*[:(]", body, re.MULTILINE)]
         if len(owners) != 1:
+            #: `import { apiClient }` 인데 파일은 `const client = axios.create(…)` 만(내보내지 않음) — HTTP 클라이언트가 하나뿐이면
+            #: 그 이름으로 함께 내보낸다(실기기 TEMP 2.0.6: 화면 5개가 apiClient 를 불러와 빌드가 멈춤).
+            clients = re.findall(r"^(?:export\s+)?(?:const|let|var)\s+([\w$]+)\s*(?::\s*[\w.<>]+)?\s*=\s*axios\.create\(", text, re.MULTILINE)
+            if len(clients) == 1 and re.search(r"(?i)client|api|http|axios|request", name):
+                return (text.rstrip() + newline_ + newline_ + "// ReCoder: 다른 파일이 이 이름으로 불러와 HTTP 클라이언트를 함께 내보낸다." + newline_
+                        + f"export {{ {clients[0]} as {name} }};" + newline_)
             #: 이름만 살짝 다르다(`import { useCart }` 인데 파일은 `useCartStore`) — 확실한 짝이 하나뿐이면 별칭으로 내보낸다.
             twin = _alias_twin(text, name)
             if twin is None:
@@ -815,6 +832,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
     missing_files: list[tuple[str, str]] = []
     missing_names: list[str] = []
     missing_exports: list[tuple[str, str, str]] = []  # (내보내야 할 파일, 이름, esm|cjs)
+    missing_detail: list[tuple[str, str, str]] = []  # (불러오는 파일, 이름, 내보내야 할 파일) — 생성 교정이 파일별로 고친다
     jsx_in_js: list[str] = []
     process_env: list[str] = []
     for rel in files.files():
@@ -859,6 +877,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                 if name and name not in exported:
                     missing_names.append(f"`{name}`({rel} → {target})")
                     missing_exports.append((target, name, "esm"))
+                    missing_detail.append((rel, name, target))
         #: 기본 가져오기(import Header from './Header')인데 그 파일에 기본 내보내기가 없다 — Vite 빌드가 멈춘다.
         for local, spec in re.findall(r"""^\s*import\s+([\w$]+)\s*(?:,\s*\{[^}]*\})?\s*from\s*['"](\.{1,2}/[^'"]+)['"]""", active, re.MULTILINE):
             target = _resolve_local(files, rel, spec)
@@ -872,6 +891,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                 continue
             missing_names.append(f"`default`({rel} → {target})")
             missing_exports.append((target, f"default:{local}", "esm"))
+            missing_detail.append((rel, "default", target))
         cjs_bindings = []
         for var, spec in _CJS_REQUIRE_BIND.findall(active):
             cjs_bindings.append((var, spec, None))
@@ -891,6 +911,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                 if name not in exported:
                     missing_names.append(f"`{name}`({rel} → {target})")
                     missing_exports.append((target, name, "cjs"))
+                    missing_detail.append((rel, name, target))
         # 3) Vite 는 .js 안의 JSX 를 해석하지 않는다 · 브라우저 코드에 process.env 가 없다
         #    (서버 파일·설정 파일은 제외 — 단일 패키지 Vite+Express 앱의 server.js 를 건드리면 안 된다)
         if project in vite and not _is_server_file(active) and not re.search(r"(^|/)(?:vite|vitest|playwright|cypress|jest|tailwind|postcss|eslint)\.config\.|(^|/)(?:cypress|e2e|tests?|__tests__)/", rel):
@@ -908,6 +929,8 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             ("없는 스타일 파일을 빈 파일로 만드세요(자동 수정 가능)." if styles_only else
              "빠진 파일을 만들거나 import 경로를 실제 파일로 고치세요."),
             missing_files[0][0], styles_only))
+    if missing_detail:
+        result.fix_data["missing_names_detail"] = sorted(set(missing_detail))
     if missing_names:
         #: 그 파일 안에 같은 이름이 선언만 되고 내보내지지 않았으면(const CartContext = createContext()) 내보내기만
         #: 붙이면 된다 — 나눠 만든 파일끼리 가장 흔한 어긋남(실기기 생성 쇼핑몰). 모두 그런 경우에만 자동 수정.
@@ -1004,7 +1027,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             continue
         text = _strip_js_comments(files.read(rel) or "")
         instances = []
-        for var, value in re.findall(r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*axios\.create\(\s*\{[^}]*?\bbaseURL\s*:\s*([^,\n}]+)""", text, re.DOTALL):
+        for var, value in re.findall(r"""\b(?:const|let|var)\s+([\w$]+)\s*(?::\s*[\w.<>]+)?\s*=\s*axios\.create\(\s*\{[^}]*?\bbaseURL\s*:\s*([^,\n}]+)""", text, re.DOTALL):
             value = value.strip()
             ident = re.fullmatch(r"[\w$]+", value)
             if ident:  # baseURL: API_BASE_URL — 같은 파일의 상수를 따라간다
@@ -1017,6 +1040,13 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
         for var in instances:
             names_by_file: dict[str, set[str]] = {rel: {var}}
             default_export = re.search(rf"\bexport\s+default\s+{re.escape(var)}\b", text)
+            #: 이름으로 내보낸 것도 따라간다 — `export const api = axios.create(…)`, `export {{ client as apiClient }}`
+            exported_as = set(re.findall(rf"\bexport\s+(?:const|let|var)\s+({re.escape(var)})\b", text))
+            for group in re.findall(r"\bexport\s*\{([^}]*)\}", text):
+                for part in group.split(","):
+                    bits = [b.strip() for b in part.split(" as ")]
+                    if bits and bits[0] == var:
+                        exported_as.add(bits[-1])
             for other in files.files():
                 if other == rel or not other.endswith((".js", ".jsx", ".ts", ".tsx")) or "/node_modules/" in f"/{other}":
                     continue
@@ -1024,6 +1054,13 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                 for local, spec in re.findall(r"""\bimport\s+([\w$]+)\s*(?:,\s*\{[^}]*\})?\s*from\s*['"](\.{1,2}/[^'"]+)['"]""", body):
                     if default_export and _resolve_local(files, other, spec) == rel:
                         names_by_file.setdefault(other, set()).add(local)
+                for group, spec in re.findall(r"""\bimport\s+(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*['"](\.{1,2}/[^'"]+)['"]""", body):
+                    if not exported_as or _resolve_local(files, other, spec) != rel:
+                        continue
+                    for part in group.split(","):
+                        bits = [b.strip() for b in re.sub(r"^\s*type\s+", "", part).split(" as ")]
+                        if bits and bits[0] in exported_as:
+                            names_by_file.setdefault(other, set()).add(bits[-1])
             for target, names in names_by_file.items():
                 body = files.read(target) or ""
                 if api_prefix_rewrite(body, names) != body:
@@ -2321,6 +2358,30 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 ("`../` 를 하나 줄여 실제 빌드 결과 폴더를 가리키게 하세요(자동 수정 가능)."
                  if "NODE_STATIC_PATH_OUTSIDE_PROJECT" in writes else "경로를 실제 빌드 결과 폴더로 고치세요."),
                 outside[0].split(":", 1)[0], "NODE_STATIC_PATH_OUTSIDE_PROJECT" in writes))
+        typings = node_fixups.missing_type_packages(files)
+        if typings:
+            writes["NODE_TYPES_MISSING"] = typings
+            result.issues.append(ReadinessIssue(
+                "NODE_TYPES_MISSING", ERROR,
+                f"TypeScript 코드가 불러오는 패키지의 타입 선언(@types)이 없습니다({', '.join(sorted(typings))}). "
+                "tsc 빌드가 TS7016(Could not find a declaration file)으로 멈춥니다.",
+                "@types 패키지를 devDependencies 에 추가하세요(자동 수정 가능 — 검증된 버전).", sorted(typings)[0], True))
+        unimported, import_writes = node_fixups.missing_imports(files)
+        if unimported:
+            writes["NODE_NAME_NOT_IMPORTED"] = import_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_NAME_NOT_IMPORTED", ERROR,
+                "다른 파일이 내보내는 이름을 쓰면서 import 하지 않았습니다: " + "; ".join(unimported[:4])
+                + ". TypeScript 빌드가 \"Cannot find name\" 으로 멈추거나 실행 중 ReferenceError 가 납니다.",
+                "그 이름을 내보내는 파일에서 import 하세요(자동 수정 가능).", unimported[0].split(":", 1)[0], True))
+        nested, nested_writes = node_fixups.nested_routers(files)
+        if nested:
+            writes["NODE_NESTED_ROUTER"] = nested_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_NESTED_ROUTER", ERROR,
+                "화면 진입 파일과 App 이 둘 다 라우터로 감쌉니다: " + "; ".join(nested[:2])
+                + ". React Router 가 \"You cannot render a <Router> inside another <Router>\" 로 멈춰 화면이 비어 보입니다.",
+                "진입 파일의 바깥 라우터를 빼세요(자동 수정 가능).", sorted(nested_writes)[0], True))
         loops, loop_writes = node_fixups.react_effect_loops(files)
         if loops:
             if loop_writes:
@@ -2928,6 +2989,47 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
         ci_fixed = node_fixups.npm_ci_without_lock(text, files)
     except Exception:  # noqa: BLE001
         ci_fixed = None
+    #: 화면·서버 폴더형 Node 앱인데 실행 단계가 확실히 깨졌다 — ReCoder 검증 Dockerfile 로 바꾸게 한다(백업과 함께).
+    try:
+        import docker_kit
+        if not docker_kit.is_recoder(text):
+            kit = docker_kit.layout(files)
+            breaks = docker_kit.runtime_breaks(text, kit) if kit else []
+            if breaks:
+                kit_writes = {dockerfile: docker_kit.render(kit)}
+                if not files.exists(".dockerignore") or "node_modules" not in (files.read(".dockerignore") or ""):
+                    kit_writes[".dockerignore"] = docker_kit.DOCKERIGNORE
+                result.fix_data.setdefault("file_writes", {})["DOCKERFILE_RUNTIME_BROKEN"] = kit_writes
+                result.issues.append(ReadinessIssue(
+                    "DOCKERFILE_RUNTIME_BROKEN", ERROR,
+                    "Dockerfile 의 실행 단계로는 앱이 뜨지 않습니다: " + "; ".join(breaks)
+                    + ". 컨테이너가 시작하자마자 종료되고 계속 재시작합니다.",
+                    f"ReCoder 검증 Dockerfile(화면 {kit.get('ui') or '없음'}·서버 {kit['server']} 폴더 구조용)로 바꾸세요"
+                    "(자동 수정 가능 — 원본은 .recoder/backups 에 보관).", dockerfile, True))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[build_readiness] Dockerfile 실행 단계 점검 생략: {exc}", file=sys.stderr)
+    try:
+        dev_fixed = node_fixups.build_stage_omits_dev(text)
+    except Exception:  # noqa: BLE001
+        dev_fixed = None
+    if dev_fixed is not None:
+        result.fix_data.setdefault("file_writes", {})["DOCKERFILE_BUILD_STAGE_OMITS_DEV"] = {dockerfile: dev_fixed}
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_BUILD_STAGE_OMITS_DEV", ERROR,
+            "Dockerfile 의 빌드 단계가 개발 의존성 없이(--omit=dev·--production·NODE_ENV=production) 설치한 뒤 빌드합니다. "
+            "typescript·vite 같은 빌드 도구가 없어 `tsc: not found` 로 이미지 빌드가 멈춥니다.",
+            "빌드하는 단계는 개발 의존성까지 설치하게 하세요(자동 수정 가능 — 실행 단계는 그대로 운영 의존성만).",
+            dockerfile, True))
+    try:
+        import security_fix
+        cleaned, cleaned_titles = security_fix.lint_clean(text)
+    except Exception:  # noqa: BLE001
+        cleaned, cleaned_titles = text, []
+    if cleaned_titles and cleaned != text:
+        #: 문제로 띄우지 않는다(배포를 막지 않는 권고라 "문제 있는 것처럼" 보였다 — 사용자 지적). 생성 직후·배포 직전에
+        #: 같은 동작으로 조용히 정리하고, 배포 결과의 "자동으로 고친 것" 에만 남긴다.
+        result.fix_data.setdefault("file_writes", {})["DOCKERFILE_LINT_ADVISORY"] = {dockerfile: cleaned}
+        result.fix_data["lint_titles"] = list(dict.fromkeys(cleaned_titles))
     if ci_fixed is not None:
         result.fix_data.setdefault("file_writes", {})["DOCKERFILE_NPM_CI_WITHOUT_LOCK"] = {dockerfile: ci_fixed}
         result.issues.append(ReadinessIssue(
@@ -3495,6 +3597,9 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
         raise ValueError("자동으로 고칠 수 없는 항목입니다. 안내에 따라 직접 수정하세요.")
     before = analyze(root, online=code == "NODE_DEPENDENCY_VERSION_NOT_FOUND")
     issue = next((i for i in before.issues if i.code == code), None)
+    if issue is None and code in FILE_WRITE_FIXES and (before.fix_data.get("file_writes") or {}).get(code):
+        #: 문제로 띄우지 않고 고칠 내용만 만든 항목(보안 권고 정리 등)
+        issue = ReadinessIssue(code, WARNING, "", "", "", True)
     if issue is None:
         return {"applied": False, "message": "이미 해결된 항목입니다.", "readiness": before.to_dict()}
     changed: list[str] = []

@@ -231,7 +231,12 @@ _INIT_SQL_MAX_BYTES = 2_000_000
 
 
 def find_init_sql(workspace: str) -> Optional[Path]:
-    """앱이 기대하는 테이블을 만드는 SQL 파일(있을 때만). CREATE TABLE 이 없으면 초기화 파일로 보지 않는다."""
+    """앱이 기대하는 테이블을 만드는 SQL 파일(있을 때만). CREATE TABLE 이 없으면 초기화 파일로 보지 않는다.
+
+    .sql 파일이 없으면 코드 안의 초기화 스크립트(backend/scripts/init-db.ts 등)에 든 CREATE 문을 모아 쓴다 —
+    실기기(TEMP 2.0.6): 테이블을 `npm run db:init`(tsx, 개발 도구)으로만 만들어 배포한 앱이 `relation "products"
+    does not exist` 로 시작하자마자 죽었다.
+    """
     if not workspace:
         return None
     root = Path(workspace)
@@ -244,7 +249,93 @@ def find_init_sql(workspace: str) -> Optional[Path]:
                     return path
         except OSError:
             continue
-    return None
+    try:
+        sql = ddl_from_code(root)
+    except Exception:  # noqa: BLE001 — 찾지 못하면 예전처럼 앱이 스스로 만든다고 본다
+        sql = None
+    if not sql:
+        return None
+    import hashlib
+    folder = Path.home() / ".recoder" / "schema"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{hashlib.sha256(sql.encode()).hexdigest()[:16]}.sql"
+    if not path.is_file():
+        path.write_text(sql, encoding="utf-8")
+    return path
+
+
+_CODE_EXT = (".js", ".ts", ".mjs", ".cjs")
+_SKIP_PARTS = {"node_modules", "dist", "build", ".git", ".recoder", "frontend", "client", "web", "public", "tests", "test", "__tests__"}
+_LITERAL = re.compile(r"`((?:\\.|[^`\\])*)`|'((?:\\.|[^'\\\n])*)'|\"((?:\\.|[^\"\\\n])*)\"", re.S)
+_DDL = re.compile(r"^\s*create\s+(?:unique\s+)?(?:table|index|extension)\b", re.I)
+
+
+def _statements(sql: str) -> list[str]:
+    out, depth, cur, quote = [], 0, [], ""
+    for ch in sql:
+        if quote:
+            cur.append(ch)
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == ";" and depth <= 0:
+            out.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    tail = "".join(cur).strip()
+    if tail:
+        out.append(tail)
+    return [re.sub(r"--[^\n]*", "", st).strip() for st in out if st.strip()]
+
+
+def ddl_from_code(root: Path) -> Optional[str]:
+    """서버 코드 문자열 안의 CREATE TABLE/INDEX/EXTENSION 문 → 여러 번 실행해도 되는 초기화 SQL. 없거나 위험하면 None.
+
+    앱이 시작할 때 IF NOT EXISTS 없이 CREATE TABLE 을 하면(미리 만들어 두면 그 앱이 "already exists" 로 죽는다) 쓰지 않는다.
+    """
+    found: list[str] = []
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if not path.is_file() or not rel.endswith(_CODE_EXT) or set(rel.split("/")[:-1]) & _SKIP_PARTS:
+            continue
+        try:
+            if path.stat().st_size > _INIT_SQL_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        if not re.search(r"create\s+(?:unique\s+)?(?:table|index)", text, re.I):
+            continue
+        runtime = not re.search(r"(^|/)(scripts?|migrations?|seeds?|db-?init|init-?db|setup|tools)(/|[._-])", rel, re.I)
+        for m in _LITERAL.finditer(text):
+            body = next(g for g in m.groups() if g is not None)
+            if "${" in body:
+                continue
+            for st in _statements(body.replace("\\n", "\n")):
+                if not _DDL.match(st):
+                    continue
+                if runtime and re.match(r"\s*create\s+table\s+(?!if\s+not\s+exists)", st, re.I):
+                    return None  # 앱이 시작할 때 직접 만든다 — 미리 만들면 그 앱이 깨진다
+                st = re.sub(r"^\s*create\s+table\s+(?!if\s+not\s+exists)", "CREATE TABLE IF NOT EXISTS ", st, flags=re.I)
+                st = re.sub(r"^\s*create\s+(unique\s+)?index\s+(?!if\s+not\s+exists)(?!concurrently)",
+                            lambda x: f"CREATE {(x.group(1) or '').upper()}INDEX IF NOT EXISTS ", st, flags=re.I)
+                st = re.sub(r"^\s*create\s+extension\s+(?!if\s+not\s+exists)", "CREATE EXTENSION IF NOT EXISTS ", st, flags=re.I)
+                if st not in found:
+                    found.append(st)
+    if not any(re.match(r"create\s+table", st, re.I) for st in found):
+        return None
+    #: 테이블 먼저(참조 순서는 원래 순서를 따른다), 그다음 인덱스
+    tables = [st for st in found if re.match(r"create\s+(?:table|extension)", st, re.I)]
+    rest = [st for st in found if st not in tables]
+    return "-- ReCoder: 코드의 초기화 스크립트에서 모은 테이블 정의(여러 번 실행해도 안전)\n" + \
+        "\n".join(st.rstrip(";") + ";" for st in tables + rest) + "\n"
 
 
 def _exec_sql(name: str, sql: str, timeout: int = 120) -> subprocess.CompletedProcess:

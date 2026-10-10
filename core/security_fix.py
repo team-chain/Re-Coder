@@ -508,6 +508,94 @@ def _created_uid(lines: list[str], n: int, name: str) -> Optional[str]:
     return uid
 
 
+def _run_span(lines: list[str], i: int) -> int:
+    """i 번째 줄에서 시작하는 명령이 끝나는 줄(\\ 로 이은 줄 포함)."""
+    end = i
+    while end < len(lines) - 1 and lines[end].rstrip().endswith("\\"):
+        end += 1
+    return end
+
+
+def _plain_run(lines: list[str], i: int) -> bool:
+    """합쳐도 뜻이 같은 셸 형식 RUN 인가(JSON 형식·--mount 같은 옵션·heredoc 은 합치지 않는다)."""
+    m = re.match(r"^\s*RUN\s+(.*)$", lines[i], re.I)
+    if not m or m.group(1).lstrip().startswith(("[", "--")):
+        return False
+    body = "\n".join(lines[i:_run_span(lines, i) + 1])
+    return "<<" not in body
+
+
+def _merge_runs(lines: list[str], n: int) -> Optional[list[str]]:
+    """n 번째 줄의 RUN 을 바로 앞의 RUN 에 `&&` 로 잇는다(그 사이에 주석만 있을 때). 아니면 None.
+    a 가 실패하면 원래도 빌드가 멈추므로 `a && b` 와 뜻이 같다."""
+    if not _plain_run(lines, n):
+        return None
+    k = n - 1
+    comments: list[str] = []
+    while k >= 0 and (not lines[k].strip() or lines[k].lstrip().startswith("#")):
+        if re.search(r"hadolint\s+ignore", lines[k], re.I):
+            return None  # 예외 표시가 붙은 명령은 따로 둔다
+        if lines[k].strip():
+            comments.insert(0, lines[k])
+        k -= 1
+    if k < 0:
+        return None
+    start = k
+    while start > 0 and lines[start - 1].rstrip().endswith("\\"):
+        start -= 1
+    if not _plain_run(lines, start) or _run_span(lines, start) != k:
+        return None
+    end = _run_span(lines, n)
+    second = [re.sub(r"^\s*RUN\s+", "", lines[n], flags=re.I)] + lines[n + 1:end + 1]
+    indent = re.match(r"^(\s*)", lines[start]).group(1)
+    joined = lines[start:k] + [lines[k].rstrip() + " \\", f"{indent}    && {second[0].strip()}"] + second[1:]
+    #: 사이에 있던 주석은 합친 명령 위로 올린다
+    return lines[:start] + comments + joined + lines[end + 1:]
+
+
+def lint_clean(text: str) -> tuple[str, list[str]]:
+    """hadolint 없이도 확실히 찾을 수 있는 권고를 고친다 — (고친 Dockerfile, 고친 항목 제목).
+    AI 가 만든 Dockerfile 이 보안 게이트에 '권고' 를 남기지 않게(생성 직후·배포 전)."""
+    lines = (text or "").split("\n")
+    done: list[str] = []
+    for _ in range(40):
+        changed = False
+        for i, line in enumerate(lines):
+            code = None
+            prev = lines[i - 1] if i else ""
+            if re.match(r"^\s*RUN\b[^\n]*\bapk\s+add\b", line, re.I) and "--no-cache" not in line:
+                code = "DL3019"
+            elif re.match(r"^\s*RUN\b[^\n]*\bapk\s+add\b", line, re.I) and not re.search(r"apk\s+add[^&|;]*=\S", line) \
+                    and not re.search(r"hadolint\s+ignore=[\w,]*DL3018", prev):
+                code = "DL3018"
+            elif re.match(r"^\s*RUN\b", line, re.I) and re.search(r"apt-get\s+install", "\n".join(lines[i:_run_span(lines, i) + 1])) \
+                    and not re.search(r"apt-get\s+install[^&|;]*=\S", "\n".join(lines[i:_run_span(lines, i) + 1])) \
+                    and not re.search(r"hadolint\s+ignore=[\w,]*DL3008", prev):
+                code = "DL3008"
+            elif re.match(r"^\s*USER\s+[A-Za-z_][\w.-]*\s*$", line, re.I):
+                code = "DL3066"
+            elif re.match(r"^\s*RUN\b", line, re.I) and _merge_runs(lines, i):
+                code = "DL3059"
+            elif re.match(r"^\s*(?:CMD|ENTRYPOINT)\s+(?!\[)\S", line, re.I):
+                code = "DL3025"
+            if not code:
+                continue
+            block = _hadolint_block_fix(code, lines, i)
+            if block:
+                new, title = block
+            else:
+                fixed, title = _hadolint_line_fix(code, line)
+                new = lines[:i] + [fixed] + lines[i + 1:] if title and fixed != line else None
+            if new and new != lines:
+                lines = new
+                done.append(f"{title} ({code})")
+                changed = True
+                break
+        if not changed:
+            break
+    return "\n".join(lines), done
+
+
 def _hadolint_block_fix(code: str, lines: list[str], n: int) -> Optional[tuple[list[str], str]]:
     """여러 줄을 바꾸는 수정. (새 줄 목록, 제목) 또는 None."""
     if code == "DL3066":
@@ -535,8 +623,20 @@ def _hadolint_block_fix(code: str, lines: list[str], n: int) -> Optional[tuple[l
                 return None
             new[n - 1] = f"{prev.rstrip()},{code}"
             return new, "OS 패키지 버전은 기본 이미지 태그로 고정(이 줄만 예외)"
+        #: 바로 윗줄이 아닌 곳(설명 주석 위)에 둔 예외 표시는 hadolint 가 읽지 않는다 — 남겨 두면 같은 표시가 두 번 보인다.
+        k = n - 1
+        while k >= 0 and new[k].lstrip().startswith("#"):
+            if re.fullmatch(rf"\s*#\s*hadolint\s+ignore={code}\s*", new[k], re.I):
+                del new[k]
+                n -= 1
+            k -= 1
         note = (f"{indent}# ReCoder: OS 패키지는 기본 이미지 태그가 버전을 정합니다(저장소가 옛 버전을 지우면 고정한 버전 때문에 빌드가 깨짐)")
+        if any(l.strip() == note.strip() for l in new[max(0, n - 3):n]):
+            return new[:n] + [f"{indent}# hadolint ignore={code}"] + new[n:], "OS 패키지 버전은 기본 이미지 태그로 고정(이 줄만 예외)"
         return new[:n] + [note, f"{indent}# hadolint ignore={code}"] + new[n:], "OS 패키지 버전은 기본 이미지 태그로 고정(이 줄만 예외)"
+    if code == "DL3059":
+        merged = _merge_runs(lines, n)
+        return (merged, "이어진 RUN 을 하나로(동작은 그대로)") if merged else None
     if code == "DL3003":
         m = re.match(r"^(\s*)RUN\s+cd\s+([\w.\-/]+)\s*&&\s*(.+?)\s*$", lines[n])
         if not m or lines[n].rstrip().endswith("\\") or ".." in m.group(2).split("/") or re.search(r"\bcd\s", m.group(3)):
@@ -662,7 +762,7 @@ def _hadolint_fixes(root: Path, violations: list[dict]) -> list[FixProposal]:
         where = ", ".join(str(n + 1) for n, _ in hits[:6])
         advisory = code in _ADVISORY_LINT
         out.append(FixProposal(id=_pid("hadolint", "manual", code, where), tool="hadolint", auto=False,
-                               title=f"{code} — {'권고, 배포에 영향 없음' if advisory else '직접 확인'} ({len(hits)}곳)",
+                               title=f"{code} — {'참고, 배포에 영향 없음' if advisory else '직접 확인'} ({len(hits)}곳)",
                                detail=f"Dockerfile {where}번째 줄: {_LINT_KO.get(code) or hits[0][1] or code}"
                                       + (" 버전 고정은 재현 가능한 빌드를 위한 권고이며, 그 자체로 취약점은 아닙니다." if code in _PIN_LINT else "")
                                       + (" 보안 게이트를 빨간색으로 만들지 않습니다." if advisory else ""),

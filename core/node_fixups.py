@@ -602,3 +602,263 @@ def react_effect_loops(files) -> tuple[list[str], dict[str, str]]:
                 updated = "import { useMemo } from 'react';\n" + updated
         writes[rel] = updated
     return problems, writes
+
+
+# ── 10) 빌드하는 단계에서 개발 의존성을 빼고 설치 ─────────────────────────────
+
+_BUILD_CMD = re.compile(r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b|\b(?:npx\s+)?(?:tsc|vite\s+build|next\s+build|react-scripts\s+build|webpack|ng\s+build|nuxt\s+build)\b")
+_INSTALL = re.compile(r"\b(?:npm\s+(?:ci|install|i)|pnpm\s+install|yarn\s+install)\b")
+_OMIT_FLAGS = re.compile(r"\s+(?:--omit[= ]dev|--only[= ]prod(?:uction)?|--production(?:=true)?|--prod)\b")
+
+
+def build_stage_omits_dev(dockerfile: str) -> Optional[str]:
+    """빌드(npm run build·tsc·vite build)를 하는 단계가 개발 의존성 없이 설치하면 고친 Dockerfile, 아니면 None.
+
+    실기기(TEMP 2.0.6): 빌드 단계가 `npm install --omit=dev` 라 typescript·vite 가 없어 `sh: tsc: not found`.
+    · 그 단계의 설치에서 --omit=dev·--only=production·--production 을 뺀다(실행 단계는 그대로 — 운영 이미지는 가볍게).
+    · 그 단계에 ENV NODE_ENV=production 이 먼저 있으면 npm 이 개발 의존성을 건너뛰므로 설치에 --include=dev 를 붙인다.
+    """
+    lines = (dockerfile or "").split("\n")
+    stages: list[tuple[int, int]] = []
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"\s*FROM\s", line, re.I):
+            if start is not None:
+                stages.append((start, i))
+            start = i
+    if start is None:
+        return None
+    stages.append((start, len(lines)))
+    changed = False
+    for a, b in stages:
+        body = "\n".join(lines[a:b])
+        logical = re.sub(r"\\\r?\n", " ", body)
+        runs = [l for l in logical.split("\n") if re.match(r"\s*RUN\s", l, re.I)]
+        if not any(_BUILD_CMD.search(r) for r in runs):
+            continue
+        prod_env = False
+        for i in range(a, b):
+            line = lines[i]
+            if re.match(r"\s*ENV\s", line, re.I) and re.search(r"\bNODE_ENV[= ]\s*['\"]?production", line):
+                prod_env = True
+            if not _INSTALL.search(line) or line.lstrip().startswith("#"):
+                continue
+            new = _OMIT_FLAGS.sub("", line)
+            if prod_env and "--include=dev" not in new and re.search(r"\bnpm\s+(?:ci|install|i)\b", new):
+                new = re.sub(r"\bnpm\s+(ci|install|i)\b", r"npm \1 --include=dev", new, count=1)
+            if new != line:
+                lines[i] = new
+                changed = True
+    return "\n".join(lines) if changed else None
+
+
+# ── 11) 쓰는데 import 하지 않은 이름 ─────────────────────────────────────────
+
+_SRC = (".ts", ".tsx", ".js", ".jsx", ".mjs")
+_EXPORTED = re.compile(r"^\s*export\s+(?:declare\s+)?(?:default\s+)?(?:async\s+)?(?:abstract\s+)?"
+                       r"(?:const|let|var|function\*?|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)", re.M)
+
+
+def _exports_of(text: str) -> set[str]:
+    names = set(_EXPORTED.findall(text))
+    for group in re.findall(r"\bexport\s*\{([^}]*)\}(?!\s*from)", text):
+        names |= {p.split(" as ")[-1].strip() for p in group.split(",") if p.strip()}
+    return {n for n in names if n != "default"}
+
+
+def _code_only(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", " ", text)
+    return re.sub(r"""(['"])(?:\\.|(?!\1)[^\\\n])*\1""", "''", text)
+
+
+def _declared_here(code: str, name: str) -> bool:
+    n = re.escape(name)
+    return bool(re.search(rf"\b(?:const|let|var|function\*?|class|interface|type|enum|import)\s+(?:type\s+)?{n}\b", code)
+                or re.search(rf"\bimport\b[^;]*\b{n}\b[^;]*\bfrom\b", code)
+                or re.search(rf"\bexport\s*(?:type\s*)?\{{[^}}]*\b{n}\b[^}}]*\}}\s*from\b", code)  # 다시 내보내기
+                or re.search(rf"[{{,]\s*(?:[\w$]+\s*:\s*)?{n}\s*(?:=[^,}}]+)?\s*[,}}]\s*[^=]*=", code)  # 구조 분해
+                or re.search(rf"[(,]\s*(?:\.\.\.)?{n}\s*[:,)=?]", code)  # 함수 인자
+                or re.search(rf"\bcatch\s*\(\s*{n}\b|\bfor\s*\(\s*(?:const|let|var)\s+{n}\b", code))
+
+
+def missing_imports(files) -> tuple[list[str], dict[str, str]]:
+    """([문제], {파일: import 를 더한 내용}) — 프로젝트의 한 파일만 내보내는 이름을 쓰면서 import 하지 않은 파일.
+
+    실기기(TEMP 2.0.6): AdminOrdersPage.tsx 가 apiClient·OrderDetail 을 쓰면서 import 하지 않아 tsc TS2304.
+    확실할 때만 — 내보내는 파일이 하나뿐이고, 그 파일 안에서 지역 선언·인자·구조 분해로 쓰이지 않을 때.
+    """
+    sources = [p for p in files.files() if p.endswith(_SRC) and "/node_modules/" not in f"/{p}"
+               and not re.search(r"(^|/)(dist|build)/|\.d\.ts$", p)]
+    texts = {p: files.read(p) or "" for p in sources}
+    owners: dict[str, list[str]] = {}
+    for p, t in texts.items():
+        for name in _exports_of(t):
+            owners.setdefault(name, []).append(p)
+    problems: list[str] = []
+    writes: dict[str, str] = {}
+    for rel, text in texts.items():
+        code = _code_only(text)
+        side = rel.split("/", 1)[0] if "/" in rel else ""
+        adds: list[tuple[str, str]] = []
+        for name, where in owners.items():
+            if len(name) < 4 or rel in where:
+                continue
+            same_side = [w for w in where if (w.split("/", 1)[0] if "/" in w else "") == side]
+            if len(same_side) != 1:
+                continue
+            if not re.search(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", code) or _declared_here(code, name):
+                continue
+            #: 실제로 이름으로 쓰는가 — 속성 접근·호출·타입 자리·JSX 태그
+            if not re.search(rf"(?<![\w$.]){re.escape(name)}\s*(?:[.(<\[]|\s*\)|>|\s*\||\s*;|\s*,|\s*\]|\s*=>)|[:<|,]\s*{re.escape(name)}\b|<{re.escape(name)}[\s/>]", code):
+                continue
+            adds.append((name, same_side[0]))
+        if not adds:
+            continue
+        rel_imports = re.findall(r"""from\s+['"](\.{1,2}/[^'"]+)['"]""", text)
+        with_js = bool(rel_imports) and all(re.search(r"\.(?:js|mjs|cjs)$", s) for s in rel_imports)
+        new_lines = []
+        for target, names in sorted({t: sorted(n for n, w in adds if w == t) for _n, t in adds}.items()):
+            spec = posixpath.relpath(target, posixpath.dirname(rel) or ".")
+            spec = spec if spec.startswith(".") else "./" + spec
+            spec = re.sub(r"\.(tsx?|jsx?|mjs)$", ".js" if with_js else "", spec)
+            types_only = all(re.search(rf"^\s*export\s+(?:declare\s+)?(?:interface|type)\s+{re.escape(n)}\b", texts[target], re.M)
+                             for n in names)
+            kw = "import type" if types_only and rel.endswith((".ts", ".tsx")) else "import"
+            new_lines.append(f"{kw} {{ {', '.join(names)} }} from '{spec}';")
+            problems.append(f"{rel}: {', '.join(names)} 을(를) 쓰지만 {target} 에서 불러오지 않습니다")
+        lines = text.split("\n")
+        last_import = max((i for i, l in enumerate(lines) if re.match(r"\s*import\b", l)), default=-1)
+        #: 여러 줄 import 의 끝까지
+        while 0 <= last_import < len(lines) - 1 and not re.search(r"""from\s+['"][^'"]+['"]\s*;?\s*$|^\s*import\s+['"]""", lines[last_import]):
+            last_import += 1
+        lines[last_import + 1:last_import + 1] = new_lines
+        writes[rel] = "\n".join(lines)
+    return problems, writes
+
+
+# ── 12) TypeScript 인데 타입 선언(@types)이 없는 패키지 ──────────────────────
+
+def missing_type_packages(files) -> dict[str, str]:
+    """{package.json: @types 를 더한 내용} — TS 코드가 불러오는 패키지에 타입이 없어 tsc 가 TS7016 으로 멈추는 경우.
+    검증된 버전을 아는 @types 만 넣는다(node_manifests.DEV_VERSIONS)."""
+    out: dict[str, str] = {}
+    listing = files.files()
+    manifests = [p for p in listing if posixpath.basename(p) == "package.json" and "/node_modules/" not in f"/{p}"]
+    for manifest in manifests:
+        folder = posixpath.dirname(manifest)
+        prefix = f"{folder}/" if folder else ""
+        raw = files.read(manifest)
+        try:
+            pkg = json.loads(raw or "")
+        except ValueError:
+            continue
+        if not isinstance(pkg, dict):
+            continue
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        if "typescript" not in deps:
+            continue
+        nested = {posixpath.dirname(m) for m in manifests if m != manifest and m.startswith(prefix)}
+        ts = {p: files.read(p) or "" for p in listing if p.startswith(prefix) and p.endswith((".ts", ".tsx"))
+              and not p.endswith(".d.ts") and "/node_modules/" not in f"/{p}" and not any(p.startswith(n + "/") for n in nested)}
+        if not ts:
+            continue
+        wanted = []
+        for name in sorted(node_manifests.imported_packages(ts)):
+            types = f"@types/{name.replace('@', '').replace('/', '__')}" if name.startswith("@") else f"@types/{name}"
+            if name in node_manifests._TYPED or types in deps or types not in node_manifests.DEV_VERSIONS:
+                continue
+            wanted.append(types)
+        if not wanted:
+            continue
+        dev = dict(pkg.get("devDependencies") or {})
+        for t in wanted:
+            dev[t] = node_manifests.DEV_VERSIONS[t]
+        pkg["devDependencies"] = dict(sorted(dev.items()))
+        out[manifest] = _dump_like(raw or "", pkg)
+    return out
+
+
+# ── 13) 라우터를 두 번 감쌈(main 과 App 둘 다 <BrowserRouter>) ─────────────────
+
+_ROUTER_TAGS = ("BrowserRouter", "HashRouter", "MemoryRouter", "Router")
+
+
+def _router_names(text: str) -> set[str]:
+    """react-router(-dom)에서 불러온 라우터 컴포넌트의 이 파일 안 이름(별칭 포함)."""
+    names: set[str] = set()
+    for group in re.findall(r"""import\s*\{([^}]*)\}\s*from\s*['"]react-router(?:-dom)?['"]""", text):
+        for part in group.split(","):
+            bits = [b.strip() for b in part.split(" as ")]
+            if bits and bits[0] in _ROUTER_TAGS:
+                names.add(bits[-1])
+    return names
+
+
+def nested_routers(files) -> tuple[list[str], dict[str, str]]:
+    """([문제], {진입 파일: 바깥 라우터를 뺀 내용}) — 진입 파일과 App 이 둘 다 라우터로 감싸면 React Router 가
+    "You cannot render a <Router> inside another <Router>" 로 화면 전체를 멈춘다(실기기 TEMP 2.0.6: 빈 화면)."""
+    problems: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not re.search(r"(^|/)(main|index)\.(jsx|tsx|js|ts)$", rel) or "/node_modules/" in f"/{rel}":
+            continue
+        text = files.read(rel) or ""
+        if "render" not in text:
+            continue
+        outer = [n for n in _router_names(text) if re.search(rf"<{n}[\s>]", text)]
+        if len(outer) != 1:
+            continue
+        app = None
+        for local, spec in re.findall(r"""import\s+([A-Za-z_$][\w$]*)\s+from\s+['"](\.{1,2}/[^'"]+)['"]""", text):
+            if re.search(rf"<{local}[\s/>]", text):
+                base = posixpath.normpath(posixpath.join(posixpath.dirname(rel), spec))
+                app = next((c for c in (base, *(base + e for e in (".tsx", ".jsx", ".ts", ".js"))) if files.exists(c)), None)
+                if app:
+                    break
+        if not app:
+            continue
+        inner_text = files.read(app) or ""
+        if not any(re.search(rf"<{n}[\s>]", inner_text) for n in _router_names(inner_text)):
+            continue
+        name = outer[0]
+        updated = _unwrap(text, name)
+        if updated is None:
+            continue
+        if not re.search(rf"<{name}[\s>]", updated):
+            updated = _drop_named_import(updated, name)
+        #: App 이 같은 공급자(AuthProvider 등)도 다시 감싸면 바깥 것도 뺀다 — 바깥 공급자는 라우터 밖이 되어
+        #: useNavigate 를 쓰면 멈추고, 안쪽과 상태가 둘로 갈린다.
+        for wrapper in sorted(set(re.findall(r"^\s*<([A-Z][\w$]*)(?:\s[^>]*)?>\s*$", updated, re.M))):
+            if wrapper in ("App",) or not re.search(rf"<{wrapper}[\s>]", inner_text):
+                continue
+            again = _unwrap(updated, wrapper)
+            if again is not None:
+                updated = again
+                if not re.search(rf"<{wrapper}[\s>/]", updated):
+                    updated = re.sub(rf"""^import\s*\{{\s*{wrapper}\s*\}}\s*from\s*['"][^'"]+['"];?[ \t]*\n""", "", updated, flags=re.M)
+        problems.append(f"{rel} 와 {app} 가 둘 다 라우터(<{name}>)로 감쌉니다")
+        writes[rel] = updated
+    return problems, writes
+
+
+def _unwrap(text: str, name: str) -> Optional[str]:
+    """한 줄짜리 <name …> … </name> 감싸기 하나를 벗긴다(안쪽 들여쓰기 한 단계 줄임). 확실하지 않으면 None."""
+    lines = text.split("\n")
+    opens = [i for i, l in enumerate(lines) if re.fullmatch(rf"\s*<{name}(?:\s[^>]*)?>\s*", l)]
+    closes = [i for i, l in enumerate(lines) if re.fullmatch(rf"\s*</{name}>\s*", l)]
+    if len(opens) != 1 or len(closes) != 1 or closes[0] < opens[0]:
+        return None
+    o, c = opens[0], closes[0]
+    return "\n".join(lines[:o] + [re.sub(r"^  ", "", l) for l in lines[o + 1:c]] + lines[c + 1:])
+
+
+def _drop_named_import(text: str, name: str) -> str:
+    def fix(m: re.Match) -> str:
+        parts = [p.strip() for p in m.group(1).split(",") if p.strip()]
+        keep = [p for p in parts if p.split(" as ")[-1].strip() != name]
+        if not keep:
+            return ""
+        return m.group(0).replace(m.group(1), " " + ", ".join(keep) + " ")
+    out = re.sub(r"""import\s*\{([^}]*)\}\s*from\s*['"]react-router(?:-dom)?['"];?[ \t]*\n?""", fix, text, count=1)
+    return out

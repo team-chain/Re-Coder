@@ -68,7 +68,9 @@ export function gateVerdict(kinds: GateKind[], results: Partial<Record<GateKind,
   if (issues) return { state: 'issues', label: `이상 발견 ${issues}건`, issues, advisories, notApplicable, unverified };
   const secretsPassed = !kinds.includes('gitleaks') || results.gitleaks?.status === 'ok';
   if (ran === kinds.length && !unverified.length && clean > 0 && secretsPassed) {
-    return { state: 'clean', label: advisories ? `이상 없음 · 권고 ${advisories}건` : '이상 없음', issues, advisories, notApplicable, unverified };
+    //: 권고(버전 고정 등 배포를 막지 않는 항목)는 게이트 문구에 붙이지 않는다 — "권고 N건" 이 문제처럼 보였다(사용자 지적).
+    //: 건수는 advisories 로 넘기고, 보안 화면에서 "참고" 로 보여 준다.
+    return { state: 'clean', label: '이상 없음', issues, advisories, notApplicable, unverified };
   }
   const pending = kinds.length - ran + unverified.length;
   return { state: 'unverified', label: `검사 미확인 ${pending}개`, issues, advisories, notApplicable, unverified };
