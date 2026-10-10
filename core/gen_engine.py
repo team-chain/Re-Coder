@@ -28,7 +28,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Any, Callable
 
 from llm.base import LLMError, LLMErrorType, LLMRequest
@@ -62,6 +62,8 @@ PLAN_SCHEMA = {
             "type": "object",
             "properties": {"file": {"type": "string", "minLength": 1}, "purpose": {"type": "string"},
                            "layer": {"type": "integer"},
+                           #: 이 파일이 불러올 프로젝트 파일(목록의 경로) — 그 파일이 먼저 완성된 뒤 실제 내용을 보고 쓴다
+                           "uses": {"type": "array", "items": {"type": "string"}},
                            #: 예상 크기 — large 는 처음부터 글자 그대로 이어 받는다(한 번에 받다 잘려 버리는 호출을 아낀다)
                            "size": {"type": "string", "enum": ["small", "medium", "large"]}},
             "required": ["file"], "additionalProperties": False}},
@@ -518,6 +520,10 @@ class LargeGeneration:
 - files: 만들거나 고칠 파일. 이번 응답에는 최대 {PAGE_FILES}개만 넣고, 더 있으면 more=true(다음 응답에서 이어서 받습니다).
   각 파일의 layer: 0=공통 기반(설정·패키지·DB 스키마/연결·인증·공용 타입/유틸), 1=기능(API·서비스·모델), 2=화면·진입점·문서.
   각 파일의 size: 예상 길이 small(~80줄)·medium(~250줄)·large(그보다 김).
+  각 파일의 uses: 이 파일이 import 할 **프로젝트 안의 파일** 경로(이 목록에 있는 경로 그대로, 외부 패키지는 빼고).
+  ReCoder 는 uses 의 파일을 먼저 완성하고, 그 실제 내용을 보여 주며 이 파일을 쓰게 합니다(서로 상관없는 파일은 동시에).
+  contracts 에는 화면 공용 컴포넌트의 props(이름·타입·필수 여부), 훅·Context 가 돌려주는 필드 이름과 타입,
+  공용 타입(예: CartItem 의 필드)도 적으세요 — 화면 파일들이 이것을 글자 그대로 씁니다.
   의존성 순서로 나열하세요. root package.json/Dockerfile/.dockerignore/README, 로그인·회원가입, DB 초기화 등 실행에 필요한 파일을
   빠뜨리지 마세요. 파일 수는 줄이지 말고 실제로 필요한 만큼 모두 적으세요."""
         files: list[dict] = []
@@ -553,7 +559,8 @@ class LargeGeneration:
 {contracts}
 이미 받은 파일(다시 쓰지 마세요):
 {listed}
-아직 목록에 없는 파일을 의존성 순서로 최대 {PAGE_FILES}개 더 주세요(파일 내용은 쓰지 마세요). 각 파일에 layer(0/1/2)를 붙이고,
+아직 목록에 없는 파일을 의존성 순서로 최대 {PAGE_FILES}개 더 주세요(파일 내용은 쓰지 마세요). 각 파일에 layer(0/1/2)와
+uses(import 할 프로젝트 파일 경로)를 붙이고,
 아직 남았으면 more=true, 이것으로 끝이면 more=false."""
             resp = self.call(page_prompt, PAGE_SCHEMA, "generate_code_manifest", 4096, agent="planner")
             try:
@@ -614,6 +621,8 @@ class LargeGeneration:
             seen.add(key)
             out.append({"file": path, "purpose": str(item.get("purpose") or "").strip(),
                         "layer": item.get("layer") if isinstance(item.get("layer"), int) else None,
+                        "uses": [str(u).strip().replace("\\", "/") for u in (item.get("uses") or [])
+                                 if isinstance(u, str) and u.strip()][:40],
                         **({"size": item["size"]} if item.get("size") in ("small", "medium", "large") else {})})
         return out
 
@@ -621,9 +630,11 @@ class LargeGeneration:
         return _ca()._relative_to_target([{"file": path}], self.target_folder)[0]["file"]
 
     # ── 공통 프롬프트 ──
-    def _context(self, files_done: list[dict]) -> str:
+    def _context(self, files_done: list[dict], targets: list[str] | None = None) -> str:
         m, files = self.state["manifest"], self.state["files"]
         listing = "\n".join(f"- {f['file']}: {f.get('purpose', '')}" for f in files)
+        done_part = (self._dependency_context(files_done, targets) if targets
+                     else _ca()._completed_files_context(files_done))
         return f"""
 
 [대규모 생성 2단계] 전체 파일 목록과 파일 사이의 약속은 아래와 같습니다. 다른 파일은 다른 에이전트가 같은 약속으로 동시에 작성합니다.
@@ -631,7 +642,68 @@ class LargeGeneration:
 약속(반드시 지킬 것 — 이름·경로·필드·타입을 글자 그대로 맞추세요):
 {m.get('contracts', '') or '(없음 — 파일 목록과 요청에서 일관되게 정하세요)'}
 전체 파일 목록:
-{listing}""" + _ca()._completed_files_context(files_done)
+{listing}""" + done_part
+
+    def _dependency_context(self, files_done: list[dict], targets: list[str]) -> str:
+        """쓸 파일이 실제로 기대는 파일을 보여 준다 — uses 의 파일은 전체 내용, 나머지 완성된 파일은 내보내는 이름·모양만.
+
+        예전엔 목록 앞쪽 파일부터 64k 를 채워(서버 파일이 먼저 들어감) 화면 파일이 정작 쓰는 컴포넌트·훅을 못 봤다 —
+        ErrorAlert 의 onClose 가 필수인 줄 모르고 10개 화면이 빼먹거나, useCart 에 없는 total 을 꺼냈다(실기기 카페 2.0.8)."""
+        by_key = {_norm(op["file"]): op for op in files_done if op.get("content")}
+        wanted: list[str] = []
+        for t in targets:
+            entry = next((f for f in self.state["files"] if _norm(f["file"]) == _norm(t)), None)
+            for u in (entry or {}).get("uses") or []:
+                k = self._resolve_use(u)
+                if k and k in by_key and k not in wanted and k not in {_norm(x) for x in targets}:
+                    wanted.append(k)
+        sides_all = _sides_of(self.state["files"])
+        sides = {_side(t, sides_all) for t in targets}
+        if not wanted:
+            #: 설계가 uses 를 적지 않았다 — 같은 쪽의 더 아래 단계 파일(가까운 단계 먼저)을 전체 내용으로 보여 준다.
+            top = max(_rank(t) for t in targets)
+            near = sorted((k for k, op in by_key.items() if _side(op["file"], sides_all) in sides
+                           and 0 < _rank(op["file"]) < top and k not in {_norm(x) for x in targets}),
+                          key=lambda k: -_rank(by_key[k]["file"]))
+            wanted = near
+        blocks, used = [], 0
+        full = set()
+        for k in wanted:
+            op = by_key[k]
+            block = f"\n[이미 생성한 파일 — 이 파일이 기대는 코드: 이름·props·반환 필드·함수 인자·API 경로를 이 내용과 글자 그대로 맞추세요] {op['file']}\n```\n{op['content']}\n```\n"
+            if used + len(block) <= 48_000:
+                blocks.append(block)
+                used += len(block)
+                full.add(k)
+        summaries, sused = [], 0
+        ordered = sorted(by_key.items(), key=lambda kv: (0 if _side(kv[1]["file"], sides_all) in sides else 1, _rank(kv[1]["file"])))
+        for k, op in ordered:
+            if k in full:
+                continue
+            text = _export_summary(op["file"], op["content"])
+            if not text:
+                continue
+            block = f"- {op['file']}\n{text}\n"
+            if sused + len(block) > 28_000:
+                continue
+            summaries.append(block)
+            sused += len(block)
+        out = "".join(blocks)
+        if summaries:
+            out += ("\n[이미 완성된 다른 파일이 실제로 내보내는 것 — 이 파일들을 쓸 때는 아래 이름·props·타입·인자를 그대로 쓰세요."
+                    " 필수 props 를 빼거나 없는 필드를 꺼내지 마세요]\n" + "".join(summaries))
+        return out
+
+    def _resolve_use(self, use: str) -> str | None:
+        keys = {_norm(f["file"]): f["file"] for f in self.state["files"]}
+        u = _norm(self._rel(use)) if use else ""
+        if u in keys:
+            return u
+        stem = re.sub(r"\.(js|jsx|ts|tsx|mjs|cjs)$", "", u)
+        for cand in (stem + ".ts", stem + ".tsx", stem + ".js", stem + ".jsx", stem + "/index.ts", stem + "/index.tsx", stem + "/index.js"):
+            if cand in keys:
+                return cand
+        return None
 
     # ── 3. 이어 쓰기 ──
     def write_in_parts(self, base_prompt: str, label: str, *, agent: str = "", operation: str = "generate_code_file_part",
@@ -717,7 +789,7 @@ class LargeGeneration:
         """파일 여러 개를 한 번에 받는다. 받은 것 중 검사를 통과한 것만 돌려준다(빠진 파일은 부르는 쪽이 하나씩).
         응답이 잘리거나 형식이 틀리면 빈 목록 — 그 파일들은 하나씩·조각으로 다시 만든다(실패로 세지 않는다)."""
         ca = _ca()
-        base = self.prompt + self._context(files_done)
+        base = self.prompt + self._context(files_done, [f["file"] for f in batch])
         wanted = "\n".join(f"- {f['file']}" for f in batch)
         p = base + f"\n\n이번 응답의 ops 에는 **아래 파일만** 전체 내용으로 작성하세요(다른 파일은 넣지 마세요):\n{wanted}"
         for f in batch:
@@ -751,7 +823,7 @@ class LargeGeneration:
                     message=(f"{path} 쓰던 내용에 이어서 씁니다" if resuming else
                              f"{path} 을(를) 글자 그대로 이어 받습니다" + (" (맥락을 줄여서)" if lean else "")))
         #: lean — 이미 만든 파일 본문을 빼고 약속·목록만 보낸다(입력이 커서 생기는 실패를 피한다).
-        context = self._context([] if lean else files_done)
+        context = self._context([] if lean else files_done, None if lean else [path])
         base = self.context_prompt + context + f"\n\n지금은 {path} 파일 하나만 작성합니다." + _doc_hint(path)
         content = self.write_in_parts(base, f"{path} 파일", agent=agent, path=path)
         return {"action": "create", "file": path, "content": content, "language": "",
@@ -834,7 +906,7 @@ class LargeGeneration:
     def _fix(self, op: dict, problems: list[str], files_done: list[dict], agent: str) -> str:
         ca = _ca()
         listing = "\n".join(f"- {p}" for p in problems)
-        p = self.context_prompt + self._context(files_done) + f"""
+        p = self.context_prompt + self._context(files_done, [op["file"]]) + f"""
 
 [즉시 교정] 방금 작성한 {op['file']} 에 아래 문제가 있습니다.
 {listing}
@@ -864,46 +936,7 @@ replace 는 바꿀 내용입니다.
     def run(self) -> tuple[dict, list[dict], Any]:
         try:
             self.plan()
-            files = self.state["files"]
-            for layer in (0, 1, 2):
-                wave = [f for f in files if f["layer"] == layer and _norm(f["file"]) not in self.state["ops"]
-                        and not (self.skip_failed and _norm(f["file"]) in self.state["failed"])]
-                if not wave:
-                    continue
-                # 기반 파일은 서로 의존하므로 순서대로(정확도), 기능·화면은 기반 코드를 보며 동시에(속도).
-                workers = 1 if layer == 0 else self.concurrency
-                done_before = [self.state["ops"][_norm(f["file"])] for f in files
-                               if _norm(f["file"]) in self.state["ops"]]
-                self._event("wave", layer=layer, agents=workers,
-                            message=f"{['공통 기반', '기능', '화면·진입점'][layer]} {len(wave)}개 — 에이전트 {workers}명")
-                batches = _batches(wave, BATCH)
-                if workers == 1:
-                    for batch in batches:
-                        context = [self.state["ops"][_norm(f["file"])] for f in files if _norm(f["file"]) in self.state["ops"]]
-                        self._run_batch(batch, context, "agent-1")
-                else:
-                    slots = [f"agent-{i + 1}" for i in range(workers)]
-                    free = list(slots)
-                    free_lock = threading.Lock()
-
-                    def task(batch: list[dict]) -> None:
-                        with free_lock:
-                            slot = free.pop(0) if free else slots[0]
-                        try:
-                            self._run_batch(batch, done_before, slot)
-                        finally:
-                            with free_lock:
-                                free.append(slot)
-
-                    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gen") as pool:
-                        futures = [pool.submit(task, b) for b in batches]
-                        first_error: BaseException | None = None
-                        for fut in as_completed(futures):
-                            exc = fut.exception()
-                            if exc and first_error is None:
-                                first_error = exc
-                        if first_error:
-                            raise first_error
+            self._schedule()
         except Paused as exc:
             self._save()
             self._log("", error_kind(exc), f"멈춤 — {exc}")
@@ -946,6 +979,107 @@ replace 는 바꿀 내용입니다.
                  "fallback_docs": self.fallback_docs or [{"file": op["file"], "reason": "자동 작성"} for op in ops if op.get("fallback")]},
                 ops, self.last_resp)
 
+    def _deps(self, files: list[dict]) -> dict[str, list[tuple[str, bool]]]:
+        """파일마다 먼저 끝나야 하는 파일 [(경로 키, 설계가 직접 적은 것인가)].
+
+        · 설계의 uses(이 파일이 import 할 파일) — 그 파일의 실제 내용을 보고 써야 이름·props 가 맞는다.
+        · 같은 쪽(frontend/·backend/ …) 안에서 더 아래 단계(_rank: 설정 → 타입·유틸 → 서비스·API·Context → 훅·라우트
+          → 컴포넌트 → 화면 → 진입점)의 파일 — uses 를 빠뜨려도 화면이 컴포넌트보다 먼저 써지지 않게.
+        다른 쪽(화면 ↔ 서버)끼리는 기다리지 않는다(약속 문서로 맞춘다)."""
+        keys = {_norm(f["file"]): f for f in files}
+        sides = _sides_of(files)
+        out: dict[str, list[tuple[str, bool]]] = {}
+        for f in files:
+            k = _norm(f["file"])
+            side, rank = _side(f["file"], sides), _rank(f["file"])
+            deps: dict[str, bool] = {}
+            for u in f.get("uses") or []:
+                d = self._resolve_use(u)
+                if d and d != k and d in keys:
+                    deps[d] = True
+            #: 설계가 uses 를 적었으면 그 파일과 공용 타입·유틸(1단계)만 기다린다 — 상관없는 컴포넌트까지 기다리지 않게.
+            #: 적지 않았으면 같은 쪽의 더 아래 단계를 모두 기다린다. 설정·패키지(0단계)와 문서는 서로 기다리지 않는다.
+            explicit = bool(deps)
+            for g in files:
+                d = _norm(g["file"])
+                gr = _rank(g["file"])
+                if d == k or d in deps or _side(g["file"], sides) != side or gr == 0 or gr >= rank or rank >= 7:
+                    continue
+                if explicit and gr != 1:
+                    continue
+                deps[d] = False
+            out[k] = list(deps.items())
+        return out
+
+    def _schedule(self) -> None:
+        """설계의 의존 순서대로, 서로 상관없는 파일은 동시에 만든다(공통 기반도 — 예전엔 한 명이 순서대로 써서 가장 오래 걸렸다).
+        파일마다 시작하는 순간까지 완성된 파일(특히 그 파일이 불러오는 파일)의 실제 내용을 보고 쓴다."""
+        files = self.state["files"]
+        todo = [f for f in files if _norm(f["file"]) not in self.state["ops"]
+                and not (self.skip_failed and _norm(f["file"]) in self.state["failed"])]
+        if not todo:
+            return
+        deps = self._deps(files)
+        sides = _sides_of(files)
+        pending = {_norm(f["file"]): f for f in todo}
+        running: set[str] = set()
+        workers = self.concurrency
+        self._event("wave", layer=-1, agents=workers,
+                    message=f"파일 {len(todo)}개 — 에이전트 {workers}명이 의존 순서대로 동시에 만듭니다(먼저 끝난 파일을 보고 다음 파일을 씁니다)")
+        slots = [f"agent-{i + 1}" for i in range(workers)]
+        free = list(slots)
+
+        def unmet(k: str) -> list[tuple[str, bool]]:
+            return [(d, e) for d, e in deps.get(k, []) if d in pending or d in running]
+
+        def task(batch: list[dict], slot: str) -> None:
+            with self._lock:
+                context = [dict(op) for op in self.state["ops"].values()]
+            self._run_batch(batch, context, slot)
+
+        first_error: BaseException | None = None
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gen") as pool:
+            futures: dict = {}
+            while (pending or futures) and first_error is None:
+                ready = [k for k in pending if not unmet(k)]
+                if not ready and not futures and pending:
+                    #: 서로 기다리는 파일(설계의 uses 가 단계와 엇갈림) — 직접 적은 의존이 남지 않은 것부터 푼다.
+                    soft = [k for k in pending if all(not e for _d, e in unmet(k))]
+                    pool_keys = soft or list(pending)
+                    ready = [min(pool_keys, key=lambda k: (_rank(pending[k]["file"]), len(unmet(k))))]
+                ready.sort(key=lambda k: (_rank(pending[k]["file"]), list(pending).index(k)))
+                while ready and free:
+                    k = ready.pop(0)
+                    batch = [pending.pop(k)]
+                    #: 작은 파일은 같은 쪽·같은 단계의 다른 작은 파일과 둘씩 묶어 호출 수를 줄인다
+                    if _small(batch[0], self.state):
+                        mate = next((m for m in ready if _small(pending[m], self.state)
+                                     and _side(pending[m]["file"], sides) == _side(batch[0]["file"], sides)
+                                     and _rank(pending[m]["file"]) == _rank(batch[0]["file"])), None)
+                        if mate and BATCH > 1:
+                            ready.remove(mate)
+                            batch.append(pending.pop(mate))
+                    slot = free.pop(0)
+                    for f in batch:
+                        running.add(_norm(f["file"]))
+                    futures[pool.submit(task, batch, slot)] = (batch, slot)
+                if not futures:
+                    continue
+                done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    batch, slot = futures.pop(fut)
+                    free.append(slot)
+                    for f in batch:
+                        running.discard(_norm(f["file"]))
+                    exc = fut.exception()
+                    if exc and first_error is None:
+                        first_error = exc
+            if first_error is not None:
+                for fut in futures:
+                    fut.cancel()
+        if first_error is not None:
+            raise first_error
+
     def _run_batch(self, batch: list[dict], context: list[dict], agent: str) -> None:
         """작은 파일은 두 개씩 한 번에 받고, 받은 것은 하나씩 바로 저장한다. 빠진 파일·이어 쓰던 파일은 하나씩."""
         todo = [f for f in batch if _norm(f["file"]) not in self.state["ops"]]
@@ -966,6 +1100,113 @@ replace 는 바꿀 내용입니다.
 
 
 # ── 보조 ───────────────────────────────────────────────────────────────
+
+_SIDE_SKIP = {"src", "app", "lib"}
+
+
+def _side(path: str, sides: "frozenset[str] | None" = None) -> str:
+    """frontend/·backend/ 처럼 따로 빌드되는 쪽(그 폴더에 package.json 등이 있는 첫 폴더). 그 밖은 루트 ''."""
+    parts = path.replace("\\", "/").strip("/").split("/")
+    if len(parts) < 2:
+        return ""
+    head = parts[0].lower()
+    if sides is not None:
+        return head if head in sides else ""
+    return head if head not in _SIDE_SKIP else ""
+
+
+def _sides_of(files: list[dict]) -> frozenset:
+    marks = {"package.json", "requirements.txt", "pyproject.toml", "go.mod", "pom.xml", "build.gradle", "cargo.toml"}
+    out = set()
+    for f in files:
+        parts = str(f.get("file") or "").replace("\\", "/").strip("/").split("/")
+        if len(parts) == 2 and parts[1].lower() in marks:
+            out.add(parts[0].lower())
+    return frozenset(out)
+
+
+def _rank(path: str) -> int:
+    """같은 쪽 안에서 먼저 써야 하는 순서(작을수록 먼저). 경로만 보고 정한다."""
+    p = "/" + path.replace("\\", "/").lower()
+    name = posixpath.basename(p)
+    stem = re.sub(r"\.[^.]+$", "", name)
+    if name.endswith((".md", ".mdx", ".txt")) or re.search(r"/(docs?|tests?|__tests__|e2e)/|\.(test|spec)\.", p) or "/seed" in p:
+        return 7
+    if name in {"package.json", "requirements.txt", "pyproject.toml", "go.mod", "dockerfile", ".dockerignore", ".gitignore",
+                "index.html", ".env.example", ".env.sample"} or re.match(r"(tsconfig.*|.*\.config)\.(json|js|cjs|mjs|ts)$", name) \
+            or name.endswith((".prisma", ".sql", ".css", ".scss", ".d.ts", ".yml", ".yaml", ".toml", ".ini")):
+        return 0
+    if re.search(r"/(types?|constants?|config|utils?|lib|helpers?|db|database|models?|schemas?|validators?|interfaces)/", p) \
+            or stem in {"types", "constants", "config", "db", "database", "models", "schema"}:
+        return 1
+    if re.search(r"/(services?|middlewares?|api|context|contexts|store|stores|repositories|repos|clients?|providers?)/", p):
+        return 2
+    if re.search(r"/(hooks?|routes?|routers?|controllers?|handlers?|resolvers?)/", p):
+        return 3
+    if re.search(r"/(components?|layouts?|widgets?|ui)/", p):
+        return 4
+    if re.search(r"/(pages?|views?|screens?|routes?/_?app)/", p):
+        return 5
+    if stem in {"app", "main", "index", "server", "router", "routes", "_app", "manage", "wsgi", "asgi"}:
+        return 6
+    return 3
+
+
+def _small(f: dict, state: dict) -> bool:
+    return (f.get("size") != "large" and f["file"] not in state["partial"]
+            and not int((state["attempts"].get(_norm(f["file"])) or {}).get("tries", 0)))
+
+
+_SIG_SUFFIX = re.compile(r"(Props|State|Return|Result|Options|Context|ContextType|Value|Params|Request|Response|Item|Payload)$")
+
+
+def _export_summary(path: str, content: str, limit: int = 2400) -> str:
+    """파일이 바깥에 내보내는 이름과 모양(다른 파일이 맞춰 쓸 것) — 인터페이스·타입 본문, 함수·컴포넌트 시그니처."""
+    if not content:
+        return ""
+    low = path.lower()
+    lines = content.split("\n")
+    out: list[str] = []
+    if low.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts")):
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            strip = line.strip()
+            m_block = re.match(r"(export\s+)?(?:declare\s+)?(interface|type|enum)\s+([A-Za-z_$][\w$]*)", strip)
+            if m_block and (m_block.group(1) or _SIG_SUFFIX.search(m_block.group(3))) and not line.startswith((" ", "\t")):
+                depth, j, block = 0, i, []
+                while j < len(lines) and j - i < 40:
+                    block.append(lines[j])
+                    depth += lines[j].count("{") - lines[j].count("}")
+                    if depth <= 0 and (lines[j].rstrip().endswith((";", "}")) or (m_block.group(2) != "type" and "{" in "".join(block))):
+                        if depth <= 0 and ("{" in "".join(block) or lines[j].rstrip().endswith(";")):
+                            break
+                    j += 1
+                out.extend(block)
+                i = j + 1
+                continue
+            if re.match(r"export\s+(default\s+)?(async\s+)?function\b", strip) or re.match(r"export\s+(const|let)\s+[\w$]+", strip) \
+                    or re.match(r"export\s+(default\s+)?class\b", strip):
+                sig = [line]
+                j = i
+                while not re.search(r"(\{|=>|=)\s*$|;\s*$", lines[j].rstrip()) and j - i < 8 and j + 1 < len(lines):
+                    j += 1
+                    sig.append(lines[j])
+                out.append("\n".join(sig).rstrip(" {"))
+                i = j + 1
+                continue
+            if re.match(r"export\s+default\s+[\w$]+\s*;?$", strip) or re.match(r"export\s*\{", strip) or re.match(r"export\s+\*", strip):
+                out.append(strip)
+            elif re.search(r"createContext<", strip):
+                out.append(strip)
+            i += 1
+    elif low.endswith(".py"):
+        out = [l for l in lines if re.match(r"(async\s+def|def|class)\s+[A-Za-z_]", l)]
+    elif low.endswith(".sql"):
+        out = [l for l in lines if re.match(r"\s*(create\s+(table|type|index|unique)|\s+\w+\s+\w+.*,?$)", l, re.I)][:60]
+    text = "\n".join(out).strip()
+    return text[:limit]
+
 
 def _batches(files: list[dict], size: int) -> list[list[dict]]:
     return [files[i:i + size] for i in range(0, len(files), size)]
@@ -1215,29 +1456,94 @@ FIX_SCHEMA = {
 _REL_IMPORT = re.compile(r"""(?:from\s*|import\s*\(?\s*|require\(\s*)['"](\.{1,2}/[^'"]+)['"]""")
 
 
-def _related(ops: list[dict], index: int, limit: int = 36_000) -> list[int]:
-    """이 파일이 불러오는 프로젝트 파일(한 단계) — 이름·타입·함수 모양을 맞추려면 정의를 봐야 한다."""
+def _related(ops: list[dict], index: int, limit: int = 36_000, hint: str = "") -> list[int]:
+    """이 파일이 불러오는 프로젝트 파일(한 단계) — 이름·타입·함수 모양을 맞추려면 정의를 봐야 한다.
+
+    오류 문장에 나온 이름(OrderListResponse·useCart·PaginationProps …)을 정의하는 파일을 먼저 넣는다 — import 순서대로
+    채우면 미들웨어 파일들로 한도가 차서 정작 타입 정의 파일이 빠졌다(TEMP 2.0.8 점검: orders.ts 에 types/ 가 빠짐)."""
     by_norm = {_norm(op["file"]): i for i, op in enumerate(ops)}
     me = ops[index]
     base = posixpath.dirname(str(me["file"]).replace("\\", "/"))
-    out, used = [], 0
+    found: list[int] = []
     for spec in _REL_IMPORT.findall(str(me.get("content") or "")):
         target = posixpath.normpath(posixpath.join(base, spec))
         stem = re.sub(r"\.(js|jsx|ts|tsx|mjs|cjs)$", "", target)
         for cand in (target, stem + ".ts", stem + ".tsx", stem + ".js", stem + ".jsx", stem + "/index.ts", stem + "/index.tsx",
                      stem + "/index.js", stem + ".d.ts"):
             j = by_norm.get(_norm(cand))
-            if j is not None and j != index and j not in out:
-                size = len(str(ops[j].get("content") or ""))
-                if used + size <= limit:
-                    out.append(j)
-                    used += size
+            if j is not None and j != index:
+                if j not in found:
+                    found.append(j)
                 break
-    return out
+    words = {w for w in re.findall(r"[A-Za-z_$][\w$]{3,}", hint or "")
+             if not w.startswith("TS") and w not in {"Type", "type", "Property", "does", "exist", "Argument", "assignable",
+                                                     "parameter", "Cannot", "find", "name", "Expected", "arguments", "only",
+                                                     "specify", "known", "properties", "Object", "literal", "string", "number",
+                                                     "boolean", "null", "undefined", "IntrinsicAttributes", "void"}}
+
+    def score(j: int) -> int:
+        text = str(ops[j].get("content") or "")
+        return sum(1 for w in words if re.search(rf"\b(?:export\s+)?(?:declare\s+)?(?:async\s+)?(?:function|const|let|class|interface|type|enum)\s+{re.escape(w)}\b", text)) * 10 \
+            + sum(1 for w in words if re.search(rf"\b{re.escape(w)}\b", text))
+
+    ranked = sorted(found, key=lambda j: (-score(j), found.index(j))) if words else found
+    out, used = [], 0
+    for j in ranked:
+        size = len(str(ops[j].get("content") or ""))
+        if used + size <= limit:
+            out.append(j)
+            used += size
+    return sorted(out, key=found.index)
+
+
+_TYPE_IN_MSG = re.compile(r"type '(?:IntrinsicAttributes & )?([A-Z][\w$]*)'")
+
+
+def _definition_first(ops: list[dict], grouped: dict[int, list[str]]) -> dict[int, list[str]]:
+    """여러 파일이 같은 정의(컴포넌트 props·훅 반환·Context 타입)와 어긋나면 정의 파일 하나를 먼저 고친다.
+
+    실기기(카페 2.0.8): 화면 10개가 ErrorAlert 에 onClose 를 안 넘겨(필수) 10개 파일을 따로따로 고치려 했다 — 정의에서
+    onClose 를 선택으로 바꾸면 한 번에 끝난다. 쓰는 쪽 파일의 그 오류 줄은 이번 회차에서 빼고(동시에 같은 정의를
+    서로 다르게 고치지 않게) 다음 빌드에서 남았는지 다시 본다."""
+    users: dict[str, dict[int, list[str]]] = {}
+    for idx, problems in grouped.items():
+        for problem in problems:
+            for line in re.split(r" / (?=\d+행 )", problem):
+                for name in set(_TYPE_IN_MSG.findall(line)):
+                    users.setdefault(name, {}).setdefault(idx, []).append(line.split(" (해결:", 1)[0])
+    out = {k: list(v) for k, v in grouped.items()}
+    for name, by_file in users.items():
+        if len(by_file) < 2:
+            continue
+        owners = [i for i, op in enumerate(ops) if re.search(
+            rf"^\s*(?:export\s+)?(?:interface|type)\s+{re.escape(name)}\b", str(op.get("content") or ""), re.M)]
+        if len(owners) != 1 or ops[owners[0]].get("fixed"):
+            continue
+        owner = owners[0]
+        lines = [f"{ops[i]['file']}: {l.split(': ', 1)[-1][:220]}" for i, ls in by_file.items() for l in ls][:14]
+        out.setdefault(owner, []).insert(0,
+            f"다른 파일 {len(by_file)}개가 이 파일의 {name} 와(과) 다르게 씁니다 — 쓰는 쪽이 여럿이므로 정의를 그 쓰임에 맞추세요"
+            f"(필수 항목은 선택(?)으로, 쓰는 쪽이 꺼내는 필드·함수는 더하기). 기존 이름·필드는 지우지 마세요.\n  "
+            + "\n  ".join(lines) + " (해결: 정의 파일만 고치면 쓰는 파일들은 그대로 빌드됩니다)")
+        for i in by_file:
+            if i == owner:
+                continue
+            kept = []
+            for problem in out.get(i, []):
+                parts = [l for l in re.split(r" / (?=\d+행 )", problem) if name not in _TYPE_IN_MSG.findall(l)]
+                if parts:
+                    kept.append(" / ".join(parts))
+            if kept:
+                out[i] = kept
+            else:
+                out.pop(i, None)
+    #: 정의 파일을 먼저(회차당 파일 수 한도 안에 들게)
+    owners_first = sorted(out.items(), key=lambda kv: 0 if kv[1] and kv[1][0].startswith("다른 파일 ") else 1)
+    return dict(owners_first)
 
 
 def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_files: int = 8,
-                   emit: Callable[[dict], None] | None = None, workers: int = 3) -> list[dict] | None:
+                   emit: Callable[[dict], None] | None = None, workers: int | None = None) -> list[dict] | None:
     """전체 점검에서 나온 문제를 **바뀔 부분만** 고친다(대규모 생성용).
 
     · 고칠 파일과 그 파일이 불러오는 파일(정의)을 함께 보여 주고, 어긋난 쪽이 정의 파일이면 그 파일도 고치게 한다 —
@@ -1258,6 +1564,7 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
         grouped.setdefault(idx, []).append(f"{issue.get('message', '')} (해결: {issue.get('fix', '')})")
     if not grouped:
         return None
+    grouped = _definition_first(ops, grouped)
     engine = LargeGeneration(prompt, emit=emit)
     listing = "\n".join(f"- {op['file']}" for op in ops)
     targets = list(grouped.items())[:max_files]
@@ -1266,8 +1573,9 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
         idx, problems = item
         op = ops[idx]
         if emit:
-            emit({"step": "fixing", "agent": "review", "file": op["file"], "message": f"전체 점검 — {op['file']} 오류 {len(problems)}건 고치는 중"})
-        related = _related(ops, idx)
+            n_err = sum(len(re.findall(r"\d+행 ", x)) or 1 for x in problems)
+            emit({"step": "fixing", "agent": "review", "file": op["file"], "message": f"전체 점검 — {op['file']} 오류 {n_err}건 고치는 중"})
+        related = _related(ops, idx, hint="\n".join(problems))
         context = "".join(f"\n[참고 — 이 파일이 불러오는 파일] {ops[j]['file']}\n```\n{ca._prompt_body(ops[j]['content'], 20_000)}\n```\n"
                           for j in related)
         p = _without_output_format(prompt) + f"""
@@ -1295,6 +1603,8 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
                  and isinstance(e.get("find"), str) and isinstance(e.get("replace"), str) and e["find"]]
         return idx, edits
 
+    #: 생성과 같은 수의 에이전트가 동시에 고친다(설정한 팀 인원 — 예전엔 3명 고정이라 고칠 파일이 많으면 오래 걸렸다)
+    workers = workers or engine.concurrency
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(targets))), thread_name_prefix="fix") as pool:
         answers = list(pool.map(ask, targets))
     out = [dict(op) for op in ops]

@@ -220,7 +220,7 @@ export class CanvasHost {
                         //: 알린다 — 올린 뒤 흰 화면을 보고서야 알게 되면 늦다. 점검 실패는 배포를 막지 않는다.
                         try {
                             const readiness = await this.api.checkBuildReadiness(workspace);
-                            const screenBreakers = new Set(['NODE_VITE_PROCESS_ENV','NODE_VITE_JSX_IN_JS','NODE_LOCAL_IMPORT_MISSING','NODE_IMPORT_NAME_MISSING','NODE_CONTEXT_MEMBER_MISSING','NODE_IMPORT_PACKAGE_TYPO','NODE_UNDECLARED_DEPENDENCY','NODE_BUILD_ENTRY_MISSING','NODE_BUILD_TOOL_MISSING','NODE_IMPORT_NAME_UNDEFINED','NODE_REACT_EFFECT_LOOP','NODE_WORKSPACE_MANIFEST_MISSING','NODE_TSCONFIG_REFERENCE_MISSING','NODE_VITE_TERSER_MISSING','NODE_STATIC_PATH_OUTSIDE_PROJECT','NODE_NAME_NOT_IMPORTED','NODE_NESTED_ROUTER','NODE_TYPES_MISSING']);
+                            const screenBreakers = new Set(['NODE_VITE_PROCESS_ENV','NODE_VITE_JSX_IN_JS','NODE_LOCAL_IMPORT_MISSING','NODE_IMPORT_NAME_MISSING','NODE_CONTEXT_MEMBER_MISSING','NODE_IMPORT_PACKAGE_TYPO','NODE_UNDECLARED_DEPENDENCY','NODE_BUILD_ENTRY_MISSING','NODE_BUILD_TOOL_MISSING','NODE_IMPORT_NAME_UNDEFINED','NODE_REACT_EFFECT_LOOP','NODE_WORKSPACE_MANIFEST_MISSING','NODE_TSCONFIG_REFERENCE_MISSING','NODE_VITE_TERSER_MISSING','NODE_STATIC_PATH_OUTSIDE_PROJECT','NODE_NAME_NOT_IMPORTED','NODE_NESTED_ROUTER','NODE_TYPES_MISSING','NODE_MODULE_NOT_IMPORTED','NODE_CLIENT_NOT_CREATED','NODE_PRISMA_CLI_MISSING','NODE_TAILWIND_SELF_APPLY']);
                             for (const issue of (readiness.issues || []).filter(i => i.severity === 'error' && screenBreakers.has(i.code)).slice(0, 4)) {
                                 staticNotes.push(`배포 전 고칠 것: ${issue.message} 해결: ${issue.fix}`);
                             }

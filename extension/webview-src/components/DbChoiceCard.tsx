@@ -7,9 +7,9 @@ import React from "react";
 
 export interface DbDiagnosis { code: string; title: string; cause: string; fix?: string; lines?: string[] }
 
-const box = (tone: "warn" | "bad"): React.CSSProperties => ({
-  border: `1px solid ${tone === "bad" ? "var(--vscode-errorForeground,#f48771)" : "var(--vscode-editorWarning-foreground,#cca700)"}`,
-  background: tone === "bad" ? "rgba(244,135,113,.08)" : "rgba(204,167,0,.08)",
+const box = (tone: "warn" | "bad" | "info"): React.CSSProperties => ({
+  border: `1px solid ${tone === "bad" ? "var(--vscode-errorForeground,#f48771)" : tone === "info" ? "var(--vscode-panel-border,#555)" : "var(--vscode-editorWarning-foreground,#cca700)"}`,
+  background: tone === "bad" ? "rgba(244,135,113,.08)" : tone === "info" ? "transparent" : "rgba(204,167,0,.08)",
   borderRadius: 6, padding: "9px 11px", margin: "0 0 10px", fontSize: 11, lineHeight: 1.55,
 });
 const primary: React.CSSProperties = { background: "var(--vscode-button-background,#0e639c)", color: "var(--vscode-button-foreground,#fff)", border: 0, borderRadius: 4, padding: "5px 11px", fontSize: 11.5, fontWeight: 600, cursor: "pointer" };
@@ -58,5 +58,18 @@ export const DemoSeedWarning: React.FC<{ seed: { ok: boolean; script?: string; m
     <strong style={{ color: "var(--vscode-editorWarning-foreground,#cca700)" }}>데모 상품을 넣지 못했습니다</strong>
     <div style={{ marginTop: 4 }}>앱은 실행됐지만 상품 목록이 비어 있을 수 있습니다. {seed.script ? `${seed.script} 실행 결과:` : ""}</div>
     <Lines lines={seed.message ? seed.message.split("\n").filter(Boolean).slice(-6) : []} />
+  </section>
+);
+
+/** 첫 배포에서 앱의 샘플 데이터 스크립트(npm run db:seed 등)를 돌린 결과 — 관리자 계정·메뉴가 여기서 생긴다. */
+export const AppSeedNote: React.FC<{ seed: { ok: boolean; script?: string; log?: string } }> = ({ seed }) => (
+  <section role="status" aria-label="샘플 데이터" data-testid="app-seed-note" style={box(seed.ok ? "info" : "warn")}>
+    <strong>{seed.ok ? "처음 배포 — 앱의 샘플 데이터를 넣었습니다" : "앱의 샘플 데이터를 넣지 못했습니다"}</strong>
+    <div style={{ marginTop: 4 }}>
+      {seed.ok
+        ? `빈 DB 라서 ${seed.script ?? "샘플 데이터"} 를 한 번 실행했습니다(관리자 계정·기본 메뉴 등은 앱 README 를 확인하세요). 다시 배포할 때는 실행하지 않습니다.`
+        : `앱은 실행됐지만 관리자 계정·기본 데이터가 없을 수 있습니다. ${seed.script ?? ""} 실행 결과:`}
+    </div>
+    {!seed.ok && <Lines lines={seed.log ? seed.log.split("\n").filter(Boolean).slice(-6) : []} />}
   </section>
 );

@@ -47,14 +47,18 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_STATIC_PATH_OUTSIDE_PROJECT", "DOCKERFILE_NPM_CI_WITHOUT_LOCK", "NODE_UNDECLARED_DEPENDENCY",
                 "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP", "DOCKERFILE_BUILD_STAGE_OMITS_DEV",
                 "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER", "DOCKERFILE_RUNTIME_BROKEN",
-                "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING"}
+                "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING", "NODE_PRISMA_CLI_MISSING",
+                "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
+                "NODE_TAILWIND_SELF_APPLY"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
 FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
                     "NODE_STATIC_PATH_OUTSIDE_PROJECT", "DOCKERFILE_NPM_CI_WITHOUT_LOCK", "NODE_UNDECLARED_DEPENDENCY",
                     "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP", "DOCKERFILE_BUILD_STAGE_OMITS_DEV",
                     "DOCKERFILE_RUNTIME_BROKEN", "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER",
-                    "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING")
+                    "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING", "NODE_PRISMA_CLI_MISSING",
+                    "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
+                    "NODE_TAILWIND_SELF_APPLY")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -2382,6 +2386,43 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "다른 파일이 내보내는 이름을 쓰면서 import 하지 않았습니다: " + "; ".join(unimported[:4])
                 + ". TypeScript 빌드가 \"Cannot find name\" 으로 멈추거나 실행 중 ReferenceError 가 납니다.",
                 "그 이름을 내보내는 파일에서 import 하세요(자동 수정 가능).", unimported[0].split(":", 1)[0], True))
+        module_refs, module_writes = node_fixups.namespace_imports(files)
+        if module_refs:
+            writes["NODE_MODULE_NOT_IMPORTED"] = module_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_MODULE_NOT_IMPORTED", ERROR,
+                "모듈 이름으로 함수를 부르면서 그 모듈을 불러오지 않았습니다: " + "; ".join(module_refs[:3])
+                + ". TypeScript 빌드가 \"Cannot find name\" 으로 멈춥니다.",
+                "그 모듈을 `import * as 이름` 으로 불러오세요(자동 수정 가능).", module_refs[0].split(":", 1)[0], True))
+        clients, client_writes = node_fixups.hoisted_clients(files)
+        if clients:
+            writes["NODE_CLIENT_NOT_CREATED"] = client_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_CLIENT_NOT_CREATED", ERROR,
+                "다른 함수처럼 DB 클라이언트 등을 만들지 않고 바로 씁니다: " + "; ".join(clients[:3])
+                + ". TypeScript 빌드가 \"Cannot find name\" 으로 멈춥니다.",
+                "그 함수 맨 앞에서 다른 함수와 같은 방법으로 만드세요(자동 수정 가능).", clients[0].split(":", 1)[0], True))
+        self_apply, self_apply_writes = node_fixups.tailwind_self_apply(files)
+        if self_apply:
+            writes["NODE_TAILWIND_SELF_APPLY"] = self_apply_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_TAILWIND_SELF_APPLY", ERROR,
+                "; ".join(self_apply[:2]) + ". Tailwind 가 \"circular dependency\" 로 화면 빌드를 멈춥니다.",
+                "같은 이름의 유틸리티는 Tailwind 가 이미 만들어 주므로 그 규칙을 지우세요(자동 수정 가능 — 화면 모양은 같음).",
+                sorted(self_apply_writes)[0], True))
+        safe_notes, safe_writes = node_fixups.ts_safe_rewrites(files)
+        if safe_writes:
+            #: 문제로 띄우지 않는다(실행 동작은 그대로, tsc 만 막히는 모양) — 생성 직후·배포 직전 자동 수정이 조용히 고친다.
+            writes["NODE_TS_SAFE_REWRITE"] = safe_writes
+            result.fix_data["ts_safe_notes"] = safe_notes
+        prisma_cli = node_fixups.prisma_cli_missing(files)
+        if prisma_cli:
+            writes["NODE_PRISMA_CLI_MISSING"] = prisma_cli
+            result.issues.append(ReadinessIssue(
+                "NODE_PRISMA_CLI_MISSING", ERROR,
+                "@prisma/client 를 쓰는데 prisma(개발 도구)가 없어 `prisma generate` 를 할 수 없습니다. "
+                "Prisma 타입이 만들어지지 않아 TypeScript 빌드가 멈춥니다.",
+                "prisma 를 @prisma/client 와 같은 버전으로 devDependencies 에 추가하세요(자동 수정 가능).", sorted(prisma_cli)[0], True))
         nested, nested_writes = node_fixups.nested_routers(files)
         if nested:
             writes["NODE_NESTED_ROUTER"] = nested_writes
@@ -2481,6 +2522,12 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                            ("redis", {"redis", "ioredis"})):
         if runtime_names & deps_for:
             result.services.append(kind)
+    if "@prisma/client" in runtime_names:
+        #: Prisma 는 스키마의 datasource 가 DB 를 정한다 — PostgreSQL·MongoDB 면 로컬 배포가 함께 띄운다(DATABASE_URL).
+        provider = _prisma_provider(files)
+        kind = {"postgresql": "postgres", "postgres": "postgres", "mongodb": "mongodb"}.get(provider or "")
+        if kind and kind not in result.services:
+            result.services.insert(0, kind)
     provisioned = {"PostgreSQL": "postgres", "MongoDB": "mongodb", "Redis": "redis"}
     reads_db_env = any(re.search(r"(DATABASE|POSTGRES|PG|MONGO|REDIS|DB_)", n.upper()) for n in result.env_names)
     for dep, label, pattern in _EXTERNAL_SERVICES:
@@ -2734,6 +2781,9 @@ def _dockerfile_facts(text: str) -> dict:
             facts["runs_build"] = True
         elif op == "CMD":
             m = re.search(r"""\bnode["']?\s*,?\s*["']?([\w./-]+\.[cm]?js)""", line)
+            if m and m.group(1).rsplit("/", 1)[-1] == "recoder-start.cjs":
+                #: ReCoder 검증 Dockerfile(Prisma) — 시작 도우미는 빌드 단계가 만들고, 실제 서버는 다음 인자다
+                m = re.search(r"""recoder-start\.cjs["']?\s*,?\s*["']?([\w./-]+\.[cm]?js)""", line) or m
             facts["cmd_entry"] = _norm(m.group(1)) if m else None
     return facts
 
@@ -3594,6 +3644,15 @@ def apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> lis
         raise ValueError(f"파일을 바꾸지 못해 원래대로 되돌렸습니다: {exc}. 파일이 다른 프로그램에서 열려 있거나 "
                          "읽기 전용인지 확인하세요.") from exc
     return changed
+
+
+def _prisma_provider(files) -> Optional[str]:
+    for rel in files.files():
+        if rel.endswith(".prisma") and "/node_modules/" not in f"/{rel}":
+            m = re.search(r"""datasource\s+\w+\s*\{[^}]*?\bprovider\s*=\s*["']([\w-]+)["']""", files.read(rel) or "", re.S)
+            if m:
+                return m.group(1).lower()
+    return None
 
 
 def apply_fix(workspace: str | Path, code: str) -> dict:

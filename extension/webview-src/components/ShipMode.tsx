@@ -16,7 +16,7 @@ import { LocalRollbackResult, LocalRollbackStatus, rollbackWatchId } from "./Loc
 import { BuildDiagnosis, BuildFailure, ReadinessIssue, ReadinessPanel } from "./ReadinessPanel";
 import { issueKind, shortIssue } from "./issueText";
 import { DeployDemo, DeploySetting, DeploySettingsPanel } from "./DeploySettingsPanel";
-import { AppCheckWarning, DbDiagnosis, DbSchemaChoice, DemoSeedWarning } from "./DbChoiceCard";
+import { AppCheckWarning, AppSeedNote, DbDiagnosis, DbSchemaChoice, DemoSeedWarning } from "./DbChoiceCard";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -240,7 +240,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   proposalIdRef.current = proposal?.proposal_id ?? null;
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [plan, setPlan] = useState<DeploymentPlan | null>(null);
-  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean }; security_scan?: { status?: string; high_count?: number; reason?: string }; auto_fixed?: Array<{ code: string; message: string; changed?: string[] }>; screen?: { ok?: boolean | null; checked?: string; warnings?: string[] }; app_check?: { status?: string; path?: string; http_status?: number; diagnosis?: DbDiagnosis }; demo_seed?: { ok: boolean; script?: string; message?: string } } | null>(null);
+  const [deployResult, setDeployResult] = useState<{ status: string; deployment_id?: string; health_ok?: boolean; health_check_url?: string; rollback_target?: string | null; continuous_verification?: { enabled?: boolean; started?: boolean }; security_scan?: { status?: string; high_count?: number; reason?: string }; auto_fixed?: Array<{ code: string; message: string; changed?: string[] }>; screen?: { ok?: boolean | null; checked?: string; warnings?: string[] }; app_check?: { status?: string; path?: string; http_status?: number; diagnosis?: DbDiagnosis }; demo_seed?: { ok: boolean; script?: string; message?: string }; seeded?: { ok: boolean; script?: string; log?: string } } | null>(null);
   //: 배포 뒤 감시(연속 검증) 스냅샷과 롤백 결과 — 로컬 Docker 배포의 D1~D4.
   //: 예전엔 코어가 감시하고 롤백 후보를 관리해도 사이드바 어디에도 표시·승인 UI 가 없었다.
   const [watch, setWatch] = useState<VerificationSnapshot | null | "none">(null);
@@ -1031,6 +1031,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         <AppCheckWarning check={deployResult.app_check} busy={dbBusy} onNewDb={plan?.container_name ? handleNewDbAfterDeploy : undefined} />
       )}
       {(step === "done" || step === "error") && deployResult?.demo_seed && <DemoSeedWarning seed={deployResult.demo_seed} />}
+      {step === "done" && deployResult?.seeded && <AppSeedNote seed={deployResult.seeded} />}
       {dbError && step === "done" && <div role="alert" style={{ color: "var(--vscode-errorForeground,#f48771)", fontSize: 11, marginBottom: 8 }}>{dbError}</div>}
       {/* ── Done banner ── */}
       {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deploymentHealthVerdict(deployResult, watch) !== "healthy" ? (

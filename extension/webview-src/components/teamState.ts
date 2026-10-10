@@ -106,6 +106,7 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
         text: `작업 ${event.total ?? list.length}개로 나눔 — 공통 기반 ${n[0]} → 기능 ${n[1]} → 화면 ${n[2]}` };
     }
     case "wave": {
+      if (event.layer === -1 && msg) return { who: "", role: "system", text: msg };
       const l = typeof event.layer === "number" ? event.layer : 1;
       const count = files.filter(f => f.layer === l && f.state !== "done" && f.state !== "issue").length;
       return { who: "", role: "system", text: l === 0
@@ -160,7 +161,8 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
       next.total = Math.max(next.total, next.files.length);
       break;
     case "resumed": next.phase = "building"; break;
-    case "wave": next.phase = "building"; next.layer = typeof event.layer === "number" ? event.layer : next.layer; break;
+    //: layer -1 — 의존 순서대로 모든 단계를 동시에 만든다(공통 기반도 여러 명). 모든 칸을 연다.
+    case "wave": next.phase = "building"; next.layer = event.layer === -1 ? 2 : typeof event.layer === "number" ? event.layer : next.layer; break;
     case "file_start": setFile(event.file, "writing"); break;
     case "file_split": case "file_part": setFile(event.file, "parts"); break;
     case "fixing": {

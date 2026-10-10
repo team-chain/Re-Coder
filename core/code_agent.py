@@ -2302,6 +2302,18 @@ def _apply_docker_kit(root: Path, target_folder: str, ops: list[dict]) -> tuple[
     return out, True
 
 
+def _build_error_keys(errors: list[dict]) -> set:
+    """빌드 오류의 정체(파일·오류 코드·문장 — 줄 번호는 고치면 바뀌므로 뺀다). 직전과 비교해 진전이 있었는지 본다."""
+    keys = set()
+    for e in errors:
+        parts = re.findall(r"\d+행 (TS\d+|[^:]*): ([^/←]+)", e.get("message") or "")
+        if not parts:
+            keys.add((e.get("file"), e.get("code"), (e.get("message") or "")[:200]))
+        for code, text in parts:
+            keys.add((e.get("file"), code, text.strip()[:160]))
+    return keys
+
+
 def _build_failure_issues(verification: dict, ops: list[dict]) -> list[dict]:
     """컨테이너 빌드 실패 로그 → 소스 파일별 문제(tsc·vite 오류 줄). 못 뽑으면 빈 목록."""
     try:
@@ -2318,7 +2330,30 @@ def _build_failure_issues(verification: dict, ops: list[dict]) -> list[dict]:
 def _verify_generated_build(root: Path, target_folder: str, ops: list[dict]) -> dict:
     from generated_validation import verify_proposal
     base = (root / target_folder).resolve() if target_folder else root.resolve()
-    return verify_proposal(base, ops)
+    return verify_proposal(base, _verification_ops(base, ops))
+
+
+def _verification_ops(base: Path, ops: list[dict]) -> list[dict]:
+    """검증 빌드용 ops — ReCoder 검증 Dockerfile 이면 폴더마다 끝까지 빌드해 오류를 한 번에 모으는 판으로.
+
+    실기기(TEMP 2.0.8 점검): 화면 빌드가 먼저 실패해 서버 빌드 오류(수십 건)가 보이지 않다가, 화면을 고치자 새로 나타나
+    "고쳐도 끝나지 않는" 것처럼 보였다. 배포에 쓰는 Dockerfile 은 그대로다(이 판은 검증에만)."""
+    try:
+        import docker_kit
+        from build_readiness import ProjectFiles
+        current = next((op for op in ops if _norm_op_path(op.get("file", "")) == "dockerfile"), None)
+        if current is None or not docker_kit.is_recoder(current.get("content")):
+            return ops
+        overlay = {str(op.get("file") or "").replace("\\", "/").lstrip("/"): op.get("content") or ""
+                   for op in ops if op.get("action") != "delete"}
+        info = docker_kit.layout(ProjectFiles(base, overlay))
+        if not info:
+            return ops
+        verify = docker_kit.render(dict(info, verify=True))
+        return [dict(op, content=verify) if op is current else op for op in ops]
+    except Exception as exc:  # noqa: BLE001 — 검증판을 못 만들면 원래 Dockerfile 로 검증한다
+        print(f"[code_agent] 검증용 Dockerfile 생략: {exc}", flush=True)
+        return ops
 
 
 def generate_code(
@@ -2586,6 +2621,8 @@ def generate_code(
     visited = set()
     #: 빌드 오류 수의 흐름 — 고쳐도 줄지 않으면 같은 일을 되풀이하지 않고 멈춘다("계속 고치기만 한다" — 사용자 지적 2.0.7)
     build_counts: list[int] = []
+    build_keys: list[set] = []
+    prev_state: tuple | None = None
     for _round in range(_CONSISTENCY_ROUNDS):
         if _round and _time.monotonic() - started_at > budget:
             print(f"[code_agent] 생성 시간 예산({budget}s) 초과 — AI 교정을 멈추고 결과를 돌려줍니다", flush=True)
@@ -2612,14 +2649,23 @@ def generate_code(
                 {"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
                  "message": verification["output"],
                  "fix": "실제 빌드 로그의 원인을 고치세요. 검사를 제거하거나 기능을 생략하지 마세요."}]
-            count = sum(len(re.findall(r"\d+행 ", e.get("message") or "")) or 1 for e in errors)
-            if build_counts and count >= build_counts[-1]:
-                print(f"[code_agent] 빌드 오류가 줄지 않아({build_counts[-1]} → {count}) 교정을 멈춥니다", flush=True)
+            keys = _build_error_keys(errors)
+            count = len(keys) or len(errors)
+            if build_keys and not (build_keys[-1] - keys):
+                #: 직전 빌드 오류가 하나도 사라지지 않았다 — 같은 교정을 되풀이하지 않는다. 이번 교정이 오류를 더했으면
+                #: 직전 상태로 되돌린다(고친다며 더 망가뜨린 결과를 주지 않게).
+                worse = bool(keys - build_keys[-1])
+                if worse and prev_state is not None:
+                    ops_out, errors, verification = prev_state
+                    count = len(build_keys[-1]) or len(errors)
+                print(f"[code_agent] 빌드 오류가 줄지 않아 교정을 멈춥니다(남은 {count}건{' · 직전 상태로 되돌림' if worse else ''})", flush=True)
                 _report({"step": "consistency", "round": _round + 1,
                          "message": f"빌드 오류가 더 줄지 않아 교정을 멈췄습니다(남은 {count}건) — 결과에 파일별로 보여 드립니다"})
                 consistency = errors
                 break
+            build_keys.append(keys)
             build_counts.append(count)
+            prev_state = (ops_out, errors, verification)
         if foundation:
             break  # A reviewed foundation is never silently rewritten by a model.
         signature = hashlib.sha256(json.dumps(ops_out, sort_keys=True).encode()).hexdigest()
@@ -2638,7 +2684,7 @@ def generate_code(
                 except ImportError:  # pragma: no cover
                     from core import gen_engine as _ge  # type: ignore
                     from core import generation_progress as _gp  # type: ignore
-                edited = _ge.edit_fix_round(prompt, ops_out, errors, max_files=12, emit=_gp.current())
+                edited = _ge.edit_fix_round(prompt, ops_out, errors, max_files=16, emit=_gp.current(), workers=agents)
             except Exception as exc:  # noqa: BLE001 — 교정 실패는 아래 파일 단위 교정으로 넘어간다
                 print(f"[code_agent] 부분 교정 생략: {exc}", flush=True)
                 edited = None
@@ -2715,7 +2761,9 @@ def generate_code(
     if verification["status"] == "failed":
         per_file = _build_failure_issues(verification, ops_out)
         seen = {(i.get("file"), i.get("code")) for i in consistency}
-        consistency += [i for i in per_file if (i.get("file"), i.get("code")) not in seen] or [
+        #: 파일별로 뽑은 오류가 이미 결과에 있으면 그대로 둔다 — 예전엔 이때도 "Dockerfile" 오류를 하나 더 붙여
+        #: 고칠 수 없는 고정 파일이 문제인 것처럼 보였다.
+        consistency += [i for i in per_file if (i.get("file"), i.get("code")) not in seen] if per_file else [
             {"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
              "message": verification["output"], "fix": "실제 빌드 오류를 해결한 뒤 다시 검증하세요."}]
     if payment_mode:

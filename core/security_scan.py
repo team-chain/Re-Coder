@@ -506,7 +506,7 @@ class SecurityScanner:
                         # generic 패턴은 placeholder/예시 값 제외 (오탐 감소)
                         if name == "generic_secret_assignment":
                             val = m.group(1)
-                            if self._PLACEHOLDER_RE.search(val):
+                            if self._PLACEHOLDER_RE.search(val) or _name_like_secret(line, m):
                                 continue
                         raw = m.group(0)
                         masked = (raw[:4] + "***") if len(raw) > 7 else "***"
@@ -566,6 +566,19 @@ _STANDALONE_SECRET_PATTERNS = [
         r"(?i)(?:api[_-]?key|secret(?:[_-]?key)?|access[_-]?key|auth[_-]?token|password|passwd|client[_-]?secret)"
         r"\s*[:=]\s*['\"]([^'\"\s]{16,})['\"]"), "high"),
 ]
+#: 키가 아니라 이름인 값 — 오류 코드·상수 이름(INVALID_PASSWORD: 'INVALID_PASSWORD', 'PASSWORD_TOO_WEAK').
+#: 실기기(카페 2.0.8): 오류 코드 목록이 "키처럼 보이는 값" 으로 잡혀 결과에 확인 필요로 남았다.
+_CONSTANT_NAME_VALUE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+
+
+def _name_like_secret(line: str, match: "re.Match") -> bool:
+    value = match.group(1)
+    if _CONSTANT_NAME_VALUE.match(value):
+        return True
+    key = re.search(r"([A-Za-z_][\w]*)['\"]?\s*[:=]\s*['\"]" + re.escape(value), line)
+    return bool(key and key.group(1).lower() == value.lower())
+
+
 _STANDALONE_PLACEHOLDER = re.compile(
     r"(?i)(your[_-]?|xxx|change[_-]?me|example|placeholder|dummy|<.*>|\{\{.*\}\}|\$\{)")
 _STANDALONE_SKIP_DIRS = {
@@ -586,7 +599,7 @@ def scan_text_for_secrets(text: str, filename: str = "") -> list[dict]:
             m = rx.search(line)
             if not m:
                 continue
-            if name == "generic_secret_assignment" and _STANDALONE_PLACEHOLDER.search(m.group(1)):
+            if name == "generic_secret_assignment" and (_STANDALONE_PLACEHOLDER.search(m.group(1)) or _name_like_secret(line, m)):
                 continue
             raw = m.group(0)
             masked = (raw[:4] + "***") if len(raw) > 7 else "***"

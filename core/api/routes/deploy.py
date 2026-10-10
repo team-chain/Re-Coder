@@ -4348,6 +4348,18 @@ def _auto_fix_before_build(workspace_path: str) -> list[dict]:
                                 "changed": [c for c in result.get("changed", []) if not str(c).startswith(".recoder/")][:12]})
     except Exception as exc:  # noqa: BLE001
         logger.warning("pre-deploy lint cleanup failed: %s", exc)
+    #: tsc 만 막히는 흔한 모양(환경 변수 확인 뒤 string, 조건부 펼치기) — 실행 동작은 그대로라 문제로 띄우지 않고 고친다.
+    try:
+        readiness = analyze(workspace_path)
+        if (readiness.fix_data.get("file_writes") or {}).get("NODE_TS_SAFE_REWRITE"):
+            result = apply_fix(workspace_path, "NODE_TS_SAFE_REWRITE")
+            if result.get("applied"):
+                applied.append({"code": "NODE_TS_SAFE_REWRITE",
+                                "message": "TypeScript 빌드만 막던 모양을 같은 동작으로 정리: "
+                                + "; ".join(readiness.fix_data.get("ts_safe_notes") or [])[:280],
+                                "changed": [c for c in result.get("changed", []) if not str(c).startswith(".recoder/")][:12]})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pre-deploy ts cleanup failed: %s", exc)
     return applied
 
 
@@ -4896,6 +4908,27 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     if restored_previous and rollback_source is not None:
                         restored_verification_resumed = await _resume_verification_for(rollback_source)
 
+        #: 빈 DB 에 테이블을 막 만든 첫 배포 — 앱이 둔 샘플 데이터 스크립트(관리자 계정·메뉴 등)를 한 번 돌린다.
+        #: 다시 배포할 때는(데이터가 있으면) 돌리지 않는다. 실패해도 배포 결과는 그대로 두고 알리기만 한다.
+        seeded: Optional[dict] = None
+        if success and plan.method == DeployMethod.LOCAL_DOCKER and plan.companions:
+            try:
+                import local_services
+                from context_gate import mask_secrets
+                if local_services.take_fresh(str(plan.container_name)):
+                    seed = local_services.seed_command(_plan_workspaces.get(request.plan_id, ""))
+                    if seed:
+                        report_progress('seed', f"처음 배포 — 앱의 샘플 데이터({seed['name']})를 넣습니다")
+                        ran = await asyncio.to_thread(
+                            subprocess.run, ["docker", "exec", "-w", seed["workdir"], str(plan.container_name), "node", seed["script"]],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                        seeded = {"script": seed["name"], "ok": ran.returncode == 0,
+                                  "log": mask_secrets(((ran.stdout or "") + (ran.stderr or ""))[-1500:])}
+            except Exception as exc:  # noqa: BLE001 - 샘플 데이터 실패가 배포 결과를 바꾸지 않는다
+                logger.warning("seed after first deploy failed: %s", exc)
+                seeded = {"ok": False, "log": str(exc)[:300]}
+
         #: 헬스(/health)·첫 화면이 통과해도 조회 API 가 500 일 수 있다(실기기: DB 테이블 구조가 달라 상품 조회 실패).
         #: 읽기 전용 API 를 한 번 불러 보고, 5xx 면 "배포는 됐지만 앱이 오류를 냄" 으로 알린다(되돌리지는 않는다).
         app_check: Optional[dict] = None
@@ -5038,6 +5071,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             **({"auto_fixed": pre_deploy_fixes} if pre_deploy_fixes else {}),
             **({"demo_seed": demo_seed} if demo_seed is not None else {}),
             **({"app_check": app_check} if app_check is not None else {}),
+            **({"seeded": seeded} if seeded is not None else {}),
         }
 
 

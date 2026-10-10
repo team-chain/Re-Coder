@@ -389,7 +389,7 @@ def build_log_issues(log: str, op_paths: list[str], dockerfile: str = "", conten
     for target, lines in grouped.items():
         issues.append({
             "code": "GENERATED_BUILD_FAILED", "severity": "error", "file": target,
-            "message": f"컨테이너 빌드에서 {target} 의 오류 {len(lines)}건: " + " / ".join(lines[:8]),
+            "message": f"컨테이너 빌드에서 {target} 의 오류 {len(lines)}건: " + " / ".join(lines[:20]),
             "fix": "오류 줄의 타입·이름·import 를 실제 코드에 맞게 고치세요. 타입 검사를 끄거나(any 남발·ts-ignore) 기능을 지우지 마세요.",
         })
     return issues
@@ -899,3 +899,323 @@ def vite_env_types(files) -> dict[str, str]:
         src = f"{prefix}src"
         out[f"{src}/vite-env.d.ts"] = VITE_ENV_DTS
     return out
+
+
+# ── 15) Prisma 를 쓰는데 prisma CLI(개발 의존성)가 없다 ───────────────────────
+
+def prisma_cli_missing(files) -> dict[str, str]:
+    """{package.json: prisma 를 개발 의존성으로 더한 내용} — `prisma generate` 가 없으면 @prisma/client 의 타입·엔진이
+    만들어지지 않아 tsc 가 수십 건(Order·Payment 없음, tx 가 any)으로 멈춘다. 버전은 @prisma/client 와 같게."""
+    out: dict[str, str] = {}
+    for manifest in files.files():
+        if posixpath.basename(manifest) != "package.json" or "/node_modules/" in f"/{manifest}":
+            continue
+        raw = files.read(manifest) or ""
+        try:
+            pkg = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(pkg, dict):
+            continue
+        deps = pkg.get("dependencies") if isinstance(pkg.get("dependencies"), dict) else {}
+        dev = pkg.get("devDependencies") if isinstance(pkg.get("devDependencies"), dict) else {}
+        spec = deps.get("@prisma/client") or dev.get("@prisma/client")
+        if not isinstance(spec, str) or "prisma" in deps or "prisma" in dev:
+            continue
+        pkg["devDependencies"] = dict(dev, prisma=spec)
+        out[manifest] = _dump_like(raw, pkg)
+    return out
+
+
+# ── 16) 함수마다 만들어 쓰는 클라이언트를 어떤 함수는 만들지 않고 쓴다 ─────────────
+
+def _mask_code(text: str) -> str:
+    """주석·문자열 안을 공백으로(길이·줄 위치는 그대로) — 위치 계산용."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out[i:j] = " " * (j - i)
+            i = j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out[i:j] = [ch if ch == "\n" else " " for ch in text[i:j]]
+            i = j
+            continue
+        if c in "'\"`":
+            j = i + 1
+            while j < n and text[j] != c and not (c != "`" and text[j] == "\n"):
+                j += 2 if text[j] == "\\" else 1
+            for k in range(i + 1, min(j, n)):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j + 1
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _brace_pairs(masked: str) -> list[tuple[int, int]]:
+    pairs, stack = [], []
+    for i, c in enumerate(masked):
+        if c == "{":
+            stack.append(i)
+        elif c == "}" and stack:
+            pairs.append((stack.pop(), i))
+    return pairs
+
+
+_LOCAL_CLIENT = re.compile(r"(?m)^([ \t]+)(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\(\s*\)\s*;?[ \t]*$")
+_FN_OPEN = re.compile(r"(?:\)|=>)\s*(?::\s*[^{;=]+?)?\s*$")
+
+
+def _is_function_body(masked: str, open_at: int) -> bool:
+    """masked[open_at] == '{' 가 함수 본문의 시작인가(`) {`·`): 타입 {`·`=> {` — if·for·while·switch·catch 블록은 아니다).
+    반환 타입에 중괄호·제네릭이 있어도(`): Promise<{ id: string }> {`) 찾는다."""
+    head = masked[max(0, open_at - 600):open_at]
+    if re.search(r"=>\s*$", head):
+        return True
+    depth = 0
+    pairs = {"}": "{", ">": "<", "]": "["}
+    k = len(head) - 1
+    while k >= 0:
+        c = head[k]
+        if c in pairs and not (c == ">" and k > 0 and head[k - 1] == "="):
+            depth += 1
+        elif c in "{<[":
+            if depth == 0:
+                return False
+            depth -= 1
+        elif c == ";" and depth == 0:
+            return False
+        elif c == ")" and depth == 0:
+            between = head[k + 1:].strip()
+            if between and not between.startswith(":"):
+                return False
+            pd = 0
+            for j in range(k, -1, -1):
+                if head[j] == ")":
+                    pd += 1
+                elif head[j] == "(":
+                    pd -= 1
+                    if pd == 0:
+                        word = re.search(r"([A-Za-z_$][\w$]*)\s*(?:<[^()]*>)?\s*$", head[:j])
+                        return not (word and word.group(1) in ("if", "for", "while", "switch", "catch", "with"))
+            return False
+        k -= 1
+    return False
+
+
+def hoisted_clients(files) -> tuple[list[str], dict[str, str]]:
+    """([문제], {파일: 고친 내용}) — `const prisma = getPrismaClient();` 를 함수마다 쓰다가 어떤 함수에서는 빠뜨려
+    `Cannot find name 'prisma'`(TS2304)로 빌드가 멈춘 경우(실기기 TEMP 2.0.8 점검: 32건). 빠진 함수의 맨 앞에
+    같은 줄을 넣는다(다른 함수와 똑같이 — 모듈 최상위로 올리면 초기화 순서가 바뀔 수 있다)."""
+    problems: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith(_SRC) or rel.endswith(".d.ts") or "/node_modules/" in f"/{rel}" or re.search(r"(^|/)(dist|build)/", rel):
+            continue
+        text = files.read(rel) or ""
+        if not _LOCAL_CLIENT.search(text):
+            continue
+        masked = _mask_code(text)
+        imported = set()
+        for m in re.finditer(r"\bimport\s+(?:type\s+)?([^;]*?)\s+from\s+['\"]", masked):
+            imported |= set(re.findall(r"[A-Za-z_$][\w$]*", m.group(1)))
+        # 위치 계산은 원문 줄로(문자열은 가려 둔 masked 기준) — 지역 선언은 원문에서 찾는다
+        decls: dict[str, tuple[str, list[int]]] = {}
+        for m in _LOCAL_CLIENT.finditer(text):
+            name, fn = m.group(2), m.group(3)
+            if fn not in imported or masked[m.start(2):m.end(2)] != name:
+                continue
+            prev = decls.get(name)
+            if prev and prev[0] != fn:
+                decls[name] = ("", [])  # 같은 이름을 다른 함수로 만든다 — 추측하지 않는다
+                continue
+            decls.setdefault(name, (fn, []))[1].append(m.start(2))
+        if not decls:
+            continue
+        pairs = _brace_pairs(masked)
+
+        def enclosing(pos: int) -> list[tuple[int, int]]:
+            return sorted((p for p in pairs if p[0] < pos < p[1]), key=lambda p: p[0], reverse=True)
+
+        inserts: dict[int, str] = {}
+        fixed_names = []
+        for name, (fn, positions) in decls.items():
+            if not fn:
+                continue
+            if re.search(rf"(?m)^(?:export\s+)?(?:const|let|var|function|class)\s+{re.escape(name)}\b", masked):
+                continue  # 모듈 최상위에 이미 있다
+            scopes = [enclosing(p)[0] for p in positions if enclosing(p)]
+            for use in re.finditer(rf"(?<![\w$.]){re.escape(name)}\s*\.", masked):
+                at = use.start()
+                if any(a < at < b for a, b in scopes):
+                    continue
+                chain = enclosing(at)
+                body = next((p for p in chain if _is_function_body(masked, p[0])), None)
+                if body is None:
+                    continue  # 모듈 최상위 사용 — 건드리지 않는다
+                # 그 함수 안에 같은 이름의 다른 선언(인자·구조 분해 등)이 있으면 건드리지 않는다
+                head = masked[max(0, body[0] - 200):body[0]]
+                if re.search(rf"[(,]\s*{re.escape(name)}\s*[:,)=?]", head) or _declared_here(masked[body[0]:body[1]], name):
+                    continue
+                if body[0] in inserts:
+                    continue
+                nl = text.find("\n", body[0])
+                inner = text[nl + 1:body[1]] if nl >= 0 else ""
+                ind = re.match(r"[ \t]*", inner).group(0) if inner.strip() else "  "
+                inserts[body[0]] = f"\n{ind}const {name} = {fn}();"
+                if name not in fixed_names:
+                    fixed_names.append(name)
+        if not inserts:
+            continue
+        new = text
+        for pos in sorted(inserts, reverse=True):
+            new = new[:pos + 1] + inserts[pos] + new[pos + 1:]
+        writes[rel] = new
+        problems.append(f"{rel}: {', '.join(fixed_names)} 을(를) 만들지 않고 쓰는 함수 {len(inserts)}곳")
+    return problems, writes
+
+
+# ── 17) 모듈 이름으로 쓰는데(orderService.getOrderById) 그 모듈을 불러오지 않았다 ─────
+
+_GLOBALS = {"console", "process", "Math", "JSON", "Object", "Array", "Promise", "Number", "String", "Date", "Error",
+            "window", "document", "globalThis", "Buffer", "Symbol", "Reflect", "Intl", "React", "module", "exports", "require"}
+
+
+def namespace_imports(files) -> tuple[list[str], dict[str, str]]:
+    """([문제], {파일: import 를 더한 내용}) — 같은 쪽(서버·화면)에 `orderService.ts` 가 있고 그 모듈이 내보내는 함수를
+    `orderService.x()` 로 쓰는데 불러오지 않은 파일(실기기 TEMP 2.0.8 점검: TS2304 'orderService')."""
+    sources = [p for p in files.files() if p.endswith(_SRC) and not p.endswith(".d.ts") and "/node_modules/" not in f"/{p}"
+               and not re.search(r"(^|/)(dist|build)/", p)]
+    by_base: dict[tuple[str, str], list[str]] = {}
+    for p in sources:
+        side = p.split("/", 1)[0] if "/" in p else ""
+        base = re.sub(r"\.(?:tsx?|jsx?|mjs)$", "", posixpath.basename(p))
+        if base != "index":
+            by_base.setdefault((side, base), []).append(p)
+    problems: list[str] = []
+    writes: dict[str, str] = {}
+    texts: dict[str, str] = {}
+    for rel in sources:
+        text = files.read(rel) or ""
+        code = _code_only(text)
+        side = rel.split("/", 1)[0] if "/" in rel else ""
+        adds = []
+        for name in sorted(set(re.findall(r"(?<![\w$.])([A-Za-z_$][\w$]{3,})\s*\.\s*[A-Za-z_$]", code))):
+            if name in _GLOBALS or _declared_here(code, name):
+                continue
+            targets = [t for t in by_base.get((side, name), []) if t != rel]
+            if len(targets) != 1:
+                continue
+            target = targets[0]
+            body = texts.setdefault(target, files.read(target) or "")
+            members = set(re.findall(rf"(?<![\w$.]){re.escape(name)}\s*\.\s*([A-Za-z_$][\w$]*)", code))
+            if not members or not members <= _exports_of(body):
+                continue
+            adds.append((name, target))
+        if not adds:
+            continue
+        rel_imports = re.findall(r"""from\s+['"](\.{1,2}/[^'"]+)['"]""", text)
+        with_js = bool(rel_imports) and all(re.search(r"\.(?:js|mjs|cjs)$", s) for s in rel_imports)
+        new_lines = []
+        for name, target in adds:
+            spec = posixpath.relpath(target, posixpath.dirname(rel) or ".")
+            spec = spec if spec.startswith(".") else "./" + spec
+            spec = re.sub(r"\.(tsx?|jsx?|mjs)$", ".js" if with_js else "", spec)
+            new_lines.append(f"import * as {name} from '{spec}';")
+            problems.append(f"{rel}: {name}.… 을 쓰지만 {target} 을(를) 불러오지 않습니다")
+        lines = text.split("\n")
+        last_import = max((i for i, l in enumerate(lines) if re.match(r"\s*import\b", l)), default=-1)
+        while 0 <= last_import < len(lines) - 1 and not re.search(r"""from\s+['"][^'"]+['"]\s*;?\s*$|^\s*import\s+['"]""", lines[last_import]):
+            last_import += 1
+        lines[last_import + 1:last_import + 1] = new_lines
+        writes[rel] = "\n".join(lines)
+    return problems, writes
+
+
+# ── 18) TypeScript 가 좁히지 못하는 확실한 모양(동작은 그대로) ─────────────────────
+
+_ENV_CONST = re.compile(r"(?m)^(export\s+)?const\s+([A-Z][A-Z0-9_]*)\s*=\s*process\.env\.([A-Za-z_][A-Za-z0-9_]*)\s*;")
+_SPREAD_AND = re.compile(r"\.\.\.\(\s*([A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*)\s*&&\s*(\{[^{}()]*\})\s*\)")
+
+
+def ts_safe_rewrites(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 실행 동작은 그대로 두고 tsc 만 막히는 AI 의 흔한 모양을 바로잡는다.
+
+    · `const JWT_SECRET = process.env.JWT_SECRET;` 다음 최상위에 `if (!JWT_SECRET) throw …` 가 있으면 함수 안에서는
+      여전히 string | undefined 라 jwt.sign·createHmac 이 TS2769/TS2345 로 막힌다 → `process.env.X as string`
+      (바로 아래 확인이 없으면 손대지 않는다 — 그때는 정말 없을 수 있다).
+    · `...(data && { data })` 는 data 가 unknown·문자열이면 TS2698 → `...(data ? { data } : {})` (같은 동작).
+    실기기(카페 2.0.8): 서버 빌드 오류 15건 중 10건이 이 두 가지였다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".ts", ".tsx", ".mts", ".cts")) or rel.endswith(".d.ts") or "/node_modules/" in f"/{rel}":
+            continue
+        text = files.read(rel) or ""
+        new = text
+        for m in list(_ENV_CONST.finditer(new)):
+            name = m.group(2)
+            guard = re.search(rf"(?m)^if\s*\(\s*!\s*{re.escape(name)}\s*(?:\|\|[^)]*)?\)\s*\{{?\s*\n?\s*throw\b", new[m.end():])
+            if guard:
+                notes.append(f"{rel}: {name} 은 시작할 때 확인하므로 문자열로")
+        new = _ENV_CONST.sub(lambda m: (m.group(0) if not re.search(
+            rf"(?m)^if\s*\(\s*!\s*{re.escape(m.group(2))}\s*(?:\|\|[^)]*)?\)\s*\{{?\s*\n?\s*throw\b", text[m.end():])
+            else f"{m.group(1) or ''}const {m.group(2)} = process.env.{m.group(3)} as string;"), new)
+        jwt_name = re.search(r"""import\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s+['"]jsonwebtoken['"]""", new)
+        if jwt_name:
+            #: jsonwebtoken 9 의 타입은 expiresIn 에 아무 문자열이나 받지 않는다('7d' 같은 값만) — 환경 변수 값은 TS2769
+            j = jwt_name.group(1)
+            fixed_exp = re.sub(r"(\bexpiresIn\s*:\s*)([A-Za-z_$][\w$.]*)(\s*[,}\n])",
+                               lambda m: m.group(0) if m.group(2) in ("undefined", "null") or " as " in m.group(0)
+                               else f"{m.group(1)}{m.group(2)} as {j}.SignOptions['expiresIn']{m.group(3)}", new)
+            if fixed_exp != new:
+                notes.append(f"{rel}: 토큰 만료 시간(expiresIn)의 타입을 jsonwebtoken 에 맞게")
+                new = fixed_exp
+        spread = _SPREAD_AND.sub(lambda m: f"...({m.group(1)} ? {m.group(2)} : {{}})", new)
+        if spread != new:
+            notes.append(f"{rel}: 조건부 펼치기(...(x && {{…}}))를 같은 동작의 삼항식으로")
+            new = spread
+        if new != text:
+            writes[rel] = new
+    return notes, writes
+
+
+# ── 19) Tailwind 유틸리티를 같은 이름으로 다시 정의(@apply 자기 자신) ───────────────
+
+_SELF_APPLY = re.compile(r"(?m)^([ \t]*)\.([\w-]+)\s*\{\s*@apply\s+([^;{}]+);\s*\}[ \t]*\n?")
+
+
+def tailwind_self_apply(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {css: 내용}) — `.text-center { @apply text-center; }` 는 Tailwind 가 "circular dependency" 로
+    화면 빌드를 멈춘다(실기기 카페: tsc 를 고치자 드러남). 같은 이름의 유틸리티는 Tailwind 가 이미 만들어 주므로
+    그 이름만 @apply 에서 빼고, 남는 것이 없으면 규칙을 지운다(화면 모양은 같다)."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".css", ".scss", ".pcss")) or "/node_modules/" in f"/{rel}":
+            continue
+        text = files.read(rel) or ""
+        if "@apply" not in text:
+            continue
+        names: list[str] = []
+
+        def fix(m: re.Match) -> str:
+            utils = m.group(3).split()
+            if m.group(2) not in utils:
+                return m.group(0)
+            names.append(m.group(2))
+            rest = [u for u in utils if u != m.group(2)]
+            return f"{m.group(1)}.{m.group(2)} {{\n{m.group(1)}  @apply {' '.join(rest)};\n{m.group(1)}}}\n" if rest else ""
+        new = _SELF_APPLY.sub(fix, text)
+        if new != text:
+            writes[rel] = new
+            notes.append(f"{rel}: Tailwind 유틸리티를 자기 자신으로 다시 정의({', '.join(names[:4])})")
+    return notes, writes

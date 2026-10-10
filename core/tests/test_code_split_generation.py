@@ -22,7 +22,7 @@ CONTENT = {
     "server.js": "const express = require('express');\nconst app = express();\napp.use(express.static('public'));\n"
                  "app.get('/health', (q, s) => s.send('ok'));\napp.listen(process.env.PORT || 3000);\n",
     "public/index.html": "<script src=app.js></script>",
-    "public/app.js": "fetch('/api/products')",
+    "public/app.js": "const products = fetch('/api/products');\n",
     "public/style.css": "body{}",
 }
 
@@ -56,8 +56,8 @@ def test_잘리면_파일목록을_받고_나눠서_만든다(monkeypatch, tmp_p
     assert files == ["package.json", "server.js", "public/index.html", "public/app.js", "public/style.css"]
     assert router.ops.count("generate_code") == 1  # 같은 요청을 다시 보내지 않는다
     assert router.ops.count("generate_code_manifest") == 1
-    # 기반(package.json) → 기능(server.js) → 화면 3개(2개씩) = 4묶음
-    assert router.ops.count("generate_code_part") == 4
+    # 의존 순서대로 같은 단계의 작은 파일을 둘씩: 설정·정적 파일(package.json·index.html·style.css) 2묶음 → 실행 코드(server.js·app.js) 1묶음
+    assert router.ops.count("generate_code_part") == 3
     assert result["summary"].startswith("쇼핑몰")
 
 

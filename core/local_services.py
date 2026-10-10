@@ -368,6 +368,66 @@ def _initialize_postgres(name: str, init_sql: Path, progress, run: Runner) -> No
         done = subprocess.CompletedProcess([], 1, "", str(exc))
     if done.returncode != 0 and progress:
         progress(f"{init_sql.name} 실행이 실패해 되돌렸습니다: {(done.stderr or '').strip()[:200]}")
+    if done.returncode == 0:
+        _FRESH.add(name)
+
+
+#: 이번 배포에서 빈 DB 에 테이블을 처음 만든 서비스 컨테이너 — 앱의 샘플 데이터(관리자 계정 등)를 이때 한 번만 넣는다.
+_FRESH: set[str] = set()
+
+
+def take_fresh(container: str) -> bool:
+    """이번 배포가 이 앱의 DB 를 비어 있는 상태에서 막 만들었는가(한 번 묻으면 지운다)."""
+    name = service_container(container, "postgres")
+    if name in _FRESH:
+        _FRESH.discard(name)
+        return True
+    return False
+
+
+def seed_command(workspace: str) -> Optional[dict]:
+    """앱이 스스로 둔 샘플 데이터 스크립트(npm run db:seed 등)를 컨테이너 안에서 node 로 돌릴 방법.
+
+    실기기(카페 2.0.8): 관리자 계정·메뉴가 `npm run db:seed`(tsx, 개발 도구)로만 만들어져 배포한 앱에 관리자가 없었다 —
+    메뉴를 넣을 방법이 없다. ReCoder 검증 Dockerfile(구조를 안다)일 때만, 빌드 결과(dist/…seed.js)가 있으면 돌린다.
+    반환: {"workdir", "script", "name"} 또는 None."""
+    try:
+        import docker_kit
+        from build_readiness import ProjectFiles
+        files = ProjectFiles(Path(workspace))
+        if not docker_kit.is_recoder(files.read("Dockerfile")):
+            return None
+        info = docker_kit.layout(files)
+    except Exception:  # noqa: BLE001
+        return None
+    if not info:
+        return None
+    server = info["server"]
+    try:
+        pkg = json.loads(files.read(f"{server}/package.json") or "{}")
+    except ValueError:
+        return None
+    scripts = pkg.get("scripts") if isinstance(pkg, dict) and isinstance(pkg.get("scripts"), dict) else {}
+    name = next((n for n in ("db:seed", "seed", "seed:db", "db:seed:demo") if n in scripts), None)
+    if not name:
+        return None
+    m = re.search(r"(?:tsx|ts-node(?:-esm)?|node(?:\s+--loader\s+\S+)?)\s+([\w./-]+\.(?:ts|js|mjs|cjs))\b", str(scripts[name]))
+    if not m:
+        return None
+    src = re.sub(r"^\./", "", m.group(1))
+    if src.endswith(".ts"):
+        try:
+            from node_fixups import load_jsonc
+            conf = (load_jsonc(files.read(f"{server}/tsconfig.json")) or {}).get("compilerOptions") or {}
+        except Exception:  # noqa: BLE001
+            conf = {}
+        root = str(conf.get("rootDir") or "src").strip("./") or "."
+        out = str(conf.get("outDir") or "dist").strip("./") or "dist"
+        rel = src[len(root) + 1:] if root != "." and src.startswith(root + "/") else src
+        src = out + "/" + re.sub(r"\.ts$", ".js", rel)
+    workdir = "/app" if info.get("cwd_root") else f"/app/{server}"
+    script = f"{server}/{src}" if info.get("cwd_root") else src
+    return {"workdir": workdir, "script": script, "name": name}
 
 
 _CREATE_TABLE = re.compile(r"create\s+table\s+(?:if\s+not\s+exists\s+)?(?:\"?public\"?\.)?\"?([A-Za-z_][\w]*)\"?\s*\(", re.I)

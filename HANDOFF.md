@@ -1,3 +1,13 @@
+# 개발 단계 어긋남·공통 기반 1명 — 생성 순서 재설계 (2026-10-10, 2.0.9)
+
+- 실기기 2.0.8 카페(job c395e3a96baa4573): 빌드 오류 "2 → 36" 으로 교정 멈춤 — 화면 빌드가 먼저 실패해 서버 오류가 숨어 있었다. 남은 16건 대부분이 화면이 컴포넌트·훅과 다르게 씀(ErrorAlert onClose 필수 10곳, UseCartReturn total, CartContextType setItems). 원인: 계층(layer) 단위로 화면·컴포넌트를 동시에 쓰고, 맥락은 목록 앞 파일 64k(서버 파일)라 화면이 컴포넌트를 못 봄. 공통 기반은 1명 순차.
+- `gen_engine._schedule`: 파일별 의존(설계 uses + 같은 쪽 `_rank` 하위 단계, uses 가 있으면 uses+1단계만) DAG, 팀 인원 동시, 교착 시 직접 의존 없는 것부터. `_dependency_context`: uses 파일 전체(48k) + 완성 파일 `_export_summary`(28k). PLAN_SCHEMA files.uses, 약속에 props/훅 반환. wave 이벤트 layer=-1(마을 전 칸 열림).
+- 고치기: `_definition_first`(같은 타입 이름 2파일 이상 → 정의 파일 한 번), workers=팀 인원, max_files 16. 검증 빌드 `_verification_ops`(docker_kit verify=True: 폴더마다 끝까지 빌드, 마지막 단계가 실패한 폴더 출력을 찍음 — 캐시돼도 로그 남음). 진전 판정 `_build_error_keys`(줄 번호 뺀 오류 집합), 나빠지면 직전 상태 복원. 파일별로 뽑힌 오류가 이미 있으면 Dockerfile 오류를 덧붙이지 않음.
+- 결정적 교정: hoisted_clients(NODE_CLIENT_NOT_CREATED), namespace_imports(NODE_MODULE_NOT_IMPORTED), prisma_cli_missing, ts_safe_rewrites(NODE_TS_SAFE_REWRITE, 조용히 — env 확인 뒤 as string·jwt expiresIn·...(x && {})), tailwind_self_apply(NODE_TAILWIND_SELF_APPLY). build_log_issues 파일당 20줄. 보안: 상수 이름 값은 비밀 아님.
+- docker_kit: Prisma(generate·migrate diff --to-schema/--to-schema-datamodel·recoder-start.cjs base64→node 로 기록·openssl, CMD node recoder-start.cjs entry), ENV NODE_ENV=production. readiness: @prisma/client → datasource provider 로 postgres, CMD 의 recoder-start.cjs 다음 인자를 진입 파일로. 배포: 빈 DB 첫 배포에 `seed_command`(kit 일 때 db:seed → dist/…js) docker exec, 결과 `seeded`(AppSeedNote).
+- 검증(sandbox, 실제 AI 대신 사람이 고친 답): 실기기 쇼핑몰(Prisma) 2.0.7 결과 — 결정적 8건 뒤 빌드 오류 25건(12파일) → 1회 교정 → 빌드 통과. 실기기 카페 2.0.8 결과 — 결정적 교정 뒤 29건(17파일) → 1회 교정 → 통과 → 로컬 배포 성공(PostgreSQL·첫 화면·/api/menu·관리자 로그인·주문). hadolint 0·gitleaks 0. 생성 순서 흉내(카페 76파일, 6명): 265s → 175~190s, 화면 프롬프트가 ErrorAlert props·UseCartReturn 을 봄(예전 못 봄). Core 2,566 통과·확장 554/555(sandbox git insteadOf).
+- 못 한 것: 실제 AI(Haiku)로 새로 생성(이 환경에 모델 없음), Prisma 엔진 다운로드 차단으로 Prisma 앱 실행, trivy DB 다운로드 차단.
+
 # 개발 — "문제 발견 → 고치는 중" 무한 반복 (2026-10-10, 2.0.8)
 
 - 실기기: 파일 생성 완료 뒤 전체 점검이 6회 돌며 "자동 검사에서 문제 발견 → 고치는 중" 반복 → "빌드·실행 실패 예상 10건"(ImportMeta.env, useOrders ordersData, PaginationProps·ErrorAlertProps, UseCartState&UseCartActions 에 cart/loading/removeFromCart 없음, TS6133 등).

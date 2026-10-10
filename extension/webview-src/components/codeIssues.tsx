@@ -52,6 +52,11 @@ const ISSUE_TITLE: Record<string, string> = {
   DOCKERFILE_BUILD_STAGE_OMITS_DEV: "빌드 단계에 빌드 도구가 없음",
   DOCKERFILE_RUNTIME_BROKEN: "Dockerfile 실행 단계로는 앱이 안 뜸",
   NODE_NAME_NOT_IMPORTED: "쓰는데 불러오지 않은 이름",
+  NODE_MODULE_NOT_IMPORTED: "불러오지 않은 모듈",
+  NODE_CLIENT_NOT_CREATED: "만들지 않고 쓴 DB 클라이언트",
+  NODE_PRISMA_CLI_MISSING: "Prisma 도구 없음",
+  NODE_TAILWIND_SELF_APPLY: "Tailwind 유틸리티를 자기 자신으로 다시 정의",
+  NODE_VITE_ENV_TYPES_MISSING: "import.meta.env 타입 없음",
   NODE_TYPES_MISSING: "타입 선언(@types) 없음",
   NODE_NESTED_ROUTER: "라우터를 두 번 감쌈",
 };
