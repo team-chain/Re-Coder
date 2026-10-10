@@ -18,11 +18,11 @@ from schemas import FileTemplate
 _DOCKERFILE_PYTHON_FASTAPI = """\
 FROM python:3.11-slim
 WORKDIR /app
-RUN adduser --disabled-password --gecos "" appuser
+RUN adduser --disabled-password --gecos "" --uid 1001 appuser
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-USER appuser
+USER 1001
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 """
@@ -30,11 +30,11 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 _DOCKERFILE_PYTHON_FLASK = """\
 FROM python:3.11-slim
 WORKDIR /app
-RUN adduser --disabled-password --gecos "" appuser
+RUN adduser --disabled-password --gecos "" --uid 1001 appuser
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-USER appuser
+USER 1001
 EXPOSE 5000
 CMD ["python", "app.py"]
 """
@@ -49,7 +49,8 @@ RUN npm ci --omit=dev
 COPY . .
 # 이미지에 번들된 npm 의 tar 등에 CVE 가 남는다 — 앱은 node 로 직접 뜨므로 npm 을 제거한다.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
-USER node
+# 공식 node 이미지의 node 사용자(숫자 ID — hadolint DL3066)
+USER 1000
 EXPOSE 3000
 CMD ["node", "index.js"]
 """
@@ -64,7 +65,8 @@ COPY . .
 RUN npm run build
 # 번들 npm(취약한 tar 동봉)은 지우고 next 를 node 로 바로 띄운다 — npm 을 이미지 안에서 올리면 npm 12 이후 빌드가 깨진다.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
-USER node
+# 공식 node 이미지의 node 사용자(숫자 ID — hadolint DL3066)
+USER 1000
 EXPOSE 3000
 CMD ["node", "node_modules/next/dist/bin/next", "start", "-H", "0.0.0.0", "-p", "3000"]
 """

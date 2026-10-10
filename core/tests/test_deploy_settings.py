@@ -208,3 +208,16 @@ def test_설정_저장_엔드포인트는_값을_돌려주지_않고_검증한�
     finally:
         routes._deployment_plans.pop(plan.plan_id, None)
         routes._plan_workspaces.pop(plan.plan_id, None)
+
+
+def test_TS_타입과_모아서_종료하는_검사도_필수_설정으로_찾는다(tmp_path):
+    """실기기 TEMP: `const JWT_SECRET: string = process.env.JWT_SECRET ?? ''` 와 errors.push → 끝에서 process.exit(1)."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "auth.ts").write_text(
+        "const JWT_SECRET: string = process.env.JWT_SECRET ?? '';\n"
+        "if (!JWT_SECRET || JWT_SECRET.length < 32) {\n  console.error('bad');\n  process.exit(1);\n}\n")
+    (tmp_path / "src" / "server.ts").write_text(
+        "function validate(): void {\n  const errors: string[] = [];\n  if (!process.env.DATABASE_URL) {\n    errors.push('DATABASE_URL');\n  }\n"
+        "  if (errors.length) {\n    process.exit(1);\n  }\n}\n")
+    found = ds.required_env(str(tmp_path))
+    assert found.get("JWT_SECRET") == 32 and "DATABASE_URL" in found

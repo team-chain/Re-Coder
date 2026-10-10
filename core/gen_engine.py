@@ -323,8 +323,11 @@ class LargeGeneration:
     def __init__(self, prompt: str, *, target_folder: str = "", new_project: bool = False,
                  job_id: str = "", fingerprint: str = "", concurrency: int | None = None,
                  emit: Callable[[dict], None] | None = None, limiter: RateLimiter | None = None,
-                 security_review: bool = True, skip_failed: bool = False) -> None:
+                 security_review: bool = True, skip_failed: bool = False,
+                 plan_hook: Callable[[list[dict]], tuple[list[dict], list[dict], str]] | None = None) -> None:
         self.prompt = prompt
+        #: 설계 직후 목록을 고치고 고정 파일을 미리 넣는다(결제 모듈 등) → (새 목록, 미리 만든 ops, 약속에 붙일 글).
+        self.plan_hook = plan_hook
         #: 응답 형식(ops JSON) 지시를 뺀 맥락 — 설계·조각·교정 호출은 각자 다른 형식으로 답해야 하므로
         #: 이 지시가 같이 들어가면 AI 가 조각 내용 자리에 ops JSON 을 통째로 넣는다(실기기 pages.css).
         self.context_prompt = _without_output_format(prompt)
@@ -576,12 +579,27 @@ class LargeGeneration:
         for f in files:
             if not isinstance(f.get("layer"), int) or f["layer"] not in (0, 1, 2):
                 f["layer"] = _guess_layer(f["file"])
+        fixed_ops: list[dict] = []
+        if self.plan_hook:
+            try:
+                files, fixed_ops, extra = self.plan_hook(files)
+                if extra:
+                    manifest["contracts"] = (manifest.get("contracts") or "") + extra
+            except Exception as exc:  # noqa: BLE001 — 고정 파일을 못 넣어도 생성은 계속한다(점검이 결제 약속을 다시 본다)
+                self._log("", "other", f"설계 보강 생략: {exc}")
+                fixed_ops = []
         self.state["manifest"] = manifest
         self.state["files"] = files
+        for op in fixed_ops:
+            self.state["ops"][_norm(op["file"])] = op
         self._save()
         waves = {layer: sum(1 for f in files if f["layer"] == layer) for layer in (0, 1, 2)}
         self._event("planned", message=f"설계 완료 — 파일 {len(files)}개 (기반 {waves[0]} · 기능 {waves[1]} · 화면 {waves[2]})",
                     summary=summary, files=[{"file": f["file"], "layer": f["layer"], "purpose": f.get("purpose", "")} for f in files])
+        for op in fixed_ops:
+            #: ReCoder 가 넣은 고정 파일(결제 모듈) — AI 가 쓰지 않으므로 바로 완료로 알린다(목록에 대기로 남지 않게).
+            self._event("file_done", agent="planner", file=op["file"], lines=op["content"].count("\n") + 1,
+                        message=f"{op['file']} — ReCoder 결제 모듈(검증된 고정 파일)을 넣었습니다")
 
     def _merge_files(self, files: list[dict], items: list) -> list[dict]:
         seen = {_norm(f["file"]) for f in files}
@@ -1198,8 +1216,8 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
         if issue.get("severity") != "error":
             continue
         idx = by_path.get(_norm(issue.get("file") or ""))
-        if idx is None:
-            continue
+        if idx is None or ops[idx].get("fixed"):
+            continue  # ReCoder 가 넣은 고정 파일(결제 모듈)은 AI 가 고치지 않는다
         grouped.setdefault(idx, []).append(f"{issue.get('message', '')} (해결: {issue.get('fix', '')})")
     if not grouped:
         return None

@@ -95,16 +95,35 @@ def test_약속이_빠지면_고칠_파일을_지목한_오류가_된다():
     assert all(i["severity"] == "error" for i in found.values())
 
 
-def test_코드_생성은_약속을_지시하고_빠지면_일관성_점검으로_고친다(tmp_path, monkeypatch):
+KIT_SERVER = """import express from 'express';
+import payments from './payments/stripe.cjs';
+const { createStripeWebhookRouter, createPaymentIntent, STRIPE_WEBHOOK_PATH, assertPaymentConfig } = payments;
+assertPaymentConfig();
+const app = express();
+app.use(STRIPE_WEBHOOK_PATH, createStripeWebhookRouter({ async onPaymentSucceeded(ev) { await markPaid(ev.orderId, ev.eventId); } }));
+app.use(express.json());
+app.post('/api/orders', async (req, res) => res.json(await createPaymentIntent({ amount: 1000, currency: 'krw', orderId: 1 })));
+app.listen(process.env.PORT || 3001);
+"""
+
+
+def test_코드_생성은_결제_모듈을_넣고_서버가_쓰지_않으면_일관성_점검으로_고친다(tmp_path, monkeypatch):
+    """AI 가 자기 방식 결제를 만들어도 ReCoder 결제 모듈(고정 파일)을 넣고, 서버가 그 모듈을 쓰게 교정한다(실기기 TEMP)."""
     pay = pc.payment_decision(); pay["chosen_key"] = "mock"
     prompts = []
     first = {"summary": "s", "ops": [
-        {"action": "create", "file": "server/package.json", "language": "json", "content": '{"name":"s","type":"module","dependencies":{"express":"4","stripe":"14"}}', "rationale": "r"},
+        {"action": "create", "file": "server/package.json", "language": "json", "content": '{"name":"s","type":"module","dependencies":{"express":"^4.21.2","stripe":"^14.25.0"}}', "rationale": "r"},
         {"action": "create", "file": "server/src/payment.js", "language": "javascript",
          "content": "import Stripe from 'stripe';\nexport default new Stripe(process.env.STRIPE_SECRET_KEY);\n", "rationale": "r"},
         {"action": "create", "file": "server/src/index.js", "language": "javascript", "content": GOOD_SERVER.replace("handler", "(q, s) => s.end()"), "rationale": "r"},
+        {"action": "create", "file": "mock-payment-server/server.js", "language": "javascript", "content": "require('http').createServer().listen(3001);\n", "rationale": "r"},
     ]}
-    fixed = {"summary": "s", "ops": [{"action": "create", "file": "server/src/payment.js", "language": "javascript", "content": GOOD_PAYMENT, "rationale": "r"}]}
+    fixed = {"summary": "s", "ops": [
+        {"action": "create", "file": "server/src/index.js", "language": "javascript", "content": KIT_SERVER, "rationale": "r"},
+        {"action": "create", "file": "server/src/payment.js", "language": "javascript", "content": "export const currency = 'krw';\n", "rationale": "r"},
+        #: AI 가 고정 파일을 고쳐 보내도 받아들이지 않는다
+        {"action": "create", "file": "server/src/payments/stripe.cjs", "language": "javascript", "content": "module.exports = {};\n", "rationale": "r"},
+    ]}
 
     class R:
         def call(self, req, *a, **k):
@@ -116,11 +135,18 @@ def test_코드_생성은_약속을_지시하고_빠지면_일관성_점검으�
     monkeypatch.setattr(ca, "_verify_generated_build", lambda *a, **k: {"kind": "docker-build", "status": "skipped", "passed": True, "output": ""})
     result = ca.generate_code("결제 되는 사이트 만들어줘", decisions=[pay], project_root=str(tmp_path))
     assert "[결제 약속" in prompts[0] and "STRIPE_MOCK_HOST" in prompts[0]
-    assert len(prompts) >= 2 and "모의 결제 모드가 빠졌습니다" in prompts[1]
+    assert len(prompts) >= 2 and "createStripeWebhookRouter" in prompts[1] and "[결제 모듈" in prompts[1]
     files = {o["file"]: o["content"] for o in result["ops"]}
-    assert "process.env.STRIPE_MOCK_HOST" in files["server/src/payment.js"]
+    import payment_kit
+    assert files["server/src/payments/stripe.cjs"] == payment_kit.CJS_KIT
+    assert "mock-payment-server/server.js" not in files
     assert not [i for i in result["consistency_issues"] if i["code"].startswith("PAYMENT_")]
     assert ds.payment_choice_for(str(tmp_path))["payment"] == "mock"
+    # 고정 파일은 모의 결제 데모의 조건(환경변수 이름)을 그대로 만족한다
+    ws = tmp_path / "out"
+    for f, c in files.items():
+        (ws / f).parent.mkdir(parents=True, exist_ok=True); (ws / f).write_text(c)
+    assert ds.demo_supported(str(ws))
 
 
 def test_AI_앱도_서버가_하위_폴더면_데모를_지원한다(tmp_path):

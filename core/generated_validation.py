@@ -13,7 +13,13 @@ from grounded_repair.logs import summarize
 from grounded_repair.workspace import manifest, safe_path, snapshot
 
 
-def verify_proposal(root: Path, ops: list[dict], *, timeout: int = 180) -> dict:
+#: 프런트·백엔드를 함께 설치·빌드하는 앱은 첫 빌드(캐시 없음)가 3분을 넘는다 — 시간이 모자라 검증을 못 하면
+#: 깨진 결과가 "검증 못 함" 으로 지나간다. 환경변수로 조정할 수 있다.
+_BUILD_TIMEOUT = int(os.environ.get("RECODER_VERIFY_BUILD_TIMEOUT", "480"))
+
+
+def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None) -> dict:
+    timeout = timeout or _BUILD_TIMEOUT
     base = {"kind": "docker-build", "passed": False, "status": "unavailable"}
     if os.getenv("RECODER_TEST_MODE") == "1":
         return {**base, "output": "Build execution is disabled in unit tests."}
@@ -80,6 +86,8 @@ def verify_proposal(root: Path, ops: list[dict], *, timeout: int = 180) -> dict:
                 ),
                 "exit_code": process.returncode,
                 "output": summarize(log).text,
+                #: 실패 로그 끝부분 — 파일별 문제(tsc·vite 오류 줄)를 뽑는 데만 쓰고 결과에서는 뺀다.
+                **({"log": log[-40_000:]} if process.returncode != 0 else {}),
             }
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             return {**base, "output": mask_secrets(str(exc))[:2000]}

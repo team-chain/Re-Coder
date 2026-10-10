@@ -451,8 +451,17 @@ def _shell_to_exec(prefix: str, command: str) -> str:
     return prefix + json.dumps(["/bin/sh", "-c", command], ensure_ascii=False).replace('","', '", "')
 
 
+#: 값을 받는 옵션(그다음 토큰은 사용자 이름이 아니다) — busybox adduser · Debian adduser · useradd · usermod
+_USER_VALUE_FLAGS = {"-h", "-g", "-s", "-G", "-u", "-k", "-d", "-c", "-e", "-f", "-K", "-p", "-l",
+                     "--uid", "--gid", "--home", "--shell", "--ingroup", "--gecos", "--comment", "--groups",
+                     "--home-dir", "--skel", "--expiredate", "--inactive", "--key", "--password", "--login"}
+
+
 def _created_uid(lines: list[str], n: int, name: str) -> Optional[str]:
-    """n 번째 줄(USER) 과 같은 단계에서 adduser/useradd 로 만든 `name` 의 숫자 ID. 모르면 None."""
+    """n 번째 줄(USER) 과 같은 단계에서 adduser/useradd 로 만든 `name` 의 숫자 ID. 모르면 None.
+
+    옵션은 이름 앞뒤 어디에 와도 된다 — `adduser -S nodejs -u 1001`(실기기 AI Dockerfile)도 읽는다.
+    """
     start = max((i for i in range(n + 1) if re.match(r"^\s*FROM\s", lines[i], re.I)), default=0)
     text = re.sub(r"\\\r?\n", " ", "\n".join(lines[start:n]))
     uid: Optional[str] = None
@@ -465,19 +474,33 @@ def _created_uid(lines: list[str], n: int, name: str) -> Optional[str]:
                 tokens = shlex.split(cmd)
             except ValueError:
                 return None
-            if not tokens or tokens[0].rsplit("/", 1)[-1] not in ("adduser", "useradd", "usermod"):
-                continue
-            if tokens[-1] != name:
+            tool = tokens[0].rsplit("/", 1)[-1] if tokens else ""
+            if tool not in ("adduser", "useradd", "usermod"):
                 continue
             found = None
-            for i, t in enumerate(tokens[1:-1], start=1):
-                if t in ("-u", "--uid") and i + 1 < len(tokens) - 1:
+            positional: list[str] = []
+            i = 1
+            while i < len(tokens):
+                t = tokens[i]
+                if t in ("-u", "--uid") and i + 1 < len(tokens):
                     found = tokens[i + 1]
-                elif t.startswith("--uid="):
+                    i += 2
+                    continue
+                if t.startswith("--uid="):
                     found = t.split("=", 1)[1]
                 elif re.fullmatch(r"-u\d+", t):
                     found = t[2:]
-            if tokens[0].rsplit("/", 1)[-1] == "usermod":
+                elif t in _USER_VALUE_FLAGS:
+                    i += 2
+                    continue
+                elif not t.startswith("-"):
+                    positional.append(t)
+                i += 1
+            #: busybox·Debian adduser 는 첫 위치 인자가 사용자(둘째는 그룹), useradd·usermod 는 마지막이 사용자
+            user = (positional[0] if positional else None) if tool == "adduser" else (positional[-1] if positional else None)
+            if user != name:
+                continue
+            if tool == "usermod":
                 if found is not None:
                     return None  # ID 를 나중에 바꾸는 Dockerfile 은 직접 확인한다
                 continue
@@ -498,6 +521,22 @@ def _hadolint_block_fix(code: str, lines: list[str], n: int) -> Optional[tuple[l
         new = list(lines)
         new[n] = f"{m.group(1)}{uid}{m.group(3)}"
         return new, "USER 를 숫자 ID 로(같은 사용자)"
+    if code in _OS_PIN_LINT:
+        #: OS 패키지(apk·apt) 버전 고정은 저장소가 옛 버전을 지우면 빌드가 깨진다 — 기본 이미지 태그가 버전을 정한다.
+        #: 근거를 주석으로 남기고 이 줄에만 예외 표시를 단다(다른 줄·다른 규칙은 그대로 검사).
+        if not re.match(r"^\s*RUN\b", lines[n], re.I):
+            return None
+        indent = re.match(r"^(\s*)", lines[n]).group(1)
+        prev = lines[n - 1] if n > 0 else ""
+        pragma = re.match(r"^\s*#\s*hadolint\s+ignore=([\w,]+)\s*$", prev, re.I)
+        new = list(lines)
+        if pragma:
+            if code in pragma.group(1).split(","):
+                return None
+            new[n - 1] = f"{prev.rstrip()},{code}"
+            return new, "OS 패키지 버전은 기본 이미지 태그로 고정(이 줄만 예외)"
+        note = (f"{indent}# ReCoder: OS 패키지는 기본 이미지 태그가 버전을 정합니다(저장소가 옛 버전을 지우면 고정한 버전 때문에 빌드가 깨짐)")
+        return new[:n] + [note, f"{indent}# hadolint ignore={code}"] + new[n:], "OS 패키지 버전은 기본 이미지 태그로 고정(이 줄만 예외)"
     if code == "DL3003":
         m = re.match(r"^(\s*)RUN\s+cd\s+([\w.\-/]+)\s*&&\s*(.+?)\s*$", lines[n])
         if not m or lines[n].rstrip().endswith("\\") or ".." in m.group(2).split("/") or re.search(r"\bcd\s", m.group(3)):
@@ -569,6 +608,8 @@ def _hadolint_maker(code: str, original: str, hint: int) -> Maker:
 
 #: 패키지 버전 고정 권고. 저장소가 옛 버전을 지우면 고정한 버전 때문에 빌드가 깨지므로 자동으로 고치지 않는다.
 _PIN_LINT = ("DL3008", "DL3013", "DL3016", "DL3018", "DL3028")
+#: 그중 OS 패키지(apt·apk) — 근거 주석 + 그 줄만 예외 표시로 자동 정리한다.
+_OS_PIN_LINT = ("DL3008", "DL3018")
 #: 보안 게이트가 "중간" 으로 세는 권고(api/routes/deploy.py 의 _HADOLINT_ADVISORY 와 같은 목록).
 _ADVISORY_LINT = frozenset(_PIN_LINT + ("DL3003", "DL3059", "DL3066"))
 #: 권고 항목의 한국어 설명(hadolint 원문은 영어).

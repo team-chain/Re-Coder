@@ -142,7 +142,9 @@ def _code_files(workspace: str) -> Iterable[Path]:
 
 
 _JS_GUARD = re.compile(r"!\s*process\.env\.([A-Z_][A-Z0-9_]*)\b|process\.env\.([A-Z_][A-Z0-9_]*)\s*(?:===?|==)\s*undefined")
-_JS_ALIAS = re.compile(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*process\.env\.([A-Z_][A-Z0-9_]*)\s*;")
+#: `const X = process.env.X;` · `const X: string = process.env.X ?? '';` (TypeScript 타입·빈 기본값도 같은 뜻)
+_JS_ALIAS = re.compile(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[\w<>|\s]+?)?\s*=\s*process\.env\.([A-Z_][A-Z0-9_]*)"
+                       r"\s*(?:(?:\?\?|\|\|)\s*(?:''|\"\"|``))?\s*(?:as\s+string\s*)?;")
 _JS_LEN = re.compile(r"process\.env\.([A-Z_][A-Z0-9_]*)\.length\s*<\s*(\d{1,3})")
 _FATAL = re.compile(r"\bthrow\b|process\.exit\(\s*[1-9]|\braise\b|sys\.exit\(\s*[1-9]")
 _PY_INDEX = re.compile(r"os\.environ\[\s*['\"]([A-Z_][A-Z0-9_]*)['\"]\s*\]")
@@ -188,7 +190,9 @@ def required_env(workspace: str) -> dict[str, int]:
                 if re.search(rf"!\s*{re.escape(alias)}\b|\b{re.escape(alias)}\s*===?\s*undefined", line):
                     names.append(env)
             py = _PY_GUARD.findall(line)
-            if (names or py) and re.search(r"\bif\b", line) and _FATAL.search(window) and not _conditional(lines, i):
+            #: 오류를 모아 두었다가 한 번에 종료하는 검사(errors.push(…) → 끝에서 process.exit(1))도 시작을 막는다.
+            collected = bool(re.search(r"\.push\(", window)) and bool(_FATAL.search("\n".join(lines[i:i + 60])))
+            if (names or py) and re.search(r"\bif\b", line) and (_FATAL.search(window) or collected) and not _conditional(lines, i):
                 for name in names + py:
                     found.setdefault(name, 0)
             for name in _PY_INDEX.findall(line):
@@ -198,7 +202,7 @@ def required_env(workspace: str) -> dict[str, int]:
                 if alias in aliases:
                     lengths.append((aliases[alias], n))
             for name, n in lengths:
-                if name in found or _FATAL.search(window):
+                if name in found or _FATAL.search(window) or collected:
                     found[name] = max(found.get(name, 0), int(n))
     return {k: v for k, v in found.items() if _ENV_NAME.match(k) and k not in _RUNTIME_OWNED}
 

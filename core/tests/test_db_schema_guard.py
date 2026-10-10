@@ -128,3 +128,26 @@ def test_조회_API가_500이면_로그에서_DB_구조_문제로_진단한다(t
         srv.shutdown()
     assert out["status"] == "error" and out["http_status"] == 500 and out["path"] == "/api/products"
     assert out["diagnosis"]["code"] == "DB_SCHEMA_MISMATCH" and "`stock`" in out["diagnosis"]["cause"]
+
+
+class _Limited(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.send_response(429)
+        self.end_headers()
+
+
+def test_방금_뜬_앱이_429면_요청_무한_반복으로_진단한다(tmp_path):
+    """첫 화면 확인만으로 요청 한도가 찬 앱(실기기 TEMP: 6초에 2,258번) — 성공으로 넘기지 않는다."""
+    (tmp_path / "server.js").write_text("app.use('/api/products', p);\n")
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Limited)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    plan = type("P", (), {"ports": {str(srv.server_address[1]): "3000"}, "container_name": "shop"})()
+    try:
+        out = routes._probe_app_api(plan, str(tmp_path))
+    finally:
+        srv.shutdown()
+    assert out["status"] == "error" and out["http_status"] == 429
+    assert out["diagnosis"]["code"] == "APP_REQUEST_LOOP" and "자동 수정" in out["diagnosis"]["fix"]

@@ -249,6 +249,25 @@ def _run_failure(lines: list[str], text: str) -> Optional[BuildDiagnosis]:
     return None
 
 
+#: 동작과 무관한 린트성 검사(선언만 하고 쓰지 않음) — tsconfig 의 noUnusedLocals·noUnusedParameters 가 켠다.
+_TS_LINT_ONLY = {"TS6133", "TS6192", "TS6196", "TS6198", "TS6138"}
+
+
+def _explain_ts(diagnosis: BuildDiagnosis, text: str) -> None:
+    """tsc 오류를 세어 원인을 구체적으로 — 실기기 TEMP: 40건 중 26건이 '선언만 하고 쓰지 않음' 이었다."""
+    found = re.findall(r"([\w./@-]+\.tsx?)\((\d+),(\d+)\): error (TS\d+)", text)
+    unique = list(dict.fromkeys(found))
+    if not unique:
+        return
+    lint = [c for _f, _l, _c, c in unique if c in _TS_LINT_ONLY]
+    files = list(dict.fromkeys(f for f, _l, _c, _code in unique))
+    diagnosis.cause = (f"TypeScript 컴파일(tsc)에서 오류 {len(unique)}건({len(files)}개 파일)으로 빌드가 멈췄습니다"
+                       + (f" — 그중 {len(lint)}건은 '선언만 하고 쓰지 않음'(tsconfig 의 noUnusedLocals·noUnusedParameters 검사)입니다." if lint else "."))
+    diagnosis.fix = (("'선언만 하고 쓰지 않음' 은 동작과 무관한 검사입니다 — tsconfig 의 noUnusedLocals·noUnusedParameters 를 false 로 바꾸면 "
+                      "그만큼 바로 풀립니다(strict 타입 검사는 그대로). " if lint else "")
+                     + "나머지는 아래 줄의 파일·줄 번호를 고치세요. ReCoder 로 다시 만들면 빌드 검증이 이 오류를 파일별로 고칩니다.")
+
+
 def diagnose(output: str, readiness_issues: Optional[list] = None, stage: str = "build") -> BuildDiagnosis:
     """stage="run" 이면 컨테이너 로그(시작 직후 종료)를 진단한다."""
     lines = _clean(output)
@@ -267,6 +286,8 @@ def diagnose(output: str, readiness_issues: Optional[list] = None, stage: str = 
         anchor = text[:m.start()].count("\n")
         diagnosis = BuildDiagnosis(code, title, cause.format(value, path=path), fix.format(value, path=path),
                                    _key_lines(lines, anchor), step)
+        if code == "TYPESCRIPT_ERROR":
+            _explain_ts(diagnosis, text)
         break
     else:
         run_specific = _run_failure(lines, text) if stage == "run" else None

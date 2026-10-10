@@ -119,7 +119,7 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
     case "fixing": return { who, role, tone: "warn", text: `자동 검사에서 문제 발견 → 고치는 중${msg.includes("—") ? ` (${msg.split("—").slice(1).join("—").trim().slice(0, 60)})` : ""}` };
     case "verified": return event.file ? { who, role, tone: "ok", text: `${base(event.file)} 고친 뒤 확인 통과` } : null;
     case "verify_failed": return { who, role, tone: "warn", text: msg ? `확인 필요 — ${msg.slice(0, 80)}` : "확인 필요" };
-    case "file_done": return event.file ? { who, role, tone: "ok", text: `${event.file} 완료${event.lines ? ` (${event.lines}줄)` : ""}` } : null;
+    case "file_done": return event.file ? { who, role, tone: "ok", text: (msg && msg.includes("고정 파일")) ? msg : `${event.file} 완료${event.lines ? ` (${event.lines}줄)` : ""}` } : null;
     case "retry": return { who, role, tone: "warn", text: msg || `일시적 오류 — ${event.seconds ?? "잠시"}초 뒤 다시 시도` };
     case "part_retry": case "file_retry": return { who, role, tone: "warn", text: msg || `${base(event.file)} — 방법을 바꿔 다시 씁니다` };
     case "file_failed": return { who, role, tone: "warn", text: msg || `${base(event.file)} — 만들지 못함` };

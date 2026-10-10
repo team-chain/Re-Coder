@@ -220,15 +220,15 @@ def test_api_plan_apply_and_gitleaks_local_env(tmp_path):
 
 
 def test_nothing_is_silently_dropped(tmp_path):
-    root = _write(tmp_path, {"Dockerfile": "FROM alpine:3.19\nRUN apk add --no-cache curl\n"})
+    root = _write(tmp_path, {"Dockerfile": "FROM node:22-alpine\nRUN npm install -g pm2\n"})
     reports = {
-        "hadolint": {"findings": [{"line": 2, "code": "DL3018", "message": "Pin versions in apk add."}]},
+        "hadolint": {"findings": [{"line": 2, "code": "DL3016", "message": "Pin versions in npm."}]},
         **_trivy({"package": "golang.org/x/net", "installed": "0.17.0", "fixed": "0.23.0", "class": "lang-pkgs", "type": "gobinary",
                   "pkg_path": "usr/local/bin/app"}),
     }
     props = sf.plan(str(root), reports)
     lint = next(p for p in props if p.tool == "hadolint")
-    assert not lint.auto and "DL3018" in lint.title and "취약점은 아닙니다" in lint.detail
+    assert not lint.auto and "DL3016" in lint.title and "취약점은 아닙니다" in lint.detail
     go = next(p for p in props if "golang.org/x/net" in p.title)
     assert not go.auto and "0.23.0" in go.title
 
@@ -359,3 +359,32 @@ def test_모르는_규칙의_문서_키도_그_줄에서만_바꾼다(tmp_path):
     p = next(p for p in sf.plan(str(root), reports) if p.tool == "gitleaks")
     sf.apply(str(root), reports, [p.id])
     assert (root / "docs/setup.md").read_text(encoding="utf-8") == "토큰: <SECRET>\n다른 줄 그대로\n"
+
+
+def test_os_package_pin_advice_is_fixed_with_reason_on_that_line_only(tmp_path):
+    """DL3018(apk)·DL3008(apt): 버전 고정 대신 근거 주석 + 그 줄만 hadolint 예외(실기기 AI Dockerfile 28번째 줄)."""
+    text = "FROM node:20-alpine\nWORKDIR /app\nRUN apk add --no-cache dumb-init\nUSER 1001\n"
+    root = _write(tmp_path, {"Dockerfile": text})
+    props = sf.plan(str(root), {"hadolint": {"findings": [{"line": 3, "code": "DL3018", "message": "Pin versions in apk add."}]}})
+    lint = next(p for p in props if p.tool == "hadolint")
+    assert lint.auto and "DL3018" in lint.title
+    out = lint.make(root)["Dockerfile"].split("\n")
+    i = out.index("RUN apk add --no-cache dumb-init")
+    assert out[i - 1] == "# hadolint ignore=DL3018" and out[i - 2].startswith("# ReCoder:")
+    # 이미 다른 규칙 예외가 붙은 줄이면 그 줄에 이어 붙인다
+    lines = ["FROM debian:12", "# hadolint ignore=DL3009", "RUN apt-get update && apt-get install -y curl"]
+    new, _title = sf._hadolint_block_fix("DL3008", lines, 2)
+    assert new[1] == "# hadolint ignore=DL3009,DL3008" and len(new) == 3
+    assert sf._hadolint_block_fix("DL3008", new, 2) is None
+
+
+def test_dl3066_reads_uid_when_options_follow_the_name():
+    """adduser -S nodejs -u 1001 — 옵션이 이름 뒤에 와도 숫자 ID 를 찾는다(실기기 AI Dockerfile 42번째 줄)."""
+    lines = ["FROM node:20-alpine", "RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001", "USER nodejs"]
+    new, _title = sf._hadolint_block_fix("DL3066", lines, 2)
+    assert new[2] == "USER 1001"
+    assert sf._created_uid(["FROM x", "RUN adduser --system --uid 1002 nextjs", "USER nextjs"], 2, "nextjs") == "1002"
+    assert sf._created_uid(["FROM x", "RUN adduser -D -u 1003 -G grp web grp", "USER web"], 2, "web") == "1003"
+    assert sf._created_uid(["FROM x", "RUN useradd -r -u 1004 -g app app", "USER app"], 2, "app") == "1004"
+    # 다른 사용자를 만든 줄은 쓰지 않는다
+    assert sf._created_uid(["FROM x", "RUN adduser -S other -u 1005", "USER nodejs"], 2, "nodejs") is None

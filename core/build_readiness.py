@@ -42,7 +42,15 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "DOCKERFILE_RUNTIME_SUBPROJECT_DEPS_MISSING", "NODE_PG_NUMERIC_STRINGS", "NODE_CLIENT_HARDCODED_LOCALHOST",
                 "NODE_ROUTER_ANCHOR_LINK", "NODE_MODULE_FORMAT_MISMATCH", "NODE_FRONTEND_NOT_BUILT",
                 "NODE_IMPORT_NAME_MISSING", "NODE_CLIENT_API_DOUBLE_PREFIX", "DOCKERFILE_ENTRY_MISSING",
-                "DOCKERFILE_DEPS_DIR_MISSING", "DOCKERFILE_NPM_SELF_UPGRADE", "APP_DEAD_IMAGE_HOST"}
+                "DOCKERFILE_DEPS_DIR_MISSING", "DOCKERFILE_NPM_SELF_UPGRADE", "APP_DEAD_IMAGE_HOST",
+                "NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
+                "NODE_STATIC_PATH_OUTSIDE_PROJECT", "DOCKERFILE_NPM_CI_WITHOUT_LOCK", "NODE_UNDECLARED_DEPENDENCY",
+                "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP"}
+
+#: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
+FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
+                    "NODE_STATIC_PATH_OUTSIDE_PROJECT", "DOCKERFILE_NPM_CI_WITHOUT_LOCK", "NODE_UNDECLARED_DEPENDENCY",
+                    "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -372,6 +380,57 @@ def _start_entry(scripts: dict, files: "Optional[ProjectFiles]" = None, _base: s
     return None
 
 
+def _declare_known(files: "ProjectFiles", manifest: str, names: list[str]) -> Optional[str]:
+    """선언 안 된 패키지를 package.json 에 넣은 내용 — 모두 검증된 버전을 알고 lock 파일이 없을 때만(아니면 None)."""
+    try:
+        import node_manifests
+    except ImportError:  # pragma: no cover
+        return None
+    folder = posixpath.dirname(manifest)
+    if any(files.exists(posixpath.join(folder, n)) for n in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml")):
+        return None
+    if not names or any(n not in node_manifests.KNOWN_VERSIONS for n in names):
+        return None
+    raw = files.read(manifest)
+    try:
+        pkg = json.loads(raw or "")
+    except ValueError:
+        return None
+    if not isinstance(pkg, dict):
+        return None
+    deps = dict(pkg.get("dependencies") or {}) if isinstance(pkg.get("dependencies") or {}, dict) else None
+    if deps is None:
+        return None
+    for n in names:
+        deps.setdefault(n, node_manifests.KNOWN_VERSIONS[n])
+    pkg["dependencies"] = dict(sorted(deps.items()))
+    newline = "\r\n" if "\r\n" in (raw or "") else "\n"
+    return json.dumps(pkg, ensure_ascii=False, indent=2).replace("\n", newline) + newline
+
+
+def _built_entry_source(files: "ProjectFiles", entry: str) -> Optional[str]:
+    """`node backend/dist/server.js` 의 원본 TypeScript(backend/src/server.ts) — tsconfig 의 outDir·rootDir 로 되짚는다."""
+    m = re.match(r"^(?:(.+)/)?(dist|build|out|lib)/(.+)\.[cm]?js$", entry or "")
+    if not m:
+        return None
+    folder, out, rest = m.group(1) or "", m.group(2), m.group(3)
+    prefix = f"{folder}/" if folder else ""
+    root_dir = "src"
+    try:
+        import node_fixups
+        cfg = (node_fixups.load_jsonc(files.read(f"{prefix}tsconfig.json")) or {}).get("compilerOptions") or {}
+        if _norm(str(cfg.get("outDir") or out)) == out and cfg.get("rootDir"):
+            root_dir = _norm(str(cfg["rootDir"]))
+    except Exception:  # noqa: BLE001
+        pass
+    for base in (root_dir, "src", ""):
+        for ext in (".ts", ".mts", ".js", ".mjs"):
+            cand = _norm(f"{prefix}{base + '/' if base else ''}{rest}{ext}")
+            if files.exists(cand):
+                return cand
+    return None
+
+
 def _pjoin(parts: tuple) -> str:
     """루트 기준 경로 합치기 — `a/../b` 를 접고, 루트 밖이면 `..` 로 시작한다."""
     joined = posixpath.normpath(posixpath.join(*[p for p in parts if p] or [""]))
@@ -606,9 +665,11 @@ def _alias_twin(text: str, name: str) -> Optional[str]:
 
 def _esm_exports(text: str) -> Optional[set[str]]:
     #: 판단할 수 없는 형태(재수출·타입 수출·구조 분해 수출)는 None — 잘못 막느니 넘어간다.
-    if re.search(r"\bexport\s*\*|\bexport\s+(?:declare\s+)?(?:interface|type|enum|namespace|abstract)\b|\bexport\s+(?:const|let|var)\s*[\[{]", text):
+    if re.search(r"\bexport\s*\*|\bexport\s*=|\bexport\s+(?:declare\s+)?(?:const|let|var)\s*[\[{]", text):
         return None
-    names = set(re.findall(r"\bexport\s+(?:async\s+)?(?:const|let|var|function\*?|class)\s+([\w$]+)", text))
+    #: TypeScript 의 타입 내보내기(interface·type·enum·namespace)도 이름이다 — 예전에는 하나라도 있으면 판단을 포기해
+    #: .tsx 화면의 "기본 내보내기 없음"(import ProductCard from …)을 놓치고 vite 빌드에서 멈췄다(실기기 TEMP).
+    names = set(re.findall(r"\bexport\s+(?:declare\s+)?(?:async\s+)?(?:abstract\s+)?(?:const\s+enum|const|let|var|function\*?|class|interface|type|enum|namespace)\s+([\w$]+)", text))
     for group in re.findall(r"\bexport\s*\{([^}]*)\}", text):
         for part in group.split(","):
             part = part.strip()
@@ -857,13 +918,31 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
         if sure:
             #: 확실한 것만이라도 고친다(생성 직후 자동 교정). 남은 것은 다시 점검할 때 그대로 문제로 남는다.
             result.fix_data["missing_exports"] = sure
-        result.issues.append(ReadinessIssue(
-            "NODE_IMPORT_NAME_MISSING", ERROR,
-            "불러오는 이름을 그 파일이 내보내지 않습니다: " + ", ".join(list(dict.fromkeys(missing_names))[:6])
-            + ". 빌드가 실패하거나 실행 중 undefined 오류(… is not a function)로 멈춥니다.",
-            ("그 파일에 선언된 이름에 내보내기(export)를 붙이세요(자동 수정 가능)." if fixable
-             else "내보내는 쪽 이름과 쓰는 쪽 이름을 맞추세요."),
-            missing_names[0].split("(")[1].split(" ")[0], fixable))
+        sure_keys = {(t, n) for t, n, _k in sure}
+        manual = [m for m in dict.fromkeys(missing_names)
+                  if not any(m.startswith(f"`{'default' if n.startswith('default:') else n}`(") and m.endswith(f"→ {t})")
+                             for t, n in sure_keys)]
+        if sure and manual:
+            #: 고칠 수 있는 것(선언만 하고 export 안 함)과 못 고치는 것(아예 없는 이름)을 나눈다 — 한 건 때문에 나머지 자동 수정까지 막지 않게.
+            result.issues.append(ReadinessIssue(
+                "NODE_IMPORT_NAME_MISSING", ERROR,
+                "불러오는 이름을 그 파일이 내보내지 않습니다: " + ", ".join(m for m in dict.fromkeys(missing_names) if m not in manual)[:600]
+                + ". 빌드가 실패하거나 실행 중 undefined 오류(… is not a function)로 멈춥니다.",
+                "그 파일에 선언된 이름에 내보내기(export)를 붙이세요(자동 수정 가능).", sure[0][0], True))
+            result.issues.append(ReadinessIssue(
+                "NODE_IMPORT_NAME_UNDEFINED", ERROR,
+                "불러오는 이름이 그 파일에 아예 없습니다: " + ", ".join(manual[:6])
+                + ". 빌드가 실패하거나 실행 중 undefined 오류로 멈춥니다.",
+                "그 이름을 선언해 내보내거나, 쓰는 쪽을 실제로 있는 이름으로 고치세요.",
+                manual[0].split("(")[1].split(" ")[0], False))
+        else:
+            result.issues.append(ReadinessIssue(
+                "NODE_IMPORT_NAME_MISSING", ERROR,
+                "불러오는 이름을 그 파일이 내보내지 않습니다: " + ", ".join(list(dict.fromkeys(missing_names))[:6])
+                + ". 빌드가 실패하거나 실행 중 undefined 오류(… is not a function)로 멈춥니다.",
+                ("그 파일에 선언된 이름에 내보내기(export)를 붙이세요(자동 수정 가능)." if fixable
+                 else "내보내는 쪽 이름과 쓰는 쪽 이름을 맞추세요."),
+                missing_names[0].split("(")[1].split(" ")[0], fixable))
     if jsx_in_js:
         result.fix_data["jsx_in_js"] = jsx_in_js
         result.issues.append(ReadinessIssue(
@@ -1963,20 +2042,65 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "package.json", not has_lock))
 
     # 1) 빌드 스크립트 — Docker 이미지가 `npm run build` 로 실제 실행한다.
+    #: workspaces·`cd X &&` 가 가리키는데 package.json 이 없는 코드 폴더 — 코드가 불러오는 패키지로 만든다(자동 수정).
+    try:
+        import node_fixups
+        new_manifests = node_fixups.missing_manifests(files, package)
+    except Exception as exc:  # noqa: BLE001 - 점검 실패가 다른 판정을 막지 않는다
+        print(f"[build_readiness] 하위 package.json 점검 생략: {exc}", file=sys.stderr)
+        new_manifests = {}
+    if new_manifests:
+        result.fix_data.setdefault("file_writes", {})["NODE_WORKSPACE_MANIFEST_MISSING"] = new_manifests
+        shown = ", ".join(sorted(new_manifests))
+        result.issues.append(ReadinessIssue(
+            "NODE_WORKSPACE_MANIFEST_MISSING", ERROR,
+            f"루트 package.json 이 {', '.join(sorted(m[:-13] + '/' for m in new_manifests))} 를 쓰는데(workspaces·스크립트) "
+            f"그 폴더에 package.json 이 없습니다: {shown}. express·react 같은 의존성이 어디에도 선언되지 않아 "
+            "설치·빌드가 시작부터 실패하고, DB(pg 등)를 알 수 없어 배포가 DB 를 함께 띄우지 못합니다.",
+            "코드가 실제로 불러오는 패키지로 package.json 을 만드세요(자동 수정 가능 — 검증된 버전·빌드/시작 스크립트 포함).",
+            sorted(new_manifests)[0], True))
+    pending_dirs = {m[: -len("/package.json")] for m in new_manifests}
+
+    def folder_deps(folder: str) -> Optional[set[str]]:
+        try:
+            sub = json.loads(files.read(f"{folder}/package.json") or "")
+        except ValueError:
+            return None
+        names: set[str] = set()
+        for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+            if isinstance(sub, dict) and isinstance(sub.get(key), dict):
+                names.update(sub[key])
+        return names
+
     def check_script(name: str, depth: int = 0) -> None:
         script = str(scripts.get(name, ""))
+        cwd = ""
         for words in _script_commands(script):
             tool = words[0]
+            if tool == "cd" and len(words) > 1:
+                cwd = _pjoin((cwd, words[1].strip("'\"")))
+                continue
+            if cwd in pending_dirs:
+                continue  # 그 폴더의 package.json 이 없다 — 위 문제(자동 수정)가 함께 해결한다
+            here = f"{cwd}/" if cwd else ""
             if tool in {"npm", "yarn", "pnpm"} and depth < 3:
                 rest = [w for w in words[1:] if not w.startswith("-")]
                 target = rest[1] if rest[:1] == ["run"] and len(rest) > 1 else (rest[0] if rest and rest[0] != "run" else "")
-                if target and target in scripts and target != name:
+                if not cwd and target and target in scripts and target != name:
                     check_script(target, depth + 1)
                 continue
             if tool not in _NODE_TOOLS:
                 continue
             pkg, label = _NODE_TOOLS[tool]
-            if pkg not in deps and not workspaces:
+            sub_deps = folder_deps(cwd) if cwd else None
+            if cwd and sub_deps is not None:
+                if pkg not in sub_deps and pkg not in deps:
+                    result.issues.append(ReadinessIssue(
+                        "NODE_BUILD_TOOL_MISSING", ERROR,
+                        f"`{name}` 스크립트가 {cwd}/ 에서 {label}(`{tool}`)를 실행하지만 {cwd}/package.json 에 `{pkg}` 가 없습니다.",
+                        f"`cd {cwd} && npm install --save-dev {pkg}` 로 추가하세요.", f"{cwd}/package.json"))
+                    continue
+            elif pkg not in deps and not workspaces:
                 result.issues.append(ReadinessIssue(
                     "NODE_BUILD_TOOL_MISSING", ERROR,
                     f"`{name}` 스크립트가 {label}(`{tool}`)를 실행하지만 package.json 의존성에 `{pkg}` 가 없습니다.",
@@ -1994,17 +2118,17 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                     cra_broken.append((name, words[1], missing))
             elif tool == "vite" and (len(words) == 1 or words[1] == "build"):
                 has_config_root = any(
-                    re.search(r"\broot\s*:", files.read(c) or "")
+                    re.search(r"\broot\s*:", files.read(here + c) or "")
                     for c in ("vite.config.js", "vite.config.ts", "vite.config.mjs", "vite.config.cjs")
                 )
-                if not has_config_root and not files.exists("index.html"):
+                if not has_config_root and not files.exists(f"{here}index.html"):
                     result.issues.append(ReadinessIssue(
                         "NODE_BUILD_ENTRY_MISSING", ERROR,
-                        f"`{name}` 스크립트가 Vite 빌드인데 프로젝트 루트에 index.html 이 없습니다.",
+                        f"`{name}` 스크립트가 Vite 빌드인데 {cwd + '/' if cwd else '프로젝트 루트'}에 index.html 이 없습니다.",
                         "Vite 진입 파일(index.html)을 루트에 두거나 vite.config 의 root 를 지정하세요.",
                         "package.json"))
             elif tool == "next" and len(words) > 1 and words[1] == "build":
-                if not any(files.has_dir(d) for d in ("pages", "app", "src/pages", "src/app")):
+                if not any(files.has_dir(here + d) for d in ("pages", "app", "src/pages", "src/app")):
                     result.issues.append(ReadinessIssue(
                         "NODE_BUILD_ENTRY_MISSING", ERROR,
                         f"`{name}` 스크립트가 `next build` 인데 pages/ 또는 app/ 폴더가 없습니다.",
@@ -2015,7 +2139,20 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 for flag in ("-p", "--project"):
                     if flag in words[1:-1]:
                         project = words[words.index(flag) + 1]
-                config = _norm(project) if project else "tsconfig.json"
+                config = _pjoin((cwd, project)) if project else f"{here}tsconfig.json"
+                if config.endswith(".json") and not files.exists(config) and not project:
+                    try:
+                        import node_fixups
+                        made = node_fixups.node_tsconfig(files, cwd)
+                    except Exception:  # noqa: BLE001
+                        made = None
+                    if made:
+                        result.fix_data.setdefault("file_writes", {}).setdefault("NODE_TSCONFIG_MISSING", {})[config] = made
+                        result.issues.append(ReadinessIssue(
+                            "NODE_TSCONFIG_MISSING", ERROR,
+                            f"`{name}` 스크립트가 TypeScript 컴파일(`tsc`)인데 {config} 가 없습니다. 빌드가 도움말만 찍고 실패합니다.",
+                            f"{config} 를 만드세요(자동 수정 가능 — strict, dist 로 컴파일).", config, True))
+                        continue
                 if config.endswith(".json") and not files.exists(config):
                     result.issues.append(ReadinessIssue(
                         "NODE_BUILD_ENTRY_MISSING", ERROR,
@@ -2030,7 +2167,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
     entry = _start_entry(scripts, files)
     if entry and files.exists(entry):
         result.fix_data["start_entry"] = entry
-    if entry and not files.exists(entry) and not re.match(r"^(dist|build|out|lib)/", entry):
+    if entry and not files.exists(entry) and not re.search(r"(?:^|/)(dist|build|out|lib)/", entry):
         result.issues.append(ReadinessIssue(
             "NODE_START_ENTRY_MISSING", ERROR,
             f"`start` 스크립트가 실행하는 {entry} 파일이 없습니다. 컨테이너가 시작 직후 종료됩니다.",
@@ -2044,7 +2181,8 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
             "main 을 실제 서버 파일로 고치거나 start 스크립트를 추가하세요.", "package.json"))
 
     # 3) 소스가 쓰는 패키지가 선언돼 있는가 + 포트·라우트
-    entry_candidates = [e for e in (entry, _norm(main) if isinstance(main, str) else None,
+    built_source = _built_entry_source(files, entry) if entry else None
+    entry_candidates = [e for e in (entry, built_source, _norm(main) if isinstance(main, str) else None,
                                     "server.js", "index.js", "app.js", "src/server.js", "src/index.js",
                                     "src/app.js", "src/main.ts", "src/index.ts", "server.ts", "index.ts") if e]
     #: 하위 폴더에 자기 package.json 이 있으면(client/ 의 React 앱 등) 그 폴더의 코드는 그
@@ -2104,10 +2242,15 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         shown = ", ".join(f"`{n}`({missing[n]})" for n in names[:6])
         manifest = f"{project}/package.json" if project else "package.json"
         where = f"`cd {project} && npm install" if project else "`npm install"
+        #: 검증된 버전을 아는 패키지뿐이고 lock 파일이 없으면 package.json 에 바로 넣는다(자동 수정).
+        added = _declare_known(files, manifest, names)
+        if added:
+            result.fix_data.setdefault("file_writes", {}).setdefault("NODE_UNDECLARED_DEPENDENCY", {})[manifest] = added
         result.issues.append(ReadinessIssue(
             "NODE_UNDECLARED_DEPENDENCY", ERROR,
             f"코드가 불러오는 패키지가 {manifest} 에 없습니다: {shown}. 컨테이너에는 선언된 패키지만 설치됩니다.",
-            f"{where} {' '.join(names[:6])}` 로 의존성에 추가하세요.", missing[names[0]]))
+            (f"{manifest} 의 dependencies 에 추가하세요(자동 수정 가능 — 검증된 버전)." if added else
+             f"{where} {' '.join(names[:6])}` 로 의존성에 추가하세요."), missing[names[0]], bool(added)))
 
     _analyze_js_sources(files, result, manifests, owner, undeclared)
 
@@ -2137,6 +2280,63 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "NODE_STATIC_DIR_MISSING", WARNING,
                 f"서버가 정적 폴더 `{folder}` 를 제공하도록 돼 있지만 그 폴더가 없습니다.",
                 f"`{folder}` 폴더에 index.html 등을 두거나 express.static 경로를 고치세요.", ""))
+    # 3-2) 생성 코드가 자주 깨뜨리는 빌드 설정 — tsconfig references·vite terser·프로젝트 밖을 가리키는 화면 경로
+    try:
+        import node_fixups
+        writes = result.fix_data.setdefault("file_writes", {})
+        refs = node_fixups.tsconfig_missing_refs(files)
+        if refs:
+            writes["NODE_TSCONFIG_REFERENCE_MISSING"] = refs
+            result.issues.append(ReadinessIssue(
+                "NODE_TSCONFIG_REFERENCE_MISSING", ERROR,
+                f"{', '.join(sorted(refs))} 의 references 가 없는 파일(tsconfig.node.json 등)을 가리킵니다. "
+                "vite·tsc 빌드가 그 파일을 읽다가 ENOENT 로 멈춥니다.",
+                "없는 파일을 가리키는 references 항목을 지우세요(자동 수정 가능).", sorted(refs)[0], True))
+        terser = node_fixups.vite_terser_missing(files)
+        if terser:
+            writes["NODE_VITE_TERSER_MISSING"] = terser
+            result.issues.append(ReadinessIssue(
+                "NODE_VITE_TERSER_MISSING", ERROR,
+                f"vite.config 가 minify: 'terser' 인데 {', '.join(sorted(terser))} 에 terser 가 없습니다. "
+                "Vite 5 는 terser 를 함께 설치하지 않아 빌드가 \"terser not found\" 로 멈춥니다.",
+                "terser 를 devDependencies 에 추가하세요(자동 수정 가능).", sorted(terser)[0], True))
+        try:
+            outs_all = set(build_outs)
+            for folder in [d for d in manifests if d] + [m[: -len("/package.json")] for m in new_manifests]:
+                o = _vite_out_dir(files, folder) or _frontend_out_dir(files, folder)
+                if o:
+                    outs_all.add(o)
+                elif any(files.exists(f"{folder}/vite.config.{x}") for x in ("ts", "js", "mjs")):
+                    outs_all.add(f"{folder}/dist")
+        except Exception:  # noqa: BLE001
+            outs_all = set(build_outs)
+        outside, out_writes = node_fixups.static_paths_outside(files, outs_all)
+        if outside:
+            if out_writes and len(out_writes) == len({p.split(":", 1)[0] for p in outside}):
+                writes["NODE_STATIC_PATH_OUTSIDE_PROJECT"] = out_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_STATIC_PATH_OUTSIDE_PROJECT", ERROR,
+                "서버 코드의 경로가 실행 위치에서 프로젝트 밖을 가리킵니다: " + "; ".join(outside[:3])
+                + ". 컨테이너에서 화면 파일을 찾지 못해(ENOENT) 브라우저에 화면이 나오지 않습니다.",
+                ("`../` 를 하나 줄여 실제 빌드 결과 폴더를 가리키게 하세요(자동 수정 가능)."
+                 if "NODE_STATIC_PATH_OUTSIDE_PROJECT" in writes else "경로를 실제 빌드 결과 폴더로 고치세요."),
+                outside[0].split(":", 1)[0], "NODE_STATIC_PATH_OUTSIDE_PROJECT" in writes))
+        loops, loop_writes = node_fixups.react_effect_loops(files)
+        if loops:
+            if loop_writes:
+                writes["NODE_REACT_EFFECT_LOOP"] = loop_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_REACT_EFFECT_LOOP", ERROR,
+                "화면이 열리자마자 API 요청을 끝없이 되풀이합니다: " + "; ".join(loops[:2])
+                + ". 훅이 그릴 때마다 새 함수를 돌려주는데 화면이 그 함수를 useEffect 의존성에 넣었습니다 — 서버 요청 한도(429)가 "
+                "곧바로 차서 모든 화면이 \"Too many requests\" 로 멈춥니다.",
+                ("훅이 돌려주는 값을 useMemo 로 감싸 훅의 값이 바뀔 때만 새로 만드세요(자동 수정 가능 — 동작은 같습니다)."
+                 if loop_writes else "훅의 함수를 useCallback 으로 감싸세요."),
+                sorted(loop_writes)[0] if loop_writes else "", bool(loop_writes)))
+        if not writes:
+            result.fix_data.pop("file_writes", None)
+    except Exception as exc:  # noqa: BLE001 - 점검 실패가 다른 판정을 막지 않는다
+        print(f"[build_readiness] 빌드 설정 점검 생략: {exc}", file=sys.stderr)
     result.health_path = next((p for p in _HEALTH_NAMES if p in routes), None)
     result.serves_root = "/" in routes or "*" in routes or any(
         files.exists(f"{folder}/index.html") for folder in statics)
@@ -2188,6 +2388,24 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                     runtime_names |= set(sub_pkg["dependencies"])
             except ValueError:
                 pass
+    #: 서버 쪽 코드(화면 프로젝트 밖)가 실제로 불러오는 패키지 — 하위 package.json 이 빠졌거나 서버 진입 파일을
+    #: 못 찾아도(createApp 을 나눈 TS 서버) pg 를 쓰면 PostgreSQL 을 함께 띄운다(실기기: DATABASE_URL 을 직접 넣으라고 했다).
+    try:
+        ui_dirs = {d for d in _vite_projects(files, manifests) if d} | {d for d in (_frontend_projects(files) or {}) if d}
+        ui_dirs |= {m[: -len("/package.json")] for m, t in new_manifests.items() if '"vite"' in t or '"react-scripts"' in t}
+        for rel in files.files():
+            if not rel.endswith(_JS_SUFFIXES) or "/node_modules/" in f"/{rel}" or any(rel.startswith(d + "/") for d in ui_dirs):
+                continue
+            if re.search(r"(^|/)(tests?|__tests__|__mocks__|e2e)/|\.(test|spec)\.", rel):
+                continue
+            body = re.sub(r"`(?:\\.|[^`\\])*`", "``", _strip_js_comments(files.read(rel) or ""))
+            for pattern in _IMPORT_PATTERNS:
+                for spec in pattern.findall(body):
+                    pkg = _package_of(spec)
+                    if pkg:
+                        runtime_names.add(pkg)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[build_readiness] 서버 패키지 점검 생략: {exc}", file=sys.stderr)
     all_server_text = "\n".join(server_texts)
     result.env_names = sorted(set(re.findall(r"process\.env\.([A-Za-z_][A-Za-z0-9_]*)", all_server_text)))
     for kind, deps_for in (("postgres", {"pg", "postgres", "pg-promise"}), ("mongodb", {"mongoose", "mongodb"}),
@@ -2705,6 +2923,19 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
             f"앱은 {effective} 포트에서 요청을 받는데 Dockerfile 은 {expose} 포트를 엽니다(EXPOSE"
             f"{'·HEALTHCHECK' if facts['health_port'] == expose else ''}). 컨테이너가 떠도 접속·헬스 확인이 실패합니다.",
             f"Dockerfile 의 {expose} 를 {effective} 로 맞추세요(자동 수정 가능).", dockerfile, True))
+    try:
+        import node_fixups
+        ci_fixed = node_fixups.npm_ci_without_lock(text, files)
+    except Exception:  # noqa: BLE001
+        ci_fixed = None
+    if ci_fixed is not None:
+        result.fix_data.setdefault("file_writes", {})["DOCKERFILE_NPM_CI_WITHOUT_LOCK"] = {dockerfile: ci_fixed}
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_NPM_CI_WITHOUT_LOCK", ERROR,
+            "Dockerfile 이 `npm ci` 로 설치하는데 그 폴더에 package-lock.json 이 없습니다. "
+            "npm ci 는 lock 파일이 있어야만 동작해 이미지 빌드가 바로 실패합니다.",
+            "lock 파일이 없는 폴더는 `npm install` 로 설치하게 바꾸세요(자동 수정 가능 — 운영 설치는 --omit=dev).",
+            dockerfile, True))
     if any(_NPM_SELF_UPGRADE.search(l) for l in text.splitlines() if not l.lstrip().startswith("#")):
         result.issues.append(ReadinessIssue(
             "DOCKERFILE_NPM_SELF_UPGRADE", ERROR,
@@ -3267,7 +3498,12 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
     if issue is None:
         return {"applied": False, "message": "이미 해결된 항목입니다.", "readiness": before.to_dict()}
     changed: list[str] = []
-    if code == "DOCKERIGNORE_MISSING":
+    if code in FILE_WRITE_FIXES:
+        writes = (before.fix_data.get("file_writes") or {}).get(code) or {}
+        if not writes:
+            raise ValueError("고칠 내용을 확정하지 못했습니다. 안내에 따라 직접 수정하세요.")
+        changed += apply_file_plan(root, writes, [])
+    elif code == "DOCKERIGNORE_MISSING":
         path = write_dockerignore_if_missing(root)
         if path:
             changed.append(".dockerignore")

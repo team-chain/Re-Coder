@@ -1,3 +1,15 @@
+# AI 앱 개발·배포·보안 — 실제 Docker 빌드 기준으로 고침 (2026-10-10, 2.0.6)
+
+- 실기기 영상 16-48-26 + TEMP 쇼핑몰(AI 자유 생성)을 sandbox Docker 로 실제 빌드·배포해 원인을 순서대로 찾음: backend/·frontend/ package.json 없음 → lock 없는 npm ci → strict tsconfig 의 린트성 오류 30건·실제 타입 오류 ~10건 → frontend tsconfig references(tsconfig.node.json 없음) → 기본 내보내기 없음(.tsx 에 export interface 가 있어 `_esm_exports` 가 판단 포기) → `new URL('../../../frontend/dist')`(컨테이너에서 / 밖) → useApi 훅 무한 요청(6초 2,258번 → express-rate-limit 429) → AI 자체 결제(HMAC·mock-payment-server, 배포 모의 결제와 불일치).
+- `node_manifests.py`(코드 import → package.json, KNOWN/DEV 버전표, terser), `node_fixups.py`(missing_manifests·npm_ci_without_lock(여러 줄 RUN, lock 조건문 제외)·tsconfig_missing_refs·vite_terser_missing·static_paths_outside(tsconfig rootDir→outDir 실행 위치)·relax_generated_tsconfig·build_log_issues(tsc/vite → 파일별, 스테이지 WORKDIR)·node_tsconfig·react_effect_loops(훅 최상위 마스크, useMemo deps=훅 인자+최상위 바인딩)).
+- `build_readiness`: `fix_data["file_writes"][코드]` + `FILE_WRITE_FIXES`(apply_fix 가 apply_file_plan 으로 백업과 함께). 새 코드 NODE_WORKSPACE_MANIFEST_MISSING·NODE_TSCONFIG_REFERENCE_MISSING·NODE_VITE_TERSER_MISSING·NODE_STATIC_PATH_OUTSIDE_PROJECT·NODE_TSCONFIG_MISSING·NODE_REACT_EFFECT_LOOP·DOCKERFILE_NPM_CI_WITHOUT_LOCK·NODE_IMPORT_NAME_UNDEFINED(고칠 수 없는 이름 분리), NODE_UNDECLARED_DEPENDENCY 는 아는 버전이면 자동. check_script 가 `cd X` 추적, 하위 dist start 허용, `_built_entry_source` 로 포트, 서비스는 서버 쪽 import 로도.
+- `code_agent`: `_autofix_ops` 가 루트+하위 package.json 폴더마다 file_writes 를 4번까지 반복 적용, 새 tsconfig 린트성 옵션 끔, `_build_failure_issues`(verify 의 `log` → 파일별), `_consistency_issues` 는 루트가 있으면 하위 단독의 `_ROOT_SCOPED`·중복 제외, `_complete_fullstack_manifest` 가 폴더 package.json/tsconfig 추가, 생성 규칙에 Dockerfile·훅·TS 지침. `_merge_ops`·`edit_fix_round` 는 `fixed` op 를 고치지 않음.
+- 결제: `payment_kit.py`(TS_KIT·CJS_KIT, plan_with_kit=설계 직후 layer0 고정 op+약속 문서, AI mock 폴더 제외, wiring_issues). `gen_engine.LargeGeneration(plan_hook=)` → 고정 op 를 state.ops 에 넣고 file_done(planner) 이벤트. 한 번에 만든 결과에는 사후 주입. `payment_contract.issues` 는 모듈이 있으면 wiring 만.
+- 배포: `_probe_app_api` 429 → APP_REQUEST_LOOP, `deploy_settings` 필수 설정 탐지(TS 타입 별칭·errors.push 후 exit), `build_failure._explain_ts`.
+- 보안: `_created_uid` 옵션 위치 무관, DL3018/DL3008 근거 주석+`# hadolint ignore`(기존 pragma 에 덧붙임), file_registry 숫자 USER.
+- 검증: Core 2,536개·확장 555개(RAG 포함, 확장 1건은 sandbox 의 git insteadOf 환경변수 때문 — 빼고 실행하면 통과). TEMP 산출물을 생성 직후 자동 교정 → 남은 정적 문제 1건(HealthResponse 미선언, AI 교정 대상) → 타입 오류를 AI 교정처럼 고친 뒤 Docker 빌드 성공 → API 배포: PostgreSQL 함께 뜸·DATABASE_URL 요청 없음·health OK, 무한 요청 수정 뒤 첫 화면 /api/products 1번. 결제 모듈을 붙인 같은 앱을 데모 모드로 배포 → createPaymentIntent → 모의 결제 서버 서명 웹훅 → 주문 paid. CJS 모듈은 ESM·CJS 양쪽 import·서명 검증(정상 200·위조 400) 확인. hadolint 실바이너리로 DL3018·DL3066 0건. 가짜 게이트웨이 팀 생성 API 로 결제 모듈 주입·약속·지목 확인.
+- 남은 것: 기존 TEMP 결과물 자체의 타입 오류(약 10건)·API 응답 모양 불일치(products vs items)는 AI 교정 대상 — 2.0.6 으로 다시 만들면 빌드 검증이 파일별로 고친다.
+
 # 대규모 생성 — 글자 그대로 이어 받기(응답 길이 한도에 막히지 않게) (2026-10-10, 2.0.5)
 
 - 실기기: README.md 가 150→80→40줄 지시에도 매번 4096 토큰 한도에서 잘림(호출마다 ~22초 = 한도까지 씀) → 3번 실패 → [다시 쓰기]는 같은 40줄 방법을 반복해 바로 다시 실패. 잘린 JSON 응답은 통째로 버려 진행 0.

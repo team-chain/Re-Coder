@@ -3957,6 +3957,17 @@ def _probe_app_api(plan, workspace: str) -> Optional[dict]:
         checked.append({"path": route, "status": status})
         if status >= 500 and failed is None:
             failed = {"path": route, "http_status": status}
+    limited = [c for c in checked if c.get("status") == 429]
+    if failed is None and limited:
+        #: 방금 뜬 앱이 조회 한 번에 429 — 첫 화면 확인(브라우저)만으로 요청 한도가 찼다. 화면 코드가 요청을 끝없이
+        #: 되풀이하는 것이다(실기기 TEMP: 6초에 2,258번). 사용자가 열어도 똑같이 모든 화면이 멈춘다.
+        return {"status": "error", "checked": checked, "path": limited[0]["path"], "http_status": 429,
+                "diagnosis": {"code": "APP_REQUEST_LOOP", "title": "화면이 API 요청을 끝없이 되풀이함",
+                              "cause": f"배포 직후 첫 화면을 한 번 연 것만으로 {limited[0]['path']} 가 요청 한도 초과(429)를 냅니다. "
+                                       "화면 코드가 그릴 때마다 같은 요청을 다시 보내 서버의 요청 한도가 곧바로 찹니다.",
+                              "fix": "배포 준비 점검을 다시 실행해 '화면이 API 요청을 끝없이 되풀이' 항목을 자동 수정한 뒤 다시 배포하세요"
+                                     "(useEffect 의존성에 매번 새로 만들어지는 함수가 들어 있습니다).",
+                              "lines": [], "step": "앱 응답 확인"}}
     if failed is None:
         return {"status": "ok", "checked": checked}
     try:

@@ -46,6 +46,9 @@ def test_확실한_것만이라도_고치고_나머지는_문제로_남긴다(tm
         "src/pages/CartPage.jsx": PAGE.replace("import { useCart }", "import { useCart, useWishlist }"),
     }
     r = analyze(tmp_path, overlay, dockerfile=None)
+    #: 고칠 수 있는 것(useCart)은 자동 수정 항목으로, 아예 없는 이름(useWishlist)은 따로 남긴다
     issue = next(i for i in r.issues if i.code == "NODE_IMPORT_NAME_MISSING")
-    assert not issue.auto_fix
+    assert issue.auto_fix and "useWishlist" not in issue.message
+    rest = next(i for i in r.issues if i.code == "NODE_IMPORT_NAME_UNDEFINED")
+    assert not rest.auto_fix and "useWishlist" in rest.message
     assert r.fix_data["missing_exports"] == [("src/store/cartStore.js", "useCart", "esm")]

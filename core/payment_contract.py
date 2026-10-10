@@ -54,6 +54,8 @@ def code_contract(choice: str) -> str:
     return f"""
 
 [결제 약속 — 반드시 지킬 것] {first}
+- 서버가 Node/Express 이면 ReCoder 가 결제 모듈(payments/stripe)을 고정 파일로 넣습니다. 정확한 경로·함수는 설계 약속의 [결제 모듈] 을
+  따르고, 그 모듈이 있으면 아래의 Stripe 클라이언트·웹훅 검증을 직접 만들지 말고 그 모듈을 불러 쓰세요. 모의 결제 서버도 만들지 마세요.
 - 결제는 서버(Node/Express)에서 npm 패키지 `stripe` 의 PaymentIntents API 로만 만듭니다: stripe.paymentIntents.create({{ amount, currency, metadata: {{ orderId }} }}, {{ idempotencyKey }}).
 - 서버 결제 모듈 한 곳에서 환경변수를 **process.env.이름 형태 그대로** 읽습니다(구조 분해 금지): process.env.STRIPE_SECRET_KEY, process.env.STRIPE_WEBHOOK_SECRET, process.env.NODE_ENV, process.env.PAYMENT_MODE, process.env.STRIPE_MOCK_HOST, process.env.STRIPE_MOCK_PORT.
 - process.env.NODE_ENV === 'test' 이고 process.env.PAYMENT_MODE === 'mock' 일 때만 Stripe 클라이언트를 new Stripe(key, {{ host: STRIPE_MOCK_HOST, port: parseInt(STRIPE_MOCK_PORT, 10), protocol: 'http' }}) 로 만듭니다. PAYMENT_MODE=mock 인데 NODE_ENV 가 test 가 아니면 시작을 거부하고, NODE_ENV=production 에서 STRIPE_MOCK_HOST 가 있으면 시작을 거부합니다.
@@ -80,6 +82,10 @@ def _server_sources(ops: list[dict]) -> dict[str, str]:
 
 def issues(ops: list[dict]) -> list[dict]:
     """만든 결과가 결제 약속을 지켰는가 — 안 지켰으면 일관성 점검이 고칠 오류 목록."""
+    import payment_kit
+    if any(payment_kit.is_kit(op.get("file", "")) for op in ops or []):
+        #: ReCoder 결제 모듈을 넣었다 — 모의 결제·서명 검증은 그 모듈이 지킨다. 서버가 그것을 쓰는지만 본다.
+        return payment_kit.wiring_issues(ops) + _no_listen(_server_sources(ops))
     sources = _server_sources(ops)
     if not sources:
         return []
@@ -104,12 +110,15 @@ def issues(ops: list[dict]) -> list[dict]:
             "fix": f"POST {WEBHOOK_PATH} 를 express.raw 로 JSON 파서보다 먼저 등록하고 stripe.webhooks.constructEvent 로 "
                    "검증한 뒤 payment_intent.succeeded 로 주문을 결제 완료로 바꾸세요.",
         })
+    return problems + _no_listen(sources)
+
+
+def _no_listen(sources: dict[str, str]) -> list[dict]:
     for path, content in sources.items():
         if re.search(r"NODE_ENV\s*!==?\s*['\"]test['\"][^;{}]{0,40}\)?\s*\{?[^{}]{0,200}?\.listen\(", content):
-            problems.append({
+            return [{
                 "code": "PAYMENT_DEMO_NO_LISTEN", "severity": "error", "file": path,
                 "message": "NODE_ENV=test 이면 서버가 포트를 열지 않습니다 — 로컬 데모(모의 결제)는 NODE_ENV=test 로 실행됩니다",
                 "fix": "NODE_ENV 와 관계없이 서버가 listen 하게 하세요. 테스트가 필요하면 app 을 내보내는 모듈과 listen 하는 진입 파일을 나누세요.",
-            })
-            break
-    return problems
+            }]
+    return []

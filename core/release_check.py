@@ -16,6 +16,8 @@ RUNTIME_IMPORTS = (
     'google.genai', 'google.generativeai',
     #: 대규모 코드 생성(팀 모드) — code_agent 가 필요할 때 불러오므로 번들 분석이 놓치지 않게 명시한다.
     'gen_engine', 'deploy_settings', 'generation_jobs', 'generation_progress',
+    #: 2.0.6 — 빠진 하위 package.json·빌드 설정 교정, ReCoder 결제 모듈(고정 파일)
+    'node_manifests', 'node_fixups', 'payment_kit', 'payment_contract', 'unused_files',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에

@@ -116,7 +116,7 @@ def test_자동_수정은_누른_것만_적용하고_원본을_남긴다(tmp_pat
     # 이미 해결된 항목·자동 수정 대상이 아닌 항목
     assert br.apply_fix(root, "DOCKERIGNORE_MISSING")["applied"] is False
     with pytest.raises(ValueError):
-        br.apply_fix(root, "NODE_UNDECLARED_DEPENDENCY")
+        br.apply_fix(root, "NODE_BUILD_TOOL_MISSING")
 
 
 def test_자동_수정은_CRLF_줄바꿈을_보존한다(tmp_path):

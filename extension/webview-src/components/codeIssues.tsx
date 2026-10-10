@@ -39,6 +39,16 @@ const ISSUE_TITLE: Record<string, string> = {
   UNUSED_GENERATED_FILE: "아무도 쓰지 않는 파일",
   SERVER_ROUTE_NOT_MOUNTED: "서버에 등록 안 된 API",
   GENERATED_FILE_SKIPPED: "만들지 못해 뺀 파일",
+  PAYMENT_INTENT_MISSING: "결제가 시작되지 않음",
+  PAYMENT_DUPLICATE_STRIPE: "결제 모듈을 두고 따로 만든 결제 코드",
+  NODE_IMPORT_NAME_UNDEFINED: "불러오는 이름이 아예 없음",
+  NODE_REACT_EFFECT_LOOP: "화면이 요청을 끝없이 반복",
+  NODE_WORKSPACE_MANIFEST_MISSING: "폴더의 package.json 없음",
+  NODE_STATIC_PATH_OUTSIDE_PROJECT: "화면 폴더 경로가 프로젝트 밖",
+  NODE_TSCONFIG_REFERENCE_MISSING: "tsconfig 가 없는 파일을 가리킴",
+  NODE_TSCONFIG_MISSING: "tsconfig.json 없음",
+  NODE_VITE_TERSER_MISSING: "terser 없음",
+  DOCKERFILE_NPM_CI_WITHOUT_LOCK: "lock 파일 없이 npm ci",
 };
 
 export const RemainingIssues: React.FC<{

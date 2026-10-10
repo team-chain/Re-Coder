@@ -152,3 +152,12 @@ test('이어 받기 기록 — 새로 받기·이어서·맥락 줄이기·자�
  const r=recordOf({step:'file_fallback',agent:'agent-4',file:'README.md',message:'README.md — AI 가 끝내 못 써서 설계로 기본 문서를 자동 작성했습니다'},[]);
  assert.equal(r.tone,'warn');assert.match(r.text,/자동 작성/);
 });
+
+test('ReCoder 가 넣은 결제 모듈(고정 파일)은 설계 직후 완료로 표시하고 그 사실을 기록한다',()=>{
+ const files=[{file:'backend/src/payments/stripe.ts',layer:0},...FILES];
+ const v=run([{step:'planning'},{step:'planned',total:8,files},
+  {step:'file_done',agent:'planner',file:'backend/src/payments/stripe.ts',lines:170,message:'backend/src/payments/stripe.ts — ReCoder 결제 모듈(검증된 고정 파일)을 넣었습니다'}]);
+ assert.equal(v.files.find(f=>f.file==='backend/src/payments/stripe.ts').state,'done');
+ assert.match(v.records.at(-1).text,/ReCoder 결제 모듈/);
+ assert.equal(recordOf({step:'file_done',agent:'agent-1',file:'src/a.js',lines:3,message:'src/a.js 완료'},[]).text,'src/a.js 완료 (3줄)');
+});

@@ -983,6 +983,10 @@ def _build_code_prompt(
 - DB 스키마·초기화 명령·필요 환경변수 예시·root 실행/빌드 스크립트·Dockerfile·.dockerignore·README를 포함합니다. 빈 CSS나 가짜 성공 동작으로 기능을 대신하지 않습니다. DB TLS 인증서 검증을 끄지 않습니다. 인증 토큰 저장과 CORS/CSRF 정책을 일관되게 설계합니다.
 - React Router 를 쓰면 페이지 이동은 <Link>/useNavigate 로 합니다(<a href> 는 상태를 잃습니다).
 - 자리표시 이미지는 https://placehold.co/300x200?text=이름 형식을 씁니다(via.placeholder.com·placeimg.com 은 문을 닫아 이미지가 깨집니다).
+- 화면·서버를 폴더로 나누면(frontend/·backend/ 등) 폴더마다 package.json(그 폴더 코드가 불러오는 패키지 전부)을 만듭니다. tsconfig 의 references 는 실제로 만드는 파일만 가리킵니다.
+- TypeScript 는 strict 로 컴파일되게 씁니다 — process.env.X 는 string | undefined 이므로 시작 때 확인한 뒤 string 으로 좁혀 쓰고, 선언한 타입·인터페이스는 실제로 export 합니다.
+- 커스텀 훅이 함수를 돌려주면 useCallback(또는 돌려주는 객체를 useMemo)으로 감쌉니다. 매번 새로 만들어지는 함수를 useEffect 의존성에 넣으면 요청이 끝없이 반복됩니다.
+- Dockerfile: package-lock.json 을 만들지 않으면 `npm ci` 대신 `npm install`(운영 설치는 --omit=dev)을 씁니다. 실행 사용자는 숫자 ID 로 지정합니다(예: `RUN addgroup -g 1001 -S app && adduser -S -u 1001 -G app app` 뒤 `USER 1001`). OS 패키지(apk·apt)를 설치하면 바로 윗줄에 `# hadolint ignore=DL3018`(apt 는 DL3008)과 그 이유(기본 이미지 태그가 버전을 정함)를 주석으로 남깁니다. 서버가 화면 빌드 폴더를 제공하는 경로는 컨테이너 안의 실제 위치(/app/…)와 맞게 씁니다.
 
 기존 파일 목록:
 {tree}
@@ -1806,6 +1810,57 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
             if updated != manifest_op.get("content"):
                 manifest_op["content"] = updated
                 notes.append(f"{prefix}package.json: build = {ui['build']}(화면 빌드 연결)")
+    #: 점검이 고칠 내용을 미리 만들어 둔 것(빠진 하위 package.json·없는 tsconfig references·terser·프로젝트 밖 화면 경로·
+    #: lock 없는 npm ci). 하나를 고치면 다음 것이 보이므로(package.json 이 생겨야 terser 가 보인다) 몇 번 되풀이한다.
+    try:
+        from build_readiness import FILE_WRITE_FIXES
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import FILE_WRITE_FIXES  # type: ignore
+    for _pass in range(4):
+        overlay = {p: op.get("content") or "" for p, op in by_path.items()}
+        #: 루트와 하위 package.json 폴더를 각각 본다(루트 build 에 안 들어가는 하위 서버의 tsconfig 등).
+        subs = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) == "package.json" and "/" in p})
+        found_writes: list[tuple[str, str, str]] = []
+        for project in [""] + subs[:6]:
+            prefix = f"{project}/" if project else ""
+            sub_overlay = {p[len(prefix):]: c for p, c in overlay.items() if p.startswith(prefix)}
+            try:
+                fixes = (analyze(base / project if project else base, sub_overlay,
+                                 dockerfile="Dockerfile" if "Dockerfile" in sub_overlay else None)
+                         .fix_data.get("file_writes") or {})
+            except Exception as exc:  # noqa: BLE001
+                print(f"[code_agent] 빌드 설정 자동 교정 생략({project or '루트'}): {exc}", flush=True)
+                continue
+            for code in FILE_WRITE_FIXES:
+                if project and code in _ROOT_SCOPED:
+                    continue
+                for rel, content in (fixes.get(code) or {}).items():
+                    found_writes.append((code, prefix + rel.replace("\\", "/").lstrip("/"), content))
+        applied = 0
+        for code, rel, content in found_writes:
+            op = by_path.get(rel)
+            if op is not None and op.get("content") == content:
+                continue
+            if op is None and (base / rel).exists():
+                continue  # 이번 결과에 없는 디스크 파일은 바꾸지 않는다(배포 준비 점검이 백업과 함께 고친다)
+            by_path[rel] = dict(op or {"action": "create", "file": rel, "language": "json" if rel.endswith(".json") else ""},
+                                content=content, rationale=(op or {}).get("rationale") or f"ReCoder 자동 교정({code})")
+            notes.append(f"{rel}: {code}")
+            applied += 1
+        if not applied:
+            break
+    #: 새로 만든 tsconfig — strict 는 두고, 동작과 무관한 린트성 검사(미사용 변수·인덱스 접근 undefined)만 끈다.
+    #: AI 코드의 tsc 빌드 실패 대부분이 이것이었다(실기기 TEMP: 40건 중 30건).
+    try:
+        import node_fixups
+        for rel, op in by_path.items():
+            if posixpath.basename(rel) == "tsconfig.json" and op.get("action") == "create" and not (base / rel).exists():
+                relaxed = node_fixups.relax_generated_tsconfig(op.get("content") or "")
+                if relaxed and relaxed != op.get("content"):
+                    op["content"] = relaxed
+                    notes.append(f"{rel}: 린트성 검사(미사용 변수 등)가 빌드를 막지 않게")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[code_agent] tsconfig 교정 생략: {exc}", flush=True)
     # AI 가 Dockerfile 도 만들었으면 하위 폴더(client/·server/) 의존성 설치를 채운다.
     docker_op = by_path.get("Dockerfile")
     if docker_op is not None:
@@ -1828,6 +1883,10 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict]) -> tuple[list[
         except Exception as exc:  # noqa: BLE001
             print(f"[code_agent] Dockerfile 자동 교정 생략: {exc}", flush=True)
     return list(by_path.values()), notes
+
+
+#: 프로젝트 전체를 봐야 판단할 수 있는 문제 — 루트를 점검할 때 하위 폴더 단독 점검의 같은 문제는 버린다.
+_ROOT_SCOPED = {"NODE_STATIC_PATH_OUTSIDE_PROJECT", "NODE_STATIC_DIR_MISSING", "NODE_WORKSPACE_MANIFEST_MISSING"}
 
 
 def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list[dict]:
@@ -1861,6 +1920,7 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
     if any((base / m).is_file() for m in manifests):
         projects.add("")
     found: list[dict] = []
+    root_seen: set[tuple[str, str]] = set()
     for project in sorted(projects)[:5]:
         prefix = f"{project}/" if project else ""
         overlay = {rel[len(prefix):]: content for rel, content in written.items() if rel.startswith(prefix)}
@@ -1876,6 +1936,11 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         for issue in after.issues:
             if (issue.code, issue.message) in before or issue.code == "DOCKERIGNORE_MISSING":
                 continue
+            if project and "" in projects and (issue.code in _ROOT_SCOPED or (issue.code, prefix + (issue.file or "")) in root_seen):
+                #: 루트 프로젝트가 함께 점검한다 — 하위 폴더만 따로 보면 폴더 밖(../frontend/dist)을 잘못 문제 삼고, 같은 문제가 두 번 나온다.
+                continue
+            if not project:
+                root_seen.add((issue.code, issue.file or ""))
             item = issue.to_dict()
             if project:
                 item["message"] = f"[{project}] {item['message']}"
@@ -1909,9 +1974,34 @@ def _norm_op_path(path: str) -> str:
     return out.lstrip("/").casefold()
 
 
+_CODE_EXTS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue")
+
+
 def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
-    """A fresh frontend/backend project needs a runnable deployment root."""
+    """A fresh frontend/backend project needs a runnable deployment root.
+
+    코드가 든 화면·서버 폴더(frontend/·backend/ 등)에 package.json 이 목록에 없으면 함께 만든다 — AI 설계가 자주
+    빠뜨렸고(실기기 TEMP 쇼핑몰), 그러면 의존성이 어디에도 선언되지 않아 설치·빌드가 시작부터 실패했다.
+    """
+    files = list(files)
     paths = {f["file"] for f in files}
+    for folder in ("frontend", "client", "web", "backend", "server", "api"):
+        code = [p for p in paths if p.startswith(folder + "/") and p.endswith(_CODE_EXTS)]
+        if not code:
+            continue
+        ts = any(p.endswith((".ts", ".tsx")) for p in code)
+        ui = folder in ("frontend", "client", "web")
+        if folder + "/package.json" not in paths:
+            files.append({"file": f"{folder}/package.json", "layer": 0, "size": "small",
+                          "purpose": (f"{folder} dependencies (exactly the packages its code imports, stable versions) and scripts: "
+                                      + ("dev=vite, build=vite build" if ui else
+                                         ("build=tsc, start=node dist/<entry>.js, dev=tsx watch src/<entry>.ts" if ts else "start=node <entry>.js")))})
+            paths.add(f"{folder}/package.json")
+        if ts and folder + "/tsconfig.json" not in paths:
+            files.append({"file": f"{folder}/tsconfig.json", "layer": 0, "size": "small",
+                          "purpose": ("TypeScript config for the Vite React app (strict, jsx react-jsx, noEmit, no project references)" if ui else
+                                      "TypeScript config for the Node server (strict, rootDir src, outDir dist, ESM module NodeNext)")})
+            paths.add(f"{folder}/tsconfig.json")
     client = next((p for p in ("frontend", "client", "web") if p + "/package.json" in paths), None)
     server = next((p for p in ("backend", "server", "api") if p + "/package.json" in paths), None)
     if not client or not server:
@@ -1928,7 +2018,8 @@ def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
 
 def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool = False,
                     job_id: str = "", fingerprint: str = "", resume: dict | None = None,
-                    concurrency: int | None = None, skip_failed: bool = False) -> tuple[dict, list[dict], object]:
+                    concurrency: int | None = None, skip_failed: bool = False,
+                    plan_hook=None) -> tuple[dict, list[dict], object]:
     """큰 요청을 대규모 생성 엔진으로 만든다. 멈추면 GenerationPaused(이어서 만들기 가능)."""
     try:
         import gen_engine
@@ -1939,7 +2030,7 @@ def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool =
     engine = gen_engine.LargeGeneration(
         prompt, target_folder=target_folder, new_project=new_project, job_id=job_id,
         fingerprint=fingerprint, concurrency=concurrency, emit=generation_progress.current(),
-        skip_failed=skip_failed,
+        skip_failed=skip_failed, plan_hook=plan_hook,
     )
     engine.resume_from(resume)
     return engine.run()
@@ -1959,11 +2050,14 @@ def _completed_files_context(ops: list[dict], limit: int = 64_000) -> str:
 
 
 def _merge_ops(base: list[dict], updates: list[dict]) -> list[dict]:
-    """교정 결과를 파일 경로 기준으로 덮어쓴다. 교정 응답에 없는 파일은 그대로 둔다."""
+    """교정 결과를 파일 경로 기준으로 덮어쓴다. 교정 응답에 없는 파일은 그대로 둔다.
+    ReCoder 가 넣은 고정 파일(결제 모듈)은 AI 교정이 덮어쓰지 못한다."""
     index = {_norm_op_path(op["file"]): i for i, op in enumerate(base)}
     merged = list(base)
     for op in updates:
         key = _norm_op_path(op["file"])
+        if key in index and merged[index[key]].get("fixed"):
+            continue
         if key in index:
             merged[index[key]] = op
         else:
@@ -1995,6 +2089,18 @@ def _issue_weight(issues: list[dict]) -> int:
     # even when reading the now-valid manifest reveals more missing dependencies.
     keys = {(i['code'], i.get('file', '')) for i in issues if i['severity'] == 'error'}
     return sum(100 if code == 'NODE_PACKAGE_JSON_INVALID' else 1 for code, _ in keys)
+
+
+def _build_failure_issues(verification: dict, ops: list[dict]) -> list[dict]:
+    """컨테이너 빌드 실패 로그 → 소스 파일별 문제(tsc·vite 오류 줄). 못 뽑으면 빈 목록."""
+    try:
+        import node_fixups
+        docker = next((op.get("content") or "" for op in ops if _norm_op_path(op.get("file", "")) == "dockerfile"), "")
+        return node_fixups.build_log_issues(str(verification.get("log") or verification.get("output") or ""),
+                                            [op["file"] for op in ops if op.get("file")], docker)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[code_agent] 빌드 로그 분석 생략: {exc}", flush=True)
+        return []
 
 
 def _verify_generated_build(root: Path, target_folder: str, ops: list[dict]) -> dict:
@@ -2109,10 +2215,14 @@ def generate_code(
         _report({"step": "resumed", "message": "이미 끝난 작업입니다 — 저장된 결과를 불러옵니다"})
         return saved["result"]
 
+    #: AI 가 만드는 결제 앱 — Stripe 연동은 ReCoder 결제 모듈(고정 파일)을 넣고 AI 는 불러 쓰기만 한다.
+    import payment_kit
+    kit_hook = payment_kit.plan_with_kit if (payment_ai and not existing) else None
+
     def _split() -> tuple:
         return _generate_split(prompt, target_folder, new_project=not existing,
                                job_id=job_id, fingerprint=fp, resume=saved, concurrency=agents,
-                               skip_failed=skip_failed)
+                               skip_failed=skip_failed, plan_hook=kit_hook)
 
     # Request a native schema instead of relying only on prose instructions.
     # Reject incomplete batches as a whole, then give the model one bounded
@@ -2215,6 +2325,17 @@ def generate_code(
     # 생성 결과 일관성 — 이 ops 를 적용하면 새로 생기는 빌드·실행 문제(없는 파일을 가리키는
     # 스크립트, 선언 안 된 패키지 등)를 찾아 한 번 교정을 요청한다. 실기기에서 CRA 설정만 남은
     # Express 앱이 Docker 빌드에서 막혔다. 교정도 실패하면 결과에 경고로 남긴다.
+    kit_now = next((op["file"] for op in ops_out if kit_hook and payment_kit.is_kit(op.get("file", ""))), None)
+    if kit_now:
+        #: 교정 단계의 AI 도 결제 모듈 약속을 알게 한다(설계 약속에만 있으면 교정 프롬프트에 빠진다).
+        prompt += payment_kit.contract(kit_now)
+    if kit_hook and not kit_now:
+        #: 한 번에 만든 결과(설계 단계 없음) — 결제 모듈을 넣고, AI 가 따로 만든 모의 결제 서버는 뺀다.
+        #: 서버가 모듈을 쓰지 않으면 결제 약속 점검이 오류로 잡아 교정한다.
+        _files, kit_ops, _extra = payment_kit.plan_with_kit([{"file": op["file"]} for op in ops_out if op.get("file")])
+        if kit_ops:
+            ops_out = [op for op in ops_out if not payment_kit.is_ai_mock(op.get("file", ""))] + kit_ops
+            prompt += _extra
     ops_out, autofix_notes = _autofix_ops(root, target_folder, ops_out)
     if autofix_notes:
         print(f"[code_agent] 자동 교정 {len(autofix_notes)}건: {autofix_notes[:5]}", flush=True)
@@ -2257,9 +2378,11 @@ def generate_code(
             verification = _verify_generated_build(root, target_folder, ops_out)
             if verification["status"] != "failed":
                 break
-            errors = [{"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
-                       "message": verification["output"],
-                       "fix": "실제 빌드 로그의 원인을 고치세요. 검사를 제거하거나 기능을 생략하지 마세요."}]
+            #: 빌드 로그의 오류를 파일별 문제로 — 부분 교정이 그 소스 파일을 고친다(예전엔 Dockerfile 만 지목해 못 고쳤다).
+            errors = _build_failure_issues(verification, ops_out) or [
+                {"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
+                 "message": verification["output"],
+                 "fix": "실제 빌드 로그의 원인을 고치세요. 검사를 제거하거나 기능을 생략하지 마세요."}]
         if foundation:
             break  # A reviewed foundation is never silently rewritten by a model.
         signature = hashlib.sha256(json.dumps(ops_out, sort_keys=True).encode()).hexdigest()
@@ -2454,7 +2577,7 @@ def generate_code(
         "fallback_docs": [f.get("file") for f in fallback_docs],
         "unused_files": [{"file": u["file"], "consumers": u.get("consumers", [])} for u in unused
                          if any(op.get("file") == u["file"] for op in ops_out)],
-        "verification": verification,
+        "verification": {k: v for k, v in verification.items() if k != "log"},
         "foundation": foundation or None,
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),
