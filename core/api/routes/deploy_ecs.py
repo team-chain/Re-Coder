@@ -320,6 +320,7 @@ _WARNING_KEYS = (
     "policy_warning",     # 정책 엔진 없이 로컬 규칙으로 판단했다
     "service_warning",    # 앱이 내려가 있다 (요금 문제가 아니라 가용성 문제)
     "rollback_approval",  # 사용자가 승인/무시한 ECS 롤백 결과
+    "app_runtime_network",  # 공인 IP 없이 보조 DB 이미지를 받으려면 NAT 가 필요하다
 )
 
 

@@ -218,3 +218,12 @@ test('S3·ECS 노드는 AWS 공식 아키텍처 아이콘, Docker·GitHub·Disco
  // 이름 글자(ECS·S3)로 대신 그리지 않는다
  assert.ok(!/<text/.test(s3)&&!/<text/.test(ecs));
 });
+test('ECS preflight receives runtime setting names only (never values) so missing app settings block before approval',async()=>{
+ const s=setup(),calls=[],arn='arn:aws:secretsmanager:us-east-1:123456789012:secret:shop-db-ABCDEF';
+ s.api.getDeployPreflight=async(...args)=>{calls.push(args);return {blocked:false,evidence:[]};};
+ await s.send('canvas.prepare',{config:{...config,environment:'production',env_vars:{FRONTEND_URL:'https://x'},secret_refs:{DATABASE_URL:arn}}});
+ assert.deepEqual(calls[0][2],{envNames:['FRONTEND_URL','DATABASE_URL'],environment:'production'});
+ assert.ok(!JSON.stringify(calls).includes('https://x')&&!JSON.stringify(calls).includes(arn));
+ await s.send('canvas.execute',{planId:s.plan().id,approved:true});
+ assert.deepEqual(calls[1][2],{envNames:['FRONTEND_URL','DATABASE_URL'],environment:'production'});
+});

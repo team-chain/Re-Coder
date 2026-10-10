@@ -148,9 +148,10 @@ def configured(container: str) -> list[str]:
     return [k for k in kinds if k in SERVICES] if isinstance(kinds, list) else []
 
 
-def app_env(container: str, kind: str, password: str, env_names: list[str]) -> dict[str, str]:
-    """앱 컨테이너에 넘길 접속 정보. env_names 는 코드가 읽는 환경변수 이름들."""
-    host = service_container(container, kind)
+def app_env(container: str, kind: str, password: str, env_names: list[str], host: Optional[str] = None) -> dict[str, str]:
+    """앱 컨테이너에 넘길 접속 정보. env_names 는 코드가 읽는 환경변수 이름들.
+    host 를 주면 그 주소로 잇는다(ECS 는 같은 태스크 안 127.0.0.1)."""
+    host = host or service_container(container, kind)
     env: dict[str, str] = {}
     if kind == "postgres":
         url = f"postgresql://recoder:{password}@{host}:5432/app"

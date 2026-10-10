@@ -11,6 +11,19 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+
+def _sources_json() -> Path:
+    """번들 안에서도 찾는 지식 문서(resources 참고)."""
+    try:
+        from resources import resource
+    except ImportError:  # pragma: no cover
+        try:
+            from core.resources import resource
+        except ImportError:
+            return Path(__file__).with_name("sources.json")
+    return resource("grounded_repair", "sources.json")
+
+
 HOSTS = {"docs.docker.com", "docs.npmjs.com", "nodejs.org", "vite.dev",
          "expressjs.com", "docs.aws.amazon.com"}
 STOPWORDS = set("a an the to of in on for from and or with by is are was be not this that it at as".split())
@@ -88,11 +101,11 @@ class KnowledgeIndex:
 
     @classmethod
     def load(cls, path: Path | None = None, model_path: str | None = None, *, include_summaries=False):
-        path = path or Path(__file__).with_name("sources.json")
+        path = path or _sources_json()
         entries = json.loads(path.read_text(encoding="utf-8"))
         if include_summaries:
             ids = {entry["id"] for entry in entries}
-            entries.extend(entry for entry in json.loads(Path(__file__).with_name("sources.json").read_text(encoding="utf-8"))
+            entries.extend(entry for entry in json.loads(_sources_json().read_text(encoding="utf-8"))
                            if entry["id"] not in ids)
         passages = []
         for entry in entries:

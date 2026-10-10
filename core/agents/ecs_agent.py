@@ -26,6 +26,7 @@ from typing import Callable, Optional
 from core.agents.preflight_agent import PreflightAgent
 from core.agents import ecs_build
 from core.agents.ecs_health import configure_health_check, python_http_health_check
+from core.agents import ecs_runtime
 from core.agents.ecs_progress import initialize_progress, advance_progress, finish_progress
 from core.sbom import sbom_generator
 from core import aws_infra, aws_policy
@@ -67,7 +68,12 @@ _AUTH_ERROR_CODES = frozenset({
 })
 
 # FileTemplate 경로
-_TEMPLATE_PATH = Path(__file__).parent.parent / "registry" / "file_templates" / "ecs-task-definition.json.template"
+try:
+    from resources import resource as _resource
+except ImportError:  # pragma: no cover
+    from core.resources import resource as _resource
+#: 실행 파일에서 core.agents.ecs_agent 로 불려도 번들의 템플릿을 찾는다(resources 참고)
+_TEMPLATE_PATH = _resource("registry", "file_templates", "ecs-task-definition.json.template")
 
 
 def _probe_http(
@@ -120,9 +126,22 @@ class ECSAgent:
     LLM을 사용하지 않는 결정론적 배포 에이전트.
     """
 
+    @staticmethod
+    def _plan_runtime(request: ECSDeployRequest) -> "ecs_runtime.RuntimePlan":
+        """ECS 실행 설정 계획(값은 기록하지 않는다). 사용자가 준 일반 환경변수·비밀값 참조 이름은 그대로 둔다."""
+        return ecs_runtime.plan(
+            request.workspace_path,
+            key=ecs_runtime.store_key(request.region, request.cluster, request.service),
+            environment=request.environment or "",
+            provided=set(request.env_vars or {}) | set(request.secret_refs or {}),
+            container_port=request.container_port,
+        )
+
     def __init__(self, on_progress: Optional[Callable[[], None]] = None) -> None:
         self._preflight = PreflightAgent()
         self._on_progress = on_progress
+        #: 배포 요청별 ECS 실행 설정(값 포함) — 태스크 정의를 등록할 때 꺼내 쓰고 버린다. 기록·디스크에는 남기지 않는다.
+        self._runtime: dict[int, ecs_runtime.RuntimePlan] = {}
 
     def _save_progress(self) -> None:
         if self._on_progress:
@@ -254,6 +273,19 @@ class ECSAgent:
                         f"컨테이너 포트 {request.container_port}와 앱의 포트 {static_port}가 다릅니다.",
                         remedy=f"배포 설정의 컨테이너 포트를 {static_port}로 수정하세요.",
                     )
+            # 0-1. 앱이 ECS 에서 실제로 시작할 수 있는가 — DB·서명 키·결제 키. 비어 있는 값을 아무도 채울 수 없으면
+            #      AWS 자원을 하나도 만들기 전에 멈춘다(실기기 2.0.11: DATABASE_URL·JWT_SECRET 없이 배포 → 태스크가 계속 죽음).
+            if request.workspace_path:
+                runtime = await asyncio.get_running_loop().run_in_executor(None, self._plan_runtime, request)
+                if runtime.blocked:
+                    message, remedy = runtime.block_message()
+                    raise InfraError(message, remedy=remedy)
+                self._runtime[id(request)] = runtime
+                for i, note in enumerate(runtime.notes):
+                    record.provisioned[f"app_runtime_{i + 1}"] = note
+                if runtime.services and not request.assign_public_ip:
+                    record.provisioned["app_runtime_network"] = (
+                        "공인 IP 를 끈 배포입니다 — DB 이미지(ECR Public)를 받으려면 서브넷에 NAT 게이트웨이가 있어야 합니다.")
             clients = self._clients(request.region)
 
             # 1. Preflight
@@ -1001,7 +1033,8 @@ class ECSAgent:
 
         exec_arn, task_arn = self._resolve_role_arns(req, clients)
         task_def = self._render_task_definition(
-            req, image=image, execution_role_arn=exec_arn, task_role_arn=task_arn
+            req, image=image, execution_role_arn=exec_arn, task_role_arn=task_arn,
+            runtime=self._runtime.pop(id(req), None),
         )
 
         try:
@@ -1554,6 +1587,7 @@ class ECSAgent:
         image: str,
         execution_role_arn: str,
         task_role_arn: str,
+        runtime: Optional["ecs_runtime.RuntimePlan"] = None,
     ) -> dict:
         """FileTemplate 에서 Task Definition dict 생성.
 
@@ -1640,4 +1674,5 @@ class ECSAgent:
                     "retries": 3,
                     "startPeriod": 60,
                 }
-        return rendered
+        # 앱이 시작할 때 요구하는 DB·서명 키·모의 결제(staging) — `ecs_runtime.plan` 이 배포 시작 때 정했다.
+        return ecs_runtime.apply(rendered, req.container_name, runtime, image)

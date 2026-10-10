@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.0.12 — 2026-10-11 (Preview)
+
+**배포 — ECS 배포가 태스크 정의 단계에서 멈추던 문제**
+- 설치본(실행 파일) Core 가 ECS 태스크 정의 템플릿을 찾지 못했습니다(`…\_MEI…\core\registry\file_templates\ecs-task-definition.json.template`). 같은 모듈이 `core.` 이름으로 불리면 번들 안의 다른 위치를 봤기 때문입니다. 템플릿·고정 소스·지식 문서를 어느 이름으로 불려도 번들에서 찾고, 실행 파일 자체 점검(--self-check)이 두 이름 모두를 확인합니다.
+- TypeScript 서버(`const app: Express = express()`)의 `/health` 를 찾지 못해 ECS 헬스체크 없이 배포하던 문제를 고쳤습니다.
+
+**배포 — ECS 에서 앱이 실제로 시작하도록**
+- 예전에는 앱이 요구하는 DB·서명 키·결제 키를 ECS 가 하나도 넘기지 않아, 태스크 정의를 고쳐도 앱이 시작하자마자 종료했습니다(`DATABASE_URL environment variable is required`).
+- **staging**: 로컬 Docker 배포와 같은 것을 같은 태스크 안에 준비합니다 — PostgreSQL(·Redis·MongoDB, ECR Public 공식 이미지, 127.0.0.1 에서만 접속, 프로젝트 schema.sql 로 테이블 생성), 앱 서명 키(서비스마다 한 번 만들어 보관), 결제 키가 없으면 모의 결제 서버. 태스크 메모리는 필요하면 1GB 로 올립니다. 임시 DB 라 태스크가 바뀌면 데이터가 처음부터 시작합니다.
+- **production**: 임시 DB·평문 키·모의 결제를 쓰지 않고, 비어 있는 값을 Secrets Manager ARN 으로 넣으라고 **AWS 자원을 만들기 전에** 막습니다. 승인 카드에도 같은 판단이 미리 보입니다(값은 보내지 않고 이름만).
+
+**실제 결과물(2.0.11 쇼핑몰)을 띄워 보니 드러난 실행 오류 — AI 없이 바로 고침**
+- ESM 서버의 확장자 없는 import(`moduleResolution: node` 포함) → `.js`/`/index.js`, CommonJS 설정 tsconfig → NodeNext. (빌드는 되지만 `ERR_MODULE_NOT_FOUND` 로 시작 실패)
+- ESM 서버의 `require(...)`·`__dirname` → import·`import.meta.url`. (빌드는 되지만 시작하자마자 ReferenceError)
+- 화면 빌드 결과를 서버가 제공하지 않으면 ESM 서버에도 제공 코드를 넣습니다(한 번만). 서버가 화면을 제공하는데도 "제공하지 않음" 으로 보던 오탐을 고쳤습니다.
+- 운영(NODE_ENV=production)에서만 화면을 주는 서버 → 개발 모드만 빼고 제공. 결제를 끈 데모는 NODE_ENV=test 라 주소를 열면 Cannot GET / 이었습니다.
+- 주문 통화 'KRW' 와 결제 통화 'krw' 를 글자 그대로 비교해 결제가 끝나도 주문이 결제 대기에 남던 문제 → 대소문자 무시 비교.
+
 ## 2.0.11 — 2026-10-11 (Preview)
 
 **개발 — 실제 Haiku 결과(2.0.10 실기기)로 확인한 문제를 고침**

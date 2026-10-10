@@ -1013,6 +1013,9 @@ class DeployPreflightRequest(BaseModel):
     """배포 대상 선택 카드에 표시할 프로젝트 감지 요청."""
     workspace_path: str
     target: Optional[Literal['s3', 'ecs', 'local']] = None
+    #: ECS 승인 카드가 보낸 앱 실행 설정 **이름**(일반 환경변수·비밀값 참조). 값은 받지 않는다.
+    env_names: list[str] = Field(default_factory=list, max_length=200)
+    environment: Optional[str] = Field(default=None, max_length=32)
 
 
 class DeploymentDecisionRequest(BaseModel):
@@ -2236,6 +2239,31 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
                                             "auto_apply_available": issue.auto_fix})
             if readiness and readiness.errors:
                 safety["blocked"] = True
+            if request.target == 'ecs':
+                # 앱이 ECS 에서 시작할 때 요구하는 값(DB·서명 키·결제 키) — 배포 파이프라인과 같은 판단을 미리 보여 준다.
+                try:
+                    from core.agents import ecs_runtime
+                except ImportError:  # pragma: no cover
+                    from agents import ecs_runtime  # type: ignore
+                names = {n for n in request.env_names if isinstance(n, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n)}
+                runtime = await asyncio.to_thread(
+                    ecs_runtime.plan, request.workspace_path, key="preview",
+                    environment=request.environment or "staging", provided=names,
+                    container_port=0, create=False, readiness=readiness)
+                safety["ecs_runtime"] = runtime.summary()
+                for item in runtime.missing:
+                    safety["reasons"].append({"code": "ECS_APP_SETTING_MISSING", "severity": "high",
+                                              "message": f"앱이 시작할 때 요구하는 {item['name']} 이(가) 없습니다.",
+                                              "fix": item["reason"] + " 고급 설정 › 앱 실행 설정의 '비밀값 참조'에 ARN 을 넣으세요.",
+                                              "remediation_available": False, "proposal_id": None})
+                    safety["fixes"].append({"code": "ECS_APP_SETTING_MISSING", "message": item["reason"],
+                                            "proposal_id": None, "auto_apply_available": False})
+                if runtime.missing:
+                    safety["blocked"] = True
+                for note in runtime.notes:
+                    safety["warnings"].append({"code": "ECS_APP_RUNTIME", "severity": "medium", "message": note,
+                                               "fix": "자동으로 준비합니다.", "remediation_available": False,
+                                               "proposal_id": None})
         return {**detected, **safety}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

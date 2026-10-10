@@ -281,8 +281,12 @@ def test_createRequire_를_쓰는_ESM_서버에_dirname_을_넣지_않는다(tmp
         "web/package.json": json.dumps({"name": "w", "scripts": {"build": "vite build"}, "devDependencies": {"vite": "^5"}}),
         "web/index.html": "<div id=root></div>",
     })
-    issue = next((i for i in br.analyze(root).issues if i.code == "NODE_FRONTEND_NOT_SERVED"), None)
-    assert issue is None or not issue.auto_fix
+    result = br.analyze(root)
+    issue = next((i for i in result.issues if i.code == "NODE_FRONTEND_NOT_SERVED"), None)
+    #: 2.0.12 부터 ESM 서버에는 __dirname 없이(import·process.cwd()) 화면 제공 코드를 넣는다.
+    writes = (result.fix_data.get("file_writes") or {}).get("NODE_FRONTEND_NOT_SERVED") or {}
+    assert issue is None or not issue.auto_fix or (writes and not any("__dirname" in t for t in writes.values()))
+    assert all("import recoderPath from 'path';" in t for t in writes.values())
 
 
 def test_UTF8_이_아닌_파일이_있으면_아무것도_바꾸지_않는다(tmp_path):

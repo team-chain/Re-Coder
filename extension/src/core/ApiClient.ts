@@ -498,10 +498,12 @@ export class ApiClient {
         return resp.data;
     }
 
-    async getDeployPreflight(workspacePath: string, target?: 's3' | 'ecs' | 'local'): Promise<DeployPreflightResult> {
+    /** ecs 는 앱 실행 설정의 **이름**과 배포 환경을 함께 보낸다(값은 보내지 않는다) — 앱이 시작할 때 요구하는 값을 미리 막는다. */
+    async getDeployPreflight(workspacePath: string, target?: 's3' | 'ecs' | 'local', runtime?: { envNames: string[]; environment: string }): Promise<DeployPreflightResult> {
         const resp = await this.request<DeployPreflightResult>('POST', '/api/deploy/preflight', {
             workspace_path: workspacePath,
             target,
+            ...(runtime ? { env_names: runtime.envNames, environment: runtime.environment } : {}),
         }, false, 90000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
         return resp.data;

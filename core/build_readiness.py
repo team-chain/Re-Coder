@@ -50,7 +50,8 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING", "NODE_PRISMA_CLI_MISSING",
                 "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
                 "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION", "NODE_PRISMA_SCHEMA_ALIGN",
-                "NODE_EXPRESS_REQUEST_TYPE"}
+                "NODE_EXPRESS_REQUEST_TYPE", "NODE_ESM_COMMONJS_GLOBAL", "NODE_FRONTEND_PRODUCTION_ONLY",
+                "NODE_CURRENCY_CASE_COMPARE"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
 FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
@@ -60,7 +61,8 @@ FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_
                     "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING", "NODE_PRISMA_CLI_MISSING",
                     "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
                     "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION", "NODE_DEPENDENCY_VERSION_NOT_FOUND",
-                    "NODE_PRISMA_SCHEMA_ALIGN", "NODE_EXPRESS_REQUEST_TYPE")
+                    "NODE_PRISMA_SCHEMA_ALIGN", "NODE_EXPRESS_REQUEST_TYPE", "NODE_FRONTEND_NOT_SERVED",
+                    "NODE_ESM_COMMONJS_GLOBAL", "NODE_FRONTEND_PRODUCTION_ONLY", "NODE_CURRENCY_CASE_COMPARE")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -2435,6 +2437,35 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "Prisma 스키마가 코드와 다른 모양입니다: " + "; ".join(prisma_notes[:3])
                 + ". prisma generate 가 멈추거나 tsc 가 enum·숫자 타입 오류를 냅니다.",
                 "스키마를 코드가 쓰는 모양에 맞추세요(자동 수정 가능 — 저장되는 값은 같음).", sorted(prisma_writes)[0], True))
+        cjs_notes, cjs_writes = node_fixups.esm_commonjs_globals(files)
+        if cjs_writes:
+            writes["NODE_ESM_COMMONJS_GLOBAL"] = cjs_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_ESM_COMMONJS_GLOBAL", ERROR,
+                "ESM(\"type\": \"module\") 서버가 CommonJS 전용 require/__dirname 을 씁니다: " + ", ".join(sorted(cjs_writes)[:3])
+                + ". 빌드는 되지만 서버가 시작하자마자 ReferenceError 로 죽습니다(컨테이너가 계속 재시작).",
+                "import 와 import.meta.url 로 바꾸세요(자동 수정 가능 — 동작은 같음).", sorted(cjs_writes)[0], True))
+        #: 결제를 끈 데모(로컬·ECS staging)는 NODE_ENV=test 로 뜬다 — 운영에서만 화면을 주는 서버는 Cannot GET / 이 된다.
+        demo_app = all(re.search(rf"process\.env\.{m}\b", "\n".join(files.read(r) or "" for r in files.files()
+                                                              if r.endswith(_JS_SUFFIXES) and "/node_modules/" not in f"/{r}"))
+                       for m in ("PAYMENT_MODE", "STRIPE_MOCK_HOST", "STRIPE_MOCK_PORT"))
+        gate_notes, gate_writes = node_fixups.frontend_production_gate(files) if demo_app else ([], {})
+        if gate_writes:
+            writes["NODE_FRONTEND_PRODUCTION_ONLY"] = gate_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_FRONTEND_PRODUCTION_ONLY", ERROR,
+                "서버가 NODE_ENV=production 일 때만 화면을 제공합니다: " + ", ".join(sorted(gate_writes)[:2])
+                + ". 결제를 끈 데모 배포(NODE_ENV=test)에서는 주소를 열면 Cannot GET / 이 됩니다.",
+                "개발 모드(development)만 빼고 화면을 제공하게 하세요(자동 수정 가능 — 운영 동작은 같음).",
+                sorted(gate_writes)[0], True))
+        cur_notes, cur_writes = node_fixups.currency_case_compare(files)
+        if cur_writes:
+            writes["NODE_CURRENCY_CASE_COMPARE"] = cur_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_CURRENCY_CASE_COMPARE", ERROR,
+                "통화를 대소문자까지 그대로 비교합니다: " + ", ".join(sorted(cur_writes)[:2])
+                + ". 결제 서비스는 통화를 소문자('krw')로 보내므로 결제가 끝나도 주문이 결제 대기에 남습니다.",
+                "통화 비교에서 대소문자를 무시하게 하세요(자동 수정 가능).", sorted(cur_writes)[0], True))
         req_notes, req_writes = node_fixups.express_request_interfaces(files)
         if req_writes:
             writes["NODE_EXPRESS_REQUEST_TYPE"] = req_writes
@@ -2492,12 +2523,15 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         if text and re.search(r"\.listen\s*\(", text) and re.search(r"\bexpress\s*\(", text):
             result.server_entry = rel
             break
+    #: 서버 코드에서 빼는 것은 **화면** 폴더뿐이다 — 루트 build 가 backend/ 도 빌드하면 runs 에 backend 가 들어가
+    #: 서버 코드까지 빠져 "화면을 제공하지 않습니다" 로 잘못 봤다(실기기 2.0.11: app.ts 가 frontend/dist 를 제공하는데도).
+    ui_runs = [d for d in runs if _vite_out_dir(files, d) or _frontend_out_dir(files, d)]
     server_texts = [files.read(rel) or "" for rel in files.files()
-                    if rel.endswith(_JS_SUFFIXES) and not any(rel.startswith(d + "/") for d in runs)
+                    if rel.endswith(_JS_SUFFIXES) and not any(rel.startswith(d + "/") for d in ui_runs)
                     and "/node_modules/" not in rel]
     try:
         served_now = set(_served_dirs(files, [rel for rel in files.files() if rel.endswith(_JS_SUFFIXES)
-                                             and not any(rel.startswith(d + "/") for d in runs) and "/node_modules/" not in rel]))
+                                             and not any(rel.startswith(d + "/") for d in ui_runs) and "/node_modules/" not in rel]))
     except Exception:  # noqa: BLE001
         served_now = set()
     for folder in runs:
@@ -2505,19 +2539,38 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         if not out or not (routes or result.server_entry):
             continue
         #: path.join(__dirname, 'client', 'dist') 처럼 나눠 적은 경로도 제공하는 것으로 본다(글자 비교만 하면 오탐).
-        if out in served_now or any(out in text for text in server_texts):
+        parts = [re.escape(p) for p in out.split("/") if p]
+        joined = r"""['"`]?\s*(?:/|['"`]\s*,\s*['"`])\s*""".join(parts)
+        if out in served_now or any(out in text or (".static(" in text and re.search(joined, text)) for text in server_texts):
             continue
         #: 글자 "require(" 만 보면 createRequire 를 쓰는 ESM 서버도 CommonJS 로 보고 __dirname 을 넣어 죽인다.
         commonjs = bool(result.server_entry) and _js_syntax(files.read(result.server_entry) or "") == "cjs" \
             and package.get("type") != "module"
+        esm_write: dict[str, str] = {}
+        if not commonjs:
+            for rel in files.files():
+                if not rel.endswith((".ts", ".mts", ".js", ".mjs")) or rel.endswith(".d.ts") or "/node_modules/" in f"/{rel}" \
+                        or re.search(r"(^|/)(dist|build)/", rel) or (folder and rel.startswith(folder + "/")):
+                    continue
+                text = files.read(rel) or ""
+                if not re.search(r"=\s*express\(\s*\)", text) or not re.search(r"(?m)^import\s", text):
+                    continue
+                project_rel = owner(rel)
+                updated = serve_frontend_module(text, project_rel, out)
+                if updated:
+                    esm_write[rel] = updated
+                    break
+        if esm_write:
+            result.fix_data.setdefault("file_writes", {})["NODE_FRONTEND_NOT_SERVED"] = esm_write
         result.issues.append(ReadinessIssue(
             "NODE_FRONTEND_NOT_SERVED", WARNING,
             f"`build` 가 {folder}/ 의 화면을 {out}/ 로 빌드하지만 서버가 그 폴더를 제공하지 않습니다. "
             "컨테이너에서는 API 만 응답하고 브라우저로 열면 화면이 나오지 않습니다(Cannot GET /).",
             (f"서버({result.server_entry})가 {out}/ 를 제공하고 /api 밖의 경로는 index.html 로 보내게 하세요"
              "(자동 수정 가능, 원본은 .recoder/backups 에 보관)." if commonjs else
-             f"서버에서 express.static 으로 {out}/ 를 제공하도록 추가하세요."),
-            result.server_entry or "", commonjs))
+             (f"서버 앱({next(iter(esm_write))})이 {out}/ 를 제공하고 /api 밖의 경로는 index.html 로 보내게 하세요(자동 수정 가능)."
+              if esm_write else f"서버에서 express.static 으로 {out}/ 를 제공하도록 추가하세요.")),
+            result.server_entry or next(iter(esm_write), ""), commonjs or bool(esm_write)))
 
     runtime_names = set(runtime_deps)
     if result.server_entry:
@@ -3613,6 +3666,70 @@ def serve_frontend(text: str, entry_rel: str, out_dir: str) -> str:
     return text[:insert_at] + block + newline + text[insert_at:]
 
 
+def serve_frontend_module(text: str, project_rel: str, out_dir: str) -> Optional[str]:
+    """ESM·TypeScript Express 앱(앱을 만드는 파일)이 빌드한 화면을 제공하게 한 내용. 못 정하면 None.
+
+    실기기(2.0.11 Haiku 쇼핑몰): app.ts 가 앱을 만들고 server.ts 가 listen 하는 TypeScript ESM 서버라 예전 자동 수정
+    (CommonJS·한 파일 전용)이 손대지 못했고, ECS 주소를 열면 "Cannot GET /" 였다. 위치는 컨테이너·로컬 실행 모두에서
+    맞게 실행 폴더 기준 후보 중 index.html 이 있는 곳을 쓴다(Docker 검증본은 WORKDIR=서버 폴더)."""
+    import posixpath
+    if "recoderUiDir" in text:
+        return None  # 이미 넣었다
+    m = re.search(r"\b(?:export\s+)?(?:const|let|var)\s+(\w+)\s*(?::\s*[\w.<>, ]+)?=\s*express\(\s*\)", text)
+    if not m:
+        return None
+    app = m.group(1)
+    express_import = re.search(r"""(?m)^import\s+(\w+)\s*(?:,\s*\{[^}]*\})?\s+from\s+['"]express['"]""", text)
+    if not express_import:
+        return None
+    express_name = express_import.group(1)
+    catch_all = re.compile(
+        rf"^([ \t]*){re.escape(app)}\.(?:use|all|get)\s*\(\s*(?:"
+        r"(?:async\s*)?\(\s*(?:err|error|_err|req|_req|request)\b[^)]*\)\s*(?::\s*\w+\s*)?=>|"
+        r"(?:async\s+)?function\s*\(\s*(?:err|error|req|request)\b|"
+        r"['\"](?:\*|/\*|/\(\.\*\)|/:[\w]+\(\*\))['\"]|/\^?\.\*/|"
+        r"[\w$]*(?:[Nn]ot[Ff]ound|404|[Ee]rror)[\w$]*\s*\)"
+        r")", re.MULTILINE)
+    routes = [r for r in re.finditer(
+        rf"\b{re.escape(app)}\.(?:get|post|put|patch|delete|use)\s*\(\s*(?:['\"`]/(?![*(])|([A-Za-z_$][\w$]*)\s*[,)])", text)
+        if not (r.group(1) and re.search(r"[Nn]ot[Ff]ound|404|[Ee]rror", r.group(1)))]
+    after = routes[-1].end() if routes else m.end()
+    first = next((c for c in catch_all.finditer(text) if c.start() > after), None)
+    if first:
+        insert_at, indent = first.start(), first.group(1)
+    else:
+        tail = re.search(rf"(?m)^([ \t]*)(?:export\s+default\s+{re.escape(app)}\b|{re.escape(app)}\.listen\s*\()", text)
+        if not tail:
+            return None
+        insert_at, indent = tail.start(), tail.group(1)
+    while insert_at > 0:
+        prev = text.rfind("\n", 0, insert_at - 1) + 1
+        if text[prev:insert_at].strip().startswith("//"):
+            insert_at = prev
+        else:
+            break
+    from_project = posixpath.relpath(out_dir, project_rel or ".")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    head = []
+    if not re.search(r"""(?m)^import\s+(?:\*\s+as\s+)?recoderPath\b""", text):
+        head.append("import recoderPath from 'path';")
+        head.append("import recoderFs from 'fs';")
+    block = newline.join([
+        f"{indent}// ReCoder: 빌드한 화면({out_dir})을 같은 서버에서 제공한다. API 라우트는 위에서 먼저 처리된다.",
+        f"{indent}const recoderUiDir = [recoderPath.resolve(process.cwd(), '{from_project}'), recoderPath.resolve(process.cwd(), '{out_dir}')]",
+        f"{indent}  .find((dir) => recoderFs.existsSync(recoderPath.join(dir, 'index.html'))) ?? recoderPath.resolve(process.cwd(), '{from_project}');",
+        f"{indent}{app}.use({express_name}.static(recoderUiDir));",
+        f"{indent}{app}.get(/^\\/(?!api(?:\\/|$)|health(?:\\/|$)).*/, (_req, res, next) => res.sendFile(recoderPath.join(recoderUiDir, 'index.html'), (err) => {{ if (err) next(); }}));",
+        "",
+    ])
+    out = text[:insert_at] + block + newline + text[insert_at:]
+    if head:
+        last_import = list(re.finditer(r"(?m)^import\s[^;]*;?[ \t]*$", out[:insert_at]))
+        at = last_import[-1].end() if last_import else 0
+        out = out[:at] + (newline if at else "") + newline.join(head) + ("" if at else newline) + out[at:]
+    return out
+
+
 def _make_writable(path: Path) -> None:
     """읽기 전용 파일(Windows 읽기 전용 특성·압축 해제본)도 고칠 수 있게 쓰기 권한을 준다."""
     import stat
@@ -3721,8 +3838,10 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
     if issue is None:
         return {"applied": False, "message": "이미 해결된 항목입니다.", "readiness": before.to_dict()}
     changed: list[str] = []
-    if code in FILE_WRITE_FIXES:
-        writes = (before.fix_data.get("file_writes") or {}).get(code) or {}
+    #: 고칠 내용을 미리 만드는 항목 중 일부(화면 제공·없는 버전)는 예전 방식의 고치기도 있다 — 미리 만든 게 없으면 그쪽으로.
+    precomputed = (before.fix_data.get("file_writes") or {}).get(code) or {}
+    if code in FILE_WRITE_FIXES and (precomputed or code not in ("NODE_FRONTEND_NOT_SERVED", "NODE_DEPENDENCY_VERSION_NOT_FOUND")):
+        writes = precomputed
         if not writes:
             raise ValueError("고칠 내용을 확정하지 못했습니다. 안내에 따라 직접 수정하세요.")
         changed += apply_file_plan(root, writes, [])

@@ -130,7 +130,9 @@ def _declared_health_path(workspace: Path, runtime: str, requested: str) -> str 
                     active = "\n".join(line for line in active.splitlines() if not line.lstrip().startswith("//"))
                     # Mounted routers may have a prefix; their local /health
                     # is not proof that the app serves /health at its root.
-                    apps = re.findall(r"\b(?:const|let|var)\s+(\w+)\s*=\s*express\(\s*\)", active)
+                    #: TypeScript 는 `const app: Express = express();` 처럼 타입을 붙인다(실기기 2.0.11: 이 모양을 못 읽어
+                    #: /health 가 있는데도 "헬스 경로를 찾지 못했습니다" 로 ECS 헬스체크를 빼고 배포했다).
+                    apps = re.findall(r"\b(?:export\s+)?(?:const|let|var)\s+(\w+)\s*(?::\s*[\w.<>, ]+)?=\s*express\(\s*\)", active)
                     for app in apps:
                         declared.update(re.findall(rf"\b{re.escape(app)}\.get\s*\(\s*['\"]([^'\"]+)['\"]", active))
                     relative = source.relative_to(workspace).as_posix()

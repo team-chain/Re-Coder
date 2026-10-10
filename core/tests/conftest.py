@@ -105,6 +105,8 @@ def _isolate_generation_checkpoints(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("RECODER_GENERATION_DIR", str(tmp_path_factory.mktemp("generation-jobs")))
     #: 배포 설정값(자동 생성 키·입력 키)도 개발자 홈에 쓰지 않는다.
     monkeypatch.setenv("RECODER_DEPLOY_SETTINGS_DIR", str(tmp_path_factory.mktemp("deploy-settings")))
+    #: ECS 배포용으로 만든 서명 키·DB 비밀번호도 마찬가지.
+    monkeypatch.setenv("RECODER_ECS_RUNTIME_DIR", str(tmp_path_factory.mktemp("ecs-runtime")))
     #: 테스트는 가짜 라우터를 쓰므로 호출 속도 제한·재시도 대기를 끈다.
     monkeypatch.setenv("RECODER_LLM_RPM", "0")
 

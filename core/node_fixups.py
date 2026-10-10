@@ -1231,31 +1231,53 @@ _HAS_EXT = re.compile(r"\.(m?js|cjs|jsx|json|css|scss|svg|png|jpe?g|gif|webp|was
 
 
 def esm_import_extensions(files) -> tuple[list[str], dict[str, str]]:
-    """([고친 것], {파일: 내용}) — package.json 이 "type": "module" 이고 tsconfig 가 module/moduleResolution
-    NodeNext·Node16 인 TypeScript 서버에서 `import { x } from '../db/client'` 처럼 확장자가 없으면 tsc 가
-    TS2834/TS2835 로 멈추고, 빌드가 되더라도 Node 가 ERR_MODULE_NOT_FOUND 로 시작하지 못한다.
-    원본이 x.ts 면 './x.js', 폴더(x/index.ts)면 './x/index.js' 로 적는다(컴파일된 결과가 실제로 그 이름이다).
-    실기기(2.0.9 쇼핑몰 Haiku): 서버 빌드 오류의 절반이 이것이었다."""
+    """([고친 것], {파일: 내용}) — Node 가 ESM 으로 실행하는 서버("type": "module")에서 `import app from './app'`
+    처럼 확장자가 없으면 Node 가 ERR_MODULE_NOT_FOUND 로 시작하지 못한다(번들러가 없는 서버는 확장자가 필요).
+    tsc 는 moduleResolution 이 node 면 통과시키므로 빌드 검증으로는 드러나지 않는다(실기기 2.0.11: 빌드 통과, 실행 즉시 실패).
+    원본이 x.ts/x.js 면 './x.js', 폴더(x/index.ts)면 './x/index.js'. tsconfig 가 CommonJS 로 내보내면(require 가 돼
+    ESM 에서 죽는다) module·moduleResolution 을 NodeNext 로 바꾼다. Vite·Next 같은 번들러 폴더는 건드리지 않는다."""
     notes: list[str] = []
     writes: dict[str, str] = {}
     all_files = list(files.files())
-    for cfg_path in all_files:
-        if posixpath.basename(cfg_path) != "tsconfig.json" or "/node_modules/" in f"/{cfg_path}":
+    for pkg_path in all_files:
+        if posixpath.basename(pkg_path) != "package.json" or "/node_modules/" in f"/{pkg_path}":
             continue
-        folder = posixpath.dirname(cfg_path)
-        cfg = load_jsonc(files.read(cfg_path)) or {}
-        opts = cfg.get("compilerOptions") if isinstance(cfg.get("compilerOptions"), dict) else {}
-        mode = {str(opts.get("module") or "").lower(), str(opts.get("moduleResolution") or "").lower()}
-        if not mode & {"nodenext", "node16"}:
-            continue
-        pkg = load_jsonc(files.read(posixpath.join(folder, "package.json") if folder else "package.json")) or {}
+        folder = posixpath.dirname(pkg_path)
+        pkg = load_jsonc(files.read(pkg_path)) or {}
         if pkg.get("type") != "module":
             continue
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})} if isinstance(pkg.get("dependencies") or {}, dict) else {}
+        build = str((pkg.get("scripts") or {}).get("build") or "") if isinstance(pkg.get("scripts"), dict) else ""
+        if any(b in deps for b in ("vite", "react-scripts", "next", "webpack", "parcel", "@sveltejs/kit", "nuxt")) \
+                or re.search(r"\b(vite|next|webpack|parcel|react-scripts)\b", build):
+            continue  # 번들러가 확장자를 처리한다
+        if not folder and any(posixpath.basename(p) == "package.json" and "/" in p and "/node_modules/" not in f"/{p}" for p in all_files) \
+                and not any(p.endswith((".ts", ".js", ".mjs")) and "/" not in p for p in all_files):
+            continue  # 루트는 하위 폴더만 묶는다
         prefix = f"{folder}/" if folder else ""
+        cfg_path = f"{prefix}tsconfig.json"
+        cfg_text = files.read(cfg_path)
+        cfg = load_jsonc(cfg_text) if cfg_text else None
+        if cfg is not None:
+            opts = cfg.get("compilerOptions") if isinstance(cfg.get("compilerOptions"), dict) else {}
+            if str(opts.get("module") or "commonjs").lower() in ("commonjs", "umd", "amd", "system", "none"):
+                opts = dict(opts, module="NodeNext", moduleResolution="NodeNext")
+                cfg = dict(cfg, compilerOptions=opts)
+                writes[cfg_path] = _dump_like(cfg_text, cfg)
+                notes.append(f"{cfg_path}: \"type\": \"module\" 서버가 CommonJS 로 컴파일되던 것을 NodeNext(ESM)로")
+            elif str(opts.get("moduleResolution") or "").lower() in ("bundler",):
+                opts = dict(opts, module="NodeNext", moduleResolution="NodeNext")
+                cfg = dict(cfg, compilerOptions=opts)
+                writes[cfg_path] = _dump_like(cfg_text, cfg)
+                notes.append(f"{cfg_path}: 번들러가 없는 서버의 moduleResolution 을 NodeNext 로")
+        exts = (".ts", ".mts") if cfg is not None else (".js", ".mjs")
         for rel in all_files:
-            if not rel.startswith(prefix) or not rel.endswith((".ts", ".tsx", ".mts")) or rel.endswith(".d.ts") \
-                    or "/node_modules/" in f"/{rel}" or "/dist/" in f"/{rel}":
+            if not rel.startswith(prefix) or not rel.endswith(exts) or rel.endswith(".d.ts") \
+                    or "/node_modules/" in f"/{rel}" or re.search(r"(^|/)(dist|build|public)/", rel[len(prefix):]):
                 continue
+            if any(posixpath.basename(p) == "package.json" and p != pkg_path and rel.startswith(posixpath.dirname(p) + "/")
+                   and len(posixpath.dirname(p)) > len(folder) for p in all_files):
+                continue  # 더 안쪽 package.json 이 맡는다
             text = files.read(rel) or ""
             here = posixpath.dirname(rel)
 
@@ -1264,11 +1286,11 @@ def esm_import_extensions(files) -> tuple[list[str], dict[str, str]]:
                 if _HAS_EXT.search(spec.split("?")[0]):
                     return m.group(0)
                 base = posixpath.normpath(posixpath.join(here, spec))
-                if any(files.exists(base + e) for e in (".ts", ".tsx")):
+                if any(files.exists(base + e) for e in (".ts", ".tsx", ".js")):
                     new = spec + ".js"
-                elif files.exists(base + ".mts"):
+                elif files.exists(base + ".mts") or files.exists(base + ".mjs"):
                     new = spec + ".mjs"
-                elif any(files.exists(f"{base}/index{e}") for e in (".ts", ".tsx")):
+                elif any(files.exists(f"{base}/index{e}") for e in (".ts", ".tsx", ".js")):
                     new = spec.rstrip("/") + "/index.js"
                 else:
                     return m.group(0)  # 없는 파일 — 다른 점검(NODE_LOCAL_IMPORT_MISSING)이 다룬다
@@ -1277,7 +1299,7 @@ def esm_import_extensions(files) -> tuple[list[str], dict[str, str]]:
             new_text = _REL_SPEC.sub(fix, text)
             if new_text != text:
                 writes[rel] = new_text
-                notes.append(f"{rel}: 상대 import 에 .js 확장자(ESM NodeNext)")
+                notes.append(f"{rel}: 상대 import 에 .js 확장자(Node ESM)")
     return notes, writes
 
 
@@ -1419,3 +1441,188 @@ def prisma_relation_renames(log: str, contents: Mapping[str, str]) -> tuple[list
         new = new[:block.start(1)] + body + new[block.end(1):]
         notes.append(f"{schema}: {model}.{old} → {key}(코드가 쓰는 관계 이름)")
     return notes, ({schema: new} if new != text else {})
+
+
+# ── 24) ESM 서버에서 CommonJS 전역(require·__dirname) ───────────────────────────────
+
+_REQUIRE_LINE = re.compile(r"""(?m)^([ \t]*)(?:const|let|var)\s+(\w+|\{[^}]*\})\s*(?::\s*[\w.<>]+\s*)?=\s*require\(\s*['"]([^'"]+)['"]\s*\)\s*;?[ \t]*\n""")
+
+
+def _module_mode(files, rel: str) -> str:
+    """이 파일이 Node 에서 ESM 으로 실행되는가 — 가장 가까운 package.json 의 type, .mjs/.mts."""
+    if rel.endswith((".mjs", ".mts")):
+        return "esm"
+    if rel.endswith((".cjs", ".cts")):
+        return "cjs"
+    folder = posixpath.dirname(rel)
+    while True:
+        pkg = load_jsonc(files.read(posixpath.join(folder, "package.json") if folder else "package.json"))
+        if pkg is not None:
+            return "esm" if pkg.get("type") == "module" else "cjs"
+        if not folder:
+            return "cjs"
+        folder = posixpath.dirname(folder)
+
+
+def esm_commonjs_globals(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — "type": "module" 서버에서 `require(…)`·`__dirname` 을 쓰면 tsc 는 통과해도
+    Node 가 시작하자마자 ReferenceError(require is not defined in ES module scope)로 죽는다.
+    실기기(2.0.11 Haiku 쇼핑몰): 운영 모드에서만 도는 화면 제공 코드가 `const path = require('path')`·`__dirname` 을 써서
+    빌드 검증은 통과했지만 컨테이너가 뜨자마자 죽을 상태였다.
+    · `const x = require('m')` / `const { a } = require('m')` → 맨 위 `import x from 'm'` / `import { a } from 'm'`
+      (이미 같은 이름을 불러왔으면 그 줄만 지운다)
+    · `__dirname`·`__filename` → `fileURLToPath(import.meta.url)` 로 만든 같은 이름의 값을 맨 위에 둔다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".ts", ".mts", ".js", ".mjs")) or rel.endswith(".d.ts") or "/node_modules/" in f"/{rel}" \
+                or re.search(r"(^|/)(dist|build|public)/", rel):
+            continue
+        text = files.read(rel) or ""
+        if "require(" not in text and "__dirname" not in text and "__filename" not in text:
+            continue
+        if _module_mode(files, rel) != "esm" or not re.search(r"(?m)^\s*(import|export)\s", text):
+            continue
+        if re.search(r"\bcreateRequire\s*\(", text):
+            continue  # 이미 ESM 방식으로 require 를 만들어 쓴다
+        new = text
+        imports: list[str] = []
+        for m in list(_REQUIRE_LINE.finditer(text)):
+            binding, spec = m.group(2).strip(), m.group(3)
+            if binding.startswith("{"):
+                names = [n.strip().replace(":", " as ") for n in binding[1:-1].split(",") if n.strip()]
+                stmt = f"import {{ {', '.join(names)} }} from '{spec}';"
+                bound = [n.split(" as ")[-1].strip() for n in names]
+            else:
+                stmt = f"import {binding} from '{spec}';"
+                bound = [binding]
+            already = all(re.search(rf"(?m)^import\s[^;]*\b{re.escape(b)}\b[^;]*from", new) for b in bound)
+            new = new.replace(m.group(0), "", 1)
+            if not already:
+                imports.append(stmt)
+        uses_dir = re.search(r"(?<![\w.$])__dirname\b", new) and not re.search(r"\b(?:const|let|var)\s+__dirname\b", new)
+        uses_file = re.search(r"(?<![\w.$])__filename\b", new) and not re.search(r"\b(?:const|let|var)\s+__filename\b", new)
+        if uses_dir or uses_file:
+            imports.append("import { fileURLToPath as recoderFileURLToPath } from 'url';")
+            if uses_dir:
+                imports.append("import { dirname as recoderDirname } from 'path';")
+        if new == text and not imports:
+            continue
+        if "require(" in new and re.search(r"(?<![\w.$])require\s*\(", new):
+            continue  # 줄 단위로 옮길 수 없는 require(식 안 등)가 남는다 — 사람이 보게 둔다
+        lines = []
+        if imports:
+            lines += imports
+        if uses_file or uses_dir:
+            lines.append("const __filename = recoderFileURLToPath(import.meta.url);")
+        if uses_dir:
+            lines.append("const __dirname = recoderDirname(__filename);")
+        newline = "\r\n" if "\r\n" in new else "\n"
+        last_import = list(re.finditer(r"(?m)^import\s[^;]*;[ \t]*$", new))
+        at = last_import[-1].end() if last_import else 0
+        block = newline.join(lines)
+        new = new[:at] + (newline if at else "") + block + ("" if at else newline) + new[at:]
+        writes[rel] = new
+        notes.append(f"{rel}: ESM 에서 쓸 수 없는 require/__dirname 을 import·import.meta.url 로")
+    return notes, writes
+
+
+_PROD_GATE = re.compile(
+    r"""if\s*\(\s*process\.env\.NODE_ENV\s*===?\s*(['"])production\1\s*\)\s*\{""")
+
+
+def _block_end(text: str, open_at: int) -> int:
+    """`{` 위치에서 짝이 맞는 `}` 의 위치(문자열·주석 안 괄호는 대략 건너뛴다). 못 찾으면 -1."""
+    depth, i, quote = 0, open_at, ""
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif text.startswith("//", i):
+            nl = text.find("\n", i)
+            i = len(text) if nl < 0 else nl
+            continue
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def frontend_production_gate(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 화면(express.static·index.html)을 `NODE_ENV === 'production'` 일 때만 제공하는 서버.
+
+    결제를 끈 데모(로컬 Docker·ECS staging)는 결제 계약상 NODE_ENV=test 로 뜬다 — 그러면 서버가 화면을 제공하지 않아
+    주소를 열면 Cannot GET / 이 된다(실기기 2.0.11 쇼핑몰 0ce6). 조건을 `!== 'development'` 로 바꾸면 개발 서버(vite)를 쓰는
+    개발 모드만 빠지고, 운영·데모 컨테이너는 같은 화면을 제공한다. API·인증 동작은 바뀌지 않는다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".ts", ".mts", ".js", ".mjs", ".cjs")) or rel.endswith(".d.ts") \
+                or "/node_modules/" in f"/{rel}" or re.search(r"(^|/)(dist|build|public)/", rel):
+            continue
+        text = files.read(rel) or ""
+        if "NODE_ENV" not in text or ".static(" not in text:
+            continue
+        new, changed, pos = text, False, 0
+        while True:
+            m = _PROD_GATE.search(new, pos)
+            if not m:
+                break
+            end = _block_end(new, m.end() - 1)
+            body = new[m.end():end] if end > 0 else ""
+            if end > 0 and re.search(r"\.static\s*\(", body) and re.search(r"index\.html|sendFile", body):
+                cond = f"if (process.env.NODE_ENV !== {m.group(1)}development{m.group(1)}) {{"
+                new = new[:m.start()] + cond + new[m.end():]
+                pos = m.start() + len(cond)
+                changed = True
+            else:
+                pos = m.end()
+        if changed:
+            writes[rel] = new
+            notes.append(f"{rel}: 화면 제공 조건을 운영 전용에서 개발 모드 제외로")
+    return notes, writes
+
+
+_OPERAND = r"[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*"
+_CURRENCY_CMP = re.compile(
+    rf"(?<![\w$.)\]])({_OPERAND})\s*(!==|===|!=|==)\s*({_OPERAND})(?![\w$(\[.])")
+
+
+def currency_case_compare(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 주문 통화('KRW')와 결제 이벤트 통화를 글자 그대로 비교하는 서버.
+
+    Stripe(와 ReCoder 결제 모듈)는 통화를 소문자('krw')로 돌려준다. 주문을 'KRW' 로 저장한 앱은 결제가 끝나도
+    "Payment currency does not match" 로 주문이 영영 결제 대기에 남는다(실기기 2.0.11 쇼핑몰 0ce6, 모의 결제 웹훅까지 확인).
+    통화 코드(ISO 4217)는 대소문자 구분이 없으므로 두 쪽을 소문자로 맞춰 비교한다. 다른 비교는 건드리지 않는다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".ts", ".mts", ".js", ".mjs", ".cjs")) or rel.endswith(".d.ts") \
+                or "/node_modules/" in f"/{rel}" or re.search(r"(^|/)(dist|build|public)/", rel):
+            continue
+        text = files.read(rel) or ""
+        if "currency" not in text.lower():
+            continue
+
+        def fix(m: re.Match) -> str:
+            left, op, right = m.group(1), m.group(2), m.group(3)
+            last = lambda e: e.split(".")[-1].lower()
+            if "currency" not in last(left) or "currency" not in last(right):
+                return m.group(0)
+            return f"String({left}).toLowerCase() {op} String({right}).toLowerCase()"
+
+        new = _CURRENCY_CMP.sub(fix, text)
+        if new != text:
+            writes[rel] = new
+            notes.append(f"{rel}: 통화 비교를 대소문자 무시로")
+    return notes, writes

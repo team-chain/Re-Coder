@@ -21,7 +21,14 @@ def load_index():
     config = settings()
     corpus = os.getenv('RECODER_REPAIR_CORPUS', config.get('corpus', ''))
     model = os.getenv('RECODER_REPAIR_EMBEDDING_MODEL', config.get('embedding_model', ''))
-    p = Path(corpus) if corpus else Path(__file__).with_name('sources.json')
+    if corpus:
+        p = Path(corpus)
+    else:
+        try:
+            from resources import resource
+        except ImportError:  # pragma: no cover
+            from core.resources import resource
+        p = resource('grounded_repair', 'sources.json')
     return _index(str(p), (p.stat().st_mtime_ns, p.stat().st_size), model)
 
 

@@ -348,7 +348,7 @@ def contract(path: str) -> str:
   를 부르고, 결과의 clientSecret·testMode 와 주문 id 를 응답으로 돌려주세요. amount 는 통화 최소 단위 정수(원화는 원).
 - 결제 완료: 서버 진입 파일에서 **express.json() 보다 먼저** `app.use(STRIPE_WEBHOOK_PATH, createStripeWebhookRouter({{ onPaymentSucceeded, onPaymentFailed }}))`.
   onPaymentSucceeded({{ eventId, orderId, paymentIntentId, amount, currency }}) 에서 같은 eventId 는 한 번만 반영(DB 에 처리한 이벤트 id 저장)하고,
-  금액이 주문 합계와 같을 때 주문을 'paid' 로 바꾸세요. 결제 완료는 이 웹훅으로만 바꿉니다(화면·다른 API 가 직접 paid 로 바꾸지 않음).
+  금액이 주문 합계와 같을 때 주문을 'paid' 로 바꾸세요. currency 는 Stripe 처럼 소문자('krw')로 옵니다 — 통화 비교는 대소문자를 무시하세요. 결제 완료는 이 웹훅으로만 바꿉니다(화면·다른 API 가 직접 paid 로 바꾸지 않음).
 - 상태 확인 응답(/health 또는 /api/health)에 test_payment_mode: isTestPaymentMode() 를 넣으세요. 화면은 test_payment_mode 이면 카드 입력 대신
   '테스트 결제 진행 중' 을 보여 주고 주문 상태가 paid 가 될 때까지 몇 초 간격으로 확인합니다(무한 반복 금지 — 최대 30번).
 - 모의 결제 서버·결제 페이지(mock-payment-server 등)를 만들지 마세요 — 로컬 배포가 모의 결제 서버를 함께 띄웁니다.

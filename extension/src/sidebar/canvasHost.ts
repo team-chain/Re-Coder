@@ -92,6 +92,12 @@ export function publicGit(git: Awaited<ReturnType<typeof gitContext>>) {
     return state;
 }
 
+/** ECS 사전 검사에 보낼 앱 실행 설정 이름(값은 보내지 않는다). */
+export function runtimeNames(config: CanvasConfig): { envNames: string[]; environment: string } | undefined {
+    if (config.target !== 'ecs') return undefined;
+    return { envNames: [...Object.keys(config.env_vars || {}), ...Object.keys(config.secret_refs || {})], environment: config.environment };
+}
+
 /** ECS 이미지 이름 → ECR 저장소 이름(소문자). */
 export function ecrRepoName(imageName: string): string { return imageName.trim().toLowerCase(); }
 
@@ -243,7 +249,7 @@ export class CanvasHost {
                 }
                 const staticSite = config.target === 's3' ? staticPreview(workspace,config.dir) : undefined;
                 if (staticSite) config.dir = staticSite.dir;
-                const [git,aws,preflight] = await Promise.all([this.readGit(workspace), config.target === 'github' ? Promise.resolve({ready:false,region:'',identity:{account:''}}) : this.api.getAwsStatus(), config.target === 'github' ? Promise.resolve({blocked:false,summary:'승인한 커밋을 푸시하기 전에 시크릿을 검사합니다.',reasons:[],warnings:[]}) : this.api.getDeployPreflight(workspace, config.target)]);
+                const [git,aws,preflight] = await Promise.all([this.readGit(workspace), config.target === 'github' ? Promise.resolve({ready:false,region:'',identity:{account:''}}) : this.api.getAwsStatus(), config.target === 'github' ? Promise.resolve({blocked:false,summary:'승인한 커밋을 푸시하기 전에 시크릿을 검사합니다.',reasons:[],warnings:[]}) : this.api.getDeployPreflight(workspace, config.target, runtimeNames(config))]);
                 if (generation !== this.prepareGeneration) return;
                 if (config.target !== 'github' && !aws.ready) throw new Error('AWS 계정을 먼저 연결하세요.');
                 if (config.target === 'github' && (!git.connected || !git.branch)) throw new Error('GitHub 원격 저장소와 브랜치를 연결하세요.');
@@ -273,7 +279,7 @@ export class CanvasHost {
                         if(!aws.ready || (aws.identity?.account || '')!==plan.account) throw new Error('AWS 연결 계정이 바뀌었습니다. 다시 확인하세요.');
                     }
                     if(c.target!=='github') {
-                        const preflight=await this.api.getDeployPreflight(workspace, c.target);
+                        const preflight=await this.api.getDeployPreflight(workspace, c.target, runtimeNames(c));
                         if(preflight.blocked) { send('canvas.blocked',{requestId,preflight}); return; }
                     }
                     if(c.target==='ecs') {

@@ -1,3 +1,15 @@
+# ECS 배포 — 실행 파일 템플릿 경로 · 앱 실행 설정(DB·서명 키·모의 결제) · 실제 결과물 실행 오류 (2026-10-11, 2.0.12)
+
+- 실기기 2.0.11 ECS(배포 3970e520): 1~7단계(점검·인프라·검사·빌드·ECR·취약점·SBOM) 통과 뒤 8단계 태스크 정의에서 FileNotFoundError `_MEI…\core\registry\file_templates\ecs-task-definition.json.template`. spec 은 데이터를 `registry/…`(번들 맨 위)에 넣는데, 배포 라우트가 `core.agents.ecs_agent` 로 불러 `Path(__file__).parent.parent` 가 `_MEI…/core` 를 가리킴. 소스 실행·self-check(agents.ecs_agent 로만 import)에서는 드러나지 않았다.
+- `core/resources.py resource()` — core 기준 경로 → `_MEIPASS` → `_MEIPASS/core` 순으로 찾음. ecs_agent·commerce_starter·registry·grounded_repair 에 적용. release_check: 두 import 이름 모두로 템플릿·commerce·registry·지식 문서 확인.
+- ecs_health: `const app: Express = express()` 인식(TEMP app.ts 의 GET /health 를 못 찾아 헬스체크 없이 배포).
+- ECS 앱 실행 설정(`core/agents/ecs_runtime.py`): `plan()` = required_env + readiness.services + demo_supported → staging 은 같은 태스크 안 보조 컨테이너(postgres `public.ecr.aws/docker/library/postgres:16-alpine`, `sh -c` 로 RECODER_INIT_SQL_B64 → initdb.d 스크립트(한 트랜잭션, 실패해도 DB 는 뜸), listen 127.0.0.1 · 모의 결제 = 앱 이미지 `node -e MOCK_PAYMENT_JS`(127.0.0.1) · 시드 스크립트(local_services.seed_command 있을 때, essential false)), 앱 dependsOn HEALTHY/START, 메모리 최소 1024(mongo 2048), 서명 키·DB 비밀번호는 `~/.recoder/ecs_runtime/<region-cluster-service>.json`(0600, RECODER_ECS_RUNTIME_DIR). production 은 missing → `InfraError`(파이프라인 0-1단계, `_clients` 전). `apply()` 가 렌더링 결과에 합침(사용자 env·secrets 우선, 로그 설정 복사). 값은 `ECSAgent._runtime[id(req)]` 메모리에만.
+- `/api/deploy/preflight` 에 `env_names`·`environment`(ecs) → `ecs_runtime` 요약, ECS_APP_SETTING_MISSING(막음)·ECS_APP_RUNTIME(참고). 확장 `runtimeNames(config)` 가 이름만 보냄(prepare·execute 둘 다).
+- 실제 TEMP 결과물(job 0ce6, 사용자가 로컬 배포한 그 폴더)을 sandbox 에서 실행해 찾은 결함: ESM 확장자(moduleResolution node), ESM require/__dirname(NODE_ESM_COMMONJS_GLOBAL), 화면 제공 오탐(ui_runs)·ESM 제공(serve_frontend_module, 멱등), NODE_FRONTEND_PRODUCTION_ONLY(모의 결제 앱만), NODE_CURRENCY_CASE_COMPARE.
+- 검증(sandbox, Docker 레지스트리 차단이라 컨테이너 대신 같은 구성을 프로세스로): 렌더링한 태스크 정의를 botocore RegisterTaskDefinition 스키마로 검증 → postgres 보조 컨테이너의 부팅 스크립트를 그대로 실행(base64 → initdb 스크립트 → psql 한 트랜잭션, 7개 테이블) → 모의 결제 서버·앱을 태스크 정의의 환경변수 그대로 실행: `/`·`/cart`(화면), `/health`, 가입·로그인·장바구니·주문 → 모의 결제 웹훅 → 주문 paid.
+- 남은 것: 데모 상품 시드 — 이 결과물은 SEED_DEMO 시드를 서버 시작이 아닌 `backend/scripts/init-db.ts`(빌드 밖, package.json 경로도 틀림)에 둬서 로컬·ECS 모두 상품이 비어 있음. Prisma 앱의 ECS 테이블 생성(migrate) 미확인. 실제 AWS 에서 보조 컨테이너 기동은 사용자 PC 에서 확인 필요.
+- 검증: 실행 파일을 wine 에서 --self-check ok(2.0.12, ecs_runtime 포함 — 두 import 이름 확인은 하위 모듈이 빠지면 실패하도록 엄격하게), Core 2,605 · 확장 556(실패 1건은 sandbox git 의 ssh→https 재작성 탓, 변경 전에도 동일).
+
 # 실제 Haiku 결과로 검증 — 빈 파일 멈춤·두 겹 중괄호·Prisma 어긋남 (2026-10-11, 2.0.11)
 
 - 실기기 2.0.10 쇼핑몰(job 0d40eae842e74e6d, Haiku, 빈 TEMP): 설계 46개 + ReCoder 결정적 7 + 검토 9 = 62개(서버 진입점·라우트·서비스·미들웨어 모두 생김, 없는 import 0). `prisma/migrations/.gitkeep` 를 AI 가 빈 내용(25자 중 0자)으로 줬는데 implausible "내용이 비어 있음" 으로 3회 거절 → 멈춤, [이어서] 도 같은 방법 1회라 다시 멈춤.

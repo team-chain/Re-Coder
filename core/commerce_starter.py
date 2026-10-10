@@ -7,7 +7,11 @@ from pathlib import Path
 
 STARTER_ID = "commerce-foundation"
 VERSION = "commerce-v1"
-ROOT = Path(__file__).parent / "starter_templates" / "commerce"
+try:
+    from resources import resource as _resource
+except ImportError:  # pragma: no cover
+    from core.resources import resource as _resource
+ROOT = _resource("starter_templates", "commerce")
 
 
 def matches(instruction: str) -> bool:

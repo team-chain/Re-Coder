@@ -20,6 +20,10 @@ RUNTIME_IMPORTS = (
     'node_manifests', 'node_fixups', 'payment_kit', 'payment_contract', 'unused_files',
     #: 2.0.7 — ReCoder 검증 Dockerfile(화면·서버 폴더형 Node 앱)
     'docker_kit',
+    #: 2.0.12 — 번들 데이터 위치(core.* 이름으로 불려도 찾음)
+    'resources',
+    #: 2.0.12 — ECS 에서 앱이 시작하도록 DB·서명 키·모의 결제를 같은 태스크에 준비
+    'agents.ecs_runtime',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
@@ -50,6 +54,31 @@ def run(app) -> int:
         assert {'Dockerfile', 'backend/src/server.js', 'frontend/src/pages/Checkout.jsx',
                 'backend/package-lock.json', 'frontend/package-lock.json', 'backend/src/order_expiry.js'} <= starter, 'commerce foundation data missing'
         checks.append('reviewed commerce foundation')
+        #: 같은 모듈이 core.* 이름으로도 불린다(배포 라우트) — 그때도 번들의 데이터 파일을 찾아야 한다.
+        #: 실기기 2.0.11: core.agents.ecs_agent 가 _MEI…/core/registry/… 를 찾아 ECS 태스크 정의 단계에서 실패했다.
+        def _both(name: str):
+            """번들에 있는 이름으로만 — core.* 로 쓰이지 않는 모듈은 번들에 그 이름이 없다(그건 정상)."""
+            for candidate in (name, 'core.' + name):
+                try:
+                    yield candidate, importlib.import_module(candidate)
+                except ModuleNotFoundError as exc:
+                    #: 그 모듈(이나 상위 패키지) 자체가 core.* 로 없을 때만 건너뛴다 — 그 안에서 부르는 다른 모듈이 없으면 실패다.
+                    missing = str(exc.name or '')
+                    if candidate == name or not (candidate == missing or candidate.startswith(missing + '.')) \
+                            or missing == 'core':
+                        raise
+        for name, module in _both('agents.ecs_agent'):
+            assert module._TEMPLATE_PATH.is_file(), f'{name}: ECS task definition template missing'
+        for name, module in _both('agents.ecs_runtime'):
+            assert 'listen' in module.deploy_settings.MOCK_PAYMENT_JS and module.plan(None, key='k', environment='staging',
+                   provided=(), container_port=3000).summary()['sidecars'] == [], f'{name}: ECS runtime plan broken'
+        for name, module in _both('commerce_starter'):
+            assert (module.ROOT / 'backend').is_dir(), f'{name}: commerce foundation missing'
+        for name, module in _both('registry'):
+            assert module.FileTemplateRegistry()._templates, f'{name}: file templates missing'
+        for name, module in _both('grounded_repair.knowledge'):
+            assert module._sources_json().is_file(), f'{name}: knowledge sources missing'
+        checks.append('bundled data from both import names')
         from botocore.session import Session
         session = Session()
         available = set(session.get_available_services())

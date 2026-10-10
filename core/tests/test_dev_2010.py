@@ -354,3 +354,32 @@ def test_prisma_relation_rename_from_build_log():
     assert notes == ["backend/prisma/schema.prisma: Order.items → order_items(코드가 쓰는 관계 이름)"]
     contents["backend/src/services/p.ts"] = "await prisma.order.findMany({ include: { items: true } });\n"
     assert nf.prisma_relation_renames(log, contents) == ([], {})  # 옛 이름도 쓰면 손대지 않는다
+
+
+# ── 2.0.12 실행 파일에서 데이터 위치 · ECS 헬스 경로 ────────────────────────────────
+
+def test_resource_finds_bundle_data_when_loaded_as_core_package(tmp_path, monkeypatch):
+    """실기기 2.0.11: core.agents.ecs_agent 가 _MEI…/core/registry/… 를 찾아 ECS 태스크 정의 단계에서 실패했다."""
+    import sys as _sys
+    import resources
+    bundle = tmp_path / "_MEI1234"
+    (bundle / "registry" / "file_templates").mkdir(parents=True)
+    (bundle / "registry" / "file_templates" / "x.template").write_text("{}")
+    monkeypatch.setattr(resources, "_CORE_DIR", bundle / "core")  # 모듈이 core/ 아래에 있다고 보는 경우
+    monkeypatch.setattr(_sys, "_MEIPASS", str(bundle), raising=False)
+    assert resources.resource("registry", "file_templates", "x.template") == bundle / "registry" / "file_templates" / "x.template"
+
+
+def test_both_import_names_resolve_the_task_definition_template():
+    import importlib
+    for name in ("agents.ecs_agent", "core.agents.ecs_agent"):
+        assert importlib.import_module(name)._TEMPLATE_PATH.is_file()
+
+
+def test_typed_express_app_health_route_is_found(tmp_path):
+    from core.agents.ecs_health import _declared_health_path
+    (tmp_path / "backend/src").mkdir(parents=True)
+    (tmp_path / "backend/src/app.ts").write_text(
+        "import express, { Express, Request, Response } from 'express';\nconst app: Express = express();\n"
+        "app.get('/health', (req: Request, res: Response) => { res.json({ status: 'ok' }); });\nexport default app;\n")
+    assert _declared_health_path(tmp_path, "node", "/health") == "/health"
