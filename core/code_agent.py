@@ -1745,7 +1745,8 @@ def _relative_to_target(ops: list[dict], target_folder: str) -> list[dict]:
     return ops
 
 
-def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool = True) -> tuple[list[dict], list[str]]:
+def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool = True,
+                 new_app: bool = False) -> tuple[list[dict], list[str]]:
     """AI 를 다시 부르지 않고 확실히 고칠 수 있는 것만 ops 에서 고친다.
 
     나눠서 만든 파일끼리 자주 어긋나는 것들(실기기 쇼핑몰): Vite 인데 JSX 가 든 .js,
@@ -1950,7 +1951,9 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
     try:
         import node_fixups
         for rel, op in by_path.items():
-            if posixpath.basename(rel) == "tsconfig.json" and op.get("action") == "create" and not (base / rel).exists():
+            #: 새로 만드는 tsconfig — 사용자가 이미 가진 프로젝트의 tsconfig 는 바꾸지 않는다(새 앱 생성이면 다시 쓴 것도)
+            if re.fullmatch(r"tsconfig(?:\.[\w-]+)?\.json", posixpath.basename(rel)) and op.get("content") and (
+                    new_app or (op.get("action") == "create" and not (base / rel).exists())):
                 relaxed = node_fixups.relax_generated_tsconfig(op.get("content") or "")
                 if relaxed and relaxed != op.get("content"):
                     op["content"] = relaxed
@@ -1980,7 +1983,7 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
             print(f"[code_agent] Dockerfile 자동 교정 생략: {exc}", flush=True)
     if wrote_any and _again:
         #: 새 파일·import 를 넣으면 앞 단계가 고칠 것(내보내기·/api 중복 등)이 새로 보인다 — 한 번 더 돈다.
-        more_ops, more_notes = _autofix_ops(root, target_folder, list(by_path.values()), _again=False)
+        more_ops, more_notes = _autofix_ops(root, target_folder, list(by_path.values()), _again=False, new_app=new_app)
         return more_ops, notes + [n for n in more_notes if n not in notes]
     return list(by_path.values()), notes
 
@@ -2305,7 +2308,8 @@ def _build_failure_issues(verification: dict, ops: list[dict]) -> list[dict]:
         import node_fixups
         docker = next((op.get("content") or "" for op in ops if _norm_op_path(op.get("file", "")) == "dockerfile"), "")
         return node_fixups.build_log_issues(str(verification.get("log") or verification.get("output") or ""),
-                                            [op["file"] for op in ops if op.get("file")], docker)
+                                            [op["file"] for op in ops if op.get("file")], docker,
+                                            {op["file"]: str(op.get("content") or "") for op in ops if op.get("file")})
     except Exception as exc:  # noqa: BLE001
         print(f"[code_agent] 빌드 로그 분석 생략: {exc}", flush=True)
         return []
@@ -2544,7 +2548,7 @@ def generate_code(
         if kit_ops:
             ops_out = [op for op in ops_out if not payment_kit.is_ai_mock(op.get("file", ""))] + kit_ops
             prompt += _extra
-    ops_out, autofix_notes = _autofix_ops(root, target_folder, ops_out)
+    ops_out, autofix_notes = _autofix_ops(root, target_folder, ops_out, new_app=not existing)
     if not existing and not foundation:
         ops_out, kit_docker = _apply_docker_kit(root, target_folder, ops_out)
         if kit_docker:
@@ -2580,6 +2584,8 @@ def generate_code(
     verification = {"kind": "docker-build", "status": "blocked", "passed": False,
                     "output": "Static consistency errors must be repaired before building."}
     visited = set()
+    #: 빌드 오류 수의 흐름 — 고쳐도 줄지 않으면 같은 일을 되풀이하지 않고 멈춘다("계속 고치기만 한다" — 사용자 지적 2.0.7)
+    build_counts: list[int] = []
     for _round in range(_CONSISTENCY_ROUNDS):
         if _round and _time.monotonic() - started_at > budget:
             print(f"[code_agent] 생성 시간 예산({budget}s) 초과 — AI 교정을 멈추고 결과를 돌려줍니다", flush=True)
@@ -2606,14 +2612,23 @@ def generate_code(
                 {"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
                  "message": verification["output"],
                  "fix": "실제 빌드 로그의 원인을 고치세요. 검사를 제거하거나 기능을 생략하지 마세요."}]
+            count = sum(len(re.findall(r"\d+행 ", e.get("message") or "")) or 1 for e in errors)
+            if build_counts and count >= build_counts[-1]:
+                print(f"[code_agent] 빌드 오류가 줄지 않아({build_counts[-1]} → {count}) 교정을 멈춥니다", flush=True)
+                _report({"step": "consistency", "round": _round + 1,
+                         "message": f"빌드 오류가 더 줄지 않아 교정을 멈췄습니다(남은 {count}건) — 결과에 파일별로 보여 드립니다"})
+                consistency = errors
+                break
+            build_counts.append(count)
         if foundation:
             break  # A reviewed foundation is never silently rewritten by a model.
         signature = hashlib.sha256(json.dumps(ops_out, sort_keys=True).encode()).hexdigest()
         if signature in visited:
             break
         visited.add(signature)
+        trend = (f" · 빌드 오류 {build_counts[-1]}건" + (f"(직전 {build_counts[-2]}건)" if len(build_counts) > 1 else "")) if build_counts else ""
         _report({"step": "consistency", "round": _round + 1,
-                 "message": f"전체 점검 — 파일끼리 안 맞는 부분 {len(errors)}건 고치는 중"})
+                 "message": f"전체 점검 {_round + 1}/{_CONSISTENCY_ROUNDS}회차 — 고칠 곳 {len(errors)}개 파일{trend}"})
         if split_mode:
             #: 대규모 생성 결과는 바뀔 부분만 고친다(파일 전체를 다시 쓰면 응답 한도에서 잘려 교정이 생략됐다).
             try:
@@ -2628,7 +2643,7 @@ def generate_code(
                 print(f"[code_agent] 부분 교정 생략: {exc}", flush=True)
                 edited = None
             if edited is not None:
-                ops_e, _notes = _autofix_ops(root, target_folder, edited)
+                ops_e, _notes = _autofix_ops(root, target_folder, edited, new_app=not existing)
                 remaining = _issues_for(ops_e)
                 if _issue_weight(remaining) < _issue_weight(errors):
                     ops_out, consistency = ops_e, remaining
@@ -2654,7 +2669,7 @@ def generate_code(
             _data2, updates = parse_code_output(retry.text)
             updates = _relative_to_target(updates, target_folder)
             candidate = _merge_ops(ops_out, updates)
-            candidate, more_notes = _autofix_ops(root, target_folder, candidate)
+            candidate, more_notes = _autofix_ops(root, target_folder, candidate, new_app=not existing)
             remaining = _issues_for(candidate)
             if _issue_weight(remaining) > _issue_weight(consistency):
                 break
@@ -2681,7 +2696,7 @@ def generate_code(
                          "message": f"전체 점검 — 아무도 쓰지 않는 파일 {len(wiring)}개를 실제 화면에 연결하는 중"})
                 edited = _ge.edit_fix_round(prompt, ops_out, wiring, emit=_gp.current())
                 if edited is not None:
-                    ops_w, _notes = _autofix_ops(root, target_folder, edited)
+                    ops_w, _notes = _autofix_ops(root, target_folder, edited, new_app=not existing)
                     after = _issues_for(ops_w)
                     if _issue_weight(after) <= _issue_weight(consistency):
                         ops_out, consistency = ops_w, after

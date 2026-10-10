@@ -173,3 +173,37 @@ def test_생성_직후_검증_Dockerfile_을_고정_파일로_넣는다(tmp_path
     assert docker.get("fixed") and dk.is_recoder(docker["content"])
     merged = ca._merge_ops(out, [{"file": "Dockerfile", "content": "FROM x\n"}])
     assert dk.is_recoder(next(o for o in merged if o["file"] == "Dockerfile")["content"])
+
+
+def test_전체_점검_교정은_불러오는_파일을_함께_보고_그_파일도_고칠_수_있다(monkeypatch):
+    import gen_engine as ge
+    from types import SimpleNamespace
+    ops = [{"file": "src/hooks/useCart.ts", "content": "export function useCart() {\n  return { items: [], isLoading: false };\n}\n"},
+           {"file": "src/pages/Cart.tsx", "content": "import { useCart } from '../hooks/useCart';\nconst { cart, loading } = useCart();\n"},
+           {"file": "Dockerfile", "content": "FROM x\n", "fixed": True}]
+    seen = []
+
+    class R:
+        def call(self, req, agent=None, operation=None):
+            seen.append(req.prompt)
+            return SimpleNamespace(text=json.dumps({"edits": [
+                {"find": "const { cart, loading } = useCart();", "replace": "const { items: cart, isLoading: loading } = useCart();"},
+                {"file": "src/hooks/useCart.ts", "find": "isLoading: false", "replace": "isLoading: false, clear: () => {}"},
+                {"file": "Dockerfile", "find": "FROM x", "replace": "FROM y"}]}), model_used="m", provider="p", metadata={})
+
+    monkeypatch.setattr(ca, "get_router", lambda: R())
+    out = ge.edit_fix_round("p", ops, [{"severity": "error", "file": "src/pages/Cart.tsx",
+                                        "message": "1행 TS2339: Property 'cart' does not exist", "fix": "f"}])
+    assert "[참고 — 이 파일이 불러오는 파일] src/hooks/useCart.ts" in seen[0]
+    files = {o["file"]: o["content"] for o in out}
+    assert "items: cart" in files["src/pages/Cart.tsx"] and "clear: () => {}" in files["src/hooks/useCart.ts"]
+    assert files["Dockerfile"] == "FROM x\n"
+
+
+def test_vite_타입_선언이_없으면_만든다(tmp_path):
+    root = _w(tmp_path, {"frontend/package.json": FRONT_PKG,
+                         "frontend/src/api.ts": "const base = import.meta.env.VITE_API || '/api';\nexport default base;\n"})
+    writes = nf.vite_env_types(br.ProjectFiles(root))
+    assert writes == {"frontend/src/vite-env.d.ts": nf.VITE_ENV_DTS}
+    _w(root, writes)
+    assert nf.vite_env_types(br.ProjectFiles(root)) == {}

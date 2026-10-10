@@ -47,14 +47,14 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_STATIC_PATH_OUTSIDE_PROJECT", "DOCKERFILE_NPM_CI_WITHOUT_LOCK", "NODE_UNDECLARED_DEPENDENCY",
                 "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP", "DOCKERFILE_BUILD_STAGE_OMITS_DEV",
                 "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER", "DOCKERFILE_RUNTIME_BROKEN",
-                "DOCKERFILE_LINT_ADVISORY"}
+                "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
 FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
                     "NODE_STATIC_PATH_OUTSIDE_PROJECT", "DOCKERFILE_NPM_CI_WITHOUT_LOCK", "NODE_UNDECLARED_DEPENDENCY",
                     "NODE_TSCONFIG_MISSING", "NODE_REACT_EFFECT_LOOP", "DOCKERFILE_BUILD_STAGE_OMITS_DEV",
                     "DOCKERFILE_RUNTIME_BROKEN", "NODE_NAME_NOT_IMPORTED", "NODE_TYPES_MISSING", "NODE_NESTED_ROUTER",
-                    "DOCKERFILE_LINT_ADVISORY")
+                    "DOCKERFILE_LINT_ADVISORY", "NODE_VITE_ENV_TYPES_MISSING")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -2358,6 +2358,14 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 ("`../` 를 하나 줄여 실제 빌드 결과 폴더를 가리키게 하세요(자동 수정 가능)."
                  if "NODE_STATIC_PATH_OUTSIDE_PROJECT" in writes else "경로를 실제 빌드 결과 폴더로 고치세요."),
                 outside[0].split(":", 1)[0], "NODE_STATIC_PATH_OUTSIDE_PROJECT" in writes))
+        env_types = node_fixups.vite_env_types(files)
+        if env_types:
+            writes["NODE_VITE_ENV_TYPES_MISSING"] = env_types
+            result.issues.append(ReadinessIssue(
+                "NODE_VITE_ENV_TYPES_MISSING", ERROR,
+                f"Vite 화면 코드가 import.meta.env 를 쓰는데 타입 선언이 없습니다({', '.join(sorted(env_types))} 없음). "
+                "tsc 가 \"Property 'env' does not exist on type 'ImportMeta'\" 로 빌드를 멈춥니다.",
+                "src/vite-env.d.ts 에 `/// <reference types=\"vite/client\" />` 를 두세요(자동 수정 가능).", sorted(env_types)[0], True))
         typings = node_fixups.missing_type_packages(files)
         if typings:
             writes["NODE_TYPES_MISSING"] = typings

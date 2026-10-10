@@ -1202,13 +1202,50 @@ def _secret_problems(path: str, content: str) -> list[str]:
     return out[:5]
 
 
+#: 전체 점검 교정 — 고칠 파일과 함께 그 파일이 쓰는 다른 파일(이름·타입 정의)을 보고, 필요하면 그 파일도 고친다.
+FIX_SCHEMA = {
+    "type": "object",
+    "properties": {"edits": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"file": {"type": "string"}, "find": {"type": "string"}, "replace": {"type": "string"}},
+        "required": ["find", "replace"], "additionalProperties": False}}},
+    "required": ["edits"],
+    "additionalProperties": False,
+}
+_REL_IMPORT = re.compile(r"""(?:from\s*|import\s*\(?\s*|require\(\s*)['"](\.{1,2}/[^'"]+)['"]""")
+
+
+def _related(ops: list[dict], index: int, limit: int = 36_000) -> list[int]:
+    """이 파일이 불러오는 프로젝트 파일(한 단계) — 이름·타입·함수 모양을 맞추려면 정의를 봐야 한다."""
+    by_norm = {_norm(op["file"]): i for i, op in enumerate(ops)}
+    me = ops[index]
+    base = posixpath.dirname(str(me["file"]).replace("\\", "/"))
+    out, used = [], 0
+    for spec in _REL_IMPORT.findall(str(me.get("content") or "")):
+        target = posixpath.normpath(posixpath.join(base, spec))
+        stem = re.sub(r"\.(js|jsx|ts|tsx|mjs|cjs)$", "", target)
+        for cand in (target, stem + ".ts", stem + ".tsx", stem + ".js", stem + ".jsx", stem + "/index.ts", stem + "/index.tsx",
+                     stem + "/index.js", stem + ".d.ts"):
+            j = by_norm.get(_norm(cand))
+            if j is not None and j != index and j not in out:
+                size = len(str(ops[j].get("content") or ""))
+                if used + size <= limit:
+                    out.append(j)
+                    used += size
+                break
+    return out
+
+
 def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_files: int = 8,
-                   emit: Callable[[dict], None] | None = None) -> list[dict] | None:
+                   emit: Callable[[dict], None] | None = None, workers: int = 3) -> list[dict] | None:
     """전체 점검에서 나온 문제를 **바뀔 부분만** 고친다(대규모 생성용).
 
-    큰 결과를 통째로 다시 쓰게 하면 응답 한도에서 또 잘려 교정이 통째로 생략됐다.
-    문제가 지목한 파일마다 edits(find→replace)만 받아 적용한다. 고칠 수 있는 게 없으면 None.
+    · 고칠 파일과 그 파일이 불러오는 파일(정의)을 함께 보여 주고, 어긋난 쪽이 정의 파일이면 그 파일도 고치게 한다 —
+      한 파일만 보여 주면 "cart 가 없다" 같은 파일 사이 어긋남을 끝내 못 고쳤다(실기기 2.0.7: 10건이 6번 돌아도 남음).
+    · 파일마다 동시에(기본 3명) 받고, 받은 고침은 차례로 적용한다(찾을 원문이 정확히 한 번 있을 때만).
+    · ReCoder 고정 파일(검증 Dockerfile·결제 모듈)은 고치지 않는다. 고칠 수 있는 게 없으면 None.
     """
+    from concurrent.futures import ThreadPoolExecutor
     ca = _ca()
     by_path = {_norm(op["file"]): i for i, op in enumerate(ops)}
     grouped: dict[int, list[str]] = {}
@@ -1223,34 +1260,54 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
         return None
     engine = LargeGeneration(prompt, emit=emit)
     listing = "\n".join(f"- {op['file']}" for op in ops)
-    out = [dict(op) for op in ops]
-    changed = False
-    for idx, problems in list(grouped.items())[:max_files]:
-        op = out[idx]
+    targets = list(grouped.items())[:max_files]
+
+    def ask(item: tuple[int, list[str]]) -> tuple[int, list[dict]]:
+        idx, problems = item
+        op = ops[idx]
         if emit:
-            emit({"step": "fixing", "agent": "review", "file": op["file"], "message": f"전체 점검 — {op['file']} 고치는 중"})
+            emit({"step": "fixing", "agent": "review", "file": op["file"], "message": f"전체 점검 — {op['file']} 오류 {len(problems)}건 고치는 중"})
+        related = _related(ops, idx)
+        context = "".join(f"\n[참고 — 이 파일이 불러오는 파일] {ops[j]['file']}\n```\n{ca._prompt_body(ops[j]['content'], 20_000)}\n```\n"
+                          for j in related)
         p = _without_output_format(prompt) + f"""
 
 [전체 점검 교정] 생성한 파일 목록:
 {listing}
-{op['file']} 에 아래 문제가 있습니다:
+{op['file']} 에 아래 문제가 있습니다(컨테이너 빌드·점검의 실제 오류):
 """ + "\n".join(f"- {x}" for x in problems) + f"""
-**파일 전체를 다시 쓰지 말고** 바꿀 부분만 edits 로 주세요. find 는 현재 파일에 정확히 한 번 나오는 원문 그대로입니다.
+{context}
+고치는 방법:
+- **파일 전체를 다시 쓰지 말고** 바꿀 부분만 edits 로 주세요. find 는 그 파일에 정확히 한 번 나오는 원문 그대로, replace 는 바꿀 내용.
+- 기본은 {op['file']} 를 고칩니다(file 생략). 어긋난 원인이 위 참고 파일(이름·타입·함수 모양 정의)이면 그 파일을 고쳐도 됩니다 —
+  그때는 edit 에 "file": "<그 파일 경로>" 를 넣으세요. 다른 파일이 쓰는 기존 이름은 지우지 말고 더하세요.
+- 타입 검사를 끄거나(any 남발·@ts-ignore·as any) 기능을 지우지 마세요.
 현재 파일 {op['file']}:
 ```
 {ca._prompt_body(op['content'], 60_000)}
 ```"""
         try:
-            resp = engine.call(p, EDIT_SCHEMA, "generate_code_consistency", 4096, agent="review")
+            resp = engine.call(p, FIX_SCHEMA, "generate_code_consistency", 4096, agent="review")
             data = ca._extract_json(resp.text)
         except (LLMError, ValueError, CodeOutputError, Paused):
-            continue
-        content = op["content"]
-        for edit in data.get("edits") or []:
-            if isinstance(edit, dict) and isinstance(edit.get("find"), str) and isinstance(edit.get("replace"), str) \
-                    and edit["find"] and content.count(edit["find"]) == 1:
-                content = content.replace(edit["find"], edit["replace"], 1)
-        if content != op["content"]:
-            out[idx] = dict(op, content=content)
-            changed = True
+            return idx, []
+        edits = [e for e in (data.get("edits") or []) if isinstance(e, dict)
+                 and isinstance(e.get("find"), str) and isinstance(e.get("replace"), str) and e["find"]]
+        return idx, edits
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(targets))), thread_name_prefix="fix") as pool:
+        answers = list(pool.map(ask, targets))
+    out = [dict(op) for op in ops]
+    changed = False
+    for idx, edits in answers:
+        for edit in edits:
+            target_idx = idx
+            if edit.get("file"):
+                target_idx = by_path.get(_norm(edit["file"]), -1)
+                if target_idx < 0 or out[target_idx].get("fixed"):
+                    continue
+            content = str(out[target_idx].get("content") or "")
+            if content.count(edit["find"]) == 1:
+                out[target_idx] = dict(out[target_idx], content=content.replace(edit["find"], edit["replace"], 1))
+                changed = True
     return out if changed else None

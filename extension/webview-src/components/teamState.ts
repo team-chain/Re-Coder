@@ -116,7 +116,7 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
     case "file_split": return event.file ? { who, role, text: /쓰던 (내용|조각)에 이어서|이어 쓰기를 이어서/.test(msg)
       ? `${base(event.file)} 쓰던 내용에 이어서 씁니다`
       : `${base(event.file)} 이(가) 길어 끊기는 만큼 이어 받습니다${/맥락을 줄여/.test(msg) ? " (맥락을 줄여서)" : ""}` } : null;
-    case "fixing": return { who, role, tone: "warn", text: `자동 검사에서 문제 발견 → 고치는 중${msg.includes("—") ? ` (${msg.split("—").slice(1).join("—").trim().slice(0, 60)})` : ""}` };
+    case "fixing": return msg.startsWith("전체 점검") ? { who, role, tone: "warn", text: msg.slice(0, 120) } : { who, role, tone: "warn", text: `자동 검사에서 문제 발견 → 고치는 중${msg.includes("—") ? ` (${msg.split("—").slice(1).join("—").trim().slice(0, 60)})` : ""}` };
     case "verified": return event.file ? { who, role, tone: "ok", text: `${base(event.file)} 고친 뒤 확인 통과` } : null;
     case "verify_failed": return { who, role, tone: "warn", text: msg ? `확인 필요 — ${msg.slice(0, 80)}` : "확인 필요" };
     case "file_done": return event.file ? { who, role, tone: "ok", text: (msg && msg.includes("고정 파일")) ? msg : `${event.file} 완료${event.lines ? ` (${event.lines}줄)` : ""}` } : null;

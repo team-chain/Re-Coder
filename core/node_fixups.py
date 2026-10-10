@@ -351,7 +351,7 @@ def _match_op(paths: list[str], reported: str, prefer: str) -> Optional[str]:
     return tail[0] if len(tail) == 1 else None
 
 
-def build_log_issues(log: str, op_paths: list[str], dockerfile: str = "") -> list[dict]:
+def build_log_issues(log: str, op_paths: list[str], dockerfile: str = "", contents: Optional[Mapping[str, str]] = None) -> list[dict]:
     """컨테이너 빌드 로그에서 소스 파일 오류를 뽑아 파일별 문제로 만든다(파일당 한 건, 오류 줄은 모아서)."""
     if not log:
         return []
@@ -367,6 +367,10 @@ def build_log_issues(log: str, op_paths: list[str], dockerfile: str = "") -> lis
         if not target:
             continue
         line = f"{m.group(2)}행 {m.group(4)}: {m.group(5).strip()[:220]}"
+        src = ((contents or {}).get(target) or "").split("\n")
+        n = int(m.group(2)) - 1
+        if 0 <= n < len(src) and src[n].strip():
+            line += f" ← `{src[n].strip()[:160]}`"  # 그 줄의 실제 코드(교정이 정확히 찾게)
         if line not in grouped.setdefault(target, []):
             grouped[target].append(line)
     if not grouped:
@@ -861,4 +865,37 @@ def _drop_named_import(text: str, name: str) -> str:
             return ""
         return m.group(0).replace(m.group(1), " " + ", ".join(keep) + " ")
     out = re.sub(r"""import\s*\{([^}]*)\}\s*from\s*['"]react-router(?:-dom)?['"];?[ \t]*\n?""", fix, text, count=1)
+    return out
+
+
+# ── 14) Vite + TypeScript 인데 import.meta.env 타입 선언이 없다 ─────────────────
+
+VITE_ENV_DTS = '/// <reference types="vite/client" />\n'
+
+
+def vite_env_types(files) -> dict[str, str]:
+    """{폴더/src/vite-env.d.ts: 내용} — tsc 가 `Property 'env' does not exist on type 'ImportMeta'`(TS2339)로 멈추는 경우.
+    Vite 공식 템플릿이 넣는 한 줄 선언이다(실기기 2.0.7: frontend/src/api/client.ts)."""
+    out: dict[str, str] = {}
+    listing = files.files()
+    for manifest in [p for p in listing if posixpath.basename(p) == "package.json" and "/node_modules/" not in f"/{p}"]:
+        folder = posixpath.dirname(manifest)
+        prefix = f"{folder}/" if folder else ""
+        try:
+            pkg = json.loads(files.read(manifest) or "")
+        except ValueError:
+            continue
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})} if isinstance(pkg, dict) else {}
+        if "vite" not in deps:
+            continue
+        mine = [p for p in listing if p.startswith(prefix) and "/node_modules/" not in f"/{p}"]
+        if not any(p.endswith((".ts", ".tsx")) and "import.meta.env" in (files.read(p) or "") for p in mine):
+            continue
+        if any(p.endswith(".d.ts") and "vite/client" in (files.read(p) or "") for p in mine):
+            continue
+        cfg = load_jsonc(files.read(f"{prefix}tsconfig.json")) or {}
+        if "vite/client" in ((cfg.get("compilerOptions") or {}).get("types") or []):
+            continue
+        src = f"{prefix}src"
+        out[f"{src}/vite-env.d.ts"] = VITE_ENV_DTS
     return out

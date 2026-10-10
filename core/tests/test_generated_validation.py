@@ -97,7 +97,7 @@ def test_real_build_error_is_sent_back_to_repair_without_dropping_files(tmp_path
             )
 
     monkeypatch.setattr(ca, "get_router", Router)
-    monkeypatch.setattr(ca, "_autofix_ops", lambda root, folder, ops: (ops, []))
+    monkeypatch.setattr(ca, "_autofix_ops", lambda root, folder, ops, **kw: (ops, []))
     monkeypatch.setattr(ca, "_consistency_issues", lambda *args: [])
 
     def verify(root, folder, ops):

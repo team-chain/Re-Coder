@@ -1,3 +1,12 @@
+# 개발 — "문제 발견 → 고치는 중" 무한 반복 (2026-10-10, 2.0.8)
+
+- 실기기: 파일 생성 완료 뒤 전체 점검이 6회 돌며 "자동 검사에서 문제 발견 → 고치는 중" 반복 → "빌드·실행 실패 예상 10건"(ImportMeta.env, useOrders ordersData, PaginationProps·ErrorAlertProps, UseCartState&UseCartActions 에 cart/loading/removeFromCart 없음, TS6133 등).
+- 원인: edit_fix_round 가 고칠 파일 하나만 보여 줌(정의 파일 모름 → 파일 사이 어긋남을 못 고침), 순차 처리, 오류 줄 원문 없음, 줄지 않아도 6회 반복. vite-env.d.ts 없음·tsconfig.app.json 등 변형 tsconfig 의 린트 옵션은 결정적으로 고칠 수 있었음.
+- `gen_engine.edit_fix_round`: FIX_SCHEMA(edit 에 file 선택), `_related`(상대 import 1단계 → ops, 36k 한도) 참고 블록, ThreadPoolExecutor 3, 고정 op 보호, find 정확히 1회일 때만 적용. 이벤트 "전체 점검 — X 오류 N건 고치는 중"(마을 말풍선은 그대로 표시).
+- `node_fixups.build_log_issues(contents=)` 오류에 ← `소스 줄`, `vite_env_types` + readiness NODE_VITE_ENV_TYPES_MISSING(자동, FILE_WRITE_FIXES).
+- `code_agent`: `_autofix_ops(new_app=)` tsconfig*.json 모두 relax(새 앱이거나 새로 만드는 파일), 일관성 루프 `build_counts` — 빌드 오류 수가 줄지 않으면 멈춤 + 회차·추세 메시지.
+- 검증: Core 전체 통과, 확장 555개(1건 sandbox git insteadOf), lint 통과. 실제 AI 로 TEMP 재생성은 사용자 실기기에서 확인 필요.
+
 # 개발·배포·보안·설계 — 영상 18-09-09 대응 (2026-10-10, 2.0.7)
 
 - 실기기: 결과 화면 "불러오는 이름 없음 2건"(getOrdersByAdmin·default×2·apiClient×5·OrderDetail), Docker "tsc: not found"(빌드 단계 `npm install --omit=dev`), 보안 게이트 "이상 없음 · 권고 2건"(DL3059), 설계 카드 2장(시작 방식·결제)뿐.
