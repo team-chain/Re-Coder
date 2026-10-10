@@ -693,7 +693,8 @@ def _apply_settings_to_plan(plan: DeploymentPlan, workspace: str) -> None:
     state = deploy_settings.evaluate(plan.container_name, workspace, provided)
     plan.settings = state["settings"]
     plan.settings_missing = state["missing"]
-    plan.demo = state["demo"] if state["demo"].get("available") else None
+    #: 데모를 못 쓰는 앱도 "왜 키 없이 못 띄우는지" 를 화면에 보여야 한다 — 이유가 있으면 함께 싣는다(available=False).
+    plan.demo = state["demo"] if (state["demo"].get("available") or state["demo"].get("unavailable_reason")) else None
     plan.risk_reasons = [r for r in plan.risk_reasons if not r.startswith(("필요한 설정", "로컬 데모 모드", "앱 내부 서명 키"))]
     generated = [s["name"] for s in plan.settings if s.get("source") == "generated"]
     if generated:

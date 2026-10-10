@@ -28,11 +28,19 @@ export interface CodeProgressEvent {
     resumable?: boolean;
     resume_job?: string;
     reason?: string;
+    /** 오류 종류(truncation·format·quota·network·other) — file_retry·file_failed·part_retry·paused 에 실린다. */
+    kind?: string;
+    attempt?: number;
+    /** 정해진 횟수를 넘겨 실패한 파일(멈춤 응답). */
+    failed?: FailedFile[];
 }
+
+export interface FailedFile { file: string; kind: string; reason: string; }
 
 /** 생성이 멈췄지만 만든 것은 코어에 저장됐다 — 같은 요청을 jobId 와 함께 다시 보내면 이어 만든다. */
 export class GenerationPausedError extends Error {
-    constructor(message: string, readonly jobId: string, readonly done = 0, readonly total = 0) {
+    constructor(message: string, readonly jobId: string, readonly done = 0, readonly total = 0,
+                readonly reason = '', readonly failed: FailedFile[] = []) {
         super(message);
         this.name = 'GenerationPausedError';
     }
@@ -87,8 +95,11 @@ export async function readCodeStream<T>(
                 if (event.job_id) jobId = event.job_id;
                 if (event.step === 'error') {
                     if (event.resumable && (event.resume_job || jobId)) {
+                        const failed = Array.isArray(event.failed)
+                            ? event.failed.filter(f => f && typeof f.file === 'string').map(f => ({ file: f.file, kind: String(f.kind ?? ''), reason: String(f.reason ?? '') }))
+                            : [];
                         throw new GenerationPausedError(event.message || '생성이 중간에 멈췄습니다.', event.resume_job || jobId,
-                            Number(event.done_count) || 0, Number(event.total) || 0);
+                            Number(event.done_count) || 0, Number(event.total) || 0, String(event.reason ?? ''), failed);
                     }
                     throw new Error(event.message || '코드 생성에 실패했습니다.');
                 }

@@ -102,6 +102,7 @@ const css = `
 .rc-vl .sg>span{position:absolute;left:8px;top:3px;font-size:9.5px;color:var(--vscode-descriptionForeground,#8b95a3)}
 .rc-vl .sg>b{position:absolute;right:8px;top:3px;font-size:9.5px;font-weight:500;color:var(--vscode-charts-green,#73d39b)}
 .rc-vl .sg>em{position:absolute;right:8px;bottom:3px;font-size:9px;font-style:normal;color:var(--vscode-editorWarning-foreground,#cca700)}
+.rc-vl .sg>em.fail{left:8px;right:auto;color:var(--vscode-errorForeground,#f48771)}
 .rc-vl .sg .st{position:absolute;width:16px;height:6px;border-radius:2px}
 .rc-vl .ag{position:absolute;width:54px;margin-left:-27px;z-index:5;transition:left .9s cubic-bezier(.35,.6,.35,1),top .9s cubic-bezier(.35,.6,.35,1);pointer-events:none}
 .rc-vl .ag .bw{position:relative;width:40px;height:40px;margin:0 auto}
@@ -194,6 +195,7 @@ export function TeamVillage({ roster, view, width, paused }: TeamVillageProps) {
       waiting: files.filter(f => f.state === "waiting").length,
       done: files.filter(f => f.state === "done" || f.state === "issue").length,
       polish: polishingCount(view, l),
+      failed: files.filter(f => f.state === "failed").length,
     };
   });
   //: 날아가는 중인 카드는 아직 선반에 없다 — 내려앉는 순간 칸·숫자가 함께 올라간다.
@@ -365,6 +367,7 @@ export function TeamVillage({ roster, view, width, paused }: TeamVillageProps) {
           <div key={l} className="sg" style={{ left: g.x, top: g.y, width: g.w, height: g.h }}>
             <span>완성 · {LAYER[l]}</span>{n ? <b>{n}/{perLayer[l].total}</b> : null}
             {perLayer[l].polish > 0 && <em data-testid="shelf-polish">{perLayer[l].polish}개 다듬는 중</em>}
+            {perLayer[l].failed > 0 && <em className="fail" data-testid="shelf-failed">{perLayer[l].failed}개 못 만듦</em>}
             {slots.map((s, k) => (
               <i key={k} className="st" style={{ left: s.x, top: s.y, background: LAYER_COLOR[l] }} />
             ))}

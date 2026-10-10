@@ -679,6 +679,8 @@ class CodeGenerateRequest(BaseModel):
     resume_job: str = ""
     #: 팀 모드 동시 작업 에이전트 수(1~8). 0 이면 기본값.
     agents: int = 0
+    #: 이어 만들 때 정해진 횟수를 넘겨 실패한 파일을 빼고 결과를 받는다(사용자가 [이 파일 빼고 결과 받기]를 고른 경우).
+    skip_failed: bool = False
 
 
 @router.post("/api/code/generate")
@@ -729,6 +731,7 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
             project_root=body.workspace_path or "",
             mode=_code_mode(body.mode),
             job_id=body.resume_job or "",
+            skip_failed=bool(body.skip_failed and body.resume_job),
         )
     except GenerationPaused as e:
         #: 다 만든 파일은 저장됐다 — 같은 요청을 resume_job 과 함께 다시 보내면 이어 만든다.
@@ -783,6 +786,7 @@ async def generate_code_stream_route(body: CodeGenerateRequest):
             mode=_code_mode(body.mode),
             job_id=job_id,
             agents=agents,
+            skip_failed=bool(body.skip_failed and body.resume_job),
             #: 확장은 진행 이벤트를 받으며 기다리므로 자동 교정 시간을 넉넉히 준다.
             budget_seconds=3600,
         )

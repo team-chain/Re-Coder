@@ -1920,6 +1920,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     mode?: string;
                     resumeJob?: string;
                     agents?: number;
+                    skipFailed?: boolean;
                 };
                 await this.handleCodeGenerate(p.instruction ?? '', {
                     requestId: p.requestId,
@@ -1931,6 +1932,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     mode: p.mode === 'team' ? 'team' : 'auto',
                     resumeJob: typeof p.resumeJob === 'string' ? p.resumeJob : '',
                     agents: Number.isInteger(p.agents) && (p.agents as number) > 0 && (p.agents as number) <= 8 ? p.agents : 0,
+                    skipFailed: p.skipFailed === true,
                 });
                 break;
             }
@@ -2282,6 +2284,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             mode?: 'auto' | 'team';
             resumeJob?: string;
             agents?: number;
+            skipFailed?: boolean;
         } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
@@ -2307,7 +2310,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.postMessageToWebview(opts.requestWebview, 'code.generating', { requestId: opts.requestId });
             //: 큰 요청은 여러 에이전트가 나눠 수십 분까지 만든다 — 응답 하나를 기다리지 않고 진행 이벤트를 받는다.
             //: 이벤트가 올 때마다 웹뷰의 대기 시간을 다시 잡으므로 전체 시간 상한은 없다.
-            status('generating', opts.resumeJob ? '멈춘 지점부터 이어서 만드는 중…' : 'AI 가 코드를 만드는 중… (큰 요청은 여러 에이전트가 나눠 만들어요)', 300);
+            status('generating', opts.resumeJob ? (opts.skipFailed ? '만들지 못한 파일을 빼고 결과를 받는 중…' : '멈춘 지점부터 이어서 만드는 중…') : 'AI 가 코드를 만드는 중… (큰 요청은 여러 에이전트가 나눠 만들어요)', 300);
             const streaming = typeof (this._apiClient as Partial<ApiClient>).generateCodeStream === 'function';
             const result = !streaming ? await this._apiClient.generateCode(instruction, {
                 workspacePath, openFile: attach, priorFiles: this._lastCodeOps, contextFiles: opts.contextFiles ?? [],
@@ -2322,6 +2325,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 mode: opts.mode ?? 'auto',
                 resumeJob: opts.resumeJob ?? '',
                 agents: opts.agents ?? 0,
+                skipFailed: opts.skipFailed === true,
             }, (event) => {
                 if (event.message) status('generating', event.message, 300);
                 this.postMessageToWebview(opts.requestWebview, 'code.team', { requestId: opts.requestId, event: compactCodeEvent(event) });
@@ -2337,7 +2341,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             const paused = err instanceof GenerationPausedError && err.jobId
-                ? { resumable: true, resumeJob: err.jobId, done: err.done, total: err.total } : {};
+                ? { resumable: true, resumeJob: err.jobId, done: err.done, total: err.total, reason: err.reason, failed: err.failed } : {};
             this.postMessageToWebview(opts.requestWebview, 'code.error', {
                 requestId: opts.requestId,
                 message: msg,

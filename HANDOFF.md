@@ -1,3 +1,15 @@
+# 대규모 생성 — 망가진 조각·무한 이어 만들기 방지 (2026-10-10, 2.0.4)
+
+- 실기기(사용자 체크포인트 3f89c434c07345af): 45/51 에서 [이어서 만들기] 가 매번 약 80초 뒤 같은 자리로 멈췄다. `partial["client/src/styles/pages.css"].written` 이 CSS 가 아니라 ops JSON 전체(1조각), 이어 만들 때마다 2번째 조각이 실패했고, 같은 묶음의 App.css 는 `_gen_batch` 가 한꺼번에 돌려주는 구조라 매번 버려졌다. 로그에는 원인이 남지 않았다.
+- `gen_engine`: `_without_output_format(prompt)` → `context_prompt`(설계·약속·조각·교정·전체 점검 교정은 ops 형식 지시 없이), 묶음 호출만 원래 prompt. `clean_content/is_wrapped/unwrap_content`(닫히지 않은 JSON 도 content 문자열을 풀어 냄, 여러 파일 묶음이면 그 파일 것만, `\n` 글자로 들어온 한 줄은 되돌림 — .json 제외). 조각은 저장 전 검사, 3번 연속 형식 오류면 CodeOutputError. 조각 응답이 잘리면 같은 조각을 더 작은 크기로(`PART_LINES_STEPS`=150·80·40, partial 에 `lines` 저장).
+- 파일 단위: `_run_single` — 시도 횟수(`state.attempts`, 체크포인트에 저장)에 따라 한 번에→150줄 / 처음부터 80줄 / 처음부터 40줄, `MAX_FILE_TRIES`=3 넘으면 `state.failed` 에 두고 나머지 계속. `_finish` 가 파일마다 즉시 저장. 묶음은 `_ask_files` 로 받고 검사 통과분만 저장, 나머지는 하나씩. 잘림·형식 외 실패(권한 등)는 바로 멈춘다(`_recoverable`).
+- 끝: 실패 파일이 있으면 `GenerationPaused(failed=[{file,kind,reason}])`. `resume_from` 은 체크포인트를 다시 검사(`_check_saved`: 조각은 벗기거나 버림, 완성 파일도 검사)하고, 실패 파일은 가장 작은 조각·처음부터로 한 번 더(tries=2). `skip_failed=True`(API `skip_failed`, 이어 만들기일 때만)면 AI 를 부르지 않고 만든 것만 돌려주고 `code_agent` 가 `GENERATED_FILE_SKIPPED` 오류 + `skipped_files`.
+- 관측: 이벤트 `part_retry`·`file_retry`·`file_failed`·`paused`(kind: truncation·format·quota·network·other), 코어 로그 `[gen_engine] job=… file=… kind=…`.
+- 확장: `codeStream` FailedFile·GenerationPausedError(reason, failed), ApiClient `skipFailed`, 호스트 전달, `pausePanel.tsx`(실패 파일 목록 + [이 파일 다시 쓰기]/[이 파일 빼고 결과 받기], 그 밖에는 이유 + [이어서 만들기]) — TeamBoard·한 번에 만들기 공통. teamState `failed` 상태(완료로 세지 않음)·기록 문구, 마을 선반 "N개 못 만듦", file_split 기록은 실제 조각 크기.
+- 배포: `_apply_settings_to_plan` 이 데모 불가 이유가 있으면 `plan.demo`(available=false)를 싣는다(2.0.3 은 빠뜨려 화면에 안 보였다).
+- 검증: Core 2,506개·확장 553개(RAG 포함). 사용자 체크포인트를 그대로 불러와 가짜 AI 로 51/51 완료(pages.css·App.css 조각 정리). code-server 에서 가짜 게이트웨이로 (1) 첫 조각에 ops JSON → 정상 파일, (2) 조각 계속 실패 → 23/24 저장·실패 파일 패널 → [다시 쓰기] 완료, (3) [빼고 받기] → 남은 문제 상자. Docker 실제 배포: 결제 약속을 지킨 AI 형 앱 키 없이 데모 배포 → 주문 → 모의 결제 서버의 서명 웹훅 → paid, 모의 결제 없는 앱은 계획에 이유·설정 단계에서 멈춤, 쇼핑몰 기반(mock) 배포 → 가입·장바구니·주문 → paid, 예전 shop 재배포 성공. (샌드박스 Docker Hub 차단으로 node:22-alpine 은 로컬 대체 이미지 — dumb-init·curl 흉내를 더함.)
+- 알게 된 것(미수정): 쇼핑몰 기반 `GET /api/orders/:id` 에 숫자가 아닌 id 를 주면 500(400/404 가 맞음). 검토된 기반(commerce-v1)이라 버전을 올려 고쳐야 한다.
+
 # AI 앱 데모 결제 · 남은 문제 표시 · 문서 키 자리표시 · 미사용 파일 · 팀 화면 정리 (2026-10-10, 2.0.3)
 
 - 실기기 영상(2026-10-10 11-07-37.mkv): AI 자유 생성 쇼핑몰이 Stripe 키 2개를 요구하는데 데모 버튼이 없었고(모의 결제는 기반만 지원), `CartPage.jsx` 의 `useCart` 를 `cartStore` 가 내보내지 않는 채로 적용됐고, README 397줄의 예시 키를 생성 검사는 놓치고 보안 게이트(gitleaks)가 잡았다. orderApi·paymentApi 는 참조 0. 팀 화면은 대기 말풍선 겹침·점검 중 완료 수 감소·이름표 붙음·카드 덩어리.

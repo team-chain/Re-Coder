@@ -429,6 +429,8 @@ export class ApiClient {
             mode?: 'auto' | 'team';
             resumeJob?: string;
             agents?: number;
+            /** 이어 만들 때 실패한 파일을 빼고 결과를 받는다. */
+            skipFailed?: boolean;
         },
         onEvent: (event: CodeProgressEvent) => void,
         retried = false,
@@ -446,6 +448,7 @@ export class ApiClient {
             mode: opts.mode ?? 'auto',
             resume_job: opts.resumeJob ?? '',
             agents: opts.agents ?? 0,
+            skip_failed: !!(opts.skipFailed && opts.resumeJob),
         };
         const controller = new AbortController();
         const response = await fetch(`http://127.0.0.1:${this.coreManager.getPort()}/api/code/generate/stream`, {

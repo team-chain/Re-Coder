@@ -43,3 +43,14 @@ test('웹뷰로는 파일 내용 전체(result)를 빼고 보낸다',()=>{
  const c=compactCodeEvent({step:'done',result:{ops:[{content:'x'.repeat(10)}]},message:'끝'});
  assert.equal(c.result,undefined);assert.equal(c.message,'끝');
 });
+
+test('실패한 파일이 있는 멈춤은 파일·이유를 싣고, 빼고 받기는 skip_failed 로 보낸다',async t=>{
+ await assert.rejects(readCodeStream(response('data: {"step":"error","message":"파일 1개를 만들지 못했습니다","resumable":true,"resume_job":"abcdef123456","done_count":50,"total":51,"reason":"pages.css — 3번 시도해도 응답 형식이 맞지 않음","failed":[{"file":"client/src/styles/pages.css","kind":"format","reason":"응답 형식이 맞지 않음"}]}\n\n'),()=>{},()=>{}),
+  e=>e instanceof GenerationPausedError&&e.done===50&&e.failed.length===1&&e.failed[0].file==='client/src/styles/pages.css'&&/응답 형식/.test(e.reason));
+ const old=global.fetch;t.after(()=>global.fetch=old);const seen=[];
+ const api=new ApiClient({getSessionToken:()=>'tok',getPort:()=>12345,refreshToken:async()=>{}});
+ global.fetch=async(url,options)=>{seen.push(JSON.parse(options.body||'{}'));return response('data: {"step":"done","result":{"summary":"ok","ops":[],"model":"m"}}\n\n');};
+ await api.generateCodeStream('쇼핑몰',{resumeJob:'abcdef123456',skipFailed:true},()=>{});
+ await api.generateCodeStream('쇼핑몰',{skipFailed:true},()=>{});
+ assert.equal(seen[0].skip_failed,true);assert.equal(seen[1].skip_failed,false,'이어 만들기가 아니면 빼지 않는다');
+});

@@ -217,11 +217,12 @@ def test_끝난_작업을_다시_요청하면_만들지_않고_결과를_돌려�
 
 def test_이어_쓰기가_빈_내용으로_끝나면_빈_파일을_만들지_않는다(monkeypatch, tmp_path):
     from tests.test_code_split_generation import BigFile, DECISION as D
-    router = BigFile([("", True)])
+    router = BigFile([("", True)] * 3)
     monkeypatch.setattr(ca, "get_router", lambda: router)
     with pytest.raises(RuntimeError) as err:
         ca.generate_code("쇼핑몰", decisions=[D], project_root=str(tmp_path))
-    assert getattr(err.value, "job_id", "") and "이어서 만들기" in str(err.value)
+    assert getattr(err.value, "job_id", "") and [f["file"] for f in err.value.failed] == ["server.js"]
+    assert "이 파일 다시 쓰기" in str(err.value)
 
 
 def test_전체_점검_문제는_지목된_파일의_바뀔_부분만_고친다(monkeypatch):

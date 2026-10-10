@@ -177,12 +177,16 @@ def test_파일_하나가_한도를_넘으면_나눠서_이어_쓴다(monkeypatc
 
 
 def test_이어_쓰기가_진행되지_않으면_멈추고_이어서_만들_수_있게_남긴다(monkeypatch, tmp_path):
-    router = BigFile([("", False)] * 5)
+    router = BigFile([("", False)] * 30)
     monkeypatch.setattr(ca, "get_router", lambda: router)
     with pytest.raises(RuntimeError) as err:
         ca.generate_code("쇼핑몰", decisions=[DECISION], project_root=str(tmp_path))
     assert getattr(err.value, "job_id", "")  # GenerationPaused — 다 만든 파일은 체크포인트에
-    assert "이어서 만들기" in str(err.value)
+    #: 같은 자리를 끝없이 반복하지 않는다 — 방법을 바꿔 정해진 횟수(3번×빈 조각 3번)만 시도하고, 그 파일만 실패로 남긴다.
+    assert router.ops.count("generate_code_file_part") == 9
+    assert [f["file"] for f in err.value.failed] == ["server.js"]
+    assert err.value.done == len(MANIFEST["files"]) - 1, "나머지 파일은 끝까지 만들었다"
+    assert "이 파일 다시 쓰기" in str(err.value) and "빼고 결과 받기" in str(err.value)
 
 
 def test_파일_목록이_잘리면_약속은_조각으로_목록은_페이지로_받는다(monkeypatch, tmp_path):

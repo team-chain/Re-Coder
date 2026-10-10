@@ -1927,7 +1927,7 @@ def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
 
 def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool = False,
                     job_id: str = "", fingerprint: str = "", resume: dict | None = None,
-                    concurrency: int | None = None) -> tuple[dict, list[dict], object]:
+                    concurrency: int | None = None, skip_failed: bool = False) -> tuple[dict, list[dict], object]:
     """큰 요청을 대규모 생성 엔진으로 만든다. 멈추면 GenerationPaused(이어서 만들기 가능)."""
     try:
         import gen_engine
@@ -1938,6 +1938,7 @@ def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool =
     engine = gen_engine.LargeGeneration(
         prompt, target_folder=target_folder, new_project=new_project, job_id=job_id,
         fingerprint=fingerprint, concurrency=concurrency, emit=generation_progress.current(),
+        skip_failed=skip_failed,
     )
     engine.resume_from(resume)
     return engine.run()
@@ -2014,6 +2015,7 @@ def generate_code(
     job_id: str = "",
     budget_seconds: int | None = None,
     agents: int | None = None,
+    skip_failed: bool = False,
 ) -> dict:
     """
     자연어 instruction → 파일 작업(ops) 목록.
@@ -2108,7 +2110,8 @@ def generate_code(
 
     def _split() -> tuple:
         return _generate_split(prompt, target_folder, new_project=not existing,
-                               job_id=job_id, fingerprint=fp, resume=saved, concurrency=agents)
+                               job_id=job_id, fingerprint=fp, resume=saved, concurrency=agents,
+                               skip_failed=skip_failed)
 
     # Request a native schema instead of relying only on prose instructions.
     # Reject incomplete batches as a whole, then give the model one bounded
@@ -2214,8 +2217,17 @@ def generate_code(
     ops_out, autofix_notes = _autofix_ops(root, target_folder, ops_out)
     if autofix_notes:
         print(f"[code_agent] 자동 교정 {len(autofix_notes)}건: {autofix_notes[:5]}", flush=True)
+    #: 사용자가 [이 파일 빼고 결과 받기]를 고른 파일 — 빠진 채로 적용하면 그 파일을 쓰는 곳이 동작하지 않으므로 남은 문제로 보인다.
+    skipped_files = [f for f in ((data or {}).get("skipped") or []) if isinstance(f, dict)] if isinstance(data, dict) else []
+
     def _issues_for(candidate_ops: list[dict]) -> list[dict]:
         found = _consistency_issues(root, target_folder, candidate_ops)
+        have = {_norm_op_path(op.get("file", "")) for op in candidate_ops}
+        found = found + [{
+            "code": "GENERATED_FILE_SKIPPED", "severity": "error", "file": f.get("file", ""),
+            "message": f"{f.get('file')} 은(는) 만들지 못해 빼고 받았습니다({f.get('reason') or '실패'}). 이 파일을 쓰는 곳은 동작하지 않습니다.",
+            "fix": "이 파일을 직접 만들거나, 같은 요청을 다시 보내 이 파일만 다시 쓰게 하세요.",
+        } for f in skipped_files if _norm_op_path(f.get("file", "")) not in have]
         if payment_ai:
             #: 결제 약속(모의 결제 모드·서명 웹훅)이 빠졌으면 일관성 점검이 고칠 오류로 넣는다 — 빠진 채로 두면 키 없이 배포할 수 없다.
             found = found + payment_contract.issues(candidate_ops)
@@ -2433,6 +2445,7 @@ def generate_code(
         "summary": summary,
         "consistency_issues": consistency,
         #: 아무도 쓰지 않는 생성 파일 — 확장이 "모두 적용" 에서 기본으로 뺀다(사용자가 포함할 수 있음).
+        "skipped_files": [f.get("file") for f in skipped_files],
         "unused_files": [{"file": u["file"], "consumers": u.get("consumers", [])} for u in unused
                          if any(op.get("file") == u["file"] for op in ops_out)],
         "verification": verification,

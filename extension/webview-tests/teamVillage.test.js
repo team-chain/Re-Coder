@@ -123,3 +123,29 @@ test('마을: 카드를 집으러 선 자리는 작업대 앞 리코더와 겹�
  for(const W of [520,760,1200]){const L=villageLayout(W,6);const standTop=L.queue.y+L.queue.h-8,agentH=55,deskAgentTop=L.desks[0].y-58;
   assert.ok(standTop+agentH<=deskAgentTop+2,`${W}`);}
 });
+
+test('재시도·실패·멈춤은 진행 기록에 이유와 함께 남고, 실패한 파일은 완료로 세지 않는다',()=>{
+ const {PausePanel}=require('../out/webview-test/components/pausePanel');
+ const v=run([{step:'planned',total:7,files:FILES},{step:'file_start',agent:'agent-1',file:'src/db.js'},
+  {step:'part_retry',agent:'agent-1',file:'src/db.js',kind:'truncation',lines:80,message:'db.js — 응답이 잘려 80줄씩으로 줄여 다시 씁니다'},
+  {step:'file_retry',agent:'agent-1',file:'src/db.js',kind:'format',attempt:2,message:'src/db.js — 응답 형식이 맞지 않음 → 처음부터 80줄씩 다시 씁니다 (2/3)'},
+  {step:'file_failed',agent:'agent-1',file:'src/db.js',kind:'format',message:'src/db.js — 3번 시도해도 응답 형식이 맞지 않음 · 나머지를 먼저 만듭니다'},
+  {step:'paused',kind:'format',message:'멈춤 — src/db.js — 3번 시도해도 응답 형식이 맞지 않음'}]);
+ const t=v.records.map(r=>`${r.who}|${r.text}|${r.tone||''}`);
+ for(const w of ['개발 1|db.js — 응답이 잘려 80줄씩으로 줄여 다시 씁니다|warn','개발 1|src/db.js — 응답 형식이 맞지 않음 → 처음부터 80줄씩 다시 씁니다 (2/3)|warn',
+   '|멈춤 — src/db.js — 3번 시도해도 응답 형식이 맞지 않음|warn'])assert.ok(t.includes(w),w+'\n'+t.join('\n'));
+ assert.equal(v.files.find(f=>f.file==='src/db.js').state,'failed');assert.equal(v.agents['agent-1'].state,'idle');
+ const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster:buildRoster(2),view:v,width:900}));
+ assert.match(html,/1개 못 만듦/);assert.doesNotMatch(html,/<b>1\/2<\/b>/,'실패한 파일은 선반 완료 수에 넣지 않는다');
+ const panel=renderToStaticMarkup(React.createElement(PausePanel,{paused:{message:'m',done:50,total:51,failed:[{file:'client/src/styles/pages.css',kind:'format',reason:'응답 형식이 맞지 않음'}]},onResume(){}}));
+ for(const w of ['만들지 못한 파일 1개 — 나머지 50/51개는 저장했습니다','client/src/styles/pages.css','3번 시도해도 응답 형식이 맞지 않음','>이 파일 다시 쓰기<','>이 파일 빼고 결과 받기<'])assert.ok(panel.includes(w),w);
+ const plain=renderToStaticMarkup(React.createElement(PausePanel,{paused:{message:'AI 사용 한도',done:4,total:9},onResume(){}}));
+ assert.match(plain,/AI 사용 한도/);assert.match(plain,/이어서 만들기 \(4\/9\)/);assert.doesNotMatch(plain,/빼고 결과/);
+ const src=require('node:fs').readFileSync(require('node:path').join(__dirname,'../webview-src/components/CodeAgent.tsx'),'utf8');
+ assert.match(src,/skipFailed: true/);assert.match(src,/<PausePanel standalone/);
+});
+
+test('나눠 쓰기 기록은 실제 조각 크기를 쓴다(다시 쓰기는 40줄)',()=>{
+ assert.equal(recordOf({step:'file_split',agent:'agent-1',file:'src/a.js',lines:40,message:'src/a.js 이(가) 커서 40줄씩 나눠 씁니다'},[]).text,'a.js 가 커서 40줄씩 이어 씁니다');
+ assert.equal(recordOf({step:'file_split',agent:'agent-1',file:'src/a.js',lines:150,message:'src/a.js 이어 쓰기를 이어서 합니다'},[]).text,'a.js 쓰던 조각에 이어서 씁니다');
+});

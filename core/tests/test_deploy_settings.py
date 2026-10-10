@@ -161,6 +161,15 @@ def test_계획에_필요한_설정이_값_없이_실린다(tmp_path):
     assert ds.load("shop")["generated"]["JWT_SECRET"] not in plan.model_dump_json()
 
 
+def test_데모를_못_쓰는_앱은_계획에_이유를_싣고_데모는_켜지_않는다(tmp_path):
+    ws = str(shop(tmp_path, demo=False))
+    plan = _plan()
+    routes._apply_settings_to_plan(plan, ws)
+    assert plan.demo and plan.demo["available"] is False and plan.demo["enabled"] is False
+    assert "모의 결제 모드가 없어" in plan.demo["unavailable_reason"]
+    assert plan.settings_missing == ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"]
+
+
 def test_비어_있으면_빌드하지_않고_멈춘다(tmp_path, monkeypatch):
     ws = str(shop(tmp_path))
     plan = _plan()

@@ -10,6 +10,7 @@ import { loadUiState, saveUiState } from "../hooks/uiState";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { Followups, collapseChanged, insertFollowups, isConfirmOnly, pendingFollowup } from "./decisionFlow";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
+import { FailedFile, PausePanel, ResumeMode } from "./pausePanel";
 import { ConsistencyIssue, RemainingIssues, UnusedFile, UnusedFilesNote, applyLocked, filesToApply } from "./codeIssues";
 import { TeamBoard, TeamComposer } from "./TeamBoard";
 import { ANIMAL_KINDS } from "./teamAnimals";
@@ -71,7 +72,7 @@ export function buildDecisionChoices(
 //: 전부 이 고정값을 쓴다.
 //: 팀 모드: team 은 코어 진행 이벤트를 접은 화면 상태, request 는 [이어서 만들기]에 그대로 다시 보낼 생성 요청.
 interface GenerateRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; decisions: DecisionChoice[]; mode: "auto" | "team"; agents: number; }
-interface PausedInfo { message: string; jobId: string; done: number; total: number; }
+interface PausedInfo { message: string; jobId: string; done: number; total: number; reason?: string; failed?: FailedFile[]; }
 interface Turn { id: number; prompt: string; targetFolder: string; contextNames?: string[]; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string;
   roster?: TeamMember[]; team?: TeamView; request?: GenerateRequest; paused?: PausedInfo | null; }
 export interface CtxFile { path: string; content: string; }
@@ -263,7 +264,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       }
       if (responseId === undefined || activeRequest.current === responseId) activeRequest.current = null;
       if (responseId !== undefined) delete pendingRequestsRef.current[responseId];
-      const pause = payload as { resumable?: boolean; resumeJob?: string; done?: number; total?: number };
+      const pause = payload as { resumable?: boolean; resumeJob?: string; done?: number; total?: number; reason?: string; failed?: FailedFile[] };
       setTurns((ts) => {
         const copy = [...ts];
         const requestId = (payload as { requestId?: number })?.requestId;
@@ -271,7 +272,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           if ((requestId === undefined || copy[i].id === requestId) && (copy[i].status === "planning" || copy[i].status === "generating")) {
             //: 다 만든 파일은 코어에 저장돼 있다 — 실패가 아니라 일시 정지로 보여 주고 [이어서 만들기]를 준다.
             const paused = pause.resumable && pause.resumeJob && copy[i].request
-              ? { message: m, jobId: pause.resumeJob, done: Number(pause.done) || copy[i].team?.done || 0, total: Number(pause.total) || copy[i].team?.total || 0 }
+              ? { message: m, jobId: pause.resumeJob, done: Number(pause.done) || copy[i].team?.done || 0, total: Number(pause.total) || copy[i].team?.total || 0,
+                  reason: typeof pause.reason === "string" ? pause.reason : "",
+                  failed: Array.isArray(pause.failed) ? pause.failed.filter(f => f && typeof f.file === "string") : [] }
               : null;
             copy[i] = { ...copy[i], status: "error", error: m, paused };
             break;
@@ -403,13 +406,16 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   }, [confirmDecisions, postMessage]);
 
   //: 멈춘 대규모 생성을 같은 요청·같은 작업 ID 로 다시 보낸다 — 코어가 멈춘 지점부터 이어 만든다.
-  const resumeTurn = useCallback((turn: Turn) => {
+  //: mode — retry: 멈춘 지점부터(실패한 파일은 가장 작은 조각으로 처음부터 다시), skip: 실패한 파일을 빼고 결과만 받기.
+  const resumeTurn = useCallback((turn: Turn, mode: ResumeMode = "retry") => {
     if (!turn.request || !turn.paused || activeRequest.current !== null) return;
     activeRequest.current = turn.id;
     expiredRequests.current.delete(turn.id);
-    setTurns(ts => ts.map(t => t.id === turn.id ? { ...t, status: "generating", error: undefined, paused: null, progress: "멈춘 지점부터 이어서 만드는 중…" } : t));
+    const skip = mode === "skip" && !!turn.paused.failed?.length;
+    setTurns(ts => ts.map(t => t.id === turn.id ? { ...t, status: "generating", error: undefined, paused: null,
+      progress: skip ? "만들지 못한 파일을 빼고 결과를 받는 중…" : "멈춘 지점부터 이어서 만드는 중…" } : t));
     waitForResponse(turn.id, 60);
-    postMessage("code.generate", { requestId: turn.id, ...turn.request, resumeJob: turn.paused.jobId });
+    postMessage("code.generate", { requestId: turn.id, ...turn.request, resumeJob: turn.paused.jobId, ...(skip ? { skipFailed: true } : {}) });
   }, [postMessage]);
 
   const applyOp = useCallback((turn: Turn, op: CodeOp) => {
@@ -573,8 +579,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           ) : <div style={{ height: 8 }} />}
 
           {turn.team && teamWorking(turn.team) && (turn.status === "generating" || turn.paused) && (
-            <TeamBoard roster={turn.roster ?? roster} view={turn.team} paused={turn.paused ? { message: turn.paused.message, done: turn.paused.done, total: turn.paused.total } : null}
-              onResume={turn.paused && !isBusy ? () => resumeTurn(turn) : undefined} />
+            <TeamBoard roster={turn.roster ?? roster} view={turn.team} paused={turn.paused ? { message: turn.paused.message, done: turn.paused.done, total: turn.paused.total, reason: turn.paused.reason, failed: turn.paused.failed } : null}
+              onResume={turn.paused && !isBusy ? (mode) => resumeTurn(turn, mode) : undefined} />
           )}
           {(turn.status === "planning" || turn.status === "generating") && (
             <>
@@ -586,10 +592,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
             </>
           )}
           {turn.status === "error" && turn.paused && !turn.team && (
-            <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(204,167,0,.08)", border: "1px solid rgba(204,167,0,.35)", borderRadius: 4, padding: "7px 10px", fontSize: 11 }}>
-              <span style={{ flex: 1 }}>⏸ {turn.error}</span>
-              <button onClick={() => resumeTurn(turn)} disabled={isBusy} style={{ ...primaryBtn, padding: "4px 10px", fontSize: 11 }}>이어서 만들기{turn.paused.total ? ` (${turn.paused.done}/${turn.paused.total})` : ""}</button>
-            </div>
+            <PausePanel standalone paused={turn.paused} disabled={isBusy} onResume={(mode) => resumeTurn(turn, mode)} />
           )}
           {turn.status === "error" && !turn.paused && (
             <div style={{ background: "var(--vscode-inputValidation-errorBackground, rgba(239,68,68,0.1))", border: "1px solid var(--vscode-inputValidation-errorBorder, #ef4444)", borderRadius: 4, padding: "7px 10px", color: "var(--vscode-errorForeground, #f48771)", fontSize: 11 }}>{turn.error}</div>

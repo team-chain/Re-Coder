@@ -11,9 +11,11 @@ export interface TeamEvent {
   step: string; message?: string; job_id?: string; agent?: string; file?: string; part?: number; lines?: number;
   layer?: number; agents?: number; seconds?: number; done_count?: number; total?: number; elapsed?: number;
   summary?: string; files?: Array<{ file: string; layer?: number; purpose?: string }>;
+  kind?: string; attempt?: number;
 }
 
-export type FileState = "waiting" | "writing" | "parts" | "fixing" | "done" | "issue";
+/** failed: 정해진 횟수를 넘겨 실패 — 완료로 세지 않는다(사용자가 다시 쓰기·빼고 받기를 고른다). */
+export type FileState = "waiting" | "writing" | "parts" | "fixing" | "done" | "issue" | "failed";
 export type AgentState = "idle" | "writing" | "parts" | "fixing" | "waiting" | "done";
 
 export interface TeamAgentView { id: string; state: AgentState; file?: string; part?: number; lines?: number; done: number; }
@@ -73,6 +75,7 @@ export function buildRoster(devCount: number, rand: () => number = Math.random, 
 
 const STATE_OF_STEP: Record<string, AgentState | undefined> = {
   file_start: "writing", file_split: "parts", file_part: "parts", fixing: "fixing", retry: "waiting", waiting: "waiting",
+  file_retry: "writing", part_retry: "parts",
 };
 
 const ENGINE_STEPS = new Set(["planning", "planned", "wave", "file_start", "file_split", "file_part", "file_done",
@@ -110,12 +113,17 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
         : `${LAYER_TEXT[l] ?? "다음 단계"} ${count}개 — ${event.agents ?? "여러"}명이 동시에 만듭니다` };
     }
     case "file_start": return event.file ? { who, role, text: `${event.file} 작성 시작` } : null;
-    case "file_split": return event.file ? { who, role, text: `${base(event.file)} 가 커서 ${150}줄씩 이어 씁니다` } : null;
+    case "file_split": return event.file ? { who, role, text: msg.includes("이어 쓰기를 이어서")
+      ? `${base(event.file)} 쓰던 조각에 이어서 씁니다`
+      : `${base(event.file)} 가 커서 ${event.lines || 150}줄씩 이어 씁니다` } : null;
     case "fixing": return { who, role, tone: "warn", text: `자동 검사에서 문제 발견 → 고치는 중${msg.includes("—") ? ` (${msg.split("—").slice(1).join("—").trim().slice(0, 60)})` : ""}` };
     case "verified": return event.file ? { who, role, tone: "ok", text: `${base(event.file)} 고친 뒤 확인 통과` } : null;
     case "verify_failed": return { who, role, tone: "warn", text: msg ? `확인 필요 — ${msg.slice(0, 80)}` : "확인 필요" };
     case "file_done": return event.file ? { who, role, tone: "ok", text: `${event.file} 완료${event.lines ? ` (${event.lines}줄)` : ""}` } : null;
     case "retry": return { who, role, tone: "warn", text: msg || `일시적 오류 — ${event.seconds ?? "잠시"}초 뒤 다시 시도` };
+    case "part_retry": case "file_retry": return { who, role, tone: "warn", text: msg || `${base(event.file)} — 방법을 바꿔 다시 씁니다` };
+    case "file_failed": return { who, role, tone: "warn", text: msg || `${base(event.file)} — 만들지 못함` };
+    case "paused": return { who: "", role: "system", tone: "warn", text: msg || "멈춤" };
     case "waiting": return { who, role, tone: "warn", text: msg || `분당 호출 한도 — ${event.seconds ?? "잠시"}초 대기` };
     case "generated": case "consistency": return { who: "검토", role: "review", text: msg || "전체 점검 — 컨테이너 빌드로 확인" };
     case "resumed": return { who: "", role: "system", text: msg || "멈춘 지점부터 이어서 만듭니다" };
@@ -167,6 +175,8 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
       break;
     }
     case "verify_failed": setFile(event.file, "issue"); next.issues += 1; break;
+    case "file_retry": setFile(event.file, "writing"); next.retries += 1; break;
+    case "file_failed": setFile(event.file, "failed"); break;
     case "file_done": setFile(event.file, view.files.find(f => f.file === event.file)?.state === "issue" ? "issue" : "done"); break;
     case "retry": next.retries += 1; break;
     case "generated": case "consistency": next.phase = "checking"; break;
@@ -181,6 +191,8 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
     const state = STATE_OF_STEP[event.step];
     if (event.step === "file_done") {
       agent.state = "idle"; agent.done += 1; agent.file = undefined; agent.part = undefined;
+    } else if (event.step === "file_failed") {
+      agent.state = "idle"; agent.file = undefined; agent.part = undefined;
     } else if (state) {
       agent.state = state;
       if (event.file) agent.file = event.file;

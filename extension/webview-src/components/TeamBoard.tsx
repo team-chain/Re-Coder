@@ -8,6 +8,7 @@ import { CHARACTER_NAME } from "./recoderCharacter";
 import { Switch } from "./Check";
 import { TeamVillage } from "./TeamVillage";
 import { MAX_DEV_AGENTS, TeamMember, TeamView, formatElapsed, polishingCount } from "./teamState";
+import { PauseInfo, PausePanel, ResumeMode } from "./pausePanel";
 
 const ROLE_LABEL: Record<TeamMember["role"], string> = { planner: "설계", dev: "개발", review: "검토" };
 const ROLE_HINT: Record<TeamMember["role"], string> = {
@@ -113,8 +114,8 @@ const AGENT_STATE_TEXT: Record<string, string> = {
 /** 생성 중인 턴 — 누가 무엇을 하고 있는지, 전체 진행, 멈췄으면 이어서 만들기. */
 export const TeamBoard: React.FC<{
   roster: TeamMember[]; view: TeamView;
-  paused?: { message: string; done: number; total: number } | null;
-  onResume?: () => void;
+  paused?: PauseInfo | null;
+  onResume?: (mode: ResumeMode) => void;
 }> = ({ roster, view, paused, onResume }) => {
   const pct = view.total ? Math.round((view.done / view.total) * 100) : 0;
   const status = paused ? "일시 정지" : view.phase === "planning" ? "설계 중" : view.phase === "checking" ? "전체 점검 중" : view.phase === "done" ? "완료" : "만드는 중";
@@ -189,14 +190,7 @@ export const TeamBoard: React.FC<{
         ? <div className="rc-team-log" aria-live="polite">{records.slice(-3).map((r, i) => <div key={i}>{r.who ? `${r.who} · ` : ""}{r.text}</div>)}</div>
         : view.log.length > 0 && <div className="rc-team-log" aria-live="polite">{view.log.slice(-3).map((l, i) => <div key={i}>{l}</div>)}</div>}
       </>}
-      {paused && (
-        <div className="rc-team-pause" role="status">
-          <span style={{ flex: 1 }}>⏸ {paused.message}</span>
-          {onResume && <button type="button" onClick={onResume} style={{ border: "1px solid transparent", borderRadius: 4, padding: "5px 11px", background: "var(--vscode-button-background,#0e639c)", color: "var(--vscode-button-foreground,#fff)", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
-            이어서 만들기{paused.total ? ` (${paused.done}/${paused.total})` : ""}
-          </button>}
-        </div>
-      )}
+      {paused && <PausePanel paused={paused} onResume={onResume} />}
     </div>
   );
 };

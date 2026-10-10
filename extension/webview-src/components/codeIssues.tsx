@@ -38,6 +38,7 @@ const ISSUE_TITLE: Record<string, string> = {
   GENERATED_SECRET_IN_FILE: "파일에 키가 들어감",
   UNUSED_GENERATED_FILE: "아무도 쓰지 않는 파일",
   SERVER_ROUTE_NOT_MOUNTED: "서버에 등록 안 된 API",
+  GENERATED_FILE_SKIPPED: "만들지 못해 뺀 파일",
 };
 
 export const RemainingIssues: React.FC<{

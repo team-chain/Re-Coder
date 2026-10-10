@@ -104,13 +104,17 @@ def prune() -> None:
 class GenerationPaused(RuntimeError):
     """생성이 중간에 멈췄지만 만든 것은 저장됐다 — 같은 job_id 로 이어 만들 수 있다."""
 
-    def __init__(self, message: str, job_id: str, done: int = 0, total: int = 0, reason: str = "") -> None:
+    def __init__(self, message: str, job_id: str, done: int = 0, total: int = 0, reason: str = "",
+                 failed: list | None = None) -> None:
         super().__init__(message)
         self.job_id = job_id
         self.done = done
         self.total = total
         self.reason = reason
+        #: 정해진 횟수를 넘겨 실패한 파일 [{file, kind, reason}] — 화면이 [다시 쓰기]/[빼고 받기]를 보여 준다.
+        self.failed = [{"file": str(f.get("file") or ""), "kind": str(f.get("kind") or ""), "reason": str(f.get("reason") or "")}
+                       for f in (failed or []) if isinstance(f, dict)]
 
     def progress_payload(self) -> dict:
         return {"resumable": True, "resume_job": self.job_id, "done_count": self.done,
-                "total": self.total, "reason": self.reason}
+                "total": self.total, "reason": self.reason, "failed": self.failed}
