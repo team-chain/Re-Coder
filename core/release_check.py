@@ -24,6 +24,8 @@ RUNTIME_IMPORTS = (
     'resources',
     #: 2.0.12 — ECS 에서 앱이 시작하도록 DB·서명 키·모의 결제를 같은 태스크에 준비
     'agents.ecs_runtime',
+    #: 2.0.18 — 생성 직후 실행 점검(빌드한 이미지를 ECS staging 구성으로 띄워 사용자 흐름 API 확인)
+    'runtime_check',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에

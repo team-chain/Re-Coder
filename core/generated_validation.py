@@ -18,7 +18,7 @@ from grounded_repair.workspace import manifest, safe_path, snapshot
 _BUILD_TIMEOUT = int(os.environ.get("RECODER_VERIFY_BUILD_TIMEOUT", "480"))
 
 
-def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None) -> dict:
+def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None, run_app: bool = False) -> dict:
     timeout = timeout or _BUILD_TIMEOUT
     base = {"kind": "docker-build", "passed": False, "status": "unavailable"}
     if os.getenv("RECODER_TEST_MODE") == "1":
@@ -76,8 +76,20 @@ def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None) 
                     "error during connect",
                 )
             )
+            runtime = None
+            if run_app and process.returncode == 0 and image_file.is_file():
+                #: 빌드가 통과하면 같은 이미지를 ECS(staging) 구성으로 잠깐 띄워 사용자 흐름 API 를 불러 본다(runtime_check).
+                try:
+                    import runtime_check
+                    if runtime_check.enabled():
+                        runtime = runtime_check.run(workspace, image_file.read_text(encoding="utf-8").strip())
+                        for failure in runtime.get("failures") or []:
+                            failure["lines"] = [mask_secrets(line) for line in failure.get("lines") or []]
+                except Exception as exc:  # noqa: BLE001 - 실행 점검 실패가 빌드 판정을 바꾸지 않는다
+                    runtime = {"status": "unavailable", "note": mask_secrets(str(exc))[:300]}
             return {
                 **base,
+                **({"runtime": runtime} if runtime else {}),
                 "passed": process.returncode == 0,
                 "status": (
                     "unavailable"

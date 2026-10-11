@@ -1,3 +1,10 @@
+# 생성 직후 실행 점검 · sandbox 실제 Docker 로 Local·ECS 재현 (2026-10-11, 2.0.18)
+
+- sandbox 에 dockerd 가 뜨고 이전 세션이 만든 대체 이미지(node:22-alpine = 호스트 node+npm, apk 는 no-op · postgres:16-alpine = 호스트 PG16)가 있다. 레지스트리는 막혀 있어 내려받기 불가. postgres 대체 이미지를 공식 entrypoint 와 같게 보강(base64, initdb.d *.sh source, 추가 인자) — /tmp/fakepg. `docker tag postgres:16-alpine public.ecr.aws/docker/library/postgres:16-alpine`.
+- 사용자 TEMP(cdf7 쇼핑몰, 2.0.16 생성) 스냅숏을 Core API(/api/deploy/readiness → fix-all → plan local_docker → settings demo → execute)로 실제 Local Docker 배포: 112초 success, app_check 가 /api/products 500 을 APP_RUNTIME_ERROR 로 잡음. ECS 는 `_render_task_definition` 결과(11KB, botocore 검증 OK)를 한 네트워크 네임스페이스로 재현(/tmp/ld/ecs_emulate.py): postgres(초기화 SQL)·모의 결제·앱 정상 기동, 앱 자체 500 동일. S3 는 moto 로 버킷·웹사이트·업로드·정리 정상(화면만, API 없음 — 안내 있음).
+- 새 `core/runtime_check.py`: route_table(Express app.use+router.*), scenario(목록·상세·가입·로그인·인증 목록·장바구니·주문, 5xx 만 실패, 요청별 새 로그), source_files(스택 dist→src), useful_lines(오류 객체 덤프 제거), run(ecs_runtime.plan staging 그대로 docker 로 — sleep 컨테이너의 netns 공유, 임의 호스트 포트, finally 정리), issues → GENERATED_RUNTIME_ERROR. generated_validation.verify_proposal(run_app=True) 가 빌드 통과 시 실행, code_agent 루프가 실행 오류를 errors 로 교정(요청 단위 진척 비교·악화 시 되돌림), 최종 결과에 남은 실행 오류. RECODER_RUNTIME_CHECK=0 으로 끔.
+- 화면 제어(사용자 PC)는 캡처가 0x0 으로 실패해 못 함 — PC 에서의 최종 확인(생성·Local·S3·ECS)은 사용자 실행 필요. AWS 정리 기능 없음(수동 삭제 안내).
+
 # ECS SBOM 단계 실패(cp949) · Core 인코딩 전수 정리 (2026-10-11, 2.0.17)
 
 - 실기기 2.0.16 ECS(82b0255b, 새로 생성한 쇼핑몰 cdf7): 빌드·ECR·Trivy 통과 뒤 SBOM 단계 실패 `'cp949' codec can't decode byte 0xc8 in position 235511`. sbom.py 가 `output_path.read_text()`(로캘 인코딩). SBOM(312KB, 410개)은 UTF-8 이고 의존성 작성자 `Ștefan Rusu` 등이 있음 — 새 앱의 의존성(multer·aws-sdk)부터 드러남.

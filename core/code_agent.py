@@ -2364,10 +2364,25 @@ def _build_failure_issues(verification: dict, ops: list[dict]) -> list[dict]:
         return []
 
 
-def _verify_generated_build(root: Path, target_folder: str, ops: list[dict]) -> dict:
+def _verify_generated_build(root: Path, target_folder: str, ops: list[dict], run_app: bool = False) -> dict:
     from generated_validation import verify_proposal
     base = (root / target_folder).resolve() if target_folder else root.resolve()
+    if run_app:
+        return verify_proposal(base, _verification_ops(base, ops), run_app=True)
     return verify_proposal(base, _verification_ops(base, ops))
+
+
+def _runtime_issues(verification: dict) -> list[dict]:
+    """빌드는 통과했는데 실행 점검(runtime_check)에서 5xx·기동 실패가 나온 것 → 파일별 고칠 문제."""
+    runtime = verification.get("runtime") if isinstance(verification, dict) else None
+    if not isinstance(runtime, dict) or runtime.get("status") != "failed":
+        return []
+    try:
+        import runtime_check
+        return runtime_check.issues(runtime)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[code_agent] 실행 점검 결과 해석 생략: {exc}", flush=True)
+        return []
 
 
 def _verification_ops(base: Path, ops: list[dict]) -> list[dict]:
@@ -2660,6 +2675,9 @@ def generate_code(
     build_counts: list[int] = []
     build_keys: list[set] = []
     prev_state: tuple | None = None
+    #: 실행 점검(runtime_check) 오류의 흐름 — 고쳐도 줄지 않으면 멈춘다.
+    runtime_keys: list[set] = []
+    prev_runtime: tuple | None = None
     for _round in range(_CONSISTENCY_ROUNDS):
         if _round and _time.monotonic() - started_at > budget:
             print(f"[code_agent] 생성 시간 예산({budget}s) 초과 — AI 교정을 멈추고 결과를 돌려줍니다", flush=True)
@@ -2678,48 +2696,71 @@ def generate_code(
                 errors = errors + [e for e in _build_failure_issues(built, ops_out) if (e.get("file"), e.get("code")) not in seen]
         if not errors:
             _report({"step": "consistency", "round": _round + 1, "message": "컨테이너 빌드로 실제 동작을 확인하는 중"})
-            verification = _verify_generated_build(root, target_folder, ops_out)
+            verification = _verify_generated_build(root, target_folder, ops_out, run_app=not existing and not foundation)
             if verification["status"] != "failed":
-                break
-            try:
-                import node_fixups as _nf
-                rename_notes, renamed = _nf.prisma_relation_renames(
-                    str(verification.get("output") or ""), {op["file"]: op.get("content") or "" for op in ops_out})
-            except Exception as exc:  # noqa: BLE001 — 결정적 교정 실패는 AI 교정으로 넘어간다
-                print(f"[code_agent] Prisma 관계 이름 점검 생략: {exc}", flush=True)
-                renamed = {}
-            if renamed:
-                #: 코드가 쓰는 관계 이름과 스키마가 다르다 — 스키마의 관계 필드 이름만 바꾸고 다시 빌드한다(AI 없이).
-                for op in ops_out:
-                    if op["file"] in renamed:
-                        op["content"] = renamed[op["file"]]
-                print(f"[code_agent] {rename_notes}", flush=True)
+                runtime_errors = _runtime_issues(verification)
+                if not runtime_errors:
+                    break
+                #: 빌드는 되지만 실행하면 5xx·기동 실패 — 서버 로그와 함께 그 파일을 고친다(실기기 2.0.16: 상품 목록 500).
+                #: 요청 단위로 비교한다(로그에는 시각·임의 값이 섞여 매번 달라진다).
+                rkeys = {re.sub(r"/\d+(?=/|$)", "/:id", str(f.get("request")))
+                         for f in (verification.get("runtime") or {}).get("failures") or []}
+                if runtime_keys and not (runtime_keys[-1] - rkeys):
+                    worse = bool(rkeys - runtime_keys[-1])
+                    if worse and prev_runtime is not None:
+                        ops_out, verification = prev_runtime
+                    print(f"[code_agent] 실행 점검 오류가 줄지 않아 교정을 멈춥니다(남은 {len(rkeys)}건)", flush=True)
+                    _report({"step": "consistency", "round": _round + 1,
+                             "message": "실행 점검 오류가 더 줄지 않아 교정을 멈췄습니다 — 결과에 요청·서버 로그를 보여 드립니다"})
+                    break
+                runtime_keys.append(rkeys)
+                prev_runtime = (ops_out, verification)
+                errors = runtime_errors
+                failing = ", ".join(dict.fromkeys(f["request"] for f in (verification.get("runtime") or {}).get("failures") or []))
                 _report({"step": "consistency", "round": _round + 1,
-                         "message": "Prisma 관계 이름을 코드에 맞춤 — " + "; ".join(n.split(": ", 1)[-1] for n in rename_notes[:3])})
-                consistency = _issues_for(ops_out)
-                continue
-            #: 빌드 로그의 오류를 파일별 문제로 — 부분 교정이 그 소스 파일을 고친다(예전엔 Dockerfile 만 지목해 못 고쳤다).
-            errors = _build_failure_issues(verification, ops_out) or [
-                {"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
-                 "message": verification["output"],
-                 "fix": "실제 빌드 로그의 원인을 고치세요. 검사를 제거하거나 기능을 생략하지 마세요."}]
-            keys = _build_error_keys(errors)
-            count = len(keys) or len(errors)
-            if build_keys and not (build_keys[-1] - keys):
-                #: 직전 빌드 오류가 하나도 사라지지 않았다 — 같은 교정을 되풀이하지 않는다. 이번 교정이 오류를 더했으면
-                #: 직전 상태로 되돌린다(고친다며 더 망가뜨린 결과를 주지 않게).
-                worse = bool(keys - build_keys[-1])
-                if worse and prev_state is not None:
-                    ops_out, errors, verification = prev_state
-                    count = len(build_keys[-1]) or len(errors)
-                print(f"[code_agent] 빌드 오류가 줄지 않아 교정을 멈춥니다(남은 {count}건{' · 직전 상태로 되돌림' if worse else ''})", flush=True)
-                _report({"step": "consistency", "round": _round + 1,
-                         "message": f"빌드 오류가 더 줄지 않아 교정을 멈췄습니다(남은 {count}건) — 결과에 파일별로 보여 드립니다"})
-                consistency = errors
-                break
-            build_keys.append(keys)
-            build_counts.append(count)
-            prev_state = (ops_out, errors, verification)
+                         "message": f"실행 점검 — 앱을 띄워 보니 {failing} 가 오류를 냅니다. 서버 로그로 고치는 중"})
+            else:
+                errors = None
+            if errors is None:
+                try:
+                    import node_fixups as _nf
+                    rename_notes, renamed = _nf.prisma_relation_renames(
+                        str(verification.get("output") or ""), {op["file"]: op.get("content") or "" for op in ops_out})
+                except Exception as exc:  # noqa: BLE001 — 결정적 교정 실패는 AI 교정으로 넘어간다
+                    print(f"[code_agent] Prisma 관계 이름 점검 생략: {exc}", flush=True)
+                    renamed = {}
+                if renamed:
+                    #: 코드가 쓰는 관계 이름과 스키마가 다르다 — 스키마의 관계 필드 이름만 바꾸고 다시 빌드한다(AI 없이).
+                    for op in ops_out:
+                        if op["file"] in renamed:
+                            op["content"] = renamed[op["file"]]
+                    print(f"[code_agent] {rename_notes}", flush=True)
+                    _report({"step": "consistency", "round": _round + 1,
+                             "message": "Prisma 관계 이름을 코드에 맞춤 — " + "; ".join(n.split(": ", 1)[-1] for n in rename_notes[:3])})
+                    consistency = _issues_for(ops_out)
+                    continue
+                #: 빌드 로그의 오류를 파일별 문제로 — 부분 교정이 그 소스 파일을 고친다(예전엔 Dockerfile 만 지목해 못 고쳤다).
+                errors = _build_failure_issues(verification, ops_out) or [
+                    {"code": "GENERATED_BUILD_FAILED", "severity": "error", "file": "Dockerfile",
+                     "message": verification["output"],
+                     "fix": "실제 빌드 로그의 원인을 고치세요. 검사를 제거하거나 기능을 생략하지 마세요."}]
+                keys = _build_error_keys(errors)
+                count = len(keys) or len(errors)
+                if build_keys and not (build_keys[-1] - keys):
+                    #: 직전 빌드 오류가 하나도 사라지지 않았다 — 같은 교정을 되풀이하지 않는다. 이번 교정이 오류를 더했으면
+                    #: 직전 상태로 되돌린다(고친다며 더 망가뜨린 결과를 주지 않게).
+                    worse = bool(keys - build_keys[-1])
+                    if worse and prev_state is not None:
+                        ops_out, errors, verification = prev_state
+                        count = len(build_keys[-1]) or len(errors)
+                    print(f"[code_agent] 빌드 오류가 줄지 않아 교정을 멈춥니다(남은 {count}건{' · 직전 상태로 되돌림' if worse else ''})", flush=True)
+                    _report({"step": "consistency", "round": _round + 1,
+                             "message": f"빌드 오류가 더 줄지 않아 교정을 멈췄습니다(남은 {count}건) — 결과에 파일별로 보여 드립니다"})
+                    consistency = errors
+                    break
+                build_keys.append(keys)
+                build_counts.append(count)
+                prev_state = (ops_out, errors, verification)
         if foundation:
             break  # A reviewed foundation is never silently rewritten by a model.
         if split_mode and any(e.get("code") == "NODE_LOCAL_IMPORT_MISSING" for e in errors):
@@ -2833,6 +2874,9 @@ def generate_code(
     if verification["status"] == "blocked":
         #: 정적 문제가 남아도 실제 빌드는 확인한다 — 결과에 "빌드 검증 미통과" 만 남고 무엇이 깨지는지 몰랐다(실기기 2.0.6).
         verification = _verify_generated_build(root, target_folder, ops_out)
+    if verification["status"] != "failed" and not existing and not foundation:
+        seen_rt = {(i.get("file"), i.get("code")) for i in consistency}
+        consistency += [i for i in _runtime_issues(verification) if (i.get("file"), i.get("code")) not in seen_rt]
     if verification["status"] == "failed":
         per_file = _build_failure_issues(verification, ops_out)
         seen = {(i.get("file"), i.get("code")) for i in consistency}
