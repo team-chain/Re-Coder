@@ -102,7 +102,7 @@ app.use(express.static('frontend/dist'));
 
 // 404 handler for API routes (JSON only, no HTML fallback)
 app.use('/api', (req, res) => {
-  res.status(404).json({ error: 'Not found' });
+  res.status(404).json({ error: '요청한 주소를 찾을 수 없습니다' });
 });
 
 // SPA fallback for non-API routes

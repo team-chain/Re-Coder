@@ -38,7 +38,7 @@ export function AuthProvider({ children }) {
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Registration failed');
+        throw new Error(data.error || '회원가입에 실패했습니다');
       }
 
       const data = await response.json();
@@ -76,7 +76,7 @@ export function AuthProvider({ children }) {
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Login failed');
+        throw new Error(data.error || '로그인에 실패했습니다');
       }
 
       const data = await response.json();

@@ -22,10 +22,10 @@ router.post('/', authMiddleware, async (req, res) => {
 
     // Validate idempotency_key
     if (!idempotency_key || typeof idempotency_key !== 'string') {
-      return res.status(400).json({ error: 'idempotency_key is required' });
+      return res.status(400).json({ error: '주문 요청 키가 없습니다. 새로고침 후 다시 시도하세요' });
     }
     if (idempotency_key.length < 8 || idempotency_key.length > 128) {
-      return res.status(400).json({ error: 'Invalid idempotency_key length' });
+      return res.status(400).json({ error: '주문 요청 키가 올바르지 않습니다' });
     }
 
     await client.query('BEGIN');
@@ -49,13 +49,13 @@ router.post('/', authMiddleware, async (req, res) => {
       const existingOrder = existingOrderResult.rows[0];
       if (!['unpaid','pending'].includes(existingOrder.status)) {
         await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Order is already closed' });
+        return res.status(409).json({ error: '이미 종료된 주문입니다' });
       }
 
       // Verify ownership
       if (existingOrder.user_id !== userId) {
         await client.query('ROLLBACK');
-        return res.status(403).json({ error: 'Access denied' });
+        return res.status(403).json({ error: '이 주문을 볼 권한이 없습니다' });
       }
 
       // If payment_id exists, retrieve from Stripe
@@ -71,7 +71,7 @@ router.post('/', authMiddleware, async (req, res) => {
         } catch (stripeErr) {
           await client.query('ROLLBACK');
           console.error('Stripe retrieve error:', stripeErr);
-          return res.status(502).json({ error: 'Payment service unavailable' });
+          return res.status(502).json({ error: '결제 서비스에 연결할 수 없습니다' });
         }
       }
 
@@ -86,7 +86,7 @@ router.post('/', authMiddleware, async (req, res) => {
         const paymentIntent = await stripe.paymentIntents.create(
           {
             amount: existingOrder.total_amount,
-            currency: 'usd',
+            currency: 'krw',
             metadata: {
               order_id: existingOrder.id.toString(),
               user_id: userId.toString(),
@@ -115,9 +115,9 @@ router.post('/', authMiddleware, async (req, res) => {
         await client.query('ROLLBACK');
         console.error('Stripe create error for existing order:', stripeErr);
         if (stripeErr.statusCode && stripeErr.statusCode >= 400 && stripeErr.statusCode < 500) {
-          return res.status(400).json({ error: 'Payment initialization failed' });
+          return res.status(400).json({ error: '결제를 시작하지 못했습니다. 잠시 후 다시 시도하세요' });
         }
-        return res.status(502).json({ error: 'Payment service unavailable' });
+        return res.status(502).json({ error: '결제 서비스에 연결할 수 없습니다' });
       }
     }
 
@@ -139,7 +139,7 @@ router.post('/', authMiddleware, async (req, res) => {
 
     if (cartResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Cart is empty' });
+      return res.status(400).json({ error: '장바구니가 비어 있습니다' });
     }
 
     // Lock products in sorted order
@@ -167,26 +167,27 @@ router.post('/', authMiddleware, async (req, res) => {
 
       if (!product) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Invalid product in cart' });
+        return res.status(400).json({ error: '장바구니에 판매하지 않는 상품이 있습니다' });
       }
 
       // Validate quantity
       if (item.quantity <= 0 || !Number.isInteger(item.quantity)) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Invalid quantity' });
+        return res.status(400).json({ error: '수량이 올바르지 않습니다' });
       }
 
       if (item.quantity > MAX_QUANTITY_PER_ITEM) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Quantity exceeds maximum allowed' });
+        return res.status(400).json({ error: '한 번에 주문할 수 있는 수량을 넘었습니다' });
       }
 
       if (item.quantity > product.stock) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Insufficient stock' });
+        return res.status(400).json({ error: '재고가 부족합니다' });
       }
 
-      const priceInCents = Math.round(parseFloat(product.price) * 100);
+      // KRW 는 소수 단위가 없는 통화다 — 원 단위 정수로 계산하고 그대로 결제한다.
+      const priceInCents = Math.round(parseFloat(product.price));
       const itemTotal = priceInCents * item.quantity;
       totalAmount += itemTotal;
 
@@ -197,9 +198,9 @@ router.post('/', authMiddleware, async (req, res) => {
       });
     }
 
-    if (!Number.isSafeInteger(totalAmount) || totalAmount < 50 || totalAmount > 99999999) {
+    if (!Number.isSafeInteger(totalAmount) || totalAmount < 100 || totalAmount > 99999999) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Order amount is outside payment limits' });
+      return res.status(400).json({ error: '결제 가능한 금액은 100원 이상 1억 원 미만입니다' });
     }
 
     // Calculate expiry time
@@ -255,7 +256,7 @@ router.post('/', authMiddleware, async (req, res) => {
     const locked = await client.query('SELECT status FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
     if (!['unpaid','pending'].includes(locked.rows[0]?.status)) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Order is already closed' });
+      return res.status(409).json({ error: '이미 종료된 주문입니다' });
     }
 
     let paymentIntent;
@@ -263,7 +264,7 @@ router.post('/', authMiddleware, async (req, res) => {
       paymentIntent = await stripe.paymentIntents.create(
         {
           amount: totalAmount,
-          currency: 'usd',
+          currency: 'krw',
           metadata: {
             order_id: orderId.toString(),
             user_id: userId.toString(),
@@ -279,10 +280,10 @@ router.post('/', authMiddleware, async (req, res) => {
       await client.query('ROLLBACK');
       console.error('Stripe create error:', stripeErr);
       if (stripeErr.statusCode && stripeErr.statusCode >= 400 && stripeErr.statusCode < 500) {
-        return res.status(400).json({ error: 'Payment initialization failed' });
+        return res.status(400).json({ error: '결제를 시작하지 못했습니다. 잠시 후 다시 시도하세요' });
       }
       // Uncertain failure - keep order and reservations for retry
-      return res.status(502).json({ error: 'Payment service unavailable' });
+      return res.status(502).json({ error: '결제 서비스에 연결할 수 없습니다' });
     }
 
     // Update order with payment_id and status
@@ -303,7 +304,7 @@ router.post('/', authMiddleware, async (req, res) => {
       await client.query('ROLLBACK').catch(() => {});
     }
     console.error('Create order error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   } finally {
     if (client) {
       client.release();
@@ -340,7 +341,7 @@ router.get('/', authMiddleware, async (req, res) => {
     res.json({ orders });
   } catch (err) {
     console.error('Get orders error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -362,27 +363,29 @@ router.get('/:id', authMiddleware, async (req, res) => {
     );
 
     if (orderResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Order not found' });
+      return res.status(404).json({ error: '주문을 찾을 수 없습니다' });
     }
 
     const order = orderResult.rows[0];
 
     if (order.user_id !== userId) {
-      return res.status(403).json({ error: 'Access denied' });
+      return res.status(403).json({ error: '이 주문을 볼 권한이 없습니다' });
     }
 
     // Get order items
     const itemsResult = await pool.query(
-      `SELECT product_id, quantity, price
-       FROM order_items
-       WHERE order_id = $1`,
+      `SELECT oi.product_id, oi.quantity, oi.price, p.name
+       FROM order_items oi
+       LEFT JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = $1`,
       [id]
     );
 
     const items = itemsResult.rows.map(row => ({
       product_id: row.product_id,
       quantity: row.quantity,
-      price: row.price
+      price: row.price,
+      name: row.name
     }));
 
     res.json({
@@ -395,7 +398,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error('Get order error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -420,14 +423,14 @@ router.post('/:id/cancel', authMiddleware, async (req, res) => {
 
     if (orderResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Order not found' });
+      return res.status(404).json({ error: '주문을 찾을 수 없습니다' });
     }
 
     const order = orderResult.rows[0];
 
     if (order.user_id !== userId) {
       await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Access denied' });
+      return res.status(403).json({ error: '이 주문을 볼 권한이 없습니다' });
     }
 
     // If already cancelled, return idempotent success
@@ -439,7 +442,7 @@ router.post('/:id/cancel', authMiddleware, async (req, res) => {
     // Cannot cancel paid orders
     if (order.status === 'paid') {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Cannot cancel completed payment' });
+      return res.status(409).json({ error: '결제가 끝난 주문은 여기서 취소할 수 없습니다. 고객센터로 문의하세요' });
     }
 
     // If pending with payment_id, cancel Stripe PaymentIntent
@@ -450,12 +453,12 @@ router.post('/:id/cancel', authMiddleware, async (req, res) => {
         // If payment already succeeded, cannot cancel
         if (paymentIntent.status !== 'canceled') {
           await client.query('ROLLBACK');
-          return res.status(409).json({ error: 'Payment already completed' });
+          return res.status(409).json({ error: '이미 결제가 완료된 주문입니다' });
         }
       } catch (stripeErr) {
         await client.query('ROLLBACK');
         console.error('Stripe cancel error:', stripeErr);
-        return res.status(502).json({ error: 'Payment service unavailable' });
+        return res.status(502).json({ error: '결제 서비스에 연결할 수 없습니다' });
       }
     }
 
@@ -494,7 +497,7 @@ router.post('/:id/cancel', authMiddleware, async (req, res) => {
       await client.query('ROLLBACK').catch(() => {});
     }
     console.error('Cancel order error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   } finally {
     if (client) {
       client.release();

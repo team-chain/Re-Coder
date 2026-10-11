@@ -46,7 +46,7 @@ router.get('/', async (req, res) => {
     res.json({ products, total });
   } catch (err) {
     console.error('Get products error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -64,7 +64,7 @@ router.get('/:id', async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Product not found' });
+      return res.status(404).json({ error: '상품을 찾을 수 없습니다' });
     }
 
     const product = result.rows[0];
@@ -80,7 +80,7 @@ router.get('/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('Get product error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 

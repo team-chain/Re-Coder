@@ -14,18 +14,18 @@ router.post('/products', authMiddleware, adminMiddleware, async (req, res) => {
 
     // Validation
     if (!name || price === undefined || stock === undefined) {
-      return res.status(400).json({ error: 'name, price, and stock are required' });
+      return res.status(400).json({ error: '상품명, 가격, 재고는 필수입니다' });
     }
 
     const priceNum = price;
     const stockNum = stock;
 
-    if (!Number.isFinite(priceNum) || priceNum <= 0 || priceNum > 21474836.47 || Math.abs(priceNum * 100 - Math.round(priceNum * 100)) > 0.000001) {
-      return res.status(400).json({ error: 'price must be a positive number' });
+    if (!Number.isSafeInteger(priceNum) || priceNum < 100 || priceNum > 99999999) {
+      return res.status(400).json({ error: '가격은 100원 이상 1억 원 미만의 정수(원)로 입력하세요' });
     }
 
     if (!Number.isSafeInteger(stockNum) || stockNum < 0 || stockNum > 2147483647) {
-      return res.status(400).json({ error: 'stock must be a non-negative integer' });
+      return res.status(400).json({ error: '재고는 0 이상의 정수로 입력하세요' });
     }
 
     // Create product
@@ -49,7 +49,7 @@ router.post('/products', authMiddleware, adminMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error('Create product error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -69,7 +69,7 @@ router.put('/products/:id', authMiddleware, adminMiddleware, async (req, res) =>
     );
 
     if (currentResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Product not found' });
+      return res.status(404).json({ error: '상품을 찾을 수 없습니다' });
     }
 
     const current = currentResult.rows[0];
@@ -82,12 +82,12 @@ router.put('/products/:id', authMiddleware, adminMiddleware, async (req, res) =>
     const newImageUrl = image_url !== undefined ? image_url : current.image_url;
 
     // Validation
-    if (!Number.isFinite(newPrice) || newPrice <= 0 || newPrice > 21474836.47 || Math.abs(newPrice * 100 - Math.round(newPrice * 100)) > 0.000001) {
-      return res.status(400).json({ error: 'price must be a positive number' });
+    if (!Number.isSafeInteger(newPrice) || newPrice < 100 || newPrice > 99999999) {
+      return res.status(400).json({ error: '가격은 100원 이상 1억 원 미만의 정수(원)로 입력하세요' });
     }
 
     if (!Number.isSafeInteger(newStock) || newStock < 0 || newStock > 2147483647) {
-      return res.status(400).json({ error: 'stock must be a non-negative integer' });
+      return res.status(400).json({ error: '재고는 0 이상의 정수로 입력하세요' });
     }
 
     // Update product
@@ -113,7 +113,7 @@ router.put('/products/:id', authMiddleware, adminMiddleware, async (req, res) =>
     });
   } catch (err) {
     console.error('Update product error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -132,13 +132,13 @@ router.delete('/products/:id', authMiddleware, adminMiddleware, async (req, res)
     );
 
     if (productResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Product not found' });
+      return res.status(404).json({ error: '상품을 찾을 수 없습니다' });
     }
 
     const product = productResult.rows[0];
 
     if (product.stock !== 0) {
-      return res.status(400).json({ error: 'Cannot delete product with non-zero stock' });
+      return res.status(400).json({ error: '재고가 남은 상품은 삭제할 수 없습니다' });
     }
 
     // Delete product
@@ -147,7 +147,7 @@ router.delete('/products/:id', authMiddleware, adminMiddleware, async (req, res)
     res.json({ success: true });
   } catch (err) {
     console.error('Delete product error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -185,7 +185,7 @@ router.get('/orders', authMiddleware, adminMiddleware, async (req, res) => {
     res.json({ orders, total });
   } catch (err) {
     console.error('Get admin orders error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -206,23 +206,25 @@ router.get('/orders/:id', authMiddleware, adminMiddleware, async (req, res) => {
     );
 
     if (orderResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Order not found' });
+      return res.status(404).json({ error: '주문을 찾을 수 없습니다' });
     }
 
     const order = orderResult.rows[0];
 
     // Get order items
     const itemsResult = await pool.query(
-      `SELECT product_id, quantity, price
-       FROM order_items
-       WHERE order_id = $1`,
+      `SELECT oi.product_id, oi.quantity, oi.price, p.name
+       FROM order_items oi
+       LEFT JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = $1`,
       [id]
     );
 
     const items = itemsResult.rows.map(row => ({
       product_id: row.product_id,
       quantity: row.quantity,
-      price: row.price
+      price: row.price,
+      name: row.name
     }));
 
     res.json({
@@ -236,7 +238,7 @@ router.get('/orders/:id', authMiddleware, adminMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error('Get admin order error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 

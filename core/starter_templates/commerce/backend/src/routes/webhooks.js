@@ -18,7 +18,7 @@ router.post('/stripe', express.raw({type:'application/json',limit:'100kb'}), asy
     await client.query('BEGIN');
     const row = await client.query('SELECT id,user_id,total_amount,status,payment_id FROM orders WHERE id=$1 FOR UPDATE',[orderId]);
     const order = row.rows[0];
-    if (!order || order.payment_id !== intent.id || order.user_id !== Number(userId) || order.total_amount !== intent.amount || intent.currency !== 'usd') {
+    if (!order || order.payment_id !== intent.id || order.user_id !== Number(userId) || order.total_amount !== intent.amount || intent.currency !== 'krw') {
       await client.query('ROLLBACK'); return res.status(400).json({error:'Payment does not match order'});
     }
     // Event acknowledgement and business updates commit or roll back together.

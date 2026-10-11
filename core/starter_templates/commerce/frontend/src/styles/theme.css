@@ -1,0 +1,173 @@
+/* 상점 테마 — 색·글꼴은 여기 변수만 바꾸면 전체에 반영된다. main.jsx 에서 가장 마지막에 불러온다. */
+:root {
+  --ink: #15171C;
+  --ink-2: #3A4150;
+  --muted: #5B6270;
+  --bg: #F6F7F9;
+  --surface: #FFFFFF;
+  --line: #E4E7EC;
+  --line-strong: #D0D5DD;
+  --accent: #2B50E8;
+  --accent-ink: #1C3BC0;
+  --danger: #B42318;
+  --danger-bg: #FDECEA;
+  --ok: #1F7A4D;
+  --ok-bg: #E8F5EE;
+  --warn: #8A5A00;
+  --warn-bg: #FFF4D6;
+  --radius: 12px;
+}
+
+body {
+  font-family: 'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  word-break: keep-all;
+}
+
+h1, h2, h3 { color: var(--ink); letter-spacing: -0.02em; }
+h1 { font-size: 1.75rem; }
+a { color: var(--accent); }
+a:hover { color: var(--accent-ink); }
+
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* 버튼 */
+button { border-radius: 10px; font-weight: 600; }
+.btn { border-radius: 10px; font-weight: 600; }
+.btn-primary,
+.home .search-button,
+.home .add-to-cart-button,
+.product-detail .add-to-cart-button,
+.cart .checkout-button,
+.checkout-container .checkout-button,
+.checkout-container > button,
+.auth-card .submit-btn,
+.confirmation-container .view-orders-button {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover,
+.home .search-button:hover,
+.home .add-to-cart-button:hover,
+.product-detail .add-to-cart-button:hover,
+.cart .checkout-button:hover,
+.checkout-container .checkout-button:hover,
+.auth-card .submit-btn:hover,
+.confirmation-container .view-orders-button:hover { background: var(--accent-ink); }
+.btn-secondary,
+.cart .continue-shopping-button,
+.confirmation-container .continue-shopping-button,
+.back-button {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+}
+.btn-secondary:hover,
+.cart .continue-shopping-button:hover { background: #F2F4F7; }
+.btn-danger { background: var(--surface); color: var(--danger); border: 1px solid var(--danger); }
+.btn-danger:hover { background: var(--danger-bg); }
+.btn:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* 입력 */
+input, select, textarea {
+  font: inherit;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 0.7rem 0.85rem;
+  background: var(--surface);
+  color: var(--ink);
+}
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+label { font-weight: 600; font-size: 0.9rem; color: var(--ink); }
+.error-message, .error-box, .alert-danger, .alert-error { color: var(--danger); }
+.alert { border-radius: 10px; padding: 12px 14px; margin: 12px 0; }
+.alert-danger, .alert-error { background: var(--danger-bg); border: 0; }
+.alert-success { background: var(--ok-bg); color: #145C39; border: 0; }
+.alert-info { background: #EEF2FF; color: #2A3270; border: 0; }
+.loading { color: var(--muted); padding: 48px 16px; text-align: center; }
+
+/* 공지 띠 · 헤더 */
+.announce { background: var(--ink); color: #fff; text-align: center; font-size: 0.85rem; padding: 8px 16px; }
+.header { background: var(--surface); border-bottom: 1px solid var(--line); padding: 14px 0; }
+.logo { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); font-size: 1.25rem; letter-spacing: -0.02em; }
+.logo:hover { color: var(--ink); }
+.logo-mark { width: 32px; height: 32px; border-radius: 9px; background: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
+.nav-link { color: var(--ink-2); font-weight: 500; border-radius: 10px; }
+.nav-link:hover { background: #F2F4F7; color: var(--ink); }
+.cart-badge { background: var(--accent); }
+.admin-link { color: var(--ink-2); }
+.admin-link:hover { background: #F2F4F7; }
+.login-link { background: var(--ink); color: #fff; }
+.login-link:hover { background: #000; color: #fff; }
+.logout-btn { background: transparent; color: var(--muted); border: 1px solid var(--line-strong); }
+.logout-btn:hover { background: #F2F4F7; color: var(--ink); }
+.user-menu { border-left-color: var(--line); }
+
+/* 홈 · 상품 목록 */
+.home-header { margin: 8px 0 24px; }
+.home-header h1 { font-size: 1.75rem; }
+.home-count { color: var(--muted); margin: 4px 0 0; font-size: 0.9rem; }
+.home .search-input { border-radius: 10px; }
+.home .products-grid { gap: 20px; }
+.home .product-card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: none; overflow: hidden; transition: border-color .15s, transform .15s; }
+.home .product-card:hover { border-color: var(--line-strong); transform: translateY(-2px); box-shadow: 0 8px 24px rgba(21, 23, 28, .06); }
+.home .product-image { background: #F1F3F5; }
+.home .product-name { font-size: 1rem; font-weight: 600; color: var(--ink); }
+.home .product-description { color: var(--muted); font-size: 0.875rem; }
+.home .product-price { color: var(--ink); font-size: 1.2rem; font-weight: 700; }
+.home .add-to-cart-button { border-radius: 10px; }
+.home .load-more-button { background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); padding: 12px 28px; }
+.in-stock { color: var(--ok); font-size: 0.85rem; font-weight: 600; }
+.low-stock { color: var(--warn); font-size: 0.85rem; font-weight: 700; }
+.out-of-stock { color: var(--danger); font-size: 0.85rem; font-weight: 700; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 200; background: var(--ink); color: #fff; padding: 12px 18px; border-radius: 12px; font-size: 0.95rem; box-shadow: 0 10px 30px rgba(0, 0, 0, .2); max-width: calc(100% - 32px); }
+.toast a { color: #AFC1FF; font-weight: 600; }
+
+/* 상품 상세 */
+.product-detail .back-button { border: 0; background: transparent; color: var(--ink-2); padding-left: 0; }
+.product-detail .product-image-section { background: #F1F3F5; border-radius: 16px; }
+.product-detail .product-name { font-size: 1.75rem; }
+.product-detail .product-price { color: var(--ink); font-size: 1.75rem; font-weight: 700; margin: 8px 0 12px; }
+.product-detail .product-actions { margin-top: 8px; }
+.product-detail .add-to-cart-button { min-height: 52px; font-size: 1rem; }
+.product-policy { list-style: none; margin: 20px 0 0; padding: 16px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; font-size: 0.9rem; color: var(--ink-2); }
+.product-policy strong { display: inline-block; width: 84px; color: var(--ink); }
+
+/* 장바구니 · 결제 */
+.cart .cart-items-section, .cart .cart-summary,
+.checkout-container, .confirmation-content, .order-card,
+.order-detail-page .order-items-section, .order-summary,
+.admin-products .products-table-container, .admin-products .product-form-container,
+.admin-orders .orders-table-container, .admin-orders .order-details-container,
+.auth-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: none;
+}
+.cart .summary-row.total, .checkout-container .summary-total { font-size: 1.15rem; }
+.cart .checkout-button { min-height: 52px; font-size: 1rem; }
+.cart .remove-button { color: var(--muted); }
+.cart .remove-button:hover { color: var(--danger); }
+thead { background: #F9FAFB; color: var(--muted); }
+th { font-weight: 600; font-size: 0.875rem; }
+.checkout-container .checkout-button { min-height: 54px; font-size: 1.05rem; }
+.test-mode-note { background: var(--warn-bg); color: #6A4A00; border-radius: 10px; padding: 12px 14px; font-size: 0.9rem; }
+.consent { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-weight: 600; cursor: pointer; }
+.consent input { width: 20px; height: 20px; padding: 0; accent-color: var(--ink); }
+.checkout-note { color: var(--muted); font-size: 0.85rem; margin-top: 12px; text-align: center; }
+
+/* 주문 상태 뱃지 */
+.badge, .status-badge { border-radius: 6px; font-size: 0.8rem; font-weight: 700; padding: 4px 8px; }
+.badge-success, .status-paid { background: var(--ok-bg); color: var(--ok); }
+.badge-warning, .badge-info, .status-pending, .status-unpaid { background: var(--warn-bg); color: var(--warn); }
+.badge-danger, .status-failed { background: var(--danger-bg); color: var(--danger); }
+.badge-secondary, .status-cancelled { background: #F1F3F5; color: var(--muted); }
+
+/* 하단 사업자 정보 (전자상거래법 표시 사항) */
+.footer { border-top: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: 0.8rem; line-height: 1.7; margin-top: 48px; }
+.footer-inner { max-width: 1200px; margin: 0 auto; padding: 28px 16px 36px; display: flex; flex-direction: column; gap: 8px; }
+.footer strong { color: var(--ink); font-size: 0.9rem; }
+.footer-links { display: flex; flex-wrap: wrap; gap: 16px; }
+.footer-links a { color: var(--ink-2); font-weight: 600; }

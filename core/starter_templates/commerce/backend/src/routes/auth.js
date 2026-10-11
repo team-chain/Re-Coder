@@ -14,11 +14,11 @@ router.post('/register', async (req, res) => {
 
     // Validation
     if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof password !== 'string' || typeof name !== 'string' || !name.trim() || name.length > 200 || email.length > 254) {
-      return res.status(400).json({ error: 'Email, password, and name are required' });
+      return res.status(400).json({ error: '이메일, 비밀번호, 이름을 모두 입력하세요' });
     }
 
     if (password.length < 8 || Buffer.byteLength(password) > 72) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+      return res.status(400).json({ error: '비밀번호는 8자 이상이어야 합니다' });
     }
 
     // Check if email already exists
@@ -28,7 +28,7 @@ router.post('/register', async (req, res) => {
     );
 
     if (existingUser.rows.length > 0) {
-      return res.status(409).json({ error: 'Email already registered' });
+      return res.status(409).json({ error: '이미 가입된 이메일입니다' });
     }
 
     // Hash password
@@ -50,9 +50,9 @@ router.post('/register', async (req, res) => {
       token
     });
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'Email already registered' });
+    if (err.code === '23505') return res.status(409).json({ error: '이미 가입된 이메일입니다' });
     console.error('Register error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -67,7 +67,7 @@ router.post('/login', async (req, res) => {
 
     // Validation
     if (typeof email !== 'string' || typeof password !== 'string' || !email || !password || email.length > 254 || Buffer.byteLength(password) > 72) {
-      return res.status(400).json({ error: 'Email and password are required' });
+      return res.status(400).json({ error: '이메일과 비밀번호를 입력하세요' });
     }
 
     const emailLower = email.toLowerCase();
@@ -83,7 +83,7 @@ router.post('/login', async (req, res) => {
     if (userResult.rows.length === 0) {
       await client.query('ROLLBACK');
       // User not found - return generic error
-      return res.status(401).json({ error: 'Email or password is incorrect' });
+      return res.status(401).json({ error: '이메일 또는 비밀번호가 맞지 않습니다' });
     }
 
     const user = userResult.rows[0];
@@ -91,7 +91,7 @@ router.post('/login', async (req, res) => {
     // Compare in the DB timezone; timestamp without timezone must not use the host clock.
     if (user.login_locked) {
       await client.query('ROLLBACK');
-      return res.status(429).json({ error: 'Too many failed login attempts' });
+      return res.status(429).json({ error: '로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요' });
     }
 
     // Compare password
@@ -106,7 +106,7 @@ router.post('/login', async (req, res) => {
         [user.id]
       );
       await client.query('COMMIT');
-      return res.status(401).json({ error: 'Email or password is incorrect' });
+      return res.status(401).json({ error: '이메일 또는 비밀번호가 맞지 않습니다' });
     }
 
     // Reset failed login attempts on successful login
@@ -128,7 +128,7 @@ router.post('/login', async (req, res) => {
   } catch (err) {
     if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Login error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   } finally { client?.release(); }
 });
 

@@ -4,6 +4,7 @@ import { productsAPI } from '../api/client';
 import { useCart } from '../context/CartContext';
 import { useAuth } from '../context/AuthContext';
 import '../styles/ProductDetail.css';
+import { formatWon } from '../utils/money';
 
 function ProductDetail() {
   const { id } = useParams();
@@ -26,7 +27,7 @@ function ProductDetail() {
         const response = await productsAPI.getById(id);
         setProduct(response.data);
       } catch (err) {
-        setError(err.response?.data?.error || 'Failed to load product');
+        setError(err.response?.data?.error || '상품을 불러오지 못했습니다');
         console.error('Fetch product error:', err);
       } finally {
         setLoading(false);
@@ -64,15 +65,15 @@ function ProductDetail() {
   };
 
   if (loading) {
-    return <div className="product-detail loading">Loading...</div>;
+    return <div className="product-detail loading">불러오는 중…</div>;
   }
 
   if (error && !product) {
-    return <div className="product-detail error">Error: {error}</div>;
+    return <div className="product-detail error">{error}</div>;
   }
 
   if (!product) {
-    return <div className="product-detail error">Product not found</div>;
+    return <div className="product-detail error">상품을 찾을 수 없습니다</div>;
   }
 
   const isOutOfStock = product.stock === 0;
@@ -80,13 +81,13 @@ function ProductDetail() {
   return (
     <div className="product-detail">
       <button className="back-button" onClick={() => navigate('/')}>
-        ← Back to Products
+        ← 상품 목록
       </button>
 
       <div className="product-detail-container">
         <div className="product-image-section">
           <img
-            src={product.image_url || 'https://placehold.co/400x400?text=No+Image'}
+            src={product.image_url || '/products/placeholder.svg'}
             alt={product.name}
             className="product-image"
           />
@@ -95,29 +96,29 @@ function ProductDetail() {
         <div className="product-info-section">
           <h1 className="product-name">{product.name}</h1>
 
-          <div className="product-price">${product.price.toFixed(2)}</div>
+          <div className="product-price">{formatWon(product.price)}</div>
 
           <div className="product-stock">
             {isOutOfStock ? (
-              <span className="out-of-stock">Out of Stock</span>
+              <span className="out-of-stock">품절</span>
             ) : (
-              <span className="in-stock">In Stock ({product.stock} available)</span>
+              <span className={product.stock <= 5 ? 'low-stock' : 'in-stock'}>{product.stock <= 5 ? `품절 임박 · ${product.stock}개 남음` : '구매 가능'}</span>
             )}
           </div>
 
           <div className="product-description">
-            <h3>Description</h3>
-            <p>{product.description || 'No description available'}</p>
+            <h3>상품 설명</h3>
+            <p>{product.description || '상품 설명이 없습니다'}</p>
           </div>
 
           {error && <div className="error-message">{error}</div>}
           {addSuccess && (
-            <div className="success-message">Added to cart successfully!</div>
+            <div className="success-message" role="status">장바구니에 담았습니다 · <Link to="/cart">장바구니 보기</Link></div>
           )}
 
           <div className="product-actions">
             <div className="quantity-selector">
-              <label htmlFor="quantity">Quantity:</label>
+              <label htmlFor="quantity">수량</label>
               <select
                 id="quantity"
                 value={quantity}
@@ -137,13 +138,18 @@ function ProductDetail() {
               onClick={handleAddToCart}
               disabled={isOutOfStock || addingToCart}
             >
-              {addingToCart ? 'Adding...' : 'Add to Cart'}
+              {isOutOfStock ? '품절' : addingToCart ? '담는 중…' : `장바구니 담기 · ${formatWon(Number(product.price) * quantity)}`}
             </button>
           </div>
 
+          <ul className="product-policy">
+            <li><strong>배송</strong> 무료배송 · 결제 후 1~3일 이내 출고</li>
+            <li><strong>교환·반품</strong> 받은 날로부터 7일 이내 신청 가능</li>
+          </ul>
+
           {!isAuthenticated && (
             <p className="login-prompt">
-              Please <Link to="/login">log in</Link> to add items to your cart.
+              장바구니에 담으려면 <Link to="/login">로그인</Link>하세요.
             </p>
           )}
         </div>

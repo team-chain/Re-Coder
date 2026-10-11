@@ -13,7 +13,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const userId = req.user.userId;
 
     const result = await pool.query(
-      `SELECT c.product_id, c.quantity, p.price
+      `SELECT c.product_id, c.quantity, p.price, p.name, p.image_url
        FROM carts c
        JOIN products p ON c.product_id = p.id
        WHERE c.user_id = $1
@@ -24,7 +24,9 @@ router.get('/', authMiddleware, async (req, res) => {
     const items = result.rows.map(row => ({
       product_id: row.product_id,
       quantity: row.quantity,
-      price: parseFloat(row.price)
+      price: parseFloat(row.price),
+      name: row.name,
+      image_url: row.image_url
     }));
 
     const total = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
@@ -32,7 +34,7 @@ router.get('/', authMiddleware, async (req, res) => {
     res.json({ items, total });
   } catch (err) {
     console.error('Get cart error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -47,11 +49,11 @@ router.post('/', authMiddleware, async (req, res) => {
 
     // Validation
     if (!product_id || !quantity) {
-      return res.status(400).json({ error: 'product_id and quantity are required' });
+      return res.status(400).json({ error: '상품과 수량을 지정하세요' });
     }
 
     if (!Number.isInteger(quantity) || quantity <= 0) {
-      return res.status(400).json({ error: 'quantity must be a positive integer' });
+      return res.status(400).json({ error: '수량은 1 이상의 정수여야 합니다' });
     }
 
     // Check product exists and has stock
@@ -61,13 +63,13 @@ router.post('/', authMiddleware, async (req, res) => {
     );
 
     if (productResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Product not found' });
+      return res.status(404).json({ error: '상품을 찾을 수 없습니다' });
     }
 
     const product = productResult.rows[0];
 
     if (product.stock < quantity) {
-      return res.status(400).json({ error: 'Insufficient stock' });
+      return res.status(400).json({ error: '재고가 부족합니다' });
     }
 
     // Add or update cart item
@@ -88,7 +90,7 @@ router.post('/', authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error('Add to cart error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -104,11 +106,11 @@ router.post('/:product_id', authMiddleware, async (req, res) => {
 
     // Validation
     if (!quantity) {
-      return res.status(400).json({ error: 'quantity is required' });
+      return res.status(400).json({ error: '수량을 입력하세요' });
     }
 
     if (!Number.isInteger(quantity) || quantity <= 0) {
-      return res.status(400).json({ error: 'quantity must be a positive integer' });
+      return res.status(400).json({ error: '수량은 1 이상의 정수여야 합니다' });
     }
 
     // Check product exists and has stock
@@ -118,13 +120,13 @@ router.post('/:product_id', authMiddleware, async (req, res) => {
     );
 
     if (productResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Product not found' });
+      return res.status(404).json({ error: '상품을 찾을 수 없습니다' });
     }
 
     const product = productResult.rows[0];
 
     if (product.stock < quantity) {
-      return res.status(400).json({ error: 'Insufficient stock' });
+      return res.status(400).json({ error: '재고가 부족합니다' });
     }
 
     // Update cart item
@@ -137,7 +139,7 @@ router.post('/:product_id', authMiddleware, async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Cart item not found' });
+      return res.status(404).json({ error: '장바구니에 없는 상품입니다' });
     }
 
     const cartItem = result.rows[0];
@@ -148,7 +150,7 @@ router.post('/:product_id', authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error('Update cart error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 
@@ -167,13 +169,13 @@ router.delete('/:product_id', authMiddleware, async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Cart item not found' });
+      return res.status(404).json({ error: '장바구니에 없는 상품입니다' });
     }
 
     res.json({ success: true });
   } catch (err) {
     console.error('Delete cart item error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: '일시적인 오류가 발생했습니다. 잠시 후 다시 시도하세요' });
   }
 });
 

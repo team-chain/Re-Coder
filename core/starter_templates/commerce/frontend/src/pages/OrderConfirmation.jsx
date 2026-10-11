@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ordersAPI } from '../api/client';
 import '../styles/OrderConfirmation.css';
+import { formatWon } from '../utils/money';
+import { statusLabel, formatDateTime } from '../utils/labels';
 
 function OrderConfirmation() {
   const { orderId } = useParams();
@@ -18,7 +20,7 @@ function OrderConfirmation() {
         const response = await ordersAPI.getById(orderId);
         setOrder(response.data);
       } catch (err) {
-        setError(err.response?.data?.error || 'Failed to fetch order');
+        setError(err.response?.data?.error || '주문을 불러오지 못했습니다');
         console.error('Fetch order error:', err);
       } finally {
         setLoading(false);
@@ -33,7 +35,7 @@ function OrderConfirmation() {
   if (loading) {
     return (
       <div className="confirmation-container">
-        <div className="confirmation-loading">Loading order details...</div>
+        <div className="confirmation-loading">주문 정보를 불러오는 중…</div>
       </div>
     );
   }
@@ -44,7 +46,7 @@ function OrderConfirmation() {
         <div className="confirmation-error">
           <p>{error}</p>
           <button onClick={() => navigate('/')} className="back-button">
-            Back to Home
+            홈으로
           </button>
         </div>
       </div>
@@ -55,9 +57,9 @@ function OrderConfirmation() {
     return (
       <div className="confirmation-container">
         <div className="confirmation-error">
-          <p>Order not found</p>
+          <p>주문을 찾을 수 없습니다</p>
           <button onClick={() => navigate('/')} className="back-button">
-            Back to Home
+            홈으로
           </button>
         </div>
       </div>
@@ -77,67 +79,67 @@ function OrderConfirmation() {
       <div className="confirmation-wrapper">
         <div className="confirmation-header">
           <div className="success-icon">✓</div>
-          <h1>Order Confirmed</h1>
-          <p>Thank you for your purchase!</p>
+          <h1>주문이 완료되었습니다</h1>
+          <p>결제가 확인되면 상태가 '결제 완료'로 바뀝니다.</p>
         </div>
 
         <div className="confirmation-content">
           <div className="order-info-section">
-            <h2>Order Details</h2>
+            <h2>주문 정보</h2>
             <div className="info-grid">
               <div className="info-item">
-                <label>Order ID</label>
+                <label>주문번호</label>
                 <span className="order-id">#{order.id}</span>
               </div>
               <div className="info-item">
-                <label>Status</label>
+                <label>주문 상태</label>
                 <span
                   className="order-status"
                   style={{ color: statusColor[order.status] }}
                 >
-                  {order.status.toUpperCase()}
+                  {statusLabel(order.status)}
                 </span>
               </div>
               <div className="info-item">
-                <label>Order Date</label>
-                <span>{new Date(order.created_at).toLocaleDateString()}</span>
+                <label>주문 일시</label>
+                <span>{formatDateTime(order.created_at)}</span>
               </div>
               <div className="info-item">
-                <label>Total Amount</label>
+                <label>결제 금액</label>
                 <span className="total-amount">
-                  ${(order.total_amount / 100).toFixed(2)}
+                  {formatWon(order.total_amount)}
                 </span>
               </div>
             </div>
           </div>
 
           <div className="order-items-section">
-            <h2>Items</h2>
+            <h2>주문 상품</h2>
             <div className="items-list">
               {order.items && order.items.length > 0 ? (
                 order.items.map((item, index) => (
                   <div key={index} className="item-row">
                     <div className="item-info">
-                      <span className="item-id">Product #{item.product_id}</span>
-                      <span className="item-quantity">Qty: {item.quantity}</span>
+                      <span className="item-id">{item.name || `상품 #${item.product_id}`}</span>
+                      <span className="item-quantity">{formatWon(item.price)} × {item.quantity}</span>
                     </div>
                     <span className="item-price">
-                      ${(item.price / 100).toFixed(2)}
+                      {formatWon(item.price * item.quantity)}
                     </span>
                   </div>
                 ))
               ) : (
-                <p>No items in order</p>
+                <p>주문 상품이 없습니다</p>
               )}
             </div>
           </div>
 
           {order.payment_id && (
             <div className="payment-info-section">
-              <h2>Payment Information</h2>
+              <h2>결제 정보</h2>
               <div className="payment-details">
                 <div className="detail-row">
-                  <label>Payment ID</label>
+                  <label>결제 번호</label>
                   <span className="payment-id">{order.payment_id}</span>
                 </div>
               </div>
@@ -150,19 +152,19 @@ function OrderConfirmation() {
             onClick={() => navigate('/orders')}
             className="view-orders-button"
           >
-            View All Orders
+            주문 내역 보기
           </button>
           <button
             onClick={() => navigate('/')}
             className="continue-shopping-button"
           >
-            Continue Shopping
+            쇼핑 계속하기
           </button>
         </div>
 
         <div className="confirmation-footer">
           <p>
-            A confirmation email has been sent to your registered email address.
+            주문 상태는 '주문 내역'에서 언제든 확인할 수 있습니다.
           </p>
         </div>
       </div>

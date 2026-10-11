@@ -19,13 +19,13 @@ function Login() {
     const newErrors = {};
 
     if (!formData.email.trim()) {
-      newErrors.email = 'Email is required';
+      newErrors.email = '이메일을 입력하세요';
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
-      newErrors.email = 'Please enter a valid email';
+      newErrors.email = '이메일 형식이 올바르지 않습니다 (예: name@example.com)';
     }
 
     if (!formData.password) {
-      newErrors.password = 'Password is required';
+      newErrors.password = '비밀번호를 입력하세요';
     }
 
     setErrors(newErrors);
@@ -75,9 +75,9 @@ function Login() {
     return (
       <div className="auth-container">
         <div className="auth-card success">
-          <h2>Login Successful!</h2>
-          <p>Welcome back!</p>
-          <p className="redirect-message">Redirecting...</p>
+          <h2>로그인되었습니다</h2>
+          <p>다시 오신 것을 환영합니다.</p>
+          <p className="redirect-message">이동하는 중…</p>
         </div>
       </div>
     );
@@ -86,31 +86,33 @@ function Login() {
   return (
     <div className="auth-container">
       <div className="auth-card">
-        <h1>Login</h1>
+        <h1>로그인</h1>
         <form onSubmit={handleSubmit} className="auth-form">
           <div className="form-group">
-            <label htmlFor="email">Email</label>
+            <label htmlFor="email">이메일</label>
             <input
               type="email"
               id="email"
               name="email"
               value={formData.email}
               onChange={handleChange}
-              placeholder="you@example.com"
+              placeholder="name@example.com"
+              autoComplete="email"
               disabled={loading}
             />
             {errors.email && <span className="error-message">{errors.email}</span>}
           </div>
 
           <div className="form-group">
-            <label htmlFor="password">Password</label>
+            <label htmlFor="password">비밀번호</label>
             <input
               type="password"
               id="password"
               name="password"
               value={formData.password}
               onChange={handleChange}
-              placeholder="Enter your password"
+              placeholder="비밀번호"
+              autoComplete="current-password"
               disabled={loading}
             />
             {errors.password && <span className="error-message">{errors.password}</span>}
@@ -120,12 +122,12 @@ function Login() {
           {authError && <div className="error-box">{authError}</div>}
 
           <button type="submit" className="submit-btn" disabled={loading}>
-            {loading ? 'Logging in...' : 'Login'}
+            {loading ? '로그인 중…' : '로그인'}
           </button>
         </form>
 
         <div className="auth-footer">
-          <p>Don't have an account? <Link to="/register">Register here</Link></p>
+          <p>처음이신가요? <Link to="/register">회원가입</Link></p>
         </div>
       </div>
     </div>

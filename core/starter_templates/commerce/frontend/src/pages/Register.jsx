@@ -20,25 +20,25 @@ function Register() {
     const newErrors = {};
 
     if (!formData.name.trim()) {
-      newErrors.name = 'Name is required';
+      newErrors.name = '이름을 입력하세요';
     }
 
     if (!formData.email.trim()) {
-      newErrors.email = 'Email is required';
+      newErrors.email = '이메일을 입력하세요';
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
-      newErrors.email = 'Please enter a valid email';
+      newErrors.email = '이메일 형식이 올바르지 않습니다 (예: name@example.com)';
     }
 
     if (!formData.password) {
-      newErrors.password = 'Password is required';
+      newErrors.password = '비밀번호를 입력하세요';
     } else if (formData.password.length < 8) {
-      newErrors.password = 'Password must be at least 8 characters';
+      newErrors.password = '비밀번호는 8자 이상이어야 합니다';
     }
 
     if (!formData.confirmPassword) {
-      newErrors.confirmPassword = 'Please confirm your password';
+      newErrors.confirmPassword = '비밀번호를 한 번 더 입력하세요';
     } else if (formData.password !== formData.confirmPassword) {
-      newErrors.confirmPassword = 'Passwords do not match';
+      newErrors.confirmPassword = '비밀번호가 서로 다릅니다';
     }
 
     setErrors(newErrors);
@@ -86,9 +86,9 @@ function Register() {
     return (
       <div className="auth-container">
         <div className="auth-card success">
-          <h2>Registration Successful!</h2>
-          <p>Welcome! You are now logged in.</p>
-          <p className="redirect-message">Redirecting to home...</p>
+          <h2>가입이 완료되었습니다</h2>
+          <p>환영합니다! 자동으로 로그인되었습니다.</p>
+          <p className="redirect-message">홈으로 이동하는 중…</p>
         </div>
       </div>
     );
@@ -97,59 +97,63 @@ function Register() {
   return (
     <div className="auth-container">
       <div className="auth-card">
-        <h1>Create Account</h1>
+        <h1>회원가입</h1>
         <form onSubmit={handleSubmit} className="auth-form">
           <div className="form-group">
-            <label htmlFor="name">Full Name</label>
+            <label htmlFor="name">이름</label>
             <input
               type="text"
               id="name"
               name="name"
               value={formData.name}
               onChange={handleChange}
-              placeholder="John Doe"
+              placeholder="홍길동"
+              autoComplete="name"
               disabled={loading}
             />
             {errors.name && <span className="error-message">{errors.name}</span>}
           </div>
 
           <div className="form-group">
-            <label htmlFor="email">Email</label>
+            <label htmlFor="email">이메일</label>
             <input
               type="email"
               id="email"
               name="email"
               value={formData.email}
               onChange={handleChange}
-              placeholder="you@example.com"
+              placeholder="name@example.com"
+              autoComplete="email"
               disabled={loading}
             />
             {errors.email && <span className="error-message">{errors.email}</span>}
           </div>
 
           <div className="form-group">
-            <label htmlFor="password">Password</label>
+            <label htmlFor="password">비밀번호</label>
             <input
               type="password"
               id="password"
               name="password"
               value={formData.password}
               onChange={handleChange}
-              placeholder="At least 8 characters"
+              placeholder="8자 이상"
+              autoComplete="new-password"
               disabled={loading}
             />
             {errors.password && <span className="error-message">{errors.password}</span>}
           </div>
 
           <div className="form-group">
-            <label htmlFor="confirmPassword">Confirm Password</label>
+            <label htmlFor="confirmPassword">비밀번호 확인</label>
             <input
               type="password"
               id="confirmPassword"
               name="confirmPassword"
               value={formData.confirmPassword}
               onChange={handleChange}
-              placeholder="Confirm your password"
+              placeholder="비밀번호를 한 번 더 입력"
+              autoComplete="new-password"
               disabled={loading}
             />
             {errors.confirmPassword && <span className="error-message">{errors.confirmPassword}</span>}
@@ -159,12 +163,12 @@ function Register() {
           {authError && <div className="error-box">{authError}</div>}
 
           <button type="submit" className="submit-btn" disabled={loading}>
-            {loading ? 'Creating Account...' : 'Register'}
+            {loading ? '가입하는 중…' : '가입하기'}
           </button>
         </form>
 
         <div className="auth-footer">
-          <p>Already have an account? <Link to="/login">Login here</Link></p>
+          <p>이미 회원이신가요? <Link to="/login">로그인</Link></p>
         </div>
       </div>
     </div>

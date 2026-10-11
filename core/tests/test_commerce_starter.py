@@ -88,3 +88,24 @@ def test_고른_결제_시작_방식이_첫_로컬_배포의_데모_여부를_�
     sub = ws / "app"; sub.mkdir()
     ds.remember_payment_choice(str(sub), "mock")
     assert ds.payment_choice_for(str(ws))["payment"] == "mock"
+
+
+def test_foundation_is_korean_and_won():
+    """검증된 쇼핑몰 기반은 한국어·원화(KRW, 소수 단위 없음)로 나간다 — 2.0.20 실기기 데모 기준."""
+    files = {op["file"]: op["content"] for op in starter.operations()}
+    orders = files["backend/src/routes/orders.js"]
+    assert "currency: 'krw'" in orders and "'usd'" not in orders
+    assert "intent.currency !== 'krw'" in files["backend/src/routes/webhooks.js"]
+    assert '<html lang="ko">' in files["frontend/index.html"]
+    assert "ko-KR" in files["frontend/src/utils/money.js"]
+    assert "'/products/headphones.svg'" in files["backend/init-db.js"]
+    assert "frontend/public/products/headphones.svg" in files
+    # 실제 결제 키가 없을 때 Stripe.js 를 외부에서 불러오지 않는다
+    assert "@stripe/stripe-js/pure" in files["frontend/src/pages/Checkout.jsx"]
+    import re
+    ui = [n for n in files if n.startswith("frontend/src/") and n.endswith(".jsx")]
+    leftovers = {
+        n: re.findall(r">\s*(Add to Cart|Loading[^<]*|Checkout|Shopping Cart|Order Summary|Login|Register|Logout)\s*<", files[n])
+        for n in ui
+    }
+    assert not {n: v for n, v in leftovers.items() if v}

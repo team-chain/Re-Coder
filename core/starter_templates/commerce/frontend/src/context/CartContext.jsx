@@ -32,10 +32,10 @@ export function CartProvider({ children }) {
 
       if (response.status === 401) {
         logout();
-        throw new Error('Please log in again');
+        throw new Error('로그인이 만료되었습니다. 다시 로그인하세요');
       }
       if (!response.ok) {
-        throw new Error('Failed to fetch cart');
+        throw new Error('장바구니를 불러오지 못했습니다');
       }
 
       const data = await response.json();
@@ -51,8 +51,8 @@ export function CartProvider({ children }) {
 
   const addToCart = async (productId, quantity) => {
     if (!isAuthenticated || !token) {
-      setError('Please login to add items to cart');
-      throw new Error('Not authenticated');
+      setError('로그인 후 장바구니에 담을 수 있습니다');
+      throw new Error('로그인이 필요합니다');
     }
 
     setError(null);
@@ -68,11 +68,11 @@ export function CartProvider({ children }) {
 
       if (response.status === 401) {
         logout();
-        throw new Error('Please log in again');
+        throw new Error('로그인이 만료되었습니다. 다시 로그인하세요');
       }
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Failed to add to cart');
+        throw new Error(data.error || '장바구니에 담지 못했습니다');
       }
 
       // Refresh cart
@@ -85,8 +85,8 @@ export function CartProvider({ children }) {
 
   const updateCartItem = async (productId, quantity) => {
     if (!isAuthenticated || !token) {
-      setError('Please login to update cart');
-      throw new Error('Not authenticated');
+      setError('로그인 후 수량을 바꿀 수 있습니다');
+      throw new Error('로그인이 필요합니다');
     }
 
     setError(null);
@@ -102,11 +102,11 @@ export function CartProvider({ children }) {
 
       if (response.status === 401) {
         logout();
-        throw new Error('Please log in again');
+        throw new Error('로그인이 만료되었습니다. 다시 로그인하세요');
       }
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Failed to update cart');
+        throw new Error(data.error || '수량을 바꾸지 못했습니다');
       }
 
       // Refresh cart
@@ -119,8 +119,8 @@ export function CartProvider({ children }) {
 
   const removeFromCart = async (productId) => {
     if (!isAuthenticated || !token) {
-      setError('Please login to remove items from cart');
-      throw new Error('Not authenticated');
+      setError('로그인 후 상품을 뺄 수 있습니다');
+      throw new Error('로그인이 필요합니다');
     }
 
     setError(null);
@@ -134,11 +134,11 @@ export function CartProvider({ children }) {
 
       if (response.status === 401) {
         logout();
-        throw new Error('Please log in again');
+        throw new Error('로그인이 만료되었습니다. 다시 로그인하세요');
       }
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Failed to remove from cart');
+        throw new Error(data.error || '상품을 빼지 못했습니다');
       }
 
       // Refresh cart

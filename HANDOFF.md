@@ -1,3 +1,9 @@
+# 검증된 쇼핑몰 기반 한국어·원화 (2026-10-11, 2.0.20)
+
+- core/starter_templates/commerce: 화면·백엔드 오류 문구 한국어, KRW(원 단위 정수 — priceInCents 는 이제 원, 결제 100원~1억 원 미만, currency 'krw', 웹훅도 'krw'), 관리자 가격 정수 검증, utils/money.js(formatWon)·utils/labels.js(statusLabel·formatDateTime ko-KR), styles/theme.css(색 변수, main.jsx 맨 끝), Footer(사업자 정보 자리표시), 공지 띠, frontend/public/products/*.svg(시드 image_url), cart·주문 상세 API 에 상품 name 추가(LEFT JOIN), MockCheckout 재작성(요약·동의·안내), OrderDetail 결제 대기 동안 2초 간격 15회 재조회, ProtectedRoute/AdminRoute 가 from 을 넘김, Stripe 는 @stripe/stripe-js/pure.
+- sandbox 실제 Docker 검증: Local Docker 배포 success(콘솔 오류 0, app_check ok) → Playwright(/tmp/emu/kflow.js): 비로그인 담기→로그인, 가입·검증 문구, 담기 토스트, 장바구니 ₩146,800, 동의 없이 결제→오류, 주문→약 4초 뒤 새로고침 없이 결제 완료, 주문 내역, 모바일 390px 가로 넘침 없음, 영어 잔여 0. 관리자(/tmp/emu/kadmin.js): 50원 거부, 등록·수정·주문 상세 정상. ECS 태스크 정의 재현(ecs_emulate.py, botocore OK)으로 같은 흐름 통과.
+- 예전 영어 데모 DB 볼륨이 남은 PC 는 시드가 다시 들어가지 않는다(상품 0개일 때만 시드) — 데모 DB 볼륨을 지우고 다시 배포하면 한국어 상품이 들어간다.
+
 # 설계 단계 파일 목록 0개로 생성 실패 (2026-10-11, 2.0.19)
 
 - 실기기 2.0.18(job e077a4ca, TEST 폴더): 약속 문서 2조각(24K+6K자) 뒤 파일 목록 페이지가 9초 만에 파일 0개로 끝나 RuntimeError "AI 가 만들 파일 목록을 돌려주지 않았습니다". 체크포인트 files=[]. 응답 원문은 로그에 없었음(원인: 모델이 빈 files·more=false 또는 깨진 JSON — 2.0.18 변경과 무관한 경로).

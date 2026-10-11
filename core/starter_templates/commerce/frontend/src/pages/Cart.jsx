@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useCart } from '../context/CartContext';
 import { productsAPI } from '../api/client';
 import '../styles/Cart.css';
+import { formatWon } from '../utils/money';
 
 function Cart() {
   const navigate = useNavigate();
@@ -68,24 +69,24 @@ function Cart() {
   };
 
   if (loading) {
-    return <div className="cart loading">Loading cart...</div>;
+    return <div className="cart loading">장바구니를 불러오는 중…</div>;
   }
 
   if (error) {
-    return <div className="cart error">Error: {error}</div>;
+    return <div className="cart error">{error}</div>;
   }
 
   if (items.length === 0) {
     return (
       <div className="cart empty">
         <div className="empty-cart-message">
-          <h2>Your cart is empty</h2>
-          <p>Start shopping to add items to your cart.</p>
+          <h2>장바구니가 비어 있습니다</h2>
+          <p>마음에 드는 상품을 담아 보세요.</p>
           <button
             className="continue-shopping-button"
             onClick={() => navigate('/')}
           >
-            Continue Shopping
+            쇼핑 계속하기
           </button>
         </div>
       </div>
@@ -94,18 +95,18 @@ function Cart() {
 
   return (
     <div className="cart">
-      <h1>Shopping Cart</h1>
+      <h1>장바구니</h1>
 
       <div className="cart-container">
         <div className="cart-items-section">
           <table className="cart-table">
             <thead>
               <tr>
-                <th>Product</th>
-                <th>Price</th>
-                <th>Quantity</th>
-                <th>Subtotal</th>
-                <th>Action</th>
+                <th>상품</th>
+                <th>판매가</th>
+                <th>수량</th>
+                <th>합계</th>
+                <th><span className="sr-only">삭제</span></th>
               </tr>
             </thead>
             <tbody>
@@ -120,24 +121,24 @@ function Cart() {
                       <div className="product-info">
                         {product && (
                           <img
-                            src={product.image_url || 'https://placehold.co/80x80?text=No+Image'}
+                            src={product.image_url || '/products/placeholder.svg'}
                             alt={product.name}
                             className="product-thumbnail"
                           />
                         )}
                         <div>
                           <div className="product-name">
-                            {product?.name || `Product ${item.product_id}`}
+                            {product?.name || item.name || `상품 #${item.product_id}`}
                           </div>
                           {product?.description && (
                             <div className="product-description">
-                              {product.description.substring(0, 50)}...
+                              {product.description.length > 40 ? `${product.description.substring(0, 40)}…` : product.description}
                             </div>
                           )}
                         </div>
                       </div>
                     </td>
-                    <td className="price-cell">${item.price.toFixed(2)}</td>
+                    <td className="price-cell">{formatWon(item.price)}</td>
                     <td className="quantity-cell">
                       <div className="quantity-controls">
                         <button
@@ -168,14 +169,14 @@ function Cart() {
                         </button>
                       </div>
                     </td>
-                    <td className="subtotal-cell">${subtotal.toFixed(2)}</td>
+                    <td className="subtotal-cell">{formatWon(subtotal)}</td>
                     <td className="action-cell">
                       <button
                         className="remove-button"
                         onClick={() => handleRemove(item.product_id)}
                         disabled={isUpdating}
                       >
-                        Remove
+                        삭제
                       </button>
                     </td>
                   </tr>
@@ -187,18 +188,23 @@ function Cart() {
 
         <div className="cart-summary-section">
           <div className="cart-summary">
-            <h2>Order Summary</h2>
+            <h2>결제 예정 금액</h2>
 
             <div className="summary-row">
-              <span>Subtotal:</span>
-              <span>${total.toFixed(2)}</span>
+              <span>상품 금액</span>
+              <span>{formatWon(total)}</span>
+            </div>
+
+            <div className="summary-row">
+              <span>배송비</span>
+              <span>무료</span>
             </div>
 
             <div className="summary-divider"></div>
 
             <div className="summary-row total">
-              <span>Total:</span>
-              <span>${total.toFixed(2)}</span>
+              <span>최종 결제 금액</span>
+              <span>{formatWon(total)}</span>
             </div>
 
             <button
@@ -206,14 +212,14 @@ function Cart() {
               onClick={handleCheckout}
               disabled={items.length === 0 || loadingProducts}
             >
-              Proceed to Checkout
+              {formatWon(total)} 주문하기
             </button>
 
             <button
               className="continue-shopping-button"
               onClick={() => navigate('/')}
             >
-              Continue Shopping
+              쇼핑 계속하기
             </button>
           </div>
         </div>

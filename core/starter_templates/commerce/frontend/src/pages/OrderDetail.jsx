@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { ordersAPI, productsAPI } from '../api/client';
 import '../styles/OrderDetail.css';
+import { formatWon } from '../utils/money';
+import { statusLabel, formatDateTime } from '../utils/labels';
 
 function OrderDetail() {
   const { id } = useParams();
@@ -25,6 +27,30 @@ function OrderDetail() {
     fetchOrderDetail();
   }, [id, isAuthenticated, navigate]);
 
+  // 결제 웹훅은 주문 직후 몇 초 뒤에 도착한다 — 결제 대기 동안 잠시 상태를 다시 읽는다.
+  useEffect(() => {
+    if (!order || (order.status !== 'pending' && order.status !== 'unpaid')) return undefined;
+    let tries = 0;
+    let stopped = false;
+    const timer = setInterval(async () => {
+      tries += 1;
+      if (tries > 15) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        const response = await ordersAPI.getById(id);
+        if (!stopped) setOrder(response.data);
+      } catch (err) {
+        // 다음 주기에 다시 시도한다.
+      }
+    }, 2000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [id, order?.status]);
+
   const fetchOrderDetail = async () => {
     setLoading(true);
     setError(null);
@@ -42,8 +68,8 @@ function OrderDetail() {
           console.error(`Failed to fetch product ${item.product_id}:`, err);
           productMap[item.product_id] = {
             id: item.product_id,
-            name: `Product #${item.product_id}`,
-            image_url: 'https://placehold.co/100x100?text=Product'
+            name: item.name || `상품 #${item.product_id}`,
+            image_url: '/products/placeholder.svg'
           };
         }
       }
@@ -51,11 +77,11 @@ function OrderDetail() {
     } catch (err) {
       console.error('Fetch order detail error:', err);
       if (err.response?.status === 404) {
-        setError('Order not found');
+        setError('주문을 찾을 수 없습니다');
       } else if (err.response?.status === 403) {
-        setError('You do not have access to this order');
+        setError('이 주문을 볼 권한이 없습니다');
       } else {
-        setError(err.response?.data?.error || 'Failed to fetch order details');
+        setError(err.response?.data?.error || '주문 정보를 불러오지 못했습니다');
       }
     } finally {
       setLoading(false);
@@ -63,7 +89,7 @@ function OrderDetail() {
   };
 
   const handleCancelOrder = async () => {
-    if (!window.confirm('Are you sure you want to cancel this order?')) {
+    if (!window.confirm('이 주문을 취소할까요?')) {
       return;
     }
 
@@ -80,7 +106,7 @@ function OrderDetail() {
       }, 1000);
     } catch (err) {
       console.error('Cancel order error:', err);
-      setCancelError(err.response?.data?.error || 'Failed to cancel order');
+      setCancelError(err.response?.data?.error || '주문을 취소하지 못했습니다');
     } finally {
       setCancelling(false);
     }
@@ -104,28 +130,15 @@ function OrderDetail() {
   };
 
   const getStatusLabel = (status) => {
-    const labels = {
-      paid: 'Paid',
-      pending: 'Pending',
-      failed: 'Failed',
-      cancelled: 'Cancelled',
-      unpaid: 'Unpaid'
-    };
-    return labels[status] || status;
+    return statusLabel(status);
   };
 
   const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    return formatDateTime(dateString);
   };
 
   const formatPrice = (cents) => {
-    return (cents / 100).toFixed(2);
+    return formatWon(cents);
   };
 
   const canCancelOrder = order && (order.status === 'unpaid' || order.status === 'pending');
@@ -133,7 +146,7 @@ function OrderDetail() {
   if (loading) {
     return (
       <div className="order-detail-page">
-        <div className="loading">Loading order details...</div>
+        <div className="loading">주문 정보를 불러오는 중…</div>
       </div>
     );
   }
@@ -146,7 +159,7 @@ function OrderDetail() {
             className="btn btn-secondary"
             onClick={() => navigate('/orders')}
           >
-            ← Back to Orders
+            ← 주문 내역
           </button>
           <div className="alert alert-danger">
             {error}
@@ -164,10 +177,10 @@ function OrderDetail() {
             className="btn btn-secondary"
             onClick={() => navigate('/orders')}
           >
-            ← Back to Orders
+            ← 주문 내역
           </button>
           <div className="alert alert-danger">
-            Order not found
+            주문을 찾을 수 없습니다
           </div>
         </div>
       </div>
@@ -181,12 +194,12 @@ function OrderDetail() {
           className="btn btn-secondary"
           onClick={() => navigate('/orders')}
         >
-          ← Back to Orders
+          ← 주문 내역
         </button>
 
         <div className="order-detail-header">
           <div>
-            <h1>Order #{order.id}</h1>
+            <h1>주문번호 {order.id}</h1>
             <p className="order-date">{formatDate(order.created_at)}</p>
           </div>
           <div className="order-status-section">
@@ -198,7 +211,7 @@ function OrderDetail() {
 
         {cancelSuccess && (
           <div className="alert alert-success">
-            Order cancelled successfully
+            주문을 취소했습니다
           </div>
         )}
 
@@ -208,18 +221,24 @@ function OrderDetail() {
           </div>
         )}
 
+        {(order.status === 'pending' || order.status === 'unpaid') && (
+          <div className="alert alert-info" role="status">
+            결제를 확인하는 중입니다. 확인되면 이 화면에서 '결제 완료'로 바뀝니다.
+          </div>
+        )}
+
         <div className="order-detail-content">
           <div className="order-items-section">
-            <h2>Order Items</h2>
+            <h2>주문 상품</h2>
             <div className="order-items">
               {order.items && order.items.length > 0 ? (
                 <table className="items-table">
                   <thead>
                     <tr>
-                      <th>Product</th>
-                      <th>Quantity</th>
-                      <th>Unit Price</th>
-                      <th>Subtotal</th>
+                      <th>상품</th>
+                      <th>수량</th>
+                      <th>판매가</th>
+                      <th>합계</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -239,42 +258,42 @@ function OrderDetail() {
                               )}
                               <div>
                                 <p className="product-name">
-                                  {product ? product.name : `Product #${item.product_id}`}
+                                  {product ? product.name : (item.name || `상품 #${item.product_id}`)}
                                 </p>
                               </div>
                             </div>
                           </td>
                           <td className="quantity-cell">{item.quantity}</td>
-                          <td className="price-cell">${formatPrice(item.price)}</td>
-                          <td className="subtotal-cell">${formatPrice(subtotal)}</td>
+                          <td className="price-cell">{formatPrice(item.price)}</td>
+                          <td className="subtotal-cell">{formatPrice(subtotal)}</td>
                         </tr>
                       );
                     })}
                   </tbody>
                 </table>
               ) : (
-                <p>No items in this order</p>
+                <p>주문 상품이 없습니다</p>
               )}
             </div>
           </div>
 
           <div className="order-summary-section">
             <div className="order-summary">
-              <h2>Order Summary</h2>
+              <h2>결제 정보</h2>
 
               <div className="summary-row">
-                <span className="label">Subtotal:</span>
-                <span className="value">${formatPrice(order.total_amount)}</span>
+                <span className="label">상품 금액</span>
+                <span className="value">{formatPrice(order.total_amount)}</span>
               </div>
 
               <div className="summary-row total">
-                <span className="label">Total:</span>
-                <span className="value">${formatPrice(order.total_amount)}</span>
+                <span className="label">결제 금액</span>
+                <span className="value">{formatPrice(order.total_amount)}</span>
               </div>
 
               {order.payment_id && (
                 <div className="summary-row">
-                  <span className="label">Payment ID:</span>
+                  <span className="label">결제 번호</span>
                   <span className="value payment-id">{order.payment_id}</span>
                 </div>
               )}
@@ -287,7 +306,7 @@ function OrderDetail() {
                   onClick={handleCancelOrder}
                   disabled={cancelling}
                 >
-                  {cancelling ? 'Cancelling...' : 'Cancel Order'}
+                  {cancelling ? '취소하는 중…' : '주문 취소'}
                 </button>
               </div>
             )}

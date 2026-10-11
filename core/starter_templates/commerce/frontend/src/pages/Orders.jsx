@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { ordersAPI } from '../api/client';
 import '../styles/Orders.css';
+import { formatWon } from '../utils/money';
+import { statusLabel, formatDateTime } from '../utils/labels';
 
 function Orders() {
   const navigate = useNavigate();
@@ -28,7 +30,7 @@ function Orders() {
       setOrders(response.data.orders || []);
     } catch (err) {
       console.error('Fetch orders error:', err);
-      setError(err.response?.data?.error || 'Failed to fetch orders');
+      setError(err.response?.data?.error || '주문 내역을 불러오지 못했습니다');
     } finally {
       setLoading(false);
     }
@@ -52,34 +54,21 @@ function Orders() {
   };
 
   const getStatusLabel = (status) => {
-    const labels = {
-      paid: 'Paid',
-      pending: 'Pending',
-      failed: 'Failed',
-      cancelled: 'Cancelled',
-      unpaid: 'Unpaid'
-    };
-    return labels[status] || status;
+    return statusLabel(status);
   };
 
   const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    return formatDateTime(dateString);
   };
 
   const formatPrice = (cents) => {
-    return (cents / 100).toFixed(2);
+    return formatWon(cents);
   };
 
   if (loading) {
     return (
       <div className="orders-page">
-        <div className="loading">Loading orders...</div>
+        <div className="loading">주문 내역을 불러오는 중…</div>
       </div>
     );
   }
@@ -87,7 +76,7 @@ function Orders() {
   return (
     <div className="orders-page">
       <div className="orders-container">
-        <h1>My Orders</h1>
+        <h1>주문 내역</h1>
 
         {error && (
           <div className="alert alert-danger">
@@ -97,12 +86,12 @@ function Orders() {
 
         {orders.length === 0 ? (
           <div className="empty-state">
-            <p>You haven't placed any orders yet.</p>
+            <p>아직 주문한 상품이 없습니다.</p>
             <button
               className="btn btn-primary"
               onClick={() => navigate('/')}
             >
-              Continue Shopping
+              쇼핑하러 가기
             </button>
           </div>
         ) : (
@@ -111,7 +100,7 @@ function Orders() {
               <div key={order.id} className="order-card">
                 <div className="order-header">
                   <div className="order-info">
-                    <h3>Order #{order.id}</h3>
+                    <h3>주문번호 {order.id}</h3>
                     <p className="order-date">{formatDate(order.created_at)}</p>
                   </div>
                   <div className="order-status">
@@ -123,8 +112,8 @@ function Orders() {
 
                 <div className="order-body">
                   <div className="order-amount">
-                    <span className="label">Total Amount:</span>
-                    <span className="amount">${formatPrice(order.total_amount)}</span>
+                    <span className="label">결제 금액</span>
+                    <span className="amount">{formatPrice(order.total_amount)}</span>
                   </div>
                 </div>
 
@@ -133,7 +122,7 @@ function Orders() {
                     className="btn btn-secondary"
                     onClick={() => navigate(`/orders/${order.id}`)}
                   >
-                    View Details
+                    주문 상세
                   </button>
                 </div>
               </div>

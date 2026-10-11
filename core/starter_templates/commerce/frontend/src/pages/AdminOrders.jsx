@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { adminAPI } from '../api/client';
 import '../styles/AdminOrders.css';
+import { formatWon } from '../utils/money';
+import { statusLabel, formatDateTime } from '../utils/labels';
 
 function AdminOrders() {
   const { token } = useAuth();
@@ -35,7 +37,7 @@ function AdminOrders() {
       );
 
       if (!response.ok) {
-        throw new Error('Failed to fetch orders');
+        throw new Error('주문 목록을 불러오지 못했습니다');
       }
 
       const data = await response.json();
@@ -63,7 +65,7 @@ function AdminOrders() {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to fetch order details');
+        throw new Error('주문 정보를 불러오지 못했습니다');
       }
 
       const data = await response.json();
@@ -122,13 +124,7 @@ function AdminOrders() {
   };
 
   const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    return formatDateTime(dateString);
   };
 
   const currentPage = Math.floor(pagination.offset / pagination.limit) + 1;
@@ -137,30 +133,30 @@ function AdminOrders() {
   return (
     <div className="admin-orders">
       <div className="admin-header">
-        <h1>Order Management</h1>
+        <h1>주문 관리</h1>
         <div className="order-stats">
-          <span>Total Orders: {pagination.total}</span>
+          <span>전체 주문 {pagination.total.toLocaleString('ko-KR')}건</span>
         </div>
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
 
       {loading ? (
-        <div className="loading">Loading orders...</div>
+        <div className="loading">주문 목록을 불러오는 중…</div>
       ) : orders.length === 0 ? (
-        <div className="empty-state">No orders found</div>
+        <div className="empty-state">아직 주문이 없습니다</div>
       ) : (
         <>
           <div className="orders-table-container">
             <table className="orders-table">
               <thead>
                 <tr>
-                  <th>Order ID</th>
-                  <th>User ID</th>
-                  <th>Total Amount</th>
-                  <th>Status</th>
-                  <th>Created At</th>
-                  <th>Actions</th>
+                  <th>주문번호</th>
+                  <th>회원 번호</th>
+                  <th>결제 금액</th>
+                  <th>상태</th>
+                  <th>주문 일시</th>
+                  <th><span className="sr-only">관리</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -168,10 +164,10 @@ function AdminOrders() {
                   <tr key={order.id} className={selectedOrder === order.id ? 'expanded' : ''}>
                     <td>#{order.id}</td>
                     <td>{order.user_id}</td>
-                    <td>${(order.total_amount / 100).toFixed(2)}</td>
+                    <td>{formatWon(order.total_amount)}</td>
                     <td>
                       <span className={`status-badge ${getStatusBadgeClass(order.status)}`}>
-                        {order.status.charAt(0).toUpperCase() + order.status.slice(1)}
+                        {statusLabel(order.status)}
                       </span>
                     </td>
                     <td>{formatDate(order.created_at)}</td>
@@ -180,7 +176,7 @@ function AdminOrders() {
                         className="btn btn-sm btn-secondary"
                         onClick={() => handleViewDetails(order.id)}
                       >
-                        {selectedOrder === order.id ? 'Hide' : 'View'} Details
+                        {selectedOrder === order.id ? '접기' : '상세 보기'}
                       </button>
                     </td>
                   </tr>
@@ -192,7 +188,7 @@ function AdminOrders() {
           {selectedOrder && orderDetails && (
             <div className="order-details-container">
               <div className="order-details-header">
-                <h2>Order #{orderDetails.id} Details</h2>
+                <h2>주문번호 {orderDetails.id}</h2>
                 <button
                   className="btn btn-sm btn-secondary"
                   onClick={() => {
@@ -200,71 +196,71 @@ function AdminOrders() {
                     setOrderDetails(null);
                   }}
                 >
-                  Close
+                  닫기
                 </button>
               </div>
 
               {detailsLoading ? (
-                <div className="loading">Loading order details...</div>
+                <div className="loading">주문 정보를 불러오는 중…</div>
               ) : (
                 <div className="order-details-content">
                   <div className="details-section">
-                    <h3>Order Information</h3>
+                    <h3>주문 정보</h3>
                     <div className="details-grid">
                       <div className="detail-item">
-                        <label>Order ID:</label>
+                        <label>주문번호</label>
                         <span>{orderDetails.id}</span>
                       </div>
                       <div className="detail-item">
-                        <label>User ID:</label>
+                        <label>회원 번호</label>
                         <span>{orderDetails.user_id}</span>
                       </div>
                       <div className="detail-item">
-                        <label>Status:</label>
+                        <label>상태</label>
                         <span className={`status-badge ${getStatusBadgeClass(orderDetails.status)}`}>
-                          {orderDetails.status.charAt(0).toUpperCase() + orderDetails.status.slice(1)}
+                          {statusLabel(orderDetails.status)}
                         </span>
                       </div>
                       <div className="detail-item">
-                        <label>Payment ID:</label>
-                        <span className="payment-id">{orderDetails.payment_id || 'N/A'}</span>
+                        <label>결제 번호</label>
+                        <span className="payment-id">{orderDetails.payment_id || '없음'}</span>
                       </div>
                       <div className="detail-item">
-                        <label>Total Amount:</label>
-                        <span className="total-amount">${(orderDetails.total_amount / 100).toFixed(2)}</span>
+                        <label>결제 금액</label>
+                        <span className="total-amount">{formatWon(orderDetails.total_amount)}</span>
                       </div>
                       <div className="detail-item">
-                        <label>Created At:</label>
+                        <label>주문 일시</label>
                         <span>{formatDate(orderDetails.created_at)}</span>
                       </div>
                     </div>
                   </div>
 
                   <div className="details-section">
-                    <h3>Order Items</h3>
+                    <h3>주문 상품</h3>
                     {orderDetails.items && orderDetails.items.length > 0 ? (
                       <table className="items-table">
                         <thead>
                           <tr>
-                            <th>Product ID</th>
-                            <th>Quantity</th>
-                            <th>Price (USD)</th>
-                            <th>Subtotal</th>
+                            <th>상품</th>
+                            <th>수량</th>
+                            <th>판매가</th>
+                            <th>합계</th>
                           </tr>
                         </thead>
                         <tbody>
                           {orderDetails.items.map((item, index) => (
                             <tr key={index}>
-                              <td>{item.product_id}</td>
+                              <td>{item.name || `상품 #${item.product_id}`}</td>
                               <td>{item.quantity}</td>
-                              <td>${(item.price / 100).toFixed(2)}</td>
-                              <td>${((item.price * item.quantity) / 100).toFixed(2)}</td>
+                              <td>{formatWon(item.price)}</td>
+                              <td>{formatWon(item.price * item.quantity)}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     ) : (
-                      <p>No items in this order</p>
+                      <p>주문 상품이 없습니다</p>
                     )}
                   </div>
                 </div>
@@ -278,17 +274,17 @@ function AdminOrders() {
               onClick={handlePreviousPage}
               disabled={pagination.offset === 0}
             >
-              Previous
+              이전
             </button>
             <span className="page-info">
-              Page {currentPage} of {totalPages}
+              {currentPage} / {Math.max(totalPages, 1)} 페이지
             </span>
             <button
               className="btn btn-secondary"
               onClick={handleNextPage}
               disabled={pagination.offset + pagination.limit >= pagination.total}
             >
-              Next
+              다음
             </button>
           </div>
         </>
