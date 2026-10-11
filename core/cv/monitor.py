@@ -127,7 +127,7 @@ class DockerMetricsCollector:
         try:
             res = subprocess.run(
                 [self.cli, "logs", "--since", f"{int(since)}s", self.container_id],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             lines = (res.stdout + res.stderr).splitlines()
             obs.error_log_count = sum(
@@ -144,7 +144,7 @@ class DockerMetricsCollector:
             res2 = subprocess.run(
                 [self.cli, "stats", "--no-stream", "--format", "{{.MemPerc}}",
                  self.container_id],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             raw = res2.stdout.strip()
             obs.memory_pct = _parse_mem_percent(raw)

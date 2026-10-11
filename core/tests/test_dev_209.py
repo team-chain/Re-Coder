@@ -234,6 +234,10 @@ def test_build_error_keys_ignore_line_numbers():
 def test_seed_command_maps_ts_seed_to_built_file(tmp_path):
     _prisma_app(tmp_path)
     (tmp_path / "Dockerfile").write_text(docker_kit.for_workspace(tmp_path))
+    #: 스크립트가 가리키는 파일이 없으면 시드 명령을 만들지 않는다(2.0.17 — 없는 파일로 시드 컨테이너가 MODULE_NOT_FOUND)
+    assert local_services.seed_command(str(tmp_path)) is None
+    (tmp_path / "backend/src/db").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "backend/src/db/seed.ts").write_text("console.log('seed');\n")
     assert local_services.seed_command(str(tmp_path)) == {"workdir": "/app/backend", "script": "dist/db/seed.js", "name": "db:seed"}
     (tmp_path / "Dockerfile").write_text("FROM node:22\n")
     assert local_services.seed_command(str(tmp_path)) is None

@@ -374,7 +374,7 @@ class DeployAgent:
                 None,
                 lambda: subprocess.run(
                     ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image_name],
-                    capture_output=True, text=True, timeout=15
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15
                 )
             )
             digest = result.stdout.strip()
@@ -384,7 +384,7 @@ class DeployAgent:
                     None,
                     lambda: subprocess.run(
                         ["docker", "images", "--format", "{{.ID}}", image_name],
-                        capture_output=True, text=True, timeout=15
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15
                     )
                 )
                 return result2.stdout.strip().splitlines()[0] if result2.stdout.strip() else None

@@ -114,7 +114,7 @@ def check_core_ready() -> tuple[ReadyStatus, list[str]]:
     # 쓰기 권한 확인
     try:
         test_file = RECODER_HOME / ".write_test"
-        test_file.write_text("test")
+        test_file.write_text("test", encoding="utf-8")
         test_file.unlink()
     except Exception as e:
         issues.append(f"Core Ready: No write permission in RECODER_HOME: {e}")
@@ -129,7 +129,7 @@ def check_core_ready() -> tuple[ReadyStatus, list[str]]:
             "version": "6.4",
             "check_time": datetime.now(timezone.utc).isoformat(),
         }
-        runtime_path.write_text(json.dumps(runtime_data, indent=2))
+        runtime_path.write_text(json.dumps(runtime_data, indent=2), encoding="utf-8")
     except Exception as e:
         issues.append(f"Core Ready: Failed to create ready_check.json: {e}")
         return ReadyStatus.FAIL, issues
@@ -335,7 +335,7 @@ def check_docker_ready() -> tuple[ReadyStatus, str]:
         version_result = subprocess.run(
             ["docker", "--version"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=5,
         )
         if version_result.returncode != 0:

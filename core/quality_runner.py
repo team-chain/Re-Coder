@@ -58,7 +58,7 @@ class QualityRunner:
             proc = subprocess.run(
                 args,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=timeout,
             )
             return proc.returncode, proc.stdout, proc.stderr
@@ -210,7 +210,7 @@ class QualityRunner:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
             )
             stdout, stderr = proc.communicate(input=content, timeout=120)
             returncode = proc.returncode

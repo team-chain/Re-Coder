@@ -1794,7 +1794,7 @@ def _check_file(path: str, content: str) -> list[str]:
                     f = os.path.join(tmp, "check" + suffix)
                     with open(f, "w", encoding="utf-8") as fh:
                         fh.write(content)
-                    r = subprocess.run([node, "--check", f], capture_output=True, text=True, timeout=15)
+                    r = subprocess.run([node, "--check", f], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
                     if r.returncode != 0:
                         msg = (r.stderr or r.stdout or "").strip().splitlines()
                         detail = next((m for m in msg if "Error" in m), msg[-1] if msg else "문법 오류")

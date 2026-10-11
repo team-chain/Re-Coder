@@ -7,7 +7,7 @@ from pathlib import Path
 
 def settings():
     path = Path(os.getenv('RECODER_REPAIR_CONFIG', str(Path(__file__).with_name('runtime.json'))))
-    return json.loads(path.read_text()) if path.exists() else {}
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 @lru_cache(maxsize=2)

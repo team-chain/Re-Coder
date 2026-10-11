@@ -177,7 +177,7 @@ async def _ssh_fetch_file(
     try:
         result = await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=30),
+            lambda: subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30),
         )
         if result.returncode != 0:
             raise HTTPException(
@@ -211,7 +211,7 @@ async def _ssh_exec(
     try:
         result = await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=60),
+            lambda: subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60),
         )
         return {
             "exit_code": result.returncode,

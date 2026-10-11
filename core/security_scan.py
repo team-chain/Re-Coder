@@ -210,7 +210,7 @@ class SecurityScanner:
         try:
             # 첫 실행은 취약점 DB(수백 MB)를 받느라 2분을 넘길 수 있다.
             await self._run_cmd(cmd, timeout=_TRIVY_TIMEOUT)
-            raw = json.loads(Path(output_path).read_text())
+            raw = json.loads(Path(output_path).read_text(encoding="utf-8"))
             if not isinstance(raw, dict) or (
                 "Results" not in raw and not (raw.get("SchemaVersion") == 2 and isinstance(raw.get("Metadata"), dict))
             ) or ("Results" in raw and not isinstance(raw["Results"], list)):
@@ -365,7 +365,7 @@ class SecurityScanner:
             await self._run_cmd(cmd)
             if not os.path.isfile(output_path):
                 raise ValueError("Gitleaks did not create its report")
-            raw_text = Path(output_path).read_text()
+            raw_text = Path(output_path).read_text(encoding="utf-8")
             leaks = json.loads(raw_text)
             if leaks is not None and not isinstance(leaks, list):
                 raise ValueError("Gitleaks returned an invalid report")
@@ -430,7 +430,7 @@ class SecurityScanner:
             raise
 
         if proc.returncode != 0 and not allow_nonzero:
-            raise RuntimeError(f"{cmd[0]} failed (rc={proc.returncode}): {stderr.decode()[:500]}")
+            raise RuntimeError(f"{cmd[0]} failed (rc={proc.returncode}): {stderr.decode('utf-8', errors='replace')[:500]}")
 
         return stdout.decode("utf-8", errors="replace")
 

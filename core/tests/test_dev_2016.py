@@ -478,3 +478,83 @@ def test_review_round3_regressions(tmp_path):
     hook = writes["src/hooks/useTotal.ts"]
     assert "getTotalPrice, // sum\n    total: getTotalPrice()," in hook
     assert _syntax_ok(hook, "x.ts")
+
+
+def test_core_io_never_depends_on_the_windows_locale():
+    """한국어 윈도우(cp949)에서 SBOM(JSON 에 한글·특수 문자)을 읽다 ECS 배포가 멈췄다(실기기 2.0.16 SBOM 단계).
+    파일·하위 프로세스 출력은 늘 UTF-8 로 명시한다."""
+    import ast
+    core = Path(__file__).resolve().parents[1]
+    bad = []
+    for p in core.rglob("*.py"):
+        rel = p.relative_to(core).as_posix()
+        if rel.startswith(("tests/", "eval/")) or rel == "singleton.py":
+            continue
+        tree = ast.parse(p.read_text(encoding="utf-8"))
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            name = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
+            kws = {k.arg: k for k in n.keywords}
+            if name in ("read_text", "write_text") and isinstance(f, ast.Attribute) and "encoding" not in kws:
+                bad.append(f"{rel}:{n.lineno} {name}")
+            text = kws.get("text") or kws.get("universal_newlines")
+            if name in ("run", "Popen", "check_output") and text is not None and "encoding" not in kws \
+                    and isinstance(text.value, ast.Constant) and text.value.value is True:
+                bad.append(f"{rel}:{n.lineno} {name}(text=True)")
+    assert not bad, bad
+
+
+def test_sbom_with_non_ascii_is_read_under_a_non_utf8_locale(tmp_path):
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    syft = fake / "syft"
+    syft.write_text("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in cyclonedx-json=*) out=\"${a#cyclonedx-json=}\";; esac; done\n"
+                    "printf '{\"components\":[{\"name\":\"cafe\",\"description\":\"카페 ☕\"}]}' > \"$out\"\n", encoding="utf-8")
+    syft.chmod(0o755)
+    code = ("import asyncio,sys;sys.path.insert(0,%r);sys.path.insert(0,%r);from core.sbom import SBOMGenerator;"
+            "r=asyncio.run(SBOMGenerator().generate('app:1'));print(r.package_count, r.error)") % (
+        str(Path(__file__).resolve().parents[2]), str(Path(__file__).resolve().parents[1]))
+    env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0",
+           "PYTHONCOERCECLOCALE": "0", "RECODER_SBOM_DIR": str(tmp_path / "sbom")}
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert out.stdout.strip().startswith("1 None"), out.stdout + out.stderr
+
+
+def test_generated_tsconfig_module_matches_module_resolution():
+    import node_fixups as nf
+    out = nf.relax_generated_tsconfig('{"compilerOptions": {"module": "ES2020", "moduleResolution": "nodeNext", "strict": true}}')
+    assert json.loads(out)["compilerOptions"]["module"] == "NodeNext"
+    out = nf.relax_generated_tsconfig('{"compilerOptions": {"module": "commonjs", "moduleResolution": "bundler"}}')
+    assert json.loads(out)["compilerOptions"]["module"] == "ESNext"
+    assert nf.relax_generated_tsconfig('{"compilerOptions": {"module": "NodeNext", "moduleResolution": "NodeNext"}}') is None
+
+
+def test_seed_command_skips_scripts_whose_file_does_not_exist(tmp_path):
+    import local_services
+    _write(tmp_path, {
+        "Dockerfile": docker_kit.render({"server": "backend", "entry": "dist/index.js", "ui": None, "server_build": True,
+                                         "port": 3000, "health": "/health"}),
+        "backend/package.json": json.dumps({"name": "b", "type": "module", "scripts": {
+            "build": "tsc", "start": "node dist/index.js", "db:init": "node dist/db/init.js", "db:setup": "tsx src/db/seed.ts"},
+            "dependencies": {"express": "^4", "pg": "^8"}}),
+        "backend/tsconfig.json": json.dumps({"compilerOptions": {"rootDir": "./src", "outDir": "./dist"}}),
+        "backend/src/index.ts": "import express from 'express';\nexpress().listen(3000);\n",
+        "backend/src/db/seed.ts": "console.log('seed');\n",
+    })
+    cmd = local_services.seed_command(str(tmp_path))
+    assert cmd and cmd["script"] == "dist/db/seed.js" and cmd["name"] == "db:setup"
+
+
+def test_optional_marker_on_object_literal_methods_is_removed_only_there(tmp_path):
+    import node_fixups as nf
+    src = ("interface H {\n  onFail?(e: any): Promise<void>;\n}\nclass C {\n  m?(): void {}\n}\n"
+           "export const h = {\n  async onFail?(e: any) {\n    return 1;\n  },\n  run?(): void {\n  },\n};\n"
+           "const t = cond\n  ? (a)\n  : b;\ntype T = { f?(x: number): void };\n")
+    (tmp_path / "a.ts").write_text(src, encoding="utf-8")
+    notes, writes = nf.optional_object_methods(ProjectFiles(tmp_path))
+    out = writes["a.ts"]
+    assert "async onFail(e: any) {" in out and "  run(): void {" in out
+    assert "onFail?(e: any): Promise<void>;" in out and "m?(): void {}" in out and "f?(x: number)" in out and "? (a)" in out
+    assert _syntax_ok(out, "a.ts")

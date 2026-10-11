@@ -410,23 +410,38 @@ def seed_command(workspace: str) -> Optional[dict]:
         return None
     scripts = pkg.get("scripts") if isinstance(pkg, dict) and isinstance(pkg.get("scripts"), dict) else {}
     from node_fixups import SEED_SCRIPT_NAMES
-    name = next((n for n in SEED_SCRIPT_NAMES if n in scripts), None)
-    if not name:
+    try:
+        from node_fixups import load_jsonc
+        conf = (load_jsonc(files.read(f"{server}/tsconfig.json")) or {}).get("compilerOptions") or {}
+    except Exception:  # noqa: BLE001
+        conf = {}
+    root = str(conf.get("rootDir") or "src").strip("./") or "."
+    out = str(conf.get("outDir") or "dist").strip("./") or "dist"
+    picked = None
+    #: 스크립트가 가리키는 파일이 프로젝트에 실제로 있는 첫 이름만 — `db:init: node dist/db/init.js` 인데 src/db/init.ts 가
+    #: 없으면 시드 컨테이너가 MODULE_NOT_FOUND 로 끝났다(실기기 2.0.16 쇼핑몰 cdf7, 실제 시드는 db:seed 쪽).
+    for name in (n for n in SEED_SCRIPT_NAMES if n in scripts):
+        m = re.search(r"(?:tsx|ts-node(?:-esm)?|node(?:\s+--loader\s+\S+)?)\s+([\w./-]+\.(?:ts|js|mjs|cjs))\b", str(scripts[name]))
+        if not m:
+            continue
+        src = re.sub(r"^\./", "", m.group(1))
+        if src.endswith(".ts"):
+            if not files.exists(f"{server}/{src}"):
+                continue
+            rel = src[len(root) + 1:] if root != "." and src.startswith(root + "/") else src
+            src = out + "/" + re.sub(r"\.ts$", ".js", rel)
+        elif src.startswith(out + "/"):
+            stem = re.sub(r"\.(?:js|mjs|cjs)$", "", src[len(out) + 1:])
+            base = stem if root == "." else f"{root}/{stem}"
+            if not any(files.exists(f"{server}/{base}{ext}") for ext in (".ts", ".mts", ".js", ".mjs")):
+                continue
+        elif not files.exists(f"{server}/{src}"):
+            continue
+        picked = (name, src)
+        break
+    if not picked:
         return None
-    m = re.search(r"(?:tsx|ts-node(?:-esm)?|node(?:\s+--loader\s+\S+)?)\s+([\w./-]+\.(?:ts|js|mjs|cjs))\b", str(scripts[name]))
-    if not m:
-        return None
-    src = re.sub(r"^\./", "", m.group(1))
-    if src.endswith(".ts"):
-        try:
-            from node_fixups import load_jsonc
-            conf = (load_jsonc(files.read(f"{server}/tsconfig.json")) or {}).get("compilerOptions") or {}
-        except Exception:  # noqa: BLE001
-            conf = {}
-        root = str(conf.get("rootDir") or "src").strip("./") or "."
-        out = str(conf.get("outDir") or "dist").strip("./") or "dist"
-        rel = src[len(root) + 1:] if root != "." and src.startswith(root + "/") else src
-        src = out + "/" + re.sub(r"\.ts$", ".js", rel)
+    name, src = picked
     workdir = "/app" if info.get("cwd_root") else f"/app/{server}"
     script = f"{server}/{src}" if info.get("cwd_root") else src
     return {"workdir": workdir, "script": script, "name": name}

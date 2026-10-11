@@ -166,7 +166,7 @@ def _docker_pids() -> list[int]:
     """Docker.app 아래서 돌고 있는 모든 프로세스(GUI·helper·backend·build)."""
     try:
         proc = subprocess.run(
-            ["pgrep", "-f", "Docker.app/Contents/"], capture_output=True, text=True, timeout=5,
+            ["pgrep", "-f", "Docker.app/Contents/"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return []
@@ -194,7 +194,7 @@ def _oldest_process_age(pids: list[int]) -> int:
     try:
         proc = subprocess.run(
             ["ps", "-o", "etime=", "-p", ",".join(str(p) for p in pids)],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return 0
@@ -342,7 +342,7 @@ def _launch() -> tuple[bool, str]:
             env = _launch_env()
             proc = subprocess.run(
                 ["open", "-a", "Docker"],
-                capture_output=True, text=True, timeout=_OPEN_TIMEOUT_SECONDS, env=env,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_OPEN_TIMEOUT_SECONDS, env=env,
             )
             _log.warning("[docker-autostart] open -a Docker → rc=%s stdout=%r stderr=%r (제거한 env=%s)",
                          proc.returncode, proc.stdout.strip(), proc.stderr.strip(),

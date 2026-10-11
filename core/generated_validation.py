@@ -93,7 +93,7 @@ def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None) 
             return {**base, "output": mask_secrets(str(exc))[:2000]}
         finally:
             if image_file.is_file():
-                image = image_file.read_text().strip()
+                image = image_file.read_text(encoding="utf-8").strip()
                 if image.startswith("sha256:"):
                     try:
                         subprocess.run(

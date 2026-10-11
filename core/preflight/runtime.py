@@ -148,7 +148,7 @@ def detect_docker() -> DockerCapabilities:
         try:
             res = subprocess.run(
                 ["docker", "version", "--format", "{{.Server.Version}}"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if res.returncode == 0:
                 caps.cli_available = True
@@ -251,7 +251,7 @@ def temporary_container(
 
     log.debug("Starting temporary container: %s", " ".join(cmd[:6]))  # 환경변수 값은 로그 안 함
     try:
-        run_proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        run_proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"docker run timeout: {exc}") from exc
 
@@ -290,7 +290,7 @@ def fetch_container_logs(container_id: str, tail: int = 50, cli: str = "docker")
     try:
         res = subprocess.run(
             [cli, "logs", "--tail", str(tail), container_id],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
     except subprocess.TimeoutExpired:
         return "<log fetch timeout>"

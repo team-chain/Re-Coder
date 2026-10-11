@@ -81,7 +81,7 @@ class LocalDeployAgent:
                 args,
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=timeout,
             )
             output = "\n".join(
@@ -235,7 +235,7 @@ class LocalDeployAgent:
                 proc = subprocess.run(
                     ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8", errors="replace",
                     timeout=10,
                 )
                 if proc.returncode == 0 and "true" in proc.stdout.lower():
@@ -244,7 +244,7 @@ class LocalDeployAgent:
                     log_proc = subprocess.run(
                         ["docker", "logs", "--tail", "5", container_name],
                         capture_output=True,
-                        text=True,
+                        text=True, encoding="utf-8", errors="replace",
                         timeout=10,
                     )
                     if log_proc.returncode == 0:
@@ -259,7 +259,7 @@ class LocalDeployAgent:
                 proc = subprocess.run(
                     ["docker", "exec", container_name, "sh", "-c", "echo 'alive'"],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8", errors="replace",
                     timeout=5,
                 )
                 if proc.returncode == 0:

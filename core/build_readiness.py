@@ -55,6 +55,7 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_SEED_SCRIPT_OUTSIDE_BUILD", "NODE_REACT_REF_STATE",
                 "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS", "NODE_AUTH_USER_NOT_RESTORED",
                 "NODE_API_ENVELOPE_MISMATCH", "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING", "NODE_CONTEXT_VALUE_MISSING",
+                "NODE_TS_OPTIONAL_OBJECT_METHOD",
                 "NODE_AI_MOCK_SERVER_IMPORT"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
@@ -71,7 +72,7 @@ FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_
                     "NODE_REACT_REF_STATE", "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS",
                     "NODE_AUTH_USER_NOT_RESTORED", "NODE_API_ENVELOPE_MISMATCH",
                     "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING", "NODE_AI_MOCK_SERVER_IMPORT",
-                    "NODE_CONTEXT_VALUE_MISSING")
+                    "NODE_CONTEXT_VALUE_MISSING", "NODE_TS_OPTIONAL_OBJECT_METHOD")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -2617,6 +2618,14 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "NODE_CART_NOT_PERSISTED", WARNING,
                 "장바구니를 화면 메모리에만 둡니다: " + ", ".join(sorted(cart_writes)[:2]) + ". 새로고침하면 담은 상품이 사라집니다.",
                 "브라우저에 보관·복원하게 하세요(자동 수정 가능).", sorted(cart_writes)[0], True))
+        opt_notes, opt_writes = _safe_fix(node_fixups.optional_object_methods, files)
+        if opt_writes:
+            writes["NODE_TS_OPTIONAL_OBJECT_METHOD"] = opt_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_TS_OPTIONAL_OBJECT_METHOD", ERROR,
+                "객체의 메서드에 인터페이스처럼 ? 를 붙였습니다: " + "; ".join(opt_notes[:2])
+                + ". tsc 가 문법 오류(TS1162)로 빌드를 멈춥니다.",
+                "객체 메서드 이름 뒤의 ? 를 지우세요(자동 수정 가능 — 동작은 같습니다).", sorted(opt_writes)[0], True))
         ctx_notes, ctx_writes = _safe_fix(node_fixups.context_value_missing, files)
         if ctx_writes:
             writes["NODE_CONTEXT_VALUE_MISSING"] = ctx_writes

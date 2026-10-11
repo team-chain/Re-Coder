@@ -380,10 +380,11 @@ def _handle_shutdown(signum, _frame) -> None:
 
 def main() -> None:
     multiprocessing.freeze_support()
-    #: 콘솔·파이프 인코딩이 한글을 못 쓰는 Windows 로캘에서도 출력 때문에 죽지 않게 한다.
+    #: 콘솔·파이프 인코딩이 한글을 못 쓰는 Windows 로캘에서도 출력 때문에 죽지 않게 한다. 확장은 Core 출력을 UTF-8 로
+    #: 읽으므로 UTF-8 로 쓴다 — cp949 로 쓰면 core.log·오류 안내의 한글이 "����" 로 깨졌다(실기기 2.0.16 SBOM 오류).
     for _stream in (sys.stdout, sys.stderr):
         try:
-            _stream.reconfigure(errors="replace")  # type: ignore[attr-defined]
+            _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
         except Exception:
             pass
     # load_dotenv() 는 파일 상단에서 이미 호출했다(임포트 순서 때문). 중복 호출은

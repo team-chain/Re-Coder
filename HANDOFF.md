@@ -1,3 +1,10 @@
+# ECS SBOM 단계 실패(cp949) · Core 인코딩 전수 정리 (2026-10-11, 2.0.17)
+
+- 실기기 2.0.16 ECS(82b0255b, 새로 생성한 쇼핑몰 cdf7): 빌드·ECR·Trivy 통과 뒤 SBOM 단계 실패 `'cp949' codec can't decode byte 0xc8 in position 235511`. sbom.py 가 `output_path.read_text()`(로캘 인코딩). SBOM(312KB, 410개)은 UTF-8 이고 의존성 작성자 `Ștefan Rusu` 등이 있음 — 새 앱의 의존성(multer·aws-sdk)부터 드러남.
+- 고침: Core 전체 read_text/write_text·subprocess(text=True) 에 encoding="utf-8"(+errors="replace") — sbom·security_scan(Trivy·Gitleaks 결과)·local_deploy·preflight·git 등 23개 파일. main.py stdout/stderr 를 UTF-8 로(확장이 UTF-8 로 읽음 — core.log 한글 깨짐). 테스트 `test_core_io_never_depends_on_the_windows_locale`(AST 전수) · `test_sbom_with_non_ascii_is_read_under_a_non_utf8_locale`(LC_ALL=C 에서 옛 코드는 실패 재현). EUC-KR 로캘(localedef)로 전체 테스트를 돌려 남은 실패는 테스트 코드 쪽뿐(제품 코드는 sandbox 경로 이름 문제 외 없음).
+- local_services.seed_command: 스크립트가 가리키는 파일이 프로젝트에 있는 첫 이름만. node_fixups.relax_generated_tsconfig: module/moduleResolution 맞춤(TS5110·TS5095). `optional_object_methods` → NODE_TS_OPTIONAL_OBJECT_METHOD(TS1162).
+- cdf7 e2e: 빌드·DB(schema.sql)·모의 결제·앱 기동 OK. 남은 것(AI 코드 오류, 자동 교정 불가): 상품 목록 SQL 의 $ 번호가 하나 건너뜀 → 500, 화면이 오류 객체를 그대로 그려 React #31. 생성 단계에 실제 실행 점검(앱을 띄워 API 호출)이 없어 못 잡음 — 다음 과제.
+
 # 출시 전 재검토 — 파일 사이 이름 어긋남 · 웹훅 키 · 검토 3회 반영 (2026-10-11, 2.0.16)
 
 - 검토: 독립 검토 에이전트 3회(1차 19건·2차 9건·3차 11건) 전부 반영 — node_fixups `stmt_end`/`add_react_named`/`imports_end` 등 공통 도우미로 자동 교정이 코드를 깨지 않게(판단 불가면 건너뜀), docker_kit `ui_tsc_vite`·`server_tsc_only` 일 때만 타입 오류 허용·`_FATAL_TS`(pretty 출력 포함), ECSAgent `_runtime` 정리, gen_engine root = target_folder, undouble 템플릿 안 중첩, tailwind 감지 강화(lock 있고 의존성 없으면 손대지 않음) 등.

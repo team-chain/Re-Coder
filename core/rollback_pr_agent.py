@@ -369,7 +369,7 @@ def _write_audit_log(cfg: RollbackPRConfig, result: RollbackPRResult) -> str:
         "success":              result.success,
         "error":                result.error,
     }
-    log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(log_path)
 
 

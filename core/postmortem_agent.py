@@ -135,7 +135,7 @@ def _read_watchdog_tail(n: int = 30) -> str:
     """Watchdog 로그에서 마지막 n줄 읽기."""
     if not _WATCHDOG_LOG.exists():
         return "(Watchdog 로그 없음)"
-    lines = _WATCHDOG_LOG.read_text(errors="replace").splitlines()
+    lines = _WATCHDOG_LOG.read_text(errors="replace", encoding="utf-8").splitlines()
     return "\n".join(lines[-n:])
 
 
@@ -146,7 +146,7 @@ def _read_recent_audit_logs(incident_id: str) -> list[dict]:
     results = []
     for f in sorted(_AUDIT_LOG_DIR.glob("*.json"), reverse=True)[:20]:
         try:
-            data = json.loads(f.read_text())
+            data = json.loads(f.read_text(encoding="utf-8"))
             if incident_id and data.get("incident_id") == incident_id:
                 results.append(data)
             elif not incident_id:
@@ -416,7 +416,7 @@ class PostmortemAgent:
                 "otel_used":   bool(spans),
             }
             audit_path = _AUDIT_LOG_DIR / f"postmortem_{inp.incident_id}.json"
-            audit_path.write_text(json.dumps(audit_entry, ensure_ascii=False, indent=2))
+            audit_path.write_text(json.dumps(audit_entry, ensure_ascii=False, indent=2), encoding="utf-8")
             _log(f"[postmortem] AuditLog 기록: {audit_path}")
         except Exception as e:
             _log(f"[postmortem] AuditLog 기록 실패 (무시): {e}")

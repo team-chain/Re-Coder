@@ -70,7 +70,7 @@ class LocalEmbedding:
             for p in sorted(root.rglob("*")) if p.is_file()
         ]).encode()).hexdigest()
         options = root / "recoder-embedding.json"
-        config = json.loads(options.read_text()) if options.exists() else {}
+        config = json.loads(options.read_text(encoding="utf-8")) if options.exists() else {}
         self.query_prefix = config.get("query_prefix", "")
         self.passage_prefix = config.get("passage_prefix", "")
         self.min_cosine = float(config.get("min_cosine", .35))

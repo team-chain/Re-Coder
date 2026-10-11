@@ -309,10 +309,21 @@ def relax_generated_tsconfig(text: str) -> Optional[str]:
         return None
     opts = data["compilerOptions"]
     hit = [k for k in LINT_ONLY_TS_OPTIONS if opts.get(k) is True]
-    if not hit:
-        return None
     for k in hit:
         opts[k] = False
+    #: module 과 moduleResolution 이 맞지 않으면 tsc 가 설정 오류(TS5110·TS5095)로 실패한다 — 생성 검증이 이것 하나로
+    #: "확인 필요" 가 되고 AI 교정 회차를 썼다(실기기 2.0.16 쇼핑몰 cdf7: module ES2020 + moduleResolution nodeNext).
+    res = str(opts.get("moduleResolution") or "").lower()
+    mod = str(opts.get("module") or "").lower()
+    changed = bool(hit)
+    if res in ("node16", "nodenext") and mod and mod not in ("node16", "nodenext", "node18", "node20"):
+        opts["module"] = "NodeNext" if res == "nodenext" else "Node16"
+        changed = True
+    elif res == "bundler" and mod in ("commonjs", "amd", "umd", "system", "none"):
+        opts["module"] = "ESNext"
+        changed = True
+    if not changed:
+        return None
     return _dump_like(text, data)
 
 
@@ -2954,4 +2965,45 @@ def context_value_missing(files) -> tuple[list[str], dict[str, str]]:
                         text = text[:t.end()] + pre + lines + text[close:]
         writes[ctx_rel] = text
         notes.append(f"{ctx_rel}: {name} 에 {', '.join(parts)} 추가")
+    return notes, writes
+
+
+_OPTIONAL_METHOD = re.compile(r"(?m)^([ \t]*(?:async[ \t]+)?\*?[ \t]*)([A-Za-z_$][\w$]*)\?([ \t]*(?:<[^>\n]*>)?[ \t]*\()")
+
+
+def optional_object_methods(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 객체 리터럴의 메서드에 인터페이스처럼 `?` 를 붙였다(`async onPaymentFailed?(event) {`).
+    tsc 가 TS1162(문법 오류)로 실패해 배포 빌드가 멈춘다(실기기 2.0.16 쇼핑몰 cdf7). 클래스·인터페이스·타입 안은 그대로."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".ts", ".tsx", ".mts")) or rel.endswith(".d.ts") or "/node_modules/" in f"/{rel}":
+            continue
+        text = files.read(rel) or ""
+        if "?(" not in text and "? (" not in text and "?<" not in text:
+            continue
+        masked = _mask_code(text)
+        pairs = _brace_pairs(masked)
+        cuts = []
+        for m in _OPTIONAL_METHOD.finditer(masked):
+            #: 본문이 있는 메서드만(`) {` / `): T {`) — 인터페이스·타입의 선언(`;`)은 아니다
+            close = masked.find(")", m.end())
+            after = masked[close + 1:close + 200] if close > 0 else ""
+            if not re.match(r"[ \t]*(?::[ \t]*[^;{=\n]+?)?[ \t]*\{", after):
+                continue
+            q = m.end(2)
+            inside = [(o, c) for o, c in pairs if o < q < c]
+            if not inside:
+                continue
+            o = max(inside)[0]
+            head = masked[max(0, o - 300):o]
+            if re.search(r"\b(?:class|interface)\b[^{};]*$", head) or re.search(r"\btype\s+[\w$<>, ]+=\s*$", head):
+                continue
+            cuts.append(q)
+        if cuts:
+            new = text
+            for q in sorted(cuts, reverse=True):
+                new = new[:q] + new[q + 1:]
+            writes[rel] = new
+            notes.append(f"{rel}: 객체 메서드의 ? {len(cuts)}곳")
     return notes, writes

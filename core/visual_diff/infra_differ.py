@@ -306,7 +306,7 @@ class InfraDiffer:
             if paths:
                 cmd.extend(["--"] + paths)
             result = subprocess.run(
-                cmd, capture_output=True, text=True, cwd=repo_path, timeout=10
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=repo_path, timeout=10
             )
             if result.returncode != 0:
                 log.warning("git diff 실패: %s", result.stderr)
@@ -333,7 +333,7 @@ class InfraDiffer:
         try:
             result = subprocess.run(
                 ["git", "show", ref],
-                capture_output=True, text=True, cwd=repo_path, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=repo_path, timeout=5,
             )
             return result.stdout if result.returncode == 0 else ""
         except Exception:
