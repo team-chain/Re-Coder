@@ -2067,7 +2067,7 @@ def _server_missing_issues(ops: list[dict]) -> list[dict]:
     files = {_norm_op_path(op.get("file", "")): str(op.get("content") or "") for op in ops if op.get("action") != "delete"}
     ui = [t for p, t in files.items() if p.endswith((".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte"))
           and re.match(r"(frontend|client|web)/", p)]
-    if not any(re.search(r"""['"`]/api/""", t) or re.search(r"""baseURL[^\n]*['"`]/api""", t) for t in ui):
+    if not any(re.search(r"""['"`]/api(?:/|['"`])""", t) for t in ui):
         return []
     server = [p for p in files if p.endswith((".ts", ".js", ".mjs", ".cjs", ".py"))
               and not re.match(r"(frontend|client|web)/", p) and not re.search(r"mock", p, re.I)]

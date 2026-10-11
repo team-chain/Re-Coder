@@ -198,6 +198,19 @@ def _install(lock: bool) -> str:
             "npm install --no-audit --no-fund --workspaces=false")
 
 
+#: 배포 빌드는 타입 오류만으로 멈추지 않는다 — 실기기 2.0.13 카페: AI 교정 뒤에도 남은 타입 오류 몇 건(jwt.sign 의
+#: 오버로드, 화면의 key={item.id}) 때문에 `tsc && vite build` 가 멈춰 Docker·ECS 배포가 통째로 막혔다. 타입 오류는
+#: 실행 코드를 바꾸지 않는다: 화면은 타입 검사 없이 vite 로 다시 빌드하고, 서버는 tsc 가 만든 결과(진입 파일)가 있으면 쓴다.
+#: 생성 검증 빌드(verify)는 그대로 엄격하다 — 남은 오류는 생성 결과의 "확인 필요" 로 알린다.
+UI_BUILD = ("{ npm run build --workspaces=false || { echo '[recoder] 화면 타입 검사 오류 — 타입 검사 없이 vite 로 빌드합니다' >&2"
+            " && test -x node_modules/.bin/vite && node_modules/.bin/vite build; }; }")
+
+
+def server_build(entry: str) -> str:
+    return ("{ npm run build --workspaces=false || { echo '[recoder] 서버 타입 검사 오류 — tsc 가 만든 결과로 계속합니다' >&2"
+            f" && test -f {entry}; }}; }}")
+
+
 def render(info: dict) -> str:
     server, ui, entry = info["server"], info.get("ui"), info["entry"]
     port, health = info["port"], info["health"]
@@ -217,7 +230,7 @@ def render(info: dict) -> str:
 
     def build_step(folder: str, install: str, extra_before: list[str], build: bool) -> list[str]:
         if not verify:
-            steps = [install] + extra_before + (["npm run build --workspaces=false"] if build else [])
+            steps = [install] + extra_before + ([UI_BUILD] if build else [])
             return ["RUN " + " \\\n    && ".join(steps)]
         #: 생성 검증용 — 한 폴더의 빌드가 실패해도 다음 폴더까지 빌드해 오류를 한 번에 모은다(서버 오류가 화면 오류 뒤에
         #: 숨어 있다가 화면을 고치자 수십 건이 새로 나타났다). 경로는 저장소 기준으로 바꿔 찍는다.
@@ -250,7 +263,7 @@ def render(info: dict) -> str:
     else:
         server_steps = [_install(info.get("server_lock", False))] + prisma_steps
         if info.get("server_build"):
-            server_steps.append("npm run build --workspaces=false")
+            server_steps.append(server_build(entry))
         server_steps.append("npm prune --omit=dev --no-audit --no-fund --workspaces=false")
         lines += ["RUN " + " \\\n    && ".join(server_steps)]
     runtime_os = ["RUN apk upgrade --no-cache \\"]

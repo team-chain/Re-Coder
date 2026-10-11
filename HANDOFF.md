@@ -1,3 +1,10 @@
+# 실제 생성 결과로 개발→배포 끝까지 확인 — 타입 오류 배포, 화면 동작 결함 (2026-10-11, 2.0.15)
+
+- 방법(sandbox, 스크립트는 세션 scratchpad e2e.py·crawl.js): 사용자 ~/.recoder/generation 체크포인트(83ed 카페 Sequelize, 0ce6 쇼핑몰 pg, 0d40 쇼핑몰 Prisma, 4a06 화면만)의 ops → `_autofix_ops`·`_apply_docker_kit`(생성 직후와 같음) → `apply_all_fixes`([모두 적용]) → docker_kit 과 같은 빌드(npm install·UI_BUILD·server_build) → `ecs_runtime.plan` 대로 Postgres(초기화 SQL)·시드 명령·모의 결제·앱(NODE_ENV=production) → Playwright 순회(페이지·가입·로그인·담기·장바구니·결제·주문 목록, 4xx/5xx·pageerror 수집).
+- 결과: 카페·쇼핑몰(0ce6) 흐름 문제 0건. 0d40 빌드 통과(실행은 Prisma 엔진 다운로드가 차단돼 확인 못 함, 앱이 S3_BUCKET_NAME 을 시작 때 요구 → ECS 는 막고 이유 안내). 4a06 → APP_SERVER_MISSING.
+- 고침: docker_kit `UI_BUILD`/`server_build`(배포 빌드만 타입 오류 허용, verify 는 엄격), build_readiness 서버 진입 파일 backend/src/* 폴백(+ import 한 app 파일의 express()), ORM 이면 서버 package.json 의 드라이버로 services, `_check_server_missing`(APP_SERVER_MISSING), deploy 로컬 Dockerfile 폴백의 unknown 오류 문구, `_esm_exports` 내보내기 없는 ESM 은 빈 집합, `_type_only_use` → NODE_TYPE_NAME_MISSING(경고·자동 수정), node_fixups `auth_user_persist`·`api_envelope_unwrap`(배열은 배열에 envelope 키를 붙임)·`cart_persist`·`drop_ai_mock_server_imports`·esm_commonjs_globals 의 식 안 require → createRequire·tailwind 의존성 늘 선언(CDN 이면 건너뜀), gen_engine `undefined_css_classes`+`_complete_styles`(새 앱, 8개 이상·30% 이상 → src/styles/recoder-complete.css, 불러오는 화면 코드를 importers 로), `_file_hint` 서버·화면 규칙 추가, code_agent `_server_missing_issues` 가 baseURL 상수도 봄.
+- 남은 것: AI 생성 자체(설계 보강·스타일 채우기)는 이 환경에 모델이 없어 가짜 응답으로만 확인 — 사용자 PC 에서 새로 생성해 확인 필요. Prisma 실행, S3 를 꼭 요구하는 앱의 ECS(버킷·태스크 역할 준비)는 미지원(막고 안내).
+
 # 서버 없는 생성 결과 · 엉뚱한 Dockerfile 자동 수정 (2026-10-11, 2.0.14)
 
 - 실기기 2.0.13 job 4a06(Haiku, TEMP): ops 41개 = 화면 30 + mock-payment-server/{package,tsconfig}.json + ADR 10, 서버·루트 package.json·Dockerfile 없음. 요약은 "Express·Prisma·PostgreSQL". core.log 06:14:46 `kind=other`(설계 검토 생략 추정 — 한글 로그가 깨져 문구 확인 불가). 배포: local "스택 unknown", ECS 승인 카드 막는 문제 = remediation 이 쓴 FastAPI Dockerfile(COPY requirements.txt / ./app).

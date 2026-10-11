@@ -1506,13 +1506,18 @@ def esm_commonjs_globals(files) -> tuple[list[str], dict[str, str]]:
             imports.append("import { fileURLToPath as recoderFileURLToPath } from 'url';")
             if uses_dir:
                 imports.append("import { dirname as recoderDirname } from 'path';")
+        #: 식 안에 남은 require(…)(예: `id: require('uuid').v4()`) — Node 의 공식 방법(createRequire)으로 같은 require 를 만든다.
+        #: 실기기 0d40: 서버 app.ts·server.ts 에 이것이 남아 시작하자마자(또는 그 경로에서) ReferenceError 로 죽을 코드였다.
+        inline = bool(re.search(r"(?<![\w.$])require\s*\(", new)) and not re.search(r"\b(?:const|let|var)\s+require\b", new)
+        if inline:
+            imports.append("import { createRequire as recoderCreateRequire } from 'module';")
         if new == text and not imports:
             continue
-        if "require(" in new and re.search(r"(?<![\w.$])require\s*\(", new):
-            continue  # 줄 단위로 옮길 수 없는 require(식 안 등)가 남는다 — 사람이 보게 둔다
         lines = []
         if imports:
             lines += imports
+        if inline:
+            lines.append("const require = recoderCreateRequire(import.meta.url);")
         if uses_file or uses_dir:
             lines.append("const __filename = recoderFileURLToPath(import.meta.url);")
         if uses_dir:
@@ -1714,6 +1719,8 @@ def tailwind_setup(files) -> tuple[list[str], dict[str, str]]:
         tokens = tailwind_token_count(files.read(p) or "" for p in sources + [prefix + "index.html"])
         if tokens < 15:
             continue
+        if re.search(r"cdn\.tailwindcss\.com|@tailwindcss/browser", files.read(prefix + "index.html") or ""):
+            continue  # 브라우저에서 바로 쓰는 Tailwind(CDN) — 빌드 설정이 필요 없다
         major = _tw_major(pkg)
         esm = pkg.get("type") == "module"
         changed: list[str] = []
@@ -1759,8 +1766,10 @@ def tailwind_setup(files) -> tuple[list[str], dict[str, str]]:
             writes[target] = _with_directives(files.read(target) or "", major)
             changed.append(f"{target[len(prefix):]} (@tailwind 지시문)")
         # 3) 개발 의존성
+        #: 설정을 이미 넣었더라도(앞 회차 — 같은 package.json 을 다른 교정이 먼저 고쳤을 수 있다) 의존성은 늘 맞춘다.
+        #: 실기기 0d40: 설정만 들어가고 tailwindcss 가 선언되지 않아 화면 빌드가 "Cannot find module 'tailwindcss'" 로 멈췄다.
         need = {k: v for k, v in (_TW4_DEPS if major >= 4 else _TW3_DEPS).items() if k not in deps}
-        if need and changed:
+        if need:
             raw = files.read(manifest) or "{}"
             data = json.loads(raw)
             data.setdefault("devDependencies", {}).update(need)
@@ -2076,4 +2085,180 @@ def krw_minor_units(files) -> tuple[list[str], dict[str, str]]:
         if new != text:
             writes[rel] = new
             notes.append(f"{rel}: 원화 금액을 100 으로 나누지 않게")
+    return notes, writes
+
+
+# ── 새로고침하면 로그인이 풀리는 화면 ─────────────────────────────────────────
+
+def auth_user_persist(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 토큰은 localStorage 에 두면서 사용자 정보는 메모리에만 두는 로그인 상태.
+
+    실기기 2.0.13 카페: 가입·로그인은 되는데 새로고침하거나 주소로 이동하면 user 가 null 이 되어 헤더가 다시
+    '로그인/회원가입' 이 되고, 주문 내역(로그인 필요)은 로그인 화면으로 튕겼다. 토큰은 남아 있으므로 사용자 정보도
+    같은 방식으로 보관·복원한다(로그아웃하면 지운다). 사용자 정보를 서버(/auth/me)로 되살리는 앱은 건드리지 않는다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".tsx", ".jsx", ".ts", ".js")) or "/node_modules/" in f"/{rel}" or re.search(r"(^|/)(dist|build)/", rel):
+            continue
+        text = files.read(rel) or ""
+        if "createContext" not in text or "localStorage" not in text:
+            continue
+        m = re.search(r"const\s*\[\s*user\s*,\s*setUser\s*\]\s*=\s*useState(<([^>]+)>)?\(\s*null\s*\)\s*;", text)
+        if not m or not re.search(r"localStorage\.getItem\(\s*['\"][\w-]*token[\w-]*['\"]", text, re.I):
+            continue
+        if re.search(r"localStorage\.(?:get|set)Item\(\s*['\"][\w-]*user", text, re.I) or re.search(r"/auth/me|/me['\"`]|/profile['\"`]", text):
+            continue
+        typ = m.group(2)
+        t = typ or ""
+        init = ("() => {\n    try {\n      const saved = localStorage.getItem('recoder_auth_user');\n"
+                f"      return saved ? {'(JSON.parse(saved) as ' + t + ')' if t else 'JSON.parse(saved)'} : null;\n"
+                "    } catch {\n      return null;\n    }\n  }")
+        param = f"value: {t} | ((prev: {t}) => {t})" if t else "value"
+        call = f"(value as (prev: {t}) => {t})(prev)" if t else "value(prev)"
+        block = (f"const [user, recoderSetUser] = useState{m.group(1) or ''}({init});\n"
+                 "  //: ReCoder: 사용자 정보도 토큰처럼 보관해 새로고침 뒤에도 로그인 상태가 유지되게 한다(로그아웃하면 지운다).\n"
+                 f"  const setUser = useCallback(({param}) => {{\n"
+                 "    recoderSetUser((prev) => {\n"
+                 f"      const next = typeof value === 'function' ? {call} : value;\n"
+                 "      try {\n        if (next) localStorage.setItem('recoder_auth_user', JSON.stringify(next));\n"
+                 "        else localStorage.removeItem('recoder_auth_user');\n      } catch {\n        /* 저장소를 못 써도 로그인은 동작 */\n      }\n"
+                 "      return next;\n    });\n  }, []);")
+        new = text[:m.start()] + block + text[m.end():]
+        react = re.search(r"""import\s+(?:React\s*,\s*)?\{([^}]*)\}\s*from\s*['"]react['"]""", new)
+        if react and not re.search(r"\buseCallback\b", react.group(1)):
+            new = new[:react.end(1)].rstrip() + (", " if react.group(1).strip() else "") + "useCallback " + new[react.end(1):]
+        elif not react:
+            new = "import { useCallback } from 'react';\n" + new
+        writes[rel] = new
+        notes.append(f"{rel}: 새로고침 뒤에도 로그인 사용자 유지")
+    return notes, writes
+
+
+# ── 서버 응답 봉투({status, data}) 와 화면이 기대하는 모양 ────────────────────
+
+_ENVELOPE_SERVER = re.compile(r"""\.json\(\s*\{\s*(?:status\s*:\s*['"]success['"]|success\s*:\s*true)\s*,[^)]*\bdata\b""", re.S)
+_UNWRAP_HELPER = """
+//: ReCoder: 서버가 모든 응답을 { status, message, data } 로 감싸므로, data 안의 값도 바로 읽을 수 있게 한다.
+//: 원래 있던 키(status·message·data)는 그대로 두고 빠진 키만 채운다 — 기존 코드의 `.data` 접근은 그대로 동작한다.
+//: 목록(data 가 배열)은 그 배열에 status·message·data 를 붙여 돌려준다 — `.map` 도, `.data.map` 도 동작한다.
+function recoderUnwrap<T>(body: T): T {
+  const b = body as unknown as Record<string, unknown>;
+  if (!b || typeof b !== 'object' || Array.isArray(b) || !('status' in b || 'success' in b) || !b.data || typeof b.data !== 'object') {
+    return body;
+  }
+  if (Array.isArray(b.data)) {
+    return Object.assign([...(b.data as unknown[])], b) as unknown as T;
+  }
+  return { ...(b.data as Record<string, unknown>), ...b } as unknown as T;
+}
+"""
+
+
+def api_envelope_unwrap(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 서버는 성공 응답을 `{ status: 'success', message, data }` 로 감싸는데, 화면의 API
+    클라이언트는 본문을 그대로 돌려줘 `const { token, id } = await api.post('/auth/signup')` 가 undefined 를 받는 앱.
+
+    실기기 2.0.13 카페: 가입은 성공(200)했는데 토큰이 'undefined' 로 저장되어 주문 내역이 401(Invalid token)이었다.
+    클라이언트가 돌려주는 값에 data 안의 키를 더한다(있던 키는 그대로 — 지금 `.data` 로 읽는 코드도 계속 동작)."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    listing = files.files()
+    server = [p for p in listing if p.endswith((".ts", ".js", ".mjs", ".cjs")) and "/node_modules/" not in f"/{p}"
+              and not re.match(r"(frontend|client|web)/", p) and not re.search(r"(^|/)(dist|build)/", p)]
+    if not any(_ENVELOPE_SERVER.search(files.read(p) or "") for p in server):
+        return notes, writes
+    for rel in listing:
+        if not re.match(r"(frontend|client|web)/src/.*(api|client|service|http|request)[\w/.-]*\.(ts|tsx|js|jsx)$", rel, re.I) \
+                or "/node_modules/" in f"/{rel}":
+            continue
+        text = files.read(rel) or ""
+        if "recoderUnwrap" in text:
+            continue
+        ts = rel.endswith((".ts", ".tsx"))
+        new = re.sub(r"(const\s+([\w$]+)\s*=\s*await\s+[\w$]+\.json\(\)\s*;\s*return\s+)\2\s*;",
+                     lambda m: f"{m.group(1)}recoderUnwrap({m.group(2)});", text)
+        new = re.sub(r"\breturn\s+(await\s+)?([\w$]+)\.json\(\)\s*;", lambda m: f"return recoderUnwrap(await {m.group(2)}.json());", new)
+        if new == text:
+            continue
+        helper = _UNWRAP_HELPER if ts else re.sub(r"<T>|: T\b|\s*as unknown as T|\s*as unknown as Record<string, unknown>|\s*as Record<string, unknown>|\s*as unknown\[\]", "", _UNWRAP_HELPER)
+        imports = list(re.finditer(r"(?m)^import[^\n]*\n", new))
+        at = imports[-1].end() if imports else 0
+        writes[rel] = new[:at] + helper + new[at:]
+        notes.append(f"{rel}: 서버 응답 봉투의 data 값을 바로 읽게")
+    return notes, writes
+
+
+def cart_persist(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 장바구니를 화면 메모리에만 두는 앱(서버 장바구니 API 가 없음).
+
+    실기기 2.0.13 카페: 메뉴를 담은 뒤 새로고침하거나 주소로 장바구니를 열면 비어 있었다. 브라우저에 보관하고 복원한다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".tsx", ".jsx")) or "/node_modules/" in f"/{rel}" or not re.search(r"cart|basket", rel, re.I):
+            continue
+        text = files.read(rel) or ""
+        if "createContext" not in text or "localStorage" in text or re.search(r"""['"`]/(?:api/)?cart""", text):
+            continue
+        m = re.search(r"const\s*\[\s*([\w$]+)\s*,\s*(set[\w$]+)\s*\]\s*=\s*useState(<[^>]+>)?\(\s*\[\s*\]\s*\)\s*;", text)
+        if not m:
+            continue
+        name, typ = m.group(1), m.group(3) or ""
+        cast = f" as {typ[1:-1]}" if typ else ""
+        block = (f"const [{name}, {m.group(2)}] = useState{typ}(() => {{\n"
+                 "    //: ReCoder: 장바구니를 브라우저에 보관해 새로고침·주소 이동 뒤에도 그대로 둔다.\n"
+                 "    try {\n      const saved = localStorage.getItem('recoder_cart');\n"
+                 f"      const parsed = saved ? JSON.parse(saved) : [];\n      return (Array.isArray(parsed) ? parsed : []){cast};\n"
+                 "    } catch {\n      return [];\n    }\n  });\n"
+                 "  useEffect(() => {\n    try {\n"
+                 f"      localStorage.setItem('recoder_cart', JSON.stringify({name}));\n"
+                 "    } catch {\n      /* 저장소를 못 써도 장바구니는 동작 */\n    }\n"
+                 f"  }}, [{name}]);")
+        new = text[:m.start()] + block + text[m.end():]
+        react = re.search(r"""import\s+(?:React\s*,\s*)?\{([^}]*)\}\s*from\s*['"]react['"]""", new)
+        if react and not re.search(r"\buseEffect\b", react.group(1)):
+            new = new[:react.end(1)].rstrip() + ", useEffect " + new[react.end(1):]
+        elif not react:
+            new = "import { useEffect } from 'react';\n" + new
+        writes[rel] = new
+        notes.append(f"{rel}: 장바구니를 새로고침 뒤에도 유지")
+    return notes, writes
+
+
+_MOCK_MODULE = re.compile(r"(?:^|/)(?:mock[-_]?(?:payment|stripe|pay)|(?:payment|stripe)[-_]?mock|fake[-_]?(?:payment|stripe))[\w-]*\.(?:ts|js|mjs)$", re.I)
+
+
+def drop_ai_mock_server_imports(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 서버가 AI 가 따로 만든 모의 결제 서버 파일(mockPaymentServer.ts 등)을 불러와 띄우는 코드.
+
+    결제 약속상 모의 결제 서버는 배포가 함께 띄운다(로컬·ECS). AI 가 만든 그 파일은 내보내는 것이 없어서 서버가
+    `import { startMockPaymentServer } …` 에서 시작하자마자 SyntaxError 로 죽었다(실기기 0d40). 그 import 와 시작 호출만 뺀다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    listing = files.files()
+    for rel in listing:
+        if not rel.endswith((".ts", ".js", ".mjs")) or "/node_modules/" in f"/{rel}" or re.search(r"(^|/)(dist|build)/", rel) \
+                or re.match(r"(frontend|client|web)/", rel) or _MOCK_MODULE.search(rel):
+            continue
+        text = files.read(rel) or ""
+        new = text
+        for m in list(re.finditer(r"""(?m)^[ \t]*import\s*\{([^}]*)\}\s*from\s*['"](\.{1,2}/[^'"]+)['"];?[ \t]*\r?\n""", text)):
+            spec = m.group(2)
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(rel), spec))
+            target = re.sub(r"\.js$", "", target)
+            found = next((target + ext for ext in (".ts", ".js", ".mjs") if files.exists(target + ext)), None)
+            if not found or not _MOCK_MODULE.search(found):
+                continue
+            body = files.read(found) or ""
+            names = [n.strip().split(" as ")[-1].strip() for n in m.group(1).split(",") if n.strip()]
+            if any(re.search(rf"\bexport\b[^\n]*\b{re.escape(n)}\b", body) for n in names):
+                continue  # 실제로 내보내는 모듈이면 그대로 쓴다
+            new = new.replace(m.group(0), "", 1)
+            for n in names:
+                new = re.sub(rf"(?m)^([ \t]*)(?:await\s+)?{re.escape(n)}\s*\([^;\n]*\)\s*;?[ \t]*$",
+                             r"\1// ReCoder: 모의 결제 서버는 배포가 함께 띄웁니다(로컬·ECS) — 앱 안에서 따로 띄우지 않습니다.", new)
+        if new != text:
+            writes[rel] = new
+            notes.append(f"{rel}: AI 가 만든 모의 결제 서버를 앱 안에서 띄우지 않게")
     return notes, writes

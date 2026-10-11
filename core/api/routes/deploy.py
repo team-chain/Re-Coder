@@ -3135,6 +3135,14 @@ def _dockerfile_from_template(
         if stack == StackType.UNKNOWN:
             #: 스택을 확정하지 못한 채 아무 템플릿이나 고르면 실행 명령이
             #: 어긋난 컨테이너(예: uvicorn 없는 프로젝트에 CMD uvicorn)가 나온다.
+            try:
+                from build_readiness import analyze as _analyze
+            except ImportError:  # pragma: no cover
+                from core.build_readiness import analyze as _analyze  # type: ignore
+            missing = next((i for i in _analyze(workspace_path, online=False).issues if i.code == "APP_SERVER_MISSING"), None)
+            if missing:
+                #: 실기기 2.0.13: 생성 결과에 서버가 없어 "스택 unknown" 만 보였다 — 원인과 할 일을 그대로 알린다.
+                raise _UnsupportedDockerfileFallback(f"{missing.message} {missing.fix}")
             raise _UnsupportedDockerfileFallback(
                 f"프로젝트 스택을 확정하지 못했습니다({stack.value}). "
                 "앱의 루트 폴더에 index.html, package.json 또는 Python 의존성 파일이 "

@@ -801,6 +801,52 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
                         message=f"전체 점검 — 코드가 불러오는데 없는 파일 {len(new)}개를 마저 만듭니다: {names}")
             self._schedule()
 
+    def _complete_styles(self) -> None:
+        """다 만든 뒤 — 화면 코드의 className 중 어느 CSS 에도 없는 것이 많으면, 그 클래스를 정의하는 스타일 파일을 만든다.
+
+        실기기 2.0.13 카페: CSS 파일을 화면 파일과 동시에(서로 못 본 채) 써서, 화면이 쓰는 클래스 98개 중 71개가 정의되지 않아
+        헤더·메뉴 목록이 맨 HTML 처럼 겹쳐 보였다. 그 클래스를 쓰는 화면 코드를 보여 주며 한 파일로 채우고 진입 파일이 불러오게 한다.
+        Tailwind 화면은 건드리지 않는다(클래스가 곧 스타일)."""
+        if not self.new_project:
+            return
+        with self._lock:
+            contents = {op["file"]: op.get("content") or "" for op in self.state["ops"].values()}
+        gaps = undefined_css_classes(contents)
+        new: list[dict] = []
+        for folder, info in gaps.items():
+            target = f"{folder}/src/styles/recoder-complete.css" if folder else "src/styles/recoder-complete.css"
+            if any(_norm(f["file"]) == _norm(target) for f in self.state["files"]):
+                continue
+            classes = info["missing"][:150]
+            new.append({"file": target, "layer": 2, "uses": [], "importers": info["users"][:10], "planned_by": "review",
+                        "purpose": ("화면 코드가 쓰는데 어느 CSS 에도 정의되지 않은 클래스의 스타일. 아래 클래스 전부를 정의하세요"
+                                    "(불러오는 쪽 화면 코드의 구조·역할에 맞게 — 헤더는 가로 배치, 목록은 카드 격자, 폼·버튼·상태 표시 등 "
+                                    "기존 CSS 와 같은 색·글꼴·간격, 화면 폭이 좁으면 한 줄로). 다른 파일을 바꾸거나 @import 하지 마세요: "
+                                    + " ".join("." + c for c in classes))})
+        if not new:
+            return
+        with self._lock:
+            self.state["files"] = self.state["files"] + new
+        self._save()
+        self._event("plan_added", agent="review", files=[{"file": f["file"], "layer": 2} for f in new],
+                    message="전체 점검 — 화면이 쓰는데 정의되지 않은 스타일 클래스 "
+                            + ", ".join(f"{len(gaps[k]['missing'])}개" for k in gaps) + "를 채우는 스타일 파일을 만듭니다")
+        self._schedule()
+        with self._lock:
+            for f in new:
+                entry = _client_entry({op["file"]: op.get("content") or "" for op in self.state["ops"].values()},
+                                      posixpath.dirname(posixpath.dirname(posixpath.dirname(f["file"]))))
+                op = self.state["ops"].get(_norm(entry)) if entry else None
+                if not op or _norm(f["file"]) not in self.state["ops"]:
+                    continue
+                spec = "./" + posixpath.relpath(f["file"], posixpath.dirname(entry))
+                if spec not in (op.get("content") or ""):
+                    lines = (op.get("content") or "").splitlines(keepends=True)
+                    last = max((i for i, line in enumerate(lines) if re.match(r"\s*import\b", line)), default=-1)
+                    lines.insert(last + 1, f"import '{spec}';\n")
+                    op["content"] = "".join(lines)
+        self._save()
+
     def _exists_on_disk(self, path: str) -> bool:
         if not self.root:
             return False
@@ -1166,6 +1212,7 @@ replace 는 바꿀 내용입니다.
             self.plan()
             self._schedule()
             self._fill_missing_imports()
+            self._complete_styles()
         except Paused as exc:
             self._save()
             self._log("", error_kind(exc), f"멈춤 — {exc}")
@@ -1597,6 +1644,12 @@ def _file_hint(path: str) -> str:
         hint += ("\nPrisma 스키마 규칙: enum 값은 약속·코드가 쓰는 글자 그대로 쓰세요('paid' 를 쓰면 값도 paid — 대문자 이름+@map 금지). "
                  "금액·수량·재고는 Int(BigInt 금지 — 코드가 number 로 다룸). 관계 필드 이름은 약속에 적힌 이름 그대로(예: order_items). "
                  "@default 는 그 enum 값 그대로. Prisma 에 없는 속성(@@validate, @@check, @check)은 쓰지 마세요(값 검사는 코드에서).")
+    if re.search(r"(^|/)(?:backend|server|api)/", str(path)) and str(path).endswith((".ts", ".js", ".mjs")):
+        #: 실기기 0d40: S3_BUCKET_NAME 이 없으면 모듈을 불러오는 순간 throw 해 배포(로컬·ECS)가 키 없이는 아예 시작하지 못했고,
+        #: 서버가 AI 가 따로 만든 모의 결제 서버를 불러 시작하자마자 죽었다. 인라인 require 도 ESM 에서 죽는다.
+        hint += ("\n서버 규칙: 시작할 때 꼭 필요한 값(DATABASE_URL·JWT_SECRET 등)만 검사하고, 외부 서비스(S3·메일·SMS 등)는 설정이 없어도 "
+                 "서버가 시작되게 하세요(그 기능만 끄거나 로컬 대체 — 이미지는 서버의 uploads 폴더에 저장해 /uploads 로 제공). "
+                 "모의 결제 서버를 서버 안에서 만들거나 띄우지 마세요(배포가 함께 띄움). ESM 파일에서 require(…) 를 쓰지 말고 import 하세요.")
     if re.search(r"\.(?:tsx|jsx|vue|svelte)$", str(path)) or re.search(r"(^|/)(?:frontend|client|web)/src/", str(path)):
         #: 실기기 2.0.12 쇼핑몰: 화면 문구가 한국어·영어로 섞였고(Add to Cart / 장바구니), 원화를 /100 으로 표시했고,
         #: api 클라이언트(baseURL '/api') 호출에 '/api' 를 또 붙였고, 받아 온 값을 useRef 에만 넣어 화면이 다시 그려지지 않았다.
@@ -1604,7 +1657,9 @@ def _file_hint(path: str) -> str:
                  "원화(KRW)는 소수 단위가 없습니다 — 저장된 금액 정수를 그대로 원으로 표시하세요(100 으로 나누지 말 것). "
                  "api 클라이언트의 baseURL 이 '/api' 면 호출 경로에 '/api' 를 다시 붙이지 마세요. "
                  "화면에 보여 줄 값(받아 온 데이터·로딩·오류)은 useState 로 두세요(useRef 는 다시 그리지 않습니다). "
-                 "스타일은 Tailwind 유틸리티 클래스로 일관되게 쓰세요.")
+                 "스타일은 Tailwind 유틸리티 클래스로 일관되게 쓰세요. "
+                 "로그인 상태(토큰과 사용자 정보)는 새로고침 뒤에도 유지되게 하세요(localStorage 에 함께 보관하거나 시작할 때 /api/auth/me 로 복원). "
+                 "서버 응답 형식(약속의 응답 모양 — { data } 로 감싸는지)에 맞춰 값을 꺼내세요.")
     return hint
 
 
@@ -2023,6 +2078,53 @@ def _pattern_examples(pattern: str) -> list[str]:
     return out
 _CLIENT_DIRS = ("frontend", "client", "web")
 _ENTRY_STEMS = ("server", "index", "app", "main")
+
+
+_CLASS_LITERAL = re.compile(r"""\bclassName\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*`([^`]*)`\s*\})""")
+
+
+def _client_entry(contents: dict[str, str], folder: str) -> str | None:
+    prefix = f"{folder}/" if folder else ""
+    for stem in ("src/main", "src/index"):
+        for ext in (".tsx", ".jsx", ".ts", ".js"):
+            if prefix + stem + ext in contents:
+                return prefix + stem + ext
+    return None
+
+
+def undefined_css_classes(contents: dict[str, str], min_missing: int = 8, ratio: float = 0.3) -> dict[str, dict]:
+    """화면 폴더별로 className 에 쓰였는데 그 폴더의 어느 CSS 에도 정의되지 않은 클래스(많을 때만).
+    반환 {폴더: {"missing": [...], "users": [그 클래스를 쓰는 파일]}}. Tailwind 화면은 뺀다."""
+    try:
+        import node_fixups as nf
+    except ImportError:  # pragma: no cover
+        from core import node_fixups as nf  # type: ignore
+    folders = sorted({p.split("/", 1)[0] for p in contents if re.match(rf"({'|'.join(_CLIENT_DIRS)})/", p)})
+    if not folders and any(p.startswith("src/") and p.endswith((".tsx", ".jsx")) for p in contents):
+        folders = [""]
+    out: dict[str, dict] = {}
+    for folder in folders:
+        prefix = f"{folder}/" if folder else ""
+        jsx = {p: t for p, t in contents.items() if p.startswith(prefix) and p.endswith((".tsx", ".jsx", ".vue", ".svelte"))}
+        if nf.tailwind_token_count(jsx.values()) >= 15:
+            continue
+        css = "\n".join(t for p, t in contents.items() if p.startswith(prefix) and p.endswith((".css", ".scss")))
+        defined = set(re.findall(r"\.(-?[A-Za-z_][\w-]*)", css))
+        users: dict[str, list[str]] = {}
+        for p, t in jsx.items():
+            for m in _CLASS_LITERAL.finditer(t):
+                value = re.sub(r"\$\{[^}]*\}", " ", m.group(1) or m.group(2) or m.group(3) or "")
+                for token in value.split():
+                    if re.fullmatch(r"-?[A-Za-z_][\w-]*", token) and token not in defined:
+                        users.setdefault(token, [])
+                        if p not in users[token]:
+                            users[token].append(p)
+        used = {tok for p, t in jsx.items() for m in _CLASS_LITERAL.finditer(t)
+                for tok in re.sub(r"\$\{[^}]*\}", " ", m.group(1) or m.group(2) or m.group(3) or "").split()}
+        if len(users) >= min_missing and used and len(users) / len(used) >= ratio:
+            files = sorted({f for fs in users.values() for f in fs}, key=lambda f: -sum(f in fs for fs in users.values()))
+            out[folder] = {"missing": sorted(users), "users": files}
+    return out
 
 
 def plan_gaps(files: list[dict], manifest: dict, exists: Callable[[str], bool] | None = None) -> list[dict]:

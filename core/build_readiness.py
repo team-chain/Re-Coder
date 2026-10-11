@@ -53,7 +53,9 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_EXPRESS_REQUEST_TYPE", "NODE_ESM_COMMONJS_GLOBAL", "NODE_FRONTEND_PRODUCTION_ONLY",
                 "NODE_CURRENCY_CASE_COMPARE", "NODE_TAILWIND_NOT_CONFIGURED",
                 "NODE_SEED_SCRIPT_OUTSIDE_BUILD", "NODE_REACT_REF_STATE",
-                "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS"}
+                "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS", "NODE_AUTH_USER_NOT_RESTORED",
+                "NODE_API_ENVELOPE_MISMATCH", "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING",
+                "NODE_AI_MOCK_SERVER_IMPORT"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
 FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
@@ -66,7 +68,9 @@ FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_
                     "NODE_PRISMA_SCHEMA_ALIGN", "NODE_EXPRESS_REQUEST_TYPE", "NODE_FRONTEND_NOT_SERVED",
                     "NODE_ESM_COMMONJS_GLOBAL", "NODE_FRONTEND_PRODUCTION_ONLY", "NODE_CURRENCY_CASE_COMPARE",
                     "NODE_TAILWIND_NOT_CONFIGURED", "NODE_SEED_SCRIPT_OUTSIDE_BUILD",
-                    "NODE_REACT_REF_STATE", "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS")
+                    "NODE_REACT_REF_STATE", "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS",
+                    "NODE_AUTH_USER_NOT_RESTORED", "NODE_API_ENVELOPE_MISMATCH",
+                    "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING", "NODE_AI_MOCK_SERVER_IMPORT")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -700,7 +704,13 @@ def _esm_exports(text: str) -> Optional[set[str]]:
                 names.add(part.split(" as ")[-1].strip())
     if re.search(r"\bexport\s+default\b", text):
         names.add("default")
-    return names if names else None
+    if names:
+        return names
+    #: import 가 있는 ESM 파일인데 내보내는 것이 하나도 없다 — 이 파일에서 이름을 가져오면 확실히 없다(실기기 0d40:
+    #: server.ts 가 독립 실행용 mockPaymentServer.ts 에서 startMockPaymentServer 를 가져와 시작하자마자 SyntaxError).
+    if re.search(r"(?m)^\s*import\s", text) and not re.search(r"\bmodule\.exports\b|\bexports\.[\w$]+|\bexport\b", text):
+        return set()
+    return None
 
 
 def _cjs_exports(text: str) -> Optional[set[str]]:
@@ -867,6 +877,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
     vite = _vite_projects(files, manifests)
     missing_files: list[tuple[str, str]] = []
     missing_names: list[str] = []
+    type_missing: dict[str, set[str]] = {}
     missing_exports: list[tuple[str, str, str]] = []  # (내보내야 할 파일, 이름, esm|cjs)
     missing_detail: list[tuple[str, str, str]] = []  # (불러오는 파일, 이름, 내보내야 할 파일) — 생성 교정이 파일별로 고친다
     jsx_in_js: list[str] = []
@@ -910,6 +921,11 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             if exported is None:
                 continue
             for name in (re.sub(r"^type\s+", "", n.strip()).split(" as ")[0].strip() for n in names.split(",")):
+                if name and name not in exported and rel.endswith((".ts", ".tsx")) and target.endswith((".ts", ".tsx")) \
+                        and _type_only_use(active, name):
+                    #: 타입으로만 쓰는 이름 — 실행 코드에서는 지워지므로 앱을 멈추지 않는다(실기기 0d40 CreateOrderRequest).
+                    type_missing.setdefault(target, set()).add(name)
+                    continue
                 if name and name not in exported:
                     missing_names.append(f"`{name}`({rel} → {target})")
                     missing_exports.append((target, name, "esm"))
@@ -965,6 +981,23 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             ("없는 스타일 파일을 빈 파일로 만드세요(자동 수정 가능)." if styles_only else
              "빠진 파일을 만들거나 import 경로를 실제 파일로 고치세요."),
             missing_files[0][0], styles_only))
+    if type_missing:
+        writes = {}
+        for target, names in sorted(type_missing.items()):
+            text = files.read(target) or ""
+            newline = "\r\n" if "\r\n" in text else "\n"
+            add = "".join(f"export type {n} = Record<string, any>; // ReCoder: 불러오는데 없던 타입 — 실제 모양으로 바꾸세요{newline}"
+                          for n in sorted(names) if not re.search(rf"\b(?:type|interface|class|enum)\s+{re.escape(n)}\b", text))
+            if add:
+                writes[target] = text.rstrip() + newline + newline + add
+        if writes:
+            result.fix_data.setdefault("file_writes", {})["NODE_TYPE_NAME_MISSING"] = writes
+            result.issues.append(ReadinessIssue(
+                "NODE_TYPE_NAME_MISSING", WARNING,
+                "타입으로만 쓰는 이름을 그 파일이 내보내지 않습니다: "
+                + ", ".join(f"{n}({t})" for t, ns in sorted(type_missing.items()) for n in sorted(ns))[:400]
+                + ". 실행에는 영향이 없지만 타입 검사가 실패합니다.",
+                "넓은 타입으로 선언해 내보내세요(자동 수정 가능 — 나중에 실제 모양으로 바꾸세요).", next(iter(writes)), True))
     if missing_detail:
         result.fix_data["missing_names_detail"] = sorted(set(missing_detail))
     if missing_names:
@@ -2540,6 +2573,37 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "원화 금액을 100 으로 나눠 표시합니다: " + ", ".join(sorted(krw_writes)[:2])
                 + ". 원화는 소수 단위가 없어 결제는 저장된 금액 그대로 청구됩니다 — 4,900원 상품이 ₩49 로 보입니다.",
                 "원화 표시에서 100 으로 나누지 않게 하세요(자동 수정 가능).", sorted(krw_writes)[0], True))
+        au_notes, au_writes = node_fixups.auth_user_persist(files)
+        if au_writes:
+            writes["NODE_AUTH_USER_NOT_RESTORED"] = au_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_AUTH_USER_NOT_RESTORED", ERROR,
+                "로그인 토큰은 보관하지만 사용자 정보는 보관하지 않습니다: " + ", ".join(sorted(au_writes)[:2])
+                + ". 새로고침하거나 주소로 이동하면 로그아웃된 것처럼 보이고 로그인이 필요한 화면(주문 내역 등)이 로그인 화면으로 돌아갑니다.",
+                "사용자 정보도 함께 보관·복원하게 하세요(자동 수정 가능 — 로그아웃하면 지움).", sorted(au_writes)[0], True))
+        env_notes, env_writes = node_fixups.api_envelope_unwrap(files)
+        if env_writes:
+            writes["NODE_API_ENVELOPE_MISMATCH"] = env_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_API_ENVELOPE_MISMATCH", ERROR,
+                "서버는 응답을 { status, message, data } 로 감싸는데 화면의 API 클라이언트는 본문을 그대로 돌려줍니다: "
+                + ", ".join(sorted(env_writes)[:2]) + ". 가입·로그인 응답의 토큰 같은 값이 undefined 가 되어 로그인이 필요한 요청이 401 이 됩니다.",
+                "클라이언트가 data 안의 값도 바로 읽게 하세요(자동 수정 가능 — 지금 .data 로 읽는 코드도 그대로).", sorted(env_writes)[0], True))
+        cart_notes, cart_writes = node_fixups.cart_persist(files)
+        if cart_writes:
+            writes["NODE_CART_NOT_PERSISTED"] = cart_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_CART_NOT_PERSISTED", WARNING,
+                "장바구니를 화면 메모리에만 둡니다: " + ", ".join(sorted(cart_writes)[:2]) + ". 새로고침하면 담은 상품이 사라집니다.",
+                "브라우저에 보관·복원하게 하세요(자동 수정 가능).", sorted(cart_writes)[0], True))
+        mock_notes, mock_writes = node_fixups.drop_ai_mock_server_imports(files)
+        if mock_writes:
+            writes["NODE_AI_MOCK_SERVER_IMPORT"] = mock_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_AI_MOCK_SERVER_IMPORT", ERROR,
+                "서버가 AI 가 따로 만든 모의 결제 서버 파일에서 없는 이름을 불러옵니다: " + ", ".join(sorted(mock_writes)[:2])
+                + ". 서버가 시작하자마자 SyntaxError 로 종료됩니다.",
+                "그 import·호출을 빼세요 — 모의 결제 서버는 배포가 함께 띄웁니다(자동 수정 가능).", sorted(mock_writes)[0], True))
         cur_notes, cur_writes = node_fixups.currency_case_compare(files)
         if cur_writes:
             writes["NODE_CURRENCY_CASE_COMPARE"] = cur_writes
@@ -2605,6 +2669,23 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         if text and re.search(r"\.listen\s*\(", text) and re.search(r"\bexpress\s*\(", text):
             result.server_entry = rel
             break
+    if not result.server_entry:
+        #: 서버 폴더(backend/ 등)의 진입 파일이 app 을 다른 파일에서 만들어 불러오는 흔한 모양 — `import app from './app.js'`
+        #: 뒤 `app.listen(…)`(실기기 2.0.13 카페: 진입 파일을 못 찾아 서버 의존성(pg)을 몰라 ECS 가 DB 를 준비하지 않았다).
+        for side in ("backend", "server", "api"):
+            for stem in ("src/server", "src/index", "src/main", "src/app", "server", "index", "app"):
+                rel = next((f"{side}/{stem}{ext}" for ext in (".ts", ".js", ".mjs", ".cjs") if files.exists(f"{side}/{stem}{ext}")), None)
+                text = files.read(rel) if rel else None
+                if not text or not re.search(r"\.listen\s*\(", text):
+                    continue
+                linked = re.search(r"\bexpress\s*\(", text) or any(
+                    re.search(r"\bexpress\s*\(", files.read(_resolve_local(files, rel, spec) or "") or "")
+                    for spec in re.findall(r"""from\s+['"](\.{1,2}/[^'"]+)['"]""", text))
+                if linked:
+                    result.server_entry = rel
+                    break
+            if result.server_entry:
+                break
     #: 서버 코드에서 빼는 것은 **화면** 폴더뿐이다 — 루트 build 가 backend/ 도 빌드하면 runs 에 backend 가 들어가
     #: 서버 코드까지 빠져 "화면을 제공하지 않습니다" 로 잘못 봤다(실기기 2.0.11: app.ts 가 frontend/dist 를 제공하는데도).
     ui_runs = [d for d in runs if _vite_out_dir(files, d) or _frontend_out_dir(files, d)]
@@ -2685,6 +2766,18 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         print(f"[build_readiness] 서버 패키지 점검 생략: {exc}", file=sys.stderr)
     all_server_text = "\n".join(server_texts)
     result.env_names = sorted(set(re.findall(r"process\.env\.([A-Za-z_][A-Za-z0-9_]*)", all_server_text)))
+    #: ORM(Sequelize·TypeORM·Knex …)은 DB 드라이버를 직접 import 하지 않는다 — 서버 package.json 에 선언한 드라이버로 DB 를 안다.
+    if runtime_names & {"sequelize", "typeorm", "knex", "drizzle-orm", "kysely", "@mikro-orm/core", "objection"}:
+        declared: set[str] = set(runtime_deps)
+        for rel in files.files():
+            if rel.endswith("package.json") and "/node_modules/" not in f"/{rel}" and not rel.startswith(("frontend/", "client/", "web/")):
+                try:
+                    pkg_ = json.loads(files.read(rel) or "{}")
+                except ValueError:
+                    continue
+                if isinstance(pkg_, dict) and isinstance(pkg_.get("dependencies"), dict):
+                    declared |= set(pkg_["dependencies"])
+        runtime_names |= declared & {"pg", "postgres", "mysql2", "mongodb"}
     for kind, deps_for in (("postgres", {"pg", "postgres", "pg-promise"}), ("mongodb", {"mongoose", "mongodb"}),
                            ("redis", {"redis", "ioredis"})):
         if runtime_names & deps_for:
@@ -3477,6 +3570,39 @@ def _check_dead_image_hosts(files: "ProjectFiles", result: "Readiness") -> None:
         hits[0], True))
 
 
+def _type_only_use(text: str, name: str) -> bool:
+    """name 이 이 파일에서 타입 자리(: N · as N · <N> · extends N · N[])에만 쓰이는가."""
+    body = re.sub(r"(?m)^\s*import[^;]*;", "", _strip_js_comments(text))
+    uses = list(re.finditer(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", body))
+    if not uses:
+        return True
+    for m in uses:
+        before = body[max(0, m.start() - 40):m.start()]
+        after = body[m.end():m.end() + 3]
+        if re.search(r"(?::|\bas|<|,|\||&|\bextends|\bimplements|\bkeyof|\btypeof)\s*$", before) and not re.match(r"\s*[(.]", after):
+            continue
+        return False
+    return True
+
+
+def _check_server_missing(files: "ProjectFiles", result: "Readiness") -> None:
+    """화면(frontend/ 등)이 /api 를 부르는데 서버 코드가 하나도 없다 — 배포할 앱이 아니다(실기기 2.0.13 job 4a06).
+    예전엔 스택을 몰라(unknown) 엉뚱한 Dockerfile 을 제안했다. 무엇이 빠졌는지와 할 일을 바로 알린다."""
+    listing = [p for p in files.files() if "/node_modules/" not in f"/{p}" and not re.search(r"(^|/)(dist|build)/", p)]
+    ui = [p for p in listing if re.match(r"(frontend|client|web)/", p) and p.endswith((".ts", ".tsx", ".js", ".jsx"))]
+    if not ui or not any(re.search(r"""['"`]/api(?:/|['"`])""", files.read(p) or "") for p in ui):
+        return
+    server = [p for p in listing if p.endswith((".ts", ".js", ".mjs", ".cjs", ".py")) and not re.match(r"(frontend|client|web)/", p)
+              and not re.search(r"mock|(^|/)(vite|tailwind|postcss|eslint)\.config\.", p, re.I)]
+    if server:
+        return
+    result.issues.append(ReadinessIssue(
+        "APP_SERVER_MISSING", ERROR,
+        "화면은 /api 로 서버를 부르는데 이 프로젝트에는 서버 코드가 없습니다 — 코드 생성 결과에서 서버가 빠졌습니다. "
+        "이대로는 로그인·조회·주문이 동작하지 않고 Docker·ECS 로 배포할 수 없습니다.",
+        "빈 폴더에서 같은 요청으로 다시 생성하세요(2.0.14 부터 설계 단계가 약속의 API 로 서버 파일을 채웁니다).", ui[0]))
+
+
 def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]] = None,
             *, dockerfile: Optional[str] = "Dockerfile", online: bool = False) -> Readiness:
     """프로젝트(와 Dockerfile)를 읽어 빌드·실행 가능성을 판정한다.
@@ -3492,6 +3618,7 @@ def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]
     elif result.runtime == "python":
         _analyze_python(files, result)
     _check_dead_image_hosts(files, result)
+    _check_server_missing(files, result)
     if result.local_data_files:
         shown = ", ".join(result.local_data_files[:3])
         result.issues.append(ReadinessIssue(
