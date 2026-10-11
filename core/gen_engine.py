@@ -72,6 +72,9 @@ PLAN_SCHEMA = {
     "required": ["summary", "contracts", "files", "more"],
     "additionalProperties": False,
 }
+#: 형식 없이 받은 파일 목록 한 줄 — "- backend/src/server.ts | 1 | 서버 진입점"
+_PLAIN_FILE_LINE = re.compile(r"^\s*(?:[-*]|\d+[.)])?\s*`?((?:[\w@.\[\]()-]+/)*(?:[\w@\[\]()-][\w@.\[\]()-]*\.[A-Za-z0-9]+|Dockerfile|\.dockerignore|\.gitignore|\.env\.example))`?\s*(?:\|\s*(\d)\s*)?(?:\|\s*(.*))?$")
+
 PAGE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -679,8 +682,12 @@ class LargeGeneration:
             more = True
         manifest = {"summary": summary, "contracts": contracts}
         stalls = 0
+        page_size = PAGE_FILES
         while more and len(files) < FILES_SAFETY:
             listed = "\n".join(f"- {f['file']}" for f in files) or "(아직 없음)"
+            #: 아직 한 개도 못 받았으면 빈 목록으로 끝내지 말라고 분명히 적는다(실기기 2.0.18: 약속 3만 자 뒤 첫 페이지가
+            #: 파일 0개로 끝나 "파일 목록을 돌려주지 않았습니다" 로 생성이 시작도 못 했다).
+            first = "" if files else "\n아직 받은 파일이 하나도 없습니다 — files 를 비워 두지 말고, 실행에 필요한 파일부터 반드시 채우세요."
             page_prompt = self.context_prompt + f"""
 
 [대규모 생성 1단계 — 파일 목록 이어 받기]
@@ -689,21 +696,40 @@ class LargeGeneration:
 {contracts}
 이미 받은 파일(다시 쓰지 마세요):
 {listed}
-아직 목록에 없는 파일을 의존성 순서로 최대 {PAGE_FILES}개 더 주세요(파일 내용은 쓰지 마세요). 각 파일에 layer(0/1/2)와
+아직 목록에 없는 파일을 의존성 순서로 최대 {page_size}개 더 주세요(파일 내용은 쓰지 마세요). 각 파일에 layer(0/1/2)와
 uses(import 할 프로젝트 파일 경로)를 붙이고,
-아직 남았으면 more=true, 이것으로 끝이면 more=false."""
-            resp = self.call(page_prompt, PAGE_SCHEMA, "generate_code_manifest", 4096, agent="planner")
+아직 남았으면 more=true, 이것으로 끝이면 more=false.{first}"""
             try:
-                page = ca._extract_json(resp.text)
+                resp = self.call(page_prompt, PAGE_SCHEMA, "generate_code_manifest", 4096, agent="planner")
+                text = resp.text or ""
+            except LLMError as exc:
+                if not _is_truncation(exc):
+                    raise
+                #: 목록이 길어 응답이 잘렸다 — 받은 만큼은 살리고(아래), 다음 페이지는 절반만 달라고 한다.
+                text = str(getattr(exc, "partial", "") or "")
+                page_size = max(8, page_size // 2)
+            try:
+                page = ca._extract_json(text)
+                if not isinstance(page, dict):
+                    raise ValueError("not an object")
             except ValueError:
-                page = {"files": [], "more": True}
+                #: 잘리거나 형식이 깨진 응답 — 들어 있는 "file" 항목만이라도 건진다.
+                salvaged = [{"file": m} for m in re.findall(r'"file"\s*:\s*"([^"\\]{1,240})"', text)]
+                page = {"files": salvaged, "more": True}
+                page_size = max(8, page_size // 2)
             before = len(files)
             files = self._merge_files(files, page.get("files") or [])
             more = bool(page.get("more"))
+            self._log("-", "plan", f"파일 목록 페이지: 응답 {len(text)}자 · 새 파일 {len(files) - before}개 · more={more}")
             self._event("planning", message=f"파일 목록 {len(files)}개 정리됨")
             stalls = stalls + 1 if len(files) == before else 0
-            if stalls >= 2:
+            if not files and not more:
+                more = True  # 한 개도 없이 끝났다고 하면 한 번 더 묻는다(아래 stalls 가 무한 반복을 막는다)
+            if stalls >= 3:
                 break
+        if not files:
+            #: 구조화 응답이 계속 비거나 깨지면 형식 없이 줄 단위로 한 번 더 받는다.
+            files = self._plain_file_list(summary, contracts)
         if not files:
             raise RuntimeError("AI 가 만들 파일 목록을 돌려주지 않았습니다.")
         files = [dict(f, file=self._rel(f["file"])) for f in files]
@@ -915,6 +941,33 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
             return os.path.isfile(os.path.join(self.root, *path.replace("\\", "/").split("/")))
         except (OSError, ValueError):
             return False
+
+    def _plain_file_list(self, summary: str, contracts: str) -> list[dict]:
+        """마지막 수단 — 형식(JSON) 없이 "경로 | layer | 목적" 줄로 받는다. 구조화 응답이 계속 비거나 깨질 때."""
+        prompt = self.context_prompt + f"""
+
+[대규모 생성 1단계 — 파일 목록]
+요약: {summary}
+약속(앞부분):
+{contracts[:12000]}
+이 앱을 실행하는 데 필요한 파일 목록을 의존성 순서로 적으세요. 한 줄에 하나씩 `경로 | layer(0/1/2) | 무엇을 하는지` 형식으로만,
+다른 설명 없이 최대 80줄. 경로는 프로젝트 루트 기준(예: backend/src/server.ts)."""
+        try:
+            resp = self.call(prompt, None, "generate_code_manifest", 4096, agent="planner", raw=True)
+            text = resp.text or ""
+        except LLMError as exc:
+            if not _is_truncation(exc):
+                raise
+            text = str(getattr(exc, "partial", "") or "")
+        items = []
+        for line in text.splitlines():
+            m = _PLAIN_FILE_LINE.match(line)
+            if m:
+                items.append({"file": m.group(1), "layer": int(m.group(2)) if m.group(2) else None,
+                              "purpose": (m.group(3) or "").strip()})
+        files = self._merge_files([], items)
+        self._log("-", "plan", f"형식 없이 받은 파일 목록: {len(files)}개")
+        return files
 
     def _merge_files(self, files: list[dict], items: list) -> list[dict]:
         seen = {_norm(f["file"]) for f in files}

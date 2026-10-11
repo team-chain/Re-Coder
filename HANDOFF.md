@@ -1,3 +1,8 @@
+# 설계 단계 파일 목록 0개로 생성 실패 (2026-10-11, 2.0.19)
+
+- 실기기 2.0.18(job e077a4ca, TEST 폴더): 약속 문서 2조각(24K+6K자) 뒤 파일 목록 페이지가 9초 만에 파일 0개로 끝나 RuntimeError "AI 가 만들 파일 목록을 돌려주지 않았습니다". 체크포인트 files=[]. 응답 원문은 로그에 없었음(원인: 모델이 빈 files·more=false 또는 깨진 JSON — 2.0.18 변경과 무관한 경로).
+- gen_engine.plan: 첫 페이지 전에는 "비워 두지 말라" 문구, 빈 목록+more=false 면 다시 묻기(stalls 3), 깨진 응답에서 "file" 값 건지기·페이지 크기 절반, 그래도 없으면 `_plain_file_list`(raw 텍스트 "경로 | layer | 목적" 줄, `_PLAIN_FILE_LINE`). 페이지마다 `[gen_engine] kind=plan` 로그.
+
 # 생성 직후 실행 점검 · sandbox 실제 Docker 로 Local·ECS 재현 (2026-10-11, 2.0.18)
 
 - sandbox 에 dockerd 가 뜨고 이전 세션이 만든 대체 이미지(node:22-alpine = 호스트 node+npm, apk 는 no-op · postgres:16-alpine = 호스트 PG16)가 있다. 레지스트리는 막혀 있어 내려받기 불가. postgres 대체 이미지를 공식 entrypoint 와 같게 보강(base64, initdb.d *.sh source, 추가 인자) — /tmp/fakepg. `docker tag postgres:16-alpine public.ecr.aws/docker/library/postgres:16-alpine`.

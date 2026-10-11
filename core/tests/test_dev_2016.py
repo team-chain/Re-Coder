@@ -558,3 +558,44 @@ def test_optional_marker_on_object_literal_methods_is_removed_only_there(tmp_pat
     assert "async onFail(e: any) {" in out and "  run(): void {" in out
     assert "onFail?(e: any): Promise<void>;" in out and "m?(): void {}" in out and "f?(x: number)" in out and "? (a)" in out
     assert _syntax_ok(out, "a.ts")
+
+
+def _planner(responses):
+    """generate_code_manifest 호출마다 다음 응답을 돌려준다(첫 호출=설계 JSON)."""
+    import gen_engine
+    from types import SimpleNamespace
+    eng = gen_engine.LargeGeneration("요청", concurrency=1, security_review=False)
+    calls = []
+
+    def call(self, prompt, schema, operation, max_tokens, agent="", raw=False):
+        calls.append((operation, raw, prompt))
+        return SimpleNamespace(text=responses.pop(0))
+    eng.call = call.__get__(eng)
+    eng._complete_plan = lambda files, manifest: files
+    return eng, calls
+
+
+def test_plan_retries_when_the_first_file_page_comes_back_empty():
+    first = json.dumps({"summary": "쇼핑몰", "contracts": "API ...", "files": [], "more": True})
+    eng, calls = _planner([first,
+                           json.dumps({"files": [], "more": False}),
+                           json.dumps({"files": [{"file": "backend/src/server.ts", "layer": 1}], "more": False})])
+    eng.plan()
+    assert [f["file"] for f in eng.state["files"]][:1] == ["backend/src/server.ts"]
+    assert "files 를 비워 두지 말고" in calls[1][2]
+
+
+def test_plan_salvages_files_from_a_broken_page_and_falls_back_to_plain_lines():
+    first = json.dumps({"summary": "쇼핑몰", "contracts": "API ...", "files": [], "more": True})
+    broken = '{"files": [{"file": "backend/package.json", "layer": 0}, {"file": "backend/src/db.ts", "lay'
+    eng, _ = _planner([first, broken, json.dumps({"files": [], "more": False})])
+    eng.plan()
+    assert {"backend/package.json", "backend/src/db.ts"} <= {f["file"] for f in eng.state["files"]}
+
+    plain = "- backend/src/server.ts | 1 | 서버 진입점\n2. frontend/src/App.tsx | 2 | 화면\nDockerfile | 0 | 이미지\n설명 문장은 무시"
+    empty = json.dumps({"files": [], "more": False})
+    eng2, calls2 = _planner([first, empty, empty, empty, plain])
+    eng2.plan()
+    got = {f["file"] for f in eng2.state["files"]}
+    assert {"backend/src/server.ts", "frontend/src/App.tsx", "Dockerfile"} <= got
+    assert calls2[-1][1] is True  # 형식 없이(raw) 받은 마지막 시도
