@@ -74,7 +74,10 @@ def test_deploy_decision_routes_are_registered():
 
 def test_deploy_preflight_includes_block_reasons_and_fixes(tmp_path):
     """배포 화면은 감지 정보뿐 아니라 정적 검사 차단 사유도 받아야 한다."""
-    (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    #: 2.0.14: Dockerfile 자동 수정은 그 구조가 실제로 있을 때만(requirements.txt·app/main.py) — 추측한 FastAPI 템플릿 금지.
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
 
     result = asyncio.run(deploy.deploy_preflight(
         deploy.DeployPreflightRequest(workspace_path=str(tmp_path))
@@ -953,3 +956,11 @@ def test_ecs_preflight_does_not_invent_requirements_without_recoder_yml(tmp_path
     (tmp_path / ".dockerignore").write_text(".env\n", encoding="utf-8")
     result = asyncio.run(deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path), target="ecs")))
     assert "ENV_FILE_NOT_GITIGNORED" in {w["code"] for w in result["warnings"]} and not result["blocked"], result["reasons"]
+
+
+def test_unknown_layout_gets_no_dockerfile_auto_fix(tmp_path):
+    """실기기 2.0.13: 구조를 모르는 폴더에 FastAPI Dockerfile 을 자동 수정으로 제안해 배포가 막혔다."""
+    (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    result = asyncio.run(deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path))))
+    issue = next(reason for reason in result["reasons"] if reason["code"] == "MISSING_DOCKERFILE")
+    assert issue["remediation_available"] is False

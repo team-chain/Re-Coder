@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.14 — 2026-10-11 (Preview)
+
+**개발 — 서버 없이 화면만 만들고 "완료" 되던 문제(실기기 2.0.13 쇼핑몰, Haiku)**
+- 설계 목록이 화면 30개와 AI 가 따로 계획한 모의 결제 서버 설정 파일뿐이었습니다. 약속(contracts)에는 Express·Prisma·/api 가 있었는데 서버 파일이 하나도 없어, 서버를 보완하는 점검이 건너뛰었고 검토 에이전트는 응답 길이 한도에 걸려 생략됐습니다.
+- 약속에 서버 API 가 있는데 서버가 없으면 서버 뼈대(package.json·tsconfig·DB(Prisma 스키마/연결·schema.sql)·인증 미들웨어·오류 유틸·샘플 데이터 스크립트)와 /api 묶음마다 라우트·진입점을 설계에 넣고, 루트 package.json·Dockerfile·.dockerignore 도 함께 넣습니다. 검토 에이전트의 응답 한도를 두 배로 늘렸습니다.
+- AI 가 따로 계획한 모의 결제 서버(mock-payment-server/)는 서버가 없을 때도 뺍니다(배포가 모의 결제 서버를 함께 띄움).
+- 그래도 화면이 /api 를 부르는데 서버가 없으면 결과에 "확인 필요"로 분명히 남깁니다(완료처럼 보이지 않게).
+
+**배포 — 엉뚱한 Dockerfile 자동 수정**
+- 스택을 모르는 폴더에 FastAPI Dockerfile(`COPY requirements.txt`·`COPY ./app`)을 '자동 수정' 으로 제안하던 문제. 이제 폴더 구조를 읽어 확실할 때만(ReCoder 검증 Dockerfile, 또는 requirements.txt·package.json 시작 파일이 실제로 있을 때) 만들고, 모르면 자동 수정을 내지 않습니다.
+
 ## 2.0.13 — 2026-10-11 (Preview)
 
 **배포 — 자동 수정 한 번에**

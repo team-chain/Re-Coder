@@ -360,7 +360,8 @@ def plan_with_kit(files: list[dict]) -> tuple[list[dict], list[dict], str]:
     kept = [f for f in files if not is_ai_mock(f.get("file", ""))]
     path = kit_path([f["file"] for f in kept])
     if not path:
-        return files, [], ""
+        #: 서버가 없어도 AI 가 따로 계획한 모의 결제 서버(mock-payment-server/ 등)는 뺀다 — 로컬·ECS 배포가 함께 띄운다.
+        return kept, [], ""
     kept = [f for f in kept if _norm(f["file"]) != path]
     entry = {"file": path, "layer": 0, "size": "medium", "fixed": True,
              "purpose": "ReCoder 결제 모듈(고정) — Stripe 클라이언트·createPaymentIntent·createStripeWebhookRouter"}

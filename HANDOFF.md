@@ -1,3 +1,10 @@
+# 서버 없는 생성 결과 · 엉뚱한 Dockerfile 자동 수정 (2026-10-11, 2.0.14)
+
+- 실기기 2.0.13 job 4a06(Haiku, TEMP): ops 41개 = 화면 30 + mock-payment-server/{package,tsconfig}.json + ADR 10, 서버·루트 package.json·Dockerfile 없음. 요약은 "Express·Prisma·PostgreSQL". core.log 06:14:46 `kind=other`(설계 검토 생략 추정 — 한글 로그가 깨져 문구 확인 불가). 배포: local "스택 unknown", ECS 승인 카드 막는 문제 = remediation 이 쓴 FastAPI Dockerfile(COPY requirements.txt / ./app).
+- 원인: `plan_gaps` 는 서버 코드가 하나라도 있을 때만 서버 쪽 빈 곳을 메움 · `_complete_fullstack_manifest` 는 서버 package.json 이 있을 때만 루트 파일 · `_review_plan` 4096 토큰 · `plan_with_kit` 이 서버 없으면 AI mock 을 안 뺌 · `_gen_missing_dockerfile` 의 else = FastAPI.
+- 고침: plan_gaps 서버 뼈대(약속 /api 묶음 있고 서버·루트 진입 없음 → backend/{package.json,tsconfig.json,src/db/…,src/middleware/auth,src/utils/errors,src/scripts/seed} + 기존 로직이 routes·server), `_complete_plan` 이 서버가 생기면 fullstack 루트 파일 다시 보강, 검토 8192·최대 25개, plan_with_kit 은 늘 mock 제외, code_agent `_server_missing_issues`(최종 결과에만 — AI 교정 대상 아님), remediation `_project_dockerfile`(docker_kit.for_workspace) → verbatim 템플릿, Python 은 requirements.txt, Node 는 package.json 시작 파일이 있을 때만, 그 외 auto_apply False. ecs_runtime: Prisma 앱은 "테이블 SQL 없음" 경고 안 함(docker_kit PRISMA_START 가 만듦).
+- 검증: job 4a06 의 실제 목록 + 요약으로 plan_gaps → 서버 12개 + 루트 4개, mock 제외, 결제 모듈 자리(backend/src/payments/stripe.ts). 고친 0ce6 구조에서는 Dockerfile 자동 수정이 ReCoder 검증본, 화면만 있는 폴더는 자동 수정 없음. Core 2,631. 실제 AI 생성은 이 환경에 모델이 없어 사용자 PC 에서 다시 생성해 확인 필요.
+
 # 배포한 쇼핑몰 화면 품질 · 자동 수정 한 번에 (2026-10-11, 2.0.13)
 
 - 실기기 2.0.12: ECS 배포 성공(98.92.137.162:3000) — 그런데 승인 카드 자동 수정 4건을 하나씩 눌러야 했고, 화면은 스타일 없는 HTML·상품 0개.

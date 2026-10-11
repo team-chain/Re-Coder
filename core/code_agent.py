@@ -2061,6 +2061,23 @@ def _name_mismatch_issues(files, details: list, prefix: str = "") -> list[dict]:
 _ROOT_SCOPED = {"NODE_STATIC_PATH_OUTSIDE_PROJECT", "NODE_STATIC_DIR_MISSING", "NODE_WORKSPACE_MANIFEST_MISSING"}
 
 
+def _server_missing_issues(ops: list[dict]) -> list[dict]:
+    """화면이 /api 를 부르는데 서버 코드가 하나도 없다 — 실기기 2.0.13(job 4a06): 화면 30개만 만들고 "완료" 로 끝나
+    Docker·ECS 배포가 스택을 몰라 막혔다. 결과에 고칠 문제로 남겨 '완료' 처럼 보이지 않게 한다."""
+    files = {_norm_op_path(op.get("file", "")): str(op.get("content") or "") for op in ops if op.get("action") != "delete"}
+    ui = [t for p, t in files.items() if p.endswith((".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte"))
+          and re.match(r"(frontend|client|web)/", p)]
+    if not any(re.search(r"""['"`]/api/""", t) or re.search(r"""baseURL[^\n]*['"`]/api""", t) for t in ui):
+        return []
+    server = [p for p in files if p.endswith((".ts", ".js", ".mjs", ".cjs", ".py"))
+              and not re.match(r"(frontend|client|web)/", p) and not re.search(r"mock", p, re.I)]
+    if server:
+        return []
+    return [{"code": "GENERATED_SERVER_MISSING", "severity": "error", "file": "",
+             "message": "화면은 /api 로 서버를 부르는데 서버 코드가 만들어지지 않았습니다 — 이대로는 로그인·상품·주문이 동작하지 않고 배포할 수 없습니다.",
+             "fix": "같은 요청으로 다시 생성하세요(설계 단계가 약속의 API 로 서버 파일을 채웁니다)."}]
+
+
 def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list[dict]:
     """ops 를 적용했을 때 **새로 생기는** 빌드·실행 문제(build_readiness)만 돌려준다.
 
@@ -2915,6 +2932,9 @@ def generate_code(
     summary = str(data.get("summary") or "코드를 생성했습니다.").strip()
     if fallback_docs:
         summary += "\n\n자동 작성한 문서: " + ", ".join(f.get("file", "") for f in fallback_docs) + " — AI 가 끝내 못 써서 설계에서 기본 내용으로 만들었습니다."
+    if not existing and not foundation:
+        #: AI 교정으로는 서버 전체를 못 만든다 — 교정 대상이 아니라 결과에 분명히 남긴다(완료처럼 보이지 않게).
+        consistency = _server_missing_issues(ops_out) + consistency
     if consistency:
         summary += "\n\n확인 필요: " + " / ".join(i["message"] for i in consistency[:3])
     result = {

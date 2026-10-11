@@ -253,7 +253,9 @@ def plan(workspace: Optional[str], *, key: str, environment: str, provided: Iter
                 else:
                     result.notes.append(f"초기화 SQL({path.name})이 커서 태스크 정의에 넣지 못했습니다 — "
                                         "앱이 스스로 테이블을 만들지 않으면 조회가 실패합니다.")
-        if kind == "postgres" and not init_sql and not any("초기화 SQL" in n for n in result.notes):
+        prisma = "@prisma/client" in " ".join((Path(workspace) / d / "package.json").read_text(encoding="utf-8", errors="replace")
+                                             for d in ("", "backend", "server", "api") if (Path(workspace) / d / "package.json").is_file())
+        if kind == "postgres" and not init_sql and not prisma and not any("초기화 SQL" in n for n in result.notes):
             result.notes.append("테이블을 만드는 SQL(schema.sql 등)을 찾지 못해 빈 DB 로 시작합니다 — 앱이 시작할 때 테이블을 "
                                 "스스로 만들지 않으면(Prisma 는 migrate·db push 가 필요) 조회가 실패합니다.")
         container = _db_container(kind, password, init_sql)

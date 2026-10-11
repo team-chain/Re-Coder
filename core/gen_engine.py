@@ -705,6 +705,15 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
             gaps = plan_gaps(files, manifest, self._exists_on_disk)
             files += gaps
             added += gaps
+        if self.new_project and any(f.get("planned_by") for f in added):
+            #: 서버가 새로 생겼으면 루트 package.json·Dockerfile·.dockerignore 도 필요하다(처음 보강은 서버가 없어 건너뛰었다).
+            keys = {_norm(f["file"]) for f in files}
+            for f in _ca()._complete_fullstack_manifest(files):
+                if _norm(f["file"]) not in keys:
+                    f = dict(f, layer=f.get("layer") if f.get("layer") in (0, 1, 2) else _guess_layer(f["file"]), planned_by="recoder")
+                    files.append(f)
+                    added.append(f)
+                    keys.add(_norm(f["file"]))
         if added:
             names = ", ".join(f["file"] for f in added[:6]) + (f" 외 {len(added) - 6}개" if len(added) > 6 else "")
             self._event("plan_added", agent="review", files=[{"file": f["file"], "layer": f["layer"]} for f in added],
@@ -734,9 +743,11 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
 {contracts or '(없음)'}
 현재 파일 목록:
 {listed}
-빠진 파일이 없으면 files=[] 와 more=false. 있으면 빠진 파일마다 layer(0/1/2)·uses·purpose(무엇을 내보내고 무엇을 하는지)를 붙이고 more=false."""
+빠진 파일이 없으면 files=[] 와 more=false. 있으면 빠진 파일마다 layer(0/1/2)·uses·purpose(무엇을 내보내고 무엇을 하는지, 한 문장)를 붙이고 more=false.
+빠진 파일이 많으면 실행에 꼭 필요한 순서(서버 진입점·DB·라우트·인증 → 화면)로 최대 25개만 주세요."""
         try:
-            resp = self.call(prompt, PAGE_SCHEMA, "review_code_manifest", 4096, agent="review")
+            #: 4096 으로는 서버 전체가 빠진 목록(20개+)을 다 못 적어 응답이 잘리고 검토가 통째로 생략됐다(실기기 job 4a06).
+            resp = self.call(prompt, PAGE_SCHEMA, "review_code_manifest", 8192, agent="review")
             page = ca._extract_json(resp.text)
             if not isinstance(page, dict):
                 return []
@@ -2052,6 +2063,40 @@ def plan_gaps(files: list[dict], manifest: dict, exists: Callable[[str], bool] |
                 u = _target_for(src, u) if src.endswith(_CODE_EXTS) else u
             push(u, f"{src} 가 불러오는 파일 — 설계 목록에서 빠져 추가함. {src} 가 쓰는 이름을 그대로 내보내세요.", _guess_layer(u))
     text = f"{manifest.get('summary') or ''}\n{manifest.get('contracts') or ''}".lower()
+    #: 약속에 서버 API 가 있는데 서버 쪽 파일이 하나도 없다 — 실기기 2.0.13 쇼핑몰(job 4a06, Haiku): 설계 목록이 화면 30개와
+    #: 모의 결제 서버 package.json 뿐이라 백엔드 없이 "완료" 됐고, 배포 점검은 스택을 몰라 엉뚱한 Dockerfile 을 제안했다.
+    #: 서버의 뼈대(설정·DB·인증·오류 유틸)를 목록에 넣는다 — 라우트·진입점은 아래에서 약속의 /api 묶음대로 채운다.
+    api_segments = sorted(set(re.findall(r"/api/([a-z][a-z0-9_-]{1,30})", text)) - {"v1", "v2", "health"})
+    #: 화면 폴더·정적 폴더·AI 모의 결제 서버 밖의 코드(루트 src/routes 같은 서버 포함)가 하나라도 있으면 서버가 있다고 본다.
+    server_code = any(
+        p.endswith(_CODE_EXTS + (".py",)) and not p.endswith((".tsx", ".jsx", ".d.ts"))
+        and not re.match(rf"({'|'.join(_CLIENT_DIRS)}|public|static|docs)/", p)
+        and not re.search(r"(^|/)(vite|tailwind|postcss|eslint|jest|vitest)\.config\.", p)
+        and not re.match(r"(?:[\w.-]+/)?(?:mock|fake)[-_]?(?:payment|stripe|pay)", p, re.I)
+        for p in paths) or any(exists and exists(f"{side}/package.json") for side in _SERVER_DIRS)
+    if api_segments and not server_code and not present(r"(src/)?(server|app|index|main)\.(ts|js|mjs|cjs|py)"):
+        ts = any(p.endswith((".ts", ".tsx")) for p in paths) or "typescript" in text
+        ext = ".ts" if ts else ".js"
+        why = "약속(contracts)에 서버 API 가 있는데 설계 목록에 서버가 없어 추가함. "
+        push("backend/package.json", why + "서버 의존성(코드가 불러오는 패키지만, 안정 버전)과 scripts: "
+             + ("build=tsc, start=node dist/server.js, dev=tsx watch src/server.ts" if ts else "start=node src/server.js"), 0)
+        if ts:
+            push("backend/tsconfig.json", why + "Node 서버용 TypeScript 설정(strict, rootDir src, outDir dist, module NodeNext)", 0)
+        if "prisma" not in text:
+            db = ("PostgreSQL(pg Pool, DATABASE_URL)" if re.search(r"postgres|pg\b", text) else
+                  "MongoDB(mongoose, MONGODB_URI)" if "mongo" in text else
+                  "MySQL(mysql2, DATABASE_URL)" if "mysql" in text else "")
+            if db:
+                push(f"backend/src/db/connection{ext}", why + f"DB 연결 하나를 만들어 내보냄 — {db}, query 헬퍼", 0)
+                if "mongo" not in text:
+                    push("backend/src/db/schema.sql", why + "약속(contracts)의 모든 테이블·열·관계·인덱스를 만드는 CREATE TABLE IF NOT EXISTS", 0)
+        if re.search(r"jwt|토큰|token|로그인|login|auth", text):
+            push(f"backend/src/middleware/auth{ext}", why + "JWT 검증 미들웨어(Authorization: Bearer) — req.user 설정, 관리자 권한 확인", 1)
+        push(f"backend/src/utils/errors{ext}", why + "공용 오류 클래스·오류 응답 형식(약속의 오류 형식 그대로)", 0)
+        if re.search(r"샘플|시드|seed|sample|demo|데모", text):
+            push(f"backend/src/scripts/seed{ext}", why + "샘플 데이터 넣기(이미 있으면 건너뜀, 여러 번 실행해도 중복 없음) — "
+                 "package.json scripts.seed 로 실행", 2)
+        paths = paths + [f["file"] for f in add]
     for side in _SERVER_DIRS:
         code = [p for p in paths if p.startswith(side + "/") and p.endswith(_CODE_EXTS)]
         if not code:
