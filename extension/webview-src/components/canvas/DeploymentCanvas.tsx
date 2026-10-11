@@ -137,7 +137,8 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     if(event.type==='workspace.deploy.s3.dirs'&&!dirTouched.current) setConfig(c=>({...c,dir:p.suggested||''}));
     if(event.type==='workspace.deploy.s3.progress') {setS3Progress(p);setMessage('');}
     if(event.type==='workspace.deploy.s3.result') {finish();setS3Progress(p.ok?{step:'done',result:{status:'success'}}:{step:'error',message:p.message||'S3 배포 실패'});if(p.ok) {setS3Result(p.result);setMessage('');addEvent(`s3-${Date.now()}`,'S3 배포 완료',p.result?.bucket||'');refresh();}else setError(p.message||'S3 배포 실패');}
-    if(event.type==='workspace.deploy.remediationResult') {finish();setMessage(p.message||'수정을 적용했습니다. 다시 승인 내용을 확인하세요.');setBlocked([]);refresh();}
+    if(event.type==='workspace.deploy.remediationResult') {finish();setMessage(p.message||'수정을 적용했습니다. 다시 승인 내용을 확인하세요.');setBlocked([]);refresh();const again=reopenAfterFix.current;reopenAfterFix.current=null;if(again)setTimeout(()=>prepareRef.current(again),0);}
+    if(event.type==='workspace.deploy.remediationError') reopenAfterFix.current=null;
     if(event.type==='workspace.deploy.remediationError') {finish();setError(p.message);}
     if(event.type==='canvas.ecs.stopResult') {if(!p.cancelled){setMessage(p.message||'서비스를 중지했습니다.');addEvent(`ecs-stop-${Date.now()}`,'ECS 서비스 중지',p.message||'태스크 수를 0으로 줄였습니다.');refresh();}return;}
     //: 로컬 Docker 결과 알림은 DockerNotifications(develop)가 계획별로 한 번만 만든다 — 여기서 또 만들면 중복 전송된다.
@@ -176,10 +177,15 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
     if(node.target)choose(node.target);
   };
   const cancel=useCallback(()=>{setPlan(p=>{if(p)postMessage('canvas.cancel',{planId:p.id});return null;});},[postMessage]);
+  const prepareRef=useRef<(chosen:Config)=>void>(()=>{});
   const prepare=(chosen=config)=>{if(busyRef.current||live?.running)return;try { if(chosen.target==='ecs')chosen={...chosen,...parseRuntimeEnvironment(runtimeDraft)}; } catch(err) {setError(String(err));return;}busyRef.current=true;setBusy(true);setError('');setMessage('배포 대상과 사전 검사 결과를 확인 중…');const id=requestId();actionRequest.current=id;postMessage('canvas.prepare',{requestId:id,config:chosen,autoDir:chosen.target==='s3'&&!dirTouched.current});};
+  prepareRef.current=prepare;
   const drop=(target:Target)=>{choose(target);};
   const approve=()=>{if(!plan||busyRef.current)return;actionTarget.current=plan.config.target;busyRef.current=true;setBusy(true);if(plan.config.target==='s3'){setS3Result(null);setS3Progress({step:'plan',message:'승인한 파일을 확인합니다'});}setMessage('승인한 요청의 보안·권한 검사를 시작합니다…');setError('');const id=requestId();actionRequest.current=id;postMessage('canvas.execute',{requestId:id,planId:plan.id,approved:true});setPlan(null);};
   const fix=(id:string)=>{cancel();busyRef.current=true;setBusy(true);postMessage('workspace.deploy.remediation.apply',{proposalId:id});};
+  //: [모두 적용] 뒤에는 같은 설정으로 승인 카드를 다시 연다 — 고친 결과를 다시 검사해 바로 승인할 수 있게.
+  const reopenAfterFix=useRef<Config|null>(null);
+  const fixAll=(ids:string[])=>{reopenAfterFix.current=plan?.config??null;cancel();busyRef.current=true;setBusy(true);setMessage(`자동 수정 ${ids.length}건을 적용하는 중…`);postMessage('workspace.deploy.remediation.applyAll',{proposalIds:ids});};
   const scan=live?.deployment_id&&live.deployment_id!==snapshot?.deployment.deployment_id?null:snapshot?.scan;
   const deployment=useMemo(()=>{
     const result=deploymentScene(snapshot?{...snapshot,deployment:live||snapshot.deployment,scan:scan||null}:null,discord?.channel_name?`#${discord.channel_name}`:'',security,showNodeDetails);
@@ -202,7 +208,8 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const closeDrawer=()=>{setSelection(null);setPane('canvas');};
   const resetGraph=()=>{stopGraph();postMessage('canvas.graph.cancel');setLevel(1);setFolder(null);setSearch('');};
   const configField=(key:Exclude<keyof Config,"env_vars"|"secret_refs"|"assign_public_ip"|"subnet_ids"|"security_group_ids">,label:string)=><label key={key}>{label}<input value={config[key]} disabled={running} onChange={e=>update(key,key==='container_port'?Number(e.target.value):e.target.value)}/></label>;
-  const notice=<>{error&&<div className="rc-note rc-error" role="alert">{error}</div>}{message&&<div className="rc-note" role="status">{message}</div>}{blocked.map((issue,i)=><div className="rc-finding" key={i}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button disabled={busy} onClick={()=>fix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}</>;
+  const blockedFixes=[...new Set(blocked.filter(i=>i.remediation_available&&i.proposal_id).map(i=>i.proposal_id!))];
+  const notice=<>{error&&<div className="rc-note rc-error" role="alert">{error}</div>}{message&&<div className="rc-note" role="status">{message}</div>}{blockedFixes.length>1&&<button className="rc-primary" disabled={busy} onClick={()=>fixAll(blockedFixes)}>자동 수정 {blockedFixes.length}건 모두 적용</button>}{blocked.map((issue,i)=><div className="rc-finding" key={i}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button disabled={busy} onClick={()=>fix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}</>;
   return <section className={`rc-canvas rc-canvas-focused ${completed?'rc-canvas-completed':''}`} aria-label="배포 캔버스" style={expanded?{position:'fixed',inset:0,zIndex:40,padding:20,overflow:'auto',background:'var(--vscode-editor-background,#141920)'}:undefined}>
     <style>{canvasStyles}</style>
     <div className="rc-canvas-bar">
@@ -256,6 +263,6 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
         {s3Result&&<section className="rc-panel" aria-label="S3 배포 결과"><h3>S3 배포 완료</h3>{serviceLink(s3Result.url)&&<a href={serviceLink(s3Result.url)!} target="_blank" rel="noreferrer">정적 사이트 열기 ↗</a>}<p>{s3Result.bucket} · {s3Result.region} · 파일 {s3Result.uploaded.length}개</p>{s3Result.index_copied_from&&<p>{s3Result.index_copied_from}를 index.html로 함께 올렸습니다.</p>}{s3Result.excluded_note&&<div className="rc-note">{s3Result.excluded_note}</div>}</section>}
       </div>}
     </CanvasDrawer>
-    {plan&&<ApprovalCard plan={plan} onApprove={approve} onCancel={cancel} onFix={fix}/>}
+    {plan&&<ApprovalCard plan={plan} onApprove={approve} onCancel={cancel} onFix={fix} onFixAll={fixAll}/>}
   </section>;
 }

@@ -564,6 +564,14 @@ export class ApiClient {
         return resp.data;
     }
 
+    /** 자동 수정을 한 번에 적용하고 다시 판정한다(승인 카드 [모두 적용]). 고치는 중 새로 드러난 막는 문제도 함께 고친다. */
+    async fixAllBuildReadiness(workspacePath: string, codes?: string[]): Promise<{ applied: boolean; codes: string[]; changed: string[]; skipped: Array<{ code: string; message: string }>; message: string }> {
+        const resp = await this.request<{ applied: boolean; codes: string[]; changed: string[]; skipped: Array<{ code: string; message: string }>; message: string }>(
+            'POST', '/api/deploy/readiness/fix-all', { workspace_path: workspacePath, codes }, false, 300000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '자동 수정 실패'); }
+        return resp.data;
+    }
+
     async applyDeployRemediation(proposalId: string, workspacePath: string): Promise<{
         success: boolean;
         proposal_id: string;

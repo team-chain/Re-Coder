@@ -227,3 +227,15 @@ test('ECS preflight receives runtime setting names only (never values) so missin
  await s.send('canvas.execute',{planId:s.plan().id,approved:true});
  assert.deepEqual(calls[1][2],{envNames:['FRONTEND_URL','DATABASE_URL'],environment:'production'});
 });
+test('approval card offers one button that applies every automatic fix at once',()=>{
+ const {fixableProposals}=require('../out/webview-test/components/canvas/ApprovalCard.js');
+ const issue=(code,id)=>({code,message:code,fix:'',remediation_available:Boolean(id),proposal_id:id});
+ const plan={id:'p',config:{...config,target:'ecs'},projectName:'shop',repository:'',branch:'',commit:'',dirty:false,account:'1',coreRegion:config.aws_region,
+  preflight:{blocked:true,reasons:[issue('A','readiness:A'),issue('B','readiness:B'),issue('C',null)],warnings:[issue('D','readiness:D'),issue('A','readiness:A')]}};
+ assert.deepEqual(fixableProposals(plan),['readiness:A','readiness:B','readiness:D']);
+ let got=null;
+ const html=renderToStaticMarkup(React.createElement(ApprovalCard,{plan,onApprove(){},onCancel(){},onFix(){},onFixAll(ids){got=ids;}}));
+ assert.ok(html.includes('자동 수정 3건 모두 적용'));
+ const single=renderToStaticMarkup(React.createElement(ApprovalCard,{plan:{...plan,preflight:{blocked:true,reasons:[issue('A','readiness:A')],warnings:[]}},onApprove(){},onCancel(){},onFix(){},onFixAll(){}}));
+ assert.ok(!single.includes('모두 적용'));
+});

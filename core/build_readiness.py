@@ -51,7 +51,9 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
                 "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION", "NODE_PRISMA_SCHEMA_ALIGN",
                 "NODE_EXPRESS_REQUEST_TYPE", "NODE_ESM_COMMONJS_GLOBAL", "NODE_FRONTEND_PRODUCTION_ONLY",
-                "NODE_CURRENCY_CASE_COMPARE"}
+                "NODE_CURRENCY_CASE_COMPARE", "NODE_TAILWIND_NOT_CONFIGURED",
+                "NODE_SEED_SCRIPT_OUTSIDE_BUILD", "NODE_REACT_REF_STATE",
+                "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
 FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
@@ -62,7 +64,9 @@ FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_
                     "NODE_CLIENT_NOT_CREATED", "NODE_MODULE_NOT_IMPORTED", "NODE_TS_SAFE_REWRITE",
                     "NODE_TAILWIND_SELF_APPLY", "NODE_ESM_IMPORT_EXTENSION", "NODE_DEPENDENCY_VERSION_NOT_FOUND",
                     "NODE_PRISMA_SCHEMA_ALIGN", "NODE_EXPRESS_REQUEST_TYPE", "NODE_FRONTEND_NOT_SERVED",
-                    "NODE_ESM_COMMONJS_GLOBAL", "NODE_FRONTEND_PRODUCTION_ONLY", "NODE_CURRENCY_CASE_COMPARE")
+                    "NODE_ESM_COMMONJS_GLOBAL", "NODE_FRONTEND_PRODUCTION_ONLY", "NODE_CURRENCY_CASE_COMPARE",
+                    "NODE_TAILWIND_NOT_CONFIGURED", "NODE_SEED_SCRIPT_OUTSIDE_BUILD",
+                    "NODE_REACT_REF_STATE", "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -766,11 +770,28 @@ def _closest_declared(name: str, declared: set[str], imported: set[str] = frozen
     return max(pool, key=lambda d: difflib.SequenceMatcher(None, name, d).ratio())
 
 
+def _env_defined(files, name: str) -> bool:
+    """화면 빌드 변수(VITE_…)를 프로젝트 어디에서 정하는가(.env 파일·Dockerfile ARG/ENV·vite define)."""
+    for rel in files.files():
+        base = rel.rsplit("/", 1)[-1]
+        if "/node_modules/" in f"/{rel}":
+            continue
+        if base.endswith((".example", ".sample", ".template", ".dist")):
+            continue  # 예시 파일은 빌드가 읽지 않는다
+        if base.startswith(".env") or base == "Dockerfile" or base.startswith("vite.config"):
+            if re.search(rf"(?m)(?:^|\s|[{{,'\"]){re.escape(name)}\s*[=:'\"]", files.read(rel) or ""):
+                return True
+    return False
+
+
 def api_prefix_rewrite(text: str, names) -> str:
     """names(baseURL 이 /api 인 axios 인스턴스)의 호출 경로에서 앞의 /api 를 뺀다: client.get('/api/x') → client.get('/x')."""
     for name in names:
         #: 제네릭(`client.get<Product[]>('/api/x')`)·여러 줄로 나눈 호출도 같은 호출이다
         call = rf"""\b{re.escape(name)}\.(?:get|post|put|patch|delete|head|options|request)\s*(?:<[^()]*?>)?\s*\(\s*"""
+        if name.startswith("call:"):
+            #: 주소를 그대로 인스턴스에 넘기는 함수(`execute(url)` → `client.get(url)`) — `execute('/api/x')` 도 같은 호출이다.
+            call = rf"""(?<![\w$.]){re.escape(name[5:])}\s*(?:<[^()]*?>)?\s*\(\s*"""
         text = re.sub(rf"""({call})(['"`])/api(/[^'"`]*)?\2""",
                       lambda m: f"{m.group(1)}{m.group(2)}{m.group(3) or '/'}{m.group(2)}", text)
         text = re.sub(rf"""({call}`)/api(/)""", lambda m: f"{m.group(1)}{m.group(2)}", text)
@@ -1048,6 +1069,11 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
             if ident:  # baseURL: API_BASE_URL — 같은 파일의 상수를 따라간다
                 m = re.search(rf"""\b(?:const|let|var)\s+{re.escape(value)}\s*=\s*([^;\n]+)""", text)
                 value = m.group(1) if m else ""
+            #: `import.meta.env.VITE_API_BASE_URL || '/api'` — 그 변수를 어디서도 정하지 않으면(.env·Dockerfile) 늘 '/api' 다
+            #: (실기기 2.0.12 쇼핑몰: 상품 목록이 /api/api/products 로 가 404 → 화면에 상품 0개).
+            env_fallback = re.fullmatch(r"""\s*import\.meta\.env\.(\w+)\s*(?:\|\||\?\?)\s*((['"`])[^'"`$]*\3)\s*;?\s*""", value)
+            if env_fallback and not _env_defined(files, env_fallback.group(1)):
+                value = env_fallback.group(2)
             #: 문자열 그대로인 baseURL 만 본다 — `import.meta.env.VITE_API || '/api'` 처럼 배포에서 다른 주소가 될 수
             #: 있는 값은 '/api/…' 호출이 맞는 코드일 수 있다.
             if re.fullmatch(r"""(['"`])(?:https?://[^'"`$\s/]+)?[^'"`$]*?/api/?\1\s*;?""", value.strip()):
@@ -1076,6 +1102,20 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                         bits = [b.strip() for b in re.sub(r"^\s*type\s+", "", part).split(" as ")]
                         if bits and bits[0] in exported_as:
                             names_by_file.setdefault(other, set()).add(bits[-1])
+            #: 인스턴스에 주소를 그대로 넘기는 함수(useApi 의 execute(url) → client.get(url)) 를 부르는 쪽도 본다.
+            wrappers = set()
+            for target, names in list(names_by_file.items()):
+                body = _strip_js_comments(files.read(target) or "")
+                inst = "|".join(re.escape(n) for n in names)
+                for m in re.finditer(r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*(?:useCallback\(\s*)?(?:async\s*)?\(\s*([\w$]+)"""
+                                     r"""|\bfunction\s+([\w$]+)\s*\(\s*([\w$]+)""", body):
+                    fname, param = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+                    if re.search(rf"""\b(?:{inst})\.(?:get|post|put|patch|delete|request)\s*(?:<[^()]*?>)?\s*\(\s*{re.escape(param)}\b""", body):
+                        wrappers.add("call:" + fname)
+            if wrappers:
+                for other in files.files():
+                    if other.endswith((".js", ".jsx", ".ts", ".tsx")) and "/node_modules/" not in f"/{other}":
+                        names_by_file.setdefault(other, set()).update(wrappers)
             for target, names in names_by_file.items():
                 body = files.read(target) or ""
                 if api_prefix_rewrite(body, names) != body:
@@ -2458,6 +2498,48 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 + ". 결제를 끈 데모 배포(NODE_ENV=test)에서는 주소를 열면 Cannot GET / 이 됩니다.",
                 "개발 모드(development)만 빼고 화면을 제공하게 하세요(자동 수정 가능 — 운영 동작은 같음).",
                 sorted(gate_writes)[0], True))
+        tw_notes, tw_writes = node_fixups.tailwind_setup(files)
+        if tw_writes:
+            writes["NODE_TAILWIND_NOT_CONFIGURED"] = tw_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_TAILWIND_NOT_CONFIGURED", ERROR,
+                "화면이 Tailwind 클래스로 작성됐지만 빌드에 Tailwind 가 연결돼 있지 않습니다(" + "; ".join(tw_notes[:1])
+                + "). 빌드는 되지만 배포한 화면이 스타일 없는 글자·링크로만 보입니다.",
+                "Tailwind 설정 파일과 @tailwind 지시문을 넣으세요(자동 수정 가능 — 기존 설정은 바꾸지 않음).",
+                sorted(tw_writes)[0], True))
+        seed_notes, seed_writes = node_fixups.seed_script_into_build(files)
+        if seed_writes:
+            writes["NODE_SEED_SCRIPT_OUTSIDE_BUILD"] = seed_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_SEED_SCRIPT_OUTSIDE_BUILD", WARNING,
+                "샘플 데이터 스크립트가 서버 빌드 밖에 있어 배포한 앱에서 돌릴 수 없습니다(" + "; ".join(seed_notes[:2])
+                + "). 배포하면 상품·메뉴 같은 기본 데이터가 비어 있습니다.",
+                "스크립트를 빌드 폴더 안으로 옮기세요(자동 수정 가능 — 내용은 같음, 첫 배포 때 자동으로 실행).",
+                sorted(seed_writes)[0], True))
+        ref_notes, ref_writes = node_fixups.ref_state_hooks(files)
+        if ref_writes:
+            writes["NODE_REACT_REF_STATE"] = ref_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_REACT_REF_STATE", ERROR,
+                "; ".join(ref_notes[:2]).replace("가 값을 바꾼 뒤 화면을 다시 그리게", "가 받아 온 값을 useRef 에만 넣습니다")
+                + ". 요청이 성공해도 화면이 다시 그려지지 않아 목록이 비어 있거나 로딩이 끝나지 않습니다.",
+                "값을 바꾼 뒤 화면을 다시 그리게 하세요(자동 수정 가능 — 반환 모양·호출 방법은 같음).", sorted(ref_writes)[0], True))
+        hp_notes, hp_writes = node_fixups.health_alias(files)
+        if hp_writes:
+            writes["NODE_HEALTH_PATH_MISMATCH"] = hp_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_HEALTH_PATH_MISMATCH", ERROR,
+                "화면은 /api/health 로 상태를 묻는데 서버에는 /health 만 있습니다(404). 테스트 결제 모드를 몰라 결제 결과 화면이 "
+                "결제 완료를 기다리지 않습니다.",
+                "서버가 /api/health 에도 같은 응답을 주게 하세요(자동 수정 가능).", sorted(hp_writes)[0], True))
+        krw_notes, krw_writes = node_fixups.krw_minor_units(files)
+        if krw_writes:
+            writes["NODE_KRW_MINOR_UNITS"] = krw_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_KRW_MINOR_UNITS", ERROR,
+                "원화 금액을 100 으로 나눠 표시합니다: " + ", ".join(sorted(krw_writes)[:2])
+                + ". 원화는 소수 단위가 없어 결제는 저장된 금액 그대로 청구됩니다 — 4,900원 상품이 ₩49 로 보입니다.",
+                "원화 표시에서 100 으로 나누지 않게 하세요(자동 수정 가능).", sorted(krw_writes)[0], True))
         cur_notes, cur_writes = node_fixups.currency_case_compare(files)
         if cur_writes:
             writes["NODE_CURRENCY_CASE_COMPARE"] = cur_writes
@@ -3945,7 +4027,8 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
             if target.exists():
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("/* ReCoder: 코드가 불러오지만 없던 스타일 파일 — 필요한 스타일을 채우세요. */\n", encoding="utf-8")
+            import node_fixups
+            target.write_text(node_fixups.missing_style_content(ProjectFiles(root), rel), encoding="utf-8")
             changed.append(rel)
     elif code == "NODE_VITE_JSX_IN_JS":
         for rel in before.fix_data.get("jsx_in_js") or []:
@@ -4195,3 +4278,49 @@ def expects_screen(workspace: str | Path) -> bool:
         if rel.startswith(("templates/", "app/templates/", "src/templates/", "views/")) and name.endswith((".html", ".ejs", ".hbs", ".pug", ".njk", ".jinja", ".jinja2")):
             return True
     return False
+
+
+def apply_all_fixes(workspace: str | Path, codes: Optional[Iterable[str]] = None, rounds: int = 4) -> dict:
+    """자동으로 고칠 수 있는 항목을 한 번에 고친다(승인 카드 [모두 적용]).
+
+    실기기 2.0.12 ECS: 승인 카드에 자동 수정 4건이 떠서 하나씩 누르고 다시 검사해야 했다. 하나를 고치면 다음 것이
+    드러나기도 한다(내보내기를 붙여야 /api 중복 호출이 보임) — 다시 판정하며 최대 rounds 번 돈다.
+    codes 를 주면 그 항목과, 고치는 중 새로 드러난 '막는 문제(error)' 중 자동 수정 가능한 것만 고친다.
+    한 항목이 실패해도 나머지는 계속하고, 무엇을 고쳤고 무엇이 남았는지 돌려준다. 원본은 .recoder/backups 에 남는다."""
+    root = Path(workspace).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError("유효한 프로젝트 폴더가 아닙니다.")
+    wanted = {c for c in (codes or []) if c in AUTO_FIXABLE}
+    applied: list[str] = []
+    changed: list[str] = []
+    skipped: list[dict] = []
+    tried: set[str] = set()
+    for _ in range(max(1, rounds)):
+        current = analyze(root, online=False)
+        todo = [i.code for i in sorted(current.issues, key=lambda i: i.severity != ERROR)
+                if i.auto_fix and i.code in AUTO_FIXABLE and i.code not in tried
+                and (codes is None or i.code in wanted or i.severity == ERROR)]
+        #: 미리 만든 수정만 있고 문제로 띄우지 않은 항목도 요청했으면 고친다.
+        todo += [c for c in wanted if c not in tried and c not in todo
+                 and (current.fix_data.get("file_writes") or {}).get(c)]
+        if not todo:
+            break
+        for code in dict.fromkeys(todo):
+            tried.add(code)
+            try:
+                result = apply_fix(root, code)
+            except (ValueError, OSError) as exc:
+                skipped.append({"code": code, "message": str(exc)})
+                continue
+            if result.get("applied"):
+                applied.append(code)
+                changed += [c for c in result.get("changed") or [] if c not in changed]
+    final = analyze(root, online=False)
+    remaining = [{"code": i.code, "severity": i.severity, "message": i.message, "auto_fix": i.auto_fix}
+                 for i in final.issues]
+    if applied:
+        message = f"자동 수정 {len(applied)}건을 적용했습니다." + (f" {len(skipped)}건은 직접 확인이 필요합니다." if skipped else "")
+    else:
+        message = "적용할 자동 수정이 없습니다." if not skipped else "자동 수정을 적용하지 못했습니다."
+    return {"applied": bool(applied), "codes": applied, "changed": changed, "skipped": skipped,
+            "remaining": remaining, "message": message, "readiness": final.to_dict()}

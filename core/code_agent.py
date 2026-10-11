@@ -1798,10 +1798,14 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
                 continue
             rel = prefix + posixpath.normpath(posixpath.join(posixpath.dirname(importer), spec))
             if rel not in by_path and not (base / rel).exists():
-                by_path[rel] = {"action": "create", "file": rel, "language": "css",
-                                "content": "/* ReCoder: 코드가 불러오지만 AI 가 만들지 않은 스타일 파일 — 필요한 스타일을 채우세요. */\n",
-                                "rationale": "import 하는 스타일 파일이 없어 빌드가 실패하지 않도록 빈 파일을 만들었습니다."}
-                notes.append(f"{rel}: 빈 스타일 파일 추가")
+                #: 예전엔 빈 주석만 넣어 배포한 화면이 맨 HTML 로 보였다(실기기 2.0.12) — Tailwind 화면이면 지시문, 아니면 기본 스타일.
+                import node_fixups
+                from build_readiness import ProjectFiles
+                content = node_fixups.missing_style_content(
+                    ProjectFiles(base, {p: op.get("content") or "" for p, op in by_path.items()}), rel)
+                by_path[rel] = {"action": "create", "file": rel, "language": "css", "content": content,
+                                "rationale": "코드가 불러오는 스타일 파일이 없어 만들었습니다(Tailwind 지시문 또는 기본 스타일)."}
+                notes.append(f"{rel}: 없던 스타일 파일 추가")
         for rel in data.get("jsx_in_js") or []:
             op = by_path.pop(prefix + rel, None)
             if op is None:

@@ -1586,6 +1586,14 @@ def _file_hint(path: str) -> str:
         hint += ("\nPrisma 스키마 규칙: enum 값은 약속·코드가 쓰는 글자 그대로 쓰세요('paid' 를 쓰면 값도 paid — 대문자 이름+@map 금지). "
                  "금액·수량·재고는 Int(BigInt 금지 — 코드가 number 로 다룸). 관계 필드 이름은 약속에 적힌 이름 그대로(예: order_items). "
                  "@default 는 그 enum 값 그대로. Prisma 에 없는 속성(@@validate, @@check, @check)은 쓰지 마세요(값 검사는 코드에서).")
+    if re.search(r"\.(?:tsx|jsx|vue|svelte)$", str(path)) or re.search(r"(^|/)(?:frontend|client|web)/src/", str(path)):
+        #: 실기기 2.0.12 쇼핑몰: 화면 문구가 한국어·영어로 섞였고(Add to Cart / 장바구니), 원화를 /100 으로 표시했고,
+        #: api 클라이언트(baseURL '/api') 호출에 '/api' 를 또 붙였고, 받아 온 값을 useRef 에만 넣어 화면이 다시 그려지지 않았다.
+        hint += ("\n화면 규칙: 화면에 보이는 문구(제목·버튼·라벨·안내·오류)는 사용자 요청과 같은 언어로 통일하세요(한국어 요청이면 모두 한국어). "
+                 "원화(KRW)는 소수 단위가 없습니다 — 저장된 금액 정수를 그대로 원으로 표시하세요(100 으로 나누지 말 것). "
+                 "api 클라이언트의 baseURL 이 '/api' 면 호출 경로에 '/api' 를 다시 붙이지 마세요. "
+                 "화면에 보여 줄 값(받아 온 데이터·로딩·오류)은 useState 로 두세요(useRef 는 다시 그리지 않습니다). "
+                 "스타일은 Tailwind 유틸리티 클래스로 일관되게 쓰세요.")
     return hint
 
 

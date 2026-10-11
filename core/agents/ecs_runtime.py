@@ -354,6 +354,11 @@ def apply(task_def: dict, app_container: str, runtime: Optional[RuntimePlan], im
         item = json.loads(json.dumps(sidecar))
         if item.get("image") == APP_IMAGE:
             item["image"] = image
+        if item.get("name") == "recoder-seed":
+            #: 샘플 데이터 스크립트는 앱과 같은 DB 주소·설정(SEED_DEMO 등)으로 돈다.
+            item["environment"] = json.loads(json.dumps(app.get("environment", [])))
+            if app.get("secrets"):
+                item["secrets"] = json.loads(json.dumps(app["secrets"]))
         if log:
             options = dict(log.get("options") or {})
             options["awslogs-stream-prefix"] = item["name"]

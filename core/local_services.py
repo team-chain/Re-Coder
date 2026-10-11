@@ -409,7 +409,8 @@ def seed_command(workspace: str) -> Optional[dict]:
     except ValueError:
         return None
     scripts = pkg.get("scripts") if isinstance(pkg, dict) and isinstance(pkg.get("scripts"), dict) else {}
-    name = next((n for n in ("db:seed", "seed", "seed:db", "db:seed:demo") if n in scripts), None)
+    from node_fixups import SEED_SCRIPT_NAMES
+    name = next((n for n in SEED_SCRIPT_NAMES if n in scripts), None)
     if not name:
         return None
     m = re.search(r"(?:tsx|ts-node(?:-esm)?|node(?:\s+--loader\s+\S+)?)\s+([\w./-]+\.(?:ts|js|mjs|cjs))\b", str(scripts[name]))

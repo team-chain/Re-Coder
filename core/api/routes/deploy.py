@@ -4133,6 +4133,26 @@ async def deploy_readiness_fix(request: ReadinessFixRequest) -> dict:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+class ReadinessFixAllRequest(BaseModel):
+    workspace_path: str
+    #: 승인 카드에 보인 자동 수정 항목. 비우면 자동으로 고칠 수 있는 것을 모두 고친다.
+    codes: Optional[list[str]] = Field(default=None, max_length=100)
+
+
+@router.post("/api/deploy/readiness/fix-all")
+async def deploy_readiness_fix_all(request: ReadinessFixAllRequest) -> dict:
+    """자동 수정을 한 번에 적용하고 다시 판정한다(승인 카드 [모두 적용]). 원본은 .recoder/backups 에 남는다."""
+    try:
+        from build_readiness import apply_all_fixes
+    except ImportError:  # pragma: no cover
+        from core.build_readiness import apply_all_fixes  # type: ignore
+    codes = [c for c in (request.codes or []) if re.fullmatch(r"[A-Z_]{3,64}", c or "")] if request.codes is not None else None
+    try:
+        return await asyncio.to_thread(apply_all_fixes, request.workspace_path, codes)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 class SecurityFixRequest(BaseModel):
     workspace_path: str
     #: 보안 검사 화면이 받은 결과 그대로 {trivy: {...}, hadolint: {...}, gitleaks: {...}}

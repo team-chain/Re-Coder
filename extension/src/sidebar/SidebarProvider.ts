@@ -1196,6 +1196,44 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'workspace.deploy.remediation.applyAll': {
+                //: 승인 카드 [모두 적용] — 빌드 점검 항목은 Core 가 한 번에(다시 판정하며) 고치고, 나머지 수정안은 차례로 적용한다.
+                const ids = ((payload as { proposalIds?: unknown } | undefined)?.proposalIds);
+                const proposalIds = Array.isArray(ids) ? [...new Set(ids.filter((id): id is string => typeof id === 'string' && id.length > 0))].slice(0, 50) : [];
+                const workspacePath = activeProjectPath();
+                if (!proposalIds.length || !workspacePath) {
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', { message: '적용할 수정안 정보가 없습니다. 다시 검사해 주세요.' });
+                    break;
+                }
+                const appliedFiles: string[] = [], failed: string[] = [];
+                let appliedCount = 0;
+                const readinessCodes = proposalIds.filter(id => id.startsWith('readiness:')).map(id => id.slice('readiness:'.length));
+                try {
+                    if (readinessCodes.length) {
+                        const result = await this._apiClient.fixAllBuildReadiness(workspacePath, readinessCodes);
+                        appliedCount += result.codes.length;
+                        appliedFiles.push(...result.changed);
+                        failed.push(...result.skipped.map(s => s.message));
+                    }
+                    for (const id of proposalIds.filter(id => !id.startsWith('readiness:'))) {
+                        try {
+                            const result = await this._apiClient.applyDeployRemediation(id, workspacePath);
+                            if (result.success) { appliedCount += 1; appliedFiles.push(...(result.applied_files || [])); }
+                        } catch (err) {
+                            failed.push(err instanceof Error ? err.message : String(err));
+                        }
+                    }
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationResult', {
+                        success: appliedCount > 0, applied_files: appliedFiles, rerun_required: true,
+                        message: appliedCount
+                            ? `자동 수정 ${appliedCount}건을 적용했습니다.${failed.length ? ` ${failed.length}건은 직접 확인이 필요합니다: ${failed[0]}` : ''} 다시 승인 내용을 확인하세요.`
+                            : (failed[0] || '적용할 자동 수정이 없었습니다. 다시 확인하세요.'),
+                    });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.remediationError', { message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
             case 'workspace.deploy.remediation.apply': {
                 const proposalId = (payload as { proposalId?: string } | undefined)?.proposalId;
                 const workspacePath = activeProjectPath();

@@ -4,8 +4,14 @@ import { regionMismatchWarning } from "../DeploymentCenter";
 export interface Config { target: "ecs" | "s3" | "github"; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[] }
 export interface Issue { code: string; message: string; fix: string; remediation_available: boolean; proposal_id: string | null }
 export interface Plan { id: string; config: Config; projectName: string; repository: string; branch: string; commit: string; dirty: boolean; account: string; coreRegion: string; preflight: { blocked?: boolean; summary?: string; reasons?: Issue[]; warnings?: Issue[] }; staticSite?: {files:string[];excluded:string;notes?:string[]}; targetState?: { exists: boolean|null; task_definition:string; images:Array<{image:string;digest:string}>; budget:Array<{name:string;limit:string;spent:string;unit:string;period:string}>|null; warnings:string[] } }
-export function ApprovalCard({ plan, onApprove, onCancel, onFix }: { plan: Plan; onApprove: () => void; onCancel: () => void; onFix: (id:string)=>void }) {
+/** 승인 카드에 보이는 자동 수정 — [모두 적용] 이 한 번에 보낸다. */
+export function fixableProposals(plan: Plan): string[] {
+  return [...new Set([...(plan.preflight.reasons||[]), ...(plan.preflight.warnings||[])]
+    .filter(issue=>issue.remediation_available&&issue.proposal_id).map(issue=>issue.proposal_id!))];
+}
+export function ApprovalCard({ plan, onApprove, onCancel, onFix, onFixAll }: { plan: Plan; onApprove: () => void; onCancel: () => void; onFix: (id:string)=>void; onFixAll?: (ids:string[])=>void }) {
   const ref=useRef<HTMLDivElement>(null), [ack,setAck]=useState(false);
+  const fixable=fixableProposals(plan);
   const c=plan.config, warning=c.target!=='github' ? regionMismatchWarning(plan.coreRegion,c.aws_region) : null;
   useEffect(()=>{
     const previous=document.activeElement as HTMLElement | null;
@@ -32,6 +38,8 @@ export function ApprovalCard({ plan, onApprove, onCancel, onFix }: { plan: Plan;
     {plan.preflight.summary && <p className="rc-muted">{plan.preflight.summary}</p>}
     {plan.targetState?.warnings.map((warning,i)=><p className="rc-note" key={i}>{warning}</p>)}
     {/* 막는 문제와 참고 경고를 나눠 보여 준다 — 예전엔 한 목록이라 무엇 때문에 승인 버튼이 꺼졌는지 알 수 없었다(실기기 ECS). */}
+    {/* 실기기 2.0.12: 자동 수정 4건을 하나씩 누르고 다시 검사해야 했다 — 한 번에 적용하고 다시 판정한다. */}
+    {onFixAll && fixable.length > 1 && <div className="rc-note rc-fix-all"><b>자동으로 고칠 수 있는 항목 {fixable.length}건</b><p>한 번에 적용하고 다시 검사합니다. 원본은 .recoder/backups 에 남습니다.</p><button className="rc-primary" onClick={()=>onFixAll(fixable)}>자동 수정 {fixable.length}건 모두 적용</button></div>}
     {plan.preflight.blocked && (plan.preflight.reasons||[]).length > 0 && <section className="rc-blockers" aria-label="배포를 막는 문제">
       <h4>배포를 막는 문제 {(plan.preflight.reasons||[]).length}건 — 해결해야 승인할 수 있습니다</h4>
       {(plan.preflight.reasons||[]).map((issue,i)=><div className="rc-finding rc-finding-block" key={`b-${issue.code}-${i}`}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button onClick={()=>onFix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}

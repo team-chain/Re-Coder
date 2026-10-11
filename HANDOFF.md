@@ -1,3 +1,12 @@
+# 배포한 쇼핑몰 화면 품질 · 자동 수정 한 번에 (2026-10-11, 2.0.13)
+
+- 실기기 2.0.12: ECS 배포 성공(98.92.137.162:3000) — 그런데 승인 카드 자동 수정 4건을 하나씩 눌러야 했고, 화면은 스타일 없는 HTML·상품 0개.
+- 원인(실제 0ce6 결과물을 sandbox 에서 ECS 태스크와 같은 구성으로 띄워 Playwright 로 가입→장바구니→결제→주문 목록까지): tailwind.config·postcss.config·@tailwind 없음(클래스 359개), useApi 가 useRef 에만 저장(다시 안 그림), execute('/api/products') + baseURL `VITE_API_BASE_URL || '/api'`(.env.example 에만 정의) → /api/api, 시드 스크립트가 rootDir 밖(dist 에 없음), formatPrice /100(KRW), PaymentResult 가 /api/health(서버는 /health). 0d40 결과물도 Tailwind 미연결·/api/health 동일.
+- 고침(node_fixups → build_readiness FILE_WRITE_FIXES, 생성 직후 자동·배포 점검 자동 수정): `tailwind_setup`(NODE_TAILWIND_NOT_CONFIGURED), `ref_state_hooks`(NODE_REACT_REF_STATE — useReducer 다시 그리기, 훅 인자 deps → ref), `seed_script_into_build`(NODE_SEED_SCRIPT_OUTSIDE_BUILD, @ts-nocheck, 옛 위치는 import 한 줄), `health_alias`(NODE_HEALTH_PATH_MISMATCH — 앱 라우터만, mock 제외, /api 아래 마운트면 안 함), `krw_minor_units`(NODE_KRW_MINOR_UNITS), `missing_style_content`(없는 CSS = 지시문 또는 BASE_STYLESHEET), api 중복: `call:<함수>` 래퍼·env 폴백(`_env_defined`, 예시 파일 제외). local_services.seed_command 이름에 init-db 등(node_fixups.SEED_SCRIPT_NAMES). ecs_runtime 시드 컨테이너가 앱 environment·secrets 복사.
+- 한 번에: `build_readiness.apply_all_fixes`(다시 판정하며 최대 4회, 요청 코드 + 새로 드러난 error) + `POST /api/deploy/readiness/fix-all`; 확장 `workspace.deploy.remediation.applyAll`(readiness 는 fix-all 한 번, 나머지 수정안은 차례로) · ApprovalCard `fixableProposals` [모두 적용](2건 이상) · 적용 뒤 같은 설정으로 승인 카드 다시 열기.
+- 검증(sandbox): 고친 0ce6 를 ECS 태스크 정의(botocore 검증) 그대로 — postgres 부팅 스크립트 → 시드 컨테이너 명령(`node dist/scripts/init-db.js`, 상품 6개) → 모의 결제·앱 → Chromium: 스타일 적용, 상품 6개(₩39,900 등), 상세, 가입·로그인, 장바구니, 결제 → "결제 완료 ₩4,900", 주문 목록 결제 완료. 0d40 화면 CSS 5KB → 14KB. Core 2,623, 확장 557(실패 1건은 sandbox git ssh→https 재작성, 변경 전과 같음).
+- 남은 것: 상품 이미지는 placehold.co(sandbox 에서는 차단되어 확인 못 함), 일부 영어 문구는 이미 만든 결과물에 남음(새 생성부터 지시), 화면 tsc 오류 6건(vite 는 빌드됨 — ErrorAlert prop 이름 등, AI 교정 대상).
+
 # ECS 배포 — 실행 파일 템플릿 경로 · 앱 실행 설정(DB·서명 키·모의 결제) · 실제 결과물 실행 오류 (2026-10-11, 2.0.12)
 
 - 실기기 2.0.11 ECS(배포 3970e520): 1~7단계(점검·인프라·검사·빌드·ECR·취약점·SBOM) 통과 뒤 8단계 태스크 정의에서 FileNotFoundError `_MEI…\core\registry\file_templates\ecs-task-definition.json.template`. spec 은 데이터를 `registry/…`(번들 맨 위)에 넣는데, 배포 라우트가 `core.agents.ecs_agent` 로 불러 `Path(__file__).parent.parent` 가 `_MEI…/core` 를 가리킴. 소스 실행·self-check(agents.ecs_agent 로만 import)에서는 드러나지 않았다.

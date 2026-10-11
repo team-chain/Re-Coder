@@ -326,6 +326,8 @@ def test_환경변수로_정한_baseURL_은_api_중복으로_보지_않는다(tm
         "web/index.html": "<div id=root></div>",
         "web/src/api.js": "import axios from 'axios';\nconst api = axios.create({ baseURL: import.meta.env.VITE_API_ORIGIN || '/api' });\n"
                           "export const list = () => api.get('/api/products');\nexport default api;\n",
+        #: 2.0.13: 그 변수를 프로젝트가 실제로 정할 때만 다른 주소로 본다(아무도 안 정하면 늘 '/api' — test_dev_2013).
+        "web/.env.production": "VITE_API_ORIGIN=https://shop.example.com\n",
     })
     assert "NODE_CLIENT_API_DOUBLE_PREFIX" not in {i.code for i in br.analyze(root).issues}
 

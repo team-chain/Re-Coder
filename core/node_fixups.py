@@ -1626,3 +1626,454 @@ def currency_case_compare(files) -> tuple[list[str], dict[str, str]]:
             writes[rel] = new
             notes.append(f"{rel}: 통화 비교를 대소문자 무시로")
     return notes, writes
+
+
+# ── Tailwind 연결 ────────────────────────────────────────────────────────────
+
+#: className 에 흔히 쓰는 Tailwind 유틸리티 — 이게 많으면 화면이 Tailwind 를 전제로 쓰였다.
+_TW_TOKEN = re.compile(
+    r"^(?:[a-z]+:)*(?:flex|grid|hidden|block|inline-flex|inline-block|items-(?:center|start|end)|"
+    r"justify-(?:between|center|end|start|around)|(?:p|m)[xytrbl]?-(?:\d+(?:\.5)?|auto)|space-[xy]-\d+|gap-\d+|"
+    r"w-(?:full|screen|\d+(?:/\d+)?)|h-(?:full|screen|\d+)|min-h-screen|max-w-\w+|"
+    r"text-(?:xs|sm|base|lg|[2-9]?xl|center|left|right|white|black|[a-z]+-\d00)|bg-(?:white|black|[a-z]+-\d00)|"
+    r"font-(?:bold|semibold|medium|light)|rounded(?:-\w+)?|shadow(?:-\w+)?|border(?:-[a-z]+-\d00|-\d)?|"
+    r"container|mx-auto|transition(?:-\w+)?|hover:[\w-]+|cursor-pointer|overflow-\w+|truncate)$")
+_CLASS_ATTR = re.compile(r"""\bclass(?:Name)?\s*=\s*(?:\{\s*)?(?:"([^"]*)"|'([^']*)'|`([^`]*)`)""")
+_TW_CONFIGS = ("tailwind.config.js", "tailwind.config.cjs", "tailwind.config.mjs", "tailwind.config.ts")
+_POSTCSS_CONFIGS = ("postcss.config.js", "postcss.config.cjs", "postcss.config.mjs", "postcss.config.ts",
+                    ".postcssrc", ".postcssrc.json", ".postcssrc.js", ".postcssrc.cjs")
+_ENTRY_CANDIDATES = ("src/main.tsx", "src/main.jsx", "src/main.ts", "src/main.js",
+                     "src/index.tsx", "src/index.jsx", "src/index.ts", "src/index.js")
+_STYLE_PLACEHOLDER = re.compile(r"^/\*\s*ReCoder:[^*]*스타일[^*]*\*/\s*", re.M)
+#: 검증한 v3 조합(PostCSS 플러그인 방식 — Vite·CRA 모두).
+_TW3_DEPS = {"tailwindcss": "^3.4.17", "postcss": "^8.4.49", "autoprefixer": "^10.4.20"}
+_TW4_DEPS = {"tailwindcss": "^4.0.0", "@tailwindcss/postcss": "^4.0.0", "postcss": "^8.4.49"}
+
+
+def tailwind_token_count(texts: Iterable[str]) -> int:
+    count = 0
+    for text in texts:
+        for m in _CLASS_ATTR.finditer(text or ""):
+            value = m.group(1) or m.group(2) or m.group(3) or ""
+            count += sum(1 for token in value.split() if _TW_TOKEN.match(token))
+    return count
+
+
+def _tw_major(pkg: dict) -> int:
+    for section in ("dependencies", "devDependencies"):
+        spec = str((pkg.get(section) or {}).get("tailwindcss") or "")
+        m = re.search(r"(\d+)", spec)
+        if m:
+            return 4 if int(m.group(1)) >= 4 else 3
+    return 3
+
+
+def tailwind_directives(major: int) -> str:
+    return ('@import "tailwindcss";\n' if major >= 4 else "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n")
+
+
+def _has_directives(css: str, major: int) -> bool:
+    if major >= 4:
+        return bool(re.search(r"""@import\s+(?:url\()?["']tailwindcss["']""", css))
+    return bool(re.search(r"@tailwind\s+utilities", css)) or bool(re.search(r"""@import\s+["']tailwindcss/utilities""", css))
+
+
+def _with_directives(css: str, major: int) -> str:
+    """지시문을 앞쪽(@charset·@import 다음)에 넣는다. ReCoder 가 넣었던 빈 자리 주석은 지운다."""
+    body = _STYLE_PLACEHOLDER.sub("", css or "", count=1)
+    lines = body.splitlines(keepends=True)
+    at = 0
+    while at < len(lines) and (not lines[at].strip() or re.match(r"\s*@(?:charset|import)\b", lines[at])):
+        at += 1
+    head = "".join(lines[:at])
+    if head and not head.endswith("\n"):
+        head += "\n"
+    rest = "".join(lines[at:])
+    return head + tailwind_directives(major) + ("\n" + rest if rest.strip() else "")
+
+
+def tailwind_setup(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 화면이 Tailwind 클래스로 쓰였는데 빌드에 Tailwind 가 연결돼 있지 않은 Vite·CRA 앱.
+
+    실기기 2.0.12 쇼핑몰(ECS 배포까지 성공): 화면 코드는 Tailwind 클래스 359개를 썼는데 tailwind.config·postcss.config 가
+    없고 스타일 파일은 빈 자리 주석뿐이라, 배포한 화면이 스타일 없는 HTML 로 보였다. 빌드는 통과하므로 어떤 점검에도
+    걸리지 않았다. 설정 파일 두 개와 지시문(@tailwind …)을 넣고, 빠진 개발 의존성을 선언한다(기존 설정은 바꾸지 않는다)."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    listing = files.files()
+    for manifest in [p for p in listing if posixpath.basename(p) == "package.json" and "/node_modules/" not in f"/{p}"]:
+        folder = posixpath.dirname(manifest)
+        prefix = f"{folder}/" if folder else ""
+        pkg = load_jsonc(files.read(manifest)) or {}
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        bundler = "vite" if "vite" in deps else "cra" if "react-scripts" in deps else ""
+        if not bundler:
+            continue
+        sources = [p for p in listing if p.startswith(prefix + "src/") and "/node_modules/" not in f"/{p}"
+                   and p.endswith((".tsx", ".jsx", ".ts", ".js", ".html", ".vue", ".svelte"))]
+        tokens = tailwind_token_count(files.read(p) or "" for p in sources + [prefix + "index.html"])
+        if tokens < 15:
+            continue
+        major = _tw_major(pkg)
+        esm = pkg.get("type") == "module"
+        changed: list[str] = []
+        # 1) 설정 파일 (v4 는 tailwind.config 가 필요 없다)
+        if major < 4 and not any(files.exists(prefix + name) for name in _TW_CONFIGS):
+            content = (["./src/**/*.{js,jsx,ts,tsx}", "./public/index.html"] if bundler == "cra"
+                       else ["./index.html", "./src/**/*.{js,jsx,ts,tsx,vue,svelte}"])
+            body = ("/** @type {import('tailwindcss').Config} */\n"
+                    + ("export default " if esm else "module.exports = ")
+                    + "{\n  content: " + json.dumps(content) + ",\n  theme: { extend: {} },\n  plugins: [],\n};\n")
+            writes[prefix + "tailwind.config.js"] = body
+            changed.append("tailwind.config.js")
+        has_postcss = any(files.exists(prefix + name) for name in _POSTCSS_CONFIGS) or "postcss" in pkg
+        if bundler == "vite" and not has_postcss:
+            plugins = "{ '@tailwindcss/postcss': {} }" if major >= 4 else "{ tailwindcss: {}, autoprefixer: {} }"
+            writes[prefix + "postcss.config.js"] = (("export default " if esm else "module.exports = ")
+                                                    + "{\n  plugins: " + plugins + ",\n};\n")
+            changed.append("postcss.config.js")
+        # 2) 지시문 — 진입 파일이 불러오는 스타일 파일(없으면 src/index.css 를 만들고 불러온다)
+        entry = None
+        html = files.read(prefix + "index.html") or ""
+        m = re.search(r"""<script[^>]+src=["']/?([^"']+\.(?:tsx|jsx|ts|js))["']""", html)
+        if m and files.exists(prefix + m.group(1)):
+            entry = prefix + m.group(1)
+        entry = entry or next((prefix + c for c in _ENTRY_CANDIDATES if files.exists(prefix + c)), None)
+        css_files = [p for p in listing if p.startswith(prefix) and p.endswith(".css") and "/node_modules/" not in f"/{p}"
+                     and not re.search(r"(^|/)(dist|build)/", p[len(prefix):])]
+        if any(_has_directives(writes.get(p) or files.read(p) or "", major) for p in css_files):
+            pass
+        elif entry:
+            entry_text = files.read(entry) or ""
+            imported = [posixpath.normpath(posixpath.join(posixpath.dirname(entry), spec))
+                        for spec in re.findall(r"""^\s*import\s+['"](\.{1,2}/[^'"]+\.css)['"]""", entry_text, re.M)]
+            target = next((p for p in imported if files.exists(p) or p in writes), None)
+            if target is None:
+                target = imported[0] if imported else posixpath.join(posixpath.dirname(entry), "index.css")
+                if not imported:
+                    lines = entry_text.splitlines(keepends=True)
+                    last = max((i for i, line in enumerate(lines) if re.match(r"\s*import\b", line)), default=-1)
+                    lines.insert(last + 1, "import './index.css';\n")
+                    writes[entry] = "".join(lines)
+                    changed.append(f"{entry[len(prefix):]} (스타일 불러오기)")
+            writes[target] = _with_directives(files.read(target) or "", major)
+            changed.append(f"{target[len(prefix):]} (@tailwind 지시문)")
+        # 3) 개발 의존성
+        need = {k: v for k, v in (_TW4_DEPS if major >= 4 else _TW3_DEPS).items() if k not in deps}
+        if need and changed:
+            raw = files.read(manifest) or "{}"
+            data = json.loads(raw)
+            data.setdefault("devDependencies", {}).update(need)
+            newline = "\r\n" if "\r\n" in raw else "\n"
+            writes[manifest] = json.dumps(data, ensure_ascii=False, indent=2).replace("\n", newline) + newline
+            changed.append("package.json (" + ", ".join(need) + ")")
+        if changed:
+            notes.append(f"{folder or '.'}: Tailwind 클래스 {tokens}개를 쓰는 화면에 Tailwind 연결 — " + ", ".join(changed))
+    return notes, writes
+
+
+# ── 샘플 데이터 스크립트를 빌드에 넣기 ───────────────────────────────────────
+
+SEED_SCRIPT_NAMES = ("db:seed", "seed", "seed:db", "db:seed:demo", "init-db", "db:init", "init:db", "setup-db", "db:setup")
+_SEED_RUNNER = re.compile(r"(?:tsx|ts-node(?:-esm)?|node\s+--loader\s+\S+)\s+(?:watch\s+)?\.?/?([\w./-]+\.ts)\b")
+_REL_IMPORT = re.compile(r"""((?:\bfrom|\bimport)\s*\(?\s*)(['"])(\.{1,2}/[^'"]+)\2""")
+_DIRNAME_PATH = re.compile(r"""(path\.(?:join|resolve)\(\s*__dirname\s*,\s*)(['"])([^'"]+)\2(\s*\))""")
+
+
+def _rel(target: str, start: str) -> str:
+    out = posixpath.relpath(target, start or ".")
+    return out if out.startswith(".") else "./" + out
+
+
+def seed_script_into_build(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 샘플 데이터 스크립트가 서버 빌드(tsconfig rootDir) 밖에 있어 배포한 앱에서 돌릴 수 없는 경우.
+
+    실기기 2.0.12 쇼핑몰: 데모 상품을 넣는 `backend/scripts/init-db.ts` 가 rootDir(src) 밖이라 dist 에 없고,
+    package.json 은 있지도 않은 `src/scripts/init-db.ts` 를 가리켰다 → 로컬·ECS 어디서도 상품이 0개.
+    스크립트를 rootDir 안(src/scripts/)으로 옮기고(상대 import·__dirname 경로를 새 위치 기준으로), package.json 경로를 맞춘다.
+    옛 위치에는 새 파일을 부르는 한 줄만 남긴다. 옮긴 파일은 타입 검사에서 뺀다 — 예전엔 빌드에 들지 않던 파일이
+    서버 빌드를 깨면 안 된다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    listing = files.files()
+    for manifest in [p for p in listing if posixpath.basename(p) == "package.json" and "/node_modules/" not in f"/{p}"]:
+        folder = posixpath.dirname(manifest)
+        prefix = f"{folder}/" if folder else ""
+        pkg = load_jsonc(files.read(manifest)) or {}
+        scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+        conf = load_jsonc(files.read(prefix + "tsconfig.json"))
+        if not scripts or not isinstance(conf, dict):
+            continue
+        options = conf.get("compilerOptions") if isinstance(conf.get("compilerOptions"), dict) else {}
+        root = str(options.get("rootDir") or "src").strip().lstrip("./").rstrip("/")
+        out = str(options.get("outDir") or "dist").strip().lstrip("./").rstrip("/")
+        if not root or root == ".":
+            continue
+        new_scripts = dict(scripts)
+        for name in SEED_SCRIPT_NAMES:
+            cmd = scripts.get(name)
+            m = _SEED_RUNNER.search(cmd) if isinstance(cmd, str) else None
+            if not m:
+                continue
+            spec = posixpath.normpath(m.group(1))
+            actual = prefix + spec if files.exists(prefix + spec) else None
+            if actual is None:
+                found = [p for p in listing if p.startswith(prefix) and posixpath.basename(p) == posixpath.basename(spec)
+                         and "/node_modules/" not in f"/{p}" and not re.search(r"(^|/)(dist|build)/", p[len(prefix):])]
+                actual = found[0] if len(found) == 1 else None
+            if actual is None:
+                continue
+            in_pkg = actual[len(prefix):]
+            if in_pkg.startswith(root + "/"):
+                target = in_pkg
+            else:
+                target = f"{root}/scripts/{posixpath.basename(in_pkg)}"
+                if files.exists(prefix + target) or prefix + target in writes:
+                    continue
+                old_dir, new_dir = posixpath.dirname(in_pkg), posixpath.dirname(target)
+                runtime_dir = posixpath.join(out, posixpath.relpath(new_dir, root))
+                text = files.read(actual) or ""
+                moved = _REL_IMPORT.sub(lambda r: r.group(1) + r.group(2) + _rel(
+                    posixpath.normpath(posixpath.join(old_dir, r.group(3))), new_dir) + r.group(2), text)
+
+                def asset(r: re.Match) -> str:
+                    resolved = posixpath.normpath(posixpath.join(old_dir, r.group(3)))
+                    if not files.exists(prefix + resolved):
+                        return r.group(0)
+                    #: 빌드한 파일(dist/scripts)에서 원본 자원(src/db/schema.sql 등)을 찾는다 — 실행 이미지에 서버 폴더가 통째로 있다.
+                    return r.group(1) + r.group(2) + posixpath.relpath(resolved, runtime_dir) + r.group(2) + r.group(4)
+
+                moved = _DIRNAME_PATH.sub(asset, moved)
+                writes[prefix + target] = ("// @ts-nocheck — ReCoder: 배포한 앱에서도 돌 수 있게 빌드 폴더 안으로 옮긴 샘플 데이터 "
+                                           "스크립트(타입 검사 제외)\n" + moved)
+                writes[actual] = (f"// ReCoder: 이 스크립트는 {target} 로 옮겼습니다(서버 빌드에 포함되도록).\n"
+                                  f"import '{_rel(posixpath.splitext(target)[0] + '.js', old_dir)}';\n")
+                notes.append(f"{in_pkg} → {target}")
+            if spec != target:
+                new_scripts[name] = cmd.replace(m.group(1), target, 1)
+                notes.append(f"package.json {name}: {target}")
+        if new_scripts != scripts:
+            raw = files.read(manifest) or "{}"
+            data = json.loads(raw)
+            data["scripts"] = new_scripts
+            newline = "\r\n" if "\r\n" in raw else "\n"
+            writes[manifest] = json.dumps(data, ensure_ascii=False, indent=2).replace("\n", newline) + newline
+    return notes, writes
+
+
+#: 코드가 불러오는데 AI 가 만들지 않은 스타일 파일에 넣는 기본 스타일. 예전엔 빈 주석만 넣어 화면이 맨 HTML 로 보였다
+#: (실기기 2.0.12). Tailwind 앱은 tailwind_setup 이 이 내용을 지시문으로 바꾼다(클래스 선택자보다 약한 요소 선택자만 쓴다).
+BASE_STYLESHEET = """/* ReCoder 기본 스타일 — 코드가 불러오지만 생성되지 않은 스타일 파일이라 기본 모양을 넣었습니다. 자유롭게 바꾸세요. */
+:root { color-scheme: light; --rc-text: #1f2937; --rc-muted: #6b7280; --rc-line: #e5e7eb; --rc-accent: #2563eb; --rc-bg: #f9fafb; }
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; line-height: 1.6;
+       color: var(--rc-text); background: var(--rc-bg); }
+#root, main { max-width: 1120px; margin: 0 auto; padding: 0 20px 48px; }
+header, nav { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--rc-line); }
+h1, h2, h3 { line-height: 1.25; margin: 1.2em 0 .5em; }
+a { color: var(--rc-accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+img { max-width: 100%; height: auto; border-radius: 8px; }
+button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--rc-accent); background: var(--rc-accent);
+         color: #fff; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+input, select, textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--rc-line); border-radius: 8px; background: #fff;
+                          max-width: 100%; }
+form { display: grid; gap: 12px; max-width: 420px; }
+table { width: 100%; border-collapse: collapse; background: #fff; }
+th, td { padding: 10px; border-bottom: 1px solid var(--rc-line); text-align: left; }
+ul { padding-left: 1.2em; }
+"""
+
+
+def missing_style_content(files, rel: str) -> str:
+    """없는 스타일 파일에 넣을 내용 — 그 화면이 Tailwind 로 쓰였으면 지시문, 아니면 기본 스타일."""
+    parts = rel.split("/")
+    for depth in range(len(parts) - 1, -1, -1):
+        prefix = "/".join(parts[:depth])
+        manifest = f"{prefix}/package.json" if prefix else "package.json"
+        if not files.exists(manifest):
+            continue
+        pkg = load_jsonc(files.read(manifest)) or {}
+        sources = [p for p in files.files() if p.startswith((prefix + "/src/") if prefix else "src/")
+                   and p.endswith((".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte"))]
+        if tailwind_token_count(files.read(p) or "" for p in sources) >= 15:
+            return tailwind_directives(_tw_major(pkg))
+        break
+    return BASE_STYLESHEET
+
+
+# ── 화면을 다시 그리지 않는 상태 훅 ───────────────────────────────────────────
+
+def _statement_end(text: str, start: int) -> int:
+    """start 에서 시작한 문장이 끝나는 `;`(괄호 밖) 바로 뒤 위치. 못 찾으면 줄 끝."""
+    depth, i, quote = 0, start, ""
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ";" and depth <= 0:
+            return i + 1
+        elif ch == "\n" and depth <= 0 and text[start:i].strip().endswith(")"):
+            return i
+        i += 1
+    return len(text)
+
+
+def ref_state_hooks(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 받아 온 값을 useRef 에만 넣고 화면을 다시 그리지 않는 사용자 훅.
+
+    실기기 2.0.12 쇼핑몰: `useApi` 가 응답을 `stateRef.current.data = …` 로만 넣고 `{ data: stateRef.current.data }` 를
+    돌려줘서, 요청이 성공해도 컴포넌트가 다시 그려지지 않았다 → 상품 상세는 로딩이 끝나지 않고 목록은 늘 비어 보였다.
+    빌드·타입 검사로는 잡히지 않는다. 값을 바꾼 뒤 다시 그리게(useReducer) 하고, 매번 새로 만들어지는 훅 인자(options)가
+    콜백 의존성에 있으면 다시 그릴 때마다 요청이 반복되므로 ref 로 최신 값을 읽게 바꾼다. 반환 모양·호출 방법은 같다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".ts", ".tsx", ".js", ".jsx")) or rel.endswith(".d.ts") or "/node_modules/" in f"/{rel}" \
+                or re.search(r"(^|/)(dist|build)/", rel):
+            continue
+        text = files.read(rel) or ""
+        if "useRef" not in text or re.search(r"\b(?:useState|useReducer|useSyncExternalStore)\s*[(<]", text):
+            continue
+        hook = re.search(r"(?m)^(\s*)(?:export\s+)?(?:default\s+)?function\s+(use[A-Z][\w$]*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)", text)
+        if not hook:
+            continue
+        ref = re.search(r"(?m)^(\s*)const\s+([\w$]+)\s*=\s*useRef\b", text[hook.end():])
+        if not ref:
+            continue
+        name, indent = ref.group(2), ref.group(1)
+        returns_ref = re.search(rf"\breturn\s*\{{[^}}]*:\s*{re.escape(name)}\.current\.[\w$]+", text)
+        assigns = re.search(rf"(?m)^\s*{re.escape(name)}\.current\.[\w$]+\s*=", text)
+        if not (returns_ref and assigns):
+            continue
+        ts = rel.endswith((".ts", ".tsx"))
+        lines = text.splitlines(keepends=True)
+        # 1) 값을 바꾼 묶음 뒤에서 다시 그린다 — 훅 본문 바로 아래(렌더 중) 대입은 건드리지 않는다(무한 렌더).
+        assign = re.compile(rf"^(\s*){re.escape(name)}\.current\.[\w$]+\s*=")
+        out: list[str] = []
+        for i, line in enumerate(lines):
+            out.append(line)
+            m = assign.match(line)
+            if not m or len(m.group(1)) <= len(indent):
+                continue
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            if assign.match(nxt):
+                continue
+            newline = "\r\n" if line.endswith("\r\n") else "\n"
+            out.append(f"{m.group(1)}recoderRerender();{newline}")
+        new = "".join(out)
+        # 2) useRef 문장 뒤에 다시 그리는 장치와(필요하면) 최신 인자 ref
+        start = hook.end() + ref.start(0)
+        end = _statement_end(new, new.index("useRef", start))
+        params = [re.split(r"[?:=\s]", p.strip(), 1)[0] for p in hook.group(3).split(",") if p.strip()]
+        params = [p for p in params if re.fullmatch(r"[A-Za-z_$][\w$]*", p)]
+        stale = [p for p in params if re.search(rf"\[\s*(?:[\w$]+\s*,\s*)*{re.escape(p)}\s*(?:,\s*[\w$]+\s*)*\]\s*\)", new[end:])]
+        block = f"\n{indent}const [, recoderRerender] = useReducer({'(n: number)' if ts else '(n)'} => n + 1, 0);"
+        for p in stale:
+            block += f"\n{indent}const recoder_{p} = useRef({p});\n{indent}recoder_{p}.current = {p};"
+        new = new[:end] + block + new[end:]
+        tail_from = end + len(block)
+        tail = new[tail_from:]
+        for p in stale:
+            tail = re.sub(rf"(?<![\w$.]){re.escape(p)}(\??\.)", rf"recoder_{p}.current\1", tail)
+            tail = re.sub(rf"(\[[^\]\n]*?)(?<![\w$.]){re.escape(p)}\s*,?\s*([^\]\n]*\]\s*\))",
+                          lambda m: (m.group(1) + m.group(2)).replace("[, ", "[").replace(", ]", "]"), tail)
+        new = new[:tail_from] + tail
+        # 3) import
+        react_named = re.search(r"""import\s+(?:React\s*,\s*)?\{([^}]*)\}\s*from\s*['"]react['"]""", new)
+        if react_named:
+            names = react_named.group(1).rstrip().rstrip(",")
+            new = new[:react_named.start(1)] + names + ", useReducer " + new[react_named.end(1):]
+        else:
+            new = "import { useReducer } from 'react';\n" + new
+        if new != text:
+            writes[rel] = new
+            notes.append(f"{rel}: {hook.group(2)} 가 값을 바꾼 뒤 화면을 다시 그리게")
+    return notes, writes
+
+
+# ── 화면이 부르는 상태 확인 주소 · 원화 금액 표시 ─────────────────────────────
+
+def health_alias(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 서버는 /health 만 두었는데 화면은 /api/health 로 부르는 앱.
+
+    실기기 2.0.12 쇼핑몰: 결제 결과 화면이 api 클라이언트(baseURL '/api')로 '/health' 를 불러 /api/health → 404.
+    테스트 결제 모드를 모른 채 결제 완료를 기다리지 않아, 결제는 끝났는데 화면이 비어 있었다(0d40 결과물도 fetch('/api/health')).
+    결제 약속은 /health 또는 /api/health 둘 다 허용하므로 서버의 상태 경로가 두 주소에 같은 응답을 주게 한다
+    (`app.get(['/health', '/api/health'], …)`). 앱이 따로 띄우는 모의 서버(mock 등)는 건드리지 않는다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    listing = [p for p in files.files() if p.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".mts", ".cjs"))
+               and "/node_modules/" not in f"/{p}" and not re.search(r"(^|/)(dist|build|tests?|__tests__)/", p)]
+    texts = {p: files.read(p) or "" for p in listing}
+    ui = {p for p, t in texts.items() if p.endswith((".tsx", ".jsx")) or re.search(r"(^|/)(frontend|client|web)/", p)}
+    server = {p: t for p, t in texts.items() if p not in ui and not re.search(r"mock|stub|fake", posixpath.basename(p), re.I)}
+    api_base = any(re.search(r"""baseURL\s*:[^,\n}]*['"`][^'"`]*/api/?['"`]""", texts[p]) or
+                   re.search(r"""(?:API_BASE_URL|API_URL)\s*=[^;\n]*['"`]/api/?['"`]""", texts[p]) for p in ui)
+    wants = any(re.search(r"""['"`]/api/health['"`]""", texts[p]) for p in ui) or (
+        api_base and any(re.search(r"""\(\s*['"`]/health['"`]""", texts[p]) for p in ui))
+    if not wants or any(re.search(r"""['"`]/api/health['"`]""", t) for t in server.values()):
+        return notes, writes
+    route = re.compile(r"""\b(app|router|[\w$]*[Rr]outer)\.get\(\s*(['"])/health\2\s*,""")
+    for rel, text in sorted(server.items(), key=lambda kv: "/routes/" not in kv[0]):
+        m = route.search(text)
+        if not m:
+            continue
+        if m.group(1) != "app":
+            #: 라우터면 어디에 붙었는지 본다 — '/api' 아래면 이미 /api/health 다.
+            stem = posixpath.splitext(posixpath.basename(rel))[0]
+            mounts = [re.search(rf"""\.use\(\s*(['"])([^'"]*)\1\s*,\s*([\w$]+)""", line)
+                      for t in server.values() for line in t.splitlines() if stem in t and ".use(" in line]
+            names = {name for t in server.values()
+                     for name in re.findall(rf"""import\s+([\w$]+)\s+from\s+['"][^'"]*/{re.escape(stem)}(?:\.[jt]s)?['"]""", t)}
+            prefixes = [mm.group(2) for mm in mounts if mm and mm.group(3) in names]
+            if any(pfx.rstrip("/") == "/api" for pfx in prefixes):
+                return notes, writes
+            if prefixes and not any(pfx.rstrip("/") == "" for pfx in prefixes):
+                continue
+        writes[rel] = route.sub(lambda mm: f"{mm.group(1)}.get(['/health', '/api/health'],", text, count=1)
+        notes.append(f"{rel}: /api/health 도 같은 상태 응답")
+        break
+    return notes, writes
+
+
+def krw_minor_units(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 원화 금액을 100 으로 나눠 표시하는 화면.
+
+    원화는 소수 단위가 없어 결제(Stripe·ReCoder 결제 모듈)는 저장된 정수를 그대로 '원' 으로 청구한다. 그런데 AI 가
+    `price_cents / 100` 으로 표시해 실기기 2.0.12 쇼핑몰은 4,900원짜리를 ₩49 로 보여 주고 ₩4,900 을 결제했다.
+    원화(KRW)로 표시하는 파일의 단위 변환 함수만 고친다(나누기·곱하기 100 → 그대로)."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    for rel in files.files():
+        if not rel.endswith((".ts", ".tsx", ".js", ".jsx")) or "/node_modules/" in f"/{rel}" or re.search(r"(^|/)(dist|build)/", rel):
+            continue
+        text = files.read(rel) or ""
+        if not re.search(r"""currency\s*:\s*['"]KRW['"]""", text) or not re.search(r"\b100\b", text):
+            continue
+        if re.search(r"""currency\s*:\s*['"](?!KRW)[A-Z]{3}['"]""", text):
+            continue  # 여러 통화를 다루는 파일은 건드리지 않는다
+
+        def body_fix(m: re.Match) -> str:
+            body = m.group(0)
+            body = re.sub(r"return\s+([\w$.]+)\s*/\s*100\s*;", r"return \1;", body)
+            body = re.sub(r"Math\.round\(\s*([\w$.]+)\s*\*\s*100\s*\)", r"Math.round(\1)", body)
+            return body
+
+        fn = re.compile(r"(?:export\s+)?function\s+[\w$]*(?:[Cc]ents|[Ww]on|KRW|[Kk]rw|[Mm]inor)[\w$]*\s*\([^)]*\)[^{]*\{[^{}]*\}")
+        new = fn.sub(body_fix, text)
+        if new != text:
+            writes[rel] = new
+            notes.append(f"{rel}: 원화 금액을 100 으로 나누지 않게")
+    return notes, writes
