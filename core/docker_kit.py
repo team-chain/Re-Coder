@@ -303,7 +303,10 @@ def render(info: dict) -> str:
         lines.append(f"COPY --from=build --chown=1000:1000 /app/{info['ui_out']} /app/{info['ui_out']}")
     probe = ("require('http').get('http://127.0.0.1:'+(process.env.PORT||" + str(port) + ")+'" + health
              + "',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))")
-    lines += ["# 공식 node 이미지의 node 사용자(숫자 ID)",
+    workdir = "/app" if info.get("cwd_root") else f"/app/{server}"
+    lines += ["# 앱이 작업 폴더 안에 업로드·로그 폴더를 만들 수 있게(내용은 COPY --chown 이 이미 넘겼다)",
+              "RUN chown 1000:1000 " + ("/app" if workdir == "/app" else f"/app {workdir}"),
+              "# 공식 node 이미지의 node 사용자(숫자 ID)",
               "USER 1000",
               f"EXPOSE {port}",
               "HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \\",

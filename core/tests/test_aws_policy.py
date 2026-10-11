@@ -229,6 +229,9 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "logs:GetLogEvents":
+        "aws_infra.diagnose_stopped_tasks 의 `logs.get_log_events` — 클라이언트를 함수 인자로 받아 정적 스캔에 "
+        "안 잡힌다. 앱이 기동 중 죽을 때 로그 끝부분을 배포 결과에 보여 주는 선택 권한(없으면 안내만)",
     "ecr:GetAuthorizationToken":
         "agents/ecs_build.py:216 의 `ecr.get_authorization_token()` 이 실제 "
         "호출이다. 그런데 그 `ecr` 은 `ecr_login(ecr: Any, ...)` 처럼 **Any 로 "

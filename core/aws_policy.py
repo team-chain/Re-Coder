@@ -670,7 +670,8 @@ def _ecs_statements(
             # 컨테이너 로그가 갈 곳. 보관 기간을 걸어 비용 누적을 막는다.
             "Sid": "EcsLogGroup",
             "Effect": "Allow",
-            "Action": ["logs:CreateLogGroup", "logs:PutRetentionPolicy"],
+            # GetLogEvents: 앱이 기동 중 죽으면 그 로그 끝부분을 배포 결과에 바로 보여 준다(선택 — 없어도 배포는 된다).
+            "Action": ["logs:CreateLogGroup", "logs:PutRetentionPolicy", "logs:GetLogEvents"],
             "Resource": _arn("logs", "log-group:/ecs/*", ctx),
         },
         {

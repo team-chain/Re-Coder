@@ -72,6 +72,38 @@ def _runtime_family(dockerfile: Path) -> str:
     return runtime
 
 
+_ROOT_GET = r"\.get\s*\(\s*['\"]/['\"]"
+
+
+def _router_serves_root(source: Path, text: str, ident: str) -> bool:
+    """`ident` 라우터가 GET '/' 를 갖는지 — 같은 파일에서 만든 라우터이거나 상대 경로에서 가져온 라우터."""
+    if re.search(rf"\b{re.escape(ident)}{_ROOT_GET}", text):
+        return True
+    module = None
+    for pattern in (
+        rf"import\s+{re.escape(ident)}\b[^;]*?from\s+['\"](\.[^'\"]+)['\"]",
+        rf"import\s*\{{[^}}]*\b{re.escape(ident)}\b[^}}]*\}}\s*from\s+['\"](\.[^'\"]+)['\"]",
+        rf"\b{re.escape(ident)}\s*=\s*require\(\s*['\"](\.[^'\"]+)['\"]\s*\)",
+    ):
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
+            module = m.group(1)
+            break
+    if not module:
+        return False
+    base = (source.parent / module).resolve()
+    stem = re.sub(r"\.(?:js|mjs|cjs|ts)$", "", str(base))
+    for candidate in (str(base), stem + ".ts", stem + ".js", stem + ".mjs", stem + ".cjs",
+                      stem + "/index.ts", stem + "/index.js"):
+        path = Path(candidate)
+        try:
+            if path.is_file() and path.stat().st_size < 1_000_000:
+                return bool(re.search(_ROOT_GET, path.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            continue
+    return False
+
+
 _EXCLUDED_DIRS = {
     ".git", ".venv", "venv", "node_modules", ".next", "dist", "build",
     "__pycache__", "tests", "test", "__tests__",
@@ -135,6 +167,12 @@ def _declared_health_path(workspace: Path, runtime: str, requested: str) -> str 
                     apps = re.findall(r"\b(?:export\s+)?(?:const|let|var)\s+(\w+)\s*(?::\s*[\w.<>, ]+)?=\s*express\(\s*\)", active)
                     for app in apps:
                         declared.update(re.findall(rf"\b{re.escape(app)}\.get\s*\(\s*['\"]([^'\"]+)['\"]", active))
+                        #: `app.use('/health', healthRouter)` + 라우터의 `router.get('/')` 도 그 경로다(실기기 2.0.20 TEMP:
+                        #: 이 모양을 못 읽어 ECS 헬스체크 없이 배포 → 앱이 기동 중 죽어도 "성공" 후 주소 무응답).
+                        for prefix, ident in re.findall(
+                                rf"\b{re.escape(app)}\.use\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*([A-Za-z_$][\w$]*)\s*\)", active):
+                            if prefix.rstrip("/") in candidates and _router_serves_root(source, active, ident):
+                                declared.add(prefix.rstrip("/"))
                     relative = source.relative_to(workspace).as_posix()
                     for path in candidates:
                         route = path.strip("/")

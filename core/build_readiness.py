@@ -3448,6 +3448,16 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
             f"{facts['user']} 사용자로 실행되고 그 폴더는 root 소유입니다. DB 를 열지 못해(SQLITE_CANTOPEN) API 가 실패합니다.",
             f"Dockerfile 의 USER 앞에 `RUN chown {facts['user']} {facts['workdir']}` 를 추가하세요(자동 수정 가능).",
             dockerfile, True))
+    elif non_root and facts["workdir"] and not facts["workdir_owned"] and _copy_chown_into_root_workdir(text):
+        #: 실기기 2.0.20 TEMP(ECS): 내용만 `COPY --chown` 으로 넘기고 작업 폴더는 root 소유 → 앱이 uploads 폴더를 만들다
+        #: EACCES 로 기동 중 종료, 태스크가 계속 교체돼 주소 무응답.
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_WORKDIR_NOT_WRITABLE", ERROR,
+            f"컨테이너는 {facts['user']} 사용자로 실행되는데 작업 폴더 {facts['workdir']} 자체는 root 소유입니다"
+            "(COPY --chown 은 안의 파일만 넘깁니다). 앱이 그 안에 업로드·로그 폴더를 만들다 권한 오류(EACCES)로 "
+            "시작 직후 종료됩니다.",
+            f"Dockerfile 의 USER 앞에 `RUN chown {facts['user']} {facts['workdir']}` 를 추가하세요(자동 수정 가능).",
+            dockerfile, True))
     probe = result.probe_path()
     if facts["health_path"] and probe and facts["health_path"] not in {probe, "/"} \
             and facts["health_path"] != result.health_path:
@@ -3673,6 +3683,14 @@ def _check_server_missing(files: "ProjectFiles", result: "Readiness") -> None:
         "화면은 /api 로 서버를 부르는데 이 프로젝트에는 서버 코드가 없습니다 — 코드 생성 결과에서 서버가 빠졌습니다. "
         "이대로는 로그인·조회·주문이 동작하지 않고 Docker·ECS 로 배포할 수 없습니다.",
         "빈 폴더에서 같은 요청으로 다시 생성하세요(2.0.14 부터 설계 단계가 약속의 API 로 서버 파일을 채웁니다).", ui[0]))
+
+
+def _copy_chown_into_root_workdir(text: str) -> bool:
+    try:
+        import node_fixups
+        return node_fixups.runtime_workdir_not_writable(text) is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]] = None,

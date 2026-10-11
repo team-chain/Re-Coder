@@ -626,6 +626,55 @@ _INSTALL = re.compile(r"\b(?:npm\s+(?:ci|install|i)|pnpm\s+install|yarn\s+instal
 _OMIT_FLAGS = re.compile(r"\s+(?:--omit[= ]dev|--only[= ]prod(?:uction)?|--production(?:=true)?|--prod)\b")
 
 
+def runtime_workdir_not_writable(dockerfile: str) -> Optional[str]:
+    """실행 단계가 root 로 만든 WORKDIR 에 `COPY --chown=<uid>` 로 내용만 넣고 `USER <uid>` 로 뜨면, 작업 폴더 자체는
+    root 소유라 앱이 그 안에 폴더를 만들지 못한다(uploads·logs 등) → 고친 Dockerfile, 아니면 None.
+
+    실기기 2.0.20 TEMP(ECS): `mkdir '/app/backend/uploads'` EACCES 로 앱이 기동 중 종료 → 태스크가 계속 교체돼 주소 무응답.
+    USER 줄 바로 앞에 작업 폴더만(재귀 없이) 그 사용자에게 넘기는 `RUN chown` 을 넣는다. 셸이 있는 node 이미지에서만.
+    """
+    lines = (dockerfile or "").split("\n")
+    starts = [i for i, line in enumerate(lines) if re.match(r"\s*FROM\s", line, re.I)]
+    if not starts:
+        return None
+    a = starts[-1]
+    base = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)", lines[a], re.I)
+    if not base or not re.search(r"(?:^|/)node(?::|$)", base.group(1).split("@")[0]) or "distroless" in base.group(1):
+        return None
+    workdir = owner = None
+    copied: set[str] = set()
+    user_at = None
+    for i in range(a + 1, len(lines)):
+        line = lines[i]
+        if line.lstrip().startswith("#"):
+            continue
+        m = re.match(r"\s*WORKDIR\s+(\S+)", line, re.I)
+        if m and user_at is None:
+            workdir = m.group(1).rstrip("/") or "/"
+        m = re.match(r"\s*COPY\s+(?:--from=\S+\s+)?--chown=(\S+)\s+(?:--from=\S+\s+)?.*\s(\S+)\s*$", line, re.I)
+        if m and user_at is None:
+            owner = m.group(1)
+            copied.add(m.group(2).rstrip("/") or "/")
+        if re.match(r"\s*RUN\s.*\bchown\b", line, re.I):
+            return None
+        m = re.match(r"\s*USER\s+(\S+)", line, re.I)
+        if m and user_at is None:
+            user_at = i
+            user = m.group(1)
+    if user_at is None or not workdir or workdir == "/" or not owner or user in ("0", "root"):
+        return None
+    if user.split(":")[0] != owner.split(":")[0] or workdir not in copied:
+        return None
+    dirs = [workdir]
+    parent = workdir.rsplit("/", 1)[0]
+    if parent and parent != "/" and parent not in dirs:
+        dirs.insert(0, parent)
+    if user_at > a + 1 and lines[user_at - 1].lstrip().startswith("#"):
+        user_at -= 1
+    lines.insert(user_at, f"# 앱이 작업 폴더 안에 업로드·로그 폴더를 만들 수 있게(내용은 COPY --chown 이 이미 넘겼다)\nRUN chown {owner} {' '.join(dirs)}")
+    return "\n".join(lines)
+
+
 def build_stage_omits_dev(dockerfile: str) -> Optional[str]:
     """빌드(npm run build·tsc·vite build)를 하는 단계가 개발 의존성 없이 설치하면 고친 Dockerfile, 아니면 None.
 

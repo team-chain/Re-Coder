@@ -1220,7 +1220,7 @@ class _Probe:
     stage: str = "list_tasks"
 
 
-def _probe_public_ip(ecs: Any, ec2: Any, *, cluster: str, service: str) -> _Probe:
+def _probe_public_ip(ecs: Any, ec2: Any, *, cluster: str, service: str, task_definition_arn: str = "") -> _Probe:
     probe = _Probe()
     try:
         arns = ecs.list_tasks(
@@ -1242,6 +1242,11 @@ def _probe_public_ip(ecs: Any, ec2: Any, *, cluster: str, service: str) -> _Prob
         probe.last_error = f"describe_tasks: {error_message(exc)}"
         return probe
 
+    #: 갱신 배포 중에는 이전 리비전의(곧 내려갈) 태스크도 RUNNING 으로 잡힌다 — 이번 리비전의 실행 중 태스크를 먼저 본다.
+    if task_definition_arn:
+        mine = [t for t in tasks if t.get("taskDefinitionArn") == task_definition_arn
+                and t.get("lastStatus") == "RUNNING"]
+        tasks = mine or tasks
     eni_ids = _task_eni_ids(tasks)
     if not eni_ids:
         probe.stage = "await_eni"
@@ -1291,6 +1296,7 @@ def wait_for_public_url(
     interval: float = 10.0,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    task_definition_arn: str = "",
 ) -> str:
     """태스크에 공인 IP 가 붙을 때까지 기다렸다가 접속 URL 을 만든다."""
     if timeout <= 0:
@@ -1300,7 +1306,8 @@ def wait_for_public_url(
     probe = _Probe()
     while True:
         attempts += 1
-        probe = _probe_public_ip(ecs, ec2, cluster=cluster, service=service)
+        probe = _probe_public_ip(ecs, ec2, cluster=cluster, service=service,
+                                 task_definition_arn=task_definition_arn)
         if probe.ip:
             url = (
                 f"{scheme}://{probe.ip}"
@@ -1337,3 +1344,76 @@ def wait_for_public_url(
         remedy="서비스의 assignPublicIp 가 ENABLED 인지, 서브넷이 퍼블릭인지 "
                "확인하세요.",
     )
+
+
+_LOG_SIGNAL = re.compile(r"error|exception|fatal|eacces|enoent|econnrefused|denied|failed|cannot|unhandled|exited", re.I)
+
+
+def diagnose_stopped_tasks(
+    ecs: Any,
+    logs: Any,
+    *,
+    cluster: str,
+    service: str,
+    log_group: str,
+    app_container: str,
+    task_definition_arn: str = "",
+    max_lines: int = 12,
+) -> list[str]:
+    """서비스에서 최근 멈춘 태스크가 왜 멈췄는지 사람이 읽을 줄로 돌려준다(못 알아내면 빈 목록).
+
+    실기기 2.0.20: 앱이 기동 중 죽어 태스크가 계속 교체되는데 화면에는 "주소가 응답하지 않습니다 — CloudWatch 를
+    확인하세요" 만 떴다. 멈춘 이유·종료 코드·앱 로그 끝부분을 직접 보여 준다. 로그 읽기(logs:GetLogEvents)는 선택 권한이다.
+    """
+    try:
+        from context_gate import mask_secrets
+    except Exception:  # noqa: BLE001
+        def mask_secrets(text: str) -> str:  # type: ignore[misc]
+            return text
+    try:
+        arns = ecs.list_tasks(cluster=cluster, serviceName=service, desiredStatus="STOPPED").get("taskArns", [])
+        if not arns:
+            return []
+        tasks = ecs.describe_tasks(cluster=cluster, tasks=list(arns)[:100]).get("tasks", [])
+    except Exception as exc:  # noqa: BLE001
+        logger.info("멈춘 태스크 조회 실패: %s", error_message(exc))
+        return []
+    if task_definition_arn:
+        mine = [t for t in tasks if t.get("taskDefinitionArn") == task_definition_arn]
+        tasks = mine or tasks
+    if not tasks:
+        return []
+
+    def _when(task: dict) -> str:
+        return str(task.get("stoppedAt") or task.get("createdAt") or "")
+
+    task = sorted(tasks, key=_when)[-1]
+    lines = [f"최근 멈춘 태스크({len(tasks)}개 중 마지막): {task.get('stoppedReason') or '이유 없음'}"]
+    for container in task.get("containers", []):
+        code, reason = container.get("exitCode"), container.get("reason")
+        if (code not in (None, 0)) or reason:
+            lines.append(f"· 컨테이너 {container.get('name')}: 종료 코드 {code}" + (f" — {reason}" if reason else ""))
+    task_id = str(task.get("taskArn", "")).rsplit("/", 1)[-1]
+    if not (task_id and app_container and log_group):
+        return [mask_secrets(line) for line in lines]
+    events: list[str] = []
+    for prefix in ("ecs", app_container):
+        try:
+            got = logs.get_log_events(
+                logGroupName=log_group, logStreamName=f"{prefix}/{app_container}/{task_id}",
+                limit=200, startFromHead=False,
+            ).get("events", [])
+        except Exception as exc:  # noqa: BLE001
+            if error_code(exc) in ("AccessDeniedException", "AccessDenied", "UnauthorizedOperation"):
+                lines.append(f"(앱 로그를 읽을 권한 logs:GetLogEvents 가 없어 CloudWatch 로그 그룹 {log_group} 에서 직접 확인해야 합니다)")
+                return [mask_secrets(line) for line in lines]
+            continue
+        if got:
+            events = [str(e.get("message", "")).rstrip() for e in got if str(e.get("message", "")).strip()]
+            break
+    if events:
+        signal = [e for e in events if _LOG_SIGNAL.search(e)]
+        picked = (signal or events)[-max_lines:]
+        lines.append("앱 로그 끝부분:")
+        lines += ["  " + e[:400] for e in picked]
+    return [mask_secrets(line) for line in lines]

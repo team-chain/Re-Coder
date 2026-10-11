@@ -1,3 +1,12 @@
+# ECS 주소 무응답 — 시드 경합·작업 폴더 권한·헬스 경로 (2026-10-11, 2.0.21)
+
+- 실기기 2.0.20 TEMP(데일리데스크, TS backend/·frontend/, ReCoder Dockerfile) ECS 배포: success 후 http://IP:3000 timeout, "헬스 경로를 찾지 못했습니다". TEMP 스냅숏을 sandbox 에서 빌드하고 /tmp/ld/ecs_emulate.py(태스크 정의 dependsOn 그대로)로 재현.
+- ① recoder-seed(dependsOn postgres HEALTHY 만)와 앱이 동시에 떠 앱 자체 seedDatabase(SEED_DEMO)와 경합 → users_email_key unique 위반으로 앱 종료. ecs_runtime.apply 가 앱 dependsOn 에 recoder-seed COMPLETE 추가, 시드는 node -e 래퍼로 SEED_TIMEOUT_S(120) 뒤 종료.
+- ② 실행 단계 `WORKDIR /app/backend` 뒤 `COPY --chown` 은 내용만 넘겨 폴더는 root → mkdir uploads EACCES. node_fixups.runtime_workdir_not_writable + 기존 DOCKERFILE_WORKDIR_NOT_WRITABLE(SQLite 전용이던 것)을 이 경우까지 확장(기존 fixer 재사용). docker_kit.render 에 `RUN chown 1000:1000 /app /app/<server>`.
+- ③ ecs_health._declared_health_path 가 `app.use('/health', ident)` + ident 의 `.get('/')`(같은 파일 또는 상대 import) 를 인정.
+- ④ aws_infra.diagnose_stopped_tasks(멈춘 태스크 stoppedReason·종료 코드·`ecs/<app>/<taskId>` 로그 끝부분, GetLogEvents 거부 시 안내) → url 무응답·실패·ECS 자동 롤백 시 provisioned["diagnosis"]/error_detail. _probe_public_ip 가 이번 리비전 RUNNING 태스크 우선, 무응답이면 IP 다시 찾아 한 번 더. logs:GetLogEvents 를 aws_policy·quickcreate 에 추가(PINNED, 필수 목록엔 없음).
+- fakepg 에 zoneinfo 추가(TimeZone 'UTC' 오류는 대체 이미지 문제였음). 수정 후 TEMP: readiness→fix-all→Local Docker success(health ok), ECS 재현 app running·healthy·/health 200·화면 200.
+
 # 검증된 쇼핑몰 기반 한국어·원화 (2026-10-11, 2.0.20)
 
 - core/starter_templates/commerce: 화면·백엔드 오류 문구 한국어, KRW(원 단위 정수 — priceInCents 는 이제 원, 결제 100원~1억 원 미만, currency 'krw', 웹훅도 'krw'), 관리자 가격 정수 검증, utils/money.js(formatWon)·utils/labels.js(statusLabel·formatDateTime ko-KR), styles/theme.css(색 변수, main.jsx 맨 끝), Footer(사업자 정보 자리표시), 공지 띠, frontend/public/products/*.svg(시드 image_url), cart·주문 상세 API 에 상품 name 추가(LEFT JOIN), MockCheckout 재작성(요약·동의·안내), OrderDetail 결제 대기 동안 2초 간격 15회 재조회, ProtectedRoute/AdminRoute 가 from 을 넘김, Stripe 는 @stripe/stripe-js/pure.

@@ -181,11 +181,21 @@ def _mock_container(app_port: int, secret: str) -> dict:
     }
 
 
+#: 시드 스크립트가 끝나지 않으면(풀을 닫지 않는 등) 앱이 영영 뜨지 못한다 — 정해진 시간 뒤 끊고 앱을 띄운다.
+SEED_TIMEOUT_S = 120
+_SEED_WRAPPER = (
+    "const c=require('child_process').spawn(process.execPath,[process.argv[1]],{stdio:'inherit'});"
+    f"const t=setTimeout(()=>{{console.error('[recoder] 샘플 데이터 스크립트가 {SEED_TIMEOUT_S}초 안에 끝나지 않아 멈추고 앱을 시작합니다');"
+    "c.kill('SIGTERM');process.exit(0);}," + str(SEED_TIMEOUT_S * 1000) + ");"
+    "c.on('exit',code=>{clearTimeout(t);process.exit(code==null?1:code);});"
+)
+
+
 def _seed_container(workdir: Optional[str], script: str, depends: list[dict]) -> dict:
     name = "recoder-seed"
     container = {
         "name": name, "image": APP_IMAGE, "essential": False,
-        "entryPoint": ["node"], "command": [script],
+        "entryPoint": ["node", "-e", _SEED_WRAPPER], "command": [script],
         "dependsOn": [d for d in depends if d["condition"] == "HEALTHY"],
         "logConfiguration": _sidecar_log(name),
     }
@@ -390,6 +400,11 @@ def apply(task_def: dict, app_container: str, runtime: Optional[RuntimePlan], im
         for c in containers:
             if c.get("name") == "recoder-postgres":
                 c["environment"] = [e for e in c.get("environment", []) if e.get("name") != "RECODER_INIT_SQL_B64"]
+    #: 앱은 시드가 **끝난 뒤** 뜬다(실기기 2.0.20 ECS: 시드 컨테이너와 앱이 동시에 떠서 둘 다 데모 계정을 넣다가
+    #: 앱이 unique 위반으로 기동 중 종료 → 태스크가 계속 교체돼 주소가 응답하지 않음). COMPLETE 라 시드가 실패해도 앱은 뜬다.
+    if any(c.get("name") == "recoder-seed" for c in containers):
+        deps = [d for d in app.get("dependsOn", []) if d.get("containerName") != "recoder-seed"]
+        app["dependsOn"] = deps + [{"containerName": "recoder-seed", "condition": "COMPLETE"}]
     if runtime.min_memory:
         try:
             current = int(str(task_def.get("memory") or "0"))

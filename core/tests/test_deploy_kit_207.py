@@ -115,7 +115,7 @@ def test_검증_Dockerfile_은_실행_단계가_깨지지_않고_보안_권고�
     assert dk.runtime_breaks(AI_DOCKERFILE, info)
     assert sf.lint_clean(text) == (text, [])
     assert "--workspaces=false" in text and "npm prune --omit=dev" in text and "USER 1000" in text
-    assert 'HEALTHCHECK' in text and text.count("RUN ") == 3
+    assert 'HEALTHCHECK' in text and text.count("RUN ") == 4 and "RUN chown 1000:1000 /app" in text
 
 
 def test_빌드_단계만_개발_의존성을_넣는다():

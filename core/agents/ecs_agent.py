@@ -442,6 +442,10 @@ class ECSAgent:
                         f"{self.log_group_name(request)} 에서 새 이미지가 왜 "
                         "기동하지 못했는지 확인한 뒤 다시 배포하세요."
                     )
+                    diagnosis = await self._diagnose_stopped(request, record, clients)
+                    if diagnosis:
+                        record.provisioned["diagnosis"] = "\n".join(diagnosis)
+                        record.error_detail = "\n".join(diagnosis)
                     return record
 
                 # Rollback proposal 생성 (Approval Level 3)
@@ -469,6 +473,10 @@ class ECSAgent:
                         f"{self.log_group_name(request)} 에서 컨테이너가 왜 "
                         "죽는지 확인하세요."
                     )
+                diagnosis = await self._diagnose_stopped(request, record, clients)
+                if diagnosis:
+                    record.provisioned["diagnosis"] = "\n".join(diagnosis)
+                    record.error_detail = "\n".join(diagnosis)
                 await self._halt_failed_deployment(request, record, clients)
                 return record
 
@@ -1133,6 +1141,7 @@ class ECSAgent:
                 service=req.service,
                 port=req.container_port,
                 timeout=req.url_wait_timeout,
+                task_definition_arn=rec.task_definition_arn or "",
             )
 
         try:
@@ -1147,7 +1156,19 @@ class ECSAgent:
                     (rec.service_url or "") + req.health_check_path, require_success=True
                 ),
             )
+            if not reachable and not req.cloudfront_domain:
+                # 그 사이 태스크가 교체됐을 수 있다(앱이 기동 중 죽으면 ECS 가 새 태스크를 띄우고 IP 가 바뀐다) — 다시 찾아 한 번 더.
+                fresh = await loop.run_in_executor(None, lambda: aws_infra._probe_public_ip(
+                    clients["ecs"], clients["ec2"], cluster=req.cluster, service=req.service,
+                    task_definition_arn=rec.task_definition_arn or "").ip)
+                if fresh:
+                    url = f"http://{fresh}" if req.container_port in (80, 443) else f"http://{fresh}:{req.container_port}"
+                    if url != rec.service_url:
+                        rec.service_url = url
+                        reachable, detail = await loop.run_in_executor(
+                            None, lambda: _probe_http(url + req.health_check_path, require_success=True))
             if not reachable:
+                diagnosis = await self._diagnose_stopped(req, rec, clients)
                 # 상태는 SUCCEEDED 로 둔다 — ECS 기준으로 배포는 실제로
                 # 끝났고 태스크는 healthy 다. FAILED 로 바꾸면 느리게 뜨는
                 # 정상 앱을 실패로 몰고 태스크까지 내리게 된다.
@@ -1178,6 +1199,16 @@ class ECSAgent:
                     f"계속 안 되면 CloudWatch 로그 그룹 "
                     f"{self.log_group_name(req)} 를 확인하세요."
                 )
+                if diagnosis:
+                    #: 앱이 시작하다 죽고 있다 — "잠시 뒤 다시" 가 아니라 원인을 먼저 보여 준다.
+                    rec.provisioned["diagnosis"] = "\n".join(diagnosis)
+                    rec.error_message = (
+                        f"주소({rec.service_url})가 응답하지 않습니다 — 앱 컨테이너가 시작하다 멈추고 있습니다."
+                    )
+                    rec.error_detail = "\n".join(diagnosis)
+                    rec.error_remedy = (
+                        "아래 앱 로그의 오류를 고친 뒤 다시 배포하세요. 같은 오류가 Local Docker 에서도 나는지 먼저 확인하면 빠릅니다."
+                    )
             else:
                 logger.info("접속 확인 완료: %s", rec.service_url)
         except InfraError as exc:
@@ -1191,6 +1222,22 @@ class ECSAgent:
             rec.error_message = (
                 f"배포는 성공했지만 접속 주소를 확인하지 못했습니다: {exc.message}"
             )
+
+    async def _diagnose_stopped(
+        self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict
+    ) -> list[str]:
+        """멈춘 태스크의 이유·종료 코드·앱 로그 끝부분. 어떤 실패도 배포 결과를 바꾸지 않는다."""
+        if "logs" not in clients or "ecs" not in clients:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(None, lambda: aws_infra.diagnose_stopped_tasks(
+                clients["ecs"], clients["logs"], cluster=req.cluster, service=req.service,
+                log_group=self.log_group_name(req), app_container=req.container_name,
+                task_definition_arn=rec.task_definition_arn or ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("멈춘 태스크 진단 생략: %s", exc)
+            return []
 
     async def _step_poll_deployment(
         self, req: ECSDeployRequest, rec: ECSDeployRecord
