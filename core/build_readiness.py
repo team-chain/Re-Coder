@@ -54,7 +54,7 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_CURRENCY_CASE_COMPARE", "NODE_TAILWIND_NOT_CONFIGURED",
                 "NODE_SEED_SCRIPT_OUTSIDE_BUILD", "NODE_REACT_REF_STATE",
                 "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS", "NODE_AUTH_USER_NOT_RESTORED",
-                "NODE_API_ENVELOPE_MISMATCH", "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING",
+                "NODE_API_ENVELOPE_MISMATCH", "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING", "NODE_CONTEXT_VALUE_MISSING",
                 "NODE_AI_MOCK_SERVER_IMPORT"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
@@ -70,7 +70,8 @@ FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_
                     "NODE_TAILWIND_NOT_CONFIGURED", "NODE_SEED_SCRIPT_OUTSIDE_BUILD",
                     "NODE_REACT_REF_STATE", "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS",
                     "NODE_AUTH_USER_NOT_RESTORED", "NODE_API_ENVELOPE_MISMATCH",
-                    "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING", "NODE_AI_MOCK_SERVER_IMPORT")
+                    "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING", "NODE_AI_MOCK_SERVER_IMPORT",
+                    "NODE_CONTEXT_VALUE_MISSING")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -635,6 +636,8 @@ _SERVER_MARKERS = re.compile(r"""require\(\s*['"](?:express|http|https|fs|path|p
 def _is_server_file(text: str) -> bool:
     return bool(_SERVER_MARKERS.search(text))
 _ESM_NAMED_IMPORT = re.compile(r"""\bimport\s+(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*['"](\.{1,2}/[^'"]+)['"]""")
+#: import type { A, B } from './types' — 실행 코드에서는 지워지지만 tsc 빌드는 TS2305 로 멈춘다(실기기 f3c4 PaymentEvent).
+_ESM_TYPE_IMPORT = re.compile(r"""\bimport\s+type\s+\{([^}]*)\}\s*from\s*['"](\.{1,2}/[^'"]+)['"]""")
 _CJS_REQUIRE_BIND = re.compile(r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""")
 _CJS_DESTRUCTURE = re.compile(r"""\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""")
 _RELATIVE_SPEC = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\(\s*)['"](\.{1,2}/[^'"]+)['"]""")
@@ -692,16 +695,17 @@ def _alias_twin(text: str, name: str) -> Optional[str]:
 
 def _esm_exports(text: str) -> Optional[set[str]]:
     #: 판단할 수 없는 형태(재수출·타입 수출·구조 분해 수출)는 None — 잘못 막느니 넘어간다.
-    if re.search(r"\bexport\s*\*|\bexport\s*=|\bexport\s+(?:declare\s+)?(?:const|let|var)\s*[\[{]", text):
+    if re.search(r"\bexport\s*\*|\bexport\s+type\s*\*|\bexport\s*=|\bexport\s+(?:declare\s+)?(?:const|let|var)\s*[\[{]", text):
         return None
     #: TypeScript 의 타입 내보내기(interface·type·enum·namespace)도 이름이다 — 예전에는 하나라도 있으면 판단을 포기해
     #: .tsx 화면의 "기본 내보내기 없음"(import ProductCard from …)을 놓치고 vite 빌드에서 멈췄다(실기기 TEMP).
     names = set(re.findall(r"\bexport\s+(?:declare\s+)?(?:async\s+)?(?:abstract\s+)?(?:const\s+enum|const|let|var|function\*?|class|interface|type|enum|namespace)\s+([\w$]+)", text))
-    for group in re.findall(r"\bexport\s*\{([^}]*)\}", text):
+    for group in re.findall(r"\bexport\s+(?:type\s+)?\{([^}]*)\}|\bexport\s*\{([^}]*)\}", text):
+        group = "".join(group)
         for part in group.split(","):
             part = part.strip()
             if part:
-                names.add(part.split(" as ")[-1].strip())
+                names.add(re.sub(r"^type\s+", "", part).split(" as ")[-1].strip())
     if re.search(r"\bexport\s+default\b", text):
         names.add("default")
     if names:
@@ -930,6 +934,17 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                     missing_names.append(f"`{name}`({rel} → {target})")
                     missing_exports.append((target, name, "esm"))
                     missing_detail.append((rel, name, target))
+        if rel.endswith((".ts", ".tsx")):
+            for names, spec in _ESM_TYPE_IMPORT.findall(active):
+                target = _resolve_local(files, rel, spec)
+                if not target or not target.endswith((".ts", ".tsx")):
+                    continue
+                exported = _esm_exports(_strip_js_comments(files.read(target) or ""))
+                if exported is None:
+                    continue
+                for name in (n.strip().split(" as ")[0].strip() for n in names.split(",")):
+                    if re.fullmatch(r"[A-Za-z_$][\w$]*", name or "") and name not in exported:
+                        type_missing.setdefault(target, set()).add(name)
         #: 기본 가져오기(import Header from './Header')인데 그 파일에 기본 내보내기가 없다 — Vite 빌드가 멈춘다.
         for local, spec in re.findall(r"""^\s*import\s+([\w$]+)\s*(?:,\s*\{[^}]*\})?\s*from\s*['"](\.{1,2}/[^'"]+)['"]""", active, re.MULTILINE):
             target = _resolve_local(files, rel, spec)
@@ -1136,7 +1151,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                         if bits and bits[0] in exported_as:
                             names_by_file.setdefault(other, set()).add(bits[-1])
             #: 인스턴스에 주소를 그대로 넘기는 함수(useApi 의 execute(url) → client.get(url)) 를 부르는 쪽도 본다.
-            wrappers = set()
+            wrappers: dict[str, set[str]] = {}  # 정의한 파일 → 감싼 함수 이름
             for target, names in list(names_by_file.items()):
                 body = _strip_js_comments(files.read(target) or "")
                 inst = "|".join(re.escape(n) for n in names)
@@ -1144,11 +1159,17 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                                      r"""|\bfunction\s+([\w$]+)\s*\(\s*([\w$]+)""", body):
                     fname, param = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
                     if re.search(rf"""\b(?:{inst})\.(?:get|post|put|patch|delete|request)\s*(?:<[^()]*?>)?\s*\(\s*{re.escape(param)}\b""", body):
-                        wrappers.add("call:" + fname)
-            if wrappers:
+                        wrappers.setdefault(target, set()).add("call:" + fname)
+            #: 감싼 함수는 그 파일과, 그 파일에서 무엇이든 가져오는 파일에서만 같은 이름으로 본다
+            #: (다른 모듈의 같은 이름 함수 — 예: 자체 fetch 의 get('/api/…') — 를 고치지 않게).
+            for defining, wnames in wrappers.items():
+                names_by_file.setdefault(defining, set()).update(wnames)
                 for other in files.files():
-                    if other.endswith((".js", ".jsx", ".ts", ".tsx")) and "/node_modules/" not in f"/{other}":
-                        names_by_file.setdefault(other, set()).update(wrappers)
+                    if other == defining or not other.endswith((".js", ".jsx", ".ts", ".tsx")) or "/node_modules/" in f"/{other}":
+                        continue
+                    specs = re.findall(r"""\bfrom\s*['"](\.{1,2}/[^'"]+)['"]""", files.read(other) or "")
+                    if any(_resolve_local(files, other, sp) == defining for sp in specs):
+                        names_by_file.setdefault(other, set()).update(wnames)
             for target, names in names_by_file.items():
                 body = files.read(target) or ""
                 if api_prefix_rewrite(body, names) != body:
@@ -2462,7 +2483,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 f"TypeScript 코드가 불러오는 패키지의 타입 선언(@types)이 없습니다({', '.join(sorted(typings))}). "
                 "tsc 빌드가 TS7016(Could not find a declaration file)으로 멈춥니다.",
                 "@types 패키지를 devDependencies 에 추가하세요(자동 수정 가능 — 검증된 버전).", sorted(typings)[0], True))
-        unimported, import_writes = node_fixups.missing_imports(files)
+        unimported, import_writes = _safe_fix(node_fixups.missing_imports, files)
         if unimported:
             writes["NODE_NAME_NOT_IMPORTED"] = import_writes
             result.issues.append(ReadinessIssue(
@@ -2470,7 +2491,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "다른 파일이 내보내는 이름을 쓰면서 import 하지 않았습니다: " + "; ".join(unimported[:4])
                 + ". TypeScript 빌드가 \"Cannot find name\" 으로 멈추거나 실행 중 ReferenceError 가 납니다.",
                 "그 이름을 내보내는 파일에서 import 하세요(자동 수정 가능).", unimported[0].split(":", 1)[0], True))
-        module_refs, module_writes = node_fixups.namespace_imports(files)
+        module_refs, module_writes = _safe_fix(node_fixups.namespace_imports, files)
         if module_refs:
             writes["NODE_MODULE_NOT_IMPORTED"] = module_writes
             result.issues.append(ReadinessIssue(
@@ -2478,7 +2499,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "모듈 이름으로 함수를 부르면서 그 모듈을 불러오지 않았습니다: " + "; ".join(module_refs[:3])
                 + ". TypeScript 빌드가 \"Cannot find name\" 으로 멈춥니다.",
                 "그 모듈을 `import * as 이름` 으로 불러오세요(자동 수정 가능).", module_refs[0].split(":", 1)[0], True))
-        clients, client_writes = node_fixups.hoisted_clients(files)
+        clients, client_writes = _safe_fix(node_fixups.hoisted_clients, files)
         if clients:
             writes["NODE_CLIENT_NOT_CREATED"] = client_writes
             result.issues.append(ReadinessIssue(
@@ -2486,7 +2507,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "다른 함수처럼 DB 클라이언트 등을 만들지 않고 바로 씁니다: " + "; ".join(clients[:3])
                 + ". TypeScript 빌드가 \"Cannot find name\" 으로 멈춥니다.",
                 "그 함수 맨 앞에서 다른 함수와 같은 방법으로 만드세요(자동 수정 가능).", clients[0].split(":", 1)[0], True))
-        self_apply, self_apply_writes = node_fixups.tailwind_self_apply(files)
+        self_apply, self_apply_writes = _safe_fix(node_fixups.tailwind_self_apply, files)
         if self_apply:
             writes["NODE_TAILWIND_SELF_APPLY"] = self_apply_writes
             result.issues.append(ReadinessIssue(
@@ -2494,7 +2515,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "; ".join(self_apply[:2]) + ". Tailwind 가 \"circular dependency\" 로 화면 빌드를 멈춥니다.",
                 "같은 이름의 유틸리티는 Tailwind 가 이미 만들어 주므로 그 규칙을 지우세요(자동 수정 가능 — 화면 모양은 같음).",
                 sorted(self_apply_writes)[0], True))
-        esm_notes, esm_writes = node_fixups.esm_import_extensions(files)
+        esm_notes, esm_writes = _safe_fix(node_fixups.esm_import_extensions, files)
         if esm_writes:
             writes["NODE_ESM_IMPORT_EXTENSION"] = esm_writes
             result.issues.append(ReadinessIssue(
@@ -2502,7 +2523,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 f"ESM(NodeNext) 서버의 상대 import 에 확장자가 없습니다({len(esm_writes)}개 파일). tsc 가 TS2834/TS2835 로 멈추고, "
                 "빌드되더라도 Node 가 ERR_MODULE_NOT_FOUND 로 시작하지 못합니다.",
                 "원본 파일에 맞게 '.js'(폴더면 '/index.js')를 붙이세요(자동 수정 가능 — 동작은 같음).", sorted(esm_writes)[0], True))
-        prisma_notes, prisma_writes = node_fixups.prisma_schema_alignment(files)
+        prisma_notes, prisma_writes = _safe_fix(node_fixups.prisma_schema_alignment, files)
         if prisma_writes:
             writes["NODE_PRISMA_SCHEMA_ALIGN"] = prisma_writes
             result.issues.append(ReadinessIssue(
@@ -2510,7 +2531,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "Prisma 스키마가 코드와 다른 모양입니다: " + "; ".join(prisma_notes[:3])
                 + ". prisma generate 가 멈추거나 tsc 가 enum·숫자 타입 오류를 냅니다.",
                 "스키마를 코드가 쓰는 모양에 맞추세요(자동 수정 가능 — 저장되는 값은 같음).", sorted(prisma_writes)[0], True))
-        cjs_notes, cjs_writes = node_fixups.esm_commonjs_globals(files)
+        cjs_notes, cjs_writes = _safe_fix(node_fixups.esm_commonjs_globals, files)
         if cjs_writes:
             writes["NODE_ESM_COMMONJS_GLOBAL"] = cjs_writes
             result.issues.append(ReadinessIssue(
@@ -2522,7 +2543,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
         demo_app = all(re.search(rf"process\.env\.{m}\b", "\n".join(files.read(r) or "" for r in files.files()
                                                               if r.endswith(_JS_SUFFIXES) and "/node_modules/" not in f"/{r}"))
                        for m in ("PAYMENT_MODE", "STRIPE_MOCK_HOST", "STRIPE_MOCK_PORT"))
-        gate_notes, gate_writes = node_fixups.frontend_production_gate(files) if demo_app else ([], {})
+        gate_notes, gate_writes = _safe_fix(node_fixups.frontend_production_gate, files) if demo_app else ([], {})
         if gate_writes:
             writes["NODE_FRONTEND_PRODUCTION_ONLY"] = gate_writes
             result.issues.append(ReadinessIssue(
@@ -2531,7 +2552,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 + ". 결제를 끈 데모 배포(NODE_ENV=test)에서는 주소를 열면 Cannot GET / 이 됩니다.",
                 "개발 모드(development)만 빼고 화면을 제공하게 하세요(자동 수정 가능 — 운영 동작은 같음).",
                 sorted(gate_writes)[0], True))
-        tw_notes, tw_writes = node_fixups.tailwind_setup(files)
+        tw_notes, tw_writes = _safe_fix(node_fixups.tailwind_setup, files)
         if tw_writes:
             writes["NODE_TAILWIND_NOT_CONFIGURED"] = tw_writes
             result.issues.append(ReadinessIssue(
@@ -2540,7 +2561,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 + "). 빌드는 되지만 배포한 화면이 스타일 없는 글자·링크로만 보입니다.",
                 "Tailwind 설정 파일과 @tailwind 지시문을 넣으세요(자동 수정 가능 — 기존 설정은 바꾸지 않음).",
                 sorted(tw_writes)[0], True))
-        seed_notes, seed_writes = node_fixups.seed_script_into_build(files)
+        seed_notes, seed_writes = _safe_fix(node_fixups.seed_script_into_build, files)
         if seed_writes:
             writes["NODE_SEED_SCRIPT_OUTSIDE_BUILD"] = seed_writes
             result.issues.append(ReadinessIssue(
@@ -2549,7 +2570,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 + "). 배포하면 상품·메뉴 같은 기본 데이터가 비어 있습니다.",
                 "스크립트를 빌드 폴더 안으로 옮기세요(자동 수정 가능 — 내용은 같음, 첫 배포 때 자동으로 실행).",
                 sorted(seed_writes)[0], True))
-        ref_notes, ref_writes = node_fixups.ref_state_hooks(files)
+        ref_notes, ref_writes = _safe_fix(node_fixups.ref_state_hooks, files)
         if ref_writes:
             writes["NODE_REACT_REF_STATE"] = ref_writes
             result.issues.append(ReadinessIssue(
@@ -2557,7 +2578,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "; ".join(ref_notes[:2]).replace("가 값을 바꾼 뒤 화면을 다시 그리게", "가 받아 온 값을 useRef 에만 넣습니다")
                 + ". 요청이 성공해도 화면이 다시 그려지지 않아 목록이 비어 있거나 로딩이 끝나지 않습니다.",
                 "값을 바꾼 뒤 화면을 다시 그리게 하세요(자동 수정 가능 — 반환 모양·호출 방법은 같음).", sorted(ref_writes)[0], True))
-        hp_notes, hp_writes = node_fixups.health_alias(files)
+        hp_notes, hp_writes = _safe_fix(node_fixups.health_alias, files)
         if hp_writes:
             writes["NODE_HEALTH_PATH_MISMATCH"] = hp_writes
             result.issues.append(ReadinessIssue(
@@ -2565,7 +2586,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "화면은 /api/health 로 상태를 묻는데 서버에는 /health 만 있습니다(404). 테스트 결제 모드를 몰라 결제 결과 화면이 "
                 "결제 완료를 기다리지 않습니다.",
                 "서버가 /api/health 에도 같은 응답을 주게 하세요(자동 수정 가능).", sorted(hp_writes)[0], True))
-        krw_notes, krw_writes = node_fixups.krw_minor_units(files)
+        krw_notes, krw_writes = _safe_fix(node_fixups.krw_minor_units, files)
         if krw_writes:
             writes["NODE_KRW_MINOR_UNITS"] = krw_writes
             result.issues.append(ReadinessIssue(
@@ -2573,7 +2594,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "원화 금액을 100 으로 나눠 표시합니다: " + ", ".join(sorted(krw_writes)[:2])
                 + ". 원화는 소수 단위가 없어 결제는 저장된 금액 그대로 청구됩니다 — 4,900원 상품이 ₩49 로 보입니다.",
                 "원화 표시에서 100 으로 나누지 않게 하세요(자동 수정 가능).", sorted(krw_writes)[0], True))
-        au_notes, au_writes = node_fixups.auth_user_persist(files)
+        au_notes, au_writes = _safe_fix(node_fixups.auth_user_persist, files)
         if au_writes:
             writes["NODE_AUTH_USER_NOT_RESTORED"] = au_writes
             result.issues.append(ReadinessIssue(
@@ -2581,7 +2602,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "로그인 토큰은 보관하지만 사용자 정보는 보관하지 않습니다: " + ", ".join(sorted(au_writes)[:2])
                 + ". 새로고침하거나 주소로 이동하면 로그아웃된 것처럼 보이고 로그인이 필요한 화면(주문 내역 등)이 로그인 화면으로 돌아갑니다.",
                 "사용자 정보도 함께 보관·복원하게 하세요(자동 수정 가능 — 로그아웃하면 지움).", sorted(au_writes)[0], True))
-        env_notes, env_writes = node_fixups.api_envelope_unwrap(files)
+        env_notes, env_writes = _safe_fix(node_fixups.api_envelope_unwrap, files)
         if env_writes:
             writes["NODE_API_ENVELOPE_MISMATCH"] = env_writes
             result.issues.append(ReadinessIssue(
@@ -2589,14 +2610,33 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "서버는 응답을 { status, message, data } 로 감싸는데 화면의 API 클라이언트는 본문을 그대로 돌려줍니다: "
                 + ", ".join(sorted(env_writes)[:2]) + ". 가입·로그인 응답의 토큰 같은 값이 undefined 가 되어 로그인이 필요한 요청이 401 이 됩니다.",
                 "클라이언트가 data 안의 값도 바로 읽게 하세요(자동 수정 가능 — 지금 .data 로 읽는 코드도 그대로).", sorted(env_writes)[0], True))
-        cart_notes, cart_writes = node_fixups.cart_persist(files)
+        cart_notes, cart_writes = _safe_fix(node_fixups.cart_persist, files)
         if cart_writes:
             writes["NODE_CART_NOT_PERSISTED"] = cart_writes
             result.issues.append(ReadinessIssue(
                 "NODE_CART_NOT_PERSISTED", WARNING,
                 "장바구니를 화면 메모리에만 둡니다: " + ", ".join(sorted(cart_writes)[:2]) + ". 새로고침하면 담은 상품이 사라집니다.",
                 "브라우저에 보관·복원하게 하세요(자동 수정 가능).", sorted(cart_writes)[0], True))
-        mock_notes, mock_writes = node_fixups.drop_ai_mock_server_imports(files)
+        ctx_notes, ctx_writes = _safe_fix(node_fixups.context_value_missing, files)
+        if ctx_writes:
+            writes["NODE_CONTEXT_VALUE_MISSING"] = ctx_writes
+            result.issues.append(ReadinessIssue(
+                "NODE_CONTEXT_VALUE_MISSING", ERROR,
+                "화면이 Context·훅에서 꺼내 쓰는 값을 주는 쪽이 넣어 주지 않습니다: " + "; ".join(ctx_notes[:2])
+                + ". 그 값을 부르는 버튼(장바구니 담기 등)은 \"… is not a function\" 으로 멈추고, 합계 같은 값은 비어 보입니다.",
+                "주는 쪽에 이미 있는 값(이름만 다른 것 포함)을 그 이름으로도 넣으면 됩니다(자동 수정 가능).", sorted(ctx_writes)[0], True))
+        try:
+            ctx_gaps = node_fixups.context_value_gaps(files)
+        except Exception:  # noqa: BLE001
+            ctx_gaps = []
+        if ctx_gaps:
+            result.issues.append(ReadinessIssue(
+                "NODE_CONTEXT_VALUE_UNDEFINED", WARNING,
+                "화면이 Context·훅에서 꺼내 쓰는 값이 주는 쪽에 아예 없습니다: " + ", ".join(g[0] for g in ctx_gaps[:4])
+                + ". 그 값을 쓰는 기능은 undefined 로 동작하지 않습니다.",
+                "주는 쪽(Provider value·훅 return)에 그 값을 만들어 넣거나, 쓰는 쪽을 주는 이름으로 고치세요.",
+                ctx_gaps[0][1], False))
+        mock_notes, mock_writes = _safe_fix(node_fixups.drop_ai_mock_server_imports, files)
         if mock_writes:
             writes["NODE_AI_MOCK_SERVER_IMPORT"] = mock_writes
             result.issues.append(ReadinessIssue(
@@ -2604,7 +2644,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "서버가 AI 가 따로 만든 모의 결제 서버 파일에서 없는 이름을 불러옵니다: " + ", ".join(sorted(mock_writes)[:2])
                 + ". 서버가 시작하자마자 SyntaxError 로 종료됩니다.",
                 "그 import·호출을 빼세요 — 모의 결제 서버는 배포가 함께 띄웁니다(자동 수정 가능).", sorted(mock_writes)[0], True))
-        cur_notes, cur_writes = node_fixups.currency_case_compare(files)
+        cur_notes, cur_writes = _safe_fix(node_fixups.currency_case_compare, files)
         if cur_writes:
             writes["NODE_CURRENCY_CASE_COMPARE"] = cur_writes
             result.issues.append(ReadinessIssue(
@@ -2612,14 +2652,14 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "통화를 대소문자까지 그대로 비교합니다: " + ", ".join(sorted(cur_writes)[:2])
                 + ". 결제 서비스는 통화를 소문자('krw')로 보내므로 결제가 끝나도 주문이 결제 대기에 남습니다.",
                 "통화 비교에서 대소문자를 무시하게 하세요(자동 수정 가능).", sorted(cur_writes)[0], True))
-        req_notes, req_writes = node_fixups.express_request_interfaces(files)
+        req_notes, req_writes = _safe_fix(node_fixups.express_request_interfaces, files)
         if req_writes:
             writes["NODE_EXPRESS_REQUEST_TYPE"] = req_writes
             result.issues.append(ReadinessIssue(
                 "NODE_EXPRESS_REQUEST_TYPE", ERROR,
                 "; ".join(req_notes[:2]) + " — 지금은 핸들러의 req 에 body·params·query 가 없어 tsc 가 TS2769/TS2339 로 멈춥니다.",
                 "요청 타입이 express 의 Request 를 넓히게 하세요(자동 수정 가능).", sorted(req_writes)[0], True))
-        safe_notes, safe_writes = node_fixups.ts_safe_rewrites(files)
+        safe_notes, safe_writes = _safe_fix(node_fixups.ts_safe_rewrites, files)
         if safe_writes:
             #: 문제로 띄우지 않는다(실행 동작은 그대로, tsc 만 막히는 모양) — 생성 직후·배포 직전 자동 수정이 조용히 고친다.
             writes["NODE_TS_SAFE_REWRITE"] = safe_writes
@@ -2632,7 +2672,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "@prisma/client 를 쓰는데 prisma(개발 도구)가 없어 `prisma generate` 를 할 수 없습니다. "
                 "Prisma 타입이 만들어지지 않아 TypeScript 빌드가 멈춥니다.",
                 "prisma 를 @prisma/client 와 같은 버전으로 devDependencies 에 추가하세요(자동 수정 가능).", sorted(prisma_cli)[0], True))
-        nested, nested_writes = node_fixups.nested_routers(files)
+        nested, nested_writes = _safe_fix(node_fixups.nested_routers, files)
         if nested:
             writes["NODE_NESTED_ROUTER"] = nested_writes
             result.issues.append(ReadinessIssue(
@@ -2640,7 +2680,7 @@ def _analyze_node(files: ProjectFiles, result: Readiness) -> None:
                 "화면 진입 파일과 App 이 둘 다 라우터로 감쌉니다: " + "; ".join(nested[:2])
                 + ". React Router 가 \"You cannot render a <Router> inside another <Router>\" 로 멈춰 화면이 비어 보입니다.",
                 "진입 파일의 바깥 라우터를 빼세요(자동 수정 가능).", sorted(nested_writes)[0], True))
-        loops, loop_writes = node_fixups.react_effect_loops(files)
+        loops, loop_writes = _safe_fix(node_fixups.react_effect_loops, files)
         if loops:
             if loop_writes:
                 writes["NODE_REACT_EFFECT_LOOP"] = loop_writes
@@ -3570,17 +3610,38 @@ def _check_dead_image_hosts(files: "ProjectFiles", result: "Readiness") -> None:
         hits[0], True))
 
 
+def _safe_fix(fn, files) -> tuple[list[str], dict[str, str]]:
+    """자동 교정 하나가 예외를 내도 나머지 점검·교정은 계속한다(배포 화면이 통째로 비지 않게)."""
+    try:
+        return fn(files)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[build_readiness] {getattr(fn, '__name__', fn)} 생략: {exc}", file=sys.stderr)
+        return [], {}
+
+
 def _type_only_use(text: str, name: str) -> bool:
-    """name 이 이 파일에서 타입 자리(: N · as N · <N> · extends N · N[])에만 쓰이는가."""
-    body = re.sub(r"(?m)^\s*import[^;]*;", "", _strip_js_comments(text))
+    """name 이 이 파일에서 타입 자리에만 쓰이는가 — 확실할 때만 True(아니면 기존 '없는 이름' 오류로 둔다).
+
+    타입 이름 모양(PascalCase)이고, JSX 태그·호출·new·속성 접근·값 자리(쉼표·논리식·대입 오른쪽)에 한 번도 없고,
+    `x: N`·`): N`·`as N`·`satisfies N`·`extends N`·`implements N`·`<N>` 에서만 쓰일 때."""
+    if not re.fullmatch(r"[A-Z][a-z0-9]+[A-Za-z0-9]*", name):
+        return False
+    body = re.sub(r"(?ms)^\s*import\b.*?\bfrom\s*['\"][^'\"]+['\"];?", "", _strip_js_comments(text))
     uses = list(re.finditer(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", body))
     if not uses:
         return True
     for m in uses:
-        before = body[max(0, m.start() - 40):m.start()]
-        after = body[m.end():m.end() + 3]
-        if re.search(r"(?::|\bas|<|,|\||&|\bextends|\bimplements|\bkeyof|\btypeof)\s*$", before) and not re.match(r"\s*[(.]", after):
-            continue
+        before = body[max(0, m.start() - 60):m.start()]
+        after = body[m.end():m.end() + 4]
+        if re.match(r"\s*[(.]", after) or re.search(r"<\s*$", before) and re.match(r"[\s/>]", after):
+            return False  # 호출·속성·JSX 태그
+        if re.search(r"\bclass\s+[\w$]+(?:\s*<[^>]*>)?\s+extends\s*$", before):
+            return False  # 클래스 상속은 실행 중에 쓰는 값이다
+        if re.search(r"\?[^:;?\n]*:\s*$", before):
+            return False  # 삼항식 `a ? X : Y` 의 값
+        if re.search(r"(?:[\w$\])?]\s*\??:|\bas|\bsatisfies|\bextends|\bimplements|\bkeyof|<)\s*$", before) \
+                and not re.search(r"[{,]\s*[\w$]+\s*:\s*$", before):
+            continue  # 타입 주석(객체 리터럴 속성 값 `{ a: N }` 은 제외)
         return False
     return True
 
@@ -3592,9 +3653,11 @@ def _check_server_missing(files: "ProjectFiles", result: "Readiness") -> None:
     ui = [p for p in listing if re.match(r"(frontend|client|web)/", p) and p.endswith((".ts", ".tsx", ".js", ".jsx"))]
     if not ui or not any(re.search(r"""['"`]/api(?:/|['"`])""", files.read(p) or "") for p in ui):
         return
-    server = [p for p in listing if p.endswith((".ts", ".js", ".mjs", ".cjs", ".py")) and not re.match(r"(frontend|client|web)/", p)
+    server = [p for p in listing if p.endswith((".ts", ".js", ".mjs", ".cjs", ".py", ".go", ".java", ".kt", ".rb", ".php", ".rs", ".cs"))
+              and not re.match(r"(frontend|client|web)/", p)
               and not re.search(r"mock|(^|/)(vite|tailwind|postcss|eslint)\.config\.", p, re.I)]
-    if server:
+    if server or any(re.search(r"(^|/)(go\.mod|pom\.xml|build\.gradle(\.kts)?|Gemfile|composer\.json|Cargo\.toml|[\w.-]+\.csproj)$", p)
+                     for p in listing):
         return
     result.issues.append(ReadinessIssue(
         "APP_SERVER_MISSING", ERROR,
@@ -4436,8 +4499,8 @@ def apply_all_fixes(workspace: str | Path, codes: Optional[Iterable[str]] = None
             tried.add(code)
             try:
                 result = apply_fix(root, code)
-            except (ValueError, OSError) as exc:
-                skipped.append({"code": code, "message": str(exc)})
+            except Exception as exc:  # noqa: BLE001 — 한 항목이 실패해도 나머지는 계속
+                skipped.append({"code": code, "message": str(exc)[:300]})
                 continue
             if result.get("applied"):
                 applied.append(code)

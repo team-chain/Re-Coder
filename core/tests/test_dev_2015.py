@@ -21,7 +21,7 @@ def _write(root, files):
 
 def test_deploy_build_survives_type_only_errors_but_verify_stays_strict():
     info = {"server": "backend", "entry": "dist/server.js", "ui": "frontend", "ui_out": "frontend/dist", "server_build": True,
-            "port": 3000, "health": "/health"}
+            "port": 3000, "health": "/health", "ui_tsc_vite": True, "server_tsc_only": True}
     deploy = docker_kit.render(info)
     assert "node_modules/.bin/vite build" in deploy and "test -f dist/server.js" in deploy
     verify = docker_kit.render(dict(info, verify=True))

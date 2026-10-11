@@ -1,3 +1,10 @@
+# 출시 전 재검토 — 파일 사이 이름 어긋남 · 웹훅 키 · 검토 3회 반영 (2026-10-11, 2.0.16)
+
+- 검토: 독립 검토 에이전트 3회(1차 19건·2차 9건·3차 11건) 전부 반영 — node_fixups `stmt_end`/`add_react_named`/`imports_end` 등 공통 도우미로 자동 교정이 코드를 깨지 않게(판단 불가면 건너뜀), docker_kit `ui_tsc_vite`·`server_tsc_only` 일 때만 타입 오류 허용·`_FATAL_TS`(pretty 출력 포함), ECSAgent `_runtime` 정리, gen_engine root = target_folder, undouble 템플릿 안 중첩, tailwind 감지 강화(lock 있고 의존성 없으면 손대지 않음) 등.
+- 실기기 체크포인트 9개(~/.recoder/generation) e2e: 83ed 카페·0ce6 쇼핑몰·c395 카페 = 가입·로그인·담기·장바구니(합계) 문제 0건(0ce6 결제 완료·주문 목록까지, 83ed 주문까지). 0d40·f3c4 빌드 통과(Prisma 실행은 sandbox 엔진 차단). 4a06 APP_SERVER_MISSING, c356·3f89 NODE_LOCAL_IMPORT_MISSING, 3ca1 NODE_IMPORT_NAME_MISSING(없는 함수) — 막고 안내.
+- 새로: node_fixups `context_value_missing`/`context_value_gaps`(Context Provider value·훅 마지막 return 객체, 쓰는 쪽은 import 경로로 확인, 같은 함수 최상위 선언·단축형 키만 식에 사용, `_ALIASES`/`_CALL_ALIASES`, useMemo deps·타입 멤버 추가, 결과 다시 파싱) → NODE_CONTEXT_VALUE_MISSING(오류·자동)/NODE_CONTEXT_VALUE_UNDEFINED(경고). build_readiness `_ESM_TYPE_IMPORT` → NODE_TYPE_NAME_MISSING, `_esm_exports` 가 `export type {…}`·`export type *` 이해. deploy_settings `_PROVIDERLESS_WEBHOOK`(allow-list) → generate. ecs_runtime production 주 DB(redis 제외 첫 서비스) 필수. gen_engine `_definition_first` 정렬: 정의 파일 → 실행/문법/비 TS 오류 파일 → 나머지.
+- 남은 것: c395 의 주문은 createOrder(token, req) 를 인자 하나로 부르는 AI 코드 오류(생성 때 검증 빌드 미통과로 남은 것 — 새 생성에서는 AI 교정이 이 종류를 먼저 고침). AI 생성 단계 자체는 sandbox 에 모델이 없어 사용자 PC 확인 필요. Core 2,682 · 확장 557(실패 1건 = sandbox git ssh→https, 변경 전과 같음).
+
 # 실제 생성 결과로 개발→배포 끝까지 확인 — 타입 오류 배포, 화면 동작 결함 (2026-10-11, 2.0.15)
 
 - 방법(sandbox, 스크립트는 세션 scratchpad e2e.py·crawl.js): 사용자 ~/.recoder/generation 체크포인트(83ed 카페 Sequelize, 0ce6 쇼핑몰 pg, 0d40 쇼핑몰 Prisma, 4a06 화면만)의 ops → `_autofix_ops`·`_apply_docker_kit`(생성 직후와 같음) → `apply_all_fixes`([모두 적용]) → docker_kit 과 같은 빌드(npm install·UI_BUILD·server_build) → `ecs_runtime.plan` 대로 Postgres(초기화 SQL)·시드 명령·모의 결제·앱(NODE_ENV=production) → Playwright 순회(페이지·가입·로그인·담기·장바구니·결제·주문 목록, 4xx/5xx·pageerror 수집).

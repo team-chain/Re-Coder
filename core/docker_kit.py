@@ -124,8 +124,17 @@ def layout(files) -> Optional[dict]:
                        if p.startswith(server + "/") and p.endswith((".js", ".ts", ".mjs", ".cjs"))
                        and "/node_modules/" not in f"/{p}")
     prisma = prisma_schema(files, server, spkg)
+    #: 타입 오류를 넘겨도 되는 빌드인가 — 빌드가 tsc 하나(서버)·"tsc && vite build"(화면)일 때만. 다른 단계(파일 복사 등)가
+    #: 섞이면 실패를 넘기면 그 단계가 빠진 채 배포된다(검토 2.0.16).
+    server_cmd = str(scripts.get("build") or "")
+    ui_cmd = ""
+    if ui:
+        upkg_ = _pkg(files, f"{ui}/package.json") or {}
+        ui_cmd = str((upkg_.get("scripts") or {}).get("build") or "") if isinstance(upkg_.get("scripts"), dict) else ""
     return {"server": server, "entry": entry, "ui": ui, "ui_out": ui_out, "server_build": server_build, "cwd_root": cwd_root,
             "prisma": prisma,
+            "server_tsc_only": bool(re.fullmatch(r"\s*tsc(?:\s+(?:-p|--project)\s+\S+|\s+--build|\s+-b)?\s*", server_cmd)),
+            "ui_tsc_vite": bool(re.fullmatch(r"\s*(?:tsc(?:\s+-b|\s+--build|\s+--noEmit|\s+-p\s+\S+)?\s*&&\s*)?vite\s+build\s*", ui_cmd)),
             "port": int(port), "health": health, "workspaces": bool(root_pkg.get("workspaces")),
             "server_lock": files.exists(f"{server}/package-lock.json"),
             "ui_lock": bool(ui) and files.exists(f"{ui}/package-lock.json")}
@@ -206,9 +215,18 @@ UI_BUILD = ("{ npm run build --workspaces=false || { echo '[recoder] 화면 타�
             " && test -x node_modules/.bin/vite && node_modules/.bin/vite build; }; }")
 
 
+#: 타입 오류만 넘어간다 — 문법 오류(TS1xxx)·없는 모듈/이름(TS2305·2307·2613·2614·2724·2792)은 tsc 가 JS 를 내도 실행하면 죽으므로
+#: 빌드를 멈춘다(검토 2.0.15: `const x = {a: 1;` 가 빌드를 통과해 컨테이너가 계속 재시작했다). 진입 파일도 node --check 로 확인한다.
+#: "error" 없이 코드만 본다 — pretty 출력은 사이에 색 코드가 들어간다(검토 2.0.16).
+_FATAL_TS = r"TS(1[0-9][0-9][0-9]|2305|2307|2613|2614|2724|2792)([^0-9]|$)"
+
+
 def server_build(entry: str) -> str:
-    return ("{ npm run build --workspaces=false || { echo '[recoder] 서버 타입 검사 오류 — tsc 가 만든 결과로 계속합니다' >&2"
-            f" && test -f {entry}; }}; }}")
+    return ("{ npm run build --workspaces=false > /tmp/recoder-server-build.log 2>&1 && cat /tmp/recoder-server-build.log"
+            " || { cat /tmp/recoder-server-build.log"
+            f" && ! grep -Eq '{_FATAL_TS}' /tmp/recoder-server-build.log"
+            " && echo '[recoder] 서버 타입 검사 오류(실행에는 영향 없음) — tsc 가 만든 결과로 계속합니다' >&2"
+            f" && test -f {entry}; }}; }} && node --check {entry}")
 
 
 def render(info: dict) -> str:
@@ -230,7 +248,8 @@ def render(info: dict) -> str:
 
     def build_step(folder: str, install: str, extra_before: list[str], build: bool) -> list[str]:
         if not verify:
-            steps = [install] + extra_before + ([UI_BUILD] if build else [])
+            ui_build = UI_BUILD if info.get("ui_tsc_vite") else "npm run build --workspaces=false"
+            steps = [install] + extra_before + ([ui_build] if build else [])
             return ["RUN " + " \\\n    && ".join(steps)]
         #: 생성 검증용 — 한 폴더의 빌드가 실패해도 다음 폴더까지 빌드해 오류를 한 번에 모은다(서버 오류가 화면 오류 뒤에
         #: 숨어 있다가 화면을 고치자 수십 건이 새로 나타났다). 경로는 저장소 기준으로 바꿔 찍는다.
@@ -263,7 +282,7 @@ def render(info: dict) -> str:
     else:
         server_steps = [_install(info.get("server_lock", False))] + prisma_steps
         if info.get("server_build"):
-            server_steps.append(server_build(entry))
+            server_steps.append(server_build(entry) if info.get("server_tsc_only") else "npm run build --workspaces=false")
         server_steps.append("npm prune --omit=dev --no-audit --no-fund --workspaces=false")
         lines += ["RUN " + " \\\n    && ".join(server_steps)]
     runtime_os = ["RUN apk upgrade --no-cache \\"]

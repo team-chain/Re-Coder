@@ -523,6 +523,10 @@ class ECSAgent:
             )
             self._warn_if_resources_may_be_running(request, record)
             return record
+        finally:
+            #: 실행 설정(비밀값 포함)은 이 배포에서만 쓴다 — 중간에 멈춘 배포가 남긴 것을 다른 배포가 집어 가지 않게
+            #: (검토 2.0.15: id() 는 재사용된다).
+            self._runtime.pop(id(request), None)
 
     # ------------------------------------------------------------------
     # 단계별 구현

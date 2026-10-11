@@ -126,7 +126,7 @@ def test_api_prefix_through_wrapper_and_env_fallback(tmp_path):
     _write(tmp_path, {
         "package.json": '{"name":"ui","devDependencies":{"vite":"^5.0.0"}}',
         "src/api/client.ts": CLIENT, "src/hooks/useApi.ts": USE_API, ".env.example": "VITE_API_BASE_URL=/api\n",
-        "src/pages/Home.tsx": "const { execute } = useApi();\nexecute(`/api/products?page=1`);\nexecute('/products/1');\n",
+        "src/pages/Home.tsx": "import { useApi } from '../hooks/useApi';\nconst { execute } = useApi();\nexecute(`/api/products?page=1`);\nexecute('/products/1');\n",
     })
     result = analyze(tmp_path, online=False)
     assert "NODE_CLIENT_API_DOUBLE_PREFIX" in [i.code for i in result.issues]

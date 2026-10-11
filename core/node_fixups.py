@@ -1667,10 +1667,28 @@ def tailwind_token_count(texts: Iterable[str]) -> int:
 def _tw_major(pkg: dict) -> int:
     for section in ("dependencies", "devDependencies"):
         spec = str((pkg.get(section) or {}).get("tailwindcss") or "")
+        if not spec:
+            continue
         m = re.search(r"(\d+)", spec)
         if m:
             return 4 if int(m.group(1)) >= 4 else 3
+        return 4  # latest·* 는 지금 설치되는 v4
     return 3
+
+
+#: Tailwind 에만 있는 모양(Bootstrap 과 겹치지 않는 것) — mt-4·p-3·text-center·rounded 같은 공통 이름만으로는 Tailwind 로 보지 않는다.
+_TW_STRONG = re.compile(r"^(?:[a-z]+:)*(?:(?:bg|text|border|from|to|ring)-[a-z]+-\d00|[pm][xy]-\d|space-[xy]-\d|gap-\d|"
+                        r"min-h-screen|max-w-(?:\d?xl|screen-\w+)|font-(?:semibold|medium)|items-center|justify-(?:between|center)|"
+                        r"rounded-(?:md|lg|xl|full)|shadow-(?:md|lg|xl)|w-\d+|h-\d+|grid-cols-\d+|hover:[\w-]+|md:[\w-]+|sm:[\w-]+)$")
+
+
+def _tailwind_strong_count(texts) -> int:
+    count = 0
+    for text in texts:
+        for m in _CLASS_ATTR.finditer(text or ""):
+            value = m.group(1) or m.group(2) or m.group(3) or ""
+            count += sum(1 for token in value.split() if _TW_STRONG.match(token))
+    return count
 
 
 def tailwind_directives(major: int) -> str:
@@ -1717,11 +1735,20 @@ def tailwind_setup(files) -> tuple[list[str], dict[str, str]]:
         sources = [p for p in listing if p.startswith(prefix + "src/") and "/node_modules/" not in f"/{p}"
                    and p.endswith((".tsx", ".jsx", ".ts", ".js", ".html", ".vue", ".svelte"))]
         tokens = tailwind_token_count(files.read(p) or "" for p in sources + [prefix + "index.html"])
-        if tokens < 15:
+        if tokens < 15 or _tailwind_strong_count(files.read(p) or "" for p in sources) < 8:
             continue
-        if re.search(r"cdn\.tailwindcss\.com|@tailwindcss/browser", files.read(prefix + "index.html") or ""):
-            continue  # 브라우저에서 바로 쓰는 Tailwind(CDN) — 빌드 설정이 필요 없다
+        html = files.read(prefix + "index.html") or ""
+        if re.search(r"cdn\.tailwindcss\.com|@tailwindcss/browser|bootstrap", html):
+            continue  # 브라우저에서 바로 쓰는 Tailwind(CDN)·Bootstrap 화면 — 건드리지 않는다
+        if deps.keys() & {"bootstrap", "react-bootstrap", "bulma", "@tailwindcss/vite", "@tailwindcss/postcss", "windicss", "unocss"}:
+            continue  # 다른 CSS 프레임워크이거나 이미 v4 플러그인으로 연결됨
+        vite_conf = "".join(files.read(prefix + n) or "" for n in ("vite.config.ts", "vite.config.js", "vite.config.mjs"))
+        if "tailwind" in vite_conf:
+            continue
+        locked = any(files.exists(prefix + n) for n in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml"))
         major = _tw_major(pkg)
+        if locked and any(k not in deps for k in (_TW4_DEPS if major >= 4 else _TW3_DEPS)):
+            continue  # 잠금 파일이 있으면 의존성을 더할 수 없다(npm ci 실패) — 설치 안 된 플러그인을 쓰는 설정도 쓰지 않는다
         esm = pkg.get("type") == "module"
         changed: list[str] = []
         # 1) 설정 파일 (v4 는 tailwind.config 가 필요 없다)
@@ -1769,7 +1796,7 @@ def tailwind_setup(files) -> tuple[list[str], dict[str, str]]:
         #: 설정을 이미 넣었더라도(앞 회차 — 같은 package.json 을 다른 교정이 먼저 고쳤을 수 있다) 의존성은 늘 맞춘다.
         #: 실기기 0d40: 설정만 들어가고 tailwindcss 가 선언되지 않아 화면 빌드가 "Cannot find module 'tailwindcss'" 로 멈췄다.
         need = {k: v for k, v in (_TW4_DEPS if major >= 4 else _TW3_DEPS).items() if k not in deps}
-        if need:
+        if need and not locked:
             raw = files.read(manifest) or "{}"
             data = json.loads(raw)
             data.setdefault("devDependencies", {}).update(need)
@@ -1814,7 +1841,9 @@ def seed_script_into_build(files) -> tuple[list[str], dict[str, str]]:
         if not scripts or not isinstance(conf, dict):
             continue
         options = conf.get("compilerOptions") if isinstance(conf.get("compilerOptions"), dict) else {}
-        root = str(options.get("rootDir") or "src").strip().lstrip("./").rstrip("/")
+        if not options.get("rootDir"):
+            continue  # rootDir 를 정하지 않은 프로젝트에 파일을 옮기면 tsc 가 출력 폴더 모양을 바꾼다(dist/src/…)
+        root = str(options.get("rootDir")).strip().lstrip("./").rstrip("/")
         out = str(options.get("outDir") or "dist").strip().lstrip("./").rstrip("/")
         if not root or root == ".":
             continue
@@ -1853,6 +1882,10 @@ def seed_script_into_build(files) -> tuple[list[str], dict[str, str]]:
                     return r.group(1) + r.group(2) + posixpath.relpath(resolved, runtime_dir) + r.group(2) + r.group(4)
 
                 moved = _DIRNAME_PATH.sub(asset, moved)
+                outside = [r.group(3) for r in _REL_IMPORT.finditer(moved)
+                           if not posixpath.normpath(posixpath.join(new_dir, r.group(3))).startswith(root + "/")]
+                if outside:
+                    continue  # rootDir 밖(../data/…)을 import 하면 tsc 가 rootDir 오류를 낸다 — 옮기지 않는다
                 writes[prefix + target] = ("// @ts-nocheck — ReCoder: 배포한 앱에서도 돌 수 있게 빌드 폴더 안으로 옮긴 샘플 데이터 "
                                            "스크립트(타입 검사 제외)\n" + moved)
                 writes[actual] = (f"// ReCoder: 이 스크립트는 {target} 로 옮겼습니다(서버 빌드에 포함되도록).\n"
@@ -1969,25 +2002,48 @@ def ref_state_hooks(files) -> tuple[list[str], dict[str, str]]:
         ts = rel.endswith((".ts", ".tsx"))
         lines = text.splitlines(keepends=True)
         # 1) 값을 바꾼 묶음 뒤에서 다시 그린다 — 훅 본문 바로 아래(렌더 중) 대입은 건드리지 않는다(무한 렌더).
-        assign = re.compile(rf"^(\s*){re.escape(name)}\.current\.[\w$]+\s*=")
-        out: list[str] = []
-        for i, line in enumerate(lines):
-            out.append(line)
-            m = assign.match(line)
-            if not m or len(m.group(1)) <= len(indent):
+        #    대입이 여러 줄이어도(객체·삼항) 문장이 끝난 뒤에 넣는다.
+        assign = re.compile(rf"(?m)^([ \t]*){re.escape(name)}\.current\.[\w$]+\s*=(?!=)")
+        spans = []
+        broken = False
+        for m in assign.finditer(text):
+            if len(m.group(1)) > len(indent):
+                e = stmt_end(text, m.end())
+                if e < 0:
+                    broken = True
+                    break
+                spans.append((m.start(), e, m.group(1)))
+        if broken:
+            continue  # 식 안의 대입(화살표 함수 몸통 등)은 안전하게 다시 그릴 자리가 없다 — 건드리지 않는다
+        groups: list[tuple[int, str]] = []
+        for k, (a, b, ind) in enumerate(spans):
+            nxt = spans[k + 1][0] if k + 1 < len(spans) else None
+            if nxt is not None and not text[b:nxt].strip(" \t\r\n;"):
                 continue
-            nxt = lines[i + 1] if i + 1 < len(lines) else ""
-            if assign.match(nxt):
-                continue
-            newline = "\r\n" if line.endswith("\r\n") else "\n"
-            out.append(f"{m.group(1)}recoderRerender();{newline}")
-        new = "".join(out)
+            groups.append((b, ind))
+        new = text
+        nl = "\r\n" if "\r\n" in text else "\n"
+        for b, ind in reversed(groups):
+            new = new[:b] + f"{nl}{ind}recoderRerender();" + new[b:]
         # 2) useRef 문장 뒤에 다시 그리는 장치와(필요하면) 최신 인자 ref
         start = hook.end() + ref.start(0)
         end = _statement_end(new, new.index("useRef", start))
         params = [re.split(r"[?:=\s]", p.strip(), 1)[0] for p in hook.group(3).split(",") if p.strip()]
         params = [p for p in params if re.fullmatch(r"[A-Za-z_$][\w$]*", p)]
-        stale = [p for p in params if re.search(rf"\[\s*(?:[\w$]+\s*,\s*)*{re.escape(p)}\s*(?:,\s*[\w$]+\s*)*\]\s*\)", new[end:])]
+        raw_params = {re.split(r"[?:=\s]", x.strip(), 1)[0]: x for x in hook.group(3).split(",") if x.strip()}
+
+        def _object_like(p: str) -> bool:
+            #: 렌더마다 새로 만들어지는 객체 인자(options = {}, config, params …)는 ref 로 읽는다 — 의존성에 남기면
+            #: 다시 그릴 때마다 요청이 반복된다. url 같은 값 인자는 의존성에 남긴다(빼면 주소가 바뀌어도 첫 값으로만 요청).
+            body = re.sub(r"\[[^\]\n]*\]\s*\)", "", new[end:])
+            only_props = not re.search(rf"(?<![\w$.]){re.escape(p)}(?![\w$]|\s*\??\.)", body)
+            decl = raw_params.get(p, "")
+            return only_props or bool(re.search(r"=\s*[{\[]", decl)) or bool(
+                re.fullmatch(r"(?:options?|opts|config|cfg|params|settings|init|requestOptions|fetchOptions)", p))
+        stale = [p for p in params if _object_like(p)
+                 and re.search(rf"\[\s*(?:[\w$]+\s*,\s*)*{re.escape(p)}\s*(?:,\s*[\w$]+\s*)*\]\s*\)", new[end:])]
+        if any(re.search(rf"[{{,]\s*{re.escape(p)}\s*[,}}]", new[end:]) for p in stale):
+            continue  # 단축 속성({ options })은 ref 로 바꿀 수 없다 — 건드리지 않는다
         block = f"\n{indent}const [, recoderRerender] = useReducer({'(n: number)' if ts else '(n)'} => n + 1, 0);"
         for p in stale:
             block += f"\n{indent}const recoder_{p} = useRef({p});\n{indent}recoder_{p}.current = {p};"
@@ -1995,17 +2051,15 @@ def ref_state_hooks(files) -> tuple[list[str], dict[str, str]]:
         tail_from = end + len(block)
         tail = new[tail_from:]
         for p in stale:
-            tail = re.sub(rf"(?<![\w$.]){re.escape(p)}(\??\.)", rf"recoder_{p}.current\1", tail)
-            tail = re.sub(rf"(\[[^\]\n]*?)(?<![\w$.]){re.escape(p)}\s*,?\s*([^\]\n]*\]\s*\))",
-                          lambda m: (m.group(1) + m.group(2)).replace("[, ", "[").replace(", ]", "]"), tail)
+            #: 먼저 의존성 배열에서 빼고(`[url, options]` → `[url]`), 그다음 나머지 읽기를 ref 로.
+            def _drop(m: re.Match, p=p) -> str:
+                items = [x.strip() for x in m.group(1).split(",") if x.strip() and x.strip() != p]
+                return "[" + ", ".join(items) + "]" + m.group(2)
+            tail = re.sub(r"\[([^\[\]\n]*)\](\s*\))", lambda m, p=p: _drop(m) if re.search(rf"(?<![\w$.]){re.escape(p)}(?![\w$])", m.group(1)) else m.group(0), tail)
+            tail = re.sub(rf"(?<![\w$.]){re.escape(p)}(?![\w$])", f"recoder_{p}.current", tail)
         new = new[:tail_from] + tail
         # 3) import
-        react_named = re.search(r"""import\s+(?:React\s*,\s*)?\{([^}]*)\}\s*from\s*['"]react['"]""", new)
-        if react_named:
-            names = react_named.group(1).rstrip().rstrip(",")
-            new = new[:react_named.start(1)] + names + ", useReducer " + new[react_named.end(1):]
-        else:
-            new = "import { useReducer } from 'react';\n" + new
+        new = add_react_named(new, "useReducer")
         if new != text:
             writes[rel] = new
             notes.append(f"{rel}: {hook.group(2)} 가 값을 바꾼 뒤 화면을 다시 그리게")
@@ -2039,6 +2093,8 @@ def health_alias(files) -> tuple[list[str], dict[str, str]]:
         m = route.search(text)
         if not m:
             continue
+        if not re.search(r"""from\s+['"]express['"]|require\(\s*['"]express['"]\s*\)""", text):
+            continue  # 배열 경로는 Express 만 받는다(Fastify 는 시작 실패, Hono 는 404)
         if m.group(1) != "app":
             #: 라우터면 어디에 붙었는지 본다 — '/api' 아래면 이미 /api/health 다.
             stem = posixpath.splitext(posixpath.basename(rel))[0]
@@ -2125,11 +2181,7 @@ def auth_user_persist(files) -> tuple[list[str], dict[str, str]]:
                  "        else localStorage.removeItem('recoder_auth_user');\n      } catch {\n        /* 저장소를 못 써도 로그인은 동작 */\n      }\n"
                  "      return next;\n    });\n  }, []);")
         new = text[:m.start()] + block + text[m.end():]
-        react = re.search(r"""import\s+(?:React\s*,\s*)?\{([^}]*)\}\s*from\s*['"]react['"]""", new)
-        if react and not re.search(r"\buseCallback\b", react.group(1)):
-            new = new[:react.end(1)].rstrip() + (", " if react.group(1).strip() else "") + "useCallback " + new[react.end(1):]
-        elif not react:
-            new = "import { useCallback } from 'react';\n" + new
+        new = add_react_named(new, "useCallback")
         writes[rel] = new
         notes.append(f"{rel}: 새로고침 뒤에도 로그인 사용자 유지")
     return notes, writes
@@ -2178,12 +2230,13 @@ def api_envelope_unwrap(files) -> tuple[list[str], dict[str, str]]:
         ts = rel.endswith((".ts", ".tsx"))
         new = re.sub(r"(const\s+([\w$]+)\s*=\s*await\s+[\w$]+\.json\(\)\s*;\s*return\s+)\2\s*;",
                      lambda m: f"{m.group(1)}recoderUnwrap({m.group(2)});", text)
-        new = re.sub(r"\breturn\s+(await\s+)?([\w$]+)\.json\(\)\s*;", lambda m: f"return recoderUnwrap(await {m.group(2)}.json());", new)
+        #: await 가 없던 곳(async 가 아닌 함수·then 콜백)에 await 를 넣지 않는다 — 약속에 이어 붙인다.
+        new = re.sub(r"\breturn\s+await\s+([\w$]+)\.json\(\)\s*;", lambda m: f"return recoderUnwrap(await {m.group(1)}.json());", new)
+        new = re.sub(r"\breturn\s+([\w$]+)\.json\(\)\s*;", lambda m: f"return {m.group(1)}.json().then(recoderUnwrap);", new)
         if new == text:
             continue
         helper = _UNWRAP_HELPER if ts else re.sub(r"<T>|: T\b|\s*as unknown as T|\s*as unknown as Record<string, unknown>|\s*as Record<string, unknown>|\s*as unknown\[\]", "", _UNWRAP_HELPER)
-        imports = list(re.finditer(r"(?m)^import[^\n]*\n", new))
-        at = imports[-1].end() if imports else 0
+        at = imports_end(new)
         writes[rel] = new[:at] + helper + new[at:]
         notes.append(f"{rel}: 서버 응답 봉투의 data 값을 바로 읽게")
     return notes, writes
@@ -2216,11 +2269,7 @@ def cart_persist(files) -> tuple[list[str], dict[str, str]]:
                  "    } catch {\n      /* 저장소를 못 써도 장바구니는 동작 */\n    }\n"
                  f"  }}, [{name}]);")
         new = text[:m.start()] + block + text[m.end():]
-        react = re.search(r"""import\s+(?:React\s*,\s*)?\{([^}]*)\}\s*from\s*['"]react['"]""", new)
-        if react and not re.search(r"\buseEffect\b", react.group(1)):
-            new = new[:react.end(1)].rstrip() + ", useEffect " + new[react.end(1):]
-        elif not react:
-            new = "import { useEffect } from 'react';\n" + new
+        new = add_react_named(new, "useEffect")
         writes[rel] = new
         notes.append(f"{rel}: 장바구니를 새로고침 뒤에도 유지")
     return notes, writes
@@ -2233,20 +2282,18 @@ def drop_ai_mock_server_imports(files) -> tuple[list[str], dict[str, str]]:
     """([고친 것], {파일: 내용}) — 서버가 AI 가 따로 만든 모의 결제 서버 파일(mockPaymentServer.ts 등)을 불러와 띄우는 코드.
 
     결제 약속상 모의 결제 서버는 배포가 함께 띄운다(로컬·ECS). AI 가 만든 그 파일은 내보내는 것이 없어서 서버가
-    `import { startMockPaymentServer } …` 에서 시작하자마자 SyntaxError 로 죽었다(실기기 0d40). 그 import 와 시작 호출만 뺀다."""
+    `import { startMockPaymentServer } …` 에서 시작하자마자 SyntaxError 로 죽었다(실기기 0d40). 그 import 와 호출 문장을
+    뺀다. 호출이 문장으로 떼어 낼 수 없는 곳(대입·조건식 안)에 있으면 건드리지 않는다(빼면 정의되지 않은 이름이 남는다)."""
     notes: list[str] = []
     writes: dict[str, str] = {}
-    listing = files.files()
-    for rel in listing:
+    for rel in files.files():
         if not rel.endswith((".ts", ".js", ".mjs")) or "/node_modules/" in f"/{rel}" or re.search(r"(^|/)(dist|build)/", rel) \
                 or re.match(r"(frontend|client|web)/", rel) or _MOCK_MODULE.search(rel):
             continue
         text = files.read(rel) or ""
-        new = text
+        new, ok, touched = text, True, False
         for m in list(re.finditer(r"""(?m)^[ \t]*import\s*\{([^}]*)\}\s*from\s*['"](\.{1,2}/[^'"]+)['"];?[ \t]*\r?\n""", text)):
-            spec = m.group(2)
-            target = posixpath.normpath(posixpath.join(posixpath.dirname(rel), spec))
-            target = re.sub(r"\.js$", "", target)
+            target = re.sub(r"\.js$", "", posixpath.normpath(posixpath.join(posixpath.dirname(rel), m.group(2))))
             found = next((target + ext for ext in (".ts", ".js", ".mjs") if files.exists(target + ext)), None)
             if not found or not _MOCK_MODULE.search(found):
                 continue
@@ -2254,11 +2301,657 @@ def drop_ai_mock_server_imports(files) -> tuple[list[str], dict[str, str]]:
             names = [n.strip().split(" as ")[-1].strip() for n in m.group(1).split(",") if n.strip()]
             if any(re.search(rf"\bexport\b[^\n]*\b{re.escape(n)}\b", body) for n in names):
                 continue  # 실제로 내보내는 모듈이면 그대로 쓴다
-            new = new.replace(m.group(0), "", 1)
+            candidate = new.replace(m.group(0), "", 1)
             for n in names:
-                new = re.sub(rf"(?m)^([ \t]*)(?:await\s+)?{re.escape(n)}\s*\([^;\n]*\)\s*;?[ \t]*$",
-                             r"\1// ReCoder: 모의 결제 서버는 배포가 함께 띄웁니다(로컬·ECS) — 앱 안에서 따로 띄우지 않습니다.", new)
-        if new != text:
+                while True:
+                    call = re.search(rf"(?m)^([ \t]*)(?:await\s+|void\s+)?{re.escape(n)}\s*\(", candidate)
+                    if not call:
+                        break
+                    end = stmt_end(candidate, call.start() + len(call.group(1)))
+                    if end < 0:
+                        ok = False
+                        break
+                    #: 빈 문장(;)으로 남긴다 — 중괄호 없는 if 의 몸통이었으면 다음 문장을 빨아들이지 않게.
+                    candidate = (candidate[:call.start()] + call.group(1)
+                                 + ";// ReCoder: 모의 결제 서버는 배포가 함께 띄웁니다(로컬·ECS) — 앱 안에서 따로 띄우지 않습니다."
+                                 + candidate[end:])
+                if re.search(rf"(?<![\w$.]){re.escape(n)}(?![\w$])", re.sub(r"//[^\n]*", "", candidate)):
+                    ok = False  # 문장이 아닌 곳에 남았다
+            if ok:
+                new, touched = candidate, True
+        if touched and ok and new != text:
             writes[rel] = new
             notes.append(f"{rel}: AI 가 만든 모의 결제 서버를 앱 안에서 띄우지 않게")
+    return notes, writes
+
+
+# ── 공용: 문장 끝 · React import · import 블록 끝 ─────────────────────────────
+
+_CONT_END = re.compile(r"(?:[=+\-*/%&|^!?:,(\[{<>]|\b(?:return|typeof|await|new|in|of|instanceof))\s*$")
+_CONT_START = re.compile(r"^\s*(?:[.?:+\-*/%&|^,)\]}]|=>|\bas\b|\bsatisfies\b)")
+
+
+def stmt_end(text: str, start: int) -> int:
+    """start 에서 시작한 JS/TS 문장이 끝나는 위치(그 뒤 첫 글자). 괄호·문자열·템플릿·주석을 건너뛰고,
+    `;` 또는 (세미콜론 없는 코드) 이어지지 않는 줄바꿈에서 끝난다."""
+    depth, i, n = 0, start, len(text)
+    stack: list[str] = []
+    while i < n:
+        ch = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch in "'\"":
+            j = i + 1
+            while j < n and text[j] != ch and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if ch == "`":
+            j = i + 1
+            while j < n and text[j] != "`":
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text.startswith("${", j):
+                    k = stmt_end_brace(text, j + 1)
+                    j = k
+                    continue
+                j += 1
+            i = j + 1
+            continue
+        if ch == "/" and _regex_context(text, i):
+            #: 정규식 리터럴(/[{]/g) 안의 괄호는 세지 않는다.
+            j, in_class = i + 1, False
+            while j < n and text[j] != "\n":
+                c = text[j]
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == "[":
+                    in_class = True
+                elif c == "]":
+                    in_class = False
+                elif c == "/" and not in_class:
+                    break
+                j += 1
+            i = j + 1
+            continue
+        if ch in "([{":
+            stack.append(ch)
+        elif ch in ")]}":
+            if stack:
+                stack.pop()
+            elif ch == "}":
+                return i  # 바깥 블록이 닫힘 — 문장도 여기서 끝
+            else:
+                return -1  # 식 안(화살표 함수 몸통 등)이다 — 문장으로 다룰 수 없다
+        elif ch == ";" and not stack:
+            return i + 1
+        elif ch == "\n" and not stack:
+            head = text[start:i].rstrip()
+            rest = text[i + 1:]
+            nxt = rest.lstrip("\r\n\t ")
+            if head and not _CONT_END.search(head) and not _CONT_START.match(nxt):
+                return i
+        i += 1
+    return n
+
+
+def _regex_context(text: str, i: int) -> bool:
+    """i 의 `/` 가 나눗셈이 아니라 정규식 리터럴의 시작인가(앞의 의미 있는 글자로 판단)."""
+    if text.startswith("//", i) or text.startswith("/*", i):
+        return False
+    k = i - 1
+    while k >= 0 and text[k] in " \t":
+        k -= 1
+    if k < 0 or text[k] in "(,=:!&|?{};[\n":
+        return True
+    return bool(re.search(r"\b(?:return|typeof|case|in|of)\s*$", text[max(0, i - 12):i]))
+
+
+def stmt_end_brace(text: str, open_at: int) -> int:
+    """`{` 위치에서 짝 맞는 `}` 다음 위치."""
+    depth, i, n = 0, open_at, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "'\"`":
+            j = i + 1
+            while j < n and text[j] != ch:
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def add_react_named(text: str, name: str) -> str:
+    """react 의 이름 가져오기에 name 을 더한다(이미 있으면 그대로, 여러 줄·끝 쉼표 모양도 깨지지 않게)."""
+    m = re.search(r"""import\s+(?:React\s*,\s*)?\{([^}]*)\}\s*from\s*['"]react['"]""", text)
+    if m:
+        if re.search(rf"\b{re.escape(name)}\b", m.group(1)):
+            return text
+        inner = m.group(1)
+        if "\n" in inner:
+            body = inner.rstrip()
+            trailing = body.endswith(",")
+            body = body.rstrip(",")
+            ind = re.search(r"\n([ \t]*)\S", inner)
+            ind = ind.group(1) if ind else "  "
+            new_inner = f"{body},\n{ind}{name}" + ("," if trailing else "") + "\n"
+        else:
+            body = inner.strip().rstrip(",").strip()
+            new_inner = f" {body}, {name} " if body else f" {name} "
+        return text[:m.start(1)] + new_inner + text[m.end(1):]
+    d = re.search(r"""import\s+React\s+from\s*(['"])react\1""", text)
+    if d:
+        return text[:d.start()] + f"import React, {{ {name} }} from {d.group(1)}react{d.group(1)}" + text[d.end():]
+    return f"import {{ {name} }} from 'react';\n" + text
+
+
+def imports_end(text: str) -> int:
+    """맨 위 import 문들이 끝나는 위치(여러 줄 import·세미콜론 없는 코드 포함). import 가 없으면 0."""
+    end, pos = 0, 0
+    for m in re.finditer(r"(?m)^[ \t]*import\b", text):
+        if m.start() < end:
+            continue
+        stop = re.compile(r"""(?:\bfrom\s*['"][^'"]+['"]|^[ \t]*import\s*['"][^'"]+['"])[ \t]*;?""", re.M)
+        found = stop.search(text, m.start())
+        if not found:
+            break
+        e = found.end()
+        nl = text.find("\n", e)
+        end = len(text) if nl < 0 else nl + 1
+    return end
+
+
+_CREATE_CTX = re.compile(r"(?m)^\s*(?:export\s+)?const\s+([A-Z][\w$]*)\s*(?::[^=\n]+)?=\s*(?:React\.)?createContext\s*(?:<\s*([A-Za-z_$][\w$]*)[^>]*>)?\s*\(")
+_IDENT = r"[A-Za-z_$][\w$]*"
+
+
+def _top_level_parts(body: str) -> Optional[list[str]]:
+    """객체 리터럴 본문을 최상위 쉼표로 나눈다(문자열·괄호 안 쉼표·주석은 무시). 판단할 수 없으면 None."""
+    parts, depth, cur, i, n = [], 0, [], 0, len(body)
+    while i < n:
+        c = body[i]
+        if c in "'\"`":
+            j = i + 1
+            while j < n and body[j] != c:
+                j += 2 if body[j] == "\\" else 1
+            cur.append(body[i:j + 1])
+            i = j + 1
+            continue
+        if body.startswith("//", i):
+            j = body.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if body.startswith("/*", i):
+            j = body.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth < 0:
+                return None
+        if c == "," and depth == 0:
+            part = "".join(cur).strip()
+            if not part:
+                return None  # 빈 항목(,,) — 문법이 깨진 객체
+            parts.append(part)
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    if depth:
+        return None
+    last = "".join(cur).strip()
+    if last:
+        parts.append(last)
+    return parts
+
+
+def _object_entries(body: str) -> Optional[dict[str, bool]]:
+    """{키: 단축형인가}. 펼침(...)·계산된 키처럼 판단할 수 없으면 None."""
+    parts = _top_level_parts(body)
+    if parts is None:
+        return None
+    out: dict[str, bool] = {}
+    for part in parts:
+        if part.startswith("..."):
+            return None  # 펼쳐 넣은 값이 있으면 무엇이 들어 있는지 모른다
+        m = re.match(rf"(?:async\s+)?(?:get\s+|set\s+)?\[?['\"]?({_IDENT})['\"]?\]?\s*(?:[:(,]|$)", part)
+        if not m:
+            return None
+        out[m.group(1)] = bool(re.fullmatch(_IDENT, part))
+    return out
+
+
+def _object_keys(body: str) -> Optional[set[str]]:
+    entries = _object_entries(body)
+    return None if entries is None else set(entries)
+
+
+def _fn_bodies(masked: str) -> list[tuple[int, int]]:
+    return [(o, c) for o, c in _brace_pairs(masked) if _is_function_body(masked, o)]
+
+
+def _enclosing_fn(bodies: list[tuple[int, int]], pos: int) -> Optional[tuple[int, int]]:
+    inside = [(o, c) for o, c in bodies if o < pos < c]
+    return max(inside, key=lambda oc: oc[0]) if inside else None
+
+
+def _depths(masked: str, start: int, end: int) -> list[int]:
+    """masked[start:end] 각 글자의 괄호 깊이(start 기준 0)."""
+    out, d = [], 0
+    for k in range(start, end):
+        c = masked[k]
+        if c in ")]}":
+            d -= 1
+        out.append(d)
+        if c in "([{":
+            d += 1
+    return out
+
+
+def _top_decls(masked: str, body: tuple[int, int]) -> set[str]:
+    """함수 본문 최상위(중첩 블록·콜백 밖)에서 선언한 이름들."""
+    o, c = body
+    depth = _depths(masked, o + 1, c)
+    names: set[str] = set()
+    seg = masked[o + 1:c]
+    for m in re.finditer(rf"\b(?:const|let|var)\s+(?:\[([^\]]*)\]|\{{([^{{}}]*)\}}|({_IDENT}))|\bfunction\s+({_IDENT})", seg):
+        if depth[m.start()] != 0:
+            continue
+        if m.group(1) is not None:
+            names |= set(re.findall(rf"(?:^|,)\s*({_IDENT})", m.group(1)))
+        elif m.group(2) is not None:
+            for part in m.group(2).split(","):
+                bits = part.split(":")
+                name = re.match(rf"\s*({_IDENT})", bits[-1])
+                if name and not part.strip().startswith("..."):
+                    names.add(name.group(1))
+        else:
+            names.add(m.group(3) or m.group(4))
+    return names
+
+
+def _provider_value(text: str, ctx: str):
+    """Provider 의 value 객체 본문 (시작, 끝), useMemo 의존성 배열 (시작, 끝), 감싼 함수 본문 (열기, 닫기)."""
+    m = re.search(rf"<\s*{re.escape(ctx)}\.Provider\s+value\s*=\s*\{{", text)
+    if not m:
+        return None
+    masked = _mask_code(text)
+    fn = _enclosing_fn(_fn_bodies(masked), m.start())
+    if not fn:
+        return None
+    rest = text[m.end():]
+    inline = re.match(r"\s*\{", rest)
+    if inline:
+        open_at = m.end() + inline.end() - 1
+        close = _match_brace(text, open_at)
+        return (open_at + 1, close, None, fn) if close > 0 else None
+    ident = re.match(rf"\s*({_IDENT})\s*\}}", rest)
+    if not ident:
+        return None
+    var = ident.group(1)
+    #: 같은 함수(Provider 컴포넌트) 최상위의, JSX 에서 가장 가까운 선언만 — 다른 Provider·핸들러의 `const value` 를 잡지 않게.
+    depth = _depths(masked, fn[0] + 1, fn[1])
+    decl = None
+    pat = re.compile(rf"\bconst\s+{re.escape(var)}\s*(?::[^=]+)?=\s*(?:(?:React\.)?useMemo\s*\(\s*\(\s*\)\s*=>\s*\(\s*)?\{{")
+    for d in pat.finditer(masked, fn[0] + 1, m.start()):
+        if depth[d.start() - fn[0] - 1] == 0:
+            decl = d
+    if decl is None:
+        return None
+    open_at = decl.end() - 1
+    close = _match_brace(text, open_at)
+    if close < 0:
+        return None
+    deps = None
+    if "useMemo" in decl.group(0):
+        tail = re.match(r"\s*\)\s*,\s*\[([^\]]*)\]", text[close + 1:])
+        if tail:
+            deps = (close + 1 + tail.start(1), close + 1 + tail.end(1))
+    return open_at + 1, close, deps, fn
+
+
+def _hook_returns(text: str) -> list[tuple[str, int, int, Optional[str], tuple[int, int]]]:
+    """(훅 이름, return 객체 본문 시작, 끝, 반환 타입 이름, 훅 본문) — 훅 본문 최상위의 **마지막** return 이 객체일 때만
+    (앞의 `if (!ctx) return {…}` 같은 대비용 return 은 훅이 주는 값이 아니다)."""
+    out = []
+    masked = _mask_code(text)
+    for m in re.finditer(rf"\bexport\s+(?:default\s+)?function\s+(use[A-Z][\w$]*)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::\s*({_IDENT})[^{{]*)?\{{|"
+                         rf"\bexport\s+const\s+(use[A-Z][\w$]*)\s*=\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::\s*({_IDENT})[^=]*)?=>\s*\{{", masked):
+        name = m.group(1) or m.group(3)
+        type_name = m.group(2) or m.group(4)
+        open_at = m.end() - 1
+        close = _match_brace(text, open_at)
+        if close < 0:
+            continue
+        depth = _depths(masked, open_at + 1, close)
+        tops = [r for r in re.finditer(r"\breturn\b", masked[open_at + 1:close]) if depth[r.start()] == 0]
+        if not tops:
+            continue
+        last = re.match(r"return\s*\{", masked[open_at + 1 + tops[-1].start():close])
+        if not last:
+            continue
+        at = open_at + 1 + tops[-1].start() + last.end() - 1
+        end = _match_brace(text, at)
+        if end > 0:
+            out.append((name, at + 1, end, type_name, (open_at, close)))
+    return out
+
+
+def _span_of(prov: dict, text: str):
+    """(시작, 끝, 의존성 배열, 감싼 함수 본문)."""
+    if prov["kind"] == "context":
+        return _provider_value(text, prov["name"])
+    for name, start, end, _t, body in _hook_returns(text):
+        if name == prov["name"]:
+            return start, end, None, body
+    return None
+
+
+def _code_files(files) -> list[str]:
+    return [rel for rel in files.files() if rel.endswith((".tsx", ".jsx", ".ts", ".js")) and "/node_modules/" not in f"/{rel}"
+            and not re.search(r"(^|/)(dist|build)/", rel) and not rel.endswith(".d.ts")]
+
+
+def _providers(files) -> tuple[list[dict], list[str]]:
+    """값을 주는 쪽(Context Provider 의 value · 훅의 return 객체) 목록과 코드 파일들."""
+    code = _code_files(files)
+    found: dict[str, list[dict]] = {}
+    for rel in code:
+        text = files.read(rel) or ""
+        if "createContext" in text:
+            for m in _CREATE_CTX.finditer(text):
+                found.setdefault(m.group(1), []).append({"kind": "context", "name": m.group(1), "rel": rel, "type": m.group(2)})
+        for name in set(re.findall(r"\bexport\s+(?:default\s+)?(?:function\s+|const\s+)(use[A-Z][\w$]*)", text)):
+            found.setdefault(name, []).append({"kind": "hook", "name": name, "rel": rel, "type": None})
+    provs = []
+    for items in found.values():
+        if len(items) != 1:
+            continue  # 같은 이름이 여러 파일에 있으면 어느 것인지 이름만으로 정하지 않는다
+        prov = items[0]
+        if prov["kind"] == "hook":
+            text = files.read(prov["rel"]) or ""
+            hit = next((h for h in _hook_returns(text) if h[0] == prov["name"]), None)
+            if not hit:
+                continue
+            prov["type"] = hit[3]
+        provs.append(prov)
+    return provs, code
+
+
+def _imports_from(files, rel: str, text: str, name: str, target: str) -> bool:
+    """rel 이 name 을 target 파일에서 가져오는가(같은 파일이면 참)."""
+    if rel == target:
+        return True
+    for m in re.finditer(r"""\bimport\s+([^;]*?)\s+from\s*['"]([^'"]+)['"]""", text):
+        clause, spec = m.group(1), m.group(2)
+        if not re.search(rf"(?:^|[\s{{,]){re.escape(name)}(?:[\s}},]|$)", clause):
+            continue
+        if spec.startswith("."):
+            base = posixpath.normpath(posixpath.join(posixpath.dirname(rel), spec))
+        elif spec[:2] in ("@/", "~/"):
+            base = None
+            tail = spec[2:]
+        else:
+            continue
+        stem = re.sub(r"\.(?:m?js|jsx|tsx?)$", "", base if base is not None else tail)
+        tgt = re.sub(r"\.(?:m?js|jsx|tsx?)$", "", target)
+        if base is not None and (tgt == stem or tgt == stem + "/index"):
+            return True
+        if base is None and (tgt.endswith("/" + stem) or tgt.endswith("/" + stem + "/index")):
+            return True
+    return False
+
+
+def _consumed_names(text: str, ctx: str) -> Optional[set[str]]:
+    """useContext(Ctx) 에서 구조 분해로 꺼내는 이름들(판단 불가면 None). 담아 둔 변수는 같은 함수 안에서만 본다."""
+    masked = _mask_code(text)
+    bodies = _fn_bodies(masked)
+    names: set[str] = set()
+    sources: list[str] = []
+    for m in re.finditer(rf"\b(?:const|let)\s*\{{([^{{}}]*)\}}\s*(?::[^=]+)?=\s*(?:React\.)?useContext\s*\(\s*{re.escape(ctx)}\s*\)", masked):
+        sources.append(text[m.start(1):m.end(1)])
+    for h in re.finditer(rf"\b(?:const|let)\s+({_IDENT})\s*(?::[^=]+)?=\s*(?:React\.)?useContext\s*\(\s*{re.escape(ctx)}\s*\)", masked):
+        scope = _enclosing_fn(bodies, h.start())
+        for d in re.finditer(rf"\b(?:const|let)\s*\{{([^{{}}]*)\}}\s*=\s*{re.escape(h.group(1))}\s*[;\n]", masked):
+            if _enclosing_fn(bodies, d.start()) == scope:
+                sources.append(text[d.start(1):d.end(1)])
+    for group in sources:
+        for part in group.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if part.startswith("...") or "{" in part:
+                return None
+            name = re.match(rf"({_IDENT})", part)
+            if not name:
+                return None
+            names.add(name.group(1))
+    return names
+
+
+def _hook_consumed(text: str, hook: str) -> Optional[set[str]]:
+    names: set[str] = set()
+    masked = _mask_code(text)
+    for m in re.finditer(rf"\b(?:const|let)\s*\{{([^{{}}]*)\}}\s*(?::[^=]+)?=\s*{re.escape(hook)}\s*\(", masked):
+        for part in text[m.start(1):m.end(1)].split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if part.startswith("...") or "{" in part:
+                return None
+            n = re.match(rf"({_IDENT})", part)
+            if not n:
+                return None
+            names.add(n.group(1))
+    return names
+
+
+def _context_gaps(files) -> list[dict]:
+    providers, code = _providers(files)
+    gaps = []
+    for prov in providers:
+        ptext = files.read(prov["rel"]) or ""
+        span = _span_of(prov, ptext)
+        if not span:
+            continue
+        entries = _object_entries(ptext[span[0]:span[1]])
+        if entries is None:
+            continue
+        pmasked = _mask_code(ptext)
+        scope = _top_decls(pmasked, span[3])
+        for rel in code:
+            text = files.read(rel) or ""
+            if not re.search(rf"\b{re.escape(prov['name'])}\b", text):
+                continue
+            if prov["kind"] == "context":
+                used = _consumed_names(text, prov["name"]) if "useContext" in text else set()
+            else:
+                used = _hook_consumed(text, prov["name"])
+            if not used or not _imports_from(files, rel, text, prov["name"], prov["rel"]):
+                continue
+            missing = sorted(used - set(entries))
+            if missing:
+                gaps.append({"rel": rel, "ctx": prov["name"], "ctx_rel": prov["rel"], "type": prov["type"],
+                             "kind": prov["kind"], "missing": missing, "entries": entries, "scope": scope})
+    return gaps
+
+
+#: 나눠 만든 파일끼리 가장 흔한 이름 어긋남(장바구니·로그인). 쓰는 쪽 이름 → 주는 쪽에서 찾을 이름(앞이 우선).
+_ALIASES: dict[str, tuple[str, ...]] = {
+    "total": ("totalPrice", "totalAmount", "cartTotal", "subtotal"),
+    "totalPrice": ("total", "totalAmount", "cartTotal", "subtotal"),
+    "totalAmount": ("totalPrice", "total", "cartTotal", "subtotal"),
+    "cartTotal": ("totalPrice", "total", "totalAmount"),
+    "subtotal": ("totalPrice", "total", "totalAmount"),
+    "totalItems": ("itemCount", "cartCount", "count", "totalQuantity"),
+    "itemCount": ("totalItems", "cartCount", "count", "totalQuantity"),
+    "cartCount": ("totalItems", "itemCount", "count", "totalQuantity"),
+    "totalQuantity": ("totalItems", "itemCount", "cartCount"),
+    "items": ("cartItems", "cart"),
+    "cartItems": ("items", "cart"),
+    "cart": ("items", "cartItems"),
+    "addToCart": ("addItem", "addCartItem"),
+    "addItem": ("addToCart", "addCartItem"),
+    "removeFromCart": ("removeItem", "removeCartItem"),
+    "removeItem": ("removeFromCart", "removeCartItem"),
+    "updateQuantity": ("updateItemQuantity", "updateCartItem", "updateCartQuantity"),
+    "updateItemQuantity": ("updateQuantity", "updateCartItem"),
+    "clearCart": ("clear", "resetCart", "emptyCart"),
+    "loading": ("isLoading",),
+    "isLoading": ("loading",),
+    "user": ("currentUser",),
+    "currentUser": ("user",),
+    "logout": ("signOut",),
+    "signOut": ("logout",),
+    "login": ("signIn",),
+    "signIn": ("login",),
+    "register": ("signup", "signUp"),
+    "signup": ("register", "signUp"),
+    "signUp": ("register", "signup"),
+}
+#: 값으로 쓰는 이름인데 주는 쪽에는 계산 함수만 있다 → 호출 결과를 넣는다.
+_CALL_ALIASES: dict[str, tuple[str, ...]] = {
+    "total": ("getTotalPrice", "getTotal", "getCartTotal", "getTotalAmount"),
+    "totalPrice": ("getTotalPrice", "getTotal", "getCartTotal", "getTotalAmount"),
+    "totalAmount": ("getTotalAmount", "getTotalPrice", "getTotal"),
+    "cartTotal": ("getCartTotal", "getTotalPrice", "getTotal"),
+    "subtotal": ("getSubtotal", "getTotalPrice", "getTotal"),
+    "totalItems": ("getTotalItems", "getItemCount", "getCartCount"),
+    "itemCount": ("getItemCount", "getTotalItems", "getCartCount"),
+    "cartCount": ("getCartCount", "getTotalItems", "getItemCount"),
+}
+
+
+def _resolve_gap(gap: dict, name: str) -> Optional[str]:
+    """빠진 이름을 채울 식(이름 그대로면 단축형). 못 채우면 None.
+    식에 쓰는 이름은 주는 쪽 함수 최상위에 선언됐거나 객체에 단축형으로 들어 있는(= 그 자리에서 보이는) 변수만 —
+    `totalPrice: items.reduce(…)` 같은 키·getter·메서드는 변수가 아니라서 쓰면 ReferenceError 다."""
+    entries, scope = gap["entries"], gap["scope"]
+
+    def visible(ident: str) -> bool:
+        return ident in scope or entries.get(ident) is True
+
+    if name in scope:
+        return name
+    for alias in _ALIASES.get(name, ()):
+        if visible(alias):
+            return alias
+    for fn in _CALL_ALIASES.get(name, ()):
+        if visible(fn):
+            return f"{fn}()"
+    if name == "isAuthenticated":
+        for who in ("user", "currentUser", "token"):
+            if visible(who):
+                return f"!!{who}"
+    return None
+
+
+def context_value_gaps(files) -> list[tuple[str, str]]:
+    """[(설명, 쓰는 파일)] — Provider·훅이 주지 않는 값을 꺼내 쓰는 곳(자동으로 고칠 수 없는 것만)."""
+    out = []
+    for gap in _context_gaps(files):
+        bad = [n for n in gap["missing"] if _resolve_gap(gap, n) is None]
+        if bad:
+            out.append((f"{', '.join(bad)}({gap['rel']} ← {gap['ctx_rel']})", gap["rel"]))
+    return out
+
+
+def _append_entries(body: str, parts: list[str]) -> Optional[str]:
+    """객체 본문 끝에 항목을 더한다 — 끝 주석·끝 쉼표가 있어도 문법이 깨지지 않게. 결과를 다시 읽어 확인한다."""
+    masked = _mask_code(body)
+    last = len(masked.rstrip()) - 1
+    if last >= 0 and masked[last] != ",":
+        body = body[:last + 1] + "," + body[last + 1:]
+    stripped = body.rstrip()
+    if "\n" in body:
+        ind = re.search(r"\n([ \t]+)\S", body)
+        ind = ind.group(1) if ind else "  "
+        new_body = stripped + "".join(f"\n{ind}{p}," for p in parts) + body[len(stripped):]
+    else:
+        new_body = (stripped + " " if stripped.strip() else " ") + ", ".join(parts) + " "
+    keys = _object_keys(new_body)
+    if keys is None or not all(re.match(_IDENT, p).group(0) in keys for p in parts):
+        return None
+    return new_body
+
+
+def context_value_missing(files) -> tuple[list[str], dict[str, str]]:
+    """([고친 것], {파일: 내용}) — 훅·화면이 Context·훅에서 꺼내는 값을 주는 쪽이 넣지 않았는데, 같은 값이 주는 쪽에
+    이미 있다(useState 의 setItems, 다른 이름의 totalPrice·addItem 등). 주는 쪽 객체에 그 이름으로 넣어 준다.
+
+    실기기 c395 카페: hooks/useCart.ts 가 `const { items, setItems } = useContext(CartContext)` 인데 CartProvider 의 value 에
+    setItems 가 없어 [장바구니에 추가] 를 누르면 "a is not a function" 으로 멈췄고, 장바구니 화면은 useCart() 의 `total`
+    (훅은 totalPrice 를 준다)을 읽어 합계가 ₩0 이었다. tsc 는 TS2339 로 알려 주지만 배포 빌드는 타입 오류만으로 멈추지 않는다."""
+    notes: list[str] = []
+    writes: dict[str, str] = {}
+    plan: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    for gap in _context_gaps(files):
+        resolved = {n: _resolve_gap(gap, n) for n in gap["missing"]}
+        if any(v is None for v in resolved.values()):
+            continue  # 하나라도 못 채우면 그 쓰는 쪽은 손대지 않는다(경고로 남는다)
+        plan.setdefault((gap["ctx_rel"], gap["kind"], gap["ctx"], gap["type"] or ""), {}).update(resolved)
+    for (ctx_rel, kind, name, type_name), entries in sorted(plan.items()):
+        text = writes.get(ctx_rel, files.read(ctx_rel) or "")
+        span = _span_of({"kind": kind, "name": name}, text)
+        if not span:
+            continue
+        start, end, deps, _fn = span
+        keys = _object_keys(text[start:end]) or set()
+        todo = [(n, e) for n, e in sorted(entries.items()) if n not in keys]
+        if not todo:
+            continue
+        parts = [n if e == n else f"{n}: {e}" for n, e in todo]
+        new_body = _append_entries(text[start:end], parts)
+        if new_body is None:
+            continue
+        new_deps = None
+        if deps:
+            dep_text = text[deps[0]:deps[1]]
+            have = {d.strip() for d in dep_text.split(",") if d.strip()}
+            used_ids = []
+            for _n, e in todo:
+                ident = re.match(rf"!*({_IDENT})", e)
+                if ident and ident.group(1) not in have and ident.group(1) not in used_ids:
+                    used_ids.append(ident.group(1))
+            if used_ids:
+                d_core = dep_text.rstrip().rstrip(",")
+                new_deps = d_core + (", " if d_core.strip() else "") + ", ".join(used_ids)
+        if new_deps is not None:
+            text = text[:deps[0]] + new_deps + text[deps[1]:]
+        text = text[:start] + new_body + text[end:]
+        if type_name:
+            t = re.search(rf"\b(?:interface\s+{re.escape(type_name)}\b[^{{]*|type\s+{re.escape(type_name)}\s*=\s*)\{{", text)
+            if t:
+                close = _match_brace(text, t.end() - 1)
+                if close > 0:
+                    inner = text[t.end():close]
+                    missing_t = [n for n, _e in todo if not re.search(rf"(?m)^\s*(?:readonly\s+)?{re.escape(n)}\??\s*[:(]", inner)]
+                    if missing_t:
+                        tind = re.search(r"\n([ \t]+)\S", inner)
+                        tind = tind.group(1) if tind else "  "
+                        lines = "".join(f"{tind}{n}: any; // ReCoder: 쓰는 쪽이 찾는 이름\n" for n in missing_t)
+                        pre = inner.rstrip(" \t")
+                        if not pre.endswith("\n"):
+                            pre += "\n"
+                        text = text[:t.end()] + pre + lines + text[close:]
+        writes[ctx_rel] = text
+        notes.append(f"{ctx_rel}: {name} 에 {', '.join(parts)} 추가")
     return notes, writes

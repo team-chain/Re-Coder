@@ -321,6 +321,53 @@ def undouble_braces(path: str, text: str) -> str:
             out.append(text[i:j + 1])
             i = j + 1
             continue
+        if ch == "`":
+            #: 템플릿 문자열의 글자({{name}} 같은 메일 틀)는 그대로 두고, `${{x}}` 식만 `${x}` 로(검토 2.0.15).
+            j = i + 1
+            buf = ["`"]
+            while j < n and text[j] != "`":
+                if text[j] == "\\":
+                    buf.append(text[j:j + 2])
+                    j += 2
+                    continue
+                if text.startswith("${{", j):
+                    #: 짝은 괄호 깊이로 찾는다 — 안쪽 객체 `{{ style: … }}` 의 `}}` 에서 끊지 않게(검토 2.0.16).
+                    depth, k = 0, j + 3
+                    while k < n:
+                        if text.startswith("}}", k) and depth == 0:
+                            break
+                        if text[k] == "{":
+                            depth += 1
+                        elif text[k] == "}":
+                            depth -= 1
+                        k += 1
+                    if k >= n:
+                        break
+                    inner = text[j + 3:k]
+                    if "{{" in inner or "}}" in inner:
+                        inner = inner.replace("{{", "{").replace("}}", "}")
+                    buf.append("${" + inner + "}")
+                    j = k + 2
+                    continue
+                if text.startswith("${", j):
+                    depth, k = 0, j + 1
+                    while k < n:
+                        if text[k] == "{":
+                            depth += 1
+                        elif text[k] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        k += 1
+                    buf.append(text[j:k + 1])
+                    j = k + 1
+                    continue
+                buf.append(text[j])
+                j += 1
+            buf.append("`" if j < n else "")
+            out.append("".join(buf))
+            i = j + 1
+            continue
         if text.startswith("//", i):
             j = text.find("\n", i)
             j = n if j < 0 else j
@@ -403,6 +450,13 @@ class LargeGeneration:
                  root: str = "") -> None:
         self.prompt = prompt
         #: 프로젝트 루트(디스크) — 기존 프로젝트에 더할 때 이미 있는 파일을 "없는 파일"로 보지 않게.
+        #: 설계 목록의 경로는 대상 폴더 기준이다 — 디스크 확인도 같은 기준으로(검토 2.0.15: 프로젝트 루트 기준으로 보면
+        #: 대상 폴더의 기존 파일을 "없다" 로 보고 다시 만들어 사용자 코드를 덮어쓸 수 있었다).
+        folder = (target_folder or "").replace("\\", "/").strip("/")
+        if root and folder and not os.path.isabs(folder):
+            root = os.path.join(root, *folder.split("/"))
+        elif folder and os.path.isabs(folder):
+            root = folder
         self.root = root
         #: 설계 직후 목록을 고치고 고정 파일을 미리 넣는다(결제 모듈 등) → (새 목록, 미리 만든 ops, 약속에 붙일 글).
         self.plan_hook = plan_hook
@@ -691,7 +745,7 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
             f["uses"] = [self._rel(u) for u in (f.get("uses") or []) if isinstance(u, str) and u.strip()]
         files = list(files)
         added: list[dict] = []
-        gaps = plan_gaps(files, manifest, self._exists_on_disk)
+        gaps = plan_gaps(files, manifest, self._exists_on_disk, self.new_project)
         files += gaps
         added += gaps
         #: 기존 프로젝트의 작은 수정(파일 몇 개)에는 검토 호출을 쓰지 않는다 — 새 앱이거나 목록이 클 때만.
@@ -702,7 +756,7 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
                 break
             files += more
             added += more
-            gaps = plan_gaps(files, manifest, self._exists_on_disk)
+            gaps = plan_gaps(files, manifest, self._exists_on_disk, self.new_project)
             files += gaps
             added += gaps
         if self.new_project and any(f.get("planned_by") for f in added):
@@ -763,8 +817,12 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
             return []
         merged = self._merge_files(files, page.get("files") or [])
         out = []
+        known = {_norm(x["file"]) for x in files}
         for f in merged[len(files):]:
             f = dict(f, file=self._rel(f["file"]))
+            if _norm(f["file"]) in known:
+                continue  # 대상 폴더를 붙여 적은 같은 파일(검토 2.0.15)
+            known.add(_norm(f["file"]))
             if not isinstance(f.get("layer"), int) or f["layer"] not in (0, 1, 2):
                 f["layer"] = _guess_layer(f["file"])
             f["uses"] = [self._rel(u) for u in f.get("uses") or []]
@@ -823,17 +881,20 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
                                     "(불러오는 쪽 화면 코드의 구조·역할에 맞게 — 헤더는 가로 배치, 목록은 카드 격자, 폼·버튼·상태 표시 등 "
                                     "기존 CSS 와 같은 색·글꼴·간격, 화면 폭이 좁으면 한 줄로). 다른 파일을 바꾸거나 @import 하지 마세요: "
                                     + " ".join("." + c for c in classes))})
-        if not new:
+        if new:
+            with self._lock:
+                self.state["files"] = self.state["files"] + new
+            self._save()
+            self._event("plan_added", agent="review", files=[{"file": f["file"], "layer": 2} for f in new],
+                        message="전체 점검 — 화면이 쓰는데 정의되지 않은 스타일 클래스 "
+                                + ", ".join(f"{len(gaps[k]['missing'])}개" for k in gaps) + "를 채우는 스타일 파일을 만듭니다")
+        planned = [f for f in self.state["files"] if f["file"].endswith("styles/recoder-complete.css")]
+        if not planned:
             return
-        with self._lock:
-            self.state["files"] = self.state["files"] + new
-        self._save()
-        self._event("plan_added", agent="review", files=[{"file": f["file"], "layer": 2} for f in new],
-                    message="전체 점검 — 화면이 쓰는데 정의되지 않은 스타일 클래스 "
-                            + ", ".join(f"{len(gaps[k]['missing'])}개" for k in gaps) + "를 채우는 스타일 파일을 만듭니다")
+        #: 멈췄다 [이어서] 해도 여기로 다시 온다 — 아직 안 쓴 파일을 쓰고, 진입 파일이 불러오게 한다(검토 2.0.15).
         self._schedule()
         with self._lock:
-            for f in new:
+            for f in planned:
                 entry = _client_entry({op["file"]: op.get("content") or "" for op in self.state["ops"].values()},
                                       posixpath.dirname(posixpath.dirname(posixpath.dirname(f["file"]))))
                 op = self.state["ops"].get(_norm(entry)) if entry else None
@@ -1644,6 +1705,9 @@ def _file_hint(path: str) -> str:
         hint += ("\nPrisma 스키마 규칙: enum 값은 약속·코드가 쓰는 글자 그대로 쓰세요('paid' 를 쓰면 값도 paid — 대문자 이름+@map 금지). "
                  "금액·수량·재고는 Int(BigInt 금지 — 코드가 number 로 다룸). 관계 필드 이름은 약속에 적힌 이름 그대로(예: order_items). "
                  "@default 는 그 enum 값 그대로. Prisma 에 없는 속성(@@validate, @@check, @check)은 쓰지 마세요(값 검사는 코드에서).")
+    if str(path).endswith((".css", ".scss")):
+        hint += ("\n스타일 규칙: 이 스타일을 쓰는 화면 코드의 className 을 빠짐없이 정의하세요(화면 코드가 보이면 그 이름 그대로). "
+                 "헤더·내비는 가로 배치, 목록은 카드 격자, 폼·버튼·상태 표시, 좁은 화면에서는 한 줄 배치.")
     if re.search(r"(^|/)(?:backend|server|api)/", str(path)) and str(path).endswith((".ts", ".js", ".mjs")):
         #: 실기기 0d40: S3_BUCKET_NAME 이 없으면 모듈을 불러오는 순간 throw 해 배포(로컬·ECS)가 키 없이는 아예 시작하지 못했고,
         #: 서버가 AI 가 따로 만든 모의 결제 서버를 불러 시작하자마자 죽었다. 인라인 require 도 ESM 에서 죽는다.
@@ -1657,7 +1721,7 @@ def _file_hint(path: str) -> str:
                  "원화(KRW)는 소수 단위가 없습니다 — 저장된 금액 정수를 그대로 원으로 표시하세요(100 으로 나누지 말 것). "
                  "api 클라이언트의 baseURL 이 '/api' 면 호출 경로에 '/api' 를 다시 붙이지 마세요. "
                  "화면에 보여 줄 값(받아 온 데이터·로딩·오류)은 useState 로 두세요(useRef 는 다시 그리지 않습니다). "
-                 "스타일은 Tailwind 유틸리티 클래스로 일관되게 쓰세요. "
+                 "스타일은 이 프로젝트의 방식과 일관되게 쓰세요(Tailwind 설정이 있으면 유틸리티 클래스, CSS 파일을 쓰면 그 파일에 정의한 클래스). "
                  "로그인 상태(토큰과 사용자 정보)는 새로고침 뒤에도 유지되게 하세요(localStorage 에 함께 보관하거나 시작할 때 /api/auth/me 로 복원). "
                  "서버 응답 형식(약속의 응답 모양 — { data } 로 감싸는지)에 맞춰 값을 꺼내세요.")
     return hint
@@ -1825,6 +1889,10 @@ def _related(ops: list[dict], index: int, limit: int = 36_000, hint: str = "") -
 _TYPE_IN_MSG = re.compile(r"type '(?:IntrinsicAttributes & )?([A-Z][\w$]*)'")
 
 
+_SYNTAX_TS = re.compile(r"\bTS1\d{3}\b")
+_RUNTIME_TS = re.compile(r"\bTS(?:2339|2551|2554|2555|2304|2552|2305|2307|2614|2724|2349|2722|2721)\b")
+
+
 def _definition_first(ops: list[dict], grouped: dict[int, list[str]]) -> dict[int, list[str]]:
     """여러 파일이 같은 정의(컴포넌트 props·훅 반환·Context 타입)와 어긋나면 정의 파일 하나를 먼저 고친다.
 
@@ -1864,8 +1932,14 @@ def _definition_first(ops: list[dict], grouped: dict[int, list[str]]) -> dict[in
             else:
                 out.pop(i, None)
     #: 정의 파일을 먼저(회차당 파일 수 한도 안에 들게)
-    owners_first = sorted(out.items(), key=lambda kv: 0 if kv[1] and kv[1][0].startswith("다른 파일 ") else 1)
-    return dict(owners_first)
+    #: 그다음은 실행 중에 기능을 멈추게 하는 오류(없는 속성·인자 수·없는 이름)가 있는 파일 — 회차당 파일 한도 때문에
+    #: props 모양 같은 가벼운 타입 오류만 고치다 "담기 → is not a function"·"주문 401"이 남았다(실기기 c395 카페).
+    def _rank(kv):
+        owner = 0 if kv[1] and kv[1][0].startswith("다른 파일 ") else 1
+        #: 빌드를 멈추는 오류(문법 TS1xxx·vite/esbuild·정적 점검 — TS 코드가 없는 문제)도 같은 앞줄이다(검토 2.0.16).
+        urgent = any(_RUNTIME_TS.search(p) or _SYNTAX_TS.search(p) or not re.search(r"\bTS\d{4}\b", p) for p in kv[1])
+        return owner, 0 if urgent else 1
+    return dict(sorted(out.items(), key=_rank))
 
 
 def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_files: int = 8,
@@ -2127,7 +2201,8 @@ def undefined_css_classes(contents: dict[str, str], min_missing: int = 8, ratio:
     return out
 
 
-def plan_gaps(files: list[dict], manifest: dict, exists: Callable[[str], bool] | None = None) -> list[dict]:
+def plan_gaps(files: list[dict], manifest: dict, exists: Callable[[str], bool] | None = None,
+              new_project: bool = True) -> list[dict]:
     """설계 목록에서 결정적으로 알 수 있는 빈 곳 — 실행에 꼭 필요한데 목록에 없는 파일.
 
     · uses 에 적었는데 목록에 없는 프로젝트 파일
@@ -2176,12 +2251,14 @@ def plan_gaps(files: list[dict], manifest: dict, exists: Callable[[str], bool] |
         and not re.search(r"(^|/)(vite|tailwind|postcss|eslint|jest|vitest)\.config\.", p)
         and not re.match(r"(?:[\w.-]+/)?(?:mock|fake)[-_]?(?:payment|stripe|pay)", p, re.I)
         for p in paths) or any(exists and exists(f"{side}/package.json") for side in _SERVER_DIRS)
-    if api_segments and not server_code and not present(r"(src/)?(server|app|index|main)\.(ts|js|mjs|cjs|py)"):
+    if new_project and api_segments and not server_code and not present(r"(src/)?(server|app|index|main)\.(ts|js|mjs|cjs|py)"):
         ts = any(p.endswith((".ts", ".tsx")) for p in paths) or "typescript" in text
         ext = ".ts" if ts else ".js"
         why = "약속(contracts)에 서버 API 가 있는데 설계 목록에 서버가 없어 추가함. "
+        wants_seed = bool(re.search(r"샘플|시드|seed|sample|demo|데모", text))
         push("backend/package.json", why + "서버 의존성(코드가 불러오는 패키지만, 안정 버전)과 scripts: "
-             + ("build=tsc, start=node dist/server.js, dev=tsx watch src/server.ts" if ts else "start=node src/server.js"), 0)
+             + ("build=tsc, start=node dist/server.js, dev=tsx watch src/server.ts" if ts else "start=node src/server.js")
+             + (f", seed={'tsx src/scripts/seed.ts' if ts else 'node src/scripts/seed.js'}" if wants_seed else ""), 0)
         if ts:
             push("backend/tsconfig.json", why + "Node 서버용 TypeScript 설정(strict, rootDir src, outDir dist, module NodeNext)", 0)
         if "prisma" not in text:
@@ -2195,7 +2272,7 @@ def plan_gaps(files: list[dict], manifest: dict, exists: Callable[[str], bool] |
         if re.search(r"jwt|토큰|token|로그인|login|auth", text):
             push(f"backend/src/middleware/auth{ext}", why + "JWT 검증 미들웨어(Authorization: Bearer) — req.user 설정, 관리자 권한 확인", 1)
         push(f"backend/src/utils/errors{ext}", why + "공용 오류 클래스·오류 응답 형식(약속의 오류 형식 그대로)", 0)
-        if re.search(r"샘플|시드|seed|sample|demo|데모", text):
+        if wants_seed:
             push(f"backend/src/scripts/seed{ext}", why + "샘플 데이터 넣기(이미 있으면 건너뜀, 여러 번 실행해도 중복 없음) — "
                  "package.json scripts.seed 로 실행", 2)
         paths = paths + [f["file"] for f in add]
@@ -2208,7 +2285,9 @@ def plan_gaps(files: list[dict], manifest: dict, exists: Callable[[str], bool] |
         routes = [p for p in code if re.search(r"/(routes?|routers?|controllers?)/", p)]
         #: 약속에 적힌 API 묶음(/api/products …)마다 그 묶음을 다루는 서버 파일이 있어야 한다 — 없으면 라우트 파일을 더한다.
         lower_code = [p.lower() for p in code]
-        for seg in sorted(set(re.findall(r"/api/([a-z][a-z0-9_-]{1,30})", text))):
+        #: 기존 프로젝트에는 약속의 API 묶음으로 라우트를 더하지 않는다 — 디스크의 productRoutes.ts 같은 다른 이름을 못 보고
+        #: products.ts 를 또 만들었다(검토 2.0.15). 새 앱에서만.
+        for seg in (sorted(set(re.findall(r"/api/([a-z][a-z0-9_-]{1,30})", text))) if new_project else []):
             stem = seg[:-1] if seg.endswith("s") and len(seg) > 3 else seg
             handlers = [p for p in lower_code if not re.search(r"/(middlewares?|utils?|types?|lib|config|db|models?|schemas?|validators?)/", p)]
             if seg in ("v1", "v2", "health") or any(re.search(rf"/{re.escape(stem)}", p) for p in handlers):

@@ -225,17 +225,25 @@ def plan(workspace: Optional[str], *, key: str, environment: str, provided: Iter
         return value
 
     # 1) 앱이 쓰는 DB — 접속 정보를 사용자가 이미 넣었으면(RDS 등) 그대로 쓴다.
+    primary = next((k for k in kinds if k != "redis"), None)
     for kind in kinds:
         conn = local_services.app_env("ecs", kind, "x", env_names, host="127.0.0.1")
         if _covered(conn, given):
             continue
         reads = [n for n in conn if n in env_names or n in required] or [next(iter(conn))]
         if production:
-            for name in reads:
-                if name in required or name == reads[0]:
-                    result.missing.append({"name": name, "reason": (
-                        f"운영(production) 배포는 태스크 안 임시 {_LABELS[kind]} 를 쓰지 않습니다 — "
-                        "RDS 같은 관리형 DB 주소를 Secrets Manager 에 넣고 그 ARN 을 연결하세요.")})
+            #: 시작할 때 꼭 요구하는 값만 막는다 — 있으면 쓰는(선택) Redis·MongoDB 때문에 운영 배포를 막지 않는다(검토 2.0.15).
+            needed = [n for n in reads if n in required]
+            if not needed and kind == primary:
+                #: 주 DB(Postgres·MySQL·MongoDB 중 처음 찾은 것)는 앱이 검사하지 않아도(Prisma 는 DATABASE_URL 을 스스로
+                #: 읽는다·mongoose.connect(process.env.MONGODB_URI)) 없으면 동작하지 않는다 — 막는다(검토 2.0.16).
+                needed = [reads[0]]
+            if not needed:
+                result.notes.append(f"{_LABELS[kind]} 접속 정보가 없습니다 — 앱이 이 서비스 없이도 동작하는지 확인하세요(운영은 임시 DB 를 띄우지 않음).")
+            for name in needed:
+                result.missing.append({"name": name, "reason": (
+                    f"운영(production) 배포는 태스크 안 임시 {_LABELS[kind]} 를 쓰지 않습니다 — "
+                    "RDS 같은 관리형 DB 주소를 Secrets Manager 에 넣고 그 ARN 을 연결하세요.")})
             continue
         password = secret_for(f"__{kind}_password", 24)
         for name, value in local_services.app_env("ecs", kind, password, env_names, host="127.0.0.1").items():
@@ -315,7 +323,9 @@ def plan(workspace: Optional[str], *, key: str, environment: str, provided: Iter
             + (" 이 앱은 모의 결제를 지원하지 않습니다." if "STRIPE" in name and not production else ""))})
     if result.generated:
         result.notes.append(f"앱 서명 키({', '.join(result.generated)})를 이 서비스용으로 만들어 PC 에 보관하고 "
-                            "태스크 환경변수로 넣습니다(staging). 운영은 Secrets Manager ARN 을 쓰세요.")
+                            "태스크 환경변수로 넣습니다(staging). 운영은 Secrets Manager ARN 을 쓰세요."
+                            + (" 웹훅 서명 키는 실제 결제사를 연결할 때 결제사 설정의 값으로 바꿔야 결제 알림을 받습니다."
+                               if any(deploy_settings.is_webhook_secret(n) for n in result.generated) else ""))
 
     # 4) 임시 DB 는 태스크가 뜰 때마다 비어 있다 — 앱이 둔 샘플 데이터 스크립트를 그때 한 번 돌린다.
     if "postgres" in result.services and not result.missing:
@@ -366,6 +376,20 @@ def apply(task_def: dict, app_container: str, runtime: Optional[RuntimePlan], im
             options["awslogs-stream-prefix"] = item["name"]
             item["logConfiguration"] = {**log, "options": options}
         containers.append(item)
+    #: 태스크 정의는 64KiB 가 한도다 — 넘으면 이미지를 올린 뒤에 등록이 실패한다. 시드 컨테이너에는 DB·시드에 필요한 값만 남기고,
+    #: 그래도 크면 시드 컨테이너를 뺀다(검토 2.0.15: 큰 초기화 SQL + 사용자 환경변수 수십 개로 한도에 닿음).
+    if len(json.dumps(task_def)) > 60_000:
+        keep = re.compile(r"DATABASE|^PG|^DB_|POSTGRES|MONGO|REDIS|SEED|NODE_ENV|PAYMENT|STRIPE|JWT|ADMIN|PORT")
+        for item in containers:
+            if item.get("name") == "recoder-seed":
+                item["environment"] = [e for e in item.get("environment", []) if keep.search(e.get("name", ""))]
+    if len(json.dumps(task_def)) > 63_000:
+        task_def["containerDefinitions"] = containers = [c for c in containers if c.get("name") != "recoder-seed"]
+    if len(json.dumps(task_def)) > 63_000:
+        #: 그래도 크면 초기화 SQL 을 뺀다(앱이 스스로 테이블을 만들지 않으면 조회가 실패하지만, 등록 자체가 거부되는 것보다 낫다).
+        for c in containers:
+            if c.get("name") == "recoder-postgres":
+                c["environment"] = [e for e in c.get("environment", []) if e.get("name") != "RECODER_INIT_SQL_B64"]
     if runtime.min_memory:
         try:
             current = int(str(task_def.get("memory") or "0"))

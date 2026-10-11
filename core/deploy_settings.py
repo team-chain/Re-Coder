@@ -45,6 +45,8 @@ _EXTERNAL = re.compile(r"STRIPE|TOSS|KAKAO|NAVER|GOOGLE|GITHUB|AWS|OPENAI|ANTHRO
 _INTERNAL_SECRET = re.compile(r"(?:^|_)(?:JWT|SESSION|COOKIE|AUTH|APP|TOKEN|CSRF|ENCRYPTION|SIGNING|HMAC|NEXTAUTH|"
                               r"REFRESH|ACCESS_TOKEN|SECRET_KEY_BASE)(?:_|$).*(?:SECRET|KEY|SALT)$|^SECRET(?:_KEY)?$")
 
+#: 결제사·서비스 이름이 붙은 웹훅 키(CLERK_·SHOPIFY_·RAZORPAY_ …)는 그 서비스 설정의 값이어야 하므로 입력받는다.
+_PROVIDERLESS_WEBHOOK = re.compile(r"(?:PAYMENT_|PAYMENTS_|APP_|ORDER_|ORDERS_|INTERNAL_)?WEBHOOK_(?:SIGNING_)?(?:SECRET|KEY)")
 #: 외부 키 입력 안내(이름 → 설명). 모르는 키는 일반 안내를 쓴다.
 _HINTS: dict[str, tuple[str, str]] = {
     "STRIPE_SECRET_KEY": ("Stripe 비밀 키", "Stripe 대시보드 → 개발자 → API 키의 테스트 비밀 키(sk_test_…)"),
@@ -225,7 +227,15 @@ def kind_of(name: str) -> str:
     upper = name.upper()
     if not _EXTERNAL.search(upper) and _INTERNAL_SECRET.search(upper):
         return "generate"
+    #: 결제사 이름 없는 웹훅 서명 키(PAYMENT_WEBHOOK_SECRET·WEBHOOK_SECRET) — 앱이 스스로 HMAC 검증에 쓰는 값이라
+    #: 없으면 시작조차 못 한다(실기기 c395). 무작위로 만들어 앱을 띄우고, 실제 결제사를 붙일 때 그 값으로 바꾼다.
+    if _PROVIDERLESS_WEBHOOK.fullmatch(upper):
+        return "generate"
     return "input"
+
+
+def is_webhook_secret(name: str) -> bool:
+    return bool(_PROVIDERLESS_WEBHOOK.fullmatch(name.upper()))
 
 
 def _has_node_manifest(workspace: str) -> bool:
