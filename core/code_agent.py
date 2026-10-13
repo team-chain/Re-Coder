@@ -2698,7 +2698,8 @@ def generate_code(
             _report({"step": "consistency", "round": _round + 1, "message": "컨테이너 빌드로 실제 동작을 확인하는 중"})
             verification = _verify_generated_build(root, target_folder, ops_out, run_app=not existing and not foundation)
             if verification["status"] != "failed":
-                runtime_errors = _runtime_issues(verification)
+                #: 설정 누락(경고)은 AI 가 고칠 코드 문제가 아니다 — 교정 루프에 넣지 않는다.
+                runtime_errors = [i for i in _runtime_issues(verification) if i.get("severity") == "error"]
                 if not runtime_errors:
                     break
                 #: 빌드는 되지만 실행하면 5xx·기동 실패 — 서버 로그와 함께 그 파일을 고친다(실기기 2.0.16: 상품 목록 500).

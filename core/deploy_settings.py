@@ -171,20 +171,111 @@ def _conditional(lines: list[str], i: int) -> bool:
     return False
 
 
+#: 환경변수를 읽어 주는 함수(`getEnv('JWT_SECRET')`·`requireEnv(…)`) — 실기기 2.0.21 생성 앱(d22de705):
+#: `function getEnv(key, default?) { const v = process.env[key]; … throw }` 로만 읽어 `process.env.X` 를 찾던 감지가
+#: JWT_SECRET 을 놓쳤다 → 실행 점검·배포가 값을 넣지 않아 앱이 시작 즉시 종료, AI 교정이 6회 헛돌았다.
+_ACCESSOR_DEF = re.compile(
+    r"\bfunction\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(\s*([A-Za-z_$][\w$]*)"
+    r"|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]{0,80})?=\s*(?:async\s*)?(?:function\s*)?\(\s*([A-Za-z_$][\w$]*)")
+_ENV_INDEX = re.compile(r"process\.env\[\s*['\"]([A-Z_][A-Z0-9_]*)['\"]\s*\]")
+#: 설정 스키마로 한 번에 검사하는 앱(zod `z.object({...}).parse(process.env)`, envalid `cleanEnv(process.env, {...})`).
+_ZOD_FIELD = re.compile(r"\b([A-Z_][A-Z0-9_]*)\s*:\s*z\s*\.([^\n]*)")
+_ENVALID_FIELD = re.compile(r"\b([A-Z_][A-Z0-9_]*)\s*:\s*(?:str|num|bool|url|port|email|host|json)\s*\(\s*\)")
+
+
+def _body_after(text: str, start: int, limit: int = 4000) -> str:
+    """start 뒤 첫 `{` 부터 짝이 맞는 `}` 까지(못 찾으면 그 뒤 한 줄)."""
+    brace = text.find("{", start, start + 400)
+    arrow = text.find("=>", start, start + 400)
+    if brace < 0 or (0 <= arrow < brace and text[arrow + 2:brace].strip()):
+        end = text.find("\n", start)
+        return text[start:end if end > 0 else len(text)]
+    depth = 0
+    for i in range(brace, min(len(text), brace + limit)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace:i + 1]
+    return text[brace:brace + limit]
+
+
+def _env_accessors(texts: Iterable[str]) -> dict[str, bool]:
+    """process.env[인자] 를 읽어 돌려주는 함수 이름 → 값이 없으면 종료(throw·exit)하는가."""
+    found: dict[str, bool] = {}
+    for text in texts:
+        if "process.env[" not in text:
+            continue
+        for m in _ACCESSOR_DEF.finditer(text):
+            name, param = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+            if not name or not param:
+                continue
+            body = _body_after(text, m.end())
+            if not re.search(rf"process\.env\[\s*{re.escape(param)}\s*\]", body):
+                continue
+            found[name] = found.get(name, False) or bool(_FATAL.search(body))
+    return found
+
+
+def _accessor_calls(text: str, accessors: dict[str, bool]) -> Iterable[tuple[str, str, bool]]:
+    """(함수, 변수 이름, 값이 없으면 시작을 막는가) — 기본값을 넘긴 호출은 막지 않는다."""
+    for fn, fatal in accessors.items():
+        for m in re.finditer(rf"(?<![\w$.]){re.escape(fn)}\s*(?:<[^>]*>)?\(\s*['\"`]([A-Z_][A-Z0-9_]*)['\"`]\s*([,)])", text):
+            name, tail = m.group(1), m.group(2)
+            if tail == ",":
+                rest = text[m.end():m.end() + 40].lstrip()
+                required = fatal and rest.startswith("undefined")
+            else:
+                required = fatal
+            yield fn, name, required
+
+
+def _schema_env(text: str) -> dict[str, int]:
+    """설정 스키마의 필수 항목 → 최소 길이(모르면 0). 스키마가 process.env 를 검사하고 실패를 종료로 다룰 때만."""
+    found: dict[str, int] = {}
+    zod = re.search(r"\.(?:safeParse|parse)\(\s*process\.env\s*\)", text)
+    if zod and (".parse(" in text[zod.start():zod.start() + 8] or _FATAL.search(text)):
+        for name, rest in _ZOD_FIELD.findall(text):
+            chain = rest.split("),\n")[0]
+            if re.search(r"\.(?:optional|default|nullish|nullable)\s*\(", chain) or not chain.startswith("string"):
+                continue
+            mlen = re.search(r"\.min\(\s*(\d{1,3})", chain)
+            found[name] = max(found.get(name, 0), int(mlen.group(1)) if mlen else 0)
+    if re.search(r"\bcleanEnv\s*\(\s*process\.env", text):
+        for name in _ENVALID_FIELD.findall(text):
+            found.setdefault(name, 0)
+    return found
+
+
 def required_env(workspace: str) -> dict[str, int]:
     """앱이 시작할 때 없으면 종료(throw·exit·raise)하는 환경변수 → 최소 길이(모르면 0)."""
     found: dict[str, int] = {}
     if not workspace or not Path(workspace).is_dir():
         return found
+    texts: list[str] = []
     for path in _code_files(workspace):
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            texts.append(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
-        if "env" not in text:
+    accessors = _env_accessors(texts)
+    for text in texts:
+        if "env" not in text and not any(fn in text for fn in accessors):
             continue
+        for name, n in _schema_env(text).items():
+            found[name] = max(found.get(name, 0), n)
         lines = text.splitlines()
         aliases = {m.group(1): m.group(2) for m in _JS_ALIAS.finditer(text)}
+        for fn, name, required in _accessor_calls(text, accessors):
+            if required:
+                found.setdefault(name, 0)
+            #: `const jwtSecret = getEnv('JWT_SECRET'); if (jwtSecret.length < 32) throw …` 의 길이 검사도 읽는다.
+            for alias in re.findall(
+                    rf"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]{{0,40}})?=\s*{re.escape(fn)}\s*\(\s*['\"`]{name}['\"`]",
+                    text):
+                aliases.setdefault(alias, name)
         for i, line in enumerate(lines):
             window = "\n".join(lines[i:i + 4])
             names = [a or b for a, b in _JS_GUARD.findall(line)]
@@ -211,15 +302,22 @@ def required_env(workspace: str) -> dict[str, int]:
 
 def all_env_names(workspace: str) -> set[str]:
     names: set[str] = set()
+    texts: list[str] = []
     for path in _code_files(workspace) if workspace and Path(workspace).is_dir() else []:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         names.update(re.findall(r"process\.env\.([A-Z_][A-Z0-9_]*)", text))
+        names.update(_ENV_INDEX.findall(text))
+        names.update(_schema_env(text))
+        texts.append(text)
         names.update(re.findall(r"os\.(?:getenv|environ\.get)\(\s*['\"]([A-Z_][A-Z0-9_]*)['\"]", text))
         names.update(_PY_INDEX.findall(text))
-    return names
+    accessors = _env_accessors(texts)
+    for text in texts:
+        names.update(name for _fn, name, _req in _accessor_calls(text, accessors))
+    return {n for n in names if _ENV_NAME.match(n)}
 
 
 def kind_of(name: str) -> str:

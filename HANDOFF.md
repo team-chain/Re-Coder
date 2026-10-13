@@ -1,3 +1,11 @@
+# 함수·스키마로 읽는 필수 환경변수 · 실행 점검 설정 누락 (2026-10-13, 2.0.22)
+
+- 실기기 2.0.21 생성(job d22de705, AI 자유 생성 쇼핑몰, Prisma): env.ts 의 `getEnv(key)`(process.env[key] + throw)로만 JWT_SECRET 을 읽어 deploy_settings.required_env 가 놓침 → runtime_check 가 값 없이 띄워 "Environment variable JWT_SECRET is required" 로 기동 실패 → GENERATED_RUNTIME_ERROR 로 AI 교정 6회 → "실행 점검 오류가 줄지 않아 교정을 멈춥니다(남은 1건)".
+- deploy_settings: `_env_accessors`(process.env[인자] 를 읽는 함수, 본문에 throw/exit 이면 필수) + `_accessor_calls`(기본값 인자 있으면 선택) + 별칭 길이 검사, `_schema_env`(zod `.parse(process.env)` 의 z.string() 필수·.min(n), envalid `cleanEnv` 무옵션 항목), all_env_names 에 process.env['X']·접근 함수 호출·스키마 이름.
+- runtime_check: 기동 실패 로그에서 `missing_env`(영문·한국어 "X is required/가 없습니다", "Missing required environment variables: A, B") → 만들 수 있는 값(kind_of generate)은 만들어 앱만 한 번 다시 띄움, 입력해야 하는 값은 `config_missing` + issues() 가 GENERATED_RUNTIME_CONFIG(warning) 하나로 — code_agent 교정 루프는 error 만 받음.
+- 검증: 생성 결과 스냅숏 재구성 → required_env JWT_SECRET(32)·ecs_runtime.plan 이 64자 생성. Prisma 엔진 다운로드(binaries.prisma.sh)가 sandbox 에서 403 이라 그 앱 자체 기동은 못 봄. 대신 고정 앱(접근 함수 + 감지 못 하는 객체 메서드)으로 실제 Docker runtime_check: passed(재시도 경로), S3_BUCKET_NAME 필수면 failed + config_missing. 전체 2698 passed(1 실패는 sandbox 대체 node 이미지에 alpine adduser 가 없어서 — 환경 문제).
+- sandbox 가 초기화돼 wine/PyInstaller 환경이 없다 — VSIX 는 GitHub Actions "Build release"(workflow_dispatch) 로 만든다.
+
 # ECS 주소 무응답 — 시드 경합·작업 폴더 권한·헬스 경로 (2026-10-11, 2.0.21)
 
 - 실기기 2.0.20 TEMP(데일리데스크, TS backend/·frontend/, ReCoder Dockerfile) ECS 배포: success 후 http://IP:3000 timeout, "헬스 경로를 찾지 못했습니다". TEMP 스냅숏을 sandbox 에서 빌드하고 /tmp/ld/ecs_emulate.py(태스크 정의 dependsOn 그대로)로 재현.
