@@ -229,11 +229,11 @@ def test_apply_fix_updates_direct_dependency_overrides_transitive_and_pins_pytho
     alert = {"key": "us-east-1/c/shop", "workspace": str(ws)}
     out = vr.apply_fix(alert, {"ecosystem": "npm", "name": "lodash", "to": "4.17.21"}, npm_lock=False)
     assert out["applied"] and "backend/package.json" in out["message"]
-    assert json.loads((ws / "backend" / "package.json").read_text())["dependencies"]["lodash"] == "^4.17.21"
+    assert json.loads((ws / "backend" / "package.json").read_text(encoding="utf-8"))["dependencies"]["lodash"] == "^4.17.21"
     vr.apply_fix(alert, {"ecosystem": "npm", "name": "minimist", "to": "1.2.8"}, npm_lock=False)
-    assert json.loads((ws / "frontend" / "package.json").read_text())["overrides"] == {"minimist": "^1.2.8"}
+    assert json.loads((ws / "frontend" / "package.json").read_text(encoding="utf-8"))["overrides"] == {"minimist": "^1.2.8"}
     vr.apply_fix(alert, {"ecosystem": "pypi", "name": "requests", "to": "2.32.3"})
-    assert "requests>=2.32.3" in (ws / "requirements.txt").read_text()
+    assert "requests>=2.32.3" in (ws / "requirements.txt").read_text(encoding="utf-8")
     with pytest.raises(ValueError):
         vr.apply_fix({"workspace": ""}, {"ecosystem": "npm", "name": "lodash", "to": "1"})
     with pytest.raises(ValueError):

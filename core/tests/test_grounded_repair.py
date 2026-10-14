@@ -45,7 +45,7 @@ class Verifier:
         self.contents = []
 
     def __call__(self, root):
-        text = (root / "app.js").read_text()
+        text = (root / "app.js").read_text(encoding="utf-8")
         self.contents.append(text)
         return {"passed": text == "fixed", "output": "Missing parameter name Express 5 wildcard"}
 
@@ -58,7 +58,7 @@ def no_rules(*args, **kwargs):
 def setup(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
-    (root / "app.js").write_text("broken")
+    (root / "app.js").write_text("broken", encoding="utf-8")
     store = RepairStore(tmp_path / "runs.db")
     index = KnowledgeIndex([passage()])
     return root, store, index
@@ -76,11 +76,11 @@ def test_small_model_success_requires_rebuild_then_explicit_approval(setup):
     assert result["approval_required"]
     assert [tier for tier, _ in router.calls] == ["fast"]
     assert verifier.contents == ["broken", "fixed"]
-    assert (root / "app.js").read_text() == "broken"
+    assert (root / "app.js").read_text(encoding="utf-8") == "broken"
     assert result["sources"][0]["url"].startswith("https://expressjs.com/")
     assert result["llm_calls"] == 1
     assert store.approve(result["id"])["status"] == "applied"
-    assert (root / "app.js").read_text() == "fixed"
+    assert (root / "app.js").read_text(encoding="utf-8") == "fixed"
     with pytest.raises(ValueError):
         store.approve(result["id"])
 
@@ -128,11 +128,11 @@ def test_rules_are_fixed_in_copy_and_still_need_build(setup):
     root, store, index = setup
     issue = SimpleNamespace(code="known", auto_fix=True, to_dict=lambda: {"code": "known"})
     def fix(base, code):
-        (base / "app.js").write_text("fixed")
+        (base / "app.js").write_text("fixed", encoding="utf-8")
     p = RepairPipeline(Router([]), index, store, Verifier(), lambda *a, **k: SimpleNamespace(errors=[issue]), fix)
     r = run(p, root)
     assert r["status"] == "ready_for_approval" and r["llm_calls"] == 0
-    assert (root / "app.js").read_text() == "broken"
+    assert (root / "app.js").read_text(encoding="utf-8") == "broken"
 
 
 def test_cache_revalidates_and_does_not_call_model(setup):
@@ -151,7 +151,7 @@ def test_cache_invalidates_on_context_change(setup):
     root, store, index = setup
     p = RepairPipeline(Router([suggestion(), suggestion()]), index, store, Verifier(), no_rules)
     run(p, root)
-    (root / "package.json").write_text('{"name":"new-context"}')
+    (root / "package.json").write_text('{"name":"new-context"}', encoding="utf-8")
     r = run(p, root)
     assert not r["cache_hit"] and r["llm_calls"] == 1
 
@@ -159,10 +159,10 @@ def test_cache_invalidates_on_context_change(setup):
 def test_approval_rejects_changes_even_in_an_unedited_file(setup):
     root, store, index = setup
     r = run(RepairPipeline(Router([suggestion()]), index, store, Verifier(), no_rules), root)
-    (root / "Dockerfile").write_text("FROM scratch")
+    (root / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
     with pytest.raises(ValueError, match="changed"):
         store.approve(r["id"])
-    assert (root / "app.js").read_text() == "broken"
+    assert (root / "app.js").read_text(encoding="utf-8") == "broken"
 
 
 @pytest.mark.parametrize("stage", ["run", "ecs", "iam", "s3"])
@@ -188,7 +188,7 @@ def test_no_evidence_or_already_passing_build_uses_no_llm(setup):
     root, store, _ = setup
     p = RepairPipeline(Router([]), KnowledgeIndex([]), store, Verifier(), no_rules)
     assert run(p, root)["status"] == "no_document_evidence"
-    (root / "app.js").write_text("fixed")
+    (root / "app.js").write_text("fixed", encoding="utf-8")
     assert run(p, root)["status"] == "failure_not_reproduced"
 
 
@@ -215,7 +215,7 @@ def test_exact_code_and_semantic_only_retrieval():
 
 def test_unreviewed_copied_documents_are_rejected(tmp_path):
     p = tmp_path / "corpus.json"
-    p.write_text(json.dumps([{**passage().to_dict(), "kind": "excerpt", "license_status": "pending"}]))
+    p.write_text(json.dumps([{**passage().to_dict(), "kind": "excerpt", "license_status": "pending"}]), encoding="utf-8")
     with pytest.raises(ValueError, match="license"):
         KnowledgeIndex.load(p)
 
@@ -227,15 +227,20 @@ def test_unsafe_paths_rejected(tmp_path, name):
 
 
 def test_symlink_and_secret_files_not_in_context(tmp_path):
-    (tmp_path / ".env").write_text("password=secret")
+    (tmp_path / ".env").write_text("password=secret", encoding="utf-8")
     assert not manifest(tmp_path)
-    (tmp_path / "link.js").symlink_to(tmp_path / ".env")
+    try:
+        (tmp_path / "link.js").symlink_to(tmp_path / ".env")
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            pytest.skip("Windows symbolic links require Developer Mode or link privilege")
+        raise
     with pytest.raises(ValueError):
         manifest(tmp_path)
 
 
 def test_docker_verifier_never_invokes_model_commands(tmp_path, monkeypatch):
-    (tmp_path / "Dockerfile").write_text("FROM scratch")
+    (tmp_path / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
     commands = []
     def fake(cmd, **kwargs):
         commands.append(cmd)

@@ -39,13 +39,13 @@ const optional = process.env.FEATURE_FLAG || 'off';
 
 def shop(tmp_path: Path, demo: bool = True) -> Path:
     (tmp_path / "backend/src").mkdir(parents=True)
-    (tmp_path / "package.json").write_text("{}")
-    (tmp_path / "backend/src/auth.js").write_text(AUTH)
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "backend/src/auth.js").write_text(AUTH, encoding="utf-8")
     (tmp_path / "backend/src/payment.js").write_text(PAYMENT if demo else PAYMENT.split("if (PAYMENT_MODE")[0].replace(
-        "const PAYMENT_MODE = process.env.PAYMENT_MODE;\n", ""))
-    (tmp_path / "backend/src/server.js").write_text(SERVER)
+        "const PAYMENT_MODE = process.env.PAYMENT_MODE;\n", ""), encoding="utf-8")
+    (tmp_path / "backend/src/server.js").write_text(SERVER, encoding="utf-8")
     (tmp_path / "frontend").mkdir()
-    (tmp_path / "frontend/x.js").write_text("if (!process.env.VITE_ONLY) throw new Error('x')")
+    (tmp_path / "frontend/x.js").write_text("if (!process.env.VITE_ONLY) throw new Error('x')", encoding="utf-8")
     return tmp_path
 
 
@@ -123,7 +123,7 @@ def test_모의_결제_서버_코드는_문법이_맞다(tmp_path):
     if not node:
         pytest.skip("node 없음")
     script = tmp_path / "mock.js"
-    script.write_text(ds.MOCK_PAYMENT_JS)
+    script.write_text(ds.MOCK_PAYMENT_JS, encoding="utf-8")
     assert subprocess.run([node, "--check", str(script)], capture_output=True).returncode == 0
 
 
@@ -215,9 +215,9 @@ def test_TS_타입과_모아서_종료하는_검사도_필수_설정으로_찾�
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "auth.ts").write_text(
         "const JWT_SECRET: string = process.env.JWT_SECRET ?? '';\n"
-        "if (!JWT_SECRET || JWT_SECRET.length < 32) {\n  console.error('bad');\n  process.exit(1);\n}\n")
+        "if (!JWT_SECRET || JWT_SECRET.length < 32) {\n  console.error('bad');\n  process.exit(1);\n}\n", encoding="utf-8")
     (tmp_path / "src" / "server.ts").write_text(
         "function validate(): void {\n  const errors: string[] = [];\n  if (!process.env.DATABASE_URL) {\n    errors.push('DATABASE_URL');\n  }\n"
-        "  if (errors.length) {\n    process.exit(1);\n  }\n}\n")
+        "  if (errors.length) {\n    process.exit(1);\n  }\n}\n", encoding="utf-8")
     found = ds.required_env(str(tmp_path))
     assert found.get("JWT_SECRET") == 32 and "DATABASE_URL" in found

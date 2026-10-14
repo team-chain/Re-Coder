@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -159,3 +160,38 @@ def test_mcp_tool_calls_are_audited_without_values(tmp_path, monkeypatch):
     line = json.loads((tmp_path / "mcp_calls.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert line["tool"] == "recoder_analyze" and line["argument_names"] == ["error_message", "workspace_path"]
     assert "secret-value-123" not in (tmp_path / "mcp_calls.jsonl").read_text(encoding="utf-8")
+
+
+def test_tests_do_not_depend_on_plugins_missing_from_requirements_dev():
+    """pytest-asyncio 같은 플러그인은 requirements-dev.txt 에 없다 — 쓰면 그 플러그인이 있는 PC 에서만 통과한다."""
+    req = (CORE / "requirements-dev.txt").read_text(encoding="utf-8").lower()
+    for path in (CORE / "tests").glob("test_*.py"):
+        text = path.read_text(encoding="utf-8")
+        if re.search(r"(?m)^\s*@pytest\.mark\.asyncio", text):
+            assert "pytest-asyncio" in req, f"{path.name}: pytest-asyncio 가 requirements-dev.txt 에 없다"
+
+
+def test_tests_read_and_write_text_as_utf8_on_any_locale():
+    """한국어 Windows(cp949)·영문 Windows(cp1252) 개발 PC 에서도 같은 결과 — 테스트의 텍스트 입출력도 UTF-8 을 명시한다.
+
+    제품 코드는 test_core_io_never_depends_on_the_windows_locale 가 지킨다. 테스트가 로캘 기본값으로 쓰면 Windows CI 와
+    한국어 PC 에서만 깨진다(sandbox 의 EUC-KR 로캘 실행에서 33건이 그렇게 실패했다).
+    """
+    import ast
+    bad = []
+    for path in sorted((CORE / "tests").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            kws = {k.arg for k in node.keywords}
+            if "encoding" in kws or None in kws:
+                continue
+            name = node.func.attr
+            if (name == "read_text" and not node.args) or (name == "write_text" and len(node.args) < 2):
+                bad.append(f"{path.name}:{node.lineno} {name}")
+            elif name in ("run", "check_output", "Popen") and isinstance(node.func.value, ast.Name) \
+                    and node.func.value.id == "subprocess" and any(
+                        k.arg in ("text", "universal_newlines") and getattr(k.value, "value", None) is True for k in node.keywords):
+                bad.append(f"{path.name}:{node.lineno} subprocess.{name}(text=True)")
+    assert not bad, bad[:20]

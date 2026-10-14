@@ -13,7 +13,7 @@ from core.schemas import ECSDeployRequest
 
 
 def request_for(tmp_path, dockerfile="FROM node:22-alpine\n", **overrides):
-    (tmp_path / "Dockerfile").write_text(dockerfile)
+    (tmp_path / "Dockerfile").write_text(dockerfile, encoding="utf-8")
     fields = dict(project_id="p", cluster="c", service="s", workspace_path=str(tmp_path), container_port=3456)
     fields.update(overrides)
     return ECSDeployRequest(**fields)
@@ -25,7 +25,7 @@ def request_for(tmp_path, dockerfile="FROM node:22-alpine\n", **overrides):
     "FROM python:3.12 AS builder\nFROM docker.io/library/node:22-slim AS runtime\n",
 ])
 def test_express_check_uses_final_runtime_and_request_port(tmp_path, dockerfile):
-    (tmp_path / "app.js").write_text("const app = express(); app.get('/health', (req,res)=>res.send('ok'));\n")
+    (tmp_path / "app.js").write_text("const app = express(); app.get('/health', (req,res)=>res.send('ok'));\n", encoding="utf-8")
     req = request_for(tmp_path, dockerfile)
     assert configure_health_check(req) == ""
     assert req.health_check_command[:3] == ["CMD", "node", "-e"]
@@ -33,7 +33,7 @@ def test_express_check_uses_final_runtime_and_request_port(tmp_path, dockerfile)
 
 
 def test_python_healthz_is_detected_without_curl(tmp_path):
-    (tmp_path / "main.py").write_text("app = FastAPI()\n@app.get('/healthz')\ndef health():\n    return {'ok': True}\n")
+    (tmp_path / "main.py").write_text("app = FastAPI()\n@app.get('/healthz')\ndef health():\n    return {'ok': True}\n", encoding="utf-8")
     req = request_for(tmp_path, "FROM python:3.12-slim\n", container_port=8000)
     assert configure_health_check(req) == ""
     assert req.health_check_path == "/healthz"
@@ -44,7 +44,7 @@ def test_python_healthz_is_detected_without_curl(tmp_path):
 def test_next_api_route_is_used_instead_of_default_health(tmp_path):
     route = tmp_path / "src/app/api/health/route.ts"
     route.parent.mkdir(parents=True)
-    route.write_text("export async function GET() { return Response.json({ok: true}); }")
+    route.write_text("export async function GET() { return Response.json({ok: true}); }", encoding="utf-8")
     req = request_for(tmp_path)
     assert configure_health_check(req) == ""
     assert req.health_check_path == "/api/health"
@@ -57,8 +57,8 @@ def test_next_api_route_is_used_instead_of_default_health(tmp_path):
     "FROM company/node:22\n",
 ])
 def test_builder_or_package_json_does_not_prove_runtime(tmp_path, dockerfile):
-    (tmp_path / "package.json").write_text('{"dependencies":{"express":"*"}}')
-    (tmp_path / "app.js").write_text("app.get('/health', handler);")
+    (tmp_path / "package.json").write_text('{"dependencies":{"express":"*"}}', encoding="utf-8")
+    (tmp_path / "app.js").write_text("app.get('/health', handler);", encoding="utf-8")
     req = request_for(tmp_path, dockerfile)
     assert "런타임" in configure_health_check(req)
     assert req.health_check_command is None
@@ -78,7 +78,7 @@ def test_missing_get_route_is_reported_without_an_always_failing_check(tmp_path,
     source = tmp_path / name
     source.parent.mkdir(parents=True, exist_ok=True)
     setup = "app = FastAPI()\n" if source.suffix == ".py" else "const app = express();\n"
-    source.write_text(setup + content)
+    source.write_text(setup + content, encoding="utf-8")
     req = request_for(tmp_path, dockerfile)
     assert "헬스 경로" in configure_health_check(req)
     assert req.health_check_command is None

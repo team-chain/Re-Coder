@@ -297,11 +297,13 @@ def apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
             path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             changed.append(f"{path.relative_to(workspace)} (overrides)")
         lock_note = ""
-        if changed and npm_lock and shutil.which("npm"):
+        #: Windows 의 npm 은 npm.cmd 라 이름만으로는 실행되지 않는다 — 찾은 전체 경로로 부른다.
+        npm = shutil.which("npm") if npm_lock else None
+        if changed and npm:
             for rel in dict.fromkeys(c.split(" ")[0] for c in changed):
                 folder = (workspace / rel).parent
                 try:
-                    done = subprocess.run(["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"],
+                    done = subprocess.run([npm, "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"],
                                           cwd=folder, capture_output=True, text=True, timeout=240, encoding="utf-8", errors="replace")
                     lock_note = " 잠금 파일도 갱신했습니다." if done.returncode == 0 else " 잠금 파일은 갱신하지 못했습니다(npm install 로 갱신하세요)."
                 except (OSError, subprocess.TimeoutExpired):

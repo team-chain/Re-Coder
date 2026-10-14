@@ -42,7 +42,7 @@ def test_truncated_structured_plan_retries_with_shorter_instruction(monkeypatch,
             return super().call(request, agent, operation, prefer)
 
     monkeypatch.setattr(ca, "get_router", lambda: Cut())
-    (tmp_path / "index.js").write_text("x")  # 기존 프로젝트 — 한 번에 받는 경로
+    (tmp_path / "index.js").write_text("x", encoding="utf-8")  # 기존 프로젝트 — 한 번에 받는 경로
     result = ca.generate_plan("쇼핑몰", project_root=str(tmp_path))
     assert len(calls) == 2 and "재시도" in calls[1] and "2개 이하" in calls[1]
     assert result["decisions"]

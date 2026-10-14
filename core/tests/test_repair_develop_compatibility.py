@@ -17,13 +17,13 @@ from grounded_repair.store import RepairStore
 def test_new_readiness_rules_use_copy_and_approval_without_ai(tmp_path, code, line):
     root = tmp_path / "project"
     root.mkdir()
-    (root / "package.json").write_text(json.dumps({"name": "demo", "scripts": {"start": "node app.js"}}))
-    (root / "app.js").write_text("require('http').createServer((req,res)=>res.end('ok')).listen(3000);\n")
-    (root / ".dockerignore").write_text("**/node_modules\n.git\n.env\n.env.*\n")
+    (root / "package.json").write_text(json.dumps({"name": "demo", "scripts": {"start": "node app.js"}}), encoding="utf-8")
+    (root / "app.js").write_text("require('http').createServer((req,res)=>res.end('ok')).listen(3000);\n", encoding="utf-8")
+    (root / ".dockerignore").write_text("**/node_modules\n.git\n.env\n.env.*\n", encoding="utf-8")
     original = ('FROM node:22-alpine AS deps\nWORKDIR /app\nCOPY package.json ./\nRUN npm install\n'
                 'FROM node:22-alpine\nWORKDIR /app\nCOPY . .\n' + line
                 + '\nEXPOSE 3000\nCMD ["node", "app.js"]\n')
-    (root / "Dockerfile").write_text(original)
+    (root / "Dockerfile").write_text(original, encoding="utf-8")
     assert {i.code for i in analyze(root).errors} == {code}
 
     class NoModel:
@@ -36,7 +36,7 @@ def test_new_readiness_rules_use_copy_and_approval_without_ai(tmp_path, code, li
 
         def __call__(self, candidate):
             assert candidate != root
-            assert (candidate / "Dockerfile").read_text() != original
+            assert (candidate / "Dockerfile").read_text(encoding="utf-8") != original
             return {"passed": not analyze(candidate).errors}
 
     index = KnowledgeIndex([])
@@ -46,6 +46,6 @@ def test_new_readiness_rules_use_copy_and_approval_without_ai(tmp_path, code, li
     result = asyncio.run(pipeline.run(str(root), "Docker build failed"))
     assert result["route"] == "rules" and result["llm_calls"] == 0
     assert result["status"] == "ready_for_approval"
-    assert (root / "Dockerfile").read_text() == original
+    assert (root / "Dockerfile").read_text(encoding="utf-8") == original
     store.approve(result["id"], str(root))
     assert not analyze(root).errors

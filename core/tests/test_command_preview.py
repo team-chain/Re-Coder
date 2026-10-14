@@ -29,8 +29,8 @@ def make_plan(**kw) -> DeploymentPlan:
 
 def test_데모_모드는_네트워크_DB_모의결제_상품_빌드_교체_실행_순서로_보이고_값은_가린다(tmp_path):
     ws = shop(tmp_path / "ws")
-    (ws / "Dockerfile").write_text("FROM node:22-alpine\n")
-    (ws / "backend/init-db.js").write_text("// seed")
+    (ws / "Dockerfile").write_text("FROM node:22-alpine\n", encoding="utf-8")
+    (ws / "backend/init-db.js").write_text("// seed", encoding="utf-8")
     env, _ = ls.plan("shop", ["postgres"], ["DATABASE_URL"])
     ds.set_demo("shop", True)
     plan = make_plan(env=env, companions=["postgres"])
@@ -68,8 +68,8 @@ def test_위험_사유는_한글로_지금_포트를_말한다(tmp_path):
 def test_DB_없고_데모_아니면_빌드_교체_실행만(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
-    (ws / "package.json").write_text("{}")
-    (ws / ".env").write_text("API_KEY=abcdef123456\n")
+    (ws / "package.json").write_text("{}", encoding="utf-8")
+    (ws / ".env").write_text("API_KEY=abcdef123456\n", encoding="utf-8")
     plan = make_plan(env_files=[".env"])
     routes._apply_settings_to_plan(plan, str(ws))
     cmds = [s["command"] for s in plan.command_steps]

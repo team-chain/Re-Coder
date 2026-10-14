@@ -90,11 +90,11 @@ def test_auto_fixes_leave_only_the_code_mismatch(shop):
                  "DOCKERFILE_DEPS_DIR_MISSING"):
         assert br.apply_fix(shop, code)["applied"], code
     assert (shop / "client/src/index.jsx").is_file() and not (shop / "client/src/index.js").exists()
-    assert '/src/index.jsx' in (shop / "client/index.html").read_text()
-    app = (shop / "client/src/App.jsx").read_text()
+    assert '/src/index.jsx' in (shop / "client/index.html").read_text(encoding="utf-8")
+    app = (shop / "client/src/App.jsx").read_text(encoding="utf-8")
     assert "import.meta.env.VITE_STRIPE_KEY" in app and "'@stripe/stripe-js'" in app
-    assert "VITE_STRIPE_KEY" in (shop / ".env.example").read_text()
-    docker = (shop / "Dockerfile").read_text()
+    assert "VITE_STRIPE_KEY" in (shop / ".env.example").read_text(encoding="utf-8")
+    docker = (shop / "Dockerfile").read_text(encoding="utf-8")
     #: `RUN cd server` 대신 WORKDIR 로 들어갔다 나온다(같은 동작, Dockerfile 검사 DL3003 없음).
     assert "WORKDIR /app/server\nRUN if [ -f package-lock.json ]; then npm ci --omit=dev" in docker
     assert "/app/server/node_modules ./server/node_modules" in docker and "RUN cd server" not in docker
@@ -165,7 +165,7 @@ def test_root_vite_api_helper_is_checked_and_fixed(tmp_path):
     _write(tmp_path, files)
     assert "NODE_CLIENT_HARDCODED_LOCALHOST" in codes(tmp_path)
     assert br.apply_fix(tmp_path, "NODE_CLIENT_HARDCODED_LOCALHOST")["applied"]
-    assert "localhost" not in (tmp_path / "src/api/client.js").read_text()
+    assert "localhost" not in (tmp_path / "src/api/client.js").read_text(encoding="utf-8")
 
 
 def test_consistency_issue_paths_include_subproject(tmp_path):
@@ -187,5 +187,5 @@ def test_signed_webhook_must_mount_before_global_json_parser(tmp_path):
         "hooks.js": "import express from 'express';\nconst router=express.Router();\nrouter.post('/',express.raw({type:'application/json'}),(q,s)=>stripe.webhooks.constructEvent(q.body,q.headers['stripe-signature'],'secret'));\nexport default router;",
     })
     assert "NODE_WEBHOOK_RAW_BODY_ORDER" in codes(tmp_path)
-    (tmp_path / "server.js").write_text(header + mount + parser)
+    (tmp_path / "server.js").write_text(header + mount + parser, encoding="utf-8")
     assert "NODE_WEBHOOK_RAW_BODY_ORDER" not in codes(tmp_path)

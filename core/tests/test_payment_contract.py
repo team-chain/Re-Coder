@@ -59,7 +59,7 @@ def test_결정이_상한이면_결제_카드_자리를_만든다(tmp_path, monk
 def test_기존_프로젝트나_결제_없는_요청은_묻지_않는다(tmp_path, monkeypatch):
     monkeypatch.setattr(ca, "get_router", lambda: _plan_router([_decision(1)]))
     assert [d["id"] for d in ca.generate_plan("할 일 앱", project_root=str(tmp_path))["decisions"]] == ["d1"]
-    (tmp_path / "index.js").write_text("x")
+    (tmp_path / "index.js").write_text("x", encoding="utf-8")
     assert [d["id"] for d in ca.generate_plan("결제 붙여줘", project_root=str(tmp_path))["decisions"]] == ["d1"]
 
 
@@ -145,21 +145,21 @@ def test_코드_생성은_결제_모듈을_넣고_서버가_쓰지_않으면_일
     # 고정 파일은 모의 결제 데모의 조건(환경변수 이름)을 그대로 만족한다
     ws = tmp_path / "out"
     for f, c in files.items():
-        (ws / f).parent.mkdir(parents=True, exist_ok=True); (ws / f).write_text(c)
+        (ws / f).parent.mkdir(parents=True, exist_ok=True); (ws / f).write_text(c, encoding="utf-8")
     assert ds.demo_supported(str(ws))
 
 
 def test_AI_앱도_서버가_하위_폴더면_데모를_지원한다(tmp_path):
     ws = tmp_path / "ws"; (ws / "server" / "src").mkdir(parents=True)
-    (ws / "server" / "package.json").write_text("{}")
-    (ws / "server" / "src" / "payment.js").write_text(GOOD_PAYMENT)
+    (ws / "server" / "package.json").write_text("{}", encoding="utf-8")
+    (ws / "server" / "src" / "payment.js").write_text(GOOD_PAYMENT, encoding="utf-8")
     assert ds.demo_supported(str(ws))
 
 
 def test_데모를_못_쓰면_이유와_방법을_알려_준다(tmp_path):
     ws = tmp_path / "ws"; (ws / "server").mkdir(parents=True)
-    (ws / "server" / "package.json").write_text("{}")
-    (ws / "server" / "pay.js").write_text("if (!process.env.STRIPE_SECRET_KEY) throw new Error('x');\n")
+    (ws / "server" / "package.json").write_text("{}", encoding="utf-8")
+    (ws / "server" / "pay.js").write_text("if (!process.env.STRIPE_SECRET_KEY) throw new Error('x');\n", encoding="utf-8")
     state = ds.evaluate("ws-nodemo", str(ws), set())
     assert state["demo"]["available"] is False
     assert "모의 결제 모드가 없어" in state["demo"]["unavailable_reason"]

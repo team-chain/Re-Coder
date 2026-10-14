@@ -42,18 +42,18 @@ def test_losing_process_exit_preserves_owner_and_token(isolated):
     assert not CoreSingleton.acquire_lock(owner + 100000)
     CoreSingleton.release_lock(owner + 100000)
     assert CoreSingleton.RUNTIME_FILE.read_bytes() == before
-    lock = json.loads(CoreSingleton.LOCK_FILE.read_text())
+    lock = json.loads(CoreSingleton.LOCK_FILE.read_text(encoding="utf-8"))
     assert lock['pid'] == owner
     assert lock['windows'] == [owner]
 
 
 def test_old_finally_and_atexit_do_not_delete_replacement(isolated):
     previous, replacement = os.getpid(), os.getpid() + 100000
-    CoreSingleton.LOCK_FILE.write_text(json.dumps({'pid': replacement, 'windows': [replacement]}))
+    CoreSingleton.LOCK_FILE.write_text(json.dumps({'pid': replacement, 'windows': [replacement]}), encoding="utf-8")
     publish(replacement)
     CoreSingleton.release_lock(previous)
     CoreSingleton.release_lock(previous)
-    assert json.loads(CoreSingleton.LOCK_FILE.read_text())['pid'] == replacement
+    assert json.loads(CoreSingleton.LOCK_FILE.read_text(encoding="utf-8"))['pid'] == replacement
     assert CoreSingleton.read_runtime().pid == replacement
 
 
@@ -124,7 +124,7 @@ def test_simultaneous_processes_have_one_owner(isolated):
         loser.join(timeout=5)
         assert loser.exitcode == 0
         assert CoreSingleton.read_runtime().pid == winners[0]
-        assert json.loads(CoreSingleton.LOCK_FILE.read_text())['pid'] == winners[0]
+        assert json.loads(CoreSingleton.LOCK_FILE.read_text(encoding="utf-8"))['pid'] == winners[0]
     finally:
         release.set()
         for worker in workers:
@@ -171,7 +171,7 @@ def test_stale_lock_with_reused_pid_is_taken_over(isolated):
     if CoreSingleton._process_start_utc(live_but_unrelated) is None:
         pytest.skip('process start time unavailable on this platform')
     assert CoreSingleton.acquire_lock(os.getpid())
-    assert json.loads(CoreSingleton.LOCK_FILE.read_text())['pid'] == os.getpid()
+    assert json.loads(CoreSingleton.LOCK_FILE.read_text(encoding="utf-8"))['pid'] == os.getpid()
 
 
 def test_live_owner_started_before_its_lock_keeps_the_lock(isolated):

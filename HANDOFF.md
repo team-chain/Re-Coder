@@ -1,3 +1,12 @@
+# 환경 안정화 (2026-10-14, 2.0.30)
+
+- ci.yml: test 잡을 matrix(ubuntu·windows·macos × py3.11 + ubuntu py3.13, fail-fast false, AWS 가짜 키·메타데이터 끔), webview 잡 ubuntu·windows. 실제 Windows·macOS 결과는 sandbox 에서 볼 수 없다 — 첫 CI 실행 결과로 남은 OS 전용 문제를 확인할 것.
+- 로캘: sandbox 에 ko_KR.EUC-KR 로캘을 만들어(PYTHONUTF8=0, TZ=Asia/Seoul) 전체를 돌림 — 33건 실패 중 16건은 테스트의 로캘 기본 인코딩(read_text/write_text/subprocess text=True) → 코드모드로 262곳 encoding="utf-8"(바이트 오프셋 기준 AST 삽입) + 재발 방지 테스트(test_tests_read_and_write_text_as_utf8_on_any_locale). 남은 17건은 리눅스 비 UTF-8 로캘에서만 생기는 것(프로세스 인자·한글 경로 바이트를 EUC-KR 로 넘김 — git·node 는 UTF-8 로 해석). Windows 는 인자·경로가 UTF-16 이라 해당 없음. 그래서 리눅스 로캘 잡은 CI 에 넣지 않았다.
+- Python 3.11 깨끗한 venv(uv, requirements + requirements-dev): @pytest.mark.asyncio 테스트 2건이 플러그인 없어 실패 → asyncio.run 으로, 재발 방지 테스트.
+- scripts/golden_path_smoke.py: generate_plan_topics 픽스처({"topics": []} → 제품의 한 번에 받기 경로), 기대 호출 갱신 — develop 에서도 실패하던 것(bb56def 에서 재현).
+- node_fixups re.split 위치 maxsplit → 키워드. test_grounded_repair 기호 링크(WinError 1314 건너뜀), test_dev_2016 의 sh 기반 3건 POSIX 전용.
+- 로컬 확인: core 2831(3.11·3.13), extension npm test 574 + build + verify:package, watchdog 65, discord-bot 112(py3.12 venv), golden path, npm audit 4곳·pip-audit 3개 잠금 파일 0건. commerce compose 잡은 레지스트리 차단으로 sandbox 에서 못 돌림.
+
 # ReCoder 자신의 보안 — OWASP AI 에이전트 위험 (2026-10-14, 2.0.29)
 
 - ASI01 context_gate.neutralize_instructions(path, content): 문서(.md/.txt/.html/README·notes 등)는 모든 줄, 코드는 주석 줄만 — 패턴(이전 지시 무시 영/한, 역할 바꾸기·시스템 프롬프트·특수 토큰, curl|wget … | sh, 비밀값 + 외부 URL 전송)이 걸린 줄을 NEUTRALIZED 로 바꾸고 {line, kind, text(마스킹)} 반환. scrub_file_entry(removed=) → code_agent._scrub_context(…, removed) → result["prompt_guard"], 요약 문장. _build_code_prompt 에 DATA_NOTICE(파일은 데이터) — 참고/직전/열린 파일이 있을 때만.

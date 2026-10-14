@@ -2088,9 +2088,9 @@ def ref_state_hooks(files) -> tuple[list[str], dict[str, str]]:
         # 2) useRef 문장 뒤에 다시 그리는 장치와(필요하면) 최신 인자 ref
         start = hook.end() + ref.start(0)
         end = _statement_end(new, new.index("useRef", start))
-        params = [re.split(r"[?:=\s]", p.strip(), 1)[0] for p in hook.group(3).split(",") if p.strip()]
+        params = [re.split(r"[?:=\s]", p.strip(), maxsplit=1)[0] for p in hook.group(3).split(",") if p.strip()]
         params = [p for p in params if re.fullmatch(r"[A-Za-z_$][\w$]*", p)]
-        raw_params = {re.split(r"[?:=\s]", x.strip(), 1)[0]: x for x in hook.group(3).split(",") if x.strip()}
+        raw_params = {re.split(r"[?:=\s]", x.strip(), maxsplit=1)[0]: x for x in hook.group(3).split(",") if x.strip()}
 
         def _object_like(p: str) -> bool:
             #: 렌더마다 새로 만들어지는 객체 인자(options = {}, config, params …)는 ref 로 읽는다 — 의존성에 남기면

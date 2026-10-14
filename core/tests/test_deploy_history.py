@@ -95,7 +95,7 @@ def test_legacy_jsonl_bad_lines_and_snapshot_precedence(client):
     legacy = record.model_dump(mode="json")
     legacy["image"] = "app:old"
     legacy["status"] = "deployed"
-    (project_dir / "sample_deployments.jsonl").write_text(json.dumps(legacy) + "\n{invalid\n" + json.dumps({"image": "incomplete"}))
+    (project_dir / "sample_deployments.jsonl").write_text(json.dumps(legacy) + "\n{invalid\n" + json.dumps({"image": "incomplete"}), encoding="utf-8")
     assert store.save_records({record.deployment_id: record})
     deploy._deployment_records = store.load_records()
     assert deploy._deployment_records[record.deployment_id].image == "app:v2"

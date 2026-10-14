@@ -86,7 +86,7 @@ def init_git_repo(path, branch: str = "main"):
         head, rest = args[0], args[1:]
         argv = [head, *safe, *rest] if head == "git" else list(args)
         return subprocess.run(
-            argv, cwd=path, capture_output=True, text=True, env=env
+            argv, cwd=path, capture_output=True, text=True, env=env, encoding="utf-8"
         )
 
     if run("git", "init", "-q", "-b", branch).returncode != 0:
@@ -357,9 +357,9 @@ def test_automatic_health_check_reaches_aws_registration(
 ):
     """Both public requests must carry the resolved check through registration."""
     client, ecs_routes = app_client
-    (tmp_path / "Dockerfile").write_text("FROM node:22-alpine\n")
+    (tmp_path / "Dockerfile").write_text("FROM node:22-alpine\n", encoding="utf-8")
     (tmp_path / "app.js").write_text(
-        "const app=express(); app.get('/health', handler);" if has_health_route else "const app=express(); app.get('/', handler);"
+        "const app=express(); app.get('/health', handler);" if has_health_route else "const app=express(); app.get('/', handler);", encoding="utf-8"
     )
     registered = []
 

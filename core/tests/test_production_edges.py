@@ -37,9 +37,9 @@ def test_CRLF_파일에도_pg_숫자_파서를_넣는다():
 
 
 def test_커버리지_리포트의_index_html_은_앱_화면이_아니다(tmp_path):
-    (tmp_path / "requirements.txt").write_text("fastapi\n")
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
     (tmp_path / "htmlcov").mkdir()
-    (tmp_path / "htmlcov" / "index.html").write_text("<html></html>")
+    (tmp_path / "htmlcov" / "index.html").write_text("<html></html>", encoding="utf-8")
     assert br.expects_screen(tmp_path) is False
 
 

@@ -36,12 +36,12 @@ def test_approved_starter_keeps_auth_payment_and_locks_without_llm(tmp_path, mon
 
 
 def test_starter_refuses_existing_project(tmp_path):
-    (tmp_path / "index.js").write_text("keep me")
+    (tmp_path / "index.js").write_text("keep me", encoding="utf-8")
     choice = starter.decision()
     choice["chosen_key"] = "reviewed"
     with pytest.raises(ValueError, match="빈 프로젝트"):
         ca.generate_code("쇼핑몰", decisions=[choice], project_root=str(tmp_path))
-    assert (tmp_path / "index.js").read_text() == "keep me"
+    assert (tmp_path / "index.js").read_text(encoding="utf-8") == "keep me"
 
 
 def test_시작_방식에_따라_이어서_물을_결정을_알려_준다(tmp_path, monkeypatch):

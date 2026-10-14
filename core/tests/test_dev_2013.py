@@ -131,7 +131,7 @@ def test_api_prefix_through_wrapper_and_env_fallback(tmp_path):
     result = analyze(tmp_path, online=False)
     assert "NODE_CLIENT_API_DOUBLE_PREFIX" in [i.code for i in result.issues]
     names = result.fix_data["api_double_prefix"]["src/pages/Home.tsx"]
-    fixed = br.api_prefix_rewrite((tmp_path / "src/pages/Home.tsx").read_text(), names)
+    fixed = br.api_prefix_rewrite((tmp_path / "src/pages/Home.tsx").read_text(encoding="utf-8"), names)
     assert "execute(`/products?page=1`)" in fixed and "execute('/products/1')" in fixed
 
 
@@ -215,7 +215,7 @@ def test_apply_all_fixes_applies_everything_and_reports(tmp_path):
     result = br.apply_all_fixes(tmp_path)
     assert set(result["codes"]) >= {"NODE_TAILWIND_NOT_CONFIGURED", "NODE_KRW_MINOR_UNITS"}
     assert (tmp_path / "frontend/tailwind.config.js").is_file()
-    assert "return cents;" in (tmp_path / "frontend/src/utils/currency.ts").read_text()
+    assert "return cents;" in (tmp_path / "frontend/src/utils/currency.ts").read_text(encoding="utf-8")
     assert not [r for r in result["remaining"] if r["code"] in result["codes"]]
     assert br.apply_all_fixes(tmp_path)["codes"] == []                      # 두 번 눌러도 안전
 

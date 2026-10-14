@@ -10,14 +10,14 @@ import github_agent as gh
 def repo(tmp_path, monkeypatch):
     monkeypatch.setattr(gh.GitHubAgent, '_load_token', lambda self: None)
     agent = gh.GitHubAgent()
-    run = lambda *a: subprocess.run(['git', '-C', str(tmp_path), *a], capture_output=True, text=True, check=True)
+    run = lambda *a: subprocess.run(['git', '-C', str(tmp_path), *a], capture_output=True, text=True, check=True, encoding="utf-8")
     run('init', '-q', '-b', 'main')
     run('config', 'user.name', 't'); run('config', 'user.email', 't@example.test')
-    (tmp_path / 'app.js').write_text('console.log(1)\n')
-    (tmp_path / '.env.production').write_text('DB_PASSWORD=hunter2hunter2\n')
-    (tmp_path / 'id_ed25519').write_text('-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n')
-    (tmp_path / 'credentials.json').write_text('{}')
-    (tmp_path / 'config.js').write_text('const key = "AKIA' + 'ABCDEFGHIJKLMNOP";\n')
+    (tmp_path / 'app.js').write_text('console.log(1)\n', encoding="utf-8")
+    (tmp_path / '.env.production').write_text('DB_PASSWORD=hunter2hunter2\n', encoding="utf-8")
+    (tmp_path / 'id_ed25519').write_text('-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n', encoding="utf-8")
+    (tmp_path / 'credentials.json').write_text('{}', encoding="utf-8")
+    (tmp_path / 'config.js').write_text('const key = "AKIA' + 'ABCDEFGHIJKLMNOP";\n', encoding="utf-8")
     return agent, tmp_path, run
 
 
@@ -39,11 +39,11 @@ def test_삭제된_추적_파일도_반영된다(repo):
 
 def test_설정_견본과_토큰없는_npmrc_는_올린다(repo):
     agent, ws, run = repo
-    (ws / '.env.example').write_text('DB_PASSWORD=\n')
-    (ws / '.npmrc').write_text('legacy-peer-deps=true\n')
+    (ws / '.env.example').write_text('DB_PASSWORD=\n', encoding="utf-8")
+    (ws / '.npmrc').write_text('legacy-peer-deps=true\n', encoding="utf-8")
     (ws / 'sub').mkdir()
-    (ws / 'sub' / '.npmrc').write_text('//registry.npmjs.org/:_authToken=npm_abcdefghijklmnop\n')
-    (ws / 'jwt.test.js').write_text('const t = "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0NTY3.SflKxwRJSMeKKF2QT4f";\n')
+    (ws / 'sub' / '.npmrc').write_text('//registry.npmjs.org/:_authToken=npm_abcdefghijklmnop\n', encoding="utf-8")
+    (ws / 'jwt.test.js').write_text('const t = "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0NTY3.SflKxwRJSMeKKF2QT4f";\n', encoding="utf-8")
     excluded = agent._stage_safely(ws)
     staged = set(run('diff', '--cached', '--name-only').stdout.split())
     assert {'.env.example', '.npmrc', 'jwt.test.js', 'app.js'} <= staged
@@ -52,9 +52,9 @@ def test_설정_견본과_토큰없는_npmrc_는_올린다(repo):
 
 def test_pathspec_문법처럼_보이는_이름도_함께_올라간다(repo):
     agent, ws, run = repo
-    (ws / ':memo.txt').write_text('memo\n')
-    (ws / '한글 파일.txt').write_text('안녕\n')
-    (ws / 'file[1].txt').write_text('x\n')
+    (ws / ':memo.txt').write_text('memo\n', encoding="utf-8")
+    (ws / '한글 파일.txt').write_text('안녕\n', encoding="utf-8")
+    (ws / 'file[1].txt').write_text('x\n', encoding="utf-8")
     agent._stage_safely(ws)
     staged = set(run('-c', 'core.quotepath=false', 'diff', '--cached', '--name-only', '-z').stdout.split('\0'))
     assert {':memo.txt', '한글 파일.txt', 'file[1].txt', 'app.js'} <= staged

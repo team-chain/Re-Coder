@@ -104,7 +104,7 @@ def test_envelope_is_readable_both_ways(tmp_path):
 const a = recoderUnwrap({status:'success', message:'m', data:{token:'t', id:1, status:'pending'}});
 const b = recoderUnwrap({status:'success', data:[{id:1},{id:2}]});
 console.log(JSON.stringify([a.token, a.data.token, a.status, Array.isArray(b), b.map(x=>x.id), b.data.length]));"""],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8")
     assert json.loads(out.stdout) == ["t", "t", "success", True, [1, 2], 2]
 
 

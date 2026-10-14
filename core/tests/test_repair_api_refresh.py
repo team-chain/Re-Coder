@@ -22,7 +22,7 @@ def test_pending_license_is_not_fetched_and_reviewed_excerpt_has_provenance(tmp_
     assert all(r["kind"] == "excerpt" and r["fetched_at"] and r["attribution"] for r in result)
     assert all(r["text"] != "menu" for r in result)
     corpus = tmp_path / "corpus.json"
-    corpus.write_text(json.dumps(result))
+    corpus.write_text(json.dumps(result), encoding="utf-8")
     assert KnowledgeIndex.load(corpus).passages[0].attribution == "Docker documentation"
 
 

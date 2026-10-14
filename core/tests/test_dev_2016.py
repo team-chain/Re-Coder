@@ -26,7 +26,7 @@ def _syntax_ok(text: str, name: str = "x.tsx") -> bool:
     js = ("const ts=require(%r);const src=require('fs').readFileSync(0,'utf8');"
           "const out=ts.transpileModule(src,{fileName:%r,reportDiagnostics:true,compilerOptions:{jsx:'react-jsx',module:'esnext',target:'es2020'}});"
           "process.exit(out.diagnostics.length?1:0);") % (_TS, name)
-    return subprocess.run(["node", "-e", js], input=text, text=True, capture_output=True).returncode == 0
+    return subprocess.run(["node", "-e", js], input=text, text=True, capture_output=True, encoding="utf-8").returncode == 0
 
 
 def _write(root, files):
@@ -185,18 +185,19 @@ def test_go_backend_is_a_server(tmp_path):
 @pytest.mark.parametrize("log,rc,ok", [("ok", 0, True), ("src/a.ts(1,1): error TS2769: No overload", 2, True),
                                        ("src/a.ts(1,1): error TS1005: ',' expected", 2, False),
                                        ("src/a.ts(1,1): error TS2307: Cannot find module './x'", 2, False)])
+@pytest.mark.skipif(os.name != "posix", reason="Docker RUN 셸 스크립트(sh) 동작 — POSIX 셸에서만")
 def test_server_build_fails_only_on_fatal_errors(tmp_path, log, rc, ok):
     (tmp_path / "dist").mkdir()
-    (tmp_path / "dist/server.js").write_text("console.log(1)\n")
+    (tmp_path / "dist/server.js").write_text("console.log(1)\n", encoding="utf-8")
     script = f"npm() {{ echo {json.dumps(log)}; return {rc}; }}\n" + docker_kit.server_build("dist/server.js")
-    done = subprocess.run(["sh", "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    done = subprocess.run(["sh", "-c", script], cwd=tmp_path, capture_output=True, text=True, encoding="utf-8")
     assert (done.returncode == 0) is ok
 
 
 # 13 ─ 대상 폴더가 있으면 디스크 확인도 그 폴더 기준
 def test_engine_disk_root_includes_target_folder(tmp_path):
     (tmp_path / "web/frontend/src").mkdir(parents=True)
-    (tmp_path / "web/frontend/src/App.tsx").write_text("x")
+    (tmp_path / "web/frontend/src/App.tsx").write_text("x", encoding="utf-8")
     eng = ge.LargeGeneration("요청", target_folder="web", root=str(tmp_path), emit=lambda e: None, security_review=False)
     assert eng._exists_on_disk("frontend/src/App.tsx")
 
@@ -209,8 +210,8 @@ def test_existing_project_gets_no_contract_route_duplicates():
 
 
 # 14·15·16 ─ ECS 실행 설정
-@pytest.mark.asyncio
-async def test_runtime_plan_is_dropped_when_deploy_fails_early(tmp_path, monkeypatch):
+def test_runtime_plan_is_dropped_when_deploy_fails_early(tmp_path, monkeypatch):
+    import asyncio
     from core.agents.ecs_agent import ECSAgent
     from core.schemas import ECSDeployRequest
     req = ECSDeployRequest(project_id="x", cluster="c", service="s", image="", region="ap-northeast-2",
@@ -221,7 +222,7 @@ async def test_runtime_plan_is_dropped_when_deploy_fails_early(tmp_path, monkeyp
     def boom(region):
         raise RuntimeError("no creds")
     monkeypatch.setattr(agent, "_clients", boom)
-    await agent._deploy_pipeline(req)
+    asyncio.run(agent._deploy_pipeline(req))
     assert agent._runtime == {}
 
 
@@ -307,13 +308,14 @@ def test_undouble_nested_object_in_template_expression(tmp_path):
     text = ("export function A(x) {{\n  const f = (x) => {{\n    return `총 ${{ x.toLocaleString('ko-KR', {{ style: 'currency', currency: 'KRW' }}) }}`;\n"
             "  }};\n  return f(x);\n}}\nconsole.log(A(1000));\n")
     out = ge.undouble_braces("a.mjs", text)
-    (tmp_path / "a.mjs").write_text(out)
-    assert subprocess.run(["node", str(tmp_path / "a.mjs")], capture_output=True, text=True).stdout.strip() == "총 ₩1,000"
+    (tmp_path / "a.mjs").write_text(out, encoding="utf-8")
+    assert subprocess.run(["node", str(tmp_path / "a.mjs")], capture_output=True, text=True, encoding="utf-8").stdout.strip() == "총 ₩1,000"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Docker RUN 셸 스크립트(sh) 동작 — POSIX 셸에서만")
 def test_pretty_tsc_syntax_errors_still_fail_and_mixed_builds_are_strict(tmp_path):
     (tmp_path / "dist").mkdir()
-    (tmp_path / "dist/server.js").write_text("console.log(1)\n")
+    (tmp_path / "dist/server.js").write_text("console.log(1)\n", encoding="utf-8")
     log = "src/a.ts:1:1 - error\x1b[0m\x1b[90m TS1005: ',' expected"
     script = f"npm() {{ printf '%s\\n' {json.dumps(log)}; return 2; }}\n" + docker_kit.server_build("dist/server.js")
     assert subprocess.run(["sh", "-c", script], cwd=tmp_path, capture_output=True).returncode != 0
@@ -327,19 +329,19 @@ def test_import_type_of_missing_name_gets_placeholder_and_type_reexports_count(t
     root = tmp_path
     (root / "src/types").mkdir(parents=True)
     (root / "src/routes").mkdir(parents=True)
-    (root / "package.json").write_text('{"name":"a","type":"module","scripts":{"build":"tsc","start":"node dist/server.js"},"dependencies":{"express":"^4"}}')
-    (root / "src/types/index.ts").write_text("export interface User { id: string }\nexport type { Shared } from './shared.js';\n")
-    (root / "src/types/shared.ts").write_text("export interface Shared { a: number }\n")
+    (root / "package.json").write_text('{"name":"a","type":"module","scripts":{"build":"tsc","start":"node dist/server.js"},"dependencies":{"express":"^4"}}', encoding="utf-8")
+    (root / "src/types/index.ts").write_text("export interface User { id: string }\nexport type { Shared } from './shared.js';\n", encoding="utf-8")
+    (root / "src/types/shared.ts").write_text("export interface Shared { a: number }\n", encoding="utf-8")
     (root / "src/routes/pay.ts").write_text(
         "import type {\n  User,\n  Shared,\n  PaymentEvent,\n} from '../types/index.js';\n"
-        "export function f(e: PaymentEvent, u: User, s: Shared) { return [e, u, s]; }\n")
+        "export function f(e: PaymentEvent, u: User, s: Shared) { return [e, u, s]; }\n", encoding="utf-8")
     result = analyze(root, online=False)
     codes = {i.code: i for i in result.issues}
     assert "NODE_TYPE_NAME_MISSING" in codes and "PaymentEvent" in codes["NODE_TYPE_NAME_MISSING"].message
     assert "Shared" not in codes["NODE_TYPE_NAME_MISSING"].message
     assert "NODE_IMPORT_NAME_MISSING" not in codes
     apply_all_fixes(root)
-    text = (root / "src/types/index.ts").read_text()
+    text = (root / "src/types/index.ts").read_text(encoding="utf-8")
     assert "export type PaymentEvent = Record<string, any>;" in text and text.count("Shared") == 1
 
 
@@ -366,7 +368,7 @@ def test_context_setter_missing_from_provider_value_is_added(tmp_path):
     import node_fixups as nf
     for rel, text in CTX_FILES.items():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / rel).write_text(text)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
     files = ProjectFiles(tmp_path)
     notes, writes = nf.context_value_missing(files)
     out = writes["src/context/CartContext.tsx"]
@@ -386,7 +388,7 @@ def test_context_name_declared_outside_provider_is_reported_not_added(tmp_path):
     files_map["src/hooks/useCart.ts"] = files_map["src/hooks/useGhost.ts"].replace("useGhost", "useCart2")
     for rel, text in files_map.items():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / rel).write_text(text)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
     files = ProjectFiles(tmp_path)
     notes, writes = nf.context_value_missing(files)
     assert writes == {}
@@ -413,7 +415,7 @@ def test_hook_return_aliases_fill_renamed_values(tmp_path):
     }
     for rel, text in files_map.items():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / rel).write_text(text)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
     files = ProjectFiles(tmp_path)
     notes, writes = nf.context_value_missing(files)
     out = writes["src/hooks/useCart.ts"]
@@ -469,7 +471,7 @@ def test_review_round3_regressions(tmp_path):
     }
     for rel, text in files_map.items():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / rel).write_text(text)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
     files = ProjectFiles(tmp_path)
     notes, writes = nf.context_value_missing(files)
     # useCartX 는 total 을 채울 수 없어(totalPrice 는 변수가 아니다) 손대지 않고 경고로 남긴다
@@ -506,6 +508,7 @@ def test_core_io_never_depends_on_the_windows_locale():
     assert not bad, bad
 
 
+@pytest.mark.skipif(os.name != "posix", reason="가짜 syft 가 셸 스크립트 — POSIX 에서만(Windows 로캘 문제는 encoding 전수 검사가 막는다)")
 def test_sbom_with_non_ascii_is_read_under_a_non_utf8_locale(tmp_path):
     fake = tmp_path / "bin"
     fake.mkdir()
