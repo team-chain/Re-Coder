@@ -118,6 +118,15 @@ class LocalDeployAgent:
         if not dockerfile.exists():
             return False, f"Dockerfile not found: {workspace_path}/Dockerfile"
 
+        #: 2.0.29 — 위험한 RUN 은 빌드하기 전에 막는다(RUN 은 이 PC 의 Docker 에서 돈다).
+        try:
+            import dockerfile_guard  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core import dockerfile_guard  # type: ignore
+        unsafe = dockerfile_guard.check(dockerfile.read_text(encoding="utf-8", errors="replace"))
+        if unsafe:
+            return False, f"Dockerfile 안전 검사에서 막았습니다: {dockerfile_guard.message(unsafe)} — {dockerfile_guard.REMEDY}"
+
         # docker build -t {image_name} .
         args = ["docker", "build", "-t", image_name, "."]
 

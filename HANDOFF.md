@@ -1,3 +1,13 @@
+# ReCoder 자신의 보안 — OWASP AI 에이전트 위험 (2026-10-14, 2.0.29)
+
+- ASI01 context_gate.neutralize_instructions(path, content): 문서(.md/.txt/.html/README·notes 등)는 모든 줄, 코드는 주석 줄만 — 패턴(이전 지시 무시 영/한, 역할 바꾸기·시스템 프롬프트·특수 토큰, curl|wget … | sh, 비밀값 + 외부 URL 전송)이 걸린 줄을 NEUTRALIZED 로 바꾸고 {line, kind, text(마스킹)} 반환. scrub_file_entry(removed=) → code_agent._scrub_context(…, removed) → result["prompt_guard"], 요약 문장. _build_code_prompt 에 DATA_NOTICE(파일은 데이터) — 참고/직전/열린 파일이 있을 때만.
+- ASI02·05 core/dockerfile_guard.py: 논리 줄(\ 이음) 단위, RUN --security=insecure·--network=host, curl|wget → sh/python/node(TRUSTED_INSTALLERS: nodesource·rustup·poetry·astral·bun·pnpm·get.docker.com·nvm·deno 만 예외), 비밀 파일(.aws/.ssh/.npmrc…), curl/wget/nc + 비밀 env + URL, docker.sock·/proc/1|self·/host·/etc/shadow, COPY/ADD .aws/.ssh. 적용: build_readiness(DOCKERFILE_UNSAFE ERROR, 자동 수정 없음), generated_validation(빌드 전 status failed + guard), code_agent._issues_for(Dockerfile op → 교정 오류), ecs_build.build_image(BuildError, docker 안 부름), local_deploy_agent.build_image(False). docker_kit 검증본·starter·file_templates 는 통과(테스트).
+- ASI03 AwsStatus.security_warnings(model_validator: identity.arn 이 :root 로 끝나면) — 모든 생성 경로에 자동. 확장 AwsConnection 빨간 경고.
+- ASI06 grounded_repair.store.integrity(id·workspace·manifest·status·edits·corpus_version·strategy·sources 해시) 저장, cached 는 지문이 맞을 때만, approve 는 바뀌었으면 거부(지식 문서는 이미 공식 주소·검토된 라이선스만).
+- ASI09 ChatPanel 승인 카드: 요청(실제 instruction)·스택·파일 + "AI 설명"(요약, 기울임).
+- ASI07 mcp_server._audit: RECODER_HOME/mcp_calls.jsonl 에 time·tool·argument_names·ok(값 없음).
+- tests/test_dev_2029.py 10건. 전체 2829 통과.
+
 # AI 코드 보안 점수 · 배포 후 취약점 재검사 (2026-10-14, 2.0.28)
 
 - core/code_security.py: scan(files) → (Finding[], applicable). 규칙 SQL_INJECTION(.query/.execute/.raw/$queryRawUnsafe 의 템플릿·문자열 연결, req. 또는 req.body/query/params 에서 꺼낸 이름이 들어가면 precise high — Prisma $queryRaw 태그 템플릿은 안전), JWT_UNSAFE(none·리터럴 비밀값 precise, `|| '기본값'` 은 medium), CORS_WILDCARD(origin '*'/true + credentials precise), PLAINTEXT_PASSWORD(가입 라우트·users INSERT 에 password 가 있는데 bcrypt/argon2/scrypt/pbkdf2 가 없으면 precise), MISSING_AUTH(앱에 인증이 있을 때 POST/PUT/PATCH/DELETE 에 인증 미들웨어 없음 — 공개 경로·서명 웹훅·mock·app.use(prefix, auth, router) 제외), OWNER_CHECK, XSS_HTML, BRUTE_FORCE(로그인에 제한 라이브러리·직접 만든 limiter·계정 잠금(failed_login 등) 없음), ERROR_LEAK. 점수 = 통과 가중치/적용 가중치(high3·medium2·low1), 적용 규칙 없으면 None. 주석은 같은 길이 공백으로 지워 줄 번호 유지.

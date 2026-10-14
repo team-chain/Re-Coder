@@ -55,6 +55,17 @@ def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None, 
                     redacted = scrub_build_source(text)
                     if redacted != text:
                         path.write_text(redacted, encoding="utf-8")
+            #: 2.0.29 — AI 가 쓴 Dockerfile 의 위험한 RUN 은 검증 빌드도 하지 않는다(RUN 은 사용자 PC 에서 돈다).
+            try:
+                import dockerfile_guard
+            except ImportError:  # pragma: no cover
+                from core import dockerfile_guard  # type: ignore
+            docker_path = workspace / "Dockerfile"
+            unsafe = dockerfile_guard.check(docker_path.read_text(encoding="utf-8", errors="replace")) if docker_path.is_file() else []
+            if unsafe:
+                return {**base, "status": "failed", "passed": False, "exit_code": None,
+                        "output": f"Dockerfile 안전 검사에서 막아 빌드하지 않았습니다: {dockerfile_guard.message(unsafe)}",
+                        "guard": [v.__dict__ for v in unsafe]}
             with tempfile.TemporaryFile() as output:
                 process = subprocess.run(
                     ["docker", "build", "--progress=plain", "--iidfile", str(image_file), "."],

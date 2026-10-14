@@ -3312,6 +3312,14 @@ def _analyze_dockerfile(files: ProjectFiles, result: Readiness, dockerfile: str)
     text = files.read(dockerfile)
     if text is None:
         return
+    #: 2.0.29 — 빌드 전 안전 검사(내려받아 바로 실행·호스트 접근·비밀값 유출). 자동으로 고치지 않는다 — 사람이 봐야 한다.
+    try:
+        import dockerfile_guard
+    except ImportError:  # pragma: no cover
+        from core import dockerfile_guard  # type: ignore
+    for v in dockerfile_guard.check(text):
+        result.issues.append(ReadinessIssue(
+            "DOCKERFILE_UNSAFE", ERROR, f"Dockerfile 안전 검사 {v.line}행: {v.message}", dockerfile_guard.REMEDY, dockerfile))
     # COPY sources are relative to the build context, including JSON form and
     # multi-source COPY. Stage copies and dynamic paths need the actual builder.
     import shlex

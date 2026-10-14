@@ -878,15 +878,16 @@ def _decisions_prompt_block(decisions: list[NormalizedDecision]) -> str:
     )
 
 
-def _scrub_context(open_file, prior_files, context_files, secrets: dict | None = None):
-    """열린 파일·참고 파일의 비밀(.env 본문, 키 문자열)을 AI 로 보내지 않는다."""
+def _scrub_context(open_file, prior_files, context_files, secrets: dict | None = None, removed: list | None = None):
+    """열린 파일·참고 파일의 비밀(.env 본문, 키 문자열)을 AI 로 보내지 않는다.
+    2.0.29: 파일 속 숨은 지시(이전 지시 무시·비밀값 외부 전송 등)도 빼고, removed 에 모은다."""
     try:
         from context_gate import scrub_file_entry
     except ImportError:  # pragma: no cover
         from core.context_gate import scrub_file_entry  # type: ignore
-    return (scrub_file_entry(open_file, secrets) if open_file else open_file,
-            [scrub_file_entry(f, secrets) for f in prior_files] if prior_files else prior_files,
-            [scrub_file_entry(f, secrets) for f in context_files] if context_files else context_files)
+    return (scrub_file_entry(open_file, secrets, removed) if open_file else open_file,
+            [scrub_file_entry(f, secrets, removed) for f in prior_files] if prior_files else prior_files,
+            [scrub_file_entry(f, secrets, removed) for f in context_files] if context_files else context_files)
 
 
 def _restore_secrets_in_ops(ops: list[dict], secrets: dict) -> None:
@@ -936,6 +937,12 @@ def _build_code_prompt(
             ctx_block += f"\n[참고 파일] {cf.get('path','?')}\n```\n{body}\n```\n"
     if ctx_block:
         ctx_block = "\n사용자가 첨부한 참고 파일(이 내용을 활용/일관성 유지):\n" + ctx_block
+    if ctx_block or prior_block or (open_file and (open_file.get("content") or "").strip()):
+        try:
+            from context_gate import DATA_NOTICE
+        except ImportError:  # pragma: no cover
+            from core.context_gate import DATA_NOTICE  # type: ignore
+        ctx_block = f"\n{DATA_NOTICE}\n" + ctx_block
 
     folder_block = ""
     if (target_folder or "").strip():
@@ -2457,7 +2464,9 @@ def generate_code(
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
     #: 열린 파일·참고 파일의 비밀은 AI 로 보내지 않는다. 자리표시로 보낸 값은 결과에서 원래 값으로 되돌린다.
     context_secrets: dict = {}
-    open_file, prior_files, context_files = _scrub_context(open_file, prior_files, context_files, context_secrets)
+    #: 2.0.29 — 참고 파일에서 뺀 지시형 줄(결과에 알린다).
+    guarded: list[dict] = []
+    open_file, prior_files, context_files = _scrub_context(open_file, prior_files, context_files, context_secrets, guarded)
 
     # FR-02-05 — 승인 게이트. 라우트가 아니라 여기(생성 함수)에서 막는다.
     # 라우트에서만 막으면 server.py 의 구(舊) /api/code/generate 처럼 decisions 를
@@ -2665,6 +2674,17 @@ def generate_code(
                 found = found + unused_files.route_issues(unused_files.find(candidate_ops))
             except Exception as exc:  # noqa: BLE001 — 점검 실패가 생성을 막지 않는다
                 print(f"[code_agent] 미등록 API 점검 생략: {exc}", flush=True)
+            #: 2.0.29 Dockerfile 안전 검사 — 위험한 RUN 은 검증 빌드 전에 고칠 오류로.
+            try:
+                try:
+                    import dockerfile_guard
+                except ImportError:  # pragma: no cover
+                    from core import dockerfile_guard  # type: ignore
+                for op in candidate_ops:
+                    if op.get("action") != "delete" and posixpath.basename(str(op.get("file") or "")).lower().startswith("dockerfile"):
+                        found = found + dockerfile_guard.issues(str(op.get("file")), str(op.get("content") or ""))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[code_agent] Dockerfile 안전 검사 생략: {exc}", flush=True)
             #: 2.0.28 AI 코드 보안 — 정확한 규칙의 심각한 발견(사용자 입력 SQL 연결·JWT 비밀값 하드코딩·CORS 전체 허용·평문 비밀번호)만
             #: 고칠 오류로 넣는다. 나머지는 결과의 보안 점수에 경고로만.
             try:
@@ -2992,6 +3012,9 @@ def generate_code(
         consistency = _server_missing_issues(ops_out) + consistency
     if consistency:
         summary += "\n\n확인 필요: " + " / ".join(i["message"] for i in consistency[:3])
+    if guarded:
+        summary += (f"\n\n참고 파일에서 AI 에게 하는 지시처럼 보이는 줄 {len(guarded)}개를 빼고 보냈습니다"
+                    f"({', '.join(dict.fromkeys(g['file'] for g in guarded))[:120]}) — 파일에 숨은 지시가 있는지 확인하세요.")
     security = None
     if not existing and not foundation:
         try:
@@ -3018,6 +3041,8 @@ def generate_code(
         "verification": {k: v for k, v in verification.items() if k != "log"},
         #: 2.0.28 AI 코드 보안 점수(규칙별 통과·발견 위치·고치는 법)
         "security": security,
+        #: 2.0.29 참고 파일에서 AI 에게 보내지 않은 지시형 줄
+        "prompt_guard": guarded[:20],
         "foundation": foundation or None,
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),

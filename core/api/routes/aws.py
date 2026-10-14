@@ -37,7 +37,7 @@ import functools as _functools
 import threading as _threading
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, model_validator, StrictBool
 
 from .deploy_ecs import DEFAULT_CLUSTER as ECS_DEFAULT_CLUSTER
 from .deploy_ecs import DEFAULT_SERVICE as ECS_DEFAULT_SERVICE
@@ -290,6 +290,18 @@ class AwsStatus(BaseModel):
     #: 역할 모드일 때만 채워진다 — 빌린 역할과 임시 자격증명 만료 시각.
     role_arn: str = ""
     expires_at: str = ""
+    #: 2.0.29 과도한 권한(OWASP ASI03) — 루트 키 연결 등. 연결은 막지 않고 화면에 크게 경고한다.
+    security_warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _warn_root_key(self):
+        arn = (self.identity.arn if self.identity else "") or ""
+        if arn.endswith(":root") and not any("루트" in w for w in self.security_warnings):
+            self.security_warnings.append(
+                "AWS 계정의 루트(root) 키로 연결했습니다. 루트 키는 계정 전체(결제·삭제 포함)를 마음대로 할 수 있어, 새어 나가면 "
+                "계정을 통째로 잃습니다. 원클릭 IAM 셋업으로 ReCoder 전용 최소권한 사용자·역할을 만들어 연결하고, 루트 키는 "
+                "IAM 콘솔에서 지우세요.")
+        return self
 
 
 class AwsRoleSetupRequest(BaseModel):
