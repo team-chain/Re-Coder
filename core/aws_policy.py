@@ -789,6 +789,8 @@ def _ecs_statements(
             ],
             "Resource": [
                 _arn("wafv2", "regional/webacl/recoder-*/*", ctx),
+                # 2.0.31 HTTPS 주소 + WAF — CloudFront 에 붙이는 웹 ACL 은 전역 범위(us-east-1 에만 있음)
+                f"arn:{ctx.partition}:wafv2:us-east-1:{ctx.account}:global/webacl/recoder-*/*",
                 _arn("elasticloadbalancing", "loadbalancer/app/recoder-*/*", ctx),
             ],
         },
@@ -797,6 +799,26 @@ def _ecs_statements(
             "Sid": "EdgeWafRead",
             "Effect": "Allow",
             "Action": ["wafv2:ListWebACLs", "wafv2:GetWebACLForResource"],
+            "Resource": "*",
+            # 전역 범위(CloudFront) 웹 ACL 목록은 us-east-1 에서만 조회된다.
+            "Condition": {"StringEquals": {"aws:RequestedRegion": sorted({ctx.region, "us-east-1"})}},
+        },
+        {
+            # 2.0.31 원본 잠금 — CloudFront 의 비밀 머리글이 맞는 요청만 앱으로 넘기는 리스너 규칙(aws_edge.lock_origin).
+            "Sid": "EdgeOriginLock",
+            "Effect": "Allow",
+            "Action": ["elasticloadbalancing:CreateRule", "elasticloadbalancing:ModifyRule",
+                       "elasticloadbalancing:DeleteRule"],
+            "Resource": [
+                _arn("elasticloadbalancing", "listener/app/recoder-*/*/*", ctx),
+                _arn("elasticloadbalancing", "listener-rule/app/recoder-*/*/*/*", ctx),
+            ],
+        },
+        {
+            # 리스너 규칙 조회 — 리소스 단위 제한 미지원(읽기 전용).
+            "Sid": "EdgeOriginLockRead",
+            "Effect": "Allow",
+            "Action": ["elasticloadbalancing:DescribeRules"],
             "Resource": "*",
             "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
         },
@@ -840,6 +862,13 @@ def _ecs_statements(
             "Resource": f"arn:{ctx.partition}:route53:::hostedzone/*",
             "Condition": {"ForAllValues:StringEquals": {"route53:ChangeResourceRecordSetsRecordTypes": ["CNAME", "A", "AAAA"]}},
         },
+        {
+            # 2.0.31 — 도메인에 이미 다른 곳을 가리키는 레코드가 있으면 덮어쓰지 않으려고 먼저 읽는다(aws_cdn.point_domain).
+            "Sid": "HttpsDomainRecordsRead",
+            "Effect": "Allow",
+            "Action": ["route53:ListResourceRecordSets"],
+            "Resource": f"arn:{ctx.partition}:route53:::hostedzone/*",
+        },
         # ── 2.0.27 관리형 DB(RDS PostgreSQL) — 이름은 aws_rds.db_identifier() 가 recoder- 로 시작하게 만든다 ──
         {
             "Sid": "ManagedDatabase",
@@ -871,7 +900,9 @@ def _ecs_statements(
             "Sid": "ManagedDatabaseSecret",
             "Effect": "Allow",
             "Action": ["secretsmanager:CreateSecret", "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue",
-                       "secretsmanager:DeleteSecret", "secretsmanager:TagResource"],
+                       "secretsmanager:DeleteSecret", "secretsmanager:TagResource",
+                       # 2.0.31 정리로 삭제 예정(7일)이 된 비밀을 다시 배포할 때 되살린다(aws_rds._restore)
+                       "secretsmanager:DescribeSecret", "secretsmanager:RestoreSecret"],
             "Resource": _arn("secretsmanager", "secret:recoder/*", ctx),
         },
         # ── 2.0.26 AWS 리소스 정리 — 지우는 것은 recoder:managed 태그를 다시 확인한 것만(aws_cleanup) ──

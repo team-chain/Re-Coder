@@ -145,6 +145,12 @@ export function EcsProtection({ value, onChange, disabled = false }: {
             <span style={muted}>Route 53 에 그 도메인이 있으면 레코드를 자동으로 넣고, 없으면 넣을 레코드를 배포 결과에 알려 드려요.</span>
           </label>
         )}
+        {value.https && (
+          <p style={{ ...muted, margin: "4px 0 0 24px" }} data-testid="ecs-https-guard">
+            로드밸런서는 CloudFront 를 거친 요청만 받습니다(비밀 머리글로 잠금).
+            {value.edge === "alb_waf" ? " WAF 는 CloudFront 에 붙여 실제 사용자 IP 로 셉니다." : ""}
+          </p>
+        )}
         {(value.edge ?? "none") === "none" && value.https && (
           <div style={{ margin: "4px 0 0 24px" }}>
             <p style={{ ...muted, margin: "4px 0" }}>HTTPS 주소를 위해 로드밸런서만(WAF 없이) 켭니다. {EDGE_COST}</p>

@@ -5,6 +5,9 @@ import asyncio
 import json
 import logging
 import re
+import threading
+import time
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -72,6 +75,62 @@ class DeleteRequest(BaseModel):
     approved: bool = Field(..., description="사용자가 승인 카드에서 항목을 확인하고 누른 결과")
     #: 실수 방지 — 승인 카드에 보여 준 개수와 같아야 한다.
     count: Optional[int] = None
+    #: 2.0.31 — 참이면 바로 작업 id 를 돌려주고 뒤에서 지운다(DB·CloudFront 정리는 15분을 넘길 수 있다).
+    background: bool = False
+
+
+# ---------------------------------------------------------------------------
+# 2.0.31 뒤에서 도는 삭제 작업 — 요청 하나가 클라이언트 제한 시간(15분)을 넘기지 않게
+# ---------------------------------------------------------------------------
+
+_JOBS: dict[str, dict] = {}
+_JOBS_LOCK = threading.Lock()
+_KEEP_JOBS = 20
+
+
+def start_job(region: str, ids: list[str], *, clients: Optional[dict] = None, records: Optional[list[dict]] = None) -> dict:
+    """같은 리전에 도는 작업이 있으면 409. 작업 상태 dict 를 돌려준다(복사본)."""
+    with _JOBS_LOCK:
+        if any(j["region"] == region and j["status"] == "running" for j in _JOBS.values()):
+            raise HTTPException(status_code=409, detail="이 리전에서 정리가 이미 진행 중입니다 — 끝난 뒤 다시 시도하세요.")
+        job_id = uuid.uuid4().hex[:12]
+        job = {"id": job_id, "region": region, "status": "running", "count": len(ids), "progress": {"done": 0, "total": len(ids)},
+               "result": None, "error": "", "started_at": time.time(), "finished_at": None}
+        _JOBS[job_id] = job
+        for old in sorted(_JOBS, key=lambda k: _JOBS[k]["started_at"])[:-_KEEP_JOBS]:
+            if _JOBS[old]["status"] != "running":
+                _JOBS.pop(old, None)
+
+    def progress(p: dict) -> None:
+        with _JOBS_LOCK:
+            job["progress"] = dict(p)
+
+    def work() -> None:
+        try:
+            result = aws_cleanup.delete(clients if clients is not None else clients_for(region), ids, region=region,
+                                        approved=True, records=records if records is not None else _records(region),
+                                        on_progress=progress)
+            with _JOBS_LOCK:
+                job.update(status="done", result=result, progress={"done": job["progress"].get("total", len(ids)),
+                                                                    "total": job["progress"].get("total", len(ids))})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("정리 작업 실패 %s: %s", job_id, exc)
+            with _JOBS_LOCK:
+                job.update(status="failed", error=_aws_error(exc).detail)
+        finally:
+            with _JOBS_LOCK:
+                job["finished_at"] = time.time()
+
+    threading.Thread(target=work, name=f"recoder-cleanup-{job_id}", daemon=True).start()
+    return job_view(job_id)
+
+
+def job_view(job_id: str) -> dict:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="정리 작업을 찾지 못했습니다(코어를 다시 시작했다면 목록을 다시 불러오세요).")
+        return json.loads(json.dumps(job))
 
 
 @router.post("/plan")
@@ -99,8 +158,20 @@ async def delete(body: DeleteRequest) -> dict:
     ids = [i for i in dict.fromkeys(body.ids) if re.fullmatch(r"[a-z_0-9]+:[^\s]{1,512}", i)]
     if body.count is not None and body.count != len(ids):
         raise HTTPException(status_code=400, detail="승인한 항목 수와 요청 항목 수가 다릅니다 — 목록을 다시 불러오세요.")
-    try:
-        return await asyncio.to_thread(aws_cleanup.delete, clients_for(body.region), ids, region=body.region,
-                                       approved=True, records=_records(body.region))
-    except Exception as exc:  # noqa: BLE001
-        raise _aws_error(exc) from exc
+    job = start_job(body.region, ids)   # 같은 작업 저장소에 올려 겹침(409)을 한곳에서 막는다
+    if body.background:
+        return job
+    while True:  # 옛 확장(동기 응답을 기다림) 호환
+        view = job_view(job["id"])
+        if view["status"] == "done":
+            return view["result"]
+        if view["status"] == "failed":
+            raise HTTPException(status_code=502, detail=view["error"] or "AWS 리소스를 지우지 못했습니다.")
+        await asyncio.sleep(0.5)
+
+
+@router.get("/jobs/{job_id}")
+async def job(job_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{12}", job_id):
+        raise HTTPException(status_code=400, detail="작업 id 가 올바르지 않습니다.")
+    return job_view(job_id)

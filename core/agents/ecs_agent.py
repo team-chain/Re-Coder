@@ -215,6 +215,8 @@ class ECSAgent:
             "sns": session.client("sns"),
             #: 2.0.26 대규모 방패(ALB 앞 WAF)
             "wafv2": session.client("wafv2"),
+            #: 2.0.31 HTTPS 주소 + WAF — CloudFront 에 붙이는 웹 ACL 은 전역 범위라 us-east-1 에서만 다룬다.
+            "wafv2_global": session.client("wafv2", region_name="us-east-1"),
             #: 2.0.27 HTTPS 주소 — CloudFront 는 전역, 인증서는 us-east-1 에서만 붙는다(CloudFront 규칙).
             "cloudfront": session.client("cloudfront"),
             "acm_global": session.client("acm", region_name="us-east-1"),
@@ -846,27 +848,113 @@ class ECSAgent:
     def _provision_cdn(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict,
                        edge: "aws_edge.EdgeResult") -> None:
         tags = self.resource_tags(req)
+        notes: list[str] = []
         cert = None
         if req.custom_domain:
             cert = aws_cdn.ensure_certificate(clients["acm_global"], clients["route53"], req.custom_domain, tags=tags)
-            for i, note in enumerate(cert.notes):
-                rec.provisioned[f"domain_note_{i + 1}"] = note
+            notes += cert.notes
+        #: 2.0.31 — CloudFront 뒤에서는 ALB 가 보는 주소가 모두 CloudFront 엣지라, WAF 의 IP 당 제한은 CloudFront 에 붙여야
+        #: 실제 사용자 IP 로 센다(전역 범위 웹 ACL, us-east-1).
+        waf = req.edge == "alb_waf"
+        global_acl: Optional[str] = ""
+        legacy_waf = False
+        if waf:
+            try:
+                global_acl, _made = aws_edge.ensure_web_acl(
+                    clients["wafv2_global"], edge.name, rate_limit=req.waf_rate_limit, window=req.waf_window, tags=tags,
+                    scope=aws_edge.CLOUDFRONT)
+            except InfraError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if aws_infra.error_code(exc) in ("AccessDenied", "AccessDeniedException", "WAFInvalidPermissionPolicyException",
+                                                 "UnauthorizedOperation"):
+                    #: 옛 권한표 — 2.0.30 처럼 ALB 에 지역 웹 ACL 을 두고 배포는 계속한다(업데이트 안내).
+                    legacy_waf = True
+                    global_acl = None
+                    acl_arn, _made = aws_edge.ensure_web_acl(clients["wafv2"], edge.name, rate_limit=req.waf_rate_limit,
+                                                             window=req.waf_window, tags=tags)
+                    attached = str(((clients["wafv2"].get_web_acl_for_resource(ResourceArn=edge.alb_arn) or {})
+                                    .get("WebACL") or {}).get("ARN") or "")
+                    if attached != acl_arn:
+                        aws_edge.associate(clients["wafv2"], acl_arn, edge.alb_arn)
+                    edge.web_acl_arn = acl_arn
+                    notes.append("권한표가 옛 버전이라 WAF 를 로드밸런서에 두었습니다 — CloudFront 뒤에서는 IP 당 제한이 "
+                                 "엣지 주소로 묶이니 권한 템플릿 스택을 2.0.31 템플릿으로 업데이트한 뒤 다시 배포하세요.")
+                else:
+                        raise InfraError("HTTPS 주소(CloudFront)에 붙일 WAF 웹 ACL 을 준비하지 못했습니다.",
+                                     detail=aws_infra.error_message(exc),
+                                     remedy="권한 템플릿 스택을 2.0.31 템플릿으로 업데이트하세요(전역 범위 WAF 권한). "
+                                            "급하면 대규모 방패를 「로드밸런서만」으로 바꿔 배포할 수 있습니다.") from exc
         cdn = aws_cdn.ensure_distribution(
             clients["cloudfront"], name=edge.name, origin=edge.dns_name, tags=tags,
             alias=req.custom_domain if cert is not None and cert.issued else "",
-            certificate_arn=cert.arn if cert is not None and cert.issued else "")
+            certificate_arn=cert.arn if cert is not None and cert.issued else "",
+            web_acl_id=global_acl)
         self._cdn[id(req)] = cdn
+        if waf and not legacy_waf:
+            edge.web_acl_arn = str(global_acl)
+            if cdn.web_acl_live:
+                # CloudFront 쪽 WAF 가 이미 퍼져 있을 때만 로드밸런서의 옛 웹 ACL 을 뗀다(그 사이 보호 공백 없음).
+                try:
+                    note = aws_edge.detach_recoder_acl(clients["wafv2"], edge.alb_arn, edge.name,
+                                                       reason="WAF 를 HTTPS 주소(CloudFront) 쪽으로 옮겼습니다")
+                except Exception as exc:  # noqa: BLE001 - 보호는 이미 CloudFront 쪽에 있다
+                    note = f"로드밸런서에 붙어 있던 옛 웹 ACL 을 떼지 못했습니다({aws_infra.error_message(exc)}) — 「AWS 리소스 정리」에서 지우세요."
+                if note:
+                    notes.append(note)
+            elif aws_edge.find_web_acl(clients["wafv2"], edge.name) is not None:
+                notes.append("WAF 를 CloudFront 에 붙이는 중입니다 — 퍼지는 동안(15분쯤) 로드밸런서의 WAF 도 그대로 두고, 다음 배포에서 뗍니다.")
+        elif not waf:
+            try:
+                if aws_edge.delete_web_acl(clients["wafv2_global"], edge.name, aws_edge.CLOUDFRONT, attempts=1):
+                    notes.append("WAF 를 껐습니다 — CloudFront 의 웹 ACL 을 지웠습니다.")
+            except Exception as exc:  # noqa: BLE001 - 떼어 냈으니 동작엔 영향 없음, 요금만
+                if aws_infra.error_code(exc) in ("WAFAssociatedItemException",):
+                    notes.append("WAF 를 껐습니다 — CloudFront 에서 웹 ACL 을 뗐고, 퍼진 뒤(15분쯤) 다시 배포하거나 「AWS 리소스 정리」로 지우면 요금이 멈춥니다.")
+                else:
+                    logger.info("CloudFront 웹 ACL 확인 생략: %s", aws_infra.error_message(exc))
+        #: 원본 잠금 — CloudFront 가 붙이는 비밀 머리글이 맞는 요청만 앱으로. 머리글이 이미 퍼진 배포에서만 잠근다
+        #: (방금 머리글을 넣은 옛 배포를 바로 잠그면 퍼지는 동안 사용자가 403 을 본다).
+        if cdn.origin_secret_live:
+            try:
+                aws_edge.lock_origin(clients["elbv2"], edge.listener_arn, edge.target_group_arn, cdn.origin_secret)
+                rec.provisioned["origin_lock"] = "켜짐 — CloudFront 를 거치지 않은 요청은 로드밸런서가 403 으로 막습니다."
+            except Exception as exc:  # noqa: BLE001 - 보안 그룹이 이미 CloudFront 주소만 받는다(한 겹 더 하는 보호)
+                rec.provisioned["origin_lock"] = (f"켜지 못함({aws_infra.error_message(exc)}) — 권한 템플릿 스택을 최신으로 업데이트한 뒤 "
+                                                  "다시 배포하세요. 보안 그룹은 계속 CloudFront 주소만 받습니다.")
+        else:
+            widened = False
+            try:
+                # 이미 잠긴 리스너(머리글 값이 바뀐 경우) — 새 값도 받게 넓혀, 퍼지는 동안 403 이 나지 않게 한다.
+                widened = aws_edge.widen_origin_lock(clients["elbv2"], edge.listener_arn, edge.target_group_arn,
+                                                     cdn.origin_secret)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("원본 잠금 확인 생략: %s", aws_infra.error_message(exc))
+            rec.provisioned["origin_lock"] = (
+                "켜짐 — 새 잠금 값을 CloudFront 에 퍼뜨리는 중이라 옛 값과 새 값을 함께 받습니다(다음 배포에서 새 값만)."
+                if widened else "준비 중 — CloudFront 에 잠금 머리글을 넣었습니다. 퍼진 뒤 다음 배포에서 잠급니다.")
         if cert is not None and cert.issued:
             if cert.zone_id:
-                aws_cdn.point_domain(clients["route53"], cert.zone_id, req.custom_domain, cdn.domain)
-                rec.provisioned["domain"] = f"{req.custom_domain} — 인증서 발급됨, Route 53 별칭을 CloudFront 로 연결했습니다."
+                try:
+                    dns_notes = aws_cdn.point_domain(clients["route53"], cert.zone_id, req.custom_domain, cdn.domain)
+                except Exception as exc:  # noqa: BLE001 - 배포는 CloudFront 주소로 계속
+                    dns_notes = [f"Route 53 에 별칭을 넣지 못했습니다({aws_infra.error_message(exc)}) — 도메인 DNS 에 "
+                                 f"{req.custom_domain} 를 {cdn.domain} 로 연결하세요."]
+                notes += dns_notes
+                rec.provisioned["domain"] = (f"{req.custom_domain} — 인증서 발급됨, Route 53 별칭을 CloudFront 로 연결했습니다."
+                                             if not dns_notes else f"{req.custom_domain} — 인증서 발급됨, DNS 는 직접 확인이 필요합니다(아래 안내).")
             else:
                 rec.provisioned["domain"] = (f"{req.custom_domain} — 인증서 발급됨. 도메인 DNS 에 "
                                              f"{req.custom_domain} CNAME {cdn.domain} 을 넣으세요.")
         elif cert is not None:
             rec.provisioned["domain"] = f"{req.custom_domain} — 인증서 발급 대기 중(지금은 {cdn.domain} 로 서비스)"
+        for i, note in enumerate(notes):
+            rec.provisioned[f"domain_note_{i + 1}"] = note
         rec.provisioned["https"] = (f"켜짐 — https://{cdn.domain} ({'새로 만듦 · 전 세계에 퍼지는 데 5~15분' if cdn.created else '기존 것 사용'}), "
                                     "로드밸런서는 CloudFront 에서 오는 연결만 받습니다.")
+        if waf:
+            rec.provisioned["waf"] = (f"켜짐({'로드밸런서 — 권한표 업데이트 필요' if legacy_waf else 'CloudFront'}) — 사용자 IP당 {req.waf_window // 60}분 {req.waf_rate_limit:,}회 넘으면 차단 "
+                                      "+ AWS 관리 규칙 2개")
         req.cloudfront_domain = cdn.domain
 
     def _start_database(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict,

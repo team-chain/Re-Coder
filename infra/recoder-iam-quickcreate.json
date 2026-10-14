@@ -414,6 +414,9 @@
                   "Fn::Sub": "arn:${AWS::Partition}:wafv2:${AWS::Region}:${AWS::AccountId}:regional/webacl/recoder-*/*"
                 },
                 {
+                  "Fn::Sub": "arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/recoder-*/*"
+                },
+                {
                   "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:loadbalancer/app/recoder-*/*"
                 }
               ]
@@ -424,6 +427,41 @@
               "Action": [
                 "wafv2:ListWebACLs",
                 "wafv2:GetWebACLForResource"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": [
+                    {
+                      "Fn::Sub": "${AWS::Region}"
+                    },
+                    "us-east-1"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "EdgeOriginLock",
+              "Effect": "Allow",
+              "Action": [
+                "elasticloadbalancing:CreateRule",
+                "elasticloadbalancing:ModifyRule",
+                "elasticloadbalancing:DeleteRule"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:listener/app/recoder-*/*/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:listener-rule/app/recoder-*/*/*/*"
+                }
+              ]
+            },
+            {
+              "Sid": "EdgeOriginLockRead",
+              "Effect": "Allow",
+              "Action": [
+                "elasticloadbalancing:DescribeRules"
               ],
               "Resource": "*",
               "Condition": {
@@ -507,6 +545,16 @@
               }
             },
             {
+              "Sid": "HttpsDomainRecordsRead",
+              "Effect": "Allow",
+              "Action": [
+                "route53:ListResourceRecordSets"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:route53:::hostedzone/*"
+              }
+            },
+            {
               "Sid": "ManagedDatabase",
               "Effect": "Allow",
               "Action": [
@@ -567,7 +615,9 @@
                 "secretsmanager:GetSecretValue",
                 "secretsmanager:PutSecretValue",
                 "secretsmanager:DeleteSecret",
-                "secretsmanager:TagResource"
+                "secretsmanager:TagResource",
+                "secretsmanager:DescribeSecret",
+                "secretsmanager:RestoreSecret"
               ],
               "Resource": {
                 "Fn::Sub": "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:recoder/*"
@@ -656,7 +706,19 @@
                   "Fn::Sub": "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:recoder-*"
                 }
               ]
-            },
+            }
+          ]
+        }
+      }
+    },
+    "RecoderDeployPolicy3": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "ManagedPolicyName": "recoder-deploy-policy-3",
+        "Description": "ReCoder 가 배포에 요구하는 최소권한 (3/3)",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
             {
               "Sid": "CleanupDelete",
               "Effect": "Allow",
@@ -703,19 +765,7 @@
                   "ec2:ResourceTag/recoder:managed": "true"
                 }
               }
-            }
-          ]
-        }
-      }
-    },
-    "RecoderDeployPolicy3": {
-      "Type": "AWS::IAM::ManagedPolicy",
-      "Properties": {
-        "ManagedPolicyName": "recoder-deploy-policy-3",
-        "Description": "ReCoder 가 배포에 요구하는 최소권한 (3/3)",
-        "PolicyDocument": {
-          "Version": "2012-10-17",
-          "Statement": [
+            },
             {
               "Sid": "CreateAppSecurityGroup",
               "Effect": "Allow",

@@ -158,13 +158,23 @@ def start(rds: Any, ec2: Any, secretsmanager: Any, *, service: str, vpc_id: str,
 
 
 def _secret(sm: Any, name: str, tags: Optional[dict], *, create: bool) -> tuple[str, str]:
-    """(ARN, 비밀번호). 비밀이 없으면 새 비밀번호로 만든다. 있으면 저장된 비밀번호를 읽는다."""
+    """(ARN, 비밀번호). 비밀이 없으면 새 비밀번호로 만든다. 있으면 저장된 비밀번호를 읽는다.
+
+    「AWS 리소스 정리」는 비밀을 7일 복구 기간을 두고 지운다 — 그 사이에는 같은 이름으로 만들 수도 읽을 수도 없다
+    (InvalidRequestException). 그 경우 되살려(RestoreSecret) 그대로 쓴다."""
     try:
-        value = sm.get_secret_value(SecretId=name)
+        try:
+            value = sm.get_secret_value(SecretId=name)
+        except Exception as exc:  # noqa: BLE001
+            if error_code(exc) != "InvalidRequestException" or not _restore(sm, name):
+                raise
+            value = sm.get_secret_value(SecretId=name)
         data = json.loads(value.get("SecretString") or "{}")
         password = str(data.get("PGPASSWORD") or data.get("password") or "")
         if password:
             return str(value["ARN"]), password
+    except InfraError:
+        raise
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) != "ResourceNotFoundException":
             raise InfraError("관리형 DB 접속 정보를 Secrets Manager 에서 읽지 못했습니다.", detail=error_message(exc),
@@ -177,6 +187,19 @@ def _secret(sm: Any, name: str, tags: Optional[dict], *, create: bool) -> tuple[
                                SecretString=json.dumps({"password": password}), Tags=_tag_list(tags))["ARN"]
         return str(arn), password
     raise InfraError(f"Secrets Manager 의 {name} 에 비밀번호가 없습니다.", remedy="그 비밀을 지운 뒤 다시 배포하세요.")
+
+
+def _restore(sm: Any, name: str) -> bool:
+    """삭제 예정인 비밀이면 되살리고 True."""
+    try:
+        if not sm.describe_secret(SecretId=name).get("DeletedDate"):
+            return False
+        sm.restore_secret(SecretId=name)
+    except Exception as exc:  # noqa: BLE001
+        raise InfraError(f"Secrets Manager 의 {name} 이 삭제 예정이라 되살리려 했지만 실패했습니다.", detail=error_message(exc),
+                         remedy="권한 템플릿 스택을 최신으로 업데이트하거나(secretsmanager:RestoreSecret), 콘솔에서 그 비밀을 복원한 뒤 다시 배포하세요.") from exc
+    logger.info("삭제 예정이던 DB 접속 정보 비밀을 되살렸습니다: %s", name)
+    return True
 
 
 def wait(rds: Any, identifier: str, *, timeout: float = WAIT_S, sleep: Callable[[float], None] = time.sleep,
@@ -251,6 +274,15 @@ def init_container(init_sql_b64: str, *, plain_url: str = "", secret_url_ref: st
 # ---------------------------------------------------------------------------
 
 
+#: 이 상태에서는 삭제 보호 해제·삭제가 거절된다(InvalidDBInstanceState).
+BUSY = ("creating", "backing-up", "modifying", "rebooting", "upgrading", "configuring-enhanced-monitoring",
+        "starting", "stopping", "renaming", "resetting-master-credentials")
+
+
+class DbBusy(Exception):
+    """DB 가 다른 작업 중이라 지금은 지우지 않는다(정리 기능이 '건너뜀'으로 보여 준다)."""
+
+
 def delete_instance(rds: Any, identifier: str) -> str:
     """삭제 보호를 풀고 최종 스냅숏을 남기며 지운다(지우는 데 수 분)."""
     db = _describe(rds, identifier)
@@ -258,6 +290,8 @@ def delete_instance(rds: Any, identifier: str) -> str:
         return "이미 없습니다."
     if db.get("DBInstanceStatus") == "deleting":
         return "지우는 중입니다."
+    if db.get("DBInstanceStatus") in BUSY:
+        raise DbBusy(f"지금 '{db.get('DBInstanceStatus')}' 상태라 지울 수 없습니다 — 끝난 뒤(보통 5~10분) 정리를 다시 실행하세요.")
     if db.get("DeletionProtection"):
         rds.modify_db_instance(DBInstanceIdentifier=identifier, DeletionProtection=False, ApplyImmediately=True)
     snap = f"{identifier}-final-{time.strftime('%Y%m%d%H%M', time.gmtime())}"

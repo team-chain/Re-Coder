@@ -43,6 +43,50 @@ export interface CleanupResult {
     results: Array<{ id: string; label?: string; name?: string; ok: boolean; skipped?: boolean; message: string }>;
 }
 
+/** 2.0.31 뒤에서 도는 정리 작업(GET /api/aws/cleanup/jobs/{id}). */
+export interface CleanupJob {
+    id: string; region: string; status: 'running' | 'done' | 'failed'; count: number;
+    progress: { done: number; total: number; current?: string };
+    result: CleanupResult | null; error: string;
+}
+
+export interface CleanupProgress { done: number; total: number; current?: string }
+
+/**
+ * 정리 작업이 끝날 때까지 기다린다(순수 함수 — 시험에서 가짜 fetch·sleep 을 넣는다).
+ * 조회 한두 번이 실패해도(코어가 잠깐 바쁨) 이어서 기다리고, 연속 5번 실패하면 멈춘다.
+ */
+export async function waitForCleanupJob(
+    fetchJob: () => Promise<CleanupJob>,
+    opts: { onProgress?: (p: CleanupProgress) => void; sleep?: (ms: number) => Promise<void>; intervalMs?: number; maxWaitMs?: number } = {},
+): Promise<CleanupResult> {
+    const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
+    const interval = opts.intervalMs ?? 3000;
+    const deadline = opts.maxWaitMs ?? 2 * 60 * 60 * 1000;
+    let waited = 0;
+    let misses = 0;
+    for (;;) {
+        let job: CleanupJob | undefined;
+        try {
+            job = await fetchJob();
+            misses = 0;
+        } catch (err) {
+            misses += 1;
+            if (misses >= 5) { throw err instanceof Error ? err : new Error(String(err)); }
+        }
+        if (job) {
+            if (job.status === 'done' && job.result) { return job.result; }
+            if (job.status === 'failed') { throw new Error(job.error || 'AWS 리소스를 지우지 못했습니다'); }
+            opts.onProgress?.(job.progress);
+        }
+        if (waited >= deadline) {
+            throw new Error('정리가 오래 걸리고 있습니다 — AWS 에서는 계속 지우는 중일 수 있으니 잠시 뒤 목록을 다시 불러오세요.');
+        }
+        await sleep(interval);
+        waited += interval;
+    }
+}
+
 export interface OpsAlert {
     id: string; at: string; kind: 'spike' | 'blocked' | 'errors' | 'outage'; severity: string; title: string; detail: string;
     region: string; cluster: string; service: string; status?: 'open' | 'applied' | 'dismissed'; resolution?: string;
@@ -1590,12 +1634,24 @@ export class ApiClient {
         return resp.data;
     }
 
-    /** POST /api/aws/cleanup/delete — 승인한 항목만(태그를 코어가 다시 확인). */
-    async cleanupDelete(region: string, ids: string[]): Promise<CleanupResult> {
-        const resp = await this.request<CleanupResult>('POST', '/api/aws/cleanup/delete',
-            { region, ids, approved: true, count: ids.length }, false, 900000);
+    /**
+     * POST /api/aws/cleanup/delete — 승인한 항목만(태그를 코어가 다시 확인).
+     * 2.0.31: DB·CloudFront 정리는 15분을 넘길 수 있어 코어가 뒤에서 지우고, 여기서는 작업 상태를 3초마다 본다.
+     */
+    async cleanupDelete(region: string, ids: string[], onProgress?: (p: CleanupProgress) => void): Promise<CleanupResult> {
+        const resp = await this.request<CleanupJob>('POST', '/api/aws/cleanup/delete',
+            { region, ids, approved: true, count: ids.length, background: true }, false, 60000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AWS 리소스를 지우지 못했습니다'); }
-        return resp.data;
+        // 옛 코어(2.0.30 이하)는 background 를 모르고 결과를 바로 돌려준다.
+        const direct = resp.data as unknown as Partial<CleanupResult>;
+        if (Array.isArray(direct.results)) { return direct as CleanupResult; }
+        const jobId = resp.data.id;
+        if (!jobId) { throw new Error('정리 작업 번호를 받지 못했습니다 — 코어를 다시 시작한 뒤 시도하세요.'); }
+        return waitForCleanupJob(async () => {
+            const r = await this.request<CleanupJob>('GET', `/api/aws/cleanup/jobs/${encodeURIComponent(jobId)}`, undefined, false, 30000);
+            if (!r.success || !r.data) { throw new Error(r.error ?? '정리 진행 상황을 확인하지 못했습니다'); }
+            return r.data;
+        }, { onProgress });
     }
 
     /** GET /api/deploy/ecs/status — ECS 배포 진행상황 폴링. */

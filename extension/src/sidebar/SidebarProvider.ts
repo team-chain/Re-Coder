@@ -1100,7 +1100,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 try {
                     const ids = Array.isArray(p.ids) ? p.ids.filter((x): x is string => typeof x === 'string') : [];
                     if (!p.region || !ids.length || p.approved !== true) { throw new Error('승인 카드에서 지울 항목을 다시 고르세요.'); }
-                    const result = await this._apiClient.cleanupDelete(p.region, ids);
+                    const result = await this._apiClient.cleanupDelete(p.region, ids,
+                        progress => this.postMessageToWebview(requestWebview, 'aws.cleanup.progress', progress));
                     this.postMessageToWebview(requestWebview, 'aws.cleanup.deleteResult', result);
                     this.postMessageToWebview(requestWebview, 'aws.cleanup.planResult', await this._apiClient.cleanupPlan(p.region));
                 } catch (err) {

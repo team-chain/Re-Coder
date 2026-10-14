@@ -1,3 +1,18 @@
+# 검토 결과 수정 (2026-10-14, 2.0.31)
+
+- 리뷰(서브에이전트) 확인 5건 + 개연 8건. tests/test_dev_2031.py 35건, webview-tests/cleanupJob.test.js 4건.
+- aws_edge: WAF 함수에 scope(REGIONAL|CLOUDFRONT). ensure_edge(cdn=True) 는 지역 WAF 를 만들지 않고, waf 를 끈 경우만 바로 detach. ecs_agent._provision_cdn 이 wafv2_global(us-east-1) 로 CLOUDFRONT 웹 ACL → ensure_distribution(web_acl_id) → 그 뒤 지역 ACL detach(보호 공백 없음). WAF 끄면 web_acl_id="" + 전역 ACL 삭제 시도(연결 중이면 안내).
+- 원본 잠금: aws_cdn 이 Origin CustomHeaders X-Recoder-Origin(token_urlsafe 32, 기존 값 재사용), CdnResult.origin_secret_live(새 배포 또는 이미 머리글 있음). live 일 때만 aws_edge.lock_origin(규칙 우선순위 10 http-header → forward, 기본 동작 fixed-response 403). ensure_edge 는 잠긴 리스너면 규칙 대상만 맞추고, cdn 아님 + 잠김이면 unlock_origin(기본 forward, 규칙 삭제). 잠기지 않은 평소 재배포는 DescribeRules 를 부르지 않는다(옛 권한표 호환). 잠금 실패(권한)는 배포 실패가 아니라 rec.provisioned["origin_lock"] 안내.
+- alb_subnets: internet_routable_subnets(igw 경로) 로 공개 판정, 못 보면 MapPublicIpOnLaunch. 태스크 영역은 모두 포함하되 영역마다 공개 우선, 다른 영역 3개까지. associate 36회(3분), delete_web_acl 은 WAFAssociatedItem·OptimisticLock 재시도, detach 실패는 안내만.
+- aws_cdn: IdempotencyToken=sha1(domain)[:32], 검증 레코드 UPSERT 실패 → 안내, point_domain 은 list_resource_record_sets 로 확인 후 cloudfront.net 별칭이 아닌 기존 A/AAAA 는 덮어쓰지 않음(안내 반환), disable 시 WebACLId 비움. ecs_agent 가 point_domain 예외를 안내로.
+- aws_rds: _secret 에서 InvalidRequestException → describe_secret DeletedDate 있으면 restore_secret(실패 시 InfraError, remedy RestoreSecret). delete_instance 는 BUSY 상태면 DbBusy.
+- shield.current_settings: RECODER_SHIELD_PROXY 가 없으면 CONF_B64 를 풀어 cloudfront_viewer_address→cdn, real_ip_header→vpc.
+- aws_cleanup: wafv2_global 클라이언트(GLOBAL_CLIENTS), kind waf_cdn(ORDER cloudfront 다음), ACM ResourceInUse → _Kept, rds DbBusy/InvalidDBInstanceState → _Kept, 15분 뒤에도 남아 있으면 _Kept, DB 를 못 지운 서비스의 subnet/param/secret 은 건너뜀, S3 delete_objects Errors → 실패, on_progress.
+- API: DeleteRequest.background → start_job(스레드, 같은 리전 실행 중이면 409, 최근 20개 보관), GET /api/aws/cleanup/jobs/{id}. 동기 경로도 실행 중 작업 있으면 409. 확장 ApiClient.cleanupDelete 는 background + waitForCleanupJob(3초, 조회 연속 5회 실패·2시간이면 중단), 패널에 aws.cleanup.progress.
+- 권한: EdgeWaf 에 global/webacl/recoder-*/*(us-east-1), EdgeWafRead 리전 조건 [리전, us-east-1], EdgeOriginLock(Create/Modify/DeleteRule), EdgeOriginLockRead(DescribeRules, 리전), HttpsDomainRecordsRead(ListResourceRecordSets), ManagedDatabaseSecret += DescribeSecret·RestoreSecret. 런타임 증거 픽스처·FLOOR 갱신. infra/recoder-iam-quickcreate.json 재생성(정책 3개 유지).
+- 2차 리뷰 반영: 옛 권한표로 HTTPS+WAF 재배포 시 AccessDenied 면 2.0.30 처럼 ALB 에 지역 WAF(안내) — 멈추지 않음. origin_secret_live·web_acl_live 는 배포 전 Status=Deployed 일 때만(InProgress 중 재배포로 잠그거나 지역 WAF 를 떼지 않음). 머리글 값이 바뀌고 리스너가 이미 잠겨 있으면 widen_origin_lock(옛+새 값 OR, 다음 배포에서 새 값만). 규칙 우선순위는 10부터 빈 번호. WAF 끔 시 사용자가 붙인(recoder- 아닌) WebACLId 는 그대로. point_domain 은 ListResourceRecordSets 권한 없으면 예전처럼 UPSERT. 동기 /delete 도 start_job 으로 등록 후 기다림(겹침 409 한곳). 확장은 옛 코어의 즉시 결과도 받음. test_dev_2031 35건.
+- 실제 AWS 로는 확인 못 함: CloudFront WebACLId 연결에 추가 권한이 필요한지(문서상 UpdateDistribution 으로 연결, 우리 정책은 global ACL 에 GetWebACL 포함), 원본 잠금 전파 시간, RestoreSecret 직후 GetSecretValue.
+
 # 환경 안정화 (2026-10-14, 2.0.30)
 
 - ci.yml: test 잡을 matrix(ubuntu·windows·macos × py3.11 + ubuntu py3.13, fail-fast false, AWS 가짜 키·메타데이터 끔), webview 잡 ubuntu·windows. 실제 Windows·macOS 결과는 sandbox 에서 볼 수 없다 — 첫 CI 실행 결과로 남은 OS 전용 문제를 확인할 것.

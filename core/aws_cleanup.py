@@ -32,20 +32,27 @@ logger = logging.getLogger(__name__)
 PREFIX = "recoder"
 CLIENTS = ("ecs", "ecr", "logs", "ec2", "elbv2", "wafv2", "cloudwatch", "sns", "s3",
            # 2.0.27 HTTPS 주소·관리형 DB — acm_global 은 us-east-1 클라이언트(CloudFront 인증서)
-           "cloudfront", "acm_global", "rds", "secretsmanager")
+           "cloudfront", "acm_global", "rds", "secretsmanager",
+           # 2.0.31 CloudFront 에 붙인 WAF(전역 범위) — us-east-1 클라이언트
+           "wafv2_global")
+#: 리전을 us-east-1 로 고정해 만드는 클라이언트(이름 → 실제 서비스).
+GLOBAL_CLIENTS = {"acm_global": "acm", "wafv2_global": "wafv2"}
 
 #: 삭제 순서(작을수록 먼저).
 ORDER = {
-    "ecs_service": 0, "task_definitions": 1, "cloudfront": 2, "acm_certificate": 3, "waf": 4, "alb": 5,
-    "target_group": 6, "rds_instance": 7, "rds_subnet_group": 8, "rds_parameter_group": 9, "secret": 10,
-    "alarm": 11, "sns_topic": 12, "ecr": 13, "log_group": 14, "security_group": 15, "ecs_cluster": 16, "s3_bucket": 17,
+    "ecs_service": 0, "task_definitions": 1, "cloudfront": 2, "waf_cdn": 3, "acm_certificate": 4, "waf": 5, "alb": 6,
+    "target_group": 7, "rds_instance": 8, "rds_subnet_group": 9, "rds_parameter_group": 10, "secret": 11,
+    "alarm": 12, "sns_topic": 13, "ecr": 14, "log_group": 15, "security_group": 16, "ecs_cluster": 17, "s3_bucket": 18,
 }
+#: DB 가 남아 있으면 지우지 않는 것(DB 가 쓰는 중이거나, 지우면 다음 배포가 DB 비밀번호를 잃는다).
+DB_DEPENDENTS = ("rds_subnet_group", "rds_parameter_group", "secret")
 LABELS = {
     "ecs_service": "ECS 서비스", "task_definitions": "태스크 정의", "waf": "WAF 웹 ACL", "alb": "로드밸런서",
     "target_group": "대상 그룹", "alarm": "CloudWatch 경보", "sns_topic": "알림 주제(메일)", "ecr": "이미지 저장소(ECR)",
     "log_group": "로그 그룹", "security_group": "보안 그룹", "ecs_cluster": "ECS 클러스터", "s3_bucket": "S3 버킷",
     "cloudfront": "HTTPS 주소(CloudFront)", "acm_certificate": "도메인 인증서(ACM)", "rds_instance": "관리형 DB(RDS)",
     "rds_subnet_group": "DB 서브넷 그룹", "rds_parameter_group": "DB 파라미터 그룹", "secret": "DB 접속 정보(Secrets Manager)",
+    "waf_cdn": "WAF 웹 ACL(HTTPS 주소)",
 }
 COST = {
     "ecs_service": "실행 중인 태스크만큼 시간당 요금", "task_definitions": "요금 없음", "waf": "매달 고정 요금 + 요청 수",
@@ -54,11 +61,13 @@ COST = {
     "security_group": "요금 없음", "ecs_cluster": "요금 없음(빈 클러스터)", "s3_bucket": "보관 용량 + 요청 수",
     "cloudfront": "나가는 데이터·요청 수", "acm_certificate": "요금 없음", "rds_instance": "켜 두는 동안 시간당 + 저장 용량",
     "rds_subnet_group": "요금 없음", "rds_parameter_group": "요금 없음", "secret": "비밀당 매달 소액",
+    "waf_cdn": "매달 고정 요금 + 요청 수",
 }
 def make_clients(session: Any) -> dict:
     """boto3 세션 하나로 정리에 쓰는 클라이언트 묶음(인증서는 us-east-1)."""
-    out = {name: session.client(name) for name in CLIENTS if name != "acm_global"}
-    out["acm_global"] = session.client("acm", region_name="us-east-1")
+    out = {name: session.client(name) for name in CLIENTS if name not in GLOBAL_CLIENTS}
+    for name, service in GLOBAL_CLIENTS.items():
+        out[name] = session.client(service, region_name="us-east-1")
     return out
 
 
@@ -242,9 +251,13 @@ def _find_elb(elbv2: Any, wafv2: Any, items: list[Item]) -> None:
         items.append(Item(id=f"target_group:{tg['TargetGroupName']}", kind="target_group", name=tg["TargetGroupName"],
                           arn=tg["TargetGroupArn"], tagged=_managed(t), service=t.get(SERVICE_TAG, ""),
                           project=t.get(PROJECT_TAG, ""), detail=f"포트 {tg.get('Port', '')}"))
+    _find_waf(wafv2, items, scope="REGIONAL", kind="waf")
+
+
+def _find_waf(wafv2: Any, items: list[Item], *, scope: str, kind: str) -> None:
     marker = None
     while True:
-        kwargs: dict = {"Scope": "REGIONAL", "Limit": 100}
+        kwargs: dict = {"Scope": scope, "Limit": 100}
         if marker:
             kwargs["NextMarker"] = marker
         resp = wafv2.list_web_acls(**kwargs)
@@ -253,11 +266,9 @@ def _find_elb(elbv2: Any, wafv2: Any, items: list[Item]) -> None:
                 continue
             t = _tags_dict((wafv2.list_tags_for_resource(ResourceARN=acl["ARN"]).get("TagInfoForResource") or {})
                            .get("TagList"))
-            if not (_managed(t) or _recoderish(acl["Name"])):
-                continue
-            items.append(Item(id=f"waf:{acl['Name']}", kind="waf", name=acl["Name"], arn=acl["ARN"], tagged=_managed(t),
+            items.append(Item(id=f"{kind}:{acl['Name']}", kind=kind, name=acl["Name"], arn=acl["ARN"], tagged=_managed(t),
                               service=t.get(SERVICE_TAG, ""), project=t.get(PROJECT_TAG, ""),
-                              extra={"id": acl["Id"]}))
+                              extra={"id": acl["Id"], "scope": scope}))
         marker = resp.get("NextMarker")
         if not marker or not resp.get("WebACLs"):
             break
@@ -375,15 +386,21 @@ def find(clients: dict, *, region: str, records: Iterable[dict] = ()) -> tuple[l
         ("경보·알림", lambda: _find_alerts(clients["cloudwatch"], clients["sns"], items)),
         ("S3", lambda: _find_s3(clients["s3"], region, items)),
         ("HTTPS 주소", lambda: _find_cdn(clients["cloudfront"], clients["acm_global"], items)),
+        ("HTTPS 주소 WAF", lambda: _find_waf(clients["wafv2_global"], items, scope="CLOUDFRONT", kind="waf_cdn")),
         ("관리형 DB", lambda: _find_rds(clients["rds"], clients["secretsmanager"], items)),
     ]
     for label, step in steps:
         try:
-            if label in ("HTTPS 주소", "관리형 DB") and not all(
-                    k in clients for k in (("cloudfront", "acm_global") if label == "HTTPS 주소" else ("rds", "secretsmanager"))):
+            needs = {"HTTPS 주소": ("cloudfront", "acm_global"), "관리형 DB": ("rds", "secretsmanager"),
+                     "HTTPS 주소 WAF": ("wafv2_global",)}.get(label, ())
+            if not all(k in clients for k in needs):
                 continue
             step()
         except Exception as exc:  # noqa: BLE001
+            if label == "HTTPS 주소 WAF" and not any(i.kind == "cloudfront" for i in items):
+                # HTTPS 주소를 쓴 적이 없으면(옛 권한표는 us-east-1 WAF 목록을 못 봄) 경고로 시끄럽게 하지 않는다.
+                logger.info("CloudFront WAF 목록 생략: %s", error_message(exc))
+                continue
             gaps.append(f"{label}: 확인하지 못했습니다 — {error_message(exc)}")
     items.sort(key=lambda i: (ORDER.get(i.kind, 99), i.name))
     return items, gaps
@@ -403,7 +420,7 @@ def plan(clients: dict, *, region: str, records: Iterable[dict] = (), service: s
     summary = {
         "running_tasks": running,
         "load_balancers": sum(1 for i in items if i.kind == "alb"),
-        "web_acls": sum(1 for i in items if i.kind == "waf"),
+        "web_acls": sum(1 for i in items if i.kind in ("waf", "waf_cdn")),
         "image_mb": round(sum(i.extra.get("bytes", 0) for i in items if i.kind == "ecr") / 1024 / 1024, 1),
         "tagged": sum(1 for i in items if i.tagged),
         "untagged": len(untagged),
@@ -499,26 +516,50 @@ def _delete_one(clients: dict, item: Item, *, region: str, all_items: list[Item]
         if message != "지웠습니다.":
             raise _Kept(message)
         return message
+    if k == "waf_cdn":
+        try:
+            from core import aws_edge  # type: ignore
+        except ImportError:  # pragma: no cover
+            import aws_edge  # type: ignore
+        try:
+            aws_edge.delete_web_acl(clients["wafv2_global"], item.name, "CLOUDFRONT", sleep=sleep, attempts=3)
+        except Exception as exc:  # noqa: BLE001
+            if error_code(exc) != "WAFAssociatedItemException":
+                raise
+            raise _Kept("CloudFront 에서 떼어 내는 중입니다 — CloudFront 를 끈 뒤(15분쯤) 정리를 다시 실행하면 지웁니다.") from exc
+        return "지웠습니다."
     if k == "acm_certificate":
-        _retry(lambda: clients["acm_global"].delete_certificate(CertificateArn=item.arn), ("ResourceInUseException",),
-               sleep=sleep, attempts=3, delay=10)
+        try:
+            _retry(lambda: clients["acm_global"].delete_certificate(CertificateArn=item.arn), ("ResourceInUseException",),
+                   sleep=sleep, attempts=2, delay=10)
+        except Exception as exc:  # noqa: BLE001
+            if error_code(exc) != "ResourceInUseException":
+                raise
+            raise _Kept("CloudFront 가 아직 이 인증서를 씁니다 — CloudFront 가 지워진 뒤 정리를 다시 실행하면 지웁니다.") from exc
         return "지웠습니다."
     if k == "rds_instance":
         try:
             from core import aws_rds  # type: ignore
         except ImportError:  # pragma: no cover
             import aws_rds  # type: ignore
-        message = aws_rds.delete_instance(clients["rds"], item.name)
+        try:
+            message = aws_rds.delete_instance(clients["rds"], item.name)
+        except aws_rds.DbBusy as busy:
+            raise _Kept(str(busy)) from busy
+        except Exception as exc:  # noqa: BLE001
+            if error_code(exc) in ("InvalidDBInstanceState", "InvalidDBInstanceStateFault"):
+                raise _Kept("DB 가 다른 작업 중이라 지금은 지울 수 없습니다 — 몇 분 뒤 정리를 다시 실행하세요.") from exc
+            raise
         # 지워져야 서브넷 그룹·파라미터 그룹·DB 보안 그룹을 지울 수 있다 — 최대 15분 기다린다.
         for _ in range(45):
             try:
                 clients["rds"].describe_db_instances(DBInstanceIdentifier=item.name)
             except Exception as exc:  # noqa: BLE001
                 if "NotFound" in error_code(exc):
-                    break
+                    return message
                 raise
             sleep(20)
-        return message
+        raise _Kept(message + " 아직 지워지는 중이라 서브넷 그룹·파라미터 그룹·접속 정보는 다음 정리 때 지웁니다.")
     if k == "rds_subnet_group":
         _retry(lambda: clients["rds"].delete_db_subnet_group(DBSubnetGroupName=item.name),
                ("InvalidDBSubnetGroupStateFault",), sleep=sleep, attempts=4, delay=20)
@@ -565,7 +606,11 @@ def _delete_one(clients: dict, item: Item, *, region: str, all_items: list[Item]
             listed = s3.list_objects_v2(Bucket=item.name, MaxKeys=1000)
             keys = [{"Key": o["Key"]} for o in listed.get("Contents", [])]
             if keys:
-                s3.delete_objects(Bucket=item.name, Delete={"Objects": keys, "Quiet": True})
+                errors = s3.delete_objects(Bucket=item.name, Delete={"Objects": keys, "Quiet": True}).get("Errors") or []
+                if errors:
+                    first = errors[0]
+                    raise RuntimeError(f"파일 {len(errors)}개를 지우지 못했습니다(예: {first.get('Key')} — "
+                                       f"{first.get('Code')}: {first.get('Message')}).")
             if not listed.get("IsTruncated"):
                 break
         s3.delete_bucket(Bucket=item.name)
@@ -580,7 +625,8 @@ def _sg_order(groups: list[Item]) -> list[Item]:
 
 
 def delete(clients: dict, ids: Iterable[str], *, region: str, approved: bool, records: Iterable[dict] = (),
-           sleep: Callable[[float], None] = time.sleep) -> dict:
+           sleep: Callable[[float], None] = time.sleep,
+           on_progress: Optional[Callable[[dict], None]] = None) -> dict:
     """승인한 항목만 정해진 순서로 지운다. 각 항목의 결과를 돌려준다(하나가 실패해도 나머지는 계속)."""
     if not approved:
         raise PermissionError("승인 없이 지우지 않습니다.")
@@ -602,11 +648,27 @@ def delete(clients: dict, ids: Iterable[str], *, region: str, approved: bool, re
     ordered = [i for i in chosen if i.kind != "security_group"]
     pos = next((n for n, i in enumerate(ordered) if ORDER[i.kind] > ORDER["security_group"]), len(ordered))
     ordered[pos:pos] = sgs
-    for item in ordered:
+    db_left: set[str] = set()  # 지우지 못한 DB 의 서비스
+
+    def tell(item: Item, n: int) -> None:
+        if on_progress is not None:
+            try:
+                on_progress({"done": n, "total": len(ordered), "current": f"{item.label} {item.name}"})
+            except Exception:  # noqa: BLE001 - 진행 표시는 삭제를 막지 않는다
+                pass
+
+    for n, item in enumerate(ordered):
+        tell(item, n)
+        if item.kind in DB_DEPENDENTS and (item.service in db_left or "" in db_left):
+            results.append({"id": item.id, "label": item.label, "name": item.name, "ok": False, "skipped": True,
+                            "message": "DB 가 아직 남아 있어 두었습니다 — DB 가 지워진 뒤 정리를 다시 실행하세요."})
+            continue
         try:
             message = _delete_one(clients, item, region=region, all_items=items, sleep=sleep)
             results.append({"id": item.id, "label": item.label, "name": item.name, "ok": True, "message": message})
         except _Kept as kept:
+            if item.kind == "rds_instance":
+                db_left.add(item.service)
             results.append({"id": item.id, "label": item.label, "name": item.name, "ok": False, "skipped": True,
                             "message": str(kept)})
         except Exception as exc:  # noqa: BLE001
@@ -617,6 +679,8 @@ def delete(clients: dict, ids: Iterable[str], *, region: str, approved: bool, re
             elif error_code(exc) in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation",
                                      "WAFInvalidPermissionPolicyException"):
                 hint = " — 권한표에 2.0.26 정리 권한이 없습니다(권한 템플릿을 다시 적용)."
+            if item.kind == "rds_instance":
+                db_left.add(item.service)
             logger.warning("정리 실패 %s: %s", item.id, error_message(exc))
             results.append({"id": item.id, "label": item.label, "name": item.name, "ok": False,
                             "message": f"지우지 못했습니다: {error_message(exc)}{hint}"})

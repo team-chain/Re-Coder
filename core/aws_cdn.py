@@ -15,8 +15,9 @@ ReCoder Core — HTTPS 주소: 로드밸런서 앞 CloudFront (+ 선택: 내 도
 """
 from __future__ import annotations
 
+import hashlib
 import logging
-import re
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -36,6 +37,8 @@ CLOUDFRONT_ZONE_ID = "Z2FDTNDATAQYW2"
 ORIGIN_FACING_LIST = "com.amazonaws.global.cloudfront.origin-facing"
 #: 한국·일본·아시아 엣지를 포함하는 가격 등급(PriceClass_100 은 북미·유럽만).
 PRICE_CLASS = "PriceClass_200"
+#: 2.0.31 원본 잠금 머리글(aws_edge.ORIGIN_HEADER 와 같아야 한다).
+ORIGIN_HEADER = "X-Recoder-Origin"
 COST_NOTE = "CloudFront 는 나가는 데이터·요청 수만큼 요금이 나옵니다(작은 앱은 매달 몇 달러 이하, 1년 무료 사용량 있음)."
 
 
@@ -51,6 +54,12 @@ class CdnResult:
     created: bool
     alias: str = ""
     notes: list[str] = field(default_factory=list)
+    #: 원본 잠금 머리글 값과, 그 값이 이미 전 세계 CloudFront 에 퍼져 있는가(새로 만든 배포 또는 전에 넣어 둔 값).
+    origin_secret: str = field(default="", repr=False)
+    origin_secret_live: bool = False
+    web_acl_id: str = ""
+    #: 요청한 웹 ACL 이 이미 전 세계에 적용돼 있는가(새 배포 또는 이번 배포 전부터 같은 값 + Deployed).
+    web_acl_live: bool = False
 
     @property
     def url(self) -> str:
@@ -79,7 +88,21 @@ def _find(cloudfront: Any, comment: str) -> Optional[dict]:
         marker = page.get("NextMarker", "")
 
 
-def _config(name: str, origin: str, *, alias: str = "", certificate_arn: str = "") -> dict:
+def _origin_header(cfg: dict) -> str:
+    """배포 설정의 원본 잠금 머리글 값(없으면 "")."""
+    for origin in (cfg.get("Origins") or {}).get("Items") or []:
+        for h in (origin.get("CustomHeaders") or {}).get("Items") or []:
+            if str(h.get("HeaderName", "")).lower() == ORIGIN_HEADER.lower():
+                return str(h.get("HeaderValue", ""))
+    return ""
+
+
+def new_origin_secret() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _config(name: str, origin: str, *, alias: str = "", certificate_arn: str = "", origin_secret: str = "",
+            web_acl_id: str = "") -> dict:
     cfg: dict = {
         "CallerReference": f"{name}-{int(time.time())}",
         "Comment": comment_for(name),
@@ -89,6 +112,8 @@ def _config(name: str, origin: str, *, alias: str = "", certificate_arn: str = "
             "CustomOriginConfig": {"HTTPPort": 80, "HTTPSPort": 443, "OriginProtocolPolicy": "http-only",
                                    "OriginSslProtocols": {"Quantity": 1, "Items": ["TLSv1.2"]},
                                    "OriginReadTimeout": 60, "OriginKeepaliveTimeout": 5},
+            "CustomHeaders": ({"Quantity": 1, "Items": [{"HeaderName": ORIGIN_HEADER, "HeaderValue": origin_secret}]}
+                              if origin_secret else {"Quantity": 0}),
         }]},
         "DefaultCacheBehavior": {
             "TargetOriginId": "recoder-alb",
@@ -102,6 +127,7 @@ def _config(name: str, origin: str, *, alias: str = "", certificate_arn: str = "
         "PriceClass": PRICE_CLASS,
         "HttpVersion": "http2and3",
         "ViewerCertificate": {"CloudFrontDefaultCertificate": True},
+        "WebACLId": web_acl_id or "",
     }
     if alias and certificate_arn:
         cfg["Aliases"] = {"Quantity": 1, "Items": [alias]}
@@ -111,29 +137,53 @@ def _config(name: str, origin: str, *, alias: str = "", certificate_arn: str = "
 
 
 def ensure_distribution(cloudfront: Any, *, name: str, origin: str, tags: Optional[dict] = None,
-                        alias: str = "", certificate_arn: str = "") -> CdnResult:
-    """ALB 를 원본으로 하는 배포를 확보한다. 있으면 원본·도메인만 맞춘다."""
+                        alias: str = "", certificate_arn: str = "", web_acl_id: Optional[str] = None) -> CdnResult:
+    """ALB 를 원본으로 하는 배포를 확보한다. 있으면 원본·도메인·원본 잠금 머리글·WAF 만 맞춘다.
+
+    web_acl_id: CloudFront 범위 웹 ACL ARN, "" 은 떼기, None 은 그대로 두기."""
     existing = _find(cloudfront, comment_for(name))
     if existing is None:
+        secret = new_origin_secret()
         try:
             dist = cloudfront.create_distribution_with_tags(DistributionConfigWithTags={
-                "DistributionConfig": _config(name, origin, alias=alias, certificate_arn=certificate_arn),
+                "DistributionConfig": _config(name, origin, alias=alias, certificate_arn=certificate_arn,
+                                              origin_secret=secret, web_acl_id=web_acl_id or ""),
                 "Tags": {"Items": [{"Key": k, "Value": v} for k, v in (tags or {}).items()]},
             })["Distribution"]
         except Exception as exc:  # noqa: BLE001
             raise InfraError("HTTPS 주소(CloudFront)를 만들지 못했습니다.", detail=error_message(exc),
                              remedy="권한표에 2.0.27 의 cloudfront 권한이 있는지 확인하세요(권한 템플릿 스택 업데이트).") from exc
         return CdnResult(str(dist["Id"]), str(dist["DomainName"]), str(dist.get("Status", "")), True,
-                         alias=alias if certificate_arn else "")
+                         alias=alias if certificate_arn else "", origin_secret=secret, origin_secret_live=True,
+                         web_acl_id=web_acl_id or "", web_acl_live=True)
     current = cloudfront.get_distribution_config(Id=existing["Id"])
     cfg = current["DistributionConfig"]
-    want = _config(name, origin, alias=alias, certificate_arn=certificate_arn)
+    secret = _origin_header(cfg)
+    #: 머리글이 있어도 배포가 아직 퍼지는 중(InProgress)이면 일부 엣지는 머리글 없이 보낸다 — 퍼진 뒤에만 '살아 있음'.
+    deployed = str(existing.get("Status", "")) == "Deployed"
+    live = bool(secret) and deployed
+    acl_before = str(cfg.get("WebACLId") or "")
+    secret = secret or new_origin_secret()
+    want = _config(name, origin, alias=alias, certificate_arn=certificate_arn, origin_secret=secret,
+                   web_acl_id=web_acl_id or "")
     changed = False
-    if cfg["Origins"]["Items"][0].get("DomainName") != origin:
-        cfg["Origins"] = want["Origins"]
+    first = cfg["Origins"]["Items"][0]
+    if first.get("DomainName") != origin or _origin_header(cfg) != secret:
+        # 원본을 통째로 맞춘다(사람이 더한 다른 머리글은 남긴다).
+        others = [h for h in (first.get("CustomHeaders") or {}).get("Items") or []
+                  if str(h.get("HeaderName", "")).lower() != ORIGIN_HEADER.lower()]
+        fresh = want["Origins"]["Items"][0]
+        items = others + fresh["CustomHeaders"]["Items"]
+        fresh["CustomHeaders"] = {"Quantity": len(items), "Items": items}
+        cfg["Origins"] = {"Quantity": 1, "Items": [fresh]}
         changed = True
     if certificate_arn and (cfg.get("Aliases", {}).get("Items") or []) != [alias]:
         cfg["Aliases"], cfg["ViewerCertificate"] = want["Aliases"], want["ViewerCertificate"]
+        changed = True
+    if web_acl_id == "" and acl_before and "/webacl/recoder-" not in acl_before:
+        web_acl_id = None  # 사용자가 직접 붙인 웹 ACL 은 떼지 않는다
+    if web_acl_id is not None and acl_before != web_acl_id:
+        cfg["WebACLId"] = web_acl_id
         changed = True
     if not cfg.get("Enabled"):
         cfg["Enabled"] = True
@@ -142,7 +192,9 @@ def ensure_distribution(cloudfront: Any, *, name: str, origin: str, tags: Option
         cloudfront.update_distribution(Id=existing["Id"], IfMatch=current["ETag"], DistributionConfig=cfg)
     aliases = cfg.get("Aliases", {}).get("Items") or []
     return CdnResult(str(existing["Id"]), str(existing["DomainName"]), "InProgress" if changed else str(existing.get("Status", "")),
-                     False, alias=aliases[0] if aliases else "")
+                     False, alias=aliases[0] if aliases else "", origin_secret=secret, origin_secret_live=live,
+                     web_acl_id=str(cfg.get("WebACLId") or ""),
+                     web_acl_live=deployed and web_acl_id is not None and acl_before == web_acl_id)
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +245,8 @@ def ensure_certificate(acm: Any, route53: Any, domain: str, *, tags: Optional[di
     if not arn:
         arn = str(acm.request_certificate(DomainName=domain, ValidationMethod="DNS",
                                           Tags=[{"Key": k, "Value": v} for k, v in (tags or {}).items()],
-                                          IdempotencyToken=re.sub(r"\W", "", domain)[:32] or "recoder")["CertificateArn"])
+                                          # 도메인마다 다른 값(영문·숫자 32자) — 기호만 지우면 a-b.com 과 ab.com 이 겹친다.
+                                          IdempotencyToken=hashlib.sha1(domain.lower().encode("utf-8")).hexdigest()[:32])["CertificateArn"])
     record = None
     cert: dict = {}
     for _ in range(6):  # 검증 레코드는 요청 직후 몇 초 뒤에 나타난다
@@ -212,19 +265,49 @@ def ensure_certificate(acm: Any, route53: Any, domain: str, *, tags: Optional[di
     if zone:
         state.zone_id = str(zone["Id"]).rsplit("/", 1)[-1]
         if record and not state.issued:
-            _upsert(route53, state.zone_id, {"Name": record["Name"], "Type": record["Type"], "TTL": 300,
-                                             "ResourceRecords": [{"Value": record["Value"]}]})
-            state.notes.append("Route 53 에 인증서 검증 레코드를 넣었습니다 — 보통 수 분 안에 발급됩니다. 발급 뒤 다시 배포하면 도메인이 연결됩니다.")
+            try:
+                _upsert(route53, state.zone_id, {"Name": record["Name"], "Type": record["Type"], "TTL": 300,
+                                                 "ResourceRecords": [{"Value": record["Value"]}]})
+                state.notes.append("Route 53 에 인증서 검증 레코드를 넣었습니다 — 보통 수 분 안에 발급됩니다. 발급 뒤 다시 배포하면 도메인이 연결됩니다.")
+            except Exception as exc:  # noqa: BLE001 - 배포는 CloudFront 기본 주소로 계속
+                state.notes.append(f"Route 53 에 검증 레코드를 넣지 못했습니다({error_message(exc)}) — 도메인 DNS 에 직접 넣으세요: "
+                                   f"{record['Name']} CNAME {record['Value']}")
     elif record and not state.issued:
         state.notes.append(f"도메인 DNS 에 검증 레코드를 넣으세요: {record['Name']} CNAME {record['Value']} — 발급된 뒤 다시 배포하면 도메인이 연결됩니다.")
     return state
 
 
-def point_domain(route53: Any, zone_id: str, domain: str, distribution_domain: str) -> None:
-    """Route 53 별칭 A·AAAA → CloudFront."""
+def _existing_record(route53: Any, zone_id: str, domain: str, kind: str) -> Optional[dict]:
+    name = domain.rstrip(".").lower() + "."
+    sets = route53.list_resource_record_sets(HostedZoneId=zone_id, StartRecordName=name, StartRecordType=kind,
+                                             MaxItems="1").get("ResourceRecordSets", [])
+    if sets and str(sets[0].get("Name", "")).lower() == name and sets[0].get("Type") == kind:
+        return sets[0]
+    return None
+
+
+def point_domain(route53: Any, zone_id: str, domain: str, distribution_domain: str) -> list[str]:
+    """Route 53 별칭 A·AAAA → CloudFront. 다른 곳을 가리키는 레코드(사용자가 만든 서버 주소 등)는 덮어쓰지 않는다.
+    돌려주는 것은 사람이 읽을 안내(비면 모두 연결함)."""
+    notes: list[str] = []
     for kind in ("A", "AAAA"):
+        try:
+            current = _existing_record(route53, zone_id, domain, kind)
+        except Exception as exc:  # noqa: BLE001
+            if error_code(exc) not in ("AccessDenied", "AccessDeniedException"):
+                raise
+            # 옛 권한표(ListResourceRecordSets 없음) — 2.0.30 처럼 그대로 넣는다.
+            logger.info("Route 53 레코드 확인 권한 없음 — 확인 없이 별칭을 넣습니다.")
+            current = None
+        target = str(((current or {}).get("AliasTarget") or {}).get("DNSName", "")).rstrip(".").lower()
+        if current is not None and not target.endswith(".cloudfront.net"):
+            what = target or ", ".join(r.get("Value", "") for r in current.get("ResourceRecords", []) or [])
+            notes.append(f"{domain} 의 {kind} 레코드가 이미 다른 곳({what})을 가리켜 덮어쓰지 않았습니다 — "
+                         f"CloudFront({distribution_domain})로 옮기려면 Route 53 에서 그 레코드를 별칭으로 바꾸세요.")
+            continue
         _upsert(route53, zone_id, {"Name": domain, "Type": kind, "AliasTarget": {
             "HostedZoneId": CLOUDFRONT_ZONE_ID, "DNSName": distribution_domain, "EvaluateTargetHealth": False}})
+    return notes
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +321,8 @@ def disable_or_delete(cloudfront: Any, distribution_id: str) -> str:
     cfg = current["DistributionConfig"]
     if cfg.get("Enabled"):
         cfg["Enabled"] = False
+        # 붙여 둔 CloudFront 범위 웹 ACL 도 떼어 같은 정리에서 지울 수 있게 한다.
+        cfg["WebACLId"] = ""
         cloudfront.update_distribution(Id=distribution_id, IfMatch=current["ETag"], DistributionConfig=cfg)
         return "껐습니다 — CloudFront 가 끄는 데 15분쯤 걸려, 그 뒤 정리를 다시 실행하면 지웁니다."
     dist = cloudfront.get_distribution(Id=distribution_id)

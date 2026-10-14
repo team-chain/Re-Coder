@@ -232,6 +232,19 @@ def summary(decision: ShieldDecision) -> dict:
             "public_port": decision.public_port, "app_port": decision.app_port, "reason": decision.reason}
 
 
+def _proxy_from_conf(conf_b64: str) -> str:
+    """2.0.26 이전 태스크 정의에는 RECODER_SHIELD_PROXY 가 없다 — 넣어 둔 nginx 설정에서 앞단을 알아낸다."""
+    try:
+        conf = base64.b64decode(conf_b64.encode("ascii"), validate=False).decode("utf-8", "replace")
+    except (ValueError, UnicodeError):
+        return ""
+    if "cloudfront_viewer_address" in conf:
+        return "cdn"
+    if "real_ip_header" in conf:
+        return "vpc"
+    return ""
+
+
 def current_settings(task_def: dict) -> dict:
     """등록된 태스크 정의에서 방패의 강도·차단 IP 를 읽는다(대응 제안이 이것을 바꿔 새 리비전을 만든다)."""
     for c in task_def.get("containerDefinitions", []) or []:
@@ -239,7 +252,7 @@ def current_settings(task_def: dict) -> dict:
             env = {e.get("name"): e.get("value", "") for e in c.get("environment", []) or []}
             return {"on": True, "level": env.get("RECODER_SHIELD_LEVEL") or DEFAULT_LEVEL,
                     "deny": [d for d in (env.get("RECODER_SHIELD_DENY") or "").split(",") if d],
-                    "proxy": env.get("RECODER_SHIELD_PROXY") or ""}
+                    "proxy": env.get("RECODER_SHIELD_PROXY") or _proxy_from_conf(env.get("RECODER_SHIELD_CONF_B64") or "")}
     return {"on": False, "level": DEFAULT_LEVEL, "deny": [], "proxy": ""}
 
 

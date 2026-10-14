@@ -120,6 +120,7 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "logs:GetQueryResults":         "AWS 가 리소스 단위 제한 미지원(쿼리 ID 로만 읽는 결과)",
         # 2.0.26 대규모 방패·리소스 정리 — 읽기 전용 목록, 리전 조건으로 좁혔다
         "elasticloadbalancing:DescribeListeners": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "elasticloadbalancing:DescribeRules": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다(2.0.31 원본 잠금)",
         "elasticloadbalancing:DescribeTags": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "wafv2:ListWebACLs":            "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "wafv2:GetWebACLForResource":   "읽기 전용 확인 — 리전 조건으로 좁혔다",
@@ -2137,8 +2138,17 @@ def runtime_actions() -> set[str]:
                 recorder.install()
             cert = aws_cdn.ensure_certificate(cleanup_clients["acm_global"], r53, "shop.example.com", tags=tags,
                                               sleep=lambda _s: None)
+            # 2.0.31 WAF 는 CloudFront 에(전역 범위) — 붙인 뒤 ALB 의 지역 웹 ACL 을 뗀다
+            global_acl, _ = aws_edge.ensure_web_acl(cleanup_clients["wafv2_global"], edge_cdn.name, rate_limit=2000,
+                                                    window=300, tags=tags, scope=aws_edge.CLOUDFRONT)
             cdn = aws_cdn.ensure_distribution(cleanup_clients["cloudfront"], name=edge_cdn.name,
-                                              origin=edge_cdn.dns_name, tags=tags)
+                                              origin=edge_cdn.dns_name, tags=tags, web_acl_id=global_acl)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, cdn=True, **edge_args)
+            # 2.0.31 원본 잠금 — 만들기 · 값 바꾸기 · 잠긴 채 재배포 · HTTPS 끄면 풀기(아래 공개 재배포)
+            aws_edge.lock_origin(elbv2, edge_cdn.listener_arn, edge_cdn.target_group_arn, cdn.origin_secret)
+            aws_edge.lock_origin(elbv2, edge_cdn.listener_arn, edge_cdn.target_group_arn, "rotated-secret")
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, cdn=True, **edge_args)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)                 # HTTPS 끔 → 잠금 풀기(DeleteRule)
             aws_cdn.ensure_distribution(cleanup_clients["cloudfront"], name=edge_cdn.name, origin="other.example.com",
                                         tags=tags, alias="shop.example.com", certificate_arn=cert.arn)
             aws_cdn.point_domain(r53, cert.zone_id or "Z1", "shop.example.com", cdn.domain)
@@ -2154,6 +2164,8 @@ def runtime_actions() -> set[str]:
             aws_cleanup.stop(cleanup_clients, region=region, cluster="recoder-probe", service="recoder-probe-svc")
             ids = [i["id"] for g in found["groups"] for i in g["items"]]
             aws_cleanup.delete(cleanup_clients, ids, region=region, approved=True, sleep=lambda _s: None)
+            # 2.0.31 정리로 삭제 예정이 된 DB 접속 정보 — 다시 배포하면 되살린다
+            aws_rds._secret(cleanup_clients["secretsmanager"], aws_rds.secret_name("recoder-probe-svc"), tags, create=True)
             # CloudFront 는 끈 뒤(배포 완료) 다시 정리해야 지워진다
             again = aws_cleanup.plan(cleanup_clients, region=region)
             aws_cleanup.delete(cleanup_clients, [i["id"] for g in again["groups"] for i in g["items"]],
@@ -2220,6 +2232,14 @@ RUNTIME_EVIDENCE_FLOOR = {
     "secretsmanager:CreateSecret",
     "secretsmanager:PutSecretValue",
     "elasticloadbalancing:SetSecurityGroups",
+    # 2.0.31 CloudFront WAF · 원본 잠금 · 비밀 되살리기 · 도메인 레코드 확인
+    "elasticloadbalancing:CreateRule",
+    "elasticloadbalancing:ModifyRule",
+    "elasticloadbalancing:DeleteRule",
+    "elasticloadbalancing:DescribeRules",
+    "secretsmanager:DescribeSecret",
+    "secretsmanager:RestoreSecret",
+    "route53:ListResourceRecordSets",
 }
 
 

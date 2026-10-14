@@ -26,9 +26,11 @@ from typing import Any, Callable, Optional
 #: ecs_agent 가 `core.aws_infra.InfraError` 로 잡는다 — 같은 클래스여야 하므로 core 쪽을 먼저(둘 다 sys.path 에 있으면
 #: `aws_infra` 와 `core.aws_infra` 는 서로 다른 모듈이 된다).
 try:
-    from core.aws_infra import InfraError, error_code, error_message, ensure_security_group  # type: ignore
+    from core.aws_infra import (InfraError, error_code, error_message, ensure_security_group,  # type: ignore
+                                internet_routable_subnets)
 except ImportError:  # pragma: no cover
-    from aws_infra import InfraError, error_code, error_message, ensure_security_group  # type: ignore
+    from aws_infra import (InfraError, error_code, error_message, ensure_security_group,  # type: ignore
+                           internet_routable_subnets)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,15 @@ DEFAULT_WINDOW = 300
 MIN_RATE_LIMIT = 10
 MAX_RATE_LIMIT = 2_000_000_000
 LISTENER_PORT = 80
+#: WAF 범위 — ALB 는 지역(REGIONAL), CloudFront 는 전역(CLOUDFRONT, 반드시 us-east-1 클라이언트).
+REGIONAL = "REGIONAL"
+CLOUDFRONT = "CLOUDFRONT"
+#: 2.0.31 HTTPS 주소 — CloudFront 가 붙이는 비밀 머리글. 이 값이 맞는 요청만 ALB 가 앱으로 넘긴다
+#: (보안 그룹의 CloudFront 주소 목록은 **남의 CloudFront 배포**도 통과시키므로 한 겹 더).
+ORIGIN_HEADER = "X-Recoder-Origin"
+ORIGIN_RULE_PRIORITY = 10
+DENY_ACTION = {"Type": "fixed-response",
+               "FixedResponseConfig": {"StatusCode": "403", "ContentType": "text/plain", "MessageBody": "Forbidden"}}
 
 #: AWS 관리 규칙 — 일반 공격 패턴, 알려진 악성 입력.
 MANAGED_RULES = ("AWSManagedRulesCommonRuleSet", "AWSManagedRulesKnownBadInputsRuleSet")
@@ -130,25 +141,42 @@ class EdgeResult:
 
 
 def alb_subnets(ec2: Any, vpc_id: str, task_subnets: list[str]) -> list[str]:
+    """ALB 서브넷 — 태스크가 뜨는 영역은 모두 포함하고(빠지면 그 영역 태스크로 요청이 가지 않는다), 영역마다
+    **인터넷 게이트웨이로 나가는(공개) 서브넷**을 고른다. 태스크가 사설 서브넷(NAT)에 있어도 ALB 는 공개 서브넷에 있어야
+    인터넷에서 닿는다."""
     try:
         mine = ec2.describe_subnets(SubnetIds=list(task_subnets))["Subnets"] if task_subnets else []
         others = ec2.describe_subnets(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])["Subnets"]
     except Exception as exc:  # noqa: BLE001
         raise InfraError("로드밸런서를 둘 서브넷을 확인하지 못했습니다.", detail=error_message(exc),
                          remedy="권한표의 ec2:DescribeSubnets 를 확인하세요.") from exc
+    every = {str(s["SubnetId"]): s for s in [*others, *mine]}
+    routable, checked = internet_routable_subnets(ec2, vpc_id, list(every))
+    # 라우팅을 못 봤거나 igw 경로가 하나도 안 보이면(권한·특이한 라우팅) "공인 IP 자동 할당" 서브넷으로 대신 가린다.
+    public = set(routable) if checked and routable else {sid for sid, s in every.items() if s.get("MapPublicIpOnLaunch")}
+    task_ids = {str(s["SubnetId"]) for s in mine}
+
+    def rank(sid: str) -> tuple:
+        return (sid not in public, sid not in task_ids, sid)
+
+    zones: dict[str, list[str]] = {}
+    for sid, s in every.items():
+        zones.setdefault(str(s.get("AvailabilityZone")), []).append(sid)
     by_zone: dict[str, str] = {}
-    for s in mine:
-        by_zone.setdefault(str(s.get("AvailabilityZone")), str(s["SubnetId"]))
-    # 다른 영역은 공인 IP 를 주는(인터넷으로 나가는) 서브넷을 우선한다.
-    for s in sorted(others, key=lambda s: (not s.get("MapPublicIpOnLaunch"), str(s.get("AvailabilityZone")),
-                                           str(s["SubnetId"]))):
+    for zone in sorted({str(s.get("AvailabilityZone")) for s in mine}):
+        by_zone[zone] = min(zones[zone], key=rank)
+    # 다른 영역은 공개 서브넷이 있는 곳부터(가용 영역 2곳 이상 필요, 3곳까지).
+    for zone in sorted(zones, key=lambda z: (rank(min(zones[z], key=rank))[0], z)):
         if len(by_zone) >= 3:
             break
-        by_zone.setdefault(str(s.get("AvailabilityZone")), str(s["SubnetId"]))
+        by_zone.setdefault(zone, min(zones[zone], key=rank))
     if len(by_zone) < 2:
         raise InfraError(
             "로드밸런서는 가용 영역 2곳 이상의 서브넷이 필요한데 1곳만 찾았습니다.",
             remedy="VPC 에 다른 가용 영역의 공개 서브넷을 하나 더 만들거나, 대규모 방패를 끄고 배포하세요.")
+    private = [sid for sid in by_zone.values() if sid not in public]
+    if private:
+        logger.warning("ALB 서브넷 중 공개가 아닌 것: %s — 그 영역에는 공개 서브넷이 없습니다.", ",".join(private))
     return list(by_zone.values())
 
 
@@ -189,11 +217,11 @@ def _health_check(health_path: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def find_web_acl(wafv2: Any, name: str) -> dict | None:
-    """이름으로 지역(REGIONAL) 웹 ACL 요약을 찾는다."""
+def find_web_acl(wafv2: Any, name: str, scope: str = REGIONAL) -> dict | None:
+    """이름으로 웹 ACL 요약을 찾는다(scope=CLOUDFRONT 는 us-east-1 클라이언트로)."""
     marker = None
     while True:
-        kwargs: dict = {"Scope": "REGIONAL", "Limit": 100}
+        kwargs: dict = {"Scope": scope, "Limit": 100}
         if marker:
             kwargs["NextMarker"] = marker
         resp = wafv2.list_web_acls(**kwargs)
@@ -205,23 +233,24 @@ def find_web_acl(wafv2: Any, name: str) -> dict | None:
             return None
 
 
-def ensure_web_acl(wafv2: Any, name: str, *, rate_limit: int, window: int, tags: Optional[dict]) -> tuple[str, bool]:
+def ensure_web_acl(wafv2: Any, name: str, *, rate_limit: int, window: int, tags: Optional[dict],
+                   scope: str = REGIONAL) -> tuple[str, bool]:
     """웹 ACL 을 확보하고 (ARN, 새로 만들었는가). 있으면 속도 제한을 요청 값으로 맞춘다."""
     rules = web_acl_rules(name, rate_limit, window)
-    existing = find_web_acl(wafv2, name)
+    existing = find_web_acl(wafv2, name, scope)
     if existing is None:
         summary = wafv2.create_web_acl(
-            Name=name, Scope="REGIONAL", DefaultAction={"Allow": {}}, Rules=rules,
+            Name=name, Scope=scope, DefaultAction={"Allow": {}}, Rules=rules,
             VisibilityConfig=_visibility(name),
             Description="ReCoder 대규모 방패 — IP 당 속도 제한 + AWS 관리 규칙",
-            Tags=_tag_list(tags),
+            **({"Tags": _tag_list(tags)} if tags else {}),
         )["Summary"]
         logger.info("WAF 웹 ACL 생성: %s", name)
         return str(summary["ARN"]), True
-    current = wafv2.get_web_acl(Name=name, Scope="REGIONAL", Id=existing["Id"])
+    current = wafv2.get_web_acl(Name=name, Scope=scope, Id=existing["Id"])
     if rate_of(current["WebACL"].get("Rules", [])) != (int(rate_limit), int(window)) or \
             len(current["WebACL"].get("Rules", [])) != len(rules):
-        wafv2.update_web_acl(Name=name, Scope="REGIONAL", Id=existing["Id"], DefaultAction={"Allow": {}},
+        wafv2.update_web_acl(Name=name, Scope=scope, Id=existing["Id"], DefaultAction={"Allow": {}},
                              Rules=rules, VisibilityConfig=_visibility(name), LockToken=current["LockToken"],
                              Description="ReCoder 대규모 방패 — IP 당 속도 제한 + AWS 관리 규칙")
         logger.info("WAF 웹 ACL 갱신: %s (%s회/%s초)", name, rate_limit, window)
@@ -229,8 +258,8 @@ def ensure_web_acl(wafv2: Any, name: str, *, rate_limit: int, window: int, tags:
 
 
 def associate(wafv2: Any, acl_arn: str, alb_arn: str, *, sleep: Callable[[float], None] = time.sleep,
-              attempts: int = 12) -> None:
-    """방금 만든 ALB 는 잠시 WAF 가 못 본다(WAFUnavailableEntityException) — 5초씩 기다려 다시."""
+              attempts: int = 36) -> None:
+    """방금 만든 ALB 는 잠시 WAF 가 못 본다(WAFUnavailableEntityException) — 5초씩 최대 3분 기다려 다시."""
     for i in range(attempts):
         try:
             wafv2.associate_web_acl(WebACLArn=acl_arn, ResourceArn=alb_arn)
@@ -241,23 +270,127 @@ def associate(wafv2: Any, acl_arn: str, alb_arn: str, *, sleep: Callable[[float]
             sleep(5)
 
 
-def detach_recoder_acl(wafv2: Any, alb_arn: str, name: str) -> str:
-    """대규모 방패를 끈 배포 — 우리가 붙인 웹 ACL 을 떼고 지운다(켜 둔 채 매달 요금이 나가지 않게)."""
+def detach_recoder_acl(wafv2: Any, alb_arn: str, name: str, *, sleep: Callable[[float], None] = time.sleep,
+                       reason: str = "WAF 를 껐습니다") -> str:
+    """우리가 ALB 에 붙인 지역 웹 ACL 을 떼고 지운다(켜 둔 채 매달 요금이 나가지 않게).
+
+    떼어 낸 직후에는 잠시 '아직 연결됨'(WAFAssociatedItemException)으로 지우기가 거절된다 — 기다려 다시. 끝내 못 지우면
+    배포를 실패시키지 않고 안내만 남긴다(떼어 냈으므로 동작에는 영향 없음, 요금만 남음)."""
     attached = (wafv2.get_web_acl_for_resource(ResourceArn=alb_arn) or {}).get("WebACL") or {}
     if attached.get("Name") != name:
         return ""
     wafv2.disassociate_web_acl(ResourceArn=alb_arn)
-    delete_web_acl(wafv2, name)
-    return f"WAF 를 껐습니다 — 웹 ACL {name} 을 떼고 지웠습니다."
+    try:
+        delete_web_acl(wafv2, name, sleep=sleep)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("지역 웹 ACL 삭제 실패(떼어 냄): %s", error_message(exc))
+        return (f"{reason} — 웹 ACL {name} 을 로드밸런서에서 뗐지만 지우지 못했습니다({error_message(exc)}). "
+                "「AWS 리소스 정리」에서 지우세요(남겨 두면 매달 요금).")
+    return f"{reason} — 웹 ACL {name} 을 떼고 지웠습니다."
 
 
-def delete_web_acl(wafv2: Any, name: str) -> bool:
-    acl = find_web_acl(wafv2, name)
+def delete_web_acl(wafv2: Any, name: str, scope: str = REGIONAL, *, sleep: Callable[[float], None] = time.sleep,
+                   attempts: int = 6) -> bool:
+    acl = find_web_acl(wafv2, name, scope)
     if acl is None:
         return False
-    lock = wafv2.get_web_acl(Name=name, Scope="REGIONAL", Id=acl["Id"])["LockToken"]
-    wafv2.delete_web_acl(Name=name, Scope="REGIONAL", Id=acl["Id"], LockToken=lock)
+    for i in range(attempts):
+        lock = wafv2.get_web_acl(Name=name, Scope=scope, Id=acl["Id"])["LockToken"]
+        try:
+            wafv2.delete_web_acl(Name=name, Scope=scope, Id=acl["Id"], LockToken=lock)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            if error_code(exc) not in ("WAFAssociatedItemException", "WAFOptimisticLockException") or i == attempts - 1:
+                raise
+            sleep(10)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 2.0.31 원본 잠금 — CloudFront 가 붙인 비밀 머리글이 있는 요청만 앱으로
+# ---------------------------------------------------------------------------
+
+
+def _rules(elbv2: Any, listener_arn: str) -> list[dict]:
+    return elbv2.describe_rules(ListenerArn=listener_arn).get("Rules", [])
+
+
+def _header_condition(rule: dict) -> dict | None:
+    for cond in rule.get("Conditions", []) or []:
+        if cond.get("Field") == "http-header" and \
+                str((cond.get("HttpHeaderConfig") or {}).get("HttpHeaderName", "")).lower() == ORIGIN_HEADER.lower():
+            return cond
+    return None
+
+
+def origin_rule(elbv2: Any, listener_arn: str) -> dict | None:
+    return next((r for r in _rules(elbv2, listener_arn) if _header_condition(r)), None)
+
+
+def _free_priority(rules: list[dict]) -> int:
+    used = {int(r["Priority"]) for r in rules if str(r.get("Priority", "")).isdigit()}
+    return next(p for p in range(ORIGIN_RULE_PRIORITY, 50001) if p not in used)
+
+
+def is_locked(elbv2: Any, listener_arn: str) -> bool:
+    listener = (elbv2.describe_listeners(ListenerArns=[listener_arn]).get("Listeners") or [{}])[0]
+    return (listener.get("DefaultActions") or [{}])[0].get("Type") == "fixed-response"
+
+
+def _forward(tg_arn: str) -> list[dict]:
+    return [{"Type": "forward", "TargetGroupArn": tg_arn}]
+
+
+def _forwards_to(actions: list[dict], tg_arn: str) -> bool:
+    return [a.get("TargetGroupArn") for a in actions or [] if a.get("Type") == "forward"] == [tg_arn] and len(actions) == 1
+
+
+def lock_origin(elbv2: Any, listener_arn: str, tg_arn: str, secret: str, *, also: Optional[list[str]] = None) -> None:
+    """머리글 규칙을 맞추고, 기본 동작을 403 으로. 이미 잠겨 있으면 값·대상만 맞춘다.
+
+    also: 함께 받아 줄 값(머리글을 새 값으로 바꾸는 동안 옛 값도 통과 — 값 목록은 OR)."""
+    if not secret:
+        raise InfraError("원본 잠금 머리글 값이 비었습니다(내부 오류).")
+    values = list(dict.fromkeys([secret, *(also or [])]))[:5]
+    conditions = [{"Field": "http-header", "HttpHeaderConfig": {"HttpHeaderName": ORIGIN_HEADER, "Values": values}}]
+    rules = _rules(elbv2, listener_arn)
+    rule = next((r for r in rules if _header_condition(r)), None)
+    if rule is None:
+        #: 사용자가 만든 규칙과 우선순위가 겹치지 않게 비어 있는 번호를 쓴다.
+        elbv2.create_rule(ListenerArn=listener_arn, Priority=_free_priority(rules), Conditions=conditions,
+                          Actions=_forward(tg_arn))
+    else:
+        current = ((_header_condition(rule) or {}).get("HttpHeaderConfig") or {}).get("Values") or []
+        if current != values or not _forwards_to(rule.get("Actions", []), tg_arn):
+            elbv2.modify_rule(RuleArn=rule["RuleArn"], Conditions=conditions, Actions=_forward(tg_arn))
+    elbv2.modify_listener(ListenerArn=listener_arn, DefaultActions=[DENY_ACTION])
+
+
+def widen_origin_lock(elbv2: Any, listener_arn: str, tg_arn: str, secret: str) -> bool:
+    """이미 잠긴 리스너에 새 머리글 값을 **더한다**(옛 값 유지). CloudFront 가 새 값을 퍼뜨리는 동안 403 이 나지 않게.
+    잠겨 있지 않으면 아무것도 하지 않고 False."""
+    if not is_locked(elbv2, listener_arn):
+        return False
+    rule = origin_rule(elbv2, listener_arn)
+    old = ((_header_condition(rule) or {}).get("HttpHeaderConfig") or {}).get("Values") or [] if rule else []
+    if secret in old:
+        return True
+    lock_origin(elbv2, listener_arn, tg_arn, secret, also=list(old))
     return True
+
+
+def unlock_origin(elbv2: Any, listener_arn: str, tg_arn: str) -> bool:
+    """HTTPS 주소를 끈 배포 — 기본 동작을 다시 앱으로, 머리글 규칙은 지운다. 바꿨으면 True."""
+    changed = False
+    rule = origin_rule(elbv2, listener_arn)
+    listener = (elbv2.describe_listeners(ListenerArns=[listener_arn]).get("Listeners") or [{}])[0]
+    if not _forwards_to(listener.get("DefaultActions", []), tg_arn):
+        elbv2.modify_listener(ListenerArn=listener_arn, DefaultActions=_forward(tg_arn))
+        changed = True
+    if rule is not None:
+        elbv2.delete_rule(RuleArn=rule["RuleArn"])
+        changed = True
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -338,16 +471,35 @@ def ensure_edge(
 
         listeners = elbv2.describe_listeners(LoadBalancerArn=alb_arn).get("Listeners", [])
         http = next((l for l in listeners if int(l.get("Port", 0)) == LISTENER_PORT), None)
-        forward = [{"Type": "forward", "TargetGroupArn": tg_arn}]
+        forward = _forward(tg_arn)
         if http is None:
             http = elbv2.create_listener(LoadBalancerArn=alb_arn, Port=LISTENER_PORT, Protocol="HTTP",
                                          DefaultActions=forward, Tags=_tag_list(tags))["Listeners"][0]
             created.append(("listener", str(http["ListenerArn"])))
-        elif [a.get("TargetGroupArn") for a in http.get("DefaultActions", [])] != [tg_arn]:
+        elif cdn and (http.get("DefaultActions") or [{}])[0].get("Type") == "fixed-response":
+            #: 원본 잠금이 걸린 리스너 — 잠금은 그대로 두고 머리글 규칙의 대상만 맞춘다(_provision_cdn 이 값을 맞춘다).
+            rule = origin_rule(elbv2, str(http["ListenerArn"]))
+            if rule is None:
+                elbv2.modify_listener(ListenerArn=http["ListenerArn"], DefaultActions=forward)
+            elif not _forwards_to(rule.get("Actions", []), tg_arn):
+                elbv2.modify_rule(RuleArn=rule["RuleArn"], Actions=forward)
+        elif not cdn and (http.get("DefaultActions") or [{}])[0].get("Type") == "fixed-response":
+            # 잠긴 리스너만 규칙을 조회한다(옛 권한표로 하는 평소 재배포는 DescribeRules 없이 그대로 돈다).
+            if unlock_origin(elbv2, str(http["ListenerArn"]), tg_arn):
+                notes.append("HTTPS 주소를 꺼 로드밸런서가 다시 모든 요청을 앱으로 넘깁니다.")
+        elif not _forwards_to(http.get("DefaultActions", []), tg_arn):
             elbv2.modify_listener(ListenerArn=http["ListenerArn"], DefaultActions=forward)
 
         acl_arn = ""
-        if waf:
+        if cdn:
+            #: 2.0.31 — CloudFront 뒤의 ALB 에서는 모든 요청이 CloudFront 엣지 주소로 보여 IP 당 제한이 엣지 단위로 묶인다.
+            #: WAF 는 CloudFront 에(전역 범위) 붙인다 — 예전에 ALB 에 붙여 둔 지역 웹 ACL 은 CloudFront 쪽을 붙인 **뒤에**
+            #: ecs_agent._provision_cdn 이 뗀다(그 사이 보호가 비지 않게). WAF 를 끈 배포면 여기서 바로 뗀다.
+            if not waf and not any(k == "alb" for k, _ in created):
+                note = detach_recoder_acl(wafv2, alb_arn, name, sleep=sleep)
+                if note:
+                    notes.append(note)
+        elif waf:
             acl_arn, made = ensure_web_acl(wafv2, name, rate_limit=rate_limit, window=window, tags=tags)
             if made:
                 created.append(("waf", name))
@@ -358,7 +510,7 @@ def ensure_edge(
             if already != acl_arn:
                 associate(wafv2, acl_arn, alb_arn, sleep=sleep)
         elif not any(k == "alb" for k, _ in created):
-            note = detach_recoder_acl(wafv2, alb_arn, name)
+            note = detach_recoder_acl(wafv2, alb_arn, name, sleep=sleep)
             if note:
                 notes.append(note)
 
@@ -385,7 +537,7 @@ def rollback(elbv2: Any, wafv2: Any, created: list[tuple[str, str]], *,
     for kind, ref in reversed(created):
         try:
             if kind == "waf":
-                delete_web_acl(wafv2, ref)
+                delete_web_acl(wafv2, ref, sleep=sleep)
             elif kind == "listener":
                 elbv2.delete_listener(ListenerArn=ref)
             elif kind == "alb":

@@ -58,6 +58,13 @@ export function CleanupGroup({ group, picked, onPick, onStop, disabled }: {
   );
 }
 
+/** 2.0.31 뒤에서 지우는 동안의 진행 문장. */
+export function cleanupProgressText(p: Record<string, unknown>): string {
+  const done = Number(p.done ?? 0), total = Number(p.total ?? 0);
+  const current = typeof p.current === "string" && p.current ? ` — ${p.current}` : "";
+  return `지우는 중 ${Math.min(done + 1, Math.max(total, 1))}/${Math.max(total, 1)}${current} (DB·CloudFront 는 수 분~15분 걸립니다. 이 창을 닫아도 코어가 계속 지웁니다.)`;
+}
+
 export function DeleteApproval({ items, busy, onApprove, onCancel }: {
   items: CleanupItemView[]; busy: boolean; onApprove: () => void; onCancel: () => void;
 }) {
@@ -94,6 +101,7 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
       setResults((p.results as ResultView[]) ?? []); setConfirming(false);
       setNote(`${p.deleted ?? 0}개를 지웠습니다${p.failed ? ` · ${p.failed}개는 실패(아래 이유)` : ""}.`);
     }
+    if (event.type === "aws.cleanup.progress") { setNote(cleanupProgressText(p)); }
     if (event.type === "aws.cleanup.error") { setBusy(false); setConfirming(false); setNote(String(p.message ?? "실패했습니다")); }
   }, []));
 

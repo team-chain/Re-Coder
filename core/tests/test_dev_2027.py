@@ -242,6 +242,6 @@ def test_extension_request_passes_https_and_database_options():
 def test_dynamic_cleanup_clients_are_bundled_in_the_installer():
     """정리 기능은 클라이언트 이름을 목록으로 만들어 정적 검사(test_bundled_aws_services)에 안 잡힌다."""
     from release_check import BUNDLED_AWS_SERVICES, RUNTIME_IMPORTS
-    names = {"acm" if n == "acm_global" else n for n in aws_cleanup.CLIENTS}
+    names = {aws_cleanup.GLOBAL_CLIENTS.get(n, n) for n in aws_cleanup.CLIENTS}
     assert names <= set(BUNDLED_AWS_SERVICES), sorted(names - set(BUNDLED_AWS_SERVICES))
     assert {"aws_cdn", "aws_rds", "aws_edge", "aws_cleanup"} <= set(RUNTIME_IMPORTS)
