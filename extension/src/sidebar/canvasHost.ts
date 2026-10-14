@@ -16,7 +16,7 @@ import { activeProjectPath, pickProjectFolder, projectFolders, selectActiveProje
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
 type Target = 'ecs' | 's3' | 'github';
-export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[]; shield?: boolean; shield_level?: 'loose' | 'normal' | 'strict'; alerts?: boolean; alert_email?: string; edge?: 'none' | 'alb' | 'alb_waf'; waf_rate_limit?: number; waf_window?: 60 | 120 | 300 | 600; edge_cost_approved?: boolean }
+export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[]; shield?: boolean; shield_level?: 'loose' | 'normal' | 'strict'; alerts?: boolean; alert_email?: string; edge?: 'none' | 'alb' | 'alb_waf'; waf_rate_limit?: number; waf_window?: 60 | 120 | 300 | 600; edge_cost_approved?: boolean; https?: boolean; custom_domain?: string; database?: 'task' | 'rds'; db_cost_approved?: boolean }
 interface Plan { id: string; config: CanvasConfig; workspace: string; git: Awaited<ReturnType<typeof gitContext>>; account: string; created: number; targetState: Awaited<ReturnType<ApiClient['getCanvasTarget']>> | null; staticDigest?: string }
 
 export function staticPreview(workspace: string, dir: string) {
@@ -148,6 +148,28 @@ export function validateConfig(raw: Record<string, unknown>): CanvasConfig {
             config.waf_rate_limit = limit;
             config.waf_window = window as 60 | 120 | 300 | 600;
             config.edge_cost_approved = true;
+        }
+        //: 2.0.27 HTTPS 주소 · 내 도메인 · 관리형 DB
+        if (raw.https !== undefined) {
+            if (typeof raw.https !== 'boolean') throw new Error('https 는 true/false 여야 합니다.');
+            if (raw.https) {
+                if (raw.edge_cost_approved !== true) throw new Error('HTTPS 주소는 로드밸런서·CloudFront 요금이 나옵니다 — 비용 확인에 체크하세요.');
+                config.https = true;
+                config.edge_cost_approved = true;
+                if (!config.edge) { config.edge = 'alb'; }
+            }
+        }
+        if (raw.custom_domain !== undefined && raw.custom_domain !== '') {
+            const domain = String(raw.custom_domain).trim().toLowerCase();
+            if (!/^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){1,8}[a-z]{2,63}$/.test(domain)) throw new Error('도메인 형식이 올바르지 않습니다.');
+            if (!config.https) throw new Error('내 도메인은 HTTPS 주소를 켜야 연결됩니다.');
+            config.custom_domain = domain;
+        }
+        if (raw.database !== undefined && raw.database !== 'task') {
+            if (raw.database !== 'rds') throw new Error('DB 설정이 올바르지 않습니다.');
+            if (raw.db_cost_approved !== true) throw new Error('관리형 DB 는 매달 요금이 나옵니다 — 비용 확인에 체크하세요.');
+            config.database = 'rds';
+            config.db_cost_approved = true;
         }
         for (const key of ['env_vars', 'secret_refs'] as const) {
             const value = raw[key] ?? {};

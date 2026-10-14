@@ -24,7 +24,7 @@ _REGION = r"^[a-z]{2}(-gov)?-[a-z]+-\d$"
 def clients_for(region: str) -> dict:
     import boto3
     session = boto3.session.Session(region_name=region)
-    return {name: session.client(name) for name in aws_cleanup.CLIENTS}
+    return aws_cleanup.make_clients(session)
 
 
 def deploy_records() -> list[dict]:

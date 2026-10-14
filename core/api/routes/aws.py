@@ -2336,7 +2336,9 @@ def get_onboarding_link(region: str = "", targets: str = "") -> AwsOnboardingRes
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    policy_doc = template["Resources"]["RecoderDeployPolicy"]["Properties"]["PolicyDocument"]
+    #: 관리형 정책이 여러 개로 나뉘었으면(2.0.27) 전부 센다.
+    policy_doc = {"Statement": [stmt for doc in aws_onboarding.policy_documents(template)
+                                for stmt in doc["Statement"]]}
     hosted = aws_onboarding.hosted_template_url()
 
     if hosted:

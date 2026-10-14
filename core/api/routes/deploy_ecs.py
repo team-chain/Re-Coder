@@ -89,6 +89,11 @@ class ExtensionEcsDeployRequest(BaseModel):
     waf_rate_limit: Optional[int] = Field(default=None, ge=10, le=2_000_000_000)
     waf_window: Optional[Literal[60, 120, 300, 600]] = None
     edge_cost_approved: Optional[bool] = None
+    #: 2.0.27 HTTPS 주소·내 도메인·관리형 DB
+    https: Optional[bool] = None
+    custom_domain: Optional[str] = Field(default=None, pattern=r"^$|^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){1,8}[a-z]{2,63}$")
+    database: Optional[Literal["task", "rds"]] = None
+    db_cost_approved: Optional[bool] = None
 
     @field_validator("env_vars", mode="before")
     @classmethod
@@ -226,7 +231,8 @@ def to_core_request(
         "security_group_ids": list(body.security_group_ids),
     }
     for name in ("shield", "shield_level", "alerts", "alert_email",
-                 "edge", "waf_rate_limit", "waf_window", "edge_cost_approved"):
+                 "edge", "waf_rate_limit", "waf_window", "edge_cost_approved",
+                 "https", "custom_domain", "database", "db_cost_approved"):
         value = getattr(body, name)
         if value is not None:
             fields[name] = value.strip() if isinstance(value, str) else value

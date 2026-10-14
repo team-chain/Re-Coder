@@ -81,21 +81,45 @@ def _health_paths(path: str) -> list[str]:
 
 
 def nginx_conf(*, public_port: int, app_port: int, level: str = DEFAULT_LEVEL, health_path: str = "/health",
-               deny: Optional[list[str]] = None, trust_vpc_proxy: bool = False) -> str:
-    """nginx 설정 본문. deny: 막을 IP(대응 제안 '이 IP 차단'). trust_vpc_proxy: ALB 뒤면 X-Forwarded-For 로 실제 IP."""
+               deny: Optional[list[str]] = None, trust_vpc_proxy: bool = False, trust_cdn: bool = False) -> str:
+    """nginx 설정 본문. deny: 막을 IP(대응 제안 '이 IP 차단'). trust_vpc_proxy: ALB 뒤면 X-Forwarded-For 로 실제 IP.
+    trust_cdn(2.0.27): CloudFront → ALB 뒤면 CloudFront-Viewer-Address 의 사용자 IP 로 센다 — ALB 는 CloudFront 주소에서만
+    받게 막혀 있어(보안 그룹) 이 머리글을 사용자가 위조해 보낼 수 없다."""
     lv = LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
     denies = [d.strip() for d in (deny or []) if deniable(d)]
+    client = "$recoder_client" if trust_cdn else "$remote_addr"
+    key = "$recoder_client" if trust_cdn else "$binary_remote_addr"
+    if trust_cdn:
+        proto = "map $http_cloudfront_forwarded_proto $recoder_proto { default $http_cloudfront_forwarded_proto; '' $scheme; }"
+    elif trust_vpc_proxy:
+        proto = "map $http_x_forwarded_proto $recoder_proto { default $http_x_forwarded_proto; '' $scheme; }"
+    else:
+        proto = "map $scheme $recoder_proto { default $scheme; }"
     lines = [
         "# ReCoder 기본 방패 — 자동 생성(손으로 고치지 마세요: 다음 배포 때 다시 만듭니다)",
+    ]
+    if trust_cdn:
+        lines += [
+            "map $http_cloudfront_viewer_address $recoder_client {",
+            '  "~^(?<v4>[0-9.]+):[0-9]+$" $v4;',
+            '  "~^(?<v6>[0-9A-Fa-f:]+):[0-9]+$" $v6;',
+            "  default $remote_addr;",
+            "}",
+        ]
+    lines += [
         "log_format recoder_json escape=json '{\"src\":\"recoder-shield\",\"time\":\"$time_iso8601\","
-        "\"remote_addr\":\"$remote_addr\",\"method\":\"$request_method\",\"uri\":\"$uri\",\"status\":$status,"
+        f"\"remote_addr\":\"{client}\",\"method\":\"$request_method\",\"uri\":\"$uri\",\"status\":$status,"
         "\"bytes\":$body_bytes_sent,\"rt\":$request_time,\"ua\":\"$http_user_agent\"}';",
-        f"limit_req_zone $binary_remote_addr zone=perip:10m rate={lv['rate']}r/s;",
-        "limit_conn_zone $binary_remote_addr zone=conn:10m;",
+        f"limit_req_zone {key} zone=perip:10m rate={lv['rate']}r/s;",
+        f"limit_conn_zone {key} zone=conn:10m;",
         "map $http_upgrade $connection_upgrade { default upgrade; '' close; }",
         # ALB·CloudFront 뒤면 사용자가 들어온 실제 프로토콜(https)을 앱에 넘긴다(보안 쿠키·리다이렉트).
-        ("map $http_x_forwarded_proto $recoder_proto { default $http_x_forwarded_proto; '' $scheme; }"
-         if trust_vpc_proxy else "map $scheme $recoder_proto { default $scheme; }"),
+        proto,
+    ]
+    if trust_cdn and denies:
+        #: deny 지시어는 연결 주소(CloudFront)만 본다 — 사용자 IP 로 막으려면 geo 로 판정한다.
+        lines += ["geo $recoder_client $recoder_denied {", "  default 0;", *[f"  {d} 1;" for d in denies], "}"]
+    lines += [
         "server {",
         f"  listen {public_port};",
         "  server_tokens off;",
@@ -105,9 +129,13 @@ def nginx_conf(*, public_port: int, app_port: int, level: str = DEFAULT_LEVEL, h
     if trust_vpc_proxy:
         lines += ["  set_real_ip_from 10.0.0.0/8;", "  set_real_ip_from 172.16.0.0/12;", "  set_real_ip_from 192.168.0.0/16;",
                   "  real_ip_header X-Forwarded-For;", "  real_ip_recursive on;"]
-    lines += [f"  deny {d.strip()};" for d in denies]
+    if trust_cdn:
+        if denies:
+            lines += ["  if ($recoder_denied) { return 403; }"]
+    else:
+        lines += [f"  deny {d.strip()};" for d in denies]
     upstream = f"http://127.0.0.1:{app_port}"
-    proxy = ["proxy_http_version 1.1;", "proxy_set_header Host $host;", "proxy_set_header X-Real-IP $remote_addr;",
+    proxy = ["proxy_http_version 1.1;", "proxy_set_header Host $host;", f"proxy_set_header X-Real-IP {client};",
              "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;", "proxy_set_header X-Forwarded-Proto $recoder_proto;",
              "proxy_set_header Upgrade $http_upgrade;", "proxy_set_header Connection $connection_upgrade;",
              "proxy_read_timeout 60s;"]
@@ -128,10 +156,14 @@ def nginx_conf(*, public_port: int, app_port: int, level: str = DEFAULT_LEVEL, h
     return "\n".join(lines) + "\n"
 
 
+def proxy_mode(trust_vpc_proxy: bool = False, trust_cdn: bool = False) -> str:
+    return "cdn" if trust_cdn else "vpc" if trust_vpc_proxy else ""
+
+
 def container(*, public_port: int, app_port: int, level: str, health_path: str, deny: Optional[list[str]] = None,
-              trust_vpc_proxy: bool = False, log: Optional[dict] = None) -> dict:
+              trust_vpc_proxy: bool = False, log: Optional[dict] = None, trust_cdn: bool = False) -> dict:
     conf = nginx_conf(public_port=public_port, app_port=app_port, level=level, health_path=health_path,
-                      deny=deny, trust_vpc_proxy=trust_vpc_proxy)
+                      deny=deny, trust_vpc_proxy=trust_vpc_proxy or trust_cdn, trust_cdn=trust_cdn)
     check = health_path if health_path.startswith("/") else "/" + health_path
     item: dict = {
         "name": CONTAINER, "image": IMAGE, "essential": True,
@@ -139,7 +171,9 @@ def container(*, public_port: int, app_port: int, level: str, health_path: str, 
         "entryPoint": ["sh", "-c"], "command": [BOOT],
         "environment": [{"name": "RECODER_SHIELD_CONF_B64", "value": base64.b64encode(conf.encode("utf-8")).decode("ascii")},
                         {"name": "RECODER_SHIELD_LEVEL", "value": level},
-                        {"name": "RECODER_SHIELD_DENY", "value": ",".join(deny or [])}],
+                        {"name": "RECODER_SHIELD_DENY", "value": ",".join(deny or [])},
+                        #: 대응(차단·강도) 때 다시 만들어도 앞단(ALB·CloudFront)을 잊지 않게 기록한다.
+                        {"name": "RECODER_SHIELD_PROXY", "value": proxy_mode(trust_vpc_proxy, trust_cdn)}],
         "healthCheck": {"command": ["CMD-SHELL", f"wget -q -T 4 -O /dev/null http://127.0.0.1:{int(public_port)}{check} || exit 1"],
                         "interval": 15, "timeout": 5, "retries": 3, "startPeriod": 20},
     }
@@ -156,7 +190,7 @@ def _rewrite_port(command: list, old: int, new: int) -> list:
 
 
 def apply(task_def: dict, app_container: str, decision: ShieldDecision, *, health_path: str = "/health",
-          deny: Optional[list[str]] = None, trust_vpc_proxy: bool = False) -> dict:
+          deny: Optional[list[str]] = None, trust_vpc_proxy: bool = False, trust_cdn: bool = False) -> dict:
     """태스크 정의에 방패를 넣는다 — 앱은 P+1 로 옮기고, 공개 포트·외부 헬스는 방패가 맡는다."""
     if not decision.on:
         return task_def
@@ -179,7 +213,7 @@ def apply(task_def: dict, app_container: str, decision: ShieldDecision, *, healt
                 e["value"] = e["value"].replace(f"127.0.0.1:{P}", f"127.0.0.1:{A}")
     log = app.get("logConfiguration") if isinstance(app.get("logConfiguration"), dict) else None
     shield = container(public_port=P, app_port=A, level=decision.level, health_path=health_path, deny=deny,
-                       trust_vpc_proxy=trust_vpc_proxy, log=log)
+                       trust_vpc_proxy=trust_vpc_proxy, log=log, trust_cdn=trust_cdn)
     #: 앱이 헬스 체크를 가지면 HEALTHY 뒤에, 아니면 시작한 뒤에 방패가 뜬다.
     shield["dependsOn"] = [{"containerName": app_container, "condition": "HEALTHY" if app.get("healthCheck") else "START"}]
     containers.append(shield)
@@ -204,12 +238,13 @@ def current_settings(task_def: dict) -> dict:
         if c.get("name") == CONTAINER:
             env = {e.get("name"): e.get("value", "") for e in c.get("environment", []) or []}
             return {"on": True, "level": env.get("RECODER_SHIELD_LEVEL") or DEFAULT_LEVEL,
-                    "deny": [d for d in (env.get("RECODER_SHIELD_DENY") or "").split(",") if d]}
-    return {"on": False, "level": DEFAULT_LEVEL, "deny": []}
+                    "deny": [d for d in (env.get("RECODER_SHIELD_DENY") or "").split(",") if d],
+                    "proxy": env.get("RECODER_SHIELD_PROXY") or ""}
+    return {"on": False, "level": DEFAULT_LEVEL, "deny": [], "proxy": ""}
 
 
 def reconfigure(task_def: dict, *, level: Optional[str] = None, deny_add: Optional[list[str]] = None,
-                health_path: str = "/health", trust_vpc_proxy: bool = False) -> dict:
+                health_path: str = "/health", trust_vpc_proxy: Optional[bool] = None) -> dict:
     """방패 설정만 바꾼 태스크 정의(등록용 사본). 방패가 없으면 그대로."""
     td = json.loads(json.dumps(task_def))
     shield = next((c for c in td.get("containerDefinitions", []) if c.get("name") == CONTAINER), None)
@@ -219,8 +254,11 @@ def reconfigure(task_def: dict, *, level: Optional[str] = None, deny_add: Option
     lv = level if level in LEVELS else cur["level"]
     deny = list(dict.fromkeys(cur["deny"] + [d.strip() for d in (deny_add or []) if deniable(d)]))
     public = int((shield.get("portMappings") or [{}])[0].get("containerPort") or 0)
+    #: 앞단(ALB·CloudFront)은 태스크 정의에 기록된 대로 — 잊으면 모든 사용자가 ALB 주소 하나로 세어져 함께 막힌다.
+    proxy = cur.get("proxy", "")
+    vpc = proxy in ("vpc", "cdn") if trust_vpc_proxy is None else trust_vpc_proxy
     fresh = container(public_port=public, app_port=public + 1, level=lv, health_path=health_path, deny=deny,
-                      trust_vpc_proxy=trust_vpc_proxy, log=shield.get("logConfiguration"))
+                      trust_vpc_proxy=vpc, log=shield.get("logConfiguration"), trust_cdn=proxy == "cdn")
     if shield.get("logConfiguration"):
         fresh["logConfiguration"] = shield["logConfiguration"]
     fresh["dependsOn"] = shield.get("dependsOn", [])

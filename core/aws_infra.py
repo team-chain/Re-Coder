@@ -874,6 +874,7 @@ def ensure_security_group(
     cidr: str = "0.0.0.0/0",
     tags: Optional[dict] = None,
     source_group: str = "",
+    prefix_list: str = "",
 ) -> str:
     """앱 포트를 여는 보안 그룹을 확보하고 GroupId 를 돌려준다.
 
@@ -922,13 +923,16 @@ def ensure_security_group(
 
     #: 2.0.26 — ALB 뒤 태스크는 ALB 보안 그룹에서 오는 연결만 받는다(source_group). 인터넷 전체에 열지 않는다.
     permission: dict = {"IpProtocol": "tcp", "FromPort": port, "ToPort": port}
-    if source_group:
+    if prefix_list:
+        #: 2.0.27 — CloudFront 원본 전용 AWS 관리 목록에서 오는 연결만(ALB 를 직접 부르는 길을 막는다).
+        permission["PrefixListIds"] = [{"PrefixListId": prefix_list, "Description": "CloudFront origin-facing only"}]
+    elif source_group:
         permission["UserIdGroupPairs"] = [{"GroupId": source_group, "Description": "ReCoder load balancer only"}]
     else:
         permission["IpRanges"] = [{"CidrIp": cidr, "Description": "ReCoder app port"}]
     try:
         ec2.authorize_security_group_ingress(GroupId=group_id, IpPermissions=[permission])
-        logger.info("보안 그룹 인바운드 추가: %s:%d ← %s", group_id, port, source_group or cidr)
+        logger.info("보안 그룹 인바운드 추가: %s:%d ← %s", group_id, port, prefix_list or source_group or cidr)
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) != "InvalidPermission.Duplicate":
             raise InfraError(

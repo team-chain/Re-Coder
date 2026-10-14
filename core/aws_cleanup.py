@@ -30,24 +30,38 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 PREFIX = "recoder"
-CLIENTS = ("ecs", "ecr", "logs", "ec2", "elbv2", "wafv2", "cloudwatch", "sns", "s3")
+CLIENTS = ("ecs", "ecr", "logs", "ec2", "elbv2", "wafv2", "cloudwatch", "sns", "s3",
+           # 2.0.27 HTTPS 주소·관리형 DB — acm_global 은 us-east-1 클라이언트(CloudFront 인증서)
+           "cloudfront", "acm_global", "rds", "secretsmanager")
 
 #: 삭제 순서(작을수록 먼저).
 ORDER = {
-    "ecs_service": 0, "task_definitions": 1, "waf": 2, "alb": 3, "target_group": 4, "alarm": 5,
-    "sns_topic": 6, "ecr": 7, "log_group": 8, "security_group": 9, "ecs_cluster": 10, "s3_bucket": 11,
+    "ecs_service": 0, "task_definitions": 1, "cloudfront": 2, "acm_certificate": 3, "waf": 4, "alb": 5,
+    "target_group": 6, "rds_instance": 7, "rds_subnet_group": 8, "rds_parameter_group": 9, "secret": 10,
+    "alarm": 11, "sns_topic": 12, "ecr": 13, "log_group": 14, "security_group": 15, "ecs_cluster": 16, "s3_bucket": 17,
 }
 LABELS = {
     "ecs_service": "ECS 서비스", "task_definitions": "태스크 정의", "waf": "WAF 웹 ACL", "alb": "로드밸런서",
     "target_group": "대상 그룹", "alarm": "CloudWatch 경보", "sns_topic": "알림 주제(메일)", "ecr": "이미지 저장소(ECR)",
     "log_group": "로그 그룹", "security_group": "보안 그룹", "ecs_cluster": "ECS 클러스터", "s3_bucket": "S3 버킷",
+    "cloudfront": "HTTPS 주소(CloudFront)", "acm_certificate": "도메인 인증서(ACM)", "rds_instance": "관리형 DB(RDS)",
+    "rds_subnet_group": "DB 서브넷 그룹", "rds_parameter_group": "DB 파라미터 그룹", "secret": "DB 접속 정보(Secrets Manager)",
 }
 COST = {
     "ecs_service": "실행 중인 태스크만큼 시간당 요금", "task_definitions": "요금 없음", "waf": "매달 고정 요금 + 요청 수",
     "alb": "켜 두는 시간만큼 + 처리량", "target_group": "요금 없음", "alarm": "경보당 매달 소액",
     "sns_topic": "거의 없음", "ecr": "보관 용량(GB당 매달)", "log_group": "보관 용량(GB당 매달)",
     "security_group": "요금 없음", "ecs_cluster": "요금 없음(빈 클러스터)", "s3_bucket": "보관 용량 + 요청 수",
+    "cloudfront": "나가는 데이터·요청 수", "acm_certificate": "요금 없음", "rds_instance": "켜 두는 동안 시간당 + 저장 용량",
+    "rds_subnet_group": "요금 없음", "rds_parameter_group": "요금 없음", "secret": "비밀당 매달 소액",
 }
+def make_clients(session: Any) -> dict:
+    """boto3 세션 하나로 정리에 쓰는 클라이언트 묶음(인증서는 us-east-1)."""
+    out = {name: session.client(name) for name in CLIENTS if name != "acm_global"}
+    out["acm_global"] = session.client("acm", region_name="us-east-1")
+    return out
+
+
 UNTAGGED_NOTE = ("ReCoder 태그가 없어 지우지 않습니다(2.0.23 이전에 만들었거나 직접 만든 것일 수 있음) — "
                  "AWS 콘솔에서 확인한 뒤 직접 지우세요.")
 
@@ -289,6 +303,65 @@ def _find_s3(s3: Any, region: str, items: list[Item]) -> None:
                           detail=f"파일 {count}{'+' if listed.get('IsTruncated') else ''}개"))
 
 
+def _find_cdn(cloudfront: Any, acm: Any, items: list[Item]) -> None:
+    marker = ""
+    while True:
+        page = cloudfront.list_distributions(**({"Marker": marker} if marker else {})).get("DistributionList", {})
+        for dist in page.get("Items", []) or []:
+            if not str(dist.get("Comment", "")).startswith(f"{PREFIX}:"):
+                continue
+            t = _tags_dict(cloudfront.list_tags_for_resource(Resource=dist["ARN"]).get("Tags", {}).get("Items"))
+            aliases = (dist.get("Aliases") or {}).get("Items") or []
+            items.append(Item(id=f"cloudfront:{dist['Id']}", kind="cloudfront", name=str(dist["Comment"])[len(PREFIX) + 1:],
+                              arn=dist["ARN"], tagged=_managed(t), service=t.get(SERVICE_TAG, ""),
+                              project=t.get(PROJECT_TAG, ""),
+                              detail=f"https://{(aliases or [dist['DomainName']])[0]} · {'켜짐' if dist.get('Enabled') else '꺼짐'} · {dist.get('Status', '')}",
+                              extra={"id": dist["Id"]}))
+        if not page.get("IsTruncated"):
+            break
+        marker = page.get("NextMarker", "")
+    for cert in acm.list_certificates().get("CertificateSummaryList", []):
+        t = _tags_dict(acm.list_tags_for_certificate(CertificateArn=cert["CertificateArn"]).get("Tags"))
+        if not _managed(t):
+            continue  # 사용자가 직접 만든 인증서는 목록에도 넣지 않는다(이름으로 구분할 수 없음)
+        items.append(Item(id=f"acm_certificate:{cert['CertificateArn'].rsplit('/', 1)[-1]}", kind="acm_certificate",
+                          name=cert.get("DomainName", ""), arn=cert["CertificateArn"], tagged=True,
+                          service=t.get(SERVICE_TAG, ""), project=t.get(PROJECT_TAG, ""),
+                          detail=str(cert.get("Status", ""))))
+
+
+def _find_rds(rds: Any, sm: Any, items: list[Item]) -> None:
+    for db in _pages(rds, "describe_db_instances", "DBInstances"):
+        ident = str(db["DBInstanceIdentifier"])
+        if not _recoderish(ident):
+            continue
+        t = _tags_dict(db.get("TagList"))
+        items.append(Item(id=f"rds_instance:{ident}", kind="rds_instance", name=ident, arn=db.get("DBInstanceArn", ""),
+                          tagged=_managed(t), service=t.get(SERVICE_TAG, ""), project=t.get(PROJECT_TAG, ""),
+                          detail=f"{db.get('DBInstanceClass', '')} · {db.get('AllocatedStorage', '')}GB · {db.get('DBInstanceStatus', '')}"))
+    for group in _pages(rds, "describe_db_subnet_groups", "DBSubnetGroups"):
+        name = str(group["DBSubnetGroupName"])
+        if not _recoderish(name):
+            continue
+        t = _tags_dict(rds.list_tags_for_resource(ResourceName=group["DBSubnetGroupArn"]).get("TagList"))
+        items.append(Item(id=f"rds_subnet_group:{name}", kind="rds_subnet_group", name=name, arn=group["DBSubnetGroupArn"],
+                          tagged=_managed(t), service=t.get(SERVICE_TAG, ""), project=t.get(PROJECT_TAG, "")))
+    for group in _pages(rds, "describe_db_parameter_groups", "DBParameterGroups"):
+        name = str(group["DBParameterGroupName"])
+        if not _recoderish(name):
+            continue
+        t = _tags_dict(rds.list_tags_for_resource(ResourceName=group["DBParameterGroupArn"]).get("TagList"))
+        items.append(Item(id=f"rds_parameter_group:{name}", kind="rds_parameter_group", name=name,
+                          arn=group["DBParameterGroupArn"], tagged=_managed(t), service=t.get(SERVICE_TAG, ""),
+                          project=t.get(PROJECT_TAG, "")))
+    for secret in _pages(sm, "list_secrets", "SecretList", Filters=[{"Key": "name", "Values": [f"{PREFIX}/"]}]):
+        if not str(secret.get("Name", "")).startswith(f"{PREFIX}/"):
+            continue
+        t = _tags_dict(secret.get("Tags"))
+        items.append(Item(id=f"secret:{secret['Name']}", kind="secret", name=secret["Name"], arn=secret["ARN"],
+                          tagged=_managed(t), service=t.get(SERVICE_TAG, ""), project=t.get(PROJECT_TAG, "")))
+
+
 def find(clients: dict, *, region: str, records: Iterable[dict] = ()) -> tuple[list[Item], list[str]]:
     """리전의 ReCoder 리소스(태그 있는 것 + 이름·기록으로 보이는 태그 없는 것). 못 본 종류는 문장으로."""
     items: list[Item] = []
@@ -301,9 +374,14 @@ def find(clients: dict, *, region: str, records: Iterable[dict] = ()) -> tuple[l
         ("로드밸런서·WAF", lambda: _find_elb(clients["elbv2"], clients["wafv2"], items)),
         ("경보·알림", lambda: _find_alerts(clients["cloudwatch"], clients["sns"], items)),
         ("S3", lambda: _find_s3(clients["s3"], region, items)),
+        ("HTTPS 주소", lambda: _find_cdn(clients["cloudfront"], clients["acm_global"], items)),
+        ("관리형 DB", lambda: _find_rds(clients["rds"], clients["secretsmanager"], items)),
     ]
     for label, step in steps:
         try:
+            if label in ("HTTPS 주소", "관리형 DB") and not all(
+                    k in clients for k in (("cloudfront", "acm_global") if label == "HTTPS 주소" else ("rds", "secretsmanager"))):
+                continue
             step()
         except Exception as exc:  # noqa: BLE001
             gaps.append(f"{label}: 확인하지 못했습니다 — {error_message(exc)}")
@@ -412,6 +490,46 @@ def _delete_one(clients: dict, item: Item, *, region: str, all_items: list[Item]
         _retry(lambda: clients["elbv2"].delete_target_group(TargetGroupArn=item.arn), ("ResourceInUse",),
                sleep=sleep, attempts=8, delay=10)
         return "지웠습니다."
+    if k == "cloudfront":
+        try:
+            from core import aws_cdn  # type: ignore
+        except ImportError:  # pragma: no cover
+            import aws_cdn  # type: ignore
+        message = aws_cdn.disable_or_delete(clients["cloudfront"], item.extra["id"])
+        if message != "지웠습니다.":
+            raise _Kept(message)
+        return message
+    if k == "acm_certificate":
+        _retry(lambda: clients["acm_global"].delete_certificate(CertificateArn=item.arn), ("ResourceInUseException",),
+               sleep=sleep, attempts=3, delay=10)
+        return "지웠습니다."
+    if k == "rds_instance":
+        try:
+            from core import aws_rds  # type: ignore
+        except ImportError:  # pragma: no cover
+            import aws_rds  # type: ignore
+        message = aws_rds.delete_instance(clients["rds"], item.name)
+        # 지워져야 서브넷 그룹·파라미터 그룹·DB 보안 그룹을 지울 수 있다 — 최대 15분 기다린다.
+        for _ in range(45):
+            try:
+                clients["rds"].describe_db_instances(DBInstanceIdentifier=item.name)
+            except Exception as exc:  # noqa: BLE001
+                if "NotFound" in error_code(exc):
+                    break
+                raise
+            sleep(20)
+        return message
+    if k == "rds_subnet_group":
+        _retry(lambda: clients["rds"].delete_db_subnet_group(DBSubnetGroupName=item.name),
+               ("InvalidDBSubnetGroupStateFault",), sleep=sleep, attempts=4, delay=20)
+        return "지웠습니다."
+    if k == "rds_parameter_group":
+        _retry(lambda: clients["rds"].delete_db_parameter_group(DBParameterGroupName=item.name),
+               ("InvalidDBParameterGroupState", "InvalidDBParameterGroupStateFault"), sleep=sleep, attempts=4, delay=20)
+        return "지웠습니다."
+    if k == "secret":
+        clients["secretsmanager"].delete_secret(SecretId=item.arn, RecoveryWindowInDays=7)
+        return "지웠습니다(7일 안에는 Secrets Manager 에서 되살릴 수 있음)."
     if k == "alarm":
         clients["cloudwatch"].delete_alarms(AlarmNames=[item.name])
         return "지웠습니다."

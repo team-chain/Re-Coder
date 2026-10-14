@@ -17,12 +17,21 @@ export interface Protection {
   edge: Edge;
   waf_rate_limit: number;
   edge_cost_approved: boolean;
+  /** 2.0.27 HTTPS 주소(CloudFront) · 내 도메인 · 관리형 DB(RDS) */
+  https: boolean;
+  custom_domain: string;
+  database: "task" | "rds";
+  db_cost_approved: boolean;
 }
 
 export const DEFAULT_PROTECTION: Protection = {
   shield: true, shield_level: "normal", alerts: true, alert_email: "",
   edge: "none", waf_rate_limit: 2000, edge_cost_approved: false,
+  https: false, custom_domain: "", database: "task", db_cost_approved: false,
 };
+export const DB_COST =
+  "관리형 DB(RDS)는 켜 두는 동안 계속 요금이 나옵니다(db.t4g.micro + 20GB, us-east-1 기준 대략 월 15달러 이상 · 새 계정 1년 무료 사용량 있음). 그만 쓰면 「AWS 리소스 정리」로 지우세요(최종 스냅숏을 남깁니다).";
+const DOMAIN = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){1,8}[a-z]{2,63}$/;
 
 /** WAF 한도(5분 동안 IP 하나가 보낼 수 있는 요청 수). */
 export const WAF_LIMITS = [500, 1000, 2000, 5000];
@@ -41,14 +50,28 @@ const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$/;
 export function protectionRequest(p: Protection): Record<string, unknown> {
   const email = p.alert_email.trim();
   if (p.alerts && email && !EMAIL.test(email)) throw new Error("알림 메일 주소 형식이 올바르지 않습니다.");
-  const edge = p.edge ?? "none";
-  if (edge !== "none" && !p.edge_cost_approved) throw new Error("대규모 방패는 매달 요금이 나옵니다 — 비용 확인에 체크하세요.");
+  //: HTTPS 주소는 로드밸런서 앞에 둔다 — 대규모 방패를 안 켰으면 로드밸런서만 켠다.
+  const edge = p.edge && p.edge !== "none" ? p.edge : p.https ? "alb" : "none";
+  if (edge !== "none" && !p.edge_cost_approved) throw new Error(p.https && (p.edge ?? "none") === "none"
+    ? "HTTPS 주소는 로드밸런서·CloudFront 요금이 나옵니다 — 비용 확인에 체크하세요."
+    : "대규모 방패는 매달 요금이 나옵니다 — 비용 확인에 체크하세요.");
+  const domain = (p.custom_domain ?? "").trim().toLowerCase();
+  if (p.https && domain && !DOMAIN.test(domain)) throw new Error("도메인 형식이 올바르지 않습니다(예: shop.example.com).");
+  if (p.database === "rds" && !p.db_cost_approved) throw new Error("관리형 DB 는 매달 요금이 나옵니다 — 비용 확인에 체크하세요.");
   const out: Record<string, unknown> = { shield: p.shield, shield_level: p.shield_level, alerts: p.alerts, alert_email: p.alerts ? email : "" };
   if (edge !== "none") {
     out.edge = edge;
     out.waf_rate_limit = p.waf_rate_limit || 2000;
     out.waf_window = 300;
     out.edge_cost_approved = true;
+  }
+  if (p.https) {
+    out.https = true;
+    if (domain) out.custom_domain = domain;
+  }
+  if (p.database === "rds") {
+    out.database = "rds";
+    out.db_cost_approved = true;
   }
   return out;
 }
@@ -107,6 +130,40 @@ export function EcsProtection({ value, onChange, disabled = false }: {
             <p style={{ ...muted, margin: "4px 0" }} data-testid="edge-cost">{EDGE_COST}</p>
             <Checkbox checked={!!value.edge_cost_approved} disabled={disabled} tone="warn"
               onChange={v => set("edge_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
+          </div>
+        )}
+      </div>
+      <div style={{ marginTop: 10 }} data-testid="ecs-https">
+        <Checkbox checked={!!value.https} disabled={disabled} onChange={v => set("https", v)}
+          label={<b>HTTPS 주소 (CloudFront)</b>}
+          description="https://…cloudfront.net 주소를 바로 받습니다 · 로드밸런서가 함께 켜집니다" />
+        {value.https && (
+          <label style={{ display: "block", margin: "4px 0 0 24px", fontSize: 11 }}>
+            내 도메인(선택) — 넣으면 인증서를 요청하고, 발급된 뒤 다시 배포하면 연결됩니다
+            <input value={value.custom_domain ?? ""} placeholder="shop.example.com" onChange={e => set("custom_domain", e.target.value)}
+              style={{ display: "block", width: "100%", boxSizing: "border-box", marginTop: 4 }} />
+            <span style={muted}>Route 53 에 그 도메인이 있으면 레코드를 자동으로 넣고, 없으면 넣을 레코드를 배포 결과에 알려 드려요.</span>
+          </label>
+        )}
+        {(value.edge ?? "none") === "none" && value.https && (
+          <div style={{ margin: "4px 0 0 24px" }}>
+            <p style={{ ...muted, margin: "4px 0" }}>HTTPS 주소를 위해 로드밸런서만(WAF 없이) 켭니다. {EDGE_COST}</p>
+            <Checkbox checked={!!value.edge_cost_approved} disabled={disabled} tone="warn"
+              onChange={v => set("edge_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
+          </div>
+        )}
+      </div>
+      <div style={{ marginTop: 10 }} data-testid="ecs-database">
+        <Checkbox checked={value.database === "rds"} disabled={disabled}
+          onChange={v => onChange({ ...value, database: v ? "rds" : "task", db_cost_approved: false })}
+          label={<b>관리형 DB (RDS PostgreSQL)</b>}
+          description="태스크가 바뀌어도 데이터가 남습니다 · 처음 만드는 데 5~10분 · 매달 요금" />
+        {value.database === "rds" && (
+          <div style={{ margin: "4px 0 0 24px" }}>
+            <p style={{ ...muted, margin: "4px 0" }}>인터넷에서는 접속할 수 없고 이 앱의 태스크에서만 접속합니다. DB 가 비어 있으면 처음 한 번 schema.sql 로 테이블을 만들고, 샘플 데이터는 넣지 않습니다.</p>
+            <p style={{ ...muted, margin: "4px 0" }} data-testid="db-cost">{DB_COST}</p>
+            <Checkbox checked={!!value.db_cost_approved} disabled={disabled} tone="warn"
+              onChange={v => set("db_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
           </div>
         )}
       </div>

@@ -131,6 +131,18 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "sns:ListTopics":               "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "ecr:DescribeRepositories":     "이름 없이 부르는 목록 조회 — 리전 조건으로 좁혔다(정리 후보를 이름으로 거른다)",
         "s3:ListAllMyBuckets":          "계정 단위 목록 — 리소스가 없다",
+        # 2.0.27 HTTPS 주소·관리형 DB
+        "cloudfront:CreateDistribution": "만들기는 리소스 단위 제한 미지원 — aws:RequestTag 조건으로 좁혔다",
+        "cloudfront:TagResource":       "만들 때 붙이는 태그 — aws:RequestTag 조건으로 좁혔다",
+        "cloudfront:ListDistributions": "AWS 가 리소스 단위 제한 미지원(읽기 전용)",
+        "ec2:DescribeManagedPrefixLists": "AWS 가 리소스 단위 제한 미지원(읽기 전용)",
+        "acm:ListCertificates":         "AWS 가 리소스 단위 제한 미지원(읽기 전용)",
+        "route53:ListHostedZonesByName": "AWS 가 리소스 단위 제한 미지원(읽기 전용)",
+        "rds:DescribeDBInstances":      "목록 조회 — 리전 조건으로 좁혔다",
+        "rds:DescribeDBSubnetGroups":   "목록 조회 — 리전 조건으로 좁혔다",
+        "rds:DescribeDBParameterGroups": "목록 조회 — 리전 조건으로 좁혔다",
+        "rds:DescribeDBEngineVersions": "버전 조회 — 리전 조건으로 좁혔다",
+        "secretsmanager:ListSecrets":   "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         # FR-04-01 — 연결하는 IAM 사용자·정책 이름을 **정책을 만드는 시점에는
         # 알 수 없다.** 읽기 전용 조회라 범위를 좁힐 근거도 없다.
         "iam:SimulatePrincipalPolicy":  "IAM 시뮬레이션 API 가 리소스 단위 제한 미지원",
@@ -245,6 +257,16 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "cloudfront:TagResource":
+        "aws_cdn.ensure_distribution 의 create_distribution_with_tags — 태그는 TagResource 로도 인가되지만 호출은 하나뿐",
+    "acm:AddTagsToCertificate":
+        "aws_cdn.ensure_certificate 의 request_certificate(Tags=…) — 같은 이유",
+    "rds:AddTagsToResource":
+        "aws_rds.start 의 create_db_instance/create_db_subnet_group/create_db_parameter_group(Tags=…) — 같은 이유",
+    "rds:CreateDBSnapshot":
+        "aws_rds.delete_instance 의 delete_db_instance(FinalDBSnapshotIdentifier=…) — 최종 스냅숏을 만드는 권한을 함께 본다",
+    "secretsmanager:TagResource":
+        "aws_rds._secret 의 create_secret(Tags=…) — 같은 이유",
     "elasticloadbalancing:AddTags":
         "aws_edge.ensure_edge 가 create_load_balancer/create_target_group/create_listener(Tags=…) 로 만들 때 태그를 함께 "
         "붙인다 — AWS 는 생성 요청의 Tags 를 AddTags 로도 인가하지만 호출은 Create* 하나뿐이라 기록에 안 보인다",
@@ -2097,16 +2119,45 @@ def runtime_actions() -> set[str]:
             aws_edge.rollback(elbv2, wafv2, [("listener", spare["Listeners"][0]["ListenerArn"])])  # 실패 되돌리기 경로
             # 2.0.26 AWS 리소스 정리 — 목록 → 중지 → 전부 삭제(태그 다시 확인)
             import aws_cleanup
-            cleanup_clients = {name: boto3.client(name, region_name=region) for name in aws_cleanup.CLIENTS}
+            cleanup_clients = aws_cleanup.make_clients(boto3.session.Session(region_name=region))
             cleanup_clients["s3"].create_bucket(Bucket="recoder-probe-site")
             cleanup_clients["s3"].put_bucket_tagging(Bucket="recoder-probe-site",
                                                      Tagging={"TagSet": [{"Key": "recoder:managed", "Value": "true"}]})
             cleanup_clients["s3"].put_object(Bucket="recoder-probe-site", Key="index.html", Body=b"x")
+            # 2.0.27 HTTPS 주소(CloudFront + 내 도메인)와 관리형 DB(RDS) — 만들기·다시·정리
+            import aws_cdn
+            import aws_rds
+            edge_cdn = aws_edge.ensure_edge(ec2, elbv2, wafv2, cdn=True, **edge_args)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)                 # 다시 공개로(SetSecurityGroups)
+            r53 = boto3.client("route53", region_name=region)
+            recorder.uninstall()
+            try:
+                boto3.client("route53").create_hosted_zone(Name="example.com", CallerReference="probe")
+            finally:
+                recorder.install()
+            cert = aws_cdn.ensure_certificate(cleanup_clients["acm_global"], r53, "shop.example.com", tags=tags,
+                                              sleep=lambda _s: None)
+            cdn = aws_cdn.ensure_distribution(cleanup_clients["cloudfront"], name=edge_cdn.name,
+                                              origin=edge_cdn.dns_name, tags=tags)
+            aws_cdn.ensure_distribution(cleanup_clients["cloudfront"], name=edge_cdn.name, origin="other.example.com",
+                                        tags=tags, alias="shop.example.com", certificate_arn=cert.arn)
+            aws_cdn.point_domain(r53, cert.zone_id or "Z1", "shop.example.com", cdn.domain)
+            db = aws_rds.start(cleanup_clients["rds"], ec2, cleanup_clients["secretsmanager"],
+                               service="recoder-probe-svc", vpc_id=net.vpc_id, task_security_groups=[sg], tags=tags)
+            ready = aws_rds.wait(cleanup_clients["rds"], db.identifier, sleep=lambda _s: None)
+            aws_rds.store_connection(cleanup_clients["secretsmanager"], db.secret_arn,
+                                     aws_rds.connection(ready["Endpoint"], db.password, ["DATABASE_URL"]))
+            aws_rds.start(cleanup_clients["rds"], ec2, cleanup_clients["secretsmanager"],    # 다시 사용 경로
+                          service="recoder-probe-svc", vpc_id=net.vpc_id, task_security_groups=[sg], tags=tags)
             found = aws_cleanup.plan(cleanup_clients, region=region)
             assert not found["gaps"], found["gaps"]
             aws_cleanup.stop(cleanup_clients, region=region, cluster="recoder-probe", service="recoder-probe-svc")
             ids = [i["id"] for g in found["groups"] for i in g["items"]]
             aws_cleanup.delete(cleanup_clients, ids, region=region, approved=True, sleep=lambda _s: None)
+            # CloudFront 는 끈 뒤(배포 완료) 다시 정리해야 지워진다
+            again = aws_cleanup.plan(cleanup_clients, region=region)
+            aws_cleanup.delete(cleanup_clients, [i["id"] for g in again["groups"] for i in g["items"]],
+                               region=region, approved=True, sleep=lambda _s: None)
         return recorder.actions()
     finally:
         recorder.uninstall()
@@ -2158,6 +2209,17 @@ RUNTIME_EVIDENCE_FLOOR = {
     "cloudwatch:DeleteAlarms",
     "sns:DeleteTopic",
     "s3:DeleteBucket",
+    # 2.0.27 HTTPS 주소·관리형 DB
+    "cloudfront:CreateDistribution",
+    "cloudfront:UpdateDistribution",
+    "cloudfront:DeleteDistribution",
+    "acm:RequestCertificate",
+    "route53:ChangeResourceRecordSets",
+    "rds:CreateDBInstance",
+    "rds:DeleteDBInstance",
+    "secretsmanager:CreateSecret",
+    "secretsmanager:PutSecretValue",
+    "elasticloadbalancing:SetSecurityGroups",
 }
 
 

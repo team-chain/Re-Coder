@@ -269,7 +269,7 @@ def ensure_edge(
     ec2: Any, elbv2: Any, wafv2: Any, *,
     service: str, vpc_id: str, subnet_ids: list[str], app_port: int, health_path: str = "/health",
     waf: bool = True, rate_limit: int = DEFAULT_RATE_LIMIT, window: int = DEFAULT_WINDOW,
-    tags: Optional[dict] = None, sleep: Callable[[float], None] = time.sleep,
+    tags: Optional[dict] = None, sleep: Callable[[float], None] = time.sleep, cdn: bool = False,
 ) -> EdgeResult:
     """ALB + 대상 그룹 + 리스너(80) (+ WAF) 를 확보한다. 실패하면 이 호출이 새로 만든 것만 되돌린다."""
     if not vpc_id:
@@ -279,8 +279,18 @@ def ensure_edge(
     notes: list[str] = []
     try:
         subnets = alb_subnets(ec2, vpc_id, list(subnet_ids))
-        alb_sg = ensure_security_group(ec2, vpc_id=vpc_id, name=f"{service}-alb-sg", port=LISTENER_PORT,
-                                       description="ReCoder load balancer (public HTTP)", tags=tags)
+        if cdn:
+            #: 2.0.27 HTTPS 주소 — ALB 는 CloudFront 에서 오는 연결만 받는다.
+            try:
+                from core import aws_cdn  # type: ignore
+            except ImportError:  # pragma: no cover
+                import aws_cdn  # type: ignore
+            alb_sg = ensure_security_group(ec2, vpc_id=vpc_id, name=f"{service}-alb-cf-sg", port=LISTENER_PORT,
+                                           description="ReCoder load balancer (CloudFront only)", tags=tags,
+                                           prefix_list=aws_cdn.cloudfront_prefix_list(ec2))
+        else:
+            alb_sg = ensure_security_group(ec2, vpc_id=vpc_id, name=f"{service}-alb-sg", port=LISTENER_PORT,
+                                           description="ReCoder load balancer (public HTTP)", tags=tags)
         task_sg = ensure_security_group(ec2, vpc_id=vpc_id, name=f"{service}-task-sg", port=app_port,
                                         description="ReCoder ECS tasks behind the load balancer",
                                         tags=tags, source_group=alb_sg)
@@ -301,6 +311,10 @@ def ensure_edge(
         elif lb.get("VpcId") and lb.get("VpcId") != vpc_id:
             raise InfraError(f"같은 이름의 로드밸런서({name})가 다른 VPC 에 있습니다.",
                              remedy="그 로드밸런서를 지우거나 서비스 이름을 바꿔 배포하세요.")
+        elif list(lb.get("SecurityGroups") or []) != [alb_sg]:
+            #: HTTPS 주소를 켜거나 끄면 ALB 가 받는 곳(인터넷 전체 ↔ CloudFront 만)을 바꾼다.
+            elbv2.set_security_groups(LoadBalancerArn=lb["LoadBalancerArn"], SecurityGroups=[alb_sg])
+            notes.append("로드밸런서가 " + ("CloudFront 에서 오는 연결만" if cdn else "인터넷 전체에서 오는 연결을") + " 받게 바꿨습니다.")
         alb_arn = str(lb["LoadBalancerArn"])
 
         tg = _find_target_group(elbv2, name)

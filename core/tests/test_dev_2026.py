@@ -23,7 +23,7 @@ def aws(monkeypatch, tmp_path):
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     with mock_aws():
-        yield {name: boto3.client(name, region_name=REGION) for name in aws_cleanup.CLIENTS}
+        yield aws_cleanup.make_clients(boto3.session.Session(region_name=REGION))
 
 
 def _net(c):

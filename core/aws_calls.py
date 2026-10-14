@@ -130,6 +130,9 @@ OPERATION_TO_ACTION: dict[tuple[str, str], str] = {
     # 버킷 목록 API 는 ListBuckets 지만 IAM 액션은 ListAllMyBuckets 다.
     # https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBuckets.html
     ("s3", "list_buckets"):    "s3:ListAllMyBuckets",
+    # 태그를 함께 넣는 생성 API 는 따로 된 IAM 액션이 없다 — CreateDistribution(+ TagResource) 로 인가된다.
+    # https://docs.aws.amazon.com/service-authorization/latest/reference/list_cloudfront.html
+    ("cloudfront", "create_distribution_with_tags"): "cloudfront:CreateDistribution",
     # API 이름은 PutPublicAccessBlock 인데 **IAM 액션은 버킷이 붙는다.**
     # 규칙대로 PutPublicAccessBlock 을 주면 실제로는 인가되지 않는다.
     # https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutPublicAccessBlock.html
@@ -279,6 +282,9 @@ def iam_action(call: AwsCall) -> str | None:
         # WAF 는 약어를 대문자로 쓴다: create_web_acl → wafv2:CreateWebACL (기계 변환은 CreateWebAcl).
         # https://docs.aws.amazon.com/service-authorization/latest/reference/list_awswafv2.html
         action = action.replace("Acl", "ACL")
+    elif prefix == "rds":
+        # RDS 도 DB 를 대문자로 쓴다: create_db_instance → rds:CreateDBInstance.
+        action = action.replace("Db", "DB")
     return f"{prefix}:{action}"
 
 

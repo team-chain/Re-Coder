@@ -83,6 +83,8 @@ class RuntimePlan:
     services: list[str] = field(default_factory=list)
     demo: bool = False
     generated: list[str] = field(default_factory=list)
+    #: 2.0.27 관리형 DB(RDS) — 앱이 읽는 접속 정보 이름과 처음 한 번 넣을 초기화 SQL(base64). 값은 배포 중에 채운다.
+    managed_db: dict = field(default_factory=dict)
 
     @property
     def blocked(self) -> bool:
@@ -209,7 +211,7 @@ def _covered(names: Iterable[str], provided: set[str]) -> bool:
 
 
 def plan(workspace: Optional[str], *, key: str, environment: str, provided: Iterable[str],
-         container_port: int, create: bool = True, readiness=None) -> RuntimePlan:
+         container_port: int, create: bool = True, readiness=None, managed_db: bool = False) -> RuntimePlan:
     """이 앱을 ECS 에서 띄우는 데 필요한 것. create=False 면 키를 만들거나 저장하지 않는다(미리보기)."""
     result = RuntimePlan()
     if not workspace or not Path(workspace).is_dir():
@@ -236,9 +238,28 @@ def plan(workspace: Optional[str], *, key: str, environment: str, provided: Iter
 
     # 1) 앱이 쓰는 DB — 접속 정보를 사용자가 이미 넣었으면(RDS 등) 그대로 쓴다.
     primary = next((k for k in kinds if k != "redis"), None)
+    if managed_db and "postgres" not in kinds:
+        result.notes.append("관리형 DB 는 PostgreSQL 을 쓰는 앱만 만듭니다 — 이 앱은 PostgreSQL 을 쓰지 않아 만들지 않습니다.")
     for kind in kinds:
         conn = local_services.app_env("ecs", kind, "x", env_names, host="127.0.0.1")
         if _covered(conn, given):
+            continue
+        if managed_db and kind == "postgres":
+            #: 2.0.27 — 태스크 안 임시 DB 대신 RDS. 접속 정보는 배포 중(RDS 가 준비된 뒤) 채운다.
+            path = local_services.find_init_sql(workspace)
+            sql = ""
+            if path is not None:
+                try:
+                    sql = path.read_text(encoding="utf-8-sig", errors="replace")
+                except OSError:
+                    sql = ""
+            b64 = base64.b64encode(sql.encode("utf-8")).decode("ascii") if sql and len(sql.encode("utf-8")) <= _INIT_SQL_LIMIT else ""
+            given |= set(conn)   # 이 이름들은 배포 중 RDS 접속 정보로 채운다 — 없다고 막지 않는다
+            result.managed_db = {"env_names": list(env_names), "names": sorted(conn), "init_sql_b64": b64,
+                                 "init_name": path.name if (path is not None and b64) else ""}
+            result.notes.append("PostgreSQL 은 관리형 DB(RDS)로 — 데이터가 태스크와 상관없이 남습니다"
+                                + (f". DB 가 비어 있으면 처음 한 번 {path.name} 로 테이블을 만듭니다" if b64 and path is not None else "")
+                                + ". 샘플 데이터는 넣지 않습니다.")
             continue
         reads = [n for n in conn if n in env_names or n in required] or [next(iter(conn))]
         if production:

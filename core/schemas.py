@@ -1505,6 +1505,13 @@ class ECSDeployRequest(BaseModel):
     waf_rate_limit: int = Field(default=2000, ge=10, le=2_000_000_000)
     waf_window: Literal[60, 120, 300, 600] = 300
     edge_cost_approved: bool = False
+    #: 2.0.27 HTTPS 주소 — 로드밸런서 앞 CloudFront(https://xxxx.cloudfront.net). 켜면 로드밸런서도 켜진다(edge 비용 확인 필요).
+    https: bool = False
+    #: 선택: 내 도메인(ACM 인증서 DNS 검증 — 발급 뒤 다시 배포하면 연결).
+    custom_domain: str = Field(default="", pattern=r"^$|^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){1,8}[a-z]{2,63}$")
+    #: 2.0.27 관리형 DB — task(태스크 안 임시 Postgres, 기본) | rds(Amazon RDS, 데이터 유지, 비용 확인 필요)
+    database: Literal["task", "rds"] = "task"
+    db_cost_approved: bool = False
 
     @model_validator(mode="after")
     def validate_secret_refs(self):

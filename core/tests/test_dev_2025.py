@@ -83,7 +83,7 @@ def test_reconfigure_adds_deny_and_level_keeping_ports():
     td = shield.apply(_task_def(), "app", d)
     new = shield.reconfigure(td, level="strict", deny_add=["1.2.3.4", "192.168.0.1"])
     cur = shield.current_settings(new)
-    assert cur == {"on": True, "level": "strict", "deny": ["1.2.3.4"]}
+    assert cur == {"on": True, "level": "strict", "deny": ["1.2.3.4"], "proxy": ""}
     sh = new["containerDefinitions"][-1]
     conf = base64.b64decode({e["name"]: e["value"] for e in sh["environment"]}["RECODER_SHIELD_CONF_B64"]).decode()
     assert "rate=5r/s" in conf and "deny 1.2.3.4;" in conf and "listen 3000;" in conf

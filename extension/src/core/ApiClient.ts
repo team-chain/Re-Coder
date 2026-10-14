@@ -1540,6 +1540,11 @@ export class ApiClient {
         waf_rate_limit?: number;
         waf_window?: 60 | 120 | 300 | 600;
         edge_cost_approved?: boolean;
+        /** 2.0.27 HTTPS 주소·내 도메인·관리형 DB */
+        https?: boolean;
+        custom_domain?: string;
+        database?: 'task' | 'rds';
+        db_cost_approved?: boolean;
 
         environment?: string;
         branch?: string;

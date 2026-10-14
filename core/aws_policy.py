@@ -667,7 +667,8 @@ def _ecs_statements(
             "Resource": "*",
             "Condition": {
                 # 2.0.26: 계정의 첫 로드밸런서도 AWS 가 ELB 서비스 연결 역할을 만든다(대규모 방패).
-                "StringEquals": {"iam:AWSServiceName": ["ecs.amazonaws.com", "elasticloadbalancing.amazonaws.com"]}
+                "StringEquals": {"iam:AWSServiceName": ["ecs.amazonaws.com", "elasticloadbalancing.amazonaws.com",
+                                                        "rds.amazonaws.com"]}
             },
         },
         {
@@ -760,6 +761,8 @@ def _ecs_statements(
                 "elasticloadbalancing:ModifyTargetGroupAttributes",
                 "elasticloadbalancing:AddTags",
                 "elasticloadbalancing:SetWebAcl",
+                # 2.0.27 HTTPS 주소 — ALB 가 받는 곳을 CloudFront 전용 보안 그룹으로 바꾼다
+                "elasticloadbalancing:SetSecurityGroups",
                 # 실패 때 이번에 만든 것 되돌리기 + 「AWS 리소스 정리」
                 "elasticloadbalancing:DeleteListener",
                 "elasticloadbalancing:DeleteLoadBalancer",
@@ -796,6 +799,80 @@ def _ecs_statements(
             "Action": ["wafv2:ListWebACLs", "wafv2:GetWebACLForResource"],
             "Resource": "*",
             "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        # ── 2.0.27 HTTPS 주소(CloudFront + 선택: 내 도메인 ACM·Route 53) ─────────────────────
+        {
+            # 만들기는 리소스 단위 제한이 없다 — 대신 recoder:managed 태그를 붙여 만들 때만 허용한다.
+            "Sid": "HttpsCreateDistribution",
+            "Effect": "Allow",
+            "Action": ["cloudfront:CreateDistribution", "cloudfront:TagResource"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestTag/recoder:managed": "true"}},
+        },
+        {
+            "Sid": "HttpsManageDistribution",
+            "Effect": "Allow",
+            "Action": ["cloudfront:GetDistribution", "cloudfront:GetDistributionConfig", "cloudfront:UpdateDistribution",
+                       "cloudfront:DeleteDistribution", "cloudfront:ListTagsForResource"],
+            "Resource": f"arn:{ctx.partition}:cloudfront::{ctx.account}:distribution/*",
+        },
+        {
+            # 목록·CloudFront 주소 목록(접두사 목록)·도메인 영역 찾기 — 리소스 단위 제한 미지원(읽기 전용).
+            "Sid": "HttpsRead",
+            "Effect": "Allow",
+            "Action": ["cloudfront:ListDistributions", "ec2:DescribeManagedPrefixLists", "acm:ListCertificates",
+                       "route53:ListHostedZonesByName"],
+            "Resource": "*",
+        },
+        {
+            # CloudFront 인증서는 us-east-1 에만 둘 수 있다.
+            "Sid": "HttpsCertificate",
+            "Effect": "Allow",
+            "Action": ["acm:RequestCertificate", "acm:AddTagsToCertificate", "acm:DescribeCertificate",
+                       "acm:ListTagsForCertificate", "acm:DeleteCertificate"],
+            "Resource": f"arn:{ctx.partition}:acm:us-east-1:{ctx.account}:certificate/*",
+        },
+        {
+            # 인증서 검증 CNAME 과 도메인 별칭(A·AAAA)만 넣는다.
+            "Sid": "HttpsDomainRecords",
+            "Effect": "Allow",
+            "Action": ["route53:ChangeResourceRecordSets"],
+            "Resource": f"arn:{ctx.partition}:route53:::hostedzone/*",
+            "Condition": {"ForAllValues:StringEquals": {"route53:ChangeResourceRecordSetsRecordTypes": ["CNAME", "A", "AAAA"]}},
+        },
+        # ── 2.0.27 관리형 DB(RDS PostgreSQL) — 이름은 aws_rds.db_identifier() 가 recoder- 로 시작하게 만든다 ──
+        {
+            "Sid": "ManagedDatabase",
+            "Effect": "Allow",
+            "Action": ["rds:CreateDBInstance", "rds:ModifyDBInstance", "rds:DeleteDBInstance", "rds:CreateDBSnapshot",
+                       "rds:CreateDBSubnetGroup", "rds:DeleteDBSubnetGroup", "rds:CreateDBParameterGroup",
+                       "rds:ModifyDBParameterGroup", "rds:DeleteDBParameterGroup", "rds:AddTagsToResource",
+                       "rds:ListTagsForResource"],
+            "Resource": [
+                _arn("rds", "db:recoder-*", ctx),
+                _arn("rds", "subgrp:recoder-*", ctx),
+                _arn("rds", "pg:recoder-*", ctx),
+                _arn("rds", "snapshot:recoder-*", ctx),
+                # 기본 옵션 그룹(default:postgres-NN) — 새 인스턴스가 쓰는 것을 고를 수 없다.
+                _arn("rds", "og:default:postgres-*", ctx),
+            ],
+        },
+        {
+            # 목록·버전 조회 — 리소스 단위 제한 미지원(읽기 전용), 리전으로 좁힌다.
+            "Sid": "ManagedDatabaseRead",
+            "Effect": "Allow",
+            "Action": ["rds:DescribeDBInstances", "rds:DescribeDBSubnetGroups", "rds:DescribeDBParameterGroups",
+                       "rds:DescribeDBEngineVersions", "secretsmanager:ListSecrets"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        {
+            # DB 접속 정보 비밀(recoder/<서비스>/database)만.
+            "Sid": "ManagedDatabaseSecret",
+            "Effect": "Allow",
+            "Action": ["secretsmanager:CreateSecret", "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue",
+                       "secretsmanager:DeleteSecret", "secretsmanager:TagResource"],
+            "Resource": _arn("secretsmanager", "secret:recoder/*", ctx),
         },
         # ── 2.0.26 AWS 리소스 정리 — 지우는 것은 recoder:managed 태그를 다시 확인한 것만(aws_cleanup) ──
         {
@@ -1083,3 +1160,43 @@ def used_actions(policy: dict) -> list[str]:
         value = stmt.get("Action", [])
         actions.update([value] if isinstance(value, str) else value)
     return sorted(actions)
+
+
+# ---------------------------------------------------------------------------
+# 관리형 정책 크기 — 한 문서 6,144자(공백 제외) 한도 (2.0.27)
+# ---------------------------------------------------------------------------
+#
+# 2.0.25 부터 권한표가 한 관리형 정책 한도를 넘었다(CloudFormation 스택이 "Cannot exceed quota for
+# PolicySize: 6144" 로 실패). 문장을 순서대로 묶어 한도 안의 문서 여러 개로 나눈다 — 사용자·역할 하나에
+# 관리형 정책을 여러 개 붙일 수 있다(기본 10개).
+
+MANAGED_POLICY_LIMIT = 6144
+#: 자리표시자가 실제 값으로 바뀌어도 넘지 않게 가장 긴 값으로 잰다.
+_WORST_CASE = {ACCOUNT_PLACEHOLDER: "123456789012", REGION_PLACEHOLDER: "ap-southeast-5",
+               PARTITION_PLACEHOLDER: "aws-us-gov"}
+
+
+def policy_size(document: dict) -> int:
+    """IAM 이 세는 크기(공백 제외) — 자리표시자는 가장 긴 실제 값으로 바꿔 잰다."""
+    text = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+    for placeholder, value in _WORST_CASE.items():
+        text = text.replace(placeholder, value)
+    return len(re.sub(r"\s", "", text))
+
+
+def split_policy(policy: dict, limit: int = MANAGED_POLICY_LIMIT) -> list[dict]:
+    """문장 순서를 지키며 한도 안의 문서 여러 개로 나눈다. 문장 하나가 한도를 넘으면 ValueError."""
+    chunks: list[dict] = []
+    current: list[dict] = []
+    for stmt in policy.get("Statement", []):
+        trial = {"Version": policy.get("Version", "2012-10-17"), "Statement": current + [stmt]}
+        if current and policy_size(trial) > limit:
+            chunks.append({"Version": policy.get("Version", "2012-10-17"), "Statement": current})
+            current = [stmt]
+        else:
+            current = current + [stmt]
+        if policy_size({"Version": "2012-10-17", "Statement": [stmt]}) > limit:
+            raise ValueError(f"문장 하나({stmt.get('Sid')})가 관리형 정책 한도({limit}자)를 넘습니다.")
+    if current:
+        chunks.append({"Version": policy.get("Version", "2012-10-17"), "Statement": current})
+    return chunks
