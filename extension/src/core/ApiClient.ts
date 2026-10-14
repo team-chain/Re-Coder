@@ -1,3 +1,5 @@
+import { DeploymentProgressEvent, readDeploymentStream } from './deploymentStream';
+import { CodeProgressEvent, readCodeStream } from './codeStream';
 import {
     ApiResponse,
     CoreHealth,
@@ -22,6 +24,18 @@ import {
 } from '../types';
 import { CoreManager } from './CoreManager';
 import { describeHttpError, parseHttpErrorDetail, CoreHttpError } from './httpError';
+import { FETCH_HEADERS_LIMIT_MS, longHttpFetch } from './longHttp';
+
+/** 보안 검사 결과로 만든 수정안. auto=false 는 안내만, risk 가 있으면 기본으로 고르지 않는다. */
+export interface SecurityFixProposal {
+    id: string; tool: string; title: string; detail: string; files: string[]; diff: string;
+    auto: boolean; risk: string; note: string; rebuild: boolean;
+}
+
+export interface SecurityFixResult {
+    applied: string[]; skipped: { id: string; reason: string }[]; changed: string[];
+    backups: string[]; notes: string[]; rebuild: boolean;
+}
 
 /** 인프라 파일(Dockerfile 등) 승인 결과. `exists` 는 "안 썼다 — 기존 파일과 다르다" 이다. */
 export interface InfraApprovalResult {
@@ -52,10 +66,23 @@ export interface CodeAgentOp {
     secret_warnings?: CodeSecretWarning[];
 }
 
+/** /api/deploy/settings — 이름·상태만(값 없음). */
+export interface DeploySettingsState {
+    plan_id: string;
+    settings: Array<{ name: string; label: string; hint: string; status: 'ready' | 'missing'; source: string; secret: boolean; min_length?: number }>;
+    settings_missing: string[];
+    demo: { available: boolean; enabled: boolean; label: string; note: string; unavailable_reason?: string } | null;
+    risk_reasons: string[];
+    command_steps?: Array<{ command: string; note?: string }>;
+}
+
 export interface CodeAgentResult {
     summary: string;
     ops: CodeAgentOp[];
     model: string;
+    /** 대규모 생성 작업 ID — 같은 ID 로 다시 요청하면 저장된 결과를 바로 받는다. */
+    job_id?: string;
+    verification?: {kind: string; status: string; passed: boolean; output?: string};
 }
 
 /** /api/code/plan — AI-DLC 1단계: 코드 대신 "설계 결정" 선택지. */
@@ -82,6 +109,8 @@ export interface CodePlanResult {
     //: "AI 가 설계를 안 해준다"로 보인다.
     dropped?: string[];
     model: string;
+    //: 결정 id → 고른 선택지 key → 이어서 물을 결정(목록) 또는 "ai"(AI 에게 이어서 받음).
+    followups?: Record<string, Record<string, CodeDecision[] | 'ai'>>;
 }
 
 /** Workspace 오른쪽 대화 패널의 일반 AI 응답. 파일을 변경하지 않는 상담용 API다. */
@@ -199,6 +228,9 @@ export interface EcsDeployStatus {
     } | null;
 }
 
+export interface BuildReadinessIssue { code: string; severity: 'error' | 'warning'; message: string; fix: string; file?: string; auto_fix: boolean }
+export interface BuildReadiness { runtime: string; app_port: number | null; port_from_env: boolean; health_path: string | null; probe_path: string | null; issues: BuildReadinessIssue[] }
+
 export class ApiClient {
     constructor(private coreManager: CoreManager) {}
 
@@ -256,14 +288,14 @@ export class ApiClient {
         const timerId = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
-            const res = await fetch(url, {
+            const init = {
                 method,
                 headers,
                 body: body !== undefined ? JSON.stringify(body) : undefined,
                 signal: controller.signal,
-            });
+            };
+            const res = timeoutMs > FETCH_HEADERS_LIMIT_MS ? await longHttpFetch(url, init) : await fetch(url, init);
 
-            clearTimeout(timerId);
             const timestamp = new Date().toISOString();
 
             if (!res.ok) {
@@ -298,9 +330,13 @@ export class ApiClient {
             }
             return { success: true, data: json as T, timestamp };
         } catch (err: unknown) {
-            clearTimeout(timerId);
-            const message = err instanceof Error ? err.message : 'Unknown network error';
+            const message = controller.signal.aborted
+                ? `응답 대기 시간이 ${Math.round(timeoutMs / 1000)}초를 초과했습니다. Core 연결과 AI 설정을 확인한 뒤 다시 요청하세요.`
+                : err instanceof Error ? err.message : 'Unknown network error';
             return { success: false, error: message, timestamp: new Date().toISOString() };
+        } finally {
+            // The timeout covers the body as well as the HTTP headers.
+            clearTimeout(timerId);
         }
     }
 
@@ -329,7 +365,7 @@ export class ApiClient {
     }
 
     async runDiagnostics(): Promise<DiagnosticsResult> {
-        const resp = await this.request<DiagnosticsResult>('POST', '/api/diagnostics/run');
+        const resp = await this.request<DiagnosticsResult>('POST', '/api/diagnostics/run', undefined, false, 150000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Diagnostics 실행 실패'); }
         return resp.data;
     }
@@ -369,10 +405,68 @@ export class ApiClient {
             target_folder: opts?.targetFolder ?? '',
             decisions: opts?.decisions ?? [],
         };
-        // 코드 생성은 30s 를 넘길 수 있어 90s 타임아웃.
-        const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 90000);
+        // Full-file output and one schema correction can take two model calls.
+        //: 분할 생성 + 자동 교정(최대 3회)까지 끝날 시간. Core 는 10분 예산 안에서 교정을 멈춘다.
+        const resp = await this.request<CodeAgentResult>('POST', '/api/code/generate', body, false, 900000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '코드 생성 실패'); }
         return resp.data;
+    }
+
+    /**
+     * 대규모 생성 — 진행 이벤트를 받으며 기다린다(전체 시간 상한 없음).
+     * mode='team' 이면 처음부터 여러 에이전트가 나눠 만든다. resumeJob 으로 멈춘 작업을 이어 만든다.
+     * 코어가 이 경로를 모르면(구버전) 예전 /api/code/generate 로 물러선다.
+     */
+    async generateCodeStream(
+        instruction: string,
+        opts: {
+            workspacePath?: string;
+            openFile?: { path: string; content: string };
+            priorFiles?: Array<{ path: string; content: string }>;
+            contextFiles?: Array<{ path: string; content: string }>;
+            targetFolder?: string;
+            decisions?: CodeDecisionChoice[];
+            mode?: 'auto' | 'team';
+            resumeJob?: string;
+            agents?: number;
+            /** 이어 만들 때 실패한 파일을 빼고 결과를 받는다. */
+            skipFailed?: boolean;
+        },
+        onEvent: (event: CodeProgressEvent) => void,
+        retried = false,
+    ): Promise<CodeAgentResult> {
+        if (!this.coreManager.getSessionToken()) await this.coreManager.refreshToken();
+        const body = {
+            instruction,
+            workspace_path: opts.workspacePath ?? '',
+            open_file_path: opts.openFile?.path ?? '',
+            open_file_content: opts.openFile?.content ?? '',
+            prior_files: opts.priorFiles ?? [],
+            context_files: opts.contextFiles ?? [],
+            target_folder: opts.targetFolder ?? '',
+            decisions: opts.decisions ?? [],
+            mode: opts.mode ?? 'auto',
+            resume_job: opts.resumeJob ?? '',
+            agents: opts.agents ?? 0,
+            skip_failed: !!(opts.skipFailed && opts.resumeJob),
+        };
+        const controller = new AbortController();
+        const response = await fetch(`http://127.0.0.1:${this.coreManager.getPort()}/api/code/generate/stream`, {
+            method: 'POST', signal: controller.signal,
+            headers: { 'Content-Type': 'application/json', 'X-Session-Token': this.coreManager.getSessionToken(), Accept: 'text/event-stream' },
+            body: JSON.stringify(body),
+        });
+        if (response.status === 401 && !retried) {
+            await response.body?.cancel();
+            await this.coreManager.refreshToken();
+            return this.generateCodeStream(instruction, opts, onEvent, true);
+        }
+        if (response.status === 404 || response.status === 405) {
+            await response.body?.cancel();
+            return this.generateCode(instruction, opts);
+        }
+        if (!response.ok) throw new Error(describeHttpError(response.status, await response.text()));
+        return await readCodeStream<CodeAgentResult>(response, onEvent, () => controller.abort());
     }
 
     /**
@@ -386,9 +480,12 @@ export class ApiClient {
             openFile?: { path: string; content: string };
             contextFiles?: Array<{ path: string; content: string }>;
             targetFolder?: string;
+            /** "custom" — 쇼핑몰 시작 방식에서 AI 자유 생성을 고른 뒤 이어서 묻는 결정. */
+            afterStarter?: string;
         }
     ): Promise<CodePlanResult> {
         const body = {
+            after_starter: opts?.afterStarter ?? '',
             instruction,
             workspace_path: opts?.workspacePath ?? '',
             open_file_path: opts?.openFile?.path ?? '',
@@ -396,16 +493,82 @@ export class ApiClient {
             context_files: opts?.contextFiles ?? [],
             target_folder: opts?.targetFolder ?? '',
         };
-        const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 60000);
+        const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 240000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설계 결정 생성 실패'); }
         return resp.data;
     }
 
-    async getDeployPreflight(workspacePath: string): Promise<DeployPreflightResult> {
+    /** ecs 는 앱 실행 설정의 **이름**과 배포 환경을 함께 보낸다(값은 보내지 않는다) — 앱이 시작할 때 요구하는 값을 미리 막는다. */
+    async getDeployPreflight(workspacePath: string, target?: 's3' | 'ecs' | 'local', runtime?: { envNames: string[]; environment: string }): Promise<DeployPreflightResult> {
         const resp = await this.request<DeployPreflightResult>('POST', '/api/deploy/preflight', {
             workspace_path: workspacePath,
-        });
+            target,
+            ...(runtime ? { env_names: runtime.envNames, environment: runtime.environment } : {}),
+        }, false, 90000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
+        return resp.data;
+    }
+
+    /** 컨테이너 빌드·실행 가능성 정적 점검(파일만 읽음). */
+    async checkBuildReadiness(workspacePath: string): Promise<BuildReadiness> {
+        const resp = await this.request<BuildReadiness>('POST', '/api/deploy/readiness', { workspace_path: workspacePath });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 준비 점검 실패'); }
+        return resp.data;
+    }
+
+    async prepareRepair(workspacePath:string, log:string, stage:string):Promise<Record<string,unknown>> {
+        const r=await this.request<Record<string,unknown>>('POST','/api/repair/prepare',
+            {workspace_path:workspacePath,log,stage,strategy:'D',use_cache:true},false,1200000);
+        if(!r.success||!r.data)throw new Error(r.error||'수정안 검증 실패');
+        return r.data;
+    }
+
+    async getRepair(runId:string):Promise<Record<string,unknown>> {
+        const r=await this.request<Record<string,unknown>>('GET',`/api/repair/${encodeURIComponent(runId)}`);
+        if(!r.success||!r.data)throw new Error(r.error||'수정 기록 조회 실패');
+        return r.data;
+    }
+
+    async approveRepair(runId:string, workspacePath:string):Promise<Record<string,unknown>> {
+        const r=await this.request<Record<string,unknown>>('POST',`/api/repair/${encodeURIComponent(runId)}/approve`,
+            {workspace_path:workspacePath},false,30000);
+        if(!r.success||!r.data)throw new Error(r.error||'수정안 적용 실패');
+        return r.data;
+    }
+
+    /**
+     * 로컬 Docker 배포의 '필요한 설정' 저장 또는 결제를 끈 로컬 데모 전환.
+     * 값은 코어가 사용자 홈(~/.recoder)에만 보관하고, 응답에는 이름·상태만 온다.
+     */
+    async saveDeploySettings(planId: string, values: Record<string, string>, demo?: boolean): Promise<DeploySettingsState> {
+        const body: Record<string, unknown> = { plan_id: planId, values };
+        if (typeof demo === 'boolean') { body.demo = demo; }
+        const resp = await this.request<DeploySettingsState>('POST', '/api/deploy/settings', body, false, 30000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설정을 저장하지 못했습니다.'); }
+        return resp.data;
+    }
+
+    /** DB 테이블 구조가 앱과 다를 때의 선택 — new: 새 DB 로 시작(기존 DB 는 남김), keep: 그대로 사용. */
+    async chooseDeployDb(choice: 'new' | 'keep', planId?: string, containerName?: string): Promise<{ container_name: string; choice: string; db: string; message: string }> {
+        const resp = await this.request<{ container_name: string; choice: string; db: string; message: string }>(
+            'POST', '/api/deploy/db-choice', { plan_id: planId ?? null, container_name: containerName ?? null, choice }, false, 30000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'DB 선택을 저장하지 못했습니다.'); }
+        return resp.data;
+    }
+
+    /** 사용자가 누른 자동 수정 한 건. 원본은 프로젝트의 .recoder/backups 에 남는다. */
+    async fixBuildReadiness(workspacePath: string, code: string): Promise<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }> {
+        const resp = await this.request<{ applied: boolean; changed?: string[]; message: string; readiness: BuildReadiness }>(
+            'POST', '/api/deploy/readiness/fix', { workspace_path: workspacePath, code }, false, 120000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '자동 수정 실패'); }
+        return resp.data;
+    }
+
+    /** 자동 수정을 한 번에 적용하고 다시 판정한다(승인 카드 [모두 적용]). 고치는 중 새로 드러난 막는 문제도 함께 고친다. */
+    async fixAllBuildReadiness(workspacePath: string, codes?: string[]): Promise<{ applied: boolean; codes: string[]; changed: string[]; skipped: Array<{ code: string; message: string }>; message: string }> {
+        const resp = await this.request<{ applied: boolean; codes: string[]; changed: string[]; skipped: Array<{ code: string; message: string }>; message: string }>(
+            'POST', '/api/deploy/readiness/fix-all', { workspace_path: workspacePath, codes }, false, 300000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '자동 수정 실패'); }
         return resp.data;
     }
 
@@ -450,11 +613,13 @@ export class ApiClient {
         message: string,
         history: Array<{ role: 'user' | 'assistant'; content: string }>,
         workspacePath = '',
+        contextFiles: Array<{path: string; content: string}> = [],
     ): Promise<ChatResult> {
         const resp = await this.request<ChatResult>('POST', '/api/chat', {
             message,
             history,
             workspace_path: workspacePath,
+            context_files: contextFiles,
         }, false, 90000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AI 대화 실패'); }
         return resp.data;
@@ -491,7 +656,8 @@ export class ApiClient {
     async generateDockerfile(workspacePath: string, projectId?: string): Promise<InfraFileProposal> {
         const resp = await this.request<InfraFileProposal>(
             'POST', '/api/deploy/dockerfile',
-            { workspace_path: workspacePath, project_id: projectId }
+            { workspace_path: workspacePath, project_id: projectId },
+            false, 180000,  // AI 로 Dockerfile 을 만들 때 30초로는 끊겼다
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'Dockerfile 생성 실패'); }
         return resp.data;
@@ -506,7 +672,8 @@ export class ApiClient {
     async generateCompose(workspacePath: string, projectId?: string): Promise<InfraFileProposal> {
         const resp = await this.request<InfraFileProposal>(
             'POST', '/api/deploy/compose',
-            { workspace_path: workspacePath, project_id: projectId }
+            { workspace_path: workspacePath, project_id: projectId },
+            false, 180000,
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'docker-compose.yml 생성 실패'); }
         return resp.data;
@@ -588,6 +755,11 @@ export class ApiClient {
     }
 
     /** 인증된 사용자의 GitHub 레포 목록. */
+    async githubConnectRepository(req:{repository:string;create:boolean;private?:boolean}):Promise<{status:string;message?:string}> {
+        const resp=await this.request<{status:string;message?:string}>('POST','/api/github/repository/connect',req);
+        return resp.success&&resp.data ? resp.data : {status:'error',message:resp.error};
+    }
+
     async listGithubRepos(): Promise<{ status: string; repos: Array<{ name: string; private: boolean; html_url: string }> }> {
         const resp = await this.request<{ status: string; repos: unknown[] }>(
             'GET', '/api/github/repos'
@@ -604,15 +776,39 @@ export class ApiClient {
         targetPath?: string
     ): Promise<object> {
         //: 기본 30초로는 부족하다 — 코어가 Docker Desktop 자동 시작(최대 75초,
-        //: docker_autostart)을 기다린 뒤 스캔(코어 상한 300초)을 돌리므로,
+        //: docker_autostart)을 기다린 뒤 스캔(코어 상한 450초)을 돌리므로,
         //: 그 합보다 길게 잡는다. 짧으면 코어는 정상 진행 중인데 화면만
         //: "스캔 실패"로 보이는 거짓 실패가 난다.
         const resp = await this.request<object>(
             'POST', '/api/deploy/scan',
             { workspace_path: workspacePath, scan_type: scanType, target_path: targetPath },
-            false, 480000  // Docker 자동 시작(정리 45초 + 대기 120초) + 스캔 상한 300초
+            false, 660000  // Docker 자동 시작(정리 45초 + 대기 120초) + 스캔 상한 450초
         );
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? `${scanType} 스캔 요청 실패`); }
+        return resp.data;
+    }
+
+    /** 보안 검사 결과 → 바로 적용할 수 있는 수정안(코어가 결정론적으로 만든다). */
+    async securityFixPlan(workspacePath: string, reports: Record<string, unknown>): Promise<{ proposals: SecurityFixProposal[] }> {
+        const resp = await this.request<{ proposals: SecurityFixProposal[] }>(
+            'POST', '/api/deploy/security/fixes', { workspace_path: workspacePath, reports }, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '수정안을 만들지 못했습니다.'); }
+        return resp.data;
+    }
+
+    /** 고른 수정안만 적용한다. package-lock 갱신·베이스 이미지 받기까지 기다린다. */
+    async securityFixApply(workspacePath: string, reports: Record<string, unknown>, ids: string[]): Promise<SecurityFixResult> {
+        const resp = await this.request<SecurityFixResult>(
+            'POST', '/api/deploy/security/fixes/apply', { workspace_path: workspacePath, reports, ids }, false, 900000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '수정을 적용하지 못했습니다.'); }
+        return resp.data;
+    }
+
+    /** 수정 뒤 이미지를 다시 빌드한다(Trivy 재검사용). 실행 중인 컨테이너는 그대로 둔다. */
+    async securityRebuild(workspacePath: string): Promise<{ status: string; image?: string; message: string; log_tail?: string }> {
+        const resp = await this.request<{ status: string; image?: string; message: string; log_tail?: string }>(
+            'POST', '/api/deploy/security/rebuild', { workspace_path: workspacePath }, false, 780000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '이미지를 다시 빌드하지 못했습니다.'); }
         return resp.data;
     }
 
@@ -629,14 +825,39 @@ export class ApiClient {
         return resp.data;
     }
 
-    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string; error?: string }> {
-        // docker build + run + 헬스체크는 30초를 넘으므로 타임아웃을 길게.
+    async executeDeployment(planId: string, approved: boolean): Promise<{ status: string; deployment_id?: string; stdout?: string; stderr?: string; error?: string; message?: string; health_ok?: boolean }> {
+        // Build (600s), image scan, replacement and health checks must all fit.
         const resp = await this.request<{ status: string; deployment_id?: string; stdout?: string; stderr?: string }>(
-            'POST', '/api/deploy/execute', { plan_id: planId, approved }, false, 600000
+            'POST', '/api/deploy/execute', { plan_id: planId, approved }, false, 1500000
         );
         //: 코어가 4xx/5xx 로 거절한 사유(예: "Trivy: CRITICAL 3건 — 배포를 차단했습니다")를
         //: 버리고 { status: 'error' } 만 돌려주면 화면은 "사유 없음" 이 된다(실기기 검증 C2).
         return resp.success && resp.data ? resp.data : { status: 'error', error: resp.error ?? '코어가 응답하지 않았습니다.' };
+    }
+
+    async executeDeploymentStream(planId: string, approved: boolean, onEvent: (event: DeploymentProgressEvent) => void, retried = false): Promise<Awaited<ReturnType<ApiClient['executeDeployment']>>> {
+        if (!approved) return this.executeDeployment(planId, false);
+        if (!this.coreManager.getSessionToken()) await this.coreManager.refreshToken();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 1500000);
+        try {
+            const response = await fetch(`http://127.0.0.1:${this.coreManager.getPort()}/api/deploy/execute/stream`, {
+                method: 'POST', signal: controller.signal,
+                headers: { 'Content-Type': 'application/json', 'X-Session-Token': this.coreManager.getSessionToken(), Accept: 'text/event-stream' },
+                body: JSON.stringify({ plan_id: planId, approved }),
+            });
+            // Only an authentication rejection is safe to replay, before work starts.
+            if (response.status === 401 && !retried) {
+                await response.body?.cancel();
+                await this.coreManager.refreshToken();
+                return await this.executeDeploymentStream(planId, approved, onEvent, true);
+            }
+            if (!response.ok) throw new Error(describeHttpError(response.status, await response.text()));
+            return await readDeploymentStream(response, onEvent);
+        } catch (error) {
+            if (error instanceof TypeError || (error instanceof Error && error.name === 'AbortError')) throw new Error('배포 진행 연결이 끊겼습니다. 배포는 계속될 수 있으므로 Docker 실행 상태를 확인하세요.');
+            throw error;
+        } finally { clearTimeout(timer); }
     }
 
     /** 로컬 배포의 연속 검증 스냅샷. 감시가 없으면(코어 재시작 등) null. */
@@ -749,10 +970,24 @@ export class ApiClient {
     // /api/session/cost — also supported by core for backwards compat
     // -----------------------------------------------------------------------
 
+    private costCache: { at: number; value: CostSummary } | null = null;
+    private costInFlight: Promise<CostSummary> | null = null;
+
+    /**
+     * 비용 요약. 사이드바·워크벤치·헬스 폴링이 각자 5초마다 불러 실기기 로그에서 Core 요청의
+     * 70%(이틀에 2만 건)가 이것이었다. 값은 AI 호출 뒤에만 바뀌므로 20초 동안 재사용하고,
+     * 같은 순간의 중복 요청은 하나로 합친다.
+     */
     async getCostSummary(): Promise<CostSummary> {
-        const resp = await this.request<CostSummary>('GET', '/api/cost');
-        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비용 정보 조회 실패'); }
-        return resp.data;
+        if (this.costCache && Date.now() - this.costCache.at < 20_000) { return this.costCache.value; }
+        if (this.costInFlight) { return this.costInFlight; }
+        this.costInFlight = (async () => {
+            const resp = await this.request<CostSummary>('GET', '/api/cost');
+            if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비용 정보 조회 실패'); }
+            this.costCache = { at: Date.now(), value: resp.data };
+            return resp.data;
+        })();
+        try { return await this.costInFlight; } finally { this.costInFlight = null; }
     }
 
     // -----------------------------------------------------------------------
@@ -952,7 +1187,7 @@ export class ApiClient {
                 task_execution_role: deploymentContext.taskExecutionRole ?? '',
                 task_role: deploymentContext.taskRole ?? '',
             } : undefined,
-        });
+        }, false, 120000);  // IAM 시뮬레이션 여러 건 + AWS 재시도
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 권한 점검 실패');
         }
@@ -989,7 +1224,7 @@ export class ApiClient {
             secret_access_key: creds.secretAccessKey,
             region: creds.region ?? '',
             session_token: creds.sessionToken ?? '',
-        });
+        }, false, 90000);
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 자격증명 검증 실패');
         }
@@ -1006,7 +1241,7 @@ export class ApiClient {
         const resp = await this.request<AwsStatus>('POST', '/api/aws/connect-profile', {
             profile: input.profile,
             region: input.region ?? '',
-        });
+        }, false, 90000);
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 프로필 연결 실패');
         }
@@ -1263,6 +1498,14 @@ export class ApiClient {
         cpu?: string;
         memory?: string;
         task_family?: string;
+        env_vars?: Record<string, string>;
+        secret_refs?: Record<string, string>;
+        target_group_arn?: string;
+        cloudfront_domain?: string;
+        assign_public_ip?: boolean;
+        subnet_ids?: string[];
+        security_group_ids?: string[];
+
         environment?: string;
         branch?: string;
         skip_sbom?: boolean;
@@ -1278,6 +1521,23 @@ export class ApiClient {
     }
 
     /** GET /api/deploy/ecs/status — ECS 배포 진행상황 폴링. */
+    async getCanvasSnapshot(workspace: string, project: string) {
+        return this.request<Record<string, unknown>>('GET', `/api/deploy/canvas?workspace_path=${encodeURIComponent(workspace)}&project=${encodeURIComponent(project)}`);
+    }
+
+    async getCanvasTarget(region: string, cluster: string, service: string, includeBudget = true) {
+        const response = await this.request<{ exists: boolean | null; task_definition: string; images: Array<{ image: string; digest: string }>; budget: Array<{ name: string; unit: string; limit: string; spent: string; period: string }> | null; warnings: string[] }>('GET', `/api/deploy/canvas/target?region=${encodeURIComponent(region)}&cluster=${encodeURIComponent(cluster)}&service=${encodeURIComponent(service)}&include_budget=${includeBudget}`);
+        if (!response.success || !response.data) throw new Error(response.error || '배포 대상 조회 실패');
+        return response.data;
+    }
+
+    /** ECS 서비스의 태스크 수를 0 으로 내려 과금을 멈춘다(서비스는 남는다). */
+    async stopEcsService(req: { ecs_cluster: string; ecs_service: string; aws_region: string }): Promise<{ stopped: boolean; desired_count: number; message: string }> {
+        const resp = await this.request<{ stopped: boolean; desired_count: number; message: string }>('POST', '/api/deploy/ecs/stop', req, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'ECS 서비스 중지 실패'); }
+        return resp.data;
+    }
+
     async getEcsDeployStatus(deploymentId?: string): Promise<EcsDeployStatus> {
         const query = deploymentId ? `?deployment_id=${encodeURIComponent(deploymentId)}` : '';
         const resp = await this.request<EcsDeployStatus>('GET', `/api/deploy/ecs/status${query}`);
@@ -1317,13 +1577,13 @@ export class ApiClient {
     }
 
     /** POST /api/git/push — 원격 push (upstream 자동 설정). */
-    async gitPush(req: { workspace_path: string; branch?: string; force?: boolean }): Promise<{
+    async gitPush(req: { workspace_path: string; branch?: string; force?: boolean; auto_commit?: boolean }): Promise<{
         status: string;
         message?: string;
         branch?: string;
     }> {
         const resp = await this.request<{ status: string; message?: string; branch?: string }>(
-            'POST', '/api/git/push', req
+            'POST', '/api/git/push', req, false, 200000  // 큰 저장소·느린 망에서 30초로는 끊겼다
         );
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'git push 실패');
@@ -1353,7 +1613,7 @@ export class ApiClient {
         description?: string;
     }): Promise<{ status: string; html_url?: string; message?: string }> {
         const resp = await this.request<{ status: string; html_url?: string; message?: string }>(
-            'POST', '/api/github/repo', req
+            'POST', '/api/github/repo', req, false, 200000
         );
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? '레포 생성 실패');

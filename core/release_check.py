@@ -1,0 +1,114 @@
+"""Offline checks executed by the packaged binary; never reads credentials."""
+from __future__ import annotations
+
+import importlib
+import json
+from pathlib import Path
+import sqlite3
+import sys
+
+RUNTIME_IMPORTS = (
+    'api.routes.canvas', 'github_agent', 'static_frontend', 'deployment_inputs', 'code_agent', 'adr', 'aws_onboarding',
+    'agents.ecs_agent', 's3_byo', 'security_scan', 'local_deploy_agent',
+    'llm.bedrock_provider', 'llm.gemini_provider', 'llm.provider_router', 'llm.api_key_provider',
+    'commerce_starter', 'generated_validation', 'build_readiness', 'screen_check', 'build_failure', 'vuln_advice', 'npm_registry', 'local_services', 'scan_process',
+    'preflight.contract_loader', 'persistence', 'nacl.public', 'paramiko',
+    'google.genai', 'google.generativeai',
+    #: 대규모 코드 생성(팀 모드) — code_agent 가 필요할 때 불러오므로 번들 분석이 놓치지 않게 명시한다.
+    'gen_engine', 'deploy_settings', 'generation_jobs', 'generation_progress',
+    #: 2.0.6 — 빠진 하위 package.json·빌드 설정 교정, ReCoder 결제 모듈(고정 파일)
+    'node_manifests', 'node_fixups', 'payment_kit', 'payment_contract', 'unused_files',
+    #: 2.0.7 — ReCoder 검증 Dockerfile(화면·서버 폴더형 Node 앱)
+    'docker_kit',
+    #: 2.0.12 — 번들 데이터 위치(core.* 이름으로 불려도 찾음)
+    'resources',
+    #: 2.0.12 — ECS 에서 앱이 시작하도록 DB·서명 키·모의 결제를 같은 태스크에 준비
+    'agents.ecs_runtime',
+    #: 2.0.18 — 생성 직후 실행 점검(빌드한 이미지를 ECS staging 구성으로 띄워 사용자 흐름 API 확인)
+    'runtime_check',
+)
+
+#: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
+#: 필요한 것만 담는다 — botocore 전체(1,900개 파일)를 넣으면 한 파일 실행 파일이 시작할
+#: 때마다 임시 폴더에 풀고 백신이 하나하나 검사해 Windows 에서 Core 시작이 12~50초 걸렸다.
+BUNDLED_AWS_SERVICES = (
+    'sts', 'ecs', 'ecr', 's3', 'iam', 'elbv2', 'budgets', 'bedrock-runtime', 'bedrock',
+    'logs', 'ec2', 'dynamodb', 'cloudformation', 'sso', 'sso-oidc', 'signin',
+)
+
+
+def run(app) -> int:
+    checks: list[str] = []
+    try:
+        # Import from the bundle, including modules normally loaded on first use.
+        for name in RUNTIME_IMPORTS:
+            importlib.import_module(name)
+        checks.append('runtime imports')
+        from registry import CommandTemplateRegistry, FileTemplateRegistry
+        commands = CommandTemplateRegistry()
+        files = FileTemplateRegistry()
+        assert commands._templates, 'command templates are empty'
+        assert files._templates, 'file templates are empty'
+        assert 'Dockerfile.node-static' in files._templates, 'frontend Dockerfile template missing'
+        checks.append('command and infrastructure templates')
+        from commerce_starter import operations
+        starter = {op['file'] for op in operations()}
+        assert {'Dockerfile', 'backend/src/server.js', 'frontend/src/pages/Checkout.jsx',
+                'backend/package-lock.json', 'frontend/package-lock.json', 'backend/src/order_expiry.js'} <= starter, 'commerce foundation data missing'
+        checks.append('reviewed commerce foundation')
+        #: 같은 모듈이 core.* 이름으로도 불린다(배포 라우트) — 그때도 번들의 데이터 파일을 찾아야 한다.
+        #: 실기기 2.0.11: core.agents.ecs_agent 가 _MEI…/core/registry/… 를 찾아 ECS 태스크 정의 단계에서 실패했다.
+        def _both(name: str):
+            """번들에 있는 이름으로만 — core.* 로 쓰이지 않는 모듈은 번들에 그 이름이 없다(그건 정상)."""
+            for candidate in (name, 'core.' + name):
+                try:
+                    yield candidate, importlib.import_module(candidate)
+                except ModuleNotFoundError as exc:
+                    #: 그 모듈(이나 상위 패키지) 자체가 core.* 로 없을 때만 건너뛴다 — 그 안에서 부르는 다른 모듈이 없으면 실패다.
+                    missing = str(exc.name or '')
+                    if candidate == name or not (candidate == missing or candidate.startswith(missing + '.')) \
+                            or missing == 'core':
+                        raise
+        for name, module in _both('agents.ecs_agent'):
+            assert module._TEMPLATE_PATH.is_file(), f'{name}: ECS task definition template missing'
+        for name, module in _both('agents.ecs_runtime'):
+            assert 'listen' in module.deploy_settings.MOCK_PAYMENT_JS and module.plan(None, key='k', environment='staging',
+                   provided=(), container_port=3000).summary()['sidecars'] == [], f'{name}: ECS runtime plan broken'
+        for name, module in _both('commerce_starter'):
+            assert (module.ROOT / 'backend').is_dir(), f'{name}: commerce foundation missing'
+        for name, module in _both('registry'):
+            assert module.FileTemplateRegistry()._templates, f'{name}: file templates missing'
+        for name, module in _both('grounded_repair.knowledge'):
+            assert module._sources_json().is_file(), f'{name}: knowledge sources missing'
+        checks.append('bundled data from both import names')
+        from botocore.session import Session
+        session = Session()
+        available = set(session.get_available_services())
+        for service in BUNDLED_AWS_SERVICES:
+            if service == 'signin' and service not in available:
+                continue  # 오래된 botocore 에는 없다
+            assert session.get_service_model(service).operation_names, service
+        checks.append('AWS service definitions')
+        import certifi
+        assert Path(certifi.where()).is_file(), 'TLS certificate bundle missing'
+        checks.append('TLS certificates')
+        with sqlite3.connect(':memory:') as db:
+            assert db.execute('select 1').fetchone() == (1,)
+        checks.append('SQLite')
+        from apscheduler.schedulers.background import BackgroundScheduler
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(lambda: None, 'interval', seconds=60)
+        checks.append('scheduler plugins')
+        paths = app.openapi()['paths']
+        for endpoint in ('/api/health', '/api/status', '/api/chat', '/api/code/plan',
+                         '/api/code/generate', '/api/code/generate/stream', '/api/deploy/dockerfile', '/api/deploy/execute', '/api/deploy/settings', '/api/deploy/db-choice',
+                         '/api/deploy/canvas', '/api/github/repository/connect', '/api/git/push'):
+            assert endpoint in paths, f'route missing: {endpoint}'
+        checks.append('application routes')
+        from version import VERSION
+        print(json.dumps({'ok': True, 'version': VERSION, 'frozen': bool(getattr(sys, 'frozen', False)),
+                          'checks': checks}))
+        return 0
+    except Exception as exc:
+        print(json.dumps({'ok': False, 'checks': checks, 'error': str(exc)}))
+        return 1

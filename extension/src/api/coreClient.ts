@@ -360,7 +360,14 @@ export class CoreClient {
         container_port?: number;
         cpu?: string;
         memory?: string;
-        env_vars?: Array<{ name: string; value: string }>;
+        env_vars?: Array<{ name: string; value: string }> | Record<string, string>;
+        secret_refs?: Record<string, string>;
+        target_group_arn?: string;
+        cloudfront_domain?: string;
+        assign_public_ip?: boolean;
+        subnet_ids?: string[];
+        security_group_ids?: string[];
+
         task_family?: string;
         environment?: string;
         branch?: string;

@@ -1,0 +1,13 @@
+{
+  "name": "repair-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node app.js",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "vite": "6.1.0"
+  },
+  "type": "module"
+}

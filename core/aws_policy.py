@@ -497,8 +497,30 @@ def _ecs_statements(
             "Effect": "Allow",
             "Action": [
                 "ecs:RegisterTaskDefinition",
+                "ecs:DescribeTaskDefinition",
             ],
             "Resource": "*",
+        },
+        {
+            # Canvas reads only the load balancers attached to the chosen service.
+            # These two Describe operations do not support resource-level ARNs.
+            # https://docs.aws.amazon.com/service-authorization/latest/reference/list_elbv2.html
+            "Sid": "CanvasLoadBalancerRead",
+            "Effect": "Allow",
+            "Action": [
+                "elasticloadbalancing:DescribeTargetGroups",
+                "elasticloadbalancing:DescribeLoadBalancers",
+            ],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        {
+            # DescribeBudgets is authorized by ViewBudget, not DescribeBudgets.
+            # Restrict the global budget ARN to this account; no budget writes.
+            "Sid": "CanvasBudgetRead",
+            "Effect": "Allow",
+            "Action": ["budgets:ViewBudget"],
+            "Resource": _arn("budgets", "budget/*", ctx, global_service=True),
         },
         {
             # 클러스터·서비스 조회 및 롤링 업데이트.
@@ -648,7 +670,8 @@ def _ecs_statements(
             # 컨테이너 로그가 갈 곳. 보관 기간을 걸어 비용 누적을 막는다.
             "Sid": "EcsLogGroup",
             "Effect": "Allow",
-            "Action": ["logs:CreateLogGroup", "logs:PutRetentionPolicy"],
+            # GetLogEvents: 앱이 기동 중 죽으면 그 로그 끝부분을 배포 결과에 바로 보여 준다(선택 — 없어도 배포는 된다).
+            "Action": ["logs:CreateLogGroup", "logs:PutRetentionPolicy", "logs:GetLogEvents"],
             "Resource": _arn("logs", "log-group:/ecs/*", ctx),
         },
         {

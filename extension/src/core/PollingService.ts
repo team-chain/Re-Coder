@@ -12,6 +12,7 @@ export class PollingService {
     /** 자동 복구 진행 중 플래그 + 마지막 복구 시각(쿨다운용). */
     private recovering: boolean = false;
     private lastRecoveryMs: number = 0;
+    private recoverySuspended: boolean = false;
 
     constructor(
         private readonly _coreManager: CoreManager,
@@ -47,9 +48,13 @@ export class PollingService {
         this.onErrorCallback = null;
     }
 
+    /** 사용자가 Core 를 멈췄다 — 다음에 Core 가 응답할 때까지 자동 재시작하지 않는다. */
+    suspendAutoRecovery(): void { this.recoverySuspended = true; }
+
     async poll(): Promise<CoreHealth | null> {
         try {
             const health = await this.fetchHealth();
+            this.recoverySuspended = false;
             this.lastHealth = health;
             this.onUpdateCallback?.(health);
             return health;
@@ -106,6 +111,9 @@ export class PollingService {
      */
     private async tryRecover(): Promise<boolean> {
         const now = Date.now();
+        //: 사용자가 "Stop Core" 로 멈췄으면 폴링이 몇 초 뒤 다시 띄우지 않는다. 사용자가 다른 기능을 써서
+        //: Core 가 다시 응답하면(poll 성공) 자동 복구도 다시 켜진다.
+        if (this.recoverySuspended) { return false; }
         if (this.recovering) { return false; }
         if (now - this.lastRecoveryMs < 8000) { return false; }
         this.recovering = true;

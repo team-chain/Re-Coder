@@ -1,0 +1,9 @@
+{
+  "healthcheck": "앱 중단 후 반드시 실패하는 probe 검증 추가. 해당 네 조건을 모두 다시 실행했다.",
+  "secret_arn": "Secrets Manager ARN 식별자를 비밀번호로 오인하는 마스킹 및 JSON 감사 기록 손상 수정. 해당 네 조건을 모두 다시 실행했다.",
+  "source_sha256": {
+    "core/context_gate.py": "5ced1beb1916f1d7870bb53a4ba6b155b12c5133c173ea6cbf0980e686d2443d",
+    "core/grounded_repair/pipeline.py": "c8a2fc702b457edc5ce7c54465226441c74571b3f60d45580529dba1a562f4c0",
+    "scripts/repair_fixture_verifier.py": "9cc9e604b5cb7a4636484a1ca38f305610577d567888600f39d00b209d31de34"
+  }
+}

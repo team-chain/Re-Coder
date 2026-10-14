@@ -13,6 +13,8 @@ PreflightBlocker → RemediationProposal 변환. 12종 blocker code 각각에 �
 
 from __future__ import annotations
 
+import re
+
 import hashlib
 from pathlib import Path
 from typing import Callable, Optional
@@ -320,6 +322,39 @@ def _gen_app_entrypoint_not_found(
     )
 
 
+def _project_dockerfile(workspace: Path) -> tuple[str, str]:
+    """(내용, 설명) — 프로젝트 구조에서 확실히 만들 수 있는 Dockerfile. 모르면 ("", 이유).
+
+    실기기 2.0.13: 스택을 모르는(unknown) 프로젝트에 FastAPI Dockerfile 을 '자동 수정' 으로 제안해, 화면만 있는 Node 앱에
+    `COPY requirements.txt`·`COPY ./app` 이 들어가 Docker·ECS 배포가 모두 막혔다. 추측하지 않는다."""
+    try:
+        try:
+            import docker_kit
+        except ImportError:  # pragma: no cover
+            from core import docker_kit  # type: ignore
+        content = docker_kit.for_workspace(workspace)
+        if content:
+            return content, "화면·서버 폴더 구조를 읽어 만든 ReCoder 검증 Dockerfile(빌드 단계 분리, 운영 의존성만, 비루트 실행)"
+    except Exception:  # noqa: BLE001 - 구조를 못 읽으면 아래 판단으로
+        pass
+    return "", ("이 폴더의 구조로는 실행 방법을 확정할 수 없습니다(서버 진입 파일·package.json·requirements.txt 를 찾지 못함). "
+                "코드 생성 결과에 서버가 빠졌는지 확인하세요.")
+
+
+def _node_entry(workspace: Path) -> str:
+    """루트 package.json 이 가리키는 시작 파일(있을 때만) — start 의 `node X` 또는 main."""
+    import json as _json
+    try:
+        pkg = _json.loads((workspace / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    start = str((pkg.get("scripts") or {}).get("start") or "") if isinstance(pkg, dict) else ""
+    m = re.search(r"\bnode\s+(?:--[\w-]+(?:=\S+)?\s+)*([\w./-]+\.(?:js|mjs|cjs))\b", start)
+    entry = m.group(1) if m else str(pkg.get("main") or "")
+    entry = entry.lstrip("./")
+    return entry if entry and (workspace / entry).is_file() else ""
+
+
 def _gen_missing_dockerfile(
     blocker: PreflightBlocker | PreflightWarning,
     contract: ReleaseContract,
@@ -327,54 +362,42 @@ def _gen_missing_dockerfile(
 ) -> RemediationProposal:
     stack = contract.project.stack.value if hasattr(contract.project.stack, "value") else str(contract.project.stack)
     app_port = contract.runtime.app_port
-    if "fastapi" in stack:
+    content, why = _project_dockerfile(workspace)
+    if content:
+        template_id, variables = "dockerfile.verbatim", {"dockerfile": content}
+        auto = True
+    elif "fastapi" in stack and (workspace / "requirements.txt").is_file() and (workspace / "app" / "main.py").is_file():
         template_id = "dockerfile.fastapi"
-        variables = {
-            "python_version": "3.11",
-            "app_port": str(app_port),
-            "module_path": "app.main:app",
-        }
-    elif "flask" in stack:
+        variables = {"python_version": "3.11", "app_port": str(app_port), "module_path": "app.main:app"}
+        auto, why = True, f"FastAPI 스택({stack}) 템플릿"
+    elif "flask" in stack and (workspace / "requirements.txt").is_file():
         template_id = "dockerfile.flask"
-        variables = {
-            "python_version": "3.11",
-            "app_port": str(app_port),
-            "module_path": "app:app",
-        }
-    elif "express" in stack or "node" in stack:
+        variables = {"python_version": "3.11", "app_port": str(app_port), "module_path": "app:app"}
+        auto, why = True, f"Flask 스택({stack}) 템플릿"
+    elif ("express" in stack or "node" in stack) and _node_entry(workspace):
         template_id = "dockerfile.node"
-        variables = {
-            "node_version": "20",
-            "app_port": str(app_port),
-            "entry_file": "index.js",
-        }
+        variables = {"node_version": "20", "app_port": str(app_port), "entry_file": _node_entry(workspace)}
+        auto, why = True, f"Node 스택({stack}) 템플릿 — package.json 의 시작 파일 {variables['entry_file']}"
     else:
-        template_id = "dockerfile.fastapi"
-        variables = {
-            "python_version": "3.11",
-            "app_port": str(app_port),
-            "module_path": "app.main:app",
-        }
-    tmpl = get_file_template(template_id)
+        #: 모르는 스택에는 Dockerfile 을 지어내지 않는다 — 수동 안내만.
+        template_id, variables, auto = "", {}, False
+    tmpl = get_file_template(template_id) if template_id else None
     rendered = render(tmpl.base_content, variables) if tmpl else ""
     preview = RemediationPreviewFile(target_path="Dockerfile", content=rendered).model_dump()
     return _build_proposal(
         blocker_code=PreflightCheckCode.MISSING_DOCKERFILE,
         contract=contract,
-        summary=f"Dockerfile 생성 (스택: {stack})",
-        rationale=(
-            f"recoder.yml 스택 '{stack}' 에 맞는 결정론적 Dockerfile 템플릿을 적용합니다. "
-            f"FROM 이미지 태그 고정, EXPOSE {app_port}, non-root 권장."
-        ),
+        summary=f"Dockerfile 생성 ({why.split('(')[0] if auto else '자동 생성 불가'})",
+        rationale=why,
         target_type=RemediationTargetType.DOCKER_RUNTIME,
         target_path="Dockerfile",
         apply_method=RemediationApplyMethod.FILE_TEMPLATE,
-        template_id=template_id,
+        template_id=template_id or None,
         template_variables=variables,
         preview_type=RemediationPreviewType.FILE_CONTENT,
         preview=preview,
-        auto_apply_available=True,
-        confidence=0.9,
+        auto_apply_available=auto,
+        confidence=0.9 if auto else 0.0,
         risk_level=RiskLevel.MEDIUM,
         approval_level=ApprovalLevel.CONFIRM,
         rollback_hint="생성된 Dockerfile 삭제 또는 git checkout.",

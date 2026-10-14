@@ -17,10 +17,10 @@ jobs:
 
     steps:
       - name: 소스 체크아웃
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Python 3.11 준비
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
@@ -63,10 +63,10 @@ jobs:
 
     steps:
       - name: 소스 체크아웃
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Python 3.11 준비
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
@@ -96,12 +96,12 @@ jobs:
 
     steps:
       - name: 소스 체크아웃
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Node 20 준비
-        uses: actions/setup-node@v4
+      - name: Node 22 준비
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: extension/package-lock.json
 
@@ -111,7 +111,13 @@ jobs:
 
       - name: 웹뷰 렌더 테스트
         working-directory: extension
-        run: npm run test:webview
+        run: npm test
+
+      - name: 프로덕션 빌드와 VSIX 구성 검사
+        working-directory: extension
+        run: |
+          npm run build
+          npm run verify:package
 
   # ── Watchdog 감시 로직 ─────────────────────────────────────────────────
   # 왜 필요한가: 이상 판정은 **틀려도 예외가 안 난다.** 너무 민감하면 멀쩡한
@@ -124,10 +130,10 @@ jobs:
 
     steps:
       - name: 소스 체크아웃
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Python 3.11 준비
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
@@ -146,3 +152,70 @@ jobs:
           PYTHONPATH: .
         run: |
           pytest tests/ -q
+
+  discord:
+    name: Discord 로그인·프로젝트 연결
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            discord-bot/requirements.txt
+            discord-bot/requirements-dev.txt
+      - name: 의존성 설치
+        run: python -m pip install -r discord-bot/requirements-dev.txt
+      - name: Discord API 대역 및 실제 HTTP/WebSocket 검증
+        working-directory: discord-bot
+        env:
+          AWS_EC2_METADATA_DISABLED: 'true'
+          AWS_DEFAULT_REGION: us-east-1
+        run: python -m pytest tests/ -q
+
+  commerce:
+    name: 쇼핑몰 주문·보안 통합 검증
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: pip install httpx
+      - name: 새 DB와 모의 결제 서버에서 실행
+        run: docker compose -f benchmarks/commerce/compose.yml -p recoder-commerce-check up --build -d --wait
+      - name: 가격·권한·재고 경쟁·웹훅 재시도 검증
+        env:
+          SHOP_ALLOW_DISPOSABLE_TESTS: '1'
+        run: python benchmarks/commerce/acceptance.py
+      - name: 검증 자원 정리
+        if: always()
+        run: docker compose -f benchmarks/commerce/compose.yml -p recoder-commerce-check down -v
+
+  dependency-audit:
+    name: 배포 의존성 보안 검사
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: npm 잠금 파일 검사 (개발 의존성 포함)
+        run: |
+          npm audit --audit-level=moderate
+          npm audit --prefix extension --audit-level=moderate
+          npm audit --prefix core/starter_templates/commerce/backend --audit-level=moderate
+          npm audit --prefix core/starter_templates/commerce/frontend --audit-level=moderate
+      - name: 플랫폼별 Python 배포 잠금 파일 검사
+        run: |
+          python -m pip install --upgrade 'pip>=26.2' pip-audit
+          for lock in core/requirements-release-*.txt; do
+            python -m pip_audit --no-deps --disable-pip -r "$lock"
+          done

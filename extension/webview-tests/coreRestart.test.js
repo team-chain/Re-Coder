@@ -17,7 +17,7 @@ function loadManager(overrides = {}) {
   const vscode = {
     ExtensionMode: { Production: 1, Development: 2, Test: 3 },
     window: { showInformationMessage() {} },
-    workspace: { workspaceFolders: [] },
+    workspace: { workspaceFolders: [], getConfiguration: () => ({ get: (_key, fallback) => fallback }) },
   };
   vm.runInNewContext(fs.readFileSync(compiled, 'utf8'), {
     module: output, exports: output.exports,
@@ -256,4 +256,17 @@ test('Restart Core command uses explicit restart and only signals success after 
   assert.ok(block.indexOf('await coreManager.restart()') < block.indexOf("'core.restarted'"));
   assert.match(block, /showErrorMessage/);
   assert.match(block, /'core.error'/);
+});
+
+test('owner shutdown keeps runtime.json while the Core process it names is still alive', async t => {
+  //: 실기기 1.1.15: 종료 요청이 도착하지 못했는데 창이 runtime.json 만 지워서, 살아남은 Core 에
+  //: 새 창이 붙지 못하고 "연결 중"에 멈췄다. 살아 있는 Core 의 실행 정보는 지우지 않는다.
+  const { manager, before } = await isolatedCore(t);
+  const bystander = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
+  t.after(() => { try { bystander.kill('SIGKILL'); } catch { /* gone */ } });
+  manager.coreProcess = bystander;           // 이 창이 띄운 프로세스(부트로더)만 끝나고 Core 는 남은 상황
+  await manager.shutdown(true);
+  const runtime = await manager.readRuntime();
+  assert.ok(runtime, 'runtime.json must survive while its Core is alive');
+  assert.equal(runtime.pid, before.pid);
 });

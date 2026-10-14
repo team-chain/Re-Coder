@@ -1,0 +1,5 @@
+{
+  "containerPort": 8080,
+  "path": "/health",
+  "startPeriod": 15
+}

@@ -98,7 +98,8 @@ test('identical relative filenames in different workspaces have separate preview
 
 test('spaces, Korean, hash and question marks in filenames remain intact', async () => {
   await withEditor(async ({ dir, diff, opened }) => {
-    const file = '한글 test #1?.js';
+    // Windows forbids '?' in file names; retain other URI-sensitive characters there.
+    const file = process.platform === 'win32' ? '한글 test #1%20.js' : '한글 test #1?.js';
     fs.writeFileSync(path.join(dir, file), 'original');
     await diff(file, 'new contents');
     assert.equal(opened[0].after, 'new contents');

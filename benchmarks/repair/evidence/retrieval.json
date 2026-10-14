@@ -1,0 +1,49 @@
+{
+  "model": "intfloat/multilingual-e5-small",
+  "corpus_version": "58afe1ee755db88d0f3f8190218866449928c65921e3190609fb40ccea0a17b0",
+  "passages": 158,
+  "cases": [
+    {
+      "query": "컨테이너가 켜지자마자 죽어요",
+      "results": [
+        "ecs-stopped",
+        "vite-migration:4",
+        "ecs-role-archive:7"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true
+    },
+    {
+      "query": "설치하려는 패키지 버전이 없다고 나와요",
+      "results": [
+        "npm-dependencies",
+        "vite-migration:4",
+        "npm-ci:1"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true
+    },
+    {
+      "query": "이미지를 가져올 권한이 없어요",
+      "results": [
+        "ecs-execution-role",
+        "ecs-role-archive:7",
+        "ecr-policies:1"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true
+    },
+    {
+      "query": "브라우저에서 환경변수 값이 보이지 않아요",
+      "results": [
+        "vite-env",
+        "ecs-role-archive:7",
+        "node-module-errors:1"
+      ],
+      "hit_at_1": true,
+      "hit_at_3": true
+    }
+  ],
+  "elapsed_seconds": 11.625602709013037,
+  "limitation": "Four development queries; no held-out quality claim."
+}

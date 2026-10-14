@@ -158,3 +158,25 @@ os._exit(0)
     publish(os.getpid())
     assert CoreSingleton.read_runtime().pid == os.getpid()
     CoreSingleton.release_lock(os.getpid())
+
+
+def test_stale_lock_with_reused_pid_is_taken_over(isolated):
+    #: 실기기(Windows): 남은 core.lock 의 PID 를 다른 프로그램이 재사용하면 새 Core 가 영원히
+    #: "이미 실행 중"으로 거부됐다. 락을 쓴 뒤에 시작된 프로세스는 주인이 아니다.
+    import datetime as dt
+    long_ago = (dt.datetime.utcnow() - dt.timedelta(days=3)).isoformat()
+    live_but_unrelated = os.getppid()        # 살아 있지만 락보다 늦게 시작한 것으로 보이게 한다
+    CoreSingleton.LOCK_FILE.write_text(json.dumps({'pid': live_but_unrelated, 'started_at': long_ago,
+                                                   'windows': [live_but_unrelated]}), encoding='utf-8')
+    if CoreSingleton._process_start_utc(live_but_unrelated) is None:
+        pytest.skip('process start time unavailable on this platform')
+    assert CoreSingleton.acquire_lock(os.getpid())
+    assert json.loads(CoreSingleton.LOCK_FILE.read_text())['pid'] == os.getpid()
+
+
+def test_live_owner_started_before_its_lock_keeps_the_lock(isolated):
+    import datetime as dt
+    owner = os.getppid()
+    CoreSingleton.LOCK_FILE.write_text(json.dumps({'pid': owner, 'started_at': dt.datetime.utcnow().isoformat(),
+                                                   'windows': [owner]}), encoding='utf-8')
+    assert not CoreSingleton.acquire_lock(os.getpid())

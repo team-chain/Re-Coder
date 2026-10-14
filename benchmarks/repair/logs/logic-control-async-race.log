@@ -1,0 +1,8 @@
+AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+code: 'ERR_ASSERTION',
+at [eval]:1:91 {
+generatedMessage: true,
+actual: 0,
+expected: 5,
+operator: 'strictEqual',
+diff: 'simple'

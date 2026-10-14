@@ -3,7 +3,7 @@
  * Error analysis, patch proposals, diff preview, and approval UI.
  */
 
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal, { RiskLevel } from "./ApprovalModal";
 import CodeAgent, { ExternalTurn } from "./CodeAgent";
@@ -100,97 +100,16 @@ const DiffPreview: React.FC<DiffPreviewProps> = ({ patch }) => {
   );
 };
 
-// ── Step Progress Bar ────────────────────────────────────────────────────────
-
-type BuildStep = 0 | 1 | 2 | 3;
-
-const STEPS = ["에러 수집", "코드 패치", "Dockerfile", "배포"];
-
-const StepBar: React.FC<{ current: BuildStep }> = ({ current }) => {
-  const green = "#22c55e";
-  const blue = "#3b82f6";
-  const gray = "#3f3f3f";
-
-  return (
-    <div style={{ padding: "10px 4px 14px", position: "relative" }}>
-      {/* Connector line */}
-      <div style={{
-        position: "absolute",
-        top: 20,
-        left: "12.5%",
-        right: "12.5%",
-        height: 2,
-        background: gray,
-        zIndex: 0,
-      }} />
-      {/* Filled portion */}
-      <div style={{
-        position: "absolute",
-        top: 20,
-        left: "12.5%",
-        width: `${(current / 3) * 75}%`,
-        height: 2,
-        background: blue,
-        zIndex: 1,
-        transition: "width 0.3s ease",
-      }} />
-      {/* Step circles + labels */}
-      <div style={{ display: "flex", justifyContent: "space-between", position: "relative", zIndex: 2 }}>
-        {STEPS.map((label, i) => {
-          const done = i < current;
-          const active = i === current;
-          return (
-            <div key={label} style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1 }}>
-              <div style={{
-                width: 18,
-                height: 18,
-                borderRadius: "50%",
-                border: `2px solid ${done ? green : active ? blue : gray}`,
-                background: done ? green : active ? "rgba(59,130,246,0.2)" : "var(--vscode-sideBar-background, #1e1e1e)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 9,
-                color: done ? "#fff" : active ? blue : "#555",
-                fontWeight: 700,
-                transition: "all 0.2s",
-              }}>
-                {done ? "✓" : i + 1}
-              </div>
-              <span style={{
-                fontSize: 9,
-                marginTop: 4,
-                color: done ? green : active ? "#ccc" : "#555",
-                fontWeight: active ? 600 : 400,
-                textAlign: "center",
-                whiteSpace: "nowrap",
-              }}>
-                {label}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
-
 // ── BuildMode ───────────────────────────────────────────────────────────────
 
 interface BuildModeProps {
   isActive: boolean;
   externalTurn?: ExternalTurn | null;
+  onOpenDevelopment?: () => void;
 }
 
-//: CodeAgent(설계 결정 → 코드 생성)는 **어느 레이아웃에서도 숨기지 않는다.**
-//:
-//: 예전에는 `showCodeAgent` 플래그가 있었고, 큰 작업 화면(Workspace)에서는
-//: 오른쪽 대화 패널이 그 역할을 대신한다는 전제로 false 를 넘겼다. 그런데
-//: 그 대화 패널은 /api/chat 만 호출해서 설계 결정 단계(/api/code/plan)를
-//: 타지 않는다. 결과적으로 Workspace 창에서는 **결정 카드가 뜨는 경로가
-//: 아예 사라졌고**, D5(항상 선택지)·D6(사람 승인)가 UI 에서 소실됐다.
-//: 그래서 플래그 자체를 제거한다 — 다시 끄고 싶어도 끌 스위치가 없다.
-export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn }) => {
+// Workspace delegates development to its shared conversation and result engine.
+export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn, onOpenDevelopment }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -198,14 +117,6 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn }) 
   const [error, setError] = useState<string | null>(null);
   const [showApproval, setShowApproval] = useState(false);
   const [approvalResult, setApprovalResult] = useState<"approved" | "rejected" | null>(null);
-
-
-  // Derive current step
-  const currentStep: BuildStep = proposal
-    ? approvalResult === "approved"
-      ? 3
-      : 1
-    : 0;
 
   // Listen for messages from extension host
   useMessage(useCallback((msg) => {
@@ -239,7 +150,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn }) 
   }, [postMessage]);
 
   const handleApprove = useCallback(() => {
-    if (!proposal) return;
+    if (!proposal?.patches.length) return;
     postMessage("build.patch.approve", { proposal_id: proposal.proposal_id });
   }, [proposal, postMessage]);
 
@@ -248,40 +159,6 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn }) 
     postMessage("build.patch.reject", { proposal_id: proposal.proposal_id });
     setShowApproval(false);
   }, [proposal, postMessage]);
-
-
-  // ── Styles ────────────────────────────────────────────────────────────────
-
-  const sectionHeader: React.CSSProperties = {
-    fontSize: 10,
-    fontWeight: 700,
-    textTransform: "uppercase",
-    letterSpacing: "0.06em",
-    color: "var(--vscode-descriptionForeground, #888)",
-    marginBottom: 6,
-    marginTop: 12,
-  };
-
-  const btnPrimary: React.CSSProperties = {
-    background: "var(--vscode-button-background, #0078d4)",
-    color: "var(--vscode-button-foreground, #fff)",
-    border: "none",
-    borderRadius: 4,
-    padding: "6px 12px",
-    fontSize: 12,
-    cursor: "pointer",
-    fontWeight: 600,
-  };
-
-  const btnSecondary: React.CSSProperties = {
-    background: "var(--vscode-button-secondaryBackground, #3a3a3a)",
-    color: "var(--vscode-button-secondaryForeground, #ccc)",
-    border: "none",
-    borderRadius: 4,
-    padding: "6px 12px",
-    fontSize: 12,
-    cursor: "pointer",
-  };
 
   if (!isActive) {
     return (
@@ -396,6 +273,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn }) 
             )}
           </div>
 
+          {!proposal.patches.length&&<p role="status">적용할 코드 변경이 없습니다.</p>}
           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "#666", marginBottom: 6 }}>
             Diff 미리보기 ({proposal.patches.length}개 파일)
           </div>
@@ -422,7 +300,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn }) 
             </>
           )}
 
-          {!approvalResult && (
+          {!approvalResult && proposal.patches.length > 0 && (
             <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
               <button
                 style={{ background: "#2a2a2a", color: "#ccc", border: "1px solid #3f3f3f", borderRadius: 5, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}
@@ -463,7 +341,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn }) 
         </div>
       )}
 
-      <CodeAgent isActive={isActive} externalTurn={externalTurn} />
+      {onOpenDevelopment ? <button onClick={onOpenDevelopment} style={{ marginTop: 16, padding: "8px 14px", cursor: "pointer", color: "var(--vscode-button-foreground, #fff)", background: "var(--vscode-button-background, #0e639c)", border: 0, borderRadius: 6 }}>코드 생성·수정에서 이어가기</button> : <CodeAgent isActive={isActive} externalTurn={externalTurn} />}
 
 
     </div>

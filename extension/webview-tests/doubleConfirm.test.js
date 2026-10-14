@@ -22,7 +22,12 @@ test('Level 3 은 체크(acknowledged) 없이는 승인이 닫혀 있다', () =>
 
 test('Level 3 화면에 체크박스와 "확인하지 못한 상태" 안내가 있다', () => {
   assert.match(MODAL, /level === 3 && \(/);
-  assert.match(MODAL, /type="checkbox"[\s\S]*?checked=\{acknowledged\}/);
+  assert.match(MODAL, /<Checkbox[\s\S]*?checked=\{acknowledged\}/);
+  const React = require('react'); const { renderToStaticMarkup } = require('react-dom/server');
+  const { ApprovalModal } = require('../out/webview-test/components/ApprovalModal');
+  const html = renderToStaticMarkup(React.createElement(ApprovalModal, { level: 3, title: 't', summary: 's', riskLevel: 'high', riskReasons: ['보안 검사 미검증'], onApprove() {}, onReject() {} }));
+  assert.match(html, /type="checkbox"[^>]*aria-label="위험 사유 확인"/);
+  assert.match(html, /<button[^>]*disabled=""[^>]*>승인<\/button>/);
   assert.match(MODAL, /검사가 통과된 것이 아니라 확인하지 못한 상태입니다/);
 });
 

@@ -49,8 +49,8 @@ const CHECK_ITEMS: CheckItem[] = [
   {
     key: "ai_ready",
     label: "AI Ready",
-    description: "LLM provider configured (AWS Bedrock or Gemini).",
-    activationGuide: "Set AWS credentials for Bedrock, or set GEMINI_API_KEY in your environment. Then reload.",
+    description: "AI 연결 — 본인 AWS(Bedrock), 게이트웨이, 또는 Claude·ChatGPT API 키.",
+    activationGuide: "AWS를 쓰지 않으면 아래에서 Claude 또는 ChatGPT API 키로 연결하세요. AWS를 쓰면 AWS 연결 화면에서 자격 증명을 등록합니다.",
     docLink: "https://github.com/recoder/docs/ai-setup",
     enabledModes: ["Build", "Ship", "Operate"],
   },
@@ -79,6 +79,9 @@ const CHECK_ITEMS: CheckItem[] = [
     enabledModes: ["Operate"],
   },
 ];
+
+const AI_PROVIDER_NAMES: Record<string, string> = { anthropic: "Claude API 키", openai: "ChatGPT(OpenAI) API 키", bedrock: "본인 AWS (Bedrock)", gateway: "게이트웨이", gemini: "Gemini" };
+const aiButton: React.CSSProperties = { background: "transparent", border: "1px solid var(--vscode-panel-border, #444)", color: "var(--vscode-textLink-foreground, #4af)", borderRadius: 3, padding: "2px 8px", fontSize: 10, cursor: "pointer" };
 
 //: 자동 실행 등급(가역·로컬·무비용) — 코어/확장이 직접 고쳐 본다. 나머지는 설정 화면.
 const AUTO_FIXABLE = new Set(["aws_deploy_ready", "ai_ready", "docker_ready", "core_ready"]);
@@ -302,6 +305,14 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
                       </button>
                     )}
                   </div>
+                  {item.key === "ai_ready" && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8, alignItems: "center" }}>
+                      {isReady && diagnostics.provider_type && <span style={{ fontSize: 10.5, color: "var(--vscode-descriptionForeground, #888)" }}>현재: {AI_PROVIDER_NAMES[diagnostics.provider_type] ?? diagnostics.provider_type}</span>}
+                      <button onClick={(e) => { e.stopPropagation(); postMessage("ai.connect", { provider: "anthropic" }); }} style={aiButton}>Claude API 키로 연결</button>
+                      <button onClick={(e) => { e.stopPropagation(); postMessage("ai.connect", { provider: "openai" }); }} style={aiButton}>ChatGPT API 키로 연결</button>
+                      <button onClick={(e) => { e.stopPropagation(); postMessage("ai.connect"); }} style={aiButton}>연결 방법 바꾸기</button>
+                    </div>
+                  )}
                   {heal[item.key] && (
                     <div style={{ marginTop: 6, fontSize: 10.5, lineHeight: 1.5, color: heal[item.key].failed ? "var(--vscode-editorWarning-foreground, #ff9800)" : "var(--vscode-testing-iconPassed, #4caf50)" }}>
                       {heal[item.key].message}

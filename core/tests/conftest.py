@@ -35,6 +35,13 @@ os.environ.setdefault(
 # 개발자의 진짜 장부에 번호를 적는다. 그러면 `build_adr_ops` 를 부르는
 # 테스트가 실행될 때마다 번호가 올라가고, 번호를 단언하는 테스트는
 # **몇 번째로 돌리느냐에 따라 결과가 달라진다.**
+# **동반 DB 상태(새 DB 세대·데모 여부·허용한 구조)도 개발자 홈에서 떼어 놓는다.**
+# 컨테이너 이름이 그 상태에 따라 shop-postgres-2 처럼 바뀌므로, 남은 상태가 결과를 바꾸면 안 된다.
+os.environ.setdefault(
+    "RECODER_LOCAL_SERVICES_DIR",
+    str(Path(tempfile.mkdtemp(prefix="recoder-test-services-"))),
+)
+
 os.environ.setdefault(
     "RECODER_ADR_STORE",
     str(Path(tempfile.mkdtemp(prefix="recoder-test-adr-")) / "adr_reservations.json"),
@@ -65,3 +72,47 @@ os.environ.setdefault("RECODER_INFRA_AI_CUSTOMIZE", "0")
 # 못 덮어쓰고, `aws_policy.role_from_env` 는 빈 문자열을 미설정으로 본다.
 for _role_var in ("ECS_EXECUTION_ROLE_ARN", "ECS_TASK_ROLE_ARN"):
     os.environ[_role_var] = ""
+
+
+import pytest as _pytest_guard
+
+
+@_pytest_guard.fixture(autouse=True)
+def _reset_aws_disconnect_guard():
+    """clear_aws 가 건 '해제 상태' 막음(환경변수)이 다음 테스트로 새지 않게 한다."""
+    yield
+    for key in ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"):
+        if "aws-disconnected-no-file" in os.environ.get(key, ""):
+            os.environ.pop(key, None)
+    if os.environ.get("AWS_EC2_METADATA_DISABLED") == "true":
+        os.environ.pop("AWS_EC2_METADATA_DISABLED", None)
+    mod = sys.modules.get("api.routes.aws")
+    if mod is not None and hasattr(mod, "_guard_saved"):
+        mod._guard_saved.clear()
+
+
+@_pytest_guard.fixture(autouse=True)
+def _isolate_project_scanner_profiles(tmp_path, monkeypatch):
+    """Scanner tests must not write profiles into the developer's real home."""
+    import project_scanner
+    monkeypatch.setattr(project_scanner, 'RECODER_HOME', tmp_path / 'recoder-profiles')
+
+
+@_pytest_guard.fixture(autouse=True)
+def _isolate_generation_checkpoints(tmp_path_factory, monkeypatch):
+    """대규모 생성 체크포인트가 개발자 홈(~/.recoder/generation)에 쌓이지 않게 한다.
+    테스트의 tmp_path(프로젝트 폴더 역할)와도 분리한다 — '생성은 파일을 쓰지 않는다' 검사가 있다."""
+    monkeypatch.setenv("RECODER_GENERATION_DIR", str(tmp_path_factory.mktemp("generation-jobs")))
+    #: 배포 설정값(자동 생성 키·입력 키)도 개발자 홈에 쓰지 않는다.
+    monkeypatch.setenv("RECODER_DEPLOY_SETTINGS_DIR", str(tmp_path_factory.mktemp("deploy-settings")))
+    #: ECS 배포용으로 만든 서명 키·DB 비밀번호도 마찬가지.
+    monkeypatch.setenv("RECODER_ECS_RUNTIME_DIR", str(tmp_path_factory.mktemp("ecs-runtime")))
+    #: 테스트는 가짜 라우터를 쓰므로 호출 속도 제한·재시도 대기를 끈다.
+    monkeypatch.setenv("RECODER_LLM_RPM", "0")
+
+
+@_pytest_guard.fixture(autouse=True)
+def _offline_npm_versions(monkeypatch):
+    """선언 안 된 패키지의 버전을 레지스트리에서 찾는 경로가 테스트 중 실제 네트워크로 나가지 않게 한다."""
+    import node_manifests
+    monkeypatch.setattr(node_manifests, "_registry_version", lambda name: None)

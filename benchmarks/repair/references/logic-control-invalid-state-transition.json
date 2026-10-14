@@ -1,0 +1,3 @@
+{
+  "app.cjs": "exports.can=(a,b)=>({pending:['paid','cancelled'],paid:['shipped','cancelled'],shipped:[],cancelled:[]}[a]||[]).includes(b);\n"
+}

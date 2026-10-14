@@ -1,0 +1,7 @@
+.orders-container { max-width:900px; margin:auto; }
+.orders-page .order-header, .orders-page .order-body, .orders-page .order-footer { display:flex; flex-wrap:wrap; justify-content:space-between; gap:16px; }
+.orders-page .order-body { margin:16px 0; }
+.orders-page .order-date { color:#536174; font-size:.9rem; }
+.orders-page .order-amount .amount { margin-left:12px; font-weight:700; }
+.orders-page .order-footer { justify-content:flex-end; }
+.orders-page .empty-state { text-align:center; padding:40px 16px; }

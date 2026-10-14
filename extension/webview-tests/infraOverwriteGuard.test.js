@@ -37,7 +37,8 @@ test('코어: 내용이 다른 파일이 있으면 overwrite 없이는 쓰지 �
 
 test('코어: 덮어쓸 때는 기존 파일을 백업으로 남긴다', () => {
   assert.match(CORE, /_OVERWRITE_BACKUP_SUFFIX = "\.recoder-prev"/);
-  assert.match(CORE, /backup\.write_text\(conflict\["existing_content"\]/, '백업을 쓰지 않는다');
+  //: 원래 인코딩(CP949·UTF-16 등) 그대로 보관하려고 바이트로 쓴다.
+  assert.match(CORE, /backup\.write_bytes\(original_bytes\)/, '백업을 쓰지 않는다');
   assert.match(CORE, /"backup_path": backup_path/, '어디에 백업했는지 응답에 없다');
 });
 

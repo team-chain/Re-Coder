@@ -23,7 +23,7 @@ const Module = require('node:module');
 
 const HERE = __dirname;
 const EXT = path.resolve(HERE, '..');
-const PORT = Number(process.env.HARNESS_PORT || 17894);
+let PORT = Number(process.env.HARNESS_PORT || 0);
 const TOKEN = 'harness-token-123';
 
 // ── 'vscode' 를 하네스 목으로 리다이렉트 (node_modules 오염 없이) ──
@@ -43,7 +43,9 @@ const fakeCoreManager = {
     getSessionToken: () => TOKEN, getPort: () => PORT,
     refreshToken: async () => true, ensureRunning: async () => true,
     onCoreRestart: () => ({ dispose() {} }),
+    coreInstanceKey: () => 'fixture', getStoredAwsConnection: async () => null, getAwsRoleArn: async () => '',
 };
+ApiClient.prototype.runDiagnostics = async () => ({ core_ready: 'ok', ai_ready: 'ok', docker_ready: 'ok', aws_deploy_ready: 'ok', ops_ready: 'ok', issues: [] });
 const fakePolling = { poll: async () => {}, start() {}, stop() {}, getLastHealth: () => null };
 
 class Memento {
@@ -103,6 +105,10 @@ step('3-A. 승인 → 워크스페이스 추가 시점에 재시작 인계 메�
     assert.ok(memoAtMutation, '워크스페이스 추가 시점에 인계 메모가 없다 — 재시작이 먼저 오면 요청 유실');
     assert.strictEqual(memoAtMutation.instruction, action.instruction);
     assert.ok(fs.existsSync(target), '대상 폴더 미생성');
+    assert.ok(memento.get('recoder.pendingChatAction'), '첫 폴더 추가 후 재시작 전 메모를 삭제하면 안 된다');
+    assert.ok(!last(captured, 'chat.actionAccepted'), '재시작할 이전 화면에서 개발을 시작하면 안 된다');
+    sp = new SidebarProvider(vscode.Uri.file(EXT), new ApiClient(fakeCoreManager), fakeCoreManager, fakePolling, undefined, memento);
+    await sp.handleMessage({type:'webview.ready',payload:{}},wv);
     const accepted = await waitFor(captured, 'chat.actionAccepted');
     assert.ok(accepted.payload.requestId, 'actionAccepted requestId 없음');
     assert.strictEqual(memento.get('recoder.pendingChatAction'), undefined, '정상 경로에서 메모 미삭제');
@@ -125,6 +131,9 @@ step('3-B. 재시작 후 새 프로바이더의 ready 가 요청을 이어받고
 step('4. code.plan → 실 코어에서 설계 결정 수신', async () => {
     acceptedPayload = last(captured, 'chat.actionAccepted').payload;
     await sp.handleMessage({ type: 'code.plan', payload: { requestId: 777, instruction: acceptedPayload.instruction, targetFolder: acceptedPayload.targetFolder, contextFiles: [] } }, wv);
+    //: 확장이 요청을 받았다는 단계 알림이 먼저 가야 웹뷰가 "요청을 받지 못함"으로 끊지 않는다.
+    const stages = captured.filter((x) => x.type === 'code.status' && x.payload.requestId === 777).map((x) => x.payload.stage);
+    assert.deepStrictEqual(stages.slice(0, 2), ['connecting', 'planning'], `plan 단계 알림: ${JSON.stringify(stages)}`);
     const m = last(captured, 'code.planResult') || last(captured, 'code.error');
     assert.ok(m, 'planResult/error 모두 없음');
     assert.strictEqual(m.type, 'code.planResult', `설계 결정 실패: ${JSON.stringify(m.payload).slice(0, 300)}`);
@@ -171,8 +180,14 @@ function waitHealthy(ms = 30000) {
 }
 
 (async () => {
-    const py = process.env.PYTHON || 'python3';
-    const core = spawn(py, [path.join(HERE, 'fixture-core.py')], { stdio: ['ignore', 'ignore', 'inherit'], env: { ...process.env, HARNESS_PORT: String(PORT) } });
+    if (!PORT) {
+        const socket = require('node:net').createServer();
+        await new Promise(r=>socket.listen(0,'127.0.0.1',r));
+        PORT=socket.address().port;
+        await new Promise(r=>socket.close(r));
+    }
+    const py = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+    const core = spawn(py, [path.join(HERE, 'fixture-core.py')], { windowsHide:true, stdio: ['ignore', 'ignore', 'inherit'], env: { ...process.env, HARNESS_PORT: String(PORT) } });
     let failed = 0;
     try {
         await waitHealthy();
@@ -184,8 +199,14 @@ function waitHealthy(ms = 30000) {
         console.log(`하네스 기동 실패: ${e.message}`);
         failed++;
     } finally {
-        core.kill('SIGKILL');
+        if (core.exitCode === null) {
+            await new Promise(resolve => {
+                core.once('exit', resolve);
+                core.kill();
+                setTimeout(resolve, 3000).unref();
+            });
+        }
     }
     console.log(failed === 0 ? '\n통합 하네스 전 구간 통과' : `\n실패 ${failed}건`);
-    process.exit(failed === 0 ? 0 : 1);
+    process.exitCode = failed === 0 ? 0 : 1;
 })();

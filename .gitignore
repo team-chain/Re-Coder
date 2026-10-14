@@ -2,6 +2,7 @@
 *.pyc
 *.pyo
 __pycache__/
+.pytest_cache/
 **/__pycache__/
 *.egg-info/
 .env
@@ -50,3 +51,11 @@ gateway/deploy-token.csv
 core/.recoder/
 extension/dist/
 extension/bin-dist/
+.canvas-qa/
+
+# Local repair model/configuration; never bundle downloaded model weights.
+core/grounded_repair/runtime.json
+benchmarks/repair/results/
+!benchmarks/repair/logs/
+!benchmarks/repair/logs/*.log
+core/.venv

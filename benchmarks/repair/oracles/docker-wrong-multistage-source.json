@@ -1,0 +1,3 @@
+{
+  "node": "require('node:assert').equal(require('node:fs').readFileSync('result.txt','utf8').trim(),'artifact')"
+}

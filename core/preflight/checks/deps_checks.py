@@ -76,7 +76,7 @@ def _analyze_package_json(workspace: Path) -> tuple[int, int, list[str]]:
     if not path.exists():
         return 0, 0, []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return 0, 0, []
     total = 0

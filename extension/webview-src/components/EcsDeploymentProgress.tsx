@@ -1,4 +1,5 @@
 import React from "react";
+import { DeliveryTrack } from "./DeliveryTrack";
 
 export interface EcsProgressStatus {
   warnings?: string[];
@@ -94,6 +95,15 @@ export function EcsDeploymentProgress({ state }: { state: EcsProgressState }) {
       {status && <>
         <div role="status" style={{ marginTop: 6, fontWeight: 600 }}>{status.stage === "idle" && !status.deployment_id ? "아직 ECS 배포 기록이 없습니다." : title}</div>
         {status.started_at && <div style={{ color: colors.pending }}>시작: {new Date(status.started_at).toLocaleString()}</div>}
+        {!!status.steps?.length && (status.running || status.stage === "done" || status.stage === "failed") && (() => {
+          const steps = status.steps!;
+          const failedStep = steps.findIndex(s => s.status === "failed");
+          const done = status.stage === "done" && failedStep < 0;
+          const index = done ? steps.length : failedStep >= 0 ? failedStep
+            : (i => i < 0 ? steps.length - 1 : i)(steps.findIndex(s => s.status === "running" || s.status === "pending"));
+          return <DeliveryTrack stages={steps.map(s => s.label)} index={index}
+            state={done ? "done" : failedStep >= 0 || status.stage === "failed" ? "failed" : "running"} destination="ECS" />;
+        })()}
         {!!status.steps?.length && <ol style={{ padding: 0, margin: "10px 0", listStyle: "none", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 5 }}>
           {status.steps.map((step, index) => <li key={step.key} data-step={step.key} data-status={step.status} aria-current={step.status === "running" ? "step" : undefined} style={{ color: colors[step.status], padding: "4px 7px", borderLeft: `2px solid ${colors[step.status]}` }}>
             {index + 1}. {step.label} <b style={{ marginLeft: 5 }}>{step.status === "pending" && !status.running && status.stage !== "idle" ? "미실행" : labels[step.status]}</b>

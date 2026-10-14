@@ -26,6 +26,7 @@ from typing import Callable, Optional
 from core.agents.preflight_agent import PreflightAgent
 from core.agents import ecs_build
 from core.agents.ecs_health import configure_health_check, python_http_health_check
+from core.agents import ecs_runtime
 from core.agents.ecs_progress import initialize_progress, advance_progress, finish_progress
 from core.sbom import sbom_generator
 from core import aws_infra, aws_policy
@@ -67,7 +68,12 @@ _AUTH_ERROR_CODES = frozenset({
 })
 
 # FileTemplate 경로
-_TEMPLATE_PATH = Path(__file__).parent.parent / "registry" / "file_templates" / "ecs-task-definition.json.template"
+try:
+    from resources import resource as _resource
+except ImportError:  # pragma: no cover
+    from core.resources import resource as _resource
+#: 실행 파일에서 core.agents.ecs_agent 로 불려도 번들의 템플릿을 찾는다(resources 참고)
+_TEMPLATE_PATH = _resource("registry", "file_templates", "ecs-task-definition.json.template")
 
 
 def _probe_http(
@@ -76,6 +82,7 @@ def _probe_http(
     attempts: int = 6,
     interval: float = 5.0,
     timeout: float = 5.0,
+    require_success: bool = False,
     sleep=None,
 ) -> tuple[bool, str]:
     """URL 에 실제로 접속되는지 확인한다. (성공 여부, 설명).
@@ -100,7 +107,7 @@ def _probe_http(
             # 열려 있다. 경로를 잘못 짚었을 뿐이다.
             # 그러나 **5xx 는 앱이 망가진 것**이다. 이걸 성공으로 세면
             # 500 만 뱉는 서비스를 "배포 성공"으로 보고하게 된다.
-            if 500 <= exc.code < 600:
+            if require_success or 500 <= exc.code < 600:
                 last = f"HTTP {exc.code} (서버 오류)"
                 if i < attempts - 1:
                     sleeper(interval)
@@ -119,9 +126,22 @@ class ECSAgent:
     LLM을 사용하지 않는 결정론적 배포 에이전트.
     """
 
+    @staticmethod
+    def _plan_runtime(request: ECSDeployRequest) -> "ecs_runtime.RuntimePlan":
+        """ECS 실행 설정 계획(값은 기록하지 않는다). 사용자가 준 일반 환경변수·비밀값 참조 이름은 그대로 둔다."""
+        return ecs_runtime.plan(
+            request.workspace_path,
+            key=ecs_runtime.store_key(request.region, request.cluster, request.service),
+            environment=request.environment or "",
+            provided=set(request.env_vars or {}) | set(request.secret_refs or {}),
+            container_port=request.container_port,
+        )
+
     def __init__(self, on_progress: Optional[Callable[[], None]] = None) -> None:
         self._preflight = PreflightAgent()
         self._on_progress = on_progress
+        #: 배포 요청별 ECS 실행 설정(값 포함) — 태스크 정의를 등록할 때 꺼내 쓰고 버린다. 기록·디스크에는 남기지 않는다.
+        self._runtime: dict[int, ecs_runtime.RuntimePlan] = {}
 
     def _save_progress(self) -> None:
         if self._on_progress:
@@ -154,6 +174,7 @@ class ECSAgent:
             "ec2": session.client("ec2"),
             "logs": session.client("logs"),
             "sts": session.client("sts"),
+            "elbv2": session.client("elbv2"),
         }
 
     async def deploy(
@@ -241,6 +262,30 @@ class ECSAgent:
             initialize_progress(record, request)
             self._advance_progress(record, "preflight")
             aws_policy.validate_region(request.region)
+            # Generated static clients have a fixed listen port. Reject a stale
+            # UI/default before any AWS resource is created or changed.
+            if request.workspace_path:
+                from pathlib import Path
+                from static_frontend import generated_static_runtime_port
+                static_port = generated_static_runtime_port(Path(request.workspace_path) / request.dockerfile)
+                if static_port is not None and static_port != request.container_port:
+                    raise InfraError(
+                        f"컨테이너 포트 {request.container_port}와 앱의 포트 {static_port}가 다릅니다.",
+                        remedy=f"배포 설정의 컨테이너 포트를 {static_port}로 수정하세요.",
+                    )
+            # 0-1. 앱이 ECS 에서 실제로 시작할 수 있는가 — DB·서명 키·결제 키. 비어 있는 값을 아무도 채울 수 없으면
+            #      AWS 자원을 하나도 만들기 전에 멈춘다(실기기 2.0.11: DATABASE_URL·JWT_SECRET 없이 배포 → 태스크가 계속 죽음).
+            if request.workspace_path:
+                runtime = await asyncio.get_running_loop().run_in_executor(None, self._plan_runtime, request)
+                if runtime.blocked:
+                    message, remedy = runtime.block_message()
+                    raise InfraError(message, remedy=remedy)
+                self._runtime[id(request)] = runtime
+                for i, note in enumerate(runtime.notes):
+                    record.provisioned[f"app_runtime_{i + 1}"] = note
+                if runtime.services and not request.assign_public_ip:
+                    record.provisioned["app_runtime_network"] = (
+                        "공인 IP 를 끈 배포입니다 — DB 이미지(ECR Public)를 받으려면 서브넷에 NAT 게이트웨이가 있어야 합니다.")
             clients = self._clients(request.region)
 
             # 1. Preflight
@@ -390,13 +435,17 @@ class ECSAgent:
                         state = (
                             "다만 되돌린 이전 버전도 아직 떠 있지 않습니다 — "
                             "그 버전에도 문제가 있을 수 있으니 요금이 걱정되면 "
-                            "배포 중지로 태스크 수를 0 으로 내리세요."
+                            "Deploy 캔버스 › 배포 상태의 '서비스 중지'로 태스크 수를 0 으로 내리세요."
                         )
                     record.error_remedy = (
                         f"{state} CloudWatch 로그 그룹 "
                         f"{self.log_group_name(request)} 에서 새 이미지가 왜 "
                         "기동하지 못했는지 확인한 뒤 다시 배포하세요."
                     )
+                    diagnosis = await self._diagnose_stopped(request, record, clients)
+                    if diagnosis:
+                        record.provisioned["diagnosis"] = "\n".join(diagnosis)
+                        record.error_detail = "\n".join(diagnosis)
                     return record
 
                 # Rollback proposal 생성 (Approval Level 3)
@@ -424,6 +473,10 @@ class ECSAgent:
                         f"{self.log_group_name(request)} 에서 컨테이너가 왜 "
                         "죽는지 확인하세요."
                     )
+                diagnosis = await self._diagnose_stopped(request, record, clients)
+                if diagnosis:
+                    record.provisioned["diagnosis"] = "\n".join(diagnosis)
+                    record.error_detail = "\n".join(diagnosis)
                 await self._halt_failed_deployment(request, record, clients)
                 return record
 
@@ -478,6 +531,10 @@ class ECSAgent:
             )
             self._warn_if_resources_may_be_running(request, record)
             return record
+        finally:
+            #: 실행 설정(비밀값 포함)은 이 배포에서만 쓴다 — 중간에 멈춘 배포가 남긴 것을 다른 배포가 집어 가지 않게
+            #: (검토 2.0.15: id() 는 재사용된다).
+            self._runtime.pop(id(request), None)
 
     # ------------------------------------------------------------------
     # 단계별 구현
@@ -541,6 +598,12 @@ class ECSAgent:
         `provision=False` 면 아무것도 만들지 않고, 요청에 담긴 서브넷·보안
         그룹만 쓴다. 이미 인프라를 손으로 관리하는 사용자를 위한 탈출구다.
         """
+        if req.target_group_arn and not req.security_group_ids:
+            raise InfraError(
+                "ALB 배포에는 앱 보안 그룹을 명시해야 합니다.",
+                remedy="ALB 보안 그룹에서 앱 포트로 들어오는 연결만 허용한 "
+                       "security_group_ids를 지정하세요. 공개 인바운드 그룹을 자동 생성하지 않습니다.",
+            )
         if not req.provision:
             if not req.subnet_ids or not req.security_group_ids:
                 raise InfraError(
@@ -559,6 +622,10 @@ class ECSAgent:
             loop = asyncio.get_running_loop()
 
             def _verify() -> None:
+                if req.target_group_arn:
+                    aws_infra.validate_target_group_network(
+                        clients["ec2"], clients["elbv2"], req.target_group_arn, req.subnet_ids
+                    )
                 aws_infra.require_cluster(clients["ecs"], req.cluster)
                 aws_infra.require_service(
                     clients["ecs"], cluster=req.cluster, service=req.service
@@ -595,6 +662,10 @@ class ECSAgent:
                 )
             else:
                 target = aws_infra.discover_default_network(clients["ec2"])
+            if req.target_group_arn:
+                aws_infra.validate_target_group_network(
+                    clients["ec2"], clients["elbv2"], req.target_group_arn, target.subnet_ids
+                )
             rec.provisioned["vpc"] = target.vpc_id
             rec.provisioned["subnets"] = ",".join(target.subnet_ids)
             # 라우팅을 확인하지 못했다는 사실을 **기록에 남긴다.** 값만
@@ -974,7 +1045,8 @@ class ECSAgent:
 
         exec_arn, task_arn = self._resolve_role_arns(req, clients)
         task_def = self._render_task_definition(
-            req, image=image, execution_role_arn=exec_arn, task_role_arn=task_arn
+            req, image=image, execution_role_arn=exec_arn, task_role_arn=task_arn,
+            runtime=self._runtime.pop(id(req), None),
         )
 
         try:
@@ -1025,6 +1097,10 @@ class ECSAgent:
                 subnet_ids=network.subnet_ids,
                 security_group_ids=req.security_group_ids,
                 desired_count=req.desired_count,
+                assign_public_ip=req.assign_public_ip,
+                target_group_arn=req.target_group_arn,
+                container_name=req.container_name,
+                container_port=req.container_port,
             )
 
         result = await loop.run_in_executor(None, _work)
@@ -1056,6 +1132,8 @@ class ECSAgent:
         loop = asyncio.get_running_loop()
 
         def _work() -> str:
+            if req.cloudfront_domain:
+                return "https://" + req.cloudfront_domain
             return aws_infra.wait_for_public_url(
                 clients["ecs"],
                 clients["ec2"],
@@ -1063,6 +1141,7 @@ class ECSAgent:
                 service=req.service,
                 port=req.container_port,
                 timeout=req.url_wait_timeout,
+                task_definition_arn=rec.task_definition_arn or "",
             )
 
         try:
@@ -1074,10 +1153,22 @@ class ECSAgent:
             reachable, detail = await loop.run_in_executor(
                 None,
                 lambda: _probe_http(
-                    (rec.service_url or "") + req.health_check_path
+                    (rec.service_url or "") + req.health_check_path, require_success=True
                 ),
             )
+            if not reachable and not req.cloudfront_domain:
+                # 그 사이 태스크가 교체됐을 수 있다(앱이 기동 중 죽으면 ECS 가 새 태스크를 띄우고 IP 가 바뀐다) — 다시 찾아 한 번 더.
+                fresh = await loop.run_in_executor(None, lambda: aws_infra._probe_public_ip(
+                    clients["ecs"], clients["ec2"], cluster=req.cluster, service=req.service,
+                    task_definition_arn=rec.task_definition_arn or "").ip)
+                if fresh:
+                    url = f"http://{fresh}" if req.container_port in (80, 443) else f"http://{fresh}:{req.container_port}"
+                    if url != rec.service_url:
+                        rec.service_url = url
+                        reachable, detail = await loop.run_in_executor(
+                            None, lambda: _probe_http(url + req.health_check_path, require_success=True))
             if not reachable:
+                diagnosis = await self._diagnose_stopped(req, rec, clients)
                 # 상태는 SUCCEEDED 로 둔다 — ECS 기준으로 배포는 실제로
                 # 끝났고 태스크는 healthy 다. FAILED 로 바꾸면 느리게 뜨는
                 # 정상 앱을 실패로 몰고 태스크까지 내리게 된다.
@@ -1108,6 +1199,16 @@ class ECSAgent:
                     f"계속 안 되면 CloudWatch 로그 그룹 "
                     f"{self.log_group_name(req)} 를 확인하세요."
                 )
+                if diagnosis:
+                    #: 앱이 시작하다 죽고 있다 — "잠시 뒤 다시" 가 아니라 원인을 먼저 보여 준다.
+                    rec.provisioned["diagnosis"] = "\n".join(diagnosis)
+                    rec.error_message = (
+                        f"주소({rec.service_url})가 응답하지 않습니다 — 앱 컨테이너가 시작하다 멈추고 있습니다."
+                    )
+                    rec.error_detail = "\n".join(diagnosis)
+                    rec.error_remedy = (
+                        "아래 앱 로그의 오류를 고친 뒤 다시 배포하세요. 같은 오류가 Local Docker 에서도 나는지 먼저 확인하면 빠릅니다."
+                    )
             else:
                 logger.info("접속 확인 완료: %s", rec.service_url)
         except InfraError as exc:
@@ -1121,6 +1222,22 @@ class ECSAgent:
             rec.error_message = (
                 f"배포는 성공했지만 접속 주소를 확인하지 못했습니다: {exc.message}"
             )
+
+    async def _diagnose_stopped(
+        self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict
+    ) -> list[str]:
+        """멈춘 태스크의 이유·종료 코드·앱 로그 끝부분. 어떤 실패도 배포 결과를 바꾸지 않는다."""
+        if "logs" not in clients or "ecs" not in clients:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(None, lambda: aws_infra.diagnose_stopped_tasks(
+                clients["ecs"], clients["logs"], cluster=req.cluster, service=req.service,
+                log_group=self.log_group_name(req), app_container=req.container_name,
+                task_definition_arn=rec.task_definition_arn or ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("멈춘 태스크 진단 생략: %s", exc)
+            return []
 
     async def _step_poll_deployment(
         self, req: ECSDeployRequest, rec: ECSDeployRecord
@@ -1367,8 +1484,8 @@ class ECSAgent:
             # 경우에만 한다. 그때는 내려도 잃을 게 없다.
             rec.provisioned["cost_warning"] = (
                 f"태스크 {rec.running_task_count}개가 아직 실행 중입니다 — "
-                "요금이 계속 발생합니다. 사이드바의 배포 중지"
-                "(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 내리세요."
+                "요금이 계속 발생합니다. Deploy 캔버스 › 배포 상태의 "
+                "'서비스 중지'(배포 중지)로 태스크 수를 0 으로 내리세요."
                 + ("" if req.health_check_command else
                    " 컨테이너 헬스체크가 없어 앱이 죽어도 ECS 가 알아채지 "
                    "못합니다 — python_http_health_check() 를 쓰면 이런 상태를 "
@@ -1451,7 +1568,7 @@ class ECSAgent:
                 rec.provisioned["cost_warning"] = (
                     "취소했지만 이 배포는 이미 기존 서비스의 롤아웃을 "
                     "시작한 뒤였고, 되돌릴 이전 태스크 정의를 찾지 못했습니다. "
-                    "배포 중지(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 "
+                    "Deploy 캔버스 › 배포 상태의 '서비스 중지'(배포 중지)로 태스크 수를 0 으로 "
                     "내리거나 AWS 콘솔에서 서비스를 직접 되돌리세요."
                 )
             return
@@ -1486,7 +1603,7 @@ class ECSAgent:
         rec.provisioned["cost_warning"] = (
             f"서비스 '{req.service}' 는 이미 만들어졌고 태스크가 떠 있을 수 "
             "있습니다 — 배포는 실패했지만 요금은 계속 발생합니다. "
-            "배포 중지(POST /api/deploy/ecs/stop)로 태스크 수를 0 으로 "
+            "Deploy 캔버스 › 배포 상태의 '서비스 중지'(배포 중지)로 태스크 수를 0 으로 "
             "내리거나, 원인을 고친 뒤 다시 배포하세요."
         )
 
@@ -1521,6 +1638,7 @@ class ECSAgent:
         image: str,
         execution_role_arn: str,
         task_role_arn: str,
+        runtime: Optional["ecs_runtime.RuntimePlan"] = None,
     ) -> dict:
         """FileTemplate 에서 Task Definition dict 생성.
 
@@ -1539,7 +1657,10 @@ class ECSAgent:
                     remedy="AWS 자격증명이 연결돼 있는지 확인하세요.",
                 )
 
-        env_vars_list = [{"name": k, "value": v} for k, v in req.env_vars.items()]
+        #: 앱이 process.env.PORT / os.environ["PORT"] 로 포트를 정하면 ECS 가 여는 포트와 맞춰야 한다.
+        #: 로컬 Docker 배포는 이미 PORT 를 넘긴다 — ECS 만 빠져 있었다. 사용자가 정한 값이 우선.
+        env_vars = {"PORT": str(req.container_port), **dict(req.env_vars or {})}
+        env_vars_list = [{"name": k, "value": v} for k, v in env_vars.items()]
         template_str = _TEMPLATE_PATH.read_text(encoding="utf-8")
         replacements = {
             "{{task_definition_family}}": req.task_definition_family,
@@ -1582,6 +1703,10 @@ class ECSAgent:
         # 컨테이너가 로그를 못 남기고 태스크 시작 자체가 실패한다.
         # 파생값을 원본과 같은 곳에서 계산해 어긋날 여지를 없앤다.
         for container in rendered.get("containerDefinitions", []):
+            if container.get("name") == req.container_name and req.secret_refs:
+                container["secrets"] = [
+                    {"name": name, "valueFrom": arn} for name, arn in req.secret_refs.items()
+                ]
             options = container.get("logConfiguration", {}).get("options")
             if isinstance(options, dict):
                 options["awslogs-group"] = self.log_group_name(req)
@@ -1600,4 +1725,5 @@ class ECSAgent:
                     "retries": 3,
                     "startPeriod": 60,
                 }
-        return rendered
+        # 앱이 시작할 때 요구하는 DB·서명 키·모의 결제(staging) — `ecs_runtime.plan` 이 배포 시작 때 정했다.
+        return ecs_runtime.apply(rendered, req.container_name, runtime, image)

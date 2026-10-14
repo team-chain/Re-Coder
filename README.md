@@ -150,6 +150,8 @@ python scripts/golden_path_smoke.py --live
 - [SETUP.md](SETUP.md) — 설치·실행 가이드
 - [docs/ReCoder_구현설계서_v1.md](docs/ReCoder_구현설계서_v1.md) — 구현 설계서
 - [docs/API_v10.md](docs/API_v10.md) — API 레퍼런스
+- [생성·배포·보안 검증 범위](docs/production-readiness.md) — 검증된 쇼핑몰 기반, 실제 Docker·HTTPS 검증과 남은 제한
+- [쇼핑몰 통합 검사](benchmarks/commerce/README.md) — 독립 DB와 모의 결제로 주문·재고·권한 검증 재현
 
 ---
 

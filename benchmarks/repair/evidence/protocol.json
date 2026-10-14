@@ -1,0 +1,28 @@
+{
+  "captured_at": "2026-10-02T17:29:05.694853+00:00",
+  "head": "66887b2109b3e47ef3e248985b5f5bf777da30f6",
+  "source_sha256": {
+    "core/grounded_repair/knowledge.py": "d2f9e9d084485834b415fb9156647f7181972739abdcebf62df888a5c6688518",
+    "core/grounded_repair/logs.py": "0ffc6ab2a6543d3b06dd86db2e56f733ff8bd1feaed44b812b436339de6b3e21",
+    "core/grounded_repair/pipeline.py": "c8f85dcdd106ffecd284f8e70d2ac3cb2148f5863122f12e76af08b51b7f244f",
+    "core/grounded_repair/workspace.py": "93dd8cd72a0cb1a68de9e51a83ed7fa73b9645a221ced96d6ea89e032b6aece7",
+    "core/grounded_repair/config.py": "1fe7f489e09130d1cabd715420a0e4b105485e9006d55377372f0d7363e0bb45",
+    "core/grounded_repair/budget.py": "31bac22e2f48fc1baf3eb879e21a0d60d393f014ee406741e17d2796453606ae",
+    "core/grounded_repair/benchmark.py": "279c445d9e312e349e7d3aaad1214f13adbfa17ba47e23fbc89602abca9391c6",
+    "core/grounded_repair/store.py": "d502982f2f12dd6605d7ed16266400473a64874d0ddb9275e4befe4550db3384",
+    "scripts/repair_fixture_verifier.py": "78fafc442802a8bc9dcf1e93ffb747998911beaf031f4a8f8c3fed07b354532a",
+    "scripts/benchmark_repair.py": "9970500e592c2e19e926c7c2686ec4bd197c7bdc9f42a6bc9d3dcb6182c0e007",
+    "core/llm/provider_router.py": "890fab6439ee80d1de009bc193011a07d07899304a5caf158876bf33eecc729b",
+    "core/llm/bedrock_provider.py": "89b6ccb2af61265d46df187d1c0ed24308e642eddf285f5a64fa6d163970224b"
+  },
+  "fixture_manifests_sha256": "7cb216a37bb370c57db8477151cc5553f57d1607f849baec60ac681a3f715c41",
+  "python": "3.14.3",
+  "os": "macOS-15.7.4-arm64-arm-64bit-Mach-O",
+  "seed": 42,
+  "jobs": 3,
+  "runs": 144,
+  "replicates_per_case_condition": 1,
+  "cache": false,
+  "maximum_generations": 2,
+  "protocol": "All conditions use identical compressed logs, contexts, readiness and independent verifier. 36 development fixtures (6 logic controls); no holdout. Early 144-run pilot and 144-run intermediate retained."
+}

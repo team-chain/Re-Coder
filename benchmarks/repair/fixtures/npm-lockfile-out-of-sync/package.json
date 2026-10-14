@@ -1,0 +1,11 @@
+{
+  "name": "repair-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node app.cjs"
+  },
+  "dependencies": {
+    "is-number": "6.0.0"
+  }
+}

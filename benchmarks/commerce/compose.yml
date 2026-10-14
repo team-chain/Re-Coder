@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: recoder-commerce-db
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: local-disposable-only
+      POSTGRES_DB: shop
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  mock:
+    image: python:3.12-alpine
+    container_name: recoder-commerce-mock
+    command: ["python", "/validation/mock_payment.py"]
+    environment:
+      MOCK_BIND: 0.0.0.0
+      MOCK_PORT: "19090"
+    volumes:
+      - ./mock_payment.py:/validation/mock_payment.py:ro
+    ports:
+      - "127.0.0.1:19093:19090"
+  app:
+    build: ../../core/starter_templates/commerce
+    container_name: recoder-commerce-app
+    command: ["sh", "-c", "node backend/init-db.js && exec node backend/src/server.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+      mock:
+        condition: service_started
+    environment:
+      NODE_ENV: test
+      SEED_DEMO: "true"
+      PAYMENT_MODE: mock
+      DATABASE_URL: postgres://shop:local-disposable-only@db:5432/shop
+      JWT_SECRET: local-disposable-validation-secret-at-least-32
+      STRIPE_SECRET_KEY: sk_test_mock_validation_only
+      STRIPE_WEBHOOK_SECRET: whsec_mock
+      STRIPE_MOCK_HOST: mock
+      STRIPE_MOCK_PORT: "19090"
+    ports:
+      - "127.0.0.1:14310:3001"

@@ -1,6 +1,7 @@
 """History reads persisted facts; approving a stale record cannot replace a service."""
 import asyncio
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,7 +81,8 @@ def test_persistence_restores_rollback_contract_and_private_permissions():
     deploy._save_records()
     loaded = store.load_records()[record.deployment_id]
     assert loaded.model_dump() == record.model_dump()
-    assert store.store_path().stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":  # Windows exposes DOS flags here, not POSIX permissions.
+        assert store.store_path().stat().st_mode & 0o777 == 0o600
     assert not list(store.store_path().parent.glob(".local-deployments-*"))
     deploy._deployment_records = store.load_records()
     assert deploy._previous_image_for("sample", "app:v3")[0] == "app:recoder-rb-new"

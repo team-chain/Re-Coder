@@ -1,0 +1,16 @@
+npm error code ETARGET
+ERROR: process "/bin/sh -c npm install --ignore-scripts --no-audit --no-fund" did not complete successfully: exit code: 1
+#8 ERROR: process "/bin/sh -c npm install --ignore-scripts --no-audit --no-fund" did not complete successfully: exit code: 1
+0.474 npm error code ETARGET
+ERROR: failed to build: failed to solve: process "/bin/sh -c npm install --ignore-scripts --no-audit --no-fund" did not complete successfully: exit code: 1
+DONE 0.0s
+[4/5] RUN npm install --ignore-scripts --no-audit --no-fund
+npm error notarget No matching version found for is-number@99.0.0.
+npm error notarget In most cases you or one of your dependencies are requesting
+npm error notarget a package version that doesn't exist.
+npm error A complete log of this run can be found in: /root/.npm/_logs/2026-10-02T17_05_38_394Z-debug-0.log
+> [4/5] RUN npm install --ignore-scripts --no-audit --no-fund:
+#0 building with "desktop-linux" instance using docker driver
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 260B done
+#1 DONE 0.0s

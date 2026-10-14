@@ -35,7 +35,7 @@ const workspace = {
         const rel = nodePath.relative(root.uri.fsPath, p);
         return rel.startsWith('..') ? p : rel;
     },
-    getConfiguration: () => ({ get: () => undefined, update: async () => {} }),
+    getConfiguration: () => ({ get: (_key, fallback) => fallback, update: async () => {} }),
     createFileSystemWatcher: _watcher,
     onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
     onDidChangeConfiguration: () => ({ dispose() {} }),
@@ -61,6 +61,7 @@ const window = {
     withProgress: async (_o, task) => task({ report() {} }, { isCancellationRequested: false }),
     createWebviewPanel: () => { throw new Error('harness: createWebviewPanel unused'); },
     registerWebviewViewProvider: () => ({ dispose() {} }),
+    registerWebviewPanelSerializer: () => ({ dispose() {} }),
     onDidChangeActiveTextEditor: () => ({ dispose() {} }),
     activeColorTheme: { kind: 2 }, tabGroups: { all: [], close: async () => true },
 };

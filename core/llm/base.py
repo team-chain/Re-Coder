@@ -52,6 +52,9 @@ class LLMRequest:
     max_tokens:  int             = 4096
     temperature: float           = 0.0
     metadata:    dict            = field(default_factory=dict)
+    #: 응답을 **글자 그대로** 받는다(JSON 추출·잘림 오류 없음). 길이 한도에서 끊겨도 받은 만큼 돌려주고,
+    #: 끊겼는지는 response.metadata["truncated"](알 수 있을 때)로 알린다 — 긴 파일을 이어 쓰는 생성 엔진용.
+    raw_text:    bool            = False
 
 
 @dataclass

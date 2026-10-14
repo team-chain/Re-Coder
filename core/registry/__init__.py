@@ -29,7 +29,9 @@ from schemas import ActionType, ApprovalLevel, CommandTemplate, FileTemplate, Fi
 # Paths
 # ---------------------------------------------------------------------------
 
-_REGISTRY_DIR = Path(__file__).parent
+from resources import resource as _resource  # noqa: E402 — core 경로를 위에서 넣었다
+#: 실행 파일에서 core.registry 로 불려도 번들의 템플릿을 찾는다(resources 참고)
+_REGISTRY_DIR = _resource("registry")
 _COMMAND_TEMPLATES_FILE = _REGISTRY_DIR / "command_templates.json"
 _FILE_TEMPLATES_DIR = _REGISTRY_DIR / "file_templates"
 

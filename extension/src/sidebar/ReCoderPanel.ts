@@ -22,13 +22,7 @@ export class ReCoderPanel {
         webview.html = this._sidebarProvider.getWorkspacePanelHtml(webview);
         this._sidebarProvider.attachWorkspacePanel(webview);
 
-        // 큰 ReCoder 작업 화면을 단독 창처럼 사용한다. VS Code의 Sidebar는
-        // 하나뿐이므로 ReCoder만 숨길 수는 없고, 설정이 켜져 있을 때 전체를 닫는다.
-        if (vscode.workspace.getConfiguration('recoder.workspace').get<boolean>('hideSidebar', true)) {
-            setTimeout(() => {
-                void vscode.commands.executeCommand('workbench.action.closeSidebar');
-            }, 0);
-        }
+        this._hideSidebar();
 
         this._panel.onDidDispose(() => {
             this._sidebarProvider.detachWorkspacePanel(webview);
@@ -36,10 +30,54 @@ export class ReCoderPanel {
         });
     }
 
+    private _hideSidebar(): void {
+        // Also close it on re-entry, so the next Activity Bar click reveals the view again
+        // instead of merely toggling an already visible sidebar closed.
+        if (vscode.workspace.getConfiguration('recoder.workspace').get<boolean>('hideSidebar', true)) {
+            setTimeout(() => {
+                void vscode.commands.executeCommand('workbench.action.closeSidebar');
+            }, 0);
+        }
+    }
+
+    /** 패널을 만들 때와 되살릴 때 같은 옵션을 쓴다. */
+    static webviewOptions(extensionUri: vscode.Uri): vscode.WebviewOptions {
+        return {
+            enableScripts: true,
+            localResourceRoots: [
+                vscode.Uri.joinPath(extensionUri, 'media'),
+                vscode.Uri.joinPath(extensionUri, 'out'),
+            ],
+        };
+    }
+
+    /**
+     * 확장이 다시 시작된 뒤 VS Code 가 남겨 둔 ReCoder 탭을 새 확장에 다시 붙인다.
+     *
+     * 되살리기(serializer)가 없으면 확장 재시작(VSIX 설치 후 "확장 다시 시작", 빈 창에
+     * 폴더 추가 등) 뒤에도 옛 탭이 화면에 그대로 남는데, 그 탭의 메시지를 받을 확장이
+     * 없다. 사용자가 그 탭에서 요청을 보내면 30초 뒤 "확장이 요청을 받지 못했습니다"가
+     * 떴다. 이제는 그 탭을 새 확장에 연결하고 화면을 새로 그린다.
+     */
+    static revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, sidebarProvider: SidebarProvider, state?: unknown): ReCoderPanel {
+        if (ReCoderPanel._current) {
+            //: 새 확장이 이미 ReCoder 창을 열었다 — 되살린 탭은 중복이라 닫는다.
+            panel.dispose();
+            ReCoderPanel._current._panel.reveal(undefined, true);
+            return ReCoderPanel._current;
+        }
+        panel.webview.options = ReCoderPanel.webviewOptions(extensionUri);
+        //: 웹뷰가 남긴 화면 상태(보던 화면·쓰던 요청) — 새로 그린 화면이 ready 를 보내면 돌려준다.
+        sidebarProvider.setRestoredUiState(state);
+        ReCoderPanel._current = new ReCoderPanel(panel, sidebarProvider);
+        return ReCoderPanel._current;
+    }
+
     static createOrShow(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider): ReCoderPanel {
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
         if (ReCoderPanel._current) {
-            ReCoderPanel._current._panel.reveal(column, true);
+            ReCoderPanel._current._panel.reveal(column, false);
+            ReCoderPanel._current._hideSidebar();
             return ReCoderPanel._current;
         }
 
@@ -47,14 +85,7 @@ export class ReCoderPanel {
             ReCoderPanel.viewType,
             'ReCoder',
             column,
-            {
-                enableScripts: true,
-                retainContextWhenHidden: true,
-                localResourceRoots: [
-                    vscode.Uri.joinPath(extensionUri, 'media'),
-                    vscode.Uri.joinPath(extensionUri, 'out'),
-                ],
-            },
+            { ...ReCoderPanel.webviewOptions(extensionUri), retainContextWhenHidden: true },
         );
 
         ReCoderPanel._current = new ReCoderPanel(panel, sidebarProvider);

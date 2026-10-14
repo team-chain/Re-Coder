@@ -211,6 +211,9 @@ def test_required_variables__detected() -> None:
 
 
 def test_apply_file_template__missing_dockerfile__writes_file(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("app = None\n", encoding="utf-8")
     blocker = make_blocker(PreflightCheckCode.MISSING_DOCKERFILE)
     contract = make_contract(stack=ContractStack.PYTHON_FASTAPI, app_port=8000)
     proposal = generate_proposal_for_blocker(blocker, contract, tmp_path)
@@ -257,6 +260,9 @@ def test_apply_file_template__env_example_create(tmp_path: Path) -> None:
 
 
 def test_apply__dry_run_does_not_write(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("app = None\n", encoding="utf-8")
     blocker = make_blocker(PreflightCheckCode.MISSING_DOCKERFILE)
     contract = make_contract()
     proposal = generate_proposal_for_blocker(blocker, contract, tmp_path)
@@ -267,6 +273,9 @@ def test_apply__dry_run_does_not_write(tmp_path: Path) -> None:
 
 
 def test_apply__path_traversal_rejected(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("app = None\n", encoding="utf-8")
     blocker = make_blocker(PreflightCheckCode.MISSING_DOCKERFILE)
     contract = make_contract()
     proposal = generate_proposal_for_blocker(blocker, contract, tmp_path)
@@ -411,6 +420,12 @@ def test_dockerfile_stack_aware(
     expected_in_content: str,
     tmp_path: Path,
 ) -> None:
+    #: 2.0.14: 스택 이름만으로 Dockerfile 을 지어내지 않는다 — 그 스택의 근거 파일이 있어야 한다.
+    (tmp_path / "requirements.txt").write_text("fastapi\nflask\n", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("app = None\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"scripts":{"start":"node server.js"}}', encoding="utf-8")
+    (tmp_path / "server.js").write_text("require('http').createServer().listen(3000)\n", encoding="utf-8")
     blocker = make_blocker(PreflightCheckCode.MISSING_DOCKERFILE)
     contract = make_contract(stack=stack)
     proposal = generate_proposal_for_blocker(blocker, contract, tmp_path)
@@ -419,3 +434,13 @@ def test_dockerfile_stack_aware(
     assert result.success
     content = (tmp_path / "Dockerfile").read_text(encoding="utf-8")
     assert expected_in_content in content
+
+
+def test_unknown_stack_gets_no_invented_dockerfile(tmp_path: Path) -> None:
+    """실기기 2.0.13: 화면만 있는 폴더(unknown)에 FastAPI Dockerfile 을 자동 수정으로 제안해 배포가 막혔다."""
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend/package.json").write_text('{"scripts":{"build":"vite build"}}', encoding="utf-8")
+    blocker = make_blocker(PreflightCheckCode.MISSING_DOCKERFILE)
+    proposal = generate_proposal_for_blocker(blocker, make_contract(stack=ContractStack.CUSTOM), tmp_path)
+    assert proposal.auto_apply_available is False
+    assert "requirements.txt" not in str(proposal.preview)

@@ -24,7 +24,7 @@ from .base import LLMError, LLMErrorType
 #: error_type → 사용자 문장. UNKNOWN 은 의도적으로 뺐다(메시지 추정으로 폴백).
 _REASON_BY_TYPE: dict[LLMErrorType, str] = {
     LLMErrorType.THROTTLING:       "AI 제공자의 요청 한도에 도달했습니다.",
-    LLMErrorType.QUOTA_EXCEEDED:   "AI 제공자의 요청 한도에 도달했습니다.",
+    LLMErrorType.QUOTA_EXCEEDED:   "AI 제공자의 요청 한도에 도달했거나 크레딧(결제)이 부족합니다. 제공자 콘솔에서 한도·결제를 확인하세요.",
     LLMErrorType.ACCESS_DENIED:    "AI 인증 정보 또는 자격증명을 확인하지 못했습니다.",
     LLMErrorType.MODEL_NOT_FOUND:  "설정된 AI 모델을 사용할 수 없습니다.",
     LLMErrorType.CONTEXT_TOO_LONG: "요청이 너무 길어 AI 가 처리하지 못했습니다.",
@@ -51,6 +51,8 @@ def public_ai_failure_reason(exc: Exception | None) -> str:
         "rate limit", "throttl", "quota", "429", "resource_exhausted", "resource exhausted",
     )):
         return "AI 제공자의 요청 한도에 도달했습니다."
+    if any(token in message for token in ("credit balance", "insufficient_quota", "billing", "payment required")):
+        return "AI 제공자의 요청 한도에 도달했거나 크레딧(결제)이 부족합니다. 제공자 콘솔에서 한도·결제를 확인하세요."
     if any(token in message for token in (
         "credential", "api key", "api_key", "unauthorized", "forbidden", "auth",
     )):

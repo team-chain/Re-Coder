@@ -1,0 +1,7 @@
+{
+  "command": [
+    "node",
+    "app.cjs"
+  ],
+  "stdout": "42"
+}

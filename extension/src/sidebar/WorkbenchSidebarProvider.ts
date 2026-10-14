@@ -5,7 +5,7 @@
  * 새 view 로 등록되어, Primary Sidebar 또는 Secondary Sidebar 어디에든
  * 사용자가 자유롭게 옮길 수 있다 (VSCode 네이티브 drag-and-drop 지원).
  *
- * WorkbenchPanel (Editor Area) 과 같은 HTML / 메시지 프로토콜을 사용하지만:
+ * 기존 Workbench 기능을 제공하는 활성 사이드바 뷰:
  *   - 폭이 좁은 환경 — workbenchHtml.ts 가 자동으로 단일 컬럼으로 전환 (data-mode="sidebar")
  *   - 항상 보임 — Kiro 스타일의 "옆에 두고 코드 편집" 워크플로우
  *

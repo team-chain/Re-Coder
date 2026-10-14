@@ -1,0 +1,8 @@
+{
+  "command": [
+    "node",
+    "app.cjs"
+  ],
+  "stdout": "readable",
+  "required_user": "node"
+}

@@ -27,7 +27,7 @@ export const STATIC_DIR_CANDIDATES = ['dist', 'build', 'out', 'public', '_site']
  */
 const SKIP_DIRS = new Set([
     'node_modules', '.git', '.svn', '.hg', '.venv', 'venv', '__pycache__',
-    '.next/cache', '.cache', '.idea', '.vscode', 'coverage', '.pytest_cache',
+    '.next/cache', '.cache', '.idea', '.vscode', 'coverage', '.pytest_cache', '.recoder', 'docs/adr',
 ]);
 
 const SKIP_FILES = new Set(['.DS_Store', 'Thumbs.db', '.gitkeep']);
@@ -71,9 +71,11 @@ export function isSensitiveFile(relativePath: string): boolean {
  * 필요한 파일 종류는 한정적이므로 방향을 뒤집는다 — 여기 없는 확장자는
  * 올라가지 않고, 무엇이 제외됐는지는 결과에 담아 사용자에게 보여준다.
  */
+// 소스맵(.map)은 올리지 않는다 — sourcesContent 에 원본 소스 전체가 들어 있어 공개 버킷에 올리면 코드가 그대로
+// 공개된다(CRA 는 기본으로 만든다). 사이트 동작에는 필요 없다.
 const ALLOWED_EXTENSIONS = new Set([
     // 문서·스크립트·데이터
-    'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'json', 'map', 'txt', 'xml',
+    'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'json', 'txt', 'xml',
     'webmanifest', 'webapp', 'md', 'csv', 'tsv', 'pdf',
     // 이미지
     'svg', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'bmp', 'apng',
@@ -401,6 +403,18 @@ export function collectStaticFiles(
             throw new StaticAssetReadError(rel, 'file');
         }
         const binary = isBinaryAsset(rel);
+        if (/\.html?$/i.test(rel)) {
+            const html = buffer.toString('utf-8');
+            if (/\b(?:src|href)\s*=\s*["'][^"']*%PUBLIC_URL%/i.test(html)
+                || /<script\b[^>]*\bsrc\s*=\s*["'][^"']*\.(?:tsx?|jsx)(?:[?#][^"']*)?["']/i.test(html)) {
+                throw new Error(`${rel}은 아직 빌드되지 않은 React/Vite 진입 파일입니다. 프로젝트에서 npm run build를 실행한 뒤 build 또는 dist 폴더를 선택하세요.`);
+            }
+            //: CRA 템플릿(public/index.html)은 `<div id="root">` 만 있고 스크립트가 없다. 그대로 올리면
+            //: 제목만 있는 흰 화면이 된다(실기기) — 빌드 산출물이 아니라는 뜻이다.
+            if (/<div\b[^>]*\bid\s*=\s*["'](?:root|app)["'][^>]*>\s*<\/div>/i.test(html) && !/<script\b/i.test(html)) {
+                throw new Error(`${rel}은 스크립트 없이 빈 <div id="root"> 만 있는 빌드 전 템플릿입니다. 올리면 흰 화면만 보입니다. 프런트엔드 폴더에서 npm run build 를 실행한 뒤 산출물 폴더(build·dist)를 선택하세요.`);
+            }
+        }
         files.push({
             path: rel,
             //: 바이너리를 utf-8 로 읽으면 잘못된 바이트가 U+FFFD 로 치환돼,

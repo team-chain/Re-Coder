@@ -8,7 +8,10 @@ import os
 import re
 from pathlib import Path
 
-from core.schemas import ECSDeployRequest
+try:
+    from core.schemas import ECSDeployRequest
+except ModuleNotFoundError:
+    from schemas import ECSDeployRequest
 
 
 def python_http_health_check(
@@ -69,6 +72,38 @@ def _runtime_family(dockerfile: Path) -> str:
     return runtime
 
 
+_ROOT_GET = r"\.get\s*\(\s*['\"]/['\"]"
+
+
+def _router_serves_root(source: Path, text: str, ident: str) -> bool:
+    """`ident` 라우터가 GET '/' 를 갖는지 — 같은 파일에서 만든 라우터이거나 상대 경로에서 가져온 라우터."""
+    if re.search(rf"\b{re.escape(ident)}{_ROOT_GET}", text):
+        return True
+    module = None
+    for pattern in (
+        rf"import\s+{re.escape(ident)}\b[^;]*?from\s+['\"](\.[^'\"]+)['\"]",
+        rf"import\s*\{{[^}}]*\b{re.escape(ident)}\b[^}}]*\}}\s*from\s+['\"](\.[^'\"]+)['\"]",
+        rf"\b{re.escape(ident)}\s*=\s*require\(\s*['\"](\.[^'\"]+)['\"]\s*\)",
+    ):
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
+            module = m.group(1)
+            break
+    if not module:
+        return False
+    base = (source.parent / module).resolve()
+    stem = re.sub(r"\.(?:js|mjs|cjs|ts)$", "", str(base))
+    for candidate in (str(base), stem + ".ts", stem + ".js", stem + ".mjs", stem + ".cjs",
+                      stem + "/index.ts", stem + "/index.js"):
+        path = Path(candidate)
+        try:
+            if path.is_file() and path.stat().st_size < 1_000_000:
+                return bool(re.search(_ROOT_GET, path.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            continue
+    return False
+
+
 _EXCLUDED_DIRS = {
     ".git", ".venv", "venv", "node_modules", ".next", "dist", "build",
     "__pycache__", "tests", "test", "__tests__",
@@ -127,9 +162,17 @@ def _declared_health_path(workspace: Path, runtime: str, requested: str) -> str 
                     active = "\n".join(line for line in active.splitlines() if not line.lstrip().startswith("//"))
                     # Mounted routers may have a prefix; their local /health
                     # is not proof that the app serves /health at its root.
-                    apps = re.findall(r"\b(?:const|let|var)\s+(\w+)\s*=\s*express\(\s*\)", active)
+                    #: TypeScript 는 `const app: Express = express();` 처럼 타입을 붙인다(실기기 2.0.11: 이 모양을 못 읽어
+                    #: /health 가 있는데도 "헬스 경로를 찾지 못했습니다" 로 ECS 헬스체크를 빼고 배포했다).
+                    apps = re.findall(r"\b(?:export\s+)?(?:const|let|var)\s+(\w+)\s*(?::\s*[\w.<>, ]+)?=\s*express\(\s*\)", active)
                     for app in apps:
                         declared.update(re.findall(rf"\b{re.escape(app)}\.get\s*\(\s*['\"]([^'\"]+)['\"]", active))
+                        #: `app.use('/health', healthRouter)` + 라우터의 `router.get('/')` 도 그 경로다(실기기 2.0.20 TEMP:
+                        #: 이 모양을 못 읽어 ECS 헬스체크 없이 배포 → 앱이 기동 중 죽어도 "성공" 후 주소 무응답).
+                        for prefix, ident in re.findall(
+                                rf"\b{re.escape(app)}\.use\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*([A-Za-z_$][\w$]*)\s*\)", active):
+                            if prefix.rstrip("/") in candidates and _router_serves_root(source, active, ident):
+                                declared.add(prefix.rstrip("/"))
                     relative = source.relative_to(workspace).as_posix()
                     for path in candidates:
                         route = path.strip("/")
@@ -154,6 +197,16 @@ def configure_health_check(request: ECSDeployRequest) -> str:
     if not request.workspace_path:
         return "작업 폴더가 없어 런타임과 헬스 경로를 확인하지 못했습니다. health_check_command를 지정하세요."
     workspace = Path(request.workspace_path)
+    from static_frontend import generated_static_runtime_port
+    static_port = generated_static_runtime_port(workspace / request.dockerfile)
+    if static_port is not None:
+        if static_port != request.container_port:
+            return f"컨테이너 포트가 Dockerfile의 {static_port}와 다릅니다. 배포 포트를 확인하세요."
+        request.health_check_command = [
+            "CMD", "wget", "-q", "-T", "4", "-O", "/dev/null",
+            f"http://127.0.0.1:{static_port}{request.health_check_path}",
+        ]
+        return ""
     try:
         runtime = _runtime_family(workspace / request.dockerfile)
     except OSError:

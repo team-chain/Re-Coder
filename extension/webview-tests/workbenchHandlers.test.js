@@ -20,7 +20,7 @@ const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
 
 const HOST = read('../src/sidebar/workbenchHost.ts');
 const HTML = read('../src/sidebar/workbenchHtml.ts');
-const PANEL = read('../src/sidebar/WorkbenchPanel.ts');
+const ACTIVATION = read('../src/extension.ts');
 const SIDEBAR = read('../src/sidebar/WorkbenchSidebarProvider.ts');
 
 /** 호스트가 switch 로 처리하는 메시지 타입. */
@@ -39,11 +39,11 @@ function sentTypes(source) {
   return out;
 }
 
-test('두 화면 모두 공통 호스트를 상속한다 (구현이 한 곳)', () => {
-  assert.match(PANEL, /extends WorkbenchHost/, '패널이 공통 호스트를 안 쓴다');
+test('등록된 Workbench 사이드바가 공통 호스트를 사용한다', () => {
+  assert.match(ACTIVATION, /new WorkbenchSidebarProvider\(/, '활성화 경로에 Workbench가 없다');
+  assert.match(ACTIVATION, /registerWebviewViewProvider\([\s\S]*?WorkbenchSidebarProvider\.viewType/, 'Workbench 뷰가 등록되지 않는다');
   assert.match(SIDEBAR, /extends WorkbenchHost/, '사이드바가 공통 호스트를 안 쓴다');
   //: 핸들러가 다시 갈라지면 이 검사가 깨진다.
-  assert.ok(!/case 'wb\./.test(PANEL), '패널에 별도 핸들러가 되살아났다');
   assert.ok(!/case 'wb\./.test(SIDEBAR), '사이드바에 별도 핸들러가 되살아났다');
 });
 

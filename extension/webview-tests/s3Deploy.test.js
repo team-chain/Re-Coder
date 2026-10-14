@@ -19,6 +19,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 
 const {
   isBinaryAsset,
@@ -38,6 +39,21 @@ const {
   MAX_FILES,
   MAX_BYTES_PER_FILE,
 } = require('../out/deploy/staticSite.js');
+
+test('빌드하지 않은 CRA/Vite 진입 파일은 업로드 전에 멈추고 빌드 결과는 허용한다', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-static-entry-'));
+  try {
+    for (const html of ['<link href="%PUBLIC_URL%/favicon.ico">', '<script type="module" src="/src/main.tsx"></script>']) {
+      fs.writeFileSync(path.join(root, 'index.html'), html);
+      assert.throws(() => collectStaticFiles(root, fs, path.join), /npm run build/);
+    }
+    fs.writeFileSync(path.join(root, 'index.html'), '<script src="/assets/main.js"></script>');
+    assert.equal(collectStaticFiles(root, fs, path.join).files.length, 1);
+  } finally {
+    assert.ok(root.startsWith(path.join(os.tmpdir(), 'recoder-static-entry-')));
+    fs.rmSync(root, {recursive:true,force:true});
+  }
+});
 
 // ---------------------------------------------------------------------------
 // 바이너리를 텍스트로 읽지 않는다

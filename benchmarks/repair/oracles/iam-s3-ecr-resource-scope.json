@@ -1,0 +1,6 @@
+{
+  "iam": {
+    "action": "ecr:GetAuthorizationToken",
+    "resource": "*"
+  }
+}

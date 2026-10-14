@@ -284,9 +284,11 @@ def check_missing_health_endpoint(
             message=f"{stack.value} 코드에 {health_path} 라우터가 정의돼 있지 않습니다.",
             fix_hint=(
                 f"진입점에 다음과 같은 코드를 추가하세요:\n"
-                f"  @app.get('{health_path}')\n"
-                f"  def health():\n"
-                f"      return {{'status': 'ok'}}"
+                + (f"  app.get('{health_path}', (req, res) => res.json({{ status: 'ok' }}));"
+                   if stack == ContractStack.NODE_EXPRESS else
+                   f"  @app.route('{health_path}')\n  def health():\n      return {{'status': 'ok'}}"
+                   if stack == ContractStack.PYTHON_FLASK else
+                   f"  @app.get('{health_path}')\n  def health():\n      return {{'status': 'ok'}}")
             ),
             remediation_available=True,
             severity=PreflightSeverity.HIGH,
@@ -483,7 +485,7 @@ def _find_composer_bin_entrypoint(workspace: Path) -> Optional[str]:
     if not manifest.is_file():
         return None
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
 

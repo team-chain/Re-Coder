@@ -270,13 +270,13 @@ class GitOpsAgent:
 
             # git add
             r = subprocess.run(["git", "add"] + list(files.keys()),
-                                cwd=str(ws), capture_output=True, text=True, timeout=30)
+                                cwd=str(ws), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
             if r.returncode != 0:
                 return False, f"git add 실패: {r.stderr}"
 
             # git commit
             r = subprocess.run(["git", "commit", "-m", commit_message],
-                                cwd=str(ws), capture_output=True, text=True, timeout=30)
+                                cwd=str(ws), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
             if r.returncode != 0 and "nothing to commit" not in r.stdout + r.stderr:
                 return False, f"git commit 실패: {r.stderr}"
 
@@ -287,12 +287,12 @@ class GitOpsAgent:
                 push_url = repo_url.replace("https://", f"https://{github_token}@")
                 r = subprocess.run(
                     ["git", "push", push_url, f"HEAD:{branch}"],
-                    cwd=str(ws), capture_output=True, text=True, timeout=60, env=env,
+                    cwd=str(ws), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, env=env,
                 )
             else:
                 r = subprocess.run(
                     ["git", "push", "origin", branch],
-                    cwd=str(ws), capture_output=True, text=True, timeout=60, env=env,
+                    cwd=str(ws), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, env=env,
                 )
             if r.returncode != 0:
                 return False, f"git push 실패: {r.stderr}"
@@ -417,7 +417,7 @@ class GitOpsAgent:
             import subprocess
             subprocess.run(
                 ["git", "checkout", "-b", deploy_branch],
-                cwd=workspace_path, capture_output=True, text=True, timeout=15,
+                cwd=workspace_path, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
             )
         except Exception as e:
             _log(f"[GitOps] 브랜치 생성 경고: {e}")

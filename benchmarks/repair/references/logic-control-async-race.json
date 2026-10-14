@@ -1,0 +1,3 @@
+{
+  "app.cjs": "exports.total=async values=>(await Promise.all(values)).reduce((a,b)=>a+b,0);\n"
+}

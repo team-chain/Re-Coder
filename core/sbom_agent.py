@@ -83,7 +83,7 @@ class SBOMAgent:
             proc = subprocess.run(
                 args,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=timeout,
                 env=os.environ.copy(),
             )

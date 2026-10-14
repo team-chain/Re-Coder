@@ -1,0 +1,3 @@
+{
+  "node": "require('node:assert').equal(require('./dist/client.cjs'),'https://api.example.test')"
+}

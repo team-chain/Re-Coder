@@ -34,9 +34,9 @@ const block = (src, start, end) => {
 };
 
 test('① 코어가 뜨면 진단보다 먼저 보안 금고의 AWS 연결을 다시 넣는다', () => {
-  const startup = block(HOST, 'if (coreOk) {', '})();');
+  const startup = block(HOST, 'async ensureConnection()', 'private async runDiagnosticsShared');
   const heal = startup.indexOf("healAwsConnection('startup')");
-  const diag = startup.indexOf("type: 'runDiagnostics'");
+  const diag = startup.indexOf('runDiagnosticsShared(false)');
   assert.ok(heal !== -1, '기동 시 재주입이 없다');
   assert.ok(heal < diag, '재주입이 진단보다 뒤에 온다 — 첫 진단이 X 로 뜬다');
 });
@@ -58,11 +58,14 @@ test('② 진단 X → 자동 조치 → 재진단, 인스턴스당 한 번', ()
   const fn = block(HOST, 'private async _selfHealFromDiagnostics(', '    private async handleMessage(');
   assert.match(fn, /coreInstanceKey\(\)/);
   assert.match(fn, /this\._awsHealedFor === key\) \{ return false; \}/, '인스턴스당 1회 가드가 없다');
-  assert.match(fn, /notReady\('aws_deploy_ready'\) \|\| notReady\('ai_ready'\)/);
+  assert.match(fn, /notReady\('aws_deploy_ready'\) \|\| \(notReady\('ai_ready'\) && !usesAiKey\)/);
+  //: API 키로 AI 를 쓰는 사용자의 AI 문제는 AWS 로 고치지 않는다
+  assert.match(fn, /usesAiKey = [\s\S]*currentAiProvider/);
   assert.match(fn, /notReady\('docker_ready'\)/);
-  const run = block(HOST, "case 'runDiagnostics'", "case 'switchMode'");
+  const run = block(HOST, 'private async performDiagnostics()', 'triggerDiagnostics()');
   assert.match(run, /_selfHealFromDiagnostics\(/);
-  assert.match(run, /if \(healed\) \{[\s\S]*type: 'runDiagnostics'/, '고친 뒤 재진단이 없다');
+  assert.match(run, /pass < 2/);
+  assert.match(run, /if \(!healed\) break/, '고친 뒤 재진단이 없다');
 });
 
 test('③ 진단판 버튼은 자동 조치이고 결과를 항목 아래 남긴다', () => {
@@ -80,7 +83,9 @@ test('③ 진단판 버튼은 자동 조치이고 결과를 항목 아래 남긴
 
 test('④ 보관된 연결은 SecretStorage 에서만 읽고 파일로 내보내지 않는다', () => {
   const fn = block(MANAGER, 'async getStoredAwsConnection(', 'coreInstanceKey()');
-  assert.match(fn, /secrets\.get\(AWS_ACCESS_KEY_SECRET\)/);
+  //: 보안 저장소 읽기는 상한이 있는 this.secret() 을 거친다(끝나지 않는 읽기가 Core 시작을 막았다 — 실기기).
+  assert.match(fn, /(?:secrets\.get|this\.secret)\(AWS_ACCESS_KEY_SECRET\)/);
+  assert.match(MANAGER, /private secret\(key: string\)[\s\S]{0,200}extensionContext\.secrets\.get\(key\)/, 'secret() 이 SecretStorage 를 읽지 않는다');
   assert.doesNotMatch(fn, /writeFile|fs\./, '키를 파일에 쓴다');
 });
 
@@ -127,7 +132,15 @@ test('③ 코어에 확장 호스트 전용 환경변수(ELECTRON_RUN_AS_NODE)�
   const spawnBlock = MANAGER.slice(MANAGER.indexOf('this.coreProcess = spawn('), MANAGER.indexOf('this.coreProcess = spawn(') + 400);
   assert.match(MANAGER, /delete hostEnv\[k\]/, '확장이 환경을 정리하지 않는다');
   assert.match(MANAGER, /'ELECTRON_RUN_AS_NODE'/);
-  assert.match(spawnBlock, /env: \{ \.\.\.hostEnv/, 'spawn 이 정리된 환경을 쓰지 않는다');
+  assert.match(spawnBlock, /env: coreEnv/, 'spawn 이 정리된 환경을 쓰지 않는다');
+  assert.match(MANAGER, /const coreEnv: NodeJS\.ProcessEnv = \{ \.\.\.hostEnv/, 'coreEnv 가 정리된 hostEnv 에서 시작하지 않는다');
   const core = fs.readFileSync(path.join(__dirname, '../../core/docker_autostart.py'), 'utf8');
   assert.match(core, /"ELECTRON_RUN_AS_NODE",/, '코어 쪽 방어가 없다');
+});
+
+test('AI 자동 조치 — API 키 사용자는 AWS 연결이 아니라 AI 키 연결을 연다', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/sidebar/SidebarProvider.ts'), 'utf8');
+  const fix = src.slice(src.indexOf("case 'webview.diagnostics.fix'"), src.indexOf("case 'webview.open.external'"));
+  assert.match(fix, /key === 'ai_ready'[\s\S]*currentAiProvider[\s\S]*executeCommand\('recoder\.ai\.connect', aiKeyProvider\)/);
+  assert.ok(fix.indexOf("recoder.ai.connect") < fix.indexOf("recoder.awsConfigure"));
 });

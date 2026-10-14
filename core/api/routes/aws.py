@@ -32,6 +32,9 @@ from urllib.parse import unquote
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+import asyncio as _asyncio
+import functools as _functools
+import threading as _threading
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, StrictBool
@@ -51,12 +54,111 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["aws"])
 
+
+# AWS 라우트 본문은 boto3 를 동기로 부른다. async def 안에서 그대로 부르면
+# STS/IAM 이 느리거나 막힐 때 Core 이벤트 루프 전체(AI·헬스체크·배포 로그)가
+# 같이 멈춘다. 본문은 스레드에서 돌리고, os.environ 을 바꾸는 흐름끼리는
+# 예전처럼 한 번에 하나씩만 돌도록 잠근다.
+_AWS_ROUTE_LOCK = _threading.RLock()
+
+
+def _off_loop(fn):
+    @_functools.wraps(fn)
+    async def runner(*args, **kwargs):
+        def locked():
+            with _AWS_ROUTE_LOCK:
+                return fn(*args, **kwargs)
+        return await _asyncio.to_thread(locked)
+    return runner
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
 RECODER_HOME = Path(os.getenv("RECODER_HOME", str(Path.home() / ".recoder")))
 CREDENTIALS_FILE = RECODER_HOME / "aws_credentials.json"
+#: "연결 해제"를 누른 뒤에는 ~/.aws/credentials 의 [default] 로 조용히 다시
+#: 연결되지 않게 표시해 둔다. 어떤 방식으로든 다시 연결하면 지운다.
+def _disconnected_flag() -> Path:
+    return CREDENTIALS_FILE.parent / "aws_disconnected"
+
+
+def _mark_connected() -> None:
+    try:
+        _disconnected_flag().unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:  # noqa: BLE001
+        logger.debug("aws_disconnected flag remove failed: %s", exc)
+
+
+def _mark_disconnected() -> None:
+    try:
+        flag = _disconnected_flag()
+        if not flag.parent.is_dir():
+            return
+        flag.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001
+        logger.debug("aws_disconnected flag write failed: %s", exc)
+
+
+def _user_disconnected() -> bool:
+    """사용자가 해제했고, 그 뒤로 이 프로세스에 명시적 자격증명이 들어오지 않았다."""
+    return (
+        _disconnected_flag().exists()
+        and not os.environ.get("AWS_ACCESS_KEY_ID")
+        and not os.environ.get("AWS_PROFILE")
+        and _role_state is None
+    )
+
+
+#: 해제 상태에서 boto3 기본 체인이 ~/.aws 파일·인스턴스 메타데이터로 자격증명을 찾지
+#: 못하게 막는 환경변수. 상태 화면뿐 아니라 진단·배포·스캔 등 Core 안의 모든 AWS 호출이
+#: 같은 "해제됨"을 보게 한다. ~/.aws 파일 자체는 건드리지 않는다.
+def _guard_env() -> dict[str, str]:
+    missing = str(CREDENTIALS_FILE.parent / "aws-disconnected-no-file")
+    return {
+        "AWS_SHARED_CREDENTIALS_FILE": missing,
+        "AWS_CONFIG_FILE": missing,
+        "AWS_EC2_METADATA_DISABLED": "true",
+    }
+
+
+_guard_saved: dict[str, Optional[str]] = {}
+
+
+def _apply_disconnect_guard() -> None:
+    if not _user_disconnected():
+        return
+    for key, value in _guard_env().items():
+        if os.environ.get(key) == value:
+            continue
+        _guard_saved.setdefault(key, os.environ.get(key))
+        os.environ[key] = value
+
+
+def _lift_disconnect_guard() -> None:
+    guard = _guard_env()
+    for key, value in guard.items():
+        if key in _guard_saved:
+            original = _guard_saved.pop(key)
+            if os.environ.get(key) == value:
+                if original is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = original
+
+
+def _with_disconnect_guard(fn):
+    """연결 시도 동안에는 막음을 풀고, 끝났을 때 여전히 해제 상태면 다시 막는다."""
+    @_functools.wraps(fn)
+    def run(*args, **kwargs):
+        _lift_disconnect_guard()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _apply_disconnect_guard()
+    return run
 AWS_CREDENTIALS_FILE = Path.home() / ".aws" / "credentials"
 AWS_CONFIG_FILE = Path.home() / ".aws" / "config"
 
@@ -413,6 +515,12 @@ def _apply_to_process_env(
         os.environ["AWS_REGION"] = region
     if profile:
         os.environ["AWS_PROFILE"] = profile
+    else:
+        # 키로 연결했는데 예전 프로필 연결의 AWS_PROFILE 이 남아 있으면, 프로필을
+        # 명시해 세션을 만드는 경로(Bedrock 등)가 옛 프로필 계정으로 나간다.
+        os.environ.pop("AWS_PROFILE", None)
+        os.environ.pop("AWS_DEFAULT_PROFILE", None)
+    _lift_disconnect_guard()
 
 
 def _build_boto3_session(profile: Optional[str] = None, region: Optional[str] = None):
@@ -485,7 +593,7 @@ def _call_sts_get_caller_identity(profile: Optional[str], region: str) -> dict[s
         if "Unable to locate credentials" in msg or "NoCredentialsError" in msg:
             raise HTTPException(
                 status_code=400,
-                detail="AWS 자격증명을 찾을 수 없습니다. /api/aws/configure 로 먼저 등록하세요.",
+                detail="AWS 자격증명을 찾을 수 없습니다. AWS 연결 화면에서 먼저 등록하세요.",
             ) from exc
         raise HTTPException(status_code=500, detail=f"STS 호출 실패: {msg}") from exc
 
@@ -510,8 +618,11 @@ def _detect_credential_source() -> tuple[str, str]:
         return "env", _active_profile or ""
     if CREDENTIALS_FILE.exists():
         return "recoder", _active_profile or "recoder"
+    env_profile = os.environ.get("AWS_PROFILE", "").strip()
+    if _active_profile or env_profile:
+        return "aws_credentials_file", _active_profile or env_profile
     if AWS_CREDENTIALS_FILE.exists():
-        return "aws_credentials_file", _active_profile or "default"
+        return "aws_credentials_file", "default"
     return "", ""
 
 
@@ -973,6 +1084,7 @@ def _environment_snapshot() -> tuple[dict[str, Optional[str]], Optional[str]]:
             "AWS_REGION": os.environ.get("AWS_REGION"),
             "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION"),
             "AWS_PROFILE": os.environ.get("AWS_PROFILE"),
+            "AWS_DEFAULT_PROFILE": os.environ.get("AWS_DEFAULT_PROFILE"),
         },
         _active_profile,
     )
@@ -1044,6 +1156,7 @@ def _apply_role_credentials(creds: "aws_role.TemporaryCredentials", region: str)
     if region:
         os.environ["AWS_DEFAULT_REGION"] = region
         os.environ["AWS_REGION"] = region
+    _lift_disconnect_guard()
 
 
 def _refresh_role_credentials() -> None:
@@ -1132,7 +1245,9 @@ def _leave_role_mode(clear_env: bool = True) -> None:
 
 
 @router.post("/api/aws/connect", response_model=AwsStatus)
-async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
+@_off_loop
+@_with_disconnect_guard
+def connect_aws(req: AwsConnectRequest) -> AwsStatus:
     """AWS 키를 검증하고 현재 Core 프로세스에만 적용한다.
 
     키는 어떤 파일에도 저장하지 않는다. 실패한 요청은 기존 환경을 되돌리지만,
@@ -1164,6 +1279,7 @@ async def connect_aws(req: AwsConnectRequest) -> AwsStatus:
     # SecretStorage 기반 연결도 기존 configure 경로와 똑같이 진단 캐시를
     # 갱신해야 한다. 그렇지 않으면 연결은 성공했는데 AWS Deploy Ready가
     # 연결 전 결과를 계속 표시하는 상태 불일치가 생긴다.
+    _mark_connected()
     _credentials_changed()
 
     return AwsStatus(
@@ -1227,10 +1343,13 @@ def _apply_profile_to_process_env(profile: str, region: str) -> None:
     if region:
         os.environ["AWS_DEFAULT_REGION"] = region
         os.environ["AWS_REGION"] = region
+    _lift_disconnect_guard()
 
 
 @router.post("/api/aws/connect-profile", response_model=AwsStatus)
-async def connect_aws_profile(req: AwsProfileConnectRequest) -> AwsStatus:
+@_off_loop
+@_with_disconnect_guard
+def connect_aws_profile(req: AwsProfileConnectRequest) -> AwsStatus:
     """~/.aws 프로필로 연결 — 키를 화면에 다시 입력받지 않는다.
 
     배경: 연결 수단이 "키 붙여넣기"뿐이라, AWS CLI 를 이미 쓰는 사용자도
@@ -1275,6 +1394,7 @@ async def connect_aws_profile(req: AwsProfileConnectRequest) -> AwsStatus:
         raise
 
     _leave_role_mode()
+    _mark_connected()
     _credentials_changed()
 
     return AwsStatus(
@@ -1290,7 +1410,8 @@ async def connect_aws_profile(req: AwsProfileConnectRequest) -> AwsStatus:
 
 
 @router.get("/api/aws/status", response_model=AwsStatus)
-async def get_aws_status() -> AwsStatus:
+@_off_loop
+def get_aws_status() -> AwsStatus:
     """현재 AWS 자격증명 상태.
 
     자격증명이 없으면 ready=False 로 200 응답 (500 안 남).
@@ -1307,7 +1428,20 @@ async def get_aws_status() -> AwsStatus:
     storage, profile = _detect_credential_source()
     key_last4 = "" if storage == "assumed_role" else _mask_key(access_key)
 
-    if not access_key and not AWS_CREDENTIALS_FILE.exists():
+    if storage != "assumed_role" and _user_disconnected():
+        return AwsStatus(
+            ready=False,
+            identity=None,
+            region=region,
+            profile="",
+            access_key_last4="",
+            storage="",
+            message="AWS 연결을 해제했습니다. 다시 쓰려면 AWS 연결 화면에서 계정을 연결하세요.",
+        )
+
+    # SSO·assume-role 프로필은 ~/.aws/config 에만 있다 — credentials 파일이 없다고
+    # "자격증명 없음"으로 끊으면 프로필로 연결한 사용자가 영영 준비 안 됨으로 보인다.
+    if not access_key and not os.environ.get("AWS_PROFILE") and not AWS_CREDENTIALS_FILE.exists():
         return AwsStatus(
             ready=False,
             identity=None,
@@ -1315,7 +1449,7 @@ async def get_aws_status() -> AwsStatus:
             profile=profile,
             access_key_last4="",
             storage=storage,
-            message="AWS 자격증명이 설정되지 않았습니다. /api/aws/configure 로 등록하세요.",
+            message="AWS 자격증명이 아직 없습니다. AWS 연결 화면에서 계정을 연결하세요.",
         )
 
     # boto3 미설치 → ready=False (500 아님)
@@ -1389,7 +1523,9 @@ def _role_status_fields() -> dict[str, str]:
 
 
 @router.post("/api/aws/role/setup", response_model=AwsRoleSetupResponse)
-async def setup_aws_role(req: AwsRoleSetupRequest) -> AwsRoleSetupResponse:
+@_off_loop
+@_with_disconnect_guard
+def setup_aws_role(req: AwsRoleSetupRequest) -> AwsRoleSetupResponse:
     """프로그램 안에서 최소권한 역할을 만들고(있으면 맞추고) 빌려 연결한다.
 
     배경: quick-create 온보딩은 사용자를 콘솔로 보내고 키 두 개를 붙여넣게
@@ -1520,6 +1656,7 @@ async def setup_aws_role(req: AwsRoleSetupRequest) -> AwsRoleSetupResponse:
             detail=f"역할은 만들었지만 빌린 자격증명 검증에 실패했습니다: {exc.detail}",
         ) from exc
 
+    _mark_connected()
     _credentials_changed()
 
     what = "만들었습니다" if result.created else ("신뢰 정책을 갱신했습니다" if result.trust_updated else "확인했습니다")
@@ -1544,21 +1681,23 @@ async def setup_aws_role(req: AwsRoleSetupRequest) -> AwsRoleSetupResponse:
 
 
 @router.post("/api/aws/role/refresh", response_model=AwsStatus)
-async def refresh_aws_role() -> AwsStatus:
+@_off_loop
+def refresh_aws_role() -> AwsStatus:
     """역할 모드의 임시 자격증명을 지금 다시 빌린다 (만료 임박 여부와 무관)."""
     if _role_state is None:
         raise HTTPException(status_code=400, detail="역할 모드가 아닙니다.")
     _role_state["expires_at"] = datetime.now(timezone.utc)  # 강제로 만료 임박 취급
     _refresh_role_credentials()
-    return await get_aws_status()
+    return get_aws_status.__wrapped__()
 
 
 @router.post("/api/aws/permissions/check", response_model=AwsStatus)
-async def check_aws_permissions(
+@_off_loop
+def check_aws_permissions(
     req: Optional[AwsPermissionCheckRequest] = None,
 ) -> AwsStatus:
     """저장·재입력 없이 현재 연결된 자격증명의 배포 권한을 다시 점검한다."""
-    status = await get_aws_status()
+    status = get_aws_status.__wrapped__()
     if not status.ready or status.identity is None:
         return status
     identity = {
@@ -1575,7 +1714,9 @@ async def check_aws_permissions(
 
 
 @router.post("/api/aws/configure", response_model=AwsStatus)
-async def configure_aws(req: AwsConfigureRequest) -> AwsStatus:
+@_off_loop
+@_with_disconnect_guard
+def configure_aws(req: AwsConfigureRequest) -> AwsStatus:
     """AWS 자격증명 저장 + 즉시 STS 검증 + diagnostics 캐시 갱신.
 
     실패 시:
@@ -1656,6 +1797,7 @@ async def configure_aws(req: AwsConfigureRequest) -> AwsStatus:
 
     # 4) diagnostics 캐시 무효화/재실행
     _leave_role_mode()
+    _mark_connected()
     _credentials_changed()
 
     return AwsStatus(
@@ -1670,7 +1812,8 @@ async def configure_aws(req: AwsConfigureRequest) -> AwsStatus:
 
 
 @router.post("/api/aws/clear")
-async def clear_aws() -> dict[str, Any]:
+@_off_loop
+def clear_aws() -> dict[str, Any]:
     """저장된 AWS 자격증명 제거 (~/.recoder/aws_credentials.json).
 
     ~/.aws/credentials 의 [profile] 섹션은 사용자 안전을 위해 자동 제거하지 않는다.
@@ -1696,11 +1839,15 @@ async def clear_aws() -> dict[str, Any]:
     ):
         os.environ.pop(key, None)
 
+    os.environ.pop("AWS_DEFAULT_PROFILE", None)
+
     global _active_profile
     _active_profile = None
+    _mark_disconnected()
     #: 역할 모드도 끝낸다. IAM 에 만든 역할 자체는 지우지 않는다 — 다음
     #: 온보딩에서 그대로 다시 쓰고, 지우는 건 사용자가 콘솔에서 판단한다.
     _leave_role_mode()
+    _apply_disconnect_guard()
 
     _credentials_changed()
 
@@ -1713,7 +1860,8 @@ async def clear_aws() -> dict[str, Any]:
 
 
 @router.get("/api/aws/profiles")
-async def list_aws_profiles() -> dict[str, list[str]]:
+@_off_loop
+def list_aws_profiles() -> dict[str, list[str]]:
     """사용 가능한 profile 목록 — credentials 와 config(SSO 포함)를 합친다.
 
     credentials 파일만 읽으면 SSO 프로필이 목록에서 빠져서, 사용자는
@@ -1724,7 +1872,8 @@ async def list_aws_profiles() -> dict[str, list[str]]:
 
 
 @router.get("/api/aws/ecr/repos")
-async def list_ecr_repos(region: str = "", profile: str = "", max_results: int = 50) -> dict[str, Any]:
+@_off_loop
+def list_ecr_repos(region: str = "", profile: str = "", max_results: int = 50) -> dict[str, Any]:
     """ECR 레포지토리 목록 — 자격증명 sanity-check 겸용.
 
     Query:
@@ -2034,7 +2183,8 @@ def _academy_role_advice(academy: bool) -> list[str]:
 
 
 @router.get("/api/aws/policy", response_model=AwsPolicyResponse)
-async def get_minimum_policy(
+@_off_loop
+def get_minimum_policy(
     targets: str = "",
     task_execution_role: str = "",
     task_role: str = "",
@@ -2152,7 +2302,8 @@ class AwsOnboardingResponse(BaseModel):
 
 
 @router.get("/api/aws/onboarding-link", response_model=AwsOnboardingResponse)
-async def get_onboarding_link(region: str = "", targets: str = "") -> AwsOnboardingResponse:
+@_off_loop
+def get_onboarding_link(region: str = "", targets: str = "") -> AwsOnboardingResponse:
     """원클릭 IAM 셋업 링크를 만든다.
 
     템플릿은 정적 하나다 — 계정 ID·리전은 CloudFormation 내장 변수가 스택
@@ -2311,3 +2462,7 @@ async def apply_ecs_execution_role(body: ExecutionRoleApplyRequest, request: Req
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# Core 재시작 뒤에도 해제 상태를 이어 간다.
+_apply_disconnect_guard()

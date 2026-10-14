@@ -167,9 +167,10 @@ def test_node_템플릿은_현재_LTS_와_OS_패치_단계를_쓴다():
 
 def test_프롬프트와_템플릿이_번들_npm_tar_CVE_를_다룬다():
     from registries import file_registry as fr
-    assert "npm@latest" in ia._DOCKERFILE_CUSTOMISE_PROMPT and "node_modules/npm" in ia._DOCKERFILE_CUSTOMISE_PROMPT
+    assert "NEVER run `npm install -g npm@latest`" in ia._DOCKERFILE_CUSTOMISE_PROMPT and "node_modules/npm" in ia._DOCKERFILE_CUSTOMISE_PROMPT
     assert "rm -rf /usr/local/lib/node_modules/npm" in fr._DOCKERFILE_NODE_EXPRESS
-    assert "npm install -g npm@latest" in fr._DOCKERFILE_NODE_NEXT
+    assert "npm install -g npm@latest" not in fr._DOCKERFILE_NODE_NEXT
+    assert "rm -rf /usr/local/lib/node_modules/npm" in fr._DOCKERFILE_NODE_NEXT and 'next/dist/bin/next' in fr._DOCKERFILE_NODE_NEXT
 
 
 def test_모델이_EOL_node_를_골라도_22_로_강제하고_포트_진입점은_프로필_값(tmp_path):
@@ -181,7 +182,9 @@ def test_모델이_EOL_node_를_골라도_22_로_강제하고_포트_진입점�
         ProjectStack.NODE_EXPRESS, profile)
     assert out["NODE_VERSION"] == "22" and out["PORT"] == "3456" and out["START_SCRIPT"] == "src/app.js"
     assert out["APP_NAME"] == "x"
-    assert ia.InfraAgent._enforce_safe_customisations({"NODE_VERSION": "20.11"}, ProjectStack.NODE_EXPRESS, profile)["NODE_VERSION"] == "20.11"
+    #: Node 20 은 2026-04 지원 종료 — 22 로 올린다. 22 이상은 그대로 둔다.
+    assert ia.InfraAgent._enforce_safe_customisations({"NODE_VERSION": "20.11"}, ProjectStack.NODE_EXPRESS, profile)["NODE_VERSION"] == "22"
+    assert ia.InfraAgent._enforce_safe_customisations({"NODE_VERSION": "24"}, ProjectStack.NODE_EXPRESS, profile)["NODE_VERSION"] == "24"
 
 
 def test_실제_node_템플릿에_OS_패치와_npm_제거가_있다():

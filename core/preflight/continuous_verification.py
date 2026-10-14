@@ -187,7 +187,7 @@ def _run_subprocess(cmd: list[str], timeout: float = 10.0) -> Optional[subproces
         return subprocess.run(  # noqa: S603 — controlled args
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:

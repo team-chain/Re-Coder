@@ -6,9 +6,11 @@
  * 별도 :root 변수 선언이 필요 없다.
  */
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@config "../tailwind.config.js";
+@source "../";
 
 /* ----------------------------------------------------------------------
  * Component classes — 자주 쓰는 패턴을 @apply 로 묶어둔다.
@@ -63,14 +65,14 @@
 
   /* Approval modal container */
   .rc-modal {
-    @apply rc-card max-w-md w-full;
+    @apply bg-vscode-panel-bg border border-vscode-panel-border rounded-card p-3 max-w-md w-full;
   }
 
   /* Unified-diff line (used by BuildMode) */
   .rc-diff-line       { @apply font-mono text-xs px-2 py-0.5 whitespace-pre; }
-  .rc-diff-line-add   { @apply rc-diff-line bg-vscode-diff-add text-vscode-success; }
-  .rc-diff-line-del   { @apply rc-diff-line bg-vscode-diff-del text-vscode-error; }
-  .rc-diff-line-ctx   { @apply rc-diff-line text-vscode-desc; }
+  .rc-diff-line-add   { @apply font-mono text-xs px-2 py-0.5 whitespace-pre bg-vscode-diff-add text-vscode-success; }
+  .rc-diff-line-del   { @apply font-mono text-xs px-2 py-0.5 whitespace-pre bg-vscode-diff-del text-vscode-error; }
+  .rc-diff-line-ctx   { @apply font-mono text-xs px-2 py-0.5 whitespace-pre text-vscode-desc; }
 }
 
 /* ----------------------------------------------------------------------

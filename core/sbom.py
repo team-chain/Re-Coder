@@ -97,14 +97,14 @@ class SBOMGenerator:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_SBOM_TIMEOUT)
 
             if proc.returncode != 0:
-                logger.warning("Syft failed (rc=%d): %s", proc.returncode, stderr.decode()[:200])
-                return self._empty_record(image, error=stderr.decode()[:200])
+                logger.warning("Syft failed (rc=%d): %s", proc.returncode, stderr.decode("utf-8", errors="replace")[:200])
+                return self._empty_record(image, error=stderr.decode("utf-8", errors="replace")[:200])
 
             if not output_path.exists():
                 return self._empty_record(image, error="SBOM 파일이 생성되지 않았습니다")
 
             # SBOM 파싱
-            sbom_data = json.loads(output_path.read_text())
+            sbom_data = json.loads(output_path.read_text(encoding="utf-8"))
             package_count = len(sbom_data.get("components", []))
 
             logger.info("SBOM generated: %s (%d packages) → %s", image, package_count, output_path)

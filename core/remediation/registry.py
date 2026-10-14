@@ -92,6 +92,13 @@ _FILE_TEMPLATES: list[FileTemplate] = [
         ),
     ),
     FileTemplate(
+        #: 프로젝트 구조를 읽어 만든 Dockerfile 전체(ReCoder 검증 Dockerfile 등) — 내용이 곧 변수다.
+        template_id="dockerfile.verbatim",
+        file_type=FileType.DOCKERFILE,
+        base_content="{{dockerfile}}",
+        customizable_sections={"dockerfile": "프로젝트 구조에서 만든 Dockerfile 전체"},
+    ),
+    FileTemplate(
         template_id="dockerfile.fastapi",
         file_type=FileType.DOCKERFILE,
         base_content=(

@@ -843,6 +843,8 @@ def invoke_bedrock(messages: list, *, model: str | None = None,
     return {
         "text": text, "parsed": parsed, "model_used": use_model,
         "input_tokens": input_tok, "output_tokens": output_tok,
+        # 출력 상한에서 잘렸는지 호출자(코어)가 알아야 나눠서 다시 만든다.
+        "stop_reason": str(resp.get("stopReason") or ""),
     }
 
 

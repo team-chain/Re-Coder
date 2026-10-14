@@ -1,0 +1,3 @@
+{
+  "policy.json": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Effect\": \"Allow\",\n      \"Action\": [\n        \"s3:GetObject\"\n      ],\n      \"Resource\": \"arn:aws:s3:::repair-fixture/assets/config.json\"\n    }\n  ]\n}\n"
+}

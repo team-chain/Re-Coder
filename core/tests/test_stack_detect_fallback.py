@@ -63,7 +63,8 @@ def test_UNKNOWN_스택은_명시적_안내로_실패한다(tmp_path) -> None:
     with pytest.raises(deploy._UnsupportedDockerfileFallback) as exc:
         deploy._dockerfile_from_template(str(tmp_path), StackType.UNKNOWN, None)
     #: 사용자가 다음에 뭘 해야 하는지가 메시지에 있어야 한다.
-    assert "requirements" in str(exc.value)
+    assert "index.html" in str(exc.value) and "package.json" in str(exc.value)
+    assert "Dockerfile" in str(exc.value)
 
 
 def test_에이전트_템플릿_선택도_기본값_fastapi_가_없다() -> None:

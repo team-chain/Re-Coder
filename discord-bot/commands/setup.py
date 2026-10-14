@@ -70,7 +70,11 @@ class SetupGroup(app_commands.Group):
             return
 
         # 토큰은 로그에 남기지 않는다
-        guild_store.set_api(interaction.guild.id, url, token)
+        try:
+            guild_store.set_api(interaction.guild.id, url, token)
+        except ValueError as exc:
+            await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+            return
         log.info("Guild %d API 설정 완료: %s", interaction.guild.id, url)
 
         embed = discord.Embed(

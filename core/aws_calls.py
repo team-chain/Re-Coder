@@ -107,6 +107,7 @@ SERVICE_TO_IAM_PREFIX: dict[str, str] = {
     "bedrock-agent":         "bedrock",
     "cloudwatch":            "cloudwatch",
     "logs":                  "logs",
+    "elbv2":                 "elasticloadbalancing",
 }
 
 
@@ -116,6 +117,8 @@ SERVICE_TO_IAM_PREFIX: dict[str, str] = {
 # 안 지키는 것만 여기 적는다. 근거 없이 늘리지 말 것.
 
 OPERATION_TO_ACTION: dict[tuple[str, str], str] = {
+    # https://docs.aws.amazon.com/service-authorization/latest/reference/list_budgets.html
+    ("budgets", "describe_budgets"): "budgets:ViewBudget",
     ("s3", "list_objects"):    "s3:ListBucket",
     ("s3", "list_objects_v2"): "s3:ListBucket",
     ("s3", "head_bucket"):     "s3:ListBucket",

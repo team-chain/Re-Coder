@@ -1,0 +1,3 @@
+{
+  "app.cjs": "exports.day=s=>new Date(s).toISOString().slice(0,10);\n"
+}

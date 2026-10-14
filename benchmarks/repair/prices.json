@@ -1,0 +1,11 @@
+{
+  "currency": "USD",
+  "unit": "per million tokens",
+  "checked_at": "2026-10-03",
+  "source": "https://www-cdn.anthropic.com/files/4zrzovbb/website/3684c2faafb97418665782cea0001f439f74b1d2.pdf",
+  "scope": "AWS Bedrock standard global cross-region, no caching or batch, under 200K context. Pre-tax list-price estimate, not an invoice.",
+  "models": {
+    "global.anthropic.claude-sonnet-4-5-20250929-v1:0": {"input": 3.0, "output": 15.0},
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0": {"input": 1.0, "output": 5.0}
+  }
+}

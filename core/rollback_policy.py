@@ -323,7 +323,7 @@ class RollbackPolicy:
         cmd.append(previous_image)
 
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             ok = proc.returncode == 0
             return RollbackResult(
                 kind=RollbackKind.LOCAL_CONTAINER,

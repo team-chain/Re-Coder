@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 from typing import Callable, Optional
 
@@ -112,6 +113,8 @@ class S3DeployResponse(BaseModel):
     #: index.html 이 없어 다른 HTML 을 복제했다면 그 원본 경로.
     index_copied_from: Optional[str] = None
     message: str
+    #: 배포 직후 브라우저로 첫 화면을 열어 본 결과(screen_check.ScreenResult). 확인하지 못했으면 None.
+    screen: Optional[dict] = None
 
 
 def _aws_error_detail(exc: Exception, action: str) -> str:
@@ -126,6 +129,18 @@ def _aws_error_detail(exc: Exception, action: str) -> str:
     except Exception:  # noqa: BLE001
         code = ""
 
+    message = ""
+    try:
+        message = str(getattr(exc, "response", {}).get("Error", {}).get("Message", "") or exc)
+    except Exception:  # noqa: BLE001
+        message = ""
+    if code in ("AccessDenied", "AccessDeniedException") and re.search(r"BlockPublic|public access", message, re.I):
+        return (
+            f"{action} 실패: 이 AWS 계정에 '퍼블릭 액세스 차단'이 켜져 있어 웹사이트 공개 정책을 넣을 수 없습니다. "
+            "S3 콘솔 → 왼쪽 메뉴 '이 계정에 대한 퍼블릭 액세스 차단 설정'에서 '새 버킷 정책을 통해 부여된 퍼블릭 액세스 차단'을 "
+            "끈 뒤 다시 시도하세요(조직 정책이면 관리자에게 요청). 권한표를 다시 적용해도 해결되지 않습니다. "
+            f"(AWS: {code})"
+        )
     if code in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation"):
         return (
             f"{action} 권한이 없습니다. 배포 센터의 「권한표」를 사용자/역할에 "
@@ -141,6 +156,12 @@ def _aws_error_detail(exc: Exception, action: str) -> str:
             f"요청한 리전이 올바르지 않습니다. 자격증명이 유효한 리전과 같은지 "
             f"확인하세요. (AWS: {code})"
         )
+    #: 네트워크 계열(BotoCoreError: 연결 실패·시간 초과·연결 끊김)은 원문 대신 할 일을 알린다.
+    name = type(exc).__name__
+    if name in ("EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError", "ConnectionClosedError",
+                "ProxyConnectionError", "SSLError", "HTTPClientError"):
+        return (f"{action} 중 AWS 에 연결하지 못했습니다({name}). 인터넷·사내 프록시·방화벽을 확인한 뒤 "
+                "다시 배포하세요. 이미 올라간 파일은 다음 배포에서 그대로 덮어씁니다.")
     return f"{action} 실패: {exc}"
 
 
@@ -179,12 +200,14 @@ def _ensure_bucket(client, bucket: str, region: str) -> tuple[bool, str]:
         if status not in (403, 404):
             raise
         if status == 403:
-            # 존재하지만 내 것이 아니다 — 만들려 하면 더 헷갈리는 오류가 난다.
+            # 버킷 이름에 계정 지문이 들어가 다른 계정과 겹칠 일은 거의 없다 — 403 은 대개 내 권한(s3:ListBucket)
+            # 부족이다. 이름을 바꾸라고 하면 해결되지 않으니 권한표를 먼저 안내한다.
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"버킷 '{bucket}' 이 이미 다른 계정에 있습니다. 프로젝트 이름을 "
-                    f"바꿔 다시 시도하세요."
+                    f"버킷 '{bucket}' 을(를) 확인할 권한이 없습니다(HTTP 403). 배포 센터의 「권한표」를 "
+                    f"사용자/역할에 다시 적용한 뒤 시도하세요. 그래도 같으면 이 이름의 버킷이 다른 계정에 "
+                    f"있는 것이니 프로젝트 이름을 바꿔 다시 시도하세요."
                 ),
             ) from exc
 
@@ -283,12 +306,12 @@ def _deploy_bucket_sync(
     `progress` 가 주어지면 단계마다 보고한다. 없으면(기존 라우트) 아무
     일도 하지 않으므로 동작이 완전히 같다 — AWS 호출은 그대로다.
     """
-    from botocore.exceptions import ClientError  # type: ignore
+    from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
 
     _report(progress, {"step": "bucket", "message": f"버킷 {bucket} 확인 중"})
     try:
         created, actual_region = _ensure_bucket(client, bucket, region)
-    except ClientError as exc:
+    except (ClientError, BotoCoreError) as exc:
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "S3 버킷 생성"),
         ) from exc
@@ -313,7 +336,7 @@ def _deploy_bucket_sync(
     _report(progress, {"step": "website", "message": "정적 호스팅 설정 중"})
     try:
         _configure_public_website(client, bucket, region)
-    except ClientError as exc:
+    except (ClientError, BotoCoreError) as exc:
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "정적 호스팅 설정"),
         ) from exc
@@ -336,7 +359,7 @@ def _deploy_bucket_sync(
             _report(progress, {
                 "step": "upload", "done_count": index, "total": total, "key": item.key,
             })
-    except ClientError as exc:
+    except (ClientError, BotoCoreError) as exc:
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "파일 업로드"),
         ) from exc
@@ -345,13 +368,19 @@ def _deploy_bucket_sync(
     removed = _prune_obsolete_objects(client, bucket, plan.keys)
 
     url = s3_byo.website_url(bucket, region)
+    screen = _check_website_screen(url, progress)
     note = ""
     if plan.index_copied_from:
         note = f" index.html 이 없어 {plan.index_copied_from} 를 진입 문서로 함께 올렸습니다."
     if removed:
         note += f" 이전 배포 파일 {removed}개를 정리했습니다."
+    screen_failed = bool(screen) and screen.get("ok") is False
+    if screen_failed:
+        diag = screen.get("diagnosis") or {}
+        note += f" 하지만 화면이 표시되지 않습니다: {diag.get('cause') or ''} 해결: {diag.get('fix') or ''}"
     return S3DeployResponse(
-        status="deployed",
+        #: 파일은 올라갔지만 화면이 안 나오면 "배포 완료"라고 하지 않는다(주소만 뜨는 배포 방지).
+        status="screen_failed" if screen_failed else "deployed",
         bucket=bucket,
         region=region,
         url=url,
@@ -359,7 +388,40 @@ def _deploy_bucket_sync(
         bucket_created=created,
         index_copied_from=plan.index_copied_from,
         message=f"{len(plan.items)}개 파일을 올렸습니다.{note}{region_note}",
+        screen=screen,
     )
+
+
+def _check_website_screen(url: str, progress) -> Optional[dict]:
+    """S3 웹사이트 주소의 첫 화면 확인. 네트워크 사정으로 확인하지 못하면 None(판정 보류)."""
+    try:
+        import screen_check
+    except ImportError:  # pragma: no cover
+        from core import screen_check  # type: ignore
+    if not screen_check.enabled():
+        return None
+    _report(progress, {"step": "screen", "message": "브라우저로 첫 화면이 실제로 표시되는지 확인합니다"})
+    try:
+        result = screen_check.check_screen(url, wait_seconds=15.0)
+    except Exception as exc:  # noqa: BLE001 - 확인 도구 문제로 배포 결과를 흔들지 않는다
+        logger.warning("S3 screen check failed to run: %s", exc)
+        return None
+    data = result.to_dict()
+    if not result.ok and result.code == "SCREEN_HTTP_ERROR" and "연결하지 못했습니다" in " ".join(result.problems):
+        data["ok"] = None  # 이 PC 에서 S3 주소에 닿지 못함(사내망 등) — 실패로 단정하지 않는다
+        data["warnings"] = data.get("warnings", []) + ["이 PC 에서 S3 주소에 연결하지 못해 화면을 확인하지 못했습니다."]
+        return data
+    if not result.ok:
+        data["diagnosis"] = result.diagnosis()
+        #: 서버(컨테이너)용 안내 대신 S3 에서 할 일을 알려 준다.
+        s3_fix = {
+            "SCREEN_NOT_HTML": "S3 웹사이트 주소가 403/404 를 돌려줍니다. 업로드한 폴더에 index.html 이 있는지, 버킷의 공개 "
+                               "정책·웹사이트 설정이 적용됐는지 확인하고 1~2분 뒤 주소를 다시 열어 보세요. 계속되면 다시 배포하세요.",
+            "SCREEN_HTTP_ERROR": "S3 웹사이트 주소가 오류를 돌려줍니다. 잠시 뒤 주소를 다시 열어 보고, 계속되면 다시 배포하세요.",
+        }.get(result.code or "")
+        if s3_fix:
+            data["diagnosis"]["fix"] = s3_fix
+    return data
 
 
 def _deploy_sync(

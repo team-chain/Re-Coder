@@ -148,7 +148,7 @@ def detect_docker() -> DockerCapabilities:
         try:
             res = subprocess.run(
                 ["docker", "version", "--format", "{{.Server.Version}}"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if res.returncode == 0:
                 caps.cli_available = True
@@ -180,8 +180,12 @@ def http_probe(
     expected_status 미지정 시 200~299 모두 OK.
     """
     url = f"http://{host}:{port}{path}"
+    #: 로컬 컨테이너를 찌르는 요청은 시스템 프록시(HTTP_PROXY·회사 PC 의 Windows 프록시)를 거치면
+    #: 살아 있는 앱도 "응답 없음"이 된다 — 로컬 주소는 프록시 없이 직접 연결한다.
+    opener = (urllib_request.build_opener(urllib_request.ProxyHandler({}))
+              if host in ("127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0") else urllib_request.build_opener())
     try:
-        with urllib_request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — localhost only
+        with opener.open(url, timeout=timeout) as resp:  # noqa: S310 — localhost only
             status = resp.getcode() or 0
             body = resp.read(128).decode("utf-8", errors="ignore")
             if expected_status:
@@ -247,7 +251,7 @@ def temporary_container(
 
     log.debug("Starting temporary container: %s", " ".join(cmd[:6]))  # 환경변수 값은 로그 안 함
     try:
-        run_proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        run_proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"docker run timeout: {exc}") from exc
 
@@ -286,7 +290,7 @@ def fetch_container_logs(container_id: str, tail: int = 50, cli: str = "docker")
     try:
         res = subprocess.run(
             [cli, "logs", "--tail", str(tail), container_id],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
     except subprocess.TimeoutExpired:
         return "<log fetch timeout>"

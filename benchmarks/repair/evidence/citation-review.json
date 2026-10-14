@@ -1,0 +1,1179 @@
+[
+  {
+    "run_id": "7cf52fd8-f681-4440-81c2-c53008dc6e67",
+    "case_id": "npm-lockfile-out-of-sync",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "npm-ci:0"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "56406e37-43a7-4a43-97c3-dc031ca06559",
+    "case_id": "npm-lockfile-out-of-sync",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "npm-ci:0"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "808e174f-af01-4e2f-b342-f32909d0a98a",
+    "case_id": "npm-lockfile-out-of-sync",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "npm-ci:0"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "44872fea-f1b5-4c5e-bfa3-87ba3a6df086",
+    "case_id": "npm-peer-dependency-conflict",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "npm-package:4"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "17f4502a-f5bc-446a-9ff1-067d1d339ff2",
+    "case_id": "npm-unsupported-node-engine",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "npm-package:6",
+      "npm-package:7"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "de3fdbc0-0d69-4900-820c-05f02c40b634",
+    "case_id": "npm-peer-dependency-conflict",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "peer 버전 수정의 근거는 있으나 lockfile 없는 프로젝트에서 npm ci로 바꾸는 추가 수정은 문서의 전제와 맞지 않는다.",
+    "ids": [
+      "npm-ci:0",
+      "npm-ci:1",
+      "npm-package:4"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "9c0b58a7-ced8-4dc9-a457-cdf3fb77a325",
+    "case_id": "npm-unsupported-node-engine",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "npm-package:6"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "7b499c60-6c17-4494-b682-3d93e5dcea25",
+    "case_id": "npm-unsupported-node-engine",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "npm-package:6"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "6974a1b6-263b-46b9-ba6d-84f4ab529568",
+    "case_id": "npm-peer-dependency-conflict",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "npm-package:4"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "927300c6-225b-4278-8da0-26d9d31a509d",
+    "case_id": "npm-private-registry-auth",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "최종 인용이 없거나 npm ci/컨텍스트 문서만으로 registry 인증 변경을 뒷받침하지 못한다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "3c4f8fe8-8096-47b1-a156-e36e9695dff3",
+    "case_id": "npm-private-registry-auth",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "최종 인용이 없거나 npm ci/컨텍스트 문서만으로 registry 인증 변경을 뒷받침하지 못한다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "1d6c1f8d-dd32-43ca-9941-be3220e9c593",
+    "case_id": "npm-private-registry-auth",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "최종 인용이 없거나 npm ci/컨텍스트 문서만으로 registry 인증 변경을 뒷받침하지 못한다.",
+    "ids": [
+      "docker-context:9",
+      "npm-ci:0",
+      "npm-dependencies"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "5088ea6d-112f-4787-97a5-a5c2be64e943",
+    "case_id": "node-framework-express5-unnamed-wildcard",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "express-migration:1",
+      "express5-routing"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "ba4df49b-64bd-4d70-a055-7fc3ab5852ad",
+    "case_id": "node-framework-express5-unnamed-wildcard",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "express-migration:1",
+      "express5-routing"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "9d6fe824-4c4b-433b-9a75-c7a3bafce79b",
+    "case_id": "node-framework-express5-unnamed-wildcard",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "express-migration:1",
+      "express5-routing"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "438b5018-4238-45a1-a9ca-b59e73268a0f",
+    "case_id": "node-framework-express5-optional-route",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "express-migration:1"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "86dc37c8-558d-4bfc-8a0f-7114f2e93387",
+    "case_id": "node-framework-express5-optional-route",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "express-migration:1"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "24059277-e86e-4d4d-a0b0-f2bbdfae0647",
+    "case_id": "node-framework-express5-optional-route",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "express-migration:1"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "dc68030e-0d13-436b-bacc-56c01ce6a2cf",
+    "case_id": "node-framework-esm-commonjs-mismatch",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "node-module-errors:0",
+      "node-packages:0"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "56a25a19-e108-467b-af12-5b6cb9dba2cc",
+    "case_id": "node-framework-esm-commonjs-mismatch",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "node-errors",
+      "node-module-errors:0",
+      "node-packages:0"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "2e2117f0-469c-4f5a-adeb-088e1118e3c2",
+    "case_id": "node-framework-top-level-await-require",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "node-errors",
+      "node-module-errors:0"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "eb995c2a-de63-42a5-8f89-c6f386ba0b39",
+    "case_id": "node-framework-esm-commonjs-mismatch",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "node-errors",
+      "node-module-errors:0",
+      "node-packages:0"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "48fa6373-6b0a-46e5-a7cd-13a8903bda7a",
+    "case_id": "node-framework-top-level-await-require",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "node-errors",
+      "node-module-errors:0"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "64d93569-090a-4b9e-9705-e3d04da8218d",
+    "case_id": "docker-copy-outside-context",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "인용 단락은 filesystem context가 없는 COPY 실패를 설명한다. ../ 경계 밖 경로에 대한 핵심 주장을 직접 뒷받침하지 않아 보수적으로 불충분 판정.",
+    "ids": [
+      "docker-context:9"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "f92fff7e-c53b-4662-9c56-2dcd4d512d81",
+    "case_id": "node-framework-top-level-await-require",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "node-errors",
+      "node-module-errors:0"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "b28701d1-6f3d-4c1e-abeb-adf5b8efab83",
+    "case_id": "docker-copy-outside-context",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "인용 단락은 filesystem context가 없는 COPY 실패를 설명한다. ../ 경계 밖 경로에 대한 핵심 주장을 직접 뒷받침하지 않아 보수적으로 불충분 판정.",
+    "ids": [
+      "docker-context:9"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "c7dbce1c-003a-4270-aed7-048768323be8",
+    "case_id": "docker-dockerignore-required-file",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "docker-context:9"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "855f2ab3-c1e4-4afc-96cd-df08548797bf",
+    "case_id": "docker-copy-outside-context",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "인용 단락은 filesystem context가 없는 COPY 실패를 설명한다. ../ 경계 밖 경로에 대한 핵심 주장을 직접 뒷받침하지 않아 보수적으로 불충분 판정.",
+    "ids": [
+      "docker-context:9"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "9d7a83ab-0010-4928-9760-c1c9649ea02d",
+    "case_id": "docker-dockerignore-required-file",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "docker-context:9"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "1e9296d8-ee94-4738-8ec8-e94a093f48ad",
+    "case_id": "docker-dockerignore-required-file",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "docker-context:9"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "6133798e-906d-4728-870e-146178213c09",
+    "case_id": "docker-wrong-multistage-source",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "최종 편집안에 문서 인용이 없다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "c0cc540b-f77b-4283-8370-2610d8b0f013",
+    "case_id": "docker-wrong-multistage-source",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "최종 편집안에 문서 인용이 없다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "42badd4c-342e-4ba5-be1a-8d6fcb4d391b",
+    "case_id": "docker-wrong-multistage-source",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "최종 편집안에 문서 인용이 없다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "4bc15ba3-3377-485f-86c4-e666914a34c5",
+    "case_id": "docker-native-addon-toolchain",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "컴파일러 설치 편집안의 문서 인용이 없다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "a9247281-74f7-469b-819d-731cd7362947",
+    "case_id": "docker-native-addon-toolchain",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "컴파일러 설치 편집안의 문서 인용이 없다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "30f72a38-6c8c-434a-82b4-b3872939cee6",
+    "case_id": "docker-native-addon-toolchain",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "컴파일러 설치 편집안의 문서 인용이 없다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "ae5cde1e-7a68-403f-95e7-bfba83bf1538",
+    "case_id": "docker-runtime-user-permission",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "권한 변경 편집안의 문서 인용이 없다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "2bc1ba4e-521f-402f-8757-7403b23d957c",
+    "case_id": "docker-runtime-user-permission",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "권한 변경 편집안의 문서 인용이 없다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "829917e7-1a10-459c-ae74-4423d503c45d",
+    "case_id": "docker-runtime-user-permission",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "권한 변경 편집안의 문서 인용이 없다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "59baf8f6-db9b-43a3-8642-cb2c5f67e3d0",
+    "case_id": "ecs-ecr-container-port-mismatch",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "일부 편집에 필요한 직접 근거가 부족하다.",
+    "ids": [
+      "ecs-health",
+      "ecs-task-definition:10",
+      "ecs-task-definition:11",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "89e55386-c237-4c48-8987-a0b356d45e4f",
+    "case_id": "ecs-ecr-container-port-mismatch",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-health",
+      "ecs-task-definition:10",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "bbf3a722-cb28-45ba-a97c-1f0a7013026d",
+    "case_id": "ecs-ecr-container-port-mismatch",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-health",
+      "ecs-task-definition:10",
+      "ecs-task-definition:11",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "633253df-74df-4dc7-9ab6-6a91afbc1536",
+    "case_id": "ecs-ecr-health-path-mismatch",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-health",
+      "ecs-task-definition:10",
+      "ecs-task-definition:11",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "b550f170-eb7b-4aa0-b05b-a0ff5974827e",
+    "case_id": "ecs-ecr-health-path-mismatch",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-health",
+      "ecs-task-definition:10",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "7b637bcd-1724-4f7d-9de0-6cea674132b5",
+    "case_id": "ecs-ecr-health-path-mismatch",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-health",
+      "ecs-task-definition:10"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "30de94fa-749d-4de1-9f80-3db34a4fefb3",
+    "case_id": "ecs-ecr-startup-grace-period",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-health",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "6ecbac26-e810-45bd-a7fd-fcca5fa04af3",
+    "case_id": "ecs-ecr-startup-grace-period",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-health",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "c035806b-aa3c-4d08-ae90-3c6f97fd6d71",
+    "case_id": "ecs-ecr-startup-grace-period",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-health",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "5681f115-4bdc-42d3-b850-4a6383ff863d",
+    "case_id": "ecs-ecr-execution-role-image-pull",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecr-policies:2",
+      "ecs-execution-role"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "7bdf5132-49c9-4443-8223-4a662ba02c08",
+    "case_id": "ecs-ecr-execution-role-image-pull",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecr-policies:2",
+      "ecs-execution-role"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "d63b2f58-35bf-4f88-9788-8d2f12c2787f",
+    "case_id": "ecs-ecr-image-tag-missing",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-stopped",
+      "ecs-task-definition:1"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "32b45c07-601e-473c-b1bd-70ec1d1a5fc4",
+    "case_id": "ecs-ecr-image-tag-missing",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-stopped",
+      "ecs-task-definition:1"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "47a0cba0-da0a-4f73-aecd-88900ce031db",
+    "case_id": "ecs-ecr-execution-role-image-pull",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecr-policies:2",
+      "ecr-policies:4",
+      "ecs-execution-role"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "bdea2e2d-5a82-421a-a17e-d2ea103d157b",
+    "case_id": "ecs-ecr-image-tag-missing",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-stopped",
+      "ecs-task-definition:1"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "02314cdd-3fba-4cf2-addf-ff608e1d1ed9",
+    "case_id": "iam-s3-task-role-s3-read",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "815cc370-6468-4d95-94a0-702943be21de",
+    "case_id": "iam-s3-task-role-s3-read",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-cross-account:4",
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "2f35172d-c64c-4d32-93ac-158b2c1e4c0a",
+    "case_id": "iam-s3-task-role-s3-read",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "b66e1ec4-098f-414d-aafb-b5cd07518e11",
+    "case_id": "iam-s3-bucket-explicit-deny",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-cross-account:3",
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "ce3dcfc3-a21c-4709-97a9-f84e1fe6f0a6",
+    "case_id": "iam-s3-bucket-explicit-deny",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-cross-account:3",
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "616dfe3d-f776-4109-9ac7-901484b1d3ed",
+    "case_id": "iam-s3-bucket-explicit-deny",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-cross-account:3",
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "2fcdbf4b-9d5d-4caf-9a8b-4c9d5800933c",
+    "case_id": "iam-s3-kms-decrypt-permission",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-role-archive:5",
+      "s3-access-archive:16"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "b4974cd1-13da-4c97-997a-cd702529045a",
+    "case_id": "iam-s3-kms-decrypt-permission",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-role-archive:5",
+      "s3-access-archive:16"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "182baf6f-4ccf-45ea-a28d-5bd7170804de",
+    "case_id": "iam-s3-kms-decrypt-permission",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-role-archive:5",
+      "s3-access-archive:16"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "87f18b3f-6e55-42e3-ab20-005d8e17e981",
+    "case_id": "iam-s3-ecr-resource-scope",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "인용 원문 6은 SourceVpc 조건 제약, 7은 Resource * 예시다. GetAuthorizationToken의 리소스 범위 지원 불가라는 단정의 직접 근거는 없어 불충분 판정.",
+    "ids": [
+      "ecs-execution-role",
+      "ecs-role-archive:6",
+      "ecs-role-archive:7"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "763070bf-454a-45ab-9619-05e2d1399d06",
+    "case_id": "iam-s3-ecr-resource-scope",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "인용 원문 6은 SourceVpc 조건 제약, 7은 Resource * 예시다. GetAuthorizationToken의 리소스 범위 지원 불가라는 단정의 직접 근거는 없어 불충분 판정.",
+    "ids": [
+      "ecs-execution-role",
+      "ecs-role-archive:6",
+      "ecs-role-archive:7"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "a72e286a-eb36-48f2-9e38-62e87ec9e07a",
+    "case_id": "iam-s3-ecr-resource-scope",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "인용 원문 6은 SourceVpc 조건 제약, 7은 Resource * 예시다. GetAuthorizationToken의 리소스 범위 지원 불가라는 단정의 직접 근거는 없어 불충분 판정.",
+    "ids": [
+      "ecs-execution-role",
+      "ecs-role-archive:6",
+      "ecs-role-archive:7"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "55a02aab-31cb-4b3a-8306-e2cd7f785a4b",
+    "case_id": "iam-s3-s3-endpoint-policy",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "908957b3-4447-49d4-9cb9-f27f8842fcc1",
+    "case_id": "iam-s3-s3-endpoint-policy",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-cross-account:4",
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "8f05811b-75ec-44c8-9b23-5fa12b303ea8",
+    "case_id": "iam-s3-s3-endpoint-policy",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "0ce43186-c966-4495-b7dc-a064f20d0369",
+    "case_id": "iam-s3-cross-account-bucket",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-cross-account:4",
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "77b857e5-f28d-4d4d-83d4-a501fe7f9317",
+    "case_id": "iam-s3-cross-account-bucket",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-cross-account:4",
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "6d27afff-e886-42b1-9879-7e250a7c8bf2",
+    "case_id": "iam-s3-cross-account-bucket",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "iam-cross-account:4",
+      "iam-evaluation:13",
+      "s3-access"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "cd4a198b-33ff-49dc-9fbb-89f1ba5ce976",
+    "case_id": "logic-control-off-by-one-pagination",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [
+      "node-errors"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "6e73cff3-0476-47c0-b7ba-65da5465dcfb",
+    "case_id": "logic-control-off-by-one-pagination",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "71a0c697-a4b8-401d-9555-87a5fb454102",
+    "case_id": "logic-control-off-by-one-pagination",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "e9ba795f-faac-4896-bbe9-a5243700988a",
+    "case_id": "logic-control-async-race",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "35c50548-b78f-4563-8841-225a439898bf",
+    "case_id": "logic-control-async-race",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [
+      "node-errors"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "0ce5384f-7b83-4259-92cc-4e43cbe4810b",
+    "case_id": "logic-control-async-race",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "68d93214-0b56-4c5a-a34f-0f69054af72a",
+    "case_id": "logic-control-wrong-tax-rounding",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "5a3c8a2a-f630-46cf-83ae-eedb763ffbf5",
+    "case_id": "logic-control-wrong-tax-rounding",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "ccbd1226-9e9b-4ddd-b699-153413ce9456",
+    "case_id": "logic-control-wrong-tax-rounding",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "64127a90-d3fe-48f7-9281-8fe96eda01c2",
+    "case_id": "logic-control-invalid-state-transition",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "64e198e1-8c44-4854-8d79-1fb99df20902",
+    "case_id": "logic-control-invalid-state-transition",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "647f18dc-abc9-465e-b1d4-eb61ca416ace",
+    "case_id": "logic-control-invalid-state-transition",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "77c0c308-15f0-407f-a533-ab6922f57186",
+    "case_id": "logic-control-timezone-boundary",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [
+      "node-errors"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "717ef0eb-198d-4b0d-ad4c-4086e8ea047b",
+    "case_id": "logic-control-timezone-boundary",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "31eebda1-63c3-4d0f-8d12-7c57145f9332",
+    "case_id": "logic-control-timezone-boundary",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "6a8dcc99-f204-4590-a302-d4d1007af6c8",
+    "case_id": "logic-control-missing-null-branch",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "02ac60f0-9ae1-42bc-9c51-d6138b1ef107",
+    "case_id": "logic-control-missing-null-branch",
+    "condition": "B",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "87bf5731-6c52-4628-adac-c3fd219a01a7",
+    "case_id": "logic-control-missing-null-branch",
+    "condition": "D",
+    "review": "incorrect",
+    "reason": "인용이 없거나 이 로직 수정에 무관하다.",
+    "ids": [],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "e94f5458-718d-4e2b-a76e-9aed096290b1",
+    "case_id": "docker-probe-tool-missing",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "docker-runtime",
+      "ecs-task-definition:12",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "4defa157-1edb-4231-be44-b93cec2401cc",
+    "case_id": "docker-probe-tool-missing",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "docker-runtime",
+      "ecs-task-definition:12",
+      "ecs-task-definition:13"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "73ee3cf2-71d3-44f1-a4f7-1c1ecb2e0412",
+    "case_id": "docker-probe-tool-missing",
+    "condition": "C",
+    "review": "incorrect",
+    "reason": "문서는 실행 가능한 probe 필요성을 뒷받침하지만 최종 /dev/tcp가 /bin/sh에서 지원된다는 근거가 없다. 강화된 oracle도 실패했다.",
+    "ids": [
+      "docker-runtime",
+      "ecs-task-definition:12"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "ff48703f-8dd4-472e-920f-cbc0b60af717",
+    "case_id": "ecs-ecr-secrets-initialization",
+    "condition": "C",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-role-archive:4",
+      "ecs-role-archive:5"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "a8ff0161-991a-4090-977e-6227af0c022d",
+    "case_id": "ecs-ecr-secrets-initialization",
+    "condition": "D",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-role-archive:4",
+      "ecs-role-archive:5"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  },
+  {
+    "run_id": "298d2c1f-3fed-496d-8030-641668c21736",
+    "case_id": "ecs-ecr-secrets-initialization",
+    "condition": "B",
+    "review": "correct",
+    "reason": "인용 단락이 수정의 핵심 원리/설정 규칙을 뒷받침한다. 실제 값과 파일 관계는 제공된 로그·소스에 근거한다.",
+    "ids": [
+      "ecs-role-archive:4",
+      "ecs-role-archive:5"
+    ],
+    "reviewer": "assistant manual review",
+    "scope": "Final schema-valid edit proposal, including server-rejected proposals; key-mechanism support, not independent human review."
+  }
+]

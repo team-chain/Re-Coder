@@ -137,11 +137,18 @@ def test_실행시_빌드후_스캔이_돌고_CRITICAL_이면_컨테이너를_�
     monkeypatch.setattr(deploy, "_local_image_exists", lambda image: True)
 
     scanned: list[str] = []
+    async def image_id(image):
+        return 'sha256:' + 'a' * 64
+    monkeypatch.setattr(deploy, '_local_image_id', image_id)
 
     async def _critical_scan(scan_type, workspace, target):
         scanned.append(target)
         return {"status": "ok", "scan_type": "trivy", "critical_count": 2,
-                "high_count": 0, "findings": [], "summary": "2 critical"}
+                "high_count": 0, "summary": "2 critical", "findings": [
+                    {"severity": "CRITICAL", "id": "GHSA-34x7-hfp2-rc4v", "package": "tar", "installed": "6.2.1",
+                     "fixed": "7.5.21", "class": "lang-pkgs", "pkg_path": "app/node_modules/tar/package.json"},
+                    {"severity": "CRITICAL", "id": "CVE-2026-0001", "package": "libssl3", "installed": "3.3.1-r0",
+                     "fixed": "3.3.2-r0", "class": "os-pkgs"}]}
 
     monkeypatch.setattr(deploy, "_execute_scan", _critical_scan)
 
@@ -150,19 +157,27 @@ def test_실행시_빌드후_스캔이_돌고_CRITICAL_이면_컨테이너를_�
 
     monkeypatch.setattr(deploy.subprocess, "run", _docker_must_not_run)
 
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(deploy.execute_deployment(
-            deploy.ExecuteRequest(plan_id=plan.plan_id, approved=True)
-        ))
+    result = asyncio.run(deploy.execute_deployment(
+        deploy.ExecuteRequest(plan_id=plan.plan_id, approved=True)
+    ))
 
-    assert exc.value.status_code == 400
-    assert "CRITICAL" in str(exc.value.detail)
+    #: 차단은 그대로 — 대신 무엇을 어떻게 고칠지를 함께 돌려준다.
+    assert result["status"] == "failed" and result["stage"] == "scan"
+    assert "CRITICAL" in result["message"]
+    assert result["diagnosis"]["code"] == "IMAGE_CRITICAL_CVE"
+    assert any("tar 6.2.1 → 7.5.21" in line for line in result["diagnosis"]["lines"])
+    origins = {v["package"]: v["origin"] for v in result["vulnerabilities"]}
+    assert origins == {"tar": "app", "libssl3": "base_os"}
     #: 스캔이 실제로 1회 돌았다 — 이게 DoD 다.
-    assert scanned == [plan.image]
-    #: 대기열은 소진된다 (재시도 시 중복 차단 로직이 꼬이지 않게).
-    assert plan.plan_id not in deploy._plans_pending_image_scan
+    assert scanned == ['sha256:' + 'a' * 64]
+    # A rejected request must still require scanning on retry.
+    assert plan.plan_id in deploy._plans_pending_image_scan
+    again = asyncio.run(deploy.execute_deployment(deploy.ExecuteRequest(plan_id=plan.plan_id, approved=True)))
+    assert again["status"] == "failed"
+    assert len(scanned) == 2
 
     deploy._deployment_plans.pop(plan.plan_id, None)
+    deploy._plans_pending_image_scan.pop(plan.plan_id, None)
 
 
 def test_실행_취소시에도_대기열이_정리된다(monkeypatch) -> None:
@@ -183,7 +198,7 @@ def test_실행_취소시에도_대기열이_정리된다(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_음성대조_스캔이_정상으로_돈_플랜은_승인도_대기열도_그대로(monkeypatch) -> None:
+def test_clean_preview_still_requires_scanning_the_image_built_at_execution(monkeypatch) -> None:
     monkeypatch.setattr(deploy, "_local_image_exists", lambda image: True)
 
     async def _clean_scan(scan_type, workspace, target):
@@ -204,4 +219,4 @@ def test_음성대조_스캔이_정상으로_돈_플랜은_승인도_대기열�
     plan = asyncio.run(deploy.create_deployment_plan(_plan_request()))
 
     assert plan.approval_level == ApprovalLevel.CONFIRM
-    assert deploy._plans_pending_image_scan == {}
+    assert deploy._plans_pending_image_scan == {plan.plan_id: plan.image}

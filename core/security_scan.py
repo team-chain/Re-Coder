@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -37,6 +38,11 @@ except ImportError:  # core/ 가 직접 sys.path 에 있는 실행 환경
         SecurityScanSeverity,
         SecurityScanTool,
     )
+
+try:
+    from core.scan_process import named_docker_run, stop_scan_process
+except ImportError:
+    from scan_process import named_docker_run, stop_scan_process
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +82,18 @@ def _docker_fallback_available(tool: str) -> bool:
 
 
 
+#: 결제·AI·메일·패키지 서비스 키 — gitleaks 기본 규칙과 같은 모양. 생성 직후 검사와 배포 보안 검사가 같은 것을 잡게 한다.
+#: (예전에는 이 모양이 없어서 README 의 sk_test_… 를 생성 검사는 놓치고 배포 보안 검사(gitleaks)만 잡았다.)
+PROVIDER_SECRET_PATTERNS = [
+    ("stripe_secret_key", re.compile(r"\b(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}\b"), "critical"),
+    ("stripe_webhook_secret", re.compile(r"\bwhsec_[A-Za-z0-9]{24,}\b"), "high"),
+    ("anthropic_api_key", re.compile(r"\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{40,}"), "critical"),
+    ("openai_api_key", re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}\b"), "critical"),
+    ("sendgrid_api_key", re.compile(r"\bSG\.[A-Za-z0-9_-]{16,32}\.[A-Za-z0-9_-]{16,64}\b"), "critical"),
+    ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"), "critical"),
+]
+
+
 class SecurityScanner:
     """Trivy / Hadolint / gitleaks 통합 보안 스캐너"""
 
@@ -94,21 +112,34 @@ class SecurityScanner:
         findings: list[SecurityFinding] = []
 
         tasks = []
+        tools = []
         if image:
             tasks.append(self._run_trivy(image))
+            tools.append(SecurityScanTool.TRIVY)
         if dockerfile_path:
             tasks.append(self._run_hadolint(dockerfile_path))
+            tools.append(SecurityScanTool.HADOLINT)
         if repo_path:
             tasks.append(self._run_gitleaks(repo_path))
             tasks.append(self._run_builtin_secrets(repo_path))
+            tools.extend([SecurityScanTool.GITLEAKS, SecurityScanTool.GITLEAKS])
 
         scan_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for scan in scan_results:
-            if isinstance(scan, Exception):
-                logger.warning("Security scan error: %s", scan)
-            elif isinstance(scan, list):
-                findings.extend(scan)
+        for tool, scan in zip(tools, scan_results):
+            if isinstance(scan, asyncio.CancelledError):
+                raise scan
+            if not isinstance(scan, list) or any(not isinstance(f, SecurityFinding) for f in scan):
+                # An unexpected worker failure must retain the tool identity.
+                # Otherwise an empty findings list turns an unscanned image green.
+                logger.warning("%s scan returned %s", tool.value, type(scan).__name__)
+                findings.append(SecurityFinding(
+                    tool=tool, severity=SecurityScanSeverity.HIGH,
+                    title=f"{tool.value}_scan_failed",
+                    description=f"{tool.value} 검사 결과를 확인하지 못했습니다 ({type(scan).__name__}). 다시 검사하세요.",
+                ))
+                continue
+            findings.extend(scan)
 
         findings = self._dedupe_secret_findings(findings)
         result.findings = findings
@@ -143,7 +174,7 @@ class SecurityScanner:
             # 디렉터리로 받는다. ECR 이미지를 끌어와야 하면 AWS 자격증명이
             # 필요하므로 환경변수 이름만 넘기고 ~/.aws 는 읽기 전용으로 준다.
             # 취약점 DB 캐시를 호스트에 두지 않으면 매번 수백 MB 를 다시 받는다.
-            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "recoder-trivy")
+            cache_dir = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "recoder-trivy")
             os.makedirs(cache_dir, exist_ok=True)
             cmd = [
                 "docker", "run", "--rm",
@@ -151,12 +182,25 @@ class SecurityScanner:
                 "-v", f"{out_dir}:/out",
                 "-v", f"{cache_dir}:/root/.cache/",
             ]
-            for name in _AWS_ENV_PASSTHROUGH:
-                if os.environ.get(name):
-                    cmd.extend(["-e", name])
-            aws_dir = os.path.join(os.path.expanduser("~"), ".aws")
-            if os.path.isdir(aws_dir):
-                cmd.extend(["-v", f"{aws_dir}:/root/.aws:ro"])
+            #: 이미지가 로컬 데몬에 있으면(방금 빌드·푸시한 경우) **AWS 자격증명을 넘기지 않고**
+            #: 로컬에서만 읽는다. 스캐너 컨테이너(외부 이미지)가 사용자 키를 받을 이유가 없다.
+            #: 로컬에 없을 때(ECR 에만 있는 이미지)만 원격에서 받도록 자격증명을 넘긴다.
+            local_image = False
+            try:
+                local_image = (await asyncio.to_thread(
+                    subprocess.run, ["docker", "image", "inspect", image], capture_output=True, timeout=20,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                local_image = False
+            if local_image:
+                trivy_args = trivy_args + ["--image-src", "docker"]
+            else:
+                for name in _AWS_ENV_PASSTHROUGH:
+                    if os.environ.get(name):
+                        cmd.extend(["-e", name])
+                aws_dir = os.path.join(os.path.expanduser("~"), ".aws")
+                if os.path.isdir(aws_dir):
+                    cmd.extend(["-v", f"{aws_dir}:/root/.aws:ro"])
             cmd.append(_DOCKER_IMAGES["trivy"])
             cmd.extend(trivy_args + ["--output", "/out/trivy.json", image])
             logger.info("trivy 바이너리가 없어 %s 컨테이너로 검사합니다", _DOCKER_IMAGES["trivy"])
@@ -166,7 +210,11 @@ class SecurityScanner:
         try:
             # 첫 실행은 취약점 DB(수백 MB)를 받느라 2분을 넘길 수 있다.
             await self._run_cmd(cmd, timeout=_TRIVY_TIMEOUT)
-            raw = json.loads(Path(output_path).read_text())
+            raw = json.loads(Path(output_path).read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or (
+                "Results" not in raw and not (raw.get("SchemaVersion") == 2 and isinstance(raw.get("Metadata"), dict))
+            ) or ("Results" in raw and not isinstance(raw["Results"], list)):
+                raise ValueError("Trivy returned an invalid report")
             for result in raw.get("Results", []):
                 for vuln in result.get("Vulnerabilities") or []:
                     sev_str = vuln.get("Severity", "UNKNOWN").upper()
@@ -247,8 +295,10 @@ class SecurityScanner:
         try:
             stdout = await self._run_cmd(cmd, allow_nonzero=True, stdin_data=stdin_data)
             if not stdout.strip():
-                return findings
+                raise ValueError("Hadolint returned no report")
             issues = json.loads(stdout)
+            if not isinstance(issues, list):
+                raise ValueError("Hadolint returned an invalid report")
             for issue in issues:
                 level = issue.get("level", "warning").lower()
                 sev = SecurityScanSeverity.CRITICAL if level == "error" else SecurityScanSeverity.MEDIUM
@@ -313,10 +363,12 @@ class SecurityScanner:
             # 검사 자체가 실패한 것(잘못된 플래그·마운트 실패 등) — 비어 있는
             # 보고서를 "시크릿 없음" 으로 읽으면 안 된다.
             await self._run_cmd(cmd)
-            raw_text = Path(output_path).read_text() if os.path.exists(output_path) else ""
-            if not raw_text.strip() or raw_text.strip() == "null":
-                return findings
+            if not os.path.isfile(output_path):
+                raise ValueError("Gitleaks did not create its report")
+            raw_text = Path(output_path).read_text(encoding="utf-8")
             leaks = json.loads(raw_text)
+            if leaks is not None and not isinstance(leaks, list):
+                raise ValueError("Gitleaks returned an invalid report")
             for leak in (leaks or []):
                 findings.append(SecurityFinding(
                     tool=SecurityScanTool.GITLEAKS,
@@ -359,6 +411,7 @@ class SecurityScanner:
         cmd: list[str], allow_nonzero: bool = False, stdin_data: Optional[bytes] = None,
         timeout: int = _SCAN_TIMEOUT,
     ) -> str:
+        cmd, name = named_docker_run(cmd)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
@@ -370,11 +423,14 @@ class SecurityScanner:
                 proc.communicate(stdin_data), timeout=timeout,
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            await stop_scan_process(proc, name)
             raise RuntimeError(f"Command timed out after {timeout}s: {cmd[0]}")
+        except asyncio.CancelledError:
+            await asyncio.shield(stop_scan_process(proc, name))
+            raise
 
         if proc.returncode != 0 and not allow_nonzero:
-            raise RuntimeError(f"{cmd[0]} failed (rc={proc.returncode}): {stderr.decode()[:500]}")
+            raise RuntimeError(f"{cmd[0]} failed (rc={proc.returncode}): {stderr.decode('utf-8', errors='replace')[:500]}")
 
         return stdout.decode("utf-8", errors="replace")
 
@@ -399,6 +455,7 @@ class SecurityScanner:
         ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), "high"),
         ("slack_webhook", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+"), "high"),
         ("private_key_block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"), "critical"),
+        *PROVIDER_SECRET_PATTERNS,
         ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), "medium"),
         ("generic_secret_assignment", re.compile(
             r"(?i)(?:api[_-]?key|secret(?:[_-]?key)?|access[_-]?key|auth[_-]?token|password|passwd|client[_-]?secret)"
@@ -449,7 +506,7 @@ class SecurityScanner:
                         # generic 패턴은 placeholder/예시 값 제외 (오탐 감소)
                         if name == "generic_secret_assignment":
                             val = m.group(1)
-                            if self._PLACEHOLDER_RE.search(val):
+                            if self._PLACEHOLDER_RE.search(val) or _name_like_secret(line, m):
                                 continue
                         raw = m.group(0)
                         masked = (raw[:4] + "***") if len(raw) > 7 else "***"
@@ -503,11 +560,25 @@ _STANDALONE_SECRET_PATTERNS = [
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), "high"),
     ("slack_webhook", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+"), "high"),
     ("private_key_block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"), "critical"),
+    *PROVIDER_SECRET_PATTERNS,
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), "medium"),
     ("generic_secret_assignment", re.compile(
         r"(?i)(?:api[_-]?key|secret(?:[_-]?key)?|access[_-]?key|auth[_-]?token|password|passwd|client[_-]?secret)"
         r"\s*[:=]\s*['\"]([^'\"\s]{16,})['\"]"), "high"),
 ]
+#: 키가 아니라 이름인 값 — 오류 코드·상수 이름(INVALID_PASSWORD: 'INVALID_PASSWORD', 'PASSWORD_TOO_WEAK').
+#: 실기기(카페 2.0.8): 오류 코드 목록이 "키처럼 보이는 값" 으로 잡혀 결과에 확인 필요로 남았다.
+_CONSTANT_NAME_VALUE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+
+
+def _name_like_secret(line: str, match: "re.Match") -> bool:
+    value = match.group(1)
+    if _CONSTANT_NAME_VALUE.match(value):
+        return True
+    key = re.search(r"([A-Za-z_][\w]*)['\"]?\s*[:=]\s*['\"]" + re.escape(value), line)
+    return bool(key and key.group(1).lower() == value.lower())
+
+
 _STANDALONE_PLACEHOLDER = re.compile(
     r"(?i)(your[_-]?|xxx|change[_-]?me|example|placeholder|dummy|<.*>|\{\{.*\}\}|\$\{)")
 _STANDALONE_SKIP_DIRS = {
@@ -528,7 +599,7 @@ def scan_text_for_secrets(text: str, filename: str = "") -> list[dict]:
             m = rx.search(line)
             if not m:
                 continue
-            if name == "generic_secret_assignment" and _STANDALONE_PLACEHOLDER.search(m.group(1)):
+            if name == "generic_secret_assignment" and (_STANDALONE_PLACEHOLDER.search(m.group(1)) or _name_like_secret(line, m)):
                 continue
             raw = m.group(0)
             masked = (raw[:4] + "***") if len(raw) > 7 else "***"
@@ -569,3 +640,63 @@ def scan_project_for_secrets(repo_path: str, max_files: int = 2000, max_bytes: i
             rel = str(fp)
         out.extend(scan_text_for_secrets(text, rel))
     return out
+
+
+# ── 문서의 예시 키 → 자리표시 ────────────────────────────────────────────────────
+#: README·.env.example 같은 문서는 실제 키가 필요 없다. AI 가 진짜처럼 생긴 예시 키(sk_test_51H…)를 쓰면
+#: 배포 보안 검사(gitleaks)가 "키 유출" 로 막는다. 문서 안의 키 모양 값은 <이름> 자리표시로 바꾼다.
+_DOC_SUFFIXES = (".md", ".mdx", ".markdown", ".txt", ".rst", ".adoc", ".example", ".sample", ".template", ".dist")
+_ENV_DOC_NAMES = (".env.example", ".env.sample", ".env.template", ".env.dist", "env.example", "example.env")
+_PLACEHOLDER_NAMES = {
+    "aws_access_key_id": "AWS_ACCESS_KEY_ID", "github_token": "GITHUB_TOKEN", "slack_token": "SLACK_TOKEN",
+    "google_api_key": "GOOGLE_API_KEY", "slack_webhook": "SLACK_WEBHOOK_URL", "jwt": "JWT",
+    "stripe_secret_key": "STRIPE_SECRET_KEY", "stripe_webhook_secret": "STRIPE_WEBHOOK_SECRET",
+    "anthropic_api_key": "ANTHROPIC_API_KEY", "openai_api_key": "OPENAI_API_KEY",
+    "sendgrid_api_key": "SENDGRID_API_KEY", "npm_token": "NPM_TOKEN",
+}
+_SECRET_NAME = re.compile(r"(?i)secret|token|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|credential|signing[_-]?key")
+_DOC_ASSIGN = re.compile(r"""(?P<pre>(?<![\w.-])(?P<name>[A-Za-z_][A-Za-z0-9_.-]{1,60})["']?\s*(?:=|:)\s*["'`]?)(?P<val>[^\s"'`<>,;)\]]{8,})""")
+_NOT_A_SECRET = re.compile(r"(?i)^(?:true|false|null|none|undefined|required|optional|string|number|\$\{.*|\$\(.*|process\.env.*|os\.environ.*|https?://.*|\d+[smhd]?)$")
+
+
+def _entropy(value: str) -> float:
+    import math
+    from collections import Counter
+    n = len(value)
+    return -sum(c / n * math.log2(c / n) for c in Counter(value).values()) if n else 0.0
+
+
+def is_doc_like(path: str) -> bool:
+    """키가 필요 없는 문서·예시 파일인가(.env.local 같은 실제 설정 파일은 아니다)."""
+    low = str(path or "").replace("\\", "/").lower()
+    base = low.rsplit("/", 1)[-1]
+    return base in _ENV_DOC_NAMES or low.endswith(_DOC_SUFFIXES)
+
+
+def redact_doc_secrets(text: str) -> tuple[str, int]:
+    """문서 안의 키 모양 값을 <이름> 자리표시로 바꾼다 → (바뀐 내용, 바꾼 줄 수). 값 원문은 남기지 않는다."""
+    if not text:
+        return text, 0
+    lines = text.split("\n")
+    changed = 0
+    patterns = [(n, rx) for n, rx, _ in _STANDALONE_SECRET_PATTERNS if n in _PLACEHOLDER_NAMES]
+    for i, line in enumerate(lines):
+        new = line
+        for name, rx in patterns:
+            new = rx.sub(f"<{_PLACEHOLDER_NAMES[name]}>", new)
+
+        def assign(m: "re.Match[str]") -> str:
+            name, val = m.group("name"), m.group("val")
+            if not _SECRET_NAME.search(name) or _NOT_A_SECRET.match(val) or _STANDALONE_PLACEHOLDER.search(val):
+                return m.group(0)
+            token = re.match(r"[\w.=+/-]*", val).group(0)
+            if len(token) < 10 or _entropy(token) < 3.5:
+                return m.group(0)  # 짧거나 평범한 값(예: password: required, Admin1234!)은 그대로 — gitleaks 일반 규칙과 같은 기준
+            label = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper() or "SECRET"
+            return m.group("pre") + f"<{label}>"
+
+        new = _DOC_ASSIGN.sub(assign, new)
+        if new != line:
+            lines[i] = new
+            changed += 1
+    return "\n".join(lines), changed
