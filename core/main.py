@@ -81,6 +81,7 @@ from api.routes import (  # noqa: E402
     repair,
     ops_alerts as ops_alerts_routes,
     aws_cleanup as aws_cleanup_routes,
+    security_checks as security_checks_routes,
 )
 
 _bound_port: int = 0
@@ -235,6 +236,14 @@ async def lifespan(app: FastAPI):
             ops_task = _asyncio.create_task(_ops_alerts.Monitor(_ops_session).run_forever())
         except Exception as exc:  # noqa: BLE001
             print(f"[ReCoder Core] 운영 감시 시작 생략: {exc}", flush=True)
+    #: 2.0.28 배포 후 취약점 재검사 — 하루 한 번 SBOM 을 OSV 와 대조(새로 발표된 것만 알림).
+    vuln_task = None
+    try:
+        import vuln_recheck as _vuln
+        if _vuln.enabled():
+            vuln_task = _asyncio.create_task(_vuln.Rechecker(_vuln.records_from_store).run_forever())
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ReCoder Core] 취약점 재검사 시작 생략: {exc}", flush=True)
 
     try:
         from observability import observability  # type: ignore
@@ -265,6 +274,8 @@ async def lifespan(app: FastAPI):
         guard_task.cancel()
         if ops_task is not None:
             ops_task.cancel()
+        if vuln_task is not None:
+            vuln_task.cancel()
         if relay_poller is not None:
             try:
                 await relay_poller.stop()
@@ -379,6 +390,7 @@ def create_app() -> FastAPI:
     #: 2.0.25 공격·장애 감지 알림
     app.include_router(ops_alerts_routes.router)
     app.include_router(aws_cleanup_routes.router)
+    app.include_router(security_checks_routes.router)
 
     return app
 

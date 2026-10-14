@@ -28,7 +28,7 @@ export function OpsAlertCard({ alert, onChoose }: { alert: OpsAlertView; onChoos
         <span style={muted}>{alert.region} · {new Date(alert.at).toLocaleString("ko-KR")}</span>
         {!open && <span style={muted}>· {alert.status === "applied" ? "대응함" : "닫음"}</span>}
       </div>
-      <div style={{ marginTop: 4, fontSize: 12 }}>{alert.detail}</div>
+      <div style={{ marginTop: 4, fontSize: 12, whiteSpace: "pre-line" }}>{alert.detail}</div>
       {(alert.sources?.ips?.length || alert.sources?.paths?.length) ? (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 8, fontSize: 11 }}>
           <div><div style={muted}>상위 IP</div>{(alert.sources?.ips ?? []).map(r => <div key={r.value}><code>{r.value}</code> {r.count.toLocaleString()}회</div>)}</div>
@@ -38,7 +38,7 @@ export function OpsAlertCard({ alert, onChoose }: { alert: OpsAlertView; onChoos
       {alert.resolution && <div style={{ ...muted, marginTop: 6 }}>{alert.resolution}</div>}
       {open && (alert.suggestions?.length ?? 0) > 0 && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
-          {alert.suggestions!.map(s => <button key={s.action} style={btn} onClick={() => onChoose(s)}>{s.label}</button>)}
+          {alert.suggestions!.map((s, i) => <button key={`${s.action}-${i}`} style={btn} onClick={() => onChoose(s)}>{s.label}</button>)}
         </div>
       )}
     </div>
@@ -70,7 +70,7 @@ export const OpsAlertsPanel: React.FC = () => {
 
   return (
     <section data-testid="ops-alerts" style={{ marginBottom: 18 }}>
-      <h3 style={{ margin: "0 0 4px" }}>공격·장애 감지 알림</h3>
+      <h3 style={{ margin: "0 0 4px" }}>운영 알림 — 공격·장애·새 취약점</h3>
       <p style={muted}>
         {monitors ? `ECS 서비스 ${monitors}개를 1분마다 봅니다 — 요청 급증 · 차단 급증 · 오류 증가 · 태스크 부족.`
           : "감시 중인 서비스가 없습니다. ECS 배포에서 「공격·장애 감지 알림」을 켜면 여기에 나타납니다."}

@@ -2665,6 +2665,16 @@ def generate_code(
                 found = found + unused_files.route_issues(unused_files.find(candidate_ops))
             except Exception as exc:  # noqa: BLE001 — 점검 실패가 생성을 막지 않는다
                 print(f"[code_agent] 미등록 API 점검 생략: {exc}", flush=True)
+            #: 2.0.28 AI 코드 보안 — 정확한 규칙의 심각한 발견(사용자 입력 SQL 연결·JWT 비밀값 하드코딩·CORS 전체 허용·평문 비밀번호)만
+            #: 고칠 오류로 넣는다. 나머지는 결과의 보안 점수에 경고로만.
+            try:
+                try:
+                    import code_security
+                except ImportError:  # pragma: no cover
+                    from core import code_security  # type: ignore
+                found = found + code_security.issues(code_security.ops_files(candidate_ops), errors_only=True)
+            except Exception as exc:  # noqa: BLE001 — 점검 실패가 생성을 막지 않는다
+                print(f"[code_agent] 보안 점검 생략: {exc}", flush=True)
         return found
 
     consistency = _issues_for(ops_out)
@@ -2982,6 +2992,21 @@ def generate_code(
         consistency = _server_missing_issues(ops_out) + consistency
     if consistency:
         summary += "\n\n확인 필요: " + " / ".join(i["message"] for i in consistency[:3])
+    security = None
+    if not existing and not foundation:
+        try:
+            try:
+                import code_security
+            except ImportError:  # pragma: no cover
+                from core import code_security  # type: ignore
+            security = code_security.report(code_security.ops_files(ops_out))
+            if security.get("score") is not None:
+                warn = len(security.get("findings") or [])
+                summary += f"\n\nAI 코드 보안 점검 {security['score']}점" + (f" — 확인할 곳 {warn}곳" if warn else " — 발견 없음")
+                _report({"step": "security", "message": f"AI 코드 보안 점검 {security['score']}점"
+                                                        + (f" · 확인할 곳 {warn}곳" if warn else "")})
+        except Exception as exc:  # noqa: BLE001
+            print(f"[code_agent] 보안 점수 생략: {exc}", flush=True)
     result = {
         "summary": summary,
         "consistency_issues": consistency,
@@ -2991,6 +3016,8 @@ def generate_code(
         "unused_files": [{"file": u["file"], "consumers": u.get("consumers", [])} for u in unused
                          if any(op.get("file") == u["file"] for op in ops_out)],
         "verification": {k: v for k, v in verification.items() if k != "log"},
+        #: 2.0.28 AI 코드 보안 점수(규칙별 통과·발견 위치·고치는 법)
+        "security": security,
         "foundation": foundation or None,
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),

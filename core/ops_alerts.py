@@ -434,6 +434,18 @@ def act(alert_id: str, action: str, value: Any, *, approved: bool, session_facto
     allowed = {s["action"] for s in alert.get("suggestions") or []}
     if action not in allowed:
         raise ValueError("이 알림에 대한 제안이 아닙니다.")
+    if action == "upgrade":
+        #: 2.0.28 배포 후 취약점 — 제안한 올리기만(값까지 같아야) 프로젝트 파일에 적용한다. AWS 는 건드리지 않는다.
+        offered = [s.get("value") for s in alert.get("suggestions") or [] if s.get("action") == "upgrade"]
+        if value not in offered:
+            raise ValueError("이 알림이 제안한 올리기가 아닙니다.")
+        try:
+            import vuln_recheck  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core import vuln_recheck  # type: ignore
+        result = vuln_recheck.apply_fix(alert, value)
+        _resolve(alert_id, "applied", result["message"])
+        return result
     session = session_factory(alert["region"])
     ecs = session.client("ecs")
     try:

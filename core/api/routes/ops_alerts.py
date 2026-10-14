@@ -28,7 +28,7 @@ class AlertList(BaseModel):
 
 
 class ActRequest(BaseModel):
-    action: Literal["block_ip", "shield_strict", "scale", "rollback"]
+    action: Literal["block_ip", "shield_strict", "scale", "rollback", "upgrade"]
     value: Optional[Any] = None
     approved: bool = Field(..., description="사용자가 승인 카드에서 고른 결과")
 

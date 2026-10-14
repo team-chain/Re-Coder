@@ -1,3 +1,13 @@
+# AI 코드 보안 점수 · 배포 후 취약점 재검사 (2026-10-14, 2.0.28)
+
+- core/code_security.py: scan(files) → (Finding[], applicable). 규칙 SQL_INJECTION(.query/.execute/.raw/$queryRawUnsafe 의 템플릿·문자열 연결, req. 또는 req.body/query/params 에서 꺼낸 이름이 들어가면 precise high — Prisma $queryRaw 태그 템플릿은 안전), JWT_UNSAFE(none·리터럴 비밀값 precise, `|| '기본값'` 은 medium), CORS_WILDCARD(origin '*'/true + credentials precise), PLAINTEXT_PASSWORD(가입 라우트·users INSERT 에 password 가 있는데 bcrypt/argon2/scrypt/pbkdf2 가 없으면 precise), MISSING_AUTH(앱에 인증이 있을 때 POST/PUT/PATCH/DELETE 에 인증 미들웨어 없음 — 공개 경로·서명 웹훅·mock·app.use(prefix, auth, router) 제외), OWNER_CHECK, XSS_HTML, BRUTE_FORCE(로그인에 제한 라이브러리·직접 만든 limiter·계정 잠금(failed_login 등) 없음), ERROR_LEAK. 점수 = 통과 가중치/적용 가중치(high3·medium2·low1), 적용 규칙 없으면 None. 주석은 같은 길이 공백으로 지워 줄 번호 유지.
+- 오탐 측정: commerce 기반 100점(로그인 잠금 인정), /tmp/g1(AI 생성 앱) 100점(웹훅·mock 제외 후), 테스트 픽스처 전체 2819 통과(교정 루프에 끼어든 오류 없음).
+- code_agent: _issues_for 에 code_security.issues(errors_only=True)(새 앱만) → 교정 루프. 결과 result["security"] = report, 요약에 "AI 코드 보안 점검 N점", 진행 _report step=security. 확장 codeIssues.SecurityScoreNote.
+- core/vuln_recheck.py: deployments(배포 기록 중 서비스별 최근 succeeded + SBOM 파일 + request.workspace_path), purls(CycloneDX 의 npm/pypi/maven/golang/cargo/gem/nuget/composer, 중첩 components 포함), query(OSV querybatch 1,000개씩), fixed_version(같은 생태계·이름의 ranges 중 현재보다 큰 가장 작은 fixed), severity(database_specific.severity), run(state RECODER_HOME/vuln_recheck.json: known[id|purl] found/notified/fixed/fix_applied, 새 것만 ops_alerts._store kind=vuln + upgrade 제안 최대 3), apply_fix(npm: package.json 직접 의존 ^to, 없으면 lock 있는 package.json overrides, npm 있으면 --package-lock-only; pypi: requirements*.txt name>=to), Rechecker(시작 2분 뒤, 24시간마다; RECODER_TEST_MODE·RECODER_VULN_RECHECK=0·RECODER_OFFLINE=1 이면 끔). main lifespan 에 시작·종료.
+- ops_alerts.act: upgrade 는 제안한 값과 같을 때만, AWS 를 부르지 않고 apply_fix. ActRequest 에 upgrade. 확장 OpsAlertCard: 같은 action 여러 버튼 key, 상세 줄바꿈.
+- API /api/security/code(작업 폴더 점수 — node_modules·dist·테스트 제외, 4,000파일·1MB 한도), /api/security/vulns/check, /api/security/vulns/history.
+- sandbox 에서 api.osv.dev 가 프록시 403 이라 실제 OSV 응답은 확인 못 함(형식은 OSV 문서대로, 테스트는 고정 응답). PC 에서 /api/security/vulns/check 로 확인 필요.
+
 # HTTPS 주소(CloudFront) · 관리형 DB(RDS) (2026-10-14, 2.0.27)
 
 - core/aws_cdn.py: ensure_distribution(Comment=recoder:<edge_name> 로 찾음, 원본 ALB http-only, redirect-to-https, CachingDisabled, AllViewerAndCloudFrontHeaders-2022-06, PriceClass_200(한국 엣지 포함), Tags) — 있으면 원본·별칭만 갱신. ensure_certificate(us-east-1 ACM, DNS 검증, 기존 ISSUED/PENDING 재사용, Route 53 영역이 있으면 검증 CNAME UPSERT, 없으면 안내), point_domain(A·AAAA 별칭 → CloudFront, Z2FDTNDATAQYW2), disable_or_delete(켜져 있으면 끄고 _Kept, Deployed 면 삭제).
