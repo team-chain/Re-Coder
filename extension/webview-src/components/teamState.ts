@@ -34,6 +34,8 @@ export interface TeamView {
   agents: Record<string, TeamAgentView>;
   fixes: number;
   secretFixes: number;
+  /** 보안 검사가 설치 전에 막은 수상한 패키지 건수(security_block 이벤트) — 2.0.23. */
+  securityBlocks?: number;
   issues: number;
   retries: number;
   elapsed: number;
@@ -49,7 +51,7 @@ export const DEFAULT_DEV_AGENTS = 3;
 
 export function emptyTeamView(): TeamView {
   return { jobId: "", engaged: false, phase: "planning", summary: "", files: [], total: 0, done: 0, layer: null, agents: {},
-    fixes: 0, secretFixes: 0, issues: 0, retries: 0, elapsed: 0, log: [], records: [] };
+    fixes: 0, secretFixes: 0, securityBlocks: 0, issues: 0, retries: 0, elapsed: 0, log: [], records: [] };
 }
 
 /** 에이전트들이 실제로 일하고 있는지 — 검증된 기반(쇼핑몰 등)처럼 AI 가 생성하지 않는 경로에서는 보드를 띄우지 않는다. */
@@ -119,6 +121,8 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
       : `${base(event.file)} 이(가) 길어 끊기는 만큼 이어 받습니다${/맥락을 줄여/.test(msg) ? " (맥락을 줄여서)" : ""}` } : null;
     case "fixing": return msg.startsWith("전체 점검") ? { who, role, tone: "warn", text: msg.slice(0, 120) } : { who, role, tone: "warn", text: `자동 검사에서 문제 발견 → 고치는 중${msg.includes("—") ? ` (${msg.split("—").slice(1).join("—").trim().slice(0, 60)})` : ""}` };
     case "verified": return event.file ? { who, role, tone: "ok", text: `${base(event.file)} 고친 뒤 확인 통과` } : null;
+    case "security_block": return { who: who || "검토", role: role === "system" ? "review" : role, tone: "warn",
+      text: msg || "수상한 패키지 차단" };
     case "verify_failed": return { who, role, tone: "warn", text: msg ? `확인 필요 — ${msg.slice(0, 80)}` : "확인 필요" };
     case "file_done": return event.file ? { who, role, tone: "ok", text: (msg && msg.includes("고정 파일")) ? msg : `${event.file} 완료${event.lines ? ` (${event.lines}줄)` : ""}` } : null;
     case "retry": return { who, role, tone: "warn", text: msg || `일시적 오류 — ${event.seconds ?? "잠시"}초 뒤 다시 시도` };
@@ -191,6 +195,7 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
       break;
     }
     case "verify_failed": setFile(event.file, "issue"); next.issues += 1; break;
+    case "security_block": next.securityBlocks = (next.securityBlocks ?? 0) + 1; break;
     case "file_retry": setFile(event.file, "writing"); next.retries += 1; break;
     case "file_failed": setFile(event.file, "failed"); break;
     case "file_done": setFile(event.file, view.files.find(f => f.file === event.file)?.state === "issue" ? "issue" : "done"); break;

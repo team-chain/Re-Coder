@@ -81,6 +81,7 @@ const css = `
   background:radial-gradient(ellipse at 50% 120%,rgba(55,148,255,.10),transparent 60%),linear-gradient(rgba(127,127,127,.06) 1px,transparent 1px) 0 0/24px 24px,linear-gradient(90deg,rgba(127,127,127,.06) 1px,transparent 1px) 0 0/24px 24px,var(--vscode-editor-background,#191b1f)}
 .rc-vl .zn{position:absolute;border:1px dashed var(--vscode-panel-border,#3a404a);border-radius:10px}
 .rc-vl .zn>span{position:absolute;left:8px;right:8px;top:4px;font-size:10px;color:var(--vscode-descriptionForeground,#8b95a3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rc-vl .zn>em.sec{position:absolute;left:8px;right:8px;bottom:6px;font-style:normal;font-size:10px;font-weight:600;padding:2px 6px;border-radius:6px;background:rgba(248,113,113,.16);color:#fca5a5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rc-vl .qc{position:absolute;border-radius:7px;background:rgba(0,0,0,.16)}
 .rc-vl .qc>span{position:absolute;left:0;right:0;bottom:2px;text-align:center;font-size:9.5px;color:var(--vscode-descriptionForeground,#8b95a3)}
 .rc-vl .lk{position:absolute;z-index:4;transform:translate(-50%,-50%);white-space:nowrap;padding:2px 8px;border-radius:99px;font-size:9.5px;color:var(--vscode-descriptionForeground,#aab3bf);background:rgba(12,14,18,.88);border:1px solid var(--vscode-panel-border,#3a404a)}
@@ -331,7 +332,8 @@ export function TeamVillage({ roster, view, width, paused }: TeamVillageProps) {
     <div className="rc-vl" data-testid="team-village" role="img" aria-label={`팀 작업 — 파일 ${view.done}/${view.total || "?"}`}>
       <style>{css}</style>
       <div className="zn" style={{ left: L.plan.x, top: L.plan.y, width: L.plan.w, height: L.plan.h }}><span>설계실</span></div>
-      <div className="zn" style={{ left: L.review.x, top: L.review.y, width: L.review.w, height: L.review.h }}><span>검토 · 마지막 전체 점검</span></div>
+      <div className="zn" style={{ left: L.review.x, top: L.review.y, width: L.review.w, height: L.review.h }}><span>검토 · 마지막 전체 점검</span>
+        {(view.securityBlocks ?? 0) > 0 && <em className="sec" data-testid="security-blocks">수상한 패키지 차단 {view.securityBlocks}</em>}</div>
       <div className="zn" style={{ left: L.queue.x, top: L.queue.y, width: L.queue.w, height: L.queue.h, borderStyle: "solid" }}><span>작업 대기열</span></div>
       {L.qcols.map((q, l) => {
         const per = Math.max(1, Math.floor((q.w - 6) / 30));

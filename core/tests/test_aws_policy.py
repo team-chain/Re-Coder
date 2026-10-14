@@ -1914,15 +1914,17 @@ def runtime_actions() -> set[str]:
             logs = boto3.client("logs", region_name=region)
             ecr = boto3.client("ecr", region_name=region)
 
-            aws_infra.ensure_cluster(ecs, "recoder-probe")
-            aws_infra.ensure_cluster(ecs, "recoder-probe")          # 재사용 경로
-            aws_infra.ensure_log_group(logs, "/ecs/recoder-probe")
-            aws_infra.ensure_ecr_repository(ecr, "recoder-probe")
+            # 2.0.23 — 새로 만든 리소스에는 recoder:managed 태그를 붙인다(재사용 경로는 안 붙임)
+            tags = aws_infra.recoder_tags("probe", "recoder-probe-svc")
+            aws_infra.ensure_cluster(ecs, "recoder-probe", tags=tags)
+            aws_infra.ensure_cluster(ecs, "recoder-probe", tags=tags)          # 재사용 경로
+            aws_infra.ensure_log_group(logs, "/ecs/recoder-probe", tags=tags)
+            aws_infra.ensure_ecr_repository(ecr, "recoder-probe", tags=tags)
             aws_infra.ensure_ecr_repository(ecr, "recoder-probe")   # 재사용 경로
 
             net = aws_infra.discover_default_network(ec2)
             sg = aws_infra.ensure_security_group(
-                ec2, vpc_id=net.vpc_id, name="recoder-probe-sg", port=8000
+                ec2, vpc_id=net.vpc_id, name="recoder-probe-sg", port=8000, tags=tags
             )
             # 두 번째 호출은 중복 경로 → DescribeSecurityGroups 가 나간다
             aws_infra.ensure_security_group(
@@ -1940,11 +1942,12 @@ def runtime_actions() -> set[str]:
                      "memory": 512, "cpu": 256}
                 ],
             )["taskDefinition"]["taskDefinitionArn"]
+            aws_infra.tag_created(ecs, "ecs", task_def, tags)   # ecs_agent 가 등록 직후 하는 일
 
             aws_infra.ensure_service(
                 ecs, cluster="recoder-probe", service="recoder-probe-svc",
                 task_definition=task_def, subnet_ids=net.subnet_ids,
-                security_group_ids=[sg], desired_count=1,
+                security_group_ids=[sg], desired_count=1, tags=tags,
             )
             aws_infra.ensure_service(                                # 갱신 경로
                 ecs, cluster="recoder-probe", service="recoder-probe-svc",
@@ -2056,6 +2059,10 @@ RUNTIME_EVIDENCE_FLOOR = {
     "ec2:DescribeNetworkInterfaces",
     "ec2:CreateSecurityGroup",
     "ec2:AuthorizeSecurityGroupIngress",
+    "ecs:TagResource",
+    "ecr:TagResource",
+    "logs:TagResource",
+    "ec2:CreateTags",
 }
 
 

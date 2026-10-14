@@ -54,6 +54,8 @@ datas += [(str(file), 'registry/file_templates')
           for file in (CORE_DIR / 'registry' / 'file_templates').iterdir()
           if file.is_file() and file.suffix not in ('.py', '.pyc')]
 datas += [(str(CORE_DIR / 'registry' / 'command_templates.json'), 'registry')]
+# 2.0.23 — 짝퉁 npm 패키지 판정용 유명 패키지 목록(scripts/update_popular_npm.py 로 갱신)
+datas += [(str(CORE_DIR / 'data' / 'popular_npm.json'), 'data')]
 
 # Versioned commerce source, including lockfiles and public CA certificates.
 datas += [(str(file), str(file.parent.relative_to(CORE_DIR)))

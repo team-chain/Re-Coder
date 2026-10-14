@@ -161,3 +161,15 @@ test('ReCoder 가 넣은 결제 모듈(고정 파일)은 설계 직후 완료로
  assert.match(v.records.at(-1).text,/ReCoder 결제 모듈/);
  assert.equal(recordOf({step:'file_done',agent:'agent-1',file:'src/a.js',lines:3,message:'src/a.js 완료'},[]).text,'src/a.js 완료 (3줄)');
 });
+
+test('2.0.23 보안 검사가 막은 수상한 패키지는 실제 이벤트로만 기록·표시된다',()=>{
+ let v=run([{step:'planning'},{step:'planned',total:7,files:FILES},{step:'consistency',message:'전체 점검'}]);
+ assert.equal(v.securityBlocks,0);
+ const quiet=renderToStaticMarkup(React.createElement(TeamVillage,{view:v,roster:buildRoster(2,Math.random),width:760}));
+ assert.ok(!quiet.includes('security-blocks'));
+ v=reduceTeam(v,{step:'security_block',agent:'review',file:'package.json',message:'수상한 패키지 차단 — tiny-pay-sdk-kr'});
+ assert.equal(v.securityBlocks,1);
+ assert.ok(v.records.some(r=>r.who==='검토'&&r.text==='수상한 패키지 차단 — tiny-pay-sdk-kr'&&r.tone==='warn'));
+ const html=renderToStaticMarkup(React.createElement(TeamVillage,{view:v,roster:buildRoster(2,Math.random),width:760}));
+ assert.ok(html.includes('수상한 패키지 차단 1'));
+});

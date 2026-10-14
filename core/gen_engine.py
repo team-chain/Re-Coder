@@ -2015,6 +2015,11 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
         if idx is None or ops[idx].get("fixed"):
             continue  # ReCoder 가 넣은 고정 파일(결제 모듈)은 AI 가 고치지 않는다
         grouped.setdefault(idx, []).append(f"{issue.get('message', '')} (해결: {issue.get('fix', '')})")
+        if issue.get("code") == "NODE_PACKAGE_UNTRUSTED" and emit:
+            #: 마을: 보안 검사가 설치 전에 막은 사실을 그 파일 카드에 보인다(실제 판정 결과로만).
+            names = re.findall(r"`([^`]+)` —", issue.get("message", ""))
+            emit({"step": "security_block", "agent": "review", "file": ops[idx]["file"],
+                  "message": "수상한 패키지 차단" + (f" — {', '.join(names[:3])}" if names else "")})
     if not grouped:
         return None
     grouped = _definition_first(ops, grouped)

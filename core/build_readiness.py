@@ -56,7 +56,7 @@ AUTO_FIXABLE = {"DOCKERIGNORE_MISSING", "DOCKERFILE_PORT_MISMATCH", "DOCKERFILE_
                 "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS", "NODE_AUTH_USER_NOT_RESTORED",
                 "NODE_API_ENVELOPE_MISMATCH", "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING", "NODE_CONTEXT_VALUE_MISSING",
                 "NODE_TS_OPTIONAL_OBJECT_METHOD",
-                "NODE_AI_MOCK_SERVER_IMPORT"}
+                "NODE_AI_MOCK_SERVER_IMPORT", "NODE_PACKAGE_UNTRUSTED"}
 
 #: 고칠 내용을 점검이 미리 만들어 두는 수정({경로: 새 내용}, fix_data["file_writes"][코드]) — 적용은 백업과 함께 한 번에.
 FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_MISSING", "NODE_VITE_TERSER_MISSING",
@@ -72,7 +72,7 @@ FILE_WRITE_FIXES = ("NODE_WORKSPACE_MANIFEST_MISSING", "NODE_TSCONFIG_REFERENCE_
                     "NODE_REACT_REF_STATE", "NODE_HEALTH_PATH_MISMATCH", "NODE_KRW_MINOR_UNITS",
                     "NODE_AUTH_USER_NOT_RESTORED", "NODE_API_ENVELOPE_MISMATCH",
                     "NODE_CART_NOT_PERSISTED", "NODE_TYPE_NAME_MISSING", "NODE_AI_MOCK_SERVER_IMPORT",
-                    "NODE_CONTEXT_VALUE_MISSING", "NODE_TS_OPTIONAL_OBJECT_METHOD")
+                    "NODE_CONTEXT_VALUE_MISSING", "NODE_TS_OPTIONAL_OBJECT_METHOD", "NODE_PACKAGE_UNTRUSTED")
 
 #: 이 버전 아래를 쓰면 이미지 보안 검사(Trivy)에서 CRITICAL 이 나와 배포가 막히는 직접 의존성.
 #: (패키지 → (안전한 최소 major, 권장 범위, 이유)). 버전만 올리면 되는 경우만 적는다.
@@ -3595,6 +3595,93 @@ def _check_versions_online(files: "ProjectFiles", result: Readiness) -> None:
             fix, manifest, auto))
 
 
+def _check_package_trust(files: "ProjectFiles", result: Readiness) -> None:
+    """갓 생긴 무명 패키지·유명 패키지 흉내 이름(슬롭스쿼팅·타이포스쿼팅)을 설치 전에 찾는다.
+
+    네트워크가 안 되거나 사내 레지스트리면 조용히 넘어간다(판단하지 않음).
+    """
+    try:
+        import package_trust  # type: ignore
+        import npm_registry  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import package_trust, npm_registry  # type: ignore
+    trust_log: dict[str, dict] = {}
+    for folder in [""] + list(result.subprojects):
+        manifest = f"{folder}/package.json" if folder else "package.json"
+        try:
+            package = json.loads(files.read(manifest) or "")
+        except ValueError:
+            continue
+        if not isinstance(package, dict):
+            continue
+        sections = {name: section for section in ("devDependencies", "dependencies")
+                    for name in (package.get(section) or {}) if isinstance(package.get(section), dict)}
+        if not sections:
+            continue
+        try:
+            verdicts = package_trust.assess(list(sections))
+        except Exception:  # noqa: BLE001 - 점검 실패가 계획을 막지 않는다
+            continue
+        blocked = [v for v in verdicts.values() if v.level == "block"]
+        warned = [v for v in verdicts.values() if v.level == "warn"]
+        for v in blocked + warned:
+            trust_log[f"{manifest}:{v.name}"] = v.to_dict()
+        if not blocked and not warned:
+            continue
+        # 짝퉁 의심은 원래 패키지로 바꾸는 고침을 미리 만든다(package.json + import 문).
+        writes: dict[str, str] = {}
+        text = files.read(manifest) or ""
+        renamed: dict[str, str] = {}
+        for v in blocked:
+            if v.kinds == ["typo"] or (v.replacement and "typo" in v.kinds and "young" not in v.kinds):
+                if v.replacement in sections:
+                    continue  # 진짜 패키지가 이미 있다 — 짝퉁만 빼면 되지만 import 정리는 AI 교정에 맡긴다
+                versions = npm_registry.fetch_versions(v.replacement) if os.environ.get("RECODER_TEST_MODE") != "1" \
+                    or os.environ.get("RECODER_NPM_REGISTRY") == "1" else None
+                spec = npm_registry.suggest("", versions) if versions else None
+                updated = package_trust.rename_dependency(text, sections[v.name], v.name, v.replacement, spec or "latest") \
+                    if text else None
+                if updated:
+                    text = updated
+                    renamed[v.name] = v.replacement
+        if renamed:
+            writes[manifest] = text
+            prefix = f"{folder}/" if folder else ""
+            for rel in files.files():
+                if not rel.endswith(_JS_SUFFIXES) or not rel.startswith(prefix) or "/node_modules/" in f"/{rel}":
+                    continue
+                body = files.read(rel) or ""
+                new_body = body
+                for old, new in renamed.items():
+                    new_body = rename_package_import(new_body, old, new)
+                if new_body != body:
+                    writes[rel] = new_body
+        auto = bool(blocked) and all(v.name in renamed for v in blocked)
+        if auto:
+            result.fix_data.setdefault("file_writes", {}).setdefault("NODE_PACKAGE_UNTRUSTED", {}).update(writes)
+        if blocked:
+            parts = [f"`{v.name}` — " + "; ".join(v.reasons) for v in blocked[:5]]
+            if auto:
+                fix = ("원래 패키지로 바꿉니다: " + ", ".join(f"{k} → {v}" for k, v in renamed.items())
+                       + " (자동 수정 가능, 원본은 .recoder/backups 에 보관).")
+            else:
+                fix = ("이 패키지를 쓰지 마세요. 같은 일을 하는 널리 쓰이는 패키지로 바꾸거나 직접 구현하고, "
+                       f"{manifest} 와 import 문에서 이름을 빼세요. 검사를 끄거나 우회하지 마세요.")
+            result.issues.append(ReadinessIssue(
+                "NODE_PACKAGE_UNTRUSTED", ERROR,
+                f"{manifest} 에 설치하면 위험한 패키지가 있습니다: " + " / ".join(parts)
+                + ". 설치하는 순간 PC·서버에서 코드가 실행될 수 있어 설치 전에 막습니다.",
+                fix, manifest, auto))
+        elif warned:
+            result.issues.append(ReadinessIssue(
+                "NODE_PACKAGE_UNTRUSTED", WARNING,
+                f"{manifest} 에 확인이 필요한 패키지가 있습니다: "
+                + " / ".join(f"`{v.name}` — " + "; ".join(v.reasons) for v in warned[:5]) + ".",
+                "널리 쓰이는 대체 패키지가 있으면 바꾸는 것을 권합니다. 그대로 써도 빌드는 진행됩니다.", manifest))
+    if trust_log:
+        result.fix_data["package_trust"] = trust_log
+
+
 #: 문을 닫은 이미지 자리표시 서비스. AI 가 만든 코드·초기 데이터에 자주 들어가 화면의 이미지가 전부 깨진다
 #: (2026-10-04 실기기 쇼핑몰: via.placeholder.com). 같은 주소 형식을 받는 서비스로 바꾼다.
 _DEAD_IMAGE_HOST = re.compile(r"https?://(?:via\.placeholder\.com|placeholder\.com(?=/\d)|placeimg\.com)/", re.I)
@@ -3705,6 +3792,7 @@ def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]
         _analyze_node(files, result)
         if online:
             _check_versions_online(files, result)
+            _check_package_trust(files, result)
     elif result.runtime == "python":
         _analyze_python(files, result)
     _check_dead_image_hosts(files, result)
@@ -4129,7 +4217,7 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
         raise ValueError("유효한 프로젝트 폴더가 아닙니다.")
     if code not in AUTO_FIXABLE:
         raise ValueError("자동으로 고칠 수 없는 항목입니다. 안내에 따라 직접 수정하세요.")
-    before = analyze(root, online=code == "NODE_DEPENDENCY_VERSION_NOT_FOUND")
+    before = analyze(root, online=code in ("NODE_DEPENDENCY_VERSION_NOT_FOUND", "NODE_PACKAGE_UNTRUSTED"))
     issue = next((i for i in before.issues if i.code == code), None)
     if issue is None and code in FILE_WRITE_FIXES and (before.fix_data.get("file_writes") or {}).get(code):
         #: 문제로 띄우지 않고 고칠 내용만 만든 항목(보안 권고 정리 등)

@@ -1,6 +1,12 @@
 name: Build release
 
 on:
+  # 정식 배포 경로: 버전을 올린 커밋에 태그를 달아 push 한다.
+  #   git tag v2.0.23 && git push origin v2.0.23
+  # 태그 push 는 그 태그 커밋의 이 파일을 쓰므로 main 병합 없이도 돈다.
+  # 시험은 v2.0.23-rc1 같은 태그로 한다(시험 릴리스로 표시된다).
+  push:
+    tags: ['v*']
   workflow_dispatch:
   pull_request:
     branches: [develop]
@@ -12,6 +18,7 @@ on:
       - 'core/starter_templates/**'
       - 'core/requirements-release-*.txt'
       - 'scripts/build-release.py'
+      - 'scripts/check_release_tag.py'
       - 'extension/scripts/package-release.js'
       - 'extension/harness/release-smoke.js'
       - 'extension/package-lock.json'
@@ -20,7 +27,24 @@ permissions:
   contents: read
 
 jobs:
+  # 태그와 제품 버전이 다르면 아무것도 빌드하지 않는다.
+  version-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Tag matches product version
+        id: tag
+        if: github.ref_type == 'tag'
+        run: python scripts/check_release_tag.py "$GITHUB_REF_NAME"
+
   windows-vsix:
+    needs: version-check
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
@@ -63,6 +87,7 @@ jobs:
           if-no-files-found: error
 
   linux-vsix:
+    needs: version-check
     # 22.04 의 glibc 로 Core 를 얼려야 더 오래된 배포판에서도 실행된다.
     runs-on: ubuntu-22.04
     timeout-minutes: 40
@@ -101,6 +126,7 @@ jobs:
           if-no-files-found: error
 
   macos-arm64-vsix:
+    needs: version-check
     # Apple Silicon 전용. Intel Mac 은 grpcio 등 잠근 의존성의 x86_64 휠이 없어 대상에서 뺐다.
     runs-on: macos-14
     timeout-minutes: 40
@@ -137,3 +163,44 @@ jobs:
             extension/dist/*-darwin-arm64.vsix.sha256
             extension/dist/*-darwin-arm64.release.json
           if-no-files-found: error
+
+  # 태그 빌드일 때만: 출처 증명을 붙이고 GitHub Release 에 올린다.
+  # 쓰기 권한은 이 job 에만 준다.
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [version-check, windows-vsix, linux-vsix, macos-arm64-vsix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
+        with:
+          path: release
+          merge-multiple: true
+      - name: Check every file against its sha256
+        working-directory: release
+        run: |
+          set -euo pipefail
+          ls -la
+          for f in *.vsix; do
+            want=$(cut -d' ' -f1 "$f.sha256")
+            got=$(sha256sum "$f" | cut -d' ' -f1)
+            test "$want" = "$got" || { echo "sha256 mismatch: $f"; exit 1; }
+          done
+      - name: Build provenance (who built this file, from which commit)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: 'release/*.vsix'
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.version-check.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          flags=(--title "ReCoder $GITHUB_REF_NAME" --generate-notes --verify-tag)
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" release/* "${flags[@]}"

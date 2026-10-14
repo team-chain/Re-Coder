@@ -270,6 +270,43 @@
               "Resource": "*"
             },
             {
+              "Sid": "TagRecoderResources",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:TagResource",
+                "ecr:TagResource",
+                "logs:TagResource",
+                "ec2:CreateTags"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/recoder-*/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+                }
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "aws:TagKeys": [
+                    "recoder:*"
+                  ]
+                }
+              }
+            },
+            {
               "Sid": "CreateAppSecurityGroup",
               "Effect": "Allow",
               "Action": [
@@ -294,7 +331,8 @@
                 "s3:GetBucketLocation",
                 "s3:PutBucketWebsite",
                 "s3:PutBucketPolicy",
-                "s3:PutBucketPublicAccessBlock"
+                "s3:PutBucketPublicAccessBlock",
+                "s3:PutBucketTagging"
               ],
               "Resource": {
                 "Fn::Sub": "arn:${AWS::Partition}:s3:::recoder-*"

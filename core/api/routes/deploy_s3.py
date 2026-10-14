@@ -215,6 +215,18 @@ def _ensure_bucket(client, bucket: str, region: str) -> tuple[bool, str]:
     return True, region
 
 
+def _tag_bucket(client, bucket: str) -> None:
+    """새로 만든 버킷에 ReCoder 태그를 붙인다(정리 기능이 찾는 표시). 실패해도 배포는 계속한다."""
+    try:
+        from aws_infra import MANAGED_TAG  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.aws_infra import MANAGED_TAG  # type: ignore
+    try:
+        client.put_bucket_tagging(Bucket=bucket, Tagging={"TagSet": [{"Key": MANAGED_TAG, "Value": "true"}]})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("버킷 태그를 붙이지 못했습니다(%s): %s", bucket, exc)
+
+
 def _configure_public_website(client, bucket: str, region: str) -> None:
     """정적 호스팅 + 공개 읽기.
 
@@ -315,6 +327,8 @@ def _deploy_bucket_sync(
         raise HTTPException(
             status_code=502, detail=_aws_error_detail(exc, "S3 버킷 생성"),
         ) from exc
+    if created:
+        _tag_bucket(client, bucket)
     _report(progress, {
         "step": "bucket",
         "done": True,

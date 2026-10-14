@@ -587,6 +587,10 @@ class ECSAgent:
     def ecr_repo_name(self, req: ECSDeployRequest) -> str:
         return req.ecr_repo or req.service
 
+    def resource_tags(self, req: ECSDeployRequest) -> dict[str, str]:
+        """ReCoder 가 새로 만드는 리소스에 붙이는 태그(정리 기능이 이것으로 찾는다)."""
+        return aws_infra.recoder_tags(req.project_id, req.service)
+
     async def _step_provision(
         self,
         req: ECSDeployRequest,
@@ -644,10 +648,10 @@ class ECSAgent:
         loop = asyncio.get_running_loop()
 
         def _work() -> aws_infra.NetworkTarget:
-            aws_infra.ensure_cluster(clients["ecs"], req.cluster)
+            aws_infra.ensure_cluster(clients["ecs"], req.cluster, tags=self.resource_tags(req))
             rec.provisioned["cluster"] = req.cluster
 
-            aws_infra.ensure_log_group(clients["logs"], self.log_group_name(req))
+            aws_infra.ensure_log_group(clients["logs"], self.log_group_name(req), tags=self.resource_tags(req))
             rec.provisioned["log_group"] = self.log_group_name(req)
 
             # 서브넷 — 요청에 있으면 그걸 쓰되, **VPC 는 조회해서 알아낸다.**
@@ -700,6 +704,7 @@ class ECSAgent:
                         vpc_id=target.vpc_id,
                         name=f"{req.service}-sg",
                         port=req.container_port,
+                        tags=self.resource_tags(req),
                     )
                 ]
             rec.provisioned["security_groups"] = ",".join(groups)
@@ -741,7 +746,7 @@ class ECSAgent:
             # 약속이 반만 지켜졌다.
             if req.provision:
                 repository_uri = aws_infra.ensure_ecr_repository(
-                    clients["ecr"], repo_name
+                    clients["ecr"], repo_name, tags=self.resource_tags(req)
                 )
                 rec.provisioned["ecr_repo"] = repo_name
             else:
@@ -1070,6 +1075,7 @@ class ECSAgent:
 
         arn = resp["taskDefinition"]["taskDefinitionArn"]
         logger.info("태스크 정의 등록: %s", arn)
+        aws_infra.tag_created(ecs, "ecs", arn, self.resource_tags(req))
         return arn, prev_arn
 
     # ------------------------------------------------------------------
@@ -1101,6 +1107,7 @@ class ECSAgent:
                 target_group_arn=req.target_group_arn,
                 container_name=req.container_name,
                 container_port=req.container_port,
+                tags=self.resource_tags(req),
             )
 
         result = await loop.run_in_executor(None, _work)

@@ -26,6 +26,8 @@ RUNTIME_IMPORTS = (
     'agents.ecs_runtime',
     #: 2.0.18 — 생성 직후 실행 점검(빌드한 이미지를 ECS staging 구성으로 띄워 사용자 흐름 API 확인)
     'runtime_check',
+    #: 2.0.23 — 설치 전에 수상한 npm 패키지(갓 생긴 무명·짝퉁 이름) 차단
+    'package_trust',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
@@ -56,6 +58,9 @@ def run(app) -> int:
         assert {'Dockerfile', 'backend/src/server.js', 'frontend/src/pages/Checkout.jsx',
                 'backend/package-lock.json', 'frontend/package-lock.json', 'backend/src/order_expiry.js'} <= starter, 'commerce foundation data missing'
         checks.append('reviewed commerce foundation')
+        import package_trust
+        assert len(package_trust.popular()) > 1000, 'popular npm package list missing'
+        checks.append('package trust data')
         #: 같은 모듈이 core.* 이름으로도 불린다(배포 라우트) — 그때도 번들의 데이터 파일을 찾아야 한다.
         #: 실기기 2.0.11: core.agents.ecs_agent 가 _MEI…/core/registry/… 를 찾아 ECS 태스크 정의 단계에서 실패했다.
         def _both(name: str):

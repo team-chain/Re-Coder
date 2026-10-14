@@ -697,6 +697,24 @@ def _ecs_statements(
             "Resource": "*",
         },
         {
+            # 2.0.23 — ReCoder 가 **새로 만든** 리소스에 recoder:managed 태그를 붙인다.
+            # 정리 기능이 "ReCoder 가 만든 것만" 찾는 표시다(aws_infra.tag_created).
+            # 태그 키를 recoder:* 로만 제한해 다른 태그(비용 배분 등)는 건드리지 못하게 한다.
+            # 없어도 배포는 된다(태그만 빠진다).
+            "Sid": "TagRecoderResources",
+            "Effect": "Allow",
+            "Action": ["ecs:TagResource", "ecr:TagResource", "logs:TagResource", "ec2:CreateTags"],
+            "Resource": [
+                _arn("ecs", f"cluster/{cluster}", ctx),
+                _arn("ecs", f"service/{cluster}/{service}", ctx),
+                _arn("ecs", "task-definition/*", ctx),
+                repo,
+                _arn("logs", "log-group:/ecs/*", ctx),
+                _arn("ec2", "security-group/*", ctx),
+            ],
+            "Condition": {"ForAllValues:StringLike": {"aws:TagKeys": ["recoder:*"]}},
+        },
+        {
             # 앱 포트를 여는 보안 그룹을 만든다.
             # CreateSecurityGroup 은 만들 그룹과 넣을 VPC 를 둘 다 요구한다.
             "Sid": "CreateAppSecurityGroup",
@@ -737,6 +755,8 @@ def _s3_statements(ctx: ArnContext) -> list[dict]:
                 "s3:PutBucketWebsite",
                 "s3:PutBucketPolicy",
                 "s3:PutBucketPublicAccessBlock",
+                # 2.0.23 — 새로 만든 버킷에 recoder:managed 태그(정리 기능이 찾는 표시)
+                "s3:PutBucketTagging",
             ],
             "Resource": bucket,
         },

@@ -1,3 +1,12 @@
+# 슬롭스쿼팅 방어 · AWS 리소스 태그 · 태그 릴리스 (2026-10-14, 2.0.23)
+
+- core/package_trust.py: 유명 목록(core/data/popular_npm.json, 17,817개 — scripts/update_popular_npm.py 가 registry 검색 API 의 주간 다운로드로 만든다. api.npmjs.org 는 sandbox 에서 403 이라 fetch_weekly 가 검색 API 로 대체) 밖 이름만 조회. look_alike = 같은 스코프·이름 5자 이상·길이차 1 이하·편집 거리 1(인접 교환 1) 또는 구분자만 다름. judge: typo(주간 < min(5,000, max(1,000, 유명의 1%))) · young(30일 미만 & 주간 1,000 미만) → block, install_script/no_repo/deprecated → warn, 404 는 기존 NODE_DEPENDENCY_VERSION_NOT_FOUND 몫. 캐시 ~/.recoder/cache/package_trust.json 24h. 테스트 모드·RECODER_OFFLINE·사내 레지스트리면 조회 안 함.
+- 오탐 측정(실제 레지스트리): 저장소 package.json 38개 이름 0건, npm 검색 표본 1,262개(주간 1천+) 차단 0건(처음 규칙 — 편집 거리 2·짧은 이름 포함 — 은 896개 중 15개 오탐이라 줄였다).
+- build_readiness._check_package_trust(online 분석에서만) → NODE_PACKAGE_UNTRUSTED(block=ERROR, warn=WARNING). 짝퉁만이면 file_writes(package.json 이름·범위 + import 문) 로 자동 교정 — code_agent 의 FILE_WRITE_FIXES 루프가 AI 없이 바로 고친다. young 은 auto_fix False → edit_fix_round 로 AI 교정 + gen_engine 이 security_block 이벤트(teamState.securityBlocks, 마을 검토 칸 배지).
+- aws_infra.recoder_tags/tag_created: 생성 경로에서만 best-effort 태그(재사용·사용자 리소스는 안 붙임). ecs_agent.resource_tags(project_id, service) → cluster·log group·SG·ECR·service·task def. deploy_s3._tag_bucket. aws_policy 「TagRecoderResources」(aws:TagKeys recoder:* 조건) + s3:PutBucketTagging, 런타임 증거 픽스처에 태그 경로.
+- release.yml: push tags v* → version-check(scripts/check_release_tag.py, rc 면 prerelease) → 3 OS → publish(sha256 대조, actions/attest-build-provenance@v3, gh release create). 쓰기 권한은 publish job 만.
+- extension webview-tests canvasConnections: `git remote get-url` 이 전역 url.insteadOf 로 바뀌어 보이는 환경(이 sandbox)에서 실패 → `git config --get remote.origin.url` 로(환경 무관).
+
 # 함수·스키마로 읽는 필수 환경변수 · 실행 점검 설정 누락 (2026-10-13, 2.0.22)
 
 - 실기기 2.0.21 생성(job d22de705, AI 자유 생성 쇼핑몰, Prisma): env.ts 의 `getEnv(key)`(process.env[key] + throw)로만 JWT_SECRET 을 읽어 deploy_settings.required_env 가 놓침 → runtime_check 가 값 없이 띄워 "Environment variable JWT_SECRET is required" 로 기동 실패 → GENERATED_RUNTIME_ERROR 로 AI 교정 6회 → "실행 점검 오류가 줄지 않아 교정을 멈춥니다(남은 1건)".
