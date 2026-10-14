@@ -80,6 +80,7 @@ from api.routes import (  # noqa: E402
     github,
     repair,
     ops_alerts as ops_alerts_routes,
+    aws_cleanup as aws_cleanup_routes,
 )
 
 _bound_port: int = 0
@@ -377,6 +378,7 @@ def create_app() -> FastAPI:
     app.include_router(repair.router)
     #: 2.0.25 공격·장애 감지 알림
     app.include_router(ops_alerts_routes.router)
+    app.include_router(aws_cleanup_routes.router)
 
     return app
 

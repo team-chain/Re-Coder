@@ -31,6 +31,7 @@ from core.agents.ecs_progress import initialize_progress, advance_progress, fini
 from core.sbom import sbom_generator
 from core import aws_infra, aws_policy
 from core import shield as shield_mod
+from core import aws_edge
 from core.aws_infra import InfraError
 from core.schemas import (
     ECSDeployRecord,
@@ -145,6 +146,8 @@ class ECSAgent:
         self._runtime: dict[int, ecs_runtime.RuntimePlan] = {}
         #: 2.0.25 배포 요청별 방패 결정(켤 수 있나·앱 포트) — 태스크 정의·서비스(로드 밸런서 대상 컨테이너)가 쓴다.
         self._shield: dict[int, "shield_mod.ShieldDecision"] = {}
+        #: 2.0.26 배포 요청별 대규모 방패(ALB·WAF) 결과 — 주소 확인·실패 안내가 쓴다.
+        self._edge: dict[int, "aws_edge.EdgeResult"] = {}
 
     @staticmethod
     def _plan_shield(request: ECSDeployRequest) -> "shield_mod.ShieldDecision":
@@ -205,6 +208,8 @@ class ECSAgent:
             #: 2.0.25 공격·장애 감지 알림(지표 경보·메일)
             "cloudwatch": session.client("cloudwatch"),
             "sns": session.client("sns"),
+            #: 2.0.26 대규모 방패(ALB 앞 WAF)
+            "wafv2": session.client("wafv2"),
         }
 
     async def deploy(
@@ -322,6 +327,12 @@ class ECSAgent:
             record.provisioned["shield"] = (
                 f"켜짐 — 강도 {info['label']}(IP당 초당 {info['rate']}회, 순간 {info['burst']}회), 공개 포트 {decision.public_port} "
                 f"→ 앱 {decision.app_port}" if decision.on else f"꺼짐 — {decision.reason}")
+            self._check_edge_request(request)
+            if request.edge != "none":
+                record.provisioned["edge"] = (
+                    "대규모 방패 — 로드밸런서" + (" + AWS WAF(IP당 "
+                    f"{request.waf_window // 60}분 {request.waf_rate_limit:,}회 + AWS 관리 규칙 2개)"
+                    if request.edge == "alb_waf" else "만") + " (비용 확인함)")
             clients = self._clients(request.region)
 
             # 1. Preflight
@@ -574,10 +585,26 @@ class ECSAgent:
             #: (검토 2.0.15: id() 는 재사용된다).
             self._runtime.pop(id(request), None)
             self._shield.pop(id(request), None)
+            self._edge.pop(id(request), None)
 
     # ------------------------------------------------------------------
     # 단계별 구현
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_edge_request(req: ECSDeployRequest) -> None:
+        """대규모 방패는 AWS 자원을 하나도 만들기 전에 조건을 본다 — 비용 확인 · 직접 지정한 대상 그룹 · provision."""
+        if req.edge == "none":
+            return
+        if not req.edge_cost_approved:
+            raise InfraError("대규모 방패(로드밸런서·WAF)는 켜 두기만 해도 매달 요금이 나와 비용 확인이 필요합니다.",
+                             remedy="배포 설정의 「대규모 방패」에서 비용 확인에 체크한 뒤 다시 배포하세요. " + aws_edge.COST_NOTE)
+        if req.target_group_arn:
+            raise InfraError("대상 그룹을 직접 지정한 배포에는 대규모 방패를 함께 켤 수 없습니다.",
+                             remedy="대상 그룹 ARN 을 비우거나(ReCoder 가 로드밸런서를 만듦) 대규모 방패를 끄세요.")
+        if not req.provision:
+            raise InfraError("인프라 자동 준비(provision)를 끈 배포에는 대규모 방패를 켤 수 없습니다.",
+                             remedy="provision 을 켜거나 대규모 방패를 끄세요.")
 
     async def _step_preflight(self, req: ECSDeployRequest, rec: ECSDeployRecord) -> ECSDeployRecord:
         # ECR 리포지토리 이름은 파이프라인 전체가 **한 곳**에서 계산한다.
@@ -722,6 +749,28 @@ class ECSAgent:
                 logger.warning(
                     "서브넷 인터넷 경로 미확인: %s", ",".join(target.subnet_ids)
                 )
+
+            # 2.0.26 대규모 방패 — ALB(+WAF) 를 만들고, 태스크는 ALB 보안 그룹에서 오는 연결만 받는다.
+            if req.edge != "none":
+                edge = aws_edge.ensure_edge(
+                    clients["ec2"], clients["elbv2"], clients["wafv2"], service=req.service,
+                    vpc_id=target.vpc_id, subnet_ids=list(target.subnet_ids), app_port=req.container_port,
+                    health_path=req.health_check_path, waf=req.edge == "alb_waf",
+                    rate_limit=req.waf_rate_limit, window=req.waf_window, tags=self.resource_tags(req))
+                self._edge[id(req)] = edge
+                rec.provisioned["load_balancer"] = (
+                    f"{edge.name} — {edge.url} ({'새로 만듦' if 'alb' in edge.created else '기존 것 사용'})")
+                rec.provisioned["waf"] = (
+                    f"켜짐 — IP당 {req.waf_window // 60}분 {req.waf_rate_limit:,}회 넘으면 차단 + AWS 관리 규칙 2개"
+                    if edge.web_acl_arn else "꺼짐 — 로드밸런서만")
+                for i, note in enumerate(edge.notes):
+                    rec.provisioned[f"edge_note_{i + 1}"] = note
+                groups = list(req.security_group_ids) + [edge.task_security_group]
+                rec.provisioned["security_groups"] = ",".join(groups)
+                req.security_group_ids = groups
+                #: 아래 서비스 단계가 이 대상 그룹에 연결하고, 방패(nginx)는 ALB 가 넘긴 실제 IP 를 쓴다.
+                req.target_group_arn = edge.target_group_arn
+                return target
 
             # 보안 그룹
             if req.security_group_ids:
@@ -1217,9 +1266,13 @@ class ECSAgent:
             return
         loop = asyncio.get_running_loop()
 
+        edge = self._edge.get(id(req))
+
         def _work() -> str:
             if req.cloudfront_domain:
                 return "https://" + req.cloudfront_domain
+            if edge is not None:
+                return edge.url
             return aws_infra.wait_for_public_url(
                 clients["ecs"],
                 clients["ec2"],
@@ -1236,13 +1289,16 @@ class ECSAgent:
             # "URL 로 **접속됨**"이므로 실제로 한 번 받아본다. 여기서
             # 확인하지 않으면 "성공"이라고 보고한 주소가 열리지 않는
             # 상황이 그대로 사용자에게 간다.
+            # ALB 주소는 만든 뒤 DNS 가 퍼지고 대상이 healthy 가 되기까지 1~3분 걸린다 — 더 오래 기다린다.
+            attempts = max(6, int(min(req.url_wait_timeout, 300) // 10)) if edge is not None else 6
             reachable, detail = await loop.run_in_executor(
                 None,
                 lambda: _probe_http(
-                    (rec.service_url or "") + req.health_check_path, require_success=True
+                    (rec.service_url or "") + req.health_check_path, require_success=True,
+                    attempts=attempts, interval=10.0 if edge is not None else 5.0,
                 ),
             )
-            if not reachable and not req.cloudfront_domain:
+            if not reachable and not req.cloudfront_domain and edge is None:
                 # 그 사이 태스크가 교체됐을 수 있다(앱이 기동 중 죽으면 ECS 가 새 태스크를 띄우고 IP 가 바뀐다) — 다시 찾아 한 번 더.
                 fresh = await loop.run_in_executor(None, lambda: aws_infra._probe_public_ip(
                     clients["ecs"], clients["ec2"], cluster=req.cluster, service=req.service,
@@ -1682,6 +1738,10 @@ class ECSAgent:
         여기서 AWS 를 부르지 않는 이유: 이 경로에 오는 가장 큰 원인이
         **AWS 를 못 부르는 상황**이다. 그래서 끄는 방법을 알려주기만 한다.
         """
+        if rec.provisioned.get("load_balancer") and "edge_cost_warning" not in rec.provisioned:
+            rec.provisioned["edge_cost_warning"] = (
+                "로드밸런서(·WAF)는 배포가 실패해도 남아 있어 시간당 요금이 붙습니다 — 다시 배포하면 그대로 다시 쓰고, "
+                "그만 쓸 거면 「AWS 리소스 정리」에서 지우세요.")
         if not rec.provisioned.get("service"):
             return
         if "halt" in rec.provisioned or "cost_warning" in rec.provisioned:

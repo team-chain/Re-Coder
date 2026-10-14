@@ -1072,6 +1072,42 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'aws.cleanup.plan': {
+                const p = (payload ?? {}) as { region?: string; service?: string };
+                try {
+                    if (!p.region) { throw new Error('리전을 고르세요.'); }
+                    const plan = await this._apiClient.cleanupPlan(p.region, p.service ?? '');
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.planResult', plan);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'aws.cleanup.stop': {
+                const p = (payload ?? {}) as { region?: string; cluster?: string; service?: string };
+                try {
+                    if (!p.region || !p.cluster || !p.service) { throw new Error('중지할 서비스를 다시 고르세요.'); }
+                    const result = await this._apiClient.cleanupStop(p.region, p.cluster, p.service);
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.stopResult', result);
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.planResult', await this._apiClient.cleanupPlan(p.region));
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'aws.cleanup.delete': {
+                const p = (payload ?? {}) as { region?: string; ids?: unknown; approved?: boolean };
+                try {
+                    const ids = Array.isArray(p.ids) ? p.ids.filter((x): x is string => typeof x === 'string') : [];
+                    if (!p.region || !ids.length || p.approved !== true) { throw new Error('승인 카드에서 지울 항목을 다시 고르세요.'); }
+                    const result = await this._apiClient.cleanupDelete(p.region, ids);
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.deleteResult', result);
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.planResult', await this._apiClient.cleanupPlan(p.region));
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
+                }
+                break;
+            }
             case 'workspace.deploy.ecs.status': {
                 const deploymentId = (payload as { deploymentId?: string } | undefined)?.deploymentId;
                 try {

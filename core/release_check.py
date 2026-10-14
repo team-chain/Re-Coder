@@ -32,6 +32,7 @@ RUNTIME_IMPORTS = (
     'board',
     #: 2.0.25 — 기본 방패(nginx)·공격·장애 감지 알림
     'shield', 'ops_alerts', 'api.routes.ops_alerts',
+    'aws_edge', 'aws_cleanup', 'api.routes.aws_cleanup',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
@@ -42,6 +43,8 @@ BUNDLED_AWS_SERVICES = (
     'logs', 'ec2', 'dynamodb', 'cloudformation', 'sso', 'sso-oidc', 'signin',
     #: 2.0.25 공격·장애 감지 알림(지표·경보·메일)
     'cloudwatch', 'sns',
+    #: 2.0.26 대규모 방패(WAF)
+    'wafv2',
 )
 
 

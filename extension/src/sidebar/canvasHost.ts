@@ -16,7 +16,7 @@ import { activeProjectPath, pickProjectFolder, projectFolders, selectActiveProje
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
 type Target = 'ecs' | 's3' | 'github';
-export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[]; shield?: boolean; shield_level?: 'loose' | 'normal' | 'strict'; alerts?: boolean; alert_email?: string }
+export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[]; shield?: boolean; shield_level?: 'loose' | 'normal' | 'strict'; alerts?: boolean; alert_email?: string; edge?: 'none' | 'alb' | 'alb_waf'; waf_rate_limit?: number; waf_window?: 60 | 120 | 300 | 600; edge_cost_approved?: boolean }
 interface Plan { id: string; config: CanvasConfig; workspace: string; git: Awaited<ReturnType<typeof gitContext>>; account: string; created: number; targetState: Awaited<ReturnType<ApiClient['getCanvasTarget']>> | null; staticDigest?: string }
 
 export function staticPreview(workspace: string, dir: string) {
@@ -135,6 +135,19 @@ export function validateConfig(raw: Record<string, unknown>): CanvasConfig {
             const email = String(raw.alert_email).trim();
             if (!/^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$/.test(email)) throw new Error('알림 메일 주소 형식이 올바르지 않습니다.');
             config.alert_email = email;
+        }
+        //: 2.0.26 대규모 방패(ALB + WAF) — 비용 확인 없이는 받지 않는다
+        if (raw.edge !== undefined && raw.edge !== 'none') {
+            if (!['alb', 'alb_waf'].includes(String(raw.edge))) throw new Error('대규모 방패 설정이 올바르지 않습니다.');
+            if (raw.edge_cost_approved !== true) throw new Error('대규모 방패는 매달 요금이 나옵니다 — 비용 확인에 체크하세요.');
+            const limit = Number(raw.waf_rate_limit ?? 2000);
+            if (!Number.isInteger(limit) || limit < 10 || limit > 2_000_000_000) throw new Error('WAF 요청 한도는 10 이상의 정수여야 합니다.');
+            const window = Number(raw.waf_window ?? 300);
+            if (![60, 120, 300, 600].includes(window)) throw new Error('WAF 창은 60·120·300·600초 중 하나입니다.');
+            config.edge = raw.edge as 'alb' | 'alb_waf';
+            config.waf_rate_limit = limit;
+            config.waf_window = window as 60 | 120 | 300 | 600;
+            config.edge_cost_approved = true;
         }
         for (const key of ['env_vars', 'secret_refs'] as const) {
             const value = raw[key] ?? {};

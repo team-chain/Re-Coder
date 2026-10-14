@@ -510,6 +510,9 @@ def _ecs_statements(
             "Action": [
                 "elasticloadbalancing:DescribeTargetGroups",
                 "elasticloadbalancing:DescribeLoadBalancers",
+                # 2.0.26 대규모 방패·정리 — 리스너와 태그 조회(리소스 단위 제한 미지원, 읽기 전용)
+                "elasticloadbalancing:DescribeListeners",
+                "elasticloadbalancing:DescribeTags",
             ],
             "Resource": "*",
             "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
@@ -663,7 +666,8 @@ def _ecs_statements(
             "Action": ["iam:CreateServiceLinkedRole"],
             "Resource": "*",
             "Condition": {
-                "StringEquals": {"iam:AWSServiceName": "ecs.amazonaws.com"}
+                # 2.0.26: 계정의 첫 로드밸런서도 AWS 가 ELB 서비스 연결 역할을 만든다(대규모 방패).
+                "StringEquals": {"iam:AWSServiceName": ["ecs.amazonaws.com", "elasticloadbalancing.amazonaws.com"]}
             },
         },
         {
@@ -742,6 +746,119 @@ def _ecs_statements(
             ],
             "Condition": {"ForAllValues:StringLike": {"aws:TagKeys": ["recoder:*"]}},
         },
+        # ── 2.0.26 대규모 방패(ALB + WAF, 선택) ─────────────────────────────────────────
+        # 이름은 aws_edge.edge_name() 이 항상 recoder- 로 시작하게 만든다. 없어도 기본 배포는 된다.
+        {
+            "Sid": "EdgeLoadBalancer",
+            "Effect": "Allow",
+            "Action": [
+                "elasticloadbalancing:CreateLoadBalancer",
+                "elasticloadbalancing:CreateTargetGroup",
+                "elasticloadbalancing:CreateListener",
+                "elasticloadbalancing:ModifyListener",
+                "elasticloadbalancing:ModifyTargetGroup",
+                "elasticloadbalancing:ModifyTargetGroupAttributes",
+                "elasticloadbalancing:AddTags",
+                "elasticloadbalancing:SetWebAcl",
+                # 실패 때 이번에 만든 것 되돌리기 + 「AWS 리소스 정리」
+                "elasticloadbalancing:DeleteListener",
+                "elasticloadbalancing:DeleteLoadBalancer",
+                "elasticloadbalancing:DeleteTargetGroup",
+            ],
+            "Resource": [
+                _arn("elasticloadbalancing", "loadbalancer/app/recoder-*/*", ctx),
+                _arn("elasticloadbalancing", "targetgroup/recoder-*/*", ctx),
+                _arn("elasticloadbalancing", "listener/app/recoder-*/*/*", ctx),
+            ],
+        },
+        {
+            "Sid": "EdgeWaf",
+            "Effect": "Allow",
+            "Action": [
+                "wafv2:CreateWebACL",
+                "wafv2:GetWebACL",
+                "wafv2:UpdateWebACL",
+                "wafv2:DeleteWebACL",
+                "wafv2:AssociateWebACL",
+                "wafv2:DisassociateWebACL",
+                "wafv2:ListTagsForResource",
+                "wafv2:TagResource",
+            ],
+            "Resource": [
+                _arn("wafv2", "regional/webacl/recoder-*/*", ctx),
+                _arn("elasticloadbalancing", "loadbalancer/app/recoder-*/*", ctx),
+            ],
+        },
+        {
+            # 이름으로 웹 ACL 찾기 · ALB 에 붙은 웹 ACL 확인 — 리소스 단위 제한 미지원(읽기 전용).
+            "Sid": "EdgeWafRead",
+            "Effect": "Allow",
+            "Action": ["wafv2:ListWebACLs", "wafv2:GetWebACLForResource"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        # ── 2.0.26 AWS 리소스 정리 — 지우는 것은 recoder:managed 태그를 다시 확인한 것만(aws_cleanup) ──
+        {
+            # 목록 조회 — 리소스 단위 제한을 지원하지 않는 읽기 전용 액션.
+            "Sid": "CleanupList",
+            "Effect": "Allow",
+            "Action": ["ecs:ListClusters", "ecs:ListTaskDefinitions", "cloudwatch:DescribeAlarms", "sns:ListTopics",
+                       "ecr:DescribeRepositories"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        {
+            "Sid": "CleanupListServices",
+            "Effect": "Allow",
+            "Action": ["ecs:ListServices"],
+            "Resource": "*",
+            "Condition": {"ArnLike": {"ecs:cluster": _arn("ecs", f"cluster/{cluster}", ctx)}},
+        },
+        {
+            # 태스크 정의 등록 해제는 리소스 단위 제한을 지원하지 않는다(해제해도 요금·실행에는 영향 없음).
+            "Sid": "CleanupTaskDefinitions",
+            "Effect": "Allow",
+            "Action": ["ecs:DeregisterTaskDefinition"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        {
+            "Sid": "CleanupReadTags",
+            "Effect": "Allow",
+            "Action": ["ecs:ListTagsForResource", "ecr:ListTagsForResource", "ecr:DescribeImages",
+                       "logs:ListTagsForResource", "cloudwatch:ListTagsForResource", "sns:ListTagsForResource"],
+            "Resource": [
+                _arn("ecs", f"cluster/{cluster}", ctx),
+                _arn("ecs", f"service/{cluster}/{service}", ctx),
+                _arn("ecs", "task-definition/*", ctx),
+                repo,
+                _arn("logs", "log-group:/ecs/*", ctx),
+                _arn("cloudwatch", "alarm:recoder-*", ctx),
+                _arn("sns", "recoder-*", ctx),
+            ],
+        },
+        {
+            "Sid": "CleanupDelete",
+            "Effect": "Allow",
+            "Action": ["ecs:DeleteService", "ecs:DeleteCluster", "ecr:DeleteRepository", "logs:DeleteLogGroup",
+                       "cloudwatch:DeleteAlarms", "sns:DeleteTopic"],
+            "Resource": [
+                _arn("ecs", f"cluster/{cluster}", ctx),
+                _arn("ecs", f"service/{cluster}/{service}", ctx),
+                repo,
+                _arn("logs", "log-group:/ecs/*", ctx),
+                _arn("cloudwatch", "alarm:recoder-*", ctx),
+                _arn("sns", "recoder-*", ctx),
+            ],
+        },
+        {
+            # 보안 그룹은 이름으로 좁힐 수 없다 — ReCoder 태그가 붙은 그룹만 지울 수 있게 조건을 건다.
+            "Sid": "CleanupSecurityGroups",
+            "Effect": "Allow",
+            "Action": ["ec2:DeleteSecurityGroup"],
+            "Resource": _arn("ec2", "security-group/*", ctx),
+            "Condition": {"StringEquals": {"ec2:ResourceTag/recoder:managed": "true"}},
+        },
         {
             # 앱 포트를 여는 보안 그룹을 만든다.
             # CreateSecurityGroup 은 만들 그룹과 넣을 VPC 를 둘 다 요구한다.
@@ -785,8 +902,18 @@ def _s3_statements(ctx: ArnContext) -> list[dict]:
                 "s3:PutBucketPublicAccessBlock",
                 # 2.0.23 — 새로 만든 버킷에 recoder:managed 태그(정리 기능이 찾는 표시)
                 "s3:PutBucketTagging",
+                # 2.0.26 AWS 리소스 정리 — 태그 확인 후 비운 버킷 삭제
+                "s3:GetBucketTagging",
+                "s3:DeleteBucket",
             ],
             "Resource": bucket,
+        },
+        {
+            # 정리 목록 — 버킷 목록 조회는 계정 단위라 리소스를 좁힐 수 없다(읽기 전용).
+            "Sid": "S3CleanupList",
+            "Effect": "Allow",
+            "Action": ["s3:ListAllMyBuckets"],
+            "Resource": "*",
         },
         {
             "Sid": "S3StaticSiteObjects",

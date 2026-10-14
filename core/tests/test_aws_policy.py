@@ -118,6 +118,19 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         # 2.0.25 공격·장애 감지 — 읽기 전용, AWS 가 리소스 단위 제한 미지원
         "cloudwatch:GetMetricData":     "AWS 가 리소스 단위 제한 미지원(읽기 전용 지표 조회)",
         "logs:GetQueryResults":         "AWS 가 리소스 단위 제한 미지원(쿼리 ID 로만 읽는 결과)",
+        # 2.0.26 대규모 방패·리소스 정리 — 읽기 전용 목록, 리전 조건으로 좁혔다
+        "elasticloadbalancing:DescribeListeners": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "elasticloadbalancing:DescribeTags": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "wafv2:ListWebACLs":            "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "wafv2:GetWebACLForResource":   "읽기 전용 확인 — 리전 조건으로 좁혔다",
+        "ecs:ListClusters":             "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "ecs:ListTaskDefinitions":      "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "ecs:ListServices":             "AWS 가 리소스 단위 제한 미지원 — ecs:cluster 조건으로 좁혔다",
+        "ecs:DeregisterTaskDefinition": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다(해제는 요금·실행에 영향 없음)",
+        "cloudwatch:DescribeAlarms":    "읽기 전용 목록 — 리전 조건으로 좁혔다",
+        "sns:ListTopics":               "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "ecr:DescribeRepositories":     "이름 없이 부르는 목록 조회 — 리전 조건으로 좁혔다(정리 후보를 이름으로 거른다)",
+        "s3:ListAllMyBuckets":          "계정 단위 목록 — 리소스가 없다",
         # FR-04-01 — 연결하는 IAM 사용자·정책 이름을 **정책을 만드는 시점에는
         # 알 수 없다.** 읽기 전용 조회라 범위를 좁힐 근거도 없다.
         "iam:SimulatePrincipalPolicy":  "IAM 시뮬레이션 API 가 리소스 단위 제한 미지원",
@@ -232,6 +245,14 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "elasticloadbalancing:AddTags":
+        "aws_edge.ensure_edge 가 create_load_balancer/create_target_group/create_listener(Tags=…) 로 만들 때 태그를 함께 "
+        "붙인다 — AWS 는 생성 요청의 Tags 를 AddTags 로도 인가하지만 호출은 Create* 하나뿐이라 기록에 안 보인다",
+    "wafv2:TagResource":
+        "같은 이유 — wafv2.create_web_acl(Tags=…) 의 태그는 TagResource 로 인가된다",
+    "elasticloadbalancing:SetWebAcl":
+        "wafv2.associate_web_acl/disassociate_web_acl 로 ALB 에 웹 ACL 을 붙이고 뗄 때 AWS 가 ALB 쪽 권한으로 함께 "
+        "확인한다 — ELB API 호출은 없어 기록에 안 보인다",
     "cloudwatch:TagResource":
         "ops_alerts.setup_aws 가 put_metric_alarm(Tags=…) 로 만들 때 태그를 함께 붙인다 — AWS 는 생성 요청의 Tags 를 "
         "TagResource 로도 인가하지만 호출은 PutMetricAlarm 하나뿐이라 기록에 안 보인다",
@@ -2049,6 +2070,43 @@ def runtime_actions() -> set[str]:
                 service="recoder-probe-svc", log_group="/ecs/recoder-probe", email="probe@example.com",
                 tags={"recoder:managed": "true"},
             )
+            # 2.0.26 대규모 방패(ALB + WAF) — 만들기 · 다시(재사용·한도 갱신) · WAF 끄기(떼고 지움)
+            import aws_edge
+            elbv2 = boto3.client("elbv2", region_name=region)
+            wafv2 = boto3.client("wafv2", region_name=region)
+            edge_args = dict(service="recoder-probe-svc", vpc_id=net.vpc_id, subnet_ids=list(net.subnet_ids),
+                             app_port=8000, tags=tags, sleep=lambda _s: None)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, rate_limit=500, health_path="/ready", **edge_args)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, waf=False, **edge_args)
+            edge = aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)
+            # 리스너가 다른 대상 그룹을 가리키는 경우(대상 그룹을 손으로 지웠다 다시 만든 등) — 준비는 기록 밖에서.
+            recorder.uninstall()
+            try:
+                setup_elb = boto3.client("elbv2", region_name=region)
+                other = setup_elb.create_target_group(Name="recoder-probe-other", Protocol="HTTP", Port=8000,
+                                                      VpcId=net.vpc_id, TargetType="ip")["TargetGroups"][0]
+                setup_elb.modify_listener(ListenerArn=edge.listener_arn,
+                                          DefaultActions=[{"Type": "forward", "TargetGroupArn": other["TargetGroupArn"]}])
+                spare = setup_elb.create_listener(LoadBalancerArn=edge.alb_arn, Port=8080, Protocol="HTTP",
+                                                  DefaultActions=[{"Type": "forward",
+                                                                   "TargetGroupArn": other["TargetGroupArn"]}])
+            finally:
+                recorder.install()
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)          # ModifyListener 경로
+            aws_edge.rollback(elbv2, wafv2, [("listener", spare["Listeners"][0]["ListenerArn"])])  # 실패 되돌리기 경로
+            # 2.0.26 AWS 리소스 정리 — 목록 → 중지 → 전부 삭제(태그 다시 확인)
+            import aws_cleanup
+            cleanup_clients = {name: boto3.client(name, region_name=region) for name in aws_cleanup.CLIENTS}
+            cleanup_clients["s3"].create_bucket(Bucket="recoder-probe-site")
+            cleanup_clients["s3"].put_bucket_tagging(Bucket="recoder-probe-site",
+                                                     Tagging={"TagSet": [{"Key": "recoder:managed", "Value": "true"}]})
+            cleanup_clients["s3"].put_object(Bucket="recoder-probe-site", Key="index.html", Body=b"x")
+            found = aws_cleanup.plan(cleanup_clients, region=region)
+            assert not found["gaps"], found["gaps"]
+            aws_cleanup.stop(cleanup_clients, region=region, cluster="recoder-probe", service="recoder-probe-svc")
+            ids = [i["id"] for g in found["groups"] for i in g["items"]]
+            aws_cleanup.delete(cleanup_clients, ids, region=region, approved=True, sleep=lambda _s: None)
         return recorder.actions()
     finally:
         recorder.uninstall()
@@ -2083,6 +2141,23 @@ RUNTIME_EVIDENCE_FLOOR = {
     "sns:CreateTopic",
     "sns:Subscribe",
     "cloudwatch:PutMetricAlarm",
+    # 2.0.26 대규모 방패
+    "elasticloadbalancing:CreateLoadBalancer",
+    "elasticloadbalancing:CreateTargetGroup",
+    "elasticloadbalancing:CreateListener",
+    "wafv2:CreateWebACL",
+    "wafv2:AssociateWebACL",
+    # 2.0.26 리소스 정리
+    "ecs:DeleteService",
+    "ecs:DeleteCluster",
+    "ecr:DeleteRepository",
+    "logs:DeleteLogGroup",
+    "ec2:DeleteSecurityGroup",
+    "elasticloadbalancing:DeleteLoadBalancer",
+    "wafv2:DeleteWebACL",
+    "cloudwatch:DeleteAlarms",
+    "sns:DeleteTopic",
+    "s3:DeleteBucket",
 }
 
 

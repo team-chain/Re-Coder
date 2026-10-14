@@ -1499,6 +1499,12 @@ class ECSDeployRequest(BaseModel):
     #: 2.0.25 공격·장애 감지 알림 — 방패 로그 지표 필터 + CloudWatch 경보(+ 이메일 SNS). 권한이 없으면 이것만 빠진다.
     alerts: bool = True
     alert_email: str = Field(default="", pattern=r"^$|^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$")
+    #: 2.0.26 대규모 방패(선택) — none | alb(로드밸런서만) | alb_waf(로드밸런서 + AWS WAF).
+    #: 켜 두기만 해도 매달 요금이 나오므로 edge_cost_approved 가 없으면 아무것도 만들지 않는다.
+    edge: Literal["none", "alb", "alb_waf"] = "none"
+    waf_rate_limit: int = Field(default=2000, ge=10, le=2_000_000_000)
+    waf_window: Literal[60, 120, 300, 600] = 300
+    edge_cost_approved: bool = False
 
     @model_validator(mode="after")
     def validate_secret_refs(self):

@@ -873,6 +873,7 @@ def ensure_security_group(
     description: str = "ReCoder ECS Fargate service",
     cidr: str = "0.0.0.0/0",
     tags: Optional[dict] = None,
+    source_group: str = "",
 ) -> str:
     """앱 포트를 여는 보안 그룹을 확보하고 GroupId 를 돌려준다.
 
@@ -919,21 +920,15 @@ def ensure_security_group(
         group_id = str(groups[0]["GroupId"])
         logger.info("보안 그룹 재사용: %s (%s)", name, group_id)
 
+    #: 2.0.26 — ALB 뒤 태스크는 ALB 보안 그룹에서 오는 연결만 받는다(source_group). 인터넷 전체에 열지 않는다.
+    permission: dict = {"IpProtocol": "tcp", "FromPort": port, "ToPort": port}
+    if source_group:
+        permission["UserIdGroupPairs"] = [{"GroupId": source_group, "Description": "ReCoder load balancer only"}]
+    else:
+        permission["IpRanges"] = [{"CidrIp": cidr, "Description": "ReCoder app port"}]
     try:
-        ec2.authorize_security_group_ingress(
-            GroupId=group_id,
-            IpPermissions=[
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": port,
-                    "ToPort": port,
-                    "IpRanges": [
-                        {"CidrIp": cidr, "Description": "ReCoder app port"}
-                    ],
-                }
-            ],
-        )
-        logger.info("보안 그룹 인바운드 추가: %s:%d ← %s", group_id, port, cidr)
+        ec2.authorize_security_group_ingress(GroupId=group_id, IpPermissions=[permission])
+        logger.info("보안 그룹 인바운드 추가: %s:%d ← %s", group_id, port, source_group or cidr)
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) != "InvalidPermission.Duplicate":
             raise InfraError(

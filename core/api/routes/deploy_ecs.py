@@ -84,6 +84,11 @@ class ExtensionEcsDeployRequest(BaseModel):
     shield_level: Optional[Literal["loose", "normal", "strict"]] = None
     alerts: Optional[bool] = None
     alert_email: Optional[str] = Field(default=None, pattern=r"^$|^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$")
+    #: 2.0.26 대규모 방패(ALB + WAF, 선택)
+    edge: Optional[Literal["none", "alb", "alb_waf"]] = None
+    waf_rate_limit: Optional[int] = Field(default=None, ge=10, le=2_000_000_000)
+    waf_window: Optional[Literal[60, 120, 300, 600]] = None
+    edge_cost_approved: Optional[bool] = None
 
     @field_validator("env_vars", mode="before")
     @classmethod
@@ -220,7 +225,8 @@ def to_core_request(
         "subnet_ids": list(body.subnet_ids),
         "security_group_ids": list(body.security_group_ids),
     }
-    for name in ("shield", "shield_level", "alerts", "alert_email"):
+    for name in ("shield", "shield_level", "alerts", "alert_email",
+                 "edge", "waf_rate_limit", "waf_window", "edge_cost_approved"):
         value = getattr(body, name)
         if value is not None:
             fields[name] = value.strip() if isinstance(value, str) else value

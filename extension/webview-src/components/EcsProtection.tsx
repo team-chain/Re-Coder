@@ -7,14 +7,27 @@ import { Checkbox } from "./Check";
  *  · 공격·장애 감지 알림: 요청 급증·차단 급증·오류 증가·태스크 부족을 VS Code·디스코드로, 메일을 넣으면 PC 가 꺼져 있어도.
  */
 export type ShieldLevel = "loose" | "normal" | "strict";
+export type Edge = "none" | "alb" | "alb_waf";
 export interface Protection {
   shield: boolean;
   shield_level: ShieldLevel;
   alerts: boolean;
   alert_email: string;
+  /** 2.0.26 대규모 방패(로드밸런서 + AWS WAF) — 켜 두기만 해도 매달 요금, 비용 확인 필요 */
+  edge: Edge;
+  waf_rate_limit: number;
+  edge_cost_approved: boolean;
 }
 
-export const DEFAULT_PROTECTION: Protection = { shield: true, shield_level: "normal", alerts: true, alert_email: "" };
+export const DEFAULT_PROTECTION: Protection = {
+  shield: true, shield_level: "normal", alerts: true, alert_email: "",
+  edge: "none", waf_rate_limit: 2000, edge_cost_approved: false,
+};
+
+/** WAF 한도(5분 동안 IP 하나가 보낼 수 있는 요청 수). */
+export const WAF_LIMITS = [500, 1000, 2000, 5000];
+export const EDGE_COST =
+  "로드밸런서는 켜 두는 시간만큼 + 처리량만큼, WAF 는 매달 고정 요금 + 요청 수만큼 나옵니다(트래픽이 거의 없어도 us-east-1 기준 대략 월 25달러 이상). 그만 쓰면 운영 화면의 「AWS 리소스 정리」로 지우세요.";
 
 export const SHIELD_LEVELS: Array<{ value: ShieldLevel; label: string; rate: number; note: string }> = [
   { value: "loose", label: "느슨", rate: 50, note: "학교·회사처럼 한 IP 뒤에 사람이 많을 때" },
@@ -28,7 +41,16 @@ const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$/;
 export function protectionRequest(p: Protection): Record<string, unknown> {
   const email = p.alert_email.trim();
   if (p.alerts && email && !EMAIL.test(email)) throw new Error("알림 메일 주소 형식이 올바르지 않습니다.");
-  return { shield: p.shield, shield_level: p.shield_level, alerts: p.alerts, alert_email: p.alerts ? email : "" };
+  const edge = p.edge ?? "none";
+  if (edge !== "none" && !p.edge_cost_approved) throw new Error("대규모 방패는 매달 요금이 나옵니다 — 비용 확인에 체크하세요.");
+  const out: Record<string, unknown> = { shield: p.shield, shield_level: p.shield_level, alerts: p.alerts, alert_email: p.alerts ? email : "" };
+  if (edge !== "none") {
+    out.edge = edge;
+    out.waf_rate_limit = p.waf_rate_limit || 2000;
+    out.waf_window = 300;
+    out.edge_cost_approved = true;
+  }
+  return out;
 }
 
 const muted: React.CSSProperties = { color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 };
@@ -67,6 +89,27 @@ export function EcsProtection({ value, onChange, disabled = false }: {
           <span style={muted}>배포 뒤 구독 확인 메일의 링크를 한 번 눌러야 합니다.</span>
         </label>
       )}
+      <div style={{ marginTop: 10 }} data-testid="ecs-edge">
+        <Checkbox checked={(value.edge ?? "none") !== "none"} disabled={disabled}
+          onChange={v => onChange({ ...value, edge: v ? "alb_waf" : "none", edge_cost_approved: false })}
+          label={<b>대규모 방패 (로드밸런서 + AWS WAF)</b>}
+          description="초당 수천 건 이상 몰려도 앱까지 오기 전에 막습니다 · 매달 요금이 나옵니다" />
+        {(value.edge ?? "none") !== "none" && (
+          <div style={{ margin: "4px 0 0 24px", fontSize: 12 }}>
+            <label style={{ display: "block" }}>
+              IP 하나가 5분 동안 보낼 수 있는 요청
+              <select value={value.waf_rate_limit || 2000} onChange={e => set("waf_rate_limit", Number(e.target.value))}
+                style={{ marginLeft: 6 }}>
+                {WAF_LIMITS.map(n => <option key={n} value={n}>{n.toLocaleString()}회{n === 2000 ? " (기본)" : ""}</option>)}
+              </select>
+            </label>
+            <p style={{ ...muted, margin: "4px 0" }}>앱은 로드밸런서에서 오는 연결만 받게 바뀌고, 주소가 로드밸런서 주소(http://…elb.amazonaws.com)로 바뀝니다. AWS 관리 규칙(일반 공격 패턴·알려진 악성 입력)도 함께 켭니다.</p>
+            <p style={{ ...muted, margin: "4px 0" }} data-testid="edge-cost">{EDGE_COST}</p>
+            <Checkbox checked={!!value.edge_cost_approved} disabled={disabled} tone="warn"
+              onChange={v => set("edge_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
+          </div>
+        )}
+      </div>
     </fieldset>
   );
 }

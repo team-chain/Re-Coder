@@ -26,6 +26,23 @@ import { CoreManager } from './CoreManager';
 import { describeHttpError, parseHttpErrorDetail, CoreHttpError } from './httpError';
 
 /** 2.0.25 공격·장애 감지 알림 한 건 — 코어 ops_alerts 가 실제 지표로 만든 것. */
+/** 2.0.26 AWS 리소스 정리 */
+export interface CleanupItem {
+    id: string; kind: string; label: string; name: string; service: string; cluster: string; tagged: boolean;
+    deletable: boolean; detail: string; cost: string; note: string;
+}
+export interface CleanupPlan {
+    region: string;
+    groups: Array<{ service: string; items: CleanupItem[] }>;
+    untagged: CleanupItem[];
+    summary: { running_tasks: number; load_balancers: number; web_acls: number; image_mb: number; tagged: number; untagged: number };
+    gaps: string[];
+}
+export interface CleanupResult {
+    region: string; deleted: number; failed: number; gaps: string[];
+    results: Array<{ id: string; label?: string; name?: string; ok: boolean; skipped?: boolean; message: string }>;
+}
+
 export interface OpsAlert {
     id: string; at: string; kind: 'spike' | 'blocked' | 'errors' | 'outage'; severity: string; title: string; detail: string;
     region: string; cluster: string; service: string; status?: 'open' | 'applied' | 'dismissed'; resolution?: string;
@@ -1518,6 +1535,11 @@ export class ApiClient {
         shield_level?: 'loose' | 'normal' | 'strict';
         alerts?: boolean;
         alert_email?: string;
+        /** 2.0.26 대규모 방패(ALB + WAF, 선택 — 비용 확인 필요) */
+        edge?: 'none' | 'alb' | 'alb_waf';
+        waf_rate_limit?: number;
+        waf_window?: 60 | 120 | 300 | 600;
+        edge_cost_approved?: boolean;
 
         environment?: string;
         branch?: string;
@@ -1546,6 +1568,28 @@ export class ApiClient {
         const resp = await this.request<{ applied: boolean; message: string }>(
             'POST', `/api/ops/alerts/${encodeURIComponent(alertId)}/act`, { action, value, approved }, false, 120000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '대응을 적용하지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/aws/cleanup/plan — 2.0.26 ReCoder 가 만든 AWS 리소스 목록(아무것도 바꾸지 않음). */
+    async cleanupPlan(region: string, service = ''): Promise<CleanupPlan> {
+        const resp = await this.request<CleanupPlan>('POST', '/api/aws/cleanup/plan', { region, service }, false, 120000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AWS 리소스 목록을 불러오지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/aws/cleanup/stop — 서비스 태스크 수 0(되살릴 수 있음). */
+    async cleanupStop(region: string, cluster: string, service: string): Promise<{ ok: boolean; message: string }> {
+        const resp = await this.request<{ ok: boolean; message: string }>('POST', '/api/aws/cleanup/stop', { region, cluster, service });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '서비스를 중지하지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/aws/cleanup/delete — 승인한 항목만(태그를 코어가 다시 확인). */
+    async cleanupDelete(region: string, ids: string[]): Promise<CleanupResult> {
+        const resp = await this.request<CleanupResult>('POST', '/api/aws/cleanup/delete',
+            { region, ids, approved: true, count: ids.length }, false, 900000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AWS 리소스를 지우지 못했습니다'); }
         return resp.data;
     }
 

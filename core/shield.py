@@ -93,6 +93,9 @@ def nginx_conf(*, public_port: int, app_port: int, level: str = DEFAULT_LEVEL, h
         f"limit_req_zone $binary_remote_addr zone=perip:10m rate={lv['rate']}r/s;",
         "limit_conn_zone $binary_remote_addr zone=conn:10m;",
         "map $http_upgrade $connection_upgrade { default upgrade; '' close; }",
+        # ALB·CloudFront 뒤면 사용자가 들어온 실제 프로토콜(https)을 앱에 넘긴다(보안 쿠키·리다이렉트).
+        ("map $http_x_forwarded_proto $recoder_proto { default $http_x_forwarded_proto; '' $scheme; }"
+         if trust_vpc_proxy else "map $scheme $recoder_proto { default $scheme; }"),
         "server {",
         f"  listen {public_port};",
         "  server_tokens off;",
@@ -105,7 +108,7 @@ def nginx_conf(*, public_port: int, app_port: int, level: str = DEFAULT_LEVEL, h
     lines += [f"  deny {d.strip()};" for d in denies]
     upstream = f"http://127.0.0.1:{app_port}"
     proxy = ["proxy_http_version 1.1;", "proxy_set_header Host $host;", "proxy_set_header X-Real-IP $remote_addr;",
-             "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;", "proxy_set_header X-Forwarded-Proto $scheme;",
+             "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;", "proxy_set_header X-Forwarded-Proto $recoder_proto;",
              "proxy_set_header Upgrade $http_upgrade;", "proxy_set_header Connection $connection_upgrade;",
              "proxy_read_timeout 60s;"]
     for path in _health_paths(health_path):
