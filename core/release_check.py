@@ -30,6 +30,8 @@ RUNTIME_IMPORTS = (
     'package_trust',
     #: 2.0.24 — 마을 공용 게시판(서버 API 모양 추출) — gen_engine 이 필요할 때 불러온다
     'board',
+    #: 2.0.25 — 기본 방패(nginx)·공격·장애 감지 알림
+    'shield', 'ops_alerts', 'api.routes.ops_alerts',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
@@ -38,6 +40,8 @@ RUNTIME_IMPORTS = (
 BUNDLED_AWS_SERVICES = (
     'sts', 'ecs', 'ecr', 's3', 'iam', 'elbv2', 'budgets', 'bedrock-runtime', 'bedrock',
     'logs', 'ec2', 'dynamodb', 'cloudformation', 'sso', 'sso-oidc', 'signin',
+    #: 2.0.25 공격·장애 감지 알림(지표·경보·메일)
+    'cloudwatch', 'sns',
 )
 
 

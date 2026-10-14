@@ -16,7 +16,7 @@ import { activeProjectPath, pickProjectFolder, projectFolders, selectActiveProje
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
 type Target = 'ecs' | 's3' | 'github';
-export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[] }
+export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[]; shield?: boolean; shield_level?: 'loose' | 'normal' | 'strict'; alerts?: boolean; alert_email?: string }
 interface Plan { id: string; config: CanvasConfig; workspace: string; git: Awaited<ReturnType<typeof gitContext>>; account: string; created: number; targetState: Awaited<ReturnType<ApiClient['getCanvasTarget']>> | null; staticDigest?: string }
 
 export function staticPreview(workspace: string, dir: string) {
@@ -119,6 +119,22 @@ export function validateConfig(raw: Record<string, unknown>): CanvasConfig {
         if (raw.assign_public_ip !== undefined) {
             if (typeof raw.assign_public_ip !== 'boolean') throw new Error('공인 IP 설정은 true/false여야 합니다.');
             config.assign_public_ip = raw.assign_public_ip;
+        }
+        //: 2.0.25 보호·운영
+        for (const key of ['shield', 'alerts'] as const) {
+            if (raw[key] !== undefined) {
+                if (typeof raw[key] !== 'boolean') throw new Error(`${key} 는 true/false 여야 합니다.`);
+                config[key] = raw[key] as boolean;
+            }
+        }
+        if (raw.shield_level !== undefined) {
+            if (!['loose', 'normal', 'strict'].includes(String(raw.shield_level))) throw new Error('방패 강도는 느슨·보통·엄격 중 하나입니다.');
+            config.shield_level = raw.shield_level as 'loose' | 'normal' | 'strict';
+        }
+        if (raw.alert_email !== undefined && raw.alert_email !== '') {
+            const email = String(raw.alert_email).trim();
+            if (!/^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$/.test(email)) throw new Error('알림 메일 주소 형식이 올바르지 않습니다.');
+            config.alert_email = email;
         }
         for (const key of ['env_vars', 'secret_refs'] as const) {
             const value = raw[key] ?? {};

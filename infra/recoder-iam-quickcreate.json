@@ -270,6 +270,49 @@
               "Resource": "*"
             },
             {
+              "Sid": "OpsAlertLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:PutMetricFilter",
+                "logs:StartQuery"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/*"
+              }
+            },
+            {
+              "Sid": "OpsAlertRead",
+              "Effect": "Allow",
+              "Action": [
+                "cloudwatch:GetMetricData",
+                "logs:GetQueryResults"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "OpsAlertAlarms",
+              "Effect": "Allow",
+              "Action": [
+                "cloudwatch:PutMetricAlarm",
+                "cloudwatch:TagResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:recoder-*"
+              }
+            },
+            {
+              "Sid": "OpsAlertTopic",
+              "Effect": "Allow",
+              "Action": [
+                "sns:CreateTopic",
+                "sns:Subscribe",
+                "sns:TagResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:recoder-*"
+              }
+            },
+            {
               "Sid": "TagRecoderResources",
               "Effect": "Allow",
               "Action": [

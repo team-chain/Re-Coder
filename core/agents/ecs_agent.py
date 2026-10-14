@@ -30,6 +30,7 @@ from core.agents import ecs_runtime
 from core.agents.ecs_progress import initialize_progress, advance_progress, finish_progress
 from core.sbom import sbom_generator
 from core import aws_infra, aws_policy
+from core import shield as shield_mod
 from core.aws_infra import InfraError
 from core.schemas import (
     ECSDeployRecord,
@@ -142,6 +143,32 @@ class ECSAgent:
         self._on_progress = on_progress
         #: 배포 요청별 ECS 실행 설정(값 포함) — 태스크 정의를 등록할 때 꺼내 쓰고 버린다. 기록·디스크에는 남기지 않는다.
         self._runtime: dict[int, ecs_runtime.RuntimePlan] = {}
+        #: 2.0.25 배포 요청별 방패 결정(켤 수 있나·앱 포트) — 태스크 정의·서비스(로드 밸런서 대상 컨테이너)가 쓴다.
+        self._shield: dict[int, "shield_mod.ShieldDecision"] = {}
+
+    @staticmethod
+    def _plan_shield(request: ECSDeployRequest) -> "shield_mod.ShieldDecision":
+        """방패를 켤 수 있는지 — 앱이 PORT 환경변수를 읽어야 앱을 방패 뒤 포트로 옮길 수 있다."""
+        if not request.shield:
+            return shield_mod.decide(enabled=False, level=request.shield_level, public_port=request.container_port,
+                                     port_from_env=False)
+        if not request.workspace_path:
+            return shield_mod.ShieldDecision(False, request.shield_level,
+                                             "작업 폴더 없이 이미지만 배포해 앱이 PORT 를 읽는지 확인하지 못했습니다 — 방패 없이 배포합니다.")
+        from pathlib import Path
+        from static_frontend import generated_static_runtime_port
+        try:
+            from build_readiness import analyze
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import analyze  # type: ignore
+        static = generated_static_runtime_port(Path(request.workspace_path) / request.dockerfile) is not None
+        try:
+            readiness = analyze(request.workspace_path, online=False)
+            port_from_env = bool(readiness.port_from_env) or readiness.runtime == "python"
+        except Exception:  # noqa: BLE001 - 판단하지 못하면 켜지 않는다(앱이 안 뜨는 것보다 방패 없는 편이 낫다)
+            port_from_env = False
+        return shield_mod.decide(enabled=True, level=request.shield_level, public_port=request.container_port,
+                                 port_from_env=port_from_env, static_site=static)
 
     def _save_progress(self) -> None:
         if self._on_progress:
@@ -175,6 +202,9 @@ class ECSAgent:
             "logs": session.client("logs"),
             "sts": session.client("sts"),
             "elbv2": session.client("elbv2"),
+            #: 2.0.25 공격·장애 감지 알림(지표 경보·메일)
+            "cloudwatch": session.client("cloudwatch"),
+            "sns": session.client("sns"),
         }
 
     async def deploy(
@@ -286,6 +316,12 @@ class ECSAgent:
                 if runtime.services and not request.assign_public_ip:
                     record.provisioned["app_runtime_network"] = (
                         "공인 IP 를 끈 배포입니다 — DB 이미지(ECR Public)를 받으려면 서브넷에 NAT 게이트웨이가 있어야 합니다.")
+            decision = await asyncio.get_running_loop().run_in_executor(None, self._plan_shield, request)
+            self._shield[id(request)] = decision
+            info = shield_mod.summary(decision)
+            record.provisioned["shield"] = (
+                f"켜짐 — 강도 {info['label']}(IP당 초당 {info['rate']}회, 순간 {info['burst']}회), 공개 포트 {decision.public_port} "
+                f"→ 앱 {decision.app_port}" if decision.on else f"꺼짐 — {decision.reason}")
             clients = self._clients(request.region)
 
             # 1. Preflight
@@ -378,6 +414,8 @@ class ECSAgent:
             self._advance_progress(record, "svc_update")
             await self._step_ensure_service(request, record, clients,
                                             task_def_arn, network)
+            # 7-1. 공격·장애 감지 알림 준비(실패해도 배포는 계속)
+            await self._step_alerts(request, record, clients)
 
             # 8. desired_count 가 0 이면 띄울 태스크가 없다 — 폴링도 URL 도
             #    의미가 없다. 여기서 성공으로 끝낸다(과금 0원 상태).
@@ -535,6 +573,7 @@ class ECSAgent:
             #: 실행 설정(비밀값 포함)은 이 배포에서만 쓴다 — 중간에 멈춘 배포가 남긴 것을 다른 배포가 집어 가지 않게
             #: (검토 2.0.15: id() 는 재사용된다).
             self._runtime.pop(id(request), None)
+            self._shield.pop(id(request), None)
 
     # ------------------------------------------------------------------
     # 단계별 구현
@@ -1052,6 +1091,7 @@ class ECSAgent:
         task_def = self._render_task_definition(
             req, image=image, execution_role_arn=exec_arn, task_role_arn=task_arn,
             runtime=self._runtime.pop(id(req), None),
+            shield_decision=self._shield.get(id(req)),
         )
 
         try:
@@ -1082,6 +1122,43 @@ class ECSAgent:
     # 7단계: 서비스 확보
     # ------------------------------------------------------------------
 
+    async def _step_alerts(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
+        """방패 접속 기록으로 요청·차단·오류 지표와 경보를 만들고, Core 감시 목록에 올린다(2.0.25, best-effort)."""
+        if not req.alerts:
+            rec.provisioned["alerts"] = "꺼짐 — 배포 설정에서 감지 알림을 껐습니다."
+            return
+        shield_on = bool(self._shield.get(id(req)) and self._shield[id(req)].on)
+        try:
+            import ops_alerts  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core import ops_alerts  # type: ignore
+        loop = asyncio.get_running_loop()
+
+        def _work() -> dict:
+            result = (ops_alerts.setup_aws(clients, service=req.service, log_group=self.log_group_name(req),
+                                           email=req.alert_email, tags=self.resource_tags(req))
+                      if shield_on else {"filters": [], "alarms": [], "topic": "", "email": "", "notes": []})
+            ops_alerts.register(region=req.region, cluster=req.cluster, service=req.service,
+                                log_group=self.log_group_name(req), health_path=req.health_check_path,
+                                metrics=bool(result["filters"]))
+            return result
+
+        try:
+            result = await loop.run_in_executor(None, _work)
+        except Exception as exc:  # noqa: BLE001
+            rec.provisioned["alerts"] = f"준비하지 못했습니다 — {aws_infra.error_message(exc)}"
+            return
+        if shield_on and result["filters"]:
+            rec.provisioned["alerts"] = (
+                "켜짐 — 요청 급증·차단 급증·오류 증가·태스크 부족을 1분마다 봅니다(Core 가 켜져 있을 때 VS Code·디스코드 알림)"
+                + (", PC 가 꺼져 있어도 CloudWatch 경보가 메일로 보냅니다" if result["email"] else "")
+                + ".")
+        else:
+            rec.provisioned["alerts"] = ("부분 — 방패가 꺼져 요청 수를 셀 수 없어 태스크 부족(장애)만 봅니다."
+                                         if not shield_on else "부분 — 요청 지표를 만들지 못해 태스크 부족(장애)만 봅니다.")
+        for i, note in enumerate(result["notes"]):
+            rec.provisioned[f"alerts_note_{i + 1}"] = note
+
     async def _step_ensure_service(
         self,
         req: ECSDeployRequest,
@@ -1105,7 +1182,9 @@ class ECSAgent:
                 desired_count=req.desired_count,
                 assign_public_ip=req.assign_public_ip,
                 target_group_arn=req.target_group_arn,
-                container_name=req.container_name,
+                #: 방패가 켜졌으면 로드 밸런서는 방패 컨테이너(공개 포트)로 보낸다.
+                container_name=(shield_mod.CONTAINER if (self._shield.get(id(req)) and self._shield[id(req)].on)
+                                else req.container_name),
                 container_port=req.container_port,
                 tags=self.resource_tags(req),
             )
@@ -1646,6 +1725,7 @@ class ECSAgent:
         execution_role_arn: str,
         task_role_arn: str,
         runtime: Optional["ecs_runtime.RuntimePlan"] = None,
+        shield_decision: Optional["shield_mod.ShieldDecision"] = None,
     ) -> dict:
         """FileTemplate 에서 Task Definition dict 생성.
 
@@ -1733,4 +1813,9 @@ class ECSAgent:
                     "startPeriod": 60,
                 }
         # 앱이 시작할 때 요구하는 DB·서명 키·모의 결제(staging) — `ecs_runtime.plan` 이 배포 시작 때 정했다.
-        return ecs_runtime.apply(rendered, req.container_name, runtime, image)
+        rendered = ecs_runtime.apply(rendered, req.container_name, runtime, image)
+        if shield_decision is not None and shield_decision.on:
+            #: 2.0.25 기본 방패 — 공개 포트는 nginx 가, 앱은 다음 포트에서. ALB 뒤면 X-Forwarded-For 로 실제 IP 를 본다.
+            rendered = shield_mod.apply(rendered, req.container_name, shield_decision, health_path=req.health_check_path,
+                                        trust_vpc_proxy=bool(req.target_group_arn))
+        return rendered

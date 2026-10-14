@@ -697,6 +697,34 @@ def _ecs_statements(
             "Resource": "*",
         },
         {
+            # 2.0.25 공격·장애 감지 알림(ops_alerts) — 방패 접속 기록으로 요청·차단·오류 지표를 만들고(PutMetricFilter),
+            # 원인 IP·경로를 Logs Insights 로 뽑는다(StartQuery). 없어도 배포는 되고 알림만 빠진다.
+            "Sid": "OpsAlertLogs",
+            "Effect": "Allow",
+            "Action": ["logs:PutMetricFilter", "logs:StartQuery"],
+            "Resource": _arn("logs", "log-group:/ecs/*", ctx),
+        },
+        {
+            # 지표 읽기·쿼리 결과 읽기는 리소스 단위 제한을 지원하지 않는다(읽기 전용).
+            "Sid": "OpsAlertRead",
+            "Effect": "Allow",
+            "Action": ["cloudwatch:GetMetricData", "logs:GetQueryResults"],
+            "Resource": "*",
+        },
+        {
+            # PC 가 꺼져 있어도 AWS 가 직접 메일을 보내도록 recoder-* 경보와 알림 주제만 만든다.
+            "Sid": "OpsAlertAlarms",
+            "Effect": "Allow",
+            "Action": ["cloudwatch:PutMetricAlarm", "cloudwatch:TagResource"],
+            "Resource": _arn("cloudwatch", "alarm:recoder-*", ctx),
+        },
+        {
+            "Sid": "OpsAlertTopic",
+            "Effect": "Allow",
+            "Action": ["sns:CreateTopic", "sns:Subscribe", "sns:TagResource"],
+            "Resource": _arn("sns", "recoder-*", ctx),
+        },
+        {
             # 2.0.23 — ReCoder 가 **새로 만든** 리소스에 recoder:managed 태그를 붙인다.
             # 정리 기능이 "ReCoder 가 만든 것만" 찾는 표시다(aws_infra.tag_created).
             # 태그 키를 recoder:* 로만 제한해 다른 태그(비용 배분 등)는 건드리지 못하게 한다.

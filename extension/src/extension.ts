@@ -13,6 +13,8 @@
 
 import * as vscode from 'vscode';
 import { activeProjectPath, initActiveProject, pickProjectFolder } from './activeProject';
+import { DiscordWebhook } from './sidebar/discordWebhook';
+import { AlertWatcher } from './ops/alertWatcher';
 import { isAiKeyProvider, runAiConnectCommand } from './ai/aiKeys';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -114,6 +116,17 @@ export function activate(context: vscode.ExtensionContext): void {
             { webviewOptions: { retainContextWhenHidden: true } }
         )
     );
+
+    // ── 2.0.25 공격·장애 감지 알림 — 코어가 판정한 새 알림을 VS Code·디스코드로 ──
+    const alertDiscord = new DiscordWebhook(context.secrets);
+    const alertWatcher = new AlertWatcher(apiClient, context.globalState, {
+        send: async (title, detail) => {
+            const ws = activeProjectPath();
+            if (ws && await alertDiscord.configured(ws)) { await alertDiscord.send(ws, title, detail); }
+        },
+    }, () => ReCoderPanel.showView(context.extensionUri, sidebarProvider, 'operate'));
+    context.subscriptions.push(alertWatcher);
+    alertWatcher.start();
 
     //: 확장이 다시 시작돼도 열려 있던 ReCoder 탭을 새 확장에 다시 연결한다(ReCoderPanel.revive).
     context.subscriptions.push(

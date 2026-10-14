@@ -115,6 +115,9 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "elasticloadbalancing:DescribeTargetGroups": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "elasticloadbalancing:DescribeLoadBalancers": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
+        # 2.0.25 공격·장애 감지 — 읽기 전용, AWS 가 리소스 단위 제한 미지원
+        "cloudwatch:GetMetricData":     "AWS 가 리소스 단위 제한 미지원(읽기 전용 지표 조회)",
+        "logs:GetQueryResults":         "AWS 가 리소스 단위 제한 미지원(쿼리 ID 로만 읽는 결과)",
         # FR-04-01 — 연결하는 IAM 사용자·정책 이름을 **정책을 만드는 시점에는
         # 알 수 없다.** 읽기 전용 조회라 범위를 좁힐 근거도 없다.
         "iam:SimulatePrincipalPolicy":  "IAM 시뮬레이션 API 가 리소스 단위 제한 미지원",
@@ -229,6 +232,11 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "cloudwatch:TagResource":
+        "ops_alerts.setup_aws 가 put_metric_alarm(Tags=…) 로 만들 때 태그를 함께 붙인다 — AWS 는 생성 요청의 Tags 를 "
+        "TagResource 로도 인가하지만 호출은 PutMetricAlarm 하나뿐이라 기록에 안 보인다",
+    "sns:TagResource":
+        "같은 이유 — sns.create_topic(Tags=…) 의 태그는 TagResource 로 인가된다",
     "logs:GetLogEvents":
         "aws_infra.diagnose_stopped_tasks 의 `logs.get_log_events` — 클라이언트를 함수 인자로 받아 정적 스캔에 "
         "안 잡힌다. 앱이 기동 중 죽을 때 로그 끝부분을 배포 결과에 보여 주는 선택 권한(없으면 안내만)",
@@ -2033,6 +2041,14 @@ def runtime_actions() -> set[str]:
                 _RunningEcs(), ec2,
                 cluster="recoder-probe", service="recoder-probe-svc",
             )
+            # 2.0.25 공격·장애 감지 알림 — 배포 직후 지표 필터·SNS·경보를 만든다(클라이언트를 인자로 받아 정적 스캔에 안 보인다)
+            import ops_alerts
+            ops_alerts.setup_aws(
+                {"logs": logs, "cloudwatch": boto3.client("cloudwatch", region_name=region),
+                 "sns": boto3.client("sns", region_name=region)},
+                service="recoder-probe-svc", log_group="/ecs/recoder-probe", email="probe@example.com",
+                tags={"recoder:managed": "true"},
+            )
         return recorder.actions()
     finally:
         recorder.uninstall()
@@ -2063,6 +2079,10 @@ RUNTIME_EVIDENCE_FLOOR = {
     "ecr:TagResource",
     "logs:TagResource",
     "ec2:CreateTags",
+    "logs:PutMetricFilter",
+    "sns:CreateTopic",
+    "sns:Subscribe",
+    "cloudwatch:PutMetricAlarm",
 }
 
 

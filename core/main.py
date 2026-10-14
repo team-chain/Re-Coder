@@ -79,6 +79,7 @@ from api.routes import (  # noqa: E402
     aws,
     github,
     repair,
+    ops_alerts as ops_alerts_routes,
 )
 
 _bound_port: int = 0
@@ -224,6 +225,16 @@ async def lifespan(app: FastAPI):
     import asyncio as _asyncio
     guard_task = _asyncio.create_task(_runtime_guard(pid, port, token))
 
+    #: 2.0.25 공격·장애 감시 — ECS 배포가 감시 목록에 올린 서비스만 1분마다 본다(목록이 비면 아무것도 부르지 않는다).
+    ops_task = None
+    if os.environ.get("RECODER_TEST_MODE") != "1" and os.environ.get("RECODER_OPS_MONITOR", "1") != "0":
+        try:
+            import ops_alerts as _ops_alerts
+            from api.routes.ops_alerts import session_for as _ops_session
+            ops_task = _asyncio.create_task(_ops_alerts.Monitor(_ops_session).run_forever())
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ReCoder Core] 운영 감시 시작 생략: {exc}", flush=True)
+
     try:
         from observability import observability  # type: ignore
         observability.initialize()
@@ -251,6 +262,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         guard_task.cancel()
+        if ops_task is not None:
+            ops_task.cancel()
         if relay_poller is not None:
             try:
                 await relay_poller.stop()
@@ -362,6 +375,8 @@ def create_app() -> FastAPI:
     app.include_router(aws.router)
     app.include_router(github.router)
     app.include_router(repair.router)
+    #: 2.0.25 공격·장애 감지 알림
+    app.include_router(ops_alerts_routes.router)
 
     return app
 

@@ -1049,6 +1049,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            // ── 2.0.25 공격·장애 감지 알림 ──
+            case 'ops.alerts.list': {
+                try {
+                    const data = await this._apiClient.listOpsAlerts();
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.result', data);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'ops.alerts.act': {
+                const p = (payload ?? {}) as { alertId?: string; action?: string; value?: unknown; approved?: boolean };
+                try {
+                    if (!p.alertId || !p.action || typeof p.approved !== 'boolean') { throw new Error('승인 카드에서 대응을 다시 고르세요.'); }
+                    const result = await this._apiClient.actOpsAlert(p.alertId, p.action, p.value ?? null, p.approved);
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.actResult', { alertId: p.alertId, ...result });
+                    const data = await this._apiClient.listOpsAlerts();
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.result', data);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.error', { message: String(err), alertId: p.alertId });
+                }
+                break;
+            }
             case 'workspace.deploy.ecs.status': {
                 const deploymentId = (payload as { deploymentId?: string } | undefined)?.deploymentId;
                 try {

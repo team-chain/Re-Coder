@@ -1,3 +1,13 @@
+# ECS 기본 방패 · 공격·장애 감지 알림 (2026-10-14, 2.0.25)
+
+- core/shield.py: nginx 사이드카(public.ecr.aws/docker/library/nginx:stable-alpine, 컨테이너 recoder-shield). 설정은 env RECODER_SHIELD_CONF_B64 → BOOT 가 conf.d 에 쓰고 `nginx -t` 후 exec. 공개 포트 P = nginx, 앱은 PORT=P+1(앱 healthCheck 포트·모의 결제 웹훅 URL 도 바꿈). LEVELS loose 50/100/100 · normal 20/40/50 · strict 5/10/20(rate r/s / burst / IP당 동시 연결). JSON 접속 로그 `{"src":"recoder-shield",...}`. deny 는 공인 주소만(ipaddress is_global). trust_vpc_proxy(ALB 뒤)면 real_ip. decide(): readiness.port_from_env(또는 Python 런타임) & 정적 사이트 아님일 때만 on — 아니면 이유를 provisioned["shield"] 에. apply() 는 태스크 메모리 512 이상으로, reconfigure() 는 관리 밖 키(memory 등) 유지.
+- ecs_agent: _plan_shield(런타임 계획 다음) → _render_task_definition(shield_decision) → ensure_service 의 컨테이너 이름이 recoder-shield. _step_alerts(ensure_service 다음, best-effort): ops_alerts.setup_aws + register. clients 에 cloudwatch·sns.
+- core/ops_alerts.py: 지표 필터 Requests/Blocked/Errors(ReCoder/<service>), 경보 traffic-spike(5분 3,000 고정)·blocked-ratio>0.2·error-ratio>0.05(metric math `IF(req>=50, bad/req, 0)`), SNS recoder-<svc>-alerts(+메일 구독). evaluate(): 급증 = 24h 중앙값의 10배(287점 이상일 때, 아니면 3,000 · 바닥 300), 비율은 50건 이상. TaskWatch 3회 연속 부족 → 장애. Monitor.tick 60s(Core lifespan, RECODER_TEST_MODE·RECODER_OPS_MONITOR=0 이면 안 띄움), 저장 RECODER_HOME/ops_alerts.json·ops_monitors.json, 같은 종류 30분 쿨다운, top_sources(Logs Insights). act() 는 approved 필수 — 새 태스크 정의 리비전(shield.reconfigure) + update_service.
+- API /api/ops/alerts(GET ?since, POST /{id}/act, DELETE /monitors/{key}, POST /check). aws_policy OpsAlertLogs/Read/Alarms/Topic(recoder-* 로 좁힘) — REQUIRED_DEPLOY_ACTIONS 에는 넣지 않음(없으면 알림만 부분). BUNDLED_AWS_SERVICES += cloudwatch, sns.
+- 확장: src/ops/alertWatcher.ts(처음엔 마지막 id 만 저장 · 이후 open 알림만 VS Code 알림 + 디스코드, [자세히] → 운영 화면), EcsProtection(배포 센터·캔버스 승인 카드 「기본 방패」「감지 알림」), OpsAlertsPanel(운영 화면, 60s, 승인 카드).
+- 검증: 실제 nginx 로 BOOT 명령 그대로 실행 — 400 요청 → 429 347건·200 53건, 헬스 영향 없음. tests/test_dev_2025.py 18건(moto 로 setup_aws·Monitor·act), test_aws_policy 런타임 증거, webview opsAlerts 4건.
+- 하지 않은 것: Local Docker 방패(localhost 전용이라 불필요), runtime_check 단계에는 방패 없음, 실제 AWS 경보 발화는 사용자 계정에서 확인 필요.
+
 # 마을 공용 게시판 · 의존 관문 (2026-10-14, 2.0.24)
 
 - core/board.py: local_routes(라우트 호출마다 다음 라우트 전까지를 핸들러로 보고 첫 2xx `.json({...})` 최상위 키·`[ … ]`, 변수 응답은 None), 인증 = 경로 뒤 미들웨어 이름 또는 `router.use(auth)`. board_entries: 완성된 진입점의 app.use 접두사 → 없으면 약속 문서의 `/api(/vN)/<자원>` → `/api/<자원>s`(guessed). is_server_route_path(routes|routers|controllers|handlers/, 화면 폴더 제외 · backend|server/ 아래 api/), is_api_layer(화면 쪽 api|services|clients/ 또는 api·client·http·axios 이름), api_waits_for(같은 자원 줄기만, 범용 클라이언트는 전부).

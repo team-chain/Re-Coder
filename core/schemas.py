@@ -1493,6 +1493,12 @@ class ECSDeployRequest(BaseModel):
     target_group_arn: str = Field(default="", pattern=r"^$|^arn:(aws|aws-us-gov|aws-cn):elasticloadbalancing:[a-z0-9-]+:[0-9]{12}:targetgroup/[A-Za-z0-9-]+/[a-f0-9]+$")
     cloudfront_domain: str = Field(default="", pattern=r"^$|^[a-z0-9-]+\.cloudfront\.net$")
     assign_public_ip: bool = True
+    #: 2.0.25 기본 방패 — 앱 앞 nginx 로 IP 당 요청 수 제한(앱이 PORT 환경변수를 읽을 때만 켜진다).
+    shield: bool = True
+    shield_level: Literal["loose", "normal", "strict"] = "normal"
+    #: 2.0.25 공격·장애 감지 알림 — 방패 로그 지표 필터 + CloudWatch 경보(+ 이메일 SNS). 권한이 없으면 이것만 빠진다.
+    alerts: bool = True
+    alert_email: str = Field(default="", pattern=r"^$|^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$")
 
     @model_validator(mode="after")
     def validate_secret_refs(self):

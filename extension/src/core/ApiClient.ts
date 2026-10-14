@@ -24,6 +24,14 @@ import {
 } from '../types';
 import { CoreManager } from './CoreManager';
 import { describeHttpError, parseHttpErrorDetail, CoreHttpError } from './httpError';
+
+/** 2.0.25 공격·장애 감지 알림 한 건 — 코어 ops_alerts 가 실제 지표로 만든 것. */
+export interface OpsAlert {
+    id: string; at: string; kind: 'spike' | 'blocked' | 'errors' | 'outage'; severity: string; title: string; detail: string;
+    region: string; cluster: string; service: string; status?: 'open' | 'applied' | 'dismissed'; resolution?: string;
+    sources?: { ips?: Array<{ value: string; count: number }>; paths?: Array<{ value: string; count: number }> };
+    suggestions?: Array<{ action: string; value: unknown; label: string; detail: string }>;
+}
 import { FETCH_HEADERS_LIMIT_MS, longHttpFetch } from './longHttp';
 
 /** 보안 검사 결과로 만든 수정안. auto=false 는 안내만, risk 가 있으면 기본으로 고르지 않는다. */
@@ -1505,6 +1513,11 @@ export class ApiClient {
         assign_public_ip?: boolean;
         subnet_ids?: string[];
         security_group_ids?: string[];
+        /** 2.0.25 기본 방패·감지 알림(생략하면 코어 기본: 켬·보통) */
+        shield?: boolean;
+        shield_level?: 'loose' | 'normal' | 'strict';
+        alerts?: boolean;
+        alert_email?: string;
 
         environment?: string;
         branch?: string;
@@ -1517,6 +1530,22 @@ export class ApiClient {
             // 호스트가 배너 대신 "차단 + 사유" 카드로 보여 줄 수 있게.
             throw new CoreHttpError(resp.error ?? 'ECS 배포 요청 실패', resp.status, resp.detail ?? null);
         }
+        return resp.data;
+    }
+
+    /** GET /api/ops/alerts — 2.0.25 공격·장애 감지 알림(since 이후 새 것만). */
+    async listOpsAlerts(since = ''): Promise<{ alerts: OpsAlert[]; monitors: Array<Record<string, unknown>> }> {
+        const resp = await this.request<{ alerts: OpsAlert[]; monitors: Array<Record<string, unknown>> }>(
+            'GET', `/api/ops/alerts${since ? `?since=${encodeURIComponent(since)}` : ''}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '알림을 불러오지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/ops/alerts/{id}/act — 승인 카드에서 고른 대응만 적용(approved=false 면 닫기). */
+    async actOpsAlert(alertId: string, action: string, value: unknown, approved: boolean): Promise<{ applied: boolean; message: string }> {
+        const resp = await this.request<{ applied: boolean; message: string }>(
+            'POST', `/api/ops/alerts/${encodeURIComponent(alertId)}/act`, { action, value, approved }, false, 120000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '대응을 적용하지 못했습니다'); }
         return resp.data;
     }
 

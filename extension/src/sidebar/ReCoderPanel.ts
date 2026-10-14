@@ -73,6 +73,17 @@ export class ReCoderPanel {
         return ReCoderPanel._current;
     }
 
+    /** 특정 화면(예: 운영 대응)을 열어 보여 준다 — 새 창이면 화면이 준비될 때 그 화면으로 시작한다. */
+    static showView(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider, view: string): void {
+        if (ReCoderPanel._current) {
+            ReCoderPanel.createOrShow(extensionUri, sidebarProvider);
+            void ReCoderPanel._current._panel.webview.postMessage({ type: 'ui.openView', payload: { view } });
+            return;
+        }
+        sidebarProvider.setRestoredUiState({ view });
+        ReCoderPanel.createOrShow(extensionUri, sidebarProvider);
+    }
+
     static createOrShow(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider): ReCoderPanel {
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
         if (ReCoderPanel._current) {

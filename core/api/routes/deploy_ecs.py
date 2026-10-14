@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -79,6 +79,11 @@ class ExtensionEcsDeployRequest(BaseModel):
     assign_public_ip: bool = True
     subnet_ids: list[str] = Field(default_factory=list)
     security_group_ids: list[str] = Field(default_factory=list)
+    #: 2.0.25 — 기본 방패·감지 알림(생략하면 코어 기본값: 둘 다 켬, 강도 보통)
+    shield: Optional[bool] = None
+    shield_level: Optional[Literal["loose", "normal", "strict"]] = None
+    alerts: Optional[bool] = None
+    alert_email: Optional[str] = Field(default=None, pattern=r"^$|^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$")
 
     @field_validator("env_vars", mode="before")
     @classmethod
@@ -215,6 +220,10 @@ def to_core_request(
         "subnet_ids": list(body.subnet_ids),
         "security_group_ids": list(body.security_group_ids),
     }
+    for name in ("shield", "shield_level", "alerts", "alert_email"):
+        value = getattr(body, name)
+        if value is not None:
+            fields[name] = value.strip() if isinstance(value, str) else value
     if (body.aws_region or "").strip():
         fields["region"] = body.aws_region.strip()  # type: ignore[union-attr]
     if (body.container_name or "").strip():

@@ -9,6 +9,7 @@ import { Replay } from "../Replay";
 import { SecurityScanPanel, PolicyPanel, ScanResultLite } from "../Hubs";
 import { GateVerdict, gateColors, gateVerdict } from "../securityGate";
 import { EcsRuntimeEnvironment, parseRuntimeEnvironment } from "../EcsRuntimeEnvironment";
+import { DEFAULT_PROTECTION, EcsProtection, protectionRequest, type Protection } from "../EcsProtection";
 import { EcsExecutionRole } from "../EcsExecutionRole";
 import { EcsDeploymentProgress, EcsProgressStatus, initialEcsProgress, serviceLink } from "../EcsDeploymentProgress";
 import { Scene } from "./Scene";
@@ -33,6 +34,8 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const [selection,setSelection]=useState<Target|null>(null),[config,setConfig]=useState<Config>(defaultConfig),[plan,setPlan]=useState<Plan|null>(null);
   const [busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState('');
   const [runtimeDraft,setRuntimeDraft]=useState({environment:'',secrets:''});
+  //: 2.0.25 보호·운영(기본 방패·감지 알림) — 승인 카드에 그대로 보인다
+  const [protection,setProtection]=useState<Protection>(DEFAULT_PROTECTION);
   const [blocked,setBlocked]=useState<Issue[]>([]),[security,setSecurity]=useState(false),[force2D,setForce2D]=useState(false);
   const [expanded,setExpanded]=useState(false),[showNodeDetails,setShowNodeDetails]=useState(false);
   const [graph,setGraph]=useState<AnalysisGraph|null>(null),[level,setLevel]=useState<1|2|3>(1),[file,setFile]=useState(''),[folder,setFolder]=useState<string|null>(null),[search,setSearch]=useState(''),[graphLoading,setGraphLoading]=useState(false);
@@ -178,7 +181,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   };
   const cancel=useCallback(()=>{setPlan(p=>{if(p)postMessage('canvas.cancel',{planId:p.id});return null;});},[postMessage]);
   const prepareRef=useRef<(chosen:Config)=>void>(()=>{});
-  const prepare=(chosen=config)=>{if(busyRef.current||live?.running)return;try { if(chosen.target==='ecs')chosen={...chosen,...parseRuntimeEnvironment(runtimeDraft)}; } catch(err) {setError(String(err));return;}busyRef.current=true;setBusy(true);setError('');setMessage('배포 대상과 사전 검사 결과를 확인 중…');const id=requestId();actionRequest.current=id;postMessage('canvas.prepare',{requestId:id,config:chosen,autoDir:chosen.target==='s3'&&!dirTouched.current});};
+  const prepare=(chosen=config)=>{if(busyRef.current||live?.running)return;try { if(chosen.target==='ecs')chosen={...chosen,...parseRuntimeEnvironment(runtimeDraft),...protectionRequest(protection)}; } catch(err) {setError(String(err));return;}busyRef.current=true;setBusy(true);setError('');setMessage('배포 대상과 사전 검사 결과를 확인 중…');const id=requestId();actionRequest.current=id;postMessage('canvas.prepare',{requestId:id,config:chosen,autoDir:chosen.target==='s3'&&!dirTouched.current});};
   prepareRef.current=prepare;
   const drop=(target:Target)=>{choose(target);};
   const approve=()=>{if(!plan||busyRef.current)return;actionTarget.current=plan.config.target;busyRef.current=true;setBusy(true);if(plan.config.target==='s3'){setS3Result(null);setS3Progress({step:'plan',message:'승인한 파일을 확인합니다'});}setMessage('승인한 요청의 보안·권한 검사를 시작합니다…');setError('');const id=requestId();actionRequest.current=id;postMessage('canvas.execute',{requestId:id,planId:plan.id,approved:true});setPlan(null);};
@@ -207,7 +210,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const targetTitle=selection==='ecs'?'ECS로 배포':selection==='s3'?'S3로 배포':'GitHub로 푸시';
   const closeDrawer=()=>{setSelection(null);setPane('canvas');};
   const resetGraph=()=>{stopGraph();postMessage('canvas.graph.cancel');setLevel(1);setFolder(null);setSearch('');};
-  const configField=(key:Exclude<keyof Config,"env_vars"|"secret_refs"|"assign_public_ip"|"subnet_ids"|"security_group_ids">,label:string)=><label key={key}>{label}<input value={config[key]} disabled={running} onChange={e=>update(key,key==='container_port'?Number(e.target.value):e.target.value)}/></label>;
+  const configField=(key:Exclude<keyof Config,"env_vars"|"secret_refs"|"assign_public_ip"|"subnet_ids"|"security_group_ids"|"shield"|"shield_level"|"alerts"|"alert_email">,label:string)=><label key={key}>{label}<input value={config[key]} disabled={running} onChange={e=>update(key,key==='container_port'?Number(e.target.value):e.target.value)}/></label>;
   const blockedFixes=[...new Set(blocked.filter(i=>i.remediation_available&&i.proposal_id).map(i=>i.proposal_id!))];
   const notice=<>{error&&<div className="rc-note rc-error" role="alert">{error}</div>}{message&&<div className="rc-note" role="status">{message}</div>}{blockedFixes.length>1&&<button className="rc-primary" disabled={busy} onClick={()=>fixAll(blockedFixes)}>자동 수정 {blockedFixes.length}건 모두 적용</button>}{blocked.map((issue,i)=><div className="rc-finding" key={i}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<button disabled={busy} onClick={()=>fix(issue.proposal_id!)}>제안된 수정 적용</button>}</div>)}</>;
   return <section className={`rc-canvas rc-canvas-focused ${completed?'rc-canvas-completed':''}`} aria-label="배포 캔버스" style={expanded?{position:'fixed',inset:0,zIndex:40,padding:20,overflow:'auto',background:'var(--vscode-editor-background,#141920)'}:undefined}>
@@ -240,7 +243,8 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
         <p className="rc-target-summary">{snapshot?.projectName||'프로젝트'} → {selection==='ecs'?config.ecs_cluster:selection==='s3'?'S3':snapshot?.git.repository||'GitHub'}</p>
         {selection==='ecs'&&<>
           <div className="rc-fields">{configField('ecs_service','서비스')}{configField('tag','이미지 태그')}{configField('aws_region','AWS 리전')}</div>
-          <details className="rc-details rc-advanced"><summary>고급 설정</summary><div className="rc-fields">{([['image_name','이미지 이름'],['ecs_cluster','Cluster'],['task_family','Task family'],['container_port','컨테이너 포트'],['cpu','CPU 단위'],['memory','메모리 MB']] as Array<[Exclude<keyof Config,"env_vars"|"secret_refs"|"assign_public_ip"|"subnet_ids"|"security_group_ids">,string]>).map(([key,label])=>configField(key,label))}<label>배포 환경<select disabled={running} value={config.environment} onChange={e=>update('environment',e.target.value)}><option value="staging">staging</option><option value="production">production</option></select></label></div><EcsRuntimeEnvironment value={runtimeDraft} onChange={draft=>{setRuntimeDraft(draft);setPlan(null);}} disabled={running}/><EcsExecutionRole region={config.aws_region} disabled={!snapshot?.aws.ready||running}/></details>
+          <details className="rc-details rc-advanced"><summary>고급 설정</summary><div className="rc-fields">{([['image_name','이미지 이름'],['ecs_cluster','Cluster'],['task_family','Task family'],['container_port','컨테이너 포트'],['cpu','CPU 단위'],['memory','메모리 MB']] as Array<[Exclude<keyof Config,"env_vars"|"secret_refs"|"assign_public_ip"|"subnet_ids"|"security_group_ids"|"shield"|"shield_level"|"alerts"|"alert_email">,string]>).map(([key,label])=>configField(key,label))}<label>배포 환경<select disabled={running} value={config.environment} onChange={e=>update('environment',e.target.value)}><option value="staging">staging</option><option value="production">production</option></select></label></div><EcsRuntimeEnvironment value={runtimeDraft} onChange={draft=>{setRuntimeDraft(draft);setPlan(null);}} disabled={running}/><EcsExecutionRole region={config.aws_region} disabled={!snapshot?.aws.ready||running}/></details>
+          <EcsProtection value={protection} onChange={p=>{setProtection(p);setPlan(null);}} disabled={running}/>
         </>}
         {selection==='s3'&&<div className="rc-fields"><label>빌드 산출물 폴더<input value={config.dir} disabled={running} onChange={e=>update('dir',e.target.value)} placeholder="자동 감지"/></label>{configField('aws_region','AWS 리전')}</div>}
         {selection==='github'&&snapshot&&<GitHubPanel workspace={snapshot.workspace} git={snapshot.git} onChanged={git=>{setSnapshot(s=>s?{...s,git}:s);refresh();}} onReview={()=>prepare()} onWorkflow={()=>openPane('details')} disabled={running}/>}

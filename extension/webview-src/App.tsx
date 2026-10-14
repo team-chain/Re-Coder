@@ -404,6 +404,11 @@ const App: React.FC = () => {
         const v = saved.view;
         if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
       }
+      if (type === "ui.openView" && isWorkspacePanel) {
+        //: 2.0.25 — 알림의 [자세히] 등 확장이 특정 화면을 열게 할 때.
+        const v = (payload as { view?: string } | undefined)?.view;
+        if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
+      }
       if (type === "code.setTargetFolder" && isWorkspacePanel) {
         //: 탐색기 "여기에 코드 생성" — 코드 화면으로 옮기고 그 폴더를 대상으로 둔다.
         setPendingTargetFolder((payload as { folder?: string })?.folder ?? "");

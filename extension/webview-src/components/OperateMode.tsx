@@ -14,6 +14,7 @@
 import React, { useState, useCallback } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal from "./ApprovalModal";
+import { OpsAlertsPanel } from "./OpsAlertsPanel";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -187,16 +188,20 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
 
   if (!isActive) {
     return (
+      <div>
+      <OpsAlertsPanel />
       <div style={{ padding: 16, color: "var(--vscode-descriptionForeground)", textAlign: "center", fontSize: 12, lineHeight: 1.7 }}>
         Operate Mode는 다음이 필요합니다:<br />
         AI Ready · AWS Deploy Ready · Ops Ready<br />
         <span style={{ color: "var(--vscode-textLink-foreground, #4af)" }}>진단 탭에서 확인하세요</span>
+      </div>
       </div>
     );
   }
 
   return (
     <div style={{ fontFamily: "var(--vscode-font-family, sans-serif)", fontSize: 12, color: "var(--vscode-editor-foreground)" }}>
+      <OpsAlertsPanel />
 
       {/* EC2 연결 정보 */}
       <div style={sectionHeader}>EC2 연결 정보</div>
