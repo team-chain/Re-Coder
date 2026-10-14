@@ -1,3 +1,11 @@
+# 마을 공용 게시판 · 의존 관문 (2026-10-14, 2.0.24)
+
+- core/board.py: local_routes(라우트 호출마다 다음 라우트 전까지를 핸들러로 보고 첫 2xx `.json({...})` 최상위 키·`[ … ]`, 변수 응답은 None), 인증 = 경로 뒤 미들웨어 이름 또는 `router.use(auth)`. board_entries: 완성된 진입점의 app.use 접두사 → 없으면 약속 문서의 `/api(/vN)/<자원>` → `/api/<자원>s`(guessed). is_server_route_path(routes|routers|controllers|handlers/, 화면 폴더 제외 · backend|server/ 아래 api/), is_api_layer(화면 쪽 api|services|clients/ 또는 api·client·http·axios 이름), api_waits_for(같은 자원 줄기만, 범용 클라이언트는 전부).
+- gen_engine: state["board"](체크포인트에 저장·resume 복원), _deps 에 화면 API 파일 → 같은 자원 서버 라우트 약한 의존, _dependency_context 에 게시판 블록(대상이 서버 쪽뿐이면 생략), 이벤트 board_post{items}·board_read.
+- 의존 관문 `_gate`(_finish 에서 _verify_and_fix 다음, 저장 전 — 이 파일을 기다리는 파일은 아직 시작 전): 완성 파일 overlay 로 build_readiness.analyze(새 프로젝트는 빈 임시 폴더 기준). ① missing_exports 중 이 파일이 낀 쌍 → add_missing_export ② file_writes 의 NODE_TYPE_NAME_MISSING·NODE_CONTEXT_VALUE_MISSING ③ 이 파일 몫의 남은 이름 어긋남·Context member·Vite process.env → self._fix 1회(실패해도 진행). 다른 완성 파일 반영은 **이 관문이 바꾼 파일만, 그 사이 다른 관문이 안 바꿨을 때만**(동시 관문이 옛 내용으로 덮어 되돌리던 경쟁을 테스트가 잡음). 1.5s(RECODER_GATE_BUDGET_S) 넘는 일이 2번이면 그 작업에서는 끈다. 이벤트 gate_check{ok, fixed[], returned, by}.
+- teamState: board·boardReaders·lastPost·gate·gates. TeamVillage: VILLAGE_HEIGHT 392→432, 작업대 이름표와 선반 사이 게시판 줄(L.board), 검토 리코더가 관문 때 gate.by 작업대 옆(말풍선 윗줄)으로, 검토 칸에 관문 통과·자동 수정·되돌림 수.
+- 검증: tests/test_dev_2024.py(엔진 실행 — 화면 API 파일이 서버 라우트 뒤에 시작하고 프롬프트에 게시판, 관문 자동 export·1회 되돌림·실패해도 완료·끄기/느리면 꺼짐), webview teamVillage 3건. 마을은 renderToStaticMarkup → Playwright 캡처로 겹침 확인(정적 렌더는 <style> 의 > 를 이스케이프하니 캡처 때 되돌려야 실제 모양).
+
 # 슬롭스쿼팅 방어 · AWS 리소스 태그 · 태그 릴리스 (2026-10-14, 2.0.23)
 
 - core/package_trust.py: 유명 목록(core/data/popular_npm.json, 17,817개 — scripts/update_popular_npm.py 가 registry 검색 API 의 주간 다운로드로 만든다. api.npmjs.org 는 sandbox 에서 403 이라 fetch_weekly 가 검색 API 로 대체) 밖 이름만 조회. look_alike = 같은 스코프·이름 5자 이상·길이차 1 이하·편집 거리 1(인접 교환 1) 또는 구분자만 다름. judge: typo(주간 < min(5,000, max(1,000, 유명의 1%))) · young(30일 미만 & 주간 1,000 미만) → block, install_script/no_repo/deprecated → warn, 404 는 기존 NODE_DEPENDENCY_VERSION_NOT_FOUND 몫. 캐시 ~/.recoder/cache/package_trust.json 24h. 테스트 모드·RECODER_OFFLINE·사내 레지스트리면 조회 안 함.

@@ -12,7 +12,15 @@ export interface TeamEvent {
   layer?: number; agents?: number; seconds?: number; done_count?: number; total?: number; elapsed?: number;
   summary?: string; files?: Array<{ file: string; layer?: number; purpose?: string }>;
   kind?: string; attempt?: number;
+  /** 2.0.24 게시판(board_post) 항목 · 관문(gate_check) 결과 */
+  items?: BoardItem[]; ok?: boolean; fixed?: string[]; returned?: boolean; by?: string;
 }
+
+/** 게시판 메모 한 장 — 서버 라우트 파일에서 뽑은 실제 경로·응답 모양(지어내지 않는다). */
+export interface BoardItem { method: string; path: string; shape?: string | null; auth?: boolean }
+
+/** 마지막 관문 결과 — 검토 리코더가 그 작업대로 가서 도장을 찍는다. */
+export interface GateView { file: string; by?: string; ok: boolean; fixed: number; returned: boolean; seq: number }
 
 /** failed: 정해진 횟수를 넘겨 실패 — 완료로 세지 않는다(사용자가 다시 쓰기·빼고 받기를 고른다). */
 export type FileState = "waiting" | "writing" | "parts" | "fixing" | "done" | "issue" | "failed";
@@ -36,6 +44,14 @@ export interface TeamView {
   secretFixes: number;
   /** 보안 검사가 설치 전에 막은 수상한 패키지 건수(security_block 이벤트) — 2.0.23. */
   securityBlocks?: number;
+  /** 2.0.24 공용 게시판 — 경로마다 한 장(같은 경로는 나중 것으로) */
+  board?: Array<BoardItem & { file: string; by?: string }>;
+  /** 누가 게시판을 보고 어떤 파일을 시작했나(에이전트 → 파일) */
+  boardReaders?: Record<string, string>;
+  /** 마지막으로 게시판에 붙인 에이전트와 장 수 */
+  lastPost?: { agent: string; count: number; seq: number } | null;
+  gate?: GateView | null;
+  gates?: { passed: number; fixed: number; returned: number };
   issues: number;
   retries: number;
   elapsed: number;
@@ -51,7 +67,8 @@ export const DEFAULT_DEV_AGENTS = 3;
 
 export function emptyTeamView(): TeamView {
   return { jobId: "", engaged: false, phase: "planning", summary: "", files: [], total: 0, done: 0, layer: null, agents: {},
-    fixes: 0, secretFixes: 0, securityBlocks: 0, issues: 0, retries: 0, elapsed: 0, log: [], records: [] };
+    fixes: 0, secretFixes: 0, securityBlocks: 0, board: [], boardReaders: {}, lastPost: null, gate: null,
+    gates: { passed: 0, fixed: 0, returned: 0 }, issues: 0, retries: 0, elapsed: 0, log: [], records: [] };
 }
 
 /** 에이전트들이 실제로 일하고 있는지 — 검증된 기반(쇼핑몰 등)처럼 AI 가 생성하지 않는 경로에서는 보드를 띄우지 않는다. */
@@ -81,7 +98,7 @@ const STATE_OF_STEP: Record<string, AgentState | undefined> = {
 };
 
 const ENGINE_STEPS = new Set(["planning", "planned", "plan_added", "wave", "file_start", "file_split", "file_part", "file_done",
-  "fixing", "verified", "verify_failed", "split", "resumed", "generated"]);
+  "fixing", "verified", "verify_failed", "split", "resumed", "generated", "board_post", "board_read", "gate_check"]);
 
 /** 이벤트의 agent 값 → 화면 이름(개발 N · 검토 · 설계). 슬롯 이름은 코어의 agent-1, agent-2 … */
 export function agentName(id: string | undefined): { who: string; role: TeamRole | "system" } {
@@ -123,6 +140,14 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
     case "verified": return event.file ? { who, role, tone: "ok", text: `${base(event.file)} 고친 뒤 확인 통과` } : null;
     case "security_block": return { who: who || "검토", role: role === "system" ? "review" : role, tone: "warn",
       text: msg || "수상한 패키지 차단" };
+    case "board_post": return { who, role, tone: "ok", text: `게시판에 API ${(event.items ?? []).length}개 공유 — ${base(event.file)}` };
+    case "board_read": return event.file ? { who, role, text: `게시판 확인 후 시작 — ${base(event.file)}` } : null;
+    case "gate_check": {
+      const n = (event.fixed ?? []).length;
+      return { who: "검토", role: "review", tone: event.returned ? "warn" : "ok",
+        text: event.returned ? `관문 — ${base(event.file)} 어긋남을 작성자에게 한 번 돌려보냄`
+          : n ? `관문 통과 — ${base(event.file)} 자동 수정 ${n}건` : `관문 통과 — ${base(event.file)}` };
+    }
     case "verify_failed": return { who, role, tone: "warn", text: msg ? `확인 필요 — ${msg.slice(0, 80)}` : "확인 필요" };
     case "file_done": return event.file ? { who, role, tone: "ok", text: (msg && msg.includes("고정 파일")) ? msg : `${event.file} 완료${event.lines ? ` (${event.lines}줄)` : ""}` } : null;
     case "retry": return { who, role, tone: "warn", text: msg || `일시적 오류 — ${event.seconds ?? "잠시"}초 뒤 다시 시도` };
@@ -196,6 +221,30 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
     }
     case "verify_failed": setFile(event.file, "issue"); next.issues += 1; break;
     case "security_block": next.securityBlocks = (next.securityBlocks ?? 0) + 1; break;
+    case "board_post": {
+      const items = (event.items ?? []).filter(i => i && i.method && i.path);
+      if (items.length) {
+        const keyOf = (i: BoardItem) => `${i.method} ${i.path}`;
+        const fresh = new Set(items.map(keyOf));
+        next.board = [...(next.board ?? []).filter(b => !fresh.has(keyOf(b))),
+          ...items.map(i => ({ ...i, file: event.file ?? "", ...(by ? { by } : {}) }))];
+        next.lastPost = by ? { agent: by, count: items.length, seq: (view.lastPost?.seq ?? 0) + 1 } : next.lastPost ?? null;
+      }
+      break;
+    }
+    case "board_read": if (by && event.file) next.boardReaders = { ...(next.boardReaders ?? {}), [by]: event.file }; break;
+    case "gate_check": {
+      const g = next.gates ?? { passed: 0, fixed: 0, returned: 0 };
+      const n = (event.fixed ?? []).length;
+      next.gates = { passed: g.passed + (event.returned ? 0 : 1), fixed: g.fixed + n, returned: g.returned + (event.returned ? 1 : 0) };
+      next.gate = { file: event.file ?? "", by: event.by, ok: !!event.ok, fixed: n, returned: !!event.returned, seq: (view.gate?.seq ?? 0) + 1 };
+      if (event.returned && event.by && next.agents[event.by]) {
+        //: 카드가 작성자 작업대로 돌아간다 — 그 리코더가 그 문제만 한 번 고친다(엔진 _gate).
+        next.agents[event.by] = { ...next.agents[event.by], state: "fixing", file: event.file };
+      }
+      if (event.returned) setFile(event.file, "fixing");
+      break;
+    }
     case "file_retry": setFile(event.file, "writing"); next.retries += 1; break;
     case "file_failed": setFile(event.file, "failed"); break;
     case "file_done": setFile(event.file, view.files.find(f => f.file === event.file)?.state === "issue" ? "issue" : "done"); break;

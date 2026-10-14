@@ -28,6 +28,8 @@ RUNTIME_IMPORTS = (
     'runtime_check',
     #: 2.0.23 — 설치 전에 수상한 npm 패키지(갓 생긴 무명·짝퉁 이름) 차단
     'package_trust',
+    #: 2.0.24 — 마을 공용 게시판(서버 API 모양 추출) — gen_engine 이 필요할 때 불러온다
+    'board',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
