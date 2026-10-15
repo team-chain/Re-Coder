@@ -19,6 +19,7 @@ import asyncio
 import collections
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -1037,14 +1038,18 @@ class ECSAgent:
         if decision == "allowed":
             return
         role = exec_arn.rsplit("/", 1)[-1]
+        #: 2.0.33 이 서비스·이 리전의 DB 비밀 하나만 읽게 한다(전에는 모든 리전의 recoder/* 전체였다).
+        #: 정책 이름도 서비스마다 달라야 한다 — 같은 이름으로 put-role-policy 하면 앞 서비스의 권한을 덮어 쓴다.
         doc = json.dumps({"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": "secretsmanager:GetSecretValue",
-            "Resource": f"arn:{partition}:secretsmanager:*:{account}:secret:recoder/*"}]}, separators=(",", ":"))
+            "Resource": f"arn:{partition}:secretsmanager:{req.region}:{account}:secret:{aws_rds.secret_name(req.service)}-*"}]},
+            separators=(",", ":"))
+        policy_name = ("recoder-db-secret-" + re.sub(r"[^A-Za-z0-9+=,.@_-]", "-", f"{req.service}-{req.region}"))[:128]
         raise InfraError(
             "production 관리형 DB 는 접속 정보를 Secrets Manager 비밀로 넣는데, ECS 실행 역할이 그 비밀을 읽을 권한이 없습니다.",
             detail=f"실행 역할 {exec_arn} 의 secretsmanager:GetSecretValue 판정: {decision or '알 수 없음'}",
-            remedy=("관리자 권한으로 한 번 실행한 뒤 다시 배포하세요(ReCoder 비밀 recoder/* 만 읽게 함): "
-                    f"aws iam put-role-policy --role-name {role} --policy-name recoder-db-secret --policy-document '{doc}'. "
+            remedy=("관리자 권한으로 한 번 실행한 뒤 다시 배포하세요(이 서비스의 DB 비밀 하나만 읽게 함): "
+                    f"aws iam put-role-policy --role-name {role} --policy-name {policy_name} --policy-document '{doc}'. "
                     "또는 staging 으로 배포하면 접속 정보를 환경변수로 넣어 이 권한 없이 동작합니다. 아직 아무것도 만들지 않았습니다."))
 
     async def _step_database_ready(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:

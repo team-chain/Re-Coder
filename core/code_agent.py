@@ -918,13 +918,19 @@ def _restore_neutralized_in_ops(ops: list[dict], guarded: list[dict]) -> None:
         from context_gate import restore_neutralized
     except ImportError:  # pragma: no cover
         from core.context_gate import restore_neutralized  # type: ignore
+    def _key(name: object) -> str:
+        #: 2.0.33 lstrip("./") 는 글자를 지워 ".env" 와 "env" 를 같은 파일로 봤다 — 앞의 "./" 만 뗀다.
+        text = str(name or "").replace("\\", "/")
+        while text.startswith("./"):
+            text = text[2:]
+        return text
+
     by_file: dict[str, list[str]] = {}
     for g in guarded:
-        by_file.setdefault(str(g.get("file") or "").replace("\\", "/").lstrip("./"), []).append(str(g.get("raw", "")))
+        by_file.setdefault(_key(g.get("file")), []).append(str(g.get("raw", "")))
     for op in ops:
         if isinstance(op.get("content"), str):
-            name = str(op.get("file") or "").replace("\\", "/").lstrip("./")
-            op["content"] = restore_neutralized(op["content"], by_file.get(name, []))
+            op["content"] = restore_neutralized(op["content"], by_file.get(_key(op.get("file")), []))
 
 
 def _build_code_prompt(
@@ -3021,6 +3027,15 @@ def generate_code(
         from code_removals import annotate_removals
     except ImportError:
         from core.code_removals import annotate_removals
+    #: 2.0.33 — 어느 생성 경로(팀 모드·이어 받기 포함)든 마지막에 같은 경로 규칙으로 한 번 더 거른다(.git·.vscode·밖으로 나감).
+    try:
+        from code_output import safe_rel_path as _safe_path
+    except ImportError:  # pragma: no cover
+        from core.code_output import safe_rel_path as _safe_path  # type: ignore
+    _unsafe = [op.get("file") for op in ops_out if isinstance(op, dict) and _safe_path(op.get("file")) is None]
+    if _unsafe:
+        print(f"[code_agent] 쓰지 않는 경로를 뺐습니다: {_unsafe[:5]}")
+        ops_out = [op for op in ops_out if isinstance(op, dict) and _safe_path(op.get("file")) is not None]
     #: 지시형이라 뺀 줄을 먼저 되돌리고(그 줄에도 자리표시된 비밀이 있을 수 있다) 그다음 비밀을 되돌린다.
     _restore_neutralized_in_ops(ops_out, guarded)
     _restore_secrets_in_ops(ops_out, context_secrets)
@@ -3073,9 +3088,9 @@ def generate_code(
     if adr_ops:
         result["adr"] = [op["file"] for op in adr_ops]
         print(f"[code_agent] ADR {len(adr_ops)}건 영속화 예정: {result['adr']}")
-    if split_mode:
-        result["job_id"] = job_id
-        #: 결과를 체크포인트 자리에 남겨 둔다 — 확장이 받기 전에 연결이 끊겨도 같은 작업 ID 로 바로 받는다.
-        _jobs.save(job_id, {"fingerprint": fp, "result": result})
+    result["job_id"] = job_id
+    #: 결과를 체크포인트 자리에 남겨 둔다 — 확장이 받기 전에 연결이 끊겨도 같은 작업 ID 로 바로 받는다.
+    #: 2.0.33 분할 생성만이 아니라 모든 생성 결과를 남긴다(한 번에 만든 결과도 끊기면 다시 만들어야 했다).
+    _jobs.save(job_id, {"fingerprint": fp, "result": result})
     print(f"[code_agent] 코드 생성 완료 | ops {len(ops_out)}개 | model={result['model']}")
     return result

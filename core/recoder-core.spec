@@ -70,7 +70,8 @@ a = Analysis(
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=['pytest', 'pytest_asyncio', 'tests', 'moto', 'eval', 'tkinter'],
+    #: 2.0.33 paramiko(LGPL) — 원격 SSH 롤백은 제품 화면에서 부르지 않는다. 번들에 넣지 않는다.
+    excludes=['pytest', 'pytest_asyncio', 'tests', 'moto', 'eval', 'tkinter', 'paramiko'],
     noarchive=False,
 )
 # ── 시작 속도: 한 파일 실행 파일은 시작할 때마다 모든 데이터 파일을 임시 폴더에 푼다 ──

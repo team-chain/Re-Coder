@@ -732,9 +732,13 @@ def restore_neutralized(content: str, raw_lines: list[str]) -> str:
     표시 줄을 그대로 저장하던 것). 원래 줄을 모르면 표시 줄만 지운다."""
     if NEUTRALIZED not in content:
         return content
-    pending = list(raw_lines)
+    lines = content.split("\n")
+    markers = sum(1 for line in lines if line.strip() == NEUTRALIZED)
+    #: 2.0.33 표시 줄 수가 빼고 보낸 줄 수와 정확히 같을 때만 원래 줄로 되돌린다. AI 가 표시를 지우거나 옮기거나
+    #: 더 만들었으면 어느 표시가 어느 줄인지 알 수 없다 — 지시형 줄을 엉뚱한 자리에 넣느니 표시만 지운다.
+    pending = list(raw_lines) if markers == len(raw_lines) else []
     out: list[str] = []
-    for line in content.split("\n"):
+    for line in lines:
         if line.strip() == NEUTRALIZED:
             if pending:
                 out.append(pending.pop(0))

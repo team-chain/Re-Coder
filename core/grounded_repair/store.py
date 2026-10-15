@@ -39,7 +39,21 @@ def _install_key(folder: Path) -> bytes:
             continue
         with os.fdopen(fd, "wb") as fh:
             fh.write(secrets.token_bytes(32))
-    return path.read_bytes()
+    #: 2.0.33 키 파일이 짧은 채로 남아 있으면(쓰다 꺼짐·디스크 가득) 예전에는 그 짧은 값(빈 값이면 키 없는 지문)을 그대로 썼다.
+    #: 새 키를 임시 파일에 다 쓴 뒤 바꿔 끼우고(원자적) 실제로 남은 것을 다시 읽는다. 그래도 안 되면 이번 실행만 쓰는 키
+    #: — 저장된 기억은 검증되지 않아 다시 쓰지 않을 뿐, 키 없이 서명하는 일은 없다.
+    try:
+        tmp = folder / f".repair_store.key.{os.getpid()}.{secrets.token_hex(4)}"
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(secrets.token_bytes(32))
+        os.replace(tmp, path)
+        data = path.read_bytes()
+        if len(data) >= 32:
+            return data
+    except OSError:
+        pass
+    return secrets.token_bytes(32)
 
 
 class RepairStore:

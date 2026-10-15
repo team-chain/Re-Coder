@@ -164,11 +164,17 @@ jobs:
             extension/dist/*-darwin-arm64.release.json
           if-no-files-found: error
 
+  # 2.0.33 태그 빌드도 CI 전체(코어 3 OS·확장·보안 검사)를 통과해야 올린다 — 전에는 빌드만 되면 테스트 없이 올라갔다.
+  tests:
+    if: github.ref_type == 'tag'
+    needs: version-check
+    uses: ./.github/workflows/ci.yml
+
   # 태그 빌드일 때만: 출처 증명을 붙이고 GitHub Release 에 올린다.
   # 쓰기 권한은 이 job 에만 준다.
   publish:
     if: github.ref_type == 'tag'
-    needs: [version-check, windows-vsix, linux-vsix, macos-arm64-vsix]
+    needs: [version-check, tests, windows-vsix, linux-vsix, macos-arm64-vsix]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

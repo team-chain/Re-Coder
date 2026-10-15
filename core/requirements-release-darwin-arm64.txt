@@ -31,6 +31,7 @@ httpx==0.28.1
 idna==3.16
 invoke==3.0.3
 jmespath==1.1.0
+macholib==1.16.4
 packaging==26.3
 paramiko==5.0.0
 proto-plus==1.28.0

@@ -12,7 +12,7 @@ RUNTIME_IMPORTS = (
     'agents.ecs_agent', 's3_byo', 'security_scan', 'local_deploy_agent',
     'llm.bedrock_provider', 'llm.gemini_provider', 'llm.provider_router', 'llm.api_key_provider',
     'commerce_starter', 'generated_validation', 'build_readiness', 'screen_check', 'build_failure', 'vuln_advice', 'npm_registry', 'local_services', 'scan_process',
-    'preflight.contract_loader', 'persistence', 'nacl.public', 'paramiko',
+    'preflight.contract_loader', 'persistence', 'nacl.public',
     'google.genai', 'google.generativeai',
     #: 대규모 코드 생성(팀 모드) — code_agent 가 필요할 때 불러오므로 번들 분석이 놓치지 않게 명시한다.
     'gen_engine', 'deploy_settings', 'generation_jobs', 'generation_progress',

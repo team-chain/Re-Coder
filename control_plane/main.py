@@ -142,7 +142,8 @@ if __name__ == "__main__":
     port = int(os.environ.get("CONTROL_PLANE_PORT", "18000"))
     uvicorn.run(
         "control_plane.main:app",
-        host="0.0.0.0",
+        #: 2.0.33 기본은 이 PC 에서만 — 서버로 열려면 CONTROL_PLANE_HOST=0.0.0.0 을 직접 정한다(인증 앞단을 둔 뒤).
+        host=os.environ.get("CONTROL_PLANE_HOST", "127.0.0.1"),
         port=port,
         reload=os.environ.get("DEV_RELOAD", "false").lower() == "true",
         log_level=_LOG_LEVEL.lower(),

@@ -1313,8 +1313,8 @@ def test_prefix_wildcard_is_still_allowed_for_defaults():
 
 @pytest.mark.parametrize("arn,expected", [
     # 실제 러너랩 세션에서 확인한 ARN 모양
-    ("arn:aws:sts::413113423592:assumed-role/voclabs/user5057797=a@b.com", True),
-    ("arn:aws:iam::413113423592:role/LabRole", True),
+    ("arn:aws:sts::210987654321:assumed-role/voclabs/user5057797=a@b.com", True),
+    ("arn:aws:iam::210987654321:role/LabRole", True),
     ("arn:aws:iam::111122223333:user/recoder-deploy", False),
     ("arn:aws:iam::111122223333:root", False),
     ("", False),

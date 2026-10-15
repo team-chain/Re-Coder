@@ -77,4 +77,4 @@ GitHub 저장소 → Settings → Secrets and variables → Actions:
 | Secret | 값 |
 |--------|----|
 | `RECODER_API_URL` | `http://your-server:8000` |
-| `RECODER_API_TOKEN` | `recoder-demo-token-2026` |
+| `RECODER_API_TOKEN` | 서버의 SESSION_TOKEN 과 같은 **직접 만든 긴 무작위 값** (예: `python -c "import secrets;print(secrets.token_urlsafe(32))"`) — 예시 값을 그대로 쓰지 마세요 |

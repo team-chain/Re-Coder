@@ -30,7 +30,7 @@ def test_버킷_이름은_S3_규칙을_지킨다():
     import re
 
     for project in ["My Blog App", "UPPER_CASE", "한글이름", "a" * 200, "--dashes--"]:
-        name = s3_byo.bucket_name(project, "413113423592")
+        name = s3_byo.bucket_name(project, "210987654321")
         assert 3 <= len(name) <= 63, f"길이 위반: {name} ({len(name)})"
         assert re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", name), f"형식 위반: {name}"
         assert "--" not in name or True  # 연속 하이픈은 허용되지만 슬러그에서 제거한다
@@ -39,14 +39,14 @@ def test_버킷_이름은_S3_규칙을_지킨다():
 
 def test_버킷_이름이_길어져도_계정_지문은_살아남는다():
     """지문이 유일성의 근거다. 잘라내면 충돌 방지가 무너진다."""
-    name = s3_byo.bucket_name("z" * 200, "413113423592")
-    assert name.endswith(s3_byo.account_fingerprint("413113423592")), name
+    name = s3_byo.bucket_name("z" * 200, "210987654321")
+    assert name.endswith(s3_byo.account_fingerprint("210987654321")), name
     assert len(name) <= 63
 
 
 def test_같은_입력이면_같은_버킷_이름_재배포가_같은_곳으로():
-    first = s3_byo.bucket_name("blog", "413113423592")
-    second = s3_byo.bucket_name("blog", "413113423592")
+    first = s3_byo.bucket_name("blog", "210987654321")
+    second = s3_byo.bucket_name("blog", "210987654321")
     assert first == second, "재배포마다 새 버킷이 생긴다"
 
 
@@ -296,7 +296,7 @@ def test_슬러그가_같아지는_프로젝트도_버킷이_갈린다(a, b, why
     두 번째 배포가 첫 번째 버킷을 재배포로 취급해, 겹치는 파일만 덮어쓰고
     나머지는 남긴다. 조용히 일어나서 알아채기도 어렵다.
     """
-    account = "413113423592"
+    account = "210987654321"
     assert s3_byo.bucket_name(a, account) != s3_byo.bucket_name(b, account), why
 
 
@@ -306,7 +306,7 @@ def test_음성대조_같은_프로젝트는_항상_같은_버킷이다():
     파이썬 `hash()` 는 프로세스마다 값이 달라진다(PYTHONHASHSEED). 그걸
     쓰지 않았는지 확인하는 대조이기도 하다.
     """
-    account = "413113423592"
+    account = "210987654321"
     assert s3_byo.bucket_name("blog", account) == s3_byo.bucket_name("blog", account)
     assert s3_byo.project_fingerprint("blog") == s3_byo.project_fingerprint("blog")
 
@@ -315,15 +315,15 @@ def test_지문이_들어가도_길이_규칙을_지킨다():
     import re
 
     for project in ["z" * 300, "블로그" * 50, "a"]:
-        name = s3_byo.bucket_name(project, "413113423592")
+        name = s3_byo.bucket_name(project, "210987654321")
         assert 3 <= len(name) <= 63, f"{name} ({len(name)})"
         assert re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", name), name
 
 
 def test_길어도_지문_둘은_안_잘린다():
     """이 둘이 유일성의 근거다. 자르면 충돌 방지가 무너진다."""
-    name = s3_byo.bucket_name("z" * 300, "413113423592")
-    assert name.endswith("-" + s3_byo.account_fingerprint("413113423592"))
+    name = s3_byo.bucket_name("z" * 300, "210987654321")
+    assert name.endswith("-" + s3_byo.account_fingerprint("210987654321"))
     assert s3_byo.project_fingerprint("z" * 300) in name
 
 
@@ -434,7 +434,7 @@ def test_계정_뒤_6자리가_같아도_버킷이_갈린다():
 
 def test_계정_번호가_버킷_이름에_그대로_드러나지_않는다():
     """이 이름은 공개 웹사이트 URL 에 그대로 노출된다."""
-    account = "413113423592"
+    account = "210987654321"
     name = s3_byo.bucket_name("blog", account)
     assert account not in name
     assert account[-6:] not in name
@@ -442,9 +442,9 @@ def test_계정_번호가_버킷_이름에_그대로_드러나지_않는다():
 
 def test_음성대조_같은_계정은_항상_같은_지문():
     """지문이 흔들리면 재배포마다 버킷이 새로 생긴다."""
-    assert s3_byo.account_fingerprint("413113423592") == s3_byo.account_fingerprint("413113423592")
+    assert s3_byo.account_fingerprint("210987654321") == s3_byo.account_fingerprint("210987654321")
     #: 하이픈·공백이 섞여 들어와도 같은 계정으로 본다.
-    assert s3_byo.account_fingerprint("4131-1342-3592") == s3_byo.account_fingerprint("413113423592")
+    assert s3_byo.account_fingerprint("2109-8765-4321") == s3_byo.account_fingerprint("210987654321")
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,42 @@ def _proc_tools():
     return proc_tools
 
 
+def _halt_crash_loop(container: str) -> None:
+    if not container:
+        return
+    for args in (["docker", "update", "--restart=no", container], ["docker", "stop", "-t", "5", container]):
+        try:
+            subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, shell=False)
+        except (OSError, subprocess.SubprocessError):
+            return
+
+
+def _volume_args(container: str, image: str) -> list[str]:
+    """이미지가 선언한 VOLUME 마다 이 앱 전용 이름 있는 볼륨(2.0.33).
+
+    교체 배포는 옛 컨테이너를 지우고 새로 띄운다 — 이름 없는(익명) 볼륨은 새 컨테이너에 이어지지 않아 SQLite·업로드 같은
+    데이터가 배포마다 사라지고, 버려진 볼륨이 쌓였다. 이름을 붙이면 다음 배포·롤백이 같은 데이터를 그대로 쓴다."""
+    if not container or not image:
+        return []
+    try:
+        out = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config.Volumes}}", image],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20, shell=False)
+        volumes = json.loads(out.stdout or "null") if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    args: list[str] = []
+    for path in sorted((volumes or {}).keys()):
+        if not isinstance(path, str) or not path.startswith("/"):
+            continue
+        #: 임시·캐시 폴더는 이어 쓸 데이터가 아니다 — 이름을 붙이면 옛 내용이 새 이미지의 것을 가린다.
+        if re.match(r"^/(tmp|var/tmp|run|var/run|var/cache)(/|$)", path.rstrip("/") + "/"):
+            continue
+        slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", path.strip("/")) or "root"
+        name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{container}-data-{slug}")[:200]
+        args += ["-v", f"{name}:{path}"]
+    return args
+
+
 def _port_publish(host_port, container_port) -> str:
     try:
         from deployment_inputs import port_publish  # type: ignore
@@ -829,7 +865,9 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
         run_args.extend(_env_file_args(list(record.env_file_paths or []), set((record.env or {}).keys()) | set(_settings)))
         run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
         # 태그가 아니라 고정 태그·이미지 ID 로 되돌린다 — 태그는 그사이 움직였을 수 있다.
-        run_args.extend(["--restart", "unless-stopped", _stable_image_ref(record) or record.image])
+        _restore_image = _stable_image_ref(record) or record.image
+        run_args.extend(await asyncio.to_thread(_volume_args, record.container_name, _restore_image))
+        run_args.extend(["--restart", "unless-stopped", _restore_image])
     except (TypeError, ValueError) as exc:
         logger.error("Cannot restore prior container %s: %s", record.container_name, exc)
         return False, "", str(exc)
@@ -4867,6 +4905,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     demo_seed = {"ok": ok, "script": init_script, **({} if ok else {"message": out[-600:]})}
                     if not ok:
                         report_progress('services', f"데모 상품을 넣지 못했습니다(배포는 계속합니다): {out[-160:]}")
+            cmd_args.extend(await asyncio.to_thread(_volume_args, str(plan.container_name), str(runtime_image)))
             cmd_args.extend(['--restart', 'unless-stopped', str(runtime_image)])
 
         restored_previous = False
@@ -4957,6 +4996,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(restore_source)
                     if restored_previous and rollback_source is not None:
                         restored_verification_resumed = await _resume_verification_for(rollback_source)
+                else:
+                    #: 2.0.33 — 되살릴 이전 버전이 없는 첫 배포가 시작하자마자 죽으면, 재시작 정책 때문에 끝없이 다시 떠
+                    #: 포트를 쥐고 Docker Desktop 을 켤 때마다 살아났다. 로그를 볼 수 있게 컨테이너는 남기고 멈춘다.
+                    await asyncio.to_thread(_halt_crash_loop, plan.container_name or '')
 
         # 헬스 경로가 200 이어도 화면은 비어 있을 수 있다(실기기: 주소만 열리고 화면이 없음).
         # 화면이 있어야 하는 앱이면 브라우저로 첫 화면을 열어 실제로 그려지는지 확인한다.
@@ -5330,6 +5373,12 @@ async def rollback(request: RollbackRequest) -> dict:
         except Exception as exc:  # noqa: BLE001 - 붙잡지 못해도 롤백은 진행한다(기존 동작)
             logger.warning("capture before rollback failed: %s", exc)
             current_container = None
+        #: 2.0.33 이미지의 데이터 볼륨을 배포 때와 같은 이름으로 붙인다(되돌려도 데이터가 그대로).
+        #: 상태 확인(409)을 통과한 뒤에만 Docker 를 부른다.
+        volume_args = await asyncio.to_thread(_volume_args, record.container_name, record.rollback_target)
+        if volume_args:
+            at = len(run_args) - 1 - run_args[::-1].index("--restart")
+            run_args[at:at] = volume_args
         # 1) docker stop (실패 무시 — 이미 중지됐을 수 있음)
         await loop.run_in_executor(
             None,

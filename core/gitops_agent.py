@@ -283,12 +283,23 @@ class GitOpsAgent:
             # git push
             env = os.environ.copy()
             if github_token:
-                # URL에 토큰 삽입 (HTTPS 방식)
-                push_url = repo_url.replace("https://", f"https://{github_token}@")
+                #: 2.0.33 토큰을 URL(명령줄 인자)에 넣지 않는다 — 다른 프로그램이 프로세스 목록으로 볼 수 있고
+                #: 실패 메시지(stderr)에도 그대로 찍혔다. 그 서버 주소에만 붙는 인증 헤더를 환경변수로 넘긴다.
+                import base64
+                from urllib.parse import urlsplit
+                parts = urlsplit(repo_url)
+                if parts.scheme != "https" or not parts.hostname:
+                    return False, "토큰으로 올리려면 저장소 주소가 https:// 로 시작해야 합니다."
+                auth = base64.b64encode(f"x-access-token:{github_token}".encode()).decode()
+                env.update({"GIT_CONFIG_COUNT": "1",
+                            "GIT_CONFIG_KEY_0": f"http.https://{parts.netloc.rsplit('@', 1)[-1]}/.extraheader",
+                            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {auth}", "GIT_TERMINAL_PROMPT": "0"})
                 r = subprocess.run(
-                    ["git", "push", push_url, f"HEAD:{branch}"],
+                    ["git", "push", repo_url, f"HEAD:{branch}"],
                     cwd=str(ws), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, env=env,
                 )
+                if r.returncode != 0:
+                    return False, "git push 실패: " + (r.stderr or "").replace(github_token, "***")
             else:
                 r = subprocess.run(
                     ["git", "push", "origin", branch],
@@ -322,7 +333,11 @@ class GitOpsAgent:
 
             # repo_url → owner/repo 추출
             # https://github.com/owner/repo.git → owner/repo
-            parts = repo_url.rstrip("/").rstrip(".git").split("/")
+            #: 2.0.33 rstrip(".git") 는 글자 집합을 지워 "my-widget" → "my-widge" 가 됐다 — 끝의 ".git" 만 뗀다.
+            trimmed = repo_url.rstrip("/")
+            if trimmed.endswith(".git"):
+                trimmed = trimmed[:-4]
+            parts = trimmed.split("/")
             repo_full = "/".join(parts[-2:])
 
             result = gh.create_pr(

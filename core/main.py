@@ -407,6 +407,16 @@ def _handle_shutdown(signum, _frame) -> None:
     sys.exit(0)
 
 
+#: 배포판마다 다른 시스템 인증서 묶음 위치(빌드한 PC 의 경로가 없을 때 차례로 찾는다). 사내 루트 인증서도 여기에 들어 있다.
+_SYSTEM_CA_FILES = (
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian·Ubuntu·Alpine·Arch
+    "/etc/pki/tls/certs/ca-bundle.crt",     # Fedora·RHEL·Amazon Linux
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/ssl/ca-bundle.pem",               # openSUSE
+    "/etc/ssl/cert.pem",                    # macOS·Alpine
+)
+
+
 def _ensure_ca_bundle() -> None:
     """HTTPS 인증서 묶음 위치(2.0.32).
 
@@ -421,11 +431,30 @@ def _ensure_ca_bundle() -> None:
         paths = ssl.get_default_verify_paths()
         have_default = bool((paths.cafile and os.path.isfile(paths.cafile))
                             or (paths.capath and os.path.isdir(paths.capath) and os.listdir(paths.capath)))
-        if getattr(sys, "frozen", False) or not have_default:
-            import certifi
-            os.environ["SSL_CERT_FILE"] = certifi.where()
+        if have_default:
+            #: 2.0.33 시스템 인증서가 보이면 그대로 쓴다 — 번들이라고 certifi 로 바꾸면 회사망(사내 루트 인증서를
+            #: 시스템 저장소에 넣어 둔 PC)에서 오히려 모든 HTTPS 가 실패했다.
+            return
+        for candidate in _SYSTEM_CA_FILES:
+            if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                os.environ["SSL_CERT_FILE"] = candidate
+                return
+        import certifi
+        os.environ["SSL_CERT_FILE"] = certifi.where()
     except Exception:  # noqa: BLE001 - 없으면 시스템 기본값으로
         pass
+
+
+def _is_loopback_host(name: str) -> bool:
+    """정확히 내 PC 주소만(2.0.33). "127.evil.example" 같은 이름을 앞글자만 보고 프록시 없이 보내지 않는다."""
+    name = (name or "").strip().rstrip(".").lower()
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(name.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
 
 
 class _LoopbackDirectProxyHandler:
@@ -442,7 +471,7 @@ class _LoopbackDirectProxyHandler:
             def proxy_open(self, req, proxy, type):  # noqa: A002 - urllib 의 이름
                 host = (req.host or "").rsplit("@", 1)[-1]
                 name = host[1:].split("]", 1)[0] if host.startswith("[") else host.split(":", 1)[0]
-                if name.lower() in ("127.0.0.1", "localhost", "::1") or name.startswith("127."):
+                if _is_loopback_host(name):
                     return None
                 return super().proxy_open(req, proxy, type)
 

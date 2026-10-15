@@ -493,7 +493,9 @@ class RollbackPolicy:
             )
 
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        #: 2.0.33 처음 보는 서버 키를 자동으로 믿지 않는다(중간자 공격) — known_hosts 에 있는 서버만.
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         try:
             connect_kwargs: dict[str, Any] = {
                 "hostname": ssh_host,

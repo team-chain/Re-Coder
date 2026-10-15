@@ -8,6 +8,8 @@ on:
   push:
     branches: [develop]
   workflow_dispatch:
+  # 2.0.33 릴리스(태그) 빌드도 같은 테스트를 통과해야 올린다 — release.yml 이 이 워크플로를 불러 쓴다.
+  workflow_call:
 
 jobs:
   test:

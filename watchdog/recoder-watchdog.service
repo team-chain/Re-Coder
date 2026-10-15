@@ -3,7 +3,8 @@ Description=ReCoder EC2 Watchdog Daemon
 Documentation=https://github.com/your-org/recoder
 After=network-online.target docker.service
 Wants=network-online.target
-Requires=docker.service
+# 2.0.33 Requires= 이면 docker.service 이름이 다른 설치(snap 등)에서 데몬이 아예 시작하지 않는다.
+Wants=docker.service
 
 [Service]
 Type=simple

@@ -117,6 +117,14 @@ def _ca():
     return ca
 
 
+def _safe_rel_path(path):
+    try:
+        from code_output import safe_rel_path  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.code_output import safe_rel_path  # type: ignore
+    return safe_rel_path(path)
+
+
 def _norm(path: str) -> str:
     out = posixpath.normpath(str(path or "").strip().replace("\\", "/"))
     while out.startswith("./"):
@@ -990,9 +998,12 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         for item in items:
             if not isinstance(item, dict):
                 continue
-            path = str(item.get("file") or "").strip().replace("\\", "/")
+            path = _safe_rel_path(item.get("file"))
+            #: 2.0.33 — 한 번에 받기와 같은 경로 규칙(절대 경로·C:·밖으로 나감·.git·.vscode 거절)
+            if not path:
+                continue
             key = _norm(path)
-            if not path or key in seen or path.startswith("/") or ".." in path.split("/"):
+            if key in seen:
                 continue
             seen.add(key)
             out.append({"file": path, "purpose": str(item.get("purpose") or "").strip(),

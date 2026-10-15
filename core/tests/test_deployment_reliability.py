@@ -120,7 +120,7 @@ def test_approved_run_uses_scanned_image_all_ports_and_environment(monkeypatch):
     result=asyncio.run(d.execute_deployment(d.ExecuteRequest(plan_id=plan.plan_id,approved=True)))
     assert result['status']=='success' and result['health_ok'] is True
     assert events[0]==('scan',image_id)
-    command=events[1][1]
+    command=next(cmd for kind,cmd in events if kind=='run' and cmd[:2]==['docker','run'])
     assert command[-1]==image_id and 'MODE=test' in command
     assert '127.0.0.1:4567:3000' in command and '127.0.0.1:4568:3001' in command  # 2.0.32 이 PC 에서만
     assert not d._plans_pending_image_scan and not d._plan_workspaces

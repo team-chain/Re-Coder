@@ -25,9 +25,28 @@ def run(args: list[str], *, cwd: Path = ROOT):
 def notices() -> None:
     lines = ['ReCoder third-party notices',
              'Python runtime and build dependencies; versions in the release manifest.', '']
-    python_license = Path(sys.base_prefix) / 'LICENSE.txt'
-    if python_license.is_file():
-        lines += ['CPython', python_license.read_text(encoding='utf-8', errors='replace'), '']
+    # 2.0.33 CPython 라이선스는 Windows 는 설치 폴더, Linux·macOS 는 표준 라이브러리 폴더에 있다(전에는 Windows 만 들어갔다).
+    import ssl
+    import sysconfig
+    candidates = [Path(sys.base_prefix) / 'LICENSE.txt', Path(sysconfig.get_path('stdlib')) / 'LICENSE.txt',
+                  Path(sys.base_prefix) / 'share' / 'doc' / f'python{sys.version_info[0]}.{sys.version_info[1]}' / 'copyright']
+    python_license = next((c for c in candidates if c.is_file()), None)
+    if python_license is None:
+        raise SystemExit('CPython LICENSE.txt 를 찾지 못했습니다 — 배포물에 넣어야 합니다.')
+    lines += [f'CPython {platform.python_version()}', python_license.read_text(encoding='utf-8', errors='replace'), '']
+    lines += [f'OpenSSL ({ssl.OPENSSL_VERSION}) — bundled with the Python runtime',
+              'Licensed under the Apache License 2.0 (OpenSSL 3.x). https://www.openssl.org/source/license.html', '']
+    # 확장(webpack 번들)에 들어가는 npm 패키지.
+    for package in ('react', 'react-dom', 'scheduler', 'three', 'ws'):
+        folder = EXT / 'node_modules' / package
+        manifest = folder / 'package.json'
+        if not manifest.is_file():
+            raise SystemExit(f'{package} 가 node_modules 에 없습니다 — npm ci 뒤에 실행하세요.')
+        info = json.loads(manifest.read_text(encoding='utf-8'))
+        lines += [f"{package} {info.get('version', '')} (npm)", str(info.get('license', ''))]
+        for license_file in sorted(folder.glob('LICEN[CS]E*')):
+            lines += [license_file.read_text(encoding='utf-8', errors='replace')]
+        lines += ['']
     for dist in sorted(metadata.distributions(), key=lambda d: d.metadata['Name'].lower()):
         name = dist.metadata['Name']
         if name.lower() == 'pip':

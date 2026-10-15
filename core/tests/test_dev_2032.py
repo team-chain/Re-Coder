@@ -196,6 +196,10 @@ def test_production_rds_stops_before_creating_anything_when_role_cannot_read_the
         _provision(aws, tmp_path, environment="production", database="rds", db_cost_approved=True, ready=False)
     assert "put-role-policy" in err.value.remedy and "아직 아무것도 만들지 않았습니다" in err.value.remedy
     assert ":secret:recoder/recoder-shop/database-" in aws["iam"].calls[0]["ResourceArns"][0]
+    # 2.0.33 고치는 명령은 이 서비스·이 리전의 비밀 하나만 — 정책 이름도 서비스마다 다르다(덮어쓰기 방지).
+    assert f":secretsmanager:{REGION}:" in err.value.remedy and "secret:recoder/recoder-shop/database-*" in err.value.remedy
+    assert "secret:recoder/*" not in err.value.remedy and ":secretsmanager:*:" not in err.value.remedy
+    assert f"--policy-name recoder-db-secret-recoder-shop-{REGION}" in err.value.remedy
     assert aws["rds"].describe_db_instances()["DBInstances"] == []
 
 
@@ -561,10 +565,15 @@ def test_loopback_requests_skip_the_proxy(monkeypatch):
 
 
 def test_ca_bundle_is_set_for_bundled_core(monkeypatch):
+    """빌드한 PC 의 인증서 경로가 없고 시스템 묶음도 없으면 certifi 로(2.0.33: 시스템 묶음이 있으면 그것이 먼저)."""
+    import ssl
     import sys
     import main as core_main
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(ssl, "get_default_verify_paths",
+                        lambda: ssl.DefaultVerifyPaths("/nonexistent/cert.pem", "/nonexistent/certs", "", "", "", ""))
+    monkeypatch.setattr(core_main, "_SYSTEM_CA_FILES", ())
     core_main._ensure_ca_bundle()
     import certifi
     assert __import__("os").environ["SSL_CERT_FILE"] == certifi.where()

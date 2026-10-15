@@ -2716,6 +2716,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.postMessage('code.error', { message: `잘못된 파일명: ${file}`, ...ack });
             return false;
         }
+        //: 2.0.33 — 저장소 메타데이터·편집기 설정(.git/hooks, .vscode/tasks.json)은 실행되는 파일이라 AI 결과로 쓰지 않는다
+        //: (코어도 거르지만 화면 쪽에서도 한 번 더). 드라이브 문자(C:)가 든 경로도 받지 않는다.
+        if (safe.split('/').some(seg => ['.git', '.vscode'].includes(seg.toLowerCase())) || /^[a-zA-Z]:/.test(safe)) {
+            this.postMessage('code.error', { message: `${safe} 은(는) AI 가 쓰지 않는 위치라 적용하지 않았습니다.`, ...ack });
+            return false;
+        }
         const uri = vscode.Uri.joinPath(root, safe);
         try {
             //: 심볼릭 링크를 따라 워크스페이스 밖(예: ~/.bashrc)을 덮어쓰지 않는다.

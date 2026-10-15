@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -72,10 +73,31 @@ def save(job_id: str, state: dict) -> None:
     try:
         path = _path(job_id)
         state = {**state, "updated_at": time.time()}
-        tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+        #: 2.0.33 결과에는 생성된 코드(.env 예시 값 등)가 들어 있다 — 본인만 읽게(0600) 만든다.
+        #: mkstemp 는 처음부터 0600 으로 만든다(쓰는 동안에도 남이 못 읽는다).
         with _LOCK:
-            tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, path)
+            fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(state, fh, ensure_ascii=False)
+                try:
+                    os.chmod(tmp, 0o600)
+                except OSError:
+                    pass
+                for attempt in range(10):
+                    try:
+                        os.replace(tmp, path)
+                        break
+                    except PermissionError:
+                        if attempt == 9:
+                            raise
+                        time.sleep(0.05 * (attempt + 1))
+            finally:
+                if os.path.exists(tmp):
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
     except Exception:  # noqa: BLE001
         pass
 
