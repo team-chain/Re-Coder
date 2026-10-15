@@ -38,6 +38,14 @@ _DOCKER_TIMEOUT_RUN = 120  # 2분
 _DOCKER_TIMEOUT_STOP = 30
 
 
+def _port_publish(host_port, container_port) -> str:
+    try:
+        from deployment_inputs import port_publish  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.deployment_inputs import port_publish  # type: ignore
+    return port_publish(host_port, container_port)
+
+
 @dataclass
 class DeployResult:
     """배포 결과."""
@@ -173,11 +181,11 @@ class LocalDeployAgent:
         for port_map in plan.ports:
             host_port = port_map.get("host", "8000")
             container_port = port_map.get("container", "8000")
-            port_bindings.append(f"{host_port}:{container_port}")
+            port_bindings.append(_port_publish(host_port, container_port))
 
         if not port_bindings:
             # 기본값
-            port_bindings.append("8000:8000")
+            port_bindings.append(_port_publish(8000, 8000))
 
         # 환경 변수
         env_args = []
@@ -331,7 +339,7 @@ class LocalDeployAgent:
         container_id = container_output
 
         # 3. Health Check
-        health_url = f"http://localhost:{plan.ports[0]['host'] if plan.ports else '8000'}{plan.health_check_path}"
+        health_url = f"http://127.0.0.1:{plan.ports[0]['host'] if plan.ports else '8000'}{plan.health_check_path}"
         health_ok = self.health_check(plan.container_name, health_url)
         logs.append(f"[HEALTH] {'PASS' if health_ok else 'FAIL'}")
 

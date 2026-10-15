@@ -4,7 +4,7 @@
  *  · 「중지」는 태스크 수만 0 으로(되살릴 수 있음). 「완전 삭제」는 항목을 직접 체크하고 승인 카드에서 한 번 더 확인해야 한다.
  *  · 태그 없는 옛 리소스는 "수동 확인 필요" 로 보여 주기만 한다(코어도 지우지 않는다).
  */
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { Checkbox } from "./Check";
 
@@ -22,6 +22,15 @@ export interface CleanupPlanView {
 interface ResultView { id: string; label?: string; name?: string; ok: boolean; skipped?: boolean; message: string }
 
 export const CLEANUP_REGIONS = ["us-east-1", "us-west-2", "ap-northeast-2", "ap-northeast-1", "eu-west-1"];
+/** 리전 이름 형식(코어와 같은 규칙). 2.0.32 — 정해 둔 5곳 밖(eu-central-1·ap-southeast-1 등)도 직접 넣을 수 있다. */
+export const REGION_RE = /^[a-z]{2}(-gov)?-[a-z]+-\d$/;
+
+/** 고를 리전 목록 — 배포한 적 있는 리전을 앞에, 기본 몇 곳을 뒤에. */
+export function cleanupRegionChoices(defaultRegion: string, deployed: string[]): string[] {
+  return [...new Set([defaultRegion, ...deployed, ...CLEANUP_REGIONS].filter(r => REGION_RE.test(r)))];
+}
+
+interface CleanupJobView { id: string; region: string; status: string; progress?: { done: number; total: number; current?: string }; error?: string }
 
 const box: React.CSSProperties = { border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 8, padding: 12, marginBottom: 10 };
 const muted: React.CSSProperties = { color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 };
@@ -62,7 +71,7 @@ export function CleanupGroup({ group, picked, onPick, onStop, disabled }: {
 export function cleanupProgressText(p: Record<string, unknown>): string {
   const done = Number(p.done ?? 0), total = Number(p.total ?? 0);
   const current = typeof p.current === "string" && p.current ? ` — ${p.current}` : "";
-  return `지우는 중 ${Math.min(done + 1, Math.max(total, 1))}/${Math.max(total, 1)}${current} (DB·CloudFront 는 수 분~15분 걸립니다. 이 창을 닫아도 코어가 계속 지웁니다.)`;
+  return `지우는 중 ${Math.min(done + 1, Math.max(total, 1))}/${Math.max(total, 1)}${current} (DB·CloudFront 는 수 분~15분 걸립니다. 이 탭을 떠나도 코어가 계속 지우지만, VS Code 를 닫으면 멈춥니다 — 다시 열어 목록을 불러오면 이어서 지울 수 있습니다.)`;
 }
 
 export function DeleteApproval({ items, busy, onApprove, onCancel }: {
@@ -92,9 +101,23 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [results, setResults] = useState<ResultView[]>([]);
+  const [deployed, setDeployed] = useState<string[]>([]);
+  const [customRegion, setCustomRegion] = useState("");
 
   useMessage(useCallback((event) => {
     const p = (event.payload ?? {}) as Record<string, unknown>;
+    if (event.type === "aws.cleanup.regionsResult") { setDeployed(((p.regions as string[]) ?? []).filter(r => REGION_RE.test(r))); }
+    if (event.type === "aws.cleanup.jobsResult") {
+      //: 2.0.32 — 탭을 다시 열었을 때 진행 중인 정리에 다시 붙고, 코어가 꺼져 중단된 정리를 알린다.
+      const latest = ((p.jobs as CleanupJobView[]) ?? [])[0];
+      if (latest?.status === "running") {
+        setBusy(true); setConfirming(true);
+        setNote(cleanupProgressText((latest.progress ?? {}) as Record<string, unknown>));
+        postMessage("aws.cleanup.attach", { region: latest.region, jobId: latest.id });
+      } else if (latest?.status === "interrupted") {
+        setNote(latest.error || "지난 정리가 중간에 멈췄습니다 — 목록을 불러와 남은 것을 이어서 지우세요.");
+      }
+    }
     if (event.type === "aws.cleanup.planResult") { setPlan(p as unknown as CleanupPlanView); setBusy(false); setPicked({}); }
     if (event.type === "aws.cleanup.stopResult") { setNote(String(p.message ?? "")); }
     if (event.type === "aws.cleanup.deleteResult") {
@@ -102,10 +125,17 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
       setNote(`${p.deleted ?? 0}개를 지웠습니다${p.failed ? ` · ${p.failed}개는 실패(아래 이유)` : ""}.`);
     }
     if (event.type === "aws.cleanup.progress") { setNote(cleanupProgressText(p)); }
+    if (event.type === "aws.cleanup.refreshError") {
+      setBusy(false); setConfirming(false);
+      setNote(prev => `${prev ? prev + " " : ""}목록은 새로 고치지 못했습니다(${String(p.message ?? "")}) — [목록 불러오기]를 눌러 주세요.`);
+    }
     if (event.type === "aws.cleanup.error") { setBusy(false); setConfirming(false); setNote(String(p.message ?? "실패했습니다")); }
-  }, []));
+  }, [postMessage]));
 
   const load = () => { setBusy(true); setNote(""); setResults([]); postMessage("aws.cleanup.plan", { region }); };
+  useEffect(() => { postMessage("aws.cleanup.regions"); }, [postMessage]);
+  useEffect(() => { postMessage("aws.cleanup.jobs", { region }); }, [postMessage, region]);
+  const regionChoices = cleanupRegionChoices(defaultRegion, deployed);
   const ids = selectedIds(plan, picked);
   const chosen = plan ? plan.groups.flatMap(g => g.items).filter(i => ids.includes(i.id)) : [];
 
@@ -116,9 +146,13 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
       <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
         <label style={{ fontSize: 12 }}>리전{" "}
           <select value={region} disabled={busy} onChange={e => { setRegion(e.target.value); setPlan(null); }}>
-            {[...new Set([defaultRegion, ...CLEANUP_REGIONS])].map(r => <option key={r} value={r}>{r}</option>)}
+            {[...new Set([region, ...regionChoices])].map(r => <option key={r} value={r}>{r}{deployed.includes(r) ? " (배포함)" : ""}</option>)}
           </select>
         </label>
+        <input value={customRegion} disabled={busy} placeholder="다른 리전 (예: eu-central-1)" aria-label="다른 리전"
+          onChange={e => setCustomRegion(e.target.value.trim())} style={{ width: 150, fontSize: 12 }} />
+        <button style={btn} disabled={busy || !REGION_RE.test(customRegion)}
+          onClick={() => { setRegion(customRegion); setPlan(null); setCustomRegion(""); }}>바꾸기</button>
         <button style={btn} disabled={busy} onClick={load}>{busy && !confirming ? "불러오는 중…" : "목록 불러오기"}</button>
       </div>
       {note && <div style={{ ...box, fontSize: 12 }} data-testid="cleanup-note">{note}</div>}

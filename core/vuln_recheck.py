@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import logging
 import os
 import re
@@ -23,6 +24,10 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
+try:
+    import proc_tools  # type: ignore
+except ImportError:  # pragma: no cover
+    from core import proc_tools  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -51,20 +56,36 @@ def _state_file() -> Path:
     return _home() / "vuln_recheck.json"
 
 
-def _read_state() -> dict:
+def _state_io():
     try:
-        data = json.loads(_state_file().read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+        import state_io  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import state_io  # type: ignore
+    return state_io
+
+
+#: 재검사(하루 한 번 스레드)와 API(지금 검사·올리기)가 같은 상태를 읽고-고치고-쓴다 — 한 번에 하나만.
+_STATE_LOCK = threading.RLock()
+
+
+def _read_state() -> dict:
+    """모양이 틀린 항목은 버린다(2.0.32 — 손상된 항목 하나 때문에 매일 검사가 조용히 멈추던 것)."""
+    data = _state_io().read_json(_state_file(), {})
+    if not isinstance(data, dict):
         return {}
+    clean: dict = {}
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        known = entry.get("known") if isinstance(entry.get("known"), dict) else {}
+        entry["known"] = {k: v for k, v in known.items()
+                          if isinstance(v, dict) and isinstance(v.get("id"), str) and isinstance(v.get("purl"), str)}
+        clean[str(key)] = entry
+    return clean
 
 
 def _write_state(data: dict) -> None:
-    path = _state_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(path)
+    _state_io().write_json(_state_file(), data)
 
 
 def _now() -> str:
@@ -159,6 +180,9 @@ def fixed_version(vuln: dict, pkg: dict) -> str:
         if p.get("ecosystem") != eco or str(p.get("name", "")).lower() != pkg["name"].lower():
             continue
         for rng in affected.get("ranges") or []:
+            #: GIT 범위의 fixed 는 커밋 해시다 — 버전이 아니다(2.0.32).
+            if str(rng.get("type", "")).upper() not in ("SEMVER", "ECOSYSTEM"):
+                continue
             for event in rng.get("events") or []:
                 fixed = event.get("fixed")
                 if fixed and _version_key(fixed) > current and (not best or _version_key(fixed) < _version_key(best)):
@@ -191,6 +215,12 @@ def run(records: Iterable[dict], *, post: Callable[[str, dict], dict] = _post_js
         except ImportError:  # pragma: no cover
             from core import ops_alerts  # type: ignore
         store = ops_alerts._store
+    with _STATE_LOCK:
+        return _run(records, post=post, get=get, store=store)
+
+
+def _run(records: Iterable[dict], *, post: Callable[[str, dict], dict], get: Callable[[str], dict],
+         store: Callable[[dict], Optional[dict]]) -> list[dict]:
     state = _read_state()
     raised: list[dict] = []
     for dep in deployments(records):
@@ -198,6 +228,7 @@ def run(records: Iterable[dict], *, post: Callable[[str, dict], dict] = _post_js
         if not packages:
             continue
         found = query(packages, post=post)
+        first = dep["key"] not in state or not state[dep["key"]].get("checked_at")
         entry = state.setdefault(dep["key"], {"known": {}, "checked_at": ""})
         known: dict = entry.setdefault("known", {})
         now = _now()
@@ -211,6 +242,9 @@ def run(records: Iterable[dict], *, post: Callable[[str, dict], dict] = _post_js
         for vid, purl in sorted(current_ids):
             k = f"{vid}|{purl}"
             if k in known and not known[k].get("fixed_at"):
+                #: 알림이 막혀(같은 서비스 알림 쿨다운) 아직 못 알린 것은 다음에 다시 알린다(2.0.32 — 영영 묻히던 것).
+                if not known[k].get("notified_at"):
+                    fresh.append(known[k])
                 continue
             try:
                 detail = get(OSV_VULN.format(urllib.request.quote(vid)))
@@ -222,13 +256,13 @@ def run(records: Iterable[dict], *, post: Callable[[str, dict], dict] = _post_js
                     "summary": str(detail.get("summary") or "")[:200], "severity": severity(detail),
                     "aliases": [a for a in detail.get("aliases") or [] if str(a).startswith("CVE-")][:3],
                     "fixed": fixed_version(detail, pkg), "found_at": now, "notified_at": "", "fixed_at": "",
-                    "fix_applied_at": ""}
+                    "fix_applied_at": "", "initial": first}
             known[k] = item
             fresh.append(item)
         entry["checked_at"] = now
         entry["deployment_id"] = dep["deployment_id"]
         if fresh:
-            alert = store(_alert(dep, fresh))
+            alert = store(_alert(dep, fresh, first=all(v.get("initial") for v in fresh)))
             if alert:
                 for item in fresh:
                     item["notified_at"] = now
@@ -237,7 +271,7 @@ def run(records: Iterable[dict], *, post: Callable[[str, dict], dict] = _post_js
     return raised
 
 
-def _alert(dep: dict, fresh: list[dict]) -> dict:
+def _alert(dep: dict, fresh: list[dict], *, first: bool = False) -> dict:
     fresh = sorted(fresh, key=lambda v: -SEVERITY_ORDER.get(v["severity"], 0))
     top = fresh[0]["severity"]
     lines = [f"· {v['name']} {v['version']}" + (f" → {v['fixed']}" if v["fixed"] else " (고쳐진 버전 없음)")
@@ -253,7 +287,9 @@ def _alert(dep: dict, fresh: list[dict]) -> dict:
                     "detail": f"{u['name']} 을(를) {u['from']} → {u['to']} 로 바꿉니다(package.json·requirements.txt). 다시 배포해야 반영됩니다."}
                    for u in list(upgrades.values())[:3]] if dep.get("workspace") else []
     return {"key": dep["key"], "kind": "vuln", "severity": "critical" if top in ("CRITICAL", "HIGH") else "warning",
-            "title": f"새 취약점 {len(fresh)}건", "detail": "배포 이후 새로 발표된 취약점입니다.\n" + "\n".join(lines),
+            "title": (f"배포된 버전의 알려진 취약점 {len(fresh)}건" if first else f"새 취약점 {len(fresh)}건"),
+            "detail": ("처음 검사에서 찾은, 지금 배포된 버전의 알려진 취약점입니다.\n" if first
+                       else "배포 이후 새로 발표된 취약점입니다.\n") + "\n".join(lines),
             "region": dep["region"], "cluster": dep["cluster"], "service": dep["service"], "workspace": dep.get("workspace", ""),
             "vulns": [{k: v[k] for k in ("id", "name", "version", "fixed", "severity")} for v in fresh[:20]],
             "suggestions": suggestions}
@@ -267,8 +303,42 @@ def _alert(dep: dict, fresh: list[dict]) -> dict:
 _PKG_DIRS = ("", "backend", "server", "api", "frontend", "client", "web", "app")
 
 
+def _read_text(path: Path) -> tuple[str, str]:
+    """(내용, 줄바꿈). BOM 이 있어도 읽고(메모장·PowerShell 5.1), 원래 줄바꿈(CRLF/LF)을 기억한다(2.0.32)."""
+    raw = path.read_bytes().decode("utf-8-sig")
+    return raw.replace("\r\n", "\n"), ("\r\n" if "\r\n" in raw else "\n")
+
+
+def _write_text(path: Path, text: str, newline: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text.replace("\n", newline) if newline != "\n" else text)
+
+
+def _pep503(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def bump_requirement(text: str, name: str, to: str) -> str:
+    """requirements 의 한 패키지를 `이름[extra]>=to` 로(상한·고정·환경 표시는 정리, 주석·마커는 그대로)."""
+    want = _pep503(name)
+    out: list[str] = []
+    for line in text.split("\n"):
+        m = re.match(r"^(\s*)([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?\s*((?:[<>=!~]=?\s*[^;#,\s]+\s*,?\s*)*)(.*)$", line)
+        if m and _pep503(m.group(2)) == want and not line.lstrip().startswith(("#", "-")):
+            rest = m.group(5)
+            out.append(f"{m.group(1)}{m.group(2)}{m.group(3) or ''}>={to}" + (" " + rest.strip() if rest.strip() else ""))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
     """승인한 올리기 — 프로젝트 파일만 바꾼다(재배포는 사용자가)."""
+    with _STATE_LOCK:
+        return _apply_fix(alert, value, npm_lock=npm_lock)
+
+
+def _apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
     workspace = Path(str(alert.get("workspace") or ""))
     if not str(alert.get("workspace") or "") or not workspace.is_dir():
         raise ValueError("이 배포의 작업 폴더를 찾지 못했습니다 — 직접 버전을 올린 뒤 다시 배포하세요.")
@@ -279,7 +349,8 @@ def apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
     if value.get("ecosystem") == "npm":
         targets = [workspace / d / "package.json" for d in _PKG_DIRS if (workspace / d / "package.json").is_file()]
         for path in targets:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            text, nl = _read_text(path)
+            data = json.loads(text)
             hit = False
             for section in ("dependencies", "devDependencies"):
                 deps = data.get(section)
@@ -287,14 +358,15 @@ def apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
                     deps[name] = f"^{to}"
                     hit = True
             if hit:
-                path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n", nl)
                 changed.append(str(path.relative_to(workspace)))
         if not changed and targets:
             #: 직접 쓰는 패키지가 아니다(다른 패키지가 끌어옴) — 잠금 파일이 있는 package.json 에 overrides 로 올린다.
             path = next((p for p in targets if (p.parent / "package-lock.json").is_file()), targets[0])
-            data = json.loads(path.read_text(encoding="utf-8"))
+            text, nl = _read_text(path)
+            data = json.loads(text)
             data.setdefault("overrides", {})[name] = f"^{to}"
-            path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n", nl)
             changed.append(f"{path.relative_to(workspace)} (overrides)")
         lock_note = ""
         #: Windows 의 npm 은 npm.cmd 라 이름만으로는 실행되지 않는다 — 찾은 전체 경로로 부른다.
@@ -303,7 +375,7 @@ def apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
             for rel in dict.fromkeys(c.split(" ")[0] for c in changed):
                 folder = (workspace / rel).parent
                 try:
-                    done = subprocess.run([npm, "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"],
+                    done = proc_tools.run([npm, "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"],
                                           cwd=folder, capture_output=True, text=True, timeout=240, encoding="utf-8", errors="replace")
                     lock_note = " 잠금 파일도 갱신했습니다." if done.returncode == 0 else " 잠금 파일은 갱신하지 못했습니다(npm install 로 갱신하세요)."
                 except (OSError, subprocess.TimeoutExpired):
@@ -313,10 +385,10 @@ def apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
         for path in workspace.rglob("requirements*.txt"):
             if "node_modules" in path.parts or ".venv" in path.parts:
                 continue
-            text = path.read_text(encoding="utf-8")
-            new = re.sub(rf"(?im)^({re.escape(name)})\s*(==|>=|~=)\s*[\w.+-]+", rf"\g<1>>={to}", text)
+            text, nl = _read_text(path)
+            new = bump_requirement(text, name, to)
             if new != text:
-                path.write_text(new, encoding="utf-8")
+                _write_text(path, new, nl)
                 changed.append(str(path.relative_to(workspace)))
     else:
         raise ValueError("이 종류의 패키지는 자동으로 올리지 않습니다.")

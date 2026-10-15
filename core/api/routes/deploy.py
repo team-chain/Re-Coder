@@ -45,6 +45,23 @@ from schemas import (
     StackType,
 )
 
+
+def _proc_tools():
+    try:
+        import proc_tools  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import proc_tools  # type: ignore
+    return proc_tools
+
+
+def _port_publish(host_port, container_port) -> str:
+    try:
+        from deployment_inputs import port_publish  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.deployment_inputs import port_publish  # type: ignore
+    return port_publish(host_port, container_port)
+
+
 logger = logging.getLogger(__name__)
 
 #: 바깥 제한은 스캐너 자체 제한보다 길어야 한다. 같으면 바깥이 먼저 끊어 컨테이너 정리를
@@ -767,7 +784,7 @@ def _command_steps(plan: DeploymentPlan, workspace: str) -> list[dict]:
         from deployment_inputs import WORKSPACE_LABEL, workspace_fingerprint
         run += ["--label", f"{WORKSPACE_LABEL}={workspace_fingerprint(workspace)}"]
     for hp, cp in plan.ports.items():
-        run += ["-p", f"{int(hp)}:{int(cp)}"]
+        run += ["-p", _port_publish(hp, cp)]
     env_files = _resolved_env_files(workspace, plan.env_files)
     names = list(plan.env)
     settings_env = _settings_env(c, workspace, _provided_env_names(plan.env, env_files), app_port) if workspace else {}
@@ -802,7 +819,7 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
     run_args = ["docker", "run", "-d", "--name", record.container_name]
     try:
         for host_port, container_port in (record.ports or {}).items():
-            run_args.extend(["-p", f"{int(host_port)}:{int(container_port)}"])
+            run_args.extend(["-p", _port_publish(host_port, container_port)])
         for key, value in (record.env or {}).items():
             run_args.extend(["-e", f"{key}={value}"])
         _settings = _settings_env(record.container_name, "", _provided_env_names(record.env or {}, list(record.env_file_paths or [])),
@@ -879,7 +896,7 @@ async def _resume_verification_for(record: DeploymentRecord) -> bool:
         await verifier.start(
             deployment_id=record.deployment_id,
             container_name=record.container_name,
-            health_check_url=f"http://localhost:{host_port}{health_path}",
+            health_check_url=f"http://127.0.0.1:{host_port}{health_path}",
             duration_minutes=5,
             project_id=record.project_id,
             on_threshold_exceeded=_mark_rollback_candidate_unhealthy,
@@ -2778,13 +2795,14 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
 
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        target.write_text(proposal.content, encoding="utf-8")
+        #: Windows 에서도 LF 그대로 — Dockerfile·entrypoint.sh 가 CRLF 가 되면 컨테이너에서 셸 스크립트가 돌지 않는다(2.0.32).
+        target.write_text(proposal.content, encoding="utf-8", newline="")
     except PermissionError:
         #: Windows 읽기 전용 특성이 붙은 파일 — 쓰기 권한을 주고 한 번 더. 그래도 안 되면 알아듣는 오류로.
         import stat
         try:
             os.chmod(target, os.stat(target).st_mode | stat.S_IWRITE)
-            target.write_text(proposal.content, encoding="utf-8")
+            target.write_text(proposal.content, encoding="utf-8", newline="")
         except OSError as exc:
             raise HTTPException(status_code=409, detail=f"{target.name} 을(를) 저장하지 못했습니다(읽기 전용이거나 다른 프로그램이 열고 있음): {exc}") from exc
     additional_paths = []
@@ -4466,7 +4484,7 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
     try:
         result = await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: subprocess.run(
+            lambda: _proc_tools().run(
                 cmd, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=workspace_path, timeout=LOCAL_BUILD_TIMEOUT_SECONDS,
             ),
@@ -4742,7 +4760,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             # 안전한 args list 직접 조립 (shell=False 강제)
             cmd_args: list[str] = ["docker", "run", "-d", "--name", str(plan.container_name)]
             for _hp, _cp in plan.ports.items():
-                cmd_args.extend(["-p", f"{int(_hp)}:{int(_cp)}"])
+                cmd_args.extend(["-p", _port_publish(_hp, _cp)])
             cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
         demo_seed: Optional[dict] = None
@@ -4755,7 +4773,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 from deployment_inputs import WORKSPACE_LABEL, workspace_fingerprint
                 cmd_args.extend(['--label', f'{WORKSPACE_LABEL}={workspace_fingerprint(_ws_for_label)}'])
             for hp, cp in plan.ports.items():
-                cmd_args.extend(['-p', f'{int(hp)}:{int(cp)}'])
+                cmd_args.extend(['-p', _port_publish(hp, cp)])
             if plan.companions and plan.container_name:
                 #: 승인 뒤 데모 전환·"새 DB로 시작" 으로 쓸 DB 가 바뀌었을 수 있다 — 접속 정보를 지금 기준으로 다시 만든다.
                 try:
@@ -5073,7 +5091,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     health_path = plan.health_check_path or "/health"
                     if not health_path.startswith("/"):
                         health_path = "/" + health_path
-                    health_url = f"http://localhost:{first_hp}{health_path}"
+                    health_url = f"http://127.0.0.1:{first_hp}{health_path}"
                     verifier = get_continuous_verifier()
                     await verifier.start(
                         deployment_id=record.deployment_id,
@@ -5153,7 +5171,7 @@ async def _verify_local_screen(plan, workspace_path: str) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("screen expectation check failed: %s", exc)
         wants_screen = False
-    url = f"http://localhost:{host_port}/"
+    url = f"http://127.0.0.1:{host_port}/"
     try:
         checked = await asyncio.to_thread(check_screen, url, wait_seconds=25.0)
     except Exception as exc:  # noqa: BLE001 - 확인 도구 문제로 배포 결과를 흔들지 않는다
@@ -5267,7 +5285,7 @@ async def rollback(request: RollbackRequest) -> dict:
                 status_code=400,
                 detail=f"기록된 포트 매핑이 올바르지 않습니다: {_hp}:{_cp}",
             ) from None
-        run_args.extend(["-p", f"{_host}:{_cont}"])
+        run_args.extend(["-p", _port_publish(_host, _cont)])
     for _k, _v in (rollback_env or {}).items():
         if not _ENV_RE.match(str(_k)):
             raise HTTPException(

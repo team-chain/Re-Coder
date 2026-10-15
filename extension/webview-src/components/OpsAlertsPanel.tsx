@@ -56,10 +56,14 @@ export const OpsAlertsPanel: React.FC = () => {
   const load = useCallback(() => postMessage("ops.alerts.list"), [postMessage]);
   useEffect(() => { load(); const t = window.setInterval(load, 60_000); return () => window.clearInterval(t); }, [load]);
   useMessage(useCallback((event) => {
-    const p = (event.payload ?? {}) as { alerts?: OpsAlertView[]; monitors?: unknown[]; message?: string; applied?: boolean };
+    const p = (event.payload ?? {}) as { alerts?: OpsAlertView[]; monitors?: unknown[]; message?: string; applied?: boolean; alertId?: string };
     if (event.type === "ops.alerts.result") { setAlerts([...(p.alerts ?? [])].reverse()); setMonitors((p.monitors ?? []).length); }
     if (event.type === "ops.alerts.actResult") { setBusy(false); setPending(null); setNote(p.message ?? ""); }
-    if (event.type === "ops.alerts.error") { setBusy(false); setNote(p.message ?? "알림을 불러오지 못했습니다"); }
+    // 2.0.32 — 1분 목록 갱신의 오류가 적용 중인 승인 버튼을 다시 켜지 않게: 적용(act) 오류(alertId 있음)만 busy 를 푼다.
+    if (event.type === "ops.alerts.error") {
+      if (p.alertId) { setBusy(false); }
+      setNote(p.message ?? "알림을 불러오지 못했습니다");
+    }
   }, []));
 
   const decide = (approved: boolean) => {

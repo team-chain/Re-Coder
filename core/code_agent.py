@@ -642,9 +642,12 @@ def apply_patch(proposal: PatchProposal) -> dict:
         # diff 적용
         try:
             original_text = fp.read_text(encoding='utf-8') if fp.exists() else ""
+            #: 2.0.32 — 원래 줄바꿈(CRLF/LF)을 지킨다. 기본 write_text 는 Windows 에서 LF 를 CRLF 로 바꿔, LF 로 된 셸 스크립트를
+            #: 컨테이너에서 못 돌게 하고(…sh^M), 바꾸지 않은 줄까지 git 변경으로 보이게 했다.
+            crlf = fp.exists() and b"\r\n" in fp.read_bytes()
             patched_text = _apply_unified_diff(original_text, patch.unified_diff)
             fp.parent.mkdir(parents=True, exist_ok=True)
-            fp.write_text(patched_text, encoding='utf-8')
+            fp.write_text(patched_text.replace("\n", "\r\n") if crlf else patched_text, encoding='utf-8', newline="")
             validation = _validate_changed_file(fp)
             if backup_path is not None:
                 backup_records.append({
@@ -905,6 +908,23 @@ def _restore_secrets_in_ops(ops: list[dict], secrets: dict) -> None:
         #: 문서(README·.env.example)에는 원래 값을 되돌려 넣지 않는다 — 자리표시가 맞다(키가 문서로 새지 않게).
         if isinstance(op.get("content"), str) and not is_doc_like(str(op.get("file") or "")):
             op["content"] = restore_code_secrets(op["content"], secrets)
+
+
+def _restore_neutralized_in_ops(ops: list[dict], guarded: list[dict]) -> None:
+    """2.0.32 — 지시형이라 빼고 보낸 줄이 결과 파일에 표시로 남으면 원래 줄로 되돌린다(파일마다 순서대로)."""
+    if not guarded:
+        return
+    try:
+        from context_gate import restore_neutralized
+    except ImportError:  # pragma: no cover
+        from core.context_gate import restore_neutralized  # type: ignore
+    by_file: dict[str, list[str]] = {}
+    for g in guarded:
+        by_file.setdefault(str(g.get("file") or "").replace("\\", "/").lstrip("./"), []).append(str(g.get("raw", "")))
+    for op in ops:
+        if isinstance(op.get("content"), str):
+            name = str(op.get("file") or "").replace("\\", "/").lstrip("./")
+            op["content"] = restore_neutralized(op["content"], by_file.get(name, []))
 
 
 def _build_code_prompt(
@@ -3001,6 +3021,8 @@ def generate_code(
         from code_removals import annotate_removals
     except ImportError:
         from core.code_removals import annotate_removals
+    #: 지시형이라 뺀 줄을 먼저 되돌리고(그 줄에도 자리표시된 비밀이 있을 수 있다) 그다음 비밀을 되돌린다.
+    _restore_neutralized_in_ops(ops_out, guarded)
     _restore_secrets_in_ops(ops_out, context_secrets)
     annotate_removals(ops_out, root, target_folder)
 
@@ -3042,7 +3064,7 @@ def generate_code(
         #: 2.0.28 AI 코드 보안 점수(규칙별 통과·발견 위치·고치는 법)
         "security": security,
         #: 2.0.29 참고 파일에서 AI 에게 보내지 않은 지시형 줄
-        "prompt_guard": guarded[:20],
+        "prompt_guard": [{k: v for k, v in g.items() if k != "raw"} for g in guarded[:20]],
         "foundation": foundation or None,
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),

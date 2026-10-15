@@ -41,6 +41,8 @@ DEFAULT_WINDOW = 300
 MIN_RATE_LIMIT = 10
 MAX_RATE_LIMIT = 2_000_000_000
 LISTENER_PORT = 80
+#: 웹 ACL 설명 — AWS 가 허용하는 문자(영문·숫자·_+=:#@/-,. 공백)만. 한글·긴 줄표(—)를 넣으면 생성이 거절된다(2.0.32).
+WAF_DESCRIPTION = "ReCoder edge shield - per-IP rate limit + AWS managed rules"
 #: WAF 범위 — ALB 는 지역(REGIONAL), CloudFront 는 전역(CLOUDFRONT, 반드시 us-east-1 클라이언트).
 REGIONAL = "REGIONAL"
 CLOUDFRONT = "CLOUDFRONT"
@@ -69,6 +71,11 @@ def edge_name(service: str) -> str:
     slug = re.sub(r"-+", "-", slug)[:18].strip("-") or "app"
     digest = hashlib.sha1(str(service).encode("utf-8")).hexdigest()[:4]
     return f"recoder-{slug}-{digest}"
+
+
+def global_acl_name(name: str, region: str) -> str:
+    """CloudFront(전역) 웹 ACL 이름 — 같은 서비스 이름을 여러 리전에 배포해도 겹치지 않게 리전을 붙인다(2.0.32)."""
+    return f"{name}-{region}" if region else name
 
 
 def _tag_list(tags: Optional[dict]) -> list[dict]:
@@ -242,7 +249,7 @@ def ensure_web_acl(wafv2: Any, name: str, *, rate_limit: int, window: int, tags:
         summary = wafv2.create_web_acl(
             Name=name, Scope=scope, DefaultAction={"Allow": {}}, Rules=rules,
             VisibilityConfig=_visibility(name),
-            Description="ReCoder 대규모 방패 — IP 당 속도 제한 + AWS 관리 규칙",
+            Description=WAF_DESCRIPTION,
             **({"Tags": _tag_list(tags)} if tags else {}),
         )["Summary"]
         logger.info("WAF 웹 ACL 생성: %s", name)
@@ -252,7 +259,7 @@ def ensure_web_acl(wafv2: Any, name: str, *, rate_limit: int, window: int, tags:
             len(current["WebACL"].get("Rules", [])) != len(rules):
         wafv2.update_web_acl(Name=name, Scope=scope, Id=existing["Id"], DefaultAction={"Allow": {}},
                              Rules=rules, VisibilityConfig=_visibility(name), LockToken=current["LockToken"],
-                             Description="ReCoder 대규모 방패 — IP 당 속도 제한 + AWS 관리 규칙")
+                             Description=WAF_DESCRIPTION)
         logger.info("WAF 웹 ACL 갱신: %s (%s회/%s초)", name, rate_limit, window)
     return str(existing["ARN"]), False
 

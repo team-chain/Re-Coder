@@ -698,6 +698,11 @@ def _ecs_statements(
                 "ec2:DescribeRouteTables",
                 "ec2:DescribeSecurityGroups",
                 "ec2:DescribeNetworkInterfaces",
+                # 2.0.32 — 로드밸런서를 만들 때 ELB 가 호출자 권한으로 계정·인터넷 게이트웨이·주소를 확인한다
+                # (ElasticLoadBalancingFullAccess 가 함께 주는 읽기 권한).
+                "ec2:DescribeInternetGateways",
+                "ec2:DescribeAccountAttributes",
+                "ec2:DescribeAddresses",
             ],
             "Resource": "*",
         },
@@ -850,9 +855,19 @@ def _ecs_statements(
             # CloudFront 인증서는 us-east-1 에만 둘 수 있다.
             "Sid": "HttpsCertificate",
             "Effect": "Allow",
-            "Action": ["acm:RequestCertificate", "acm:AddTagsToCertificate", "acm:DescribeCertificate",
+            "Action": ["acm:AddTagsToCertificate", "acm:DescribeCertificate",
                        "acm:ListTagsForCertificate", "acm:DeleteCertificate"],
             "Resource": f"arn:{ctx.partition}:acm:us-east-1:{ctx.account}:certificate/*",
+        },
+        {
+            # 2.0.32 — RequestCertificate 는 리소스 단위 제한을 지원하지 않는다(인증서 ARN 에 걸면 늘 거절).
+            # 대신 us-east-1 과 recoder:managed 태그를 붙인 요청으로만 좁힌다.
+            "Sid": "HttpsRequestCertificate",
+            "Effect": "Allow",
+            "Action": ["acm:RequestCertificate"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-1",
+                                           "aws:RequestTag/recoder:managed": "true"}},
         },
         {
             # 인증서 검증 CNAME 과 도메인 별칭(A·AAAA)만 넣는다.
@@ -874,6 +889,7 @@ def _ecs_statements(
             "Sid": "ManagedDatabase",
             "Effect": "Allow",
             "Action": ["rds:CreateDBInstance", "rds:ModifyDBInstance", "rds:DeleteDBInstance", "rds:CreateDBSnapshot",
+                       "rds:StartDBInstance",
                        "rds:CreateDBSubnetGroup", "rds:DeleteDBSubnetGroup", "rds:CreateDBParameterGroup",
                        "rds:ModifyDBParameterGroup", "rds:DeleteDBParameterGroup", "rds:AddTagsToResource",
                        "rds:ListTagsForResource"],

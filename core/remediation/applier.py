@@ -173,10 +173,10 @@ def _apply_file_template(
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         if is_append and target.exists():
-            with target.open("a", encoding="utf-8") as f:
+            with target.open("a", encoding="utf-8", newline="") as f:
                 f.write(rendered)
         else:
-            target.write_text(rendered, encoding="utf-8")
+            target.write_text(rendered, encoding="utf-8", newline="")  # Windows 에서도 LF 그대로(2.0.32)
     except OSError as exc:
         # 실패 → 백업 복원
         if backup_dir is not None and (backup_dir / (proposal.target_path or "")).exists():

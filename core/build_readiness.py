@@ -3603,6 +3603,12 @@ def _check_versions_online(files: "ProjectFiles", result: Readiness) -> None:
             fix, manifest, auto))
 
 
+def _non_registry_spec(spec: object) -> bool:
+    text = str(spec or "").strip()
+    return bool(re.match(r"(?i)(file:|link:|workspace:|portal:|npm:|git\+|git:|github:|gitlab:|bitbucket:|https?:|\.{0,2}/|~)", text)) \
+        or bool(re.fullmatch(r"[\w.-]+/[\w.-]+(#.*)?", text))
+
+
 def _check_package_trust(files: "ProjectFiles", result: Readiness) -> None:
     """갓 생긴 무명 패키지·유명 패키지 흉내 이름(슬롭스쿼팅·타이포스쿼팅)을 설치 전에 찾는다.
 
@@ -3614,7 +3620,24 @@ def _check_package_trust(files: "ProjectFiles", result: Readiness) -> None:
     except ImportError:  # pragma: no cover
         from core import package_trust, npm_registry  # type: ignore
     trust_log: dict[str, dict] = {}
-    for folder in [""] + list(result.subprojects):
+    #: 2.0.32 — 루트·하위 프로젝트만 보면 루트 스크립트가 설치하는 server/·client/ 가 빠졌다. node_modules 밖의 모든 package.json.
+    folders: list[str] = [""] + list(result.subprojects)
+    runtime_sub = getattr(result, "runtime_subproject", "") or ""
+    if runtime_sub:
+        folders.append(runtime_sub)
+    for rel in files.files():
+        if rel.endswith("package.json") and "node_modules/" not in rel and rel.count("/") <= 3:
+            folders.append(posixpath.dirname(rel))
+    folders = list(dict.fromkeys(folders))[:20]
+    local_names: set[str] = set()
+    for folder in folders:
+        try:
+            pkg = json.loads(files.read(f"{folder}/package.json" if folder else "package.json") or "")
+            if isinstance(pkg, dict) and isinstance(pkg.get("name"), str):
+                local_names.add(pkg["name"])
+        except ValueError:
+            continue
+    for folder in folders:
         manifest = f"{folder}/package.json" if folder else "package.json"
         try:
             package = json.loads(files.read(manifest) or "")
@@ -3622,8 +3645,12 @@ def _check_package_trust(files: "ProjectFiles", result: Readiness) -> None:
             continue
         if not isinstance(package, dict):
             continue
+        #: 레지스트리에서 받지 않는 의존성(file:·link:·workspace:·git·주소·npm: 별칭)과 같은 저장소의 다른 패키지는
+        #: 이름이 유명 패키지와 비슷해도 짝퉁이 아니다 — 이름을 바꾸면 로컬 패키지가 깨진다(2.0.32).
         sections = {name: section for section in ("devDependencies", "dependencies")
-                    for name in (package.get(section) or {}) if isinstance(package.get(section), dict)}
+                    if isinstance(package.get(section), dict)
+                    for name, spec in package[section].items()
+                    if name not in local_names and not _non_registry_spec(spec)}
         if not sections:
             continue
         try:
@@ -4341,7 +4368,7 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             import node_fixups
-            target.write_text(node_fixups.missing_style_content(ProjectFiles(root), rel), encoding="utf-8")
+            target.write_text(node_fixups.missing_style_content(ProjectFiles(root), rel), encoding="utf-8", newline="")
             changed.append(rel)
     elif code == "NODE_VITE_JSX_IN_JS":
         for rel in before.fix_data.get("jsx_in_js") or []:

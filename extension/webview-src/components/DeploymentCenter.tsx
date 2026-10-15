@@ -657,6 +657,11 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
         ecsService: ecs.ecs_service,
         taskFamily: ecs.task_family,
         awsRegion: ecs.aws_region,
+        // 2.0.32 — 켠 보호 기능(대규모 방패·HTTPS·도메인·관리형 DB)의 권한도 배포 전에 확인한다.
+        edge: (protect as { edge?: string }).edge ?? "none",
+        https: (protect as { https?: boolean }).https === true,
+        customDomain: (protect as { custom_domain?: string }).custom_domain ?? "",
+        database: (protect as { database?: string }).database ?? "task",
       },
     });
   };

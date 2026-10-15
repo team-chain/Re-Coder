@@ -205,7 +205,8 @@ def _restore(sm: Any, name: str) -> bool:
 def wait(rds: Any, identifier: str, *, timeout: float = WAIT_S, sleep: Callable[[float], None] = time.sleep,
          on_wait: Optional[Callable[[str, float], None]] = None) -> dict:
     """available 이 될 때까지. on_wait(상태, 지난 초) 로 진행을 알린다."""
-    started = time.monotonic()
+    begun = time.monotonic()
+    started = False
     while True:
         db = _describe(rds, identifier)
         if db is None:
@@ -213,9 +214,18 @@ def wait(rds: Any, identifier: str, *, timeout: float = WAIT_S, sleep: Callable[
         status = str(db.get("DBInstanceStatus", ""))
         if status == "available" and db.get("Endpoint"):
             return db
+        if status == "stopped" and not started:
+            # 직접 멈췄거나 7일 정지 후… 멈춘 DB 는 기다려도 켜지지 않는다 — 켠다(2.0.32).
+            try:
+                rds.start_db_instance(DBInstanceIdentifier=identifier)
+                started = True
+                logger.info("멈춰 있던 관리형 DB 를 켭니다: %s", identifier)
+            except Exception as exc:  # noqa: BLE001
+                raise InfraError(f"관리형 DB({identifier})가 멈춰 있는데 켜지 못했습니다.", detail=error_message(exc),
+                                 remedy="RDS 콘솔에서 DB 를 시작한 뒤 다시 배포하세요(권한표의 rds:StartDBInstance 확인).") from exc
         if status in ("failed", "incompatible-parameters", "incompatible-restore", "storage-full", "deleting"):
             raise InfraError(f"관리형 DB 상태가 '{status}' 라 쓸 수 없습니다.", remedy="RDS 콘솔에서 상태를 확인하세요.")
-        waited = time.monotonic() - started
+        waited = time.monotonic() - begun
         if waited > timeout:
             raise InfraError(f"관리형 DB 가 {int(timeout // 60)}분 안에 준비되지 않았습니다(상태: {status}).",
                              remedy="조금 뒤 다시 배포하면 만들어진 DB 를 그대로 씁니다.")

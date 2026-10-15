@@ -407,8 +407,55 @@ def _handle_shutdown(signum, _frame) -> None:
     sys.exit(0)
 
 
+def _ensure_ca_bundle() -> None:
+    """HTTPS 인증서 묶음 위치(2.0.32).
+
+    번들(PyInstaller)은 빌드한 컴퓨터의 OpenSSL 기본 경로를 그대로 들고 온다 — macOS 빌드(python.org 파이썬)의
+    /Library/Frameworks/…/cert.pem, 우분투의 /usr/lib/ssl 은 사용자 PC 에 없어 urllib 로 하는 HTTPS(OSV 취약점 조회·GitHub·
+    LLM 게이트웨이)가 CERTIFICATE_VERIFY_FAILED 로 조용히 실패했다. 사용자가 SSL_CERT_FILE 을 정했으면 그대로 둔다.
+    """
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import ssl
+        paths = ssl.get_default_verify_paths()
+        have_default = bool((paths.cafile and os.path.isfile(paths.cafile))
+                            or (paths.capath and os.path.isdir(paths.capath) and os.listdir(paths.capath)))
+        if getattr(sys, "frozen", False) or not have_default:
+            import certifi
+            os.environ["SSL_CERT_FILE"] = certifi.where()
+    except Exception:  # noqa: BLE001 - 없으면 시스템 기본값으로
+        pass
+
+
+class _LoopbackDirectProxyHandler:
+    """urllib 의 프록시 처리에서 내 PC(127.0.0.1·localhost·::1) 주소만 프록시를 거치지 않게 한다(2.0.32).
+
+    회사망처럼 http_proxy 가 걸린 PC 에서 로컬 배포 헬스 체크(http://127.0.0.1:포트)가 프록시로 가 502 로 실패했고,
+    Windows 레지스트리 프록시의 `<local>` 예외는 점이 있는 127.0.0.1 을 빼 주지 않는다."""
+
+    @staticmethod
+    def install() -> None:
+        import urllib.request
+
+        class Handler(urllib.request.ProxyHandler):
+            def proxy_open(self, req, proxy, type):  # noqa: A002 - urllib 의 이름
+                host = (req.host or "").rsplit("@", 1)[-1]
+                name = host[1:].split("]", 1)[0] if host.startswith("[") else host.split(":", 1)[0]
+                if name.lower() in ("127.0.0.1", "localhost", "::1") or name.startswith("127."):
+                    return None
+                return super().proxy_open(req, proxy, type)
+
+        urllib.request.install_opener(urllib.request.build_opener(Handler()))
+
+
 def main() -> None:
     multiprocessing.freeze_support()
+    _ensure_ca_bundle()
+    try:
+        _LoopbackDirectProxyHandler.install()
+    except Exception:  # noqa: BLE001
+        pass
     #: 콘솔·파이프 인코딩이 한글을 못 쓰는 Windows 로캘에서도 출력 때문에 죽지 않게 한다. 확장은 Core 출력을 UTF-8 로
     #: 읽으므로 UTF-8 로 쓴다 — cp949 로 쓰면 core.log·오류 안내의 한글이 "����" 로 깨졌다(실기기 2.0.16 SBOM 오류).
     for _stream in (sys.stdout, sys.stderr):

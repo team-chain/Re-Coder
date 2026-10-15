@@ -315,7 +315,7 @@ class RollbackPolicy:
         cmd = [
             "docker", "run", "-d",
             "--name", container_name,
-            "-p", f"{host_port}:{container_port}",
+            "-p", _port_publish(host_port, container_port),
             "--restart", "unless-stopped",
         ]
         for k, v in (env or {}).items():
@@ -658,6 +658,15 @@ class RollbackPolicy:
 # ===========================================================================
 # Helpers
 # ===========================================================================
+
+
+
+def _port_publish(host_port, container_port) -> str:
+    try:
+        from deployment_inputs import port_publish  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.deployment_inputs import port_publish  # type: ignore
+    return port_publish(host_port, container_port)
 
 
 def _strip_ssh_wrapper(ssh_command: str) -> str:

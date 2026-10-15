@@ -18,6 +18,7 @@ boto3 클라이언트 묶음(dict)을 인자로 받는다 — moto 로 그대로
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable, Optional
@@ -254,7 +255,14 @@ def _find_elb(elbv2: Any, wafv2: Any, items: list[Item]) -> None:
     _find_waf(wafv2, items, scope="REGIONAL", kind="waf")
 
 
-def _find_waf(wafv2: Any, items: list[Item], *, scope: str, kind: str) -> None:
+_REGION_SUFFIX = re.compile(r"-([a-z]{2}(?:-gov)?-[a-z]+-\d)$")
+
+
+def _find_waf(wafv2: Any, items: list[Item], *, scope: str, kind: str, region: str = "",
+              foreign: Optional[dict] = None) -> None:
+    """scope=CLOUDFRONT 는 전역이라 모든 리전의 것이 보인다 — 이 리전 것(이름 끝 -리전)과, 리전 표시가 없는 옛 이름(2.0.31)은
+    **다른 리전**의 CloudFront 배포가 쓰지 않는 것을 고른다(떼어진 옛 ACL 이 어느 리전에서도 안 보여 요금만 남지 않게, 2.0.32)."""
+    foreign_acls = (foreign or {}).get("acls", set())
     marker = None
     while True:
         kwargs: dict = {"Scope": scope, "Limit": 100}
@@ -264,6 +272,10 @@ def _find_waf(wafv2: Any, items: list[Item], *, scope: str, kind: str) -> None:
         for acl in resp.get("WebACLs", []):
             if not _recoderish(acl["Name"]):
                 continue
+            if scope == "CLOUDFRONT" and region:
+                suffix = _REGION_SUFFIX.search(acl["Name"])
+                if (suffix and suffix.group(1) != region) or (not suffix and acl["ARN"] in foreign_acls):
+                    continue
             t = _tags_dict((wafv2.list_tags_for_resource(ResourceARN=acl["ARN"]).get("TagInfoForResource") or {})
                            .get("TagList"))
             items.append(Item(id=f"{kind}:{acl['Name']}", kind=kind, name=acl["Name"], arn=acl["ARN"], tagged=_managed(t),
@@ -314,20 +326,35 @@ def _find_s3(s3: Any, region: str, items: list[Item]) -> None:
                           detail=f"파일 {count}{'+' if listed.get('IsTruncated') else ''}개"))
 
 
-def _find_cdn(cloudfront: Any, acm: Any, items: list[Item]) -> None:
+def _find_cdn(cloudfront: Any, acm: Any, items: list[Item], region: str = "", foreign: Optional[dict] = None) -> None:
+    """CloudFront·인증서는 전역 — 이 리전의 ALB 를 원본으로 하는 배포와, 이 리전 배포를 위해 만든 인증서만(2.0.32).
+    foreign 에 다른 리전 배포가 쓰는 웹 ACL·도메인을 모은다(옛 이름 ACL·인증서를 고를 때 쓴다)."""
+    foreign = foreign if foreign is not None else {}
+    foreign.setdefault("acls", set())
+    foreign.setdefault("domains", set())
+    try:
+        from core import aws_cdn  # type: ignore
+    except ImportError:  # pragma: no cover
+        import aws_cdn  # type: ignore
     marker = ""
     while True:
         page = cloudfront.list_distributions(**({"Marker": marker} if marker else {})).get("DistributionList", {})
         for dist in page.get("Items", []) or []:
             if not str(dist.get("Comment", "")).startswith(f"{PREFIX}:"):
                 continue
+            if region and aws_cdn.item_region(dist) not in ("", region):
+                if dist.get("WebACLId"):
+                    foreign["acls"].add(str(dist["WebACLId"]))
+                foreign["domains"] |= set((dist.get("Aliases") or {}).get("Items") or [])
+                continue
             t = _tags_dict(cloudfront.list_tags_for_resource(Resource=dist["ARN"]).get("Tags", {}).get("Items"))
             aliases = (dist.get("Aliases") or {}).get("Items") or []
-            items.append(Item(id=f"cloudfront:{dist['Id']}", kind="cloudfront", name=str(dist["Comment"])[len(PREFIX) + 1:],
+            items.append(Item(id=f"cloudfront:{dist['Id']}", kind="cloudfront",
+                              name=str(dist["Comment"])[len(PREFIX) + 1:].split("@", 1)[0],
                               arn=dist["ARN"], tagged=_managed(t), service=t.get(SERVICE_TAG, ""),
                               project=t.get(PROJECT_TAG, ""),
                               detail=f"https://{(aliases or [dist['DomainName']])[0]} · {'켜짐' if dist.get('Enabled') else '꺼짐'} · {dist.get('Status', '')}",
-                              extra={"id": dist["Id"]}))
+                              extra={"id": dist["Id"], "web_acl": str(dist.get("WebACLId") or "")}))
         if not page.get("IsTruncated"):
             break
         marker = page.get("NextMarker", "")
@@ -335,6 +362,9 @@ def _find_cdn(cloudfront: Any, acm: Any, items: list[Item]) -> None:
         t = _tags_dict(acm.list_tags_for_certificate(CertificateArn=cert["CertificateArn"]).get("Tags"))
         if not _managed(t):
             continue  # 사용자가 직접 만든 인증서는 목록에도 넣지 않는다(이름으로 구분할 수 없음)
+        cert_region = t.get("recoder:region", "")
+        if region and (cert_region != region if cert_region else cert.get("DomainName") in foreign["domains"]):
+            continue  # 다른 리전 배포의 인증서
         items.append(Item(id=f"acm_certificate:{cert['CertificateArn'].rsplit('/', 1)[-1]}", kind="acm_certificate",
                           name=cert.get("DomainName", ""), arn=cert["CertificateArn"], tagged=True,
                           service=t.get(SERVICE_TAG, ""), project=t.get(PROJECT_TAG, ""),
@@ -377,6 +407,7 @@ def find(clients: dict, *, region: str, records: Iterable[dict] = ()) -> tuple[l
     """리전의 ReCoder 리소스(태그 있는 것 + 이름·기록으로 보이는 태그 없는 것). 못 본 종류는 문장으로."""
     items: list[Item] = []
     gaps: list[str] = []
+    foreign: dict = {"acls": set(), "domains": set()}
     steps: list[tuple[str, Callable[[], None]]] = [
         ("ECS", lambda: _find_ecs(clients["ecs"], items, list(records))),
         ("ECR", lambda: _find_ecr(clients["ecr"], items)),
@@ -385,8 +416,9 @@ def find(clients: dict, *, region: str, records: Iterable[dict] = ()) -> tuple[l
         ("로드밸런서·WAF", lambda: _find_elb(clients["elbv2"], clients["wafv2"], items)),
         ("경보·알림", lambda: _find_alerts(clients["cloudwatch"], clients["sns"], items)),
         ("S3", lambda: _find_s3(clients["s3"], region, items)),
-        ("HTTPS 주소", lambda: _find_cdn(clients["cloudfront"], clients["acm_global"], items)),
-        ("HTTPS 주소 WAF", lambda: _find_waf(clients["wafv2_global"], items, scope="CLOUDFRONT", kind="waf_cdn")),
+        ("HTTPS 주소", lambda: _find_cdn(clients["cloudfront"], clients["acm_global"], items, region, foreign)),
+        ("HTTPS 주소 WAF", lambda: _find_waf(clients["wafv2_global"], items, scope="CLOUDFRONT", kind="waf_cdn",
+                                           region=region, foreign=foreign)),
         ("관리형 DB", lambda: _find_rds(clients["rds"], clients["secretsmanager"], items)),
     ]
     for label, step in steps:

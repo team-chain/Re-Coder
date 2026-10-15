@@ -43,6 +43,14 @@ from core.security_scan import security_scanner
 
 logger = logging.getLogger(__name__)
 
+
+def boto3_client_like(clients: dict, name: str):
+    """clients 묶음에 없으면(옛 호출자·시험) 같은 기본 세션으로 만든다."""
+    if name not in clients:
+        import boto3
+        clients[name] = boto3.client(name)
+    return clients[name]
+
 _POLL_INTERVAL = 15           # CloudWatch 폴링 간격 (초)
 _MAX_POLL_ATTEMPTS = 40       # 최대 폴링 횟수 (= 10분)
 _CIRCUIT_BREAKER_WINDOW = 300 # 5분 (초)
@@ -172,7 +180,10 @@ class ECSAgent:
         static = generated_static_runtime_port(Path(request.workspace_path) / request.dockerfile) is not None
         try:
             readiness = analyze(request.workspace_path, online=False)
-            port_from_env = bool(readiness.port_from_env) or readiness.runtime == "python"
+            port_from_env = bool(readiness.port_from_env)
+            if readiness.runtime == "python":
+                # 2.0.32 — 파이썬은 시작 명령·코드가 PORT 를 정말 쓰는지 본다(포트를 고정한 앱에 켜면 태스크가 계속 교체된다).
+                port_from_env = shield_mod.python_reads_port(request.workspace_path, request.dockerfile)
         except Exception:  # noqa: BLE001 - 판단하지 못하면 켜지 않는다(앱이 안 뜨는 것보다 방패 없는 편이 낫다)
             port_from_env = False
         return shield_mod.decide(enabled=True, level=request.shield_level, public_port=request.container_port,
@@ -224,6 +235,8 @@ class ECSAgent:
             #: 2.0.27 관리형 DB
             "rds": session.client("rds"),
             "secretsmanager": session.client("secretsmanager"),
+            #: 2.0.32 production 관리형 DB — 실행 역할이 DB 비밀을 읽을 수 있는지 미리 시뮬레이션
+            "iam": session.client("iam"),
         }
 
     async def deploy(
@@ -807,8 +820,11 @@ class ECSAgent:
                 req.target_group_arn = edge.target_group_arn
                 if req.https:
                     self._provision_cdn(req, rec, clients, edge)
+                else:
+                    self._note_leftovers(req, rec, clients, cdn_only=True)
                 self._start_database(req, rec, clients, target)
                 return target
+            self._note_leftovers(req, rec, clients)
 
             # 보안 그룹
             if req.security_group_ids:
@@ -845,13 +861,33 @@ class ECSAgent:
     # 2.0.27 HTTPS 주소(CloudFront) · 관리형 DB(RDS)
     # ------------------------------------------------------------------
 
+    def _note_leftovers(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict, *, cdn_only: bool = False) -> None:
+        """대규모 방패·HTTPS 를 끈 배포 — 예전에 만든 로드밸런서·WAF·CloudFront 는 지우지 않고 남는다(되돌리기 쉽게).
+        요금이 계속 나가므로 알린다(2.0.32). 확인이 안 되면 조용히 넘어간다."""
+        name = aws_edge.edge_name(req.service)
+        left: list[str] = []
+        try:
+            if not cdn_only and aws_edge._find_load_balancer(clients["elbv2"], name) is not None:
+                left.append(f"로드밸런서 {name}" + (" + WAF" if aws_edge.find_web_acl(clients["wafv2"], name) else ""))
+            if "cloudfront" in clients and aws_cdn._find(clients["cloudfront"], aws_cdn.comment_for(name, req.region),
+                                                         legacy=aws_cdn.comment_for(name), region=req.region):
+                left.append("HTTPS 주소(CloudFront)")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("남은 리소스 확인 생략: %s", aws_infra.error_message(exc))
+            return
+        if left:
+            rec.provisioned["leftover_resources"] = (
+                f"이번 배포에서 끈 {', '.join(left)} 은(는) 지우지 않고 남겨 두었습니다 — 계속 요금이 나옵니다. "
+                "다시 켤 계획이 없으면 운영 화면의 「AWS 리소스 정리」에서 지우세요.")
+
     def _provision_cdn(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict,
                        edge: "aws_edge.EdgeResult") -> None:
         tags = self.resource_tags(req)
         notes: list[str] = []
         cert = None
         if req.custom_domain:
-            cert = aws_cdn.ensure_certificate(clients["acm_global"], clients["route53"], req.custom_domain, tags=tags)
+            cert = aws_cdn.ensure_certificate(clients["acm_global"], clients["route53"], req.custom_domain,
+                                              tags={**tags, "recoder:region": req.region})
             notes += cert.notes
         #: 2.0.31 — CloudFront 뒤에서는 ALB 가 보는 주소가 모두 CloudFront 엣지라, WAF 의 IP 당 제한은 CloudFront 에 붙여야
         #: 실제 사용자 IP 로 센다(전역 범위 웹 ACL, us-east-1).
@@ -861,8 +897,8 @@ class ECSAgent:
         if waf:
             try:
                 global_acl, _made = aws_edge.ensure_web_acl(
-                    clients["wafv2_global"], edge.name, rate_limit=req.waf_rate_limit, window=req.waf_window, tags=tags,
-                    scope=aws_edge.CLOUDFRONT)
+                    clients["wafv2_global"], aws_edge.global_acl_name(edge.name, req.region), rate_limit=req.waf_rate_limit,
+                    window=req.waf_window, tags=tags, scope=aws_edge.CLOUDFRONT)
             except InfraError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -889,7 +925,7 @@ class ECSAgent:
             clients["cloudfront"], name=edge.name, origin=edge.dns_name, tags=tags,
             alias=req.custom_domain if cert is not None and cert.issued else "",
             certificate_arn=cert.arn if cert is not None and cert.issued else "",
-            web_acl_id=global_acl)
+            web_acl_id=global_acl, region=req.region)
         self._cdn[id(req)] = cdn
         if waf and not legacy_waf:
             edge.web_acl_arn = str(global_acl)
@@ -906,13 +942,21 @@ class ECSAgent:
                 notes.append("WAF 를 CloudFront 에 붙이는 중입니다 — 퍼지는 동안(15분쯤) 로드밸런서의 WAF 도 그대로 두고, 다음 배포에서 뗍니다.")
         elif not waf:
             try:
-                if aws_edge.delete_web_acl(clients["wafv2_global"], edge.name, aws_edge.CLOUDFRONT, attempts=1):
+                if aws_edge.delete_web_acl(clients["wafv2_global"], aws_edge.global_acl_name(edge.name, req.region),
+                                           aws_edge.CLOUDFRONT, attempts=1):
                     notes.append("WAF 를 껐습니다 — CloudFront 의 웹 ACL 을 지웠습니다.")
             except Exception as exc:  # noqa: BLE001 - 떼어 냈으니 동작엔 영향 없음, 요금만
                 if aws_infra.error_code(exc) in ("WAFAssociatedItemException",):
                     notes.append("WAF 를 껐습니다 — CloudFront 에서 웹 ACL 을 뗐고, 퍼진 뒤(15분쯤) 다시 배포하거나 「AWS 리소스 정리」로 지우면 요금이 멈춥니다.")
                 else:
                     logger.info("CloudFront 웹 ACL 확인 생략: %s", aws_infra.error_message(exc))
+        if (waf and not legacy_waf and cdn.web_acl_live) or not waf:
+            # 2.0.31 의 리전 표시 없는 CloudFront 웹 ACL — 새 이름으로 옮겨 퍼졌거나 WAF 를 껐으면 지운다(요금만 남지 않게).
+            try:
+                if aws_edge.delete_web_acl(clients["wafv2_global"], edge.name, aws_edge.CLOUDFRONT, attempts=1):
+                    notes.append("예전 이름의 CloudFront 웹 ACL 을 지웠습니다.")
+            except Exception as exc:  # noqa: BLE001 - 아직 연결돼 있으면 다음 배포·정리에서
+                logger.info("옛 CloudFront 웹 ACL 정리 생략: %s", aws_infra.error_message(exc))
         #: 원본 잠금 — CloudFront 가 붙이는 비밀 머리글이 맞는 요청만 앱으로. 머리글이 이미 퍼진 배포에서만 잠근다
         #: (방금 머리글을 넣은 옛 배포를 바로 잠그면 퍼지는 동안 사용자가 403 을 본다).
         if cdn.origin_secret_live:
@@ -966,12 +1010,42 @@ class ECSAgent:
             rec.provisioned["database"] = ("만들지 않음 — 앱이 PostgreSQL 을 쓰지 않거나 DB 접속 정보를 이미 넣었습니다."
                                            if runtime is not None else "만들지 않음 — 작업 폴더 없이 이미지로만 배포해 앱의 DB 를 알 수 없습니다.")
             return
+        if (req.environment or "").strip().lower() == "production":
+            # 2.0.32 — production 은 DB 접속 정보를 비밀 참조로 넣는다. 실행 역할이 그 비밀을 못 읽으면 태스크가
+            # 시작하지 못하므로(ResourceInitializationError) RDS 를 만들기 **전에** 확인한다.
+            self._check_db_secret_access(req, rec, clients)
         handle = aws_rds.start(clients["rds"], clients["ec2"], clients["secretsmanager"], service=req.service,
                                vpc_id=target.vpc_id, task_security_groups=list(req.security_group_ids),
                                tags=self.resource_tags(req))
         self._db[id(req)] = handle
         rec.provisioned["database"] = (f"관리형 DB {handle.identifier} 만드는 중(5~10분 — 그 사이 이미지를 빌드합니다)"
                                        if handle.created else f"관리형 DB {handle.identifier} 다시 사용")
+
+    def _check_db_secret_access(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
+        exec_arn, _task = self._resolve_role_arns(req, clients)
+        partition, account = exec_arn.split(":")[1], exec_arn.split(":")[4]
+        secret_arn = f"arn:{partition}:secretsmanager:{req.region}:{account}:secret:{aws_rds.secret_name(req.service)}-AbCdEf"
+        try:
+            iam = boto3_client_like(clients, "iam")
+            result = iam.simulate_principal_policy(PolicySourceArn=exec_arn, ActionNames=["secretsmanager:GetSecretValue"],
+                                                   ResourceArns=[secret_arn])
+            decision = str((result.get("EvaluationResults") or [{}])[0].get("EvalDecision", ""))
+        except Exception as exc:  # noqa: BLE001 - 확인 권한이 없으면(학교 계정 등) 막지 않고 알린다
+            rec.provisioned["database_secret_check"] = (f"실행 역할이 DB 접속 정보 비밀을 읽을 수 있는지 확인하지 못했습니다"
+                                                        f"({aws_infra.error_message(exc)}) — 태스크가 시작하지 못하면 아래 권한을 추가하세요.")
+            return
+        if decision == "allowed":
+            return
+        role = exec_arn.rsplit("/", 1)[-1]
+        doc = json.dumps({"Version": "2012-10-17", "Statement": [{
+            "Effect": "Allow", "Action": "secretsmanager:GetSecretValue",
+            "Resource": f"arn:{partition}:secretsmanager:*:{account}:secret:recoder/*"}]}, separators=(",", ":"))
+        raise InfraError(
+            "production 관리형 DB 는 접속 정보를 Secrets Manager 비밀로 넣는데, ECS 실행 역할이 그 비밀을 읽을 권한이 없습니다.",
+            detail=f"실행 역할 {exec_arn} 의 secretsmanager:GetSecretValue 판정: {decision or '알 수 없음'}",
+            remedy=("관리자 권한으로 한 번 실행한 뒤 다시 배포하세요(ReCoder 비밀 recoder/* 만 읽게 함): "
+                    f"aws iam put-role-policy --role-name {role} --policy-name recoder-db-secret --policy-document '{doc}'. "
+                    "또는 staging 으로 배포하면 접속 정보를 환경변수로 넣어 이 권한 없이 동작합니다. 아직 아무것도 만들지 않았습니다."))
 
     async def _step_database_ready(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
         """RDS 가 준비되면 접속 정보를 비밀에 쓰고, 태스크에 넣을 값(staging)·참조(production)와 초기화 컨테이너를 정한다."""

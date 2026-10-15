@@ -221,6 +221,12 @@ class AwsDeploymentPermissionContext(BaseModel):
     aws_region: str = ""
     task_execution_role: str = ""
     task_role: str = ""
+    #: 2.0.32 — 배포에서 켠 보호 기능. 켠 것의 권한도 미리 확인한다(옛 권한 템플릿이면 ECR 에 올리고 ALB 를 만든 뒤에야
+    #: 실패하던 것).
+    edge: str = "none"
+    https: bool = False
+    custom_domain: str = ""
+    database: str = "task"
 
 
 class AwsConnectRequest(BaseModel):
@@ -375,6 +381,13 @@ OPTIONAL_COST_CONTROL_ACTIONS = {
 # 배포 차단이 아닌 조건부 안내로만 보여 준다.
 OPTIONAL_CONDITIONAL_ACTIONS = {
     "iam:CreateServiceLinkedRole",
+}
+
+#: 2.0.32 — 없어도 배포가 대신하는 길이 있는 보호 기능 권한(막지 않고 알린다).
+#:  · 원본 잠금(리스너 규칙): 없으면 잠금만 끈 채 배포(보안 그룹은 계속 CloudFront 주소만 받음)
+#:  · CloudFront 범위 WAF: 없으면 2.0.30 처럼 로드밸런서에 WAF 를 둔다
+OPTIONAL_PROTECTION_ACTIONS = {
+    "elasticloadbalancing:CreateRule",
 }
 
 _BROAD_POLICY_NAMES = {
@@ -735,7 +748,55 @@ def _resolved_permission_context(
         aws_region=(supplied.aws_region or "").strip(),
         task_execution_role=execution_role,
         task_role=task_role,
+        edge=supplied.edge if supplied.edge in ("none", "alb", "alb_waf") else "none",
+        https=bool(supplied.https),
+        custom_domain=(supplied.custom_domain or "").strip(),
+        database=supplied.database if supplied.database in ("task", "rds") else "task",
     ), None
+
+
+def _protection_simulations(context: AwsDeploymentPermissionContext, partition: str, account: str,
+                            region: str) -> list[tuple[list[str], list[str], Optional[list[dict[str, object]]]]]:
+    """켠 보호 기능마다 대표 권한을 실제로 만들 이름의 ARN 으로 시뮬레이션한다(2.0.32)."""
+    try:
+        from aws_edge import edge_name, global_acl_name  # type: ignore
+        from aws_rds import db_identifier, secret_name  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.aws_edge import edge_name, global_acl_name  # type: ignore
+        from core.aws_rds import db_identifier, secret_name  # type: ignore
+    out: list[tuple[list[str], list[str], Optional[list[dict[str, object]]]]] = []
+    edge = context.edge if context.edge != "none" else ("alb" if context.https else "none")
+    name = edge_name(context.ecs_service)
+    if edge != "none":
+        out += [
+            (["elasticloadbalancing:CreateLoadBalancer"],
+             [f"arn:{partition}:elasticloadbalancing:{region}:{account}:loadbalancer/app/{name}/0000000000000000"], None),
+            (["elasticloadbalancing:CreateTargetGroup"],
+             [f"arn:{partition}:elasticloadbalancing:{region}:{account}:targetgroup/{name}/0000000000000000"], None),
+        ]
+    if edge == "alb_waf" and not context.https:
+        out.append((["wafv2:CreateWebACL"], [f"arn:{partition}:wafv2:{region}:{account}:regional/webacl/{name}/0000"], None))
+    if context.https:
+        out += [
+            (["cloudfront:CreateDistribution"], ["*"], [{
+                "ContextKeyName": "aws:RequestTag/recoder:managed", "ContextKeyValues": ["true"], "ContextKeyType": "string"}]),
+            (["elasticloadbalancing:CreateRule"],
+             [f"arn:{partition}:elasticloadbalancing:{region}:{account}:listener/app/{name}/0000000000000000/0000000000000000"], None),
+        ]
+        if edge == "alb_waf":
+            out.append((["wafv2:CreateWebACL"],
+                        [f"arn:{partition}:wafv2:us-east-1:{account}:global/webacl/{global_acl_name(name, region)}/0000"], None))
+        if context.custom_domain:
+            out.append((["acm:RequestCertificate"], ["*"], [
+                {"ContextKeyName": "aws:RequestTag/recoder:managed", "ContextKeyValues": ["true"], "ContextKeyType": "string"},
+                {"ContextKeyName": "aws:RequestedRegion", "ContextKeyValues": ["us-east-1"], "ContextKeyType": "string"}]))
+    if context.database == "rds":
+        out += [
+            (["rds:CreateDBInstance"], [f"arn:{partition}:rds:{region}:{account}:db:{db_identifier(context.ecs_service)}"], None),
+            (["secretsmanager:CreateSecret"],
+             [f"arn:{partition}:secretsmanager:{region}:{account}:secret:{secret_name(context.ecs_service)}-AbCdEf"], None),
+        ]
+    return out
 
 
 def _inspect_deploy_permissions(
@@ -865,6 +926,8 @@ def _inspect_deploy_permissions(
         (["ec2:CreateSecurityGroup"], [vpc_arn, security_group_arn], None),
         (["ec2:AuthorizeSecurityGroupIngress"], [security_group_arn], None),
     ])
+    protection_actions = _protection_simulations(context, partition, account_id, simulation_region)
+    simulations.extend(protection_actions)
     deferred_actions: list[str] = []
 
     decisions: dict[str, list[str]] = {}
@@ -892,11 +955,22 @@ def _inspect_deploy_permissions(
         action for action in simulated_actions
         if any(decision.lower() != "allowed" for decision in decisions.get(action, ["implicitDeny"]))
     ]
+    advisory_protection = [
+        action for action in denied_actions
+        if action in OPTIONAL_PROTECTION_ACTIONS
+        or (action == "wafv2:CreateWebACL" and context.https and context.edge == "alb_waf")
+    ]
     report.missing_actions = [
         action for action in denied_actions
         if action not in OPTIONAL_COST_CONTROL_ACTIONS
         and action not in OPTIONAL_CONDITIONAL_ACTIONS
+        and action not in advisory_protection
     ]
+    if advisory_protection:
+        report.warnings.append(
+            "권한 템플릿이 옛 버전이라 일부 보호를 줄여 배포합니다(" + ", ".join(sorted(set(advisory_protection)))
+            + "): HTTPS 주소의 원본 잠금은 꺼지고, WAF 는 CloudFront 대신 로드밸런서에 붙습니다. "
+            "권한 템플릿 CloudFormation 스택을 최신으로 업데이트하면 다음 배포부터 켜집니다.")
     optional_cost_actions = [
         action for action in denied_actions
         if action in OPTIONAL_COST_CONTROL_ACTIONS
@@ -915,8 +989,14 @@ def _inspect_deploy_permissions(
     )
     if unresolved_assumed_role_path and failed_actions and not report.missing_actions:
         report.advisory_only = True
+    protection_set = {a for actions, _r, _c in protection_actions for a in actions}
     if report.missing_actions:
         report.warnings.append("ECS 배포에 필요한 권한 일부가 실제 배포 대상에서 허용되지 않았습니다.")
+    if protection_set & set(report.missing_actions):
+        report.warnings.append(
+            "켠 보호 기능(대규모 방패·HTTPS 주소·내 도메인·관리형 DB)에 필요한 권한이 없습니다: "
+            + ", ".join(sorted(protection_set & set(report.missing_actions)))
+            + ". 권한 템플릿 CloudFormation 스택을 최신 템플릿으로 업데이트하거나, 그 기능을 끄고 배포하세요.")
     if optional_cost_actions:
         report.warnings.append(
             "배포는 가능하지만 비용 최적화 설정 권한이 없습니다: "

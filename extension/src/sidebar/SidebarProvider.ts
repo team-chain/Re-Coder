@@ -247,6 +247,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     /** 요청-응답 메시지는 요청을 보낸 Webview로만 돌려보낸다. */
+    /** 정리·중지 뒤 목록 새로 고침. 실패해도 방금 결과 문장을 덮지 않는다(2.0.32). */
+    private async refreshCleanupPlan(requestWebview: vscode.Webview | undefined, region: string): Promise<void> {
+        try {
+            this.postMessageToWebview(requestWebview, 'aws.cleanup.planResult', await this._apiClient.cleanupPlan(region));
+        } catch (err) {
+            this.postMessageToWebview(requestWebview, 'aws.cleanup.refreshError', { message: String(err) });
+        }
+    }
+
     private postMessageToWebview(webview: vscode.Webview | undefined, type: string, payload: unknown): void {
         if (/^(canvas\.graph|canvas\.error|code\.|chat\.)/.test(type)) {
             const id = (payload as { requestId?: unknown; id?: unknown })?.requestId ?? (payload as { id?: unknown })?.id ?? '';
@@ -1083,13 +1092,40 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'aws.cleanup.regions': {
+                try {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.regionsResult', await this._apiClient.cleanupRegions());
+                } catch { /* 옛 코어 — 기본 리전 목록만 */ }
+                break;
+            }
+            case 'aws.cleanup.jobs': {
+                const p = (payload ?? {}) as { region?: string };
+                try {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.jobsResult', await this._apiClient.cleanupJobs(p.region ?? ''));
+                } catch { /* 옛 코어 — 작업 기록 없음 */ }
+                break;
+            }
+            case 'aws.cleanup.attach': {
+                //: 2.0.32 — 화면을 다시 열었을 때 이미 뒤에서 도는 정리에 다시 붙는다.
+                const p = (payload ?? {}) as { region?: string; jobId?: string };
+                try {
+                    if (!p.region || !p.jobId || !/^[0-9a-f]{12}$/.test(p.jobId)) { throw new Error('정리 작업 정보를 다시 불러오세요.'); }
+                    const result = await this._apiClient.cleanupAttach(p.jobId,
+                        progress => this.postMessageToWebview(requestWebview, 'aws.cleanup.progress', progress));
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.deleteResult', result);
+                    await this.refreshCleanupPlan(requestWebview, p.region);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
+                }
+                break;
+            }
             case 'aws.cleanup.stop': {
                 const p = (payload ?? {}) as { region?: string; cluster?: string; service?: string };
                 try {
                     if (!p.region || !p.cluster || !p.service) { throw new Error('중지할 서비스를 다시 고르세요.'); }
                     const result = await this._apiClient.cleanupStop(p.region, p.cluster, p.service);
                     this.postMessageToWebview(requestWebview, 'aws.cleanup.stopResult', result);
-                    this.postMessageToWebview(requestWebview, 'aws.cleanup.planResult', await this._apiClient.cleanupPlan(p.region));
+                    await this.refreshCleanupPlan(requestWebview, p.region);
                 } catch (err) {
                     this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
                 }
@@ -1103,7 +1139,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const result = await this._apiClient.cleanupDelete(p.region, ids,
                         progress => this.postMessageToWebview(requestWebview, 'aws.cleanup.progress', progress));
                     this.postMessageToWebview(requestWebview, 'aws.cleanup.deleteResult', result);
-                    this.postMessageToWebview(requestWebview, 'aws.cleanup.planResult', await this._apiClient.cleanupPlan(p.region));
+                    await this.refreshCleanupPlan(requestWebview, p.region);
                 } catch (err) {
                     this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
                 }

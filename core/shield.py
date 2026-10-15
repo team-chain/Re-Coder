@@ -69,10 +69,60 @@ def decide(*, enabled: bool, level: str, public_port: int, port_from_env: bool, 
         return ShieldDecision(False, lv, "정적 화면 이미지(nginx)는 이미 웹 서버라 방패를 붙이지 않습니다.")
     if not port_from_env:
         return ShieldDecision(False, lv, "앱이 포트를 PORT 환경변수로 받지 않고 코드에 고정해 두어, 앱을 방패 뒤 포트로 옮길 수 "
-                                         "없습니다. 서버 시작 코드를 `process.env.PORT` 를 쓰게 고치면 다음 배포부터 방패가 켜집니다.")
+                                         "없습니다. 서버 시작 코드를 `process.env.PORT`(Node)·`--port ${PORT:-8000}` 또는 `os.environ['PORT']`(파이썬)을 쓰게 "
+                                         "고치면 다음 배포부터 방패가 켜집니다.")
     if not 1 <= public_port <= 65534:
         return ShieldDecision(False, lv, f"포트 {public_port} 다음 번호를 앱 포트로 쓸 수 없습니다.")
     return ShieldDecision(True, lv, "", app_port=public_port + 1, public_port=public_port)
+
+
+_PY_PORT_ENV = re.compile(r"""(os\.environ\.get|os\.getenv|environ\.get)\(\s*['"]PORT['"]|os\.environ\[\s*['"]PORT['"]\s*\]""")
+
+
+def python_reads_port(workspace: str, dockerfile: str = "Dockerfile") -> bool:
+    """파이썬 앱이 실제로 PORT 환경변수로 포트를 정하는가(2.0.32).
+
+    방패는 앱을 PORT=공개 포트+1 로 옮긴다. `uvicorn … --port 8000` 처럼 시작 명령에 포트를 고정하면 PORT 를 무시해
+    앱과 nginx 가 같은 포트를 두고 다투고 태스크가 계속 교체된다 — 그래서 확실할 때만 켠다.
+      · 시작 명령(마지막 CMD/ENTRYPOINT)에 $PORT·${PORT 가 있으면 참
+      · `python 파일.py` 로 시작하고 그 파일이 os.environ/getenv 로 PORT 를 읽으면 참
+      · gunicorn 은 시작 명령에 --bind/-b 가 없으면 PORT 를 스스로 읽는다(gunicorn 20+) — 참
+    """
+    from pathlib import Path
+    root = Path(workspace)
+    try:
+        text = (root / dockerfile).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    start = ""
+    text = text.replace("\r\n", "\n")
+    workdirs = [w.rstrip("/") for w in re.findall(r"(?im)^\s*WORKDIR\s+(\S+)", text)]
+    for raw in text.replace("\\\n", " ").splitlines():
+        line = raw.strip()
+        if re.match(r"(?i)^(CMD|ENTRYPOINT)\b", line):
+            start = line if re.match(r"(?i)^CMD\b", line) or not start else start + " " + line
+    if not start:
+        return False
+    if re.search(r"\$\{?PORT\b", start):
+        return True
+    words = re.findall(r"""[^\s"',\[\]]+""", start)
+    if "gunicorn" in words and not any(w in ("--bind", "-b") or w.startswith("--bind=") for w in words):
+        return True
+    for w in words:
+        if w.endswith(".py"):
+            rel = w
+            for wd in workdirs:  # CMD ["python", "/app/main.py"] → 작업 폴더의 main.py
+                if wd and rel.startswith(wd + "/"):
+                    rel = rel[len(wd) + 1:]
+            rel = rel.lstrip("./")
+            candidates = [rel] + ["/".join(rel.split("/")[i:]) for i in range(1, rel.count("/") + 1)]
+            for cand in candidates:
+                try:
+                    src = (root / cand).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                return bool(_PY_PORT_ENV.search(src))
+    return False
 
 
 def _health_paths(path: str) -> list[str]:

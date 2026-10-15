@@ -652,7 +652,7 @@ def _apply_unified_diff(file_path: Path, patch: FilePatch) -> bool:
         return False
 
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_text(new_text, encoding="utf-8")
+    file_path.write_text(new_text, encoding="utf-8", newline="")  # nl 로 이미 맞춘 줄바꿈을 그대로(2.0.32)
     return True
 
 

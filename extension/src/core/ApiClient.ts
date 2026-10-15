@@ -45,7 +45,7 @@ export interface CleanupResult {
 
 /** 2.0.31 뒤에서 도는 정리 작업(GET /api/aws/cleanup/jobs/{id}). */
 export interface CleanupJob {
-    id: string; region: string; status: 'running' | 'done' | 'failed'; count: number;
+    id: string; region: string; status: 'running' | 'done' | 'failed' | 'interrupted'; count: number;
     progress: { done: number; total: number; current?: string };
     result: CleanupResult | null; error: string;
 }
@@ -76,7 +76,7 @@ export async function waitForCleanupJob(
         }
         if (job) {
             if (job.status === 'done' && job.result) { return job.result; }
-            if (job.status === 'failed') { throw new Error(job.error || 'AWS 리소스를 지우지 못했습니다'); }
+            if (job.status === 'failed' || job.status === 'interrupted') { throw new Error(job.error || 'AWS 리소스를 지우지 못했습니다'); }
             opts.onProgress?.(job.progress);
         }
         if (waited >= deadline) {
@@ -1245,6 +1245,11 @@ export class ApiClient {
         awsRegion?: string;
         taskExecutionRole?: string;
         taskRole?: string;
+        /** 2.0.32 — 켠 보호 기능의 권한도 함께 점검 */
+        edge?: string;
+        https?: boolean;
+        customDomain?: string;
+        database?: string;
     }): Promise<AwsStatus> {
         const resp = await this.request<AwsStatus>('POST', '/api/aws/permissions/check', {
             deployment_context: deploymentContext ? {
@@ -1255,6 +1260,10 @@ export class ApiClient {
                 aws_region: deploymentContext.awsRegion ?? '',
                 task_execution_role: deploymentContext.taskExecutionRole ?? '',
                 task_role: deploymentContext.taskRole ?? '',
+                edge: deploymentContext.edge ?? 'none',
+                https: deploymentContext.https ?? false,
+                custom_domain: deploymentContext.customDomain ?? '',
+                database: deploymentContext.database ?? 'task',
             } : undefined,
         }, false, 120000);  // IAM 시뮬레이션 여러 건 + AWS 재시도
         if (!resp.success || !resp.data) {
@@ -1605,8 +1614,8 @@ export class ApiClient {
     }
 
     /** GET /api/ops/alerts — 2.0.25 공격·장애 감지 알림(since 이후 새 것만). */
-    async listOpsAlerts(since = ''): Promise<{ alerts: OpsAlert[]; monitors: Array<Record<string, unknown>> }> {
-        const resp = await this.request<{ alerts: OpsAlert[]; monitors: Array<Record<string, unknown>> }>(
+    async listOpsAlerts(since = ''): Promise<{ alerts: OpsAlert[]; monitors: Array<Record<string, unknown>>; cursor_reset?: boolean }> {
+        const resp = await this.request<{ alerts: OpsAlert[]; monitors: Array<Record<string, unknown>>; cursor_reset?: boolean }>(
             'GET', `/api/ops/alerts${since ? `?since=${encodeURIComponent(since)}` : ''}`);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '알림을 불러오지 못했습니다'); }
         return resp.data;
@@ -1615,7 +1624,8 @@ export class ApiClient {
     /** POST /api/ops/alerts/{id}/act — 승인 카드에서 고른 대응만 적용(approved=false 면 닫기). */
     async actOpsAlert(alertId: string, action: string, value: unknown, approved: boolean): Promise<{ applied: boolean; message: string }> {
         const resp = await this.request<{ applied: boolean; message: string }>(
-            'POST', `/api/ops/alerts/${encodeURIComponent(alertId)}/act`, { action, value, approved }, false, 120000);
+            // 2.0.32 — 취약점 올리기는 폴더마다 npm 잠금 갱신(최대 4분)을 하므로 넉넉히 기다린다(시간 초과 뒤 다시 누르면 두 번 적용되던 것).
+            'POST', `/api/ops/alerts/${encodeURIComponent(alertId)}/act`, { action, value, approved }, false, 600000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '대응을 적용하지 못했습니다'); }
         return resp.data;
     }
@@ -1624,6 +1634,20 @@ export class ApiClient {
     async cleanupPlan(region: string, service = ''): Promise<CleanupPlan> {
         const resp = await this.request<CleanupPlan>('POST', '/api/aws/cleanup/plan', { region, service }, false, 120000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AWS 리소스 목록을 불러오지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** GET /api/aws/cleanup/regions — ReCoder 로 배포한 적 있는 리전(2.0.32). */
+    async cleanupRegions(): Promise<{ regions: string[] }> {
+        const resp = await this.request<{ regions: string[] }>('GET', '/api/aws/cleanup/regions');
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '리전 목록을 불러오지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** GET /api/aws/cleanup/jobs — 최근 정리 작업(진행 중·중단됨 확인, 2.0.32). */
+    async cleanupJobs(region: string): Promise<{ jobs: CleanupJob[] }> {
+        const resp = await this.request<{ jobs: CleanupJob[] }>('GET', `/api/aws/cleanup/jobs${region ? `?region=${encodeURIComponent(region)}` : ''}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '정리 작업 기록을 불러오지 못했습니다'); }
         return resp.data;
     }
 
@@ -1647,6 +1671,11 @@ export class ApiClient {
         if (Array.isArray(direct.results)) { return direct as CleanupResult; }
         const jobId = resp.data.id;
         if (!jobId) { throw new Error('정리 작업 번호를 받지 못했습니다 — 코어를 다시 시작한 뒤 시도하세요.'); }
+        return this.cleanupAttach(jobId, onProgress);
+    }
+
+    /** 2.0.32 — 뒤에서 도는 정리 작업이 끝날 때까지 본다(화면을 다시 열었을 때 다시 붙기). */
+    async cleanupAttach(jobId: string, onProgress?: (p: CleanupProgress) => void): Promise<CleanupResult> {
         return waitForCleanupJob(async () => {
             const r = await this.request<CleanupJob>('GET', `/api/aws/cleanup/jobs/${encodeURIComponent(jobId)}`, undefined, false, 30000);
             if (!r.success || !r.data) { throw new Error(r.error ?? '정리 진행 상황을 확인하지 못했습니다'); }
@@ -1723,20 +1752,6 @@ export class ApiClient {
             throw new Error(resp.error ?? 'git push 실패');
         }
         return resp.data;
-    }
-
-    /** GET /api/git/info — 현재 브랜치/remote 정보. */
-    async gitInfo(workspacePath: string): Promise<{
-        branch?: string;
-        remote_url?: string;
-        clean?: boolean;
-        ahead?: number;
-        behind?: number;
-        last_commit?: string;
-    }> {
-        const qs = new URLSearchParams({ workspace_path: workspacePath });
-        const resp = await this.request<object>('GET', `/api/git/info?${qs}`);
-        return resp.success && resp.data ? (resp.data as object) : {};
     }
 
     /** POST /api/github/repo — 새 GitHub 레포 생성 + 초기 push. */

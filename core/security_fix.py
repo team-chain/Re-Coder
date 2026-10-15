@@ -25,6 +25,10 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+try:
+    import proc_tools  # type: ignore
+except ImportError:  # pragma: no cover
+    from core import proc_tools  # type: ignore
 
 try:  # 패키지(core.*)·단독 실행 모두
     import build_readiness as br
@@ -1111,7 +1115,7 @@ def _run_post(root: Path, cwd: str, cmd: tuple[str, ...]) -> str:
     if not exe:
         return f"{' '.join(cmd)} 를 실행하지 못했습니다({cmd[0]} 없음) — {cwd or '프로젝트'} 폴더에서 직접 실행하세요."
     try:
-        r = subprocess.run([exe, *cmd[1:]], cwd=str(root / cwd), capture_output=True, text=True,
+        r = proc_tools.run([exe, *cmd[1:]], cwd=str(root / cwd), capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=600, shell=False)
     except (OSError, subprocess.SubprocessError) as exc:
         return f"{' '.join(cmd)} 실패: {exc}"

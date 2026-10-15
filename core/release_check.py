@@ -35,6 +35,8 @@ RUNTIME_IMPORTS = (
     'aws_edge', 'aws_cleanup', 'api.routes.aws_cleanup',
     'aws_cdn', 'aws_rds',
     'code_security', 'vuln_recheck', 'api.routes.security_checks',
+    #: 2.0.32 — 상태 파일 안전 쓰기, 시간 제한이 지켜지는 프로세스 실행(함수 안에서만 불러온다)
+    'state_io', 'proc_tools', 'dockerfile_guard', 'context_gate',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에

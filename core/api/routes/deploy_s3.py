@@ -585,7 +585,12 @@ async def deploy_s3_stream(request: S3DeployRequest) -> StreamingResponse:
         task = loop.create_task(_run())
         try:
             while True:
-                event = await queue.get()
+                try:
+                    #: 2.0.32 — 큰 파일 하나를 올리는 동안 아무것도 안 보내면 확장(fetch)이 5분 뒤 끊었다. 10초마다 심장박동.
+                    event = await asyncio.wait_for(queue.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    yield b": heartbeat\n\n"
+                    continue
                 if event is _SENTINEL:
                     break
                 yield _sse(event)

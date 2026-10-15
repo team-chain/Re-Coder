@@ -72,6 +72,15 @@ _DURATION_RE: re.Pattern[str] = re.compile(
 )
 
 
+
+def _port_publish(host_port, container_port) -> str:
+    try:
+        from deployment_inputs import port_publish  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.deployment_inputs import port_publish  # type: ignore
+    return port_publish(host_port, container_port)
+
+
 def parse_duration(s: str | None, default: float = 60.0) -> float:
     """``"5m"`` / ``"30s"`` / ``"100ms"`` / ``"1h"`` → seconds (float).
 
@@ -244,7 +253,7 @@ def temporary_container(
         name_prefix: 임시 컨테이너 이름 prefix
     """
     name = f"{name_prefix}{int(time.time() * 1000)}"
-    cmd = [cli, "run", "-d", "--name", name, "-p", f"{host_port}:{app_port}"]
+    cmd = [cli, "run", "-d", "--name", name, "-p", _port_publish(host_port, app_port)]
     for k, v in (env or {}).items():
         cmd.extend(["-e", f"{k}={v}"])
     cmd.append(image_ref)

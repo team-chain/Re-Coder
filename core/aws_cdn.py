@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -42,8 +43,24 @@ ORIGIN_HEADER = "X-Recoder-Origin"
 COST_NOTE = "CloudFront 는 나가는 데이터·요청 수만큼 요금이 나옵니다(작은 앱은 매달 몇 달러 이하, 1년 무료 사용량 있음)."
 
 
-def comment_for(name: str) -> str:
-    return f"recoder:{name}"
+def comment_for(name: str, region: str = "") -> str:
+    """배포를 찾는 표시. 2.0.32 부터 리전을 붙인다 — 같은 서비스 이름을 두 리전에 배포하면 한 배포를 서로 덮어썼다."""
+    return f"recoder:{name}@{region}" if region else f"recoder:{name}"
+
+
+def origin_region(domain: str) -> str:
+    """ALB 주소(xxx.<리전>.elb.amazonaws.com)의 리전."""
+    m = re.search(r"\.([a-z]{2}(?:-gov)?-[a-z]+-\d)\.elb\.amazonaws\.com\.?$", str(domain or ""))
+    return m.group(1) if m else ""
+
+
+def item_region(item: dict) -> str:
+    """목록 항목(list_distributions)의 리전 — 표시(@리전) 또는 원본 ALB 주소에서."""
+    comment = str(item.get("Comment", ""))
+    if "@" in comment:
+        return comment.rsplit("@", 1)[-1]
+    origins = (item.get("Origins") or {}).get("Items") or []
+    return origin_region(origins[0].get("DomainName", "")) if origins else ""
 
 
 @dataclass
@@ -75,16 +92,22 @@ def cloudfront_prefix_list(ec2: Any) -> str:
     return str(lists[0]["PrefixListId"])
 
 
-def _find(cloudfront: Any, comment: str) -> Optional[dict]:
+def _find(cloudfront: Any, comment: str, legacy: str = "", region: str = "") -> Optional[dict]:
+    """표시(comment)가 같은 배포. 없으면 옛 표시(legacy, 리전 없음) 중 원본 ALB 가 같은 리전인 것."""
     marker = ""
+    fallback: Optional[dict] = None
     while True:
         kwargs = {"Marker": marker} if marker else {}
         page = cloudfront.list_distributions(**kwargs).get("DistributionList", {})
         for item in page.get("Items", []) or []:
             if item.get("Comment") == comment:
                 return item
+            c = str(item.get("Comment", ""))
+            if legacy and fallback is None and (c == legacy or (not region and c.startswith(legacy + "@"))) and \
+                    (not region or item_region(item) in ("", region)):
+                fallback = item
         if not page.get("IsTruncated"):
-            return None
+            return fallback
         marker = page.get("NextMarker", "")
 
 
@@ -102,10 +125,10 @@ def new_origin_secret() -> str:
 
 
 def _config(name: str, origin: str, *, alias: str = "", certificate_arn: str = "", origin_secret: str = "",
-            web_acl_id: str = "") -> dict:
+            web_acl_id: str = "", region: str = "") -> dict:
     cfg: dict = {
-        "CallerReference": f"{name}-{int(time.time())}",
-        "Comment": comment_for(name),
+        "CallerReference": f"{name}-{int(time.time())}-{secrets.token_hex(4)}",
+        "Comment": comment_for(name, region),
         "Enabled": True,
         "Origins": {"Quantity": 1, "Items": [{
             "Id": "recoder-alb", "DomainName": origin,
@@ -137,17 +160,19 @@ def _config(name: str, origin: str, *, alias: str = "", certificate_arn: str = "
 
 
 def ensure_distribution(cloudfront: Any, *, name: str, origin: str, tags: Optional[dict] = None,
-                        alias: str = "", certificate_arn: str = "", web_acl_id: Optional[str] = None) -> CdnResult:
+                        alias: str = "", certificate_arn: str = "", web_acl_id: Optional[str] = None,
+                        region: str = "") -> CdnResult:
     """ALB 를 원본으로 하는 배포를 확보한다. 있으면 원본·도메인·원본 잠금 머리글·WAF 만 맞춘다.
 
     web_acl_id: CloudFront 범위 웹 ACL ARN, "" 은 떼기, None 은 그대로 두기."""
-    existing = _find(cloudfront, comment_for(name))
+    region = region or origin_region(origin)
+    existing = _find(cloudfront, comment_for(name, region), legacy=comment_for(name), region=region)
     if existing is None:
         secret = new_origin_secret()
         try:
             dist = cloudfront.create_distribution_with_tags(DistributionConfigWithTags={
                 "DistributionConfig": _config(name, origin, alias=alias, certificate_arn=certificate_arn,
-                                              origin_secret=secret, web_acl_id=web_acl_id or ""),
+                                              origin_secret=secret, web_acl_id=web_acl_id or "", region=region),
                 "Tags": {"Items": [{"Key": k, "Value": v} for k, v in (tags or {}).items()]},
             })["Distribution"]
         except Exception as exc:  # noqa: BLE001
@@ -165,8 +190,11 @@ def ensure_distribution(cloudfront: Any, *, name: str, origin: str, tags: Option
     acl_before = str(cfg.get("WebACLId") or "")
     secret = secret or new_origin_secret()
     want = _config(name, origin, alias=alias, certificate_arn=certificate_arn, origin_secret=secret,
-                   web_acl_id=web_acl_id or "")
+                   web_acl_id=web_acl_id or "", region=region)
     changed = False
+    if region and cfg.get("Comment") != want["Comment"]:
+        cfg["Comment"] = want["Comment"]  # 옛 표시(리전 없음)를 이번에 리전 표시로 바꾼다
+        changed = True
     first = cfg["Origins"]["Items"][0]
     if first.get("DomainName") != origin or _origin_header(cfg) != secret:
         # 원본을 통째로 맞춘다(사람이 더한 다른 머리글은 남긴다).
@@ -207,9 +235,11 @@ def _zone_for(route53: Any, domain: str) -> Optional[dict]:
     parts = domain.rstrip(".").split(".")
     for i in range(len(parts) - 1):
         candidate = ".".join(parts[i:]) + "."
-        zones = route53.list_hosted_zones_by_name(DNSName=candidate, MaxItems="1").get("HostedZones", [])
-        if zones and zones[0]["Name"] == candidate and not zones[0].get("Config", {}).get("PrivateZone"):
-            return zones[0]
+        # 같은 이름의 사설 영역이 공개 영역보다 먼저 나올 수 있다 — 몇 개를 받아 공개 영역을 고른다.
+        zones = route53.list_hosted_zones_by_name(DNSName=candidate, MaxItems="10").get("HostedZones", [])
+        public = [z for z in zones if z["Name"] == candidate and not z.get("Config", {}).get("PrivateZone")]
+        if public:
+            return public[0]
     return None
 
 
@@ -236,15 +266,20 @@ def ensure_certificate(acm: Any, route53: Any, domain: str, *, tags: Optional[di
     """`acm` 은 반드시 us-east-1 클라이언트(CloudFront 인증서 규칙). 발급을 기다리지 않는다."""
     arn = ""
     for status in (["ISSUED"], ["PENDING_VALIDATION"]):
-        for cert in acm.list_certificates(CertificateStatuses=status).get("CertificateSummaryList", []):
-            if cert.get("DomainName") == domain:
-                arn = str(cert["CertificateArn"])
+        token = ""
+        while not arn:  # 인증서가 많으면 여러 쪽 — 첫 쪽만 보면 같은 도메인 인증서를 또 요청한다
+            page = acm.list_certificates(CertificateStatuses=status, **({"NextToken": token} if token else {}))
+            arn = next((str(c["CertificateArn"]) for c in page.get("CertificateSummaryList", [])
+                        if c.get("DomainName") == domain), "")
+            token = page.get("NextToken") or ""
+            if not token:
                 break
         if arn:
             break
     if not arn:
+        tag_list = [{"Key": k, "Value": v} for k, v in (tags or {}).items()]
         arn = str(acm.request_certificate(DomainName=domain, ValidationMethod="DNS",
-                                          Tags=[{"Key": k, "Value": v} for k, v in (tags or {}).items()],
+                                          **({"Tags": tag_list} if tag_list else {}),
                                           # 도메인마다 다른 값(영문·숫자 32자) — 기호만 지우면 a-b.com 과 ab.com 이 겹친다.
                                           IdempotencyToken=hashlib.sha1(domain.lower().encode("utf-8")).hexdigest()[:32])["CertificateArn"])
     record = None

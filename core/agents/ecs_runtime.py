@@ -46,6 +46,9 @@ _IMAGES = {
 _MIN_MEMORY = {"postgres": 1024, "redis": 1024, "mongodb": 2048, "payment": 1024}
 #: 태스크 정의 전체는 64KiB 가 한도다 — 초기화 SQL 을 환경변수로 넣을 수 있는 크기.
 _INIT_SQL_LIMIT = 24_000
+#: 줄이기 시작하는 크기 · 보조 컨테이너를 빼는 크기(방패 컨테이너 몫 4KB 를 남긴다).
+_TRIM_AT = 56_000
+_DROP_AT = 59_000
 _HEALTH = {
     "postgres": ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U recoder -d app || exit 1"],
     "redis": ["CMD-SHELL", "redis-cli -h 127.0.0.1 ping | grep -q PONG || exit 1"],
@@ -409,18 +412,23 @@ def apply(task_def: dict, app_container: str, runtime: Optional[RuntimePlan], im
         containers.append(item)
     #: 태스크 정의는 64KiB 가 한도다 — 넘으면 이미지를 올린 뒤에 등록이 실패한다. 시드 컨테이너에는 DB·시드에 필요한 값만 남기고,
     #: 그래도 크면 시드 컨테이너를 뺀다(검토 2.0.15: 큰 초기화 SQL + 사용자 환경변수 수십 개로 한도에 닿음).
-    if len(json.dumps(task_def)) > 60_000:
+    #: 2.0.32 — 이 뒤에 방패(nginx) 컨테이너가 3~4KB 를 더한다. 그만큼 여유를 두고 줄인다.
+    if len(json.dumps(task_def)) > _TRIM_AT:
         keep = re.compile(r"DATABASE|^PG|^DB_|POSTGRES|MONGO|REDIS|SEED|NODE_ENV|PAYMENT|STRIPE|JWT|ADMIN|PORT")
         for item in containers:
             if item.get("name") == "recoder-seed":
                 item["environment"] = [e for e in item.get("environment", []) if keep.search(e.get("name", ""))]
-    if len(json.dumps(task_def)) > 63_000:
+    if len(json.dumps(task_def)) > _DROP_AT:
         task_def["containerDefinitions"] = containers = [c for c in containers if c.get("name") != "recoder-seed"]
-    if len(json.dumps(task_def)) > 63_000:
+    if len(json.dumps(task_def)) > _DROP_AT:
         #: 그래도 크면 초기화 SQL 을 뺀다(앱이 스스로 테이블을 만들지 않으면 조회가 실패하지만, 등록 자체가 거부되는 것보다 낫다).
+        #: 관리형 DB(RDS)의 초기화 컨테이너는 SQL 이 없으면 할 일이 없으니 통째로 뺀다.
         for c in containers:
-            if c.get("name") == "recoder-postgres":
+            if c.get("name") in ("recoder-postgres", "recoder-db-init"):
                 c["environment"] = [e for e in c.get("environment", []) if e.get("name") != "RECODER_INIT_SQL_B64"]
+        if any(c.get("name") == "recoder-db-init" for c in containers):
+            task_def["containerDefinitions"] = containers = [c for c in containers if c.get("name") != "recoder-db-init"]
+            app["dependsOn"] = [d for d in app.get("dependsOn", []) if d.get("containerName") != "recoder-db-init"]
     #: 앱은 시드가 **끝난 뒤** 뜬다(실기기 2.0.20 ECS: 시드 컨테이너와 앱이 동시에 떠서 둘 다 데모 계정을 넣다가
     #: 앱이 unique 위반으로 기동 중 종료 → 태스크가 계속 교체돼 주소가 응답하지 않음). COMPLETE 라 시드가 실패해도 앱은 뜬다.
     if any(c.get("name") == "recoder-seed" for c in containers):

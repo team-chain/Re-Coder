@@ -10,7 +10,7 @@ import * as vscode from 'vscode';
 import type { OpsAlert } from '../core/ApiClient';
 
 export interface AlertSource {
-    listOpsAlerts(since?: string): Promise<{ alerts: OpsAlert[] }>;
+    listOpsAlerts(since?: string): Promise<{ alerts: OpsAlert[]; cursor_reset?: boolean }>;
 }
 export interface AlertSink {
     /** 디스코드 등 — 설정돼 있지 않으면 조용히 넘어간다. */
@@ -58,15 +58,21 @@ export class AlertWatcher implements vscode.Disposable {
         try {
             const last = this.state.get<string>(LAST_KEY, '');
             let alerts: OpsAlert[];
+            let reset = false;
             try {
-                alerts = (await this.source.listOpsAlerts(last)).alerts ?? [];
+                const resp = await this.source.listOpsAlerts(last);
+                alerts = resp.alerts ?? [];
+                reset = resp.cursor_reset === true;
             } catch {
                 return 0; // 코어가 아직 안 떴거나 재시작 중 — 다음 번에
             }
             if (!alerts.length) { return 0; }
             await this.state.update(LAST_KEY, alerts[alerts.length - 1].id);
             if (!last) { return 0; } // 처음 켤 때 쌓여 있던 것은 화면의 목록에서 본다
-            const fresh = alerts.filter(a => (a.status ?? 'open') === 'open');
+            // 2.0.32 — 기억한 마지막 알림을 코어가 모르면(목록이 잘림·상태 초기화) 전체가 오므로, 최근 것만 새 알림으로 띄운다.
+            const recent = Date.now() - 2 * this.intervalMs - 60_000;
+            const fresh = alerts.filter(a => (a.status ?? 'open') === 'open'
+                && (!reset || (Date.parse(a.at) || 0) >= recent));
             for (const a of fresh) {
                 const { title, detail } = alertMessage(a);
                 const show = a.severity === 'critical' ? this.window.showErrorMessage : this.window.showWarningMessage;

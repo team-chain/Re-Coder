@@ -50,7 +50,12 @@ _RATE_LIBS = ("express-rate-limit", "rate-limiter-flexible", "express-slow-down"
 _PUBLIC_PATH = re.compile(r"(?i)(login|log-in|signin|sign-in|signup|sign-up|register|auth|token|refresh|logout|password|reset|verify|"
                           r"webhook|health|contact|subscribe|newsletter|checkout/session|callback|oauth)")
 _LOGIN_PATH = re.compile(r"(?i)(login|log-in|signin|sign-in|/auth/?$|/session)")
-_SIGNUP_PATH = re.compile(r"(?i)(signup|sign-up|register|join)")
+#: 2.0.32 — `join`(방 참가·대기 명단), `/:id/register`(행사 신청)는 계정 가입이 아니다.
+_SIGNUP_PATH = re.compile(r"(?i)^(?!.*/:[^/]+/(register|signup)).*(signup|sign-up|register)")
+#: 비밀번호를 직접 저장하지 않는 외부 인증(해시는 그쪽이 한다).
+_EXTERNAL_AUTH = re.compile(r"(?i)supabase\.auth|createUserWithEmailAndPassword|firebase/auth|firebase-admin|@clerk/|"
+                            r"amazon-cognito|aws-amplify|CognitoIdentity|next-auth|@auth/|auth0|passport-(google|github|oauth)|"
+                            r"lucia|better-auth|@kinde-oss")
 
 
 @dataclass
@@ -141,10 +146,27 @@ def _request_names(text: str) -> set[str]:
     return names
 
 
+#: 사용자 입력이 섞여도 SQL 로는 안전한 식(2.0.32): 리터럴 두 개 중 고르기, 숫자 변환, 자리표시자 목록 만들기.
+_SAFE_EXPR = (
+    re.compile(r"""^[^`]*\?\s*(['"])[^'"]*\1\s*:\s*(['"])[^'"]*\2\s*$""", re.S),
+    re.compile(r"^\s*(Number|parseInt|parseFloat|Math\.(floor|ceil|round|min|max|abs)|BigInt)\s*\("),
+    re.compile(r"""\.map\([^)]*\)?.*['"`]\s*(\$|\?)""", re.S),
+)
+
+
+def _safe_sql_expr(expr: str) -> bool:
+    e = expr.strip()
+    if any(rx.search(e) for rx in _SAFE_EXPR[:2]):
+        return True
+    return ".map(" in e and ".join(" in e and bool(_SAFE_EXPR[2].search(e))
+
+
 def _sql(path: str, text: str) -> list[Finding]:
     out: list[Finding] = []
-    user = _request_names(text)
     for m in _SQL_CALL.finditer(text):
+        #: 요청에서 꺼낸 이름은 이 호출 앞(같은 처리 함수 근처)에서만 찾는다 — 다른 핸들러의 `const { table } = req.query`
+        #: 때문에 마이그레이션 루프의 `${table}` 이 오탐되던 것(2.0.32).
+        user = _request_names(text[max(0, m.start() - 2500):m.start()])
         arg = m.end()
         template = _template_at(text, arg)
         exprs: list[str] = []
@@ -164,8 +186,11 @@ def _sql(path: str, text: str) -> list[Finding]:
         if m.group(1) in ("$queryRawUnsafe", "$executeRawUnsafe", "unsafe"):
             tainted = True
         else:
-            tainted = any("req." in e or any(re.search(rf"(?<![\w$.]){re.escape(n)}(?![\w$])", e) for n in user) for e in exprs)
-        placeholder_only = all(re.fullmatch(r"\s*[\w$.]+\s*", e) and not tainted for e in exprs) and not concat
+            tainted = any(not _safe_sql_expr(e) and
+                          ("req." in e or any(re.search(rf"(?<![\w$.]){re.escape(n)}(?![\w$])", e) for n in user))
+                          for e in exprs)
+        placeholder_only = all((re.fullmatch(r"\s*[\w$.]+\s*", e) or _safe_sql_expr(e)) and not tainted
+                               for e in exprs) and not concat
         out.append(Finding(
             "SQL_INJECTION", path, _line(text, m.start()),
             ("사용자 입력이 SQL 문자열에 그대로 들어갑니다" if tainted else
@@ -189,7 +214,7 @@ def _jwt(path: str, text: str) -> list[Finding]:
         if len(args) < 2:
             continue
         secret = args[1].strip()
-        if re.fullmatch(r"""(['"`])[^'"`]{1,200}\1""", secret):
+        if re.fullmatch(r"""(['"`])[^'"`]{1,200}\1""", secret) and "${" not in secret:
             out.append(Finding("JWT_UNSAFE", path, _line(text, m.start()), "JWT 비밀값이 코드에 적혀 있습니다 — 누구나 토큰을 만들 수 있습니다.",
                                "high", precise=True))
         elif re.search(r"""\|\|\s*(['"`])[^'"`]+\1""", secret) or re.search(r"""\?\?\s*(['"`])[^'"`]+\1""", secret):
@@ -357,8 +382,16 @@ def scan(files: dict[str, str]) -> tuple[list[Finding], dict[str, bool]]:
     if signup or stores_password:
         applicable["PLAINTEXT_PASSWORD"] = True
         hashed = any(d in deps for d in _HASH_LIBS) or re.search(
-            r"\b(bcrypt|argon2|scrypt(Sync)?|pbkdf2(Sync)?)\b", everything)
-        if not hashed:
+            r"\b(bcrypt|argon2|scrypt(Sync)?|pbkdf2(Sync)?)\b", everything) or _EXTERNAL_AUTH.search(everything) \
+            or any(d.startswith(("@supabase/", "firebase", "@clerk/", "next-auth", "@auth/", "aws-amplify")) for d in deps)
+        #: 2.0.32 — 오류(교정 루프 강제)는 비밀번호를 **저장하는** 코드를 봤을 때만. 가입 경로만 있으면 확인 권고(중간).
+        if not hashed and not stores_password:
+            where = next((r for r in routes if r["method"] == "POST" and _SIGNUP_PATH.search(r["sub"])), None)
+            if where is not None and re.search(r"(?i)password", where["body"]):
+                findings.append(Finding("PLAINTEXT_PASSWORD", where["file"], where["line"],
+                                        "가입 처리에서 비밀번호를 해시하는 코드를 찾지 못했습니다 — 저장 전에 bcrypt·argon2 로 해시하세요.",
+                                        "medium"))
+        elif not hashed:
             where = next((r for r in routes if r["method"] == "POST" and _SIGNUP_PATH.search(r["sub"])), None)
             findings.append(Finding("PLAINTEXT_PASSWORD", where["file"] if where else next(iter(clean), ""),
                                     where["line"] if where else 1,

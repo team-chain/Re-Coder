@@ -108,14 +108,14 @@ def test_https_with_waf_puts_the_web_acl_on_cloudfront_and_moves_it_off_the_alb(
     assert aws_edge.find_web_acl(aws["wafv2"], edge.name) is None
     assert any("CloudFront" in v for k, v in rec.provisioned.items() if k.startswith("domain_note_"))
     assert "CloudFront" in rec.provisioned["waf"]
-    acl = aws["wafv2_global"].get_web_acl(Name=edge.name, Scope="CLOUDFRONT",
-                                          Id=aws_edge.find_web_acl(aws["wafv2_global"], edge.name, "CLOUDFRONT")["Id"])
+    acl = aws["wafv2_global"].get_web_acl(Name=aws_edge.global_acl_name(edge.name, REGION), Scope="CLOUDFRONT",
+                                          Id=aws_edge.find_web_acl(aws["wafv2_global"], aws_edge.global_acl_name(edge.name, REGION), "CLOUDFRONT")["Id"])
     assert aws_edge.rate_of(acl["WebACL"]["Rules"]) == (req.waf_rate_limit, req.waf_window)
     # WAF 를 끄면 CloudFront 에서 떼고 웹 ACL 도 지운다
     agent, req, rec = _provision(aws, tmp_path, edge="alb", edge_cost_approved=True, https=True)
     dist = aws["cloudfront"].get_distribution_config(Id=cdn.distribution_id)["DistributionConfig"]
     assert dist["WebACLId"] == ""
-    assert aws_edge.find_web_acl(aws["wafv2_global"], edge.name, "CLOUDFRONT") is None
+    assert aws_edge.find_web_acl(aws["wafv2_global"], aws_edge.global_acl_name(edge.name, REGION), "CLOUDFRONT") is None
 
 
 def test_global_waf_permission_error_is_a_readable_infra_error(aws, tmp_path, monkeypatch):
@@ -150,7 +150,7 @@ def test_regional_waf_stays_until_the_cloudfront_waf_has_spread(aws, tmp_path, m
     acl, _ = aws_edge.ensure_web_acl(aws["wafv2"], edge.name, rate_limit=2000, window=300, tags=None)
     aws_edge.associate(aws["wafv2"], acl, edge.alb_arn, sleep=NOSLEEP)
     real_find = aws_cdn._find
-    monkeypatch.setattr(aws_cdn, "_find", lambda cf, c: {**real_find(cf, c), "Status": "InProgress"})
+    monkeypatch.setattr(aws_cdn, "_find", lambda cf, c, **kw: {**real_find(cf, c, **kw), "Status": "InProgress"})
     agent, req, rec = _provision(aws, tmp_path, edge="alb_waf", edge_cost_approved=True, https=True)
     assert aws_edge.find_web_acl(aws["wafv2"], edge.name) is not None          # 아직 뗄 때가 아님
     assert any("다음 배포에서 뗍니다" in v for k, v in rec.provisioned.items() if k.startswith("domain_note_"))
@@ -597,7 +597,7 @@ def test_cloudfront_waf_listing_denied_is_quiet_without_https(monkeypatch):
 def test_header_not_live_while_distribution_is_in_progress(aws, monkeypatch):
     first = aws_cdn.ensure_distribution(aws["cloudfront"], name="recoder-shop-1a2b", origin="lb.example.com")
     real_find = aws_cdn._find
-    monkeypatch.setattr(aws_cdn, "_find", lambda cf, c: {**real_find(cf, c), "Status": "InProgress"})
+    monkeypatch.setattr(aws_cdn, "_find", lambda cf, c, **kw: {**real_find(cf, c, **kw), "Status": "InProgress"})
     again = aws_cdn.ensure_distribution(aws["cloudfront"], name="recoder-shop-1a2b", origin="lb.example.com")
     assert again.origin_secret == first.origin_secret and not again.origin_secret_live
 

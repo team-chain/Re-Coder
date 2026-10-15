@@ -120,6 +120,10 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "logs:GetQueryResults":         "AWS 가 리소스 단위 제한 미지원(쿼리 ID 로만 읽는 결과)",
         # 2.0.26 대규모 방패·리소스 정리 — 읽기 전용 목록, 리전 조건으로 좁혔다
         "elasticloadbalancing:DescribeListeners": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "acm:RequestCertificate":       "AWS 가 리소스 단위 제한 미지원 — us-east-1·recoder:managed 요청 태그 조건으로 좁혔다(2.0.32)",
+        "ec2:DescribeInternetGateways":  "AWS 가 리소스 단위 제한 미지원",
+        "ec2:DescribeAccountAttributes": "AWS 가 리소스 단위 제한 미지원",
+        "ec2:DescribeAddresses":         "AWS 가 리소스 단위 제한 미지원",
         "elasticloadbalancing:DescribeRules": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다(2.0.31 원본 잠금)",
         "elasticloadbalancing:DescribeTags": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "wafv2:ListWebACLs":            "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
@@ -258,6 +262,13 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "ec2:DescribeInternetGateways":
+        "aws_edge.ensure_edge 의 create_load_balancer — ELB 가 인터넷용 ALB 를 만들 때 호출자 권한으로 VPC 의 인터넷 "
+        "게이트웨이를 확인한다(우리 코드의 호출이 아니라 기록에 안 보인다, ElasticLoadBalancingFullAccess 와 같은 읽기 권한)",
+    "ec2:DescribeAccountAttributes":
+        "같은 이유 — create_load_balancer 때 ELB 가 계정 속성(EC2-VPC)을 확인한다",
+    "ec2:DescribeAddresses":
+        "같은 이유 — create_load_balancer/set_subnets 때 ELB 가 주소 할당을 확인한다",
     "cloudfront:TagResource":
         "aws_cdn.ensure_distribution 의 create_distribution_with_tags — 태그는 TagResource 로도 인가되지만 호출은 하나뿐",
     "acm:AddTagsToCertificate":
@@ -1958,6 +1969,9 @@ def runtime_actions() -> set[str]:
 
     recorder = ac.Recorder()
     recorder.install()
+    from tests.aws_pattern_guard import PatternGuard
+    guard = PatternGuard().install()
+    _PATTERN_PROBLEMS.clear()
     try:
         with mock_aws():
             region = "us-east-1"
@@ -2154,7 +2168,12 @@ def runtime_actions() -> set[str]:
             aws_cdn.point_domain(r53, cert.zone_id or "Z1", "shop.example.com", cdn.domain)
             db = aws_rds.start(cleanup_clients["rds"], ec2, cleanup_clients["secretsmanager"],
                                service="recoder-probe-svc", vpc_id=net.vpc_id, task_security_groups=[sg], tags=tags)
-            ready = aws_rds.wait(cleanup_clients["rds"], db.identifier, sleep=lambda _s: None)
+            recorder.uninstall()
+            try:
+                boto3.client("rds", region_name=region).stop_db_instance(DBInstanceIdentifier=db.identifier)
+            finally:
+                recorder.install()
+            ready = aws_rds.wait(cleanup_clients["rds"], db.identifier, sleep=lambda _s: None)   # 멈춘 DB 켜기 경로
             aws_rds.store_connection(cleanup_clients["secretsmanager"], db.secret_arn,
                                      aws_rds.connection(ready["Endpoint"], db.password, ["DATABASE_URL"]))
             aws_rds.start(cleanup_clients["rds"], ec2, cleanup_clients["secretsmanager"],    # 다시 사용 경로
@@ -2173,7 +2192,11 @@ def runtime_actions() -> set[str]:
         return recorder.actions()
     finally:
         recorder.uninstall()
+        guard.uninstall()
+        _PATTERN_PROBLEMS.extend(guard.found)
 
+
+_PATTERN_PROBLEMS: list[str] = []
 
 #: 런타임 기록이 **반드시** 담고 있어야 하는 액션.
 #: 이게 없으면 기록기가 고장 났거나 픽스처가 배포 경로를 안 도는 것인데,
@@ -2240,7 +2263,15 @@ RUNTIME_EVIDENCE_FLOOR = {
     "secretsmanager:DescribeSecret",
     "secretsmanager:RestoreSecret",
     "route53:ListResourceRecordSets",
+    # 2.0.32
+    "rds:StartDBInstance",
 }
+
+
+def test_runtime_calls_use_values_aws_accepts(runtime_actions):
+    """2.0.32 — 배포·정리 경로의 모든 요청 값이 AWS 서비스 규칙(pattern·길이·허용 값)에 맞는다(moto 는 검사하지 않음)."""
+    assert runtime_actions
+    assert not _PATTERN_PROBLEMS, "\n".join(_PATTERN_PROBLEMS[:20])
 
 
 def test_runtime_recorder_actually_sees_the_deploy_path(runtime_actions):

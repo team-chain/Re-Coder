@@ -47,7 +47,7 @@ def test_prompt_marks_files_as_data_and_reports_what_was_removed():
 
 def test_generation_result_carries_prompt_guard():
     src = (CORE / "code_agent.py").read_text(encoding="utf-8")
-    assert '"prompt_guard": guarded[:20]' in src and "_scrub_context(open_file, prior_files, context_files, context_secrets, guarded)" in src
+    assert '"prompt_guard": [{k: v for k, v in g.items() if k != \"raw\"} for g in guarded[:20]]' in src and "_scrub_context(open_file, prior_files, context_files, context_secrets, guarded)" in src
 
 
 # ── ASI02·05 Dockerfile ─────────────────────────────────────────────────

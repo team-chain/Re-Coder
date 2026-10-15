@@ -164,15 +164,33 @@ export function needsBuild(workspace: string, project: FrontendProject): boolean
 
 export interface BuildOutcome { ok: boolean; via: 'npm' | 'docker'; output: string }
 
-type Runner = (command: string, cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<{ code: number | null; output: string }>;
+/** 문자열은 셸로(npm 처럼 PATH·.cmd 를 찾아야 하는 고정 명령), 배열은 셸 없이(사용자 경로가 들어가는 명령) 실행한다. */
+type Runner = (command: string | string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<{ code: number | null; output: string }>;
+
+/** 셸·npm 이 띄운 자식까지 끝낸다(2.0.32 — 셸만 죽여 시간 제한이 듣지 않던 것). */
+function killTree(child: cp.ChildProcess): void {
+    if (!child.pid) { return; }
+    try {
+        if (process.platform === 'win32') {
+            cp.execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+        } else {
+            process.kill(-child.pid, 'SIGKILL');
+        }
+    } catch {
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+}
 
 const run: Runner = (command, cwd, env, timeoutMs) => new Promise(resolve => {
-    const child = cp.spawn(command, { cwd, env, shell: true, windowsHide: true });
+    const detached = process.platform !== 'win32'; // 프로세스 그룹으로 묶어 한 번에 끝낸다
+    const child = Array.isArray(command)
+        ? cp.spawn(command[0], command.slice(1), { cwd, env, shell: false, windowsHide: true, detached })
+        : cp.spawn(command, { cwd, env, shell: true, windowsHide: true, detached });
     let output = '';
     const keep = (chunk: Buffer) => { output = (output + chunk.toString('utf-8')).slice(-20000); };
     child.stdout?.on('data', keep);
     child.stderr?.on('data', keep);
-    const timer = setTimeout(() => { output += `\n시간 초과(${Math.round(timeoutMs / 60000)}분)로 중단했습니다.`; child.kill(); }, timeoutMs);
+    const timer = setTimeout(() => { output += `\n시간 초과(${Math.round(timeoutMs / 60000)}분)로 중단했습니다.`; killTree(child); }, timeoutMs);
     child.on('error', err => { clearTimeout(timer); resolve({ code: -1, output: `${output}\n${err.message}` }); });
     child.on('close', code => { clearTimeout(timer); resolve({ code, output }); });
 });
@@ -215,10 +233,23 @@ export async function buildFrontend(
     onProgress(`${where} 빌드 중 (Docker · ${project.label}) — 처음에는 몇 분 걸릴 수 있습니다`);
     //: node_modules 는 컨테이너 안에만 둔다(익명 볼륨). 리눅스용 바이너리가 사용자 폴더에 섞이면
     //: PC 에서 개발 서버를 띄울 때 깨진다.
-    const mount = cwd.replace(/"/g, '');
-    const script = `if [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; else npm install --no-audit --no-fund; fi && npm run ${buildScript(project)}`;
+    //: 2.0.32 — 셸 없이 인자 배열로 넘긴다(폴더 이름의 $·`·%VAR% 가 PC 셸에서 풀리지 않게). 리눅스의 Docker 는 root 로 돌아
+    //: 빌드 결과(dist)가 root 소유가 되므로, 끝에 사용자 소유로 돌려놓는다.
+    const outRel = path.relative(cwd, path.join(workspace, project.outDir)).split(path.sep).join('/') || 'dist';
+    //: rootless Docker·Podman 은 컨테이너의 root 가 이미 사용자다 — 거기서 chown 하면 오히려 다른 uid 가 되어 사용자가 못 지운다.
+    //: 일반(root) Docker 임을 확인했을 때만 소유자를 돌려놓는다.
+    let rootful = false;
+    if (process.platform === 'linux') {
+        const security = await runner('docker info --format "{{json .SecurityOptions}}"', cwd, env, 30_000);
+        rootful = security.code === 0 && /name=/.test(security.output) && !/rootless/i.test(security.output);
+    }
+    const owner = rootful && typeof process.getuid === 'function' && typeof process.getgid === 'function'
+        && process.getuid() !== 0 ? `${process.getuid()}:${process.getgid()}` : '';
+    const chown = owner && /^[\w./-]+$/.test(outRel) && !outRel.startsWith('..') ? `; chown -R ${owner} '${outRel}' 2>/dev/null` : '';
+    const script = `(if [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; else npm install --no-audit --no-fund; fi && npm run ${buildScript(project)}); rc=$?${chown}; exit $rc`;
     const result = await runner(
-        `docker run --rm -v "${mount}:/app" -v /app/node_modules -w /app -e GENERATE_SOURCEMAP=false -e CI=false node:22-alpine sh -c "${script}"`,
+        ['docker', 'run', '--rm', '-v', `${cwd}:/app`, '-v', '/app/node_modules', '-w', '/app',
+            '-e', 'GENERATE_SOURCEMAP=false', '-e', 'CI=false', 'node:22-alpine', 'sh', '-c', script],
         cwd, env, 25 * 60_000);
     return { ok: result.code === 0, via: 'docker', output: result.output };
 }

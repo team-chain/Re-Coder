@@ -25,6 +25,8 @@ def session_for(region: str):
 class AlertList(BaseModel):
     alerts: list[dict]
     monitors: list[dict]
+    #: 2.0.32 — 확장이 기억한 마지막 알림을 찾지 못했다(목록이 잘리거나 바뀜). 전체를 돌려주니 '새 알림'으로 다 띄우지 말 것.
+    cursor_reset: bool = False
 
 
 class ActRequest(BaseModel):
@@ -35,7 +37,8 @@ class ActRequest(BaseModel):
 
 @router.get("", response_model=AlertList)
 async def list_alerts(since: str = "") -> AlertList:
-    return AlertList(alerts=ops_alerts.alerts(since), monitors=ops_alerts.monitors())
+    return AlertList(alerts=ops_alerts.alerts(since), monitors=ops_alerts.monitors(),
+                     cursor_reset=not ops_alerts.cursor_known(since))
 
 
 @router.post("/{alert_id}/act")

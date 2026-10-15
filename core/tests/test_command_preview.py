@@ -43,7 +43,7 @@ def test_데모_모드는_네트워크_DB_모의결제_상품_빌드_교체_실�
     assert cmds[4].endswith("shop:latest backend/init-db.js")
     assert cmds[5] == "docker stop shop && docker rm shop"
     run = cmds[6]
-    assert run.startswith("docker run -d --name shop --label ") and "-p 3002:3001" in run
+    assert run.startswith("docker run -d --name shop --label ") and "-p 127.0.0.1:3002:3001" in run
     assert "-e DATABASE_URL=***" in run and "-e JWT_SECRET=***" in run and "-e PAYMENT_MODE=mock" in run
     assert "--network recoder-shop" in run and run.endswith("--restart unless-stopped shop:latest")
     # 값이 화면으로 새지 않는다

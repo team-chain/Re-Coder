@@ -238,12 +238,18 @@ async def _handle_message(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
         arguments = params.get("arguments") or {}
         handler = _TOOL_DISPATCH.get(name or "")
         if handler is None:
+            #: 2.0.32 — 없는 도구·실패한 호출도 남긴다(감사 기록이 가장 필요한 것이 이쪽이다).
+            _audit(str(name or ""), arguments if isinstance(arguments, dict) else {}, {"isError": True})
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
                 "error": {"code": -32601, "message": f"tool not found: {name}"},
             }
-        result = await handler(arguments)
+        try:
+            result = await handler(arguments)
+        except Exception:
+            _audit(name or "", arguments if isinstance(arguments, dict) else {}, {"isError": True})
+            raise
         _audit(name or "", arguments, result)
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 

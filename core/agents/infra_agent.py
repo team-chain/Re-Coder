@@ -102,7 +102,7 @@ def _runtime_hint(workspace_path: str, stack) -> str:
         pkg = root / "package.json"
         if pkg.is_file():
             try:
-                engines = _json.loads(pkg.read_text(encoding="utf-8", errors="replace")).get("engines", {})
+                engines = _json.loads(pkg.read_text(encoding="utf-8-sig", errors="replace")).get("engines", {})
                 node = str(engines.get("node", "")) if isinstance(engines, dict) else ""
             except Exception:
                 node = ""
@@ -261,7 +261,7 @@ class InfraAgent:
             if '"express"' in pkg or '"fastify"' in pkg or '"koa"' in pkg:
                 return StackType.NODE_EXPRESS
             try:
-                scripts = json.loads(package_json.read_text(encoding="utf-8", errors="replace")).get("scripts") or {}
+                scripts = json.loads(package_json.read_text(encoding="utf-8-sig", errors="replace")).get("scripts") or {}
                 if any(re.search(r"\bnode\b", str(v)) for v in scripts.values()):
                     return StackType.NODE_EXPRESS
             except (OSError, ValueError, AttributeError):

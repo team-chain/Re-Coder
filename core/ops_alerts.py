@@ -199,19 +199,22 @@ def _home() -> Path:
 _LOCK = threading.Lock()
 
 
-def _read(name: str, default):
+def _state_io():
     try:
-        return json.loads((_home() / name).read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return default
+        import state_io  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import state_io  # type: ignore
+    return state_io
+
+
+def _read(name: str, default):
+    data = _state_io().read_json(_home() / name, default)
+    return data if isinstance(data, type(default)) else default
 
 
 def _write(name: str, data) -> None:
-    path = _home() / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    #: 고유 임시 파일 + Windows 의 잠깐 열린 파일 재시도(2.0.32).
+    _state_io().write_json(_home() / name, data)
 
 
 def register(*, region: str, cluster: str, service: str, log_group: str, health_path: str = "/health",
@@ -248,6 +251,11 @@ def alerts(since: str = "") -> list[dict]:
     return items
 
 
+def cursor_known(since: str) -> bool:
+    """확장이 기억한 마지막 알림이 아직 목록에 있는가(200개를 넘겨 잘렸거나 상태 파일이 바뀌면 모른다)."""
+    return not since or any(a.get("id") == since for a in _read("ops_alerts.json", []))
+
+
 def _store(alert: dict) -> Optional[dict]:
     """같은 서비스·종류는 30분에 한 번만."""
     with _LOCK:
@@ -269,7 +277,56 @@ def _resolve(alert_id: str, status: str, note: str) -> None:
             if a.get("id") == alert_id:
                 a["status"] = status
                 a["resolution"] = note
+                a.pop("busy", None)
         _write("ops_alerts.json", items)
+
+
+def _claim(alert_id: str) -> dict:
+    """적용을 시작한다고 표시 — 같은 알림을 두 번 적용하지 않게(2.0.32: 응답을 기다리다 시간 초과로 다시 누르면
+    태스크 정의가 두 번 등록되고 배포가 두 번 시작됐다)."""
+    with _LOCK:
+        items = _read("ops_alerts.json", [])
+        alert = next((a for a in items if a.get("id") == alert_id), None)
+        if alert is None:
+            raise ValueError("알림을 찾지 못했습니다.")
+        #: '적용 안 함'으로 닫은 알림은 나중에 다시 적용할 수 있다. 이미 적용한 것만 거절한다.
+        if (alert.get("status") or "open") == "applied":
+            raise ValueError("이미 처리한 알림입니다 — 목록을 새로 고치세요.")
+        if alert.get("busy") and time.time() - float(alert.get("busy", 0)) < 15 * 60:
+            raise ValueError("이 알림의 대응을 적용하는 중입니다 — 끝날 때까지 기다리세요.")
+        alert["busy"] = time.time()
+        _write("ops_alerts.json", items)
+        return dict(alert)
+
+
+def _release(alert_id: str) -> None:
+    with _LOCK:
+        items = _read("ops_alerts.json", [])
+        for a in items:
+            if a.get("id") == alert_id:
+                a.pop("busy", None)
+        _write("ops_alerts.json", items)
+
+
+def _done_suggestion(alert_id: str, action: str, value: Any, note: str) -> bool:
+    """제안 하나를 처리했다고 남기고, 남은 제안이 없으면 알림을 '적용함'으로 닫는다. 닫았으면 True."""
+    with _LOCK:
+        items = _read("ops_alerts.json", [])
+        closed = False
+        for a in items:
+            if a.get("id") != alert_id:
+                continue
+            a.pop("busy", None)
+            a.setdefault("done", []).append({"action": action, "value": value, "message": note})
+            a["suggestions"] = [x for x in a.get("suggestions") or [] if not (x.get("action") == action and x.get("value") == value)]
+            if not a["suggestions"]:
+                a["status"] = "applied"
+                a["resolution"] = note
+                closed = True
+            else:
+                a["resolution"] = note
+        _write("ops_alerts.json", items)
+        return closed
 
 
 # ---------------------------------------------------------------------------
@@ -428,12 +485,17 @@ def act(alert_id: str, action: str, value: Any, *, approved: bool, session_facto
     if not approved:
         _resolve(alert_id, "dismissed", "사용자가 적용하지 않음")
         return {"applied": False, "message": "적용하지 않았습니다."}
-    alert = next((a for a in alerts() if a.get("id") == alert_id), None)
-    if alert is None:
-        raise ValueError("알림을 찾지 못했습니다.")
+    alert = _claim(alert_id)
+    try:
+        return _act(alert, alert_id, action, value, session_factory=session_factory)
+    finally:
+        _release(alert_id)
+
+
+def _act(alert: dict, alert_id: str, action: str, value: Any, *, session_factory: Callable[[str], Any]) -> dict:
     allowed = {s["action"] for s in alert.get("suggestions") or []}
     if action not in allowed:
-        raise ValueError("이 알림에 대한 제안이 아닙니다.")
+        raise ValueError("이 알림에 대한 제안이 아닙니다(이미 적용했을 수 있습니다).")
     if action == "upgrade":
         #: 2.0.28 배포 후 취약점 — 제안한 올리기만(값까지 같아야) 프로젝트 파일에 적용한다. AWS 는 건드리지 않는다.
         offered = [s.get("value") for s in alert.get("suggestions") or [] if s.get("action") == "upgrade"]
@@ -444,7 +506,8 @@ def act(alert_id: str, action: str, value: Any, *, approved: bool, session_facto
         except ImportError:  # pragma: no cover
             from core import vuln_recheck  # type: ignore
         result = vuln_recheck.apply_fix(alert, value)
-        _resolve(alert_id, "applied", result["message"])
+        #: 2.0.32 — 올리기 제안이 여럿이면 하나씩 적용한다(첫 적용으로 알림 전체가 닫혀 나머지를 다시 볼 수 없던 것).
+        _done_suggestion(alert_id, action, value, result["message"])
         return result
     session = session_factory(alert["region"])
     ecs = session.client("ecs")

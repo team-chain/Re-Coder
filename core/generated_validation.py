@@ -11,6 +11,10 @@ from pathlib import Path
 from context_gate import mask_secrets, scrub_build_source
 from grounded_repair.logs import summarize
 from grounded_repair.workspace import manifest, safe_path, snapshot
+try:
+    import proc_tools  # type: ignore
+except ImportError:  # pragma: no cover
+    from core import proc_tools  # type: ignore
 
 
 #: 프런트·백엔드를 함께 설치·빌드하는 앱은 첫 빌드(캐시 없음)가 3분을 넘는다 — 시간이 모자라 검증을 못 하면
@@ -43,18 +47,19 @@ def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None, 
                     continue
                 target = safe_path(workspace, op["file"])
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(scrub_build_source(op["content"]), encoding="utf-8")
+                #: Windows 에서도 LF 그대로 — CRLF 로 바뀐 셸 스크립트는 리눅스 컨테이너에서 실행되지 않는다(2.0.32).
+                target.write_text(scrub_build_source(op["content"]), encoding="utf-8", newline="")
             # Existing source can also contain inline credentials; preserve them only
             # in the original workspace, never in the disposable Docker context.
             for path in workspace.rglob("*"):
                 if path.is_file():
                     try:
-                        text = path.read_text(encoding="utf-8")
-                    except UnicodeDecodeError:
+                        text = path.read_bytes().decode("utf-8")
+                    except (UnicodeDecodeError, OSError):
                         continue
                     redacted = scrub_build_source(text)
                     if redacted != text:
-                        path.write_text(redacted, encoding="utf-8")
+                        path.write_bytes(redacted.encode("utf-8"))
             #: 2.0.29 — AI 가 쓴 Dockerfile 의 위험한 RUN 은 검증 빌드도 하지 않는다(RUN 은 사용자 PC 에서 돈다).
             try:
                 import dockerfile_guard
@@ -67,7 +72,7 @@ def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None, 
                         "output": f"Dockerfile 안전 검사에서 막아 빌드하지 않았습니다: {dockerfile_guard.message(unsafe)}",
                         "guard": [v.__dict__ for v in unsafe]}
             with tempfile.TemporaryFile() as output:
-                process = subprocess.run(
+                process = proc_tools.run(
                     ["docker", "build", "--progress=plain", "--iidfile", str(image_file), "."],
                     cwd=workspace,
                     stdout=output,

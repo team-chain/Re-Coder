@@ -136,3 +136,12 @@ def read_env_file(path: "str | Path") -> dict[str, str]:
             continue
         out[key] = value
     return out
+
+
+def port_publish(host_port: object, container_port: object) -> str:
+    """docker run -p 값. 2.0.32 — 기본은 이 PC 에서만 접속(127.0.0.1). 예전 -p 호스트:컨테이너 는 모든 네트워크(같은 와이파이의
+    다른 사람)에 개발용 비밀값이 든 앱을 열었다. 다른 기기에서 열어야 하면 RECODER_LOCAL_BIND=0.0.0.0."""
+    import os
+    bind = (os.environ.get("RECODER_LOCAL_BIND") or "127.0.0.1").strip()
+    return f"{bind}:{int(host_port)}:{int(container_port)}" if bind else f"{int(host_port)}:{int(container_port)}"
+

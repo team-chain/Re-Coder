@@ -271,7 +271,10 @@
                 "ec2:DescribeSubnets",
                 "ec2:DescribeRouteTables",
                 "ec2:DescribeSecurityGroups",
-                "ec2:DescribeNetworkInterfaces"
+                "ec2:DescribeNetworkInterfaces",
+                "ec2:DescribeInternetGateways",
+                "ec2:DescribeAccountAttributes",
+                "ec2:DescribeAddresses"
               ],
               "Resource": "*"
             },
@@ -515,7 +518,6 @@
               "Sid": "HttpsCertificate",
               "Effect": "Allow",
               "Action": [
-                "acm:RequestCertificate",
                 "acm:AddTagsToCertificate",
                 "acm:DescribeCertificate",
                 "acm:ListTagsForCertificate",
@@ -523,6 +525,20 @@
               ],
               "Resource": {
                 "Fn::Sub": "arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*"
+              }
+            },
+            {
+              "Sid": "HttpsRequestCertificate",
+              "Effect": "Allow",
+              "Action": [
+                "acm:RequestCertificate"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "us-east-1",
+                  "aws:RequestTag/recoder:managed": "true"
+                }
               }
             },
             {
@@ -562,6 +578,7 @@
                 "rds:ModifyDBInstance",
                 "rds:DeleteDBInstance",
                 "rds:CreateDBSnapshot",
+                "rds:StartDBInstance",
                 "rds:CreateDBSubnetGroup",
                 "rds:DeleteDBSubnetGroup",
                 "rds:CreateDBParameterGroup",
@@ -671,7 +688,19 @@
                   }
                 }
               }
-            },
+            }
+          ]
+        }
+      }
+    },
+    "RecoderDeployPolicy3": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "ManagedPolicyName": "recoder-deploy-policy-3",
+        "Description": "ReCoder 가 배포에 요구하는 최소권한 (3/3)",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
             {
               "Sid": "CleanupReadTags",
               "Effect": "Allow",
@@ -706,19 +735,7 @@
                   "Fn::Sub": "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:recoder-*"
                 }
               ]
-            }
-          ]
-        }
-      }
-    },
-    "RecoderDeployPolicy3": {
-      "Type": "AWS::IAM::ManagedPolicy",
-      "Properties": {
-        "ManagedPolicyName": "recoder-deploy-policy-3",
-        "Description": "ReCoder 가 배포에 요구하는 최소권한 (3/3)",
-        "PolicyDocument": {
-          "Version": "2012-10-17",
-          "Statement": [
+            },
             {
               "Sid": "CleanupDelete",
               "Effect": "Allow",

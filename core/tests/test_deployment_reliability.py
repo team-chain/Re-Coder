@@ -122,7 +122,7 @@ def test_approved_run_uses_scanned_image_all_ports_and_environment(monkeypatch):
     assert events[0]==('scan',image_id)
     command=events[1][1]
     assert command[-1]==image_id and 'MODE=test' in command
-    assert '4567:3000' in command and '4568:3001' in command
+    assert '127.0.0.1:4567:3000' in command and '127.0.0.1:4568:3001' in command  # 2.0.32 이 PC 에서만
     assert not d._plans_pending_image_scan and not d._plan_workspaces
     assert result['continuous_verification']=={'enabled':False,'started':False}
 
