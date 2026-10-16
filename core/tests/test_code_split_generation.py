@@ -194,13 +194,15 @@ def test_이어_쓰기가_진행되지_않으면_멈추고_이어서_만들_수_
 def test_파일_목록이_잘리면_약속은_조각으로_목록은_페이지로_받는다(monkeypatch, tmp_path):
     class CutManifest(Router):
         calls = []
+        summaries = []
         def call(self, request, agent=None, operation=None):
+            if operation == "summarize_request":  # 요약 한 줄 — 2.0.36 절약 등급 작업
+                CutManifest.summaries.append(request.prompt)
+                return type("R", (), {"text": json.dumps({"summary": "쇼핑몰"}), "model_used": "m", "provider": "p"})()
             if operation == "generate_code_manifest":
                 CutManifest.calls.append(request.prompt)
                 if len(CutManifest.calls) == 1:
                     raise CUT
-                if len(CutManifest.calls) == 2:  # 요약 한 줄
-                    return type("R", (), {"text": json.dumps({"summary": "쇼핑몰"}), "model_used": "m", "provider": "p"})()
                 return type("R", (), {"text": json.dumps({"files": MANIFEST["files"], "more": False}), "model_used": "m", "provider": "p"})()
             if operation == "generate_code_contracts":
                 return type("R", (), {"text": json.dumps({"content": "GET /api/products", "done": True}), "model_used": "m", "provider": "p"})()
@@ -209,3 +211,4 @@ def test_파일_목록이_잘리면_약속은_조각으로_목록은_페이지�
     result = ca.generate_code("쇼핑몰", decisions=[DECISION], project_root=str(tmp_path))
     assert set(CONTENT) <= {op["file"] for op in result["ops"]}
     assert "GET /api/products" in CutManifest.calls[-1]  # 이어 받은 약속을 목록 요청에 넣었다
+    assert len(CutManifest.summaries) == 1

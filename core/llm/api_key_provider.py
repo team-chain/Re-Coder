@@ -1,11 +1,15 @@
 """
-API 키 Provider — AWS 없이 Claude(Anthropic) 또는 ChatGPT(OpenAI) API 키로 AI 를 쓴다.
+API 키 Provider — AWS 없이 Claude(Anthropic)·ChatGPT(OpenAI)·OpenAI 호환 API(DeepSeek 등) 키로 AI 를 쓴다.
 
 활성화 (확장이 VS Code 보안 저장소의 키로 Core 를 띄울 때 넣는다):
   RECODER_AI_PROVIDER      = "anthropic" | "openai"
   RECODER_ANTHROPIC_API_KEY / RECODER_OPENAI_API_KEY
   RECODER_ANTHROPIC_MODEL / RECODER_OPENAI_MODEL        (선택)
   RECODER_ANTHROPIC_FAST_MODEL / RECODER_OPENAI_FAST_MODEL (선택)
+
+OpenAI 호환(2.0.36): RECODER_COMPATIBLE_API_KEY + RECODER_COMPATIBLE_BASE_URL(필수, https —
+  내 PC 의 localhost 만 http 허용) + RECODER_COMPATIBLE_MODEL(비우면 deepseek-chat).
+  강제 도구 호출을 거절하는 서버면 JSON 모드(response_format)로 한 번 다시 보낸다.
 
 일부러 ANTHROPIC_API_KEY/OPENAI_API_KEY 같은 흔한 이름을 읽지 않는다. 다른 도구 때문에
 이미 설정된 키가 있다고 Bedrock 사용자의 경로가 몰래 바뀌면 안 된다.
@@ -34,25 +38,62 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
-PROVIDERS = ("anthropic", "openai")
+PROVIDERS = ("anthropic", "openai", "compatible")
 DEFAULT_MODELS = {
     "anthropic": ("claude-sonnet-5", "claude-sonnet-5"),
     "openai": ("gpt-5-mini", "gpt-5-mini"),
+    "compatible": ("deepseek-chat", "deepseek-chat"),
 }
 ENDPOINTS = {
     "anthropic": "https://api.anthropic.com/v1/messages",
     "openai": "https://api.openai.com/v1/chat/completions",
 }
-LABELS = {"anthropic": "Claude API", "openai": "OpenAI API"}
+LABELS = {"anthropic": "Claude API", "openai": "OpenAI API", "compatible": "OpenAI 호환 API"}
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 TOOL_NAME = "output"
+
+
+def compatible_endpoint(raw: str) -> str:
+    """OpenAI 호환 주소 → chat/completions 주소. 안전하지 않은 주소는 ValueError.
+
+    https 만 받는다(키가 평문으로 나가지 않게). 내 PC 에서 도는 서버(localhost)만 http 를 허용한다.
+    주소 안의 사용자 정보(user:pass@)·쿼리·조각은 받지 않는다 — 키는 헤더로만 보낸다.
+    """
+    from urllib.parse import urlsplit
+    value = (raw or "").strip()
+    if not value:
+        raise ValueError("OpenAI 호환 API 주소가 비어 있습니다.")
+    parts = urlsplit(value)
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("https", "http") or not host:
+        raise ValueError("OpenAI 호환 API 주소는 https:// 로 시작해야 합니다.")
+    if parts.scheme == "http" and host not in _LOCAL_HOSTS:
+        raise ValueError("OpenAI 호환 API 주소는 https 여야 합니다(http 는 내 PC 의 localhost 만 허용).")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise ValueError("OpenAI 호환 API 주소에 사용자 정보·쿼리를 넣지 마세요.")
+    path = parts.path.rstrip("/")
+    if not path.endswith("/chat/completions"):
+        path += "/chat/completions"
+    netloc = parts.netloc
+    return f"{parts.scheme}://{netloc}{path}"
+
+
+def provider_ready(name: str) -> bool:
+    """이 제공자를 쓸 키(호환 API 는 주소까지)가 있는가."""
+    if name not in PROVIDERS or not os.environ.get(f"RECODER_{name.upper()}_API_KEY", "").strip():
+        return False
+    if name == "compatible":
+        try:
+            compatible_endpoint(os.environ.get("RECODER_COMPATIBLE_BASE_URL", ""))
+        except ValueError:
+            return False
+    return True
 
 
 def selected_provider() -> str:
     """키까지 있는 경우에만 제공자 이름을 돌려준다. 아니면 ''."""
     name = (os.environ.get("RECODER_AI_PROVIDER") or "").strip().lower()
-    if name not in PROVIDERS:
-        return ""
-    return name if os.environ.get(f"RECODER_{name.upper()}_API_KEY", "").strip() else ""
+    return name if provider_ready(name) else ""
 
 
 def api_key_enabled() -> bool:
@@ -79,12 +120,18 @@ def _is_reasoning_model(model: str) -> bool:
 
 
 class ApiKeyProvider(LLMProvider):
+    #: converse(usage=...) 로 실제 토큰 수를 돌려준다 — 라우터가 원장에 어림값 대신 적는다.
+    reports_usage = True
+
     def __init__(self, provider: str, model_id: str = "") -> None:
         if provider not in PROVIDERS:
             raise ValueError(f"unknown provider: {provider}")
         self._provider = provider
         self._key = os.environ.get(f"RECODER_{provider.upper()}_API_KEY", "").strip()
-        self._endpoint = os.environ.get(f"RECODER_{provider.upper()}_BASE_URL", "").strip() or ENDPOINTS[provider]
+        if provider == "compatible":
+            self._endpoint = compatible_endpoint(os.environ.get("RECODER_COMPATIBLE_BASE_URL", ""))
+        else:
+            self._endpoint = os.environ.get(f"RECODER_{provider.upper()}_BASE_URL", "").strip() or ENDPOINTS[provider]
         self._timeout = float(os.environ.get("RECODER_AI_TIMEOUT", "") or "150")
         self.model_id = model_id or model_for(provider)
         self._model_id = self.model_id
@@ -146,11 +193,15 @@ class ApiKeyProvider(LLMProvider):
 
     def _post(self, payload: dict) -> dict:
         """일시 오류는 한 번 재시도. 모델이 모르는 선택 파라미터는 빼고 한 번 더 보낸다."""
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 return self._post_once(payload)
             except LLMError as exc:
                 text = str(exc)
+                if self._provider == "compatible" and exc.error_type == LLMErrorType.VALIDATION_ERROR and "tools" in payload:
+                    #: 강제 도구 호출을 모르는 호환 서버 — 같은 요청을 JSON 모드로 한 번 더.
+                    payload = _json_mode(payload)
+                    continue
                 if exc.error_type == LLMErrorType.VALIDATION_ERROR and "reasoning_effort" in payload and "reasoning_effort" in text:
                     payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
                     continue
@@ -188,8 +239,12 @@ class ApiKeyProvider(LLMProvider):
                 payload["tool_choice"] = {"type": "tool", "name": TOOL_NAME}
             return payload
         chat = ([{"role": "system", "content": system}] if system else []) + [{"role": r, "content": t} for r, t in texts]
-        payload = {"model": self.model_id, "messages": chat, "max_completion_tokens": max_tokens}
-        if _is_reasoning_model(self.model_id):
+        if self._provider == "compatible":
+            #: 호환 서버 대부분은 max_completion_tokens·reasoning_effort 를 모른다.
+            payload = {"model": self.model_id, "messages": chat, "max_tokens": max_tokens}
+        else:
+            payload = {"model": self.model_id, "messages": chat, "max_completion_tokens": max_tokens}
+        if self._provider == "openai" and _is_reasoning_model(self.model_id):
             payload["reasoning_effort"] = "low"
         if schema:
             payload["tools"] = [{"type": "function", "function": {"name": TOOL_NAME, "description": "Return structured JSON output matching the provided schema.", "parameters": schema}}]
@@ -227,14 +282,22 @@ class ApiKeyProvider(LLMProvider):
 
     # ── BedrockProvider 호환 async converse ──────────────────────────
     async def converse(self, messages, system=None, output_schema=None, *, max_tokens=4096, temperature=0.0,
-                       raw: bool = False) -> dict:
+                       raw: bool = False, usage: Optional[dict] = None) -> dict:
         payload = self._payload(messages, system, None if raw else output_schema, max_tokens)
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, self._post, payload)
+        if usage is not None:
+            usage.update(zip(("input_tokens", "output_tokens"), self._usage(result)))
         if raw:
             return self._raw_text(result)
         parsed, _text, _i, _o = self._parse(result, output_schema)
         return parsed
+
+    def _usage(self, result: dict) -> tuple[int, int]:
+        usage = result.get("usage") or {}
+        if self._provider == "anthropic":
+            return int(usage.get("input_tokens", 0) or 0), int(usage.get("output_tokens", 0) or 0)
+        return int(usage.get("prompt_tokens", 0) or 0), int(usage.get("completion_tokens", 0) or 0)
 
     def _raw_text(self, result: dict) -> dict:
         """글자 그대로 + 끊김 여부(JSON 추출·잘림 오류 없음)."""
@@ -264,6 +327,26 @@ class ApiKeyProvider(LLMProvider):
 
     def estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
         return 0.0
+
+
+def _json_mode(payload: dict) -> dict:
+    """도구 호출 대신 JSON 모드 — 스키마는 마지막 사용자 메시지에 붙인다."""
+    out = {k: v for k, v in payload.items() if k not in ("tools", "tool_choice")}
+    schema = None
+    try:
+        schema = payload["tools"][0]["function"]["parameters"]
+    except (KeyError, IndexError, TypeError):
+        pass
+    messages = [dict(m) for m in out.get("messages") or []]
+    hint = "\n\nReturn only one JSON object" + (
+        " matching this JSON schema:\n" + json.dumps(schema, ensure_ascii=False) if schema else ".")
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            m["content"] = str(m.get("content") or "") + hint
+            break
+    out["messages"] = messages
+    out["response_format"] = {"type": "json_object"}
+    return out
 
 
 def _parse_json_text(text: str) -> dict:

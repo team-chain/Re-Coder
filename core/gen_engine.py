@@ -32,6 +32,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from llm.base import LLMError, LLMErrorType, LLMRequest
+from llm.task_tier import bind as _bind, is_test_file as _is_test_file
 from code_output import CODE_OUTPUT_SCHEMA, CodeOutputError, parse_code_output
 import generation_jobs as jobs
 
@@ -697,7 +698,7 @@ class LargeGeneration:
             self._event("planning", message="약속 문서가 길어 나눠서 받는 중")
             resp = self.call(self.context_prompt + "\n\n이 요청이 무엇을 만드는지 한국어 한 줄로만 JSON {\"summary\": \"...\"} 으로 답하세요.",
                              {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]},
-                             "generate_code_manifest", 512, agent="planner")
+                             "summarize_request", 512, agent="planner")
             summary = str(ca._extract_json(resp.text).get("summary") or "").strip()
             contracts = self.write_in_parts(
                 header + "\n\n지금은 파일 목록 없이 contracts(파일 사이의 약속) 문서만 씁니다.",
@@ -1203,7 +1204,9 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         for f in batch:
             self._event("file_start", agent=agent, file=f["file"], message=f"{f['file']} 작성 중")
         try:
-            resp = self.call(p, CODE_OUTPUT_SCHEMA, "generate_code_part", ca._CODE_AGENT_MAX_TOKENS, agent=agent)
+            #: 2.0.36 — 테스트 파일만 묶은 요청은 절약 등급(테스트 초안)으로 보낸다.
+            operation = "generate_test_draft" if all(_is_test_file(f["file"]) for f in batch) else "generate_code_part"
+            resp = self.call(p, CODE_OUTPUT_SCHEMA, operation, ca._CODE_AGENT_MAX_TOKENS, agent=agent)
             _data, ops = parse_code_output(resp.text)
         except (LLMError, CodeOutputError) as exc:
             if not (_is_truncation(exc) or isinstance(exc, CodeOutputError)
@@ -1237,7 +1240,8 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         context = self._context([] if lean else files_done, None if lean else [path])
         self._note_board_read(context, [path], agent)
         base = self.context_prompt + context + f"\n\n지금은 {path} 파일 하나만 작성합니다." + _file_hint(path)
-        content = self.write_in_parts(base, f"{path} 파일", agent=agent, path=path)
+        content = self.write_in_parts(base, f"{path} 파일", agent=agent, path=path,
+                                      operation="generate_test_draft" if _is_test_file(path) else "generate_code_file_part")
         return {"action": "create", "file": path, "content": content, "language": "",
                 "rationale": "응답 길이 한도 때문에 이어 받아 작성"}
 
@@ -1666,7 +1670,7 @@ replace 는 바꿀 내용입니다.
                     slot = free.pop(0)
                     for f in batch:
                         running.add(_norm(f["file"]))
-                    futures[pool.submit(task, batch, slot)] = (batch, slot)
+                    futures[pool.submit(_bind(task), batch, slot)] = (batch, slot)
                 if not futures:
                     continue
                 done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
@@ -2276,7 +2280,7 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
     #: 생성과 같은 수의 에이전트가 동시에 고친다(설정한 팀 인원 — 예전엔 3명 고정이라 고칠 파일이 많으면 오래 걸렸다)
     workers = workers or engine.concurrency
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(targets))), thread_name_prefix="fix") as pool:
-        answers = list(pool.map(ask, targets))
+        answers = list(pool.map(_bind(ask), targets))
     out = [dict(op) for op in ops]
     changed = False
     for idx, edits in answers:

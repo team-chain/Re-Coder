@@ -7,7 +7,7 @@
  * - F5/확장 테스트: 해당 확장 소스의 core/main.py, 설치 실행: Core 바이너리
  */
 import * as vscode from 'vscode';
-import { aiKeyEnv } from '../ai/aiKeyEnv';
+import { AiRoutingSettings, aiKeyEnv } from '../ai/aiKeyEnv';
 import * as path from 'path';
 import { StringDecoder } from 'string_decoder';
 import * as fs from 'fs';
@@ -599,6 +599,18 @@ export class CoreManager {
         });
     }
 
+    /** 2.0.36 recoder.ai.* 설정 — 모델·절약 공급자·OpenAI 호환 주소·단가. */
+    private _aiRoutingSettings(): AiRoutingSettings {
+        const cfg = vscode.workspace.getConfiguration('recoder.ai');
+        return {
+            modelFor: (p) => cfg.get<string>(`${p}Model`, '') || '',
+            economyProvider: cfg.get<string>('economyProvider', '') || '',
+            economyModel: cfg.get<string>('economyModel', '') || '',
+            compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '',
+            prices: cfg.get<unknown>('prices', {}),
+        };
+    }
+
     private async spawnCore(spec: SpawnSpec | null = this._findCoreSpec()): Promise<void> {
         this.isSpawning = true;
         let processLog: CoreProcessLog | undefined;
@@ -621,7 +633,7 @@ export class CoreManager {
                 globalState: ctx.globalState,
             };
             const [gatewayEnv, awsEnv, aiEnv] = await Promise.all([this._gatewayEnv(), this._awsEnv(),
-                withFallback(aiKeyEnv(secretsWithLimit, (p) => vscode.workspace.getConfiguration('recoder.ai').get<string>(`${p}Model`, '') || ''), SECRET_READ_TIMEOUT_MS * 2, {})]);
+                withFallback(aiKeyEnv(secretsWithLimit, this._aiRoutingSettings()), SECRET_READ_TIMEOUT_MS * 2, {})]);
 
             //: 확장 호스트 전용 변수(ELECTRON_RUN_AS_NODE 등)는 코어에 넘기지 않는다 — 코어가
             //: 띄우는 Docker Desktop(Electron)이 그걸 물려받으면 GUI 없이 즉시 종료한다(실기기).

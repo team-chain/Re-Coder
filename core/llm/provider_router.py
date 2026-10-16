@@ -7,6 +7,11 @@ Primary   : Bedrock Claude Sonnet  — code patches, Dockerfile, complex ops ana
 Fast      : Bedrock Claude Haiku   — error classification, log summary, scanner results
 Fallback  : Gemini Flash           — Bedrock failure or cost-reduction mode
 
+2.0.36 작업 등급(llm/task_tier.py)
+Quality   : 코드 생성·보안 수정·교정 — 위 Primary 그대로
+Economy   : 계획 주제·요약·오류 분류·테스트 초안 — RECODER_ECONOMY_PROVIDER 로 따로 고를 수 있다
+            (fast | anthropic | openai | compatible). 고르지 않으면 품질 공급자와 같다.
+
 All calls are recorded as LLMCallRecord entries for cost tracking.
 """
 
@@ -50,6 +55,22 @@ def _get_shared():
         from core.llm import breaker as _breaker_mod  # type: ignore
         from core.llm import cost_ledger as _ledger  # type: ignore
     return _breaker_mod, _ledger
+
+
+def _get_tiers():
+    try:
+        from llm import task_tier as _tiers
+    except ImportError:
+        from core.llm import task_tier as _tiers  # type: ignore
+    return _tiers
+
+
+def _get_pricing():
+    try:
+        from llm import pricing as _pricing
+    except ImportError:
+        from core.llm import pricing as _pricing  # type: ignore
+    return _pricing
 
 
 def _get_base_types():
@@ -133,6 +154,16 @@ class LLMProviderRouter:
 
         self._call_records: list[Any] = []  # list[LLMCallRecord]
 
+        #: 2.0.36 절약 등급 공급자 — None 이면 품질 공급자를 그대로 쓴다(기존 동작).
+        self._extra: dict = {}
+        self._economy_spec = ""
+        self._economy_note = ""
+        try:
+            self._economy = self._build_economy()
+        except Exception as exc:  # pragma: no cover — 설정 오류로 Core 가 못 뜨면 안 된다
+            log.warning("economy provider 비활성: %s", exc)
+            self._economy = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -200,7 +231,7 @@ class LLMProviderRouter:
                     span.set_attribute("latency_ms", latency)
                     self._record_call(
                         agent="primary", operation="call_primary",
-                        provider="bedrock", model=self._bedrock_sonnet.model_id,
+                        provider=self._bedrock_sonnet.provider_name, model=self._bedrock_sonnet.model_id,
                         input_tokens=input_tok, output_tokens=output_tok,
                         latency_ms=latency, fallback_used=False, retry_count=0,
                     )
@@ -262,7 +293,7 @@ class LLMProviderRouter:
                 latency = int((time.monotonic() - start) * 1000)
                 self._record_call(
                     agent="fast", operation="call_fast",
-                    provider="bedrock", model=self._bedrock_haiku.model_id,
+                    provider=self._bedrock_haiku.provider_name, model=self._bedrock_haiku.model_id,
                     input_tokens=input_tok, output_tokens=output_tok,
                     latency_ms=latency, fallback_used=False, retry_count=0,
                 )
@@ -331,6 +362,18 @@ class LLMProviderRouter:
           - "haiku"   → call_fast    (Bedrock Haiku  → Gemini fallback)
           - anything else → call_primary
         """
+        tiers = _get_tiers()
+        if tiers.forced_provider() or (self._economy is not None and tiers.tier_for(operation) == tiers.ECONOMY):
+            #: 절약 등급·비교 실행은 등급 라우팅이 있는 call_llm 으로 보낸다.
+            try:
+                from llm.base import LLMRequest
+            except ImportError:  # pragma: no cover
+                from core.llm.base import LLMRequest  # type: ignore
+            resp = await self.call_llm(
+                LLMRequest(prompt=prompt, json_schema=schema, max_tokens=max_tokens, temperature=0.0),
+                agent=agent, operation=operation, prefer="fast" if model_preference == "haiku" else "primary",
+            )
+            return resp.text
         if model_preference == "haiku":
             result = await self.call_fast(prompt, schema=schema)
         else:
@@ -354,40 +397,67 @@ class LLMProviderRouter:
         code_agent/analyzer 가 쓰던 LLMRequest→LLMResponse 계약을 유지하면서,
         provider 선택·게이트웨이 전환·브레이커·비용 기록을 전부 이 클래스의
         한 벌로 태운다. 보드 이슈 「LLM 라우터가 두 벌」의 본체 수술.
+
+        2.0.36 작업 등급
+            절약 등급 작업(task_tier.ECONOMY_OPERATIONS)은 절약 공급자가 정해져 있으면 그쪽으로 먼저
+            보낸다. 실패하면(잘린 응답 제외) 품질 공급자로 이어 간다 — 비용 때문에 기능이 멈추지 않게.
+            비교 도구가 공급자를 고정한 실행(task_tier.pinned)에서는 다른 공급자로 바꾸지 않는다.
+            품질 공급자 아닌 곳·OpenAI 호환 API 로 나가는 문맥은 비밀값을 가린다.
         """
         LLMError, LLMResponse = _get_base_types()
         from .base import LLMErrorType
+        tiers = _get_tiers()
         breaker_mod, _ = _get_shared()
 
-        provider = self._bedrock_haiku if prefer == "fast" else self._bedrock_sonnet
+        tier = tiers.tier_for(operation)
+        forced = tiers.forced_provider()
+        if forced:
+            pinned = self._spec_provider(forced)
+            if pinned is None:
+                raise LLMError(f"비교할 AI 공급자를 쓸 수 없습니다({forced}) — 키·주소를 확인하세요.",
+                               LLMErrorType.ACCESS_DENIED, False)
+            chain = [pinned]
+        else:
+            base = self._bedrock_haiku if prefer == "fast" else self._bedrock_sonnet
+            economy = self._economy if tier == tiers.ECONOMY else None
+            chain = [economy, base] if economy is not None and economy is not base else [base]
+
         schema = getattr(request, "json_schema", None)
         raw = bool(getattr(request, "raw_text", False))
         if raw:
             schema = None
         system = (getattr(request, "system", "") or "").strip()
-        prompt = f"{system}\n\n{request.prompt}" if system else request.prompt
+        full_prompt = f"{system}\n\n{request.prompt}" if system else request.prompt
+        code_output = operation not in tiers.ECONOMY_OPERATIONS or operation == "generate_test_draft"
 
         start = time.monotonic()
         retry = 0
-        fallback = False
         result: Any = None
-        used_provider = provider.provider_name
-        used_model = provider.model_id
         primary_error = None
+        provider = chain[0]
+        prompt = full_prompt
+        masked = 0
+        usage: dict = {}
 
-        br = breaker_mod.breaker_for(f"{provider.provider_name}/{provider.model_id}")
-        if br.is_open:
-            log.info("[CB] open — %s 건너뜀 (call_llm)", provider.model_id)
-            retry = 1
-        else:
+        for provider in chain:
+            prompt, masked = self._outgoing(provider, full_prompt, code_output)
+            usage = {}
+            br = breaker_mod.breaker_for(f"{provider.provider_name}/{provider.model_id}")
+            if br.is_open:
+                log.info("[CB] open — %s 건너뜀 (call_llm)", provider.model_id)
+                retry += 1
+                continue
             try:
                 messages = [{"role": "user", "content": [{"text": prompt}]}]
+                extra: dict = {"raw": True} if raw else {}
+                if getattr(provider, "reports_usage", False):
+                    extra["usage"] = usage
                 result = await provider.converse(
                     messages, output_schema=schema,
-                    max_tokens=request.max_tokens, temperature=request.temperature,
-                    **({"raw": True} if raw else {}),
+                    max_tokens=request.max_tokens, temperature=request.temperature, **extra,
                 )
                 br.record_success()
+                break
             except Exception as exc:
                 # A clipped model response is a generation failure, not a provider
                 # outage. Let the caller repair its output without switching models.
@@ -395,33 +465,45 @@ class LLMProviderRouter:
                     br.record_success()
                     self._record_call(
                         agent=agent or "router", operation=operation or "call_llm",
-                        provider="bedrock" if used_provider != "gemini" else "gemini", model=used_model,
+                        provider=provider.provider_name, model=provider.model_id,
                         input_tokens=max(1, len(prompt) // 4), output_tokens=request.max_tokens,
                         latency_ms=int((time.monotonic() - start) * 1000),
-                        fallback_used=False, retry_count=0,
+                        fallback_used=False, retry_count=retry, tier=tier, masked=masked,
                     )
                     raise
                 br.record_failure()
-                retry = 1
+                retry += 1
                 primary_error = exc
-                log.warning("call_llm %s 실패: %s — Gemini 폴백", used_model, exc)
+                log.warning("call_llm %s/%s 실패: %s", provider.provider_name, provider.model_id, exc)
 
+        fallback = result is None or provider is not chain[0]
+        used_provider, used_model = provider.provider_name, provider.model_id
         if result is None:
-            fallback = True
+            if forced:
+                #: 비교 실험의 조건을 몰래 바꾸지 않는다 — 실패는 실패로 남긴다.
+                if isinstance(primary_error, LLMError):
+                    raise primary_error
+                raise LLMError(f"{forced} 공급자 호출 실패: {primary_error or '연속 실패로 잠시 대기 중'}",
+                               LLMErrorType.SERVICE_ERROR, True, raw=primary_error)
             used_provider, used_model = "gemini", "gemini-2.5-flash"
+            prompt, masked = self._outgoing(self._gemini, full_prompt, code_output)
+            usage = {}
             result = await self._fallback(
                 prompt, schema, primary_error, max_tokens=request.max_tokens,
                 temperature=request.temperature, **({"raw": True} if raw else {}),
             )
 
         latency = int((time.monotonic() - start) * 1000)
-        input_tok, output_tok = self._estimate_tokens(prompt, result)
+        if usage.get("input_tokens") or usage.get("output_tokens"):
+            input_tok, output_tok, source = int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0), "api"
+        else:
+            (input_tok, output_tok), source = self._estimate_tokens(prompt, result), "estimate"
         record = self._record_call(
             agent=agent or "router", operation=operation or "call_llm",
-            provider="bedrock" if used_provider != "gemini" else "gemini",
-            model=used_model,
+            provider=used_provider, model=used_model,
             input_tokens=input_tok, output_tokens=output_tok,
             latency_ms=latency, fallback_used=fallback, retry_count=retry,
+            tier=tier, token_source=source, masked=masked,
         )
 
         #: 레거시 호출자는 .text 에서 JSON 을 뽑는다. converse 는 파싱된 dict 를
@@ -444,6 +526,9 @@ class LLMProviderRouter:
             latency_ms=latency,
             fallback_used=fallback,
             retry_count=retry,
+            input_tokens=input_tok,
+            output_tokens=output_tok,
+            token_source="api" if source == "api" else "local_estimate",
         )
         if truncated is not None:
             resp.metadata["truncated"] = bool(truncated)
@@ -452,8 +537,99 @@ class LLMProviderRouter:
             "estimated_cost_usd": record.estimated_cost_usd,
             "provider": used_provider,
             "model": used_model,
+            "tier": tier,
         }
         return resp
+
+    # ------------------------------------------------------------------
+    # 2.0.36 작업 등급 — 공급자 고르기·비밀값 가리기·상태
+    # ------------------------------------------------------------------
+
+    def _outgoing(self, provider: Any, prompt: str, code_output: bool) -> tuple[str, int]:
+        """품질 공급자가 아닌 곳·OpenAI 호환 API 로 나가는 글은 비밀값을 가린다."""
+        name = getattr(provider, "provider_name", "")
+        if name != "compatible" and name == self._bedrock_sonnet.provider_name:
+            return prompt, 0
+        if name == "gemini" and not getattr(provider, "available", True):
+            return prompt, 0
+        try:
+            from .scrub import scrub_for_external
+        except ImportError:  # pragma: no cover
+            from llm.scrub import scrub_for_external  # type: ignore
+        return scrub_for_external(prompt, code=code_output)
+
+    def _spec_provider(self, spec: str, *, economy: bool = False) -> Any:
+        """공급자 이름 → provider. 쓸 수 없으면 None.
+
+        quality(지금 품질 공급자) · fast(그 빠른 모델) · economy(지금 절약 설정) ·
+        anthropic/openai/compatible(키가 있는 API 공급자).
+        """
+        spec = (spec or "").strip().lower()
+        if spec in ("", "quality", "same"):
+            return self._bedrock_sonnet
+        if spec == "fast":
+            return self._bedrock_haiku
+        if spec == "economy":
+            return self._economy or self._bedrock_sonnet
+        key = (spec, economy)
+        if key in self._extra:
+            return self._extra[key]
+        try:
+            from .api_key_provider import ApiKeyProvider, model_for, provider_ready
+        except ImportError:  # pragma: no cover
+            from llm.api_key_provider import ApiKeyProvider, model_for, provider_ready  # type: ignore
+        import os
+        if not provider_ready(spec):
+            return None
+        model = (os.environ.get("RECODER_ECONOMY_MODEL") or "").strip() if economy else ""
+        try:
+            made = ApiKeyProvider(spec, model or model_for(spec, fast=economy))
+        except ValueError as exc:
+            log.warning("AI 공급자 %s 를 만들 수 없습니다: %s", spec, exc)
+            return None
+        self._extra[key] = made
+        return made
+
+    def _build_economy(self) -> Any:
+        import os
+        spec = (os.environ.get("RECODER_ECONOMY_PROVIDER") or "").strip().lower()
+        self._economy_spec = spec
+        self._economy_note = ""
+        if spec in ("", "quality", "same"):
+            return None
+        if spec not in ("fast", "anthropic", "openai", "compatible"):
+            self._economy_note = f"알 수 없는 절약 공급자({spec}) — 품질 공급자를 씁니다."
+            return None
+        provider = self._spec_provider(spec, economy=True)
+        if provider is None:
+            self._economy_note = "절약 공급자의 키(호환 API 는 주소까지)가 없어 품질 공급자를 씁니다."
+            log.warning("economy provider %s 비활성: 키 없음", spec)
+            return None
+        log.info("economy tier → %s/%s", provider.provider_name, provider.model_id)
+        return provider
+
+    def routing_status(self) -> dict:
+        """확장 설정 화면이 보여 줄 등급별 공급자(키 값은 넣지 않는다)."""
+        tiers = _get_tiers()
+        quality = self._bedrock_sonnet
+        economy = self._economy or quality
+        separate = self._economy is not None and self._economy is not quality
+        choices = []
+        for spec, label in (("quality", "지금 품질 공급자"), ("fast", "품질 공급자의 빠른 모델"),
+                            ("anthropic", "Claude API"), ("openai", "OpenAI API"), ("compatible", "OpenAI 호환 API")):
+            p = self._spec_provider(spec)
+            choices.append({"spec": spec, "label": label, "ready": p is not None,
+                            "provider": getattr(p, "provider_name", ""), "model": getattr(p, "model_id", "")})
+        return {
+            "quality": {"provider": quality.provider_name, "model": quality.model_id},
+            "economy": {"spec": self._economy_spec or "quality", "provider": economy.provider_name,
+                        "model": economy.model_id, "separate": separate,
+                        "scrubbed": separate and (economy.provider_name != quality.provider_name
+                                                  or economy.provider_name == "compatible"),
+                        "note": self._economy_note},
+            "economy_operations": sorted(tiers.ECONOMY_OPERATIONS),
+            "choices": choices,
+        }
 
     @property
     def call_records(self) -> list[Any]:
@@ -504,7 +680,9 @@ class LLMProviderRouter:
                  "operation": "repair_" + tier, "provider": provider.provider_name,
                  "model": provider.model_id, "input_tokens": None, "output_tokens": None,
                  "token_source": "unknown", "estimated_cost_usd": None,
-                 "fallback_used": False, "transport_retries": "not_measured"}
+                 "fallback_used": False, "transport_retries": "not_measured", "tier": "quality"}
+        if _get_tiers().run_tag():
+            entry["run"] = _get_tiers().run_tag()
         started = time.monotonic()
         try:
             response = await asyncio.to_thread(getattr(provider, "call_measured", provider.call), plain)
@@ -549,16 +727,26 @@ class LLMProviderRouter:
         latency_ms: float,
         fallback_used: bool,
         retry_count: int,
+        tier: str = "quality",
+        token_source: str = "estimate",
+        masked: int = 0,
     ) -> Any:
         """Create and store an LLMCallRecord for cost/telemetry tracking."""
         LLMCallRecord, ProviderType = _get_schemas()
+        pricing = _get_pricing()
 
-        cost = self._estimate_cost(provider, model, input_tokens, output_tokens)
+        known, pricing_source = pricing.cost_usd(provider, model, input_tokens, output_tokens)
+        cost = known if known is not None else 0.0
+        quality_eq = None
+        if tier == "economy":
+            quality_eq, _ = pricing.cost_usd(self._bedrock_sonnet.provider_name, self._bedrock_sonnet.model_id,
+                                             input_tokens, output_tokens)
 
-        try:
-            provider_enum = ProviderType(provider)
-        except ValueError:
-            provider_enum = ProviderType.ANTHROPIC
+        provider_enum = {
+            "bedrock": ProviderType.BEDROCK, "gateway": ProviderType.BEDROCK,
+            "openai": ProviderType.OPENAI, "compatible": ProviderType.OPENAI,
+            "anthropic": ProviderType.ANTHROPIC,
+        }.get(provider, ProviderType.ANTHROPIC)
 
         record = LLMCallRecord(
             call_id=str(uuid.uuid4()),
@@ -578,19 +766,29 @@ class LLMProviderRouter:
 
         #: 비용 집계는 **한 곳** — 어느 진입점으로 불렀든 원장에 남는다.
         _, ledger = _get_shared()
-        ledger.record({
+        entry = {
             "call_id": record.call_id,
             "agent": agent,
             "operation": operation,
+            "tier": tier,
             "provider": provider,
             "model": model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "token_source": token_source,
             "latency_ms": int(latency_ms),
             "fallback_used": fallback_used,
             "retry_count": retry_count,
-            "estimated_cost_usd": cost,
-        })
+            #: 단가를 모르면 None — 0 달러로 적지 않는다(비교 도구가 "단가 미설정"으로 보여 준다).
+            "estimated_cost_usd": known,
+            "pricing_source": pricing_source,
+            "quality_equivalent_usd": quality_eq,
+            "masked": masked,
+        }
+        run = _get_tiers().run_tag()
+        if run:
+            entry["run"] = run
+        ledger.record(entry)
         return record
 
     @staticmethod
@@ -600,27 +798,9 @@ class LLMProviderRouter:
         input_tokens: int,
         output_tokens: int,
     ) -> float:
-        """
-        Estimate USD cost for the given provider/model/token counts.
-
-        Falls back to Sonnet pricing when the model is not in the table.
-        """
-        try:
-            from llm.bedrock_provider import COST_PER_1K_TOKENS as BEDROCK_COSTS
-        except ImportError:
-            try:
-                from core.llm.bedrock_provider import COST_PER_1K_TOKENS as BEDROCK_COSTS
-            except ImportError:
-                BEDROCK_COSTS = {}
-
-        if provider == "gemini":
-            return 0.0
-
-        rates = BEDROCK_COSTS.get(model, {"input": 0.003, "output": 0.015})
-        return (
-            (input_tokens / 1000.0) * rates["input"]
-            + (output_tokens / 1000.0) * rates["output"]
-        )
+        """USD 비용 어림(호환용). 단가 규칙은 llm/pricing.py 한 곳 — 모르는 단가는 0."""
+        cost, _ = _get_pricing().cost_usd(provider, model, input_tokens, output_tokens)
+        return cost or 0.0
 
     @staticmethod
     def _estimate_tokens(prompt: str, result: Any) -> tuple[int, int]:

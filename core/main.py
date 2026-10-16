@@ -82,6 +82,7 @@ from api.routes import (  # noqa: E402
     ops_alerts as ops_alerts_routes,
     aws_cleanup as aws_cleanup_routes,
     security_checks as security_checks_routes,
+    models as models_routes,
 )
 
 _bound_port: int = 0
@@ -391,6 +392,8 @@ def create_app() -> FastAPI:
     app.include_router(ops_alerts_routes.router)
     app.include_router(aws_cleanup_routes.router)
     app.include_router(security_checks_routes.router)
+    #: 2.0.36 작업별 AI 공급자·비용 원장·공급자 비교
+    app.include_router(models_routes.router)
 
     return app
 

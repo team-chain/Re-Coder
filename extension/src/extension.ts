@@ -15,7 +15,7 @@ import * as vscode from 'vscode';
 import { activeProjectPath, initActiveProject, pickProjectFolder } from './activeProject';
 import { DiscordWebhook } from './sidebar/discordWebhook';
 import { AlertWatcher } from './ops/alertWatcher';
-import { isAiKeyProvider, runAiConnectCommand } from './ai/aiKeys';
+import { isAiKeyProvider, isEconomyProvider, recentRoutingWrite, runAiConnectCommand, runEconomyCommand } from './ai/aiKeys';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CoreManager } from './core/CoreManager';
@@ -480,6 +480,21 @@ export function activate(context: vscode.ExtensionContext): void {
             const changed = await runAiConnectCommand(context, isAiKeyProvider(provider) ? provider : undefined);
             if (changed) { await vscode.commands.executeCommand('recoder.restartCore'); }
         })
+    );
+
+    // ── Command: 절약 등급 AI 공급자 (2.0.36) ─────────────────────────────────
+    // 계획 주제·요약·오류 분류·테스트 초안만 다른 공급자(DeepSeek 등)로. 코드 생성·보안 수정은 그대로.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.ai.economy', async (provider?: unknown) => {
+            const changed = await runEconomyCommand(context, isEconomyProvider(provider) ? provider : undefined);
+            if (changed) { await vscode.commands.executeCommand('recoder.restartCore'); }
+        }),
+        vscode.workspace.onDidChangeConfiguration(async (e) => {
+            const keys = ['economyProvider', 'economyModel', 'compatibleBaseUrl', 'compatibleModel', 'anthropicModel', 'openaiModel', 'prices'];
+            if (!keys.some((k) => e.affectsConfiguration(`recoder.ai.${k}`)) || recentRoutingWrite()) { return; }
+            const pick = await vscode.window.showInformationMessage('ReCoder: AI 공급자 설정이 바뀌었습니다. Core를 다시 시작해야 적용됩니다.', 'Core 다시 시작');
+            if (pick) { await vscode.commands.executeCommand('recoder.restartCore'); }
+        }),
     );
 
     // ── Command: 배포할 프로젝트 폴더 변경 ─────────────────────────────────────

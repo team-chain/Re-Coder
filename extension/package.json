@@ -2,7 +2,7 @@
   "name": "recoder",
   "displayName": "ReCoder — AI DevOps Agent",
   "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
-  "version": "2.0.35",
+  "version": "2.0.36",
   "publisher": "recoder-team",
   "license": "MIT",
   "preview": true,
@@ -176,7 +176,11 @@
       },
       {
         "command": "recoder.ai.connect",
-        "title": "ReCoder: Connect AI with API Key (Claude / ChatGPT)"
+        "title": "ReCoder: Connect AI with API Key (Claude / ChatGPT / OpenAI-compatible)"
+      },
+      {
+        "command": "recoder.ai.economy",
+        "title": "ReCoder: 절약 등급 AI 공급자 고르기 (요약·계획 주제·테스트 초안)"
       },
       {
         "command": "recoder.selectProject",
@@ -313,6 +317,41 @@
           "type": "string",
           "default": "",
           "description": "OpenAI API 키로 연결했을 때 쓸 모델 ID. 비우면 gpt-5-mini."
+        },
+        "recoder.ai.compatibleBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI 호환 API(DeepSeek 등) 주소. 예: https://api.deepseek.com — https 만 허용(내 PC 의 localhost 만 http). 키는 'ReCoder: Connect AI' 명령으로 보안 저장소에 넣습니다."
+        },
+        "recoder.ai.compatibleModel": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI 호환 API 에서 쓸 모델 ID. 비우면 deepseek-chat."
+        },
+        "recoder.ai.economyProvider": {
+          "type": "string",
+          "enum": ["", "fast", "anthropic", "openai", "compatible"],
+          "enumDescriptions": ["품질과 같은 공급자(기존 동작)", "품질 공급자의 빠른 모델", "Claude API", "OpenAI API", "OpenAI 호환 API (DeepSeek 등)"],
+          "default": "",
+          "description": "절약 등급 작업(설계 질문 주제·요약·오류 분류·원인 후보·테스트 초안)을 보낼 AI 공급자. 코드 생성·보안 수정·교정은 언제나 기본(품질) 공급자가 합니다. 다른 공급자로 나가는 문맥은 비밀값을 가립니다."
+        },
+        "recoder.ai.economyModel": {
+          "type": "string",
+          "default": "",
+          "description": "절약 등급에서 쓸 모델 ID. 비우면 그 공급자의 빠른 모델."
+        },
+        "recoder.ai.prices": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "input": { "type": "number", "minimum": 0, "description": "입력 100만 토큰당 달러" },
+              "output": { "type": "number", "minimum": 0, "description": "출력 100만 토큰당 달러" }
+            },
+            "required": ["input", "output"]
+          },
+          "markdownDescription": "모델별 단가(100만 토큰당 달러) — 비용 원장·공급자 비교에 씁니다. 예: `{\"deepseek-chat\": {\"input\": 0.5, \"output\": 1.5}}`(예시 숫자). 값은 공급자 가격표에서 확인하세요. 단가를 모르는 모델은 0 달러로 적지 않고 '단가 미설정'으로 보여 줍니다."
         },
         "recoder.bridge.httpPort": {
           "type": "number",

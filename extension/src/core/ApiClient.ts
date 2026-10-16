@@ -206,6 +206,17 @@ export interface TrustItem { key: string; principle: string; status: 'pass' | 'w
 export interface TrustPrinciple { key: string; label: string; summary: string; status: 'pass' | 'warn' | 'block'; items: TrustItem[] }
 export interface TrustReport { target: string; principles: TrustPrinciple[]; counts: Record<'pass' | 'warn' | 'block' | 'info', number>; scanned_files: number; truncated: boolean; note?: string }
 
+/** 2.0.36 작업별 AI 공급자 — 형태는 webview-src/components/modelRoutingModel.ts 와 같다(키 값은 오지 않는다). */
+export interface ModelRouting {
+    quality: { provider: string; model: string };
+    economy: { spec: string; provider: string; model: string; separate: boolean; scrubbed: boolean; note: string };
+    economy_operations: string[];
+    choices: Array<{ spec: string; label: string; ready: boolean; provider: string; model: string }>;
+}
+export interface ModelCostGroup { tier: 'economy' | 'quality'; provider: string; model: string; calls: number; input_tokens: number; output_tokens: number; cost_usd: number; unknown_cost_calls: number; estimated_token_calls: number; masked: number }
+export interface ModelCosts { calls: number; total_cost_usd: number; unknown_cost_calls: number; economy_saved_usd: number; groups: ModelCostGroup[]; days: number; persisted: boolean }
+export interface ModelCompareJob { id: string; status: 'running' | 'finished'; started_at: number; finished_at: number | null; instruction_chars: number; sides: Array<Record<string, unknown>>; verdict: Record<string, string | null> | null }
+
 export interface DeployPreflightResult {
     app_kind: 'server' | 'static' | 'unknown';
     summary: string;
@@ -590,6 +601,34 @@ export class ApiClient {
         }, false, 60000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '신뢰 점검 실패'); }
         return resp.data;
+    }
+
+    /** 2.0.36 등급별 AI 공급자(키 값 없음). */
+    async getModelRouting(): Promise<ModelRouting> {
+        const resp = await this.request<ModelRouting>('GET', '/api/models/routing');
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AI 공급자 정보를 받지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** 2.0.36 비용 원장 — 등급·공급자·모델별 토큰·비용. */
+    async getModelCosts(days = 30): Promise<ModelCosts> {
+        const resp = await this.request<ModelCosts>('GET', `/api/models/costs?days=${Math.max(1, Math.min(365, Math.round(days)))}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비용 원장을 받지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** 2.0.36 같은 요청을 두 공급자로 — 백그라운드 작업을 시작하고 바로 돌려준다. */
+    async startModelCompare(instruction: string, workspacePath: string, providers: [string, string]): Promise<ModelCompareJob> {
+        const resp = await this.request<ModelCompareJob>('POST', '/api/models/compare', { instruction, workspace_path: workspacePath, providers });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비교를 시작하지 못했습니다'); }
+        return resp.data;
+    }
+
+    async getModelCompare(jobId: string): Promise<ModelCompareJob | null> {
+        const path = jobId ? `/api/models/compare/${encodeURIComponent(jobId)}` : '/api/models/compare/latest';
+        const resp = await this.request<ModelCompareJob | { job: ModelCompareJob | null }>('GET', path);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비교 결과를 받지 못했습니다'); }
+        return 'job' in resp.data ? resp.data.job : resp.data;
     }
 
     /** 컨테이너 빌드·실행 가능성 정적 점검(파일만 읽음). */

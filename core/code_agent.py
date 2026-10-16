@@ -1514,7 +1514,12 @@ def _full_design_decisions(instruction: str, existing: list[str], open_file, con
 
     chunks = [topics[i:i + 3] for i in range(0, len(topics), 3)]
     with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as pool:
-        results = list(pool.map(cards, chunks))
+        #: 2.0.36 — 작업 스레드도 같은 공급자 고정·실행 표시를 보게 문맥을 넘긴다.
+        try:
+            from llm.task_tier import bind as _bind
+        except ImportError:  # pragma: no cover
+            from core.llm.task_tier import bind as _bind  # type: ignore
+        results = list(pool.map(_bind(cards), chunks))
     decisions = [d for part in results for d in part]
     return decisions or None
 

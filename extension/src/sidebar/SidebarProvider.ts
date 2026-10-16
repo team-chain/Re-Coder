@@ -1,4 +1,4 @@
-import { currentAiProvider } from '../ai/aiKeyEnv';
+import { currentAiProvider, isEconomyProvider, storedAiKeys } from '../ai/aiKeyEnv';
 import { withTimeout } from '../core/timeouts';
 import { detectFrontendProject } from '../deploy/frontendBuild';
 import * as vscode from 'vscode';
@@ -776,7 +776,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'ai.connect': {
                 //: AWS 없이 AI — Claude/ChatGPT API 키 입력. 키는 명령이 보안 저장소에 둔다.
                 const provider = (payload as { provider?: string } | undefined)?.provider;
-                await vscode.commands.executeCommand('recoder.ai.connect', provider === 'anthropic' || provider === 'openai' ? provider : undefined);
+                await vscode.commands.executeCommand('recoder.ai.connect', provider === 'anthropic' || provider === 'openai' || provider === 'compatible' ? provider : undefined);
                 break;
             }
             case 'webview.diagnostics.rerun': {
@@ -2234,6 +2234,66 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.postMessage('map.projectResult', data);
                 } catch (err) {
                     this.postMessage('map.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'models.load': {
+                //: 2.0.36 작업별 AI 공급자 화면 — 등급별 공급자·30일 비용·마지막 비교. 키 값은 보내지 않는다(있는지만).
+                try {
+                    const [routing, costs, compare, keys] = await Promise.all([
+                        this._apiClient.getModelRouting(),
+                        this._apiClient.getModelCosts(30),
+                        this._apiClient.getModelCompare('').catch(() => null),
+                        this._secrets && this._globalState ? storedAiKeys({ secrets: this._secrets, globalState: this._globalState }) : Promise.resolve(null),
+                    ]);
+                    const cfg = vscode.workspace.getConfiguration('recoder.ai');
+                    this.postMessageToWebview(requestWebview, 'models.state', {
+                        routing, costs, compare, keys,
+                        settings: { economyProvider: cfg.get<string>('economyProvider', '') || '', compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '' },
+                    });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'models.error', { message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'models.setEconomy': {
+                const provider = (payload as { provider?: unknown } | undefined)?.provider;
+                await vscode.commands.executeCommand('recoder.ai.economy', isEconomyProvider(provider) ? provider : undefined);
+                break;
+            }
+            case 'models.openPrices': {
+                await vscode.commands.executeCommand('workbench.action.openSettings', 'recoder.ai.prices');
+                break;
+            }
+            case 'models.compare.start': {
+                //: 같은 요청을 두 공급자로 — AI 요청이 두 번 나가 비용도 두 번 든다. 시작 전에 확인받는다.
+                const p = (payload ?? {}) as { instruction?: unknown; providers?: unknown };
+                const instruction = typeof p.instruction === 'string' ? p.instruction.trim() : '';
+                const providers = Array.isArray(p.providers) ? p.providers.map((x) => String(x)) : [];
+                if (!instruction || providers.length !== 2) {
+                    this.postMessageToWebview(requestWebview, 'models.compareError', { message: '요청과 비교할 공급자 두 개를 고르세요.' });
+                    break;
+                }
+                const ok = await vscode.window.showWarningMessage(
+                    '같은 요청을 두 AI 공급자에 각각 보냅니다. AI 요금이 두 번 들고, 끝날 때까지 몇 분 걸릴 수 있습니다. 파일은 바꾸지 않습니다.',
+                    { modal: true }, '비교 시작');
+                if (ok !== '비교 시작') { this.postMessageToWebview(requestWebview, 'models.compareError', { message: '' }); break; }
+                try {
+                    const job = await this._apiClient.startModelCompare(instruction, activeProjectPath() ?? '', [providers[0], providers[1]]);
+                    this.postMessageToWebview(requestWebview, 'models.compare', job);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'models.compareError', { message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'models.compare.poll': {
+                const id = String((payload as { id?: unknown } | undefined)?.id ?? '');
+                if (!/^[a-f0-9]{6,32}$/.test(id)) { break; }
+                try {
+                    const job = await this._apiClient.getModelCompare(id);
+                    if (job) { this.postMessageToWebview(requestWebview, 'models.compare', job); }
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'models.compareError', { message: err instanceof Error ? err.message : String(err) });
                 }
                 break;
             }
