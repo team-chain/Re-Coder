@@ -337,6 +337,8 @@ class DeploymentPlan(BaseModel):
     demo: Optional[dict] = None
     #: 승인 화면의 '실행할 명령' — 실행 경로와 같은 인자 조립 함수로 만든 순서 목록. 설정값은 *** 로 가린다.
     command_steps: list[dict] = Field(default_factory=list)
+    #: 2.0.35 배포 전 신뢰 점검(trust_check.evaluate) — 원칙별 통과·주의·막힘. 배포를 새로 막지 않는다.
+    trust: Optional[dict] = None
 
 
 class DeploymentRecord(BaseModel):

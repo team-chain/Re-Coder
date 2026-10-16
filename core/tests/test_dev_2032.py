@@ -125,7 +125,8 @@ def test_policy_grants_certificate_requests_and_load_balancer_reads():
     by = {s["Sid"]: s for s in ap.build_policy()["Statement"]}
     req = by["HttpsRequestCertificate"]
     assert req["Action"] == ["acm:RequestCertificate"] and req["Resource"] == "*"
-    assert req["Condition"]["StringEquals"] == {"aws:RequestedRegion": "us-east-1", "aws:RequestTag/recoder:managed": "true"}
+    # 2.0.35 원본 구간 HTTPS 인증서는 배포 리전에도 요청한다(us-east-1 은 CloudFront 용).
+    assert req["Condition"]["StringEquals"] == {"aws:RequestedRegion": ["<REGION>", "us-east-1"], "aws:RequestTag/recoder:managed": "true"}
     assert "acm:RequestCertificate" not in by["HttpsCertificate"]["Action"]
     assert {"ec2:DescribeInternetGateways", "ec2:DescribeAccountAttributes", "ec2:DescribeAddresses"} <= \
         set(by["DiscoverDefaultNetwork"]["Action"])

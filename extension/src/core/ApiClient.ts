@@ -201,6 +201,11 @@ export interface ChatAction {
     summary: string;
 }
 
+/** 2.0.35 배포 전 신뢰 점검 결과(core/trust_check.py). */
+export interface TrustItem { key: string; principle: string; status: 'pass' | 'warn' | 'block' | 'info'; title: string; detail: string; fix: string }
+export interface TrustPrinciple { key: string; label: string; summary: string; status: 'pass' | 'warn' | 'block'; items: TrustItem[] }
+export interface TrustReport { target: string; principles: TrustPrinciple[]; counts: Record<'pass' | 'warn' | 'block' | 'info', number>; scanned_files: number; truncated: boolean; note?: string }
+
 export interface DeployPreflightResult {
     app_kind: 'server' | 'static' | 'unknown';
     summary: string;
@@ -575,6 +580,15 @@ export class ApiClient {
             ...(runtime ? { env_names: runtime.envNames, environment: runtime.environment } : {}),
         }, false, 90000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
+        return resp.data;
+    }
+
+    /** 2.0.35 배포 전 신뢰 점검(제로 트러스트) — 읽기 전용. 설정은 이름·켜짐 여부만 보낸다(값 없음). */
+    async getTrustCheck(workspacePath: string, target: 'local' | 'ecs' | 's3', config: Record<string, unknown>, identityArn = ''): Promise<TrustReport> {
+        const resp = await this.request<TrustReport>('POST', '/api/deploy/trust-check', {
+            workspace_path: workspacePath, target, config, identity_arn: identityArn,
+        }, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '신뢰 점검 실패'); }
         return resp.data;
     }
 

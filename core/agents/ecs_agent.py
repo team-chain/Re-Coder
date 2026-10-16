@@ -232,6 +232,8 @@ class ECSAgent:
             #: 2.0.27 HTTPS 주소 — CloudFront 는 전역, 인증서는 us-east-1 에서만 붙는다(CloudFront 규칙).
             "cloudfront": session.client("cloudfront"),
             "acm_global": session.client("acm", region_name="us-east-1"),
+            #: 2.0.35 원본 구간 HTTPS — ALB 에 붙이는 인증서는 배포 리전에 있어야 한다.
+            "acm": session.client("acm"),
             "route53": session.client("route53"),
             #: 2.0.27 관리형 DB
             "rds": session.client("rds"),
@@ -881,6 +883,46 @@ class ECSAgent:
                 f"이번 배포에서 끈 {', '.join(left)} 은(는) 지우지 않고 남겨 두었습니다 — 계속 요금이 나옵니다. "
                 "다시 켤 계획이 없으면 운영 화면의 「AWS 리소스 정리」에서 지우세요.")
 
+    def _prepare_origin_tls(self, req: ECSDeployRequest, clients: dict, edge: "aws_edge.EdgeResult",
+                            cert: "Optional[aws_cdn.CertificateState]", tags: dict) -> "aws_cdn.OriginTls":
+        """origin.<도메인> → ALB 443(배포 리전 인증서). 모든 준비가 끝난 배포에서만 ready — 그 전에는 지금처럼 HTTP 원본.
+
+        실패해도 배포는 계속한다(원본 잠금 머리글과 CloudFront 전용 보안 그룹이 계속 막는다)."""
+        host = aws_cdn.origin_host(req.custom_domain)
+        out = aws_cdn.OriginTls(host=host)
+        zone_id = cert.zone_id if cert is not None else ""
+        if not zone_id:
+            out.notes.append(f"{req.custom_domain} 영역이 Route 53 에 없어 CloudFront 와 로드밸런서 사이는 HTTP 로 둡니다"
+                             "(원본 잠금 머리글로 막음). Route 53 으로 옮기면 다음 배포에서 HTTPS 로 바뀝니다.")
+            return out
+        if "acm" not in clients or not edge.zone_id:
+            return out
+        try:
+            origin_cert = aws_cdn.ensure_certificate(
+                clients["acm"], clients["route53"], host, then="CloudFront 와 로드밸런서 사이가 HTTPS 로 바뀝니다",
+                tags={**tags, "recoder:region": req.region, aws_cdn.ORIGIN_TAG: "true"})
+            out.certificate_arn = origin_cert.arn
+            conflict = aws_cdn.point_origin(clients["route53"], zone_id, host, edge.dns_name, edge.zone_id)
+            if conflict:
+                out.notes.append(conflict)
+                return out
+            if not origin_cert.issued:
+                out.status = "pending"
+                out.notes += origin_cert.notes
+                return out
+            aws_edge.allow_https_from_cloudfront(clients["ec2"], edge.alb_security_group,
+                                                 aws_cdn.cloudfront_prefix_list(clients["ec2"]))
+            out.listener_arn = aws_edge.ensure_https_listener(
+                clients["elbv2"], alb_arn=edge.alb_arn, tg_arn=edge.target_group_arn, certificate_arn=origin_cert.arn,
+                http_listener_arn=edge.listener_arn, tags=tags)
+            out.status = "ready"
+        except Exception as exc:  # noqa: BLE001 - 원본 구간은 HTTP 로 계속(머리글 잠금 유지)
+            out.status = "skipped"
+            out.listener_arn = ""
+            out.notes.append(f"CloudFront 와 로드밸런서 사이 HTTPS 를 준비하지 못했습니다({aws_infra.error_message(exc)}) — "
+                             "지금은 HTTP 로 두고 원본 잠금 머리글로 막습니다. 권한 템플릿 스택을 2.0.35 템플릿으로 업데이트한 뒤 다시 배포하세요.")
+        return out
+
     def _provision_cdn(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict,
                        edge: "aws_edge.EdgeResult") -> None:
         tags = self.resource_tags(req)
@@ -922,12 +964,16 @@ class ECSAgent:
                                      detail=aws_infra.error_message(exc),
                                      remedy="권한 템플릿 스택을 2.0.31 템플릿으로 업데이트하세요(전역 범위 WAF 권한). "
                                             "급하면 대규모 방패를 「로드밸런서만」으로 바꿔 배포할 수 있습니다.") from exc
+        #: 2.0.35 원본 구간 HTTPS — 내 도메인이 Route 53 에 있으면 CloudFront → ALB 도 HTTPS 로(준비된 배포부터).
+        tls = self._prepare_origin_tls(req, clients, edge, cert, tags) if req.custom_domain else aws_cdn.OriginTls()
+        notes += tls.notes
         cdn = aws_cdn.ensure_distribution(
-            clients["cloudfront"], name=edge.name, origin=edge.dns_name, tags=tags,
+            clients["cloudfront"], name=edge.name, origin=tls.host if tls.ready else edge.dns_name, tags=tags,
             alias=req.custom_domain if cert is not None and cert.issued else "",
             certificate_arn=cert.arn if cert is not None and cert.issued else "",
-            web_acl_id=global_acl, region=req.region)
+            web_acl_id=global_acl, region=req.region, origin_https=tls.ready)
         self._cdn[id(req)] = cdn
+        listeners = [edge.listener_arn] + ([tls.listener_arn] if tls.listener_arn else [])
         if waf and not legacy_waf:
             edge.web_acl_arn = str(global_acl)
             if cdn.web_acl_live:
@@ -962,7 +1008,8 @@ class ECSAgent:
         #: (방금 머리글을 넣은 옛 배포를 바로 잠그면 퍼지는 동안 사용자가 403 을 본다).
         if cdn.origin_secret_live:
             try:
-                aws_edge.lock_origin(clients["elbv2"], edge.listener_arn, edge.target_group_arn, cdn.origin_secret)
+                for listener in listeners:
+                    aws_edge.lock_origin(clients["elbv2"], listener, edge.target_group_arn, cdn.origin_secret)
                 rec.provisioned["origin_lock"] = "켜짐 — CloudFront 를 거치지 않은 요청은 로드밸런서가 403 으로 막습니다."
             except Exception as exc:  # noqa: BLE001 - 보안 그룹이 이미 CloudFront 주소만 받는다(한 겹 더 하는 보호)
                 rec.provisioned["origin_lock"] = (f"켜지 못함({aws_infra.error_message(exc)}) — 권한 템플릿 스택을 최신으로 업데이트한 뒤 "
@@ -971,8 +1018,10 @@ class ECSAgent:
             widened = False
             try:
                 # 이미 잠긴 리스너(머리글 값이 바뀐 경우) — 새 값도 받게 넓혀, 퍼지는 동안 403 이 나지 않게 한다.
-                widened = aws_edge.widen_origin_lock(clients["elbv2"], edge.listener_arn, edge.target_group_arn,
-                                                     cdn.origin_secret)
+                widened = False
+                for listener in listeners:
+                    widened = aws_edge.widen_origin_lock(clients["elbv2"], listener, edge.target_group_arn,
+                                                         cdn.origin_secret) or widened
             except Exception as exc:  # noqa: BLE001
                 logger.info("원본 잠금 확인 생략: %s", aws_infra.error_message(exc))
             rec.provisioned["origin_lock"] = (
@@ -997,6 +1046,10 @@ class ECSAgent:
             rec.provisioned[f"domain_note_{i + 1}"] = note
         rec.provisioned["https"] = (f"켜짐 — https://{cdn.domain} ({'새로 만듦 · 전 세계에 퍼지는 데 5~15분' if cdn.created else '기존 것 사용'}), "
                                     "로드밸런서는 CloudFront 에서 오는 연결만 받습니다.")
+        rec.provisioned["origin_tls"] = (
+            f"켜짐 — CloudFront 와 로드밸런서 사이도 HTTPS({tls.host}, TLS 1.2 이상)입니다." if tls.ready else
+            "준비 중 — 로드밸런서 인증서 발급을 기다립니다. 발급 뒤 다음 배포에서 CloudFront 와 로드밸런서 사이를 HTTPS 로 바꿉니다." if tls.status == "pending" else
+            "꺼짐 — CloudFront 와 로드밸런서 사이는 HTTP 입니다(원본 잠금 머리글로 막음). 내 도메인을 Route 53 에 두면 HTTPS 로 바뀝니다.")
         if waf:
             rec.provisioned["waf"] = (f"켜짐({'로드밸런서 — 권한표 업데이트 필요' if legacy_waf else 'CloudFront'}) — 사용자 IP당 {req.waf_window // 60}분 {req.waf_rate_limit:,}회 넘으면 차단 "
                                       "+ AWS 관리 규칙 2개")

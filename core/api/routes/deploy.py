@@ -3914,9 +3914,61 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
             except Exception as exc:  # noqa: BLE001 - 점검 실패가 계획을 막지 않는다
                 logger.warning("deploy settings check failed: %s", exc)
 
+        #: 2.0.35 배포 전 신뢰 점검(제로 트러스트) — 승인 카드에 원칙별로 보여 준다. 점검 실패는 계획을 막지 않는다.
+        try:
+            has_previous = any(r.container_name == plan.container_name and r.status == DeployStatus.SUCCESS
+                               for r in _records_newest_first()) if plan.container_name else None
+            plan.trust = await asyncio.wait_for(asyncio.to_thread(
+                _trust_report, request.workspace_path, "local",
+                {"enable_continuous_verification": plan.enable_continuous_verification}, "", has_previous), timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("trust check failed: %s", exc)
+
     _deployment_plans[plan.plan_id] = plan
     _plan_workspaces[plan.plan_id] = request.workspace_path or ""
     return plan
+
+
+def _trust_report(workspace_path: str, target: str, config: dict, identity_arn: str = "",
+                  has_rollback: Optional[bool] = None) -> dict:
+    try:
+        import trust_check  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import trust_check  # type: ignore
+    return trust_check.evaluate(workspace_path, target, config, identity_arn=identity_arn, has_rollback=has_rollback)
+
+
+class TrustCheckRequest(BaseModel):
+    workspace_path: str = Field(min_length=1, max_length=4096)
+    target: Literal["local", "ecs", "s3"]
+    #: 보호·환경 설정(https·edge·custom_domain·environment·database·alerts·shield·assign_public_ip·dir)과
+    #: 환경변수·비밀값 참조의 **이름**. 값은 받지 않는다(받아도 쓰지 않는다).
+    config: dict = Field(default_factory=dict)
+    identity_arn: str = Field(default="", max_length=2048)
+
+
+_TRUST_CONFIG_KEYS = {"https", "edge", "custom_domain", "environment", "database", "alerts", "shield",
+                      "assign_public_ip", "dir", "enable_continuous_verification"}
+
+
+@router.post("/api/deploy/trust-check")
+async def deploy_trust_check(request: TrustCheckRequest) -> dict:
+    """배포 전 신뢰 점검(2.0.35) — 승인 카드의 「제로 트러스트 점검」. 읽기 전용이며 AWS 를 부르지 않는다."""
+    workspace = Path(request.workspace_path).expanduser()
+    if not workspace.is_dir():
+        raise HTTPException(status_code=400, detail="작업 폴더를 찾지 못했습니다.")
+    config = {k: v for k, v in (request.config or {}).items() if k in _TRUST_CONFIG_KEYS and isinstance(v, (str, bool, int))}
+    for key in ("env_vars", "secret_refs"):
+        names = (request.config or {}).get(key)
+        if isinstance(names, dict):
+            config[key] = {str(k)[:128]: "" for k in list(names)[:200]}
+        elif isinstance(names, list):
+            config[key] = {str(k)[:128]: "" for k in names[:200]}
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(
+            _trust_report, str(workspace), request.target, config, request.identity_arn), timeout=45)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="신뢰 점검이 시간 안에 끝나지 않았습니다(파일이 아주 많은 폴더).") from exc
 
 
 def _docker_port_publishers(port: int) -> Optional[list[str]]:

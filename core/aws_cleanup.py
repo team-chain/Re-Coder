@@ -35,13 +35,17 @@ CLIENTS = ("ecs", "ecr", "logs", "ec2", "elbv2", "wafv2", "cloudwatch", "sns", "
            # 2.0.27 HTTPS 주소·관리형 DB — acm_global 은 us-east-1 클라이언트(CloudFront 인증서)
            "cloudfront", "acm_global", "rds", "secretsmanager",
            # 2.0.31 CloudFront 에 붙인 WAF(전역 범위) — us-east-1 클라이언트
-           "wafv2_global")
+           "wafv2_global",
+           # 2.0.35 원본 구간 HTTPS — 배포 리전 인증서(acm) · origin.<도메인> 레코드(route53)
+           "acm", "route53")
 #: 리전을 us-east-1 로 고정해 만드는 클라이언트(이름 → 실제 서비스).
 GLOBAL_CLIENTS = {"acm_global": "acm", "wafv2_global": "wafv2"}
 
 #: 삭제 순서(작을수록 먼저).
 ORDER = {
     "ecs_service": 0, "task_definitions": 1, "cloudfront": 2, "waf_cdn": 3, "acm_certificate": 4, "waf": 5, "alb": 6,
+    #: 로드밸런서(443 리스너)가 쓰는 인증서 — 로드밸런서를 지운 뒤에
+    "acm_origin_certificate": 6.5,
     "target_group": 7, "rds_instance": 8, "rds_subnet_group": 9, "rds_parameter_group": 10, "secret": 11,
     "alarm": 12, "sns_topic": 13, "ecr": 14, "log_group": 15, "security_group": 16, "ecs_cluster": 17, "s3_bucket": 18,
 }
@@ -54,6 +58,7 @@ LABELS = {
     "cloudfront": "HTTPS 주소(CloudFront)", "acm_certificate": "도메인 인증서(ACM)", "rds_instance": "관리형 DB(RDS)",
     "rds_subnet_group": "DB 서브넷 그룹", "rds_parameter_group": "DB 파라미터 그룹", "secret": "DB 접속 정보(Secrets Manager)",
     "waf_cdn": "WAF 웹 ACL(HTTPS 주소)",
+    "acm_origin_certificate": "원본 구간 인증서(ACM · 로드밸런서)",
 }
 COST = {
     "ecs_service": "실행 중인 태스크만큼 시간당 요금", "task_definitions": "요금 없음", "waf": "매달 고정 요금 + 요청 수",
@@ -63,6 +68,7 @@ COST = {
     "cloudfront": "나가는 데이터·요청 수", "acm_certificate": "요금 없음", "rds_instance": "켜 두는 동안 시간당 + 저장 용량",
     "rds_subnet_group": "요금 없음", "rds_parameter_group": "요금 없음", "secret": "비밀당 매달 소액",
     "waf_cdn": "매달 고정 요금 + 요청 수",
+    "acm_origin_certificate": "요금 없음",
 }
 def make_clients(session: Any) -> dict:
     """boto3 세션 하나로 정리에 쓰는 클라이언트 묶음(인증서는 us-east-1)."""
@@ -362,6 +368,8 @@ def _find_cdn(cloudfront: Any, acm: Any, items: list[Item], region: str = "", fo
         t = _tags_dict(acm.list_tags_for_certificate(CertificateArn=cert["CertificateArn"]).get("Tags"))
         if not _managed(t):
             continue  # 사용자가 직접 만든 인증서는 목록에도 넣지 않는다(이름으로 구분할 수 없음)
+        if t.get("recoder:origin") == "true":
+            continue  # 원본 구간 인증서 — _find_origin_certs 가 배포 리전에서 따로 찾는다(us-east-1 배포면 같은 목록)
         cert_region = t.get("recoder:region", "")
         if region and (cert_region != region if cert_region else cert.get("DomainName") in foreign["domains"]):
             continue  # 다른 리전 배포의 인증서
@@ -369,6 +377,24 @@ def _find_cdn(cloudfront: Any, acm: Any, items: list[Item], region: str = "", fo
                           name=cert.get("DomainName", ""), arn=cert["CertificateArn"], tagged=True,
                           service=t.get(SERVICE_TAG, ""), project=t.get(PROJECT_TAG, ""),
                           detail=str(cert.get("Status", ""))))
+
+
+def _find_origin_certs(acm: Any, items: list[Item]) -> None:
+    """2.0.35 원본 구간 HTTPS 인증서(origin.<도메인>, 배포 리전) — recoder:origin 태그가 있는 것만."""
+    token = ""
+    while True:
+        page = acm.list_certificates(**({"NextToken": token} if token else {}))
+        for cert in page.get("CertificateSummaryList", []):
+            t = _tags_dict(acm.list_tags_for_certificate(CertificateArn=cert["CertificateArn"]).get("Tags"))
+            if not _managed(t) or t.get("recoder:origin") != "true":
+                continue
+            items.append(Item(id=f"acm_origin_certificate:{cert['CertificateArn'].rsplit('/', 1)[-1]}",
+                              kind="acm_origin_certificate", name=cert.get("DomainName", ""), arn=cert["CertificateArn"],
+                              tagged=True, service=t.get(SERVICE_TAG, ""), project=t.get(PROJECT_TAG, ""),
+                              detail=str(cert.get("Status", ""))))
+        token = page.get("NextToken") or ""
+        if not token:
+            return
 
 
 def _find_rds(rds: Any, sm: Any, items: list[Item]) -> None:
@@ -420,11 +446,12 @@ def find(clients: dict, *, region: str, records: Iterable[dict] = ()) -> tuple[l
         ("HTTPS 주소 WAF", lambda: _find_waf(clients["wafv2_global"], items, scope="CLOUDFRONT", kind="waf_cdn",
                                            region=region, foreign=foreign)),
         ("관리형 DB", lambda: _find_rds(clients["rds"], clients["secretsmanager"], items)),
+        ("원본 구간 인증서", lambda: _find_origin_certs(clients["acm"], items)),
     ]
     for label, step in steps:
         try:
             needs = {"HTTPS 주소": ("cloudfront", "acm_global"), "관리형 DB": ("rds", "secretsmanager"),
-                     "HTTPS 주소 WAF": ("wafv2_global",)}.get(label, ())
+                     "HTTPS 주소 WAF": ("wafv2_global",), "원본 구간 인증서": ("acm",)}.get(label, ())
             if not all(k in clients for k in needs):
                 continue
             step()
@@ -569,6 +596,25 @@ def _delete_one(clients: dict, item: Item, *, region: str, all_items: list[Item]
                 raise
             raise _Kept("CloudFront 가 아직 이 인증서를 씁니다 — CloudFront 가 지워진 뒤 정리를 다시 실행하면 지웁니다.") from exc
         return "지웠습니다."
+    if k == "acm_origin_certificate":
+        try:
+            _retry(lambda: clients["acm"].delete_certificate(CertificateArn=item.arn), ("ResourceInUseException",),
+                   sleep=sleep, attempts=3, delay=10)
+        except Exception as exc:  # noqa: BLE001
+            if error_code(exc) != "ResourceInUseException":
+                raise
+            raise _Kept("로드밸런서가 아직 이 인증서를 씁니다 — 로드밸런서가 지워진 뒤 정리를 다시 실행하면 지웁니다.") from exc
+        note = ""
+        if "route53" in clients:
+            try:
+                from core import aws_cdn  # type: ignore
+            except ImportError:  # pragma: no cover
+                import aws_cdn  # type: ignore
+            try:
+                note = aws_cdn.remove_origin_record(clients["route53"], item.name)
+            except Exception as exc:  # noqa: BLE001 - 인증서는 지웠다. 레코드는 사람이 지워도 된다
+                note = f"{item.name} 레코드는 지우지 못했습니다({error_message(exc)}) — Route 53 에서 지우세요."
+        return "지웠습니다." + (f" {note}" if note else "")
     if k == "rds_instance":
         try:
             from core import aws_rds  # type: ignore

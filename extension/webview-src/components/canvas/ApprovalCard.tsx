@@ -1,13 +1,16 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Checkbox } from "../Check";
 import { regionMismatchWarning } from "../DeploymentCenter";
+import { TrustCheck, TrustReport } from "../TrustCheck";
 export interface Config { target: "ecs" | "s3" | "github"; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[];
   /** 2.0.25 보호·운영 */
   shield?: boolean; shield_level?: "loose" | "normal" | "strict"; alerts?: boolean; alert_email?: string;
   edge?: "none" | "alb" | "alb_waf"; waf_rate_limit?: number; waf_window?: number; edge_cost_approved?: boolean;
   https?: boolean; custom_domain?: string; database?: "task" | "rds"; db_cost_approved?: boolean }
 export interface Issue { code: string; message: string; fix: string; remediation_available: boolean; proposal_id: string | null }
-export interface Plan { id: string; config: Config; projectName: string; repository: string; branch: string; commit: string; dirty: boolean; account: string; coreRegion: string; preflight: { blocked?: boolean; summary?: string; reasons?: Issue[]; warnings?: Issue[] }; staticSite?: {files:string[];excluded:string;notes?:string[]}; targetState?: { exists: boolean|null; task_definition:string; images:Array<{image:string;digest:string}>; budget:Array<{name:string;limit:string;spent:string;unit:string;period:string}>|null; warnings:string[] } }
+export interface Plan { id: string; config: Config; projectName: string; repository: string; branch: string; commit: string; dirty: boolean; account: string; coreRegion: string; preflight: { blocked?: boolean; summary?: string; reasons?: Issue[]; warnings?: Issue[] }; staticSite?: {files:string[];excluded:string;notes?:string[]}; targetState?: { exists: boolean|null; task_definition:string; images:Array<{image:string;digest:string}>; budget:Array<{name:string;limit:string;spent:string;unit:string;period:string}>|null; warnings:string[] };
+  /** 2.0.35 배포 전 신뢰 점검(제로 트러스트) — 코어가 못 하면 없다. */
+  trust?: TrustReport | null }
 /** 승인 카드에 보이는 자동 수정 — [모두 적용] 이 한 번에 보낸다. */
 export function fixableProposals(plan: Plan): string[] {
   return [...new Set([...(plan.preflight.reasons||[]), ...(plan.preflight.warnings||[])]
@@ -40,6 +43,7 @@ export function ApprovalCard({ plan, onApprove, onCancel, onFix, onFixAll }: { p
       {c.target!=='github' && <><dt>AWS 예산</dt><dd>{plan.targetState?.budget?.length ? plan.targetState.budget.map((b,i)=><div key={i}>{b.name} · {b.period}: {b.spent ?? '미확인'} / {b.limit ?? '미확인'} {b.unit}</div>) : '이 화면에서 조회되지 않았습니다. AWS 비용·예산을 확인하세요.'}<div>실행 중인 리소스에는 비용이 발생합니다.</div></dd></>}
     </dl>
     {plan.preflight.summary && <p className="rc-muted">{plan.preflight.summary}</p>}
+    <TrustCheck report={plan.trust} />
     {plan.targetState?.warnings.map((warning,i)=><p className="rc-note" key={i}>{warning}</p>)}
     {/* 막는 문제와 참고 경고를 나눠 보여 준다 — 예전엔 한 목록이라 무엇 때문에 승인 버튼이 꺼졌는지 알 수 없었다(실기기 ECS). */}
     {/* 실기기 2.0.12: 자동 수정 4건을 하나씩 누르고 다시 검사해야 했다 — 한 번에 적용하고 다시 판정한다. */}

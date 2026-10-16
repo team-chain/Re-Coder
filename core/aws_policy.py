@@ -852,12 +852,14 @@ def _ecs_statements(
             "Resource": "*",
         },
         {
-            # CloudFront 인증서는 us-east-1 에만 둘 수 있다.
+            # CloudFront 인증서는 us-east-1 에만 둘 수 있다. 2.0.35 원본 구간 HTTPS(origin.<도메인> → ALB 443)의
+            # 인증서는 ALB 와 같은 배포 리전에 둔다.
             "Sid": "HttpsCertificate",
             "Effect": "Allow",
             "Action": ["acm:AddTagsToCertificate", "acm:DescribeCertificate",
                        "acm:ListTagsForCertificate", "acm:DeleteCertificate"],
-            "Resource": f"arn:{ctx.partition}:acm:us-east-1:{ctx.account}:certificate/*",
+            "Resource": sorted({f"arn:{ctx.partition}:acm:us-east-1:{ctx.account}:certificate/*",
+                                f"arn:{ctx.partition}:acm:{ctx.region}:{ctx.account}:certificate/*"}),
         },
         {
             # 2.0.32 — RequestCertificate 는 리소스 단위 제한을 지원하지 않는다(인증서 ARN 에 걸면 늘 거절).
@@ -866,7 +868,7 @@ def _ecs_statements(
             "Effect": "Allow",
             "Action": ["acm:RequestCertificate"],
             "Resource": "*",
-            "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-1",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": sorted({"us-east-1", ctx.region}),
                                            "aws:RequestTag/recoder:managed": "true"}},
         },
         {

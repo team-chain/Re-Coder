@@ -5,6 +5,11 @@ ReCoder Core — HTTPS 주소: 로드밸런서 앞 CloudFront (+ 선택: 내 도
 
   사용자 ─HTTPS→ CloudFront ─HTTP→ ALB(CloudFront 주소에서만 받음) → 방패(nginx) → 앱
 
+  2.0.35 내 도메인을 쓰면 CloudFront → ALB 구간도 HTTPS 로 바꾼다(원본 잠금 머리글이 평문으로 가지 않게).
+  ALB 기본 주소(*.elb.amazonaws.com)로는 인증서를 받을 수 없어, 같은 영역에 `origin.<도메인>` 을 ALB 별칭으로 두고
+  배포 리전 ACM 인증서로 ALB 443 리스너를 연다. 인증서가 발급되고 리스너·레코드가 준비된 배포부터 CloudFront 원본을
+  `origin.<도메인>`·HTTPS 전용으로 바꾼다. 그 전(발급 대기)이나 Route 53 에 영역이 없으면 지금처럼 HTTP 로 둔다.
+
   · 캐시는 끈다(CachingDisabled) — 생성 앱은 로그인·장바구니처럼 사용자마다 다른 응답이 많다.
   · 사용자 머리글·쿠키·쿼리를 모두 넘기고(AllViewerAndCloudFrontHeaders), CloudFront 가 사용자 IP(CloudFront-Viewer-Address)와
     원래 프로토콜(CloudFront-Forwarded-Proto)을 붙인다 — 방패가 이것으로 IP 별 제한을 건다.
@@ -46,6 +51,10 @@ COST_NOTE = "CloudFront 는 나가는 데이터·요청 수만큼 요금이 나�
 def comment_for(name: str, region: str = "") -> str:
     """배포를 찾는 표시. 2.0.32 부터 리전을 붙인다 — 같은 서비스 이름을 두 리전에 배포하면 한 배포를 서로 덮어썼다."""
     return f"recoder:{name}@{region}" if region else f"recoder:{name}"
+
+
+def region_from_tags(tags: Optional[dict]) -> str:
+    return str((tags or {}).get("recoder:region", ""))
 
 
 def origin_region(domain: str) -> str:
@@ -125,14 +134,15 @@ def new_origin_secret() -> str:
 
 
 def _config(name: str, origin: str, *, alias: str = "", certificate_arn: str = "", origin_secret: str = "",
-            web_acl_id: str = "", region: str = "") -> dict:
+            web_acl_id: str = "", region: str = "", origin_https: bool = False) -> dict:
     cfg: dict = {
         "CallerReference": f"{name}-{int(time.time())}-{secrets.token_hex(4)}",
         "Comment": comment_for(name, region),
         "Enabled": True,
         "Origins": {"Quantity": 1, "Items": [{
             "Id": "recoder-alb", "DomainName": origin,
-            "CustomOriginConfig": {"HTTPPort": 80, "HTTPSPort": 443, "OriginProtocolPolicy": "http-only",
+            "CustomOriginConfig": {"HTTPPort": 80, "HTTPSPort": 443,
+                                   "OriginProtocolPolicy": "https-only" if origin_https else "http-only",
                                    "OriginSslProtocols": {"Quantity": 1, "Items": ["TLSv1.2"]},
                                    "OriginReadTimeout": 60, "OriginKeepaliveTimeout": 5},
             "CustomHeaders": ({"Quantity": 1, "Items": [{"HeaderName": ORIGIN_HEADER, "HeaderValue": origin_secret}]}
@@ -161,18 +171,20 @@ def _config(name: str, origin: str, *, alias: str = "", certificate_arn: str = "
 
 def ensure_distribution(cloudfront: Any, *, name: str, origin: str, tags: Optional[dict] = None,
                         alias: str = "", certificate_arn: str = "", web_acl_id: Optional[str] = None,
-                        region: str = "") -> CdnResult:
+                        region: str = "", origin_https: bool = False) -> CdnResult:
     """ALB 를 원본으로 하는 배포를 확보한다. 있으면 원본·도메인·원본 잠금 머리글·WAF 만 맞춘다.
 
-    web_acl_id: CloudFront 범위 웹 ACL ARN, "" 은 떼기, None 은 그대로 두기."""
-    region = region or origin_region(origin)
+    web_acl_id: CloudFront 범위 웹 ACL ARN, "" 은 떼기, None 은 그대로 두기.
+    origin_https: 원본이 `origin.<도메인>`(ALB 443, 인증서 있음)일 때 True — CloudFront 가 ALB 에 HTTPS 로만 붙는다."""
+    region = region or origin_region(origin) or region_from_tags(tags)
     existing = _find(cloudfront, comment_for(name, region), legacy=comment_for(name), region=region)
     if existing is None:
         secret = new_origin_secret()
         try:
             dist = cloudfront.create_distribution_with_tags(DistributionConfigWithTags={
                 "DistributionConfig": _config(name, origin, alias=alias, certificate_arn=certificate_arn,
-                                              origin_secret=secret, web_acl_id=web_acl_id or "", region=region),
+                                              origin_secret=secret, web_acl_id=web_acl_id or "", region=region,
+                                              origin_https=origin_https),
                 "Tags": {"Items": [{"Key": k, "Value": v} for k, v in (tags or {}).items()]},
             })["Distribution"]
         except Exception as exc:  # noqa: BLE001
@@ -190,13 +202,15 @@ def ensure_distribution(cloudfront: Any, *, name: str, origin: str, tags: Option
     acl_before = str(cfg.get("WebACLId") or "")
     secret = secret or new_origin_secret()
     want = _config(name, origin, alias=alias, certificate_arn=certificate_arn, origin_secret=secret,
-                   web_acl_id=web_acl_id or "", region=region)
+                   web_acl_id=web_acl_id or "", region=region, origin_https=origin_https)
     changed = False
     if region and cfg.get("Comment") != want["Comment"]:
         cfg["Comment"] = want["Comment"]  # 옛 표시(리전 없음)를 이번에 리전 표시로 바꾼다
         changed = True
     first = cfg["Origins"]["Items"][0]
-    if first.get("DomainName") != origin or _origin_header(cfg) != secret:
+    protocol = str((first.get("CustomOriginConfig") or {}).get("OriginProtocolPolicy", ""))
+    if first.get("DomainName") != origin or _origin_header(cfg) != secret or \
+            protocol != want["Origins"]["Items"][0]["CustomOriginConfig"]["OriginProtocolPolicy"]:
         # 원본을 통째로 맞춘다(사람이 더한 다른 머리글은 남긴다).
         others = [h for h in (first.get("CustomHeaders") or {}).get("Items") or []
                   if str(h.get("HeaderName", "")).lower() != ORIGIN_HEADER.lower()]
@@ -262,8 +276,9 @@ class CertificateState:
 
 
 def ensure_certificate(acm: Any, route53: Any, domain: str, *, tags: Optional[dict] = None,
-                       sleep: Callable[[float], None] = time.sleep) -> CertificateState:
-    """`acm` 은 반드시 us-east-1 클라이언트(CloudFront 인증서 규칙). 발급을 기다리지 않는다."""
+                       sleep: Callable[[float], None] = time.sleep, then: str = "도메인이 연결됩니다") -> CertificateState:
+    """`acm` 은 CloudFront 용이면 us-east-1 클라이언트, 원본(ALB) 용이면 배포 리전 클라이언트. 발급을 기다리지 않는다.
+    then: 발급 뒤 다시 배포하면 일어나는 일(안내 문장)."""
     arn = ""
     for status in (["ISSUED"], ["PENDING_VALIDATION"]):
         token = ""
@@ -303,12 +318,12 @@ def ensure_certificate(acm: Any, route53: Any, domain: str, *, tags: Optional[di
             try:
                 _upsert(route53, state.zone_id, {"Name": record["Name"], "Type": record["Type"], "TTL": 300,
                                                  "ResourceRecords": [{"Value": record["Value"]}]})
-                state.notes.append("Route 53 에 인증서 검증 레코드를 넣었습니다 — 보통 수 분 안에 발급됩니다. 발급 뒤 다시 배포하면 도메인이 연결됩니다.")
+                state.notes.append(f"Route 53 에 {domain} 인증서 검증 레코드를 넣었습니다 — 보통 수 분 안에 발급됩니다. 발급 뒤 다시 배포하면 {then}.")
             except Exception as exc:  # noqa: BLE001 - 배포는 CloudFront 기본 주소로 계속
                 state.notes.append(f"Route 53 에 검증 레코드를 넣지 못했습니다({error_message(exc)}) — 도메인 DNS 에 직접 넣으세요: "
                                    f"{record['Name']} CNAME {record['Value']}")
     elif record and not state.issued:
-        state.notes.append(f"도메인 DNS 에 검증 레코드를 넣으세요: {record['Name']} CNAME {record['Value']} — 발급된 뒤 다시 배포하면 도메인이 연결됩니다.")
+        state.notes.append(f"도메인 DNS 에 검증 레코드를 넣으세요: {record['Name']} CNAME {record['Value']} — 발급된 뒤 다시 배포하면 {then}.")
     return state
 
 
@@ -343,6 +358,68 @@ def point_domain(route53: Any, zone_id: str, domain: str, distribution_domain: s
         _upsert(route53, zone_id, {"Name": domain, "Type": kind, "AliasTarget": {
             "HostedZoneId": CLOUDFRONT_ZONE_ID, "DNSName": distribution_domain, "EvaluateTargetHealth": False}})
     return notes
+
+
+# ---------------------------------------------------------------------------
+# 2.0.35 원본 구간 HTTPS — origin.<도메인> → ALB 443(배포 리전 ACM 인증서)
+# ---------------------------------------------------------------------------
+
+ORIGIN_LABEL = "origin"
+#: 원본 인증서 표시 태그(정리에서 배포 리전 인증서를 찾는다)
+ORIGIN_TAG = "recoder:origin"
+
+
+def origin_host(domain: str) -> str:
+    """CloudFront 가 HTTPS 로 붙을 원본 주소 — 사용자 도메인 바로 아래 한 단계(origin.shop.example.com)."""
+    return f"{ORIGIN_LABEL}.{domain.strip().rstrip('.').lower()}"
+
+
+@dataclass
+class OriginTls:
+    """원본 구간 HTTPS 준비 결과. ready 면 CloudFront 원본을 host·HTTPS 전용으로 쓴다."""
+    host: str = ""
+    status: str = "skipped"          # ready · pending · skipped
+    certificate_arn: str = ""
+    listener_arn: str = ""
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def ready(self) -> bool:
+        return self.status == "ready"
+
+
+def point_origin(route53: Any, zone_id: str, host: str, alb_dns: str, alb_zone_id: str) -> str:
+    """origin.<도메인> A 별칭 → ALB. 다른 곳(사람이 만든 레코드)을 가리키면 덮어쓰지 않고 안내를 돌려준다("" 이면 연결됨)."""
+    try:
+        current = _existing_record(route53, zone_id, host, "A")
+    except Exception as exc:  # noqa: BLE001
+        if error_code(exc) not in ("AccessDenied", "AccessDeniedException"):
+            raise
+        current = None
+    target = str(((current or {}).get("AliasTarget") or {}).get("DNSName", "")).rstrip(".").lower()
+    if current is not None and not target.endswith(".elb.amazonaws.com"):
+        what = target or ", ".join(r.get("Value", "") for r in current.get("ResourceRecords", []) or [])
+        return (f"{host} 의 A 레코드가 이미 다른 곳({what})을 가리켜 원본 구간 HTTPS 를 켜지 않았습니다 — "
+                f"그 레코드를 지우거나 이름을 비워 두면 다음 배포에서 켭니다.")
+    if target != alb_dns.rstrip(".").lower() and target != f"dualstack.{alb_dns.rstrip('.').lower()}":
+        _upsert(route53, zone_id, {"Name": host, "Type": "A", "AliasTarget": {
+            "HostedZoneId": alb_zone_id, "DNSName": alb_dns, "EvaluateTargetHealth": False}})
+    return ""
+
+
+def remove_origin_record(route53: Any, host: str) -> str:
+    """정리: origin.<도메인> 이 ALB 를 가리키는 별칭이면 지운다(ALB 를 지운 뒤 남는 주소가 없게). 결과 문장."""
+    zone = _zone_for(route53, host)
+    if not zone:
+        return ""
+    zone_id = str(zone["Id"]).rsplit("/", 1)[-1]
+    current = _existing_record(route53, zone_id, host, "A")
+    target = str(((current or {}).get("AliasTarget") or {}).get("DNSName", "")).rstrip(".").lower()
+    if current is None or not target.endswith(".elb.amazonaws.com"):
+        return ""
+    route53.change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={
+        "Comment": "ReCoder cleanup", "Changes": [{"Action": "DELETE", "ResourceRecordSet": current}]})
+    return f"{host} 레코드도 지웠습니다."
 
 
 # ---------------------------------------------------------------------------

@@ -523,9 +523,14 @@
                 "acm:ListTagsForCertificate",
                 "acm:DeleteCertificate"
               ],
-              "Resource": {
-                "Fn::Sub": "arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*"
-              }
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:acm:${AWS::Region}:${AWS::AccountId}:certificate/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*"
+                }
+              ]
             },
             {
               "Sid": "HttpsRequestCertificate",
@@ -536,7 +541,12 @@
               "Resource": "*",
               "Condition": {
                 "StringEquals": {
-                  "aws:RequestedRegion": "us-east-1",
+                  "aws:RequestedRegion": [
+                    {
+                      "Fn::Sub": "${AWS::Region}"
+                    },
+                    "us-east-1"
+                  ],
                   "aws:RequestTag/recoder:managed": "true"
                 }
               }

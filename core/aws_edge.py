@@ -41,6 +41,10 @@ DEFAULT_WINDOW = 300
 MIN_RATE_LIMIT = 10
 MAX_RATE_LIMIT = 2_000_000_000
 LISTENER_PORT = 80
+#: 2.0.35 원본 구간 HTTPS — 내 도메인을 쓰는 HTTPS 주소에서 CloudFront 가 이 포트로 붙는다.
+HTTPS_LISTENER_PORT = 443
+#: TLS 1.2 이상(1.3 우선) — https://docs.aws.amazon.com/elasticloadbalancing/latest/application/describe-ssl-policies.html
+SSL_POLICY = "ELBSecurityPolicy-TLS13-1-2-2021-06"
 #: 웹 ACL 설명 — AWS 가 허용하는 문자(영문·숫자·_+=:#@/-,. 공백)만. 한글·긴 줄표(—)를 넣으면 생성이 거절된다(2.0.32).
 WAF_DESCRIPTION = "ReCoder edge shield - per-IP rate limit + AWS managed rules"
 #: WAF 범위 — ALB 는 지역(REGIONAL), CloudFront 는 전역(CLOUDFRONT, 반드시 us-east-1 클라이언트).
@@ -136,6 +140,8 @@ class EdgeResult:
     web_acl_arn: str = ""
     created: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: ALB 별칭 레코드에 쓰는 ALB 의 호스티드 영역 ID(2.0.35 원본 구간 HTTPS)
+    zone_id: str = ""
 
     @property
     def url(self) -> str:
@@ -401,6 +407,58 @@ def unlock_origin(elbv2: Any, listener_arn: str, tg_arn: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 2.0.35 원본 구간 HTTPS — 443 리스너(80 과 같은 잠금)
+# ---------------------------------------------------------------------------
+
+
+def allow_https_from_cloudfront(ec2: Any, group_id: str, prefix_list: str) -> None:
+    """ALB 보안 그룹에 CloudFront 원본 전용 목록 → 443 을 더한다(이미 있으면 그대로)."""
+    try:
+        ec2.authorize_security_group_ingress(GroupId=group_id, IpPermissions=[{
+            "IpProtocol": "tcp", "FromPort": HTTPS_LISTENER_PORT, "ToPort": HTTPS_LISTENER_PORT,
+            "PrefixListIds": [{"PrefixListId": prefix_list, "Description": "CloudFront origin-facing only"}]}])
+    except Exception as exc:  # noqa: BLE001
+        if error_code(exc) != "InvalidPermission.Duplicate":
+            raise
+
+
+def https_listener(elbv2: Any, alb_arn: str) -> dict | None:
+    listeners = elbv2.describe_listeners(LoadBalancerArn=alb_arn).get("Listeners", [])
+    return next((l for l in listeners if int(l.get("Port", 0)) == HTTPS_LISTENER_PORT), None)
+
+
+def ensure_https_listener(elbv2: Any, *, alb_arn: str, tg_arn: str, certificate_arn: str, http_listener_arn: str,
+                          tags: Optional[dict] = None) -> str:
+    """443 리스너를 80 리스너와 **같은 동작**으로 맞춘다 — 80 이 잠겨 있으면 443 도 기본 403 + 같은 머리글 규칙.
+    CloudFront 가 원본을 443 으로 바꾸는 순간에도 잠금이 비지 않게, 규칙을 먼저 만든 뒤에 돌려준다."""
+    http = (elbv2.describe_listeners(ListenerArns=[http_listener_arn]).get("Listeners") or [{}])[0]
+    locked = (http.get("DefaultActions") or [{}])[0].get("Type") == "fixed-response"
+    default = [DENY_ACTION] if locked else _forward(tg_arn)
+    certs = [{"CertificateArn": certificate_arn}]
+    current = https_listener(elbv2, alb_arn)
+    if current is None:
+        tag_list = _tag_list(tags)
+        current = elbv2.create_listener(LoadBalancerArn=alb_arn, Port=HTTPS_LISTENER_PORT, Protocol="HTTPS",
+                                        SslPolicy=SSL_POLICY, Certificates=certs, DefaultActions=default,
+                                        **({"Tags": tag_list} if tag_list else {}))["Listeners"][0]
+    else:
+        have = [c.get("CertificateArn") for c in current.get("Certificates") or []]
+        if have[:1] != [certificate_arn] or current.get("SslPolicy") != SSL_POLICY:
+            elbv2.modify_listener(ListenerArn=current["ListenerArn"], Protocol="HTTPS", Port=HTTPS_LISTENER_PORT,
+                                  SslPolicy=SSL_POLICY, Certificates=certs)
+    arn = str(current["ListenerArn"])
+    if locked:
+        rule = origin_rule(elbv2, http_listener_arn)
+        values = ((_header_condition(rule) or {}).get("HttpHeaderConfig") or {}).get("Values") or [] if rule else []
+        if values:
+            lock_origin(elbv2, arn, tg_arn, values[0], also=list(values[1:]))
+    elif not _forwards_to(current.get("DefaultActions", []), tg_arn) and \
+            (current.get("DefaultActions") or [{}])[0].get("Type") != "fixed-response":
+        elbv2.modify_listener(ListenerArn=arn, DefaultActions=default)
+    return arn
+
+
+# ---------------------------------------------------------------------------
 # 전체
 # ---------------------------------------------------------------------------
 
@@ -521,7 +579,7 @@ def ensure_edge(
             if note:
                 notes.append(note)
 
-        return EdgeResult(name=name, alb_arn=alb_arn, dns_name=str(lb.get("DNSName") or ""),
+        return EdgeResult(name=name, alb_arn=alb_arn, dns_name=str(lb.get("DNSName") or ""), zone_id=str(lb.get("CanonicalHostedZoneId") or ""),
                           target_group_arn=tg_arn, listener_arn=str(http["ListenerArn"]),
                           alb_security_group=alb_sg, task_security_group=task_sg, web_acl_arn=acl_arn,
                           created=[k for k, _ in created], notes=notes)

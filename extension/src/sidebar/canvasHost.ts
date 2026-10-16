@@ -93,6 +93,20 @@ export function publicGit(git: Awaited<ReturnType<typeof gitContext>>) {
 }
 
 /** ECS 사전 검사에 보낼 앱 실행 설정 이름(값은 보내지 않는다). */
+/** 신뢰 점검에 보낼 설정 — 켜짐 여부·이름만(환경변수·비밀값의 **값**은 보내지 않는다). */
+export function trustConfig(config: CanvasConfig): Record<string, unknown> {
+    const c = config as unknown as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of ['https', 'edge', 'custom_domain', 'environment', 'database', 'alerts', 'shield', 'assign_public_ip', 'dir']) {
+        if (c[key] !== undefined && c[key] !== null) { out[key] = c[key]; }
+    }
+    for (const key of ['env_vars', 'secret_refs']) {
+        const v = c[key];
+        if (v && typeof v === 'object' && !Array.isArray(v)) { out[key] = Object.keys(v as Record<string, unknown>); }
+    }
+    return out;
+}
+
 export function runtimeNames(config: CanvasConfig): { envNames: string[]; environment: string } | undefined {
     if (config.target !== 'ecs') return undefined;
     return { envNames: [...Object.keys(config.env_vars || {}), ...Object.keys(config.secret_refs || {})], environment: config.environment };
@@ -305,12 +319,18 @@ export class CanvasHost {
                 if (config.target !== 'github' && !aws.ready) throw new Error('AWS 계정을 먼저 연결하세요.');
                 if (config.target === 'github' && (!git.connected || !git.branch)) throw new Error('GitHub 원격 저장소와 브랜치를 연결하세요.');
                 if (config.target === 'github' && !git.head) throw new Error('먼저 소스 제어에서 올릴 파일을 확인하고 첫 커밋을 만드세요.');
-                const targetState = config.target === 'ecs' ? await this.api.getCanvasTarget(config.aws_region,config.ecs_cluster,config.ecs_service) : null;
+                //: 2.0.35 배포 전 신뢰 점검(제로 트러스트) — 실패해도 승인 카드는 그대로 뜬다(점검 칸만 빠짐).
+                const trustPromise = config.target === 'github' ? Promise.resolve(null)
+                    : Promise.resolve().then(() => this.api.getTrustCheck(workspace, config.target as 'ecs' | 's3', trustConfig(config), String((aws.identity as { arn?: string } | null | undefined)?.arn || ''))).catch(() => null);
+                const [targetState, trust] = await Promise.all([
+                    config.target === 'ecs' ? this.api.getCanvasTarget(config.aws_region,config.ecs_cluster,config.ecs_service) : Promise.resolve(null),
+                    trustPromise,
+                ]);
                 if (generation !== this.prepareGeneration) return;
                 const id=randomUUID();
                 this.plans.clear(); // Older approvals must not execute after editing a target.
                 this.plans.set(id,{id,config,workspace,git,account:aws.identity?.account || '',created:Date.now(),targetState,staticDigest:staticSite?.digest});
-                send('canvas.plan', { requestId, id, config, projectName:path.basename(workspace), repository:git.repository, branch:git.branch, commit:git.head, dirty:git.dirty, coreRegion:aws.ready ? aws.region : '', account:aws.identity?.account || '', preflight, targetState, staticSite:staticSite ? {files:staticSite.files,excluded:staticSite.excluded,notes:staticNotes} : undefined });
+                send('canvas.plan', { requestId, id, config, projectName:path.basename(workspace), repository:git.repository, branch:git.branch, commit:git.head, dirty:git.dirty, coreRegion:aws.ready ? aws.region : '', account:aws.identity?.account || '', preflight, targetState, trust, staticSite:staticSite ? {files:staticSite.files,excluded:staticSite.excluded,notes:staticNotes} : undefined });
                 return;
             }
             if (type === 'canvas.cancel') { this.prepareGeneration++; this.plans.delete(String(p.planId)); return; }
