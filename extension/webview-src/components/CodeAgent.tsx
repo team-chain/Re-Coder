@@ -11,6 +11,7 @@ import { DecisionOptionCards } from "./DecisionOptionCards";
 import { Followups, collapseChanged, insertFollowups, isConfirmOnly, pendingFollowup } from "./decisionFlow";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
 import { FailedFile, PausePanel, ResumeMode } from "./pausePanel";
+import FlowPreviewPanel from "./FlowPreviewPanel";
 import { ConsistencyIssue, FallbackDocsNote, RemainingIssues, SecurityReport, SecurityScoreNote, UnusedFile, UnusedFilesNote, applyLocked, filesToApply } from "./codeIssues";
 import { TeamBoard, TeamComposer } from "./TeamBoard";
 import { ANIMAL_KINDS } from "./teamAnimals";
@@ -623,6 +624,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               <UnusedFilesNote unused={turn.result.unused_files} include={!!includeUnused[turn.id]}
                 onInclude={(v) => setIncludeUnused((cur) => ({ ...cur, [turn.id]: v }))} />
               <CodeRemovalSummary checks={turn.result.ops.map((op) => op.removal_check)} />
+              <FlowPreviewPanel turnId={turn.id} ops={turn.result.ops} targetFolder={turn.targetFolder} projectRoot={turn.result.projectRoot}
+                findings={turn.result.security?.findings} />
               {(() => {
                 const ops = filesToApply(turn.result!.ops, turn.result!.unused_files, !!includeUnused[turn.id]);
                 const locked = applyLocked(turn.result!.consistency_issues, !!ackIssues[turn.id]);

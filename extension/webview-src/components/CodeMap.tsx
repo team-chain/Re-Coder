@@ -11,6 +11,8 @@
  */
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import FlowDryRun from "./FlowDryRun";
+import type { FlowGraph } from "./dryRunModel";
 
 // ── Types (Core 응답과 1:1) ──────────────────────────────────────────────────
 interface Finding {
@@ -226,7 +228,10 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
   const [width, setWidth] = useState(540);
   const [project, setProject] = useState<ProjectGraph | null>(null);
   const [file, setFile] = useState<FileGraph | null>(null);
-  const [view, setView] = useState<"project" | "file">("project");
+  const [view, setView] = useState<"project" | "file" | "flow">("project");
+  const [flow, setFlow] = useState<FlowGraph | null>(null);
+  const [flowLoading, setFlowLoading] = useState(false);
+  const [flowError, setFlowError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -252,10 +257,19 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
       setFile(payload as FileGraph); setView("file"); setLoading(false); setError(null);
     } else if (type === "map.error") {
       setError(String((payload as { message?: string })?.message ?? payload)); setLoading(false);
+    } else if (type === "map.flowResult") {
+      setFlow(payload as FlowGraph); setFlowLoading(false); setFlowError(null);
+    } else if (type === "map.flowError") {
+      setFlowError(String((payload as { message?: string })?.message ?? payload)); setFlowLoading(false);
     }
   }, []));
 
   useEffect(() => { if (isActive && !project) loadProject(); }, [isActive, project, loadProject]);
+
+  const loadFlow = useCallback(() => {
+    setView("flow"); setFlowLoading(true); setFlowError(null);
+    postMessage("map.flow", {});
+  }, [postMessage]);
 
   const openFileMap = useCallback((id: string) => {
     setLoading(true); setError(null);
@@ -277,23 +291,30 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
       {/* 헤더 */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
         <div style={{ fontSize: 13, fontWeight: 700 }}>
-          {view === "project" ? "구조 지도 — 전체 아키텍처" : `${file?.name ?? ""} — 내부 지도`}
+          {view === "project" ? "구조 지도 — 전체 아키텍처" : view === "flow" ? "흐름 dry run — 실행하지 않고 따라가기" : `${file?.name ?? ""} — 내부 지도`}
         </div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          {view === "file" && (
+          {view !== "project" && (
             <button style={headerBtn} onClick={() => setView("project")}>← 아키텍처</button>
           )}
-          <button style={{ ...headerBtn, opacity: loading ? .5 : 1 }} disabled={loading} onClick={loadProject}>새로고침</button>
+          {view !== "flow" && (
+            <button style={{ ...headerBtn, color: C.cyan, borderColor: `${C.cyan}66` }} onClick={() => { if (flow) setView("flow"); else loadFlow(); }}>흐름 dry run</button>
+          )}
+          {view === "flow"
+            ? <button style={{ ...headerBtn, opacity: flowLoading ? .5 : 1 }} disabled={flowLoading} onClick={loadFlow}>새로고침</button>
+            : <button style={{ ...headerBtn, opacity: loading ? .5 : 1 }} disabled={loading} onClick={loadProject}>새로고침</button>}
         </div>
       </div>
 
       <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5, marginBottom: 10 }}>
-        {view === "project"
+        {view === "flow"
+          ? <>API 경로·화면 동작·실행 파일 중 하나를 고르면 그 요청이 지나가는 함수를 <b style={{ color: C.ink }}>호출 순서대로</b> 한 단계씩 보여 줍니다. DB·외부 API·비밀값을 쓰는 곳이 표시됩니다.</>
+          : view === "project"
           ? <>선은 실제 <b style={{ color: C.ink }}>import</b>(사실), 위치는 계층(입구→저장). 파일을 누르면 그 안으로 들어갑니다. 정적 분석이라 동적 호출은 표시되지 않습니다.</>
           : <>파일 안 <b style={{ color: C.ink }}>함수·메서드·콜백 호출</b>의 정적 분석 결과입니다. 노랑은 호출이 몰린 과부하 지점입니다.</>}
       </div>
 
-      {loading && (
+      {loading && view !== "flow" && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: C.dim, padding: "16px 0" }}>
           <div style={{ width: 13, height: 13, border: `2px solid ${C.line}`, borderTopColor: C.cyan, borderRadius: "50%", animation: "rcmspin 0.8s linear infinite" }} />
           <style>{`@keyframes rcmspin { to { transform: rotate(360deg); } }`}</style>
@@ -301,10 +322,25 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
         </div>
       )}
 
-      {error && (
+      {error && view !== "flow" && (
         <div style={{ background: `${C.red}1a`, border: `1px solid ${C.red}`, color: C.red, borderRadius: 6, padding: "8px 10px", fontSize: 11.5 }}>
           {error}
         </div>
+      )}
+
+      {/* 흐름 dry run */}
+      {view === "flow" && flowLoading && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, color: C.dim, padding: "16px 0" }}>
+          <div style={{ width: 13, height: 13, border: `2px solid ${C.line}`, borderTopColor: C.cyan, borderRadius: "50%", animation: "rcmspin 0.8s linear infinite" }} />
+          <style>{`@keyframes rcmspin { to { transform: rotate(360deg); } }`}</style>
+          호출 흐름 분석 중…
+        </div>
+      )}
+      {view === "flow" && flowError && (
+        <div style={{ background: `${C.red}1a`, border: `1px solid ${C.red}`, color: C.red, borderRadius: 6, padding: "8px 10px", fontSize: 11.5 }}>{flowError}</div>
+      )}
+      {view === "flow" && !flowLoading && flow && (
+        <FlowDryRun graph={flow} onOpen={(f, line) => postMessage("map.openFile", { id: f, line })} />
       )}
 
       {/* 프로젝트 뷰 */}

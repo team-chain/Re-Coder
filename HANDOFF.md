@@ -1,3 +1,16 @@
+# 흐름 dry run 다이어그램 (2026-10-16, 2.0.34)
+
+- extension/src/codemap/flow.ts — analyzeFlow(root, {overrides}) → FlowGraph{kind:'flow', source:'source', nodes(id=`파일#이름`, kind function|handler|route|main, effects, hash, line~endLine), edges(order·line·branch if|else|loop|catch|case|cond|callback·certainty direct|inferred), entries(route|ui|main)}. previewFlow(root, overrides) → {graph, changed(added|modified by hash), removed, affected(BFS로 바뀐 노드에 닿는 진입점)}. source 필드는 나중의 바이너리(REA) 분석을 같은 화면에 그리기 위한 자리.
+  - JS/TS: function·const 화살표·exports.x·클래스 메서드/화살표 프로퍼티·객체 메서드, import/require 바인딩, export·module.exports·default, `new X()` 객체 → 메서드(추정). 경로: `x.get('/p', mw, handler)`(핸들러가 함수로 이어질 때만 — axios.get 오탐 방지, 템플릿 경로 제외), `app.use('/p', mw…, router)` 접두사·미들웨어 사슬(여러 단계), Next pages/api·app/**/route.*. 화면: JSX on*={…}, addEventListener(선택자 라벨), el.onclick.
+  - Python: def(시그니처 제외 본문)·클래스 메서드, from/import(상대·서브모듈), self.x = Cls() 객체, FastAPI·Flask 데코레이터(route methods=), APIRouter/Blueprint prefix, include_router/register_blueprint(prefix·Depends), 핸들러 시그니처 Depends/Security → 핸들러 앞 순서, `if __name__ == "__main__":` 다음 줄부터.
+  - 갈림: jsBranchIndex(본문 한 번 훑어 중괄호 종류 기록 + 이분 탐색, 중괄호 없는 if·&&·?: 는 문장 단위), pyBranchAt(들여쓰기 위로).
+  - 효과 규칙 EFFECT_RULES(같은 줄 같은 종류 1개). 비밀값은 이름이 SECRET·TOKEN·PASSWORD·KEY·DATABASE_URL… 일 때만. 테스트 파일·d.ts 제외. 한도 노드 6000·선 30000.
+  - 성능: 호출 찾기는 이름만 정규식 + 앞 객체 사슬은 거꾸로 읽기, `\s*(?:<…>)?\s*` 같은 붙은 공백 수량자 제거, import 는 2000자 창에서 from 찾기, `split(/\s+as\s+/)` → 공백 접고 split(' as '). analyzer.ts 의 Python from-import 도 같은 문제 수정. 퍼징(공백 6만·이름 3천 × 토큰 86개 × 모양 7개, 두 분석기) 1.5초 넘는 것 없음. 실측: core 254파일 1.3초, extension/src 0.3초.
+- analysisWorker/AnalysisJob: mode project|file|flow|preview, overrides. SidebarProvider: map.flow → map.flowResult|map.flowError, code.flowPreview{key, ops, targetFolder, projectRoot} → code.flowPreviewResult{key, preview, projectRoot, prefix}|{key, error} (_resolveWriteRoot·_joinFolder, .git/.vscode/드라이브 제외, 디스크에 쓰지 않음), map.openFile 에 line·projectRoot. map.project·map.file·자동 새로 고침도 작업 스레드(_mapJob·_mapRefreshJob) — 예전에는 확장 호스트에서 동기 실행.
+- 웹뷰: components/dryRunModel.ts(dryRun: 깊이 우선·순서·seen/cycle·한도 300단계/24깊이, 요약은 종류별 함수 수; layoutDryRun; findingsByNode), FlowDryRun.tsx(시작점 optgroup: 변경이 지나가는 곳·바뀐 함수·API 경로·화면 동작·실행·함수, 재생/단계/키보드, 현재 단계 카드, 곡선 선(같은 열 건너뛰기는 옆으로, 위로 되돌아가기는 오른쪽 호), 노드 상태 current/visited/future, 자동 스크롤, 단계 기록, 정적 분석 고지), FlowPreviewPanel.tsx(CodeAgent 결과 카드 「적용 전 흐름 미리 보기」), CodeMap 에 「흐름 dry run」 보기. 파일 이름 대소문자 충돌(FlowDryRun/flowDryRun) 피해 dryRunModel.
+- 시험: webview-tests/flowDryRun.test.js(Express·FastAPI·React/Next·깨진 코드·dry run·배치·보안 발견·미리 보기·작업 스레드·화면·정규식 성능), flowPreviewHost.test.js(확장 호스트 메시지), codemapImports 의 stripJs 시험을 컴파일된 export 사용으로. 브라우저(Chromium)로 재생·키보드·스크린샷 확인.
+- 한계: 정적 분석(동적 호출·DI·콜백 실행 시점은 추정/누락), 지원 언어 JS/TS/Python, 전역 미들웨어 app.use(mw)(경로 없음)는 사슬에 넣지 않음.
+
 # 출시 점검 2차 수정 (2026-10-15, 2.0.33)
 
 - 2차 감사 3개(보안 리뷰 / 코어 레거시 / 주변 도구). tests/test_dev_2033.py(65), webview-tests/productionAudit 1건, discord-bot test_bridge_security 확장, gateway 단가 고정.

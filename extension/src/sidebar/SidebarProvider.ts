@@ -31,7 +31,7 @@ import {
     STATIC_DIR_CANDIDATES,
 } from '../deploy/staticSite';
 import { PollingService } from '../core/PollingService';
-import { analyzeProject, analyzeFile } from '../codemap/analyzer';
+import { AnalysisJob } from '../codemap/analysisJob';
 import { CanvasHost } from './canvasHost';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken } from './discordBotToken';
@@ -134,6 +134,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _mapRefreshTimer?: ReturnType<typeof setTimeout>;
     private _state: SidebarState;
     private _canvasHosts = new Map<vscode.Webview | undefined, CanvasHost>();
+    /** dry run 그래프 분석(작업 스레드) — 새 요청이 오면 이전 분석은 취소한다. */
+    private _flowJob = new AnalysisJob(60000);
+    /** 구조 지도도 작업 스레드에서 — 큰 저장소·이상한 파일이 확장 호스트(채팅·승인)를 멈추게 하지 않는다(2.0.34). */
+    private _mapJob = new AnalysisJob(30000);
+    private _mapRefreshJob = new AnalysisJob(30000);
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -234,6 +239,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this._pollingActive = false;
             }
             this._mapWatcher?.dispose();
+            this._flowJob.cancel();
+            this._mapJob.cancel();
+            this._mapRefreshJob.cancel();
             this._mapWatcher = undefined;
             if (this._mapRefreshTimer) { clearTimeout(this._mapRefreshTimer); }
         });
@@ -329,13 +337,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     /** 사이드바가 보일 때만 재분석해 webview 에 푸시(파일 뷰면 화면을 빼앗지 않음). */
     private _doMapRefresh(): void {
-        try {
-            if (!this._view?.visible) { return; }
-            const root = activeProjectPath();
-            if (!root) { return; }
-            const data = analyzeProject(root);
-            this.postMessage('map.projectResult', data);
-        } catch { /* 무해하게 무시 */ }
+        if (!this._view?.visible) { return; }
+        const root = activeProjectPath();
+        if (!root) { return; }
+        this._mapRefreshJob.run(root).then(
+            (data) => this.postMessage('map.projectResult', data),
+            () => { /* 자동 새로 고침 실패는 무해하게 무시 — 보던 지도를 그대로 둔다 */ },
+        );
     }
 
     /** 탐색기에서 폴더 우클릭 → '여기에 코드 생성' 시 webview 에 대상 폴더 주입.
@@ -2221,11 +2229,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 try {
                     const root = activeProjectPath();
                     if (!root) { this.postMessage('map.error', { message: '분석할 폴더가 열려있지 않습니다.' }); break; }
-                    // 서버 불필요 — 확장 내부에서 정적 분석.
-                    const data = analyzeProject(root);
+                    // 서버 불필요 — 확장 내부에서 정적 분석(작업 스레드).
+                    const data = await this._mapJob.run(root);
                     this.postMessage('map.projectResult', data);
                 } catch (err) {
                     this.postMessage('map.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'map.flow': {
+                //: dry run 다이어그램 — 파일을 넘나드는 호출 그래프. 작업 스레드에서 분석해 화면·확장이 멈추지 않는다.
+                const root = activeProjectPath();
+                if (!root) { this.postMessageToWebview(requestWebview, 'map.flowError', { message: '분석할 폴더가 열려있지 않습니다.' }); break; }
+                try {
+                    const graph = await this._flowJob.run(root, '', { mode: 'flow' });
+                    this.postMessageToWebview(requestWebview, 'map.flowResult', graph);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'map.flowError', { message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'code.flowPreview': {
+                //: 적용 전 dry run — 제안된 파일을 디스크에 쓰지 않고 그 내용으로 흐름을 다시 그려, 바뀌는 함수와 지나가는 진입점을 알려 준다.
+                const p = (payload ?? {}) as { key?: string; ops?: Array<{ file?: string; content?: string; action?: string }>; targetFolder?: string; projectRoot?: string };
+                const key = String(p.key ?? '');
+                const resolved = this._resolveWriteRoot(p.targetFolder ?? '', p.projectRoot ?? '');
+                if (!resolved) { this.postMessageToWebview(requestWebview, 'code.flowPreviewResult', { key, error: '이 결과를 만든 프로젝트가 워크스페이스에 없어 미리 볼 수 없습니다.' }); break; }
+                const overrides: Array<[string, string | null]> = [];
+                for (const op of (Array.isArray(p.ops) ? p.ops : []).slice(0, 400)) {
+                    const combined = this._joinFolder(resolved.relFolder, String(op.file ?? ''));
+                    const safe = combined.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '.' && seg !== '..').join('/');
+                    if (!safe || /^[a-zA-Z]:/.test(safe) || safe.split('/').some(seg => ['.git', '.vscode'].includes(seg.toLowerCase()))) { continue; }
+                    const content = typeof op.content === 'string' ? op.content : '';
+                    if (content.length > 1_500_000) { continue; }
+                    overrides.push([safe, op.action === 'delete' ? null : content]);
+                }
+                try {
+                    const preview = await new AnalysisJob(60000).run(resolved.root.fsPath, '', { mode: 'preview', overrides });
+                    this.postMessageToWebview(requestWebview, 'code.flowPreviewResult', { key, preview, projectRoot: resolved.root.fsPath, prefix: resolved.relFolder });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'code.flowPreviewResult', { key, error: err instanceof Error ? err.message : String(err) });
                 }
                 break;
             }
@@ -2237,7 +2280,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const safe = (id ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                     if (!safe) { this.postMessage('map.error', { message: '대상 파일이 없습니다.' }); break; }
                     const abs = vscode.Uri.joinPath(root, safe).fsPath;
-                    const data = analyzeFile(abs);
+                    const data = await this._mapJob.run(root.fsPath, abs);
                     this.postMessage('map.fileResult', data);
                 } catch (err) {
                     this.postMessage('map.error', { message: String(err) });
@@ -2323,12 +2366,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'map.openFile': {
-                const { id } = (payload ?? {}) as { id?: string };
+                const { id, line, projectRoot } = (payload ?? {}) as { id?: string; line?: number; projectRoot?: string };
                 try {
-                    const root = activeProjectUri();
+                    //: 적용 전 미리 보기는 생성한 프로젝트 기준 — 그 사이 활성 프로젝트가 바뀌어도 그 프로젝트의 파일을 연다.
+                    const root = projectRoot && isInsideProjectRoot(projectRoot) ? vscode.Uri.file(projectRoot) : activeProjectUri();
                     if (!root || !id) { break; }
                     const safe = id.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
-                    await vscode.window.showTextDocument(vscode.Uri.joinPath(root, safe));
+                    const target = vscode.Uri.joinPath(root, safe);
+                    if (!fs.existsSync(target.fsPath)) { void vscode.window.showInformationMessage(`${safe} 은(는) 아직 적용하지 않은 새 파일입니다.`); break; }
+                    const at = Number.isInteger(line) && (line as number) > 0 ? new vscode.Position((line as number) - 1, 0) : undefined;
+                    await vscode.window.showTextDocument(target, at ? { selection: new vscode.Range(at, at) } : undefined);
                 } catch (err) {
                     this.postMessage('map.error', { message: String(err) });
                 }
