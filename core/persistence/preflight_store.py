@@ -79,7 +79,7 @@ def list_preflight_runs(
         where_clauses.append("status = ?")
         params.append(status.value if hasattr(status, "value") else str(status))
     where = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-    query = f"SELECT payload FROM preflight_runs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    query = f"SELECT payload FROM preflight_runs{where} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     with db.connect() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()

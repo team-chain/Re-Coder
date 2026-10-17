@@ -359,7 +359,7 @@ def _apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
                     hit = True
             if hit:
                 _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n", nl)
-                changed.append(str(path.relative_to(workspace)))
+                changed.append(path.relative_to(workspace).as_posix())
         if not changed and targets:
             #: 직접 쓰는 패키지가 아니다(다른 패키지가 끌어옴) — 잠금 파일이 있는 package.json 에 overrides 로 올린다.
             path = next((p for p in targets if (p.parent / "package-lock.json").is_file()), targets[0])
@@ -367,7 +367,7 @@ def _apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
             data = json.loads(text)
             data.setdefault("overrides", {})[name] = f"^{to}"
             _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n", nl)
-            changed.append(f"{path.relative_to(workspace)} (overrides)")
+            changed.append(f"{path.relative_to(workspace).as_posix()} (overrides)")
         lock_note = ""
         #: Windows 의 npm 은 npm.cmd 라 이름만으로는 실행되지 않는다 — 찾은 전체 경로로 부른다.
         npm = shutil.which("npm") if npm_lock else None
@@ -389,7 +389,7 @@ def _apply_fix(alert: dict, value: dict, *, npm_lock: bool = True) -> dict:
             new = bump_requirement(text, name, to)
             if new != text:
                 _write_text(path, new, nl)
-                changed.append(str(path.relative_to(workspace)))
+                changed.append(path.relative_to(workspace).as_posix())
     else:
         raise ValueError("이 종류의 패키지는 자동으로 올리지 않습니다.")
     if not changed:

@@ -2780,6 +2780,10 @@ def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
             continue
     if existing == proposal.content:
         return None
+    #: 줄바꿈만 다른 파일(Windows git autocrlf 로 받은 CRLF)은 같은 내용이다. 충돌로 보면 Windows 사용자는
+    #: 같은 Dockerfile 을 저장할 때마다 "이미 있음"을 만난다(CI windows-latest). 저장하면 LF 로 맞춰진다.
+    if existing is not None and existing.replace("\r\n", "\n") == proposal.content.replace("\r\n", "\n"):
+        return None
     import difflib
 
     diff = "".join(

@@ -80,7 +80,7 @@ def list_remediation_runs(
     if success_only:
         where_clauses.append("success = 1")
     where = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-    query = f"SELECT payload FROM remediation_runs{where} ORDER BY applied_at DESC LIMIT ? OFFSET ?"
+    query = f"SELECT payload FROM remediation_runs{where} ORDER BY applied_at DESC, rowid DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     with db.connect() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()

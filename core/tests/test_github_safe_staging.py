@@ -1,4 +1,5 @@
 """GitHub 푸시·저장소 생성의 자동 커밋이 민감한 파일을 올리지 않는다(보안 검토 P0)."""
+import os
 import subprocess
 
 import pytest
@@ -52,12 +53,13 @@ def test_설정_견본과_토큰없는_npmrc_는_올린다(repo):
 
 def test_pathspec_문법처럼_보이는_이름도_함께_올라간다(repo):
     agent, ws, run = repo
-    (ws / ':memo.txt').write_text('memo\n', encoding="utf-8")
-    (ws / '한글 파일.txt').write_text('안녕\n', encoding="utf-8")
-    (ws / 'file[1].txt').write_text('x\n', encoding="utf-8")
+    #: Windows 는 파일 이름에 ':' 를 못 쓴다(CI windows-latest) — 그 이름은 거기서 생길 수 없으니 나머지만 본다.
+    names = ['한글 파일.txt', 'file[1].txt'] + ([':memo.txt'] if os.name != 'nt' else [])
+    for name in names:
+        (ws / name).write_text('x\n', encoding="utf-8")
     agent._stage_safely(ws)
     staged = set(run('-c', 'core.quotepath=false', 'diff', '--cached', '--name-only', '-z').stdout.split('\0'))
-    assert {':memo.txt', '한글 파일.txt', 'file[1].txt', 'app.js'} <= staged
+    assert {*names, 'app.js'} <= staged
 
 
 def test_올릴_변경이_전부_제외되면_커밋없이_푸시한다(repo, monkeypatch):
