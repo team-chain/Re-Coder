@@ -212,7 +212,8 @@ def run_tests():
     before = public.get("/api/products/1").json()
     o, key = order(a)
     oid = o["order_id"]
-    check("server recomputes price", o["total_amount"] == round(float(before["price"]) * 100))
+    #: KRW 는 소수 단위가 없는 통화다(2.0.20 원화 상점) — 서버는 원 단위 정수 그대로 결제한다(×100 아님).
+    check("server recomputes price", o["total_amount"] == round(float(before["price"])), [o["total_amount"], before["price"]])
     check("stock reserved", public.get("/api/products/1").json()["stock"] == before["stock"] - 1)
     r = a.post("/api/orders", json={"idempotency_key": key})
     check("order replay same ID", r.status_code == 200 and r.json().get("order_id") == oid)
@@ -270,12 +271,12 @@ def run_tests():
         json={
             "name": "Validation race " + run,
             "description": "Only test data",
-            "price": 10,
+            "price": 1000,
             "stock": 1,
             "image_url": "",
         },
     )
-    check("admin product create", p.status_code in (200, 201))
+    check("admin product create", p.status_code in (200, 201), [p.status_code, p.text[:200]])
     pid = p.json().get("id", p.json().get("product", {}).get("id"))
     if pid:
         x, _, _ = account("race1")
@@ -339,7 +340,7 @@ def run_tests():
         check(
             "admin rejects invalid stock " + str(value),
             a.post(
-                "/api/admin/products", json={"name": "invalid", "price": 10, "stock": value}
+                "/api/admin/products", json={"name": "invalid", "price": 1000, "stock": value}
             ).status_code
             == 400,
         )
