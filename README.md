@@ -22,7 +22,7 @@ From Prompt to Production — 만드는 속도만큼, 안전하게.
 ![Amazon Bedrock](https://img.shields.io/badge/Amazon_Bedrock-232F3E?style=flat-square)
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
 
-[**시연 영상**](https://youtu.be/8W2SarV1orU) &nbsp;·&nbsp; [**최종 발표 자료**](발표자료/ReCoder_최종발표.pptx) &nbsp;·&nbsp; [**구현 설계서**](docs/ReCoder_구현설계서_v2.md) &nbsp;·&nbsp; [**설치 · 실행**](#설치--실행)
+[**시연 영상**](https://youtu.be/8W2SarV1orU) &nbsp;·&nbsp; [**발표 자료**](발표자료/ReCoder_2학기_중간발표.pptx) &nbsp;·&nbsp; [**구현 설계서**](docs/ReCoder_구현설계서_v2.md) &nbsp;·&nbsp; [**설치 · 실행**](#설치--실행)
 
 </div>
 
