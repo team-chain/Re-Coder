@@ -1,3 +1,13 @@
+# 선택형 Reranker 비교 (2026-10-20, 2.0.39)
+
+- 이전 단계 2.0.38의 `8f48255c`는 [전체 CI](https://github.com/team-chain/Re-Coder/actions/runs/39291319145) 성공 확인 후 진행했다.
+- `grounded_repair/reranker.py`: 로컬 safetensors 단일 점수 CrossEncoder, 원격 코드 허용 없음, 런타임 다운로드 없음. CPU 기본, 512 토큰/배치 4/후보 20개. 기본은 꺼짐이다.
+- `KnowledgeIndex`: 버전 필터 뒤 최대 20개 후보만 재평가한다. 정확한 오류 코드는 계속 우선하며 모델 점수의 개수·유한성을 검사한다. 모델 지문은 색인/수정 캐시 키에 포함한다. 기존 retrieval_mode는 유지하고 retrieval_profile을 추가했다.
+- `setup_repair_reranker.py`는 고정 BGE revision을 명시적으로 설치하고 기존 설정의 다른 키는 보존한다. 선택형 의존성은 실제 확인한 sentence-transformers 5.7.0으로 고정했다.
+- `compare_repair_reranker.py`와 고정 개발 질의 20개 + 버전 차단 대조군으로 검색 품질·지연을 비교한다. 유료 LLM 없음, 독립 holdout 아님, 실제 오류 수정 성공률 아님.
+- 실제 BGE+E5, macOS arm64 CPU: Hit@1 100%→95%, Hit@4 모두 100%, 중앙값 36.6ms→10,988.3ms. 기본 비활성화 유지. `benchmarks/repair/RERANKER.md`와 원본 JSON에 조건·한계를 기록했다.
+- 로컬 검증: RAG 관련 123건, 실제 Docker 수정·승인 smoke, Black·Ruff, 버전 일치 검사 통과.
+
 # 오류 관련 코드·테스트 문맥 (2026-10-20, 2.0.38)
 
 - 이전 단계 2.0.37의 `fa23cff7`은 [전체 CI](https://github.com/team-chain/Re-Coder/actions/runs/39287751318) 성공 확인 후 다음 브랜치로 진행했다.
