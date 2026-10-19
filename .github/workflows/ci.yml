@@ -12,6 +12,28 @@ on:
   workflow_call:
 
 jobs:
+  execution-policy:
+    name: OPA 실행 정책·실제 Docker 통합
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: core/requirements.txt
+      - uses: open-policy-agent/setup-opa@v2
+        with:
+          version: '1.20.2'
+      - run: python -m pip install -r core/requirements.txt
+      - name: Rego 정책 실행 검증
+        run: opa test policies/ -v
+      - name: 실행 허용·승인 철회·서버 중단 검증
+        run: python scripts/smoke_execution_policy.py
+
   repair-security-eval:
     name: Promptfoo 수정안 보안 회귀
     runs-on: ubuntu-latest
