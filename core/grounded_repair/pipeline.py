@@ -13,6 +13,7 @@ from pathlib import Path
 
 from build_readiness import analyze, apply_fix
 from context_gate import mask_secrets
+from execution_policy import ExecutionDeniedError, ExecutionPolicy
 from grounded_repair.context import CONTEXT_VERSION
 from grounded_repair.knowledge import KnowledgeIndex
 from grounded_repair.logs import summarize
@@ -73,10 +74,12 @@ class RepairPipeline:
         verifier=None,
         readiness=analyze,
         rule_fix=apply_fix,
+        policy=None,
     ):
         self.router, self.index, self.store = router, index, store
         self.verifier = verifier or DockerVerifier()
         self.readiness, self.rule_fix = readiness, rule_fix
+        self.policy = policy or getattr(store, "policy", None) or ExecutionPolicy()
 
     async def run(self, workspace: str, log: str, stage="build", strategy="D", use_cache=True):
         if strategy not in STRATEGIES or stage not in {"build", "run", "ecs", "iam", "s3"}:
@@ -99,6 +102,7 @@ class RepairPipeline:
                     self.verifier.identity,
                     profile,
                     CONTEXT_VERSION,
+                    self.policy.profile,
                 ],
                 sort_keys=True,
             ).encode()
@@ -122,7 +126,21 @@ class RepairPipeline:
             "rule_issues": [],
             "citation_review": "not_reviewed",
             "model_profile": profile,
+            "execution_policy": self.policy.profile,
+            "policy_checks": [],
         }
+
+        async def permit(action, **facts):
+            try:
+                check = await asyncio.to_thread(
+                    self.policy.authorize, action, root, stage=stage, **facts
+                )
+                result["policy_checks"].append(check)
+                return True
+            except ExecutionDeniedError as exc:
+                result["policy_checks"].append(exc.record)
+                result["policy_error"] = exc.record["reason"]
+                return False
 
         def finish(status):
             result["status"] = status
@@ -154,6 +172,8 @@ class RepairPipeline:
             base.mkdir()
             await asyncio.to_thread(snapshot, root, base, expected)
             # Reuse the real readiness registry, never a caller-supplied verdict.
+            if not await permit("repair.inspect", snapshot=True, tool="readiness"):
+                return finish("policy_denied")
             readiness = await asyncio.to_thread(self.readiness, base, online=True)
             blockers = readiness.errors
             result["rule_issues"] = [i.to_dict() for i in blockers]
@@ -163,6 +183,8 @@ class RepairPipeline:
                     return finish("rule_action_required")
                 original = {n: (base / n).read_bytes() for n in expected}
                 for code in dict.fromkeys(i.code for i in blockers):
+                    if not await permit("repair.rule_fix", snapshot=True, rule_code=code):
+                        return finish("policy_denied")
                     await asyncio.to_thread(self.rule_fix, base, code)
                 after = await asyncio.to_thread(manifest, base)
                 # New/deleted files require the existing readiness remediation UI.
@@ -179,6 +201,8 @@ class RepairPipeline:
                     for n, c in changes.items()
                 ):
                     return finish("rule_action_required")
+                if not await permit("repair.verify", snapshot=True, tool=self.verifier.identity):
+                    return finish("policy_denied")
                 result["verification"] = await asyncio.to_thread(self.verifier, base)
                 if not result["verification"]["passed"] or not changes:
                     return finish("rule_action_required")
@@ -202,6 +226,8 @@ class RepairPipeline:
                 return finish("insufficient_context")
             # Avoid counting an already working build as an AI repair success.
             if stage == "build" or stage in getattr(self.verifier, "supported_stages", set()):
+                if not await permit("repair.verify", snapshot=True, tool=self.verifier.identity):
+                    return finish("policy_denied")
                 result["baseline"] = await asyncio.to_thread(self.verifier, base)
                 if result["baseline"].get("available") is False:
                     return finish("verification_unavailable")
@@ -235,6 +261,8 @@ class RepairPipeline:
                         suggestion = Suggestion.model_validate(cached["suggestion"])
                         result["cache_hit"] = True
                     else:
+                        if not await permit("repair.generate", snapshot=True, tool="repair_model"):
+                            return finish("policy_denied")
                         payload = {
                             "stage": stage,
                             "evidence": evidence.text,
@@ -297,15 +325,22 @@ class RepairPipeline:
                             raise ValueError("Edit contains a secret or redaction placeholder")
                         if edit.content == context[edit.path]:
                             raise ValueError("Model proposed an unchanged file")
-                        safe_path(candidate_dir, edit.path).write_bytes(
-                            edit.content.encode("utf-8")
-                        )
                         edits[edit.path] = edit.content
+                    if not await permit("repair.edit", snapshot=True, paths=list(edits)):
+                        return finish("policy_denied")
+                    for name, content in edits.items():
+                        safe_path(candidate_dir, name).write_bytes(content.encode("utf-8"))
+                    if not await permit("repair.inspect", snapshot=True, tool="readiness"):
+                        return finish("policy_denied")
                     remaining = await asyncio.to_thread(self.readiness, candidate_dir, online=False)
                     if remaining.errors:
                         raise ValueError(
                             "Readiness failed: " + "; ".join(i.code for i in remaining.errors)
                         )
+                    if not await permit(
+                        "repair.verify", snapshot=True, tool=self.verifier.identity
+                    ):
+                        return finish("policy_denied")
                     verdict = await asyncio.to_thread(self.verifier, candidate_dir)
                     attempt["verification"] = verdict
                     if verdict.get("available") is False:

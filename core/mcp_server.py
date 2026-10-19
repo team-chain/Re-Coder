@@ -28,11 +28,13 @@ CLI 사용:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import sys
-from typing import Any, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -76,9 +78,9 @@ _RECODER_ANALYZE_SCHEMA = {
 
 
 def list_tools() -> list[dict[str, Any]]:
-    MCPToolDescriptor = _schemas()
+    descriptor = _schemas()
     tools = [
-        MCPToolDescriptor(
+        descriptor(
             name="recoder_analyze",
             description=(
                 "Run the ReCoder Local Core analyzer on an error context. "
@@ -177,7 +179,7 @@ _PROTOCOL_VERSION = "2024-11-05"
 _SERVER_INFO = {"name": "recoder-mcp", "version": "0.1.0"}
 
 
-def _check_token() -> Optional[str]:
+def _check_token() -> str | None:
     """X-Session-Token 내부 검증. CI 모드 / dev 모드에서는 SKIP."""
 
     expected = os.environ.get("SESSION_TOKEN")
@@ -196,18 +198,28 @@ def _audit(tool: str, arguments: dict[str, Any], result: Any) -> None:
     try:
         import time as _time
         from pathlib import Path as _Path
+
         home = _Path(os.environ.get("RECODER_HOME") or (_Path.home() / ".recoder"))
         home.mkdir(parents=True, exist_ok=True)
-        line = {"time": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()), "tool": tool,
-                "argument_names": sorted(str(k) for k in (arguments or {})),
-                "ok": not (isinstance(result, dict) and result.get("isError"))}
+        line = {
+            "time": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "tool": tool,
+            "argument_names": sorted(str(k) for k in (arguments or {})),
+            "ok": not (isinstance(result, dict) and result.get("isError")),
+        }
+        if isinstance(result, dict):
+            check = result.get("_meta", {}).get("execution_policy")
+            if isinstance(check, dict):
+                line["execution_policy"] = {
+                    k: check.get(k) for k in ("allowed", "decision", "policy_version")
+                }
         with (home / "mcp_calls.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(line, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 - 기록 실패가 도구 호출을 막지 않는다
         log.warning("MCP 호출 기록 실패", exc_info=True)
 
 
-async def _handle_message(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
+async def _handle_message(msg: dict[str, Any]) -> dict[str, Any] | None:
     method = msg.get("method")
     msg_id = msg.get("id")
     params = msg.get("params") or {}
@@ -239,18 +251,41 @@ async def _handle_message(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
         handler = _TOOL_DISPATCH.get(name or "")
         if handler is None:
             #: 2.0.32 — 없는 도구·실패한 호출도 남긴다(감사 기록이 가장 필요한 것이 이쪽이다).
-            _audit(str(name or ""), arguments if isinstance(arguments, dict) else {}, {"isError": True})
+            _audit(
+                str(name or ""), arguments if isinstance(arguments, dict) else {}, {"isError": True}
+            )
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
                 "error": {"code": -32601, "message": f"tool not found: {name}"},
             }
         try:
-            result = await handler(arguments)
+            try:
+                from execution_policy import ExecutionDeniedError, ExecutionPolicy
+            except ImportError:
+                from core.execution_policy import ExecutionDeniedError, ExecutionPolicy
+            try:
+                if not isinstance(arguments, dict):
+                    raise ValueError("MCP arguments must be an object")
+                check = await asyncio.to_thread(
+                    ExecutionPolicy().authorize,
+                    "mcp.call",
+                    arguments.get("workspace_path", ""),
+                    tool=name,
+                )
+            except ExecutionDeniedError as exc:
+                result = _error(str(exc))
+                result["_meta"] = {"execution_policy": exc.record}
+            except ValueError as exc:
+                result = _error(str(exc))
+            else:
+                result = await handler(arguments)
+                if isinstance(result, dict):
+                    result.setdefault("_meta", {})["execution_policy"] = check
         except Exception:
             _audit(name or "", arguments if isinstance(arguments, dict) else {}, {"isError": True})
             raise
-        _audit(name or "", arguments, result)
+        _audit(name or "", arguments if isinstance(arguments, dict) else {}, result)
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
     # 응답을 안 요구하는 notification 인 경우 id 가 없다
@@ -305,10 +340,8 @@ async def _stdio_loop() -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[mcp_server] %(message)s")
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_stdio_loop())
-    except KeyboardInterrupt:
-        pass
 
 
 if __name__ == "__main__":  # pragma: no cover

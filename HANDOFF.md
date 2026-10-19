@@ -1,3 +1,24 @@
+# 수정·MCP 실행 정책 (2026-10-20, 2.0.41)
+
+- 이전 2.0.40 `687c68dc`의 [전체 CI 12개](https://github.com/team-chain/Re-Coder/actions/runs/39301281550) 성공 확인 후 진행했다.
+- `execution_policy.py`: 기본 local, 명시적 `RECODER_EXECUTION_POLICY=opa`에서 기존 OPAGate 재사용. Level 3으로 질의하고 버전 있는 `allow`만 실행한다. 서버 오류·잘못된 응답·추가 승인 요구를 차단하며 로컬 경로/테스트/승인 제한을 원격 허용으로 우회하지 못한다.
+- pipeline의 inspect/generate/rule_fix/edit/verify와 store의 apply, MCP recoder_analyze handler 직전에 연결했다. 모델 응답에서 승인/정책 flag를 받지 않는다. 후보 파일은 모든 수정안을 검증하고 정책을 통과한 뒤 쓴다.
+- 정책 profile은 수정 캐시 키에 포함한다. 기존 캐시도 쓰기·검증·승인 단계 정책을 재확인한다. 승인 시 현재 정책을 다시 확인하고, 거부 시 원본을 보존하며 기록을 남긴다(검증 유효 시간 연장 없음).
+- 정책 기록을 HMAC에 포함해 이전 버전의 준비 결과/캐시는 다시 검증해야 한다. 화면에 차단 사유, MCP 감사에 결정/정책 버전을 표시한다.
+- `policies/recoder/execution.rego`, 테스트, `docs/execution-policy.md` 추가. OPA 1.20.2 실제 서버 + Docker smoke에서 정상 허용·준비 후 승인 철회·Docker 전 차단·재허용 적용·서버 중단 차단을 확인했다. 유료 LLM 0회.
+- 로컬 검증: Core 3,163 passed / 2 skipped, 확장 610건, Rego 23건, Promptfoo 19건 통과. 확장 프로덕션 빌드·패키지 검사, Black·Ruff·버전 일치·워크플로 검사도 통과했다. CI에 실제 OPA + Docker 통합 필수 작업을 추가했다.
+- 범위: 문서 근거 수정과 MCP 분석 호출. 모든 레거시 생성/배포/확장 파일 작업을 통제하는 전역 샌드박스는 아니다. 기존 배포 게이트는 별도다.
+
+# Promptfoo 수정안 보안 회귀 (2026-10-20, 2.0.40)
+
+- 이전 2.0.39 `f96a71a2`의 [전체 CI 11개](https://github.com/team-chain/Re-Coder/actions/runs/39297297810) 성공 확인 후 진행했다.
+- `evals/repair-security`: Promptfoo 0.124.1 고정, Node 22.22+/CI 24, 제품과 분리한 개발 의존성. Python provider가 임시 프로젝트의 실제 pipeline/store/readiness를 호출한다.
+- 고정 사례 19개: 정상 준비/승인 2개 + 경로·테스트·근거·비밀값·명령·승인 우회. 결과 상태뿐 아니라 검증기 호출 수·원본 보존·합성 비밀값 누출·승인 오류를 함께 판정한다.
+- 모델/재빌드 fixture이며 실제 LLM 공격 성공률이 아니다. 유료 API와 Docker 호출 없음. 실제 Docker는 기존 CI smoke에서 검사한다.
+- CI `repair-security-eval`이 푸시·PR·릴리스 호출에 포함되고 결과 JSON을 artifact로 보존한다. 설정/캐시를 격리하고 텔레메트리·호스팅된 공격 생성·업데이트 확인을 끈다.
+- 로컬 CLI 19/19 통과, 의도적 오답 대조군은 failure 1/error 0/종료 코드 100. Black·Ruff·버전/워크플로 검사 통과.
+- 선택 의존성을 제외하고 SQLite 플랫폼 바인딩만 잠금 버전으로 복원한다. basic-ftp 6.2.3 override 후 실제 설치 구성 `npm audit --omit=optional` 0건. 전체 선택 의존성을 설치할 경우 미수정 node-forge/braces advisory가 있으므로 README의 최소 설치 절차를 유지한다.
+
 # 선택형 Reranker 비교 (2026-10-20, 2.0.39)
 
 - 이전 단계 2.0.38의 `8f48255c`는 [전체 CI](https://github.com/team-chain/Re-Coder/actions/runs/39291319145) 성공 확인 후 진행했다.

@@ -10,6 +10,7 @@ export interface RepairResult {
   suggestion?: {explanation:string;guidance:string[]};
   rule_issues?: Array<{code:string;message:string;fix:string}>;
   verification?: {passed:boolean;output?:string};
+  policy_error?: string;
 }
 const labels: Record<string,string> = {
   ready_for_approval:'재빌드 통과 · 변경 내용을 확인하세요', applied:'수정 적용 완료 · 다시 배포할 수 있습니다',
@@ -18,6 +19,7 @@ const labels: Record<string,string> = {
   failure_not_reproduced:'현재 프로젝트에서 빌드 오류가 재현되지 않았습니다', verification_unavailable:'빌드 검증 환경을 사용할 수 없습니다',
   no_document_evidence:'관련 공식 문서를 찾지 못했습니다', insufficient_context:'수정에 필요한 파일 정보가 부족합니다',
   workspace_changed:'프로젝트가 변경됐습니다. 다시 검증하세요', budget_exhausted:'설정한 호출 예산에 도달했습니다',
+  policy_denied:'실행 정책으로 작업이 차단됐습니다',
 };
 export function canApproveRepair(result:RepairResult):boolean {
   return result.status==='ready_for_approval' && result.approval_required && result.verification?.passed===true;
@@ -28,6 +30,7 @@ export function documentLink(value:string):string|undefined {
 export function RepairDetails({result,onApprove,busy=false}:{result:RepairResult;onApprove:()=>void;busy?:boolean}) {
   return <div aria-label="문서 근거 수정안">
     <p role="status"><strong>{labels[result.status]||result.status}</strong></p>
+    {result.policy_error&&<p role="alert">실행 제한 사유: {result.policy_error}</p>}
     {result.suggestion&&<><p>{result.suggestion.explanation}</p><ul>{result.suggestion.guidance.map((s,i)=><li key={i}>{s}</li>)}</ul></>}
     {result.rule_issues?.map(i=><p key={i.code}>{i.message}<br/>{i.fix}</p>)}
     {Object.entries(result.diffs||{}).map(([name,diff])=><details key={name} open><summary>{name}</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:300,overflow:'auto'}}>{diff}</pre></details>)}

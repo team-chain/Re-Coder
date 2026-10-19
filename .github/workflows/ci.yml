@@ -12,6 +12,63 @@ on:
   workflow_call:
 
 jobs:
+  execution-policy:
+    name: OPA 실행 정책·실제 Docker 통합
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: core/requirements.txt
+      - uses: open-policy-agent/setup-opa@v2
+        with:
+          version: '1.20.2'
+      - run: python -m pip install -r core/requirements.txt
+      - name: Rego 정책 실행 검증
+        run: opa test policies/ -v
+      - name: 실행 허용·승인 철회·서버 중단 검증
+        run: python scripts/smoke_execution_policy.py
+
+  repair-security-eval:
+    name: Promptfoo 수정안 보안 회귀
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: core/requirements.txt
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: evals/repair-security/package-lock.json
+      - name: 평가 의존성 설치
+        run: |
+          python -m pip install -r core/requirements.txt
+          npm ci --ignore-scripts --omit=optional --prefix evals/repair-security
+          npm run setup:native --prefix evals/repair-security
+          npm audit --omit=optional --audit-level=moderate --prefix evals/repair-security
+      - name: 공격 응답·정상 수정 대조군 평가
+        env:
+          PROMPTFOO_PYTHON: python
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: npm test --prefix evals/repair-security
+      - name: 평가 결과 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-security-eval
+          path: evals/repair-security/results/security.json
+          if-no-files-found: warn
+
   test:
     # 2.0.30 — 사용자 PC 는 대부분 Windows 다. 리눅스에서만 초록이면 Windows 에서만 깨지는 것(경로·인코딩·셸)을
     # 사용자가 먼저 만난다. 세 OS 와 두 Python 버전(설치본 3.11 · 최신 3.13)에서 같은 스위트를 돌린다.

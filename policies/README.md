@@ -2,13 +2,19 @@
 
 배포 게이트(설계서 §Q3 Preset Policy)를 OPA 정책으로 정의한 것이다.
 
+2.0.41부터 `recoder/execution.rego`가 문서 근거 수정·MCP 분석의 실행 직전 정책을 추가한다.
+기본 로컬 모드와 명시적 OPA 모드, 정책 철회 및 적용 범위는
+[실행 정책 안내](../docs/execution-policy.md)를 참고한다. OPA 실행 통제 모드는 서버 장애 시 차단한다.
+
 ## 구조
 
 ```
 policies/
 └── recoder/
     ├── deploy.rego        배포 차단 규칙 5개
-    └── deploy_test.rego   규칙 검증
+    ├── deploy_test.rego   배포 규칙 검증
+    ├── execution.rego    수정·분석 실행 허용
+    └── execution_test.rego 실행 정책 검증
 ```
 
 ## 코어와의 계약
