@@ -1,8 +1,8 @@
 # 문서 근거 기반 배포 오류 수정
 
-작업 브랜치: `feat/document-grounded-repair`, 시작 commit `66887b2`.
-확장과 Core의 표시 버전은 **1.1.30**이다. `develop`의 `6699ccf`를 통합했다.
-새 배포 점검·보안 수정·외부 프로젝트 선택 기능을 유지하고, 프로젝트 변경 시 이전 수정안과 진행 중 응답을 무효화한다.
+이 기능은 `feat/document-grounded-repair`의 `66887b2`에서 시작해 1.1.30에 통합됐다.
+아래 초기 비교 실험은 당시 기록이며, 이후 개선의 효과로 재해석하지 않는다.
+프로젝트 변경 시 이전 수정안과 진행 중 응답을 무효화한다.
 
 ## 사용 흐름
 
@@ -21,6 +21,43 @@ UI 요청 ID와 활성 프로젝트 확인으로 늦게 도착한 다른 프로�
 ECS/IAM/S3/런타임의 제품 API는 빌드 통과만으로 승인하지 않는다. 해당 환경의 검증이 없으면
 `environment_verification_required` 또는 수동 확인 상태를 표시한다. 연구용 로컬 계약 검사와
 IAM 시뮬레이션은 이 승인 조건을 우회하지 않는다.
+
+## 선택형 Reranker와 비교 (2.0.39)
+
+기본은 꺼짐이다. 검색된 후보 최대 20개를 로컬 cross-encoder로 다시 평가해 최대 4개를
+수정 근거로 전달한다. 호환되지 않는 버전의 문서는 먼저 제외하며, 정확한 오류 코드
+일치가 일반적인 문서보다 뒤로 밀리지 않게 한다. 후보에 없는 문서를 만들어 넣지 않는다.
+모델 점수의 개수·유한성을 검사하고 잘못된 결과는 명시적으로 실패한다.
+
+Python Core에서만 선택적으로 설치한다. 기본 배포 바이너리에 모델이나 PyTorch를 추가하지 않는다.
+설치 도구는 [Apache-2.0 BGE reranker](https://huggingface.co/BAAI/bge-reranker-v2-m3)의
+고정 리비전 `953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`를 받는다(가중치 약 2.1 GB).
+
+```sh
+python -m pip install -r core/requirements-repair.txt
+python scripts/setup_repair_reranker.py --assets work/repair-assets --config core/grounded_repair/runtime.json
+# 같은 corpus·embedding으로 재순위화 적용 전후 비교; 유료 LLM 호출 없음
+python scripts/compare_repair_reranker.py \
+  --embedding-model work/repair-assets/multilingual-e5-small \
+  --reranker-model work/repair-assets/bge-reranker-v2-m3 \
+  --output work/reranker-comparison.json
+```
+
+설정의 `reranker_model` 또는 `RECODER_REPAIR_RERANKER_MODEL`에 로컬 디렉터리를 지정하고
+Core를 재시작한다. 설정을 비우면 끈다. 실행 중에는 다운로드하지 않으며
+`local_files_only=True`, `trust_remote_code=False`, safetensors 가중치를 요구한다.
+기본 장치는 CPU이며 `RECODER_REPAIR_RERANKER_DEVICE`로 바꿀 수 있다. 입력은 쌍당
+최대 512 토큰, 한 배치는 4개다. API `retrieval_profile`은 구성된 모델 지문과 후보 한도를
+기록하며, 모델 구성이 바뀌면 기존 수정 캐시는 재사용하지 않는다.
+
+비교 데이터는 한국어·영어 개발용 검색 질의 20개와 버전 차단 대조군 1개다.
+기존 smoke 질의 4개를 포함하므로 독립 holdout이 아니다. Hit@1·Hit@4·MRR@4와
+warm-up 이후 중앙값·p95 시간을 기록한다. 정확도 향상 여부와 실행 환경의 속도를 함께
+확인한 뒤 활성화를 결정한다. 이 수치는 생성한 수정안의 성공률·안전성 평가를 대신하지 않는다.
+
+2026-10-20 macOS arm64 CPU 실측에서는 Hit@1이 100%→95%, 중앙값이 36.6ms→10,988.3ms였다.
+이 개발 세트에서는 이점이 없어 **기본 비활성화를 유지**한다. 문서 주제 단위 정답이며
+문단의 충분성까지 검증한 결과는 아니다. [실험 조건·원본 결과](../benchmarks/repair/RERANKER.md)를 참고한다.
 
 ## 오류 관련 코드·테스트 선택 (2.0.38)
 

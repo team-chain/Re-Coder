@@ -1,0 +1,26 @@
+{
+  "purpose": "Fixed development queries for retrieval comparison; not held-out repair accuracy.",
+  "cases": [
+    {"id":"ko-stopped","query":"컨테이너가 켜지자마자 죽어요","expected":["ecs-stopped","ecs-stop-archive","docker-runtime"]},
+    {"id":"ko-package-version","query":"설치하려는 패키지 버전이 없다고 나와요","expected":["npm-dependencies","npm-package"]},
+    {"id":"ko-pull-permission","query":"이미지를 가져올 권한이 없어요","expected":["ecs-execution-role","ecs-role-archive","ecr-policies"]},
+    {"id":"ko-vite-env","query":"브라우저에서 환경변수 값이 보이지 않아요","expected":["vite-env","vite-environment"]},
+    {"id":"npm-etarget","query":"npm error code ETARGET No matching version found for dependency","keywords":["ETARGET"],"expected":["npm-dependencies","npm-package","npm-install"]},
+    {"id":"npm-ci-lock","query":"npm ci failed because package-lock.json and package.json are not in sync","expected":["npm-ci","npm-dependencies"]},
+    {"id":"copy-context","query":"COPY failed source outside build context or excluded by .dockerignore","expected":["docker-copy","docker-context"]},
+    {"id":"ko-copy","query":"Docker 빌드에서 COPY 할 파일이 빌드 컨텍스트 바깥에 있어서 찾을 수 없어요","expected":["docker-copy","docker-context"]},
+    {"id":"multistage","query":"Docker COPY --from wrong build stage name missing source artifact","expected":["docker-copy","docker-context"]},
+    {"id":"probe-executable","query":"HEALTHCHECK curl executable not found in final image","expected":["docker-runtime","ecs-health","ecs-task-definition"]},
+    {"id":"node-esm","query":"ERR_REQUIRE_ESM CommonJS require of ES module failed","keywords":["ERR_REQUIRE_ESM"],"expected":["node-errors","node-module-errors","node-packages"]},
+    {"id":"node-resolution","query":"ERR_MODULE_NOT_FOUND module resolution import extensions","keywords":["ERR_MODULE_NOT_FOUND"],"expected":["node-errors","node-module-errors","node-packages"]},
+    {"id":"express5-wildcard","query":"Missing parameter name wildcard Express 5 route","versions":{"express":5},"expected":["express5-routing","express-migration"]},
+    {"id":"ko-express5","query":"Express 5로 올린 뒤 별표 경로에서 Missing parameter name 오류가 납니다","versions":{"express":5},"expected":["express5-routing","express-migration"]},
+    {"id":"vite-client-build","query":"import.meta.env VITE_ values replaced at build time, changing container env does not update client","expected":["vite-env","vite-environment"]},
+    {"id":"ecs-image-role","query":"AccessDenied ecr:BatchGetImage task execution role image pull","keywords":["AccessDenied"],"expected":["ecs-execution-role","ecs-role-archive","ecr-policies"]},
+    {"id":"ecs-startup","query":"ECS unhealthy during slow startup startPeriod health check grace","expected":["ecs-health","ecs-task-definition","docker-runtime"]},
+    {"id":"ko-ecs-startup","query":"ECS 앱 시작이 느려 준비되기 전에 상태 검사가 실패합니다","expected":["ecs-health","ecs-task-definition","docker-runtime"]},
+    {"id":"s3-deny","query":"S3 AccessDenied explicit Deny in bucket policy overrides Allow","keywords":["AccessDenied"],"expected":["s3-access","s3-access-archive","iam-evaluation"]},
+    {"id":"ko-s3-deny","query":"S3 객체 읽기가 거부됩니다. 버킷 정책에 명시적 Deny가 있으면 Allow를 추가해도 되나요","expected":["s3-access","s3-access-archive","iam-evaluation"]},
+    {"id":"express4-safety","query":"Missing parameter name wildcard route","versions":{"express":4},"expected":[],"forbidden":["express5-routing","express-migration"]}
+  ]
+}

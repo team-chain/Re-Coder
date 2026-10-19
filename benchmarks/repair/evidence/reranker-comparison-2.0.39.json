@@ -1,0 +1,705 @@
+{
+  "limitation": "Development queries, including four existing smoke queries; not held-out or end-to-end repair accuracy. No paid LLM calls.",
+  "corpus_sha256": "42ea9af99b70040f4b1c4145c2670a1775cf7620426ded483f13c79068bb34c9",
+  "cases_sha256": "3b7218314384d7d3184fecd20b62ba46cb40ba2f325b7d4c38d09ec4d1b118a0",
+  "environment": {
+    "system": "Darwin",
+    "machine": "arm64",
+    "python": "3.12.11"
+  },
+  "mode": "hybrid",
+  "reranker_profile": {
+    "reranker": "cross-encoder-v1:a9dc7aba2fdd8eca1bc7fda5c2191e5dbcb9739258f594f73eb3f3a7fad57318",
+    "candidate_limit": 20
+  },
+  "setup_seconds": 34.069,
+  "repeats": 1,
+  "metrics": {
+    "baseline": {
+      "positive_queries": 20,
+      "hit_at_1": 1.0,
+      "hit_at_4": 1.0,
+      "mrr_at_4": 1.0,
+      "median_ms": 36.592,
+      "p95_ms": 51.401,
+      "forbidden_hits": 0
+    },
+    "reranked": {
+      "positive_queries": 20,
+      "hit_at_1": 0.95,
+      "hit_at_4": 1.0,
+      "mrr_at_4": 0.975,
+      "median_ms": 10988.312,
+      "p95_ms": 12440.63,
+      "forbidden_hits": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "ko-stopped",
+      "query": "컨테이너가 켜지자마자 죽어요",
+      "expected": [
+        "ecs-stopped",
+        "ecs-stop-archive",
+        "docker-runtime"
+      ],
+      "baseline": {
+        "ids": [
+          "ecs-stopped",
+          "vite-migration:4",
+          "ecs-role-archive:7",
+          "node-module-errors:1"
+        ],
+        "latency_ms": [
+          51.252
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "ecs-task-definition:13",
+          "ecs-stopped",
+          "vite-migration:6",
+          "docker-context:4"
+        ],
+        "latency_ms": [
+          10988.312
+        ]
+      }
+    },
+    {
+      "id": "ko-package-version",
+      "query": "설치하려는 패키지 버전이 없다고 나와요",
+      "expected": [
+        "npm-dependencies",
+        "npm-package"
+      ],
+      "reranked": {
+        "ids": [
+          "npm-package:6",
+          "npm-dependencies",
+          "npm-package:5",
+          "npm-package:1"
+        ],
+        "latency_ms": [
+          10175.556
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "npm-dependencies",
+          "vite-migration:4",
+          "npm-ci:1",
+          "npm-package:4"
+        ],
+        "latency_ms": [
+          33.713
+        ]
+      }
+    },
+    {
+      "id": "ko-pull-permission",
+      "query": "이미지를 가져올 권한이 없어요",
+      "expected": [
+        "ecs-execution-role",
+        "ecs-role-archive",
+        "ecr-policies"
+      ],
+      "baseline": {
+        "ids": [
+          "ecs-execution-role",
+          "ecs-role-archive:7",
+          "ecr-policies:1",
+          "ecr-policies:0"
+        ],
+        "latency_ms": [
+          35.234
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "ecr-policies:2",
+          "ecr-policies:0",
+          "ecr-policies:1",
+          "ecs-execution-role"
+        ],
+        "latency_ms": [
+          11238.787
+        ]
+      }
+    },
+    {
+      "id": "ko-vite-env",
+      "query": "브라우저에서 환경변수 값이 보이지 않아요",
+      "expected": [
+        "vite-env",
+        "vite-environment"
+      ],
+      "reranked": {
+        "ids": [
+          "vite-env",
+          "vite-environment:5",
+          "ecs-task-definition:22",
+          "vite-environment:3"
+        ],
+        "latency_ms": [
+          11061.394
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "vite-env",
+          "ecs-role-archive:7",
+          "node-module-errors:1",
+          "express-migration:2"
+        ],
+        "latency_ms": [
+          43.549
+        ]
+      }
+    },
+    {
+      "id": "npm-etarget",
+      "query": "npm error code ETARGET No matching version found for dependency",
+      "keywords": [
+        "ETARGET"
+      ],
+      "expected": [
+        "npm-dependencies",
+        "npm-package",
+        "npm-install"
+      ],
+      "baseline": {
+        "ids": [
+          "npm-dependencies",
+          "npm-package:4",
+          "npm-package:6",
+          "npm-ci:0"
+        ],
+        "latency_ms": [
+          35.655
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "npm-dependencies",
+          "npm-package:6",
+          "npm-package:1",
+          "npm-package:7"
+        ],
+        "latency_ms": [
+          11922.528
+        ]
+      }
+    },
+    {
+      "id": "npm-ci-lock",
+      "query": "npm ci failed because package-lock.json and package.json are not in sync",
+      "expected": [
+        "npm-ci",
+        "npm-dependencies"
+      ],
+      "reranked": {
+        "ids": [
+          "npm-ci:0",
+          "npm-package:7",
+          "npm-ci:1",
+          "npm-install:0"
+        ],
+        "latency_ms": [
+          11289.656
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "npm-dependencies",
+          "npm-ci:0",
+          "npm-ci:1",
+          "npm-install:0"
+        ],
+        "latency_ms": [
+          38.872
+        ]
+      }
+    },
+    {
+      "id": "copy-context",
+      "query": "COPY failed source outside build context or excluded by .dockerignore",
+      "expected": [
+        "docker-copy",
+        "docker-context"
+      ],
+      "baseline": {
+        "ids": [
+          "docker-copy",
+          "docker-context:9",
+          "docker-context:13",
+          "docker-context:14"
+        ],
+        "latency_ms": [
+          36.592
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "docker-copy",
+          "docker-context:9",
+          "docker-context:13",
+          "docker-context:10"
+        ],
+        "latency_ms": [
+          12383.768
+        ]
+      }
+    },
+    {
+      "id": "ko-copy",
+      "query": "Docker 빌드에서 COPY 할 파일이 빌드 컨텍스트 바깥에 있어서 찾을 수 없어요",
+      "expected": [
+        "docker-copy",
+        "docker-context"
+      ],
+      "reranked": {
+        "ids": [
+          "docker-copy",
+          "docker-context:9",
+          "docker-context:14",
+          "docker-context:1"
+        ],
+        "latency_ms": [
+          12440.63
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "docker-copy",
+          "docker-context:9",
+          "docker-context:14",
+          "docker-context:1"
+        ],
+        "latency_ms": [
+          35.583
+        ]
+      }
+    },
+    {
+      "id": "multistage",
+      "query": "Docker COPY --from wrong build stage name missing source artifact",
+      "expected": [
+        "docker-copy",
+        "docker-context"
+      ],
+      "baseline": {
+        "ids": [
+          "docker-copy",
+          "docker-context:14",
+          "docker-context:9",
+          "docker-context:15"
+        ],
+        "latency_ms": [
+          35.95
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "docker-copy",
+          "docker-context:14",
+          "docker-context:9",
+          "docker-context:0"
+        ],
+        "latency_ms": [
+          13423.511
+        ]
+      }
+    },
+    {
+      "id": "probe-executable",
+      "query": "HEALTHCHECK curl executable not found in final image",
+      "expected": [
+        "docker-runtime",
+        "ecs-health",
+        "ecs-task-definition"
+      ],
+      "reranked": {
+        "ids": [
+          "docker-runtime",
+          "ecs-task-definition:13",
+          "ecs-task-definition:10",
+          "ecs-task-definition:12"
+        ],
+        "latency_ms": [
+          9630.451
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "docker-runtime",
+          "ecs-task-definition:10",
+          "ecs-task-definition:13",
+          "ecs-task-definition:12"
+        ],
+        "latency_ms": [
+          42.006
+        ]
+      }
+    },
+    {
+      "id": "node-esm",
+      "query": "ERR_REQUIRE_ESM CommonJS require of ES module failed",
+      "keywords": [
+        "ERR_REQUIRE_ESM"
+      ],
+      "expected": [
+        "node-errors",
+        "node-module-errors",
+        "node-packages"
+      ],
+      "baseline": {
+        "ids": [
+          "node-errors",
+          "node-module-errors:0",
+          "vite-migration:8",
+          "node-module-errors:1"
+        ],
+        "latency_ms": [
+          42.452
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "node-errors",
+          "node-module-errors:0",
+          "vite-migration:8",
+          "vite-migration:10"
+        ],
+        "latency_ms": [
+          9908.315
+        ]
+      }
+    },
+    {
+      "id": "node-resolution",
+      "query": "ERR_MODULE_NOT_FOUND module resolution import extensions",
+      "keywords": [
+        "ERR_MODULE_NOT_FOUND"
+      ],
+      "expected": [
+        "node-errors",
+        "node-module-errors",
+        "node-packages"
+      ],
+      "reranked": {
+        "ids": [
+          "node-errors",
+          "node-module-errors:0",
+          "node-module-errors:1",
+          "vite-migration:9"
+        ],
+        "latency_ms": [
+          11820.285
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "node-errors",
+          "node-module-errors:0",
+          "vite-migration:9",
+          "vite-migration:10"
+        ],
+        "latency_ms": [
+          36.244
+        ]
+      }
+    },
+    {
+      "id": "express5-wildcard",
+      "query": "Missing parameter name wildcard Express 5 route",
+      "versions": {
+        "express": 5
+      },
+      "expected": [
+        "express5-routing",
+        "express-migration"
+      ],
+      "baseline": {
+        "ids": [
+          "express5-routing",
+          "express-migration:1",
+          "express-migration:0",
+          "express-migration:2"
+        ],
+        "latency_ms": [
+          44.225
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "express5-routing",
+          "express-migration:1",
+          "express-migration:0",
+          "express-migration:2"
+        ],
+        "latency_ms": [
+          10212.059
+        ]
+      }
+    },
+    {
+      "id": "ko-express5",
+      "query": "Express 5로 올린 뒤 별표 경로에서 Missing parameter name 오류가 납니다",
+      "versions": {
+        "express": 5
+      },
+      "expected": [
+        "express5-routing",
+        "express-migration"
+      ],
+      "reranked": {
+        "ids": [
+          "express5-routing",
+          "express-migration:2",
+          "express-migration:0",
+          "express-migration:1"
+        ],
+        "latency_ms": [
+          10501.072
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "express5-routing",
+          "express-migration:0",
+          "express-migration:2",
+          "express-migration:1"
+        ],
+        "latency_ms": [
+          33.226
+        ]
+      }
+    },
+    {
+      "id": "vite-client-build",
+      "query": "import.meta.env VITE_ values replaced at build time, changing container env does not update client",
+      "expected": [
+        "vite-env",
+        "vite-environment"
+      ],
+      "baseline": {
+        "ids": [
+          "vite-env",
+          "vite-environment:1",
+          "vite-environment:0",
+          "vite-environment:4"
+        ],
+        "latency_ms": [
+          33.185
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "vite-env",
+          "vite-environment:0",
+          "vite-environment:1",
+          "vite-environment:4"
+        ],
+        "latency_ms": [
+          11639.857
+        ]
+      }
+    },
+    {
+      "id": "ecs-image-role",
+      "query": "AccessDenied ecr:BatchGetImage task execution role image pull",
+      "keywords": [
+        "AccessDenied"
+      ],
+      "expected": [
+        "ecs-execution-role",
+        "ecs-role-archive",
+        "ecr-policies"
+      ],
+      "reranked": {
+        "ids": [
+          "ecs-execution-role",
+          "s3-access",
+          "ecs-role-archive:0",
+          "ecs-role-archive:6"
+        ],
+        "latency_ms": [
+          10261.726
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "ecs-execution-role",
+          "s3-access",
+          "ecs-role-archive:1",
+          "ecr-policies:2"
+        ],
+        "latency_ms": [
+          31.948
+        ]
+      }
+    },
+    {
+      "id": "ecs-startup",
+      "query": "ECS unhealthy during slow startup startPeriod health check grace",
+      "expected": [
+        "ecs-health",
+        "ecs-task-definition",
+        "docker-runtime"
+      ],
+      "baseline": {
+        "ids": [
+          "ecs-health",
+          "ecs-task-definition:13",
+          "ecs-task-definition:11",
+          "ecs-task-definition:10"
+        ],
+        "latency_ms": [
+          39.449
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "ecs-health",
+          "ecs-task-definition:13",
+          "ecs-task-definition:10",
+          "ecs-task-definition:11"
+        ],
+        "latency_ms": [
+          9501.654
+        ]
+      }
+    },
+    {
+      "id": "ko-ecs-startup",
+      "query": "ECS 앱 시작이 느려 준비되기 전에 상태 검사가 실패합니다",
+      "expected": [
+        "ecs-health",
+        "ecs-task-definition",
+        "docker-runtime"
+      ],
+      "reranked": {
+        "ids": [
+          "ecs-task-definition:13",
+          "ecs-stop-archive:0",
+          "ecs-health",
+          "ecs-stopped"
+        ],
+        "latency_ms": [
+          9699.202
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "ecs-health",
+          "ecs-stop-archive:1",
+          "ecs-stopped",
+          "ecs-stop-archive:0"
+        ],
+        "latency_ms": [
+          37.524
+        ]
+      }
+    },
+    {
+      "id": "s3-deny",
+      "query": "S3 AccessDenied explicit Deny in bucket policy overrides Allow",
+      "keywords": [
+        "AccessDenied"
+      ],
+      "expected": [
+        "s3-access",
+        "s3-access-archive",
+        "iam-evaluation"
+      ],
+      "baseline": {
+        "ids": [
+          "s3-access",
+          "ecs-execution-role",
+          "s3-access-archive:2",
+          "s3-access-archive:5"
+        ],
+        "latency_ms": [
+          32.135
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "s3-access",
+          "ecs-execution-role",
+          "iam-evaluation:12",
+          "s3-access-archive:13"
+        ],
+        "latency_ms": [
+          9928.072
+        ]
+      }
+    },
+    {
+      "id": "ko-s3-deny",
+      "query": "S3 객체 읽기가 거부됩니다. 버킷 정책에 명시적 Deny가 있으면 Allow를 추가해도 되나요",
+      "expected": [
+        "s3-access",
+        "s3-access-archive",
+        "iam-evaluation"
+      ],
+      "reranked": {
+        "ids": [
+          "s3-access-archive:2",
+          "iam-evaluation:13",
+          "iam-cross-account:3",
+          "iam-evaluation:14"
+        ],
+        "latency_ms": [
+          10845.431
+        ]
+      },
+      "baseline": {
+        "ids": [
+          "s3-access",
+          "s3-access-archive:12",
+          "s3-access-archive:0",
+          "iam-evaluation:13"
+        ],
+        "latency_ms": [
+          61.336
+        ]
+      }
+    },
+    {
+      "id": "express4-safety",
+      "query": "Missing parameter name wildcard route",
+      "versions": {
+        "express": 4
+      },
+      "expected": [],
+      "forbidden": [
+        "express5-routing",
+        "express-migration"
+      ],
+      "baseline": {
+        "ids": [
+          "node-errors",
+          "iam-resource:1",
+          "ecs-task-definition:23",
+          "ecs-role-archive:5"
+        ],
+        "latency_ms": [
+          51.401
+        ]
+      },
+      "reranked": {
+        "ids": [
+          "iam-resource:0",
+          "iam-resource:1",
+          "docker-context:13",
+          "ecs-task-definition:20"
+        ],
+        "latency_ms": [
+          11141.682
+        ]
+      }
+    }
+  ]
+}

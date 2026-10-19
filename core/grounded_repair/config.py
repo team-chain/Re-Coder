@@ -1,4 +1,5 @@
 """Explicit local retrieval assets and distinct repair tiers, without downloads at runtime."""
+
 import json
 import os
 from functools import lru_cache
@@ -6,21 +7,28 @@ from pathlib import Path
 
 
 def settings():
-    path = Path(os.getenv('RECODER_REPAIR_CONFIG', str(Path(__file__).with_name('runtime.json'))))
+    path = Path(os.getenv("RECODER_REPAIR_CONFIG", str(Path(__file__).with_name("runtime.json"))))
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 @lru_cache(maxsize=2)
-def _index(corpus, corpus_stamp, model):
-    from grounded_repair.knowledge import KnowledgeIndex, LocalEmbedding
-    index = KnowledgeIndex.load(Path(corpus) if corpus else None, model_path=model, include_summaries=True)
+def _index(corpus, corpus_stamp, model, reranker):
+    from grounded_repair.knowledge import KnowledgeIndex
+
+    index = KnowledgeIndex.load(
+        Path(corpus) if corpus else None,
+        model_path=model,
+        include_summaries=True,
+        reranker_path=reranker,
+    )
     return index
 
 
 def load_index():
     config = settings()
-    corpus = os.getenv('RECODER_REPAIR_CORPUS', config.get('corpus', ''))
-    model = os.getenv('RECODER_REPAIR_EMBEDDING_MODEL', config.get('embedding_model', ''))
+    corpus = os.getenv("RECODER_REPAIR_CORPUS", config.get("corpus", ""))
+    model = os.getenv("RECODER_REPAIR_EMBEDDING_MODEL", config.get("embedding_model", ""))
+    reranker = os.getenv("RECODER_REPAIR_RERANKER_MODEL", config.get("reranker_model", ""))
     if corpus:
         p = Path(corpus)
     else:
@@ -28,24 +36,30 @@ def load_index():
             from resources import resource
         except ImportError:  # pragma: no cover
             from core.resources import resource
-        p = resource('grounded_repair', 'sources.json')
-    return _index(str(p), (p.stat().st_mtime_ns, p.stat().st_size), model)
+        p = resource("grounded_repair", "sources.json")
+    return _index(str(p), (p.stat().st_mtime_ns, p.stat().st_size), model, reranker)
 
 
 def repair_router():
-    from llm.provider_router import LLMProviderRouter
     from llm.bedrock_provider import BedrockProvider
+    from llm.provider_router import LLMProviderRouter
+
     router = LLMProviderRouter()
     config = settings()
-    for tier, attribute in [('primary', '_bedrock_sonnet'), ('fast', '_bedrock_haiku')]:
+    for tier, attribute in [("primary", "_bedrock_sonnet"), ("fast", "_bedrock_haiku")]:
         provider = getattr(router, attribute)
-        model = os.getenv('RECODER_REPAIR_' + tier.upper() + '_MODEL', config.get(tier + '_model', ''))
+        model = os.getenv(
+            "RECODER_REPAIR_" + tier.upper() + "_MODEL", config.get(tier + "_model", "")
+        )
         if not model and isinstance(provider, BedrockProvider):
-            model = ('global.anthropic.claude-sonnet-4-5-20250929-v1:0' if tier == 'primary'
-                     else 'global.anthropic.claude-haiku-4-5-20251001-v1:0')
+            model = (
+                "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                if tier == "primary"
+                else "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+            )
         if model:
             # Preserve explicitly selected authentication/provider and AWS region.
             provider.model_id = model
-    if 'RECODER_REPAIR_PRICES' not in os.environ and config.get('prices'):
-        os.environ['RECODER_REPAIR_PRICES'] = json.dumps(config['prices'])
+    if "RECODER_REPAIR_PRICES" not in os.environ and config.get("prices"):
+        os.environ["RECODER_REPAIR_PRICES"] = json.dumps(config["prices"])
     return router
