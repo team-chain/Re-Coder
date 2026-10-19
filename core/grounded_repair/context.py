@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from pathlib import PurePosixPath
 
-CONTEXT_VERSION = "error-local-code-tests-v1"
+CONTEXT_VERSION = "error-local-readonly-tests-v2"
 CONFIGS = {
     "Dockerfile",
     ".dockerignore",

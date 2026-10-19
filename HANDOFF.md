@@ -4,7 +4,8 @@
 - `grounded_repair/context.py`: 로그의 파일 참조 → 같은 패키지의 대응 소스/테스트 → 설정 → 나머지 순서. 여러 package.json·pyproject.toml·requirements.txt가 있는 경우 가장 가까운 패키지로 묶는다. Windows 경로 구분자·모호한 basename·외부 의존성 경로를 처리한다.
 - `workspace.select_context`의 기존 파일 수·크기·비밀값 검사를 그대로 거친다. `.jsx`·`.tsx` 및 Python 프로젝트 설정도 대상에 포함한다. 파일 이름 규칙에 따른 연관 추정이며 AST 연결이나 테스트 실행은 아니다.
 - pipeline은 선택 파일 목록과 선택기 버전을 기록하고, 선택기 버전도 캐시 키에 포함한다. 후속은 선택형 reranker 비교 실험 → Promptfoo 평가/CI → OPA 실행 통제다.
-- 로컬 검증: RAG 관련 105건, 실제 Docker 수정·승인 smoke, Black·Ruff, 버전 일치 검사 통과. 파일 참조·테스트 연관·모노레포 범위·모호한 이름·의존성 stack frame·파일 크기/비밀값 제외·캐시 무효화를 확인했다.
+- 로컬 검증: RAG 관련 107건, 실제 Docker 수정·승인 smoke, Black·Ruff, 버전 일치 검사 통과. 파일 참조·테스트 연관·모노레포 범위·모호한 이름·의존성 stack frame·파일 크기/비밀값 제외·캐시 무효화를 확인했다.
+- 후속 검토: 테스트를 고쳐 빌드를 통과시키지 못하도록 `read_only_files`를 명시하고 후보 파일 쓰기 전에 테스트 수정안을 거부한다. 기존 `llm.task_tier.is_test_file` 경로 판정을 재사용하고 선택기 버전을 v2로 바꿔 캐시를 무효화한다. 구현 파일만 고치는 정상 경로와 테스트 덮어쓰기 거부를 함께 검증한다.
 
 # RAG 문서 버전 필터 (2026-10-20, 2.0.37)
 

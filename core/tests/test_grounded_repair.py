@@ -231,6 +231,37 @@ def test_context_selector_revision_invalidates_repair_cache(setup, monkeypatch):
     assert len(router.calls) == 2
 
 
+def test_test_evidence_cannot_be_rewritten_to_pass_verification(setup):
+    root, store, index = setup
+    test = root / "test_app.py"
+    test.write_text("assert expected_behavior()", encoding="utf-8")
+    proposal = suggestion()
+    proposal["edits"].append(
+        {"path": "test_app.py", "content": "assert True", "evidence_ids": ["express"]}
+    )
+    verifier = Verifier()
+    router = Router([proposal, proposal])
+    result = run(RepairPipeline(router, index, store, verifier, no_rules), root)
+    assert result["status"] == "unresolved"
+    assert verifier.contents == ["broken"]
+    assert all("read-only" in attempt["error"] for attempt in result["attempts"])
+    assert result["read_only_files"] == ["test_app.py"]
+    assert json.loads(router.calls[0][1].prompt)["read_only_files"] == ["test_app.py"]
+    assert test.read_text(encoding="utf-8") == "assert expected_behavior()"
+    assert (root / "app.js").read_text(encoding="utf-8") == "broken"
+
+
+def test_implementation_can_be_repaired_with_read_only_test_evidence(setup):
+    root, store, index = setup
+    test = root / "test_app.py"
+    test.write_text("assert expected_behavior()", encoding="utf-8")
+    result = run(RepairPipeline(Router([suggestion()]), index, store, Verifier(), no_rules), root)
+    assert result["status"] == "ready_for_approval"
+    store.approve(result["id"])
+    assert (root / "app.js").read_text(encoding="utf-8") == "fixed"
+    assert test.read_text(encoding="utf-8") == "assert expected_behavior()"
+
+
 def test_citation_hallucination_is_rejected_before_build(setup):
     root, store, index = setup
     verifier = Verifier()
