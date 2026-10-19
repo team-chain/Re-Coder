@@ -69,7 +69,12 @@
     "kind": "authored_summary",
     "license_status": "summary_only",
     "license_url": "https://github.com/expressjs/expressjs.com/blob/main/LICENSE.md",
-    "fulltext_status": "authored_summary_only"
+    "fulltext_status": "authored_summary_only",
+    "applies_to": {
+      "express": [
+        5
+      ]
+    }
   },
   {
     "id": "ecs-stopped",
@@ -1272,7 +1277,12 @@
     ],
     "text": "## Removed methods and properties\n\nIf you use any of these methods or properties in your app, it will crash. So, you'll need to change your app after you update to version 5.\n\n### app.del()\n\nExpress 5 no longer supports the `app.del()` function. If you use this function, an error is thrown. For registering HTTP DELETE routes, use the `app.delete()` function instead.\n\nInitially, `del` was used instead of `delete`, because `delete` is a reserved keyword in JavaScript. However, as of ECMAScript 6, `delete` and other reserved keywords can legally be used as property names.\n\n### res.send(body, status)\n\nExpress 5 no longer supports the signature `res.send(obj, status)`. Instead, set the status and then chain it to the `res.send()` method like this: `res.status(status).send(obj)`.\n\n### res.send(status)\n\nExpress 5 no longer supports the signature `res.send(status)`, where `status` is a number. Instead, use the `res.sendStatus(statusCode)` function, which sets the HTTP response header status code and sends the text version of the code: \"Not Found\", \"Internal Server Error\", and so on.\nIf you need to send a number by using the `res.send()` function, quote the number to convert it to a string, so that Express does not interpret it as an attempt to use the unsupported old signature.\n\n### res.sendfile()\n\nThe `res.sendfile()` function has been replaced by a camel-cased version `res.sendFile()` in Express 5.\n\n### res.sendFile() options\n\nThe `hidden` and `from` options for `res.sendFile()` are no longer supported. Use `dotfiles` and `root` instead.",
     "kind": "excerpt",
-    "fetched_at": "2026-10-02T17:08:03.698799+00:00"
+    "fetched_at": "2026-10-02T17:08:03.698799+00:00",
+    "applies_to": {
+      "express": [
+        5
+      ]
+    }
   },
   {
     "id": "express-migration:1",
@@ -1296,7 +1306,12 @@
     ],
     "text": "The `dotfiles` option applies to hidden directories in the path as well as hidden files. For example, a file served from an absolute path like `/var/www/app/.cache/index.html` now requires `dotfiles: 'allow'`, even though `index.html` is not a dotfile. In Express 4 a hidden directory in the path was served by default; Express 5 returns `404` unless you opt in.\n\nThis check only applies to the part of the path that `send` evaluates. When you pass a `root`, only the portion relative to `root` is checked, so a hidden directory inside `root` is unaffected.\n\n### Path route matching syntax\n\nPath route matching syntax is when a string is supplied as the first parameter to the `app.all()`, `app.use()`, `app.METHOD()`, `router.all()`, `router.METHOD()`, and `router.use()` APIs. The following changes have been made to how the path string is matched to an incoming request:\n\n- The wildcard `*` must have a name, matching the behavior of parameters `:`, use `/*splat` instead of `/*`\n\n```diff\n  -app.get('/*', async (req, res) => {\n  +app.get('/*splat', async (req, res) => {\n     res.send('ok');\n   });\n  ```\n\n<Alert type=\"info\">\n\n`*splat` matches any path without the root path. If you need to match the root path as well `/`, you can use `/{*splat}`, wrapping the wildcard in braces.\n\n```js\n  app.get('/{*splat}', async (req, res) => {\n    res.send('ok');\n  });\n  ```\n\n</Alert>\n\n- The optional character `?` is no longer supported, use braces instead.\n\n```diff\n  -app.get('/:file.:ext?', async (req, res) => {\n  +app.get('/:file{.:ext}', async (req, res) => {\n     res.send('ok');\n   });\n  ```",
     "kind": "excerpt",
-    "fetched_at": "2026-10-02T17:08:03.698808+00:00"
+    "fetched_at": "2026-10-02T17:08:03.698808+00:00",
+    "applies_to": {
+      "express": [
+        5
+      ]
+    }
   },
   {
     "id": "express-migration:2",
@@ -1320,7 +1335,12 @@
     ],
     "text": "- Regexp characters are not supported. For example:\n\n```diff\n  -app.get('/[discussion|page]/:slug', async (req, res) => {\n  +app.get(['/discussion/:slug', '/page/:slug'], async (req, res) => {\n     res.status(200).send('ok');\n   });\n  ```\n\n- Some characters have been reserved to avoid confusion during upgrade (`()[]?+!`), use `\\` to escape them.\n- Parameter names now support valid JavaScript identifiers, or quoted like `:\"this\"`.",
     "kind": "excerpt",
-    "fetched_at": "2026-10-02T17:08:03.698810+00:00"
+    "fetched_at": "2026-10-02T17:08:03.698810+00:00",
+    "applies_to": {
+      "express": [
+        5
+      ]
+    }
   },
   {
     "id": "ecs-task-definition:0",

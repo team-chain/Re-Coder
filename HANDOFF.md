@@ -1,3 +1,21 @@
+# 오류 관련 코드·테스트 문맥 (2026-10-20, 2.0.38)
+
+- 이전 단계 2.0.37의 `fa23cff7`은 [전체 CI](https://github.com/team-chain/Re-Coder/actions/runs/39287751318) 성공 확인 후 다음 브랜치로 진행했다.
+- `grounded_repair/context.py`: 로그의 파일 참조 → 같은 패키지의 대응 소스/테스트 → 설정 → 나머지 순서. 여러 package.json·pyproject.toml·requirements.txt가 있는 경우 가장 가까운 패키지로 묶는다. Windows 경로 구분자·모호한 basename·외부 의존성 경로를 처리한다.
+- `workspace.select_context`의 기존 파일 수·크기·비밀값 검사를 그대로 거친다. `.jsx`·`.tsx` 및 Python 프로젝트 설정도 대상에 포함한다. 파일 이름 규칙에 따른 연관 추정이며 AST 연결이나 테스트 실행은 아니다.
+- pipeline은 선택 파일 목록과 선택기 버전을 기록하고, 선택기 버전도 캐시 키에 포함한다. 후속은 선택형 reranker 비교 실험 → Promptfoo 평가/CI → OPA 실행 통제다.
+- 로컬 검증: RAG 관련 107건, 실제 Docker 수정·승인 smoke, Black·Ruff, 버전 일치 검사 통과. 파일 참조·테스트 연관·모노레포 범위·모호한 이름·의존성 stack frame·파일 크기/비밀값 제외·캐시 무효화를 확인했다.
+- 후속 검토: 테스트를 고쳐 빌드를 통과시키지 못하도록 `read_only_files`를 명시하고 후보 파일 쓰기 전에 테스트 수정안을 거부한다. 기존 `llm.task_tier.is_test_file` 경로 판정을 재사용하고 선택기 버전을 v2로 바꿔 캐시를 무효화한다. 구현 파일만 고치는 정상 경로와 테스트 덮어쓰기 거부를 함께 검증한다.
+
+# RAG 문서 버전 필터 (2026-10-20, 2.0.37)
+
+- `grounded_repair/knowledge.py`: `Passage.applies_to`는 패키지별 허용 major 목록이며 출처의 `version` 리비전과 구분한다. 확실하게 다른 버전이면 BM25·dense 후보에서 먼저 제외한다. metadata·검색기 v4가 색인/수정 캐시 키에 반영된다.
+- `grounded_repair/versions.py`: 검증용 복사본의 package.json만 읽는다. 문서가 다루는 패키지만 추출해 불필요한 의존성 목록을 프롬프트로 보내지 않는다. 단일 major의 단순 범위만 인정하며 모노레포 충돌·불명확한 범위·손상된 manifest는 추정하지 않는다. 설치 버전이나 전체 semver 호환성의 증명은 아니다.
+- 기본 요약·benchmark corpus·refresh manifest의 Express 5 문서에 적용 대상 metadata를 기록했다. pipeline은 확인한 선언을 기록하고 모델에도 전달한다. 필터 후 근거가 없으면 모델 호출 없이 종료한다.
+- 검증: RAG 관련 테스트 89건, 로컬 Core 전체 3,090건 통과(13건 skip). Docker Desktop을 시작한 뒤 실제 빌드 실패 → 수정 후 빌드 성공 → 승인 전 원본 유지 → 승인 후 적용 smoke도 통과했다(유료 호출 0). 기존 Docker mock의 import 순서 의존성을 제거했다. 오래된 smoke의 고장 사례는 이미 readiness 규칙에서 차단되어 RAG에 도달하지 않았으므로, 실제 빌드가 필요한 COPY 목적지 충돌로 교체했다.
+- 첫 Windows CI에서 대용량 parametrize 값이 테스트 이름에 그대로 들어가 `PYTEST_CURRENT_TEST` 환경변수의 32,767자 한도를 넘었다. 테스트 이름을 짧게 지정했다. 검증할 입력 크기와 제품 동작은 바꾸지 않는다.
+- `codex/feat/**` 푸시에 전체 CI를 실행하며 골든패스 작업에 실제 Docker RAG smoke를 추가했다. 버전 필터는 수정 정확도 향상률을 측정한 실험이 아니다. 오류별 코드/테스트 선택·선택형 reranker·Promptfoo·OPA 실행 통제는 후속 단계다.
+
 # 작업별 AI 공급자 · 비용 원장 · 공급자 비교 (2026-10-16, 2.0.36)
 
 - core/llm/task_tier.py — tier_for(operation): ECONOMY_OPERATIONS(generate_plan_topics·summarize_request·summarize_scan(_results)·classify_error·augment_candidates·generate_test_draft) 만 economy, 나머지(모르는 이름 포함) quality. REPAIR_OPERATIONS(비교 도구 교정 횟수). contextvars _FORCED·_RUN_TAG + pinned(spec, tag) + bind(fn)(작업 스레드로 문맥 전달 — 호출마다 Context.copy()). is_test_file(path).

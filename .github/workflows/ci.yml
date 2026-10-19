@@ -1,12 +1,12 @@
 name: CI
 
-# 개별 브랜치 → develop PR 시 검증 (회차1 회고 합의사항)
+# develop PR 및 codex/feat/** 작업 브랜치의 각 푸시를 검증한다.
 # main 브랜치는 건드리지 않는다.
 on:
   pull_request:
     branches: [develop]
   push:
-    branches: [develop]
+    branches: [develop, 'codex/feat/**']
   workflow_dispatch:
   # 2.0.33 릴리스(태그) 빌드도 같은 테스트를 통과해야 올린다 — release.yml 이 이 워크플로를 불러 쓴다.
   workflow_call:
@@ -100,6 +100,9 @@ jobs:
 
       - name: 골든패스 실행
         run: python scripts/golden_path_smoke.py
+
+      - name: 문서 근거 수정 Docker 스모크
+        run: python scripts/smoke_grounded_repair.py
 
   # ── 웹뷰 렌더 테스트 ───────────────────────────────────────────────────
   # 왜 필요한가: Workspace 창에서 결정 카드가 뜨지 않던 버그(showCodeAgent
