@@ -112,6 +112,7 @@ class RepairPipeline:
             "strategy": strategy,
             "evidence": evidence.to_dict(),
             "retrieval_mode": self.index.mode,
+            "retrieval_profile": self.index.retrieval_profile,
             "corpus_version": self.index.version,
             "sources": [],
             "attempts": [],

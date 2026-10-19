@@ -135,7 +135,7 @@ class LocalEmbedding:
 
 
 class KnowledgeIndex:
-    def __init__(self, passages: list[Passage], embed=None):
+    def __init__(self, passages: list[Passage], embed=None, reranker=None):
         if any(not official_url(p.url) or not p.text or len(p.text) > 2400 for p in passages):
             raise ValueError("Invalid official document passage")
         if len({p.id for p in passages}) != len(passages):
@@ -152,13 +152,19 @@ class KnowledgeIndex:
                 raise ValueError("Invalid document version applicability")
         self.passages = passages
         self.embed = embed
+        self.reranker = reranker
+        self.retrieval_profile = {
+            "reranker": getattr(reranker, "identity", "injected" if reranker else "none"),
+            "candidate_limit": 20 if reranker else None,
+        }
         self.mode = "hybrid" if embed else "keyword_only"
         self.version = hashlib.sha256(
             json.dumps(
                 {
                     "passages": [p.to_dict() for p in passages],
                     "embedding": getattr(embed, "identity", "injected" if embed else "none"),
-                    "retriever": "bm25-rrf-version-filter-v4",
+                    "reranking": self.retrieval_profile,
+                    "retriever": "bm25-rrf-optional-reranker-v5",
                 },
                 sort_keys=True,
             ).encode()
@@ -170,7 +176,12 @@ class KnowledgeIndex:
 
     @classmethod
     def load(
-        cls, path: Path | None = None, model_path: str | None = None, *, include_summaries=False
+        cls,
+        path: Path | None = None,
+        model_path: str | None = None,
+        *,
+        include_summaries=False,
+        reranker_path: str | None = None,
     ):
         path = path or _sources_json()
         entries = json.loads(path.read_text(encoding="utf-8"))
@@ -198,7 +209,18 @@ class KnowledgeIndex:
             if model_path is not None
             else os.getenv("RECODER_REPAIR_EMBEDDING_MODEL", "")
         )
-        return cls(passages, LocalEmbedding(model) if model else None)
+        reranker_model = (
+            reranker_path
+            if reranker_path is not None
+            else os.getenv("RECODER_REPAIR_RERANKER_MODEL", "")
+        )
+        if reranker_model:
+            from grounded_repair.reranker import LocalReranker
+
+            reranker = LocalReranker(reranker_model)
+        else:
+            reranker = None
+        return cls(passages, LocalEmbedding(model) if model else None, reranker)
 
     def search(
         self,
@@ -208,6 +230,8 @@ class KnowledgeIndex:
         *,
         project_versions: dict[str, int] | None = None,
     ) -> list[Passage]:
+        if not 1 <= top_k <= 20:
+            raise ValueError("Retrieval top_k must be between 1 and 20")
         if not self.passages:
             return []
         versions = project_versions or {}
@@ -280,4 +304,21 @@ class KnowledgeIndex:
                 self.passages[i].id,
             ),
         )
+        if self.reranker and len(ranked) > 1:
+            candidates = ranked[:20]
+            relevance = self.reranker(
+                query, [self.passages[i].title + "\n" + self.passages[i].text for i in candidates]
+            )
+            if len(relevance) != len(candidates) or any(not math.isfinite(s) for s in relevance):
+                raise ValueError("Reranker returned invalid relevance scores")
+            original_rank = {index: rank for rank, index in enumerate(candidates)}
+            model_scores = dict(zip(candidates, relevance, strict=True))
+            ranked = sorted(
+                candidates,
+                key=lambda i: (
+                    -sum(k.lower() in self.terms[i] for k in keywords),
+                    -model_scores[i],
+                    original_rank[i],
+                ),
+            )
         return [self.passages[i] for i in ranked[:top_k]]
