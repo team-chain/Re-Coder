@@ -457,8 +457,10 @@ const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCanc
         <div style={{ padding: "9px 11px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "44px 1fr", gap: "5px 10px", fontSize: 11.5 }}>
             <div style={{ color: "#8fa4b5" }}>위치</div><div style={{ color: "#e3e9ef", overflowWrap: "anywhere" }}><code style={{ ...mono, background: "#0f161d", padding: "1px 5px", borderRadius: 4, color: "#cfe3f2" }}>{folderLabel}</code></div>
-            {action.summary && <><div style={{ color: "#8fa4b5" }}>작업</div><div style={{ color: "#e3e9ef" }}>{action.summary}</div></>}
+            {/* 2.0.29 (OWASP ASI09) — 승인의 근거는 실제 계획 데이터(위치·실행할 요청·만들 파일). AI 가 쓴 요약은 "AI 설명" 으로 구분한다. */}
+            {action.instruction && <><div style={{ color: "#8fa4b5" }}>요청</div><div data-testid="action-instruction" style={{ color: "#e3e9ef", overflowWrap: "anywhere" }}>{action.instruction.length > 240 ? action.instruction.slice(0, 240) + "…" : action.instruction}</div></>}
             {action.stack && <><div style={{ color: "#8fa4b5" }}>스택</div><div style={{ color: "#e3e9ef" }}>{action.stack}</div></>}
+            {action.summary && <><div style={{ color: "#8fa4b5" }}>AI 설명</div><div data-testid="action-ai-summary" style={{ color: "#9fb0bf", fontStyle: "italic" }}>{action.summary}</div></>}
           </div>
           {action.files.length > 0 && (
             <ul style={{ margin: "8px 0 0", padding: 0, listStyle: "none", fontSize: 11.5 }}>

@@ -35,6 +35,26 @@ class CodeOutputError(ValueError):
     """Safe, bounded explanation; never contains model text or project content."""
 
 
+#: AI 가 쓰지 않는 폴더 — 저장소 메타데이터·편집기 설정(.git/hooks, .vscode/tasks.json)은 실행 가능한 코드라 승인 한 번으로
+#: PC 에서 돌 수 있다(보안 검토). 모든 생성 경로(한 번에·팀 모드·이어 받기)가 같은 규칙을 쓴다(2.0.33).
+FORBIDDEN_DIRS = frozenset({".git", ".vscode"})
+
+
+def safe_rel_path(path: object) -> str | None:
+    """프로젝트 안 상대 경로면 정규화한 경로, 아니면 None(절대·드라이브·밖으로 나감·금지 폴더)."""
+    if not isinstance(path, str):
+        return None
+    file = path.strip().replace("\\", "/")
+    if not file or file.startswith("/") or ":" in file:
+        return None
+    file = posixpath.normpath(file)
+    if file in (".", "..") or file.startswith("../"):
+        return None
+    if any(seg.casefold() in FORBIDDEN_DIRS for seg in file.split("/")):
+        return None
+    return file
+
+
 def parse_code_output(raw: str) -> tuple[dict, list[dict]]:
     text = (raw or "").strip()
     if not text:

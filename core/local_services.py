@@ -135,7 +135,12 @@ def _load(container: str) -> dict:
 def _save(container: str, data: dict) -> None:
     _HOME.mkdir(parents=True, exist_ok=True)
     path = _secret_file(container)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    #: 2.0.33 DB 비밀번호가 든 파일 — 원자적으로(쓰다 끊겨도 반쪽 파일이 남지 않게), 처음부터 0600 으로 쓴다.
+    try:
+        import state_io  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import state_io  # type: ignore
+    state_io.write_json(path, data, indent=2)
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -302,7 +307,12 @@ def ddl_from_code(root: Path) -> Optional[str]:
     앱이 시작할 때 IF NOT EXISTS 없이 CREATE TABLE 을 하면(미리 만들어 두면 그 앱이 "already exists" 로 죽는다) 쓰지 않는다.
     """
     found: list[str] = []
-    for path in sorted(root.rglob("*")):
+    #: 2.0.33 node_modules 같은 큰 폴더는 들어가지도 않는다(rglob 은 다 훑은 뒤 걸러서 큰 프로젝트에서 수십 초 걸렸다).
+    candidates: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_PARTS and not os.path.islink(os.path.join(dirpath, d))]
+        candidates.extend(Path(dirpath) / name for name in filenames if name.endswith(_CODE_EXT))
+    for path in sorted(candidates):
         rel = path.relative_to(root).as_posix()
         if not path.is_file() or not rel.endswith(_CODE_EXT) or set(rel.split("/")[:-1]) & _SKIP_PARTS:
             continue

@@ -59,3 +59,10 @@ benchmarks/repair/results/
 !benchmarks/repair/logs/
 !benchmarks/repair/logs/*.log
 core/.venv
+
+# Discord 봇 실행 중 생기는 상태 파일(서버 설정·토큰) — 저장소에 올리지 않는다(2.0.33)
+discord-bot/guild_config.db
+discord-bot/guild_config.db-*
+discord-bot/bridge_settings.json
+discord-bot/policy.json
+discord-bot/connections*.json

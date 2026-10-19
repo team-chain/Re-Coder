@@ -66,7 +66,26 @@ def load_records() -> dict[str, DeploymentRecord]:
         except (OSError, ValueError):
             load_incomplete = True
             log.warning("Could not read local deployment history: %s", path.name)
+            _keep_corrupt_copy(path)
     return records
+
+
+def _keep_corrupt_copy(path: Path) -> None:
+    """2.0.33 — 읽지 못한 기록 파일을 다음 저장이 덮어쓰기 전에 옆에 남긴다(롤백 대상·복원용 환경값을 잃지 않게)."""
+    import time as _time
+    try:
+        if path.is_file():
+            backup = path.with_name(f"{path.name}.corrupt-{_time.strftime('%Y%m%d-%H%M%S')}")
+            if not backup.exists():
+                import shutil as _shutil
+                _shutil.copy2(path, backup)
+                try:
+                    os.chmod(backup, 0o600)
+                except OSError:
+                    pass
+                log.warning("Saved unreadable deployment history as %s", backup.name)
+    except OSError:
+        pass
 
 
 def save_records(records: dict[str, DeploymentRecord]) -> bool:
@@ -84,7 +103,15 @@ def save_records(records: dict[str, DeploymentRecord]) -> bool:
             json.dump(payload, stream, ensure_ascii=False)
             stream.flush()
             os.fsync(stream.fileno())
-        temp_path.replace(path)
+        for attempt in range(10):  # Windows: 다른 스레드가 잠깐 열어 두면 PermissionError
+            try:
+                temp_path.replace(path)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                import time as _time
+                _time.sleep(0.05 * (attempt + 1))
         save_failed = False
         return True
     except (OSError, TypeError, ValueError):

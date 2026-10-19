@@ -14,6 +14,7 @@ import { ShipMode } from "./components/ShipMode";
 import { OperateMode } from "./components/OperateMode";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
+import { ModelRouting } from "./components/ModelRouting";
 import { Replay } from "./components/Replay";
 import CodeMap from "./components/CodeMap";
 import DeploymentCanvas from "./components/canvas/DeploymentCanvas";
@@ -271,6 +272,7 @@ const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Ex
     case "build": body = <BuildMode isActive={ctx.isAiReady} onOpenDevelopment={() => onSelectMode("code")} />; break;
     case "map": body = <CodeMap isActive />; break;
     case "adr": body = <AdrPanel />; break;
+    case "models": body = <ModelRouting />; break;
     case "ship": body = <ShipMode isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} />; break;
     case "deploy": return <DeploymentCanvas navigation={HUBS.map(h=><button key={h.id} aria-pressed={h.id==='deploy'} onClick={()=>goHub(h.id)}>{h.title}</button>)} onOpenDocker={() => onSelectMode("ship")} onOpenOperate={() => onSelectMode("operate")} isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} isOpsReady={ctx.isOpsReady} />;
     case "replay": body = <Replay />; break;
@@ -402,6 +404,11 @@ const App: React.FC = () => {
         const saved = (payload ?? {}) as Record<string, unknown>;
         saveUiState(saved);
         const v = saved.view;
+        if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
+      }
+      if (type === "ui.openView" && isWorkspacePanel) {
+        //: 2.0.25 — 알림의 [자세히] 등 확장이 특정 화면을 열게 할 때.
+        const v = (payload as { view?: string } | undefined)?.view;
         if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
       }
       if (type === "code.setTargetFolder" && isWorkspacePanel) {

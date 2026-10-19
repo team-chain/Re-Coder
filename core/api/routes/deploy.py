@@ -45,6 +45,59 @@ from schemas import (
     StackType,
 )
 
+
+def _proc_tools():
+    try:
+        import proc_tools  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import proc_tools  # type: ignore
+    return proc_tools
+
+
+def _halt_crash_loop(container: str) -> None:
+    if not container:
+        return
+    for args in (["docker", "update", "--restart=no", container], ["docker", "stop", "-t", "5", container]):
+        try:
+            subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, shell=False)
+        except (OSError, subprocess.SubprocessError):
+            return
+
+
+def _volume_args(container: str, image: str) -> list[str]:
+    """이미지가 선언한 VOLUME 마다 이 앱 전용 이름 있는 볼륨(2.0.33).
+
+    교체 배포는 옛 컨테이너를 지우고 새로 띄운다 — 이름 없는(익명) 볼륨은 새 컨테이너에 이어지지 않아 SQLite·업로드 같은
+    데이터가 배포마다 사라지고, 버려진 볼륨이 쌓였다. 이름을 붙이면 다음 배포·롤백이 같은 데이터를 그대로 쓴다."""
+    if not container or not image:
+        return []
+    try:
+        out = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config.Volumes}}", image],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20, shell=False)
+        volumes = json.loads(out.stdout or "null") if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    args: list[str] = []
+    for path in sorted((volumes or {}).keys()):
+        if not isinstance(path, str) or not path.startswith("/"):
+            continue
+        #: 임시·캐시 폴더는 이어 쓸 데이터가 아니다 — 이름을 붙이면 옛 내용이 새 이미지의 것을 가린다.
+        if re.match(r"^/(tmp|var/tmp|run|var/run|var/cache)(/|$)", path.rstrip("/") + "/"):
+            continue
+        slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", path.strip("/")) or "root"
+        name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{container}-data-{slug}")[:200]
+        args += ["-v", f"{name}:{path}"]
+    return args
+
+
+def _port_publish(host_port, container_port) -> str:
+    try:
+        from deployment_inputs import port_publish  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.deployment_inputs import port_publish  # type: ignore
+    return port_publish(host_port, container_port)
+
+
 logger = logging.getLogger(__name__)
 
 #: 바깥 제한은 스캐너 자체 제한보다 길어야 한다. 같으면 바깥이 먼저 끊어 컨테이너 정리를
@@ -767,7 +820,7 @@ def _command_steps(plan: DeploymentPlan, workspace: str) -> list[dict]:
         from deployment_inputs import WORKSPACE_LABEL, workspace_fingerprint
         run += ["--label", f"{WORKSPACE_LABEL}={workspace_fingerprint(workspace)}"]
     for hp, cp in plan.ports.items():
-        run += ["-p", f"{int(hp)}:{int(cp)}"]
+        run += ["-p", _port_publish(hp, cp)]
     env_files = _resolved_env_files(workspace, plan.env_files)
     names = list(plan.env)
     settings_env = _settings_env(c, workspace, _provided_env_names(plan.env, env_files), app_port) if workspace else {}
@@ -802,7 +855,7 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
     run_args = ["docker", "run", "-d", "--name", record.container_name]
     try:
         for host_port, container_port in (record.ports or {}).items():
-            run_args.extend(["-p", f"{int(host_port)}:{int(container_port)}"])
+            run_args.extend(["-p", _port_publish(host_port, container_port)])
         for key, value in (record.env or {}).items():
             run_args.extend(["-e", f"{key}={value}"])
         _settings = _settings_env(record.container_name, "", _provided_env_names(record.env or {}, list(record.env_file_paths or [])),
@@ -812,7 +865,9 @@ async def _restore_prior_local_container(record: DeploymentRecord) -> tuple[bool
         run_args.extend(_env_file_args(list(record.env_file_paths or []), set((record.env or {}).keys()) | set(_settings)))
         run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
         # 태그가 아니라 고정 태그·이미지 ID 로 되돌린다 — 태그는 그사이 움직였을 수 있다.
-        run_args.extend(["--restart", "unless-stopped", _stable_image_ref(record) or record.image])
+        _restore_image = _stable_image_ref(record) or record.image
+        run_args.extend(await asyncio.to_thread(_volume_args, record.container_name, _restore_image))
+        run_args.extend(["--restart", "unless-stopped", _restore_image])
     except (TypeError, ValueError) as exc:
         logger.error("Cannot restore prior container %s: %s", record.container_name, exc)
         return False, "", str(exc)
@@ -879,7 +934,7 @@ async def _resume_verification_for(record: DeploymentRecord) -> bool:
         await verifier.start(
             deployment_id=record.deployment_id,
             container_name=record.container_name,
-            health_check_url=f"http://localhost:{host_port}{health_path}",
+            health_check_url=f"http://127.0.0.1:{host_port}{health_path}",
             duration_minutes=5,
             project_id=record.project_id,
             on_threshold_exceeded=_mark_rollback_candidate_unhealthy,
@@ -2725,6 +2780,10 @@ def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
             continue
     if existing == proposal.content:
         return None
+    #: 줄바꿈만 다른 파일(Windows git autocrlf 로 받은 CRLF)은 같은 내용이다. 충돌로 보면 Windows 사용자는
+    #: 같은 Dockerfile 을 저장할 때마다 "이미 있음"을 만난다(CI windows-latest). 저장하면 LF 로 맞춰진다.
+    if existing is not None and existing.replace("\r\n", "\n") == proposal.content.replace("\r\n", "\n"):
+        return None
     import difflib
 
     diff = "".join(
@@ -2778,13 +2837,14 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
 
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        target.write_text(proposal.content, encoding="utf-8")
+        #: Windows 에서도 LF 그대로 — Dockerfile·entrypoint.sh 가 CRLF 가 되면 컨테이너에서 셸 스크립트가 돌지 않는다(2.0.32).
+        target.write_text(proposal.content, encoding="utf-8", newline="")
     except PermissionError:
         #: Windows 읽기 전용 특성이 붙은 파일 — 쓰기 권한을 주고 한 번 더. 그래도 안 되면 알아듣는 오류로.
         import stat
         try:
             os.chmod(target, os.stat(target).st_mode | stat.S_IWRITE)
-            target.write_text(proposal.content, encoding="utf-8")
+            target.write_text(proposal.content, encoding="utf-8", newline="")
         except OSError as exc:
             raise HTTPException(status_code=409, detail=f"{target.name} 을(를) 저장하지 못했습니다(읽기 전용이거나 다른 프로그램이 열고 있음): {exc}") from exc
     additional_paths = []
@@ -3858,9 +3918,61 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
             except Exception as exc:  # noqa: BLE001 - 점검 실패가 계획을 막지 않는다
                 logger.warning("deploy settings check failed: %s", exc)
 
+        #: 2.0.35 배포 전 신뢰 점검(제로 트러스트) — 승인 카드에 원칙별로 보여 준다. 점검 실패는 계획을 막지 않는다.
+        try:
+            has_previous = any(r.container_name == plan.container_name and r.status == DeployStatus.SUCCESS
+                               for r in _records_newest_first()) if plan.container_name else None
+            plan.trust = await asyncio.wait_for(asyncio.to_thread(
+                _trust_report, request.workspace_path, "local",
+                {"enable_continuous_verification": plan.enable_continuous_verification}, "", has_previous), timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("trust check failed: %s", exc)
+
     _deployment_plans[plan.plan_id] = plan
     _plan_workspaces[plan.plan_id] = request.workspace_path or ""
     return plan
+
+
+def _trust_report(workspace_path: str, target: str, config: dict, identity_arn: str = "",
+                  has_rollback: Optional[bool] = None) -> dict:
+    try:
+        import trust_check  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import trust_check  # type: ignore
+    return trust_check.evaluate(workspace_path, target, config, identity_arn=identity_arn, has_rollback=has_rollback)
+
+
+class TrustCheckRequest(BaseModel):
+    workspace_path: str = Field(min_length=1, max_length=4096)
+    target: Literal["local", "ecs", "s3"]
+    #: 보호·환경 설정(https·edge·custom_domain·environment·database·alerts·shield·assign_public_ip·dir)과
+    #: 환경변수·비밀값 참조의 **이름**. 값은 받지 않는다(받아도 쓰지 않는다).
+    config: dict = Field(default_factory=dict)
+    identity_arn: str = Field(default="", max_length=2048)
+
+
+_TRUST_CONFIG_KEYS = {"https", "edge", "custom_domain", "environment", "database", "alerts", "shield",
+                      "assign_public_ip", "dir", "enable_continuous_verification"}
+
+
+@router.post("/api/deploy/trust-check")
+async def deploy_trust_check(request: TrustCheckRequest) -> dict:
+    """배포 전 신뢰 점검(2.0.35) — 승인 카드의 「제로 트러스트 점검」. 읽기 전용이며 AWS 를 부르지 않는다."""
+    workspace = Path(request.workspace_path).expanduser()
+    if not workspace.is_dir():
+        raise HTTPException(status_code=400, detail="작업 폴더를 찾지 못했습니다.")
+    config = {k: v for k, v in (request.config or {}).items() if k in _TRUST_CONFIG_KEYS and isinstance(v, (str, bool, int))}
+    for key in ("env_vars", "secret_refs"):
+        names = (request.config or {}).get(key)
+        if isinstance(names, dict):
+            config[key] = {str(k)[:128]: "" for k in list(names)[:200]}
+        elif isinstance(names, list):
+            config[key] = {str(k)[:128]: "" for k in names[:200]}
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(
+            _trust_report, str(workspace), request.target, config, request.identity_arn), timeout=45)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="신뢰 점검이 시간 안에 끝나지 않았습니다(파일이 아주 많은 폴더).") from exc
 
 
 def _docker_port_publishers(port: int) -> Optional[list[str]]:
@@ -4466,7 +4578,7 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
     try:
         result = await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: subprocess.run(
+            lambda: _proc_tools().run(
                 cmd, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=workspace_path, timeout=LOCAL_BUILD_TIMEOUT_SECONDS,
             ),
@@ -4742,7 +4854,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             # 안전한 args list 직접 조립 (shell=False 강제)
             cmd_args: list[str] = ["docker", "run", "-d", "--name", str(plan.container_name)]
             for _hp, _cp in plan.ports.items():
-                cmd_args.extend(["-p", f"{int(_hp)}:{int(_cp)}"])
+                cmd_args.extend(["-p", _port_publish(_hp, _cp)])
             cmd_args.extend(["--restart", "unless-stopped", str(plan.image)])
 
         demo_seed: Optional[dict] = None
@@ -4755,7 +4867,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 from deployment_inputs import WORKSPACE_LABEL, workspace_fingerprint
                 cmd_args.extend(['--label', f'{WORKSPACE_LABEL}={workspace_fingerprint(_ws_for_label)}'])
             for hp, cp in plan.ports.items():
-                cmd_args.extend(['-p', f'{int(hp)}:{int(cp)}'])
+                cmd_args.extend(['-p', _port_publish(hp, cp)])
             if plan.companions and plan.container_name:
                 #: 승인 뒤 데모 전환·"새 DB로 시작" 으로 쓸 DB 가 바뀌었을 수 있다 — 접속 정보를 지금 기준으로 다시 만든다.
                 try:
@@ -4849,6 +4961,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     demo_seed = {"ok": ok, "script": init_script, **({} if ok else {"message": out[-600:]})}
                     if not ok:
                         report_progress('services', f"데모 상품을 넣지 못했습니다(배포는 계속합니다): {out[-160:]}")
+            cmd_args.extend(await asyncio.to_thread(_volume_args, str(plan.container_name), str(runtime_image)))
             cmd_args.extend(['--restart', 'unless-stopped', str(runtime_image)])
 
         restored_previous = False
@@ -4939,6 +5052,10 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     restored_previous, restore_stdout, restore_stderr = await _restore_prior_local_container(restore_source)
                     if restored_previous and rollback_source is not None:
                         restored_verification_resumed = await _resume_verification_for(rollback_source)
+                else:
+                    #: 2.0.33 — 되살릴 이전 버전이 없는 첫 배포가 시작하자마자 죽으면, 재시작 정책 때문에 끝없이 다시 떠
+                    #: 포트를 쥐고 Docker Desktop 을 켤 때마다 살아났다. 로그를 볼 수 있게 컨테이너는 남기고 멈춘다.
+                    await asyncio.to_thread(_halt_crash_loop, plan.container_name or '')
 
         # 헬스 경로가 200 이어도 화면은 비어 있을 수 있다(실기기: 주소만 열리고 화면이 없음).
         # 화면이 있어야 하는 앱이면 브라우저로 첫 화면을 열어 실제로 그려지는지 확인한다.
@@ -5073,7 +5190,7 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                     health_path = plan.health_check_path or "/health"
                     if not health_path.startswith("/"):
                         health_path = "/" + health_path
-                    health_url = f"http://localhost:{first_hp}{health_path}"
+                    health_url = f"http://127.0.0.1:{first_hp}{health_path}"
                     verifier = get_continuous_verifier()
                     await verifier.start(
                         deployment_id=record.deployment_id,
@@ -5153,7 +5270,7 @@ async def _verify_local_screen(plan, workspace_path: str) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("screen expectation check failed: %s", exc)
         wants_screen = False
-    url = f"http://localhost:{host_port}/"
+    url = f"http://127.0.0.1:{host_port}/"
     try:
         checked = await asyncio.to_thread(check_screen, url, wait_seconds=25.0)
     except Exception as exc:  # noqa: BLE001 - 확인 도구 문제로 배포 결과를 흔들지 않는다
@@ -5267,7 +5384,7 @@ async def rollback(request: RollbackRequest) -> dict:
                 status_code=400,
                 detail=f"기록된 포트 매핑이 올바르지 않습니다: {_hp}:{_cp}",
             ) from None
-        run_args.extend(["-p", f"{_host}:{_cont}"])
+        run_args.extend(["-p", _port_publish(_host, _cont)])
     for _k, _v in (rollback_env or {}).items():
         if not _ENV_RE.match(str(_k)):
             raise HTTPException(
@@ -5312,6 +5429,12 @@ async def rollback(request: RollbackRequest) -> dict:
         except Exception as exc:  # noqa: BLE001 - 붙잡지 못해도 롤백은 진행한다(기존 동작)
             logger.warning("capture before rollback failed: %s", exc)
             current_container = None
+        #: 2.0.33 이미지의 데이터 볼륨을 배포 때와 같은 이름으로 붙인다(되돌려도 데이터가 그대로).
+        #: 상태 확인(409)을 통과한 뒤에만 Docker 를 부른다.
+        volume_args = await asyncio.to_thread(_volume_args, record.container_name, record.rollback_target)
+        if volume_args:
+            at = len(run_args) - 1 - run_args[::-1].index("--restart")
+            run_args[at:at] = volume_args
         # 1) docker stop (실패 무시 — 이미 중지됐을 수 있음)
         await loop.run_in_executor(
             None,

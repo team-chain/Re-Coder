@@ -157,13 +157,14 @@ def test_task_definition_without_workspace_is_unchanged(tmp_path):
     assert [c["name"] for c in td["containerDefinitions"]] == ["app"]
 
 
-@pytest.mark.asyncio
-async def test_pipeline_stops_before_any_aws_call_when_settings_are_missing(tmp_path, monkeypatch):
+def test_pipeline_stops_before_any_aws_call_when_settings_are_missing(tmp_path, monkeypatch):
+    #: pytest-asyncio 없이 돈다 — 테스트 의존성(requirements-dev.txt)에 없는 플러그인에 기대면 CI·다른 PC 에서만 실패한다.
+    import asyncio
     req = _request(_shop(tmp_path), environment="production")
     agent = ECSAgent()
     touched = []
     monkeypatch.setattr(agent, "_clients", lambda region: touched.append(region) or {})
-    record = await agent._deploy_pipeline(req)
+    record = asyncio.run(agent._deploy_pipeline(req))
     assert record.status.value.lower() == "failed"
     assert "DATABASE_URL" in record.error_message and "Secrets Manager" in (record.error_remedy or "")
     assert touched == []
@@ -192,19 +193,19 @@ def test_demo_app_serves_the_ui_outside_production(tmp_path):
     for rel, text in {"backend/src/app.ts": APP_TS,
                       "backend/src/pay.ts": "export const m = [process.env.PAYMENT_MODE, process.env.STRIPE_MOCK_HOST, process.env.STRIPE_MOCK_PORT];\n"}.items():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / rel).write_text(text)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
     notes, writes = nf.frontend_production_gate(ProjectFiles(tmp_path))
     new = writes["backend/src/app.ts"]
     assert "if (process.env.NODE_ENV !== 'development') {" in new
     assert "process.env.NODE_ENV === 'production' ? 'x' : '*'" in new   # 화면 제공과 무관한 조건은 그대로
-    (tmp_path / "backend/src/app.ts").write_text(new)
+    (tmp_path / "backend/src/app.ts").write_text(new, encoding="utf-8")
     assert nf.frontend_production_gate(ProjectFiles(tmp_path)) == ([], {})
 
 
 def test_production_gate_is_not_flagged_for_apps_without_mock_payment(tmp_path):
     (tmp_path / "src").mkdir()
-    (tmp_path / "src/app.ts").write_text(APP_TS)
-    (tmp_path / "package.json").write_text('{"name":"a","dependencies":{"express":"^4.19.2"}}')
+    (tmp_path / "src/app.ts").write_text(APP_TS, encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"name":"a","dependencies":{"express":"^4.19.2"}}', encoding="utf-8")
     assert "NODE_FRONTEND_PRODUCTION_ONLY" not in [i.code for i in analyze(str(tmp_path), online=False).issues]
 
 
@@ -212,22 +213,22 @@ def test_currency_comparison_ignores_case_only_for_currency(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src/pay.ts").write_text(
         "if (order.currency !== currency) { throw 1; }\nif (order.total_cents !== amount_cents) { throw 2; }\n"
-        "if (payload.currency === order.currency) ok();\n")
+        "if (payload.currency === order.currency) ok();\n", encoding="utf-8")
     _notes, writes = nf.currency_case_compare(ProjectFiles(tmp_path))
     new = writes["src/pay.ts"]
     assert "String(order.currency).toLowerCase() !== String(currency).toLowerCase()" in new
     assert "order.total_cents !== amount_cents" in new
     assert "String(payload.currency).toLowerCase() === String(order.currency).toLowerCase()" in new
-    (tmp_path / "src/pay.ts").write_text(new)
+    (tmp_path / "src/pay.ts").write_text(new, encoding="utf-8")
     assert nf.currency_case_compare(ProjectFiles(tmp_path)) == ([], {})
 
 
 def test_esm_require_and_dirname_become_imports(tmp_path):
     (tmp_path / "backend/src").mkdir(parents=True)
-    (tmp_path / "backend/package.json").write_text('{"type":"module"}')
+    (tmp_path / "backend/package.json").write_text('{"type":"module"}', encoding="utf-8")
     (tmp_path / "backend/src/app.ts").write_text(
         "import express from 'express';\nconst app = express();\nconst path = require('path');\n"
-        "const { readFileSync } = require('fs');\napp.use(express.static(path.join(__dirname, 'public')));\n")
+        "const { readFileSync } = require('fs');\napp.use(express.static(path.join(__dirname, 'public')));\n", encoding="utf-8")
     _notes, writes = nf.esm_commonjs_globals(ProjectFiles(tmp_path))
     new = writes["backend/src/app.ts"]
     assert "require(" not in new and "import path from 'path';" in new and "import { readFileSync } from 'fs';" in new
@@ -236,14 +237,14 @@ def test_esm_require_and_dirname_become_imports(tmp_path):
 
 def test_esm_extensions_are_added_for_node_resolution(tmp_path):
     (tmp_path / "backend/src/db").mkdir(parents=True)
-    (tmp_path / "backend/package.json").write_text('{"type":"module"}')
-    (tmp_path / "backend/tsconfig.json").write_text('{"compilerOptions":{"module":"ESNext","moduleResolution":"node"}}')
-    (tmp_path / "backend/src/server.ts").write_text("import app from './app';\nimport { q } from './db';\n")
-    (tmp_path / "backend/src/app.ts").write_text("export default 1;\n")
-    (tmp_path / "backend/src/db/index.ts").write_text("export const q = 1;\n")
+    (tmp_path / "backend/package.json").write_text('{"type":"module"}', encoding="utf-8")
+    (tmp_path / "backend/tsconfig.json").write_text('{"compilerOptions":{"module":"ESNext","moduleResolution":"node"}}', encoding="utf-8")
+    (tmp_path / "backend/src/server.ts").write_text("import app from './app';\nimport { q } from './db';\n", encoding="utf-8")
+    (tmp_path / "backend/src/app.ts").write_text("export default 1;\n", encoding="utf-8")
+    (tmp_path / "backend/src/db/index.ts").write_text("export const q = 1;\n", encoding="utf-8")
     (tmp_path / "frontend/src").mkdir(parents=True)
-    (tmp_path / "frontend/package.json").write_text('{"type":"module","devDependencies":{"vite":"^5.0.0"}}')
-    (tmp_path / "frontend/src/main.ts").write_text("import App from './App';\n")
+    (tmp_path / "frontend/package.json").write_text('{"type":"module","devDependencies":{"vite":"^5.0.0"}}', encoding="utf-8")
+    (tmp_path / "frontend/src/main.ts").write_text("import App from './App';\n", encoding="utf-8")
     _notes, writes = nf.esm_import_extensions(ProjectFiles(tmp_path))
     assert "import app from './app.js';" in writes["backend/src/server.ts"]
     assert "from './db/index.js'" in writes["backend/src/server.ts"]

@@ -16,7 +16,7 @@ import { activeProjectPath, pickProjectFolder, projectFolders, selectActiveProje
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
 type Target = 'ecs' | 's3' | 'github';
-export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[] }
+export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[]; shield?: boolean; shield_level?: 'loose' | 'normal' | 'strict'; alerts?: boolean; alert_email?: string; edge?: 'none' | 'alb' | 'alb_waf'; waf_rate_limit?: number; waf_window?: 60 | 120 | 300 | 600; edge_cost_approved?: boolean; https?: boolean; custom_domain?: string; database?: 'task' | 'rds'; db_cost_approved?: boolean }
 interface Plan { id: string; config: CanvasConfig; workspace: string; git: Awaited<ReturnType<typeof gitContext>>; account: string; created: number; targetState: Awaited<ReturnType<ApiClient['getCanvasTarget']>> | null; staticDigest?: string }
 
 export function staticPreview(workspace: string, dir: string) {
@@ -93,6 +93,20 @@ export function publicGit(git: Awaited<ReturnType<typeof gitContext>>) {
 }
 
 /** ECS 사전 검사에 보낼 앱 실행 설정 이름(값은 보내지 않는다). */
+/** 신뢰 점검에 보낼 설정 — 켜짐 여부·이름만(환경변수·비밀값의 **값**은 보내지 않는다). */
+export function trustConfig(config: CanvasConfig): Record<string, unknown> {
+    const c = config as unknown as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of ['https', 'edge', 'custom_domain', 'environment', 'database', 'alerts', 'shield', 'assign_public_ip', 'dir']) {
+        if (c[key] !== undefined && c[key] !== null) { out[key] = c[key]; }
+    }
+    for (const key of ['env_vars', 'secret_refs']) {
+        const v = c[key];
+        if (v && typeof v === 'object' && !Array.isArray(v)) { out[key] = Object.keys(v as Record<string, unknown>); }
+    }
+    return out;
+}
+
 export function runtimeNames(config: CanvasConfig): { envNames: string[]; environment: string } | undefined {
     if (config.target !== 'ecs') return undefined;
     return { envNames: [...Object.keys(config.env_vars || {}), ...Object.keys(config.secret_refs || {})], environment: config.environment };
@@ -119,6 +133,57 @@ export function validateConfig(raw: Record<string, unknown>): CanvasConfig {
         if (raw.assign_public_ip !== undefined) {
             if (typeof raw.assign_public_ip !== 'boolean') throw new Error('공인 IP 설정은 true/false여야 합니다.');
             config.assign_public_ip = raw.assign_public_ip;
+        }
+        //: 2.0.25 보호·운영
+        for (const key of ['shield', 'alerts'] as const) {
+            if (raw[key] !== undefined) {
+                if (typeof raw[key] !== 'boolean') throw new Error(`${key} 는 true/false 여야 합니다.`);
+                config[key] = raw[key] as boolean;
+            }
+        }
+        if (raw.shield_level !== undefined) {
+            if (!['loose', 'normal', 'strict'].includes(String(raw.shield_level))) throw new Error('방패 강도는 느슨·보통·엄격 중 하나입니다.');
+            config.shield_level = raw.shield_level as 'loose' | 'normal' | 'strict';
+        }
+        if (raw.alert_email !== undefined && raw.alert_email !== '') {
+            const email = String(raw.alert_email).trim();
+            if (!/^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$/.test(email)) throw new Error('알림 메일 주소 형식이 올바르지 않습니다.');
+            config.alert_email = email;
+        }
+        //: 2.0.26 대규모 방패(ALB + WAF) — 비용 확인 없이는 받지 않는다
+        if (raw.edge !== undefined && raw.edge !== 'none') {
+            if (!['alb', 'alb_waf'].includes(String(raw.edge))) throw new Error('대규모 방패 설정이 올바르지 않습니다.');
+            if (raw.edge_cost_approved !== true) throw new Error('대규모 방패는 매달 요금이 나옵니다 — 비용 확인에 체크하세요.');
+            const limit = Number(raw.waf_rate_limit ?? 2000);
+            if (!Number.isInteger(limit) || limit < 10 || limit > 2_000_000_000) throw new Error('WAF 요청 한도는 10 이상의 정수여야 합니다.');
+            const window = Number(raw.waf_window ?? 300);
+            if (![60, 120, 300, 600].includes(window)) throw new Error('WAF 창은 60·120·300·600초 중 하나입니다.');
+            config.edge = raw.edge as 'alb' | 'alb_waf';
+            config.waf_rate_limit = limit;
+            config.waf_window = window as 60 | 120 | 300 | 600;
+            config.edge_cost_approved = true;
+        }
+        //: 2.0.27 HTTPS 주소 · 내 도메인 · 관리형 DB
+        if (raw.https !== undefined) {
+            if (typeof raw.https !== 'boolean') throw new Error('https 는 true/false 여야 합니다.');
+            if (raw.https) {
+                if (raw.edge_cost_approved !== true) throw new Error('HTTPS 주소는 로드밸런서·CloudFront 요금이 나옵니다 — 비용 확인에 체크하세요.');
+                config.https = true;
+                config.edge_cost_approved = true;
+                if (!config.edge) { config.edge = 'alb'; }
+            }
+        }
+        if (raw.custom_domain !== undefined && raw.custom_domain !== '') {
+            const domain = String(raw.custom_domain).trim().toLowerCase();
+            if (!/^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){1,8}[a-z]{2,63}$/.test(domain)) throw new Error('도메인 형식이 올바르지 않습니다.');
+            if (!config.https) throw new Error('내 도메인은 HTTPS 주소를 켜야 연결됩니다.');
+            config.custom_domain = domain;
+        }
+        if (raw.database !== undefined && raw.database !== 'task') {
+            if (raw.database !== 'rds') throw new Error('DB 설정이 올바르지 않습니다.');
+            if (raw.db_cost_approved !== true) throw new Error('관리형 DB 는 매달 요금이 나옵니다 — 비용 확인에 체크하세요.');
+            config.database = 'rds';
+            config.db_cost_approved = true;
         }
         for (const key of ['env_vars', 'secret_refs'] as const) {
             const value = raw[key] ?? {};
@@ -254,12 +319,18 @@ export class CanvasHost {
                 if (config.target !== 'github' && !aws.ready) throw new Error('AWS 계정을 먼저 연결하세요.');
                 if (config.target === 'github' && (!git.connected || !git.branch)) throw new Error('GitHub 원격 저장소와 브랜치를 연결하세요.');
                 if (config.target === 'github' && !git.head) throw new Error('먼저 소스 제어에서 올릴 파일을 확인하고 첫 커밋을 만드세요.');
-                const targetState = config.target === 'ecs' ? await this.api.getCanvasTarget(config.aws_region,config.ecs_cluster,config.ecs_service) : null;
+                //: 2.0.35 배포 전 신뢰 점검(제로 트러스트) — 실패해도 승인 카드는 그대로 뜬다(점검 칸만 빠짐).
+                const trustPromise = config.target === 'github' ? Promise.resolve(null)
+                    : Promise.resolve().then(() => this.api.getTrustCheck(workspace, config.target as 'ecs' | 's3', trustConfig(config), String((aws.identity as { arn?: string } | null | undefined)?.arn || ''))).catch(() => null);
+                const [targetState, trust] = await Promise.all([
+                    config.target === 'ecs' ? this.api.getCanvasTarget(config.aws_region,config.ecs_cluster,config.ecs_service) : Promise.resolve(null),
+                    trustPromise,
+                ]);
                 if (generation !== this.prepareGeneration) return;
                 const id=randomUUID();
                 this.plans.clear(); // Older approvals must not execute after editing a target.
                 this.plans.set(id,{id,config,workspace,git,account:aws.identity?.account || '',created:Date.now(),targetState,staticDigest:staticSite?.digest});
-                send('canvas.plan', { requestId, id, config, projectName:path.basename(workspace), repository:git.repository, branch:git.branch, commit:git.head, dirty:git.dirty, coreRegion:aws.ready ? aws.region : '', account:aws.identity?.account || '', preflight, targetState, staticSite:staticSite ? {files:staticSite.files,excluded:staticSite.excluded,notes:staticNotes} : undefined });
+                send('canvas.plan', { requestId, id, config, projectName:path.basename(workspace), repository:git.repository, branch:git.branch, commit:git.head, dirty:git.dirty, coreRegion:aws.ready ? aws.region : '', account:aws.identity?.account || '', preflight, targetState, trust, staticSite:staticSite ? {files:staticSite.files,excluded:staticSite.excluded,notes:staticNotes} : undefined });
                 return;
             }
             if (type === 'canvas.cancel') { this.prepareGeneration++; this.plans.delete(String(p.planId)); return; }

@@ -434,7 +434,9 @@ class CodeAgent:
         fpath = Path(file_path)
         try:
             original_lines: list[str]
+            crlf = False
             if fpath.exists():
+                crlf = b"\r\n" in fpath.read_bytes()
                 original_lines = fpath.read_text(encoding="utf-8").splitlines(keepends=True)
             else:
                 original_lines = []
@@ -444,7 +446,11 @@ class CodeAgent:
                 return False
 
             fpath.parent.mkdir(parents=True, exist_ok=True)
-            fpath.write_text("".join(patched), encoding="utf-8")
+            text = "".join(patched)
+            #: 원래 CRLF 파일이면 CRLF 로(2.0.32 — 기본 쓰기는 Windows 에서 모든 줄을 CRLF 로, newline="" 만 쓰면 LF 로 바꿨다).
+            if crlf and "\r\n" not in text:
+                text = text.replace("\n", "\r\n")
+            fpath.write_text(text, encoding="utf-8", newline="")
             return True
         except Exception as exc:
             logger.error("Patch application error for %s: %s", file_path, exc)

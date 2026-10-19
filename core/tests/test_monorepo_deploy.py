@@ -228,13 +228,13 @@ def test_fixed_dockerfile_builds_and_serves(tmp_path):
     (root / "frontend" / "package.json").write_text(json.dumps({"name": "fe", "scripts": {"build": "mkdir -p dist && echo ok > dist/index.html"}}), encoding="utf-8")
     d._auto_fix_before_build(str(root))
     tag = "recoder-test-monorepo:latest"
-    build = subprocess.run(["docker", "build", "-q", "-t", tag, str(root)], capture_output=True, text=True, timeout=900)
+    build = subprocess.run(["docker", "build", "-q", "-t", tag, str(root)], capture_output=True, text=True, timeout=900, encoding="utf-8")
     if build.returncode != 0 and "pull" in (build.stderr or "").lower():
         pytest.skip("베이스 이미지를 받을 수 없다")
     assert build.returncode == 0, build.stderr[-2000:]
     try:
         ls = subprocess.run(["docker", "run", "--rm", "--entrypoint", "ls", tag, "/app/backend/node_modules/express"],
-                            capture_output=True, text=True, timeout=60)
+                            capture_output=True, text=True, timeout=60, encoding="utf-8")
         assert ls.returncode == 0, ls.stderr
     finally:
         subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)

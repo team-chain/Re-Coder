@@ -8,6 +8,7 @@
  *   - docker build/run: Level 2 (명령 미리보기 + 승인)
  */
 
+import type { TrustReport } from "./TrustCheck";
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal, { CommandStep } from "./ApprovalModal";
@@ -123,6 +124,8 @@ interface DeploymentPlan {
   demo?: DeployDemo | null;
   /** 실제 실행 순서대로의 명령(코어가 실행 경로와 같은 함수로 만든 것, 값은 가림). */
   command_steps?: CommandStep[];
+  /** 2.0.35 배포 전 신뢰 점검(제로 트러스트) */
+  trust?: TrustReport | null;
 }
 
 /** 승인 버튼을 막는 조건 — 필요한 설정이 비어 있으면 빌드해도 앱이 바로 종료한다. */
@@ -1280,6 +1283,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
             riskLevel={plan.risk_level}
             riskReasons={plan.risk_reasons}
             commandSteps={plan.command_steps}
+            trust={plan.trust}
             commandPreview={`docker build -t ${plan.image} . && docker run -d --name ${plan.container_name} ${Object.entries(plan.ports).map(([h, c]) => `-p ${h}:${c}`).join(" ")} ${plan.image}`}
             onApprove={handleDeploy}
             onReject={() => { setShowApproval(false); }}

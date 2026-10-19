@@ -51,7 +51,8 @@ test('existing origin and changed workspace cannot be overwritten by connection 
  const s=fixture(t);s.git('init','--initial-branch=main');s.git('remote','add','origin','git@github.com:tester/keep.git');
  await s.send('canvas.github.connect',{repository:'tester/other',create:true});
  assert.equal(s.output.at(-1).type,'canvas.error');assert.equal(s.connections.length,0);
- assert.equal(s.git('remote','get-url','origin'),'git@github.com:tester/keep.git');
+ // get-url 은 사용자 전역 설정(url.insteadOf)으로 바뀌어 보일 수 있어, 저장된 값 그대로를 읽는다.
+ assert.equal(s.git('config','--get','remote.origin.url'),'git@github.com:tester/keep.git');
  await s.send('canvas.github.connect',{repository:'tester/other',workspace:'/other'});
  assert.equal(s.output.at(-1).type,'canvas.error');assert.equal(s.connections.length,0);
 });

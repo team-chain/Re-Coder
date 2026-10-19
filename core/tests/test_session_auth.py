@@ -109,7 +109,7 @@ def test_persisted_token_is_private_on_create_and_upgrade(tmp_path):
     path.chmod(0o644)
     main._persist_session_token(path, "shorter")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert path.read_text() == "shorter"
+    assert path.read_text(encoding="utf-8") == "shorter"
 
 
 def test_restart_reuses_persisted_token_with_authenticated_status(monkeypatch, tmp_path):

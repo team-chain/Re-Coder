@@ -253,10 +253,10 @@ def test_setup_permissions_are_not_added_to_normal_deployment_policy(tmp_path):
     assert not actions.intersection({"iam:CreateRole", "iam:AttachRolePolicy"})
     # Exercise audit scope without traversing an installed developer environment.
     source = Path(__file__).resolve().parents[1] / "ecs_execution_role.py"
-    (tmp_path / source.name).write_text(source.read_text())
+    (tmp_path / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
     venv = tmp_path / ".venv"
     venv.mkdir()
-    (venv / "dependency.py").write_text("import boto3\nboto3.client('iam').delete_user(UserName='not-our-code')\n")
+    (venv / "dependency.py").write_text("import boto3\nboto3.client('iam').delete_user(UserName='not-our-code')\n", encoding="utf-8")
     scan = aws_calls.scan_source(tmp_path)
     assert any("ecs_execution_role.py" in item and "승인" in item for item in scan.skipped)
     assert any(".venv/dependency.py" in item for item in scan.skipped)

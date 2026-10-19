@@ -19,6 +19,15 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+
+def _port_publish(host_port, container_port) -> str:
+    try:
+        from deployment_inputs import port_publish  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.deployment_inputs import port_publish  # type: ignore
+    return port_publish(host_port, container_port)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -294,7 +303,7 @@ class DeployAgent:
         if detach:
             cmd.append("-d")
         cmd += ["--name", container_name]
-        cmd += ["-p", f"{host_port}:{container_port}"]
+        cmd += ["-p", _port_publish(host_port, container_port)]
         cmd += ["--restart", "unless-stopped"]
         for key, val in (env or {}).items():
             cmd += ["-e", f"{key}={val}"]

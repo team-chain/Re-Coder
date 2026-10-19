@@ -27,8 +27,8 @@ def test_결제_모듈은_데모_조건과_필수_설정을_만족한다(tmp_pat
     for name, body in (("server/payments/stripe.cjs", pk.CJS_KIT), ("api/src/payments/stripe.ts", pk.TS_KIT)):
         ws = tmp_path / name.split("/")[0]
         (ws / name).parent.mkdir(parents=True, exist_ok=True)
-        (ws / name).write_text(body)
-        (ws / name.split("/")[0] / "package.json").write_text("{}")
+        (ws / name).write_text(body, encoding="utf-8")
+        (ws / name.split("/")[0] / "package.json").write_text("{}", encoding="utf-8")
         assert ds.demo_supported(str(ws))
         assert "STRIPE_SECRET_KEY" in ds.required_env(str(ws))  # 실제 키로 띄울 때는 입력받는다(데모가 대신 채움)
     for body in (pk.TS_KIT, pk.CJS_KIT):

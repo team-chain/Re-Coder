@@ -16,7 +16,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(aws, "RECODER_HOME", tmp_path)
     cred = tmp_path / "aws" / "credentials"
     cred.parent.mkdir()
-    cred.write_text("[default]\naws_access_key_id = AKIAOLDDEFAULT000000\naws_secret_access_key = x\n")
+    cred.write_text("[default]\naws_access_key_id = AKIAOLDDEFAULT000000\naws_secret_access_key = x\n", encoding="utf-8")
     monkeypatch.setattr(aws, "AWS_CREDENTIALS_FILE", cred)
     monkeypatch.setattr(aws, "_role_state", None)
     monkeypatch.setattr(aws, "_active_profile", None)

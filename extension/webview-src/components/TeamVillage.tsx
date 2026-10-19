@@ -7,7 +7,10 @@
  *    이어 쓰기(file_part)는 작업대 화면에 조각 수, 자동 검사 교정(fixing)은 **작성한 리코더 자신의** 작업대가
  *    노랗게 바뀐다(교정은 별도 검토 에이전트가 아니라 작성한 슬롯이 한다 — 엔진 구조 그대로).
  *    완료(file_done)하면 카드가 완성 선반으로 간다.
- *  · 검토 리코더: 마지막 전체 점검(consistency) 때만 가운데로 나온다.
+ *  · 검토 리코더: 파일이 완성될 때마다 의존 관문(gate_check)으로 그 작업대에 가서 도장을 찍고(자동 수정 N건 · 통과 /
+ *    카드 되돌림), 마지막 전체 점검(consistency) 때 가운데로 나온다(2.0.24 — 엔진이 파일마다 관문을 돈다).
+ *  · 공용 게시판: 서버 라우트 파일이 완성되면 그 파일에서 뽑은 실제 API 경로가 메모로 붙고(board_post), 화면의 API 파일을
+ *    쓰는 리코더는 "게시판 확인 후 시작"(board_read) 한다.
  *  · 단계 문: 공통 기반 → 기능 → 화면. 앞 단계 파일이 모두 끝나야 다음 칸이 열린다(엔진의 wave 순서).
  *  · 말풍선은 리코더마다 따로 띄운다(각자 움직이는 개체). 이웃끼리 높이를 엇갈리게 두고 폭을 작업대 간격에 맞춰 겹치지 않게 한다.
  *  · 같은 때 카드를 집으러 가는 리코더는 차례로 간다(대기열 앞에 동시에 몰려 겹치지 않게).
@@ -20,7 +23,8 @@ import { characterImg } from "./recoderCharacter";
 import { polishingCount } from "./teamState";
 import type { TeamMember, TeamView } from "./teamState";
 
-export const VILLAGE_HEIGHT = 392;
+//: 2.0.24 — 작업대와 선반 사이에 공용 게시판 줄(40px)을 넣어 392 → 432.
+export const VILLAGE_HEIGHT = 432;
 /** 작업대 위 말풍선 두 줄(엇갈림) 높이. */
 const BUBBLE_TIER = 26;
 /** 동시에 날아가는 완성 카드 수 상한 — 넘으면 오래된 것부터 바로 선반에 내려놓는다. */
@@ -32,6 +36,8 @@ const LAYER_COLOR = ["#4f8cff", "#2fbfa5", "#b08cff"];
 
 export interface Rect { x: number; y: number; w: number; h: number }
 export interface VillageLayout { W: number; H: number; plan: Rect; review: Rect; queue: Rect; qcols: Rect[]; desks: Rect[]; shelf: Rect; segs: Rect[];
+  /** 공용 게시판(2.0.24) — 서버가 붙인 API 메모 */
+  board: Rect;
   /** 개발 리코더 말풍선의 최대 폭 — 이웃과 높이를 엇갈리게 두므로 작업대 간격 두 칸까지 쓸 수 있다. */
   bubbleMax: number }
 
@@ -50,11 +56,12 @@ export function villageLayout(W: number, devs: number, H = VILLAGE_HEIGHT): Vill
   const sx = Math.max(10, (W - total) / 2);
   const desks = Array.from({ length: n }, (_, i) => ({ x: sx + i * (dw + gap), y: 222, w: dw, h: 58 }));
   const shelf = { x: 10, y: H - 66, w: W - 20, h: 58 };
+  const board = { x: 10, y: shelf.y - 48, w: W - 20, h: 40 };
   const sw = (shelf.w - 12) / 3;
   const segs = [0, 1, 2].map(i => ({ x: shelf.x + i * (sw + 6), y: shelf.y, w: sw, h: shelf.h }));
   const pitch = dw + gap;
   const bubbleMax = Math.floor(Math.max(60, Math.min(190, n === 1 ? 190 : 2 * pitch - 10)));
-  return { W, H, plan, review, queue, qcols, desks, shelf, segs, bubbleMax };
+  return { W, H, plan, review, queue, qcols, desks, shelf, segs, bubbleMax, board };
 }
 
 /** 말풍선 폭 어림(한글 10px 글꼴 기준). */
@@ -81,6 +88,15 @@ const css = `
   background:radial-gradient(ellipse at 50% 120%,rgba(55,148,255,.10),transparent 60%),linear-gradient(rgba(127,127,127,.06) 1px,transparent 1px) 0 0/24px 24px,linear-gradient(90deg,rgba(127,127,127,.06) 1px,transparent 1px) 0 0/24px 24px,var(--vscode-editor-background,#191b1f)}
 .rc-vl .zn{position:absolute;border:1px dashed var(--vscode-panel-border,#3a404a);border-radius:10px}
 .rc-vl .zn>span{position:absolute;left:8px;right:8px;top:4px;font-size:10px;color:var(--vscode-descriptionForeground,#8b95a3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rc-vl .zn>em.sec{position:absolute;left:8px;right:8px;bottom:6px;font-style:normal;font-size:10px;font-weight:600;padding:2px 6px;border-radius:6px;background:rgba(248,113,113,.16);color:#fca5a5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rc-vl .zn>em.gt{position:absolute;left:8px;right:8px;bottom:6px;font-style:normal;font-size:9.5px;color:var(--vscode-charts-green,#73d39b);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rc-vl .zn>em.gt~em.sec,.rc-vl .zn>em.sec{bottom:22px}
+.rc-vl .zn.bz{border-style:solid;border-color:rgba(204,167,0,.45);background:rgba(204,167,0,.05)}
+.rc-vl .zn.bz>span{color:var(--vscode-editorWarning-foreground,#d7b740)}
+.rc-vl .zn.bz .memos{position:absolute;left:8px;right:8px;top:18px;display:flex;gap:5px;overflow:hidden;white-space:nowrap}
+.rc-vl .zn.bz .memos i{font-style:normal;font:9.5px/1.5 var(--vscode-editor-font-family,monospace);padding:0 6px;border-radius:4px;background:#fef3c7;color:#3a2e05;flex-shrink:0}
+.rc-vl .zn.bz .memos i.unk{background:#f1e9cf;color:#5a4a14}
+.rc-vl .ag.stamp .bd{border-color:rgba(115,211,155,.7)}
 .rc-vl .qc{position:absolute;border-radius:7px;background:rgba(0,0,0,.16)}
 .rc-vl .qc>span{position:absolute;left:0;right:0;bottom:2px;text-align:center;font-size:9.5px;color:var(--vscode-descriptionForeground,#8b95a3)}
 .rc-vl .lk{position:absolute;z-index:4;transform:translate(-50%,-50%);white-space:nowrap;padding:2px 8px;border-radius:99px;font-size:9.5px;color:var(--vscode-descriptionForeground,#aab3bf);background:rgba(12,14,18,.88);border:1px solid var(--vscode-panel-border,#3a404a)}
@@ -279,6 +295,15 @@ export function TeamVillage({ roster, view, width, paused }: TeamVillageProps) {
       const c = center(L.review); pos = { x: c.x, y: L.review.y + 30 };
       if (checking) { pos = gather(k, everyone); cls += paused ? "" : " type"; bubble = { text: "전체 점검 — 빌드로 확인", tone: "warn" }; }
       else if (finished) pos = gather(k, everyone);
+      else if (view.gate && view.phase === "building") {
+        //: 2.0.24 의존 관문 — 파일이 끝날 때마다 그 작업대로 가서 도장을 찍는다(실제 gate_check 이벤트로만).
+        const at = view.gate.by ? devs.findIndex(d => d.id === view.gate!.by) : -1;
+        const d = at >= 0 ? L.desks[at] : null;
+        if (d) pos = { x: Math.min(L.W - 30, d.x + d.w - 8), y: d.y - 58 };
+        bubble = view.gate.returned ? { text: "카드 되돌림 — 한 번 고치기", tone: "warn" }
+          : { text: view.gate.fixed ? `자동 수정 ${view.gate.fixed}건 · 통과` : "관문 통과", tone: "ok" };
+        cls += " stamp";
+      }
     } else {
       const i = devs.findIndex(d => d.id === m.id);
       const d = L.desks[i];
@@ -295,13 +320,17 @@ export function TeamVillage({ roster, view, width, paused }: TeamVillageProps) {
         pos = gather(k, everyone);
       } else if (a?.state === "writing" || a?.state === "parts") {
         cls += paused ? "" : " type";
-        bubble = { text: a.state === "parts" && a.part ? `이어 쓰는 중 · ${a.part}조각` : `${base(a.file)} 작성 중` };
+        bubble = view.boardReaders?.[m.id] && view.boardReaders[m.id] === a.file && a.state === "writing"
+          ? { text: "게시판 확인 후 시작" }
+          : { text: a.state === "parts" && a.part ? `이어 쓰는 중 · ${a.part}조각` : `${base(a.file)} 작성 중` };
       } else if (a?.state === "fixing") {
         cls += paused ? "" : " type"; bubble = { text: "자동 검사 → 고치는 중", tone: "warn" };
       } else if (a?.state === "waiting") {
         cls += " wait"; bubble = { text: "⏳ 잠시 대기", tone: "warn" };
       } else if (view.layer === 0 && i > 0 && !finished && !checking && view.files.length) {
         cls += " wait"; bubble = { text: WAIT_TEXT[(i - 1) % WAIT_TEXT.length] };
+      } else if (view.lastPost && view.lastPost.agent === m.id && !finished && !checking) {
+        bubble = { text: `게시판에 API ${view.lastPost.count}개 공유`, tone: "ok" };
       }
     }
     if (m.role === "dev" && returning[m.id]) bubble = null;
@@ -309,7 +338,9 @@ export function TeamVillage({ roster, view, width, paused }: TeamVillageProps) {
     const devIndex = m.role === "dev" ? devs.findIndex(d => d.id === m.id) : -1;
     const bubbleStyle: React.CSSProperties | undefined = devIndex >= 0
       ? { maxWidth: L.bubbleMax, animationDelay: `${(devIndex % 3) * 110}ms` } : undefined;
-    const bubbleUp = devIndex >= 0 && devs.length > 1 && devIndex % 2 === 1 && fetching[m.id] === undefined && !checking && !finished;
+    const bubbleUp = (devIndex >= 0 && devs.length > 1 && devIndex % 2 === 1 && fetching[m.id] === undefined && !checking && !finished)
+      //: 관문 도장 말풍선은 그 작업대 리코더의 말풍선과 겹치지 않게 윗줄에
+      || (m.role === "review" && cls.includes(" stamp"));
     //: 가장자리 리코더의 말풍선이 마을 밖으로 잘리지 않게 안쪽으로 민다(글자 수로 폭을 어림).
     const shift = bubble ? bubbleShift(pos.x, bubbleWidth(bubble.text, devIndex >= 0 ? L.bubbleMax : 190), L.W) : 0;
     const style = shift ? { ...(bubbleStyle ?? {}), marginLeft: shift } : bubbleStyle;
@@ -331,7 +362,15 @@ export function TeamVillage({ roster, view, width, paused }: TeamVillageProps) {
     <div className="rc-vl" data-testid="team-village" role="img" aria-label={`팀 작업 — 파일 ${view.done}/${view.total || "?"}`}>
       <style>{css}</style>
       <div className="zn" style={{ left: L.plan.x, top: L.plan.y, width: L.plan.w, height: L.plan.h }}><span>설계실</span></div>
-      <div className="zn" style={{ left: L.review.x, top: L.review.y, width: L.review.w, height: L.review.h }}><span>검토 · 마지막 전체 점검</span></div>
+      <div className="zn" style={{ left: L.review.x, top: L.review.y, width: L.review.w, height: L.review.h }}><span>검토 · 관문 + 마지막 점검</span>
+        {(view.securityBlocks ?? 0) > 0 && <em className="sec" data-testid="security-blocks">수상한 패키지 차단 {view.securityBlocks}</em>}
+        {view.gates && (view.gates.passed + view.gates.returned) > 0 &&
+          <em className="gt" data-testid="gate-counts">관문 통과 {view.gates.passed}{view.gates.fixed ? ` · 자동 수정 ${view.gates.fixed}` : ""}{view.gates.returned ? ` · 되돌림 ${view.gates.returned}` : ""}</em>}</div>
+      <div className="zn bz" style={{ left: L.board.x, top: L.board.y, width: L.board.w, height: L.board.h }} data-testid="village-board">
+        <span>공용 게시판{(view.board ?? []).length ? ` · API ${(view.board ?? []).length}` : " · 서버 API 가 완성되면 붙습니다"}</span>
+        <div className="memos">{(view.board ?? []).slice(-12).map(b => (
+          <i key={`${b.method} ${b.path}`} className={b.shape ? "" : "unk"} title={`${b.method} ${b.path} → ${b.shape || "모양 모름"}${b.auth ? " · 로그인 필요" : ""}`}>{b.method} {b.path}</i>
+        ))}</div></div>
       <div className="zn" style={{ left: L.queue.x, top: L.queue.y, width: L.queue.w, height: L.queue.h, borderStyle: "solid" }}><span>작업 대기열</span></div>
       {L.qcols.map((q, l) => {
         const per = Math.max(1, Math.floor((q.w - 6) / 30));

@@ -8,21 +8,33 @@ on:
   push:
     branches: [develop]
   workflow_dispatch:
+  # 2.0.33 릴리스(태그) 빌드도 같은 테스트를 통과해야 올린다 — release.yml 이 이 워크플로를 불러 쓴다.
+  workflow_call:
 
 jobs:
   test:
-    name: pytest (core)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 2.0.30 — 사용자 PC 는 대부분 Windows 다. 리눅스에서만 초록이면 Windows 에서만 깨지는 것(경로·인코딩·셸)을
+    # 사용자가 먼저 만난다. 세 OS 와 두 Python 버전(설치본 3.11 · 최신 3.13)에서 같은 스위트를 돌린다.
+    name: pytest (core · ${{ matrix.os }} · py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.11']
+        include:
+          - os: ubuntu-latest
+            python: '3.13'
 
     steps:
       - name: 소스 체크아웃
         uses: actions/checkout@v5
 
-      - name: Python 3.11 준비
+      - name: Python ${{ matrix.python }} 준비
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: |
             core/requirements.txt
@@ -42,6 +54,11 @@ jobs:
         working-directory: core
         env:
           PYTHONPATH: .
+          # 실제 AWS 자격증명이 있는 러너에서도 테스트가 진짜 계정을 부르지 않게(moto 만).
+          AWS_ACCESS_KEY_ID: testing
+          AWS_SECRET_ACCESS_KEY: testing
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: 'true'
         # 낡은 테스트 4건(FR 회차2 「낡은 테스트 4건 수리」, PR #14)은 수리 완료로
         # 격리를 해제했다. 이제 전체 스위트가 게이팅에 그대로 들어간다.
         run: |
@@ -90,9 +107,13 @@ jobs:
   # 초록이었기 때문에 데모 당일까지 아무도 몰랐다. 웹뷰를 Node 에서 실제로
   # 렌더해서 핵심 경로가 화면에 붙어 있는지 확인한다.
   webview:
-    name: webview 렌더 테스트 (extension)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: webview 렌더 테스트 (extension · ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - name: 소스 체크아웃

@@ -94,6 +94,6 @@ def test_opa_test_가_통과한다() -> None:
     """opa 가 설치돼 있으면 정책을 실제로 실행해 검증한다."""
     proc = subprocess.run(
         ["opa", "test", str(_POLICY_DIR), "-v"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=120, encoding="utf-8"
     )
     assert proc.returncode == 0, f"opa test 실패:\n{proc.stdout}\n{proc.stderr}"

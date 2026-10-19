@@ -337,6 +337,8 @@ class DeploymentPlan(BaseModel):
     demo: Optional[dict] = None
     #: 승인 화면의 '실행할 명령' — 실행 경로와 같은 인자 조립 함수로 만든 순서 목록. 설정값은 *** 로 가린다.
     command_steps: list[dict] = Field(default_factory=list)
+    #: 2.0.35 배포 전 신뢰 점검(trust_check.evaluate) — 원칙별 통과·주의·막힘. 배포를 새로 막지 않는다.
+    trust: Optional[dict] = None
 
 
 class DeploymentRecord(BaseModel):
@@ -1493,6 +1495,25 @@ class ECSDeployRequest(BaseModel):
     target_group_arn: str = Field(default="", pattern=r"^$|^arn:(aws|aws-us-gov|aws-cn):elasticloadbalancing:[a-z0-9-]+:[0-9]{12}:targetgroup/[A-Za-z0-9-]+/[a-f0-9]+$")
     cloudfront_domain: str = Field(default="", pattern=r"^$|^[a-z0-9-]+\.cloudfront\.net$")
     assign_public_ip: bool = True
+    #: 2.0.25 기본 방패 — 앱 앞 nginx 로 IP 당 요청 수 제한(앱이 PORT 환경변수를 읽을 때만 켜진다).
+    shield: bool = True
+    shield_level: Literal["loose", "normal", "strict"] = "normal"
+    #: 2.0.25 공격·장애 감지 알림 — 방패 로그 지표 필터 + CloudWatch 경보(+ 이메일 SNS). 권한이 없으면 이것만 빠진다.
+    alerts: bool = True
+    alert_email: str = Field(default="", pattern=r"^$|^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$")
+    #: 2.0.26 대규모 방패(선택) — none | alb(로드밸런서만) | alb_waf(로드밸런서 + AWS WAF).
+    #: 켜 두기만 해도 매달 요금이 나오므로 edge_cost_approved 가 없으면 아무것도 만들지 않는다.
+    edge: Literal["none", "alb", "alb_waf"] = "none"
+    waf_rate_limit: int = Field(default=2000, ge=10, le=2_000_000_000)
+    waf_window: Literal[60, 120, 300, 600] = 300
+    edge_cost_approved: bool = False
+    #: 2.0.27 HTTPS 주소 — 로드밸런서 앞 CloudFront(https://xxxx.cloudfront.net). 켜면 로드밸런서도 켜진다(edge 비용 확인 필요).
+    https: bool = False
+    #: 선택: 내 도메인(ACM 인증서 DNS 검증 — 발급 뒤 다시 배포하면 연결).
+    custom_domain: str = Field(default="", pattern=r"^$|^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){1,8}[a-z]{2,63}$")
+    #: 2.0.27 관리형 DB — task(태스크 안 임시 Postgres, 기본) | rds(Amazon RDS, 데이터 유지, 비용 확인 필요)
+    database: Literal["task", "rds"] = "task"
+    db_cost_approved: bool = False
 
     @model_validator(mode="after")
     def validate_secret_refs(self):

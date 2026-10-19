@@ -191,6 +191,22 @@ def _check_token() -> Optional[str]:
     return None
 
 
+def _audit(tool: str, arguments: dict[str, Any], result: Any) -> None:
+    """2.0.29 (OWASP ASI07) — MCP 도구 호출을 모두 기록한다. 값은 남기지 않고 인자 이름만."""
+    try:
+        import time as _time
+        from pathlib import Path as _Path
+        home = _Path(os.environ.get("RECODER_HOME") or (_Path.home() / ".recoder"))
+        home.mkdir(parents=True, exist_ok=True)
+        line = {"time": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()), "tool": tool,
+                "argument_names": sorted(str(k) for k in (arguments or {})),
+                "ok": not (isinstance(result, dict) and result.get("isError"))}
+        with (home / "mcp_calls.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - 기록 실패가 도구 호출을 막지 않는다
+        log.warning("MCP 호출 기록 실패", exc_info=True)
+
+
 async def _handle_message(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
     method = msg.get("method")
     msg_id = msg.get("id")
@@ -222,12 +238,19 @@ async def _handle_message(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
         arguments = params.get("arguments") or {}
         handler = _TOOL_DISPATCH.get(name or "")
         if handler is None:
+            #: 2.0.32 — 없는 도구·실패한 호출도 남긴다(감사 기록이 가장 필요한 것이 이쪽이다).
+            _audit(str(name or ""), arguments if isinstance(arguments, dict) else {}, {"isError": True})
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
                 "error": {"code": -32601, "message": f"tool not found: {name}"},
             }
-        result = await handler(arguments)
+        try:
+            result = await handler(arguments)
+        except Exception:
+            _audit(name or "", arguments if isinstance(arguments, dict) else {}, {"isError": True})
+            raise
+        _audit(name or "", arguments, result)
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
     # 응답을 안 요구하는 notification 인 경우 id 가 없다

@@ -16,6 +16,15 @@ SKIP = {".git", ".recoder", "node_modules", ".venv", "venv", "__pycache__", ".ca
 MAX_SNAPSHOT_BYTES = 32_000_000
 
 
+
+def _run_tree(args, **kwargs):
+    """시간이 지나면 docker 와 그 자식(buildx)까지 끝낸다(2.0.32, Windows 에서 멈추던 것)."""
+    try:
+        import proc_tools  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import proc_tools  # type: ignore
+    return proc_tools.run(args, **kwargs)
+
 def safe_path(root: Path, name: str) -> Path:
     parts = PurePosixPath(name).parts
     if not parts or name.startswith(("/", "\\")) or "\\" in name or ":" in name or any(p in {"..", "."} | SKIP for p in parts):
@@ -101,7 +110,7 @@ class DockerVerifier:
         # A private output file bounds memory even for verbose compiler output.
         with tempfile.TemporaryFile() as output:
             try:
-                p = subprocess.run(
+                p = _run_tree(
                     ["docker", "build", "--progress=plain", "."], cwd=workspace,
                     stdout=output, stderr=subprocess.STDOUT, timeout=300, shell=False,
                 )

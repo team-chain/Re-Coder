@@ -47,6 +47,8 @@ os.environ.setdefault(
     str(Path(tempfile.mkdtemp(prefix="recoder-test-adr-")) / "adr_reservations.json"),
 )
 
+# 2.0.36 비용 원장 — 테스트가 사용자 홈(~/.recoder)에 기록을 남기지 않게 디스크 기록을 끈다.
+os.environ.setdefault("RECODER_COST_LEDGER_FILE", "")
 # 테스트 중에는 실제 LLM 호출을 막기 위한 환경변수
 os.environ.setdefault("RECODER_TEST_MODE", "1")
 # infra_agent 의 LLM 커스터마이징도 비활성화 → 템플릿 그대로 반환되도록

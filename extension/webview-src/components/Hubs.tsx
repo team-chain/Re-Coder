@@ -21,7 +21,7 @@ import { SecurityFixList } from './SecurityFixList';
 
 export type HubId = "develop" | "deploy" | "security";
 export type FeatureId =
-  | "code" | "build" | "map" | "adr"
+  | "code" | "build" | "map" | "adr" | "models"
   | "ship" | "deploy" | "replay" | "operate"
   | "scan" | "secrets" | "policy";
 
@@ -49,6 +49,7 @@ export const FEATURES: FeatureDef[] = [
   { id: "build", hub: "develop", icon: "bug", title: "에러 분석", desc: "오류의 원인과 수정안을 확인하세요.", action: "분석", gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
   { id: "map", hub: "develop", icon: "network", title: "아키텍처", desc: "파일과 함수가 어떻게 연결되는지 살펴보세요.", action: "보기" },
   { id: "adr", hub: "develop", icon: "file-text", title: "설계 기록 (ADR)", desc: "이전에 결정한 설계와 선택 이유를 찾아보세요.", action: "열기" },
+  { id: "models", hub: "develop", icon: "coins", title: "AI 공급자 · 비용", desc: "작업마다 쓸 AI 를 고르고, 비용과 같은 요청의 결과를 비교하세요.", action: "열기" },
 
   { id: "ship", hub: "deploy", icon: "box", title: "로컬 Docker 배포", desc: "Dockerfile 생성 → 검사 → build → run → 헬스체크. 실패하면 이전 이미지로 되돌립니다.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isDockerReady, hint: "Docker 필요" }) },
   { id: "deploy", hub: "deploy", icon: "cloud-upload", title: "배포 캔버스", desc: "프로젝트를 Docker · GitHub · ECS · S3로 연결하고, 승인과 보안 검사부터 실행 상태까지 확인합니다.", action: "열기", primary: true },

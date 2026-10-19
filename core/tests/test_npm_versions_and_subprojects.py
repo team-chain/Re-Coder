@@ -98,7 +98,7 @@ def test_nonexistent_version_is_an_error_and_auto_fixes(mall, registry):
     assert issue.severity == "error" and issue.auto_fix and "^9.0.3" in issue.message
     out = br.apply_fix(mall, "NODE_DEPENDENCY_VERSION_NOT_FOUND")
     assert out["applied"]
-    assert json.loads((mall / "package.json").read_text())["dependencies"]["jsonwebtoken"] == "^9.0.3"
+    assert json.loads((mall / "package.json").read_text(encoding="utf-8"))["dependencies"]["jsonwebtoken"] == "^9.0.3"
     assert not any(i.code == "NODE_DEPENDENCY_VERSION_NOT_FOUND" for i in br.analyze(mall, online=True).issues)
 
 
@@ -113,7 +113,7 @@ def test_subproject_build_requires_installing_client_deps_and_fix_inserts_it(mal
     assert readiness.subprojects == ["client"]
     assert any(i.code == "DOCKERFILE_SUBPROJECT_DEPS_MISSING" and i.auto_fix for i in readiness.issues)
     br.apply_fix(mall, "DOCKERFILE_SUBPROJECT_DEPS_MISSING")
-    text = (mall / "Dockerfile").read_text()
+    text = (mall / "Dockerfile").read_text(encoding="utf-8")
     lines = text.splitlines()
     install = next(i for i, l in enumerate(lines) if l == "WORKDIR /app/client")
     assert lines[install + 1].startswith("RUN if [ -f package-lock.json ]") and lines[install + 2] == "WORKDIR /app"
@@ -133,7 +133,7 @@ def test_frontend_not_served_is_fixed_by_serving_the_build(mall):
     issue = next(i for i in br.analyze(mall).issues if i.code == "NODE_FRONTEND_NOT_SERVED")
     assert issue.severity == "warning" and issue.auto_fix and issue.file == "server/index.js"
     br.apply_fix(mall, "NODE_FRONTEND_NOT_SERVED")
-    text = (mall / "server/index.js").read_text()
+    text = (mall / "server/index.js").read_text(encoding="utf-8")
     assert "join(__dirname, '../client/build')" in text
     assert text.index("recoderUiDir") < text.index("app.listen(")
     assert text.index("app.get('/health'") < text.index("recoderUiDir")

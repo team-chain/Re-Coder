@@ -60,6 +60,35 @@ def set_bot(bot) -> None:
 # 인증 헬퍼
 # ---------------------------------------------------------------------------
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def _same_machine_client(request: web.Request) -> bool:
+    """브라우저가 보낸 요청을 막는다(2.0.33).
+
+    키가 없으면 루프백 요청을 믿는데, 사용자가 연 아무 웹페이지도 브라우저를 통해 127.0.0.1 로 POST 할 수 있고
+    (CSRF), DNS 리바인딩이면 응답까지 읽는다. VS Code 확장(Node fetch)은 Origin 을 보내지 않고 JSON 으로 보낸다.
+      · 웹페이지 Origin(http/https)이 붙은 요청 거부
+      · 키가 없을 때 Host 가 내 PC 이름이 아니면 거부(리바인딩)
+      · 본문이 있는 요청은 application/json 만(브라우저의 단순 요청 — 폼·text/plain — 은 사전 확인 없이 오므로)
+    """
+    origin = (request.headers.get("Origin") or "").strip().lower()
+    if origin.startswith(("http://", "https://")):
+        log.warning("웹페이지(%s)에서 온 봇 API 요청 거부", origin[:80])
+        return False
+    if not REGISTRATION_KEY:
+        host = (request.host or "").rsplit(":", 1)[0] if not (request.host or "").startswith("[") \
+            else (request.host or "").split("]", 1)[0] + "]"
+        if host.lower() not in _LOOPBACK_HOSTS:
+            log.warning("내 PC 이름이 아닌 Host(%s) 요청 거부", (request.host or "")[:80])
+            return False
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and (request.content_length or 0) > 0:
+        if (request.content_type or "").lower() != "application/json":
+            log.warning("JSON 이 아닌 봇 API 요청(%s) 거부", request.content_type)
+            return False
+    return True
+
+
 def _check_auth(request: web.Request) -> bool:
     """등록·브리지 관리 요청 인증.
 
@@ -68,6 +97,8 @@ def _check_auth(request: web.Request) -> bool:
     바꿀 수 있다. 키가 없으면: (1) start_api_server 가 루프백에만 바인드하고
     (2) 여기서도 루프백 밖 요청은 전부 거부한다 — 이중 방어다.
     """
+    if not _same_machine_client(request):
+        return False
     if not REGISTRATION_KEY:
         peer = request.remote or ""
         if peer in ("127.0.0.1", "::1", "localhost"):

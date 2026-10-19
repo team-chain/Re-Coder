@@ -46,7 +46,7 @@ def test_malformed_or_missing_reports_are_not_clean_scans(monkeypatch, tmp_path,
     async def command(cmd, **kwargs):
         flag = "--output" if tool == "trivy" else "--report-path"
         if flag in cmd and report is not None:
-            Path(cmd[cmd.index(flag) + 1]).write_text(report)
+            Path(cmd[cmd.index(flag) + 1]).write_text(report, encoding="utf-8")
         return report or ""
     monkeypatch.setattr(ss.SecurityScanner, "_run_cmd", staticmethod(command))
     findings = asyncio.run(getattr(ss.SecurityScanner(), "_run_" + tool)(str(tmp_path)))
@@ -69,14 +69,14 @@ class _Capture:
             if out.startswith("/out/"):
                 host_dir = next(a.rsplit(":", 1)[0] for a in cmd if a.endswith(":/out"))
                 out = os.path.join(host_dir, os.path.basename(out))
-            Path(out).write_text(json.dumps({"Results": []}))
+            Path(out).write_text(json.dumps({"Results": []}), encoding="utf-8")
             return ""
         if "--report-path" in cmd:
             out = cmd[cmd.index("--report-path") + 1]
             if out.startswith("/out/"):
                 host_dir = next(a.rsplit(":", 1)[0] for a in cmd if a.endswith(":/out"))
                 out = os.path.join(host_dir, os.path.basename(out))
-            Path(out).write_text("[]")
+            Path(out).write_text("[]", encoding="utf-8")
             return ""
         if "hadolint" in joined:
             return "[]"
@@ -140,7 +140,7 @@ def test_hadolint_폴백은_Dockerfile_을_표준입력으로_넘긴다(monkeypa
     cap = _Capture(tmp_path)
     monkeypatch.setattr(ss.SecurityScanner, "_run_cmd", staticmethod(cap))
     dockerfile = tmp_path / "Dockerfile"
-    dockerfile.write_text("FROM alpine\n")
+    dockerfile.write_text("FROM alpine\n", encoding="utf-8")
 
     findings = asyncio.run(ss.SecurityScanner()._run_hadolint(str(dockerfile)))
 

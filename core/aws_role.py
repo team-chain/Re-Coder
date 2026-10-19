@@ -332,21 +332,20 @@ def ensure_deploy_role(
         task_execution_role=task_execution_role, task_role=task_role,
         cluster=cluster, service=service, ecr_repo=ecr_repo,
     )
-    if not policy_fits_inline(policy):
-        raise ValueError(
-            f"역할 정책이 인라인 한도({INLINE_POLICY_LIMIT}자)를 넘습니다. "
-            "aws_policy 의 문장을 나누거나 관리형 정책으로 바꿔야 합니다."
-        )
-    try:
-        iam.put_role_policy(
-            RoleName=role_name,
-            PolicyName=ROLE_POLICY_NAME,
-            PolicyDocument=json.dumps(policy),
-        )
-    except Exception as exc:  # noqa: BLE001
-        if _is_denied(exc):
-            raise RoleSetupDenied("iam:PutRolePolicy", str(exc)) from exc
-        raise
+    if policy_fits_inline(policy):
+        try:
+            iam.put_role_policy(
+                RoleName=role_name,
+                PolicyName=ROLE_POLICY_NAME,
+                PolicyDocument=json.dumps(policy),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_denied(exc):
+                raise RoleSetupDenied("iam:PutRolePolicy", str(exc)) from exc
+            raise
+    else:
+        #: 2.0.26 부터 권한표가 인라인 한도(역할 합계 10,240자)를 넘는다 — 관리형 정책 여러 개로 나눠 붙인다.
+        _attach_managed(iam, account=account, partition=partition, role_name=role_name, policy=policy)
 
     return RoleSetupResult(
         role_arn=role_arn,
@@ -357,6 +356,61 @@ def ensure_deploy_role(
         principal_arn=principal_arn,
         warnings=warnings,
     )
+
+
+def managed_policy_name(index: int) -> str:
+    return f"{ROLE_POLICY_NAME}-{index + 1}"
+
+
+def _call(action: str, fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        if _is_denied(exc):
+            raise RoleSetupDenied(action, str(exc)) from exc
+        raise
+
+
+def _attach_managed(iam, *, account: str, partition: str, role_name: str, policy: dict) -> list[str]:
+    """정책을 한도 안의 관리형 정책 여러 개로 만들고(있으면 새 버전) 역할에 붙인다. 남는 옛 조각·인라인 정책은 뗀다."""
+    chunks = aws_policy.split_policy(policy)
+    arns: list[str] = []
+    for i, doc in enumerate(chunks):
+        name = managed_policy_name(i)
+        arn = f"arn:{partition}:iam::{account}:policy/{name}"
+        body = json.dumps(doc)
+        exists = True
+        try:
+            iam.get_policy(PolicyArn=arn)
+        except Exception as exc:  # noqa: BLE001
+            if _error_code(exc) in {"NoSuchEntity", "NoSuchEntityException"}:
+                exists = False
+            elif _is_denied(exc):
+                raise RoleSetupDenied("iam:GetPolicy", str(exc)) from exc
+            else:
+                raise
+        if exists:
+            versions = _call("iam:ListPolicyVersions", iam.list_policy_versions, PolicyArn=arn).get("Versions", [])
+            old = sorted((v for v in versions if not v.get("IsDefaultVersion")), key=lambda v: str(v.get("CreateDate")))
+            while len(old) >= 4:   # 버전은 5개까지 — 새 버전 자리를 비운다
+                _call("iam:DeletePolicyVersion", iam.delete_policy_version, PolicyArn=arn, VersionId=old.pop(0)["VersionId"])
+            _call("iam:CreatePolicyVersion", iam.create_policy_version, PolicyArn=arn, PolicyDocument=body, SetAsDefault=True)
+        else:
+            _call("iam:CreatePolicy", iam.create_policy, PolicyName=name, PolicyDocument=body,
+                  Description=f"ReCoder deploy role policy ({i + 1}/{len(chunks)})",
+                  Tags=[{"Key": "ManagedBy", "Value": "recoder"}])
+        _call("iam:AttachRolePolicy", iam.attach_role_policy, RoleName=role_name, PolicyArn=arn)
+        arns.append(arn)
+    attached = _call("iam:ListAttachedRolePolicies", iam.list_attached_role_policies, RoleName=role_name)
+    for item in attached.get("AttachedPolicies", []):
+        if str(item.get("PolicyName", "")).startswith(f"{ROLE_POLICY_NAME}-") and item.get("PolicyArn") not in arns:
+            _call("iam:DetachRolePolicy", iam.detach_role_policy, RoleName=role_name, PolicyArn=item["PolicyArn"])
+    try:   # 예전 한 벌 인라인 정책은 이제 관리형 정책이 대신한다
+        iam.delete_role_policy(RoleName=role_name, PolicyName=ROLE_POLICY_NAME)
+    except Exception as exc:  # noqa: BLE001
+        if _error_code(exc) not in {"NoSuchEntity", "NoSuchEntityException"} and not _is_denied(exc):
+            raise
+    return arns
 
 
 def assume_deploy_role(

@@ -11,7 +11,8 @@ import { DecisionOptionCards } from "./DecisionOptionCards";
 import { Followups, collapseChanged, insertFollowups, isConfirmOnly, pendingFollowup } from "./decisionFlow";
 import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemovalWarning";
 import { FailedFile, PausePanel, ResumeMode } from "./pausePanel";
-import { ConsistencyIssue, FallbackDocsNote, RemainingIssues, UnusedFile, UnusedFilesNote, applyLocked, filesToApply } from "./codeIssues";
+import FlowPreviewPanel from "./FlowPreviewPanel";
+import { ConsistencyIssue, FallbackDocsNote, RemainingIssues, SecurityReport, SecurityScoreNote, UnusedFile, UnusedFilesNote, applyLocked, filesToApply } from "./codeIssues";
 import { TeamBoard, TeamComposer } from "./TeamBoard";
 import { ANIMAL_KINDS } from "./teamAnimals";
 import { DEFAULT_DEV_AGENTS, MAX_DEV_AGENTS, TeamEvent, TeamMember, TeamView, buildRoster, emptyTeamView, reduceTeam, teamWorking } from "./teamState";
@@ -30,7 +31,9 @@ interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?
   /** 아무도 쓰지 않는 생성 파일 — "모두 적용" 에서 기본으로 뺀다. */
   unused_files?: UnusedFile[];
   /** AI 가 끝내 못 써서 설계로 자동 작성한 문서. */
-  fallback_docs?: string[]; }
+  fallback_docs?: string[];
+  /** 2.0.28 AI 코드 보안 점수. */
+  security?: SecurityReport | null; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
 //: 확정된 결정 하나. **`impact` 를 반드시 함께 보낸다.**
@@ -616,10 +619,13 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               </div>
               <RemainingIssues issues={turn.result.consistency_issues} acknowledged={!!ackIssues[turn.id]}
                 onAcknowledge={(v) => setAckIssues((cur) => ({ ...cur, [turn.id]: v }))} />
+              <SecurityScoreNote report={turn.result.security} />
               <FallbackDocsNote files={turn.result.fallback_docs} />
               <UnusedFilesNote unused={turn.result.unused_files} include={!!includeUnused[turn.id]}
                 onInclude={(v) => setIncludeUnused((cur) => ({ ...cur, [turn.id]: v }))} />
               <CodeRemovalSummary checks={turn.result.ops.map((op) => op.removal_check)} />
+              <FlowPreviewPanel turnId={turn.id} ops={turn.result.ops} targetFolder={turn.targetFolder} projectRoot={turn.result.projectRoot}
+                findings={turn.result.security?.findings} />
               {(() => {
                 const ops = filesToApply(turn.result!.ops, turn.result!.unused_files, !!includeUnused[turn.id]);
                 const locked = applyLocked(turn.result!.consistency_issues, !!ackIssues[turn.id]);

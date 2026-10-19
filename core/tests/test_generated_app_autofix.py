@@ -72,15 +72,15 @@ def test_생성_쇼핑몰의_어긋남을_모두_찾고_자동으로_고친다(t
     assert codes["NODE_CLIENT_API_DOUBLE_PREFIX"].auto_fix
     _fix_all(root)
     assert not [i for i in br.analyze(root).issues if i.severity == "error"]
-    assert "outDir: 'dist'" in (root / "frontend/vite.config.js").read_text()
-    assert json.loads((root / "package.json").read_text())["scripts"]["build"] == "npm run build:frontend"
-    assert "export const CartContext" in (root / "frontend/src/context/CartContext.jsx").read_text()
-    assert "export default Header;" in (root / "frontend/src/components/Header.jsx").read_text()
-    client = (root / "frontend/src/api/client.js").read_text()
+    assert "outDir: 'dist'" in (root / "frontend/vite.config.js").read_text(encoding="utf-8")
+    assert json.loads((root / "package.json").read_text(encoding="utf-8"))["scripts"]["build"] == "npm run build:frontend"
+    assert "export const CartContext" in (root / "frontend/src/context/CartContext.jsx").read_text(encoding="utf-8")
+    assert "export default Header;" in (root / "frontend/src/components/Header.jsx").read_text(encoding="utf-8")
+    client = (root / "frontend/src/api/client.js").read_text(encoding="utf-8")
     assert "export const getProducts = (...args) =>" in client and "res.data" in client
-    assert "client.get(`/products/${1}`)" in (root / "frontend/src/pages/Cart.jsx").read_text()
+    assert "client.get(`/products/${1}`)" in (root / "frontend/src/pages/Cart.jsx").read_text(encoding="utf-8")
     #: 이미 서버가 제공하는 폴더를 또 제공하도록 서버를 고치지 않는다(path.join 으로 나눠 적은 경로)
-    assert (root / "server.js").read_text().count("express.static") == 1
+    assert (root / "server.js").read_text(encoding="utf-8").count("express.static") == 1
 
 
 def test_음성대조_맞게_쓴_코드는_건드리지_않는다(tmp_path):

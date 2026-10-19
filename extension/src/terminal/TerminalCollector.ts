@@ -216,7 +216,9 @@ export class TerminalCollector {
         const shellFlag = process.platform === 'win32' ? '/c' : '-c';
 
         try {
-            const { stdout, stderr } = await execFileAsync(shell, [shellFlag, command], {
+            // 2.0.32 — 한국어 Windows 의 cmd.exe 는 cp949 로 출력해 UTF-8 로 읽으면 한글이 깨졌다. 코드 페이지를 UTF-8 로 바꿔 실행한다.
+            const run = process.platform === 'win32' ? `chcp 65001 >nul & ${command}` : command;
+            const { stdout, stderr } = await execFileAsync(shell, [shellFlag, run], {
                 cwd: workspacePath || undefined,
                 maxBuffer: 1024 * 1024 * 10, // 10 MB
                 timeout: 120_000,             // 2 min hard cap

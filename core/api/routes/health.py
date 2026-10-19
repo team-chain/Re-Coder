@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -168,7 +169,12 @@ async def shutdown(request: Request) -> dict:
 
     async def _delayed_shutdown():
         await asyncio.sleep(0.5)
-        os.kill(os.getpid(), signal.SIGTERM)
+        if sys.platform == "win32":
+            # Windows 의 os.kill(SIGTERM) 은 즉시 강제 종료(TerminateProcess)라 종료 정리가 돌지 않는다 — 같은 프로세스 안에서
+            # 신호 처리기를 부른다(2.0.32).
+            signal.raise_signal(signal.SIGTERM)
+        else:
+            os.kill(os.getpid(), signal.SIGTERM)
 
     asyncio.create_task(_delayed_shutdown())
     return {"status": "shutting_down"}

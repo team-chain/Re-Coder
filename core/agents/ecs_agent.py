@@ -19,6 +19,7 @@ import asyncio
 import collections
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -30,6 +31,9 @@ from core.agents import ecs_runtime
 from core.agents.ecs_progress import initialize_progress, advance_progress, finish_progress
 from core.sbom import sbom_generator
 from core import aws_infra, aws_policy
+from core import shield as shield_mod
+from core import aws_edge
+from core import aws_cdn, aws_rds
 from core.aws_infra import InfraError
 from core.schemas import (
     ECSDeployRecord,
@@ -39,6 +43,14 @@ from core.schemas import (
 from core.security_scan import security_scanner
 
 logger = logging.getLogger(__name__)
+
+
+def boto3_client_like(clients: dict, name: str):
+    """clients 묶음에 없으면(옛 호출자·시험) 같은 기본 세션으로 만든다."""
+    if name not in clients:
+        import boto3
+        clients[name] = boto3.client(name)
+    return clients[name]
 
 _POLL_INTERVAL = 15           # CloudWatch 폴링 간격 (초)
 _MAX_POLL_ATTEMPTS = 40       # 최대 폴링 횟수 (= 10분)
@@ -135,6 +147,7 @@ class ECSAgent:
             environment=request.environment or "",
             provided=set(request.env_vars or {}) | set(request.secret_refs or {}),
             container_port=request.container_port,
+            managed_db=request.database == "rds",
         )
 
     def __init__(self, on_progress: Optional[Callable[[], None]] = None) -> None:
@@ -142,6 +155,40 @@ class ECSAgent:
         self._on_progress = on_progress
         #: 배포 요청별 ECS 실행 설정(값 포함) — 태스크 정의를 등록할 때 꺼내 쓰고 버린다. 기록·디스크에는 남기지 않는다.
         self._runtime: dict[int, ecs_runtime.RuntimePlan] = {}
+        #: 2.0.25 배포 요청별 방패 결정(켤 수 있나·앱 포트) — 태스크 정의·서비스(로드 밸런서 대상 컨테이너)가 쓴다.
+        self._shield: dict[int, "shield_mod.ShieldDecision"] = {}
+        #: 2.0.26 배포 요청별 대규모 방패(ALB·WAF) 결과 — 주소 확인·실패 안내가 쓴다.
+        self._edge: dict[int, "aws_edge.EdgeResult"] = {}
+        #: 2.0.27 HTTPS 주소(CloudFront)·관리형 DB(RDS) — 비밀번호는 메모리에만, 배포가 끝나면 버린다.
+        self._cdn: dict[int, "aws_cdn.CdnResult"] = {}
+        self._db: dict[int, "aws_rds.DbHandle"] = {}
+
+    @staticmethod
+    def _plan_shield(request: ECSDeployRequest) -> "shield_mod.ShieldDecision":
+        """방패를 켤 수 있는지 — 앱이 PORT 환경변수를 읽어야 앱을 방패 뒤 포트로 옮길 수 있다."""
+        if not request.shield:
+            return shield_mod.decide(enabled=False, level=request.shield_level, public_port=request.container_port,
+                                     port_from_env=False)
+        if not request.workspace_path:
+            return shield_mod.ShieldDecision(False, request.shield_level,
+                                             "작업 폴더 없이 이미지만 배포해 앱이 PORT 를 읽는지 확인하지 못했습니다 — 방패 없이 배포합니다.")
+        from pathlib import Path
+        from static_frontend import generated_static_runtime_port
+        try:
+            from build_readiness import analyze
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import analyze  # type: ignore
+        static = generated_static_runtime_port(Path(request.workspace_path) / request.dockerfile) is not None
+        try:
+            readiness = analyze(request.workspace_path, online=False)
+            port_from_env = bool(readiness.port_from_env)
+            if readiness.runtime == "python":
+                # 2.0.32 — 파이썬은 시작 명령·코드가 PORT 를 정말 쓰는지 본다(포트를 고정한 앱에 켜면 태스크가 계속 교체된다).
+                port_from_env = shield_mod.python_reads_port(request.workspace_path, request.dockerfile)
+        except Exception:  # noqa: BLE001 - 판단하지 못하면 켜지 않는다(앱이 안 뜨는 것보다 방패 없는 편이 낫다)
+            port_from_env = False
+        return shield_mod.decide(enabled=True, level=request.shield_level, public_port=request.container_port,
+                                 port_from_env=port_from_env, static_site=static)
 
     def _save_progress(self) -> None:
         if self._on_progress:
@@ -175,6 +222,24 @@ class ECSAgent:
             "logs": session.client("logs"),
             "sts": session.client("sts"),
             "elbv2": session.client("elbv2"),
+            #: 2.0.25 공격·장애 감지 알림(지표 경보·메일)
+            "cloudwatch": session.client("cloudwatch"),
+            "sns": session.client("sns"),
+            #: 2.0.26 대규모 방패(ALB 앞 WAF)
+            "wafv2": session.client("wafv2"),
+            #: 2.0.31 HTTPS 주소 + WAF — CloudFront 에 붙이는 웹 ACL 은 전역 범위라 us-east-1 에서만 다룬다.
+            "wafv2_global": session.client("wafv2", region_name="us-east-1"),
+            #: 2.0.27 HTTPS 주소 — CloudFront 는 전역, 인증서는 us-east-1 에서만 붙는다(CloudFront 규칙).
+            "cloudfront": session.client("cloudfront"),
+            "acm_global": session.client("acm", region_name="us-east-1"),
+            #: 2.0.35 원본 구간 HTTPS — ALB 에 붙이는 인증서는 배포 리전에 있어야 한다.
+            "acm": session.client("acm"),
+            "route53": session.client("route53"),
+            #: 2.0.27 관리형 DB
+            "rds": session.client("rds"),
+            "secretsmanager": session.client("secretsmanager"),
+            #: 2.0.32 production 관리형 DB — 실행 역할이 DB 비밀을 읽을 수 있는지 미리 시뮬레이션
+            "iam": session.client("iam"),
         }
 
     async def deploy(
@@ -286,6 +351,20 @@ class ECSAgent:
                 if runtime.services and not request.assign_public_ip:
                     record.provisioned["app_runtime_network"] = (
                         "공인 IP 를 끈 배포입니다 — DB 이미지(ECR Public)를 받으려면 서브넷에 NAT 게이트웨이가 있어야 합니다.")
+            decision = await asyncio.get_running_loop().run_in_executor(None, self._plan_shield, request)
+            self._shield[id(request)] = decision
+            info = shield_mod.summary(decision)
+            record.provisioned["shield"] = (
+                f"켜짐 — 강도 {info['label']}(IP당 초당 {info['rate']}회, 순간 {info['burst']}회), 공개 포트 {decision.public_port} "
+                f"→ 앱 {decision.app_port}" if decision.on else f"꺼짐 — {decision.reason}")
+            self._check_edge_request(request)
+            if request.database == "rds":
+                record.provisioned["database"] = "관리형 DB(RDS) — 비용 확인함"
+            if request.edge != "none":
+                record.provisioned["edge"] = (
+                    "대규모 방패 — 로드밸런서" + (" + AWS WAF(IP당 "
+                    f"{request.waf_window // 60}분 {request.waf_rate_limit:,}회 + AWS 관리 규칙 2개)"
+                    if request.edge == "alb_waf" else "만") + " (비용 확인함)")
             clients = self._clients(request.region)
 
             # 1. Preflight
@@ -363,6 +442,9 @@ class ECSAgent:
 
             self._abort_if_cancelled(record, "보안 스캔")
 
+            # 5-1. 2.0.27 관리형 DB — 인프라 단계에서 만들기 시작한 RDS 가 준비되기를 기다린다(그 사이 빌드는 끝남).
+            await self._step_database_ready(request, record, clients)
+
             # 6. Task Definition 생성 + 등록
             task_def_arn, prev_arn = await self._step_register_task_definition(
                 request, clients, image_uri
@@ -378,6 +460,8 @@ class ECSAgent:
             self._advance_progress(record, "svc_update")
             await self._step_ensure_service(request, record, clients,
                                             task_def_arn, network)
+            # 7-1. 공격·장애 감지 알림 준비(실패해도 배포는 계속)
+            await self._step_alerts(request, record, clients)
 
             # 8. desired_count 가 0 이면 띄울 태스크가 없다 — 폴링도 URL 도
             #    의미가 없다. 여기서 성공으로 끝낸다(과금 0원 상태).
@@ -535,10 +619,42 @@ class ECSAgent:
             #: 실행 설정(비밀값 포함)은 이 배포에서만 쓴다 — 중간에 멈춘 배포가 남긴 것을 다른 배포가 집어 가지 않게
             #: (검토 2.0.15: id() 는 재사용된다).
             self._runtime.pop(id(request), None)
+            self._shield.pop(id(request), None)
+            self._edge.pop(id(request), None)
+            self._cdn.pop(id(request), None)
+            self._db.pop(id(request), None)
 
     # ------------------------------------------------------------------
     # 단계별 구현
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_edge_request(req: ECSDeployRequest) -> None:
+        """대규모 방패는 AWS 자원을 하나도 만들기 전에 조건을 본다 — 비용 확인 · 직접 지정한 대상 그룹 · provision."""
+        if req.database == "rds":
+            if not req.db_cost_approved:
+                raise InfraError("관리형 DB(RDS)는 켜 두는 동안 계속 요금이 나와 비용 확인이 필요합니다.",
+                                 remedy="배포 설정의 「관리형 DB」에서 비용 확인에 체크한 뒤 다시 배포하세요. " + aws_rds.COST_NOTE)
+            if not req.provision:
+                raise InfraError("인프라 자동 준비(provision)를 끈 배포에는 관리형 DB 를 만들 수 없습니다.",
+                                 remedy="provision 을 켜거나 DATABASE_URL 을 비밀값 참조로 직접 넣으세요.")
+        if req.https and req.edge == "none":
+            #: HTTPS 주소(CloudFront)는 로드밸런서 앞에 둔다 — 로드밸런서만(WAF 없이) 켠다.
+            req.edge = "alb"
+        if req.custom_domain and not req.https:
+            raise InfraError("내 도메인은 HTTPS 주소(CloudFront)를 켜야 연결할 수 있습니다.",
+                             remedy="배포 설정에서 HTTPS 주소를 켜세요.")
+        if req.edge == "none":
+            return
+        if not req.edge_cost_approved:
+            raise InfraError("대규모 방패(로드밸런서·WAF)는 켜 두기만 해도 매달 요금이 나와 비용 확인이 필요합니다.",
+                             remedy="배포 설정의 「대규모 방패」에서 비용 확인에 체크한 뒤 다시 배포하세요. " + aws_edge.COST_NOTE)
+        if req.target_group_arn:
+            raise InfraError("대상 그룹을 직접 지정한 배포에는 대규모 방패를 함께 켤 수 없습니다.",
+                             remedy="대상 그룹 ARN 을 비우거나(ReCoder 가 로드밸런서를 만듦) 대규모 방패를 끄세요.")
+        if not req.provision:
+            raise InfraError("인프라 자동 준비(provision)를 끈 배포에는 대규모 방패를 켤 수 없습니다.",
+                             remedy="provision 을 켜거나 대규모 방패를 끄세요.")
 
     async def _step_preflight(self, req: ECSDeployRequest, rec: ECSDeployRecord) -> ECSDeployRecord:
         # ECR 리포지토리 이름은 파이프라인 전체가 **한 곳**에서 계산한다.
@@ -586,6 +702,10 @@ class ECSAgent:
 
     def ecr_repo_name(self, req: ECSDeployRequest) -> str:
         return req.ecr_repo or req.service
+
+    def resource_tags(self, req: ECSDeployRequest) -> dict[str, str]:
+        """ReCoder 가 새로 만드는 리소스에 붙이는 태그(정리 기능이 이것으로 찾는다)."""
+        return aws_infra.recoder_tags(req.project_id, req.service)
 
     async def _step_provision(
         self,
@@ -644,10 +764,10 @@ class ECSAgent:
         loop = asyncio.get_running_loop()
 
         def _work() -> aws_infra.NetworkTarget:
-            aws_infra.ensure_cluster(clients["ecs"], req.cluster)
+            aws_infra.ensure_cluster(clients["ecs"], req.cluster, tags=self.resource_tags(req))
             rec.provisioned["cluster"] = req.cluster
 
-            aws_infra.ensure_log_group(clients["logs"], self.log_group_name(req))
+            aws_infra.ensure_log_group(clients["logs"], self.log_group_name(req), tags=self.resource_tags(req))
             rec.provisioned["log_group"] = self.log_group_name(req)
 
             # 서브넷 — 요청에 있으면 그걸 쓰되, **VPC 는 조회해서 알아낸다.**
@@ -680,6 +800,35 @@ class ECSAgent:
                     "서브넷 인터넷 경로 미확인: %s", ",".join(target.subnet_ids)
                 )
 
+            # 2.0.26 대규모 방패 — ALB(+WAF) 를 만들고, 태스크는 ALB 보안 그룹에서 오는 연결만 받는다.
+            if req.edge != "none":
+                edge = aws_edge.ensure_edge(
+                    clients["ec2"], clients["elbv2"], clients["wafv2"], service=req.service,
+                    vpc_id=target.vpc_id, subnet_ids=list(target.subnet_ids), app_port=req.container_port,
+                    health_path=req.health_check_path, waf=req.edge == "alb_waf",
+                    rate_limit=req.waf_rate_limit, window=req.waf_window, tags=self.resource_tags(req),
+                    cdn=req.https)
+                self._edge[id(req)] = edge
+                rec.provisioned["load_balancer"] = (
+                    f"{edge.name} — {edge.url} ({'새로 만듦' if 'alb' in edge.created else '기존 것 사용'})")
+                rec.provisioned["waf"] = (
+                    f"켜짐 — IP당 {req.waf_window // 60}분 {req.waf_rate_limit:,}회 넘으면 차단 + AWS 관리 규칙 2개"
+                    if edge.web_acl_arn else "꺼짐 — 로드밸런서만")
+                for i, note in enumerate(edge.notes):
+                    rec.provisioned[f"edge_note_{i + 1}"] = note
+                groups = list(req.security_group_ids) + [edge.task_security_group]
+                rec.provisioned["security_groups"] = ",".join(groups)
+                req.security_group_ids = groups
+                #: 아래 서비스 단계가 이 대상 그룹에 연결하고, 방패(nginx)는 ALB 가 넘긴 실제 IP 를 쓴다.
+                req.target_group_arn = edge.target_group_arn
+                if req.https:
+                    self._provision_cdn(req, rec, clients, edge)
+                else:
+                    self._note_leftovers(req, rec, clients, cdn_only=True)
+                self._start_database(req, rec, clients, target)
+                return target
+            self._note_leftovers(req, rec, clients)
+
             # 보안 그룹
             if req.security_group_ids:
                 groups = list(req.security_group_ids)
@@ -700,14 +849,300 @@ class ECSAgent:
                         vpc_id=target.vpc_id,
                         name=f"{req.service}-sg",
                         port=req.container_port,
+                        tags=self.resource_tags(req),
                     )
                 ]
             rec.provisioned["security_groups"] = ",".join(groups)
             # 뒤 단계가 쓰도록 요청에 되돌려 심는다.
             req.security_group_ids = groups
+            self._start_database(req, rec, clients, target)
             return target
 
         return await loop.run_in_executor(None, _work)
+
+    # ------------------------------------------------------------------
+    # 2.0.27 HTTPS 주소(CloudFront) · 관리형 DB(RDS)
+    # ------------------------------------------------------------------
+
+    def _note_leftovers(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict, *, cdn_only: bool = False) -> None:
+        """대규모 방패·HTTPS 를 끈 배포 — 예전에 만든 로드밸런서·WAF·CloudFront 는 지우지 않고 남는다(되돌리기 쉽게).
+        요금이 계속 나가므로 알린다(2.0.32). 확인이 안 되면 조용히 넘어간다."""
+        name = aws_edge.edge_name(req.service)
+        left: list[str] = []
+        try:
+            if not cdn_only and aws_edge._find_load_balancer(clients["elbv2"], name) is not None:
+                left.append(f"로드밸런서 {name}" + (" + WAF" if aws_edge.find_web_acl(clients["wafv2"], name) else ""))
+            if "cloudfront" in clients and aws_cdn._find(clients["cloudfront"], aws_cdn.comment_for(name, req.region),
+                                                         legacy=aws_cdn.comment_for(name), region=req.region):
+                left.append("HTTPS 주소(CloudFront)")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("남은 리소스 확인 생략: %s", aws_infra.error_message(exc))
+            return
+        if left:
+            rec.provisioned["leftover_resources"] = (
+                f"이번 배포에서 끈 {', '.join(left)} 은(는) 지우지 않고 남겨 두었습니다 — 계속 요금이 나옵니다. "
+                "다시 켤 계획이 없으면 운영 화면의 「AWS 리소스 정리」에서 지우세요.")
+
+    def _prepare_origin_tls(self, req: ECSDeployRequest, clients: dict, edge: "aws_edge.EdgeResult",
+                            cert: "Optional[aws_cdn.CertificateState]", tags: dict) -> "aws_cdn.OriginTls":
+        """origin.<도메인> → ALB 443(배포 리전 인증서). 모든 준비가 끝난 배포에서만 ready — 그 전에는 지금처럼 HTTP 원본.
+
+        실패해도 배포는 계속한다(원본 잠금 머리글과 CloudFront 전용 보안 그룹이 계속 막는다)."""
+        host = aws_cdn.origin_host(req.custom_domain)
+        out = aws_cdn.OriginTls(host=host)
+        zone_id = cert.zone_id if cert is not None else ""
+        if not zone_id:
+            out.notes.append(f"{req.custom_domain} 영역이 Route 53 에 없어 CloudFront 와 로드밸런서 사이는 HTTP 로 둡니다"
+                             "(원본 잠금 머리글로 막음). Route 53 으로 옮기면 다음 배포에서 HTTPS 로 바뀝니다.")
+            return out
+        if "acm" not in clients or not edge.zone_id:
+            return out
+        try:
+            origin_cert = aws_cdn.ensure_certificate(
+                clients["acm"], clients["route53"], host, then="CloudFront 와 로드밸런서 사이가 HTTPS 로 바뀝니다",
+                tags={**tags, "recoder:region": req.region, aws_cdn.ORIGIN_TAG: "true"})
+            out.certificate_arn = origin_cert.arn
+            conflict = aws_cdn.point_origin(clients["route53"], zone_id, host, edge.dns_name, edge.zone_id)
+            if conflict:
+                out.notes.append(conflict)
+                return out
+            if not origin_cert.issued:
+                out.status = "pending"
+                out.notes += origin_cert.notes
+                return out
+            aws_edge.allow_https_from_cloudfront(clients["ec2"], edge.alb_security_group,
+                                                 aws_cdn.cloudfront_prefix_list(clients["ec2"]))
+            out.listener_arn = aws_edge.ensure_https_listener(
+                clients["elbv2"], alb_arn=edge.alb_arn, tg_arn=edge.target_group_arn, certificate_arn=origin_cert.arn,
+                http_listener_arn=edge.listener_arn, tags=tags)
+            out.status = "ready"
+        except Exception as exc:  # noqa: BLE001 - 원본 구간은 HTTP 로 계속(머리글 잠금 유지)
+            out.status = "skipped"
+            out.listener_arn = ""
+            out.notes.append(f"CloudFront 와 로드밸런서 사이 HTTPS 를 준비하지 못했습니다({aws_infra.error_message(exc)}) — "
+                             "지금은 HTTP 로 두고 원본 잠금 머리글로 막습니다. 권한 템플릿 스택을 2.0.35 템플릿으로 업데이트한 뒤 다시 배포하세요.")
+        return out
+
+    def _provision_cdn(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict,
+                       edge: "aws_edge.EdgeResult") -> None:
+        tags = self.resource_tags(req)
+        notes: list[str] = []
+        cert = None
+        if req.custom_domain:
+            cert = aws_cdn.ensure_certificate(clients["acm_global"], clients["route53"], req.custom_domain,
+                                              tags={**tags, "recoder:region": req.region})
+            notes += cert.notes
+        #: 2.0.31 — CloudFront 뒤에서는 ALB 가 보는 주소가 모두 CloudFront 엣지라, WAF 의 IP 당 제한은 CloudFront 에 붙여야
+        #: 실제 사용자 IP 로 센다(전역 범위 웹 ACL, us-east-1).
+        waf = req.edge == "alb_waf"
+        global_acl: Optional[str] = ""
+        legacy_waf = False
+        if waf:
+            try:
+                global_acl, _made = aws_edge.ensure_web_acl(
+                    clients["wafv2_global"], aws_edge.global_acl_name(edge.name, req.region), rate_limit=req.waf_rate_limit,
+                    window=req.waf_window, tags=tags, scope=aws_edge.CLOUDFRONT)
+            except InfraError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if aws_infra.error_code(exc) in ("AccessDenied", "AccessDeniedException", "WAFInvalidPermissionPolicyException",
+                                                 "UnauthorizedOperation"):
+                    #: 옛 권한표 — 2.0.30 처럼 ALB 에 지역 웹 ACL 을 두고 배포는 계속한다(업데이트 안내).
+                    legacy_waf = True
+                    global_acl = None
+                    acl_arn, _made = aws_edge.ensure_web_acl(clients["wafv2"], edge.name, rate_limit=req.waf_rate_limit,
+                                                             window=req.waf_window, tags=tags)
+                    attached = str(((clients["wafv2"].get_web_acl_for_resource(ResourceArn=edge.alb_arn) or {})
+                                    .get("WebACL") or {}).get("ARN") or "")
+                    if attached != acl_arn:
+                        aws_edge.associate(clients["wafv2"], acl_arn, edge.alb_arn)
+                    edge.web_acl_arn = acl_arn
+                    notes.append("권한표가 옛 버전이라 WAF 를 로드밸런서에 두었습니다 — CloudFront 뒤에서는 IP 당 제한이 "
+                                 "엣지 주소로 묶이니 권한 템플릿 스택을 2.0.31 템플릿으로 업데이트한 뒤 다시 배포하세요.")
+                else:
+                        raise InfraError("HTTPS 주소(CloudFront)에 붙일 WAF 웹 ACL 을 준비하지 못했습니다.",
+                                     detail=aws_infra.error_message(exc),
+                                     remedy="권한 템플릿 스택을 2.0.31 템플릿으로 업데이트하세요(전역 범위 WAF 권한). "
+                                            "급하면 대규모 방패를 「로드밸런서만」으로 바꿔 배포할 수 있습니다.") from exc
+        #: 2.0.35 원본 구간 HTTPS — 내 도메인이 Route 53 에 있으면 CloudFront → ALB 도 HTTPS 로(준비된 배포부터).
+        tls = self._prepare_origin_tls(req, clients, edge, cert, tags) if req.custom_domain else aws_cdn.OriginTls()
+        notes += tls.notes
+        cdn = aws_cdn.ensure_distribution(
+            clients["cloudfront"], name=edge.name, origin=tls.host if tls.ready else edge.dns_name, tags=tags,
+            alias=req.custom_domain if cert is not None and cert.issued else "",
+            certificate_arn=cert.arn if cert is not None and cert.issued else "",
+            web_acl_id=global_acl, region=req.region, origin_https=tls.ready)
+        self._cdn[id(req)] = cdn
+        listeners = [edge.listener_arn] + ([tls.listener_arn] if tls.listener_arn else [])
+        if waf and not legacy_waf:
+            edge.web_acl_arn = str(global_acl)
+            if cdn.web_acl_live:
+                # CloudFront 쪽 WAF 가 이미 퍼져 있을 때만 로드밸런서의 옛 웹 ACL 을 뗀다(그 사이 보호 공백 없음).
+                try:
+                    note = aws_edge.detach_recoder_acl(clients["wafv2"], edge.alb_arn, edge.name,
+                                                       reason="WAF 를 HTTPS 주소(CloudFront) 쪽으로 옮겼습니다")
+                except Exception as exc:  # noqa: BLE001 - 보호는 이미 CloudFront 쪽에 있다
+                    note = f"로드밸런서에 붙어 있던 옛 웹 ACL 을 떼지 못했습니다({aws_infra.error_message(exc)}) — 「AWS 리소스 정리」에서 지우세요."
+                if note:
+                    notes.append(note)
+            elif aws_edge.find_web_acl(clients["wafv2"], edge.name) is not None:
+                notes.append("WAF 를 CloudFront 에 붙이는 중입니다 — 퍼지는 동안(15분쯤) 로드밸런서의 WAF 도 그대로 두고, 다음 배포에서 뗍니다.")
+        elif not waf:
+            try:
+                if aws_edge.delete_web_acl(clients["wafv2_global"], aws_edge.global_acl_name(edge.name, req.region),
+                                           aws_edge.CLOUDFRONT, attempts=1):
+                    notes.append("WAF 를 껐습니다 — CloudFront 의 웹 ACL 을 지웠습니다.")
+            except Exception as exc:  # noqa: BLE001 - 떼어 냈으니 동작엔 영향 없음, 요금만
+                if aws_infra.error_code(exc) in ("WAFAssociatedItemException",):
+                    notes.append("WAF 를 껐습니다 — CloudFront 에서 웹 ACL 을 뗐고, 퍼진 뒤(15분쯤) 다시 배포하거나 「AWS 리소스 정리」로 지우면 요금이 멈춥니다.")
+                else:
+                    logger.info("CloudFront 웹 ACL 확인 생략: %s", aws_infra.error_message(exc))
+        if (waf and not legacy_waf and cdn.web_acl_live) or not waf:
+            # 2.0.31 의 리전 표시 없는 CloudFront 웹 ACL — 새 이름으로 옮겨 퍼졌거나 WAF 를 껐으면 지운다(요금만 남지 않게).
+            try:
+                if aws_edge.delete_web_acl(clients["wafv2_global"], edge.name, aws_edge.CLOUDFRONT, attempts=1):
+                    notes.append("예전 이름의 CloudFront 웹 ACL 을 지웠습니다.")
+            except Exception as exc:  # noqa: BLE001 - 아직 연결돼 있으면 다음 배포·정리에서
+                logger.info("옛 CloudFront 웹 ACL 정리 생략: %s", aws_infra.error_message(exc))
+        #: 원본 잠금 — CloudFront 가 붙이는 비밀 머리글이 맞는 요청만 앱으로. 머리글이 이미 퍼진 배포에서만 잠근다
+        #: (방금 머리글을 넣은 옛 배포를 바로 잠그면 퍼지는 동안 사용자가 403 을 본다).
+        if cdn.origin_secret_live:
+            try:
+                for listener in listeners:
+                    aws_edge.lock_origin(clients["elbv2"], listener, edge.target_group_arn, cdn.origin_secret)
+                rec.provisioned["origin_lock"] = "켜짐 — CloudFront 를 거치지 않은 요청은 로드밸런서가 403 으로 막습니다."
+            except Exception as exc:  # noqa: BLE001 - 보안 그룹이 이미 CloudFront 주소만 받는다(한 겹 더 하는 보호)
+                rec.provisioned["origin_lock"] = (f"켜지 못함({aws_infra.error_message(exc)}) — 권한 템플릿 스택을 최신으로 업데이트한 뒤 "
+                                                  "다시 배포하세요. 보안 그룹은 계속 CloudFront 주소만 받습니다.")
+        else:
+            widened = False
+            try:
+                # 이미 잠긴 리스너(머리글 값이 바뀐 경우) — 새 값도 받게 넓혀, 퍼지는 동안 403 이 나지 않게 한다.
+                widened = False
+                for listener in listeners:
+                    widened = aws_edge.widen_origin_lock(clients["elbv2"], listener, edge.target_group_arn,
+                                                         cdn.origin_secret) or widened
+            except Exception as exc:  # noqa: BLE001
+                logger.info("원본 잠금 확인 생략: %s", aws_infra.error_message(exc))
+            rec.provisioned["origin_lock"] = (
+                "켜짐 — 새 잠금 값을 CloudFront 에 퍼뜨리는 중이라 옛 값과 새 값을 함께 받습니다(다음 배포에서 새 값만)."
+                if widened else "준비 중 — CloudFront 에 잠금 머리글을 넣었습니다. 퍼진 뒤 다음 배포에서 잠급니다.")
+        if cert is not None and cert.issued:
+            if cert.zone_id:
+                try:
+                    dns_notes = aws_cdn.point_domain(clients["route53"], cert.zone_id, req.custom_domain, cdn.domain)
+                except Exception as exc:  # noqa: BLE001 - 배포는 CloudFront 주소로 계속
+                    dns_notes = [f"Route 53 에 별칭을 넣지 못했습니다({aws_infra.error_message(exc)}) — 도메인 DNS 에 "
+                                 f"{req.custom_domain} 를 {cdn.domain} 로 연결하세요."]
+                notes += dns_notes
+                rec.provisioned["domain"] = (f"{req.custom_domain} — 인증서 발급됨, Route 53 별칭을 CloudFront 로 연결했습니다."
+                                             if not dns_notes else f"{req.custom_domain} — 인증서 발급됨, DNS 는 직접 확인이 필요합니다(아래 안내).")
+            else:
+                rec.provisioned["domain"] = (f"{req.custom_domain} — 인증서 발급됨. 도메인 DNS 에 "
+                                             f"{req.custom_domain} CNAME {cdn.domain} 을 넣으세요.")
+        elif cert is not None:
+            rec.provisioned["domain"] = f"{req.custom_domain} — 인증서 발급 대기 중(지금은 {cdn.domain} 로 서비스)"
+        for i, note in enumerate(notes):
+            rec.provisioned[f"domain_note_{i + 1}"] = note
+        rec.provisioned["https"] = (f"켜짐 — https://{cdn.domain} ({'새로 만듦 · 전 세계에 퍼지는 데 5~15분' if cdn.created else '기존 것 사용'}), "
+                                    "로드밸런서는 CloudFront 에서 오는 연결만 받습니다.")
+        rec.provisioned["origin_tls"] = (
+            f"켜짐 — CloudFront 와 로드밸런서 사이도 HTTPS({tls.host}, TLS 1.2 이상)입니다." if tls.ready else
+            "준비 중 — 로드밸런서 인증서 발급을 기다립니다. 발급 뒤 다음 배포에서 CloudFront 와 로드밸런서 사이를 HTTPS 로 바꿉니다." if tls.status == "pending" else
+            "꺼짐 — CloudFront 와 로드밸런서 사이는 HTTP 입니다(원본 잠금 머리글로 막음). 내 도메인을 Route 53 에 두면 HTTPS 로 바뀝니다.")
+        if waf:
+            rec.provisioned["waf"] = (f"켜짐({'로드밸런서 — 권한표 업데이트 필요' if legacy_waf else 'CloudFront'}) — 사용자 IP당 {req.waf_window // 60}분 {req.waf_rate_limit:,}회 넘으면 차단 "
+                                      "+ AWS 관리 규칙 2개")
+        req.cloudfront_domain = cdn.domain
+
+    def _start_database(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict,
+                        target: aws_infra.NetworkTarget) -> None:
+        if req.database != "rds":
+            return
+        runtime = self._runtime.get(id(req))
+        if runtime is None or not runtime.managed_db:
+            rec.provisioned["database"] = ("만들지 않음 — 앱이 PostgreSQL 을 쓰지 않거나 DB 접속 정보를 이미 넣었습니다."
+                                           if runtime is not None else "만들지 않음 — 작업 폴더 없이 이미지로만 배포해 앱의 DB 를 알 수 없습니다.")
+            return
+        if (req.environment or "").strip().lower() == "production":
+            # 2.0.32 — production 은 DB 접속 정보를 비밀 참조로 넣는다. 실행 역할이 그 비밀을 못 읽으면 태스크가
+            # 시작하지 못하므로(ResourceInitializationError) RDS 를 만들기 **전에** 확인한다.
+            self._check_db_secret_access(req, rec, clients)
+        handle = aws_rds.start(clients["rds"], clients["ec2"], clients["secretsmanager"], service=req.service,
+                               vpc_id=target.vpc_id, task_security_groups=list(req.security_group_ids),
+                               tags=self.resource_tags(req))
+        self._db[id(req)] = handle
+        rec.provisioned["database"] = (f"관리형 DB {handle.identifier} 만드는 중(5~10분 — 그 사이 이미지를 빌드합니다)"
+                                       if handle.created else f"관리형 DB {handle.identifier} 다시 사용")
+
+    def _check_db_secret_access(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
+        exec_arn, _task = self._resolve_role_arns(req, clients)
+        partition, account = exec_arn.split(":")[1], exec_arn.split(":")[4]
+        secret_arn = f"arn:{partition}:secretsmanager:{req.region}:{account}:secret:{aws_rds.secret_name(req.service)}-AbCdEf"
+        try:
+            iam = boto3_client_like(clients, "iam")
+            result = iam.simulate_principal_policy(PolicySourceArn=exec_arn, ActionNames=["secretsmanager:GetSecretValue"],
+                                                   ResourceArns=[secret_arn])
+            decision = str((result.get("EvaluationResults") or [{}])[0].get("EvalDecision", ""))
+        except Exception as exc:  # noqa: BLE001 - 확인 권한이 없으면(학교 계정 등) 막지 않고 알린다
+            rec.provisioned["database_secret_check"] = (f"실행 역할이 DB 접속 정보 비밀을 읽을 수 있는지 확인하지 못했습니다"
+                                                        f"({aws_infra.error_message(exc)}) — 태스크가 시작하지 못하면 아래 권한을 추가하세요.")
+            return
+        if decision == "allowed":
+            return
+        role = exec_arn.rsplit("/", 1)[-1]
+        #: 2.0.33 이 서비스·이 리전의 DB 비밀 하나만 읽게 한다(전에는 모든 리전의 recoder/* 전체였다).
+        #: 정책 이름도 서비스마다 달라야 한다 — 같은 이름으로 put-role-policy 하면 앞 서비스의 권한을 덮어 쓴다.
+        doc = json.dumps({"Version": "2012-10-17", "Statement": [{
+            "Effect": "Allow", "Action": "secretsmanager:GetSecretValue",
+            "Resource": f"arn:{partition}:secretsmanager:{req.region}:{account}:secret:{aws_rds.secret_name(req.service)}-*"}]},
+            separators=(",", ":"))
+        policy_name = ("recoder-db-secret-" + re.sub(r"[^A-Za-z0-9+=,.@_-]", "-", f"{req.service}-{req.region}"))[:128]
+        raise InfraError(
+            "production 관리형 DB 는 접속 정보를 Secrets Manager 비밀로 넣는데, ECS 실행 역할이 그 비밀을 읽을 권한이 없습니다.",
+            detail=f"실행 역할 {exec_arn} 의 secretsmanager:GetSecretValue 판정: {decision or '알 수 없음'}",
+            remedy=("관리자 권한으로 한 번 실행한 뒤 다시 배포하세요(이 서비스의 DB 비밀 하나만 읽게 함): "
+                    f"aws iam put-role-policy --role-name {role} --policy-name {policy_name} --policy-document '{doc}'. "
+                    "또는 staging 으로 배포하면 접속 정보를 환경변수로 넣어 이 권한 없이 동작합니다. 아직 아무것도 만들지 않았습니다."))
+
+    async def _step_database_ready(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
+        """RDS 가 준비되면 접속 정보를 비밀에 쓰고, 태스크에 넣을 값(staging)·참조(production)와 초기화 컨테이너를 정한다."""
+        handle = self._db.get(id(req))
+        runtime = self._runtime.get(id(req))
+        if handle is None or runtime is None:
+            return
+        loop = asyncio.get_running_loop()
+
+        def on_wait(status: str, waited: float) -> None:
+            rec.provisioned["database"] = f"관리형 DB {handle.identifier} 준비 기다리는 중({status}, {int(waited // 60)}분 지남)"
+            self._save_progress()
+
+        def _work() -> dict:
+            db = aws_rds.wait(clients["rds"], handle.identifier, on_wait=on_wait)
+            values = aws_rds.connection(db["Endpoint"], handle.password, runtime.managed_db.get("env_names", []))
+            aws_rds.store_connection(clients["secretsmanager"], handle.secret_arn, values)
+            return values
+
+        values = await loop.run_in_executor(None, _work)
+        production = (req.environment or "").strip().lower() == "production"
+        if production:
+            refs = aws_rds.secret_refs(handle.secret_arn, sorted(values))
+            req.secret_refs = {**refs, **dict(req.secret_refs)}
+            rec.provisioned["database_secret"] = (
+                f"접속 정보는 Secrets Manager({aws_rds.secret_name(req.service)}) 참조로 넣었습니다 — 태스크 실행 역할에 "
+                "이 비밀의 secretsmanager:GetSecretValue 권한이 있어야 태스크가 시작합니다.")
+        else:
+            for name, value in values.items():
+                runtime.env.setdefault(name, value)
+        init_sql = runtime.managed_db.get("init_sql_b64", "")
+        if init_sql:
+            init = aws_rds.init_container(init_sql, plain_url="" if production else values["DATABASE_URL"],
+                                          secret_url_ref=f"{handle.secret_arn}:DATABASE_URL::" if production else "")
+            runtime.sidecars.append(init)
+            runtime.depends_on.append({"containerName": init["name"], "condition": "COMPLETE"})
+        rec.provisioned["database"] = (f"관리형 DB {handle.identifier} 준비됨 — 데이터가 태스크와 상관없이 남습니다"
+                                       + (f", 비어 있으면 처음 한 번 {runtime.managed_db.get('init_name')} 로 테이블을 만듭니다" if init_sql else "")
+                                       + ".")
 
     # ------------------------------------------------------------------
     # 3단계: 빌드 + ECR 업로드 (FR-05-04)
@@ -741,7 +1176,7 @@ class ECSAgent:
             # 약속이 반만 지켜졌다.
             if req.provision:
                 repository_uri = aws_infra.ensure_ecr_repository(
-                    clients["ecr"], repo_name
+                    clients["ecr"], repo_name, tags=self.resource_tags(req)
                 )
                 rec.provisioned["ecr_repo"] = repo_name
             else:
@@ -1047,6 +1482,7 @@ class ECSAgent:
         task_def = self._render_task_definition(
             req, image=image, execution_role_arn=exec_arn, task_role_arn=task_arn,
             runtime=self._runtime.pop(id(req), None),
+            shield_decision=self._shield.get(id(req)),
         )
 
         try:
@@ -1070,11 +1506,49 @@ class ECSAgent:
 
         arn = resp["taskDefinition"]["taskDefinitionArn"]
         logger.info("태스크 정의 등록: %s", arn)
+        aws_infra.tag_created(ecs, "ecs", arn, self.resource_tags(req))
         return arn, prev_arn
 
     # ------------------------------------------------------------------
     # 7단계: 서비스 확보
     # ------------------------------------------------------------------
+
+    async def _step_alerts(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
+        """방패 접속 기록으로 요청·차단·오류 지표와 경보를 만들고, Core 감시 목록에 올린다(2.0.25, best-effort)."""
+        if not req.alerts:
+            rec.provisioned["alerts"] = "꺼짐 — 배포 설정에서 감지 알림을 껐습니다."
+            return
+        shield_on = bool(self._shield.get(id(req)) and self._shield[id(req)].on)
+        try:
+            import ops_alerts  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core import ops_alerts  # type: ignore
+        loop = asyncio.get_running_loop()
+
+        def _work() -> dict:
+            result = (ops_alerts.setup_aws(clients, service=req.service, log_group=self.log_group_name(req),
+                                           email=req.alert_email, tags=self.resource_tags(req))
+                      if shield_on else {"filters": [], "alarms": [], "topic": "", "email": "", "notes": []})
+            ops_alerts.register(region=req.region, cluster=req.cluster, service=req.service,
+                                log_group=self.log_group_name(req), health_path=req.health_check_path,
+                                metrics=bool(result["filters"]))
+            return result
+
+        try:
+            result = await loop.run_in_executor(None, _work)
+        except Exception as exc:  # noqa: BLE001
+            rec.provisioned["alerts"] = f"준비하지 못했습니다 — {aws_infra.error_message(exc)}"
+            return
+        if shield_on and result["filters"]:
+            rec.provisioned["alerts"] = (
+                "켜짐 — 요청 급증·차단 급증·오류 증가·태스크 부족을 1분마다 봅니다(Core 가 켜져 있을 때 VS Code·디스코드 알림)"
+                + (", PC 가 꺼져 있어도 CloudWatch 경보가 메일로 보냅니다" if result["email"] else "")
+                + ".")
+        else:
+            rec.provisioned["alerts"] = ("부분 — 방패가 꺼져 요청 수를 셀 수 없어 태스크 부족(장애)만 봅니다."
+                                         if not shield_on else "부분 — 요청 지표를 만들지 못해 태스크 부족(장애)만 봅니다.")
+        for i, note in enumerate(result["notes"]):
+            rec.provisioned[f"alerts_note_{i + 1}"] = note
 
     async def _step_ensure_service(
         self,
@@ -1099,8 +1573,11 @@ class ECSAgent:
                 desired_count=req.desired_count,
                 assign_public_ip=req.assign_public_ip,
                 target_group_arn=req.target_group_arn,
-                container_name=req.container_name,
+                #: 방패가 켜졌으면 로드 밸런서는 방패 컨테이너(공개 포트)로 보낸다.
+                container_name=(shield_mod.CONTAINER if (self._shield.get(id(req)) and self._shield[id(req)].on)
+                                else req.container_name),
                 container_port=req.container_port,
+                tags=self.resource_tags(req),
             )
 
         result = await loop.run_in_executor(None, _work)
@@ -1131,9 +1608,16 @@ class ECSAgent:
             return
         loop = asyncio.get_running_loop()
 
+        edge = self._edge.get(id(req))
+        cdn = self._cdn.get(id(req))
+
         def _work() -> str:
+            if cdn is not None:
+                return cdn.url
             if req.cloudfront_domain:
                 return "https://" + req.cloudfront_domain
+            if edge is not None:
+                return edge.url
             return aws_infra.wait_for_public_url(
                 clients["ecs"],
                 clients["ec2"],
@@ -1150,13 +1634,16 @@ class ECSAgent:
             # "URL 로 **접속됨**"이므로 실제로 한 번 받아본다. 여기서
             # 확인하지 않으면 "성공"이라고 보고한 주소가 열리지 않는
             # 상황이 그대로 사용자에게 간다.
+            # ALB 주소는 만든 뒤 DNS 가 퍼지고 대상이 healthy 가 되기까지 1~3분 걸린다 — 더 오래 기다린다.
+            attempts = max(6, int(min(req.url_wait_timeout, 300) // 10)) if (edge is not None or cdn is not None) else 6
             reachable, detail = await loop.run_in_executor(
                 None,
                 lambda: _probe_http(
-                    (rec.service_url or "") + req.health_check_path, require_success=True
+                    (rec.service_url or "") + req.health_check_path, require_success=True,
+                    attempts=attempts, interval=10.0 if (edge is not None or cdn is not None) else 5.0,
                 ),
             )
-            if not reachable and not req.cloudfront_domain:
+            if not reachable and not req.cloudfront_domain and edge is None:
                 # 그 사이 태스크가 교체됐을 수 있다(앱이 기동 중 죽으면 ECS 가 새 태스크를 띄우고 IP 가 바뀐다) — 다시 찾아 한 번 더.
                 fresh = await loop.run_in_executor(None, lambda: aws_infra._probe_public_ip(
                     clients["ecs"], clients["ec2"], cluster=req.cluster, service=req.service,
@@ -1167,7 +1654,13 @@ class ECSAgent:
                         rec.service_url = url
                         reachable, detail = await loop.run_in_executor(
                             None, lambda: _probe_http(url + req.health_check_path, require_success=True))
-            if not reachable:
+            if not reachable and cdn is not None and cdn.created:
+                #: 새 CloudFront 배포는 전 세계에 퍼지는 데 5~15분 걸린다 — 실패가 아니다(태스크는 healthy).
+                rec.provisioned["url_warning"] = (
+                    f"HTTPS 주소({rec.service_url})가 아직 퍼지는 중입니다({detail}) — 새 CloudFront 는 5~15분 뒤 열립니다. "
+                    f"그 전에는 로드밸런서도 CloudFront 에서 온 연결만 받아 바로 열 수 없습니다.")
+                logger.info("CloudFront 전파 대기: %s (%s)", rec.service_url, detail)
+            elif not reachable:
                 diagnosis = await self._diagnose_stopped(req, rec, clients)
                 # 상태는 SUCCEEDED 로 둔다 — ECS 기준으로 배포는 실제로
                 # 끝났고 태스크는 healthy 다. FAILED 로 바꾸면 느리게 뜨는
@@ -1596,6 +2089,14 @@ class ECSAgent:
         여기서 AWS 를 부르지 않는 이유: 이 경로에 오는 가장 큰 원인이
         **AWS 를 못 부르는 상황**이다. 그래서 끄는 방법을 알려주기만 한다.
         """
+        if str(rec.provisioned.get("database", "")).startswith("관리형 DB") and "db_cost_warning" not in rec.provisioned:
+            rec.provisioned["db_cost_warning"] = (
+                "관리형 DB(RDS)는 배포가 실패해도 남아 계속 요금이 나옵니다 — 다시 배포하면 그대로 쓰고(데이터 유지), "
+                "그만 쓸 거면 「AWS 리소스 정리」에서 지우세요.")
+        if rec.provisioned.get("load_balancer") and "edge_cost_warning" not in rec.provisioned:
+            rec.provisioned["edge_cost_warning"] = (
+                "로드밸런서(·WAF)는 배포가 실패해도 남아 있어 시간당 요금이 붙습니다 — 다시 배포하면 그대로 다시 쓰고, "
+                "그만 쓸 거면 「AWS 리소스 정리」에서 지우세요.")
         if not rec.provisioned.get("service"):
             return
         if "halt" in rec.provisioned or "cost_warning" in rec.provisioned:
@@ -1639,6 +2140,7 @@ class ECSAgent:
         execution_role_arn: str,
         task_role_arn: str,
         runtime: Optional["ecs_runtime.RuntimePlan"] = None,
+        shield_decision: Optional["shield_mod.ShieldDecision"] = None,
     ) -> dict:
         """FileTemplate 에서 Task Definition dict 생성.
 
@@ -1726,4 +2228,9 @@ class ECSAgent:
                     "startPeriod": 60,
                 }
         # 앱이 시작할 때 요구하는 DB·서명 키·모의 결제(staging) — `ecs_runtime.plan` 이 배포 시작 때 정했다.
-        return ecs_runtime.apply(rendered, req.container_name, runtime, image)
+        rendered = ecs_runtime.apply(rendered, req.container_name, runtime, image)
+        if shield_decision is not None and shield_decision.on:
+            #: 2.0.25 기본 방패 — 공개 포트는 nginx 가, 앱은 다음 포트에서. ALB 뒤면 X-Forwarded-For 로 실제 IP 를 본다.
+            rendered = shield_mod.apply(rendered, req.container_name, shield_decision, health_path=req.health_check_path,
+                                        trust_vpc_proxy=bool(req.target_group_arn), trust_cdn=bool(req.https))
+        return rendered

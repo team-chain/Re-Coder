@@ -115,6 +115,39 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
         "elasticloadbalancing:DescribeTargetGroups": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "elasticloadbalancing:DescribeLoadBalancers": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         "logs:DescribeLogGroups":       "AWS 가 리소스 단위 제한 미지원",
+        # 2.0.25 공격·장애 감지 — 읽기 전용, AWS 가 리소스 단위 제한 미지원
+        "cloudwatch:GetMetricData":     "AWS 가 리소스 단위 제한 미지원(읽기 전용 지표 조회)",
+        "logs:GetQueryResults":         "AWS 가 리소스 단위 제한 미지원(쿼리 ID 로만 읽는 결과)",
+        # 2.0.26 대규모 방패·리소스 정리 — 읽기 전용 목록, 리전 조건으로 좁혔다
+        "elasticloadbalancing:DescribeListeners": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "acm:RequestCertificate":       "AWS 가 리소스 단위 제한 미지원 — us-east-1·recoder:managed 요청 태그 조건으로 좁혔다(2.0.32)",
+        "ec2:DescribeInternetGateways":  "AWS 가 리소스 단위 제한 미지원",
+        "ec2:DescribeAccountAttributes": "AWS 가 리소스 단위 제한 미지원",
+        "ec2:DescribeAddresses":         "AWS 가 리소스 단위 제한 미지원",
+        "elasticloadbalancing:DescribeRules": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다(2.0.31 원본 잠금)",
+        "elasticloadbalancing:DescribeTags": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "wafv2:ListWebACLs":            "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "wafv2:GetWebACLForResource":   "읽기 전용 확인 — 리전 조건으로 좁혔다",
+        "ecs:ListClusters":             "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "ecs:ListTaskDefinitions":      "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "ecs:ListServices":             "AWS 가 리소스 단위 제한 미지원 — ecs:cluster 조건으로 좁혔다",
+        "ecs:DeregisterTaskDefinition": "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다(해제는 요금·실행에 영향 없음)",
+        "cloudwatch:DescribeAlarms":    "읽기 전용 목록 — 리전 조건으로 좁혔다",
+        "sns:ListTopics":               "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
+        "ecr:DescribeRepositories":     "이름 없이 부르는 목록 조회 — 리전 조건으로 좁혔다(정리 후보를 이름으로 거른다)",
+        "s3:ListAllMyBuckets":          "계정 단위 목록 — 리소스가 없다",
+        # 2.0.27 HTTPS 주소·관리형 DB
+        "cloudfront:CreateDistribution": "만들기는 리소스 단위 제한 미지원 — aws:RequestTag 조건으로 좁혔다",
+        "cloudfront:TagResource":       "만들 때 붙이는 태그 — aws:RequestTag 조건으로 좁혔다",
+        "cloudfront:ListDistributions": "AWS 가 리소스 단위 제한 미지원(읽기 전용)",
+        "ec2:DescribeManagedPrefixLists": "AWS 가 리소스 단위 제한 미지원(읽기 전용)",
+        "acm:ListCertificates":         "AWS 가 리소스 단위 제한 미지원(읽기 전용)",
+        "route53:ListHostedZonesByName": "AWS 가 리소스 단위 제한 미지원(읽기 전용)",
+        "rds:DescribeDBInstances":      "목록 조회 — 리전 조건으로 좁혔다",
+        "rds:DescribeDBSubnetGroups":   "목록 조회 — 리전 조건으로 좁혔다",
+        "rds:DescribeDBParameterGroups": "목록 조회 — 리전 조건으로 좁혔다",
+        "rds:DescribeDBEngineVersions": "버전 조회 — 리전 조건으로 좁혔다",
+        "secretsmanager:ListSecrets":   "AWS 가 리소스 단위 제한 미지원 — 리전 조건으로 좁혔다",
         # FR-04-01 — 연결하는 IAM 사용자·정책 이름을 **정책을 만드는 시점에는
         # 알 수 없다.** 읽기 전용 조회라 범위를 좁힐 근거도 없다.
         "iam:SimulatePrincipalPolicy":  "IAM 시뮬레이션 API 가 리소스 단위 제한 미지원",
@@ -229,6 +262,36 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "ec2:DescribeInternetGateways":
+        "aws_edge.ensure_edge 의 create_load_balancer — ELB 가 인터넷용 ALB 를 만들 때 호출자 권한으로 VPC 의 인터넷 "
+        "게이트웨이를 확인한다(우리 코드의 호출이 아니라 기록에 안 보인다, ElasticLoadBalancingFullAccess 와 같은 읽기 권한)",
+    "ec2:DescribeAccountAttributes":
+        "같은 이유 — create_load_balancer 때 ELB 가 계정 속성(EC2-VPC)을 확인한다",
+    "ec2:DescribeAddresses":
+        "같은 이유 — create_load_balancer/set_subnets 때 ELB 가 주소 할당을 확인한다",
+    "cloudfront:TagResource":
+        "aws_cdn.ensure_distribution 의 create_distribution_with_tags — 태그는 TagResource 로도 인가되지만 호출은 하나뿐",
+    "acm:AddTagsToCertificate":
+        "aws_cdn.ensure_certificate 의 request_certificate(Tags=…) — 같은 이유",
+    "rds:AddTagsToResource":
+        "aws_rds.start 의 create_db_instance/create_db_subnet_group/create_db_parameter_group(Tags=…) — 같은 이유",
+    "rds:CreateDBSnapshot":
+        "aws_rds.delete_instance 의 delete_db_instance(FinalDBSnapshotIdentifier=…) — 최종 스냅숏을 만드는 권한을 함께 본다",
+    "secretsmanager:TagResource":
+        "aws_rds._secret 의 create_secret(Tags=…) — 같은 이유",
+    "elasticloadbalancing:AddTags":
+        "aws_edge.ensure_edge 가 create_load_balancer/create_target_group/create_listener(Tags=…) 로 만들 때 태그를 함께 "
+        "붙인다 — AWS 는 생성 요청의 Tags 를 AddTags 로도 인가하지만 호출은 Create* 하나뿐이라 기록에 안 보인다",
+    "wafv2:TagResource":
+        "같은 이유 — wafv2.create_web_acl(Tags=…) 의 태그는 TagResource 로 인가된다",
+    "elasticloadbalancing:SetWebAcl":
+        "wafv2.associate_web_acl/disassociate_web_acl 로 ALB 에 웹 ACL 을 붙이고 뗄 때 AWS 가 ALB 쪽 권한으로 함께 "
+        "확인한다 — ELB API 호출은 없어 기록에 안 보인다",
+    "cloudwatch:TagResource":
+        "ops_alerts.setup_aws 가 put_metric_alarm(Tags=…) 로 만들 때 태그를 함께 붙인다 — AWS 는 생성 요청의 Tags 를 "
+        "TagResource 로도 인가하지만 호출은 PutMetricAlarm 하나뿐이라 기록에 안 보인다",
+    "sns:TagResource":
+        "같은 이유 — sns.create_topic(Tags=…) 의 태그는 TagResource 로 인가된다",
     "logs:GetLogEvents":
         "aws_infra.diagnose_stopped_tasks 의 `logs.get_log_events` — 클라이언트를 함수 인자로 받아 정적 스캔에 "
         "안 잡힌다. 앱이 기동 중 죽을 때 로그 끝부분을 배포 결과에 보여 주는 선택 권한(없으면 안내만)",
@@ -1250,8 +1313,8 @@ def test_prefix_wildcard_is_still_allowed_for_defaults():
 
 @pytest.mark.parametrize("arn,expected", [
     # 실제 러너랩 세션에서 확인한 ARN 모양
-    ("arn:aws:sts::413113423592:assumed-role/voclabs/user5057797=a@b.com", True),
-    ("arn:aws:iam::413113423592:role/LabRole", True),
+    ("arn:aws:sts::210987654321:assumed-role/voclabs/user5057797=a@b.com", True),
+    ("arn:aws:iam::210987654321:role/LabRole", True),
     ("arn:aws:iam::111122223333:user/recoder-deploy", False),
     ("arn:aws:iam::111122223333:root", False),
     ("", False),
@@ -1906,6 +1969,9 @@ def runtime_actions() -> set[str]:
 
     recorder = ac.Recorder()
     recorder.install()
+    from tests.aws_pattern_guard import PatternGuard
+    guard = PatternGuard().install()
+    _PATTERN_PROBLEMS.clear()
     try:
         with mock_aws():
             region = "us-east-1"
@@ -1914,15 +1980,17 @@ def runtime_actions() -> set[str]:
             logs = boto3.client("logs", region_name=region)
             ecr = boto3.client("ecr", region_name=region)
 
-            aws_infra.ensure_cluster(ecs, "recoder-probe")
-            aws_infra.ensure_cluster(ecs, "recoder-probe")          # 재사용 경로
-            aws_infra.ensure_log_group(logs, "/ecs/recoder-probe")
-            aws_infra.ensure_ecr_repository(ecr, "recoder-probe")
+            # 2.0.23 — 새로 만든 리소스에는 recoder:managed 태그를 붙인다(재사용 경로는 안 붙임)
+            tags = aws_infra.recoder_tags("probe", "recoder-probe-svc")
+            aws_infra.ensure_cluster(ecs, "recoder-probe", tags=tags)
+            aws_infra.ensure_cluster(ecs, "recoder-probe", tags=tags)          # 재사용 경로
+            aws_infra.ensure_log_group(logs, "/ecs/recoder-probe", tags=tags)
+            aws_infra.ensure_ecr_repository(ecr, "recoder-probe", tags=tags)
             aws_infra.ensure_ecr_repository(ecr, "recoder-probe")   # 재사용 경로
 
             net = aws_infra.discover_default_network(ec2)
             sg = aws_infra.ensure_security_group(
-                ec2, vpc_id=net.vpc_id, name="recoder-probe-sg", port=8000
+                ec2, vpc_id=net.vpc_id, name="recoder-probe-sg", port=8000, tags=tags
             )
             # 두 번째 호출은 중복 경로 → DescribeSecurityGroups 가 나간다
             aws_infra.ensure_security_group(
@@ -1940,11 +2008,12 @@ def runtime_actions() -> set[str]:
                      "memory": 512, "cpu": 256}
                 ],
             )["taskDefinition"]["taskDefinitionArn"]
+            aws_infra.tag_created(ecs, "ecs", task_def, tags)   # ecs_agent 가 등록 직후 하는 일
 
             aws_infra.ensure_service(
                 ecs, cluster="recoder-probe", service="recoder-probe-svc",
                 task_definition=task_def, subnet_ids=net.subnet_ids,
-                security_group_ids=[sg], desired_count=1,
+                security_group_ids=[sg], desired_count=1, tags=tags,
             )
             aws_infra.ensure_service(                                # 갱신 경로
                 ecs, cluster="recoder-probe", service="recoder-probe-svc",
@@ -2030,10 +2099,104 @@ def runtime_actions() -> set[str]:
                 _RunningEcs(), ec2,
                 cluster="recoder-probe", service="recoder-probe-svc",
             )
+            # 2.0.25 공격·장애 감지 알림 — 배포 직후 지표 필터·SNS·경보를 만든다(클라이언트를 인자로 받아 정적 스캔에 안 보인다)
+            import ops_alerts
+            ops_alerts.setup_aws(
+                {"logs": logs, "cloudwatch": boto3.client("cloudwatch", region_name=region),
+                 "sns": boto3.client("sns", region_name=region)},
+                service="recoder-probe-svc", log_group="/ecs/recoder-probe", email="probe@example.com",
+                tags={"recoder:managed": "true"},
+            )
+            # 2.0.26 대규모 방패(ALB + WAF) — 만들기 · 다시(재사용·한도 갱신) · WAF 끄기(떼고 지움)
+            import aws_edge
+            elbv2 = boto3.client("elbv2", region_name=region)
+            wafv2 = boto3.client("wafv2", region_name=region)
+            edge_args = dict(service="recoder-probe-svc", vpc_id=net.vpc_id, subnet_ids=list(net.subnet_ids),
+                             app_port=8000, tags=tags, sleep=lambda _s: None)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, rate_limit=500, health_path="/ready", **edge_args)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, waf=False, **edge_args)
+            edge = aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)
+            # 리스너가 다른 대상 그룹을 가리키는 경우(대상 그룹을 손으로 지웠다 다시 만든 등) — 준비는 기록 밖에서.
+            recorder.uninstall()
+            try:
+                setup_elb = boto3.client("elbv2", region_name=region)
+                other = setup_elb.create_target_group(Name="recoder-probe-other", Protocol="HTTP", Port=8000,
+                                                      VpcId=net.vpc_id, TargetType="ip")["TargetGroups"][0]
+                setup_elb.modify_listener(ListenerArn=edge.listener_arn,
+                                          DefaultActions=[{"Type": "forward", "TargetGroupArn": other["TargetGroupArn"]}])
+                spare = setup_elb.create_listener(LoadBalancerArn=edge.alb_arn, Port=8080, Protocol="HTTP",
+                                                  DefaultActions=[{"Type": "forward",
+                                                                   "TargetGroupArn": other["TargetGroupArn"]}])
+            finally:
+                recorder.install()
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)          # ModifyListener 경로
+            aws_edge.rollback(elbv2, wafv2, [("listener", spare["Listeners"][0]["ListenerArn"])])  # 실패 되돌리기 경로
+            # 2.0.26 AWS 리소스 정리 — 목록 → 중지 → 전부 삭제(태그 다시 확인)
+            import aws_cleanup
+            cleanup_clients = aws_cleanup.make_clients(boto3.session.Session(region_name=region))
+            cleanup_clients["s3"].create_bucket(Bucket="recoder-probe-site")
+            cleanup_clients["s3"].put_bucket_tagging(Bucket="recoder-probe-site",
+                                                     Tagging={"TagSet": [{"Key": "recoder:managed", "Value": "true"}]})
+            cleanup_clients["s3"].put_object(Bucket="recoder-probe-site", Key="index.html", Body=b"x")
+            # 2.0.27 HTTPS 주소(CloudFront + 내 도메인)와 관리형 DB(RDS) — 만들기·다시·정리
+            import aws_cdn
+            import aws_rds
+            edge_cdn = aws_edge.ensure_edge(ec2, elbv2, wafv2, cdn=True, **edge_args)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)                 # 다시 공개로(SetSecurityGroups)
+            r53 = boto3.client("route53", region_name=region)
+            recorder.uninstall()
+            try:
+                boto3.client("route53").create_hosted_zone(Name="example.com", CallerReference="probe")
+            finally:
+                recorder.install()
+            cert = aws_cdn.ensure_certificate(cleanup_clients["acm_global"], r53, "shop.example.com", tags=tags,
+                                              sleep=lambda _s: None)
+            # 2.0.31 WAF 는 CloudFront 에(전역 범위) — 붙인 뒤 ALB 의 지역 웹 ACL 을 뗀다
+            global_acl, _ = aws_edge.ensure_web_acl(cleanup_clients["wafv2_global"], edge_cdn.name, rate_limit=2000,
+                                                    window=300, tags=tags, scope=aws_edge.CLOUDFRONT)
+            cdn = aws_cdn.ensure_distribution(cleanup_clients["cloudfront"], name=edge_cdn.name,
+                                              origin=edge_cdn.dns_name, tags=tags, web_acl_id=global_acl)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, cdn=True, **edge_args)
+            # 2.0.31 원본 잠금 — 만들기 · 값 바꾸기 · 잠긴 채 재배포 · HTTPS 끄면 풀기(아래 공개 재배포)
+            aws_edge.lock_origin(elbv2, edge_cdn.listener_arn, edge_cdn.target_group_arn, cdn.origin_secret)
+            aws_edge.lock_origin(elbv2, edge_cdn.listener_arn, edge_cdn.target_group_arn, "rotated-secret")
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, cdn=True, **edge_args)
+            aws_edge.ensure_edge(ec2, elbv2, wafv2, **edge_args)                 # HTTPS 끔 → 잠금 풀기(DeleteRule)
+            aws_cdn.ensure_distribution(cleanup_clients["cloudfront"], name=edge_cdn.name, origin="other.example.com",
+                                        tags=tags, alias="shop.example.com", certificate_arn=cert.arn)
+            aws_cdn.point_domain(r53, cert.zone_id or "Z1", "shop.example.com", cdn.domain)
+            db = aws_rds.start(cleanup_clients["rds"], ec2, cleanup_clients["secretsmanager"],
+                               service="recoder-probe-svc", vpc_id=net.vpc_id, task_security_groups=[sg], tags=tags)
+            recorder.uninstall()
+            try:
+                boto3.client("rds", region_name=region).stop_db_instance(DBInstanceIdentifier=db.identifier)
+            finally:
+                recorder.install()
+            ready = aws_rds.wait(cleanup_clients["rds"], db.identifier, sleep=lambda _s: None)   # 멈춘 DB 켜기 경로
+            aws_rds.store_connection(cleanup_clients["secretsmanager"], db.secret_arn,
+                                     aws_rds.connection(ready["Endpoint"], db.password, ["DATABASE_URL"]))
+            aws_rds.start(cleanup_clients["rds"], ec2, cleanup_clients["secretsmanager"],    # 다시 사용 경로
+                          service="recoder-probe-svc", vpc_id=net.vpc_id, task_security_groups=[sg], tags=tags)
+            found = aws_cleanup.plan(cleanup_clients, region=region)
+            assert not found["gaps"], found["gaps"]
+            aws_cleanup.stop(cleanup_clients, region=region, cluster="recoder-probe", service="recoder-probe-svc")
+            ids = [i["id"] for g in found["groups"] for i in g["items"]]
+            aws_cleanup.delete(cleanup_clients, ids, region=region, approved=True, sleep=lambda _s: None)
+            # 2.0.31 정리로 삭제 예정이 된 DB 접속 정보 — 다시 배포하면 되살린다
+            aws_rds._secret(cleanup_clients["secretsmanager"], aws_rds.secret_name("recoder-probe-svc"), tags, create=True)
+            # CloudFront 는 끈 뒤(배포 완료) 다시 정리해야 지워진다
+            again = aws_cleanup.plan(cleanup_clients, region=region)
+            aws_cleanup.delete(cleanup_clients, [i["id"] for g in again["groups"] for i in g["items"]],
+                               region=region, approved=True, sleep=lambda _s: None)
         return recorder.actions()
     finally:
         recorder.uninstall()
+        guard.uninstall()
+        _PATTERN_PROBLEMS.extend(guard.found)
 
+
+_PATTERN_PROBLEMS: list[str] = []
 
 #: 런타임 기록이 **반드시** 담고 있어야 하는 액션.
 #: 이게 없으면 기록기가 고장 났거나 픽스처가 배포 경로를 안 도는 것인데,
@@ -2056,7 +2219,59 @@ RUNTIME_EVIDENCE_FLOOR = {
     "ec2:DescribeNetworkInterfaces",
     "ec2:CreateSecurityGroup",
     "ec2:AuthorizeSecurityGroupIngress",
+    "ecs:TagResource",
+    "ecr:TagResource",
+    "logs:TagResource",
+    "ec2:CreateTags",
+    "logs:PutMetricFilter",
+    "sns:CreateTopic",
+    "sns:Subscribe",
+    "cloudwatch:PutMetricAlarm",
+    # 2.0.26 대규모 방패
+    "elasticloadbalancing:CreateLoadBalancer",
+    "elasticloadbalancing:CreateTargetGroup",
+    "elasticloadbalancing:CreateListener",
+    "wafv2:CreateWebACL",
+    "wafv2:AssociateWebACL",
+    # 2.0.26 리소스 정리
+    "ecs:DeleteService",
+    "ecs:DeleteCluster",
+    "ecr:DeleteRepository",
+    "logs:DeleteLogGroup",
+    "ec2:DeleteSecurityGroup",
+    "elasticloadbalancing:DeleteLoadBalancer",
+    "wafv2:DeleteWebACL",
+    "cloudwatch:DeleteAlarms",
+    "sns:DeleteTopic",
+    "s3:DeleteBucket",
+    # 2.0.27 HTTPS 주소·관리형 DB
+    "cloudfront:CreateDistribution",
+    "cloudfront:UpdateDistribution",
+    "cloudfront:DeleteDistribution",
+    "acm:RequestCertificate",
+    "route53:ChangeResourceRecordSets",
+    "rds:CreateDBInstance",
+    "rds:DeleteDBInstance",
+    "secretsmanager:CreateSecret",
+    "secretsmanager:PutSecretValue",
+    "elasticloadbalancing:SetSecurityGroups",
+    # 2.0.31 CloudFront WAF · 원본 잠금 · 비밀 되살리기 · 도메인 레코드 확인
+    "elasticloadbalancing:CreateRule",
+    "elasticloadbalancing:ModifyRule",
+    "elasticloadbalancing:DeleteRule",
+    "elasticloadbalancing:DescribeRules",
+    "secretsmanager:DescribeSecret",
+    "secretsmanager:RestoreSecret",
+    "route53:ListResourceRecordSets",
+    # 2.0.32
+    "rds:StartDBInstance",
 }
+
+
+def test_runtime_calls_use_values_aws_accepts(runtime_actions):
+    """2.0.32 — 배포·정리 경로의 모든 요청 값이 AWS 서비스 규칙(pattern·길이·허용 값)에 맞는다(moto 는 검사하지 않음)."""
+    assert runtime_actions
+    assert not _PATTERN_PROBLEMS, "\n".join(_PATTERN_PROBLEMS[:20])
 
 
 def test_runtime_recorder_actually_sees_the_deploy_path(runtime_actions):

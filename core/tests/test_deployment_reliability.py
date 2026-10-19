@@ -46,7 +46,7 @@ from schemas import ActionType, ApprovalLevel, DeploymentPlan, DeployMethod
 
 @pytest.mark.parametrize('fields,ports', [({'host_port': 4567}, {'4567':'3000'}), ({'container_port': 5678}, {'3000':'5678'})])
 def test_partial_port_override_is_preserved(tmp_path, fields, ports):
-    (tmp_path/'Dockerfile').write_text('FROM node:22\nEXPOSE 3000\n')
+    (tmp_path/'Dockerfile').write_text('FROM node:22\nEXPOSE 3000\n', encoding="utf-8")
     req=d.DeployPlanRequest(workspace_path=str(tmp_path),project_id='board',env={'MODE':'test'},health_check_path='/ready',enable_continuous_verification=False,**fields)
     plan=asyncio.run(DeployAgent().create_plan(req))
     assert plan.ports==ports
@@ -68,10 +68,10 @@ def test_unicode_project_names_work_and_do_not_collide():
 
 
 def test_local_plan_detects_real_next_health_route_and_preserves_explicit_path(tmp_path):
-    (tmp_path/'Dockerfile').write_text('FROM node:22\nEXPOSE 3000\n')
+    (tmp_path/'Dockerfile').write_text('FROM node:22\nEXPOSE 3000\n', encoding="utf-8")
     source=tmp_path/'app/api/health/route.ts'
     source.parent.mkdir(parents=True)
-    source.write_text('export function GET() { return Response.json({ok: true}); }')
+    source.write_text('export function GET() { return Response.json({ok: true}); }', encoding="utf-8")
     for options,expected in [({},'/api/health'),({'health_check_path':'/health'},'/health'),({'health_check_path':'/ready'},'/ready')]:
         request=d.DeployPlanRequest(workspace_path=str(tmp_path),**options)
         plan=asyncio.run(DeployAgent().create_plan(request))
@@ -120,9 +120,9 @@ def test_approved_run_uses_scanned_image_all_ports_and_environment(monkeypatch):
     result=asyncio.run(d.execute_deployment(d.ExecuteRequest(plan_id=plan.plan_id,approved=True)))
     assert result['status']=='success' and result['health_ok'] is True
     assert events[0]==('scan',image_id)
-    command=events[1][1]
+    command=next(cmd for kind,cmd in events if kind=='run' and cmd[:2]==['docker','run'])
     assert command[-1]==image_id and 'MODE=test' in command
-    assert '4567:3000' in command and '4568:3001' in command
+    assert '127.0.0.1:4567:3000' in command and '127.0.0.1:4568:3001' in command  # 2.0.32 이 PC 에서만
     assert not d._plans_pending_image_scan and not d._plan_workspaces
     assert result['continuous_verification']=={'enabled':False,'started':False}
 

@@ -642,9 +642,12 @@ def apply_patch(proposal: PatchProposal) -> dict:
         # diff 적용
         try:
             original_text = fp.read_text(encoding='utf-8') if fp.exists() else ""
+            #: 2.0.32 — 원래 줄바꿈(CRLF/LF)을 지킨다. 기본 write_text 는 Windows 에서 LF 를 CRLF 로 바꿔, LF 로 된 셸 스크립트를
+            #: 컨테이너에서 못 돌게 하고(…sh^M), 바꾸지 않은 줄까지 git 변경으로 보이게 했다.
+            crlf = fp.exists() and b"\r\n" in fp.read_bytes()
             patched_text = _apply_unified_diff(original_text, patch.unified_diff)
             fp.parent.mkdir(parents=True, exist_ok=True)
-            fp.write_text(patched_text, encoding='utf-8')
+            fp.write_text(patched_text.replace("\n", "\r\n") if crlf else patched_text, encoding='utf-8', newline="")
             validation = _validate_changed_file(fp)
             if backup_path is not None:
                 backup_records.append({
@@ -878,15 +881,16 @@ def _decisions_prompt_block(decisions: list[NormalizedDecision]) -> str:
     )
 
 
-def _scrub_context(open_file, prior_files, context_files, secrets: dict | None = None):
-    """열린 파일·참고 파일의 비밀(.env 본문, 키 문자열)을 AI 로 보내지 않는다."""
+def _scrub_context(open_file, prior_files, context_files, secrets: dict | None = None, removed: list | None = None):
+    """열린 파일·참고 파일의 비밀(.env 본문, 키 문자열)을 AI 로 보내지 않는다.
+    2.0.29: 파일 속 숨은 지시(이전 지시 무시·비밀값 외부 전송 등)도 빼고, removed 에 모은다."""
     try:
         from context_gate import scrub_file_entry
     except ImportError:  # pragma: no cover
         from core.context_gate import scrub_file_entry  # type: ignore
-    return (scrub_file_entry(open_file, secrets) if open_file else open_file,
-            [scrub_file_entry(f, secrets) for f in prior_files] if prior_files else prior_files,
-            [scrub_file_entry(f, secrets) for f in context_files] if context_files else context_files)
+    return (scrub_file_entry(open_file, secrets, removed) if open_file else open_file,
+            [scrub_file_entry(f, secrets, removed) for f in prior_files] if prior_files else prior_files,
+            [scrub_file_entry(f, secrets, removed) for f in context_files] if context_files else context_files)
 
 
 def _restore_secrets_in_ops(ops: list[dict], secrets: dict) -> None:
@@ -904,6 +908,29 @@ def _restore_secrets_in_ops(ops: list[dict], secrets: dict) -> None:
         #: 문서(README·.env.example)에는 원래 값을 되돌려 넣지 않는다 — 자리표시가 맞다(키가 문서로 새지 않게).
         if isinstance(op.get("content"), str) and not is_doc_like(str(op.get("file") or "")):
             op["content"] = restore_code_secrets(op["content"], secrets)
+
+
+def _restore_neutralized_in_ops(ops: list[dict], guarded: list[dict]) -> None:
+    """2.0.32 — 지시형이라 빼고 보낸 줄이 결과 파일에 표시로 남으면 원래 줄로 되돌린다(파일마다 순서대로)."""
+    if not guarded:
+        return
+    try:
+        from context_gate import restore_neutralized
+    except ImportError:  # pragma: no cover
+        from core.context_gate import restore_neutralized  # type: ignore
+    def _key(name: object) -> str:
+        #: 2.0.33 lstrip("./") 는 글자를 지워 ".env" 와 "env" 를 같은 파일로 봤다 — 앞의 "./" 만 뗀다.
+        text = str(name or "").replace("\\", "/")
+        while text.startswith("./"):
+            text = text[2:]
+        return text
+
+    by_file: dict[str, list[str]] = {}
+    for g in guarded:
+        by_file.setdefault(_key(g.get("file")), []).append(str(g.get("raw", "")))
+    for op in ops:
+        if isinstance(op.get("content"), str):
+            op["content"] = restore_neutralized(op["content"], by_file.get(_key(op.get("file")), []))
 
 
 def _build_code_prompt(
@@ -936,6 +963,12 @@ def _build_code_prompt(
             ctx_block += f"\n[참고 파일] {cf.get('path','?')}\n```\n{body}\n```\n"
     if ctx_block:
         ctx_block = "\n사용자가 첨부한 참고 파일(이 내용을 활용/일관성 유지):\n" + ctx_block
+    if ctx_block or prior_block or (open_file and (open_file.get("content") or "").strip()):
+        try:
+            from context_gate import DATA_NOTICE
+        except ImportError:  # pragma: no cover
+            from core.context_gate import DATA_NOTICE  # type: ignore
+        ctx_block = f"\n{DATA_NOTICE}\n" + ctx_block
 
     folder_block = ""
     if (target_folder or "").strip():
@@ -1481,7 +1514,12 @@ def _full_design_decisions(instruction: str, existing: list[str], open_file, con
 
     chunks = [topics[i:i + 3] for i in range(0, len(topics), 3)]
     with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as pool:
-        results = list(pool.map(cards, chunks))
+        #: 2.0.36 — 작업 스레드도 같은 공급자 고정·실행 표시를 보게 문맥을 넘긴다.
+        try:
+            from llm.task_tier import bind as _bind
+        except ImportError:  # pragma: no cover
+            from core.llm.task_tier import bind as _bind  # type: ignore
+        results = list(pool.map(_bind(cards), chunks))
     decisions = [d for part in results for d in part]
     return decisions or None
 
@@ -2457,7 +2495,9 @@ def generate_code(
     print(f"[code_agent] 코드 생성 시작 | 세션: {session_id} | 요청: {instruction[:80]!r} | 기존파일 {len(existing)}개")
     #: 열린 파일·참고 파일의 비밀은 AI 로 보내지 않는다. 자리표시로 보낸 값은 결과에서 원래 값으로 되돌린다.
     context_secrets: dict = {}
-    open_file, prior_files, context_files = _scrub_context(open_file, prior_files, context_files, context_secrets)
+    #: 2.0.29 — 참고 파일에서 뺀 지시형 줄(결과에 알린다).
+    guarded: list[dict] = []
+    open_file, prior_files, context_files = _scrub_context(open_file, prior_files, context_files, context_secrets, guarded)
 
     # FR-02-05 — 승인 게이트. 라우트가 아니라 여기(생성 함수)에서 막는다.
     # 라우트에서만 막으면 server.py 의 구(舊) /api/code/generate 처럼 decisions 를
@@ -2665,6 +2705,27 @@ def generate_code(
                 found = found + unused_files.route_issues(unused_files.find(candidate_ops))
             except Exception as exc:  # noqa: BLE001 — 점검 실패가 생성을 막지 않는다
                 print(f"[code_agent] 미등록 API 점검 생략: {exc}", flush=True)
+            #: 2.0.29 Dockerfile 안전 검사 — 위험한 RUN 은 검증 빌드 전에 고칠 오류로.
+            try:
+                try:
+                    import dockerfile_guard
+                except ImportError:  # pragma: no cover
+                    from core import dockerfile_guard  # type: ignore
+                for op in candidate_ops:
+                    if op.get("action") != "delete" and posixpath.basename(str(op.get("file") or "")).lower().startswith("dockerfile"):
+                        found = found + dockerfile_guard.issues(str(op.get("file")), str(op.get("content") or ""))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[code_agent] Dockerfile 안전 검사 생략: {exc}", flush=True)
+            #: 2.0.28 AI 코드 보안 — 정확한 규칙의 심각한 발견(사용자 입력 SQL 연결·JWT 비밀값 하드코딩·CORS 전체 허용·평문 비밀번호)만
+            #: 고칠 오류로 넣는다. 나머지는 결과의 보안 점수에 경고로만.
+            try:
+                try:
+                    import code_security
+                except ImportError:  # pragma: no cover
+                    from core import code_security  # type: ignore
+                found = found + code_security.issues(code_security.ops_files(candidate_ops), errors_only=True)
+            except Exception as exc:  # noqa: BLE001 — 점검 실패가 생성을 막지 않는다
+                print(f"[code_agent] 보안 점검 생략: {exc}", flush=True)
         return found
 
     consistency = _issues_for(ops_out)
@@ -2971,6 +3032,17 @@ def generate_code(
         from code_removals import annotate_removals
     except ImportError:
         from core.code_removals import annotate_removals
+    #: 2.0.33 — 어느 생성 경로(팀 모드·이어 받기 포함)든 마지막에 같은 경로 규칙으로 한 번 더 거른다(.git·.vscode·밖으로 나감).
+    try:
+        from code_output import safe_rel_path as _safe_path
+    except ImportError:  # pragma: no cover
+        from core.code_output import safe_rel_path as _safe_path  # type: ignore
+    _unsafe = [op.get("file") for op in ops_out if isinstance(op, dict) and _safe_path(op.get("file")) is None]
+    if _unsafe:
+        print(f"[code_agent] 쓰지 않는 경로를 뺐습니다: {_unsafe[:5]}")
+        ops_out = [op for op in ops_out if isinstance(op, dict) and _safe_path(op.get("file")) is not None]
+    #: 지시형이라 뺀 줄을 먼저 되돌리고(그 줄에도 자리표시된 비밀이 있을 수 있다) 그다음 비밀을 되돌린다.
+    _restore_neutralized_in_ops(ops_out, guarded)
     _restore_secrets_in_ops(ops_out, context_secrets)
     annotate_removals(ops_out, root, target_folder)
 
@@ -2982,6 +3054,24 @@ def generate_code(
         consistency = _server_missing_issues(ops_out) + consistency
     if consistency:
         summary += "\n\n확인 필요: " + " / ".join(i["message"] for i in consistency[:3])
+    if guarded:
+        summary += (f"\n\n참고 파일에서 AI 에게 하는 지시처럼 보이는 줄 {len(guarded)}개를 빼고 보냈습니다"
+                    f"({', '.join(dict.fromkeys(g['file'] for g in guarded))[:120]}) — 파일에 숨은 지시가 있는지 확인하세요.")
+    security = None
+    if not existing and not foundation:
+        try:
+            try:
+                import code_security
+            except ImportError:  # pragma: no cover
+                from core import code_security  # type: ignore
+            security = code_security.report(code_security.ops_files(ops_out))
+            if security.get("score") is not None:
+                warn = len(security.get("findings") or [])
+                summary += f"\n\nAI 코드 보안 점검 {security['score']}점" + (f" — 확인할 곳 {warn}곳" if warn else " — 발견 없음")
+                _report({"step": "security", "message": f"AI 코드 보안 점검 {security['score']}점"
+                                                        + (f" · 확인할 곳 {warn}곳" if warn else "")})
+        except Exception as exc:  # noqa: BLE001
+            print(f"[code_agent] 보안 점수 생략: {exc}", flush=True)
     result = {
         "summary": summary,
         "consistency_issues": consistency,
@@ -2991,6 +3081,10 @@ def generate_code(
         "unused_files": [{"file": u["file"], "consumers": u.get("consumers", [])} for u in unused
                          if any(op.get("file") == u["file"] for op in ops_out)],
         "verification": {k: v for k, v in verification.items() if k != "log"},
+        #: 2.0.28 AI 코드 보안 점수(규칙별 통과·발견 위치·고치는 법)
+        "security": security,
+        #: 2.0.29 참고 파일에서 AI 에게 보내지 않은 지시형 줄
+        "prompt_guard": [{k: v for k, v in g.items() if k != "raw"} for g in guarded[:20]],
         "foundation": foundation or None,
         "ops": ops_out,
         "model": getattr(llm_resp, "model_used", ""),
@@ -2999,9 +3093,9 @@ def generate_code(
     if adr_ops:
         result["adr"] = [op["file"] for op in adr_ops]
         print(f"[code_agent] ADR {len(adr_ops)}건 영속화 예정: {result['adr']}")
-    if split_mode:
-        result["job_id"] = job_id
-        #: 결과를 체크포인트 자리에 남겨 둔다 — 확장이 받기 전에 연결이 끊겨도 같은 작업 ID 로 바로 받는다.
-        _jobs.save(job_id, {"fingerprint": fp, "result": result})
+    result["job_id"] = job_id
+    #: 결과를 체크포인트 자리에 남겨 둔다 — 확장이 받기 전에 연결이 끊겨도 같은 작업 ID 로 바로 받는다.
+    #: 2.0.33 분할 생성만이 아니라 모든 생성 결과를 남긴다(한 번에 만든 결과도 끊기면 다시 만들어야 했다).
+    _jobs.save(job_id, {"fingerprint": fp, "result": result})
     print(f"[code_agent] 코드 생성 완료 | ops {len(ops_out)}개 | model={result['model']}")
     return result

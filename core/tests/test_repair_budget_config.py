@@ -80,10 +80,10 @@ def test_fixture_success_is_separate_from_production_approval():
 def test_approval_rejects_another_active_workspace(tmp_path):
     from grounded_repair.store import RepairStore
     from grounded_repair.workspace import manifest
-    root=tmp_path/'one';root.mkdir();(root/'app.js').write_text('old')
+    root=tmp_path/'one';root.mkdir();(root/'app.js').write_text('old', encoding="utf-8")
     store=RepairStore(tmp_path/'db');store.save({'id':'r','status':'ready_for_approval','workspace':str(root),'manifest':manifest(root),'edits':{'app.js':'new'}})
     with pytest.raises(ValueError,match='different workspace'):store.approve('r',str(tmp_path/'two'))
-    assert (root/'app.js').read_text()=='old'
+    assert (root/'app.js').read_text(encoding="utf-8")=='old'
 
 
 @pytest.mark.parametrize('amount',[float('nan'),float('inf'),-1])
@@ -128,7 +128,7 @@ def test_secret_arn_remains_an_identifier_but_credentials_are_redacted():
 
 
 def test_refreshed_excerpt_corpus_keeps_local_semantic_anchors(tmp_path):
-    corpus=tmp_path/'corpus.json';corpus.write_text('[]')
+    corpus=tmp_path/'corpus.json';corpus.write_text('[]', encoding="utf-8")
     index=KnowledgeIndex.load(corpus,model_path='',include_summaries=True)
     assert len(index.passages)==10 and any(p.id=='ecs-stopped' for p in index.passages)
     shipped=KnowledgeIndex.load(model_path='',include_summaries=True)

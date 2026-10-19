@@ -128,10 +128,30 @@ async def get_cost_summary() -> CostSummary:
         if c.timestamp.replace(tzinfo=timezone.utc) >= month_cutoff
     )
 
+    #: 2.0.36 — 실제 호출 기록은 비용 원장(~/.recoder/model_costs.jsonl)에 쌓인다. 예전 파일(llm_calls.jsonl)은
+    #: 아무도 쓰지 않아 화면 비용이 늘 0 이었다. 원장 파일의 30일 기록을 더한다(단가 미설정 호출은 0 으로 더하지 않음).
+    ledger_rows: list = []
+    try:
+        try:
+            from llm import cost_ledger
+        except ImportError:  # pragma: no cover
+            from core.llm import cost_ledger  # type: ignore
+        if cost_ledger.ledger_file() is not None:
+            ledger_rows = cost_ledger.stored_records(month_cutoff.timestamp())
+    except Exception:  # noqa: BLE001 — 비용 표시 때문에 화면이 실패하면 안 된다
+        ledger_rows = []
+    for row in ledger_rows:
+        cost = row.get("estimated_cost_usd")
+        if cost is None:
+            continue
+        monthly_usd += float(cost)
+        if float(row.get("ts") or 0) >= day_cutoff.timestamp():
+            daily_usd += float(cost)
+
     return CostSummary(
         daily_usd=round(daily_usd, 6),
         monthly_usd=round(monthly_usd, 6),
-        call_count=len(calls),
+        call_count=len(calls) + len(ledger_rows),
         last_updated=now,
     )
 
@@ -189,6 +209,16 @@ async def delete_data(older_than_days: int = Query(30, ge=1)) -> dict:
                 kept_lines.append(line)  # Keep lines we can't parse
 
         _LLM_CALLS_FILE.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+
+    #: 2.0.36 비용 원장도 같은 보존 기간을 따른다.
+    try:
+        try:
+            from llm import cost_ledger
+        except ImportError:  # pragma: no cover
+            from core.llm import cost_ledger  # type: ignore
+        deleted_calls += cost_ledger.prune(cutoff.timestamp())
+    except Exception:  # noqa: BLE001
+        pass
 
     return {
         "status": "ok",

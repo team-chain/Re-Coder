@@ -24,6 +24,75 @@ import {
 } from '../types';
 import { CoreManager } from './CoreManager';
 import { describeHttpError, parseHttpErrorDetail, CoreHttpError } from './httpError';
+
+/** 2.0.25 공격·장애 감지 알림 한 건 — 코어 ops_alerts 가 실제 지표로 만든 것. */
+/** 2.0.26 AWS 리소스 정리 */
+export interface CleanupItem {
+    id: string; kind: string; label: string; name: string; service: string; cluster: string; tagged: boolean;
+    deletable: boolean; detail: string; cost: string; note: string;
+}
+export interface CleanupPlan {
+    region: string;
+    groups: Array<{ service: string; items: CleanupItem[] }>;
+    untagged: CleanupItem[];
+    summary: { running_tasks: number; load_balancers: number; web_acls: number; image_mb: number; tagged: number; untagged: number };
+    gaps: string[];
+}
+export interface CleanupResult {
+    region: string; deleted: number; failed: number; gaps: string[];
+    results: Array<{ id: string; label?: string; name?: string; ok: boolean; skipped?: boolean; message: string }>;
+}
+
+/** 2.0.31 뒤에서 도는 정리 작업(GET /api/aws/cleanup/jobs/{id}). */
+export interface CleanupJob {
+    id: string; region: string; status: 'running' | 'done' | 'failed' | 'interrupted'; count: number;
+    progress: { done: number; total: number; current?: string };
+    result: CleanupResult | null; error: string;
+}
+
+export interface CleanupProgress { done: number; total: number; current?: string }
+
+/**
+ * 정리 작업이 끝날 때까지 기다린다(순수 함수 — 시험에서 가짜 fetch·sleep 을 넣는다).
+ * 조회 한두 번이 실패해도(코어가 잠깐 바쁨) 이어서 기다리고, 연속 5번 실패하면 멈춘다.
+ */
+export async function waitForCleanupJob(
+    fetchJob: () => Promise<CleanupJob>,
+    opts: { onProgress?: (p: CleanupProgress) => void; sleep?: (ms: number) => Promise<void>; intervalMs?: number; maxWaitMs?: number } = {},
+): Promise<CleanupResult> {
+    const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
+    const interval = opts.intervalMs ?? 3000;
+    const deadline = opts.maxWaitMs ?? 2 * 60 * 60 * 1000;
+    let waited = 0;
+    let misses = 0;
+    for (;;) {
+        let job: CleanupJob | undefined;
+        try {
+            job = await fetchJob();
+            misses = 0;
+        } catch (err) {
+            misses += 1;
+            if (misses >= 5) { throw err instanceof Error ? err : new Error(String(err)); }
+        }
+        if (job) {
+            if (job.status === 'done' && job.result) { return job.result; }
+            if (job.status === 'failed' || job.status === 'interrupted') { throw new Error(job.error || 'AWS 리소스를 지우지 못했습니다'); }
+            opts.onProgress?.(job.progress);
+        }
+        if (waited >= deadline) {
+            throw new Error('정리가 오래 걸리고 있습니다 — AWS 에서는 계속 지우는 중일 수 있으니 잠시 뒤 목록을 다시 불러오세요.');
+        }
+        await sleep(interval);
+        waited += interval;
+    }
+}
+
+export interface OpsAlert {
+    id: string; at: string; kind: 'spike' | 'blocked' | 'errors' | 'outage'; severity: string; title: string; detail: string;
+    region: string; cluster: string; service: string; status?: 'open' | 'applied' | 'dismissed'; resolution?: string;
+    sources?: { ips?: Array<{ value: string; count: number }>; paths?: Array<{ value: string; count: number }> };
+    suggestions?: Array<{ action: string; value: unknown; label: string; detail: string }>;
+}
 import { FETCH_HEADERS_LIMIT_MS, longHttpFetch } from './longHttp';
 
 /** 보안 검사 결과로 만든 수정안. auto=false 는 안내만, risk 가 있으면 기본으로 고르지 않는다. */
@@ -131,6 +200,22 @@ export interface ChatAction {
     files: string[];
     summary: string;
 }
+
+/** 2.0.35 배포 전 신뢰 점검 결과(core/trust_check.py). */
+export interface TrustItem { key: string; principle: string; status: 'pass' | 'warn' | 'block' | 'info'; title: string; detail: string; fix: string }
+export interface TrustPrinciple { key: string; label: string; summary: string; status: 'pass' | 'warn' | 'block'; items: TrustItem[] }
+export interface TrustReport { target: string; principles: TrustPrinciple[]; counts: Record<'pass' | 'warn' | 'block' | 'info', number>; scanned_files: number; truncated: boolean; note?: string }
+
+/** 2.0.36 작업별 AI 공급자 — 형태는 webview-src/components/modelRoutingModel.ts 와 같다(키 값은 오지 않는다). */
+export interface ModelRouting {
+    quality: { provider: string; model: string };
+    economy: { spec: string; provider: string; model: string; separate: boolean; scrubbed: boolean; note: string };
+    economy_operations: string[];
+    choices: Array<{ spec: string; label: string; ready: boolean; provider: string; model: string }>;
+}
+export interface ModelCostGroup { tier: 'economy' | 'quality'; provider: string; model: string; calls: number; input_tokens: number; output_tokens: number; cost_usd: number; unknown_cost_calls: number; estimated_token_calls: number; masked: number }
+export interface ModelCosts { calls: number; total_cost_usd: number; unknown_cost_calls: number; economy_saved_usd: number; groups: ModelCostGroup[]; days: number; persisted: boolean }
+export interface ModelCompareJob { id: string; status: 'running' | 'finished'; started_at: number; finished_at: number | null; instruction_chars: number; sides: Array<Record<string, unknown>>; verdict: Record<string, string | null> | null }
 
 export interface DeployPreflightResult {
     app_kind: 'server' | 'static' | 'unknown';
@@ -507,6 +592,43 @@ export class ApiClient {
         }, false, 90000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 사전 감지 실패'); }
         return resp.data;
+    }
+
+    /** 2.0.35 배포 전 신뢰 점검(제로 트러스트) — 읽기 전용. 설정은 이름·켜짐 여부만 보낸다(값 없음). */
+    async getTrustCheck(workspacePath: string, target: 'local' | 'ecs' | 's3', config: Record<string, unknown>, identityArn = ''): Promise<TrustReport> {
+        const resp = await this.request<TrustReport>('POST', '/api/deploy/trust-check', {
+            workspace_path: workspacePath, target, config, identity_arn: identityArn,
+        }, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '신뢰 점검 실패'); }
+        return resp.data;
+    }
+
+    /** 2.0.36 등급별 AI 공급자(키 값 없음). */
+    async getModelRouting(): Promise<ModelRouting> {
+        const resp = await this.request<ModelRouting>('GET', '/api/models/routing');
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AI 공급자 정보를 받지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** 2.0.36 비용 원장 — 등급·공급자·모델별 토큰·비용. */
+    async getModelCosts(days = 30): Promise<ModelCosts> {
+        const resp = await this.request<ModelCosts>('GET', `/api/models/costs?days=${Math.max(1, Math.min(365, Math.round(days)))}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비용 원장을 받지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** 2.0.36 같은 요청을 두 공급자로 — 백그라운드 작업을 시작하고 바로 돌려준다. */
+    async startModelCompare(instruction: string, workspacePath: string, providers: [string, string]): Promise<ModelCompareJob> {
+        const resp = await this.request<ModelCompareJob>('POST', '/api/models/compare', { instruction, workspace_path: workspacePath, providers });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비교를 시작하지 못했습니다'); }
+        return resp.data;
+    }
+
+    async getModelCompare(jobId: string): Promise<ModelCompareJob | null> {
+        const path = jobId ? `/api/models/compare/${encodeURIComponent(jobId)}` : '/api/models/compare/latest';
+        const resp = await this.request<ModelCompareJob | { job: ModelCompareJob | null }>('GET', path);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '비교 결과를 받지 못했습니다'); }
+        return 'job' in resp.data ? resp.data.job : resp.data;
     }
 
     /** 컨테이너 빌드·실행 가능성 정적 점검(파일만 읽음). */
@@ -1176,6 +1298,11 @@ export class ApiClient {
         awsRegion?: string;
         taskExecutionRole?: string;
         taskRole?: string;
+        /** 2.0.32 — 켠 보호 기능의 권한도 함께 점검 */
+        edge?: string;
+        https?: boolean;
+        customDomain?: string;
+        database?: string;
     }): Promise<AwsStatus> {
         const resp = await this.request<AwsStatus>('POST', '/api/aws/permissions/check', {
             deployment_context: deploymentContext ? {
@@ -1186,6 +1313,10 @@ export class ApiClient {
                 aws_region: deploymentContext.awsRegion ?? '',
                 task_execution_role: deploymentContext.taskExecutionRole ?? '',
                 task_role: deploymentContext.taskRole ?? '',
+                edge: deploymentContext.edge ?? 'none',
+                https: deploymentContext.https ?? false,
+                custom_domain: deploymentContext.customDomain ?? '',
+                database: deploymentContext.database ?? 'task',
             } : undefined,
         }, false, 120000);  // IAM 시뮬레이션 여러 건 + AWS 재시도
         if (!resp.success || !resp.data) {
@@ -1505,6 +1636,21 @@ export class ApiClient {
         assign_public_ip?: boolean;
         subnet_ids?: string[];
         security_group_ids?: string[];
+        /** 2.0.25 기본 방패·감지 알림(생략하면 코어 기본: 켬·보통) */
+        shield?: boolean;
+        shield_level?: 'loose' | 'normal' | 'strict';
+        alerts?: boolean;
+        alert_email?: string;
+        /** 2.0.26 대규모 방패(ALB + WAF, 선택 — 비용 확인 필요) */
+        edge?: 'none' | 'alb' | 'alb_waf';
+        waf_rate_limit?: number;
+        waf_window?: 60 | 120 | 300 | 600;
+        edge_cost_approved?: boolean;
+        /** 2.0.27 HTTPS 주소·내 도메인·관리형 DB */
+        https?: boolean;
+        custom_domain?: string;
+        database?: 'task' | 'rds';
+        db_cost_approved?: boolean;
 
         environment?: string;
         branch?: string;
@@ -1518,6 +1664,76 @@ export class ApiClient {
             throw new CoreHttpError(resp.error ?? 'ECS 배포 요청 실패', resp.status, resp.detail ?? null);
         }
         return resp.data;
+    }
+
+    /** GET /api/ops/alerts — 2.0.25 공격·장애 감지 알림(since 이후 새 것만). */
+    async listOpsAlerts(since = ''): Promise<{ alerts: OpsAlert[]; monitors: Array<Record<string, unknown>>; cursor_reset?: boolean }> {
+        const resp = await this.request<{ alerts: OpsAlert[]; monitors: Array<Record<string, unknown>>; cursor_reset?: boolean }>(
+            'GET', `/api/ops/alerts${since ? `?since=${encodeURIComponent(since)}` : ''}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '알림을 불러오지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/ops/alerts/{id}/act — 승인 카드에서 고른 대응만 적용(approved=false 면 닫기). */
+    async actOpsAlert(alertId: string, action: string, value: unknown, approved: boolean): Promise<{ applied: boolean; message: string }> {
+        const resp = await this.request<{ applied: boolean; message: string }>(
+            // 2.0.32 — 취약점 올리기는 폴더마다 npm 잠금 갱신(최대 4분)을 하므로 넉넉히 기다린다(시간 초과 뒤 다시 누르면 두 번 적용되던 것).
+            'POST', `/api/ops/alerts/${encodeURIComponent(alertId)}/act`, { action, value, approved }, false, 600000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '대응을 적용하지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/aws/cleanup/plan — 2.0.26 ReCoder 가 만든 AWS 리소스 목록(아무것도 바꾸지 않음). */
+    async cleanupPlan(region: string, service = ''): Promise<CleanupPlan> {
+        const resp = await this.request<CleanupPlan>('POST', '/api/aws/cleanup/plan', { region, service }, false, 120000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AWS 리소스 목록을 불러오지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** GET /api/aws/cleanup/regions — ReCoder 로 배포한 적 있는 리전(2.0.32). */
+    async cleanupRegions(): Promise<{ regions: string[] }> {
+        const resp = await this.request<{ regions: string[] }>('GET', '/api/aws/cleanup/regions');
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '리전 목록을 불러오지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** GET /api/aws/cleanup/jobs — 최근 정리 작업(진행 중·중단됨 확인, 2.0.32). */
+    async cleanupJobs(region: string): Promise<{ jobs: CleanupJob[] }> {
+        const resp = await this.request<{ jobs: CleanupJob[] }>('GET', `/api/aws/cleanup/jobs${region ? `?region=${encodeURIComponent(region)}` : ''}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '정리 작업 기록을 불러오지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/aws/cleanup/stop — 서비스 태스크 수 0(되살릴 수 있음). */
+    async cleanupStop(region: string, cluster: string, service: string): Promise<{ ok: boolean; message: string }> {
+        const resp = await this.request<{ ok: boolean; message: string }>('POST', '/api/aws/cleanup/stop', { region, cluster, service });
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '서비스를 중지하지 못했습니다'); }
+        return resp.data;
+    }
+
+    /**
+     * POST /api/aws/cleanup/delete — 승인한 항목만(태그를 코어가 다시 확인).
+     * 2.0.31: DB·CloudFront 정리는 15분을 넘길 수 있어 코어가 뒤에서 지우고, 여기서는 작업 상태를 3초마다 본다.
+     */
+    async cleanupDelete(region: string, ids: string[], onProgress?: (p: CleanupProgress) => void): Promise<CleanupResult> {
+        const resp = await this.request<CleanupJob>('POST', '/api/aws/cleanup/delete',
+            { region, ids, approved: true, count: ids.length, background: true }, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AWS 리소스를 지우지 못했습니다'); }
+        // 옛 코어(2.0.30 이하)는 background 를 모르고 결과를 바로 돌려준다.
+        const direct = resp.data as unknown as Partial<CleanupResult>;
+        if (Array.isArray(direct.results)) { return direct as CleanupResult; }
+        const jobId = resp.data.id;
+        if (!jobId) { throw new Error('정리 작업 번호를 받지 못했습니다 — 코어를 다시 시작한 뒤 시도하세요.'); }
+        return this.cleanupAttach(jobId, onProgress);
+    }
+
+    /** 2.0.32 — 뒤에서 도는 정리 작업이 끝날 때까지 본다(화면을 다시 열었을 때 다시 붙기). */
+    async cleanupAttach(jobId: string, onProgress?: (p: CleanupProgress) => void): Promise<CleanupResult> {
+        return waitForCleanupJob(async () => {
+            const r = await this.request<CleanupJob>('GET', `/api/aws/cleanup/jobs/${encodeURIComponent(jobId)}`, undefined, false, 30000);
+            if (!r.success || !r.data) { throw new Error(r.error ?? '정리 진행 상황을 확인하지 못했습니다'); }
+            return r.data;
+        }, { onProgress });
     }
 
     /** GET /api/deploy/ecs/status — ECS 배포 진행상황 폴링. */
@@ -1589,20 +1805,6 @@ export class ApiClient {
             throw new Error(resp.error ?? 'git push 실패');
         }
         return resp.data;
-    }
-
-    /** GET /api/git/info — 현재 브랜치/remote 정보. */
-    async gitInfo(workspacePath: string): Promise<{
-        branch?: string;
-        remote_url?: string;
-        clean?: boolean;
-        ahead?: number;
-        behind?: number;
-        last_commit?: string;
-    }> {
-        const qs = new URLSearchParams({ workspace_path: workspacePath });
-        const resp = await this.request<object>('GET', `/api/git/info?${qs}`);
-        return resp.success && resp.data ? (resp.data as object) : {};
     }
 
     /** POST /api/github/repo — 새 GitHub 레포 생성 + 초기 push. */

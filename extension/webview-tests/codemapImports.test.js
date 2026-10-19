@@ -31,11 +31,8 @@ test('함수 정의 탐지는 여전히 문자열을 지운 소스를 쓴다(문
 });
 
 test('stripJs 는 keepStrings=true 일 때 문자열 내용을 그대로 둔다 (동작 검증)', () => {
-  // TS 함수 본문을 JS 로 그대로 평가해 실제 동작을 본다(타입 표기 제거).
-  const body = fn('stripJs')
-    .replace(/function stripJs\(src: string, keepStrings = false\): string/, 'function stripJs(src, keepStrings = false)')
-    .replace(/const out: string\[\] = \[\]/, 'const out = []');
-  const stripJs = new Function(`${body}; return stripJs;`)();
+  // 2.0.34 stripJs 를 내보내므로 컴파일된 함수를 그대로 쓴다(소스를 잘라 평가하던 방식은 다음 함수가 export 면 깨졌다).
+  const { stripJs } = require('../out/codemap/analyzer.js');
   const src = 'import { A } from "./components/A"; // 주석\nconst s = "function fake() {}";';
   const kept = stripJs(src, true);
   assert.ok(kept.includes('"./components/A"'), '문자열이 지워졌다');

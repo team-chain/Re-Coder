@@ -145,7 +145,7 @@ def list_deployments(
         where_clauses.append("contract_hash = ?")
         params.append(contract_hash)
     where = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-    query = f"SELECT payload FROM deployments{where} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    query = f"SELECT payload FROM deployments{where} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     with db.connect() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()
@@ -164,7 +164,7 @@ def list_rollback_candidates(
             """
             SELECT payload FROM deployments
             WHERE project_id = ? AND status = ? AND image_digest IS NOT NULL
-            ORDER BY created_at DESC LIMIT ?
+            ORDER BY created_at DESC, rowid DESC LIMIT ?
             """,
             (project_id, DeploymentLedgerStatus.STABLE.value, limit),
         ).fetchall()

@@ -166,11 +166,72 @@ def retry_on_transient(
 
 
 # ---------------------------------------------------------------------------
+# ReCoder 리소스 태그 (2.0.23)
+# ---------------------------------------------------------------------------
+#
+# 정리 기능은 "ReCoder 가 만든 것만" 지워야 안전하다. 그래서 **새로 만든** 리소스에만
+# recoder:managed=true 를 붙인다. 이미 있던(사용자가 만든) 리소스는 재사용해도 태그를
+# 붙이지 않는다 — 붙이면 정리할 때 사용자 리소스를 지우게 된다.
+#
+# 태그는 생성과 **따로** 붙인다(best-effort). 생성 요청에 tags 를 넣으면 태그 권한
+# (ecs:TagResource 등)이 없는 옛 권한표의 사용자는 생성 자체가 실패한다.
+
+MANAGED_TAG = "recoder:managed"
+PROJECT_TAG = "recoder:project"
+SERVICE_TAG = "recoder:service"
+
+
+def recoder_tags(project: str = "", service: str = "") -> dict[str, str]:
+    """ReCoder 가 만든 리소스에 붙이는 태그. 값은 AWS 제한(256자, 허용 문자)에 맞춘다."""
+    def clean(value: str) -> str:
+        return re.sub(r"[^\w .:/=+\-@]", "-", str(value or ""))[:256]
+    tags = {MANAGED_TAG: "true"}
+    if project:
+        tags[PROJECT_TAG] = clean(project)
+    if service:
+        tags[SERVICE_TAG] = clean(service)
+    return tags
+
+
+def tag_created(client: Any, kind: str, ref: str, tags: Optional[dict]) -> bool:
+    """방금 만든 리소스에 태그를 붙인다. 실패해도 배포를 막지 않는다(권한 없는 옛 권한표)."""
+    if not tags or not ref:
+        return False
+    try:
+        if kind == "ecs":
+            client.tag_resource(resourceArn=ref, tags=[{"key": k, "value": v} for k, v in tags.items()])
+        elif kind == "ecr":
+            client.tag_resource(resourceArn=ref, tags=[{"Key": k, "Value": v} for k, v in tags.items()])
+        elif kind == "logs":
+            client.tag_resource(resourceArn=ref, tags=dict(tags))
+        elif kind == "ec2":
+            client.create_tags(Resources=[ref], Tags=[{"Key": k, "Value": v} for k, v in tags.items()])
+        else:
+            raise ValueError(f"unknown tag kind: {kind}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("태그를 붙이지 못했습니다(%s %s): %s — 정리 기능이 이 리소스를 자동으로 찾지 못합니다.",
+                       kind, ref, error_message(exc))
+        return False
+    return True
+
+
+def _log_group_arn(logs: Any, name: str) -> str:
+    try:
+        for group in logs.describe_log_groups(logGroupNamePrefix=name).get("logGroups", []):
+            if group.get("logGroupName") == name:
+                arn = str(group.get("arn") or "")
+                return arn[:-2] if arn.endswith(":*") else arn
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # 클러스터
 # ---------------------------------------------------------------------------
 
 
-def ensure_cluster(ecs: Any, name: str) -> str:
+def ensure_cluster(ecs: Any, name: str, *, tags: Optional[dict] = None) -> str:
     """ECS 클러스터를 확보하고 ARN 을 돌려준다. 있으면 그대로 쓴다.
 
     빈 클러스터는 요금이 없다 — 지우고 다시 만들 이유가 없다.
@@ -199,7 +260,9 @@ def ensure_cluster(ecs: Any, name: str) -> str:
             remedy="권한표의 ecs:CreateCluster 가 부여됐는지 확인하세요.",
         ) from exc
     logger.info("ECS 클러스터 생성: %s", name)
-    return str(created["cluster"]["clusterArn"])
+    arn = str(created["cluster"]["clusterArn"])
+    tag_created(ecs, "ecs", arn, tags)
+    return arn
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +275,7 @@ def ensure_log_group(
     name: str,
     *,
     retention_days: Optional[int] = DEFAULT_LOG_RETENTION_DAYS,
+    tags: Optional[dict] = None,
 ) -> str:
     """로그 그룹을 확보하고 보관 기간을 건다.
 
@@ -227,6 +291,8 @@ def ensure_log_group(
     try:
         logs.create_log_group(logGroupName=name)
         logger.info("로그 그룹 생성: %s", name)
+        if tags:
+            tag_created(logs, "logs", _log_group_arn(logs, name), tags)
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) != "ResourceAlreadyExistsException":
             raise InfraError(
@@ -410,6 +476,7 @@ def ensure_ecr_repository(
     *,
     keep_last: Optional[int] = DEFAULT_ECR_KEEP_LAST,
     scan_on_push: bool = True,
+    tags: Optional[dict] = None,
 ) -> str:
     """ECR 리포지토리를 확보하고 repositoryUri 를 돌려준다."""
     # 수명 주기 정책은 실패해도 배포를 막지 않으려고 경고만 남긴다.
@@ -425,6 +492,7 @@ def ensure_ecr_repository(
             imageScanningConfiguration={"scanOnPush": scan_on_push},
         )["repository"]
         logger.info("ECR 리포지토리 생성: %s", name)
+        tag_created(ecr, "ecr", str(repository.get("repositoryArn") or ""), tags)
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) != "RepositoryAlreadyExistsException":
             raise InfraError(
@@ -804,6 +872,9 @@ def ensure_security_group(
     port: int,
     description: str = "ReCoder ECS Fargate service",
     cidr: str = "0.0.0.0/0",
+    tags: Optional[dict] = None,
+    source_group: str = "",
+    prefix_list: str = "",
 ) -> str:
     """앱 포트를 여는 보안 그룹을 확보하고 GroupId 를 돌려준다.
 
@@ -822,6 +893,7 @@ def ensure_security_group(
             )["GroupId"]
         )
         logger.info("보안 그룹 생성: %s (%s)", name, group_id)
+        tag_created(ec2, "ec2", group_id, tags)
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) != "InvalidGroup.Duplicate":
             raise InfraError(
@@ -849,21 +921,18 @@ def ensure_security_group(
         group_id = str(groups[0]["GroupId"])
         logger.info("보안 그룹 재사용: %s (%s)", name, group_id)
 
+    #: 2.0.26 — ALB 뒤 태스크는 ALB 보안 그룹에서 오는 연결만 받는다(source_group). 인터넷 전체에 열지 않는다.
+    permission: dict = {"IpProtocol": "tcp", "FromPort": port, "ToPort": port}
+    if prefix_list:
+        #: 2.0.27 — CloudFront 원본 전용 AWS 관리 목록에서 오는 연결만(ALB 를 직접 부르는 길을 막는다).
+        permission["PrefixListIds"] = [{"PrefixListId": prefix_list, "Description": "CloudFront origin-facing only"}]
+    elif source_group:
+        permission["UserIdGroupPairs"] = [{"GroupId": source_group, "Description": "ReCoder load balancer only"}]
+    else:
+        permission["IpRanges"] = [{"CidrIp": cidr, "Description": "ReCoder app port"}]
     try:
-        ec2.authorize_security_group_ingress(
-            GroupId=group_id,
-            IpPermissions=[
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": port,
-                    "ToPort": port,
-                    "IpRanges": [
-                        {"CidrIp": cidr, "Description": "ReCoder app port"}
-                    ],
-                }
-            ],
-        )
-        logger.info("보안 그룹 인바운드 추가: %s:%d ← %s", group_id, port, cidr)
+        ec2.authorize_security_group_ingress(GroupId=group_id, IpPermissions=[permission])
+        logger.info("보안 그룹 인바운드 추가: %s:%d ← %s", group_id, port, prefix_list or source_group or cidr)
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) != "InvalidPermission.Duplicate":
             raise InfraError(
@@ -973,6 +1042,7 @@ def ensure_service(
     circuit_breaker: bool = True,
     circuit_breaker_rollback: bool = False,
     sleep: Callable[[float], None] = time.sleep,
+    tags: Optional[dict] = None,
 ) -> ServiceResult:
     """Fargate 서비스를 확보한다. 있으면 새 태스크 정의로 갱신한다.
 
@@ -1092,6 +1162,7 @@ def ensure_service(
         ) from exc
 
     logger.info("ECS 서비스 생성: %s/%s (desired=%d)", cluster, service, desired_count)
+    tag_created(ecs, "ecs", str(resp["service"]["serviceArn"]), tags)
     return ServiceResult(
         service_arn=str(resp["service"]["serviceArn"]),
         action="created",

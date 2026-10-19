@@ -32,6 +32,10 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Optional
+try:
+    import proc_tools  # type: ignore
+except ImportError:  # pragma: no cover
+    from core import proc_tools  # type: ignore
 
 _JS_TYPES = ("javascript", "ecmascript", "text/jsx", "application/x-javascript")
 _ATTR = r"""(?:["']([^"']+)["']|([^\s"'>]+))"""
@@ -271,7 +275,7 @@ def _render(browser: str, url: str, budget_ms: int, timeout: float) -> tuple[str
     if sys.platform.startswith("win"):
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        proc = subprocess.run(args, capture_output=True, timeout=timeout, **kwargs)
+        proc = proc_tools.run(args, capture_output=True, timeout=timeout, **kwargs)
     finally:
         shutil.rmtree(profile, ignore_errors=True)
     dom = proc.stdout.decode("utf-8", errors="replace")

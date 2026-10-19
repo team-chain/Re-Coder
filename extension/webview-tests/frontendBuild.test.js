@@ -51,10 +51,12 @@ test('npm 이 있으면 설치 후 빌드, 소스맵은 끈다', async t => {
 test('npm 이 없으면 Docker 로 빌드하고, 둘 다 없으면 이유를 알려 준다', async t => {
   const { ws } = project(t);
   const seen = [];
-  const withDocker = async (command) => { seen.push(command); return { code: command.startsWith('npm') ? 1 : 0, output: '' }; };
+  const withDocker = async (command) => { seen.push(command); return { code: String(command).startsWith('npm') ? 1 : 0, output: '' }; };
   const out = await fb.buildFrontend(ws, fb.detectFrontendProject(ws), () => {}, withDocker);
   assert.equal(out.via, 'docker');
-  assert.match(seen.at(-1), /docker run --rm -v ".*:\/app" -v \/app\/node_modules/);
+  const last = seen.at(-1);
+  assert.ok(Array.isArray(last), 'Docker 는 셸 없이 인자 배열로');
+  assert.match(last.join(' '), /docker run --rm -v .*:\/app -v \/app\/node_modules/);
   const none = await fb.buildFrontend(ws, fb.detectFrontendProject(ws), () => {}, async () => ({ code: 1, output: '' }));
   assert.equal(none.ok, false);
   assert.match(none.output, /npm 도 Docker 도/);

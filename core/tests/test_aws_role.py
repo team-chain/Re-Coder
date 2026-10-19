@@ -86,6 +86,74 @@ class FakeIam:
         self._check("iam:PutRolePolicy")
         self.inline[(RoleName, PolicyName)] = json.loads(PolicyDocument)
 
+    # ── 2.0.27 관리형 정책(인라인 한도를 넘을 때) ──
+    managed: dict[str, list[dict]]
+    attached: dict[str, list[str]]
+
+    def _m(self) -> None:
+        if not hasattr(self, "managed_store"):
+            self.managed_store: dict[str, list[dict]] = {}
+            self.attached_store: dict[str, list[str]] = {}
+
+    def get_policy(self, PolicyArn: str) -> dict:
+        self._m(); self.calls.append("GetPolicy"); self._check("iam:GetPolicy")
+        if PolicyArn not in self.managed_store:
+            raise _ClientError("NoSuchEntity", PolicyArn)
+        return {"Policy": {"Arn": PolicyArn}}
+
+    def create_policy(self, PolicyName: str, PolicyDocument: str, **kw) -> dict:
+        self._m(); self.calls.append("CreatePolicy"); self._check("iam:CreatePolicy")
+        arn = f"arn:aws:iam::{ACCOUNT}:policy/{PolicyName}"
+        self.managed_store[arn] = [{"VersionId": "v1", "IsDefaultVersion": True, "CreateDate": 1,
+                                    "Document": json.loads(PolicyDocument)}]
+        return {"Policy": {"Arn": arn}}
+
+    def list_policy_versions(self, PolicyArn: str) -> dict:
+        self._m(); self.calls.append("ListPolicyVersions"); self._check("iam:ListPolicyVersions")
+        return {"Versions": [dict(v) for v in self.managed_store[PolicyArn]]}
+
+    def delete_policy_version(self, PolicyArn: str, VersionId: str) -> None:
+        self._m(); self.calls.append("DeletePolicyVersion")
+        self.managed_store[PolicyArn] = [v for v in self.managed_store[PolicyArn] if v["VersionId"] != VersionId]
+
+    def create_policy_version(self, PolicyArn: str, PolicyDocument: str, SetAsDefault: bool) -> dict:
+        self._m(); self.calls.append("CreatePolicyVersion"); self._check("iam:CreatePolicyVersion")
+        versions = self.managed_store[PolicyArn]
+        assert len(versions) < 5, "IAM 은 버전 5개까지"
+        for v in versions:
+            v["IsDefaultVersion"] = False
+        versions.append({"VersionId": f"v{len(versions) + 10}", "IsDefaultVersion": True,
+                         "CreateDate": len(versions) + 10, "Document": json.loads(PolicyDocument)})
+        return {}
+
+    def attach_role_policy(self, RoleName: str, PolicyArn: str) -> None:
+        self._m(); self.calls.append("AttachRolePolicy"); self._check("iam:AttachRolePolicy")
+        if PolicyArn not in self.attached_store.setdefault(RoleName, []):
+            self.attached_store[RoleName].append(PolicyArn)
+
+    def list_attached_role_policies(self, RoleName: str) -> dict:
+        self._m(); self.calls.append("ListAttachedRolePolicies")
+        return {"AttachedPolicies": [{"PolicyArn": a, "PolicyName": a.rsplit("/", 1)[-1]}
+                                     for a in self.attached_store.get(RoleName, [])]}
+
+    def detach_role_policy(self, RoleName: str, PolicyArn: str) -> None:
+        self._m(); self.calls.append("DetachRolePolicy")
+        self.attached_store[RoleName].remove(PolicyArn)
+
+    def delete_role_policy(self, RoleName: str, PolicyName: str) -> None:
+        self.calls.append("DeleteRolePolicy")
+        if (RoleName, PolicyName) not in self.inline:
+            raise _ClientError("NoSuchEntity", PolicyName)
+        del self.inline[(RoleName, PolicyName)]
+
+    def role_documents(self, RoleName: str = aws_role.ROLE_NAME) -> list[dict]:
+        """역할에 실제로 적용된 정책 문서(인라인 + 붙은 관리형의 기본 버전)."""
+        self._m()
+        docs = [d for (r, _), d in self.inline.items() if r == RoleName]
+        for arn in self.attached_store.get(RoleName, []):
+            docs.append(next(v["Document"] for v in self.managed_store[arn] if v["IsDefaultVersion"]))
+        return docs
+
 
 class FakeSts:
     def __init__(self, deny_first: int = 0, deny_always: bool = False) -> None:
@@ -156,13 +224,18 @@ def test_없으면_만들고_다시_부르면_만들지_않는다() -> None:
     iam = FakeIam()
     first = _ensure(iam)
     assert first.created is True and first.role_arn == ROLE_ARN
-    assert iam.calls == ["GetRole", "CreateRole", "PutRolePolicy"]
+    assert iam.calls[:2] == ["GetRole", "CreateRole"] and "AttachRolePolicy" in iam.calls
+    n = len(aws_policy.split_policy(aws_role.build_role_policy(ACCOUNT, REGION, ROLE_ARN)))
+    assert iam.calls.count("CreatePolicy") == n
 
     second = _ensure(iam)
     assert second.created is False and second.trust_updated is False
     assert iam.calls.count("CreateRole") == 1
-    #: 정책은 매번 덮어쓴다 — 원본(aws_policy)이 바뀌면 다음 셋업에서 따라온다.
-    assert iam.calls.count("PutRolePolicy") == 2
+    #: 정책은 매번 새 버전으로 덮어쓴다 — 원본(aws_policy)이 바뀌면 다음 셋업에서 따라온다.
+    assert iam.calls.count("CreatePolicy") == n and iam.calls.count("CreatePolicyVersion") == n
+    for _ in range(6):     # 버전 5개 한도에 걸리지 않는다(옛 버전을 지운다)
+        _ensure(iam)
+    assert len(iam.role_documents()) == n
 
 
 def test_다른_주체가_이미_있으면_지우지_않고_추가한다() -> None:
@@ -189,7 +262,8 @@ def test_이미_신뢰된_주체면_신뢰_정책을_건드리지_않는다() ->
 def test_역할_정책은_aws_policy_와_한_벌이고_자기_읽기_한_줄만_더_있다() -> None:
     iam = FakeIam()
     _ensure(iam)
-    attached = iam.inline[(aws_role.ROLE_NAME, aws_role.ROLE_POLICY_NAME)]
+    docs = iam.role_documents()
+    attached = {"Version": "2012-10-17", "Statement": [st for d in docs for st in d["Statement"]]}
     exec_role, task_role = aws_policy.resolve_roles("", "")
     expected = aws_policy.build_policy(
         None, account_id=ACCOUNT, region=REGION,
@@ -200,7 +274,27 @@ def test_역할_정책은_aws_policy_와_한_벌이고_자기_읽기_한_줄만_
     assert own["Sid"] == "ReadOwnRolePolicies"
     assert own["Resource"] == ROLE_ARN          # role/* 가 아니라 자기 자신만
     assert not aws_policy.has_placeholder(attached)
-    assert aws_role.policy_fits_inline(attached)
+    #: 문서 하나하나가 관리형 정책 한도 안이다(합치면 인라인 한도를 넘어 나눴다)
+    assert all(aws_policy.policy_size(d) <= aws_policy.MANAGED_POLICY_LIMIT for d in docs)
+
+
+def test_예전_인라인_정책은_관리형으로_옮기고_지운다() -> None:
+    iam = FakeIam(existing_trust=aws_role.build_trust_policy([USER_ARN]))
+    iam.inline[(aws_role.ROLE_NAME, aws_role.ROLE_POLICY_NAME)] = {"Version": "2012-10-17", "Statement": []}
+    _ensure(iam)
+    assert (aws_role.ROLE_NAME, aws_role.ROLE_POLICY_NAME) not in iam.inline
+    # 조각 수가 줄면 남는 옛 조각을 뗀다
+    extra = f"arn:aws:iam::{ACCOUNT}:policy/{aws_role.managed_policy_name(8)}"
+    iam.attached_store[aws_role.ROLE_NAME].append(extra)
+    iam.managed_store[extra] = [{"VersionId": "v1", "IsDefaultVersion": True, "CreateDate": 1, "Document": {}}]
+    _ensure(iam)
+    assert extra not in iam.attached_store[aws_role.ROLE_NAME]
+
+
+def test_작은_정책은_예전처럼_인라인_한_벌() -> None:
+    iam = FakeIam()
+    aws_role.ensure_deploy_role(iam, account=ACCOUNT, region=REGION, principal_arn=USER_ARN, targets=["s3"])
+    assert "PutRolePolicy" in iam.calls and "CreatePolicy" not in iam.calls
 
 
 def test_계정_리전이_비면_정책을_만들지_않는다() -> None:
@@ -213,7 +307,7 @@ def test_계정_리전이_비면_정책을_만들지_않는다() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("denied", ["iam:GetRole", "iam:CreateRole", "iam:PutRolePolicy"])
+@pytest.mark.parametrize("denied", ["iam:GetRole", "iam:CreateRole", "iam:CreatePolicy", "iam:AttachRolePolicy"])
 def test_권한이_없으면_어느_액션인지_알려_준다(denied: str) -> None:
     iam = FakeIam(deny={denied})
     with pytest.raises(aws_role.RoleSetupDenied) as info:
@@ -298,7 +392,7 @@ def test_역할_설명은_IAM_이_받는_문자만_쓴다() -> None:
     assert re.fullmatch(r"[\u0009\u000A\u000D\u0020-\u007E\u00A1-\u00FF]*", aws_role.ROLE_DESCRIPTION)
     iam = FakeIam()
     _ensure(iam)
-    assert iam.calls == ["GetRole", "CreateRole", "PutRolePolicy"]
+    assert iam.calls[:2] == ["GetRole", "CreateRole"]
 
 
 def test_create_role_에_넘기는_설명이_상수와_같다() -> None:

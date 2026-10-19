@@ -68,7 +68,18 @@ npm install
 npm run build             # 확장 TS + 웹뷰 번들
 # VSCode 로 extension 폴더 열고 F5 → Extension Development Host
 ```
-**(b) 배포본 VSIX 만들기 (학생 배포용):**
+**(b) 배포본 VSIX — 태그로 자동 빌드 (2.0.23~, 권장):**
+```powershell
+# 1) core/version.py 와 extension/package.json(+lock) 의 버전을 올린 커밋을 develop 에 push
+# 2) 그 커밋에 태그를 달아 push — Actions 가 Windows·Linux·macOS VSIX 를 빌드해 GitHub Release 에 올린다
+git tag v2.0.23
+git push origin v2.0.23
+# 시험은 v2.0.23-rc1 처럼(시험 릴리스로 표시). 태그와 버전이 다르면 빌드하지 않는다.
+# 받은 파일이 이 저장소에서 빌드된 것인지 확인:
+gh attestation verify recoder-2.0.23-win32-x64.vsix --repo <조직>/<저장소>
+```
+
+**(c) 배포본 VSIX 를 직접 만들기 (오프라인·디버그용):**
 ```powershell
 # 1) Core 바이너리 빌드 (core 에서, venv 활성)
 cd ..\core ; pip install pyinstaller ; pyinstaller recoder-core.spec --noconfirm
