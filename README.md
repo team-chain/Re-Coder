@@ -121,7 +121,7 @@ AI 코딩 도구로 코드를 만드는 일은 쉬워졌지만, 만든 코드를
   </tr>
 </table>
 
-### 숫자로 보는 ReCoder
+### ReCoder
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/stats-dark.png">
