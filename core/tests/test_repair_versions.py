@@ -118,7 +118,11 @@ def test_bom_and_dependency_fields(tmp_path):
     }
 
 
-@pytest.mark.parametrize("contents", ["[]", "{", '{"dependencies": []}', " " * 128_001])
+@pytest.mark.parametrize(
+    "contents",
+    ["[]", "{", '{"dependencies": []}', " " * 128_001],
+    ids=["non-object", "invalid-json", "invalid-dependencies", "oversized"],
+)
 def test_invalid_manifest_does_not_create_false_certainty(tmp_path, contents):
     (tmp_path / "package.json").write_text(contents, encoding="utf-8")
     assert project_versions(tmp_path, manifest(tmp_path), {"express", "vite"}) == {}
