@@ -512,6 +512,6 @@ python scripts/golden_path_smoke.py --live
   </tr>
 </table>
 
-**TEAM Chain** · 동양미래대학교 컴퓨터소프트웨어공학과 졸업작품 · 지도교수 이희진
+**TEAM Chain** 
 
 </div>
