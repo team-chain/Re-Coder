@@ -1,4 +1,5 @@
 """Copy, validate and approve exact file contents; model text is never a command."""
+
 from __future__ import annotations
 
 import hashlib
@@ -10,11 +11,20 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 from context_gate import mask_secrets
+from grounded_repair.context import context_order
 from grounded_repair.logs import summarize
 
-SKIP = {".git", ".recoder", "node_modules", ".venv", "venv", "__pycache__", ".cache", ".pytest_cache"}
+SKIP = {
+    ".git",
+    ".recoder",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".cache",
+    ".pytest_cache",
+}
 MAX_SNAPSHOT_BYTES = 32_000_000
-
 
 
 def _run_tree(args, **kwargs):
@@ -25,9 +35,16 @@ def _run_tree(args, **kwargs):
         from core import proc_tools  # type: ignore
     return proc_tools.run(args, **kwargs)
 
+
 def safe_path(root: Path, name: str) -> Path:
     parts = PurePosixPath(name).parts
-    if not parts or name.startswith(("/", "\\")) or "\\" in name or ":" in name or any(p in {"..", "."} | SKIP for p in parts):
+    if (
+        not parts
+        or name.startswith(("/", "\\"))
+        or "\\" in name
+        or ":" in name
+        or any(p in {"..", "."} | SKIP for p in parts)
+    ):
         raise ValueError("Unsafe repair path")
     if any(p.startswith(".env") or p in {".aws", ".ssh", ".npmrc", ".netrc"} for p in parts):
         raise ValueError("Secret file is not a repair target")
@@ -57,7 +74,9 @@ def manifest(root: Path) -> dict[str, str]:
             total += path.stat().st_size
             if total > MAX_SNAPSHOT_BYTES or len(result) >= 4000:
                 raise ValueError("Repair workspace exceeds snapshot limit (32 MB / 4000 files)")
-            result[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+            result[path.relative_to(root).as_posix()] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
     return result
 
 
@@ -74,15 +93,8 @@ def snapshot(root: Path, target: Path, expected: dict[str, str]):
 
 
 def select_context(root: Path, files: dict[str, str], evidence: str) -> dict[str, str]:
-    def priority(name):
-        return (0 if name in evidence else 1 if Path(name).name in {
-            "Dockerfile", "package.json", "docker-compose.yml", "vite.config.js",
-            "vite.config.ts", "tsconfig.json", "requirements.txt", "requirements.md", ".dockerignore", "task-definition.json"
-        } else 2, name)
     chosen, remaining = {}, 24000
-    for name in sorted(files, key=priority):
-        if priority(name)[0] == 2 and Path(name).suffix not in {".js", ".cjs", ".mjs", ".ts", ".py", ".json", ".yaml", ".yml", ".c", ".txt"}:
-            continue
+    for name in context_order(files, evidence):
         p = safe_path(root, name)
         if p.stat().st_size > min(12000, remaining):
             continue
@@ -102,6 +114,7 @@ def select_context(root: Path, files: dict[str, str], evidence: str) -> dict[str
 
 class DockerVerifier:
     """Build only. Cloud/runtime failures require a different environment verifier."""
+
     identity = "docker-build-v1"
 
     def __call__(self, workspace: Path) -> dict:
@@ -111,19 +124,39 @@ class DockerVerifier:
         with tempfile.TemporaryFile() as output:
             try:
                 p = _run_tree(
-                    ["docker", "build", "--progress=plain", "."], cwd=workspace,
-                    stdout=output, stderr=subprocess.STDOUT, timeout=300, shell=False,
+                    ["docker", "build", "--progress=plain", "."],
+                    cwd=workspace,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    timeout=300,
+                    shell=False,
                 )
                 output.seek(0)
                 log = output.read(1_000_000).decode("utf-8", "replace")
-                available = not any(s in log.lower() for s in (
-                    "cannot connect to the docker daemon", "is the docker daemon running",
-                    "permission denied while trying to connect", "failed to update builder last activity",
-                    "error during connect"))
-                return {"passed": p.returncode == 0, "output": summarize(log).text,
-                        "available": available, "exit_code": p.returncode, "kind": self.identity}
+                available = not any(
+                    s in log.lower()
+                    for s in (
+                        "cannot connect to the docker daemon",
+                        "is the docker daemon running",
+                        "permission denied while trying to connect",
+                        "failed to update builder last activity",
+                        "error during connect",
+                    )
+                )
+                return {
+                    "passed": p.returncode == 0,
+                    "output": summarize(log).text,
+                    "available": available,
+                    "exit_code": p.returncode,
+                    "kind": self.identity,
+                }
             except (OSError, subprocess.TimeoutExpired) as exc:
-                return {"passed": False, "available": False, "output": mask_secrets(str(exc)), "kind": self.identity}
+                return {
+                    "passed": False,
+                    "available": False,
+                    "output": mask_secrets(str(exc)),
+                    "kind": self.identity,
+                }
 
 
 def apply_exact(root: Path, expected: dict[str, str], edits: dict[str, str]):

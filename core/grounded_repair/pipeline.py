@@ -13,6 +13,7 @@ from pathlib import Path
 
 from build_readiness import analyze, apply_fix
 from context_gate import mask_secrets
+from grounded_repair.context import CONTEXT_VERSION
 from grounded_repair.knowledge import KnowledgeIndex
 from grounded_repair.logs import summarize
 from grounded_repair.store import RepairStore
@@ -95,6 +96,7 @@ class RepairPipeline:
                     strategy,
                     self.verifier.identity,
                     profile,
+                    CONTEXT_VERSION,
                 ],
                 sort_keys=True,
             ).encode()
@@ -189,6 +191,8 @@ class RepairPipeline:
 
             result["route"] = "documents" if strategy != "A" else "model_only"
             context = await asyncio.to_thread(select_context, base, expected, evidence.text)
+            result["context_files"] = list(context)
+            result["context_version"] = CONTEXT_VERSION
             if not context:
                 return finish("insufficient_context")
             # Avoid counting an already working build as an AI repair success.

@@ -218,6 +218,19 @@ def test_cloud_or_runtime_errors_are_never_approved_by_build_only(setup, stage):
         store.approve(r["id"])
 
 
+def test_context_selector_revision_invalidates_repair_cache(setup, monkeypatch):
+    root, store, index = setup
+    router = Router([suggestion(), suggestion()])
+    pipeline = RepairPipeline(router, index, store, Verifier(), no_rules)
+    first = run(pipeline, root)
+    assert first["context_files"] == ["app.js"]
+    monkeypatch.setattr("grounded_repair.pipeline.CONTEXT_VERSION", "new-selection-policy")
+    second = run(pipeline, root)
+    assert not second["cache_hit"]
+    assert second["context_version"] == "new-selection-policy"
+    assert len(router.calls) == 2
+
+
 def test_citation_hallucination_is_rejected_before_build(setup):
     root, store, index = setup
     verifier = Verifier()
