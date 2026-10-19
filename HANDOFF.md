@@ -1,3 +1,11 @@
+# RAG 문서 버전 필터 (2026-10-20, 2.0.37)
+
+- `grounded_repair/knowledge.py`: `Passage.applies_to`는 패키지별 허용 major 목록이며 출처의 `version` 리비전과 구분한다. 확실하게 다른 버전이면 BM25·dense 후보에서 먼저 제외한다. metadata·검색기 v4가 색인/수정 캐시 키에 반영된다.
+- `grounded_repair/versions.py`: 검증용 복사본의 package.json만 읽는다. 문서가 다루는 패키지만 추출해 불필요한 의존성 목록을 프롬프트로 보내지 않는다. 단일 major의 단순 범위만 인정하며 모노레포 충돌·불명확한 범위·손상된 manifest는 추정하지 않는다. 설치 버전이나 전체 semver 호환성의 증명은 아니다.
+- 기본 요약·benchmark corpus·refresh manifest의 Express 5 문서에 적용 대상 metadata를 기록했다. pipeline은 확인한 선언을 기록하고 모델에도 전달한다. 필터 후 근거가 없으면 모델 호출 없이 종료한다.
+- 검증: RAG 관련 테스트 89건 통과. 기존 Docker mock의 import 순서 의존성을 제거했다. 오래된 smoke의 고장 사례는 이미 readiness 규칙에서 차단되어 RAG에 도달하지 않았으므로, 실제 빌드가 필요한 COPY 목적지 충돌로 교체했다. 로컬 Docker 데몬이 꺼져 있어 실제 빌드 확인은 CI 스모크에서 수행한다.
+- `codex/feat/**` 푸시에 전체 CI를 실행하며 골든패스 작업에 실제 Docker RAG smoke를 추가했다. 버전 필터는 수정 정확도 향상률을 측정한 실험이 아니다. 오류별 코드/테스트 선택·선택형 reranker·Promptfoo·OPA 실행 통제는 후속 단계다.
+
 # 작업별 AI 공급자 · 비용 원장 · 공급자 비교 (2026-10-16, 2.0.36)
 
 - core/llm/task_tier.py — tier_for(operation): ECONOMY_OPERATIONS(generate_plan_topics·summarize_request·summarize_scan(_results)·classify_error·augment_candidates·generate_test_draft) 만 economy, 나머지(모르는 이름 포함) quality. REPAIR_OPERATIONS(비교 도구 교정 횟수). contextvars _FORCED·_RUN_TAG + pinned(spec, tag) + bind(fn)(작업 스레드로 문맥 전달 — 호출마다 Context.copy()). is_test_file(path).
