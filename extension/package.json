@@ -204,6 +204,10 @@
         "icon": "$(keyboard)"
       },
       {
+        "command": "recoder.quickAccess.enableInTerminal",
+        "title": "ReCoder: 터미널에서도 Alt+Q 로 빠른 이동"
+      },
+      {
         "command": "recoder.quick.up",
         "title": "ReCoder: 빠른 이동 ↑ 칸 열기"
       },

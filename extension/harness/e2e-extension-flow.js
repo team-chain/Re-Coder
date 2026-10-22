@@ -3,7 +3,7 @@
 // 픽스처 LLM 을 물린 **실 HTTP 코어**를 직접 띄워 붙여, 사용자가 실기기에서
 // 밟는 메시지 사슬을 처음부터 끝까지 재현한다:
 //
-//   webview.ready → chat.send → chat.approveAction(빈 창=확장 재시작 시나리오)
+//   webview.ready → chat.send → chat.approveAction(빈 창 — 워크스페이스를 바꾸지 않고 외부 프로젝트로)
 //   → code.plan → code.planResult → code.spec → code.specResult → code.generate → code.result
 //   → code.applyAll → 파일이 실제 디스크에 존재
 //
@@ -37,6 +37,7 @@ Module._resolveFilename = function (request, ...rest) {
 const vscode = require('vscode');
 const { ApiClient } = require(path.join(EXT, 'out/core/ApiClient'));
 const { SidebarProvider } = require(path.join(EXT, 'out/sidebar/SidebarProvider'));
+const { initActiveProject, activeProjectPath } = require(path.join(EXT, 'out/activeProject'));
 
 // ── 협력자 가짜 ──
 const fakeCoreManager = {
@@ -78,6 +79,8 @@ step('0. 코어 헬스', async () => {
 
 const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-proj-'));
 const memento = new Memento();
+//: 제품의 activate() 처럼 현재 프로젝트 모듈에 저장소를 물린다(외부 프로젝트 목록이 여기 저장된다).
+initActiveProject({ workspaceState: new Memento(), globalState: memento, subscriptions: [] });
 let sp, captured, wv, action, decisions, acceptedPayload, ops;
 
 step('1. 빈 창(폴더 0개)에서 기동 + webview.ready', async () => {
@@ -96,22 +99,25 @@ step('2. chat.send → 승인 카드(action) 수신', async () => {
     assert.ok(action && action.type === 'code.plan', '승인 카드(action)가 없다');
 });
 
-step('3-A. 승인 → 워크스페이스 추가 시점에 재시작 인계 메모가 이미 있다', async () => {
-    let memoAtMutation = null;
-    vscode.workspace.__onUpdateWorkspaceFolders = () => { memoAtMutation = memento.get('recoder.pendingChatAction'); };
+step('3-A. 승인 → 워크스페이스를 바꾸지 않고(확장 재시작 없음) 승인한 폴더를 외부 프로젝트로 바로 이어 간다', async () => {
+    //: 26756bda 이후: 빈 창·단일 폴더 창에서 폴더를 워크스페이스에 넣으면 VS Code 가 확장을 재시작해 요청이 사라졌다.
+    //: 이제 워크스페이스는 건드리지 않는다 — 재시작이 없으니 인계 메모 없이 같은 화면에서 바로 승인된다.
+    let mutated = false;
+    vscode.workspace.__onUpdateWorkspaceFolders = () => { mutated = true; };
     const target = path.join(ws, 'board-app');
     await sp.handleMessage({ type: 'chat.approveAction', payload: { id: 'c1', instruction: action.instruction, targetFolder: target } }, wv);
     vscode.workspace.__onUpdateWorkspaceFolders = null;
-    assert.ok(memoAtMutation, '워크스페이스 추가 시점에 인계 메모가 없다 — 재시작이 먼저 오면 요청 유실');
-    assert.strictEqual(memoAtMutation.instruction, action.instruction);
+    assert.strictEqual(mutated, false, '워크스페이스 폴더를 바꾸면 확장이 재시작된다');
     assert.ok(fs.existsSync(target), '대상 폴더 미생성');
-    assert.ok(memento.get('recoder.pendingChatAction'), '첫 폴더 추가 후 재시작 전 메모를 삭제하면 안 된다');
-    assert.ok(!last(captured, 'chat.actionAccepted'), '재시작할 이전 화면에서 개발을 시작하면 안 된다');
-    sp = new SidebarProvider(vscode.Uri.file(EXT), new ApiClient(fakeCoreManager), fakeCoreManager, fakePolling, undefined, memento);
-    await sp.handleMessage({type:'webview.ready',payload:{}},wv);
-    const accepted = await waitFor(captured, 'chat.actionAccepted');
-    assert.ok(accepted.payload.requestId, 'actionAccepted requestId 없음');
-    assert.strictEqual(memento.get('recoder.pendingChatAction'), undefined, '정상 경로에서 메모 미삭제');
+    const accepted = last(captured, 'chat.actionAccepted');
+    assert.ok(accepted && accepted.payload.requestId, '승인한 화면에서 바로 이어 가야 한다');
+    assert.strictEqual(accepted.payload.instruction, action.instruction);
+    assert.strictEqual(path.resolve(accepted.payload.absolutePath), path.resolve(target));
+    assert.strictEqual(path.resolve(activeProjectPath()), path.resolve(target), '승인한 폴더가 현재 프로젝트가 된다');
+    assert.strictEqual(memento.get('recoder.pendingChatAction'), undefined, '재시작이 없으니 인계 메모를 남기지 않는다(다음 ready 가 중복 발송)');
+    const before = captured.filter((m) => m.type === 'chat.actionAccepted').length;
+    await sp.handleMessage({ type: 'webview.ready', payload: {} }, wv);
+    assert.strictEqual(captured.filter((m) => m.type === 'chat.actionAccepted').length, before, '다시 ready 가 와도 같은 요청을 또 보내지 않는다');
 });
 
 step('3-B. 재시작 후 새 프로바이더의 ready 가 요청을 이어받고, 중복 발송하지 않는다', async () => {
@@ -170,7 +176,9 @@ step('6. code.applyAll → 파일이 실제 디스크에 생성된다', async ()
     await sp.handleMessage({ type: 'code.applyAll', payload: { ops: applyOps, targetFolder: acceptedPayload.targetFolder } }, wv);
     const applied = last(captured, 'code.applied');
     assert.ok(applied && applied.payload.ok, `적용 실패: ${JSON.stringify((last(captured, 'code.error') || {}).payload || {}).slice(0, 200)}`);
-    const root = vscode.workspace.workspaceFolders[0].uri.fsPath;
+    //: 워크스페이스 폴더가 아니라 승인한 외부 프로젝트(board-app)에 써야 한다.
+    const root = path.resolve(acceptedPayload.absolutePath);
+    assert.ok(!vscode.workspace.workspaceFolders, '워크스페이스는 그대로 비어 있다');
     for (const o of applyOps) {
         const p = path.join(root, o.file);
         assert.ok(fs.existsSync(p), `디스크에 없음: ${p}`);

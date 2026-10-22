@@ -29,25 +29,43 @@ const LOGIC_SEG = new Set(["services", "service", "lib", "libs", "utils", "util"
   "middlewares", "workers", "jobs", "tasks", "agents", "llm", "usecases"]);
 const ENTRY_FILES = /^(server|app|main|index|wsgi|asgi|manage|urls|cli|bootstrap|extension)\.(js|mjs|cjs|ts|py)$/;
 const CONFIG_FILES = /(^|\.)(config|conf|rc)\.(js|cjs|mjs|ts|json)$|^(tsconfig|jsconfig|package|babel|jest|vite|webpack|rollup|eslint|prettier|tailwind|postcss)\b/;
+//: 서버 언어 — 이 파일들은 web/·client/·views/ 같은 폴더에 있어도 화면 코드가 아니다(Java 의 com/x/web/UserController.java 등).
+const SERVER_EXT = /\.(py|java|kt|kts|scala|go|rb|rs|cs|php)$/;
+//: 화면 컴포넌트 확장자 — routes/·api/ 폴더에 있어도(React Router·TanStack 의 routes/Home.tsx) 화면이다.
+const UI_EXT = /\.(jsx|tsx|vue|svelte)$/;
+//: Django·Flask 처럼 파일 이름이 곧 역할인 경우.
+const PY_ENTRY_FILES = /^(views|viewsets|routes|urls|api|handlers|controllers|endpoints)\.py$/;
+const PY_SUPPORT_FILES = /^(settings|conftest|setup|tests|test)\.py$/;
+const CONTROLLER_FILES = /(controller|endpoint)s?\.[a-z]+$|(resource|handler)s?\.(java|kt|go|cs)$/;
+const FRONT_DIRS = new Set(["frontend", "client", "web", "webview-src"]);
 
 /** 파일 경로(과 노드 종류)로 역할을 추정한다. 확실한 표시(폴더·파일 이름)가 없으면 확장자로. */
 export function roleOf(path: string, hint: { kind?: string } = {}): Role {
   if (hint.kind === "route") return "entry";
-  const p = (path || "").replace(/\\/g, "/").toLowerCase();
+  const raw = (path || "").replace(/\\/g, "/");
+  const p = raw.toLowerCase();
   const parts = p.split("/").filter(Boolean);
   const name = parts[parts.length - 1] ?? "";
+  const rawName = raw.split("/").filter(Boolean).pop() ?? "";
   const dirs = parts.slice(0, -1);
+  const server = SERVER_EXT.test(name);
   if (dirs.some((d) => SUPPORT_SEG.has(d)) || /\.(test|spec)\.[a-z]+$/.test(name) || /^test_.*\.py$/.test(name) || /_test\.(py|go)$/.test(name)
-    || CONFIG_FILES.test(name)) return "support";
+    || CONFIG_FILES.test(name) || PY_SUPPORT_FILES.test(name)) return "support";
   if (/\.(css|scss|sass|less|html?|vue|svelte)$/.test(name)) return "ui";
+  //: Next.js 의 API 경로(pages/api/*, app/**/route.ts)는 frontend/ 안에 있어도 서버 입구다.
+  const joined = dirs.join("/");
+  if (/(^|\/)pages\/api(\/|$)/.test(joined) || (dirs.includes("app") && /^route\.(js|mjs|ts)$/.test(name))) return "entry";
   //: 프런트엔드 폴더 안은 api/·models/ 같은 이름이어도 화면 쪽 코드다(frontend/src/api/client.js 는 서버 API 가 아니다).
-  if (dirs.some((d) => d === "frontend" || d === "client" || d === "web" || d === "webview-src")) return "ui";
+  if (!server && dirs.some((d) => FRONT_DIRS.has(d))) return "ui";
   if (dirs.some((d) => DATA_SEG.has(d)) || /(^|[._-])(models?|schemas?|db|repository|repo|migration|entity|dao)([._-]|\.)/.test(name) || name.endsWith(".sql")) return "data";
-  const pagesApi = dirs.join("/").includes("pages/api") || (dirs.includes("app") && name.startsWith("route."));
-  if (pagesApi || dirs.some((d) => ENTRY_SEG.has(d)) || (ENTRY_FILES.test(name) && !dirs.some((d) => UI_SEG.has(d)))) return "entry";
-  if (/\.(jsx|tsx)$/.test(name) || dirs.some((d) => UI_SEG.has(d))) return "ui";
+  //: React 의 src/App.jsx·App.tsx·App.js(대문자) 는 화면 뿌리다 — Express 의 app.js(소문자)와 다르다.
+  if (/^App\.(js|ts|jsx|tsx)$/.test(rawName)) return "ui";
+  if (server && (PY_ENTRY_FILES.test(name) || (dirs.includes("views") && name.endsWith(".py")))) return "entry";
+  if (CONTROLLER_FILES.test(name) && !UI_EXT.test(name)) return "entry";
+  if (!UI_EXT.test(name) && (dirs.some((d) => ENTRY_SEG.has(d)) || (ENTRY_FILES.test(name) && !dirs.some((d) => UI_SEG.has(d))))) return "entry";
+  if (UI_EXT.test(name) || (!server && dirs.some((d) => UI_SEG.has(d)))) return "ui";
   if (dirs.some((d) => LOGIC_SEG.has(d))) return "logic";
-  if (/\.(py|js|mjs|cjs|ts|go|rb|java|kt|rs)$/.test(name)) return "logic";
+  if (/\.(py|js|mjs|cjs|ts|go|rb|java|kt|rs|scala|cs|php)$/.test(name)) return "logic";
   return "other";
 }
 
@@ -80,6 +98,8 @@ export interface LaneOptions {
   groupPad?: number; groupHeader?: number; groupGap?: number; top?: number; maxCols?: number;
   /** 한 열에 이보다 많으면 옆 열로 넘긴다(세로로 끝없이 늘어나지 않게) */
   maxRows?: number;
+  /** 한 레인의 열(보조 열 포함)이 이보다 많아지면 옆으로 넘기지 않고 줄을 늘린다(가로로 끝없이 늘어나지 않게). */
+  maxLaneCols?: number;
   /** 노드가 하나뿐인 그룹을 이 이름의 그룹 하나로 모은다(상자가 노드마다 생기지 않게) */
   mergeSingletons?: string;
 }
@@ -176,7 +196,7 @@ export function layoutLanes(nodes: LNode[], edges: LEdge[], options: LaneOptions
     //: 그룹 × 단계(열)별 목록 — 한 열이 maxRows 를 넘으면 옆 보조 열로 넘긴다
     const cells = new Map<string, Map<number, LNode[]>>();
     const ranks = Math.max(...members.map((n) => col.get(n.id)!)) + 1;
-    const subCols = new Array(ranks).fill(1);
+    const longest: number[] = new Array(ranks).fill(0);
     for (const key of groupKeys) {
       const rows = new Map<number, LNode[]>();
       for (const n of byGroup.get(key)!) {
@@ -187,9 +207,18 @@ export function layoutLanes(nodes: LNode[], edges: LEdge[], options: LaneOptions
       }
       for (const [c, r] of rows) {
         r.sort((a, b) => topo.get(a.id)! - topo.get(b.id)!);
-        subCols[c] = Math.max(subCols[c], Math.ceil(r.length / maxRows));
+        longest[c] = Math.max(longest[c], r.length);
       }
       cells.set(key, rows);
+    }
+    //: 넘친 열은 옆 보조 열로 — 단, 레인 폭이 상한을 넘으면 그 레인만 줄 수를 늘린다(폴더 하나에 파일 40개 같은 경우).
+    const laneCap = Math.max(ranks, options.maxLaneCols ?? Math.max(maxCols + 2, 6));
+    let rowsHere = maxRows;
+    const subColsFor = (rowsN: number) => longest.map((len) => Math.max(1, Math.ceil(len / rowsN)));
+    let subCols = subColsFor(rowsHere);
+    while (subCols.reduce((a, b) => a + b, 0) > laneCap && rowsHere < members.length) {
+      rowsHere += 1;
+      subCols = subColsFor(rowsHere);
     }
     const colOffset: number[] = [];
     let acc = 0;
@@ -200,14 +229,14 @@ export function layoutLanes(nodes: LNode[], edges: LEdge[], options: LaneOptions
     for (const key of groupKeys) {
       const rows = cells.get(key)!;
       const list = byGroup.get(key)!;
-      const maxRowsHere = Math.min(maxRows, Math.max(...[...rows.values()].map((r) => r.length)));
+      const maxRowsHere = Math.min(rowsHere, Math.max(...[...rows.values()].map((r) => r.length)));
       const gh = header + pad * 2 + maxRowsHere * nodeH + (maxRowsHere - 1) * rowGap;
       const label = key === MISC ? (options.mergeSingletons ?? "") : (list[0].groupLabel ?? key);
       groups.push({ key: key === MISC ? "" : key, label, role, count: list.length, x, y, w: laneW, h: gh });
       for (const [c, r] of rows) {
         r.forEach((n, i) => {
           const w = n.w ?? nodeW, h = n.h ?? nodeH;
-          const cc = colOffset[c] + Math.floor(i / maxRows), row = i % maxRows;
+          const cc = colOffset[c] + Math.floor(i / rowsHere), row = i % rowsHere;
           placed.set(n.id, {
             id: n.id, role, group: key === MISC ? "" : key, col: cc, w, h,
             x: x + pad + cc * colW + (colW - w) / 2,
@@ -252,14 +281,16 @@ export function groupColor(key: string): string {
 /** 글자 수로 자르기(SVG 는 넘치는 글자를 자르지 않는다). 한글은 두 칸으로 센다. */
 export function fit(text: string, px: number, size = 11): string {
   const unit = size * 0.58;
-  let used = 0, out = "";
-  for (const ch of text) {
+  let used = 0;
+  //: 글자 단위(코드 포인트)로 센다 — 이모지·확장 한자 같은 두 칸짜리 문자를 반으로 자르지 않게.
+  const out: string[] = [];
+  for (const ch of Array.from(text ?? "")) {
     const w = /[ㄱ-힝]/.test(ch) ? unit * 1.75 : unit;
-    if (used + w > px) return out.slice(0, Math.max(0, out.length - 1)) + "…";
+    if (used + w > px) return out.slice(0, Math.max(0, out.length - 1)).join("") + "…";
     used += w;
-    out += ch;
+    out.push(ch);
   }
-  return out;
+  return out.join("");
 }
 
 // ── 아키텍처: 파일 그래프 → 폴더 단위로 묶기 ─────────────────────────────────

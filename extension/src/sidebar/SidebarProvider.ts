@@ -18,7 +18,7 @@ import {
     AwsStatus,
 } from '../types';
 import { ApiClient, CodeDecisionChoice, CodeSpec } from '../core/ApiClient';
-import { currentQuickAccess, quickWheelClosed, saveQuickAccess, setQuickSlot, QuickAccessPayload } from '../quickAccessHost';
+import { currentQuickAccess, quickWheelClosed, resetQuickAccess, setQuickSlot, QuickAccessPayload } from '../quickAccessHost';
 import { GenerationPausedError, compactCodeEvent } from '../core/codeStream';
 import { CoreHttpError, policyDenialFromDetail } from '../core/httpError';
 import { CoreManager } from '../core/CoreManager';
@@ -184,6 +184,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** 새로 여는 ReCoder 창이 ready 를 보내면 띄울 빠른 이동 휠(창이 이미 있으면 바로 보낸다 — ReCoderPanel.post). */
     private _pendingWheel: 'pick' | 'edit' | null = null;
     requestWheel(mode: 'pick' | 'edit'): void { this._pendingWheel = mode; }
+    //: 큰 작업 화면이 ready 를 보냈는가 — 막 만든 창·다시 불러온 창에 바로 보낸 메시지는 React 가 듣기 전이라 사라진다.
+    private _workspaceReady = false;
+    isWorkspaceReady(): boolean { return !!this._workspacePanelWebview && this._workspaceReady; }
     /** 빠른 이동 설정이 바뀌면 열린 화면에 알린다. */
     broadcastQuickAccess(state: QuickAccessPayload): void {
         this.postMessage('quickAccess.state', state);
@@ -302,6 +305,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      */
     attachWorkspacePanel(webview: vscode.Webview): void {
         this._workspacePanelWebview = webview;
+        this._workspaceReady = false;
         webview.onDidReceiveMessage((message: { type: string; payload: unknown }) => {
             void this.handleMessage(message, webview);
         });
@@ -314,6 +318,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._canvasHosts.delete(webview);
         if (this._workspacePanelWebview === webview) {
             this._workspacePanelWebview = undefined;
+            this._workspaceReady = false;
             this._workspaceAutoOpenRequested = false;
             if (!this._view?.visible) {
                 this._pollingService.stop();
@@ -1566,12 +1571,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'quickAccess.set': {
                 //: 화면의 휠에서 한 칸을 바꾼다. 모르는 칸·기능은 무시한다(설정 변경 알림으로 화면이 다시 맞춰진다).
                 const p = (payload ?? {}) as { slot?: unknown; target?: unknown };
-                const changed = typeof p.slot === 'string' && typeof p.target === 'string' && await setQuickSlot(p.slot, p.target);
-                if (!changed) { this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess()); }
+                try {
+                    const changed = typeof p.slot === 'string' && typeof p.target === 'string' && await setQuickSlot(p.slot, p.target);
+                    if (!changed) { this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess()); }
+                } catch (err) {
+                    //: 저장 실패(설정 파일 잠김·문법 오류 등) — 화면이 낙관적으로 바꾼 칸을 되돌리고 이유를 알린다.
+                    this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess());
+                    void vscode.window.showErrorMessage(`빠른 이동 설정을 저장하지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
+                }
                 break;
             }
             case 'quickAccess.reset': {
-                await saveQuickAccess(null);
+                try { await resetQuickAccess(); } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess());
+                    void vscode.window.showErrorMessage(`빠른 이동 설정을 되돌리지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
+                }
                 break;
             }
             case 'quickAccess.keybindings': {
@@ -1581,7 +1595,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'quickAccess.closed': {
                 //: 휠을 닫았다 — 고르지 않고 닫았으면(Esc) Alt+Q 를 누르기 전의 편집기로 돌아간다.
-                await quickWheelClosed((payload as { cancelled?: unknown } | undefined)?.cancelled === true);
+                const reason = (payload as { reason?: unknown } | undefined)?.reason;
+                await quickWheelClosed(reason === 'pick' || reason === 'dismiss' ? reason : 'cancel');
                 break;
             }
             case 'ui.state': {
@@ -1604,6 +1619,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.postMessageToWebview(requestWebview, 'ui.restore', this._restoredUiState);
                     this._restoredUiState = null;
                 }
+                if (requestWebview && requestWebview === this._workspacePanelWebview) { this._workspaceReady = true; }
                 if (this._pendingWheel && requestWebview && requestWebview === this._workspacePanelWebview) {
                     this.postMessageToWebview(requestWebview, 'quickAccess.wheel', { mode: this._pendingWheel, state: currentQuickAccess() });
                     this._pendingWheel = null;
@@ -2142,7 +2158,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         workspacePath: scope.workspacePath, openFile, contextFiles: p.contextFiles ?? [],
                         targetFolder: scope.targetFolder, decisions: p.decisions ?? [],
                     });
-                    this.postMessageToWebview(requestWebview, 'code.specResult', { requestId: p.requestId, spec: draft.spec });
+                    this.postMessageToWebview(requestWebview, 'code.specResult', {
+                        requestId: p.requestId, spec: draft.spec ?? null,
+                        ...(draft.skip ? { skip: draft.skip, message: draft.message ?? '' } : {}),
+                    });
                 } catch (err) {
                     this.postMessageToWebview(requestWebview, 'code.specError', {
                         requestId: p.requestId, message: err instanceof Error ? err.message : String(err),

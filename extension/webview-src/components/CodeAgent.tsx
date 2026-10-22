@@ -96,6 +96,8 @@ interface DecisionModal {
   /** 2.0.43 — decide: 설계 결정 고르기, spec: 명세(합격 조건) 확인·수정(마지막 단계). */
   phase?: "decide" | "spec";
   spec?: EditableSpec | null; specLoading?: boolean; specError?: string;
+  /** 코어가 이 요청은 합격 조건 단계를 건너뛴다고 알렸다(검증된 기반 코드 등) — 그 안내 문장. */
+  specSkip?: string;
   /** 지금 명세 초안을 받은 설계 선택 — 선택을 바꾸고 돌아오면 초안을 다시 받는다. */
   specFor?: string;
 }
@@ -137,6 +139,20 @@ export interface ExternalTurn { requestId: number; instruction: string; targetFo
 let pendingTargetFolder: string | null = null;
 export function setPendingTargetFolder(folder: string): void { pendingTargetFolder = folder; }
 
+
+//: 모달 창 안에서 Tab 이 창 밖(뒤의 입력창·머리글)으로 나가지 않게 돈다.
+function trapTab(e: React.KeyboardEvent<HTMLDivElement>) {
+  if (e.key !== "Tab") return;
+  const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+    .filter((el) => el.offsetParent !== null || el === document.activeElement);
+  if (!items.length) { e.preventDefault(); return; }
+  const first = items[0], last = items[items.length - 1];
+  const at = document.activeElement;
+  if (e.shiftKey && (at === first || at === e.currentTarget)) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && at === last) { e.preventDefault(); first.focus(); }
+}
+
 export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string; onOpenHub?: (hub: "deploy" | "security") => void }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError, onOpenHub }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
@@ -169,6 +185,14 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   const [decisionModal, setDecisionModal] = useState<DecisionModal | null>(null);
   const decisionModalRef = React.useRef<DecisionModal | null>(null);
   decisionModalRef.current = decisionModal;
+  //: 결정·명세 창이 열리거나 단계가 바뀌면 키보드 포커스를 창 안으로 — 뒤의 입력창에 글자가 들어가지 않게.
+  const dialogRef = React.useRef<HTMLDivElement | null>(null);
+  const dialogKey = decisionModal ? `${decisionModal.requestId}:${decisionModal.phase}:${decisionModal.step}` : "";
+  useEffect(() => {
+    if (!dialogKey || typeof document === "undefined") return;
+    const box = dialogRef.current;
+    if (box && !box.contains(document.activeElement)) box.focus({ preventScroll: true });
+  }, [dialogKey]);
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const pendingRequestsRef = React.useRef<Record<number, PendingRequest>>({});
   const handledExternalRef = React.useRef<number | null>(null);
@@ -185,10 +209,16 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     finishWaiting(id);
     responseTimers.current.set(id, setTimeout(() => {
       responseTimers.current.delete(id);
+      //: 명세 초안이 늦는 것은 턴 실패가 아니다 — 고른 설계를 지킨 채 명세 창 안에서 다시 받거나 직접 쓰게 한다.
+      const modal = decisionModalRef.current;
+      if (modal?.requestId === id && modal.phase === "spec" && modal.specLoading) {
+        setDecisionModal((cur) => cur && cur.requestId === id ? { ...cur, specLoading: false, spec: cur.spec ?? addCriterion(emptySpec()),
+          specError: "합격 조건 초안이 너무 오래 걸립니다(5분)." } : cur);
+        return;
+      }
       expiredRequests.current.add(id);
       if (activeRequest.current === id) activeRequest.current = null;
-      //: 명세 초안을 기다리다 시간이 지나면 열린 결정 창도 닫는다(턴은 아래에서 오류로 바뀐다).
-      if (decisionModalRef.current?.requestId === id) setDecisionModal(null);
+      if (modal?.requestId === id) setDecisionModal(null);
       const unsent = pendingRequestsRef.current[id]?.instruction ?? "";
       delete pendingRequestsRef.current[id];
       const acknowledged = acknowledgedRequests.current.has(id);
@@ -343,12 +373,16 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       });
     } else if (type === "code.specResult" || type === "code.specError") {
       //: 2.0.43 명세 초안 — 결정 창 안에서만 반영한다. 실패해도 턴은 그대로(다시 받기·직접 쓰기).
-      const r = payload as { requestId?: number; spec?: unknown; message?: string };
+      const r = payload as { requestId?: number; spec?: unknown; message?: string; skip?: string };
       setDecisionModal((cur) => {
         if (!cur || cur.requestId !== r.requestId || cur.phase !== "spec" || !cur.specLoading) { return cur; }
         if (type === "code.specError") {
           return { ...cur, specLoading: false, spec: cur.spec ?? addCriterion(emptySpec()),
             specError: `합격 조건 초안을 받지 못했습니다: ${r.message ?? "알 수 없는 오류"}` };
+        }
+        if (r.skip) {
+          //: 합격 조건을 따르지 않는 생성 — 빈 편집기를 보여 주지 않고, 이유와 [생성] 만 둔다.
+          return { ...cur, specLoading: false, specError: "", spec: null, specSkip: r.message || "이 요청은 합격 조건 단계를 건너뜁니다." };
         }
         const spec = fromDraft(r.spec);
         //: 초안에 조건이 하나도 없으면 빈 줄 하나를 열어 둔다 — 어디에 쓰면 되는지 보이게.
@@ -406,11 +440,12 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     if (!request) { setDecisionModal(null); return; }
     const choices = buildDecisionChoices(modalArg.decisions, modalArg.selections);
     const specFor = JSON.stringify(choices.map((c) => [c.id, c.chosen_key]));
-    if (modalArg.spec && modalArg.specFor === specFor && !modalArg.specError) {
+    if ((modalArg.spec || modalArg.specSkip) && modalArg.specFor === specFor && !modalArg.specError) {
       setDecisionModal({ ...modalArg, phase: "spec" });
       return;
     }
-    setDecisionModal({ ...modalArg, phase: "spec", specLoading: true, specError: "", specFor, spec: modalArg.spec ?? null });
+    //: 설계 선택이 바뀌었으면 예전 초안은 버린다 — 새 초안이 실패해도 다른 설계의 합격 조건이 같이 나가지 않게.
+    setDecisionModal({ ...modalArg, phase: "spec", specLoading: true, specError: "", specSkip: "", specFor, spec: modalArg.specFor === specFor ? modalArg.spec ?? null : null });
     waitForResponse(modalArg.requestId, 300);
     postMessage("code.spec", { requestId: modalArg.requestId, instruction: request.instruction, targetFolder: request.targetFolder,
       contextFiles: request.contextFiles, decisions: choices });
@@ -561,9 +596,10 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         //: 2.0.43 명세 · 합격 조건 — 결정 창의 마지막 단계. 여기서 승인한 조건만 생성 요청에 실린다.
         const m = decisionModal;
         const issues = specIssues(m.spec);
-        const blocked = !!m.specLoading || hasBlocking(issues);
+        const skip = !m.specLoading && !!m.specSkip;
+        const blocked = !!m.specLoading || (!skip && hasBlocking(issues));
         return (
-          <div role="dialog" aria-modal="true" aria-label="명세 확인" style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 18, background: "rgba(0,0,0,.58)", backdropFilter: "blur(2px)" }}>
+          <div role="dialog" aria-modal="true" aria-label="명세 확인" ref={dialogRef} tabIndex={-1} onKeyDown={trapTab} style={{ position: "fixed", inset: 0, zIndex: 1000, outline: "none", display: "grid", placeItems: "center", padding: 18, background: "rgba(0,0,0,.58)", backdropFilter: "blur(2px)" }}>
             <div style={{ width: "min(720px, 100%)", maxHeight: "calc(100vh - 36px)", overflowY: "auto", border: "1px solid var(--vscode-widget-border, #454545)", borderRadius: 10, background: "var(--vscode-editorWidget-background, #252526)", boxShadow: "0 18px 48px rgba(0,0,0,.45)" }}>
               <div style={{ padding: "15px 18px 12px", borderBottom: "1px solid var(--vscode-panel-border, #3b3b3b)" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -572,13 +608,14 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                   <span style={{ marginLeft: "auto", borderRadius: 99, padding: "3px 8px", background: "var(--vscode-badge-background, #4d4d4d)", color: "var(--vscode-badge-foreground, #fff)", fontSize: 11, fontWeight: 600 }}>마지막 단계</span>
                 </div>
                 <p style={{ margin: "6px 0 0", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.55 }}>
-                  이 조건을 모두 만족하도록 만들고 docs/spec 에 기록합니다.
+                  {skip ? "이 요청에는 합격 조건을 적용하지 않습니다." : "이 조건을 모두 만족하도록 만들고 docs/spec 에 기록합니다."}
                 </p>
               </div>
               <div style={{ padding: 18 }}>
                 {m.specLoading && <p role="status" data-testid="spec-loading" style={{ margin: 0, color: "var(--vscode-textLink-foreground, #4daafc)", fontSize: 12.5 }}>AI 가 합격 조건 초안을 만드는 중… (보통 10~40초)</p>}
                 {m.specError && <p role="alert" style={{ margin: "0 0 12px", color: "var(--vscode-errorForeground, #f48771)", fontSize: 12, lineHeight: 1.5 }}>{m.specError} [다시 받기] 를 누르거나 아래에 직접 적어 주세요.</p>}
-                {!m.specLoading && m.spec && (
+                {skip && <p role="status" data-testid="spec-skip" style={{ margin: 0, fontSize: 12.5, lineHeight: 1.55 }}>{m.specSkip}</p>}
+                {!m.specLoading && !skip && m.spec && (
                   <SpecEditor spec={m.spec} issues={issues} onChange={(next) => setDecisionModal((cur) => cur && cur.requestId === m.requestId ? { ...cur, spec: next } : cur)} />
                 )}
               </div>
@@ -588,8 +625,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                 <button disabled={!!m.specLoading} onClick={() => setDecisionModal((cur) => cur ? { ...cur, phase: "decide" } : cur)} style={{ ...ghostBtn, padding: "7px 11px" }}>← 설계 결정</button>
                 {m.specError && <button onClick={() => requestSpec({ ...m, spec: null, specError: "" })} style={{ ...ghostBtn, padding: "7px 11px" }}>다시 받기</button>}
                 {m.specError && <button onClick={() => confirmDecisions(m, false)} style={{ ...ghostBtn, padding: "7px 11px" }} title="합격 조건 없이 설계 결정만으로 만듭니다">명세 없이 생성</button>}
-                <button onClick={() => confirmDecisions(m)} disabled={blocked}
-                  style={{ ...primaryBtn, marginLeft: "auto", padding: "8px 13px", opacity: blocked ? .5 : 1 }}>명세대로 생성 →</button>
+                <button onClick={() => confirmDecisions(m, !skip)} disabled={blocked}
+                  style={{ ...primaryBtn, marginLeft: "auto", padding: "8px 13px", opacity: blocked ? .5 : 1 }}>{skip ? "생성 →" : "명세대로 생성 →"}</button>
               </div>
             </div>
           </div>
@@ -603,7 +640,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         const confirmOnly = isConfirmOnly(view.decisions);
         const selected = view.selections[decision.id];
         return (
-          <div role="dialog" aria-modal="true" aria-label="설계 결정" style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 18, background: "rgba(0,0,0,.58)", backdropFilter: "blur(2px)" }}>
+          <div role="dialog" aria-modal="true" aria-label="설계 결정" ref={dialogRef} tabIndex={-1} onKeyDown={trapTab} style={{ position: "fixed", inset: 0, zIndex: 1000, outline: "none", display: "grid", placeItems: "center", padding: 18, background: "rgba(0,0,0,.58)", backdropFilter: "blur(2px)" }}>
             <div style={{ width: "min(560px, 100%)", maxHeight: "calc(100vh - 36px)", overflowY: "auto", border: "1px solid var(--vscode-widget-border, #454545)", borderRadius: 10, background: "var(--vscode-editorWidget-background, #252526)", boxShadow: "0 18px 48px rgba(0,0,0,.45)" }}>
               <div style={{ padding: "15px 18px 12px", borderBottom: "1px solid var(--vscode-panel-border, #3b3b3b)" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

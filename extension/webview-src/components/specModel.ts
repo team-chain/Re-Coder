@@ -118,6 +118,18 @@ const VAGUE = /(잘\s*(동작|작동|되|돌아)|적절(히|한)|원활|깔끔|�
 //: 실패 흐름(잘못된 입력·권한 없음·없는 데이터)을 다루는 조건인가.
 const FAILURE = /(거절|거부|막|실패|오류|에러|잘못|없(는|으면|을)|권한|로그인하지|401|403|404|409|422|400|초과|부족|중복|빈\s)/;
 
+//: AI 초안은 프로젝트 파일을 읽고 만든다 — 파일에 심어 둔 문장이 "외부로 보내라" 같은 조건으로 들어올 수 있다.
+//: 막지는 않고(정상적인 웹훅·외부 API 도 있다) 사람이 한 번 보게 알린다. 사람이 직접 쓴 조건은 묻지 않는다.
+const RISKY = /(https?:\/\/|\bwww\.|\.env\b|비밀\s*(값|번호|키)|시크릿|secret|api[\s_-]*key|access[\s_-]*key|토큰|token|password|패스워드|자격\s*증명|credential|외부\s*(로|에|서버|주소)?\s*(전송|보내|업로드)|원격\s*(으로|에)\s*(전송|보내)|웹훅|webhook)/i;
+
+export function riskyWord(text: string): string | null {
+  const m = RISKY.exec(text);
+  return m ? m[0] : null;
+}
+
+/** 범위 한 칸에 이보다 많이 적으면 한 번에 만들기엔 크다고 알린다. */
+export const SCOPE_WARN_LINES = 8;
+
 export function vagueWord(text: string): string | null {
   const m = VAGUE.exec(text);
   return m ? m[0] : null;
@@ -132,6 +144,8 @@ export function specIssues(spec: EditableSpec | null | undefined): SpecIssue[] {
   if (!written.length) out.push({ level: "block", message: "합격 조건을 하나 이상 남겨 주세요. 무엇이 되면 완성인지 정해야 생성할 수 있습니다." });
   for (const c of included) {
     if (!c.text.trim()) { out.push({ key: c.key, level: "warn", message: "빈 조건은 빼고 보냅니다." }); continue; }
+    const risky = c.source === "ai" ? riskyWord(`${c.text} ${c.check}`) : null;
+    if (risky) out.push({ key: c.key, level: "warn", message: `외부 주소·비밀 값과 관련된 AI 조건("${risky}") — 요청하신 내용이 맞는지 확인해 주세요. 프로젝트 파일의 문장이 섞여 들어왔을 수 있습니다.` });
     const vague = vagueWord(c.text);
     if (vague) out.push({ key: c.key, level: "warn", message: `확인할 수 없는 말("${vague}") — 숫자·상태 코드·화면 문구처럼 확인할 수 있게 써 주세요.` });
     else if (!c.check.trim()) out.push({ key: c.key, level: "warn", message: "확인 방법이 비어 있습니다." });
@@ -140,6 +154,8 @@ export function specIssues(spec: EditableSpec | null | undefined): SpecIssue[] {
     out.push({ level: "warn", message: "실패 흐름(잘못된 입력·권한 없음·없는 데이터) 조건이 없습니다. 출시 수준이라면 하나 이상 넣는 것을 권합니다." });
   }
   if (!spec.goal.trim()) out.push({ level: "warn", message: "목표가 비어 있습니다." });
+  const scopeLines = spec.inScope.split(/\r?\n/).filter((s) => s.trim()).length;
+  if (scopeLines > SCOPE_WARN_LINES) out.push({ level: "warn", message: `만들 것이 ${scopeLines}줄입니다. 한 번에 만들기엔 큽니다 — 나눠서 요청하면 결과를 확인하기 쉽습니다.` });
   return out;
 }
 

@@ -561,19 +561,20 @@ export function activate(context: vscode.ExtensionContext): void {
     //: 2.0.44 빠른 이동 — Alt+Q 로 휠, 방향키(기본 4칸) · Shift+방향키(사용자 추가 4칸) · "ReCoder: ○○ 열기" 명령.
     registerQuickAccess(context, {
         open: (target) => {
-            ReCoderPanel.showView(context.extensionUri, sidebarProvider, target.view, target.mapMode ? { mapMode: target.mapMode } : undefined);
+            ReCoderPanel.showView(context.extensionUri, sidebarProvider, target.view, target.mapMode ? { mapMode: target.mapMode } : undefined, { stay: true });
             void ensureCoreRunning(coreManager, sidebarProvider);
         },
         showWheel: (mode) => {
-            //: 창이 이미 있으면 바로 띄우고, 없으면 새 창이 준비될 때(ready) 띄운다.
-            const existed = ReCoderPanel.createOrShowExisting(context.extensionUri, sidebarProvider);
-            if (existed) {
+            //: 휠은 잠깐 보는 것 — ReCoder 탭을 지금 편집기 그룹으로 끌고 오지 않고, 사이드바도 닫지 않는다.
+            const show = { stay: true, hideSidebar: false };
+            if (ReCoderPanel.createOrShowExisting(context.extensionUri, sidebarProvider, show) && sidebarProvider.isWorkspaceReady()) {
                 ReCoderPanel.post('quickAccess.wheel', { mode, state: currentQuickAccess() });
-            } else {
-                sidebarProvider.requestWheel(mode);
-                ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider);
-                void ensureCoreRunning(coreManager, sidebarProvider);
+                return;
             }
+            //: 창이 없거나 아직 그리는 중 — 화면이 ready 를 보내면 띄운다(바로 보내면 React 가 듣기 전이라 사라진다).
+            sidebarProvider.requestWheel(mode);
+            ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider, show);
+            void ensureCoreRunning(coreManager, sidebarProvider);
         },
         broadcast: (state) => sidebarProvider.broadcastQuickAccess(state),
     });

@@ -173,7 +173,10 @@ export interface CodeSpec {
     criteria: CodeSpecCriterion[];
 }
 export interface CodeSpecDraft {
-    spec: CodeSpec;
+    /** null + skip: 이 요청은 합격 조건을 따르지 않는 생성(검증된 기반 코드)이라 단계를 건너뛴다. */
+    spec: CodeSpec | null;
+    skip?: string;
+    message?: string;
     model?: string;
     provider?: string;
 }

@@ -15,6 +15,7 @@ export class ReCoderPanel {
     private constructor(
         private readonly _panel: vscode.WebviewPanel,
         private readonly _sidebarProvider: SidebarProvider,
+        hideSidebar = true,
     ) {
         // dispose 콜백에서는 panel.webview 접근이 금지된다. 미리 참조를 보관해야
         // 창을 닫은 뒤에도 정리 로직이 예외 없이 실행되고 다음 창을 열 수 있다.
@@ -22,7 +23,7 @@ export class ReCoderPanel {
         webview.html = this._sidebarProvider.getWorkspacePanelHtml(webview);
         this._sidebarProvider.attachWorkspacePanel(webview);
 
-        this._hideSidebar();
+        if (hideSidebar) { this._hideSidebar(); }
 
         this._panel.onDidDispose(() => {
             this._sidebarProvider.detachWorkspacePanel(webview);
@@ -74,20 +75,20 @@ export class ReCoderPanel {
     }
 
     /** 특정 화면(예: 운영 대응)을 열어 보여 준다 — 새 창이면 화면이 준비될 때 그 화면으로 시작한다. */
-    static showView(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider, view: string, extra?: Record<string, unknown>): void {
+    static showView(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider, view: string, extra?: Record<string, unknown>, opts?: ShowOptions): void {
         if (ReCoderPanel._current) {
-            ReCoderPanel.createOrShow(extensionUri, sidebarProvider);
+            ReCoderPanel.createOrShow(extensionUri, sidebarProvider, opts);
             void ReCoderPanel._current._panel.webview.postMessage({ type: 'ui.openView', payload: { view, ...(extra ?? {}) } });
             return;
         }
         sidebarProvider.requestView(view, extra);
-        ReCoderPanel.createOrShow(extensionUri, sidebarProvider);
+        ReCoderPanel.createOrShow(extensionUri, sidebarProvider, opts);
     }
 
     /** 창이 이미 있으면 앞으로 꺼내고 true, 없으면 아무것도 하지 않고 false. */
-    static createOrShowExisting(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider): boolean {
+    static createOrShowExisting(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider, opts?: ShowOptions): boolean {
         if (!ReCoderPanel._current) { return false; }
-        ReCoderPanel.createOrShow(extensionUri, sidebarProvider);
+        ReCoderPanel.createOrShow(extensionUri, sidebarProvider, opts);
         return true;
     }
 
@@ -98,11 +99,12 @@ export class ReCoderPanel {
         return true;
     }
 
-    static createOrShow(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider): ReCoderPanel {
+    static createOrShow(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider, opts: ShowOptions = {}): ReCoderPanel {
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
         if (ReCoderPanel._current) {
-            ReCoderPanel._current._panel.reveal(column, false);
-            ReCoderPanel._current._hideSidebar();
+            //: stay — 빠른 이동: 다른 편집기 그룹에 둔 ReCoder 탭을 지금 그룹으로 끌고 오지 않는다(그 자리에서 앞으로).
+            ReCoderPanel._current._panel.reveal(opts.stay ? undefined : column, false);
+            if (opts.hideSidebar !== false) { ReCoderPanel._current._hideSidebar(); }
             return ReCoderPanel._current;
         }
 
@@ -113,7 +115,14 @@ export class ReCoderPanel {
             { ...ReCoderPanel.webviewOptions(extensionUri), retainContextWhenHidden: true },
         );
 
-        ReCoderPanel._current = new ReCoderPanel(panel, sidebarProvider);
+        ReCoderPanel._current = new ReCoderPanel(panel, sidebarProvider, opts.hideSidebar !== false);
         return ReCoderPanel._current;
     }
+}
+
+export interface ShowOptions {
+    /** 이미 열린 탭을 그 편집기 그룹에 둔 채 앞으로 꺼낸다(기본: 지금 편집기 그룹으로 옮김). */
+    stay?: boolean;
+    /** false 면 recoder.workspace.hideSidebar 설정이 켜져 있어도 사이드바를 닫지 않는다. */
+    hideSidebar?: boolean;
 }

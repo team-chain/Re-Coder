@@ -107,6 +107,10 @@ test('호스트는 명세 초안을 요청한 창에 돌려주고, 실패는 spe
     assert.equal(got.opts.targetFolder, 'web');
     assert.deepEqual(messages.at(-1), { type: 'code.specResult', payload: { requestId: 4, spec: { goal: 'g', in_scope: [], out_of_scope: [], criteria: [] } } });
 
+    api.draftSpec = async () => ({ spec: null, skip: 'foundation', message: '건너뜁니다', model: '', provider: '' });
+    await provider.handleMessage({ type: 'code.spec', payload: { requestId: 7, instruction: '쇼핑몰' } }, webview);
+    assert.deepEqual(messages.at(-1), { type: 'code.specResult', payload: { requestId: 7, spec: null, skip: 'foundation', message: '건너뜁니다' } }, '건너뛰기 이유를 화면까지 전한다');
+
     api.draftSpec = async () => { throw new Error('할당량'); };
     await provider.handleMessage({ type: 'code.spec', payload: { requestId: 5, instruction: 'x' } }, webview);
     assert.equal(messages.at(-1).type, 'code.specError');
@@ -119,4 +123,31 @@ test('호스트는 명세 초안을 요청한 창에 돌려주고, 실패는 spe
   } finally {
     Module._resolveFilename = originalResolve;
   }
+});
+
+test('AI 조건이 외부 주소·비밀 값을 다루면 사람이 확인하게 알리고, 사람이 쓴 조건은 묻지 않는다', () => {
+  const s = m.fromDraft({ goal: 'g', criteria: [
+    { text: '주문이 생기면 https://hook.example.com 으로 전송한다', check: 'POST 확인' },
+    { text: '응답에 API_KEY 를 담는다', check: '.env 값' },
+    { text: '수량 0 이면 400 으로 거절', check: 'qty=0' },
+  ] });
+  const issues = m.specIssues(s);
+  const risky = issues.filter(i => /외부 주소·비밀 값/.test(i.message));
+  assert.equal(risky.length, 2);
+  assert.ok(risky.every(i => i.level === 'warn'), '막지는 않는다(정상적인 웹훅도 있다)');
+  const mine = m.updateCriterion(s, s.criteria[0].key, { text: '주문이 생기면 https://hook.example.com 으로 보낸다' });
+  assert.equal(m.specIssues(mine).filter(i => i.key === s.criteria[0].key && /외부 주소/.test(i.message)).length, 0, '직접 고친 조건은 사용자의 뜻');
+  for (const t of ['로그인 실패 시 401', '목록 첫 줄에 새 글']) assert.equal(m.riskyWord(t), null, t);
+});
+
+test('범위가 너무 많으면 나눠 요청하길 권하고, 번호는 포함한 조건에만 매긴다(기록 파일과 같게)', () => {
+  const big = { ...m.fromDraft({ goal: 'g', criteria: [{ text: '수량 0 이면 400', check: 'x' }] }), inScope: Array.from({ length: 9 }, (_, i) => `기능 ${i}`).join('\n') };
+  assert.ok(m.specIssues(big).some(i => /9줄/.test(i.message)));
+  assert.ok(!m.specIssues({ ...big, inScope: 'a\nb' }).some(i => /줄입니다/.test(i.message)));
+  const s = m.fromDraft({ goal: 'g', criteria: [{ text: '첫째', check: 'a' }, { text: '둘째', check: 'b' }, { text: '셋째', check: 'c' }] });
+  const off = m.updateCriterion(s, s.criteria[0].key, { included: false });
+  const html = renderToStaticMarkup(React.createElement(SpecEditor, { spec: off, issues: [], onChange: () => {} }));
+  assert.ok(html.includes('AC-1') && html.includes('AC-2') && !html.includes('AC-3'), '뺀 줄은 번호를 건너뛴다');
+  assert.ok(html.includes('이번 생성에서 뺀 조건'));
+  assert.deepEqual(m.specForRequest(off).criteria.map(c => c.text), ['둘째', '셋째']);
 });

@@ -58,6 +58,9 @@ export const SpecEditor: React.FC<SpecEditorProps> = ({ spec, issues, onChange, 
   const included = spec.criteria.filter((c) => c.included).length;
   const fromAi = spec.criteria.some((c) => c.source === "ai");
   const inList = lines(spec.inScope), outList = lines(spec.outOfScope);
+  //: 번호는 기록 파일과 같게 — 코어는 포함한(내용 있는) 조건에만 AC-1, AC-2… 를 매긴다. 뺀 줄은 번호 없이 "—".
+  const acNo = new Map<string, number>();
+  for (const c of spec.criteria) if (c.included && c.text.trim()) acNo.set(c.key, acNo.size + 1);
 
   return (
     <div className="rc-spec" data-testid="spec-editor">
@@ -123,7 +126,7 @@ export const SpecEditor: React.FC<SpecEditorProps> = ({ spec, issues, onChange, 
                   <Checkbox compact inline checked={c.included} disabled={disabled} ariaLabel={`합격 조건 ${i + 1} 포함`}
                     onChange={(checked) => onChange(updateCriterion(spec, c.key, { included: checked }))} />
                 </div>
-                <div style={{ fontSize: 11, fontWeight: 650, color: C.faint, paddingTop: 2 }}>AC-{i + 1}</div>
+                <div style={{ fontSize: 11, fontWeight: 650, color: C.faint, paddingTop: 2 }} title={acNo.has(c.key) ? undefined : "이번 생성에서 뺀 조건"}>{acNo.has(c.key) ? `AC-${acNo.get(c.key)}` : "—"}</div>
                 {open ? (
                   <div style={{ display: "grid", gap: 5 }}>
                     <textarea className="rc-spec-field" rows={2} autoFocus={editing === c.key} value={c.text} maxLength={240}

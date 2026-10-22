@@ -158,3 +158,60 @@ test('아키텍처 맵: 역할 레인·폴더 상자·import 선, 파일이 많�
   const fd = fileDiagram({ nodes: [{ id: 'a', name: 'a', cls: 'Cart', in_degree: 0, out_degree: 1, flags: [] }, { id: 'b', name: 'b', cls: null, in_degree: 1, out_degree: 0, flags: ['overloaded'] }], edges: [{ from: 'a', to: 'b' }] });
   assert.deepEqual(fd.nodes.map((n) => n.group), ['Cart', '모듈 함수']);
 });
+
+test('역할 추정 보강: Next.js API·Java web 폴더·React App·routes 컴포넌트·Django 파일', () => {
+  const cases = {
+    'frontend/pages/api/orders.ts': 'entry', 'web/app/api/users/route.ts': 'entry', 'src/app/route.js': 'entry',
+    'src/main/java/com/shop/web/UserController.java': 'entry', 'src/main/java/com/shop/client/PayClient.java': 'logic',
+    'src/main/kotlin/shop/api/OrderResource.kt': 'entry', 'handlers/cart_handler.go': 'entry',
+    'src/App.jsx': 'ui', 'src/App.js': 'ui', 'src/App.tsx': 'ui', 'app.js': 'entry',
+    'src/routes/Home.tsx': 'ui', 'src/routes/cart.ts': 'entry', 'src/api/Orders.jsx': 'ui',
+    'shop/views.py': 'entry', 'shop/views/cart.py': 'entry', 'shop/urls.py': 'entry', 'shop/viewsets.py': 'entry',
+    'mysite/settings.py': 'support', 'shop/tests.py': 'support', 'conftest.py': 'support',
+    'templates/home.html': 'ui', 'core/llm/router.py': 'logic',
+  };
+  for (const [file, role] of Object.entries(cases)) assert.equal(L.roleOf(file), role, file);
+});
+
+test('레인 폭 상한: 한 폴더에 파일이 아주 많으면 옆으로 끝없이 늘이지 않고 줄을 늘린다', () => {
+  const nodes = Array.from({ length: 120 }, (_, i) => ({ id: `f${i}`, role: 'logic', group: 'services', order: i }));
+  const lay = L.layoutLanes(nodes, [], { maxRows: 8, maxCols: 5 });
+  const cols = new Set([...lay.nodes.values()].map((p) => p.col));
+  assert.ok(cols.size <= 7, `열 ${cols.size}개`);
+  assert.equal(lay.nodes.size, 120);
+  const placed = [...lay.nodes.values()];
+  for (let i = 0; i < placed.length; i++) for (let j = i + 1; j < placed.length; j++) assert.ok(!overlaps(box(placed[i]), box(placed[j])));
+  const g = lay.groups[0];
+  for (const p of placed) assert.ok(p.y + p.h <= g.y + g.h, '늘린 줄도 상자 안');
+  // 적을 때는 예전처럼 8줄에서 옆으로
+  const few = L.layoutLanes(nodes.slice(0, 12), [], { maxRows: 8 });
+  assert.equal(new Set([...few.nodes.values()].map((p) => p.col)).size, 2);
+});
+
+test('글자 자르기는 이모지·확장 문자를 반으로 자르지 않는다', () => {
+  const out = L.fit('🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀', 40);
+  assert.ok(out.endsWith('…'));
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(out), '짝 없는 상위 대리 문자가 없다');
+  assert.equal(L.fit('짧음', 200), '짧음');
+});
+
+test('다이어그램: 누를 수 있는 노드는 키보드로 닿고, 화살표 id 는 다이어그램마다 다르다', () => {
+  const nodes = [{ id: 'a', role: 'entry', group: 'g', order: 0, title: 'routes/cart.js', sub: '3 파일' }, { id: 'b', role: 'logic', group: 'h', order: 1, title: 'services' }];
+  const edges = [{ from: 'a', to: 'b' }];
+  const two = renderToStaticMarkup(React.createElement('div', null,
+    React.createElement(StructureDiagram, { nodes, edges, onNodeClick: () => {} }),
+    React.createElement(StructureDiagram, { nodes, edges })));
+  const ids = [...two.matchAll(/<marker[^>]* id="([^"]+)"/g)].map((m) => m[1]);
+  assert.equal(new Set(ids).size, ids.length, '화살표 정의 id 가 겹치지 않는다');
+  for (const m of two.matchAll(/marker-end="url\(#([^)]+)\)"/g)) assert.ok(ids.includes(m[1]), m[1]);
+  const [interactive, plain] = two.split('data-structure-diagram').slice(1);
+  assert.equal((interactive.match(/tabindex="0"/g) || []).length, 2);
+  assert.ok(interactive.includes('role="button"') && interactive.includes('aria-label="routes/cart.js — 3 파일"'));
+  assert.ok(interactive.includes('role="group"'), '누를 수 있는 요소를 담은 svg 는 img 가 아니다');
+  assert.ok(!plain.includes('tabindex="0"') && plain.includes('role="img"'), '누를 수 없으면 Tab 순서에 넣지 않는다');
+});
+
+test('다이어그램 키 처리: Enter·Space 는 클릭, Shift+Enter 는 두 번 누르기 — 원본 결선', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../webview-src/components/StructureDiagram.tsx'), 'utf8');
+  for (const s of ['e.key === "Enter" && e.shiftKey && onNodeDoubleClick', 'e.key === " "', 'React.useId()', 'scaleRef.current', '}, [focusId, layout]);', 'JSON.stringify(options ?? {})']) assert.ok(src.includes(s), s);
+});

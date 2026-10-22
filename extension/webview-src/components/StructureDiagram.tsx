@@ -3,7 +3,7 @@
  * 아키텍처 맵과 dry run 이 같이 쓴다. 배치는 structureLayout.ts.
  *
  * 읽는 법: 왼쪽에서 오른쪽으로 화면 → 입구(API) → 처리 → 데이터 → 외부. 상자는 폴더(또는 파일).
- * 노드에 마우스를 올리면 그 노드와 이어진 선만 진하게 남는다.
+ * 노드에 마우스를 올리면(키보드로 Tab 해 오면) 그 노드와 이어진 선만 진하게 남는다. Enter·Space 는 클릭, Shift+Enter 는 두 번 누르기.
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, LEdge, LNode, Role, edgeRoute, fit, groupColor, layoutLanes, LaneOptions } from "./structureLayout";
@@ -53,10 +53,18 @@ export interface StructureDiagramProps {
 }
 
 export const StructureDiagram: React.FC<StructureDiagramProps> = ({ nodes, edges, onNodeClick, onNodeDoubleClick, focusId, maxHeight = 560, layout: options, ariaLabel }) => {
-  const layout = useMemo(() => layoutLanes(nodes, edges, options), [nodes, edges, options]);
+  //: 부르는 쪽이 layout={{...}} 를 매번 새로 만들어도(재생 한 단계마다) 배치를 다시 계산하지 않게 값으로 비교한다.
+  const optionsKey = JSON.stringify(options ?? {});
+  const layout = useMemo(() => layoutLanes(nodes, edges, JSON.parse(optionsKey) as LaneOptions), [nodes, edges, optionsKey]);
   const [scale, setScale] = useState(1);
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
   const [hover, setHover] = useState<string | null>(null);
+  const [keyFocus, setKeyFocus] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  //: 한 화면에 다이어그램이 둘 이상이어도(지도 + 파일 안) 화살표 정의 id 가 겹치지 않게.
+  const uid = React.useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const arrowId = (color: string) => `sd-${uid}-arrow-${color.replace("#", "")}`;
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
   // 처음 그릴 때 폭에 맞춘다(너무 작게는 줄이지 않는다 — 글자가 안 읽히면 의미가 없다).
@@ -71,6 +79,8 @@ export const StructureDiagram: React.FC<StructureDiagramProps> = ({ nodes, edges
     const box = scrollRef.current;
     const at = focusId ? layout.nodes.get(focusId) : undefined;
     if (!box || !at) return;
+    //: 배율은 ref 로 읽는다 — 사용자가 확대·축소할 때마다 재생 중인 노드로 화면을 끌고 가지 않게.
+    const scale = scaleRef.current;
     const cx = (at.x + at.w / 2) * scale, cy = (at.y + at.h / 2) * scale;
     const outX = cx < box.scrollLeft + 40 || cx > box.scrollLeft + box.clientWidth - 40;
     const outY = cy < box.scrollTop + 40 || cy > box.scrollTop + box.clientHeight - 40;
@@ -78,7 +88,7 @@ export const StructureDiagram: React.FC<StructureDiagramProps> = ({ nodes, edges
       const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
       box.scrollTo?.({ left: Math.max(0, cx - box.clientWidth / 2), top: Math.max(0, cy - box.clientHeight / 2), behavior: reduce ? "auto" : "smooth" });
     }
-  }, [focusId, layout, scale]);
+  }, [focusId, layout]);
 
   const touching = (e: LEdge) => !hover || e.from === hover || e.to === hover;
   const neighbors = useMemo(() => {
@@ -103,11 +113,11 @@ export const StructureDiagram: React.FC<StructureDiagramProps> = ({ nodes, edges
         }}>맞춤</button>
       </div>
       <div ref={scrollRef} style={{ overflow: "auto", maxHeight, border: `1px solid ${C.line}`, borderRadius: 10, background: C.bg }}>
-        <svg role="img" aria-label={ariaLabel ?? "구조 다이어그램"} width={W * scale} height={H * scale} viewBox={`0 0 ${W} ${H}`}
+        <svg role={onNodeClick ? "group" : "img"} aria-label={ariaLabel ?? "구조 다이어그램"} width={W * scale} height={H * scale} viewBox={`0 0 ${W} ${H}`}
           style={{ display: "block", fontFamily: "var(--vscode-font-family)" }} onMouseLeave={() => setHover(null)}>
           <defs>
             {["#5b95ff", "#3fd6de", "#f7b955", "#7f8b99", "#ff8f6b", "#b48cff", "#ff6573", "#3ddc97"].map((c) => (
-              <marker key={c} id={`sd-arrow-${c.slice(1)}`} markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+              <marker key={c} id={arrowId(c)} markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
                 <path d="M0,0 L8,4.5 L0,9 Z" fill={c} />
               </marker>
             ))}
@@ -148,7 +158,7 @@ export const StructureDiagram: React.FC<StructureDiagramProps> = ({ nodes, edges
               <g key={`${e.from}>${e.to}:${i}`} data-edge={`${e.from}>${e.to}`} data-edge-state={e.state ?? "solid"}>
                 <path d={r.d} fill="none" stroke={color} strokeOpacity={opacity}
                   strokeWidth={e.state === "now" ? 2.6 : Math.min(3.5, (r.backward ? 1 : 1.3) + (e.weight ? Math.log2(e.weight) * 0.6 : 0))}
-                  strokeDasharray={dash} markerEnd={`url(#sd-arrow-${color.replace("#", "")})`} />
+                  strokeDasharray={dash} markerEnd={`url(#${arrowId(color)})`} />
                 {e.label && !idle && (e.state === "now" || (hover !== null && lit)) && (
                   <text x={r.mid.x + 3} y={r.mid.y - 3} fontSize={8.5} fill={color}>{e.label}</text>
                 )}
@@ -165,9 +175,20 @@ export const StructureDiagram: React.FC<StructureDiagramProps> = ({ nodes, edges
             const dim = state === "future" || (hover !== null && hover !== n.id && !neighbors.has(n.id));
             return (
               <g key={n.id} {...(n.attrs ?? {})} data-state={state} transform={`translate(${p.x},${p.y})`}
-                opacity={dim ? 0.38 : 1} style={{ cursor: onNodeClick ? "pointer" : "default", transition: "opacity .2s" }}
+                opacity={dim ? 0.38 : 1} style={{ cursor: onNodeClick ? "pointer" : "default", transition: "opacity .2s", outline: "none" }}
+                {...(onNodeClick ? {
+                  tabIndex: 0, role: "button", "aria-label": [n.title, n.sub, n.tooltip && n.tooltip !== n.title ? n.tooltip : ""].filter(Boolean).join(" — "),
+                  onFocus: () => { setKeyFocus(n.id); setHover(n.id); },
+                  onBlur: () => { setKeyFocus((k) => (k === n.id ? null : k)); setHover((h) => (h === n.id ? null : h)); },
+                  onKeyDown: (e: React.KeyboardEvent) => {
+                    //: Shift+Enter = 두 번 누르기(파일 열기)
+                    if (e.key === "Enter" && e.shiftKey && onNodeDoubleClick) { e.preventDefault(); onNodeDoubleClick(n.id); return; }
+                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onNodeClick(n.id); }
+                  },
+                } : {})}
                 onMouseEnter={() => setHover(n.id)} onClick={() => onNodeClick?.(n.id)} onDoubleClick={() => onNodeDoubleClick?.(n.id)}>
                 <title>{n.tooltip ?? n.title}</title>
+                {keyFocus === n.id && <rect x={-3} y={-3} width={p.w + 6} height={p.h + 6} rx={11} fill="none" stroke="var(--vscode-focusBorder, #3794ff)" strokeWidth={2} />}
                 {state === "current" && <rect x={-4} y={-4} width={p.w + 8} height={p.h + 8} rx={12} fill={C.cyan} fillOpacity={0.18} />}
                 <rect width={p.w} height={p.h} rx={9} style={{ fill: C.panel }} stroke={accent} strokeWidth={state === "current" ? 2 : 1} />
                 <text x={9} y={p.h / 2 - (n.sub ? 3 : -4)} fontSize={11} fontWeight={600} style={{ fill: C.ink }}>{fit(n.title, p.w - 16)}</text>

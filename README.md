@@ -435,6 +435,8 @@ npm run build                      # VS Code에서 extension 폴더를 열고 F5
 
 칸은 휠의 칸 바꾸기나 설정 `recoder.quickAccess` 에서, 여는 키는 VS Code 단축키 설정(`recoder.quickAccess.wheel`)에서 바꿉니다.
 
+터미널에 포커스가 있을 때는 VS Code 가 키를 셸로 보내므로 Alt+Q 가 휠을 열지 않습니다. 터미널에서도 쓰려면 명령 팔레트에서 `ReCoder: 터미널에서도 Alt+Q 로 빠른 이동` 을 실행하세요(사용자 설정 `terminal.integrated.commandsToSkipShell` 에 한 줄을 더합니다 — 셸의 Alt+Q 기능 대신 휠이 열립니다).
+
 설치 파일(VSIX)은 `v*` 태그를 push하면 GitHub Actions가 Windows · Linux · macOS용으로 빌드해 GitHub Release에 올립니다. 운영자용 전체 설정(게이트웨이 · Discord 봇 · VSIX 직접 빌드)은 [SETUP.md](SETUP.md)를 참고하세요.
 
 ### 골든패스 스모크

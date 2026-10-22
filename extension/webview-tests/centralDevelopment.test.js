@@ -311,12 +311,49 @@ test('확인 카드만 있는 작은 요청도 [진행] 뒤 합격 조건을 확
   assert.equal(req.payload.decisions[0].chosen_key, 'proceed');
 });
 
-test('명세 초안이 오지 않으면 창을 닫고 다시 요청할 수 있게 한다', () => {
+test('명세 초안이 오지 않으면 고른 설계를 지킨 채 창 안에서 다시 받거나 명세 없이 만들 수 있다', () => {
   const ui = mount();
-  toSpec(ui);
+  const id = toSpec(ui);
   ui.expire();
-  assert.equal(ui.find(n => n.props.role === 'dialog'), undefined);
-  assert.equal(ui.find(n => n.type === 'textarea').props.disabled, false);
+  const dialog = ui.find(n => n.props.role === 'dialog' && n.props['aria-label'] === '명세 확인');
+  assert.ok(dialog, '턴을 실패로 바꾸지 않고 창에 남는다');
+  assert.ok(ui.find(n => n.props.role === 'alert' && JSON.stringify(n.props.children).includes('너무 오래')));
+  ui.button('다시 받기').props.onClick(); ui.render();
+  assert.equal(ui.messages.at(-1).type, 'code.spec');
+  ui.emit('code.specError', {requestId:id, message:'연결 끊김'});
+  ui.button('명세 없이 생성').props.onClick(); ui.render();
+  const gen = ui.messages.at(-1);
+  assert.equal(gen.type, 'code.generate');
+  assert.equal(gen.payload.spec, null);
+  assert.equal(gen.payload.decisions[0].chosen_key, 'sqlite', '고른 설계는 그대로');
+});
+
+test('코어가 합격 조건 단계를 건너뛰라고 하면 빈 편집기 대신 이유와 [생성 →] 만 보인다', () => {
+  const ui = mount();
+  const id = toSpec(ui);
+  ui.emit('code.specResult', {requestId:id, spec:null, skip:'foundation', message:'검증된 쇼핑몰 기반은 정해진 코드를 그대로 씁니다.'});
+  assert.ok(ui.find(n => n.props['data-testid'] === 'spec-skip'));
+  assert.equal(editor(ui), undefined);
+  const go = ui.button('생성 →');
+  assert.equal(go.props.disabled, false);
+  go.props.onClick(); ui.render();
+  assert.equal(ui.messages.at(-1).type, 'code.generate');
+  assert.equal(ui.messages.at(-1).payload.spec, null);
+});
+
+test('설계 선택을 바꾸면 예전 설계의 합격 조건 초안은 버리고 새로 받는다', () => {
+  const ui = mount();
+  const id = toSpec(ui);
+  ui.emit('code.specResult', {requestId:id, spec});
+  ui.button('← 설계 결정').props.onClick(); ui.render();
+  ui.find(n => n.props && n.props.radioName === 'decision-storage').props.onSelect('pg'); ui.render();
+  ui.button('다음: 합격 조건 →').props.onClick(); ui.render();
+  assert.equal(ui.messages.at(-1).type, 'code.spec');
+  assert.equal(ui.messages.at(-1).payload.decisions[0].chosen_key, 'pg');
+  assert.equal(editor(ui), undefined, '새 초안이 올 때까지 예전 조건을 보여 주지 않는다');
+  ui.emit('code.specError', {requestId:id, message:'x'});
+  ui.button('명세 없이 생성').props.onClick(); ui.render();
+  assert.equal(ui.messages.at(-1).payload.spec, null, '실패해도 다른 설계의 조건이 실리지 않는다');
 });
 
 test('결과에는 따른 합격 조건과 "아직 자동 확인 전"이 함께 보인다', () => {
