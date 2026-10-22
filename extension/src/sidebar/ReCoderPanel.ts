@@ -103,7 +103,7 @@ export class ReCoderPanel {
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
         if (ReCoderPanel._current) {
             //: stay — 빠른 이동: 다른 편집기 그룹에 둔 ReCoder 탭을 지금 그룹으로 끌고 오지 않는다(그 자리에서 앞으로).
-            ReCoderPanel._current._panel.reveal(opts.stay ? undefined : column, false);
+            ReCoderPanel._current._panel.reveal(opts.stay ? undefined : column, !!opts.preserveFocus);
             if (opts.hideSidebar !== false) { ReCoderPanel._current._hideSidebar(); }
             return ReCoderPanel._current;
         }
@@ -111,7 +111,7 @@ export class ReCoderPanel {
         const panel = vscode.window.createWebviewPanel(
             ReCoderPanel.viewType,
             'ReCoder',
-            column,
+            { viewColumn: column, preserveFocus: !!opts.preserveFocus },
             { ...ReCoderPanel.webviewOptions(extensionUri), retainContextWhenHidden: true },
         );
 
@@ -125,4 +125,6 @@ export interface ShowOptions {
     stay?: boolean;
     /** false 면 recoder.workspace.hideSidebar 설정이 켜져 있어도 사이드바를 닫지 않는다. */
     hideSidebar?: boolean;
+    /** 창을 보여 주되 키보드 포커스는 지금 자리(치던 편집기)에 둔다 — 빠른 이동 휠. */
+    preserveFocus?: boolean;
 }

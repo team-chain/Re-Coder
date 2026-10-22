@@ -564,18 +564,20 @@ export function activate(context: vscode.ExtensionContext): void {
             ReCoderPanel.showView(context.extensionUri, sidebarProvider, target.view, target.mapMode ? { mapMode: target.mapMode } : undefined, { stay: true });
             void ensureCoreRunning(coreManager, sidebarProvider);
         },
-        showWheel: (mode) => {
+        showWheel: (mode, slot) => {
             //: 휠은 잠깐 보는 것 — ReCoder 탭을 지금 편집기 그룹으로 끌고 오지 않고, 사이드바도 닫지 않는다.
-            const show = { stay: true, hideSidebar: false };
+            //: 고르기(pick)는 키보드 포커스를 치던 편집기에 둔다 — 방향키는 VS Code 단축키가 받는다.
+            const show = { stay: true, hideSidebar: false, preserveFocus: mode === 'pick' };
             if (ReCoderPanel.createOrShowExisting(context.extensionUri, sidebarProvider, show) && sidebarProvider.isWorkspaceReady()) {
-                ReCoderPanel.post('quickAccess.wheel', { mode, state: currentQuickAccess() });
+                ReCoderPanel.post('quickAccess.wheel', { mode, slot, state: currentQuickAccess() });
                 return;
             }
             //: 창이 없거나 아직 그리는 중 — 화면이 ready 를 보내면 띄운다(바로 보내면 React 가 듣기 전이라 사라진다).
-            sidebarProvider.requestWheel(mode);
+            sidebarProvider.requestWheel(mode, slot);
             ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider, show);
             void ensureCoreRunning(coreManager, sidebarProvider);
         },
+        hideWheel: () => { ReCoderPanel.post('quickAccess.wheelClose', {}); },
         broadcast: (state) => sidebarProvider.broadcastQuickAccess(state),
     });
 

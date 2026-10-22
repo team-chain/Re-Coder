@@ -18,7 +18,7 @@ import {
     AwsStatus,
 } from '../types';
 import { ApiClient, CodeDecisionChoice, CodeSpec } from '../core/ApiClient';
-import { currentQuickAccess, quickWheelClosed, resetQuickAccess, setQuickSlot, QuickAccessPayload } from '../quickAccessHost';
+import { currentQuickAccess, isWheelOpen, quickWheelClosed, resetQuickAccess, setQuickSlot, QuickAccessPayload } from '../quickAccessHost';
 import { GenerationPausedError, compactCodeEvent } from '../core/codeStream';
 import { CoreHttpError, policyDenialFromDetail } from '../core/httpError';
 import { CoreManager } from '../core/CoreManager';
@@ -182,8 +182,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._workspacePanelRevived = false;
     }
     /** 새로 여는 ReCoder 창이 ready 를 보내면 띄울 빠른 이동 휠(창이 이미 있으면 바로 보낸다 — ReCoderPanel.post). */
-    private _pendingWheel: 'pick' | 'edit' | null = null;
-    requestWheel(mode: 'pick' | 'edit'): void { this._pendingWheel = mode; }
+    private _pendingWheel: { mode: 'pick' | 'edit'; slot?: string } | null = null;
+    requestWheel(mode: 'pick' | 'edit', slot?: string): void { this._pendingWheel = { mode, slot }; }
     //: 큰 작업 화면이 ready 를 보냈는가 — 막 만든 창·다시 불러온 창에 바로 보낸 메시지는 React 가 듣기 전이라 사라진다.
     private _workspaceReady = false;
     isWorkspaceReady(): boolean { return !!this._workspacePanelWebview && this._workspaceReady; }
@@ -1621,7 +1621,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 if (requestWebview && requestWebview === this._workspacePanelWebview) { this._workspaceReady = true; }
                 if (this._pendingWheel && requestWebview && requestWebview === this._workspacePanelWebview) {
-                    this.postMessageToWebview(requestWebview, 'quickAccess.wheel', { mode: this._pendingWheel, state: currentQuickAccess() });
+                    //: 그 사이 휠이 닫혔으면(Esc·시간 초과) 늦게 띄우지 않는다.
+                    if (this._pendingWheel.mode === 'edit' || isWheelOpen()) {
+                        this.postMessageToWebview(requestWebview, 'quickAccess.wheel', { ...this._pendingWheel, state: currentQuickAccess() });
+                    }
                     this._pendingWheel = null;
                 }
                 if (this._pendingCodeTarget !== null && requestWebview && requestWebview === this._workspacePanelWebview) {

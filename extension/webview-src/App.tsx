@@ -18,7 +18,7 @@ import { ModelRouting } from "./components/ModelRouting";
 import { Replay } from "./components/Replay";
 import CodeMap, { requestMapMode } from "./components/CodeMap";
 import QuickWheel, { CloseReason } from "./components/QuickWheel";
-import { QuickSlot, QuickState, toState, viewFor } from "./components/quickAccessModel";
+import { ALL_SLOTS, QuickSlot, QuickState, assignSlot, toState, viewFor } from "./components/quickAccessModel";
 import DeploymentCanvas from "./components/canvas/DeploymentCanvas";
 import { AwsConnection } from './components/AwsConnection';
 import { CanvasDrawer } from './components/canvas/CanvasDrawer';
@@ -242,19 +242,24 @@ const QuickAccess: React.FC<{ onSelectMode: (m: ViewMode) => void }> = ({ onSele
   const { postMessage, useMessage } = useVSCodeApi();
   const [state, setState] = useState<QuickState | null>(null);
   const [open, setOpen] = useState<null | "pick" | "edit">(null);
+  const [startSlot, setStartSlot] = useState<QuickSlot | null>(null);
   const openRef = useRef(open);
   openRef.current = open;
+  const stateRef = useRef(state);
+  stateRef.current = state;
   useEffect(() => { postMessage("quickAccess.get"); }, [postMessage]);
   useMessage(useCallback(({ type, payload }) => {
     if (type === "quickAccess.state") { const next = toState(payload); if (next) setState(next); }
     if (type === "quickAccess.wheel") {
-      const p = (payload ?? {}) as { mode?: string; state?: unknown };
+      const p = (payload ?? {}) as { mode?: string; slot?: unknown; state?: unknown };
       const next = toState(p.state); if (next) setState(next);
       const mode = p.mode === "edit" ? "edit" : "pick";
-      //: 휠이 떠 있는데 Alt+Q 를 또 누르면 닫는다(켜고 끄기).
-      if (openRef.current === "pick" && mode === "pick") { openRef.current = null; setOpen(null); postMessage("quickAccess.closed", { reason: "cancel" }); return; }
+      //: 켜고 끄기(Alt+Q 두 번)는 확장이 정한다 — 닫을 때는 quickAccess.wheelClose 가 온다.
+      setStartSlot(typeof p.slot === "string" && (ALL_SLOTS as string[]).includes(p.slot) ? p.slot as QuickSlot : null);
       openRef.current = mode; setOpen(mode);
     }
+    //: 확장 쪽에서 닫았다(방향키로 고름·Esc·시간 초과·글자 입력) — 다시 알리지 않고 닫기만.
+    if (type === "quickAccess.wheelClose") { openRef.current = null; setOpen(null); }
   }, [postMessage]));
   //: 닫는 알림은 한 번만 — Esc 뒤에 창이 가려지며 blur 가 또 오는 경우 등.
   const close = useCallback((reason: CloseReason) => {
@@ -280,8 +285,17 @@ const QuickAccess: React.FC<{ onSelectMode: (m: ViewMode) => void }> = ({ onSele
     <button className="rc-quick-button" onClick={() => { openRef.current = "pick"; setOpen("pick"); }} disabled={!state} title={state ? `빠른 이동 — ${state.wheelKey} 를 누르면 어디서든 열려요` : "빠른 이동 준비 중"} aria-haspopup="dialog">
       빠른 이동 <kbd>{state?.wheelKey ?? "Alt+Q"}</kbd>
     </button>
-    {open && state && <QuickWheel key={open} state={state} initialMode={open} onOpen={go} onClose={close}
-      onAssign={(slot: QuickSlot, target: string) => { setState({ ...state, slots: { ...state.slots, [slot]: target } }); postMessage("quickAccess.set", { slot, target }); }}
+    {open && state && <QuickWheel key={open} state={state} initialMode={open} initialSlot={startSlot} onOpen={go} onClose={close}
+      onAssign={(slot: QuickSlot, target: string) => {
+        //: 다른 칸이 쓰던 기능이면 두 칸을 맞바꾼다(한 기능이 두 칸에 생기지 않게).
+        const cur = stateRef.current ?? state;
+        const changes = assignSlot(cur, slot, target);
+        if (!changes.length) return;
+        const slots = { ...cur.slots };
+        for (const c of changes) slots[c.slot] = c.target;
+        setState({ ...cur, slots });
+        for (const c of changes) postMessage("quickAccess.set", c);
+      }}
       onReset={() => postMessage("quickAccess.reset")} onKeybindings={() => postMessage("quickAccess.keybindings")} />}
   </>;
 };

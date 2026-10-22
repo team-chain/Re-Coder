@@ -55,7 +55,15 @@ test('명령·키·설정 스키마가 기능 표와 맞고, VS Code 기본 키�
   for (const s of host.QUICK_SLOTS) assert.ok(cmds.has(`recoder.quick.${host.SLOT_COMMAND[s]}`), s);
   assert.ok(cmds.has('recoder.quickAccess.wheel') && cmds.has('recoder.quickAccess.configure'));
   const kb = pkg.contributes.keybindings;
-  assert.deepEqual(kb.map((k) => [k.command, k.key]), [['recoder.quickAccess.wheel', 'alt+q']], '기본 키는 Alt+Q 하나');
+  const always = kb.filter((k) => !k.when);
+  assert.deepEqual(always.map((k) => [k.command, k.key]), [['recoder.quickAccess.wheel', 'alt+q']], '항상 켜진 키는 Alt+Q 하나');
+  //: 방향키·Esc·E 는 휠이 떠 있을 때만(when) — 평소 편집기 방향키를 가로채지 않는다.
+  const wheelKeys = kb.filter((k) => k.when);
+  assert.ok(wheelKeys.every((k) => k.when === 'recoder.quickWheelOpen'));
+  assert.deepEqual(wheelKeys.filter((k) => k.command === 'recoder.quickWheel.key').map((k) => [k.key, k.args]),
+    host.QUICK_SLOTS.map((s) => [s, s]), '8칸 모두 방향키 하나로');
+  assert.ok(wheelKeys.some((k) => k.command === 'recoder.quickWheel.close' && k.key === 'escape'));
+  assert.ok(wheelKeys.some((k) => k.command === 'recoder.quickWheel.edit' && k.key === 'e'));
   const keys = JSON.stringify(kb).toLowerCase();
   assert.ok(!/ctrl\+shift\+r|cmd\+shift\+r/.test(keys), 'Ctrl+Shift+R 은 VS Code 리팩터링 — 두 번 누르는 키의 앞 키로 잡으면 리팩터링이 안 된다');
   assert.ok(!/alt\+(up|down|left|right)/.test(keys), 'Alt+방향키는 줄 이동·뒤로 가기');
@@ -118,12 +126,17 @@ const render = (props) => renderToStaticMarkup(React.createElement(QuickWheelVie
   state: STATE, mode: 'pick', selected: null, onSlot: noop, onAssign: noop, onMode: noop, onReset: noop, onKeybindings: noop, onClose: noop, ...props,
 }));
 
-test('고르기: 8칸 모두 이름·키가 보이고 빈 칸은 "추가"', () => {
+test('고르기: 방향키 4칸은 아이콘·이름·키, Shift 칸은 넣은 것만 — 빈 "추가" 칸·가운데 원·긴 설명이 없다', () => {
   const html = render({});
-  for (const t of ['코드 생성', '아키텍처', '배포 캔버스', '에러 분석', 'dry run', '+ 추가', '↑', 'Shift+→', 'Esc 닫기', 'Alt+Q']) assert.ok(html.includes(t), t);
-  assert.equal((html.match(/data-slot=/g) || []).length, 8);
-  assert.ok(html.includes('aria-label="Shift+→ 칸 비어 있음 — 기능 지정"'));
+  for (const t of ['코드 생성', '아키텍처', '배포 캔버스', '에러 분석', '↑', '→', 'Esc 닫기', 'E 칸 바꾸기', '&lt;/&gt;', '⇢']) assert.ok(html.includes(t), t);
+  assert.equal((html.match(/data-slot=/g) || []).length, 5, '바깥 4칸 + 넣어 둔 Shift+↑ 하나');
+  assert.ok(html.includes('data-slot="shift+up"') && !html.includes('data-slot="shift+right"'), '빈 Shift 칸은 고르기에서 숨긴다');
+  assert.ok(!html.includes('+ 추가') && !html.includes('빠른 이동</text>'), '빈 칸 "추가"와 가운데 원 글자가 없다');
+  assert.ok(!html.includes('방향키로 열기'), '긴 설명줄이 없다');
   assert.ok(!html.includes('quick-wheel-editor'));
+  // 바깥 칸과 같은 기능을 Shift 칸에도 넣었으면 중복은 숨긴다
+  const dup = render({ state: { ...STATE, slots: { ...STATE.slots, 'shift+up': 'code' } } });
+  assert.equal((dup.match(/data-slot=/g) || []).length, 4);
 });
 
 test('편집: 고른 칸에 넣을 기능 목록과 다른 칸에서 쓰는 표시, 설정 문제 안내', () => {
@@ -132,13 +145,17 @@ test('편집: 고른 칸에 넣을 기능 목록과 다른 칸에서 쓰는 표�
   assert.ok(html.includes('Shift+→ 칸'));
   for (const t of ['취약점 스캔', '시크릿 검사', '비워 두기', '기본값으로', '여는 키 바꾸기', '모르는 기능']) assert.ok(html.includes(t), t);
   assert.match(html, /코드 생성 · 수정<\/span><span[^>]*>↑/, '이미 다른 칸에 있는 기능은 그 칸 키를 보여 준다');
+  assert.equal((html.match(/data-slot=/g) || []).length, 8, '칸 바꾸기에서는 빈 칸도 모두 보인다');
+  assert.ok(html.includes('같은 키를 다시 누르면 다음 기능'));
+  assert.ok(!/Enter/.test(html), 'Enter 를 누르라는 안내가 없다');
 });
 
 // ── 확장 쪽 명령 ─────────────────────────────────────────────────────────
 
 function fakeVscode() {
   const store = { global: undefined, workspace: undefined, folder: undefined };
-  const calls = { updates: [], shown: [], diffs: [], info: [], commands: new Map(), listeners: [] };
+  const calls = { updates: [], shown: [], diffs: [], info: [], commands: new Map(), listeners: [], ctx: [], ev: { doc: [], sel: [], win: [] } };
+  const on = (list) => (fn) => { list.push(fn); return { dispose() { const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); } }; };
   const merged = () => {
     // VS Code 처럼 객체 설정은 범위끼리 합쳐서 준다
     const parts = [store.global, store.workspace, store.folder].filter((v) => v !== undefined);
@@ -146,6 +163,7 @@ function fakeVscode() {
   };
   const vs = {
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
+    TextEditorSelectionChangeKind: { Keyboard: 1, Mouse: 2, Command: 3 },
     workspace: {
       getConfiguration: (section) => section === 'terminal.integrated' ? {
         get: () => store.skipShell,
@@ -162,11 +180,14 @@ function fakeVscode() {
         },
       }),
       onDidChangeConfiguration: (fn) => { calls.listeners.push(fn); return { dispose() {} }; },
+      onDidChangeTextDocument: on(calls.ev.doc),
       openTextDocument: async (uri) => { if (calls.missing === uri) throw new Error('없음'); return { uri }; },
       openNotebookDocument: async (uri) => ({ uri, notebook: true }),
     },
     window: {
       activeTextEditor: undefined,
+      onDidChangeTextEditorSelection: on(calls.ev.sel),
+      onDidChangeWindowState: on(calls.ev.win),
       tabGroups: { activeTabGroup: { viewColumn: 1, activeTab: undefined } },
       showTextDocument: async (doc, opts) => { calls.shown.push({ doc, opts }); },
       showNotebookDocument: async (doc, opts) => { calls.shown.push({ doc, opts }); },
@@ -175,7 +196,7 @@ function fakeVscode() {
     },
     commands: {
       registerCommand: (id, fn) => { calls.commands.set(id, fn); return { dispose() {} }; },
-      executeCommand: async (id, ...args) => { calls.diffs.push({ id, args }); },
+      executeCommand: async (id, ...args) => { if (id === 'setContext') { calls.ctx.push(args); return; } calls.diffs.push({ id, args }); },
     },
   };
   return { vs, store, calls };
@@ -192,8 +213,8 @@ test('Alt+Q → 휠, Esc 로 닫으면 치던 편집기·커서로 돌아가고,
   const { vs, calls } = fakeVscode();
   const h = loadHost(vs);
   const opened = [], wheels = [];
-  h.registerQuickAccess({ subscriptions: [] }, { open: (t) => opened.push(t.id), showWheel: (m) => wheels.push(m), broadcast: noop });
-  assert.equal(calls.commands.size, 3 + 8 + host.QUICK_TARGETS.length);
+  h.registerQuickAccess({ subscriptions: [] }, { open: (t) => opened.push(t.id), showWheel: (m) => wheels.push(m), hideWheel: noop, broadcast: noop });
+  assert.equal(calls.commands.size, 3 + 3 + 8 + host.QUICK_TARGETS.length);
   vs.window.activeTextEditor = { document: { uri: 'file:///a.ts' }, viewColumn: 1, selection: 'sel-3:4' };
   await calls.commands.get('recoder.quickAccess.wheel')();
   assert.deepEqual(wheels, ['pick']);
@@ -213,14 +234,14 @@ test('Alt+Q → 휠, Esc 로 닫으면 치던 편집기·커서로 돌아가고,
 test('돌아갈 곳: ReCoder 창에서 다시 누르면 앞서 기억한 편집기를 지키고, diff·노트북도 그대로 연다', async () => {
   const { vs, calls } = fakeVscode();
   const h = loadHost(vs);
-  h.registerQuickAccess({ subscriptions: [] }, { open: noop, showWheel: noop, broadcast: noop });
+  h.registerQuickAccess({ subscriptions: [] }, { open: noop, showWheel: noop, hideWheel: noop, broadcast: noop });
   const wheel = calls.commands.get('recoder.quickAccess.wheel');
   vs.window.activeTextEditor = { document: { uri: 'file:///a.ts' }, viewColumn: 2, selection: 's' };
   await wheel();
-  vs.window.activeTextEditor = undefined; // 포커스가 ReCoder 창(웹뷰)으로 넘어간 뒤
-  await wheel();
-  await h.quickWheelClosed('cancel');
-  assert.equal(calls.shown.at(-1).doc.uri, 'file:///a.ts', 'ReCoder 창에서 다시 눌러도 원래 파일로');
+  vs.window.activeTextEditor = undefined; // ReCoder 탭이 앞으로 와 편집기가 가려진 뒤
+  await wheel(); // 두 번째 Alt+Q = 닫기
+  await new Promise((r) => setImmediate(r));
+  assert.equal(calls.shown.at(-1).doc.uri, 'file:///a.ts', '다시 눌러 닫아도 원래 파일로');
 
   vs.window.tabGroups.activeTabGroup.activeTab = { label: 'a ↔ b', input: { original: 'file:///a', modified: 'file:///b' } };
   await wheel();
@@ -254,7 +275,7 @@ test('칸 명령: 지정된 기능을 열고, 빈 칸이면 [지정하기] 로 �
   const { vs, calls } = fakeVscode();
   const h = loadHost(vs);
   const opened = [], wheels = [];
-  h.registerQuickAccess({ subscriptions: [] }, { open: (t) => opened.push(t.id), showWheel: (m) => wheels.push(m), broadcast: noop });
+  h.registerQuickAccess({ subscriptions: [] }, { open: (t) => opened.push(t.id), showWheel: (m) => wheels.push(m), hideWheel: noop, broadcast: noop });
   await calls.commands.get('recoder.quick.left')();
   await calls.commands.get('recoder.open.flow')();
   assert.deepEqual(opened, ['build', 'flow']);
@@ -268,7 +289,7 @@ test('휠에서 바꾼 칸은 그 칸을 정하는 가장 좁은 범위에, 그 
   const { vs, store, calls } = fakeVscode();
   const h = loadHost(vs);
   const seen = [];
-  h.registerQuickAccess({ subscriptions: [] }, { open: noop, showWheel: noop, broadcast: (s) => seen.push(s) });
+  h.registerQuickAccess({ subscriptions: [] }, { open: noop, showWheel: noop, hideWheel: noop, broadcast: (s) => seen.push(s) });
   assert.equal(await h.setQuickSlot('shift+up', 'scan'), true);
   assert.deepEqual(calls.updates.at(-1), { key: 'quickAccess', value: { 'shift+up': 'scan' }, target: 1 });
   assert.equal(await h.setQuickSlot('up', 'nope'), false, '모르는 기능은 저장하지 않는다');
@@ -312,7 +333,7 @@ test('휠에서 바꾼 칸은 그 칸을 정하는 가장 좁은 범위에, 그 
 test('빠르게 두 칸을 바꿔도 앞의 변경이 사라지지 않고, 저장 실패는 알린 뒤 다음 저장은 된다', async () => {
   const { vs, store, calls } = fakeVscode();
   const h = loadHost(vs);
-  h.registerQuickAccess({ subscriptions: [] }, { open: noop, showWheel: noop, broadcast: noop });
+  h.registerQuickAccess({ subscriptions: [] }, { open: noop, showWheel: noop, hideWheel: noop, broadcast: noop });
   await Promise.all([h.setQuickSlot('shift+up', 'scan'), h.setQuickSlot('shift+down', 'replay'), h.setQuickSlot('shift+left', 'adr')]);
   assert.deepEqual(store.global, { 'shift+up': 'scan', 'shift+down': 'replay', 'shift+left': 'adr' });
   calls.failNext = true;
@@ -337,17 +358,23 @@ test('ReCoder 창이 닫혀 있을 때 요청한 화면으로 연다(마지막�
     const webview = { postMessage: (m) => { messages.push(m); return true; }, onDidReceiveMessage: () => ({ dispose() {} }) };
     provider.attachWorkspacePanel(webview);
     provider.requestView('map', { mapMode: 'flow' });
-    provider.requestWheel('pick');
+    provider.requestWheel('edit', 'shift+up');
     await provider.handleMessage({ type: 'webview.ready', payload: { layout: 'workspace' } }, webview);
     const restore = messages.find((m) => m.type === 'ui.restore');
     assert.deepEqual(restore.payload, { view: 'map', codeDraft: '쓰던 요청', mapMode: 'flow' });
     const wheel = messages.find((m) => m.type === 'quickAccess.wheel');
-    assert.equal(wheel.payload.mode, 'pick');
+    assert.equal(wheel.payload.mode, 'edit');
+    assert.equal(wheel.payload.slot, 'shift+up', '빈 칸을 눌러 들어왔으면 그 칸을 고른 채');
     assert.equal(wheel.payload.state.slots.up, 'code');
     messages.length = 0;
     await provider.handleMessage({ type: 'quickAccess.get', payload: {} }, webview);
     assert.equal(messages[0].type, 'quickAccess.state');
     assert.equal(messages[0].payload.targets.length, host.QUICK_TARGETS.length);
+    // 창을 그리는 사이 휠이 닫혔으면(Esc·시간 초과) 늦게 띄우지 않는다
+    messages.length = 0;
+    provider.requestWheel('pick');
+    await provider.handleMessage({ type: 'webview.ready', payload: { layout: 'workspace' } }, webview);
+    assert.ok(!messages.some((m) => m.type === 'quickAccess.wheel'));
   } finally {
     Module._resolveFilename = origResolve;
   }
@@ -363,7 +390,7 @@ test('App 결선: 머리글 버튼, 휠 열기·닫기 알림, 지도 모드 전
 test('터미널에서도 Alt+Q: 묻고 나서 사용자 설정에 한 줄만 더하고, 다른 항목·중복은 건드리지 않는다', async () => {
   const { vs, store, calls } = fakeVscode();
   const h = loadHost(vs);
-  h.registerQuickAccess({ subscriptions: [] }, { open: noop, showWheel: noop, broadcast: noop });
+  h.registerQuickAccess({ subscriptions: [] }, { open: noop, showWheel: noop, hideWheel: noop, broadcast: noop });
   const cmd = calls.commands.get('recoder.quickAccess.enableInTerminal');
   store.skipShell = ['workbench.action.quickOpen', '-recoder.quickAccess.wheel'];
   calls.infoAnswer = undefined;
@@ -371,7 +398,7 @@ test('터미널에서도 Alt+Q: 묻고 나서 사용자 설정에 한 줄만 더
   assert.deepEqual(store.skipShell, ['workbench.action.quickOpen', '-recoder.quickAccess.wheel'], '취소하면 바꾸지 않는다');
   calls.infoAnswer = '더하기';
   await cmd();
-  assert.deepEqual(store.skipShell, ['workbench.action.quickOpen', 'recoder.quickAccess.wheel'], '빼 두었던 표시는 지우고 더한다');
+  assert.deepEqual(store.skipShell, ['workbench.action.quickOpen', 'recoder.quickAccess.wheel', ...h.WHEEL_KEY_COMMANDS], '빼 두었던 표시는 지우고, 휠 방향키 명령까지 더한다');
   assert.equal(calls.updates.at(-1).target, 1, '사용자 설정에');
   assert.equal(h.wheelWorksInTerminal(), true);
   const n = calls.updates.length;
@@ -380,4 +407,93 @@ test('터미널에서도 Alt+Q: 묻고 나서 사용자 설정에 한 줄만 더
   assert.match(calls.info.at(-1), /이미/);
   const ids = pkg.contributes.commands.map((c) => c.command);
   assert.ok(ids.includes('recoder.quickAccess.enableInTerminal'));
+});
+
+test('Alt+Q → 방향키 한 번: 클릭·입력·Enter 없이 VS Code 단축키로 바로 연다', async () => {
+  const { vs, calls } = fakeVscode();
+  const h = loadHost(vs);
+  const opened = [], wheels = [];
+  let hidden = 0;
+  h.registerQuickAccess({ subscriptions: [] }, { open: (t) => opened.push(t.id), showWheel: (m, slot) => wheels.push([m, slot]), hideWheel: () => hidden++, broadcast: noop });
+  const key = calls.commands.get('recoder.quickWheel.key');
+  await key('right');
+  assert.deepEqual(opened, [], '휠이 닫혀 있으면 방향키 명령은 아무것도 하지 않는다');
+  vs.window.activeTextEditor = { document: { uri: 'file:///a.ts' }, viewColumn: 1, selection: 's' };
+  await calls.commands.get('recoder.quickAccess.wheel')();
+  assert.deepEqual(calls.ctx.at(-1), ['recoder.quickWheelOpen', true], '휠이 떠 있는 동안만 방향키를 받는다');
+  assert.deepEqual(wheels, [['pick', undefined]]);
+  assert.equal(h.isWheelOpen(), true);
+  await key('right');
+  assert.deepEqual(opened, ['map'], '→ 한 번에 아키텍처');
+  assert.deepEqual(calls.ctx.at(-1), ['recoder.quickWheelOpen', false]);
+  assert.equal(hidden, 1, '화면의 휠도 닫는다');
+  assert.equal(calls.shown.length, 0, '고른 화면에 머문다(편집기로 돌아가지 않음)');
+
+  // 빈 Shift 칸 → 그 칸을 고른 채 칸 바꾸기
+  await calls.commands.get('recoder.quickAccess.wheel')();
+  await key({ slot: 'shift+down' });
+  assert.deepEqual(wheels.at(-1), ['edit', 'shift+down']);
+  assert.equal(h.isWheelOpen(), false);
+
+  // Esc → 닫고 치던 편집기로
+  await calls.commands.get('recoder.quickAccess.wheel')();
+  await calls.commands.get('recoder.quickWheel.close')();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(calls.shown.at(-1).doc.uri, 'file:///a.ts');
+  assert.equal(h.isWheelOpen(), false);
+
+  // E → 칸 바꾸기
+  await calls.commands.get('recoder.quickAccess.wheel')();
+  await calls.commands.get('recoder.quickWheel.edit')();
+  assert.deepEqual(wheels.at(-1), ['edit', undefined]);
+  // 모르는 칸 이름은 무시
+  await calls.commands.get('recoder.quickAccess.wheel')();
+  await key('diagonal');
+  assert.equal(h.isWheelOpen(), true);
+});
+
+test('휠을 띄운 채 다른 일을 시작하면 닫힌다 — 방향키가 휠에 묶여 남지 않게', async (t) => {
+  const { vs, calls } = fakeVscode();
+  const h = loadHost(vs);
+  h.registerQuickAccess({ subscriptions: [] }, { open: noop, showWheel: noop, hideWheel: noop, broadcast: noop });
+  const wheel = calls.commands.get('recoder.quickAccess.wheel');
+  await wheel();
+  calls.ev.sel.forEach((fn) => fn({ kind: 3 }));
+  assert.equal(h.isWheelOpen(), true, '명령으로 생긴 커서 이동(탭 전환 등)은 닫는 이유가 아니다');
+  calls.ev.doc.forEach((fn) => fn({ contentChanges: [{}] }));
+  assert.equal(h.isWheelOpen(), false, '글자를 치면 닫힌다');
+  assert.equal(calls.ev.doc.length + calls.ev.sel.length + calls.ev.win.length, 0, '닫히면 감시도 걷어 낸다');
+  await wheel();
+  calls.ev.sel.forEach((fn) => fn({ kind: 2 }));
+  assert.equal(h.isWheelOpen(), false, '마우스로 다른 곳을 누르면 닫힌다');
+  await wheel();
+  calls.ev.win.forEach((fn) => fn({ focused: false }));
+  assert.equal(h.isWheelOpen(), false, 'VS Code 창을 떠나면 닫힌다');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await wheel();
+  t.mock.timers.tick(h.WHEEL_IDLE_MS + 1);
+  assert.equal(h.isWheelOpen(), false, '아무것도 고르지 않으면 잠시 뒤 닫힌다');
+  t.mock.timers.reset();
+});
+
+test('칸 바꾸기 규칙: 같은 기능은 두 칸에 생기지 않는다(맞바꿈), 같은 방향키를 다시 누르면 다음 기능', () => {
+  assert.deepEqual(model.visibleInner(STATE), ['shift+up']);
+  assert.deepEqual(model.visibleInner({ ...STATE, slots: { ...STATE.slots, 'shift+up': 'map' } }), [], '바깥 칸과 같으면 숨김');
+  // 맞바꿈
+  assert.deepEqual(model.assignSlot(STATE, 'up', 'map'), [{ slot: 'up', target: 'map' }, { slot: 'right', target: 'code' }]);
+  assert.deepEqual(model.assignSlot(STATE, 'shift+right', 'code'), [{ slot: 'shift+right', target: 'code' }, { slot: 'up', target: '' }]);
+  assert.deepEqual(model.assignSlot(STATE, 'up', 'code'), [], '그대로면 바꿀 것 없음');
+  assert.deepEqual(model.assignSlot(STATE, 'shift+right', ''), [], '빈 칸을 비우기');
+  // 다음 기능: 다른 칸이 쓰는 기능은 건너뛴다
+  const order = [];
+  let st = STATE;
+  for (let i = 0; i < 12; i++) {
+    const n = model.nextTarget(st, 'shift+right');
+    order.push(n);
+    st = { ...st, slots: { ...st.slots, 'shift+right': n } };
+  }
+  assert.ok(!order.some((id) => ['code', 'map', 'deploy', 'build', 'flow'].includes(id)), '다른 칸의 기능은 차례에 없다');
+  assert.ok(order.includes(''), 'Shift 칸은 비우기도 차례에 든다');
+  assert.ok(!model.nextTarget(STATE, 'up') || model.nextTarget(STATE, 'up') !== 'code');
+  for (const t of host.QUICK_TARGETS) assert.notEqual(model.iconFor(t.id), '•', `${t.id} 아이콘`);
 });

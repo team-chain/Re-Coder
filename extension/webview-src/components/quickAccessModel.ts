@@ -29,6 +29,48 @@ const SHORT: Record<string, string> = {
 export const shortLabel = (id: string, targets: QuickState["targets"]): string =>
   SHORT[id] ?? targets.find((t) => t.id === id)?.label ?? id;
 
+//: 칸 아이콘 — 글자를 읽기 전에 모양으로 먼저 알아보게(Windows·macOS 기본 글꼴에 있는 기호만).
+const ICON: Record<string, string> = {
+  code: "</>", build: "⚠", map: "▦", flow: "⇢", adr: "✎", models: "◎", ship: "▶", deploy: "☁",
+  replay: "↺", operate: "⚑", scan: "⌕", secrets: "✱", policy: "✓", home: "⌂",
+};
+export const iconFor = (id: string): string => ICON[id] ?? "•";
+
+/**
+ * 고르기 화면에 보일 안쪽 칸 — 기능이 들어 있고, 바깥 칸과 같은 기능이 아닌 것만.
+ * 빈 칸("+ 추가")과 중복은 고르기에서 숨긴다(칸 바꾸기에서는 다 보인다).
+ */
+export function visibleInner(state: QuickState): QuickSlot[] {
+  const outer = new Set(OUTER.map((s) => state.slots[s]).filter(Boolean));
+  return INNER.filter((s) => state.slots[s] && !outer.has(state.slots[s]));
+}
+
+/**
+ * 칸 바꾸기에서 같은 방향키를 한 번 더 누르면 다음 기능으로 — Enter 없이 바로 바뀐다.
+ * 다른 칸이 쓰는 기능은 건너뛴다(한 기능이 두 칸에 생기지 않게). 안쪽 칸은 "비워 두기"도 차례에 든다.
+ */
+export function nextTarget(state: QuickState, slot: QuickSlot): string {
+  const used = new Set(ALL_SLOTS.filter((s) => s !== slot).map((s) => state.slots[s]).filter(Boolean));
+  const order = [...state.targets.map((t) => t.id).filter((id) => !used.has(id)), ...(slot.startsWith("shift+") ? [""] : [])];
+  if (!order.length) return state.slots[slot];
+  const i = order.indexOf(state.slots[slot]);
+  return order[(i + 1) % order.length];
+}
+
+/**
+ * 칸에 기능을 넣는다. 그 기능이 다른 칸에 있으면 두 칸을 맞바꾼다 — 한 기능이 두 칸에 생기지 않고,
+ * 다른 칸의 기능이 사라지지도 않는다. 바꿔야 할 칸 목록을 돌려준다.
+ */
+export function assignSlot(state: QuickState, slot: QuickSlot, target: string): Array<{ slot: QuickSlot; target: string }> {
+  const changes: Array<{ slot: QuickSlot; target: string }> = [{ slot, target }];
+  if (target) {
+    for (const other of ALL_SLOTS) {
+      if (other !== slot && state.slots[other] === target) changes.push({ slot: other, target: state.slots[slot] });
+    }
+  }
+  return changes.filter((c) => state.slots[c.slot] !== c.target);
+}
+
 const ARROW: Record<string, string> = { up: "↑", right: "→", down: "↓", left: "←" };
 export function defaultKey(slot: QuickSlot): string {
   const shift = slot.startsWith("shift+");

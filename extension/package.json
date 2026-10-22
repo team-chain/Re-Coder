@@ -330,6 +330,64 @@
         "command": "recoder.quickAccess.wheel",
         "key": "alt+q",
         "mac": "alt+q"
+      },
+      {
+        "command": "recoder.quickWheel.key",
+        "key": "up",
+        "args": "up",
+        "when": "recoder.quickWheelOpen"
+      },
+      {
+        "command": "recoder.quickWheel.key",
+        "key": "right",
+        "args": "right",
+        "when": "recoder.quickWheelOpen"
+      },
+      {
+        "command": "recoder.quickWheel.key",
+        "key": "down",
+        "args": "down",
+        "when": "recoder.quickWheelOpen"
+      },
+      {
+        "command": "recoder.quickWheel.key",
+        "key": "left",
+        "args": "left",
+        "when": "recoder.quickWheelOpen"
+      },
+      {
+        "command": "recoder.quickWheel.key",
+        "key": "shift+up",
+        "args": "shift+up",
+        "when": "recoder.quickWheelOpen"
+      },
+      {
+        "command": "recoder.quickWheel.key",
+        "key": "shift+right",
+        "args": "shift+right",
+        "when": "recoder.quickWheelOpen"
+      },
+      {
+        "command": "recoder.quickWheel.key",
+        "key": "shift+down",
+        "args": "shift+down",
+        "when": "recoder.quickWheelOpen"
+      },
+      {
+        "command": "recoder.quickWheel.key",
+        "key": "shift+left",
+        "args": "shift+left",
+        "when": "recoder.quickWheelOpen"
+      },
+      {
+        "command": "recoder.quickWheel.close",
+        "key": "escape",
+        "when": "recoder.quickWheelOpen"
+      },
+      {
+        "command": "recoder.quickWheel.edit",
+        "key": "e",
+        "when": "recoder.quickWheelOpen"
       }
     ],
     "configuration": {
