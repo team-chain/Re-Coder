@@ -568,11 +568,11 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               <div style={{ padding: "15px 18px 12px", borderBottom: "1px solid var(--vscode-panel-border, #3b3b3b)" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ width: 4, height: 20, borderRadius: 2, background: "var(--vscode-textLink-foreground, #3794ff)" }} />
-                  <strong style={{ fontSize: 15 }}>무엇이 되면 완성인가요?</strong>
-                  <span style={{ marginLeft: "auto", borderRadius: 99, padding: "3px 8px", background: "var(--vscode-badge-background, #4d4d4d)", color: "var(--vscode-badge-foreground, #fff)", fontSize: 11, fontWeight: 600 }}>명세 · 마지막 단계</span>
+                  <strong style={{ fontSize: 15 }}>완성 기준</strong>
+                  <span style={{ marginLeft: "auto", borderRadius: 99, padding: "3px 8px", background: "var(--vscode-badge-background, #4d4d4d)", color: "var(--vscode-badge-foreground, #fff)", fontSize: 11, fontWeight: 600 }}>마지막 단계</span>
                 </div>
-                <p style={{ margin: "8px 0 0", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.55 }}>
-                  고른 설계로 만들 때 지켜야 할 완성 기준입니다. 고치거나 더하고 승인하면, AI 가 이 조건을 모두 만족하도록 만들고 docs/spec 에 기록을 남깁니다.
+                <p style={{ margin: "6px 0 0", color: "var(--vscode-descriptionForeground, #aaa)", fontSize: 12, lineHeight: 1.55 }}>
+                  이 조건을 모두 만족하도록 만들고 docs/spec 에 기록합니다.
                 </p>
               </div>
               <div style={{ padding: 18 }}>

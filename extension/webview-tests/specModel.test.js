@@ -65,9 +65,12 @@ test('확인할 수 없는 조건·빈 확인 방법·실패 흐름 없음은 �
 });
 
 test('편집기는 조건 번호·종류·AI 초안 표시·경고를 그리고 값을 이스케이프한다', () => {
-  const s = m.fromDraft({ goal: '<b>목표</b>', criteria: [{ text: '목록이 잘 동작한다', kind: 'screen', check: 'x' }] });
+  const s = m.fromDraft({ goal: '<b>목표</b>', in_scope: ['목록'], out_of_scope: ['댓글'], criteria: [{ text: '목록이 잘 동작한다', kind: 'screen', check: 'x' }, { text: '빈 확인', kind: 'api', check: '' }] });
   const html = renderToStaticMarkup(React.createElement(SpecEditor, { spec: s, issues: m.specIssues(s), onChange: () => {} }));
-  for (const t of ['AC-1', '화면', 'AI 초안', '확인할 수 없는 말', '+ 합격 조건 추가', '이번에 만들지 않음']) assert.ok(html.includes(t), t);
+  for (const t of ['AC-1', 'AC-2', '화면', 'AI 초안', '확인할 수 없는 말', '+ 합격 조건 추가', '이번에 만들지 않음', '댓글', '확인 방법 없음', '확인 · x']) assert.ok(html.includes(t), t);
+  assert.ok(!html.includes('<textarea'), '읽기가 먼저 — 처음부터 모든 줄이 입력칸이 아니다');
+  const blank = m.addCriterion(m.fromDraft({ goal: 'g', criteria: [] }));
+  assert.ok(renderToStaticMarkup(React.createElement(SpecEditor, { spec: blank, issues: [], onChange: () => {} })).includes('<textarea'), '빈 조건은 바로 쓸 수 있게 연다');
   assert.ok(!html.includes('<b>목표</b>') && html.includes('&lt;b&gt;'));
 });
 
