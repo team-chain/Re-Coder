@@ -38,7 +38,7 @@ RUNTIME_IMPORTS = (
     #: 2.0.32 — 상태 파일 안전 쓰기, 시간 제한이 지켜지는 프로세스 실행(함수 안에서만 불러온다)
     'state_io', 'proc_tools', 'dockerfile_guard', 'context_gate',
     #: 2.0.36 — 작업별 AI 공급자·비용 원장·공급자 비교(라우터가 함수 안에서 불러온다)
-    'llm.task_tier', 'llm.pricing', 'llm.scrub', 'llm.cost_ledger', 'model_compare', 'api.routes.models',
+    'llm.task_tier', 'llm.pricing', 'llm.scrub', 'llm.cost_ledger', 'model_compare', 'api.routes.models', 'code_spec',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
@@ -122,7 +122,7 @@ def run(app) -> int:
         scheduler.add_job(lambda: None, 'interval', seconds=60)
         checks.append('scheduler plugins')
         paths = app.openapi()['paths']
-        for endpoint in ('/api/health', '/api/status', '/api/chat', '/api/code/plan',
+        for endpoint in ('/api/health', '/api/status', '/api/chat', '/api/code/plan', '/api/code/spec',
                          '/api/code/generate', '/api/code/generate/stream', '/api/deploy/dockerfile', '/api/deploy/execute', '/api/deploy/settings', '/api/deploy/db-choice',
                          '/api/deploy/canvas', '/api/github/repository/connect', '/api/git/push'):
             assert endpoint in paths, f'route missing: {endpoint}'

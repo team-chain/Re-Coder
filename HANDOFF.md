@@ -1,3 +1,13 @@
+# 명세 · 합격 조건 (2026-10-22, 2.0.43) — 명세 기반 개발 1단계
+
+- 흐름: code.plan → 결정 창(decide) → **code.spec → 명세 창(spec)** → code.generate(spec 포함). 결정 창 상태 DecisionModal 에 phase·spec(EditableSpec)·specLoading·specError·specFor(선택 지문 — 같으면 다시 받지 않음). 마지막 결정 버튼 "다음: 합격 조건 →", 확인 카드 "진행 →" 도 requestSpec. 명세 대기 300초 넘으면 창 닫고 턴 오류(waitForResponse 가 열린 창을 닫음).
+- core/code_spec.py(AI 안 부름): SPEC_SCHEMA, normalize_spec(비신뢰 → AC-n 재번호·중복·included False 제외·kind 기본 feature·source 기본 user·개행 접기·출력 형식 문구 제거, 멱등, 조건 없으면 None), draft_from_llm(source ai, 조건 없어도 목표·범위 유지), spec_prompt_block(사용자 요청 바로 앞, 대규모 생성 맥락에도 남음), spec_markdown·build_spec_ops(docs/spec/SPEC-YYYYMMDD-HHMMSS-slug.md, is_spec), overwrites_spec_record.
+- code_agent.generate_spec(instruction, decisions, …) — operation generate_spec(품질 등급), 깨진 JSON 한 번 재시도. generate_code(spec=) — 한 번 정규화, _build_code_prompt(spec_block=), 지문에 spec(있을 때만 — 명세 없는 요청의 이어 받기 지문은 예전 그대로), AI op 의 docs/spec/SPEC-* 덮어쓰기 제거, 결과 spec{…, file, verified:false}. 명세 없으면 프롬프트·결과 모두 예전과 같음(시험으로 고정). 승인 게이트는 그대로(명세가 승인 대신이 아님).
+- POST /api/code/spec(CodeSpecRequest), CodeGenerateRequest.spec → 두 생성 라우트. release_check: 경로·code_spec 모듈.
+- 확장: ApiClient.draftSpec·CodeSpec 타입·두 생성 경로 body.spec. SidebarProvider case code.spec → code.specResult / code.specError(턴 오류 아님), code.generate → handleCodeGenerate(spec). webview specModel.ts(fromDraft·updateCriterion(고치면 source user)·add/remove·specForRequest(포함한 조건만, 범위 줄 나눔)·specIssues(block: 조건 없음 / warn: 모호한 말·확인 방법 없음·실패 흐름 없음·목표 없음)), SpecEditor.tsx(훅 없음, 공통 Checkbox), 결과 data-testid=code-spec-summary("아직 자동 확인 전").
+- 시험: core/tests/test_dev_2038.py(14), webview-tests/specModel.test.js(7 — 모델·렌더·결선·호스트), centralDevelopment.test.js(명세 단계 7 + 기존 흐름 수정). harness e2e 에 4b(code.spec) 추가 — fixture-core 에 generate_spec 응답. (e2e 3-A·6 은 이 변경 전에도 실패하던 하네스 문제 — CI 에서 돌지 않음.)
+- 다음 단계(②~⑤): 합격 조건 → 테스트(kind 별: api → HTTP 시험, screen → 화면 시나리오, security → 권한 시험), 통과까지 교정, 출시 기준 검사, 조건별 증거 화면(verified 채우기, 기록 표의 "자동 확인" 열).
+
 # 구조 다이어그램 (2026-10-22, 2.0.42)
 
 - webview-src/components/structureLayout.ts — roleOf(path, {kind}) 역할 추정(support → 스타일/html → frontend·client·web·webview-src 는 ui → data → entry → ui → logic → 확장자). layoutLanes(nodes{id,role,group,groupLabel,order}, edges, {colW,nodeW,nodeH,maxCols(레인 안 단계 상한),maxRows(한 열 상한 → 보조 열),mergeSingletons(노드 하나뿐인 그룹을 한 상자로)}) → 레인(ROLE_ORDER 순서, 가로) · 그룹 상자(레인 폭 전체, 세로로 쌓음) · 노드(레인 안 단계 = 같은 레인 안 선의 최장 경로, 반복 DFS 로 순환 끊음). edgeRoute(오른쪽 S 곡선 / 같은 열 옆으로 / 되돌아가면 아래로 크게 + backward). aggregateFolders(최상위 파일은 역할별로 나눔 `(최상위)#role`). fit(글자 폭 자르기, 한글 1.75배), groupColor.

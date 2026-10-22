@@ -4,7 +4,7 @@
 // 밟는 메시지 사슬을 처음부터 끝까지 재현한다:
 //
 //   webview.ready → chat.send → chat.approveAction(빈 창=확장 재시작 시나리오)
-//   → code.plan → code.planResult → code.generate → code.result
+//   → code.plan → code.planResult → code.spec → code.specResult → code.generate → code.result
 //   → code.applyAll → 파일이 실제 디스크에 존재
 //
 // 왜 있나: 이 사슬은 단위 테스트(webview-tests)가 각 조각만 보므로, 조각은
@@ -142,14 +142,26 @@ step('4. code.plan → 실 코어에서 설계 결정 수신', async () => {
     assert.ok(Array.isArray(decisions) && decisions.length >= 1, '결정이 비었다');
 });
 
-step('5. code.generate(결정 확정) → 코드 + ADR 수신', async () => {
-    const choices = decisions.map((d) => ({ id: d.id, question: d.question, chosen_key: d.recommended_key || (d.options && d.options[0] && d.options[0].key), options: d.options, impact: d.impact || '' }));
-    await sp.handleMessage({ type: 'code.generate', payload: { requestId: 777, instruction: acceptedPayload.instruction, targetFolder: acceptedPayload.targetFolder, contextFiles: [], decisions: choices } }, wv);
+let choices, spec;
+step('4b. code.spec → 실 코어에서 명세(합격 조건) 초안 수신', async () => {
+    choices = decisions.map((d) => ({ id: d.id, question: d.question, chosen_key: d.recommended_key || (d.options && d.options[0] && d.options[0].key), options: d.options, impact: d.impact || '' }));
+    await sp.handleMessage({ type: 'code.spec', payload: { requestId: 777, instruction: acceptedPayload.instruction, targetFolder: acceptedPayload.targetFolder, contextFiles: [], decisions: choices } }, wv);
+    const m = last(captured, 'code.specResult') || last(captured, 'code.specError');
+    assert.ok(m, 'specResult/specError 모두 없음');
+    assert.strictEqual(m.type, 'code.specResult', `명세 초안 실패: ${JSON.stringify(m.payload).slice(0, 300)}`);
+    spec = m.payload.spec;
+    assert.deepStrictEqual(spec.criteria.map((c) => c.id), ['AC-1', 'AC-2']);
+});
+
+step('5. code.generate(결정·명세 확정) → 코드 + ADR + 명세 기록 수신', async () => {
+    await sp.handleMessage({ type: 'code.generate', payload: { requestId: 777, instruction: acceptedPayload.instruction, targetFolder: acceptedPayload.targetFolder, contextFiles: [], decisions: choices, spec } }, wv);
     const g = last(captured, 'code.result') || last(captured, 'code.error');
     assert.ok(g, 'code.result/error 모두 없음');
     assert.strictEqual(g.type, 'code.result', `생성 실패: ${JSON.stringify(g.payload).slice(0, 300)}`);
     ops = g.payload.ops || (g.payload.result && g.payload.result.ops);
     assert.ok(Array.isArray(ops) && ops.length >= 2, `ops 부족: ${JSON.stringify(g.payload).slice(0, 300)}`);
+    assert.ok(ops.some((o) => /^docs\/spec\/SPEC-/.test(o.file || o.path || '')), '명세 기록 파일이 없다');
+    assert.strictEqual(g.payload.spec && g.payload.spec.verified, false, '자동 확인 전임을 결과에 남긴다');
 });
 
 step('6. code.applyAll → 파일이 실제 디스크에 생성된다', async () => {

@@ -65,6 +65,16 @@ function mount(props = {}) {
 const plan = {decisions: [{id:'storage', question:'저장 방식은?', impact:'데이터 보존', options:[
   {key:'sqlite', label:'SQLite', summary:'로컬 DB', pros:[], cons:[], recommended:true},
 ]}]};
+const spec = {goal:'게시글을 쓰고 볼 수 있다', in_scope:['글 작성'], out_of_scope:['댓글'], criteria:[
+  {id:'AC-1', text:'제목 없이 쓰면 400 을 돌려준다', kind:'api', check:'POST /posts {} → 400', source:'ai'},
+  {id:'AC-2', text:'쓴 글이 목록 맨 위에 보인다', kind:'screen', check:'작성 후 / 첫 줄', source:'ai'},
+]};
+//: 결정 → 명세 → 생성까지 한 번에(명세 단계는 별도 시험이 자세히 본다).
+function generateThrough(ui, requestId) {
+  ui.button('다음: 합격 조건 →').props.onClick(); ui.render();
+  ui.emit('code.specResult', {requestId, spec});
+  ui.button('명세대로 생성 →').props.onClick(); ui.render();
+}
 
 test('central request opens design directly, then generates and applies only after user actions', () => {
   const ui = mount();
@@ -83,14 +93,22 @@ test('central request opens design directly, then generates and applies only aft
   assert.equal(ui.reviews, 1);
   assert.equal(ui.messages.length, 1, 'planning neither generates nor writes files');
   ui.emit('code.folderPicked', {folder:'changed-after-request'});
-  ui.button('이 선택으로 생성 →').props.onClick(); ui.render();
+  ui.button('다음: 합격 조건 →').props.onClick(); ui.render();
+  const specRequest = ui.messages.at(-1);
+  assert.equal(specRequest.type, 'code.spec', '설계 결정을 다 고르면 바로 만들지 않고 명세 초안을 받는다');
+  assert.equal(specRequest.payload.decisions[0].chosen_key, 'sqlite');
+  assert.equal(specRequest.payload.targetFolder, 'src');
+  ui.emit('code.specResult', {requestId:request.requestId, spec});
+  assert.ok(ui.find(n => n.props.role === 'dialog' && n.props['aria-label'] === '명세 확인'));
+  ui.button('명세대로 생성 →').props.onClick(); ui.render();
   const generate = ui.messages.at(-1);
   assert.equal(generate.type, 'code.generate');
   assert.equal(generate.payload.targetFolder, 'src');
   assert.equal(generate.payload.decisions[0].impact, '데이터 보존');
   assert.equal(generate.payload.contextFiles[0].path, 'README.md');
+  assert.equal(generate.payload.spec.criteria.length, 2);
   ui.emit('code.result', {requestId:request.requestId, summary:'게시판', model:'fixture', projectRoot:'/work/shop', ops:[{file:'app.js',content:'new code',action:'create',language:'js',rationale:'entry'}]});
-  assert.equal(ui.messages.length, 2, 'generation never auto-applies');
+  assert.equal(ui.messages.length, 3, 'generation never auto-applies');
   ui.button('변경 보기').props.onClick();
   assert.equal(ui.messages.at(-1).type, 'code.diff');
   assert.equal(ui.messages.at(-1).payload.targetFolder, 'src');
@@ -146,7 +164,7 @@ test('생성 결과가 여러 파일이면 목록만 먼저 보이고, 이름을
   ui.input('게시판'); ui.button('보내기').props.onClick();
   const request = ui.messages[0].payload;
   ui.emit('code.planResult', {...plan, requestId:request.requestId});
-  ui.button('이 선택으로 생성 →').props.onClick(); ui.render();
+  generateThrough(ui, request.requestId);
   ui.emit('code.result', {requestId:request.requestId, summary:'게시판', model:'fixture', ops:[
     {file:'a.js',content:'AAA-CONTENT',action:'create',language:'js',rationale:''},
     {file:'b.js',content:'BBB-CONTENT',action:'edit',language:'js',rationale:''}]});
@@ -204,4 +222,112 @@ test('확장이 받았다고 답한 요청은 입력창에 되돌리지 않는�
   ui.emit('code.status', {requestId:id, stage:'planning', message:'AI 가 설계 결정을 준비하는 중…', waitSeconds:270});
   ui.expire();
   assert.equal(ui.find(n => n.type === 'textarea').props.value, '');
+});
+
+// ── 2.0.38 명세 · 합격 조건 ─────────────────────────────────────────────
+const plan2 = {decisions: [{id:'storage', question:'저장 방식은?', impact:'', options:[
+  {key:'sqlite', label:'SQLite', summary:'', pros:[], cons:[], recommended:true},
+  {key:'pg', label:'PostgreSQL', summary:'', pros:[], cons:[], recommended:false},
+]}]};
+function toSpec(ui) {
+  ui.input('게시판'); ui.button('보내기').props.onClick();
+  const id = ui.messages[0].payload.requestId;
+  ui.emit('code.planResult', {...plan2, requestId:id});
+  ui.button('다음: 합격 조건 →').props.onClick(); ui.render();
+  return id;
+}
+const editor = ui => ui.find(n => typeof n.type === 'function' && n.type.name === 'SpecEditor');
+
+test('명세 초안을 받는 동안은 생성할 수 없고, 사람이 고친 조건만 생성 요청에 실린다', () => {
+  const ui = mount();
+  const id = toSpec(ui);
+  assert.ok(ui.find(n => n.props['data-testid'] === 'spec-loading'));
+  assert.ok(ui.button('명세대로 생성 →').props.disabled, '초안을 받는 중에는 잠김');
+  ui.emit('code.specResult', {requestId:id, spec});
+  const first = editor(ui).props.spec;
+  assert.equal(first.criteria.length, 2);
+  // 첫 조건은 빼고, 둘째는 고친다
+  const edited = {...first, criteria:[{...first.criteria[0], included:false}, {...first.criteria[1], text:'쓴 글이 목록 첫 줄에 보인다', source:'user'}]};
+  editor(ui).props.onChange(edited); ui.render();
+  ui.button('명세대로 생성 →').props.onClick(); ui.render();
+  const gen = ui.messages.at(-1);
+  assert.equal(gen.type, 'code.generate');
+  assert.deepEqual(gen.payload.spec.criteria, [{text:'쓴 글이 목록 첫 줄에 보인다', kind:'screen', check:'작성 후 / 첫 줄', source:'user'}]);
+  assert.deepEqual(gen.payload.spec.out_of_scope, ['댓글']);
+});
+
+test('합격 조건을 모두 빼면 생성이 잠긴다', () => {
+  const ui = mount();
+  const id = toSpec(ui);
+  ui.emit('code.specResult', {requestId:id, spec});
+  const s = editor(ui).props.spec;
+  editor(ui).props.onChange({...s, criteria:s.criteria.map(c => ({...c, included:false}))}); ui.render();
+  assert.ok(ui.button('명세대로 생성 →').props.disabled);
+  assert.ok(!ui.messages.some(m => m.type === 'code.generate'));
+});
+
+test('설계 결정으로 돌아갔다 와도 같은 선택이면 고친 명세를 지키고, 선택을 바꾸면 초안을 다시 받는다', () => {
+  const ui = mount();
+  const id = toSpec(ui);
+  ui.emit('code.specResult', {requestId:id, spec});
+  const s = editor(ui).props.spec;
+  editor(ui).props.onChange({...s, goal:'직접 고친 목표'}); ui.render();
+  const before = ui.messages.filter(m => m.type === 'code.spec').length;
+  ui.button('← 설계 결정').props.onClick(); ui.render();
+  assert.ok(ui.find(n => n.props['aria-label'] === '설계 결정'));
+  ui.button('다음: 합격 조건 →').props.onClick(); ui.render();
+  assert.equal(ui.messages.filter(m => m.type === 'code.spec').length, before, '같은 선택이면 다시 받지 않는다');
+  assert.equal(editor(ui).props.spec.goal, '직접 고친 목표');
+  ui.button('← 설계 결정').props.onClick(); ui.render();
+  ui.find(n => n.type && n.type.name === 'DecisionOptionCards').props.onSelect('pg'); ui.render();
+  ui.button('다음: 합격 조건 →').props.onClick(); ui.render();
+  assert.equal(ui.messages.filter(m => m.type === 'code.spec').length, before + 1);
+  assert.equal(ui.messages.at(-1).payload.decisions[0].chosen_key, 'pg');
+});
+
+test('초안을 못 받으면 다시 받거나, 직접 쓰거나, 명세 없이 만들 수 있다 — 턴은 오류로 바뀌지 않는다', () => {
+  const ui = mount();
+  const id = toSpec(ui);
+  ui.emit('code.specError', {requestId:id, message:'AI 할당량 초과'});
+  assert.ok(ui.find(n => n.props.role === 'alert' && JSON.stringify(n.props.children).includes('AI 할당량 초과')));
+  assert.equal(editor(ui).props.spec.criteria.length, 1, '직접 쓸 빈 줄 하나');
+  ui.button('다시 받기').props.onClick(); ui.render();
+  assert.equal(ui.messages.at(-1).type, 'code.spec');
+  ui.emit('code.specError', {requestId:id, message:'또 실패'});
+  ui.button('명세 없이 생성').props.onClick(); ui.render();
+  const gen = ui.messages.at(-1);
+  assert.equal(gen.type, 'code.generate');
+  assert.equal(gen.payload.spec, null);
+});
+
+test('확인 카드만 있는 작은 요청도 [진행] 뒤 합격 조건을 확인한다', () => {
+  const ui = mount();
+  ui.input('오타 고쳐줘'); ui.button('보내기').props.onClick();
+  const id = ui.messages[0].payload.requestId;
+  ui.emit('code.planResult', {requestId:id, decisions:[]});
+  ui.button('진행 →').props.onClick(); ui.render();
+  const req = ui.messages.at(-1);
+  assert.equal(req.type, 'code.spec');
+  assert.equal(req.payload.decisions[0].chosen_key, 'proceed');
+});
+
+test('명세 초안이 오지 않으면 창을 닫고 다시 요청할 수 있게 한다', () => {
+  const ui = mount();
+  toSpec(ui);
+  ui.expire();
+  assert.equal(ui.find(n => n.props.role === 'dialog'), undefined);
+  assert.equal(ui.find(n => n.type === 'textarea').props.disabled, false);
+});
+
+test('결과에는 따른 합격 조건과 "아직 자동 확인 전"이 함께 보인다', () => {
+  const ui = mount();
+  const id = toSpec(ui);
+  ui.emit('code.specResult', {requestId:id, spec});
+  ui.button('명세대로 생성 →').props.onClick(); ui.render();
+  ui.emit('code.result', {requestId:id, summary:'s', model:'m', ops:[{file:'a.js',content:'x',action:'create',language:'js',rationale:''}],
+    spec:{...spec, file:'docs/spec/SPEC-1-x.md', verified:false}});
+  const box = ui.find(n => n.props['data-testid'] === 'code-spec-summary');
+  assert.ok(box);
+  const all = JSON.stringify(ui.nodes().filter(n => n.props && n.props['data-testid'] === 'code-spec-summary').map(n => n.props.children));
+  assert.ok(all.includes('아직 자동 확인 전') && all.includes('docs/spec/SPEC-1-x.md'));
 });

@@ -941,6 +941,7 @@ def _build_code_prompt(
     context_files: list[dict] | None = None,
     target_folder: str = "",
     decisions: list[NormalizedDecision] | None = None,
+    spec_block: str = "",
 ) -> str:
     """코드 생성 에이전트용 프롬프트. JSON ops 형식을 강제한다.
 
@@ -1023,7 +1024,7 @@ def _build_code_prompt(
 
 기존 파일 목록:
 {tree}
-{folder_block}{ctx_block}{prior_block}{open_block}{decision_block}
+{folder_block}{ctx_block}{prior_block}{open_block}{decision_block}{spec_block}
 사용자 요청:
 {instruction}
 
@@ -1769,6 +1770,120 @@ def generate_plan(
     return result
 
 
+# ── 2.0.38 명세 · 합격 조건 (/api/code/spec) ────────────────────────────
+_SPEC_MAX_TOKENS = 3000
+
+
+def _build_spec_prompt(
+    instruction: str,
+    existing_files: list[str],
+    open_file: dict | None,
+    target_folder: str,
+    context_files: list[dict] | None,
+    decision_block: str,
+) -> str:
+    """설계 결정까지 고른 요청 → "무엇이 되면 완성인가"(목표·범위·합격 조건) 초안을 요구하는 프롬프트."""
+    open_file, _prior, context_files = _scrub_context(open_file, None, context_files)
+    tree = "\n".join(f"- {f}" for f in existing_files[:200]) or "(빈 프로젝트)"
+    folder_block = f"\n[대상 폴더] {target_folder.strip().rstrip('/')}/\n" if (target_folder or "").strip() else ""
+    ctx_block = ""
+    for cf in (context_files or [])[:3]:
+        body = _prompt_body(cf.get("content") or "", _MAX_PROMPT_BYTES)
+        if body.strip():
+            ctx_block += f"\n[참고 파일] {cf.get('path', '?')}\n```\n{body}\n```\n"
+    open_block = ""
+    if open_file and (open_file.get("content") or "").strip():
+        body = _prompt_body(open_file.get("content") or "", _MAX_PROMPT_BYTES)
+        open_block = f"\n현재 편집 중인 파일: {open_file.get('path', '(unknown)')}\n```\n{body}\n```\n"
+    return f"""당신은 코드를 만들기 전에 "무엇이 되면 완성인가"를 사용자와 맞추는 요구사항 정리 담당입니다.
+아직 코드를 쓰지 말고, 아래 요청을 실제 출시할 수 있는 수준으로 만들려면 무엇을 만족해야 하는지 명세로 정리하세요.
+
+규칙:
+- goal: 이 작업이 끝나면 사용자가 무엇을 할 수 있게 되는지 한 문장.
+- in_scope: 이번에 만드는 것(기능 단위, 짧게). out_of_scope: 요청에 없거나 다음으로 미룰 것 — 과하게 만들지 않게 경계를 긋습니다.
+- criteria(합격 조건): 보통 4~10개(오타·이름 변경 같은 작은 수정이면 1~3개). 각 조건은 **확인할 수 있는 한 문장**입니다(누가·무엇을 하면·어떤 결과가 나온다).
+  "잘 동작한다", "적절히", "빠르게" 같은 확인할 수 없는 말은 쓰지 말고 숫자·상태 코드·화면에 보이는 문구처럼 확인 가능한 결과로 씁니다.
+- 정상 흐름만 쓰지 말고 잘못된 입력·권한 없음·빈 데이터 같은 실패 흐름도 포함합니다. 로그인·결제·개인정보가 있으면 보안 조건을 넣습니다.
+- kind: feature(기능) | api(API 응답) | screen(화면) | data(데이터 저장·정합성) | security(보안) | quality(실행·빌드·성능).
+- check: 그 조건을 어떻게 확인하는지 짧게(예: "POST /api/cart 에 수량 0 → 400", "새로고침 후에도 장바구니 유지").
+- 사용자가 고른 설계 결정이 있으면 그 선택을 전제로 씁니다. 모든 문장은 한국어로 씁니다.
+
+기존 파일 목록:
+{tree}
+{folder_block}{ctx_block}{open_block}{decision_block}
+사용자 요청:
+{instruction}
+
+아래 형식의 JSON 객체 하나만 반환하세요(설명 문장 금지):
+{{"goal": "...", "in_scope": ["..."], "out_of_scope": ["..."],
+  "criteria": [{{"text": "로그인하지 않은 사용자가 장바구니에 담으면 로그인 화면으로 이동한다", "kind": "feature", "check": "로그아웃 상태에서 담기 → /login"}}]}}"""
+
+
+def generate_spec(
+    instruction: str,
+    decisions: list | None = None,
+    open_file: dict | None = None,
+    target_folder: str = "",
+    context_files: list[dict] | None = None,
+    project_root: str = "",
+) -> dict:
+    """설계 결정을 고른 뒤 → 명세(목표·범위·합격 조건) 초안. 코드는 만들지 않는다.
+
+    사용자가 화면에서 고치고 승인한 명세가 generate_code(spec=…) 로 다시 온다.
+    반환: {"spec": {goal, in_scope, out_of_scope, criteria:[{id,text,kind,check,source}]}, "model", "provider"}
+    """
+    try:
+        import code_spec
+    except ImportError:  # pragma: no cover
+        from core import code_spec  # type: ignore
+    instruction = (instruction or "").strip()
+    if not instruction:
+        raise ValueError("instruction 이 비어 있습니다.")
+    root = _resolve_root(project_root)
+    existing = _list_project_files(root)
+    decision_block = _decisions_prompt_block(normalize_decisions(decisions))
+    prompt = _build_spec_prompt(instruction, existing, open_file, target_folder, context_files, decision_block)
+    data: dict | None = None
+    llm_resp = None
+    last_error: Exception | None = None
+    for attempt in range(2):
+        attempt_prompt = prompt if attempt == 0 else (
+            prompt + "\n\n[재시도] 직전 응답이 올바른 JSON 이 아니었습니다. 설명 없이 위 형식의 JSON 객체 하나만, "
+                     "합격 조건은 8개 이하로 짧게 반환하세요.")
+        try:
+            llm_resp = get_router().call(
+                LLMRequest(prompt=attempt_prompt, json_schema=code_spec.SPEC_SCHEMA,
+                           max_tokens=_SPEC_MAX_TOKENS, temperature=0.2),
+                agent="code_agent",
+                operation="generate_spec",
+            )
+        except LLMError as e:
+            if e.error_type == LLMErrorType.STRUCTURED_OUTPUT:
+                last_error = RuntimeError(str(e) or "응답이 잘렸습니다.")
+                continue
+            from llm.failure import public_ai_failure_reason
+            guidance = " 잠시 후 다시 시도해 주세요." if e.retryable else " AI 연결 설정을 확인해 주세요."
+            raise RuntimeError(f"LLM 호출 실패: {public_ai_failure_reason(e)}{guidance}") from e
+        raw = (llm_resp.text or "").strip()
+        if not raw:
+            last_error = RuntimeError("AI 가 빈 응답을 보냈습니다.")
+            continue
+        try:
+            data = _extract_json(raw)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+    if data is None:
+        raise RuntimeError(f"명세 초안을 해석하지 못했습니다(2회 시도). 마지막 오류: {last_error}")
+    spec = code_spec.draft_from_llm(data)
+    print(f"[code_agent] 명세 초안 | 합격 조건 {len(spec['criteria'])}개")
+    return {
+        "spec": spec,
+        "model": getattr(llm_resp, "model_used", ""),
+        "provider": getattr(llm_resp, "provider", ""),
+    }
+
+
 def _relative_to_target(ops: list[dict], target_folder: str) -> list[dict]:
     """op 경로를 대상 폴더 기준으로 맞춘다. 모델이 'web/index.html' 처럼 대상 폴더를 붙여 돌려주면
     적용 단계에서 폴더가 한 번 더 붙어 web/web/index.html 이 생겼다(확장·ADR·삭제 경고는 대상 기준)."""
@@ -2460,9 +2575,13 @@ def generate_code(
     budget_seconds: int | None = None,
     agents: int | None = None,
     skip_failed: bool = False,
+    spec: dict | None = None,
 ) -> dict:
     """
     자연어 instruction → 파일 작업(ops) 목록.
+
+    spec(2.0.38): 사용자가 확인·승인한 명세(목표·범위·합격 조건). 주어지면 프롬프트에 "완성 기준"으로 넣고,
+        docs/spec/SPEC-*.md 기록을 ops 에 함께 담는다. 합격 조건이 없으면 명세 없이 생성한 것과 같다.
 
     mode: "auto"(작은 요청은 한 번에, 잘리면 대규모 엔진) | "team"(처음부터 대규모 엔진 — 여러 에이전트).
     job_id: 대규모 생성의 체크포인트 ID. 같은 요청을 같은 job_id 로 다시 보내면 멈춘 지점부터 이어 만든다.
@@ -2523,10 +2642,18 @@ def generate_code(
     norm_decisions = normalize_decisions(decisions)
     if norm_decisions:
         print(f"[code_agent] 승인된 결정 {len(norm_decisions)}개 주입")
+    try:
+        import code_spec as _code_spec
+    except ImportError:  # pragma: no cover
+        from core import code_spec as _code_spec  # type: ignore
+    #: 2.0.38 명세도 여기서 한 번만 정규화한다 — 프롬프트와 기록 파일이 같은 값을 본다.
+    norm_spec = _code_spec.normalize_spec(spec)
+    if norm_spec:
+        print(f"[code_agent] 승인된 합격 조건 {len(norm_spec['criteria'])}개 주입")
 
     prompt = _build_code_prompt(
         instruction, existing, open_file, prior_files or [], context_files or [],
-        target_folder, norm_decisions,
+        target_folder, norm_decisions, spec_block=_code_spec.spec_prompt_block(norm_spec),
     )
     #: 고른 결제 시작 방식 — AI 가 만드는 앱도 로컬 배포의 모의 결제 서버와 맞는 약속을 지키게 한다.
     import payment_contract
@@ -2546,7 +2673,9 @@ def generate_code(
     job_id = job_id if _jobs.valid_job_id(job_id) else _jobs.new_job_id()
     #: 같은 요청인지 — 요청문·승인한 결정·대상 폴더·프로젝트가 같아야 체크포인트를 이어 쓴다.
     fp = _jobs.fingerprint(instruction=instruction, decisions=norm_decisions, target=target_folder, root=str(root),
-                           context=[f.get("path") for f in (context_files or []) if isinstance(f, dict)])
+                           context=[f.get("path") for f in (context_files or []) if isinstance(f, dict)],
+                           #: 명세가 다르면 다른 작업이다. 명세 없는 요청은 예전 지문 그대로(이어 받기 호환).
+                           **({"spec": norm_spec} if norm_spec else {}))
     saved = _jobs.load(job_id, fp)
     _jobs.prune()
     if saved and isinstance(saved.get("result"), dict):
@@ -2981,11 +3110,14 @@ def generate_code(
             return False
         return bool(re.match(r"adr-\d+", path[len(prefix):]))
 
-    intruders = [op for op in ops_out if _overwrites_adr_record(op)]
+    def _overwrites_record(op: dict) -> bool:
+        return _overwrites_adr_record(op) or _code_spec.overwrites_spec_record(op.get("file"))
+
+    intruders = [op for op in ops_out if _overwrites_record(op)]
     if intruders:
         for op in intruders:
-            print(f"[code_agent] ADR 기록을 덮어쓰려는 코드 op 제외: {op.get('file')!r}")
-        ops_out = [op for op in ops_out if not _overwrites_adr_record(op)]
+            print(f"[code_agent] ADR·명세 기록을 덮어쓰려는 코드 op 제외: {op.get('file')!r}")
+        ops_out = [op for op in ops_out if not _overwrites_record(op)]
         if not ops_out:
             # 걸러내고 나니 적용할 것이 하나도 없다. 이대로 성공으로 반환하면
             # 확장은 "생성 완료 · 변경 0건"을 띄우고, 사용자는 요청이 처리된
@@ -2999,6 +3131,9 @@ def generate_code(
     adr_ops = build_adr_ops(norm_decisions, instruction, root, target_folder)
     if adr_ops:
         ops_out.extend(adr_ops)
+    spec_ops = _code_spec.build_spec_ops(norm_spec, instruction)
+    if spec_ops:
+        ops_out.extend(spec_ops)
 
     # 적용 전 안전 검사 — 생성된 코드/ADR 에 시크릿이 박혀있으면 op 에 경고를 단다.
     # README·.env.example 같은 문서의 키 모양 예시 값은 자리표시(<STRIPE_SECRET_KEY>)로 바꾼다 — 배포 보안 검사(gitleaks)와
@@ -3090,6 +3225,9 @@ def generate_code(
         "model": getattr(llm_resp, "model_used", ""),
         "provider": getattr(llm_resp, "provider", ""),
     }
+    if norm_spec:
+        #: 2.0.38 — 이 결과가 따른 명세. 합격 여부 자동 확인은 아직 없다(화면이 "자동 확인 전"으로 보여 준다).
+        result["spec"] = {**norm_spec, "file": spec_ops[0]["file"] if spec_ops else "", "verified": False}
     if adr_ops:
         result["adr"] = [op["file"] for op in adr_ops]
         print(f"[code_agent] ADR {len(adr_ops)}건 영속화 예정: {result['adr']}")

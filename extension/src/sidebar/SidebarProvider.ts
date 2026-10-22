@@ -17,7 +17,7 @@ import {
     DeployMethod,
     AwsStatus,
 } from '../types';
-import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
+import { ApiClient, CodeDecisionChoice, CodeSpec } from '../core/ApiClient';
 import { GenerationPausedError, compactCodeEvent } from '../core/codeStream';
 import { CoreHttpError, policyDenialFromDetail } from '../core/httpError';
 import { CoreManager } from '../core/CoreManager';
@@ -2063,6 +2063,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     resumeJob?: string;
                     agents?: number;
                     skipFailed?: boolean;
+                    spec?: CodeSpec | null;
                 };
                 await this.handleCodeGenerate(p.instruction ?? '', {
                     requestId: p.requestId,
@@ -2075,7 +2076,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     resumeJob: typeof p.resumeJob === 'string' ? p.resumeJob : '',
                     agents: Number.isInteger(p.agents) && (p.agents as number) > 0 && (p.agents as number) <= 8 ? p.agents : 0,
                     skipFailed: p.skipFailed === true,
+                    spec: p.spec && typeof p.spec === 'object' ? p.spec : null,
                 });
+                break;
+            }
+            case 'code.spec': {
+                //: 2.0.38 — 설계 결정을 고른 뒤 명세(목표·범위·합격 조건) 초안을 받는다.
+                //: 실패해도 턴을 오류로 바꾸지 않는다 — 명세 창 안에서 다시 받거나 직접 적게 한다.
+                const p = (payload ?? {}) as { requestId?: number; instruction?: string; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }>; decisions?: CodeDecisionChoice[] };
+                try {
+                    const scope = this._codeScope(p.targetFolder ?? '');
+                    await this.ensureConnection();
+                    const ed = vscode.window.activeTextEditor;
+                    const openFile = ed && !ed.document.isUntitled
+                        ? { path: vscode.workspace.asRelativePath(ed.document.uri), content: ed.document.getText() } : undefined;
+                    const draft = await this._apiClient.draftSpec(p.instruction ?? '', {
+                        workspacePath: scope.workspacePath, openFile, contextFiles: p.contextFiles ?? [],
+                        targetFolder: scope.targetFolder, decisions: p.decisions ?? [],
+                    });
+                    this.postMessageToWebview(requestWebview, 'code.specResult', { requestId: p.requestId, spec: draft.spec });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'code.specError', {
+                        requestId: p.requestId, message: err instanceof Error ? err.message : String(err),
+                    });
+                }
                 break;
             }
             case 'code.plan': {
@@ -2526,6 +2550,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             resumeJob?: string;
             agents?: number;
             skipFailed?: boolean;
+            /** 2.0.38 사용자가 승인한 명세(합격 조건). */
+            spec?: CodeSpec | null;
         } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
@@ -2555,7 +2581,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const streaming = typeof (this._apiClient as Partial<ApiClient>).generateCodeStream === 'function';
             const result = !streaming ? await this._apiClient.generateCode(instruction, {
                 workspacePath, openFile: attach, priorFiles: this._lastCodeOps, contextFiles: opts.contextFiles ?? [],
-                targetFolder: scope.targetFolder, decisions: opts.decisions ?? [],
+                targetFolder: scope.targetFolder, decisions: opts.decisions ?? [], spec: opts.spec ?? null,
             }) : await this._apiClient.generateCodeStream(instruction, {
                 workspacePath,
                 openFile: attach,
@@ -2567,6 +2593,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 resumeJob: opts.resumeJob ?? '',
                 agents: opts.agents ?? 0,
                 skipFailed: opts.skipFailed === true,
+                spec: opts.spec ?? null,
             }, (event) => {
                 if (event.message) status('generating', event.message, 300);
                 this.postMessageToWebview(opts.requestWebview, 'code.team', { requestId: opts.requestId, event: compactCodeEvent(event) });

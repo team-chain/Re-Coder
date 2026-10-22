@@ -152,6 +152,30 @@ export interface CodeAgentResult {
     /** 대규모 생성 작업 ID — 같은 ID 로 다시 요청하면 저장된 결과를 바로 받는다. */
     job_id?: string;
     verification?: {kind: string; status: string; passed: boolean; output?: string};
+    /** 2.0.38 — 이 결과가 따른 명세(합격 조건). verified 는 아직 언제나 false(자동 확인은 다음 단계). */
+    spec?: CodeSpec & { file?: string; verified?: boolean };
+}
+
+/** 2.0.38 명세 · 합격 조건 — 코드를 만들기 전에 "무엇이 되면 완성인가"를 맞춘다. */
+export type CodeSpecKind = 'feature' | 'api' | 'screen' | 'data' | 'security' | 'quality';
+export interface CodeSpecCriterion {
+    id: string;
+    text: string;
+    kind: CodeSpecKind;
+    /** 어떻게 확인하는지(예: "POST /api/cart qty=0 → 400"). */
+    check: string;
+    source: 'ai' | 'user';
+}
+export interface CodeSpec {
+    goal: string;
+    in_scope: string[];
+    out_of_scope: string[];
+    criteria: CodeSpecCriterion[];
+}
+export interface CodeSpecDraft {
+    spec: CodeSpec;
+    model?: string;
+    provider?: string;
 }
 
 /** /api/code/plan — AI-DLC 1단계: 코드 대신 "설계 결정" 선택지. */
@@ -478,6 +502,8 @@ export class ApiClient {
             // (Core 의 /api/code/generate 가 아직 이 필드를 소비하지 않아도 무해하게 무시됨 —
             //  decisions 반영은 별도 태스크.)
             decisions?: CodeDecisionChoice[];
+            /** 2.0.38 사용자가 승인한 명세. 없으면 명세 없이 생성. */
+            spec?: CodeSpec | null;
         }
     ): Promise<CodeAgentResult> {
         const body = {
@@ -489,6 +515,7 @@ export class ApiClient {
             context_files: opts?.contextFiles ?? [],
             target_folder: opts?.targetFolder ?? '',
             decisions: opts?.decisions ?? [],
+            spec: opts?.spec ?? null,
         };
         // Full-file output and one schema correction can take two model calls.
         //: 분할 생성 + 자동 교정(최대 3회)까지 끝날 시간. Core 는 10분 예산 안에서 교정을 멈춘다.
@@ -516,6 +543,7 @@ export class ApiClient {
             agents?: number;
             /** 이어 만들 때 실패한 파일을 빼고 결과를 받는다. */
             skipFailed?: boolean;
+            spec?: CodeSpec | null;
         },
         onEvent: (event: CodeProgressEvent) => void,
         retried = false,
@@ -534,6 +562,7 @@ export class ApiClient {
             resume_job: opts.resumeJob ?? '',
             agents: opts.agents ?? 0,
             skip_failed: !!(opts.skipFailed && opts.resumeJob),
+            spec: opts.spec ?? null,
         };
         const controller = new AbortController();
         const response = await fetch(`http://127.0.0.1:${this.coreManager.getPort()}/api/code/generate/stream`, {
@@ -580,6 +609,31 @@ export class ApiClient {
         };
         const resp = await this.request<CodePlanResult>('POST', '/api/code/plan', body, false, 240000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설계 결정 생성 실패'); }
+        return resp.data;
+    }
+
+    /** 2.0.38 — 설계 결정을 고른 뒤 명세(목표·범위·합격 조건) 초안을 받는다(/api/code/spec). 코드는 만들지 않는다. */
+    async draftSpec(
+        instruction: string,
+        opts?: {
+            workspacePath?: string;
+            openFile?: { path: string; content: string };
+            contextFiles?: Array<{ path: string; content: string }>;
+            targetFolder?: string;
+            decisions?: CodeDecisionChoice[];
+        }
+    ): Promise<CodeSpecDraft> {
+        const body = {
+            instruction,
+            decisions: opts?.decisions ?? [],
+            workspace_path: opts?.workspacePath ?? '',
+            open_file_path: opts?.openFile?.path ?? '',
+            open_file_content: opts?.openFile?.content ?? '',
+            context_files: opts?.contextFiles ?? [],
+            target_folder: opts?.targetFolder ?? '',
+        };
+        const resp = await this.request<CodeSpecDraft>('POST', '/api/code/spec', body, false, 240000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '명세 초안 생성 실패'); }
         return resp.data;
     }
 

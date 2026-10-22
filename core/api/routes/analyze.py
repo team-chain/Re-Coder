@@ -681,6 +681,8 @@ class CodeGenerateRequest(BaseModel):
     agents: int = 0
     #: 이어 만들 때 정해진 횟수를 넘겨 실패한 파일을 빼고 결과를 받는다(사용자가 [이 파일 빼고 결과 받기]를 고른 경우).
     skip_failed: bool = False
+    #: 2.0.38 — 사용자가 확인·승인한 명세(목표·범위·합격 조건). 없으면 명세 없이 생성한 것과 같다.
+    spec: dict | None = None
 
 
 @router.post("/api/code/generate")
@@ -732,6 +734,7 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
             mode=_code_mode(body.mode),
             job_id=body.resume_job or "",
             skip_failed=bool(body.skip_failed and body.resume_job),
+            spec=body.spec,
         )
     except GenerationPaused as e:
         #: 다 만든 파일은 저장됐다 — 같은 요청을 resume_job 과 함께 다시 보내면 이어 만든다.
@@ -787,6 +790,7 @@ async def generate_code_stream_route(body: CodeGenerateRequest):
             job_id=job_id,
             agents=agents,
             skip_failed=bool(body.skip_failed and body.resume_job),
+            spec=body.spec,
             #: 확장은 진행 이벤트를 받으며 기다리므로 자동 교정 시간을 넉넉히 준다.
             budget_seconds=3600,
         )
@@ -1083,3 +1087,50 @@ async def code_plan_route(body: CodePlanRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"설계 결정 생성 실패: {e}") from e
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 2.0.38 명세 · 합격 조건 (/api/code/spec)
+#   설계 결정을 고른 뒤, 코드를 만들기 전에 "무엇이 되면 완성인가"(목표·범위·합격 조건) 초안을 받는다.
+#   사용자가 화면에서 고친 명세가 /api/code/generate 의 spec 으로 다시 온다. 코드는 만들지 않는다.
+# ---------------------------------------------------------------------------
+
+
+class CodeSpecRequest(BaseModel):
+    instruction: str = ""
+    decisions: list = []
+    workspace_path: str = ""
+    open_file_path: str = ""
+    open_file_content: str = ""
+    context_files: list = []
+    target_folder: str = ""
+
+
+@router.post("/api/code/spec")
+async def code_spec_route(body: CodeSpecRequest) -> dict:
+    import asyncio as _asyncio
+
+    if not (body.instruction or "").strip():
+        raise HTTPException(status_code=400, detail="instruction 이 비어 있습니다.")
+    open_file = None
+    if body.open_file_path or body.open_file_content:
+        open_file = {"path": body.open_file_path, "content": body.open_file_content}
+    try:
+        try:
+            from code_agent import generate_spec
+        except ImportError:
+            from core.code_agent import generate_spec
+        # 워크스페이스 경로는 전역 env 가 아니라 인자로 넘긴다(동시 요청 격리 — generate_code_route 주석 참조).
+        return await _asyncio.to_thread(
+            generate_spec,
+            instruction=body.instruction,
+            decisions=body.decisions or [],
+            open_file=open_file,
+            context_files=body.context_files or [],
+            target_folder=body.target_folder or "",
+            project_root=body.workspace_path or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"명세 초안 생성 실패: {e}") from e

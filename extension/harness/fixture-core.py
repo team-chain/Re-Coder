@@ -48,6 +48,11 @@ CODE = {"summary": "게시판 생성", "ops": [
     {"action": "create", "file": "app.js", "language": "javascript",
      "content": "console.log('board')", "rationale": "동작"},
 ]}
+SPEC = {"goal": "게시글을 쓰고 목록에서 볼 수 있다", "in_scope": ["글 작성", "목록"], "out_of_scope": ["댓글"],
+        "criteria": [
+            {"text": "제목 없이 쓰면 저장하지 않고 안내 문구를 보여 준다", "kind": "feature", "check": "빈 제목 → 안내"},
+            {"text": "쓴 글이 목록 맨 위에 보인다", "kind": "screen", "check": "작성 후 첫 줄"},
+        ]}
 CHAT = {"reply": "게시판을 만들겠습니다. 아래에서 위치와 파일을 확인하고 승인해 주세요.",
         "action": {"type": "code.plan", "instruction": "게시판 생성 - 글 작성/목록/삭제",
                    "stack": "HTML/JS", "files": ["index.html", "app.js"], "summary": "게시판 생성"}}
@@ -62,6 +67,8 @@ class _Fx:
     def call(self, request, agent=None, operation=None):
         if operation == "generate_plan":
             return _Resp(json.dumps(PLAN, ensure_ascii=False))
+        if operation == "generate_spec":
+            return _Resp(json.dumps(SPEC, ensure_ascii=False))
         if operation == "generate_code":
             return _Resp(json.dumps(CODE, ensure_ascii=False))
         return _Resp(json.dumps(CHAT, ensure_ascii=False))
