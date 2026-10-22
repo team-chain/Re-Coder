@@ -5,7 +5,7 @@
 - code_agent.generate_spec(instruction, decisions, …) — operation generate_spec(품질 등급), 깨진 JSON 한 번 재시도. generate_code(spec=) — 한 번 정규화, _build_code_prompt(spec_block=), 지문에 spec(있을 때만 — 명세 없는 요청의 이어 받기 지문은 예전 그대로), AI op 의 docs/spec/SPEC-* 덮어쓰기 제거, 결과 spec{…, file, verified:false}. 명세 없으면 프롬프트·결과 모두 예전과 같음(시험으로 고정). 승인 게이트는 그대로(명세가 승인 대신이 아님).
 - POST /api/code/spec(CodeSpecRequest), CodeGenerateRequest.spec → 두 생성 라우트. release_check: 경로·code_spec 모듈.
 - 확장: ApiClient.draftSpec·CodeSpec 타입·두 생성 경로 body.spec. SidebarProvider case code.spec → code.specResult / code.specError(턴 오류 아님), code.generate → handleCodeGenerate(spec). webview specModel.ts(fromDraft·updateCriterion(고치면 source user)·add/remove·specForRequest(포함한 조건만, 범위 줄 나눔)·specIssues(block: 조건 없음 / warn: 모호한 말·확인 방법 없음·실패 흐름 없음·목표 없음)), SpecEditor.tsx(훅 없음, 공통 Checkbox), 결과 data-testid=code-spec-summary("아직 자동 확인 전").
-- 시험: core/tests/test_dev_2038.py(14), webview-tests/specModel.test.js(7 — 모델·렌더·결선·호스트), centralDevelopment.test.js(명세 단계 7 + 기존 흐름 수정). harness e2e 에 4b(code.spec) 추가 — fixture-core 에 generate_spec 응답. (e2e 3-A·6 은 이 변경 전에도 실패하던 하네스 문제 — CI 에서 돌지 않음.)
+- 시험: core/tests/test_dev_2043.py(14), webview-tests/specModel.test.js(7 — 모델·렌더·결선·호스트), centralDevelopment.test.js(명세 단계 7 + 기존 흐름 수정). harness e2e 에 4b(code.spec) 추가 — fixture-core 에 generate_spec 응답. (e2e 3-A·6 은 이 변경 전에도 실패하던 하네스 문제 — CI 에서 돌지 않음.)
 - 다음 단계(②~⑤): 합격 조건 → 테스트(kind 별: api → HTTP 시험, screen → 화면 시나리오, security → 권한 시험), 통과까지 교정, 출시 기준 검사, 조건별 증거 화면(verified 채우기, 기록 표의 "자동 확인" 열).
 
 # 구조 다이어그램 (2026-10-22, 2.0.42)

@@ -36,7 +36,7 @@ interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?
   fallback_docs?: string[];
   /** 2.0.28 AI 코드 보안 점수. */
   security?: SecurityReport | null;
-  /** 2.0.38 이 결과가 따른 명세. verified 는 아직 언제나 false — 자동 확인(테스트)은 다음 단계. */
+  /** 2.0.43 이 결과가 따른 명세. verified 는 아직 언제나 false — 자동 확인(테스트)은 다음 단계. */
   spec?: { goal?: string; criteria?: Array<{ id: string; text: string; kind: SpecKind; check?: string }>; file?: string; verified?: boolean } | null; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
@@ -81,7 +81,7 @@ export function buildDecisionChoices(
 //: 전부 이 고정값을 쓴다.
 //: 팀 모드: team 은 코어 진행 이벤트를 접은 화면 상태, request 는 [이어서 만들기]에 그대로 다시 보낼 생성 요청.
 interface GenerateRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; decisions: DecisionChoice[]; mode: "auto" | "team"; agents: number;
-  /** 2.0.38 사용자가 승인한 명세(합격 조건). 이어서 만들기에도 그대로 다시 보낸다. */
+  /** 2.0.43 사용자가 승인한 명세(합격 조건). 이어서 만들기에도 그대로 다시 보낸다. */
   spec?: SpecPayload | null; }
 interface PausedInfo { message: string; jobId: string; done: number; total: number; reason?: string; failed?: FailedFile[]; }
 interface Turn { id: number; prompt: string; targetFolder: string; contextNames?: string[]; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string;
@@ -93,7 +93,7 @@ interface DecisionModal {
   /** 고른 선택에 따라 이어서 물을 결정(코어가 알려 줌) · 이미 끼워 넣은 것 · AI 에게 받는 중 · 실패/안내. */
   followups?: Followups; expanded?: Record<string, { key: string; ids: string[] }>;
   loading?: boolean; followupError?: string; followupNote?: string;
-  /** 2.0.38 — decide: 설계 결정 고르기, spec: 명세(합격 조건) 확인·수정(마지막 단계). */
+  /** 2.0.43 — decide: 설계 결정 고르기, spec: 명세(합격 조건) 확인·수정(마지막 단계). */
   phase?: "decide" | "spec";
   spec?: EditableSpec | null; specLoading?: boolean; specError?: string;
   /** 지금 명세 초안을 받은 설계 선택 — 선택을 바꾸고 돌아오면 초안을 다시 받는다. */
@@ -342,7 +342,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           followupNote: list.length ? "" : "AI 가 더 물을 설계 결정을 찾지 못했습니다. 이 선택으로 생성할 수 있습니다." };
       });
     } else if (type === "code.specResult" || type === "code.specError") {
-      //: 2.0.38 명세 초안 — 결정 창 안에서만 반영한다. 실패해도 턴은 그대로(다시 받기·직접 쓰기).
+      //: 2.0.43 명세 초안 — 결정 창 안에서만 반영한다. 실패해도 턴은 그대로(다시 받기·직접 쓰기).
       const r = payload as { requestId?: number; spec?: unknown; message?: string };
       setDecisionModal((cur) => {
         if (!cur || cur.requestId !== r.requestId || cur.phase !== "spec" || !cur.specLoading) { return cur; }
@@ -399,7 +399,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     setDecisionModal(null);
   }, [decisionModal, postMessage]);
 
-  //: 2.0.38 설계 결정을 다 고르면 바로 만들지 않고 명세(목표·범위·합격 조건) 단계로 간다.
+  //: 2.0.43 설계 결정을 다 고르면 바로 만들지 않고 명세(목표·범위·합격 조건) 단계로 간다.
   //: 같은 선택으로 이미 받은 초안이 있으면(뒤로 갔다 온 경우) 다시 받지 않는다 — 사람이 고친 내용을 지키려고.
   const requestSpec = useCallback((modalArg: DecisionModal) => {
     const request = pendingRequestsRef.current[modalArg.requestId];
@@ -558,7 +558,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         .rc-decision-option:hover { border-color: var(--vscode-focusBorder, #3794ff) !important; }
       `}</style>
       {decisionModal && decisionModal.phase === "spec" && (() => {
-        //: 2.0.38 명세 · 합격 조건 — 결정 창의 마지막 단계. 여기서 승인한 조건만 생성 요청에 실린다.
+        //: 2.0.43 명세 · 합격 조건 — 결정 창의 마지막 단계. 여기서 승인한 조건만 생성 요청에 실린다.
         const m = decisionModal;
         const issues = specIssues(m.spec);
         const blocked = !!m.specLoading || hasBlocking(issues);
@@ -700,7 +700,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                     : "빌드 미검증 · Docker와 실행 설정을 확인한 뒤 검증하세요."}
               </div>
               {turn.result.spec && (turn.result.spec.criteria?.length ?? 0) > 0 && (
-                //: 2.0.38 — 이 결과가 따른 합격 조건. 아직 자동으로 확인하지 않았다는 사실을 그대로 보여 준다.
+                //: 2.0.43 — 이 결과가 따른 합격 조건. 아직 자동으로 확인하지 않았다는 사실을 그대로 보여 준다.
                 <details data-testid="code-spec-summary" style={{ margin: "0 0 10px", border: "1px solid var(--vscode-widget-border, var(--vscode-panel-border, #3b3b3b))", borderRadius: 7, padding: "7px 10px", fontSize: 12 }}>
                   <summary style={{ cursor: "pointer", color: "var(--vscode-foreground, #ddd)" }}>
                     합격 조건 {turn.result.spec.criteria?.length}개를 따라 만들었습니다 <span style={{ color: "var(--vscode-editorWarning-foreground, #cca700)" }}>· 아직 자동 확인 전</span>

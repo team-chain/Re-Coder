@@ -1,4 +1,4 @@
-// 2.0.37 구조 다이어그램 — 역할 추정, 레인 배치(겹침 없음·방향), 아키텍처 맵(폴더 단위·펼치기), dry run 을 구조 위에서.
+// 2.0.42 구조 다이어그램 — 역할 추정, 레인 배치(겹침 없음·방향), 아키텍처 맵(폴더 단위·펼치기), dry run 을 구조 위에서.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

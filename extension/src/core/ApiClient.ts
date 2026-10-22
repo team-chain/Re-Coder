@@ -152,11 +152,11 @@ export interface CodeAgentResult {
     /** 대규모 생성 작업 ID — 같은 ID 로 다시 요청하면 저장된 결과를 바로 받는다. */
     job_id?: string;
     verification?: {kind: string; status: string; passed: boolean; output?: string};
-    /** 2.0.38 — 이 결과가 따른 명세(합격 조건). verified 는 아직 언제나 false(자동 확인은 다음 단계). */
+    /** 2.0.43 — 이 결과가 따른 명세(합격 조건). verified 는 아직 언제나 false(자동 확인은 다음 단계). */
     spec?: CodeSpec & { file?: string; verified?: boolean };
 }
 
-/** 2.0.38 명세 · 합격 조건 — 코드를 만들기 전에 "무엇이 되면 완성인가"를 맞춘다. */
+/** 2.0.43 명세 · 합격 조건 — 코드를 만들기 전에 "무엇이 되면 완성인가"를 맞춘다. */
 export type CodeSpecKind = 'feature' | 'api' | 'screen' | 'data' | 'security' | 'quality';
 export interface CodeSpecCriterion {
     id: string;
@@ -502,7 +502,7 @@ export class ApiClient {
             // (Core 의 /api/code/generate 가 아직 이 필드를 소비하지 않아도 무해하게 무시됨 —
             //  decisions 반영은 별도 태스크.)
             decisions?: CodeDecisionChoice[];
-            /** 2.0.38 사용자가 승인한 명세. 없으면 명세 없이 생성. */
+            /** 2.0.43 사용자가 승인한 명세. 없으면 명세 없이 생성. */
             spec?: CodeSpec | null;
         }
     ): Promise<CodeAgentResult> {
@@ -612,7 +612,7 @@ export class ApiClient {
         return resp.data;
     }
 
-    /** 2.0.38 — 설계 결정을 고른 뒤 명세(목표·범위·합격 조건) 초안을 받는다(/api/code/spec). 코드는 만들지 않는다. */
+    /** 2.0.43 — 설계 결정을 고른 뒤 명세(목표·범위·합격 조건) 초안을 받는다(/api/code/spec). 코드는 만들지 않는다. */
     async draftSpec(
         instruction: string,
         opts?: {

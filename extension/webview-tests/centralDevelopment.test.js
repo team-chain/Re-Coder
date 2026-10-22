@@ -224,7 +224,7 @@ test('확장이 받았다고 답한 요청은 입력창에 되돌리지 않는�
   assert.equal(ui.find(n => n.type === 'textarea').props.value, '');
 });
 
-// ── 2.0.38 명세 · 합격 조건 ─────────────────────────────────────────────
+// ── 2.0.43 명세 · 합격 조건 ─────────────────────────────────────────────
 const plan2 = {decisions: [{id:'storage', question:'저장 방식은?', impact:'', options:[
   {key:'sqlite', label:'SQLite', summary:'', pros:[], cons:[], recommended:true},
   {key:'pg', label:'PostgreSQL', summary:'', pros:[], cons:[], recommended:false},

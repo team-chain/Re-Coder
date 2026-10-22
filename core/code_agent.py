@@ -1770,7 +1770,7 @@ def generate_plan(
     return result
 
 
-# ── 2.0.38 명세 · 합격 조건 (/api/code/spec) ────────────────────────────
+# ── 2.0.43 명세 · 합격 조건 (/api/code/spec) ────────────────────────────
 _SPEC_MAX_TOKENS = 3000
 
 
@@ -2580,7 +2580,7 @@ def generate_code(
     """
     자연어 instruction → 파일 작업(ops) 목록.
 
-    spec(2.0.38): 사용자가 확인·승인한 명세(목표·범위·합격 조건). 주어지면 프롬프트에 "완성 기준"으로 넣고,
+    spec(2.0.43): 사용자가 확인·승인한 명세(목표·범위·합격 조건). 주어지면 프롬프트에 "완성 기준"으로 넣고,
         docs/spec/SPEC-*.md 기록을 ops 에 함께 담는다. 합격 조건이 없으면 명세 없이 생성한 것과 같다.
 
     mode: "auto"(작은 요청은 한 번에, 잘리면 대규모 엔진) | "team"(처음부터 대규모 엔진 — 여러 에이전트).
@@ -2646,7 +2646,7 @@ def generate_code(
         import code_spec as _code_spec
     except ImportError:  # pragma: no cover
         from core import code_spec as _code_spec  # type: ignore
-    #: 2.0.38 명세도 여기서 한 번만 정규화한다 — 프롬프트와 기록 파일이 같은 값을 본다.
+    #: 2.0.43 명세도 여기서 한 번만 정규화한다 — 프롬프트와 기록 파일이 같은 값을 본다.
     norm_spec = _code_spec.normalize_spec(spec)
     if norm_spec:
         print(f"[code_agent] 승인된 합격 조건 {len(norm_spec['criteria'])}개 주입")
@@ -3226,7 +3226,7 @@ def generate_code(
         "provider": getattr(llm_resp, "provider", ""),
     }
     if norm_spec:
-        #: 2.0.38 — 이 결과가 따른 명세. 합격 여부 자동 확인은 아직 없다(화면이 "자동 확인 전"으로 보여 준다).
+        #: 2.0.43 — 이 결과가 따른 명세. 합격 여부 자동 확인은 아직 없다(화면이 "자동 확인 전"으로 보여 준다).
         result["spec"] = {**norm_spec, "file": spec_ops[0]["file"] if spec_ops else "", "verified": False}
     if adr_ops:
         result["adr"] = [op["file"] for op in adr_ops]

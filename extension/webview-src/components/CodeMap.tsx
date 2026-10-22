@@ -1,7 +1,7 @@
 /**
  * ReCoder — CodeMap component (구조 지도 / Architecture & Code Map)
  *
- * 2.0.37 — 구조 다이어그램(StructureDiagram):
+ * 2.0.42 — 구조 다이어그램(StructureDiagram):
  *   - 가로는 역할 레인(화면 → 입구·API → 처리 → 데이터 → 설정·테스트), 상자는 폴더, 노드는 파일, 선은 import.
  *     레인 안에서는 import 방향(부르는 쪽 → 불리는 쪽)으로 왼쪽에서 오른쪽.
  *   - 파일이 많으면(60개 초과) 폴더 단위로 먼저 보여 주고, 폴더를 누르면 그 폴더의 파일과 이웃 폴더를 펼친다.

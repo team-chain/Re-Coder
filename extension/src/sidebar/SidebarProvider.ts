@@ -2081,7 +2081,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'code.spec': {
-                //: 2.0.38 — 설계 결정을 고른 뒤 명세(목표·범위·합격 조건) 초안을 받는다.
+                //: 2.0.43 — 설계 결정을 고른 뒤 명세(목표·범위·합격 조건) 초안을 받는다.
                 //: 실패해도 턴을 오류로 바꾸지 않는다 — 명세 창 안에서 다시 받거나 직접 적게 한다.
                 const p = (payload ?? {}) as { requestId?: number; instruction?: string; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }>; decisions?: CodeDecisionChoice[] };
                 try {
@@ -2550,7 +2550,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             resumeJob?: string;
             agents?: number;
             skipFailed?: boolean;
-            /** 2.0.38 사용자가 승인한 명세(합격 조건). */
+            /** 2.0.43 사용자가 승인한 명세(합격 조건). */
             spec?: CodeSpec | null;
         } = {},
     ): Promise<void> {
