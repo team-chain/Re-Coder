@@ -2531,10 +2531,13 @@ def _build_failure_issues(verification: dict, ops: list[dict]) -> list[dict]:
         return []
 
 
-def _verify_generated_build(root: Path, target_folder: str, ops: list[dict], run_app: bool = False) -> dict:
+def _verify_generated_build(root: Path, target_folder: str, ops: list[dict], run_app: bool = False,
+                            acceptance=None) -> dict:
     from generated_validation import verify_proposal
     base = (root / target_folder).resolve() if target_folder else root.resolve()
     if run_app:
+        if acceptance is not None:
+            return verify_proposal(base, _verification_ops(base, ops), run_app=True, acceptance=acceptance)
         return verify_proposal(base, _verification_ops(base, ops), run_app=True)
     return verify_proposal(base, _verification_ops(base, ops))
 
@@ -2590,6 +2593,41 @@ def generate_code(
     agents: int | None = None,
     skip_failed: bool = False,
     spec: dict | None = None,
+    models: dict | None = None,
+    test: bool = True,
+) -> dict:
+    """코드 생성(아래 _generate_code 설명). 2.0.45:
+
+    models: 팀 구성 창에서 역할(planner·dev·review·test)마다 고른 공급자 — 이 요청 동안만 쓴다.
+    test:   테스트 리코더 — 승인한 합격 조건을 실제로 띄운 앱에 시험해 보고 실패는 고친다(명세가 있을 때만).
+    """
+    try:
+        from llm import task_tier as _tiers
+    except ImportError:  # pragma: no cover
+        from core.llm import task_tier as _tiers  # type: ignore
+    with _tiers.role_models(models), _tiers.acting_as("dev"):
+        return _generate_code(
+            instruction, session_id, open_file, prior_files, context_files, target_folder, decisions, project_root,
+            mode, job_id, budget_seconds, agents, skip_failed, spec, test=test)
+
+
+def _generate_code(
+    instruction: str,
+    session_id: str = "",
+    open_file: dict | None = None,
+    prior_files: list[dict] | None = None,
+    context_files: list[dict] | None = None,
+    target_folder: str = "",
+    decisions: list | None = None,
+    project_root: str = "",
+    mode: str = "auto",
+    job_id: str = "",
+    budget_seconds: int | None = None,
+    agents: int | None = None,
+    skip_failed: bool = False,
+    spec: dict | None = None,
+    *,
+    test: bool = True,
 ) -> dict:
     """
     자연어 instruction → 파일 작업(ops) 목록.
@@ -2872,6 +2910,20 @@ def generate_code(
         return found
 
     consistency = _issues_for(ops_out)
+    #: 2.0.45 테스트 리코더 — 승인한 합격 조건이 있는 새 앱이면, 앱을 띄운 실행 점검 안에서 조건 시험을 돌린다.
+    acceptance = None
+    acceptance_note = ""
+    if norm_spec and not foundation:
+        if not test:
+            acceptance_note = "테스트를 끈 채 만들었습니다."
+        elif existing:
+            acceptance_note = "기존 프로젝트에 더한 코드는 아직 자동으로 시험하지 않습니다."
+        else:
+            try:
+                import code_test as _code_test
+            except ImportError:  # pragma: no cover
+                from core import code_test as _code_test  # type: ignore
+            acceptance = _code_test.Session(norm_spec["criteria"], emit=_report)
     verification = {"kind": "docker-build", "status": "blocked", "passed": False,
                     "output": "Static consistency errors must be repaired before building."}
     visited = set()
@@ -2900,7 +2952,9 @@ def generate_code(
                 errors = errors + [e for e in _build_failure_issues(built, ops_out) if (e.get("file"), e.get("code")) not in seen]
         if not errors:
             _report({"step": "consistency", "round": _round + 1, "message": "컨테이너 빌드로 실제 동작을 확인하는 중"})
-            verification = _verify_generated_build(root, target_folder, ops_out, run_app=not existing and not foundation)
+            verification = (_verify_generated_build(root, target_folder, ops_out, run_app=True, acceptance=acceptance)
+                            if acceptance is not None else
+                            _verify_generated_build(root, target_folder, ops_out, run_app=not existing and not foundation))
             if verification["status"] != "failed":
                 #: 설정 누락(경고)은 AI 가 고칠 코드 문제가 아니다 — 교정 루프에 넣지 않는다.
                 runtime_errors = [i for i in _runtime_issues(verification) if i.get("severity") == "error"]
@@ -2908,22 +2962,28 @@ def generate_code(
                     break
                 #: 빌드는 되지만 실행하면 5xx·기동 실패 — 서버 로그와 함께 그 파일을 고친다(실기기 2.0.16: 상품 목록 500).
                 #: 요청 단위로 비교한다(로그에는 시각·임의 값이 섞여 매번 달라진다).
-                rkeys = {re.sub(r"/\d+(?=/|$)", "/:id", str(f.get("request")))
+                rkeys = {(str(f.get("criterion")) if f.get("acceptance") else re.sub(r"/\d+(?=/|$)", "/:id", str(f.get("request"))))
                          for f in (verification.get("runtime") or {}).get("failures") or []}
                 if runtime_keys and not (runtime_keys[-1] - rkeys):
                     worse = bool(rkeys - runtime_keys[-1])
                     if worse and prev_runtime is not None:
-                        ops_out, verification = prev_runtime
+                        ops_out, verification, kept_runs = prev_runtime
+                        #: 되돌린 코드의 시험 기록만 남긴다 — 버린 코드의 결과를 사용자에게 보여 주지 않게(검토 2.0.45).
+                        if acceptance is not None:
+                            del acceptance.runs[kept_runs:]
                     print(f"[code_agent] 실행 점검 오류가 줄지 않아 교정을 멈춥니다(남은 {len(rkeys)}건)", flush=True)
                     _report({"step": "consistency", "round": _round + 1,
                              "message": "실행 점검 오류가 더 줄지 않아 교정을 멈췄습니다 — 결과에 요청·서버 로그를 보여 드립니다"})
                     break
                 runtime_keys.append(rkeys)
-                prev_runtime = (ops_out, verification)
+                prev_runtime = (ops_out, verification, len(acceptance.runs) if acceptance is not None else 0)
                 errors = runtime_errors
-                failing = ", ".join(dict.fromkeys(f["request"] for f in (verification.get("runtime") or {}).get("failures") or []))
+                rt_failures = (verification.get("runtime") or {}).get("failures") or []
+                failing = ", ".join(dict.fromkeys(f["request"] for f in rt_failures if not f.get("acceptance")))
+                failed_ac = list(dict.fromkeys(str(f.get("criterion")) for f in rt_failures if f.get("acceptance")))
                 _report({"step": "consistency", "round": _round + 1,
-                         "message": f"실행 점검 — 앱을 띄워 보니 {failing} 가 오류를 냅니다. 서버 로그로 고치는 중"})
+                         "message": (f"실행 점검 — 앱을 띄워 보니 {failing} 가 오류를 냅니다. 서버 로그로 고치는 중" if failing else
+                                     f"테스트 — 합격 조건 {', '.join(failed_ac)} 시험이 실패했습니다. 조건을 만족하도록 고치는 중")})
             else:
                 errors = None
             if errors is None:
@@ -3245,7 +3305,23 @@ def generate_code(
         spec_file = spec_ops[0]["file"] if spec_ops else ""
         folder = (target_folder or "").replace("\\", "/").strip().strip("/")
         #: 화면에 보이는 기록 위치는 실제로 쓰이는 곳(대상 폴더 기준)과 같아야 한다.
-        result["spec"] = {**norm_spec, "file": f"{folder}/{spec_file}" if folder and spec_file else spec_file, "verified": False}
+        summary = acceptance.summary(acceptance_note) if acceptance is not None else {
+            "status": "skipped", "note": acceptance_note or "테스트하지 않았습니다.", "total": len(norm_spec["criteria"]),
+            "passed": 0, "failed": 0, "unverifiable": 0, "criteria": [], "rounds": 0}
+        if acceptance is not None and not acceptance.runs:
+            rt = verification.get("runtime") if isinstance(verification, dict) else None
+            why = (rt or {}).get("note") or verification.get("output") if isinstance(verification, dict) else ""
+            summary["note"] = ("앱을 띄우지 못해 시험하지 못했습니다" + (f": {str(why)[:160]}" if why else "."))
+        #: verified — 시험할 수 있는 조건이 모두 통과했을 때만(확인 불가 조건은 통과로 세지 않는다 — 화면이 따로 보여 준다).
+        verified = summary["status"] == "passed" and summary.get("failed", 0) == 0 and summary.get("passed", 0) > 0
+        result["spec"] = {**norm_spec, "file": f"{folder}/{spec_file}" if folder and spec_file else spec_file,
+                          "verified": verified, "acceptance": summary}
+        if spec_ops and summary.get("criteria"):
+            #: 기록 파일에도 조건별 자동 확인 결과를 남긴다.
+            spec_ops[0]["content"] = _code_spec.spec_markdown(norm_spec, instruction, acceptance=summary)
+            for op in ops_out:
+                if op is not spec_ops[0] and op.get("is_spec") and op.get("file") == spec_ops[0]["file"]:
+                    op["content"] = spec_ops[0]["content"]
     if adr_ops:
         result["adr"] = [op["file"] for op in adr_ops]
         print(f"[code_agent] ADR {len(adr_ops)}건 영속화 예정: {result['adr']}")

@@ -32,7 +32,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from llm.base import LLMError, LLMErrorType, LLMRequest
-from llm.task_tier import bind as _bind, is_test_file as _is_test_file
+from llm.task_tier import acting_as as _acting_as, bind as _bind, is_test_file as _is_test_file, role_of as _role_of
 from code_output import CODE_OUTPUT_SCHEMA, CodeOutputError, parse_code_output
 import generation_jobs as jobs
 
@@ -462,6 +462,16 @@ def clean_content(path: str, text: str) -> str | None:
     return undouble_braces(path, out)
 
 
+def _preview(content: str, lines: int = 40, limit: int = 3000) -> str:
+    """AI Village 의 리코더 패널에 보일 완성 파일 앞부분(2.0.45). 비밀값 모양은 가린다."""
+    head = "\n".join((content or "").splitlines()[:lines])[:limit]
+    try:
+        from llm.scrub import scrub_for_external
+        return scrub_for_external(head)[0]
+    except Exception:  # noqa: BLE001 — 가리기를 못 하면 보내지 않는다
+        return ""
+
+
 # ── 엔진 ───────────────────────────────────────────────────────────────
 
 class LargeGeneration:
@@ -525,6 +535,22 @@ class LargeGeneration:
         done = len(self.state.get("ops") or {})
         self.emit({"step": step, "done_count": done, "total": total, "job_id": self.job_id,
                    "elapsed": round(time.monotonic() - self._started, 1), **data})
+
+    def _usage(self, agent: str, operation: str, resp: Any) -> None:
+        """리코더별 사용량(2.0.45 AI Village) — 실제 응답의 모델·토큰과 단가표로 낸 비용. 단가를 모르면 cost 없음."""
+        try:
+            model = str(getattr(resp, "model_used", "") or "")
+            provider = str(getattr(resp, "provider", "") or "")
+            tin, tout = int(getattr(resp, "input_tokens", 0) or 0), int(getattr(resp, "output_tokens", 0) or 0)
+            try:
+                from llm import pricing as _pricing
+            except ImportError:  # pragma: no cover
+                from core.llm import pricing as _pricing  # type: ignore
+            cost, _src = _pricing.cost_usd(provider, model, tin, tout)
+            self._event("usage", agent=agent or "", operation=operation, model=model, provider=provider,
+                        input_tokens=tin, output_tokens=tout, **({"cost_usd": round(cost, 6)} if cost is not None else {}))
+        except Exception:  # noqa: BLE001 — 사용량 알림 실패가 생성을 막지 않는다
+            pass
 
     def _log(self, path: str, kind: str, message: str) -> None:
         """코어 로그 한 줄 — 멈춘 이유를 추측하지 않도록 작업·파일·종류를 남긴다(값·코드 원문은 남기지 않는다)."""
@@ -639,11 +665,14 @@ class LargeGeneration:
             self.limiter.acquire(lambda s: self._event("waiting", agent=agent, seconds=round(s),
                                                        message=f"AI 호출 한도 때문에 {round(s)}초 기다리는 중"))
             try:
-                resp = ca.get_router().call(
-                    LLMRequest(prompt=prompt, json_schema=None if raw else schema, max_tokens=max_tokens,
-                               temperature=0.2, raw_text=raw),
-                    agent="code_agent", operation=operation)
+                #: 2.0.45 — 이 호출을 한 리코더의 역할로 부른다(팀 구성 창의 역할별 모델).
+                with _acting_as(_role_of(agent)):
+                    resp = ca.get_router().call(
+                        LLMRequest(prompt=prompt, json_schema=None if raw else schema, max_tokens=max_tokens,
+                                   temperature=0.2, raw_text=raw),
+                        agent="code_agent", operation=operation)
                 self.last_resp = resp
+                self._usage(agent, operation, resp)
                 return resp
             except Exception as exc:  # noqa: BLE001
                 if _is_truncation(exc):
@@ -1303,7 +1332,7 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         self._post_board(op, agent)
         self._save()
         self._event("file_done", agent=agent, file=op["file"], lines=op["content"].count("\n") + 1,
-                    message=f"{op['file']} 완료")
+                    message=f"{op['file']} 완료", preview=_preview(op["content"]))
 
     # ── 2.0.24 마을 공용 게시판 ──
     def _server_sides(self) -> set[str]:

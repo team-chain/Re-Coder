@@ -1,7 +1,7 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const React=require('react');const {renderToStaticMarkup}=require('react-dom/server');
 const {buildRoster,reduceTeam,emptyTeamView,MAX_DEV_AGENTS,formatElapsed}=require('../out/webview-test/components/teamState');
-const {TeamBoard,TeamComposer}=require('../out/webview-test/components/TeamBoard');
+const {TeamBoard,memberLabel}=require('../out/webview-test/components/TeamBoard');
 const {ANIMAL_KINDS,pickAnimal}=require('../out/webview-test/components/teamAnimals');
 
 const seq=(...xs)=>{let i=0;return()=>xs[i++%xs.length];};
@@ -46,22 +46,17 @@ test('보드: 에이전트마다 리코더 캐릭터·역할 번호·하고 있�
  for(const e of [{step:'planned',total:4,files:[{file:'a.js',layer:0},{file:'b.js',layer:1},{file:'c.js',layer:1},{file:'d.html',layer:2}]},
    {step:'file_start',agent:'agent-1',file:'b.js'},{step:'file_part',agent:'agent-2',file:'c.js',part:2},{step:'file_done',agent:'agent-1',file:'a.js',done_count:1,total:4}])v=reduceTeam(v,e);
  const html=renderToStaticMarkup(React.createElement(TeamBoard,{roster,view:v}));
- assert.match(html,/팀 작업/);assert.match(html,/파일 1\/4/);assert.match(html,/c\.js · 2조각/);assert.match(html,/설계/);assert.match(html,/검토/);
+ assert.match(html,/팀 작업/);assert.match(html,/파일 1\/4/);assert.match(html,/조각 2/);assert.match(html,/설계/);assert.match(html,/검토/);
  assert.match(html,/<img src="data:image\/png;base64,/);assert.match(html,/개발 1/);assert.match(html,/개발 2/);
  assert.doesNotMatch(html,/강아지|고양이|토끼|다람쥐|펭귄|판다/);assert.doesNotMatch(html,/이어서 만들기/);
  const paused=renderToStaticMarkup(React.createElement(TeamBoard,{roster,view:v,paused:{message:'AI 사용 한도',done:1,total:4},onResume:()=>{}}));
  assert.match(paused,/일시 정지/);assert.match(paused,/이어서 만들기 \(1\/4\)/);
 });
 
-test('구성 막대: 팀 모드 켜면 팀원과 [＋ 개발 에이전트], 최대 인원이면 추가 불가',()=>{
- const off=renderToStaticMarkup(React.createElement(TeamComposer,{enabled:false,roster:buildRoster(2),onToggle(){},onAdd(){},onRemove(){}}));
- assert.match(off,/팀 모드/);assert.doesNotMatch(off,/개발 에이전트/);
- const full=renderToStaticMarkup(React.createElement(TeamComposer,{enabled:true,roster:buildRoster(MAX_DEV_AGENTS),onToggle(){},onAdd(){},onRemove(){}}));
- assert.match(full,/＋ 개발 에이전트/);assert.match(full,/<button type="button" disabled="" aria-label="개발 에이전트 추가">/);
- assert.match(full,/효과가 작을 수 있어요/);
- assert.equal((full.match(/<img src="data:image\/png/g)||[]).length,MAX_DEV_AGENTS+2);assert.match(full,/리코더 · 개발 1/);
+test('팀원 이름: 모두 리코더 — 역할과 번호로 구분',()=>{
+ const r=buildRoster(MAX_DEV_AGENTS,Math.random,[],true);
+ assert.deepEqual(r.map(m=>memberLabel(r,m)),['설계','개발 1','개발 2','개발 3','개발 4','개발 5','개발 6','검토','테스트']);
 });
-
 test('2.0.10 검토가 빠진 파일을 더하면 작업 목록에 붙고 검토 말풍선으로 알린다',()=>{
  let v=emptyTeamView();
  v=reduceTeam(v,{step:'planned',files:[{file:'a.ts',layer:0},{file:'b.tsx',layer:2}]});

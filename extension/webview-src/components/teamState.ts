@@ -4,7 +4,7 @@
  */
 import { AnimalKind, pickAnimal } from "./teamAnimals";
 
-export type TeamRole = "planner" | "dev" | "review";
+export type TeamRole = "planner" | "dev" | "review" | "test";
 export interface TeamMember { id: string; role: TeamRole; animal: AnimalKind; }
 
 export interface TeamEvent {
@@ -14,6 +14,23 @@ export interface TeamEvent {
   kind?: string; attempt?: number;
   /** 2.0.24 게시판(board_post) 항목 · 관문(gate_check) 결과 */
   items?: BoardItem[]; ok?: boolean; fixed?: string[]; returned?: boolean; by?: string;
+  /** 2.0.45 사용량(usage) — 실제 응답의 모델·토큰·비용 */
+  model?: string; provider?: string; input_tokens?: number; output_tokens?: number; cost_usd?: number; operation?: string;
+  /** 2.0.45 완성 파일 앞부분(file_done) — 비밀값은 코어가 가린다 */
+  preview?: string;
+  /** 2.0.45 테스트 리코더(acceptance) */
+  phase?: string; round?: number; passed?: number; failed?: number; unverifiable?: number; checks?: number;
+  criteria?: Array<{ id: string; verdict: string }>;
+}
+
+/** 리코더 한 명의 실제 사용량 — usage 이벤트에서만 센다. */
+export interface AgentUsage { calls: number; inputTokens: number; outputTokens: number; costUsd: number; unknownCost: number; models: string[] }
+
+/** 테스트 리코더 진행 — acceptance 이벤트에서만. */
+export interface TestView {
+  phase: "writing" | "written" | "running" | "result";
+  checks: number; unverifiable: number; passed: number; failed: number; total: number; round: number;
+  criteria: Array<{ id: string; verdict: string }>;
 }
 
 /** 게시판 메모 한 장 — 서버 라우트 파일에서 뽑은 실제 경로·응답 모양(지어내지 않는다). */
@@ -26,7 +43,9 @@ export interface GateView { file: string; by?: string; ok: boolean; fixed: numbe
 export type FileState = "waiting" | "writing" | "parts" | "fixing" | "done" | "issue" | "failed";
 export type AgentState = "idle" | "writing" | "parts" | "fixing" | "waiting" | "done";
 
-export interface TeamAgentView { id: string; state: AgentState; file?: string; part?: number; lines?: number; done: number; }
+export interface TeamAgentView { id: string; state: AgentState; file?: string; part?: number; lines?: number; done: number;
+  /** 2.0.45 — 이 리코더가 처음·마지막으로 움직인 때(경과 초)와 완성한 파일 */
+  firstAt?: number; lastAt?: number; files?: string[]; }
 
 export interface TeamView {
   jobId: string;
@@ -58,17 +77,30 @@ export interface TeamView {
   log: string[];
   /** 진행 기록 — 실제 이벤트를 "누가 무엇을 했는지" 한 줄로(최근 30개). 에이전트끼리의 대화가 아니다. */
   records: TeamRecord[];
+  /** 2.0.45 리코더별 사용량(에이전트 ID → 합계) */
+  usage?: Record<string, AgentUsage>;
+  /** 2.0.45 테스트 리코더 */
+  test?: TestView | null;
+  /** 2.0.45 완성 파일 앞부분(최근 40개) */
+  previews?: Record<string, string>;
+  /** 2.0.45 다시 보기용 이벤트(미리보기 글은 빼고 최근 MAX_EVENTS 개) */
+  events?: TeamEvent[];
+  /** 2.0.45 이어서 만들기 — 새 요청의 시계는 0 부터라 그 전까지 걸린 시간을 더한다. */
+  clockBase?: number;
 }
 
 export interface TeamRecord { who: string; role: TeamRole | "system"; text: string; tone?: "ok" | "warn" }
 
 export const MAX_DEV_AGENTS = 6;
+/** 다시 보기용으로 남기는 이벤트 수(최근 것부터). */
+export const MAX_EVENTS = 1000;
 export const DEFAULT_DEV_AGENTS = 3;
 
 export function emptyTeamView(): TeamView {
   return { jobId: "", engaged: false, phase: "planning", summary: "", files: [], total: 0, done: 0, layer: null, agents: {},
     fixes: 0, secretFixes: 0, securityBlocks: 0, board: [], boardReaders: {}, lastPost: null, gate: null,
-    gates: { passed: 0, fixed: 0, returned: 0 }, issues: 0, retries: 0, elapsed: 0, log: [], records: [] };
+    gates: { passed: 0, fixed: 0, returned: 0 }, issues: 0, retries: 0, elapsed: 0, log: [], records: [],
+    usage: {}, test: null, previews: {}, events: [] };
 }
 
 /** 에이전트들이 실제로 일하고 있는지 — 검증된 기반(쇼핑몰 등)처럼 AI 가 생성하지 않는 경로에서는 보드를 띄우지 않는다. */
@@ -76,8 +108,8 @@ export function teamWorking(view: TeamView | null | undefined): boolean {
   return !!view && (!!view.engaged || view.total > 0 || Object.keys(view.agents).length > 0);
 }
 
-/** 팀 구성: 설계 1 + 개발 N + 검토(보안·문법) 1. 동물은 겹치지 않게 무작위. */
-export function buildRoster(devCount: number, rand: () => number = Math.random, keep: TeamMember[] = []): TeamMember[] {
+/** 팀 구성: 설계 1 + 개발 N + 검토(보안·문법) 1 (+ 테스트 1). 동물은 겹치지 않게 무작위. */
+export function buildRoster(devCount: number, rand: () => number = Math.random, keep: TeamMember[] = [], test = false): TeamMember[] {
   const n = Math.max(1, Math.min(MAX_DEV_AGENTS, Math.floor(devCount) || 1));
   const used: AnimalKind[] = [];
   const take = (id: string, role: TeamRole): TeamMember => {
@@ -89,6 +121,7 @@ export function buildRoster(devCount: number, rand: () => number = Math.random, 
   const roster = [take("planner", "planner")];
   for (let i = 1; i <= n; i++) roster.push(take(`agent-${i}`, "dev"));
   roster.push(take("review", "review"));
+  if (test) roster.push(take("test", "test"));
   return roster;
 }
 
@@ -105,6 +138,7 @@ export function agentName(id: string | undefined): { who: string; role: TeamRole
   if (!id) return { who: "", role: "system" };
   if (id === "review") return { who: "검토", role: "review" };
   if (id === "planner") return { who: "설계", role: "planner" };
+  if (id === "test") return { who: "테스트", role: "test" };
   const m = /^agent-(\d+)$/.exec(id);
   return m ? { who: `개발 ${m[1]}`, role: "dev" } : { who: id, role: "dev" };
 }
@@ -160,17 +194,48 @@ export function recordOf(event: TeamEvent, files: TeamView["files"]): TeamRecord
     case "plan_added": return { who: "검토", role: "review", tone: "warn", text: msg || `빠진 파일 ${(event.files ?? []).length}개를 목록에 더함` };
     case "resumed": return { who: "", role: "system", text: msg || "멈춘 지점부터 이어서 만듭니다" };
     case "done": return { who: "", role: "system", tone: "ok", text: msg || "완료" };
+    case "acceptance": return event.phase === "result"
+      ? { who: "테스트", role: "test", tone: event.failed ? "warn" : "ok", text: msg || `${event.passed ?? 0}/${event.total ?? 0} 통과` }
+      : msg ? { who: "테스트", role: "test", text: msg } : null;
     default: return null;
   }
 }
 
+//: 사용량은 숫자만 쌓고 화면 기록·다시 보기에는 남기지 않는다(호출마다 와서 기록을 덮는다).
+const QUIET_STEPS = new Set(["usage"]);
+
+function addUsage(view: TeamView, event: TeamEvent): Record<string, AgentUsage> {
+  const id = event.agent || "system";
+  const cur = view.usage?.[id] ?? { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, unknownCost: 0, models: [] };
+  const model = event.model || "";
+  return {
+    ...(view.usage ?? {}),
+    [id]: {
+      calls: cur.calls + 1,
+      inputTokens: cur.inputTokens + Math.max(0, event.input_tokens ?? 0),
+      outputTokens: cur.outputTokens + Math.max(0, event.output_tokens ?? 0),
+      costUsd: cur.costUsd + (typeof event.cost_usd === "number" && event.cost_usd >= 0 ? event.cost_usd : 0),
+      unknownCost: cur.unknownCost + (typeof event.cost_usd === "number" ? 0 : 1),
+      models: model && !cur.models.includes(model) ? [...cur.models, model] : cur.models,
+    },
+  };
+}
+
 export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
+  if (typeof event.elapsed === "number" && view.clockBase) event = { ...event, elapsed: event.elapsed + view.clockBase };
+  //: 사용량도 다시 보기에 남긴다(그 시점까지의 호출·비용) — 숫자만 담긴 작은 이벤트.
+  if (event.step === "usage") return { ...view, usage: addUsage(view, event), events: [...(view.events ?? []), event].slice(-MAX_EVENTS) };
   const next: TeamView = { ...view, agents: { ...view.agents }, files: view.files, log: view.log, records: view.records ?? [] };
+  if (!QUIET_STEPS.has(event.step)) {
+    const { preview: _p, ...light } = event;
+    next.events = [...(view.events ?? []), light].slice(-MAX_EVENTS);
+  }
   if (event.job_id) next.jobId = event.job_id;
   if (ENGINE_STEPS.has(event.step)) next.engaged = true;
-  if (typeof event.total === "number" && event.total > 0) next.total = event.total;
+  //: acceptance 의 total 은 완성 기준 수다 — 파일 수에 섞지 않는다(2.0.45).
+  if (event.step !== "acceptance" && typeof event.total === "number" && event.total > 0) next.total = event.total;
   if (typeof event.done_count === "number") next.done = Math.max(next.done, event.done_count);
-  if (typeof event.elapsed === "number") next.elapsed = event.elapsed;
+  if (typeof event.elapsed === "number") next.elapsed = Math.max(next.elapsed, event.elapsed);
   if (event.message) next.log = [...view.log, event.message].slice(-5);
   //: by: 그 파일을 맡은 개발 슬롯(agent-N) — 화면이 완성 카드를 "누구의 작업대에서" 날려 보낼지 안다.
   const by = event.agent && /^agent-\d+$/.test(event.agent) ? event.agent : undefined;
@@ -250,14 +315,41 @@ export function reduceTeam(view: TeamView, event: TeamEvent): TeamView {
     case "file_done": setFile(event.file, view.files.find(f => f.file === event.file)?.state === "issue" ? "issue" : "done"); break;
     case "retry": next.retries += 1; break;
     case "generated": case "consistency": next.phase = "checking"; break;
+    case "acceptance": {
+      const t = view.test ?? { phase: "writing", checks: 0, unverifiable: 0, passed: 0, failed: 0, total: 0, round: 0, criteria: [] };
+      const phase = (["writing", "written", "running", "result"] as const).find(p => p === event.phase) ?? t.phase;
+      next.test = { ...t, phase,
+        ...(typeof event.checks === "number" ? { checks: event.checks } : {}),
+        ...(typeof event.unverifiable === "number" ? { unverifiable: event.unverifiable } : {}),
+        ...(typeof event.round === "number" ? { round: event.round } : {}),
+        ...(phase === "result" ? { passed: event.passed ?? 0, failed: event.failed ?? 0, total: event.total ?? 0,
+          criteria: Array.isArray(event.criteria) ? event.criteria.filter(c => c && typeof c.id === "string") : t.criteria } : {}) };
+      if (next.phase !== "done") next.phase = "checking";
+      break;
+    }
     case "done":
       next.phase = "done"; next.done = Math.max(next.done, next.total);
       if (next.files.some(f => f.polish)) next.files = next.files.map(f => f.polish ? { ...f, polish: false } : f);
       break;
   }
+  //: 완료 수 — 엔진이 done_count 를 주지 않은 이벤트(이어 만들기 등)에도 완성된 파일 수보다 작게 보이지 않게.
+  if (event.step === "file_done") next.done = Math.max(next.done, next.files.filter(f => f.state === "done" || f.state === "issue").length);
+  if (event.step === "file_done" && event.file && typeof event.preview === "string" && event.preview) {
+    const prev = { ...(view.previews ?? {}) };
+    delete prev[event.file];
+    prev[event.file] = event.preview;
+    const keys = Object.keys(prev);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 40))) delete prev[k];
+    next.previews = prev;
+  }
   const record = recordOf(event, next.files);
   if (record) next.records = [...next.records, record].slice(-30);
   if (agent) {
+    if (typeof event.elapsed === "number") {
+      if (agent.firstAt === undefined) agent.firstAt = event.elapsed;
+      agent.lastAt = event.elapsed;
+    }
+    if (event.step === "file_done" && event.file) agent.files = [...(agent.files ?? []).filter(f => f !== event.file), event.file];
     const state = STATE_OF_STEP[event.step];
     if (event.step === "file_done") {
       agent.state = "idle"; agent.done += 1; agent.file = undefined; agent.part = undefined;
@@ -282,4 +374,31 @@ export function polishingCount(view: TeamView, layer?: number): number {
 export function formatElapsed(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** 다시 보기 — 기록해 둔 이벤트를 t 초까지 다시 접은 화면 상태(사용량도 그 시점까지, 미리보기는 지금 값). */
+export function viewAt(view: TeamView, t: number): TeamView {
+  const events = view.events ?? [];
+  let v = emptyTeamView();
+  for (const e of events) {
+    if (typeof e.elapsed === "number" && e.elapsed > t) break;
+    v = reduceTeam(v, e);
+  }
+  return { ...v, previews: view.previews, events, elapsed: Math.min(t, view.elapsed) };
+}
+
+/** 리코더가 일한 시간(처음 움직임 → 마지막 움직임, 초). 움직인 적 없으면 0. */
+export function agentSeconds(a: TeamAgentView | undefined): number {
+  return a && a.firstAt !== undefined && a.lastAt !== undefined ? Math.max(0, a.lastAt - a.firstAt) : 0;
+}
+
+/** 팀 전체 사용량 합계. */
+export function totalUsage(view: TeamView): AgentUsage {
+  const sum: AgentUsage = { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, unknownCost: 0, models: [] };
+  for (const u of Object.values(view.usage ?? {})) {
+    sum.calls += u.calls; sum.inputTokens += u.inputTokens; sum.outputTokens += u.outputTokens;
+    sum.costUsd += u.costUsd; sum.unknownCost += u.unknownCost;
+    for (const m of u.models) if (!sum.models.includes(m)) sum.models.push(m);
+  }
+  return sum;
 }

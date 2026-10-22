@@ -233,6 +233,22 @@ export interface TrustItem { key: string; principle: string; status: 'pass' | 'w
 export interface TrustPrinciple { key: string; label: string; summary: string; status: 'pass' | 'warn' | 'block'; items: TrustItem[] }
 export interface TrustReport { target: string; principles: TrustPrinciple[]; counts: Record<'pass' | 'warn' | 'block' | 'info', number>; scanned_files: number; truncated: boolean; note?: string }
 
+/** 2.0.45 팀 구성 창에서 역할마다 고른 공급자(코어 task_tier.ROLE_SPECS 와 같은 이름). */
+export type TeamModelSpec = 'quality' | 'fast' | 'anthropic' | 'openai' | 'compatible';
+export type TeamModels = Partial<Record<'planner' | 'dev' | 'review' | 'test', TeamModelSpec>>;
+const TEAM_ROLES = ['planner', 'dev', 'review', 'test'] as const;
+const TEAM_SPECS: readonly string[] = ['quality', 'fast', 'anthropic', 'openai', 'compatible'];
+/** 웹뷰에서 온 값(비신뢰) → 알려진 역할·공급자만. */
+export function cleanTeamModels(raw: unknown): TeamModels | null {
+    if (!raw || typeof raw !== 'object') { return null; }
+    const out: TeamModels = {};
+    for (const role of TEAM_ROLES) {
+        const v = (raw as Record<string, unknown>)[role];
+        if (typeof v === 'string' && TEAM_SPECS.includes(v)) { out[role] = v as TeamModelSpec; }
+    }
+    return Object.keys(out).length ? out : null;
+}
+
 /** 2.0.36 작업별 AI 공급자 — 형태는 webview-src/components/modelRoutingModel.ts 와 같다(키 값은 오지 않는다). */
 export interface ModelRouting {
     quality: { provider: string; model: string };
@@ -507,6 +523,9 @@ export class ApiClient {
             decisions?: CodeDecisionChoice[];
             /** 2.0.43 사용자가 승인한 명세. 없으면 명세 없이 생성. */
             spec?: CodeSpec | null;
+            /** 2.0.45 역할별 AI 공급자 · 테스트 리코더. */
+            models?: TeamModels | null;
+            test?: boolean;
         }
     ): Promise<CodeAgentResult> {
         const body = {
@@ -519,6 +538,8 @@ export class ApiClient {
             target_folder: opts?.targetFolder ?? '',
             decisions: opts?.decisions ?? [],
             spec: opts?.spec ?? null,
+            models: opts?.models ?? null,
+            test: opts?.test !== false,
         };
         // Full-file output and one schema correction can take two model calls.
         //: 분할 생성 + 자동 교정(최대 3회)까지 끝날 시간. Core 는 10분 예산 안에서 교정을 멈춘다.
@@ -547,6 +568,8 @@ export class ApiClient {
             /** 이어 만들 때 실패한 파일을 빼고 결과를 받는다. */
             skipFailed?: boolean;
             spec?: CodeSpec | null;
+            models?: TeamModels | null;
+            test?: boolean;
         },
         onEvent: (event: CodeProgressEvent) => void,
         retried = false,
@@ -566,6 +589,8 @@ export class ApiClient {
             agents: opts.agents ?? 0,
             skip_failed: !!(opts.skipFailed && opts.resumeJob),
             spec: opts.spec ?? null,
+            models: opts.models ?? null,
+            test: opts.test !== false,
         };
         const controller = new AbortController();
         const response = await fetch(`http://127.0.0.1:${this.coreManager.getPort()}/api/code/generate/stream`, {

@@ -1,8 +1,9 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const React=require('react');const {renderToStaticMarkup}=require('react-dom/server');
 const {buildRoster,reduceTeam,emptyTeamView,recordOf,agentName}=require('../out/webview-test/components/teamState');
-const {TeamVillage,villageLayout}=require('../out/webview-test/components/TeamVillage');
-const {TeamBoard}=require('../out/webview-test/components/TeamBoard');
+const {AgentVillage,cardOf,stagesOf,displayName}=require('../out/webview-test/components/AgentVillage');
+const {TeamBoard,boardMetrics,boardStatus}=require('../out/webview-test/components/TeamBoard');
+const V=(props)=>renderToStaticMarkup(React.createElement(AgentVillage,props));
 
 const FILES=[{file:'package.json',layer:0},{file:'src/db.js',layer:0},{file:'src/routes/a.js',layer:1},{file:'src/routes/b.js',layer:1},{file:'src/routes/c.js',layer:1},{file:'public/index.html',layer:2},{file:'public/app.js',layer:2}];
 const run=(evs)=>evs.reduce((v,e)=>reduceTeam(v,e),emptyTeamView());
@@ -25,41 +26,6 @@ test('진행 기록은 실제 이벤트를 누가 무엇을 했는지로 적는�
  assert.equal(run(many).records.length,30);
 });
 
-test('마을 배치: 작업대가 겹치지 않고 폭 안에 들어간다(개발 1~6명, 폭 300~1200)',()=>{
- for(const W of [300,520,760,1200])for(let n=1;n<=6;n++){
-  const L=villageLayout(W,n);
-  assert.equal(L.desks.length,n);
-  for(let i=1;i<n;i++)assert.ok(L.desks[i].x>=L.desks[i-1].x+L.desks[i-1].w,`${W}/${n}`);
-  if(W>=520)assert.ok(L.desks[n-1].x+L.desks[n-1].w<=W-8,`${W}/${n} 오른쪽 넘침`);
-  for(const q of L.qcols)assert.ok(q.x>=L.queue.x&&q.x+q.w<=L.queue.x+L.queue.w+0.5);
- }
-});
-
-test('마을: 남은 카드·잠긴 단계·작업 중 말풍선·자동 검사 교정은 작성자 작업대에',()=>{
- const roster=buildRoster(2);
- let v=run([{step:'planned',total:7,files:FILES},{step:'wave',layer:0,agents:1},
-  {step:'file_start',agent:'agent-1',file:'package.json'},{step:'file_done',agent:'agent-1',file:'package.json',done_count:1},
-  {step:'file_start',agent:'agent-1',file:'src/db.js'},{step:'fixing',agent:'agent-1',file:'src/db.js',message:'src/db.js 고치는 중 — 하드코딩된 비밀값'}]);
- const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
- assert.match(html,/data-testid="team-village"/);
- assert.equal((html.match(/<img src="data:image\/png/g)||[]).length,roster.length);
- assert.equal((html.match(/class="cd( dim)?"/g)||[]).length,5,'대기 카드 = 아직 시작 안 한 파일 수');
- assert.equal((html.match(/class="qc locked"/g)||[]).length,2,'공통 기반 중에는 기능·화면 칸이 잠김');assert.equal((html.match(/class="lk"/g)||[]).length,2);
- assert.match(html,/class="dk fix"/);assert.match(html,/자동 검사 → 고치는 중/);
- assert.match(html,/공통 기반 먼저 — 대기/,'다른 개발 리코더는 공통 기반을 기다린다');
- assert.doesNotMatch(html,/전체 점검 — 빌드로 확인/);
- v=run([{step:'planned',total:7,files:FILES},...FILES.map((f,i)=>({step:'file_done',agent:'agent-1',file:f.file,done_count:i+1})),{step:'consistency',message:'전체 점검'}]);
- const chk=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
- assert.match(chk,/전체 점검 — 빌드로 확인/);assert.doesNotMatch(chk,/class="qc locked"/);assert.match(chk,/<b>2\/2<\/b>/);
-});
-
-test('보드: 폭을 모르는 첫 렌더(서버)는 한 줄 보기, 진행 기록 마지막 3줄',()=>{
- const v=run([{step:'planned',total:7,files:FILES},{step:'file_start',agent:'agent-2',file:'src/routes/a.js'}]);
- const html=renderToStaticMarkup(React.createElement(TeamBoard,{roster:buildRoster(2),view:v}));
- assert.doesNotMatch(html,/team-village/);assert.match(html,/개발 2 · src\/routes\/a\.js 작성 시작/);
- assert.match(html,/마지막에 전체 점검/);
-});
-
 test('전체 점검이 완성 파일을 고쳐도 완료 수·단계 ✓ 는 줄지 않고 "다듬는 중" 만 붙는다',()=>{
  const {polishingCount}=require('../out/webview-test/components/teamState');
  const built=[{step:'planned',total:7,files:FILES},...FILES.map((f,i)=>({step:'file_done',agent:'agent-1',file:f.file,done_count:i+1}))];
@@ -67,49 +33,15 @@ test('전체 점검이 완성 파일을 고쳐도 완료 수·단계 ✓ 는 줄
   {step:'fixing',agent:'review',file:'public/app.js',message:'전체 점검 — public/app.js 고치는 중'}]);
  assert.equal(v.files.filter(f=>f.state==='done').length,7,'완료로 센다');
  assert.equal(polishingCount(v),2);assert.equal(polishingCount(v,0),1);
- const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster:buildRoster(2),view:v,width:900}));
- assert.match(html,/<b>2\/2<\/b>/);assert.match(html,/1개 다듬는 중/);
+ const html=V({roster:buildRoster(2),view:v,width:900});
+ assert.match(html,/✓ 공통 기반 2\/2/);assert.match(html,/✓ 화면 2\/2/);
+ assert.deepEqual(stagesOf(v).map(x=>x.state),['done','done','done','now'],'다듬는 중에도 단계 ✓ 는 그대로');
  const board=renderToStaticMarkup(React.createElement(TeamBoard,{roster:buildRoster(2),view:v}));
- assert.match(board,/✓ 공통 기반 2/);assert.match(board,/2개 다듬는 중/);
+ assert.match(board,/2개 다듬는 중/);assert.match(board,/파일 7\/7/);
  v=reduceTeam(v,{step:'done'});assert.equal(polishingCount(v),0,'끝나면 표시를 지운다');
  //: 아직 쓰는 중인 파일의 교정은 예전처럼 "고치는 중"
  const w=run([{step:'planned',total:7,files:FILES},{step:'file_start',agent:'agent-1',file:'package.json'},{step:'fixing',agent:'agent-1',file:'package.json'}]);
  assert.equal(w.files.find(f=>f.file==='package.json').state,'fixing');
-});
-
-test('마을: 말풍선은 사람마다 따로 — 이웃은 높이를 엇갈리고 폭은 작업대 간격 안, 이름표와 완료 수는 두 줄',()=>{
- const {WAIT_TEXT}=require('../out/webview-test/components/TeamVillage');
- const roster=buildRoster(6);
- const v=run([{step:'planned',total:7,files:FILES},{step:'wave',layer:0,agents:1},{step:'file_start',agent:'agent-1',file:'package.json'},
-  {step:'file_done',agent:'agent-1',file:'package.json',done_count:1},{step:'file_start',agent:'agent-1',file:'src/db.js'}]);
- for(const W of [520,760,1200]){
-  const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:W}));
-  const bubbles=html.match(/class="bb[^"]*"[^>]*>[^<]*/g)||[];
-  assert.equal(bubbles.length,6,'작성 중 1 + 기다리는 5명 각자');
-  for(const t of WAIT_TEXT.slice(0,5))assert.ok(html.includes(`>${t}<`),t);
-  assert.equal(bubbles.filter(b=>/class="bb[^"]* up"/.test(b)).length,3,'이웃끼리 높이를 엇갈린다');
-  const L=villageLayout(W,6);const pitch=L.desks[1].x-L.desks[0].x;
-  assert.ok(L.bubbleMax<=2*pitch-10,'엇갈린 두 줄이면 이웃과 겹치지 않는 폭');
-  assert.match(html,/<div class="lb"><span>개발 1 작업대<\/span><b>완료 1<\/b><\/div>/);
-  for(let i=1;i<6;i++)assert.ok(L.desks[i].x-L.desks[i-1].x>=L.desks[i-1].w);
-  const agentTop=L.desks[0].y-58,agentH=55;
-  assert.ok(agentTop+agentH-(58+26)-18>=L.queue.y+L.queue.h-4,'윗줄 말풍선도 대기열을 가리지 않는다');
-  assert.ok(L.desks[0].y+L.desks[0].h+30<=L.shelf.y,'이름표 두 줄이 선반과 겹치지 않는다');
- }
-});
-
-test('마을: 선반 칸 위치 — 넘치면 숫자만 올라간다',()=>{
- const {shelfSlot}=require('../out/webview-test/components/TeamVillage');
- const seg={x:0,y:0,w:200,h:58};
- assert.deepEqual(shelfSlot(seg,0),{x:8,y:20});assert.deepEqual(shelfSlot(seg,9),{x:8,y:29});
- assert.equal(shelfSlot(seg,36),null);assert.equal(shelfSlot(seg,-1),null);
-});
-
-test('마을: 가장자리 말풍선은 안쪽으로 밀어 잘리지 않는다',()=>{
- const {bubbleShift,bubbleWidth}=require('../out/webview-test/components/TeamVillage');
- assert.equal(bubbleShift(400,100,800),0);
- assert.equal(bubbleShift(30,100,800),24);assert.equal(bubbleShift(790,100,800),-44);
- assert.ok(bubbleWidth('공통 기반 먼저 — 대기',300)<150);assert.equal(bubbleWidth('아주 긴 말풍선 문구가 여기에 들어갑니다 아주 길게',80),80);
 });
 
 test('파일마다 맡은 개발 슬롯을 기억한다(완성 카드를 맡은 작업대에서 날린다)',()=>{
@@ -117,11 +49,6 @@ test('파일마다 맡은 개발 슬롯을 기억한다(완성 카드를 맡은 
   {step:'file_done',agent:'agent-2',file:'src/routes/a.js'},{step:'fixing',agent:'review',file:'src/routes/a.js'}]);
  assert.equal(v.files.find(f=>f.file==='src/routes/a.js').by,'agent-2','검토의 다듬기가 맡은 사람을 바꾸지 않는다');
  assert.equal(v.files.find(f=>f.file==='src/routes/b.js').by,'agent-2');
-});
-
-test('마을: 카드를 집으러 선 자리는 작업대 앞 리코더와 겹치지 않는다',()=>{
- for(const W of [520,760,1200]){const L=villageLayout(W,6);const standTop=L.queue.y+L.queue.h-8,agentH=55,deskAgentTop=L.desks[0].y-58;
-  assert.ok(standTop+agentH<=deskAgentTop+2,`${W}`);}
 });
 
 test('재시도·실패·멈춤은 진행 기록에 이유와 함께 남고, 실패한 파일은 완료로 세지 않는다',()=>{
@@ -135,8 +62,8 @@ test('재시도·실패·멈춤은 진행 기록에 이유와 함께 남고, 실
  for(const w of ['개발 1|db.js — 응답이 잘려 80줄씩으로 줄여 다시 씁니다|warn','개발 1|src/db.js — 응답 형식이 맞지 않음 → 처음부터 80줄씩 다시 씁니다 (2/3)|warn',
    '|멈춤 — src/db.js — 3번 시도해도 응답 형식이 맞지 않음|warn'])assert.ok(t.includes(w),w+'\n'+t.join('\n'));
  assert.equal(v.files.find(f=>f.file==='src/db.js').state,'failed');assert.equal(v.agents['agent-1'].state,'idle');
- const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster:buildRoster(2),view:v,width:900}));
- assert.match(html,/1개 못 만듦/);assert.doesNotMatch(html,/<b>1\/2<\/b>/,'실패한 파일은 선반 완료 수에 넣지 않는다');
+ const html=V({roster:buildRoster(2),view:v,width:900});
+ assert.match(html,/공통 기반 0\/2 · 못 만듦 1/,'실패한 파일은 완료 수에 넣지 않는다');
  const panel=renderToStaticMarkup(React.createElement(PausePanel,{paused:{message:'m',done:50,total:51,failed:[{file:'client/src/styles/pages.css',kind:'format',reason:'응답 형식이 맞지 않음'}]},onResume(){}}));
  for(const w of ['만들지 못한 파일 1개 — 나머지 50/51개는 저장했습니다','client/src/styles/pages.css','3번 시도해도 응답 형식이 맞지 않음','>이 파일 다시 쓰기<','>이 파일 빼고 결과 받기<'])assert.ok(panel.includes(w),w);
  const plain=renderToStaticMarkup(React.createElement(PausePanel,{paused:{message:'AI 사용 한도',done:4,total:9},onResume(){}}));
@@ -165,16 +92,15 @@ test('ReCoder 가 넣은 결제 모듈(고정 파일)은 설계 직후 완료로
 test('2.0.23 보안 검사가 막은 수상한 패키지는 실제 이벤트로만 기록·표시된다',()=>{
  let v=run([{step:'planning'},{step:'planned',total:7,files:FILES},{step:'consistency',message:'전체 점검'}]);
  assert.equal(v.securityBlocks,0);
- const quiet=renderToStaticMarkup(React.createElement(TeamVillage,{view:v,roster:buildRoster(2,Math.random),width:760}));
- assert.ok(!quiet.includes('security-blocks'));
+ const review=(view)=>{const r=buildRoster(2);return cardOf(r,r.find(m=>m.role==='review'),view,false);};
+ assert.doesNotMatch(review(v).meta[0],/차단/);
  v=reduceTeam(v,{step:'security_block',agent:'review',file:'package.json',message:'수상한 패키지 차단 — tiny-pay-sdk-kr'});
  assert.equal(v.securityBlocks,1);
  assert.ok(v.records.some(r=>r.who==='검토'&&r.text==='수상한 패키지 차단 — tiny-pay-sdk-kr'&&r.tone==='warn'));
- const html=renderToStaticMarkup(React.createElement(TeamVillage,{view:v,roster:buildRoster(2,Math.random),width:760}));
- assert.ok(html.includes('수상한 패키지 차단 1'));
+ assert.match(review(v).meta[0],/차단 1/);
 });
 
-test('2.0.24 공용 게시판: 서버 라우트 메모가 붙고, 화면 API 리코더는 게시판을 보고 시작한다',()=>{
+test('2.0.24 공용 게시판: 서버 경로가 붙고, 화면 리코더는 게시판을 보고 시작한다',()=>{
  const roster=buildRoster(2);
  let v=run([{step:'planned',total:7,files:FILES},{step:'wave',layer:-1,agents:2},
   {step:'file_start',agent:'agent-1',file:'src/routes/a.js'},
@@ -184,40 +110,121 @@ test('2.0.24 공용 게시판: 서버 라우트 메모가 붙고, 화면 API 리
  assert.equal(v.board.length,2);assert.equal(v.lastPost.agent,'agent-1');assert.equal(v.boardReaders['agent-2'],'public/app.js');
  const t=v.records.map(r=>`${r.who}|${r.text}`);
  assert.ok(t.includes('개발 1|게시판에 API 2개 공유 — a.js'));assert.ok(t.includes('개발 2|게시판 확인 후 시작 — app.js'));
- const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
- assert.match(html,/공용 게시판 · API 2/);assert.match(html,/>GET \/api\/a</);assert.match(html,/class="unk"[^>]*>POST \/api\/a</);
- assert.match(html,/게시판에 API 2개 공유/);assert.match(html,/게시판 확인 후 시작/);
+ const html=V({roster,view:v,width:900});
+ assert.match(html,/data-testid="village-board"/);assert.match(html,/<em>GET<\/em>\/api\/a/);assert.match(html,/<em>POST<\/em>\/api\/a/);
  // 같은 경로를 다시 붙이면 새 것으로 바뀐다(중복 메모 없음)
  v=reduceTeam(v,{step:'board_post',agent:'agent-1',file:'src/routes/a.js',items:[{method:'GET',path:'/api/a',shape:'{ items }'}]});
  assert.equal(v.board.filter(b=>b.path==='/api/a'&&b.method==='GET').length,1);assert.equal(v.board.find(b=>b.method==='GET').shape,'{ items }');
- const empty=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:run([{step:'planned',total:7,files:FILES}]),width:900}));
- assert.match(empty,/서버 API 가 완성되면 붙습니다/);
+ const empty=V({roster,view:run([{step:'planned',total:7,files:FILES}]),width:900});
+ assert.doesNotMatch(empty,/village-board/,'경로가 없으면 게시판을 그리지 않는다');
 });
 
-test('2.0.24 의존 관문: 검토 리코더가 작업대로 가서 도장을 찍고, 되돌린 카드는 작성자가 고친다',()=>{
+test('2.0.24 의존 관문: 검토 카드에 통과·수정 수, 되돌린 파일은 작성자 카드가 고치는 중',()=>{
  const roster=buildRoster(2);
  let v=run([{step:'planned',total:7,files:FILES},{step:'wave',layer:-1,agents:2},
   {step:'file_start',agent:'agent-2',file:'src/routes/b.js'},
   {step:'gate_check',agent:'review',by:'agent-2',file:'src/routes/b.js',ok:true,fixed:['a: x 내보내기','b: TYPE'],returned:false,message:'관문 통과 — 자동 수정 2건'}]);
  assert.deepEqual(v.gates,{passed:1,fixed:2,returned:0});
- let html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
- assert.match(html,/자동 수정 2건 · 통과/);assert.match(html,/class="ag review stamp"/);assert.match(html,/관문 통과 1 · 자동 수정 2/);
+ const rv=(view)=>cardOf(roster,roster.find(m=>m.role==='review'),view,false);
+ assert.match(rv(v).meta[0],/통과 1 · 수정 2/);assert.equal(rv(v).state,'관문 확인');
  v=reduceTeam(v,{step:'gate_check',agent:'review',by:'agent-2',file:'src/routes/b.js',ok:false,fixed:[],returned:true,message:'관문 — 되돌림'});
  assert.equal(v.agents['agent-2'].state,'fixing');assert.equal(v.files.find(f=>f.file==='src/routes/b.js').state,'fixing');
- html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
- assert.match(html,/카드 되돌림 — 한 번 고치기/);assert.match(html,/되돌림 1/);
+ const dev2=cardOf(roster,roster.find(m=>m.id==='agent-2'),v,false);
+ assert.equal(dev2.state,'고치는 중');assert.equal(dev2.file,'src/routes/b.js');assert.equal(v.gates.returned,1);
  assert.ok(v.records.some(r=>r.who==='검토'&&r.tone==='warn'&&r.text.includes('작성자에게 한 번 돌려보냄')));
  // 마지막 전체 점검이 시작되면 관문 자리 대신 모두 모인다
  v=reduceTeam(v,{step:'consistency',message:'전체 점검'});
- html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
- assert.match(html,/전체 점검 — 빌드로 확인/);assert.doesNotMatch(html,/카드 되돌림/);
+ assert.equal(rv(v).state,'전체 점검');assert.equal(boardStatus(v,false),'전체 점검 중');
 });
 
-test('2.0.24 마을 배치: 게시판 줄은 작업대 이름표와 선반 사이에 겹치지 않게',()=>{
- for(const W of [300,520,760,1200])for(let n=1;n<=6;n++){
-  const L=villageLayout(W,n);
-  assert.ok(L.board.y>=L.desks[0].y+L.desks[0].h+26,`${W}/${n} 이름표와 겹침`);
-  assert.ok(L.board.y+L.board.h<=L.shelf.y-4,`${W}/${n} 선반과 겹침`);
-  assert.ok(L.board.x>=0&&L.board.x+L.board.w<=W);
- }
+
+// ── 2.0.45 AI Village ─────────────────────────────────────────────────────
+
+test('2.0.45 카드: 리코더마다 상태·파일·일한 시간·AI 호출·비용 — 값은 실제 이벤트에서만',()=>{
+ const roster=buildRoster(2,Math.random,[],true);
+ assert.deepEqual(roster.map(m=>m.role),['planner','dev','dev','review','test']);
+ let v=run([{step:'planned',total:7,files:FILES,elapsed:3},{step:'wave',layer:0,agents:1,elapsed:3},
+  {step:'file_start',agent:'agent-1',file:'package.json',elapsed:4},
+  {step:'usage',agent:'agent-1',model:'us.anthropic.claude-sonnet-4-5-20250929-v1:0',input_tokens:1000,output_tokens:500,cost_usd:0.0105},
+  {step:'usage',agent:'agent-1',model:'us.anthropic.claude-sonnet-4-5-20250929-v1:0',input_tokens:10,output_tokens:5},
+  {step:'file_done',agent:'agent-1',file:'package.json',lines:20,done_count:1,elapsed:34,preview:'{\n  "name": "x"\n}'},
+  {step:'file_start',agent:'agent-1',file:'src/db.js',elapsed:35}]);
+ const dev=cardOf(roster,roster[1],v,false);
+ assert.equal(dev.name,'개발 1');assert.equal(dev.state,'작성 중');assert.equal(dev.file,'src/db.js');assert.equal(dev.role,'공통 기반');
+ assert.match(dev.meta[1],/0:31 · 2회 · \$0\.01/,'일한 시간(첫 움직임 → 마지막) · 호출 · 단가를 아는 호출만 더한 비용');
+ assert.equal(v.usage['agent-1'].unknownCost,1,'단가를 모르는 호출은 따로 센다');
+ const idle=cardOf(roster,roster[2],v,false);assert.equal(idle.state,'대기');assert.match(idle.meta[1],/—/);
+ assert.equal(cardOf(roster,roster[4],v,false).state,'대기','테스트는 전체 점검 뒤 시작');
+ assert.equal(displayName(roster,roster[2]),'개발 2');
+ //: 화면 — 카드 5장, 오른쪽 자세히(코드 탭: 완성 파일 앞부분), 모델 이름은 사람이 읽는 이름
+ const html=V({roster,view:v,width:1000});
+ assert.equal((html.match(/data-agent="/g)||[]).length,5);
+ assert.match(html,/class="rc-av split"/);assert.match(html,/data-testid="village-inspector"/);
+ assert.match(html,/모델 · Claude Sonnet 4\.5/);
+ assert.match(html,/src\/db\.js 작성 중 — 파일이 완성되면 내용이 보입니다/,'작성 중인 파일은 지어내지 않는다');
+ assert.ok(!html.includes('NaN'));
+ const narrow=V({roster,view:v,width:0});assert.match(narrow,/class="rc-av stack"/,'폭을 모르면(서버 렌더) 위아래로 쌓는다');
+});
+
+test('2.0.45 테스트 리코더: 시험 작성 → 실행 → 결과, 실패면 빨간 상태와 조건별 판정',()=>{
+ const roster=buildRoster(1,Math.random,[],true);
+ const base=[{step:'planned',total:7,files:FILES},...FILES.map((f,i)=>({step:'file_done',agent:'agent-1',file:f.file,done_count:i+1})),{step:'consistency',message:'점검'}];
+ let v=run([...base,{step:'acceptance',agent:'test',phase:'writing',message:'완성 기준 시험 작성'}]);
+ const t=()=>cardOf(roster,roster.find(m=>m.role==='test'),v,false);
+ assert.equal(t().state,'시험 작성 중');assert.equal(boardStatus(v,false),'테스트 중');
+ v=reduceTeam(v,{step:'acceptance',agent:'test',phase:'written',checks:5,unverifiable:1});
+ assert.equal(t().meta[0],'시험 5개');
+ v=reduceTeam(v,{step:'acceptance',agent:'test',phase:'result',round:1,passed:3,failed:1,unverifiable:1,total:5,
+  criteria:[{id:'AC-1',verdict:'passed'},{id:'AC-2',verdict:'failed'},{id:'AC-3',verdict:'unverifiable'}]});
+ assert.equal(t().state,'실패 1');assert.equal(t().tone,'x');assert.equal(t().meta[0],'3/5 통과 · 확인 불가 1');
+ assert.deepEqual(stagesOf(v).slice(-2),[{label:'전체 점검',state:'done'},{label:'테스트 3/5',state:'now'}]);
+ v=reduceTeam(v,{step:'acceptance',agent:'test',phase:'result',round:2,passed:4,failed:0,unverifiable:1,total:5,criteria:[{id:'AC-2',verdict:'passed'}]});
+ assert.equal(t().state,'통과');assert.equal(stagesOf(v).at(-1).state,'done');
+});
+
+test('2.0.45 다시 보기: 기록한 이벤트를 그 시점까지 다시 접는다 · 이어서 만들기는 시계를 이어 붙인다',()=>{
+ const {viewAt,totalUsage}=require('../out/webview-test/components/teamState');
+ let v=run([{step:'planned',total:7,files:FILES,elapsed:2},{step:'file_start',agent:'agent-1',file:'package.json',elapsed:3},
+  {step:'file_done',agent:'agent-1',file:'package.json',done_count:1,elapsed:20},{step:'file_start',agent:'agent-1',file:'src/db.js',elapsed:21},
+  {step:'usage',agent:'agent-1',input_tokens:5,output_tokens:5,cost_usd:0.5}]);
+ assert.equal(v.events.length,5,'사용량도 다시 보기에 남는다');assert.ok(!v.events.some(e=>'preview' in e));
+ const at10=viewAt(v,10);
+ assert.equal(at10.done,0);assert.equal(at10.agents['agent-1'].file,'package.json');assert.equal(at10.elapsed,10);
+ assert.equal(totalUsage(at10).costUsd,0,'그 시점까지의 사용량');
+ assert.equal(viewAt(v,25).agents['agent-1'].file,'src/db.js');assert.equal(totalUsage(viewAt(v,25)).costUsd,0.5);
+ //: 멈춘 뒤 이어서 만들면 새 요청의 시계는 0 부터 — 앞의 시간에 이어 붙인다(뒤로 가지 않는다).
+ v={...v,clockBase:v.elapsed};
+ v=reduceTeam(v,{step:'resumed',elapsed:1});
+ assert.equal(v.elapsed,22);assert.equal(v.events.at(-1).elapsed,22);
+ const html=V({roster:buildRoster(1),view:v,width:900});
+ assert.match(html,/aria-label="다시 볼 시점"/);assert.match(html,/0:22 \/ 0:22/);
+});
+
+test('2.0.45 팀 머리: 상태·파일·고친 문제·AI 호출·비용·시간, 끝난 뒤에는 접힌 "다시 보기"',()=>{
+ let v=run([{step:'planned',total:7,files:FILES,elapsed:1},{step:'file_done',agent:'agent-1',file:'package.json',done_count:1,elapsed:5},
+  {step:'fixing',agent:'agent-1',file:'src/db.js',message:'고치는 중'},
+  {step:'usage',agent:'agent-1',cost_usd:0.25},{step:'usage',agent:'planner'}]);
+ assert.deepEqual(boardMetrics(v),['파일 1/7','자동으로 고친 문제 1','AI 2회','$0.25+','0:05']);
+ const live=renderToStaticMarkup(React.createElement(TeamBoard,{roster:buildRoster(2),view:v}));
+ assert.match(live,/data-testid="agent-village"/);assert.match(live,/만드는 중/);
+ const done=renderToStaticMarkup(React.createElement(TeamBoard,{roster:buildRoster(2),view:{...v,phase:'done'},collapsible:true,files:{'package.json':'{}'}}));
+ assert.match(done,/팀 작업 다시 보기/);assert.match(done,/aria-expanded="false"/);assert.doesNotMatch(done,/agent-village/,'접혀 있으면 마을을 그리지 않는다');
+});
+
+test('2.0.45 코드 탭: 결과가 오면 완성 파일 전체, 그 전에는 코어가 비밀값을 가린 앞부분만',()=>{
+ const roster=buildRoster(1);
+ const v=run([{step:'planned',total:7,files:FILES},{step:'file_start',agent:'agent-1',file:'src/db.js'},
+  {step:'file_done',agent:'agent-1',file:'src/db.js',done_count:1,preview:'const url = process.env.DB_URL;'}]);
+ const pre=V({roster,view:v,width:900});
+ assert.match(pre,/data-testid="village-code"[^>]*>const url = process\.env\.DB_URL;/);assert.match(pre,/앞 40줄 · 비밀값 모양은 가림/);
+ const full=V({roster,view:v,width:900,files:{'src/db.js':'line1\nline2'}});
+ assert.match(full,/line1\nline2/);assert.doesNotMatch(full,/앞 40줄/);
+});
+
+test('2.0.45 테스트 결과의 total(완성 기준 수)은 파일 수를 덮어쓰지 않는다 · 완료 수는 완성 파일보다 작지 않다',()=>{
+ let v=run([{step:'planned',total:7,files:FILES},{step:'file_done',agent:'agent-1',file:'package.json'},{step:'file_done',agent:'agent-1',file:'src/db.js'}]);
+ assert.equal(v.done,2,'done_count 가 없어도 완성 파일 수');
+ v=reduceTeam(v,{step:'acceptance',agent:'test',phase:'result',passed:3,failed:0,unverifiable:1,total:4,criteria:[]});
+ assert.equal(v.total,7);assert.equal(v.test.total,4);
+ assert.deepEqual(boardMetrics({...v,elapsed:0}).slice(0,1),['파일 2/7']);
 });

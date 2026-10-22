@@ -11,6 +11,7 @@ import contextvars
 import json
 import logging
 import threading
+import time
 from typing import Any, Callable
 
 _reporter: contextvars.ContextVar[Callable[[dict], None] | None] = contextvars.ContextVar(
@@ -62,28 +63,48 @@ def stream(operation: Callable[[], Any], job_id: str):
         loop = asyncio.get_running_loop()
         lock = threading.Lock()
 
-        def put(event: dict) -> None:
-            with lock:
-                loop.call_soon_threadsafe(queue.put_nowait, event)
+        started = time.monotonic()
 
-        def work():
+        def send(item: Any) -> None:
+            with lock:
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+
+        def put(event: dict) -> None:
+            #: 2.0.45 모든 이벤트에 같은 시계(요청 시작부터 초)를 붙인다 — 엔진 밖 단계(전체 점검·테스트)도
+            #: 화면의 시간·다시 보기에 들어가고, 엔진 이벤트와 순서가 어긋나지 않는다.
+            send({**event, "elapsed": round(time.monotonic() - started, 1)})
+
+        def finish(payload: dict) -> None:
+            #: 마지막 결과(done/error)와 끝 표시도 **작업 스레드에서 같은 통로로** 보낸다. 예전에는 루프 쪽에서
+            #: 바로 넣어서, 작업이 빨리 끝나면 직전 진행 이벤트(전체 점검·테스트 결과)가 done 뒤로 밀려 버려졌다.
+            send(payload)
+            send(sentinel)
+
+        def work() -> None:
             token = _reporter.set(put)
             try:
-                return operation()
+                result = operation()
+            except Exception as exc:  # noqa: BLE001
+                payload = {"step": "error", "message": str(exc) or type(exc).__name__}
+                extra = getattr(exc, "progress_payload", None)
+                if callable(extra):
+                    try:
+                        payload.update(extra())
+                    except Exception:  # noqa: BLE001
+                        log.debug("progress payload failed", exc_info=True)
+                finish(payload)
+                return
             finally:
                 _reporter.reset(token)
+            finish({"step": "done", "result": result})
 
         try:
-            result = await asyncio.to_thread(contextvars.copy_context().run, work)
-            queue.put_nowait({"step": "done", "result": result})
-        except Exception as exc:  # noqa: BLE001
-            payload = {"step": "error", "message": str(exc) or type(exc).__name__}
-            extra = getattr(exc, "progress_payload", None)
-            if callable(extra):
-                payload.update(extra())
-            queue.put_nowait(payload)
-        finally:
+            await asyncio.to_thread(contextvars.copy_context().run, work)
+        except BaseException as exc:  # noqa: BLE001 — 스레드를 못 띄운 경우 등: 보는 쪽이 끝없이 기다리지 않게
+            queue.put_nowait({"step": "error", "message": str(exc) or type(exc).__name__})
             queue.put_nowait(sentinel)
+            if not isinstance(exc, Exception):
+                raise
 
     async def events():
         task = asyncio.create_task(run())

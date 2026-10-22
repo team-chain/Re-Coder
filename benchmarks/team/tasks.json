@@ -1,0 +1,2149 @@
+{
+ "version": 1,
+ "note": "사람이 쓴 판정 시험(oracle). 생성 쪽(A/B/C)에는 prompt 와 criteria 만 보이고 oracle 은 보이지 않는다.",
+ "tasks": [
+  {
+   "id": "T01-notes",
+   "title": "메모 CRUD",
+   "frontend": false,
+   "prompt": "메모 REST API. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/notes {title, body} → 201 과 만든 메모 {id, title, body}. title 이 없거나 빈 문자열이면 400. GET /api/notes → 200 메모 배열(최근에 만든 것이 먼저). GET /api/notes/:id → 200 메모, 없으면 404. DELETE /api/notes/:id → 204, 지운 뒤 조회하면 404.",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "title 이 없거나 비어 있으면 400",
+     "kind": "api",
+     "check": "POST /api/notes {} → 400"
+    },
+    {
+     "id": "AC-2",
+     "text": "만든 메모를 id 로 다시 조회할 수 있다",
+     "kind": "api",
+     "check": "POST → 201, GET /api/notes/:id → 같은 title"
+    },
+    {
+     "id": "AC-3",
+     "text": "목록은 최근에 만든 메모가 먼저",
+     "kind": "api",
+     "check": "GET /api/notes 첫 항목 = 마지막으로 만든 메모"
+    },
+    {
+     "id": "AC-4",
+     "text": "지운 메모와 없는 id 는 404",
+     "kind": "api",
+     "check": "DELETE → 204, GET → 404"
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "제목 없음",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/notes",
+       "body": {
+        "body": "x"
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/notes",
+       "body": {
+        "title": "",
+        "body": "x"
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "만들고 조회",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/notes",
+       "body": {
+        "title": "t{{rand}}",
+        "body": "b"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ],
+        "json": [
+         {
+          "path": "title",
+          "op": "equals",
+          "value": "t{{rand}}"
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/notes/{{id}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "title",
+          "op": "equals",
+          "value": "t{{rand}}"
+         },
+         {
+          "path": "body",
+          "op": "equals",
+          "value": "b"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "최근 먼저",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/notes",
+       "body": {
+        "title": "a{{rand}}",
+        "body": "1"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/notes",
+       "body": {
+        "title": "b{{rand}}",
+        "body": "2"
+       },
+       "save": {
+        "last": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/notes",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "0.id",
+          "op": "equals",
+          "value": "{{last}}"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-4",
+     "title": "삭제",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/notes",
+       "body": {
+        "title": "d{{rand}}",
+        "body": "x"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "DELETE",
+       "path": "/api/notes/{{id}}",
+       "expect": {
+        "status": [
+         204
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/notes/{{id}}",
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/notes/99999999",
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "T02-todos",
+   "title": "할 일 · 완료 표시 · 거르기",
+   "frontend": true,
+   "prompt": "할 일 목록 앱. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/todos {text} → 201 {id, text, done:false}. text 가 없으면 400. PATCH /api/todos/:id {done} → 200 과 바뀐 할 일, 없는 id 는 404. GET /api/todos → 배열(최근에 만든 것이 먼저), GET /api/todos?done=true 또는 ?done=false 로 거른다. 화면도 만들어: public/index.html 과 public/app.js 로 목록을 불러와 보여 주고, 폼으로 새 항목을 만든다(같은 서버가 정적 파일도 보낸다).",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "text 없이 만들면 400",
+     "kind": "api",
+     "check": "POST /api/todos {} → 400"
+    },
+    {
+     "id": "AC-2",
+     "text": "새 할 일은 done:false",
+     "kind": "api",
+     "check": "POST → done false"
+    },
+    {
+     "id": "AC-3",
+     "text": "PATCH 로 완료 표시, 없는 id 는 404",
+     "kind": "api",
+     "check": "PATCH {done:true} → done true"
+    },
+    {
+     "id": "AC-4",
+     "text": "?done=true / ?done=false 로 거른다",
+     "kind": "api",
+     "check": "완료한 항목은 done=true 목록 맨 앞, done=false 목록에는 없음"
+    },
+    {
+     "id": "AC-5",
+     "text": "화면에서 목록을 보고 새 할 일을 만든다",
+     "kind": "screen",
+     "check": "public/index.html"
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "내용 없음",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/todos",
+       "body": {},
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "기본값",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/todos",
+       "body": {
+        "text": "x{{rand}}"
+       },
+       "expect": {
+        "status": [
+         201
+        ],
+        "json": [
+         {
+          "path": "done",
+          "op": "equals",
+          "value": false
+         },
+         {
+          "path": "text",
+          "op": "equals",
+          "value": "x{{rand}}"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "완료 표시",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/todos",
+       "body": {
+        "text": "p{{rand}}"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "PATCH",
+       "path": "/api/todos/{{id}}",
+       "body": {
+        "done": true
+       },
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "done",
+          "op": "equals",
+          "value": true
+         }
+        ]
+       }
+      },
+      {
+       "method": "PATCH",
+       "path": "/api/todos/99999999",
+       "body": {
+        "done": true
+       },
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-4",
+     "title": "거르기",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/todos",
+       "body": {
+        "text": "f{{rand}}"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "PATCH",
+       "path": "/api/todos/{{id}}",
+       "body": {
+        "done": true
+       },
+       "expect": {
+        "status": [
+         200
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/todos",
+       "body": {
+        "text": "g{{rand}}"
+       },
+       "save": {
+        "open": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/todos?done=true",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "0.id",
+          "op": "equals",
+          "value": "{{id}}"
+         },
+         {
+          "path": "0.done",
+          "op": "equals",
+          "value": true
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/todos?done=false",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "0.id",
+          "op": "equals",
+          "value": "{{open}}"
+         },
+         {
+          "path": "0.done",
+          "op": "equals",
+          "value": false
+         }
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "T03-likes",
+   "title": "좋아요 — 한 사람 한 번",
+   "frontend": false,
+   "prompt": "게시글 좋아요 API. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/posts {title} → 201 {id, title, likes:0}. POST /api/posts/:id/likes {user} → 200 {likes}: 같은 user 가 다시 누르면 그대로, 다른 user 면 1 늘어난다. user 가 없으면 400, 없는 글이면 404. GET /api/posts/:id → 200 {id, title, likes}.",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "새 글의 좋아요는 0",
+     "kind": "api",
+     "check": "POST /api/posts → likes 0"
+    },
+    {
+     "id": "AC-2",
+     "text": "같은 사람이 두 번 눌러도 한 번만 센다",
+     "kind": "api",
+     "check": "같은 user 두 번 → likes 1"
+    },
+    {
+     "id": "AC-3",
+     "text": "다른 사람이 누르면 늘고 상세에도 보인다",
+     "kind": "api",
+     "check": "두 사람 → GET likes 2"
+    },
+    {
+     "id": "AC-4",
+     "text": "user 없음 400 · 없는 글 404",
+     "kind": "api",
+     "check": ""
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "처음 0",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/posts",
+       "body": {
+        "title": "p{{rand}}"
+       },
+       "expect": {
+        "status": [
+         201
+        ],
+        "json": [
+         {
+          "path": "likes",
+          "op": "equals",
+          "value": 0
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "같은 사람",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/posts",
+       "body": {
+        "title": "q{{rand}}"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/{{id}}/likes",
+       "body": {
+        "user": "u1"
+       },
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "likes",
+          "op": "equals",
+          "value": 1
+         }
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/{{id}}/likes",
+       "body": {
+        "user": "u1"
+       },
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "likes",
+          "op": "equals",
+          "value": 1
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "두 사람",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/posts",
+       "body": {
+        "title": "r{{rand}}"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/{{id}}/likes",
+       "body": {
+        "user": "a"
+       },
+       "expect": {
+        "status": [
+         200
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/{{id}}/likes",
+       "body": {
+        "user": "b"
+       },
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "likes",
+          "op": "equals",
+          "value": 2
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/posts/{{id}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "likes",
+          "op": "equals",
+          "value": 2
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-4",
+     "title": "잘못된 요청",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/posts",
+       "body": {
+        "title": "s{{rand}}"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/{{id}}/likes",
+       "body": {},
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/99999999/likes",
+       "body": {
+        "user": "a"
+       },
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "T04-auth",
+   "title": "가입 · 로그인 · 내 정보",
+   "frontend": false,
+   "prompt": "회원 인증 API. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/auth/register {email, password} → 201 {id, email}(비밀번호는 응답에 넣지 않는다). 이미 있는 email 은 409, password 가 8자 미만이면 400. POST /api/auth/login {email, password} → 200 {token}, 틀리면 401. GET /api/me (Authorization: Bearer 토큰) → 200 {id, email}, 토큰이 없거나 틀리면 401. 비밀번호는 해시로 저장한다.",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "가입하면 201 이고 비밀번호는 응답에 없다",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-2",
+     "text": "같은 email 로 다시 가입하면 409, 짧은 비밀번호는 400",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-3",
+     "text": "로그인하면 토큰, 틀리면 401",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-4",
+     "text": "토큰으로 내 정보, 없으면 401",
+     "kind": "security",
+     "check": ""
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "가입",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/auth/register",
+       "body": {
+        "email": "a{{rand}}@ex.com",
+        "password": "pw-{{rand}}-long"
+       },
+       "expect": {
+        "status": [
+         201
+        ],
+        "json": [
+         {
+          "path": "email",
+          "op": "equals",
+          "value": "a{{rand}}@ex.com"
+         },
+         {
+          "path": "password",
+          "op": "missing"
+         },
+         {
+          "path": "id",
+          "op": "exists"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "중복·짧은 비밀번호",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/auth/register",
+       "body": {
+        "email": "b{{rand}}@ex.com",
+        "password": "pw-{{rand}}-long"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/auth/register",
+       "body": {
+        "email": "b{{rand}}@ex.com",
+        "password": "pw-{{rand}}-long"
+       },
+       "expect": {
+        "status": [
+         409
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/auth/register",
+       "body": {
+        "email": "c{{rand}}@ex.com",
+        "password": "short"
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "로그인",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/auth/register",
+       "body": {
+        "email": "d{{rand}}@ex.com",
+        "password": "pw-{{rand}}-long"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/auth/login",
+       "body": {
+        "email": "d{{rand}}@ex.com",
+        "password": "pw-{{rand}}-long"
+       },
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "token",
+          "op": "exists"
+         }
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/auth/login",
+       "body": {
+        "email": "d{{rand}}@ex.com",
+        "password": "wrong-password"
+       },
+       "expect": {
+        "status": [
+         401
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-4",
+     "title": "내 정보",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/auth/register",
+       "body": {
+        "email": "e{{rand}}@ex.com",
+        "password": "pw-{{rand}}-long"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/auth/login",
+       "body": {
+        "email": "e{{rand}}@ex.com",
+        "password": "pw-{{rand}}-long"
+       },
+       "save": {
+        "tok": "token"
+       },
+       "expect": {
+        "status": [
+         200
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/me",
+       "auth": "tok",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "email",
+          "op": "equals",
+          "value": "e{{rand}}@ex.com"
+         },
+         {
+          "path": "password",
+          "op": "missing"
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/me",
+       "expect": {
+        "status": [
+         401
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "T05-pages",
+   "title": "목록 나눠 보기",
+   "frontend": false,
+   "prompt": "상품 목록 API. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/items {name} → 201 {id, name}, name 이 없으면 400. GET /api/items?page=1&limit=10 → 200 {items, total, page, limit}: items 는 만든 순서대로 page 쪽의 limit 개, total 은 전체 수. page·limit 의 기본값은 1·10, limit 최대 50(더 크면 50), 숫자가 아니거나 1보다 작으면 400.",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "limit 개씩 나눠 주고 total 은 전체 수",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-2",
+     "text": "page 와 limit 을 그대로 돌려준다(기본 1·10)",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-3",
+     "text": "limit 은 최대 50",
+     "kind": "api",
+     "check": "limit=500 → limit 50"
+    },
+    {
+     "id": "AC-4",
+     "text": "숫자가 아니거나 1보다 작은 page·limit 은 400",
+     "kind": "api",
+     "check": ""
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "나누기",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/items",
+       "body": {
+        "name": "i1-{{rand}}"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/items",
+       "body": {
+        "name": "i2-{{rand}}"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/items",
+       "body": {
+        "name": "i3-{{rand}}"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/items?page=1&limit=2",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "items",
+          "op": "length",
+          "value": 2
+         },
+         {
+          "path": "total",
+          "op": "gte",
+          "value": 3
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "돌려주기",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/items",
+       "body": {
+        "name": "j{{rand}}"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/items?page=2&limit=1",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "page",
+          "op": "equals",
+          "value": 2
+         },
+         {
+          "path": "limit",
+          "op": "equals",
+          "value": 1
+         },
+         {
+          "path": "items",
+          "op": "length",
+          "value": 1
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/items",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "page",
+          "op": "equals",
+          "value": 1
+         },
+         {
+          "path": "limit",
+          "op": "equals",
+          "value": 10
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "최대 50",
+     "steps": [
+      {
+       "method": "GET",
+       "path": "/api/items?limit=500",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "limit",
+          "op": "equals",
+          "value": 50
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-4",
+     "title": "잘못된 값",
+     "steps": [
+      {
+       "method": "GET",
+       "path": "/api/items?limit=abc",
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/items?page=0",
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "T06-comments",
+   "title": "글 · 댓글",
+   "frontend": true,
+   "prompt": "게시판 댓글 기능. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/posts {title} → 201 {id, title}. POST /api/posts/:id/comments {text} → 201 {id, postId, text}, text 가 비면 400, 없는 글이면 404. GET /api/posts → 글 배열, GET /api/posts/:id/comments → 댓글 배열(먼저 쓴 것이 먼저), 없는 글이면 404. 화면도 만들어: public/index.html 과 public/app.js 로 목록을 불러와 보여 주고, 폼으로 새 항목을 만든다(같은 서버가 정적 파일도 보낸다).",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "글에 댓글을 달고 그 글의 댓글 목록에서 볼 수 있다",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-2",
+     "text": "댓글은 먼저 쓴 것이 먼저",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-3",
+     "text": "빈 댓글 400 · 없는 글 404",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-4",
+     "text": "화면에서 글과 댓글을 본다",
+     "kind": "screen",
+     "check": ""
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "댓글",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/posts",
+       "body": {
+        "title": "p{{rand}}"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/{{id}}/comments",
+       "body": {
+        "text": "c{{rand}}"
+       },
+       "expect": {
+        "status": [
+         201
+        ],
+        "json": [
+         {
+          "path": "text",
+          "op": "equals",
+          "value": "c{{rand}}"
+         },
+         {
+          "path": "postId",
+          "op": "equals",
+          "value": "{{id}}"
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/posts/{{id}}/comments",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "0.text",
+          "op": "equals",
+          "value": "c{{rand}}"
+         },
+         {
+          "path": "$",
+          "op": "length",
+          "value": 1
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "순서",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/posts",
+       "body": {
+        "title": "o{{rand}}"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/{{id}}/comments",
+       "body": {
+        "text": "first"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/{{id}}/comments",
+       "body": {
+        "text": "second"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/posts/{{id}}/comments",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "0.text",
+          "op": "equals",
+          "value": "first"
+         },
+         {
+          "path": "1.text",
+          "op": "equals",
+          "value": "second"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "잘못된 요청",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/posts",
+       "body": {
+        "title": "e{{rand}}"
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/{{id}}/comments",
+       "body": {
+        "text": ""
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/posts/99999999/comments",
+       "body": {
+        "text": "x"
+       },
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/posts/99999999/comments",
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "T07-stock",
+   "title": "재고 · 주문",
+   "frontend": false,
+   "prompt": "재고 관리 API. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/products {name, stock} → 201 {id, name, stock}, stock 이 정수가 아니거나 음수면 400. GET /api/products/:id → 200 상품. POST /api/orders {productId, qty} → 201 {id, productId, qty} 이고 그 상품의 stock 이 qty 만큼 준다. 재고보다 많으면 409(재고는 그대로), 없는 상품은 404, qty 가 1 이상의 정수가 아니면 400.",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "음수·정수가 아닌 재고는 400",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-2",
+     "text": "주문하면 재고가 그만큼 준다",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-3",
+     "text": "재고보다 많이 주문하면 409 이고 재고는 그대로",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-4",
+     "text": "없는 상품 404 · 잘못된 수량 400",
+     "kind": "api",
+     "check": ""
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "재고 검사",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/products",
+       "body": {
+        "name": "n",
+        "stock": -1
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/products",
+       "body": {
+        "name": "n",
+        "stock": "many"
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "재고 줄기",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/products",
+       "body": {
+        "name": "p{{rand}}",
+        "stock": 5
+       },
+       "save": {
+        "pid": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/orders",
+       "body": {
+        "productId": "{{pid}}",
+        "qty": 2
+       },
+       "expect": {
+        "status": [
+         201
+        ],
+        "json": [
+         {
+          "path": "qty",
+          "op": "equals",
+          "value": 2
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/products/{{pid}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "stock",
+          "op": "equals",
+          "value": 3
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "재고 초과",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/products",
+       "body": {
+        "name": "q{{rand}}",
+        "stock": 1
+       },
+       "save": {
+        "pid": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/orders",
+       "body": {
+        "productId": "{{pid}}",
+        "qty": 2
+       },
+       "expect": {
+        "status": [
+         409
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/products/{{pid}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "stock",
+          "op": "equals",
+          "value": 1
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-4",
+     "title": "잘못된 주문",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/products",
+       "body": {
+        "name": "r{{rand}}",
+        "stock": 3
+       },
+       "save": {
+        "pid": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/orders",
+       "body": {
+        "productId": 99999999,
+        "qty": 1
+       },
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/orders",
+       "body": {
+        "productId": "{{pid}}",
+        "qty": 0
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "T08-links",
+   "title": "짧은 주소",
+   "frontend": true,
+   "prompt": "짧은 주소 서비스. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/links {url} → 201 {code, url, hits:0}, http:// 또는 https:// 로 시작하지 않으면 400. GET /api/links/:code → 200 {code, url, hits}, 없으면 404. POST /api/links/:code/visit → 200 {url, hits} 이고 hits 가 1 늘어난다. 화면도 만들어: public/index.html 과 public/app.js 로 목록을 불러와 보여 주고, 폼으로 새 항목을 만든다(같은 서버가 정적 파일도 보낸다).",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "http(s) 주소만 받는다",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-2",
+     "text": "만든 짧은 주소로 원래 주소를 찾는다",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-3",
+     "text": "방문하면 hits 가 늘고 조회에도 보인다",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-4",
+     "text": "없는 코드는 404",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-5",
+     "text": "화면에서 주소를 줄이고 목록을 본다",
+     "kind": "screen",
+     "check": ""
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "주소 검사",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/links",
+       "body": {
+        "url": "ftp://x.example"
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/links",
+       "body": {},
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "찾기",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/links",
+       "body": {
+        "url": "https://ex.com/{{rand}}"
+       },
+       "save": {
+        "code": "code"
+       },
+       "expect": {
+        "status": [
+         201
+        ],
+        "json": [
+         {
+          "path": "hits",
+          "op": "equals",
+          "value": 0
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/links/{{code}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "url",
+          "op": "equals",
+          "value": "https://ex.com/{{rand}}"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "방문",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/links",
+       "body": {
+        "url": "https://ex.com/v{{rand}}"
+       },
+       "save": {
+        "code": "code"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/links/{{code}}/visit",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "hits",
+          "op": "equals",
+          "value": 1
+         }
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/links/{{code}}/visit",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "hits",
+          "op": "equals",
+          "value": 2
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/links/{{code}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "hits",
+          "op": "equals",
+          "value": 2
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-4",
+     "title": "없는 코드",
+     "steps": [
+      {
+       "method": "GET",
+       "path": "/api/links/zz-none-{{rand}}",
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/links/zz-none-{{rand}}/visit",
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "T09-books",
+   "title": "책 검색",
+   "frontend": true,
+   "prompt": "책 목록과 검색. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/books {title, author} → 201 {id, title, author}, 둘 중 하나라도 없으면 400. GET /api/books → 배열. GET /api/books?q=단어 → 제목이나 저자에 그 단어가 들어간 책만(대소문자 구분 없이), 없으면 빈 배열. 화면도 만들어: public/index.html 과 public/app.js 로 목록을 불러와 보여 주고, 폼으로 새 항목을 만든다(같은 서버가 정적 파일도 보낸다).",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "제목·저자가 없으면 400",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-2",
+     "text": "제목으로 찾는다(대소문자 무시)",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-3",
+     "text": "저자로 찾는다",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-4",
+     "text": "없으면 빈 배열",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-5",
+     "text": "화면에서 검색한다",
+     "kind": "screen",
+     "check": ""
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "빠진 값",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/books",
+       "body": {
+        "title": "x"
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/books",
+       "body": {
+        "author": "y"
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "제목",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/books",
+       "body": {
+        "title": "Zeta{{rand}} Saga",
+        "author": "Kim"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/books?q=zeta{{rand}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "$",
+          "op": "length",
+          "value": 1
+         },
+         {
+          "path": "0.title",
+          "op": "equals",
+          "value": "Zeta{{rand}} Saga"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "저자",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/books",
+       "body": {
+        "title": "Book",
+        "author": "Writer{{rand}}"
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/books?q=writer{{rand}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "0.author",
+          "op": "equals",
+          "value": "Writer{{rand}}"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-4",
+     "title": "없음",
+     "steps": [
+      {
+       "method": "GET",
+       "path": "/api/books?q=nothing-{{rand}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "$",
+          "op": "length",
+          "value": 0
+         }
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "T10-users",
+   "title": "입력 검사",
+   "frontend": false,
+   "prompt": "회원 정보 API. Node.js Express 로 새 프로젝트를 만들어 줘. 데이터는 메모리에 저장해도 된다. 응답은 감싸지 않은 JSON 으로 보내고(예: {\"id\": 1, ...}), 오류는 {\"error\": \"이유\"} 로 보낸다. POST /api/users {name, email, age} → 201 {id, name, email, age}. name 은 1~50자, email 은 이메일 모양, age 는 0~150 의 정수여야 하고 아니면 400. 같은 email 이 있으면 409. GET /api/users/:id → 200 회원, 없으면 404.",
+   "criteria": [
+    {
+     "id": "AC-1",
+     "text": "이메일 모양이 아니면 400",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-2",
+     "text": "나이는 0~150 정수만",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-3",
+     "text": "이름은 1~50자",
+     "kind": "api",
+     "check": ""
+    },
+    {
+     "id": "AC-4",
+     "text": "같은 email 409 · 만든 회원 조회",
+     "kind": "api",
+     "check": ""
+    }
+   ],
+   "oracle": [
+    {
+     "criterion": "AC-1",
+     "title": "이메일",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/users",
+       "body": {
+        "name": "a",
+        "email": "not-an-email",
+        "age": 20
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-2",
+     "title": "나이",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/users",
+       "body": {
+        "name": "a",
+        "email": "g{{rand}}@ex.com",
+        "age": -1
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/users",
+       "body": {
+        "name": "a",
+        "email": "h{{rand}}@ex.com",
+        "age": 200
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/users",
+       "body": {
+        "name": "a",
+        "email": "i{{rand}}@ex.com",
+        "age": 20.5
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/users",
+       "body": {
+        "name": "a",
+        "email": "j{{rand}}@ex.com",
+        "age": 0
+       },
+       "expect": {
+        "status": [
+         201
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-3",
+     "title": "이름",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/users",
+       "body": {
+        "name": "",
+        "email": "k{{rand}}@ex.com",
+        "age": 3
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/users",
+       "body": {
+        "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "email": "l{{rand}}@ex.com",
+        "age": 3
+       },
+       "expect": {
+        "status": [
+         400
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "criterion": "AC-4",
+     "title": "중복·조회",
+     "steps": [
+      {
+       "method": "POST",
+       "path": "/api/users",
+       "body": {
+        "name": "m",
+        "email": "m{{rand}}@ex.com",
+        "age": 30
+       },
+       "save": {
+        "id": "id"
+       },
+       "expect": {
+        "status": [
+         201
+        ],
+        "json": [
+         {
+          "path": "age",
+          "op": "equals",
+          "value": 30
+         }
+        ]
+       }
+      },
+      {
+       "method": "POST",
+       "path": "/api/users",
+       "body": {
+        "name": "m2",
+        "email": "m{{rand}}@ex.com",
+        "age": 31
+       },
+       "expect": {
+        "status": [
+         409
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/users/{{id}}",
+       "expect": {
+        "status": [
+         200
+        ],
+        "json": [
+         {
+          "path": "email",
+          "op": "equals",
+          "value": "m{{rand}}@ex.com"
+         }
+        ]
+       }
+      },
+      {
+       "method": "GET",
+       "path": "/api/users/99999999",
+       "expect": {
+        "status": [
+         404
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

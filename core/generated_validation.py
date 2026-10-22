@@ -22,7 +22,8 @@ except ImportError:  # pragma: no cover
 _BUILD_TIMEOUT = int(os.environ.get("RECODER_VERIFY_BUILD_TIMEOUT", "480"))
 
 
-def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None, run_app: bool = False) -> dict:
+def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None, run_app: bool = False,
+                    acceptance=None) -> dict:
     timeout = timeout or _BUILD_TIMEOUT
     base = {"kind": "docker-build", "passed": False, "status": "unavailable"}
     if os.getenv("RECODER_TEST_MODE") == "1":
@@ -98,7 +99,7 @@ def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None, 
                 try:
                     import runtime_check
                     if runtime_check.enabled():
-                        runtime = runtime_check.run(workspace, image_file.read_text(encoding="utf-8").strip())
+                        runtime = runtime_check.run(workspace, image_file.read_text(encoding="utf-8").strip(), acceptance=acceptance)
                         for failure in runtime.get("failures") or []:
                             failure["lines"] = [mask_secrets(line) for line in failure.get("lines") or []]
                 except Exception as exc:  # noqa: BLE001 - 실행 점검 실패가 빌드 판정을 바꾸지 않는다

@@ -13,11 +13,15 @@ import { CodeRemovalSummary, CodeRemovalWarning, RemovalCheck } from "./CodeRemo
 import { FailedFile, PausePanel, ResumeMode } from "./pausePanel";
 import FlowPreviewPanel from "./FlowPreviewPanel";
 import { ConsistencyIssue, FallbackDocsNote, RemainingIssues, SecurityReport, SecurityScoreNote, UnusedFile, UnusedFilesNote, applyLocked, filesToApply } from "./codeIssues";
-import { TeamBoard, TeamComposer } from "./TeamBoard";
+import { TeamBoard } from "./TeamBoard";
+import { TeamSetup } from "./TeamSetup";
+import { AcceptancePanel, ResultSpec } from "./AcceptancePanel";
+import { Preset, RunStat, TeamConfig, addRun, cleanConfig, cleanHistory, defaultConfig, modelOptions, modelsForRequest, readySpecs, setDevs } from "./teamConfig";
+import type { RoutingChoice } from "./modelRoutingModel";
 import { SpecEditor } from "./SpecEditor";
-import { EditableSpec, KIND_LABEL, SpecKind, SpecPayload, addCriterion, emptySpec, fromDraft, hasBlocking, specForRequest, specIssues } from "./specModel";
+import { EditableSpec, SpecPayload, addCriterion, emptySpec, fromDraft, hasBlocking, specForRequest, specIssues } from "./specModel";
 import { ANIMAL_KINDS } from "./teamAnimals";
-import { DEFAULT_DEV_AGENTS, MAX_DEV_AGENTS, TeamEvent, TeamMember, TeamView, buildRoster, emptyTeamView, reduceTeam, teamWorking } from "./teamState";
+import { TeamEvent, TeamMember, TeamView, buildRoster, emptyTeamView, reduceTeam, teamWorking, totalUsage } from "./teamState";
 
 interface SecretWarning { rule: string; line: number; masked: string; }
 interface CodeOp {
@@ -36,8 +40,9 @@ interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?
   fallback_docs?: string[];
   /** 2.0.28 AI 코드 보안 점수. */
   security?: SecurityReport | null;
-  /** 2.0.43 이 결과가 따른 명세. verified 는 아직 언제나 false — 자동 확인(테스트)은 다음 단계. */
-  spec?: { goal?: string; criteria?: Array<{ id: string; text: string; kind: SpecKind; check?: string }>; file?: string; verified?: boolean } | null; }
+  /** 2.0.43 이 결과가 따른 명세 · 2.0.45 테스트 리코더의 조건별 결과(acceptance). verified 는 모든 조건이 통과했을 때만. */
+  spec?: ResultSpec | null;
+  foundation?: string | null; }
 interface DecisionOption { key: string; label: string; summary: string; pros: string[]; cons: string[]; recommended: boolean; }
 interface Decision { id: string; question: string; options: DecisionOption[]; impact: string; }
 //: 확정된 결정 하나. **`impact` 를 반드시 함께 보낸다.**
@@ -82,12 +87,16 @@ export function buildDecisionChoices(
 //: 팀 모드: team 은 코어 진행 이벤트를 접은 화면 상태, request 는 [이어서 만들기]에 그대로 다시 보낼 생성 요청.
 interface GenerateRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; decisions: DecisionChoice[]; mode: "auto" | "team"; agents: number;
   /** 2.0.43 사용자가 승인한 명세(합격 조건). 이어서 만들기에도 그대로 다시 보낸다. */
-  spec?: SpecPayload | null; }
+  spec?: SpecPayload | null;
+  /** 2.0.45 역할별 모델(설계·개발·검토·테스트 → 공급자 이름) · 테스트 리코더를 돌릴지. */
+  models?: Partial<Record<string, string>> | null; test?: boolean; }
 interface PausedInfo { message: string; jobId: string; done: number; total: number; reason?: string; failed?: FailedFile[]; }
 interface Turn { id: number; prompt: string; targetFolder: string; contextNames?: string[]; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string;
-  roster?: TeamMember[]; team?: TeamView; request?: GenerateRequest; paused?: PausedInfo | null; }
+  roster?: TeamMember[]; team?: TeamView; request?: GenerateRequest; paused?: PausedInfo | null;
+  /** 2.0.45 예상 시간·비용 기록용 — 생성을 시작한 때와 고른 프리셋. 이어서 만든 턴은 기록하지 않는다. */
+  run?: { startedAt: number; preset: Preset; resumed?: boolean }; }
 export interface CtxFile { path: string; content: string; }
-interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; team?: boolean; roster?: TeamMember[]; }
+interface PendingRequest { instruction: string; targetFolder: string; contextFiles: CtxFile[]; team?: boolean; roster?: TeamMember[]; config?: TeamConfig; }
 interface DecisionModal {
   requestId: number; decisions: Decision[]; selections: Record<string, string>; step: number; dropped: string[];
   /** 고른 선택에 따라 이어서 물을 결정(코어가 알려 줌) · 이미 끼워 넣은 것 · AI 에게 받는 중 · 실패/안내. */
@@ -117,8 +126,9 @@ export const FIRST_ACK_SECONDS = 15;
 export const NOT_RECEIVED = "ReCoder 확장이 이 요청을 받지 못했습니다. 확장이 다시 시작되면서 이 창과 연결이 끊긴 것 같습니다. Ctrl+Shift+P → Developer: Reload Window 로 창을 다시 불러온 뒤 다시 보내 주세요. 보낸 내용은 입력창에 다시 넣어 두었습니다.";
 
 //: 위치 칩 글자 — 절대 경로(다른 프로젝트 폴더)는 폴더 이름만, 전체 경로는 마우스를 올리면 보인다.
-export function folderLabel(folder: string): string {
-  if (!folder) return "루트";
+//: 폴더를 고르지 않았으면 열린 프로젝트 이름(예: board-app) — 모르면 "프로젝트 루트".
+export function folderLabel(folder: string, project = ""): string {
+  if (!folder) return project || "프로젝트 루트";
   const parts = folder.replace(/[\\/]+$/, "").split(/[\\/]/);
   return /^([A-Za-z]:|\/|\\\\|~)/.test(folder) ? (parts[parts.length - 1] || folder) : folder;
 }
@@ -161,19 +171,39 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   useEffect(() => { saveUiState({ codeDraft: input }); }, [input]);
   const [targetFolder, setTargetFolder] = useState(() => { const f = pendingTargetFolder ?? ""; pendingTargetFolder = null; return f; });
   const [contextFiles, setContextFiles] = useState<CtxFile[]>([]);
-  //: 팀 모드 구성 — 창을 다시 불러와도 유지한다(동물 배정도 그대로).
+  //: 팀 모드 구성 — 창을 다시 불러와도 유지한다(프리셋·역할별 모델·인원·테스트).
   const [teamMode, setTeamMode] = useState<boolean>(() => loadUiState().codeTeamMode === true);
+  const [teamConfig, setTeamConfig] = useState<TeamConfig>(() => {
+    const st = loadUiState();
+    if (st.codeTeamConfig) return cleanConfig(st.codeTeamConfig);
+    //: 2.0.44 까지는 인원만 저장했다(팀원 목록) — 그 수를 이어받는다.
+    const old = Array.isArray(st.codeTeamRoster) ? (st.codeTeamRoster as TeamMember[]).filter((m) => m && m.role === "dev").length : 0;
+    return old ? setDevs(defaultConfig(), old) : defaultConfig();
+  });
   const [roster, setRoster] = useState<TeamMember[]>(() => {
     const saved = loadUiState().codeTeamRoster;
     const valid = Array.isArray(saved) && saved.length >= 3 && saved.every((m) => m && typeof m === "object"
-      && typeof (m as TeamMember).id === "string" && ["planner", "dev", "review"].includes((m as TeamMember).role)
+      && typeof (m as TeamMember).id === "string" && ["planner", "dev", "review", "test"].includes((m as TeamMember).role)
       && (ANIMAL_KINDS as string[]).includes((m as TeamMember).animal));
-    return valid ? saved as TeamMember[] : buildRoster(DEFAULT_DEV_AGENTS);
+    return valid ? saved as TeamMember[] : buildRoster(3);
   });
-  useEffect(() => { saveUiState({ codeTeamMode: teamMode, codeTeamRoster: roster }); }, [teamMode, roster]);
-  const addDevAgent = useCallback(() => setRoster(r => buildRoster(Math.min(MAX_DEV_AGENTS, r.filter(m => m.role === "dev").length + 1), Math.random, r)), []);
-  const removeDevAgent = useCallback(() => setRoster(r => buildRoster(Math.max(1, r.filter(m => m.role === "dev").length - 1), Math.random, r)), []);
+  useEffect(() => { setRoster((r) => buildRoster(teamConfig.devs, Math.random, r, teamConfig.test)); }, [teamConfig.devs, teamConfig.test]);
+  useEffect(() => { saveUiState({ codeTeamMode: teamMode, codeTeamRoster: roster, codeTeamConfig: teamConfig }); }, [teamMode, roster, teamConfig]);
+  //: 지난 실행 기록 — 팀 창의 "예상 시간·비용"은 여기서만 나온다(지어내지 않는다).
+  const [runHistory, setRunHistory] = useState<RunStat[]>(() => cleanHistory(loadUiState().codeTeamHistory));
+  useEffect(() => { saveUiState({ codeTeamHistory: runHistory }); }, [runHistory]);
+  //: 역할별 모델 목록(코어 /api/models/routing) — 받기 전에는 기본 두 개만.
+  const [routingChoices, setRoutingChoices] = useState<RoutingChoice[] | null>(null);
+  const modelChoices = modelOptions(routingChoices);
+  const loadModels = useCallback(() => postMessage("models.load"), [postMessage]);
+  //: 위치 칩에 보일 프로젝트 이름(확장이 알려 줌).
+  const [projectName, setProjectName] = useState("");
+  //: 처음 한 번 — 프로젝트 이름과 모델 목록을 묻는다(팀 창을 열 때도 모델 목록은 새로 받는다).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { postMessage("code.project"); postMessage("models.load"); }, []);
   const [turns, setTurns] = useState<Turn[]>([]);
+  const turnsRef = React.useRef<Turn[]>(turns);
+  turnsRef.current = turns;
   const [applyState, setApplyState] = useState<Record<string, ApplyStatus>>({});
   const [applyErrors, setApplyErrors] = useState<Record<string, string>>({});
   //: 생성 결과는 파일 목록만 먼저 보여 준다(파일이 수십 개면 내용이 화면을 덮었다). 이름을 누르면 내용을 펼친다.
@@ -274,9 +304,29 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       setTurns(ts => ts.map(t => t.id === p.requestId ? { ...t, team: reduceTeam(t.team ?? emptyTeamView(), event) } : t));
       return;
     }
+    if (type === "models.state") {
+      const st = payload as { routing?: { choices?: RoutingChoice[] } };
+      if (Array.isArray(st?.routing?.choices)) setRoutingChoices(st.routing!.choices!);
+      return;
+    }
+    if (type === "code.project") {
+      const name = (payload as { name?: unknown })?.name;
+      setProjectName(typeof name === "string" ? name : "");
+      return;
+    }
     if (type === "code.result") {
       const res = payload as CodeResult;
       const requestId = res.requestId;
+      //: 2.0.45 예상 시간·비용 기록 — 실제로 걸린 시간과, 단가를 아는 호출만 더한 비용(모르면 비용 없이).
+      const done = turnsRef.current.find((t) => t.id === requestId && t.status === "generating");
+      if (done?.run && !done.run.resumed && !res.foundation && (res.ops?.length ?? 0) > 0) {
+        const seconds = Math.round((Date.now() - done.run.startedAt) / 1000);
+        const u = done.team ? totalUsage(done.team) : null;
+        if (seconds > 0) {
+          setRunHistory((h) => addRun(h, { seconds, costUsd: u && u.calls && !u.unknownCost ? u.costUsd : null, files: res.ops.length,
+            devs: done.request?.agents ?? 1, preset: done.run!.preset, at: Date.now(), team: done.request?.mode === "team" }));
+        }
+      }
       if (requestId === undefined || activeRequest.current === requestId) activeRequest.current = null;
       if (requestId !== undefined) delete pendingRequestsRef.current[requestId];
       setTurns((ts) => {
@@ -405,7 +455,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     if (!text || activeRequest.current !== null) { return; }
     const id = _turnSeq++;
     activeRequest.current = id;
-    pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles, team: teamMode, roster };
+    pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles, team: teamMode, roster, config: teamConfig };
     // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
     // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
     setTurns((ts) => [...ts, { id, prompt: text, targetFolder, contextNames: contextFiles.map((f) => f.path), status: "planning", roster }]);
@@ -413,7 +463,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     waitForResponse(id, isHostLinkLost() ? 5 : FIRST_ACK_SECONDS);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
-  }, [input, targetFolder, contextFiles, postMessage, teamMode, roster]);
+  }, [input, targetFolder, contextFiles, postMessage, teamMode, roster, teamConfig]);
 
   const chooseDecision = useCallback((key: string) => {
     setDecisionModal((current) => current ? {
@@ -458,17 +508,21 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     if (!request) { setDecisionModal(null); return; }
     const choices = buildDecisionChoices(decisionModal.decisions, decisionModal.selections);
     const team = request.roster ?? roster;
+    const cfg = request.config ?? teamConfig;
+    const ready = routingChoices ? readySpecs(modelChoices) : null;
     const generate: GenerateRequest = {
       instruction: request.instruction, targetFolder: request.targetFolder, contextFiles: request.contextFiles, decisions: choices,
       //: 팀 모드가 꺼져 있어도 요청이 크면 코어가 자동으로 나눠 만든다(같은 에이전트 수로).
-      mode: request.team ? "team" : "auto", agents: team.filter(m => m.role === "dev").length,
+      mode: request.team ? "team" : "auto", agents: cfg.devs,
       spec: withSpec ? specForRequest(decisionModal.spec) : null,
+      models: modelsForRequest(cfg, !!request.team, ready), test: cfg.test,
     };
-    setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId ? { ...turn, status: "generating", request: generate, roster: team } : turn));
+    setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId
+      ? { ...turn, status: "generating", request: generate, roster: team, run: { startedAt: Date.now(), preset: cfg.preset } } : turn));
     setDecisionModal(null);
     waitForResponse(decisionModal.requestId, 30);
     postMessage("code.generate", { requestId: decisionModal.requestId, ...generate });
-  }, [postMessage, roster]);
+  }, [postMessage, roster, teamConfig, routingChoices, modelChoices]);
 
   //: [다음]/[생성] — 고른 선택이 이어서 물을 결정을 갖고 있으면 먼저 끼워 넣거나 AI 에게 받는다.
   const advanceDecision = useCallback(() => {
@@ -496,7 +550,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     activeRequest.current = turn.id;
     expiredRequests.current.delete(turn.id);
     const skip = mode === "skip" && !!turn.paused.failed?.length;
-    setTurns(ts => ts.map(t => t.id === turn.id ? { ...t, status: "generating", error: undefined, paused: null,
+    setTurns(ts => ts.map(t => t.id === turn.id ? { ...t, status: "generating", error: undefined, paused: null, run: t.run ? { ...t.run, resumed: true } : t.run,
+      team: t.team ? { ...t.team, clockBase: t.team.elapsed } : t.team,
       progress: skip ? "만들지 못한 파일을 빼고 결과를 받는 중…" : "멈춘 지점부터 이어서 만드는 중…" } : t));
     waitForResponse(turn.id, 60);
     postMessage("code.generate", { requestId: turn.id, ...turn.request, resumeJob: turn.paused.jobId, ...(skip ? { skipFailed: true } : {}) });
@@ -557,31 +612,32 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         .rc-cg { max-width: 860px; margin: 8px auto 0; display: flex; flex-direction: column; }
         .rc-cg-hero { margin: clamp(12px, 13vh, 132px) 0 18px; text-align: center; font-size: 22px; font-weight: 600; letter-spacing: -.2px; color: var(--vscode-foreground, #eee); }
         .rc-cg-notice { margin: 0 0 10px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, #333)); border-radius: 8px; padding: 8px 12px; color: var(--vscode-descriptionForeground, #aaa); font-size: 12px; line-height: 1.5; }
-        .rc-cg-box { background: var(--vscode-input-background, #252526); border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, #3f3f3f)); border-radius: 12px; padding: 10px 10px 8px 12px; transition: border-color .12s ease; }
+        .rc-cg-box { background: var(--vscode-input-background, #252526); border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, #3f3f3f)); border-radius: 12px; padding: 14px 12px 12px 16px; transition: border-color .12s ease; }
         .rc-cg-box:focus-within { border-color: var(--vscode-focusBorder, #3794ff); }
-        .rc-cg-input { display: block; width: 100%; box-sizing: border-box; border: 0; outline: none; background: transparent; color: var(--vscode-input-foreground, #ccc); font-family: var(--vscode-font-family, sans-serif); font-size: 13.5px; line-height: 1.6; padding: 2px 2px 0; resize: none; field-sizing: content; max-height: 260px; overflow-y: auto; }
+        .rc-cg-input { display: block; width: 100%; box-sizing: border-box; border: 0; outline: none; background: transparent; color: var(--vscode-input-foreground, #ccc); font-family: var(--vscode-font-family, sans-serif); font-size: 14.5px; line-height: 1.6; padding: 2px 2px 0; resize: none; field-sizing: content; max-height: 260px; overflow-y: auto; }
         .rc-cg-input::placeholder { color: var(--vscode-input-placeholderForeground, #6b6b6b); }
         .rc-cg-input:disabled { opacity: .6; }
-        .rc-cg-tools { display: flex; align-items: flex-end; gap: 8px; margin-top: 6px; }
-        .rc-cg-ctx { flex: 1; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+        .rc-cg-tools { display: flex; align-items: flex-end; gap: 8px; margin-top: 8px; }
+        .rc-cg-ctx { flex: 1; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
         .rc-cg-actions { flex: none; display: flex; align-items: center; gap: 8px; }
         @media (max-width: 520px) { .rc-cg-kbd { display: none; } }
-        .rc-cg-chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; max-width: 240px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, #3f3f3f)); background: transparent; color: var(--vscode-foreground, #ccc); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+        .rc-cg-chip { display: inline-flex; align-items: center; gap: 7px; height: 36px; max-width: 260px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, #3f3f3f)); background: transparent; color: var(--vscode-foreground, #ccc); font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; }
+        .rc-cg-chip:focus-visible, .rc-cg-send:focus-visible, .rc-cg-x:focus-visible { outline: 2px solid var(--vscode-focusBorder, #3794ff); outline-offset: 1px; }
         .rc-cg-chip:hover { background: var(--vscode-toolbar-hoverBackground, rgba(90,93,94,.31)); }
         .rc-cg-chip.quiet { border-color: transparent; color: var(--vscode-descriptionForeground, #999); }
         .rc-cg-chip > span { overflow: hidden; text-overflow: ellipsis; }
-        .rc-cg-file { display: inline-flex; align-items: center; height: 24px; max-width: 220px; padding: 0 2px 0 8px; border-radius: 6px; background: var(--vscode-badge-background, #2b2b2c); color: var(--vscode-badge-foreground, #ccc); font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; }
+        .rc-cg-file { display: inline-flex; align-items: center; height: 36px; max-width: 240px; padding: 0 4px 0 12px; border-radius: 8px; background: var(--vscode-badge-background, #2b2b2c); color: var(--vscode-badge-foreground, #ccc); font-family: var(--vscode-editor-font-family, monospace); font-size: 13px; }
         .rc-cg-file > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .rc-cg-x { border: 0; background: transparent; color: inherit; opacity: .7; cursor: pointer; padding: 0 5px; font-size: 13px; line-height: 1; }
+        .rc-cg-x { border: 0; background: transparent; color: inherit; opacity: .7; cursor: pointer; padding: 0 7px; font-size: 16px; line-height: 1; min-height: 28px; }
         .rc-cg-x:hover { opacity: 1; }
-        .rc-cg-kbd { font-size: 11px; color: var(--vscode-descriptionForeground, #777); opacity: .8; }
-        .rc-cg-send { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border: 0; border-radius: 8px; padding: 0; background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); cursor: pointer; transition: filter .12s ease, transform .05s ease; }
+        .rc-cg-kbd { font-size: 12px; color: var(--vscode-descriptionForeground, #777); opacity: .85; border: 1px solid var(--vscode-widget-border, #3f3f3f); border-radius: 5px; padding: 1px 7px; }
+        .rc-cg-send { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border: 0; border-radius: 9px; padding: 0; background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); cursor: pointer; transition: filter .12s ease, transform .05s ease; }
         .rc-cg-send:hover:not(:disabled) { filter: brightness(1.12); }
         .rc-cg-send:active:not(:disabled) { transform: translateY(1px); }
         .rc-cg-send:disabled { background: var(--vscode-button-secondaryBackground, #3a3a3a); color: var(--vscode-disabledForeground, #8b8b8b); cursor: not-allowed; }
         .rc-cg-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
         .rc-cg-examples { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 14px; }
-        .rc-cg-examples button { border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, #3f3f3f)); border-radius: 999px; padding: 3px 11px; background: transparent; color: var(--vscode-descriptionForeground, #999); font: inherit; font-size: 12px; cursor: pointer; }
+        .rc-cg-examples button { border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, #3f3f3f)); border-radius: 999px; padding: 6px 14px; background: transparent; color: var(--vscode-descriptionForeground, #999); font: inherit; font-size: 13px; cursor: pointer; }
         .rc-cg-examples button:hover { color: var(--vscode-foreground, #ddd); border-color: var(--vscode-focusBorder, #3794ff); }
         .rc-cg-turn { margin-bottom: 16px; }
         .rc-cg-me { width: fit-content; max-width: 82%; margin-left: auto; padding: 8px 13px; border-radius: 14px; background: var(--vscode-list-inactiveSelectionBackground, #2b2b2c); color: var(--vscode-foreground, #eee); font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -723,10 +779,11 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           )}
           {turn.status === "done" && turn.result && (
             <div>
-              {turn.team && turn.team.total > 0 && !(turn.result as { foundation?: string | null } | undefined)?.foundation && (
-                <div data-testid="team-done" style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", margin: "0 0 6px" }}>
-                  팀 작업 완료 · 파일 {turn.team.total}개 · 에이전트 {Object.keys(turn.team.agents).filter(a => a.startsWith("agent-")).length || 1}명이 동시에 작업
-                  {turn.team.fixes ? ` · 만들면서 고친 문제 ${turn.team.fixes}건` : ""}
+              {turn.team && teamWorking(turn.team) && turn.team.total > 0 && !turn.result.foundation && (
+                //: 끝난 팀 작업 — 접힌 한 줄. 펼치면 리코더별 코드·검사·기록과 다시 보기.
+                <div data-testid="team-done">
+                  <TeamBoard collapsible roster={turn.roster ?? roster} view={{ ...turn.team, phase: "done" }}
+                    files={Object.fromEntries(turn.result.ops.map((op) => [op.file, op.content]))} />
                 </div>
               )}
               <div role="status" data-testid="code-build-verification" style={{fontSize: 11, marginBottom: 8,
@@ -736,21 +793,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                     ? "빌드 검증 미통과 · 오류를 해결한 뒤 배포하세요."
                     : "빌드 미검증 · Docker와 실행 설정을 확인한 뒤 검증하세요."}
               </div>
-              {turn.result.spec && (turn.result.spec.criteria?.length ?? 0) > 0 && (
-                //: 2.0.43 — 이 결과가 따른 합격 조건. 아직 자동으로 확인하지 않았다는 사실을 그대로 보여 준다.
-                <details data-testid="code-spec-summary" style={{ margin: "0 0 10px", border: "1px solid var(--vscode-widget-border, var(--vscode-panel-border, #3b3b3b))", borderRadius: 7, padding: "7px 10px", fontSize: 12 }}>
-                  <summary style={{ cursor: "pointer", color: "var(--vscode-foreground, #ddd)" }}>
-                    합격 조건 {turn.result.spec.criteria?.length}개를 따라 만들었습니다 <span style={{ color: "var(--vscode-editorWarning-foreground, #cca700)" }}>· 아직 자동 확인 전</span>
-                  </summary>
-                  <ul style={{ margin: "8px 0 4px", paddingLeft: 18, color: "var(--vscode-descriptionForeground, #aaa)", lineHeight: 1.6 }}>
-                    {(turn.result.spec.criteria ?? []).map((c) => (
-                      <li key={c.id}><b style={{ color: "var(--vscode-foreground, #ddd)" }}>{c.id}</b> [{KIND_LABEL[c.kind] ?? "기능"}] {c.text}{c.check ? ` — 확인: ${c.check}` : ""}</li>
-                    ))}
-                  </ul>
-                  <div style={{ color: "var(--vscode-descriptionForeground, #888)", fontSize: 11 }}>
-                    각 조건이 실제로 만족되는지는 아직 테스트로 확인하지 않았습니다. 적용 후 직접 확인해 주세요.{turn.result.spec.file ? ` 기록: ${turn.result.spec.file}` : ""}
-                  </div>
-                </details>
+              {turn.result.spec && ((turn.result.spec.criteria?.length ?? 0) > 0 || (turn.result.spec.acceptance?.criteria?.length ?? 0) > 0) && (
+                //: 2.0.45 — 완성 기준(합격 조건)마다 테스트 리코더의 결과. 시험을 못 돌렸으면 그 이유를 그대로 보여 준다.
+                <AcceptancePanel spec={turn.result.spec} />
               )}
               <RemainingIssues issues={turn.result.consistency_issues} acknowledged={!!ackIssues[turn.id]}
                 onAcknowledge={(v) => setAckIssues((cur) => ({ ...cur, [turn.id]: v }))} />
@@ -864,11 +909,11 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
           />
           <div className="rc-cg-tools">
             <div className="rc-cg-ctx">
-            <button type="button" className="rc-cg-chip" onClick={() => postMessage("code.pickFolder")} title={targetFolder ? `코드를 만들 위치: ${targetFolder}` : "코드를 만들 위치: 현재 프로젝트 루트"}>
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d="M1.5 4.5h4l1.5 1.5h7.5v7h-13z" /></svg>
-              <span>{folderLabel(targetFolder)}</span>
+            <button type="button" className="rc-cg-chip" data-testid="code-folder" onClick={() => postMessage("code.pickFolder")} title={targetFolder ? `코드를 만들 위치: ${targetFolder}` : `코드를 만들 위치: ${projectName || "현재 프로젝트"} 루트 (눌러서 바꾸기)`}>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d="M1.5 4.5h4l1.5 1.5h7.5v7h-13z" /></svg>
+              <span>{folderLabel(targetFolder, projectName)}</span>
             </button>
-            {targetFolder && <button type="button" className="rc-cg-x" aria-label="위치 지우기" title="루트로" onClick={() => setTargetFolder("")} style={{ marginLeft: -4 }}>×</button>}
+            {targetFolder && <button type="button" className="rc-cg-x" aria-label="위치 지우기" title="프로젝트 루트로" onClick={() => setTargetFolder("")} style={{ marginLeft: -6 }}>×</button>}
             {contextFiles.map((c) => (
               <span key={c.path} className="rc-cg-file" title={c.path}>
                 <span>{c.path}</span>
@@ -876,20 +921,21 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               </span>
             ))}
             <button type="button" className="rc-cg-chip quiet" aria-label="참고 파일 추가" onClick={() => postMessage("code.pickContext")}>
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d="M10.5 4.5 5 10a1.8 1.8 0 0 0 2.5 2.5L13 7a3.2 3.2 0 0 0-4.5-4.5L3 8" /></svg>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d="M10.5 4.5 5 10a1.8 1.8 0 0 0 2.5 2.5L13 7a3.2 3.2 0 0 0-4.5-4.5L3 8" /></svg>
               <span>참고 파일</span>
             </button>
+            <TeamSetup teamMode={teamMode} config={teamConfig} options={modelChoices} history={runHistory} instruction={input}
+              disabled={isBusy} onTeamMode={setTeamMode} onChange={setTeamConfig} onOpen={loadModels} />
             </div>
             <div className="rc-cg-actions">
-            <span className="rc-cg-kbd">Ctrl+Enter</span>
+            <span className="rc-cg-kbd">Ctrl ↵</span>
             <button type="button" onClick={send} disabled={!input.trim() || isBusy} className="rc-cg-send" title="보내기 (Ctrl+Enter)">
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" /></svg>
+              <svg width="19" height="19" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" /></svg>
               <span className="rc-cg-sr">보내기</span>
             </button>
             </div>
           </div>
         </div>
-        <TeamComposer enabled={teamMode} roster={roster} disabled={isBusy} onToggle={setTeamMode} onAdd={addDevAgent} onRemove={removeDevAgent} />
         {!hasTurns && (
           <div className="rc-cg-examples">
             {EXAMPLES.map((ex) => (

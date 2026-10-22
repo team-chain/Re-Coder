@@ -153,6 +153,10 @@ AI 코딩 도구로 코드를 만드는 일은 쉬워졌지만, 만든 코드를
 - **공용 게시판** — 서버 API 파일이 끝나면 실제 경로 · 응답 키 · 로그인 필요 여부를 뽑아 화면 코드에 전달 (AI 호출 없음)
 - **의존 관문** — 파일이 끝날 때마다 내보내기 누락 · 타입 어긋남을 바로 검사하고, 기계적으로 고칠 수 있으면 즉시 수정
 - 중간에 끊겨도 체크포인트에서 이어서 생성
+- **팀 구성 창** — 프리셋(품질 우선 · 균형 · 비용 절약)과 역할(설계 · 개발 · 검토 · 테스트)별 모델, 개발 인원, 테스트 켜기. 예상 시간 · 비용은 지난 실행 기록으로만 표시
+- **테스트 리코더** — 승인한 완성 기준을 실행 중인 앱에 HTTP 시험으로 확인하고, 실패하면 고친 뒤 다시 시험. 결과 화면에 조건별 통과 · 실패 · 확인 불가와 요청 · 응답 근거
+- **리코더별 기록** — 카드마다 지금 파일 · 일한 시간 · AI 호출 · 비용, 오른쪽 패널에 코드 · 검사 · 기록, 끝난 뒤 다시 보기
+- **[팀 벤치마크](benchmarks/team/README.md)** — 혼자 · 팀 · 팀+테스트를 사람이 쓴 판정 시험으로 비교(통과율 · 실행 성공 · 연결 오류 · 보안 · 시간 · 비용)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/feature-village-dark.jpg">
@@ -469,6 +473,7 @@ python scripts/golden_path_smoke.py --live
 | [생성 · 배포 · 보안 검증 범위](docs/production-readiness.md) | 쇼핑몰 기반, 실제 Docker · AWS 검증과 남은 제한 |
 | [문서 근거 수정](docs/document-grounded-repair.md) | RAG 색인 · 검색 · 실험 설계 |
 | [쇼핑몰 통합 검사](benchmarks/commerce/README.md) | 독립 DB와 모의 결제로 주문 · 재고 · 권한 검증 재현 |
+| [팀 벤치마크](benchmarks/team/README.md) | 혼자 · 팀 · 팀+테스트 비교, 사람이 쓴 판정 시험과 기준 구현 |
 | [AWS 최소 권한](docs/aws-minimum-permissions.md) | 배포에 필요한 IAM 권한 |
 | [변경 기록](extension/CHANGELOG.md) | 버전별 변경 내용 |
 

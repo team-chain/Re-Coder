@@ -7,8 +7,9 @@ const React = require('react');
 
 // Exercise the compiled component's event handlers/state without a VS Code DOM.
 // The production bundle + actual HTTP host is also exercised in workspace-preview.
+const STARTUP = new Set(['code.project', 'models.load']);
 function mount(props = {}) {
-  const states = [], effects = [], timers = new Map(), messages = [];
+  const states = [], effects = [], timers = new Map(), messages = [], startup = [];
   let cursor = 0, tree, receive, timerId = 0, reviews = 0;
   const exports = {};
   const hooks = {
@@ -34,7 +35,8 @@ function mount(props = {}) {
     require(id) {
       if (id === 'react') return hooks;
       if (id === '../hooks/useVSCodeApi') return {useVSCodeApi: () => ({
-        postMessage: (type, payload) => messages.push({type, payload}), useMessage: fn => {receive = fn;},
+        //: 처음 그릴 때 묻는 프로젝트 이름·모델 목록은 따로 모은다(요청 흐름 시험이 세는 메시지와 섞지 않는다).
+        postMessage: (type, payload) => (STARTUP.has(type) ? startup : messages).push({type, payload}), useMessage: fn => {receive = fn;},
       })};
       return require(path.join(__dirname, '../out/webview-test/components', id));
     },
@@ -54,7 +56,7 @@ function mount(props = {}) {
   }
   render();
   return {
-    messages, render, nodes, get reviews() {return reviews;},
+    messages, startup, render, nodes, get reviews() {return reviews;},
     find: predicate => nodes().find(predicate),
     button(label) { const node = nodes().find(n => n.type === 'button' && text(n) === label); assert.ok(node, label); return node; },
     input(value) { nodes().find(n => n.type === 'textarea').props.onChange({target: {value}}); render(); },
@@ -356,15 +358,35 @@ test('설계 선택을 바꾸면 예전 설계의 합격 조건 초안은 버리
   assert.equal(ui.messages.at(-1).payload.spec, null, '실패해도 다른 설계의 조건이 실리지 않는다');
 });
 
-test('결과에는 따른 합격 조건과 "아직 자동 확인 전"이 함께 보인다', () => {
+test('결과에는 완성 기준 테스트 결과(조건·기록 파일)가 보이고, 생성 요청에는 팀 구성(모델·테스트)이 실린다', () => {
   const ui = mount();
   const id = toSpec(ui);
   ui.emit('code.specResult', {requestId:id, spec});
   ui.button('명세대로 생성 →').props.onClick(); ui.render();
+  const gen = ui.messages.at(-1);
+  assert.equal(gen.type, 'code.generate');
+  assert.equal(gen.payload.test, true, '테스트는 기본으로 켠다');
+  assert.equal(gen.payload.agents, 3);
+  //: 기본(균형) — 팀 모드가 꺼져 있으면 개발(품질 = 기본이라 싣지 않음)과 테스트(빠른 모델)만.
+  assert.deepEqual(gen.payload.models, {test: 'fast'});
+  const acceptance = {status:'passed', passed:1, failed:0, unverifiable:1, total:2, checks:2, rounds:2, first:{passed:0, failed:1},
+    criteria:[{id:'AC-1', verdict:'passed', retries:1, history:['failed','passed']}, {id:'AC-2', verdict:'unverifiable', reason:'화면'}]};
   ui.emit('code.result', {requestId:id, summary:'s', model:'m', ops:[{file:'a.js',content:'x',action:'create',language:'js',rationale:''}],
-    spec:{...spec, file:'docs/spec/SPEC-1-x.md', verified:false}});
-  const box = ui.find(n => n.props['data-testid'] === 'code-spec-summary');
-  assert.ok(box);
-  const all = JSON.stringify(ui.nodes().filter(n => n.props && n.props['data-testid'] === 'code-spec-summary').map(n => n.props.children));
-  assert.ok(all.includes('아직 자동 확인 전') && all.includes('docs/spec/SPEC-1-x.md'));
+    spec:{...spec, file:'docs/spec/SPEC-1-x.md', verified:false, acceptance}});
+  const panel = ui.find(n => n.props && n.props.spec && n.props.spec.acceptance);
+  assert.ok(panel, '완성 기준 테스트 상자');
+  assert.equal(panel.props.spec.file, 'docs/spec/SPEC-1-x.md');
+  assert.equal(panel.props.spec.acceptance.passed, 1);
+  assert.deepEqual(ui.startup.map(m => m.type), ['code.project', 'models.load'], '처음 한 번 프로젝트 이름·모델 목록을 묻는다');
+});
+
+test('위치 칩: 폴더를 고르지 않았으면 열린 프로젝트 이름을 보여 준다', () => {
+  const ui = mount();
+  const chip = () => ui.find(n => n.props && n.props['data-testid'] === 'code-folder');
+  const label = () => JSON.stringify(chip().props.children);
+  assert.ok(label().includes('프로젝트 루트'));
+  ui.emit('code.project', {name: 'board-app'});
+  assert.ok(label().includes('board-app'), label());
+  ui.emit('code.setTargetFolder', {folder: 'server/src'});
+  assert.ok(label().includes('server/src'));
 });

@@ -54,3 +54,19 @@ test('실패한 파일이 있는 멈춤은 파일·이유를 싣고, 빼고 받�
  await api.generateCodeStream('쇼핑몰',{skipFailed:true},()=>{});
  assert.equal(seen[0].skip_failed,true);assert.equal(seen[1].skip_failed,false,'이어 만들기가 아니면 빼지 않는다');
 });
+
+test('2.0.45 ApiClient: 역할별 모델과 테스트 켜기를 싣고, 모르는 역할·공급자는 버린다',async t=>{
+ const {cleanTeamModels}=require('../out/core/ApiClient');
+ assert.deepEqual(cleanTeamModels({dev:'openai',review:'fast',hacker:'fast',test:'evil',planner:1}),{dev:'openai',review:'fast'});
+ assert.equal(cleanTeamModels({}),null);assert.equal(cleanTeamModels('x'),null);
+ const old=global.fetch;t.after(()=>global.fetch=old);const seen=[];
+ const api=new ApiClient({getSessionToken:()=>'tok',getPort:()=>12345,refreshToken:async()=>{}});
+ global.fetch=async(url,options)=>{seen.push(JSON.parse(options.body||'{}'));return response('data: {"step":"done","result":{"summary":"ok","ops":[],"model":"m"}}\n\n');};
+ await api.generateCodeStream('게시판',{models:{test:'fast'},test:true},()=>{});
+ await api.generateCodeStream('게시판',{test:false},()=>{});
+ await api.generateCodeStream('게시판',{},()=>{});
+ assert.deepEqual(seen[0].models,{test:'fast'});assert.equal(seen[0].test,true);
+ assert.equal(seen[1].test,false);assert.equal(seen[2].test,true,'기본은 켬');
+ const usage=compactCodeEvent({step:'usage',agent:'agent-1',model:'m',input_tokens:5,output_tokens:2,cost_usd:0.01});
+ assert.equal(usage.cost_usd,0.01,'사용량 이벤트는 그대로 화면에');
+});

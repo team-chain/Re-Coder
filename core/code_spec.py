@@ -198,7 +198,11 @@ def spec_prompt_block(spec: Spec | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def spec_markdown(spec: Spec, instruction: str, when: datetime | None = None) -> str:
+_VERDICT_TEXT = {"passed": "통과", "failed": "실패", "unverifiable": "확인 불가"}
+
+
+def spec_markdown(spec: Spec, instruction: str, when: datetime | None = None, *, acceptance: dict | None = None) -> str:
+    """명세 기록. acceptance(2.0.45 테스트 리코더 요약)가 있으면 조건별 자동 확인 결과를 표에 적는다."""
     when = when or datetime.now()
     out = [
         f"# 명세: {spec.get('goal') or _clean(instruction, 80) or '요청'}",
@@ -216,11 +220,23 @@ def spec_markdown(spec: Spec, instruction: str, when: datetime | None = None) ->
     out += ["", "## 이번에 만들지 않음"]
     out += [f"- {s}" for s in spec.get("out_of_scope") or []] or ["- (적지 않음)"]
     out += ["", "## 합격 조건", "", "| ID | 종류 | 조건 | 확인 방법 | 자동 확인 |", "|---|---|---|---|---|"]
+    verdicts = {v.get("id"): v for v in (acceptance or {}).get("criteria") or []}
     for c in spec["criteria"]:
         text = c["text"].replace("|", "\\|")
         check = (c.get("check") or "-").replace("|", "\\|")
-        out.append(f"| {c['id']} | {KIND_LABEL.get(c['kind'], '기능')} | {text} | {check} | 아직 없음 |")
-    out += ["", "> 합격 조건은 사람이 확인·승인한 완성 기준입니다. 자동 확인(테스트) 결과는 아직 연결되지 않았습니다.", ""]
+        v = verdicts.get(c["id"])
+        auto = "아직 없음"
+        if v:
+            auto = _VERDICT_TEXT.get(v.get("verdict"), "아직 없음")
+            if v.get("retries"):
+                auto += f" (고친 뒤 · 재시도 {v['retries']})"
+        out.append(f"| {c['id']} | {KIND_LABEL.get(c['kind'], '기능')} | {text} | {check} | {auto} |")
+    if acceptance and acceptance.get("criteria"):
+        out += ["", f"> 테스트 리코더: 시험 {acceptance.get('checks', 0)}개 · {acceptance.get('passed', 0)}/{acceptance.get('total', 0)} 통과"
+                    f" · 실패 {acceptance.get('failed', 0)} · 확인 불가 {acceptance.get('unverifiable', 0)} "
+                    f"({acceptance.get('rounds', 0)}회 실행). 확인 불가는 HTTP 요청으로 확인할 수 없는 조건(화면 등)입니다.", ""]
+    else:
+        out += ["", "> 합격 조건은 사람이 확인·승인한 완성 기준입니다. 자동 확인(테스트) 결과는 아직 연결되지 않았습니다.", ""]
     return "\n".join(out)
 
 

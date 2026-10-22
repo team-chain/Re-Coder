@@ -39,6 +39,8 @@ RUNTIME_IMPORTS = (
     'state_io', 'proc_tools', 'dockerfile_guard', 'context_gate',
     #: 2.0.36 — 작업별 AI 공급자·비용 원장·공급자 비교(라우터가 함수 안에서 불러온다)
     'llm.task_tier', 'llm.pricing', 'llm.scrub', 'llm.cost_ledger', 'model_compare', 'api.routes.models', 'code_spec',
+    #: 2.0.45 — 테스트 리코더(완성 기준 시험) — 생성·실행 점검이 함수 안에서 불러온다
+    'code_test',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에

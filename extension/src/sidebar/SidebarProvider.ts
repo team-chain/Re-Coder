@@ -17,7 +17,7 @@ import {
     DeployMethod,
     AwsStatus,
 } from '../types';
-import { ApiClient, CodeDecisionChoice, CodeSpec } from '../core/ApiClient';
+import { ApiClient, CodeDecisionChoice, CodeSpec, TeamModels, cleanTeamModels } from '../core/ApiClient';
 import { currentQuickAccess, isWheelOpen, quickWheelClosed, resetQuickAccess, setQuickSlot, QuickAccessPayload } from '../quickAccessHost';
 import { GenerationPausedError, compactCodeEvent } from '../core/codeStream';
 import { CoreHttpError, policyDenialFromDetail } from '../core/httpError';
@@ -158,7 +158,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         onDidChangeActiveProject((workspace) => {
             if (this._mapWatcher) { this._mapWatcher.dispose(); this._mapWatcher = undefined; this._setupMapWatcher(); }
             this.postMessage('canvas.projectChanged', { workspace, projects: projectFolders() });
+            this.postMessage('code.project', this._projectInfo());
         });
+    }
+
+    /** 지금 프로젝트(대상 폴더 기준이 되는 곳)의 이름. 열린 폴더가 없으면 빈 이름. */
+    private _projectInfo(): { name: string } {
+        const p = activeProjectPath();
+        return { name: p ? path.basename(p) : '' };
     }
 
     /** 되살린 ReCoder 탭이 남긴 화면 상태 — 새 화면이 처음 ready 를 보낼 때 한 번 돌려준다. */
@@ -2131,6 +2138,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     agents?: number;
                     skipFailed?: boolean;
                     spec?: CodeSpec | null;
+                    models?: unknown;
+                    test?: unknown;
                 };
                 await this.handleCodeGenerate(p.instruction ?? '', {
                     requestId: p.requestId,
@@ -2144,7 +2153,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     agents: Number.isInteger(p.agents) && (p.agents as number) > 0 && (p.agents as number) <= 8 ? p.agents : 0,
                     skipFailed: p.skipFailed === true,
                     spec: p.spec && typeof p.spec === 'object' ? p.spec : null,
+                    models: cleanTeamModels(p.models),
+                    test: p.test !== false,
                 });
+                break;
+            }
+            case 'code.project': {
+                //: 2.0.45 입력창의 폴더 버튼 — 대상 폴더를 고르지 않았을 때 "루트" 대신 실제 프로젝트 이름을 보여 준다.
+                this.postMessageToWebview(requestWebview, 'code.project', this._projectInfo());
                 break;
             }
             case 'code.spec': {
@@ -2622,6 +2638,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             skipFailed?: boolean;
             /** 2.0.43 사용자가 승인한 명세(합격 조건). */
             spec?: CodeSpec | null;
+            /** 2.0.45 역할별 AI 공급자 · 테스트 리코더. */
+            models?: TeamModels | null;
+            test?: boolean;
         } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
@@ -2652,7 +2671,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const result = !streaming ? await this._apiClient.generateCode(instruction, {
                 workspacePath, openFile: attach, priorFiles: this._lastCodeOps, contextFiles: opts.contextFiles ?? [],
                 targetFolder: scope.targetFolder, decisions: opts.decisions ?? [], spec: opts.spec ?? null,
+                models: opts.models ?? null, test: opts.test !== false,
             }) : await this._apiClient.generateCodeStream(instruction, {
+                models: opts.models ?? null,
+                test: opts.test !== false,
                 workspacePath,
                 openFile: attach,
                 priorFiles: this._lastCodeOps,

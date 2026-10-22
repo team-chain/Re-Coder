@@ -677,7 +677,7 @@ def test_old_unsuffixed_cloudfront_acl_stays_cleanable_after_detach(aws):
 def test_neutralized_line_gets_its_real_secret_back():
     import inspect
     from core import code_agent
-    src = inspect.getsource(code_agent.generate_code) if hasattr(code_agent, "generate_code") else inspect.getsource(code_agent)
+    src = inspect.getsource(code_agent._generate_code)  # 2.0.45 generate_code 는 역할 모델을 거는 얇은 감싸개
     assert src.index("_restore_neutralized_in_ops(ops_out, guarded)") < src.index("_restore_secrets_in_ops(ops_out, context_secrets)")
 
 

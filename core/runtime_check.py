@@ -19,6 +19,7 @@ import secrets
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -91,6 +92,16 @@ def route_table(files: dict[str, str], server: str) -> list[tuple[str, str, str]
 
 # ── 요청 ───────────────────────────────────────────────────────────────────
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """3xx 를 따라가지 않는다 — 시험·점검 요청이 띄운 앱 밖(다른 호스트·메타데이터 주소)으로 나가지 않게(2.0.45)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _request(base: str, method: str, path: str, body: Optional[dict] = None, token: str = "") -> tuple[Optional[int], object]:
     headers = {"Accept": "application/json"}
     data = None
@@ -99,9 +110,11 @@ def _request(base: str, method: str, path: str, body: Optional[dict] = None, tok
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    #: 한글·공백이 든 경로(?q=김치)는 그대로면 urllib 이 거절해 "연결 실패"로 보인다 — 글자만 인코딩한다.
+    path = urllib.parse.quote(path, safe="/?&=%:@-._~+,;!$'()*[]#")
     req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with _OPENER.open(req, timeout=10) as resp:
             raw = resp.read(200_000)
             status = resp.status
     except urllib.error.HTTPError as exc:
@@ -254,9 +267,12 @@ def _related(file: str, files: dict[str, str]) -> list[str]:
 
 # ── 실행 ───────────────────────────────────────────────────────────────────
 
-def run(workspace: Path, image: str, *, timeout: int = 180) -> dict:
+def run(workspace: Path, image: str, *, timeout: int = 180, acceptance=None) -> dict:
     import deploy_settings
-    """{"status": passed|failed|skipped|unavailable, "checked": [...], "failures": [...], "note": str}."""
+    """{"status": passed|failed|skipped|unavailable, "checked": [...], "failures": [...], "note": str}.
+
+    acceptance(2.0.45): code_test.Session — 앱이 뜨면 합격 조건 시험을 돌리고 결과를 "acceptance" 로, 실패는 failures 에.
+    """
     started = time.monotonic()
     try:
         import docker_kit
@@ -383,7 +399,8 @@ def run(workspace: Path, image: str, *, timeout: int = 180) -> dict:
             fresh, seen["n"] = lines[seen["n"]:], len(lines)
             return fresh
 
-        checked = scenario(base, route_table(files, server), new_logs)
+        routes = route_table(files, server)
+        checked = scenario(base, routes, new_logs)
         failures = []
         done_requests: set[str] = set()
         for item in checked:
@@ -406,11 +423,40 @@ def run(workspace: Path, image: str, *, timeout: int = 180) -> dict:
                              "lines": key, "files": target[:3]})
         for item in checked:
             item.pop("logs", None)
+        outcome = None
+        if acceptance is not None:
+            outcome, extra = run_acceptance(acceptance, base, routes, files, server, new_logs)
+            failures.extend(extra)
         return {"status": "failed" if failures else "passed", "checked": checked, "failures": failures,
-                "seconds": round(time.monotonic() - started)}
+                "seconds": round(time.monotonic() - started),
+                **({"acceptance": {k: v for k, v in outcome.items() if k != "results"}} if outcome else {})}
     finally:
         for name in reversed(created):
             _docker(["rm", "-f", name], 60)
+
+
+def run_acceptance(acceptance, base: str, routes: list, files: dict[str, str], server: str, new_logs=None) -> tuple[Optional[dict], list[dict]]:
+    """테스트 리코더(2.0.45) — 떠 있는 앱에 합격 조건 시험을 돌린다. (결과, 실행 점검 실패 항목).
+
+    실패는 시험이 거친 경로 파일(+ 서버 로그에 찍힌 파일, 첫 파일과 이어진 파일)의 문제로 넘긴다. 시험 자체가 깨져도
+    실행 점검 판정을 망가뜨리지 않는다(결과 없음)."""
+    try:
+        outcome = acceptance.execute(lambda m, p, b, t: _request(base, m, p, b, t), routes, files, new_logs)
+        try:
+            import code_test
+        except ImportError:  # pragma: no cover
+            from core import code_test  # type: ignore
+        out = []
+        for f in code_test.failures(outcome):
+            route_files = f.get("files") or []
+            hit_files = source_files(f.get("lines") or [], files, server)
+            related = [x for rf in route_files[:1] for x in _related(rf, files)]
+            target = list(dict.fromkeys(hit_files + route_files + related))
+            out.append(dict(f, lines=useful_lines(f.get("lines") or []), files=target[:3]))
+        return outcome, out
+    except Exception as exc:  # noqa: BLE001
+        print(f"[runtime_check] 합격 조건 시험 생략: {exc}", flush=True)
+        return None, []
 
 
 _MISSING_ENV = re.compile(
@@ -443,6 +489,17 @@ def issues(result: dict) -> list[dict]:
             })
             continue
         lines = "\n".join(f.get("lines") or [])[:1500]
+        if f.get("acceptance"):
+            #: 테스트 리코더가 찾은 합격 조건 실패 — 조건을 만족하게 고친다(시험을 속이는 교정은 금지).
+            for file in (f.get("files") or [])[:3]:
+                out.append({
+                    "code": "ACCEPTANCE_FAILED", "severity": "error", "file": file,
+                    "message": f"합격 조건 {f.get('criterion')} 「{f.get('title')}」 시험 실패: {f.get('message')} "
+                               f"(요청 {f['request'].split(' ', 1)[-1]})" + (f". 서버 로그:\n{lines}" if lines else ""),
+                    "fix": "사용자가 승인한 합격 조건을 실제로 만족하도록 이 파일의 동작을 고치세요. 특정 시험 값만 맞추거나 "
+                           "검사·인증을 끄거나 오류를 삼키지 마세요. 조건과 관계없는 동작은 바꾸지 마세요.",
+                })
+            continue
         status = f.get("status")
         what = (f"{f['request']} 요청이 {status} 오류를 냈습니다" if status else f"{f['request']} 에서 앱이 뜨지 않았습니다(컨테이너 종료)")
         for file in (f.get("files") or [])[:3]:

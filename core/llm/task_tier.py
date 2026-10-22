@@ -71,6 +71,81 @@ def pinned(spec: str, tag: str) -> Iterator[None]:
         _FORCED.reset(a)
 
 
+@contextlib.contextmanager
+def tagged(tag: str) -> Iterator[None]:
+    """공급자는 그대로 두고 이 문맥의 AI 호출 원장 기록에만 tag 를 붙인다(2.0.45 팀 벤치마크 — 실행마다 비용을 나눠 센다)."""
+    b = _RUN_TAG.set(tag)
+    try:
+        yield
+    finally:
+        _RUN_TAG.reset(b)
+
+
+# ── 역할별 모델(2.0.45) ─────────────────────────────────────────────────
+#: 팀 구성 창에서 사용자가 역할마다 고른 공급자. 한 생성 요청 동안만 유효하다(contextvars — 다른 요청에 새지 않음).
+ROLES = ("planner", "dev", "review", "test")
+ROLE_LABEL = {"planner": "설계", "dev": "개발", "review": "검토", "test": "테스트"}
+#: 역할 모델로 고를 수 있는 공급자 이름(provider_router._spec_provider 와 같은 이름).
+ROLE_SPECS = ("quality", "fast", "anthropic", "openai", "compatible")
+_ROLE_MODELS: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("recoder_role_models", default=None)
+_ROLE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("recoder_role", default=None)
+
+
+def normalize_role_models(raw: Any) -> dict[str, str]:
+    """비신뢰 입력 → {역할: 공급자}. 모르는 역할·공급자는 버린다. quality 는 기본과 같아 적지 않는다."""
+    out: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    for role, spec in raw.items():
+        r = str(role or "").strip().lower()
+        v = str(spec or "").strip().lower()
+        if r in ROLES and v in ROLE_SPECS and v != "quality":
+            out[r] = v
+    return out
+
+
+def role_of(agent: str) -> Optional[str]:
+    """엔진의 에이전트 이름 → 역할. planner·review·test 는 그대로, agent-N·dev 는 개발."""
+    a = (agent or "").strip().lower()
+    if a in ("planner", "review", "test"):
+        return a
+    if a.startswith("agent-") or a.startswith("dev") or a == "code_agent":
+        return "dev"
+    return None
+
+
+@contextlib.contextmanager
+def role_models(models: Any) -> Iterator[dict]:
+    """이 문맥(한 생성 요청) 동안 역할별 모델을 쓴다. 빈 값이면 기존과 같다."""
+    norm = normalize_role_models(models)
+    token = _ROLE_MODELS.set(norm or None)
+    try:
+        yield norm
+    finally:
+        _ROLE_MODELS.reset(token)
+
+
+@contextlib.contextmanager
+def acting_as(role: Optional[str]) -> Iterator[None]:
+    """이 문맥의 AI 호출은 role 역할로 본다(역할 모델을 고를 때·사용량을 셀 때)."""
+    token = _ROLE.set(role if role in ROLES else None)
+    try:
+        yield
+    finally:
+        _ROLE.reset(token)
+
+
+def current_role() -> Optional[str]:
+    return _ROLE.get()
+
+
+def role_spec() -> Optional[str]:
+    """지금 역할에 사용자가 고른 공급자(없으면 None — 기본 경로)."""
+    models = _ROLE_MODELS.get()
+    role = _ROLE.get()
+    return (models or {}).get(role) if role else None
+
+
 def bind(fn: Callable[..., Any]) -> Callable[..., Any]:
     """지금 문맥(고정 공급자·실행 표시)을 작업 스레드로 가져가는 감싸개.
 

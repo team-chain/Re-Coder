@@ -421,6 +421,15 @@ class LLMProviderRouter:
             base = self._bedrock_haiku if prefer == "fast" else self._bedrock_sonnet
             economy = self._economy if tier == tiers.ECONOMY else None
             chain = [economy, base] if economy is not None and economy is not base else [base]
+            #: 2.0.45 역할별 모델 — 팀 구성 창에서 이 역할에 고른 공급자를 먼저 쓴다. 실패하면(키 만료·장애)
+            #: 기본 공급자로 이어 간다 — 결과의 model_used 가 실제로 쓴 모델을 보여 준다(몰래 바꾼 것으로 숨기지 않음).
+            spec = tiers.role_spec()
+            if spec:
+                chosen = self._spec_provider(spec)
+                if chosen is not None and chosen is not chain[0]:
+                    chain = [chosen] + [p for p in chain if p is not chosen]
+                elif chosen is None:
+                    log.warning("역할 모델 %s 를 쓸 수 없어 기본 공급자를 씁니다(%s)", spec, tiers.current_role())
 
         schema = getattr(request, "json_schema", None)
         raw = bool(getattr(request, "raw_text", False))

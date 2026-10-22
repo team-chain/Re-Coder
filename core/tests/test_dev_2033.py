@@ -47,7 +47,7 @@ def test_every_generation_result_is_checkpointed():
     """한 번에 만든 결과도(분할 생성만이 아니라) 끊겼을 때 같은 작업 ID 로 다시 받는다."""
     import inspect
     import code_agent
-    src = inspect.getsource(code_agent.generate_code)
+    src = inspect.getsource(code_agent._generate_code)  # 2.0.45 본문은 _generate_code
     tail = src[src.rindex('result["job_id"] = job_id'):]
     assert "if split_mode:" not in src[src.rindex("if adr_ops:"):src.rindex('result["job_id"] = job_id')]
     assert '_jobs.save(job_id, {"fingerprint": fp, "result": result})' in tail

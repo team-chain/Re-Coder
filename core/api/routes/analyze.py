@@ -683,6 +683,11 @@ class CodeGenerateRequest(BaseModel):
     skip_failed: bool = False
     #: 2.0.43 — 사용자가 확인·승인한 명세(목표·범위·합격 조건). 없으면 명세 없이 생성한 것과 같다.
     spec: dict | None = None
+    #: 2.0.45 — 팀 구성 창에서 역할마다 고른 AI 공급자 {planner|dev|review|test: quality|fast|anthropic|openai|compatible}.
+    models: dict | None = None
+    #: 2.0.45 — 테스트 리코더(합격 조건을 띄운 앱에 시험). 끄면 예전과 같다.
+    #: 2.0.45 테스트 리코더 — 확장이 팀 구성 창의 값을 늘 보낸다. 값을 모르는 예전 클라이언트는 예전처럼 끈다.
+    test: bool = False
 
 
 @router.post("/api/code/generate")
@@ -735,6 +740,8 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
             job_id=body.resume_job or "",
             skip_failed=bool(body.skip_failed and body.resume_job),
             spec=body.spec,
+            models=body.models,
+            test=body.test,
         )
     except GenerationPaused as e:
         #: 다 만든 파일은 저장됐다 — 같은 요청을 resume_job 과 함께 다시 보내면 이어 만든다.
@@ -791,6 +798,8 @@ async def generate_code_stream_route(body: CodeGenerateRequest):
             agents=agents,
             skip_failed=bool(body.skip_failed and body.resume_job),
             spec=body.spec,
+            models=body.models,
+            test=body.test,
             #: 확장은 진행 이벤트를 받으며 기다리므로 자동 교정 시간을 넉넉히 준다.
             budget_seconds=3600,
         )
