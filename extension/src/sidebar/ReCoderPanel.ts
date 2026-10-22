@@ -74,14 +74,28 @@ export class ReCoderPanel {
     }
 
     /** 특정 화면(예: 운영 대응)을 열어 보여 준다 — 새 창이면 화면이 준비될 때 그 화면으로 시작한다. */
-    static showView(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider, view: string): void {
+    static showView(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider, view: string, extra?: Record<string, unknown>): void {
         if (ReCoderPanel._current) {
             ReCoderPanel.createOrShow(extensionUri, sidebarProvider);
-            void ReCoderPanel._current._panel.webview.postMessage({ type: 'ui.openView', payload: { view } });
+            void ReCoderPanel._current._panel.webview.postMessage({ type: 'ui.openView', payload: { view, ...(extra ?? {}) } });
             return;
         }
-        sidebarProvider.setRestoredUiState({ view });
+        sidebarProvider.requestView(view, extra);
         ReCoderPanel.createOrShow(extensionUri, sidebarProvider);
+    }
+
+    /** 창이 이미 있으면 앞으로 꺼내고 true, 없으면 아무것도 하지 않고 false. */
+    static createOrShowExisting(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider): boolean {
+        if (!ReCoderPanel._current) { return false; }
+        ReCoderPanel.createOrShow(extensionUri, sidebarProvider);
+        return true;
+    }
+
+    /** 열린 ReCoder 창에 메시지를 보낸다(없으면 false). */
+    static post(type: string, payload: unknown): boolean {
+        if (!ReCoderPanel._current) { return false; }
+        void ReCoderPanel._current._panel.webview.postMessage({ type, payload });
+        return true;
     }
 
     static createOrShow(extensionUri: vscode.Uri, sidebarProvider: SidebarProvider): ReCoderPanel {

@@ -18,6 +18,7 @@ import {
     AwsStatus,
 } from '../types';
 import { ApiClient, CodeDecisionChoice, CodeSpec } from '../core/ApiClient';
+import { currentQuickAccess, quickWheelClosed, saveQuickAccess, setQuickSlot, QuickAccessPayload } from '../quickAccessHost';
 import { GenerationPausedError, compactCodeEvent } from '../core/codeStream';
 import { CoreHttpError, policyDenialFromDetail } from '../core/httpError';
 import { CoreManager } from '../core/CoreManager';
@@ -168,6 +169,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const saved = this._savedUiState();
         this._restoredUiState = saved ?? (state && typeof state === 'object' ? { ...(state as Record<string, unknown>) } : null);
         this._workspacePanelRevived = true;
+    }
+    /**
+     * 새 ReCoder 창을 특정 화면으로 시작하게 한다(빠른 이동·알림의 [자세히]).
+     *
+     * 예전에는 setRestoredUiState({ view }) 를 썼는데, 그 함수는 확장이 기억한 마지막 화면이 있으면
+     * 그쪽을 우선한다(되살리기용). 그래서 창을 닫았다가 단축키·알림으로 열면 요청한 화면이 아니라
+     * 마지막에 보던 화면이 열렸다. 쓰던 요청(codeDraft)은 살리고 화면만 요청한 것으로 바꾼다.
+     */
+    requestView(view: string, extra?: Record<string, unknown>): void {
+        this._restoredUiState = { ...(this._savedUiState() ?? {}), view, ...(extra ?? {}) };
+        this._workspacePanelRevived = false;
+    }
+    /** 새로 여는 ReCoder 창이 ready 를 보내면 띄울 빠른 이동 휠(창이 이미 있으면 바로 보낸다 — ReCoderPanel.post). */
+    private _pendingWheel: 'pick' | 'edit' | null = null;
+    requestWheel(mode: 'pick' | 'edit'): void { this._pendingWheel = mode; }
+    /** 빠른 이동 설정이 바뀌면 열린 화면에 알린다. */
+    broadcastQuickAccess(state: QuickAccessPayload): void {
+        this.postMessage('quickAccess.state', state);
     }
     private static readonly UI_STATE_KEY = 'recoder.workspaceUiState';
     private _uiStateScope(): string {
@@ -1540,6 +1559,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 void this._pollingService.poll();
                 break;
             }
+            case 'quickAccess.get': {
+                this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess());
+                break;
+            }
+            case 'quickAccess.set': {
+                //: 화면의 휠에서 한 칸을 바꾼다. 모르는 칸·기능은 무시한다(설정 변경 알림으로 화면이 다시 맞춰진다).
+                const p = (payload ?? {}) as { slot?: unknown; target?: unknown };
+                const changed = typeof p.slot === 'string' && typeof p.target === 'string' && await setQuickSlot(p.slot, p.target);
+                if (!changed) { this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess()); }
+                break;
+            }
+            case 'quickAccess.reset': {
+                await saveQuickAccess(null);
+                break;
+            }
+            case 'quickAccess.keybindings': {
+                //: 키 자체를 바꾸고 싶을 때 — VS Code 단축키 설정을 ReCoder 빠른 이동만 걸러 연다.
+                await vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', 'recoder.quick');
+                break;
+            }
+            case 'quickAccess.closed': {
+                //: 휠을 닫았다 — 고르지 않고 닫았으면(Esc) Alt+Q 를 누르기 전의 편집기로 돌아간다.
+                await quickWheelClosed((payload as { cancelled?: unknown } | undefined)?.cancelled === true);
+                break;
+            }
             case 'ui.state': {
                 //: 큰 작업 화면의 상태(보던 화면·쓰던 요청)만 기억한다. 작은 값만 받는다.
                 if (requestWebview && requestWebview === this._workspacePanelWebview && payload && typeof payload === 'object') {
@@ -1559,6 +1603,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (this._restoredUiState && requestWebview && requestWebview === this._workspacePanelWebview) {
                     this.postMessageToWebview(requestWebview, 'ui.restore', this._restoredUiState);
                     this._restoredUiState = null;
+                }
+                if (this._pendingWheel && requestWebview && requestWebview === this._workspacePanelWebview) {
+                    this.postMessageToWebview(requestWebview, 'quickAccess.wheel', { mode: this._pendingWheel, state: currentQuickAccess() });
+                    this._pendingWheel = null;
                 }
                 if (this._pendingCodeTarget !== null && requestWebview && requestWebview === this._workspacePanelWebview) {
                     this.postMessageToWebview(requestWebview, 'code.setTargetFolder', { folder: this._pendingCodeTarget });

@@ -423,6 +423,18 @@ npm run build                      # VS Code에서 extension 폴더를 열고 F5
 | ReCoder Gateway (운영자가 준 반 코드, AWS 키 불필요) | `ReCoder: Connect to Gateway (Enroll)` |
 | Claude API · OpenAI API · OpenAI 호환 API | `ReCoder: Connect AI with API Key` |
 
+**빠른 이동** — 어디서든 `Alt+Q`(macOS `⌥Q`)를 누르면 휠이 뜨고, 방향키 하나로 기능 화면이 열립니다. Esc 로 닫으면 보던 파일로 돌아갑니다.
+
+| 키 | 기본 기능 |
+|---|---|
+| ↑ | 코드 생성 · 수정 |
+| → | 아키텍처 |
+| ↓ | 배포 캔버스 |
+| ← | 에러 분석 |
+| Shift + 방향키 | 비어 있음 — 휠에서 `E` 를 눌러 원하는 기능을 넣습니다 |
+
+칸은 휠의 칸 바꾸기나 설정 `recoder.quickAccess` 에서, 여는 키는 VS Code 단축키 설정(`recoder.quickAccess.wheel`)에서 바꿉니다.
+
 설치 파일(VSIX)은 `v*` 태그를 push하면 GitHub Actions가 Windows · Linux · macOS용으로 빌드해 GitHub Release에 올립니다. 운영자용 전체 설정(게이트웨이 · Discord 봇 · VSIX 직접 빌드)은 [SETUP.md](SETUP.md)를 참고하세요.
 
 ### 골든패스 스모크

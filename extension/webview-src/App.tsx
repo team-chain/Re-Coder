@@ -16,7 +16,9 @@ import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
 import { ModelRouting } from "./components/ModelRouting";
 import { Replay } from "./components/Replay";
-import CodeMap from "./components/CodeMap";
+import CodeMap, { requestMapMode } from "./components/CodeMap";
+import QuickWheel from "./components/QuickWheel";
+import { QuickSlot, QuickState, toState, viewFor } from "./components/quickAccessModel";
 import DeploymentCanvas from "./components/canvas/DeploymentCanvas";
 import { AwsConnection } from './components/AwsConnection';
 import { CanvasDrawer } from './components/canvas/CanvasDrawer';
@@ -232,6 +234,45 @@ const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Extern
   </>;
 };
 
+/**
+ * 빠른 이동 (2.0.44) — Alt+Q(확장 명령)나 머리글 버튼으로 휠을 띄우고, 고른 기능 화면으로 옮긴다.
+ * 칸 설정은 확장이 들고(설정 recoder.quickAccess), 화면은 받은 상태를 그린다.
+ */
+const QuickAccess: React.FC<{ onSelectMode: (m: ViewMode) => void }> = ({ onSelectMode }) => {
+  const { postMessage, useMessage } = useVSCodeApi();
+  const [state, setState] = useState<QuickState | null>(null);
+  const [open, setOpen] = useState<null | "pick" | "edit">(null);
+  const openRef = useRef(open);
+  openRef.current = open;
+  useEffect(() => { postMessage("quickAccess.get"); }, [postMessage]);
+  useMessage(useCallback(({ type, payload }) => {
+    if (type === "quickAccess.state") { const next = toState(payload); if (next) setState(next); }
+    if (type === "quickAccess.wheel") {
+      const p = (payload ?? {}) as { mode?: string; state?: unknown };
+      const next = toState(p.state); if (next) setState(next);
+      const mode = p.mode === "edit" ? "edit" : "pick";
+      //: 휠이 떠 있는데 Alt+Q 를 또 누르면 닫는다(켜고 끄기).
+      if (openRef.current === "pick" && mode === "pick") { setOpen(null); postMessage("quickAccess.closed", { cancelled: true }); return; }
+      setOpen(mode);
+    }
+  }, [postMessage]));
+  const close = useCallback((cancelled: boolean) => { setOpen(null); postMessage("quickAccess.closed", { cancelled }); }, [postMessage]);
+  const go = useCallback((id: string) => {
+    const v = viewFor(id);
+    if (!v) return;
+    onSelectMode(v.view as ViewMode);
+    if (v.mapMode) requestMapMode(v.mapMode);
+  }, [onSelectMode]);
+  return <>
+    <button className="rc-quick-button" onClick={() => setOpen("pick")} disabled={!state} title={state ? `빠른 이동 — ${state.wheelKey} 를 누르면 어디서든 열려요` : "빠른 이동 준비 중"} aria-haspopup="dialog">
+      빠른 이동 <kbd>{state?.wheelKey ?? "Alt+Q"}</kbd>
+    </button>
+    {open && state && <QuickWheel key={open} state={state} initialMode={open} onOpen={go} onClose={close}
+      onAssign={(slot: QuickSlot, target: string) => { setState({ ...state, slots: { ...state.slots, [slot]: target } }); postMessage("quickAccess.set", { slot, target }); }}
+      onReset={() => postMessage("quickAccess.reset")} onKeybindings={() => postMessage("quickAccess.keybindings")} />}
+  </>;
+};
+
 /** Connection management is reachable in every workspace mode. */
 const WorkspaceConnection: React.FC = () => {
   const { postMessage, useMessage } = useVSCodeApi();
@@ -302,7 +343,8 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         .rc-workspace-header .rc-brand{display:flex;align-items:center;gap:8px;border:0;padding-left:0;font-size:15px;font-weight:600}
         .rc-workspace-header .rc-status-toggle{display:flex;align-items:center;gap:7px;color:var(--vscode-descriptionForeground,#aaa);border:0;font-size:11px;padding:6px}
         .rc-global-nav{display:flex;align-items:center;gap:4px;margin-left:24px}.rc-workspace-header .rc-global-nav button{border:0;padding:9px 14px;color:var(--vscode-descriptionForeground,#929ba7)}.rc-workspace-header .rc-global-nav button[aria-current=page]{background:var(--vscode-list-activeSelectionBackground,#263748);color:var(--vscode-list-activeSelectionForeground,#eef5ff)}
-        .rc-workspace-connection{margin-left:auto}.rc-workspace-header .rc-connection-button{display:flex;align-items:center;gap:7px;border:0;background:transparent;font-size:11px;color:var(--vscode-descriptionForeground,#aaa)}.rc-connection-dot{height:6px;width:6px;border-radius:50%;background:#d2a760}.rc-connection-dot[data-ready=true]{background:#56bf91}
+        .rc-workspace-header .rc-quick-button{margin-left:auto;display:flex;align-items:center;gap:7px;border:0;color:var(--vscode-descriptionForeground,#aaa);font-size:11px}.rc-quick-button kbd{font-family:var(--vscode-editor-font-family,monospace);font-size:10px;border:1px solid var(--vscode-panel-border,#444);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--vscode-foreground,#ddd)}
+        .rc-workspace-connection{margin-left:0}.rc-workspace-header .rc-connection-button{display:flex;align-items:center;gap:7px;border:0;background:transparent;font-size:11px;color:var(--vscode-descriptionForeground,#aaa)}.rc-connection-dot{height:6px;width:6px;border-radius:50%;background:#d2a760}.rc-connection-dot[data-ready=true]{background:#56bf91}
         .rc-workspace .rc-local-hub-nav,.rc-workspace .rc-mode-nav{display:none!important}.rc-workspace [hidden]{display:none!important}
         .rc-workspace-content{flex:1;min-height:0;overflow:auto;padding:28px 32px}
         .rc-workspace button:focus-visible{outline:2px solid var(--vscode-focusBorder,#75b9ef);outline-offset:3px}
@@ -314,6 +356,7 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         <div className="rc-workspace-header">
           <button className="rc-brand" onClick={() => onSelectMode("home")} aria-label="ReCoder 홈"><Icon.Logo size={22} />ReCoder</button>
           <nav className="rc-global-nav" aria-label="작업 선택">{HUBS.map(h => <button key={h.id} aria-current={activeHub === h.id ? 'page' : undefined} onClick={() => onSelectMode(`hub:${h.id}`)}>{h.title}</button>)}</nav>
+          <QuickAccess onSelectMode={onSelectMode} />
           <WorkspaceConnection />
           <StatusBadge pending={diagnosticsPending} error={diagnosticsError} compact diagnostics={diagnostics} coreStatus={coreStatus} expanded={showDiagnostics} onToggle={onToggleDiagnostics} />
         </div>
@@ -405,11 +448,15 @@ const App: React.FC = () => {
         saveUiState(saved);
         const v = saved.view;
         if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
+        if (v === "map" && (saved.mapMode === "flow" || saved.mapMode === "project")) requestMapMode(saved.mapMode);
       }
       if (type === "ui.openView" && isWorkspacePanel) {
         //: 2.0.25 — 알림의 [자세히] 등 확장이 특정 화면을 열게 할 때.
-        const v = (payload as { view?: string } | undefined)?.view;
+        const p = (payload ?? {}) as { view?: string; mapMode?: string };
+        const v = p.view;
         if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
+        //: 빠른 이동 "흐름 dry run"/"아키텍처" — 지도 화면 안의 모드까지 맞춘다.
+        if (v === "map" && (p.mapMode === "flow" || p.mapMode === "project")) requestMapMode(p.mapMode);
       }
       if (type === "code.setTargetFolder" && isWorkspacePanel) {
         //: 탐색기 "여기에 코드 생성" — 코드 화면으로 옮기고 그 폴더를 대상으로 둔다.

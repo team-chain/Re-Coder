@@ -1,3 +1,14 @@
+# 빠른 이동 · 충돌 정리 (2026-10-22, 2.0.44)
+
+- src/quickAccess.ts(순수): QUICK_SLOTS(up·right·down·left·shift+…), QUICK_TARGETS(code·build·map(mapMode project)·flow(view map, mapMode flow)·adr·models·ship·deploy·replay·operate·scan·secrets·policy·home), DEFAULT_QUICK_ACCESS(↑code →map ↓deploy ←build, shift 칸 ""), resolveQuickAccess(설정을 기본값과 합침 — VS Code 객체 설정은 통째로 바뀜, "" = 비움, 모르는 칸·기능은 problems), toSetting(기본값과 다른 칸만), withSlot, slotKeyLabel, wheelKeyLabel.
+- src/quickAccessHost.ts: 명령 recoder.quickAccess.wheel(Alt+Q — 기본 키는 이것 하나) · .configure · recoder.quick.<up|right|…|shiftLeft>(키 없음) · recoder.open.<id>. Alt+Q 때 활성 편집기(uri·열·선택)를 기억 → 휠이 Esc 로 닫히면(quickAccess.closed cancelled) showTextDocument 로 돌아감. setQuickSlot/saveQuickAccess(작업 영역 값이 있으면 그 대상에 씀), 설정 변경 → broadcast(quickAccess.state).
+- extension.ts showWheel: 창이 있으면 ReCoderPanel.post('quickAccess.wheel'), 없으면 sidebarProvider.requestWheel → webview.ready 에서 보냄. open: ReCoderPanel.showView(view, {mapMode}).
+- SidebarProvider: requestView(view, extra) — 예전 showView 가 쓰던 setRestoredUiState 는 저장된 마지막 화면을 우선해서 요청한 화면이 무시됐다(알림 [자세히] 포함). quickAccess.get/set/reset/keybindings/closed.
+- webview: quickAccessModel.ts(toState·viewFor·slotForKey·moveSelection·petalPath), QuickWheel.tsx(QuickWheelView 훅 없음 + QuickWheel 키 처리 — 휠이 떠 있으면 Esc·방향키를 capture 에서 막음), App QuickAccess(머리글 버튼, Alt+Q 두 번 = 닫기, 고르면 setView + requestMapMode), CodeMap requestMapMode(화면보다 먼저 온 요청은 처음 그려질 때 꺼냄).
+- package.json: Ctrl+Shift+R 두 단계 키 제거(VS Code 리팩터링을 막고 있었음). Alt+방향키는 쓰지 않음(줄 이동·뒤로 가기). 터미널에 포커스가 있으면 Alt+Q 는 셸이 먼저 받는다(terminal.integrated.commandsToSkipShell 에 recoder.quickAccess.wheel 을 넣으면 터미널에서도 동작 — 사용자 설정은 건드리지 않음).
+- 번호: 구조 다이어그램 2.0.37 → 2.0.42, 명세 2.0.38 → 2.0.43(main 의 2.0.37~2.0.41 과 겹침), test_dev_2038 → test_dev_2043.
+- 시험: webview-tests/quickAccess.test.js(15 — 설정 해석·저장 왕복, package.json 명령·키·스키마 대조(Ctrl+Shift+R·Alt+방향키 금지), 화면 표 = 확장 표, 휠 렌더(고르기·편집), 호스트 명령(되돌아가기·빈 칸·작업 영역 저장·변경 알림), 닫힌 창 요청 화면). 실제 웹뷰 번들 렌더로 →(아키텍처)·Shift+↑(dry run)·빈 칸 → 편집·지정·Esc 확인.
+
 # 명세 · 합격 조건 (2026-10-22, 2.0.43) — 명세 기반 개발 1단계
 
 - 흐름: code.plan → 결정 창(decide) → **code.spec → 명세 창(spec)** → code.generate(spec 포함). 결정 창 상태 DecisionModal 에 phase·spec(EditableSpec)·specLoading·specError·specFor(선택 지문 — 같으면 다시 받지 않음). 마지막 결정 버튼 "다음: 합격 조건 →", 확인 카드 "진행 →" 도 requestSpec. 명세 대기 300초 넘으면 창 닫고 턴 오류(waitForResponse 가 열린 창을 닫음).

@@ -2,7 +2,7 @@
   "name": "recoder",
   "displayName": "ReCoder — AI DevOps Agent",
   "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
-  "version": "2.0.43",
+  "version": "2.0.44",
   "publisher": "recoder-team",
   "license": "MIT",
   "preview": true,
@@ -192,6 +192,105 @@
         "title": "ReCoder: 이 폴더에 코드 생성",
         "icon": "$(sparkle)"
       }
+,
+      {
+        "command": "recoder.quickAccess.wheel",
+        "title": "ReCoder: 빠른 이동 휠 (Alt+Q)",
+        "icon": "$(compass)"
+      },
+      {
+        "command": "recoder.quickAccess.configure",
+        "title": "ReCoder: 빠른 이동 칸 바꾸기",
+        "icon": "$(keyboard)"
+      },
+      {
+        "command": "recoder.quick.up",
+        "title": "ReCoder: 빠른 이동 ↑ 칸 열기"
+      },
+      {
+        "command": "recoder.quick.right",
+        "title": "ReCoder: 빠른 이동 → 칸 열기"
+      },
+      {
+        "command": "recoder.quick.down",
+        "title": "ReCoder: 빠른 이동 ↓ 칸 열기"
+      },
+      {
+        "command": "recoder.quick.left",
+        "title": "ReCoder: 빠른 이동 ← 칸 열기"
+      },
+      {
+        "command": "recoder.quick.shiftUp",
+        "title": "ReCoder: 빠른 이동 Shift+↑ 칸 열기"
+      },
+      {
+        "command": "recoder.quick.shiftRight",
+        "title": "ReCoder: 빠른 이동 Shift+→ 칸 열기"
+      },
+      {
+        "command": "recoder.quick.shiftDown",
+        "title": "ReCoder: 빠른 이동 Shift+↓ 칸 열기"
+      },
+      {
+        "command": "recoder.quick.shiftLeft",
+        "title": "ReCoder: 빠른 이동 Shift+← 칸 열기"
+      },
+      {
+        "command": "recoder.open.code",
+        "title": "ReCoder: 코드 생성 · 수정 열기"
+      },
+      {
+        "command": "recoder.open.build",
+        "title": "ReCoder: 에러 분석 열기"
+      },
+      {
+        "command": "recoder.open.map",
+        "title": "ReCoder: 아키텍처 열기"
+      },
+      {
+        "command": "recoder.open.flow",
+        "title": "ReCoder: 흐름 dry run 열기"
+      },
+      {
+        "command": "recoder.open.adr",
+        "title": "ReCoder: 설계 기록 (ADR) 열기"
+      },
+      {
+        "command": "recoder.open.models",
+        "title": "ReCoder: AI 공급자 · 비용 열기"
+      },
+      {
+        "command": "recoder.open.ship",
+        "title": "ReCoder: 로컬 Docker 배포 열기"
+      },
+      {
+        "command": "recoder.open.deploy",
+        "title": "ReCoder: 배포 캔버스 열기"
+      },
+      {
+        "command": "recoder.open.replay",
+        "title": "ReCoder: 롤백 · 배포 이력 열기"
+      },
+      {
+        "command": "recoder.open.operate",
+        "title": "ReCoder: 운영 대응 열기"
+      },
+      {
+        "command": "recoder.open.scan",
+        "title": "ReCoder: 취약점 스캔 열기"
+      },
+      {
+        "command": "recoder.open.secrets",
+        "title": "ReCoder: 시크릿 검사 열기"
+      },
+      {
+        "command": "recoder.open.policy",
+        "title": "ReCoder: 정책 게이트 열기"
+      },
+      {
+        "command": "recoder.open.home",
+        "title": "ReCoder: ReCoder 홈 열기"
+      }
     ],
     "menus": {
       "editor/context": [
@@ -224,20 +323,326 @@
     },
     "keybindings": [
       {
-        "command": "recoder.openWorkbench",
-        "key": "ctrl+shift+r ctrl+w",
-        "mac": "cmd+shift+r cmd+w",
-        "when": "!terminalFocus"
-      },
-      {
-        "command": "recoder.analyzeError",
-        "key": "ctrl+shift+r ctrl+a",
-        "mac": "cmd+shift+r cmd+a"
+        "command": "recoder.quickAccess.wheel",
+        "key": "alt+q",
+        "mac": "alt+q"
       }
     ],
     "configuration": {
       "title": "ReCoder",
       "properties": {
+        "recoder.quickAccess": {
+          "type": "object",
+          "markdownDescription": "**빠른 이동** — `Alt+Q` 로 휠을 띄우고 방향키 하나로 기능을 엽니다. 적지 않은 칸은 기본값(↑ 코드 생성 · → 아키텍처 · ↓ 배포 캔버스 · ← 에러 분석)을 쓰고, `\"\"` 로 두면 그 칸을 비웁니다. `shift+…` 칸(휠에서 Shift+방향키)은 원하는 기능을 더 넣는 자리입니다. 휠의 **편집** 에서도 바꿀 수 있고, 휠을 여는 키는 VS Code 단축키 설정(`recoder.quickAccess.wheel`)에서 바꿀 수 있습니다.",
+          "default": {},
+          "properties": {
+            "up": {
+              "type": "string",
+              "enum": [
+                "code",
+                "build",
+                "map",
+                "flow",
+                "adr",
+                "models",
+                "ship",
+                "deploy",
+                "replay",
+                "operate",
+                "scan",
+                "secrets",
+                "policy",
+                "home",
+                ""
+              ],
+              "enumDescriptions": [
+                "코드 생성 · 수정",
+                "에러 분석",
+                "아키텍처",
+                "흐름 dry run",
+                "설계 기록 (ADR)",
+                "AI 공급자 · 비용",
+                "로컬 Docker 배포",
+                "배포 캔버스",
+                "롤백 · 배포 이력",
+                "운영 대응",
+                "취약점 스캔",
+                "시크릿 검사",
+                "정책 게이트",
+                "ReCoder 홈",
+                "비움"
+              ],
+              "description": "휠에서 ↑"
+            },
+            "right": {
+              "type": "string",
+              "enum": [
+                "code",
+                "build",
+                "map",
+                "flow",
+                "adr",
+                "models",
+                "ship",
+                "deploy",
+                "replay",
+                "operate",
+                "scan",
+                "secrets",
+                "policy",
+                "home",
+                ""
+              ],
+              "enumDescriptions": [
+                "코드 생성 · 수정",
+                "에러 분석",
+                "아키텍처",
+                "흐름 dry run",
+                "설계 기록 (ADR)",
+                "AI 공급자 · 비용",
+                "로컬 Docker 배포",
+                "배포 캔버스",
+                "롤백 · 배포 이력",
+                "운영 대응",
+                "취약점 스캔",
+                "시크릿 검사",
+                "정책 게이트",
+                "ReCoder 홈",
+                "비움"
+              ],
+              "description": "휠에서 →"
+            },
+            "down": {
+              "type": "string",
+              "enum": [
+                "code",
+                "build",
+                "map",
+                "flow",
+                "adr",
+                "models",
+                "ship",
+                "deploy",
+                "replay",
+                "operate",
+                "scan",
+                "secrets",
+                "policy",
+                "home",
+                ""
+              ],
+              "enumDescriptions": [
+                "코드 생성 · 수정",
+                "에러 분석",
+                "아키텍처",
+                "흐름 dry run",
+                "설계 기록 (ADR)",
+                "AI 공급자 · 비용",
+                "로컬 Docker 배포",
+                "배포 캔버스",
+                "롤백 · 배포 이력",
+                "운영 대응",
+                "취약점 스캔",
+                "시크릿 검사",
+                "정책 게이트",
+                "ReCoder 홈",
+                "비움"
+              ],
+              "description": "휠에서 ↓"
+            },
+            "left": {
+              "type": "string",
+              "enum": [
+                "code",
+                "build",
+                "map",
+                "flow",
+                "adr",
+                "models",
+                "ship",
+                "deploy",
+                "replay",
+                "operate",
+                "scan",
+                "secrets",
+                "policy",
+                "home",
+                ""
+              ],
+              "enumDescriptions": [
+                "코드 생성 · 수정",
+                "에러 분석",
+                "아키텍처",
+                "흐름 dry run",
+                "설계 기록 (ADR)",
+                "AI 공급자 · 비용",
+                "로컬 Docker 배포",
+                "배포 캔버스",
+                "롤백 · 배포 이력",
+                "운영 대응",
+                "취약점 스캔",
+                "시크릿 검사",
+                "정책 게이트",
+                "ReCoder 홈",
+                "비움"
+              ],
+              "description": "휠에서 ←"
+            },
+            "shift+up": {
+              "type": "string",
+              "enum": [
+                "code",
+                "build",
+                "map",
+                "flow",
+                "adr",
+                "models",
+                "ship",
+                "deploy",
+                "replay",
+                "operate",
+                "scan",
+                "secrets",
+                "policy",
+                "home",
+                ""
+              ],
+              "enumDescriptions": [
+                "코드 생성 · 수정",
+                "에러 분석",
+                "아키텍처",
+                "흐름 dry run",
+                "설계 기록 (ADR)",
+                "AI 공급자 · 비용",
+                "로컬 Docker 배포",
+                "배포 캔버스",
+                "롤백 · 배포 이력",
+                "운영 대응",
+                "취약점 스캔",
+                "시크릿 검사",
+                "정책 게이트",
+                "ReCoder 홈",
+                "비움"
+              ],
+              "description": "휠에서 Shift+↑"
+            },
+            "shift+right": {
+              "type": "string",
+              "enum": [
+                "code",
+                "build",
+                "map",
+                "flow",
+                "adr",
+                "models",
+                "ship",
+                "deploy",
+                "replay",
+                "operate",
+                "scan",
+                "secrets",
+                "policy",
+                "home",
+                ""
+              ],
+              "enumDescriptions": [
+                "코드 생성 · 수정",
+                "에러 분석",
+                "아키텍처",
+                "흐름 dry run",
+                "설계 기록 (ADR)",
+                "AI 공급자 · 비용",
+                "로컬 Docker 배포",
+                "배포 캔버스",
+                "롤백 · 배포 이력",
+                "운영 대응",
+                "취약점 스캔",
+                "시크릿 검사",
+                "정책 게이트",
+                "ReCoder 홈",
+                "비움"
+              ],
+              "description": "휠에서 Shift+→"
+            },
+            "shift+down": {
+              "type": "string",
+              "enum": [
+                "code",
+                "build",
+                "map",
+                "flow",
+                "adr",
+                "models",
+                "ship",
+                "deploy",
+                "replay",
+                "operate",
+                "scan",
+                "secrets",
+                "policy",
+                "home",
+                ""
+              ],
+              "enumDescriptions": [
+                "코드 생성 · 수정",
+                "에러 분석",
+                "아키텍처",
+                "흐름 dry run",
+                "설계 기록 (ADR)",
+                "AI 공급자 · 비용",
+                "로컬 Docker 배포",
+                "배포 캔버스",
+                "롤백 · 배포 이력",
+                "운영 대응",
+                "취약점 스캔",
+                "시크릿 검사",
+                "정책 게이트",
+                "ReCoder 홈",
+                "비움"
+              ],
+              "description": "휠에서 Shift+↓"
+            },
+            "shift+left": {
+              "type": "string",
+              "enum": [
+                "code",
+                "build",
+                "map",
+                "flow",
+                "adr",
+                "models",
+                "ship",
+                "deploy",
+                "replay",
+                "operate",
+                "scan",
+                "secrets",
+                "policy",
+                "home",
+                ""
+              ],
+              "enumDescriptions": [
+                "코드 생성 · 수정",
+                "에러 분석",
+                "아키텍처",
+                "흐름 dry run",
+                "설계 기록 (ADR)",
+                "AI 공급자 · 비용",
+                "로컬 Docker 배포",
+                "배포 캔버스",
+                "롤백 · 배포 이력",
+                "운영 대응",
+                "취약점 스캔",
+                "시크릿 검사",
+                "정책 게이트",
+                "ReCoder 홈",
+                "비움"
+              ],
+              "description": "휠에서 Shift+←"
+            }
+          },
+          "additionalProperties": false
+        },
         "recoder.core.autoStart": {
           "type": "boolean",
           "default": true,

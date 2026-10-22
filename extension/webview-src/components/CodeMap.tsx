@@ -189,6 +189,16 @@ const FindingsList: React.FC<{ findings: Finding[]; onOpen?: (id: string) => voi
 };
 
 // ── Main ─────────────────────────────────────────────────────────────────────
+//: 빠른 이동이 요청한 지도 모드. 지도 화면이 아직 없으면 처음 그려질 때 꺼내 쓴다(메시지가 화면보다 먼저 온다).
+export type MapMode = "project" | "flow";
+export const MAP_MODE_EVENT = "recoder:map-mode";
+let pendingMapMode: MapMode | null = null;
+export function requestMapMode(mode: MapMode): void {
+  pendingMapMode = mode;
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(MAP_MODE_EVENT));
+}
+function takeMapMode(): MapMode | null { const m = pendingMapMode; pendingMapMode = null; return m; }
+
 const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -228,6 +238,20 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
     postMessage("map.flow", {});
   }, [postMessage]);
 
+  //: 2.0.44 빠른 이동 — "흐름 dry run" 이나 "아키텍처" 로 바로 왔을 때 그 모드로 연다.
+  const flowRef = useRef<FlowGraph | null>(null);
+  flowRef.current = flow;
+  useEffect(() => {
+    const apply = (m: MapMode | null) => {
+      if (m === "flow") { if (flowRef.current) setView("flow"); else loadFlow(); }
+      else if (m === "project") setView("project");
+    };
+    apply(takeMapMode());
+    const onEvent = () => apply(takeMapMode());
+    if (typeof window === "undefined") return undefined;
+    window.addEventListener(MAP_MODE_EVENT, onEvent);
+    return () => window.removeEventListener(MAP_MODE_EVENT, onEvent);
+  }, [loadFlow]);
   const openFileMap = useCallback((id: string) => {
     setLoading(true); setError(null);
     postMessage("map.file", { id });

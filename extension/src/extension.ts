@@ -24,6 +24,7 @@ import { PollingService } from './core/PollingService';
 import { SidebarProvider } from './sidebar/SidebarProvider';
 import { WorkbenchSidebarProvider } from './sidebar/WorkbenchSidebarProvider';
 import { ReCoderPanel } from './sidebar/ReCoderPanel';
+import { currentQuickAccess, registerQuickAccess } from './quickAccessHost';
 import { migrateActivityBar, restoreRecoderViews, chooseSidebarLocation } from './sidebar/activityBar';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
@@ -556,6 +557,26 @@ export function activate(context: vscode.ExtensionContext): void {
             void ensureCoreRunning(coreManager, sidebarProvider);
         }),
     );
+
+    //: 2.0.44 빠른 이동 — Alt+Q 로 휠, 방향키(기본 4칸) · Shift+방향키(사용자 추가 4칸) · "ReCoder: ○○ 열기" 명령.
+    registerQuickAccess(context, {
+        open: (target) => {
+            ReCoderPanel.showView(context.extensionUri, sidebarProvider, target.view, target.mapMode ? { mapMode: target.mapMode } : undefined);
+            void ensureCoreRunning(coreManager, sidebarProvider);
+        },
+        showWheel: (mode) => {
+            //: 창이 이미 있으면 바로 띄우고, 없으면 새 창이 준비될 때(ready) 띄운다.
+            const existed = ReCoderPanel.createOrShowExisting(context.extensionUri, sidebarProvider);
+            if (existed) {
+                ReCoderPanel.post('quickAccess.wheel', { mode, state: currentQuickAccess() });
+            } else {
+                sidebarProvider.requestWheel(mode);
+                ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider);
+                void ensureCoreRunning(coreManager, sidebarProvider);
+            }
+        },
+        broadcast: (state) => sidebarProvider.broadcastQuickAccess(state),
+    });
 
     // Keep existing command IDs for shortcuts, using VS Code's actual placement commands.
     context.subscriptions.push(
