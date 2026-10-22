@@ -1,7 +1,9 @@
 /**
- * ReCoder — dry run 다이어그램(2.0.34)
+ * ReCoder — dry run 다이어그램(2.0.34, 2.0.37 구조 위에서 재생)
  *
  * 진입점(API 경로·화면 동작·실행 파일)을 고르면, 코드를 실행하지 않고 호출 그래프를 따라 한 단계씩 지나간다.
+ *   - 2.0.37: 일자로 늘어놓지 않고 구조 위에 그린다 — 가로는 역할(화면 → 입구·API → 처리 → 데이터 → 외부),
+ *     상자는 파일, 맨 오른쪽은 이 흐름이 닿는 DB·외부 API·AWS·비밀값. 요청이 어느 층·어느 파일을 지나 무엇에 닿는지 보인다.
  *   - 지금 단계는 강조, 지난 곳은 진하게, 아직 안 간 곳은 흐리게
  *   - 노드마다 하는 일(DB·외부 API·AWS·비밀값·파일·명령 실행), 바뀐 함수(적용 전 미리 보기), 보안 발견
  *   - 선: 조건·반복·오류 처리로 갈리는 호출은 주황 점선, 이름만으로 고른(추정) 호출은 회색 점선
@@ -10,8 +12,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BRANCH_LABEL, DryRunStep, EFFECT_LABEL, EffectKind, FlowGraph, FlowNode,
-  dryRun, findingsByNode, layoutDryRun,
+  dryRun, findingsByNode,
 } from "./dryRunModel";
+import StructureDiagram, { DiagramEdge, DiagramNode } from "./StructureDiagram";
+import { roleOf } from "./structureLayout";
 
 const C = {
   bg: "var(--vscode-editor-background, #0c121a)",
@@ -48,30 +52,11 @@ export interface FlowDryRunProps {
   intervalMs?: number;
 }
 
-/**
- * 선 모양: 아래로 이어지면 부드러운 곡선, 같은 열에서 여러 줄을 건너뛰면 옆으로 비켜 가 중간 노드를 가리지 않는다.
- * 위로 되돌아가는 호출(재귀·이미 지남)은 오른쪽으로 크게 돌아간다.
- */
-export function edgePath(a: { x: number; y: number }, b: { x: number; y: number }, index: number): { path: string; mid: { x: number; y: number } } {
-  const sx = a.x, sy = a.y + 18, ex = b.x, ey = b.y - 22;
-  if (ey <= sy) {
-    const side = 95 + (index % 3) * 12;
-    const path = `M${sx + 75},${a.y} C${sx + 75 + side},${a.y} ${ex + 75 + side},${b.y} ${ex + 75},${b.y}`;
-    return { path, mid: { x: Math.max(sx, ex) + 75 + side * 0.75, y: (a.y + b.y) / 2 } };
-  }
-  const skips = Math.abs(sx - ex) < 10 && ey - sy > 110;
-  const bend = skips ? (index % 2 ? -1 : 1) * 88 : 0;
-  const k = Math.min(40, (ey - sy) / 2);
-  const path = `M${sx},${sy} C${sx + bend},${sy + k} ${ex + bend},${ey - k} ${ex},${ey}`;
-  return { path, mid: { x: (sx + ex) / 2 + bend * 0.75, y: (sy + ey) / 2 } };
-}
-
 const nodeLabel = (n: FlowNode) => (n.cls ? `${n.cls}.${n.name}` : n.name);
 const shortFile = (f: string) => { const parts = f.split("/"); return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : f; };
 
 export const FlowDryRun: React.FC<FlowDryRunProps> = ({ graph, changed, removed, affected, findings, findingsPrefix, onOpen, intervalMs = 1100 }) => {
   const wrapRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(540);
   const byId = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
   const affectedSet = useMemo(() => new Set(affected ?? []), [affected]);
 
@@ -106,26 +91,6 @@ export const FlowDryRun: React.FC<FlowDryRunProps> = ({ graph, changed, removed,
     return () => clearTimeout(t);
   }, [playing, step, steps.length, intervalMs]);
 
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return undefined;
-    const ro = new ResizeObserver(() => setWidth(Math.max(320, el.clientWidth - 4)));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  const layout = useMemo(() => (result ? layoutDryRun(result, width) : null), [result, width]);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  // 지금 단계의 노드가 보이게 스크롤한다(긴 흐름에서 재생하면 화면 밖으로 나갔다).
-  useEffect(() => {
-    const box = scrollRef.current;
-    const at = layout && steps[step] ? layout.pos.get(steps[step].node) : undefined;
-    if (!box || !at) return;
-    if (at.y - 50 < box.scrollTop || at.y + 50 > box.scrollTop + box.clientHeight) {
-      const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-      box.scrollTo?.({ top: Math.max(0, at.y - box.clientHeight / 2), behavior: reduce ? "auto" : "smooth" });
-    }
-  }, [step, layout, steps]);
   const findingMap = useMemo(() => findingsByNode(graph, findings ?? [], findingsPrefix ?? ""), [graph, findings, findingsPrefix]);
 
   // 지금까지 지난 노드·선
@@ -138,6 +103,70 @@ export const FlowDryRun: React.FC<FlowDryRunProps> = ({ graph, changed, removed,
     for (const s of steps) if (s.from && !seen.has(`${s.from} ${s.node}`)) seen.set(`${s.from} ${s.node}`, s);
     return [...seen.values()];
   }, [steps]);
+
+  //: 구조 다이어그램 — 지나가는 함수(파일 상자, 역할 레인) + 이 흐름이 닿는 외부(DB·외부 API·AWS·비밀값…)
+  const diagram = useMemo(() => {
+    if (!result) return null;
+    const first = new Map<string, number>();
+    steps.forEach((s, i) => { if (!first.has(s.node)) first.set(s.node, i); });
+    const nodes: DiagramNode[] = [];
+    const effectEdges: DiagramEdge[] = [];
+    const sinks = new Map<EffectKind, { visited: boolean; details: Set<string>; current: boolean }>();
+    for (const [id, idx] of first) {
+      const n = byId.get(id);
+      if (!n) continue;
+      const kinds = EFFECT_ORDER.filter((k) => n.effects.some((f) => f.kind === k));
+      const change = changed?.[id];
+      const sec = findingMap.get(id) ?? [];
+      const isVisited = visited.has(id);
+      nodes.push({
+        id, role: roleOf(n.file, { kind: n.kind }), group: n.kind === "route" ? "API 경로" : n.file,
+        groupLabel: n.kind === "route" ? "API 경로" : shortFile(n.file), order: idx,
+        title: `${n.kind === "route" ? "🛣 " : n.kind === "main" ? "▶ " : ""}${nodeLabel(n)}`,
+        sub: n.kind === "route" ? "API 경로" : `${n.file.split("/").pop()}:${n.line}`,
+        state: current?.node === id ? "current" : isVisited ? "visited" : "future",
+        accent: current?.node === id ? C.cyan : change ? C.violet : sec.length ? C.red : undefined,
+        badges: [
+          ...(change ? [{ text: change === "added" ? "새로" : "바뀜", color: C.violet, solid: true }] : []),
+          ...(sec.length ? [{ text: `보안 ${sec.length}`, color: C.red, solid: true }] : []),
+          ...kinds.map((k) => ({ text: EFFECT_LABEL[k], color: EFFECT_COLOR[k] })),
+        ],
+        attrs: { "data-flow-node": id }, tooltip: `${nodeLabel(n)} — ${n.file}:${n.line}`,
+      });
+      for (const k of kinds) {
+        const sink = sinks.get(k) ?? { visited: false, details: new Set<string>(), current: false };
+        sink.visited = sink.visited || isVisited;
+        sink.current = sink.current || current?.node === id;
+        n.effects.filter((f) => f.kind === k).forEach((f) => sink.details.add(f.detail));
+        sinks.set(k, sink);
+        effectEdges.push({ from: id, to: `effect:${k}`, color: EFFECT_COLOR[k], style: "effect", state: current?.node === id ? "now" : isVisited ? "walked" : "idle" });
+      }
+    }
+    EFFECT_ORDER.forEach((k, i) => {
+      const sink = sinks.get(k);
+      if (!sink) return;
+      const detail = [...sink.details][0] ?? "";
+      nodes.push({
+        id: `effect:${k}`, role: "external", group: "external", groupLabel: "이 흐름이 닿는 곳", order: 1_000_000 + i,
+        title: EFFECT_LABEL[k], sub: sink.details.size > 1 ? `${detail} 외 ${sink.details.size - 1}` : detail,
+        accent: EFFECT_COLOR[k], state: sink.current ? "current" : sink.visited ? "visited" : "future",
+        attrs: { "data-flow-sink": k },
+      });
+    });
+    const callEdges: DiagramEdge[] = edges.map((s) => {
+      const walked = walkedEdges.has(`${s.from} ${s.node}`);
+      const isNow = !!current && current.from === s.from && current.node === s.node;
+      return {
+        from: s.from!, to: s.node,
+        color: s.certainty === "inferred" ? "#7f8b99" : s.branch ? C.amber : walked ? C.cyan : "#5b95ff",
+        style: s.certainty === "inferred" ? "inferred" : s.branch ? "branch" : "solid",
+        label: s.branch && walked ? BRANCH_LABEL[s.branch] : undefined,
+        state: isNow ? "now" : walked ? "walked" : "idle",
+      };
+    });
+    return { nodes, edges: [...callEdges, ...effectEdges] };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, steps, step, byId, changed, findingMap, edges]);
 
   const onKey = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "ArrowRight") { e.preventDefault(); setPlaying(false); setStep((s) => Math.min(s + 1, steps.length - 1)); }
@@ -219,88 +248,12 @@ export const FlowDryRun: React.FC<FlowDryRunProps> = ({ graph, changed, removed,
         </div>
       )}
 
-      {/* 다이어그램 */}
-      {layout && (
-        <div ref={scrollRef} style={{ overflow: "auto", maxHeight: 520 }}>
-          <div style={{
-            position: "relative", width, height: layout.height, minHeight: 180,
-            background: `linear-gradient(${C.line}22 1px, transparent 1px), linear-gradient(90deg, ${C.line}22 1px, transparent 1px)`,
-            backgroundSize: "26px 26px", border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden",
-          }}>
-            <svg width={width} height={layout.height} style={{ position: "absolute", inset: 0, overflow: "visible" }} aria-hidden="true">
-              <defs>
-                <marker id="rfd-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L6,3.5 L0,7 Z" fill={C.cyan} /></marker>
-                <marker id="rfd-arrow-dim" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L6,3.5 L0,7 Z" fill="#7f8b99" /></marker>
-              </defs>
-              {layout.bands.map((b, i) => (
-                <text key={i} x={8} y={b.y - 36} fill={C.dim} fontSize={8.5} style={{ letterSpacing: 0.6 }}>{b.label}</text>
-              ))}
-              {edges.map((s, i) => {
-                const a = layout.pos.get(s.from!), b = layout.pos.get(s.node);
-                if (!a || !b) return null;
-                const walked = walkedEdges.has(`${s.from} ${s.node}`);
-                const isNow = current && current.from === s.from && current.node === s.node;
-                const color = s.certainty === "inferred" ? "#7f8b99" : s.branch ? C.amber : walked ? C.cyan : C.edge;
-                const d = edgePath(a, b, i);
-                return (
-                  <g key={i}>
-                    <path d={d.path} fill="none"
-                      stroke={color} strokeOpacity={walked ? 0.95 : 0.25} strokeWidth={isNow ? 3 : walked ? 2 : 1.3}
-                      strokeDasharray={s.certainty === "inferred" ? "2 4" : s.branch ? "6 4" : undefined}
-                      markerEnd={walked ? "url(#rfd-arrow)" : "url(#rfd-arrow-dim)"} />
-                    {s.branch && walked && (
-                      <text x={d.mid.x + 4} y={d.mid.y} fill={C.amber} fontSize={8.5}>{BRANCH_LABEL[s.branch]}</text>
-                    )}
-                  </g>
-                );
-              })}
-            </svg>
-            {[...layout.pos.entries()].map(([id, p]) => {
-              const n = byId.get(id);
-              if (!n) return null;
-              const isCurrent = current?.node === id;
-              const done = visited.has(id);
-              const kinds = EFFECT_ORDER.filter((k) => n.effects.some((f) => f.kind === k));
-              const change = changed?.[id];
-              const sec = findingMap.get(id) ?? [];
-              const firstStep = steps.findIndex((s) => s.node === id);
-              return (
-                <div key={id} data-flow-node={id} data-state={isCurrent ? "current" : done ? "visited" : "future"}
-                  role="button" tabIndex={-1} title={`${nodeLabel(n)} — ${n.file}:${n.line}`}
-                  onClick={() => { setPlaying(false); if (firstStep >= 0) setStep(firstStep); }}
-                  onDoubleClick={() => { if (onOpen && n.kind !== "route") onOpen(n.file, n.line); }}
-                  style={{
-                    position: "absolute", left: p.x, top: p.y, transform: "translate(-50%,-50%)", zIndex: 2, cursor: "pointer",
-                    opacity: done ? 1 : 0.35, transition: "opacity .25s",
-                  }}>
-                  {(change || sec.length > 0) && (
-                    <div style={{ position: "absolute", top: -10, left: 8, display: "flex", gap: 3 }}>
-                      {change && <Badge color={C.violet} solid>{change === "added" ? "새로" : "바뀜"}</Badge>}
-                      {sec.length > 0 && <Badge color={C.red} solid>보안 {sec.length}</Badge>}
-                    </div>
-                  )}
-                  <div style={{
-                    border: `1px solid ${isCurrent ? C.cyan : change ? C.violet : C.line}`, borderRadius: 10, background: C.panel,
-                    boxShadow: isCurrent ? `0 0 16px ${C.cyan}80` : "0 4px 12px rgba(0,0,0,.3)",
-                    padding: "6px 9px", width: 150, boxSizing: "border-box",
-                  }}>
-                    <div style={{ fontSize: 11.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {n.kind === "route" ? "🛣 " : n.kind === "main" ? "▶ " : ""}{nodeLabel(n)}
-                    </div>
-                    <div style={{ fontSize: 9, color: C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {n.kind === "route" ? "API 경로" : `${shortFile(n.file)}:${n.line}`}
-                    </div>
-                    {kinds.length > 0 && (
-                      <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginTop: 3 }}>
-                        {kinds.map((k) => <Badge key={k} color={EFFECT_COLOR[k]}>{EFFECT_LABEL[k]}</Badge>)}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+      {/* 다이어그램 — 구조 위에서 재생 */}
+      {diagram && (
+        <StructureDiagram nodes={diagram.nodes} edges={diagram.edges} focusId={current?.node} maxHeight={520} layout={{ maxCols: 5 }}
+          ariaLabel="dry run 구조 다이어그램"
+          onNodeClick={(id) => { if (id.startsWith("effect:")) return; setPlaying(false); const i = steps.findIndex((s) => s.node === id); if (i >= 0) setStep(i); }}
+          onNodeDoubleClick={(id) => { const n = byId.get(id); if (n && onOpen && n.kind !== "route") onOpen(n.file, n.line); }} />
       )}
 
       {/* 범례 */}

@@ -113,30 +113,6 @@ export function dryRun(
   };
 }
 
-export interface Pos { x: number; y: number; }
-
-/**
- * dry run 이 지나간 노드만 그린다. 위에서 아래로 호출 깊이, 같은 깊이는 처음 지난 순서대로(폭이 모자라면 줄바꿈).
- * 노드 칩 폭(약 170px)을 보장해 좁은 사이드바에서도 겹치지 않는다.
- */
-export function layoutDryRun(result: DryRunResult, width: number): { pos: Map<string, Pos>; height: number; bands: Array<{ label: string; y: number }> } {
-  const cols = Math.max(1, Math.floor((width - 24) / 190));
-  const firstDepth = new Map<string, number>();
-  for (const s of result.steps) if (!firstDepth.has(s.node)) firstDepth.set(s.node, s.depth);
-  const rows = new Map<number, string[]>();
-  for (const [id, d] of firstDepth) { const r = rows.get(d) ?? []; r.push(id); rows.set(d, r); }
-  const pos = new Map<string, Pos>();
-  const bands: Array<{ label: string; y: number }> = [];
-  let y = 56;
-  for (const depth of [...rows.keys()].sort((a, b) => a - b)) {
-    const members = rows.get(depth)!;
-    bands.push({ label: depth === 0 ? "시작" : `${depth}단계 호출`, y });
-    members.forEach((id, i) => pos.set(id, { x: ((i % cols) + 0.5) * width / cols, y: y + Math.floor(i / cols) * 92 }));
-    y += Math.ceil(members.length / cols) * 92 + 30;
-  }
-  return { pos, height: Math.max(180, y), bands };
-}
-
 /** 미리 보기의 보안 발견(파일·줄)을 그 줄을 품은 가장 안쪽 함수에 붙인다. */
 export function findingsByNode<T extends { file: string; line: number }>(graph: FlowGraph, findings: T[], prefix = ""): Map<string, T[]> {
   const out = new Map<string, T[]>();

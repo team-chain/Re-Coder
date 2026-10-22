@@ -3,29 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {layoutProject,layoutGrid} = require('../out/webview-test/components/CodeMap.js');
 const {analyzeFile,analyzeProject} = require('../out/codemap/analyzer.js');
-const node = (id,layer='service')=>({id,name:id,module:id,layer,in_degree:0,out_degree:0,flags:[]});
-
-function spaced(layout,width){
- const positions=[...layout.pos.values()];
- for(const p of positions){assert.ok(p.x>=85&&p.x<=width-85);assert.ok(p.y>=30&&p.y+30<=layout.height);}
- for(let i=0;i<positions.length;i++)for(let j=i+1;j<positions.length;j++){
-  const a=positions[i],b=positions[j];assert.ok(Math.abs(a.x-b.x)>=185||Math.abs(a.y-b.y)>=78,`overlap: ${JSON.stringify([a,b])}`);
- }
-}
-for(const width of [320,540,960]) test(`project nodes wrap without overlap at width ${width}`,()=>{
- const nodes=[...Array.from({length:18},(_,i)=>node(`service${i}`)),node('entry','entry'),node('data','data'),node('unknown','custom')];
- const layout=layoutProject(nodes,width);
- assert.equal(layout.pos.size,nodes.length);spaced(layout,width);
- assert.ok(new Set(nodes.filter(n=>n.layer==='service').map(n=>layout.pos.get(n.id).y)).size>1);
- assert.ok(layout.pos.get('data').y>Math.max(...nodes.filter(n=>n.layer==='service').map(n=>layout.pos.get(n.id).y)));
- assert.equal(layout.bands.length,4);
-});
-test('function grid reserves a full chip width even in a narrow sidebar',()=>{
- spaced(layoutGrid(Array.from({length:15},(_,i)=>node(String(i))),320),320);
- assert.ok(layoutProject([],320).height>=180);
-});
 function analyze(src){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'recoder-map-'));try{const file=path.join(dir,'app.js');fs.writeFileSync(file,src);return analyzeFile(file);}finally{fs.rmSync(dir,{recursive:true,force:true});}}
 function project(manifest, files){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'recoder-map-entry-'));

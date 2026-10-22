@@ -1,18 +1,21 @@
 /**
  * ReCoder — CodeMap component (구조 지도 / Architecture & Code Map)
  *
- * 2단계 줌:
- *   - 프로젝트(폴더) 뷰: 파일 노드 + 내부 import 엣지. 계층(entry→service→data→other)
- *     으로 위에서 아래로 배치. 고립(빨강)·과부하(노랑)를 색으로. 스타일 파일은 중립(스타일).
- *   - 파일 뷰: 파일을 누르면 그 안의 함수/메서드 호출 그래프.
+ * 2.0.37 — 구조 다이어그램(StructureDiagram):
+ *   - 가로는 역할 레인(화면 → 입구·API → 처리 → 데이터 → 설정·테스트), 상자는 폴더, 노드는 파일, 선은 import.
+ *     레인 안에서는 import 방향(부르는 쪽 → 불리는 쪽)으로 왼쪽에서 오른쪽.
+ *   - 파일이 많으면(60개 초과) 폴더 단위로 먼저 보여 주고, 폴더를 누르면 그 폴더의 파일과 이웃 폴더를 펼친다.
+ *   - 파일 뷰: 파일을 누르면 그 안의 함수/메서드 호출 그래프(클래스별 상자).
  *
  * 관통 원칙: 선은 사실(import/call), 색·위치는 해석(고립/과부하/계층).
  * 데이터는 확장 내부 정적 분석에서 옴 — Core·LLM 연결 불필요.
  */
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import FlowDryRun from "./FlowDryRun";
 import type { FlowGraph } from "./dryRunModel";
+import StructureDiagram, { DiagramEdge, DiagramNode } from "./StructureDiagram";
+import { ROLE_LABEL, ROLE_ORDER, Role, aggregateFolders, folderOf, roleOf } from "./structureLayout";
 
 // ── Types (Core 응답과 1:1) ──────────────────────────────────────────────────
 interface Finding {
@@ -54,36 +57,88 @@ const C = {
   edge: "var(--vscode-charts-blue, #5b95ff)",
 };
 
-const LAYER_ORDER = ["entry", "service", "data", "style", "other"];
-const LAYER_LABEL: Record<string, string> = {
-  entry: "entry · 입구", service: "service · 처리", data: "data · 저장", style: "style · 스타일", other: "기타",
+/** 파일이 이보다 많으면 폴더 단위로 먼저 보여 준다. */
+export const FOLDER_VIEW_THRESHOLD = 60;
+const ROLE_COLOR: Record<Role, string> = {
+  ui: "#3fd6de", entry: "#5b95ff", logic: "#b48cff", data: "#f7b955", support: "#7f8b99", other: "#7f8b99", external: "#ff8f6b",
 };
 
-interface Pos { x: number; y: number; }
-
-// ── 레이아웃 계산 ────────────────────────────────────────────────────────────
-export function layoutProject(nodes: ProjNode[], width: number): { pos: Map<string, Pos>; height: number; bands: { label: string; y: number }[] } {
-  const pos = new Map<string, Pos>();
-  const bands: { label: string; y: number }[] = [];
-  const cols = Math.max(1, Math.floor((width - 24) / 190));
-  let y = 56;
-  for (const layer of LAYER_ORDER) {
-    const members = nodes.filter(n => (LAYER_ORDER.includes(n.layer) ? n.layer : "other") === layer);
-    if (!members.length) continue;
-    bands.push({ label: LAYER_LABEL[layer], y });
-    members.forEach((node, index) => {
-      pos.set(node.id, { x: ((index % cols) + 0.5) * width / cols, y: y + Math.floor(index / cols) * 86 });
-    });
-    y += Math.ceil(members.length / cols) * 86 + 30;
-  }
-  return { pos, height: Math.max(180, y), bands };
+function fileBadges(flags: string[]) {
+  if (flags.includes("orphan")) return [{ text: "고립", color: C.red, solid: true }];
+  if (flags.includes("overloaded")) return [{ text: "과부하", color: C.amber, solid: true }];
+  return [];
 }
 
-export function layoutGrid(nodes: { id: string }[], width: number): { pos: Map<string, Pos>; height: number } {
-  const cols = Math.max(1, Math.floor((width - 24) / 190));
-  const pos = new Map<string, Pos>();
-  nodes.forEach((node, index) => pos.set(node.id, { x: ((index % cols) + 0.5) * width / cols, y: 40 + Math.floor(index / cols) * 82 }));
-  return { pos, height: Math.max(180, 40 + Math.ceil(nodes.length / cols) * 82) };
+/** 파일 단위 다이어그램 노드·선. focus 를 주면 그 폴더의 파일과, 이어진 다른 폴더(폴더 노드)만. */
+export function projectDiagram(project: { nodes: ProjNode[]; edges: Edge[] }, mode: "files" | "folders", focus = "", showAll = false): { nodes: DiagramNode[]; edges: DiagramEdge[] } {
+  //: 스타일·도구 설정 파일은 구조를 가린다(화면 레인이 CSS 로 가득 찬다) — 기본은 숨기고 켤 수 있게.
+  if (!showAll) {
+    const keep = new Set(project.nodes.filter((n) => !n.flags.includes("style") && !n.flags.includes("config")).map((n) => n.id));
+    project = { nodes: project.nodes.filter((n) => keep.has(n.id)), edges: project.edges.filter((e) => keep.has(e.from) && keep.has(e.to)) };
+  }
+  const order = new Map([...project.nodes].sort((a, b) => a.id.localeCompare(b.id)).map((n, i) => [n.id, i]));
+  if (mode === "folders" && !focus) {
+    const agg = aggregateFolders(project.nodes, project.edges);
+    const sorted = [...agg.nodes].sort((a, b) => a.label.localeCompare(b.label));
+    return {
+      nodes: sorted.map((f, i) => ({
+        id: f.id, role: f.role, group: f.id.includes("#") ? "(최상위)" : f.label.split("/")[0] || f.label,
+        groupLabel: f.id.includes("#") ? "(최상위)" : f.label.split("/")[0] || f.label, order: i,
+        title: f.label.split("/").slice(-1)[0] || f.label, sub: `${f.label} · 파일 ${f.files}개`,
+        badges: f.flags.includes("overloaded") ? [{ text: "과부하", color: C.amber, solid: true }] : [],
+        attrs: { "data-map-node": f.id }, tooltip: `${f.label} — 파일 ${f.files}개 (누르면 펼침)`,
+      })),
+      edges: agg.edges.map((e) => ({ ...e, weight: e.count, label: e.count > 1 ? String(e.count) : undefined })),
+    };
+  }
+  //: 최상위 폴더는 역할별로 나눠 보여 준다("(최상위)#logic").
+  const [focusDir, focusRole] = focus.split("#");
+  const inFocus = (id: string) => !focus || (folderOf(id) === focusDir && (!focusRole || roleOf(id) === focusRole));
+  const files = project.nodes.filter((n) => inFocus(n.id));
+  const nodes: DiagramNode[] = files.map((n) => ({
+    id: n.id, role: roleOf(n.id), group: folderOf(n.id), order: order.get(n.id) ?? 0,
+    title: n.name, sub: projSub(n), badges: fileBadges(n.flags),
+    accent: n.flags.includes("orphan") ? C.red : n.flags.includes("overloaded") ? C.amber : undefined,
+    attrs: { "data-map-node": n.id }, tooltip: `${n.id} — 누르면 파일 안 함수 지도`,
+  }));
+  const edges: DiagramEdge[] = [];
+  if (!focus) {
+    for (const e of project.edges) edges.push({ from: e.from, to: e.to });
+    return { nodes, edges };
+  }
+  //: 이웃 폴더는 폴더 노드 하나로 — 선 굵기는 import 수.
+  const outside = new Map<string, number>();
+  const counts = new Map<string, number>();
+  for (const e of project.edges) {
+    const a = inFocus(e.from), b = inFocus(e.to);
+    if (a && b) { edges.push({ from: e.from, to: e.to }); continue; }
+    if (!a && !b) continue;
+    const other = `dir:${folderOf(a ? e.to : e.from)}`;
+    outside.set(other, (outside.get(other) ?? 0) + 1);
+    const key = a ? `${e.from}\n${other}` : `${other}\n${e.to}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let i = nodes.length;
+  for (const [id, n] of outside) {
+    const folder = id.slice(4);
+    nodes.push({ id, role: roleOf(`${folder}/x.js`), group: "이웃 폴더", order: 100000 + i++, title: folder.split("/").slice(-1)[0] || folder,
+      sub: `${folder} · import ${n}`, accent: "#7f8b99", attrs: { "data-map-node": id }, tooltip: `${folder} — 누르면 이 폴더로 이동` });
+  }
+  for (const [k, count] of counts) { const [from, to] = k.split("\n"); edges.push({ from, to, weight: count, color: "#7f8b99" }); }
+  return { nodes, edges };
+}
+
+/** 파일 안 함수 지도 — 클래스별 상자, 호출 방향으로 왼쪽 → 오른쪽. */
+export function fileDiagram(file: { nodes: FnNode[]; edges: Edge[] }): { nodes: DiagramNode[]; edges: DiagramEdge[] } {
+  return {
+    nodes: file.nodes.map((n, i) => ({
+      id: n.id, role: "logic" as Role, group: n.cls ?? "모듈 함수", order: i,
+      title: n.cls ? `${n.cls}.${n.name}` : n.name, sub: n.in_degree > 0 ? `${n.in_degree}곳서 호출` : "호출하는 곳 없음",
+      badges: n.flags.includes("overloaded") ? [{ text: "과부하", color: C.amber, solid: true }] : [],
+      accent: n.flags.includes("overloaded") ? C.amber : undefined, attrs: { "data-map-fn": n.id },
+    })),
+    edges: file.edges.map((e) => ({ from: e.from, to: e.to })),
+  };
 }
 
 /** 프로젝트 노드 아래 한 줄 설명. 스타일 파일은 '아무도 import 안 함' 같은 실패 느낌의 문구를 쓰지 않는다. */
@@ -94,94 +149,6 @@ export function projSub(n: ProjNode): string {
   if (n.flags.includes("orphan")) return "아무도 import 안 함";
   return `${n.in_degree}곳서 의존`;
 }
-
-// ── 노드 칩 ──────────────────────────────────────────────────────────────────
-const NodeChip: React.FC<{
-  x: number; y: number; title: string; sub?: string;
-  flags: string[]; degree?: number; onClick?: () => void; clickable?: boolean;
-}> = ({ x, y, title, sub, flags, degree, onClick, clickable }) => {
-  const orphan = flags.includes("orphan");
-  const over = flags.includes("overloaded");
-  const style = flags.includes("style");
-  const config = flags.includes("config");
-  const accent = orphan ? C.red : over ? C.amber : C.line;
-  //: 스타일 파일은 코드가 아니라 화면에 입혀지는 자원 — 빨간 '고립' 대신 중립 표시.
-  const flagLabel = orphan ? "고립" : over ? "과부하" : style ? "스타일" : config ? "도구 설정" : "";
-  return (
-    <div
-      onClick={onClick}
-      title={title + (clickable ? " — 열기" : "")}
-      role={clickable ? "button" : undefined}
-      tabIndex={clickable ? 0 : undefined}
-      onKeyDown={e => { if (clickable && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick?.(); } }}
-      style={{
-        position: "absolute", left: x, top: y, transform: "translate(-50%,-50%)",
-        cursor: clickable ? "pointer" : "default", zIndex: 2,
-      }}
-    >
-      {flagLabel && (
-        <div style={{
-          position: "absolute", top: -9, left: 8, fontSize: 8.5, fontWeight: 700,
-          padding: "1px 6px", borderRadius: 10, whiteSpace: "nowrap",
-          background: orphan ? C.red : over ? C.amber : C.panel, color: orphan || over ? "#10141a" : C.dim,
-          border: orphan || over ? "none" : `1px solid ${C.line}`,
-        }}>{flagLabel}</div>
-      )}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 7,
-        border: `1px solid ${accent}`, borderRadius: 10,
-        background: C.panel,
-        boxShadow: over || orphan ? `0 0 14px ${accent}40` : "0 4px 12px rgba(0,0,0,.3)",
-        padding: "6px 9px", maxWidth: 150,
-      }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 11.5, fontWeight: 600, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 130 }}>{title}</div>
-          {sub && <div style={{ fontSize: 9, color: C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 130 }}>{sub}</div>}
-        </div>
-      </div>
-      {typeof degree === "number" && degree > 0 && (
-        <div style={{
-          position: "absolute", bottom: -7, right: -6, fontSize: 8.5,
-          background: C.bg, border: `1px solid ${over ? C.amber : C.line}`,
-          color: over ? C.amber : C.dim, borderRadius: 10, padding: "0 6px",
-        }}>in {degree}</div>
-      )}
-    </div>
-  );
-};
-
-// ── 캔버스 (노드 + 엣지) ─────────────────────────────────────────────────────
-const Canvas: React.FC<{
-  pos: Map<string, Pos>; edges: Edge[]; height: number; width: number;
-  children: React.ReactNode; bands?: { label: string; y: number }[];
-}> = ({ pos, edges, height, width, children, bands }) => (
-  <div style={{
-    position: "relative", width, height, minHeight: 180,
-    background: `linear-gradient(${C.line}22 1px, transparent 1px), linear-gradient(90deg, ${C.line}22 1px, transparent 1px)`,
-    backgroundSize: "26px 26px",
-    border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden",
-  }}>
-    <svg width={width} height={height} style={{ position: "absolute", inset: 0, overflow: "visible" }}>
-      <defs>
-        <marker id="rcm-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-          <path d="M0,0 L6,3.5 L0,7 Z" fill={C.cyan} />
-        </marker>
-      </defs>
-      {bands?.map((b, i) => (
-        <text key={i} x={8} y={b.y - 34} fill={C.dim} fontSize={8.5} style={{ textTransform: "uppercase", letterSpacing: 0.6 }}>{b.label}</text>
-      ))}
-      {edges.map((e, i) => {
-        const a = pos.get(e.from), b = pos.get(e.to);
-        if (!a || !b) return null;
-        return (
-          <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-            stroke={C.edge} strokeOpacity={0.5} strokeWidth={1.5} markerEnd="url(#rcm-arrow)" />
-        );
-      })}
-    </svg>
-    {children}
-  </div>
-);
 
 // ── Findings ─────────────────────────────────────────────────────────────────
 const FindingsList: React.FC<{ findings: Finding[]; onOpen?: (id: string) => void; openLabel?: string }> = ({ findings, onOpen, openLabel }) => {
@@ -225,7 +192,6 @@ const FindingsList: React.FC<{ findings: Finding[]; onOpen?: (id: string) => voi
 const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const wrapRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(540);
   const [project, setProject] = useState<ProjectGraph | null>(null);
   const [file, setFile] = useState<FileGraph | null>(null);
   const [view, setView] = useState<"project" | "file" | "flow">("project");
@@ -234,15 +200,6 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
   const [flowError, setFlowError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // 노드 폭을 확보하고 화면 폭에 맞춰 계층 안에서 줄바꿈한다.
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setWidth(Math.max(320, el.clientWidth - 4)));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
 
   const loadProject = useCallback(() => {
     setLoading(true); setError(null); setView("project");
@@ -276,10 +233,21 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
     postMessage("map.file", { id });
   }, [postMessage]);
 
-  // ── 프로젝트 뷰 레이아웃 ──
-  const projLayout = project ? layoutProject(project.nodes, width) : null;
-  const projBands = projLayout?.bands ?? [];
-  const fileLayout = file ? layoutGrid(file.nodes, width) : null;
+  // ── 다이어그램 데이터 ──
+  const [mode, setMode] = useState<"auto" | "files" | "folders">("auto");
+  const [focus, setFocus] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => { setFocus(""); }, [project]);
+  const effectiveMode: "files" | "folders" = mode === "auto"
+    ? ((project?.nodes.length ?? 0) > FOLDER_VIEW_THRESHOLD ? "folders" : "files") : mode;
+  const projDiagram = useMemo(() => (project ? projectDiagram(project, effectiveMode, focus, showAll) : null), [project, effectiveMode, focus, showAll]);
+  const hiddenCount = useMemo(() => (project && !showAll ? project.nodes.filter((n) => n.flags.includes("style") || n.flags.includes("config")).length : 0), [project, showAll]);
+  const fileDiag = useMemo(() => (file ? fileDiagram(file) : null), [file]);
+  const presentRoles = useMemo(() => ROLE_ORDER.filter((r) => projDiagram?.nodes.some((n) => n.role === r)), [projDiagram]);
+  const onProjectNode = useCallback((id: string) => {
+    if (id.startsWith("dir:")) { setFocus(id.slice(4)); return; }
+    openFileMap(id);
+  }, [openFileMap]);
 
   const headerBtn: React.CSSProperties = {
     background: "none", border: `1px solid ${C.line}`, color: C.dim,
@@ -308,9 +276,9 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
 
       <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5, marginBottom: 10 }}>
         {view === "flow"
-          ? <>API 경로·화면 동작·실행 파일 중 하나를 고르면 그 요청이 지나가는 함수를 <b style={{ color: C.ink }}>호출 순서대로</b> 한 단계씩 보여 줍니다. DB·외부 API·비밀값을 쓰는 곳이 표시됩니다.</>
+          ? <>API 경로·화면 동작·실행 파일 중 하나를 고르면, 그 요청이 <b style={{ color: C.ink }}>어느 층(화면 → 입구·API → 처리 → 데이터)·어느 파일</b>을 지나 DB·외부 API·AWS·비밀값에 닿는지 구조 위에서 한 단계씩 보여 줍니다.</>
           : view === "project"
-          ? <>선은 실제 <b style={{ color: C.ink }}>import</b>(사실), 위치는 계층(입구→저장). 파일을 누르면 그 안으로 들어갑니다. 정적 분석이라 동적 호출은 표시되지 않습니다.</>
+          ? <>가로는 역할(화면 → 입구·API → 처리 → 데이터), 상자는 폴더, 선은 실제 <b style={{ color: C.ink }}>import</b>(부르는 쪽 → 불리는 쪽). 노드에 마우스를 올리면 이어진 선만 남습니다. 역할은 폴더·파일 이름으로 추정한 것이고, 정적 분석이라 동적 호출은 표시되지 않습니다.</>
           : <>파일 안 <b style={{ color: C.ink }}>함수·메서드·콜백 호출</b>의 정적 분석 결과입니다. 노랑은 호출이 몰린 과부하 지점입니다.</>}
       </div>
 
@@ -344,37 +312,55 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
       )}
 
       {/* 프로젝트 뷰 */}
-      {!loading && view === "project" && project && projLayout && (
+      {!loading && view === "project" && project && projDiagram && (
         <>
-          <div style={{ fontSize: 10.5, color: C.dim, marginBottom: 6 }}>
-            {project.files_scanned}개 파일 · {project.edges.length}개 의존
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 10.5, color: C.dim, marginBottom: 6 }}>
+            <span>{project.files_scanned}개 파일 · {project.edges.length}개 의존</span>
+            {focus && (
+              <span data-map-focus style={{ color: C.ink }}>
+                폴더 <b>{focus.replace("#", " · ")}</b> 와 이웃 폴더
+                <button style={{ ...headerBtn, marginLeft: 6, fontSize: 10, padding: "1px 7px" }} onClick={() => setFocus("")}>← 전체</button>
+              </span>
+            )}
+            {(hiddenCount > 0 || showAll) && (
+              <button style={{ ...headerBtn, fontSize: 10, padding: "1px 7px" }} onClick={() => setShowAll((v) => !v)}>
+                {showAll ? "스타일·설정 파일 숨기기" : `스타일·설정 파일 ${hiddenCount}개 숨김 · 보기`}
+              </button>
+            )}
+            {!focus && (
+              <span style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+                {(["folders", "files"] as const).map((m) => (
+                  <button key={m} aria-pressed={effectiveMode === m} onClick={() => setMode(m)}
+                    style={{ ...headerBtn, fontSize: 10, padding: "2px 8px", color: effectiveMode === m ? C.cyan : C.dim, borderColor: effectiveMode === m ? `${C.cyan}88` : C.line }}>
+                    {m === "folders" ? "폴더 단위" : "파일 단위"}
+                  </button>
+                ))}
+              </span>
+            )}
           </div>
-          <div style={{ overflow: "auto", maxHeight: 560 }}>
-            <Canvas pos={projLayout.pos} edges={project.edges} height={projLayout.height} width={width} bands={projBands}>
-              {project.nodes.map((n) => {
-                const p = projLayout.pos.get(n.id)!;
-                return (
-                  <NodeChip key={n.id} x={p.x} y={p.y} title={n.name}
-                    sub={projSub(n)}
-                    flags={n.flags} degree={n.in_degree}
-                    clickable onClick={() => openFileMap(n.id)} />
-                );
-              })}
-            </Canvas>
-          </div>
+          {projDiagram.nodes.length === 0 ? (
+            <div style={{ fontSize: 11.5, color: C.dim, padding: "12px 0" }}>분석할 코드 파일을 찾지 못했습니다.</div>
+          ) : (
+            <StructureDiagram nodes={projDiagram.nodes} edges={projDiagram.edges} onNodeClick={onProjectNode}
+              layout={{ mergeSingletons: effectiveMode === "folders" && !focus ? "폴더" : "", maxRows: 8 }}
+              onNodeDoubleClick={(id) => { if (!id.startsWith("dir:")) postMessage("map.openFile", { id }); }}
+              ariaLabel="아키텍처 구조 다이어그램" />
+          )}
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8, fontSize: 10, color: C.dim }}>
-            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><i style={{ width: 14, height: 2, background: C.edge, display: "inline-block" }} />import</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><i style={{ width: 9, height: 9, border: `1px dashed ${C.red}`, display: "inline-block" }} />고립</span>
+            {presentRoles.map((r) => (
+              <span key={r} style={{ display: "flex", alignItems: "center", gap: 5 }}><i style={{ width: 9, height: 9, background: ROLE_COLOR[r], opacity: 0.7, display: "inline-block", borderRadius: 2 }} />{ROLE_LABEL[r]}</span>
+            ))}
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><i style={{ width: 14, height: 2, background: C.edge, display: "inline-block" }} />import(부르는 쪽 → 불리는 쪽)</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><i style={{ width: 9, height: 9, background: C.red, display: "inline-block", borderRadius: 2 }} />고립</span>
             <span style={{ display: "flex", alignItems: "center", gap: 5 }}><i style={{ width: 9, height: 9, background: C.amber, display: "inline-block", borderRadius: 2 }} />과부하</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 5 }} title="CSS·SCSS 같은 스타일 파일과 빌드·테스트 도구 설정 파일 — 코드가 import 하지 않아도 정상입니다"><i style={{ width: 9, height: 9, border: `1px solid ${C.line}`, background: C.panel, display: "inline-block", borderRadius: 2 }} />스타일 · 도구 설정 (정상)</span>
-            <span>파일 클릭 → 내부 지도</span>
+            <span>{effectiveMode === "folders" && !focus ? "폴더 클릭 → 펼치기" : "파일 클릭 → 내부 지도 · 더블클릭 → 에디터"}</span>
           </div>
           <FindingsList findings={project.findings} onOpen={openFileMap} openLabel="열어보기" />
         </>
       )}
 
       {/* 파일 뷰 */}
-      {!loading && view === "file" && file && fileLayout && (
+      {!loading && view === "file" && file && fileDiag && (
         <>
           <div style={{ fontSize: 10.5, color: C.dim, marginBottom: 6 }}>
             {file.functions_scanned}개 함수·콜백 · {file.edges.length}개 호출
@@ -384,19 +370,7 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
           {file.nodes.length === 0 ? (
             <div style={{ fontSize: 11.5, color: C.dim, padding: "12px 0" }}>정적 분석으로 식별한 함수·콜백이 없습니다. 동적으로 만들어진 함수는 표시되지 않을 수 있습니다.</div>
           ) : (
-            <div style={{ overflow: "auto", maxHeight: 560 }}>
-              <Canvas pos={fileLayout.pos} edges={file.edges} height={fileLayout.height} width={width}>
-                {file.nodes.map((n) => {
-                  const p = fileLayout.pos.get(n.id)!;
-                  return (
-                    <NodeChip key={n.id} x={p.x} y={p.y}
-                      title={n.cls ? `${n.cls}.${n.name}` : n.name}
-                      sub={n.in_degree > 0 ? `${n.in_degree}곳서 호출` : undefined}
-                      flags={n.flags} degree={n.in_degree} />
-                  );
-                })}
-              </Canvas>
-            </div>
+            <StructureDiagram nodes={fileDiag.nodes} edges={fileDiag.edges} layout={{ maxCols: 6 }} ariaLabel="파일 안 함수 호출 다이어그램" />
           )}
           <FindingsList findings={file.findings} />
         </>

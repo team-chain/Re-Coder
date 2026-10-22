@@ -1,3 +1,12 @@
+# 구조 다이어그램 (2026-10-22, 2.0.42)
+
+- webview-src/components/structureLayout.ts — roleOf(path, {kind}) 역할 추정(support → 스타일/html → frontend·client·web·webview-src 는 ui → data → entry → ui → logic → 확장자). layoutLanes(nodes{id,role,group,groupLabel,order}, edges, {colW,nodeW,nodeH,maxCols(레인 안 단계 상한),maxRows(한 열 상한 → 보조 열),mergeSingletons(노드 하나뿐인 그룹을 한 상자로)}) → 레인(ROLE_ORDER 순서, 가로) · 그룹 상자(레인 폭 전체, 세로로 쌓음) · 노드(레인 안 단계 = 같은 레인 안 선의 최장 경로, 반복 DFS 로 순환 끊음). edgeRoute(오른쪽 S 곡선 / 같은 열 옆으로 / 되돌아가면 아래로 크게 + backward). aggregateFolders(최상위 파일은 역할별로 나눔 `(최상위)#role`). fit(글자 폭 자르기, 한글 1.75배), groupColor.
+- StructureDiagram.tsx — SVG 한 장(레인·그룹·선·노드), 처음엔 폭 맞춤(최소 75%), −/+/맞춤, 마우스 올리면 이웃 선만, 선 40개 넘으면 기본 흐리게, focusId 로 자동 스크롤, 노드 attrs(data-flow-node·data-map-node) 그대로 붙임, markerUnits=userSpaceOnUse(굵은 선에서 화살촉이 커지지 않게).
+- CodeMap — projectDiagram(project, files|folders, focus, showAll)(스타일·config 기본 숨김, 60개 초과면 폴더 단위, 폴더 클릭 → 그 폴더 파일 + 이웃 폴더 노드), fileDiagram(클래스별 상자). 옛 layoutProject·layoutGrid·NodeChip·Canvas 제거.
+- FlowDryRun — 도달한 함수 전부를 역할 레인·파일 상자에, 효과(DB·외부 API·AWS·비밀값·파일·명령)를 external 레인 sink 노드로(data-flow-sink), 단계 상태(current/visited/future)·지난 선·지금 선. 옛 layoutDryRun·edgePath 제거.
+- 시험: webview-tests/structureDiagram.test.js(역할 표, 레인 순서·겹침 없음·상자 안·레인 안 왼→오, 3000 노드 2초 안·20000 사슬, 선 모양, 실제 Express 프로젝트 dry run 렌더 — 레인 4개·sink·여러 열, 아키텍처 폴더 단위·펼치기). 실제 저장소(쇼핑몰 기반·확장 src·core 429 파일) 브라우저 캡처로 확인.
+- 남은 개선: 레인 안 그룹 상자가 레인 폭 전체라 앞 열이 비면 왼쪽 여백이 남음. 역할 추정은 이름 기반(규칙 밖 구조는 처리/기타로).
+
 # 수정·MCP 실행 정책 (2026-10-20, 2.0.41)
 
 - 이전 2.0.40 `687c68dc`의 [전체 CI 12개](https://github.com/team-chain/Re-Coder/actions/runs/39301281550) 성공 확인 후 진행했다.

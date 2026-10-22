@@ -8,7 +8,7 @@ const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 const { analyzeFlow, previewFlow } = require('../out/codemap/flow.js');
 const { AnalysisJob } = require('../out/codemap/analysisJob.js');
-const { dryRun, layoutDryRun, findingsByNode } = require('../out/webview-test/components/dryRunModel.js');
+const { dryRun, findingsByNode } = require('../out/webview-test/components/dryRunModel.js');
 const { FlowDryRun } = require('../out/webview-test/components/FlowDryRun.js');
 
 function project(files) {
@@ -274,22 +274,6 @@ test('dry run: 호출 순서대로 깊이 우선 · 이미 지난 곳·재귀는
     assert.equal(limited.steps.length, 3);
     assert.equal(dryRun(g, 'no-such-node').steps.length, 0);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
-});
-
-test('dry run 배치: 좁은 사이드바부터 넓은 화면까지 노드가 겹치지 않는다', () => {
-  const nodes = Array.from({ length: 30 }, (_, i) => ({ id: `n${i}`, file: 'a.js', name: `n${i}`, line: i + 1, endLine: i + 1, kind: 'function', effects: [], hash: '' }));
-  const edges = nodes.slice(1).map((n, i) => ({ from: i < 10 ? 'n0' : `n${i - 9}`, to: n.id, line: 1, order: i, certainty: 'direct' }));
-  const g = { kind: 'flow', source: 'source', root: '/', files_scanned: 1, nodes, edges, entries: [], truncated: false, notes: [] };
-  const r = dryRun(g, 'n0');
-  for (const width of [320, 540, 960]) {
-    const layout = layoutDryRun(r, width);
-    const pos = [...layout.pos.values()];
-    assert.equal(pos.length, new Set(r.steps.map(s => s.node)).size);
-    for (const p of pos) assert.ok(p.x >= 75 && p.x <= width - 75, `width ${width}: x ${p.x}`);
-    for (let i = 0; i < pos.length; i++) for (let j = i + 1; j < pos.length; j++) {
-      assert.ok(Math.abs(pos[i].x - pos[j].x) >= 160 || Math.abs(pos[i].y - pos[j].y) >= 80, `겹침 ${JSON.stringify([pos[i], pos[j]])}`);
-    }
-  }
 });
 
 test('보안 발견은 그 줄을 품은 가장 안쪽 함수에 붙는다(대상 폴더 기준 경로 포함)', () => {
