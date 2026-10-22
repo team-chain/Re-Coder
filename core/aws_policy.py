@@ -510,6 +510,9 @@ def _ecs_statements(
             "Action": [
                 "elasticloadbalancing:DescribeTargetGroups",
                 "elasticloadbalancing:DescribeLoadBalancers",
+                # 2.0.26 대규모 방패·정리 — 리스너와 태그 조회(리소스 단위 제한 미지원, 읽기 전용)
+                "elasticloadbalancing:DescribeListeners",
+                "elasticloadbalancing:DescribeTags",
             ],
             "Resource": "*",
             "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
@@ -663,7 +666,9 @@ def _ecs_statements(
             "Action": ["iam:CreateServiceLinkedRole"],
             "Resource": "*",
             "Condition": {
-                "StringEquals": {"iam:AWSServiceName": "ecs.amazonaws.com"}
+                # 2.0.26: 계정의 첫 로드밸런서도 AWS 가 ELB 서비스 연결 역할을 만든다(대규모 방패).
+                "StringEquals": {"iam:AWSServiceName": ["ecs.amazonaws.com", "elasticloadbalancing.amazonaws.com",
+                                                        "rds.amazonaws.com"]}
             },
         },
         {
@@ -693,8 +698,292 @@ def _ecs_statements(
                 "ec2:DescribeRouteTables",
                 "ec2:DescribeSecurityGroups",
                 "ec2:DescribeNetworkInterfaces",
+                # 2.0.32 — 로드밸런서를 만들 때 ELB 가 호출자 권한으로 계정·인터넷 게이트웨이·주소를 확인한다
+                # (ElasticLoadBalancingFullAccess 가 함께 주는 읽기 권한).
+                "ec2:DescribeInternetGateways",
+                "ec2:DescribeAccountAttributes",
+                "ec2:DescribeAddresses",
             ],
             "Resource": "*",
+        },
+        {
+            # 2.0.25 공격·장애 감지 알림(ops_alerts) — 방패 접속 기록으로 요청·차단·오류 지표를 만들고(PutMetricFilter),
+            # 원인 IP·경로를 Logs Insights 로 뽑는다(StartQuery). 없어도 배포는 되고 알림만 빠진다.
+            "Sid": "OpsAlertLogs",
+            "Effect": "Allow",
+            "Action": ["logs:PutMetricFilter", "logs:StartQuery"],
+            "Resource": _arn("logs", "log-group:/ecs/*", ctx),
+        },
+        {
+            # 지표 읽기·쿼리 결과 읽기는 리소스 단위 제한을 지원하지 않는다(읽기 전용).
+            "Sid": "OpsAlertRead",
+            "Effect": "Allow",
+            "Action": ["cloudwatch:GetMetricData", "logs:GetQueryResults"],
+            "Resource": "*",
+        },
+        {
+            # PC 가 꺼져 있어도 AWS 가 직접 메일을 보내도록 recoder-* 경보와 알림 주제만 만든다.
+            "Sid": "OpsAlertAlarms",
+            "Effect": "Allow",
+            "Action": ["cloudwatch:PutMetricAlarm", "cloudwatch:TagResource"],
+            "Resource": _arn("cloudwatch", "alarm:recoder-*", ctx),
+        },
+        {
+            "Sid": "OpsAlertTopic",
+            "Effect": "Allow",
+            "Action": ["sns:CreateTopic", "sns:Subscribe", "sns:TagResource"],
+            "Resource": _arn("sns", "recoder-*", ctx),
+        },
+        {
+            # 2.0.23 — ReCoder 가 **새로 만든** 리소스에 recoder:managed 태그를 붙인다.
+            # 정리 기능이 "ReCoder 가 만든 것만" 찾는 표시다(aws_infra.tag_created).
+            # 태그 키를 recoder:* 로만 제한해 다른 태그(비용 배분 등)는 건드리지 못하게 한다.
+            # 없어도 배포는 된다(태그만 빠진다).
+            "Sid": "TagRecoderResources",
+            "Effect": "Allow",
+            "Action": ["ecs:TagResource", "ecr:TagResource", "logs:TagResource", "ec2:CreateTags"],
+            "Resource": [
+                _arn("ecs", f"cluster/{cluster}", ctx),
+                _arn("ecs", f"service/{cluster}/{service}", ctx),
+                _arn("ecs", "task-definition/*", ctx),
+                repo,
+                _arn("logs", "log-group:/ecs/*", ctx),
+                _arn("ec2", "security-group/*", ctx),
+            ],
+            "Condition": {"ForAllValues:StringLike": {"aws:TagKeys": ["recoder:*"]}},
+        },
+        # ── 2.0.26 대규모 방패(ALB + WAF, 선택) ─────────────────────────────────────────
+        # 이름은 aws_edge.edge_name() 이 항상 recoder- 로 시작하게 만든다. 없어도 기본 배포는 된다.
+        {
+            "Sid": "EdgeLoadBalancer",
+            "Effect": "Allow",
+            "Action": [
+                "elasticloadbalancing:CreateLoadBalancer",
+                "elasticloadbalancing:CreateTargetGroup",
+                "elasticloadbalancing:CreateListener",
+                "elasticloadbalancing:ModifyListener",
+                "elasticloadbalancing:ModifyTargetGroup",
+                "elasticloadbalancing:ModifyTargetGroupAttributes",
+                "elasticloadbalancing:AddTags",
+                "elasticloadbalancing:SetWebAcl",
+                # 2.0.27 HTTPS 주소 — ALB 가 받는 곳을 CloudFront 전용 보안 그룹으로 바꾼다
+                "elasticloadbalancing:SetSecurityGroups",
+                # 실패 때 이번에 만든 것 되돌리기 + 「AWS 리소스 정리」
+                "elasticloadbalancing:DeleteListener",
+                "elasticloadbalancing:DeleteLoadBalancer",
+                "elasticloadbalancing:DeleteTargetGroup",
+            ],
+            "Resource": [
+                _arn("elasticloadbalancing", "loadbalancer/app/recoder-*/*", ctx),
+                _arn("elasticloadbalancing", "targetgroup/recoder-*/*", ctx),
+                _arn("elasticloadbalancing", "listener/app/recoder-*/*/*", ctx),
+            ],
+        },
+        {
+            "Sid": "EdgeWaf",
+            "Effect": "Allow",
+            "Action": [
+                "wafv2:CreateWebACL",
+                "wafv2:GetWebACL",
+                "wafv2:UpdateWebACL",
+                "wafv2:DeleteWebACL",
+                "wafv2:AssociateWebACL",
+                "wafv2:DisassociateWebACL",
+                "wafv2:ListTagsForResource",
+                "wafv2:TagResource",
+            ],
+            "Resource": [
+                _arn("wafv2", "regional/webacl/recoder-*/*", ctx),
+                # 2.0.31 HTTPS 주소 + WAF — CloudFront 에 붙이는 웹 ACL 은 전역 범위(us-east-1 에만 있음)
+                f"arn:{ctx.partition}:wafv2:us-east-1:{ctx.account}:global/webacl/recoder-*/*",
+                _arn("elasticloadbalancing", "loadbalancer/app/recoder-*/*", ctx),
+            ],
+        },
+        {
+            # 이름으로 웹 ACL 찾기 · ALB 에 붙은 웹 ACL 확인 — 리소스 단위 제한 미지원(읽기 전용).
+            "Sid": "EdgeWafRead",
+            "Effect": "Allow",
+            "Action": ["wafv2:ListWebACLs", "wafv2:GetWebACLForResource"],
+            "Resource": "*",
+            # 전역 범위(CloudFront) 웹 ACL 목록은 us-east-1 에서만 조회된다.
+            "Condition": {"StringEquals": {"aws:RequestedRegion": sorted({ctx.region, "us-east-1"})}},
+        },
+        {
+            # 2.0.31 원본 잠금 — CloudFront 의 비밀 머리글이 맞는 요청만 앱으로 넘기는 리스너 규칙(aws_edge.lock_origin).
+            "Sid": "EdgeOriginLock",
+            "Effect": "Allow",
+            "Action": ["elasticloadbalancing:CreateRule", "elasticloadbalancing:ModifyRule",
+                       "elasticloadbalancing:DeleteRule"],
+            "Resource": [
+                _arn("elasticloadbalancing", "listener/app/recoder-*/*/*", ctx),
+                _arn("elasticloadbalancing", "listener-rule/app/recoder-*/*/*/*", ctx),
+            ],
+        },
+        {
+            # 리스너 규칙 조회 — 리소스 단위 제한 미지원(읽기 전용).
+            "Sid": "EdgeOriginLockRead",
+            "Effect": "Allow",
+            "Action": ["elasticloadbalancing:DescribeRules"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        # ── 2.0.27 HTTPS 주소(CloudFront + 선택: 내 도메인 ACM·Route 53) ─────────────────────
+        {
+            # 만들기는 리소스 단위 제한이 없다 — 대신 recoder:managed 태그를 붙여 만들 때만 허용한다.
+            "Sid": "HttpsCreateDistribution",
+            "Effect": "Allow",
+            "Action": ["cloudfront:CreateDistribution", "cloudfront:TagResource"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestTag/recoder:managed": "true"}},
+        },
+        {
+            "Sid": "HttpsManageDistribution",
+            "Effect": "Allow",
+            "Action": ["cloudfront:GetDistribution", "cloudfront:GetDistributionConfig", "cloudfront:UpdateDistribution",
+                       "cloudfront:DeleteDistribution", "cloudfront:ListTagsForResource"],
+            "Resource": f"arn:{ctx.partition}:cloudfront::{ctx.account}:distribution/*",
+        },
+        {
+            # 목록·CloudFront 주소 목록(접두사 목록)·도메인 영역 찾기 — 리소스 단위 제한 미지원(읽기 전용).
+            "Sid": "HttpsRead",
+            "Effect": "Allow",
+            "Action": ["cloudfront:ListDistributions", "ec2:DescribeManagedPrefixLists", "acm:ListCertificates",
+                       "route53:ListHostedZonesByName"],
+            "Resource": "*",
+        },
+        {
+            # CloudFront 인증서는 us-east-1 에만 둘 수 있다. 2.0.35 원본 구간 HTTPS(origin.<도메인> → ALB 443)의
+            # 인증서는 ALB 와 같은 배포 리전에 둔다.
+            "Sid": "HttpsCertificate",
+            "Effect": "Allow",
+            "Action": ["acm:AddTagsToCertificate", "acm:DescribeCertificate",
+                       "acm:ListTagsForCertificate", "acm:DeleteCertificate"],
+            "Resource": sorted({f"arn:{ctx.partition}:acm:us-east-1:{ctx.account}:certificate/*",
+                                f"arn:{ctx.partition}:acm:{ctx.region}:{ctx.account}:certificate/*"}),
+        },
+        {
+            # 2.0.32 — RequestCertificate 는 리소스 단위 제한을 지원하지 않는다(인증서 ARN 에 걸면 늘 거절).
+            # 대신 us-east-1 과 recoder:managed 태그를 붙인 요청으로만 좁힌다.
+            "Sid": "HttpsRequestCertificate",
+            "Effect": "Allow",
+            "Action": ["acm:RequestCertificate"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": sorted({"us-east-1", ctx.region}),
+                                           "aws:RequestTag/recoder:managed": "true"}},
+        },
+        {
+            # 인증서 검증 CNAME 과 도메인 별칭(A·AAAA)만 넣는다.
+            "Sid": "HttpsDomainRecords",
+            "Effect": "Allow",
+            "Action": ["route53:ChangeResourceRecordSets"],
+            "Resource": f"arn:{ctx.partition}:route53:::hostedzone/*",
+            "Condition": {"ForAllValues:StringEquals": {"route53:ChangeResourceRecordSetsRecordTypes": ["CNAME", "A", "AAAA"]}},
+        },
+        {
+            # 2.0.31 — 도메인에 이미 다른 곳을 가리키는 레코드가 있으면 덮어쓰지 않으려고 먼저 읽는다(aws_cdn.point_domain).
+            "Sid": "HttpsDomainRecordsRead",
+            "Effect": "Allow",
+            "Action": ["route53:ListResourceRecordSets"],
+            "Resource": f"arn:{ctx.partition}:route53:::hostedzone/*",
+        },
+        # ── 2.0.27 관리형 DB(RDS PostgreSQL) — 이름은 aws_rds.db_identifier() 가 recoder- 로 시작하게 만든다 ──
+        {
+            "Sid": "ManagedDatabase",
+            "Effect": "Allow",
+            "Action": ["rds:CreateDBInstance", "rds:ModifyDBInstance", "rds:DeleteDBInstance", "rds:CreateDBSnapshot",
+                       "rds:StartDBInstance",
+                       "rds:CreateDBSubnetGroup", "rds:DeleteDBSubnetGroup", "rds:CreateDBParameterGroup",
+                       "rds:ModifyDBParameterGroup", "rds:DeleteDBParameterGroup", "rds:AddTagsToResource",
+                       "rds:ListTagsForResource"],
+            "Resource": [
+                _arn("rds", "db:recoder-*", ctx),
+                _arn("rds", "subgrp:recoder-*", ctx),
+                _arn("rds", "pg:recoder-*", ctx),
+                _arn("rds", "snapshot:recoder-*", ctx),
+                # 기본 옵션 그룹(default:postgres-NN) — 새 인스턴스가 쓰는 것을 고를 수 없다.
+                _arn("rds", "og:default:postgres-*", ctx),
+            ],
+        },
+        {
+            # 목록·버전 조회 — 리소스 단위 제한 미지원(읽기 전용), 리전으로 좁힌다.
+            "Sid": "ManagedDatabaseRead",
+            "Effect": "Allow",
+            "Action": ["rds:DescribeDBInstances", "rds:DescribeDBSubnetGroups", "rds:DescribeDBParameterGroups",
+                       "rds:DescribeDBEngineVersions", "secretsmanager:ListSecrets"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        {
+            # DB 접속 정보 비밀(recoder/<서비스>/database)만.
+            "Sid": "ManagedDatabaseSecret",
+            "Effect": "Allow",
+            "Action": ["secretsmanager:CreateSecret", "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue",
+                       "secretsmanager:DeleteSecret", "secretsmanager:TagResource",
+                       # 2.0.31 정리로 삭제 예정(7일)이 된 비밀을 다시 배포할 때 되살린다(aws_rds._restore)
+                       "secretsmanager:DescribeSecret", "secretsmanager:RestoreSecret"],
+            "Resource": _arn("secretsmanager", "secret:recoder/*", ctx),
+        },
+        # ── 2.0.26 AWS 리소스 정리 — 지우는 것은 recoder:managed 태그를 다시 확인한 것만(aws_cleanup) ──
+        {
+            # 목록 조회 — 리소스 단위 제한을 지원하지 않는 읽기 전용 액션.
+            "Sid": "CleanupList",
+            "Effect": "Allow",
+            "Action": ["ecs:ListClusters", "ecs:ListTaskDefinitions", "cloudwatch:DescribeAlarms", "sns:ListTopics",
+                       "ecr:DescribeRepositories"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        {
+            "Sid": "CleanupListServices",
+            "Effect": "Allow",
+            "Action": ["ecs:ListServices"],
+            "Resource": "*",
+            "Condition": {"ArnLike": {"ecs:cluster": _arn("ecs", f"cluster/{cluster}", ctx)}},
+        },
+        {
+            # 태스크 정의 등록 해제는 리소스 단위 제한을 지원하지 않는다(해제해도 요금·실행에는 영향 없음).
+            "Sid": "CleanupTaskDefinitions",
+            "Effect": "Allow",
+            "Action": ["ecs:DeregisterTaskDefinition"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
+        {
+            "Sid": "CleanupReadTags",
+            "Effect": "Allow",
+            "Action": ["ecs:ListTagsForResource", "ecr:ListTagsForResource", "ecr:DescribeImages",
+                       "logs:ListTagsForResource", "cloudwatch:ListTagsForResource", "sns:ListTagsForResource"],
+            "Resource": [
+                _arn("ecs", f"cluster/{cluster}", ctx),
+                _arn("ecs", f"service/{cluster}/{service}", ctx),
+                _arn("ecs", "task-definition/*", ctx),
+                repo,
+                _arn("logs", "log-group:/ecs/*", ctx),
+                _arn("cloudwatch", "alarm:recoder-*", ctx),
+                _arn("sns", "recoder-*", ctx),
+            ],
+        },
+        {
+            "Sid": "CleanupDelete",
+            "Effect": "Allow",
+            "Action": ["ecs:DeleteService", "ecs:DeleteCluster", "ecr:DeleteRepository", "logs:DeleteLogGroup",
+                       "cloudwatch:DeleteAlarms", "sns:DeleteTopic"],
+            "Resource": [
+                _arn("ecs", f"cluster/{cluster}", ctx),
+                _arn("ecs", f"service/{cluster}/{service}", ctx),
+                repo,
+                _arn("logs", "log-group:/ecs/*", ctx),
+                _arn("cloudwatch", "alarm:recoder-*", ctx),
+                _arn("sns", "recoder-*", ctx),
+            ],
+        },
+        {
+            # 보안 그룹은 이름으로 좁힐 수 없다 — ReCoder 태그가 붙은 그룹만 지울 수 있게 조건을 건다.
+            "Sid": "CleanupSecurityGroups",
+            "Effect": "Allow",
+            "Action": ["ec2:DeleteSecurityGroup"],
+            "Resource": _arn("ec2", "security-group/*", ctx),
+            "Condition": {"StringEquals": {"ec2:ResourceTag/recoder:managed": "true"}},
         },
         {
             # 앱 포트를 여는 보안 그룹을 만든다.
@@ -737,8 +1026,20 @@ def _s3_statements(ctx: ArnContext) -> list[dict]:
                 "s3:PutBucketWebsite",
                 "s3:PutBucketPolicy",
                 "s3:PutBucketPublicAccessBlock",
+                # 2.0.23 — 새로 만든 버킷에 recoder:managed 태그(정리 기능이 찾는 표시)
+                "s3:PutBucketTagging",
+                # 2.0.26 AWS 리소스 정리 — 태그 확인 후 비운 버킷 삭제
+                "s3:GetBucketTagging",
+                "s3:DeleteBucket",
             ],
             "Resource": bucket,
+        },
+        {
+            # 정리 목록 — 버킷 목록 조회는 계정 단위라 리소스를 좁힐 수 없다(읽기 전용).
+            "Sid": "S3CleanupList",
+            "Effect": "Allow",
+            "Action": ["s3:ListAllMyBuckets"],
+            "Resource": "*",
         },
         {
             "Sid": "S3StaticSiteObjects",
@@ -908,3 +1209,43 @@ def used_actions(policy: dict) -> list[str]:
         value = stmt.get("Action", [])
         actions.update([value] if isinstance(value, str) else value)
     return sorted(actions)
+
+
+# ---------------------------------------------------------------------------
+# 관리형 정책 크기 — 한 문서 6,144자(공백 제외) 한도 (2.0.27)
+# ---------------------------------------------------------------------------
+#
+# 2.0.25 부터 권한표가 한 관리형 정책 한도를 넘었다(CloudFormation 스택이 "Cannot exceed quota for
+# PolicySize: 6144" 로 실패). 문장을 순서대로 묶어 한도 안의 문서 여러 개로 나눈다 — 사용자·역할 하나에
+# 관리형 정책을 여러 개 붙일 수 있다(기본 10개).
+
+MANAGED_POLICY_LIMIT = 6144
+#: 자리표시자가 실제 값으로 바뀌어도 넘지 않게 가장 긴 값으로 잰다.
+_WORST_CASE = {ACCOUNT_PLACEHOLDER: "123456789012", REGION_PLACEHOLDER: "ap-southeast-5",
+               PARTITION_PLACEHOLDER: "aws-us-gov"}
+
+
+def policy_size(document: dict) -> int:
+    """IAM 이 세는 크기(공백 제외) — 자리표시자는 가장 긴 실제 값으로 바꿔 잰다."""
+    text = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+    for placeholder, value in _WORST_CASE.items():
+        text = text.replace(placeholder, value)
+    return len(re.sub(r"\s", "", text))
+
+
+def split_policy(policy: dict, limit: int = MANAGED_POLICY_LIMIT) -> list[dict]:
+    """문장 순서를 지키며 한도 안의 문서 여러 개로 나눈다. 문장 하나가 한도를 넘으면 ValueError."""
+    chunks: list[dict] = []
+    current: list[dict] = []
+    for stmt in policy.get("Statement", []):
+        trial = {"Version": policy.get("Version", "2012-10-17"), "Statement": current + [stmt]}
+        if current and policy_size(trial) > limit:
+            chunks.append({"Version": policy.get("Version", "2012-10-17"), "Statement": current})
+            current = [stmt]
+        else:
+            current = current + [stmt]
+        if policy_size({"Version": "2012-10-17", "Statement": [stmt]}) > limit:
+            raise ValueError(f"문장 하나({stmt.get('Sid')})가 관리형 정책 한도({limit}자)를 넘습니다.")
+    if current:
+        chunks.append({"Version": policy.get("Version", "2012-10-17"), "Statement": current})
+    return chunks

@@ -47,9 +47,8 @@ def _strip_subs(value):
 
 
 def test_템플릿_정책은_aws_policy_와_한_벌이다() -> None:
-    doc = _strip_subs(
-        _template()["Resources"]["RecoderDeployPolicy"]["Properties"]["PolicyDocument"]
-    )
+    docs = [_strip_subs(d) for d in aws_onboarding.policy_documents(_template())]
+    doc = {"Version": "2012-10-17", "Statement": [st for d in docs for st in d["Statement"]]}
     exec_role, task_role = aws_policy.resolve_roles("", "")
     expected = aws_policy.build_policy(
         None, "", "", exec_role, task_role=task_role,
@@ -72,7 +71,12 @@ def test_자리표시자가_템플릿에_남지_않는다() -> None:
 
 def test_필수_자원과_출력이_있다() -> None:
     t = _template()
-    assert set(t["Resources"]) == {"RecoderDeployPolicy", "RecoderDeployUser", "RecoderDeployKey"}
+    policies = {k for k, v in t["Resources"].items() if v["Type"] == "AWS::IAM::ManagedPolicy"}
+    assert "RecoderDeployPolicy" in policies
+    assert set(t["Resources"]) == policies | {"RecoderDeployUser", "RecoderDeployKey"}
+    #: 나뉜 정책을 모두 사용자에게 붙인다
+    assert t["Resources"]["RecoderDeployUser"]["Properties"]["ManagedPolicyArns"] == [{"Ref": p} for p in sorted(
+        policies, key=lambda n: (len(n), n))]
     assert {"AccessKeyId", "SecretAccessKey"} <= set(t["Outputs"])
     #: 키 발급은 반드시 우리가 만든 사용자에게.
     assert t["Resources"]["RecoderDeployKey"]["Properties"]["UserName"] == {"Ref": "RecoderDeployUser"}
@@ -121,3 +125,19 @@ def test_infra_템플릿_파일이_생성기_출력과_일치한다() -> None:
     assert json.loads(out.read_text(encoding="utf-8")) == _template(), (
         "산출물이 낡았다 — python3 scripts/generate_iam_template.py 로 재생성해 커밋할 것"
     )
+
+
+
+def test_관리형_정책은_하나도_6144자를_넘지_않는다() -> None:
+    """2.0.25 부터 한 문서가 한도를 넘어 스택 생성이 실패하던 것을 막는다(공백 제외·가장 긴 리전 기준)."""
+    import re as _re
+    t = _template()
+    docs = aws_onboarding.policy_documents(t)
+    for doc in docs:
+        text = json.dumps(_strip_subs(doc), separators=(",", ":"), ensure_ascii=False)
+        text = (text.replace("${AWS::AccountId}", "123456789012").replace("${AWS::Region}", "ap-southeast-5")
+                    .replace("${AWS::Partition}", "aws-us-gov"))
+        assert len(_re.sub(r"\s", "", text)) <= 6144
+    sids = [st["Sid"] for d in docs for st in d["Statement"]]
+    assert len(sids) == len(set(sids))
+    assert len(docs) <= 10, "사용자 하나에 붙일 수 있는 관리형 정책 수(기본 10)를 넘는다"

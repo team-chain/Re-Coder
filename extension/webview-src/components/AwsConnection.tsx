@@ -14,6 +14,8 @@ type AwsStatus = {
   message?: string;
   role_arn?: string;
   expires_at?: string;
+  /** 2.0.29 루트 키 연결 등 과도한 권한 경고 */
+  security_warnings?: string[];
   permission_check?: {
     inspected: boolean;
     required_actions: string[];
@@ -176,6 +178,11 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
     const permission = status.permission_check;
     return <div style={card}>
       <div style={{ color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 15, fontWeight: 700 }}>✓ AWS 연결됨</div>
+      {(status.security_warnings ?? []).map((w) => (
+        <div key={w} role="alert" data-testid="aws-security-warning" style={{ marginTop: 10, padding: "9px 10px", borderRadius: 5, background: "rgba(244, 135, 113, .12)", border: "1px solid rgba(244, 135, 113, .45)", color: "var(--vscode-errorForeground, #f48771)", fontSize: 11.5, lineHeight: 1.55 }}>
+          <b>위험한 키입니다.</b> {w}
+        </div>
+      ))}
       <div style={{ marginTop: 9, fontSize: 12, lineHeight: 1.6 }}>
         <div>계정: <b>{status.identity?.account ?? "확인됨"}</b></div>
         <div>리전: <b>{status.region || "미확인"}</b>{status.storage !== "assumed_role" && status.access_key_last4 ? ` · 키 끝 ${status.access_key_last4}` : ""}{status.storage === "aws_profile" && status.profile ? ` · 프로필 ${status.profile}` : ""}</div>

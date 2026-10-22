@@ -133,3 +133,45 @@ export const FallbackDocsNote: React.FC<{ files?: string[] | null }> = ({ files 
     </div>
   );
 };
+
+/** 2.0.28 AI 코드 보안 점수 — 코어 code_security.report. */
+export interface SecurityReport {
+  score: number | null;
+  rules: Array<{ rule: string; label: string; applicable: boolean; passed: boolean; count: number; severity?: string }>;
+  findings: Array<{ rule: string; label: string; file: string; line: number; message: string; severity: string; precise?: boolean; fix: string }>;
+}
+
+const SEVERITY_KO: Record<string, string> = { high: "심각", medium: "보통", low: "낮음" };
+
+export const SecurityScoreNote: React.FC<{ report?: SecurityReport | null }> = ({ report }) => {
+  if (!report || report.score === null || report.score === undefined) return null;
+  const tone = report.score >= 90 ? "var(--vscode-testing-iconPassed, #73c991)"
+    : report.score >= 70 ? "var(--vscode-editorWarning-foreground, #cca700)" : "var(--vscode-errorForeground, #f48771)";
+  const checked = report.rules.filter(r => r.applicable);
+  return (
+    <section data-testid="code-security" aria-label="AI 코드 보안 점수"
+      style={{ border: "1px solid var(--vscode-panel-border,#3b3b3b)", borderRadius: 6, padding: "7px 10px", margin: "0 0 8px", fontSize: 11, lineHeight: 1.5 }}>
+      <div style={{ fontWeight: 600 }}>
+        AI 코드 보안 점검 <span style={{ color: tone }}>{report.score}점</span>
+        <span style={{ fontWeight: 400, color: "var(--vscode-descriptionForeground,#999)" }}>
+          {" "}· 규칙 {checked.length}개 중 {checked.filter(r => r.passed).length}개 통과
+        </span>
+      </div>
+      {report.findings.length > 0 ? (
+        <details>
+          <summary style={{ cursor: "pointer" }}>확인할 곳 {report.findings.length}곳</summary>
+          <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+            {report.findings.slice(0, 12).map((f, i) => (
+              <li key={`${f.file}:${f.line}:${i}`}>
+                <b>{f.label}</b> ({SEVERITY_KO[f.severity] ?? f.severity}) <code style={{ fontSize: 10.5 }}>{f.file}:{f.line}</code> — {f.message}
+                <div style={{ color: "var(--vscode-descriptionForeground,#999)" }}>고치는 법: {f.fix}</div>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : (
+        <div style={{ color: "var(--vscode-descriptionForeground,#999)" }}>AI 가 자주 하는 보안 실수(SQL 인젝션·평문 비밀번호·위험한 JWT·CORS 등)가 보이지 않습니다.</div>
+      )}
+    </section>
+  );
+};

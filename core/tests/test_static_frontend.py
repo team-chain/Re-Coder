@@ -45,11 +45,11 @@ def test_approved_static_dockerfile_saves_ignore_without_overwriting_user_rules(
     proposal=InfraFileProposal(file_type=FileType.DOCKERFILE,target_path='Dockerfile',content=content,base_template=template,risk_reasons=[STATIC_IGNORE_NOTICE])
     result=_write_proposal_to_workspace(proposal,str(tmp_path),proposal.proposal_id)
     assert result['status']=='saved'
-    assert (tmp_path/'.dockerignore').read_text()==STATIC_DOCKERIGNORE
+    assert (tmp_path/'.dockerignore').read_text(encoding="utf-8")==STATIC_DOCKERIGNORE
     assert result['additional_paths']==[str(tmp_path/'.dockerignore')]
-    (tmp_path/'.dockerignore').write_text('custom-rules\n')
+    (tmp_path/'.dockerignore').write_text('custom-rules\n', encoding="utf-8")
     _write_proposal_to_workspace(proposal,str(tmp_path),proposal.proposal_id)
-    assert (tmp_path/'.dockerignore').read_text()=='custom-rules\n'
+    assert (tmp_path/'.dockerignore').read_text(encoding="utf-8")=='custom-rules\n'
 
 
 def test_frontend_legacy_generator_uses_same_template(tmp_path):
@@ -64,7 +64,7 @@ def test_compose_probe_uses_the_generated_nginx_runtime(tmp_path):
     from infra_agent import compose_health_check_block
     package(tmp_path)
     content,_=frontend_dockerfile(str(tmp_path),3000)
-    (tmp_path/'Dockerfile').write_text(content)
+    (tmp_path/'Dockerfile').write_text(content, encoding="utf-8")
     check=compose_health_check_block('node-express','3000',workspace_path=str(tmp_path))
     assert '"wget"' in check and '"node"' not in check
     assert 'http://127.0.0.1:3000/health' in check
@@ -79,7 +79,7 @@ def test_server_frameworks_keep_existing_runtime(tmp_path,framework):
 def test_vite_config_uses_static_runtime_and_explicit_output(tmp_path):
     package(tmp_path,dependencies={'vite':'5.4.0'},scripts={'build':'vite build'})
     assert static_frontend_output(str(tmp_path))=='dist'
-    (tmp_path/'vite.config.ts').write_text('export default {build:{outDir:"site"}}')
+    (tmp_path/'vite.config.ts').write_text('export default {build:{outDir:"site"}}', encoding="utf-8")
     assert static_frontend_output(str(tmp_path)) == 'dist'
     content, template = frontend_dockerfile(str(tmp_path))
     assert template == 'Dockerfile.node-static'
@@ -91,7 +91,7 @@ def test_vite_config_uses_static_runtime_and_explicit_output(tmp_path):
 
 def test_standard_react_vite_config_is_not_an_express_server(tmp_path):
     package(tmp_path, dependencies={'react':'18','vite':'5'}, scripts={'build':'vite build'})
-    (tmp_path/'vite.config.js').write_text("import react from '@vitejs/plugin-react'; export default {plugins:[react()],server:{port:3000}}")
+    (tmp_path/'vite.config.js').write_text("import react from '@vitejs/plugin-react'; export default {plugins:[react()],server:{port:3000}}", encoding="utf-8")
     content, template = _dockerfile_from_template(str(tmp_path), StackType.NODE_EXPRESS, SimpleNamespace(default_port=3000))
     assert template == 'Dockerfile.node-static' and 'nginx' in content
 
@@ -103,7 +103,7 @@ def test_older_static_images_keep_their_compose_probe_after_template_update(tmp_
     previous = content.replace('RUN apk upgrade --no-cache && printf', 'RUN printf')
     previous = previous.replace('RUN test -s /app/build/index.html\n', '')
     path = tmp_path/'Dockerfile'
-    path.write_text(previous)
+    path.write_text(previous, encoding="utf-8")
     assert generated_static_runtime_port(path) == 8081
 
 
@@ -122,9 +122,9 @@ def test_static_runtimes_from_1_1_28_are_still_recognized(tmp_path):
         old = old.replace('CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/health"]', 'CMD wget -q -O /dev/null http://127.0.0.1:8081/health || exit 1')
         assert old != content
         for text in (content, old, old.replace('RUN apk upgrade --no-cache && printf', 'RUN printf')):
-            (root / 'Dockerfile').write_text(text)
+            (root / 'Dockerfile').write_text(text, encoding="utf-8")
             assert generated_static_runtime_port(root / 'Dockerfile') == 8081
-        (root / 'Dockerfile').write_text(old.replace('|| exit 1', '|| exit 2'))
+        (root / 'Dockerfile').write_text(old.replace('|| exit 1', '|| exit 2'), encoding="utf-8")
         assert generated_static_runtime_port(root / 'Dockerfile') is None
 
 
@@ -137,13 +137,13 @@ def test_invalid_ports_cannot_enter_nginx_config(tmp_path,port):
 def test_plain_html_builds_without_ai_node_or_python_and_keeps_secrets_out(tmp_path):
     from static_frontend import generated_static_runtime_port
     from infra_agent import compose_health_check_block, generate_dockerfile
-    (tmp_path/'index.html').write_text('<link href="styles.css"><script src="app.js"></script>')
-    (tmp_path/'app.js').write_text('localStorage.setItem("test","ok")')
-    (tmp_path/'styles.css').write_text('body { color: blue; }')
-    (tmp_path/'.env').write_text('TOKEN=example')
-    (tmp_path/'secrets.json').write_text('{"key":"private"}')
+    (tmp_path/'index.html').write_text('<link href="styles.css"><script src="app.js"></script>', encoding="utf-8")
+    (tmp_path/'app.js').write_text('localStorage.setItem("test","ok")', encoding="utf-8")
+    (tmp_path/'styles.css').write_text('body { color: blue; }', encoding="utf-8")
+    (tmp_path/'.env').write_text('TOKEN=example', encoding="utf-8")
+    (tmp_path/'secrets.json').write_text('{"key":"private"}', encoding="utf-8")
     (tmp_path/'docs').mkdir()
-    (tmp_path/'docs'/'private.html').write_text('not public')
+    (tmp_path/'docs'/'private.html').write_text('not public', encoding="utf-8")
     assert static_frontend_output(str(tmp_path)) == '.'
     content, template = _dockerfile_from_template(str(tmp_path), StackType.UNKNOWN)
     assert template == 'Dockerfile.html-static'
@@ -151,7 +151,7 @@ def test_plain_html_builds_without_ai_node_or_python_and_keeps_secrets_out(tmp_p
     assert '*/secrets.json' in content and './docs/*' in content
     assert 'npm' not in content and 'python' not in content
     dockerfile = tmp_path/'Dockerfile'
-    dockerfile.write_text(content)
+    dockerfile.write_text(content, encoding="utf-8")
     assert generated_static_runtime_port(dockerfile) == 3000
     assert 'wget' in compose_health_check_block('unknown', '3000', workspace_path=str(tmp_path))
     assert generate_dockerfile(workspace_path=str(tmp_path)).base_template == template
@@ -159,7 +159,7 @@ def test_plain_html_builds_without_ai_node_or_python_and_keeps_secrets_out(tmp_p
 
 def test_plain_html_route_saves_ready_to_build_proposal_without_llm(tmp_path, monkeypatch):
     from api.routes import deploy
-    (tmp_path/'index.html').write_text('<h1>Board</h1>')
+    (tmp_path/'index.html').write_text('<h1>Board</h1>', encoding="utf-8")
     monkeypatch.setattr(deploy, '_get_infra_agent', lambda: None)
     proposal = asyncio.run(deploy.generate_dockerfile(deploy.DockerfileRequest(workspace_path=str(tmp_path))))
     assert proposal.base_template == 'Dockerfile.html-static'
@@ -169,22 +169,22 @@ def test_plain_html_route_saves_ready_to_build_proposal_without_llm(tmp_path, mo
 
 @pytest.mark.parametrize('marker', ['requirements.txt', 'pyproject.toml', 'package.json', 'composer.json'])
 def test_plain_html_does_not_override_unknown_backend_or_build_tool(tmp_path, marker):
-    (tmp_path/'index.html').write_text('<h1>not enough evidence</h1>')
-    (tmp_path/marker).write_text('{}')
+    (tmp_path/'index.html').write_text('<h1>not enough evidence</h1>', encoding="utf-8")
+    (tmp_path/marker).write_text('{}', encoding="utf-8")
     assert frontend_dockerfile(str(tmp_path)) is None
 
 
 def test_s3_preflight_has_no_container_requirement_even_if_dockerfile_exists(tmp_path):
     from api.routes import deploy
-    (tmp_path/'index.html').write_text('<h1>Board</h1>')
-    (tmp_path/'Dockerfile').write_text('FROM scratch')
-    (tmp_path/'.gitignore').write_text('.env\n.env.*\n')
+    (tmp_path/'index.html').write_text('<h1>Board</h1>', encoding="utf-8")
+    (tmp_path/'Dockerfile').write_text('FROM scratch', encoding="utf-8")
+    (tmp_path/'.gitignore').write_text('.env\n.env.*\n', encoding="utf-8")
     result = asyncio.run(deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path), target='s3')))
     issues = result['reasons'] + result['warnings']
     assert not any('Runtime Preflight' in issue['message'] or 'Dockerfile' in issue['message'] or '포트' in issue['message'] for issue in issues)
     (tmp_path/'.gitignore').unlink()
     result = asyncio.run(deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path), target='s3')))
     assert not result['blocked'], result['reasons']
-    (tmp_path/'.env').write_text('API_KEY=fixture')
+    (tmp_path/'.env').write_text('API_KEY=fixture', encoding="utf-8")
     result = asyncio.run(deploy.deploy_preflight(deploy.DeployPreflightRequest(workspace_path=str(tmp_path), target='s3')))
     assert any(issue['code'] == 'ENV_FILE_NOT_GITIGNORED' for issue in result['reasons'])

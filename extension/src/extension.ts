@@ -13,7 +13,9 @@
 
 import * as vscode from 'vscode';
 import { activeProjectPath, initActiveProject, pickProjectFolder } from './activeProject';
-import { isAiKeyProvider, runAiConnectCommand } from './ai/aiKeys';
+import { DiscordWebhook } from './sidebar/discordWebhook';
+import { AlertWatcher } from './ops/alertWatcher';
+import { isAiKeyProvider, isEconomyProvider, recentRoutingWrite, runAiConnectCommand, runEconomyCommand } from './ai/aiKeys';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CoreManager } from './core/CoreManager';
@@ -22,6 +24,7 @@ import { PollingService } from './core/PollingService';
 import { SidebarProvider } from './sidebar/SidebarProvider';
 import { WorkbenchSidebarProvider } from './sidebar/WorkbenchSidebarProvider';
 import { ReCoderPanel } from './sidebar/ReCoderPanel';
+import { currentQuickAccess, registerQuickAccess } from './quickAccessHost';
 import { migrateActivityBar, restoreRecoderViews, chooseSidebarLocation } from './sidebar/activityBar';
 import { TerminalCollector } from './terminal/TerminalCollector';
 import { AnalyzeRequest } from './types';
@@ -114,6 +117,17 @@ export function activate(context: vscode.ExtensionContext): void {
             { webviewOptions: { retainContextWhenHidden: true } }
         )
     );
+
+    // ── 2.0.25 공격·장애 감지 알림 — 코어가 판정한 새 알림을 VS Code·디스코드로 ──
+    const alertDiscord = new DiscordWebhook(context.secrets);
+    const alertWatcher = new AlertWatcher(apiClient, context.globalState, {
+        send: async (title, detail) => {
+            const ws = activeProjectPath();
+            if (ws && await alertDiscord.configured(ws)) { await alertDiscord.send(ws, title, detail); }
+        },
+    }, () => ReCoderPanel.showView(context.extensionUri, sidebarProvider, 'operate'));
+    context.subscriptions.push(alertWatcher);
+    alertWatcher.start();
 
     //: 확장이 다시 시작돼도 열려 있던 ReCoder 탭을 새 확장에 다시 연결한다(ReCoderPanel.revive).
     context.subscriptions.push(
@@ -469,6 +483,21 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
+    // ── Command: 절약 등급 AI 공급자 (2.0.36) ─────────────────────────────────
+    // 계획 주제·요약·오류 분류·테스트 초안만 다른 공급자(DeepSeek 등)로. 코드 생성·보안 수정은 그대로.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.ai.economy', async (provider?: unknown) => {
+            const changed = await runEconomyCommand(context, isEconomyProvider(provider) ? provider : undefined);
+            if (changed) { await vscode.commands.executeCommand('recoder.restartCore'); }
+        }),
+        vscode.workspace.onDidChangeConfiguration(async (e) => {
+            const keys = ['economyProvider', 'economyModel', 'compatibleBaseUrl', 'compatibleModel', 'anthropicModel', 'openaiModel', 'prices'];
+            if (!keys.some((k) => e.affectsConfiguration(`recoder.ai.${k}`)) || recentRoutingWrite()) { return; }
+            const pick = await vscode.window.showInformationMessage('ReCoder: AI 공급자 설정이 바뀌었습니다. Core를 다시 시작해야 적용됩니다.', 'Core 다시 시작');
+            if (pick) { await vscode.commands.executeCommand('recoder.restartCore'); }
+        }),
+    );
+
     // ── Command: 배포할 프로젝트 폴더 변경 ─────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.selectProject', async () => {
@@ -528,6 +557,27 @@ export function activate(context: vscode.ExtensionContext): void {
             void ensureCoreRunning(coreManager, sidebarProvider);
         }),
     );
+
+    //: 2.0.44 빠른 이동 — Alt+Q 로 휠, 방향키(기본 4칸) · Shift+방향키(사용자 추가 4칸) · "ReCoder: ○○ 열기" 명령.
+    registerQuickAccess(context, {
+        open: (target) => {
+            ReCoderPanel.showView(context.extensionUri, sidebarProvider, target.view, target.mapMode ? { mapMode: target.mapMode } : undefined, { stay: true });
+            void ensureCoreRunning(coreManager, sidebarProvider);
+        },
+        showWheel: (mode) => {
+            //: 휠은 잠깐 보는 것 — ReCoder 탭을 지금 편집기 그룹으로 끌고 오지 않고, 사이드바도 닫지 않는다.
+            const show = { stay: true, hideSidebar: false };
+            if (ReCoderPanel.createOrShowExisting(context.extensionUri, sidebarProvider, show) && sidebarProvider.isWorkspaceReady()) {
+                ReCoderPanel.post('quickAccess.wheel', { mode, state: currentQuickAccess() });
+                return;
+            }
+            //: 창이 없거나 아직 그리는 중 — 화면이 ready 를 보내면 띄운다(바로 보내면 React 가 듣기 전이라 사라진다).
+            sidebarProvider.requestWheel(mode);
+            ReCoderPanel.createOrShow(context.extensionUri, sidebarProvider, show);
+            void ensureCoreRunning(coreManager, sidebarProvider);
+        },
+        broadcast: (state) => sidebarProvider.broadcastQuickAccess(state),
+    });
 
     // Keep existing command IDs for shortcuts, using VS Code's actual placement commands.
     context.subscriptions.push(

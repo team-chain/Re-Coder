@@ -96,21 +96,21 @@ def test_자동_수정을_차례로_누르면_정적_문제가_모두_사라진�
             break
         assert br.apply_fix(root, todo[0].code)["applied"]
     assert [i.code for i in br.analyze(root).issues if i.severity == "error"] == []
-    backend = json.loads((root / "backend/package.json").read_text())
+    backend = json.loads((root / "backend/package.json").read_text(encoding="utf-8"))
     assert backend["dependencies"]["pg"] == nm.KNOWN_VERSIONS["pg"] and backend["scripts"]["start"] == "node dist/server.js"
     assert {"@types/express", "@types/pg", "typescript"} <= set(backend["devDependencies"])
-    frontend = json.loads((root / "frontend/package.json").read_text())
+    frontend = json.loads((root / "frontend/package.json").read_text(encoding="utf-8"))
     assert frontend["scripts"]["build"] == "vite build" and "terser" in frontend["devDependencies"]
-    assert "references" not in json.loads((root / "frontend/tsconfig.json").read_text())
-    assert "new URL('../../frontend/dist', import.meta.url)" in (root / "backend/src/app.ts").read_text()
-    docker = (root / "Dockerfile").read_text()
+    assert "references" not in json.loads((root / "frontend/tsconfig.json").read_text(encoding="utf-8"))
+    assert "new URL('../../frontend/dist', import.meta.url)" in (root / "backend/src/app.ts").read_text(encoding="utf-8")
+    docker = (root / "Dockerfile").read_text(encoding="utf-8")
     assert "npm ci" not in docker and "npm install --no-audit --no-fund --omit=dev" in docker
-    assert "export default ProductCard;" in (root / "frontend/src/ProductCard.tsx").read_text()
+    assert "export default ProductCard;" in (root / "frontend/src/ProductCard.tsx").read_text(encoding="utf-8")
 
 
 def test_생성_직후_자동_교정도_같은_것을_고치고_tsconfig_린트만_끈다(tmp_path):
     src = _temp_shop(tmp_path / "src")
-    ops = [{"action": "create", "file": p.relative_to(src).as_posix(), "content": p.read_text()} for p in src.rglob("*") if p.is_file()]
+    ops = [{"action": "create", "file": p.relative_to(src).as_posix(), "content": p.read_text(encoding="utf-8")} for p in src.rglob("*") if p.is_file()]
     empty = tmp_path / "empty"; empty.mkdir()
     out, notes = ca._autofix_ops(empty, "", ops)
     files = {o["file"]: o["content"] for o in out}
@@ -127,18 +127,18 @@ def test_하위_폴더_단독_점검은_폴더_밖_경로를_문제로_보지_�
         if not todo:
             break
         br.apply_fix(root, todo[0].code)
-    (root / "backend/src/app.ts").write_text(APP_TS.replace("../../../frontend", "../../frontend"))
-    ops = [{"action": "create", "file": "backend/src/app.ts", "content": (root / "backend/src/app.ts").read_text()},
-           {"action": "create", "file": "backend/package.json", "content": (root / "backend/package.json").read_text()}]
+    (root / "backend/src/app.ts").write_text(APP_TS.replace("../../../frontend", "../../frontend"), encoding="utf-8")
+    ops = [{"action": "create", "file": "backend/src/app.ts", "content": (root / "backend/src/app.ts").read_text(encoding="utf-8")},
+           {"action": "create", "file": "backend/package.json", "content": (root / "backend/package.json").read_text(encoding="utf-8")}]
     found = ca._consistency_issues(root, "", ops)
     assert not [i for i in found if i["code"] == "NODE_STATIC_PATH_OUTSIDE_PROJECT"]
 
 
 def test_lock_파일이_있으면_npm_ci_를_그대로_둔다(tmp_path):
     root = _write(tmp_path, {"package.json": "{}", "package-lock.json": "{}", "Dockerfile": "FROM node:20\nCOPY package*.json ./\nRUN npm ci\n"})
-    assert nf.npm_ci_without_lock((root / "Dockerfile").read_text(), br.ProjectFiles(root)) is None
+    assert nf.npm_ci_without_lock((root / "Dockerfile").read_text(encoding="utf-8"), br.ProjectFiles(root)) is None
     (root / "package-lock.json").unlink()
-    fixed = nf.npm_ci_without_lock((root / "Dockerfile").read_text(), br.ProjectFiles(root))
+    fixed = nf.npm_ci_without_lock((root / "Dockerfile").read_text(encoding="utf-8"), br.ProjectFiles(root))
     assert "RUN npm install --no-audit --no-fund" in fixed
 
 
@@ -205,7 +205,7 @@ def test_훅_때문에_요청이_끝없이_반복되는_화면을_찾아_useMemo
     assert "return useMemo(() => ({\n    request,\n    get,\n  }), [token]);" in fixed
     assert fixed.startswith("import { useMemo } from 'react';")
     # 고친 뒤에는 문제가 없다
-    (root / "src/hooks/useApi.ts").write_text(fixed)
+    (root / "src/hooks/useApi.ts").write_text(fixed, encoding="utf-8")
     assert nf.react_effect_loops(br.ProjectFiles(root)) == ([], {})
 
 
@@ -237,7 +237,7 @@ def test_tsc_빌드인데_tsconfig_가_없으면_만든다(tmp_path):
     issue = next(i for i in r.issues if i.code == "NODE_TSCONFIG_MISSING")
     assert issue.auto_fix
     br.apply_fix(root, "NODE_TSCONFIG_MISSING")
-    cfg = json.loads((root / "tsconfig.json").read_text())["compilerOptions"]
+    cfg = json.loads((root / "tsconfig.json").read_text(encoding="utf-8"))["compilerOptions"]
     assert cfg["module"] == "NodeNext" and cfg["outDir"] == "dist" and cfg["rootDir"] == "."
 
 
@@ -247,7 +247,7 @@ def test_검증된_버전을_아는_패키지는_선언을_자동으로_더한�
     issue = next(i for i in br.analyze(root, dockerfile=None).issues if i.code == "NODE_UNDECLARED_DEPENDENCY")
     assert issue.auto_fix
     br.apply_fix(root, "NODE_UNDECLARED_DEPENDENCY")
-    assert json.loads((root / "package.json").read_text())["dependencies"]["cors"] == nm.KNOWN_VERSIONS["cors"]
+    assert json.loads((root / "package.json").read_text(encoding="utf-8"))["dependencies"]["cors"] == nm.KNOWN_VERSIONS["cors"]
     # 모르는 패키지는 지어내지 않는다
     root2 = _write(tmp_path / "b", {"package.json": json.dumps({"name": "a", "scripts": {"start": "node server.js"}}),
                                     "server.js": "require('some-unknown-pkg');\nrequire('http').createServer().listen(3000);\n"})

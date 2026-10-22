@@ -115,7 +115,7 @@ def test_롤백이_포트_매핑을_재현한다(captured):
     assert result["status"] == "ok"
     cmd = _run_cmd(captured)
     assert "-p" in cmd, f"포트 매핑 없이 컨테이너를 띄웠다: {cmd}"
-    assert "18080:8000" in cmd, cmd
+    assert "127.0.0.1:18080:8000" in cmd, cmd
 
 
 def test_롤백이_환경변수를_재현한다(captured):
@@ -152,7 +152,7 @@ def test_롤백은_이전_이미지의_포트와_환경을_복원한다(captured
     result = _rollback(rec)
 
     cmd = _run_cmd(captured)
-    assert "18080:8000" in cmd
+    assert "127.0.0.1:18080:8000" in cmd
     assert "19000:9000" not in cmd
     assert "PORT=8000" in cmd
     assert "LEGACY_SETTING=yes" in cmd
@@ -198,7 +198,7 @@ def test_교체_배포가_실패하면_이전_정상_컨테이너를_복원한�
     assert result["restored_previous"] is True
     restore_run = [args for args in calls if len(args) > 1 and args[1] == "run"][-1]
     assert restore_run[-1] == previous.image
-    assert "18080:8000" in restore_run
+    assert "127.0.0.1:18080:8000" in restore_run
     assert "PORT=8000" in restore_run
 
 

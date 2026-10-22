@@ -46,6 +46,9 @@ _IMAGES = {
 _MIN_MEMORY = {"postgres": 1024, "redis": 1024, "mongodb": 2048, "payment": 1024}
 #: 태스크 정의 전체는 64KiB 가 한도다 — 초기화 SQL 을 환경변수로 넣을 수 있는 크기.
 _INIT_SQL_LIMIT = 24_000
+#: 줄이기 시작하는 크기 · 보조 컨테이너를 빼는 크기(방패 컨테이너 몫 4KB 를 남긴다).
+_TRIM_AT = 56_000
+_DROP_AT = 59_000
 _HEALTH = {
     "postgres": ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U recoder -d app || exit 1"],
     "redis": ["CMD-SHELL", "redis-cli -h 127.0.0.1 ping | grep -q PONG || exit 1"],
@@ -83,6 +86,8 @@ class RuntimePlan:
     services: list[str] = field(default_factory=list)
     demo: bool = False
     generated: list[str] = field(default_factory=list)
+    #: 2.0.27 관리형 DB(RDS) — 앱이 읽는 접속 정보 이름과 처음 한 번 넣을 초기화 SQL(base64). 값은 배포 중에 채운다.
+    managed_db: dict = field(default_factory=dict)
 
     @property
     def blocked(self) -> bool:
@@ -209,7 +214,7 @@ def _covered(names: Iterable[str], provided: set[str]) -> bool:
 
 
 def plan(workspace: Optional[str], *, key: str, environment: str, provided: Iterable[str],
-         container_port: int, create: bool = True, readiness=None) -> RuntimePlan:
+         container_port: int, create: bool = True, readiness=None, managed_db: bool = False) -> RuntimePlan:
     """이 앱을 ECS 에서 띄우는 데 필요한 것. create=False 면 키를 만들거나 저장하지 않는다(미리보기)."""
     result = RuntimePlan()
     if not workspace or not Path(workspace).is_dir():
@@ -236,9 +241,28 @@ def plan(workspace: Optional[str], *, key: str, environment: str, provided: Iter
 
     # 1) 앱이 쓰는 DB — 접속 정보를 사용자가 이미 넣었으면(RDS 등) 그대로 쓴다.
     primary = next((k for k in kinds if k != "redis"), None)
+    if managed_db and "postgres" not in kinds:
+        result.notes.append("관리형 DB 는 PostgreSQL 을 쓰는 앱만 만듭니다 — 이 앱은 PostgreSQL 을 쓰지 않아 만들지 않습니다.")
     for kind in kinds:
         conn = local_services.app_env("ecs", kind, "x", env_names, host="127.0.0.1")
         if _covered(conn, given):
+            continue
+        if managed_db and kind == "postgres":
+            #: 2.0.27 — 태스크 안 임시 DB 대신 RDS. 접속 정보는 배포 중(RDS 가 준비된 뒤) 채운다.
+            path = local_services.find_init_sql(workspace)
+            sql = ""
+            if path is not None:
+                try:
+                    sql = path.read_text(encoding="utf-8-sig", errors="replace")
+                except OSError:
+                    sql = ""
+            b64 = base64.b64encode(sql.encode("utf-8")).decode("ascii") if sql and len(sql.encode("utf-8")) <= _INIT_SQL_LIMIT else ""
+            given |= set(conn)   # 이 이름들은 배포 중 RDS 접속 정보로 채운다 — 없다고 막지 않는다
+            result.managed_db = {"env_names": list(env_names), "names": sorted(conn), "init_sql_b64": b64,
+                                 "init_name": path.name if (path is not None and b64) else ""}
+            result.notes.append("PostgreSQL 은 관리형 DB(RDS)로 — 데이터가 태스크와 상관없이 남습니다"
+                                + (f". DB 가 비어 있으면 처음 한 번 {path.name} 로 테이블을 만듭니다" if b64 and path is not None else "")
+                                + ". 샘플 데이터는 넣지 않습니다.")
             continue
         reads = [n for n in conn if n in env_names or n in required] or [next(iter(conn))]
         if production:
@@ -388,18 +412,23 @@ def apply(task_def: dict, app_container: str, runtime: Optional[RuntimePlan], im
         containers.append(item)
     #: 태스크 정의는 64KiB 가 한도다 — 넘으면 이미지를 올린 뒤에 등록이 실패한다. 시드 컨테이너에는 DB·시드에 필요한 값만 남기고,
     #: 그래도 크면 시드 컨테이너를 뺀다(검토 2.0.15: 큰 초기화 SQL + 사용자 환경변수 수십 개로 한도에 닿음).
-    if len(json.dumps(task_def)) > 60_000:
+    #: 2.0.32 — 이 뒤에 방패(nginx) 컨테이너가 3~4KB 를 더한다. 그만큼 여유를 두고 줄인다.
+    if len(json.dumps(task_def)) > _TRIM_AT:
         keep = re.compile(r"DATABASE|^PG|^DB_|POSTGRES|MONGO|REDIS|SEED|NODE_ENV|PAYMENT|STRIPE|JWT|ADMIN|PORT")
         for item in containers:
             if item.get("name") == "recoder-seed":
                 item["environment"] = [e for e in item.get("environment", []) if keep.search(e.get("name", ""))]
-    if len(json.dumps(task_def)) > 63_000:
+    if len(json.dumps(task_def)) > _DROP_AT:
         task_def["containerDefinitions"] = containers = [c for c in containers if c.get("name") != "recoder-seed"]
-    if len(json.dumps(task_def)) > 63_000:
+    if len(json.dumps(task_def)) > _DROP_AT:
         #: 그래도 크면 초기화 SQL 을 뺀다(앱이 스스로 테이블을 만들지 않으면 조회가 실패하지만, 등록 자체가 거부되는 것보다 낫다).
+        #: 관리형 DB(RDS)의 초기화 컨테이너는 SQL 이 없으면 할 일이 없으니 통째로 뺀다.
         for c in containers:
-            if c.get("name") == "recoder-postgres":
+            if c.get("name") in ("recoder-postgres", "recoder-db-init"):
                 c["environment"] = [e for e in c.get("environment", []) if e.get("name") != "RECODER_INIT_SQL_B64"]
+        if any(c.get("name") == "recoder-db-init" for c in containers):
+            task_def["containerDefinitions"] = containers = [c for c in containers if c.get("name") != "recoder-db-init"]
+            app["dependsOn"] = [d for d in app.get("dependsOn", []) if d.get("containerName") != "recoder-db-init"]
     #: 앱은 시드가 **끝난 뒤** 뜬다(실기기 2.0.20 ECS: 시드 컨테이너와 앱이 동시에 떠서 둘 다 데모 계정을 넣다가
     #: 앱이 unique 위반으로 기동 중 종료 → 태스크가 계속 교체돼 주소가 응답하지 않음). COMPLETE 라 시드가 실패해도 앱은 뜬다.
     if any(c.get("name") == "recoder-seed" for c in containers):

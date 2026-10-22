@@ -1,4 +1,4 @@
-# Control Plane — Q2-A
+# Control Plane - Q2-A (keep this file ASCII: pip reads it with the system code page on Windows)
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 pydantic[email]>=2.7.0

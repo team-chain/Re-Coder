@@ -111,7 +111,7 @@ def test_기록에_없는_컨테이너도_교체_전에_붙잡아_복구한다(m
     )
     restore_run = [a for a in calls if len(a) > 1 and a[1] == "run"][-1]
     assert restore_run[-1] == "sha256:legacyid", restore_run
-    assert "18080:8000" in restore_run, "붙잡은 포트 매핑이 복구에 쓰이지 않았다"
+    assert "127.0.0.1:18080:8000" in restore_run, "붙잡은 포트 매핑이 복구에 쓰이지 않았다"
 
 
 def test_붙잡은_환경변수에서_이름이_이상한_항목은_버린다(monkeypatch):

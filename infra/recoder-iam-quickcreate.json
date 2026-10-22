@@ -6,7 +6,7 @@
       "Type": "AWS::IAM::ManagedPolicy",
       "Properties": {
         "ManagedPolicyName": "recoder-deploy-policy",
-        "Description": "ReCoder 가 배포에 요구하는 최소권한",
+        "Description": "ReCoder 가 배포에 요구하는 최소권한 (1/3)",
         "PolicyDocument": {
           "Version": "2012-10-17",
           "Statement": [
@@ -67,7 +67,9 @@
               "Effect": "Allow",
               "Action": [
                 "elasticloadbalancing:DescribeTargetGroups",
-                "elasticloadbalancing:DescribeLoadBalancers"
+                "elasticloadbalancing:DescribeLoadBalancers",
+                "elasticloadbalancing:DescribeListeners",
+                "elasticloadbalancing:DescribeTags"
               ],
               "Resource": "*",
               "Condition": {
@@ -231,7 +233,11 @@
               "Resource": "*",
               "Condition": {
                 "StringEquals": {
-                  "iam:AWSServiceName": "ecs.amazonaws.com"
+                  "iam:AWSServiceName": [
+                    "ecs.amazonaws.com",
+                    "elasticloadbalancing.amazonaws.com",
+                    "rds.amazonaws.com"
+                  ]
                 }
               }
             },
@@ -265,9 +271,527 @@
                 "ec2:DescribeSubnets",
                 "ec2:DescribeRouteTables",
                 "ec2:DescribeSecurityGroups",
-                "ec2:DescribeNetworkInterfaces"
+                "ec2:DescribeNetworkInterfaces",
+                "ec2:DescribeInternetGateways",
+                "ec2:DescribeAccountAttributes",
+                "ec2:DescribeAddresses"
               ],
               "Resource": "*"
+            },
+            {
+              "Sid": "OpsAlertLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:PutMetricFilter",
+                "logs:StartQuery"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/*"
+              }
+            },
+            {
+              "Sid": "OpsAlertRead",
+              "Effect": "Allow",
+              "Action": [
+                "cloudwatch:GetMetricData",
+                "logs:GetQueryResults"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "OpsAlertAlarms",
+              "Effect": "Allow",
+              "Action": [
+                "cloudwatch:PutMetricAlarm",
+                "cloudwatch:TagResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:recoder-*"
+              }
+            },
+            {
+              "Sid": "OpsAlertTopic",
+              "Effect": "Allow",
+              "Action": [
+                "sns:CreateTopic",
+                "sns:Subscribe",
+                "sns:TagResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:recoder-*"
+              }
+            },
+            {
+              "Sid": "TagRecoderResources",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:TagResource",
+                "ecr:TagResource",
+                "logs:TagResource",
+                "ec2:CreateTags"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/recoder-*/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+                }
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "aws:TagKeys": [
+                    "recoder:*"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "RecoderDeployPolicy2": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "ManagedPolicyName": "recoder-deploy-policy-2",
+        "Description": "ReCoder 가 배포에 요구하는 최소권한 (2/3)",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "EdgeLoadBalancer",
+              "Effect": "Allow",
+              "Action": [
+                "elasticloadbalancing:CreateLoadBalancer",
+                "elasticloadbalancing:CreateTargetGroup",
+                "elasticloadbalancing:CreateListener",
+                "elasticloadbalancing:ModifyListener",
+                "elasticloadbalancing:ModifyTargetGroup",
+                "elasticloadbalancing:ModifyTargetGroupAttributes",
+                "elasticloadbalancing:AddTags",
+                "elasticloadbalancing:SetWebAcl",
+                "elasticloadbalancing:SetSecurityGroups",
+                "elasticloadbalancing:DeleteListener",
+                "elasticloadbalancing:DeleteLoadBalancer",
+                "elasticloadbalancing:DeleteTargetGroup"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:loadbalancer/app/recoder-*/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:targetgroup/recoder-*/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:listener/app/recoder-*/*/*"
+                }
+              ]
+            },
+            {
+              "Sid": "EdgeWaf",
+              "Effect": "Allow",
+              "Action": [
+                "wafv2:CreateWebACL",
+                "wafv2:GetWebACL",
+                "wafv2:UpdateWebACL",
+                "wafv2:DeleteWebACL",
+                "wafv2:AssociateWebACL",
+                "wafv2:DisassociateWebACL",
+                "wafv2:ListTagsForResource",
+                "wafv2:TagResource"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:wafv2:${AWS::Region}:${AWS::AccountId}:regional/webacl/recoder-*/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/recoder-*/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:loadbalancer/app/recoder-*/*"
+                }
+              ]
+            },
+            {
+              "Sid": "EdgeWafRead",
+              "Effect": "Allow",
+              "Action": [
+                "wafv2:ListWebACLs",
+                "wafv2:GetWebACLForResource"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": [
+                    {
+                      "Fn::Sub": "${AWS::Region}"
+                    },
+                    "us-east-1"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "EdgeOriginLock",
+              "Effect": "Allow",
+              "Action": [
+                "elasticloadbalancing:CreateRule",
+                "elasticloadbalancing:ModifyRule",
+                "elasticloadbalancing:DeleteRule"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:listener/app/recoder-*/*/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:listener-rule/app/recoder-*/*/*/*"
+                }
+              ]
+            },
+            {
+              "Sid": "EdgeOriginLockRead",
+              "Effect": "Allow",
+              "Action": [
+                "elasticloadbalancing:DescribeRules"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": {
+                    "Fn::Sub": "${AWS::Region}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "HttpsCreateDistribution",
+              "Effect": "Allow",
+              "Action": [
+                "cloudfront:CreateDistribution",
+                "cloudfront:TagResource"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestTag/recoder:managed": "true"
+                }
+              }
+            },
+            {
+              "Sid": "HttpsManageDistribution",
+              "Effect": "Allow",
+              "Action": [
+                "cloudfront:GetDistribution",
+                "cloudfront:GetDistributionConfig",
+                "cloudfront:UpdateDistribution",
+                "cloudfront:DeleteDistribution",
+                "cloudfront:ListTagsForResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*"
+              }
+            },
+            {
+              "Sid": "HttpsRead",
+              "Effect": "Allow",
+              "Action": [
+                "cloudfront:ListDistributions",
+                "ec2:DescribeManagedPrefixLists",
+                "acm:ListCertificates",
+                "route53:ListHostedZonesByName"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "HttpsCertificate",
+              "Effect": "Allow",
+              "Action": [
+                "acm:AddTagsToCertificate",
+                "acm:DescribeCertificate",
+                "acm:ListTagsForCertificate",
+                "acm:DeleteCertificate"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:acm:${AWS::Region}:${AWS::AccountId}:certificate/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*"
+                }
+              ]
+            },
+            {
+              "Sid": "HttpsRequestCertificate",
+              "Effect": "Allow",
+              "Action": [
+                "acm:RequestCertificate"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": [
+                    {
+                      "Fn::Sub": "${AWS::Region}"
+                    },
+                    "us-east-1"
+                  ],
+                  "aws:RequestTag/recoder:managed": "true"
+                }
+              }
+            },
+            {
+              "Sid": "HttpsDomainRecords",
+              "Effect": "Allow",
+              "Action": [
+                "route53:ChangeResourceRecordSets"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:route53:::hostedzone/*"
+              },
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "route53:ChangeResourceRecordSetsRecordTypes": [
+                    "CNAME",
+                    "A",
+                    "AAAA"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "HttpsDomainRecordsRead",
+              "Effect": "Allow",
+              "Action": [
+                "route53:ListResourceRecordSets"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:route53:::hostedzone/*"
+              }
+            },
+            {
+              "Sid": "ManagedDatabase",
+              "Effect": "Allow",
+              "Action": [
+                "rds:CreateDBInstance",
+                "rds:ModifyDBInstance",
+                "rds:DeleteDBInstance",
+                "rds:CreateDBSnapshot",
+                "rds:StartDBInstance",
+                "rds:CreateDBSubnetGroup",
+                "rds:DeleteDBSubnetGroup",
+                "rds:CreateDBParameterGroup",
+                "rds:ModifyDBParameterGroup",
+                "rds:DeleteDBParameterGroup",
+                "rds:AddTagsToResource",
+                "rds:ListTagsForResource"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:subgrp:recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:pg:recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:snapshot:recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:og:default:postgres-*"
+                }
+              ]
+            },
+            {
+              "Sid": "ManagedDatabaseRead",
+              "Effect": "Allow",
+              "Action": [
+                "rds:DescribeDBInstances",
+                "rds:DescribeDBSubnetGroups",
+                "rds:DescribeDBParameterGroups",
+                "rds:DescribeDBEngineVersions",
+                "secretsmanager:ListSecrets"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": {
+                    "Fn::Sub": "${AWS::Region}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "ManagedDatabaseSecret",
+              "Effect": "Allow",
+              "Action": [
+                "secretsmanager:CreateSecret",
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:PutSecretValue",
+                "secretsmanager:DeleteSecret",
+                "secretsmanager:TagResource",
+                "secretsmanager:DescribeSecret",
+                "secretsmanager:RestoreSecret"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:recoder/*"
+              }
+            },
+            {
+              "Sid": "CleanupList",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:ListClusters",
+                "ecs:ListTaskDefinitions",
+                "cloudwatch:DescribeAlarms",
+                "sns:ListTopics",
+                "ecr:DescribeRepositories"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": {
+                    "Fn::Sub": "${AWS::Region}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "CleanupListServices",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:ListServices"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "ecs:cluster": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/recoder-*"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "CleanupTaskDefinitions",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:DeregisterTaskDefinition"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": {
+                    "Fn::Sub": "${AWS::Region}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "RecoderDeployPolicy3": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "ManagedPolicyName": "recoder-deploy-policy-3",
+        "Description": "ReCoder 가 배포에 요구하는 최소권한 (3/3)",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CleanupReadTags",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:ListTagsForResource",
+                "ecr:ListTagsForResource",
+                "ecr:DescribeImages",
+                "logs:ListTagsForResource",
+                "cloudwatch:ListTagsForResource",
+                "sns:ListTagsForResource"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/recoder-*/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:recoder-*"
+                }
+              ]
+            },
+            {
+              "Sid": "CleanupDelete",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:DeleteService",
+                "ecs:DeleteCluster",
+                "ecr:DeleteRepository",
+                "logs:DeleteLogGroup",
+                "cloudwatch:DeleteAlarms",
+                "sns:DeleteTopic"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/recoder-*/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:recoder-*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:recoder-*"
+                }
+              ]
+            },
+            {
+              "Sid": "CleanupSecurityGroups",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:DeleteSecurityGroup"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "ec2:ResourceTag/recoder:managed": "true"
+                }
+              }
             },
             {
               "Sid": "CreateAppSecurityGroup",
@@ -294,11 +818,22 @@
                 "s3:GetBucketLocation",
                 "s3:PutBucketWebsite",
                 "s3:PutBucketPolicy",
-                "s3:PutBucketPublicAccessBlock"
+                "s3:PutBucketPublicAccessBlock",
+                "s3:PutBucketTagging",
+                "s3:GetBucketTagging",
+                "s3:DeleteBucket"
               ],
               "Resource": {
                 "Fn::Sub": "arn:${AWS::Partition}:s3:::recoder-*"
               }
+            },
+            {
+              "Sid": "S3CleanupList",
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListAllMyBuckets"
+              ],
+              "Resource": "*"
             },
             {
               "Sid": "S3StaticSiteObjects",
@@ -338,6 +873,12 @@
         "ManagedPolicyArns": [
           {
             "Ref": "RecoderDeployPolicy"
+          },
+          {
+            "Ref": "RecoderDeployPolicy2"
+          },
+          {
+            "Ref": "RecoderDeployPolicy3"
           }
         ]
       }

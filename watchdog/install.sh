@@ -5,7 +5,7 @@
 # 동작:
 #   1. /opt/recoder/watchdog 에 watchdog 소스 복사
 #   2. /var/log/recoder 디렉토리 생성
-#   3. python3-pip + requests + psutil 설치
+#   3. 전용 가상환경(/opt/recoder/venv)에 requests + psutil + boto3 설치
 #   4. /etc/recoder/watchdog.env (없으면 템플릿 생성)
 #   5. systemd unit 등록 및 enable + start
 #
@@ -24,6 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 INSTALL_PREFIX="${RECODER_WATCHDOG_INSTALL_PREFIX:-/opt/recoder/watchdog}"
+VENV_DIR="${RECODER_WATCHDOG_VENV:-/opt/recoder/venv}"
 LOG_DIR="${RECODER_WATCHDOG_LOG_DIR:-/var/log/recoder}"
 ENV_DIR="${RECODER_WATCHDOG_ENV_DIR:-/etc/recoder}"
 ENV_FILE="${ENV_DIR}/watchdog.env"
@@ -61,7 +62,7 @@ install_python_deps() {
         apt)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y
-            apt-get install -y python3 python3-pip
+            apt-get install -y python3 python3-pip python3-venv
             ;;
         dnf)
             dnf install -y python3 python3-pip
@@ -79,10 +80,18 @@ install_python_deps() {
     # 설치에서도 넣어 두는 이유: 나중에 watchdog.env 에 ECS_CLUSTER 만 채우면
     # 바로 켜져야 하는데, 그때 boto3 가 없으면 "AWS 자격증명과 권한을
     # 확인하세요" 라는 **원인과 다른** 안내만 반복된다.
+    #
+    # 2.0.33 시스템 파이썬에 pip install 하지 않는다 — Ubuntu 24.04·Debian 12 는 PEP 668
+    # (externally-managed-environment)로 거부해 설치가 여기서 멈췄다. 전용 가상환경을 만든다.
+    log "가상환경 준비: ${VENV_DIR}"
+    if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+        mkdir -p "$(dirname "${VENV_DIR}")"
+        python3 -m venv "${VENV_DIR}"
+    fi
     log "pip 의존성 설치: requests, psutil, boto3"
-    if ! python3 -m pip install --upgrade --no-cache-dir requests psutil boto3; then
+    if ! "${VENV_DIR}/bin/python" -m pip install --upgrade --no-cache-dir requests psutil boto3; then
         # pip 가 너무 오래된 경우 폴백
-        python3 -m pip install --no-cache-dir requests psutil boto3
+        "${VENV_DIR}/bin/python" -m pip install --no-cache-dir requests psutil boto3
     fi
 }
 
@@ -203,7 +212,9 @@ EOF
 
 install_systemd_unit() {
     log "systemd unit 설치: ${UNIT_PATH}"
-    cp -f "${SCRIPT_DIR}/recoder-watchdog.service" "${UNIT_PATH}"
+    # 가상환경의 파이썬으로 실행한다(의존성이 그 안에만 있다).
+    sed "s#^ExecStart=/usr/bin/python3 #ExecStart=${VENV_DIR}/bin/python #" \
+        "${SCRIPT_DIR}/recoder-watchdog.service" > "${UNIT_PATH}"
     chmod 0644 "${UNIT_PATH}"
 
     systemctl daemon-reload
@@ -229,7 +240,7 @@ verify() {
     fi
 
     log "Python import 검증"
-    if ! python3 -c "import sys; sys.path.insert(0, '/opt/recoder'); import watchdog.recoder_watchdog" 2>/dev/null; then
+    if ! "${VENV_DIR}/bin/python" -c "import sys; sys.path.insert(0, '/opt/recoder'); import watchdog.recoder_watchdog" 2>/dev/null; then
         err "watchdog.recoder_watchdog import 실패"
         exit 1
     fi

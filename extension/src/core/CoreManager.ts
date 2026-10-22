@@ -7,8 +7,9 @@
  * - F5/확장 테스트: 해당 확장 소스의 core/main.py, 설치 실행: Core 바이너리
  */
 import * as vscode from 'vscode';
-import { aiKeyEnv } from '../ai/aiKeyEnv';
+import { AiRoutingSettings, aiKeyEnv } from '../ai/aiKeyEnv';
 import * as path from 'path';
+import { StringDecoder } from 'string_decoder';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as cp from 'child_process';
@@ -598,6 +599,18 @@ export class CoreManager {
         });
     }
 
+    /** 2.0.36 recoder.ai.* 설정 — 모델·절약 공급자·OpenAI 호환 주소·단가. */
+    private _aiRoutingSettings(): AiRoutingSettings {
+        const cfg = vscode.workspace.getConfiguration('recoder.ai');
+        return {
+            modelFor: (p) => cfg.get<string>(`${p}Model`, '') || '',
+            economyProvider: cfg.get<string>('economyProvider', '') || '',
+            economyModel: cfg.get<string>('economyModel', '') || '',
+            compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '',
+            prices: cfg.get<unknown>('prices', {}),
+        };
+    }
+
     private async spawnCore(spec: SpawnSpec | null = this._findCoreSpec()): Promise<void> {
         this.isSpawning = true;
         let processLog: CoreProcessLog | undefined;
@@ -620,7 +633,7 @@ export class CoreManager {
                 globalState: ctx.globalState,
             };
             const [gatewayEnv, awsEnv, aiEnv] = await Promise.all([this._gatewayEnv(), this._awsEnv(),
-                withFallback(aiKeyEnv(secretsWithLimit, (p) => vscode.workspace.getConfiguration('recoder.ai').get<string>(`${p}Model`, '') || ''), SECRET_READ_TIMEOUT_MS * 2, {})]);
+                withFallback(aiKeyEnv(secretsWithLimit, this._aiRoutingSettings()), SECRET_READ_TIMEOUT_MS * 2, {})]);
 
             //: 확장 호스트 전용 변수(ELECTRON_RUN_AS_NODE 등)는 코어에 넘기지 않는다 — 코어가
             //: 띄우는 Docker Desktop(Electron)이 그걸 물려받으면 GUI 없이 즉시 종료한다(실기기).
@@ -652,17 +665,22 @@ export class CoreManager {
             processLog.setPid(spawnedProcess.pid);
             this.coreProcess.once('spawn', () => processLog.event('spawned'));
 
+            //: 2.0.32 — 조각마다 따로 글자로 바꾸면 조각 경계에 걸린 한글(3바이트)이 깨진다. 이어 붙여 해석한다.
+            const outText = new StringDecoder('utf8');
+            const errText = new StringDecoder('utf8');
             this.coreProcess.stdout?.on('data', (data: Buffer) => {
                 processLog.write('stdout', data);
-                console.log('[ReCoder Core]', data.toString().trim());
+                const text = outText.write(data).trim();
+                if (text) { console.log('[ReCoder Core]', text); }
             });
             const watch: { exited: boolean; code: number | null; tail: string[]; lockHeld?: boolean } = { exited: false, code: null, tail: [] };
             this.spawnWatch = watch;
             this.coreProcess.stderr?.on('data', (data: Buffer) => {
-                watch.tail = [...watch.tail, ...data.toString().split(/\r?\n/).filter(l => l.trim())].slice(-6);
-                if (/already running/i.test(data.toString())) { watch.lockHeld = true; }
+                const text = errText.write(data);
+                watch.tail = [...watch.tail, ...text.split(/\r?\n/).filter(l => l.trim())].slice(-6);
+                if (/already running/i.test(text)) { watch.lockHeld = true; }
                 processLog.write('stderr', data);
-                console.error('[ReCoder Core STDERR]', data.toString().trim());
+                if (text.trim()) { console.error('[ReCoder Core STDERR]', text.trim()); }
             });
             this.coreProcess.on('exit', (code, signal) => {
                 watch.exited = true; watch.code = code;
@@ -797,11 +815,25 @@ export class CoreManager {
         stopLog.event(`stop requested force=${force}`);
 
         if (process.platform === 'win32') {
-            if (pid) {
+            // 2.0.32 — 먼저 Core 에 정상 종료를 요청한다. 바로 taskkill /F 하면 종료 정리가 돌지 않고, PyInstaller 가 푼
+            // %TEMP%\_MEIxxxx 폴더가 창을 닫을 때마다 남았다(부트로더는 자식이 스스로 끝나야 지운다).
+            if (!force && pid && this.port && this.sessionToken) {
+                try {
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), 1500);
+                    await fetch(`http://127.0.0.1:${this.port}/api/shutdown`, {
+                        method: 'POST', headers: { 'X-Session-Token': this.sessionToken }, signal: controller.signal,
+                    }).catch(() => undefined);
+                    clearTimeout(timer);
+                    const deadline = Date.now() + Math.min(SHUTDOWN_GRACE_MS, 4000);
+                    while (Date.now() < deadline && this.isProcessRunning(pid)) { await this.sleep(200); }
+                } catch { /* 아래 강제 종료로 */ }
+            }
+            if (pid && this.isProcessRunning(pid)) {
                 // PyInstaller one-file executables have a bootloader and child.
                 // Only terminate the tree spawned by this manager.
                 try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ }
-            } else if (proc) {
+            } else if (!pid && proc) {
                 try { proc.kill('SIGTERM'); } catch { /* ignore */ }
             }
         } else {

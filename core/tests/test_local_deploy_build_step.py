@@ -26,7 +26,7 @@ class _Proc:
 
 
 def test_Dockerfile_있으면_워크스페이스에서_docker_build_를_돈다(monkeypatch, tmp_path):
-    (tmp_path / "Dockerfile").write_text("FROM alpine\n")
+    (tmp_path / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
     calls = []
     monkeypatch.setattr(d.subprocess, "run", lambda cmd, **kw: calls.append((cmd, kw)) or _Proc(0))
 
@@ -37,7 +37,7 @@ def test_Dockerfile_있으면_워크스페이스에서_docker_build_를_돈다(m
 
 
 def test_빌드_실패는_stderr_와_함께_실패로_끝난다_컨테이너는_안_건드림(monkeypatch, tmp_path):
-    (tmp_path / "Dockerfile").write_text("FROM alpine\n")
+    (tmp_path / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
     monkeypatch.setattr(d.subprocess, "run", lambda cmd, **kw: _Proc(1, err="npm ERR! missing script"))
 
     r = asyncio.run(d._build_local_image(_plan(), str(tmp_path)))
@@ -66,7 +66,7 @@ def test_로컬_Docker_가_아니면_빌드_단계를_건너뛴다(monkeypatch, 
 
 
 def test_빌드_타임아웃은_예외_없이_실패_응답(monkeypatch, tmp_path):
-    (tmp_path / "Dockerfile").write_text("FROM alpine\n")
+    (tmp_path / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
     def boom(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, 1)
     monkeypatch.setattr(d.subprocess, "run", boom)
@@ -79,20 +79,20 @@ from agents.deploy_agent import DeployAgent  # noqa: E402
 
 
 def test_포트는_Dockerfile_EXPOSE_를_최우선으로_본다(tmp_path):
-    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/app.js"}}')
-    (tmp_path / "Dockerfile").write_text("FROM node:20-alpine\nEXPOSE 3456\nCMD [\"node\",\"src/app.js\"]\n")
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/app.js"}}', encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM node:20-alpine\nEXPOSE 3456\nCMD [\"node\",\"src/app.js\"]\n", encoding="utf-8")
     assert DeployAgent._detect_port(str(tmp_path)) == (3456, 3456)
 
 
 def test_Dockerfile_없으면_소스의_listen_포트를_본다(tmp_path):
-    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/app.js"}}')
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/app.js"}}', encoding="utf-8")
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "app.js").write_text('app.listen(3456, () => {});\n')
+    (tmp_path / "src" / "app.js").write_text('app.listen(3456, () => {});\n', encoding="utf-8")
     assert DeployAgent._detect_port(str(tmp_path)) == (3456, 3456)
 
 
 def test_아무_단서_없는_node_는_예전처럼_3000(tmp_path):
-    (tmp_path / "package.json").write_text('{"scripts": {"start": "node index.js"}}')
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node index.js"}}', encoding="utf-8")
     assert DeployAgent._detect_port(str(tmp_path)) == (3000, 3000)
 
 
@@ -102,9 +102,9 @@ import infra_agent  # noqa: E402
 
 def test_node_진입점은_start_스크립트_main_순으로_읽고_포트는_소스에서_읽는다(tmp_path):
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n')
+    (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n', encoding="utf-8")
     (tmp_path / "package.json").write_text(
-        '{"main":"src/app.js","scripts":{"start":"node src/app.js"},"dependencies":{"express":"^4"}}')
+        '{"main":"src/app.js","scripts":{"start":"node src/app.js"},"dependencies":{"express":"^4"}}', encoding="utf-8")
     stack, meta = infra_agent._detect_stack(str(tmp_path))
     assert stack == "node-express"
     assert meta["entrypoint"] == "src/app.js"
@@ -112,16 +112,16 @@ def test_node_진입점은_start_스크립트_main_순으로_읽고_포트는_�
 
 
 def test_node_단서_없으면_예전_기본값_index_js_3000(tmp_path):
-    (tmp_path / "index.js").write_text('app.listen(process.env.PORT);\n')
-    (tmp_path / "package.json").write_text('{"dependencies":{"express":"^4"}}')
+    (tmp_path / "index.js").write_text('app.listen(process.env.PORT);\n', encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"dependencies":{"express":"^4"}}', encoding="utf-8")
     stack, meta = infra_agent._detect_stack(str(tmp_path))
     assert meta["entrypoint"] == "index.js" and meta["port"] == "3000"
 
 
 def test_플랜_포트는_PORT_기본값_패턴도_읽는다(tmp_path):
-    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/app.js"}}')
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/app.js"}}', encoding="utf-8")
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n')
+    (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n', encoding="utf-8")
     assert DeployAgent._detect_port(str(tmp_path)) == (3456, 3456)
 
 
@@ -131,9 +131,9 @@ from project_scanner import ProjectScanner  # noqa: E402
 
 def test_project_scanner_는_node_진입점과_포트를_프로젝트에서_읽는다(tmp_path):
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n')
+    (tmp_path / "src" / "app.js").write_text('const PORT = process.env.PORT || 3456;\napp.listen(PORT);\n', encoding="utf-8")
     (tmp_path / "package.json").write_text(
-        '{"main":"src/app.js","scripts":{"start":"node src/app.js"},"dependencies":{"express":"^4"}}')
+        '{"main":"src/app.js","scripts":{"start":"node src/app.js"},"dependencies":{"express":"^4"}}', encoding="utf-8")
     profile = ProjectScanner().scan(str(tmp_path))
     assert profile.default_port == 3456
     assert profile.default_run_command == "node src/app.js"
@@ -145,11 +145,11 @@ from schemas import ProjectStack  # noqa: E402
 
 
 def test_런타임_힌트는_nvmrc_engines_를_읽고_없으면_최신_LTS(tmp_path):
-    (tmp_path / "package.json").write_text('{"engines":{"node":">=20"}}')
+    (tmp_path / "package.json").write_text('{"engines":{"node":">=20"}}', encoding="utf-8")
     assert "Node.js 20" in ia._runtime_hint(str(tmp_path), ProjectStack.NODE_EXPRESS)
-    (tmp_path / ".nvmrc").write_text("v22.1.0\n")
+    (tmp_path / ".nvmrc").write_text("v22.1.0\n", encoding="utf-8")
     assert "Node.js 22.1.0" in ia._runtime_hint(str(tmp_path), ProjectStack.NODE_EXPRESS)
-    (tmp_path / ".nvmrc").unlink(); (tmp_path / "package.json").write_text('{}')
+    (tmp_path / ".nvmrc").unlink(); (tmp_path / "package.json").write_text('{}', encoding="utf-8")
     assert "Node.js 22" in ia._runtime_hint(str(tmp_path), ProjectStack.NODE_EXPRESS)
 
 

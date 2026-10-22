@@ -1,8 +1,8 @@
 # 문서 근거 기반 배포 오류 수정
 
-작업 브랜치: `feat/document-grounded-repair`, 시작 commit `66887b2`.
-확장과 Core의 표시 버전은 **1.1.30**이다. `develop`의 `6699ccf`를 통합했다.
-새 배포 점검·보안 수정·외부 프로젝트 선택 기능을 유지하고, 프로젝트 변경 시 이전 수정안과 진행 중 응답을 무효화한다.
+이 기능은 `feat/document-grounded-repair`의 `66887b2`에서 시작해 1.1.30에 통합됐다.
+아래 초기 비교 실험은 당시 기록이며, 이후 개선의 효과로 재해석하지 않는다.
+프로젝트 변경 시 이전 수정안과 진행 중 응답을 무효화한다.
 
 ## 사용 흐름
 
@@ -21,6 +21,89 @@ UI 요청 ID와 활성 프로젝트 확인으로 늦게 도착한 다른 프로�
 ECS/IAM/S3/런타임의 제품 API는 빌드 통과만으로 승인하지 않는다. 해당 환경의 검증이 없으면
 `environment_verification_required` 또는 수동 확인 상태를 표시한다. 연구용 로컬 계약 검사와
 IAM 시뮬레이션은 이 승인 조건을 우회하지 않는다.
+
+## 실행 정책 (2.0.41)
+
+점검·모델 호출·후보 파일 수정·재빌드·원본 적용 직전에 실행 정책을 확인한다.
+기본은 서버가 필요 없는 로컬 검사다. OPA 모드를 켜면 정책 서버가 응답하지 않거나
+명시적 허용을 주지 않을 때 차단한다. 승인 때도 현재 정책을 다시 확인하고 화면에
+차단 사유를 표시한다. [설정과 적용 범위](execution-policy.md)를 참고한다.
+이전 버전에 저장한 수정안은 정책 기록의 무결성 형식이 바뀌어 다시 검증해야 한다.
+
+## 수정안 보안 평가 (2.0.40)
+
+[Promptfoo 회귀 평가](../evals/repair-security/README.md)는 악성 모델 응답을 실제
+수정·승인 경로에 재생한다. 경로/테스트/비밀값/근거/승인 검사를 확인하며 정상 수정도
+통과해야 한다. 개발·CI 전용으로, 실제 모델의 탈옥 저항성 점수와는 구분한다.
+
+## 선택형 Reranker와 비교 (2.0.39)
+
+기본은 꺼짐이다. 검색된 후보 최대 20개를 로컬 cross-encoder로 다시 평가해 최대 4개를
+수정 근거로 전달한다. 호환되지 않는 버전의 문서는 먼저 제외하며, 정확한 오류 코드
+일치가 일반적인 문서보다 뒤로 밀리지 않게 한다. 후보에 없는 문서를 만들어 넣지 않는다.
+모델 점수의 개수·유한성을 검사하고 잘못된 결과는 명시적으로 실패한다.
+
+Python Core에서만 선택적으로 설치한다. 기본 배포 바이너리에 모델이나 PyTorch를 추가하지 않는다.
+설치 도구는 [Apache-2.0 BGE reranker](https://huggingface.co/BAAI/bge-reranker-v2-m3)의
+고정 리비전 `953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`를 받는다(가중치 약 2.1 GB).
+
+```sh
+python -m pip install -r core/requirements-repair.txt
+python scripts/setup_repair_reranker.py --assets work/repair-assets --config core/grounded_repair/runtime.json
+# 같은 corpus·embedding으로 재순위화 적용 전후 비교; 유료 LLM 호출 없음
+python scripts/compare_repair_reranker.py \
+  --embedding-model work/repair-assets/multilingual-e5-small \
+  --reranker-model work/repair-assets/bge-reranker-v2-m3 \
+  --output work/reranker-comparison.json
+```
+
+설정의 `reranker_model` 또는 `RECODER_REPAIR_RERANKER_MODEL`에 로컬 디렉터리를 지정하고
+Core를 재시작한다. 설정을 비우면 끈다. 실행 중에는 다운로드하지 않으며
+`local_files_only=True`, `trust_remote_code=False`, safetensors 가중치를 요구한다.
+기본 장치는 CPU이며 `RECODER_REPAIR_RERANKER_DEVICE`로 바꿀 수 있다. 입력은 쌍당
+최대 512 토큰, 한 배치는 4개다. API `retrieval_profile`은 구성된 모델 지문과 후보 한도를
+기록하며, 모델 구성이 바뀌면 기존 수정 캐시는 재사용하지 않는다.
+
+비교 데이터는 한국어·영어 개발용 검색 질의 20개와 버전 차단 대조군 1개다.
+기존 smoke 질의 4개를 포함하므로 독립 holdout이 아니다. Hit@1·Hit@4·MRR@4와
+warm-up 이후 중앙값·p95 시간을 기록한다. 정확도 향상 여부와 실행 환경의 속도를 함께
+확인한 뒤 활성화를 결정한다. 이 수치는 생성한 수정안의 성공률·안전성 평가를 대신하지 않는다.
+
+2026-10-20 macOS arm64 CPU 실측에서는 Hit@1이 100%→95%, 중앙값이 36.6ms→10,988.3ms였다.
+이 개발 세트에서는 이점이 없어 **기본 비활성화를 유지**한다. 문서 주제 단위 정답이며
+문단의 충분성까지 검증한 결과는 아니다. [실험 조건·원본 결과](../benchmarks/repair/RERANKER.md)를 참고한다.
+
+## 오류 관련 코드·테스트 선택 (2.0.38)
+
+로그에 나타난 워크스페이스 파일을 먼저 선택하고 같은 패키지의 대응 테스트
+(`test_foo.py`, `foo_test.py`, `foo.test.ts(x)`, `foo.spec.js(x)` 등)를 함께 우선한다.
+테스트 실패 로그에서는 대응 구현 파일을 우선한다. 그다음 해당 패키지의 설정과
+나머지 파일을 선택한다. package.json·pyproject.toml·requirements.txt로 패키지 경계를
+구분하고 루트 공통 설정도 유지한다. 루트 Dockerfile처럼 전체 빌드와 관련된 오류는
+하위 패키지까지 선택할 수 있다.
+
+파일명은 경계와 경로를 확인하고, 같은 이름의 파일이 여럿인 경우 임의로 결정하지 않는다.
+의존성 폴더의 stack frame은 프로젝트 파일로 해석하지 않는다. 이는 파일명·경로 기반
+우선순위이며 AST 의존성 분석이나 테스트 실행은 아니다. 별도 이름의 통합 테스트를
+자동으로 연결한다고 보장하지 않는다. 기존 12개/24,000자 제한과 비밀값 제외를 유지한다.
+API의 `context_files`와 `context_version`으로 선택 결과를 확인할 수 있으며,
+선택기 버전이 바뀌면 기존 수정 캐시는 재사용하지 않는다.
+테스트 경로는 `read_only_files`로 함께 전달하고, 테스트를 바꾸는 모델 수정안은
+복사본에 쓰거나 재빌드하기 전에 거부한다. 테스트를 수정해야 하는 작업은 수동 검토가 필요하다.
+
+## 문서 버전 적합성 (2.0.37)
+
+문서의 `version`은 출처 리비전이며 실행 환경 버전으로 해석하지 않는다. 검토한
+`applies_to` 메타데이터로 적용 대상 패키지의 major 버전을 별도로 기록한다.
+현재 기본 카탈로그는 Express 5 마이그레이션 문서에 `{"express": [5]}`를 지정한다.
+프로젝트 복사본의 package.json에서 한 major에 한정된 선언을 확인했을 때만
+맞지 않는 문서를 BM25·의미 검색 후보 모두에서 제외한다. 모델에도 확인된 선언을 전달한다.
+
+이는 설치된 버전의 증명이 아니다. 복잡한 범위·별칭·workspace 의존성·손상된 manifest,
+여러 패키지의 상충하는 선언은 알 수 없음으로 처리한다. 메타데이터가 없는 문서나
+프로젝트 버전이 불명확한 경우는 유지하므로 호환성이 보장되는 것은 아니다.
+필터 후 근거가 없으면 모델을 호출하지 않고 `no_document_evidence`로 끝낸다.
+새 metadata와 검색기 revision은 캐시 키에 포함된다. 과거 실험 결과는 재측정하지 않았다.
 
 ## 실제 의미 검색 설정
 

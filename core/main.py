@@ -79,6 +79,10 @@ from api.routes import (  # noqa: E402
     aws,
     github,
     repair,
+    ops_alerts as ops_alerts_routes,
+    aws_cleanup as aws_cleanup_routes,
+    security_checks as security_checks_routes,
+    models as models_routes,
 )
 
 _bound_port: int = 0
@@ -224,6 +228,24 @@ async def lifespan(app: FastAPI):
     import asyncio as _asyncio
     guard_task = _asyncio.create_task(_runtime_guard(pid, port, token))
 
+    #: 2.0.25 공격·장애 감시 — ECS 배포가 감시 목록에 올린 서비스만 1분마다 본다(목록이 비면 아무것도 부르지 않는다).
+    ops_task = None
+    if os.environ.get("RECODER_TEST_MODE") != "1" and os.environ.get("RECODER_OPS_MONITOR", "1") != "0":
+        try:
+            import ops_alerts as _ops_alerts
+            from api.routes.ops_alerts import session_for as _ops_session
+            ops_task = _asyncio.create_task(_ops_alerts.Monitor(_ops_session).run_forever())
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ReCoder Core] 운영 감시 시작 생략: {exc}", flush=True)
+    #: 2.0.28 배포 후 취약점 재검사 — 하루 한 번 SBOM 을 OSV 와 대조(새로 발표된 것만 알림).
+    vuln_task = None
+    try:
+        import vuln_recheck as _vuln
+        if _vuln.enabled():
+            vuln_task = _asyncio.create_task(_vuln.Rechecker(_vuln.records_from_store).run_forever())
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ReCoder Core] 취약점 재검사 시작 생략: {exc}", flush=True)
+
     try:
         from observability import observability  # type: ignore
         observability.initialize()
@@ -251,6 +273,10 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         guard_task.cancel()
+        if ops_task is not None:
+            ops_task.cancel()
+        if vuln_task is not None:
+            vuln_task.cancel()
         if relay_poller is not None:
             try:
                 await relay_poller.stop()
@@ -362,6 +388,12 @@ def create_app() -> FastAPI:
     app.include_router(aws.router)
     app.include_router(github.router)
     app.include_router(repair.router)
+    #: 2.0.25 공격·장애 감지 알림
+    app.include_router(ops_alerts_routes.router)
+    app.include_router(aws_cleanup_routes.router)
+    app.include_router(security_checks_routes.router)
+    #: 2.0.36 작업별 AI 공급자·비용 원장·공급자 비교
+    app.include_router(models_routes.router)
 
     return app
 
@@ -378,8 +410,84 @@ def _handle_shutdown(signum, _frame) -> None:
     sys.exit(0)
 
 
+#: 배포판마다 다른 시스템 인증서 묶음 위치(빌드한 PC 의 경로가 없을 때 차례로 찾는다). 사내 루트 인증서도 여기에 들어 있다.
+_SYSTEM_CA_FILES = (
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian·Ubuntu·Alpine·Arch
+    "/etc/pki/tls/certs/ca-bundle.crt",     # Fedora·RHEL·Amazon Linux
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/ssl/ca-bundle.pem",               # openSUSE
+    "/etc/ssl/cert.pem",                    # macOS·Alpine
+)
+
+
+def _ensure_ca_bundle() -> None:
+    """HTTPS 인증서 묶음 위치(2.0.32).
+
+    번들(PyInstaller)은 빌드한 컴퓨터의 OpenSSL 기본 경로를 그대로 들고 온다 — macOS 빌드(python.org 파이썬)의
+    /Library/Frameworks/…/cert.pem, 우분투의 /usr/lib/ssl 은 사용자 PC 에 없어 urllib 로 하는 HTTPS(OSV 취약점 조회·GitHub·
+    LLM 게이트웨이)가 CERTIFICATE_VERIFY_FAILED 로 조용히 실패했다. 사용자가 SSL_CERT_FILE 을 정했으면 그대로 둔다.
+    """
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import ssl
+        paths = ssl.get_default_verify_paths()
+        have_default = bool((paths.cafile and os.path.isfile(paths.cafile))
+                            or (paths.capath and os.path.isdir(paths.capath) and os.listdir(paths.capath)))
+        if have_default:
+            #: 2.0.33 시스템 인증서가 보이면 그대로 쓴다 — 번들이라고 certifi 로 바꾸면 회사망(사내 루트 인증서를
+            #: 시스템 저장소에 넣어 둔 PC)에서 오히려 모든 HTTPS 가 실패했다.
+            return
+        for candidate in _SYSTEM_CA_FILES:
+            if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                os.environ["SSL_CERT_FILE"] = candidate
+                return
+        import certifi
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+    except Exception:  # noqa: BLE001 - 없으면 시스템 기본값으로
+        pass
+
+
+def _is_loopback_host(name: str) -> bool:
+    """정확히 내 PC 주소만(2.0.33). "127.evil.example" 같은 이름을 앞글자만 보고 프록시 없이 보내지 않는다."""
+    name = (name or "").strip().rstrip(".").lower()
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(name.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+class _LoopbackDirectProxyHandler:
+    """urllib 의 프록시 처리에서 내 PC(127.0.0.1·localhost·::1) 주소만 프록시를 거치지 않게 한다(2.0.32).
+
+    회사망처럼 http_proxy 가 걸린 PC 에서 로컬 배포 헬스 체크(http://127.0.0.1:포트)가 프록시로 가 502 로 실패했고,
+    Windows 레지스트리 프록시의 `<local>` 예외는 점이 있는 127.0.0.1 을 빼 주지 않는다."""
+
+    @staticmethod
+    def install() -> None:
+        import urllib.request
+
+        class Handler(urllib.request.ProxyHandler):
+            def proxy_open(self, req, proxy, type):  # noqa: A002 - urllib 의 이름
+                host = (req.host or "").rsplit("@", 1)[-1]
+                name = host[1:].split("]", 1)[0] if host.startswith("[") else host.split(":", 1)[0]
+                if _is_loopback_host(name):
+                    return None
+                return super().proxy_open(req, proxy, type)
+
+        urllib.request.install_opener(urllib.request.build_opener(Handler()))
+
+
 def main() -> None:
     multiprocessing.freeze_support()
+    _ensure_ca_bundle()
+    try:
+        _LoopbackDirectProxyHandler.install()
+    except Exception:  # noqa: BLE001
+        pass
     #: 콘솔·파이프 인코딩이 한글을 못 쓰는 Windows 로캘에서도 출력 때문에 죽지 않게 한다. 확장은 Core 출력을 UTF-8 로
     #: 읽으므로 UTF-8 로 쓴다 — cp949 로 쓰면 core.log·오류 안내의 한글이 "����" 로 깨졌다(실기기 2.0.16 SBOM 오류).
     for _stream in (sys.stdout, sys.stderr):

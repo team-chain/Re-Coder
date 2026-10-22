@@ -345,7 +345,7 @@ def _node_entry(workspace: Path) -> str:
     """루트 package.json 이 가리키는 시작 파일(있을 때만) — start 의 `node X` 또는 main."""
     import json as _json
     try:
-        pkg = _json.loads((workspace / "package.json").read_text(encoding="utf-8"))
+        pkg = _json.loads((workspace / "package.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return ""
     start = str((pkg.get("scripts") or {}).get("start") or "") if isinstance(pkg, dict) else ""

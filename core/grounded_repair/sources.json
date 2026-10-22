@@ -69,7 +69,12 @@
     "kind": "authored_summary",
     "license_status": "summary_only",
     "license_url": "https://github.com/expressjs/expressjs.com/blob/main/LICENSE.md",
-    "fulltext_status": "authored_summary_only"
+    "fulltext_status": "authored_summary_only",
+    "applies_to": {
+      "express": [
+        5
+      ]
+    }
   },
   {
     "id": "ecs-stopped",

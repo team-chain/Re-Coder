@@ -34,7 +34,7 @@ def _codes(root: Path) -> list[str]:
 
 
 def _run(root: Path, entry: str) -> str:
-    proc = subprocess.run([NODE, entry], cwd=root, capture_output=True, text=True, timeout=30)
+    proc = subprocess.run([NODE, entry], cwd=root, capture_output=True, text=True, timeout=30, encoding="utf-8")
     assert proc.returncode == 0, proc.stderr[-800:]
     return proc.stdout
 
@@ -343,5 +343,5 @@ def test_파일_계획은_중간에_실패하면_원래대로_되돌린다(tmp_p
     with pytest.raises(ValueError, match="원래대로"):
         br.apply_file_plan(root, {"main.js": "y"}, [("a.js", "a.cjs"), ("b.js", "b.cjs")])
     monkeypatch.setattr(Path, "unlink", real_unlink)
-    assert (root / "main.js").read_text() == "x"
+    assert (root / "main.js").read_text(encoding="utf-8") == "x"
     assert not (root / "b.cjs").exists() and (root / "b.js").exists()

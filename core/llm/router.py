@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -82,8 +83,11 @@ class LLMRouter:
         성공 시 response.metadata["llm_call_record"] 에 비용 추적 dict 가
         들어간다 — 같은 기록이 llm/cost_ledger 원장에도 적힌다.
         """
+        #: 2.0.36 — 브리지 스레드는 호출자의 문맥(비교 도구의 공급자 고정·실행 표시)을 모른다.
+        #: 문맥 복사본 안에서 돌려야 같은 값을 본다.
+        ctx = contextvars.copy_context()
         future = _BRIDGE.submit(
-            asyncio.run,
+            ctx.run, asyncio.run,
             self._pr.call_llm(request, agent=agent, operation=operation, prefer=prefer),
         )
         return future.result()

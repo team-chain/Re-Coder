@@ -70,6 +70,17 @@ def _to_cfn_value(value: Any) -> Any:
     return value
 
 
+def policy_resource(index: int) -> str:
+    """템플릿의 관리형 정책 자원 이름 — 첫 번째는 예전 이름 그대로(스택 업데이트 때 교체되지 않게)."""
+    return "RecoderDeployPolicy" if index == 0 else f"RecoderDeployPolicy{index + 1}"
+
+
+def policy_documents(template: dict) -> list[dict]:
+    """템플릿의 정책 문서들(순서대로)."""
+    return [r["Properties"]["PolicyDocument"] for r in template["Resources"].values()
+            if r.get("Type") == "AWS::IAM::ManagedPolicy"]
+
+
 def build_quickcreate_template(
     targets: list[str] | None = None,
     *,
@@ -93,7 +104,19 @@ def build_quickcreate_template(
         service=service or aws_policy.DEFAULT_SERVICE,
         ecr_repo=ecr_repo or aws_policy.DEFAULT_ECR_REPO,
     )
-    policy_document = _to_cfn_value(policy)
+    #: 관리형 정책 한 개는 6,144자까지 — 넘으면 여러 개로 나눠 사용자에게 모두 붙인다(2.0.27).
+    chunks = aws_policy.split_policy(policy)
+    policies = {
+        policy_resource(i): {
+            "Type": "AWS::IAM::ManagedPolicy",
+            "Properties": {
+                "ManagedPolicyName": POLICY_NAME if i == 0 else f"{POLICY_NAME}-{i + 1}",
+                "Description": "ReCoder 가 배포에 요구하는 최소권한" + ("" if len(chunks) == 1 else f" ({i + 1}/{len(chunks)})"),
+                "PolicyDocument": _to_cfn_value(chunk),
+            },
+        }
+        for i, chunk in enumerate(chunks)
+    }
 
     return {
         "AWSTemplateFormatVersion": "2010-09-09",
@@ -103,19 +126,12 @@ def build_quickcreate_template(
             "AWS 연결 화면에 붙여넣으세요."
         ),
         "Resources": {
-            "RecoderDeployPolicy": {
-                "Type": "AWS::IAM::ManagedPolicy",
-                "Properties": {
-                    "ManagedPolicyName": POLICY_NAME,
-                    "Description": "ReCoder 가 배포에 요구하는 최소권한",
-                    "PolicyDocument": policy_document,
-                },
-            },
+            **policies,
             "RecoderDeployUser": {
                 "Type": "AWS::IAM::User",
                 "Properties": {
                     "UserName": USER_NAME,
-                    "ManagedPolicyArns": [{"Ref": "RecoderDeployPolicy"}],
+                    "ManagedPolicyArns": [{"Ref": name} for name in policies],
                 },
             },
             "RecoderDeployKey": {

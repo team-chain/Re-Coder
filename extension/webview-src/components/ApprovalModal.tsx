@@ -6,6 +6,7 @@
 import React, { useState, useCallback } from "react";
 import { issueKind, shortIssue } from "./issueText";
 import { Checkbox } from "./Check";
+import { TrustCheck, TrustReport } from "./TrustCheck";
 
 /** 실제로 실행할 명령 한 단계(코어가 실행 경로와 같은 함수로 만든 것, 설정값은 *** 로 가림). */
 export interface CommandStep { command: string; note?: string }
@@ -24,6 +25,8 @@ export interface ApprovalModalProps {
   rollbackPath?: string;       // Level 3+
   diffBefore?: string;         // Level 4
   diffAfter?: string;          // Level 4
+  /** 2.0.35 배포 전 신뢰 점검(제로 트러스트) */
+  trust?: TrustReport | null;
   onApprove: () => void;
   onReject: () => void;
 }
@@ -63,6 +66,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = ({
   rollbackPath,
   diffBefore,
   diffAfter,
+  trust,
   onApprove,
   onReject,
 }) => {
@@ -180,6 +184,8 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = ({
           )}
         </div>
       )}
+
+      <TrustCheck report={trust} />
 
       {/* 실행할 명령 (Level 2+) — 코어가 실제 실행 순서대로 준 목록. 없으면 예전 한 줄. */}
       {level >= 2 && commandSteps && commandSteps.length > 0 && (

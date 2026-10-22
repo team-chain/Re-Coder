@@ -149,7 +149,7 @@ def test_provision_rejects_incompatible_alb_before_build(monkeypatch, provision)
     ec2.describe_subnets.return_value["Subnets"][0]["AvailabilityZone"] = "region-c"
     clients = {"ec2": ec2, "elbv2": alb, "ecs": MagicMock(), "logs": MagicMock()}
     for name in ["ensure_cluster", "ensure_log_group"]:
-        monkeypatch.setattr(aws_infra, name, lambda *a: None)
+        monkeypatch.setattr(aws_infra, name, lambda *a, **k: None)
     monkeypatch.setattr(
         aws_infra,
         "resolve_subnet_network",

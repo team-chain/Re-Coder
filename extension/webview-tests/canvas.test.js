@@ -239,3 +239,15 @@ test('approval card offers one button that applies every automatic fix at once',
  const single=renderToStaticMarkup(React.createElement(ApprovalCard,{plan:{...plan,preflight:{blocked:true,reasons:[issue('A','readiness:A')],warnings:[]}},onApprove(){},onCancel(){},onFix(){},onFixAll(){}}));
  assert.ok(!single.includes('모두 적용'));
 });
+test('2.0.35 승인 카드에 신뢰 점검이 붙고(값 없이 이름만 보냄), 점검이 실패해도 승인 카드는 뜬다',async()=>{
+ const s=setup(),calls=[];
+ s.api.getAwsStatus=async()=>({ready:true,identity:{account:'123',arn:'arn:aws:iam::123:user/dev'},region:'us-east-1'});
+ s.api.getTrustCheck=async(...args)=>{calls.push(args);return {target:'ecs',principles:[],counts:{pass:1,warn:0,block:0,info:0},scanned_files:1,truncated:false};};
+ await s.send('canvas.prepare',{config:{...config,environment:'production',env_vars:{JWT_SECRET:'super-secret'}}});
+ assert.equal(s.plan().trust.counts.pass,1);
+ assert.equal(calls[0][1],'ecs');assert.equal(calls[0][3],'arn:aws:iam::123:user/dev');
+ assert.deepEqual(calls[0][2].env_vars,['JWT_SECRET']);assert.ok(!JSON.stringify(calls).includes('super-secret'));
+ s.api.getTrustCheck=async()=>{throw new Error('core down');};
+ await s.send('canvas.prepare',{config});
+ assert.equal(s.plan().trust,null);assert.ok(s.plan().id);
+});

@@ -1,4 +1,4 @@
-import { currentAiProvider } from '../ai/aiKeyEnv';
+import { currentAiProvider, isEconomyProvider, storedAiKeys } from '../ai/aiKeyEnv';
 import { withTimeout } from '../core/timeouts';
 import { detectFrontendProject } from '../deploy/frontendBuild';
 import * as vscode from 'vscode';
@@ -17,7 +17,8 @@ import {
     DeployMethod,
     AwsStatus,
 } from '../types';
-import { ApiClient, CodeDecisionChoice } from '../core/ApiClient';
+import { ApiClient, CodeDecisionChoice, CodeSpec } from '../core/ApiClient';
+import { currentQuickAccess, quickWheelClosed, resetQuickAccess, setQuickSlot, QuickAccessPayload } from '../quickAccessHost';
 import { GenerationPausedError, compactCodeEvent } from '../core/codeStream';
 import { CoreHttpError, policyDenialFromDetail } from '../core/httpError';
 import { CoreManager } from '../core/CoreManager';
@@ -31,7 +32,7 @@ import {
     STATIC_DIR_CANDIDATES,
 } from '../deploy/staticSite';
 import { PollingService } from '../core/PollingService';
-import { analyzeProject, analyzeFile } from '../codemap/analyzer';
+import { AnalysisJob } from '../codemap/analysisJob';
 import { CanvasHost } from './canvasHost';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken } from './discordBotToken';
@@ -134,6 +135,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _mapRefreshTimer?: ReturnType<typeof setTimeout>;
     private _state: SidebarState;
     private _canvasHosts = new Map<vscode.Webview | undefined, CanvasHost>();
+    /** dry run 그래프 분석(작업 스레드) — 새 요청이 오면 이전 분석은 취소한다. */
+    private _flowJob = new AnalysisJob(60000);
+    /** 구조 지도도 작업 스레드에서 — 큰 저장소·이상한 파일이 확장 호스트(채팅·승인)를 멈추게 하지 않는다(2.0.34). */
+    private _mapJob = new AnalysisJob(30000);
+    private _mapRefreshJob = new AnalysisJob(30000);
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -163,6 +169,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const saved = this._savedUiState();
         this._restoredUiState = saved ?? (state && typeof state === 'object' ? { ...(state as Record<string, unknown>) } : null);
         this._workspacePanelRevived = true;
+    }
+    /**
+     * 새 ReCoder 창을 특정 화면으로 시작하게 한다(빠른 이동·알림의 [자세히]).
+     *
+     * 예전에는 setRestoredUiState({ view }) 를 썼는데, 그 함수는 확장이 기억한 마지막 화면이 있으면
+     * 그쪽을 우선한다(되살리기용). 그래서 창을 닫았다가 단축키·알림으로 열면 요청한 화면이 아니라
+     * 마지막에 보던 화면이 열렸다. 쓰던 요청(codeDraft)은 살리고 화면만 요청한 것으로 바꾼다.
+     */
+    requestView(view: string, extra?: Record<string, unknown>): void {
+        this._restoredUiState = { ...(this._savedUiState() ?? {}), view, ...(extra ?? {}) };
+        this._workspacePanelRevived = false;
+    }
+    /** 새로 여는 ReCoder 창이 ready 를 보내면 띄울 빠른 이동 휠(창이 이미 있으면 바로 보낸다 — ReCoderPanel.post). */
+    private _pendingWheel: 'pick' | 'edit' | null = null;
+    requestWheel(mode: 'pick' | 'edit'): void { this._pendingWheel = mode; }
+    //: 큰 작업 화면이 ready 를 보냈는가 — 막 만든 창·다시 불러온 창에 바로 보낸 메시지는 React 가 듣기 전이라 사라진다.
+    private _workspaceReady = false;
+    isWorkspaceReady(): boolean { return !!this._workspacePanelWebview && this._workspaceReady; }
+    /** 빠른 이동 설정이 바뀌면 열린 화면에 알린다. */
+    broadcastQuickAccess(state: QuickAccessPayload): void {
+        this.postMessage('quickAccess.state', state);
     }
     private static readonly UI_STATE_KEY = 'recoder.workspaceUiState';
     private _uiStateScope(): string {
@@ -234,6 +261,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this._pollingActive = false;
             }
             this._mapWatcher?.dispose();
+            this._flowJob.cancel();
+            this._mapJob.cancel();
+            this._mapRefreshJob.cancel();
             this._mapWatcher = undefined;
             if (this._mapRefreshTimer) { clearTimeout(this._mapRefreshTimer); }
         });
@@ -247,6 +277,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     /** 요청-응답 메시지는 요청을 보낸 Webview로만 돌려보낸다. */
+    /** 정리·중지 뒤 목록 새로 고침. 실패해도 방금 결과 문장을 덮지 않는다(2.0.32). */
+    private async refreshCleanupPlan(requestWebview: vscode.Webview | undefined, region: string): Promise<void> {
+        try {
+            this.postMessageToWebview(requestWebview, 'aws.cleanup.planResult', await this._apiClient.cleanupPlan(region));
+        } catch (err) {
+            this.postMessageToWebview(requestWebview, 'aws.cleanup.refreshError', { message: String(err) });
+        }
+    }
+
     private postMessageToWebview(webview: vscode.Webview | undefined, type: string, payload: unknown): void {
         if (/^(canvas\.graph|canvas\.error|code\.|chat\.)/.test(type)) {
             const id = (payload as { requestId?: unknown; id?: unknown })?.requestId ?? (payload as { id?: unknown })?.id ?? '';
@@ -266,6 +305,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      */
     attachWorkspacePanel(webview: vscode.Webview): void {
         this._workspacePanelWebview = webview;
+        this._workspaceReady = false;
         webview.onDidReceiveMessage((message: { type: string; payload: unknown }) => {
             void this.handleMessage(message, webview);
         });
@@ -278,6 +318,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._canvasHosts.delete(webview);
         if (this._workspacePanelWebview === webview) {
             this._workspacePanelWebview = undefined;
+            this._workspaceReady = false;
             this._workspaceAutoOpenRequested = false;
             if (!this._view?.visible) {
                 this._pollingService.stop();
@@ -320,13 +361,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     /** 사이드바가 보일 때만 재분석해 webview 에 푸시(파일 뷰면 화면을 빼앗지 않음). */
     private _doMapRefresh(): void {
-        try {
-            if (!this._view?.visible) { return; }
-            const root = activeProjectPath();
-            if (!root) { return; }
-            const data = analyzeProject(root);
-            this.postMessage('map.projectResult', data);
-        } catch { /* 무해하게 무시 */ }
+        if (!this._view?.visible) { return; }
+        const root = activeProjectPath();
+        if (!root) { return; }
+        this._mapRefreshJob.run(root).then(
+            (data) => this.postMessage('map.projectResult', data),
+            () => { /* 자동 새로 고침 실패는 무해하게 무시 — 보던 지도를 그대로 둔다 */ },
+        );
     }
 
     /** 탐색기에서 폴더 우클릭 → '여기에 코드 생성' 시 webview 에 대상 폴더 주입.
@@ -759,7 +800,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'ai.connect': {
                 //: AWS 없이 AI — Claude/ChatGPT API 키 입력. 키는 명령이 보안 저장소에 둔다.
                 const provider = (payload as { provider?: string } | undefined)?.provider;
-                await vscode.commands.executeCommand('recoder.ai.connect', provider === 'anthropic' || provider === 'openai' ? provider : undefined);
+                await vscode.commands.executeCommand('recoder.ai.connect', provider === 'anthropic' || provider === 'openai' || provider === 'compatible' ? provider : undefined);
                 break;
             }
             case 'webview.diagnostics.rerun': {
@@ -1046,6 +1087,93 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     } else {
                         this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.error', { message: String(err) });
                     }
+                }
+                break;
+            }
+            // ── 2.0.25 공격·장애 감지 알림 ──
+            case 'ops.alerts.list': {
+                try {
+                    const data = await this._apiClient.listOpsAlerts();
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.result', data);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'ops.alerts.act': {
+                const p = (payload ?? {}) as { alertId?: string; action?: string; value?: unknown; approved?: boolean };
+                try {
+                    if (!p.alertId || !p.action || typeof p.approved !== 'boolean') { throw new Error('승인 카드에서 대응을 다시 고르세요.'); }
+                    const result = await this._apiClient.actOpsAlert(p.alertId, p.action, p.value ?? null, p.approved);
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.actResult', { alertId: p.alertId, ...result });
+                    const data = await this._apiClient.listOpsAlerts();
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.result', data);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'ops.alerts.error', { message: String(err), alertId: p.alertId });
+                }
+                break;
+            }
+            case 'aws.cleanup.plan': {
+                const p = (payload ?? {}) as { region?: string; service?: string };
+                try {
+                    if (!p.region) { throw new Error('리전을 고르세요.'); }
+                    const plan = await this._apiClient.cleanupPlan(p.region, p.service ?? '');
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.planResult', plan);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'aws.cleanup.regions': {
+                try {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.regionsResult', await this._apiClient.cleanupRegions());
+                } catch { /* 옛 코어 — 기본 리전 목록만 */ }
+                break;
+            }
+            case 'aws.cleanup.jobs': {
+                const p = (payload ?? {}) as { region?: string };
+                try {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.jobsResult', await this._apiClient.cleanupJobs(p.region ?? ''));
+                } catch { /* 옛 코어 — 작업 기록 없음 */ }
+                break;
+            }
+            case 'aws.cleanup.attach': {
+                //: 2.0.32 — 화면을 다시 열었을 때 이미 뒤에서 도는 정리에 다시 붙는다.
+                const p = (payload ?? {}) as { region?: string; jobId?: string };
+                try {
+                    if (!p.region || !p.jobId || !/^[0-9a-f]{12}$/.test(p.jobId)) { throw new Error('정리 작업 정보를 다시 불러오세요.'); }
+                    const result = await this._apiClient.cleanupAttach(p.jobId,
+                        progress => this.postMessageToWebview(requestWebview, 'aws.cleanup.progress', progress));
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.deleteResult', result);
+                    await this.refreshCleanupPlan(requestWebview, p.region);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'aws.cleanup.stop': {
+                const p = (payload ?? {}) as { region?: string; cluster?: string; service?: string };
+                try {
+                    if (!p.region || !p.cluster || !p.service) { throw new Error('중지할 서비스를 다시 고르세요.'); }
+                    const result = await this._apiClient.cleanupStop(p.region, p.cluster, p.service);
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.stopResult', result);
+                    await this.refreshCleanupPlan(requestWebview, p.region);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'aws.cleanup.delete': {
+                const p = (payload ?? {}) as { region?: string; ids?: unknown; approved?: boolean };
+                try {
+                    const ids = Array.isArray(p.ids) ? p.ids.filter((x): x is string => typeof x === 'string') : [];
+                    if (!p.region || !ids.length || p.approved !== true) { throw new Error('승인 카드에서 지울 항목을 다시 고르세요.'); }
+                    const result = await this._apiClient.cleanupDelete(p.region, ids,
+                        progress => this.postMessageToWebview(requestWebview, 'aws.cleanup.progress', progress));
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.deleteResult', result);
+                    await this.refreshCleanupPlan(requestWebview, p.region);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'aws.cleanup.error', { message: String(err) });
                 }
                 break;
             }
@@ -1436,6 +1564,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 void this._pollingService.poll();
                 break;
             }
+            case 'quickAccess.get': {
+                this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess());
+                break;
+            }
+            case 'quickAccess.set': {
+                //: 화면의 휠에서 한 칸을 바꾼다. 모르는 칸·기능은 무시한다(설정 변경 알림으로 화면이 다시 맞춰진다).
+                const p = (payload ?? {}) as { slot?: unknown; target?: unknown };
+                try {
+                    const changed = typeof p.slot === 'string' && typeof p.target === 'string' && await setQuickSlot(p.slot, p.target);
+                    if (!changed) { this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess()); }
+                } catch (err) {
+                    //: 저장 실패(설정 파일 잠김·문법 오류 등) — 화면이 낙관적으로 바꾼 칸을 되돌리고 이유를 알린다.
+                    this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess());
+                    void vscode.window.showErrorMessage(`빠른 이동 설정을 저장하지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
+                }
+                break;
+            }
+            case 'quickAccess.reset': {
+                try { await resetQuickAccess(); } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess());
+                    void vscode.window.showErrorMessage(`빠른 이동 설정을 되돌리지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
+                }
+                break;
+            }
+            case 'quickAccess.keybindings': {
+                //: 키 자체를 바꾸고 싶을 때 — VS Code 단축키 설정을 ReCoder 빠른 이동만 걸러 연다.
+                await vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', 'recoder.quick');
+                break;
+            }
+            case 'quickAccess.closed': {
+                //: 휠을 닫았다 — 고르지 않고 닫았으면(Esc) Alt+Q 를 누르기 전의 편집기로 돌아간다.
+                const reason = (payload as { reason?: unknown } | undefined)?.reason;
+                await quickWheelClosed(reason === 'pick' || reason === 'dismiss' ? reason : 'cancel');
+                break;
+            }
             case 'ui.state': {
                 //: 큰 작업 화면의 상태(보던 화면·쓰던 요청)만 기억한다. 작은 값만 받는다.
                 if (requestWebview && requestWebview === this._workspacePanelWebview && payload && typeof payload === 'object') {
@@ -1455,6 +1618,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (this._restoredUiState && requestWebview && requestWebview === this._workspacePanelWebview) {
                     this.postMessageToWebview(requestWebview, 'ui.restore', this._restoredUiState);
                     this._restoredUiState = null;
+                }
+                if (requestWebview && requestWebview === this._workspacePanelWebview) { this._workspaceReady = true; }
+                if (this._pendingWheel && requestWebview && requestWebview === this._workspacePanelWebview) {
+                    this.postMessageToWebview(requestWebview, 'quickAccess.wheel', { mode: this._pendingWheel, state: currentQuickAccess() });
+                    this._pendingWheel = null;
                 }
                 if (this._pendingCodeTarget !== null && requestWebview && requestWebview === this._workspacePanelWebview) {
                     this.postMessageToWebview(requestWebview, 'code.setTargetFolder', { folder: this._pendingCodeTarget });
@@ -1959,6 +2127,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     resumeJob?: string;
                     agents?: number;
                     skipFailed?: boolean;
+                    spec?: CodeSpec | null;
                 };
                 await this.handleCodeGenerate(p.instruction ?? '', {
                     requestId: p.requestId,
@@ -1971,7 +2140,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     resumeJob: typeof p.resumeJob === 'string' ? p.resumeJob : '',
                     agents: Number.isInteger(p.agents) && (p.agents as number) > 0 && (p.agents as number) <= 8 ? p.agents : 0,
                     skipFailed: p.skipFailed === true,
+                    spec: p.spec && typeof p.spec === 'object' ? p.spec : null,
                 });
+                break;
+            }
+            case 'code.spec': {
+                //: 2.0.43 — 설계 결정을 고른 뒤 명세(목표·범위·합격 조건) 초안을 받는다.
+                //: 실패해도 턴을 오류로 바꾸지 않는다 — 명세 창 안에서 다시 받거나 직접 적게 한다.
+                const p = (payload ?? {}) as { requestId?: number; instruction?: string; targetFolder?: string; contextFiles?: Array<{ path: string; content: string }>; decisions?: CodeDecisionChoice[] };
+                try {
+                    const scope = this._codeScope(p.targetFolder ?? '');
+                    await this.ensureConnection();
+                    const ed = vscode.window.activeTextEditor;
+                    const openFile = ed && !ed.document.isUntitled
+                        ? { path: vscode.workspace.asRelativePath(ed.document.uri), content: ed.document.getText() } : undefined;
+                    const draft = await this._apiClient.draftSpec(p.instruction ?? '', {
+                        workspacePath: scope.workspacePath, openFile, contextFiles: p.contextFiles ?? [],
+                        targetFolder: scope.targetFolder, decisions: p.decisions ?? [],
+                    });
+                    this.postMessageToWebview(requestWebview, 'code.specResult', {
+                        requestId: p.requestId, spec: draft.spec ?? null,
+                        ...(draft.skip ? { skip: draft.skip, message: draft.message ?? '' } : {}),
+                    });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'code.specError', {
+                        requestId: p.requestId, message: err instanceof Error ? err.message : String(err),
+                    });
+                }
                 break;
             }
             case 'code.plan': {
@@ -2125,11 +2320,106 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 try {
                     const root = activeProjectPath();
                     if (!root) { this.postMessage('map.error', { message: '분석할 폴더가 열려있지 않습니다.' }); break; }
-                    // 서버 불필요 — 확장 내부에서 정적 분석.
-                    const data = analyzeProject(root);
+                    // 서버 불필요 — 확장 내부에서 정적 분석(작업 스레드).
+                    const data = await this._mapJob.run(root);
                     this.postMessage('map.projectResult', data);
                 } catch (err) {
                     this.postMessage('map.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'models.load': {
+                //: 2.0.36 작업별 AI 공급자 화면 — 등급별 공급자·30일 비용·마지막 비교. 키 값은 보내지 않는다(있는지만).
+                try {
+                    const [routing, costs, compare, keys] = await Promise.all([
+                        this._apiClient.getModelRouting(),
+                        this._apiClient.getModelCosts(30),
+                        this._apiClient.getModelCompare('').catch(() => null),
+                        this._secrets && this._globalState ? storedAiKeys({ secrets: this._secrets, globalState: this._globalState }) : Promise.resolve(null),
+                    ]);
+                    const cfg = vscode.workspace.getConfiguration('recoder.ai');
+                    this.postMessageToWebview(requestWebview, 'models.state', {
+                        routing, costs, compare, keys,
+                        settings: { economyProvider: cfg.get<string>('economyProvider', '') || '', compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '' },
+                    });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'models.error', { message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'models.setEconomy': {
+                const provider = (payload as { provider?: unknown } | undefined)?.provider;
+                await vscode.commands.executeCommand('recoder.ai.economy', isEconomyProvider(provider) ? provider : undefined);
+                break;
+            }
+            case 'models.openPrices': {
+                await vscode.commands.executeCommand('workbench.action.openSettings', 'recoder.ai.prices');
+                break;
+            }
+            case 'models.compare.start': {
+                //: 같은 요청을 두 공급자로 — AI 요청이 두 번 나가 비용도 두 번 든다. 시작 전에 확인받는다.
+                const p = (payload ?? {}) as { instruction?: unknown; providers?: unknown };
+                const instruction = typeof p.instruction === 'string' ? p.instruction.trim() : '';
+                const providers = Array.isArray(p.providers) ? p.providers.map((x) => String(x)) : [];
+                if (!instruction || providers.length !== 2) {
+                    this.postMessageToWebview(requestWebview, 'models.compareError', { message: '요청과 비교할 공급자 두 개를 고르세요.' });
+                    break;
+                }
+                const ok = await vscode.window.showWarningMessage(
+                    '같은 요청을 두 AI 공급자에 각각 보냅니다. AI 요금이 두 번 들고, 끝날 때까지 몇 분 걸릴 수 있습니다. 파일은 바꾸지 않습니다.',
+                    { modal: true }, '비교 시작');
+                if (ok !== '비교 시작') { this.postMessageToWebview(requestWebview, 'models.compareError', { message: '' }); break; }
+                try {
+                    const job = await this._apiClient.startModelCompare(instruction, activeProjectPath() ?? '', [providers[0], providers[1]]);
+                    this.postMessageToWebview(requestWebview, 'models.compare', job);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'models.compareError', { message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'models.compare.poll': {
+                const id = String((payload as { id?: unknown } | undefined)?.id ?? '');
+                if (!/^[a-f0-9]{6,32}$/.test(id)) { break; }
+                try {
+                    const job = await this._apiClient.getModelCompare(id);
+                    if (job) { this.postMessageToWebview(requestWebview, 'models.compare', job); }
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'models.compareError', { message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'map.flow': {
+                //: dry run 다이어그램 — 파일을 넘나드는 호출 그래프. 작업 스레드에서 분석해 화면·확장이 멈추지 않는다.
+                const root = activeProjectPath();
+                if (!root) { this.postMessageToWebview(requestWebview, 'map.flowError', { message: '분석할 폴더가 열려있지 않습니다.' }); break; }
+                try {
+                    const graph = await this._flowJob.run(root, '', { mode: 'flow' });
+                    this.postMessageToWebview(requestWebview, 'map.flowResult', graph);
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'map.flowError', { message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'code.flowPreview': {
+                //: 적용 전 dry run — 제안된 파일을 디스크에 쓰지 않고 그 내용으로 흐름을 다시 그려, 바뀌는 함수와 지나가는 진입점을 알려 준다.
+                const p = (payload ?? {}) as { key?: string; ops?: Array<{ file?: string; content?: string; action?: string }>; targetFolder?: string; projectRoot?: string };
+                const key = String(p.key ?? '');
+                const resolved = this._resolveWriteRoot(p.targetFolder ?? '', p.projectRoot ?? '');
+                if (!resolved) { this.postMessageToWebview(requestWebview, 'code.flowPreviewResult', { key, error: '이 결과를 만든 프로젝트가 워크스페이스에 없어 미리 볼 수 없습니다.' }); break; }
+                const overrides: Array<[string, string | null]> = [];
+                for (const op of (Array.isArray(p.ops) ? p.ops : []).slice(0, 400)) {
+                    const combined = this._joinFolder(resolved.relFolder, String(op.file ?? ''));
+                    const safe = combined.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '.' && seg !== '..').join('/');
+                    if (!safe || /^[a-zA-Z]:/.test(safe) || safe.split('/').some(seg => ['.git', '.vscode'].includes(seg.toLowerCase()))) { continue; }
+                    const content = typeof op.content === 'string' ? op.content : '';
+                    if (content.length > 1_500_000) { continue; }
+                    overrides.push([safe, op.action === 'delete' ? null : content]);
+                }
+                try {
+                    const preview = await new AnalysisJob(60000).run(resolved.root.fsPath, '', { mode: 'preview', overrides });
+                    this.postMessageToWebview(requestWebview, 'code.flowPreviewResult', { key, preview, projectRoot: resolved.root.fsPath, prefix: resolved.relFolder });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'code.flowPreviewResult', { key, error: err instanceof Error ? err.message : String(err) });
                 }
                 break;
             }
@@ -2141,7 +2431,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const safe = (id ?? '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                     if (!safe) { this.postMessage('map.error', { message: '대상 파일이 없습니다.' }); break; }
                     const abs = vscode.Uri.joinPath(root, safe).fsPath;
-                    const data = analyzeFile(abs);
+                    const data = await this._mapJob.run(root.fsPath, abs);
                     this.postMessage('map.fileResult', data);
                 } catch (err) {
                     this.postMessage('map.error', { message: String(err) });
@@ -2227,12 +2517,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'map.openFile': {
-                const { id } = (payload ?? {}) as { id?: string };
+                const { id, line, projectRoot } = (payload ?? {}) as { id?: string; line?: number; projectRoot?: string };
                 try {
-                    const root = activeProjectUri();
+                    //: 적용 전 미리 보기는 생성한 프로젝트 기준 — 그 사이 활성 프로젝트가 바뀌어도 그 프로젝트의 파일을 연다.
+                    const root = projectRoot && isInsideProjectRoot(projectRoot) ? vscode.Uri.file(projectRoot) : activeProjectUri();
                     if (!root || !id) { break; }
                     const safe = id.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
-                    await vscode.window.showTextDocument(vscode.Uri.joinPath(root, safe));
+                    const target = vscode.Uri.joinPath(root, safe);
+                    if (!fs.existsSync(target.fsPath)) { void vscode.window.showInformationMessage(`${safe} 은(는) 아직 적용하지 않은 새 파일입니다.`); break; }
+                    const at = Number.isInteger(line) && (line as number) > 0 ? new vscode.Position((line as number) - 1, 0) : undefined;
+                    await vscode.window.showTextDocument(target, at ? { selection: new vscode.Range(at, at) } : undefined);
                 } catch (err) {
                     this.postMessage('map.error', { message: String(err) });
                 }
@@ -2323,6 +2617,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             resumeJob?: string;
             agents?: number;
             skipFailed?: boolean;
+            /** 2.0.43 사용자가 승인한 명세(합격 조건). */
+            spec?: CodeSpec | null;
         } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
@@ -2352,7 +2648,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const streaming = typeof (this._apiClient as Partial<ApiClient>).generateCodeStream === 'function';
             const result = !streaming ? await this._apiClient.generateCode(instruction, {
                 workspacePath, openFile: attach, priorFiles: this._lastCodeOps, contextFiles: opts.contextFiles ?? [],
-                targetFolder: scope.targetFolder, decisions: opts.decisions ?? [],
+                targetFolder: scope.targetFolder, decisions: opts.decisions ?? [], spec: opts.spec ?? null,
             }) : await this._apiClient.generateCodeStream(instruction, {
                 workspacePath,
                 openFile: attach,
@@ -2364,6 +2660,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 resumeJob: opts.resumeJob ?? '',
                 agents: opts.agents ?? 0,
                 skipFailed: opts.skipFailed === true,
+                spec: opts.spec ?? null,
             }, (event) => {
                 if (event.message) status('generating', event.message, 300);
                 this.postMessageToWebview(opts.requestWebview, 'code.team', { requestId: opts.requestId, event: compactCodeEvent(event) });
@@ -2618,6 +2915,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const safe = combined.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
         if (!safe) {
             this.postMessage('code.error', { message: `잘못된 파일명: ${file}`, ...ack });
+            return false;
+        }
+        //: 2.0.33 — 저장소 메타데이터·편집기 설정(.git/hooks, .vscode/tasks.json)은 실행되는 파일이라 AI 결과로 쓰지 않는다
+        //: (코어도 거르지만 화면 쪽에서도 한 번 더). 드라이브 문자(C:)가 든 경로도 받지 않는다.
+        if (safe.split('/').some(seg => ['.git', '.vscode'].includes(seg.toLowerCase())) || /^[a-zA-Z]:/.test(safe)) {
+            this.postMessage('code.error', { message: `${safe} 은(는) AI 가 쓰지 않는 위치라 적용하지 않았습니다.`, ...ack });
             return false;
         }
         const uri = vscode.Uri.joinPath(root, safe);

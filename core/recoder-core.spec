@@ -54,6 +54,8 @@ datas += [(str(file), 'registry/file_templates')
           for file in (CORE_DIR / 'registry' / 'file_templates').iterdir()
           if file.is_file() and file.suffix not in ('.py', '.pyc')]
 datas += [(str(CORE_DIR / 'registry' / 'command_templates.json'), 'registry')]
+# 2.0.23 — 짝퉁 npm 패키지 판정용 유명 패키지 목록(scripts/update_popular_npm.py 로 갱신)
+datas += [(str(CORE_DIR / 'data' / 'popular_npm.json'), 'data')]
 
 # Versioned commerce source, including lockfiles and public CA certificates.
 datas += [(str(file), str(file.parent.relative_to(CORE_DIR)))
@@ -68,7 +70,8 @@ a = Analysis(
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=['pytest', 'pytest_asyncio', 'tests', 'moto', 'eval', 'tkinter'],
+    #: 2.0.33 paramiko(LGPL) — 원격 SSH 롤백은 제품 화면에서 부르지 않는다. 번들에 넣지 않는다.
+    excludes=['pytest', 'pytest_asyncio', 'tests', 'moto', 'eval', 'tkinter', 'paramiko'],
     noarchive=False,
 )
 # ── 시작 속도: 한 파일 실행 파일은 시작할 때마다 모든 데이터 파일을 임시 폴더에 푼다 ──

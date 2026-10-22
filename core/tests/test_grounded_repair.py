@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from grounded_repair.knowledge import KnowledgeIndex, Passage
 from grounded_repair.logs import summarize
 from grounded_repair.pipeline import RepairPipeline
@@ -15,14 +13,25 @@ from grounded_repair.workspace import DockerVerifier, manifest, safe_path
 from llm.base import LLMResponse
 
 
-def passage(id="express", text="Missing parameter name Express 5 wildcard named route"):
-    return Passage(id, "Express routes", "https://expressjs.com/en/guide/migrating-5/", text, "5", "2026-10-03")
+def passage(passage_id="express", text="Missing parameter name Express 5 wildcard named route"):
+    return Passage(
+        passage_id,
+        "Express routes",
+        "https://expressjs.com/en/guide/migrating-5/",
+        text,
+        "5",
+        "2026-10-03",
+    )
 
 
 def suggestion(content="fixed", citations=None):
     refs = citations if citations is not None else ["express"]
-    return {"explanation": "Use a named route", "guidance": [], "evidence_ids": refs,
-            "edits": [{"path": "app.js", "content": content, "evidence_ids": refs}]}
+    return {
+        "explanation": "Use a named route",
+        "guidance": [],
+        "evidence_ids": refs,
+        "edits": [{"path": "app.js", "content": content, "evidence_ids": refs}],
+    }
 
 
 class Router:
@@ -33,9 +42,20 @@ class Router:
     async def call_repair(self, request, *, tier, run_id):
         self.calls.append((tier, request))
         data = next(self.responses)
-        return LLMResponse(text=json.dumps(data), parsed=data, metadata={"llm_call_record": {
-            "model": tier, "estimated_cost_usd": .01, "token_source": "api", "input_tokens": 20,
-            "output_tokens": 10, "fallback_used": False}})
+        return LLMResponse(
+            text=json.dumps(data),
+            parsed=data,
+            metadata={
+                "llm_call_record": {
+                    "model": tier,
+                    "estimated_cost_usd": 0.01,
+                    "token_source": "api",
+                    "input_tokens": 20,
+                    "output_tokens": 10,
+                    "fallback_used": False,
+                }
+            },
+        )
 
 
 class Verifier:
@@ -45,7 +65,7 @@ class Verifier:
         self.contents = []
 
     def __call__(self, root):
-        text = (root / "app.js").read_text()
+        text = (root / "app.js").read_text(encoding="utf-8")
         self.contents.append(text)
         return {"passed": text == "fixed", "output": "Missing parameter name Express 5 wildcard"}
 
@@ -58,7 +78,7 @@ def no_rules(*args, **kwargs):
 def setup(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
-    (root / "app.js").write_text("broken")
+    (root / "app.js").write_text("broken", encoding="utf-8")
     store = RepairStore(tmp_path / "runs.db")
     index = KnowledgeIndex([passage()])
     return root, store, index
@@ -76,11 +96,11 @@ def test_small_model_success_requires_rebuild_then_explicit_approval(setup):
     assert result["approval_required"]
     assert [tier for tier, _ in router.calls] == ["fast"]
     assert verifier.contents == ["broken", "fixed"]
-    assert (root / "app.js").read_text() == "broken"
+    assert (root / "app.js").read_text(encoding="utf-8") == "broken"
     assert result["sources"][0]["url"].startswith("https://expressjs.com/")
     assert result["llm_calls"] == 1
     assert store.approve(result["id"])["status"] == "applied"
-    assert (root / "app.js").read_text() == "fixed"
+    assert (root / "app.js").read_text(encoding="utf-8") == "fixed"
     with pytest.raises(ValueError):
         store.approve(result["id"])
 
@@ -94,16 +114,25 @@ def test_rebuild_failure_escalates_and_uses_clean_snapshot(setup):
     second = json.loads(router.calls[1][1].prompt)
     assert second["files"]["app.js"] == "broken"
     assert second["previous_failure"]
-    assert result["estimated_cost_usd"] == .02
+    assert result["estimated_cost_usd"] == 0.02
 
 
-@pytest.mark.parametrize("strategy,tiers", [("A", ["primary", "primary"]), ("B", ["primary", "primary"]),
-                                          ("C", ["fast", "fast"]), ("D", ["fast", "primary"])])
+@pytest.mark.parametrize(
+    "strategy,tiers",
+    [
+        ("A", ["primary", "primary"]),
+        ("B", ["primary", "primary"]),
+        ("C", ["fast", "fast"]),
+        ("D", ["fast", "primary"]),
+    ],
+)
 def test_comparison_conditions_and_retry_budget(setup, strategy, tiers):
     root, store, index = setup
     refs = [] if strategy == "A" else ["express"]
     router = Router([suggestion("bad1", refs), suggestion("bad2", refs)])
-    result = run(RepairPipeline(router, index, store, Verifier(), no_rules), root, strategy=strategy)
+    result = run(
+        RepairPipeline(router, index, store, Verifier(), no_rules), root, strategy=strategy
+    )
     assert result["status"] == "unresolved"
     assert not result["approval_required"]
     assert [tier for tier, _ in router.calls] == tiers
@@ -115,10 +144,16 @@ def test_comparison_conditions_and_retry_budget(setup, strategy, tiers):
 
 def test_rule_failures_do_not_call_model_or_retriever(setup):
     root, store, index = setup
-    issue = SimpleNamespace(code="NODE_BUILD_ENTRY_MISSING", auto_fix=False, to_dict=lambda: {"code": "NODE_BUILD_ENTRY_MISSING"})
+    issue = SimpleNamespace(
+        code="NODE_BUILD_ENTRY_MISSING",
+        auto_fix=False,
+        to_dict=lambda: {"code": "NODE_BUILD_ENTRY_MISSING"},
+    )
     router = Router([])
     index.search = lambda *_: pytest.fail("retrieval called before rules")
-    p = RepairPipeline(router, index, store, Verifier(), lambda *a, **k: SimpleNamespace(errors=[issue]))
+    p = RepairPipeline(
+        router, index, store, Verifier(), lambda *a, **k: SimpleNamespace(errors=[issue])
+    )
     result = run(p, root)
     assert result["status"] == "rule_action_required"
     assert not router.calls
@@ -127,12 +162,16 @@ def test_rule_failures_do_not_call_model_or_retriever(setup):
 def test_rules_are_fixed_in_copy_and_still_need_build(setup):
     root, store, index = setup
     issue = SimpleNamespace(code="known", auto_fix=True, to_dict=lambda: {"code": "known"})
+
     def fix(base, code):
-        (base / "app.js").write_text("fixed")
-    p = RepairPipeline(Router([]), index, store, Verifier(), lambda *a, **k: SimpleNamespace(errors=[issue]), fix)
+        (base / "app.js").write_text("fixed", encoding="utf-8")
+
+    p = RepairPipeline(
+        Router([]), index, store, Verifier(), lambda *a, **k: SimpleNamespace(errors=[issue]), fix
+    )
     r = run(p, root)
     assert r["status"] == "ready_for_approval" and r["llm_calls"] == 0
-    assert (root / "app.js").read_text() == "broken"
+    assert (root / "app.js").read_text(encoding="utf-8") == "broken"
 
 
 def test_cache_revalidates_and_does_not_call_model(setup):
@@ -151,7 +190,7 @@ def test_cache_invalidates_on_context_change(setup):
     root, store, index = setup
     p = RepairPipeline(Router([suggestion(), suggestion()]), index, store, Verifier(), no_rules)
     run(p, root)
-    (root / "package.json").write_text('{"name":"new-context"}')
+    (root / "package.json").write_text('{"name":"new-context"}', encoding="utf-8")
     r = run(p, root)
     assert not r["cache_hit"] and r["llm_calls"] == 1
 
@@ -159,26 +198,79 @@ def test_cache_invalidates_on_context_change(setup):
 def test_approval_rejects_changes_even_in_an_unedited_file(setup):
     root, store, index = setup
     r = run(RepairPipeline(Router([suggestion()]), index, store, Verifier(), no_rules), root)
-    (root / "Dockerfile").write_text("FROM scratch")
+    (root / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
     with pytest.raises(ValueError, match="changed"):
         store.approve(r["id"])
-    assert (root / "app.js").read_text() == "broken"
+    assert (root / "app.js").read_text(encoding="utf-8") == "broken"
 
 
 @pytest.mark.parametrize("stage", ["run", "ecs", "iam", "s3"])
 def test_cloud_or_runtime_errors_are_never_approved_by_build_only(setup, stage):
     root, store, index = setup
-    r = run(RepairPipeline(Router([suggestion()]), index, store, Verifier(), no_rules), root, stage=stage)
+    r = run(
+        RepairPipeline(Router([suggestion()]), index, store, Verifier(), no_rules),
+        root,
+        stage=stage,
+    )
     assert r["status"] == "environment_verification_required"
     assert not r["approval_required"]
     with pytest.raises(ValueError):
         store.approve(r["id"])
 
 
+def test_context_selector_revision_invalidates_repair_cache(setup, monkeypatch):
+    root, store, index = setup
+    router = Router([suggestion(), suggestion()])
+    pipeline = RepairPipeline(router, index, store, Verifier(), no_rules)
+    first = run(pipeline, root)
+    assert first["context_files"] == ["app.js"]
+    monkeypatch.setattr("grounded_repair.pipeline.CONTEXT_VERSION", "new-selection-policy")
+    second = run(pipeline, root)
+    assert not second["cache_hit"]
+    assert second["context_version"] == "new-selection-policy"
+    assert len(router.calls) == 2
+
+
+def test_test_evidence_cannot_be_rewritten_to_pass_verification(setup):
+    root, store, index = setup
+    test = root / "test_app.py"
+    test.write_text("assert expected_behavior()", encoding="utf-8")
+    proposal = suggestion()
+    proposal["edits"].append(
+        {"path": "test_app.py", "content": "assert True", "evidence_ids": ["express"]}
+    )
+    verifier = Verifier()
+    router = Router([proposal, proposal])
+    result = run(RepairPipeline(router, index, store, verifier, no_rules), root)
+    assert result["status"] == "unresolved"
+    assert verifier.contents == ["broken"]
+    assert all("read-only" in attempt["error"] for attempt in result["attempts"])
+    assert result["read_only_files"] == ["test_app.py"]
+    assert json.loads(router.calls[0][1].prompt)["read_only_files"] == ["test_app.py"]
+    assert test.read_text(encoding="utf-8") == "assert expected_behavior()"
+    assert (root / "app.js").read_text(encoding="utf-8") == "broken"
+
+
+def test_implementation_can_be_repaired_with_read_only_test_evidence(setup):
+    root, store, index = setup
+    test = root / "test_app.py"
+    test.write_text("assert expected_behavior()", encoding="utf-8")
+    result = run(RepairPipeline(Router([suggestion()]), index, store, Verifier(), no_rules), root)
+    assert result["status"] == "ready_for_approval"
+    store.approve(result["id"])
+    assert (root / "app.js").read_text(encoding="utf-8") == "fixed"
+    assert test.read_text(encoding="utf-8") == "assert expected_behavior()"
+
+
 def test_citation_hallucination_is_rejected_before_build(setup):
     root, store, index = setup
     verifier = Verifier()
-    r = run(RepairPipeline(Router([suggestion(citations=["invented"])] * 2), index, store, verifier, no_rules), root)
+    r = run(
+        RepairPipeline(
+            Router([suggestion(citations=["invented"])] * 2), index, store, verifier, no_rules
+        ),
+        root,
+    )
     assert r["status"] == "unresolved"
     assert verifier.contents == ["broken"]
     assert "citation" in r["attempts"][0]["error"]
@@ -188,14 +280,14 @@ def test_no_evidence_or_already_passing_build_uses_no_llm(setup):
     root, store, _ = setup
     p = RepairPipeline(Router([]), KnowledgeIndex([]), store, Verifier(), no_rules)
     assert run(p, root)["status"] == "no_document_evidence"
-    (root / "app.js").write_text("fixed")
+    (root / "app.js").write_text("fixed", encoding="utf-8")
     assert run(p, root)["status"] == "failure_not_reproduced"
 
 
 def test_summarization_preserves_early_codes_ecs_reasons_and_masks_secrets():
     log = "npm error code ETARGET\nnpm error No matching version found for jsonwebtoken@^9.1.2.\n"
     log += "password=superprivate\n" + ("download complete\n" * 9000)
-    log += 'stoppedReason: AccessDenied ecr:BatchGetImage\n'
+    log += "stoppedReason: AccessDenied ecr:BatchGetImage\n"
     e = summarize(log)
     assert "ETARGET" in e.keywords and "AccessDenied" in e.keywords
     assert "jsonwebtoken@^9.1.2" in e.text and "ecr:BatchGetImage" in e.text
@@ -203,10 +295,14 @@ def test_summarization_preserves_early_codes_ecs_reasons_and_masks_secrets():
 
 
 def test_exact_code_and_semantic_only_retrieval():
-    docs = [passage("npm", "ETARGET dependency package version missing"),
-            passage("health", "probe initialization startup grace period")]
+    docs = [
+        passage("npm", "ETARGET dependency package version missing"),
+        passage("health", "probe initialization startup grace period"),
+    ]
+
     def embed(texts):
-        return [[0., 1.] if "starts slowly" in t or "probe" in t else [1., 0.] for t in texts]
+        return [[0.0, 1.0] if "starts slowly" in t or "probe" in t else [1.0, 0.0] for t in texts]
+
     index = KnowledgeIndex(docs, embed)
     assert index.search("ETARGET", ["ETARGET"])[0].id == "npm"
     assert index.search("service starts slowly", [])[0].id == "health"
@@ -215,32 +311,45 @@ def test_exact_code_and_semantic_only_retrieval():
 
 def test_unreviewed_copied_documents_are_rejected(tmp_path):
     p = tmp_path / "corpus.json"
-    p.write_text(json.dumps([{**passage().to_dict(), "kind": "excerpt", "license_status": "pending"}]))
+    p.write_text(
+        json.dumps([{**passage().to_dict(), "kind": "excerpt", "license_status": "pending"}]),
+        encoding="utf-8",
+    )
     with pytest.raises(ValueError, match="license"):
         KnowledgeIndex.load(p)
 
 
-@pytest.mark.parametrize("name", ["../outside", "/etc/passwd", "a/../../out", ".git/config", ".env", "C:\\file", "a/.npmrc"])
+@pytest.mark.parametrize(
+    "name",
+    ["../outside", "/etc/passwd", "a/../../out", ".git/config", ".env", "C:\\file", "a/.npmrc"],
+)
 def test_unsafe_paths_rejected(tmp_path, name):
     with pytest.raises(ValueError):
         safe_path(tmp_path, name)
 
 
 def test_symlink_and_secret_files_not_in_context(tmp_path):
-    (tmp_path / ".env").write_text("password=secret")
+    (tmp_path / ".env").write_text("password=secret", encoding="utf-8")
     assert not manifest(tmp_path)
-    (tmp_path / "link.js").symlink_to(tmp_path / ".env")
+    try:
+        (tmp_path / "link.js").symlink_to(tmp_path / ".env")
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            pytest.skip("Windows symbolic links require Developer Mode or link privilege")
+        raise
     with pytest.raises(ValueError):
         manifest(tmp_path)
 
 
 def test_docker_verifier_never_invokes_model_commands(tmp_path, monkeypatch):
-    (tmp_path / "Dockerfile").write_text("FROM scratch")
+    (tmp_path / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
     commands = []
+
     def fake(cmd, **kwargs):
         commands.append(cmd)
         assert kwargs["shell"] is False
         return SimpleNamespace(returncode=1)
-    monkeypatch.setattr("grounded_repair.workspace.subprocess.run", fake)
+
+    monkeypatch.setattr("grounded_repair.workspace._run_tree", fake)
     assert not DockerVerifier()(tmp_path)["passed"]
     assert commands == [["docker", "build", "--progress=plain", "."]]

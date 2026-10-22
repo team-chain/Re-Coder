@@ -56,6 +56,12 @@ def _student(table, sid="s1", used_total=0, used_today=0,
             "today": record_day}
 
 
+def _pin_prices(monkeypatch):
+    """비용 숫자를 확인하는 테스트는 단가를 고정한다 — 기본 단가(GW_PRICE_*)가 바뀌어도 의미가 같게(2.0.33)."""
+    monkeypatch.setattr(common, "PRICE_IN_PER_1K", 0.0003)
+    monkeypatch.setattr(common, "PRICE_OUT_PER_1K", 0.00125)
+
+
 def _used(table, sid="s1"):
     it = table.get_item(Key={"pk": f"STUDENT#{sid}", "sk": "META"})["Item"]
     return int(it["used_total_tokens"]), int(it["used_today_tokens"])
@@ -157,6 +163,7 @@ def test_reconcile_returns_overreservation(table):
 
 def test_shared_pool_is_reserved_before_paid_call(table, monkeypatch):
     """동시 요청은 유료 호출 전에 같은 풀 비용 캡을 원자적으로 선점한다."""
+    _pin_prices(monkeypatch)
     monkeypatch.setattr(common, "POOL_SOFT_USD", 0.001)
     first = _student(table, sid="s1", max_daily=10_000)
     second = _student(table, sid="s2", max_daily=10_000)
@@ -192,8 +199,9 @@ def test_release_before_dispatch(table):
     assert float(pool["used_cost_usd"]) == pytest.approx(0.0)
 
 
-def test_dispatched_reservation_cannot_be_refunded(table):
+def test_dispatched_reservation_cannot_be_refunded(table, monkeypatch):
     """No error path may turn an ambiguous paid call back into free quota."""
+    _pin_prices(monkeypatch)
     item = _student(table)
     reservation = common.reserve_quota(item, 600)
     common.mark_reservation_dispatched(reservation)
@@ -235,6 +243,7 @@ def test_expired_orphan_reservation_is_recovered(table, monkeypatch):
 
 def test_expired_dispatched_reservation_is_charged_and_ledgered(table, monkeypatch):
     """A post-dispatch crash never refunds quota that AWS may have charged."""
+    _pin_prices(monkeypatch)
     clock = {"now": 1_700_000_000}
     monkeypatch.setattr(common, "_now_epoch", lambda: clock["now"])
     item = _student(table)

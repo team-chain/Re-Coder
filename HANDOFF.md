@@ -1,3 +1,239 @@
+# 빠른 이동 · 충돌 정리 (2026-10-22, 2.0.44)
+
+- src/quickAccess.ts(순수): QUICK_SLOTS(up·right·down·left·shift+…), QUICK_TARGETS(code·build·map(mapMode project)·flow(view map, mapMode flow)·adr·models·ship·deploy·replay·operate·scan·secrets·policy·home), DEFAULT_QUICK_ACCESS(↑code →map ↓deploy ←build, shift 칸 ""), resolveQuickAccess(설정을 기본값과 합침 — VS Code 객체 설정은 통째로 바뀜, "" = 비움, 모르는 칸·기능은 problems), toSetting(기본값과 다른 칸만), withSlot, slotKeyLabel, wheelKeyLabel.
+- src/quickAccessHost.ts: 명령 recoder.quickAccess.wheel(Alt+Q — 기본 키는 이것 하나) · .configure · recoder.quick.<up|right|…|shiftLeft>(키 없음) · recoder.open.<id>. Alt+Q 때 활성 편집기(uri·열·선택)를 기억 → 휠이 Esc 로 닫히면(quickAccess.closed cancelled) showTextDocument 로 돌아감. setQuickSlot/saveQuickAccess(작업 영역 값이 있으면 그 대상에 씀), 설정 변경 → broadcast(quickAccess.state).
+- extension.ts showWheel: 창이 있으면 ReCoderPanel.post('quickAccess.wheel'), 없으면 sidebarProvider.requestWheel → webview.ready 에서 보냄. open: ReCoderPanel.showView(view, {mapMode}).
+- SidebarProvider: requestView(view, extra) — 예전 showView 가 쓰던 setRestoredUiState 는 저장된 마지막 화면을 우선해서 요청한 화면이 무시됐다(알림 [자세히] 포함). quickAccess.get/set/reset/keybindings/closed.
+- webview: quickAccessModel.ts(toState·viewFor·slotForKey·moveSelection·petalPath), QuickWheel.tsx(QuickWheelView 훅 없음 + QuickWheel 키 처리 — 휠이 떠 있으면 Esc·방향키를 capture 에서 막음), App QuickAccess(머리글 버튼, Alt+Q 두 번 = 닫기, 고르면 setView + requestMapMode), CodeMap requestMapMode(화면보다 먼저 온 요청은 처음 그려질 때 꺼냄).
+- package.json: Ctrl+Shift+R 두 단계 키 제거(VS Code 리팩터링을 막고 있었음). Alt+방향키는 쓰지 않음(줄 이동·뒤로 가기). 터미널에 포커스가 있으면 Alt+Q 는 셸이 먼저 받는다(terminal.integrated.commandsToSkipShell 에 recoder.quickAccess.wheel 을 넣으면 터미널에서도 동작 — 사용자 설정은 건드리지 않음).
+- 번호: 구조 다이어그램 2.0.37 → 2.0.42, 명세 2.0.38 → 2.0.43(main 의 2.0.37~2.0.41 과 겹침), test_dev_2038 → test_dev_2043.
+- 시험: webview-tests/quickAccess.test.js(15 — 설정 해석·저장 왕복, package.json 명령·키·스키마 대조(Ctrl+Shift+R·Alt+방향키 금지), 화면 표 = 확장 표, 휠 렌더(고르기·편집), 호스트 명령(되돌아가기·빈 칸·작업 영역 저장·변경 알림), 닫힌 창 요청 화면). 실제 웹뷰 번들 렌더로 →(아키텍처)·Shift+↑(dry run)·빈 칸 → 편집·지정·Esc 확인.
+
+# 명세 · 합격 조건 (2026-10-22, 2.0.43) — 명세 기반 개발 1단계
+
+- 흐름: code.plan → 결정 창(decide) → **code.spec → 명세 창(spec)** → code.generate(spec 포함). 결정 창 상태 DecisionModal 에 phase·spec(EditableSpec)·specLoading·specError·specFor(선택 지문 — 같으면 다시 받지 않음). 마지막 결정 버튼 "다음: 합격 조건 →", 확인 카드 "진행 →" 도 requestSpec. 명세 대기 300초 넘으면 창 닫고 턴 오류(waitForResponse 가 열린 창을 닫음).
+- core/code_spec.py(AI 안 부름): SPEC_SCHEMA, normalize_spec(비신뢰 → AC-n 재번호·중복·included False 제외·kind 기본 feature·source 기본 user·개행 접기·출력 형식 문구 제거, 멱등, 조건 없으면 None), draft_from_llm(source ai, 조건 없어도 목표·범위 유지), spec_prompt_block(사용자 요청 바로 앞, 대규모 생성 맥락에도 남음), spec_markdown·build_spec_ops(docs/spec/SPEC-YYYYMMDD-HHMMSS-slug.md, is_spec), overwrites_spec_record.
+- code_agent.generate_spec(instruction, decisions, …) — operation generate_spec(품질 등급), 깨진 JSON 한 번 재시도. generate_code(spec=) — 한 번 정규화, _build_code_prompt(spec_block=), 지문에 spec(있을 때만 — 명세 없는 요청의 이어 받기 지문은 예전 그대로), AI op 의 docs/spec/SPEC-* 덮어쓰기 제거, 결과 spec{…, file, verified:false}. 명세 없으면 프롬프트·결과 모두 예전과 같음(시험으로 고정). 승인 게이트는 그대로(명세가 승인 대신이 아님).
+- POST /api/code/spec(CodeSpecRequest), CodeGenerateRequest.spec → 두 생성 라우트. release_check: 경로·code_spec 모듈.
+- 확장: ApiClient.draftSpec·CodeSpec 타입·두 생성 경로 body.spec. SidebarProvider case code.spec → code.specResult / code.specError(턴 오류 아님), code.generate → handleCodeGenerate(spec). webview specModel.ts(fromDraft·updateCriterion(고치면 source user)·add/remove·specForRequest(포함한 조건만, 범위 줄 나눔)·specIssues(block: 조건 없음 / warn: 모호한 말·확인 방법 없음·실패 흐름 없음·목표 없음)), SpecEditor.tsx(훅 없음, 공통 Checkbox), 결과 data-testid=code-spec-summary("아직 자동 확인 전").
+- 시험: core/tests/test_dev_2043.py(14), webview-tests/specModel.test.js(7 — 모델·렌더·결선·호스트), centralDevelopment.test.js(명세 단계 7 + 기존 흐름 수정). harness e2e 에 4b(code.spec) 추가 — fixture-core 에 generate_spec 응답. (e2e 3-A·6 은 이 변경 전에도 실패하던 하네스 문제 — CI 에서 돌지 않음.)
+- 다음 단계(②~⑤): 합격 조건 → 테스트(kind 별: api → HTTP 시험, screen → 화면 시나리오, security → 권한 시험), 통과까지 교정, 출시 기준 검사, 조건별 증거 화면(verified 채우기, 기록 표의 "자동 확인" 열).
+
+# 구조 다이어그램 (2026-10-22, 2.0.42)
+
+- webview-src/components/structureLayout.ts — roleOf(path, {kind}) 역할 추정(support → 스타일/html → frontend·client·web·webview-src 는 ui → data → entry → ui → logic → 확장자). layoutLanes(nodes{id,role,group,groupLabel,order}, edges, {colW,nodeW,nodeH,maxCols(레인 안 단계 상한),maxRows(한 열 상한 → 보조 열),mergeSingletons(노드 하나뿐인 그룹을 한 상자로)}) → 레인(ROLE_ORDER 순서, 가로) · 그룹 상자(레인 폭 전체, 세로로 쌓음) · 노드(레인 안 단계 = 같은 레인 안 선의 최장 경로, 반복 DFS 로 순환 끊음). edgeRoute(오른쪽 S 곡선 / 같은 열 옆으로 / 되돌아가면 아래로 크게 + backward). aggregateFolders(최상위 파일은 역할별로 나눔 `(최상위)#role`). fit(글자 폭 자르기, 한글 1.75배), groupColor.
+- StructureDiagram.tsx — SVG 한 장(레인·그룹·선·노드), 처음엔 폭 맞춤(최소 75%), −/+/맞춤, 마우스 올리면 이웃 선만, 선 40개 넘으면 기본 흐리게, focusId 로 자동 스크롤, 노드 attrs(data-flow-node·data-map-node) 그대로 붙임, markerUnits=userSpaceOnUse(굵은 선에서 화살촉이 커지지 않게).
+- CodeMap — projectDiagram(project, files|folders, focus, showAll)(스타일·config 기본 숨김, 60개 초과면 폴더 단위, 폴더 클릭 → 그 폴더 파일 + 이웃 폴더 노드), fileDiagram(클래스별 상자). 옛 layoutProject·layoutGrid·NodeChip·Canvas 제거.
+- FlowDryRun — 도달한 함수 전부를 역할 레인·파일 상자에, 효과(DB·외부 API·AWS·비밀값·파일·명령)를 external 레인 sink 노드로(data-flow-sink), 단계 상태(current/visited/future)·지난 선·지금 선. 옛 layoutDryRun·edgePath 제거.
+- 시험: webview-tests/structureDiagram.test.js(역할 표, 레인 순서·겹침 없음·상자 안·레인 안 왼→오, 3000 노드 2초 안·20000 사슬, 선 모양, 실제 Express 프로젝트 dry run 렌더 — 레인 4개·sink·여러 열, 아키텍처 폴더 단위·펼치기). 실제 저장소(쇼핑몰 기반·확장 src·core 429 파일) 브라우저 캡처로 확인.
+- 남은 개선: 레인 안 그룹 상자가 레인 폭 전체라 앞 열이 비면 왼쪽 여백이 남음. 역할 추정은 이름 기반(규칙 밖 구조는 처리/기타로).
+
+# 수정·MCP 실행 정책 (2026-10-20, 2.0.41)
+
+- 이전 2.0.40 `687c68dc`의 [전체 CI 12개](https://github.com/team-chain/Re-Coder/actions/runs/39301281550) 성공 확인 후 진행했다.
+- `execution_policy.py`: 기본 local, 명시적 `RECODER_EXECUTION_POLICY=opa`에서 기존 OPAGate 재사용. Level 3으로 질의하고 버전 있는 `allow`만 실행한다. 서버 오류·잘못된 응답·추가 승인 요구를 차단하며 로컬 경로/테스트/승인 제한을 원격 허용으로 우회하지 못한다.
+- pipeline의 inspect/generate/rule_fix/edit/verify와 store의 apply, MCP recoder_analyze handler 직전에 연결했다. 모델 응답에서 승인/정책 flag를 받지 않는다. 후보 파일은 모든 수정안을 검증하고 정책을 통과한 뒤 쓴다.
+- 정책 profile은 수정 캐시 키에 포함한다. 기존 캐시도 쓰기·검증·승인 단계 정책을 재확인한다. 승인 시 현재 정책을 다시 확인하고, 거부 시 원본을 보존하며 기록을 남긴다(검증 유효 시간 연장 없음).
+- 정책 기록을 HMAC에 포함해 이전 버전의 준비 결과/캐시는 다시 검증해야 한다. 화면에 차단 사유, MCP 감사에 결정/정책 버전을 표시한다.
+- `policies/recoder/execution.rego`, 테스트, `docs/execution-policy.md` 추가. OPA 1.20.2 실제 서버 + Docker smoke에서 정상 허용·준비 후 승인 철회·Docker 전 차단·재허용 적용·서버 중단 차단을 확인했다. 유료 LLM 0회.
+- 로컬 검증: Core 3,163 passed / 2 skipped, 확장 610건, Rego 23건, Promptfoo 19건 통과. 확장 프로덕션 빌드·패키지 검사, Black·Ruff·버전 일치·워크플로 검사도 통과했다. CI에 실제 OPA + Docker 통합 필수 작업을 추가했다.
+- 범위: 문서 근거 수정과 MCP 분석 호출. 모든 레거시 생성/배포/확장 파일 작업을 통제하는 전역 샌드박스는 아니다. 기존 배포 게이트는 별도다.
+
+# Promptfoo 수정안 보안 회귀 (2026-10-20, 2.0.40)
+
+- 이전 2.0.39 `f96a71a2`의 [전체 CI 11개](https://github.com/team-chain/Re-Coder/actions/runs/39297297810) 성공 확인 후 진행했다.
+- `evals/repair-security`: Promptfoo 0.124.1 고정, Node 22.22+/CI 24, 제품과 분리한 개발 의존성. Python provider가 임시 프로젝트의 실제 pipeline/store/readiness를 호출한다.
+- 고정 사례 19개: 정상 준비/승인 2개 + 경로·테스트·근거·비밀값·명령·승인 우회. 결과 상태뿐 아니라 검증기 호출 수·원본 보존·합성 비밀값 누출·승인 오류를 함께 판정한다.
+- 모델/재빌드 fixture이며 실제 LLM 공격 성공률이 아니다. 유료 API와 Docker 호출 없음. 실제 Docker는 기존 CI smoke에서 검사한다.
+- CI `repair-security-eval`이 푸시·PR·릴리스 호출에 포함되고 결과 JSON을 artifact로 보존한다. 설정/캐시를 격리하고 텔레메트리·호스팅된 공격 생성·업데이트 확인을 끈다.
+- 로컬 CLI 19/19 통과, 의도적 오답 대조군은 failure 1/error 0/종료 코드 100. Black·Ruff·버전/워크플로 검사 통과.
+- 선택 의존성을 제외하고 SQLite 플랫폼 바인딩만 잠금 버전으로 복원한다. basic-ftp 6.2.3 override 후 실제 설치 구성 `npm audit --omit=optional` 0건. 전체 선택 의존성을 설치할 경우 미수정 node-forge/braces advisory가 있으므로 README의 최소 설치 절차를 유지한다.
+
+# 선택형 Reranker 비교 (2026-10-20, 2.0.39)
+
+- 이전 단계 2.0.38의 `8f48255c`는 [전체 CI](https://github.com/team-chain/Re-Coder/actions/runs/39291319145) 성공 확인 후 진행했다.
+- `grounded_repair/reranker.py`: 로컬 safetensors 단일 점수 CrossEncoder, 원격 코드 허용 없음, 런타임 다운로드 없음. CPU 기본, 512 토큰/배치 4/후보 20개. 기본은 꺼짐이다.
+- `KnowledgeIndex`: 버전 필터 뒤 최대 20개 후보만 재평가한다. 정확한 오류 코드는 계속 우선하며 모델 점수의 개수·유한성을 검사한다. 모델 지문은 색인/수정 캐시 키에 포함한다. 기존 retrieval_mode는 유지하고 retrieval_profile을 추가했다.
+- `setup_repair_reranker.py`는 고정 BGE revision을 명시적으로 설치하고 기존 설정의 다른 키는 보존한다. 선택형 의존성은 실제 확인한 sentence-transformers 5.7.0으로 고정했다.
+- `compare_repair_reranker.py`와 고정 개발 질의 20개 + 버전 차단 대조군으로 검색 품질·지연을 비교한다. 유료 LLM 없음, 독립 holdout 아님, 실제 오류 수정 성공률 아님.
+- 실제 BGE+E5, macOS arm64 CPU: Hit@1 100%→95%, Hit@4 모두 100%, 중앙값 36.6ms→10,988.3ms. 기본 비활성화 유지. `benchmarks/repair/RERANKER.md`와 원본 JSON에 조건·한계를 기록했다.
+- 로컬 검증: RAG 관련 123건, 실제 Docker 수정·승인 smoke, Black·Ruff, 버전 일치 검사 통과.
+
+# 오류 관련 코드·테스트 문맥 (2026-10-20, 2.0.38)
+
+- 이전 단계 2.0.37의 `fa23cff7`은 [전체 CI](https://github.com/team-chain/Re-Coder/actions/runs/39287751318) 성공 확인 후 다음 브랜치로 진행했다.
+- `grounded_repair/context.py`: 로그의 파일 참조 → 같은 패키지의 대응 소스/테스트 → 설정 → 나머지 순서. 여러 package.json·pyproject.toml·requirements.txt가 있는 경우 가장 가까운 패키지로 묶는다. Windows 경로 구분자·모호한 basename·외부 의존성 경로를 처리한다.
+- `workspace.select_context`의 기존 파일 수·크기·비밀값 검사를 그대로 거친다. `.jsx`·`.tsx` 및 Python 프로젝트 설정도 대상에 포함한다. 파일 이름 규칙에 따른 연관 추정이며 AST 연결이나 테스트 실행은 아니다.
+- pipeline은 선택 파일 목록과 선택기 버전을 기록하고, 선택기 버전도 캐시 키에 포함한다. 후속은 선택형 reranker 비교 실험 → Promptfoo 평가/CI → OPA 실행 통제다.
+- 로컬 검증: RAG 관련 107건, 실제 Docker 수정·승인 smoke, Black·Ruff, 버전 일치 검사 통과. 파일 참조·테스트 연관·모노레포 범위·모호한 이름·의존성 stack frame·파일 크기/비밀값 제외·캐시 무효화를 확인했다.
+- 후속 검토: 테스트를 고쳐 빌드를 통과시키지 못하도록 `read_only_files`를 명시하고 후보 파일 쓰기 전에 테스트 수정안을 거부한다. 기존 `llm.task_tier.is_test_file` 경로 판정을 재사용하고 선택기 버전을 v2로 바꿔 캐시를 무효화한다. 구현 파일만 고치는 정상 경로와 테스트 덮어쓰기 거부를 함께 검증한다.
+
+# RAG 문서 버전 필터 (2026-10-20, 2.0.37)
+
+- `grounded_repair/knowledge.py`: `Passage.applies_to`는 패키지별 허용 major 목록이며 출처의 `version` 리비전과 구분한다. 확실하게 다른 버전이면 BM25·dense 후보에서 먼저 제외한다. metadata·검색기 v4가 색인/수정 캐시 키에 반영된다.
+- `grounded_repair/versions.py`: 검증용 복사본의 package.json만 읽는다. 문서가 다루는 패키지만 추출해 불필요한 의존성 목록을 프롬프트로 보내지 않는다. 단일 major의 단순 범위만 인정하며 모노레포 충돌·불명확한 범위·손상된 manifest는 추정하지 않는다. 설치 버전이나 전체 semver 호환성의 증명은 아니다.
+- 기본 요약·benchmark corpus·refresh manifest의 Express 5 문서에 적용 대상 metadata를 기록했다. pipeline은 확인한 선언을 기록하고 모델에도 전달한다. 필터 후 근거가 없으면 모델 호출 없이 종료한다.
+- 검증: RAG 관련 테스트 89건, 로컬 Core 전체 3,090건 통과(13건 skip). Docker Desktop을 시작한 뒤 실제 빌드 실패 → 수정 후 빌드 성공 → 승인 전 원본 유지 → 승인 후 적용 smoke도 통과했다(유료 호출 0). 기존 Docker mock의 import 순서 의존성을 제거했다. 오래된 smoke의 고장 사례는 이미 readiness 규칙에서 차단되어 RAG에 도달하지 않았으므로, 실제 빌드가 필요한 COPY 목적지 충돌로 교체했다.
+- 첫 Windows CI에서 대용량 parametrize 값이 테스트 이름에 그대로 들어가 `PYTEST_CURRENT_TEST` 환경변수의 32,767자 한도를 넘었다. 테스트 이름을 짧게 지정했다. 검증할 입력 크기와 제품 동작은 바꾸지 않는다.
+- `codex/feat/**` 푸시에 전체 CI를 실행하며 골든패스 작업에 실제 Docker RAG smoke를 추가했다. 버전 필터는 수정 정확도 향상률을 측정한 실험이 아니다. 오류별 코드/테스트 선택·선택형 reranker·Promptfoo·OPA 실행 통제는 후속 단계다.
+
+# 작업별 AI 공급자 · 비용 원장 · 공급자 비교 (2026-10-16, 2.0.36)
+
+- core/llm/task_tier.py — tier_for(operation): ECONOMY_OPERATIONS(generate_plan_topics·summarize_request·summarize_scan(_results)·classify_error·augment_candidates·generate_test_draft) 만 economy, 나머지(모르는 이름 포함) quality. REPAIR_OPERATIONS(비교 도구 교정 횟수). contextvars _FORCED·_RUN_TAG + pinned(spec, tag) + bind(fn)(작업 스레드로 문맥 전달 — 호출마다 Context.copy()). is_test_file(path).
+- provider_router: __init__ 끝에서 _build_economy() — RECODER_ECONOMY_PROVIDER fast|anthropic|openai|compatible(+RECODER_ECONOMY_MODEL), 키 없으면 None + note. call_llm 체인 = [economy, base](economy 실패 → 품질, 잘린 응답은 그대로 raise), pinned 면 [고정 공급자]만(실패 시 raise, Gemini 대체 없음). _outgoing: 품질 공급자와 다른 vendor 또는 compatible 이면 llm/scrub.scrub_for_external(code=결과가 코드인 작업이면 scrub_build_source 만). reports_usage 공급자는 converse(usage=dict) 로 실제 토큰. complete() 도 economy·pinned 면 call_llm 경유. _spec_provider(quality|fast|economy|anthropic|openai|compatible), routing_status()(키 값 없음). _record_call: provider=실제 이름, tier·token_source·masked·pricing_source·quality_equivalent_usd·run, 비용 None 허용. llm/router.py 브리지는 contextvars.copy_context().run 으로 asyncio.run. gen_engine·code_agent 스레드 풀은 task_tier.bind.
+- llm/pricing.py — RECODER_MODEL_PRICES(JSON, 달러/백만) → Bedrock 표 → Claude 계열 Sonnet 어림(assumed) → 그 외 None(unconfigured). Gemini 0. 외부 단가는 코드에 넣지 않음(자주 바뀜).
+- llm/api_key_provider.py — provider "compatible": RECODER_COMPATIBLE_API_KEY + RECODER_COMPATIBLE_BASE_URL(compatible_endpoint: https, localhost 만 http, userinfo·쿼리 거절, /chat/completions 붙임) + RECODER_COMPATIBLE_MODEL(기본 deepseek-chat). payload max_tokens(reasoning_effort 없음). 400 VALIDATION + tools → _json_mode(response_format json_object + 스키마를 마지막 메시지에) 한 번. provider_ready(name).
+- llm/cost_ledger.py — record() 가 RECODER_COST_LEDGER_FILE(기본 RECODER_HOME|~/.recoder/model_costs.jsonl, 빈 값/0 이면 끔)에 정해 둔 칸만 기록(본문 금지), 8MB 넘으면 절반. stored_records·summarize(등급·공급자·모델, unknown_cost_calls, economy_saved_usd)·summary(days)·prune(before_ts). conftest 가 테스트에서 디스크 기록을 끔. /api/cost(session.get_cost_summary) 가 원장 파일을 더함(예전 llm_calls.jsonl 은 아무도 안 씀 → 늘 $0 이었음), /api/session/data 보존 기간도 원장에 적용.
+- core/model_compare.py — start(instruction≤4000, workspace(절대·존재), specs 2개) → 같은 공급자·모델이면 거절, 하나씩만(CompareBusy 409), 데몬 스레드로 쪽마다 pinned(spec, compare-<id>-<spec>) 안에서 code_agent.generate_code(decisions=확인 카드 proceed — 확장의 비용 확인 모달이 승인, mode auto, budget 420s). measure(): 원장 run 기록 → calls·repair_calls(REPAIR_OPERATIONS + generate_code 재시도)·토큰·cost(None 이면 단가 미설정)·masked + 결과 ops → code_security.report 점수·consistency 오류 수. verdict(): 항목별 더 나은 쪽(cheaper 는 둘 다 단가 있을 때만), 종합 승자 없음. 최근 5개 메모리 보관(본문 없음).
+- api/routes/models.py — GET /api/models/routing · GET /api/models/costs?days · POST /api/models/compare · GET /api/models/compare/latest · /{id}. main.py 등록, release_check RUNTIME_IMPORTS 추가.
+- 확장: aiKeyEnv(AiRoutingSettings | 예전 함수 인자) — 기본 공급자 키 + **절약 공급자로 고른 키만** Core 로, compatible 은 주소가 안전할 때만, RECODER_MODEL_PRICES. aiKeys: compatible(주소 → 키), storeAiKey(makeDefault), runEconomyCommand(키 없으면 받기, 기본 연결 유지), recentRoutingWrite(설정 감시 중복 재시작 질문 방지). 명령 recoder.ai.economy, 설정 recoder.ai.compatibleBaseUrl·compatibleModel·economyProvider·economyModel·prices, 설정이 바뀌면 Core 재시작 질문. SidebarProvider models.load·setEconomy·openPrices·compare.start(모달 확인)·compare.poll(id 형식 검사). webview ModelRouting(컨테이너)/ModelRoutingView + modelRoutingModel(formatUsd 4자리·costCell·compareRows·compareChoices), Develop 허브 기능 "models"(아이콘 coins).
+- 시험: core/tests/test_dev_2036.py(34 — 로컬 가짜 호환 서버: JSON 모드 재시도·키 비노출·가리기·선형 시간·등급 라우팅·대체·고정·스레드 전파·원장 파일·/api/cost·API·비교), webview-tests/modelRouting(.test.js 10, Host 2). 실제 Core 프로세스 E2E(가짜 OpenAI=품질, 가짜 호환=절약): 설계 주제 → 절약(비밀값 가림 masked 1), 카드 → 품질, 원장·/api/cost 반영, 비교가 두 공급자로 실제 생성 경로를 돌려 SQL 인젝션 쪽을 교정 1회·남은 오류 1·보안 25점으로 표시.
+- 실제 DeepSeek 품질 판단은 안 함(도구만). code_security 에는 명령 실행(child_process exec + 요청 값) 규칙이 없다 — 비교 보안 점수도 그만큼만 본다(후속 후보).
+
+# 제로 트러스트 층 (2026-10-16, 2.0.35)
+
+- core/trust_check.py — evaluate(workspace, target local|ecs|s3, config, identity_arn, has_rollback) → {principles[ai·identity·network·secrets·audit]{status, items[{key,status pass|warn|block|info,title,detail,fix}]}, counts, scanned_files, truncated}. 새로 막지 않는다(block 은 dockerfile_guard 결과뿐). 파일 수집은 os.walk 가지치기(node_modules·dist…), 600개·400KB·총 8MB. 항목: dockerfile(guard) · code_security(report, high → warn) · lockfile(의존성 있는 package.json 옆 잠금 파일을 디스크에서, requirements == 고정) · root/temporary/scoped(identity ARN) · bind(RECODER_LOCAL_BIND) · https/origin_lock/origin_tls/waf/public_ip/s3_http · hardcoded(security_scan.scan_text_for_secrets high, .env·문서 제외, 마스킹) · image(.dockerignore .env*) · runtime(production 비밀 이름 평문 env) · approval/rollback/watch/sbom.
+- POST /api/deploy/trust-check(TrustCheckRequest: 설정은 허용 키만, env_vars·secret_refs 는 이름만 — 값은 버림). 로컬 계획(DeploymentPlan.trust)에 붙임(has_rollback = 같은 컨테이너의 성공 기록). 확장: ApiClient.getTrustCheck, canvasHost.trustConfig(값 없이 이름만) + canvas.plan.trust(대상 상태와 함께 병렬, 실패하면 빠짐), webview TrustCheck.tsx(원칙·항목, 주의·막힘 있으면 펼침), ApprovalCard·ApprovalModal(ShipMode 로컬 배포)에 표시.
+- 원본 구간 HTTPS(aws_cdn·aws_edge·ecs_agent): custom_domain + Route 53 영역이면 _prepare_origin_tls — origin.<도메인> 인증서를 배포 리전 ACM 에 요청(태그 recoder:origin, then 문구), point_origin(A 별칭 → ALB, 다른 곳을 가리키면 덮어쓰지 않고 안내), 발급되면 allow_https_from_cloudfront(443 ← CloudFront 접두사 목록) + ensure_https_listener(SSL_POLICY TLS13-1-2-2021-06, 80 과 같은 기본 동작, 80 이 잠겨 있으면 머리글 규칙을 먼저 복사) → ensure_distribution(origin=host, origin_https=True → https-only). 원본 잠금·넓히기는 80·443 둘 다. rec.provisioned["origin_tls"] 켜짐/준비 중/꺼짐. 실패는 HTTP 로 계속(안내). EdgeResult.zone_id(CanonicalHostedZoneId). create_listener Tags 비면 빼기(빈 목록은 botocore 거부).
+- 정리: CLIENTS += acm(리전)·route53, kind acm_origin_certificate(ORDER 6.5, ALB 뒤), 지우면 remove_origin_record(ALB 별칭일 때만). _find_cdn 은 recoder:origin 인증서 제외(us-east-1 배포 중복 방지).
+- 권한: HttpsCertificate Resource 에 배포 리전 인증서, HttpsRequestCertificate RequestedRegion [리전, us-east-1]. infra/recoder-iam-quickcreate.json 재생성.
+- 시험: core/tests/test_dev_2035.py(moto ap-northeast-2 — 발급 대기 → 가져온 인증서로 발급 → 443·https-only·같은 잠금, 다른 레코드 보존, Route 53 없음, 도메인 없음, 권한 실패, 정리, 권한표, 신뢰 점검 단위·끝점·큰 폴더), webview-tests/trustCheck.test.js. PatternGuard 로 요청 값 규칙 대조.
+- 실제 AWS 미확인: ALB HTTPS 리스너 + CloudFront https-only 전환 시점(퍼지는 동안 두 리스너 모두 잠금이라 403 없음 예상), ACM 지역 인증서 발급 시간.
+
+# 흐름 dry run 다이어그램 (2026-10-16, 2.0.34)
+
+- extension/src/codemap/flow.ts — analyzeFlow(root, {overrides}) → FlowGraph{kind:'flow', source:'source', nodes(id=`파일#이름`, kind function|handler|route|main, effects, hash, line~endLine), edges(order·line·branch if|else|loop|catch|case|cond|callback·certainty direct|inferred), entries(route|ui|main)}. previewFlow(root, overrides) → {graph, changed(added|modified by hash), removed, affected(BFS로 바뀐 노드에 닿는 진입점)}. source 필드는 나중의 바이너리(REA) 분석을 같은 화면에 그리기 위한 자리.
+  - JS/TS: function·const 화살표·exports.x·클래스 메서드/화살표 프로퍼티·객체 메서드, import/require 바인딩, export·module.exports·default, `new X()` 객체 → 메서드(추정). 경로: `x.get('/p', mw, handler)`(핸들러가 함수로 이어질 때만 — axios.get 오탐 방지, 템플릿 경로 제외), `app.use('/p', mw…, router)` 접두사·미들웨어 사슬(여러 단계), Next pages/api·app/**/route.*. 화면: JSX on*={…}, addEventListener(선택자 라벨), el.onclick.
+  - Python: def(시그니처 제외 본문)·클래스 메서드, from/import(상대·서브모듈), self.x = Cls() 객체, FastAPI·Flask 데코레이터(route methods=), APIRouter/Blueprint prefix, include_router/register_blueprint(prefix·Depends), 핸들러 시그니처 Depends/Security → 핸들러 앞 순서, `if __name__ == "__main__":` 다음 줄부터.
+  - 갈림: jsBranchIndex(본문 한 번 훑어 중괄호 종류 기록 + 이분 탐색, 중괄호 없는 if·&&·?: 는 문장 단위), pyBranchAt(들여쓰기 위로).
+  - 효과 규칙 EFFECT_RULES(같은 줄 같은 종류 1개). 비밀값은 이름이 SECRET·TOKEN·PASSWORD·KEY·DATABASE_URL… 일 때만. 테스트 파일·d.ts 제외. 한도 노드 6000·선 30000.
+  - 성능: 호출 찾기는 이름만 정규식 + 앞 객체 사슬은 거꾸로 읽기, `\s*(?:<…>)?\s*` 같은 붙은 공백 수량자 제거, import 는 2000자 창에서 from 찾기, `split(/\s+as\s+/)` → 공백 접고 split(' as '). analyzer.ts 의 Python from-import 도 같은 문제 수정. 퍼징(공백 6만·이름 3천 × 토큰 86개 × 모양 7개, 두 분석기) 1.5초 넘는 것 없음. 실측: core 254파일 1.3초, extension/src 0.3초.
+- analysisWorker/AnalysisJob: mode project|file|flow|preview, overrides. SidebarProvider: map.flow → map.flowResult|map.flowError, code.flowPreview{key, ops, targetFolder, projectRoot} → code.flowPreviewResult{key, preview, projectRoot, prefix}|{key, error} (_resolveWriteRoot·_joinFolder, .git/.vscode/드라이브 제외, 디스크에 쓰지 않음), map.openFile 에 line·projectRoot. map.project·map.file·자동 새로 고침도 작업 스레드(_mapJob·_mapRefreshJob) — 예전에는 확장 호스트에서 동기 실행.
+- 웹뷰: components/dryRunModel.ts(dryRun: 깊이 우선·순서·seen/cycle·한도 300단계/24깊이, 요약은 종류별 함수 수; layoutDryRun; findingsByNode), FlowDryRun.tsx(시작점 optgroup: 변경이 지나가는 곳·바뀐 함수·API 경로·화면 동작·실행·함수, 재생/단계/키보드, 현재 단계 카드, 곡선 선(같은 열 건너뛰기는 옆으로, 위로 되돌아가기는 오른쪽 호), 노드 상태 current/visited/future, 자동 스크롤, 단계 기록, 정적 분석 고지), FlowPreviewPanel.tsx(CodeAgent 결과 카드 「적용 전 흐름 미리 보기」), CodeMap 에 「흐름 dry run」 보기. 파일 이름 대소문자 충돌(FlowDryRun/flowDryRun) 피해 dryRunModel.
+- 시험: webview-tests/flowDryRun.test.js(Express·FastAPI·React/Next·깨진 코드·dry run·배치·보안 발견·미리 보기·작업 스레드·화면·정규식 성능), flowPreviewHost.test.js(확장 호스트 메시지), codemapImports 의 stripJs 시험을 컴파일된 export 사용으로. 브라우저(Chromium)로 재생·키보드·스크린샷 확인.
+- 한계: 정적 분석(동적 호출·DI·콜백 실행 시점은 추정/누락), 지원 언어 JS/TS/Python, 전역 미들웨어 app.use(mw)(경로 없음)는 사슬에 넣지 않음.
+
+# 출시 점검 2차 수정 (2026-10-15, 2.0.33)
+
+- 2차 감사 3개(보안 리뷰 / 코어 레거시 / 주변 도구). tests/test_dev_2033.py(65), webview-tests/productionAudit 1건, discord-bot test_bridge_security 확장, gateway 단가 고정.
+- 생성: code_agent 가 split_mode 와 무관하게 결과 체크포인트 저장(result.job_id 항상). generation_jobs.save 는 mkstemp(0600)+replace 재시도. code_output.safe_rel_path(FORBIDDEN_DIRS .git·.vscode, 절대·드라이브·..) — gen_engine._merge_files·code_agent ops 필터. 확장 handleCodeApply 도 .git/.vscode/드라이브 거부. restore_neutralized 는 표시 수 == 뺀 줄 수일 때만 복원, 파일 키는 앞 "./" 만 제거(lstrip 버그).
+- 로컬 배포: deploy._volume_args(image inspect .Config.Volumes → -v <컨테이너>-data-<경로>:<경로>, /tmp·/run·/var/cache 제외) — 배포·복원·롤백(롤백은 409 확인 뒤). _halt_crash_loop(되살릴 것 없을 때 update --restart=no + stop). local_deploy_store._keep_corrupt_copy, save replace 재시도. local_services._save → state_io(0600), ddl_from_code 는 os.walk 로 _SKIP_PARTS 가지치기.
+- 실제 Docker E2E(sandbox, node 이미지): 배포 → 재배포 → 롤백에서 127.0.0.1 바인딩·unless-stopped·이름 있는 볼륨·데이터 유지, 첫 배포 즉시 종료 시 컨테이너 남김 + 재시작 끔 + 멈춤 확인.
+- GitHub: repo_create_and_push — 이미 있는 저장소가 공개 범위 다르거나 size>0 이면 conflict(이 폴더 origin 이 그 저장소면 허용), branch -M 제거, 다른 origin 은 conflict, push HEAD:refs/heads/<기본>. gitops_agent 는 extraheader(그 호스트만) + stderr 토큰 가림, rstrip(".git") 버그.
+- 보안: ecs_agent DB 비밀 remedy = arn:<p>:secretsmanager:<region>:<acct>:secret:<secret_name>-*, 정책 이름 recoder-db-secret-<service>-<region>. main._ensure_ca_bundle 은 기본 저장소가 있으면 그대로, 없으면 _SYSTEM_CA_FILES → certifi. _is_loopback_host(ipaddress). grounded_repair 키 짧으면 원자적 재생성, 실패 시 실행 한정 무작위 키(무키 서명 없음). dockerfile_guard: 파이프 단계 분석(_command_word 가 sudo·env·busybox·xargs·tee 통과), _inline_runs_stdin(-c 코드에 exec 없으면 데이터 읽기), 다운로드 대상(-o·-O·> ·curl -O 이름), _VERIFIED(sha*sum -c·gpg --verify·cosign), PATH 폴더 이름 실행, RUN 사이 fetched 추적, 인라인 fetch+exec, _secret_in_payload(-d·-F·-T·비인증 헤더), 비밀 마운트는 그 경로만 제외. rollback_policy paramiko RejectPolicy.
+- 주변: discord-bot api_server._same_machine_client(Origin http(s) 거부, 무키면 Host 루프백만, 본문 있으면 application/json). guild_config.db·bridge_settings.json·policy.json 추적 해제 + .gitignore. preflight-action README 데모 토큰 제거. ci.yml workflow_call + release.yml tests 잡(publish.needs). watchdog install.sh venv(/opt/recoder/venv, python3-venv), unit Wants=docker. build-release notices: CPython(stdlib LICENSE), OpenSSL, npm(react·react-dom·scheduler·three·ws). paramiko 는 RUNTIME_IMPORTS 에서 빼고 spec excludes. darwin 잠금 macholib. control_plane 기본 127.0.0.1(CONTROL_PLANE_HOST), otel compose 포트 127.0.0.1. gateway·control_plane requirements ASCII. 테스트의 실제 계정 ID → 210987654321.
+- 남은 위험: 코드 서명 없음(Windows SmartScreen·macOS Gatekeeper 경고), 91MB pptx 추적 중(히스토리 정리는 사용자 결정), 루트의 bedrock_test.py·show_policy.py·restart-core.bat, taskkill PID 재사용(짧은 창), CloudFront→ALB 원본 구간 HTTP(비밀 머리글이 평문 — ALB HTTPS 리스너가 필요), 생성 취소 API 없음(끊겨도 끝까지 가고 결과는 저장), sandbox 의 node:22-alpine 은 진짜 alpine 이 아니라 test_monorepo_deploy 1건 실패(환경).
+- 봇 상태 파일 추적 해제: pull 하면 작업 폴더의 discord-bot/guild_config.db·bridge_settings.json 이 지워진다 — 쓰고 있었다면 pull 전에 복사해 두고 다시 넣을 것(이후는 .gitignore).
+
+# 출시 점검 수정 (2026-10-15, 2.0.32)
+
+- 영역별 감사 4개(AWS 배포·운영 / 크로스 플랫폼 / 보안 기능 / 확장↔코어 계약) + 리눅스 릴리스 빌드(build-release.py + release-smoke.js, 전부 PASS). tests/test_dev_2032.py, tests/aws_pattern_guard.py(봇코어 모델의 pattern·길이·enum 대조 — test_aws_policy 런타임 픽스처 전체에도 적용).
+- AWS: WAF_DESCRIPTION(ASCII). HttpsRequestCertificate(Resource *, RequestedRegion us-east-1 + RequestTag recoder:managed), request_certificate 는 태그 있을 때만 Tags. DiscoverDefaultNetwork += DescribeInternetGateways·AccountAttributes·Addresses(PINNED). shield.python_reads_port(CMD/ENTRYPOINT 의 $PORT, gunicorn --bind 없음, python 파일의 environ PORT). _check_db_secret_access(production+RDS, simulate_principal_policy 로 실행 역할 GetSecretValue — denied 면 RDS 만들기 전 InfraError + put-role-policy 명령, 확인 불가면 안내만). comment_for(name, region)=recoder:<name>@<region>, 옛 표시는 원본 ALB 리전이 같을 때 채택·재표시, CallerReference 무작위 꼬리. global_acl_name(name, region). 정리: CloudFront 는 item_region, waf_cdn 은 이름 끝 리전(옛 이름은 이 리전 배포가 쓰는 것만), 인증서는 recoder:region 태그(옛 것은 이 리전 배포 별칭과 같은 도메인만). _note_leftovers(edge none·https 끔). aws_rds.wait 가 stopped 면 start_db_instance(+rds:StartDBInstance). ecs_runtime 줄이기 기준 56K/59K, recoder-db-init 도 SQL 빼고 통째로 제거. list_certificates 페이지, _zone_for 공개 영역 선택.
+- 권한 점검: AwsDeploymentPermissionContext 에 edge·https·custom_domain·database, _protection_simulations(대표 액션 + 실제 이름 ARN). 확장 DeploymentCenter 가 protect 값을 보냄.
+- 보안: code_security(_SIGNUP_PATH 에서 join·/:param/register 제외, 외부 인증 SDK 인정, 저장 증거 없으면 medium, _safe_sql_expr, 호출 앞 2,500자에서만 요청 이름, JWT 템플릿 ${} 제외). build_readiness._non_registry_spec + 모든 package.json(≤20)·로컬 패키지 이름 제외. grounded_repair.store HMAC(h1:, repair_store.key 0600) + 적용 전 확인·지문 없음 거부. dockerfile_guard 재작성(heredoc·이음 중 주석, TRUSTED 경로 단위, TOKEN_HOSTS, 비밀 마운트, 읽기만 비밀, 다운로드 후 실행, ADD URL 실행, env 덤프). context_gate(문자열 안 /* 무시, system prompt 패턴 제거, prompts 파일 제외, raw 보관) + code_agent._restore_neutralized_in_ops, prompt_guard 에서 raw 제거. vuln_recheck(SEMVER/ECOSYSTEM 만, bump_requirement·PEP503·extras, BOM·CRLF 보존, 못 알린 것 재알림, 상태 모양 검사, initial → "배포된 버전의 알려진 취약점", _STATE_LOCK). ops_alerts(state_io, _claim/busy·open 아니면 거부, _done_suggestion 으로 제안별 적용, cursor_known → AlertList.cursor_reset, 확장 watcher 는 reset 이면 최근 것만). mcp 감사에 없는 도구·실패.
+- 환경: main._ensure_ca_bundle(frozen 이거나 기본 CA 없으면 certifi), _LoopbackDirectProxyHandler(전역 opener), /api/shutdown 은 Windows 에서 signal.raise_signal. state_io(파일별 RLock, mkstemp, Windows PermissionError 재시도, utf-8-sig 읽기). proc_tools.run(손주까지 종료, 시험 monkeypatch 존중) → npm·docker build·chrome 호출. deployment_inputs.port_publish(기본 127.0.0.1, RECODER_LOCAL_BIND). 작업 폴더 쓰기 newline=""(CRLF 원본 유지), package.json utf-8-sig. 확장: CoreManager Windows 종료는 /api/shutdown → 대기 → taskkill, StringDecoder, frontendBuild 의 docker 는 인자 배열·리눅스 chown·프로세스 나무 종료, TerminalCollector chcp 65001, 정리 패널(자유 리전·배포 리전·작업 다시 붙기·refreshError), act 시간 제한 600초, 목록 갱신 오류가 승인 버튼을 다시 켜지 않음, S3 스트림 10초 심장박동, 죽은 gitInfo 제거.
+- 정리 작업 기록: RECODER_HOME/cleanup_jobs.json, 시작 시 running → interrupted. GET /api/aws/cleanup/regions, /jobs.
+- 2차 검토(회귀) 반영: dockerfile_guard — _runs_file 은 셸·인터프리터 인자 또는 명령 자리만(tar·chmod 는 실행 아님), _SUBST_SH 는 sh -c "$(curl…)"·eval·<(curl…) 만, .env 는 읽는 쪽(첫 인자)이고 *.example 이 아닐 때만, helm 설치 스크립트 신뢰(제품이 내보내는 Dockerfile 112개 무오탐). 권한 점검 — CreateRule·HTTPS+WAF 의 전역 CreateWebACL 은 막지 않고 안내(OPTIONAL_PROTECTION_ACTIONS, 2.0.31 의 대체 경로가 있음). 옛 이름(리전 없음) CloudFront ACL — 배포에서 새 이름이 퍼졌거나 WAF 를 끄면 지우고, 정리는 다른 리전 배포가 쓰지 않으면 어느 리전에서나 보임(인증서도 같은 규칙). frontendBuild chown 은 docker info SecurityOptions 로 rootful 확인 때만. 지시 줄 복원 → 비밀 복원 순서. agents/code_agent 패치도 CRLF 유지. 헬스 체크 주소 127.0.0.1, 남은 docker run -p(deploy.py 2곳·rollback_policy·local_deploy_agent)도 port_publish. python_reads_port 는 CRLF·WORKDIR 절대 경로 처리, 방패 끔 사유에 파이썬 안내. repair_store.key 는 O_EXCL 로 한 번만 생성.
+- 남은 위험(코드로 못 닫은 것): 실제 AWS 실행 미확인(WAF·CloudFront·ACM·RDS·원본 잠금), Windows·macOS 실기기 미확인(CI 첫 실행 확인), OSV 실응답 미확인(프록시 차단), RECODER_HOME 을 바꾸면 runtime.json 은 ~/.recoder 에 남음, rootless Docker·Podman 의 소켓 경로, 젊은 패키지 차단을 확장에서 풀 방법(RECODER_TRUSTED_SCOPES 환경변수뿐), src/api/coreClient.ts 의 옛 엔드포인트(가짜 서버 스모크 전용).
+
+# 검토 결과 수정 (2026-10-14, 2.0.31)
+
+- 리뷰(서브에이전트) 확인 5건 + 개연 8건. tests/test_dev_2031.py 35건, webview-tests/cleanupJob.test.js 4건.
+- aws_edge: WAF 함수에 scope(REGIONAL|CLOUDFRONT). ensure_edge(cdn=True) 는 지역 WAF 를 만들지 않고, waf 를 끈 경우만 바로 detach. ecs_agent._provision_cdn 이 wafv2_global(us-east-1) 로 CLOUDFRONT 웹 ACL → ensure_distribution(web_acl_id) → 그 뒤 지역 ACL detach(보호 공백 없음). WAF 끄면 web_acl_id="" + 전역 ACL 삭제 시도(연결 중이면 안내).
+- 원본 잠금: aws_cdn 이 Origin CustomHeaders X-Recoder-Origin(token_urlsafe 32, 기존 값 재사용), CdnResult.origin_secret_live(새 배포 또는 이미 머리글 있음). live 일 때만 aws_edge.lock_origin(규칙 우선순위 10 http-header → forward, 기본 동작 fixed-response 403). ensure_edge 는 잠긴 리스너면 규칙 대상만 맞추고, cdn 아님 + 잠김이면 unlock_origin(기본 forward, 규칙 삭제). 잠기지 않은 평소 재배포는 DescribeRules 를 부르지 않는다(옛 권한표 호환). 잠금 실패(권한)는 배포 실패가 아니라 rec.provisioned["origin_lock"] 안내.
+- alb_subnets: internet_routable_subnets(igw 경로) 로 공개 판정, 못 보면 MapPublicIpOnLaunch. 태스크 영역은 모두 포함하되 영역마다 공개 우선, 다른 영역 3개까지. associate 36회(3분), delete_web_acl 은 WAFAssociatedItem·OptimisticLock 재시도, detach 실패는 안내만.
+- aws_cdn: IdempotencyToken=sha1(domain)[:32], 검증 레코드 UPSERT 실패 → 안내, point_domain 은 list_resource_record_sets 로 확인 후 cloudfront.net 별칭이 아닌 기존 A/AAAA 는 덮어쓰지 않음(안내 반환), disable 시 WebACLId 비움. ecs_agent 가 point_domain 예외를 안내로.
+- aws_rds: _secret 에서 InvalidRequestException → describe_secret DeletedDate 있으면 restore_secret(실패 시 InfraError, remedy RestoreSecret). delete_instance 는 BUSY 상태면 DbBusy.
+- shield.current_settings: RECODER_SHIELD_PROXY 가 없으면 CONF_B64 를 풀어 cloudfront_viewer_address→cdn, real_ip_header→vpc.
+- aws_cleanup: wafv2_global 클라이언트(GLOBAL_CLIENTS), kind waf_cdn(ORDER cloudfront 다음), ACM ResourceInUse → _Kept, rds DbBusy/InvalidDBInstanceState → _Kept, 15분 뒤에도 남아 있으면 _Kept, DB 를 못 지운 서비스의 subnet/param/secret 은 건너뜀, S3 delete_objects Errors → 실패, on_progress.
+- API: DeleteRequest.background → start_job(스레드, 같은 리전 실행 중이면 409, 최근 20개 보관), GET /api/aws/cleanup/jobs/{id}. 동기 경로도 실행 중 작업 있으면 409. 확장 ApiClient.cleanupDelete 는 background + waitForCleanupJob(3초, 조회 연속 5회 실패·2시간이면 중단), 패널에 aws.cleanup.progress.
+- 권한: EdgeWaf 에 global/webacl/recoder-*/*(us-east-1), EdgeWafRead 리전 조건 [리전, us-east-1], EdgeOriginLock(Create/Modify/DeleteRule), EdgeOriginLockRead(DescribeRules, 리전), HttpsDomainRecordsRead(ListResourceRecordSets), ManagedDatabaseSecret += DescribeSecret·RestoreSecret. 런타임 증거 픽스처·FLOOR 갱신. infra/recoder-iam-quickcreate.json 재생성(정책 3개 유지).
+- 2차 리뷰 반영: 옛 권한표로 HTTPS+WAF 재배포 시 AccessDenied 면 2.0.30 처럼 ALB 에 지역 WAF(안내) — 멈추지 않음. origin_secret_live·web_acl_live 는 배포 전 Status=Deployed 일 때만(InProgress 중 재배포로 잠그거나 지역 WAF 를 떼지 않음). 머리글 값이 바뀌고 리스너가 이미 잠겨 있으면 widen_origin_lock(옛+새 값 OR, 다음 배포에서 새 값만). 규칙 우선순위는 10부터 빈 번호. WAF 끔 시 사용자가 붙인(recoder- 아닌) WebACLId 는 그대로. point_domain 은 ListResourceRecordSets 권한 없으면 예전처럼 UPSERT. 동기 /delete 도 start_job 으로 등록 후 기다림(겹침 409 한곳). 확장은 옛 코어의 즉시 결과도 받음. test_dev_2031 35건.
+- 실제 AWS 로는 확인 못 함: CloudFront WebACLId 연결에 추가 권한이 필요한지(문서상 UpdateDistribution 으로 연결, 우리 정책은 global ACL 에 GetWebACL 포함), 원본 잠금 전파 시간, RestoreSecret 직후 GetSecretValue.
+
+# 환경 안정화 (2026-10-14, 2.0.30)
+
+- ci.yml: test 잡을 matrix(ubuntu·windows·macos × py3.11 + ubuntu py3.13, fail-fast false, AWS 가짜 키·메타데이터 끔), webview 잡 ubuntu·windows. 실제 Windows·macOS 결과는 sandbox 에서 볼 수 없다 — 첫 CI 실행 결과로 남은 OS 전용 문제를 확인할 것.
+- 로캘: sandbox 에 ko_KR.EUC-KR 로캘을 만들어(PYTHONUTF8=0, TZ=Asia/Seoul) 전체를 돌림 — 33건 실패 중 16건은 테스트의 로캘 기본 인코딩(read_text/write_text/subprocess text=True) → 코드모드로 262곳 encoding="utf-8"(바이트 오프셋 기준 AST 삽입) + 재발 방지 테스트(test_tests_read_and_write_text_as_utf8_on_any_locale). 남은 17건은 리눅스 비 UTF-8 로캘에서만 생기는 것(프로세스 인자·한글 경로 바이트를 EUC-KR 로 넘김 — git·node 는 UTF-8 로 해석). Windows 는 인자·경로가 UTF-16 이라 해당 없음. 그래서 리눅스 로캘 잡은 CI 에 넣지 않았다.
+- Python 3.11 깨끗한 venv(uv, requirements + requirements-dev): @pytest.mark.asyncio 테스트 2건이 플러그인 없어 실패 → asyncio.run 으로, 재발 방지 테스트.
+- scripts/golden_path_smoke.py: generate_plan_topics 픽스처({"topics": []} → 제품의 한 번에 받기 경로), 기대 호출 갱신 — develop 에서도 실패하던 것(bb56def 에서 재현).
+- node_fixups re.split 위치 maxsplit → 키워드. test_grounded_repair 기호 링크(WinError 1314 건너뜀), test_dev_2016 의 sh 기반 3건 POSIX 전용.
+- 로컬 확인: core 2831(3.11·3.13), extension npm test 574 + build + verify:package, watchdog 65, discord-bot 112(py3.12 venv), golden path, npm audit 4곳·pip-audit 3개 잠금 파일 0건. commerce compose 잡은 레지스트리 차단으로 sandbox 에서 못 돌림.
+
+# ReCoder 자신의 보안 — OWASP AI 에이전트 위험 (2026-10-14, 2.0.29)
+
+- ASI01 context_gate.neutralize_instructions(path, content): 문서(.md/.txt/.html/README·notes 등)는 모든 줄, 코드는 주석 줄만 — 패턴(이전 지시 무시 영/한, 역할 바꾸기·시스템 프롬프트·특수 토큰, curl|wget … | sh, 비밀값 + 외부 URL 전송)이 걸린 줄을 NEUTRALIZED 로 바꾸고 {line, kind, text(마스킹)} 반환. scrub_file_entry(removed=) → code_agent._scrub_context(…, removed) → result["prompt_guard"], 요약 문장. _build_code_prompt 에 DATA_NOTICE(파일은 데이터) — 참고/직전/열린 파일이 있을 때만.
+- ASI02·05 core/dockerfile_guard.py: 논리 줄(\ 이음) 단위, RUN --security=insecure·--network=host, curl|wget → sh/python/node(TRUSTED_INSTALLERS: nodesource·rustup·poetry·astral·bun·pnpm·get.docker.com·nvm·deno 만 예외), 비밀 파일(.aws/.ssh/.npmrc…), curl/wget/nc + 비밀 env + URL, docker.sock·/proc/1|self·/host·/etc/shadow, COPY/ADD .aws/.ssh. 적용: build_readiness(DOCKERFILE_UNSAFE ERROR, 자동 수정 없음), generated_validation(빌드 전 status failed + guard), code_agent._issues_for(Dockerfile op → 교정 오류), ecs_build.build_image(BuildError, docker 안 부름), local_deploy_agent.build_image(False). docker_kit 검증본·starter·file_templates 는 통과(테스트).
+- ASI03 AwsStatus.security_warnings(model_validator: identity.arn 이 :root 로 끝나면) — 모든 생성 경로에 자동. 확장 AwsConnection 빨간 경고.
+- ASI06 grounded_repair.store.integrity(id·workspace·manifest·status·edits·corpus_version·strategy·sources 해시) 저장, cached 는 지문이 맞을 때만, approve 는 바뀌었으면 거부(지식 문서는 이미 공식 주소·검토된 라이선스만).
+- ASI09 ChatPanel 승인 카드: 요청(실제 instruction)·스택·파일 + "AI 설명"(요약, 기울임).
+- ASI07 mcp_server._audit: RECODER_HOME/mcp_calls.jsonl 에 time·tool·argument_names·ok(값 없음).
+- tests/test_dev_2029.py 10건. 전체 2829 통과.
+
+# AI 코드 보안 점수 · 배포 후 취약점 재검사 (2026-10-14, 2.0.28)
+
+- core/code_security.py: scan(files) → (Finding[], applicable). 규칙 SQL_INJECTION(.query/.execute/.raw/$queryRawUnsafe 의 템플릿·문자열 연결, req. 또는 req.body/query/params 에서 꺼낸 이름이 들어가면 precise high — Prisma $queryRaw 태그 템플릿은 안전), JWT_UNSAFE(none·리터럴 비밀값 precise, `|| '기본값'` 은 medium), CORS_WILDCARD(origin '*'/true + credentials precise), PLAINTEXT_PASSWORD(가입 라우트·users INSERT 에 password 가 있는데 bcrypt/argon2/scrypt/pbkdf2 가 없으면 precise), MISSING_AUTH(앱에 인증이 있을 때 POST/PUT/PATCH/DELETE 에 인증 미들웨어 없음 — 공개 경로·서명 웹훅·mock·app.use(prefix, auth, router) 제외), OWNER_CHECK, XSS_HTML, BRUTE_FORCE(로그인에 제한 라이브러리·직접 만든 limiter·계정 잠금(failed_login 등) 없음), ERROR_LEAK. 점수 = 통과 가중치/적용 가중치(high3·medium2·low1), 적용 규칙 없으면 None. 주석은 같은 길이 공백으로 지워 줄 번호 유지.
+- 오탐 측정: commerce 기반 100점(로그인 잠금 인정), /tmp/g1(AI 생성 앱) 100점(웹훅·mock 제외 후), 테스트 픽스처 전체 2819 통과(교정 루프에 끼어든 오류 없음).
+- code_agent: _issues_for 에 code_security.issues(errors_only=True)(새 앱만) → 교정 루프. 결과 result["security"] = report, 요약에 "AI 코드 보안 점검 N점", 진행 _report step=security. 확장 codeIssues.SecurityScoreNote.
+- core/vuln_recheck.py: deployments(배포 기록 중 서비스별 최근 succeeded + SBOM 파일 + request.workspace_path), purls(CycloneDX 의 npm/pypi/maven/golang/cargo/gem/nuget/composer, 중첩 components 포함), query(OSV querybatch 1,000개씩), fixed_version(같은 생태계·이름의 ranges 중 현재보다 큰 가장 작은 fixed), severity(database_specific.severity), run(state RECODER_HOME/vuln_recheck.json: known[id|purl] found/notified/fixed/fix_applied, 새 것만 ops_alerts._store kind=vuln + upgrade 제안 최대 3), apply_fix(npm: package.json 직접 의존 ^to, 없으면 lock 있는 package.json overrides, npm 있으면 --package-lock-only; pypi: requirements*.txt name>=to), Rechecker(시작 2분 뒤, 24시간마다; RECODER_TEST_MODE·RECODER_VULN_RECHECK=0·RECODER_OFFLINE=1 이면 끔). main lifespan 에 시작·종료.
+- ops_alerts.act: upgrade 는 제안한 값과 같을 때만, AWS 를 부르지 않고 apply_fix. ActRequest 에 upgrade. 확장 OpsAlertCard: 같은 action 여러 버튼 key, 상세 줄바꿈.
+- API /api/security/code(작업 폴더 점수 — node_modules·dist·테스트 제외, 4,000파일·1MB 한도), /api/security/vulns/check, /api/security/vulns/history.
+- sandbox 에서 api.osv.dev 가 프록시 403 이라 실제 OSV 응답은 확인 못 함(형식은 OSV 문서대로, 테스트는 고정 응답). PC 에서 /api/security/vulns/check 로 확인 필요.
+
+# HTTPS 주소(CloudFront) · 관리형 DB(RDS) (2026-10-14, 2.0.27)
+
+- core/aws_cdn.py: ensure_distribution(Comment=recoder:<edge_name> 로 찾음, 원본 ALB http-only, redirect-to-https, CachingDisabled, AllViewerAndCloudFrontHeaders-2022-06, PriceClass_200(한국 엣지 포함), Tags) — 있으면 원본·별칭만 갱신. ensure_certificate(us-east-1 ACM, DNS 검증, 기존 ISSUED/PENDING 재사용, Route 53 영역이 있으면 검증 CNAME UPSERT, 없으면 안내), point_domain(A·AAAA 별칭 → CloudFront, Z2FDTNDATAQYW2), disable_or_delete(켜져 있으면 끄고 _Kept, Deployed 면 삭제).
+- aws_edge.ensure_edge(cdn=True): `{svc}-alb-cf-sg`(80, 접두사 목록 com.amazonaws.global.cloudfront.origin-facing) 로 ALB 를 만들고, 기존 ALB 는 set_security_groups 로 바꿈(끄면 다시 공개 SG). aws_infra.ensure_security_group(prefix_list=).
+- shield: trust_cdn — map $http_cloudfront_viewer_address → $recoder_client(IPv4/IPv6, 없으면 $remote_addr), limit 키·로그 remote_addr·X-Real-IP 를 그것으로, 차단은 geo $recoder_client(deny 는 연결 주소만 봄), 프로토콜은 CloudFront-Forwarded-Proto. RECODER_SHIELD_PROXY(vpc|cdn) 를 컨테이너 env 에 남기고 reconfigure 가 그대로 씀 — 2.0.26 에서 ops_alerts.act 가 trust_vpc_proxy 를 잃어 ALB 뒤 모든 사용자를 한 IP 로 세던 결함 수정. 실제 nginx: 사용자 A 폭주 89×429, 사용자 B 200, 차단 IP 403, IPv6 주소 파싱.
+- core/aws_rds.py: db_identifier = edge_name + "-db", start(태스크 SG 에서만 5432 인 `{svc}-db-sg`, 비밀 recoder/<svc>/database 에 비밀번호 먼저, describe_db_engine_versions 기본(실패 시 16/postgres16), 서브넷 그룹 2개 영역, 파라미터 그룹 rds.force_ssl=0, db.t4g.micro 20GB gp3 암호화 백업1일 삭제보호, Tags), wait(20초 간격, 25분, on_wait), connection(local_services.app_env 이름 규칙 + URL 인코딩), store_connection, secret_refs(`arn:…:KEY::`), init_container(postgres 이미지, 공개 스키마 테이블 0개일 때만 초기화 SQL 한 트랜잭션 — 실제 PG16 으로 첫 실행 적용·두 번째 건너뜀·실패 시 되돌림 확인), delete_instance(삭제 보호 해제 + 최종 스냅숏).
+  ManageMasterUserPassword 를 쓰지 않은 이유: RDS 비밀은 사용자명·비밀번호만 담아 생성 앱이 읽는 DATABASE_URL 을 ECS 에서 만들 수 없다.
+- ecs_runtime.plan(managed_db=True): postgres 사이드카 대신 managed_db{env_names,names,init_sql_b64} 를 남기고 그 이름들을 provided 로 봄(production 차단 안 함). PostgreSQL 이 없으면 안내만.
+- ecs_agent: _check_edge_request — https 면 edge 최소 alb, custom_domain 은 https 필요, rds 는 db_cost_approved·provision. _provision_cdn(엣지 다음) · _start_database(SG 확정 뒤, 기다리지 않음) · _step_database_ready(태스크 정의 등록 직전 대기 → staging env / production secret_refs + 초기화 컨테이너 dependsOn COMPLETE). clients 에 cloudfront·acm_global(us-east-1)·route53·rds·secretsmanager. URL: cdn.url, 새 배포면 전파 대기 안내(실패 아님). 실패 시 db_cost_warning.
+- aws_cleanup: cloudfront·acm_certificate(태그 있는 것만 목록)·rds_instance(삭제 후 최대 15분 사라질 때까지)·rds_subnet_group·rds_parameter_group·secret(복구 7일), make_clients(session).
+- aws_policy: HttpsCreateDistribution(aws:RequestTag 조건)·HttpsManageDistribution·HttpsRead·HttpsCertificate(us-east-1)·HttpsDomainRecords(CNAME/A/AAAA 만)·ManagedDatabase(db/subgrp/pg/snapshot recoder-*, og:default:postgres-*)·ManagedDatabaseRead(리전 조건)·ManagedDatabaseSecret(secret:recoder/*), SetSecurityGroups, CreateServiceLinkedRole 에 rds. PINNED: cloudfront:TagResource·acm:AddTagsToCertificate·rds:AddTagsToResource·rds:CreateDBSnapshot·secretsmanager:TagResource. aws_calls: rds 약어(Db→DB), create_distribution_with_tags → cloudfront:CreateDistribution.
+- 확장: EcsProtection(HTTPS 주소·내 도메인·관리형 DB·비용 확인), canvasHost·ApprovalCard(HTTPS·DB 행), ApiClient. webview httpsDb 3건, core tests/test_dev_2027.py 9건, test_aws_policy 런타임 증거(엣지 cdn 전환·인증서·배포·별칭·RDS 생성·재사용·정리 2회).
+- 권한 크기: build_policy(계정·리전 채움) 압축 JSON 이 11.7K자 — 관리형 정책 6,144자(2.0.25 에서 이미 6.8K 로 초과)·역할 인라인 합계 10,240자 초과. aws_policy.split_policy/policy_size(공백 제외, 가장 긴 리전·파티션으로 잼) → quick-create 템플릿 RecoderDeployPolicy/2/3(첫 이름 유지, 사용자에 모두 붙임), aws_role 은 인라인에 안 맞으면 recoder-deploy-policy-N 관리형 정책(있으면 새 버전, 버전 5개 한도 위해 옛 것 삭제, 남는 조각 떼기, 옛 인라인 삭제). 필요 IAM: GetPolicy·CreatePolicy·CreatePolicyVersion·ListPolicyVersions·DeletePolicyVersion·AttachRolePolicy·ListAttachedRolePolicies·DetachRolePolicy(없으면 RoleSetupDenied → 콘솔 폴백).
+- 실제 AWS(CloudFront 전파·인증서 발급·RDS 연결)는 사용자 계정에서 확인 필요.
+
+# 대규모 방패(ALB + WAF) · AWS 리소스 정리 (2026-10-14, 2.0.26)
+
+- core/aws_edge.py: edge_name(service) = recoder-<slug18>-<sha1 4>(32자, 권한표 recoder-* 와 맞춤). ensure_edge(ec2, elbv2, wafv2): alb_subnets(태스크 서브넷 영역 + 다른 영역, 2곳 미만이면 InfraError) → `{svc}-alb-sg`(80 공개) · `{svc}-task-sg`(앱 포트, ALB SG 에서만 — aws_infra.ensure_security_group(source_group=)) → ALB(internet-facing, Tags) → 대상 그룹(ip, 헬스 경로, Matcher 200-499 — 헬스 경로가 없는 앱도 살아 있으면 통과, 세밀한 판정은 컨테이너 헬스체크 몫, deregistration 30s) → 리스너 80(다른 TG 를 가리키면 ModifyListener) → WAF(web_acl_rules: 속도 제한 Block + CommonRuleSet(SizeRestrictions_BODY 는 Count) + KnownBadInputs, 있으면 한도만 update) → associate(WAFUnavailableEntityException 5초×12). waf=False 면 우리 ACL 을 떼고 지움. 실패 시 rollback(이번에 만든 것만 역순, ResourceInUse 재시도).
+- ecs_agent: _check_edge_request(비용 확인·target_group_arn 충돌·provision=False) 를 AWS 호출 전에. _step_provision 에서 ensure_edge → req.security_group_ids += task SG(공개 `{svc}-sg` 는 안 만듦), req.target_group_arn = TG → 방패 trust_vpc_proxy 켜짐, 서비스 LB 대상은 recoder-shield. _step_resolve_url: ALB DNS, 10초 × (timeout/10) 회 대기. 실패 시 edge_cost_warning. clients 에 wafv2.
+- shield: trust_vpc_proxy 면 `map $http_x_forwarded_proto $recoder_proto` 로 원래 프로토콜 전달(nginx -t 두 모드 확인).
+- core/aws_cleanup.py: find(clients) — 권한표 범위에 맞춰 이름에 recoder 가 든 후보만 조회(로그는 /ecs/* 전부 태그 확인, SG 는 태그 또는 설명 "ReCoder", ECS 는 recoder* 클러스터 + 배포 기록의 클러스터). describe_clusters 로 INACTIVE 제외. plan(서비스별 그룹·untagged·summary·gaps — 종류별 실패는 gaps 로만), stop(태스크 0 + ops_alerts.unregister), delete(approved 필수, 다시 find 해서 태그 확인한 id 만, ORDER 순, SG 는 다른 선택 SG 를 참조하는 쪽 먼저, DependencyViolation·ResourceInUse·ClusterContains* 재시도, 다른 서비스가 남은 클러스터는 _Kept 로 둠).
+- API /api/aws/cleanup/plan · stop · delete(approved + count 일치). 배포 기록(RECODER_ECS_STORE)의 옛 서비스는 untagged 로.
+- aws_policy: EdgeLoadBalancer(recoder-* LB·TG·리스너), EdgeWaf(webacl recoder-* + LB), EdgeWafRead(ListWebACLs·GetWebACLForResource, 리전 조건), CleanupList/ListServices(ecs:cluster 조건)/TaskDefinitions/ReadTags/Delete, CleanupSecurityGroups(ec2:ResourceTag/recoder:managed=true), S3 GetBucketTagging·DeleteBucket·ListAllMyBuckets, iam:CreateServiceLinkedRole 에 elasticloadbalancing.amazonaws.com. PINNED: elasticloadbalancing:AddTags·SetWebAcl, wafv2:TagResource. WAF 관리 규칙 묶음(managedruleset) ARN 은 계정 칸이 AWS 라 넣지 않았다(계정 칸 불변식) — 실제 AWS 에서 CreateWebACL 이 거부되면 이 부분부터 볼 것.
+- aws_calls: s3 list_buckets → ListAllMyBuckets, wafv2 약어(Acl → ACL), _snake 가 약어 뒤 새 단어를 끊음(GetWebACLForResource, 복수 s 는 붙임 — DescribeDBInstances 도 바르게).
+- 확장: EcsProtection 「대규모 방패」(한도 select, 비용 문구, 확인 체크 — protectionRequest 가 확인 없으면 throw), canvasHost.validateConfig·ApprovalCard(대규모 방패 행, 접속 주소 "로드밸런서 주소"), AwsCleanupPanel(운영 화면 두 분기, Checkbox, 승인 카드), SidebarProvider aws.cleanup.plan/stop/delete, ApiClient cleanupPlan/Stop/Delete.
+- 검증: tests/test_dev_2026.py(moto — 만들기·재사용·한도 갱신·WAF 끄기·실패 되돌리기(기존 ALB 는 남김)·2개 영역, ECS 연결(공개 SG 안 만듦·nginx real_ip), 정리 목록·승인·태그 없는 것 안 지움·전부 삭제 후 0·SG 순서·남의 서비스 있는 클러스터 유지·중지·권한 없는 종류는 gaps·라우트·배포 기록), test_aws_policy 런타임 증거(edge 4경로 + ModifyListener + rollback + 정리 전체), webview awsCleanup 3건. 실제 AWS(ALB·WAF 생성·차단·정리)는 사용자 계정에서 확인 필요.
+
+# ECS 기본 방패 · 공격·장애 감지 알림 (2026-10-14, 2.0.25)
+
+- core/shield.py: nginx 사이드카(public.ecr.aws/docker/library/nginx:stable-alpine, 컨테이너 recoder-shield). 설정은 env RECODER_SHIELD_CONF_B64 → BOOT 가 conf.d 에 쓰고 `nginx -t` 후 exec. 공개 포트 P = nginx, 앱은 PORT=P+1(앱 healthCheck 포트·모의 결제 웹훅 URL 도 바꿈). LEVELS loose 50/100/100 · normal 20/40/50 · strict 5/10/20(rate r/s / burst / IP당 동시 연결). JSON 접속 로그 `{"src":"recoder-shield",...}`. deny 는 공인 주소만(ipaddress is_global). trust_vpc_proxy(ALB 뒤)면 real_ip. decide(): readiness.port_from_env(또는 Python 런타임) & 정적 사이트 아님일 때만 on — 아니면 이유를 provisioned["shield"] 에. apply() 는 태스크 메모리 512 이상으로, reconfigure() 는 관리 밖 키(memory 등) 유지.
+- ecs_agent: _plan_shield(런타임 계획 다음) → _render_task_definition(shield_decision) → ensure_service 의 컨테이너 이름이 recoder-shield. _step_alerts(ensure_service 다음, best-effort): ops_alerts.setup_aws + register. clients 에 cloudwatch·sns.
+- core/ops_alerts.py: 지표 필터 Requests/Blocked/Errors(ReCoder/<service>), 경보 traffic-spike(5분 3,000 고정)·blocked-ratio>0.2·error-ratio>0.05(metric math `IF(req>=50, bad/req, 0)`), SNS recoder-<svc>-alerts(+메일 구독). evaluate(): 급증 = 24h 중앙값의 10배(287점 이상일 때, 아니면 3,000 · 바닥 300), 비율은 50건 이상. TaskWatch 3회 연속 부족 → 장애. Monitor.tick 60s(Core lifespan, RECODER_TEST_MODE·RECODER_OPS_MONITOR=0 이면 안 띄움), 저장 RECODER_HOME/ops_alerts.json·ops_monitors.json, 같은 종류 30분 쿨다운, top_sources(Logs Insights). act() 는 approved 필수 — 새 태스크 정의 리비전(shield.reconfigure) + update_service.
+- API /api/ops/alerts(GET ?since, POST /{id}/act, DELETE /monitors/{key}, POST /check). aws_policy OpsAlertLogs/Read/Alarms/Topic(recoder-* 로 좁힘) — REQUIRED_DEPLOY_ACTIONS 에는 넣지 않음(없으면 알림만 부분). BUNDLED_AWS_SERVICES += cloudwatch, sns.
+- 확장: src/ops/alertWatcher.ts(처음엔 마지막 id 만 저장 · 이후 open 알림만 VS Code 알림 + 디스코드, [자세히] → 운영 화면), EcsProtection(배포 센터·캔버스 승인 카드 「기본 방패」「감지 알림」), OpsAlertsPanel(운영 화면, 60s, 승인 카드).
+- 검증: 실제 nginx 로 BOOT 명령 그대로 실행 — 400 요청 → 429 347건·200 53건, 헬스 영향 없음. tests/test_dev_2025.py 18건(moto 로 setup_aws·Monitor·act), test_aws_policy 런타임 증거, webview opsAlerts 4건.
+- 하지 않은 것: Local Docker 방패(localhost 전용이라 불필요), runtime_check 단계에는 방패 없음, 실제 AWS 경보 발화는 사용자 계정에서 확인 필요.
+
+# 마을 공용 게시판 · 의존 관문 (2026-10-14, 2.0.24)
+
+- core/board.py: local_routes(라우트 호출마다 다음 라우트 전까지를 핸들러로 보고 첫 2xx `.json({...})` 최상위 키·`[ … ]`, 변수 응답은 None), 인증 = 경로 뒤 미들웨어 이름 또는 `router.use(auth)`. board_entries: 완성된 진입점의 app.use 접두사 → 없으면 약속 문서의 `/api(/vN)/<자원>` → `/api/<자원>s`(guessed). is_server_route_path(routes|routers|controllers|handlers/, 화면 폴더 제외 · backend|server/ 아래 api/), is_api_layer(화면 쪽 api|services|clients/ 또는 api·client·http·axios 이름), api_waits_for(같은 자원 줄기만, 범용 클라이언트는 전부).
+- gen_engine: state["board"](체크포인트에 저장·resume 복원), _deps 에 화면 API 파일 → 같은 자원 서버 라우트 약한 의존, _dependency_context 에 게시판 블록(대상이 서버 쪽뿐이면 생략), 이벤트 board_post{items}·board_read.
+- 의존 관문 `_gate`(_finish 에서 _verify_and_fix 다음, 저장 전 — 이 파일을 기다리는 파일은 아직 시작 전): 완성 파일 overlay 로 build_readiness.analyze(새 프로젝트는 빈 임시 폴더 기준). ① missing_exports 중 이 파일이 낀 쌍 → add_missing_export ② file_writes 의 NODE_TYPE_NAME_MISSING·NODE_CONTEXT_VALUE_MISSING ③ 이 파일 몫의 남은 이름 어긋남·Context member·Vite process.env → self._fix 1회(실패해도 진행). 다른 완성 파일 반영은 **이 관문이 바꾼 파일만, 그 사이 다른 관문이 안 바꿨을 때만**(동시 관문이 옛 내용으로 덮어 되돌리던 경쟁을 테스트가 잡음). 1.5s(RECODER_GATE_BUDGET_S) 넘는 일이 2번이면 그 작업에서는 끈다. 이벤트 gate_check{ok, fixed[], returned, by}.
+- teamState: board·boardReaders·lastPost·gate·gates. TeamVillage: VILLAGE_HEIGHT 392→432, 작업대 이름표와 선반 사이 게시판 줄(L.board), 검토 리코더가 관문 때 gate.by 작업대 옆(말풍선 윗줄)으로, 검토 칸에 관문 통과·자동 수정·되돌림 수.
+- 검증: tests/test_dev_2024.py(엔진 실행 — 화면 API 파일이 서버 라우트 뒤에 시작하고 프롬프트에 게시판, 관문 자동 export·1회 되돌림·실패해도 완료·끄기/느리면 꺼짐), webview teamVillage 3건. 마을은 renderToStaticMarkup → Playwright 캡처로 겹침 확인(정적 렌더는 <style> 의 > 를 이스케이프하니 캡처 때 되돌려야 실제 모양).
+
+# 슬롭스쿼팅 방어 · AWS 리소스 태그 · 태그 릴리스 (2026-10-14, 2.0.23)
+
+- core/package_trust.py: 유명 목록(core/data/popular_npm.json, 17,817개 — scripts/update_popular_npm.py 가 registry 검색 API 의 주간 다운로드로 만든다. api.npmjs.org 는 sandbox 에서 403 이라 fetch_weekly 가 검색 API 로 대체) 밖 이름만 조회. look_alike = 같은 스코프·이름 5자 이상·길이차 1 이하·편집 거리 1(인접 교환 1) 또는 구분자만 다름. judge: typo(주간 < min(5,000, max(1,000, 유명의 1%))) · young(30일 미만 & 주간 1,000 미만) → block, install_script/no_repo/deprecated → warn, 404 는 기존 NODE_DEPENDENCY_VERSION_NOT_FOUND 몫. 캐시 ~/.recoder/cache/package_trust.json 24h. 테스트 모드·RECODER_OFFLINE·사내 레지스트리면 조회 안 함.
+- 오탐 측정(실제 레지스트리): 저장소 package.json 38개 이름 0건, npm 검색 표본 1,262개(주간 1천+) 차단 0건(처음 규칙 — 편집 거리 2·짧은 이름 포함 — 은 896개 중 15개 오탐이라 줄였다).
+- build_readiness._check_package_trust(online 분석에서만) → NODE_PACKAGE_UNTRUSTED(block=ERROR, warn=WARNING). 짝퉁만이면 file_writes(package.json 이름·범위 + import 문) 로 자동 교정 — code_agent 의 FILE_WRITE_FIXES 루프가 AI 없이 바로 고친다. young 은 auto_fix False → edit_fix_round 로 AI 교정 + gen_engine 이 security_block 이벤트(teamState.securityBlocks, 마을 검토 칸 배지).
+- aws_infra.recoder_tags/tag_created: 생성 경로에서만 best-effort 태그(재사용·사용자 리소스는 안 붙임). ecs_agent.resource_tags(project_id, service) → cluster·log group·SG·ECR·service·task def. deploy_s3._tag_bucket. aws_policy 「TagRecoderResources」(aws:TagKeys recoder:* 조건) + s3:PutBucketTagging, 런타임 증거 픽스처에 태그 경로.
+- release.yml: push tags v* → version-check(scripts/check_release_tag.py, rc 면 prerelease) → 3 OS → publish(sha256 대조, actions/attest-build-provenance@v3, gh release create). 쓰기 권한은 publish job 만.
+- extension webview-tests canvasConnections: `git remote get-url` 이 전역 url.insteadOf 로 바뀌어 보이는 환경(이 sandbox)에서 실패 → `git config --get remote.origin.url` 로(환경 무관).
+
 # 함수·스키마로 읽는 필수 환경변수 · 실행 점검 설정 누락 (2026-10-13, 2.0.22)
 
 - 실기기 2.0.21 생성(job d22de705, AI 자유 생성 쇼핑몰, Prisma): env.ts 의 `getEnv(key)`(process.env[key] + throw)로만 JWT_SECRET 을 읽어 deploy_settings.required_env 가 놓침 → runtime_check 가 값 없이 띄워 "Environment variable JWT_SECRET is required" 로 기동 실패 → GENERATED_RUNTIME_ERROR 로 AI 교정 6회 → "실행 점검 오류가 줄지 않아 교정을 멈춥니다(남은 1건)".

@@ -219,7 +219,12 @@
     "license_path": "LICENSE.md",
     "license_sha256": "58064ebb41520d178054dea1a0bae72f48ced50607a6a8fbff6d381f80da8713",
     "license_source_url": "https://raw.githubusercontent.com/expressjs/expressjs.com/b0134ed2234602e64e73db7883ae0c3f3c0079bc/LICENSE.md",
-    "tracking_ref": "main"
+    "tracking_ref": "main",
+    "applies_to": {
+      "express": [
+        5
+      ]
+    }
   },
   {
     "id": "ecs-task-definition",

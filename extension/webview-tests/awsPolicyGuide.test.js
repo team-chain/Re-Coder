@@ -43,10 +43,10 @@ test('자리표시자가 남아 있으면 붙여 넣기 전에 막아 세운다'
 test('음성대조 — 다 채워졌으면 그대로 붙이라고 말한다', () => {
   const { blocking, message } = describePolicyFill({
     policy_json: '{}', needs_manual_fill: false,
-    account_id: '413113423592', region: 'us-east-1',
+    account_id: '210987654321', region: 'us-east-1',
   });
   assert.strictEqual(blocking, false);
-  assert.match(message, /413113423592/);
+  assert.match(message, /210987654321/);
   assert.match(message, /us-east-1/);
   assert.ok(!/자리표시자/.test(message));
 });

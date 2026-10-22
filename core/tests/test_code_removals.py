@@ -130,7 +130,7 @@ def test_size_limit_and_read_errors(tmp_path, monkeypatch):
     annotate_removals(ops, tmp_path)
     assert ops[0]["removal_check"]["status"] == "unavailable"
     assert compare_sources("", " " * (MAX_SOURCE_BYTES + 1), ".js")["status"] == "unavailable"
-    (tmp_path / "app.js").write_text(JS)
+    (tmp_path / "app.js").write_text(JS, encoding="utf-8")
     def denied(*args, **kwargs):
         raise PermissionError("denied")
     monkeypatch.setattr(Path, "open", denied)
@@ -140,18 +140,18 @@ def test_size_limit_and_read_errors(tmp_path, monkeypatch):
 
 def test_target_folder_and_request_root_override_action_and_model_report(tmp_path):
     (tmp_path / "nested").mkdir()
-    (tmp_path / "nested" / "app.js").write_text(JS)
-    (tmp_path / "app.js").write_text(HEALTH_ONLY)
+    (tmp_path / "nested" / "app.js").write_text(JS, encoding="utf-8")
+    (tmp_path / "app.js").write_text(HEALTH_ONLY, encoding="utf-8")
     ops = [{"file": "app.js", "content": HEALTH_ONLY, "action": "create", "removal_check": {"status": "new_file"}}]
     annotate_removals(ops, tmp_path, "nested")
     assert len(ops[0]["removal_check"]["removed"]) == 4
-    assert (tmp_path / "nested" / "app.js").read_text() == JS
+    assert (tmp_path / "nested" / "app.js").read_text(encoding="utf-8") == JS
 
 
 def test_new_file_and_external_symlink(tmp_path):
     inside = tmp_path / "inside"
     inside.mkdir()
-    (tmp_path / "secret.js").write_text(JS)
+    (tmp_path / "secret.js").write_text(JS, encoding="utf-8")
     try:
         (inside / "link.js").symlink_to(tmp_path / "secret.js")
     except OSError as error:
@@ -167,7 +167,7 @@ def test_new_file_and_external_symlink(tmp_path):
 
 @pytest.mark.parametrize("name", ["./app.js", "/app.js", "..\\app.js"])
 def test_matches_extension_write_path_normalisation(tmp_path, name):
-    (tmp_path / "app.js").write_text(JS)
+    (tmp_path / "app.js").write_text(JS, encoding="utf-8")
     ops = [{"file": name, "content": HEALTH_ONLY}]
     annotate_removals(ops, tmp_path)
     assert len(ops[0]["removal_check"]["removed"]) == 4
@@ -176,7 +176,7 @@ def test_matches_extension_write_path_normalisation(tmp_path, name):
 def test_generation_and_api_deliver_computed_warning_without_writing(tmp_path, monkeypatch):
     from api.routes.analyze import CodeGenerateRequest, generate_code_route
 
-    (tmp_path / "app.js").write_text(JS)
+    (tmp_path / "app.js").write_text(JS, encoding="utf-8")
     calls = []
     class Router:
         def call(self, *args, **kwargs):
@@ -192,4 +192,4 @@ def test_generation_and_api_deliver_computed_warning_without_writing(tmp_path, m
     )))
     assert len(result["ops"][0]["removal_check"]["removed"]) == 4
     assert len(calls) == 1
-    assert (tmp_path / "app.js").read_text() == JS
+    assert (tmp_path / "app.js").read_text(encoding="utf-8") == JS

@@ -47,8 +47,8 @@ def test_broken_manifest_repair_can_expose_new_errors():
 def test_proposal_build_is_disposable_and_secrets_are_excluded(tmp_path, monkeypatch):
     monkeypatch.delenv("RECODER_TEST_MODE", raising=False)
     monkeypatch.setattr(gv.shutil, "which", lambda _: "/test/docker")
-    (tmp_path / "app.js").write_text("original")
-    (tmp_path / ".env").write_text("PRIVATE_TOKEN=do-not-copy")
+    (tmp_path / "app.js").write_text("original", encoding="utf-8")
+    (tmp_path / ".env").write_text("PRIVATE_TOKEN=do-not-copy", encoding="utf-8")
     calls = []
 
     def run(command, **kwargs):
@@ -58,8 +58,8 @@ def test_proposal_build_is_disposable_and_secrets_are_excluded(tmp_path, monkeyp
             assert workspace != tmp_path
             assert not (workspace / ".env").exists()
             assert not (workspace / ".env.production").exists()
-            assert (workspace / "app.js").read_text() == "changed"
-            Path(command[command.index("--iidfile") + 1]).write_text("sha256:fixture")
+            assert (workspace / "app.js").read_text(encoding="utf-8") == "changed"
+            Path(command[command.index("--iidfile") + 1]).write_text("sha256:fixture", encoding="utf-8")
             kwargs["stdout"].write(b"build complete")
         return SimpleNamespace(returncode=0)
 
@@ -73,7 +73,7 @@ def test_proposal_build_is_disposable_and_secrets_are_excluded(tmp_path, monkeyp
         ],
     )
     assert result["status"] == "passed"
-    assert (tmp_path / "app.js").read_text() == "original"
+    assert (tmp_path / "app.js").read_text(encoding="utf-8") == "original"
     assert calls[-1] == ["docker", "image", "rm", "sha256:fixture"]
 
 

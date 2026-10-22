@@ -590,9 +590,24 @@ class GitHubAgent:
         # 2. 이미 존재하면 그대로 사용
         code, body = _http("GET", f"/repos/{full}", token=self._token)
         if code == 200 and isinstance(body, dict):
+            #: 2.0.33 — 이미 있는 저장소에 그대로 올리지 않는다: 공개 범위가 요청과 다르거나(비공개로 만들라 했는데 공개 저장소)
+            #: 내용이 있으면(남의/예전 프로젝트) 덮어쓰기 전에 사람이 확인해야 한다.
+            #: 이 폴더가 이미 그 저장소에 연결돼 있으면(전에 ReCoder 로 올린 같은 프로젝트) 다시 올리는 것이다 — 막지 않는다.
+            rc_o, origin_now, _ = self._git(ws, ["remote", "get-url", "origin"]) if (ws / ".git").exists() else (1, "", "")
+            linked = rc_o == 0 and (origin_now or "").strip().rstrip("/").removesuffix(".git").lower() \
+                == f"https://github.com/{full}".lower()
+            if not linked and bool(body.get("private")) != bool(private):
+                want, have = ("비공개", "공개") if private else ("공개", "비공개")
+                return {"status": "conflict", "message": f"{full} 저장소가 이미 있고 {have}입니다({want}로 만들려고 했음) — "
+                                                          "다른 이름을 쓰거나 GitHub 에서 공개 범위를 확인하세요.",
+                        "repo_url": body.get("html_url", f"https://github.com/{full}")}
+            if not linked and int(body.get("size") or 0) > 0:
+                return {"status": "conflict", "message": f"{full} 저장소가 이미 있고 내용이 있습니다 — 덮어쓰지 않았습니다. "
+                                                          "다른 이름을 쓰거나 그 저장소를 연결하는 경우 직접 push 하세요.",
+                        "repo_url": body.get("html_url", f"https://github.com/{full}")}
             html_url = body.get("html_url", f"https://github.com/{full}")
             default_branch = body.get("default_branch", "main")
-            logger.info(f"[github_agent] repo already exists: {full}")
+            logger.info(f"[github_agent] repo already exists (empty): {full}")
         else:
             # 3. 새로 생성 — 본인 계정인지 org 인지 분기
             user_login = (self._user_cache.get("login") or "").lower()
@@ -632,20 +647,20 @@ class GitHubAgent:
             if rc2 != 0:
                 return {"status": "error", "message": f"초기 커밋 실패: {(err2 or out2)[:300]}"}
 
-        # 6. 현재 브랜치를 default_branch 로 정렬
-        rc, cur, _ = self._git(ws, ["branch", "--show-current"])
-        cur = cur.strip()
-        if cur and cur != default_branch:
-            self._git(ws, ["branch", "-M", default_branch])
+        # 6. 로컬 브랜치 이름은 바꾸지 않는다(2.0.33 — `branch -M` 이 같은 이름의 로컬 main 을 덮어써 커밋을 잃었다).
+        #    지금 브랜치(HEAD)를 원격의 기본 브랜치로 올린다.
 
         # 7. remote 설정 — 토큰은 .git/config·명령줄에 두지 않는다(push 와 같은 프로세스 전용 헤더).
         #    예전에는 토큰을 remote URL 에 넣었다가 지웠는데, 도중에 Core 가 죽으면 그대로 남았다.
+        #    이미 다른 곳(GitLab·다른 저장소)을 가리키는 origin 은 바꾸지 않는다 — 덮어쓰면 사용자의 연결이 사라진다.
         clean_url = f"https://github.com/{full}.git"
-        rc, _, _ = self._git(ws, ["remote", "get-url", "origin"])
+        rc, existing_url, _ = self._git(ws, ["remote", "get-url", "origin"])
+        existing_url = (existing_url or "").strip()
         if rc != 0:
             self._git(ws, ["remote", "add", "origin", clean_url])
-        else:
-            self._git(ws, ["remote", "set-url", "origin", clean_url])
+        elif existing_url.rstrip("/").removesuffix(".git").lower() != clean_url.removesuffix(".git").lower():
+            return {"status": "conflict", "message": f"이 폴더의 origin 이 이미 다른 곳({existing_url})을 가리켜 바꾸지 않았습니다 — "
+                                                      "그 연결을 정리한 뒤 다시 시도하세요.", "repo_url": html_url}
 
         # 8. push
         import base64
@@ -653,7 +668,7 @@ class GitHubAgent:
         auth = base64.b64encode(f"x-access-token:{self._token}".encode()).decode()
         env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
                     "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {auth}", "GIT_TERMINAL_PROMPT": "0"})
-        rc, _, err = self._git(ws, ["push", "-u", "origin", default_branch], timeout=180, env=env)
+        rc, _, err = self._git(ws, ["push", "-u", "origin", f"HEAD:refs/heads/{default_branch}"], timeout=180, env=env)
         err = (err or "").replace(self._token, "[redacted]").replace(auth, "[redacted]")
 
         if rc != 0:

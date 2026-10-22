@@ -95,16 +95,16 @@ def test_배포가_막히던_원인을_모두_찾고_자동_수정으로_고친�
         assert br.apply_fix(root, todo[0].code)["applied"], todo[0].code
     left = [i.code for i in br.analyze(root).issues if i.severity == "error"]
     assert left == []
-    docker = (root / "Dockerfile").read_text()
+    docker = (root / "Dockerfile").read_text(encoding="utf-8")
     assert dk.is_recoder(docker) and 'CMD ["node", "backend/dist/server.js"]' in docker and "WORKDIR /app\n" in docker
-    assert "export default router;" in (root / "backend/src/routes/payment.ts").read_text()
-    assert "export { client as apiClient };" in (root / "frontend/src/api/client.ts").read_text()
-    orders = (root / "frontend/src/Orders.tsx").read_text()
+    assert "export default router;" in (root / "backend/src/routes/payment.ts").read_text(encoding="utf-8")
+    assert "export { client as apiClient };" in (root / "frontend/src/api/client.ts").read_text(encoding="utf-8")
+    orders = (root / "frontend/src/Orders.tsx").read_text(encoding="utf-8")
     assert "import { apiClient } from './api/client';" in orders and "import type { Order } from './types';" in orders
-    assert "'/orders'" in orders and "'/cart'" in (root / "frontend/src/Cart.tsx").read_text()
-    main = (root / "frontend/src/main.tsx").read_text()
+    assert "'/orders'" in orders and "'/cart'" in (root / "frontend/src/Cart.tsx").read_text(encoding="utf-8")
+    main = (root / "frontend/src/main.tsx").read_text(encoding="utf-8")
     assert "BrowserRouter" not in main and "AuthProvider" not in main and "<App />" in main
-    assert "@types/uuid" in json.loads((root / "backend/package.json").read_text())["devDependencies"]
+    assert "@types/uuid" in json.loads((root / "backend/package.json").read_text(encoding="utf-8"))["devDependencies"]
 
 
 def test_검증_Dockerfile_은_실행_단계가_깨지지_않고_보안_권고가_없다(tmp_path):
@@ -165,7 +165,7 @@ def test_보안_권고를_같은_동작으로_정리한다():
 
 def test_생성_직후_검증_Dockerfile_을_고정_파일로_넣는다(tmp_path):
     src = _shop(tmp_path / "src")
-    ops = [{"action": "create", "file": p.relative_to(src).as_posix(), "content": p.read_text()} for p in src.rglob("*") if p.is_file()]
+    ops = [{"action": "create", "file": p.relative_to(src).as_posix(), "content": p.read_text(encoding="utf-8")} for p in src.rglob("*") if p.is_file()]
     empty = tmp_path / "empty"; empty.mkdir()
     out, _notes = ca._autofix_ops(empty, "", ops)
     out, _ = ca._apply_docker_kit(empty, "", out)

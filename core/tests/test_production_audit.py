@@ -43,7 +43,7 @@ def _write(root: Path, files: dict[str, str]) -> Path:
 
 def _node_check(path: Path) -> None:
     if NODE:
-        r = subprocess.run([NODE, "--check", str(path)], capture_output=True, text=True)
+        r = subprocess.run([NODE, "--check", str(path)], capture_output=True, text=True, encoding="utf-8")
         assert r.returncode == 0, r.stderr
 
 
@@ -67,7 +67,7 @@ def test_빌드때_만든_Dockerfile_포트로_컨테이너_포트를_맞춘다(
     from schemas import ActionType, DeployMethod, DeploymentPlan
     plan = DeploymentPlan(method=DeployMethod.LOCAL_DOCKER, action=ActionType.DOCKER_RUN, image="a:latest",
                           container_name="a", ports={"8000": "8000"}, env={"PORT": "8000"})
-    (tmp_path / "Dockerfile").write_text("FROM python:3.11\nEXPOSE 5000\n")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.11\nEXPOSE 5000\n", encoding="utf-8")
     note = d._align_ports_with_dockerfile(plan, tmp_path / "Dockerfile")
     assert note and plan.ports == {"8000": "5000"} and plan.env["PORT"] == "5000"
     assert d._align_ports_with_dockerfile(plan, tmp_path / "Dockerfile") is None  # 이미 맞으면 그대로
@@ -161,12 +161,12 @@ def test_음성대조_로컬_404_는_기다리지_않는다(monkeypatch):
 
 def test_두_번_덮어써도_사용자가_고친_원본_백업은_남는다(tmp_path):
     target = tmp_path / "Dockerfile"
-    target.write_text("# 손으로 고침\nFROM a\n")
+    target.write_text("# 손으로 고침\nFROM a\n", encoding="utf-8")
     first = SimpleNamespace(content="FROM b\n", target_path="Dockerfile", workspace_path=str(tmp_path), file_type="dockerfile", risk_reasons=[])
     d._write_proposal_to_workspace(first, str(tmp_path), "p1", overwrite=True)
     second = SimpleNamespace(content="FROM c\n", target_path="Dockerfile", workspace_path=str(tmp_path), file_type="dockerfile", risk_reasons=[])
     d._write_proposal_to_workspace(second, str(tmp_path), "p2", overwrite=True)
-    backups = sorted(p.read_text() for p in tmp_path.glob("Dockerfile.recoder-prev*"))
+    backups = sorted(p.read_text(encoding="utf-8") for p in tmp_path.glob("Dockerfile.recoder-prev*"))
     assert "# 손으로 고침\nFROM a\n" in backups and "FROM b\n" in backups
 
 
@@ -192,7 +192,7 @@ def test_uploads_폴더로_빌드_결과를_돌리지_않는다(tmp_path):
         "client/vite.config.js": "export default { build: {} }\n",
         "client/index.html": "<div id=root></div>",
     })
-    plan = br.frontend_build_plan(br.ProjectFiles(tmp_path), json.loads((tmp_path / "package.json").read_text())["scripts"], ["server.js"])
+    plan = br.frontend_build_plan(br.ProjectFiles(tmp_path), json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))["scripts"], ["server.js"])
     assert not plan or "uploads" not in json.dumps(plan, ensure_ascii=False)
 
 
@@ -214,10 +214,10 @@ def test_같은_파일_이름의_CommonJS_두_개를_가져와도_이름이_겹�
         "models/user.js": "const o = {}; o.findUser = () => 2;\nmodule.exports = Object.assign({}, o);\n",
     })
     br.apply_fix(root, "NODE_MODULE_FORMAT_MISMATCH")
-    text = (root / "server.js").read_text()
+    text = (root / "server.js").read_text(encoding="utf-8")
     assert "__recoder_user_2" in text
     if NODE:
-        r = subprocess.run([NODE, "server.js"], cwd=root, capture_output=True, text=True, timeout=20)
+        r = subprocess.run([NODE, "server.js"], cwd=root, capture_output=True, text=True, timeout=20, encoding="utf-8")
         assert r.returncode == 0 and "function function" in r.stdout, r.stderr
 
 
@@ -314,8 +314,8 @@ def test_pg_를_쓰는_파일마다_숫자_파서를_넣는다(tmp_path):
     if not any(i.code == "NODE_PG_NUMERIC_STRINGS" for i in br.analyze(root).issues):
         pytest.skip("이 프로젝트에서는 NUMERIC 경고가 나오지 않는다")
     br.apply_fix(root, "NODE_PG_NUMERIC_STRINGS")
-    assert "setTypeParser" in (root / "server.js").read_text()
-    assert "setTypeParser" in (root / "scripts/seed.js").read_text()
+    assert "setTypeParser" in (root / "server.js").read_text(encoding="utf-8")
+    assert "setTypeParser" in (root / "scripts/seed.js").read_text(encoding="utf-8")
 
 
 def test_환경변수로_정한_baseURL_은_api_중복으로_보지_않는다(tmp_path):

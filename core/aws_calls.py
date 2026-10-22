@@ -127,6 +127,12 @@ OPERATION_TO_ACTION: dict[tuple[str, str], str] = {
     # `s3:DeleteObject`다. 메서드 이름을 기계적으로 CamelCase화하면 존재하지
     # 않는 s3:DeleteObjects 권한으로 잘못 판정한다.
     ("s3", "delete_objects"):  "s3:DeleteObject",
+    # 버킷 목록 API 는 ListBuckets 지만 IAM 액션은 ListAllMyBuckets 다.
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBuckets.html
+    ("s3", "list_buckets"):    "s3:ListAllMyBuckets",
+    # 태그를 함께 넣는 생성 API 는 따로 된 IAM 액션이 없다 — CreateDistribution(+ TagResource) 로 인가된다.
+    # https://docs.aws.amazon.com/service-authorization/latest/reference/list_cloudfront.html
+    ("cloudfront", "create_distribution_with_tags"): "cloudfront:CreateDistribution",
     # API 이름은 PutPublicAccessBlock 인데 **IAM 액션은 버킷이 붙는다.**
     # 규칙대로 PutPublicAccessBlock 을 주면 실제로는 인가되지 않는다.
     # https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutPublicAccessBlock.html
@@ -271,7 +277,15 @@ def iam_action(call: AwsCall) -> str | None:
     if not call.operation or call.operation.startswith("_"):
         return None
     prefix = SERVICE_TO_IAM_PREFIX.get(call.service, call.service)
-    return f"{prefix}:{_pascal(call.operation)}"
+    action = _pascal(call.operation)
+    if prefix == "wafv2":
+        # WAF 는 약어를 대문자로 쓴다: create_web_acl → wafv2:CreateWebACL (기계 변환은 CreateWebAcl).
+        # https://docs.aws.amazon.com/service-authorization/latest/reference/list_awswafv2.html
+        action = action.replace("Acl", "ACL")
+    elif prefix == "rds":
+        # RDS 도 DB 를 대문자로 쓴다: create_db_instance → rds:CreateDBInstance.
+        action = action.replace("Db", "DB")
+    return f"{prefix}:{action}"
 
 
 # ── 정적 분석 ────────────────────────────────────────────────────────
@@ -869,7 +883,11 @@ def _snake(pascal: str) -> str:
     """`UpdateService` → `update_service`. 런타임 기록을 정적 쪽과 같은 모양으로."""
     out = []
     for i, ch in enumerate(pascal):
-        if ch.isupper() and i > 0 and not pascal[i - 1].isupper():
+        # 약어 뒤 새 단어도 끊는다: GetWebACLForResource → get_web_acl_for_resource
+        # (복수형 s 는 약어에 붙인다: ListWebACLs → list_web_acls)
+        nxt = pascal[i + 1] if i + 1 < len(pascal) else ""
+        plural = nxt == "s" and (i + 2 == len(pascal) or pascal[i + 2].isupper())
+        if ch.isupper() and i > 0 and (not pascal[i - 1].isupper() or (nxt.islower() and not plural)):
             out.append("_")
         out.append(ch.lower())
     return "".join(out)

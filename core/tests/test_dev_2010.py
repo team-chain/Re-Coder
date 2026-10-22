@@ -364,7 +364,7 @@ def test_resource_finds_bundle_data_when_loaded_as_core_package(tmp_path, monkey
     import resources
     bundle = tmp_path / "_MEI1234"
     (bundle / "registry" / "file_templates").mkdir(parents=True)
-    (bundle / "registry" / "file_templates" / "x.template").write_text("{}")
+    (bundle / "registry" / "file_templates" / "x.template").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(resources, "_CORE_DIR", bundle / "core")  # 모듈이 core/ 아래에 있다고 보는 경우
     monkeypatch.setattr(_sys, "_MEIPASS", str(bundle), raising=False)
     assert resources.resource("registry", "file_templates", "x.template") == bundle / "registry" / "file_templates" / "x.template"
@@ -381,5 +381,5 @@ def test_typed_express_app_health_route_is_found(tmp_path):
     (tmp_path / "backend/src").mkdir(parents=True)
     (tmp_path / "backend/src/app.ts").write_text(
         "import express, { Express, Request, Response } from 'express';\nconst app: Express = express();\n"
-        "app.get('/health', (req: Request, res: Response) => { res.json({ status: 'ok' }); });\nexport default app;\n")
+        "app.get('/health', (req: Request, res: Response) => { res.json({ status: 'ok' }); });\nexport default app;\n", encoding="utf-8")
     assert _declared_health_path(tmp_path, "node", "/health") == "/health"

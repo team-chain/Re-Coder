@@ -33,7 +33,7 @@ def pipeline(monkeypatch):
     monkeypatch.setattr(module, "configure_health_check", lambda req: "")
     monkeypatch.setattr(agent, "_warn_if_resources_may_be_running", lambda *args: None)
     monkeypatch.setattr(agent, "_scan_gate_message", lambda result: None)
-    monkeypatch.setattr(module.aws_infra, "ensure_ecr_repository", lambda *args: "repo/test")
+    monkeypatch.setattr(module.aws_infra, "ensure_ecr_repository", lambda *args, **kwargs: "repo/test")
 
     async def passing(req, record, *args):
         record.preflight_passed = True

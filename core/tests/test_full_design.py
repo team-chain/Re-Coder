@@ -53,7 +53,7 @@ def test_주제를_못_받으면_예전처럼_한_번에_받는다(tmp_path, mon
 
 
 def test_기존_프로젝트_수정은_예전처럼(tmp_path, monkeypatch):
-    (tmp_path / "index.js").write_text("x")
+    (tmp_path / "index.js").write_text("x", encoding="utf-8")
     r = Router()
     monkeypatch.setattr(ca, "get_router", lambda: r)
     ca.generate_plan("로그인 붙여줘", project_root=str(tmp_path))

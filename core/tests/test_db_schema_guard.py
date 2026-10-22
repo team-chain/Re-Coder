@@ -40,7 +40,7 @@ def test_초기화_SQL에서_테이블과_열을_읽는다():
 
 def test_빈_DB와_맞는_DB는_통과_다른_앱의_DB는_멈춘다(tmp_path):
     sql = tmp_path / "schema.sql"
-    sql.write_text(SQL)
+    sql.write_text(SQL, encoding="utf-8")
     assert ls.schema_status("shop", sql, fake_psql([]))["ok"] is True
     good = ["users|id", "users|email", "users|price", "products|id", "products|name", "products|stock"]
     assert ls.schema_status("shop", sql, fake_psql(good))["ok"] is True
@@ -99,7 +99,7 @@ def test_조회_API_경로를_찾는다(tmp_path):
     (tmp_path / "backend/src").mkdir(parents=True)
     (tmp_path / "backend/src/server.js").write_text(
         "app.use('/api/auth', a);\napp.use('/api/products', p);\napp.use('/api/webhooks', w);\napp.get('/api/config', c);\n"
-        "app.use('/api/admin', x);\n")
+        "app.use('/api/admin', x);\n", encoding="utf-8")
     assert routes._api_probe_paths(str(tmp_path)) == ["/api/products", "/api/config"]
 
 
@@ -113,7 +113,7 @@ class _H(http.server.BaseHTTPRequestHandler):
 
 
 def test_조회_API가_500이면_로그에서_DB_구조_문제로_진단한다(tmp_path, monkeypatch):
-    (tmp_path / "server.js").write_text("app.use('/api/products', p);\n")
+    (tmp_path / "server.js").write_text("app.use('/api/products', p);\n", encoding="utf-8")
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     port = srv.server_address[1]
@@ -141,7 +141,7 @@ class _Limited(http.server.BaseHTTPRequestHandler):
 
 def test_방금_뜬_앱이_429면_요청_무한_반복으로_진단한다(tmp_path):
     """첫 화면 확인만으로 요청 한도가 찬 앱(실기기 TEMP: 6초에 2,258번) — 성공으로 넘기지 않는다."""
-    (tmp_path / "server.js").write_text("app.use('/api/products', p);\n")
+    (tmp_path / "server.js").write_text("app.use('/api/products', p);\n", encoding="utf-8")
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Limited)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     plan = type("P", (), {"ports": {str(srv.server_address[1]): "3000"}, "container_name": "shop"})()

@@ -32,6 +32,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from llm.base import LLMError, LLMErrorType, LLMRequest
+from llm.task_tier import bind as _bind, is_test_file as _is_test_file
 from code_output import CODE_OUTPUT_SCHEMA, CodeOutputError, parse_code_output
 import generation_jobs as jobs
 
@@ -101,9 +102,28 @@ EDIT_SCHEMA = {
 }
 
 
+GATE_BUDGET_S = float(os.environ.get("RECODER_GATE_BUDGET_S", "1.5"))
+
+
+def _board():
+    try:
+        import board  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import board  # type: ignore
+    return board
+
+
 def _ca():
     import code_agent as ca  # 지연 import — code_agent 가 이 모듈을 부른다
     return ca
+
+
+def _safe_rel_path(path):
+    try:
+        from code_output import safe_rel_path  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.code_output import safe_rel_path  # type: ignore
+    return safe_rel_path(path)
 
 
 def _norm(path: str) -> str:
@@ -485,7 +505,10 @@ class LargeGeneration:
                 concurrency = 3
         self.concurrency = max(1, min(8, concurrency))
         self.state: dict[str, Any] = {"fingerprint": fingerprint, "manifest": None, "files": [],
-                                      "ops": {}, "partial": {}, "attempts": {}, "failed": {}}
+                                      "ops": {}, "partial": {}, "attempts": {}, "failed": {}, "board": {}}
+        #: 의존 관문(2.0.24) — 검사가 너무 느리면(큰 프로젝트) 이번 작업에서는 끈다. 동시 진행 이점을 지키기 위해서다.
+        self._gate_slow = 0
+        self.gate_enabled = os.environ.get("RECODER_GATE", "1") != "0"
         self.last_resp = None
         self._lock = threading.Lock()
         self._started = time.monotonic()
@@ -562,7 +585,8 @@ class LargeGeneration:
             return False
         self.state = {"fingerprint": self.fp, "manifest": saved["manifest"], "files": saved["files"],
                       "ops": dict(saved.get("ops") or {}), "partial": dict(saved.get("partial") or {}),
-                      "attempts": dict(saved.get("attempts") or {}), "failed": dict(saved.get("failed") or {})}
+                      "attempts": dict(saved.get("attempts") or {}), "failed": dict(saved.get("failed") or {}),
+                      "board": dict(saved.get("board") or {})}
         repaired = self._check_saved()
         failed = list(self.state["failed"].values())
         if failed and not self.skip_failed:
@@ -674,7 +698,7 @@ class LargeGeneration:
             self._event("planning", message="약속 문서가 길어 나눠서 받는 중")
             resp = self.call(self.context_prompt + "\n\n이 요청이 무엇을 만드는지 한국어 한 줄로만 JSON {\"summary\": \"...\"} 으로 답하세요.",
                              {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]},
-                             "generate_code_manifest", 512, agent="planner")
+                             "summarize_request", 512, agent="planner")
             summary = str(ca._extract_json(resp.text).get("summary") or "").strip()
             contracts = self.write_in_parts(
                 header + "\n\n지금은 파일 목록 없이 contracts(파일 사이의 약속) 문서만 씁니다.",
@@ -975,9 +999,12 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         for item in items:
             if not isinstance(item, dict):
                 continue
-            path = str(item.get("file") or "").strip().replace("\\", "/")
+            path = _safe_rel_path(item.get("file"))
+            #: 2.0.33 — 한 번에 받기와 같은 경로 규칙(절대 경로·C:·밖으로 나감·.git·.vscode 거절)
+            if not path:
+                continue
             key = _norm(path)
-            if not path or key in seen or path.startswith("/") or ".." in path.split("/"):
+            if key in seen:
                 continue
             seen.add(key)
             out.append({"file": path, "purpose": str(item.get("purpose") or "").strip(),
@@ -1068,7 +1095,7 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
                 continue
             summaries.append(block)
             sused += len(block)
-        out = "".join(blocks)
+        out = "".join(blocks) + self._board_block(targets)
         if summaries:
             out += ("\n[이미 완성된 다른 파일이 실제로 내보내는 것 — 이 파일들을 쓸 때는 아래 이름·props·타입·인자를 그대로 쓰세요."
                     " 필수 props 를 빼거나 없는 필드를 꺼내지 마세요]\n" + "".join(summaries))
@@ -1170,13 +1197,16 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         응답이 잘리거나 형식이 틀리면 빈 목록 — 그 파일들은 하나씩·조각으로 다시 만든다(실패로 세지 않는다)."""
         ca = _ca()
         base = self.prompt + self._context(files_done, [f["file"] for f in batch])
+        self._note_board_read(base, [f["file"] for f in batch], agent)
         wanted = "\n".join(f"- {f['file']}" for f in batch)
         p = base + "".join(_file_hint(f["file"]) for f in batch if _file_hint(f["file"])) \
             + f"\n\n이번 응답의 ops 에는 **아래 파일만** 전체 내용으로 작성하세요(다른 파일은 넣지 마세요):\n{wanted}"
         for f in batch:
             self._event("file_start", agent=agent, file=f["file"], message=f"{f['file']} 작성 중")
         try:
-            resp = self.call(p, CODE_OUTPUT_SCHEMA, "generate_code_part", ca._CODE_AGENT_MAX_TOKENS, agent=agent)
+            #: 2.0.36 — 테스트 파일만 묶은 요청은 절약 등급(테스트 초안)으로 보낸다.
+            operation = "generate_test_draft" if all(_is_test_file(f["file"]) for f in batch) else "generate_code_part"
+            resp = self.call(p, CODE_OUTPUT_SCHEMA, operation, ca._CODE_AGENT_MAX_TOKENS, agent=agent)
             _data, ops = parse_code_output(resp.text)
         except (LLMError, CodeOutputError) as exc:
             if not (_is_truncation(exc) or isinstance(exc, CodeOutputError)
@@ -1208,8 +1238,10 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
                              f"{path} 을(를) 글자 그대로 이어 받습니다" + (" (맥락을 줄여서)" if lean else "")))
         #: lean — 이미 만든 파일 본문을 빼고 약속·목록만 보낸다(입력이 커서 생기는 실패를 피한다).
         context = self._context([] if lean else files_done, None if lean else [path])
+        self._note_board_read(context, [path], agent)
         base = self.context_prompt + context + f"\n\n지금은 {path} 파일 하나만 작성합니다." + _file_hint(path)
-        content = self.write_in_parts(base, f"{path} 파일", agent=agent, path=path)
+        content = self.write_in_parts(base, f"{path} 파일", agent=agent, path=path,
+                                      operation="generate_test_draft" if _is_test_file(path) else "generate_code_file_part")
         return {"action": "create", "file": path, "content": content, "language": "",
                 "rationale": "응답 길이 한도 때문에 이어 받아 작성"}
 
@@ -1258,14 +1290,186 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
                 self._note_failure(target, exc, agent)
 
     def _finish(self, op: dict, files_done: list[dict], agent: str) -> None:
-        """검사·교정 뒤 **바로** 저장한다 — 같이 맡은 다른 파일이 실패해도 이 파일은 남는다."""
+        """검사·교정 뒤 **바로** 저장한다 — 같이 맡은 다른 파일이 실패해도 이 파일은 남는다.
+
+        저장 전에 의존 관문(이 파일과, 이 파일을 불러오는 완성 파일 사이의 이름·타입·Context 어긋남)을 돌린다.
+        이 함수가 끝나기 전에는 이 파일을 기다리는 다음 파일이 시작하지 않으므로, 관문에서 고친 내용을 보고 쓴다.
+        """
         op = self._verify_and_fix(op, files_done, agent)
+        op = self._gate(op, files_done, agent)
         with self._lock:
             self.state["ops"][_norm(op["file"])] = op
             self.state["failed"].pop(_norm(op["file"]), None)
+        self._post_board(op, agent)
         self._save()
         self._event("file_done", agent=agent, file=op["file"], lines=op["content"].count("\n") + 1,
                     message=f"{op['file']} 완료")
+
+    # ── 2.0.24 마을 공용 게시판 ──
+    def _server_sides(self) -> set[str]:
+        files = self.state.get("files") or []
+        sides = _sides_of(files)
+        out = {_side(f["file"], sides) for f in files if _board().is_server_route_path(f["file"])}
+        out |= {s for s in sides if s in _SERVER_DIRS}
+        return out
+
+    def _post_board(self, op: dict, agent: str) -> None:
+        """서버 라우트 파일이 완성되면 실제 경로·응답 키·인증 여부를 게시판에 붙인다(AI 호출 없음)."""
+        bd = _board()
+        path, content = op["file"], op.get("content") or ""
+        sides = _sides_of(self.state.get("files") or [])
+        side = _side(path, sides)
+        if not bd.is_route_file(path, content) or (sides and side not in self._server_sides()):
+            return
+        with self._lock:
+            done = {o["file"]: o.get("content") or "" for o in self.state["ops"].values() if o.get("content")}
+        try:
+            entries = bd.board_entries(path, content, done, side,
+                                       str((self.state.get("manifest") or {}).get("contracts") or ""))
+        except Exception as exc:  # noqa: BLE001 - 게시판은 보조 정보다
+            self._log(path, "board", f"게시판 추출 생략: {exc}")
+            return
+        if not entries:
+            return
+        with self._lock:
+            self.state.setdefault("board", {})[_norm(path)] = entries
+        self._event("board_post", agent=agent, file=path,
+                    items=[{k: e[k] for k in ("method", "path", "shape", "auth")} for e in entries[:12]],
+                    message=f"게시판에 API {len(entries)}개 공유 — {path}")
+
+    def _note_board_read(self, context: str, targets: list[str], agent: str) -> None:
+        if "[게시판 —" in context:
+            for t in targets:
+                self._event("board_read", agent=agent, file=t, message=f"{t} — 게시판 확인 후 시작")
+
+    def _board_block(self, targets: list[str]) -> str:
+        board = self.state.get("board") or {}
+        if not board or not targets:
+            return ""
+        sides = _sides_of(self.state.get("files") or [])
+        servers = self._server_sides()
+        if sides and all(_side(t, sides) in servers for t in targets):
+            return ""  # 서버 파일끼리는 이미 서로의 코드를 본다
+        return _board().format_board(board, targets)
+
+    # ── 2.0.24 의존 관문 ──
+    _GATE_CODES = ("NODE_IMPORT_NAME_MISSING", "NODE_IMPORT_NAME_UNDEFINED", "NODE_TYPE_NAME_MISSING",
+                   "NODE_CONTEXT_VALUE_MISSING", "NODE_CONTEXT_MEMBER_MISSING", "NODE_VITE_PROCESS_ENV")
+    _GATE_WRITES = ("NODE_TYPE_NAME_MISSING", "NODE_CONTEXT_VALUE_MISSING")
+
+    def _gate(self, op: dict, files_done: list[dict], agent: str) -> dict:
+        """파일이 완성되는 순간 그 파일과 맞물린 완성 파일 사이의 어긋남만 빠르게 본다.
+
+        · 기계적으로 고칠 수 있으면(export 붙이기·타입 선언·Context value) 바로 고친다 — 다른 완성 파일도.
+        · 이 파일 때문에 생긴 어긋남이 남으면 작성한 리코더에게 그 문제만 담아 **한 번** 돌려보낸다. 실패해도 막지 않는다.
+        """
+        if not self.gate_enabled or self._gate_slow >= 2 or not op.get("content") \
+                or not op["file"].endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")):
+            return op
+        import tempfile
+        try:
+            from build_readiness import add_missing_export, analyze
+        except ImportError:  # pragma: no cover
+            from core.build_readiness import add_missing_export, analyze  # type: ignore
+        key = _norm(op["file"])
+        with self._lock:
+            done = {_norm(o["file"]): dict(o) for o in self.state["ops"].values() if o.get("content") is not None}
+        done[key] = dict(op)
+        original = {k: o.get("content") for k, o in done.items()}
+        overlay = {o["file"]: o.get("content") or "" for o in done.values()}
+        started = time.monotonic()
+        try:
+            base = self.root if self.root and os.path.isdir(self.root) else None
+            if base is None:
+                with tempfile.TemporaryDirectory(prefix="recoder-gate-") as empty:
+                    readiness = analyze(empty, overlay, dockerfile=None)
+            else:
+                readiness = analyze(base, overlay, dockerfile=None)
+        except Exception as exc:  # noqa: BLE001 - 관문이 생성을 막지 않는다
+            self._log(op["file"], "gate", f"관문 검사 생략: {exc}")
+            return op
+        took = time.monotonic() - started
+        if took > GATE_BUDGET_S:
+            self._gate_slow += 1
+            self._log(op["file"], "gate", f"관문 검사 {took:.2f}s — 느려서 " + ("이번 작업에서는 끕니다" if self._gate_slow >= 2 else "한 번 더 지켜봅니다"))
+        involved = {key} | {_norm(i) for i in self._importers_of(op["file"], overlay)}
+        involved |= {_norm(tg) for r, _n, tg in (readiness.fix_data.get("missing_names_detail") or []) if _norm(r) == key}
+        detail = readiness.fix_data.get("missing_names_detail") or []
+        fixed: list[str] = []
+        # ① export 를 붙이면 되는 것(선언은 있는데 내보내지 않음)
+        pairs = {(_norm(tg), n) for r, n, tg in detail if _norm(r) == key or _norm(tg) == key}
+        for target, name, kind in readiness.fix_data.get("missing_exports") or []:
+            t = _norm(target)
+            plain = name.split(":", 1)[0] if name.startswith("default:") else name
+            if t not in done or not ((t, plain) in pairs or (t, name) in pairs or t == key):
+                continue
+            new = add_missing_export(done[t].get("content") or "", name, kind)
+            if new and new != done[t].get("content"):
+                done[t]["content"] = new
+                fixed.append(f"{done[t]['file']}: `{name.split(':')[-1]}` 내보내기")
+        # ② 점검이 미리 만든 고침(타입 선언·Context value)
+        writes = readiness.fix_data.get("file_writes") or {}
+        for code in self._GATE_WRITES:
+            for rel, content in (writes.get(code) or {}).items():
+                t = _norm(rel)
+                if t in done and (t in involved or t == key) and content != done[t].get("content"):
+                    done[t]["content"] = content
+                    fixed.append(f"{done[t]['file']}: {code}")
+        # ③ 남은 문제 중 이 파일 몫
+        own: list[str] = []
+        exported_now = {(_norm(t), n) for t, n, _k in readiness.fix_data.get("missing_exports") or []}
+        for rel, name, target in detail:
+            if (_norm(target), name) in exported_now:
+                continue
+            if _norm(rel) == key and _norm(target) in done:
+                own.append(f"`{name}` 을(를) {target} 에서 불러오지만 그 파일에 없습니다 — 그 파일이 실제로 내보내는 이름을 쓰세요")
+            elif _norm(target) == key and _norm(rel) in done:
+                own.append(f"{rel} 가 이 파일에서 `{name}` 을(를) 불러옵니다 — 그 이름을 선언해 내보내세요")
+        for issue in readiness.issues:
+            if issue.code in ("NODE_CONTEXT_MEMBER_MISSING", "NODE_VITE_PROCESS_ENV") and _norm(issue.file or "") == key:
+                own.append(issue.message)
+        returned = False
+        if own:
+            returned = True
+            self._event("gate_check", agent="review", file=op["file"], ok=False, fixed=fixed[:6], returned=True,
+                        by=agent, message=f"관문 — {op['file']} 어긋남 {len(own)}건, 작성자에게 한 번 돌려보냄")
+            try:
+                done[key]["content"] = self._fix(done[key], own[:6], files_done, agent)
+            except Paused:
+                raise
+            except (LLMError, CodeOutputError, ValueError) as exc:
+                if isinstance(exc, LLMError) and not (_is_truncation(exc) or exc.error_type == LLMErrorType.STRUCTURED_OUTPUT):
+                    raise
+                self._log(op["file"], "gate", "관문 교정 실패 — 막지 않고 마지막 전체 점검에 맡김")
+        # 다른 완성 파일에 고친 내용 반영(이 파일 것은 돌려준다). 여러 관문이 동시에 돌므로 **이 관문이 바꾼 파일만**,
+        # 그리고 그 사이 다른 관문이 먼저 바꾸지 않았을 때만 쓴다 — 아니면 옛 내용으로 덮어 다른 관문의 고침을 되돌린다.
+        with self._lock:
+            for t, o in done.items():
+                if t == key or o.get("content") == original.get(t) or t not in self.state["ops"]:
+                    continue
+                if self.state["ops"][t].get("content") == original.get(t):
+                    self.state["ops"][t] = dict(self.state["ops"][t], content=o["content"])
+                else:
+                    self._log(o.get("file", t), "gate", "다른 관문이 먼저 고쳐 이번 고침은 건너뜀 — 마지막 전체 점검이 다시 본다")
+        result = dict(op, content=done[key]["content"])
+        if not returned:
+            self._event("gate_check", agent="review", file=op["file"], ok=True, fixed=fixed[:6], returned=False, by=agent,
+                        message=(f"관문 통과 — 자동 수정 {len(fixed)}건" if fixed else f"관문 통과 — {op['file']}"))
+        return result
+
+    def _importers_of(self, path: str, files: dict[str, str]) -> list[str]:
+        """완성된 파일 중 path 를 상대 경로로 불러오는 파일."""
+        stem = re.sub(r"\.(js|jsx|ts|tsx|mjs|cjs)$", "", path)
+        out = []
+        for rel, text in files.items():
+            if rel == path or not rel.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")):
+                continue
+            for spec in re.findall(r"""(?:from\s+|require\(\s*|import\(\s*)['"](\.{1,2}/[^'"]+)['"]""", text or ""):
+                base = posixpath.normpath(posixpath.join(posixpath.dirname(rel), spec))
+                if re.sub(r"\.(js|jsx|ts|tsx|mjs|cjs)$", "", base) in (stem, stem.rsplit("/index", 1)[0] if stem.endswith("/index") else stem):
+                    out.append(rel)
+                    break
+        return out
 
     # ── 4. 만들 때마다 확인 ──
     def _verify_and_fix(self, op: dict, files_done: list[dict], agent: str) -> dict:
@@ -1401,6 +1605,18 @@ replace 는 바꿀 내용입니다.
                     continue
                 deps[d] = False
             out[k] = list(deps.items())
+        #: 2.0.24 — 화면 쪽 API 호출 파일만 같은 자원의 서버 라우트 파일을 (약하게) 기다린다 — 게시판의 실제 응답 모양을 보고 쓰게.
+        #: 화면 컴포넌트까지 기다리게 하지 않는다(동시 진행 유지). 서버 라우트 쪽에서 화면을 기다리는 일은 없다.
+        bd = _board()
+        servers = {_side(f["file"], sides) for f in files if bd.is_server_route_path(f["file"])} | {s for s in sides if s in _SERVER_DIRS}
+        if sides and servers and servers != set(sides):
+            routes = [f["file"] for f in files if _side(f["file"], sides) in servers and bd.is_server_route_path(f["file"])]
+            for f in files:
+                if bd.is_api_layer(f["file"], servers, sides):
+                    k = _norm(f["file"])
+                    have = {d for d, _e in out.get(k, [])}
+                    out[k] = out.get(k, []) + [(_norm(r), False) for r in bd.api_waits_for(f["file"], routes)
+                                               if _norm(r) not in have and _norm(r) != k]
         return out
 
     def _schedule(self) -> None:
@@ -1454,7 +1670,7 @@ replace 는 바꿀 내용입니다.
                     slot = free.pop(0)
                     for f in batch:
                         running.add(_norm(f["file"]))
-                    futures[pool.submit(task, batch, slot)] = (batch, slot)
+                    futures[pool.submit(_bind(task), batch, slot)] = (batch, slot)
                 if not futures:
                     continue
                 done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
@@ -2015,6 +2231,11 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
         if idx is None or ops[idx].get("fixed"):
             continue  # ReCoder 가 넣은 고정 파일(결제 모듈)은 AI 가 고치지 않는다
         grouped.setdefault(idx, []).append(f"{issue.get('message', '')} (해결: {issue.get('fix', '')})")
+        if issue.get("code") == "NODE_PACKAGE_UNTRUSTED" and emit:
+            #: 마을: 보안 검사가 설치 전에 막은 사실을 그 파일 카드에 보인다(실제 판정 결과로만).
+            names = re.findall(r"`([^`]+)` —", issue.get("message", ""))
+            emit({"step": "security_block", "agent": "review", "file": ops[idx]["file"],
+                  "message": "수상한 패키지 차단" + (f" — {', '.join(names[:3])}" if names else "")})
     if not grouped:
         return None
     grouped = _definition_first(ops, grouped)
@@ -2059,7 +2280,7 @@ def edit_fix_round(prompt: str, ops: list[dict], issues: list[dict], *, max_file
     #: 생성과 같은 수의 에이전트가 동시에 고친다(설정한 팀 인원 — 예전엔 3명 고정이라 고칠 파일이 많으면 오래 걸렸다)
     workers = workers or engine.concurrency
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(targets))), thread_name_prefix="fix") as pool:
-        answers = list(pool.map(ask, targets))
+        answers = list(pool.map(_bind(ask), targets))
     out = [dict(op) for op in ops]
     changed = False
     for idx, edits in answers:

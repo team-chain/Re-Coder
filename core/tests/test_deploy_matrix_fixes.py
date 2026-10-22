@@ -119,7 +119,7 @@ def test_wrapped_port_and_typescript_entry(tmp_path):
         "src/index.ts": "import express from 'express';\nconst app = express();\nconst port = Number(process.env.PORT) || 8080;\napp.listen(port);\n",
     })
     from infra_agent import _detect_node_entry_and_port
-    assert _detect_node_entry_and_port(root, json.loads((root / "package.json").read_text())) == ("dist/index.js", 8080)
+    assert _detect_node_entry_and_port(root, json.loads((root / "package.json").read_text(encoding="utf-8"))) == ("dist/index.js", 8080)
     assert br.analyze(root).app_port == 8080
 
 
@@ -198,7 +198,7 @@ def test_rendered_templates_do_not_turn_the_security_gate_red(tmp_path):
         text = _re.sub(r"{{\s*(\w+)\s*}}", lambda m: values[m.group(1)], path.read_text(encoding="utf-8"))
         target = tmp_path / path.name
         target.write_text(text, encoding="utf-8")
-        out = subprocess.run(["hadolint", "--format", "json", "--no-fail", str(target)], capture_output=True, text=True)
+        out = subprocess.run(["hadolint", "--format", "json", "--no-fail", str(target)], capture_output=True, text=True, encoding="utf-8")
         issues = json.loads(out.stdout or "[]")
         red = [(i["code"], i["line"]) for i in issues
                if i["level"] == "error" or (i["level"] == "warning" and i["code"] not in _HADOLINT_ADVISORY)]

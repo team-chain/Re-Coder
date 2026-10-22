@@ -1,6 +1,14 @@
 import * as path from 'path';
 import { Worker } from 'worker_threads';
 import type { ProjectResult, FileResult } from './analyzer';
+import type { FlowGraph, FlowPreview } from './flow';
+
+export interface AnalysisOptions {
+    /** project(기본) · file · flow(dry run 그래프) · preview(적용 전 흐름 미리 보기) */
+    mode?: 'project' | 'file' | 'flow' | 'preview';
+    /** preview: 상대 경로 → 바뀔 내용(null 이면 지움) */
+    overrides?: Array<[string, string | null]>;
+}
 
 // File reads and parsing must never block chat, approvals or the VS Code host.
 export class AnalysisJob {
@@ -9,12 +17,12 @@ export class AnalysisJob {
 
     cancel(): void { this.cancelCurrent?.(); }
 
-    run(workspace: string, file = ''): Promise<ProjectResult | FileResult> {
+    run(workspace: string, file = '', options: AnalysisOptions = {}): Promise<ProjectResult | FileResult | FlowGraph | FlowPreview> {
         this.cancel();
         return new Promise((resolve, reject) => {
-            const worker = new Worker(path.join(__dirname, 'analysisWorker.js'), { workerData: { workspace, file } });
+            const worker = new Worker(path.join(__dirname, 'analysisWorker.js'), { workerData: { workspace, file, mode: options.mode, overrides: options.overrides } });
             let settled = false;
-            const finish = (error?: Error, graph?: ProjectResult | FileResult) => {
+            const finish = (error?: Error, graph?: ProjectResult | FileResult | FlowGraph | FlowPreview) => {
                 if (settled) return;
                 settled = true;
                 clearTimeout(timer);

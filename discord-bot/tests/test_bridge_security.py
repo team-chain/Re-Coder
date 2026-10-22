@@ -61,11 +61,21 @@ def test_registration_auth_denies_external_when_keyless(monkeypatch):
     monkeypatch.setattr(api_server, "REGISTRATION_KEY", "")
 
     class _Req:
-        def __init__(self, remote, headers=None):
+        def __init__(self, remote, headers=None, host="127.0.0.1:8765", method="GET", content_type="", length=0):
             self.remote = remote
             self.headers = headers or {}
+            self.host = host
+            self.method = method
+            self.content_type = content_type
+            self.content_length = length
     assert api_server._check_auth(_Req("127.0.0.1")) is True
     assert api_server._check_auth(_Req("203.0.113.7")) is False
+    # 2.0.33 브라우저(웹페이지)가 보낸 요청 — CSRF·DNS 리바인딩
+    assert api_server._check_auth(_Req("127.0.0.1", {"Origin": "https://evil.example"})) is False
+    assert api_server._check_auth(_Req("127.0.0.1", host="rebind.evil.example:8765")) is False
+    assert api_server._check_auth(_Req("127.0.0.1", method="POST", content_type="text/plain", length=20)) is False
+    assert api_server._check_auth(_Req("127.0.0.1", method="POST", content_type="application/json", length=20)) is True
+    assert api_server._check_auth(_Req("::1", host="[::1]:8765")) is True
 
 
 def test_link_rejects_forged_token_against_gateway(monkeypatch):

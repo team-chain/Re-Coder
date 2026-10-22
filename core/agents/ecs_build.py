@@ -191,7 +191,16 @@ def build_image(
     `exec format error` 로 죽는다. 이 오류는 로그에서 원인을 알아보기
     매우 어려워서, 애초에 플랫폼을 고정한다.
     """
-    ensure_dockerfile(workspace_path, dockerfile)
+    path = ensure_dockerfile(workspace_path, dockerfile)
+    #: 2.0.29 — 빌드하기 전에 위험한 RUN(내려받아 바로 실행·호스트 접근·비밀값 유출)을 막는다. RUN 은 이 PC 의 Docker 에서 돈다.
+    try:
+        from core import dockerfile_guard
+    except ImportError:  # pragma: no cover
+        import dockerfile_guard  # type: ignore
+    unsafe = dockerfile_guard.check(path.read_text(encoding="utf-8", errors="replace"))
+    if unsafe:
+        raise BuildError(f"Dockerfile 안전 검사에서 막았습니다: {dockerfile_guard.message(unsafe)}",
+                         remedy=dockerfile_guard.REMEDY)
     logger.info("docker build 시작: %s (platform=%s)", local_tag, platform)
     rc, out, err = runner(
         [

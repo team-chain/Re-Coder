@@ -56,7 +56,7 @@ export interface FileResult { kind: 'file'; path: string; name: string; function
 
 interface DefMeta { name: string; cls: string | null; }
 
-function iterFiles(root: string, exts: string[], out: string[]): void {
+export function iterFiles(root: string, exts: string[], out: string[]): void {
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
@@ -72,7 +72,7 @@ function iterFiles(root: string, exts: string[], out: string[]): void {
     }
 }
 
-function readText(p: string): string | null {
+export function readText(p: string): string | null {
     try {
         const st = fs.statSync(p);
         if (st.size > MAX_FILE_BYTES) { return null; }
@@ -80,9 +80,9 @@ function readText(p: string): string | null {
     } catch { return null; }
 }
 
-function toPosix(p: string): string { return p.split(path.sep).join('/'); }
+export function toPosix(p: string): string { return p.split(path.sep).join('/'); }
 
-function moduleName(relPosix: string): string {
+export function moduleName(relPosix: string): string {
     let parts = relPosix.replace(/\.py$/i, '').split('/');
     if (parts.length && parts[parts.length - 1] === '__init__') { parts = parts.slice(0, -1); }
     return parts.join('.');
@@ -115,7 +115,7 @@ function layerOf(filename: string): string {
  * keepStrings=true — 문자열을 지우면 `from "./x"` 가 `from "    "` 가 돼 모든 JS/TS
  * import 가 사라지고, 파일 전부가 "아무도 import 안 함(고립)" 으로 나온다(실기기 재현).
  */
-function stripJs(src: string, keepStrings = false): string {
+export function stripJs(src: string, keepStrings = false): string {
     const out: string[] = []; let i = 0; const n = src.length;
     while (i < n) {
         const two = src.substr(i, 2); const c = src[i];
@@ -133,7 +133,7 @@ function stripJs(src: string, keepStrings = false): string {
     return out.join('');
 }
 
-function stripPy(src: string): string {
+export function stripPy(src: string, keepStrings = false): string {
     const out: string[] = []; let i = 0; const n = src.length;
     while (i < n) {
         const c = src[i];
@@ -142,11 +142,13 @@ function stripPy(src: string): string {
             const triple = src.substr(i, 3);
             if (triple === "'''" || triple === '"""') {
                 let j = src.indexOf(triple, i + 3); j = j < 0 ? n : j + 3;
-                for (let k = i; k < j; k++) { out.push(src[k] === '\n' ? '\n' : ' '); } i = j; continue;
+                if (keepStrings) { out.push(src.slice(i, j)); } else { for (let k = i; k < j; k++) { out.push(src[k] === '\n' ? '\n' : ' '); } }
+                i = j; continue;
             }
             const q = c; let j = i + 1;
             while (j < n) { if (src[j] === '\\') { j += 2; continue; } if (src[j] === q) { j++; break; } if (src[j] === '\n') { break; } j++; }
-            for (let k = i; k < j; k++) { out.push(src[k] === '\n' ? '\n' : ' '); } i = j; continue;
+            if (keepStrings) { out.push(src.slice(i, j)); } else { for (let k = i; k < j; k++) { out.push(src[k] === '\n' ? '\n' : ' '); } }
+            i = j; continue;
         }
         out.push(c); i++;
     }
@@ -162,20 +164,23 @@ function collectImportsPy(src: string, selfMod: string): Set<string> {
         let m = line.match(/^import\s+(.+)$/);
         if (m) {
             for (const part of m[1].split(',')) {
-                const name = part.trim().split(/\s+as\s+/)[0].trim();
+                const name = part.trim().replace(/\s+/g, ' ').split(' as ')[0].trim();
                 if (name) { out.add(name); out.add(name.split('.')[0]); }
             }
             continue;
         }
-        m = line.match(/^from\s+(\.*)([\w.]*)\s+import\s+(.+)$/);
+        //: 점·모듈 이름이 비어 있을 수 없게 해 \s+ 두 개가 붙지 않는다(긴 공백 줄에서 제곱 시간이던 것, 2.0.34)
+        m = line.match(/^from\s+(\.+[\w.]*|[\w.]+)\s+import\s+(.+)$/);
         if (m) {
-            const dots = m[1].length; const mod = m[2] || '';
+            const lead = (m[1].match(/^\.*/) as RegExpMatchArray)[0];
+            const dots = lead.length; const mod = m[1].slice(dots) || '';
+            m = [m[0], lead, mod, m[2]] as unknown as RegExpMatchArray;
             let baseParts: string[] = [];
             if (dots > 0) { baseParts = pkgParts.slice(0, pkgParts.length - (dots - 1)).filter(Boolean); }
             const base = [...baseParts, ...(mod ? [mod] : [])].join('.');
             if (base) { out.add(base); }
             for (const nm of m[3].split(',')) {
-                const name = nm.trim().split(/\s+as\s+/)[0].trim().replace(/[()]/g, '');
+                const name = nm.trim().replace(/\s+/g, ' ').split(' as ')[0].trim().replace(/[()]/g, '');
                 if (!name || name === '*') { continue; }
                 if (base) { out.add(`${base}.${name}`); } else { out.add(name); }
             }

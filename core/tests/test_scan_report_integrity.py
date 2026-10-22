@@ -42,7 +42,7 @@ def test_valid_empty_reports_still_pass(monkeypatch):
 
 def test_hadolint_docker_error_is_not_a_clean_scan(tmp_path,monkeypatch):
     dockerfile=tmp_path/'Dockerfile'
-    dockerfile.write_text('FROM nginx:alpine\n')
+    dockerfile.write_text('FROM nginx:alpine\n', encoding="utf-8")
     agent=object.__new__(InfraAgent)
     async def communicate(**kwargs):return b'',b'Docker daemon unavailable'
     async def start(*args,**kwargs):return SimpleNamespace(returncode=125,communicate=communicate)

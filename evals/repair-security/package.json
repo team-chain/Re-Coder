@@ -1,0 +1,9 @@
+{
+  "name": "recoder-repair-security-evals",
+  "private": true,
+  "version": "1.0.0",
+  "engines": {"node": ">=22.22.0"},
+  "scripts": {"test": "node run.cjs", "setup:native": "node install-native.cjs"},
+  "devDependencies": {"promptfoo": "0.124.1"},
+  "overrides": {"basic-ftp": "6.2.3"}
+}

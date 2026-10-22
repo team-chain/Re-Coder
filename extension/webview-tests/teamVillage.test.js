@@ -161,3 +161,63 @@ test('ReCoder 가 넣은 결제 모듈(고정 파일)은 설계 직후 완료로
  assert.match(v.records.at(-1).text,/ReCoder 결제 모듈/);
  assert.equal(recordOf({step:'file_done',agent:'agent-1',file:'src/a.js',lines:3,message:'src/a.js 완료'},[]).text,'src/a.js 완료 (3줄)');
 });
+
+test('2.0.23 보안 검사가 막은 수상한 패키지는 실제 이벤트로만 기록·표시된다',()=>{
+ let v=run([{step:'planning'},{step:'planned',total:7,files:FILES},{step:'consistency',message:'전체 점검'}]);
+ assert.equal(v.securityBlocks,0);
+ const quiet=renderToStaticMarkup(React.createElement(TeamVillage,{view:v,roster:buildRoster(2,Math.random),width:760}));
+ assert.ok(!quiet.includes('security-blocks'));
+ v=reduceTeam(v,{step:'security_block',agent:'review',file:'package.json',message:'수상한 패키지 차단 — tiny-pay-sdk-kr'});
+ assert.equal(v.securityBlocks,1);
+ assert.ok(v.records.some(r=>r.who==='검토'&&r.text==='수상한 패키지 차단 — tiny-pay-sdk-kr'&&r.tone==='warn'));
+ const html=renderToStaticMarkup(React.createElement(TeamVillage,{view:v,roster:buildRoster(2,Math.random),width:760}));
+ assert.ok(html.includes('수상한 패키지 차단 1'));
+});
+
+test('2.0.24 공용 게시판: 서버 라우트 메모가 붙고, 화면 API 리코더는 게시판을 보고 시작한다',()=>{
+ const roster=buildRoster(2);
+ let v=run([{step:'planned',total:7,files:FILES},{step:'wave',layer:-1,agents:2},
+  {step:'file_start',agent:'agent-1',file:'src/routes/a.js'},
+  {step:'board_post',agent:'agent-1',file:'src/routes/a.js',items:[{method:'GET',path:'/api/a',shape:'{ items, total }',auth:false},{method:'POST',path:'/api/a',shape:null,auth:true}],message:'게시판에 API 2개 공유'},
+  {step:'file_done',agent:'agent-1',file:'src/routes/a.js',done_count:1},
+  {step:'board_read',agent:'agent-2',file:'public/app.js'},{step:'file_start',agent:'agent-2',file:'public/app.js'}]);
+ assert.equal(v.board.length,2);assert.equal(v.lastPost.agent,'agent-1');assert.equal(v.boardReaders['agent-2'],'public/app.js');
+ const t=v.records.map(r=>`${r.who}|${r.text}`);
+ assert.ok(t.includes('개발 1|게시판에 API 2개 공유 — a.js'));assert.ok(t.includes('개발 2|게시판 확인 후 시작 — app.js'));
+ const html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
+ assert.match(html,/공용 게시판 · API 2/);assert.match(html,/>GET \/api\/a</);assert.match(html,/class="unk"[^>]*>POST \/api\/a</);
+ assert.match(html,/게시판에 API 2개 공유/);assert.match(html,/게시판 확인 후 시작/);
+ // 같은 경로를 다시 붙이면 새 것으로 바뀐다(중복 메모 없음)
+ v=reduceTeam(v,{step:'board_post',agent:'agent-1',file:'src/routes/a.js',items:[{method:'GET',path:'/api/a',shape:'{ items }'}]});
+ assert.equal(v.board.filter(b=>b.path==='/api/a'&&b.method==='GET').length,1);assert.equal(v.board.find(b=>b.method==='GET').shape,'{ items }');
+ const empty=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:run([{step:'planned',total:7,files:FILES}]),width:900}));
+ assert.match(empty,/서버 API 가 완성되면 붙습니다/);
+});
+
+test('2.0.24 의존 관문: 검토 리코더가 작업대로 가서 도장을 찍고, 되돌린 카드는 작성자가 고친다',()=>{
+ const roster=buildRoster(2);
+ let v=run([{step:'planned',total:7,files:FILES},{step:'wave',layer:-1,agents:2},
+  {step:'file_start',agent:'agent-2',file:'src/routes/b.js'},
+  {step:'gate_check',agent:'review',by:'agent-2',file:'src/routes/b.js',ok:true,fixed:['a: x 내보내기','b: TYPE'],returned:false,message:'관문 통과 — 자동 수정 2건'}]);
+ assert.deepEqual(v.gates,{passed:1,fixed:2,returned:0});
+ let html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
+ assert.match(html,/자동 수정 2건 · 통과/);assert.match(html,/class="ag review stamp"/);assert.match(html,/관문 통과 1 · 자동 수정 2/);
+ v=reduceTeam(v,{step:'gate_check',agent:'review',by:'agent-2',file:'src/routes/b.js',ok:false,fixed:[],returned:true,message:'관문 — 되돌림'});
+ assert.equal(v.agents['agent-2'].state,'fixing');assert.equal(v.files.find(f=>f.file==='src/routes/b.js').state,'fixing');
+ html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
+ assert.match(html,/카드 되돌림 — 한 번 고치기/);assert.match(html,/되돌림 1/);
+ assert.ok(v.records.some(r=>r.who==='검토'&&r.tone==='warn'&&r.text.includes('작성자에게 한 번 돌려보냄')));
+ // 마지막 전체 점검이 시작되면 관문 자리 대신 모두 모인다
+ v=reduceTeam(v,{step:'consistency',message:'전체 점검'});
+ html=renderToStaticMarkup(React.createElement(TeamVillage,{roster,view:v,width:900}));
+ assert.match(html,/전체 점검 — 빌드로 확인/);assert.doesNotMatch(html,/카드 되돌림/);
+});
+
+test('2.0.24 마을 배치: 게시판 줄은 작업대 이름표와 선반 사이에 겹치지 않게',()=>{
+ for(const W of [300,520,760,1200])for(let n=1;n<=6;n++){
+  const L=villageLayout(W,n);
+  assert.ok(L.board.y>=L.desks[0].y+L.desks[0].h+26,`${W}/${n} 이름표와 겹침`);
+  assert.ok(L.board.y+L.board.h<=L.shelf.y-4,`${W}/${n} 선반과 겹침`);
+  assert.ok(L.board.x>=0&&L.board.x+L.board.w<=W);
+ }
+});

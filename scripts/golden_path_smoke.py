@@ -156,6 +156,10 @@ class _FixtureRouter:
 
     def call(self, request, agent=None, operation=None):  # noqa: ANN001
         self.calls.append(operation or "")
+        if operation == "generate_plan_topics":
+            #: 새 앱 설계는 "주제 → 카드" 두 단계다(code_agent._full_design_decisions). 이 정적 앱은 고를 주제가 없다고
+            #: 답해, 제품이 예전 방식(한 번에 받기)으로 넘어가는 길을 그대로 지나가게 한다.
+            return _FixtureResponse(json.dumps({"topics": []}))
         if operation == "generate_plan":
             return _FixtureResponse(json.dumps(_PLAN_FIXTURE, ensure_ascii=False))
         if operation == "generate_code":
@@ -889,11 +893,11 @@ def main() -> int:
         code_agent.get_router = original  # type: ignore[assignment]
         shutil.rmtree(tmp_store, ignore_errors=True)
 
-    if code == 0 and router.calls != ["generate_plan", "generate_code"]:
+    if code == 0 and router.calls != ["generate_plan_topics", "generate_plan", "generate_code"]:
         # 픽스처가 안 불렸다면 골든패스가 LLM 을 안 거친 것이다 — 통과로 보면 안 된다.
         print(
             f"\n골든패스 스모크 실패 — 예상한 LLM 단계가 실행되지 않았다: {router.calls}\n"
-            "  plan 과 generate 가 각각 한 번씩 불려야 한다.",
+            "  설계 주제·plan·generate 가 각각 한 번씩 불려야 한다.",
             flush=True,
         )
         return 1

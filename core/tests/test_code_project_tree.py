@@ -7,7 +7,7 @@ import code_agent
 def test_skips_dependencies_before_descending(tmp_path, monkeypatch):
     for folder in ('src', 'node_modules', '.git', 'dist'):
         (tmp_path / folder).mkdir()
-        (tmp_path / folder / 'file.ts').write_text('example')
+        (tmp_path / folder / 'file.ts').write_text('example', encoding="utf-8")
     visited = []
     original = os.scandir
     def scan(path):
@@ -20,7 +20,7 @@ def test_skips_dependencies_before_descending(tmp_path, monkeypatch):
 
 def test_stops_at_limit_without_visiting_remaining_directories(tmp_path, monkeypatch):
     for name in ('b.ts', 'a.ts'):
-        (tmp_path / name).write_text('example')
+        (tmp_path / name).write_text('example', encoding="utf-8")
     (tmp_path / 'nested').mkdir()
     visited = []
     original = os.scandir
