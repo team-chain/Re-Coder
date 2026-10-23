@@ -1,8 +1,10 @@
 import React, { useEffect, useRef } from 'react';
 
 /** Children stay mounted while closed so ongoing work and form state survive. */
-export function CanvasDrawer({ open, title, onClose, busy = false, children }: {
-  open: boolean; title: string; onClose: () => void; busy?: boolean; children: React.ReactNode;
+export function CanvasDrawer({ open, title, onClose, busy = false, bare = false, children }: {
+  open: boolean; title: string; onClose: () => void; busy?: boolean;
+  /** 2.0.46 설정 시트 — 제목은 시트가 아이콘과 함께 그린다. 여기서는 닫기 단추만 오른쪽 위에. */
+  bare?: boolean; children: React.ReactNode;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
@@ -24,8 +26,10 @@ export function CanvasDrawer({ open, title, onClose, busy = false, children }: {
     return () => { document.removeEventListener('keydown',key); if(previous?.isConnected) previous.focus(); };
   }, [open,busy]);
   return <div className="rc-drawer-shade" hidden={!open} onClick={e => {if(e.target === e.currentTarget && !busy) onClose();}}>
-    <div className="rc-drawer" ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title}>
-      <header><h3>{title}</h3><button onClick={onClose} disabled={busy} aria-label="패널 닫기">닫기</button></header>
+    <div className={`rc-drawer${bare ? " rc-drawer-bare" : ""}`} ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title}>
+      {bare
+        ? <button className="rc-drawer-x" onClick={onClose} disabled={busy} aria-label="패널 닫기"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg></button>
+        : <header><h3>{title}</h3><button onClick={onClose} disabled={busy} aria-label="패널 닫기">닫기</button></header>}
       {children}
     </div>
   </div>;

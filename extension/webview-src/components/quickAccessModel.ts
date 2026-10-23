@@ -29,12 +29,12 @@ const SHORT: Record<string, string> = {
 export const shortLabel = (id: string, targets: QuickState["targets"]): string =>
   SHORT[id] ?? targets.find((t) => t.id === id)?.label ?? id;
 
-//: 칸 아이콘 — 글자를 읽기 전에 모양으로 먼저 알아보게(Windows·macOS 기본 글꼴에 있는 기호만).
+//: 칸 아이콘 — 글자를 읽기 전에 모양으로 먼저 알아보게. 2.0.46 부터 선 아이콘 이름(ui/icons).
 const ICON: Record<string, string> = {
-  code: "</>", build: "⚠", map: "▦", flow: "⇢", adr: "✎", models: "◎", ship: "▶", deploy: "☁",
-  replay: "↺", operate: "⚑", scan: "⌕", secrets: "✱", policy: "✓", home: "⌂",
+  code: "code", build: "bug", map: "graph", flow: "flow", adr: "doc", models: "chip", ship: "box", deploy: "upload",
+  replay: "history", operate: "pulse", scan: "scan", secrets: "key", policy: "policy", home: "home",
 };
-export const iconFor = (id: string): string => ICON[id] ?? "•";
+export const iconFor = (id: string): string => ICON[id] ?? "file";
 
 /**
  * 고르기 화면에 보일 안쪽 칸 — 기능이 들어 있고, 바깥 칸과 같은 기능이 아닌 것만.

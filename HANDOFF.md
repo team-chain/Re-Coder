@@ -1,3 +1,13 @@
+# 배포 설정 시트 · GitHub 시트 · 빠른 이동 카드 (2026-10-23, 2.0.46)
+
+- 부품: webview-src/components/ui/icons.tsx(Icon — 24 격자 선 SVG, data-icon, 모르는 이름은 file), ui/kit.tsx(KIT_CSS — 모든 선택자 `.rk ` 접두(캔버스 `.rc-canvas button/input` 규칙을 이기려고), Kit · SheetHead · Section · Box · KvRow(「변경」 → editor(close)) · SettingRow · Segmented(라디오) · Collapse(details) · Button(aria-disabled) · Line · AWS_REGIONS · regionName, rk-costnote).
+- canvas/TargetSheets.tsx: deployedTag · nextTag(v3 → v4) · EcsSheet(advanced 에 기존 입력칸 그대로) · S3Sheet. DeploymentCanvas 는 선택 영역을 `<Kit className="rc-target-setup">` 로 감싸고 CanvasDrawer bare(머리 대신 닫기 아이콘). 스냅숏에서 설정을 안 건드렸으면 tag = nextTag(배포된 이미지).
+- EcsProtection: 화면만 바꿈(protectionRequest · 검사 그대로). paidSummary · monthlyExtra(대규모 방패 25 / HTTPS 만 18 / RDS +15) · ALB_COST · CostNote(한 줄 + 자세히).
+- GitHubPanel: 호스트 프로토콜 그대로(canvas.github.*). 연결 + 변경 있음이면 changes 자동 요청, 「커밋하고 푸시」 = commit 후 결과에 git.head 가 있고 commitPreview 가 없으면 onReview()(푸시 승인). 오류면 이어 푸시 취소.
+- QuickWheel: QuickWheelView 를 3×3 카드 격자 + Shift 칸 알약으로. 키 처리 · data-slot/target/empty/selected 그대로. quickAccessModel.ICON 은 아이콘 이름.
+- 시험: webview-tests/uiKit.test.js(10 — kit 선택자 접두 · KvRow · Segmented · 아이콘 · 버전 · 요금 · ECS/S3/GitHub 시트, 이모지 없음), quickAccess(아이콘 이름 · 글리프 없음), httpsDb(문구 완화). 실제 컴포넌트 + 가짜 호스트 번들(Playwright)로 1280 · 700 · 420px 확인: 지역 변경 · 유료 펼침 · 요금 갱신 · 비용 확인 없으면 prepare 안 보냄 · GitHub 고르기/누락 안내/연결 · 휠 고르기/편집, 콘솔 오류 없음.
+- 못 한 것: 다른 화면(운영 · 보안 · 개발 탭)에 같은 부품 적용은 다음 단계.
+
 # 팀 구성 · 테스트 리코더 · AI Village · 팀 벤치마크 (2026-10-22, 2.0.45)
 
 - 역할별 모델: llm/task_tier — ROLES(planner·dev·review·test)·ROLE_SPECS(quality·fast·anthropic·openai·compatible)·normalize_role_models·role_of(agent)·role_models(models)·acting_as(role)·role_spec()·tagged(tag)(원장 run 표시만). provider_router.call_llm 은 강제(pinned)가 없을 때 role_spec 공급자를 체인 맨 앞에(못 쓰면 경고 후 기본). gen_engine.call 이 acting_as(role_of(agent)) + usage 이벤트(agent·model·provider·토큰·cost_usd). code_agent.generate_code(spec, models, test) = 얇은 감싸개 → _generate_code(본문). CodeGenerateRequest.models·test.

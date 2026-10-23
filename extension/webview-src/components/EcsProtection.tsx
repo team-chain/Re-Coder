@@ -1,5 +1,6 @@
 import React from "react";
-import { Checkbox } from "./Check";
+import { Checkbox, Switch } from "./Check";
+import { Box, Collapse, Section, Segmented, SettingRow } from "./ui/kit";
 
 /**
  * ECS 배포 — 보호·운영 설정(2.0.25~).
@@ -38,11 +39,24 @@ export const WAF_LIMITS = [500, 1000, 2000, 5000];
 export const EDGE_COST =
   "로드밸런서는 켜 두는 시간만큼 + 처리량만큼, WAF 는 매달 고정 요금 + 요청 수만큼 나옵니다(트래픽이 거의 없어도 us-east-1 기준 대략 월 25달러 이상). 그만 쓰면 운영 화면의 「AWS 리소스 정리」로 지우세요.";
 
+export const ALB_COST =
+  "로드밸런서는 켜 두는 시간만큼 + 처리량만큼 나옵니다(트래픽이 거의 없어도 us-east-1 기준 대략 월 18달러 이상). 그만 쓰면 운영 화면의 「AWS 리소스 정리」로 지우세요.";
+
 export const SHIELD_LEVELS: Array<{ value: ShieldLevel; label: string; rate: number; note: string }> = [
   { value: "loose", label: "느슨", rate: 50, note: "학교·회사처럼 한 IP 뒤에 사람이 많을 때" },
   { value: "normal", label: "보통", rate: 20, note: "기본값" },
   { value: "strict", label: "엄격", rate: 5, note: "공격을 받는 중일 때" },
 ];
+
+/** 요금 안내 — 한 줄만 보이고, 자세한 설명은 「자세히」 안에. */
+function CostNote({ short, full, testId }: { short: string; full: string; testId?: string }) {
+  return (
+    <details className="rk-costnote" data-testid={testId}>
+      <summary><span>{short}</span><em>자세히</em></summary>
+      <p>{full}</p>
+    </details>
+  );
+}
 
 const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$/;
 
@@ -76,103 +90,95 @@ export function protectionRequest(p: Protection): Record<string, unknown> {
   return out;
 }
 
-const muted: React.CSSProperties = { color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 };
+/** 켜 둔 유료 항목 이름(접힌 줄에 보인다). */
+export function paidSummary(p: Protection): string[] {
+  const on: string[] = [];
+  if (p.https) on.push("HTTPS 주소");
+  if ((p.edge ?? "none") !== "none") on.push("대규모 방패");
+  if (p.database === "rds") on.push("관리형 DB");
+  return on;
+}
 
+/** 배포 요약에 보일 대략의 월 추가 요금(USD, 표시용). 켠 것이 없으면 0. */
+export function monthlyExtra(p: Protection): number {
+  //: 대규모 방패(로드밸런서 + WAF) 약 $25, HTTPS 만이면 로드밸런서만 약 $18.
+  const lb = (p.edge ?? "none") !== "none" ? 25 : p.https ? 18 : 0;
+  return lb + (p.database === "rds" ? 15 : 0);
+}
+
+const help = "rk-help";
+
+/**
+ * 보호 · 운영(2.0.46 새 모양) — 기본 방패·감지 알림은 늘 보이는 두 줄, 요금이 드는 셋(HTTPS·대규모 방패·관리형 DB)은
+ * 한 줄로 접어 둔다. 하나라도 켜져 있으면 펼친 채로 보인다.
+ */
 export function EcsProtection({ value, onChange, disabled = false }: {
   value: Protection; onChange: (p: Protection) => void; disabled?: boolean;
 }) {
   const set = <K extends keyof Protection>(k: K, v: Protection[K]) => onChange({ ...value, [k]: v });
+  const paid = paidSummary(value);
+  const edgeOn = (value.edge ?? "none") !== "none";
   return (
-    <fieldset disabled={disabled} data-testid="ecs-protection" style={{ marginTop: 12, minWidth: 0 }}>
-      <legend>보호 · 운영</legend>
-      <Checkbox checked={value.shield} disabled={disabled} onChange={v => set("shield", v)}
-        label={<b>기본 방패</b>} description="앱 앞에서 한 IP 의 과도한 요청을 429 로 막습니다" />
-      {value.shield && (
-        <div role="radiogroup" aria-label="방패 강도" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 6, margin: "6px 0 4px 24px" }}>
-          {SHIELD_LEVELS.map(l => (
-            <label key={l.value} data-level={l.value} style={{
-              border: `1px solid ${value.shield_level === l.value ? "var(--vscode-focusBorder, #3794ff)" : "var(--vscode-panel-border, #3f3f3f)"}`,
-              borderRadius: 6, padding: "6px 8px", cursor: "pointer", fontSize: 12 }}>
-              <input type="radio" name="shield-level" value={l.value} checked={value.shield_level === l.value}
-                onChange={() => set("shield_level", l.value)} style={{ marginRight: 6 }} />
-              {l.label} <span style={muted}>· IP당 초당 {l.rate}회</span>
-              <div style={muted}>{l.note}</div>
-            </label>
-          ))}
-        </div>
-      )}
-      {value.shield && <p style={{ ...muted, margin: "2px 0 8px 24px" }}>앱이 포트를 PORT 환경변수로 받을 때만 켜집니다. 못 켜면 배포 결과에 이유를 알려 드려요. 초당 수만 건 규모는 대규모 방패(ALB + WAF)가 필요합니다.</p>}
-      <Checkbox checked={value.alerts} disabled={disabled} onChange={v => set("alerts", v)}
-        label={<b>공격·장애 감지 알림</b>} description="요청 급증 · 차단 급증 · 오류 증가 · 태스크 부족" />
-      {value.alerts && (
-        <label style={{ display: "block", margin: "4px 0 0 24px", fontSize: 11 }}>
-          알림 메일(선택) — 넣으면 PC 가 꺼져 있어도 AWS 가 메일을 보냅니다
-          <input type="email" value={value.alert_email} placeholder="me@example.com" onChange={e => set("alert_email", e.target.value)}
-            style={{ display: "block", width: "100%", boxSizing: "border-box", marginTop: 4 }} />
-          <span style={muted}>배포 뒤 구독 확인 메일의 링크를 한 번 눌러야 합니다.</span>
-        </label>
-      )}
-      <div style={{ marginTop: 10 }} data-testid="ecs-edge">
-        <Checkbox checked={(value.edge ?? "none") !== "none"} disabled={disabled}
-          onChange={v => onChange({ ...value, edge: v ? "alb_waf" : "none", edge_cost_approved: false })}
-          label={<b>대규모 방패 (로드밸런서 + AWS WAF)</b>}
-          description="초당 수천 건 이상 몰려도 앱까지 오기 전에 막습니다 · 매달 요금이 나옵니다" />
-        {(value.edge ?? "none") !== "none" && (
-          <div style={{ margin: "4px 0 0 24px", fontSize: 12 }}>
-            <label style={{ display: "block" }}>
-              IP 하나가 5분 동안 보낼 수 있는 요청
-              <select value={value.waf_rate_limit || 2000} onChange={e => set("waf_rate_limit", Number(e.target.value))}
-                style={{ marginLeft: 6 }}>
-                {WAF_LIMITS.map(n => <option key={n} value={n}>{n.toLocaleString()}회{n === 2000 ? " (기본)" : ""}</option>)}
-              </select>
-            </label>
-            <p style={{ ...muted, margin: "4px 0" }}>앱은 로드밸런서에서 오는 연결만 받게 바뀌고, 주소가 로드밸런서 주소(http://…elb.amazonaws.com)로 바뀝니다. AWS 관리 규칙(일반 공격 패턴·알려진 악성 입력)도 함께 켭니다.</p>
-            <p style={{ ...muted, margin: "4px 0" }} data-testid="edge-cost">{EDGE_COST}</p>
-            <Checkbox checked={!!value.edge_cost_approved} disabled={disabled} tone="warn"
-              onChange={v => set("edge_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
+    <div data-testid="ecs-protection" aria-disabled={disabled || undefined}>
+      <Section title="보호">
+        <Box>
+          <SettingRow icon="shield" title="기본 방패" desc="한 IP 의 과도한 요청을 429 로 막음"
+            trailing={<Switch checked={value.shield} disabled={disabled} onChange={v => set("shield", v)} ariaLabel="기본 방패" />}>
+            {value.shield && <>
+              <Segmented name="shield-level" label="방패 강도" value={value.shield_level} disabled={disabled} onChange={v => set("shield_level", v)}
+                options={SHIELD_LEVELS.map(l => ({ value: l.value, label: <>{l.label} <span style={{ opacity: .7 }}>{l.rate}/초</span></>, title: `IP당 초당 ${l.rate}회 · ${l.note}` }))} />
+              <p className={help}>{SHIELD_LEVELS.find(l => l.value === value.shield_level)?.note} · IP당 초당 {SHIELD_LEVELS.find(l => l.value === value.shield_level)?.rate}회. 앱이 PORT 환경변수로 포트를 받을 때만 켜집니다.</p>
+            </>}
+          </SettingRow>
+          <SettingRow icon="bell" title="공격·장애 감지 알림" desc="요청·차단 급증 · 오류 증가 · 태스크 부족"
+            trailing={<Switch checked={value.alerts} disabled={disabled} onChange={v => set("alerts", v)} ariaLabel="공격·장애 감지 알림" />}>
+            {value.alerts && <>
+              <input className="rk-input" type="email" value={value.alert_email} disabled={disabled} aria-label="알림 메일"
+                placeholder="알림 메일 (선택) — PC 가 꺼져 있어도 받습니다" onChange={e => set("alert_email", e.target.value)} />
+              {value.alert_email.trim() && <p className={help}>배포 뒤 구독 확인 메일의 링크를 한 번 눌러야 합니다.</p>}
+            </>}
+          </SettingRow>
+        </Box>
+        <Collapse testId="ecs-paid" open={paid.length > 0} summary={paid.length ? `켜짐: ${paid.join(" · ")}` : "HTTPS 주소 · 대규모 방패 · 관리형 DB"} aside="매달 요금">
+          <div data-testid="ecs-https">
+            <SettingRow icon="lock" title="HTTPS 주소" desc="CloudFront · https://…cloudfront.net 주소, 내 도메인도 연결" cost="월 약 $18+"
+              trailing={<Switch checked={!!value.https} disabled={disabled} onChange={v => set("https", v)} ariaLabel="HTTPS 주소" />}>
+              {value.https && <>
+                <input className="rk-input" value={value.custom_domain ?? ""} disabled={disabled} aria-label="내 도메인"
+                  placeholder="내 도메인 (선택) · shop.example.com" onChange={e => set("custom_domain", e.target.value)} />
+                <p className={help} data-testid="ecs-https-guard">인증서가 나온 뒤 다시 배포하면 도메인이 붙습니다 · CloudFront 를 거친 요청만 받음(비밀 머리글로 잠금).
+                  {value.edge === "alb_waf" ? " WAF 는 CloudFront 에 붙여 실제 사용자 IP 로 셉니다." : ""}</p>
+                {!edgeOn && <>
+                  <CostNote short="로드밸런서만(WAF 없이) 함께 켬 · 월 약 $18+" full={ALB_COST} />
+                  <Checkbox checked={!!value.edge_cost_approved} disabled={disabled} tone="warn" onChange={v => set("edge_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
+                </>}
+              </>}
+            </SettingRow>
           </div>
-        )}
-      </div>
-      <div style={{ marginTop: 10 }} data-testid="ecs-https">
-        <Checkbox checked={!!value.https} disabled={disabled} onChange={v => set("https", v)}
-          label={<b>HTTPS 주소 (CloudFront)</b>}
-          description="https://…cloudfront.net 주소를 바로 받습니다 · 로드밸런서가 함께 켜집니다" />
-        {value.https && (
-          <label style={{ display: "block", margin: "4px 0 0 24px", fontSize: 11 }}>
-            내 도메인(선택) — 넣으면 인증서를 요청하고, 발급된 뒤 다시 배포하면 연결됩니다
-            <input value={value.custom_domain ?? ""} placeholder="shop.example.com" onChange={e => set("custom_domain", e.target.value)}
-              style={{ display: "block", width: "100%", boxSizing: "border-box", marginTop: 4 }} />
-            <span style={muted}>Route 53 에 그 도메인이 있으면 레코드를 자동으로 넣고, 없으면 넣을 레코드를 배포 결과에 알려 드려요.</span>
-          </label>
-        )}
-        {value.https && (
-          <p style={{ ...muted, margin: "4px 0 0 24px" }} data-testid="ecs-https-guard">
-            로드밸런서는 CloudFront 를 거친 요청만 받습니다(비밀 머리글로 잠금).
-            {value.edge === "alb_waf" ? " WAF 는 CloudFront 에 붙여 실제 사용자 IP 로 셉니다." : ""}
-          </p>
-        )}
-        {(value.edge ?? "none") === "none" && value.https && (
-          <div style={{ margin: "4px 0 0 24px" }}>
-            <p style={{ ...muted, margin: "4px 0" }}>HTTPS 주소를 위해 로드밸런서만(WAF 없이) 켭니다. {EDGE_COST}</p>
-            <Checkbox checked={!!value.edge_cost_approved} disabled={disabled} tone="warn"
-              onChange={v => set("edge_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
+          <div data-testid="ecs-edge">
+            <SettingRow icon="wall" title="대규모 방패" desc="로드밸런서 + AWS WAF · 초당 수천 건도 앱 앞에서 막음" cost="월 약 $25+"
+              trailing={<Switch checked={edgeOn} disabled={disabled} onChange={v => onChange({ ...value, edge: v ? "alb_waf" : "none", edge_cost_approved: false })} ariaLabel="대규모 방패" />}>
+              {edgeOn && <>
+                <label className={help} style={{ display: "flex", alignItems: "center", gap: 8 }}>IP 하나가 5분 동안 보낼 수 있는 요청
+                  <select className="rk-input" style={{ width: "auto", height: 30 }} value={value.waf_rate_limit || 2000} disabled={disabled} onChange={e => set("waf_rate_limit", Number(e.target.value))}>
+                    {WAF_LIMITS.map(n => <option key={n} value={n}>{n.toLocaleString()}회{n === 2000 ? " (기본)" : ""}</option>)}
+                  </select></label>
+                <CostNote testId="edge-cost" short="AWS 관리 규칙도 함께 켬 · 월 약 $25+" full={`주소가 로드밸런서 주소로 바뀌고 AWS 관리 규칙(일반 공격 패턴)도 함께 켭니다. ${EDGE_COST}`} />
+                <Checkbox checked={!!value.edge_cost_approved} disabled={disabled} tone="warn" onChange={v => set("edge_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
+              </>}
+            </SettingRow>
           </div>
-        )}
-      </div>
-      <div style={{ marginTop: 10 }} data-testid="ecs-database">
-        <Checkbox checked={value.database === "rds"} disabled={disabled}
-          onChange={v => onChange({ ...value, database: v ? "rds" : "task", db_cost_approved: false })}
-          label={<b>관리형 DB (RDS PostgreSQL)</b>}
-          description="태스크가 바뀌어도 데이터가 남습니다 · 처음 만드는 데 5~10분 · 매달 요금" />
-        {value.database === "rds" && (
-          <div style={{ margin: "4px 0 0 24px" }}>
-            <p style={{ ...muted, margin: "4px 0" }}>인터넷에서는 접속할 수 없고 이 앱의 태스크에서만 접속합니다. DB 가 비어 있으면 처음 한 번 schema.sql 로 테이블을 만들고, 샘플 데이터는 넣지 않습니다.</p>
-            <p style={{ ...muted, margin: "4px 0" }} data-testid="db-cost">{DB_COST}</p>
-            <Checkbox checked={!!value.db_cost_approved} disabled={disabled} tone="warn"
-              onChange={v => set("db_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
+          <div data-testid="ecs-database">
+            <SettingRow icon="database" title="관리형 DB" desc="RDS PostgreSQL · 다시 배포해도 데이터가 남음" cost="월 약 $15+"
+              trailing={<Switch checked={value.database === "rds"} disabled={disabled} onChange={v => onChange({ ...value, database: v ? "rds" : "task", db_cost_approved: false })} ariaLabel="관리형 DB" />}>
+              {value.database === "rds" && <>
+                <CostNote testId="db-cost" short="이 앱에서만 접속 · schema.sql 로 테이블 생성 · 처음 5~10분" full={DB_COST} />
+                <Checkbox checked={!!value.db_cost_approved} disabled={disabled} tone="warn" onChange={v => set("db_cost_approved", v)} label="비용이 드는 것을 확인했습니다" />
+              </>}
+            </SettingRow>
           </div>
-        )}
-      </div>
-    </fieldset>
+        </Collapse>
+      </Section>
+    </div>
   );
 }

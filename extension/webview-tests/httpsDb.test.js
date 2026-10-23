@@ -15,7 +15,7 @@ test('2.0.27 HTTPS 주소: 로드밸런서를 함께 켜고 비용 확인·도�
  const withWaf=protectionRequest({...DEFAULT_PROTECTION,edge:'alb_waf',https:true,edge_cost_approved:true});
  assert.equal(withWaf.edge,'alb_waf');
  const html=renderToStaticMarkup(React.createElement(EcsProtection,{value:{...DEFAULT_PROTECTION,https:true},onChange(){}}));
- assert.match(html,/HTTPS 주소 \(CloudFront\)/);assert.match(html,/내 도메인/);assert.match(html,/로드밸런서만\(WAF 없이\)/);
+ assert.match(html,/HTTPS 주소/);assert.match(html,/CloudFront/);assert.match(html,/내 도메인/);assert.match(html,/로드밸런서만\(WAF 없이\)/);
 });
 
 test('2.0.27 관리형 DB: 비용 확인이 있어야 요청에 싣는다',()=>{
@@ -24,7 +24,7 @@ test('2.0.27 관리형 DB: 비용 확인이 있어야 요청에 싣는다',()=>{
  assert.equal(on.database,'rds');assert.equal(on.db_cost_approved,true);assert.equal(on.edge,undefined);
  assert.equal(protectionRequest(DEFAULT_PROTECTION).database,undefined);
  const html=renderToStaticMarkup(React.createElement(EcsProtection,{value:{...DEFAULT_PROTECTION,database:'rds'},onChange(){}}));
- assert.match(html,/관리형 DB \(RDS PostgreSQL\)/);assert.match(html,/월 15달러/);assert.match(html,/schema\.sql/);
+ assert.match(html,/관리형 DB/);assert.match(html,/RDS PostgreSQL/);assert.match(html,/월 15달러/);assert.match(html,/schema\.sql/);
 });
 
 test('2.0.27 캔버스: HTTPS·도메인·관리형 DB 를 검사한다',()=>{

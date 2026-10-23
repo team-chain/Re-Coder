@@ -9,7 +9,7 @@ import { Replay } from "../Replay";
 import { SecurityScanPanel, PolicyPanel, ScanResultLite } from "../Hubs";
 import { GateVerdict, gateColors, gateVerdict } from "../securityGate";
 import { EcsRuntimeEnvironment, parseRuntimeEnvironment } from "../EcsRuntimeEnvironment";
-import { DEFAULT_PROTECTION, EcsProtection, protectionRequest, type Protection } from "../EcsProtection";
+import { DEFAULT_PROTECTION, protectionRequest, type Protection } from "../EcsProtection";
 import { EcsExecutionRole } from "../EcsExecutionRole";
 import { EcsDeploymentProgress, EcsProgressStatus, initialEcsProgress, serviceLink } from "../EcsDeploymentProgress";
 import { Scene } from "./Scene";
@@ -18,6 +18,8 @@ import { CanvasDrawer } from "./CanvasDrawer";
 import { ApprovalCard, Config, Issue, Plan } from "./ApprovalCard";
 import { CanvasEvent, DiscordPanel, DiscordState } from "./DiscordPanel";
 import { GitHubPanel } from "./GitHubPanel";
+import { EcsSheet, S3Sheet, nextTag } from "./TargetSheets";
+import { Kit } from "../ui/kit";
 import { canvasStyles } from "./styles";
 import { mergeDeployment, SnapshotRequests } from "./state";
 import { DockerNotifications } from './dockerNotifications';
@@ -100,7 +102,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
         setRuntimeDraft({environment:'',secrets:''});setPlan(null);setSelection(null);setBlocked([]);setError('');setMessage('');setManualGate(null);lastEventStatus.current='';postMessage('canvas.discord.status');}
       snapshotRef.current=next;setSnapshot(next);setLoading(false);
       if(workspaceChanged)notificationSettings();
-      if(!touched.current) setConfig(c=>({...c,container_port:next.container_port||defaultConfig.container_port,aws_region:next.aws.region||c.aws_region,ecs_cluster:next.resource?.cluster||c.ecs_cluster,ecs_service:next.resource?.service||c.ecs_service}));
+      if(!touched.current) setConfig(c=>({...c,container_port:next.container_port||defaultConfig.container_port,aws_region:next.aws.region||c.aws_region,ecs_cluster:next.resource?.cluster||c.ecs_cluster,ecs_service:next.resource?.service||c.ecs_service,tag:nextTag(next.resource?.image)||c.tag}));
       if(!expectedId.current || expectedId.current===next.deployment.deployment_id) {
         if(liveRef.current?.running && !next.deployment.running && ['done','failed'].includes(next.deployment.stage)) setMessage('');
         liveRef.current=mergeDeployment(liveRef.current,next.deployment);setLive(liveRef.current);
@@ -237,19 +239,15 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
       {level===1&&!completed&&(live?.deployment_id||running||Boolean(snapshot?.warnings.length))&&<button className="rc-activity" onClick={()=>openPane('status')}>{running?(live?.stage_text||'배포 준비 중…'):live?.stage==='failed'?'배포 실패 · 결과 확인':'배포 상태 확인'} →</button>}
     </div>
     {level===1&&completed&&<div className="rc-result-bar" role="status"><span><strong>{s3Result?'S3 배포 완료':'배포 완료'}</strong><small>{s3Result?.bucket || snapshot?.resource?.service}</small></span><div className="rc-actions">{completedLink&&<a className="rc-service-link" href={completedLink} target="_blank" rel="noreferrer">서비스 열기 ↗</a>}<button onClick={()=>openPane('status')}>결과 상세</button></div></div>}
-    <CanvasDrawer open={drawerOpen&&!plan} title={selection?targetTitle:pane==='analysis'?'소스 분석':panes.find(([id])=>id===pane)?.[1]||'배포'} onClose={closeDrawer} busy={busy}>
+    <CanvasDrawer open={drawerOpen&&!plan} bare={Boolean(selection)} title={selection?targetTitle:pane==='analysis'?'소스 분석':panes.find(([id])=>id===pane)?.[1]||'배포'} onClose={closeDrawer} busy={busy}>
       {drawerOpen&&notice}
-      {selection&&<div className="rc-target-setup">
-        <p className="rc-target-summary">{snapshot?.projectName||'프로젝트'} → {selection==='ecs'?config.ecs_cluster:selection==='s3'?'S3':snapshot?.git.repository||'GitHub'}</p>
-        {selection==='ecs'&&<>
-          <div className="rc-fields">{configField('ecs_service','서비스')}{configField('tag','이미지 태그')}{configField('aws_region','AWS 리전')}</div>
-          <details className="rc-details rc-advanced"><summary>고급 설정</summary><div className="rc-fields">{([['image_name','이미지 이름'],['ecs_cluster','Cluster'],['task_family','Task family'],['container_port','컨테이너 포트'],['cpu','CPU 단위'],['memory','메모리 MB']] as Array<[Exclude<keyof Config,"env_vars"|"secret_refs"|"assign_public_ip"|"subnet_ids"|"security_group_ids"|"shield"|"shield_level"|"alerts"|"alert_email"|"edge"|"waf_rate_limit"|"waf_window"|"edge_cost_approved"|"https"|"custom_domain"|"database"|"db_cost_approved">,string]>).map(([key,label])=>configField(key,label))}<label>배포 환경<select disabled={running} value={config.environment} onChange={e=>update('environment',e.target.value)}><option value="staging">staging</option><option value="production">production</option></select></label></div><EcsRuntimeEnvironment value={runtimeDraft} onChange={draft=>{setRuntimeDraft(draft);setPlan(null);}} disabled={running}/><EcsExecutionRole region={config.aws_region} disabled={!snapshot?.aws.ready||running}/></details>
-          <EcsProtection value={protection} onChange={p=>{setProtection(p);setPlan(null);}} disabled={running}/>
-        </>}
-        {selection==='s3'&&<div className="rc-fields"><label>빌드 산출물 폴더<input value={config.dir} disabled={running} onChange={e=>update('dir',e.target.value)} placeholder="자동 감지"/></label>{configField('aws_region','AWS 리전')}</div>}
+      {selection&&<Kit className="rc-target-setup">
+        {selection==='ecs'&&<EcsSheet config={config} update={(k,v)=>update(k,v)} running={running} busy={busy} ready={Boolean(snapshot?.workspace)} onPrepare={()=>prepare()}
+          protection={protection} onProtection={p=>{setProtection(p);setPlan(null);}} deployedImage={snapshot?.resource?.image}
+          advanced={<><div className="rc-fields">{([['image_name','이미지 이름'],['ecs_cluster','Cluster'],['task_family','Task family'],['container_port','컨테이너 포트'],['cpu','CPU 단위'],['memory','메모리 MB']] as Array<[Exclude<keyof Config,"env_vars"|"secret_refs"|"assign_public_ip"|"subnet_ids"|"security_group_ids"|"shield"|"shield_level"|"alerts"|"alert_email"|"edge"|"waf_rate_limit"|"waf_window"|"edge_cost_approved"|"https"|"custom_domain"|"database"|"db_cost_approved">,string]>).map(([key,label])=>configField(key,label))}<label>배포 환경<select disabled={running} value={config.environment} onChange={e=>update('environment',e.target.value)}><option value="staging">staging</option><option value="production">production</option></select></label></div><EcsRuntimeEnvironment value={runtimeDraft} onChange={draft=>{setRuntimeDraft(draft);setPlan(null);}} disabled={running}/><EcsExecutionRole region={config.aws_region} disabled={!snapshot?.aws.ready||running}/></>}/>}
+        {selection==='s3'&&<S3Sheet config={config} update={(k,v)=>update(k,v)} running={running} busy={busy} ready={Boolean(snapshot?.workspace)} onPrepare={()=>prepare()} autoDir={!dirTouched.current}/>}
         {selection==='github'&&snapshot&&<GitHubPanel workspace={snapshot.workspace} git={snapshot.git} onChanged={git=>{setSnapshot(s=>s?{...s,git}:s);refresh();}} onReview={()=>prepare()} onWorkflow={()=>openPane('details')} disabled={running}/>}
-        {selection!=='github'&&<><button className="rc-primary rc-review-button" onClick={()=>prepare()} disabled={running||!snapshot?.workspace}>{busy?'확인 중…':'배포 내용 확인'}</button><p className="rc-muted rc-approval-hint">다음 단계에서 내용을 검토하고 승인합니다.</p></>}
-      </div>}
+      </Kit>}
       {visited.has('details')&&<div hidden={pane!=='details'}><DeploymentCenter key={snapshot?.workspace||'none'} onOpenDocker={onOpenDocker}/></div>}
       {visited.has('history')&&<div hidden={pane!=='history'}><Replay/></div>}
       {visited.has('aws')&&<div hidden={pane!=='aws'}><AwsConnection ecsPolicyContext={{cluster:config.ecs_cluster,service:config.ecs_service,ecrRepo:(config.image_name||config.ecs_service).trim().toLowerCase()}}/></div>}

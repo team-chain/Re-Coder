@@ -128,7 +128,8 @@ const render = (props) => renderToStaticMarkup(React.createElement(QuickWheelVie
 
 test('고르기: 방향키 4칸은 아이콘·이름·키, Shift 칸은 넣은 것만 — 빈 "추가" 칸·가운데 원·긴 설명이 없다', () => {
   const html = render({});
-  for (const t of ['코드 생성', '아키텍처', '배포 캔버스', '에러 분석', '↑', '→', 'Esc 닫기', 'E 칸 바꾸기', '&lt;/&gt;', '⇢']) assert.ok(html.includes(t), t);
+  for (const t of ['코드 생성', '아키텍처', '배포 캔버스', '에러 분석', '↑', '→', 'Esc 닫기', 'E 칸 바꾸기', 'data-icon="code"', 'data-icon="flow"']) assert.ok(html.includes(t), t);
+  assert.ok(!/[⚠☁✎⌂]/.test(html), '2.0.46 글자 기호 대신 선 아이콘');
   assert.equal((html.match(/data-slot=/g) || []).length, 5, '바깥 4칸 + 넣어 둔 Shift+↑ 하나');
   assert.ok(html.includes('data-slot="shift+up"') && !html.includes('data-slot="shift+right"'), '빈 Shift 칸은 고르기에서 숨긴다');
   assert.ok(!html.includes('+ 추가') && !html.includes('빠른 이동</text>'), '빈 칸 "추가"와 가운데 원 글자가 없다');

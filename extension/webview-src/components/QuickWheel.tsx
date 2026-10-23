@@ -11,11 +11,9 @@
  * QuickWheelView 는 그리기만 한다(훅 없음 — 서버 렌더 시험). 키 처리는 QuickWheel 이 한다.
  */
 import React, { useEffect, useRef, useState } from "react";
-import { INNER, OUTER, QuickSlot, QuickState, iconFor, labelPoint, nextTarget, petalPath, shortLabel, slotAngle, slotForKey, visibleInner } from "./quickAccessModel";
-
-const CX = 150, CY = 150;
-const OUT_R0 = 62, OUT_R1 = 146, IN_R0 = 30, IN_R1 = 58;
-const GAP = 3; // 조각 사이 각도(도)
+import { INNER, OUTER, QuickSlot, QuickState, iconFor, nextTarget, shortLabel, slotForKey, visibleInner } from "./quickAccessModel";
+import { Icon } from "./ui/icons";
+import { CHARACTER_SRC } from "./recoderCharacter";
 
 const C = {
   fg: "var(--vscode-foreground, #e6e6e6)",
@@ -27,6 +25,30 @@ const C = {
   btnFg: "var(--vscode-button-foreground, #fff)",
   warn: "var(--vscode-editorWarning-foreground, #cca700)",
 };
+
+//: 2.0.46 카드 모양 — 배포 시트와 같은 면·모서리. 방향키 칸은 십자 배치, 가운데는 리코더.
+const WHEEL_CSS = `
+.rc-qw{--qw-surface:color-mix(in srgb,var(--vscode-foreground,#fff) 6%,var(--vscode-editorWidget-background,#252526));--qw-hair:color-mix(in srgb,var(--vscode-foreground,#fff) 10%,transparent)}
+.rc-qw-grid{display:grid;grid-template-columns:repeat(3,112px);grid-template-rows:repeat(3,84px);gap:10px;justify-content:center}
+.rc-qw-card{all:unset;box-sizing:border-box;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;border-radius:16px;
+  background:var(--qw-surface);box-shadow:0 0 0 1px var(--qw-hair),0 10px 24px rgba(0,0,0,.28);color:var(--vscode-foreground,#e6e6e6);transition:transform .12s,background .12s}
+.rc-qw-card b{font-size:13px;font-weight:600;line-height:1.2;text-align:center;padding:0 6px}
+.rc-qw-card kbd{font:600 10.5px var(--vscode-font-family,sans-serif);color:var(--vscode-descriptionForeground,#9d9d9d);background:color-mix(in srgb,var(--vscode-foreground,#fff) 9%,transparent);border-radius:5px;padding:0 6px}
+.rc-qw-card:hover,.rc-qw-card[data-selected=true]{background:var(--vscode-button-background,#0078d4);color:var(--vscode-button-foreground,#fff);transform:scale(1.04)}
+.rc-qw-card:hover kbd,.rc-qw-card[data-selected=true] kbd{background:rgba(255,255,255,.22);color:inherit}
+.rc-qw-card[data-empty=true]{background:transparent;box-shadow:inset 0 0 0 1.5px var(--qw-hair);color:var(--vscode-descriptionForeground,#9d9d9d)}
+.rc-qw-card:focus-visible{outline:2px solid var(--vscode-focusBorder,#3794ff);outline-offset:2px}
+.rc-qw-hub{display:grid;place-items:center}.rc-qw-hub span{width:70px;height:70px;border-radius:50%;display:grid;place-items:center;background:color-mix(in srgb,var(--vscode-foreground,#fff) 4%,transparent);box-shadow:0 0 0 1px var(--qw-hair)}
+.rc-qw-hub img{width:44px;height:44px}
+.rc-qw-inner{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:12px;max-width:356px}
+.rc-qw-pill{all:unset;box-sizing:border-box;cursor:pointer;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:9px;background:var(--qw-surface);box-shadow:0 0 0 1px var(--qw-hair);font-size:12px;color:var(--vscode-foreground,#e6e6e6)}
+.rc-qw-pill kbd{font:600 10px var(--vscode-font-family,sans-serif);color:var(--vscode-descriptionForeground,#9d9d9d)}
+.rc-qw-pill:hover,.rc-qw-pill[data-selected=true]{background:var(--vscode-button-background,#0078d4);color:var(--vscode-button-foreground,#fff)}
+.rc-qw-pill:hover kbd,.rc-qw-pill[data-selected=true] kbd{color:inherit}
+.rc-qw-pill[data-empty=true]{background:transparent;box-shadow:inset 0 0 0 1px var(--qw-hair);color:var(--vscode-descriptionForeground,#9d9d9d)}
+.rc-qw-card[data-selected=true][data-empty=true],.rc-qw-pill[data-selected=true][data-empty=true]{background:var(--vscode-button-background,#0078d4);color:var(--vscode-button-foreground,#fff);box-shadow:none}
+@media (prefers-reduced-motion: reduce){.rc-qw-card{transition:none}}
+`;
 
 export interface QuickWheelViewProps {
   state: QuickState;
@@ -43,38 +65,30 @@ export interface QuickWheelViewProps {
   dialogRef?: React.Ref<HTMLDivElement>;
 }
 
-const Petal: React.FC<{ slot: QuickSlot; state: QuickState; mode: "pick" | "edit"; selected: boolean; onSlot: (s: QuickSlot) => void }> = ({ slot, state, mode, selected, onSlot }) => {
+const AREA: Record<string, React.CSSProperties> = {
+  up: { gridColumn: 2, gridRow: 1 }, right: { gridColumn: 3, gridRow: 2 }, down: { gridColumn: 2, gridRow: 3 }, left: { gridColumn: 1, gridRow: 2 },
+};
+
+const Slot: React.FC<{ slot: QuickSlot; state: QuickState; mode: "pick" | "edit"; selected: boolean; onSlot: (s: QuickSlot) => void }> = ({ slot, state, mode, selected, onSlot }) => {
   const inner = slot.startsWith("shift+");
-  const [r0, r1] = inner ? [IN_R0, IN_R1] : [OUT_R0, OUT_R1];
-  const a = slotAngle(slot);
   const id = state.slots[slot];
   const empty = !id;
   const label = empty ? "비어 있음" : shortLabel(id, state.targets);
-  const p = labelPoint(CX, CY, (r0 + r1) / 2, slot);
   const key = state.keys[slot];
   const name = empty ? `${key} 칸 비어 있음 — 기능 지정` : `${key} ${state.targets.find((t) => t.id === id)?.label ?? label}`;
+  if (inner) {
+    return (
+      <button type="button" className="rc-qw-pill" aria-label={name} title={name} data-slot={slot} data-target={id || ""} data-empty={empty} data-selected={selected}
+        tabIndex={-1} onClick={() => onSlot(slot)}>
+        {empty ? (mode === "edit" ? <Icon name="plus" size={13} /> : null) : <Icon name={iconFor(id)} size={13} />}<span>{label}</span><kbd>{key}</kbd>
+      </button>
+    );
+  }
   return (
-    <g className="rc-qw-petal" role="button" tabIndex={-1} aria-label={name} data-slot={slot} data-target={id || ""} style={{ cursor: "pointer" }}
-      onClick={() => onSlot(slot)}>
-      <path d={petalPath(CX, CY, r0, r1, a - 45 + GAP, a + 45 - GAP)}
-        fill={selected ? "rgba(0,120,212,.32)" : empty ? "transparent" : "rgba(255,255,255,.07)"}
-        stroke={selected ? "#3794ff" : empty ? "rgba(255,255,255,.2)" : "rgba(255,255,255,.12)"}
-        strokeWidth={selected ? 2 : 1} strokeDasharray={empty ? "4 4" : undefined} />
-      {inner ? (
-        //: 안쪽 칸은 좁다 — 아이콘과 짧은 이름만(전체 이름은 마우스를 올리면).
-        <>
-          <title>{name}</title>
-          <text x={p.x} y={p.y + (empty ? 4 : 0)} textAnchor="middle" fontSize={empty ? 12 : 13} fill={empty ? "#8a8a8a" : "#9cdcfe"}>{empty ? (mode === "edit" ? "+" : "") : iconFor(id)}</text>
-          {!empty && <text x={p.x} y={p.y + 12} textAnchor="middle" fontSize={8.5} fill="#cfcfcf">{label}</text>}
-        </>
-      ) : (
-        <>
-          {!empty && <text x={p.x} y={p.y - 12} textAnchor="middle" fontSize={17} fill="#9cdcfe">{iconFor(id)}</text>}
-          <text x={p.x} y={p.y + (empty ? 4 : 9)} textAnchor="middle" fontSize={13} fontWeight={600} fill={empty ? "#8a8a8a" : "#e6e6e6"}>{label}</text>
-          <text x={p.x} y={p.y + (empty ? 19 : 24)} textAnchor="middle" fontSize={10} fill="#8a8a8a">{key}</text>
-        </>
-      )}
-    </g>
+    <button type="button" className="rc-qw-card" aria-label={name} data-slot={slot} data-target={id || ""} data-empty={empty} data-selected={selected}
+      tabIndex={-1} style={AREA[slot]} onClick={() => onSlot(slot)}>
+      {!empty && <Icon name={iconFor(id)} size={20} />}<b>{label}</b><kbd>{key}</kbd>
+    </button>
   );
 };
 
@@ -83,19 +97,22 @@ export const QuickWheelView: React.FC<QuickWheelViewProps> = ({ state, mode, sel
   const sel = selected ?? "up";
   //: 고르기: 넣어 둔 Shift 칸만(빈 칸·중복은 숨김). 칸 바꾸기: 8칸 모두.
   const inner = editing ? INNER : visibleInner(state);
-  const btn: React.CSSProperties = { font: "inherit", fontSize: 12, borderRadius: 6, padding: "5px 11px", cursor: "pointer", border: `1px solid ${C.line}`, background: "transparent", color: C.fg };
+  const btn: React.CSSProperties = { font: "inherit", fontSize: 12, borderRadius: 8, padding: "6px 12px", cursor: "pointer", border: `1px solid ${C.line}`, background: "transparent", color: C.fg };
   return (
-    <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="빠른 이동" data-testid="quick-wheel" data-mode={mode}
-      style={{ position: "fixed", inset: 0, zIndex: 2000, display: "grid", placeItems: "center", background: "rgba(0,0,0,.45)", outline: "none" }}
+    <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="빠른 이동" data-testid="quick-wheel" data-mode={mode} className="rc-qw"
+      style={{ position: "fixed", inset: 0, zIndex: 2000, display: "grid", placeItems: "center", background: "rgba(0,0,0,.45)", backdropFilter: "blur(2px)", outline: "none" }}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", justifyContent: "center", padding: 14, borderRadius: 14, background: C.panel, border: `1px solid ${C.line}`, boxShadow: "0 18px 48px rgba(0,0,0,.45)", maxWidth: "calc(100vw - 24px)" }}>
+      <style>{WHEEL_CSS}</style>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 20, alignItems: "center", justifyContent: "center", padding: 20, borderRadius: 20, background: C.panel, border: `1px solid ${C.line}`, boxShadow: "0 24px 60px rgba(0,0,0,.45)", maxWidth: "calc(100vw - 24px)" }}>
         <div>
-          <style>{`.rc-qw-petal:hover path{fill:rgba(0,120,212,.22);stroke:#3794ff}@media (prefers-reduced-motion:no-preference){.rc-qw-petal path{transition:fill .12s,stroke .12s}}`}</style>
-          <svg width={260} height={260} viewBox="0 0 300 300" role="group" aria-label="방향키로 고르기" style={{ display: "block", fontFamily: "var(--vscode-font-family)" }}>
-            {OUTER.map((s) => <Petal key={s} slot={s} state={state} mode={mode} selected={editing && sel === s} onSlot={onSlot} />)}
-            {inner.map((s) => <Petal key={s} slot={s} state={state} mode={mode} selected={editing && sel === s} onSlot={onSlot} />)}
-          </svg>
-          <p style={{ margin: "4px 0 0", textAlign: "center", fontSize: 11, color: C.faint }}>
+          <div className="rc-qw-grid" role="group" aria-label="방향키로 고르기">
+            {OUTER.map((s) => <Slot key={s} slot={s} state={state} mode={mode} selected={editing && sel === s} onSlot={onSlot} />)}
+            <div className="rc-qw-hub" style={{ gridColumn: 2, gridRow: 2 }} aria-hidden="true"><span><img src={CHARACTER_SRC} alt="" /></span></div>
+          </div>
+          {inner.length > 0 && <div className="rc-qw-inner" role="group" aria-label="Shift+방향키">
+            {inner.map((s) => <Slot key={s} slot={s} state={state} mode={mode} selected={editing && sel === s} onSlot={onSlot} />)}
+          </div>}
+          <p style={{ margin: "12px 0 0", textAlign: "center", fontSize: 11.5, color: C.dim }}>
             {editing ? "방향키로 칸 · 같은 키를 다시 누르면 다음 기능 · Esc 닫기" : "Esc 닫기 · E 칸 바꾸기"}
           </p>
           <div aria-live="polite" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)" }}>
@@ -104,24 +121,24 @@ export const QuickWheelView: React.FC<QuickWheelViewProps> = ({ state, mode, sel
         </div>
 
         {editing && (
-          <div data-testid="quick-wheel-editor" style={{ width: 220, maxHeight: 320, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div data-testid="quick-wheel-editor" style={{ width: 230, maxHeight: 340, display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ fontSize: 12.5, fontWeight: 650, color: C.fg }}>{state.keys[sel]} 칸</div>
-            <div role="radiogroup" data-quick-list aria-label={`${state.keys[sel]} 칸에 넣을 기능`} style={{ overflowY: "auto", display: "grid", gap: 2, border: `1px solid ${C.line}`, borderRadius: 8, padding: 4 }}>
+            <div role="radiogroup" data-quick-list aria-label={`${state.keys[sel]} 칸에 넣을 기능`} style={{ overflowY: "auto", display: "grid", gap: 2, borderRadius: 12, padding: 4, background: "color-mix(in srgb,var(--vscode-foreground,#fff) 4%,transparent)" }}>
               {state.targets.map((t) => {
                 const on = state.slots[sel] === t.id;
                 const usedBy = (Object.keys(state.slots) as QuickSlot[]).filter((s) => s !== sel && state.slots[s] === t.id).map((s) => state.keys[s]);
                 return (
                   <button key={t.id} role="radio" aria-checked={on} tabIndex={on ? 0 : -1} onClick={() => onAssign(sel, t.id)}
                     title={usedBy.length ? `${usedBy.join(" ")} 칸과 맞바꿉니다` : undefined}
-                    style={{ ...btn, border: 0, textAlign: "left", display: "flex", alignItems: "center", gap: 8, background: on ? "rgba(0,120,212,.28)" : "transparent", padding: "5px 8px" }}>
-                    <span style={{ width: 22, textAlign: "center", color: "#9cdcfe" }}>{iconFor(t.id)}</span>
+                    style={{ ...btn, border: 0, textAlign: "left", display: "flex", alignItems: "center", gap: 9, background: on ? "rgba(0,120,212,.28)" : "transparent", padding: "6px 9px" }}>
+                    <span style={{ width: 18, display: "grid", placeItems: "center", color: C.dim }}><Icon name={iconFor(t.id)} size={15} /></span>
                     <span style={{ flex: 1 }}>{t.label}</span>
                     {usedBy.length > 0 && <span style={{ color: C.faint, fontSize: 10.5 }}>{usedBy.join(" ")}</span>}
                   </button>
                 );
               })}
               <button role="radio" aria-checked={!state.slots[sel]} tabIndex={!state.slots[sel] ? 0 : -1} onClick={() => onAssign(sel, "")}
-                style={{ ...btn, border: 0, textAlign: "left", color: C.dim, background: !state.slots[sel] ? "rgba(0,120,212,.28)" : "transparent", padding: "5px 8px" }}>비워 두기</button>
+                style={{ ...btn, border: 0, textAlign: "left", color: C.dim, background: !state.slots[sel] ? "rgba(0,120,212,.28)" : "transparent", padding: "6px 9px" }}>비워 두기</button>
             </div>
             {state.problems.length > 0 && (
               <div role="note" style={{ fontSize: 11, color: C.warn, lineHeight: 1.45 }}>{state.problems.map((p, i) => <div key={i}>· {p}</div>)}</div>
