@@ -1,5 +1,6 @@
 /** AWS BYO 계정 연결 — 키는 검증 뒤 VS Code SecretStorage에만 저장된다. */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Icon } from "./ui/icons";
 import { Checkbox } from "./Check";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { AwsPolicyGuide, EcsPolicyContext } from "./AwsPolicyGuide";
@@ -194,7 +195,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       </div>
       {permission && (permission.missing_actions.length > 0 || permission.excessive_policies.length > 0 || permission.warnings.length > 0) && (
         <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 5, background: "rgba(245, 180, 0, .12)", border: "1px solid rgba(245, 180, 0, .35)", color: "var(--vscode-editorWarning-foreground, #cca700)", fontSize: 11, lineHeight: 1.55 }}>
-          {permission.excessive_policies.length > 0 && <div><b>⚠️ 이 키는 너무 강력합니다:</b> {permission.excessive_policies.join(", ")}. 배포 전용 최소권한 키를 권장합니다.</div>}
+          {permission.excessive_policies.length > 0 && <div><b><Icon name="alert" size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />이 키는 너무 강력합니다:</b> {permission.excessive_policies.join(", ")}. 배포 전용 최소권한 키를 권장합니다.</div>}
           {permission.missing_actions.length > 0 && <div style={{ marginTop: permission.excessive_policies.length ? 5 : 0 }}><b>배포 전 확인할 권한:</b> {permission.missing_actions.join(", ")}</div>}
           {permission.warnings.map((warning) => <div key={warning} style={{ marginTop: (permission.excessive_policies.length || permission.missing_actions.length) ? 5 : 0 }}>{warning}</div>)}
         </div>

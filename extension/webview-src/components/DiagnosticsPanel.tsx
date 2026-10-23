@@ -4,6 +4,8 @@
  */
 
 import React, { useState } from "react";
+import { Button, Kit } from "./ui/kit";
+import { Icon } from "./ui/icons";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { useSelfHeal } from "../hooks/useSelfHeal";
 
@@ -40,79 +42,83 @@ interface CheckItem {
 const CHECK_ITEMS: CheckItem[] = [
   {
     key: "core_ready",
-    label: "Core Ready",
-    description: "Local Python core server is running and reachable.",
-    activationGuide: "Run: python -m recoder.core.main in your terminal, or use the ReCoder: Start Core command.",
+    label: "ReCoder 코어",
+    description: "이 컴퓨터에서 도는 ReCoder 코어 서버에 연결됩니다.",
+    activationGuide: "명령 팔레트에서 「ReCoder: Start Core」를 실행하세요. 자동 조치가 먼저 다시 켜 봅니다.",
     docLink: "https://github.com/recoder/docs/core-setup",
-    enabledModes: ["Build", "Ship", "Operate"],
+    enabledModes: ["개발", "배포", "운영"],
   },
   {
     key: "ai_ready",
-    label: "AI Ready",
+    label: "AI 연결",
     description: "AI 연결 — 본인 AWS(Bedrock), 게이트웨이, 또는 Claude·ChatGPT API 키.",
     activationGuide: "AWS를 쓰지 않으면 아래에서 Claude 또는 ChatGPT API 키로 연결하세요. AWS를 쓰면 AWS 연결 화면에서 자격 증명을 등록합니다.",
     docLink: "https://github.com/recoder/docs/ai-setup",
-    enabledModes: ["Build", "Ship", "Operate"],
+    enabledModes: ["개발", "배포", "운영"],
   },
   {
     key: "docker_ready",
-    label: "Docker Ready",
-    description: "Docker daemon is available and accessible.",
-    activationGuide: "Install Docker Desktop or ensure the Docker daemon is running. Verify with: docker info",
+    label: "Docker",
+    description: "Docker 가 실행 중이라 이미지를 빌드하고 로컬에서 돌릴 수 있습니다.",
+    activationGuide: "Docker Desktop 을 설치하거나 켜 주세요. 터미널에서 docker info 로 확인할 수 있습니다.",
     docLink: "https://docs.docker.com/get-docker/",
-    enabledModes: ["Ship"],
+    enabledModes: ["배포"],
   },
   {
     key: "aws_deploy_ready",
-    label: "AWS Deploy Ready",
-    description: "AWS credentials and ECR access are configured.",
-    activationGuide: "Configure AWS CLI: aws configure. Ensure IAM role includes ECR and ECS permissions.",
+    label: "AWS 배포",
+    description: "배포 전용 AWS 권한과 ECR 접근이 준비됐습니다.",
+    activationGuide: "상단의 「AWS 연결」에서 배포 전용 권한을 연결하세요. ECR · ECS 권한이 필요합니다.",
     docLink: "https://github.com/recoder/docs/aws-deploy",
-    enabledModes: ["Ship"],
+    enabledModes: ["배포"],
   },
   {
     key: "ops_ready",
-    label: "Ops Ready",
-    description: "EC2 host and SSH key configured for incident response.",
-    activationGuide: "Provide EC2 host address and SSH key path in the Operate tab settings.",
+    label: "운영 대응",
+    description: "장애 대응에 쓸 서버 주소와 접속 정보가 준비됐습니다.",
+    activationGuide: "운영 화면 설정에서 서버 주소와 SSH 키 경로를 입력하세요.",
     docLink: "https://github.com/recoder/docs/ops-setup",
-    enabledModes: ["Operate"],
+    enabledModes: ["운영"],
   },
 ];
 
 const AI_PROVIDER_NAMES: Record<string, string> = { anthropic: "Claude API 키", openai: "ChatGPT(OpenAI) API 키", bedrock: "본인 AWS (Bedrock)", gateway: "게이트웨이", gemini: "Gemini" };
-const aiButton: React.CSSProperties = { background: "transparent", border: "1px solid var(--vscode-panel-border, #444)", color: "var(--vscode-textLink-foreground, #4af)", borderRadius: 3, padding: "2px 8px", fontSize: 10, cursor: "pointer" };
 
 //: 자동 실행 등급(가역·로컬·무비용) — 코어/확장이 직접 고쳐 본다. 나머지는 설정 화면.
 const AUTO_FIXABLE = new Set(["aws_deploy_ready", "ai_ready", "docker_ready", "core_ready"]);
 function autoFixable(key: string): boolean { return AUTO_FIXABLE.has(key); }
 
-function getStateIcon(state: ReadyState): string {
-  switch (state) {
-    case "ready": return "✓";
-    case "partial": return "~";
-    case "not_ready": return "✗";
-    case "error": return "!";
-    default: return "?";
-  }
+const STATE_TEXT: Record<string, string> = { ready: "정상", partial: "일부", not_ready: "필요", error: "오류" };
+const ITEM_ICON: Record<string, string> = { core_ready: "chip", ai_ready: "code", docker_ready: "box", aws_deploy_ready: "upload", ops_ready: "pulse" };
+function tone(state: ReadyState): "ok" | "warn" | "bad" | "" {
+  return state === "ready" ? "ok" : state === "partial" ? "warn" : state === "error" ? "bad" : "";
 }
 
-function getStateColor(state: ReadyState): string {
-  switch (state) {
-    case "ready": return "var(--vscode-testing-iconPassed, #4caf50)";
-    case "partial": return "var(--vscode-editorWarning-foreground, #ff9800)";
-    case "not_ready": return "var(--vscode-descriptionForeground, #888)";
-    case "error": return "var(--vscode-editorError-foreground, #f44336)";
-    default: return "var(--vscode-descriptionForeground, #888)";
-  }
-}
+const DIAG_CSS = `
+.rc-diag{font-size:12.5px;color:var(--vscode-foreground);padding:12px 14px}
+.rc-diag .hd{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.rc-diag .hd b{font-size:13px;font-weight:600}.rc-diag .hd small{color:var(--rk-fg3)}
+.rc-diag .hd .sp{margin-left:auto}
+.rc-diag .list{border-radius:12px;background:var(--rk-surface);overflow:hidden}
+.rc-diag details+details{border-top:1px solid var(--rk-hair)}
+.rc-diag summary{list-style:none;display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer}
+.rc-diag summary::-webkit-details-marker{display:none}
+.rc-diag summary .nm{flex:1;min-width:0}
+.rc-diag summary .md{color:var(--rk-fg3);font-size:11px}
+.rc-diag .st{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--rk-fg2);min-width:38px}
+.rc-diag .st::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--rk-fg3)}
+.rc-diag .st[data-tone=ok]::before{background:var(--rk-ok)}.rc-diag .st[data-tone=warn]::before{background:var(--rk-warn)}.rc-diag .st[data-tone=bad]::before{background:var(--rk-bad)}
+.rc-diag .body{padding:0 12px 12px 36px;display:flex;flex-direction:column;gap:8px;color:var(--rk-fg2);line-height:1.5}
+.rc-diag .guide{background:var(--rk-surface2);border-radius:8px;padding:8px 10px;color:var(--rk-fg)}
+.rc-diag .acts{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.rc-diag .model{font-size:11.5px;color:var(--rk-fg3);margin:0 0 8px}.rc-diag .model code{color:var(--rk-fg)}
+`;
 
 export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
   diagnostics,
   onRetry,
 }) => {
   const { postMessage } = useVSCodeApi();
-  const [expanded, setExpanded] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const { heal, start } = useSelfHeal();
 
@@ -123,208 +129,80 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
     setTimeout(() => setRetrying(false), 3000);
   };
 
-  const containerStyle: React.CSSProperties = {
-    background: "var(--vscode-editor-background)",
-    border: "1px solid var(--vscode-panel-border, #444)",
-    borderRadius: 6,
-    padding: "10px 12px",
-    fontSize: 12,
-    color: "var(--vscode-editor-foreground)",
-    fontFamily: "var(--vscode-font-family, sans-serif)",
-  };
-
   if (!diagnostics) {
     return (
-      <div style={containerStyle}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div className="spinner" style={{ width: 14, height: 14, border: "2px solid var(--vscode-panel-border, #444)", borderTopColor: "var(--vscode-button-background, #0078d4)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-          <span style={{ color: "var(--vscode-descriptionForeground, #888)" }}>Running diagnostics…</span>
-        </div>
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      </div>
+      <Kit className="rc-diag"><style>{DIAG_CSS}</style>
+        <div className="hd"><b>시스템 점검</b><small>점검 중…</small></div>
+      </Kit>
     );
   }
 
-  const readyCount = CHECK_ITEMS.filter(
-    (item) => diagnostics[item.key] === "ready"
-  ).length;
+  const readyCount = CHECK_ITEMS.filter((item) => diagnostics[item.key] === "ready").length;
 
   return (
-    <div style={containerStyle}>
-      {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <div>
-          <div style={{ fontWeight: 700, fontSize: 13 }}>System Diagnostics</div>
-          <div style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #888)", marginTop: 1 }}>
-            {readyCount}/{CHECK_ITEMS.length} checks passed
-            {diagnostics.validation_time && ` · ${new Date(diagnostics.validation_time).toLocaleTimeString()}`}
-          </div>
-        </div>
-        <button
-          onClick={handleRetry}
-          disabled={retrying}
-          style={{
-            background: "var(--vscode-button-secondaryBackground, #3a3a3a)",
-            color: "var(--vscode-button-secondaryForeground, #ccc)",
-            border: "none",
-            borderRadius: 3,
-            padding: "4px 10px",
-            fontSize: 11,
-            cursor: retrying ? "not-allowed" : "pointer",
-            opacity: retrying ? 0.6 : 1,
-          }}
-        >
-          {retrying ? "Running…" : "Re-run"}
-        </button>
+    <Kit className="rc-diag"><style>{DIAG_CSS}</style>
+      <div className="hd">
+        <b>시스템 점검</b>
+        <small>{readyCount}/{CHECK_ITEMS.length} 정상{diagnostics.validation_time && ` · ${new Date(diagnostics.validation_time).toLocaleTimeString()}`}</small>
+        <span className="sp" />
+        <Button small variant="ghost" onClick={handleRetry} disabled={retrying}>{retrying ? "점검 중…" : "다시 점검"}</Button>
       </div>
-
-      {/* Resolved model info */}
       {diagnostics.resolved_model_id && (
-        <div style={{
-          background: "var(--vscode-textCodeBlock-background, #1e1e1e)",
-          borderRadius: 3,
-          padding: "4px 8px",
-          fontSize: 11,
-          marginBottom: 10,
-          fontFamily: "var(--vscode-editor-font-family, monospace)",
-          color: "var(--vscode-descriptionForeground, #888)",
-        }}>
-          연결 검증 모델: <span style={{ color: "var(--vscode-editor-foreground)" }}>{diagnostics.resolved_model_id}</span>
-          {diagnostics.resolved_region && (
-            <> · Region: <span style={{ color: "var(--vscode-editor-foreground)" }}>{diagnostics.resolved_region}</span></>
-          )}
-          <div style={{ fontFamily: "var(--vscode-font-family, sans-serif)", marginTop: 3 }}>진단 시 호출에 성공한 모델입니다. 작업 종류와 폴백에 따라 실제 사용 모델은 달라질 수 있습니다.</div>
-          {diagnostics.is_cross_region_profile && (
-            <span style={{ color: "var(--vscode-editorWarning-foreground, #fa0)", marginLeft: 6 }}>[cross-region]</span>
-          )}
-        </div>
+        <p className="model" title="진단 시 호출에 성공한 모델입니다. 작업 종류와 폴백에 따라 실제 사용 모델은 달라질 수 있습니다.">
+          연결 검증 모델 <code>{diagnostics.resolved_model_id}</code>{diagnostics.resolved_region && <> · {diagnostics.resolved_region}</>}
+          {diagnostics.is_cross_region_profile && " · 교차 리전"} · 작업 종류와 폴백에 따라 실제 모델은 달라질 수 있습니다.
+        </p>
       )}
-
-      {/* Check Items */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div className="list">
         {CHECK_ITEMS.map((item) => {
           const state: ReadyState = (diagnostics[item.key] as ReadyState) ?? "not_ready";
           const isReady = state === "ready";
-          const isOpen = expanded === item.key;
-          const color = getStateColor(state);
-
           return (
-            <div
-              key={item.key}
-              style={{
-                border: "1px solid var(--vscode-panel-border, #333)",
-                borderRadius: 4,
-                overflow: "hidden",
-              }}
-            >
-              {/* Row */}
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "6px 8px",
-                  cursor: "pointer",
-                  background: isOpen ? "var(--vscode-list-hoverBackground, #2a2a2a)" : "transparent",
-                }}
-                onClick={() => setExpanded(isOpen ? null : item.key)}
-              >
-                <span style={{ color, fontWeight: 700, fontSize: 13, width: 14, textAlign: "center", flexShrink: 0 }}>
-                  {getStateIcon(state)}
-                </span>
-                <span style={{ flex: 1, fontWeight: isReady ? 400 : 600, opacity: isReady ? 0.9 : 1 }}>
-                  {item.label}
-                </span>
-                <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #888)" }}>
-                  {item.enabledModes.join(" / ")}
-                </span>
-                <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground, #888)" }}>
-                  {isOpen ? "▲" : "▼"}
-                </span>
-              </div>
-
-              {/* Expanded details */}
-              {isOpen && (
-                <div style={{
-                  padding: "8px 10px 10px",
-                  borderTop: "1px solid var(--vscode-panel-border, #333)",
-                  background: "var(--vscode-sideBar-background, #252526)",
-                }}>
-                  <div style={{ color: "var(--vscode-descriptionForeground, #888)", marginBottom: 6, lineHeight: 1.5 }}>
-                    {item.description}
-                  </div>
-
+            <details key={item.key} data-testid={`diag-${item.key}`}>
+              <summary>
+                <Icon name={ITEM_ICON[item.key] || "file"} size={15} style={{ color: "var(--rk-fg2)" }} />
+                <span className="nm">{item.label}</span>
+                <span className="md">{item.enabledModes.join(" · ")}</span>
+                <span className="st" data-tone={tone(state)}>{STATE_TEXT[state] ?? "확인 안 됨"}</span>
+              </summary>
+              <div className="body">
+                <span>{item.description}</span>
+                {!isReady && <div className="guide">{item.activationGuide}</div>}
+                <div className="acts">
                   {!isReady && (
-                    <div style={{
-                      background: "var(--vscode-textCodeBlock-background, #1e1e1e)",
-                      borderRadius: 3,
-                      padding: "6px 8px",
-                      fontSize: 11,
-                      lineHeight: 1.6,
-                      color: "var(--vscode-editor-foreground)",
-                      marginBottom: 6,
-                    }}>
-                      <strong>How to activate:</strong> {item.activationGuide}
-                    </div>
+                    <Button small
+                      disabled={!!heal[item.key]?.pending}
+                      onClick={() => start(item.key)}
+                      title={autoFixable(item.key) ? "코어가 직접 고쳐 봅니다 — 안 되면 다음 행동을 안내합니다." : "설정 화면을 엽니다."}>
+                      {!!heal[item.key]?.pending ? "조치 중…" : (autoFixable(item.key) ? "자동 조치" : "설정 열기")}
+                    </Button>
                   )}
-
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    {item.docLink && (
-                      <a
-                        href={item.docLink}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ color: "var(--vscode-textLink-foreground, #4af)", fontSize: 11 }}
-                        onClick={(e) => {
-                          e.preventDefault();
-                          postMessage("webview.open.external", { url: item.docLink });
-                        }}
-                      >
-                        View docs →
-                      </a>
-                    )}
-                    {!isReady && (
-                      <button
-                        disabled={!!heal[item.key]?.pending}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          start(item.key);
-                        }}
-                        title={autoFixable(item.key) ? "코어가 직접 고쳐 봅니다 — 안 되면 다음 행동을 안내합니다." : "설정 화면을 엽니다."}
-                        style={{
-                          background: "transparent",
-                          border: "1px solid var(--vscode-panel-border, #444)",
-                          color: "var(--vscode-textLink-foreground, #4af)",
-                          borderRadius: 3,
-                          padding: "2px 8px",
-                          fontSize: 10,
-                          cursor: !!heal[item.key]?.pending ? "wait" : "pointer",
-                        }}
-                      >
-                        {!!heal[item.key]?.pending ? "조치 중…" : (autoFixable(item.key) ? "자동 조치" : "설정 열기")}
-                      </button>
-                    )}
-                  </div>
-                  {item.key === "ai_ready" && (
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8, alignItems: "center" }}>
-                      {isReady && diagnostics.provider_type && <span style={{ fontSize: 10.5, color: "var(--vscode-descriptionForeground, #888)" }}>현재: {AI_PROVIDER_NAMES[diagnostics.provider_type] ?? diagnostics.provider_type}</span>}
-                      <button onClick={(e) => { e.stopPropagation(); postMessage("ai.connect", { provider: "anthropic" }); }} style={aiButton}>Claude API 키로 연결</button>
-                      <button onClick={(e) => { e.stopPropagation(); postMessage("ai.connect", { provider: "openai" }); }} style={aiButton}>ChatGPT API 키로 연결</button>
-                      <button onClick={(e) => { e.stopPropagation(); postMessage("ai.connect"); }} style={aiButton}>연결 방법 바꾸기</button>
-                    </div>
-                  )}
-                  {heal[item.key] && (
-                    <div style={{ marginTop: 6, fontSize: 10.5, lineHeight: 1.5, color: heal[item.key].failed ? "var(--vscode-editorWarning-foreground, #ff9800)" : "var(--vscode-testing-iconPassed, #4caf50)" }}>
-                      {heal[item.key].message}
-                    </div>
+                  {item.docLink && (
+                    <a className="rk-link" href={item.docLink} target="_blank" rel="noreferrer"
+                      onClick={(e) => { e.preventDefault(); postMessage("webview.open.external", { url: item.docLink }); }}>
+                      문서 보기
+                    </a>
                   )}
                 </div>
-              )}
-            </div>
+                {item.key === "ai_ready" && (
+                  <div className="acts">
+                    {isReady && diagnostics.provider_type && <span>현재: {AI_PROVIDER_NAMES[diagnostics.provider_type] ?? diagnostics.provider_type}</span>}
+                    <Button small variant="ghost" onClick={() => postMessage("ai.connect", { provider: "anthropic" })}>Claude API 키로 연결</Button>
+                    <Button small variant="ghost" onClick={() => postMessage("ai.connect", { provider: "openai" })}>ChatGPT API 키로 연결</Button>
+                    <Button small variant="ghost" onClick={() => postMessage("ai.connect")}>연결 방법 바꾸기</Button>
+                  </div>
+                )}
+                {heal[item.key] && (
+                  <div style={{ color: heal[item.key].failed ? "var(--rk-warn)" : "var(--rk-ok)" }}>
+                    {heal[item.key].message}
+                  </div>
+                )}
+              </div>
+            </details>
           );
         })}
       </div>
-    </div>
+    </Kit>
   );
 };
 

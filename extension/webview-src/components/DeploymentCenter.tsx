@@ -1,5 +1,6 @@
 /** ReCoder Workspace 안에서 사용하는 배포 센터와 AI-DLC 배포 결정 카드. */
 import React, { useCallback, useEffect, useRef, useState, useReducer } from "react";
+import { Icon } from "./ui/icons";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { DecisionOptionCards } from "./DecisionOptionCards";
 import { AwsConnection } from "./AwsConnection";
@@ -382,7 +383,7 @@ const EcsRollbackApprovalCard: React.FC<{
   return (
     <div style={{ marginBottom: 16, border: "1px solid rgba(241, 196, 15, .7)", borderRadius: 9, overflow: "hidden", background: "rgba(241, 196, 15, .07)" }}>
       <div style={{ padding: "13px 15px", borderBottom: "1px solid rgba(241, 196, 15, .35)" }}>
-        <div style={{ fontSize: 14, fontWeight: 750, color: "var(--vscode-editorWarning-foreground, #f1c40f)" }}>⚠️ 이상 감지 · 이전 버전으로 롤백할까요?</div>
+        <div style={{ fontSize: 14, fontWeight: 750, color: "var(--vscode-editorWarning-foreground, #f1c40f)" }}><Icon name="alert" size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />이상 감지 · 이전 버전으로 롤백할까요?</div>
         <div style={{ marginTop: 7, fontSize: 12, lineHeight: 1.5 }}>{proposal.reason}</div>
         {proposal.status === "failed" && <div style={{ marginTop: 7, fontSize: 11, color: "var(--vscode-editorWarning-foreground, #f1c40f)" }}>이전 롤백 요청이 실패했습니다. AWS 자격증명 또는 ECS 상태를 고친 뒤 다시 승인할 수 있습니다.</div>}
         <div style={{ marginTop: 8, fontSize: 11, color: "var(--vscode-descriptionForeground, #aaa)", lineHeight: 1.55 }}>
@@ -726,7 +727,7 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
 
       {target === "decision" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 9, overflow: "hidden", background: "var(--vscode-editorWidget-background, #252526)" }}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--vscode-panel-border, #3f3f3f)", background: "linear-gradient(120deg, rgba(55,148,255,.16), transparent)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}><span>⌕</span> {checking ? "프로젝트 구성 확인 중…" : describeDetection(preflight?.summary)}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}><Icon name="search" size={15} /> {checking ? "프로젝트 구성 확인 중…" : describeDetection(preflight?.summary)}</div>
           {!checking && <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>{preflight?.evidence.map(item => <span key={item} style={{ padding: "3px 7px", borderRadius: 99, fontSize: 11, color: "var(--vscode-textLink-foreground, #75beff)", background: "rgba(55,148,255,.13)", border: "1px solid rgba(55,148,255,.28)" }}>{item}</span>)}</div>}
           <button onClick={runPreflight} disabled={checking || Boolean(applyingProposalId)} style={{ marginTop: 11, border: "none", background: "transparent", padding: 0, color: "var(--vscode-textLink-foreground, #75beff)", cursor: "pointer", fontSize: 11 }}>다시 검사</button>
         </div>

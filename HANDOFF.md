@@ -1,3 +1,13 @@
+# 나머지 화면 · 밝은 테마 · 의존성 (2026-10-23, 2.0.47)
+
+- ApprovalCard: Kit(forwardRef 로 바꿈 — ref 를 받음) + SheetHead(Logo) · KvRow · Line · Collapse(approval-more · approval-warnings). data-testid approval-shield/edge/https/db 유지, approval-extra(요금) · approval-approve. 승인 버튼은 진짜 disabled(지역 확인 전 · 막힘). 요금 = monthlyExtra(edge alb_waf → 25, https 또는 edge alb → 18, rds +15).
+- CanvasDrawer: 늘 rc-drawer-bare 모양 + 닫기 아이콘. bare 가 아니면 rc-drawer-head(icon · title · sub). DeploymentCanvas.PANE_HEAD(Discord 는 자기 머리라 bare). 이력 패널은 Replay 의 제목 줄을 CSS 로 숨김(.rc-pane-history), 상세 배포는 DeploymentCenter 제목 두 줄을 숨김(.rc-pane-details).
+- DiagnosticsPanel: 한국어 라벨 · details 줄 · Kit Button. selfHealing/diagnosticsUx 가 보는 조각("자동 조치", heal[item.key].message, disabled={!!heal[item.key]?.pending}, 연결 검증 모델 · 작업 종류와 폴백) 유지.
+- 이모지 → Icon(alert · play · pause · rewind · edit 추가). uiKit.test.js 가 webview-src 전체에서 이모지를 찾는다(✓ ✕ 같은 글자 기호는 허용).
+- Check.tsx 체크박스 기본값을 테마 중립으로(--vscode-checkbox-* 가 없을 때 입력칸 배경 · 글자색 45%).
+- requirements 최소 버전 올림(pip-audit 0건 확인 — 하한을 고정해 검사). Dependabot 25건은 기본 브랜치 main 기준이라 develop → main 병합 뒤 줄어든다(이 세션은 GitHub 알림 API 접근 없음 — 숫자는 GitHub 에서 확인).
+- 시험: uiKit.test.js +4(승인 카드 · 시스템 점검 · 패널 머리 · 이모지 없음). 실제 웹뷰 번들(workspace-preview) 1100 · 420px 와 컴포넌트 하네스 1280 · 420px, 밝은 테마 변수로 캡처 확인, 콘솔 오류 없음.
+
 # 배포 설정 시트 · GitHub 시트 · 빠른 이동 카드 (2026-10-23, 2.0.46)
 
 - 부품: webview-src/components/ui/icons.tsx(Icon — 24 격자 선 SVG, data-icon, 모르는 이름은 file), ui/kit.tsx(KIT_CSS — 모든 선택자 `.rk ` 접두(캔버스 `.rc-canvas button/input` 규칙을 이기려고), Kit · SheetHead · Section · Box · KvRow(「변경」 → editor(close)) · SettingRow · Segmented(라디오) · Collapse(details) · Button(aria-disabled) · Line · AWS_REGIONS · regionName, rk-costnote).

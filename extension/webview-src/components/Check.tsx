@@ -13,7 +13,7 @@ label.rc-ck.rc-ck:hover{background:var(--vscode-list-hoverBackground,rgba(255,25
 label.rc-ck.rc-ck.compact{padding:2px 4px;margin:0 -4px;gap:6px}
 label.rc-ck.rc-ck.inline{display:inline-flex;margin:0}
 label.rc-ck.rc-ck input,label.rc-sw.rc-sw input{appearance:none;-webkit-appearance:none;margin:0;padding:0;min-width:0;flex:none;cursor:pointer;font:inherit;box-sizing:border-box}
-label.rc-ck.rc-ck input{width:16px;height:16px;margin-top:1px;border-radius:5px;border:1.5px solid var(--vscode-checkbox-border,#6b7480);background:var(--vscode-checkbox-background,#1a1c20);display:grid;place-content:center;transition:background .15s,border-color .15s,box-shadow .15s}
+label.rc-ck.rc-ck input{width:16px;height:16px;margin-top:1px;border-radius:5px;border:1.5px solid var(--vscode-checkbox-border,color-mix(in srgb,var(--vscode-foreground,#888) 45%,transparent));background:var(--vscode-checkbox-background,var(--vscode-input-background,transparent));display:grid;place-content:center;transition:background .15s,border-color .15s,box-shadow .15s}
 label.rc-ck.rc-ck input::before{content:"";width:9px;height:9px;transform:scale(0);transition:transform .15s cubic-bezier(.3,1.6,.5,1);clip-path:polygon(14% 44%,0 65%,50% 100%,100% 16%,80% 0%,43% 62%);background:var(--vscode-button-foreground,#fff)}
 label.rc-ck.rc-ck input:checked{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
 label.rc-ck.rc-ck input:checked::before{transform:scale(1)}

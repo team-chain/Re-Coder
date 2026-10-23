@@ -828,7 +828,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
                       <button onClick={() => applyAll(turn)} disabled={anyPending || allApplied || locked}
                         title={locked ? "위의 남은 문제를 확인한 뒤 적용할 수 있습니다" : undefined}
                         style={{ ...primaryBtn, ...(anyPending || allApplied || locked ? { opacity: 0.55, cursor: "default" } : {}) }}>
-                        {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : locked ? "🔒 확인 후 적용" : "모두 적용"}
+                        {allApplied ? "모두 적용됨" : anyPending ? "적용 중…" : locked ? "확인 후 적용" : "모두 적용"}
                       </button>
                     )}
                   </div>

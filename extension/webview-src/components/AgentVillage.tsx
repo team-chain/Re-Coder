@@ -9,6 +9,7 @@
  * 지어낸 대화·가짜 진행률은 넣지 않는다. 비용은 단가를 아는 호출만 더하고, 모르면 "단가 미설정"으로 따로 센다.
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Icon } from "./ui/icons";
 import { CHARACTER_SRC } from "./recoderCharacter";
 import { prettyModel, formatCost } from "./teamConfig";
 import { AgentUsage, TeamMember, TeamRecord, TeamView, agentName, agentSeconds, formatElapsed, totalUsage, viewAt } from "./teamState";
@@ -326,7 +327,7 @@ export const AgentVillage: React.FC<AgentVillageProps> = ({ roster, view, paused
       {view.elapsed > 0 && (view.events ?? []).length > 1 && (
         <div className="rc-av-scrub" style={{ gridColumn: "1 / -1" }}>
           <button type="button" onClick={() => { if (playing) { setPlaying(false); return; } setReplay(replay === null || replay >= total ? 0 : replay); setPlaying(true); }}
-            aria-label={playing ? "다시 보기 멈춤" : "처음부터 다시 보기"}>{playing ? "❚❚" : "▶"} 다시 보기</button>
+            aria-label={playing ? "다시 보기 멈춤" : "처음부터 다시 보기"}>{playing ? <Icon name="pause" size={12} /> : <Icon name="play" size={12} />} 다시 보기</button>
           <input type="range" min={0} max={total} step={1} value={replay ?? total} aria-label="다시 볼 시점"
             onChange={(e) => { setPlaying(false); const t = Number(e.target.value); setReplay(t >= total ? null : t); }} />
           <span>{formatElapsed(replay ?? view.elapsed)} / {formatElapsed(view.elapsed)}</span>

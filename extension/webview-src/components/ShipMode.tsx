@@ -10,6 +10,7 @@
 
 import type { TrustReport } from "./TrustCheck";
 import React, { useState, useCallback, useEffect, useRef } from "react";
+import { Icon } from "./ui/icons";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal, { CommandStep } from "./ApprovalModal";
 import { DeploymentActivity, DeploymentActivityEvent } from './DeploymentActivity';
@@ -719,7 +720,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       const raw = (result.message || "").trim();
       return (
         <div style={{ padding: "8px 10px", borderRadius: 4, border: "1px solid #f59e0b", background: "rgba(245,158,11,0.08)", color: "#f59e0b", fontSize: 11, lineHeight: 1.55, marginBottom: 8 }}>
-          <strong>⚠ 이미지 취약점 검사를 하지 못했습니다</strong>
+          <strong><Icon name="alert" size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />이미지 취약점 검사를 하지 못했습니다</strong>
           <div style={{ marginTop: 3, color: "#e3b261" }}>
             {shortIssue(cause || "스캐너를 실행할 수 없었습니다.")} 취약점이 없다는 뜻이 아니라 확인하지 못했다는 뜻입니다.
           </div>
@@ -967,7 +968,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       {/* ── Required secrets warning ── */}
       {matchesTab && proposal && proposal.required_secrets.length > 0 && (
         <div style={{ marginBottom: 10, fontSize: 10, color: "#f59e0b", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 5, padding: "5px 9px" }}>
-          ⚠ 필요한 환경변수: {proposal.required_secrets.join(", ")}
+          <Icon name="alert" size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />필요한 환경변수: {proposal.required_secrets.join(", ")}
         </div>
       )}
 
@@ -1110,7 +1111,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
             <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 4, border: `1px solid ${rollbackResult.status === "ok" ? "#22c55e" : "#ef4444"}`, color: rollbackResult.status === "ok" ? "#22c55e" : "#ef4444", whiteSpace: "pre-wrap" }}>
               {rollbackResult.status === "ok"
                 ? `✓ 롤백 완료 — ${rollbackResult.rolled_back_to ?? "이전 버전"} 으로 되돌렸고 기록에 남았습니다.${rollbackResult.warning ? `
-⚠ ${rollbackResult.warning}` : ""}`
+주의: ${rollbackResult.warning}` : ""}`
                 : `롤백 실패 — ${(rollbackResult.error || rollbackResult.stderr || "사유 없음").trim()}`}
             </div>
           )}
@@ -1213,7 +1214,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
             opacity: primaryDisabled ? 0.5 : 1,
           }}
         >
-          <span>✅</span>
+          <Icon name="check" size={16} />
           {step === "idle"
             ? `${activeFileLabel} 생성`
             : step === "preview"
@@ -1255,7 +1256,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
             opacity: securityScanEnabled ? 1 : 0.5,
           }}
         >
-          <span>🔒</span> {step === "scanning" ? "보안 스캔 중…" : "보안 스캔"}
+          <Icon name="shield" size={14} /> {step === "scanning" ? "보안 스캔 중…" : "보안 스캔"}
         </button>}
       </div>
 

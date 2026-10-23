@@ -448,7 +448,7 @@ const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCanc
   return (
     <div style={{ marginTop: 8, border: `1px solid ${border}`, borderRadius: 9, background: "#1b2530", overflow: "hidden", boxShadow: "0 6px 18px rgba(0,0,0,.3)", maxWidth: 420 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", background: head, borderBottom: `1px solid ${border}`, fontWeight: 700, fontSize: 12, color: "#e6f0f8" }}>
-        <span>{accepted ? (complete ? "✓ 적용 완료" : st.steps.some(step => step.state === "fail") ? "작업 중단 · 내용 확인" : "승인됨 · 변경 검토") : st.status === "error" ? "⚠️ 진행 실패" : st.status === "approving" ? "⏳ 준비 중" : "📁 생성 승인"}</span>
+        <span>{accepted ? (complete ? "✓ 적용 완료" : st.steps.some(step => step.state === "fail") ? "작업 중단 · 내용 확인" : "승인됨 · 변경 검토") : st.status === "error" ? "진행 실패" : st.status === "approving" ? "준비 중" : "생성 승인"}</span>
         {!accepted && badge && <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 999, background: "#3a2a10", color: "#f0b35b", border: "1px solid #6b4a17" }}>{badge}</span>}
         {accepted && <span style={{ marginLeft: "auto", ...mono, fontSize: 10, color: "#8fd9ad", padding: "2px 7px", borderRadius: 999, background: "#1f3328", border: "1px solid #2f6b4a", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{folderLabel}</span>}
       </div>

@@ -5,6 +5,7 @@
  * 명세 값은 부모(CodeAgent 결정 창)가 들고, 여기서는 지금 편집 중인 줄만 기억한다.
  */
 import React, { useState } from "react";
+import { Icon } from "./ui/icons";
 import { Checkbox } from "./Check";
 import { EditableSpec, KIND_LABEL, SPEC_KINDS, SpecIssue, SpecKind, addCriterion, removeCriterion, updateCriterion } from "./specModel";
 
@@ -78,7 +79,7 @@ export const SpecEditor: React.FC<SpecEditorProps> = ({ spec, issues, onChange, 
             <div onClick={() => !disabled && setEditing("goal")} style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.45, color: spec.goal ? C.fg : C.faint, cursor: "text" }}>
               {spec.goal || "끝나면 무엇을 할 수 있게 되는지 한 문장으로 적어 주세요"}
             </div>
-            <button type="button" className="rc-spec-icon" aria-label="목표 고치기" disabled={disabled} onClick={() => setEditing("goal")}>✎</button>
+            <button type="button" className="rc-spec-icon" aria-label="목표 고치기" disabled={disabled} onClick={() => setEditing("goal")}><Icon name="edit" size={14} /></button>
           </div>
         )}
       </div>
@@ -86,7 +87,7 @@ export const SpecEditor: React.FC<SpecEditorProps> = ({ spec, issues, onChange, 
       {/* 범위 */}
       <div className="rc-spec-head">
         <div className="rc-spec-sec">범위
-          <button type="button" className="rc-spec-icon" aria-label="범위 고치기" disabled={disabled} onClick={() => setEditing(editing === "scope" ? null : "scope")}>✎</button>
+          <button type="button" className="rc-spec-icon" aria-label="범위 고치기" disabled={disabled} onClick={() => setEditing(editing === "scope" ? null : "scope")}><Icon name="edit" size={14} /></button>
         </div>
         {editing === "scope" ? (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 8 }}>
@@ -153,7 +154,7 @@ export const SpecEditor: React.FC<SpecEditorProps> = ({ spec, issues, onChange, 
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 2 }}>
-                  {!open && <button type="button" className="rc-spec-icon" aria-label={`합격 조건 ${i + 1} 고치기`} disabled={disabled} onClick={() => setEditing(c.key)}>✎</button>}
+                  {!open && <button type="button" className="rc-spec-icon" aria-label={`합격 조건 ${i + 1} 고치기`} disabled={disabled} onClick={() => setEditing(c.key)}><Icon name="edit" size={14} /></button>}
                   <button type="button" className="rc-spec-icon" aria-label={`합격 조건 ${i + 1} 지우기`} disabled={disabled}
                     onClick={() => { if (editing === c.key) setEditing(null); onChange(removeCriterion(spec, c.key)); }}>×</button>
                 </div>

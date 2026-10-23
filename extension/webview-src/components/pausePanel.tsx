@@ -6,6 +6,7 @@
  *  · 그 밖(사용 한도·연결)에는 이유와 [이어서 만들기].
  */
 import React from "react";
+import { Icon } from "./ui/icons";
 
 export interface FailedFile { file: string; kind?: string; reason?: string }
 export interface PauseInfo { message: string; done: number; total: number; reason?: string; failed?: FailedFile[] }
@@ -31,7 +32,7 @@ export const PausePanel: React.FC<{ paused: PauseInfo; onResume?: (mode: ResumeM
     return (
       <div className="rc-team-pause" role="status" data-testid="pause-failed" style={{ ...box(standalone), display: "block" }}>
         <div style={{ fontWeight: 600, marginBottom: 3 }}>
-          ⏸ 만들지 못한 파일 {failed.length}개 — 나머지 {paused.done}/{paused.total}개는 저장했습니다
+          <Icon name="pause" size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />만들지 못한 파일 {failed.length}개 — 나머지 {paused.done}/{paused.total}개는 저장했습니다
         </div>
         <ul style={{ margin: "0 0 6px", paddingLeft: 18 }}>
           {failed.slice(0, 6).map(f => (
@@ -52,7 +53,7 @@ export const PausePanel: React.FC<{ paused: PauseInfo; onResume?: (mode: ResumeM
   }
   return (
     <div className="rc-team-pause" role="status" data-testid="pause-resume" style={{ ...box(standalone), display: "flex" }}>
-      <span style={{ flex: 1 }}>⏸ {paused.message}</span>
+      <span style={{ flex: 1, display: "flex", alignItems: "center", gap: 6 }}><Icon name="pause" size={13} />{paused.message}</span>
       {onResume && <button type="button" style={btn(true)} disabled={disabled} onClick={() => onResume("retry")}>이어서 만들기{progress}</button>}
     </div>
   );

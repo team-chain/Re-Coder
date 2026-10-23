@@ -70,3 +70,44 @@ test('GitHub 시트: 처음엔 로그인 버튼 하나만',()=>{
  const html=r(h(GitHubPanel,{workspace:'/w',git:{branch:'main',dirty:false},onChanged(){},onReview(){},onWorkflow(){},disabled:false}));
  assert.match(html,/GitHub 에 푸시/);assert.match(html,/data-testid="github-primary"/);assert.doesNotMatch(html,EMOJI);
 });
+
+// 2.0.47 나머지 화면
+const {ApprovalCard}=require('../out/webview-test/components/canvas/ApprovalCard');
+const {DiagnosticsPanel}=require('../out/webview-test/components/DiagnosticsPanel');
+const {CanvasDrawer}=require('../out/webview-test/components/canvas/CanvasDrawer');
+const fs=require('node:fs'),path=require('node:path');
+const plan=(cfg={})=>({id:'p',projectName:'TEMP',repository:'',branch:'main',commit:'abc',dirty:false,account:'123',coreRegion:'ap-northeast-2',
+ preflight:{blocked:false,summary:'점검 통과',reasons:[],warnings:[]},targetState:{exists:false,task_definition:'',images:[],budget:null,warnings:[]},
+ config:{target:'ecs',image_name:'app',tag:'v4',aws_region:'ap-northeast-2',ecs_cluster:'c',ecs_service:'s',task_family:'f',container_port:3000,cpu:'256',memory:'512',environment:'staging',dir:'',...cfg}});
+
+test('승인 카드: 핵심 값 · 보호 줄 · 자세히는 접힘 · 요금 한 줄 · 버튼 둘',()=>{
+ const html=r(h(ApprovalCard,{plan:plan(),onApprove(){},onCancel(){},onFix(){}}));
+ assert.match(html,/이 변경을 진행할까요/);assert.match(html,/서울/);assert.match(html,/app:v4/);
+ assert.match(html,/data-testid="approval-extra">없음 · Fargate 실행비만/);
+ assert.match(html,/<details[^>]*data-testid="approval-more"/);
+ assert.match(html,/승인하고 배포/);assert.match(html,/>취소</);assert.doesNotMatch(html,EMOJI);
+ const https=r(h(ApprovalCard,{plan:plan({https:true,edge:'alb'}),onApprove(){},onCancel(){},onFix(){}}));
+ assert.match(https,/월 약 \$18\+/);assert.match(https,/로드밸런서 켬 — HTTPS 용 · WAF 없음/);
+ const waf=r(h(ApprovalCard,{plan:plan({edge:'alb_waf',database:'rds'}),onApprove(){},onCancel(){},onFix(){}}));
+ assert.match(waf,/월 약 \$40\+/);assert.match(waf,/대규모 방패 켬 — 로드밸런서 \+ WAF/);
+});
+
+test('시스템 점검: 한국어 이름 · 상태 글자 · 펼치면 안내',()=>{
+ const html=r(h(DiagnosticsPanel,{diagnostics:{core_ready:'ready',ai_ready:'ready',docker_ready:'not_ready',aws_deploy_ready:'ready',ops_ready:'partial'}}));
+ assert.match(html,/시스템 점검/);assert.match(html,/3\/5 정상/);assert.match(html,/ReCoder 코어/);assert.match(html,/Docker Desktop/);
+ assert.match(html,/data-tone="ok">정상/);assert.match(html,/>필요</);assert.match(html,/>일부</);
+ assert.doesNotMatch(html,/System Diagnostics|checks passed|Re-run|How to activate/);
+});
+
+test('캔버스 패널 머리: 아이콘 · 제목 · 한 줄 설명 · 닫기 아이콘',()=>{
+ const html=r(h(CanvasDrawer,{open:true,title:'배포 이력',sub:'기록 · 되돌리기',icon:h('i',null,'I'),onClose(){}},h('p',null,'x')));
+ assert.match(html,/rc-drawer-head/);assert.match(html,/배포 이력/);assert.match(html,/기록 · 되돌리기/);assert.match(html,/aria-label="패널 닫기"/);
+ assert.doesNotMatch(html,/>닫기</);
+});
+
+test('웹뷰 소스에 이모지가 없다',()=>{
+ const bad=/[\u{1F300}-\u{1FAFF}\u2600-\u26FF\u2705\u23E9-\u23FA\u270E\u275A\u2315\uFE0F]/u, hits=[];
+ const walk=d=>{for(const f of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,f.name);if(f.isDirectory())walk(p);else if(/\.tsx?$/.test(f.name)){fs.readFileSync(p,'utf8').split('\n').forEach((l,i)=>{if(bad.test(l)&&!/^\s*(\/\/|\*)/.test(l))hits.push(`${path.relative(d,p)}:${i+1}`);});}}};
+ walk(path.join(__dirname,'../webview-src'));
+ assert.deepEqual(hits,[]);
+});

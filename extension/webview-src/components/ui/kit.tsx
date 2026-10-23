@@ -109,10 +109,10 @@ function ensure(): boolean {
 }
 
 /** 부품을 쓰는 영역 — 스타일을 한 번 넣고 테마 색 변수를 연다. */
-export function Kit({ children, className = "", style, ...rest }: React.HTMLAttributes<HTMLDivElement>) {
+export const Kit = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(function Kit({ children, className = "", style, ...rest }, ref) {
   const live = ensure();
-  return <div className={`rk ${className}`.trim()} style={style} {...rest}>{!live && <style>{KIT_CSS}</style>}{children}</div>;
-}
+  return <div ref={ref} className={`rk ${className}`.trim()} style={style} {...rest}>{!live && <style>{KIT_CSS}</style>}{children}</div>;
+});
 
 export function SheetHead({ icon, title, sub }: { icon: React.ReactNode; title: React.ReactNode; sub?: React.ReactNode }) {
   return <div className="rk-head"><span className="ic">{icon}</span><div style={{ minWidth: 0 }}><h3>{title}</h3>{sub && <p>{sub}</p>}</div></div>;

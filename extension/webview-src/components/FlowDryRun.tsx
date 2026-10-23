@@ -10,6 +10,7 @@
  * 정적 분석이라 실제 실행 순서·값과 다를 수 있다는 것을 화면에 함께 적는다.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Icon } from "./ui/icons";
 import {
   BRANCH_LABEL, DryRunStep, EFFECT_LABEL, EffectKind, FlowGraph, FlowNode,
   dryRun, findingsByNode,
@@ -122,7 +123,7 @@ export const FlowDryRun: React.FC<FlowDryRunProps> = ({ graph, changed, removed,
       nodes.push({
         id, role: roleOf(n.file, { kind: n.kind }), group: n.kind === "route" ? "API 경로" : n.file,
         groupLabel: n.kind === "route" ? "API 경로" : shortFile(n.file), order: idx,
-        title: `${n.kind === "route" ? "🛣 " : n.kind === "main" ? "▶ " : ""}${nodeLabel(n)}`,
+        title: `${n.kind === "route" ? "경로 · " : n.kind === "main" ? "시작 · " : ""}${nodeLabel(n)}`,
         sub: n.kind === "route" ? "API 경로" : `${n.file.split("/").pop()}:${n.line}`,
         state: current?.node === id ? "current" : isVisited ? "visited" : "future",
         accent: current?.node === id ? C.cyan : change ? C.violet : sec.length ? C.red : undefined,
@@ -206,10 +207,10 @@ export const FlowDryRun: React.FC<FlowDryRunProps> = ({ graph, changed, removed,
           ))}
         </select>
         <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          <button style={btn} aria-label="처음으로" title="처음으로 (Home)" onClick={() => { setPlaying(false); setStep(0); }}>⏮</button>
+          <button style={btn} aria-label="처음으로" title="처음으로 (Home)" onClick={() => { setPlaying(false); setStep(0); }}><Icon name="rewind" size={14} /></button>
           <button style={btn} aria-label="이전 단계" title="이전 단계 (←)" disabled={step <= 0} onClick={() => { setPlaying(false); setStep((s) => Math.max(0, s - 1)); }}>◀</button>
           <button style={{ ...btn, borderColor: C.cyan, color: C.cyan }} aria-label={playing ? "일시정지" : "재생"} title="재생/일시정지 (스페이스)"
-            onClick={() => { if (!playing && step >= steps.length - 1) setStep(0); setPlaying((p) => !p); }}>{playing ? "⏸" : "▶"}</button>
+            onClick={() => { if (!playing && step >= steps.length - 1) setStep(0); setPlaying((p) => !p); }}>{playing ? <Icon name="pause" size={14} /> : <Icon name="play" size={14} />}</button>
           <button style={btn} aria-label="다음 단계" title="다음 단계 (→)" disabled={step >= steps.length - 1} onClick={() => { setPlaying(false); setStep((s) => Math.min(steps.length - 1, s + 1)); }}>▶|</button>
           <span data-flow-progress style={{ fontSize: 11, color: C.dim, marginLeft: 4, whiteSpace: "nowrap" }}>{steps.length ? step + 1 : 0} / {steps.length}</span>
         </div>

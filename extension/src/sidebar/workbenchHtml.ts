@@ -1344,7 +1344,7 @@ html[data-mode="sidebar"] .deploy-grid{ }
         if (sel){
           const repos = (m.payload && m.payload.repos) || [];
           sel.innerHTML = '<option value="">— 레포 선택 —</option>' +
-            repos.map(r => '<option value="' + r.name + '">' + (r.private ? '🔒 ' : '') + r.name + '</option>').join('');
+            repos.map(r => '<option value="' + r.name + '">' + (r.private ? '(비공개) ' : '') + r.name + '</option>').join('');
           sel.onchange = () => {
             const v = sel.value || '';
             ['gh-secret-repo','gh-runs-repo'].forEach(id => { if ($(id) && !$(id).value) $(id).value = v; });

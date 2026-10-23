@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
+import { Icon } from "../ui/icons";
 import * as THREE from "three";
 import { colors, dropTargetAt, SceneEdge, SceneNode, Target } from "./model";
 import { createArchitectureScene } from './threeScene';
@@ -125,7 +126,7 @@ export function Scene({ nodes, edges, busy, onActivate, onDrop, force2D = false,
               data-canvas-target={n.target} aria-label={`${n.name} · ${n.badge}`} title={`${n.name}\n${n.subtitle}\n${n.badge}`} aria-disabled={n.locked || undefined}
               onClick={() => { if (suppress.current) { suppress.current=false; return; } onActivate(n); }}
               onPointerDown={e => { suppress.current=false; if(n.id!=="project" || busy || e.button!==0) return; gesture.current={x:e.clientX,y:e.clientY,moved:false}; e.currentTarget.setPointerCapture(e.pointerId); }}>
-              <span className="rc-node-label"><strong title={n.name}>{n.name}</strong><small title={n.subtitle}>{n.subtitle}</small><em>{n.locked ? "🔒 " : ""}{n.badge}</em></span>
+              <span className="rc-node-label"><strong title={n.name}>{n.name}</strong><small title={n.subtitle}>{n.subtitle}</small><em>{n.locked && <Icon name="lock" size={11} style={{ verticalAlign: "-1px", marginRight: 4 }} />}{n.badge}</em></span>
               <span className={`rc-plate ${n.kind==="gate" ? "rc-gate-plate" : ""}`}><Logo kind={n.kind} /><small>{n.kind === "project" ? "PROJECT" : n.kind.toUpperCase()}</small></span>
             </button>
           </foreignObject>

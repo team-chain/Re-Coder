@@ -35,6 +35,11 @@ const P: Record<string, string> = {
   external: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
   branch: "M6 3v12M6 15a3 3 0 1 0 0 .01M18 9a3 3 0 1 0 0-.01M18 9c0 4-6 3-12 6",
   file: "M7 3h7l5 5v13H7zM14 3v5h5",
+  play: "M8 5v14l11-7z",
+  pause: "M8 5v14M16 5v14",
+  rewind: "M6 5v14M19 5 9 12l10 7z",
+  edit: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4",
+  alert: "M12 4 2.5 20h19zM12 10v4M12 17v.01",
 };
 
 export type IconName = keyof typeof P;

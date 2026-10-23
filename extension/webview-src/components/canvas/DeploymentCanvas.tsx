@@ -12,7 +12,8 @@ import { EcsRuntimeEnvironment, parseRuntimeEnvironment } from "../EcsRuntimeEnv
 import { DEFAULT_PROTECTION, protectionRequest, type Protection } from "../EcsProtection";
 import { EcsExecutionRole } from "../EcsExecutionRole";
 import { EcsDeploymentProgress, EcsProgressStatus, initialEcsProgress, serviceLink } from "../EcsDeploymentProgress";
-import { Scene } from "./Scene";
+import { Logo, Scene } from "./Scene";
+import { Icon } from "../ui/icons";
 import { AnalysisGraph, SceneNode, Snapshot, Target, analysisScene, available, deploymentScene } from "./model";
 import { CanvasDrawer } from "./CanvasDrawer";
 import { ApprovalCard, Config, Issue, Plan } from "./ApprovalCard";
@@ -26,6 +27,16 @@ import { DockerNotifications } from './dockerNotifications';
 import {GroundedRepairPanel} from '../GroundedRepairPanel';
 
 type Pane = "canvas" | "details" | "history" | "aws" | "docker" | "security" | "discord" | "status" | "analysis";
+/** 2.0.47 패널 머리 — 설정 시트와 같은 아이콘 · 제목 · 한 줄 설명. Discord 는 자기 머리를 그린다. */
+const PANE_HEAD: Partial<Record<Pane, { icon: React.ReactNode; title: string; sub: string }>> = {
+  details: { icon: <Icon name="settings" size={18} />, title: "상세 배포", sub: "파이프라인 · 워크플로 · 고급 설정" },
+  history: { icon: <Icon name="history" size={18} />, title: "배포 이력", sub: "이 컴퓨터에 저장된 기록 · 이전 버전으로 되돌리기" },
+  aws: { icon: <Logo kind="ecs" />, title: "AWS 연결", sub: "배포 전용 권한으로 내 AWS 계정에 연결" },
+  docker: { icon: <Logo kind="docker" />, title: "Docker", sub: "로컬에서 빌드 · 실행 · 롤백" },
+  security: { icon: <Icon name="shield" size={18} />, title: "보안 검사", sub: "시크릿 · 이미지 · Dockerfile · 배포 정책" },
+  status: { icon: <Icon name="pulse" size={18} />, title: "배포 상태", sub: "검사 단계 · 진행 · 실행 중인 태스크" },
+  analysis: { icon: <Icon name="graph" size={18} />, title: "소스 분석", sub: "파일 · 함수 연결과 발견한 문제" },
+};
 const defaultConfig: Config = { target:"ecs",image_name:"recoder-app",tag:"v1",aws_region:"",ecs_cluster:"recoder-cluster",ecs_service:"recoder-app",task_family:"recoder-task",container_port:8000,cpu:"256",memory:"512",environment:"staging",dir:"" };
 const toolLabels: Record<string,string> = {pending:'대기',running:'검사 중',passed:'통과',findings:'발견 항목 있음',unverified:'미확인',not_run:'미실행',accepted:'요청 승인'};
 
@@ -239,7 +250,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
       {level===1&&!completed&&(live?.deployment_id||running||Boolean(snapshot?.warnings.length))&&<button className="rc-activity" onClick={()=>openPane('status')}>{running?(live?.stage_text||'배포 준비 중…'):live?.stage==='failed'?'배포 실패 · 결과 확인':'배포 상태 확인'} →</button>}
     </div>
     {level===1&&completed&&<div className="rc-result-bar" role="status"><span><strong>{s3Result?'S3 배포 완료':'배포 완료'}</strong><small>{s3Result?.bucket || snapshot?.resource?.service}</small></span><div className="rc-actions">{completedLink&&<a className="rc-service-link" href={completedLink} target="_blank" rel="noreferrer">서비스 열기 ↗</a>}<button onClick={()=>openPane('status')}>결과 상세</button></div></div>}
-    <CanvasDrawer open={drawerOpen&&!plan} bare={Boolean(selection)} title={selection?targetTitle:pane==='analysis'?'소스 분석':panes.find(([id])=>id===pane)?.[1]||'배포'} onClose={closeDrawer} busy={busy}>
+    <CanvasDrawer open={drawerOpen&&!plan} bare={Boolean(selection)||!PANE_HEAD[pane]} icon={PANE_HEAD[pane]?.icon} sub={PANE_HEAD[pane]?.sub} title={selection?targetTitle:PANE_HEAD[pane]?.title||panes.find(([id])=>id===pane)?.[1]||'배포'} onClose={closeDrawer} busy={busy}>
       {drawerOpen&&notice}
       {selection&&<Kit className="rc-target-setup">
         {selection==='ecs'&&<EcsSheet config={config} update={(k,v)=>update(k,v)} running={running} busy={busy} ready={Boolean(snapshot?.workspace)} onPrepare={()=>prepare()}
@@ -248,11 +259,11 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
         {selection==='s3'&&<S3Sheet config={config} update={(k,v)=>update(k,v)} running={running} busy={busy} ready={Boolean(snapshot?.workspace)} onPrepare={()=>prepare()} autoDir={!dirTouched.current}/>}
         {selection==='github'&&snapshot&&<GitHubPanel workspace={snapshot.workspace} git={snapshot.git} onChanged={git=>{setSnapshot(s=>s?{...s,git}:s);refresh();}} onReview={()=>prepare()} onWorkflow={()=>openPane('details')} disabled={running}/>}
       </Kit>}
-      {visited.has('details')&&<div hidden={pane!=='details'}><DeploymentCenter key={snapshot?.workspace||'none'} onOpenDocker={onOpenDocker}/></div>}
-      {visited.has('history')&&<div hidden={pane!=='history'}><Replay/></div>}
+      {visited.has('details')&&<div className="rc-pane-details" hidden={pane!=='details'}><DeploymentCenter key={snapshot?.workspace||'none'} onOpenDocker={onOpenDocker}/></div>}
+      {visited.has('history')&&<div className="rc-pane-history" hidden={pane!=='history'}><Replay/></div>}
       {visited.has('aws')&&<div hidden={pane!=='aws'}><AwsConnection ecsPolicyContext={{cluster:config.ecs_cluster,service:config.ecs_service,ecrRepo:(config.image_name||config.ecs_service).trim().toLowerCase()}}/></div>}
       {visited.has('docker')&&<div hidden={pane!=='docker'}><ShipMode key={snapshot?.workspace||'none'} isAiReady={isAiReady} isDockerReady={isDockerReady}/></div>}
-      {visited.has('security')&&<div hidden={pane!=='security'}>{security&&<p className="rc-muted">빨간 점선은 소스의 시크릿이 저장소로 유출될 수 있는 경로입니다. 커밋·이미지 포함 여부는 별도 확인이 필요합니다. 검사 미실행은 안전 판정이 아닙니다.</p>}{manualGate&&manualGate.state!=='running'&&<div className={`rc-note ${manualGate.state==='issues'?'rc-error':''}`} role="status" style={{borderLeft:`3px solid ${gateColors[manualGate.state]}`}}><b>보안 게이트 · {manualGate.label}</b>{manualGate.notApplicable.length>0&&<small style={{display:'block'}}>{manualGate.notApplicable.map(k=>k==='trivy'?'이미지 검사(빌드된 이미지 없음)':'Dockerfile 검사(Dockerfile 없음)').join(', ')}는 대상이 없어 제외했습니다. 배포할 때 다시 검사합니다.</small>}{manualGate.state==='unverified'&&<small style={{display:'block'}}>검사하지 못한 항목은 통과로 보지 않습니다. 항목을 펼쳐 원인을 확인하세요.</small>}</div>}<SecurityScanPanel key={snapshot?.workspace||'none'} kinds={['trivy','hadolint','gitleaks']} title="보안 검사" note="수정한 소스를 다시 검사하세요." onChange={onScanResults}/><PolicyPanel/>{scan?.findings.map((f,i)=><div key={i} className="rc-finding"><b>{f.tool} · {f.title}</b><p>{f.fix}</p><small>{f.location}</small></div>)}{Boolean(scan?.findings.length)&&<button disabled={!isAiReady} onClick={()=>postMessage('canvas.fix',{findings:scan?.findings})}>AI 수정안 만들기</button>}</div>}
+      {visited.has('security')&&<div hidden={pane!=='security'}>{security&&<p className="rc-muted">빨간 점선은 소스의 시크릿이 저장소로 유출될 수 있는 경로입니다. 커밋·이미지 포함 여부는 별도 확인이 필요합니다. 검사 미실행은 안전 판정이 아닙니다.</p>}{manualGate&&manualGate.state!=='running'&&<div className={`rc-note ${manualGate.state==='issues'?'rc-error':''}`} role="status" style={{borderLeft:`3px solid ${gateColors[manualGate.state]}`}}><b>보안 게이트 · {manualGate.label}</b>{manualGate.notApplicable.length>0&&<small style={{display:'block'}}>{manualGate.notApplicable.map(k=>k==='trivy'?'이미지 검사(빌드된 이미지 없음)':'Dockerfile 검사(Dockerfile 없음)').join(', ')}는 대상이 없어 제외했습니다. 배포할 때 다시 검사합니다.</small>}{manualGate.state==='unverified'&&<small style={{display:'block'}}>검사하지 못한 항목은 통과로 보지 않습니다. 항목을 펼쳐 원인을 확인하세요.</small>}</div>}<SecurityScanPanel key={snapshot?.workspace||'none'} kinds={['trivy','hadolint','gitleaks']} title="지금 소스 검사" note="고친 뒤 다시 검사하세요." onChange={onScanResults}/><PolicyPanel/>{scan?.findings.map((f,i)=><div key={i} className="rc-finding"><b>{f.tool} · {f.title}</b><p>{f.fix}</p><small>{f.location}</small></div>)}{Boolean(scan?.findings.length)&&<button disabled={!isAiReady} onClick={()=>postMessage('canvas.fix',{findings:scan?.findings})}>AI 수정안 만들기</button>}</div>}
       {visited.has('discord')&&<div hidden={pane!=='discord'}><DiscordPanel state={discord} events={events} enabled={notify} onEnabled={value=>notificationSettings(value)} post={postMessage} guilds={guilds} channels={channels} error={discordError}/></div>}
       {pane==='analysis'&&graph&&<div><header><h3>{level===2?'파일 · import':'함수 · 호출'} {graph.nodes.length}개</h3><button onClick={()=>loadGraph(level===3?file:'')}>다시 분석</button></header>{graph.nodes.length===0&&<p>분석 가능한 항목이 없습니다.</p>}{level===3&&<button onClick={()=>postMessage('map.openFile',{id:file})}>파일을 에디터에서 열기</button>}{graph.findings.map((f,i)=><div className="rc-finding" key={i}><b>{f.title}</b><p>{f.detail}</p><small>{f.fix}</small></div>)}</div>}
       {pane==='status'&&<div>

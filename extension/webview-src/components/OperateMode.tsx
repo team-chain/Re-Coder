@@ -12,6 +12,7 @@
  */
 
 import React, { useState, useCallback } from "react";
+import { Icon } from "./ui/icons";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal from "./ApprovalModal";
 import { OpsAlertsPanel } from "./OpsAlertsPanel";
@@ -330,7 +331,7 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
             )}
             {!proposal.parameters.rollback_feasible && (
               <div style={{ marginTop: 8, fontSize: 10, color: "var(--vscode-editorWarning-foreground, #ff9800)" }}>
-                ⚠ 롤백 불완전: {proposal.parameters.rollback_blocker}
+                <Icon name="alert" size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />롤백 불완전: {proposal.parameters.rollback_blocker}
               </div>
             )}
           </div>
