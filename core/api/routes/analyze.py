@@ -14,6 +14,10 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+try:
+    from api.errors import internal_error as _internal_error
+except ImportError:  # pragma: no cover
+    from core.api.errors import internal_error as _internal_error  # type: ignore
 
 from schemas import AnalyzeRequest, ApprovalLevel, FilePatch, PatchProposal, RiskLevel
 
@@ -486,7 +490,7 @@ async def approve_patch(proposal_id: str, approved: bool) -> dict:
                 Path(fpath_str).write_bytes(original_bytes)
             except Exception:
                 pass
-        raise HTTPException(status_code=500, detail=f"Patch application failed: {exc}") from exc
+        raise _internal_error(exc, message="패치를 적용하지 못해 원래 파일로 되돌렸습니다.") from exc
 
     del _proposals[proposal_id]
 
@@ -749,7 +753,7 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"코드 생성 실패: {e}") from e
+        raise _internal_error(e, message="코드 생성에 실패했습니다.") from e
 
     return result
 
@@ -1093,7 +1097,7 @@ async def code_plan_route(body: CodePlanRequest) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"설계 결정 생성 실패: {e}") from e
+        raise _internal_error(e, message="설계 결정 생성에 실패했습니다.") from e
 
     return result
 
@@ -1142,4 +1146,4 @@ async def code_spec_route(body: CodeSpecRequest) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"명세 초안 생성 실패: {e}") from e
+        raise _internal_error(e, message="명세 초안 생성에 실패했습니다.") from e

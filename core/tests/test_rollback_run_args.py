@@ -88,7 +88,7 @@ def _record(**overrides) -> DeploymentRecord:
 
 def _rollback(rec: DeploymentRecord) -> dict:
     return asyncio.run(
-        deploy_route.rollback(deploy_route.RollbackRequest(deployment_id=rec.deployment_id))
+        deploy_route.rollback(deploy_route.RollbackRequest(deployment_id=rec.deployment_id, approved=True))
     )
 
 
@@ -271,7 +271,7 @@ def test_교체_배포_명령이_예외여도_이전_정상_컨테이너를_복�
         )
 
     assert exc.value.status_code == 500
-    assert "previous container restored" in str(exc.value.detail)
+    assert "이전 컨테이너를 다시 띄웠습니다" in str(exc.value.detail) and "오류 ID" in str(exc.value.detail)
     restore_run = [args for args in calls if len(args) > 1 and args[1] == "run"][-1]
     assert restore_run[-1] == "app:v1"
 
@@ -311,7 +311,7 @@ def test_기존_컨테이너_삭제_중_예외여도_이전_정상_컨테이너�
         )
 
     assert exc.value.status_code == 500
-    assert "previous container restored" in str(exc.value.detail)
+    assert "이전 컨테이너를 다시 띄웠습니다" in str(exc.value.detail) and "오류 ID" in str(exc.value.detail)
     restore_run = [args for args in calls if len(args) > 1 and args[1] == "run"][-1]
     assert restore_run[-1] == "app:v1"
 
@@ -501,3 +501,80 @@ def test_롤백_헬스_미확인과_실패를_통과로_보내지_않는다(capt
     assert result["health_ok"] is False
     assert result["restored_deployment_id"] is None
     assert result["verification_resumed"] is False
+
+
+# ---------------------------------------------------------------------------
+# 3.0.2 — 승인 필수 · 배포와 같은 .env 값 · 헬스 실패 시 롤백 직전 컨테이너 복원
+# ---------------------------------------------------------------------------
+
+
+def test_롤백은_승인이_없으면_아무것도_하지_않는다(captured):
+    from fastapi import HTTPException
+    rec = _record()
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(deploy_route.rollback(deploy_route.RollbackRequest(deployment_id=rec.deployment_id)))
+    assert exc.value.status_code == 400 and "승인" in exc.value.detail
+    assert captured == []
+
+
+def test_롤백은_배포와_같은_env_파일_값을_넘기고_새_비밀을_만들지_않는다(captured, monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("JWT_SECRET=from-env-file\nSTRIPE_KEY=sk_test_1\n", encoding="utf-8")
+    seen_provided: list[set] = []
+
+    def fake_settings(container, workspace, provided, port):
+        seen_provided.append(set(provided))
+        #: deploy_settings.runtime_env 처럼 — 이미 값이 정해진 이름은 건드리지 않는다.
+        return {k: v for k, v in {"JWT_SECRET": "freshly-generated", "SESSION_SECRET": "stored"}.items()
+                if k not in provided}
+
+    monkeypatch.setattr(deploy_route, "_settings_env", fake_settings)
+    previous = _record(image="app:v1", env_file_paths=[str(env_file)])
+    current = _record(rollback_source_deployment_id=previous.deployment_id, rollback_ports={"18080": "8000"},
+                      rollback_env={"PORT": "8000"}, env_file_paths=[])
+    _rollback(current)
+    cmd = _run_cmd(captured)
+    assert "JWT_SECRET=from-env-file" in cmd and "STRIPE_KEY=sk_test_1" in cmd
+    assert "JWT_SECRET=freshly-generated" not in cmd
+    assert "SESSION_SECRET=stored" in cmd
+    assert {"JWT_SECRET", "STRIPE_KEY", "PORT"} <= seen_provided[-1]
+
+
+def test_되돌린_컨테이너가_헬스_실패하면_롤백_직전_컨테이너를_복원한다(captured, monkeypatch):
+    rec = _record()
+    before = DeploymentRecord(project_id="p", method=DeployMethod.LOCAL_DOCKER, image="app:v2",
+                              container_name="app", ports={"18080": "8000"}, status=DeployStatus.SUCCESS)
+    restored: list = []
+
+    async def fake_capture(name):
+        return before
+
+    async def fake_restore(record):
+        restored.append(record)
+        return True, "", ""
+
+    monkeypatch.setattr(deploy_route, "_capture_running_local_container", fake_capture)
+    monkeypatch.setattr(deploy_route, "_restore_prior_local_container", fake_restore)
+    _stub_health(monkeypatch, healthy=False)
+    result = _rollback(rec)
+    assert result["status"] == "failed" and result["health_ok"] is False
+    assert restored == [before], "헬스 실패한 롤백 컨테이너를 그대로 두면 아무것도 서비스하지 않는다"
+    assert result["restored_previous"] is True and "다시 띄웠습니다" in result["warning"]
+    assert ["docker", "rm", "-f", "app"] in captured
+
+
+def test_롤백이_성공하면_롤백_직전_컨테이너를_되살리지_않는다(captured, monkeypatch):
+    rec = _record()
+    restored: list = []
+
+    async def fake_capture(name):
+        return DeploymentRecord(project_id="p", method=DeployMethod.LOCAL_DOCKER, image="app:v2", container_name="app")
+
+    async def fake_restore(record):
+        restored.append(record)
+        return True, "", ""
+
+    monkeypatch.setattr(deploy_route, "_capture_running_local_container", fake_capture)
+    monkeypatch.setattr(deploy_route, "_restore_prior_local_container", fake_restore)
+    result = _rollback(rec)
+    assert result["status"] == "ok" and restored == [] and result["restored_previous"] is None

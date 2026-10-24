@@ -34,6 +34,7 @@ from core import aws_infra, aws_policy
 from core import shield as shield_mod
 from core import aws_edge
 from core import aws_cdn, aws_rds
+from core import ecs_stable
 from core.aws_infra import InfraError
 from core.schemas import (
     ECSDeployRecord,
@@ -532,6 +533,7 @@ class ECSAgent:
                     if diagnosis:
                         record.provisioned["diagnosis"] = "\n".join(diagnosis)
                         record.error_detail = "\n".join(diagnosis)
+                    await self._tell_watcher(request, record, clients)
                     return record
 
                 # Rollback proposal 생성 (Approval Level 3)
@@ -564,6 +566,8 @@ class ECSAgent:
                     record.provisioned["diagnosis"] = "\n".join(diagnosis)
                     record.error_detail = "\n".join(diagnosis)
                 await self._halt_failed_deployment(request, record, clients)
+                # 감시자의 롤백 기준은 **마지막 성공 버전**으로 둔다 — 실패한 이번 버전이 기준이 되지 않게.
+                await self._tell_watcher(request, record, clients)
                 return record
 
             # 10. 공개 주소 확인 — 카드 DoD 1번 "URL 로 접속됨"
@@ -577,6 +581,7 @@ class ECSAgent:
 
             record.status = ECSDeployStatus.SUCCEEDED
             record.completed_at = datetime.now(timezone.utc)
+            self._record_success(request, record)
             await self._tell_watcher(request, record, clients)
             logger.info(
                 "ECS 배포 성공: %s/%s image=%s url=%s",
@@ -593,6 +598,12 @@ class ECSAgent:
             record.status = ECSDeployStatus.CANCELLED
             record.error_message = f"사용자 요청으로 취소되었습니다 ({stop} 단계 뒤)"
             await self._stop_after_cancel(request, record, clients)
+            # 취소는 태스크만 멈춘다 — 이미 만든 로드밸런서·WAF·CloudFront·RDS 는 남아 요금이 나온다.
+            # 실패 경로와 같은 비용 안내를 남기고, 무엇이 남았는지 기록한다.
+            if self._warn_billing_leftovers(request, record):
+                record.error_remedy = (
+                    "취소 전에 만든 리소스(" + record.provisioned["billing_resources"] + ")는 지우지 않고 남겼습니다 — "
+                    "요금이 계속 나옵니다. 다시 배포하면 그대로 쓰고, 그만 쓸 거면 「AWS 리소스 정리」에서 지우세요.")
             return record
 
         except InfraError as exc:
@@ -853,6 +864,7 @@ class ECSAgent:
                         name=f"{req.service}-sg",
                         port=req.container_port,
                         tags=self.resource_tags(req),
+                        require_managed=True,
                     )
                 ]
             rec.provisioned["security_groups"] = ",".join(groups)
@@ -1106,7 +1118,17 @@ class ECSAgent:
             detail=f"실행 역할 {exec_arn} 의 secretsmanager:GetSecretValue 판정: {decision or '알 수 없음'}",
             remedy=("관리자 권한으로 한 번 실행한 뒤 다시 배포하세요(이 서비스의 DB 비밀 하나만 읽게 함): "
                     f"aws iam put-role-policy --role-name {role} --policy-name {policy_name} --policy-document '{doc}'. "
-                    "또는 staging 으로 배포하면 접속 정보를 환경변수로 넣어 이 권한 없이 동작합니다. 아직 아무것도 만들지 않았습니다."))
+                    "또는 staging 으로 배포하면 접속 정보를 환경변수로 넣어 이 권한 없이 동작합니다. "
+                    + self._created_so_far(rec)))
+
+    def _created_so_far(self, rec: ECSDeployRecord) -> str:
+        """DB 비밀 권한 오류 안내의 끝 문장 — 이미 만든 요금 리소스가 있으면 사실대로 말한다."""
+        left = self._billing_resources(rec)
+        if not left:
+            return "요금이 나오는 리소스는 아직 아무것도 만들지 않았습니다."
+        rec.provisioned["billing_resources"] = ", ".join(left)
+        return (f"다만 {', '.join(left)} 은(는) 이미 만들어져 요금이 나옵니다 — 다시 배포하면 그대로 쓰고, "
+                "그만 쓸 거면 「AWS 리소스 정리」에서 지우세요.")
 
     async def _step_database_ready(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
         """RDS 가 준비되면 접속 정보를 비밀에 쓰고, 태스크에 넣을 값(staging)·참조(production)와 초기화 컨테이너를 정한다."""
@@ -1469,15 +1491,19 @@ class ECSAgent:
         """Task Definition JSON 생성 → AWS 등록. 이전 revision ARN 반환."""
         ecs = clients["ecs"]
 
-        # 이전 Task Definition ARN 조회 (rollback 대상).
+        # 롤백 대상 = **마지막으로 정상 배포가 끝난** 태스크 정의(이 PC 의 기록).
+        #
+        # 예전에는 서비스가 지금 가리키는 태스크 정의를 그대로 썼다. 직전 배포가 실패했으면
+        # 그건 실패한 버전이다(v2 정상 → v3 실패 → v4 의 롤백 대상이 v3). 기록이 없을 때만
+        # (이 PC 에서 처음 배포하는 기존 서비스) 서비스가 **안정 상태**일 때의 태스크 정의를 쓴다.
         # 서비스가 아직 없을 수도 있다 — 그건 정상이므로 조용히 넘어간다.
-        prev_arn: Optional[str] = None
+        steady_arn = ""
         try:
             services = ecs.describe_services(
                 cluster=req.cluster, services=[req.service]
             ).get("services", [])
             if services:
-                prev_arn = services[0].get("taskDefinition")
+                steady_arn = ecs_stable.steady_task_definition(services[0])
         except Exception as exc:  # noqa: BLE001
             logger.debug("이전 태스크 정의 조회 생략: %s", aws_infra.error_message(exc))
 
@@ -1510,14 +1536,43 @@ class ECSAgent:
         arn = resp["taskDefinition"]["taskDefinitionArn"]
         logger.info("태스크 정의 등록: %s", arn)
         aws_infra.tag_created(ecs, "ecs", arn, self.resource_tags(req))
+        prev_arn = self._rollback_target(req, arn, steady_arn)
         return arn, prev_arn
+
+    @staticmethod
+    def _rollback_target(req: ECSDeployRequest, new_arn: str, steady_arn: str = "") -> Optional[str]:
+        """이번 배포가 실패하면 되돌아갈 버전 — 마지막 성공 배포(새 리비전 자신은 제외). 없으면 None."""
+        try:
+            known = ecs_stable.last_success(req.region, req.cluster, req.service, exclude=new_arn)
+        except Exception as exc:  # noqa: BLE001 - 기록을 못 읽으면 안정 상태 판정으로만
+            logger.warning("성공 배포 기록을 읽지 못했습니다: %s", exc)
+            known = ""
+        if known:
+            return known
+        if steady_arn and ecs_stable._rev(steady_arn) != ecs_stable._rev(new_arn):
+            return steady_arn
+        return None
+
+    @staticmethod
+    def _record_success(req: ECSDeployRequest, rec: ECSDeployRecord) -> None:
+        """정상 배포(헬스·주소 확인까지 끝남)만 롤백 기준으로 적는다."""
+        if not rec.task_definition_arn:
+            return
+        try:
+            ecs_stable.record_success(req.region, req.cluster, req.service, rec.task_definition_arn)
+        except Exception as exc:  # noqa: BLE001 - 기록 실패가 배포 성공을 바꾸지 않는다
+            logger.warning("성공 배포 기록을 남기지 못했습니다: %s", exc)
 
     # ------------------------------------------------------------------
     # 7단계: 서비스 확보
     # ------------------------------------------------------------------
 
     async def _tell_watcher(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
-        """2.0.48 — 감시자가 설치돼 있으면 '이전 버전'(밤 롤백 링크의 대상)을 이번 배포 직전 버전으로 바꾼다. best-effort."""
+        """2.0.48 — 감시자가 설치돼 있으면 '이전 버전'(밤 롤백 링크의 대상)을 바꾼다. best-effort.
+
+        3.0.2 — 대상은 언제나 **마지막으로 정상 배포된 버전**이다(previous_task_definition_arn 은 이제
+        ecs_stable 기록에서 온다). 이번 배포가 성공했으면 그 직전 성공 버전, 실패했으면 마지막 성공 버전 —
+        실패한 버전은 절대 기준이 되지 않는다."""
         if not rec.task_definition_arn or not rec.previous_task_definition_arn:
             return
         try:
@@ -1530,7 +1585,9 @@ class ECSAgent:
                 watcher.from_clients(clients), region=req.region, cluster=req.cluster, service=req.service,
                 current_td=rec.task_definition_arn or "", stable_td=rec.previous_task_definition_arn or ""))
             if changed:
-                rec.provisioned["watcher"] = "24시간 감시자의 롤백 기준을 이번 배포 직전 버전으로 바꿨습니다."
+                rec.provisioned["watcher"] = (
+                    "24시간 감시자의 롤백 기준을 마지막으로 정상 배포된 버전"
+                    f"({ecs_stable._rev(rec.previous_task_definition_arn or '')})으로 맞췄습니다.")
         except Exception as exc:  # noqa: BLE001 - 감시자 갱신 실패가 배포 성공을 바꾸지 않는다
             logger.info("감시자 기준 버전 갱신 생략: %s", exc)
 
@@ -2110,14 +2167,7 @@ class ECSAgent:
         여기서 AWS 를 부르지 않는 이유: 이 경로에 오는 가장 큰 원인이
         **AWS 를 못 부르는 상황**이다. 그래서 끄는 방법을 알려주기만 한다.
         """
-        if str(rec.provisioned.get("database", "")).startswith("관리형 DB") and "db_cost_warning" not in rec.provisioned:
-            rec.provisioned["db_cost_warning"] = (
-                "관리형 DB(RDS)는 배포가 실패해도 남아 계속 요금이 나옵니다 — 다시 배포하면 그대로 쓰고(데이터 유지), "
-                "그만 쓸 거면 「AWS 리소스 정리」에서 지우세요.")
-        if rec.provisioned.get("load_balancer") and "edge_cost_warning" not in rec.provisioned:
-            rec.provisioned["edge_cost_warning"] = (
-                "로드밸런서(·WAF)는 배포가 실패해도 남아 있어 시간당 요금이 붙습니다 — 다시 배포하면 그대로 다시 쓰고, "
-                "그만 쓸 거면 「AWS 리소스 정리」에서 지우세요.")
+        ECSAgent._warn_billing_leftovers(req, rec)
         if not rec.provisioned.get("service"):
             return
         if "halt" in rec.provisioned or "cost_warning" in rec.provisioned:
@@ -2128,6 +2178,40 @@ class ECSAgent:
             "Deploy 캔버스 › 배포 상태의 '서비스 중지'(배포 중지)로 태스크 수를 0 으로 "
             "내리거나, 원인을 고친 뒤 다시 배포하세요."
         )
+
+    @staticmethod
+    def _billing_resources(rec: ECSDeployRecord) -> list[str]:
+        """이번 배포가 이미 만들었거나 다시 쓰기 시작한, 태스크와 상관없이 요금이 나오는 리소스."""
+        out: list[str] = []
+        if rec.provisioned.get("load_balancer"):
+            out.append("로드밸런서 " + str(rec.provisioned["load_balancer"]).split(" — ", 1)[0])
+        if str(rec.provisioned.get("waf", "")).startswith("켜짐"):
+            out.append("WAF")
+        if str(rec.provisioned.get("https", "")).startswith("켜짐"):
+            out.append("HTTPS 주소(CloudFront)")
+        #: "관리형 DB(RDS) — 비용 확인함" 은 승인 표시일 뿐이다. 실제로 만든(다시 쓴) DB 는 "관리형 DB <식별자> …".
+        database = str(rec.provisioned.get("database", ""))
+        parts = database.split(" ", 3)
+        if database.startswith("관리형 DB ") and len(parts) >= 3:
+            out.append(f"관리형 DB {parts[2]}")
+        return out
+
+    @staticmethod
+    def _warn_billing_leftovers(req: ECSDeployRequest, rec: ECSDeployRecord) -> bool:
+        """실패·취소로 끝났는데 남아 요금이 나오는 리소스를 기록하고 안내한다. 남은 것이 있으면 True."""
+        left = ECSAgent._billing_resources(rec)
+        if not left:
+            return False
+        rec.provisioned["billing_resources"] = ", ".join(left)
+        if any(item.startswith("관리형 DB") for item in left) and "db_cost_warning" not in rec.provisioned:
+            rec.provisioned["db_cost_warning"] = (
+                "관리형 DB(RDS)는 배포가 실패하거나 취소돼도 남아 계속 요금이 나옵니다 — 다시 배포하면 그대로 쓰고(데이터 유지), "
+                "그만 쓸 거면 「AWS 리소스 정리」에서 지우세요.")
+        if any(item.startswith(("로드밸런서", "WAF", "HTTPS")) for item in left) and "edge_cost_warning" not in rec.provisioned:
+            rec.provisioned["edge_cost_warning"] = (
+                "로드밸런서(·WAF·HTTPS 주소)는 배포가 실패하거나 취소돼도 남아 있어 시간당 요금이 붙습니다 — "
+                "다시 배포하면 그대로 다시 쓰고, 그만 쓸 거면 「AWS 리소스 정리」에서 지우세요.")
+        return True
 
     async def _create_rollback_proposal(
         self, req: ECSDeployRequest, rec: ECSDeployRecord

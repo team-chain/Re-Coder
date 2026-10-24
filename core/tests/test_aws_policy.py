@@ -2007,6 +2007,10 @@ def runtime_actions() -> set[str]:
             aws_infra.ensure_security_group(
                 ec2, vpc_id=net.vpc_id, name="recoder-probe-sg", port=8000
             )
+            # 3.0.2 앱 포트가 바뀐 재배포 → ReCoder 가 열었던 옛 포트 규칙을 거둔다(RevokeSecurityGroupIngress)
+            aws_infra.ensure_security_group(
+                ec2, vpc_id=net.vpc_id, name="recoder-probe-sg", port=8080, require_managed=True
+            )
 
             task_def = ecs.register_task_definition(
                 family="recoder-probe",

@@ -32,6 +32,24 @@ _POLL_INTERVAL = 10      # 폴링 간격 (초)
 _MAX_POLL_ATTEMPTS = 60  # 최대 10분
 _DEFAULT_TIMEOUT = 30    # HTTP 요청 타임아웃
 
+#: 사설 CA 로 서명된 ArgoCD 서버용 CA 묶음(PEM) 경로. 비우면 시스템 인증서로 검증한다.
+CA_BUNDLE_ENV = "RECODER_ARGOCD_CA_BUNDLE"
+
+
+def tls_verify() -> "bool | str":
+    """ArgoCD HTTPS 인증서 검증 설정 — **항상 검증한다.**
+
+    예전에는 verify=False 라 같은 네트워크의 누구나 ArgoCD 서버인 척하고 Bearer 토큰을 가로챌 수 있었다.
+    사설 인증서 환경은 RECODER_ARGOCD_CA_BUNDLE 에 CA 파일 경로를 넣는다(검증을 끄는 설정은 두지 않는다).
+    """
+    import os
+    bundle = (os.environ.get(CA_BUNDLE_ENV) or "").strip()
+    if bundle:
+        if not os.path.isfile(bundle):
+            raise ValueError(f"{CA_BUNDLE_ENV} 에 지정한 CA 파일을 찾지 못했습니다: {bundle}")
+        return bundle
+    return True
+
 
 class ArgoCDAgent:
     """
@@ -63,8 +81,15 @@ class ArgoCDAgent:
             "Content-Type": "application/json",
         }
 
+        try:
+            verify = tls_verify()
+        except ValueError as exc:
+            record.sync_phase = ArgoSyncPhase.SYNC_FAILED
+            record.error_message = str(exc)
+            record.completed_at = datetime.now(timezone.utc)
+            return record
         async with httpx.AsyncClient(
-            verify=False,  # 사설 인증서 환경 대응 (프로덕션에서는 verify=True)
+            verify=verify,  # 사설 CA 는 RECODER_ARGOCD_CA_BUNDLE 로 — 검증은 끄지 않는다
             timeout=_DEFAULT_TIMEOUT,
         ) as client:
             try:
@@ -125,7 +150,7 @@ class ArgoCDAgent:
         base_url = f"https://{argocd_server}"
         headers = {"Authorization": f"Bearer {argocd_token}"}
 
-        async with httpx.AsyncClient(verify=False, timeout=_DEFAULT_TIMEOUT) as client:
+        async with httpx.AsyncClient(verify=tls_verify(), timeout=_DEFAULT_TIMEOUT) as client:
             return await self._get_app_state(client, base_url, headers, app_name)
 
     async def rollback_app(
@@ -148,7 +173,12 @@ class ArgoCDAgent:
         }
         url = urljoin(base_url, f"/api/v1/applications/{app_name}/rollback")
 
-        async with httpx.AsyncClient(verify=False, timeout=_DEFAULT_TIMEOUT) as client:
+        try:
+            verify = tls_verify()
+        except ValueError as exc:
+            logger.error("ArgoCD rollback skipped: %s", exc)
+            return False
+        async with httpx.AsyncClient(verify=verify, timeout=_DEFAULT_TIMEOUT) as client:
             try:
                 resp = await client.post(url, headers=headers, json={"id": target_id})
                 resp.raise_for_status()

@@ -295,7 +295,7 @@ def test_롤백에_성공하면_되살아난_릴리스의_감시를_다시_건�
     deploy_route._deployment_records[failed.deployment_id] = failed
 
     result = asyncio.run(
-        deploy_route.rollback(deploy_route.RollbackRequest(deployment_id=failed.deployment_id))
+        deploy_route.rollback(deploy_route.RollbackRequest(deployment_id=failed.deployment_id, approved=True))
     )
 
     assert result["status"] == "ok"

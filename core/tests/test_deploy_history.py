@@ -214,7 +214,7 @@ def test_cancelled_health_probe_cannot_mark_rollback_success(monkeypatch):
     stub_docker(monkeypatch)
     monkeypatch.setattr(deploy, "_probe_local_http_health", AsyncMock(side_effect=asyncio.CancelledError))
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(deploy.rollback(deploy.RollbackRequest(deployment_id=record.deployment_id, require_current=True)))
+        asyncio.run(deploy.rollback(deploy.RollbackRequest(deployment_id=record.deployment_id, require_current=True, approved=True)))
     assert store.load_records()[record.deployment_id].rollback_status == "unknown"
 
 
@@ -244,7 +244,7 @@ def test_new_deployment_while_waiting_for_lock_is_checked_again(monkeypatch):
     async def run():
         lock = await deploy._lock_for_container(record.container_name)
         await lock.acquire()
-        task = asyncio.create_task(deploy.rollback(deploy.RollbackRequest(deployment_id=record.deployment_id, require_current=True)))
+        task = asyncio.create_task(deploy.rollback(deploy.RollbackRequest(deployment_id=record.deployment_id, require_current=True, approved=True)))
         await asyncio.sleep(0)
         local("newer", deployed_at=datetime(2026, 9, 24))
         lock.release()

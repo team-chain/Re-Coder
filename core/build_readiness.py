@@ -3911,7 +3911,46 @@ def _read_raw(path: Path) -> str:
         return stream.read()
 
 
+#: 지금 고치는 워크스페이스(apply_fix·apply_file_plan 이 정한다). 여기 밖으로는 쓰지 않는다.
+import contextvars as _contextvars
+
+_WRITE_ROOT: "_contextvars.ContextVar[Optional[Path]]" = _contextvars.ContextVar("recoder_write_root", default=None)
+
+
+def _ensure_inside(root: Path, path: Path) -> Path:
+    """`path` 가 워크스페이스 `root` 안의 진짜 경로인지 확인한다(심볼릭 링크를 따라 밖으로 나가는 쓰기 차단).
+
+    grounded_repair.workspace.safe_path 와 같은 규칙 — 경로 중간이나 끝이 심볼릭 링크면 거부하고,
+    resolve() 결과가 워크스페이스 밖이면 거부한다. 예: Dockerfile → /etc/cron.d/x 링크.
+    """
+    root_abs = Path(os.path.abspath(root))
+    candidate = Path(os.path.abspath(path if path.is_absolute() else root_abs / path))
+    try:
+        rel = candidate.relative_to(root_abs)
+    except ValueError:
+        try:
+            root_abs = root_abs.resolve()
+            rel = candidate.relative_to(root_abs)
+        except ValueError:
+            raise ValueError(f"{path} 은(는) 프로젝트 폴더 밖이라 자동 수정하지 않았습니다.") from None
+    current = root_abs
+    for part in rel.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"{rel.as_posix()} 은(는) 심볼릭 링크를 거쳐서 자동 수정하지 않았습니다 "
+                             "(프로젝트 밖 파일을 덮어쓸 수 있습니다). 링크 대신 실제 파일을 두고 다시 시도하세요.")
+    if not candidate.resolve().is_relative_to(root_abs.resolve()):
+        raise ValueError(f"{rel.as_posix()} 은(는) 프로젝트 폴더 밖을 가리켜 자동 수정하지 않았습니다.")
+    return candidate
+
+
 def _write_raw(path: Path, text: str) -> None:
+    #: 끝 경로가 링크면 어떤 호출자든 쓰지 않는다. 워크스페이스가 정해져 있으면 그 안인지도 본다.
+    if path.is_symlink():
+        raise ValueError(f"{path.name} 은(는) 심볼릭 링크라 자동 수정하지 않았습니다(프로젝트 밖 파일을 덮어쓸 수 있습니다).")
+    root = _WRITE_ROOT.get()
+    if root is not None:
+        _ensure_inside(root, path)
     try:
         stream = path.open("w", encoding="utf-8", newline="")
     except PermissionError:
@@ -3927,11 +3966,15 @@ def _backup(root: Path, rel: str, text: str) -> str:
     """원본을 .recoder/backups 에 남긴다(빌드 컨텍스트·Git 에 섞이지 않게)."""
     import time
     folder = root / ".recoder" / "backups"
+    #: .recoder 나 backups 가 밖을 가리키는 링크면 백업이 프로젝트 밖에 써진다 — 만들기 전에 확인한다.
+    _ensure_inside(root, folder)
     folder.mkdir(parents=True, exist_ok=True)
+    _ensure_inside(root, folder)
     stem = f"{rel.replace('/', '_')}.{time.strftime('%Y%m%d-%H%M%S')}"
     target, n = folder / stem, 1
     while target.exists():  # 같은 초에 여러 번 고쳐도 원본을 덮지 않는다
         target, n = folder / f"{stem}-{n}", n + 1
+    _ensure_inside(root, target)
     _write_raw(target, text)
     return target.relative_to(root).as_posix()
 
@@ -4167,6 +4210,17 @@ def apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> lis
     **전부 되거나 전부 안 된다.** 중간에 실패하면(Windows 의 읽기 전용 파일·잠긴 파일 등) 쓴 파일을
     원래대로 돌리고 오류를 낸다 — 옛 .js 와 새 .cjs 가 함께 남으면 앱이 반쯤 바뀐 채로 남는다.
     """
+    #: 쓰기 전에 모든 경로를 확인한다 — 하나라도 링크를 거치거나 밖을 가리키면 아무것도 바꾸지 않는다.
+    for rel in list(writes) + [p for pair in renames for p in pair]:
+        _ensure_inside(root, root / rel)
+    token = _WRITE_ROOT.set(Path(root))
+    try:
+        return _apply_file_plan(root, writes, renames)
+    finally:
+        _WRITE_ROOT.reset(token)
+
+
+def _apply_file_plan(root: Path, writes: Mapping[str, str], renames: list) -> list[str]:
     rename_map = {old: new for old, new in renames if (root / old).is_file() and not (root / new).exists()}
     skipped = [old for old, new in renames if old not in rename_map]
     if skipped:
@@ -4250,6 +4304,14 @@ def apply_fix(workspace: str | Path, code: str) -> dict:
     root = Path(workspace).expanduser().resolve()
     if not root.is_dir():
         raise ValueError("유효한 프로젝트 폴더가 아닙니다.")
+    token = _WRITE_ROOT.set(root)
+    try:
+        return _apply_fix(root, code)
+    finally:
+        _WRITE_ROOT.reset(token)
+
+
+def _apply_fix(root: Path, code: str) -> dict:
     if code not in AUTO_FIXABLE:
         raise ValueError("자동으로 고칠 수 없는 항목입니다. 안내에 따라 직접 수정하세요.")
     before = analyze(root, online=code in ("NODE_DEPENDENCY_VERSION_NOT_FOUND", "NODE_PACKAGE_UNTRUSTED"))

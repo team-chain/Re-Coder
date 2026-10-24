@@ -436,36 +436,43 @@ def http(event: dict) -> dict:
 
 
 def _approve(token_id: str, target: str, from_td: str, now: float) -> dict:
-    ddb = _client("dynamodb")
-    try:
-        ddb.update_item(
-            TableName=_env("WATCH_TABLE"), Key=_item({"pk": "TOKEN", "sk": token_id}),
-            UpdateExpression="SET #s = :used, used_at = :now",
-            ConditionExpression="#s = :pending AND expires > :now",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues=_item({":used": "used", ":pending": "pending", ":now": int(now)}))
-    except Exception as exc:  # noqa: BLE001
-        if _code(exc) == "ConditionalCheckFailedException":
-            return _page(410, "쓸 수 없는 링크입니다", "<p>이미 사용했거나 만료된 링크입니다.</p>")
-        raise
-    svc = _service()
-    current = str(svc.get("taskDefinition") or "")
+    """승인 링크 실행. **서비스 상태를 먼저 확인하고** 나서 토큰을 쓴다(3.0.2).
+
+    예전에는 토큰을 'used' 로 바꾼 뒤 DescribeServices 를 불렀다. 그 호출이 일시적으로 실패하면(조절·시간 초과)
+    롤백은 안 됐는데 링크만 소진돼, 한밤중 장애에 쓸 수 있는 유일한 링크가 사라졌다. 이제는 확인이 끝난 뒤에만
+    소비하고, 롤백 호출이 실패하면 토큰을 pending 으로 되돌려 같은 링크로 다시 시도할 수 있게 한다."""
     service = _env("WATCH_SERVICE")
+    try:
+        svc = _service()
+    except Exception as exc:  # noqa: BLE001 - 토큰은 그대로(pending) 둔다
+        _attempt_failed(f"롤백 링크를 열었지만 서비스 상태를 확인하지 못했습니다({_code(exc)}) — 링크는 아직 쓸 수 있습니다.")
+        return _page(502, "롤백하지 않았습니다",
+                     f"<p>{html.escape(service)} 의 상태를 확인하지 못해 멈췄습니다({html.escape(_code(exc))}). "
+                     "링크는 아직 쓸 수 있습니다 — 잠시 뒤 다시 열어 주십시오.</p>")
+    current = str(svc.get("taskDefinition") or "")
     if _rev(current) != _rev(from_td):
-        _mark(token_id, "stale")
+        if not _transition(token_id, "pending", "stale", now):
+            return _page(410, "쓸 수 없는 링크입니다", "<p>이미 사용했거나 만료된 링크입니다.</p>")
+        _event_action(token_id, "stale")
         raise_event("rollback", f"롤백 링크를 열었지만 그 사이 버전이 바뀌어({_rev(current)}) 롤백하지 않았습니다.",
                     source="link", severity="info", cooldown=False)
         return _page(409, "롤백하지 않았습니다",
                      f"<p>링크를 만든 뒤 {html.escape(service)} 의 버전이 바뀌었습니다(지금 {html.escape(_rev(current))}). "
                      "엉뚱한 버전을 되돌리지 않도록 멈췄습니다. VS Code 에서 확인하세요.</p>")
+    #: 원자적 소비 — 같은 링크를 두 번 눌러도 롤백은 한 번만.
+    if not _transition(token_id, "pending", "used", now):
+        return _page(410, "쓸 수 없는 링크입니다", "<p>이미 사용했거나 만료된 링크입니다.</p>")
     try:
         _client("ecs").update_service(cluster=_env("WATCH_CLUSTER"), service=service, taskDefinition=target,
                                       forceNewDeployment=True)
     except Exception as exc:  # noqa: BLE001
-        _mark(token_id, "failed")
-        raise_event("rollback", f"롤백을 시작하지 못했습니다: {_code(exc)}", source="link", severity="high", cooldown=False)
+        restored = _restore_pending(token_id)
+        _attempt_failed(f"롤백을 시작하지 못했습니다: {_code(exc)}" + (" — 링크는 아직 쓸 수 있습니다." if restored else ""),
+                        severity="high")
         return _page(502, "롤백을 시작하지 못했습니다",
-                     f"<p>AWS 가 거절했습니다({html.escape(_code(exc))}). VS Code 의 ReCoder 에서 다시 시도하세요.</p>")
+                     f"<p>AWS 가 거절했습니다({html.escape(_code(exc))}). "
+                     + ("같은 링크로 다시 시도하거나 " if restored else "")
+                     + "VS Code 의 ReCoder 에서 다시 시도하세요.</p>")
     _event_action(token_id, "used")
     raise_event("rollback", f"승인 링크로 {_rev(from_td)} → {_rev(target)} 롤백을 시작했습니다.", source="link",
                 severity="info", cooldown=False, extra={"target": target, "from_td": from_td})
@@ -474,12 +481,43 @@ def _approve(token_id: str, target: str, from_td: str, now: float) -> dict:
                  "1~3분 뒤 반영됩니다.</div><p><small>원인 코드는 VS Code 의 ReCoder Operate 화면에서 확인하세요.</small></p>")
 
 
-def _mark(token_id: str, status: str) -> None:
-    _client("dynamodb").update_item(
-        TableName=_env("WATCH_TABLE"), Key=_item({"pk": "TOKEN", "sk": token_id}),
-        UpdateExpression="SET #s = :s", ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues=_item({":s": status}))
-    _event_action(token_id, status)
+def _transition(token_id: str, before: str, after: str, now: float) -> bool:
+    """토큰 상태를 before → after 로(만료 전에만). 다른 요청이 먼저 바꿨으면 False."""
+    try:
+        _client("dynamodb").update_item(
+            TableName=_env("WATCH_TABLE"), Key=_item({"pk": "TOKEN", "sk": token_id}),
+            UpdateExpression="SET #s = :after, used_at = :now",
+            ConditionExpression="#s = :before AND expires > :now",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues=_item({":after": after, ":before": before, ":now": int(now)}))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if _code(exc) == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def _restore_pending(token_id: str) -> bool:
+    """롤백 호출이 실패했다 — 링크를 다시 쓸 수 있게 pending 으로 되돌린다(best-effort)."""
+    try:
+        _client("dynamodb").update_item(
+            TableName=_env("WATCH_TABLE"), Key=_item({"pk": "TOKEN", "sk": token_id}),
+            UpdateExpression="SET #s = :pending", ConditionExpression="#s = :used",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues=_item({":pending": "pending", ":used": "used"}))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(json.dumps({"token_restore": "failed", "error": _code(exc)}))
+        return False
+
+
+def _attempt_failed(detail: str, *, severity: str = "info") -> None:
+    """실패한 승인 시도를 기록으로 남긴다(실패해도 응답 페이지는 그대로)."""
+    try:
+        raise_event("rollback", detail, source="link", severity=severity, cooldown=False,
+                    extra={"attempt": "failed"})
+    except Exception as exc:  # noqa: BLE001
+        print(json.dumps({"attempt_record": "failed", "error": _code(exc)}))
 
 
 def _event_action(token_id: str, status: str) -> None:

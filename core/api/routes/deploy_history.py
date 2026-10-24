@@ -160,7 +160,7 @@ async def approve_history_rollback(source: Literal["local", "ecs"], deployment_i
         entry = _local_entry(record, {latest.deployment_id} if latest else set())
         if not entry.rollback.available:
             raise HTTPException(status_code=409, detail=entry.rollback.reason)
-        result = await deploy.rollback(deploy.RollbackRequest(deployment_id=deployment_id, require_current=True))
+        result = await deploy.rollback(deploy.RollbackRequest(deployment_id=deployment_id, require_current=True, approved=True))
         return {"status": result["status"], "message": "이전 이미지로 롤백했습니다." if result["status"] == "ok" else result.get("error") or result.get("warning") or "롤백에 실패했습니다. 컨테이너 로그를 확인하세요.", "warning": result.get("warning")}
     record = ecs._deploy_records.get(deployment_id)
     if record is None:

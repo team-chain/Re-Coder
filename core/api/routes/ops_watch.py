@@ -16,8 +16,14 @@ from pydantic import BaseModel, Field
 try:
     import ops_alerts  # type: ignore
     import watcher  # type: ignore
+    import ecs_stable  # type: ignore
 except ImportError:  # pragma: no cover
-    from core import ops_alerts, watcher  # type: ignore
+    from core import ops_alerts, watcher, ecs_stable  # type: ignore
+
+try:
+    from api.errors import internal_error as _internal_error
+except ImportError:  # pragma: no cover
+    from core.api.errors import internal_error as _internal_error  # type: ignore
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ops/watch", tags=["ops-watch"])
@@ -45,10 +51,12 @@ def _fail(exc: Exception) -> HTTPException:
     if isinstance(exc, (watcher.WatchError, ValueError)):
         return HTTPException(status_code=400, detail=str(exc))
     code = watcher._code(exc)
+    #: AWS 오류 원문(계정·ARN 이 들어 있다)은 로그에만 — 응답에는 오류 코드와 오류 ID 만.
     if code in ("AccessDenied", "AccessDeniedException", "UnauthorizedOperation"):
-        return HTTPException(status_code=502, detail=f"AWS 권한이 없습니다({watcher._msg(exc)}) — 권한 템플릿을 최신으로 다시 적용하세요.")
-    logger.warning("감시자 요청 실패: %s", exc)
-    return HTTPException(status_code=502, detail=f"AWS 요청이 실패했습니다: {watcher._msg(exc)}")
+        return _internal_error(exc, status_code=502, logger=logger,
+                               message=f"AWS 권한이 없습니다({code}) — 권한 템플릿을 최신으로 다시 적용해 주십시오.")
+    return _internal_error(exc, status_code=502, logger=logger,
+                           message=f"AWS 요청이 실패했습니다({code or type(exc).__name__}).")
 
 
 def _downsample(values: list[float], points: int = SERIES_POINTS) -> list[float]:
@@ -61,7 +69,18 @@ def _downsample(values: list[float], points: int = SERIES_POINTS) -> list[float]
 
 
 def _stable_from_records(m: dict, current_td: str) -> str:
-    """로컬 배포 기록에서 '지금 버전 직전에 성공한 버전'을 찾는다(설치 직후부터 롤백 링크를 준비하려고)."""
+    """'지금 버전이 아닌, 마지막으로 정상 배포된 버전'을 찾는다(설치 직후부터 롤백 링크를 준비하려고).
+
+    3.0.2 — 실패한 배포의 태스크 정의는 절대 고르지 않는다. 먼저 성공 배포 기록(ecs_stable)을 보고,
+    없으면(기록이 생기기 전 배포) 로컬 배포 기록 중 **성공한 배포 자신의** 태스크 정의만 쓴다.
+    예전처럼 성공 기록의 previous_task_definition_arn 을 쓰면 그 값이 실패한 버전일 수 있었다.
+    """
+    try:
+        found = ecs_stable.last_success(m["region"], m["cluster"], m["service"], exclude=current_td)
+        if found:
+            return found
+    except Exception as exc:  # noqa: BLE001
+        logger.info("성공 배포 기록을 읽지 못했습니다: %s", exc)
     try:
         try:
             from api.routes import ecs as ecs_routes  # type: ignore
@@ -71,8 +90,9 @@ def _stable_from_records(m: dict, current_td: str) -> str:
         for r in records:
             if (r.region, r.cluster, r.service) == (m["region"], m["cluster"], m["service"]) \
                     and str(getattr(r.status, "value", r.status)) == "succeeded" \
-                    and watcher._rev(str(r.task_definition_arn or "")) == watcher._rev(current_td):
-                return str(r.previous_task_definition_arn or "")
+                    and r.task_definition_arn \
+                    and watcher._rev(str(r.task_definition_arn)) != watcher._rev(current_td):
+                return str(r.task_definition_arn)
     except Exception as exc:  # noqa: BLE001
         logger.info("배포 기록에서 이전 버전을 찾지 못했습니다: %s", exc)
     return ""
@@ -150,6 +170,8 @@ class ApproveBody(KeyBody):
 class SettingsBody(KeyBody):
     discord: Optional[str] = Field(None, max_length=400)
     email: str = Field("", max_length=260)
+    #: 알림 대상(디스코드·SNS 메일 구독)을 바꾸므로 승인이 있어야 한다(3.0.2).
+    approved: bool = False
 
 
 class RollbackBody(KeyBody):
@@ -216,6 +238,8 @@ async def post_uninstall(body: ApproveBody) -> dict:
 @router.post("/settings")
 async def post_settings(body: SettingsBody) -> dict:
     m = _monitor(body.key)
+    if not body.approved:
+        raise HTTPException(status_code=400, detail="승인 없이 알림 설정(디스코드·메일)을 바꾸지 않습니다.")
     try:
         return await asyncio.to_thread(watcher.settings, session_for(m["region"]), region=m["region"], cluster=m["cluster"],
                                        service=m["service"], discord=body.discord, email=body.email)
@@ -223,12 +247,29 @@ async def post_settings(body: SettingsBody) -> dict:
         raise _fail(exc) from exc
 
 
+def _ecs_routes():
+    try:
+        from api.routes import ecs as ecs_routes  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.api.routes import ecs as ecs_routes  # type: ignore
+    return ecs_routes
+
+
 @router.post("/rollback")
 async def post_rollback(body: RollbackBody) -> dict:
     m = _monitor(body.key)
-    try:
-        return await asyncio.to_thread(watcher.rollback, session_for(m["region"]), region=m["region"], cluster=m["cluster"],
-                                       service=m["service"], target_td=body.target_td, from_td=body.from_td,
-                                       approved=body.approved)
-    except Exception as exc:  # noqa: BLE001
-        raise _fail(exc) from exc
+    if not body.approved:
+        raise HTTPException(status_code=400, detail="승인 없이 되돌리지 않습니다.")
+    ecs_routes = _ecs_routes()
+    #: 배포와 같은 서비스 잠금을 잡는다(deploy_ecs 의 승인 롤백과 같은 방식). 배포가 도는 중이면 409 —
+    #: 새 배포가 UpdateService 하는 사이에 옛 버전으로 덮어쓰지 않게.
+    async with ecs_routes.service_operation_lock(m["cluster"], m["service"]):
+        active = ecs_routes._active_deployment(m["cluster"], m["service"])
+        if active is not None:
+            raise HTTPException(status_code=409, detail="이 서비스에 배포가 진행 중입니다. 배포가 끝난 뒤 Operate 화면을 새로 고쳐 다시 확인해 주십시오.")
+        try:
+            return await asyncio.to_thread(watcher.rollback, session_for(m["region"]), region=m["region"], cluster=m["cluster"],
+                                           service=m["service"], target_td=body.target_td, from_td=body.from_td,
+                                           approved=body.approved)
+        except Exception as exc:  # noqa: BLE001
+            raise _fail(exc) from exc

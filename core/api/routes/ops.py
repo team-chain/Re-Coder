@@ -20,6 +20,11 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+try:
+    from api.errors import internal_error as _internal_error
+except ImportError:  # pragma: no cover
+    from core.api.errors import internal_error as _internal_error  # type: ignore
+
 from schemas import (
     ActionType,
     AlertRecord,
@@ -41,6 +46,43 @@ _alerts: dict[str, AlertRecord] = {}
 
 class _SSHNotDispatchedError(RuntimeError):
     """The local SSH process could not start; remote execution is impossible."""
+
+
+import re as _re_ssh
+
+#: SSH 접속 대상 — ssh 가 옵션으로 읽을 수 있는 값(`-oProxyCommand=...`)을 막는다. 첫 글자는 영숫자만.
+_SSH_USER_RE = _re_ssh.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+#: 호스트 이름·IPv4 는 영숫자·점·하이픈, IPv6 는 콜론도 허용한다. 첫 글자는 '-' 가 될 수 없다.
+_SSH_HOST_RE = _re_ssh.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,252}$")
+
+
+def _validate_ssh_target(host: Optional[str], user: Optional[str]) -> tuple[str, str]:
+    """host·user 를 검증한다. 맞지 않으면 422 — 원격 명령을 보내기 전에 막는다."""
+    host = (host or "").strip()
+    user = (user or "").strip()
+    if not _SSH_HOST_RE.fullmatch(host) or ".." in host:
+        raise HTTPException(
+            status_code=422,
+            detail="SSH 호스트 형식이 올바르지 않습니다. 영문·숫자·점·하이픈(IPv6 는 콜론)만 쓸 수 있고 '-' 로 시작할 수 없습니다.",
+        )
+    if not _SSH_USER_RE.fullmatch(user):
+        raise HTTPException(
+            status_code=422,
+            detail="SSH 사용자 이름 형식이 올바르지 않습니다. 영문·숫자·점·밑줄·하이픈만 쓸 수 있고 '-' 로 시작할 수 없습니다.",
+        )
+    return host, user
+
+
+def _ssh_base_args(key_path: str, port: int) -> list[str]:
+    """공통 ssh 옵션. 처음 보는 호스트 키는 기록하되(accept-new) 바뀐 키는 거부한다(중간자 차단)."""
+    return [
+        "ssh",
+        "-i", key_path,
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=10",
+        "-o", "BatchMode=yes",
+        "-p", str(int(port)),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -164,12 +206,10 @@ async def _ssh_fetch_file(
     """
     import shlex as _shlex
     # remote_path / user / host 도 ssh 가 원격 셸로 전달하기 전에 안전화.
-    cmd = [
-        "ssh",
-        "-i", key_path,
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "ConnectTimeout=10",
-        "-p", str(port),
+    host, user = _validate_ssh_target(host, user)
+    cmd = _ssh_base_args(key_path, port) + [
+        # "--" 뒤는 옵션으로 읽지 않는다 — 접속 대상이 `-o...` 로 해석되는 주입 차단.
+        "--",
         f"{user}@{host}",
         # cat 명령에 원격 path 를 안전하게 quoting — 메타문자 (; & | $) 무력화.
         "cat -- " + _shlex.quote(remote_path),
@@ -180,9 +220,10 @@ async def _ssh_fetch_file(
             lambda: subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30),
         )
         if result.returncode != 0:
-            raise HTTPException(
+            raise _internal_error(
+                RuntimeError(f"ssh exit {result.returncode}: {result.stderr[:500]}"),
                 status_code=502,
-                detail=f"SSH fetch failed: {result.stderr[:500]}",
+                message="SSH 로 장애 기록을 가져오지 못했습니다. 호스트·키·경로를 확인해 주십시오.",
             )
         return result.stdout
     except asyncio.TimeoutError:
@@ -199,15 +240,8 @@ async def _ssh_exec(
     port: int = 22,
 ) -> dict:
     """Execute a command on a remote host via SSH and return the result."""
-    cmd = [
-        "ssh",
-        "-i", key_path,
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "ConnectTimeout=10",
-        "-p", str(port),
-        f"{user}@{host}",
-        command,
-    ]
+    host, user = _validate_ssh_target(host, user)
+    cmd = _ssh_base_args(key_path, port) + ["--", f"{user}@{host}", command]
     try:
         result = await asyncio.get_running_loop().run_in_executor(
             None,
@@ -229,11 +263,17 @@ async def _ssh_exec(
 
 
 @router.post("/api/ops/fetch-incidents")
-async def fetch_incidents(request: FetchIncidentsRequest) -> list[AlertRecord]:
+async def fetch_incidents(
+    request: FetchIncidentsRequest,
+    authenticated_actor: str = Depends(_authenticated_ops_actor),
+) -> list[AlertRecord]:
     """
     Connect to a remote host via SSH and retrieve incident records from
     the JSONL log file at *incident_log_path*.
+
+    원격 호스트에 SSH 로 접속하므로 /api/ops/analyze·approve 와 같은 운영 승인자 자격증명이 필요하다.
     """
+    _validate_ssh_target(request.host, request.ssh_user)
     raw_content = await _ssh_fetch_file(
         host=request.host,
         user=request.ssh_user,
@@ -413,6 +453,7 @@ async def approve_response(
                 status_code=422,
                 detail="ssh_host and ssh_key_path are required for remote execution.",
             )
+        ssh_host, ssh_user = _validate_ssh_target(ssh_host, ssh_user)
     except HTTPException:
         _proposals[request.proposal_id] = proposal   # 실행 전 실패 — 되돌린다
         raise
@@ -456,15 +497,18 @@ async def approve_response(
     except _SSHNotDispatchedError as exc:
         # 로컬 SSH 프로세스가 시작되지 않은 확정적 실행 전 실패만 재시도 가능.
         _proposals[request.proposal_id] = proposal
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise _internal_error(exc, status_code=503,
+                              message="이 PC 에서 SSH 클라이언트를 찾지 못했습니다. OpenSSH 를 설치한 뒤 다시 시도해 주십시오.") from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         # 타임아웃/연결 단절은 원격 명령이 시작된 뒤 발생했을 수도 있다. 이
         # proposal 을 되살리면 비멱등 조치가 재시도 때 두 번 실행될 수 있으므로
         # 소비된 상태로 유지하고 실행 결과를 '불명'으로 보고한다.
-        raise HTTPException(
+        raise _internal_error(
+            exc,
             status_code=502,
-            detail=("SSH 실행 결과를 확인할 수 없습니다. proposal 은 중복 실행 "
-                    f"방지를 위해 소비되었습니다: {exc}"),
+            message="SSH 실행 결과를 확인할 수 없습니다. proposal 은 중복 실행 방지를 위해 소비되었습니다.",
         ) from exc
 
     return {

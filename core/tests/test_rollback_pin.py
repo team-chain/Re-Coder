@@ -155,7 +155,7 @@ def test_되돌릴_이미지가_없으면_컨테이너를_건드리지_않고_�
     monkeypatch.setattr(deploy_route.subprocess, "run", _spy_run)
 
     result = asyncio.run(
-        deploy_route.rollback(deploy_route.RollbackRequest(deployment_id=rec.deployment_id))
+        deploy_route.rollback(deploy_route.RollbackRequest(deployment_id=rec.deployment_id, approved=True))
     )
 
     assert result["status"] == "failed"

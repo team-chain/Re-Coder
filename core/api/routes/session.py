@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from schemas import (
@@ -101,6 +101,23 @@ def _read_sessions() -> list[SessionRecord]:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+@router.get("/api/session/ci-token")
+async def get_ci_token(request: Request) -> dict:
+    """GitHub Actions Preflight 게이트용 CI 토큰(세션 토큰으로만 볼 수 있다).
+
+    이 값은 POST /workbench/preflight/run 하나만 부를 수 있다. 저장소 Secret RECODER_CI_TOKEN 에 넣는다.
+    """
+    token = str(getattr(request.app.state, "ci_token", "") or "")
+    if not token:
+        raise HTTPException(status_code=503, detail="CI 토큰을 준비하지 못했습니다. Core 를 다시 시작해 주십시오.")
+    return {
+        "secret_name": "RECODER_CI_TOKEN",
+        "token": token,
+        "allowed": ["POST /workbench/preflight/run"],
+        "path": str(_RECODER_DIR / "ci_token"),
+    }
 
 
 @router.get("/api/cost")

@@ -617,4 +617,5 @@ def test_routes_require_registered_service_and_approval(aws, monkeypatch):
     assert c.post("/api/ops/watch/rollback", json={"key": key, "target_td": td(1), "from_td": td(2)}).status_code == 400
     assert current_td(aws).endswith("shop:2")
     assert c.post("/api/ops/watch/settings", json={"key": key, "discord": "nope"}).status_code == 400
+    assert c.post("/api/ops/watch/settings", json={"key": key, "discord": "nope", "approved": True}).status_code == 400
     assert c.post("/api/ops/watch/uninstall", json={"key": key, "approved": True}).json()["ok"]

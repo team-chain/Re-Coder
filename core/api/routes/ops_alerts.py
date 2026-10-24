@@ -7,6 +7,10 @@ from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+try:
+    from api.errors import internal_error as _internal_error
+except ImportError:  # pragma: no cover
+    from core.api.errors import internal_error as _internal_error  # type: ignore
 
 try:
     import ops_alerts  # type: ignore
@@ -49,8 +53,8 @@ async def act(alert_id: str, body: ActRequest) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.warning("대응 적용 실패: %s", exc)
-        raise HTTPException(status_code=502, detail=f"대응을 적용하지 못했습니다: {ops_alerts._err(exc)}") from exc
+        raise _internal_error(exc, status_code=502, message="대응을 적용하지 못했습니다. AWS 권한과 연결 상태를 확인해 주십시오.",
+                              logger=logger) from exc
 
 
 @router.delete("/monitors/{key:path}")

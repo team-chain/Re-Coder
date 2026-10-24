@@ -695,7 +695,8 @@ _PREFLIGHT_GATE_TEMPLATE = '''
   # setup-python 설치 안 함 + stdlib(urllib) 만 사용 → 러너에 추가 설치 불필요.
   # 셸 무관(단일 python -c 명령) — Windows PowerShell / bash 모두 동작.
   # 원격 Core(EC2)면 RECODER_API_URL 을 그 주소로, runs-on 을 ubuntu-latest 로 바꾸세요.
-  # 사전 준비: ① self-hosted 러너 등록 ② Secret RECODER_SESSION_TOKEN 등록.
+  # 사전 준비: ① self-hosted 러너 등록 ② Secret RECODER_CI_TOKEN 등록
+  #   (값: ~/.recoder/ci_token — Preflight 실행 하나만 부를 수 있는 CI 전용 토큰. 세션 토큰을 넣지 마세요).
   preflight:
     name: ReCoder Preflight 게이트
     runs-on: self-hosted
@@ -705,7 +706,7 @@ _PREFLIGHT_GATE_TEMPLATE = '''
       - name: ReCoder 배포 전 안전성 검증
         env:
           RECODER_API_URL: http://localhost:17894
-          RECODER_API_TOKEN: ${{ secrets.RECODER_SESSION_TOKEN }}
+          RECODER_API_TOKEN: ${{ secrets.RECODER_CI_TOKEN }}
           FAIL_ON_SCORE_AT_OR_ABOVE: "60"
           PREFLIGHT_PY: |
             import json, os, sys, urllib.request
@@ -842,7 +843,7 @@ jobs:
         template_name = "generic-ci"
 
     required_secrets = [
-        "RECODER_SESSION_TOKEN",  # Preflight 게이트가 로컬/원격 Core 인증에 사용
+        "RECODER_CI_TOKEN",  # Preflight 게이트 전용 CI 토큰(~/.recoder/ci_token) — preflight 실행만 허용
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "ECR_REGISTRY",
@@ -888,7 +889,7 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────
 
 """
-    # ReCoder Preflight 게이트 job 은 self-hosted 러너 + RECODER_SESSION_TOKEN 이
+    # ReCoder Preflight 게이트 job 은 self-hosted 러너 + RECODER_CI_TOKEN 이
     # 필요해서, 환경변수 RECODER_GHA_PREFLIGHT 로 옵트인할 때만 붙인다.
     # (기본 OFF → 생성 즉시 GitHub 호스팅 러너만으로 도는 CI-only 워크플로.)
     import os as _os

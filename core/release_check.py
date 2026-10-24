@@ -43,6 +43,8 @@ RUNTIME_IMPORTS = (
     'code_test',
     #: 2.0.48 — 모니터 · 24시간 감시자
     'watcher', 'api.routes.ops_watch',
+    #: 3.0.2 — 마지막 성공 배포 기록(롤백 대상) · 5xx 오류 ID 응답
+    'ecs_stable', 'api.errors',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에

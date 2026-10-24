@@ -166,3 +166,46 @@ def test_build_helper_reports_push_only_after_build(monkeypatch):
     monkeypatch.setattr(ecs_build, "push_image", lambda *args, **kwargs: events.append("pushed"))
     ecs_build.build_and_push(object(), workspace_path="/fixture", repository_uri="repo/app", tag="v1", on_progress=events.append)
     assert events == ["building", "built", "ecr_push", "login", "pushed"]
+
+
+def test_cancel_after_provisioning_records_billing_resources_and_warns(pipeline, monkeypatch):
+    """3.0.2 — 인프라 확보 뒤 취소하면 로드밸런서·WAF·CloudFront·RDS 가 남는다. 실패 경로처럼 알린다."""
+    agent, rec, _ = pipeline
+
+    async def provision(req, record, *args):
+        record.provisioned["load_balancer"] = "recoder-test-1a2b — http://x.elb.amazonaws.com (새로 만듦)"
+        record.provisioned["waf"] = "켜짐 — IP당 5분 1,000회"
+        record.provisioned["https"] = "켜짐 — https://d1.cloudfront.net (새로 만듦)"
+        record.provisioned["database"] = "관리형 DB recoder-test-db 만드는 중(5~10분)"
+        record.cancel_requested = True
+        return None
+    monkeypatch.setattr(agent, "_step_provision", provision)
+    result = asyncio.run(agent.deploy(request(), rec))
+    assert result.status == ECSDeployStatus.CANCELLED
+    left = result.provisioned["billing_resources"]
+    assert "로드밸런서 recoder-test-1a2b" in left and "WAF" in left and "CloudFront" in left and "recoder-test-db" in left
+    assert "AWS 리소스 정리" in result.provisioned["edge_cost_warning"]
+    assert "AWS 리소스 정리" in result.provisioned["db_cost_warning"]
+    assert "요금" in (result.error_remedy or "")
+
+
+def test_cancel_before_provisioning_does_not_scare(pipeline, monkeypatch):
+    agent, rec, _ = pipeline
+
+    async def provision(req, record, *args):
+        record.cancel_requested = True
+        return None
+    monkeypatch.setattr(agent, "_step_provision", provision)
+    result = asyncio.run(agent.deploy(request(database="rds", db_cost_approved=True), rec))
+    assert result.status == ECSDeployStatus.CANCELLED
+    assert "billing_resources" not in result.provisioned and "db_cost_warning" not in result.provisioned
+
+
+def test_db_secret_error_does_not_claim_nothing_was_created_after_the_load_balancer():
+    from core.agents.ecs_agent import ECSAgent as Agent
+    rec = ECSDeployRecord()
+    agent = Agent()
+    assert "아직 아무것도 만들지 않았습니다" in agent._created_so_far(rec)
+    rec.provisioned["load_balancer"] = "recoder-x — http://x (새로 만듦)"
+    text = agent._created_so_far(rec)
+    assert "아무것도 만들지 않았습니다" not in text and "로드밸런서 recoder-x" in text and "요금" in text

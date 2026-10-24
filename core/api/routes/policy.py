@@ -17,6 +17,10 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+try:
+    from api.errors import internal_error as _internal_error
+except ImportError:  # pragma: no cover
+    from core.api.errors import internal_error as _internal_error  # type: ignore
 
 from core.opa_client import OPAResult, opa_client
 from core.policy_cache import policy_cache
@@ -126,7 +130,7 @@ async def reload_cache(device_token: str, org_id: str) -> dict:
             "bundle_version": policy_cache.get_cached_version(),
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _internal_error(exc, message="정책 번들을 갱신하지 못했습니다.", logger=logger) from exc
 
 
 async def _request_approval(

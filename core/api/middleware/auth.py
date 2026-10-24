@@ -13,6 +13,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 
+#: CI 토큰(GitHub Actions Secret RECODER_CI_TOKEN)이 부를 수 있는 유일한 경로.
+CI_TOKEN_ROUTES = frozenset({("POST", "/workbench/preflight/run")})
+
+
 class SessionTokenMiddleware(BaseHTTPMiddleware):
     """
     Middleware that enforces X-Session-Token header authentication.
@@ -48,10 +52,19 @@ class SessionTokenMiddleware(BaseHTTPMiddleware):
             )
 
         # Constant-time comparison to prevent timing attacks
-        if not hmac.compare_digest(provided_token.encode("utf-8"), expected_token.encode("utf-8")):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Invalid session token."},
-            )
+        if hmac.compare_digest(provided_token.encode("utf-8"), expected_token.encode("utf-8")):
+            return await call_next(request)
 
-        return await call_next(request)
+        # CI token: accepted only for the Preflight gate route, never elsewhere.
+        ci_token: str = getattr(request.app.state, "ci_token", "") or ""
+        if (
+            ci_token
+            and (request.method.upper(), request.url.path) in CI_TOKEN_ROUTES
+            and hmac.compare_digest(provided_token.encode("utf-8"), ci_token.encode("utf-8"))
+        ):
+            return await call_next(request)
+
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid session token."},
+        )

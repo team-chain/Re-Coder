@@ -100,6 +100,11 @@ def _port_publish(host_port, container_port) -> str:
 
 logger = logging.getLogger(__name__)
 
+try:
+    from api.errors import internal_error as _internal_error
+except ImportError:  # pragma: no cover
+    from core.api.errors import internal_error as _internal_error  # type: ignore
+
 #: 바깥 제한은 스캐너 자체 제한보다 길어야 한다. 같으면 바깥이 먼저 끊어 컨테이너 정리를
 #: 못 하고, 사용자는 원인 대신 "시간 초과"만 본다.
 _TRIVY_OUTER_TIMEOUT = 450
@@ -1062,6 +1067,8 @@ class ExecuteRequest(BaseModel):
 class RollbackRequest(BaseModel):
     deployment_id: str
     require_current: bool = False
+    #: 실행 중인 컨테이너를 내리고 다른 이미지로 바꾸므로 사용자 승인이 있어야 한다(이력 화면의 롤백과 같은 규칙).
+    approved: bool = False
 
 
 class DeployPreflightRequest(BaseModel):
@@ -2751,6 +2758,39 @@ def _resolve_proposal_target(proposal, workspace_override) -> Path:
     return target
 
 
+def _proposal_root(proposal, workspace_override) -> Optional[Path]:
+    root = workspace_override or getattr(proposal, "workspace_path", None)
+    if not root and not Path(proposal.target_path).is_absolute():
+        root = str(Path.cwd())
+    return Path(root).expanduser().resolve() if root else None
+
+
+def _refuse_outside_workspace(root: Optional[Path], path: Path) -> None:
+    """심볼릭 링크를 거치거나 워크스페이스 밖을 가리키는 경로에는 쓰지 않는다(grounded_repair.safe_path 와 같은 규칙).
+
+    예: 워크스페이스의 Dockerfile 이 ~/.bashrc 를 가리키는 링크면, 저장 한 번으로 프로젝트 밖 파일을 덮어쓴다.
+    """
+    if path.is_symlink():
+        raise HTTPException(status_code=400, detail=(
+            f"{path.name} 이(가) 심볼릭 링크라 저장하지 않았습니다 — 프로젝트 밖 파일을 덮어쓸 수 있습니다. "
+            "링크를 지우고 실제 파일로 둔 뒤 다시 저장해 주십시오."))
+    if root is None:
+        return
+    candidate = Path(os.path.abspath(path))
+    try:
+        rel = candidate.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="저장할 경로가 프로젝트 폴더 밖이라 저장하지 않았습니다.") from None
+    current = root
+    for part in rel.parts:
+        current = current / part
+        if current.is_symlink():
+            raise HTTPException(status_code=400, detail=(
+                f"{rel.as_posix()} 경로에 심볼릭 링크가 있어 저장하지 않았습니다 — 프로젝트 밖에 쓸 수 있습니다."))
+    if not candidate.resolve().is_relative_to(root):
+        raise HTTPException(status_code=400, detail="저장할 경로가 프로젝트 폴더 밖을 가리켜 저장하지 않았습니다.")
+
+
 def _existing_file_conflict(proposal, target: Path) -> Optional[dict]:
     """대상 파일이 이미 있고 **내용이 다르면** 그 사실을 돌려준다. 없거나 같으면 None.
 
@@ -2811,6 +2851,8 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
     """
     target = _resolve_proposal_target(proposal, workspace_override)
     file_type = getattr(proposal.file_type, "value", proposal.file_type)
+    root = _proposal_root(proposal, workspace_override)
+    _refuse_outside_workspace(root, target)
 
     conflict = _existing_file_conflict(proposal, target)
     backup_path: Optional[str] = None
@@ -2825,6 +2867,7 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
                 **conflict,
             }
         backup = target.with_name(target.name + _OVERWRITE_BACKUP_SUFFIX)
+        _refuse_outside_workspace(root, backup)
         try:
             if backup.is_file() and backup.read_bytes() != original_bytes:
                 #: 이전 백업(사용자가 손으로 고친 원본일 수 있다)을 덮어쓰지 않고 시각을 붙여 옮겨 둔다.
@@ -2836,6 +2879,7 @@ def _write_proposal_to_workspace(proposal, workspace_override, proposal_id, *, o
         backup_path = str(backup)
 
     target.parent.mkdir(parents=True, exist_ok=True)
+    _refuse_outside_workspace(root, target)  # mkdir 사이에 바뀌지 않았는지 한 번 더
     try:
         #: Windows 에서도 LF 그대로 — Dockerfile·entrypoint.sh 가 CRLF 가 되면 컨테이너에서 셸 스크립트가 돌지 않는다(2.0.32).
         target.write_text(proposal.content, encoding="utf-8", newline="")
@@ -3459,10 +3503,7 @@ async def generate_compose_route(request: ComposeRequest) -> InfraFileProposal:
     try:
         from infra_agent import generate_docker_compose  # type: ignore
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=500,
-            detail=f"infra_agent.generate_docker_compose import 실패: {exc}",
-        ) from exc
+        raise _internal_error(exc, message="docker-compose 생성기를 불러오지 못했습니다.", logger=logger) from exc
 
     # 스캔은 실패해도 진행한다 — project=None 이면 생성기가 자체 폴백을 쓴다.
     try:
@@ -3475,13 +3516,9 @@ async def generate_compose_route(request: ComposeRequest) -> InfraFileProposal:
     try:
         proposal = await asyncio.to_thread(generate_docker_compose, project, ws_path)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"docker-compose.yml 생성 실패: {exc} — 워크스페이스에 인식 가능한 "
-                f"프로젝트 파일(package.json·requirements.txt 등)이 있는지 확인하세요."
-            ),
-        ) from exc
+        raise _internal_error(exc, message=(
+            "docker-compose.yml 을 만들지 못했습니다. 워크스페이스에 인식 가능한 "
+            "프로젝트 파일(package.json·requirements.txt 등)이 있는지 확인해 주십시오."), logger=logger) from exc
 
     abs_ws = str(Path(ws_path).expanduser().resolve())
     update = {"workspace_path": abs_ws}
@@ -3550,15 +3587,12 @@ async def generate_github_actions_route(request: GithubActionsRequest) -> InfraF
     try:
         from project_scanner import get_project_scanner  # type: ignore
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"project_scanner import 실패: {e}") from e
+        raise _internal_error(e, message="프로젝트 스캐너를 불러오지 못했습니다.", logger=logger) from e
 
     try:
         from infra_agent import generate_github_actions  # type: ignore
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"infra_agent.generate_github_actions import 실패: {e}",
-        ) from e
+        raise _internal_error(e, message="GitHub Actions 생성기를 불러오지 못했습니다.", logger=logger) from e
 
     # 1. 워크스페이스 스캔 → ProjectProfile
     ws_path = request.workspace_path
@@ -3581,9 +3615,7 @@ async def generate_github_actions_route(request: GithubActionsRequest) -> InfraF
     try:
         proposal = await asyncio.to_thread(generate_github_actions, project, ws_path)
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"GitHub Actions 워크플로우 생성 실패: {e}",
-        ) from e
+        raise _internal_error(e, message="GitHub Actions 워크플로를 만들지 못했습니다.", logger=logger) from e
 
     # 3. file_type 보정 + workspace_path 절대경로 박기.
     #    approve 단계가 이 경로 기준으로 .github/workflows/deploy.yml 을 쓰지 않으면
@@ -5025,14 +5057,13 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 )
                 if restored_previous and rollback_source is not None:
                     await _resume_verification_for(rollback_source)
-                restoration = "previous container restored" if restored_previous else (
-                    f"previous container restoration failed: {restore_stderr}"
+                if not restored_previous:
+                    logger.error("previous container restoration failed: %s", restore_stderr)
+                restoration = "이전 컨테이너를 다시 띄웠습니다." if restored_previous else (
+                    "이전 컨테이너를 되살리지 못했습니다 — Docker 에서 컨테이너 상태를 확인해 주십시오."
                 )
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Deployment execution failed: {exc}; {restoration}",
-                ) from exc
-            raise HTTPException(status_code=500, detail=f"Deployment execution failed: {exc}") from exc
+                raise _internal_error(exc, message=f"배포를 실행하지 못했습니다. {restoration}", logger=logger) from exc
+            raise _internal_error(exc, message="배포를 실행하지 못했습니다.", logger=logger) from exc
 
         # docker run 성공만으로는 앱이 준비됐다고 볼 수 없다. HTTP 헬스 확인을 통과한
         # 기록만 이후 배포의 롤백 후보가 된다. 아직 응답이 없으면 pending,
@@ -5318,6 +5349,8 @@ async def rollback(request: RollbackRequest) -> dict:
     돌려준다. 모든 지표가 "복구됨"인데 사용자만 접속하지 못한다. 장애 대응 중에
     이걸 만나면 원인을 찾는 데 시간을 다 쓴다.
     """
+    if not request.approved:
+        raise HTTPException(status_code=400, detail="실행 대상 확인과 사용자 승인이 필요합니다.")
     record = _deployment_records.get(request.deployment_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Deployment '{request.deployment_id}' not found.")
@@ -5392,14 +5425,22 @@ async def rollback(request: RollbackRequest) -> dict:
                 detail=f"기록된 환경변수 이름이 올바르지 않습니다: {_k!r}",
             )
         run_args.extend(["-e", f"{_k}={_v}"])
-    _rb_settings = _settings_env(record.container_name, "", set(rollback_env or {}),
+    #: 보통 배포와 **같은 값**을 넘긴다 — PC 의 .env 파일(되돌릴 배포가 쓰던 것)과, 그 파일·기록이 이미 정한 이름은
+    #: 건드리지 않는 설정값. 예전에는 .env 를 빼고 띄워, .env 의 서명 키 대신 다른 값이 들어가 로그인·결제가 깨졌다.
+    _source_record = (_deployment_records.get(record.rollback_source_deployment_id)
+                      if record.rollback_source_deployment_id else None)
+    _rb_env_files = [p for p in list((_source_record.env_file_paths if _source_record is not None
+                                      else record.env_file_paths) or []) if Path(p).is_file()]
+    _rb_settings = _settings_env(record.container_name, "", _provided_env_names(rollback_env or {}, _rb_env_files),
                                  int(next(iter((rollback_ports or {}).values()), 3001)))
     for _k, _v in _rb_settings.items():
         run_args.extend(["-e", f"{_k}={_v}"])
+    run_args.extend(_env_file_args(_rb_env_files, set(rollback_env or {}) | set(_rb_settings)))
     run_args.extend(await asyncio.to_thread(_companion_network_args, record.container_name))
     run_args.extend(["--restart", "unless-stopped", record.rollback_target])
 
     health_failed = False
+    restored_current: Optional[bool] = None
     # 배포와 같은 컨테이너를 건드리므로 같은 락을 쓴다.
     container_lock = await _lock_for_container(record.container_name)
     await container_lock.acquire()
@@ -5459,13 +5500,6 @@ async def rollback(request: RollbackRequest) -> dict:
             ),
         )
         success = result.returncode == 0
-        if not success and current_container is not None:
-            await loop.run_in_executor(None, lambda: subprocess.run(
-                ["docker", "rm", "-f", record.container_name], shell=False, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=60))
-            restored_current, _out, restore_err = await _restore_prior_local_container(current_container)
-            logger.warning("rollback run failed (%s); previous container restored=%s %s",
-                           (result.stderr or "")[-300:], restored_current, restore_err)
         # 포트 기록이 없으면 찔러 볼 곳이 없다. 그때는 확인을 건너뛰고 아래에서
         # "외부 접속이 불가능할 수 있다" 고 알린다 — "확인할 수 없음" 과
         # "죽어 있음" 은 다른 상태이고, 뭉뚱그리면 사용자가 원인을 못 찾는다.
@@ -5484,6 +5518,15 @@ async def rollback(request: RollbackRequest) -> dict:
             if not healthy:
                 success = False
                 health_failed = True
+        #: 되돌린 이미지가 뜨지 못했거나(docker run 실패) **떴지만 헬스 확인에 실패하면** 롤백 직전 컨테이너를
+        #: 다시 띄운다 — 그대로 두면 아무것도 서비스하지 않는 컨테이너만 남는다.
+        if not success and current_container is not None:
+            await loop.run_in_executor(None, lambda: subprocess.run(
+                ["docker", "rm", "-f", record.container_name], shell=False, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=60))
+            restored_current, _out, restore_err = await _restore_prior_local_container(current_container)
+            logger.warning("rollback failed (health_failed=%s, %s); previous container restored=%s %s",
+                           health_failed, (result.stderr or "")[-300:], restored_current, restore_err)
         outcome_known = True
     except HTTPException:
         raise
@@ -5493,7 +5536,7 @@ async def rollback(request: RollbackRequest) -> dict:
             record.rollback_error = "롤백 실행 중 오류가 발생했습니다. 컨테이너 상태와 로그를 확인하세요."
             record.rollback_completed_at = datetime.now(timezone.utc)
             _save_records()
-        raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
+        raise _internal_error(exc, message="롤백을 실행하지 못했습니다. 컨테이너 상태와 로그를 확인해 주십시오.", logger=logger) from exc
     finally:
         if attempted and record.rollback_status == "running":
             if outcome_known:
@@ -5536,9 +5579,13 @@ async def rollback(request: RollbackRequest) -> dict:
         "ports": dict(rollback_ports or {}),
         # 포트 기록이 없는 배포(이 필드가 생기기 전의 기록)는 롤백해도 밖에서
         # 접속할 수 없다. 조용히 성공으로 보이지 않게 알린다.
+        #: 롤백이 실패해 롤백 직전 컨테이너를 다시 띄웠는지(None = 되살릴 컨테이너가 없었거나 시도 안 함).
+        "restored_previous": restored_current,
         "warning": (
-            "이전 이미지를 다시 띄웠지만 헬스 확인에 실패했습니다 — "
-            "서비스가 복구되지 않았습니다. 컨테이너 로그를 확인하세요."
+            "이전 이미지를 다시 띄웠지만 헬스 확인에 실패했습니다 — 서비스가 복구되지 않았습니다. "
+            + ("롤백 직전 컨테이너를 다시 띄웠습니다. " if restored_current else
+               "롤백 직전 컨테이너도 되살리지 못했습니다. " if restored_current is False else "")
+            + "컨테이너 로그를 확인하세요."
             if health_failed
             else None if (rollback_ports or {})
             else "이 배포에는 포트 기록이 없어 롤백된 컨테이너에 외부 접속이 불가능할 수 있습니다."
@@ -5558,10 +5605,7 @@ def _get_verifier():
             from core.preflight.continuous_verification import get_continuous_verifier
             return get_continuous_verifier()
         except Exception as exc:
-            raise HTTPException(
-                status_code=503,
-                detail=f"ContinuousVerifier unavailable: {exc}",
-            ) from exc
+            raise _internal_error(exc, status_code=503, message="지속 검증 기능을 쓸 수 없습니다.", logger=logger) from exc
 
 
 @router.get("/api/deploy/verification/{deployment_id}/status")

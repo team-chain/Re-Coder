@@ -1050,6 +1050,15 @@ def _ecs_statements(
             "Condition": {"StringEquals": {"ec2:ResourceTag/recoder:managed": "true"}},
         },
         {
+            # 3.0.2 — 앱 포트를 바꿔 다시 배포하면 ReCoder 가 열었던 옛 포트 규칙을 거둔다.
+            # ReCoder 태그가 붙은 그룹에서만(사용자 그룹의 규칙은 못 지운다). 없어도 배포는 된다(옛 포트가 남을 뿐).
+            "Sid": "RevokeStaleAppPort",
+            "Effect": "Allow",
+            "Action": ["ec2:RevokeSecurityGroupIngress"],
+            "Resource": _arn("ec2", "security-group/*", ctx),
+            "Condition": {"StringEquals": {"ec2:ResourceTag/recoder:managed": "true"}},
+        },
+        {
             # 앱 포트를 여는 보안 그룹을 만든다.
             # CreateSecurityGroup 은 만들 그룹과 넣을 VPC 를 둘 다 요구한다.
             "Sid": "CreateAppSecurityGroup",

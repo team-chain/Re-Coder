@@ -102,6 +102,30 @@ def _persist_session_token(path: Path, token: str) -> None:
     CoreSingleton.set_file_permissions(path)
 
 
+def _ci_token_path() -> Path:
+    """GitHub Actions Preflight 게이트 전용 토큰 파일(RECODER_CI_TOKEN Secret 에 넣는 값)."""
+    return Path.home() / ".recoder" / "ci_token"
+
+
+def _load_or_create_ci_token(path: Path, *, avoid: str = "") -> str:
+    """CI 토큰 — 한 번 만들어 영속한다(Secret 을 다시 등록할 필요가 없게).
+
+    이 토큰은 SessionTokenMiddleware 가 `POST /workbench/preflight/run` 에만 받아 준다.
+    세션 토큰과 같은 값이면(이론상) 권한이 섞이므로 새로 만든다.
+    """
+    existing = ""
+    try:
+        if path.is_file() and not path.is_symlink():
+            existing = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        existing = ""
+    if len(existing) >= 32 and existing != avoid:
+        return existing
+    token = secrets.token_urlsafe(32)
+    _persist_session_token(path, token)
+    return token
+
+
 #: runtime.json 복구·확장 호스트 생존 확인 주기(초).
 _GUARD_INTERVAL_SECONDS = float(os.environ.get("RECODER_GUARD_INTERVAL", "3"))
 
@@ -195,30 +219,23 @@ async def lifespan(app: FastAPI):
     port = _bound_port if _bound_port else CoreSingleton.find_available_port()
     app.state.port = port
 
-    # 토큰 안정화: 재시작해도 같은 토큰을 유지한다 (GitHub Secret 재등록 불필요).
-    # runtime.json 은 정상 종료 시 삭제되므로, 종료에도 살아남는 별도 파일에 보관한다.
-    # 우선순위: SESSION_TOKEN env > 영속 파일 > 기존 runtime.json > 새로 생성.
+    # 세션 토큰은 **시작할 때마다 새로 만든다.** 이 토큰은 Core 의 모든 API(AWS 배포·자격증명 저장 포함)를
+    # 여는 열쇠라, 예전처럼 ~/.recoder/.session_token 에 영속해 GitHub Actions Secret 으로 넘기면 CI 러너·
+    # 저장소 관리자 누구나 재시작 뒤에도 Core 전체를 부를 수 있었다. 확장은 runtime.json 에서 매번 읽는다.
+    # CI(Preflight 게이트)는 POST /workbench/preflight/run 하나만 부를 수 있는 별도 CI 토큰을 쓴다.
     from pathlib import Path as _TokPath
-    _tok_file = _TokPath.home() / ".recoder" / ".session_token"
-    _persisted_token = None
+    _legacy_tok_file = _TokPath.home() / ".recoder" / ".session_token"
     try:
-        if _tok_file.is_file():
-            _persisted_token = (_tok_file.read_text(encoding="utf-8").strip() or None)
-    except Exception:
-        _persisted_token = None
-    _existing_rt = CoreSingleton.read_runtime()
-    _existing_token = getattr(_existing_rt, "session_token", None) if _existing_rt else None
-    token = (
-        os.environ.get("SESSION_TOKEN")
-        or _persisted_token
-        or _existing_token
-        or secrets.token_urlsafe(32)
-    )
-    app.state.session_token = token
-    try:
-        _persist_session_token(_tok_file, token)
+        _legacy_tok_file.unlink(missing_ok=True)  # 예전 버전이 남긴 영속 토큰은 더 이상 쓰지 않는다
     except Exception:
         pass
+    token = os.environ.get("SESSION_TOKEN") or secrets.token_urlsafe(32)
+    app.state.session_token = token
+    try:
+        app.state.ci_token = _load_or_create_ci_token(_ci_token_path(), avoid=token)
+    except Exception as exc:  # noqa: BLE001 - CI 토큰이 없으면 CI 게이트만 401 이 된다
+        logging.getLogger("recoder.core").warning("CI 토큰을 준비하지 못했습니다: %s", exc)
+        app.state.ci_token = ""
 
     CoreSingleton.write_runtime(port=port, token=token, pid=pid)
     CoreSingleton.set_file_permissions(CoreSingleton.RUNTIME_FILE)

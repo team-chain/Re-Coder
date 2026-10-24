@@ -17,6 +17,10 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+try:
+    from api.errors import internal_error as _internal_error
+except ImportError:  # pragma: no cover
+    from core.api.errors import internal_error as _internal_error  # type: ignore
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/relay", tags=["relay"])
@@ -52,15 +56,9 @@ def _get_queue():
         from relay.dynamo_queue import DynamoCommandQueue
         return DynamoCommandQueue()
     except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"DynamoDB relay unavailable: {exc}",
-        ) from exc
+        raise _internal_error(exc, status_code=503, message="DynamoDB 릴레이를 쓸 수 없습니다.", logger=logger) from exc
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"relay init error: {exc}",
-        ) from exc
+        raise _internal_error(exc, message="릴레이를 초기화하지 못했습니다.", logger=logger) from exc
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────
@@ -76,7 +74,8 @@ async def enqueue(body: EnqueueRequest) -> Dict[str, Any]:
         source=body.source,
     )
     if result.get("status") != "ok":
-        raise HTTPException(status_code=500, detail=result.get("error", "enqueue failed"))
+        raise _internal_error(RuntimeError(str(result.get("error", "enqueue failed"))),
+                              message="명령을 릴레이 큐에 넣지 못했습니다.", logger=logger)
     return result
 
 

@@ -903,6 +903,21 @@
               }
             },
             {
+              "Sid": "RevokeStaleAppPort",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:RevokeSecurityGroupIngress"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "ec2:ResourceTag/recoder:managed": "true"
+                }
+              }
+            },
+            {
               "Sid": "CreateAppSecurityGroup",
               "Effect": "Allow",
               "Action": [

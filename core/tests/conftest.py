@@ -42,6 +42,12 @@ os.environ.setdefault(
     str(Path(tempfile.mkdtemp(prefix="recoder-test-services-"))),
 )
 
+# 3.0.2 ECS 마지막 성공 배포 기록(롤백 대상)도 개발자 홈에서 떼어 놓는다.
+os.environ.setdefault(
+    "RECODER_ECS_STABLE_STORE",
+    str(Path(tempfile.mkdtemp(prefix="recoder-test-stable-")) / "ecs_stable_versions.json"),
+)
+
 os.environ.setdefault(
     "RECODER_ADR_STORE",
     str(Path(tempfile.mkdtemp(prefix="recoder-test-adr-")) / "adr_reservations.json"),
@@ -109,6 +115,8 @@ def _isolate_generation_checkpoints(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("RECODER_DEPLOY_SETTINGS_DIR", str(tmp_path_factory.mktemp("deploy-settings")))
     #: ECS 배포용으로 만든 서명 키·DB 비밀번호도 마찬가지.
     monkeypatch.setenv("RECODER_ECS_RUNTIME_DIR", str(tmp_path_factory.mktemp("ecs-runtime")))
+    #: 3.0.2 마지막 성공 배포 기록 — 테스트마다 비운다(앞 테스트의 성공 기록이 롤백 대상이 되지 않게).
+    monkeypatch.setenv("RECODER_ECS_STABLE_STORE", str(tmp_path_factory.mktemp("ecs-stable") / "ecs_stable_versions.json"))
     #: 테스트는 가짜 라우터를 쓰므로 호출 속도 제한·재시도 대기를 끈다.
     monkeypatch.setenv("RECODER_LLM_RPM", "0")
 

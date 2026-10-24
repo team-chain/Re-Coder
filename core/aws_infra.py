@@ -46,7 +46,12 @@ DEFAULT_LOG_RETENTION_DAYS = 7
 
 #: ECR 에 남겨둘 최근 이미지 개수. 배포할 때마다 이미지가 쌓이는데
 #: GB 당 월 $0.10 이라 방치하면 조용히 예산을 먹는다.
-DEFAULT_ECR_KEEP_LAST = 5
+#:
+#: 3.0.2 — 5 → 10. 롤백 대상(마지막 **성공** 배포, ecs_stable)의 이미지가 지워지면 롤백할 수 없다.
+#: 수명 주기 정책은 태스크 정의가 참조하는지 모르고 개수만 센다. 그래서 "지금 버전 + 롤백 대상"이
+#: 최근 10개 안에 있다는 가정에 기댄다 — 실패한 배포가 9번 연속 쌓이기 전까지는 성립한다.
+#: 그보다 많이 실패하면 오래된 성공 이미지가 만료될 수 있다(그때는 소스를 다시 빌드해 배포한다).
+DEFAULT_ECR_KEEP_LAST = 10
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +475,19 @@ def require_ecr_repository(ecr: Any, name: str) -> str:
     return str(repos[0]["repositoryUri"])
 
 
+def _ecr_repo_managed(ecr: Any, repository: Optional[dict]) -> bool:
+    """리포지토리에 recoder:managed=true 태그가 있는가. 확인하지 못하면 False(남의 것으로 본다)."""
+    arn = str((repository or {}).get("repositoryArn") or "")
+    if not arn:
+        return False
+    try:
+        tags = ecr.list_tags_for_resource(resourceArn=arn).get("tags") or []
+    except Exception as exc:  # noqa: BLE001
+        logger.info("ECR 태그를 읽지 못했습니다(%s): %s", arn, error_message(exc))
+        return False
+    return any(t.get("Key") == MANAGED_TAG and t.get("Value") == "true" for t in tags)
+
+
 def ensure_ecr_repository(
     ecr: Any,
     name: str,
@@ -486,13 +504,15 @@ def ensure_ecr_repository(
         ecr_lifecycle_policy(keep_last)  # 값 검증용 (결과는 아래에서 다시 만든다)
 
     repository: dict | None = None
+    created = False
     try:
         repository = ecr.create_repository(
             repositoryName=name,
             imageScanningConfiguration={"scanOnPush": scan_on_push},
         )["repository"]
+        created = True
         logger.info("ECR 리포지토리 생성: %s", name)
-        tag_created(ecr, "ecr", str(repository.get("repositoryArn") or ""), tags)
+        tag_created(ecr, "ecr", str(repository.get("repositoryArn") or ""), tags or recoder_tags())
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) != "RepositoryAlreadyExistsException":
             raise InfraError(
@@ -512,6 +532,11 @@ def ensure_ecr_repository(
             ) from inner
         logger.info("ECR 리포지토리 재사용: %s", name)
 
+    #: 수명 주기 정책은 **ReCoder 가 만든(또는 recoder:managed=true 태그가 붙은) 리포지토리에만** 건다.
+    #: 같은 이름의 사용자 리포지토리에 걸면, 사용자가 정한 정책을 덮어쓰고 그쪽 이미지를 지운다.
+    if keep_last is not None and not created and not _ecr_repo_managed(ecr, repository):
+        logger.info("ECR 리포지토리 %s 는 ReCoder 가 만든 것이 아니라 수명 주기 정책을 건드리지 않습니다.", name)
+        keep_last = None
     if keep_last is not None:
         try:
             ecr.put_lifecycle_policy(
@@ -864,6 +889,35 @@ def resolve_subnet_network(ec2: Any, subnet_ids: Iterable[str]) -> NetworkTarget
     )
 
 
+#: ReCoder 가 앱 포트를 열 때 규칙에 붙이는 설명 — 옛 규칙을 거둘 때 이것으로 우리 것만 고른다.
+_APP_PORT_RULE_DESCRIPTION = "ReCoder app port"
+
+
+def _revoke_stale_app_ports(ec2: Any, group: dict, *, keep_port: int, cidr: str) -> None:
+    """앱 포트가 바뀐 재배포 — ReCoder 가 예전에 연 다른 포트의 공개 규칙을 거둔다(옛 포트가 계속 열려 있지 않게).
+
+    ReCoder 설명이 붙은 cidr 규칙만 건드린다. 사용자가 손으로 넣은 규칙은 그대로 둔다. 실패해도 배포는 계속한다.
+    """
+    stale: list[dict] = []
+    for perm in group.get("IpPermissions") or []:
+        if perm.get("IpProtocol") != "tcp" or perm.get("FromPort") == keep_port:
+            continue
+        ranges = [r for r in perm.get("IpRanges") or []
+                  if r.get("CidrIp") == cidr and r.get("Description") == _APP_PORT_RULE_DESCRIPTION]
+        if ranges and perm.get("FromPort") == perm.get("ToPort"):
+            stale.append({"IpProtocol": "tcp", "FromPort": perm["FromPort"], "ToPort": perm["ToPort"],
+                          "IpRanges": [{"CidrIp": cidr}]})
+    if not stale:
+        return
+    try:
+        ec2.revoke_security_group_ingress(GroupId=str(group["GroupId"]), IpPermissions=stale)
+        logger.info("보안 그룹 %s 의 옛 앱 포트 규칙을 거뒀습니다: %s", group["GroupId"],
+                    ",".join(str(p["FromPort"]) for p in stale))
+    except Exception as exc:  # noqa: BLE001 - 권한표가 옛것이면 경고만
+        logger.warning("옛 앱 포트 규칙을 거두지 못했습니다(%s): %s — 그 포트가 계속 열려 있을 수 있습니다.",
+                       group.get("GroupId"), error_message(exc))
+
+
 def ensure_security_group(
     ec2: Any,
     *,
@@ -875,8 +929,13 @@ def ensure_security_group(
     tags: Optional[dict] = None,
     source_group: str = "",
     prefix_list: str = "",
+    require_managed: bool = False,
 ) -> str:
     """앱 포트를 여는 보안 그룹을 확보하고 GroupId 를 돌려준다.
+
+    require_managed=True 면 같은 이름의 그룹이 이미 있을 때 **ReCoder 태그(recoder:managed=true)가 있어야만**
+    다시 쓴다(3.0.2). 사용자가 따로 만든 `{service}-sg` 에 0.0.0.0/0 규칙을 더하는 일을 막는다. 다시 쓸 때
+    앱 포트가 바뀌었으면 ReCoder 가 열었던 옛 포트의 0.0.0.0/0 규칙을 거둔다.
 
     기본값이 0.0.0.0/0 인 이유는 카드 DoD 가 "URL 로 접속됨"을 요구하기
     때문이다. 프로덕션이라면 ALB 뒤로 넣고 여기는 ALB 만 허용해야 한다
@@ -893,7 +952,8 @@ def ensure_security_group(
             )["GroupId"]
         )
         logger.info("보안 그룹 생성: %s (%s)", name, group_id)
-        tag_created(ec2, "ec2", group_id, tags)
+        #: 태그가 있어야 다음 배포가 이 그룹을 'ReCoder 가 만든 것'으로 알아보고 다시 쓴다.
+        tag_created(ec2, "ec2", group_id, tags or recoder_tags())
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) != "InvalidGroup.Duplicate":
             raise InfraError(
@@ -918,8 +978,21 @@ def ensure_security_group(
                 f"보안 그룹 '{name}' 이 이미 있다고 하는데 찾을 수 없습니다.",
                 remedy="다른 VPC 에 같은 이름이 있는지 확인하세요.",
             )
-        group_id = str(groups[0]["GroupId"])
+        group = groups[0]
+        group_id = str(group["GroupId"])
+        managed = any(t.get("Key") == MANAGED_TAG and t.get("Value") == "true" for t in group.get("Tags") or [])
+        if require_managed and not managed:
+            raise InfraError(
+                f"보안 그룹 '{name}'({group_id}) 이 이미 있는데 ReCoder 가 만든 그룹이 아니어서 쓰지 않았습니다.",
+                detail="이 그룹에는 recoder:managed=true 태그가 없습니다. 그대로 쓰면 앱 포트를 인터넷(0.0.0.0/0)에 여는 "
+                       "규칙이 다른 용도의 그룹에 추가됩니다.",
+                remedy=("배포 설정에 쓸 보안 그룹을 security_group_ids 로 직접 지정하세요. 이 그룹이 예전 ReCoder 배포가 "
+                        "만든 것이 맞다면 태그를 붙인 뒤 다시 배포하면 됩니다: "
+                        f"aws ec2 create-tags --resources {group_id} --tags Key={MANAGED_TAG},Value=true"),
+            )
         logger.info("보안 그룹 재사용: %s (%s)", name, group_id)
+        if managed and not (prefix_list or source_group):
+            _revoke_stale_app_ports(ec2, group, keep_port=port, cidr=cidr)
 
     #: 2.0.26 — ALB 뒤 태스크는 ALB 보안 그룹에서 오는 연결만 받는다(source_group). 인터넷 전체에 열지 않는다.
     permission: dict = {"IpProtocol": "tcp", "FromPort": port, "ToPort": port}
@@ -929,7 +1002,7 @@ def ensure_security_group(
     elif source_group:
         permission["UserIdGroupPairs"] = [{"GroupId": source_group, "Description": "ReCoder load balancer only"}]
     else:
-        permission["IpRanges"] = [{"CidrIp": cidr, "Description": "ReCoder app port"}]
+        permission["IpRanges"] = [{"CidrIp": cidr, "Description": _APP_PORT_RULE_DESCRIPTION}]
     try:
         ec2.authorize_security_group_ingress(GroupId=group_id, IpPermissions=[permission])
         logger.info("보안 그룹 인바운드 추가: %s:%d ← %s", group_id, port, prefix_list or source_group or cidr)

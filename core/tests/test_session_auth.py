@@ -112,8 +112,13 @@ def test_persisted_token_is_private_on_create_and_upgrade(tmp_path):
     assert path.read_text(encoding="utf-8") == "shorter"
 
 
-def test_restart_reuses_persisted_token_with_authenticated_status(monkeypatch, tmp_path):
-    """Exercise lifespan without sockets, AWS, real locks or user state."""
+def test_restart_rotates_session_token_but_keeps_ci_token(monkeypatch, tmp_path):
+    """Exercise lifespan without sockets, AWS, real locks or user state.
+
+    The all-powerful session token must change on every start (it used to be
+    persisted so a GitHub Actions secret kept working). The CI token persists,
+    and a stale legacy ``.session_token`` file is removed, never reused.
+    """
     from pathlib import Path
     import sys
     from types import SimpleNamespace
@@ -122,6 +127,9 @@ def test_restart_reuses_persisted_token_with_authenticated_status(monkeypatch, t
     monkeypatch.delenv("SESSION_TOKEN", raising=False)
     monkeypatch.setenv("RECODER_RELAY_ENABLED", "false")
     monkeypatch.setitem(sys.modules, "observability", SimpleNamespace(observability=SimpleNamespace(initialize=lambda: None)))
+    legacy = tmp_path / ".recoder" / ".session_token"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("legacy-persisted-token-that-must-not-be-reused-0000", encoding="utf-8")
     singleton = main.CoreSingleton
     monkeypatch.setattr(singleton, "acquire_lock", lambda pid: True)
     monkeypatch.setattr(singleton, "find_available_port", lambda: 17894)
@@ -131,6 +139,7 @@ def test_restart_reuses_persisted_token_with_authenticated_status(monkeypatch, t
     monkeypatch.setattr(singleton, "set_file_permissions", lambda path: None)
     monkeypatch.setattr(singleton, "remove_window", lambda pid: True)
     monkeypatch.setattr(singleton, "release_lock", lambda pid: None)
+    ci_tokens = []
 
     async def run():
         for _ in range(2):
@@ -139,8 +148,59 @@ def test_restart_reuses_persisted_token_with_authenticated_status(monkeypatch, t
                 client = TestClient(app)
                 assert client.get("/api/status").status_code == 401
                 assert client.get("/api/status", headers={"X-Session-Token": app.state.session_token}).status_code == 200
+                ci_tokens.append(app.state.ci_token)
+                # The CI token opens nothing but the Preflight gate.
+                assert client.get("/api/status", headers={"X-Session-Token": app.state.ci_token}).status_code == 401
+                shown = client.get("/api/session/ci-token", headers={"X-Session-Token": app.state.session_token})
+                assert shown.status_code == 200 and shown.json()["token"] == app.state.ci_token
+                assert shown.json()["secret_name"] == "RECODER_CI_TOKEN"
 
     asyncio.run(run())
     assert len(writes) == 2
-    assert writes[0]["token"] == writes[1]["token"]
-    assert len(writes[0]["token"]) >= 32
+    assert writes[0]["token"] != writes[1]["token"], "session token must rotate on every start"
+    assert all(len(w["token"]) >= 32 for w in writes)
+    assert "legacy-persisted" not in writes[0]["token"] and not legacy.exists()
+    assert ci_tokens[0] == ci_tokens[1] and len(ci_tokens[0]) >= 32
+    assert ci_tokens[0] not in {w["token"] for w in writes}
+    assert (tmp_path / ".recoder" / "ci_token").read_text(encoding="utf-8") == ci_tokens[0]
+    if os.name == "posix":
+        assert stat.S_IMODE((tmp_path / ".recoder" / "ci_token").stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("method,path,expected", [
+    ("POST", "/workbench/preflight/run", 200),
+    ("GET", "/workbench/preflight/run", 401),
+    ("POST", "/workbench/preflight/run/", 401),
+    ("POST", "/workbench/mode", 401),
+    ("POST", "/api/deploy/ecs", 401),
+    ("GET", "/api/session/ci-token", 401),
+])
+def test_ci_token_is_accepted_only_for_preflight_run(method, path, expected):
+    app = FastAPI()
+    app.state.session_token = TOKEN
+    app.state.ci_token = "ci-token-" + "x" * 32
+    app.add_middleware(SessionTokenMiddleware)
+    calls = []
+
+    async def handler():
+        calls.append(path)
+        return {"ok": True}
+
+    app.add_api_route(path, handler, methods=[method])
+    client = TestClient(app)
+    response = client.request(method, path, headers={"X-Session-Token": app.state.ci_token})
+    assert response.status_code == expected
+    assert len(calls) == (1 if expected == 200 else 0)
+    # The session token still works everywhere.
+    assert client.request(method, path, headers={"X-Session-Token": TOKEN}).status_code == 200
+
+
+def test_generated_workflow_uses_ci_token_secret(monkeypatch, tmp_path):
+    import infra_agent
+    monkeypatch.setenv("RECODER_GHA_PREFLIGHT", "1")
+    proposal = infra_agent.generate_github_actions(None, str(tmp_path))
+    assert "${{ secrets.RECODER_CI_TOKEN }}" in proposal.content
+    assert "RECODER_SESSION_TOKEN" not in proposal.content
+    assert "/workbench/preflight/run" in proposal.content
+    assert "RECODER_CI_TOKEN" in proposal.required_secrets
+    assert "RECODER_SESSION_TOKEN" not in proposal.required_secrets
